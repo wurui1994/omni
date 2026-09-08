@@ -4004,7 +4004,7 @@ function $js_json_nl(gap, depth) { return gap > 0 ? "\n" + " ".repeat(gap * dept
 // toJSON（规范 SerializeJSONProperty 第 2 步）：对象身上有可调用的 toJSON 就先换成它的
 // 返回值 —— Date 的序列化就是这么来的。与规范差的一格：规范里 toJSON 在 replacer
 // **之前**，这里在之后（replacer 在调用方那一层），两样都给的时候次序不同。
-function $js_json_val(v, rep, gap, depth) {
+function $js_json_val(v, rep, gap, depth, seen) {
   if ($js_isobj(v)) {
     const tj = $js_getp(v, "toJSON", undefined);
     if ($dynTag(tj) === "function") v = $callThis(tj, v, []);
@@ -4026,7 +4026,22 @@ function $js_json_val(v, rep, gap, depth) {
   if (t === "bool") return v ? "true" : "false";
   if (t === "real") return Number.isFinite(v) ? $js_str(v) : "null";
   if (t === "string") return $js_json_quote(v);
-  if (t === "int") $rt_error("do not know how to serialize a bigint");
+  if (t === "int") throw new $JsonBad("do not know how to serialize a bigint", "TypeError");
+  /* 环（o.self = o）：规范抛 TypeError。从前这儿一路递归下去，把**宿主的栈**撑爆 ——
+     那是崩，比错答案还糟。seen 是一条**当前路径上的**容器栈（不是"见过的全部"）：
+     同一格对象出现在兄弟位置上是合法的（{a: x, b: x}），只有出现在自己的祖先里才是环。 */
+  if (t === "list" || t === "dict" || t === "object" || t === "Map" || t === "Set") {
+    if (seen.indexOf(v) >= 0) throw new $JsonBad("circular structure in JSON", "TypeError");
+    seen.push(v);
+    const s = $js_json_body(v, t, rep, gap, depth, seen);
+    seen.pop();
+    return s;
+  }
+  // 剩下的（regexp / bytes / TextEncoder…）照旧当场报：照 JS 那样给 {} 会撒谎
+  throw new $JsonBad("do not know how to serialize a " + t, "TypeError");
+}
+// 容器那几支的正文（拆出来只为了让 seen 的 push/pop 成对，不必在每条 return 前手写 pop）
+function $js_json_body(v, t, rep, gap, depth, seen) {
   if (t === "list") {
     if (v.length === 0) return "[]";
     const sep = $js_json_nl(gap, depth + 1);
@@ -4034,7 +4049,7 @@ function $js_json_val(v, rep, gap, depth) {
     for (let i = 0; i < v.length; i++) {
       if (i) out += ",";
       out += sep;
-      const s = $js_json_val($js_json_apply(rep, $js_str(i), v[i]), rep, gap, depth + 1);
+      const s = $js_json_val($js_json_apply(rep, $js_str(i), v[i]), rep, gap, depth + 1, seen);
       out += s === undefined ? "null" : s;
     }
     return out + $js_json_nl(gap, depth) + "]";
@@ -4045,7 +4060,7 @@ function $js_json_val(v, rep, gap, depth) {
     const sep = $js_json_nl(gap, depth + 1);
     if (only !== undefined) {
       for (const k of only) {
-        const s = $js_json_val($js_json_apply(rep, k, $js_obj_get(v, k)), rep, gap, depth + 1);
+        const s = $js_json_val($js_json_apply(rep, k, $js_obj_get(v, k)), rep, gap, depth + 1, seen);
         if (s === undefined) continue;
         if (!first) out += ",";
         first = false;
@@ -4054,7 +4069,7 @@ function $js_json_val(v, rep, gap, depth) {
       return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
     }
     for (const [k, val] of v) {
-      const s = $js_json_val($js_json_apply(rep, k, val), rep, gap, depth + 1);
+      const s = $js_json_val($js_json_apply(rep, k, val), rep, gap, depth + 1, seen);
       if (s === undefined) continue;
       if (!first) out += ",";
       first = false;
@@ -4073,7 +4088,7 @@ function $js_json_val(v, rep, gap, depth) {
     let out = "{", first = true;
     const sep = $js_json_nl(gap, depth + 1);
     for (const k of ks) {
-      const s = $js_json_val($js_json_apply(rep, k, $js_getp(v, k, undefined)), rep, gap, depth + 1);
+      const s = $js_json_val($js_json_apply(rep, k, $js_getp(v, k, undefined)), rep, gap, depth + 1, seen);
       if (s === undefined) continue;
       if (!first) out += ",";
       first = false;
@@ -4081,12 +4096,18 @@ function $js_json_val(v, rep, gap, depth) {
     }
     return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
   }
-  $rt_error("do not know how to serialize a " + t);
+  throw new $JsonBad("do not know how to serialize a " + t, "TypeError");
 }
 function $js_json_stringify(v, rep, indent) {
   let gap = 0;
   if ($dynTag(indent) === "real" && indent > 0) gap = Math.min(Math.trunc(indent), 10);
-  return $js_json_val($js_json_apply(rep, "", v), rep, gap, 0);
+  try {
+    return $js_json_val($js_json_apply(rep, "", v), rep, gap, 0, []);
+  } catch (e) {
+    if (!(e instanceof $JsonBad)) throw e;
+    $js_throw($js_err_new(e.m, [e.k, "Error"], undefined));
+    return undefined;
+  }
 }
 
 // ----------------------------------------------------- JSON.parse（ADR-0011）
@@ -4098,16 +4119,20 @@ function $js_json_stringify(v, rep, indent) {
 // （宿主 JSON.parse 也没有 BigInt 那一支）。重复的键后来的赢、位置留在第一次
 // 出现的地方 —— Map.set 与 C 侧 dict_set 都是这个语义。没有 reviver。
 //
-// 解析失败是硬错（omni: runtime error），不是能 catch 的 SyntaxError：ADR-0007
-// 决定 1 里 throw 是静态降级的，而这个 op 里没有用户回调可以往 pending 槽里放东西。
+// 解析失败是**能 catch 的 SyntaxError**（ADR-0020）：try { JSON.parse(s) } catch {} 是
+// 真实代码里最常见的一格写法，从前它是硬错（omni: runtime error），整个进程就没了。
+// 这一族函数互相递归、错误点有十几处，所以内部用宿主自己的 throw 把栈剥到 parse 那一层
+// （$JsonBad 只是个信号，不是 JS 可见的值），再在那儿翻成一格 pending 的 SyntaxError。
+// js_json_parse 在 ABI 表里本来就是 throws: true，所以调用点的 pending 检查早就发了。
 // 游标是 { s, i } 一个记录：这一族函数互相递归，下标要共享。
-function $js_json_eoi() { $rt_error("unexpected end of JSON input"); }
+function $JsonBad(m, k) { this.m = m; this.k = k === undefined ? "SyntaxError" : k; }
+function $js_json_eoi() { throw new $JsonBad("unexpected end of JSON input"); }
 function $js_json_bad(z) {
   const c = z.s.charCodeAt(z.i);
   const shown = c >= 0x20 && c < 0x7f
     ? "'" + z.s[z.i] + "'"
     : "\\u" + c.toString(16).padStart(4, "0");
-  $rt_error("unexpected token " + shown + " in JSON at position " + z.i);
+  throw new $JsonBad("unexpected token " + shown + " in JSON at position " + z.i);
 }
 function $js_json_at(z) { if (z.i >= z.s.length) $js_json_eoi(); return z.s.charCodeAt(z.i); }
 function $js_json_ws(z) {
@@ -4252,10 +4277,17 @@ function $js_json_revive(rep, holder, key, val) {
 // 末尾除了空白不许还有东西。
 function $js_json_parse(text, rep) {
   const z = { s: $js_str(text), i: 0 };
-  const v = $js_json_read(z);
-  $js_json_ws(z);
-  if (z.i !== z.s.length) {
-    $rt_error("unexpected non-whitespace character after JSON at position " + z.i);
+  let v;
+  try {
+    v = $js_json_read(z);
+    $js_json_ws(z);
+    if (z.i !== z.s.length) {
+      throw new $JsonBad("unexpected non-whitespace character after JSON at position " + z.i);
+    }
+  } catch (e) {
+    if (!(e instanceof $JsonBad)) throw e;
+    $js_throw($js_err_new(e.m, [e.k, "Error"], undefined));
+    return undefined;
   }
   if ($dynTag(rep) === "function") {
     const root = $js_obj_new();
