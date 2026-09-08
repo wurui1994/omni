@@ -1168,7 +1168,22 @@ class Lower {
         const key = this.keyName(p.key, pat.span);
         out.push(...this.bindElem(p.value, op('js_obj_get', [varRef(t), s16(key)])));
       }
-      if (pat.rest) this.err(pat.span, 'rest in an object pattern is not supported');
+      if (pat.rest) {
+        /* `const {a, ...r} = o`（ADR-0020 P3）：r 是"**剩下的**自有可枚举属性"的一份浅拷贝。
+         * 摊成"整份抄一遍，再把取过的那几个键删掉" —— 现成的两个 op 就够，不必为它新增。
+         * 顺序无所谓：抄的是自有属性，删的是取过的键，两组互不影响。 */
+        if (pat.rest.type !== 'Ident') {
+          this.err(pat.span, 'a nested pattern in an object rest is not supported');
+        } else {
+          out.push(...this.defineVar(pat.rest.name,
+            () => op('js_obj_assign', [op('js_obj_new', []), varRef(t)])));
+          for (const p of pat.props) {
+            if (p.computed) continue;
+            out.push(exprStmt(op('js_obj_delete',
+              [this.refVar(pat.rest.name), s16(this.keyName(p.key, pat.span))])));
+          }
+        }
+      }
       return out;
     }
     this.err(pat.span, `cannot destructure with '${pat.type}'`);
@@ -1818,8 +1833,23 @@ class Lower {
 
   call(e) {
     if (e.optional) {
-      this.err(e.span, 'optional calls (?.()) are not supported');
-      return undefExpr();
+      /* `f?.()` / `o.f?.()`（ADR-0020 P3）：函数值是 null 或 undefined 就整句不调、
+       * 结果是 undefined。摊法与 `?.` 取属性那一条同一个（onObject 的 optional 分支）：
+       * 先算进临时量，再拿一次**宽松**相等比 null（宽松对 null 正好覆盖 undefined）。
+       * 成员形态还要把接收者留住 —— `o.f?.()` 里的 this 是 o。 */
+      const c0 = e.callee;
+      const t = this.temp();
+      if (c0.type === 'Member' && !this.staticPath(c0)) {
+        return this.onObject(c0.object, c0.optional, (obj) => {
+          const r = this.temp();
+          const fn = assign(varRef(t), this.memberOn(assign(varRef(r), obj), c0));
+          return ternary(boolOp('js_eq', [fn, nullExpr()], { strict: false }), undefExpr(),
+            this.lazy(() => op('js_call_this',
+              [varRef(t), varRef(r), box(this.argList(e.args), listType(D))])));
+        });
+      }
+      return ternary(boolOp('js_eq', [assign(varRef(t), this.expr(c0)), nullExpr()], { strict: false }),
+        undefExpr(), this.lazy(() => this.dynCall(varRef(t), e.args)));
     }
     const c = e.callee;
     if (c.type === 'Ident') {
