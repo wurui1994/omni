@@ -63,6 +63,9 @@ export const JS_ABI = {
   js_str_lower: { js: '$js_str_lower', c: 'omni_js_str_lower', arity: 1 },
   js_str_upper: { js: '$js_str_upper', c: 'omni_js_str_upper', arity: 1 },
   js_str_index_of: { js: '$js_str_index_of', c: 'omni_js_str_index_of', arity: 3 },
+  // isWellFormed / toWellFormed（ES2024）：落单的代理项算"不良"，后者替成 U+FFFD
+  js_str_is_well_formed: { js: '$js_str_is_well_formed', c: 'omni_js_str_is_well_formed', arity: 1, ret: 'bool' },
+  js_str_to_well_formed: { js: '$js_str_to_well_formed', c: 'omni_js_str_to_well_formed', arity: 1 },
   js_str_last_index_of: { js: '$js_str_last_index_of', c: 'omni_js_str_last_index_of', arity: 3 },
   js_str_includes: { js: '$js_str_includes', c: 'omni_js_str_includes', arity: 2, ret: 'bool' },
   js_str_starts_with: { js: '$js_str_starts_with', c: 'omni_js_str_starts_with', arity: 3, ret: 'bool' },
@@ -349,6 +352,10 @@ export const JS_ABI = {
   // 只长 exec 一格：量过，仓库里正则当值的用法就是 `re.exec(s)` 的循环。
   js_re_new: { js: '$js_re_new', c: 'omni_js_re_new', arity: 2 },
   js_re_exec: { js: '$js_re_exec', c: 'omni_js_re_exec', arity: 2 },
+  /* matchAll（ES2020）：一趟趟找，每一趟一格与 exec 同形的结果（带 index / input /
+     groups）。那三格靠 list 的旁表，C 那侧没有（P1-c），所以这一条进 P1_JS_ONLY。
+     交出来的是**数组**而不是迭代器对象 —— 展开 / for-of / Array.from 都成。 */
+  js_re_match_all: { js: '$js_re_match_all', c: 'omni_js_re_match_all', arity: 3 },
   /* 正则对象的 lastIndex（ADR-0020 P4）。它本来就在两侧的三元组里（src/flags/li）——
      缺的只是"能读能写"。写的那一条不走成员表：`r.lastIndex = 0` 降成 js_idx_set，
      所以 idx_set 里认这一格（regexp 上只有这一个可写的属性）。 */
@@ -600,6 +607,8 @@ export const JS_METHODS = {
   reverse: { on: { list: 'js_arr_reverse' } },
   fill: { on: { list: 'js_arr_fill', bytes: 'js_buf_fill' } },
   exec: { on: { regexp: 'js_re_exec' } },
+  isWellFormed: { on: { string: 'js_str_is_well_formed' } },
+  toWellFormed: { on: { string: 'js_str_to_well_formed' } },
   // 字节缓冲上的那几个（DataView / Uint8Array 的方法）
   getUint8: { on: { bytes: 'js_buf_get_u8' } },
   setUint8: { on: { bytes: 'js_buf_set_u8' } },
@@ -692,6 +701,8 @@ const P1_JS_ONLY = [
   'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',
   // groupBy 里 Object 那一格造的是**真对象**（null 原型），所以跟着这一族
   'js_obj_group_by',
+  // matchAll 的结果带 index / input / groups —— 那是 list 旁表，C 那侧还没有
+  'js_re_match_all',
   'js_jobs_run',
   'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',

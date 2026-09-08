@@ -1106,6 +1106,10 @@ function $js_str_repeat(s, n) {
   if (k < 0) $rt_error("repeat count must not be negative");
   return $js_asS16(s).repeat(k);
 }
+// isWellFormed / toWellFormed（ES2024）：落单的代理项（没配对的 D800..DFFF）算"不良",
+// toWellFormed 把每个落单的替成 U+FFFD。C 那份是手划码元的同一套判据。
+function $js_str_is_well_formed(s) { return $js_asS16(s).isWellFormed(); }
+function $js_str_to_well_formed(s) { return $js_asS16(s).toWellFormed(); }
 function $js_str_pad_start(s, n, fill) {
   return $js_asS16(s).padStart($js_idx(n, 0), fill === undefined ? " " : $js_asS16(fill));
 }
@@ -3631,6 +3635,25 @@ function $js_re_result(m, str) {
     const names = Object.keys(m.groups);
     for (let i = 0; i < names.length; i++) $js_obj_set(g, names[i], m.groups[names[i]]);
     $js_obj_set(out, "groups", g);
+  }
+  return out;
+}
+/* matchAll（ES2020）：从 0 起一趟趟找，每一趟给一格与 exec 同形的结果（整体匹配在 0、
+   捕获组依次在后，外加 index / input / groups）。**交出来的是一个数组**而不是迭代器对象
+   —— 展开、for-of、Array.from 都成，next() 那一面不在这个值域里（画出来的边界）。
+   空匹配往前挪一格，不然在原地打转；不动接收者那格 lastIndex（规范里 matchAll 用克隆）。
+   这一格只有 JS 侧：结果上的 index / input / groups 靠 list 的旁表，C 那侧没有（P1-c）。 */
+function $js_re_match_all(body, flags, sd) {
+  if (!flags.includes("g")) $rt_error("matchAll needs the g flag");
+  const s = $js_asS16(sd);
+  const re = $js_re_get(body, flags);
+  const out = [];
+  let at = 0;
+  while (at <= s.length) {
+    const m = $js_re_find(re, s, at);
+    if (m === null) break;
+    out.push($js_re_result(m, s));
+    at = m.index + (m[0].length === 0 ? 1 : m[0].length);
   }
   return out;
 }

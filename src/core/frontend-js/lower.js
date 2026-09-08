@@ -2518,7 +2518,7 @@ class Lower {
       if (!re) return null;
       return op('js_re_test', [s16(re.body), s16(re.flags), arg(0)]);
     }
-    if (!['replace', 'match', 'split'].includes(c.name)) return null;
+    if (!['replace', 'match', 'matchAll', 'split'].includes(c.name)) return null;
     const re = e.args.length ? this.regexOf(e.args[0]) : null;
     if (!re) {
       if (c.name === 'split') return null;   // 字符串分隔符那一支走 js_m_split
@@ -2526,8 +2526,10 @@ class Lower {
       return undefExpr();
     }
     const recv = this.expr(c.object);
-    const name = { replace: 'js_re_replace', match: 'js_re_match', split: 'js_re_split' }[c.name];
-    if (c.name === 'match') return op(name, [s16(re.body), s16(re.flags), recv]);
+    const name = {
+      replace: 'js_re_replace', match: 'js_re_match', matchAll: 'js_re_match_all', split: 'js_re_split',
+    }[c.name];
+    if (c.name === 'match' || c.name === 'matchAll') return op(name, [s16(re.body), s16(re.flags), recv]);
     return op(name, [s16(re.body), s16(re.flags), recv, arg(1)]);
   }
 

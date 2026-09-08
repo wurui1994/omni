@@ -122,6 +122,12 @@ const gm = Map.groupBy([1, 2, 3, 4], (x) => x % 2);
 console.log(`groupBy ${[...gm.keys()].join(",")} ${gm.get(1).join(",")} ${gm.get(0).join(",")}`);
 console.log(`groupBy ${Map.groupBy([], (x) => 1).size} ${Map.groupBy(["a"], (v, i, arr) => `${v}${i}${arr}`).size}`);
 
+// isWellFormed / toWellFormed（ES2024）：C 那份是手划码元的，与 prelude 转手宿主的
+// 那份必须给出同一套判据 —— 落单的代理项算不良，toWellFormed 把它替成 U+FFFD。
+console.log(`wf ${"ab".isWellFormed()} ${"\ud800".isWellFormed()} ${"\ud800\udc00".isWellFormed()} ${"a\udfffb".isWellFormed()}`);
+const wf = "\ud800x".toWellFormed();
+console.log(`wf ${wf.length} ${wf.charCodeAt(0) === 0xfffd} ${"ab".toWellFormed()} ${"\ud800\udc00".toWellFormed().length}`);
+
 
 
 

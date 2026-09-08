@@ -200,3 +200,39 @@ omni_dyn omni_js_str_of_char_code(omni_dyn u) {
 omni_dyn omni_js_str_of_code_point(omni_dyn cp) {
   return omni_dyn_of_s16(omni_s16_of_code_point(to_int_arg(cp, 0)));
 }
+
+/* isWellFormed / toWellFormed（ES2024）：落单的代理项（没配对的 D800..DFFF）算"不良"。
+   判据与 prelude 那份（转手宿主的同名方法）一样：高位后面必须紧跟低位，低位不能单独出现；
+   toWellFormed 把每个落单的替成 U+FFFD，配好对的整段照抄。 */
+bool omni_js_str_is_well_formed(omni_dyn s) {
+  omni_s16 v = want_s16(s);
+  for (int64_t i = 0; i < v.len; i++) {
+    uint16_t u = v.p[i];
+    if (u >= 0xD800 && u <= 0xDBFF) {
+      if (i + 1 >= v.len) return false;
+      uint16_t n = v.p[i + 1];
+      if (n < 0xDC00 || n > 0xDFFF) return false;
+      i++;
+    } else if (u >= 0xDC00 && u <= 0xDFFF) {
+      return false;
+    }
+  }
+  return true;
+}
+
+omni_dyn omni_js_str_to_well_formed(omni_dyn s) {
+  omni_s16 v = want_s16(s);
+  omni_s16_buf b = { NULL, 0, 0 };
+  for (int64_t i = 0; i < v.len; i++) {
+    uint16_t u = v.p[i];
+    if (u >= 0xD800 && u <= 0xDBFF && i + 1 < v.len
+        && v.p[i + 1] >= 0xDC00 && v.p[i + 1] <= 0xDFFF) {
+      omni_s16_buf_add_unit(&b, u);
+      omni_s16_buf_add_unit(&b, v.p[i + 1]);
+      i++;
+      continue;
+    }
+    omni_s16_buf_add_unit(&b, (u >= 0xD800 && u <= 0xDFFF) ? 0xFFFD : u);
+  }
+  return omni_dyn_of_s16(omni_s16_buf_done(&b));
+}
