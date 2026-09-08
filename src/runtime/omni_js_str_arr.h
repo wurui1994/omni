@@ -89,6 +89,7 @@ static omni_dyn omni_js_idx_get(omni_dyn o, omni_dyn k) { \
       return omni_js_num_key(k) ? omni_js_arr_get(o, k) : omni_js_obj_get(o, k); \
     case OMNI_DYN_STR16: return omni_js_str_index(o, k); \
     case OMNI_DYN_DICT: return omni_js_obj_get(o, k); \
+    case OMNI_DYN_BYTES: return omni_js_buf_get_u8(o, k); \
     default: \
       omni_errorf("cannot index a %s", omni_dyn_tag_name(o.tag)); \
       return omni_dyn_undef(); \
@@ -100,6 +101,7 @@ static omni_dyn omni_js_idx_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
       if (omni_js_num_key(k)) omni_js_arr_set(o, k, v); else omni_js_obj_set(o, k, v); \
       return v; \
     case OMNI_DYN_DICT: omni_js_obj_set(o, k, v); return v; \
+    case OMNI_DYN_BYTES: omni_js_buf_set_u8(o, k, v); return v; \
     default: \
       omni_errorf("cannot assign to an index of a %s", omni_dyn_tag_name(o.tag)); \
       return omni_dyn_undef(); \

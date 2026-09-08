@@ -1416,6 +1416,10 @@ function $js_idx_get(o, k) {
     case "dict": return $js_obj_get(o, k);
     // 真对象（ADR-0020 P1）：o[k] 与 o.k 是同一条路 —— 沿原型链、触发访问器。
     case "object": return $js_getp(o, k, undefined);
+    // Uint8Array 的 t[i]（ADR-0020 P4）。这个值域里 ArrayBuffer/Uint8Array/DataView 是
+    // 同一种值，所以 DataView 上也能下标读 —— JS 里那是普通属性（undefined）。越界照
+    // .getUint8 那条路报错，不像 JS 给 undefined：两条腿一致比像 JS 更重要。
+    case "bytes": return $js_buf_get_u8(o, k);
     default: $rt_error("cannot index a " + $dynTag(o));
   }
 }
@@ -1434,6 +1438,8 @@ function $js_idx_set(o, k, v) {
     }
     case "dict": $js_obj_set(o, k, v); return v;
     case "object": $js_setp(o, k, v); return v;
+    // t[i] = x：写进那一格字节（低 8 位），值仍是右边那个数（JS 的赋值表达式语义）
+    case "bytes": $js_buf_set_u8(o, k, v); return v;
     default: $rt_error("cannot assign to an index of a " + $dynTag(o));
   }
 }

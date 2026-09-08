@@ -62,6 +62,20 @@ try {
   console.log(`err ${err.name} ${err.message} ${err instanceof TypeError}`);
 }
 
+// Uint8Array 的下标读写：写进去只留低 8 位（300 & 255 = 44）
+const ta = new Uint8Array(3);
+ta[0] = 255;
+ta[1] = 300;
+console.log(`bytes ${ta[0]} ${ta[1]} ${ta[2]} ${ta.length}`);
+ta[2] = ta[0] - 1;
+console.log(`bytes ${ta[2]}`);
+
+// typeof 一个没声明的名字是 "undefined"，不是编译错（特性探测靠这一条）。
+// 名字得是**哪儿都没有**的：structuredClone 那种在 node 里是函数，比不成。
+function tf() {}
+console.log(`typeof ${typeof noSuchGlobalAnywhere} ${typeof Math} ${typeof Map} ${typeof tf}`);
+console.log(`typeof ${typeof undefined} ${typeof NaN} ${typeof ta} ${typeof "s"}`);
+
 
 
 

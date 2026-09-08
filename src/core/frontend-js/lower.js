@@ -1597,6 +1597,23 @@ class Lower {
     return undefExpr();
   }
 
+  /**
+   * `typeof <名字>` 的静态答案：null = 有运行期的格子，照常发 js_typeof。
+   * 别的都是编译期就定死的字符串 —— 类与顶层函数是 "function"、命名空间（Math/JSON…）
+   * 是 "object"、剩下的（根本没声明过）照规范是 "undefined"。
+   */
+  typeofIdent(e) {
+    const n = e.name;
+    if (n === 'undefined') return 'undefined';
+    if (n === 'NaN' || n === 'Infinity') return null;
+    if (this.lookup(n) || this.globals.has(n) || this.regexConsts.has(n)) return null;
+    if (n === 'arguments' && this.fn && !this.fn.isMain && !this.fn.isArrowFn) return null;
+    if (this.topFns.has(n) || this.classes.has(n) || this.natives.has(n)) return 'function';
+    if (ERROR_CTORS.has(n) || CTOR_NAMES.has(n)) return 'function';
+    if (STATIC_NS.has(n)) return 'object';
+    return 'undefined';
+  }
+
   /** 模板串：从第一段字符串开始一路 js_add —— 有一边是字符串，js_add 就是拼接 */
   template(e) {
     if (e.tag) {
@@ -1709,7 +1726,16 @@ class Lower {
       case '-': return op('js_neg', [this.expr(e.arg)]);
       case '+': return op('js_num_of', [this.expr(e.arg)]);
       case '~': return op('js_bitnot', [this.expr(e.arg)]);
-      case 'typeof': return op('js_typeof', [this.expr(e.arg)]);
+      case 'typeof': {
+        /* `typeof 一个没声明的名字`在 JS 里是 "undefined"，**不抛 ReferenceError** ——
+         * 特性探测（`typeof structuredClone === "function"`）全靠这一条。所以名字这一支
+         * 先静态问一次：拿不到运行期的格子就直接给常量，别在编译期骂 unresolved。 */
+        if (e.arg.type === 'Ident') {
+          const t = this.typeofIdent(e.arg);
+          if (t !== null) return s16(t);
+        }
+        return op('js_typeof', [this.expr(e.arg)]);
+      }
       case 'delete': {
         const t = e.arg;
         if (t.type !== 'Member') {
@@ -2379,6 +2405,11 @@ class Lower {
 const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number', 'BigInt', 'process', 'console',
   // ADR-0020 P1：Symbol 与 Reflect 的静态面（Symbol.iterator、Reflect.ownKeys …）
   'Symbol', 'Reflect']);
+
+/* `new X(...)` 认的内建构造器（newExpr 里一支支写着）。这张表只给 `typeof X` 用 ——
+ * 它们在 JS 里都是函数值，而这个值域里还不能把它们当值传，所以答案是编译期定死的。 */
+const CTOR_NAMES = new Set(['Map', 'Set', 'WeakMap', 'WeakSet', 'Array', 'ArrayBuffer',
+  'Uint8Array', 'DataView', 'TextEncoder', 'RegExp', 'Promise', 'Proxy', 'Date']);
 
 const STATIC_CALLS = {
   'JSON.stringify': { op: 'js_json_stringify', argc: 3 },
