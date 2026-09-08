@@ -1927,6 +1927,10 @@ function $js_obj_set(o, k, v) {
     /* a.length = n 是**改长度**，不是往旁表里挂一个叫 length 的字段（从前是后者，
        于是 a.length = 0 静静地什么也没做）。短了截掉，长了补 undefined —— 规范 10.4.2.4。 */
     if (key === "length") { $js_arr_set_len(o, v); return o; }
+    /* 下标形状的**字符串**键就是下标：往 "1" 上写与往 1 上写是同一格（规范里数组的
+       [[Set]] 先把键 ToString，再看它是不是数组下标）。从前这一支落进旁表，于是那次写
+       静静地丢了（读那一边一直是对的 —— 所以更藏得住）。 */
+    if ($js_isidx(key)) { $js_arr_set(o, Number(key), v); return o; }
     $js_xprops(o, true).set(key, v);
     return o;
   }

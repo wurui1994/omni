@@ -79,12 +79,31 @@ static DT omni_js_xprops_(omni_dyn o, bool make) { \
   DT##_set(omni_js_xprops_tbl_, id, omni_js_dict_wrap(d)); \
   return d; \
 } \
+/* 键是不是一格**规范的十进制下标**（"0" / "12"；不收 "01" / "+1" / "1e2"）。不是就给 -1。
+   数组身上的 `0 in a`、`a["1"]` 的读与写都靠它 —— 与 prelude 那份的判据对着写。 */ \
+static int64_t omni_js_dec_index(omni_str key) { \
+  if (key.len == 0 || key.len > 18) return -1; \
+  if (key.p[0] == '0') return key.len == 1 ? 0 : -1; \
+  int64_t n = 0; \
+  for (int64_t i = 0; i < key.len; i++) { \
+    char c = key.p[i]; \
+    if (c < '0' || c > '9') return -1; \
+    n = n * 10 + (c - '0'); \
+  } \
+  return n; \
+} \
 /* 键是编译期字面量时走这四条：字典里的键本来就是 UTF-8，字面量池已经把它算好了
  * （见 backend-c/emit.js 的 s16PoolLines），omni_js_prop 那次转换和分配就整个省掉。
  * 解释器把 OIR 节点当 dict 读，`e.kind` 这类取字段全落在这里，是原生构建最热的一条。 */ \
 static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   DT d; \
   if (o.tag == OMNI_DYN_LIST) { \
+    /* 下标形状的字符串键就是下标（`a["1"]`）—— 与写那一边同一条判据 */ \
+    int64_t idx = omni_js_dec_index(key); \
+    if (idx >= 0) { \
+      LT l = (LT)o.u.ref; \
+      return idx < l->len ? l->items[idx] : omni_dyn_undef(); \
+    } \
     d = omni_js_xprops_(o, false); \
     if (d == NULL) return omni_dyn_undef(); \
   } else { \
@@ -107,21 +126,15 @@ static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
     while (l->len < n) l->items[l->len++] = omni_dyn_undef(); \
     return o; \
   } \
+  /* 下标形状的**字符串**键就是下标：`a["1"] = x` 与 `a[1] = x` 是同一格（规范里数组的
+     [[Set]] 先把键 ToString、再看它是不是数组下标）。从前这一支落进旁表，那次写就静静
+     地丢了 —— 读那一边一直是对的，所以更藏得住。 */ \
+  if (o.tag == OMNI_DYN_LIST) { \
+    int64_t idx = omni_js_dec_index(key); \
+    if (idx >= 0) { omni_js_arr_set(o, omni_dyn_of_real((double)idx), v); return o; } \
+  } \
   DT##_set(o.tag == OMNI_DYN_LIST ? omni_js_xprops_(o, true) : omni_js_dict_of(o), key, v); \
   return o; \
-} \
-/* 键是不是一格**规范的十进制下标**（"0" / "12"；不收 "01" / "+1" / "1e2"）。不是就给 -1。
-   数组身上的 `0 in a` 靠它 —— 与 prelude 那份的正则对着写。 */ \
-static int64_t omni_js_dec_index(omni_str key) { \
-  if (key.len == 0 || key.len > 18) return -1; \
-  if (key.p[0] == '0') return key.len == 1 ? 0 : -1; \
-  int64_t n = 0; \
-  for (int64_t i = 0; i < key.len; i++) { \
-    char c = key.p[i]; \
-    if (c < '0' || c > '9') return -1; \
-    n = n * 10 + (c - '0'); \
-  } \
-  return n; \
 } \
 static bool omni_js_obj_hask(omni_dyn o, omni_str key) { \
   if (o.tag == OMNI_DYN_LIST) { \

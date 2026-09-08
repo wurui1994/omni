@@ -224,3 +224,13 @@ const deep = [[1], [2]];
 const cp4 = [...deep];
 cp4[0].push(9);
 console.log(`ali ${deep[0].join(",")} ${cp4.length} ${deep === cp4}`);
+/* 下标形状的**字符串**键就是下标：往 "1" 上写与往 1 上写是同一格（规范里数组的 [[Set]]
+   先把键 ToString、再看它是不是数组下标）。从前这一支落进旁表，那次写静静地丢了 ——
+   读那一边一直是对的，所以更藏得住。 */
+const sk = [1, 2, 3];
+sk["1"] = 9;
+sk["3"] = 4;
+console.log(`sk ${sk.join(",")} ${sk.length} ${sk["1"]} ${sk[1]}`);
+sk["01"] = "x";
+sk.foo = "y";
+console.log(`sk ${sk.length} ${Object.keys(sk).join(",")} ${sk["01"]} ${sk.foo}`);
