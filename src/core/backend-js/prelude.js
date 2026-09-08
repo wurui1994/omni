@@ -1010,14 +1010,15 @@ function $js_cmp(op, a, b) {
     // 与 Omni 的 string 比较走同一条规则（JS 后端一直是宿主的 < ，见 ADR-0005 的已知偏差）
     c = a < b ? -1 : (a > b ? 1 : 0);
   } else {
-    const num = (t) => t === "int" || t === "real";
-    if (!num(ta) || !num(tb)) $rt_error("cannot compare " + ta + " with " + tb);
-    // 两个 bigint 之间精确比：Number() 在 2^53 以上丢位，而 BigInt 的 < 是精确的。
-    // C 侧的 int_cmp 是同一条规则 —— 两边都精确，大数上才不分叉。
-    if (ta === "int" && tb === "int") {
+    /* 混着比（"2" > 1、[2] > 1、null >= 0、undefined > 0）：规范 7.2.13 —— 只有两边都是
+       串才按串比，否则**两边都 ToNumber**。串解析不动就是 NaN，NaN 上一切关系比较都 false。
+       从前这儿是当场报错，于是这一族写法整条腿走不通（qjs 与 node 都照上面那条给答案）。 */
+    if ($dynTag(a) === "int" && $dynTag(b) === "int") {
+      // 两个 bigint 之间精确比：Number() 在 2^53 以上丢位，而 BigInt 的 < 是精确的。
+      // C 侧的 int_cmp 是同一条规则 —— 两边都精确，大数上才不分叉。
       c = a < b ? -1 : (a > b ? 1 : 0);
     } else {
-      const x = Number(a), y = Number(b);
+      const x = Number($js_num_of(a)), y = Number($js_num_of(b));
       if (Number.isNaN(x) || Number.isNaN(y)) return false;
       c = x < y ? -1 : (x > y ? 1 : 0);
     }
@@ -1043,9 +1044,12 @@ function $js_eq(strict, a, b) {
     if (num(ta) && num(tb)) return Number(a) === Number(b);
     // 对象 == 原始值：先把对象 ToPrimitive（规范 IsLooselyEqual 第 10、11 步），再比一次。
     // ADR-0020 P1 —— 从前这个值域里没有"能转成原始值的对象"，所以这一格不存在。
+    // **数组也算**（[] == false 与 [1] == 1 都是 true）：从前只看了真对象那一支，
+    // 于是数组那一格静静地给 false。$js_prim 认得 list（摊成 join(",")）与真对象两种。
     const prim = (t) => t === "string" || t === "int" || t === "real" || t === "bool" || t === "symbol";
-    if (ta === "object" && prim(tb)) return $js_eq(false, $js_to_prim("d", a), b);
-    if (prim(ta) && tb === "object") return $js_eq(false, a, $js_to_prim("d", b));
+    const objish = (t) => t === "object" || t === "list";
+    if (objish(ta) && prim(tb)) return $js_eq(false, $js_prim("d", a), b);
+    if (prim(ta) && objish(tb)) return $js_eq(false, a, $js_prim("d", b));
     // 字符串与数、布尔与别的：照规范都先转成数（这一格从前也不在，补齐）
     if (ta === "string" && num(tb)) return $js_num_of(a) === Number(b);
     if (num(ta) && tb === "string") return Number(a) === $js_num_of(b);
@@ -2181,6 +2185,9 @@ function $mkRealm() {
      这儿把借得最多的那几个摆上去 —— 整张表要等"派发器生成一份注册表"那一步，现在
      摆的是量到过的这些；表外的名字还是 undefined（借它就会当场报"不是函数"）。 */
   $natm(r.arrP, "join", 1, (t, a) => $js_arr_join(t, a[0]));
+  /* Array.prototype.toString（规范 23.1.3.36）：就是 join(",")。少了它的话
+     [1,2].toString() 落到 Object.prototype 上、印出 [object Array]（量出来的分叉）。 */
+  $natm(r.arrP, "toString", 0, (t) => $js_arr_join(t, undefined));
   $natm(r.arrP, "slice", 2, (t, a) => $js_arr_slice(t, a[0], a[1]));
   $natm(r.arrP, "concat", 1, (t, a) => $js_arr_concat(t, a[0]));
   $natm(r.arrP, "indexOf", 1, (t, a) => $js_arr_index_of(t, a[0]));

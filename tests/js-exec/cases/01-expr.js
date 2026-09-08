@@ -52,3 +52,9 @@ let ox = 0;
 console.log(ox + 1, JSON.stringify(ox = 5), ox + 1);
 let oy = 0;
 console.log(`${oy + 1}`, JSON.stringify(oy = 7), oy);
+
+// 混着比（规范 7.2.13）：只有两边都是串才按串比，否则两边都 ToNumber。
+// 从前这一族是当场报错 —— 而 qjs 与 node 都照上面那条给答案。
+console.log("2" > "10", 2 > 10, "2" > 1, "10" < 9, "" < 1);
+console.log(null >= 0, null > 0, undefined > 0, true > 0, false >= 0);
+console.log("abc" < 1, 1 < "abc", "3" >= 3, "3" <= 3);

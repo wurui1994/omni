@@ -408,9 +408,11 @@ bool omni_js_cmp(int op, omni_dyn a, omni_dyn b) {
   if (a.tag == OMNI_DYN_STR16 && b.tag == OMNI_DYN_STR16) {
     c = omni_s16_cmp(a.u.s16, b.u.s16);
   } else {
-    if (!is_num(a) || !is_num(b)) {
-      omni_errorf("cannot compare %s with %s", omni_dyn_tag_name(a.tag), omni_dyn_tag_name(b.tag));
-    }
+    /* 混着比（"2" > 1、null >= 0、undefined > 0）：规范 7.2.13 —— 只有两边都是串才按串比，
+       否则**两边都 ToNumber**（串解析不动是 NaN，NaN 上一切关系比较都 false）。
+       与 prelude 的 $js_cmp 对着写；从前这儿是当场报错。 */
+    if (!is_num(a)) a = omni_js_num_of(a);
+    if (!is_num(b)) b = omni_js_num_of(b);
     /* 两个 bigint 之间精确比（转 double 在 2^53 以上丢位，JS 那边是精确的）；
        只要有一边是 real 就照 JS 的口径转 double 再比 */
     if (is_int(a) && is_int(b)) {
