@@ -2114,8 +2114,10 @@ function $js_own_keys(o, kind) {
       if (kind === "y" && !isSym) continue;
       if ((kind === "s" || kind === "e") && isSym) continue;
       if (kind === "e") {
-        const sl = $js_isobj(o.px.t) ? o.px.t.ps.get($js_pkey(ks[i])) : undefined;
-        if (sl === undefined || !sl.e) continue;
+        /* Object.keys 那一档：陷阱报了的键还要问一遍描述符（**走 gOPD 陷阱**，不是直接
+           翻目标）—— 陷阱说"有、可枚举"就算，与规范一致。 */
+        const d = $js_obj_desc(o, ks[i]);
+        if (d === undefined || !$js_truthy($js_getp(d, "enumerable", undefined))) continue;
       }
       out.push(ks[i]);
     }
@@ -3252,6 +3254,14 @@ function $js_obj_is_ext(o) { return $js_isobj(o) ? o.ex : false; }
 // 已有槽的时候只覆盖 desc 里**出现过**的字段（规范 ValidateAndApplyPropertyDescriptor）。
 function $js_obj_def(o, k, desc) {
   if (!$js_isobj(o)) $rt_error("defineProperty on " + $dynTag(o));
+  /* defineProperty 陷阱（ADR-0020）：没有陷阱就落到目标上 —— 不这么做的话
+     Object.defineProperty(代理, …) 会把那一格写在代理对象自己身上，读回来又走陷阱到目标。 */
+  if (o.px !== undefined) {
+    const f = $js_px_trap(o, "defineProperty");
+    if (f === undefined) return $js_obj_def(o.px.t, k, desc);
+    $callThis(f, o.px.h, [o.px.t, $js_pkey(k), desc]);
+    return o;
+  }
   const key = $js_pkey(k);
   const has = (n) => $js_isobj(desc) && desc.ps.has(n);
   const get = (n) => $js_getp(desc, n, undefined);
@@ -3291,6 +3301,24 @@ function $js_obj_def(o, k, desc) {
   if (has("configurable")) old.c = $js_truthy(get("configurable"));
   return o;
 }
+/* 陷阱交回来的描述符补齐（规范 6.2.6.6 CompletePropertyDescriptor）：不是对象就当"没有"；
+   有 get/set 的是访问器描述符（补另一格），否则是数据描述符（补 value / writable）；
+   两边都补 enumerable / configurable，缺的一律 false。 */
+function $js_desc_complete(d) {
+  if (!$js_isobj(d)) return undefined;
+  const g = $js_getp(d, "get", undefined), s = $js_getp(d, "set", undefined);
+  const out = $js_obj_new_p(undefined);
+  if (g !== undefined || s !== undefined) {
+    $js_def_data(out, "get", g, true, true, true);
+    $js_def_data(out, "set", s, true, true, true);
+  } else {
+    $js_def_data(out, "value", $js_getp(d, "value", undefined), true, true, true);
+    $js_def_data(out, "writable", $js_truthy($js_getp(d, "writable", undefined)), true, true, true);
+  }
+  $js_def_data(out, "enumerable", $js_truthy($js_getp(d, "enumerable", undefined)), true, true, true);
+  $js_def_data(out, "configurable", $js_truthy($js_getp(d, "configurable", undefined)), true, true, true);
+  return out;
+}
 function $js_obj_desc(o, k) {
   /* 数组与字符串上的描述符：下标那几格是"可写、可枚举、可配置"的数据属性，length 是
      可写但**不可枚举、不可配置**（规范 10.4.2.1；字符串上下标与 length 都是只读、
@@ -3321,6 +3349,15 @@ function $js_obj_desc(o, k) {
     return undefined;
   }
   if (!$js_isobj(o)) return undefined;
+  /* getOwnPropertyDescriptor 陷阱（ADR-0020）：陷阱交回来的描述符还要**补齐**
+     （规范 6.2.6.6 CompletePropertyDescriptor：数据描述符补 value/writable、访问器补
+     get/set，两边都补 enumerable/configurable，缺的都当 false）。从前这一格不问陷阱，
+     于是 Object.getOwnPropertyDescriptor(代理, k) 悄悄给出目标上的那一格（或 undefined）。 */
+  if (o.px !== undefined) {
+    const f = $js_px_trap(o, "getOwnPropertyDescriptor");
+    if (f === undefined) return $js_obj_desc(o.px.t, k);
+    return $js_desc_complete($callThis(f, o.px.h, [o.px.t, $js_pkey(k)]));
+  }
   const sl = o.ps.get($js_pkey(k));
   if (sl === undefined) return undefined;
   const d = $js_obj_new_p(undefined);
@@ -3335,8 +3372,7 @@ function $js_obj_desc(o, k) {
   $js_def_data(d, "configurable", sl.c, true, true, true);
   return d;
 }
-function $js_obj_del_p(o, k) {
-  if (!$js_isobj(o)) return true;
+function $js_obj_del_p(o, k) {  if (!$js_isobj(o)) return true;
   if (o.px !== undefined) {
     const f = $js_px_trap(o, "deleteProperty");
     return f === undefined ? $js_obj_del_p(o.px.t, k)

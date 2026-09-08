@@ -1,10 +1,9 @@
 // Proxy（ADR-0020 P4）。代理与普通对象是**同一种值**（$dynTag 都给 "object"），
-// 差别只在属性访问的五个入口上多问一句陷阱：get / set / has / deleteProperty / ownKeys。
-// 处理器上没有那一格就落到目标身上。
+// 差别只在属性访问的那几个入口上多问一句陷阱：get / set / has / deleteProperty /
+// ownKeys / getOwnPropertyDescriptor / defineProperty。处理器上没有那一格就落到目标身上。
 //
-// 不做的写在明处：apply / construct（代理还不能当函数调）、getPrototypeOf、
-// defineProperty、getOwnPropertyDescriptor，以及规范里那一整套"不变量校验" ——
-// 只有 Object.keys 那一档（ownKeys + 可枚举性）照规范再问了一遍目标的描述符。
+// 不做的写在明处：apply / construct（代理还不能当函数调，`new Proxy(function(){}, …)`
+// 当场报）、getPrototypeOf，以及规范里那一整套"不变量校验"。
 const always42 = new Proxy({}, { get() { return 42; } });
 console.log(always42.anything, always42.x);
 
@@ -30,3 +29,22 @@ const pass = new Proxy({ v: 7 }, {});
 console.log(pass.v, "v" in pass, Object.keys(pass).join("|"));
 pass.w = 8;
 console.log(pass.w, Object.keys(pass).join("|"));
+
+/* getOwnPropertyDescriptor / defineProperty 两格陷阱。gOPD 交回来的描述符要**补齐**
+   （规范 6.2.6.6：缺的 writable / enumerable / configurable 一律 false）；Object.keys
+   那一档也改成问描述符（**走陷阱**）而不是直接翻目标 —— 从前这两格都不问陷阱，于是
+   Object.keys(代理) 与 getOwnPropertyDescriptor(代理, k) 悄悄给出目标上的答案。 */
+const dt = { a: 1 };
+const dp = new Proxy(dt, {
+  ownKeys() { return ["a", "extra"]; },
+  getOwnPropertyDescriptor() { return { value: 7, enumerable: true, configurable: true }; },
+  defineProperty(tt, k, d) { return Reflect.defineProperty(tt, k, d); },
+});
+console.log(Object.keys(dp).join(","), JSON.stringify(Object.getOwnPropertyDescriptor(dp, "a")));
+Object.defineProperty(dp, "made", { value: 3, enumerable: true, configurable: true });
+console.log(dt.made, Object.getOwnPropertyNames(dt).join(","));
+// 没有那两格陷阱时落到目标
+const dp2 = new Proxy({ q: 4 }, {});
+console.log(JSON.stringify(Object.getOwnPropertyDescriptor(dp2, "q")));
+Object.defineProperty(dp2, "r", { value: 5, enumerable: false, configurable: false });
+console.log(Object.keys(dp2).join(","), Object.getOwnPropertyNames(dp2).join(","));
