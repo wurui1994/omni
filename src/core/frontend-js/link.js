@@ -213,10 +213,11 @@ function scan(m, diags) {
           break;
         }
         for (const sp of s.specifiers) {
-          if (sp.local !== sp.exported) {
-            diags.error(s.span, `renaming an export ('${sp.local}' as '${sp.exported}') is not supported`);
-            continue;
-          }
+          /* 改名的导出（`export { A as reA }`）：整棵 import 树是**拼成一个程序**的，名字
+           * 共用一个顶层空间，所以改名摊成一句模块级绑定 `const reA = A;`（与 import 改名
+           * 那一支同一招，见下面 imports 那一段）。导出表记的是"导出名 -> 本地名"，
+           * 引用方按导出名找过来，正好落在那一句绑定上。 */
+          if (sp.local !== sp.exported) m.aliases.push({ from: sp.local, to: sp.exported, span: s.span });
           m.exports.set(sp.exported, sp.local);
         }
         break;
@@ -257,7 +258,7 @@ export function linkJs(entry, read, diags) {
       return;
     }
     state.set(path, 'loading');
-    const m = { path, ast: parseJs(new SourceFile(path, text), diags), body: [], exports: new Map(), imports: [], natives: [], cnatives: [] };
+    const m = { path, ast: parseJs(new SourceFile(path, text), diags), body: [], exports: new Map(), aliases: [], imports: [], natives: [], cnatives: [] };
     mods.set(path, m);
     scan(m, diags);
     for (const imp of m.imports) load(imp.path, imp.span);
@@ -325,6 +326,18 @@ export function linkJs(entry, read, diags) {
       }
     }
     body.push(...m.body);
+    // 改名的导出：绑定排在模块体**之后**（本地那一格可能是 const，要先声明再引用）
+    for (const al of m.aliases) {
+      body.push({
+        type: 'VarDecl',
+        kind: 'const',
+        decls: [{
+          id: { type: 'Ident', name: al.to, span: al.span },
+          init: { type: 'Ident', name: al.from, span: al.span },
+        }],
+        span: al.span,
+      });
+    }
   }
   return { type: 'Program', body, natives, cnatives, modules: order.map((m) => m.path) };
 }

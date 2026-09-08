@@ -25,3 +25,9 @@ export class Counter {
 export const table = new Map();
 table.set("a", 1);
 table.set("b", 2);
+
+/* 改名的导出（`export { x as y }`）：整棵 import 树拼成一个程序、名字共用一个顶层空间，
+   所以改名摊成一句模块级绑定 `const y = x;`（与 import 改名那一支同一招）。 */
+const localTag = "tag";
+function localAdd(a, b) { return a + b; }
+export { localTag as TAG, localAdd as add };
