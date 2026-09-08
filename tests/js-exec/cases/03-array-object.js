@@ -112,3 +112,14 @@ const uns = [2, 3];
 console.log(`${uns.unshift(1)} ${uns.join(",")}`);
 const uns0 = [];
 console.log(`${uns0.unshift("a")} ${uns0.join(",")}`);
+
+// in 在数组上：**元素那几格算键**（从前只问了旁表，0 in a 静静地给 false）
+// Object.hasOwn 那几行在 tests/js262 里量 —— 它是 P1_JS_ONLY，摆进来整条用例会掉出 C 腿
+const inA = [1, 2, 3];
+console.log(`in ${0 in inA} ${2 in inA} ${3 in inA} ${"0" in inA} ${"length" in inA} ${"foo" in inA}`);
+inA.foo = 1;
+console.log(`in ${"foo" in inA} ${0 in []} ${"x" in { x: 1 }} ${"y" in { x: 1 }} ${1 in { 1: "a" }}`);
+// void：算一遍再交出 undefined（副作用要留着）
+let vo = 0;
+console.log(`void ${String(void 0)} ${String(void (vo = 5))} ${vo}`);
+console.log(`safe ${Number.isSafeInteger(3)} ${Number.isSafeInteger(2 ** 53)} ${Number.isSafeInteger(1.5)} ${Number.isSafeInteger("3")}`);

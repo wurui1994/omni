@@ -57,3 +57,23 @@ function pair([a, b]) {
   return a + b;
 }
 console.log(String(pair([3, 4])));
+
+// 模式带默认值（`function f({x} = {})`）与嵌套模式的默认值：只在那一格是 undefined 时生效
+function opt({ x = 1, y: z = 2 } = {}, ...tail) {
+  return `${x}/${z}/${tail.length}`;
+}
+console.log(opt(), opt({ x: 9 }, 1, 2), opt({ y: 7 }));
+function nest({ b: { c = 2 } = {} } = {}) {
+  return String(c);
+}
+console.log(nest(), nest({ b: {} }), nest({ b: { c: 5 } }));
+const [q = 5, , r = 6, ...more] = [undefined, 2];
+console.log(`${q}/${r}/${more.length}`);
+// 计算键的解构：键的表达式只算一次
+let hits = 0;
+function k() {
+  hits = hits + 1;
+  return "kk";
+}
+const { [k()]: got = "no", ...restC } = { kk: "yes", zz: 1 };
+console.log(`${got}/${hits}/${JSON.stringify(restC)}`);

@@ -1294,11 +1294,21 @@ class Lower {
       return out;
     }
     if (pat.type === 'ObjectPattern') {
-      for (const p of pat.props) {
-        if (p.computed) { this.err(pat.span, 'computed keys in a destructuring pattern are not supported'); continue; }
-        const key = this.keyName(p.key, pat.span);
-        out.push(...this.bindElem(p.value, op('js_obj_get', [varRef(t), s16(key)])));
-      }
+      /* 计算键（`const { [k]: v } = o`）：键的表达式**只算一次** —— 它可能有副作用，
+       * 而 rest 那一支还要再用一遍（把取过的键从拷贝里删掉）。所以先落在临时量上。 */
+      const keys = [];
+      pat.props.forEach((p) => {
+        let k;
+        if (!p.computed) {
+          k = s16(this.keyName(p.key, pat.span));
+        } else {
+          const kt = this.declare('_k').name;
+          out.push(localStmt(kt, this.expr(p.key)));
+          k = varRef(kt);
+        }
+        keys.push(k);
+        out.push(...this.bindElem(p.value, op('js_obj_get', [varRef(t), k])));
+      });
       if (pat.rest) {
         /* `const {a, ...r} = o`（ADR-0020 P3）：r 是"**剩下的**自有可枚举属性"的一份浅拷贝。
          * 摊成"整份抄一遍，再把取过的那几个键删掉" —— 现成的两个 op 就够，不必为它新增。
@@ -1308,15 +1318,14 @@ class Lower {
         } else {
           out.push(...this.defineVar(pat.rest.name,
             () => op('js_obj_assign', [op('js_obj_new', []), varRef(t)])));
-          for (const p of pat.props) {
-            if (p.computed) continue;
-            out.push(exprStmt(op('js_obj_delete',
-              [this.refVar(pat.rest.name), s16(this.keyName(p.key, pat.span))])));
+          for (const k of keys) {
+            out.push(exprStmt(op('js_obj_delete', [this.refVar(pat.rest.name), k])));
           }
         }
       }
       return out;
     }
+    if (pat.type === 'AssignPattern') return this.bindElem(pat, value);
     this.err(pat.span, `cannot destructure with '${pat.type}'`);
     return out;
   }
@@ -1325,8 +1334,19 @@ class Lower {
   bindElem(el, value) {
     if (el.type === 'AssignPattern') {
       if (el.left.type !== 'Ident') {
-        this.err(el.span, 'a default value on a nested pattern is not supported');
-        return this.bindPattern(el.left, value);
+        /* 嵌套模式带默认值（`function f({x} = {})`、`const {b: {c} = {}} = o`）：默认值
+         * 只在这一格是 undefined 时生效，所以先把值落在一个临时量上、补过默认值，再往里拆。 */
+        const t = this.declare('_v').name;
+        return [
+          localStmt(t, value),
+          {
+            kind: 'If',
+            cond: boolOp('js_eq', [varRef(t), undefExpr()], { strict: true }),
+            then: block([exprStmt(assign(varRef(t), this.expr(el.right)))]),
+            otherwise: null,
+          },
+          ...this.bindPattern(el.left, varRef(t)),
+        ];
       }
       const ref = () => this.refVar(el.left.name);
       const decl = this.defineVar(el.left.name, () => value);
@@ -2019,6 +2039,12 @@ class Lower {
           if (t !== null) return s16(t);
         }
         return op('js_typeof', [this.expr(e.arg)]);
+      }
+      case 'void': {
+        /* void x：算一遍 x（副作用要留着），值是 undefined。逗号那条路同一个办法 ——
+         * 把它作为语句先发出去，表达式的位置交出 undefined。 */
+        this.emitPre(exprStmt(this.exprDiscard(e.arg)), e.span);
+        return undefExpr();
       }
       case 'delete': {
         const t = e.arg;
@@ -3089,6 +3115,7 @@ const STATIC_CALLS = {
   'Number.isNaN': { op: 'js_num_is_nan', argc: 1, len: 1 },
   'Number.isFinite': { op: 'js_num_is_finite', argc: 1, len: 1 },
   'Number.isInteger': { op: 'js_num_is_integer', argc: 1, len: 1 },
+  'Number.isSafeInteger': { op: 'js_num_is_safe_integer', argc: 1, len: 1 },
   'Number.parseInt': { op: 'js_num_parse_int', argc: 2, len: 2 },
   'Number.parseFloat': { op: 'js_num_parse_float', argc: 1, len: 1 },
   // Date.now()：就是宿主时钟那一格 op，不必造一格 Date 对象

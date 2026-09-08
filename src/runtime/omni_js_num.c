@@ -26,6 +26,12 @@ bool omni_js_num_is_integer(omni_dyn v) {
   return v.tag == OMNI_DYN_REAL && isfinite(v.u.r) && v.u.r == trunc(v.u.r);
 }
 
+/* isSafeInteger：整数**且**绝对值不超过 2^53-1（超出那一档 double 上相邻两数差 2，
+   加一减一会回到自己，所以规范把它划出去）。 */
+bool omni_js_num_is_safe_integer(omni_dyn v) {
+  return omni_js_num_is_integer(v) && fabs(v.u.r) <= 9007199254740991.0;
+}
+
 /* Number(x)：字符串按 JS 的数字文法解析（空串是 0，解析不动是 NaN），
    BigInt 转 double，bool 转 0/1，null 是 0，undefined 是 NaN。 */
 omni_dyn omni_js_num_of(omni_dyn v) {

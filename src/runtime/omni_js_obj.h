@@ -99,8 +99,27 @@ static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
   DT##_set(o.tag == OMNI_DYN_LIST ? omni_js_xprops_(o, true) : omni_js_dict_of(o), key, v); \
   return o; \
 } \
+/* 键是不是一格**规范的十进制下标**（"0" / "12"；不收 "01" / "+1" / "1e2"）。不是就给 -1。
+   数组身上的 `0 in a` 靠它 —— 与 prelude 那份的正则对着写。 */ \
+static int64_t omni_js_dec_index(omni_str key) { \
+  if (key.len == 0 || key.len > 18) return -1; \
+  if (key.p[0] == '0') return key.len == 1 ? 0 : -1; \
+  int64_t n = 0; \
+  for (int64_t i = 0; i < key.len; i++) { \
+    char c = key.p[i]; \
+    if (c < '0' || c > '9') return -1; \
+    n = n * 10 + (c - '0'); \
+  } \
+  return n; \
+} \
 static bool omni_js_obj_hask(omni_dyn o, omni_str key) { \
   if (o.tag == OMNI_DYN_LIST) { \
+    /* 元素那几格**也算键**（`0 in a` 是 true）：下标在 0..len-1 里就有，length 也是自有的
+       一格。从前这儿只问了旁表，于是 0 in [1,2] 静静地给 false。 */ \
+    LT l = (LT)o.u.ref; \
+    int64_t idx = omni_js_dec_index(key); \
+    if (idx >= 0) return idx < l->len; \
+    if (key.len == 6 && memcmp(key.p, "length", 6) == 0) return true; \
     DT d = omni_js_xprops_(o, false); \
     return d == NULL ? false : DT##_contains(d, key); \
   } \
@@ -120,7 +139,10 @@ static omni_dyn omni_js_obj_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
   return omni_js_obj_setk(o, omni_js_prop(k), v); \
 } \
 static bool omni_js_obj_has(omni_dyn o, omni_dyn k) { \
-  return omni_js_obj_hask(o, omni_js_prop(k)); \
+  /* in / hasOwn 的键：规范先 ToPropertyKey，**数要按串形算**（0 in a 里左边就是个数）。
+     取属性那条路上的 omni_js_prop 照旧只收串 —— 那句报错是「降级发错了」的固定签名。 */ \
+  omni_dyn kk = k.tag == OMNI_DYN_REAL ? omni_js_str(k) : k; \
+  return omni_js_obj_hask(o, omni_js_prop(kk)); \
 } \
 static bool omni_js_obj_delete(omni_dyn o, omni_dyn k) { \
   return omni_js_obj_deletek(o, omni_js_prop(k)); \

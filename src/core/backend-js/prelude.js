@@ -1633,11 +1633,20 @@ function $js_obj_set(o, k, v) {
 }
 function $js_obj_has(o, k) {
   if ($js_isobj(o)) return $js_obj_has_p(o, k);
-  if ($dynTag(o) === "list") {
-    const x = $js_xprops(o, false);
-    return x === undefined ? false : x.has($js_prop(k));
-  }
-  return $js_dict_of(o).has($js_prop(k));
+  if ($dynTag(o) === "list") return $js_arr_has_key(o, $js_hkey(k));
+  return $js_dict_of(o).has($js_hkey(k));
+}
+/* in / hasOwn 的键：规范先 ToPropertyKey，**数要按串形算**（0 in a 里左边就是个数）。
+   取属性那条路上的 $js_prop 照旧只收串 —— 那句报错是"降级发错了"的固定签名。 */
+function $js_hkey(k) { return $dynTag(k) === "real" ? $js_str(k) : $js_prop(k); }
+/* 数组身上的"有没有这个键"（0 in a / Object.hasOwn(a, 0)）：**元素那几格算键** ——
+   下标在 0..len-1 里就有（从前这儿只问了旁表，于是 0 in [1,2] 静静地给 false）。
+   length 也是一格自有属性。别的名字才去旁表（js 里数组也是对象，见 xprops）。 */
+function $js_arr_has_key(o, key) {
+  if ($js_isidx(key)) return Number(key) < $js_arr_of(o).length;
+  if (key === "length") return true;
+  const x = $js_xprops(o, false);
+  return x === undefined ? false : x.has(key);
 }
 function $js_obj_delete(o, k) {
   if ($js_isobj(o)) return $js_obj_del_p(o, k);
@@ -2812,7 +2821,13 @@ function $js_obj_proto_set(o, p) {
   if ($js_isobj(o)) o.pr = p === undefined || p === null ? null : p;
   return o;
 }
-function $js_obj_has_own(o, k) { return $js_isobj(o) ? o.ps.has($js_pkey(k)) : false; }
+function $js_obj_has_own(o, k) {
+  if ($js_isobj(o)) return o.ps.has($js_pkey(k));
+  // 数组与 dict 上也要认（Object.hasOwn(a, 0) / Object.hasOwn({1:"a"}, 1)）
+  if ($dynTag(o) === "list") return $js_arr_has_key(o, $js_hkey(k));
+  if ($dynTag(o) === "dict") return $js_dict_of(o).has($js_hkey(k));
+  return false;
+}
 function $js_obj_own_keys(kind, o) { return $js_isobj(o) ? $js_own_keys(o, kind) : []; }
 function $js_obj_freeze(o) {
   if ($js_isobj(o)) {
@@ -3113,6 +3128,8 @@ function $js_real(v, who) {
 function $js_num_is_nan(v) { return $dynTag(v) === "real" && Number.isNaN(v); }
 function $js_num_is_finite(v) { return $dynTag(v) === "real" && Number.isFinite(v); }
 function $js_num_is_integer(v) { return $dynTag(v) === "real" && Number.isInteger(v); }
+// isSafeInteger：整数**且**绝对值不超过 2^53-1（超出那一档 double 上相邻两数差 2）
+function $js_num_is_safe_integer(v) { return $dynTag(v) === "real" && Number.isSafeInteger(v); }
 function $js_num_of(v) {
   switch ($dynTag(v)) {
     case "real": return v;
