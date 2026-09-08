@@ -2553,7 +2553,19 @@ class Lower {
       ? op('js_add', [x, constReal(1)])
       : op('js_arith', [x, constReal(1)], { op: '-' }));
     if (discard || e.prefix) return lv.set(bump(lv.get()));
-    // 后缀的值是**旧的**，所以先存一份再写回
+    /* 后缀的值是**旧的**，所以先存一份再写回。平时摊成两句（干净、也不挑目标形状）。
+     *
+     * 惰性位置（三元的分支、`&&` 的右边）里开不了语句 —— 那儿 emitPre 会报
+     * "hoist it into a statement"。名字这一支可以不摊：把两次写折进一个表达式
+     *   (t = i) 先存旧值 -> i = t + 1 写回 -> 值是 t
+     * 三元的两条分支都是"读同一格临时量"，所以复制的只是一个变量引用，没有重复求值。
+     * 只给名字开这条路：成员/下标目标要在 set 与 get 里各求一次接收者，而 C 那边
+     * 实参求值次序是未指定的，两条腿会分叉。 */
+    if (this.fn.lazies > 0 && e.arg.type === 'Ident') {
+      const t0 = this.temp();
+      const wrote = lv.set(bump(assign(varRef(t0), lv.get())));
+      return ternary(truthy(wrote), varRef(t0), varRef(t0));
+    }
     const t = this.temp();
     this.emitPre(exprStmt(assign(varRef(t), lv.get())), e.span);
     this.emitPre(exprStmt(lv.set(bump(varRef(t)))), e.span);

@@ -8,6 +8,6 @@
 #   lit 字段名（原先叫 kind，撞上 IR 节点的判别字段）压住的，改名 sel 之后一起绿了。
 # 已经绿的（删掉的）：proto-chain、class-static-field —— 字面量里的 __proto__ 与
 #   Object.prototype 上那几个名字（hasOwnProperty/valueOf…）通了之后绿的。
+# 已经绿的（删掉的）：iter-protocol —— 后缀自增能在惰性位置（三元分支）里降了之后绿的。
 this-call-apply-bind.js  # Array.prototype.join.call 这种"借内建方法"还没通
-iter-protocol.js         # for-of / 展开 / 解构走 Symbol.iterator 协议
 class-extends.js         # instanceof Object 与 Object.prototype.toString 的 tag
