@@ -232,11 +232,13 @@ class JsParser {
           && !this.at('(', 1) && !this.at('=', 1) && !this.at(';', 1) && !this.at('}', 1)) {
         kind = this.next().value;
       }
+      // 生成器方法（ADR-0020 P2）：`*m() {}` / `static *m() {}` / `*[Symbol.iterator]() {}`
+      const generator = kind === 'method' ? !!this.eat('*') : false;
       const { key, computed } = this.propertyKey();
       if (this.at('(')) {
         const { params, rest } = this.paramList();
         const body = this.block();
-        members.push({ kind, static: isStatic, key, computed, params, rest, body, span: this.spanFrom(mStart) });
+        members.push({ kind, static: isStatic, key, computed, params, rest, body, generator, span: this.spanFrom(mStart) });
       } else {
         // 类字段。`static x = 1` 用得到，实例字段 stage0 里没有，但语法一样，一起收下
         const value = this.eat('=') ? this.assignExpr() : null;
@@ -924,11 +926,13 @@ class JsParser {
             && !this.at(',', 1) && !this.at(':', 1) && !this.at('(', 1) && !this.at('}', 1)) {
           kind = this.next().value;
         }
+        // 生成器方法（ADR-0020 P2）：`{ *gen() { … } }`
+        const generator = kind === 'init' ? !!this.eat('*') : false;
         const { key, computed } = this.propertyKey();
         if (this.at('(')) {
           const { params, rest } = this.paramList();
           const body = this.block();
-          props.push({ kind: kind === 'init' ? 'init' : kind, key, computed, method: true, params, rest, body, span: this.spanFrom(pStart) });
+          props.push({ kind: kind === 'init' ? 'init' : kind, key, computed, method: true, params, rest, body, generator, span: this.spanFrom(pStart) });
         } else if (this.eat(':')) {
           props.push({ kind: 'init', key, computed, method: false, value: this.assignExpr(), span: this.spanFrom(pStart) });
         } else {

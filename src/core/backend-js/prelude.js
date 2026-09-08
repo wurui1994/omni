@@ -1855,6 +1855,7 @@ function $mkRealm() {
     iterP: new $JSObj(objP, "Iterator"),
     dateP: new $JSObj(objP, "Date"),
     promP: new $JSObj(objP, "Promise"),
+    genP: new $JSObj(objP, "Generator"),
     // globalThis（ADR-0020 P4）：这个值域里没有全局环境记录（模块的顶层名字是模块局部的），
     // 所以它就是**一格普通的真对象**，每个 realm 一份。挂上去的东西读得回来，
     // 内建（Math / JSON …）不在它身上 —— 那是画出来的边界。
@@ -1934,6 +1935,12 @@ function $mkRealm() {
           $nat("", 1, () => { $js_throw(e); return undefined; }), undefined);
       }));
   });
+  /* 生成器对象的原型（ADR-0020 P2）：next / return / throw 都转给同一格状态机，
+     Symbol.iterator 返回自己 —— 于是 for-of 与展开走的是通用的迭代器协议那条路。 */
+  $natm(r.genP, "next", 1, (t, a) => $js_gen_step(t, a[0], 0));
+  $natm(r.genP, "return", 1, (t, a) => $js_gen_step(t, a[0], 1));
+  $natm(r.genP, "throw", 1, (t, a) => $js_gen_step(t, a[0], 2));
+  $js_def_data(r.genP, $js_sym_wk("iterator"), $nat("[Symbol.iterator]", 0, (t) => t), true, false, true);
   return r;
 }
 /* ---------------------------------------- 作业队列（微任务）与 Promise
@@ -2045,6 +2052,43 @@ function $js_promise_all(items) {
     return undefined;
   }));
   return out;
+}
+/* 生成器（ADR-0020 P2 的后半）：函数体已经被 genfn.js 改写成一台状态机，这儿只剩
+   "包装成迭代器对象"这一层皮。step 是那台状态机（一格普通的 JS 函数值），约定：
+     step(v, 0) -> 下一步（v 是 next(v) 送进去的值）
+     step(v, 1) -> it.return(v)：跑该跑的 finally，然后完
+     step(v, 2) -> it.throw(v)：同上，跑完把异常接回去
+   返回的都是 js_gen_res 造的 { value, done }。状态存两格隐藏槽：
+   $stp（那台状态机）与 $gst（0 还没开始 / 1 挂起 / 2 完）。 */
+function $js_gen_res(v, done) {
+  const o = $js_obj_new();
+  $js_def_data(o, "value", v, true, true, true);
+  $js_def_data(o, "done", done === true, true, true, true);
+  return o;
+}
+function $js_gen_new(step) {
+  const g = $js_obj_new_p($realm().genP);
+  $js_def_data(g, "$stp", step, true, false, true);
+  $js_def_data(g, "$gst", 0, true, false, true);
+  return g;
+}
+function $js_gen_is(v) { return $js_isobj(v) && v.ps.has("$stp"); }
+function $js_gen_step(g, v, mode) {
+  if (!$js_gen_is(g)) $rt_error("this is not a generator");
+  const st = g.ps.get("$gst").v;
+  /* 没开始就 return/throw，或者已经跑完了：不进体（规范如此）。
+     it.throw 在这两种情况下就是"从这儿抛出去"。 */
+  if (st === 2 || (st === 0 && mode !== 0)) {
+    g.ps.get("$gst").v = 2;
+    if (mode === 2) { $js_throw(v); return undefined; }
+    return $js_gen_res(mode === 1 ? v : undefined, true);
+  }
+  g.ps.get("$gst").v = 1;
+  const r = $callThis(g.ps.get("$stp").v, undefined, [v, mode]);
+  // 体里抛出来的东西在挂起槽里（ADR-0007）：生成器就此完，让它继续往调用者那边冒
+  if ($js_pending()) { g.ps.get("$gst").v = 2; return undefined; }
+  if ($js_truthy($js_getp(r, "done", undefined))) g.ps.get("$gst").v = 2;
+  return r;
 }
 // Date 的隐藏槽。取到的不是数就说明接收者不是这一族的对象 —— 报一句，别悄悄算出 NaN。
 function $js_date_ms(t) {

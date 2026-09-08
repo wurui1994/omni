@@ -18,6 +18,7 @@
 import { DYNAMIC, STRING, BOOL, REAL, INT, listType, dictType, fnType } from '../hir/types.js';
 import { JS_ALL, JS_METHODS, JS_PROPS } from '../hir/js_abi.js';
 import { C_ABI } from '../hir/c_abi.js';
+import { genToStateMachine } from './genfn.js';
 
 /** JS 的函数签名只有一种：fn(list&lt;dynamic&gt;) -&gt; dynamic（ADR-0011） */
 const JS_FN = fnType([listType(DYNAMIC)], DYNAMIC);
@@ -160,6 +161,8 @@ const CLASS_INIT_KEY = '$init';
 function fnNodeOfProp(p) {
   return {
     type: 'FuncExpr', id: null, params: p.params, rest: p.rest, body: p.body, span: p.span,
+    // 生成器方法（ADR-0020 P2）：`*m() {}` 的那一格标记要跟着传下去，closureOf 靠它改写
+    generator: p.generator === true,
   };
 }
 
@@ -501,8 +504,17 @@ class Lower {
   /* -------------------------------------------------------- 函数 */
 
   funcDecl(s) {
-    this.funcs.push(this.funcOf(s.id, this.topFns.get(s.id), s.params, s.rest, s.body.body, s.span));
+    const f = this.genFix(s);
+    this.funcs.push(this.funcOf(s.id, this.topFns.get(s.id), f.params, f.rest, f.body.body, f.span));
   }
+
+  /** 生成器（ADR-0020 P2）：`function*` 在这儿先被改写成一台状态机（genfn.js），
+   * 降级器自己因此不用认识 Yield —— 它看到的是普通函数体。 */
+  genFix(node) {
+    if (node.generator !== true) return node;
+    return genToStateMachine(node, (sp, msg) => this.err(sp, msg));
+  }
+
 
   /** 一个新的函数栈帧。opts.outerScopes 给出捕获层（只有 cell 能被捕获） */
   newFrame(bodyStmts, opts) {
@@ -617,6 +629,7 @@ class Lower {
    * @returns {{expr: any, closure: any}}
    */
   closureOf(node, label, extra = {}) {
+    node = this.genFix(node);
     const id = this.closures.length;
     const mangled = this.mangle('l_', label);
     const rec = { id, mangled, make: `omni_mk_${mangled}`, captures: [] };
@@ -1599,6 +1612,9 @@ class Lower {
         return constInt(0n);
       }
       case 'Str': return s16(e.value);
+      /* 合成节点（genfn.js 造的）：直接发一个 ABI 里的 op。解析器不会产出它 ——
+       * 它是"改写器写给降级器"的那一格，省得把状态机的每一步都翻译成用户级 JS。 */
+      case 'OpCall': return op(e.op, e.args.map((a) => this.expr(a)));
       case 'Lit': return e.value === null ? nullExpr() : constBool(e.value);
       case 'Ident': return this.ident(e);
       case 'Template': return this.template(e);

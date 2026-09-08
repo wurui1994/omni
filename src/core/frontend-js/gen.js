@@ -322,6 +322,7 @@ class Gen {
       return;
     }
     if (p.method) {
+      if (p.generator === true) this.emit('*');
       this.key(p.key, p.computed);
       this.params(p.params, p.rest, false);
       this.emit(' ');
@@ -464,6 +465,7 @@ class Gen {
         continue;
       }
       if (m.kind === 'get' || m.kind === 'set') this.emit(`${m.kind} `);
+      if (m.generator === true) this.emit('*');
       this.key(m.key, m.computed);
       this.params(m.params, m.rest, false);
       this.emit(' ');

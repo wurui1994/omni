@@ -216,6 +216,13 @@ export const JS_ABI = {
   js_promise_rejected: { js: '$js_promise_rejected', c: 'omni_js_promise_rejected', arity: 1 },
   js_promise_all: { js: '$js_promise_all', c: 'omni_js_promise_all', arity: 1, throws: true },
   js_jobs_run: { js: '$js_jobs_run', c: 'omni_js_jobs_run', arity: 0, ret: 'void', throws: true },
+  /* 生成器（ADR-0020 P2 的后半）：`function*` 的体被 genfn.js 改写成一台状态机，
+     这里只剩两格 op —— 一格造迭代器对象（next/return/throw + Symbol.iterator 都在它的
+     原型 genP 上），一格造 `{ value, done }`。状态机自己是**普通的 JS 代码**，
+     所以生成器不需要新的调用约定。 */
+  js_gen_new: { js: '$js_gen_new', c: 'omni_js_gen_new', arity: 1 },
+  js_gen_res: { js: '$js_gen_res', c: 'omni_js_gen_res', arity: 2 },
+
 
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
   js_map_size: { js: '$js_map_size', c: 'omni_js_map_size', arity: 1 },
@@ -604,6 +611,7 @@ const P1_JS_ONLY = [
   'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new', 'js_proxy_new',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
   'js_jobs_run',
+  'js_gen_new', 'js_gen_res',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 
