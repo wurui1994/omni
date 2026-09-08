@@ -1352,6 +1352,9 @@ function $js_utf8_bytes(s) { return [...new TextEncoder().encode($js_asS16(s))];
 function $js_num_parse_int(s, radix) {
   return parseInt($js_asS16(s), radix === undefined ? undefined : Math.trunc(radix));
 }
+// parseFloat：吃最长的合法前缀。C 那份手划前缀再 strtod（strtod 认 0x / inf / nan，
+// JS 的 parseFloat 只认十进制字面量加 Infinity），两边因此在 "0x10" 上同样给 0。
+function $js_num_parse_float(s) { return parseFloat($js_asS16(s)); }
 // for-of 的取值面：数组原样返回（所以下标迭代是活的），字符串按**码点**切，
 // Map 给 [k, v] 对，Set 给元素。普通对象不可迭代 —— JS 也是这样。
 // for-in 的那一串键（ADR-0020 P3）：自有 + 继承来的**可枚举字符串键**，按"先自己、
@@ -2166,6 +2169,8 @@ function $js_math(op, a, b) {
   if (op === "P") return Math.log1p(x);
   if (op === "B") return Math.cbrt(x);
   if (op === "F") return Math.fround(x);
+  // clz32：先 ToUint32 再数前导零（Math.clz32 自己就做这一步转换）
+  if (op === "Z") return Math.clz32(x);
   const y = $js_real(b, "Math");
   if (op === "M") return Math.max(x, y);
   if (op === "m") return Math.min(x, y);
@@ -2478,14 +2483,38 @@ function $js_json_read(z) {
   if (c === 45 || $js_json_digit(c)) return $js_json_num(z);
   $js_json_bad(z);
 }
+// reviver（ADR-0020 P4）：自底向上走一遍，每一格调一次 (key, value)，this 是持有者。
+// 键在数组里是下标的字符串形式；回调返回 undefined 就把那一格删掉（数组里留成 undefined）。
+// 根那一格的持有者是个只有 "" 这一个键的临时对象 —— 规范就是这么规定的。
+function $js_json_revive(rep, holder, key, val) {
+  if ($dynTag(val) === "list") {
+    for (let i = 0; i < val.length; i++) {
+      val[i] = $js_json_revive(rep, val, $js_str(i), val[i]);
+    }
+  } else if ($dynTag(val) === "dict") {
+    const ks = $js_obj_keys(val);
+    for (let i = 0; i < ks.length; i++) {
+      const k = ks[i];
+      const r = $js_json_revive(rep, val, k, $js_obj_get(val, k));
+      if (r === undefined) $js_obj_delete(val, k);
+      else $js_obj_set(val, k, r);
+    }
+  }
+  return $js_call_this(rep, holder, [key, val]);
+}
 // 实参先按 JS 的口径转字符串（JSON.parse(5) 是 5，不是报错），再从头读一格值，
 // 末尾除了空白不许还有东西。
-function $js_json_parse(text) {
+function $js_json_parse(text, rep) {
   const z = { s: $js_str(text), i: 0 };
   const v = $js_json_read(z);
   $js_json_ws(z);
   if (z.i !== z.s.length) {
     $rt_error("unexpected non-whitespace character after JSON at position " + z.i);
+  }
+  if ($dynTag(rep) === "function") {
+    const root = $js_obj_new();
+    $js_obj_set(root, "", v);
+    return $js_json_revive(rep, root, "", v);
   }
   return v;
 }

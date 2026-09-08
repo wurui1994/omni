@@ -90,6 +90,40 @@ omni_dyn omni_js_num_parse_int(omni_dyn sd, omni_dyn radixd) {
   return omni_dyn_of_real(sign * acc);
 }
 
+/* parseFloat(s)：吃最长的合法前缀，后面有垃圾也不报错，一个数字都没有就是 NaN。
+   刻意**不**把整串交给 strtod：strtod 认 "0x10"（16）、"inf"、"nan" 这些扩展，而
+   JS 的 parseFloat 只认十进制字面量加 Infinity —— 所以先手划出合法前缀，再让
+   strtod 只看那一段（十进制的舍入还是交给它，两边才逐位相同）。 */
+omni_dyn omni_js_num_parse_float(omni_dyn sd) {
+  omni_str s = omni_s16_to_utf8(omni_js_as_s16(sd));
+  const char *p = omni_cstr(s);
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' || *p == '\f') p++;
+  const char *start = p;
+  double sign = 1;
+  if (*p == '+' || *p == '-') { if (*p == '-') sign = -1; p++; }
+  if (strncmp(p, "Infinity", 8) == 0) return omni_dyn_of_real(sign * (double)INFINITY);
+  int digits = 0;
+  while (*p >= '0' && *p <= '9') { p++; digits++; }
+  if (*p == '.') {
+    p++;
+    while (*p >= '0' && *p <= '9') { p++; digits++; }
+  }
+  if (digits == 0) return omni_dyn_of_real((double)NAN);
+  if (*p == 'e' || *p == 'E') {
+    const char *q = p + 1;
+    if (*q == '+' || *q == '-') q++;
+    if (*q >= '0' && *q <= '9') {
+      while (*q >= '0' && *q <= '9') q++;
+      p = q;
+    }
+  }
+  int64_t n = p - start;
+  char *buf = omni_alloc_bytes(n + 1);
+  memcpy(buf, start, (size_t)n);
+  buf[n] = '\0';
+  return omni_dyn_of_real(strtod(buf, NULL));
+}
+
 /* JS 的 StringToBigInt。刻意**不**走 omni_int_of_string：那是 Omni 的 int(string)
    语义（只认十进制），而 BigInt("0xf0") 在 JS 里是 240n —— 编译器自己的 js 词法器
    就靠它读十六进制的 bigint 字面量。收的范围是 [INT64_MIN, UINT64_MAX]：正的那半
@@ -226,6 +260,23 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
     case 'F': {
       float f = (float)x;
       return omni_dyn_of_real((double)f);
+    }
+    /* clz32：ToUint32 之后数前导零。不用 __builtin_clz —— 它在 0 上是未定义的，
+       而 Math.clz32(0) 必须是 32。 */
+    case 'Z': {
+      uint32_t u = 0;
+      if (isfinite(x)) {
+        double t = fmod(trunc(x), 4294967296.0);
+        if (t < 0) t += 4294967296.0;
+        u = (uint32_t)t;
+      }
+      int n = 0;
+      if (u == 0) {
+        n = 32;
+      } else {
+        while (!(u & 0x80000000u)) { u <<= 1; n++; }
+      }
+      return omni_dyn_of_real((double)n);
     }
     default: break;
   }

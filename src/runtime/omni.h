@@ -590,6 +590,7 @@ bool omni_js_num_is_finite(omni_dyn v);
 bool omni_js_num_is_integer(omni_dyn v);
 omni_dyn omni_js_num_of(omni_dyn v);
 omni_dyn omni_js_num_parse_int(omni_dyn s, omni_dyn radix);
+omni_dyn omni_js_num_parse_float(omni_dyn s);
 omni_dyn omni_js_bigint_of(omni_dyn v);
 omni_dyn omni_js_bigint_as_int_n(omni_dyn bits, omni_dyn v);
 omni_dyn omni_js_bigint_as_uint_n(omni_dyn bits, omni_dyn v);

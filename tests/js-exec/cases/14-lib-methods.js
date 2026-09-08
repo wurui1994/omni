@@ -31,3 +31,23 @@ console.log(`padEnd ${"ab".padEnd(7, "xyz")}|`);
 // at 在数组上：负下标从尾部数（a[-1] 走的是取属性那条路，给 undefined）
 console.log(`at ${xs.at(0)} ${xs.at(-1)} ${xs.at(4)} ${xs.at(-9)} ${xs[-1]}`);
 
+// clz32 与 parseFloat：C 那份都不是"转手 libm"，而是手写的（0 上的前导零、
+// strtod 的 0x/inf 扩展要挡掉），所以两条腿都得量
+console.log(`clz32 ${Math.clz32(0)} ${Math.clz32(1)} ${Math.clz32(0x80000000)} ${Math.clz32(-1)}`);
+console.log(`clz32 ${Math.clz32(NaN)} ${Math.clz32(4294967297)}`);
+console.log(`parseFloat ${parseFloat("1.5")} ${parseFloat(" 2.5e3xyz")} ${parseFloat("0x10")}`);
+console.log(`parseFloat ${parseFloat("abc")} ${parseFloat("-Infinity")} ${Number.parseFloat(".5")}`);
+console.log(`parseFloat ${parseFloat("3.")} ${parseFloat("1e")} ${parseFloat("1e+2")}`);
+
+// JSON.parse 的 reviver：自底向上、键是字符串（数组是下标），返回 undefined 删格
+const rev = JSON.parse('{"a":1,"b":{"c":2},"d":[3,4]}', (k, v) => (typeof v === "number" ? v + 10 : v));
+console.log(`reviver ${JSON.stringify(rev)}`);
+const drop = JSON.parse('{"a":1,"b":2}', (k, v) => (k === "b" ? undefined : v));
+console.log(`reviver ${JSON.stringify(drop)}`);
+const keys = [];
+JSON.parse('{"a":[1]}', (k, v) => { keys.push(k); return v; });
+console.log(`reviver ${keys.join("|")}`);
+console.log(`reviver ${JSON.parse("[1,2]", (k, v) => v).join(",")}`);
+
+
+

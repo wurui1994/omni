@@ -255,7 +255,7 @@ export const JS_ABI = {
   // cli.js:792 的 `JSON.parse(readText(p))`。封闭的 ABI 该长的时候就长 —— 反过来把编译器
   // 自己的源码改窄是把问题挪个地方。reviver 仍不收：仓库里 parse 全是一个实参。
   js_json_stringify: { js: '$js_json_stringify', c: 'omni_js_json_stringify', arity: 3, throws: true },
-  js_json_parse: { js: '$js_json_parse', c: 'omni_js_json_parse', arity: 1 },
+  js_json_parse: { js: '$js_json_parse', c: 'omni_js_json_parse', arity: 2, throws: true },
 
   // ---------------------------------------------------------------- RegExp
   // 模式与 flags 是普通的 string 实参（不是 lit）：两侧都按字面量做编译缓存，C 侧的键
@@ -302,6 +302,9 @@ export const JS_ABI = {
   js_str_split: { js: '$js_str_split', c: 'omni_js_str_split', arity: 2 },
   js_utf8_bytes: { js: '$js_utf8_bytes', c: 'omni_js_utf8_bytes', arity: 1 },
   js_num_parse_int: { js: '$js_num_parse_int', c: 'omni_js_num_parse_int', arity: 2 },
+  // parseFloat：与 Number(s) 不是一回事 —— 吃最长的合法前缀，后面有垃圾也不报错，
+  // 而且**不认** 0x / Infinity 以外的那些 strtod 扩展（C 那份为此手划前缀再 strtod）。
+  js_num_parse_float: { js: '$js_num_parse_float', c: 'omni_js_num_parse_float', arity: 1 },
   js_arr_entries: { js: '$js_arr_entries', c: 'omni_js_arr_entries', arity: 1 },
 
   // ------------------------------------------------- for-of 与 o[k]（lower.js 用）

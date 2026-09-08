@@ -2360,8 +2360,8 @@ const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number'
 
 const STATIC_CALLS = {
   'JSON.stringify': { op: 'js_json_stringify', argc: 3 },
-  // parse 只收一个实参（没有 reviver）：量过，仓库里 JSON.parse 全是一个实参
-  'JSON.parse': { op: 'js_json_parse', argc: 1 },
+  // parse 的第二个实参是 reviver（ADR-0020 P4）：自底向上走一遍，undefined 删格
+  'JSON.parse': { op: 'js_json_parse', argc: 2 },
   'Math.abs': { op: 'js_math', argc: 2, lit: { op: 'a' } },
   'Math.trunc': { op: 'js_math', argc: 2, lit: { op: 't' } },
   'Math.floor': { op: 'js_math', argc: 2, lit: { op: 'f' } },
@@ -2375,6 +2375,9 @@ const STATIC_CALLS = {
      缺的只是这张表里的名字。**Math.round 不在这儿** —— js_math 的 'r' 是 C 的 round
      （离零舍入），而 Math.round 是"半数往上"，两者在 -0.5 上就分叉。 */
   'Math.sqrt': { op: 'js_math', argc: 2, lit: { op: 's' } },
+  // clz32：先 ToUint32 再数前导零。JS 的 Math.clz32 与 C 那份都走这一格（不是 __builtin_clz，
+  // 那个在 0 上是未定义的）
+  'Math.clz32': { op: 'js_math', argc: 2, lit: { op: 'Z' } },
   'Math.hypot': { op: 'js_math', argc: 2, lit: { op: 'Y' } },
   'Math.exp': { op: 'js_math', argc: 2, lit: { op: 'E' } },
   'Math.expm1': { op: 'js_math', argc: 2, lit: { op: 'X' } },
@@ -2442,6 +2445,7 @@ const STATIC_CALLS = {
   'Number.isFinite': { op: 'js_num_is_finite', argc: 1 },
   'Number.isInteger': { op: 'js_num_is_integer', argc: 1 },
   'Number.parseInt': { op: 'js_num_parse_int', argc: 2 },
+  'Number.parseFloat': { op: 'js_num_parse_float', argc: 1 },
   'BigInt.asIntN': { op: 'js_bigint_as_int_n', argc: 2 },
   'BigInt.asUintN': { op: 'js_bigint_as_uint_n', argc: 2 },
   'process.cwd': { op: 'js_proc_cwd', argc: 0 },
@@ -2507,6 +2511,7 @@ const GLOBAL_CALLS = {
   Number: { op: 'js_num_of', argc: 1 },
   BigInt: { op: 'js_bigint_of', argc: 1 },
   parseInt: { op: 'js_num_parse_int', argc: 2 },
+  parseFloat: { op: 'js_num_parse_float', argc: 1 },
   // Symbol(desc)（ADR-0020 P1）。**不是构造器** —— `new Symbol()` 在 JS 里是 TypeError，
   // 这儿也就只有调用这一条路。
   Symbol: { op: 'js_sym_new', argc: 1 },

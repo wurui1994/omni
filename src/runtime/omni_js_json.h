@@ -323,7 +323,36 @@ static omni_dyn omni_js_json_read(omni_js_json_cur *z) { \
   if (c == 45 || omni_js_json_digit(c)) return omni_dyn_of_real(omni_js_json_num(z)); \
   omni_js_json_bad(z); \
 } \
-static omni_dyn omni_js_json_parse(omni_dyn text) { \
+static omni_dyn omni_js_json_revive(omni_dyn rep, omni_dyn holder, omni_s16 key, omni_dyn val) { \
+  if (val.tag == OMNI_DYN_LIST) { \
+    LT l = (LT)val.u.ref; \
+    for (int64_t i = 0; i < l->len; i++) { \
+      omni_s16 ik = omni_js_as_s16(omni_js_str(omni_dyn_of_real((double)i))); \
+      l->items[i] = omni_js_json_revive(rep, val, ik, l->items[i]); \
+    } \
+  } else if (val.tag == OMNI_DYN_DICT) { \
+    DT d = (DT)val.u.ref; \
+    int64_t n = d->n; \
+    for (int64_t i = 0; i < n; i++) { \
+      omni_str k; \
+      omni_dyn r; \
+      if (!d->live[i]) continue; \
+      k = d->keys[i]; \
+      r = omni_js_json_revive(rep, val, omni_s16_of_utf8(k), d->vals[i]); \
+      if (r.tag == OMNI_DYN_UNDEF) omni_js_obj_deletek(val, k); \
+      else omni_js_obj_setk(val, k, r); \
+    } \
+  } \
+  { \
+    LT args = LT##_new(); \
+    LT##_reserve(args, 2); \
+    args->items[0] = omni_dyn_of_s16(key); \
+    args->items[1] = val; \
+    args->len = 2; \
+    return omni_js_call_this(rep, holder, omni_js_arr_wrap(args)); \
+  } \
+} \
+static omni_dyn omni_js_json_parse(omni_dyn text, omni_dyn rep) { \
   omni_js_json_cur z; \
   omni_dyn v; \
   omni_s16 s = omni_js_as_s16(omni_js_str(text)); \
@@ -334,6 +363,11 @@ static omni_dyn omni_js_json_parse(omni_dyn text) { \
   omni_js_json_ws(&z); \
   if (z.i != z.len) { \
     omni_errorf("unexpected non-whitespace character after JSON at position %lld", (long long)z.i); \
+  } \
+  if (rep.tag == OMNI_DYN_FN) { \
+    omni_dyn root = omni_js_obj_new(); \
+    omni_js_obj_setk(root, omni_str_new("", 0), v); \
+    return omni_js_json_revive(rep, root, omni_js_s16_lit(""), v); \
   } \
   return v; \
 }
