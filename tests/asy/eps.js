@@ -31,9 +31,14 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
-const REF = join(ROOT, '.omni-cache', 'epsref');
-const RES = join(ROOT, '.omni-cache', 'epsres');
-const WORK = join(ROOT, '.omni-cache', 'epsrun');
+// **两套参考**：装着的 asy 默认走 Vulkan（这台机器的 GL 是编掉的），而我们三维那一档的
+// 主路是 GL（`libomnigl`，见 ADR-0014 第十七刀）——两个渲染器的像素不一样。
+// `OMNI_EPS_GL=1` 就换成 `asy -novulkan` 的那一套：参考、判据印记、工作目录全部另立门户，
+// 免得两套混在一个目录里互相盖（那等于把结论悄悄弄反）。
+const GL = process.env.OMNI_EPS_GL === '1';
+const REF = join(ROOT, '.omni-cache', GL ? 'epsref-gl' : 'epsref');
+const RES = join(ROOT, '.omni-cache', GL ? 'epsres-gl' : 'epsres');
+const WORK = join(ROOT, '.omni-cache', GL ? 'epsrun-gl' : 'epsrun');
 const ASY = '/opt/homebrew/bin/asy';
 const ASYBASE = '/opt/homebrew/share/asymptote';
 const TOL = 1e-3;
@@ -341,7 +346,9 @@ function oracle(n, p) {
   mkdirSync(WORK, { recursive: true });
   // 例子的路径要**绝对**：这一趟的 cwd 是 WORK，而调用方给的 exDir 常是相对仓库根的
   // （`node tests/asy/eps.js tests/asy/examples …`），照原样传进去 asy 找不到文件。
-  const r = spawnSync(ASY, ['-noV', '-f', 'eps', '-o', n, resolve(p)],
+  // `-novulkan` 那一档（`OMNI_EPS_GL=1`）：让 asy 走它自己的 GL 渲染器，与我们的主路对齐。
+  const r = spawnSync(ASY, GL ? ['-noV', '-novulkan', '-f', 'eps', '-o', n, resolve(p)]
+    : ['-noV', '-f', 'eps', '-o', n, resolve(p)],
     { cwd: WORK, encoding: 'utf8', timeout: 60000 });
   const made = join(WORK, `${n}.eps`);
   if (r.status !== 0 || !existsSync(made) || statSync(made).size === 0) return null;
