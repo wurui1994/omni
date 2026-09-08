@@ -2329,15 +2329,22 @@ class Lower {
     /** @type {any[]} 一段段拼：连续的普通元素是一个 ListLit，展开的是 js_iter */
     const parts = [];
     let run = [];
+    let firstIsSpread = false;
     e.elements.forEach((el, i) => {
       if (el !== null && el.type === 'Spread') {
         if (run.length) { parts.push(arrLit(run)); run = []; }
+        if (parts.length === 0) firstIsSpread = true;
         parts.push(vals[i]);
         return;
       }
       run.push(vals[i]);
     });
     if (run.length || parts.length === 0) parts.push(arrLit(run));
+    /* `[...a]` 必须是**一份新的**数组：js_iter 在 list 上是恒等，一段就交回去的话
+     * `const b = [...a]` 拿到的就是 a 自己 —— `b.push(x)` / `b.sort()` 会改到 a
+     * （量出来的 silent 分叉：`[...people].sort(…)` 把原数组也排了，`people[0]` 于是变了）。
+     * 头一段是展开时前面垫一格空字面量，concat 就给出新数组。 */
+    if (firstIsSpread) parts.unshift(arrLit([]));
     return parts.reduce((a, b) => op('js_arr_concat', [a, b]));
   }
 
@@ -2847,7 +2854,13 @@ class Lower {
       }
       /* concat 也收可变实参，而成员派发器是定长的。它是**可结合**的（一次拼一段），
        * 所以多实参摊成一串调用、展开在运行期 reduce —— 与封闭 ABI 那边的 assoc 同一招。
-       * push 不在这儿：它有专门的 js_arr_push_all（上面那一支）。 */
+       * push 不在这儿：它有专门的 js_arr_push_all（上面那一支）。
+       * 一个实参都不给（`a.concat()`）是**拷一份**：缺席的实参会补成 undefined，而
+       * `concat(undefined)` 在 JS 里是"末尾多一格 undefined" —— 两者必须分开
+       * （量出来的 silent 分叉：`a.concat().length` 多了 1）。 */
+      if (name === 'concat' && e.args.length === 0) {
+        return op('js_m_concat', [recv, arrLit([])]);
+      }
       if (name === 'concat' && (e.args.length > 1 || e.args.some((a) => a.type === 'Spread'))) {
         if (!e.args.some((a) => a.type === 'Spread')) {
           let out = recv;

@@ -206,3 +206,21 @@ console.log(`sp ${JSON.stringify({ ...[1, 2] })} ${JSON.stringify({ ..."ab" })} 
 console.log(`fi ${[1, 2, 3, 2].indexOf(2, 2)} ${[1, 2, 3, 2].indexOf(2, -2)} ${[1, 2, 3, 2].indexOf(2, 4)}`);
 console.log(`fi ${[1, 2, 3, 2].lastIndexOf(2, 2)} ${[1, 2, 3, 2].lastIndexOf(2, 0)} ${[1, 2, 3, 2].lastIndexOf(2, -3)}`);
 console.log(`fi ${[1, 2, 3].includes(2, 2)} ${[1, 2, 3].includes(2, -2)} ${[1, 2, 3].includes(3, 99)}`);
+/* `[...a]` 必须是**一份新的**数组，`a.concat()` 也是。前者从前一段就交回去（js_iter 在 list
+   上是恒等）—— `const b = [...a]` 拿到的就是 a 自己，`b.sort()` 把原数组也排了；后者缺席的
+   实参补成 undefined，于是末尾多一格。两处都是 silent 的错答案。 */
+const ali = [3, 1, 2];
+const cp1 = [...ali];
+cp1.push(9);
+cp1.sort((x, y) => x - y);
+console.log(`ali ${ali.join(",")} ${cp1.join(",")} ${ali === cp1}`);
+const cp2 = ali.concat();
+cp2.push(8);
+console.log(`ali ${ali.length} ${cp2.join(",")} ${ali.concat(undefined).length}`);
+const cp3 = [0, ...ali];
+cp3[0] = 7;
+console.log(`ali ${ali.join(",")} ${cp3.join(",")} ${[...ali, 4].join(",")}`);
+const deep = [[1], [2]];
+const cp4 = [...deep];
+cp4[0].push(9);
+console.log(`ali ${deep[0].join(",")} ${cp4.length} ${deep === cp4}`);
