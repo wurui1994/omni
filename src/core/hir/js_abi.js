@@ -115,6 +115,12 @@ export const JS_ABI = {
   js_arr_last_index_of: { js: '$js_arr_last_index_of', c: 'omni_js_arr_last_index_of', arity: 2 },
   js_arr_includes: { js: '$js_arr_includes', c: 'omni_js_arr_includes', arity: 2, ret: 'bool' },
   js_arr_join: { js: '$js_arr_join', c: 'omni_js_arr_join', arity: 2 },
+  /* Uint8Array 上那几格数组方法：先摊成字节的数组再走 list 那一格。只有**结果是原始值**
+     的四格（map / filter / slice 在 JS 里交出 TypedArray，摊成 list 会撒谎）。 */
+  js_buf_join: { js: '$js_buf_join', c: 'omni_js_buf_join', arity: 2 },
+  js_buf_elem_at: { js: '$js_buf_elem_at', c: 'omni_js_buf_elem_at', arity: 2 },
+  js_buf_index_of: { js: '$js_buf_index_of', c: 'omni_js_buf_index_of', arity: 2 },
+  js_buf_includes: { js: '$js_buf_includes', c: 'omni_js_buf_includes', arity: 2, ret: 'bool' },
   // throws: true —— 回调是用户代码，会往 pending 槽里放东西（见文件末尾 throw/try 那节）
   js_arr_map: { js: '$js_arr_map', c: 'omni_js_arr_map', arity: 2, throws: true },
   js_arr_filter: { js: '$js_arr_filter', c: 'omni_js_arr_filter', arity: 2, throws: true },
@@ -605,7 +611,7 @@ export const JS_PROPS = {
 /** @type {Record<string, {on: Record<string, string>, lit?: Record<string, any>}>} */
 export const JS_METHODS = {
   // String
-  at: { on: { list: 'js_arr_at', string: 'js_str_at' } },
+  at: { on: { list: 'js_arr_at', string: 'js_str_at', bytes: 'js_buf_elem_at' } },
   // charAt 与 at 不是一回事：越界给空串、且不认负下标（规范 22.1.3.1）
   charAt: { on: { string: 'js_str_char_at' } },
   charCodeAt: { on: { string: 'js_str_char_code_at' } },
@@ -630,9 +636,9 @@ export const JS_METHODS = {
   // 两种接收者都有的。形参个数取多的那支（string 的 indexOf 还带 from），
   // list 分支只吃前面几个
   slice: { on: { list: 'js_arr_slice', string: 'js_str_slice' } },
-  indexOf: { on: { list: 'js_arr_index_of', string: 'js_str_index_of' } },
+  indexOf: { on: { list: 'js_arr_index_of', string: 'js_str_index_of', bytes: 'js_buf_index_of' } },
   lastIndexOf: { on: { list: 'js_arr_last_index_of', string: 'js_str_last_index_of' } },
-  includes: { on: { list: 'js_arr_includes', string: 'js_str_includes' } },
+  includes: { on: { list: 'js_arr_includes', string: 'js_str_includes', bytes: 'js_buf_includes' } },
   entries: { on: { list: 'js_arr_entries', Map: 'js_map_entries' } },
 
   // Array
@@ -672,7 +678,7 @@ export const JS_METHODS = {
   getFloat64: { on: { bytes: 'js_buf_get_f64' } },
   setFloat64: { on: { bytes: 'js_buf_set_f64' } },
   encode: { on: { TextEncoder: 'js_text_encode' } },
-  join: { on: { list: 'js_arr_join' } },
+  join: { on: { list: 'js_arr_join', bytes: 'js_buf_join' } },
   map: { on: { list: 'js_arr_map' } },
   filter: { on: { list: 'js_arr_filter' } },
   forEach: { on: { list: 'js_arr_for_each' } },

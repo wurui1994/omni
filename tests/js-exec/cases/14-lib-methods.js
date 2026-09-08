@@ -139,6 +139,12 @@ let usum = 0;
 for (const byte of ub) usum = usum + byte;
 console.log(`iter ${usum} ${[...new Uint8Array(0)].length}`);
 
+// Uint8Array 上结果是原始值的那四格：先摊成字节的数组，再走 list 那一格。
+// map / filter / slice 在 JS 里交出 TypedArray，摊成 list 会撒谎，所以那几个照旧当场报错。
+console.log(`buf ${ub.join(",")} ${ub.join("|")} ${new Uint8Array(0).join(",")}|`);
+console.log(`buf ${ub.at(0)} ${ub.at(-1)} ${ub.at(9)} ${ub.indexOf(2)} ${ub.indexOf(99)}`);
+console.log(`buf ${ub.includes(255)} ${ub.includes(0)}`);
+
 
 
 

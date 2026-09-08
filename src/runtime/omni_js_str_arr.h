@@ -186,6 +186,21 @@ static omni_dyn omni_js_iter(omni_dyn v) { \
       return omni_dyn_undef(); \
   } \
 } \
+/* Uint8Array 上那几格数组方法：先摊成字节的数组（omni_js_iter），再走 list 那一格。
+   只有**结果是原始值**的四格 —— map / filter / slice 在 JS 里交出 TypedArray，
+   摊成 list 会在打印与 JSON 上撒谎，所以那几个照旧当场报错。 */ \
+static omni_dyn omni_js_buf_join(omni_dyn b, omni_dyn sep) { \
+  return omni_js_arr_join(omni_js_iter(b), sep); \
+} \
+static omni_dyn omni_js_buf_elem_at(omni_dyn b, omni_dyn i) { \
+  return omni_js_arr_at(omni_js_iter(b), i); \
+} \
+static omni_dyn omni_js_buf_index_of(omni_dyn b, omni_dyn v) { \
+  return omni_js_arr_index_of(omni_js_iter(b), v); \
+} \
+static bool omni_js_buf_includes(omni_dyn b, omni_dyn v) { \
+  return omni_js_arr_includes(omni_js_iter(b), v); \
+} \
 /* 下标是数就是元素，否则是**挂在数组身上的属性**（JS 里数组也是对象，见 omni_js_obj.h
    的旁表）。`a.foo` 与 `a["foo"]` 于是走到同一个地方 —— 降级器把成员赋值发成 idx_set。 */ \
 static bool omni_js_num_key(omni_dyn k) { \

@@ -4037,6 +4037,13 @@ class $JsBytes {
   }
 }
 class $JsTextEnc {}
+/* Uint8Array 上的几格数组方法：先摊成字节的数组，再走 list 那一格。只收**结果是原始值**
+   的那几个（join / at / indexOf / includes）—— map / filter / slice 在 JS 里交出的是
+   TypedArray，摊成 list 会在打印与 JSON 上撒谎，所以照旧当场报错。 */
+function $js_buf_join(b, sep) { return $js_arr_join($js_iter(b), sep); }
+function $js_buf_elem_at(b, i) { return $js_arr_at($js_iter(b), i); }
+function $js_buf_index_of(b, v) { return $js_arr_index_of($js_iter(b), v); }
+function $js_buf_includes(b, v) { return $js_arr_includes($js_iter(b), v); }
 function $js_bytes(v, who) {
   if ($dynTag(v) !== "bytes") $rt_error(who + " expects a byte buffer, found " + $dynTag(v));
   return v;
