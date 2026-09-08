@@ -158,8 +158,10 @@ export const JS_ABI = {
   // desc 进出都是**一格真对象**（不是 dict）：Object.defineProperty 的实参就是它。
   js_obj_def: { js: '$js_obj_def', c: 'omni_js_obj_def', arity: 3, throws: true },
   js_obj_desc: { js: '$js_obj_desc', c: 'omni_js_obj_desc', arity: 2 },
-  // kind: 's' 字符串键 / 'y' Symbol 键 / 'a' 全部 / 'e' 可枚举的字符串键（Object.keys）
-  js_obj_own_keys: { js: '$js_obj_own_keys', c: 'omni_js_obj_own_keys', arity: 1, lit: ['kind'] },
+  // sel: 's' 字符串键 / 'y' Symbol 键 / 'a' 全部 / 'e' 可枚举的字符串键（Object.keys）
+  // **不能叫 kind**：lit 的字段名会直接落在 Builtin 节点身上，而 `kind` 是 IR 节点自己的
+  // 判别字段 —— 叫 kind 的话发射器把这一格当成"一个 kind 为 'a' 的表达式"，当场 js.expr: a
+  js_obj_own_keys: { js: '$js_obj_own_keys', c: 'omni_js_obj_own_keys', arity: 1, lit: ['sel'] },
   js_obj_freeze: { js: '$js_obj_freeze', c: 'omni_js_obj_freeze', arity: 1 },
   js_obj_seal: { js: '$js_obj_seal', c: 'omni_js_obj_seal', arity: 1 },
   js_obj_prevent_ext: { js: '$js_obj_prevent_ext', c: 'omni_js_obj_prevent_ext', arity: 1 },
