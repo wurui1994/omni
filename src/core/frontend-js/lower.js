@@ -821,7 +821,7 @@ class Lower {
     let cur = node;
     while (cur && cur.type === 'Member' && !cur.computed) {
       const p = this.staticPath(cur);
-      if (p && STATIC_PROPS[p]) return true;
+      if (p && Object.hasOwn(STATIC_PROPS, p)) return true;
       cur = cur.object;
     }
     return false;
@@ -1709,6 +1709,19 @@ class Lower {
         continue;
       }
       const key = p.computed ? this.expr(p.key) : s16(this.keyName(p.key, p.span));
+      /* `{ __proto__: v }` 是**设原型**，不是加一格属性（规范 B.3.1）。只有
+       * "名字 : 值"这一种形状算：`{ __proto__ }` 简写、`{ __proto__() {} }` 方法、
+       * `{ ["__proto__"]: v }` 计算键都是普通属性。
+       * 与规范差一格：给的既不是对象也不是 null 时规范整句忽略，这儿照 js_obj_proto_set
+       * 的口径写进去 —— 那一格与 Object.setPrototypeOf 共用，改要一起改。 */
+      if (!p.computed && !p.method && p.shorthand !== true
+        && this.keyName(p.key, p.span) === '__proto__') {
+        const t = this.temp();
+        this.emitPre(exprStmt(assign(varRef(t), out)), p.span);
+        this.emitPre(exprStmt(op('js_obj_proto_set', [varRef(t), this.expr(p.value)])), p.span);
+        out = varRef(t);
+        continue;
+      }
       /* 方法简写 `{ m() {} }` 就是一格函数值属性（可写、可枚举）——
        * 与 `{ m: function() {} }` 在这个值域里没有区别（差的那一格是 home object，
        * 而它只被 `super` 用到，那在 P1-f）。解析器把方法摊成 params/rest/body
@@ -1828,14 +1841,18 @@ class Lower {
     }
     const path = this.staticPath(e);
     if (path) {
-      const spec = STATIC_PROPS[path];
+      /* 这几张表都拿**用户写的名字**当键，所以一律 Object.hasOwn 再取：
+       * `o.hasOwnProperty("a")` / `valueOf()` 这些名字在 Object.prototype 上，
+       * `表[名字]` 会拿到继承来的函数当成"表里有这一格"，当场崩在下游
+       * （量出来的：`({a:1}).hasOwnProperty("a")` 崩在 methodCall 的 JS_ALL 查表）。 */
+      const spec = Object.hasOwn(STATIC_PROPS, path) ? STATIC_PROPS[path] : undefined;
       // lit 也要带上：well-known Symbol（Symbol.iterator …）就是"名字是编译期常量"的 op
       if (spec) return op(spec.op, [], spec.lit ?? {});
       if (path.startsWith('process.env.')) return op('js_proc_env', [s16(path.slice('process.env.'.length))]);
       /* 常量那一族（ADR-0020 P4）：Number.EPSILON / Math.PI 这些没有运行期成分 ——
        * 直接就是一个 real 字面量，不必为它们各开一个 op。非有限的那几个
        * （Infinity / NaN）不在这儿：字面量要能落到 C 里，那是另一格。 */
-      if (CONST_PROPS[path] !== undefined) return constReal(CONST_PROPS[path]);
+      if (Object.hasOwn(CONST_PROPS, path)) return constReal(CONST_PROPS[path]);
       /* 最长的**已注册前缀**（ADR-0020 P1-f）：`Object.prototype.toString` 就是
        * "取 Object.prototype 这一格，再取它的 toString" —— 内建原型现在是真对象，
        * 所以后半段是普通的属性读。这一条让 `X.prototype.m.call(…)` 那类写法通了。 */
@@ -1874,7 +1891,7 @@ class Lower {
 
   memberOn(obj, e) {
     if (e.computed) return op('js_idx_get', [obj, this.expr(e.prop)]);
-    if (JS_PROPS[e.name]) return op(`js_p_${e.name}`, [obj]);
+    if (Object.hasOwn(JS_PROPS, e.name)) return op(`js_p_${e.name}`, [obj]);
     return op('js_obj_get', [obj, s16(e.name)]);
   }
 
@@ -1953,7 +1970,7 @@ class Lower {
         // 外部 C 符号（ADR-0014 决策 4）：实参个数由 C 的原型定死，不补 undefined
         const cn = this.cnatives.get(c.name);
         if (cn) return this.cCall(cn, e.args, e.span, c.name);
-        const g = GLOBAL_CALLS[c.name];
+        const g = Object.hasOwn(GLOBAL_CALLS, c.name) ? GLOBAL_CALLS[c.name] : undefined;
         if (g) return this.abiCall(g, e.args, e.span, c.name);
         this.err(e.span, `unresolved function '${c.name}'`);
         return undefExpr();
@@ -1975,7 +1992,7 @@ class Lower {
       }
       const path = this.staticPath(c);
       if (path) {
-        const spec = STATIC_CALLS[path];
+        const spec = Object.hasOwn(STATIC_CALLS, path) ? STATIC_CALLS[path] : undefined;
         if (spec) return this.abiCall(spec, e.args, e.span, path);
         /* 已注册前缀那一条（ADR-0020 P1-f）：`Object.prototype.toString.call(x)` ——
          * 前半段求值出内建原型（真对象），后半段就是普通的成员调用，往下落到通用路径。 */
@@ -1986,7 +2003,7 @@ class Lower {
       }
       const re = this.regexCall(c, e);
       if (re) return re;
-      if (!c.computed && JS_METHODS[c.name]) return this.methodCall(c, e);
+      if (!c.computed && Object.hasOwn(JS_METHODS, c.name)) return this.methodCall(c, e);
       /* 兜底：属性里存着的函数值。**接收者要传下去**（ADR-0020 P1）—— `o.m()` 里的
        * this 就是 o，这是原型上的方法、call/apply/bind、方法借用全都依赖的一格。
        * 从前这儿是 dynCall（丢掉接收者），于是 `o.m()` 里的 this 只能靠捕获的 cell。
