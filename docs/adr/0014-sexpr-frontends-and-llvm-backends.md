@@ -12995,3 +12995,65 @@ pseudosphere 一度看着像"整幅右移一像素"（同一行上 `我们(x+1) 
 只有两处线级的：`draw(r,6,backpen=linetype("10 10",10))` 那条**虚线的相位**
 （(932,1667..1688) 参考是白、我们涂黑）与 (1914..1920,631..635) 参考有黑线我们没有 ——
 两处合起来 ink 双向独占只有 1077/1323 个像素。
+
+## 第十七刀：GL 主路落地（libomnigl），以及"线"那一族的账重开
+
+**取向**：三维那一档的主路是**代码层面完整的 OpenGL 实现**，`src/runtime/omni_r3.c` 里那套
+CPU 光栅器降为拿不到 GPU 时的备选。这一刀把主路从"只有上下文与 shader"推到"能出图、
+而且每条探针都比备选更接近参考"。
+
+### 落地的四块
+
+1. **离屏上下文用 CGL，不是 GLFW。** 我们生成的程序把入口跑在一条大栈 pthread 上
+   （`cli.js:1923` 的 `-pthread` + `omni_run_entry`），而 macOS 上 `glfwInit` 要主线程 ——
+   在那条线程上调它当场 `Trace/BPT trap: 5`，宿主一行错都留不下（现象是"没出图、也没报错"）。
+   换成 `CGLChoosePixelFormat` + `kCGLOGLPVersion_3_2_Core`（Apple Silicon 上给到 4.1 core）
+   之后一次就通，链接也从 `-lglfw -framework Cocoa -framework IOKit` 缩到只剩 `-framework OpenGL`。
+2. **八个 program 全部照 `glrender.cc:265-352` 那个只 push 不 pop 的 `#define` 栈编出来**，
+   shader 直接用 asy 装好的 `shaders/GL/`（根 `shaders/` 那份是 Vulkan 的，Apple GL 4.1 编不过）。
+   属性 location **不查、按名字绑死**（`shaders.cc:37-41` 的 `glBindAttribLocation`，
+   position/normal/material/color/width = 0..4），`material` 是 `in int` 必须走
+   `glVertexAttribIPointer`，`MaterialBuffer` 没有 `binding=` 要手绑三步。
+   自检的判据写死成"每个像素必须是 51/102/153"（`fragment.glsl:248` 在 Nlights 0 时
+   直走 `outColor = emissive`，取 (0.2,0.4,0.6) 让通道互不相同）。
+3. **六条 buffer 与一帧的次序照 `drawBuffers()` 的 ssbo==0 那一路**：
+   points → lines → materials → colors → triangles → [透明：CPU 按 `projView` 第 2 列排序 +
+   关深度写 + 一趟]。混合在 `initShaders` 里开一次就不关（`glrender.cc:288-292`），
+   不透明那几趟也是开着混合画的。材质下标的编法照 `bezierpatch.cc:43-49`/`:845`
+   （不透明面片用普通下标，透明与 `tri` 那族用 `±(1+i)`，符号选"顶点色当 diffuse"）。
+4. **材质必须去重**，照 `drawsurface.cc:59-67` 的 `materialMap`。我们的清单一条 drawop 发一条
+   `mat`，box3 有 1076 条 → 1076×64 = 68864 字节 > 本机 `GL_MAX_UNIFORM_BLOCK_SIZE`（65536），
+   整趟失败回落 CPU。去重后 box3 只剩 2 条。这不是优化，是照抄语义。
+
+### 视景体长宽比：两条腿两条规矩
+
+GL 这条腿上 `aspect` 就是**位图的长宽比**；第十六刀那一串 `initDisplay`（工作区夹、1024/768
+分块下限、pt 那一对）是拿 **Vulkan** 参考标定出来的，CPU 备选仍旧走它。
+`vkrender.cc:343` 与 `glrender.cc:1220` 给 `setDimensions` 的 Width/Height 本来就是两个来源，
+所以这不矛盾。量出来的（GL 主路对 `asy -novulkan`，字节不同的比例）：
+lw4 28.09%→20.05%、big_line 73.84%→50.03%、diag2 55.35%→50.03%、box3 0.93%→0.81%，
+boxln/big_sph/box2 不变；**三条线探针的墨迹包围盒逐像素对上**（x[226,2040] / y[377,1889]）。
+
+### "线"那一族：参考画的是管子，而且中轴那条线一个像素都没贡献
+
+`three.asy:2236-2295` 的 `drawthick`：`settings.thick && linewidth > 0` 时 `draw(path3)` 发的是
+**tube 曲面 + 端盖 + 中轴细线**三样。我们这一侧也是这么发的（`draw((-2,-2,-1)--(2,2,1))`
+的清单里 408 个面片顶点 + 2 个线顶点），`settings.thick`/`linewidth` 两边都是 true/0.5，
+`/tmp/ithree` 里插 `write` 量过 `r=0.25`、`min/max(T.s[0])` 到最后一位都一样。
+
+把那句 `_draw(f,c,p,light)` 掐掉再生成参考 —— **与完整参考逐字节相同**。也就是说参考的墨
+全是管子曲面涂的，`lineData` 那条 GL_LINES（macOS core profile 线宽恒 1）什么都没画上。
+
+diag2（2268x4）反解出 dealias 前的横截面：参考 `[255,0,0,255]`（中间两行满覆盖 = 2.0 px、
+边界正好压在像素线上），我们 res×1 是 `[255,128,128,255]`（1.0 px）、res×0.25 是
+`[255,64,64,255]`（1.5 px）且**再细也不动**（`OMNI_R3_DEPTH` 8/14/20 × `OMNI_R3_RES`
+0.25/0.05 六组全是 2269.96）。
+
+从清单的控制点反算：那四片圆柱面片的角点最大只到 |y| = 0.2041，而
+√(0.2041²+0.1443²) = **0.25** 正是真半径 —— 极值落在**角点之间**，我们的平四边形没把它补回来，
+参考补上了（0.5bp 直径在 4 px/bp 下就是 2.0 px）。下一刀查 `r3_add_patch`/`r3_render_patch`
+对这四片的角点与细分判据，判据用 diag2 的墨量 1511 / 2270 → 3030。
+
+顺带记两处已对上源码、还没改的分歧：`res` 公式里的 `size2` asy 用
+`hypot(Width,Height)`（`renderBase.cc:274`，initDisplay 出来的显示尺寸）、我们用
+`hypot(fw,fh)`；`OMNI_GL_ONLY` 位掩码（1/2/4/8/16 对应五条 buffer）是这一刀加的分账口。
