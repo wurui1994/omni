@@ -167,6 +167,8 @@ export const JS_ABI = {
   // 迭代器协议：拿迭代器、走一步（结果是 { value, done } 那一格对象）
   js_iter_proto: { js: '$js_iter_proto', c: 'omni_js_iter_proto', arity: 1 },
   js_iter_next: { js: '$js_iter_next', c: 'omni_js_iter_next', arity: 1 },
+  // for-in 走一遍的那一串键：自有 + 继承来的可枚举字符串键，去重（ADR-0020 P3）
+  js_for_in_keys: { js: '$js_for_in_keys', c: 'omni_js_for_in_keys', arity: 1 },
   js_sym_new: { js: '$js_sym_new', c: 'omni_js_sym_new', arity: 1 },
   js_sym_for: { js: '$js_sym_for', c: 'omni_js_sym_for', arity: 1 },
   js_sym_key_for: { js: '$js_sym_key_for', c: 'omni_js_sym_key_for', arity: 1 },
@@ -526,7 +528,7 @@ const P1_JS_ONLY = [
   'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',
   'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
-  'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next',
+  'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
   'js_sym_wk', 'js_realm_proto',
 ];

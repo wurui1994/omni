@@ -1287,6 +1287,34 @@ function $js_num_parse_int(s, radix) {
 }
 // for-of 的取值面：数组原样返回（所以下标迭代是活的），字符串按**码点**切，
 // Map 给 [k, v] 对，Set 给元素。普通对象不可迭代 —— JS 也是这样。
+// for-in 的那一串键（ADR-0020 P3）：自有 + 继承来的**可枚举字符串键**，按"先自己、
+// 再原型"的次序去重。数组给下标（字符串形态）加挂在它身上的那些属性；dict 给它的全部键
+// （Omni 的 dict 没有描述符那一层）；原始值与 null/undefined 一个都不给（JS 就是这样）。
+function $js_for_in_keys(o) {
+  const out = [], seen = new Set();
+  const t = $dynTag(o);
+  if (t === "list") {
+    for (let i = 0; i < o.length; i++) out.push($js_str(i));
+    const x = $js_xprops(o, false);
+    if (x !== undefined) for (const k of x.keys()) out.push(k);
+    return out;
+  }
+  if (t === "dict") return [...o.keys()];
+  if (t === "string") {
+    for (let i = 0; i < o.length; i++) out.push($js_str(i));
+    return out;
+  }
+  let cur = o;
+  while ($js_isobj(cur)) {
+    for (const k of $js_own_keys(cur, "e")) {
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(k);
+    }
+    cur = cur.pr;
+  }
+  return out;
+}
 function $js_iter(v) {
   switch ($dynTag(v)) {
     case "list": return v;

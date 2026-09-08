@@ -1012,8 +1012,8 @@ class Lower {
       case 'For': return this.forStmt(s);
       case 'ForOf': return this.forOf(s);
       case 'ForIn':
-        this.err(s.span, "for-in is not supported; iterate Object.keys(o) instead");
-        return [];
+        // for-in（ADR-0020 P3）：与 for-of 同一个形状，只是那一串是"键"
+        return this.forOf(s, () => op('js_for_in_keys', [this.expr(s.right)]));
       case 'Return':
         // 构造器的 return 只能是空的（值就是实例），别的形状拒掉
         if (this.fn.isCtor) {
@@ -1248,7 +1248,15 @@ class Lower {
    * for-of：取一次可迭代对象（js_iter：数组原样返回，所以下标迭代是活的），
    * 然后按下标走。刻意不用 OIR 的 ForIn —— 那个要静态的容器类型，而这里全是 dynamic。
    */
-  forOf(s) {
+  /**
+   * `for-of`，以及 `for-in`（ADR-0020 P3）—— 两者的形状是同一个：先把"要走一遍的那串
+   * 东西"摊成一个数组，再按下标走。差别只在那一步：for-of 是 `js_iter`（协议或内建），
+   * for-in 是 `js_for_in_keys`（自有 + 继承来的可枚举字符串键，去重）。
+   *
+   * 惰性那一格还没有（生成器是 P2）：现在两条都是**先收齐再走**。可观察的差别是
+   * "循环体里改容器"—— 记在 ADR-0020 里，等 P2 的生成器把惰性形态带进来。
+   */
+  forOf(s, seqOf = () => op('js_iter', [this.expr(s.right)])) {
     if (!s.declKind) {
       this.err(s.span, 'for-of over an existing variable is not supported; declare the loop variable');
       return [];
@@ -1256,7 +1264,7 @@ class Lower {
     this.pushScope();
     const it = this.declare('_it').name;
     const i = this.declare('_i').name;
-    const pre = [localStmt(it, op('js_iter', [this.expr(s.right)])), localStmt(i, constReal(0))];
+    const pre = [localStmt(it, seqOf()), localStmt(i, constReal(0))];
     const cond = boolOp('js_cmp', [varRef(i), op('js_p_length', [varRef(it)])], { op: '<' });
     const step = assign(varRef(i), op('js_add', [varRef(i), constReal(1)]));
     this.fn.loops++;
