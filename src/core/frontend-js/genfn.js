@@ -1,9 +1,10 @@
 /**
- * 生成器改写（ADR-0020 P2 的后半）：把 `function*` 的体切成一台状态机。
+ * 生成器与 async 的改写（ADR-0020 P2 的后半）：把 `function*` / `async function` 的体
+ * 切成一台状态机。
  *
- * 这个文件只做 **AST -> AST**：进来是一个 `generator: true` 的函数节点，出去是一个
- * 普通函数节点，体里再没有 `Yield`。降级器（lower.js）因此不用认识生成器 ——
- * 它看到的是"一格状态量 + 一个 while(true) 的派发 + 一堆 goto"。
+ * 这个文件只做 **AST -> AST**：进来是一个 `generator: true` / `async: true` 的函数节点，
+ * 出去是一个普通函数节点，体里再没有 `Yield` / `Await`。降级器（lower.js）因此不用认识
+ * 这两样 —— 它看到的是"一格状态量 + 一个 while(true) 的派发 + 一堆 goto"。
  *
  *   function* g(a) { yield a; yield 2; }
  *
@@ -23,12 +24,18 @@
  *     return js_gen_new(_g_step);
  *   }
  *
+ * 三种尾巴共用这一台机器，差别只在"谁来恢复它"：
+ *   function*        -> js_gen_new     恢复者是 next()
+ *   async function   -> js_async_run   恢复者是微任务（await 那一段发 js_gen_awt）
+ *   async function*  -> js_agen_new    next() 返回 promise，两种收尾都可能出现
+ *
  * 认下来的是一个**子集**（拿不准的一律当场报错，而不是悄悄降错）：
- *   - yield 只能在**语句层**：`yield e;` / `const x = yield e;` / `x = yield e;` /
- *     `yield* e;`。别的位置（实参里、二元运算里、条件里）报一句能照着改的错。
- *   - 切段要穿过的结构：块、if、while、do-while、for、for-of、for-in、
- *     以及 `try { … } finally { … }`（finally 体自己不许再有 yield）。
- *   - `try { … } catch (e) { … }` 里有 yield 还降不了：这个值域里的异常是"挂起槽 +
+ *   - yield / await 只能在**语句层**：`yield e;` / `const x = await e;` / `x = yield e;` /
+ *     `yield* e;` / `return await e;`。别的位置（实参里、二元运算里、条件里）报一句
+ *     能照着改的错。
+ *   - 切段要穿过的结构：块、if、while、do-while、for、for-of、for-in、for await、
+ *     以及 `try { … } finally { … }`（finally 体自己不许再有 yield / await）。
+ *   - `try { … } catch (e) { … }` 里有 yield / await 还降不了：这个值域里的异常是"挂起槽 +
  *     提前 return"（ADR-0007），跨状态机接手要另一套形状。
  *   - **已知的洞**：切开的 try 体里真抛出来的异常不会跑 finally（挂起槽会把 step
  *     直接送出去）。it.return / it.throw 那两条路是跑的。
@@ -55,13 +62,14 @@ function isFnBoundary(n) {
   return Array.isArray(n.params) && n.body != null && n.body.type === 'Block';
 }
 
-/** 子树里有 yield 吗（不进函数边界） */
-function hasYield(node, top = true) {
+/** 子树里有"能挂起"的东西吗 —— yield / await / for-await（不进函数边界） */
+function hasSuspend(node, top = true) {
   if (!node || typeof node !== 'object') return false;
   if (!top && isFnBoundary(node)) return false;
-  if (node.type === 'Yield') return true;
+  if (node.type === 'Yield' || node.type === 'Await') return true;
+  if (node.type === 'ForOf' && node.await === true) return true;
   let hit = false;
-  eachChild(node, (x) => { if (!hit) hit = hasYield(x, false); });
+  eachChild(node, (x) => { if (!hit) hit = hasSuspend(x, false); });
   return hit;
 }
 
@@ -102,6 +110,9 @@ const opCall = (op, args, sp) => ({ type: 'OpCall', op, args, span: sp });
 const exprStmt = (e, sp) => ({ type: 'ExprStmt', expr: e, span: sp });
 const assign = (target, value, sp) => ({ type: 'Assign', op: '=', target, value, span: sp });
 const bin = (op, left, right, sp) => ({ type: 'Binary', op, left, right, span: sp });
+const member = (obj, name, sp) => ({
+  type: 'Member', object: obj, name, computed: false, optional: false, span: sp,
+});
 const block = (body, sp) => ({ type: 'Block', body, span: sp });
 const ret = (arg, sp) => ({ type: 'Return', arg, span: sp });
 const ifSt = (test, cons, alt, sp) => ({ type: 'If', test, cons, alt, span: sp });
@@ -141,8 +152,9 @@ function rewriteReturns(node) {
 /* ---- 切段 ---- */
 
 class Split {
-  constructor(err) {
+  constructor(err, isAsync) {
     this.err = err;
+    this.isAsync = isAsync === true;
     this.blocks = [];   // 每一段的语句表
     this.term = [];     // 这一段已经跳走了吗（跳走之后再 emit 就是死代码）
     this.hoist = [];    // 要提到外层函数体的名字（切段要跨过它们的生存期）
@@ -173,6 +185,14 @@ class Split {
     this.term[b] = true;
   }
 
+  /** `_g_st = k; return js_gen_awt(v);` —— 等一格 promise，恢复者是微任务 */
+  awaitTo(b, v, k, sp) {
+    if (this.term[b]) return;
+    this.blocks[b].push(exprStmt(assign(ident(ST, sp), num(k, sp), sp), sp));
+    this.blocks[b].push(ret(opCall('js_gen_awt', [v], sp), sp));
+    this.term[b] = true;
+  }
+
   temp(tag) {
     const n = `_g_${tag}${this.tmp}`;
     this.tmp += 1;
@@ -198,7 +218,7 @@ class Split {
     if (s.type === 'VarDecl') return this.varDecl(s, cur, ctx);
     /* 原样发进段里的条件：没有 yield、没有会跳出去的 break/continue，而且里面的 return
      * 不必先跑 finally。return 原样发之前要改写成"生成器完成"。 */
-    if (!hasYield(s) && !hasFreeBC(s)) {
+    if (!hasSuspend(s) && !hasFreeBC(s)) {
       const hasRet = hasFreeReturn(s);
       if (!hasRet) { this.emit(cur, s); return cur; }
       if (ctx.fin < 0) { this.emit(cur, rewriteReturns(s)); return cur; }
@@ -240,28 +260,38 @@ class Split {
   exprStmt(s, cur, ctx) {
     const e = s.expr;
     const sp = s.span;
-    if (e.type === 'Yield') return this.yieldExpr(e, null, cur, ctx);
-    if (e.type === 'Assign' && e.value && e.value.type === 'Yield') {
+    if (e.type === 'Yield' || e.type === 'Await') return this.suspend(e, null, cur, ctx);
+    if (e.type === 'Assign' && e.value && (e.value.type === 'Yield' || e.value.type === 'Await')) {
       if (e.op !== '=') {
-        this.err(sp, "a compound assignment from 'yield' is not supported; split it into two statements");
+        this.err(sp, "a compound assignment from 'yield' / 'await' is not supported; split it into two statements");
         return cur;
       }
       if (e.target.type !== 'Ident') {
-        this.err(sp, "'yield' can only be assigned to a plain name; assign it to a local first");
+        this.err(sp, "'yield' / 'await' can only be assigned to a plain name; assign it to a local first");
         return cur;
       }
-      return this.yieldExpr(e.value, e.target, cur, ctx);
+      return this.suspend(e.value, e.target, cur, ctx);
     }
-    this.err(sp, "'yield' in this position is not supported; write it as its own statement ('yield e;' or 'const x = yield e;')");
+    this.err(sp, "'yield' / 'await' in this position is not supported; write it as its own statement ('yield e;' or 'const x = await e;')");
     return cur;
   }
 
-  /** 一次让出：当前段收尾（记下回来的段号），值从 `_g_v` 接回来 */
-  yieldExpr(e, target, cur, ctx) {
+  /** 一次挂起。当前段收尾（记下回来的段号），值从 `_g_v` 接回来 */
+  suspend(e, target, cur, ctx) {
     const sp = e.span;
-    if (e.arg && hasYield(e.arg)) {
-      this.err(sp, "a nested 'yield' is not supported");
+    if (e.arg && hasSuspend(e.arg)) {
+      this.err(sp, "a nested 'yield' / 'await' is not supported");
       return cur;
+    }
+    if (e.type === 'Await') {
+      if (!this.isAsync) {
+        this.err(sp, "'await' is only allowed in an async function");
+        return cur;
+      }
+      const nextA = this.newBlock();
+      this.awaitTo(cur, e.arg ? e.arg : undef(sp), nextA, sp);
+      if (target) this.emit(nextA, exprStmt(assign(target, ident(SENT, sp), sp), sp));
+      return nextA;
     }
     if (e.delegate) return this.delegate(e, target, cur, ctx);
     const next = this.newBlock();
@@ -301,12 +331,12 @@ class Split {
       }
       this.hoist.push(d.id.name);
       if (!d.init) continue;
-      if (d.init.type === 'Yield') {
-        b = this.yieldExpr(d.init, ident(d.id.name, sp), b, ctx);
+      if (d.init.type === 'Yield' || d.init.type === 'Await') {
+        b = this.suspend(d.init, ident(d.id.name, sp), b, ctx);
         continue;
       }
-      if (hasYield(d.init)) {
-        this.err(sp, "'yield' in this position is not supported; write it as its own statement");
+      if (hasSuspend(d.init)) {
+        this.err(sp, "'yield' / 'await' in this position is not supported; write it as its own statement");
         continue;
       }
       this.emit(b, exprStmt(assign(ident(d.id.name, sp), d.init, sp), sp));
@@ -316,20 +346,27 @@ class Split {
 
   retStmt(s, cur, ctx) {
     const sp = s.span;
-    if (s.arg && hasYield(s.arg)) {
-      this.err(sp, "'return' of a 'yield' is not supported; split it into two statements");
+    let b = cur;
+    let arg = s.arg ? s.arg : undef(sp);
+    // `return await e;` 很常见：拆成"等一格 + 返回那一格" —— 用户不必自己动手
+    if (s.arg && s.arg.type === 'Await') {
+      const t = this.temp('rv');
+      b = this.suspend(s.arg, ident(t, sp), b, ctx);
+      if (b < 0) return -1;
+      arg = ident(t, sp);
+    } else if (s.arg && hasSuspend(s.arg)) {
+      this.err(sp, "'return' of a 'yield' / 'await' is not supported; split it into two statements");
       return -1;
     }
-    const arg = s.arg ? s.arg : undef(sp);
     if (ctx.fin >= 0) {
       // 还在 try 里：先把值收好、标上"在为 return 跑 finally"，再跳到 finally 的入口
-      this.emit(cur, exprStmt(assign(ident(UNW, sp), num(1, sp), sp), sp));
-      this.emit(cur, exprStmt(assign(ident(RV, sp), arg, sp), sp));
-      this.goto(cur, ctx.fin, sp);
+      this.emit(b, exprStmt(assign(ident(UNW, sp), num(1, sp), sp), sp));
+      this.emit(b, exprStmt(assign(ident(RV, sp), arg, sp), sp));
+      this.goto(b, ctx.fin, sp);
       return -1;
     }
-    this.emit(cur, ret(genRes(arg, true, sp), sp));
-    this.term[cur] = true;
+    this.emit(b, ret(genRes(arg, true, sp), sp));
+    this.term[b] = true;
     return -1;
   }
 
@@ -343,7 +380,7 @@ class Split {
 
   ifStmt(s, cur, ctx) {
     const sp = s.span;
-    if (hasYield(s.test)) {
+    if (hasSuspend(s.test)) {
       this.err(sp, "'yield' in an if condition is not supported; assign it to a name first");
       return cur;
     }
@@ -364,7 +401,7 @@ class Split {
 
   whileStmt(s, cur, ctx) {
     const sp = s.span;
-    if (hasYield(s.test)) {
+    if (hasSuspend(s.test)) {
       this.err(sp, "'yield' in a loop condition is not supported; assign it to a name first");
       return cur;
     }
@@ -381,7 +418,7 @@ class Split {
 
   doWhile(s, cur, ctx) {
     const sp = s.span;
-    if (hasYield(s.test)) {
+    if (hasSuspend(s.test)) {
       this.err(sp, "'yield' in a loop condition is not supported; assign it to a name first");
       return cur;
     }
@@ -398,7 +435,7 @@ class Split {
 
   forStmt(s, cur, ctx) {
     const sp = s.span;
-    if ((s.test && hasYield(s.test)) || (s.update && hasYield(s.update))) {
+    if ((s.test && hasSuspend(s.test)) || (s.update && hasSuspend(s.update))) {
       this.err(sp, "'yield' in a for header is not supported");
       return cur;
     }
@@ -428,7 +465,7 @@ class Split {
    * 一样是**先收齐再走** —— 无穷的可迭代对象在这儿会挂住，那是同一格已知的账。 */
   forInOf(s, cur, ctx) {
     const sp = s.span;
-    if (hasYield(s.right)) {
+    if (hasSuspend(s.right)) {
       this.err(sp, "'yield' in a for-of header is not supported");
       return cur;
     }
@@ -437,6 +474,7 @@ class Split {
       return cur;
     }
     if (s.declKind) this.hoist.push(s.left.name);
+    if (s.await === true) return this.forAwait(s, cur, ctx);
     const it = this.temp('it');
     const ix = this.temp('ix');
     const items = s.type === 'ForIn'
@@ -455,6 +493,34 @@ class Split {
     this.emit(bodyB, exprStmt(assign(ident(s.left.name, sp),
       opCall('js_idx_get', [ident(it, sp), ident(ix, sp)], sp), sp), sp));
     this.emit(bodyB, exprStmt(assign(ident(ix, sp), bin('+', ident(ix, sp), num(1, sp), sp), sp), sp));
+    const x = this.stmt(s.body, bodyB, { ...ctx, brk: exit, cont: head });
+    if (x >= 0) this.goto(x, head, sp);
+    return exit;
+  }
+
+  /* `for await (const v of xs)`（ADR-0020 P2）：走异步迭代协议 —— 每一圈 await 一格
+   * `it.next()` 的 promise。同步可迭代的兜底在运行期那一侧（`js_aiter` 照规范的
+   * CreateAsyncFromSyncIterator 把元素的值也 await 一遍），所以这儿只有一处 await。 */
+  forAwait(s, cur, ctx) {
+    const sp = s.span;
+    if (!this.isAsync) {
+      this.err(sp, "'for await' is only allowed in an async function");
+      return cur;
+    }
+    const it = this.temp('ai');
+    const r = this.temp('ar');
+    this.emit(cur, exprStmt(assign(ident(it, sp), opCall('js_aiter', [s.right], sp), sp), sp));
+    const head = this.newBlock();
+    const after = this.newBlock();
+    const bodyB = this.newBlock();
+    const exit = this.newBlock();
+    this.goto(cur, head, sp);
+    this.awaitTo(head, opCall('js_aiter_next', [ident(it, sp)], sp), after, sp);
+    this.emit(after, exprStmt(assign(ident(r, sp), ident(SENT, sp), sp), sp));
+    this.emit(after, ifSt(member(ident(r, sp), 'done', sp),
+      this.gotoBlock(exit, sp), this.gotoBlock(bodyB, sp), sp));
+    this.term[after] = true;
+    this.emit(bodyB, exprStmt(assign(ident(s.left.name, sp), member(ident(r, sp), 'value', sp), sp), sp));
     const x = this.stmt(s.body, bodyB, { ...ctx, brk: exit, cont: head });
     if (x >= 0) this.goto(x, head, sp);
     return exit;
@@ -482,7 +548,7 @@ class Split {
       this.err(sp, 'a nested try/finally around a yield is not supported in a generator');
       return cur;
     }
-    if (hasYield(s.finalizer)) {
+    if (hasSuspend(s.finalizer)) {
       this.err(sp, "'yield' inside a finally block is not supported");
       return cur;
     }
@@ -546,13 +612,20 @@ function modePrologue(sp) {
 }
 
 /**
- * 把一个 `generator: true` 的函数节点改写成普通函数节点。降级器在 funcDecl 与
- * closureOf 的入口调它一次（lower.js），所以嵌套的生成器也一样过这条路。
+ * 把一个 `generator: true` / `async: true` 的函数节点改写成普通函数节点。降级器在
+ * funcDecl 与 closureOf 的入口调它一次（lower.js），所以嵌套的那些也一样过这条路。
+ *
+ * 三种尾巴（体切出来的段是同一台机器）：
+ *   function*        -> js_gen_new(step)     同步生成器，恢复者是 next()
+ *   async function   -> js_async_run(step)   返回一格 promise，恢复者是微任务
+ *   async function*  -> js_agen_new(step)    next() 返回 promise；yield 与 await 各一种收尾
  */
 export function genToStateMachine(node, err) {
   const sp = node.span;
+  const isAsync = node.async === true;
+  const isGen = node.generator === true;
   checkNames(node, err);
-  const sx = new Split(err);
+  const sx = new Split(err, isAsync);
   const entry = sx.newBlock();
   /* 体里顶层的函数声明留在外层函数体上：那儿有降级器的提升（hoistFuncDecls），
    * 而状态机的段是 if 块 —— 声明留在段里就只有那一段看得见它。 */
@@ -593,8 +666,9 @@ export function genToStateMachine(node, err) {
     out.push(letDecl(n, null, sp));
   }
   out.push({ type: 'VarDecl', kind: 'const', decls: [{ id: ident(STEP, sp), init: step }], span: sp });
-  out.push(ret(opCall('js_gen_new', [ident(STEP, sp)], sp), sp));
-  return { ...node, generator: false, body: block(out, sp) };
+  const tail = isGen && isAsync ? 'js_agen_new' : (isAsync ? 'js_async_run' : 'js_gen_new');
+  out.push(ret(opCall(tail, [ident(STEP, sp)], sp), sp));
+  return { ...node, generator: false, async: false, body: block(out, sp) };
 }
 
 

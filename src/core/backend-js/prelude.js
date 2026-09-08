@@ -1856,6 +1856,7 @@ function $mkRealm() {
     dateP: new $JSObj(objP, "Date"),
     promP: new $JSObj(objP, "Promise"),
     genP: new $JSObj(objP, "Generator"),
+    agenP: new $JSObj(objP, "AsyncGenerator"),
     // globalThis（ADR-0020 P4）：这个值域里没有全局环境记录（模块的顶层名字是模块局部的），
     // 所以它就是**一格普通的真对象**，每个 realm 一份。挂上去的东西读得回来，
     // 内建（Math / JSON …）不在它身上 —— 那是画出来的边界。
@@ -1941,6 +1942,11 @@ function $mkRealm() {
   $natm(r.genP, "return", 1, (t, a) => $js_gen_step(t, a[0], 1));
   $natm(r.genP, "throw", 1, (t, a) => $js_gen_step(t, a[0], 2));
   $js_def_data(r.genP, $js_sym_wk("iterator"), $nat("[Symbol.iterator]", 0, (t) => t), true, false, true);
+  // async 生成器：next/return/throw 都返回 promise，Symbol.asyncIterator 返回自己
+  $natm(r.agenP, "next", 1, (t, a) => $js_agen_step(t, a[0], 0));
+  $natm(r.agenP, "return", 1, (t, a) => $js_agen_step(t, a[0], 1));
+  $natm(r.agenP, "throw", 1, (t, a) => $js_agen_step(t, a[0], 2));
+  $js_def_data(r.agenP, $js_sym_wk("asyncIterator"), $nat("[Symbol.asyncIterator]", 0, (t) => t), true, false, true);
   return r;
 }
 /* ---------------------------------------- 作业队列（微任务）与 Promise
@@ -2089,6 +2095,110 @@ function $js_gen_step(g, v, mode) {
   if ($js_pending()) { g.ps.get("$gst").v = 2; return undefined; }
   if ($js_truthy($js_getp(r, "done", undefined))) g.ps.get("$gst").v = 2;
   return r;
+}
+/* async 那一半（ADR-0020 P2）：状态机是同一台，换的只是"谁来恢复它"。
+   await 那一步收尾时发的是 $js_gen_awt 造的结果（多一格 $aw 标记），驱动看见它就把
+   resumption 挂到 promise 的 then 上 —— 于是恢复者是**微任务**。规范里 await 花一拍
+   （PromiseResolve + PerformPromiseThen），这儿正好也是一拍。 */
+function $js_gen_awt(v) {
+  const o = $js_gen_res(v, false);
+  $js_def_data(o, "$aw", true, true, false, true);
+  return o;
+}
+function $js_gen_is_awt(r) { return $js_isobj(r) && r.ps.has("$aw"); }
+// 把一格 await 的结果接回状态机：兑现走 mode 0，拒绝走 mode 2（在体里就是抛出来）
+function $js_await_then(v, resume) {
+  $js_prom_react($js_promise_resolved(v),
+    $nat("", 1, (t, a) => { resume(a[0], 0); return undefined; }),
+    $nat("", 1, (t, a) => { resume(a[0], 2); return undefined; }));
+  return undefined;
+}
+function $js_async_run(step) {
+  const p = $js_prom_new();
+  const tick = (v, mode) => {
+    const r = $callThis(step, undefined, [v, mode]);
+    // 体里抛出来的（挂起槽，ADR-0007）就是这一格 promise 的 reject
+    if ($js_pending()) { $js_prom_settle(p, 2, $js_take_pending()); return undefined; }
+    if ($js_truthy($js_getp(r, "done", undefined))) {
+      $js_prom_settle(p, 1, $js_getp(r, "value", undefined));
+      return undefined;
+    }
+    return $js_await_then($js_getp(r, "value", undefined), tick);
+  };
+  // 第一段是**同步**跑的（规范如此：async 函数体一直跑到第一个 await）
+  tick(undefined, 0);
+  return p;
+}
+/* async 生成器：next() 返回一格 promise。段里两种收尾都可能出现 ——
+   await 就继续驱动（不结算），yield / return 才结算这一次 next 的 promise。 */
+function $js_agen_new(step) {
+  const g = $js_obj_new_p($realm().agenP);
+  $js_def_data(g, "$stp", step, true, false, true);
+  $js_def_data(g, "$gst", 0, true, false, true);
+  return g;
+}
+function $js_agen_step(g, v, mode) {
+  if (!$js_isobj(g) || !g.ps.has("$stp")) $rt_error("this is not an async generator");
+  const p = $js_prom_new();
+  const st = g.ps.get("$gst").v;
+  if (st === 2 || (st === 0 && mode !== 0)) {
+    g.ps.get("$gst").v = 2;
+    if (mode === 2) $js_prom_settle(p, 2, v);
+    else $js_prom_settle(p, 1, $js_gen_res(mode === 1 ? v : undefined, true));
+    return p;
+  }
+  g.ps.get("$gst").v = 1;
+  const tick = (sv, sm) => {
+    const r = $callThis(g.ps.get("$stp").v, undefined, [sv, sm]);
+    if ($js_pending()) {
+      g.ps.get("$gst").v = 2;
+      $js_prom_settle(p, 2, $js_take_pending());
+      return undefined;
+    }
+    if ($js_gen_is_awt(r)) return $js_await_then($js_getp(r, "value", undefined), tick);
+    const done = $js_truthy($js_getp(r, "done", undefined));
+    const val = $js_getp(r, "value", undefined);
+    if (done) {
+      g.ps.get("$gst").v = 2;
+      $js_prom_settle(p, 1, $js_gen_res(val, true));
+      return undefined;
+    }
+    /* 规范的 AsyncGeneratorYield 先 Await 一遍让出去的值，才结算这一次 next 的 promise
+       （27.6.3.8）—— 于是 async 生成器的每一圈比同步生成器**多一拍**。量出来的：
+       少了这一拍，for await 的循环体会比 qjs 早两拍跑。 */
+    $js_prom_react($js_promise_resolved(val),
+      $nat("", 1, (t, a) => { $js_prom_settle(p, 1, $js_gen_res(a[0], false)); return undefined; }),
+      $nat("", 1, (t, a) => {
+        g.ps.get("$gst").v = 2;
+        $js_prom_settle(p, 2, a[0]);
+        return undefined;
+      }));
+    return undefined;
+  };
+  tick(v, mode);
+  return p;
+}
+/* for await 的异步迭代协议。Symbol.asyncIterator 有就用它；没有就把同步迭代包一层
+   （规范的 CreateAsyncFromSyncIterator）—— 那一层里**元素的值也要 await 一遍**，
+   所以 for await (const v of [Promise.resolve(1)]) 拿到的是 1 而不是那格 promise。 */
+function $js_aiter(v) {
+  const f = $js_isobj(v) ? $js_getp(v, $js_sym_wk("asyncIterator"), undefined) : undefined;
+  if (f !== undefined && f !== null) return $callThis(f, v, []);
+  const xs = $js_iter(v);
+  let i = 0;
+  const o = $js_obj_new();
+  $natm(o, "next", 0, () => {
+    if (i >= xs.length) return $js_promise_resolved($js_gen_res(undefined, true));
+    const x = xs[i];
+    i += 1;
+    return $js_prom_react($js_promise_resolved(x),
+      $nat("", 1, (t, a) => $js_gen_res(a[0], false)), undefined);
+  });
+  return o;
+}
+function $js_aiter_next(it) {
+  const f = $js_getp(it, "next", undefined);
+  return $js_promise_resolved($callThis(f, it, []));
 }
 // Date 的隐藏槽。取到的不是数就说明接收者不是这一族的对象 —— 报一句，别悄悄算出 NaN。
 function $js_date_ms(t) {

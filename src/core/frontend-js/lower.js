@@ -163,6 +163,7 @@ function fnNodeOfProp(p) {
     type: 'FuncExpr', id: null, params: p.params, rest: p.rest, body: p.body, span: p.span,
     // 生成器方法（ADR-0020 P2）：`*m() {}` 的那一格标记要跟着传下去，closureOf 靠它改写
     generator: p.generator === true,
+    async: p.async === true,
   };
 }
 
@@ -508,10 +509,10 @@ class Lower {
     this.funcs.push(this.funcOf(s.id, this.topFns.get(s.id), f.params, f.rest, f.body.body, f.span));
   }
 
-  /** 生成器（ADR-0020 P2）：`function*` 在这儿先被改写成一台状态机（genfn.js），
-   * 降级器自己因此不用认识 Yield —— 它看到的是普通函数体。 */
+  /** 生成器与 async（ADR-0020 P2）：`function*` / `async function` 在这儿先被改写成
+   * 一台状态机（genfn.js），降级器自己因此不用认识 Yield / Await —— 它看到的是普通函数体。 */
   genFix(node) {
-    if (node.generator !== true) return node;
+    if (node.generator !== true && node.async !== true) return node;
     return genToStateMachine(node, (sp, msg) => this.err(sp, msg));
   }
 
@@ -1060,7 +1061,14 @@ class Lower {
       }
       case 'DoWhile': return this.doWhile(s);
       case 'For': return this.forStmt(s);
-      case 'ForOf': return this.forOf(s);
+      case 'ForOf':
+        /* `for await` 只在 async 函数体里成立（genfn.js 那条路会把它摊成异步迭代协议）。
+         * 走到这儿说明它在**非 async 的**位置上 —— 顶层 await 这个值域里没有（ADR-0020）。 */
+        if (s.await === true) {
+          this.err(s.span, "'for await' is only allowed in an async function");
+          return [];
+        }
+        return this.forOf(s);
       case 'ForIn':
         // for-in（ADR-0020 P3）：与 for-of 同一个形状，只是那一串是"键"
         return this.forOf(s, () => op('js_for_in_keys', [this.expr(s.right)]));
@@ -1613,8 +1621,14 @@ class Lower {
       }
       case 'Str': return s16(e.value);
       /* 合成节点（genfn.js 造的）：直接发一个 ABI 里的 op。解析器不会产出它 ——
-       * 它是"改写器写给降级器"的那一格，省得把状态机的每一步都翻译成用户级 JS。 */
-      case 'OpCall': return op(e.op, e.args.map((a) => this.expr(a)));
+       * 它是"改写器写给降级器"的那一格，省得把状态机的每一步都翻译成用户级 JS。
+       * async 那三格要作业队列：main 末尾得补一句 js_jobs_run（见 jobsTail）。 */
+      case 'OpCall': {
+        if (e.op === 'js_async_run' || e.op === 'js_agen_new' || e.op === 'js_aiter_next') {
+          this.usesJobs = true;
+        }
+        return op(e.op, e.args.map((a) => this.expr(a)));
+      }
       case 'Lit': return e.value === null ? nullExpr() : constBool(e.value);
       case 'Ident': return this.ident(e);
       case 'Template': return this.template(e);

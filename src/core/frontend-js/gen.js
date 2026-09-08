@@ -47,6 +47,8 @@ function prec(n) {
     case 'Seq': return PREC.Seq;
     // yield 的优先级比赋值还低（ADR-0020 P2）：`x = yield v` 要能原样打回去
     case 'Yield': return PREC.Seq;
+    // await 与一元运算符同级
+    case 'Await': return PREC.Unary;
     case 'Assign': return PREC.Assign;
     case 'Arrow': return PREC.Arrow;
     case 'Cond': return PREC.Cond;
@@ -173,6 +175,7 @@ class Gen {
       }
 
       case 'Arrow': {
+        if (n.async === true) this.emit('async ');
         this.params(n.params, n.rest, n.params.length === 1 && !n.rest && n.params[0].type === 'Ident');
         this.emit(' => ');
         if (n.expression) {
@@ -184,10 +187,17 @@ class Gen {
       }
 
       case 'FuncExpr': {
+        if (n.async === true) this.emit('async ');
         this.emit(`function${n.generator === true ? '*' : ''}${n.id ? ` ${n.id}` : ''}`);
         this.params(n.params, n.rest, false);
         this.emit(' ');
         this.block(n.body);
+        return;
+      }
+
+      case 'Await': {
+        this.emit('await ');
+        this.expr(n.arg, PREC.Unary);
         return;
       }
 
@@ -322,6 +332,7 @@ class Gen {
       return;
     }
     if (p.method) {
+      if (p.async === true) this.emit('async ');
       if (p.generator === true) this.emit('*');
       this.key(p.key, p.computed);
       this.params(p.params, p.rest, false);
@@ -465,6 +476,7 @@ class Gen {
         continue;
       }
       if (m.kind === 'get' || m.kind === 'set') this.emit(`${m.kind} `);
+      if (m.async === true) this.emit('async ');
       if (m.generator === true) this.emit('*');
       this.key(m.key, m.computed);
       this.params(m.params, m.rest, false);
@@ -500,6 +512,7 @@ class Gen {
       }
 
       case 'FuncDecl': {
+        if (s.async === true) this.emit('async ');
         this.emit(`function${s.generator === true ? '*' : ''} ${s.id}`);
         this.params(s.params, s.rest, false);
         this.emit(' ');
@@ -576,7 +589,7 @@ class Gen {
       }
 
       case 'ForOf': case 'ForIn': {
-        this.emit('for (');
+        this.emit(s.await === true ? 'for await (' : 'for (');
         if (s.declKind) this.emit(`${s.declKind} `);
         this.pattern(s.left);
         this.emit(s.type === 'ForOf' ? ' of ' : ' in ');

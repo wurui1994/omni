@@ -67,6 +67,22 @@ class JsParser {
     return (t.kind === 'punct' || t.kind === 'kw') && t.value === value;
   }
 
+  /* 上下文关键字（`async` / `await`）：它们在 JS 里**词法上是普通标识符** —— `async` 可以
+     当变量名，`await` 在非 async 函数里也是名字。所以不进 KEYWORDS_JS，靠调用点多问一句。 */
+  atWord(w, k = 0) {
+    const t = this.peek(k);
+    return t.kind === 'ident' && t.value === w;
+  }
+
+  /** `await e`（ADR-0020 P2）：后面得真能开始一个表达式，否则 `await` 就是个名字 */
+  awaitAhead() {
+    if (!this.atWord('await')) return false;
+    const t = this.peek(1);
+    if (t.kind === 'eof' || t.nl === true) return false;
+    if (t.kind === 'punct') return ['(', '[', '{', '!', '-', '+', '~', '...'].includes(t.value);
+    return true;
+  }
+
   eat(value) {
     if (!this.at(value)) return null;
     return this.next();
@@ -136,6 +152,8 @@ class JsParser {
         default: break;
       }
     }
+    // `async function f() {}`（ADR-0020 P2）：async 是上下文关键字，只有紧跟 function 才分流
+    if (this.atWord('async') && this.at('function', 1) && this.peek(1).nl !== true) return this.funcDecl();
     // `L: for (…)` —— 带标签的循环。靠下一个 token 是 `:` 分流（`x: 1` 那种对象字面量
     // 的键值对不会走到这里，它在表达式里）
     if (t.kind === 'ident' && this.at(':', 1)) return this.labeled();
@@ -192,13 +210,17 @@ class JsParser {
   }
 
   funcDecl() {
-    const start = this.expect('function');
+    const start = this.cur();
+    // `async function`（ADR-0020 P2）：async 是上下文关键字，同一行紧跟 function 才算
+    const isAsync = this.atWord('async') && this.at('function', 1);
+    if (isAsync) this.next();
+    this.expect('function');
     // `function*`（ADR-0020 P2）：生成器只是函数上的一格标记，体的解析一模一样
     const generator = !!this.eat('*');
     const id = this.identName('function name');
     const { params, rest } = this.paramList();
     const body = this.block();
-    return { type: 'FuncDecl', id, params, rest, body, generator, span: this.spanFrom(start) };
+    return { type: 'FuncDecl', id, params, rest, body, generator, async: isAsync, span: this.spanFrom(start) };
   }
 
   classDecl() {
@@ -226,6 +248,11 @@ class JsParser {
         });
         continue;
       }
+      /* async 方法（ADR-0020 P2）：`async m() {}` / `static async *m() {}`。
+         `async` 自己也可以是方法名（`async() {}`），所以后面紧跟 `(` / `=` 时不算。 */
+      const isAsyncM = this.atWord('async')
+        && !this.at('(', 1) && !this.at('=', 1) && !this.at(';', 1) && !this.at('}', 1)
+        ? !!this.next() : false;
       // getter/setter：`get` / `set` 本身也可以是方法名，所以要看下一个 token
       let kind = 'method';
       if ((this.cur().kind === 'ident') && (this.cur().value === 'get' || this.cur().value === 'set')
@@ -238,7 +265,7 @@ class JsParser {
       if (this.at('(')) {
         const { params, rest } = this.paramList();
         const body = this.block();
-        members.push({ kind, static: isStatic, key, computed, params, rest, body, generator, span: this.spanFrom(mStart) });
+        members.push({ kind, static: isStatic, key, computed, params, rest, body, generator, async: isAsyncM, span: this.spanFrom(mStart) });
       } else {
         // 类字段。`static x = 1` 用得到，实例字段 stage0 里没有，但语法一样，一起收下
         const value = this.eat('=') ? this.assignExpr() : null;
@@ -288,6 +315,8 @@ class JsParser {
    */
   forStmt() {
     const start = this.expect('for');
+    // `for await (const v of xs)`（ADR-0020 P2）：只有 for-of 有这一格
+    const isAwait = this.atWord('await') ? !!this.next() : false;
     this.expect('(');
     let init = null;
     let declKind = null;
@@ -304,7 +333,7 @@ class JsParser {
         const right = this.assignExpr();
         this.expect(')');
         const body = this.statement();
-        return { type: kind === 'of' ? 'ForOf' : 'ForIn', declKind, left, right, body, span: this.spanFrom(start) };
+        return { type: kind === 'of' ? 'ForOf' : 'ForIn', declKind, left, right, body, await: isAwait, span: this.spanFrom(start) };
       }
       // 普通 for：回到 varDecl 的路子，把已经读掉的第一个绑定接上
       const decls = [];
@@ -325,7 +354,7 @@ class JsParser {
         const body = this.statement();
         return {
           type: kind === 'of' ? 'ForOf' : 'ForIn',
-          declKind: null, left: this.toPattern(e), right, body, span: this.spanFrom(start),
+          declKind: null, left: this.toPattern(e), right, body, await: isAwait, span: this.spanFrom(start),
         };
       }
       init = { type: 'ExprStmt', expr: e, span: e.span };
@@ -590,11 +619,11 @@ class JsParser {
    * 还是形参表，只有看到后面有没有 `=>` 才知道。这里不做回溯，直接数括号往前看 ——
    * 回溯要连诊断一起回滚，容易漏，而且 `(` 嵌套很深时是指数级。
    */
-  arrowAhead() {
-    if (this.cur().kind === 'ident' && this.at('=>', 1)) return true;
-    if (!this.at('(')) return false;
+  arrowAhead(base = 0) {
+    if (this.peek(base).kind === 'ident' && this.at('=>', base + 1)) return true;
+    if (!this.at('(', base)) return false;
     let depth = 0;
-    for (let k = 0; ; k++) {
+    for (let k = base; ; k++) {
       const t = this.peek(k);
       if (t.kind === 'eof') return false;
       if (t.kind === 'punct') {
@@ -621,7 +650,11 @@ class JsParser {
       const arg = bare && !delegate ? null : this.assignExpr();
       return { type: 'Yield', arg, delegate, span: this.spanFrom(start) };
     }
-    if (this.arrowAhead()) return this.arrow();
+    if (this.arrowAhead()) return this.arrow(null, false);
+    // `async x => …` / `async (a, b) => …`（ADR-0020 P2）
+    if (this.atWord('async') && this.peek(1).nl !== true && this.arrowAhead(1)) {
+      return this.arrow(this.next(), true);
+    }
     const left = this.conditional();
     const t = this.cur();
     if (t.kind === 'punct' && ASSIGN_OPS_JS.has(t.value)) {
@@ -634,12 +667,13 @@ class JsParser {
     return left;
   }
 
-  arrow() {
-    const start = this.cur();
+  arrow(startTok, isAsync) {
+    const start = startTok === null || startTok === undefined ? this.cur() : startTok;
     let params;
     let rest = null;
     if (this.cur().kind === 'ident') {
-      params = [{ type: 'Ident', name: this.next().value, span: start.span }];
+      const p = this.next();
+      params = [{ type: 'Ident', name: p.value, span: p.span }];
     } else {
       const pl = this.paramList();
       params = pl.params;
@@ -648,10 +682,10 @@ class JsParser {
     this.expect('=>');
     if (this.at('{')) {
       const body = this.block();
-      return { type: 'Arrow', params, rest, body, expression: false, span: this.spanFrom(start) };
+      return { type: 'Arrow', params, rest, body, expression: false, async: isAsync === true, span: this.spanFrom(start) };
     }
     const body = this.assignExpr();
-    return { type: 'Arrow', params, rest, body, expression: true, span: this.spanFrom(start) };
+    return { type: 'Arrow', params, rest, body, expression: true, async: isAsync === true, span: this.spanFrom(start) };
   }
 
   conditional() {
@@ -690,6 +724,13 @@ class JsParser {
 
   unary() {
     const t = this.cur();
+    /* `await e`（ADR-0020 P2）：优先级与一元运算符同级。解析器不跟踪"在不在 async 体里"
+       （与 yield 同一个立场）—— 那一条由降级器查，它知道自己在哪个函数里。 */
+    if (this.awaitAhead()) {
+      this.next();
+      const arg = this.unary();
+      return { type: 'Await', arg, span: this.spanFrom(t) };
+    }
     const op = (t.kind === 'punct' || t.kind === 'kw') ? t.value : null;
     if (op !== null && UNARY.has(op)) {
       this.next();
@@ -839,6 +880,17 @@ class JsParser {
 
   primary() {
     const t = this.cur();
+    /* `async function () {}`（ADR-0020 P2）：async 是普通标识符，所以要在 ident 那一支
+       之前截住 —— 不截的话它就成了名字 `async` 后面跟一个语法错误。 */
+    if (this.atWord('async') && this.at('function', 1) && this.peek(1).nl !== true) {
+      const start = this.next();
+      this.expect('function');
+      const generator = !!this.eat('*');
+      const id = this.cur().kind === 'ident' ? this.next().value : null;
+      const { params, rest } = this.paramList();
+      const body = this.block();
+      return { type: 'FuncExpr', id, params, rest, body, generator, async: true, span: this.spanFrom(start) };
+    }
     switch (t.kind) {
       case 'num': this.next(); return { type: 'Num', value: t.value, raw: t.raw, span: t.span };
       case 'bigint': this.next(); return { type: 'BigIntLit', value: t.value, raw: t.raw, span: t.span };
@@ -858,7 +910,7 @@ class JsParser {
           const id = this.cur().kind === 'ident' ? this.next().value : null;
           const { params, rest } = this.paramList();
           const body = this.block();
-          return { type: 'FuncExpr', id, params, rest, body, generator, span: this.spanFrom(start) };
+          return { type: 'FuncExpr', id, params, rest, body, generator, async: false, span: this.spanFrom(start) };
         }
         case 'class': {
           const start = this.next();
@@ -922,6 +974,10 @@ class JsParser {
       } else {
         const pStart = this.cur();
         let kind = 'init';
+        // async 方法（ADR-0020 P2）：`{ async m() {} }`；`async` 当键名时不算
+        const isAsyncM = this.atWord('async')
+          && !this.at('(', 1) && !this.at(',', 1) && !this.at(':', 1) && !this.at('}', 1)
+          ? !!this.next() : false;
         if (this.cur().kind === 'ident' && (this.cur().value === 'get' || this.cur().value === 'set')
             && !this.at(',', 1) && !this.at(':', 1) && !this.at('(', 1) && !this.at('}', 1)) {
           kind = this.next().value;
@@ -932,7 +988,7 @@ class JsParser {
         if (this.at('(')) {
           const { params, rest } = this.paramList();
           const body = this.block();
-          props.push({ kind: kind === 'init' ? 'init' : kind, key, computed, method: true, params, rest, body, generator, span: this.spanFrom(pStart) });
+          props.push({ kind: kind === 'init' ? 'init' : kind, key, computed, method: true, params, rest, body, generator, async: isAsyncM, span: this.spanFrom(pStart) });
         } else if (this.eat(':')) {
           props.push({ kind: 'init', key, computed, method: false, value: this.assignExpr(), span: this.spanFrom(pStart) });
         } else {

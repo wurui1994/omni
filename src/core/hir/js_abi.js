@@ -222,6 +222,16 @@ export const JS_ABI = {
      所以生成器不需要新的调用约定。 */
   js_gen_new: { js: '$js_gen_new', c: 'omni_js_gen_new', arity: 1 },
   js_gen_res: { js: '$js_gen_res', c: 'omni_js_gen_res', arity: 2 },
+  /* async 那一半：同一台状态机，只换一个"驱动"。`await` 那一步收尾时发的是 js_gen_awt
+     （与 yield 的收尾分得开 —— async 生成器里两种都有），驱动把 resumption 挂到
+     promise 的 then 上，所以恢复者是微任务而不是 next()。
+     js_aiter / js_aiter_next 是 `for await` 的异步迭代协议那一格（同步可迭代的兜底
+     照规范的 CreateAsyncFromSyncIterator，把元素的值也 await 一遍）。 */
+  js_gen_awt: { js: '$js_gen_awt', c: 'omni_js_gen_awt', arity: 1 },
+  js_async_run: { js: '$js_async_run', c: 'omni_js_async_run', arity: 1, throws: true },
+  js_agen_new: { js: '$js_agen_new', c: 'omni_js_agen_new', arity: 1 },
+  js_aiter: { js: '$js_aiter', c: 'omni_js_aiter', arity: 1, throws: true },
+  js_aiter_next: { js: '$js_aiter_next', c: 'omni_js_aiter_next', arity: 1, throws: true },
 
 
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
@@ -611,7 +621,8 @@ const P1_JS_ONLY = [
   'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new', 'js_proxy_new',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
   'js_jobs_run',
-  'js_gen_new', 'js_gen_res',
+  'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
+  'js_aiter', 'js_aiter_next',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 
