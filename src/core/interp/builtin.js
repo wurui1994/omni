@@ -1275,6 +1275,16 @@ function jsOp(I, e, a) {
   return invoke(e.name, abi, lits.length > 0 ? lits.concat(a) : a);
 }
 
+/**
+ * 边界的另一半（见 invoke 那段注）：解释器造的函数值被**宿主那一份 op** 当回调用时
+ * （`xs.forEach(f)` 的循环住在 prelude 里），回调里的 throw 落在解释器这一份待决槽里，
+ * 而那个循环问的是 prelude 那一份 —— 不搬过去它就接着把剩下的圈跑完。量出来的静默分叉：
+ * `[1,2,3].forEach(x => { seen.push(x); if (x === 2) throw … })` 在 node 上 seen 是 1,2。
+ */
+export function mirrorPendingToHost() {
+  if (pendingSet) callJsOp('js_throw', [pendingVal]);
+}
+
 function takePending() {
   if (!pendingSet) return undefined;
   pendingSet = false;
@@ -1329,6 +1339,16 @@ export function jsCallFn(f, args) {
 function invoke(name, abi, args) {
   flushOut();
   const r = callJsOp(name, args);
+  /* 宿主那一份 op **自己**抛出来的错（prelude 的 $js_throw —— JSON.parse 的语法错、
+     decodeURIComponent 的畸形输入那一族，见 prelude 的 $HostBad）落在 **prelude 的**
+     待决槽里，而 OIR 里那句 js_pending 问的是解释器这一份。两个槽是刻意分开的（理由见
+     上面 pendingVal 那段注），所以边界上要搬一次 —— 不搬就是**静默**吞掉：量出来的是
+     interp 上 JSON.parse("{") 给 undefined，catch 一格都进不去。
+     只问表里标了 throws 的那些，热路径上不多这一次调用。 */
+  if (abi.throws === true && callJsOp('js_pending', [])) {
+    pendingVal = callJsOp('js_take_pending', []);
+    pendingSet = true;
+  }
   return abi.ret === 'void' ? undefined : r;
 }
 

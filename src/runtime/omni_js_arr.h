@@ -328,64 +328,88 @@ static omni_dyn omni_js_arr_join(omni_dyn a, omni_dyn sep) { \
   } \
   return omni_dyn_of_s16(out); \
 } \
+/* 回调里 throw 了要**立刻停**：这个值域里 throw 是"放一格 pending 再跳"（ADR-0007 决定 1），
+   所以每调一次回调之后都要问一句 omni_js_pending()。不问就是静默多跑几圈 —— 量出来的
+   [1,2,3].forEach(x => { seen.push(x); if (x === 2) throw … }) 在 node 上 seen 是 1,2。
+   与 prelude 的 $js_arr_* 逐行对着写；抛了之后返回值没人看，给个形状对的就行。 */ \
 static omni_dyn omni_js_arr_map(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
   LT out = LT##_new(); \
   LT##_reserve(out, l->len); \
-  for (int64_t i = 0; i < l->len; i++) out->items[out->len++] = omni_js_call3(f, l->items[i], i, a); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    out->items[out->len++] = omni_js_call3(f, l->items[i], i, a); \
+    if (omni_js_pending()) break; \
+  } \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_arr_filter(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
   LT out = LT##_new(); \
   for (int64_t i = 0; i < l->len; i++) { \
-    if (omni_js_truthy(omni_js_call3(f, l->items[i], i, a))) LT##_push(out, l->items[i]); \
+    bool keep = omni_js_truthy(omni_js_call3(f, l->items[i], i, a)); \
+    if (omni_js_pending()) break; \
+    if (keep) LT##_push(out, l->items[i]); \
   } \
   return omni_js_arr_wrap(out); \
 } \
 static void omni_js_arr_for_each(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
-  for (int64_t i = 0; i < l->len; i++) omni_js_call3(f, l->items[i], i, a); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    omni_js_call3(f, l->items[i], i, a); \
+    if (omni_js_pending()) return; \
+  } \
 } \
 static bool omni_js_arr_some(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
   for (int64_t i = 0; i < l->len; i++) { \
-    if (omni_js_truthy(omni_js_call3(f, l->items[i], i, a))) return true; \
+    bool hit = omni_js_truthy(omni_js_call3(f, l->items[i], i, a)); \
+    if (omni_js_pending()) return false; \
+    if (hit) return true; \
   } \
   return false; \
 } \
 static bool omni_js_arr_every(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
   for (int64_t i = 0; i < l->len; i++) { \
-    if (!omni_js_truthy(omni_js_call3(f, l->items[i], i, a))) return false; \
+    bool ok = omni_js_truthy(omni_js_call3(f, l->items[i], i, a)); \
+    if (omni_js_pending()) return false; \
+    if (!ok) return false; \
   } \
   return true; \
 } \
 static omni_dyn omni_js_arr_find(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
   for (int64_t i = 0; i < l->len; i++) { \
-    if (omni_js_truthy(omni_js_call3(f, l->items[i], i, a))) return l->items[i]; \
+    bool hit = omni_js_truthy(omni_js_call3(f, l->items[i], i, a)); \
+    if (omni_js_pending()) return omni_dyn_undef(); \
+    if (hit) return l->items[i]; \
   } \
   return omni_dyn_undef(); \
 } \
 static omni_dyn omni_js_arr_find_index(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
   for (int64_t i = 0; i < l->len; i++) { \
-    if (omni_js_truthy(omni_js_call3(f, l->items[i], i, a))) return omni_dyn_of_real((double)i); \
+    bool hit = omni_js_truthy(omni_js_call3(f, l->items[i], i, a)); \
+    if (omni_js_pending()) return omni_dyn_of_real(-1.0); \
+    if (hit) return omni_dyn_of_real((double)i); \
   } \
   return omni_dyn_of_real(-1.0); \
 } \
 static omni_dyn omni_js_arr_find_last(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
   for (int64_t i = l->len - 1; i >= 0; i--) { \
-    if (omni_js_truthy(omni_js_call3(f, l->items[i], i, a))) return l->items[i]; \
+    bool hit = omni_js_truthy(omni_js_call3(f, l->items[i], i, a)); \
+    if (omni_js_pending()) return omni_dyn_undef(); \
+    if (hit) return l->items[i]; \
   } \
   return omni_dyn_undef(); \
 } \
 static omni_dyn omni_js_arr_find_last_index(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
   for (int64_t i = l->len - 1; i >= 0; i--) { \
-    if (omni_js_truthy(omni_js_call3(f, l->items[i], i, a))) return omni_dyn_of_real((double)i); \
+    bool hit = omni_js_truthy(omni_js_call3(f, l->items[i], i, a)); \
+    if (omni_js_pending()) return omni_dyn_of_real(-1.0); \
+    if (hit) return omni_dyn_of_real((double)i); \
   } \
   return omni_dyn_of_real(-1.0); \
 } \
@@ -417,6 +441,7 @@ static omni_dyn omni_js_arr_reduce(omni_dyn a, omni_dyn f, omni_dyn init) { \
     args->items[3] = a; \
     args->len = 4; \
     acc = omni_js_call(f, args); \
+    if (omni_js_pending()) return omni_dyn_undef(); \
   } \
   return acc; \
 } \
@@ -439,6 +464,7 @@ static omni_dyn omni_js_arr_reduce_right(omni_dyn a, omni_dyn f, omni_dyn init) 
     args->items[3] = a; \
     args->len = 4; \
     acc = omni_js_call(f, args); \
+    if (omni_js_pending()) return omni_dyn_undef(); \
   } \
   return acc; \
 } \
@@ -472,6 +498,7 @@ static omni_dyn omni_js_arr_flat_map(omni_dyn a, omni_dyn f) { \
   LT out = LT##_new(); \
   for (int64_t i = 0; i < l->len; i++) { \
     omni_dyn r = omni_js_call3(f, l->items[i], i, a); \
+    if (omni_js_pending()) break; \
     if (r.tag == OMNI_DYN_LIST) { \
       LT s = (LT)r.u.ref; \
       for (int64_t j = 0; j < s->len; j++) LT##_push(out, s->items[j]); \

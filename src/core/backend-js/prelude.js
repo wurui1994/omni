@@ -1565,36 +1565,89 @@ function $js_bind_this(f, t) {
   const call = (args) => $callThis(f, t, args);
   return { fp: (self, args) => call(args), fp2: (ig, args) => call(args), $nm: $js_fn_name(f), $ln: $js_fn_len(f) };
 }
-function $js_arr_map(a, f) { return $js_arr_of(a).map((x, i) => $js_call3(f, x, i, a)); }
-function $js_arr_filter(a, f) {
-  return $js_arr_of(a).filter((x, i) => $js_truthy($js_call3(f, x, i, a)));
+/* 回调里 throw 了要**立刻停**。这个值域里 throw 是"放一格 pending 再跳"（ADR-0007 决定 1），
+   所以每调一次回调之后都得问一句 $js_pending() —— 不问就是**静默**多跑几圈：量出来的
+   [1,2,3].forEach(x => { seen.push(x); if (x === 2) throw … }) 在 node 上 seen 是 1,2，
+   我们从前是 1,2,3。宿主的 .map / .filter / .forEach / .some / .every 因此全换成手写循环 ——
+   它们没有"半路停下来"这一格。抛了之后返回值没人看，随便给个形状对的。
+   C 那份（omni_js_arr.h）是同一套判据，两边逐行对着写。 */
+function $js_arr_map(a, f) {
+  const l = $js_arr_of(a), out = [];
+  for (let i = 0; i < l.length; i++) {
+    out.push($js_call3(f, l[i], i, a));
+    if ($js_pending()) return out;
+  }
+  return out;
 }
-function $js_arr_for_each(a, f) { $js_arr_of(a).forEach((x, i) => { $js_call3(f, x, i, a); }); }
+function $js_arr_filter(a, f) {
+  const l = $js_arr_of(a), out = [];
+  for (let i = 0; i < l.length; i++) {
+    const keep = $js_truthy($js_call3(f, l[i], i, a));
+    if ($js_pending()) return out;
+    if (keep) out.push(l[i]);
+  }
+  return out;
+}
+function $js_arr_for_each(a, f) {
+  const l = $js_arr_of(a);
+  for (let i = 0; i < l.length; i++) {
+    $js_call3(f, l[i], i, a);
+    if ($js_pending()) return;
+  }
+}
 function $js_arr_some(a, f) {
-  return $js_arr_of(a).some((x, i) => $js_truthy($js_call3(f, x, i, a)));
+  const l = $js_arr_of(a);
+  for (let i = 0; i < l.length; i++) {
+    const hit = $js_truthy($js_call3(f, l[i], i, a));
+    if ($js_pending()) return false;
+    if (hit) return true;
+  }
+  return false;
 }
 function $js_arr_every(a, f) {
-  return $js_arr_of(a).every((x, i) => $js_truthy($js_call3(f, x, i, a)));
+  const l = $js_arr_of(a);
+  for (let i = 0; i < l.length; i++) {
+    const ok = $js_truthy($js_call3(f, l[i], i, a));
+    if ($js_pending()) return false;
+    if (!ok) return false;
+  }
+  return true;
 }
 function $js_arr_find(a, f) {
   const l = $js_arr_of(a);
-  for (let i = 0; i < l.length; i++) if ($js_truthy($js_call3(f, l[i], i, a))) return l[i];
+  for (let i = 0; i < l.length; i++) {
+    const hit = $js_truthy($js_call3(f, l[i], i, a));
+    if ($js_pending()) return undefined;
+    if (hit) return l[i];
+  }
   return undefined;
 }
 function $js_arr_find_index(a, f) {
   const l = $js_arr_of(a);
-  for (let i = 0; i < l.length; i++) if ($js_truthy($js_call3(f, l[i], i, a))) return i;
+  for (let i = 0; i < l.length; i++) {
+    const hit = $js_truthy($js_call3(f, l[i], i, a));
+    if ($js_pending()) return -1;
+    if (hit) return i;
+  }
   return -1;
 }
 // 从后往前那两格（ES2023）：谓词照旧收 (v, i, arr)，只是走的方向反过来
 function $js_arr_find_last(a, f) {
   const l = $js_arr_of(a);
-  for (let i = l.length - 1; i >= 0; i--) if ($js_truthy($js_call3(f, l[i], i, a))) return l[i];
+  for (let i = l.length - 1; i >= 0; i--) {
+    const hit = $js_truthy($js_call3(f, l[i], i, a));
+    if ($js_pending()) return undefined;
+    if (hit) return l[i];
+  }
   return undefined;
 }
 function $js_arr_find_last_index(a, f) {
   const l = $js_arr_of(a);
-  for (let i = l.length - 1; i >= 0; i--) if ($js_truthy($js_call3(f, l[i], i, a))) return i;
+  for (let i = l.length - 1; i >= 0; i--) {
+    const hit = $js_truthy($js_call3(f, l[i], i, a));
+    if ($js_pending()) return -1;
+    if (hit) return i;
+  }
   return -1;
 }
 function $js_arr_reduce(a, f, init) {
@@ -1606,7 +1659,10 @@ function $js_arr_reduce(a, f, init) {
   } else {
     acc = init;
   }
-  for (; i < l.length; i++) acc = $callFn(f, [acc, l[i], i, a]);
+  for (; i < l.length; i++) {
+    acc = $callFn(f, [acc, l[i], i, a]);
+    if ($js_pending()) return undefined;
+  }
   return acc;
 }
 function $js_arr_reduce_right(a, f, init) {
@@ -1618,7 +1674,10 @@ function $js_arr_reduce_right(a, f, init) {
   } else {
     acc = init;
   }
-  for (; i >= 0; i--) acc = $callFn(f, [acc, l[i], i, a]);
+  for (; i >= 0; i--) {
+    acc = $callFn(f, [acc, l[i], i, a]);
+    if ($js_pending()) return undefined;
+  }
   return acc;
 }
 // flat：深度是个计数，一层一层摊（不递归 —— 深数组会把 C 侧的栈捅穿）。
@@ -1648,6 +1707,7 @@ function $js_arr_flat_map(a, f) {
   const l = $js_arr_of(a);
   for (let i = 0; i < l.length; i++) {
     const r = $js_call3(f, l[i], i, a);
+    if ($js_pending()) return out;
     if ($dynTag(r) === "list") out.push(...r); else out.push(r);
   }
   return out;

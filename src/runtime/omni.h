@@ -20,6 +20,9 @@
 #include <stdarg.h>
 #include <math.h>
 #include <errno.h>
+/* setjmp：JSON 那两段（parse 的十几处语法错、stringify 的环）要把栈剥回入口那一层。
+   JS 那侧用宿主自己的 throw 做同一件事（见 prelude 的 $HostBad）—— 两条腿同一个形状。 */
+#include <setjmp.h>
 
 #if defined(__GNUC__) || defined(__clang__)
 #define OMNI_NORETURN __attribute__((noreturn))

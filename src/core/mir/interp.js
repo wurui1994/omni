@@ -29,6 +29,7 @@ import {
   arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, listGet, listSet, dictGet, dynTag, W,
   ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub,
   memInit, memData, memSize, memGrow, memLoadFn, memStoreFn, memLoadFnN, memStoreFnN,
+  mirrorPendingToHost,
 } from '../interp/builtin.js';
 import { JS_ALL } from '../hir/js_abi.js';
 import { hasLibc, callLibc, ExitCall, setFnPtrCaller, libcAtExit } from '../interp/libc.js';
@@ -1077,9 +1078,19 @@ class MirInterp {
         // wrapFn：解释器造的函数值必须**就是**这一代的闭包记录，宿主库那些回调 op
         // （xs.map(f)）拿到它才能直接调（ADR-0013 决策 3）。JS 域的函数体只有一个形参，
         // 绑的是整条实参表，所以那一支要再包一层。
+        // mirrorPendingToHost：回调里的 throw 落在解释器那一份待决槽里，而宿主那些 op
+        // （$js_arr_for_each 的循环）问的是 prelude 那一份 —— 见 interp/builtin.js 里那段注。
         F.v[i] = isJs
-          ? wrapFn((self, callArgs) => I.callFunc(bodyNo, caps, [callArgs]))
-          : wrapFn((self, callArgs) => I.callFunc(bodyNo, caps, callArgs));
+          ? wrapFn((self, callArgs) => {
+            const r = I.callFunc(bodyNo, caps, [callArgs]);
+            mirrorPendingToHost();
+            return r;
+          })
+          : wrapFn((self, callArgs) => {
+            const r = I.callFunc(bodyNo, caps, callArgs);
+            mirrorPendingToHost();
+            return r;
+          });
         if (single) def.$one = F.v[i];
         return next;
       };

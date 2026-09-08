@@ -19,7 +19,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { stderr, wrapFn, callFnValue } from '../host/native.js';
-import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub, memInit, memData, memSize, memGrow, memLoad, memStore, InterpFail, InterpUncaught, U, jsPendingText } from './builtin.js';
+import { callBuiltin, zeroOf, newInstance, flushOut, failRt, jsCallFn, vecHsum, bufNew, bufGet, bufSet, arrNew, arrLen, arrGet, arrSet, arrPush, arrPop, ptrNew, ptrChk, ptrTChk, ptrLoad, ptrStore, ptrAdd, ptrSub, memInit, memData, memSize, memGrow, memLoad, memStore, InterpFail, InterpUncaught, U, jsPendingText, mirrorPendingToHost } from './builtin.js';
 
 // 语句的结果：正常走完 / break / continue / return。刻意不用异常做控制流 —— C 侧的
 // throw 是"待决错误标志 + 普通跳转"（ADR-0007），用信号值两个宿主上形状一致。
@@ -454,11 +454,19 @@ class Interp {
     // 单件那一格**两条路都要落**：从前 JS 那条在这儿就 return 了，于是 `f === f` 在这条腿上
     // 是假，而两个后端都是真（量出来的：tests/js-exec 的 21-builtin-fn-value 印 `same false`）。
     if (this.mod.js === true) {
-      const jf = wrapFn((self, args) => this.callFunc(body, caps, [args]));
+      const jf = wrapFn((self, args) => {
+        const r = this.callFunc(body, caps, [args]);
+        mirrorPendingToHost();
+        return r;
+      });
       if (def.single === true && def.captures.length === 0) def.$one = jf;
       return jf;
     }
-    const fv = wrapFn((self, args) => this.callFunc(body, caps, args));
+    const fv = wrapFn((self, args) => {
+      const r = this.callFunc(body, caps, args);
+      mirrorPendingToHost();
+      return r;
+    });
     if (def.single === true && def.captures.length === 0) def.$one = fv;
     return fv;
   }

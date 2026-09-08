@@ -16,6 +16,10 @@
 #ifndef OMNI_JS_JSON_H
 #define OMNI_JS_JSON_H
 
+/* 序列化时的嵌套上限：祖先表借 depth 当下标（见 omni_js_json_val 里那段），所以这一格
+   同时是"环检测能看多深"与"递归有多深"的闸门。超了抛 RangeError，不是把栈撑爆。 */
+#define OMNI_JS_JSON_MAXDEPTH 512
+
 /* 转义规则照 JSON.stringify：只转 " \ 与 U+0000..U+001F，另外把落单的代理项写成
    \uXXXX（ES2019 的 well-formed JSON.stringify）。非 ASCII 不转义 —— 输出是 UTF-16，
    落盘时才转 UTF-8。 */
@@ -63,7 +67,25 @@ OMNI_JS_JSON_2(LT, DT)
    实参是 (key, value) —— key 在数组里是下标的字符串形式。 */
 #define OMNI_JS_JSON_2(LT, DT) \
 static omni_s16 omni_js_json_absent(void) { omni_s16 r; r.p = NULL; r.len = 0; return r; } \
-static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t depth); \
+static jmp_buf omni_js_json_jb; \
+static omni_dyn omni_js_json_err(const char *kind, omni_s16 msg) { \
+  LT cls = LT##_new(); \
+  LT##_push(cls, omni_dyn_of_s16(omni_js_s16_lit(kind))); \
+  LT##_push(cls, omni_dyn_of_s16(omni_js_s16_lit("Error"))); \
+  omni_dyn o = omni_js_obj_new(); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("$cls")), omni_js_arr_wrap(cls)); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("name")), omni_dyn_of_s16(omni_js_s16_lit(kind))); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("message")), omni_dyn_of_s16(msg)); \
+  return o; \
+} \
+static OMNI_NORETURN void omni_js_json_fail(const char *kind, omni_s16 msg) { \
+  omni_js_throw(omni_js_json_err(kind, msg)); \
+  longjmp(omni_js_json_jb, 1); \
+} \
+static OMNI_NORETURN void omni_js_json_failc(const char *kind, const char *msg) { \
+  omni_js_json_fail(kind, omni_js_s16_lit(msg)); \
+} \
+static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t depth, const void **seen); \
 static omni_dyn omni_js_json_apply(omni_dyn rep, omni_s16 key, omni_dyn v) { \
   /* replacer 只有**函数**形态才调（数组形态是白名单，见 omni_js_json_list） */ \
   if (rep.tag != OMNI_DYN_FN) return v; \
@@ -101,13 +123,24 @@ static omni_s16 omni_js_json_nl(int64_t gap, int64_t depth) { \
   for (int64_t i = 0; i < gap * depth; i++) out[n++] = ' '; \
   omni_s16 r; r.p = out; r.len = n; return r; \
 } \
-static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t depth) { \
+static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t depth, const void **seen) { \
   if (v.tag == OMNI_DYN_DICT) { \
     omni_dyn tj = omni_js_obj_get(v, omni_dyn_of_s16(omni_js_s16_lit("toJSON"))); \
     if (tj.tag == OMNI_DYN_FN) { \
       LT noargs = LT##_new(); \
       v = omni_js_call_this(tj, v, omni_js_arr_wrap(noargs)); \
     } \
+  } \
+  /* 环（o.self = o）：规范抛 TypeError。从前这儿一路递归下去，把栈撑爆 —— 那是崩，
+     比错答案还糟。祖先表借 depth 当下标：一格容器在 depth 上，它的祖先正好占
+     seen[0..depth-1]。所以同一格对象出现在兄弟位置上仍然合法（{a:x, b:x}），
+     只有落在自己的祖先里才是环。与 prelude 的 $js_json_val 对着写。 */ \
+  if (v.tag == OMNI_DYN_LIST || v.tag == OMNI_DYN_DICT) { \
+    if (depth >= OMNI_JS_JSON_MAXDEPTH) omni_js_json_failc("RangeError", "JSON nesting too deep"); \
+    for (int64_t k = 0; k < depth; k++) { \
+      if (seen[k] == v.u.ref) omni_js_json_failc("TypeError", "circular structure in JSON"); \
+    } \
+    seen[depth] = v.u.ref; \
   } \
   switch (v.tag) { \
     case OMNI_DYN_UNDEF: case OMNI_DYN_FN: return omni_js_json_absent(); \
@@ -117,7 +150,7 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
       return isfinite(v.u.r) ? omni_js_as_s16(omni_js_str(v)) : omni_js_s16_lit("null"); \
     case OMNI_DYN_STR16: return omni_js_json_quote_s16(v.u.s16); \
     case OMNI_DYN_INT: case OMNI_DYN_UINT: \
-      omni_error("do not know how to serialize a bigint"); \
+      omni_js_json_failc("TypeError", "do not know how to serialize a bigint"); \
       return omni_js_json_absent(); \
     case OMNI_DYN_LIST: { \
       LT l = (LT)v.u.ref; \
@@ -128,7 +161,7 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
         if (i) out = omni_s16_cat(out, omni_js_s16_lit(",")); \
         out = omni_s16_cat(out, sep); \
         omni_dyn x = omni_js_json_apply(rep, omni_js_as_s16(omni_js_str(omni_dyn_of_real((double)i))), l->items[i]); \
-        omni_s16 s = omni_js_json_val(x, rep, gap, depth + 1); \
+        omni_s16 s = omni_js_json_val(x, rep, gap, depth + 1, seen); \
         out = omni_s16_cat(out, s.p ? s : omni_js_s16_lit("null")); \
       } \
       out = omni_s16_cat(out, omni_js_json_nl(gap, depth)); \
@@ -152,7 +185,7 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
         for (int64_t i = 0; i < ks->len; i++) { \
           omni_s16 key = ks->items[i].u.s16; \
           omni_dyn x = omni_js_json_apply(rep, key, omni_js_obj_get(v, ks->items[i])); \
-          omni_s16 s = omni_js_json_val(x, rep, gap, depth + 1); \
+          omni_s16 s = omni_js_json_val(x, rep, gap, depth + 1, seen); \
           if (!s.p) continue; \
           if (!first) out = omni_s16_cat(out, omni_js_s16_lit(",")); \
           first = false; \
@@ -179,7 +212,7 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
               || omni_s16_eq(key, omni_js_s16_lit("message")) \
               || omni_s16_eq(key, omni_js_s16_lit("cause")))) continue; \
         omni_dyn x = omni_js_json_apply(rep, key, d->vals[i]); \
-        omni_s16 s = omni_js_json_val(x, rep, gap, depth + 1); \
+        omni_s16 s = omni_js_json_val(x, rep, gap, depth + 1, seen); \
         if (!s.p) continue; \
         if (!first) out = omni_s16_cat(out, omni_js_s16_lit(",")); \
         first = false; \
@@ -194,18 +227,30 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
     } \
     case OMNI_DYN_MAP: case OMNI_DYN_SET: return omni_js_s16_lit("{}"); \
     default: \
-      omni_errorf("do not know how to serialize a %s", omni_dyn_tag_name(v.tag)); \
-      return omni_js_json_absent(); \
+      omni_js_json_fail("TypeError", omni_s16_cat( \
+        omni_js_s16_lit("do not know how to serialize a "), \
+        omni_js_s16_lit(omni_dyn_tag_name(v.tag)))); \
   } \
 } \
+/* stringify / parse 的入口都要收一次 longjmp（错在十几处，剥栈比逐层检查 pending 省事）。
+   jmp_buf 是一格静态量，所以入口先把它存一份再装自己那一份 —— replacer / toJSON 是用户
+   代码，里面完全可以再调一次 JSON.stringify（嵌套），不存就把外层那个落点冲掉了。 */ \
 static omni_dyn omni_js_json_stringify(omni_dyn v, omni_dyn rep, omni_dyn indent) { \
   int64_t gap = 0; \
   if (indent.tag == OMNI_DYN_REAL && indent.u.r > 0) { \
     gap = (int64_t)indent.u.r; \
     if (gap > 10) gap = 10; \
   } \
+  const void *seen[OMNI_JS_JSON_MAXDEPTH]; \
+  jmp_buf save; \
+  memcpy(save, omni_js_json_jb, sizeof(jmp_buf)); \
+  if (setjmp(omni_js_json_jb)) { \
+    memcpy(omni_js_json_jb, save, sizeof(jmp_buf)); \
+    return omni_dyn_undef(); \
+  } \
   omni_dyn root = omni_js_json_apply(rep, omni_js_s16_lit(""), v); \
-  omni_s16 s = omni_js_json_val(root, rep, gap, 0); \
+  omni_s16 s = omni_js_json_val(root, rep, gap, 0, seen); \
+  memcpy(omni_js_json_jb, save, sizeof(jmp_buf)); \
   return s.p ? omni_dyn_of_s16(s) : omni_dyn_undef(); \
 } \
 OMNI_JS_JSON_3(LT, DT)
@@ -217,19 +262,20 @@ OMNI_JS_JSON_3(LT, DT)
    （宿主 JSON.parse 也没有 BigInt 那一支）。重复的键后来的赢、位置留在第一次出现的
    地方 —— dict_set 与 JS 侧 Map.set 都是这个语义。没有 reviver。
 
-   解析失败是硬错（omni: runtime error），不是能 catch 的 SyntaxError：ADR-0007
-   决定 1 里 throw 是静态降级的，而这个 op 里没有用户回调可以往 pending 槽里放东西。 */
+   解析失败是**能 catch 的 SyntaxError**（ADR-0020）：错误点有十几处、这一族函数互相递归，
+   所以出错点 longjmp 回 omni_js_json_parse 那一层（JS 那侧用宿主自己的 throw 做同一件事，
+   见 prelude 的 $HostBad）。报错文本两侧照旧逐字相同。 */
 #define OMNI_JS_JSON_3(LT, DT) \
 typedef struct { const uint16_t *p; int64_t len; int64_t i; } omni_js_json_cur; \
 static OMNI_NORETURN void omni_js_json_eoi(void) { \
-  omni_error("unexpected end of JSON input"); \
+  omni_js_json_failc("SyntaxError", "unexpected end of JSON input"); \
 } \
 static OMNI_NORETURN void omni_js_json_bad(omni_js_json_cur *z) { \
   uint16_t c = z->p[z->i]; \
-  if (c >= 0x20 && c < 0x7f) { \
-    omni_errorf("unexpected token '%c' in JSON at position %lld", (char)c, (long long)z->i); \
-  } \
-  omni_errorf("unexpected token \\u%04x in JSON at position %lld", (unsigned)c, (long long)z->i); \
+  omni_str t = (c >= 0x20 && c < 0x7f) \
+    ? omni_str_fmt("unexpected token '%c' in JSON at position %lld", (char)c, (long long)z->i) \
+    : omni_str_fmt("unexpected token \\u%04x in JSON at position %lld", (unsigned)c, (long long)z->i); \
+  omni_js_json_fail("SyntaxError", omni_s16_of_utf8(t)); \
 } \
 static uint16_t omni_js_json_at(omni_js_json_cur *z) { \
   if (z->i >= z->len) omni_js_json_eoi(); \
@@ -422,11 +468,21 @@ static omni_dyn omni_js_json_parse(omni_dyn text, omni_dyn rep) { \
   z.p = s.p; \
   z.len = s.len; \
   z.i = 0; \
+  /* longjmp 的落点（理由见第三段开头）。jmp_buf 是静态量，所以先存一份 —— reviver 是
+     用户代码，里面完全可以再调一次 JSON.parse。 */ \
+  jmp_buf save; \
+  memcpy(save, omni_js_json_jb, sizeof(jmp_buf)); \
+  if (setjmp(omni_js_json_jb)) { \
+    memcpy(omni_js_json_jb, save, sizeof(jmp_buf)); \
+    return omni_dyn_undef(); \
+  } \
   v = omni_js_json_read(&z); \
   omni_js_json_ws(&z); \
   if (z.i != z.len) { \
-    omni_errorf("unexpected non-whitespace character after JSON at position %lld", (long long)z.i); \
+    omni_js_json_fail("SyntaxError", omni_s16_of_utf8(omni_str_fmt( \
+      "unexpected non-whitespace character after JSON at position %lld", (long long)z.i))); \
   } \
+  memcpy(omni_js_json_jb, save, sizeof(jmp_buf)); \
   if (rep.tag == OMNI_DYN_FN) { \
     omni_dyn root = omni_js_obj_new(); \
     omni_js_obj_setk(root, omni_str_new("", 0), v); \
