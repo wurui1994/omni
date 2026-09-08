@@ -2616,9 +2616,14 @@ function $js_num_to_precision(v, digits) {
   return $js_real(v, "toPrecision").toPrecision(p);
 }
 function $js_num_to_string(v, radix) {
-  const x = $js_real(v, "toString");
   const r = radix === undefined ? 10 : $js_real(radix, "toString");
   if (r < 2 || r > 36) $rt_error("toString() radix must be between 2 and 36, got " + r);
+  /* 接收者也可能是 int（这个值域里的 bigint）或 bool。int 不先转 double：2^53 之上的
+     int64 转过去要掉精度，而 bigint 自己就会按位印。 */
+  const t = $dynTag(v);
+  if (t === "bool") return $js_str(v);
+  if (t === "int") return r === 10 ? $js_str(v) : v.toString(r);
+  const x = $js_real(v, "toString");
   if (r === 10) return $js_str(x);
   if (!Number.isFinite(x) || !Number.isInteger(x)) {
     $rt_error("toString(radix) with a non-integer value is not supported");

@@ -514,6 +514,12 @@ export const JS_TAG_C = {
   regexp: 'OMNI_DYN_RE',
   bytes: 'OMNI_DYN_BYTES',
   TextEncoder: 'OMNI_DYN_TEXTENC',
+  int: 'OMNI_DYN_INT',
+  bool: 'OMNI_DYN_BOOL',
+  /* uint 只有 C 那一侧有（决策 19 的 OMNI_DYN_UINT：asUintN 的结果可能落在 [2^63, 2^64)）。
+     JS 那侧的 $dynTag 认不出它 —— bigint 一律是 "int" —— 所以 JS 的派发器上会多出一个
+     永不命中的 case。留着它是为了别在这个角上留下"C 报错、JS 能跑"的静默不齐。 */
+  uint: 'OMNI_DYN_UINT',
 };
 
 /** @type {Record<string, Record<string, string>>} */
@@ -607,8 +613,14 @@ export const JS_METHODS = {
   keys: { on: { Map: 'js_map_keys' } },
   values: { on: { Map: 'js_map_values' } },
 
-  // Number
-  toString: { on: { real: 'js_num_to_string' } },
+  // Number。toString 的接收者还有 int（这个值域里的 bigint）与 bool ——
+  // 它们本来落到"取属性再当函数调"的兜底上，于是 (5n).toString() 给出 [object Number]。
+  toString: {
+    on: {
+      real: 'js_num_to_string', int: 'js_num_to_string',
+      uint: 'js_num_to_string', bool: 'js_num_to_string',
+    },
+  },
   toPrecision: { on: { real: 'js_num_to_precision' } },
 };
 /* ADR-0020 P1 那一族（真对象 / Symbol / 迭代器协议）**现在只有 JS 侧的实现**。

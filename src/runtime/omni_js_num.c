@@ -349,9 +349,33 @@ omni_dyn omni_js_num_to_precision(omni_dyn v, omni_dyn digits) {
    非十进制只支持整数值：源码里只拿它印码点和字节（toString(16) / toString(8)），
    小数的非十进制表示 JS 自己都是"实现定义"的，两边模仿不到一起，所以直接报错。 */
 omni_dyn omni_js_num_to_string(omni_dyn v, omni_dyn radix) {
-  double x = want_real(v, "toString");
   int r = radix.tag == OMNI_DYN_UNDEF ? 10 : (int)want_real(radix, "toString");
   if (r < 2 || r > 36) omni_errorf("toString() radix must be between 2 and 36, got %d", r);
+  /* 接收者也可能是 int（这个值域里的 bigint）或 bool。int 不先转 double：2^53 之上的
+     int64 转过去要掉精度，所以按 64 位整数自己走那个取余的循环。 */
+  if (v.tag == OMNI_DYN_BOOL) return omni_js_str(v);
+  if (v.tag == OMNI_DYN_INT || v.tag == OMNI_DYN_UINT) {
+    if (r == 10) return omni_js_str(v);
+    bool ineg = v.tag == OMNI_DYN_INT && v.u.i < 0;
+    /* uint 那一格（决策 19）与 int 共用 u.i，按无符号重新解释就是它的值 */
+    uint64_t un = v.tag == OMNI_DYN_UINT ? (uint64_t)v.u.i
+      : (ineg ? (uint64_t)(-(v.u.i + 1)) + 1u : (uint64_t)v.u.i);
+    char itmp[80];
+    int ik = 0;
+    if (un == 0) itmp[ik++] = '0';
+    while (un) {
+      int d = (int)(un % (uint64_t)r);
+      itmp[ik++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+      un /= (uint64_t)r;
+    }
+    char iout[82];
+    char *io = iout;
+    if (ineg) *io++ = '-';
+    while (ik) *io++ = itmp[--ik];
+    *io = '\0';
+    return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", iout)));
+  }
+  double x = want_real(v, "toString");
   if (r == 10) return omni_js_str(omni_dyn_of_real(x));
   if (!isfinite(x) || x != trunc(x)) {
     omni_error("toString(radix) with a non-integer value is not supported");
