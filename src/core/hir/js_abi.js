@@ -62,6 +62,9 @@ export const JS_ABI = {
   // replaceAll：**只收字符串模式**。正则那一支要 lastIndex 与替换串里的 $1，
   // 那两样在 js_re_* 那一族里（regexp 接收者由 lower.js 静态发过去）。
   js_str_replace_all: { js: '$js_str_replace_all', c: 'omni_js_str_replace_all', arity: 3 },
+  /* replace(串, 替换)：只换第一处；替换可以是函数（收 (match, offset, string)）或带 $ 的串。
+     正则那一支由降级器直接发成 js_re_replace（regexCall），不经过这一格。 */
+  js_str_replace: { js: '$js_str_replace', c: 'omni_js_str_replace', arity: 3, throws: true },
   js_str_trim: { js: '$js_str_trim', c: 'omni_js_str_trim', arity: 1, lit: ['side'] },
   js_str_lower: { js: '$js_str_lower', c: 'omni_js_str_lower', arity: 1 },
   js_str_upper: { js: '$js_str_upper', c: 'omni_js_str_upper', arity: 1 },
@@ -583,6 +586,7 @@ export const JS_METHODS = {
   padStart: { on: { string: 'js_str_pad_start' } },
   padEnd: { on: { string: 'js_str_pad_end' } },
   replaceAll: { on: { string: 'js_str_replace_all' } },
+  replace: { on: { string: 'js_str_replace' } },
   trim: { on: { string: 'js_str_trim' }, lit: { side: 'b' } },
   trimStart: { on: { string: 'js_str_trim' }, lit: { side: 'l' } },
   trimEnd: { on: { string: 'js_str_trim' }, lit: { side: 'r' } },

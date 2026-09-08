@@ -2526,16 +2526,24 @@ class Lower {
       if (!re) return null;
       return op('js_re_test', [s16(re.body), s16(re.flags), arg(0)]);
     }
-    if (!['replace', 'match', 'matchAll', 'split'].includes(c.name)) return null;
+    if (!['replace', 'replaceAll', 'match', 'matchAll', 'split'].includes(c.name)) return null;
     const re = e.args.length ? this.regexOf(e.args[0]) : null;
     if (!re) {
-      if (c.name === 'split') return null;   // 字符串分隔符那一支走 js_m_split
+      // 串模式那几支各有自己的成员 op（js_m_replace / js_m_replaceAll / js_m_split）
+      if (c.name === 'split' || c.name === 'replace' || c.name === 'replaceAll') return null;
       this.err(e.span, `'${c.name}' needs a regex literal as its first argument`);
+      return undefExpr();
+    }
+    /* replaceAll 收正则时规范要求带 g（不带是 TypeError）—— 这儿是编译期报错。
+       带 g 的话它与 replace 完全同义，所以接到同一格 op 上。 */
+    if (c.name === 'replaceAll' && !re.flags.includes('g')) {
+      this.err(e.span, "'replaceAll' with a regex needs the g flag");
       return undefExpr();
     }
     const recv = this.expr(c.object);
     const name = {
-      replace: 'js_re_replace', match: 'js_re_match', matchAll: 'js_re_match_all', split: 'js_re_split',
+      replace: 'js_re_replace', replaceAll: 'js_re_replace',
+      match: 'js_re_match', matchAll: 'js_re_match_all', split: 'js_re_split',
     }[c.name];
     if (c.name === 'match' || c.name === 'matchAll') return op(name, [s16(re.body), s16(re.flags), recv]);
     return op(name, [s16(re.body), s16(re.flags), recv, arg(1)]);

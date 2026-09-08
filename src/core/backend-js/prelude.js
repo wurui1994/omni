@@ -1138,6 +1138,20 @@ function $js_str_replace_all(s, pat, rep) {
   }
   return out + v.slice(i);
 }
+/* replace(串, 替换)：只换**第一处**（规范 22.1.3.19 的非全局那一支）。替换可以是函数
+   （收 (match, offset, string)）或带 $ 的串（$$ / $& / 前后文那两个 —— 串模式没有编号组）。
+   正则那一支不走这儿：降级器把它发成 js_re_replace（regexCall）。 */
+function $js_str_replace(s, pat, rep) {
+  const v = $js_asS16(s), p = $js_asS16(pat);
+  const at = v.indexOf(p);
+  if (at < 0) return v;
+  const m = [p];
+  m.index = at;
+  const r = $dynTag(rep) === "function"
+    ? $js_str($callFn(rep, [p, at, v]))
+    : $js_re_sub($js_asS16(rep), v, m);
+  return v.slice(0, at) + r + v.slice(at + p.length);
+}
 function $js_str_trim(side, s) {
   const v = $js_asS16(s);
   return side === "l" ? v.trimStart() : side === "r" ? v.trimEnd() : v.trim();

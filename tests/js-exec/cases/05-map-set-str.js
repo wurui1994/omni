@@ -149,3 +149,10 @@ console.log(`diff ${[...su.difference(sv)].join(",")}| ${[...sv.difference(su)].
 console.log(`symdiff ${[...su.symmetricDifference(sv)].join(",")} ${[...sv.symmetricDifference(su)].join(",")}`);
 console.log(`pred ${su.isSubsetOf(sv)} ${su.isSupersetOf(new Set([5]))} ${su.isDisjointFrom(new Set([2]))} ${su.isDisjointFrom(sv)}`);
 console.log(`keep ${su.size} ${sv.size} ${[...new Set().union(su)].join(",")}`);
+
+// 串模式的 replace（只换第一处）：替换可以是函数或带 $ 的串。C 那份借的是 re 那两格
+// （omni_js_re_call / omni_js_re_sub），caps 现搭一格，所以这一行在 C 那条腿上也要量。
+console.log(`rep ${"abc".replace("b", "X")} ${"abc".replace("z", "X")} ${"aab".replace("a", "-")}`);
+console.log(`rep ${"abc".replace("b", (m) => m.toUpperCase())} ${"abc".replace("b", (m, i, s) => `${m}${i}${s}`)}`);
+console.log(`rep ${"abc".replace("b", "[$&]")} ${"abc".replace("b", "$$")} ${"abc".replace("", "-")}`);
+console.log(`rep ${"aXbXc".replaceAll(/X/g, "-")} ${"a1b2".replace(/\d/g, (m, i) => `${m}@${i}`)}`);

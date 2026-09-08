@@ -26,6 +26,26 @@
    普通对象按属性名。Map/Set 用 o[k] 在 JS 里是访问属性而不是条目，量过的源码里
    没有这种写法，所以当场报错而不是猜。 */
 #define OMNI_JS_STR_ARR(LT, DT) \
+/* replace(串, 替换)：只换**第一处**（规范 22.1.3.19 的非全局那一支）。替换是函数就调它
+   （收 (match, offset, string)），是串就走 $ 展开 —— 两样都借 omni_js_re_* 那两格
+   （RE 那段比这一段先展开），caps 现搭一格 {at, at+len}、没有编号组。 */ \
+static omni_dyn omni_js_str_replace(omni_dyn sd, omni_dyn patd, omni_dyn repl) { \
+  omni_s16 s = omni_js_as_s16(sd), p = omni_js_as_s16(patd); \
+  int64_t at = omni_s16_index_of(s, p, 0); \
+  omni_s16_buf out = { 0, 0, 0 }; \
+  int64_t caps[2]; \
+  if (at < 0) return omni_dyn_of_s16(s); \
+  caps[0] = at; \
+  caps[1] = at + p.len; \
+  omni_s16_buf_add(&out, omni_s16_slice(s, 0, at)); \
+  if (repl.tag == OMNI_DYN_FN) { \
+    omni_s16_buf_add(&out, omni_js_as_s16(omni_js_str(omni_js_re_call(repl, s, caps, 0)))); \
+  } else { \
+    omni_s16_buf_add(&out, omni_js_re_sub(omni_js_as_s16(repl), s, caps, 0)); \
+  } \
+  omni_s16_buf_add(&out, omni_s16_slice(s, caps[1], s.len)); \
+  return omni_dyn_of_s16(omni_s16_buf_done(&out)); \
+} \
 /* Array.from(v[, f])：mapFn 收 (value, index)（规范 23.1.2.1 —— 只有两格，所以不能用
    固定三格的 omni_js_call3）。**类数组**（dict 上有 length）也认：按 0..length-1 取下标，
    那是 Array.from({length:n}, f) 的用法。它落在这一段是因为要 omni_js_obj_get 与
