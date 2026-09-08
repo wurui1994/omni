@@ -172,7 +172,11 @@ export const JS_ABI = {
      `super.v` 与 `Reflect.get(t, k, recv)` 都靠这一格（少了它，super 上的 getter
      会拿原型当 this，量出来是 undefined）。缺席就是 o 自己。 */
   js_getp: { js: '$js_getp', c: 'omni_js_getp', arity: 3 },
-  js_setp: { js: '$js_setp', c: 'omni_js_setp', arity: 3 },
+  /* 写属性。**第四格是接收者**（OrdinarySet 的 Receiver）：`super.x = v` 与
+     `Reflect.set(t, k, v, recv)` 靠它 —— 访问器的 this 是接收者，数据格也写在接收者身上。 */
+  js_setp: { js: '$js_setp', c: 'omni_js_setp', arity: 4 },
+  // Reflect.set：与赋值的差别只在答案上 —— 它交出一个布尔（写不进去就是 false）
+  js_reflect_set: { js: '$js_reflect_set', c: 'omni_js_reflect_set', arity: 4, ret: 'bool' },
   js_obj_has_p: { js: '$js_obj_has_p', c: 'omni_js_obj_has_p', arity: 2, ret: 'bool' },
   js_obj_del_p: { js: '$js_obj_del_p', c: 'omni_js_obj_del_p', arity: 2, ret: 'bool' },
   js_obj_has_own: { js: '$js_obj_has_own', c: 'omni_js_obj_has_own', arity: 2, ret: 'bool' },
@@ -726,6 +730,7 @@ export const JS_METHODS = {
 const P1_JS_ONLY = [
   'js_obj_new_p', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
   'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
+  'js_reflect_set',
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',
   'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
   'js_obj_from_entries',

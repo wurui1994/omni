@@ -1780,12 +1780,36 @@ function $js_getp(o, k, recv) {
   return $callThis(sl.g, self, []);
 }
 // [[Set]]。原型链上的 setter 优先；只有数据属性可写、且接收者可扩展时才落自有槽。
-function $js_setp(o, k, v) {
+/* Reflect.set 与赋值的差别只在**答案**上：赋值的值是 v（JS 的赋值表达式如此），而
+   Reflect.set 交出一个布尔 —— 写不进去（不可写、没有 setter、接收者不可扩展）时是 false。
+   所以它先照 OrdinarySet 的判据看一眼，再把活交给 $js_setp。 */
+function $js_reflect_set(o, k, v, recv) {
   if (!$js_isobj(o)) $rt_error("cannot set a property of " + $dynTag(o));
+  const self = recv === undefined ? o : recv;
+  const hit = o.px !== undefined ? null : $js_find_slot(o, $js_pkey(k));
+  if (hit !== null) {
+    const sl = hit[1];
+    if (sl.a) {
+      if (sl.s === undefined) return false;
+      $js_setp(o, k, v, self);
+      return true;
+    }
+    if (!sl.w) return false;
+  }
+  if (o.px === undefined && (!$js_isobj(self) || (!self.ps.has($js_pkey(k)) && !self.ex))) return false;
+  $js_setp(o, k, v, self);
+  return true;
+}
+/* 写属性。**第四格是接收者**（规范的 OrdinarySet 那个 Receiver）：super.x = v 与
+   Reflect.set(t, k, v, recv) 靠它 —— 访问器的 this 是接收者，而数据格要写在**接收者**
+   身上（不是找到那一格的对象上）。缺席就是 o 自己。 */
+function $js_setp(o, k, v, recv) {
+  if (!$js_isobj(o)) $rt_error("cannot set a property of " + $dynTag(o));
+  const self = recv === undefined ? o : recv;
   if (o.px !== undefined) {
     const f = $js_px_trap(o, "set");
-    if (f === undefined) return $js_setp(o.px.t, k, v);
-    $callThis(f, o.px.h, [o.px.t, $js_pkey(k), v, o]);
+    if (f === undefined) return $js_setp(o.px.t, k, v, self);
+    $callThis(f, o.px.h, [o.px.t, $js_pkey(k), v, self]);
     return v;
   }
   const key = $js_pkey(k);
@@ -1794,18 +1818,32 @@ function $js_setp(o, k, v) {
     const sl = hit[1];
     if (sl.a) {
       if (sl.s === undefined) return v;
-      $callThis(sl.s, o, [v]);
+      $callThis(sl.s, self, [v]);
       return v;
     }
-    if (hit[0] === o) {
+    if (hit[0] === o && self === o) {
       if (!sl.w) return v;
       sl.v = v;
       return v;
     }
     if (!sl.w) return v;
   }
-  if (!o.ex) return v;
-  $js_def_data(o, key, v, true, true, true);
+  if (!$js_isobj(self)) $rt_error("cannot set a property of " + $dynTag(self));
+  /* 接收者是代理就落到它的目标上（没有 defineProperty 陷阱时规范就是这么转的）——
+     不这么做的话 p.w = 8 会把那一格写在代理对象自己身上，读回来又走陷阱到目标，
+     于是变成 undefined（量出来的：proxy-traps 的空处理器那一段）。 */
+  let tgt = self;
+  while ($js_isobj(tgt) && tgt.px !== undefined) tgt = tgt.px.t;
+  if (!$js_isobj(tgt)) $rt_error("cannot set a property of " + $dynTag(tgt));
+  // 接收者身上已经有这一格自有数据属性就原地写，否则新建一格
+  const own = tgt.ps.get(key);
+  if (own !== undefined && !own.a) {
+    if (!own.w) return v;
+    own.v = v;
+    return v;
+  }
+  if (!tgt.ex) return v;
+  $js_def_data(tgt, key, v, true, true, true);
   return v;
 }
 // 原始值上的取属性：查它那一族的原型（内建方法就住在那儿），外加 string 的 length 与下标。

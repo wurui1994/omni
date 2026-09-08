@@ -2887,6 +2887,13 @@ class Lower {
       if (t.type === 'ArrayPattern' || t.type === 'ObjectPattern') return this.destructAssign(t, e);
       // 简单赋值不需要临时量：接收者只算一次
       if (t.type === 'Member') {
+        /* `super.x = v`（ADR-0020 P1-f）：从**父类原型**上找那一格，但访问器的 this 与
+         * 数据格的落点都是**当前的接收者** —— 就是 js_setp 的第四格。 */
+        if (!t.computed && t.object.type === 'Ident' && t.object.name === 'super' && !this.lookup('super')) {
+          const sp = this.superProtoRef(e.span);
+          if (sp === null) return undefExpr();
+          return op('js_setp', [sp, this.propKey(t.name), this.expr(e.value), this.superRecv()]);
+        }
         const path = this.staticPath(t);
         if (path) {
           const spec = STATIC_SETS[path];
@@ -3050,7 +3057,7 @@ const STATIC_CALLS = {
   'Reflect.ownKeys': { op: 'js_obj_own_keys', argc: 1, lit: { sel: 'a' }, len: 1 },
   'Reflect.has': { op: 'js_obj_has_p', argc: 2, len: 2 },
   'Reflect.get': { op: 'js_getp', argc: 3, len: 2 },
-  'Reflect.set': { op: 'js_setp', argc: 3, len: 3 },
+  'Reflect.set': { op: 'js_reflect_set', argc: 4, len: 3 },
   'Reflect.deleteProperty': { op: 'js_obj_del_p', argc: 2 },
   'Reflect.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
   'Reflect.preventExtensions': { op: 'js_obj_prevent_ext', argc: 1 },
