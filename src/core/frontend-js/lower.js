@@ -202,7 +202,8 @@ function mentionsThis(node) {
   if (!node || typeof node !== 'object') return false;
   if (node.type === 'This') return true;
   if (node.type === 'Ident' && node.name === 'super') return true;
-  if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl') return false;
+  if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl'
+    || node.type === 'ClassExpr') return false;
   /* 对象字面量里的方法与访问器（`{ next() { this.i } }`）也是**普通函数** —— 它们身上
    * 没有 type，只有 method: true（见 parser 的 objectLit），所以要单独挡一道。漏了这一道
    * 的后果是：外层函数会以为"我的体里提到了 this"、开一格 this 并装进 cell，方法于是
@@ -219,7 +220,8 @@ function mentionsNewTarget(node) {
   if (!node || typeof node !== 'object') return false;
   if (node.type === 'NewTarget') return true;
   if (node.method === true) return false;
-  if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl') return false;
+  if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl'
+    || node.type === 'ClassExpr') return false;
   let hit = false;
   eachChild(node, (x) => { if (!hit) hit = mentionsNewTarget(x); });
   return hit;
@@ -827,9 +829,14 @@ class Lower {
    * **共享的**（`a.m === b.m` 为真）、在原型上（`hasOwnProperty('m')` 为假）、
    * 而 `this` 是真接收者，所以方法可以借给别人用。
    */
-  classProtoStmts(s) {
-    const rec = this.classes.get(s.id);
-    const sup = rec.superName;
+  classProtoStmts(s, opts = {}) {
+    /* 类**表达式**（`const C = class {}`）走的正是这一段：差别只在"那两格东西住在哪儿"。
+     * 声明那条住模块级全局（方法只能建一次 —— 重建原型的话
+     * `getPrototypeOf(a) === getPrototypeOf(b)` 就假了）；表达式那条住一对**临时量**，
+     * 因为每次求值都得是一格新的类（`mk(1) !== mk(2)`，量过 qjs）。 */
+    const name = opts.name ?? s.id;
+    const classOf = opts.classOf !== undefined ? opts.classOf : s.id;
+    const sup = opts.superName !== undefined ? opts.superName : this.classes.get(s.id).superName;
     if (sup !== null) {
       const srec = this.classes.get(sup);
       if (!srec || srec.isError) {
@@ -837,8 +844,8 @@ class Lower {
         return [];   // 父类的原型槽不存在，往下走就是内部崩（量出来的：class G extends Array {}）
       }
     }
-    const protoG = () => globalRef(this.globals.get(protoGlobalName(s.id)).name);
-    const classG = () => globalRef(this.globals.get(s.id).name);
+    const protoG = opts.protoRef ?? (() => globalRef(this.globals.get(protoGlobalName(s.id)).name));
+    const classG = opts.classRef ?? (() => globalRef(this.globals.get(s.id).name));
     const out = [];
     /* 原型链就是**把父类的原型当自己原型的原型**；静态成员的继承是"类对象的原型是父类对象"
      * （规范如此 —— 所以子类身上能查到父类的 static 方法）。 */
@@ -865,7 +872,7 @@ class Lower {
       }
     }
     out.push(exprStmt(this.defHidden(classG(), s16('length'), constReal(clen))));
-    out.push(exprStmt(this.defHidden(classG(), s16('name'), s16(s.id))));
+    out.push(exprStmt(this.defHidden(classG(), s16('name'), s16(name))));
 
     let ctor = null;
     const fields = [];
@@ -877,7 +884,7 @@ class Lower {
       if (m.kind === 'staticBlock') {
         const fn = this.closureExpr({
           type: 'FuncExpr', id: null, params: [], rest: null, body: m.body, span: m.span,
-        }, `${s.id}_static_block`, { classOf: s.id });
+        }, `${name}_static_block`, { classOf });
         out.push(exprStmt(op('js_call_this', [fn, classG(), box(this.argList([]), listType(D))])));
         continue;
       }
@@ -899,11 +906,11 @@ class Lower {
         continue;
       }
       if (what === 'constructor' && !m.static) { ctor = m; continue; }
-      const label = `${s.id}_${m.static ? 'static_' : ''}${what ?? 'computed'}`;
+      const label = `${name}_${m.static ? 'static_' : ''}${what ?? 'computed'}`;
       /* staticSuper：静态方法里的 `super.m()` 指的是**父类对象**上的 m，不是父类原型上的
        * （规范 里 static 的 [[HomeObject]] 就是类对象本身）。superProtoRef 认这一位。 */
       const fn = this.closureExpr(fnNodeOfProp(m), label, {
-        classOf: s.id, fnName: what ?? '', staticSuper: m.static === true,
+        classOf, fnName: what ?? '', staticSuper: m.static === true,
       });
       if (m.kind === 'get' || m.kind === 'set') {
         let desc = op('js_obj_set', [op('js_obj_new', []), s16(m.kind), fn]);
@@ -913,7 +920,8 @@ class Lower {
         out.push(exprStmt(this.defHidden(target(), key(), fn)));
       }
     }
-    out.push(exprStmt(this.defHidden(classG(), classInitKey(), this.classInitClosure(s, ctor, fields))));
+    out.push(exprStmt(this.defHidden(classG(), classInitKey(),
+      this.classInitClosure(s, ctor, fields, { name, classOf, sup }))));
     return out;
   }
 
@@ -926,8 +934,10 @@ class Lower {
   }
 
   /** `$init`：实例字段 + 构造器体，`this` 是传进来的接收者（不分配实例） */
-  classInitClosure(s, ctor, fields) {
-    const sup = this.classes.get(s.id).superName;
+  classInitClosure(s, ctor, fields, opts = {}) {
+    const name = opts.name ?? s.id;
+    const classOf = opts.classOf !== undefined ? opts.classOf : s.id;
+    const sup = opts.sup !== undefined ? opts.sup : this.classes.get(s.id).superName;
     const node = {
       type: 'FuncExpr',
       id: null,
@@ -936,9 +946,9 @@ class Lower {
       body: ctor ? ctor.body : { type: 'Block', body: [], span: s.span },
       span: s.span,
     };
-    return this.closureExpr(node, `${s.id}_init`, {
+    return this.closureExpr(node, `${name}_init`, {
       wantThis: true,
-      classOf: s.id,
+      classOf,
       pre: () => {
         const pre = [];
         /* 没写构造器的派生类：规范给的隐式构造器是 `constructor(...a){ super(...a) }` ——
@@ -974,6 +984,39 @@ class Lower {
         return pre;
       },
     });
+  }
+
+  /**
+   * 类表达式（`const C = class {}`、`[class{}, class{}]`、`return class {}`）。
+   *
+   * 与类声明**共用** classProtoStmts —— 差别只在那两格东西住哪儿：声明住模块级全局
+   * （方法只能建一次），表达式住一对临时量，于是每次求值都是一格新的类。这一点是可
+   * 观察的：`mk(1) !== mk(2)`、两次求值造出来的实例互不 instanceof（qjs 就是这样）。
+   *
+   * 两处画出来的边界：
+   *   - `class X extends Y {}` 当表达式还不收 —— 原型链要拿父类的原型对象与 `$init`，
+   *     而那两格现在只对"这个文件里声明过的类"存在（见 classProtoStmts 的 sup 那一段）。
+   *   - 有名字的类表达式（`class Named {}`）：名字只落到类对象的 `name` 上，**不**在类体
+   *     内部当一格绑定用（规范里它是的）。要那一格得多开一层作用域。
+   */
+  classExpr(e) {
+    if (e.superClass) {
+      this.err(e.span, "'extends' in a class expression is not supported; declare the class");
+      return undefExpr();
+    }
+    const name = e.id ?? '';
+    const protoT = this.temp();
+    const classT = this.temp();
+    const node = { id: name, superClass: null, members: e.members, span: e.span };
+    const stmts = this.classProtoStmts(node, {
+      name,
+      classOf: null,
+      superName: null,
+      protoRef: () => varRef(protoT),
+      classRef: () => varRef(classT),
+    });
+    for (const st of stmts) this.emitPre(st, e.span);
+    return varRef(classT);
   }
 
   /* 私有名（`#x`）的键：一格**符号**，不是字符串 —— 于是 `o["#x"]` 取不到、
@@ -2138,8 +2181,7 @@ class Lower {
       case 'Arrow': case 'FuncExpr':
         return this.closureExpr(e, e.type === 'FuncExpr' && e.id ? e.id : 'fn');
       case 'ClassExpr':
-        this.err(e.span, 'class expressions are not lowered yet (ADR-0011 landing step 6c)');
-        return undefExpr();
+        return this.classExpr(e);
       case 'Regex':
         // 决策 10 的第二半：不在 .test/.replace/.match/.split 的接收位上，就求值出一格
         // 正则对象。字面量每次求值都造一格新的（ES5 起就是这个语义），所以 `g` 的
