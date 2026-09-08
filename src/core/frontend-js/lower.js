@@ -1146,9 +1146,11 @@ class Lower {
    */
   bindPattern(pat, value) {
     if (pat.type === 'Ident') return this.defineVar(pat.name, () => value);
-    // 右值只算一次，存进一个临时量再按位取
+    // 右值只算一次，存进一个临时量再按位取。
+    // 数组模式先过一遍 js_iter（ADR-0020 P1）：规范里数组解构走的是**迭代器协议**，
+    // 所以 `const [a, b] = 自定义可迭代对象` 也该成立；数组身上它是恒等，字符串按码点切。
     const t = this.declare('_d').name;
-    const out = [localStmt(t, value)];
+    const out = [localStmt(t, pat.type === 'ArrayPattern' ? op('js_iter', [value]) : value)];
     if (pat.type === 'ArrayPattern') {
       pat.elements.forEach((el, i) => {
         if (el === null) return;

@@ -1195,7 +1195,9 @@ function $js_arr_concat(a, b) { return $js_arr_of(a).concat($js_arr_of(b)); }
 function $js_arr_reverse(a) { $js_arr_of(a).reverse(); return a; }
 function $js_arr_fill(a, v) { $js_arr_of(a).fill(v); return a; }
 function $js_arr_is_array(v) { return $dynTag(v) === "list"; }
-function $js_arr_from(v) { return $js_arr_of(v).slice(); }
+// Array.from：走一遍迭代（ADR-0020 P1）——数组是恒等、字符串按码点、Map/Set 给条目，
+// 自定义可迭代对象走 Symbol.iterator 协议。再 slice 一份，免得把原数组交出去。
+function $js_arr_from(v) { return $js_iter(v).slice(); }
 function $js_arr_index_of(a, v) { return $js_arr_of(a).findIndex((x) => $js_eq(true, x, v)); }
 function $js_arr_last_index_of(a, v) {
   const l = $js_arr_of(a);
