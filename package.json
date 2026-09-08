@@ -26,6 +26,7 @@
     "test:sexpr": "node tests/sexpr/run.js",
     "test:asy": "node tests/asy/run.js",
     "test:jnc": "node tests/jnc/run.js",
+    "test:js262": "node tests/js262/run.js",
     "test:jit": "node tests/jit/run.js",
     "test:gpu": "node tests/gpu/run.js",
     "test:bootstrap": "node tests/bootstrap/run.js",

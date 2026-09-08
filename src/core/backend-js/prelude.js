@@ -804,6 +804,10 @@ function $dynTag(v) {
       if (v instanceof $JsRe) return "regexp";
       if (v instanceof $JsBytes) return "bytes";
       if (v instanceof $JsTextEnc) return "TextEncoder";
+      // ADR-0020 P1 的两格新值：真对象与 Symbol。摆在 "function" 兜底**之前** ——
+      // 兜底认的是闭包记录 { fp, … }，而这两格都不是可调用的东西。
+      if (v instanceof $JSObj) return "object";
+      if (v instanceof $JSSym) return "symbol";
       return "function";  // 闭包记录 { fp, c_* }
   }
 }
@@ -878,6 +882,7 @@ function $js_typeof(v) {
   if (t === "real") return "number";
   if (t === "string") return "string";
   if (t === "function") return "function";
+  if (t === "symbol") return "symbol";
   if (t === "undefined") return "undefined";
   return "object";
 }
@@ -892,6 +897,10 @@ function $js_str(v) {
     case "string": return v;
     // String(/x/g) 是 "/x/g"
     case "regexp": return "/" + v.src + "/" + v.flags;
+    // ADR-0020 P1：真对象走 ToPrimitive（hint string），Symbol 只有显式 String() 才给字
+    // —— 这一格与 JS 一致：模板与 "+" 上碰到 Symbol 是 TypeError，那两处不经过这里。
+    case "object": return $js_str($js_to_prim("s", v));
+    case "symbol": return $js_sym_str(v);
     default: $rt_error("cannot convert " + $dynTag(v) + " to string");
   }
 }
@@ -1237,6 +1246,17 @@ function $js_iter(v) {
     case "Map": return $js_map_entries(v);
     case "Set": return $js_set_items(v);
     case "string": return [...v];
+    // ADR-0020 P1：真对象按**协议**迭代（Symbol.iterator + next），不按标签硬派发。
+    // 收成一个数组回去：for-of 的降级现在吃的是数组，把"惰性"这一格留给 P2
+    // （生成器那一刀之后，for-of 才有真正的惰性形态）。
+    case "object": {
+      const it = $js_iter_proto(v), out = [];
+      for (;;) {
+        const r = $js_iter_next(it);
+        if ($js_truthy($js_getp(r, "done", undefined))) return out;
+        out.push($js_getp(r, "value", undefined));
+      }
+    }
     default: $rt_error($dynTag(v) + " is not iterable");
   }
 }
@@ -1351,6 +1371,434 @@ function $js_obj_assign(dst, src) {
   for (const [k, v] of $js_dict_of(src)) d.set(k, v);
   return dst;
 }
+
+// ---------------------------------------------------------------- 真对象（ADR-0020 P1）
+// ADR-0011 那一档的"对象"是 dict<string,dynamic>：没有原型、没有描述符、没有 Symbol 键，
+// 于是 getter/setter、Object.defineProperty、instanceof 的原型链、迭代器协议全都做不出来。
+// 这一节是新的那一格 —— $JSObj。它与 runtime/omni_js_object.c 必须同样地绕圈：
+// 键序、描述符的默认值、访问器的接收者是谁，都是 test262 会逐条盯的地方。
+//
+// 迁移期两格并存：老的 Map 照旧走 $js_obj_*（一个字节都不动，编译器自己的源码跑在那上面），
+// 新的走 $js_getp / $js_setp。lower.js 把对象字面量与类翻到这一格之后，Map 那格就只剩
+// Map/Set 自己用了。
+class $JSSym {
+  constructor(d) { this.d = d; }
+}
+// 属性槽。数据属性用 v/w，访问器用 g/s，a 是"我是访问器"那一位 ——
+// 不靠 "g === undefined" 判断：{ set f(x){} } 是合法的只写访问器，它的 get 就是 undefined。
+class $Slot {
+  constructor(a, v, g, s, w, e, c) {
+    this.a = a; this.v = v; this.g = g; this.s = s;
+    this.w = w; this.e = e; this.c = c;
+  }
+}
+class $JSObj {
+  constructor(proto, cls) {
+    this.pr = proto === undefined ? null : proto;
+    this.ps = new Map();
+    this.ex = true;
+    this.cl = cls === undefined ? "Object" : cls;
+  }
+}
+function $js_isobj(v) { return v instanceof $JSObj; }
+// 属性键规范成两种：字符串（UTF-16 码元）或 $JSSym（按同一性）。数字键走 ToString ——
+// o[1] 与 o["1"] 是同一格属性，这一条不做对齐后面数组索引全错。
+function $js_pkey(k) {
+  if (k instanceof $JSSym) return k;
+  if (typeof k === "string") return k;
+  return $js_asS16($js_str(k));
+}
+// 是不是数组下标形式的键（0 .. 2^32-2 的规范十进制）。own keys 的次序要它。
+function $js_isidx(k) {
+  if (typeof k !== "string" || k === "") return false;
+  if (k === "0") return true;
+  if (k.charCodeAt(0) < 49 || k.charCodeAt(0) > 57) return false;
+  for (let i = 1; i < k.length; i++) {
+    const c = k.charCodeAt(i);
+    if (c < 48 || c > 57) return false;
+  }
+  return k.length < 11 && Number(k) < 4294967295;
+}
+function $js_def_data(o, k, v, w, e, c) {
+  o.ps.set($js_pkey(k), new $Slot(false, v, undefined, undefined, w, e, c));
+  return o;
+}
+function $js_def_acc(o, k, g, s, e, c) {
+  o.ps.set($js_pkey(k), new $Slot(true, undefined, g, s, false, e, c));
+  return o;
+}
+// 自有属性的次序（规范 OrdinaryOwnPropertyKeys）：下标键按数值升序，然后是别的字符串键
+// 按插入序，最后是 Symbol 键按插入序。kind: 's' 只要字符串 / 'y' 只要 Symbol /
+// 'a' 全要 / 'e' 只要可枚举的字符串键（Object.keys 那一档）。
+function $js_own_keys(o, kind) {
+  const idx = [], str = [], sym = [];
+  for (const [k, sl] of o.ps) {
+    if (k instanceof $JSSym) { sym.push(k); continue; }
+    if (kind === "e" && !sl.e) continue;
+    if ($js_isidx(k)) idx.push(k); else str.push(k);
+  }
+  idx.sort((a, b) => Number(a) - Number(b));
+  if (kind === "y") return sym;
+  const out = [...idx, ...str];
+  if (kind === "s" || kind === "e") return out;
+  return [...out, ...sym];
+}
+// 沿原型链找槽。返回 [宿主对象, 槽] 或 null —— 调用方要知道"在谁身上找到的"（访问器
+// 的接收者是最初那个对象，不是原型）。
+function $js_find_slot(o, key) {
+  let cur = o;
+  while (cur !== null && cur !== undefined) {
+    if (!$js_isobj(cur)) return null;
+    const sl = cur.ps.get(key);
+    if (sl !== undefined) return [cur, sl];
+    cur = cur.pr;
+  }
+  return null;
+}
+// [[Get]]。recv 是接收者（访问器的 this）；不给就是 o 自己。
+function $js_getp(o, k, recv) {
+  const self = recv === undefined ? o : recv;
+  if (!$js_isobj(o)) return $js_prim_get(o, k);
+  const hit = $js_find_slot(o, $js_pkey(k));
+  if (hit === null) return undefined;
+  const sl = hit[1];
+  if (!sl.a) return sl.v;
+  if (sl.g === undefined) return undefined;
+  return $callThis(sl.g, self, []);
+}
+// [[Set]]。原型链上的 setter 优先；只有数据属性可写、且接收者可扩展时才落自有槽。
+function $js_setp(o, k, v) {
+  if (!$js_isobj(o)) $rt_error("cannot set a property of " + $dynTag(o));
+  const key = $js_pkey(k);
+  const hit = $js_find_slot(o, key);
+  if (hit !== null) {
+    const sl = hit[1];
+    if (sl.a) {
+      if (sl.s === undefined) return v;
+      $callThis(sl.s, o, [v]);
+      return v;
+    }
+    if (hit[0] === o) {
+      if (!sl.w) return v;
+      sl.v = v;
+      return v;
+    }
+    if (!sl.w) return v;
+  }
+  if (!o.ex) return v;
+  $js_def_data(o, key, v, true, true, true);
+  return v;
+}
+// 原始值上的取属性：查它那一族的原型（内建方法就住在那儿），外加 string 的 length 与下标。
+function $js_prim_get(o, k) {
+  const key = $js_pkey(k);
+  if (o === undefined || o === null) $rt_error("cannot read '" + $js_key_str(key) + "' of " + $dynTag(o));
+  if (typeof o === "string") {
+    if (key === "length") return o.length;
+    if ($js_isidx(key)) return $js_str_index(o, Number(key));
+  }
+  if (Array.isArray(o)) {
+    if (key === "length") return o.length;
+    if ($js_isidx(key)) return $js_arr_get(o, Number(key));
+  }
+  const p = $js_proto_of_prim(o);
+  if (p === null) return undefined;
+  const hit = $js_find_slot(p, key);
+  if (hit === null) return undefined;
+  const sl = hit[1];
+  if (!sl.a) return sl.v;
+  if (sl.g === undefined) return undefined;
+  return $callThis(sl.g, o, []);
+}
+function $js_key_str(key) { return key instanceof $JSSym ? "Symbol(" + (key.d === undefined ? "" : key.d) + ")" : key; }
+function $js_proto_of_prim(o) {
+  const r = $realm();
+  switch ($dynTag(o)) {
+    case "string": return r.strP;
+    case "real": case "int": return r.numP;
+    case "bool": return r.boolP;
+    case "list": return r.arrP;
+    case "function": return r.funP;
+    case "Map": return r.mapP;
+    case "Set": return r.setP;
+    case "regexp": return r.reP;
+    case "dict": return r.objP;
+    default: return r.objP;
+  }
+}
+// 带接收者的调用。函数值现在有两个入口：fp（老的，没有 this）与 fp2（带 this）。
+// 迁移期这样安排的理由：ADR-0011 那一代的 this 是**捕获的 cell**，传接收者对它是空操作；
+// 而原型上的内建方法必须拿到接收者。lower.js 把 this 改成真接收者之后，编译出来的函数
+// 也会带 fp2，$callThis 就不必再分岔。
+function $callThis(f, thisv, args) {
+  const g = $js_asFn(f);
+  if (g.fp2 !== undefined) return g.fp2(thisv, args);
+  return $callFn(g, args);
+}
+// op 面的那一层皮：实参是一格 list 值，取出来再转发。
+function $js_call_this(f, thisv, args) { return $callThis(f, thisv, $js_arr_of(args)); }
+// 内建方法值。$nm/$ln 是 name 与 length（Function.prototype.name/length 要它们）。
+function $nat(name, len, fn) {
+  return { fp: (self, args) => fn(undefined, args), fp2: (t, args) => fn(t, args), $nm: name, $ln: len };
+}
+function $natm(o, name, len, fn) {
+  $js_def_data(o, name, $nat(name, len, fn), true, false, true);
+  return o;
+}
+// Symbol 的两张表：Symbol.for 的注册表，与 well-known 那一族。
+const $SYMREG = new Map();
+const $WKSYM = new Map();
+function $js_sym_wk(name) {
+  let s = $WKSYM.get(name);
+  if (s === undefined) { s = new $JSSym("Symbol." + name); $WKSYM.set(name, s); }
+  return s;
+}
+function $js_sym_new(desc) { return new $JSSym(desc === undefined ? undefined : $js_asS16($js_str(desc))); }
+function $js_sym_for(k) {
+  const key = $js_asS16($js_str(k));
+  let s = $SYMREG.get(key);
+  if (s === undefined) { s = new $JSSym(key); $SYMREG.set(key, s); }
+  return s;
+}
+function $js_sym_key_for(s) {
+  for (const [k, v] of $SYMREG) if (v === s) return k;
+  return undefined;
+}
+function $js_sym_desc(s) { return $dynAsSym(s).d; }
+function $js_sym_str(s) { const d = $dynAsSym(s).d; return "Symbol(" + (d === undefined ? "" : d) + ")"; }
+function $dynAsSym(s) {
+  if (!(s instanceof $JSSym)) $rt_error($dynTag(s) + " is not a symbol");
+  return s;
+}
+// 领域（realm）：内建原型都是真对象，内建方法就住在上面。懒建一次 ——
+// 不是每个程序都会碰到原型链，而建这一圈要几十次 defineProperty。
+let $R = null;
+function $realm() {
+  if ($R === null) $R = $mkRealm();
+  return $R;
+}
+function $mkRealm() {
+  const objP = new $JSObj(null, "Object");
+  const funP = new $JSObj(objP, "Function");
+  const r = {
+    objP, funP,
+    arrP: new $JSObj(objP, "Array"),
+    strP: new $JSObj(objP, "String"),
+    numP: new $JSObj(objP, "Number"),
+    boolP: new $JSObj(objP, "Boolean"),
+    symP: new $JSObj(objP, "Symbol"),
+    errP: new $JSObj(objP, "Error"),
+    mapP: new $JSObj(objP, "Map"),
+    setP: new $JSObj(objP, "Set"),
+    reP: new $JSObj(objP, "RegExp"),
+    iterP: new $JSObj(objP, "Iterator"),
+  };
+  $R = r;
+  $natm(objP, "hasOwnProperty", 1, (t, a) => $js_isobj(t) && t.ps.has($js_pkey(a[0])));
+  $natm(objP, "isPrototypeOf", 1, (t, a) => {
+    let cur = $js_isobj(a[0]) ? a[0].pr : null;
+    while (cur !== null && cur !== undefined) { if (cur === t) return true; cur = $js_isobj(cur) ? cur.pr : null; }
+    return false;
+  });
+  $natm(objP, "propertyIsEnumerable", 1, (t, a) => {
+    if (!$js_isobj(t)) return false;
+    const sl = t.ps.get($js_pkey(a[0]));
+    return sl !== undefined && sl.e;
+  });
+  $natm(objP, "valueOf", 0, (t) => t);
+  $natm(objP, "toString", 0, (t) => $js_obj_to_string(t));
+  $natm(objP, "toLocaleString", 0, (t) => $js_str(t));
+  $natm(funP, "call", 1, (t, a) => $callThis(t, a[0], a.slice(1)));
+  $natm(funP, "apply", 2, (t, a) => $callThis(t, a[0], a[1] === undefined || a[1] === null ? [] : $js_arr_of(a[1])));
+  $natm(funP, "bind", 1, (t, a) => {
+    const bt = a[0], pre = a.slice(1);
+    return { fp: (self, args) => $callThis(t, bt, [...pre, ...args]), fp2: (ig, args) => $callThis(t, bt, [...pre, ...args]), $nm: "bound", $ln: 0 };
+  });
+  // Symbol.toStringTag 决定 [object X] 里的 X；没有就看 [[Class]]。
+  $natm(r.iterP, "next", 0, () => $rt_error("Iterator.prototype.next is abstract"));
+  return r;
+}
+function $js_obj_to_string(t) {
+  if (t === undefined) return "[object Undefined]";
+  if (t === null) return "[object Null]";
+  const tag = $js_isobj(t) ? $js_getp(t, $js_sym_wk("toStringTag"), undefined) : undefined;
+  if (typeof tag === "string") return "[object " + tag + "]";
+  if ($js_isobj(t)) return "[object " + t.cl + "]";
+  switch ($dynTag(t)) {
+    case "list": return "[object Array]";
+    case "string": return "[object String]";
+    case "real": case "int": return "[object Number]";
+    case "bool": return "[object Boolean]";
+    case "function": return "[object Function]";
+    default: return "[object Object]";
+  }
+}
+// ---- 新对象那一格的 op 面（js_abi.js 里同名的那些）
+function $js_obj_new_p(proto) { return new $JSObj(proto === undefined ? $realm().objP : proto); }
+function $js_obj_proto_get(o) { return $js_isobj(o) ? o.pr : $js_proto_of_prim(o); }
+function $js_obj_proto_set(o, p) {
+  if ($js_isobj(o)) o.pr = p === undefined || p === null ? null : p;
+  return o;
+}
+function $js_obj_has_own(o, k) { return $js_isobj(o) ? o.ps.has($js_pkey(k)) : false; }
+function $js_obj_own_keys(kind, o) { return $js_isobj(o) ? $js_own_keys(o, kind) : []; }
+function $js_obj_freeze(o) {
+  if ($js_isobj(o)) {
+    o.ex = false;
+    for (const [, sl] of o.ps) { sl.c = false; if (!sl.a) sl.w = false; }
+  }
+  return o;
+}
+function $js_obj_seal(o) {
+  if ($js_isobj(o)) { o.ex = false; for (const [, sl] of o.ps) sl.c = false; }
+  return o;
+}
+function $js_obj_is_frozen(o) {
+  if (!$js_isobj(o)) return true;
+  if (o.ex) return false;
+  for (const [, sl] of o.ps) if (sl.c || (!sl.a && sl.w)) return false;
+  return true;
+}
+function $js_obj_is_sealed(o) {
+  if (!$js_isobj(o)) return true;
+  if (o.ex) return false;
+  for (const [, sl] of o.ps) if (sl.c) return false;
+  return true;
+}
+function $js_obj_prevent_ext(o) { if ($js_isobj(o)) o.ex = false; return o; }
+function $js_obj_is_ext(o) { return $js_isobj(o) ? o.ex : false; }
+// defineProperty。desc 是一格真对象；缺席的字段照规范取 false/undefined。
+// 已有槽的时候只覆盖 desc 里**出现过**的字段（规范 ValidateAndApplyPropertyDescriptor）。
+function $js_obj_def(o, k, desc) {
+  if (!$js_isobj(o)) $rt_error("defineProperty on " + $dynTag(o));
+  const key = $js_pkey(k);
+  const has = (n) => $js_isobj(desc) && desc.ps.has(n);
+  const get = (n) => $js_getp(desc, n, undefined);
+  const old = o.ps.get(key);
+  const isAcc = has("get") || has("set");
+  if (old === undefined) {
+    if (!o.ex) $rt_error("object is not extensible");
+    if (isAcc) {
+      o.ps.set(key, new $Slot(true, undefined, has("get") ? get("get") : undefined,
+        has("set") ? get("set") : undefined, false, has("enumerable") ? $js_truthy(get("enumerable")) : false,
+        has("configurable") ? $js_truthy(get("configurable")) : false));
+    } else {
+      o.ps.set(key, new $Slot(false, has("value") ? get("value") : undefined, undefined, undefined,
+        has("writable") ? $js_truthy(get("writable")) : false,
+        has("enumerable") ? $js_truthy(get("enumerable")) : false,
+        has("configurable") ? $js_truthy(get("configurable")) : false));
+    }
+    return o;
+  }
+  if (!old.c && !(has("value") && !old.a && old.w)) {
+    if (has("configurable") && $js_truthy(get("configurable"))) $rt_error("cannot redefine property");
+    if (has("enumerable") && $js_truthy(get("enumerable")) !== old.e) $rt_error("cannot redefine property");
+  }
+  if (isAcc) {
+    old.a = true;
+    old.v = undefined;
+    if (has("get")) old.g = get("get");
+    if (has("set")) old.s = get("set");
+  } else if (has("value") || has("writable")) {
+    old.a = false;
+    old.g = undefined;
+    old.s = undefined;
+    if (has("value")) old.v = get("value");
+    if (has("writable")) old.w = $js_truthy(get("writable"));
+  }
+  if (has("enumerable")) old.e = $js_truthy(get("enumerable"));
+  if (has("configurable")) old.c = $js_truthy(get("configurable"));
+  return o;
+}
+function $js_obj_desc(o, k) {
+  if (!$js_isobj(o)) return undefined;
+  const sl = o.ps.get($js_pkey(k));
+  if (sl === undefined) return undefined;
+  const d = $js_obj_new_p(undefined);
+  if (sl.a) {
+    $js_def_data(d, "get", sl.g, true, true, true);
+    $js_def_data(d, "set", sl.s, true, true, true);
+  } else {
+    $js_def_data(d, "value", sl.v, true, true, true);
+    $js_def_data(d, "writable", sl.w, true, true, true);
+  }
+  $js_def_data(d, "enumerable", sl.e, true, true, true);
+  $js_def_data(d, "configurable", sl.c, true, true, true);
+  return d;
+}
+function $js_obj_del_p(o, k) {
+  if (!$js_isobj(o)) return true;
+  const key = $js_pkey(k), sl = o.ps.get(key);
+  if (sl === undefined) return true;
+  if (!sl.c) return false;
+  o.ps.delete(key);
+  return true;
+}
+function $js_obj_has_p(o, k) { return $js_isobj(o) ? $js_find_slot(o, $js_pkey(k)) !== null : $js_prim_get(o, k) !== undefined; }
+function $js_realm_proto(name) {
+  const r = $realm();
+  switch (name) {
+    case "Object": return r.objP;
+    case "Function": return r.funP;
+    case "Array": return r.arrP;
+    case "String": return r.strP;
+    case "Number": return r.numP;
+    case "Boolean": return r.boolP;
+    case "Symbol": return r.symP;
+    case "Error": return r.errP;
+    case "Map": return r.mapP;
+    case "Set": return r.setP;
+    case "RegExp": return r.reP;
+    case "Iterator": return r.iterP;
+    default: $rt_error("no such builtin prototype: " + name);
+  }
+}
+// instanceof：走原型链，先问 Symbol.hasInstance。
+function $js_instanceof(v, ctor) {
+  const hi = $js_isobj(ctor) ? $js_getp(ctor, $js_sym_wk("hasInstance"), undefined) : undefined;
+  if (hi !== undefined && hi !== null) return $js_truthy($callThis(hi, ctor, [v]));
+  const proto = $js_isobj(ctor) ? $js_getp(ctor, "prototype", undefined) : undefined;
+  if (!$js_isobj(proto)) $rt_error("right-hand side of 'instanceof' is not callable");
+  let cur = $js_isobj(v) ? v.pr : null;
+  while (cur !== null && cur !== undefined) {
+    if (cur === proto) return true;
+    cur = $js_isobj(cur) ? cur.pr : null;
+  }
+  return false;
+}
+// 迭代器协议。iterProto 那一格是给内建迭代器用的；这一条是"按协议驱动一个对象"。
+function $js_iter_proto(v) {
+  const f = $js_isobj(v) ? $js_getp(v, $js_sym_wk("iterator"), undefined) : $js_prim_get(v, $js_sym_wk("iterator"));
+  if (f === undefined || f === null) $rt_error($dynTag(v) + " is not iterable");
+  return $callThis(f, v, []);
+}
+function $js_iter_next(it) {
+  const f = $js_getp(it, "next", undefined);
+  const r = $callThis(f, it, []);
+  if (!$js_isobj(r)) $rt_error("iterator result is not an object");
+  return r;
+}
+// ToPrimitive（hint: 'n' number / 's' string / 'd' default）。Symbol.toPrimitive 优先，
+// 然后按 hint 试 valueOf/toString 两轮 —— 次序就是规范 OrdinaryToPrimitive。
+function $js_to_prim(hint, v) {
+  if (!$js_isobj(v)) return v;
+  const f = $js_getp(v, $js_sym_wk("toPrimitive"), undefined);
+  if (f !== undefined && f !== null) {
+    const h = hint === "n" ? "number" : hint === "s" ? "string" : "default";
+    const r = $callThis(f, v, [h]);
+    if (!$js_isobj(r)) return r;
+    $rt_error("Symbol.toPrimitive returned an object");
+  }
+  const names = hint === "s" ? ["toString", "valueOf"] : ["valueOf", "toString"];
+  for (const n of names) {
+    const m = $js_getp(v, n, undefined);
+    if (m === undefined || m === null) continue;
+    const r = $callThis(m, v, []);
+    if (!$js_isobj(r)) return r;
+  }
+  $rt_error("cannot convert an object to a primitive value");
+}
+
 
 function $js_map_of(v) {
   if ($dynTag(v) !== "Map") $rt_error($dynTag(v) + " is not a Map");

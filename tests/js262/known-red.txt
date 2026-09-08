@@ -1,0 +1,16 @@
+# 还没实现的用例，一行一个（ADR-0020 的 P1..P6 一格一格拆）。
+# 红着不算门失败；**绿了会报出来** —— 那是"把这一行删掉"的信号。
+#
+# 2026-09-08 的基线：12 个全红。每一条后面记的是"卡在哪一句"，那就是下一片要动的地方。
+obj-accessor.js          # 对象字面量里的方法与访问器还没降级
+obj-defineproperty.js    # Object.defineProperty / getOwnPropertyDescriptor 还没接到新对象上
+obj-freeze.js            # freeze/seal/preventExtensions 同上
+obj-key-order.js         # 键序（下标键升序）与 for-in
+proto-chain.js           # Object.create / getPrototypeOf / setPrototypeOf
+symbol-basic.js          # Symbol 全家还没接进降级器
+this-call-apply-bind.js  # this 还是捕获的 cell，不是调用接收者
+iter-protocol.js         # for-of / 展开 / 解构还没走 Symbol.iterator 协议
+class-static-field.js    # 类还是"造实例的函数"：没有 static、字段、访问器
+class-extends.js         # extends 只支持 Error；没有 super 方法调用
+for-in.js                # for-in 整个不支持
+to-primitive.js          # ToPrimitive 与 Symbol.toPrimitive

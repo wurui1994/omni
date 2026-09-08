@@ -126,6 +126,56 @@ export const JS_ABI = {
   // { ...src, k: v } 的展开那一步：把 src 的自有键抄进 dst，返回 dst
   js_obj_assign: { js: '$js_obj_assign', c: 'omni_js_obj_assign', arity: 2 },
 
+  // ------------------------------------------------- 真对象 / Symbol（ADR-0020 P1）
+  // 上面那一族（js_obj_*）的载体是 dict<string,dynamic>：没有原型、没有描述符、
+  // 没有 Symbol 键，于是访问器、defineProperty、instanceof 的链、迭代器协议都做不出来。
+  // 这一族是新的那一格 —— 原型链 + 属性槽（数据/访问器 + writable/enumerable/configurable）。
+  // 迁移期两格并存：编译器自己的源码还跑在上面那族上，一个字节都不动。
+  //
+  // **C 侧还没落地**（omni_js_object.c 是下一片）。现在没有任何降级会发这些 op，所以
+  // 生成的 C 里引用不到它们 —— 这一条写在明处，不假装两边已经齐了。
+  js_obj_new_p: { js: '$js_obj_new_p', c: 'omni_js_obj_new_p', arity: 1 },
+  js_obj_proto_get: { js: '$js_obj_proto_get', c: 'omni_js_obj_proto_get', arity: 1 },
+  js_obj_proto_set: { js: '$js_obj_proto_set', c: 'omni_js_obj_proto_set', arity: 2 },
+  // 取/设属性的**完整语义**：沿原型链、触发访问器、按可写性决定落不落自有槽。
+  js_getp: { js: '$js_getp', c: 'omni_js_getp', arity: 2 },
+  js_setp: { js: '$js_setp', c: 'omni_js_setp', arity: 3 },
+  js_obj_has_p: { js: '$js_obj_has_p', c: 'omni_js_obj_has_p', arity: 2, ret: 'bool' },
+  js_obj_del_p: { js: '$js_obj_del_p', c: 'omni_js_obj_del_p', arity: 2, ret: 'bool' },
+  js_obj_has_own: { js: '$js_obj_has_own', c: 'omni_js_obj_has_own', arity: 2, ret: 'bool' },
+  // desc 进出都是**一格真对象**（不是 dict）：Object.defineProperty 的实参就是它。
+  js_obj_def: { js: '$js_obj_def', c: 'omni_js_obj_def', arity: 3, throws: true },
+  js_obj_desc: { js: '$js_obj_desc', c: 'omni_js_obj_desc', arity: 2 },
+  // kind: 's' 字符串键 / 'y' Symbol 键 / 'a' 全部 / 'e' 可枚举的字符串键（Object.keys）
+  js_obj_own_keys: { js: '$js_obj_own_keys', c: 'omni_js_obj_own_keys', arity: 1, lit: ['kind'] },
+  js_obj_freeze: { js: '$js_obj_freeze', c: 'omni_js_obj_freeze', arity: 1 },
+  js_obj_seal: { js: '$js_obj_seal', c: 'omni_js_obj_seal', arity: 1 },
+  js_obj_prevent_ext: { js: '$js_obj_prevent_ext', c: 'omni_js_obj_prevent_ext', arity: 1 },
+  js_obj_is_frozen: { js: '$js_obj_is_frozen', c: 'omni_js_obj_is_frozen', arity: 1, ret: 'bool' },
+  js_obj_is_sealed: { js: '$js_obj_is_sealed', c: 'omni_js_obj_is_sealed', arity: 1, ret: 'bool' },
+  js_obj_is_ext: { js: '$js_obj_is_ext', c: 'omni_js_obj_is_ext', arity: 1, ret: 'bool' },
+  js_obj_to_string: { js: '$js_obj_to_string', c: 'omni_js_obj_to_string', arity: 1 },
+  // 带接收者的调用。ADR-0011 那一代的 this 是捕获的 cell，所以对编译出来的函数这是
+  // 空操作；原型上的内建方法必须靠它拿到接收者（prelude 里那一格 fp2）。
+  js_call_this: { js: '$js_call_this', c: 'omni_js_call_this', arity: 3 },
+  js_instanceof: { js: '$js_instanceof', c: 'omni_js_instanceof', arity: 2, ret: 'bool' },
+  // hint: 'n' number / 's' string / 'd' default（规范的 ToPrimitive）
+  js_to_prim: { js: '$js_to_prim', c: 'omni_js_to_prim', arity: 1, lit: ['hint'] },
+  // 迭代器协议：拿迭代器、走一步（结果是 { value, done } 那一格对象）
+  js_iter_proto: { js: '$js_iter_proto', c: 'omni_js_iter_proto', arity: 1 },
+  js_iter_next: { js: '$js_iter_next', c: 'omni_js_iter_next', arity: 1 },
+  js_sym_new: { js: '$js_sym_new', c: 'omni_js_sym_new', arity: 1 },
+  js_sym_for: { js: '$js_sym_for', c: 'omni_js_sym_for', arity: 1 },
+  js_sym_key_for: { js: '$js_sym_key_for', c: 'omni_js_sym_key_for', arity: 1 },
+  js_sym_desc: { js: '$js_sym_desc', c: 'omni_js_sym_desc', arity: 1 },
+  js_sym_str: { js: '$js_sym_str', c: 'omni_js_sym_str', arity: 1 },
+  // well-known Symbol：名字是编译期常量（iterator / asyncIterator / toPrimitive /
+  // toStringTag / hasInstance / …）
+  js_sym_wk: { js: '$js_sym_wk', c: 'omni_js_sym_wk', arity: 0, lit: ['name'] },
+  // 内建原型（Object / Function / Array / String / Number / Boolean / Symbol /
+  // Error / Map / Set / RegExp / Iterator）—— 内建方法就住在这些对象上
+  js_realm_proto: { js: '$js_realm_proto', c: 'omni_js_realm_proto', arity: 0, lit: ['name'] },
+
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
   js_map_size: { js: '$js_map_size', c: 'omni_js_map_size', arity: 1 },
   js_map_has: { js: '$js_map_has', c: 'omni_js_map_has', arity: 2, ret: 'bool' },
