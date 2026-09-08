@@ -573,6 +573,8 @@ omni_dyn omni_js_buf_len(omni_dyn b);
 void omni_js_buf_set(omni_dyn dst, omni_dyn src);
 omni_dyn omni_js_buf_fill(omni_dyn b, omni_dyn v);
 omni_dyn omni_js_buf_get_u8(omni_dyn b, omni_dyn at);
+omni_dyn omni_js_buf_getn(int sel, omni_dyn b, omni_dyn at, omni_dyn le);
+void omni_js_buf_setn(int sel, omni_dyn b, omni_dyn at, omni_dyn v, omni_dyn le);
 void omni_js_buf_set_u8(omni_dyn b, omni_dyn at, omni_dyn v);
 omni_dyn omni_js_buf_get_i64(omni_dyn b, omni_dyn at, omni_dyn le);
 void omni_js_buf_set_i64(omni_dyn b, omni_dyn at, omni_dyn v, omni_dyn le);

@@ -292,6 +292,12 @@ export const JS_ABI = {
   js_buf_set_i64: { js: '$js_buf_set_i64', c: 'omni_js_buf_set_i64', arity: 4, ret: 'void' },
   js_buf_get_f64: { js: '$js_buf_get_f64', c: 'omni_js_buf_get_f64', arity: 3 },
   js_buf_set_f64: { js: '$js_buf_set_f64', c: 'omni_js_buf_set_f64', arity: 4, ret: 'void' },
+  /* DataView 的定宽整数与 float32（ADR-0020 P4）。一个 op 收全部宽度，宽度走 lit：
+     'b' int8 / 'B' uint8 / 'h' int16 / 'H' uint16 / 'i' int32 / 'I' uint32 / 'f' float32。
+     十二个方法名各占一格 op 的话 ABI 会胖一圈，而它们的区别只有"几个字节、有没有符号"。
+     BigInt64 与 Float64 仍是上面那两条老 op —— 它们的**值域**不同（bigint / 双精度）。 */
+  js_buf_getn: { js: '$js_buf_getn', c: 'omni_js_buf_getn', arity: 3, lit: ['sel'] },
+  js_buf_setn: { js: '$js_buf_setn', c: 'omni_js_buf_setn', arity: 4, ret: 'void', lit: ['sel'] },
   // TextEncoder 是无状态的，但 `new TextEncoder().encode(t)` 是两步，所以那一格也得
   // 有个值。单独一个标签而不是拿 bytes 塞个哨兵 —— 哨兵一漏就是悄悄算错。
   js_text_enc_new: { js: '$js_text_enc_new', c: 'omni_js_text_enc_new', arity: 0 },
@@ -507,6 +513,19 @@ export const JS_METHODS = {
   // 字节缓冲上的那几个（DataView / Uint8Array 的方法）
   getUint8: { on: { bytes: 'js_buf_get_u8' } },
   setUint8: { on: { bytes: 'js_buf_set_u8' } },
+  // 定宽那一族走同一个 op，宽度在 lit 里（见 js_buf_getn 那一行的注释）
+  getInt8: { on: { bytes: 'js_buf_getn' }, lit: { sel: 'b' } },
+  setInt8: { on: { bytes: 'js_buf_setn' }, lit: { sel: 'b' } },
+  getInt16: { on: { bytes: 'js_buf_getn' }, lit: { sel: 'h' } },
+  setInt16: { on: { bytes: 'js_buf_setn' }, lit: { sel: 'h' } },
+  getUint16: { on: { bytes: 'js_buf_getn' }, lit: { sel: 'H' } },
+  setUint16: { on: { bytes: 'js_buf_setn' }, lit: { sel: 'H' } },
+  getInt32: { on: { bytes: 'js_buf_getn' }, lit: { sel: 'i' } },
+  setInt32: { on: { bytes: 'js_buf_setn' }, lit: { sel: 'i' } },
+  getUint32: { on: { bytes: 'js_buf_getn' }, lit: { sel: 'I' } },
+  setUint32: { on: { bytes: 'js_buf_setn' }, lit: { sel: 'I' } },
+  getFloat32: { on: { bytes: 'js_buf_getn' }, lit: { sel: 'f' } },
+  setFloat32: { on: { bytes: 'js_buf_setn' }, lit: { sel: 'f' } },
   getBigInt64: { on: { bytes: 'js_buf_get_i64' } },
   setBigInt64: { on: { bytes: 'js_buf_set_i64' } },
   getFloat64: { on: { bytes: 'js_buf_get_f64' } },

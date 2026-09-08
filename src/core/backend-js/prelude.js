@@ -2964,6 +2964,49 @@ function $js_buf_get_u8(b, at) {
   const v = $js_bytes(b, ".getUint8");
   return v.dv.getUint8($js_buf_at(v, at, 1, ".getUint8"));
 }
+// 定宽整数与 float32（ADR-0020 P4）：宽度在 sel 里，见 hir/js_abi.js 的 js_buf_getn。
+// 转手宿主的 DataView —— 存整数时的取整与截断照规范（C 那份自己算一遍同样的模）。
+function $js_buf_wname(sel) {
+  if (sel === "b") return "Int8";
+  if (sel === "B") return "Uint8";
+  if (sel === "h") return "Int16";
+  if (sel === "H") return "Uint16";
+  if (sel === "i") return "Int32";
+  if (sel === "I") return "Uint32";
+  return "Float32";
+}
+function $js_buf_wsize(sel) {
+  if (sel === "b" || sel === "B") return 1;
+  if (sel === "h" || sel === "H") return 2;
+  return 4;
+}
+function $js_buf_getn(sel, b, at, le) {
+  const who = ".get" + $js_buf_wname(sel);
+  const v = $js_bytes(b, who);
+  const o = $js_buf_at(v, at, $js_buf_wsize(sel), who);
+  const l = $js_truthy(le);
+  if (sel === "b") return v.dv.getInt8(o);
+  if (sel === "B") return v.dv.getUint8(o);
+  if (sel === "h") return v.dv.getInt16(o, l);
+  if (sel === "H") return v.dv.getUint16(o, l);
+  if (sel === "i") return v.dv.getInt32(o, l);
+  if (sel === "I") return v.dv.getUint32(o, l);
+  return v.dv.getFloat32(o, l);
+}
+function $js_buf_setn(sel, b, at, x, le) {
+  const who = ".set" + $js_buf_wname(sel);
+  const v = $js_bytes(b, who);
+  const o = $js_buf_at(v, at, $js_buf_wsize(sel), who);
+  const d = $js_real(x, who), l = $js_truthy(le);
+  if (sel === "b") v.dv.setInt8(o, d);
+  else if (sel === "B") v.dv.setUint8(o, d);
+  else if (sel === "h") v.dv.setInt16(o, d, l);
+  else if (sel === "H") v.dv.setUint16(o, d, l);
+  else if (sel === "i") v.dv.setInt32(o, d, l);
+  else if (sel === "I") v.dv.setUint32(o, d, l);
+  else v.dv.setFloat32(o, d, l);
+  return undefined;
+}
 function $js_buf_set_u8(b, at, x) {
   const v = $js_bytes(b, ".setUint8");
   v.dv.setUint8($js_buf_at(v, at, 1, ".setUint8"), $js_real(x, ".setUint8") & 255);

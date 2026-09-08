@@ -561,6 +561,96 @@ void omni_js_buf_set_u8(omni_dyn bd, omni_dyn at, omni_dyn v) {
   b->p[o] = js_to_u8(want_bufnum(v, ".setUint8"));
 }
 
+/* DataView 的定宽整数与 float32（ADR-0020 P4）。宽度走 sel（见 hir/js_abi.js 的
+   js_buf_getn）：'b' int8 / 'B' uint8 / 'h' int16 / 'H' uint16 / 'i' int32 /
+   'I' uint32 / 'f' float32。错误文本里的方法名要与 prelude 那份逐字相同。 */
+static const char *buf_wname(int sel) {
+  switch (sel) {
+    case 'b': return "Int8";
+    case 'B': return "Uint8";
+    case 'h': return "Int16";
+    case 'H': return "Uint16";
+    case 'i': return "Int32";
+    case 'I': return "Uint32";
+    default: return "Float32";
+  }
+}
+
+static int buf_wsize(int sel) {
+  if (sel == 'b' || sel == 'B') return 1;
+  if (sel == 'h' || sel == 'H') return 2;
+  return 4;
+}
+
+static uint64_t buf_rdn(const uint8_t *p, int n, bool le) {
+  uint64_t x = 0;
+  int i;
+  for (i = 0; i < n; i++) x |= (uint64_t)p[le ? i : n - 1 - i] << (8 * i);
+  return x;
+}
+
+static void buf_wrn(uint8_t *p, uint64_t x, int n, bool le) {
+  int i;
+  for (i = 0; i < n; i++) p[le ? i : n - 1 - i] = (uint8_t)((x >> (8 * i)) & 0xffu);
+}
+
+/* JS 存整数的口径（规范 SetValueInBuffer）：先 ToIntegerOrInfinity 再取模 2^(8n)。
+   非有限数一律 0 —— 宿主的 DataView.set* 就是这么做的，两边必须同样。 */
+static uint64_t buf_to_int(double d, int n) {
+  double mod = ldexp(1.0, 8 * n);
+  double t;
+  if (!isfinite(d)) return 0;
+  t = fmod(trunc(d), mod);
+  if (t < 0) t += mod;
+  return (uint64_t)t;
+}
+
+omni_dyn omni_js_buf_getn(int sel, omni_dyn bd, omni_dyn at, omni_dyn le) {
+  char who[32];
+  omni_js_bytes *b;
+  int n = buf_wsize(sel);
+  int64_t o;
+  uint64_t raw;
+  snprintf(who, sizeof who, ".get%s", buf_wname(sel));
+  b = want_bytes(bd, who);
+  o = buf_at(b, at, n, who);
+  raw = buf_rdn(b->p + o, n, omni_js_truthy(le));
+  switch (sel) {
+    case 'b': return omni_dyn_of_real((double)(int8_t)(uint8_t)raw);
+    case 'B': return omni_dyn_of_real((double)(uint8_t)raw);
+    case 'h': return omni_dyn_of_real((double)(int16_t)(uint16_t)raw);
+    case 'H': return omni_dyn_of_real((double)(uint16_t)raw);
+    case 'i': return omni_dyn_of_real((double)(int32_t)(uint32_t)raw);
+    case 'I': return omni_dyn_of_real((double)(uint32_t)raw);
+    default: {
+      union { uint32_t u; float f; } u;
+      u.u = (uint32_t)raw;
+      return omni_dyn_of_real((double)u.f);
+    }
+  }
+}
+
+void omni_js_buf_setn(int sel, omni_dyn bd, omni_dyn at, omni_dyn v, omni_dyn le) {
+  char who[32];
+  omni_js_bytes *b;
+  int n = buf_wsize(sel);
+  int64_t o;
+  double d;
+  uint64_t raw;
+  snprintf(who, sizeof who, ".set%s", buf_wname(sel));
+  b = want_bytes(bd, who);
+  d = want_bufnum(v, who);
+  o = buf_at(b, at, n, who);
+  if (sel == 'f') {
+    union { uint32_t u; float f; } u;
+    u.f = (float)d;
+    raw = u.u;
+  } else {
+    raw = buf_to_int(d, n);
+  }
+  buf_wrn(b->p + o, raw, n, omni_js_truthy(le));
+}
+
 omni_dyn omni_js_buf_get_i64(omni_dyn bd, omni_dyn at, omni_dyn le) {
   omni_js_bytes *b = want_bytes(bd, ".getBigInt64");
   int64_t o = buf_at(b, at, 8, ".getBigInt64");

@@ -76,6 +76,33 @@ function tf() {}
 console.log(`typeof ${typeof noSuchGlobalAnywhere} ${typeof Math} ${typeof Map} ${typeof tf}`);
 console.log(`typeof ${typeof undefined} ${typeof NaN} ${typeof ta} ${typeof "s"}`);
 
+// DataView 的定宽那一族：ArrayBuffer/Uint8Array/DataView 在这个值域里是同一种值，
+// 所以下面这几行看的是同一块内存（小端标志给不给都量一遍）
+const dv = new DataView(new ArrayBuffer(8));
+dv.setInt32(0, 7);
+console.log(`dv ${dv.getInt32(0)} ${dv.getUint32(0)} ${dv.getInt8(3)}`);
+dv.setInt32(0, -2, true);
+console.log(`dv ${dv.getInt32(0, true)} ${dv.getUint32(0, true)} ${dv.getUint8(0)}`);
+dv.setInt16(4, -1);
+console.log(`dv ${dv.getInt16(4)} ${dv.getUint16(4)} ${dv.getInt8(4)}`);
+dv.setUint16(4, 70000);
+console.log(`dv ${dv.getUint16(4)}`);
+dv.setFloat32(4, 0.5);
+console.log(`dv ${dv.getFloat32(4)} ${dv.getFloat32(4, true)}`);
+dv.setInt8(0, 200);
+console.log(`dv ${dv.getInt8(0)} ${dv.getUint8(0)}`);
+
+// WeakMap / WeakSet 就是 Map / Set：这个值域里没有可观测的回收，两者写不出区别
+const wk = {};
+const wm = new WeakMap();
+wm.set(wk, 1);
+console.log(`weak ${wm.get(wk)} ${wm.has(wk)} ${wm.has({})}`);
+const ws = new WeakSet();
+ws.add(wk);
+console.log(`weak ${ws.has(wk)} ${ws.has({})} ${wm.delete(wk)} ${wm.has(wk)}`);
+
+
+
 
 
 

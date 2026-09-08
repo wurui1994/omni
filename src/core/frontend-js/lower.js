@@ -2136,8 +2136,12 @@ class Lower {
   }
 
   newExpr(e) {
-    const n = e.callee.type === 'Ident' ? e.callee.name : null;
-    if ((n === 'Map' || n === 'Set') && !this.lookup(n)) {
+    const n0 = e.callee.type === 'Ident' ? e.callee.name : null;
+    /* WeakMap / WeakSet 就是 Map / Set（ADR-0020 P4）。差别只在"键不阻止回收"，而这个
+     * 值域里没有 GC 可观测的面（arena 一次性释放），所以两者在**能写出来的程序**里
+     * 不可区分。刻意不做的两件事写在明处：不检查键必须是对象、`size`/迭代照 Map 有。 */
+    const n = n0 === 'WeakMap' ? 'Map' : (n0 === 'WeakSet' ? 'Set' : n0);
+    if ((n === 'Map' || n === 'Set') && !this.lookup(n0) && !this.classes.has(n0)) {
       if (e.args.length > 1) {
         this.err(e.span, `new ${n}(...) takes at most 1 argument`);
         return undefExpr();
