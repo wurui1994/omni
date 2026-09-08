@@ -1820,6 +1820,10 @@ function $js_idx_get(o, k) {
     // 同一种值，所以 DataView 上也能下标读 —— JS 里那是普通属性（undefined）。越界照
     // .getUint8 那条路报错，不像 JS 给 undefined：两条腿一致比像 JS 更重要。
     case "bytes": return $js_buf_get_u8(o, k);
+    /* 函数值上的 f[k]（t[k] 在代理陷阱里最常见）：落到 Function.prototype 那张面上 ——
+       name / length / call / apply / bind 都在那儿，别的键给 undefined（JS 里也是）。
+       理由与上面 "string" 那一支同一条：这不是"把它当容器下标取"，是取属性。 */
+    case "function": return $js_prim_get(o, k);
     // Map/Set 上的 o[k] 照旧当场报（那在 JS 里是属性访问而不是条目，容易看错），
     // 只放**符号键**过去 —— m[Symbol.iterator] 是协议本身，不是"把条目当下标取"。
     default:
@@ -2169,11 +2173,36 @@ function $js_px_trap(o, name) {
   const f = $js_getp(o.px.h, name, undefined);
   return f === undefined || f === null ? undefined : f;
 }
+/* 可调用的代理（ADR-0020 P4）：目标是函数（或类对象）时，代理自己也得是**可调用的** ——
+   typeof 给 "function"、p(1,2) 走 apply 陷阱、new p() 走 construct 陷阱。所以这一支
+   不造 $JSObj（那一格 dynTag 给 "object"），造一格**闭包记录**并把 px 挂在它身上：
+   dynTag 的兜底认的正是 { fp, … }，于是 typeof 就对上了。
+   px 那一格两种形状共用，$js_px_trap 只问 o.px.h，不在乎宿主是对象还是闭包记录。
+   画出来的边界：可调用代理身上的 get 陷阱只在**取属性**那条路上生效（见 $js_prim_get），
+   own_keys / defineProperty 那几格还是落到函数那张面上 —— 函数在这个值域里不是真对象。 */
 function $js_proxy_new(t, h) {
-  if (!$js_isobj(t) || !$js_isobj(h)) $rt_error("new Proxy takes an object target and handler");
+  if (!$js_isobj(h)) $rt_error("new Proxy takes an object target and handler");
+  if ($dynTag(t) === "function") {
+    const p = {
+      px: { t, h },
+      fp: (self, args) => $js_px_call(self, undefined, args),
+      fp2: (thisv, args) => $js_px_call(p, thisv, args),
+      $nm: $js_fn_name(t),
+      $ln: $js_fn_len(t),
+    };
+    return p;
+  }
+  if (!$js_isobj(t)) $rt_error("new Proxy takes an object target and handler");
   const o = new $JSObj(null, "Object");
   o.px = { t, h };
   return o;
+}
+// 调一格可调用代理：有 apply 陷阱就 trap(target, thisArg, argsList)，没有就落到目标上。
+// 实参表本身就是一格 list（这个值域里 list 就是一条 JS 数组），原样交给陷阱。
+function $js_px_call(p, thisv, args) {
+  const f = $js_px_trap(p, "apply");
+  if (f === undefined) return $callThis(p.px.t, thisv, args);
+  return $callThis(f, p.px.h, [p.px.t, thisv, args]);
 }
 function $js_getp(o, k, recv) {
   const self = recv === undefined ? o : recv;
@@ -2261,6 +2290,13 @@ function $js_setp(o, k, v, recv) {
 function $js_prim_get(o, k) {
   const key = $js_pkey(k);
   if (o === undefined || o === null) $rt_error("cannot read '" + $js_key_str(key) + "' of " + $dynTag(o));
+  /* 可调用代理（目标是函数的那一支）：它是一格闭包记录而不是 $JSObj，所以取属性走这儿。
+     get 陷阱要在函数那张面（name / length / call / apply / bind）之前问。 */
+  if (typeof o === "object" && o.px !== undefined && o.fp !== undefined) {
+    const f = $js_px_trap(o, "get");
+    if (f !== undefined) return $callThis(f, o.px.h, [o.px.t, key, o]);
+    return $js_getp(o.px.t, key, o.px.t);
+  }
   if (typeof o === "string") {
     if (key === "length") return o.length;
     if ($js_isidx(key)) return $js_str_index(o, Number(key));
@@ -2365,6 +2401,20 @@ function $js_nt_take() {
   return v;
 }
 function $js_fn_construct(f, args) {
+  /* 代理身上的 construct 陷阱最先问（规范 10.5.13）：目标是函数还是类对象都算，所以
+     这一问要在下面那两条之前 —— 类对象那条会去读 classInit，而读属性本身会过 get 陷阱。
+     陷阱不给对象时规范抛 TypeError；这个值域里 new 的值一律是对象，所以照旧当场报。 */
+  if (f !== null && typeof f === "object" && f.px !== undefined) {
+    const c = $js_px_trap(f, "construct");
+    if (c !== undefined) {
+      const r = $callThis(c, f.px.h, [f.px.t, $js_arr_of(args), f]);
+      if ($js_pending()) return undefined;
+      if (!$js_isobj(r)) $rt_error("a proxy construct trap must return an object");
+      return r;
+    }
+    // 没有陷阱就落到目标上（可调用代理的 fp 只管 apply 那一侧）
+    if (!$js_isobj(f)) return $js_fn_construct(f.px.t, args);
+  }
   /* 右边是一格**类对象**（new this() / new ctorFromMap()）：类对象不是函数值，
      构造要走它身上那两格 —— prototype 当原型、初始化实例那格闭包（键是符号
      Symbol.omni.classInit，见降级器的 classInitKey）。

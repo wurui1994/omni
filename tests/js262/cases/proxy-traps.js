@@ -2,8 +2,7 @@
 // 差别只在属性访问的那几个入口上多问一句陷阱：get / set / has / deleteProperty /
 // ownKeys / getOwnPropertyDescriptor / defineProperty。处理器上没有那一格就落到目标身上。
 //
-// 不做的写在明处：apply / construct（代理还不能当函数调，`new Proxy(function(){}, …)`
-// 当场报）、getPrototypeOf，以及规范里那一整套"不变量校验"。
+// 不做的写在明处：getPrototypeOf，以及规范里那一整套"不变量校验"。
 const always42 = new Proxy({}, { get() { return 42; } });
 console.log(always42.anything, always42.x);
 
@@ -48,3 +47,33 @@ const dp2 = new Proxy({ q: 4 }, {});
 console.log(JSON.stringify(Object.getOwnPropertyDescriptor(dp2, "q")));
 Object.defineProperty(dp2, "r", { value: 5, enumerable: false, configurable: false });
 console.log(Object.keys(dp2).join(","), Object.getOwnPropertyNames(dp2).join(","));
+
+/* 可调用的代理（apply / construct 两格陷阱）。目标是函数时代理自己也得**可调用** ——
+   typeof 给 "function"、p(…) 走 apply、new p(…) 走 construct。这一支不造真对象而是造
+   一格闭包记录（见 prelude 的 $js_proxy_new）：dynTag 的兜底认的正是那个形状。
+   从前 new Proxy(函数, …) 在收实参那一步就当场报。 */
+function greet(who) { return "hi " + who; }
+const cp = new Proxy(greet, {
+  get(t, k) { return k === "tag" ? "T" : t[k]; },
+  apply(t, th, a) { return t(a[0]) + "!"; },
+});
+console.log(cp("a"), cp.tag, cp.name, cp.length, typeof cp);
+// 没有 apply 陷阱：落到目标上；get 陷阱照旧生效
+const cq = new Proxy(greet, { get(t, k) { return "g:" + String(k); } });
+console.log(cq("b"), cq.whatever);
+// 类目标 + construct 陷阱：第三个实参是 newTarget
+class Box { constructor(v) { this.v = v; } m() { return this.v; } }
+const cr = new Proxy(Box, { construct(t, a, nt) { return { seen: a[0], same: nt === cr }; } });
+console.log(JSON.stringify(new cr(9)));
+// 没有 construct 陷阱：照旧造真实例（类目标与函数目标两种都试）
+const cs = new Proxy(Box, {});
+console.log(new cs(4).m(), new cs(4) instanceof Box);
+function Pt(x) { this.x = x; }
+console.log(new (new Proxy(Pt, {}))(6).x);
+// 陷阱看得见完整实参表；代理当回调用
+const cv = new Proxy(function () { return arguments.length; }, {
+  apply(t, th, a) { return a.length * 100 + t.apply(th, a); },
+});
+console.log(cv(1, 2, 3));
+console.log([1, 2, 3].map(new Proxy(function (n) { return n; },
+  { apply(t, th, a) { return a[0] * 2; } })).join(","));
