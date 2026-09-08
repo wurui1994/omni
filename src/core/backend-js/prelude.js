@@ -3420,6 +3420,8 @@ function $js_map_get(m, k) {
 }
 function $js_map_set(m, k, v) { $js_map_of(m).set($js_key(k), [k, v]); return m; }
 function $js_map_delete(m, k) { return $js_map_of(m).delete($js_key(k)); }
+// clear：整格清空，交出 undefined（规范 24.1.3.1）
+function $js_map_clear(m) { $js_map_of(m).clear(); }
 function $js_map_keys(m) { return [...$js_map_of(m).values()].map((p) => p[0]); }
 function $js_map_values(m) { return [...$js_map_of(m).values()].map((p) => p[1]); }
 function $js_map_entries(m) { return [...$js_map_of(m).values()]; }
@@ -3435,6 +3437,8 @@ function $js_set_size(s) { return $js_set_of(s).size; }
 function $js_set_has(s, v) { return $js_set_of(s).has($js_key(v)); }
 function $js_set_add(s, v) { $js_set_of(s).set($js_key(v), v); return s; }
 function $js_set_delete(s, v) { return $js_set_of(s).delete($js_key(v)); }
+// clear：整格清空，交出 undefined（规范 24.2.3.2）
+function $js_set_clear(s) { $js_set_of(s).clear(); }
 function $js_set_items(s) { return [...$js_set_of(s).values()]; }
 function $js_set_for_each(s, f) {
   for (const v of [...$js_set_of(s).values()]) $js_call3(f, v, v, s);
@@ -3500,7 +3504,8 @@ function $js_map_of_pairs(init) {
 function $js_set_of_list(init) {
   const s = $js_set_new();
   if (init === undefined) return s;
-  const src = $dynTag(init) === "Set" ? $js_set_items(init) : $js_arr_of(init);
+  // 初值收任何可迭代的东西（规范 24.2.1.1）：字符串按码点、Set / Map 按它们的次序
+  const src = $js_iter(init);
   for (const v of src) $js_set_add(s, v);
   return s;
 }
@@ -3806,7 +3811,9 @@ function $js_json_val(v, rep, gap, depth) {
     if ($dynTag(tj) === "function") v = $callThis(tj, v, []);
   }
   const t = $dynTag(v);
-  if (t === "undefined" || t === "function") return undefined;
+  // undefined / 函数 / Symbol 都"不产生任何文本"：在对象里是**跳过这一格**，
+  // 在数组里落成 null，顶层就是 undefined（规范 25.5.2.2 第 11 步）
+  if (t === "undefined" || t === "function" || t === "symbol") return undefined;
   /* 类对象在 JS 里**是函数**，JSON.stringify(SomeClass) 于是是 undefined。这个值域里类是
      一格真对象，靠它身上那格符号键（omni.classInit，见 lower.js 的 classInitKey）认出来 ——
      从前印的是 {}（量出来的静默分叉）。 */

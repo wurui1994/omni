@@ -336,6 +336,11 @@ static omni_dyn omni_js_map_set(omni_dyn m, omni_dyn k, omni_dyn v) { \
 static bool omni_js_map_delete(omni_dyn m, omni_dyn k) { \
   return DT##_remove(omni_js_map_of(m), omni_js_key(k)); \
 } \
+/* clear：逐格摘掉（容器模板里没有 clear）。槽位留着、live 置假，与 delete 同一形状 */ \
+static void omni_js_map_clear(omni_dyn m) { \
+  DT d = omni_js_map_of(m); \
+  for (int64_t i = 0; i < d->n; i++) if (d->live[i]) DT##_remove(d, d->keys[i]); \
+} \
 static omni_dyn omni_js_map_keys(omni_dyn m) { \
   DT d = omni_js_map_of(m); \
   LT out = LT##_new(); \
@@ -374,6 +379,10 @@ static omni_dyn omni_js_set_add(omni_dyn s, omni_dyn v) { \
 } \
 static bool omni_js_set_delete(omni_dyn s, omni_dyn v) { \
   return DT##_remove(omni_js_set_of(s), omni_js_key(v)); \
+} \
+static void omni_js_set_clear(omni_dyn s) { \
+  DT d = omni_js_set_of(s); \
+  for (int64_t i = 0; i < d->n; i++) if (d->live[i]) DT##_remove(d, d->keys[i]); \
 } \
 static omni_dyn omni_js_set_items(omni_dyn s) { \
   DT d = omni_js_set_of(s); \
@@ -434,7 +443,21 @@ static omni_dyn omni_js_map_of_pairs(omni_dyn init) { \
 static omni_dyn omni_js_set_of_list(omni_dyn init) { \
   omni_dyn s = omni_js_set_new(); \
   if (init.tag == OMNI_DYN_UNDEF) return s; \
-  LT l = omni_js_arr_of(init.tag == OMNI_DYN_SET ? omni_js_set_items(init) : init); \
+  /* 初值收 list / Set / 字符串（规范 24.2.1.1 说的是"任何可迭代的东西"）。字符串按**码点**
+     拆 —— 这一段比 omni_js_iter 先展开（宏段顺序），所以在本段里自己拆一遍。 */ \
+  if (init.tag == OMNI_DYN_STR16) { \
+    omni_s16 v = omni_js_as_s16(init); \
+    for (int64_t i = 0; i < v.len; ) { \
+      int64_t n = 1; \
+      if (v.p[i] >= 0xD800 && v.p[i] <= 0xDBFF && i + 1 < v.len \
+          && v.p[i + 1] >= 0xDC00 && v.p[i + 1] <= 0xDFFF) n = 2; \
+      omni_js_set_add(s, omni_dyn_of_s16(omni_s16_slice(v, i, i + n))); \
+      i += n; \
+    } \
+    return s; \
+  } \
+  LT l = omni_js_arr_of(init.tag == OMNI_DYN_SET ? omni_js_set_items(init) \
+    : (init.tag == OMNI_DYN_MAP ? omni_js_map_entries(init) : init)); \
   for (int64_t i = 0; i < l->len; i++) omni_js_set_add(s, l->items[i]); \
   return s; \
 } \

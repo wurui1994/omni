@@ -156,3 +156,14 @@ console.log(`rep ${"abc".replace("b", "X")} ${"abc".replace("z", "X")} ${"aab".r
 console.log(`rep ${"abc".replace("b", (m) => m.toUpperCase())} ${"abc".replace("b", (m, i, s) => `${m}${i}${s}`)}`);
 console.log(`rep ${"abc".replace("b", "[$&]")} ${"abc".replace("b", "$$")} ${"abc".replace("", "-")}`);
 console.log(`rep ${"aXbXc".replaceAll(/X/g, "-")} ${"a1b2".replace(/\d/g, (m, i) => `${m}@${i}`)}`);
+
+/* clear：整格清空、交出 undefined（规范 24.1.3.1 / 24.2.3.2）。C 那边容器模板里没有 clear，
+   所以是"逐格摘掉"—— 摘完 size 要真是 0，之后还能照常再塞。 */
+const cm = new Map([["a", 1], ["b", 2]]);
+console.log(`clr ${cm.size} ${String(cm.clear())} ${cm.size} ${String(cm.get("a"))} ${cm.has("a")}`);
+cm.set("c", 3);
+console.log(`clr ${cm.size} ${String(cm.get("c"))} ${[...cm.keys()].join(",")}`);
+const cs = new Set([1, 2, 3]);
+console.log(`clr ${cs.size} ${String(cs.clear())} ${cs.size} ${cs.has(2)} ${cs.add(9).size} ${[...cs].join(",")}`);
+// new Set(串)：按**码点**拆（从前只收 list，字符串当场报 "string is not an array"）
+console.log(`sfs ${[...new Set("hello")].join("")} ${new Set("aab").size} ${new Set("").size}`);

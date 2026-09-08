@@ -323,6 +323,9 @@ export const JS_ABI = {
   js_map_get: { js: '$js_map_get', c: 'omni_js_map_get', arity: 2 },
   js_map_set: { js: '$js_map_set', c: 'omni_js_map_set', arity: 3 },
   js_map_delete: { js: '$js_map_delete', c: 'omni_js_map_delete', arity: 2, ret: 'bool' },
+  // clear：整格清空，交出 undefined（规范 24.1.3.1 / 24.2.3.2）
+  js_map_clear: { js: '$js_map_clear', c: 'omni_js_map_clear', arity: 1, ret: 'void' },
+  js_set_clear: { js: '$js_set_clear', c: 'omni_js_set_clear', arity: 1, ret: 'void' },
   js_map_keys: { js: '$js_map_keys', c: 'omni_js_map_keys', arity: 1 },
   js_map_values: { js: '$js_map_values', c: 'omni_js_map_values', arity: 1 },
   js_map_entries: { js: '$js_map_entries', c: 'omni_js_map_entries', arity: 1 },
@@ -758,6 +761,7 @@ export const JS_METHODS = {
   isDisjointFrom: { on: { Set: 'js_set_is_disjoint' } },
   has: { on: { Map: 'js_map_has', Set: 'js_set_has' } },
   delete: { on: { Map: 'js_map_delete', Set: 'js_set_delete' } },
+  clear: { on: { Map: 'js_map_clear', Set: 'js_set_clear' } },
   keys: { on: { Map: 'js_map_keys', list: 'js_arr_keys', Set: 'js_set_items' } },
   values: { on: { Map: 'js_map_values', list: 'js_arr_values', Set: 'js_set_items' } },
 
