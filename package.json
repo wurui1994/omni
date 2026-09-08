@@ -2,6 +2,7 @@
   "name": "omni-lang",
   "version": "0.0.1",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Omni: cross-language parsing / multi-backend compilation architecture (stage0 bootstrap compiler, plain JS)",
   "bin": {
