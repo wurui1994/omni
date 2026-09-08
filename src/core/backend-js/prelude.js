@@ -1869,8 +1869,13 @@ function $js_obj_del_p(o, k) {
   return true;
 }
 function $js_obj_has_p(o, k) { return $js_isobj(o) ? $js_find_slot(o, $js_pkey(k)) !== null : $js_prim_get(o, k) !== undefined; }
-function $js_realm_proto(name) {
-  const r = $realm();
+// Object.fromEntries：走一遍迭代（数组、Map、自定义可迭代对象都收），每一项按 [k, v] 取。
+function $js_obj_from_entries(pairs) {
+  const o = $js_obj_new();
+  for (const p of $js_iter(pairs)) $js_setp(o, $js_idx_get(p, 0), $js_idx_get(p, 1));
+  return o;
+}
+function $js_realm_proto(name) {  const r = $realm();
   switch (name) {
     case "Object": return r.objP;
     case "Function": return r.funP;

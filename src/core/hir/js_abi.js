@@ -155,6 +155,8 @@ export const JS_ABI = {
   js_obj_is_sealed: { js: '$js_obj_is_sealed', c: 'omni_js_obj_is_sealed', arity: 1, ret: 'bool' },
   js_obj_is_ext: { js: '$js_obj_is_ext', c: 'omni_js_obj_is_ext', arity: 1, ret: 'bool' },
   js_obj_to_string: { js: '$js_obj_to_string', c: 'omni_js_obj_to_string', arity: 1 },
+  // Object.fromEntries：吃一串 [k, v]（数组 / Map / 任何可迭代的），出一格真对象
+  js_obj_from_entries: { js: '$js_obj_from_entries', c: 'omni_js_obj_from_entries', arity: 1 },
   // 带接收者的调用。ADR-0011 那一代的 this 是捕获的 cell，所以对编译出来的函数这是
   // 空操作；原型上的内建方法必须靠它拿到接收者（prelude 里那一格 fp2）。
   js_call_this: { js: '$js_call_this', c: 'omni_js_call_this', arity: 3 },
@@ -530,6 +532,7 @@ const P1_JS_ONLY = [
   'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',
   'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
+  'js_obj_from_entries',
   'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
   'js_sym_wk', 'js_realm_proto',

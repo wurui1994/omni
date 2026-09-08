@@ -559,6 +559,8 @@ class Lower {
     if (opts.pre) stmts.push(...opts.pre());
     // 这一帧属于哪个类（`super.m()` 与 `super(...)` 要靠它找父类，ADR-0020 P1-f）
     if (opts.classOf) this.fn.classOf = opts.classOf;
+    // 箭头没有自己的 arguments（规范如此）—— `arguments` 那一格要认得出来
+    this.fn.isArrowFn = opts.isArrow === true;
     params.forEach((p, i) => stmts.push(...this.bindParam(p, i, span)));
     if (rest) {
       if (rest.type !== 'Ident') this.err(span, 'destructuring a rest parameter is not supported');
@@ -1579,6 +1581,17 @@ class Lower {
       this.err(e.span, `'${e.name}' can only be used as a member base, e.g. ${e.name}.something`);
       return undefExpr();
     }
+    /* `arguments`（ADR-0020 P3）：这个值域里"实参表"本来就是函数的那一格形参
+     * （`args`，list<dynamic>），所以 arguments 就是它 —— 装箱之后 `.length` 与下标
+     * 都是现成的。箭头**没有**自己的 arguments（规范如此），这儿就照规范骂一句，
+     * 不去悄悄给它外层的那一份（那要把 args 也装 cell 传下去）。 */
+    if (e.name === 'arguments' && this.fn && !this.fn.isMain) {
+      if (this.fn.isArrowFn) {
+        this.err(e.span, "an arrow function has no 'arguments'; take a rest parameter instead");
+        return undefExpr();
+      }
+      return argsDyn();
+    }
     this.err(e.span, `unresolved identifier '${e.name}'`);
     return undefExpr();
   }
@@ -2303,6 +2316,7 @@ const STATIC_CALLS = {
   'Object.isFrozen': { op: 'js_obj_is_frozen', argc: 1 },
   'Object.isSealed': { op: 'js_obj_is_sealed', argc: 1 },
   'Object.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
+  'Object.fromEntries': { op: 'js_obj_from_entries', argc: 1 },
   'Symbol.for': { op: 'js_sym_for', argc: 1 },
   'Symbol.keyFor': { op: 'js_sym_key_for', argc: 1 },
   'Reflect.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1 },
