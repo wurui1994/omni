@@ -1428,11 +1428,23 @@ class Lower {
    * 它们会被这层合成的循环接住，语义就变了。
    */
   tryStmt(s) {
+    if (!s.handler && !s.finalizer) { this.err(s.span, "'try' needs a 'catch'"); return []; }
+    /* finally（ADR-0020 P4）：pending 槽是全局一格，所以清理代码不能在"槽里还有东西"的
+     * 时候跑 —— 那样 C 自己的第一次 pending 检查就会当场把它接走。所以三步：
+     *   1. 先记下"有没有异常"、把它挪到一格局部量（槽因此清空）；
+     *   2. 干净地跑清理；
+     *   3. 有的话再抛回去（js_throw 就是"往槽里放"）。
+     * **不收 return/break/continue 从 try 或 catch 里跳出去**：那会绕过清理，而绕过
+     * 清理比报错危险得多。这一条在下面显式查，报的是能照着改的一句话。 */
     if (s.finalizer) {
-      this.err(s.span, "'finally' is not lowered; duplicate the cleanup into both paths");
-      return [];
+      const where = this.abruptIn(s.block.body) ?? (s.handler ? this.abruptIn(s.handler.body) : null);
+      if (where) {
+        this.err(where.span ?? s.span,
+          "'return' / 'break' / 'continue' out of a try with 'finally' is not lowered; "
+          + 'move the cleanup after the try, or restructure with a flag');
+        return [];
+      }
     }
-    if (!s.handler) { this.err(s.span, "'try' needs a 'catch'"); return []; }
     this.fn.tries++;
     this.fn.tryLoops.push(this.fn.loops);
     this.fn.oloops++;   // try 体也摊在一层合成的 while(true) 里
@@ -1450,17 +1462,97 @@ class Lower {
       body: block([...body, { kind: 'Break' }]),
     };
     this.pushScope();
+    const hasCatch = !!s.handler;
+    /* 有 finally 时 catch 体也要摊在一层合成循环里：catch 里再抛的话，pending 检查
+     * 在"没有 try 包着"的位置就是**直接从函数 return**，清理会被整段跳过
+     * （量出来的：node 印 c2ioR，我们印 c2io）。套一层之后那次检查落成 break，
+     * 走出去正好接上下面的 finally。 */
+    const wrapCatch = hasCatch && !!s.finalizer;
+    if (wrapCatch) {
+      this.fn.tries++;
+      this.fn.tryLoops.push(this.fn.loops);
+      this.fn.oloops++;
+      this.fn.tryOLoops.push(this.fn.oloops);
+    }
     // 绑不绑名字都要把槽取空 —— 不取的话下一次 pending 检查会重新抛一遍
-    const head = s.param ? this.bindPattern(s.param, op('js_take_pending', []))
-      : [exprStmt(op('js_take_pending', []))];
-    const handler = s.handler.body.flatMap((x) => this.stmt(x));
+    const head = !hasCatch ? []
+      : (s.param ? this.bindPattern(s.param, op('js_take_pending', []))
+        : [exprStmt(op('js_take_pending', []))]);
+    const handler = !hasCatch ? [] : s.handler.body.flatMap((x) => this.stmt(x));
+    if (wrapCatch) {
+      this.fn.tryOLoops.pop();
+      this.fn.oloops--;
+      this.fn.tryLoops.pop();
+      this.fn.tries--;
+    }
     this.popScope();
-    return [loop, {
-      kind: 'If',
-      cond: boolOp('js_pending', []),
-      then: block([...head, ...handler]),
-      otherwise: null,
-    }];
+    const out = [loop];
+    if (hasCatch) {
+      const hbody = wrapCatch ? [{
+        kind: 'While',
+        cond: { kind: 'Const', type: BOOL, value: true },
+        body: block([...handler, { kind: 'Break' }]),
+      }] : handler;
+      out.push({
+        kind: 'If',
+        cond: boolOp('js_pending', []),
+        then: block([...head, ...hbody]),
+        otherwise: null,
+      });
+    }
+    if (s.finalizer) {
+      this.pushScope();
+      const has = this.declare('_fhas').name;
+      const val = this.declare('_ferr').name;
+      const fin = s.finalizer.body.flatMap((x) => this.stmt(x));
+      this.popScope();
+      out.push(localStmt(has, box(boolOp('js_pending', []), BOOL)));
+      out.push(localStmt(val, op('js_take_pending', [])));
+      out.push(...fin);
+      out.push({
+        kind: 'If',
+        cond: truthy(varRef(has)),
+        then: block([exprStmt(op('js_throw', [varRef(val)]))]),
+        otherwise: null,
+      });
+    }
+    return [block(out)];
+  }
+
+  /**
+   * try / catch 体里有没有"跳出这一块"的语句（Return，或者会被外层循环接住的
+   * break/continue）。有 finally 的时候这些形状还不收 —— 见 tryStmt 里的说明。
+   * 不进嵌套函数（那里的 return 是它自己的），也不进内层循环/switch 的无标签 break。
+   * @returns {any} 找到的那一句（用它的 span 报错），没有就是 null
+   */
+  abruptIn(sts) {
+    let found = null;
+    const walk = (st, depth) => {
+      if (!st || found) return;
+      switch (st.type) {
+        case 'Return': found = st; return;
+        case 'Break': case 'Continue':
+          if (depth === 0 || st.label) found = st;
+          return;
+        case 'Block': for (const x of st.body) walk(x, depth); return;
+        case 'If': walk(st.cons, depth); walk(st.alt, depth); return;
+        case 'Labeled': walk(st.body, depth); return;
+        case 'While': case 'DoWhile': case 'For': case 'ForOf': case 'ForIn':
+          walk(st.body, depth + 1);
+          return;
+        case 'Switch':
+          for (const cs of st.cases) for (const x of cs.body) walk(x, depth + 1);
+          return;
+        case 'Try':
+          for (const x of st.block.body) walk(x, depth);
+          if (st.handler) for (const x of st.handler.body) walk(x, depth);
+          if (st.finalizer) for (const x of st.finalizer.body) walk(x, depth);
+          return;
+        default: return;   // 函数/类声明与普通语句都不算
+      }
+    };
+    for (const st of sts) walk(st, 0);
+    return found;
   }
 
   /* -------------------------------------------------------- 表达式 */
