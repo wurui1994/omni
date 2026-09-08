@@ -1534,6 +1534,14 @@ function $js_arr_join(a, sep) {
   }
   return out;
 }
+/* 迭代方法的第二个实参 thisArg（map / filter / forEach / some / every / find… 都收）：
+   把回调裹成一格"this 定住了"的函数，形状与 bind 出来的那一格相同（fp / fp2 / $nm / $ln）。
+   不给就原样交回去 —— 免得白包一层。这条只在 JS 那条腿上：C 还没有真函数对象。 */
+function $js_bind_this(f, t) {
+  if (t === undefined) return f;
+  const call = (args) => $callThis(f, t, args);
+  return { fp: (self, args) => call(args), fp2: (ig, args) => call(args), $nm: $js_fn_name(f), $ln: $js_fn_len(f) };
+}
 function $js_arr_map(a, f) { return $js_arr_of(a).map((x, i) => $js_call3(f, x, i, a)); }
 function $js_arr_filter(a, f) {
   return $js_arr_of(a).filter((x, i) => $js_truthy($js_call3(f, x, i, a)));
@@ -2453,9 +2461,18 @@ function $mkRealm() {
   $natm(r.arrP, "toSpliced", 2, (t, a) => $js_arr_to_spliced(t, a));
   $natm(r.arrP, "indexOf", 1, (t, a) => $js_arr_index_of(t, a[0], a[1]));
   $natm(r.arrP, "includes", 1, (t, a) => $js_arr_includes(t, a[0], a[1]));
-  $natm(r.arrP, "map", 1, (t, a) => $js_arr_map(t, a[0]));
-  $natm(r.arrP, "filter", 1, (t, a) => $js_arr_filter(t, a[0]));
-  $natm(r.arrP, "forEach", 1, (t, a) => $js_arr_for_each(t, a[0]));
+  /* 迭代方法的第二个实参是 thisArg（规范 23.1.3.*）：回调先裹一层把 this 定住。
+     从前这一格被丢掉 —— [1,2,3].map(cb, {k:2}) 里 cb 的 this 是 undefined。 */
+  $natm(r.arrP, "map", 1, (t, a) => $js_arr_map(t, $js_bind_this(a[0], a[1])));
+  $natm(r.arrP, "filter", 1, (t, a) => $js_arr_filter(t, $js_bind_this(a[0], a[1])));
+  $natm(r.arrP, "forEach", 1, (t, a) => $js_arr_for_each(t, $js_bind_this(a[0], a[1])));
+  $natm(r.arrP, "some", 1, (t, a) => $js_arr_some(t, $js_bind_this(a[0], a[1])));
+  $natm(r.arrP, "every", 1, (t, a) => $js_arr_every(t, $js_bind_this(a[0], a[1])));
+  $natm(r.arrP, "find", 1, (t, a) => $js_arr_find(t, $js_bind_this(a[0], a[1])));
+  $natm(r.arrP, "findIndex", 1, (t, a) => $js_arr_find_index(t, $js_bind_this(a[0], a[1])));
+  $natm(r.arrP, "findLast", 1, (t, a) => $js_arr_find_last(t, $js_bind_this(a[0], a[1])));
+  $natm(r.arrP, "findLastIndex", 1, (t, a) => $js_arr_find_last_index(t, $js_bind_this(a[0], a[1])));
+  $natm(r.arrP, "flatMap", 1, (t, a) => $js_arr_flat_map(t, $js_bind_this(a[0], a[1])));
   // 字符串那边同理（String.prototype.slice.call(s, 1)）。trim 的 lit 排在实参前面。
   $natm(r.strP, "slice", 2, (t, a) => $js_str_slice(t, a[0], a[1]));
   $natm(r.strP, "indexOf", 1, (t, a) => $js_str_index_of(t, a[0], undefined));
