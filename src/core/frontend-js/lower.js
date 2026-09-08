@@ -1134,7 +1134,7 @@ class Lower {
       case 'Labeled': {
         // 标签只打在循环上（parser 那边保证）。记下"进了这层循环之后 OIR 有多少层"，
         // 里面的 `break L` 就能算出要跳出几层。
-        this.fn.labels.push({ name: s.label, depth: this.fn.oloops + 1 });
+        this.fn.labels.push({ name: s.label, depth: this.fn.oloops + 1, block: s.block === true });
         const st = this.stmt(s.body);
         this.fn.labels.pop();
         return st;
@@ -1499,6 +1499,12 @@ class Lower {
     }
     if (ent === null) {
       this.err(s.span, `no enclosing label '${s.label}' for '${what}'`);
+      return 1;
+    }
+    /* `continue L` 指着一个**标签块**：规范里这是 SyntaxError（continue 只能指循环），
+       而这边的块摊成了 while(true)，放过去就成死循环 —— 所以在这儿挡住。 */
+    if (ent.block === true && what === 'continue') {
+      this.err(s.span, `'continue ${s.label}' targets a labeled block, which is not a loop`);
       return 1;
     }
     const tries = this.fn.tryOLoops;

@@ -172,8 +172,21 @@ class JsParser {
     const body = this.statement();
     const loop = body.type === 'For' || body.type === 'ForOf' || body.type === 'ForIn'
       || body.type === 'While' || body.type === 'DoWhile';
-    if (!loop) this.error(this.spanFrom(start), 'a label is only supported on a loop');
-    return { type: 'Labeled', label: start.value, body, span: this.spanFrom(start) };
+    const sp = this.spanFrom(start);
+    if (loop) return { type: 'Labeled', label: start.value, body, span: sp };
+    /* 标签打在**块**上（`L: { … break L; }`）：摊成 `L: while (true) { … ; break; }` ——
+     * 于是 `break L` 还是"跳出一层循环"那条现成的边。降级器认 block 这一位：
+     * `continue L` 在规范里就是 SyntaxError，摊完之后它会变成死循环，所以要挡住。 */
+    if (body.type !== 'Block') {
+      this.error(sp, 'a label is only supported on a loop or a block');
+    }
+    const once = {
+      type: 'While',
+      test: { type: 'Lit', value: true, span: sp },
+      body: { type: 'Block', body: [...body.body, { type: 'Break', label: null, span: sp }], span: sp },
+      span: sp,
+    };
+    return { type: 'Labeled', label: start.value, body: once, block: true, span: sp };
   }
 
   exprStatement() {
