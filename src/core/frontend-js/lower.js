@@ -345,6 +345,8 @@ class Lower {
     this.closures = [];
     /** 顶层函数当值用时的转发闭包：名字 -> 闭包记录（一个函数只生成一次） */
     this.fnValues = new Map();
+    /** 内建函数当值用时的薄包装：路径（'Object.keys' / 'Number'） -> 闭包记录 */
+    this.builtinFns = new Map();
     this.fn = null;
   }
 
@@ -671,7 +673,10 @@ class Lower {
       id, mangled, make: `omni_mk_${mangled}`, captures: [],
       fnName: extra.fnName !== undefined ? extra.fnName
         : (typeof node.id === 'string' ? node.id : ''),
-      fnLen: fnArity(node.params),
+      /* length 一般就是"到第一个默认值为止的形参个数"，但内建的薄包装要能盖掉它 ——
+       * 包装的形参个数是 **op 的**（js_math 收 2 个），而 Math.abs.length 是 1。 */
+      fnLen: extra.fnLen !== undefined ? extra.fnLen : fnArity(node.params),
+      ...(extra.single === true ? { single: true } : {}),
     };
     this.closures.push(rec);   // 先占位：体里的嵌套闭包会往后追加，id 不能变
     // 箭头的表达式体等价于 { return expr; }
@@ -1789,6 +1794,12 @@ class Lower {
      * （每个 realm 一份）。挂上去的东西读得回来；内建（Math / JSON …）不在它身上 ——
      * 那是画出来的边界，不是悄悄给个空对象。用户自己声明了同名变量的话上面就接住了。 */
     if (e.name === 'globalThis') return op('js_global_this', []);
+    /* 全局内建函数当值用（见 builtinFnValue）：`[1,2].map(Number)` /
+     * `["1","2"].map(parseInt)`（后者照规范是 [1, NaN, NaN] —— 第二个实参是下标，
+     * 被当成了进制）。这一格要在 STATIC_NS 之前 —— `Number` / `String` 既是命名空间
+     * 也是函数，**当值用时是那个函数**。 */
+    const gv = Object.hasOwn(GLOBAL_CALLS, e.name) ? GLOBAL_CALLS[e.name] : undefined;
+    if (gv !== undefined && gv.len !== undefined) return this.builtinFnValue(e.name, e, e.name, gv);
     if (STATIC_NS.has(e.name)) {
       this.err(e.span, `'${e.name}' can only be used as a member base, e.g. ${e.name}.something`);
       return undefExpr();
@@ -2098,10 +2109,49 @@ class Lower {
       if (!e.computed && e.object.type === 'Member' && this.staticPrefix(e.object)) {
         return op('js_obj_get', [this.member(e.object), s16(e.name)]);
       }
+      // 内建静态面当值用：`const f = Object.keys` —— 只认表里标了 len 的那些（见 builtinFnValue）
+      const fv = Object.hasOwn(STATIC_CALLS, path) ? STATIC_CALLS[path] : undefined;
+      if (fv !== undefined && fv.len !== undefined) return this.builtinFnValue(path, e, e.name, fv);
+      /* 内建函数值上的属性读：`Math.abs.name` / `Object.assign.length` —— 前半段求成那个
+       * 薄包装的值，后半段就是普通的属性读（与上面 `X.prototype.m` 那一条同一个形状）。 */
+      if (!e.computed && e.object.type === 'Member') {
+        const base = this.staticPath(e.object);
+        const bs = base !== null && Object.hasOwn(STATIC_CALLS, base) ? STATIC_CALLS[base] : undefined;
+        if (bs !== undefined && bs.len !== undefined) {
+          return this.memberOn(this.builtinFnValue(base, e.object, e.object.name, bs), e);
+        }
+      }
       this.err(e.span, `'${path}' is not in the closed ABI (ADR-0011 decision 2)`);
       return undefExpr();
     }
     return this.onObject(e.object, e.optional, (obj) => this.memberOn(obj, e));
+  }
+
+  /**
+   * 内建函数**当值用**（ADR-0020 P1-f）：`const f = Object.keys` / `[1,2].map(Number)`。
+   *
+   * 造一个薄包装 —— 形参就是 op 的那几个，体是**原封不动的那一句调用**，于是补 undefined、
+   * lit、pre、usesJobs 全都还走 abiCall 那条路，不必在这儿复述一遍。
+   *
+   * 只有表里标了 `len` 的名字有这一格：`len` 是 **JS 那侧的 arity**，和 op 的形参个数不是
+   * 一回事（js_math 收 2 个，而 `Math.abs.length` 是 1）。没标的照旧当场报错 —— 给一个
+   * length 会撒谎的值是退步。
+   *
+   * `single: true` 与顶层函数当值用同一个理由：`Object.keys === Object.keys` 要为真。
+   */
+  builtinFnValue(key, callee, name, spec) {
+    const hit = this.builtinFns.get(key);
+    if (hit) return this.makeClosure(hit);
+    const sp = callee.span;
+    const ps = [];
+    for (let i = 0; i < spec.argc; i++) ps.push({ type: 'Ident', name: `_b${i}`, span: sp });
+    const arrow = {
+      type: 'Arrow', params: ps, rest: null, expression: true, span: sp,
+      body: { type: 'Call', callee, args: ps.map((p) => ({ ...p })), optional: false, span: sp },
+    };
+    const rec = this.closureOf(arrow, name, { fnName: name, fnLen: spec.len, single: true });
+    this.builtinFns.set(key, rec);
+    return this.makeClosure(rec);
   }
 
   /**
@@ -2762,22 +2812,25 @@ const CTOR_NAMES = new Set(['Map', 'Set', 'WeakMap', 'WeakSet', 'Array', 'ArrayB
   'Uint8Array', 'DataView', 'TextEncoder', 'RegExp', 'Promise', 'Proxy', 'Date']);
 
 const STATIC_CALLS = {
-  'JSON.stringify': { op: 'js_json_stringify', argc: 3 },
+  /* `len` 那一列：这个名字**当值用**时的 `fn.length`（照规范/qjs 量的），标了才允许
+     `const f = Object.keys` 这种写法（见 builtinFnValue）。它和 `argc` 不是一回事 ——
+     argc 是 op 的形参个数。收可变实参的那几格（fold / join）不标：包装摊不开。 */
+  'JSON.stringify': { op: 'js_json_stringify', argc: 3, len: 3 },
   // parse 的第二个实参是 reviver（ADR-0020 P4）：自底向上走一遍，undefined 删格
-  'JSON.parse': { op: 'js_json_parse', argc: 2 },
-  'Math.abs': { op: 'js_math', argc: 2, lit: { op: 'a' } },
-  'Math.trunc': { op: 'js_math', argc: 2, lit: { op: 't' } },
-  'Math.floor': { op: 'js_math', argc: 2, lit: { op: 'f' } },
-  'Math.ceil': { op: 'js_math', argc: 2, lit: { op: 'c' } },
-  'Math.max': { op: 'js_math', argc: 2, lit: { op: 'M' } },
-  'Math.min': { op: 'js_math', argc: 2, lit: { op: 'm' } },
+  'JSON.parse': { op: 'js_json_parse', argc: 2, len: 2 },
+  'Math.abs': { op: 'js_math', argc: 2, lit: { op: 'a' }, len: 1 },
+  'Math.trunc': { op: 'js_math', argc: 2, lit: { op: 't' }, len: 1 },
+  'Math.floor': { op: 'js_math', argc: 2, lit: { op: 'f' }, len: 1 },
+  'Math.ceil': { op: 'js_math', argc: 2, lit: { op: 'c' }, len: 1 },
+  'Math.max': { op: 'js_math', argc: 2, lit: { op: 'M' }, len: 2 },
+  'Math.min': { op: 'js_math', argc: 2, lit: { op: 'm' }, len: 2 },
   // fround（ADR-0017 第一刀）：MIR 的 f32 语义就是"按 double 算完再舍一次到单精度"，
   // 而闭包解释器要在**我们自己编出来的**编译器里也这么算 —— 所以它必须进封闭 ABI。
   'Math.fround': { op: 'js_math', argc: 2, lit: { op: 'F' } },
   /* 超越函数那一族（ADR-0020 P4）：选择子早就在 js_math 里（核心方言的 (rmath …) 用着），
      缺的只是这张表里的名字。**Math.round 不在这儿** —— js_math 的 'r' 是 C 的 round
      （离零舍入），而 Math.round 是"半数往上"，两者在 -0.5 上就分叉。 */
-  'Math.sqrt': { op: 'js_math', argc: 2, lit: { op: 's' } },
+  'Math.sqrt': { op: 'js_math', argc: 2, lit: { op: 's' }, len: 1 },
   // clz32：先 ToUint32 再数前导零。JS 的 Math.clz32 与 C 那份都走这一格（不是 __builtin_clz，
   // 那个在 0 上是未定义的）
   'Math.clz32': { op: 'js_math', argc: 2, lit: { op: 'Z' } },
@@ -2802,60 +2855,60 @@ const STATIC_CALLS = {
   'Math.acosh': { op: 'js_math', argc: 2, lit: { op: 'K' } },
   'Math.atanh': { op: 'js_math', argc: 2, lit: { op: 'L' } },
   // pow 与 `**` 是同一件事（规范里两者都是 ToNumber 之后求幂），所以它就是那条算术 op
-  'Math.pow': { op: 'js_arith', argc: 2, lit: { op: 'p' } },
+  'Math.pow': { op: 'js_arith', argc: 2, lit: { op: 'p' }, len: 2 },
   // imul 是**32 位乘法**，不是 `Math.*` 那一族：它属于 i32 那三条 op（ADR-0013 第三刀）。
   // `a * b` 先在 double 里丢精度，再折回 i32 已经错了 —— 这正是 `js_i32_op` 的 '*' 那一格。
   'Math.imul': { op: 'js_i32_op', argc: 2, pre: ['*'] },
-  'Object.keys': { op: 'js_obj_keys', argc: 1 },
-  'Object.values': { op: 'js_obj_values', argc: 1 },
-  'Object.entries': { op: 'js_obj_entries', argc: 1 },
-  'Object.assign': { op: 'js_obj_assign', argc: 2 },
+  'Object.keys': { op: 'js_obj_keys', argc: 1, len: 1 },
+  'Object.values': { op: 'js_obj_values', argc: 1, len: 1 },
+  'Object.entries': { op: 'js_obj_entries', argc: 1, len: 1 },
+  'Object.assign': { op: 'js_obj_assign', argc: 2, len: 2 },
   /* ---- 真对象那一族（ADR-0020 P1）。`hasOwn` 从前接的是 js_obj_has，而那一条现在
      沿原型链走（`in` 的语义）—— 自有属性得问 js_obj_has_own，不然继承来的键也算"自有"。 */
-  'Object.hasOwn': { op: 'js_obj_has_own', argc: 2 },
+  'Object.hasOwn': { op: 'js_obj_has_own', argc: 2, len: 2 },
   'Object.create': { op: 'js_obj_new_p', argc: 1 },
-  'Object.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1 },
+  'Object.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1, len: 1 },
   'Object.setPrototypeOf': { op: 'js_obj_proto_set', argc: 2 },
   'Object.defineProperty': { op: 'js_obj_def', argc: 3 },
   'Object.getOwnPropertyDescriptor': { op: 'js_obj_desc', argc: 2 },
   'Object.getOwnPropertyNames': { op: 'js_obj_own_keys', argc: 1, lit: { sel: 's' } },
   'Object.getOwnPropertySymbols': { op: 'js_obj_own_keys', argc: 1, lit: { sel: 'y' } },
-  'Object.freeze': { op: 'js_obj_freeze', argc: 1 },
+  'Object.freeze': { op: 'js_obj_freeze', argc: 1, len: 1 },
   'Object.seal': { op: 'js_obj_seal', argc: 1 },
   'Object.preventExtensions': { op: 'js_obj_prevent_ext', argc: 1 },
   'Object.isFrozen': { op: 'js_obj_is_frozen', argc: 1 },
   'Object.isSealed': { op: 'js_obj_is_sealed', argc: 1 },
   'Object.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
-  'Object.fromEntries': { op: 'js_obj_from_entries', argc: 1 },
+  'Object.fromEntries': { op: 'js_obj_from_entries', argc: 1, len: 1 },
   'Symbol.for': { op: 'js_sym_for', argc: 1 },
   'Symbol.keyFor': { op: 'js_sym_key_for', argc: 1 },
   'Reflect.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1 },
   'Reflect.setPrototypeOf': { op: 'js_obj_proto_set', argc: 2 },
   'Reflect.defineProperty': { op: 'js_obj_def', argc: 3 },
   'Reflect.getOwnPropertyDescriptor': { op: 'js_obj_desc', argc: 2 },
-  'Reflect.ownKeys': { op: 'js_obj_own_keys', argc: 1, lit: { sel: 'a' } },
-  'Reflect.has': { op: 'js_obj_has_p', argc: 2 },
-  'Reflect.get': { op: 'js_getp', argc: 2 },
-  'Reflect.set': { op: 'js_setp', argc: 3 },
+  'Reflect.ownKeys': { op: 'js_obj_own_keys', argc: 1, lit: { sel: 'a' }, len: 1 },
+  'Reflect.has': { op: 'js_obj_has_p', argc: 2, len: 2 },
+  'Reflect.get': { op: 'js_getp', argc: 2, len: 2 },
+  'Reflect.set': { op: 'js_setp', argc: 3, len: 3 },
   'Reflect.deleteProperty': { op: 'js_obj_del_p', argc: 2 },
   'Reflect.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
   'Reflect.preventExtensions': { op: 'js_obj_prevent_ext', argc: 1 },
-  'Array.isArray': { op: 'js_arr_is_array', argc: 1 },
-  'Array.from': { op: 'js_arr_from', argc: 1 },
+  'Array.isArray': { op: 'js_arr_is_array', argc: 1, len: 1 },
+  'Array.from': { op: 'js_arr_from', argc: 1, len: 1 },
   'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1, fold: 'js_add' },
   'String.fromCodePoint': { op: 'js_str_of_code_point', argc: 1 },
-  'Number.isNaN': { op: 'js_num_is_nan', argc: 1 },
-  'Number.isFinite': { op: 'js_num_is_finite', argc: 1 },
-  'Number.isInteger': { op: 'js_num_is_integer', argc: 1 },
-  'Number.parseInt': { op: 'js_num_parse_int', argc: 2 },
-  'Number.parseFloat': { op: 'js_num_parse_float', argc: 1 },
+  'Number.isNaN': { op: 'js_num_is_nan', argc: 1, len: 1 },
+  'Number.isFinite': { op: 'js_num_is_finite', argc: 1, len: 1 },
+  'Number.isInteger': { op: 'js_num_is_integer', argc: 1, len: 1 },
+  'Number.parseInt': { op: 'js_num_parse_int', argc: 2, len: 2 },
+  'Number.parseFloat': { op: 'js_num_parse_float', argc: 1, len: 1 },
   // Date.now()：就是宿主时钟那一格 op，不必造一格 Date 对象
-  'Date.now': { op: 'js_now_ms', argc: 0 },
+  'Date.now': { op: 'js_now_ms', argc: 0, len: 0 },
   // Promise 的三个静态面（ADR-0020 P2）。用到它们就要在 main 末尾排一次微任务队列，
   // 所以 abiCall 里对这几个 op 打一下 usesJobs
-  'Promise.resolve': { op: 'js_promise_resolved', argc: 1 },
-  'Promise.reject': { op: 'js_promise_rejected', argc: 1 },
-  'Promise.all': { op: 'js_promise_all', argc: 1 },
+  'Promise.resolve': { op: 'js_promise_resolved', argc: 1, len: 1 },
+  'Promise.reject': { op: 'js_promise_rejected', argc: 1, len: 1 },
+  'Promise.all': { op: 'js_promise_all', argc: 1, len: 1 },
   'BigInt.asIntN': { op: 'js_bigint_as_int_n', argc: 2 },
   'BigInt.asUintN': { op: 'js_bigint_as_uint_n', argc: 2 },
   'process.cwd': { op: 'js_proc_cwd', argc: 0 },
@@ -2932,11 +2985,11 @@ const REALM_CTORS = new Set([
 ]);
 
 const GLOBAL_CALLS = {
-  String: { op: 'js_str', argc: 1 },
-  Number: { op: 'js_num_of', argc: 1 },
-  BigInt: { op: 'js_bigint_of', argc: 1 },
-  parseInt: { op: 'js_num_parse_int', argc: 2 },
-  parseFloat: { op: 'js_num_parse_float', argc: 1 },
+  String: { op: 'js_str', argc: 1, len: 1 },
+  Number: { op: 'js_num_of', argc: 1, len: 1 },
+  BigInt: { op: 'js_bigint_of', argc: 1, len: 1 },
+  parseInt: { op: 'js_num_parse_int', argc: 2, len: 2 },
+  parseFloat: { op: 'js_num_parse_float', argc: 1, len: 1 },
   // Symbol(desc)（ADR-0020 P1）。**不是构造器** —— `new Symbol()` 在 JS 里是 TypeError，
   // 这儿也就只有调用这一条路。
   Symbol: { op: 'js_sym_new', argc: 1 },

@@ -450,7 +450,14 @@ class Interp {
     // （xs.map(f) 之类）拿到它才能直接调（ADR-0013 决策 3）。fp 收到的那条 list 是
     // **实参表**：JS 域的函数体只有一个形参，绑的就是整条表，所以要再包一层；Omni 域的
     // 函数体形参是按位置绑的，那条表本身就是位置实参。判据在模块上（lower.js 的 js: true）。
-    if (this.mod.js === true) return wrapFn((self, args) => this.callFunc(body, caps, [args]));
+    //
+    // 单件那一格**两条路都要落**：从前 JS 那条在这儿就 return 了，于是 `f === f` 在这条腿上
+    // 是假，而两个后端都是真（量出来的：tests/js-exec 的 21-builtin-fn-value 印 `same false`）。
+    if (this.mod.js === true) {
+      const jf = wrapFn((self, args) => this.callFunc(body, caps, [args]));
+      if (def.single === true && def.captures.length === 0) def.$one = jf;
+      return jf;
+    }
     const fv = wrapFn((self, args) => this.callFunc(body, caps, args));
     if (def.single === true && def.captures.length === 0) def.$one = fv;
     return fv;
