@@ -359,6 +359,24 @@ class JsParser {
       init = { type: 'VarDecl', kind: declKind, decls, span: this.spanFrom(kwTok) };
       this.expect(';');
     } else {
+      /* `for (k in o)`（没有声明、目标是个名字）：不能先 this.expression() —— `in` 会被
+       * 当成**二元运算符**吃掉（`k in o` 是个表达式），于是后面的 `)` 就对不上了。
+       * 名字 + in/of 这一种形状先接住；别的形状（`[a, b] of xs`）照旧走下面那条，
+       * 那儿只有 `of`，不与二元运算符打架。 */
+      const t0 = this.cur();
+      const t1 = this.peek(1);
+      if (t0.kind === 'ident' && t1 && (t1.value === 'in' || t1.value === 'of')) {
+        const target = { type: 'Ident', name: t0.value, span: t0.span };
+        this.next();
+        const kind = this.next().value;
+        const right = this.assignExpr();
+        this.expect(')');
+        const body = this.statement();
+        return {
+          type: kind === 'of' ? 'ForOf' : 'ForIn',
+          declKind: null, left: target, right, body, await: isAwait, span: this.spanFrom(start),
+        };
+      }
       const e = this.expression();
       if (this.at('of') || this.at('in')) {
         const kind = this.next().value;

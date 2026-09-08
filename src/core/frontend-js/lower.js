@@ -1612,8 +1612,11 @@ class Lower {
    * "循环体里改容器"—— 记在 ADR-0020 里，等 P2 的生成器把惰性形态带进来。
    */
   forOf(s, seqOf = () => op('js_iter', [this.expr(s.right)])) {
-    if (!s.declKind) {
-      this.err(s.span, 'for-of over an existing variable is not supported; declare the loop variable');
+    /* 没有声明的 for-of / for-in（`for (x of xs)`、`for (k in o)`）：每轮往一个**已经
+     * 存在的**名字上写。目标只收名字 —— 成员目标（`for (o.k of xs)`）要把接收者提成
+     * 临时量（走 sink），而这儿是循环体里的一句，提出去就跑到循环外面了。 */
+    if (!s.declKind && s.left.type !== 'Ident') {
+      this.err(s.span, "for-of / for-in over an existing target is only supported for a plain name; declare the loop variable, or assign inside the body");
       return [];
     }
     this.pushScope();
@@ -1624,7 +1627,14 @@ class Lower {
     const step = assign(varRef(i), op('js_add', [varRef(i), constReal(1)]));
     this.fn.loops++;
     this.fn.oloops++;
-    const inner = this.bindPattern(s.left, op('js_idx_get', [varRef(it), varRef(i)]));
+    const elem = () => op('js_idx_get', [varRef(it), varRef(i)]);
+    let inner;
+    if (s.declKind) {
+      inner = this.bindPattern(s.left, elem());
+    } else {
+      const lv = this.lvalue(s.left, s.span);
+      inner = lv ? [exprStmt(lv.set(elem()))] : [];
+    }
     const body = this.bodyBlock(s.body);
     this.fn.oloops--;
     this.fn.loops--;

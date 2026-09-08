@@ -120,3 +120,19 @@ scan: while (m < 10) {
   tally = tally + m;
 }
 console.log(tally + " " + m);
+
+/* 没有声明的 for-of / for-in（`for (x of xs)`、`for (k in o)`）：每轮往一个**已经存在的**
+   名字上写，循环之后那个名字留着最后一轮的值。`for (k in o)` 从前连解析都过不去 ——
+   this.expression() 会把 `k in o` 当成二元 in 表达式吃掉，所以"名字 + in/of"这一种形状
+   现在在 for 头部先接住。 */
+let fx;
+const fxs = [];
+for (fx of [1, 2, 3]) fxs.push(fx);
+console.log(`fx ${fxs.join(",")} ${fx}`);
+let fk;
+const fks = [];
+for (fk in { a: 1, b: 2 }) fks.push(fk);
+console.log(`fk ${fks.join(",")} ${fk}`);
+let fs2 = "";
+for (fx of "ab") fs2 = fs2 + fx + "|";
+console.log(`fs ${fs2} ${fx}`);
