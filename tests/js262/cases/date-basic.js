@@ -18,3 +18,16 @@ console.log(d1 - d0, d1 > d0, typeof String(d1));
 // Date.now() 就是宿主时钟
 console.log(typeof Date.now(), Date.now() > 1700000000000);
 console.log(typeof new Date().getTime());
+/* new Date 的另两种形状：一个**串**（走 Date.parse）与 (y, mo[, d, h, mi, s, ms])
+   那一族（本地时区，缺的格子补 1/0）。从前两种都在降级那儿当场报。
+   本地时区那一族只验"存进去再取出来"，不印 ISO —— 那会随机器的时区变。 */
+const local = new Date(2024, 0, 15, 10, 30, 45, 500);
+console.log(local.getFullYear(), local.getMonth(), local.getDate());
+console.log(local.getHours(), local.getMinutes(), local.getSeconds(), local.getMilliseconds());
+const short = new Date(2024, 5);
+console.log(short.getFullYear(), short.getMonth(), short.getDate(), short.getHours());
+const fromStr = new Date("2024-01-15T00:00:00Z");
+console.log(fromStr.getTime(), fromStr.toISOString(), Date.parse("2024-01-15T00:00:00Z"));
+console.log(new Date("nope").getTime(), Number.isNaN(Date.parse("nope")));
+console.log(new Date(0) instanceof Date, new Date(0) instanceof Object, ({}) instanceof Date);
+console.log(new Date("2024-01-15T00:00:00Z").getUTCFullYear(), new Date(86400000).getTime());

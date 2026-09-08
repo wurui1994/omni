@@ -3140,16 +3140,20 @@ class Lower {
       return op('js_buf_view', [as[0], as[1] ?? undefExpr(), as[2] ?? undefExpr()]);
     }
     /* new Date(...)（ADR-0020 P4）：一格真对象，毫秒在隐藏槽里，取值面挂在 realm 的
-     * dateP 上（见 prelude）。只收两种形状 —— 不给实参（当下）与一个毫秒数；
-     * 字符串解析与 (y, m, d, …) 那一族还没做，当场报，不悄悄给个错的时刻。 */
+     * dateP 上（见 prelude）。三种形状：不给实参（当下）、一个实参（毫秒数**或串** ——
+     * 串走 Date.parse，运行期看标签决定）、以及 (y, mo[, d, h, mi, s, ms]) 那一族
+     * （本地时区，缺的格子补 1/0）。展开还是当场报：定长的 op 表达不了。 */
     if (n === 'Date' && !this.lookup(n) && !this.classes.has(n)) {
-      if (e.args.length === 0) return op('js_date_new', [op('js_now_ms', [])]);
-      if (e.args.length === 1 && e.args[0].type !== 'Spread') {
-        return op('js_date_new', [this.expr(e.args[0])]);
+      const sp = e.args.find((a) => a.type === 'Spread');
+      if (sp !== undefined) {
+        this.err(sp.span, "spread is not supported in a 'new Date' call");
+        return undefExpr();
       }
-      this.err(e.span, "'new Date' takes no argument or a millisecond timestamp here;"
-        + ' the string and (year, month, day, ...) forms are not lowered');
-      return undefExpr();
+      if (e.args.length === 0) return op('js_date_new', [op('js_now_ms', [])]);
+      if (e.args.length === 1) return op('js_date_new', [this.expr(e.args[0])]);
+      const as = this.seq(e.args, (a) => this.expr(a));
+      const at = (i) => as[i] ?? undefExpr();
+      return op('js_date_new', [op('js_date_parts', [at(0), at(1), at(2), at(3), at(4), at(5), at(6)])]);
     }
     /* new RegExp(src[, flags])（ADR-0011 决策 10）：模式与旗标是**运行期的串** ——
      * 字面量那条路在 expr() 里，这一支是"现搭一格正则对象"。第二个实参缺席就是无旗标。 */
@@ -3612,6 +3616,8 @@ const STATIC_CALLS = {
   'Number.parseFloat': { op: 'js_num_parse_float', argc: 1, len: 1 },
   // Date.now()：就是宿主时钟那一格 op，不必造一格 Date 对象
   'Date.now': { op: 'js_now_ms', argc: 0, len: 0 },
+  // Date.parse(串)：交出毫秒（认不出来是 NaN）。new Date(串) 走的是同一条解析
+  'Date.parse': { op: 'js_date_parse', argc: 1, len: 1 },
   // Promise 的三个静态面（ADR-0020 P2）。用到它们就要在 main 末尾排一次微任务队列，
   // 所以 abiCall 里对这几个 op 打一下 usesJobs
   'Promise.resolve': { op: 'js_promise_resolved', argc: 1, len: 1 },
@@ -3695,6 +3701,7 @@ const ERROR_CTORS = new Set([
  * Error 那一族不在这儿：它们走 `$cls` 链（决策 15）。 */
 const REALM_CTORS = new Set([
   'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'Symbol', 'RegExp', 'Map', 'Set',
+  'Date',
 ]);
 
 const GLOBAL_CALLS = {

@@ -3194,11 +3194,23 @@ function $js_date_ms(t) {
   if (typeof v !== "number") $rt_error("this is not a Date");
   return v;
 }
-function $js_date_new(ms) {
+/* new Date(v)：v 是串就**解析**（规范 21.4.2.1 第 4 步 —— ISO 那一套与宿主认的那些），
+   别的先 ToNumber。从前只收毫秒数，串形态在降级那儿当场报。 */
+function $js_date_new(v) {
   const o = $js_obj_new_p($realm().dateP);
-  $js_def_data(o, "$ms", $js_real(ms, "new Date"), true, false, true);
+  const ms = $dynTag(v) === "string" ? Date.parse($js_asS16(v))
+    : $js_real($js_num_of(v), "new Date");
+  $js_def_data(o, "$ms", ms, true, false, true);
   return o;
 }
+/* new Date(y, mo[, d, h, mi, s, ms])：**本地时区**的那一族（规范 21.4.2.1 第 3 步）。
+   缺席的格子照规范补：日是 1，别的是 0。年份 0..99 会被当 19xx（宿主如此，两把尺子一致）。 */
+function $js_date_parts(y, mo, d, h, mi, s, ms) {
+  const num = (v, dflt) => (v === undefined ? dflt : Math.trunc($js_real($js_num_of(v), "new Date")));
+  return new Date(num(y, 1970), num(mo, 0), num(d, 1), num(h, 0), num(mi, 0), num(s, 0), num(ms, 0)).getTime();
+}
+// Date.parse(串)：交出毫秒（认不出来就是 NaN）
+function $js_date_parse(s) { return Date.parse($js_asS16($js_str(s))); }
 function $js_obj_to_string(t) {
   if (t === undefined) return "[object Undefined]";
   if (t === null) return "[object Null]";
@@ -3429,6 +3441,7 @@ function $js_realm_proto(name) {
     case "Set": return r.setP;
     case "RegExp": return r.reP;
     case "Iterator": return r.iterP;
+    case "Date": return r.dateP;
     default: $rt_error("no such builtin prototype: " + name);
   }
 }
