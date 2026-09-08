@@ -263,10 +263,20 @@ static void want_num(int op, omni_dyn a, omni_dyn b) {
   }
 }
 
+/* 非数的原始值先 ToNumber（规范 ApplyStringOrNumericBinaryOperator 第 3 步的 ToNumeric）：
+   "3" * "4" 是 12、true + true 是 2、null + 1 是 1。bigint 不转（混着算照旧由 want_num
+   当场报），判据与 prelude 的 $js_tonum 相同。 */
+static omni_dyn to_num1(omni_dyn v) {
+  if (is_int(v) || v.tag == OMNI_DYN_REAL) return v;
+  return omni_js_num_of(v);
+}
+
 omni_dyn omni_js_add(omni_dyn a, omni_dyn b) {
   if (a.tag == OMNI_DYN_STR16 || b.tag == OMNI_DYN_STR16) {
     return omni_dyn_of_s16(omni_s16_cat(to_s16(a), to_s16(b)));
   }
+  a = to_num1(a);
+  b = to_num1(b);
   want_num('+', a, b);
   if (is_int(a)) return omni_dyn_of_int(omni_add(a.u.i, b.u.i));
   return omni_dyn_of_real(a.u.r + b.u.r);
@@ -288,6 +298,8 @@ static int64_t js_ipow(int64_t a, int64_t b) {
 }
 
 omni_dyn omni_js_arith(int op, omni_dyn a, omni_dyn b) {
+  a = to_num1(a);
+  b = to_num1(b);
   want_num(op, a, b);
   if (is_int(a)) {
     /* 除与取余要看**符号性**：别的运算（- * p）都是回卷的，回卷是模 2^64 的环同态，
@@ -324,8 +336,9 @@ omni_dyn omni_js_neg(omni_dyn a) {
   /* $W(-a)：UINT 走同一支 —— 回卷之后位模式与有符号那一支相同 */
   if (is_int(a)) return omni_dyn_of_int(omni_neg(a.u.i));
   if (a.tag == OMNI_DYN_REAL) return omni_dyn_of_real(-a.u.r);
-  omni_errorf("cannot negate %s", omni_dyn_tag_name(a.tag));
-  return omni_dyn_null();
+  /* 别的一律先 ToNumber（规范 13.5.5：一元负号先 ToNumeric）：-"3" 是 -3、-true 是 -1。
+     判据与 prelude 的 $js_neg 相同 —— 从前这儿是 "cannot negate string"。 */
+  return omni_dyn_of_real(-omni_js_num_of(a).u.r);
 }
 
 /* 位运算只对 int（= BigInt）成立。JS 的 Number 位运算会先截成 int32，

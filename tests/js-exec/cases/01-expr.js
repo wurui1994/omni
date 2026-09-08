@@ -67,3 +67,11 @@ console.log(Object.is(undefined, undefined), Object.is(NaN, 0 / 0), NaN === NaN,
 // 值用模板串印：console.log 直接印 bigint 时 node 会带 n，而这个值域里 bigint 与方言的
 // int64 是同一个标签，C 那条腿分不开（见 prelude 的 $js_disp）。
 console.log(`${5n / 2n} ${-7n % 3n} ${7n / 2n} ${10n / 5n}`);
+
+/* 算术之前的 ToNumber（规范 ApplyStringOrNumericBinaryOperator 第 3 步）：非数的**原始值**
+   先转成 Number。从前一元负号与那四个算术 op 都是当场报错（loud，而两把尺子都给答案）。
+   bigint 与 Number 混着算照旧 loud —— JS 里那是 TypeError。 */
+console.log(-"3", +"4", -"", -"x", -true, -null);
+console.log("3" * "4", "10" / "4", "7" % "4", "2" ** "3", "5" - "2");
+console.log(true + true, null + 1, undefined + 1, true * 3, null - 1, false / 2);
+console.log(1 + "2", "3" + 4, "" + 5, 1 + true, "a" + null, "b" + undefined);

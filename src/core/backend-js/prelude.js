@@ -924,6 +924,8 @@ function $js_add(a, b) {
   a = $js_prim("d", a);
   b = $js_prim("d", b);
   if ($dynTag(a) === "string" || $dynTag(b) === "string") return $js_str(a) + $js_str(b);
+  a = $js_tonum(a);
+  b = $js_tonum(b);
   $js_num2("+", a, b);
   return $dynTag(a) === "int" ? $DW(a + b) : a + b;
 }
@@ -959,10 +961,18 @@ function $js_ipow(a, b) {
   }
   return r;
 }
+/* 非数的原始值先 ToNumber（规范 ApplyStringOrNumericBinaryOperator 第 3 步的 ToNumeric）：
+   "3" * "4" 是 12、true + true 是 2、null + 1 是 1、undefined - 1 是 NaN。bigint 不转
+   —— 混着算在 JS 里是 TypeError，这儿由 $js_num2 当场报。Symbol 也照旧由 $js_num_of 报。
+   从前这两处一律报 "cannot apply '*' to string and string"（loud，而两把尺子都给答案）。 */
+function $js_tonum(v) {
+  const t = $dynTag(v);
+  return t === "int" || t === "real" ? v : $js_num_of(v);
+}
 function $js_arith(op, a, b) {
   // 对象与数组先 ToPrimitive（hint number），与 js_add 那一处同一条规矩
-  a = $js_prim("n", a);
-  b = $js_prim("n", b);
+  a = $js_tonum($js_prim("n", a));
+  b = $js_tonum($js_prim("n", b));
   $js_num2(op, a, b);
   const isInt = $dynTag(a) === "int";
   switch (op) {
@@ -978,7 +988,10 @@ function $js_neg(a) {
   const t = $dynTag(a);
   if (t === "int") return $DW(-a);
   if (t === "real") return -a;
-  $rt_error("cannot negate " + t);
+  /* 别的一律先 ToNumber（规范 13.5.5 的一元负号先 ToNumeric）：-"3" 是 -3、-true 是 -1、
+     -[] 是 -0、-{} 是 NaN。从前这儿直接报"cannot negate string"（loud，但两把尺子都给
+     答案）。bigint 已经在上面那两支里了，所以这儿转的都是 Number。 */
+  return -$js_num_of(a);
 }
 function $js_bitop(op, a, b) {
   const ta = $dynTag(a), tb = $dynTag(b);
