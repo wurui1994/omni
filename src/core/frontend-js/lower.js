@@ -561,6 +561,11 @@ class Lower {
       tries: 0, tryLoops: [],
       // 每层 try 进去时的 OIR 循环层数（带标签的跳转要用它拦"跳过 catch"）
       tryOLoops: [],
+      /* 带 finally 的 try：从体里 return / break / continue 出去要**先跑清理**。
+       * 每层记一格 { unw, rv, loops, switches, oloops }：unw 是"为什么出去"
+       * （1 return / 2 break / 3 continue），rv 是 return 的值，后三个是进 try 时的
+       * 层数快照（用来判断这一句是被里面的循环接住、还是真要跳出 try）。 */
+      finStack: [],
       // 每层 switch 进去时的循环层数，以及那层的"出去之后要 continue"标志位（懒声明）
       switchLoops: [], switchFlags: [],
       // **OIR 的**循环层数，以及每个还在作用域里的标签记下的那一层。
@@ -899,15 +904,26 @@ class Lower {
           ])));
         }
         // 字段在构造器体**之前**、形参绑定之前（规范：字段初始化器看不见构造器的形参）
-        for (const f of fields) {
-          const fname = f.computed ? null : this.keyName(f.key, f.span);
-          const fkey = f.computed ? this.expr(f.key) : this.propKey(fname);
-          const fval = f.value ? this.expr(f.value) : undefExpr();
-          // 私有名那一格不可枚举（理由同 classProtoStmts 里那段说明）
-          pre.push(exprStmt(fname !== null && fname.startsWith('#')
-            ? this.defHidden(this.readEntry(this.lookup('this')), fkey, fval)
-            : op('js_setp', [this.readEntry(this.lookup('this')), fkey, fval])));
+        const fieldStmts = () => {
+          const out = [];
+          for (const f of fields) {
+            const fname = f.computed ? null : this.keyName(f.key, f.span);
+            const fkey = f.computed ? this.expr(f.key) : this.propKey(fname);
+            const fval = f.value ? this.expr(f.value) : undefExpr();
+            // 私有名那一格不可枚举（理由同 classProtoStmts 里那段说明）
+            out.push(exprStmt(fname !== null && fname.startsWith('#')
+              ? this.defHidden(this.readEntry(this.lookup('this')), fkey, fval)
+              : op('js_setp', [this.readEntry(this.lookup('this')), fkey, fval])));
+          }
+          return out;
+        };
+        /* **写了构造器的派生类**：字段要等 super() 回来才初始化（规范 15.7.14），
+         * 所以把那一批挂在栈帧上，由 super(...) 那一处发出来。 */
+        if (ctor && sup !== null && fields.length > 0) {
+          this.fn.fieldsAfterSuper = fieldStmts;
+          return pre;
         }
+        pre.push(...fieldStmts());
         return pre;
       },
     });
@@ -1198,13 +1214,17 @@ class Lower {
       case 'ForIn':
         // for-in（ADR-0020 P3）：与 for-of 同一个形状，只是那一串是"键"
         return this.forOf(s, () => op('js_for_in_keys', [this.expr(s.right)]));
-      case 'Return':
+      case 'Return': {
         // 构造器的 return 只能是空的（值就是实例），别的形状拒掉
         if (this.fn.isCtor) {
           if (s.arg) this.err(s.span, 'a constructor cannot return a value');
-          return [{ kind: 'Return', value: this.readEntry(this.lookup('this')) }];
+          const self = this.readEntry(this.lookup('this'));
+          return this.finAbrupt(1, self) ?? [{ kind: 'Return', value: self }];
         }
-        return [{ kind: 'Return', value: s.arg ? this.expr(s.arg) : undefExpr() }];
+        const rv = s.arg ? this.expr(s.arg) : undefExpr();
+        // 外面套着带 finally 的 try：先记下再 break 出去，清理跑完了才真的 return
+        return this.finAbrupt(1, rv) ?? [{ kind: 'Return', value: rv }];
+      }
       case 'Labeled': {
         // 标签只打在循环上（parser 那边保证）。记下"进了这层循环之后 OIR 有多少层"，
         // 里面的 `break L` 就能算出要跳出几层。
@@ -1216,6 +1236,10 @@ class Lower {
       case 'Break':
         if (s.label) return [{ kind: 'Break', level: this.labelLevel(s, 'break') }];
         if (this.crossesTry()) {
+          /* 跨过 try 的边界：带 finally 的那一层走 unwind 协议（清理跑完了再 break），
+           * 不带 finally 的照旧报错 —— 那一层没有"跑完清理"这一步可挂。 */
+          const u = this.finAbrupt(2);
+          if (u) return u;
           this.err(s.span, "'break' cannot cross a try boundary; restructure the try");
         } else if (this.fn.loops === 0 && this.fn.switches === 0) {
           this.err(s.span, "'break' outside a loop or switch");
@@ -1225,6 +1249,8 @@ class Lower {
         // do-while 摊成 while(true) 之后，continue 会跳过尾部的条件检查
         if (s.label) return [{ kind: 'Continue', level: this.labelLevel(s, 'continue') }];
         if (this.crossesTry()) {
+          const u = this.finAbrupt(3);
+          if (u) return u;
           this.err(s.span, "'continue' cannot cross a try boundary; restructure the try");
         } else if ((this.fn.doWhiles ?? 0) > 0) {
           this.err(s.span, "'continue' inside a do-while is not lowered yet; restructure the loop");
@@ -1640,17 +1666,19 @@ class Lower {
      *   1. 先记下"有没有异常"、把它挪到一格局部量（槽因此清空）；
      *   2. 干净地跑清理；
      *   3. 有的话再抛回去（js_throw 就是"往槽里放"）。
-     * **不收 return/break/continue 从 try 或 catch 里跳出去**：那会绕过清理，而绕过
-     * 清理比报错危险得多。这一条在下面显式查，报的是能照着改的一句话。 */
+     * 从 try / catch 里 **return / break / continue 出去**也不能绕过清理，所以走一格
+     * unwind 协议：记下"为什么出去"（unw：1 return / 2 break / 3 continue）与 return 的
+     * 值，break 出这层合成循环，跑完清理再照记下的那件事接着做。外面还套着带 finally 的
+     * try 时，接着做的那一步又落成"记一次 + 再 break 一层"（见 finAbrupt）。
+     * 带标签的跳转还不收 —— 那要知道跳到哪一层，在 Break/Continue 那儿显式报。 */
+    let unw = null;
     if (s.finalizer) {
-      const where = this.abruptIn(s.block.body) ?? (s.handler ? this.abruptIn(s.handler.body) : null);
-      if (where) {
-        this.err(where.span ?? s.span,
-          "'return' / 'break' / 'continue' out of a try with 'finally' is not lowered; "
-          + 'move the cleanup after the try, or restructure with a flag');
-        return [];
+      const esc = this.abruptIn(s.block.body) ?? (s.handler ? this.abruptIn(s.handler.body) : null);
+      if (esc) {
+        unw = { unw: this.declare('_funw').name, rv: this.declare('_frv').name, used: new Set() };
       }
     }
+    if (unw) this.fn.finStack.push(unw);
     this.fn.tries++;
     this.fn.tryLoops.push(this.fn.loops);
     this.fn.oloops++;   // try 体也摊在一层合成的 while(true) 里
@@ -1692,7 +1720,7 @@ class Lower {
       this.fn.tries--;
     }
     this.popScope();
-    const out = [loop];
+    const out = unw ? [localStmt(unw.unw, constReal(0)), localStmt(unw.rv, undefExpr()), loop] : [loop];
     if (hasCatch) {
       const hbody = wrapCatch ? [{
         kind: 'While',
@@ -1707,6 +1735,7 @@ class Lower {
       });
     }
     if (s.finalizer) {
+      if (unw) this.fn.finStack.pop();
       this.pushScope();
       const has = this.declare('_fhas').name;
       const val = this.declare('_ferr').name;
@@ -1721,8 +1750,50 @@ class Lower {
         then: block([exprStmt(op('js_throw', [varRef(val)]))]),
         otherwise: null,
       });
+      /* 清理跑完了，照记下的那件事接着做。外面还套着带 finally 的 try 时 finAbrupt
+       * 交出的是"再记一次 + 再 break 一层" —— 于是一层层的清理都跑得到。 */
+      if (unw) {
+        const eq = (n) => boolOp('js_eq', [varRef(unw.unw), constReal(n)], { strict: true });
+        if (unw.used.has(1)) {
+          const ret = this.finAbrupt(1, varRef(unw.rv)) ?? [{
+            kind: 'Return',
+            value: this.fn.isMain ? null : varRef(unw.rv),
+          }];
+          out.push({ kind: 'If', cond: eq(1), then: block(ret), otherwise: null });
+        }
+        // break / continue 那两支只有真出现过才发 —— 不然会在"不在循环里"的位置发出来
+        if (unw.used.has(2)) {
+          out.push({ kind: 'If', cond: eq(2), then: block(this.finAbrupt(2) ?? [{ kind: 'Break' }]), otherwise: null });
+        }
+        if (unw.used.has(3)) {
+          out.push({
+            kind: 'If',
+            cond: eq(3),
+            then: block(this.finAbrupt(3) ?? this.continueStmts()),
+            otherwise: null,
+          });
+        }
+      }
     }
     return [block(out)];
+  }
+
+  /**
+   * "从带 finally 的 try 里跳出去"在**当前位置**怎么发：最内层的那格 finally 还没跑，
+   * 所以先把"为什么出去"记进 unw（1 return / 2 break / 3 continue）、return 的值记进 rv，
+   * 再 break 出那一层合成循环 —— 清理就在循环后面。没有这样的 try 就交出 null，
+   * 调用方照原样发 Return / Break / Continue。
+   */
+  finAbrupt(kind, value) {
+    const top = this.fn.finStack[this.fn.finStack.length - 1];
+    if (top === undefined) return null;
+    top.used.add(kind);
+    const tries = this.fn.tryOLoops;
+    const level = this.fn.oloops - tries[tries.length - 1] + 1;
+    const out = [exprStmt(assign(varRef(top.unw), constReal(kind)))];
+    if (kind === 1) out.push(exprStmt(assign(varRef(top.rv), value)));
+    out.push(level > 1 ? { kind: 'Break', level } : { kind: 'Break' });
+    return out;
   }
 
   /**
@@ -2353,11 +2424,23 @@ class Lower {
          * 对象上写。这也是为什么分配那一步放在 `new C()` 那边。 */
         const sup = this.fn.classOf ? this.classes.get(this.fn.classOf)?.superName : null;
         if (sup) {
-          return op('js_call_this', [
+          const call = op('js_call_this', [
             op('js_obj_get', [globalRef(this.globals.get(sup).name), s16(CLASS_INIT_KEY)]),
             this.readEntry(this.lookup('this')),
             box(this.argList(e.args), listType(D)),
           ]);
+          /* 派生类的字段在 **super() 回来之后**才初始化（规范 15.7.14：super 之前 this
+           * 还没绑好）。写了构造器的派生类因此把那一批挪到这儿发 —— 量出来的分叉：
+           * `class B extends A { w = this.x + 100; constructor(){ super(); } }` 里
+           * this.x 是 undefined，因为字段跑在了父类的构造器之前。 */
+          const fieldsAfter = this.fn.fieldsAfterSuper;
+          if (fieldsAfter !== undefined) {
+            this.fn.fieldsAfterSuper = undefined;
+            this.emitPre(exprStmt(call), e.span);
+            for (const st of fieldsAfter()) this.emitPre(st, e.span);
+            return undefExpr();
+          }
+          return call;
         }
         this.err(e.span, "'super(...)' is only available in the constructor of a derived class");
         return undefExpr();

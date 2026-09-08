@@ -2222,6 +2222,16 @@ function $mkRealm() {
   /* 正则对象的 toString（规范 22.2.6.13）：/源/旗标。它住在原型上，所以借方法那条路
      （RegExp.prototype.toString.call(re)）与 String(re) 都落到这一格。 */
   $natm(r.reP, "toString", 0, (t) => "/" + $js_re_source(t) + "/" + $js_re_flags(t));
+  /* Error.prototype.toString（规范 20.5.3.4）：name、有 message 时再接 ": " 与 message。
+     name / message 从**实例**上读（子类会盖掉 name），两格都缺时给 "Error"。 */
+  $natm(r.errP, "toString", 0, (t) => {
+    const n = $js_getp(t, "name", undefined);
+    const m = $js_getp(t, "message", undefined);
+    const ns = n === undefined ? "Error" : $js_str(n);
+    const ms = m === undefined ? "" : $js_str(m);
+    if (ms === "") return ns;
+    return ns === "" ? ms : ns + ": " + ms;
+  });
   /* Date（ADR-0020 P4）：一格真对象，毫秒存在隐藏槽 $ms 里（不可枚举，所以
      Object.keys / JSON.stringify 看不见它）。取值面**转手宿主 Date** —— 本地时区那几格
      因此与宿主一致（qjs 也用本地时区）。只有 JS 那条腿有：C 侧还没有真对象（P1-c），
@@ -3734,8 +3744,10 @@ function $js_check_uncaught() {
   process.exit(70);
 }
 // 异常对象就是普通对象：{ $cls: [类名…，最派生的在前], message }（ADR-0011 决策 15）
+// 原型是 **Error.prototype**（errP）：String(err) 与模板里的 err 要落到它身上的 toString，
+// 不然走的是 Object.prototype 那一格、印出 [object Object]（量出来的分叉）。
 function $js_err_new(msg, cls, opts) {
-  const o = $js_obj_new();
+  const o = $js_obj_new_p($realm().errP);
   $js_obj_set(o, "$cls", cls);
   $js_obj_set(o, "name", cls[0]);
   // message 缺席（new Error() / new Error(undefined)）就是空串 —— 规范里那一格只在
