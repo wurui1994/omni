@@ -21,6 +21,15 @@ export const RUNTIME_DIR = join(installDir(), '..', '..', 'runtime');
  */
 export const JIT_DIR = join(installDir(), '..', '..', 'jit');
 
+/**
+ * 三维那一档 OpenGL 后端（`libomnigl`）的源码目录。**故意与 RUNTIME_DIR 分开**：
+ * `runtimeSources()` 那一堆是所有腿共用、连 tcc 也要编的，而这一份要 GL 那套
+ * `-framework`，塞进去会把 tcc 那条腿带坏（理由写在 omni_r3_gl.c 的文件头）。
+ * cli.js 单独把它编成一个动态库，运行期由 omni_r3.c dlopen；拿不到就回落 CPU 光栅器。
+ */
+export const GL_DIR = join(installDir(), '..', '..', 'runtime-gl');
+
+
 /** 生成的 .c 开头只需要这一行；其余靠 -I RUNTIME_DIR + 链接 runtimeSources() */
 export const RUNTIME_INCLUDE = '#include "omni.h"';
 

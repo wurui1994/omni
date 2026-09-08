@@ -36,7 +36,7 @@ import {
   readText, writeText, exists, readDir, mkdirAll, nowMs, spawn, env, stdout, installDir,
 } from './host/native.js';
 import { join, basename } from './host/path.js';
-import { RUNTIME_DIR, JIT_DIR } from './runtime/c_runtime.js';
+import { RUNTIME_DIR, JIT_DIR, GL_DIR } from './runtime/c_runtime.js';
 import { LIB_DIR } from './module/load.js';
 
 /* 语法与内建表是**数据**，不进二进制：两个语法驱动的前端在 `installDir()/../frontend-*`
@@ -122,6 +122,9 @@ export function bootstrapSelf(o) {
   const rtN = copyTree(RUNTIME_DIR, join(o.outDir, 'runtime'), ['.c', '.h']);
   // JIT 宿主的 C 源码也要带走，否则 N1 的 run-jit 找不到它（布局错，不是编译器错）
   const jitN = copyTree(JIT_DIR, join(o.outDir, 'jit'), ['.c', '.h']);
+  // 三维那一档的 GL 插件源码同理（cli.js 的 glPlugin 现编现用）。不带走只是**少一条腿**：
+  // 那侧找不到源码就回 null，运行时走 CPU 光栅器 —— 所以这一格不进下面的计数断言。
+  copyTree(GL_DIR, join(o.outDir, 'runtime-gl'), ['.c', '.h']);
   // 语法与内建表同理：它们是**数据**、不进二进制，而两个语法驱动的前端在
   // `installDir()/../frontend-*` 底下按名字找（cli.js:248/253/1083）。不带走的话装好的
   // 编译器一跑 `.asy` 就报"找不到 asy 语法文件"—— 同样是布局错，不是编译器错。

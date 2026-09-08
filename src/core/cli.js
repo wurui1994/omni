@@ -61,7 +61,7 @@ import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
-import { RUNTIME_DIR, JIT_DIR, runtimeSources } from './runtime/c_runtime.js';
+import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
 import { interpret } from './interp/eval.js';
@@ -1927,6 +1927,46 @@ function ccFlags(cc) {
 }
 
 /**
+ * 三维那一档的 **OpenGL 后端插件**（`libomnigl`）。照 asy 自己的分法：它的
+ * `libasyopengl.so` / `libasyvulkan.so` 也是运行期 dlopen 的（rendererloader.cc），
+ * 拿不到就回落。所以这一格**只是"顺手编一下"，编不出来不算错** ——
+ * `omni_r3.c` 那侧找不到库就走 CPU 光栅器。
+ *
+ * 为什么不并进 `runtimeObjects()`：那一堆是所有腿共用、连 tcc 也要编的，而这一份要
+ * `-framework OpenGL`。混在一起就等于让 tcc 那条腿也依赖 GL（二进制对齐那把尺子会当场断）。
+ *
+ * 缓存键 = 源码的 mtime/大小 + 编译器；产物落在 `.omni-cache/gl/<key>/libomnigl.dylib`，
+ * 路径**绝对**（子进程的 cwd 不一定是仓库根，相对路径 dlopen 会静默失败）。
+ * 回 null = 这台机器上没有这条腿（不是 macOS、没源码、或者编不过）。
+ */
+function glPlugin() {
+  // macOS 之外还没有实现（上下文那一段是 CGL）。判据用框架目录，不新增宿主 ABI。
+  if (!exists('/System/Library/Frameworks/OpenGL.framework')) return null;
+  if (!isDir(GL_DIR)) return null;
+  const src = join(GL_DIR, 'omni_r3_gl.c');
+  const hdr = join(GL_DIR, 'omni_gl.h');
+  if (!exists(src) || !exists(hdr)) return null;
+  const cc = findClang();
+  const key = hash16([cc, `${mtimeMs(src)}:${fileSize(src)}`,
+    `${mtimeMs(hdr)}:${fileSize(hdr)}`].join('|'));
+  const dir = join(cacheRoot(), 'gl', key);
+  const lib = join(dir, 'libomnigl.dylib');
+  if (exists(lib)) return lib;
+  const stage = workDirFor('gl-stage', key);
+  const staged = join(stage, 'libomnigl.dylib');
+  const r = spawn(cc, ['-O2', '-w', '-dynamiclib', '-o', staged, src,
+    '-I', GL_DIR, '-framework', 'OpenGL'], 'c');
+  if (r[0] !== 0) {
+    vStep(`gl plugin  ${cc} 编不过，这一趟走 CPU 光栅器`);
+    return null;
+  }
+  mkdirAll(join(cacheRoot(), 'gl'));
+  if (!exists(dir)) rename(stage, dir);
+  vStep(`gl plugin  ${exists(lib) ? lib : staged}`);
+  return exists(lib) ? lib : staged;
+}
+
+/**
  * 运行时的 .o 缓存。不缓存就是每次 build 都重编 8 个翻译单元：实测 757ms -> 73ms，10 倍。
  * 自举时编译器要反复重建自己，这条直接决定开发循环还能不能用。
  * 缓存键 = 编译器 + flags + 运行时目录下每个 .c/.h 的 mtime 与大小（改 omni.h 会让全部失效）。
@@ -2025,6 +2065,13 @@ function runViaC(mod, argv, srcPath, cache) {
   const exe = cached === null ? join(dir, 'a.out') : cached;
   const built = buildNative(mod, exe, wi >= 0 ? dir : undefined);
   if (cached !== null) exeCachePut(srcPath, built.cc, lastAsyDeps);
+  /* 三维那一档的 GL 插件：顺手编一下、把**绝对路径**放进环境，子进程 dlopen 它。
+     `OMNI_GL_LIB` 已经给了就不动（标定时要能指别的库）；编不出来就什么都不设，
+     运行时那侧找不到库自然走 CPU 光栅器。 */
+  if (env('OMNI_GL_LIB') === undefined || env('OMNI_GL_LIB') === '') {
+    const lib = glPlugin();
+    if (lib !== null) setEnv('OMNI_GL_LIB', lib);
+  }
   const code = spawn(exe, [], 'i')[0];
   vStep(`exec ${exe}  exit=${code}`);
   return code;
@@ -2536,6 +2583,7 @@ function main(argv) {
       const t = MAP[cmd][b];
       if (t === undefined) {
         /**
+
          * `--backend interp` 该出什么？**「解释器能吃的那份 IR 文件」** —— 这是对的，
          * 与 native 出可执行文件、js 出 `.js` 是同一条契约。
          *
