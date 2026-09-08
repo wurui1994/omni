@@ -98,6 +98,35 @@ function freeJump(node, want, inLoop, inSwitch, top) {
 const hasFreeBC = (n) => freeJump(n, 'bc', false, false, true);
 const hasFreeReturn = (n) => freeJump(n, 'r', false, false, true);
 
+/**
+ * 这一格挂起提得出来吗（见 lift）。两类提不出来：
+ *
+ *   - **惰性位置**：`a || await b`、`c ? await x : y`、`o?.m(await x)` —— 提出来就把
+ *     "可能不算"变成了"一定算"，那是可观察的分叉。
+ *   - **不认的节点**：只认下面这几种"子表达式按次序、无条件求值"的形状；别的照旧报错。
+ */
+function hoistable(e) {
+  if (!e || typeof e !== 'object' || !hasSuspend(e)) return true;
+  if (e.type === 'Await' || e.type === 'Yield') return hoistable(e.arg);
+  // 可选链那一段（`o?.m()`）：短路会跳过实参，所以不提
+  if (e.optional === true) return false;
+  if (e.type === 'Logical' && hasSuspend(e.right)) return false;
+  if (e.type === 'Cond' && (hasSuspend(e.cons) || hasSuspend(e.alt))) return false;
+  /* 没有 type 的那些是**结构节点**（对象字面量的 prop、声明的 decl…）：它们不是表达式，
+   * 往里看就行。方法那一格在 isFnBoundary 那儿就断了，落不到这里。 */
+  if (e.type !== undefined && !HOISTABLE_KINDS.has(e.type)) return false;
+  if (e.type === 'Assign' && !(e.op === '=' && e.target.type === 'Ident')) return false;
+  // 对象字面量：只认普通的 key: value 那一格（方法体里的挂起属于里面那个函数）
+  if (e.type === 'Object' && e.props.some((p) => hasSuspend(p) && (p.method === true || p.kind !== 'init'))) return false;
+  let all = true;
+  eachChild(e, (x) => { if (all) all = hoistable(x); });
+  return all;
+}
+const HOISTABLE_KINDS = new Set([
+  'Call', 'New', 'Member', 'Binary', 'Logical', 'Cond', 'Unary',
+  'Array', 'Object', 'Template', 'Seq', 'Assign', 'Spread',
+]);
+
 
 /* ---- 造 AST 的那几件小工具（形状按 parser.js 里的字面量来） ---- */
 
@@ -201,6 +230,99 @@ class Split {
     return n;
   }
 
+  /* 把**表达式里面**的 yield / await 提到语句层（`console.log(await f())`）。
+   * 交出 { pre, expr }：pre 是要先跑的那几句（里面还带着挂起，交给 stmts 去切段），
+   * expr 是把挂起换成临时量之后的那一格表达式。提不出来（惰性位置、不认的节点）给 null，
+   * 调用方照旧报那句"写成自己一句"。
+   *
+   * 次序是这里唯一要小心的地方：**最后一处挂起之前的子表达式也要落进临时量**，
+   * 不然它们会被推到 await 之后才算 —— `f(g(), await h())` 里的 g() 就是那一格。 */
+  lift(e, sp) {
+    if (!hoistable(e)) return null;
+    const pre = [];
+    const expr = this.hoistExpr(e, pre);
+    return { pre, expr: expr === null ? e : expr, span: sp };
+  }
+
+  /** 一个不含挂起的子表达式：先算出来存进临时量（保住求值次序） */
+  spill(x, pre) {
+    if (x === null || x === undefined) return x;
+    if (hasSuspend(x)) return this.hoistExpr(x, pre);
+    if (x.type === 'Ident' || x.type === 'Num' || x.type === 'Str' || x.type === 'Lit') return x;
+    const sp = x.span;
+    const t = this.temp('h');
+    pre.push(exprStmt(assign(ident(t, sp), x, sp), sp));
+    return ident(t, sp);
+  }
+
+  /** 一串按次序求值的位置（实参、数组的格子、模板的插值） */
+  hoistList(xs, pre) {
+    let last = -1;
+    for (let i = 0; i < xs.length; i++) if (xs[i] && hasSuspend(xs[i])) last = i;
+    return xs.map((x, i) => {
+      if (x === null || x === undefined) return x;
+      if (x.type === 'Spread') {
+        if (i < last) return { ...x, arg: this.spill(x.arg, pre) };
+        return hasSuspend(x) ? { ...x, arg: this.hoistExpr(x.arg, pre) } : x;
+      }
+      if (i < last) return this.spill(x, pre);
+      if (i === last) return this.hoistExpr(x, pre);
+      return x;
+    });
+  }
+
+  hoistExpr(e, pre) {
+    if (!hasSuspend(e)) return e;
+    const sp = e.span;
+    if (e.type === 'Await' || e.type === 'Yield') {
+      const arg = e.arg && hasSuspend(e.arg) ? this.hoistExpr(e.arg, pre) : e.arg;
+      const t = this.temp('h');
+      pre.push(exprStmt(assign(ident(t, sp), { ...e, arg }, sp), sp));
+      return ident(t, sp);
+    }
+    switch (e.type) {
+      case 'Call': case 'New': {
+        /* 被调用的那一格先算：成员形态只把**接收者**（与计算键）落进临时量，保住
+         * `o.m(await x)` 里的 this；属性本身于是在 await 之后才查一次，那一格与规范
+         * 差一点（规范先查），换来的是不必给方法调用另开一条路。 */
+        let callee = e.callee;
+        if (e.args.some((a) => hasSuspend(a))) {
+          callee = callee.type === 'Member'
+            ? { ...callee, object: this.spill(callee.object, pre), prop: callee.computed ? this.spill(callee.prop, pre) : callee.prop }
+            : this.spill(callee, pre);
+        } else if (hasSuspend(callee)) {
+          callee = this.hoistExpr(callee, pre);
+        }
+        return { ...e, callee, args: this.hoistList(e.args, pre) };
+      }
+      case 'Member':
+        return { ...e, object: this.hoistExpr(e.object, pre), prop: e.computed && hasSuspend(e.prop) ? this.hoistExpr(e.prop, pre) : e.prop };
+      case 'Binary': {
+        const [left, right] = this.hoistList([e.left, e.right], pre);
+        return { ...e, left, right };
+      }
+      case 'Logical':
+        return { ...e, left: this.hoistExpr(e.left, pre) };
+      case 'Cond':
+        return { ...e, test: this.hoistExpr(e.test, pre) };
+      case 'Unary':
+        return { ...e, arg: this.hoistExpr(e.arg, pre) };
+      case 'Array':
+        return { ...e, elements: this.hoistList(e.elements, pre) };
+      case 'Template':
+        return { ...e, exprs: this.hoistList(e.exprs, pre) };
+      case 'Seq':
+        return { ...e, exprs: this.hoistList(e.exprs, pre) };
+      case 'Assign':
+        return { ...e, value: this.hoistExpr(e.value, pre) };
+      case 'Object': {
+        const vals = this.hoistList(e.props.map((p) => p.value), pre);
+        return { ...e, props: e.props.map((p, i) => ({ ...p, value: vals[i] })) };
+      }
+      default: return null;
+    }
+  }
+
   /** 一串语句。返回"接着往下走"的那一段，或者 -1（前面已经跳走了） */
   stmts(list, cur, ctx) {
     let b = cur;
@@ -279,6 +401,12 @@ class Split {
         return cur;
       }
       return this.suspend(e.value, e.target, cur, ctx);
+    }
+    /* 表达式**里面**的挂起（`console.log(await f())`）：提到语句层再走一遍。
+     * 提不出来的（惰性位置、不认的形状）才落到下面那句报错。 */
+    const lifted = this.lift(e, sp);
+    if (lifted && lifted.pre.length > 0) {
+      return this.stmts([...lifted.pre, exprStmt(lifted.expr, sp)], cur, ctx);
     }
     this.err(sp, "'yield' / 'await' in this position is not supported; write it as its own statement ('yield e;' or 'const x = await e;')");
     return cur;
@@ -378,6 +506,13 @@ class Split {
         continue;
       }
       if (hasSuspend(d.init)) {
+        // 初值**里面**的挂起（`const x = 1 + await f();`）：提到语句层再走一遍
+        const lifted = this.lift(d.init, sp);
+        if (lifted && lifted.pre.length > 0) {
+          b = this.stmts([...lifted.pre,
+            exprStmt(assign(ident(d.id.name, sp), lifted.expr, sp), sp)], b, ctx);
+          continue;
+        }
         this.err(sp, "'yield' / 'await' in this position is not supported; write it as its own statement");
         continue;
       }
@@ -397,8 +532,16 @@ class Split {
       if (b < 0) return -1;
       arg = ident(t, sp);
     } else if (s.arg && hasSuspend(s.arg)) {
-      this.err(sp, "'return' of a 'yield' / 'await' is not supported; split it into two statements");
-      return -1;
+      // `return f(await x);` 这类：把挂起提到语句层，再返回换好临时量的那一格
+      const lifted = this.lift(s.arg, sp);
+      if (lifted && lifted.pre.length > 0) {
+        b = this.stmts(lifted.pre, b, ctx);
+        if (b < 0) return -1;
+        arg = lifted.expr;
+      } else {
+        this.err(sp, "'return' of a 'yield' / 'await' is not supported; split it into two statements");
+        return -1;
+      }
     }
     if (ctx.fin >= 0) {
       // 还在 try 里：先把值收好、标上"在为 return 跑 finally"，再跳到 finally 的入口

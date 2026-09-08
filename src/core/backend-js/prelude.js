@@ -1635,9 +1635,22 @@ function $js_obj_get(o, k) {
 // set 返回对象本身，这样对象字面量可以降级成一串链式调用，不需要临时变量
 function $js_obj_set(o, k, v) {
   if ($js_isobj(o)) { $js_setp(o, k, v); return o; }
-  if ($dynTag(o) === "list") { $js_xprops(o, true).set($js_prop(k), v); return o; }
+  if ($dynTag(o) === "list") {
+    const key = $js_hkey(k);
+    /* a.length = n 是**改长度**，不是往旁表里挂一个叫 length 的字段（从前是后者，
+       于是 a.length = 0 静静地什么也没做）。短了截掉，长了补 undefined —— 规范 10.4.2.4。 */
+    if (key === "length") { $js_arr_set_len(o, v); return o; }
+    $js_xprops(o, true).set(key, v);
+    return o;
+  }
   $js_dict_of(o).set($js_prop(k), v);
   return o;
+}
+function $js_arr_set_len(o, v) {
+  const l = $js_arr_of(o), n = Math.trunc($js_real(v, "length"));
+  if (!Number.isFinite(n) || n < 0) $rt_error("invalid array length");
+  if (n < l.length) { l.length = n; return; }
+  while (l.length < n) l.push(undefined);
 }
 function $js_obj_has(o, k) {
   if ($js_isobj(o)) return $js_obj_has_p(o, k);

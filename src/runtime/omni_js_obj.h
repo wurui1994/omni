@@ -96,6 +96,17 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   return d->vals[e]; \
 } \
 static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
+  if (o.tag == OMNI_DYN_LIST && key.len == 6 && memcmp(key.p, "length", 6) == 0) { \
+    /* a.length = n 是**改长度**，不是往旁表里挂一个叫 length 的字段（从前是后者，于是
+       a.length = 0 静静地什么也没做）。短了截掉、长了补 undefined —— 规范 10.4.2.4。 */ \
+    LT l = (LT)o.u.ref; \
+    int64_t n = omni_js_arr_i(v); \
+    if (n < 0) omni_error("invalid array length"); \
+    if (n < l->len) { l->len = n; return o; } \
+    LT##_reserve(l, n); \
+    while (l->len < n) l->items[l->len++] = omni_dyn_undef(); \
+    return o; \
+  } \
   DT##_set(o.tag == OMNI_DYN_LIST ? omni_js_xprops_(o, true) : omni_js_dict_of(o), key, v); \
   return o; \
 } \

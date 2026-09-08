@@ -123,3 +123,16 @@ console.log(`in ${"foo" in inA} ${0 in []} ${"x" in { x: 1 }} ${"y" in { x: 1 }}
 let vo = 0;
 console.log(`void ${String(void 0)} ${String(void (vo = 5))} ${vo}`);
 console.log(`safe ${Number.isSafeInteger(3)} ${Number.isSafeInteger(2 ** 53)} ${Number.isSafeInteger(1.5)} ${Number.isSafeInteger("3")}`);
+
+// a.length = n 是**改长度**（短了截掉、长了补 undefined），不是往数组身上挂一个字段
+const la = [1, 2, 3, 4];
+la.length = 2;
+console.log(`len ${la.join(",")} ${la.length}`);
+la.length = 4;
+console.log(`len ${la.join(",")} ${la.length} ${String(la[3])}`);
+la.length = 0;
+console.log(`len ${la.join(",")}| ${la.length} ${JSON.stringify(la)}`);
+const lb = [1, 2];
+lb.foo = "x";
+lb["length"] = 1;
+console.log(`len ${lb.join(",")} ${lb.foo} ${lb.length}`);

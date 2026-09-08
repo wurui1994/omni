@@ -45,3 +45,10 @@ console.log(String(parseInt("ff", 16)));
 console.log(String(String(12.5)));
 console.log(String((1 / 3).toPrecision(17)));
 console.log(String((255).toString(16)));
+
+// 实参的求值次序：会抛的 op（JSON.stringify）会被提到语句前先算，**它前面那几格也得
+// 跟着提** —— 不然第二格先跑、第一格后跑。量出来的静默分叉，两条腿一起错。
+let ox = 0;
+console.log(ox + 1, JSON.stringify(ox = 5), ox + 1);
+let oy = 0;
+console.log(`${oy + 1}`, JSON.stringify(oy = 7), oy);

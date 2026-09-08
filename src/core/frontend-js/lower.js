@@ -1091,6 +1091,50 @@ class Lower {
   }
 
   /**
+   * 一串**按次序求值**的子表达式（实参、数组的格子、模板的插值…）。
+   *
+   * 会抛的子表达式会被 guard 提到 sink 里（先算进临时量、紧跟一次 pending 检查）。
+   * 只提一格是不够的：提出来的那一格会**跑在它前面那些还内联着的**之前。量出来的：
+   *
+   *   console.log(gi.next().value, JSON.stringify(gi.next(3)))
+   *
+   * 里 JSON.stringify（throws 的 op）落进了 sink，于是第二个 next 先跑，第一个后跑 ——
+   * 生成器于是收到错的 sent 值，而且两条腿会一致地错（**静默分叉**）。
+   *
+   * 所以：谁往 sink 里放了东西，它**前面**那几格就先落进临时量，插在那批 sink 之前。
+   * 常量不必（没有副作用、也读不到别人的写）。
+   */
+  seq(nodes, lowerOne) {
+    const at = [];
+    const out = [];
+    for (const n of nodes) {
+      at.push(this.fn.sink.length);
+      out.push(lowerOne(n));
+    }
+    let pending = [];
+    for (let i = 0; i < out.length; i++) {
+      const start = at[i];
+      const end = i + 1 < at.length ? at[i + 1] : this.fn.sink.length;
+      if (end > start) {
+        if (pending.length > 0) {
+          const stmts = [];
+          for (const j of pending) {
+            const t = this.temp();
+            stmts.push(exprStmt(assign(varRef(t), out[j])));
+            out[j] = varRef(t);
+          }
+          this.fn.sink.splice(start, 0, ...stmts);
+          for (let k = i; k < at.length; k++) at[k] += stmts.length;
+        }
+        pending = [];
+        continue;
+      }
+      if (out[i] && out[i].kind !== 'Const') pending.push(i);
+    }
+    return out;
+  }
+
+  /**
    * 惰性位置（循环条件、for 的 update、Ternary 的分支、&& 的右边）：这里**不能**把
    * 语句提到外面去 —— 提出去就变成每次都算、或者算得太早。碰上需要 sink 的构造就
    * 当场报错，让人把它拆成语句，而不是悄悄改语义。
@@ -2258,17 +2302,17 @@ class Lower {
    */
   argList(args) {
     if (!args.some((a) => a.type === 'Spread')) {
-      return { kind: 'ListLit', type: listType(D), items: args.map((a) => this.expr(a)) };
+      return { kind: 'ListLit', type: listType(D), items: this.seq(args, (a) => this.expr(a)) };
     }
     const parts = [];
     let run = [];
-    for (const a of args) {
-      if (a.type === 'Spread') {
+    for (const a of this.seq(args, (a) => (a.type === 'Spread' ? { spread: this.expr(a.arg) } : this.expr(a)))) {
+      if (a && a.spread !== undefined) {
         if (run.length) { parts.push(arrLit(run)); run = []; }
-        parts.push(op('js_iter', [this.expr(a.arg)]));
+        parts.push(op('js_iter', [a.spread]));
         continue;
       }
-      run.push(this.expr(a));
+      run.push(a);
     }
     if (run.length) parts.push(arrLit(run));
     const joined = parts.reduce((a, b) => op('js_arr_concat', [a, b]));
@@ -2507,8 +2551,7 @@ class Lower {
          那样是一个空格。 */
       if (spec.join !== undefined && spec.argc === 1) {
         let s = null;
-        for (const a of args) {
-          const one = op('js_disp', [this.expr(a)]);
+        for (const one of this.seq(args, (a) => op('js_disp', [this.expr(a)]))) {
           s = s === null ? one : op('js_add', [op('js_add', [s, s16(spec.join)]), one]);
         }
         return op(spec.op, [s === null ? s16('') : s], spec.lit ?? {});
@@ -2520,7 +2563,8 @@ class Lower {
     /* `pre`：op 的**头几个实参是定死的字符串**（不是 `lit` —— 那一格是发射器认的字面量，
        这里是普通的运行期实参）。`Math.imul` 就是这样接到 `js_i32_op` 上的。 */
     if (spec.pre !== undefined) for (const v of spec.pre) lowered.push(s16(v));
-    for (let i = 0; i < spec.argc; i++) lowered.push(i < args.length ? this.expr(args[i]) : undefExpr());
+    const fixed = this.seq(args.slice(0, spec.argc), (a) => this.expr(a));
+    for (let i = 0; i < spec.argc; i++) lowered.push(i < fixed.length ? fixed[i] : undefExpr());
     return op(spec.op, lowered, spec.lit ?? {});
   }
 
