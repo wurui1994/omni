@@ -993,10 +993,25 @@ function $js_neg(a) {
      答案）。bigint 已经在上面那两支里了，所以这儿转的都是 Number。 */
   return -$js_num_of(a);
 }
+/* Number 上的位运算（规范 7.1.6 ToInt32）：先截成 int32，结果是 Number。
+   int（= BigInt / 方言的 int64）这一支不走这儿 —— JS 里 bigint 与 number 混着做位运算是
+   TypeError，而这个值域里两者同一个标签，所以判据只能是"两边都 int 才按 64 位算"。 */
+function $js_toi32(v) {
+  if ($dynTag(v) === "int") return Number(BigInt.asIntN(32, v));
+  return Number($js_num_of(v)) | 0;   // NaN / Infinity 都是 0
+}
 function $js_bitop(op, a, b) {
   const ta = $dynTag(a), tb = $dynTag(b);
   if (ta !== "int" || tb !== "int") {
-    $rt_error("bitwise '" + op + "' requires bigint operands, found " + ta + " and " + tb);
+    const x = $js_toi32(a), y = $js_toi32(b);
+    switch (op) {
+      case "&": return x & y;
+      case "|": return x | y;
+      case "^": return x ^ y;
+      case "<": return x << (y & 31);
+      case ">": return x >> (y & 31);
+      default: $rt_error("unknown bitwise op '" + op + "'");
+    }
   }
   switch (op) {
     case "&": return a & b;
@@ -1009,8 +1024,7 @@ function $js_bitop(op, a, b) {
 }
 // 一元 ~ 单独一个 op：ABI 里所有 op 的实参个数是定的，不做可变长
 function $js_bitnot(a) {
-  const t = $dynTag(a);
-  if (t !== "int") $rt_error("bitwise '~' requires a bigint operand, found " + t);
+  if ($dynTag(a) !== "int") return ~$js_toi32(a);
   return $DW(~a);
 }
 function $js_cmp(op, a, b) {

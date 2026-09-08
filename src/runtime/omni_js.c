@@ -341,12 +341,29 @@ omni_dyn omni_js_neg(omni_dyn a) {
   return omni_dyn_of_real(-omni_js_num_of(a).u.r);
 }
 
-/* 位运算只对 int（= BigInt）成立。JS 的 Number 位运算会先截成 int32，
-   编译器源码不用那条路径，所以这里直接拒绝 real —— 宁可报错也不要静默截断。 */
+/* Number 上的位运算：先 ToInt32（规范 7.1.6），结果是 Number。int（= BigInt）那一支照旧
+   按 64 位算 —— JS 里 bigint 与 number 混着做位运算是 TypeError，而这个值域里两者同一个
+   标签，所以判据只能是"两边都 int 才按 64 位算"。判据与 prelude 的 $js_toi32 相同。 */
+static int32_t to_i32(omni_dyn v) {
+  if (is_int(v)) return (int32_t)(uint32_t)(uint64_t)v.u.i;
+  double d = to_num1(v).u.r;
+  if (!isfinite(d)) return 0;
+  double m = fmod(trunc(d), 4294967296.0);
+  if (m < 0) m += 4294967296.0;
+  return (int32_t)(uint32_t)m;
+}
+
 omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b) {
   if (!is_int(a) || !is_int(b)) {
-    omni_errorf("bitwise '%c' requires bigint operands, found %s and %s", op,
-                omni_dyn_tag_name(a.tag), omni_dyn_tag_name(b.tag));
+    int32_t x = to_i32(a), y = to_i32(b);
+    switch (op) {
+      case '&': return omni_dyn_of_real((double)(x & y));
+      case '|': return omni_dyn_of_real((double)(x | y));
+      case '^': return omni_dyn_of_real((double)(x ^ y));
+      case '<': return omni_dyn_of_real((double)(int32_t)((uint32_t)x << (y & 31)));
+      case '>': return omni_dyn_of_real((double)(x >> (y & 31)));
+      default: omni_errorf("unknown bitwise op '%c'", op);
+    }
   }
   /* 有 UINT 参与时，& | ^ 的结果可能还在 [2^63, 2^64) 里（JS 侧这三个不回卷），
      所以走规范化构造；>> 在 JS 里对非负的 BigInt 是逻辑右移，这里也必须逻辑移。
@@ -376,9 +393,7 @@ omni_dyn omni_js_bitop(int op, omni_dyn a, omni_dyn b) {
 
 /* 一元 ~ 单独一个 op：ABI 里所有 op 的实参个数是定的，不做可变长 */
 omni_dyn omni_js_bitnot(omni_dyn a) {
-  if (!is_int(a)) {
-    omni_errorf("bitwise '~' requires a bigint operand, found %s", omni_dyn_tag_name(a.tag));
-  }
+  if (!is_int(a)) return omni_dyn_of_real((double)(~to_i32(a)));
   /* $W(~a)：UINT 走同一支，回卷之后位模式相同 */
   return omni_dyn_of_int(~a.u.i);
 }

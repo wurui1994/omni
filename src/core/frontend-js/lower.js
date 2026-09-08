@@ -2552,7 +2552,12 @@ class Lower {
    * `single: true` 与顶层函数当值用同一个理由：`Object.keys === Object.keys` 要为真。
    */
   builtinFnValue(key, callee, name, spec) {
-    const hit = this.builtinFns.get(key);
+    /* 缓存的键是"这一格到底是哪个函数"，不是写法：`parseInt` 与 `Number.parseInt` 在规范里
+     * 是**同一个函数对象**（`Number.parseInt === parseInt` 为真），两条写法落到同一个 op、
+     * 同一个 name、同样的 argc/len 上，所以键取那几样。从前键是写法本身，于是同一个内建
+     * 取两次得到两个闭包，`===` 悄悄给 false。 */
+    const ck = `${name}|${spec.op ?? key}|${spec.argc}|${spec.len}`;
+    const hit = this.builtinFns.get(ck);
     if (hit) return this.makeClosure(hit);
     const sp = callee.span;
     const ps = [];
@@ -2562,7 +2567,7 @@ class Lower {
       body: { type: 'Call', callee, args: ps.map((p) => ({ ...p })), optional: false, span: sp },
     };
     const rec = this.closureOf(arrow, name, { fnName: name, fnLen: spec.len, single: true });
-    this.builtinFns.set(key, rec);
+    this.builtinFns.set(ck, rec);
     return this.makeClosure(rec);
   }
 

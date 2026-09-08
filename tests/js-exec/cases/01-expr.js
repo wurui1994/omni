@@ -75,3 +75,10 @@ console.log(-"3", +"4", -"", -"x", -true, -null);
 console.log("3" * "4", "10" / "4", "7" % "4", "2" ** "3", "5" - "2");
 console.log(true + true, null + 1, undefined + 1, true * 3, null - 1, false / 2);
 console.log(1 + "2", "3" + 4, "" + 5, 1 + true, "a" + null, "b" + undefined);
+/* Number 上的位运算：两边先 ToInt32（规范 7.1.6），结果是 Number。从前这一族当场报
+   "requires bigint operands" —— bigint 那一支照旧按 64 位算（两者在这个值域里同一个标签，
+   所以判据是"两边都 int 才走 64 位"）。 */
+console.log(~5, ~~-1.5, ~NaN, 5 & 3, 5 | 3, 5 ^ 3);
+console.log(1 << 31, (1 << 31) >>> 0, -5 >>> 0, -1 >> 1, 1 << 33, 8 >> 33);
+// 数组当操作数（`[] | 0`）只在 js262 那边量：C 那条腿还没有对象到原始值的转换（P1-c）
+console.log("5" & 3, true & 1, null | 0, undefined | 0, 4294967296 | 0, 1e21 | 0);
