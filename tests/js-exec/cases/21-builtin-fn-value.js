@@ -15,3 +15,13 @@ console.log(`same ${Math.abs === Math.abs} ${Math.abs === Math.floor}`);
 const sq = Math.sqrt;
 console.log(`sqrt ${sq(16)} ${sq(2) > 1.414}`);
 console.log(`str ${[1, true].map(String).join("|")}`);
+
+// 可变实参与展开（同一刀）：op 是定长的，所以 3 个以上摊成一串两两调用、展开则是
+// "整条实参表先求成 list，再按形状接下去"。这几行在 C 那条腿上走的是 js_arr_reduce /
+// js_arr_map / js_arr_at 加一格就地合成的闭包 —— 所以必须在这儿量。
+console.log(`vmax ${Math.max(1, 2, 3)} ${Math.min(4, 2, 9, 1)} ${Math.hypot(1, 2, 2)}`);
+console.log(`vmax ${Math.max(5)} ${Math.min(5)} ${Math.max()} ${Math.min()}`);
+const ns = [3, 9, 4];
+console.log(`spread ${Math.max(...ns)} ${Math.min(...ns)} ${Math.max(1, ...ns, 20)}`);
+console.log(`spread ${Math.max(...[])} ${Math.hypot(...[3, 4])}`);
+console.log(`spread ${String.fromCharCode(...[72, 105])}`);

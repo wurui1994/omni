@@ -1687,7 +1687,7 @@ class Lower {
         if (e.op === 'js_async_run' || e.op === 'js_agen_new' || e.op === 'js_aiter_next') {
           this.usesJobs = true;
         }
-        return op(e.op, e.args.map((a) => this.expr(a)));
+        return op(e.op, e.args.map((a) => this.expr(a)), e.lit ?? {});
       }
       case 'Lit': return e.value === null ? nullExpr() : constBool(e.value);
       case 'Ident': return this.ident(e);
@@ -2357,9 +2357,16 @@ class Lower {
   abiCall(spec, args, span, what) {
     // Promise 那几格用到了作业队列：main 末尾要补一次 js_jobs_run（见 module 那一处）
     if (spec.op.startsWith('js_promise_')) this.usesJobs = true;
-    if (args.some((a) => a.type === 'Spread')) {
-      this.err(span, `spread is not supported in a '${what}' call`);
-      return undefExpr();
+    if (args.some((a) => a.type === 'Spread')) return this.abiSpreadCall(spec, args, span, what);
+    /* `assoc`：op 是两个形参的两两归约，而这个名字在 JS 里收可变实参（Math.max / min /
+       hypot）。摊成一串调用，个数不到两个时补上**单位元** —— 规范里空调用的答案正是它
+       （max 是 -Infinity、min 是 +Infinity、hypot 是 0），而 `Math.max(x)` 就是
+       `max(-Infinity, x)`，也就是 ToNumber(x)。正好两个实参时走下面的通用路：那一条与
+       从前逐字相同，免得给现役的每个 Math.max(a, b) 都多套一层。 */
+    if (spec.assoc === true && args.length !== spec.argc) {
+      let out = constReal(spec.id);
+      for (const a of args) out = op(spec.op, [out, this.expr(a)], spec.lit ?? {});
+      return out;
     }
     if (args.length > spec.argc) {
       /* `fold`：这个名字在 JS 里收可变实参，而 ABI 的 op 是定长的。**能不能摊开**取决于
@@ -2393,6 +2400,50 @@ class Lower {
        这里是普通的运行期实参）。`Math.imul` 就是这样接到 `js_i32_op` 上的。 */
     if (spec.pre !== undefined) for (const v of spec.pre) lowered.push(s16(v));
     for (let i = 0; i < spec.argc; i++) lowered.push(i < args.length ? this.expr(args[i]) : undefExpr());
+    return op(spec.op, lowered, spec.lit ?? {});
+  }
+
+  /**
+   * 封闭 ABI 调用里的展开（`Math.max(...xs)` / `console.log(...args)` / `Object.keys(...a)`）。
+   *
+   * op 是定长的，而展开的长度只有运行期才知道，所以先把整条实参表求成一个 list
+   * （argList 那一份，展开走 js_iter），再按这个名字的形状接下去：
+   *   - `assoc`（max / min / hypot）：运行期 reduce，初值是单位元
+   *   - `fold`（fromCharCode）：同上，只是每个元素先各自过一遍 op 再用 `+` 接
+   *   - `join`（console.log）：各自 ToString、用一个空格拼成一句，只调一次 op
+   *   - 定长的（Object.keys / JSON.stringify …）：按下标取头几格，缺的自然是 undefined
+   *     （js_arr_at 越界给 undefined —— 与"缺席的实参补 js_undef"是同一件事）
+   * 归约那两支需要一格两参的闭包，就地合成一个（体是一句 OpCall，走的还是同一条 op）。
+   */
+  abiSpreadCall(spec, args, span, what) {
+    const list = this.temp();
+    const head = assign(varRef(list), box(this.argList(args), listType(D)));
+    const sp = span;
+    const idn = (n) => ({ type: 'Ident', name: n, span: sp });
+    const arrow2 = (body) => this.closureExpr({
+      type: 'Arrow', params: [idn('_r0'), idn('_r1')], rest: null, expression: true, body, span: sp,
+    }, what.replace(/[^A-Za-z0-9]/g, '_'));
+    if (spec.assoc === true) {
+      const f = arrow2({ type: 'OpCall', op: spec.op, args: [idn('_r0'), idn('_r1')], lit: spec.lit ?? {}, span: sp });
+      return op('js_arr_reduce', [head, f, constReal(spec.id)]);
+    }
+    if (spec.fold !== undefined && spec.argc === 1) {
+      const one = { type: 'OpCall', op: spec.op, args: [idn('_r1')], lit: spec.lit ?? {}, span: sp };
+      return op('js_arr_reduce', [head, arrow2({ type: 'OpCall', op: spec.fold, args: [idn('_r0'), one], span: sp }), s16('')]);
+    }
+    if (spec.join !== undefined && spec.argc === 1) {
+      const str = this.closureExpr({
+        type: 'Arrow', params: [idn('_r0')], rest: null, expression: true, span: sp,
+        body: { type: 'OpCall', op: 'js_str', args: [idn('_r0')], span: sp },
+      }, 'js_str');
+      return op(spec.op, [op('js_arr_join', [op('js_arr_map', [head, str]), s16(spec.join)])], spec.lit ?? {});
+    }
+    const lowered = [];
+    if (spec.pre !== undefined) for (const v of spec.pre) lowered.push(s16(v));
+    for (let i = 0; i < spec.argc; i++) {
+      lowered.push(op('js_arr_at', [i === 0 ? head : varRef(list), constReal(i)]));
+    }
+    if (spec.argc === 0) this.err(span, `'${what}' takes no arguments`);
     return op(spec.op, lowered, spec.lit ?? {});
   }
 
@@ -2822,8 +2873,8 @@ const STATIC_CALLS = {
   'Math.trunc': { op: 'js_math', argc: 2, lit: { op: 't' }, len: 1 },
   'Math.floor': { op: 'js_math', argc: 2, lit: { op: 'f' }, len: 1 },
   'Math.ceil': { op: 'js_math', argc: 2, lit: { op: 'c' }, len: 1 },
-  'Math.max': { op: 'js_math', argc: 2, lit: { op: 'M' }, len: 2 },
-  'Math.min': { op: 'js_math', argc: 2, lit: { op: 'm' }, len: 2 },
+  'Math.max': { op: 'js_math', argc: 2, lit: { op: 'M' }, len: 2, assoc: true, id: -Infinity },
+  'Math.min': { op: 'js_math', argc: 2, lit: { op: 'm' }, len: 2, assoc: true, id: Infinity },
   // fround（ADR-0017 第一刀）：MIR 的 f32 语义就是"按 double 算完再舍一次到单精度"，
   // 而闭包解释器要在**我们自己编出来的**编译器里也这么算 —— 所以它必须进封闭 ABI。
   'Math.fround': { op: 'js_math', argc: 2, lit: { op: 'F' } },
@@ -2834,7 +2885,7 @@ const STATIC_CALLS = {
   // clz32：先 ToUint32 再数前导零。JS 的 Math.clz32 与 C 那份都走这一格（不是 __builtin_clz，
   // 那个在 0 上是未定义的）
   'Math.clz32': { op: 'js_math', argc: 2, lit: { op: 'Z' } },
-  'Math.hypot': { op: 'js_math', argc: 2, lit: { op: 'Y' } },
+  'Math.hypot': { op: 'js_math', argc: 2, lit: { op: 'Y' }, assoc: true, id: 0 },
   'Math.exp': { op: 'js_math', argc: 2, lit: { op: 'E' } },
   'Math.expm1': { op: 'js_math', argc: 2, lit: { op: 'X' } },
   'Math.log': { op: 'js_math', argc: 2, lit: { op: 'O' } },
