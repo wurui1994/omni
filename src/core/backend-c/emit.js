@@ -1455,6 +1455,14 @@ class CEmitter {
       default: {
         const abi = JS_ALL[e.name];
         if (!abi) throw new Error(`c.builtin: ${e.name}`);
+        /* `noC`：ADR-0020 P1 那一族（真对象 / Symbol / 迭代器协议）还只有 JS 侧的实现。
+         * 在**发射的时候**就骂，而不是让它落成一个 C 链接期的 undefined symbol ——
+         * 那种错误会指向生成的 .c 的某一行，而真相是"这条腿还没修完"。 */
+        if (abi.noC === true) {
+          throw new Error(`backend-c: op '${e.name}' 还没有 C 实现（ADR-0020 P1-c）——`
+            + 'JS 的真对象/Symbol 那一族现在只在 node 宿主上成立；'
+            + '这份程序请走 --backend js 或解释器');
+        }
         const lits = (abi.lit ?? []).map((k) => {
           const v = e[k];
           return typeof v === 'string' ? `'${v}'` : String(v === true);

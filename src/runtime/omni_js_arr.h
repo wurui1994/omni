@@ -32,6 +32,24 @@ static omni_dyn omni_js_call(omni_dyn f, LT args) { \
 static omni_dyn omni_js_call_fn(omni_dyn f, omni_dyn args) { \
   return omni_js_call(f, (LT)omni_dyn_as_ref(args, OMNI_DYN_LIST)); \
 } \
+/* this 怎么传（ADR-0020 P1）：函数签名是 fn(list<dynamic>) -> dynamic，**没有 this 槽**， \
+   而改签名要动闭包记录、MakeClosure 与两个后端的调用约定。所以接收者走一格运行期的槽 —— \
+   调用前放进去，被调函数入口的 js_this_take 取走并清空。规矩两条（与 prelude 逐字对齐）： \
+     1. 只有 js_call_this 会往槽里放东西，而且**返回之后一律清成 undefined**； \
+     2. 取的人是函数入口，读一次就清。 \
+   于是"没有接收者的那些调用"看到的一定是 undefined，不管上一趟留下过什么。 */ \
+static omni_dyn omni_js_this_slot_ = { OMNI_DYN_UNDEF, { 0 } }; \
+static omni_dyn omni_js_this_take(void) { \
+  omni_dyn v = omni_js_this_slot_; \
+  omni_js_this_slot_ = omni_dyn_undef(); \
+  return v; \
+} \
+static omni_dyn omni_js_call_this(omni_dyn f, omni_dyn thisv, omni_dyn args) { \
+  omni_js_this_slot_ = thisv; \
+  omni_dyn r = omni_js_call(f, (LT)omni_dyn_as_ref(args, OMNI_DYN_LIST)); \
+  omni_js_this_slot_ = omni_dyn_undef(); \
+  return r; \
+} \
 OMNI_JS_ARR_WRAP(LT, DT) \
 static omni_dyn omni_js_call3(omni_dyn f, omni_dyn a, int64_t i, omni_dyn self) { \
   /* 精确三格，不走 reserve（那按最小 4 分配，1/4 是白扔的，而 arena 不回收）： \

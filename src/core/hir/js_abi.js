@@ -158,6 +158,9 @@ export const JS_ABI = {
   // 带接收者的调用。ADR-0011 那一代的 this 是捕获的 cell，所以对编译出来的函数这是
   // 空操作；原型上的内建方法必须靠它拿到接收者（prelude 里那一格 fp2）。
   js_call_this: { js: '$js_call_this', c: 'omni_js_call_this', arity: 3 },
+  // 函数入口取接收者（读一次就清）。与上面那条成一对：this 走一格运行期的槽，而不是
+  // 改函数签名 —— 改签名要动闭包记录、MakeClosure 与两个后端的调用约定。
+  js_this_take: { js: '$js_this_take', c: 'omni_js_this_take', arity: 0 },
   js_instanceof: { js: '$js_instanceof', c: 'omni_js_instanceof', arity: 2, ret: 'bool' },
   // hint: 'n' number / 's' string / 'd' default（规范的 ToPrimitive）
   js_to_prim: { js: '$js_to_prim', c: 'omni_js_to_prim', arity: 1, lit: ['hint'] },
@@ -523,7 +526,7 @@ const P1_JS_ONLY = [
   'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',
   'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
-  'js_call_this', 'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next',
+  'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
   'js_sym_wk', 'js_realm_proto',
 ];

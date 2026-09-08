@@ -1290,11 +1290,16 @@ function takePending() {
  */
 export function jsErrText(v) {
   // 标签用 typeTag 问，不用 instanceof —— 后者只对 Error 开（ADR-0011 决策 15），
-  // 这份源码自己也要被降级
-  if (typeTag(v) === 'dict') {
-    const cls = v.get('$cls');
+  // 这份源码自己也要被降级。
+  // 'object' 是 ADR-0020 P1 之后异常对象落的那一格（js_obj_new 造的是真对象了）。
+  // 注意这份 typeTag（host/native.js）**不认识**真对象：它落到兜底那一支上，报的是
+  // 'function'。所以三个标签一起收 —— 真的函数值身上取 '$cls' 只会是 undefined，
+  // 兜底那一句照样接着走。
+  const t = typeTag(v);
+  if (t === 'dict' || t === 'object' || t === 'function') {
+    const cls = callJsOp('js_obj_get', [v, '$cls']);
     if (typeTag(cls) === 'list' && cls.length > 0) {
-      const msg = v.get('message');
+      const msg = callJsOp('js_obj_get', [v, 'message']);
       return `${cls[0]}: ${msg === undefined ? '' : callJsOp('js_str', [msg])}`;
     }
   }

@@ -133,11 +133,39 @@ function nestedFns(node, out = []) {
   return out;
 }
 
+/**
+ * 对象字面量里的方法/访问器拼回一个函数节点（ADR-0020 P1）。
+ *
+ * 解析器把它们摊成 `{ params, rest, body }` 而**没有** `value` 那一格（parser.js:908），
+ * 而闭包降级（closureOf）吃的是一个函数节点。所以这儿补一个 FuncExpr 形状出来 ——
+ * 不是 Arrow：方法有自己的 `this`（箭头的 this 是外层的）。
+ */
+function fnNodeOfProp(p) {
+  return {
+    type: 'FuncExpr', id: null, params: p.params, rest: p.rest, body: p.body, span: p.span,
+  };
+}
+
 /** 这一层函数里，会被内层函数引用到的名字 —— 它们的局部量要装进 cell */
 function capturedNames(stmts) {
   const out = new Set();
   for (const s of stmts) for (const fn of nestedFns(s)) refNames(fn, out);
   return out;
+}
+
+/**
+ * 这个函数体里提到 `this` 了吗（ADR-0020 P1）。
+ *
+ * 钻进箭头、**不钻**进普通函数与方法：箭头的 this 是外层的（所以外层得把它装进 cell 传下去），
+ * 而普通函数有自己的 this（它自己入口取一次就行，不该逼外层也开一格）。
+ */
+function mentionsThis(node) {
+  if (!node || typeof node !== 'object') return false;
+  if (node.type === 'This') return true;
+  if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl') return false;
+  let hit = false;
+  eachChild(node, (x) => { if (!hit) hit = mentionsThis(x); });
+  return hit;
 }
 
 /* ---- 精确那一问：这个名字**真的**被内层闭包捕获了吗（只有 `for` 那条拒绝用它） ----
@@ -474,6 +502,21 @@ class Lower {
     const outer = this.fn;
     this.fn = this.newFrame(bodyStmts, opts);
     const stmts = [];
+    /* `this`（ADR-0020 P1）：普通函数与方法自己在**入口**取一次接收者。
+     * 三种情况不取：
+     *   - 箭头（`opts.isArrow`）：它的 this 是外层那一个，靠 cell 捕获拿到；
+     *   - 构造器（`opts.isCtor`）：那一格是 classDecl 自己造的实例；
+     *   - **外层已经有 `this`**：类的方法闭包捕获的就是构造器里那个实例（ADR-0011
+     *     决策 13）。取接收者会把它遮住 —— 而那个类的方法被当回调传出去时就没有接收者，
+     *     于是 this 变 undefined。这条腿在 P1-f（类改成原型链）之后才该翻过来。
+     * 提到 this 才发这一句：每个函数都发就是每次调用多一次 op，而量过的源码里绝大多数
+     * 函数根本不提它。加进 captured 是为了内层箭头能把它当 cell 捕获下去。 */
+    if (!opts.isArrow && !opts.isCtor && !this.lookup('this')
+      && bodyStmts.some((s) => mentionsThis(s))) {
+      this.fn.captured.add('this');
+      const self = this.declare('this');
+      stmts.push(this.declStmt(self, op('js_this_take', [])));
+    }
     params.forEach((p, i) => stmts.push(...this.bindParam(p, i, span)));
     if (rest) {
       if (rest.type !== 'Ident') this.err(span, 'destructuring a rest parameter is not supported');
@@ -543,6 +586,8 @@ class Lower {
     }
     const f = this.funcOf(label, mangled, node.params, node.rest, bodyStmts, node.span, {
       outerScopes: this.fn.scopes,
+      // 箭头的 this 是**外层**的（词法的），所以它自己不去取接收者
+      isArrow: node.type === 'Arrow',
     });
     f.closureId = id;
     rec.captures = f.captureList.map((e) => ({ name: e.name, type: D }));
@@ -1245,10 +1290,12 @@ class Lower {
         return this.expr(e.exprs[e.exprs.length - 1]);
       }
       case 'This': {
-        // `this` 就是构造器里那个 cell（方法闭包捕获它）；别处出现就是错的
+        /* `this` 现在是**调用接收者**（ADR-0020 P1）：函数入口用 js_this_take 取一次，
+         * 存进一个同名的局部量；箭头没有自己的，靠捕获拿外层那一个。所以这儿只要查名字。
+         * 查不到就是**顶层**的 this —— 这个值域里给 undefined（qjs 把脚本的顶层 this
+         * 当 globalThis，那一格等 P4 的 globalThis 一起做）。 */
         const ent = this.lookup('this');
         if (ent) return this.readEntry(ent);
-        this.err(e.span, "'this' is only available inside a class constructor or method");
         return undefExpr();
       }
       case 'Arrow': case 'FuncExpr':
@@ -1377,12 +1424,31 @@ class Lower {
         out = op('js_obj_assign', [out, this.expr(p.arg)]);
         continue;
       }
-      if (p.kind !== 'init' || p.method) {
-        this.err(p.span, 'methods and accessors in an object literal are not lowered yet');
+      if (p.kind === 'get' || p.kind === 'set') {
+        /* 访问器（ADR-0020 P1）：降成一次 defineProperty —— 描述符本身也是一格对象。
+         * enumerable/configurable 都是 true（字面量里的访问器就是这个默认）。
+         * 同一个键上 get 与 set 分两次定义：js_obj_def 在已有的访问器槽上只覆盖
+         * **desc 里出现过**的字段，所以先 get 后 set 两条都留得住。 */
+        const key = p.computed ? this.expr(p.key) : s16(this.keyName(p.key, p.span));
+        const fn = this.closureExpr(fnNodeOfProp(p), p.kind);
+        let desc = op('js_obj_set', [op('js_obj_new', []), s16(p.kind), fn]);
+        desc = op('js_obj_set', [desc, s16('enumerable'), constBool(true)]);
+        desc = op('js_obj_set', [desc, s16('configurable'), constBool(true)]);
+        out = op('js_obj_def', [out, key, desc]);
+        continue;
+      }
+      if (p.kind !== 'init') {
+        this.err(p.span, `object literal property kind '${p.kind}' is not lowered yet`);
         continue;
       }
       const key = p.computed ? this.expr(p.key) : s16(this.keyName(p.key, p.span));
-      out = op('js_obj_set', [out, key, this.expr(p.value)]);
+      /* 方法简写 `{ m() {} }` 就是一格函数值属性（可写、可枚举）——
+       * 与 `{ m: function() {} }` 在这个值域里没有区别（差的那一格是 home object，
+       * 而它只被 `super` 用到，那在 P1-f）。解析器把方法摊成 params/rest/body
+       * （没有 value 那一格），所以这儿要先拼回一个函数节点。 */
+      out = op('js_obj_set', [out, key, p.method
+        ? this.closureExpr(fnNodeOfProp(p), p.computed ? 'method' : this.keyName(p.key, p.span))
+        : this.expr(p.value)]);
     }
     return out;
   }
@@ -1587,8 +1653,18 @@ class Lower {
       const re = this.regexCall(c, e);
       if (re) return re;
       if (!c.computed && JS_METHODS[c.name]) return this.methodCall(c, e);
-      // 兜底：属性里存着的函数值，动态调用
-      return this.onObject(c.object, c.optional, (obj) => this.dynCall(this.memberOn(obj, c), e.args));
+      /* 兜底：属性里存着的函数值。**接收者要传下去**（ADR-0020 P1）—— `o.m()` 里的
+       * this 就是 o，这是原型上的方法、call/apply/bind、方法借用全都依赖的一格。
+       * 从前这儿是 dynCall（丢掉接收者），于是 `o.m()` 里的 this 只能靠捕获的 cell。
+       *
+       * 接收者**先存进临时量**：它要用两次（取属性、当 this），而 onObject 交出来的是
+       * 一个表达式，用两次就算两次 —— `c.bump().value()` 于是 bump 了两趟（量出来的：
+       * tests/js-exec 的 07-classes 印 4 而不是 3）。 */
+      return this.onObject(c.object, c.optional, (obj) => {
+        const t = this.temp();
+        const f = this.memberOn(assign(varRef(t), obj), c);
+        return op('js_call_this', [f, varRef(t), box(this.argList(e.args), listType(D))]);
+      });
     }
     return this.dynCall(this.expr(c), e.args);
   }
@@ -1615,7 +1691,11 @@ class Lower {
         return undefExpr();
       }
       if (e.args.length > argc) {
-        return this.dynCall(op('js_obj_get', [recv, s16(name)]), e.args);
+        // 不是 ABI 表里那个成员，而是用户自己的同名方法 —— 接收者照样要传（P1）。
+        // recv 用两次，所以先落进临时量（理由同上面那处 js_call_this）。
+        const t = this.temp();
+        const f = op('js_obj_get', [assign(varRef(t), recv), s16(name)]);
+        return op('js_call_this', [f, varRef(t), box(this.argList(e.args), listType(D))]);
       }
       const args = [recv];
       for (let i = 0; i < argc; i++) args.push(i < e.args.length ? this.expr(e.args[i]) : undefExpr());

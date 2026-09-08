@@ -1353,9 +1353,16 @@ function $js_obj_get(o, k) {
   if ($js_isobj(o)) return $js_getp(o, k, undefined);
   if ($dynTag(o) === "list") {
     const x = $js_xprops(o, false), key = $js_prop(k);
-    return x === undefined || !x.has(key) ? undefined : x.get(key);
+    if (x !== undefined && x.has(key)) return x.get(key);
+    // 数组身上没挂过这个名字：去 Array.prototype 上找（length/下标由 prim_get 管）
+    return $js_prim_get(o, k);
   }
-  const d = $js_dict_of(o), key = $js_prop(k);
+  if ($dynTag(o) !== "dict") {
+    // 原始值与函数值上的取属性：内建方法住在它那一族的原型上（ADR-0020 P1）。
+    // 从前这儿是一句"X is not an object" —— f.call / f.bind 这些于是根本没有落点。
+    return $js_prim_get(o, k);
+  }
+  const d = o, key = $js_prop(k);
   return d.has(key) ? d.get(key) : undefined;
 }
 // set 返回对象本身，这样对象字面量可以降级成一串链式调用，不需要临时变量
@@ -1568,10 +1575,28 @@ function $js_proto_of_prim(o) {
 // 迁移期这样安排的理由：ADR-0011 那一代的 this 是**捕获的 cell**，传接收者对它是空操作；
 // 而原型上的内建方法必须拿到接收者。lower.js 把 this 改成真接收者之后，编译出来的函数
 // 也会带 fp2，$callThis 就不必再分岔。
+// 带接收者的调用。函数值现在有两个入口：fp（老的，没有 this）与 fp2（带 this）。
+// 迁移期这样安排的理由：ADR-0011 那一代的 this 是**捕获的 cell**，传接收者对它是空操作；
+// 而原型上的内建方法必须拿到接收者（prelude 里那一格 fp2）。
+//
+// this 怎么传（ADR-0020 P1）：这个值域里的函数签名是 fn(list<dynamic>) -> dynamic，
+// **没有 this 槽**，而改签名要动闭包记录、MakeClosure 与两个后端的调用约定。所以接收者
+// 走一格运行期的槽：调用前放进去，被调函数入口的 js_this_take 取走并清空。规矩两条 ——
+//   1. 只有这一条路会往槽里放东西，而且**返回之后一律把槽清成 undefined**；
+//   2. 取的人是函数入口，读一次就清。
+// 于是"没有接收者的那些调用"看到的一定是 undefined，不管上一趟留下过什么。
+let $js_this_slot = undefined;
+function $js_this_take() {
+  const v = $js_this_slot;
+  $js_this_slot = undefined;
+  return v;
+}
 function $callThis(f, thisv, args) {
   const g = $js_asFn(f);
-  if (g.fp2 !== undefined) return g.fp2(thisv, args);
-  return $callFn(g, args);
+  $js_this_slot = thisv;
+  const r = g.fp2 !== undefined ? g.fp2(thisv, args) : $callFn(g, args);
+  $js_this_slot = undefined;
+  return r;
 }
 // op 面的那一层皮：实参是一格 list 值，取出来再转发。
 function $js_call_this(f, thisv, args) { return $callThis(f, thisv, $js_arr_of(args)); }
