@@ -413,7 +413,9 @@ export const JS_ABI = {
   // 都是量出来的：split 的字符串分隔符形式 4 处（'/' 与 '\n'，都不带 limit），
   // parseInt(hex, 16) 2 处，Buffer.from(s, 'utf8') 1 处（backend-c 发字符串字面量），
   // Array.prototype.entries() 1 处（hir/check.js 的 params.entries()）。
-  js_str_split: { js: '$js_str_split', c: 'omni_js_str_split', arity: 2 },
+  js_str_split: { js: '$js_str_split', c: 'omni_js_str_split', arity: 3 },
+  // substring：两头夹到 [0, len]、start > end 换过来，不认负下标（slice 那一格认）
+  js_str_substring: { js: '$js_str_substring', c: 'omni_js_str_substring', arity: 3 },
   js_utf8_bytes: { js: '$js_utf8_bytes', c: 'omni_js_utf8_bytes', arity: 1 },
   js_num_parse_int: { js: '$js_num_parse_int', c: 'omni_js_num_parse_int', arity: 2 },
   // parseFloat：与 Number(s) 不是一回事 —— 吃最长的合法前缀，后面有垃圾也不报错，
@@ -609,6 +611,7 @@ export const JS_METHODS = {
   endsWith: { on: { string: 'js_str_ends_with' } },
   // 分隔符是字符串的那一支在这里；正则那一支由 lower.js 静态发成 js_re_split
   split: { on: { string: 'js_str_split' } },
+  substring: { on: { string: 'js_str_substring' } },
 
   // 两种接收者都有的。形参个数取多的那支（string 的 indexOf 还带 from），
   // list 分支只吃前面几个

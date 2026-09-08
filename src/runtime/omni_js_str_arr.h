@@ -95,14 +95,32 @@ static omni_dyn omni_js_arr_from(omni_dyn v, omni_dyn f) { \
   } \
   return omni_js_arr_wrap(out); \
 } \
-static omni_dyn omni_js_str_split(omni_dyn sd, omni_dyn sepd) { \
+/* substring：两头都夹到 [0, len]，start > end 就换过来（规范 22.1.3.24）——
+   与 slice 的差别是它**不认负下标**（负的一律当 0）。 */ \
+static omni_dyn omni_js_str_substring(omni_dyn sd, omni_dyn ad, omni_dyn bd) { \
+  omni_s16 v = omni_js_as_s16(sd); \
+  int64_t a = (ad.tag == OMNI_DYN_UNDEF) ? 0 : omni_js_arr_i(ad); \
+  int64_t b = (bd.tag == OMNI_DYN_UNDEF) ? v.len : omni_js_arr_i(bd); \
+  int64_t t; \
+  if (a < 0) a = 0; \
+  if (a > v.len) a = v.len; \
+  if (b < 0) b = 0; \
+  if (b > v.len) b = v.len; \
+  if (a > b) { t = a; a = b; b = t; } \
+  return omni_dyn_of_s16(omni_s16_slice(v, a, b)); \
+} \
+static omni_dyn omni_js_str_split(omni_dyn sd, omni_dyn sepd, omni_dyn limitd) { \
   omni_s16 s = omni_js_as_s16(sd); \
   omni_s16 sep = omni_js_as_s16(sepd); \
   LT out = LT##_new(); \
+  /* limit 是结果长度的**上界**（规范 22.1.3.23）；缺席或负数就是不限 */ \
+  int64_t lim = (limitd.tag == OMNI_DYN_UNDEF) ? -1 : omni_js_arr_i(limitd); \
+  if (lim == 0) return omni_js_arr_wrap(out); \
   if (sep.len == 0) { \
-    LT##_reserve(out, s.len); \
-    for (int64_t i = 0; i < s.len; i++) out->items[i] = omni_dyn_of_s16(omni_s16_slice(s, i, i + 1)); \
-    out->len = s.len; \
+    for (int64_t i = 0; i < s.len; i++) { \
+      if (lim > 0 && out->len >= lim) return omni_js_arr_wrap(out); \
+      LT##_push(out, omni_dyn_of_s16(omni_s16_slice(s, i, i + 1))); \
+    } \
     return omni_js_arr_wrap(out); \
   } \
   int64_t p = 0; \
@@ -110,6 +128,7 @@ static omni_dyn omni_js_str_split(omni_dyn sd, omni_dyn sepd) { \
     int64_t at = omni_s16_index_of(s, sep, p); \
     if (at < 0) break; \
     LT##_push(out, omni_dyn_of_s16(omni_s16_slice(s, p, at))); \
+    if (lim > 0 && out->len >= lim) return omni_js_arr_wrap(out); \
     p = at + sep.len; \
   } \
   LT##_push(out, omni_dyn_of_s16(omni_s16_slice(s, p, s.len))); \

@@ -2292,6 +2292,8 @@ class Lower {
       }
       const path = this.staticPath(c);
       if (path) {
+        // Array.of(…) 收可变实参 —— 它就是一格数组字面量（展开也照走 argList）
+        if (path === 'Array.of') return box(this.argList(e.args), listType(D));
         const spec = Object.hasOwn(STATIC_CALLS, path) ? STATIC_CALLS[path] : undefined;
         if (spec) return this.abiCall(spec, e.args, e.span, path);
         /* 已注册前缀那一条（ADR-0020 P1-f）：`Object.prototype.toString.call(x)` ——

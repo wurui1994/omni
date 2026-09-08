@@ -1407,7 +1407,22 @@ function $js_arr_with(a, i, v) {
 }
 function $js_arr_entries(a) { return $js_arr_of(a).map((v, i) => [i, v]); }
 // split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
-function $js_str_split(s, sep) { return $js_asS16(s).split($js_asS16(sep)); }
+// split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
+// 第三个实参是 limit：结果长度的上界（规范 22.1.3.23）—— 从前这一格被丢掉了，
+// "a-b-c".split("-", 2) 于是给出三段（silent 的错答案，量出来的）。
+function $js_str_split(s, sep, limit) {
+  const v = $js_asS16(s), p = $js_asS16(sep);
+  const parts = p.length === 0 ? [...v.split("")] : v.split(p);
+  if (limit === undefined) return parts;
+  const n = Math.trunc($js_real(limit, "split"));
+  return n < 0 ? parts : parts.slice(0, n);
+}
+// substring：两头都夹到 [0, len]，start > end 就换过来（规范 22.1.3.24）——
+// 与 slice 的差别是它**不认负下标**（负的一律当 0）
+function $js_str_substring(s, a, b) {
+  const v = $js_asS16(s);
+  return v.substring($js_idx(a, 0), b === undefined ? v.length : $js_idx(b, v.length));
+}
 // Buffer.from(s, "utf8") 的替身：只要"UTF-8 字节的数组"这一个形状。
 // 落单的代理项两侧都替成 U+FFFD（TextEncoder 与 omni_s16_to_utf8 一致）。
 function $js_utf8_bytes(s) { return [...new TextEncoder().encode($js_asS16(s))]; }
