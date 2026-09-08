@@ -1160,6 +1160,11 @@ class Lower {
    *
    * 所以：谁往 sink 里放了东西，它**前面**那几格就先落进临时量，插在那批 sink 之前。
    * 常量不必（没有副作用、也读不到别人的写）。
+   *
+   * 注意"用过 sink 的那一格自己也还有残留"：`m.set("a",1).size` 里 set 被提走了，
+   * 留在原地的是 `js_p_size(t)` —— 它也得跟着前面那些一起落地，不然读的是**后面**那些
+   * sink 语句跑完之后的状态（量出来的静默分叉：`[m.set("a",1).size, m.size, m.set("b",2).size]`
+   * 第一格印 2 而不是 1）。
    */
   seq(nodes, lowerOne) {
     const at = [];
@@ -1184,7 +1189,6 @@ class Lower {
           for (let k = i; k < at.length; k++) at[k] += stmts.length;
         }
         pending = [];
-        continue;
       }
       if (out[i] && out[i].kind !== 'Const') pending.push(i);
     }
@@ -2147,54 +2151,76 @@ class Lower {
   }
 
   arrayLit(e) {
+    /* 元素一律先走 seq（求值次序，与对象字面量、实参表同一招）：其中一格要 sink 时，
+     * 它前面那些格先落进临时量。量出来的静默分叉：
+     * `[b.splice(1,1).length, b.join(",")]` 里 join 跑在了 splice 前面。 */
+    const vals = this.seq(e.elements, (el) => {
+      // 洞（`[1,,3]`）：这个值域里没有"稀疏数组"那一格，所以洞就是 undefined。
+      // 与 JS 的差别只剩 `1 in [1,,3]`（那边是 false，我们是 true）—— 记在 ADR-0020，
+      // 等真数组对象那一片（P4 的 TypedArray/Array exotic）再对齐。
+      if (el === null) return undefExpr();
+      if (el.type === 'Spread') return op('js_iter', [this.expr(el.arg)]);
+      return this.expr(el);
+    });
     /** @type {any[]} 一段段拼：连续的普通元素是一个 ListLit，展开的是 js_iter */
     const parts = [];
     let run = [];
-    for (const el of e.elements) {
-      if (el === null) {
-        // 洞（`[1,,3]`）：这个值域里没有"稀疏数组"那一格，所以洞就是 undefined。
-        // 与 JS 的差别只剩 `1 in [1,,3]`（那边是 false，我们是 true）—— 记在 ADR-0020，
-        // 等真数组对象那一片（P4 的 TypedArray/Array exotic）再对齐。
-        run.push(undefExpr());
-        continue;
-      }
-      if (el.type === 'Spread') {
+    e.elements.forEach((el, i) => {
+      if (el !== null && el.type === 'Spread') {
         if (run.length) { parts.push(arrLit(run)); run = []; }
-        parts.push(op('js_iter', [this.expr(el.arg)]));
-        continue;
+        parts.push(vals[i]);
+        return;
       }
-      run.push(this.expr(el));
-    }
+      run.push(vals[i]);
+    });
     if (run.length || parts.length === 0) parts.push(arrLit(run));
     return parts.reduce((a, b) => op('js_arr_concat', [a, b]));
   }
 
   /** 对象字面量：js_obj_set / js_obj_assign 都返回对象本身，所以能纯表达式地串起来 */
   objectLit(e) {
-    let out = op('js_obj_new', []);
-    for (const p of e.props) {
-      if (p.kind === 'spread') {
-        out = op('js_obj_assign', [out, this.expr(p.arg)]);
-        continue;
+    /* 属性值一律先走 seq（求值次序）：其中一格要 sink（成员调用要把接收者提成临时量、
+     * 会抛的 op 要 guard）时，它前面那些格**先落进临时量** —— 不然提出去的那一句会跑在
+     * 前面几格之前。量出来的静默分叉：`{ x: a.splice(1,1).length, y: a.join(",") }`
+     * 里 join 跑在了 splice 前面，于是 y 是删之前的内容（两把尺子都是删之后的）。
+     * 计算键仍在各自那一格里就地降 —— 键在这个值域里绝大多数是常量。 */
+    const keys = [];
+    const vals = this.seq(e.props, (p) => {
+      if (p.kind === 'spread') { keys.push(null); return this.expr(p.arg); }
+      if (p.kind === 'get' || p.kind === 'set') {
+        keys.push(p.computed ? this.expr(p.key) : s16(this.keyName(p.key, p.span)));
+        return this.closureExpr(fnNodeOfProp(p), p.kind);
       }
+      if (p.kind !== 'init') {
+        this.err(p.span, `object literal property kind '${p.kind}' is not lowered yet`);
+        keys.push(null);
+        return null;
+      }
+      keys.push(p.computed ? this.expr(p.key) : s16(this.keyName(p.key, p.span)));
+      /* 方法简写 `{ m() {} }` 就是一格函数值属性（可写、可枚举）—— 与
+       * `{ m: function() {} }` 在这个值域里没有区别（差的那一格是 home object，
+       * 而它只被 super 用到）。解析器把方法摊成 params/rest/body，所以先拼回函数节点。 */
+      if (p.method) {
+        return this.closureExpr(fnNodeOfProp(p), p.computed ? 'method' : this.keyName(p.key, p.span),
+          { fnName: p.computed ? '' : this.keyName(p.key, p.span) });
+      }
+      return this.propValue(p);
+    });
+    let out = op('js_obj_new', []);
+    e.props.forEach((p, i) => {
+      if (vals[i] === null) return;
+      if (p.kind === 'spread') { out = op('js_obj_assign', [out, vals[i]]); return; }
       if (p.kind === 'get' || p.kind === 'set') {
         /* 访问器（ADR-0020 P1）：降成一次 defineProperty —— 描述符本身也是一格对象。
          * enumerable/configurable 都是 true（字面量里的访问器就是这个默认）。
          * 同一个键上 get 与 set 分两次定义：js_obj_def 在已有的访问器槽上只覆盖
          * **desc 里出现过**的字段，所以先 get 后 set 两条都留得住。 */
-        const key = p.computed ? this.expr(p.key) : s16(this.keyName(p.key, p.span));
-        const fn = this.closureExpr(fnNodeOfProp(p), p.kind);
-        let desc = op('js_obj_set', [op('js_obj_new', []), s16(p.kind), fn]);
+        let desc = op('js_obj_set', [op('js_obj_new', []), s16(p.kind), vals[i]]);
         desc = op('js_obj_set', [desc, s16('enumerable'), constBool(true)]);
         desc = op('js_obj_set', [desc, s16('configurable'), constBool(true)]);
-        out = op('js_obj_def', [out, key, desc]);
-        continue;
+        out = op('js_obj_def', [out, keys[i], desc]);
+        return;
       }
-      if (p.kind !== 'init') {
-        this.err(p.span, `object literal property kind '${p.kind}' is not lowered yet`);
-        continue;
-      }
-      const key = p.computed ? this.expr(p.key) : s16(this.keyName(p.key, p.span));
       /* `{ __proto__: v }` 是**设原型**，不是加一格属性（规范 B.3.1）。只有
        * "名字 : 值"这一种形状算：`{ __proto__ }` 简写、`{ __proto__() {} }` 方法、
        * `{ ["__proto__"]: v }` 计算键都是普通属性。
@@ -2204,19 +2230,12 @@ class Lower {
         && this.keyName(p.key, p.span) === '__proto__') {
         const t = this.temp();
         this.emitPre(exprStmt(assign(varRef(t), out)), p.span);
-        this.emitPre(exprStmt(op('js_obj_proto_set', [varRef(t), this.expr(p.value)])), p.span);
+        this.emitPre(exprStmt(op('js_obj_proto_set', [varRef(t), vals[i]])), p.span);
         out = varRef(t);
-        continue;
+        return;
       }
-      /* 方法简写 `{ m() {} }` 就是一格函数值属性（可写、可枚举）——
-       * 与 `{ m: function() {} }` 在这个值域里没有区别（差的那一格是 home object，
-       * 而它只被 `super` 用到，那在 P1-f）。解析器把方法摊成 params/rest/body
-       * （没有 value 那一格），所以这儿要先拼回一个函数节点。 */
-      out = op('js_obj_set', [out, key, p.method
-        ? this.closureExpr(fnNodeOfProp(p), p.computed ? 'method' : this.keyName(p.key, p.span),
-          { fnName: p.computed ? '' : this.keyName(p.key, p.span) })
-        : this.propValue(p)]);
-    }
+      out = op('js_obj_set', [out, keys[i], vals[i]]);
+    });
     return out;
   }
 

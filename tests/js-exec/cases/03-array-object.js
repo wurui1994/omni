@@ -147,3 +147,18 @@ console.log(`spl ${sp2.splice(1, 0, 9, 8).length}| ${sp2.join(",")} ${[1, 2, 3].
 console.log(`spl ${[1, 2, 3].toSpliced(1, 1).join(",")} ${[1, 2, 3].toSpliced(1, 0, 9).join(",")}`);
 console.log(`sh ${[1, 2].shift()} ${[].shift()} ${[...[1, 2, 3].keys()].join(",")} ${[...[4, 5].values()].join(",")}`);
 console.log(`cat ${[1].concat([2], 3).join(",")} ${[1].concat("x").join(",")} ${Array(1, 2).join(",")}`);
+
+/* 字面量里的求值次序（静默分叉那一族）：其中一格要 sink 时，它前面那些格先落进临时量。
+   `{ x: a.splice(1,1).length, y: a.join(",") }` 里 join 从前跑在了 splice 前面；
+   用过 sink 的那一格**自己的残留**也要落地，不然 `[m.set("a",1).size, …]` 第一格印的是
+   后面那些 set 跑完之后的 size（两处都在 seq() 里）。 */
+const eo = [1, 2, 3];
+const ord = { x: eo.splice(1, 1).length, y: eo.join(",") };
+console.log(`ord ${ord.x} ${ord.y}`);
+const ea = [1, 2, 3];
+console.log(`ord ${[ea.splice(1, 1).length, ea.join(",")].join("|")}`);
+const em = new Map();
+console.log(`ord ${[em.set("a", 1).size, em.size, em.set("b", 2).size].join(",")}`);
+let cnt = 0;
+function bump() { cnt++; return cnt; }
+console.log(`ord ${[bump(), cnt, bump(), cnt].join(",")} ${JSON.stringify({ p: bump(), q: cnt })}`);
