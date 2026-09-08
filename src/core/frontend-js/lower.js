@@ -588,6 +588,10 @@ class Lower {
       finStack: [],
       // 每层 switch 进去时的循环层数，以及那层的"出去之后要 continue"标志位（懒声明）
       switchLoops: [], switchFlags: [],
+      /* 无标签 break / continue 该跳到哪一层 OIR 循环：每层真循环与每个 switch 压一格
+       * （switch 那格 cont 是 false —— continue 不认它）。try 摊出来的那层合成循环**不**压，
+       * 它不是跳转目标；跨过它就是"多跳一层"，见 Break / Continue 那两支。 */
+      targets: [],
       // **OIR 的**循环层数，以及每个还在作用域里的标签记下的那一层。
       // 与 loops 的差别是它把合成的循环也算进去（switch / try / do-while 各摊出一个
       // while(true)）—— OIR 的 Break/Continue 的 level 数的正是 OIR 的层数，
@@ -1258,8 +1262,10 @@ class Lower {
       case 'While': {
         this.fn.loops++;
         this.fn.oloops++;
+        this.fn.targets.push({ ol: this.fn.oloops, cont: true });
         const cond = this.lazy(() => truthy(this.expr(s.test)));
         const st = { kind: 'While', cond, body: this.bodyBlock(s.body) };
+        this.fn.targets.pop();
         this.fn.oloops--;
         this.fn.loops--;
         return [st];
@@ -1297,28 +1303,12 @@ class Lower {
         return st;
       }
       case 'Break':
-        if (s.label) return [{ kind: 'Break', level: this.labelLevel(s, 'break') }];
-        if (this.crossesTry()) {
-          /* 跨过 try 的边界：带 finally 的那一层走 unwind 协议（清理跑完了再 break），
-           * 不带 finally 的照旧报错 —— 那一层没有"跑完清理"这一步可挂。 */
-          const u = this.finAbrupt(2);
-          if (u) return u;
-          this.err(s.span, "'break' cannot cross a try boundary; restructure the try");
-        } else if (this.fn.loops === 0 && this.fn.switches === 0) {
-          this.err(s.span, "'break' outside a loop or switch");
-        }
-        return [{ kind: 'Break' }];
+        if (s.label) return this.labelJump(s, 'break');
+        return this.breakAt(s.span);
       case 'Continue':
         // do-while 现在摊成 For（条件在 step 里），所以 continue 正好是"去算条件"，见 doWhile
-        if (s.label) return [{ kind: 'Continue', level: this.labelLevel(s, 'continue') }];
-        if (this.crossesTry()) {
-          const u = this.finAbrupt(3);
-          if (u) return u;
-          this.err(s.span, "'continue' cannot cross a try boundary; restructure the try");
-        } else if (this.fn.loops === 0) {
-          this.err(s.span, "'continue' outside a loop");
-        }
-        return this.continueStmts();
+        if (s.label) return this.labelJump(s, 'continue');
+        return this.continueAt(s.span);
       case 'Switch': return this.switchStmt(s);
       case 'Throw':
         return [exprStmt(op('js_throw', [this.expr(s.arg)])), this.unwind()];
@@ -1523,8 +1513,10 @@ class Lower {
     const flag = this.declare('_dw').name;
     this.fn.loops++;
     this.fn.oloops++;
+    this.fn.targets.push({ ol: this.fn.oloops, cont: true });
     const body = this.bodyBlock(s.body);
     const step = assign(varRef(flag), this.lazy(() => box(truthy(this.expr(s.test)), BOOL)));
+    this.fn.targets.pop();
     this.fn.oloops--;
     this.fn.loops--;
     return [block([
@@ -1572,6 +1564,7 @@ class Lower {
     const step = s.update ? this.lazy(() => this.exprDiscard(s.update)) : null;
     this.fn.loops++;
     this.fn.oloops++;
+    this.fn.targets.push({ ol: this.fn.oloops, cont: true });
     /* 每轮一格新绑定：体里另开一层作用域，同名再声明一格 cell、从外层那一格抄一份进去。
      * 这一句是体里的 let，所以每轮执行一次、每轮一格新数组。 */
     const fresh = [];
@@ -1585,6 +1578,7 @@ class Lower {
     }
     const body = this.bodyBlock(s.body);
     if (perIter.length > 0) this.popScope();
+    this.fn.targets.pop();
     this.fn.oloops--;
     this.fn.loops--;
     this.popScope();
@@ -1627,6 +1621,7 @@ class Lower {
     const step = assign(varRef(i), op('js_add', [varRef(i), constReal(1)]));
     this.fn.loops++;
     this.fn.oloops++;
+    this.fn.targets.push({ ol: this.fn.oloops, cont: true });
     const elem = () => op('js_idx_get', [varRef(it), varRef(i)]);
     let inner;
     if (s.declKind) {
@@ -1636,6 +1631,7 @@ class Lower {
       inner = lv ? [exprStmt(lv.set(elem()))] : [];
     }
     const body = this.bodyBlock(s.body);
+    this.fn.targets.pop();
     this.fn.oloops--;
     this.fn.loops--;
     this.popScope();
@@ -1662,6 +1658,7 @@ class Lower {
     this.fn.switchLoops.push(this.fn.loops);
     // 下面那层合成的 while(true) 在 OIR 里是**一层真的循环**，case 体是在它里面降的
     this.fn.oloops++;
+    this.fn.targets.push({ ol: this.fn.oloops, cont: false });   // 无标签 break 认它，continue 不认
     this.fn.switchFlags.push(null);
     /** @type {{test: any, body: any[]}[]} 源码次序，default 也占一格（test 是 null） */
     const groups = [];
@@ -1695,6 +1692,7 @@ class Lower {
       });
     }
     this.fn.switches--;
+    this.fn.targets.pop();
     this.fn.oloops--;
     this.fn.switchLoops.pop();
     const flag = this.fn.switchFlags.pop();
@@ -1718,8 +1716,9 @@ class Lower {
    *
    * level 数的是 **OIR** 的层数，所以 switch 与 try 摊出来的那层合成循环也算 ——
    * 这也正是"跨过一个 switch 的 `break L`"能一句话说清的原因：它就是多跳一层。
-   * 跨 try 不行：try 的合成循环出来之后紧跟着 pending 检查（catch 就长在那儿），
-   * 从里面跳出去等于跳过 catch。
+   * 跨过只有 catch 的 try 也是多跳一层：那层合成循环后面紧跟着的 pending 检查（catch 就长
+   * 在那儿）只在真有异常时才进，跳转这会儿槽是空的。带 finally 的那种走不到这儿 ——
+   * labelJump 先问过 finLabelAbrupt 了。
    */
   labelLevel(s, what) {
     const labs = this.fn.labels;
@@ -1737,12 +1736,89 @@ class Lower {
       this.err(s.span, `'continue ${s.label}' targets a labeled block, which is not a loop`);
       return 1;
     }
-    const tries = this.fn.tryOLoops;
-    if (tries.length > 0 && ent.depth <= tries[tries.length - 1]) {
-      this.err(s.span, `'${what} ${s.label}' cannot cross a try boundary; restructure the try`);
-      return 1;
-    }
+    /* 跨过只有 catch 的 try 是安全的：那层合成循环出来之后紧跟着的 pending 检查只在真有
+     * 异常时才进（catch 就长在那儿），而这会儿槽是空的 —— 多跳一层正好落在它外面。
+     * 带 finally 的那种在 finLabelAbrupt 里走 unwind 协议，走不到这儿。 */
     return this.fn.oloops - ent.depth + 1;
+  }
+
+  /**
+   * 带标签的跳转发出来是什么：先看要不要跨过一层带 finally 的 try（那就走 unwind 协议，
+   * 清理跑完了在 try 后面照着再跳一次），否则就是"跳出/继续第几层 OIR 循环"。
+   */
+  labelJump(s, what) {
+    const u = this.finLabelAbrupt(s, what);
+    if (u) return u;
+    const level = this.labelLevel(s, what);
+    return [what === 'break' ? { kind: 'Break', level } : { kind: 'Continue', level }];
+  }
+
+  /**
+   * `break L` / `continue L` 要跨过一层带 finally 的 try：与 finAbrupt 同一格协议，只是
+   * "为什么出去"记的是**跳哪个标签**（4 起，一个目标一格）。清理在合成循环后面跑，跑完了
+   * 在那个位置照记下的标签再跳一次 —— 那儿已经出了合成循环，层数正好算得对；外面还套着
+   * 带 finally 的 try 时，这一步又落成"再记一次 + 再 break 一层"，于是每层清理都跑得到。
+   * 没跨过这种 try 就交出 null，调用方照原样发带层数的 Break / Continue。
+   */
+  finLabelAbrupt(s, what) {
+    const labs = this.fn.labels;
+    let ent = null;
+    for (let i = labs.length - 1; i >= 0; i--) {
+      if (labs[i].name === s.label) { ent = labs[i]; break; }
+    }
+    // 找不到标签、或 `continue` 指着标签块：让 labelLevel 去报，这儿不接
+    if (ent === null || (ent.block === true && what === 'continue')) return null;
+    const top = this.fn.finStack[this.fn.finStack.length - 1];
+    if (top === undefined || ent.depth > top.oloop) return null;   // 不跨带 finally 的 try
+    const key = `${what} ${s.label}`;
+    let j = top.jumps.find((x) => x.key === key);
+    if (!j) {
+      j = { key, code: 4 + top.jumps.length, what, label: s.label, span: s.span };
+      top.jumps.push(j);
+    }
+    /* break 出到"那层 finally 所属的合成循环"外面 —— 中间可能还夹着几层只有 catch 的 try，
+     * 一并跳出去是对的：它们循环后面那句 pending 检查只在真有异常时才进，这会儿槽是空的。 */
+    const level = this.fn.oloops - top.oloop + 1;
+    return [
+      exprStmt(assign(varRef(top.unw), constReal(j.code))),
+      level > 1 ? { kind: 'Break', level } : { kind: 'Break' },
+    ];
+  }
+
+  /**
+   * 无标签 `break` 在当前位置发什么。目标是最内层的循环或 switch（targets 的顶）：
+   *   - 目标在一层带 finally 的 try **外面**：走 unwind 协议（finAbrupt），清理跑完再跳；
+   *   - 中间夹着只有 catch 的 try（或 switch）：就是多跳几层 —— 那些合成循环后面那句
+   *     pending 检查只在真有异常时才进，这会儿槽是空的，跳过去是对的。
+   */
+  breakAt(span) {
+    const tgt = this.fn.targets[this.fn.targets.length - 1];
+    if (tgt === undefined) {
+      this.err(span, "'break' outside a loop or switch");
+      return [{ kind: 'Break' }];
+    }
+    const u = this.finAbrupt(2, undefined, tgt.ol);
+    if (u) return u;
+    const level = this.fn.oloops - tgt.ol + 1;
+    return [level > 1 ? { kind: 'Break', level } : { kind: 'Break' }];
+  }
+
+  /** 无标签 `continue`：目标是最内层的**循环**（switch 那格不算），其余同 breakAt */
+  continueAt(span) {
+    let tgt = null;
+    for (let i = this.fn.targets.length - 1; i >= 0; i--) {
+      if (this.fn.targets[i].cont) { tgt = this.fn.targets[i]; break; }
+    }
+    if (tgt === null) {
+      this.err(span, "'continue' outside a loop");
+      return [{ kind: 'Continue' }];
+    }
+    const u = this.finAbrupt(3, undefined, tgt.ol);
+    if (u) return u;
+    // 没跨 try：照旧（隔着 switch 时靠标志位翻出去，见 continueStmts）
+    if (!this.crossesTry()) return this.continueStmts();
+    const level = this.fn.oloops - tgt.ol + 1;
+    return [level > 1 ? { kind: 'Continue', level } : { kind: 'Continue' }];
   }
 
   /** 当前位置的 `continue` 该发什么：switch 是一层合成循环，得靠标志位翻出去 */
@@ -1766,8 +1842,8 @@ class Lower {
    * 正好落到循环后面；catch 就是"循环之后 pending 还在着"：
    *   while (true) { …体（每句后面查 pending -> break）…; break; }
    *   if (js_pending()) { e = js_take_pending(); …catch 体… }
-   * finally 不支持（量过：全仓库 1 处），break/continue 也不许跨过 try 的边界 ——
-   * 它们会被这层合成的循环接住，语义就变了。
+   * finally 不支持（量过：全仓库 1 处）—— 那已经是老话了：finally 走 unwind 协议（见下面
+   * 与 finAbrupt），break/continue（带标签的也算）跨过 try 的边界也收得下。
    */
   tryStmt(s) {
     if (!s.handler && !s.finalizer) { this.err(s.span, "'try' needs a 'catch'"); return []; }
@@ -1780,12 +1856,12 @@ class Lower {
      * unwind 协议：记下"为什么出去"（unw：1 return / 2 break / 3 continue）与 return 的
      * 值，break 出这层合成循环，跑完清理再照记下的那件事接着做。外面还套着带 finally 的
      * try 时，接着做的那一步又落成"记一次 + 再 break 一层"（见 finAbrupt）。
-     * 带标签的跳转还不收 —— 那要知道跳到哪一层，在 Break/Continue 那儿显式报。 */
+     * 带标签的跳转同一格协议，只是记的是"跳哪个标签"（4 起），见 finLabelAbrupt。 */
     let unw = null;
     if (s.finalizer) {
       const esc = this.abruptIn(s.block.body) ?? (s.handler ? this.abruptIn(s.handler.body) : null);
       if (esc) {
-        unw = { unw: this.declare('_funw').name, rv: this.declare('_frv').name, used: new Set() };
+        unw = { unw: this.declare('_funw').name, rv: this.declare('_frv').name, used: new Set(), jumps: [], oloop: 0 };
       }
     }
     if (unw) this.fn.finStack.push(unw);
@@ -1793,6 +1869,7 @@ class Lower {
     this.fn.tryLoops.push(this.fn.loops);
     this.fn.oloops++;   // try 体也摊在一层合成的 while(true) 里
     this.fn.tryOLoops.push(this.fn.oloops);
+    if (unw) unw.oloop = this.fn.oloops;   // finLabelAbrupt 要认"最内层这层 try 是不是我"
     this.pushScope();
     const body = s.block.body.flatMap((x) => this.stmt(x));
     this.popScope();
@@ -1873,13 +1950,17 @@ class Lower {
         }
         // break / continue 那两支只有真出现过才发 —— 不然会在"不在循环里"的位置发出来
         if (unw.used.has(2)) {
-          out.push({ kind: 'If', cond: eq(2), then: block(this.finAbrupt(2) ?? [{ kind: 'Break' }]), otherwise: null });
+          out.push({ kind: 'If', cond: eq(2), then: block(this.breakAt(s.span)), otherwise: null });
         }
         if (unw.used.has(3)) {
+          out.push({ kind: 'If', cond: eq(3), then: block(this.continueAt(s.span)), otherwise: null });
+        }
+        // 带标签的那些：4 起一格一个目标，在这个位置照记下的标签再跳一次
+        for (const j of unw.jumps) {
           out.push({
             kind: 'If',
-            cond: eq(3),
-            then: block(this.finAbrupt(3) ?? this.continueStmts()),
+            cond: eq(j.code),
+            then: block(this.labelJump({ label: j.label, span: j.span }, j.what)),
             otherwise: null,
           });
         }
@@ -1893,13 +1974,21 @@ class Lower {
    * 所以先把"为什么出去"记进 unw（1 return / 2 break / 3 continue）、return 的值记进 rv，
    * 再 break 出那一层合成循环 —— 清理就在循环后面。没有这样的 try 就交出 null，
    * 调用方照原样发 Return / Break / Continue。
+   *
+   * @param {number} kind 1 return / 2 break / 3 continue
+   * @param {any} [value] return 的值
+   * @param {number} [tgtOL] break/continue 要跳到的那层 OIR 循环的深度：它在这层 finally
+   *   **里面**的话这一跳根本没出去，清理不该现在跑 —— 交出 null 让调用方照常发。
    */
-  finAbrupt(kind, value) {
+  finAbrupt(kind, value, tgtOL) {
     const top = this.fn.finStack[this.fn.finStack.length - 1];
     if (top === undefined) return null;
+    if (tgtOL !== undefined && tgtOL > top.oloop) return null;
     top.used.add(kind);
-    const tries = this.fn.tryOLoops;
-    const level = this.fn.oloops - tries[tries.length - 1] + 1;
+    /* 数的是"到那层 finally 所属的合成循环"有几层 —— 中间夹着的只有 catch 的 try 一并跳出去
+     * （量出来的：`for { try { try { break } catch {} ; log() } finally { … } }` 早先只 break
+     * 了内层那一格，log 还照跑，node 印 fin0 我们印 after-inner0,fin0）。 */
+    const level = this.fn.oloops - top.oloop + 1;
     const out = [exprStmt(assign(varRef(top.unw), constReal(kind)))];
     if (kind === 1) out.push(exprStmt(assign(varRef(top.rv), value)));
     out.push(level > 1 ? { kind: 'Break', level } : { kind: 'Break' });

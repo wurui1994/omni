@@ -130,3 +130,52 @@ const e2 = new TypeError("bad");
 console.log(`err ${JSON.stringify(e2)} ${e2.name} ${JSON.stringify(new Error("c", { cause: 7 }))}`);
 e1.code = 5;
 console.log(`err ${JSON.stringify(e1)} ${JSON.stringify(e2, ["message"])}`);
+/* 带标签的 break / continue 跨过带 finally 的 try：unw 那一格记的是"跳哪个标签"
+   （4 起，一个目标一格），清理跑完了在 try 后面照着再跳一次。只有 catch 的那层夹在
+   中间就是多跳一层 —— 它循环后面那句 pending 检查只在真有异常时才进。 */
+function lab() {
+  const o = [];
+  L: for (let i = 0; i < 3; i++) {
+    try {
+      for (let j = 0; j < 3; j++) {
+        if (j === 1) continue L;
+        if (i === 2) break L;
+        o.push(`${i}${j}`);
+      }
+    } finally {
+      o.push(`f${i}`);
+    }
+  }
+  return o.join(",");
+}
+console.log(`lab ${lab()}`);
+function labTwo() {
+  const o = [];
+  L: for (let i = 0; i < 2; i++) {
+    try {
+      try {
+        o.push("in");
+        break L;
+      } finally { o.push("f1"); }
+    } finally { o.push("f2"); }
+    o.push("never");
+  }
+  return o.join(",");
+}
+console.log(`lab ${labTwo()}`);
+function catchOnly() {
+  const o = [];
+  for (let i = 0; i < 2; i++) {
+    try {
+      try {
+        if (i === 0) break;
+        o.push(`body${i}`);
+      } catch (e) { o.push("c"); }
+      o.push(`after-inner${i}`);
+    } finally {
+      o.push(`fin${i}`);
+    }
+  }
+  return o.join(",");
+}
+console.log(`lab ${catchOnly()}`);
