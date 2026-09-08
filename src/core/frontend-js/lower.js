@@ -1352,7 +1352,10 @@ class Lower {
     let run = [];
     for (const el of e.elements) {
       if (el === null) {
-        this.err(e.span, 'holes in an array literal are not supported');
+        // 洞（`[1,,3]`）：这个值域里没有"稀疏数组"那一格，所以洞就是 undefined。
+        // 与 JS 的差别只剩 `1 in [1,,3]`（那边是 false，我们是 true）—— 记在 ADR-0020，
+        // 等真数组对象那一片（P4 的 TypedArray/Array exotic）再对齐。
+        run.push(undefExpr());
         continue;
       }
       if (el.type === 'Spread') {
@@ -1637,6 +1640,18 @@ class Lower {
         }
         return out;
       }
+      /* `join`：可变实参**先各自 ToString 再用一个分隔符拼成一句**，然后只调一次 op。
+         与 `fold` 的差别是"调几次"：`fromCharCode` 摊成多次调用再相加，而 `console.log`
+         必须只印一行 —— 印两次就多一个换行。分隔符照 qjs（quickjs-libc.c 的 js_print）
+         那样是一个空格。 */
+      if (spec.join !== undefined && spec.argc === 1) {
+        let s = null;
+        for (const a of args) {
+          const one = op('js_str', [this.expr(a)]);
+          s = s === null ? one : op('js_add', [op('js_add', [s, s16(spec.join)]), one]);
+        }
+        return op(spec.op, [s === null ? s16('') : s], spec.lit ?? {});
+      }
       this.err(span, `'${what}' takes at most ${spec.argc} argument(s), got ${args.length}`);
       return undefExpr();
     }
@@ -1782,6 +1797,9 @@ class Lower {
     switch (o) {
       case '+': return op('js_add', [a, b]);
       case '-': case '*': case '/': case '%': return op('js_arith', [a, b], { op: o });
+      // `**=`：幂在 js_arith 里的选择子是 'p'（ADR-0020 P3 —— 二元的 `**` 早就有，
+      // 缺的只是复合赋值这一格）。
+      case '**': return op('js_arith', [a, b], { op: 'p' });
       case '&': case '|': case '^': return op('js_bitop', [a, b], { op: o });
       case '<<': return op('js_bitop', [a, b], { op: '<' });
       case '>>': return op('js_bitop', [a, b], { op: '>' });
@@ -1923,7 +1941,9 @@ const STATIC_CALLS = {
   'process.cwd': { op: 'js_proc_cwd', argc: 0 },
   'process.stdout.write': { op: 'js_proc_stdout_write', argc: 1 },
   'process.stderr.write': { op: 'js_proc_stderr_write', argc: 1 },
-  'console.log': { op: 'js_println', argc: 1 },
+  // console.log 收可变实参（ADR-0020 P3）：各自 ToString、空格拼、只印一行 —— 与 qjs 的
+  // js_print 同一个口径。从前只收一个实参，量特性覆盖的时候十条探针里九条卡在这儿。
+  'console.log': { op: 'js_println', argc: 1, join: ' ' },
 };
 
 const STATIC_PROPS = {
