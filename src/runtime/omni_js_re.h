@@ -54,7 +54,7 @@ static omni_dyn omni_js_re_result(omni_re re, omni_s16 s, const int64_t *caps) {
   } \
   return arr; \
 } \
-static omni_s16 omni_js_re_sub(omni_s16 repl, omni_s16 s, const int64_t *caps, int ng) { \
+static omni_s16 omni_js_re_sub(omni_re re, omni_s16 repl, omni_s16 s, const int64_t *caps, int ng) { \
   omni_s16_buf out = {0}; \
   for (int64_t i = 0; i < repl.len; i++) { \
     uint16_t c = repl.p[i]; \
@@ -64,6 +64,28 @@ static omni_s16 omni_js_re_sub(omni_s16 repl, omni_s16 s, const int64_t *caps, i
     else if (d == '&') { omni_s16_buf_add(&out, omni_js_re_grp(s, caps, 0)); i++; } \
     else if (d == '`') { omni_s16_buf_add(&out, omni_s16_slice(s, 0, caps[0])); i++; } \
     else if (d == '\'') { omni_s16_buf_add(&out, omni_s16_slice(s, caps[1], s.len)); i++; } \
+    /* $<name>：具名组（规范 22.1.3.19 表 22 的最后一行）。这个正则没有具名组时 $< 是
+       普通字符 —— 与 prelude 那份的判据对着写（那边看的是 m.groups 在不在）。 */ \
+    else if (d == '<' && re != NULL) { \
+      int64_t end = -1; \
+      bool named = false; \
+      for (int gi = 1; gi <= ng; gi++) { \
+        if (omni_re_group_name(re, gi).p != NULL) { named = true; break; } \
+      } \
+      for (int64_t j = i + 2; j < repl.len; j++) { \
+        if (repl.p[j] == '>') { end = j; break; } \
+      } \
+      if (!named || end < 0) { omni_s16_buf_add_unit(&out, c); continue; } \
+      omni_s16 want = omni_s16_slice(repl, i + 2, end); \
+      for (int gi = 1; gi <= ng; gi++) { \
+        omni_s16 nm = omni_re_group_name(re, gi); \
+        if (nm.p != NULL && omni_s16_eq(nm, want)) { \
+          omni_s16_buf_add(&out, omni_js_re_grp(s, caps, gi)); \
+          break; \
+        } \
+      } \
+      i = end; \
+    } \
     else if (d >= '0' && d <= '9') { \
       int n = d - '0', used = 1; \
       if (i + 2 < repl.len && repl.p[i + 2] >= '0' && repl.p[i + 2] <= '9' \
@@ -112,7 +134,7 @@ static omni_dyn omni_js_re_replace(omni_dyn pat, omni_dyn flags, omni_dyn sd, om
       omni_dyn r = omni_js_re_call(repl, s, caps, ng); \
       omni_s16_buf_add(&out, omni_js_as_s16(omni_js_str(r))); \
     } else { \
-      omni_s16_buf_add(&out, omni_js_re_sub(omni_js_as_s16(repl), s, caps, ng)); \
+      omni_s16_buf_add(&out, omni_js_re_sub(re, omni_js_as_s16(repl), s, caps, ng)); \
     } \
     copied = caps[1]; \
     at = caps[1] > caps[0] ? caps[1] : caps[1] + 1; \

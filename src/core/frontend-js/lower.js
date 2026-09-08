@@ -423,12 +423,13 @@ class Lower {
         break;
       case 'VarDecl':
         for (const d of s.decls) {
-          // 不带 g 的正则可以当"编译期常量"折到使用点上，不占全局槽：它没有可观察的
+          // 不带 g / y 的正则可以当"编译期常量"折到使用点上，不占全局槽：它没有可观察的
           // 状态（lastIndex 谁都不碰），折一份和共用一份不可区分。
-          // **带 g 的不行** —— lastIndex 是那一格自己的状态，`re.exec(s)` 的循环靠它推进，
-          // 折到使用点就成了每次一格新的，循环永远停在第一个匹配上（ADR-0011 决策 10）。
+          // **带 g 或 y 的不行** —— lastIndex 是那一格自己的状态，`re.exec(s)` 的循环靠它
+          // 推进、sticky 的 test 也一格格往前挪，折到使用点就成了每次一格新的：循环永远停在
+          // 第一个匹配上、sticky 的 lastIndex 永远是 0（ADR-0011 决策 10；y 那一格是量出来的）。
           if (s.kind === 'const' && d.id.type === 'Ident' && d.init && d.init.type === 'Regex'
-            && !d.init.flags.includes('g')) {
+            && !d.init.flags.includes('g') && !d.init.flags.includes('y')) {
             this.regexConsts.set(d.id.name, { body: d.init.body, flags: d.init.flags });
             continue;
           }
@@ -3060,7 +3061,11 @@ const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number'
   // ADR-0020 P2：Promise.resolve / reject / all / allSettled / any / race / try
   'Promise',
   // ES2024 的 Map.groupBy（`new Map(...)` 那条路不经过这儿，见 newExpr）
-  'Map']);
+  'Map',
+  /* 只为**内建原型当值用**那一条（STATIC_PROPS 里的 X.prototype）进来的几个：
+     `RegExp.prototype.toString.call(re)`、`Boolean.prototype` 这类借方法的写法要它。
+     当函数用（`[1,0].map(Boolean)`）走的是上面 GLOBAL_CALLS 那一格，比这里早。 */
+  'RegExp', 'Boolean', 'Function', 'Set']);
 
 /* `new X(...)` 认的内建构造器（newExpr 里一支支写着）。这张表只给 `typeof X` 用 ——
  * 它们在 JS 里都是函数值，而这个值域里还不能把它们当值传，所以答案是编译期定死的。 */

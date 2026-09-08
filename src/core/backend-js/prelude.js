@@ -2219,6 +2219,9 @@ function $mkRealm() {
   // Symbol 的两格：description 是访问器（规范如此），toString 给 "Symbol(desc)"
   $js_def_acc(r.symP, "description", $nat("description", 0, (t) => $dynAsSym(t).d), undefined, false, true);
   $natm(r.symP, "toString", 0, (t) => $js_sym_str(t));
+  /* 正则对象的 toString（规范 22.2.6.13）：/源/旗标。它住在原型上，所以借方法那条路
+     （RegExp.prototype.toString.call(re)）与 String(re) 都落到这一格。 */
+  $natm(r.reP, "toString", 0, (t) => "/" + $js_re_source(t) + "/" + $js_re_flags(t));
   /* Date（ADR-0020 P4）：一格真对象，毫秒存在隐藏槽 $ms 里（不可枚举，所以
      Object.keys / JSON.stringify 看不见它）。取值面**转手宿主 Date** —— 本地时区那几格
      因此与宿主一致（qjs 也用本地时区）。只有 JS 那条腿有：C 侧还没有真对象（P1-c），
@@ -4099,6 +4102,25 @@ function $js_re_result(m, str) {
     for (let i = 0; i < names.length; i++) $js_obj_set(g, names[i], m.groups[names[i]]);
     $js_obj_set(out, "groups", g);
   }
+  /* d 旗标（ES2022 hasIndices）：每一格是 [起, 止]，没参与匹配的组是 undefined。
+     只有 JS 这条腿有 —— C 的引擎当场拒 'd'（与 s / u / v 同一档，见 omni_js_re.c）。 */
+  if (m.indices !== undefined) {
+    const ix = [];
+    for (let i = 0; i < m.indices.length; i++) {
+      const p = m.indices[i];
+      ix.push(p === undefined ? undefined : [p[0], p[1]]);
+    }
+    if (m.indices.groups !== undefined) {
+      const ig = $js_obj_new();
+      const gn = Object.keys(m.indices.groups);
+      for (let i = 0; i < gn.length; i++) {
+        const p = m.indices.groups[gn[i]];
+        $js_obj_set(ig, gn[i], p === undefined ? undefined : [p[0], p[1]]);
+      }
+      $js_obj_set(ix, "groups", ig);
+    }
+    $js_obj_set(out, "indices", ix);
+  }
   return out;
 }
 /* matchAll（ES2020）：从 0 起一趟趟找，每一趟给一格与 exec 同形的结果（整体匹配在 0、
@@ -4127,7 +4149,10 @@ function $js_re_match_all(body, flags, sd) {
 function $js_re_exec(rd, sd) {
   if ($dynTag(rd) !== "regexp") $rt_error($dynTag(rd) + " is not a regexp");
   const s = $js_asS16(sd);
-  const g = rd.flags.includes("g");
+  /* lastIndex 那一格：**g 与 y 都用**（规范 22.2.7.2 第 4 步）。差别在"从哪儿起"：
+     y 要求恰好从 lastIndex 起匹配（宿主的 y 旗标自己会锚住），g 是从那儿往后找。
+     从前只看 g，于是 /ab/y 的 test 每次都从 0 起、lastIndex 一直是 0 —— 静默分叉。 */
+  const g = rd.flags.includes("g") || rd.flags.includes("y");
   const at = g ? rd.li : 0;
   const m = at < 0 ? null : $js_re_find($js_re_get(rd.src, rd.flags), s, at);
   if (m === null) {
@@ -4310,6 +4335,15 @@ function $js_re_sub(repl, s, m) {
     else if (d === "&") { out += m[0]; i++; }
     else if (d === "\u0060") { out += s.slice(0, m.index); i++; }
     else if (d === "'") { out += s.slice(m.index + m[0].length); i++; }
+    /* $<name>：具名组（规范 22.1.3.19 表 22 的最后一行）。**只有这个正则有具名组时**
+       才特殊 —— 没有 groups 那一格的话 $< 是普通字符，量过两把尺子都是这样。 */
+    else if (d === "<" && m.groups !== undefined) {
+      const end = repl.indexOf(">", i + 2);
+      if (end < 0) { out += c; continue; }
+      const v = m.groups[repl.slice(i + 2, end)];
+      out += v === undefined ? "" : v;
+      i = end;
+    }
     else if (d >= "0" && d <= "9") {
       let n = +d, used = 1;
       if (i + 2 < repl.length && repl[i + 2] >= "0" && repl[i + 2] <= "9" && n * 10 + +repl[i + 2] <= ng) {

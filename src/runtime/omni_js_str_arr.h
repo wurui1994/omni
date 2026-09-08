@@ -48,7 +48,7 @@ static omni_dyn omni_js_str_replace(omni_dyn sd, omni_dyn patd, omni_dyn repl) {
   if (repl.tag == OMNI_DYN_FN) { \
     omni_s16_buf_add(&out, omni_js_as_s16(omni_js_str(omni_js_re_call(repl, s, caps, 0)))); \
   } else { \
-    omni_s16_buf_add(&out, omni_js_re_sub(omni_js_as_s16(repl), s, caps, 0)); \
+    omni_s16_buf_add(&out, omni_js_re_sub(NULL, omni_js_as_s16(repl), s, caps, 0)); \
   } \
   omni_s16_buf_add(&out, omni_s16_slice(s, caps[1], s.len)); \
   return omni_dyn_of_s16(omni_s16_buf_done(&out)); \
