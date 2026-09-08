@@ -119,6 +119,13 @@ typedef struct {
    * 为零时加到 emissive 上。 */
   float *col;
   int usecol;
+  /* 这一片是从哪条清单行来的：0 = patch/btri（走 materialData/colorData/
+   * transparentData），1 = `tri`（走 triangleData，也就是 generalShader 那一趟）。
+   * 只有 GL 主路要分这个 —— asy 里三者是三个不同的全局 buffer、用三个不同的
+   * program，材质下标的编法也不同（bezierpatch.cc:845 的 `nC ? -1-i : 1+i`）。
+   * `cursrc` 是"下一片进表时记什么"，由解析那一侧在 push 之前摆好。 */
+  unsigned char *src;
+  int cursrc;
   size_t n, cap;
 } r3tris;
 
@@ -162,6 +169,9 @@ static int r3tris_grow(r3tris *t, size_t need) {
   const r3mat **mat = (const r3mat **) realloc(t->mat, (cap / 3 + 1) * sizeof(const r3mat *));
   if (!mat) return 0;
   t->mat = mat;
+  unsigned char *src = (unsigned char *) realloc(t->src, cap / 3 + 1);
+  if (!src) return 0;
+  t->src = src;
   if (t->usecol) {
     float *col = (float *) realloc(t->col, cap * 4 * sizeof(float));
     if (!col) return 0;
@@ -194,6 +204,7 @@ static int r3tris_pushc(r3tris *t, r3v a, r3v na, r3v b, r3v nb, r3v c, r3v nc,
                         const r3mat *m, const float *vc) {
   if (!r3tris_grow(t, 3)) return 0;
   t->mat[t->n / 3] = m;
+  t->src[t->n / 3] = (unsigned char) t->cursrc;
   if (t->usecol) {
     float *o = t->col + t->n * 4;
     if (vc) for (int i = 0; i < 12; ++i) o[i] = vc[i];
@@ -2218,6 +2229,269 @@ static int r3_tri_transparent(const r3tris *t, size_t i) {
   return c && (c[3] < 1.0f || c[7] < 1.0f || c[11] < 1.0f);
 }
 
+/* ─────────────────────────────────────────────── GL 主路（dlopen 那个插件）
+ *
+ * 主体运行时对 GL **零编译期依赖**：只 include 这个纯 C 头（里面除了 stdint 什么都不带），
+ * 库在运行期 dlopen。这样 `cli.js` 的 `runtimeObjects()` 那套统一 flags（tcc 那条腿也在
+ * 其中）一个字都不用改。拿不到库就照旧走下面的 CPU 光栅器。
+ *
+ * `OMNI_R3_BACKEND=cpu` 强制走备选；`OMNI_GL_LIB` 指库、`OMNI_GL_SHADERS` 指
+ * **shaders/GL** 那个目录（根 shaders/ 那份是 Vulkan 的，Apple GL 4.1 编不过）。 */
+#include "../runtime-gl/omni_gl.h"
+
+#define R3_RTLD_NOW 2
+extern void *dlopen(const char *, int);
+extern void *dlsym(void *, const char *);
+
+typedef int (*r3_gl_draw_fn)(const char *, const omni_gl_scene *, unsigned char *);
+typedef const char *(*r3_gl_err_fn)(void);
+
+static r3_gl_err_fn r3_gl_err = NULL;
+
+static r3_gl_draw_fn r3_gl_entry(void) {
+  static int tried = 0;
+  static r3_gl_draw_fn fn = NULL;
+  if (tried) return fn;
+  tried = 1;
+  const char *be = getenv("OMNI_R3_BACKEND");
+  if (be && strcmp(be, "cpu") == 0) return NULL;
+  const char *cands[3];
+  int nc = 0;
+  const char *env = getenv("OMNI_GL_LIB");
+  if (env) cands[nc++] = env;
+  cands[nc++] = ".omni-cache/gl/libomnigl.dylib";
+  cands[nc++] = ".omni-cache/gl/libomnigl.so";
+  for (int i = 0; i < nc; ++i) {
+    void *h = dlopen(cands[i], R3_RTLD_NOW);
+    if (!h) continue;
+    fn = (r3_gl_draw_fn) dlsym(h, "omni_gl_draw");
+    r3_gl_err = (r3_gl_err_fn) dlsym(h, "omni_gl_error");
+    if (fn) return fn;
+  }
+  return NULL;
+}
+
+/* 一片三角有没有逐顶点色（`col` 里 -1 是"这一片没有"的记号，见 r3tris_pushc） */
+static int r3_tri_hascol(const r3tris *t, size_t i) {
+  return t->usecol && t->col && t->col[i * 12] >= 0.0f;
+}
+
+/* 把细分好的三角与线段摆成 asy 的六条 buffer，交给插件画，回 fw*fh*3 的像素
+ * （第 0 行在下，与 glReadPixels 一致，正好与 CPU 那条路的 `img` 同型）。
+ * 失败回 NULL —— 调用方照旧走 CPU 光栅器。
+ *
+ * 材质下标的编法照 bezierpatch.cc:43-49 与 :845：
+ *   不透明面片           MaterialIndex = i           （materialShader/colorShader）
+ *   透明面片、`tri` 那族   MaterialIndex = 有色 ? -1-i : 1+i （generalShader/transparentShader
+ *                                                  里是 `Materials[abs(material)-1]`，
+ *                                                  符号用来选"顶点色当 diffuse"） */
+static unsigned char *r3_gl_image(const r3scene *S, const r3tris *t,
+                                  const r3lines *L, const r3mat *mats, size_t nmat) {
+  r3_gl_draw_fn draw = r3_gl_entry();
+  if (!draw || nmat == 0) return NULL;
+
+  size_t ntr = t->n / 3;
+  /* 三条 ColorVertex 的（color/triangle/transparent）、一条 MaterialVertex 的（material）、
+     线段一条（MaterialVertex）。每条先数个数再一次分配。 */
+  size_t nmv = 0, ncv[3] = { 0, 0, 0 };   /* 0=color 1=triangle 2=transparent */
+  unsigned char *bucket = (unsigned char *) malloc(ntr ? ntr : 1);
+  if (!bucket) return NULL;
+  for (size_t i = 0; i < ntr; ++i) {
+    int tr = r3_tri_transparent(t, i);
+    int gen = t->src[i] != 0;
+    int b;
+    if (tr) b = 3;                        /* transparentData */
+    else if (gen) b = 2;                  /* triangleData */
+    else if (r3_tri_hascol(t, i)) b = 1;  /* colorData */
+    else b = 0;                           /* materialData */
+    bucket[i] = (unsigned char) b;
+    if (b == 0) nmv += 3; else ncv[b - 1] += 3;
+  }
+
+  omni_gl_mvertex *mv = (omni_gl_mvertex *) malloc((nmv + 1) * sizeof(omni_gl_mvertex));
+  omni_gl_cvertex *cv[3];
+  uint32_t *mi = (uint32_t *) malloc((nmv + 1) * sizeof(uint32_t));
+  uint32_t *ci[3];
+  int bad = (!mv || !mi);
+  for (int k = 0; k < 3; ++k) {
+    cv[k] = (omni_gl_cvertex *) malloc((ncv[k] + 1) * sizeof(omni_gl_cvertex));
+    ci[k] = (uint32_t *) malloc((ncv[k] + 1) * sizeof(uint32_t));
+    if (!cv[k] || !ci[k]) bad = 1;
+  }
+  size_t nlv = L->n;                                    /* 线段：两端各一个顶点 */
+  omni_gl_mvertex *lv = (omni_gl_mvertex *) malloc((nlv + 1) * sizeof(omni_gl_mvertex));
+  uint32_t *li = (uint32_t *) malloc((nlv + 1) * sizeof(uint32_t));
+  if (!lv || !li) bad = 1;
+  omni_gl_material *ms = (omni_gl_material *) malloc(nmat * sizeof(omni_gl_material));
+  /* 材质去重：**asy 自己就是这么干的**（drawsurface.cc:59-67 的 `materialMap`，
+   * 键是那四个 vec4 的哈希），所以这不是我们的优化，是照抄语义。
+   * 不去重会当场撞墙：box3 的清单里有 1076 条 mat（我们那侧一条 drawop 发一条），
+   * 1076×64 = 68864 字节 > `GL_MAX_UNIFORM_BLOCK_SIZE`（本机 65536），UBO 传不上去。
+   * 去重之后 box3 只剩个位数。比的是**转成 float 之后**的字节，与 asy 同一精度。 */
+  int *map = (int *) malloc(nmat * sizeof(int));
+  size_t hcap = 64;
+  while (hcap < nmat * 2) hcap *= 2;
+  int *htab = (int *) malloc(hcap * sizeof(int));
+  size_t nuniq = 0;
+  if (!ms || !map || !htab) bad = 1;
+  unsigned char *img = NULL;
+  if (!bad) {
+    for (size_t i = 0; i < hcap; ++i) htab[i] = -1;
+    for (size_t i = 0; i < nmat; ++i) {
+      const r3mat *m = mats + i;
+      omni_gl_material g;
+      memset(&g, 0, sizeof g);
+      for (int k = 0; k < 4; ++k) g.diffuse[k] = (float) m->diffuse[k];
+      for (int k = 0; k < 3; ++k) g.emissive[k] = (float) m->emissive[k];
+      g.emissive[3] = 1.0f;
+      for (int k = 0; k < 3; ++k) g.specular[k] = (float) m->specular[k];
+      g.specular[3] = 1.0f;
+      g.parameters[0] = (float) m->shininess;
+      g.parameters[1] = (float) m->metallic;
+      g.parameters[2] = (float) m->fresnel0;
+      g.parameters[3] = m->lightOn ? 1.0f : 0.0f;
+      unsigned long h = 1469598103934665603UL;
+      const unsigned char *bp = (const unsigned char *) &g;
+      for (size_t k = 0; k < sizeof g; ++k) { h ^= bp[k]; h *= 1099511628211UL; }
+      size_t slot = (size_t) h & (hcap - 1);
+      int hit = -1;
+      while (htab[slot] >= 0) {
+        if (memcmp(ms + htab[slot], &g, sizeof g) == 0) { hit = htab[slot]; break; }
+        slot = (slot + 1) & (hcap - 1);
+      }
+      if (hit < 0) {
+        hit = (int) nuniq;
+        ms[nuniq++] = g;
+        htab[slot] = hit;
+      }
+      map[i] = hit;
+    }
+
+    size_t om = 0, oc[3] = { 0, 0, 0 };
+    for (size_t i = 0; i < ntr; ++i) {
+      int b = bucket[i];
+      int idx = map[(size_t) (t->mat[i] - mats)];
+      int hascol = r3_tri_hascol(t, i);
+      const float *vc = hascol ? t->col + i * 12 : NULL;
+      if (b == 0) {
+        for (int k = 0; k < 3; ++k) {
+          omni_gl_mvertex *v = mv + om;
+          v->position[0] = (float) t->pos[i * 3 + k].x;
+          v->position[1] = (float) t->pos[i * 3 + k].y;
+          v->position[2] = (float) t->pos[i * 3 + k].z;
+          v->normal[0] = (float) t->nrm[i * 3 + k].x;
+          v->normal[1] = (float) t->nrm[i * 3 + k].y;
+          v->normal[2] = (float) t->nrm[i * 3 + k].z;
+          v->material = idx;
+          mi[om] = (uint32_t) om;
+          om++;
+        }
+      } else {
+        int g = b - 1;
+        /* color 那一档是普通下标；triangle 与 transparent 走 GENERAL，编 ±(1+i) */
+        int mat = (b == 1) ? idx : (hascol ? -1 - idx : 1 + idx);
+        for (int k = 0; k < 3; ++k) {
+          omni_gl_cvertex *v = cv[g] + oc[g];
+          v->position[0] = (float) t->pos[i * 3 + k].x;
+          v->position[1] = (float) t->pos[i * 3 + k].y;
+          v->position[2] = (float) t->pos[i * 3 + k].z;
+          v->normal[0] = (float) t->nrm[i * 3 + k].x;
+          v->normal[1] = (float) t->nrm[i * 3 + k].y;
+          v->normal[2] = (float) t->nrm[i * 3 + k].z;
+          v->material = mat;
+          if (vc) for (int q = 0; q < 4; ++q) v->color[q] = vc[k * 4 + q];
+          else { v->color[0] = v->color[1] = v->color[2] = 0.0f; v->color[3] = 1.0f; }
+          ci[g][oc[g]] = (uint32_t) oc[g];
+          oc[g]++;
+        }
+      }
+    }
+    for (size_t i = 0; i < nlv; ++i) {
+      lv[i].position[0] = (float) L->p[i].x;
+      lv[i].position[1] = (float) L->p[i].y;
+      lv[i].position[2] = (float) L->p[i].z;
+      lv[i].normal[0] = lv[i].normal[1] = 0.0f; lv[i].normal[2] = 1.0f;
+      lv[i].material = map[(size_t) (L->mat[i / 2] - mats)];
+      li[i] = (uint32_t) i;
+    }
+
+    omni_gl_scene sc;
+    memset(&sc, 0, sizeof sc);
+    sc.version = OMNI_GL_REQ_VERSION;
+    sc.width = S->fw; sc.height = S->fh; sc.samples = R3_NS;
+    sc.bg[0] = (float) S->bg[0]; sc.bg[1] = (float) S->bg[1];
+    sc.bg[2] = (float) S->bg[2]; sc.bg[3] = 1.0f;
+    /* 顶点位置已经是**视图空间**（清单那一侧就转好了），所以 projViewMat 只放投影、
+       viewMat 与 normMat 是单位阵。S->P 与 glm 同型（P[列][行]）。 */
+    for (int c = 0; c < 4; ++c)
+      for (int r = 0; r < 4; ++r) sc.projViewMat[c * 4 + r] = S->P[c][r];
+    for (int k = 0; k < 16; ++k) sc.viewMat[k] = (k % 5 == 0) ? 1.0 : 0.0;
+    for (int k = 0; k < 9; ++k) sc.normMat[k] = (k % 4 == 0) ? 1.0 : 0.0;
+    sc.materials = ms; sc.nmaterials = (int) nuniq;
+    float ldir[R3_MAXLIGHT * 3], lcol[R3_MAXLIGHT * 3];
+    for (int i = 0; i < S->nlight; ++i) {
+      ldir[3*i] = (float) S->ldir[i].x;
+      ldir[3*i+1] = (float) S->ldir[i].y;
+      ldir[3*i+2] = (float) S->ldir[i].z;
+      for (int k = 0; k < 3; ++k) lcol[3*i+k] = (float) S->lcol[i][k];
+    }
+    sc.light_dirs = ldir; sc.light_colors = lcol; sc.nlights = S->nlight;
+    sc.orthographic = S->ortho;
+    sc.material.verts = mv; sc.material.nverts = nmv;
+    sc.material.indices = mi; sc.material.nindices = nmv;
+    sc.color.verts = cv[0]; sc.color.nverts = ncv[0];
+    sc.color.indices = ci[0]; sc.color.nindices = ncv[0];
+    sc.triangle.verts = cv[1]; sc.triangle.nverts = ncv[1];
+    sc.triangle.indices = ci[1]; sc.triangle.nindices = ncv[1];
+    sc.transparent.verts = cv[2]; sc.transparent.nverts = ncv[2];
+    sc.transparent.indices = ci[2]; sc.transparent.nindices = ncv[2];
+    sc.line.verts = lv; sc.line.nverts = nlv;
+    sc.line.indices = li; sc.line.nindices = nlv;
+
+    const char *sd = getenv("OMNI_GL_SHADERS");
+    if (!sd) sd = "/opt/homebrew/share/asymptote/shaders/GL";
+    img = (unsigned char *) malloc((size_t) S->fw * S->fh * 3);
+    if (img && draw(sd, &sc, img) != 0) { free(img); img = NULL; }
+    if (getenv("OMNI_R3_DEBUG"))
+      fprintf(stderr, "r3gl: %dx%d 材质 %zu（去重后 %zu）面片顶点 %zu 有色 %zu"
+              " 三角网 %zu 透明 %zu 线段顶点 %zu -> %s%s%s\n",
+              S->fw, S->fh, nmat, nuniq, nmv, ncv[0], ncv[1], ncv[2], nlv,
+              img ? "成" : "败",
+              img ? "" : "：", img ? "" :
+              ((r3_gl_err && r3_gl_err()) ? r3_gl_err() : "（没留话）"));
+  }
+  free(bucket); free(mv); free(mi); free(lv); free(li); free(ms);
+  free(map); free(htab);
+  for (int k = 0; k < 3; ++k) { free(cv[k]); free(ci[k]); }
+  return img;
+}
+
+/* dealias（psfile.cc:74 那一趟，`antialias=2` 默认打开）+ 十六进制。
+ * 除最后一行、最后一列，每个像素换成它与右、下、右下三格的**平均（截断）**。
+ * 两条腿（CPU 光栅器与 GL 插件）都走这一段 —— 参考那边这一趟在 GL 之后，
+ * 所以它不属于任何一条后端。 */
+static omni_str r3_dealias_hex(int fw, int fh, unsigned char *img) {
+  size_t nb = (size_t) fw * fh * 3;
+  size_t nw = (size_t) fw * 3;
+  for (int y = 0; y + 1 < fh; ++y)
+    for (int x = 0; x + 1 < fw; ++x) {
+      unsigned char *a = img + (size_t) y * nw + (size_t) x * 3;
+      for (int ch = 0; ch < 3; ++ch)
+        a[ch] = (unsigned char) (((unsigned) a[ch] + (unsigned) a[ch + 3]
+                                  + (unsigned) a[ch + nw]
+                                  + (unsigned) a[ch + nw + 3]) / 4);
+    }
+  char *hex = omni_alloc_bytes(nb * 2 + 1);
+  static const char *D = "0123456789abcdef";
+  size_t o = 0;
+  for (size_t i = 0; i < nb; ++i) {
+    hex[o++] = D[(img[i] >> 4) & 15];
+    hex[o++] = D[img[i] & 15];
+  }
+  hex[o] = 0;
+  return omni_str_new(hex, (int64_t) o);
+}
+
 omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
   clock_t t0 = clock(), t1 = t0, t2 = t0;
   r3_pick_samples();
@@ -2414,8 +2688,12 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
         r3v n = r3v_cross(r3v_sub(b, a), r3v_sub(c, a));
         na = n; nb = n; nc = n;
       }
+      /* `tri` 这一条走 asy 的 triangleData（generalShader）—— 记上标记，
+         GL 那边据此选 program 与材质下标的编法。 */
+      tris.cursrc = 1;
       if (!r3tris_pushc(&tris, a, na, b, nb, c, nc, mats + (nmat - 1),
                         npend == 3 ? pend : NULL)) { ok = 0; break; }
+      tris.cursrc = 0;
       npend = 0; npendn = 0;
     } else if (strcmp(kw, "bez") == 0) {
       /* 一段三次曲线（四个控制点）：细分照 beziercurve.cc:62 在这边做 */
@@ -2452,6 +2730,22 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
   if (ok && ended && header && S.fw > 0 && S.fh > 0) {
     if (!dimset) r3_set_dimensions(&S);
     r3_projection(&S);
+
+    /* **主路先试 GL**（照抄 glrender.cc 的那条腿，见 r3_gl_image 的头注）。
+       库拿不到、或者插件报错，就落到下面的 CPU 光栅器 —— 那是备选。 */
+    {
+      unsigned char *gimg = r3_gl_image(&S, &tris, &lns, mats, nmat);
+      if (gimg) {
+        out = r3_dealias_hex(S.fw, S.fh, gimg);
+        free(gimg);
+        free(tris.pos); free(tris.nrm); free((void *) tris.mat); free(tris.col);
+        free(tris.src);
+        free(lns.p); free((void *) lns.mat);
+        free(mats);
+        free(text);
+        return out;
+      }
+    }
 
     size_t np = (size_t) S.fw * S.fh * R3_NS;
     r3fb fb;
@@ -2752,7 +3046,8 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
       size_t nb = (size_t) S.fw * S.fh * 3;
       unsigned char *img = (unsigned char *) malloc(nb);
       if (!img) { free(fb.depth); free(fb.col); free(tris.pos); free(tris.nrm);
-                  free((void *) tris.mat); free(lns.p); free((void *) lns.mat);
+                  free((void *) tris.mat); free(tris.src); free(lns.p);
+                  free((void *) lns.mat);
                   free(mats); free(text); return out; }
       for (int y = 0; y < S.fh; ++y)
         for (int x = 0; x < S.fw; ++x) {
@@ -2780,32 +3075,16 @@ omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
           }
       }
       {
-        size_t nw = (size_t) S.fw * 3;
-        for (int y = 0; y + 1 < S.fh; ++y)
-          for (int x = 0; x + 1 < S.fw; ++x) {
-            unsigned char *a = img + (size_t) y * nw + (size_t) x * 3;
-            for (int ch = 0; ch < 3; ++ch)
-              a[ch] = (unsigned char) (((unsigned) a[ch] + (unsigned) a[ch + 3]
-                                        + (unsigned) a[ch + nw]
-                                        + (unsigned) a[ch + nw + 3]) / 4);
-          }
+        out = r3_dealias_hex(S.fw, S.fh, img);
       }
-      char *hex = omni_alloc_bytes(nb * 2 + 1);
-      static const char *D = "0123456789abcdef";
-      size_t o = 0;
-      for (size_t i = 0; i < nb; ++i) {
-        hex[o++] = D[(img[i] >> 4) & 15];
-        hex[o++] = D[img[i] & 15];
-      }
-      hex[o] = 0;
       free(img);
-      out = omni_str_new(hex, (int64_t) o);
     }
     free(fb.depth);
     free(fb.col);
   }
 
   free(tris.pos); free(tris.nrm); free((void *) tris.mat); free(tris.col);
+  free(tris.src);
   free(lns.p); free((void *) lns.mat);
   free(mats);
   free(text);

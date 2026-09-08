@@ -33,11 +33,15 @@
 #include <string.h>
 
 #define GL_SILENCE_DEPRECATION 1
-/* GLFW 默认会带进 `<OpenGL/gl.h>`（2.1 那一档），与我们要的 `gl3.h` 同时出现时
-   Apple 的头会警告"两个都被 include 了"。让 GLFW 什么都别带，我们自己 include。 */
-#define GLFW_INCLUDE_NONE 1
-#include <GLFW/glfw3.h>
+/* **上下文用 CGL，不用 GLFW。** 量出来的：我们的宿主程序把入口跑在一条大栈的
+ * pthread 上（cli.js:1923 的 `-pthread` + omni_run_entry），而 macOS 上 GLFW 的
+ * `glfwInit` 要主线程 —— 在那条线程上调它当场 `Trace/BPT trap: 5`（SIGTRAP），
+ * 宿主连一行错都留不下。CGL 是 macOS 上 GL 的底层接口，不碰 NSApp、不要主线程，
+ * 离屏渲染（FBO + glReadPixels）本来也不需要窗口。
+ * `kCGLOGLPVersion_3_2_Core` 在 Apple Silicon 上给到的就是 4.1 core。 */
+#include <OpenGL/OpenGL.h>
 #include <OpenGL/gl3.h>
+
 
 #include "omni_gl.h"
 
@@ -56,23 +60,33 @@ static int fail(const char *fmt, ...)
   return -1;
 }
 
-/* 离屏上下文。GLFW 的隐藏窗口是 asy 自己也在用的那条路（glrender.cc 的 initWindow）；
-   macOS 上要的是 **4.1 core profile + forward compatible**，否则拿到的是 2.1 兼容档，
-   `#version 410` 直接编不过。 */
-static GLFWwindow *ctx = NULL;
+/* 离屏上下文。asy 那边是 GLFW 的隐藏窗口（glrender.cc 的 initWindow），我们这儿
+ * 换成 CGL（原因见文件头那段）：像素格式要 **3.2 core profile**，
+ * 否则拿到的是 2.1 兼容档、`#version 410` 直接编不过。
+ * 不要 `kCGLPFAOffScreen`（那是软件渲染的老路，会掉到 CPU 上，像素与参考对不上）；
+ * 离屏靠的是自己建的 FBO，上下文本身不需要绘制目标。 */
+static CGLContextObj ctx = NULL;
 
 static int ctx_init(void)
 {
   if (ctx) return 0;
-  if (!glfwInit()) return fail("glfwInit failed");
-  glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-  ctx = glfwCreateWindow(1, 1, "omni-gl", NULL, NULL);
-  if (!ctx) return fail("glfwCreateWindow failed (no GL 4.1 core context)");
-  glfwMakeContextCurrent(ctx);
+  CGLPixelFormatAttribute attrs[] = {
+    kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute) kCGLOGLPVersion_3_2_Core,
+    kCGLPFAAccelerated,
+    kCGLPFAColorSize, (CGLPixelFormatAttribute) 24,
+    kCGLPFAAlphaSize, (CGLPixelFormatAttribute) 8,
+    kCGLPFADepthSize, (CGLPixelFormatAttribute) 32,
+    (CGLPixelFormatAttribute) 0
+  };
+  CGLPixelFormatObj pf = NULL;
+  GLint npix = 0;
+  CGLError e = CGLChoosePixelFormat(attrs, &pf, &npix);
+  if (e != kCGLNoError || !pf) return fail("CGLChoosePixelFormat 失败（%d）", (int) e);
+  e = CGLCreateContext(pf, NULL, &ctx);
+  CGLDestroyPixelFormat(pf);
+  if (e != kCGLNoError || !ctx) return fail("CGLCreateContext 失败（%d）", (int) e);
+  e = CGLSetCurrentContext(ctx);
+  if (e != kCGLNoError) return fail("CGLSetCurrentContext 失败（%d）", (int) e);
   return 0;
 }
 
