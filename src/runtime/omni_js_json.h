@@ -82,6 +82,13 @@ static omni_s16 omni_js_json_nl(int64_t gap, int64_t depth) { \
   omni_s16 r; r.p = out; r.len = n; return r; \
 } \
 static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t depth) { \
+  if (v.tag == OMNI_DYN_DICT) { \
+    omni_dyn tj = omni_js_obj_get(v, omni_dyn_of_s16(omni_js_s16_lit("toJSON"))); \
+    if (tj.tag == OMNI_DYN_FN) { \
+      LT noargs = LT##_new(); \
+      v = omni_js_call_this(tj, v, omni_js_arr_wrap(noargs)); \
+    } \
+  } \
   switch (v.tag) { \
     case OMNI_DYN_UNDEF: case OMNI_DYN_FN: return omni_js_json_absent(); \
     case OMNI_DYN_NULL: return omni_js_s16_lit("null"); \

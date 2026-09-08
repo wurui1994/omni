@@ -200,6 +200,9 @@ export const JS_ABI = {
   js_realm_proto: { js: '$js_realm_proto', c: 'omni_js_realm_proto', arity: 0, lit: ['proto'] },
   // globalThis：一格普通的真对象，每个 realm 一份（见 prelude 里 gt 那一格的说明）
   js_global_this: { js: '$js_global_this', c: 'omni_js_global_this', arity: 0 },
+  // new Date(ms)：一格真对象，毫秒在隐藏槽 $ms 里，取值面挂在 realm 的 dateP 上。
+  // `Date.now()` 不走这里 —— 它就是 js_now_ms。
+  js_date_new: { js: '$js_date_new', c: 'omni_js_date_new', arity: 1 },
 
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
   js_map_size: { js: '$js_map_size', c: 'omni_js_map_size', arity: 1 },
@@ -585,7 +588,7 @@ const P1_JS_ONLY = [
   'js_obj_from_entries',
   'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
-  'js_sym_wk', 'js_realm_proto', 'js_global_this',
+  'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 

@@ -1804,6 +1804,7 @@ function $mkRealm() {
     setP: new $JSObj(objP, "Set"),
     reP: new $JSObj(objP, "RegExp"),
     iterP: new $JSObj(objP, "Iterator"),
+    dateP: new $JSObj(objP, "Date"),
     // globalThis（ADR-0020 P4）：这个值域里没有全局环境记录（模块的顶层名字是模块局部的），
     // 所以它就是**一格普通的真对象**，每个 realm 一份。挂上去的东西读得回来，
     // 内建（Math / JSON …）不在它身上 —— 那是画出来的边界。
@@ -1835,7 +1836,44 @@ function $mkRealm() {
   // Symbol 的两格：description 是访问器（规范如此），toString 给 "Symbol(desc)"
   $js_def_acc(r.symP, "description", $nat("description", 0, (t) => $dynAsSym(t).d), undefined, false, true);
   $natm(r.symP, "toString", 0, (t) => $js_sym_str(t));
+  /* Date（ADR-0020 P4）：一格真对象，毫秒存在隐藏槽 $ms 里（不可枚举，所以
+     Object.keys / JSON.stringify 看不见它）。取值面**转手宿主 Date** —— 本地时区那几格
+     因此与宿主一致（qjs 也用本地时区）。只有 JS 那条腿有：C 侧还没有真对象（P1-c），
+     用到 Date 的程序编不成 C，tests/js-exec 会把它的 C 腿标成 skip-c。 */
+  $natm(r.dateP, "getTime", 0, (t) => $js_date_ms(t));
+  $natm(r.dateP, "valueOf", 0, (t) => $js_date_ms(t));
+  $natm(r.dateP, "toISOString", 0, (t) => new Date($js_date_ms(t)).toISOString());
+  $natm(r.dateP, "toJSON", 1, (t) => new Date($js_date_ms(t)).toISOString());
+  $natm(r.dateP, "toString", 0, (t) => new Date($js_date_ms(t)).toString());
+  $natm(r.dateP, "getFullYear", 0, (t) => new Date($js_date_ms(t)).getFullYear());
+  $natm(r.dateP, "getMonth", 0, (t) => new Date($js_date_ms(t)).getMonth());
+  $natm(r.dateP, "getDate", 0, (t) => new Date($js_date_ms(t)).getDate());
+  $natm(r.dateP, "getDay", 0, (t) => new Date($js_date_ms(t)).getDay());
+  $natm(r.dateP, "getHours", 0, (t) => new Date($js_date_ms(t)).getHours());
+  $natm(r.dateP, "getMinutes", 0, (t) => new Date($js_date_ms(t)).getMinutes());
+  $natm(r.dateP, "getSeconds", 0, (t) => new Date($js_date_ms(t)).getSeconds());
+  $natm(r.dateP, "getMilliseconds", 0, (t) => new Date($js_date_ms(t)).getMilliseconds());
+  $natm(r.dateP, "getTimezoneOffset", 0, (t) => new Date($js_date_ms(t)).getTimezoneOffset());
+  $natm(r.dateP, "getUTCFullYear", 0, (t) => new Date($js_date_ms(t)).getUTCFullYear());
+  $natm(r.dateP, "getUTCMonth", 0, (t) => new Date($js_date_ms(t)).getUTCMonth());
+  $natm(r.dateP, "getUTCDate", 0, (t) => new Date($js_date_ms(t)).getUTCDate());
+  $natm(r.dateP, "getUTCDay", 0, (t) => new Date($js_date_ms(t)).getUTCDay());
+  $natm(r.dateP, "getUTCHours", 0, (t) => new Date($js_date_ms(t)).getUTCHours());
+  $natm(r.dateP, "getUTCMinutes", 0, (t) => new Date($js_date_ms(t)).getUTCMinutes());
+  $natm(r.dateP, "getUTCSeconds", 0, (t) => new Date($js_date_ms(t)).getUTCSeconds());
+  $natm(r.dateP, "getUTCMilliseconds", 0, (t) => new Date($js_date_ms(t)).getUTCMilliseconds());
   return r;
+}
+// Date 的隐藏槽。取到的不是数就说明接收者不是这一族的对象 —— 报一句，别悄悄算出 NaN。
+function $js_date_ms(t) {
+  const v = $js_isobj(t) ? $js_getp(t, "$ms", t) : undefined;
+  if (typeof v !== "number") $rt_error("this is not a Date");
+  return v;
+}
+function $js_date_new(ms) {
+  const o = $js_obj_new_p($realm().dateP);
+  $js_def_data(o, "$ms", $js_real(ms, "new Date"), true, false, true);
+  return o;
 }
 function $js_obj_to_string(t) {
   if (t === undefined) return "[object Undefined]";
@@ -2307,7 +2345,17 @@ function $js_json_apply(rep, key, v) {
 }
 function $js_json_nl(gap, depth) { return gap > 0 ? "\n" + " ".repeat(gap * depth) : ""; }
 // undefined 与函数值"该省略"：在对象里跳过、在数组里变成 null。用 undefined 当哨兵。
+// toJSON（规范 SerializeJSONProperty 第 2 步）：对象身上有可调用的 toJSON 就先换成它的
+// 返回值 —— Date 的序列化就是这么来的。与规范差的一格：规范里 toJSON 在 replacer
+// **之前**，这里在之后（replacer 在调用方那一层），两样都给的时候次序不同。
 function $js_json_val(v, rep, gap, depth) {
+  if ($js_isobj(v)) {
+    const tj = $js_getp(v, "toJSON", undefined);
+    if ($dynTag(tj) === "function") v = $callThis(tj, v, []);
+  } else if ($dynTag(v) === "dict") {
+    const tj = $js_obj_get(v, "toJSON");
+    if ($dynTag(tj) === "function") v = $callThis(tj, v, []);
+  }
   const t = $dynTag(v);
   if (t === "undefined" || t === "function") return undefined;
   if (t === "null") return "null";

@@ -2335,6 +2335,18 @@ class Lower {
       }
       return op('js_buf_view', [as[0], as[1] ?? undefExpr(), as[2] ?? undefExpr()]);
     }
+    /* new Date(...)（ADR-0020 P4）：一格真对象，毫秒在隐藏槽里，取值面挂在 realm 的
+     * dateP 上（见 prelude）。只收两种形状 —— 不给实参（当下）与一个毫秒数；
+     * 字符串解析与 (y, m, d, …) 那一族还没做，当场报，不悄悄给个错的时刻。 */
+    if (n === 'Date' && !this.lookup(n) && !this.classes.has(n)) {
+      if (e.args.length === 0) return op('js_date_new', [op('js_now_ms', [])]);
+      if (e.args.length === 1 && e.args[0].type !== 'Spread') {
+        return op('js_date_new', [this.expr(e.args[0])]);
+      }
+      this.err(e.span, "'new Date' takes no argument or a millisecond timestamp here;"
+        + ' the string and (year, month, day, ...) forms are not lowered');
+      return undefExpr();
+    }
     // new Error(msg, opts) 与它那一家（决策 15 + ADR-0020 P4）：异常对象就是
     // { $cls: [类名…, "Error"], name, message }，opts 只看 cause 那一格。
     // AggregateError 的实参顺序不一样（errors 在前），errors 那一格另外挂。
@@ -2547,7 +2559,9 @@ class Lower {
  */
 const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number', 'BigInt', 'process', 'console',
   // ADR-0020 P1：Symbol 与 Reflect 的静态面（Symbol.iterator、Reflect.ownKeys …）
-  'Symbol', 'Reflect']);
+  'Symbol', 'Reflect',
+  // ADR-0020 P4：Date.now()
+  'Date']);
 
 /* `new X(...)` 认的内建构造器（newExpr 里一支支写着）。这张表只给 `typeof X` 用 ——
  * 它们在 JS 里都是函数值，而这个值域里还不能把它们当值传，所以答案是编译期定死的。 */
@@ -2642,6 +2656,8 @@ const STATIC_CALLS = {
   'Number.isInteger': { op: 'js_num_is_integer', argc: 1 },
   'Number.parseInt': { op: 'js_num_parse_int', argc: 2 },
   'Number.parseFloat': { op: 'js_num_parse_float', argc: 1 },
+  // Date.now()：就是宿主时钟那一格 op，不必造一格 Date 对象
+  'Date.now': { op: 'js_now_ms', argc: 0 },
   'BigInt.asIntN': { op: 'js_bigint_as_int_n', argc: 2 },
   'BigInt.asUintN': { op: 'js_bigint_as_uint_n', argc: 2 },
   'process.cwd': { op: 'js_proc_cwd', argc: 0 },
