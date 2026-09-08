@@ -2347,6 +2347,15 @@ class Lower {
         + ' the string and (year, month, day, ...) forms are not lowered');
       return undefExpr();
     }
+    /* new Proxy(target, handler)（ADR-0020 P4）：代理与普通对象是同一种值，
+     * 差别只在属性访问的五个入口上多问一句陷阱（见 prelude 的 $js_px_trap）。 */
+    if (n === 'Proxy' && !this.lookup(n) && !this.classes.has(n)) {
+      if (e.args.length !== 2 || e.args.some((a) => a.type === 'Spread')) {
+        this.err(e.span, "'new Proxy' takes exactly two arguments (target, handler)");
+        return undefExpr();
+      }
+      return op('js_proxy_new', [this.expr(e.args[0]), this.expr(e.args[1])]);
+    }
     // new Error(msg, opts) 与它那一家（决策 15 + ADR-0020 P4）：异常对象就是
     // { $cls: [类名…, "Error"], name, message }，opts 只看 cause 那一格。
     // AggregateError 的实参顺序不一样（errors 在前），errors 那一格另外挂。

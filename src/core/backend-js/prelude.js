@@ -1591,6 +1591,9 @@ class $JSObj {
     this.ps = new Map();
     this.ex = true;
     this.cl = cls === undefined ? "Object" : cls;
+    // Proxy（ADR-0020 P4）：不是 undefined 就说明这一格是代理，px = { t: 目标, h: 处理器 }。
+    // 代理与普通对象是**同一种值**（$dynTag 都给 "object"），差别只在五个入口上多问一句。
+    this.px = undefined;
   }
 }
 function $js_isobj(v) { return v instanceof $JSObj; }
@@ -1625,6 +1628,26 @@ function $js_def_acc(o, k, g, s, e, c) {
 // 'a' 全要 / 'e' 只要可枚举的字符串键（Object.keys 那一档）。
 function $js_own_keys(o, kind) {
   const idx = [], str = [], sym = [];
+  if (o.px !== undefined) {
+    const f = $js_px_trap(o, "ownKeys");
+    if (f === undefined) return $js_own_keys(o.px.t, kind);
+    // 陷阱交回来的是一串键；按 kind 过一遍（'y' 只要 Symbol，'s' 只要字符串）。
+    // 'e'（Object.keys 那一档）还要照规范再问一遍**目标**的描述符：陷阱报了、但目标上
+    // 没有或不可枚举的键不算。别的不变量校验不做。
+    const ks = $js_arr_of($callThis(f, o.px.h, [o.px.t]));
+    const out = [];
+    for (let i = 0; i < ks.length; i++) {
+      const isSym = ks[i] instanceof $JSSym;
+      if (kind === "y" && !isSym) continue;
+      if ((kind === "s" || kind === "e") && isSym) continue;
+      if (kind === "e") {
+        const sl = $js_isobj(o.px.t) ? o.px.t.ps.get($js_pkey(ks[i])) : undefined;
+        if (sl === undefined || !sl.e) continue;
+      }
+      out.push(ks[i]);
+    }
+    return out;
+  }
   for (const [k, sl] of o.ps) {
     if (k instanceof $JSSym) { sym.push(k); continue; }
     if (kind === "e" && !sl.e) continue;
@@ -1649,9 +1672,29 @@ function $js_find_slot(o, key) {
   return null;
 }
 // [[Get]]。recv 是接收者（访问器的 this）；不给就是 o 自己。
+// Proxy 的陷阱（ADR-0020 P4）：处理器上有这一格就调它，没有就落到目标身上。
+// 做了五个：get / set / has / deleteProperty / ownKeys —— 它们正好是属性访问的五个入口。
+// 不做的写在明处：apply / construct（代理还不能当函数调）、getPrototypeOf、
+// defineProperty、getOwnPropertyDescriptor、以及规范里那一整套"不变量校验"。
+function $js_px_trap(o, name) {
+  if (o.px === undefined) return undefined;
+  const f = $js_getp(o.px.h, name, undefined);
+  return f === undefined || f === null ? undefined : f;
+}
+function $js_proxy_new(t, h) {
+  if (!$js_isobj(t) || !$js_isobj(h)) $rt_error("new Proxy takes an object target and handler");
+  const o = new $JSObj(null, "Object");
+  o.px = { t, h };
+  return o;
+}
 function $js_getp(o, k, recv) {
   const self = recv === undefined ? o : recv;
   if (!$js_isobj(o)) return $js_prim_get(o, k);
+  if (o.px !== undefined) {
+    const f = $js_px_trap(o, "get");
+    return f === undefined ? $js_getp(o.px.t, k, self)
+      : $callThis(f, o.px.h, [o.px.t, $js_pkey(k), self]);
+  }
   const hit = $js_find_slot(o, $js_pkey(k));
   if (hit === null) return undefined;
   const sl = hit[1];
@@ -1662,6 +1705,12 @@ function $js_getp(o, k, recv) {
 // [[Set]]。原型链上的 setter 优先；只有数据属性可写、且接收者可扩展时才落自有槽。
 function $js_setp(o, k, v) {
   if (!$js_isobj(o)) $rt_error("cannot set a property of " + $dynTag(o));
+  if (o.px !== undefined) {
+    const f = $js_px_trap(o, "set");
+    if (f === undefined) return $js_setp(o.px.t, k, v);
+    $callThis(f, o.px.h, [o.px.t, $js_pkey(k), v, o]);
+    return v;
+  }
   const key = $js_pkey(k);
   const hit = $js_find_slot(o, key);
   if (hit !== null) {
@@ -1985,13 +2034,26 @@ function $js_obj_desc(o, k) {
 }
 function $js_obj_del_p(o, k) {
   if (!$js_isobj(o)) return true;
+  if (o.px !== undefined) {
+    const f = $js_px_trap(o, "deleteProperty");
+    return f === undefined ? $js_obj_del_p(o.px.t, k)
+      : $js_truthy($callThis(f, o.px.h, [o.px.t, $js_pkey(k)]));
+  }
   const key = $js_pkey(k), sl = o.ps.get(key);
   if (sl === undefined) return true;
   if (!sl.c) return false;
   o.ps.delete(key);
   return true;
 }
-function $js_obj_has_p(o, k) { return $js_isobj(o) ? $js_find_slot(o, $js_pkey(k)) !== null : $js_prim_get(o, k) !== undefined; }
+function $js_obj_has_p(o, k) {
+  if (!$js_isobj(o)) return $js_prim_get(o, k) !== undefined;
+  if (o.px !== undefined) {
+    const f = $js_px_trap(o, "has");
+    return f === undefined ? $js_obj_has_p(o.px.t, k)
+      : $js_truthy($callThis(f, o.px.h, [o.px.t, $js_pkey(k)]));
+  }
+  return $js_find_slot(o, $js_pkey(k)) !== null;
+}
 // Object.fromEntries：走一遍迭代（数组、Map、自定义可迭代对象都收），每一项按 [k, v] 取。
 function $js_obj_from_entries(pairs) {
   const o = $js_obj_new();

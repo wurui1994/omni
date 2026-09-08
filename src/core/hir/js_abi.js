@@ -203,6 +203,10 @@ export const JS_ABI = {
   // new Date(ms)：一格真对象，毫秒在隐藏槽 $ms 里，取值面挂在 realm 的 dateP 上。
   // `Date.now()` 不走这里 —— 它就是 js_now_ms。
   js_date_new: { js: '$js_date_new', c: 'omni_js_date_new', arity: 1 },
+  /* new Proxy(target, handler)（ADR-0020 P4）：代理与普通对象是同一种值，差别只在
+     属性访问的五个入口上多问一句陷阱（get / set / has / deleteProperty / ownKeys）。
+     apply/construct 与规范那套不变量校验都不做 —— 见 prelude 里 $js_px_trap 的说明。 */
+  js_proxy_new: { js: '$js_proxy_new', c: 'omni_js_proxy_new', arity: 2 },
 
   js_map_new: { js: '$js_map_new', c: 'omni_js_map_new', arity: 0 },
   js_map_size: { js: '$js_map_size', c: 'omni_js_map_size', arity: 1 },
@@ -588,7 +592,7 @@ const P1_JS_ONLY = [
   'js_obj_from_entries',
   'js_instanceof', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
-  'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new',
+  'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new', 'js_proxy_new',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 
