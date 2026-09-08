@@ -961,6 +961,10 @@ static int r3_add_bez(const r3scene *s, r3lines *L, const r3v *p,
  * renderBase.cc:111 setDimensions 照抄。Width/Height 这里就是 fw/fh
  * （Export 里是 `setDimensions(fullWidth,fullHeight,…)`，glrender.cc:488）。
  * X/Y 是交互平移，出图那一趟是 0。 */
+/* 这一趟走的是 GL 主路还是 CPU 备选。`omni_r3_render` 一开始问一次 dlopen 的结果并摆好；
+   `r3_set_dimensions` 里视景体的长宽比按这一格分两条规矩（见那儿那段注）。 */
+static int r3_backend_is_gl = 0;
+
 static void r3_set_dimensions(r3scene *s) {
   int Width = s->fw, Height = s->fh;
   if (Width <= 0) Width = 1;
@@ -989,6 +993,20 @@ static void r3_set_dimensions(r3scene *s) {
   double aspect;
   { const char *ef = getenv("OMNI_R3_ASPECT");
     double A = ((double) Width) / Height;
+    /* **GL 主路的视景体长宽比就是位图的长宽比。** 量出来的（2026-09-08，GL 主路对
+       `asy -novulkan`，墨迹包围盒作判据）：照下面那一串（Vulkan 那条腿标定出来的
+       initDisplay）算，线主导的图整幅大 1.107 倍；换成 `A` 之后**墨迹盒逐像素对上**：
+         lw4      我们 x[128,2138] → x[226,2040]，参考 x[226,2040]
+         big_line 我们 y[17,2249]  → y[377,1889]，参考 y[377,1889]
+         diag2    同上
+       判据上（字节不同的比例）：lw4 28.09%→20.05%、big_line 73.84%→50.03%、
+       diag2 55.35%→50.03%、box3 0.93%→0.81%，boxln/big_sph/box2 不变（那几个本来
+       两条路算出同一个值）。
+       **两条腿的规矩不同**：下面那一串是拿 **Vulkan** 参考标定出来的（box3 90228→2148
+       那一刀），CPU 光栅器仍旧走它；GL 这条腿走 `A`。这不矛盾 —— vkrender.cc:343 与
+       glrender.cc:1220 给 setDimensions 的 Width/Height 本来就是两个来源。 */
+    if (r3_backend_is_gl && !ef) { aspect = A; }
+    else {
     /* `OMNI_R3_ASPECT` 还收一个**数**（标定用）：直接拿它当视景体长宽比。
        是为了反解"参考那一侧到底用了哪个 aspect" —— 见 r3_depthfar 上面那段账。 */
     double forced = ef ? atof(ef) : 0.0;
@@ -1087,7 +1105,7 @@ static void r3_set_dimensions(r3scene *s) {
       if ((double) W0 / H0 > A) W0 = (int) ceil(H0 * A - 1e-9);
       else H0 = (int) ceil(W0 / A - 1e-9);
       aspect = (double) W0 / H0;
-    } }
+    } } }
   double zoom = s->zoom == 0 ? 1 : s->zoom;
   /* **viewportshift 不乘 zoom。** renderBase.cc:119 那一行是
    *   xshift = (X / Width + Shift.getx() * Xfactor) * zoom
@@ -2494,6 +2512,8 @@ static omni_str r3_dealias_hex(int fw, int fh, unsigned char *img) {
 
 omni_str omni_r3_render(omni_str path, omni_arr_f64 nums) {
   clock_t t0 = clock(), t1 = t0, t2 = t0;
+  /* 先定这一趟走哪条腿：视景体的长宽比按它分两条规矩（见 r3_set_dimensions） */
+  r3_backend_is_gl = r3_gl_entry() != NULL;
   r3_pick_samples();
   { const char *e = getenv("OMNI_R3_TCENTER");
     if (e) r3_tcenter = strcmp(e, "0") != 0; }
