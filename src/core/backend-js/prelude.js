@@ -1792,6 +1792,17 @@ function $js_iter_close(h) {
   const rf = $js_getp(h.it, "return", undefined);
   if ($dynTag(rf) === "function") $callThis(rf, h.it, []);
 }
+/* 数组解构的 rest：从第 i 格起收成一个 list。list 那一支是 slice，真迭代器那一支抽到 done */
+function $js_iter_rest(h, i) {
+  if (!(h instanceof $JsIterH)) return $js_arr_of(h).slice($js_idx(i, 0));
+  const out = [];
+  for (;;) {
+    if (h.d) return out;
+    const r = $js_iter_next(h.it);
+    if ($js_truthy($js_getp(r, "done", undefined))) { h.d = true; return out; }
+    out.push($js_getp(r, "value", undefined));
+  }
+}
 // o[k]：数组按下标、字符串按码元（只读）、普通对象按属性名。
 // Map/Set 上的 o[k] 在 JS 里是属性访问而不是条目，量过的源码里没有，所以报错。
 function $js_idx_get(o, k) {

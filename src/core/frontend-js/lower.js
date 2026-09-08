@@ -1412,19 +1412,26 @@ class Lower {
    */
   bindPattern(pat, value) {
     if (pat.type === 'Ident') return this.defineVar(pat.name, () => value);
-    // 右值只算一次，存进一个临时量再按位取。
-    // 数组模式先过一遍 js_iter（ADR-0020 P1）：规范里数组解构走的是**迭代器协议**，
-    // 所以 `const [a, b] = 自定义可迭代对象` 也该成立；数组身上它是恒等，字符串按码点切。
+    /* 右值只算一次，存进一个临时量再按位取。
+     * 数组模式走**迭代器协议**（规范 8.6.2 的 ArrayBindingPattern）：js_iter_open 交出
+     * "list 或一格把手"，每一格取一次就往前走一格 —— 于是 `const [a, b] = 无穷生成器()`
+     * 只 next 两次（从前是先抽干，**挂住**），取完了没有 rest 还要补一次 close
+     * （带 finally 的生成器于是跑得到清理）。数组身上把手就是它自己，与从前等价。 */
     const t = this.declare('_d').name;
-    const out = [localStmt(t, pat.type === 'ArrayPattern' ? op('js_iter', [value]) : value)];
+    const out = [localStmt(t, pat.type === 'ArrayPattern' ? op('js_iter_open', [value]) : value)];
     if (pat.type === 'ArrayPattern') {
+      // 一格 = "走一步，走得到就是那一格、走不到就是 undefined"（done 每次只走一步）
+      const at = (i) => ternary(boolOp('js_iter_done', [varRef(t), constReal(i)]),
+        undefExpr(), op('js_iter_cur', [varRef(t), constReal(i)]));
       pat.elements.forEach((el, i) => {
-        if (el === null) return;
-        out.push(...this.bindElem(el, op('js_idx_get', [varRef(t), constReal(i)])));
+        // 空位（`const [, b] = it`）也要走一格，只是不绑
+        if (el === null) { out.push(exprStmt(at(i))); return; }
+        out.push(...this.bindElem(el, at(i)));
       });
       if (pat.rest) {
-        out.push(...this.bindElem(pat.rest,
-          op('js_arr_slice', [varRef(t), constReal(pat.elements.length), undefExpr()])));
+        out.push(...this.bindElem(pat.rest, op('js_iter_rest', [varRef(t), constReal(pat.elements.length)])));
+      } else {
+        out.push(exprStmt(op('js_iter_close', [varRef(t)])));
       }
       return out;
     }
@@ -3313,7 +3320,8 @@ class Lower {
   /** 解构赋值的一层：把 srcExpr 落进临时量，再按模式往各个可赋值位置写。交出那格临时量。 */
   destructInto(pat, srcExpr, span) {
     const tv = this.temp();
-    const src = pat.type === 'ArrayPattern' ? op('js_iter', [srcExpr]) : srcExpr;
+    // 数组模式走迭代器协议（与 bindPattern 同一副形状：一格走一步，取完补一次 close）
+    const src = pat.type === 'ArrayPattern' ? op('js_iter_open', [srcExpr]) : srcExpr;
     this.emitPre(exprStmt(assign(varRef(tv), src)), span);
     const put = (leaf, value) => {
       /* 默认值（`[a = 1] = xs`、`({x = 2} = o)`）：只有 undefined 才用默认（规范如此）。
@@ -3343,11 +3351,17 @@ class Lower {
       if (lv) this.emitPre(exprStmt(lv.set(value)), span);
     };
     if (pat.type === 'ArrayPattern') {
+      const at = (i) => ternary(boolOp('js_iter_done', [varRef(tv), constReal(i)]),
+        undefExpr(), op('js_iter_cur', [varRef(tv), constReal(i)]));
       pat.elements.forEach((el, i) => {
-        if (el) put(el, op('js_idx_get', [varRef(tv), constReal(i)]));
+        // 空位也要走一格，只是不写
+        if (el) put(el, at(i));
+        else this.emitPre(exprStmt(at(i)), span);
       });
       if (pat.rest) {
-        put(pat.rest, op('js_arr_slice', [varRef(tv), constReal(pat.elements.length), undefExpr()]));
+        put(pat.rest, op('js_iter_rest', [varRef(tv), constReal(pat.elements.length)]));
+      } else {
+        this.emitPre(exprStmt(op('js_iter_close', [varRef(tv)])), span);
       }
       return varRef(tv);
     }

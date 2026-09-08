@@ -242,6 +242,9 @@ static bool omni_js_iter_done(omni_dyn h, omni_dyn i) { \
 } \
 static omni_dyn omni_js_iter_cur(omni_dyn h, omni_dyn i) { return omni_js_arr_at(h, i); } \
 static void omni_js_iter_close(omni_dyn h) { (void)h; } \
+static omni_dyn omni_js_iter_rest(omni_dyn h, omni_dyn i) { \
+  return omni_js_arr_slice(h, i, omni_dyn_undef()); \
+} \
 /* String.raw 的**普通调用**形态（tag 形态在降级器那儿就折成字面量了）：段数看 raw.length，
    最后一段后面不再拼插值；插值不够就当没有，不是拼 "undefined"。 */ \
 static omni_dyn omni_js_str_raw(omni_dyn strs, omni_dyn subs) { \

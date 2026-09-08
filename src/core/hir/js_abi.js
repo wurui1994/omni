@@ -247,6 +247,10 @@ export const JS_ABI = {
   js_iter_done: { js: '$js_iter_done', c: 'omni_js_iter_done', arity: 2, ret: 'bool', throws: true },
   js_iter_cur: { js: '$js_iter_cur', c: 'omni_js_iter_cur', arity: 2 },
   js_iter_close: { js: '$js_iter_close', c: 'omni_js_iter_close', arity: 1, ret: 'void', throws: true },
+  /* 数组解构的 rest（`const [a, ...r] = it`）：从第 i 格起把**剩下的**收成一个 list。
+     list 那一支就是 slice，真迭代器那一支是抽到 done —— 无穷迭代器上照样挂住，那与
+     `[...it]` 一样是程序自己的事（规范也是抽干）。 */
+  js_iter_rest: { js: '$js_iter_rest', c: 'omni_js_iter_rest', arity: 2, throws: true },
   js_instanceof_p: { js: '$js_instanceof_p', c: 'omni_js_instanceof_p', arity: 2, ret: 'bool' },
   /* 是不是"真对象"（规范的 Type(v) is Object）。用处只有一处：构造器 `return {…}` 时
      `new C()` 的值是**返回的那一格**，返回别的（数、undefined）就还是实例（规范 10.2.2
