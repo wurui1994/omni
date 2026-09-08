@@ -164,12 +164,16 @@ function capturedNames(stmts) {
 /**
  * 这个函数体里提到 `this` 了吗（ADR-0020 P1）。
  *
+ * `super` 也算：`super.m()` 要拿当前的接收者当 this（不然 this 会变成父类的原型），
+ * 而方法体里完全可以只写 `super.m()` 一句、根本不提 `this`。
+ *
  * 钻进箭头、**不钻**进普通函数与方法：箭头的 this 是外层的（所以外层得把它装进 cell 传下去），
  * 而普通函数有自己的 this（它自己入口取一次就行，不该逼外层也开一格）。
  */
 function mentionsThis(node) {
   if (!node || typeof node !== 'object') return false;
   if (node.type === 'This') return true;
+  if (node.type === 'Ident' && node.name === 'super') return true;
   if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl') return false;
   let hit = false;
   eachChild(node, (x) => { if (!hit) hit = mentionsThis(x); });
@@ -391,7 +395,14 @@ class Lower {
         // $cls 链，instanceof 查的就是它（ADR-0011 决策 15）
         const sup = s.superClass;
         const isError = !!(sup && sup.type === 'Ident' && sup.name === 'Error');
-        this.classes.set(s.id, { mangled: this.mangle('n_', s.id), node: s, isError });
+        /* `extends`（ADR-0020 P1-f）：Error 那一支照旧走 `$cls` 链；别的收**这个文件里
+         * 声明过的类名** —— 原型链要拿到父类的原型对象与 `$init`，而那两格是模块级全局。
+         * 任意表达式（`class C extends mixin(B)`）还不收，那要先有"类当值"。 */
+        const superName = !isError && sup ? (sup.type === 'Ident' ? sup.name : null) : null;
+        if (!isError && sup && superName === null) {
+          this.err(s.span, "'extends <expression>' is not supported; extend a class declared in this file");
+        }
+        this.classes.set(s.id, { mangled: this.mangle('n_', s.id), node: s, isError, superName });
         /* 非 Error 的类走**原型链**那条新路（ADR-0020 P1-f）：类对象与原型对象各占一格
          * 模块级全局 —— 方法只能建一次（每次 new 重建原型的话
          * `getPrototypeOf(a) === getPrototypeOf(b)` 就假了），而类名本身要在整个模块可见
@@ -537,6 +548,8 @@ class Lower {
     /* `pre`：在**取完接收者、绑形参之前**插几句。类的实例字段就是这么进去的
      * （ADR-0020 P1-f）：规范里字段在构造器体之前初始化，而且它们看不见构造器的形参。 */
     if (opts.pre) stmts.push(...opts.pre());
+    // 这一帧属于哪个类（`super.m()` 与 `super(...)` 要靠它找父类，ADR-0020 P1-f）
+    if (opts.classOf) this.fn.classOf = opts.classOf;
     params.forEach((p, i) => stmts.push(...this.bindParam(p, i, span)));
     if (rest) {
       if (rest.type !== 'Ident') this.err(span, 'destructuring a rest parameter is not supported');
@@ -695,11 +708,25 @@ class Lower {
    * 而 `this` 是真接收者，所以方法可以借给别人用。
    */
   classProtoStmts(s) {
+    const rec = this.classes.get(s.id);
+    const sup = rec.superName;
+    if (sup !== null) {
+      const srec = this.classes.get(sup);
+      if (!srec || srec.isError) {
+        this.err(s.span, `'extends ${sup}': ${srec ? 'extending an Error subclass is not supported yet' : `'${sup}' is not a class declared in this file`}`);
+      }
+    }
     const protoG = () => globalRef(this.globals.get(protoGlobalName(s.id)).name);
     const classG = () => globalRef(this.globals.get(s.id).name);
     const out = [];
-    out.push(exprStmt(assign(protoG(), op('js_obj_new_p', [undefExpr()]))));
+    /* 原型链就是**把父类的原型当自己原型的原型**；静态成员的继承是"类对象的原型是父类对象"
+     * （规范如此 —— 所以子类身上能查到父类的 static 方法）。 */
+    const supProto = sup === null ? undefExpr() : globalRef(this.globals.get(protoGlobalName(sup)).name);
+    out.push(exprStmt(assign(protoG(), op('js_obj_new_p', [supProto]))));
     out.push(exprStmt(assign(classG(), op('js_obj_new', []))));
+    if (sup !== null) {
+      out.push(exprStmt(op('js_obj_proto_set', [classG(), globalRef(this.globals.get(sup).name)])));
+    }
     // prototype 与 constructor 互指，两条都不可枚举
     out.push(exprStmt(this.defHidden(classG(), s16('prototype'), protoG())));
     out.push(exprStmt(this.defHidden(protoG(), s16('constructor'), classG())));
@@ -718,7 +745,7 @@ class Lower {
       }
       if (what === 'constructor' && !m.static) { ctor = m; continue; }
       const label = `${s.id}_${m.static ? 'static_' : ''}${what ?? 'computed'}`;
-      const fn = this.closureExpr(fnNodeOfProp(m), label);
+      const fn = this.closureExpr(fnNodeOfProp(m), label, { classOf: s.id });
       if (m.kind === 'get' || m.kind === 'set') {
         let desc = op('js_obj_set', [op('js_obj_new', []), s16(m.kind), fn]);
         desc = op('js_obj_set', [desc, s16('configurable'), constBool(true)]);
@@ -741,6 +768,7 @@ class Lower {
 
   /** `$init`：实例字段 + 构造器体，`this` 是传进来的接收者（不分配实例） */
   classInitClosure(s, ctor, fields) {
+    const sup = this.classes.get(s.id).superName;
     const node = {
       type: 'FuncExpr',
       id: null,
@@ -751,13 +779,50 @@ class Lower {
     };
     return this.closureExpr(node, `${s.id}_init`, {
       wantThis: true,
-      // 字段在构造器体**之前**、形参绑定之前（规范：字段初始化器看不见构造器的形参）
-      pre: () => fields.map((f) => exprStmt(op('js_setp', [
-        this.readEntry(this.lookup('this')),
-        f.computed ? this.expr(f.key) : s16(this.keyName(f.key, f.span)),
-        f.value ? this.expr(f.value) : undefExpr(),
-      ]))),
+      classOf: s.id,
+      pre: () => {
+        const pre = [];
+        /* 没写构造器的派生类：规范给的隐式构造器是 `constructor(...a){ super(...a) }` ——
+         * 所以整条实参表原样转给父类的 `$init`。写了构造器的那些由 `super(...)` 自己发。 */
+        if (!ctor && sup !== null) {
+          pre.push(exprStmt(op('js_call_this', [
+            op('js_obj_get', [globalRef(this.globals.get(sup).name), s16(CLASS_INIT_KEY)]),
+            this.readEntry(this.lookup('this')),
+            argsDyn(),
+          ])));
+        }
+        // 字段在构造器体**之前**、形参绑定之前（规范：字段初始化器看不见构造器的形参）
+        for (const f of fields) {
+          pre.push(exprStmt(op('js_setp', [
+            this.readEntry(this.lookup('this')),
+            f.computed ? this.expr(f.key) : s16(this.keyName(f.key, f.span)),
+            f.value ? this.expr(f.value) : undefExpr(),
+          ])));
+        }
+        return pre;
+      },
     });
+  }
+
+  /** 这个静态路径（或它的某个前缀）在 STATIC_PROPS 里注册过吗（ADR-0020 P1-f） */
+  staticPrefix(node) {
+    let cur = node;
+    while (cur && cur.type === 'Member' && !cur.computed) {
+      const p = this.staticPath(cur);
+      if (p && STATIC_PROPS[p]) return true;
+      cur = cur.object;
+    }
+    return false;
+  }
+
+  /** 父类原型那一格全局（`super.m` 用它）。不在派生类里就骂一句并回 null。 */
+  superProtoRef(span) {
+    const sup = this.fn.classOf ? this.classes.get(this.fn.classOf)?.superName : null;
+    if (!sup) {
+      this.err(span, "'super' is only available inside a method of a derived class");
+      return null;
+    }
+    return globalRef(this.globals.get(protoGlobalName(sup)).name);
   }
 
   /** 闭包值的构造表达式（在**外层**栈帧里求值） */
@@ -1656,12 +1721,23 @@ class Lower {
   }
 
   member(e) {
+    // `super.x`（不是调用）：从父类原型上取一格属性（ADR-0020 P1-f）
+    if (!e.computed && e.object.type === 'Ident' && e.object.name === 'super' && !this.lookup('super')) {
+      const sp = this.superProtoRef(e.span);
+      return sp === null ? undefExpr() : op('js_getp', [sp, s16(e.name)]);
+    }
     const path = this.staticPath(e);
     if (path) {
       const spec = STATIC_PROPS[path];
       // lit 也要带上：well-known Symbol（Symbol.iterator …）就是"名字是编译期常量"的 op
       if (spec) return op(spec.op, [], spec.lit ?? {});
       if (path.startsWith('process.env.')) return op('js_proc_env', [s16(path.slice('process.env.'.length))]);
+      /* 最长的**已注册前缀**（ADR-0020 P1-f）：`Object.prototype.toString` 就是
+       * "取 Object.prototype 这一格，再取它的 toString" —— 内建原型现在是真对象，
+       * 所以后半段是普通的属性读。这一条让 `X.prototype.m.call(…)` 那类写法通了。 */
+      if (!e.computed && e.object.type === 'Member' && this.staticPrefix(e.object)) {
+        return op('js_obj_get', [this.member(e.object), s16(e.name)]);
+      }
       this.err(e.span, `'${path}' is not in the closed ABI (ADR-0011 decision 2)`);
       return undefExpr();
     }
@@ -1728,14 +1804,25 @@ class Lower {
     }
     const c = e.callee;
     if (c.type === 'Ident') {
-      // super(msg)：只有 Error 子类有 super，作用就是把 message 填上（决策 15）
+      // super(msg)：Error 子类那一支就是把 message 填上（决策 15）
       if (c.name === 'super' && !this.lookup('super')) {
-        if (!this.fn.isCtor || !this.fn.superIsError) {
-          this.err(e.span, "'super(...)' is only available in the constructor of an Error subclass");
-          return undefExpr();
+        if (this.fn.isCtor && this.fn.superIsError) {
+          const msg = e.args.length ? this.expr(e.args[0]) : undefExpr();
+          return op('js_obj_set', [this.readEntry(this.lookup('this')), s16('message'), msg]);
         }
-        const msg = e.args.length ? this.expr(e.args[0]) : undefExpr();
-        return op('js_obj_set', [this.readEntry(this.lookup('this')), s16('message'), msg]);
+        /* 原型链那一支（ADR-0020 P1-f）：`super(...)` 就是"拿**当前的 this** 调父类的
+         * $init" —— 父类的 $init 不分配实例，所以派生类的字段与构造器体接着往同一个
+         * 对象上写。这也是为什么分配那一步放在 `new C()` 那边。 */
+        const sup = this.fn.classOf ? this.classes.get(this.fn.classOf)?.superName : null;
+        if (sup) {
+          return op('js_call_this', [
+            op('js_obj_get', [globalRef(this.globals.get(sup).name), s16(CLASS_INIT_KEY)]),
+            this.readEntry(this.lookup('this')),
+            box(this.argList(e.args), listType(D)),
+          ]);
+        }
+        this.err(e.span, "'super(...)' is only available in the constructor of a derived class");
+        return undefExpr();
       }
       if (!this.lookup(c.name) && !this.globals.has(c.name)) {
         if (this.topFns.has(c.name)) {
@@ -1755,12 +1842,28 @@ class Lower {
       return this.dynCall(this.ident(c), e.args);
     }
     if (c.type === 'Member') {
+      /* `super.m(...)`（ADR-0020 P1-f）：函数从**父类的原型**上取，`this` 还是当前的
+       * 接收者 —— 这就是 super 与普通成员调用唯一的差别（不然 `super.m()` 里的 this
+       * 会变成父类原型自己）。 */
+      if (!c.computed && c.object.type === 'Ident' && c.object.name === 'super' && !this.lookup('super')) {
+        const sp = this.superProtoRef(e.span);
+        if (sp === null) return undefExpr();
+        return op('js_call_this', [
+          op('js_getp', [sp, s16(c.name)]),
+          this.readEntry(this.lookup('this')),
+          box(this.argList(e.args), listType(D)),
+        ]);
+      }
       const path = this.staticPath(c);
       if (path) {
         const spec = STATIC_CALLS[path];
         if (spec) return this.abiCall(spec, e.args, e.span, path);
-        this.err(e.span, `'${path}' is not in the closed ABI (ADR-0011 decision 2)`);
-        return undefExpr();
+        /* 已注册前缀那一条（ADR-0020 P1-f）：`Object.prototype.toString.call(x)` ——
+         * 前半段求值出内建原型（真对象），后半段就是普通的成员调用，往下落到通用路径。 */
+        if (!this.staticPrefix(c)) {
+          this.err(e.span, `'${path}' is not in the closed ABI (ADR-0011 decision 2)`);
+          return undefExpr();
+        }
       }
       const re = this.regexCall(c, e);
       if (re) return re;
@@ -2195,6 +2298,19 @@ const STATIC_PROPS = {
   'Symbol.hasInstance': { op: 'js_sym_wk', lit: { name: 'hasInstance' } },
   'Symbol.species': { op: 'js_sym_wk', lit: { name: 'species' } },
   'Symbol.unscopables': { op: 'js_sym_wk', lit: { name: 'unscopables' } },
+  /* 内建原型当值用（ADR-0020 P1-f）：它们现在是真对象，内建方法就住在上面。
+     于是 `Object.prototype.toString.call(x)`、`Array.prototype.join.call(a, "|")`
+     这类"借方法"的写法通了 —— 后半段是普通的属性读 + 带接收者的调用。 */
+  'Object.prototype': { op: 'js_realm_proto', lit: { name: 'Object' } },
+  'Function.prototype': { op: 'js_realm_proto', lit: { name: 'Function' } },
+  'Array.prototype': { op: 'js_realm_proto', lit: { name: 'Array' } },
+  'String.prototype': { op: 'js_realm_proto', lit: { name: 'String' } },
+  'Number.prototype': { op: 'js_realm_proto', lit: { name: 'Number' } },
+  'Boolean.prototype': { op: 'js_realm_proto', lit: { name: 'Boolean' } },
+  'Symbol.prototype': { op: 'js_realm_proto', lit: { name: 'Symbol' } },
+  'RegExp.prototype': { op: 'js_realm_proto', lit: { name: 'RegExp' } },
+  'Map.prototype': { op: 'js_realm_proto', lit: { name: 'Map' } },
+  'Set.prototype': { op: 'js_realm_proto', lit: { name: 'Set' } },
 };
 
 const STATIC_SETS = {
