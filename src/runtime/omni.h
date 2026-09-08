@@ -537,7 +537,8 @@ omni_dyn omni_js_str_slice(omni_dyn s, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_str_repeat(omni_dyn s, omni_dyn n);
 omni_dyn omni_js_str_pad_start(omni_dyn s, omni_dyn n, omni_dyn fill);
 omni_dyn omni_js_str_pad_end(omni_dyn s, omni_dyn n, omni_dyn fill);
-omni_dyn omni_js_str_replace_all(omni_dyn s, omni_dyn pat, omni_dyn rep);
+/* replaceAll 的串模式在**宏那一段**（omni_js_str_arr.h，紧挨 replace）：要 omni_js_re_sub
+   / omni_js_re_call 才能支持函数替换与 $ 展开 */
 omni_dyn omni_js_str_trim(int side, omni_dyn s);
 omni_dyn omni_js_str_lower(omni_dyn s);
 omni_dyn omni_js_str_upper(omni_dyn s);

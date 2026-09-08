@@ -1235,17 +1235,31 @@ function $js_str_pad_end(s, n, fill) {
 // 宿主的 replaceAll 会认它们，所以这里不能直接转手，手写一遍才和 C 侧同样残缺。
 // 空模式照 JS 的样子在每个码元之间各插一份（"abc" 上插出 -a-b-c-）。
 function $js_str_replace_all(s, pat, rep) {
-  const v = $js_asS16(s), p = $js_asS16(pat), r = $js_asS16(rep);
+  // 运行期的正则（存进变量的 new RegExp(...)）：转给正则那一支，语义一字不差
+  if ($dynTag(pat) === "regexp") return $js_re_replace($js_re_source(pat), $js_re_flags(pat), s, rep);
+  const v = $js_asS16(s), p = $js_asS16(pat);
+  /* 替换可以是**函数**（收 (match, offset, string)）或带 $ 的串（$$ / $& / 前后文那两个
+     —— 串模式没有编号组）。从前这儿一律 $js_asS16(rep)：函数当场报"function is not a
+     string"，而 $& 那些被当普通字符抄了过去（两处都量出来了）。replace 那一支早就是
+     这套判据，两格现在共用同一段。 */
+  const isFn = $dynTag(rep) === "function";
+  const rs = isFn ? "" : $js_asS16(rep);
+  const sub = (at) => {
+    if (isFn) return $js_str($callFn(rep, [p, at, v]));
+    const m = [p];
+    m.index = at;
+    return $js_re_sub(rs, v, m);
+  };
   if (p.length === 0) {
-    let out = r;
-    for (let i = 0; i < v.length; i++) out += v[i] + r;
+    let out = sub(0);
+    for (let i = 0; i < v.length; i++) out += v[i] + sub(i + 1);
     return out;
   }
   let out = "", i = 0;
   for (;;) {
     const at = v.indexOf(p, i);
     if (at < 0) break;
-    out += v.slice(i, at) + r;
+    out += v.slice(i, at) + sub(at);
     i = at + p.length;
   }
   return out + v.slice(i);
@@ -4305,6 +4319,13 @@ function $js_re_search(pat, flags, s) {
 }
 // 正则对象上的 test：与 exec 共用那套 lastIndex 行为
 function $js_re_test_o(rd, sd) { return $js_re_exec(rd, sd) !== null; }
+// 具名组那一格对象（$js_re_result 与 replace 的函数替换共用）
+function $js_re_groups(m) {
+  const g = $js_obj_new();
+  const names = Object.keys(m.groups);
+  for (let i = 0; i < names.length; i++) $js_obj_set(g, names[i], m.groups[names[i]]);
+  return g;
+}
 // exec / .match（不带 g）的结果：一格 list，外加 index / input / groups 三格**属性**
 // （list 上挂属性走旁表，见 $js_xprops —— 所以"list 带不了属性"那句注释已经过时了）。
 // groups 只在模式里有具名组时才有，没有就整格 undefined（JS 就是这样）。
@@ -4313,12 +4334,7 @@ function $js_re_result(m, str) {
   for (let i = 0; i < m.length; i++) out.push(m[i] === undefined ? undefined : m[i]);
   $js_obj_set(out, "index", m.index);
   $js_obj_set(out, "input", str);
-  if (m.groups !== undefined) {
-    const g = $js_obj_new();
-    const names = Object.keys(m.groups);
-    for (let i = 0; i < names.length; i++) $js_obj_set(g, names[i], m.groups[names[i]]);
-    $js_obj_set(out, "groups", g);
-  }
+  if (m.groups !== undefined) $js_obj_set(out, "groups", $js_re_groups(m));
   /* d 旗标（ES2022 hasIndices）：每一格是 [起, 止]，没参与匹配的组是 undefined。
      只有 JS 这条腿有 —— C 的引擎当场拒 'd'（与 s / u / v 同一档，见 omni_js_re.c）。 */
   if (m.indices !== undefined) {
@@ -4583,7 +4599,10 @@ function $js_re_replace(pat, flags_, s, repl) {
     if (m === null) break;
     out += str.slice(copied, m.index);
     out += isFn
-      ? $js_str($callFn(repl, [...m, m.index, str]))
+      ? $js_str($callFn(repl, m.groups === undefined
+        // 有具名组时，回调的**最后一格**是那格 groups 对象（规范 22.1.3.19 第 14 步）
+        ? [...m, m.index, str]
+        : [...m, m.index, str, $js_re_groups(m)]))
       : $js_re_sub($js_asS16(repl), str, m);
     copied = m.index + m[0].length;
     at = m[0].length > 0 ? copied : copied + 1;

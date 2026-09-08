@@ -29,6 +29,14 @@
 /* replace(串, 替换)：只换**第一处**（规范 22.1.3.19 的非全局那一支）。替换是函数就调它
    （收 (match, offset, string)），是串就走 $ 展开 —— 两样都借 omni_js_re_* 那两格
    （RE 那段比这一段先展开），caps 现搭一格 {at, at+len}、没有编号组。 */ \
+/* 一处替换：是函数就调一次（收 (match, offset, string)），是串就走 $ 展开。
+   replace 与 replaceAll 共用这一格 —— 判据与 prelude 里那两处的 sub() 相同。 */ \
+static omni_s16 omni_js_str_rep1(omni_dyn repl, omni_s16 s, const int64_t *caps) { \
+  if (repl.tag == OMNI_DYN_FN) { \
+    return omni_js_as_s16(omni_js_str(omni_js_re_call(repl, s, caps, 0))); \
+  } \
+  return omni_js_re_sub(NULL, omni_js_as_s16(repl), s, caps, 0); \
+} \
 static omni_dyn omni_js_str_replace(omni_dyn sd, omni_dyn patd, omni_dyn repl) { \
   omni_s16 s, p; \
   int64_t at; \
@@ -45,12 +53,46 @@ static omni_dyn omni_js_str_replace(omni_dyn sd, omni_dyn patd, omni_dyn repl) {
   caps[0] = at; \
   caps[1] = at + p.len; \
   omni_s16_buf_add(&out, omni_s16_slice(s, 0, at)); \
-  if (repl.tag == OMNI_DYN_FN) { \
-    omni_s16_buf_add(&out, omni_js_as_s16(omni_js_str(omni_js_re_call(repl, s, caps, 0)))); \
-  } else { \
-    omni_s16_buf_add(&out, omni_js_re_sub(NULL, omni_js_as_s16(repl), s, caps, 0)); \
-  } \
+  omni_s16_buf_add(&out, omni_js_str_rep1(repl, s, caps)); \
   omni_s16_buf_add(&out, omni_s16_slice(s, caps[1], s.len)); \
+  return omni_dyn_of_s16(omni_s16_buf_done(&out)); \
+} \
+/* replaceAll（串模式）：与 replace 同一套判据，只是换**每一处**。空模式在每个码元之间
+   都算一处（"abc".replaceAll("", "-") 是 "-a-b-c-"）。它从 omni_js_str.c 搬到这一段，
+   为的就是能用 omni_js_re_sub / omni_js_re_call —— 从前那份把替换一律当串，函数当场
+   报错、`$&` 那些被当普通字符抄过去（两处都量出来了，prelude 那边一起改的）。 */ \
+static omni_dyn omni_js_str_replace_all(omni_dyn sd, omni_dyn patd, omni_dyn repl) { \
+  omni_s16 s, p; \
+  omni_s16_buf out = { 0, 0, 0 }; \
+  int64_t caps[2]; \
+  int64_t i = 0; \
+  if (patd.tag == OMNI_DYN_RE) { \
+    return omni_js_re_replace(omni_js_re_source(patd), omni_js_re_flags(patd), sd, repl); \
+  } \
+  s = omni_js_as_s16(sd); \
+  p = omni_js_as_s16(patd); \
+  if (p.len == 0) { \
+    caps[0] = 0; \
+    caps[1] = 0; \
+    omni_s16_buf_add(&out, omni_js_str_rep1(repl, s, caps)); \
+    for (int64_t k = 0; k < s.len; k++) { \
+      omni_s16_buf_add(&out, omni_s16_slice(s, k, k + 1)); \
+      caps[0] = k + 1; \
+      caps[1] = k + 1; \
+      omni_s16_buf_add(&out, omni_js_str_rep1(repl, s, caps)); \
+    } \
+    return omni_dyn_of_s16(omni_s16_buf_done(&out)); \
+  } \
+  for (;;) { \
+    int64_t at = omni_s16_index_of(s, p, i); \
+    if (at < 0) break; \
+    omni_s16_buf_add(&out, omni_s16_slice(s, i, at)); \
+    caps[0] = at; \
+    caps[1] = at + p.len; \
+    omni_s16_buf_add(&out, omni_js_str_rep1(repl, s, caps)); \
+    i = at + p.len; \
+  } \
+  omni_s16_buf_add(&out, omni_s16_slice(s, i, s.len)); \
   return omni_dyn_of_s16(omni_s16_buf_done(&out)); \
 } \
 /* Array.from(v[, f])：mapFn 收 (value, index)（规范 23.1.2.1 —— 只有两格，所以不能用

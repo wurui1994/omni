@@ -109,30 +109,9 @@ omni_dyn omni_js_str_pad_end(omni_dyn s, omni_dyn n, omni_dyn fill) {
   return omni_dyn_of_s16(omni_s16_pad_end(want_s16(s), to_int_arg(n, 0), f));
 }
 
-/* replaceAll 的字符串模式那一支：替换串里的 $& / $1 一律当普通字符（prelude 那份
-   也是手写的，正是为了两边同样残缺）。空模式照 JS 在每个码元之间各插一份。 */
-omni_dyn omni_js_str_replace_all(omni_dyn s, omni_dyn pat, omni_dyn rep) {
-  omni_s16 v = want_s16(s), p = want_s16(pat), r = want_s16(rep);
-  omni_s16_buf out = { 0, 0, 0 };
-  if (p.len == 0) {
-    omni_s16_buf_add(&out, r);
-    for (int64_t i = 0; i < v.len; i++) {
-      omni_s16_buf_add(&out, omni_s16_slice(v, i, i + 1));
-      omni_s16_buf_add(&out, r);
-    }
-    return omni_dyn_of_s16(omni_s16_buf_done(&out));
-  }
-  int64_t i = 0;
-  for (;;) {
-    int64_t at = omni_s16_index_of(v, p, i);
-    if (at < 0) break;
-    omni_s16_buf_add(&out, omni_s16_slice(v, i, at));
-    omni_s16_buf_add(&out, r);
-    i = at + p.len;
-  }
-  omni_s16_buf_add(&out, omni_s16_slice(v, i, v.len));
-  return omni_dyn_of_s16(omni_s16_buf_done(&out));
-}
+/* replaceAll 的字符串模式那一支**搬去了宏那一段**（omni_js_str_arr.h，紧挨 replace）：
+   它要 omni_js_re_sub / omni_js_re_call 才能支持函数替换与 $ 展开，而那两格在 RE 那段
+   里、只在生成的 TU 里展开 —— 这个翻译单元看不见它们。 */
 
 /* side: 'b' 两头 / 'l' 只裁前 / 'r' 只裁后 */
 omni_dyn omni_js_str_trim(int side, omni_dyn s) {

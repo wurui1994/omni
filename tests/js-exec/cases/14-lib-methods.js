@@ -165,6 +165,13 @@ console.log(`uri ${encodeURIComponent("héllo 日 𝒳")} ${decodeURIComponent("
 console.log(`uri ${decodeURIComponent(encodeURIComponent("héllo 日 𝒳 %"))} ${encodeURIComponent(";/?:@&=+$,#")}`);
 console.log(`uri ${encodeURIComponent("-_.!~*'()")} ${decodeURIComponent("%e6%97%a5")} ${encodeURIComponent(123)}|${encodeURIComponent("")}|`);
 
+/* replaceAll 的**函数替换**与 $ 展开：从前 C 与 JS 两份都把替换一律当串（函数当场报错、
+   $& 被当普通字符抄过去）。C 那份为此从 omni_js_str.c 搬进宏那一段，才用得上
+   omni_js_re_sub / omni_js_re_call —— 与 replace 共用同一格 rep1。 */
+console.log(`ra ${"x-y-z".replaceAll("-", (m) => "+")} ${"a1b1".replaceAll("1", (m, i) => i)}`);
+console.log(`ra ${"a.b".replaceAll(".", "[$&]")} ${"ab".replaceAll("", "-")} ${"aa".replaceAll("a", "$$")}`);
+console.log(`ra ${"abc".replace("b", (m) => m + m)} ${"abc".replace("b", "<$&>")}`);
+
 
 
 
