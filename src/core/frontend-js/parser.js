@@ -216,6 +216,15 @@ class JsParser {
       if (this.eat(';')) continue;
       const mStart = this.cur();
       const isStatic = this.at('static') && !this.at('(', 1) && !this.at('=', 1) ? !!this.next() : false;
+      /* static 初始化块（ADR-0020 P4）：`static { … }` —— 没有名字也没有形参，就是
+         "类定义那一刻跑一段，this 是类对象"。收成一格 staticBlock 成员。 */
+      if (isStatic && this.at('{')) {
+        const body = this.block();
+        members.push({
+          kind: 'staticBlock', static: true, key: null, computed: false, body, span: this.spanFrom(mStart),
+        });
+        continue;
+      }
       // getter/setter：`get` / `set` 本身也可以是方法名，所以要看下一个 token
       let kind = 'method';
       if ((this.cur().kind === 'ident') && (this.cur().value === 'get' || this.cur().value === 'set')

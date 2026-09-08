@@ -171,7 +171,10 @@ export function lexJs(file, diags) {
     const c = src[i];
 
     // ---- 标识符 / 关键字 / null,true,false ----
-    if (/[A-Za-z_$]/.test(c)) {
+    // `#name` 也是一个标识符（ADR-0020 P4 的私有名）：井号留在名字里，于是 `this.#x`
+    // 就是"成员名叫 #x"、`#m(){}` 就是"方法名叫 #m"，后面一路照普通属性走。
+    if (/[A-Za-z_$]/.test(c) || (c === '#' && /[A-Za-z_$]/.test(src[i + 1] ?? ''))) {
+      if (c === '#') i++;
       while (i < n && /[A-Za-z0-9_$]/.test(src[i])) i++;
       const text = src.slice(start, i);
       if (LITERAL_WORDS.has(text)) push('lit', start, LITERAL_WORDS.get(text), nl);

@@ -658,6 +658,10 @@ class Lower {
     const methods = [];
     let ctor = null;
     for (const m of s.members) {
+      if (m.kind === 'staticBlock') {
+        this.err(m.span, "a static initialization block is not supported in an Error subclass");
+        continue;
+      }
       const what = m.computed ? '<computed>' : this.keyName(m.key, m.span);
       if (m.static) { this.err(m.span, `static class members are not supported ('${what}')`); continue; }
       if (m.kind === 'field') { this.err(m.span, `class fields are not supported; assign '${what}' in the constructor`); continue; }
@@ -746,13 +750,32 @@ class Lower {
     let ctor = null;
     const fields = [];
     for (const m of s.members) {
+      /* static 初始化块（ADR-0020 P4）：类定义那一刻跑一段，`this` 是类对象。
+       * 摊成"造一格无参闭包 + 带接收者调一次" —— 于是块里的 `this.x = 1` 与
+       * `A.x = 1` 都成立，而且块里的局部量不会漏到模块作用域。它没有名字，所以
+       * 这一支必须在 keyName 之前（key 是 null）。 */
+      if (m.kind === 'staticBlock') {
+        const fn = this.closureExpr({
+          type: 'FuncExpr', id: null, params: [], rest: null, body: m.body, span: m.span,
+        }, `${s.id}_static_block`, { classOf: s.id });
+        out.push(exprStmt(op('js_call_this', [fn, classG(), box(this.argList([]), listType(D))])));
+        continue;
+      }
       const what = m.computed ? null : this.keyName(m.key, m.span);
       const key = () => (m.computed ? this.expr(m.key) : s16(what));
       const target = m.static ? classG : protoG;
       if (m.kind === 'field') {
-        // static 字段直接落在类对象上（可枚举、可写）；实例字段进 $init
-        if (m.static) out.push(exprStmt(op('js_obj_set', [classG(), key(), m.value ? this.expr(m.value) : undefExpr()])));
-        else fields.push(m);
+        /* static 字段直接落在类对象上（可枚举、可写）；实例字段进 $init。
+         * 私有名（`#x`）那一格**不可枚举** —— 它不该出现在 Object.keys / JSON.stringify
+         * 里。私有性在这个值域里就是"不可枚举 + 名字里带井号"：`o["#x"]` 能绕过去，
+         * 那是画出来的边界（真做要给每个类一格 WeakMap）。 */
+        if (m.static) {
+          out.push(exprStmt(what !== null && what.startsWith('#')
+            ? this.defHidden(classG(), key(), m.value ? this.expr(m.value) : undefExpr())
+            : op('js_obj_set', [classG(), key(), m.value ? this.expr(m.value) : undefExpr()])));
+        } else {
+          fields.push(m);
+        }
         continue;
       }
       if (what === 'constructor' && !m.static) { ctor = m; continue; }
@@ -805,11 +828,13 @@ class Lower {
         }
         // 字段在构造器体**之前**、形参绑定之前（规范：字段初始化器看不见构造器的形参）
         for (const f of fields) {
-          pre.push(exprStmt(op('js_setp', [
-            this.readEntry(this.lookup('this')),
-            f.computed ? this.expr(f.key) : s16(this.keyName(f.key, f.span)),
-            f.value ? this.expr(f.value) : undefExpr(),
-          ])));
+          const fname = f.computed ? null : this.keyName(f.key, f.span);
+          const fkey = f.computed ? this.expr(f.key) : s16(fname);
+          const fval = f.value ? this.expr(f.value) : undefExpr();
+          // 私有名那一格不可枚举（理由同 classProtoStmts 里那段说明）
+          pre.push(exprStmt(fname !== null && fname.startsWith('#')
+            ? this.defHidden(this.readEntry(this.lookup('this')), fkey, fval)
+            : op('js_setp', [this.readEntry(this.lookup('this')), fkey, fval])));
         }
         return pre;
       },
