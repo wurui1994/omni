@@ -1274,6 +1274,17 @@ function $js_arr_find_index(a, f) {
   for (let i = 0; i < l.length; i++) if ($js_truthy($js_call3(f, l[i], i, a))) return i;
   return -1;
 }
+// 从后往前那两格（ES2023）：谓词照旧收 (v, i, arr)，只是走的方向反过来
+function $js_arr_find_last(a, f) {
+  const l = $js_arr_of(a);
+  for (let i = l.length - 1; i >= 0; i--) if ($js_truthy($js_call3(f, l[i], i, a))) return l[i];
+  return undefined;
+}
+function $js_arr_find_last_index(a, f) {
+  const l = $js_arr_of(a);
+  for (let i = l.length - 1; i >= 0; i--) if ($js_truthy($js_call3(f, l[i], i, a))) return i;
+  return -1;
+}
 function $js_arr_reduce(a, f, init) {
   const l = $js_arr_of(a);
   let i = 0, acc;
@@ -1343,6 +1354,17 @@ function $js_arr_cmp(f, x, y) {
 function $js_arr_sort(a, f) { $js_arr_of(a).sort((x, y) => $js_arr_cmp(f, x, y)); return a; }
 // toSorted：整段拷贝再就地排，稳定性与比较器语义完全跟着 sort 那一份
 function $js_arr_to_sorted(a, f) { return $js_arr_sort($js_arr_of(a).slice(), f); }
+// toReversed / with：同一族的另外两格 —— 拷一份再改，原数组不动
+function $js_arr_to_reversed(a) { return $js_arr_of(a).slice().reverse(); }
+function $js_arr_with(a, i, v) {
+  const l = $js_arr_of(a).slice();
+  let k = $js_idx(i, 0);
+  if (k < 0) k += l.length;
+  // 规范里这儿是 RangeError；这个值域里没有"宿主抛的错"，所以当场报错（两条腿逐字相同）
+  if (k < 0 || k >= l.length) $rt_error("index out of range in with()");
+  l[k] = v;
+  return l;
+}
 function $js_arr_entries(a) { return $js_arr_of(a).map((v, i) => [i, v]); }
 // split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
 function $js_str_split(s, sep) { return $js_asS16(s).split($js_asS16(sep)); }

@@ -327,6 +327,20 @@ static omni_dyn omni_js_arr_find_index(omni_dyn a, omni_dyn f) { \
   } \
   return omni_dyn_of_real(-1.0); \
 } \
+static omni_dyn omni_js_arr_find_last(omni_dyn a, omni_dyn f) { \
+  LT l = omni_js_arr_of(a); \
+  for (int64_t i = l->len - 1; i >= 0; i--) { \
+    if (omni_js_truthy(omni_js_call3(f, l->items[i], i, a))) return l->items[i]; \
+  } \
+  return omni_dyn_undef(); \
+} \
+static omni_dyn omni_js_arr_find_last_index(omni_dyn a, omni_dyn f) { \
+  LT l = omni_js_arr_of(a); \
+  for (int64_t i = l->len - 1; i >= 0; i--) { \
+    if (omni_js_truthy(omni_js_call3(f, l->items[i], i, a))) return omni_dyn_of_real((double)i); \
+  } \
+  return omni_dyn_of_real(-1.0); \
+} \
 OMNI_JS_ARR_4(LT, DT)
 
 /* 第四段：reduce / reduceRight / flat / flatMap / sort / toSorted。
@@ -460,6 +474,28 @@ static omni_dyn omni_js_arr_to_sorted(omni_dyn a, omni_dyn f) { \
   for (int64_t i = 0; i < l->len; i++) out->items[i] = l->items[i]; \
   out->len = l->len; \
   return omni_js_arr_sort(omni_js_arr_wrap(out), f); \
+} \
+/* toReversed / with：同一族的另外两格 —— 拷一份再改，原数组不动。
+   with 的下标认负数；越界在规范里是 RangeError，这个值域里当场报错。 */ \
+static omni_dyn omni_js_arr_to_reversed(omni_dyn a) { \
+  LT l = omni_js_arr_of(a); \
+  LT out = LT##_new(); \
+  LT##_reserve(out, l->len); \
+  for (int64_t i = 0; i < l->len; i++) out->items[i] = l->items[l->len - 1 - i]; \
+  out->len = l->len; \
+  return omni_js_arr_wrap(out); \
+} \
+static omni_dyn omni_js_arr_with(omni_dyn a, omni_dyn i, omni_dyn v) { \
+  LT l = omni_js_arr_of(a); \
+  int64_t k = omni_js_arr_i(i); \
+  if (k < 0) k += l->len; \
+  if (k < 0 || k >= l->len) omni_error("index out of range in with()"); \
+  LT out = LT##_new(); \
+  LT##_reserve(out, l->len); \
+  for (int64_t j = 0; j < l->len; j++) out->items[j] = l->items[j]; \
+  out->len = l->len; \
+  out->items[k] = v; \
+  return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_arr_entries(omni_dyn a) { \
   LT l = omni_js_arr_of(a); \

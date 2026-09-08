@@ -113,6 +113,9 @@ export const JS_ABI = {
   js_arr_every: { js: '$js_arr_every', c: 'omni_js_arr_every', arity: 2, ret: 'bool', throws: true },
   js_arr_find: { js: '$js_arr_find', c: 'omni_js_arr_find', arity: 2, throws: true },
   js_arr_find_index: { js: '$js_arr_find_index', c: 'omni_js_arr_find_index', arity: 2, throws: true },
+  // 从后往前找那两格（ES2023）：空数组上分别是 undefined 与 -1，与 find/findIndex 对齐
+  js_arr_find_last: { js: '$js_arr_find_last', c: 'omni_js_arr_find_last', arity: 2, throws: true },
+  js_arr_find_last_index: { js: '$js_arr_find_last_index', c: 'omni_js_arr_find_last_index', arity: 2, throws: true },
   js_arr_reduce: { js: '$js_arr_reduce', c: 'omni_js_arr_reduce', arity: 3, throws: true },
   js_arr_flat_map: { js: '$js_arr_flat_map', c: 'omni_js_arr_flat_map', arity: 2, throws: true },
   js_arr_sort: { js: '$js_arr_sort', c: 'omni_js_arr_sort', arity: 2, throws: true },
@@ -122,6 +125,11 @@ export const JS_ABI = {
   js_arr_flat: { js: '$js_arr_flat', c: 'omni_js_arr_flat', arity: 2 },
   // toSorted：先整段拷贝再就地排 —— sort 那份的稳定性与比较器语义一个字不改
   js_arr_to_sorted: { js: '$js_arr_to_sorted', c: 'omni_js_arr_to_sorted', arity: 2, throws: true },
+  /* change-by-copy 那一族的另外两格（ES2023）：拷一份再改，原数组不动。
+     `with` 的下标认负数（从末尾数），越界在规范里是 RangeError —— 这个值域里没有
+     "宿主抛的错"这一格，所以照 js_buf_* 那一族的规矩当场 rt_error（两条腿逐字相同）。 */
+  js_arr_to_reversed: { js: '$js_arr_to_reversed', c: 'omni_js_arr_to_reversed', arity: 1 },
+  js_arr_with: { js: '$js_arr_with', c: 'omni_js_arr_with', arity: 3 },
 
   // ------------------------------------------------- 普通对象 / Map / Set
   // 对象 -> dict<string, dynamic>，键是属性名的 UTF-8（进出转码）。
@@ -601,12 +609,17 @@ export const JS_METHODS = {
   every: { on: { list: 'js_arr_every' } },
   find: { on: { list: 'js_arr_find' } },
   findIndex: { on: { list: 'js_arr_find_index' } },
+  findLast: { on: { list: 'js_arr_find_last' } },
+  findLastIndex: { on: { list: 'js_arr_find_last_index' } },
   reduce: { on: { list: 'js_arr_reduce' } },
   reduceRight: { on: { list: 'js_arr_reduce_right' } },
   flat: { on: { list: 'js_arr_flat' } },
   flatMap: { on: { list: 'js_arr_flat_map' } },
   sort: { on: { list: 'js_arr_sort' } },
   toSorted: { on: { list: 'js_arr_to_sorted' } },
+  toReversed: { on: { list: 'js_arr_to_reversed' } },
+  // `with` 是关键字，但成员名这一格照旧（规范里它就叫 Array.prototype.with）
+  with: { on: { list: 'js_arr_with' } },
 
   // Map / Set
   get: { on: { Map: 'js_map_get' } },

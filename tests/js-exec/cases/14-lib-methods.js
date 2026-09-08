@@ -101,6 +101,14 @@ const ws = new WeakSet();
 ws.add(wk);
 console.log(`weak ${ws.has(wk)} ${ws.has({})} ${wm.delete(wk)} ${wm.has(wk)}`);
 
+// ES2023：从后往前找那两格 + change-by-copy 的 toReversed / with（都拷一份再改）。
+// 与上面几条同一个理由 —— C 那份写坏了只有在这条腿上跑才会露出来。
+const cs = [1, 2, 3, 4];
+console.log(`findLast ${cs.findLast((x) => x % 2 === 1)} ${cs.findLastIndex((x) => x % 2 === 1)}`);
+console.log(`findLast ${[].findLast((x) => true)} ${[].findLastIndex((x) => true)}`);
+console.log(`copy ${cs.toReversed().join(",")} ${cs.join(",")}`);
+console.log(`copy ${cs.with(1, 9).join(",")} ${cs.with(-1, 0).join(",")} ${cs.join(",")}`);
+
 
 
 
