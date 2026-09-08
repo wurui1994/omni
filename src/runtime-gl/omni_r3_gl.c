@@ -697,18 +697,31 @@ int omni_gl_draw(const char *shader_dir, const omni_gl_scene *sc,
   glBindFramebuffer(GL_FRAMEBUFFER, fbo);
   glGenRenderbuffers(1, &crb);
   glBindRenderbuffer(GL_RENDERBUFFER, crb);
-  glRenderbufferStorageMultisample(GL_RENDERBUFFER, ns, GL_RGBA8,
-                                   sc->width, sc->height);
+  /* **`ns <= 1` 走朴素的 renderbuffer、不走多重采样那一条**：参考离屏导出用的就是
+     一个单采样窗口（glrender.cc:1269-1276，`multisample` 只给看得见的窗口），
+     而 `glRenderbufferStorageMultisample(…, 1, …)` 在本机驱动上量出来仍有半调 ——
+     平三角那个探针里我们边上 511 个像素是 (255,128,128)，参考在同样的位置是
+     纯白或纯红（逐字节两个值：00 与 ff）。朴素 renderbuffer + 直接 readPixels
+     （不 blit）之后这一类就没了。 */
+  if (ns > 1)
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, ns, GL_RGBA8,
+                                     sc->width, sc->height);
+  else
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, sc->width, sc->height);
   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                             GL_RENDERBUFFER, crb);
   glGenRenderbuffers(1, &drb);
   glBindRenderbuffer(GL_RENDERBUFFER, drb);
-  glRenderbufferStorageMultisample(GL_RENDERBUFFER, ns, GL_DEPTH_COMPONENT32F,
-                                   sc->width, sc->height);
+  if (ns > 1)
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, ns, GL_DEPTH_COMPONENT32F,
+                                     sc->width, sc->height);
+  else
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F,
+                          sc->width, sc->height);
   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                             GL_RENDERBUFFER, drb);
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-    return fail("多重采样 FBO 不完整（%dx%d, %d 采样）", sc->width, sc->height, ns);
+    return fail("FBO 不完整（%dx%d, %d 采样）", sc->width, sc->height, ns);
 
   /* ssbo == 0：混合开一次就不关了（glrender.cc:288-292） */
   glEnable(GL_BLEND);
@@ -740,29 +753,34 @@ int omni_gl_draw(const char *shader_dir, const omni_gl_scene *sc,
     free(idx);
   }
 
-  /* 解析 + 读回 */
+  /* 读回。`ns > 1` 才要"解析"那一步（多重采样 blit 到单采样再读）；单采样直接读，
+     与参考那边"渲进单采样窗口、glReadPixels 读回"一模一样，少一次 blit 也少一处口径。 */
   GLuint rfbo = 0, rtex = 0;
-  glGenFramebuffers(1, &rfbo);
-  glGenTextures(1, &rtex);
-  glBindTexture(GL_TEXTURE_2D, rtex);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sc->width, sc->height, 0,
-               GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-  glBindFramebuffer(GL_FRAMEBUFFER, rfbo);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                         rtex, 0);
-  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-    return fail("解析用的 FBO 不完整");
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rfbo);
-  glBlitFramebuffer(0, 0, sc->width, sc->height, 0, 0, sc->width, sc->height,
-                    GL_COLOR_BUFFER_BIT, GL_NEAREST);
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, rfbo);
+  if (ns > 1) {
+    glGenFramebuffers(1, &rfbo);
+    glGenTextures(1, &rtex);
+    glBindTexture(GL_TEXTURE_2D, rtex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sc->width, sc->height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glBindFramebuffer(GL_FRAMEBUFFER, rfbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           rtex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+      return fail("解析用的 FBO 不完整");
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rfbo);
+    glBlitFramebuffer(0, 0, sc->width, sc->height, 0, 0, sc->width, sc->height,
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, rfbo);
+  } else {
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+  }
   glPixelStorei(GL_PACK_ALIGNMENT, 1);
   glReadPixels(0, 0, sc->width, sc->height, GL_RGB, GL_UNSIGNED_BYTE, out_rgb);
 
   GLenum e = glGetError();
-  glDeleteFramebuffers(1, &rfbo);
-  glDeleteTextures(1, &rtex);
+  if (rfbo) glDeleteFramebuffers(1, &rfbo);
+  if (rtex) glDeleteTextures(1, &rtex);
   glDeleteRenderbuffers(1, &crb);
   glDeleteRenderbuffers(1, &drb);
   glDeleteFramebuffers(1, &fbo);

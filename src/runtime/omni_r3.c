@@ -2350,6 +2350,41 @@ static int r3_tri_hascol(const r3tris *t, size_t i) {
  *   透明面片、`tri` 那族   MaterialIndex = 有色 ? -1-i : 1+i （generalShader/transparentShader
  *                                                  里是 `Materials[abs(material)-1]`，
  *                                                  符号用来选"顶点色当 diffuse"） */
+/* 一块（或整张）的投影矩阵，按给定的视景体横竖界算，写成 glm 那个排布（列主序 16 格）。
+ * 与 r3_projection 同一套公式（glm::ortho / glm::frustum），外加**深度那一行折成 [0,1]**
+ * （`GLM_FORCE_DEPTH_ZERO_TO_ONE`，见下面 r3_gl_image 里那段注；`OMNI_R3_DEPTH01=0` 退回）。
+ * 分块导出要它：每块的界不同，而 S->P 是整张那一份、CPU 备选还在用，不能就地改。 */
+static void r3_fill_projmat(const r3scene *s, double l, double r, double b, double t,
+                            double *out16) {
+  double n = s->znear, f = s->zfar;
+  double P[4][4];
+  memset(P, 0, sizeof P);
+  if (s->ortho) {
+    P[0][0] = 2.0 / (r - l);
+    P[1][1] = 2.0 / (t - b);
+    P[2][2] = -2.0 / (f - n);
+    P[3][0] = -(r + l) / (r - l);
+    P[3][1] = -(t + b) / (t - b);
+    P[3][2] = -(f + n) / (f - n);
+    P[3][3] = 1.0;
+  } else {
+    P[0][0] = 2.0 * n / (r - l);
+    P[1][1] = 2.0 * n / (t - b);
+    P[2][0] = (r + l) / (r - l);
+    P[2][1] = (t + b) / (t - b);
+    P[2][2] = -(f + n) / (f - n);
+    P[2][3] = -1.0;
+    P[3][2] = -2.0 * f * n / (f - n);
+  }
+  int z01 = 1;
+  { const char *e = getenv("OMNI_R3_DEPTH01");
+    if (e && strcmp(e, "0") == 0) z01 = 0; }
+  for (int c = 0; c < 4; ++c)
+    for (int q = 0; q < 4; ++q) out16[c * 4 + q] = P[c][q];
+  if (z01)
+    for (int c = 0; c < 4; ++c) out16[c * 4 + 2] = 0.5 * P[c][2] + 0.5 * P[c][3];
+}
+
 static unsigned char *r3_gl_image(const r3scene *S, const r3tris *t,
                                   const r3lines *L, const r3mat *mats, size_t nmat) {
   r3_gl_draw_fn draw = r3_gl_entry();
@@ -2484,24 +2519,25 @@ static unsigned char *r3_gl_image(const r3scene *S, const r3tris *t,
     memset(&sc, 0, sizeof sc);
     sc.version = OMNI_GL_REQ_VERSION;
     sc.width = S->fw; sc.height = S->fh; sc.samples = R3_NS;
+    /* **离屏导出那一路参考根本没开多重采样**（glrender.cc:1269-1276）：
+         if(!View) glfwWindowHint(GLFW_VISIBLE,0);
+         else { … if(multisample > 1) glfwWindowHint(GLFW_SAMPLES,multisample); }
+       —— `multisample` 那一档**只给看得见的窗口**。导出走的是 `!View`，窗口一个采样，
+       后面那些 `glEnable/glDisable(GL_MULTISAMPLE)` 在单采样帧缓冲上是空操作。
+       参考图里的抗锯齿全来自"4 倍分辨率渲 + psfile 的 dealias 2x2 平均 + 缩回去"。
+       `OMNI_GL_SAMPLES` 是标定口（默认 1 = 照参考；4 是从前那一档）。 */
+    { const char *e = getenv("OMNI_GL_SAMPLES");
+      sc.samples = e ? atoi(e) : 1;
+      if (sc.samples < 1) sc.samples = 1; }
     sc.bg[0] = (float) S->bg[0]; sc.bg[1] = (float) S->bg[1];
     sc.bg[2] = (float) S->bg[2]; sc.bg[3] = 1.0f;
     /* 顶点位置已经是**视图空间**（清单那一侧就转好了），所以 projViewMat 只放投影、
-       viewMat 与 normMat 是单位阵。S->P 与 glm 同型（P[列][行]）。
-       **深度那一行要换成 [0,1] 那一档**：asy 的投影矩阵是 `glm::ortho`，而
-       `glmCommon.h` 定了 `GLM_FORCE_DEPTH_ZERO_TO_ONE`（renderBase.cc:233），
-       也就是 clip z ∈ [0,1]；我们 `r3_projection` 写的是经典 GL 的 [-1,1]（CPU 光栅器
-       按那一档标定的，不动）。这儿把 z 那一行按 `z' = 0.5z + 0.5w` 折过去 ——
-       等价于重算一遍 glm 的那个矩阵，而不用碰 CPU 那条腿。
-       **量出来是噪声级**：pseudosphere 254152 → 254173（+21 个字节）、big_sph 一个不变。
-       默认还是折（照 asy），理由是"参考里若有 z-fight，只有同一档深度约定才复现得出来"；
-       `OMNI_R3_DEPTH01=0` 退回不折（标定用）。 */
-    for (int c = 0; c < 4; ++c)
-      for (int r = 0; r < 4; ++r) sc.projViewMat[c * 4 + r] = S->P[c][r];
-    { const char *e = getenv("OMNI_R3_DEPTH01");
-      if (!(e && strcmp(e, "0") == 0))
-        for (int c = 0; c < 4; ++c)
-          sc.projViewMat[c * 4 + 2] = 0.5 * S->P[c][2] + 0.5 * S->P[c][3]; }
+       viewMat 与 normMat 是单位阵。矩阵在下面**逐块**算（见分块那一段）——
+       用的是 r3_fill_projmat，它照 glm::ortho/frustum，并把深度那一行折成 [0,1]
+       （`glmCommon.h` 的 `GLM_FORCE_DEPTH_ZERO_TO_ONE`，renderBase.cc:233；
+       我们 r3_projection 写的是经典 GL 的 [-1,1]，CPU 备选按那一档标定的，不动）。
+       **量出来是噪声级**：pseudosphere 254152 → 254173、big_sph 一个不变；
+       默认还是折（照 asy），`OMNI_R3_DEPTH01=0` 退回。 */
     for (int k = 0; k < 16; ++k) sc.viewMat[k] = (k % 5 == 0) ? 1.0 : 0.0;
     for (int k = 0; k < 9; ++k) sc.normMat[k] = (k % 4 == 0) ? 1.0 : 0.0;
     sc.materials = ms; sc.nmaterials = (int) nuniq;
@@ -2539,8 +2575,76 @@ static unsigned char *r3_gl_image(const r3scene *S, const r3tris *t,
         if (!(m & 8)) { sc.transparent.nindices = 0; }
         if (!(m & 16)) { sc.line.nindices = 0; }
       } }
-    img = (unsigned char *) malloc((size_t) S->fw * S->fh * 3);
-    if (img && draw(sd, &sc, img) != 0) { free(img); img = NULL; }
+    /* **导出是分块的**（glrender.cc:454-520 + tile.h）：帧缓冲只有 Width×Height
+       （renderBase.cc:1005-1013 —— 就是我们的 dispW/dispH），最终图是 fullW×fullH，
+       Export() 一块一块渲、每块自己一套视景体、读回**去掉 border 的内区**拼成整张。
+       为什么必须照着分：块的投影矩阵是"整张那一个 ×2 再平移 ±1"这一类算式，与整张一趟
+       **在浮点最后一位上不同**，边上的采样点会翻面 —— 平三角那个探针 1347 个差像素
+       全在三条边上，就是这一档。用 glspy（dyld interpose 记 GL 调用）量到的参考流水
+       （同一个 .asy，1600x308）：`viewport 800 154` 四趟、每趟 projViewMat 第 0 列
+       **20.6942406**（= 我们整张那一趟 10.3471203 的两倍）、第 2 列头两个分量 ±1；
+       我们从前是一趟 1600x308、第 0 列 10.3471203。
+       `OMNI_R3_TILE=0` 退回一趟（标定用）。 */
+    int fullW = S->fw, fullH = S->fh;
+    int fbW = S->dispW > 0 ? S->dispW : fullW;
+    int fbH = S->dispH > 0 ? S->dispH : fullH;
+    int maxTW = fbW < 1024 ? fbW : 1024;
+    int maxTH = fbH < 768 ? fbH : 768;
+    if (maxTW < 1) maxTW = 1;
+    if (maxTH < 1) maxTH = 1;
+    int ncol0 = (fullW + maxTW - 1) / maxTW;
+    int nrow0 = (fullH + maxTH - 1) / maxTH;
+    int tileW = (fullW + ncol0 - 1) / ncol0;
+    int tileH = (fullH + nrow0 - 1) / nrow0;
+    /* border = min(min(1,(numCols-1)/2),(numRows-1)/2)（glrender.cc:478，整数除） */
+    int border = 1;
+    if ((ncol0 - 1) / 2 < border) border = (ncol0 - 1) / 2;
+    if ((nrow0 - 1) / 2 < border) border = (nrow0 - 1) / 2;
+    int tWNB = tileW - 2 * border, tHNB = tileH - 2 * border;
+    /* 网格用**去边宽**重算（tile.h 的 computeGrid，setTileSize/setImageSize 都会调） */
+    int cols = tWNB > 0 ? (fullW + tWNB - 1) / tWNB : 1;
+    int rows = tHNB > 0 ? (fullH + tHNB - 1) / tHNB : 1;
+    { const char *e = getenv("OMNI_R3_TILE");
+      if ((e && strcmp(e, "0") == 0) || tWNB <= 0 || tHNB <= 0) {
+        cols = 1; rows = 1; border = 0;
+        tileW = fullW; tileH = fullH; tWNB = fullW; tHNB = fullH;
+      } }
+    int tiled = (cols > 1 || rows > 1);
+    img = (unsigned char *) malloc((size_t) fullW * fullH * 3);
+    unsigned char *tbuf = NULL;
+    if (img && tiled) {
+      tbuf = (unsigned char *) malloc((size_t) tileW * tileH * 3);
+      if (!tbuf) { free(img); img = NULL; }
+    }
+    for (int ti = 0; img && ti < rows * cols; ++ti) {
+      /* 行序是 BOTTOM_TO_TOP（tile.h 的默认）—— 与 glReadPixels 的"第 0 行在下"同向，
+         所以读回来的块可以直接按 destY 抄进整张图，不用翻。 */
+      int row = ti / cols, col = ti % cols;
+      int cTH = row < rows - 1 ? tileH : fullH - (rows - 1) * tHNB + 2 * border;
+      int cTW = col < cols - 1 ? tileW : fullW - (cols - 1) * tWNB + 2 * border;
+      double L0 = S->xmin, R0 = S->xmax, B0 = S->ymin, T0 = S->ymax;
+      double tl = L0 + (R0 - L0) * (col * tWNB - border) / fullW;
+      double trr = tl + (R0 - L0) * cTW / fullW;
+      double tb = B0 + (T0 - B0) * (row * tHNB - border) / fullH;
+      double tt = tb + (T0 - B0) * cTH / fullH;
+      r3_fill_projmat(S, tl, trr, tb, tt, sc.projViewMat);
+      sc.width = cTW; sc.height = cTH;
+      unsigned char *dst = tiled ? tbuf : img;
+      if (draw(sd, &sc, dst) != 0) { free(img); img = NULL; break; }
+      if (!tiled) break;
+      int sw = cTW - 2 * border, sh = cTH - 2 * border;
+      for (int y = 0; y < sh; ++y) {
+        int dy = tHNB * row + y;
+        if (dy < 0 || dy >= fullH) continue;
+        int sx0 = border, dx0 = tWNB * col;
+        int n = sw;
+        if (dx0 + n > fullW) n = fullW - dx0;
+        if (n <= 0) continue;
+        memcpy(img + ((size_t) dy * fullW + dx0) * 3,
+               tbuf + ((size_t) (y + border) * cTW + sx0) * 3, (size_t) n * 3);
+      }
+    }
+    free(tbuf);
     if (getenv("OMNI_R3_DEBUG"))
       fprintf(stderr, "r3gl: %dx%d 材质 %zu（去重后 %zu）面片顶点 %zu 有色 %zu"
               " 三角网 %zu 透明 %zu 线段顶点 %zu -> %s%s%s\n",
