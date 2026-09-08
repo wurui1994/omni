@@ -358,6 +358,8 @@ export const JS_ABI = {
   // lastIndex（量过：所有 .test 的正则都不带 g），所以这一层不需要 RegExp 对象。
   js_re_test: { js: '$js_re_test', c: 'omni_js_re_test', arity: 3, ret: 'bool' },
   js_re_match: { js: '$js_re_match', c: 'omni_js_re_match', arity: 3 },
+  // search：头一处匹配的下标（找不到 -1），不动 lastIndex
+  js_re_search: { js: '$js_re_search', c: 'omni_js_re_search', arity: 3 },
   js_re_split: { js: '$js_re_split', c: 'omni_js_re_split', arity: 4 },
   js_re_replace: { js: '$js_re_replace', c: 'omni_js_re_replace', arity: 4, throws: true },
   // 决策 10 的第二半：字面量不在上面四个接收位上时，求值出**一格正则对象**

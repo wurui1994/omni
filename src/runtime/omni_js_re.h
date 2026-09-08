@@ -230,6 +230,14 @@ static omni_dyn omni_js_re_flags(omni_dyn rd) { \
 static bool omni_js_re_test_o(omni_dyn rd, omni_dyn sd) { \
   return omni_js_re_exec(rd, sd).tag != OMNI_DYN_NULL; \
 } \
+/* search：头一处匹配的下标，找不到给 -1。不动 lastIndex（规范 22.1.3.22） */ \
+static omni_dyn omni_js_re_search(omni_dyn pat, omni_dyn flags, omni_dyn sd) { \
+  omni_re re = omni_js_re_get(pat, flags); \
+  omni_s16 s = omni_js_as_s16(sd); \
+  int64_t caps[2 * OMNI_RE_MAX_CAPS]; \
+  if (!omni_re_search(re, s, 0, caps)) return omni_dyn_of_real(-1.0); \
+  return omni_dyn_of_real((double)caps[0]); \
+} \
 static void omni_js_re_set_last_index(omni_dyn rd, omni_dyn v) { \
   omni_js_re_want(rd)->li = omni_js_arr_i(v); \
 }

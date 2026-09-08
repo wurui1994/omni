@@ -3899,6 +3899,12 @@ function $js_re_flags(r) {
   if ($dynTag(r) !== "regexp") $rt_error($dynTag(r) + " is not a regexp");
   return r.flags;
 }
+// search：头一处匹配的下标，找不到给 -1。**不动 lastIndex**（规范 22.1.3.22 存了再复原），
+// 所以 /g 与不带 g 的答案一样
+function $js_re_search(pat, flags, s) {
+  const m = $js_re_find($js_re_get(pat, $js_asS16(flags)), $js_asS16(s), 0);
+  return m === null ? -1 : m.index;
+}
 // 正则对象上的 test：与 exec 共用那套 lastIndex 行为
 function $js_re_test_o(rd, sd) { return $js_re_exec(rd, sd) !== null; }
 // exec / .match（不带 g）的结果：一格 list，外加 index / input / groups 三格**属性**

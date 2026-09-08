@@ -8,3 +8,5 @@ console.log("aXbXc".replaceAll(/X/g, "-"), "a1b2".replace(/\d/g, (m, i) => `${m}
 console.log("abc".replace(/(a)(b)/, "$2$1"), "a-b".replaceAll("-", "+"));
 // 不带 g 的正则交给 replaceAll 在规范里是 TypeError；这儿是编译期报错，所以不在这条里量
 console.log("aaa".replace("a", "b"), "aaa".replaceAll("a", "b"));
+// search：头一处匹配的下标（找不到 -1），不动 lastIndex —— 所以带 g 与不带 g 一样
+console.log("abc".search(/b/), "abc".search(/z/), "aXbX".search(/X/g));

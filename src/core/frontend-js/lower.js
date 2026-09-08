@@ -2534,7 +2534,7 @@ class Lower {
       if (!re) return null;
       return op('js_re_test', [s16(re.body), s16(re.flags), arg(0)]);
     }
-    if (!['replace', 'replaceAll', 'match', 'matchAll', 'split'].includes(c.name)) return null;
+    if (!['replace', 'replaceAll', 'match', 'matchAll', 'search', 'split'].includes(c.name)) return null;
     const re = e.args.length ? this.regexOf(e.args[0]) : null;
     if (!re) {
       // 串模式那几支各有自己的成员 op（js_m_replace / js_m_replaceAll / js_m_split）
@@ -2551,9 +2551,11 @@ class Lower {
     const recv = this.expr(c.object);
     const name = {
       replace: 'js_re_replace', replaceAll: 'js_re_replace',
-      match: 'js_re_match', matchAll: 'js_re_match_all', split: 'js_re_split',
+      match: 'js_re_match', matchAll: 'js_re_match_all', search: 'js_re_search', split: 'js_re_split',
     }[c.name];
-    if (c.name === 'match' || c.name === 'matchAll') return op(name, [s16(re.body), s16(re.flags), recv]);
+    if (c.name === 'match' || c.name === 'matchAll' || c.name === 'search') {
+      return op(name, [s16(re.body), s16(re.flags), recv]);
+    }
     return op(name, [s16(re.body), s16(re.flags), recv, arg(1)]);
   }
 
