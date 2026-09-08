@@ -227,6 +227,10 @@ export const JS_ABI = {
   js_promise_resolved: { js: '$js_promise_resolved', c: 'omni_js_promise_resolved', arity: 1 },
   js_promise_rejected: { js: '$js_promise_rejected', c: 'omni_js_promise_rejected', arity: 1 },
   js_promise_all: { js: '$js_promise_all', c: 'omni_js_promise_all', arity: 1, throws: true },
+  // allSettled / any / race：与 all 同一个骨架，差别只在"什么算落地"（见 prelude）
+  js_promise_all_settled: { js: '$js_promise_all_settled', c: 'omni_js_promise_all_settled', arity: 1, throws: true },
+  js_promise_any: { js: '$js_promise_any', c: 'omni_js_promise_any', arity: 1, throws: true },
+  js_promise_race: { js: '$js_promise_race', c: 'omni_js_promise_race', arity: 1, throws: true },
   js_jobs_run: { js: '$js_jobs_run', c: 'omni_js_jobs_run', arity: 0, ret: 'void', throws: true },
   /* 生成器（ADR-0020 P2 的后半）：`function*` 的体被 genfn.js 改写成一台状态机，
      这里只剩两格 op —— 一格造迭代器对象（next/return/throw + Symbol.iterator 都在它的
@@ -661,6 +665,7 @@ const P1_JS_ONLY = [
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
   'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new', 'js_proxy_new',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
+  'js_promise_all_settled', 'js_promise_any', 'js_promise_race',
   'js_jobs_run',
   'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',

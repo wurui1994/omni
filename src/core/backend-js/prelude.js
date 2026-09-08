@@ -2184,6 +2184,75 @@ function $js_promise_all(items) {
   }));
   return out;
 }
+/* allSettled / any / race（ES2020 / ES2021）：与 all 同一个骨架 —— 每个元素先过一遍
+   PromiseResolve，再挂一对反应，计数器决定谁落地。三者的差别只在"什么算落地"：
+     allSettled 从不 reject，结果按**原顺序**排（不是完成顺序）
+     any 头一个 fulfill 就成，全 reject 才 reject（AggregateError；qjs 的 message 是空串）
+     race 头一个 settle 就跟着它 —— 空数组于是永远不落地（规范如此，不是漏了一支） */
+function $js_promise_all_settled(items) {
+  const xs = [...$js_iter(items)];
+  return $js_promise_new($nat("", 2, (t, a) => {
+    const res = a[0];
+    const vals = [];
+    let left = xs.length;
+    if (left === 0) { $callThis(res, undefined, [vals]); return undefined; }
+    for (let i = 0; i < xs.length; i++) vals.push(undefined);
+    for (let i = 0; i < xs.length; i++) {
+      const at = i;
+      const settle = (status, key, v) => {
+        const o = $js_obj_new();
+        $js_obj_set(o, "status", status);
+        $js_obj_set(o, key, v);
+        vals[at] = o;
+        left--;
+        if (left === 0) $callThis(res, undefined, [vals]);
+      };
+      $js_prom_react($js_promise_resolved(xs[at]),
+        $nat("", 1, (tt, aa) => { settle("fulfilled", "value", aa[0]); return undefined; }),
+        $nat("", 1, (tt, aa) => { settle("rejected", "reason", aa[0]); return undefined; }));
+    }
+    return undefined;
+  }));
+}
+function $js_promise_any(items) {
+  const xs = [...$js_iter(items)];
+  return $js_promise_new($nat("", 2, (t, a) => {
+    const res = a[0], rej = a[1];
+    const errs = [];
+    let left = xs.length;
+    const fail = () => {
+      const e = $js_err_new("", ["AggregateError", "Error"], undefined);
+      $js_obj_set(e, "errors", errs);
+      $callThis(rej, undefined, [e]);
+    };
+    if (left === 0) { fail(); return undefined; }
+    for (let i = 0; i < xs.length; i++) errs.push(undefined);
+    for (let i = 0; i < xs.length; i++) {
+      const at = i;
+      $js_prom_react($js_promise_resolved(xs[at]),
+        $nat("", 1, (tt, aa) => { $callThis(res, undefined, [aa[0]]); return undefined; }),
+        $nat("", 1, (tt, aa) => {
+          errs[at] = aa[0];
+          left--;
+          if (left === 0) fail();
+          return undefined;
+        }));
+    }
+    return undefined;
+  }));
+}
+function $js_promise_race(items) {
+  const xs = [...$js_iter(items)];
+  return $js_promise_new($nat("", 2, (t, a) => {
+    const res = a[0], rej = a[1];
+    for (let i = 0; i < xs.length; i++) {
+      $js_prom_react($js_promise_resolved(xs[i]),
+        $nat("", 1, (tt, aa) => { $callThis(res, undefined, [aa[0]]); return undefined; }),
+        $nat("", 1, (tt, aa) => { $callThis(rej, undefined, [aa[0]]); return undefined; }));
+    }
+    return undefined;
+  }));
+}
 /* 生成器（ADR-0020 P2 的后半）：函数体已经被 genfn.js 改写成一台状态机，这儿只剩
    "包装成迭代器对象"这一层皮。step 是那台状态机（一格普通的 JS 函数值），约定：
      step(v, 0) -> 下一步（v 是 next(v) 送进去的值）
