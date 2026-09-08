@@ -105,6 +105,17 @@ a1.mark = "one";
 console.log(`${String(a1.mark)} ${String(a2.mark)}`);
 // JSON 只看元素（宿主也是这样）
 console.log(JSON.stringify(withProp));
+/* delete 的键要按**串形**算（规范先 ToPropertyKey）：`delete d[1]` 里下标是个数 ——
+   从前这一支落到"只收串"的 js_prop 上、当场报 "real is not a string"。
+   数组下标那一格另说：`delete a[i]` 在 JS 里造洞，这个值域表达不出洞，所以它当场报
+   （见 ADR-0020 与 prelude 的 $js_obj_delete）。 */
+const numKeyed = {};
+numKeyed[1] = 5;
+numKeyed[2] = 6;
+console.log(`${String(delete numKeyed[1])} ${JSON.stringify(numKeyed)}`);
+// 长度之外的下标：什么都没删掉，但按规范给 true
+const holey = [1, 2, 3];
+console.log(`${String(delete holey[10])} ${holey.length} ${holey.join(",")}`);
 
 // unshift：往头上插一格，回新长度（第一百〇四刀补的那格 ABI —— 编译器自己
 // 往 `(main …)` 头上补一句时要它，而从前动态接收者上取 "unshift" 取到的是 undefined）

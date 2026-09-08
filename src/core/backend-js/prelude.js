@@ -1963,10 +1963,19 @@ function $js_arr_has_key(o, key) {
 function $js_obj_delete(o, k) {
   if ($js_isobj(o)) return $js_obj_del_p(o, k);
   if ($dynTag(o) === "list") {
+    /* delete a[i]（i 在长度里）在 JS 里造一格**洞**：长度不变、i in a 为假、JSON 里
+       那一格是 null、forEach / map / Object.keys 全都跳过它。这个值域里的 list 是一排
+       稠密的 dyn，表达不出洞 —— 写 undefined 进去只对得上一半（i in a 变成真、
+       forEach 不跳），那是**悄悄的错答案**。所以这一格当场报，不假装删掉了。
+       想"去掉一格"照旧写 a.splice(i, 1)。 */
+    const ix = $js_hkey(k);
+    if ($js_isidx(ix) && Number(ix) < $js_arr_of(o).length) {
+      $rt_error("delete of an array index would leave a hole; use splice(" + ix + ", 1)");
+    }
     const x = $js_xprops(o, false);
-    return x === undefined ? true : x.delete($js_prop(k));
+    return x === undefined ? true : x.delete(ix);
   }
-  return $js_dict_of(o).delete($js_prop(k));
+  return $js_dict_of(o).delete($js_hkey(k));
 }
 // Object.keys/values/entries：真对象上只算**自有、可枚举、字符串键**的（规范如此），
 // dict 那一格照旧是全部键（那是 Omni 的 dict，没有描述符这一层）。

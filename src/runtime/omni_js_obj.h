@@ -151,25 +151,37 @@ static bool omni_js_obj_hask(omni_dyn o, omni_str key) { \
 } \
 static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
   if (o.tag == OMNI_DYN_LIST) { \
+    /* `delete a[i]`（i 在长度里）在 JS 里造一格**洞** —— 长度不变、`i in a` 为假、
+       JSON 那一格是 null、forEach / Object.keys 全跳过。list 是一排稠密的 dyn，
+       表达不出洞，写 undefined 进去只对得上一半，那是悄悄的错答案。所以当场报。
+       与 prelude 的 $js_obj_delete 逐字对着写。 */ \
+    int64_t hi = omni_js_dec_index(key); \
+    if (hi >= 0 && hi < ((LT)o.u.ref)->len) { \
+      omni_errorf("delete of an array index would leave a hole; use splice(%lld, 1)", \
+                  (long long) hi); \
+    } \
     DT d = omni_js_xprops_(o, false); \
     return d == NULL ? true : DT##_remove(d, key); \
   } \
   return DT##_remove(omni_js_dict_of(o), key); \
 } \
+/* get / set / has / delete 的键是同一个口径：规范先 ToPropertyKey，**数按串形算**
+   （`d[1] = 5`、`0 in a`、`delete d[1]` 里那个下标都是个数）。omni_js_prop 本身只收串 ——
+   那句 "real is not a string" 是「降级发错了」的固定签名，不该被这一族正常写法撞上。 */ \
+static omni_str omni_js_prop_k(omni_dyn k) { \
+  return omni_js_prop(k.tag == OMNI_DYN_REAL ? omni_js_str(k) : k); \
+} \
 static omni_dyn omni_js_obj_get(omni_dyn o, omni_dyn k) { \
-  return omni_js_obj_getk(o, omni_js_prop(k)); \
+  return omni_js_obj_getk(o, omni_js_prop_k(k)); \
 } \
 static omni_dyn omni_js_obj_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
-  return omni_js_obj_setk(o, omni_js_prop(k), v); \
+  return omni_js_obj_setk(o, omni_js_prop_k(k), v); \
 } \
 static bool omni_js_obj_has(omni_dyn o, omni_dyn k) { \
-  /* in / hasOwn 的键：规范先 ToPropertyKey，**数要按串形算**（0 in a 里左边就是个数）。
-     取属性那条路上的 omni_js_prop 照旧只收串 —— 那句报错是「降级发错了」的固定签名。 */ \
-  omni_dyn kk = k.tag == OMNI_DYN_REAL ? omni_js_str(k) : k; \
-  return omni_js_obj_hask(o, omni_js_prop(kk)); \
+  return omni_js_obj_hask(o, omni_js_prop_k(k)); \
 } \
 static bool omni_js_obj_delete(omni_dyn o, omni_dyn k) { \
-  return omni_js_obj_deletek(o, omni_js_prop(k)); \
+  return omni_js_obj_deletek(o, omni_js_prop_k(k)); \
 } \
 /* Object.keys / values / entries 也认**串**（规范里先 ToObject，串成了类数组）：
    键是下标的十进制串、值是一个个码元。与 prelude 那份对着写。 */ \
