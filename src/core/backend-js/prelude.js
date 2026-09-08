@@ -3187,6 +3187,34 @@ function $js_obj_def(o, k, desc) {
   return o;
 }
 function $js_obj_desc(o, k) {
+  /* 数组与字符串上的描述符：下标那几格是"可写、可枚举、可配置"的数据属性，length 是
+     可写但**不可枚举、不可配置**（规范 10.4.2.1；字符串上下标与 length 都是只读、
+     不可配置）。旁表里挂的名字算普通数据属性。从前这一支一律给 undefined，于是
+     Object.getOwnPropertyDescriptor([1], "0").value 当场炸（量出来的）。 */
+  const t = $dynTag(o);
+  if (t === "list" || t === "string") {
+    const key = $js_pkey(k);
+    const len = t === "list" ? o.length : $js_asS16(o).length;
+    const mk = (v, w, e, c) => {
+      const d = $js_obj_new_p(undefined);
+      $js_def_data(d, "value", v, true, true, true);
+      $js_def_data(d, "writable", w, true, true, true);
+      $js_def_data(d, "enumerable", e, true, true, true);
+      $js_def_data(d, "configurable", c, true, true, true);
+      return d;
+    };
+    if (key === "length") return mk(len, t === "list", false, false);
+    if (typeof key === "string" && $js_isidx(key)) {
+      const i = Number(key);
+      if (i >= len) return undefined;
+      return t === "list" ? mk(o[i], true, true, true) : mk($js_asS16(o)[i], false, true, false);
+    }
+    if (t === "list") {
+      const x = $js_xprops(o, false);
+      if (x !== undefined && x.has(key)) return mk(x.get(key), true, true, true);
+    }
+    return undefined;
+  }
   if (!$js_isobj(o)) return undefined;
   const sl = o.ps.get($js_pkey(k));
   if (sl === undefined) return undefined;
