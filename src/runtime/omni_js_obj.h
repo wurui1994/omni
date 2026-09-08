@@ -173,7 +173,7 @@ static omni_dyn omni_js_obj_assign(omni_dyn dst, omni_dyn src) { \
 static omni_dyn omni_js_arr_push_dyn(omni_dyn a, omni_dyn items) { \
   if (a.tag == OMNI_DYN_LIST) return omni_js_arr_push_all(a, items); \
   LT l = omni_js_arr_of(items); \
-  return omni_js_call_n(omni_js_obj_getk(a, omni_str_new("push", 4)), l->len, l->items); \
+  return omni_js_call_n_this(omni_js_obj_getk(a, omni_str_new("push", 4)), a, l->len, l->items); \
 } \
 OMNI_JS_MAP(LT, DT)
 

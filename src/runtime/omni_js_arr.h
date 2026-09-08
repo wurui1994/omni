@@ -70,6 +70,21 @@ static omni_dyn omni_js_call_n(omni_dyn f, int64_t n, const omni_dyn *a) { \
   } \
   return omni_js_call(f, args); \
 } \
+/* 带接收者的那一份（ADR-0020 P1）：`o.m(x)` 落到兜底上时 this **就是 o** —— \
+   原型上的方法与类的方法全靠这一格。与 prelude 的 $js_call_n_this 逐字对应。 */ \
+static omni_dyn omni_js_call_n_this(omni_dyn f, omni_dyn recv, int64_t n, const omni_dyn *a) { \
+  while (n > 0 && a[n - 1].tag == OMNI_DYN_UNDEF) n--; \
+  LT args = LT##_new(); \
+  if (n > 0) { \
+    LT##_reserve(args, n); \
+    for (int64_t i = 0; i < n; i++) args->items[i] = a[i]; \
+    args->len = n; \
+  } \
+  omni_js_this_slot_ = recv; \
+  omni_dyn r = omni_js_call(f, args); \
+  omni_js_this_slot_ = omni_dyn_undef(); \
+  return r; \
+} \
 static LT omni_js_arr_of(omni_dyn v) { return (LT)omni_dyn_as_ref(v, OMNI_DYN_LIST); } \
 static omni_dyn omni_js_arr_wrap(LT l) { return omni_dyn_of_ref((void *)l, OMNI_DYN_LIST); } \
 static omni_dyn omni_js_arr_new(void) { return omni_js_arr_wrap(LT##_new()); } \

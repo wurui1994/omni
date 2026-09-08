@@ -712,7 +712,8 @@ class CEmitter {
         this.line(`default: return ${get};`);
       } else {
         const argv = m.argc ? `${m.argc}, a_` : '0, NULL';
-        const call = `omni_js_call_n(${get}, ${argv})`;
+        // 接收者要传下去（ADR-0020 P1）：`o.m()` 落到兜底上时 this 就是 o
+        const call = `omni_js_call_n_this(${get}, r, ${argv})`;
         const ret = d.ret === 'bool' ? `omni_js_truthy(${call})` : call;
         this.line(m.argc
           ? `default: { const omni_dyn a_[] = { ${ps.slice(1).join(', ')} }; return ${ret}; }`

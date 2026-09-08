@@ -197,7 +197,8 @@ class JsEmitter {
       if (m.kind === 'prop') {
         this.line(`default: return ${get};`);
       } else {
-        const call = `$js_call_n(${get}, [${ps.slice(1).join(', ')}])`;
+        // 接收者要传下去（ADR-0020 P1）：`o.m()` 落到兜底上时 this 就是 o
+        const call = `$js_call_n_this(${get}, r, [${ps.slice(1).join(', ')}])`;
         this.line(`default: return ${d.ret === 'bool' ? `$js_truthy(${call})` : call};`);
       }
       this.indent--;

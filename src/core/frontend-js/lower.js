@@ -133,6 +133,14 @@ function nestedFns(node, out = []) {
   return out;
 }
 
+/** 类的原型对象那一格全局的名字（ADR-0020 P1-f） */
+function protoGlobalName(id) {
+  return `proto_of_${id}`;
+}
+
+/** 类对象上放"初始化实例的那个闭包"的内部键。`new C()` 与（以后的）`super(...)` 都查它。 */
+const CLASS_INIT_KEY = '$init';
+
 /**
  * 对象字面量里的方法/访问器拼回一个函数节点（ADR-0020 P1）。
  *
@@ -384,6 +392,15 @@ class Lower {
         const sup = s.superClass;
         const isError = !!(sup && sup.type === 'Ident' && sup.name === 'Error');
         this.classes.set(s.id, { mangled: this.mangle('n_', s.id), node: s, isError });
+        /* 非 Error 的类走**原型链**那条新路（ADR-0020 P1-f）：类对象与原型对象各占一格
+         * 模块级全局 —— 方法只能建一次（每次 new 重建原型的话
+         * `getPrototypeOf(a) === getPrototypeOf(b)` 就假了），而类名本身要在整个模块可见
+         * （`C.staticM()`、`C.prototype`、`x instanceof C` 都是查它）。
+         * 原型那一格的名字带前缀，撞上用户自己的同名变量的可能性留在这儿，不装作没有。 */
+        if (!isError) {
+          this.globals.set(s.id, { name: cSafe(s.id) });
+          this.globals.set(protoGlobalName(s.id), { name: cSafe(protoGlobalName(s.id)) });
+        }
         break;
       }
       case 'ImportDecl': case 'ExportNamed': case 'ExportDefault': case 'ExportDecl':
@@ -512,11 +529,14 @@ class Lower {
      * 提到 this 才发这一句：每个函数都发就是每次调用多一次 op，而量过的源码里绝大多数
      * 函数根本不提它。加进 captured 是为了内层箭头能把它当 cell 捕获下去。 */
     if (!opts.isArrow && !opts.isCtor && !this.lookup('this')
-      && bodyStmts.some((s) => mentionsThis(s))) {
+      && (opts.wantThis === true || bodyStmts.some((s) => mentionsThis(s)))) {
       this.fn.captured.add('this');
       const self = this.declare('this');
       stmts.push(this.declStmt(self, op('js_this_take', [])));
     }
+    /* `pre`：在**取完接收者、绑形参之前**插几句。类的实例字段就是这么进去的
+     * （ADR-0020 P1-f）：规范里字段在构造器体之前初始化，而且它们看不见构造器的形参。 */
+    if (opts.pre) stmts.push(...opts.pre());
     params.forEach((p, i) => stmts.push(...this.bindParam(p, i, span)));
     if (rest) {
       if (rest.type !== 'Ident') this.err(span, 'destructuring a rest parameter is not supported');
@@ -572,7 +592,7 @@ class Lower {
    * 体降级成一个独立的 OIR 函数（带 closureId），捕获的 cell 拷进闭包记录。
    * @returns {{expr: any, closure: any}}
    */
-  closureOf(node, label) {
+  closureOf(node, label, extra = {}) {
     const id = this.closures.length;
     const mangled = this.mangle('l_', label);
     const rec = { id, mangled, make: `omni_mk_${mangled}`, captures: [] };
@@ -588,6 +608,7 @@ class Lower {
       outerScopes: this.fn.scopes,
       // 箭头的 this 是**外层**的（词法的），所以它自己不去取接收者
       isArrow: node.type === 'Arrow',
+      ...extra,
     });
     f.closureId = id;
     rec.captures = f.captureList.map((e) => ({ name: e.name, type: D }));
@@ -603,6 +624,10 @@ class Lower {
    */
   classDecl(s) {
     const rec = this.classes.get(s.id);
+    /* 非 Error 的类走原型链那条新路（ADR-0020 P1-f），而且它是**语句**：原型与类对象在
+     * 类声明那一句执行时建起来（见 classProtoStmts）。这儿只剩 Error 子类的老路 ——
+     * 它那条 `$cls` 链是 throw/catch 的现役机制（ADR-0011 决策 15），不跟着一起翻。 */
+    if (!rec.isError) return;
     if (s.superClass && !rec.isError) {
       this.err(s.span, "'extends' is only supported for Error (ADR-0011 decision 15)");
     }
@@ -653,9 +678,91 @@ class Lower {
     this.funcs.push({ name: s.id, mangled: rec.mangled, ret: D, params: [{ name: 'args', type: listType(D) }], body });
   }
 
+  /**
+   * 类 -> 原型链（ADR-0020 P1-f）。降成**三样东西**，全在类声明那一句里建起来：
+   *
+   *   1. 原型对象（模块级全局 `proto_of_C`）：方法与访问器挂在它上面，**不可枚举**
+   *      （规范如此 —— 所以 `Object.keys(实例)` 只会看到自己的字段）。
+   *   2. 类对象（模块级全局 `C`）：一格真对象，挂 `prototype`、static 成员，
+   *      以及一个内部键 `$init`（初始化实例的那个闭包）。`x instanceof C` 查的就是
+   *      它身上的 `prototype`，`C.staticM()` 查的是它自己的属性。
+   *   3. `$init` 闭包：`this` 从接收者槽取（js_this_take），先跑实例字段、再跑构造器体。
+   *      刻意**不分配实例** —— 分配由 `new C()` 那边做（见 newExpr），这样以后
+   *      `super(...)` 就是"拿当前 this 调父类的 $init"，不用再造一个对象。
+   *
+   * 与老那条（ADR-0011 决策 13：每实例一份闭包方法）的差别是可观察的：方法现在是
+   * **共享的**（`a.m === b.m` 为真）、在原型上（`hasOwnProperty('m')` 为假）、
+   * 而 `this` 是真接收者，所以方法可以借给别人用。
+   */
+  classProtoStmts(s) {
+    const protoG = () => globalRef(this.globals.get(protoGlobalName(s.id)).name);
+    const classG = () => globalRef(this.globals.get(s.id).name);
+    const out = [];
+    out.push(exprStmt(assign(protoG(), op('js_obj_new_p', [undefExpr()]))));
+    out.push(exprStmt(assign(classG(), op('js_obj_new', []))));
+    // prototype 与 constructor 互指，两条都不可枚举
+    out.push(exprStmt(this.defHidden(classG(), s16('prototype'), protoG())));
+    out.push(exprStmt(this.defHidden(protoG(), s16('constructor'), classG())));
+
+    let ctor = null;
+    const fields = [];
+    for (const m of s.members) {
+      const what = m.computed ? null : this.keyName(m.key, m.span);
+      const key = () => (m.computed ? this.expr(m.key) : s16(what));
+      const target = m.static ? classG : protoG;
+      if (m.kind === 'field') {
+        // static 字段直接落在类对象上（可枚举、可写）；实例字段进 $init
+        if (m.static) out.push(exprStmt(op('js_obj_set', [classG(), key(), m.value ? this.expr(m.value) : undefExpr()])));
+        else fields.push(m);
+        continue;
+      }
+      if (what === 'constructor' && !m.static) { ctor = m; continue; }
+      const label = `${s.id}_${m.static ? 'static_' : ''}${what ?? 'computed'}`;
+      const fn = this.closureExpr(fnNodeOfProp(m), label);
+      if (m.kind === 'get' || m.kind === 'set') {
+        let desc = op('js_obj_set', [op('js_obj_new', []), s16(m.kind), fn]);
+        desc = op('js_obj_set', [desc, s16('configurable'), constBool(true)]);
+        out.push(exprStmt(op('js_obj_def', [target(), key(), desc])));
+      } else {
+        out.push(exprStmt(this.defHidden(target(), key(), fn)));
+      }
+    }
+    out.push(exprStmt(this.defHidden(classG(), s16(CLASS_INIT_KEY), this.classInitClosure(s, ctor, fields))));
+    return out;
+  }
+
+  /** 挂一格**不可枚举**的属性（可写、可配置）—— 方法与内部键都该是这个形状 */
+  defHidden(objE, keyE, valE) {
+    let desc = op('js_obj_set', [op('js_obj_new', []), s16('value'), valE]);
+    desc = op('js_obj_set', [desc, s16('writable'), constBool(true)]);
+    desc = op('js_obj_set', [desc, s16('configurable'), constBool(true)]);
+    return op('js_obj_def', [objE, keyE, desc]);
+  }
+
+  /** `$init`：实例字段 + 构造器体，`this` 是传进来的接收者（不分配实例） */
+  classInitClosure(s, ctor, fields) {
+    const node = {
+      type: 'FuncExpr',
+      id: null,
+      params: ctor ? ctor.params : [],
+      rest: ctor ? ctor.rest : null,
+      body: ctor ? ctor.body : { type: 'Block', body: [], span: s.span },
+      span: s.span,
+    };
+    return this.closureExpr(node, `${s.id}_init`, {
+      wantThis: true,
+      // 字段在构造器体**之前**、形参绑定之前（规范：字段初始化器看不见构造器的形参）
+      pre: () => fields.map((f) => exprStmt(op('js_setp', [
+        this.readEntry(this.lookup('this')),
+        f.computed ? this.expr(f.key) : s16(this.keyName(f.key, f.span)),
+        f.value ? this.expr(f.value) : undefExpr(),
+      ]))),
+    });
+  }
+
   /** 闭包值的构造表达式（在**外层**栈帧里求值） */
-  closureExpr(node, label) {
-    return this.makeClosure(this.closureOf(node, label));
+  closureExpr(node, label, extra = {}) {
+    return this.makeClosure(this.closureOf(node, label, extra));
   }
 
   makeClosure(rec) {
@@ -886,8 +993,12 @@ class Lower {
         this.err(s.span, 'a nested function declaration is only supported at the top of a function body');
         return [];
       case 'ClassDecl':
-        // 顶层的类在 module() 里已经降过了（collectTop 收，classDecl 降）
-        if (this.classes.get(s.id)?.node === s) return [];
+        /* 顶层的类：Error 子类在 module() 里就降完了（老路），非 Error 的那条**是语句** ——
+         * 原型与类对象在这一句执行时建起来（ADR-0020 P1-f）。类因此不提升，与 JS 的
+         * TDZ 方向一致（我们不报错，只是那之前 `new C()` 会拿到一格空原型）。 */
+        if (this.classes.get(s.id)?.node === s) {
+          return this.classes.get(s.id).isError ? [] : this.classProtoStmts(s);
+        }
         this.err(s.span, 'a class declaration is only supported at the top level of a module');
         return [];
       case 'ImportDecl': case 'ExportNamed': case 'ExportDefault': case 'ExportDecl':
@@ -1500,14 +1611,14 @@ class Lower {
       case '>>>': return ushr(A(), B());
       case 'in': return op('js_obj_has', [B(), A()]);
       case 'instanceof': {
-        // instanceof 查 $cls 链（决策 15），所以只对 Error 与 Error 的子类有意义
+        /* 两条路（ADR-0020 P1-f）：
+         *   - Error 与它的子类查 `$cls` 链（决策 15，那是 throw/catch 的现役机制）；
+         *   - 别的走**真原型链**（js_instanceof：先问 Symbol.hasInstance，再顺着
+         *     右边那个类对象的 prototype 往上找）。右边是任意表达式也行。 */
         const rhs = e.right.type === 'Ident' ? e.right.name : null;
-        const ok = rhs === 'Error' || (rhs && this.classes.get(rhs)?.isError);
-        if (!ok) {
-          this.err(e.span, "'instanceof' only works with Error and its subclasses (ADR-0011 decision 15)");
-          return undefExpr();
-        }
-        return op('js_is_a', [A(), s16(rhs)]);
+        const isErr = rhs === 'Error' || (rhs && this.classes.get(rhs)?.isError);
+        if (isErr) return op('js_is_a', [A(), s16(rhs)]);
+        return op('js_instanceof', [A(), B()]);
       }
       default:
         this.err(e.span, `binary '${e.op}' is not supported`);
@@ -1864,9 +1975,23 @@ class Lower {
       const msg = e.args.length ? this.expr(e.args[0]) : s16('');
       return op('js_err_new', [msg, arrLit([s16('Error')])]);
     }
-    // 类的构造：造实例的函数和普通顶层函数同一套调用约定
+    // 类的构造：Error 子类走老路（造实例的函数），别的走原型链那条新路（P1-f）
     if (n && this.classes.has(n) && !this.lookup(n)) {
-      return { kind: 'Call', func: this.classes.get(n).mangled, name: n, args: [this.argList(e.args)], type: D };
+      const rec = this.classes.get(n);
+      if (rec.isError) {
+        return { kind: 'Call', func: rec.mangled, name: n, args: [this.argList(e.args)], type: D };
+      }
+      /* 分配一格以类原型为原型的对象，再拿它当**接收者**跑 $init。摊成两句（emitPre）
+       * 而不是一个表达式：临时量要用三次（造、当接收者、当结果）。 */
+      const t = this.temp();
+      this.emitPre(exprStmt(assign(varRef(t),
+        op('js_obj_new_p', [globalRef(this.globals.get(protoGlobalName(n)).name)]))), e.span);
+      this.emitPre(exprStmt(op('js_call_this', [
+        op('js_obj_get', [globalRef(this.globals.get(n).name), s16(CLASS_INIT_KEY)]),
+        varRef(t),
+        box(this.argList(e.args), listType(D)),
+      ])), e.span);
+      return varRef(t);
     }
     this.err(e.span, `'new ${n ?? '<expr>'}' is not supported; only Array, Map, Set, Error and classes declared in this file`);
     return undefExpr();

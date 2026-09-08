@@ -849,9 +849,15 @@ function $fnOne(key, mk) {
 // 成员派发的兜底（ADR-0011 决策 12）：派发器的形参个数是表里的最大值，末尾多出来的
 // undefined 等于没给 —— 削掉再调，C 侧的 omni_js_call_n 是同一套。
 function $js_call_n(f, args) {
+  return $js_call_n_this(f, undefined, args);
+}
+/* 带接收者的那一份（ADR-0020 P1）：o.m(x) 落到兜底上时，this **就是 o** ——
+   原型上的方法、类的方法全靠这一格。从前这儿丢掉了接收者，于是 b.get() 里的
+   this 是 undefined（量出来的：REPL 那条 js 会话印 "cannot read 'v' of undefined"）。 */
+function $js_call_n_this(f, recv, args) {
   let n = args.length;
   while (n > 0 && args[n - 1] === undefined) n--;
-  return $callFn($js_asFn(f), args.slice(0, n));
+  return $callThis($js_asFn(f), recv, args.slice(0, n));
 }
 
 // ------------------------------------------------------ JS 前端的运算语义（ADR-0011）
@@ -1176,7 +1182,8 @@ function $js_arr_push_all(a, items) {
 // 就是压一层作用域），而这两种形状（零实参、带展开）降级时走的是定长 op，静态分不出接收者。
 function $js_arr_push_dyn(a, items) {
   if ($dynTag(a) === "list") return $js_arr_push_all(a, items);
-  return $js_call_n($js_obj_get(a, "push"), $js_arr_of(items));
+  // 接收者要传下去（ADR-0020 P1）：sc.push() 里的 this 就是 sc
+  return $js_call_n_this($js_obj_get(a, "push"), a, $js_arr_of(items));
 }
 function $js_arr_pop(a) { return $js_arr_of(a).pop(); }
 function $js_arr_unshift(a, v) { return $js_arr_of(a).unshift(v); }

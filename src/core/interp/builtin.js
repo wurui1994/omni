@@ -1373,10 +1373,13 @@ function memberFallback(d, m, a) {
   flushOut();
   const got = callJsOp('js_obj_get', [a[0], m.name]);
   if (m.kind === 'prop') return got;
-  // 派发器的形参个数是表里的最大值，末尾多出来的 undefined 等于没给 —— 削掉再调
+  // 派发器的形参个数是表里的最大值，末尾多出来的 undefined 等于没给 —— 削掉再调。
+  // **接收者要传下去**（ADR-0020 P1）：o.m() 里的 this 就是 o，原型上的方法与类的方法
+  // 全靠这一格。这是同一件事的第三份实现（另两份是 prelude 的 $js_call_n_this 与
+  // 生成 C 里的 omni_js_call_n_this）。
   let n = a.length;
   while (n > 1 && a[n - 1] === undefined) n--;
-  const r = callJsOp('js_call_fn', [got, a.slice(1, n)]);
+  const r = callJsOp('js_call_this', [got, a[0], a.slice(1, n)]);
   return d.ret === 'bool' ? callJsOp('js_truthy', [r]) : r;
 }
 
