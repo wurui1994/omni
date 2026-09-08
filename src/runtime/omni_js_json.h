@@ -65,13 +65,33 @@ OMNI_JS_JSON_2(LT, DT)
 static omni_s16 omni_js_json_absent(void) { omni_s16 r; r.p = NULL; r.len = 0; return r; } \
 static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t depth); \
 static omni_dyn omni_js_json_apply(omni_dyn rep, omni_s16 key, omni_dyn v) { \
-  if (rep.tag == OMNI_DYN_UNDEF) return v; \
+  /* replacer 只有**函数**形态才调（数组形态是白名单，见 omni_js_json_list） */ \
+  if (rep.tag != OMNI_DYN_FN) return v; \
   LT args = LT##_new(); \
   LT##_reserve(args, 2); \
   args->items[0] = omni_dyn_of_s16(key); \
   args->items[1] = v; \
   args->len = 2; \
   return omni_js_call(rep, args); \
+} \
+/* replacer 的**数组**形态（白名单，规范 25.5.2.2 的 PropertyList）：只留名单里的键，
+   而且**按名单的次序**输出。数字条目按串形算，重复的只留第一次，别的类型忽略。
+   rep 不是数组时交出 undefined（"没给白名单"）。 */ \
+static omni_dyn omni_js_json_list(omni_dyn rep) { \
+  if (rep.tag != OMNI_DYN_LIST) return omni_dyn_undef(); \
+  LT src = (LT)rep.u.ref; \
+  LT out = LT##_new(); \
+  for (int64_t i = 0; i < src->len; i++) { \
+    omni_dyn x = src->items[i]; \
+    if (x.tag != OMNI_DYN_STR16 && x.tag != OMNI_DYN_REAL) continue; \
+    omni_s16 k = omni_js_as_s16(omni_js_str(x)); \
+    bool dup = false; \
+    for (int64_t j = 0; j < out->len; j++) { \
+      if (omni_s16_eq(out->items[j].u.s16, k)) { dup = true; break; } \
+    } \
+    if (!dup) LT##_push(out, omni_dyn_of_s16(k)); \
+  } \
+  return omni_js_arr_wrap(out); \
 } \
 static omni_s16 omni_js_json_nl(int64_t gap, int64_t depth) { \
   if (gap <= 0) return omni_js_s16_lit(""); \
@@ -116,9 +136,28 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
     } \
     case OMNI_DYN_DICT: { \
       DT d = (DT)v.u.ref; \
+      omni_dyn only = omni_js_json_list(rep); \
       omni_s16 out = omni_js_s16_lit("{"); \
       omni_s16 sep = omni_js_json_nl(gap, depth + 1); \
       bool first = true; \
+      if (only.tag == OMNI_DYN_LIST) { \
+        LT ks = (LT)only.u.ref; \
+        for (int64_t i = 0; i < ks->len; i++) { \
+          omni_s16 key = ks->items[i].u.s16; \
+          omni_dyn x = omni_js_json_apply(rep, key, omni_js_obj_get(v, ks->items[i])); \
+          omni_s16 s = omni_js_json_val(x, rep, gap, depth + 1); \
+          if (!s.p) continue; \
+          if (!first) out = omni_s16_cat(out, omni_js_s16_lit(",")); \
+          first = false; \
+          out = omni_s16_cat(out, sep); \
+          out = omni_s16_cat(out, omni_js_json_quote_s16(key)); \
+          out = omni_s16_cat(out, omni_js_s16_lit(gap > 0 ? ": " : ":")); \
+          out = omni_s16_cat(out, s); \
+        } \
+        if (first) return omni_js_s16_lit("{}"); \
+        out = omni_s16_cat(out, omni_js_json_nl(gap, depth)); \
+        return omni_s16_cat(out, omni_js_s16_lit("}")); \
+      } \
       for (int64_t i = 0; i < d->n; i++) { \
         if (!d->live[i]) continue; \
         omni_s16 key = omni_s16_of_utf8(d->keys[i]); \

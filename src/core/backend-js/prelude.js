@@ -1109,6 +1109,19 @@ function $js_str_repeat(s, n) {
   if (k < 0) $rt_error("repeat count must not be negative");
   return $js_asS16(s).repeat(k);
 }
+/* String.raw 的**普通调用**形态：String.raw({ raw: [...] }, ...subs)。tag 形态在降级器
+   那儿就折成字面量了，这一份只管手写的调用。规范 22.1.2.6：段数看 raw.length，最后一段
+   后面不再拼插值；插值不够就当没有（不是拼 "undefined"）。 */
+function $js_str_raw(strs, subs) {
+  const raw = $js_obj_get(strs, "raw");
+  const n = $js_arr_len(raw), vs = $js_arr_of(subs);
+  let out = "";
+  for (let i = 0; i < n; i++) {
+    out = out + $js_str($js_arr_get(raw, i));
+    if (i + 1 < n && i < vs.length) out = out + $js_str(vs[i]);
+  }
+  return out;
+}
 // isWellFormed / toWellFormed（ES2024）：落单的代理项（没配对的 D800..DFFF）算"不良",
 // toWellFormed 把每个落单的替成 U+FFFD。C 那份是手划码元的同一套判据。
 function $js_str_is_well_formed(s) { return $js_asS16(s).isWellFormed(); }
@@ -1245,7 +1258,18 @@ function $js_arr_slice(a, s, e) {
 }
 function $js_arr_concat(a, b) { return $js_arr_of(a).concat($js_arr_of(b)); }
 function $js_arr_reverse(a) { $js_arr_of(a).reverse(); return a; }
-function $js_arr_fill(a, v) { $js_arr_of(a).fill(v); return a; }
+function $js_arr_fill(a, v, s, e) {
+  const l = $js_arr_of(a);
+  l.fill(v, $js_idx(s, 0), $js_idx(e, l.length));
+  return a;
+}
+/* copyWithin：同一格数组里把 [s, e) 挪到 t 起（区间会重叠，宿主的 copyWithin 自己
+   处理挪的向；C 那份是先拷一份再写的等价实现）。 */
+function $js_arr_copy_within(a, t, s, e) {
+  const l = $js_arr_of(a);
+  l.copyWithin($js_idx(t, 0), $js_idx(s, 0), $js_idx(e, l.length));
+  return a;
+}
 function $js_arr_is_array(v) { return $dynTag(v) === "list"; }
 // Array.from：走一遍迭代（ADR-0020 P1）——数组是恒等、字符串按码点、Map/Set 给条目，
 // 自定义可迭代对象走 Symbol.iterator 协议。再 slice 一份，免得把原数组交出去。
@@ -3222,7 +3246,10 @@ function $js_math(op, a, b) {
   if (op === "X") return Math.expm1(x);
   if (op === "O") return Math.log(x);
   if (op === "Q") return Math.log10(x);
+  if (op === "w") return Math.log2(x);
   if (op === "P") return Math.log1p(x);
+  /* sign：NaN 给 NaN、-0 给 -0、0 给 0 —— 所以不能写 x > 0 ? 1 : -1，零那一格要原样送回 */
+  if (op === "g") return Math.sign(x);
   if (op === "B") return Math.cbrt(x);
   if (op === "F") return Math.fround(x);
   // clz32：先 ToUint32 再数前导零（Math.clz32 自己就做这一步转换）
@@ -3342,6 +3369,20 @@ function $js_json_apply(rep, key, v) {
   // 是最常见的写法，从前 null 会掉进 $callFn 里报 "call of a null function value"）。
   return $dynTag(rep) === "function" ? $callFn(rep, [key, v]) : v;
 }
+/* replacer 的**数组**形态（白名单，规范 25.5.2.2 的 PropertyList）：只留名单里的键，
+   而且**按名单的次序**输出 —— 两把尺子量过都是这样。数字条目按它的串形算，重复的只留
+   第一次，别的类型（null / true / 对象）忽略；数组接收者不受影响。 */
+function $js_json_list(rep) {
+  if ($dynTag(rep) !== "list") return undefined;
+  const src = $js_arr_of(rep), out = [];
+  for (let i = 0; i < src.length; i++) {
+    const x = src[i], t = $dynTag(x);
+    if (t !== "string" && t !== "real") continue;
+    const k = $js_str(x);
+    if (!out.includes(k)) out.push(k);
+  }
+  return out;
+}
 function $js_json_nl(gap, depth) { return gap > 0 ? "\n" + " ".repeat(gap * depth) : ""; }
 // undefined 与函数值"该省略"：在对象里跳过、在数组里变成 null。用 undefined 当哨兵。
 // toJSON（规范 SerializeJSONProperty 第 2 步）：对象身上有可调用的 toJSON 就先换成它的
@@ -3375,8 +3416,19 @@ function $js_json_val(v, rep, gap, depth) {
     return out + $js_json_nl(gap, depth) + "]";
   }
   if (t === "dict") {
+    const only = $js_json_list(rep);
     let out = "{", first = true;
     const sep = $js_json_nl(gap, depth + 1);
+    if (only !== undefined) {
+      for (const k of only) {
+        const s = $js_json_val($js_json_apply(rep, k, $js_obj_get(v, k)), rep, gap, depth + 1);
+        if (s === undefined) continue;
+        if (!first) out += ",";
+        first = false;
+        out += sep + $js_json_quote(k) + (gap > 0 ? ": " : ":") + s;
+      }
+      return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
+    }
     for (const [k, val] of v) {
       const s = $js_json_val($js_json_apply(rep, k, val), rep, gap, depth + 1);
       if (s === undefined) continue;
@@ -3390,9 +3442,13 @@ function $js_json_val(v, rep, gap, depth) {
   // 真对象（ADR-0020 P1）：自有、可枚举、字符串键，取值走 [[Get]]（访问器要被触发）。
   // toJSON 还没接（P4 那一片）。
   if (t === "object") {
+    const only = $js_json_list(rep);
+    // 白名单给了就按**名单的次序**走，键从名单来（规范 25.5.2.2：K 是 PropertyList，
+    // 取值照旧是 [[Get]]，所以名单里点到原型上的数据属性也算）
+    const ks = only === undefined ? $js_own_keys(v, "e") : only;
     let out = "{", first = true;
     const sep = $js_json_nl(gap, depth + 1);
-    for (const k of $js_own_keys(v, "e")) {
+    for (const k of ks) {
       const s = $js_json_val($js_json_apply(rep, k, $js_getp(v, k, undefined)), rep, gap, depth + 1);
       if (s === undefined) continue;
       if (!first) out += ",";

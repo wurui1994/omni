@@ -57,6 +57,9 @@ export const JS_ABI = {
   js_str_code_point_at: { js: '$js_str_code_point_at', c: 'omni_js_str_code_point_at', arity: 2 },
   js_str_slice: { js: '$js_str_slice', c: 'omni_js_str_slice', arity: 3 },
   js_str_repeat: { js: '$js_str_repeat', c: 'omni_js_str_repeat', arity: 2 },
+  /* String.raw 的**普通调用**形态（第二格是插值摊成的一格数组）。tag 形态在降级器那儿
+     就折成字面量了 —— 原文那几段与值交替相加，不必绕道造 strings 对象。 */
+  js_str_raw: { js: '$js_str_raw', c: 'omni_js_str_raw', arity: 2 },
   js_str_pad_start: { js: '$js_str_pad_start', c: 'omni_js_str_pad_start', arity: 3 },
   js_str_pad_end: { js: '$js_str_pad_end', c: 'omni_js_str_pad_end', arity: 3 },
   // replaceAll：**只收字符串模式**。正则那一支要 lastIndex 与替换串里的 $1，
@@ -105,7 +108,8 @@ export const JS_ABI = {
   js_arr_slice: { js: '$js_arr_slice', c: 'omni_js_arr_slice', arity: 3 },
   js_arr_concat: { js: '$js_arr_concat', c: 'omni_js_arr_concat', arity: 2 },
   js_arr_reverse: { js: '$js_arr_reverse', c: 'omni_js_arr_reverse', arity: 1 },
-  js_arr_fill: { js: '$js_arr_fill', c: 'omni_js_arr_fill', arity: 2 },
+  js_arr_fill: { js: '$js_arr_fill', c: 'omni_js_arr_fill', arity: 4 },
+  js_arr_copy_within: { js: '$js_arr_copy_within', c: 'omni_js_arr_copy_within', arity: 4 },
   js_arr_is_array: { js: '$js_arr_is_array', c: 'omni_js_arr_is_array', arity: 1, ret: 'bool' },
   // Array.from(v[, mapFn])：mapFn 收 (value, index)，类数组（有 length）也认
   js_arr_from: { js: '$js_arr_from', c: 'omni_js_arr_from', arity: 2, throws: true },
@@ -350,6 +354,8 @@ export const JS_ABI = {
   //     'S' sin / 'C' cos / 'T' tan / 'I' asin / 'A' acos / 'N' atan / '2' atan2 /
   //     'H' sinh / 'D' cosh / 'G' tanh / 'J' asinh / 'K' acosh / 'L' atanh /
   //     'E' exp / 'X' expm1 / 'O' log / 'Q' log10 / 'P' log1p / 'B' cbrt / 'Y' hypot
+  //     'w' log2 / 'g' sign（这两个 JS 那侧要得到，rmath 用不上）：sign 的零那一格要
+  //     原样送回 —— Math.sign(-0) 是 -0，写成 x > 0 ? 1 : -1 就分叉了
   //     'F' fround（ADR-0017 第一刀）：C 那边是一次 `(float)` 强制转换。MIR 的 f32
   //     语义（每步之后舍一次到单精度）靠它，而闭包解释器要在自举出来的编译器里也这么算。
   //     'W' nextafter（ADR-0019 路 2）：**JS 侧是手写的** —— `Math.*` 里没有 nextafter，
@@ -650,6 +656,7 @@ export const JS_METHODS = {
   concat: { on: { list: 'js_arr_concat', string: 'js_add' } },
   reverse: { on: { list: 'js_arr_reverse' } },
   fill: { on: { list: 'js_arr_fill', bytes: 'js_buf_fill' } },
+  copyWithin: { on: { list: 'js_arr_copy_within' } },
   exec: { on: { regexp: 'js_re_exec' } },
   /* 正则**对象**上的 test（`const re = new RegExp(s); re.test(x)`）：字面量那条路由
      lower.js 静态发成 js_re_test（模式与旗标是编译期常量），这一格是运行期的接收者。

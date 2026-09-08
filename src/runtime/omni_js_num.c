@@ -263,7 +263,13 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
     case 'X': return omni_dyn_of_real(expm1(x));
     case 'O': return omni_dyn_of_real(log(x));
     case 'Q': return omni_dyn_of_real(log10(x));
+    case 'w': return omni_dyn_of_real(log2(x));
     case 'P': return omni_dyn_of_real(log1p(x));
+    /* sign：NaN 给 NaN、±0 原样送回（Math.sign(-0) 是 -0），其余看符号 */
+    case 'g': {
+      if (isnan(x) || x == 0) return omni_dyn_of_real(x);
+      return omni_dyn_of_real(x > 0 ? 1.0 : -1.0);
+    }
     case 'B': return omni_dyn_of_real(cbrt(x));
     /* fround（ADR-0017 第一刀）：把一个 double 舍到最近的 float 再读回来。
        C 这边就是一次 (float) 强制转换 —— 唯一要小心的是编译器不许把它优化掉，

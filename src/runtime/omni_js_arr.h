@@ -228,9 +228,27 @@ static omni_dyn omni_js_arr_reverse(omni_dyn a) { \
   } \
   return a; \
 } \
-static omni_dyn omni_js_arr_fill(omni_dyn a, omni_dyn v) { \
+static omni_dyn omni_js_arr_fill(omni_dyn a, omni_dyn v, omni_dyn s, omni_dyn e) { \
   LT l = omni_js_arr_of(a); \
-  for (int64_t i = 0; i < l->len; i++) l->items[i] = v; \
+  int64_t start = omni_js_arr_rel(s.tag == OMNI_DYN_UNDEF ? 0 : omni_js_arr_i(s), l->len); \
+  int64_t end = omni_js_arr_rel(e.tag == OMNI_DYN_UNDEF ? l->len : omni_js_arr_i(e), l->len); \
+  for (int64_t i = start; i < end; i++) l->items[i] = v; \
+  return a; \
+} \
+/* copyWithin：同一格数组里把 [s, e) 挪到 t 起。区间会重叠，所以**先拷一份再写** \
+   （规范 23.1.3.4 按方向选挪的向，这一份等价而更直白）。 */ \
+static omni_dyn omni_js_arr_copy_within(omni_dyn a, omni_dyn t, omni_dyn s, omni_dyn e) { \
+  LT l = omni_js_arr_of(a); \
+  int64_t to = omni_js_arr_rel(t.tag == OMNI_DYN_UNDEF ? 0 : omni_js_arr_i(t), l->len); \
+  int64_t start = omni_js_arr_rel(s.tag == OMNI_DYN_UNDEF ? 0 : omni_js_arr_i(s), l->len); \
+  int64_t end = omni_js_arr_rel(e.tag == OMNI_DYN_UNDEF ? l->len : omni_js_arr_i(e), l->len); \
+  int64_t n = end - start; \
+  if (n > l->len - to) n = l->len - to; \
+  if (n <= 0) return a; \
+  LT tmp = LT##_new(); \
+  LT##_reserve(tmp, n); \
+  for (int64_t i = 0; i < n; i++) tmp->items[tmp->len++] = l->items[start + i]; \
+  for (int64_t i = 0; i < n; i++) l->items[to + i] = tmp->items[i]; \
   return a; \
 } \
 static bool omni_js_arr_is_array(omni_dyn v) { return v.tag == OMNI_DYN_LIST; } \

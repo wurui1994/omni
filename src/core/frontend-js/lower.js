@@ -2329,6 +2329,23 @@ class Lower {
       if (path) {
         // Array.of(…) 收可变实参 —— 它就是一格数组字面量（展开也照走 argList）
         if (path === 'Array.of') return box(this.argList(e.args), listType(D));
+        /* String.raw 的**普通调用**形态：第一格是身上挂着 raw 的对象，其余是插值。
+         * tag 形态（String.raw`…`）在模板那儿就折成字面量了，不走这条。
+         * 插值收可变实参，所以余下的先摊成一格数组 —— 与 Array.of 同一条路。 */
+        if (path === 'String.raw') {
+          if (e.args.length === 0) {
+            this.err(e.span, 'String.raw() needs the strings object as its first argument');
+            return undefExpr();
+          }
+          if (e.args[0].type === 'SpreadElement') {
+            this.err(e.span, 'String.raw(...xs) spread in the first argument is not supported');
+            return undefExpr();
+          }
+          return op('js_str_raw', [
+            this.expr(e.args[0]),
+            box(this.argList(e.args.slice(1)), listType(D)),
+          ]);
+        }
         const spec = Object.hasOwn(STATIC_CALLS, path) ? STATIC_CALLS[path] : undefined;
         if (spec) return this.abiCall(spec, e.args, e.span, path);
         /* 已注册前缀那一条（ADR-0020 P1-f）：`Object.prototype.toString.call(x)` ——
@@ -3004,7 +3021,9 @@ const STATIC_CALLS = {
   'Math.expm1': { op: 'js_math', argc: 2, lit: { op: 'X' } },
   'Math.log': { op: 'js_math', argc: 2, lit: { op: 'O' } },
   'Math.log10': { op: 'js_math', argc: 2, lit: { op: 'Q' } },
+  'Math.log2': { op: 'js_math', argc: 2, lit: { op: 'w' }, len: 1 },
   'Math.log1p': { op: 'js_math', argc: 2, lit: { op: 'P' } },
+  'Math.sign': { op: 'js_math', argc: 2, lit: { op: 'g' }, len: 1 },
   'Math.cbrt': { op: 'js_math', argc: 2, lit: { op: 'B' } },
   'Math.sin': { op: 'js_math', argc: 2, lit: { op: 'S' } },
   'Math.cos': { op: 'js_math', argc: 2, lit: { op: 'C' } },

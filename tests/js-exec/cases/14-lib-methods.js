@@ -145,6 +145,21 @@ console.log(`buf ${ub.join(",")} ${ub.join("|")} ${new Uint8Array(0).join(",")}|
 console.log(`buf ${ub.at(0)} ${ub.at(-1)} ${ub.at(9)} ${ub.indexOf(2)} ${ub.indexOf(99)}`);
 console.log(`buf ${ub.includes(255)} ${ub.includes(0)}`);
 
+// fill 的 start/end 与 copyWithin：都在原地改，交出的还是同一格数组
+const fa = [1, 2, 3, 4, 5];
+console.log(`fill ${fa.fill(0, 3).join(",")} ${[1, 2, 3].fill(9, 1, 2).join(",")} ${[1, 2].fill(7).join(",")}`);
+console.log(`fill ${[1, 2, 3].fill(8, -2).join(",")} ${[1, 2, 3, 4].fill(6, 1, -1).join(",")}`);
+const cw = [1, 2, 3, 4, 5];
+console.log(`cw ${cw.copyWithin(0, 3).join(",")} ${[1, 2, 3, 4, 5].copyWithin(1, 3, 4).join(",")}`);
+console.log(`cw ${[1, 2, 3, 4, 5].copyWithin(-2, 0).join(",")} ${[1, 2, 3].copyWithin(0, 9).join(",")}`);
+// Math.log2 / Math.sign（sign 的零那一格原样送回：Math.sign(-0) 是 -0）
+console.log(`math ${Math.log2(8)} ${Math.log2(1)} ${Math.sign(-3)} ${Math.sign(0)} ${Math.sign(-0)} ${Math.sign(4)}`);
+// String.raw 的普通调用形态（tag 形态在降级器那儿就折成字面量了）
+console.log(`raw ${String.raw({ raw: ["x", "y"] }, 7)} ${String.raw({ raw: ["a"] })} ${String.raw({ raw: [] })}|`);
+// JSON.stringify 的**数组** replacer（白名单）：只留名单里的键，按名单的次序
+console.log(`json ${JSON.stringify({ b: 1, a: 2, c: 3 }, ["a", "b"])} ${JSON.stringify({ b: 1, a: 2 }, ["b", "a", "b"])}`);
+console.log(`json ${JSON.stringify({ a: 1 }, ["zz"])} ${JSON.stringify([{ a: 1, b: 2 }], ["a"])}`);
+
 
 
 

@@ -186,6 +186,19 @@ static omni_dyn omni_js_iter(omni_dyn v) { \
       return omni_dyn_undef(); \
   } \
 } \
+/* String.raw 的**普通调用**形态（tag 形态在降级器那儿就折成字面量了）：段数看 raw.length，
+   最后一段后面不再拼插值；插值不够就当没有，不是拼 "undefined"。 */ \
+static omni_dyn omni_js_str_raw(omni_dyn strs, omni_dyn subs) { \
+  omni_dyn raw = omni_js_obj_get(strs, omni_dyn_of_s16(omni_js_s16_lit("raw"))); \
+  LT l = omni_js_arr_of(raw); \
+  LT vs = omni_js_arr_of(subs); \
+  omni_s16 out = omni_s16_of_utf8(omni_str_new("", 0)); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    out = omni_s16_cat(out, omni_js_as_s16(omni_js_str(l->items[i]))); \
+    if (i + 1 < l->len && i < vs->len) out = omni_s16_cat(out, omni_js_as_s16(omni_js_str(vs->items[i]))); \
+  } \
+  return omni_dyn_of_s16(out); \
+} \
 /* Uint8Array 上那几格数组方法：先摊成字节的数组（omni_js_iter），再走 list 那一格。
    只有**结果是原始值**的四格 —— map / filter / slice 在 JS 里交出 TypedArray，
    摊成 list 会在打印与 JSON 上撒谎，所以那几个照旧当场报错。 */ \
