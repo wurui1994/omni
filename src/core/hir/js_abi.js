@@ -286,6 +286,15 @@ export const JS_ABI = {
   // new Map(pairs) / new Set(items)：初值收 list，也收同类容器（浅拷贝），缺参数就是空容器
   js_map_of_pairs: { js: '$js_map_of_pairs', c: 'omni_js_map_of_pairs', arity: 1 },
   js_set_of_list: { js: '$js_set_of_list', c: 'omni_js_set_of_list', arity: 1 },
+  /* Set 的集合运算（ES2025）：实参只认真 Set。次序照规范 —— intersection 与
+     isDisjointFrom 走小的那个，别的以接收者的次序为主（见 prelude 那段量口）。 */
+  js_set_union: { js: '$js_set_union', c: 'omni_js_set_union', arity: 2 },
+  js_set_intersection: { js: '$js_set_intersection', c: 'omni_js_set_intersection', arity: 2 },
+  js_set_difference: { js: '$js_set_difference', c: 'omni_js_set_difference', arity: 2 },
+  js_set_sym_difference: { js: '$js_set_sym_difference', c: 'omni_js_set_sym_difference', arity: 2 },
+  js_set_is_subset: { js: '$js_set_is_subset', c: 'omni_js_set_is_subset', arity: 2, ret: 'bool' },
+  js_set_is_superset: { js: '$js_set_is_superset', c: 'omni_js_set_is_superset', arity: 2, ret: 'bool' },
+  js_set_is_disjoint: { js: '$js_set_is_disjoint', c: 'omni_js_set_is_disjoint', arity: 2, ret: 'bool' },
 
   // ---------------------------------------------------------------- Number / Math
   // toPrecision 与 toString(radix) 在自举的关键路径上：编译器自己用它们把 double 与
@@ -636,6 +645,14 @@ export const JS_METHODS = {
   get: { on: { Map: 'js_map_get' } },
   set: { on: { Map: 'js_map_set', bytes: 'js_buf_set' } },
   add: { on: { Set: 'js_set_add' } },
+  // ES2025 的集合运算（接收者是 Set，实参也得是 Set）
+  union: { on: { Set: 'js_set_union' } },
+  intersection: { on: { Set: 'js_set_intersection' } },
+  difference: { on: { Set: 'js_set_difference' } },
+  symmetricDifference: { on: { Set: 'js_set_sym_difference' } },
+  isSubsetOf: { on: { Set: 'js_set_is_subset' } },
+  isSupersetOf: { on: { Set: 'js_set_is_superset' } },
+  isDisjointFrom: { on: { Set: 'js_set_is_disjoint' } },
   has: { on: { Map: 'js_map_has', Set: 'js_set_has' } },
   delete: { on: { Map: 'js_map_delete', Set: 'js_set_delete' } },
   keys: { on: { Map: 'js_map_keys' } },

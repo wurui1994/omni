@@ -138,3 +138,14 @@ console.log(`${sc.size} ${String(sc.has("x"))} ${String(sc.has(7))} ${String(sc.
 // 空容器的拷贝、以及仍然收 list 的老路子
 console.log(`${new Map(new Map()).size} ${new Set(new Set()).size}`);
 console.log(`${new Map([["k", 1]]).size} ${new Set([1, 1, 2]).size}`);
+
+// Set 的集合运算（ES2025）：次序是量点 —— intersection / isDisjointFrom 走小的那个，
+// 别的以接收者为主。C 那份与 prelude 那份是对着写的，所以五条腿上必须逐字相同。
+const su = new Set([5, 1, 9]);
+const sv = new Set([9, 1, 7, 3, 5]);
+console.log(`union ${[...su.union(sv)].join(",")} ${[...sv.union(su)].join(",")}`);
+console.log(`inter ${[...su.intersection(sv)].join(",")} ${[...sv.intersection(su)].join(",")}`);
+console.log(`diff ${[...su.difference(sv)].join(",")}| ${[...sv.difference(su)].join(",")}`);
+console.log(`symdiff ${[...su.symmetricDifference(sv)].join(",")} ${[...sv.symmetricDifference(su)].join(",")}`);
+console.log(`pred ${su.isSubsetOf(sv)} ${su.isSupersetOf(new Set([5]))} ${su.isDisjointFrom(new Set([2]))} ${su.isDisjointFrom(sv)}`);
+console.log(`keep ${su.size} ${sv.size} ${[...new Set().union(su)].join(",")}`);

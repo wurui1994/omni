@@ -2701,6 +2701,52 @@ function $js_set_has(s, v) { return $js_set_of(s).has($js_key(v)); }
 function $js_set_add(s, v) { $js_set_of(s).set($js_key(v), v); return s; }
 function $js_set_delete(s, v) { return $js_set_of(s).delete($js_key(v)); }
 function $js_set_items(s) { return [...$js_set_of(s).values()]; }
+/* Set 的集合运算（ES2025）。实参只认**真 Set**（qjs 那边非 set-like 是 TypeError，
+   这个值域里没有可 catch 的错，所以由 $js_set_of 当场报）。次序照规范量过的那样：
+     union            先 this 的次序，再把 other 里新的接在后面
+     intersection     走**小的那个**，结果次序跟着它（所以 a∩b 与 b∩a 次序一致）
+     difference       this 的次序减去 other 里有的
+     symmetricDifference  先 this 独有的（this 次序），再 other 独有的（other 次序） */
+function $js_set_union(a, b) {
+  const out = $js_set_of_list($js_set_items(a));
+  const ys = $js_set_items(b);
+  for (let i = 0; i < ys.length; i++) $js_set_add(out, ys[i]);
+  return out;
+}
+function $js_set_intersection(a, b) {
+  const aFirst = $js_set_size(a) <= $js_set_size(b);
+  const xs = $js_set_items(aFirst ? a : b);
+  const other = aFirst ? b : a;
+  const out = $js_set_new();
+  for (let i = 0; i < xs.length; i++) if ($js_set_has(other, xs[i])) $js_set_add(out, xs[i]);
+  return out;
+}
+function $js_set_difference(a, b) {
+  const xs = $js_set_items(a);
+  const out = $js_set_new();
+  for (let i = 0; i < xs.length; i++) if (!$js_set_has(b, xs[i])) $js_set_add(out, xs[i]);
+  return out;
+}
+function $js_set_sym_difference(a, b) {
+  const out = $js_set_difference(a, b);
+  const ys = $js_set_items(b);
+  for (let i = 0; i < ys.length; i++) if (!$js_set_has(a, ys[i])) $js_set_add(out, ys[i]);
+  return out;
+}
+function $js_set_is_subset(a, b) {
+  if ($js_set_size(a) > $js_set_size(b)) return false;
+  const xs = $js_set_items(a);
+  for (let i = 0; i < xs.length; i++) if (!$js_set_has(b, xs[i])) return false;
+  return true;
+}
+function $js_set_is_superset(a, b) { return $js_set_is_subset(b, a); }
+function $js_set_is_disjoint(a, b) {
+  const aFirst = $js_set_size(a) <= $js_set_size(b);
+  const xs = $js_set_items(aFirst ? a : b);
+  const other = aFirst ? b : a;
+  for (let i = 0; i < xs.length; i++) if ($js_set_has(other, xs[i])) return false;
+  return true;
+}
 // new Map(pairs) / new Set(items)。初值收 list，**也收同类容器**—— new Map(m)
 // 与 new Set(s) 是这套编译器自己最常用的浅拷贝（量到三十多处），不能不认。
 // JS 的可迭代协议整体不在这个值域里，所以别的类型仍然报错；缺参数就是空容器。

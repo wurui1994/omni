@@ -272,6 +272,54 @@ static omni_dyn omni_js_set_of_list(omni_dyn init) { \
   for (int64_t i = 0; i < l->len; i++) omni_js_set_add(s, l->items[i]); \
   return s; \
 } \
+/* Set 的集合运算（ES2025）：与 prelude 那份一字一句对着写 —— 次序照规范
+   （intersection / isDisjointFrom 走小的那个，别的以 this 的次序为主）。 */ \
+static omni_dyn omni_js_set_union(omni_dyn a, omni_dyn b) { \
+  omni_dyn out = omni_js_set_of_list(omni_js_set_items(a)); \
+  LT ys = omni_js_arr_of(omni_js_set_items(b)); \
+  for (int64_t i = 0; i < ys->len; i++) omni_js_set_add(out, ys->items[i]); \
+  return out; \
+} \
+static omni_dyn omni_js_set_intersection(omni_dyn a, omni_dyn b) { \
+  bool a_first = omni_js_set_of(a)->count <= omni_js_set_of(b)->count; \
+  LT xs = omni_js_arr_of(omni_js_set_items(a_first ? a : b)); \
+  omni_dyn other = a_first ? b : a; \
+  omni_dyn out = omni_js_set_new(); \
+  for (int64_t i = 0; i < xs->len; i++) { \
+    if (omni_js_set_has(other, xs->items[i])) omni_js_set_add(out, xs->items[i]); \
+  } \
+  return out; \
+} \
+static omni_dyn omni_js_set_difference(omni_dyn a, omni_dyn b) { \
+  LT xs = omni_js_arr_of(omni_js_set_items(a)); \
+  omni_dyn out = omni_js_set_new(); \
+  for (int64_t i = 0; i < xs->len; i++) { \
+    if (!omni_js_set_has(b, xs->items[i])) omni_js_set_add(out, xs->items[i]); \
+  } \
+  return out; \
+} \
+static omni_dyn omni_js_set_sym_difference(omni_dyn a, omni_dyn b) { \
+  omni_dyn out = omni_js_set_difference(a, b); \
+  LT ys = omni_js_arr_of(omni_js_set_items(b)); \
+  for (int64_t i = 0; i < ys->len; i++) { \
+    if (!omni_js_set_has(a, ys->items[i])) omni_js_set_add(out, ys->items[i]); \
+  } \
+  return out; \
+} \
+static bool omni_js_set_is_subset(omni_dyn a, omni_dyn b) { \
+  if (omni_js_set_of(a)->count > omni_js_set_of(b)->count) return false; \
+  LT xs = omni_js_arr_of(omni_js_set_items(a)); \
+  for (int64_t i = 0; i < xs->len; i++) if (!omni_js_set_has(b, xs->items[i])) return false; \
+  return true; \
+} \
+static bool omni_js_set_is_superset(omni_dyn a, omni_dyn b) { return omni_js_set_is_subset(b, a); } \
+static bool omni_js_set_is_disjoint(omni_dyn a, omni_dyn b) { \
+  bool a_first = omni_js_set_of(a)->count <= omni_js_set_of(b)->count; \
+  LT xs = omni_js_arr_of(omni_js_set_items(a_first ? a : b)); \
+  omni_dyn other = a_first ? b : a; \
+  for (int64_t i = 0; i < xs->len; i++) if (omni_js_set_has(other, xs->items[i])) return false; \
+  return true; \
+} \
 /* Map.groupBy（ES2024）：回调**只收两个实参**（值、下标）—— 与 map/filter 那批的
    omni_js_call3 不同，所以这儿自己拼两格实参表，不然 (v, i, arr) 那种回调在两条腿上
    看到的第三格会不一样。每组按原顺序攒成一个数组，键按 SameValueZero 比（就是 map 的键）。 */ \
