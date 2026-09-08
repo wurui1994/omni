@@ -12744,6 +12744,50 @@ op 的次序、种子、答案都没变（同一批 op、同一个顺序）。�
 跑的是 asy 自己那份源码）没问题；pseudosphere 那处相位差来自 `revolution` 背面轮廓的弧长
 让 `asy__patlen` 里 `(int)(…+0.5)` 那个 round 跳了一格，与 spheresilhouette 同族。
 
+### 有了同源 oracle 之后：三个机器常量、以及"最大差 16"那一档的改名
+
+**先把 oracle 对齐。** 装着的 asy 是 SourceForge 的 **3.14 发布包**，而 `reference/asymptote`
+是更早的 **3.14git 快照**（`base/three.asy` 差 32 行、`graph3.asy` 差 117 行，方向上安装版更新）。
+解开发布包（`reference/asymptote-3.14`）后 `base/three.asy` 与 `/opt/homebrew/share/asymptote/three.asy`
+**逐字节相同** —— 这才是产出那 189 份参考的源码。按前面那份配方编出来，
+**位图与安装版逐字节相同**（唯一差别是 `%%Creator: Asymptote 3.14` 对 `Asymptote `，
+homebrew 那份版本串是空的 —— `cmp` 会因此报 63915 字节"不同"，那是 4 字节错位，别被骗）。
+发布包还多两个坑：根目录带一份预生成的 `camp.tab.h`（会遮住 generated/include 的新头，挪走）、
+`base/webgl/asygl-1.03.js` 不在包里（包里叫 `asygl.js`，复制一份即可）。
+顺带验证：**关掉 LTO 不影响像素**，所以插桩用的构建可以放心关 LTO。
+
+**然后三个机器常量。** 用二十行 GLFW 探针照 `renderBase.cc:24-45` 与 `:975-990` 原样问这台机器：
+
+```
+videomode 1440x900   physical 286x179mm   workarea 1440x769   contentScale 2x2
+ppi = 1440/(286/25.4) = 127.88811188811188
+pixelsPerBp = ppi/72  = 1.776223776223776
+```
+
+`pixelsPerBp()` 是**显示器物理 DPI ÷ 72**，不是设备像素比；工作区是 **1440x769**。
+此前这两处加上"Aspect 该用哪一对"我全猜错了 —— 三个错凑在一起，才让上一节
+"照抄 `args.width/args.height` 反而更差"看起来成立。**那个结论作废：字面照抄是对的。**
+拿真值手算 box3：`oldW=1008`、`oldH=874` → h 被 769 夹住 → `w=886` →
+`Width=1024`/`Height=769` → 最后 `887/769 = 1.15344603`，与扫描反解的最优值 1.15345 吻合。
+账：box3 **2148 → 564**、tetra **49142 → 2239**、twoSpheres 154304 → 153759，
+探针"一样" 12 → 13，其余一个未退；`run.js` 263 passed。
+`OMNI_R3_PPB` / `OMNI_R3_SCREEN` 可覆盖 —— **换机器必须重量一次**。
+
+**最后是"最大差 16"那一档的改名。** 从前记成"BRDF 最后一位 / GPU 地板、别挖"，
+现在用 oracle 问清了：`asy -vv` 自报 **Apple M1** + `Multisampling enabled with sample width 4`
+（vkrender.cc:996-1000），`-antialias` 决定位图倍数（1→400 宽、2→800 宽，默认 2）。
+最小复现是 `lw` 探针（三条水平线 1/2/4bp、`orthographic(0,0,1)`、位图 800x404）：
+
+- **只有 8 个像素不同，全部"我们比参考亮 16"**，一个例外都没有
+- 全在三条线的**两端**（x=3~4 与 x=792~793），线的上下边缘已逐字节相同
+- 参考在左端沿 x 是 `223 → 111 → 16 → 0`，台阶不是 4 采样的 1/4（0/64/128/191/255）
+
+所以这一档是**线端那一小块的覆盖率少算一格**，与着色/法向/BRDF 无关；
+box3 564、sph_light 1098、sph_obl 1104、box2 120、boxobl 192、boxtr 156、mix 449/444、
+sphere 484、triangles 115、big_sph 896112 大概率同属这一格。
+**下一刀先量那个子采样格**（造一族"端点落在不同子像素位置"的探针，读参考能取到的档位），
+再去对 `r3_raster_line` 的端点出口规则 —— 不要再按"地板"处理。
+
 ### 转向：参考位图是 **Vulkan** 画的，"±1 是地板"那个结论作废
 
 判据里那 89 个补齐之后，我把剩下的差分成"地板 + 7 个画布差半点"，并写下"CPU 上不可能
