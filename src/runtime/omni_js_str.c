@@ -15,10 +15,12 @@ static omni_s16 want_s16(omni_dyn v) { return omni_js_as_s16(v); }
    再考虑把常量提到模块级的表里。 */
 omni_dyn omni_js_s16(omni_str s) { return omni_dyn_of_s16(omni_s16_of_utf8(s)); }
 
-/* JS 的 ToIntegerOrInfinity：下标是 Number，NaN 当 0，其余截尾。
-   刻意只收 REAL：JS 里字符串下标不可能是 BigInt，收到 int 说明降级写错了。 */
+/* JS 的 ToIntegerOrInfinity（规范 7.1.5）：先 ToNumber，NaN 当 0，其余截尾。
+   "1" / true / null 都收得下（量出来的："abcd".indexOf("c", "1") 两把尺子上是 2）；
+   收到 bigint 才报 —— JS 里拿 BigInt 当下标本来就是 TypeError。 */
 static int64_t to_int_arg(omni_dyn v, int64_t dflt) {
   if (v.tag == OMNI_DYN_UNDEF) return dflt;
+  v = omni_js_num_of(v);
   if (v.tag != OMNI_DYN_REAL) {
     omni_errorf("string index must be a number, found %s", omni_dyn_tag_name(v.tag));
   }

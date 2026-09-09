@@ -205,7 +205,7 @@ static omni_dyn omni_js_utf8_bytes(omni_dyn sd) { \
   out->len = u.len; \
   return omni_js_arr_wrap(out); \
 } \
-/* 一格能 catch 的 TypeError（异常对象就是 { $cls: […], name, message }，ADR-0011 决策 15）。
+/* 一格能 catch 的 TypeError（异常对象就是 { $cls: […], name, message }，ADR-0011 决策 15）。声明在 ARR 那一段。
    摆在 omni_js_iter 前面：那儿要用它，而 omni_js_err_new 在这个文件里排得更后。 */ \
 static void omni_js_type_err_c(const char *msg) { \
   LT cls = LT##_new(); \

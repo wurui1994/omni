@@ -20,6 +20,16 @@ console.log(`toSortedDefault ${JSON.stringify([10, 9, 1].toSorted())}`);
 // 比较器交出来的东西照规范先 ToNumber：交串的那种写法从前一律当 0，一格都不动
 console.log(`sortStrCmp ${JSON.stringify([3, 1, 2].toSorted((x, y) => x < y ? "-1" : (x > y ? "1" : "0")))}`);
 console.log(`sortUndef ${JSON.stringify([3, undefined, 1].toSorted((x, y) => x - y))}`);
+/* 下标那一族的实参照规范走 ToIntegerOrInfinity（7.1.5）：先 ToNumber，NaN 当 0，其余截尾。
+   串 / 布尔 / null 都收得下 —— 从前两条腿都当场报（"string index must be a number" /
+   "fromIndex expects a number"）。 */
+console.log(`idx ${"abcd".indexOf("c", "1")} ${"abcd".slice("1", "3")} ${"abcd".at("2")} ${"abcd".charAt("1")}`);
+console.log(`idx ${[1, 2, 3].indexOf(2, "1")} ${[1, 2, 3].slice("1").join(",")} ${[1, 2, 3].at("2")} ${"a-b-c".split("-", "2").length}`);
+// 空表 + 没给初值的 reduce 是能 catch 的 TypeError（规范 23.1.3.24 第 3 步）
+function emptyReduce() {
+  try { return `${[].reduce((s, x) => s + x)}`; } catch (e) { return `${e.name}:${e instanceof TypeError}`; }
+}
+console.log(`idx ${emptyReduce()} ${[].reduce((s, x) => s + x, 7)}`);
 
 console.log(`replaceAll ${"a-b-c".replaceAll("-", "+")}`);
 console.log(`replaceAll ${"aaa".replaceAll("aa", "b")}`);

@@ -1136,10 +1136,13 @@ function $js_asS16(v) {
   return v;
 }
 // JS 的 ToIntegerOrInfinity。只收 real：字符串下标不可能是 BigInt，收到 int 是降级写错了
+/* 下标那一族的实参照规范走 **ToIntegerOrInfinity**（7.1.5）：先 ToNumber，NaN 当 0，其余截尾。
+   所以 "1" / true / null 都收得下 —— indexOf 的第二格给串，两把尺子上是 1，从前这儿
+   当场报 "string index must be a number"（量出来的）。 */
 function $js_idx(v, dflt) {
   if (v === undefined) return dflt;
-  if ($dynTag(v) !== "real") $rt_error("string index must be a number, found " + $dynTag(v));
-  return Number.isNaN(v) ? 0 : Math.trunc(v);
+  const n = $js_num_of(v);
+  return Number.isNaN(n) ? 0 : Math.trunc(n);
 }
 /* console.log 印一格值：与 ToString 只差一处 —— **-0 印成 "-0"**。String(-0) 是 "0"，
    而 qjs 与 node 的 console.log 都印 -0（量过），所以印这条路上单独一格 op。
@@ -1564,8 +1567,8 @@ function $js_has_iter(v) {
    从前这一格被丢掉了 —— [1,2,3,2].indexOf(2, 2) 给 1（该是 3），silent 的错答案。 */
 function $js_arr_from_idx(len, from, dflt) {
   if (from === undefined) return dflt;
-  let i = Math.trunc($js_real(from, "fromIndex"));
-  if (Number.isNaN(i)) i = 0;
+  // 照规范 ToIntegerOrInfinity（"1" / true / null 都收得下），与 $js_idx 同一条口径
+  const i = $js_idx(from, dflt);
   return i < 0 ? len + i : i;
 }
 function $js_arr_index_of(a, v, from) {
@@ -1703,7 +1706,8 @@ function $js_arr_reduce(a, f, init) {
   const l = $js_arr_of(a);
   let i = 0, acc;
   if (init === undefined) {
-    if (l.length === 0) $rt_error("reduce of empty array with no initial value");
+    // 空表 + 没给初值是 TypeError（规范 23.1.3.24 第 3 步 / .25），能 catch
+    if (l.length === 0) return $js_type_err("reduce of empty array with no initial value");
     acc = l[0]; i = 1;
   } else {
     acc = init;
@@ -1718,7 +1722,8 @@ function $js_arr_reduce_right(a, f, init) {
   const l = $js_arr_of(a);
   let i = l.length - 1, acc;
   if (init === undefined) {
-    if (l.length === 0) $rt_error("reduce of empty array with no initial value");
+    // 空表 + 没给初值是 TypeError（规范 23.1.3.24 第 3 步 / .25），能 catch
+    if (l.length === 0) return $js_type_err("reduce of empty array with no initial value");
     acc = l[i]; i--;
   } else {
     acc = init;
@@ -1817,7 +1822,8 @@ function $js_str_split(s, sep, limit) {
   const p = $js_asS16(sep);
   const parts = p.length === 0 ? [...v.split("")] : v.split(p);
   if (limit === undefined) return parts;
-  const n = Math.trunc($js_real(limit, "split"));
+  // limit 照规范先 ToNumber 再截尾（22.1.3.23 那儿是 ToUint32）：串 / 布尔都收得下
+  const n = $js_idx(limit, 0);
   return n < 0 ? parts : parts.slice(0, n);
 }
 // substr（Annex B，但到处都还在用）：起点认负数（从末尾数），第二格是**长度**不是终点

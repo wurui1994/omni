@@ -23,6 +23,10 @@ struct omni_js_wrap_s { omni_fnptr fp; omni_dyn inner; };
    （ADR-0011 第 1 节），所以回调不需要按签名分派，装好实参表直接调。
    omni_js_call3 是 map/filter/forEach 那批的固定三实参形式（值、下标、数组本身）。 */
 #define OMNI_JS_ARR(LT, DT) \
+/* 一格能 catch 的 TypeError。**定义**在 omni_js_str_arr.h 那一段（那儿 obj_new / obj_set
+   都已经展开过了），这儿只先声明 —— 宏段是按 ARR -> OBJ -> … -> STR_ARR 的次序摊进同一个
+   翻译单元的，静态函数先声明后定义是合法的。 */ \
+static void omni_js_type_err_c(const char *msg); \
 static omni_dyn omni_js_call(omni_dyn f, LT args) { \
   omni_fn fp = omni_js_as_fn(f); \
   return ((omni_dyn (*)(omni_fn, LT))omni_fn_ck(fp)->fp)(fp, args); \
@@ -108,6 +112,10 @@ static omni_dyn omni_js_arr_len(omni_dyn a) { \
   return omni_dyn_of_real((double)omni_js_arr_of(a)->len); \
 } \
 static int64_t omni_js_arr_i(omni_dyn i) { \
+  /* 照规范 ToIntegerOrInfinity（7.1.5）：先 ToNumber，NaN 当 0，其余截尾 —— 与 prelude 的
+     $js_idx 同一条口径（那边 $js_arr_get 也是先过它）。所以 "1" / true / null 都收得下；
+     bigint 过不去 ToNumber，照旧当场报（JS 里拿 BigInt 当下标本来就是 TypeError）。 */ \
+  if (i.tag != OMNI_DYN_REAL) i = omni_js_num_of(i); \
   if (i.tag != OMNI_DYN_REAL) { \
     omni_errorf("array index must be a number, found %s", omni_dyn_tag_name(i.tag)); \
   } \
@@ -276,7 +284,9 @@ static bool omni_js_arr_is_array(omni_dyn v) { return v.tag == OMNI_DYN_LIST; } 
 /* 第三格是 fromIndex（规范 23.1.3.17 / .21 / .16）：负数从末尾数，越界就夹住 */ \
 static int64_t omni_js_arr_from_idx(int64_t len, omni_dyn from, int64_t dflt) { \
   if (from.tag == OMNI_DYN_UNDEF) return dflt; \
-  int64_t i = omni_js_arr_i(from); \
+  /* 照规范 ToIntegerOrInfinity（7.1.5）：先 ToNumber —— "1" / true / null 都收得下，
+     从前非数当场报（量出来的：[1,2,3].indexOf(2, "1") 两把尺子上是 1）。 */ \
+  int64_t i = omni_js_arr_i(omni_js_num_of(from)); \
   return i < 0 ? len + i : i; \
 } \
 static omni_dyn omni_js_arr_index_of(omni_dyn a, omni_dyn v, omni_dyn from) { \
@@ -440,7 +450,11 @@ static omni_dyn omni_js_arr_reduce(omni_dyn a, omni_dyn f, omni_dyn init) { \
   int64_t i = 0; \
   omni_dyn acc; \
   if (init.tag == OMNI_DYN_UNDEF) { \
-    if (l->len == 0) omni_error("reduce of empty array with no initial value"); \
+    /* 空表 + 没给初值是 TypeError（规范 23.1.3.24 第 3 步 / .25），**能 catch** */ \
+    if (l->len == 0) { \
+      omni_js_type_err_c("reduce of empty array with no initial value"); \
+      return omni_dyn_undef(); \
+    } \
     acc = l->items[0]; i = 1; \
   } else { \
     acc = init; \
@@ -463,7 +477,11 @@ static omni_dyn omni_js_arr_reduce_right(omni_dyn a, omni_dyn f, omni_dyn init) 
   int64_t i = l->len - 1; \
   omni_dyn acc; \
   if (init.tag == OMNI_DYN_UNDEF) { \
-    if (l->len == 0) omni_error("reduce of empty array with no initial value"); \
+    /* 空表 + 没给初值是 TypeError（规范 23.1.3.24 第 3 步 / .25），**能 catch** */ \
+    if (l->len == 0) { \
+      omni_js_type_err_c("reduce of empty array with no initial value"); \
+      return omni_dyn_undef(); \
+    } \
     acc = l->items[i]; i--; \
   } else { \
     acc = init; \
