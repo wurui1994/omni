@@ -43,6 +43,23 @@ try {
   [1, 2, 3].flatMap((x) => { flatted.push(x); if (x === 2) throw new Error("fm"); return [x]; });
 } catch (e) { console.log(`flatMap ${e.message} ${flatted.join(",")}`); }
 
+// 动态调用（`f()`，f 是形参）这一格：回调抛的是**宿主 op 自己**造的错（new Array(-1) 的
+// RangeError），它先落在解释器的待决槽，makeClosure 的包装又把它抄进宿主那一份 —— 宿主那格
+// 没人取就一直是脏的，catch 明明进去了，**后面某一句**才炸。所以边界上取回来一次
+// （interp/builtin.js 的 jsCallFn）。量出来的：interp 上这一格之后 `new Array(2).length` 没了。
+function caught(f) {
+  try { f(); return "no-throw"; } catch (e) { return e.message; }
+}
+// RangeError 的**消息文本**两把尺子不一样（node 是 "Invalid array length"，qjs 是小写的
+// "invalid array length"）—— 我们跟 qjs（js262 那道闸要求逐字节一致），所以这一格只量
+// "抛没抛"，不量文本。
+function threw(f) {
+  try { f(); return "no"; } catch (e) { return "yes"; }
+}
+console.log(`dyn ${threw(() => new Array(-1))}`);
+console.log(`after ${new Array(2).length}`);
+console.log(`dyn2 ${caught(() => { throw new Error("own"); })} ${caught(() => 1)}`);
+
 // 不抛的时候一格不变
 console.log([1, 2, 3].map((x) => x * 2).join(","));
 console.log(String([1, 2, 3].reduce((a, b) => a + b, 0)));

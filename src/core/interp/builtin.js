@@ -1282,7 +1282,31 @@ function jsOp(I, e, a) {
  * `[1,2,3].forEach(x => { seen.push(x); if (x === 2) throw … })` 在 node 上 seen 是 1,2。
  */
 export function mirrorPendingToHost() {
-  if (pendingSet) callJsOp('js_throw', [pendingVal]);
+  if (pendingSet) {
+    callJsOp('js_throw', [pendingVal]);
+    hostDirty = true;
+  }
+}
+
+/* 上面那一抄留下的债：宿主那一格是**为了让宿主自己的循环停下来**才写的，op 返回之后就该
+   收回来 —— 不收回来它一直是脏的，后面**随便哪一句** op 只要问了 js_pending 就把那格早就
+   被 catch 过的错重新当成新的（量出来的：08-throw-try 在给写属性三格加上 throws 之后，
+   `js_idx_set` 把类方法里那次 throw 又捞了一遍，整个程序以 uncaught 收尾）。
+   用一格标志而不是每次都问 js_pending：热路径上只多一次布尔判断。 */
+let hostDirty = false;
+
+function settle() {
+  if (hostDirty) {
+    hostDirty = false;
+    pullPendingFromHost();
+  }
+}
+
+/** 调回调那两格（js_call_fn / js_call_this）：被调的可能是宿主自己的函数值，那一路**不**经过
+ *  mirrorPendingToHost，所以标志靠不住 —— 这两格无条件问一次。 */
+function settleCall() {
+  hostDirty = false;
+  pullPendingFromHost();
 }
 
 function takePending() {
@@ -1332,7 +1356,24 @@ export function jsPendingText() {
  */
 export function jsCallFn(f, args) {
   flushOut();
-  return callJsOp('js_call_fn', [f, args]);
+  const r = callJsOp('js_call_fn', [f, args]);
+  /* 动态调用是**两个方向都会**留下待决错误的一格，所以这里和 invoke 一样要搬一次：
+     - 被调的是解释器造的闭包：它的 throw 落在解释器这一份槽里，makeClosure 的包装又把它
+       抄进了宿主那一份（mirrorPendingToHost，见上）—— 宿主那一格没人来取就一直是脏的；
+     - 被调的是宿主的函数值（js_asFn 拿到的是 prelude 造的那种）：错只落在宿主那一份，
+       不搬过来 catch 一格都进不去。
+     量出来的分叉（前者）：`try { f() } catch …` 里 f 是 `() => new Array(-1)`，catch 进得去，
+     可宿主槽留着那一格错，**后面某一句**才炸 —— interp 上 `new Array(2).length` 那句就没了。 */
+  settleCall();
+  return r;
+}
+
+/** 宿主那一份待决槽 → 解释器这一份（两个槽刻意分开，理由见 pendingVal 那段注） */
+function pullPendingFromHost() {
+  if (callJsOp('js_pending', [])) {
+    pendingVal = callJsOp('js_take_pending', []);
+    pendingSet = true;
+  }
 }
 
 /** op 里的运行期错误会直接退出，所以缓冲要先落盘 —— 不然错误消息会跑到正常输出前面 */
@@ -1348,7 +1389,8 @@ function invoke(name, abi, args) {
   if (abi.throws === true && callJsOp('js_pending', [])) {
     pendingVal = callJsOp('js_take_pending', []);
     pendingSet = true;
-  }
+    hostDirty = false;
+  } else settle();
   return abi.ret === 'void' ? undefined : r;
 }
 
@@ -1399,7 +1441,9 @@ function memberFallback(d, m, a) {
   // 生成 C 里的 omni_js_call_n_this）。
   let n = a.length;
   while (n > 1 && a[n - 1] === undefined) n--;
+  // 类的方法/原型上的方法都从这儿调下去 —— 与 jsCallFn 同一格边界，见 settleCall
   const r = callJsOp('js_call_this', [got, a[0], a.slice(1, n)]);
+  settleCall();
   return d.ret === 'bool' ? callJsOp('js_truthy', [r]) : r;
 }
 

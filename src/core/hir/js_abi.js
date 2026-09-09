@@ -181,7 +181,7 @@ export const JS_ABI = {
   // 量过的源码里有两张 Map 用数字键，"1" 不能和 1n 撞（见 ADR-0011 的"已量过的宿主面"）。
   js_obj_new: { js: '$js_obj_new', c: 'omni_js_obj_new', arity: 0 },
   js_obj_get: { js: '$js_obj_get', c: 'omni_js_obj_get', arity: 2 },
-  js_obj_set: { js: '$js_obj_set', c: 'omni_js_obj_set', arity: 3 },
+  js_obj_set: { js: '$js_obj_set', c: 'omni_js_obj_set', arity: 3, throws: true },
   js_obj_has: { js: '$js_obj_has', c: 'omni_js_obj_has', arity: 2, ret: 'bool' },
   js_obj_delete: { js: '$js_obj_delete', c: 'omni_js_obj_delete', arity: 2, ret: 'bool' },
   js_obj_keys: { js: '$js_obj_keys', c: 'omni_js_obj_keys', arity: 1 },
@@ -218,7 +218,7 @@ export const JS_ABI = {
   js_getp: { js: '$js_getp', c: 'omni_js_getp', arity: 3 },
   /* 写属性。**第四格是接收者**（OrdinarySet 的 Receiver）：`super.x = v` 与
      `Reflect.set(t, k, v, recv)` 靠它 —— 访问器的 this 是接收者，数据格也写在接收者身上。 */
-  js_setp: { js: '$js_setp', c: 'omni_js_setp', arity: 4 },
+  js_setp: { js: '$js_setp', c: 'omni_js_setp', arity: 4, throws: true },
   // Reflect.set：与赋值的差别只在答案上 —— 它交出一个布尔（写不进去就是 false）
   js_reflect_set: { js: '$js_reflect_set', c: 'omni_js_reflect_set', arity: 4, ret: 'bool' },
   js_obj_has_p: { js: '$js_obj_has_p', c: 'omni_js_obj_has_p', arity: 2, ret: 'bool' },
@@ -563,7 +563,7 @@ export const JS_ABI = {
      才生效。 */
   js_iter: { js: '$js_iter', c: 'omni_js_iter', arity: 1, throws: true },
   js_idx_get: { js: '$js_idx_get', c: 'omni_js_idx_get', arity: 2 },
-  js_idx_set: { js: '$js_idx_set', c: 'omni_js_idx_set', arity: 3 },
+  js_idx_set: { js: '$js_idx_set', c: 'omni_js_idx_set', arity: 3, throws: true },
 
   // ---------------------------------------------------------------- node 宿主面
   // 只收"真的要问操作系统"的东西。path 的 join/dirname/basename/resolve/relative/
