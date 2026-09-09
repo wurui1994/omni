@@ -1975,13 +1975,21 @@ static omni_dyn omni_js_proto_of_tag_(omni_dyn v) { \
     case OMNI_DYN_STR16: case OMNI_DYN_STRING: \
       return omni_js_realm_proto(omni_str_new("String", 6)); \
     case OMNI_DYN_REAL: return omni_js_realm_proto(omni_str_new("Number", 6)); \
+    /* 整数那两格也是 Number.prototype —— 少了它们，`(1).toFixed` 这种读法会走到下面的
+       兜底上去。 */ \
+    case OMNI_DYN_INT: case OMNI_DYN_UINT: \
+      return omni_js_realm_proto(omni_str_new("Number", 6)); \
     case OMNI_DYN_BOOL: return omni_js_realm_proto(omni_str_new("Boolean", 7)); \
     case OMNI_DYN_FN: return omni_js_realm_proto(omni_str_new("Function", 8)); \
     case OMNI_DYN_MAP: return omni_js_realm_proto(omni_str_new("Map", 3)); \
     case OMNI_DYN_SET: return omni_js_realm_proto(omni_str_new("Set", 3)); \
     case OMNI_DYN_RE: return omni_js_realm_proto(omni_str_new("RegExp", 6)); \
     case OMNI_DYN_SYM: return omni_js_realm_proto(omni_str_new("Symbol", 6)); \
-    default: return omni_dyn_null(); \
+    /* 兜底**不能给 null**：Uint8Array / DataView / TextEncoder 那几格 realm 上还没有原型，
+       从前落到 null 上去，于是 `typeof b.at` 一边照样印 undefined、一边把
+       "cannot read property 'at' of null" 留在挂起槽里 —— 下一句才炸，错还记在别人头上。
+       给 Object.prototype：读不认识的成员就是 undefined（与另外三条腿一致）。 */ \
+    default: return omni_js_realm_proto(omni_str_new("Object", 6)); \
   } \
 } \
 /* 普通函数当构造器（ADR-0020）：`new f(a)` = 造一格以 f.prototype 为原型的对象、拿它当
