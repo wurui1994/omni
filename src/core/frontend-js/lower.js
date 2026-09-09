@@ -3621,7 +3621,7 @@ const STATIC_CALLS = {
   'Object.hasOwn': { op: 'js_obj_has_own', argc: 2, len: 2 },
   // Object.is（SameValue）：NaN 与自己相同、+0 与 -0 不同
   'Object.is': { op: 'js_same_value', argc: 2, len: 2 },
-  'Object.create': { op: 'js_obj_new_p', argc: 1 },
+  'Object.create': { op: 'js_obj_create', argc: 2 },
   'Object.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1, len: 1 },
   'Object.setPrototypeOf': { op: 'js_obj_proto_set', argc: 2 },
   'Object.defineProperty': { op: 'js_obj_def', argc: 3 },

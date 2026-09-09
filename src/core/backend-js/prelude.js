@@ -3437,6 +3437,21 @@ function $js_obj_to_string(t) {
 }
 // ---- 新对象那一格的 op 面（js_abi.js 里同名的那些）
 function $js_obj_new_p(proto) { return new $JSObj(proto === undefined ? $realm().objP : proto); }
+/* Object.create(proto[, descs])：第二个实参那一支等于"造完再 defineProperty 一遍"（规范
+   20.1.2.2 就是这么说的：ObjectDefineProperties）。descs 上只算**自有可枚举**的键，
+   Symbol 键也算。从前第二个实参在降级那儿当场报 "takes at most 1 argument(s)"。 */
+function $js_obj_create(proto, descs) {
+  const o = $js_obj_new_p(proto);
+  if (descs === undefined || descs === null) return o;
+  for (const k of $js_obj_own_keys("e", descs)) $js_obj_def(o, k, $js_getp(descs, k, undefined));
+  for (const k of $js_obj_own_keys("y", descs)) {
+    const d = $js_obj_desc(descs, k);
+    if (d !== undefined && $js_truthy($js_getp(d, "enumerable", undefined))) {
+      $js_obj_def(o, k, $js_getp(descs, k, undefined));
+    }
+  }
+  return o;
+}
 function $js_obj_proto_get(o) { return $js_isobj(o) ? o.pr : $js_proto_of_prim(o); }
 function $js_obj_proto_set(o, p) {
   if ($js_isobj(o)) o.pr = p === undefined || p === null ? null : p;
