@@ -1296,9 +1296,22 @@ export function mirrorPendingToHost() {
 let hostDirty = false;
 
 function settle() {
-  if (hostDirty) {
-    hostDirty = false;
-    pullPendingFromHost();
+  if (!hostDirty) return;
+  hostDirty = false;
+  if (callJsOp('js_pending', [])) {
+    pendingVal = callJsOp('js_take_pending', []);
+    pendingSet = true;
+    return;
+  }
+  /* 搬过去的那一格**不在宿主槽里了** —— 宿主那份 op 自己把它取走并且负责了：
+     `$js_promise_try` 把回调的 throw 变成 reject、`$js_prom_schedule` 把处理器的 throw
+     变成子 promise 的 reject、`$js_gen_step` 用 mode 3 送回状态机。一格错只该有一个主人，
+     所以解释器这一份也得放手 —— 不放手它接着往上冒：量出来的是
+     `Promise.try(() => { throw "oops" }).catch(…)` 在这条腿上印 `omni: uncaught: oops`，
+     而另外三条腿都印 `try catch oops`。 */
+  if (pendingSet) {
+    pendingSet = false;
+    pendingVal = undefined;
   }
 }
 
