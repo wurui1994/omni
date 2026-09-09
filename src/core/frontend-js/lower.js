@@ -908,9 +908,13 @@ class Lower {
       if (what === 'constructor' && !m.static) { ctor = m; continue; }
       const label = `${name}_${m.static ? 'static_' : ''}${what ?? 'computed'}`;
       /* staticSuper：静态方法里的 `super.m()` 指的是**父类对象**上的 m，不是父类原型上的
-       * （规范 里 static 的 [[HomeObject]] 就是类对象本身）。superProtoRef 认这一位。 */
+       * （规范 里 static 的 [[HomeObject]] 就是类对象本身）。superProtoRef 认这一位。
+       * 访问器那两格的 name 照规范带前缀（10.2.9 SetFunctionName 的 prefix 实参）：
+       * `get v` / `set v`，不是 `v`。 */
+      const fnNm = what === undefined ? ''
+        : (m.kind === 'get' || m.kind === 'set' ? `${m.kind} ${what}` : what);
       const fn = this.closureExpr(fnNodeOfProp(m), label, {
-        classOf, fnName: what ?? '', staticSuper: m.static === true,
+        classOf, fnName: fnNm, staticSuper: m.static === true,
       });
       if (m.kind === 'get' || m.kind === 'set') {
         let desc = op('js_obj_set', [op('js_obj_new', []), s16(m.kind), fn]);
@@ -2407,7 +2411,12 @@ class Lower {
       if (p.kind === 'spread') { keys.push(null); return this.expr(p.arg); }
       if (p.kind === 'get' || p.kind === 'set') {
         keys.push(p.computed ? this.expr(p.key) : s16(this.keyName(p.key, p.span)));
-        return this.closureExpr(fnNodeOfProp(p), p.kind);
+        /* 访问器那两格的 name 照规范**带前缀**（10.2.9 SetFunctionName 的 prefix 实参）：
+         * { get g() {} } 那一格函数的 name 是 "get g" 而不是 "g"。从前一格都没给（是 ""），
+         * 按 name 打日志或分派的代码会静静地看不见它。计算键那一格的名字只有运行期才知道，
+         * 照旧空着（与计算键的方法同一条边界，见 ADR-0020）。 */
+        const nm = p.computed ? '' : `${p.kind} ${this.keyName(p.key, p.span)}`;
+        return this.closureExpr(fnNodeOfProp(p), p.kind, { fnName: nm });
       }
       if (p.kind !== 'init') {
         this.err(p.span, `object literal property kind '${p.kind}' is not lowered yet`);

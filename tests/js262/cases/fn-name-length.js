@@ -43,3 +43,15 @@ console.log(holder.m.name, holder.n.name);
 // bind 出来的那一格照规范是 "bound f"，这儿只给 "bound"（记在 prelude 的 funP.bind 上）
 const bound = foo.bind(null);
 console.log(typeof bound.name);
+
+/* 访问器那两格的 name 照规范**带前缀**（10.2.9 SetFunctionName 的 prefix 实参）：
+   "get g" / "set g"，不是 "g"。从前一格都没给（是 ""）—— 静悄悄的错值，按 name
+   打日志或分派的代码会看不见它。计算键（{ ["c"+"k"]() {} }）的名字只有运行期才知道，
+   照旧空着，见 ADR-0020。 */
+const o2 = { get g() { return 1; }, set g(v) {}, m() {} };
+const dg = Object.getOwnPropertyDescriptor(o2, "g");
+console.log(dg.get.name, dg.set.name, o2.m.name);
+class K2 { get v() { return 1; } set v(x) {} static get s() { return 2; } m() {} }
+const dv = Object.getOwnPropertyDescriptor(K2.prototype, "v");
+console.log(dv.get.name, dv.set.name, Object.getOwnPropertyDescriptor(K2, "s").get.name, K2.prototype.m.name);
+console.log(dg.get.length, dg.set.length, dv.get.length, dv.set.length);
