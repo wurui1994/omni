@@ -3165,6 +3165,22 @@ function $mkRealm() {
   $natm(r.iterP, "every", 1, (t, a) => $js_it_every(t, a[0]));
   $natm(r.iterP, "find", 1, (t, a) => $js_it_find(t, a[0]));
   $js_def_data(r.iterP, $js_sym_wk("iterator"), $nat("[Symbol.iterator]", 0, (t) => t), true, false, true);
+  /* %IteratorHelperPrototype%：helper 交出来的那一格的原型（它的原型又是 iterP，于是
+     helper 上还能接着串 helper）。next / return 从"每格对象自己带一份"搬到这儿。 */
+  $natm(r.iterHelpP, "next", 0, (t) => {
+    const st = $js_getp(t, "$hs", t);
+    if ($js_arr_get(st, 0) !== 0) return $js_gen_res(undefined, true);
+    return $callThis($js_getp(t, "$nx", t), t, []);
+  });
+  $natm(r.iterHelpP, "return", 0, (t) => {
+    const st = $js_getp(t, "$hs", t);
+    if ($js_arr_get(st, 0) === 0) {
+      $js_arr_set(st, 0, 1);
+      const up = $js_getp(t, "$hu", t);
+      if (up !== null) $js_it_close(up);
+    }
+    return $js_gen_res(undefined, true);
+  });
   /* Number.prototype 的那几格（规范 21.1.3）。从前 numP 身上一格都没挂 —— 于是
      (5).toFixed 在这条腿上是 undefined，而 C 那条腿照成员表答"是个函数"，两条腿分叉
      （量出来的：js-exec 的 35 号当场抓住）。借方法那条路
@@ -3615,17 +3631,14 @@ function $js_it_val(r) { return $js_getp(r, "value", undefined); }
    一层层链下去的 —— 少了这一格，g().map(f).take(3) 拉完之后生成器的 finally 不会跑，
    量出来过）。关掉之后 next 一律 done。 */
 function $js_it_new(next, up) {
-  let closed = false;
+  /* next / return 挂在**原型**上（规范里它们住在 %IteratorHelperPrototype%），
+     状态摊在三格不可枚举的槽里 —— 从前这两格是自有属性，于是
+     Object.getOwnPropertyNames(it.map(f)) 多两格（node 给 []）。
+     $hs 是"关了没"的可变格：存成一格单元素数组，这样改它不用碰属性的那几个标志。 */
   const o = $js_obj_new_p($realm().iterHelpP);
-  $js_def_data(o, "next", $nat("next", 0, () => (closed ? $js_gen_res(undefined, true) : next())),
-    true, false, true);
-  $js_def_data(o, "return", $nat("return", 0, () => {
-    if (!closed) {
-      closed = true;
-      if (up !== undefined) $js_it_close(up);
-    }
-    return $js_gen_res(undefined, true);
-  }), true, false, true);
+  $js_def_data(o, "$nx", $nat("next", 0, next), true, false, true);
+  $js_def_data(o, "$hu", up === undefined ? null : up, true, false, true);
+  $js_def_data(o, "$hs", [0], true, false, true);
   return o;
 }
 // 上游是真对象就按协议拿它的迭代器（惰性）；数组 / 串那些先收成数组，再按下标喂
@@ -4069,7 +4082,8 @@ function $js_obj_has_own(o, k) {
    最早的那一格，所以排在旁表那些前面）。
    Symbol 那一档（'y'）在这几格上确实是空的：旁表只收字符串键。 */
 const $JS_SLOTS = ["$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src",
-  "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v"];
+  "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v",
+  "$nx", "$hu", "$hs"];
 function $js_obj_own_keys(kind, o) {
   /* 运行时自己的内部槽不该从**任何**视图里露出来：枚举那几种靠"不可枚举"就挡住了，
      getOwnPropertyNames 这一档得按名字挡（量出来的：$cls 在异常对象上、$st/$val/$cbs 在

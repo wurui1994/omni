@@ -752,10 +752,11 @@ static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k) { \
 /* 运行时自己的内部槽名（ADR-0011 决策 15 的 $cls，加上 ADR-0020 P2 那几族）。一张封闭表，
    与 prelude 的 $JS_SLOTS 逐字对应。 */ \
 static bool omni_js_slot_(omni_dyn k) { \
-  static const char *nms[20] = { "$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src", \
-    "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v" }; \
+  static const char *nms[23] = { "$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src", \
+    "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v", \
+    "$nx", "$hu", "$hs" }; \
   if (k.tag != OMNI_DYN_STR16) return false; \
-  for (int i = 0; i < 20; i++) { \
+  for (int i = 0; i < 23; i++) { \
     if (omni_s16_eq(k.u.s16, omni_s16_of_utf8(omni_str_new(nms[i], (int64_t)strlen(nms[i]))))) { \
       return true; \
     } \
@@ -1466,12 +1467,13 @@ static omni_dyn omni_js_nat_(int64_t sel, omni_dyn a) { \
 } \
 /* realm 上那几格原型。名字与 prelude 的 $js_realm_proto 那个 switch 一一对应；认不出来的
    名字**当场报**，不给一格空对象。 */ \
-static omni_dyn omni_js_realm_tbl_[14]; \
+static omni_dyn omni_js_realm_tbl_[16]; \
 static int omni_js_realm_ix_(omni_str name) { \
   /* Generator / Iterator 排在最后两格：生成器那一族（ADR-0020 P2）落在 C 上要它们 */ \
-  static const char *names[14] = { "Object", "Function", "Array", "String", "Number", \
-    "Boolean", "Symbol", "Error", "RegExp", "Map", "Set", "Promise", "Generator", "Iterator" }; \
-  for (int i = 0; i < 14; i++) { \
+  static const char *names[16] = { "Object", "Function", "Array", "String", "Number", \
+    "Boolean", "Symbol", "Error", "RegExp", "Map", "Set", "Promise", "Generator", "Iterator", \
+    "IteratorHelper", "ArrayIterator" }; \
+  for (int i = 0; i < 16; i++) { \
     int64_t n = (int64_t)strlen(names[i]); \
     if (name.len == n && memcmp(name.p, names[i], (size_t)n) == 0) return i; \
   } \
@@ -1559,6 +1561,23 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
                       omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
     return ip; \
   } \
+  /* %IteratorHelperPrototype% 与 %ArrayIteratorPrototype%（规范里 next / return 住在这儿，
+     不是住在每格迭代器对象自己身上）。从前那两格是**自有**属性，于是
+     Object.getOwnPropertyNames(it.map(f)) 多两格，而 node 给 [] —— 静默的分叉。
+     两格的原型都是 Iterator.prototype，于是 helper 上还能接着串 helper。 */ \
+  if (ix == 14 || ix == 15) { \
+    omni_dyn hp = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Iterator", 8))); \
+    omni_js_realm_tbl_[ix] = hp; \
+    omni_js_def_data_(hp, omni_js_name_("next", 4), \
+                      omni_js_nat_(ix == 14 ? 47 : 17, omni_dyn_undef()), true, false, true); \
+    if (ix == 14) { \
+      omni_js_def_data_(hp, omni_js_name_("return", 6), omni_js_nat_(48, omni_dyn_undef()), \
+                        true, false, true); \
+    } \
+    omni_js_def_data_(hp, omni_js_sym_wk(omni_str_new("iterator", 8)), \
+                      omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
+    return hp; \
+  } \
   /* 别的原型：一格带 get 陷阱的代理，读成员当场报 —— 同一性照旧成立（instanceof 只比它） */ \
   omni_dyn h = omni_js_new_bare_(omni_dyn_null()); \
   omni_dyn nm = omni_dyn_of_s16(omni_s16_of_utf8(name)); \
@@ -1584,13 +1603,9 @@ static omni_dyn omni_js_src_iter_(omni_dyn v) { \
   /* 原型是 Iterator.prototype（不是 Object.prototype）：ES2025 那批 helper 住在那儿，
      于是 `a.values().map(f)` 与 `new Set(x).values().take(2)` 都接得上。少了这一条，
      JS 那条腿（$js_it_src 造的那格原型链上有 iterP）给函数、这条腿给 undefined。 */ \
-  omni_dyn it = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Iterator", 8))); \
+  omni_dyn it = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("ArrayIterator", 13))); \
   omni_js_def_data_(it, omni_js_name_("$src", 4), omni_js_iter(v), true, false, true); \
   omni_js_def_data_(it, omni_js_name_("$ix", 3), omni_dyn_of_real(0.0), true, false, true); \
-  omni_js_def_data_(it, omni_js_name_("next", 4), omni_js_nat_(17, omni_dyn_undef()), \
-                    true, false, true); \
-  omni_js_def_data_(it, omni_js_sym_wk(omni_str_new("iterator", 8)), \
-                    omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
   return it; \
 } \
 /* ES2025 的迭代器 helper（`Iterator.prototype` 上那 11 格，与 prelude 的 $js_it_* 逐条对齐）。
@@ -1622,7 +1637,7 @@ static int64_t omni_js_it_count_(omni_dyn n, const char *who) { \
   return (int64_t)d; \
 } \
 static omni_dyn omni_js_it_help_(int64_t kind, omni_dyn up, omni_dyn fn, int64_t n) { \
-  omni_dyn h = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Iterator", 8))); \
+  omni_dyn h = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("IteratorHelper", 14))); \
   omni_js_def_data_(h, omni_js_name_("$k", 2), omni_dyn_of_real((double)kind), true, false, true); \
   omni_js_def_data_(h, omni_js_name_("$up", 3), up, true, false, true); \
   omni_js_def_data_(h, omni_js_name_("$fn", 3), fn, true, false, true); \
@@ -1631,10 +1646,6 @@ static omni_dyn omni_js_it_help_(int64_t kind, omni_dyn up, omni_dyn fn, int64_t
   omni_js_def_data_(h, omni_js_name_("$f", 2), omni_dyn_of_real(0.0), true, false, true); \
   omni_js_def_data_(h, omni_js_name_("$c", 2), omni_dyn_of_real(0.0), true, false, true); \
   omni_js_def_data_(h, omni_js_name_("$in", 3), omni_dyn_undef(), true, false, true); \
-  omni_js_def_data_(h, omni_js_name_("next", 4), omni_js_nat_(47, omni_dyn_undef()), \
-                    true, false, true); \
-  omni_js_def_data_(h, omni_js_name_("return", 6), omni_js_nat_(48, omni_dyn_undef()), \
-                    true, false, true); \
   return h; \
 } \
 /* 作业队列（微任务，ADR-0020 P2）：一格静态 list + 一个游标（不 shift，省得每次搬）。
