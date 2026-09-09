@@ -175,3 +175,15 @@ try {
 } catch (e) {
   console.log(`caught ${e.message}`);
 }
+
+// 调用抛出来的错落在**调用那一句**上（js_call_this / js_call_fn 带 throws）：从前"报了不马上查"，
+// after 先印了、错到下一句才被接住。
+const oo = { m() { throw new Error("x"); }, n() { return 1; } };
+const clog = [];
+try { oo.m(); clog.push("after"); } catch (e) { clog.push("caught " + e.message); }
+console.log(clog.join("|"));
+// 取到的那一格不是函数：规范里是能 catch 的 TypeError，从前是硬错，try/catch 拦不住。
+// 消息文本两把尺子不一样（node 是 "oo.zork is not a function"，qjs 是 "not a function"），
+// 我们跟 qjs（js262 那道闸要求逐字节一致），所以这一格只量类名。
+try { oo.zork(); console.log("no-throw"); } catch (e) { console.log(e.name); }
+console.log(String(oo.n()));

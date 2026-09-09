@@ -886,9 +886,14 @@ function $js_call_n_this(f, recv, args) {
 // 加号 / 小于 / 双等：那样 C 侧就得去模仿 ToPrimitive，而两边模仿不到一起。
 // dynamic 里取回函数值。JS 的函数在 Omni 侧只有一个签名 fn(list<dynamic>) -> dynamic，
 // 所以取回来直接就能调用，不需要按签名分派。
+/* 取到的那一格不是函数：规范里这是**能 catch** 的 TypeError（o.foo() 里 foo 不存在是
+   最常见的一格），从前是硬错 —— 整个程序当场没了，try/catch 拦不住。
+   放一格待决错误再交出一个什么都不做的函数值：调用点会照常调它一次（拿到 undefined），
+   紧跟着的那句 pending 检查把错送出去（js_call_this / js_call_fn 都带 throws）。
+   消息跟 qjs：not a function。 */
+const $NOFN = { fp: () => undefined };
 function $js_asFn(v) {
-  const t = $dynTag(v);
-  if (t !== "function") $rt_error(t + " is not a function");
+  if ($dynTag(v) !== "function") { $js_type_err("not a function"); return $NOFN; }
   return v;
 }
 function $js_truthy(v) {

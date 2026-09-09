@@ -248,7 +248,10 @@ export const JS_ABI = {
   js_obj_descs: { js: '$js_obj_descs', c: 'omni_js_obj_descs', arity: 1 },
   // 带接收者的调用。ADR-0011 那一代的 this 是捕获的 cell，所以对编译出来的函数这是
   // 空操作；原型上的内建方法必须靠它拿到接收者（prelude 里那一格 fp2）。
-  js_call_this: { js: '$js_call_this', c: 'omni_js_call_this', arity: 3 },
+  /* 调用会抛（被调的那一段自己 throw、或者取到的那一格根本不是函数），所以这两格带 throws ——
+     不带的话"报了不马上查"：量出来的是 `try { o.m(); log.push("after") } catch …` 里
+     after 先印了、错到下一句才被接住（qjs 直接进 catch）。 */
+  js_call_this: { js: '$js_call_this', c: 'omni_js_call_this', arity: 3, throws: true },
   // 函数入口取接收者（读一次就清）。与上面那条成一对：this 走一格运行期的槽，而不是
   // 改函数签名 —— 改签名要动闭包记录、MakeClosure 与两个后端的调用约定。
   js_this_take: { js: '$js_this_take', c: 'omni_js_this_take', arity: 0 },
@@ -655,7 +658,7 @@ export const JS_ABI = {
   // 只有"在 node 上直接跑源码"那一代不是（那里它是个裸 JS 函数），由 native.js 补成记录。
   js_wrap_fn: { js: '$js_wrap_fn', c: 'omni_js_wrap_fn', arity: 1 },
   // 调一个函数值：实参是一条 list（JS 的函数在 Omni 里只有这一个签名，ADR-0011 第 1 节）。
-  js_call_fn: { js: '$js_call_fn', c: 'omni_js_call_fn', arity: 2 },
+  js_call_fn: { js: '$js_call_fn', c: 'omni_js_call_fn', arity: 2, throws: true },
   // real 的两种文本化。解释器不写第三份浮点格式化：在哪个宿主上就用那个宿主已有的那一份
   // （prelude 的 $fmt_real/$repr_real、runtime 的 omni_str_real/omni_repr_real），
   // 于是解释执行与编译执行打印出同一串字符是构造性的，不靠三份代码碰巧一致。
