@@ -2955,12 +2955,30 @@ class Lower {
     const hit = this.builtinFns.get(ck);
     if (hit) return this.makeClosure(hit);
     const sp = callee.span;
-    const ps = [];
-    for (let i = 0; i < spec.argc; i++) ps.push({ type: 'Ident', name: `_b${i}`, span: sp });
-    const arrow = {
-      type: 'Arrow', params: ps, rest: null, expression: true, span: sp,
-      body: { type: 'Call', callee, args: ps.map((p) => ({ ...p })), optional: false, span: sp },
-    };
+    /* 收**可变实参**的那几个（Math.max / min / hypot 的 assoc、fromCharCode 的 fold、
+     * console.log 的 join）：包装不能按 spec.argc 定死形参个数 —— 那样 `F.max(1,2,3)` 只
+     * 拿前两格（量出来的：一段真程序里 `max(1,2,3) - min(4,5)` 给 -2，两把尺子是 -1），
+     * 而零实参那档给 NaN（规范是 -Infinity）。所以包成 `(...xs) => Math.max(...xs)`：
+     * 带展开的调用走 abiSpreadCall 那条路，运行期 reduce，一格不差。 */
+    const variadic = spec.assoc === true || spec.fold !== undefined || spec.join !== undefined;
+    let arrow;
+    if (variadic) {
+      const rest = { type: 'Ident', name: '_bs', span: sp };
+      arrow = {
+        type: 'Arrow', params: [], rest, expression: true, span: sp,
+        body: {
+          type: 'Call', callee, optional: false, span: sp,
+          args: [{ type: 'Spread', arg: { ...rest }, span: sp }],
+        },
+      };
+    } else {
+      const ps = [];
+      for (let i = 0; i < spec.argc; i++) ps.push({ type: 'Ident', name: `_b${i}`, span: sp });
+      arrow = {
+        type: 'Arrow', params: ps, rest: null, expression: true, span: sp,
+        body: { type: 'Call', callee, args: ps.map((p) => ({ ...p })), optional: false, span: sp },
+      };
+    }
     const rec = this.closureOf(arrow, name, { fnName: name, fnLen: spec.len, single: true });
     this.builtinFns.set(ck, rec);
     return this.makeClosure(rec);
@@ -3950,7 +3968,9 @@ const STATIC_CALLS = {
   // clz32：先 ToUint32 再数前导零。JS 的 Math.clz32 与 C 那份都走这一格（不是 __builtin_clz，
   // 那个在 0 上是未定义的）
   'Math.clz32': { op: 'js_math', argc: 2, lit: { op: 'Z' } },
-  'Math.hypot': { op: 'js_math', argc: 2, lit: { op: 'Y' }, assoc: true, id: 0 },
+  // len 有了才能"当值用"（这几个的 length 照规范）。可变实参那一档由 builtinFnValue
+  // 包成 (...xs) => f(...xs)，所以定死的形参个数不会再把多出来的实参吃掉。
+  'Math.hypot': { op: 'js_math', argc: 2, lit: { op: 'Y' }, len: 2, assoc: true, id: 0 },
   'Math.exp': { op: 'js_math', argc: 2, lit: { op: 'E' } },
   'Math.expm1': { op: 'js_math', argc: 2, lit: { op: 'X' } },
   'Math.log': { op: 'js_math', argc: 2, lit: { op: 'O' } },
@@ -4025,8 +4045,8 @@ const STATIC_CALLS = {
   'Reflect.construct': { op: 'js_fn_construct', argc: 2, len: 2 },
   'Array.isArray': { op: 'js_arr_is_array', argc: 1, len: 1 },
   'Array.from': { op: 'js_arr_from', argc: 2, len: 1 },
-  'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1, fold: 'js_add' },
-  'String.fromCodePoint': { op: 'js_str_of_code_point', argc: 1, fold: 'js_add' },
+  'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1, len: 1, fold: 'js_add' },
+  'String.fromCodePoint': { op: 'js_str_of_code_point', argc: 1, len: 1, fold: 'js_add' },
   'Number.isNaN': { op: 'js_num_is_nan', argc: 1, len: 1 },
   'Number.isFinite': { op: 'js_num_is_finite', argc: 1, len: 1 },
   'Number.isInteger': { op: 'js_num_is_integer', argc: 1, len: 1 },

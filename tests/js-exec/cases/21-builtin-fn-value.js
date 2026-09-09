@@ -39,3 +39,14 @@ console.log(`assign ${JSON.stringify(Object.assign({}, "ab", null, undefined, 3,
 console.log(`round ${Math.round(-0.5)} ${Math.round(0.5)} ${Math.round(2.5)} ${Math.round(-1.5)}`);
 console.log(`round ${Math.round(0.49999999999999994)} ${Math.round(-1.2)} ${Math.round(NaN)}`);
 console.log(-0, 0, String(-0), 1 / Math.round(-0.2) < 0);
+
+// 收可变实参的内建当值用：从前包装按 argc 定死形参个数，F.max(1,2,3) 只拿前两格
+const VF = { max: Math.max, min: Math.min, hypot: Math.hypot, fcc: String.fromCharCode };
+console.log(String(VF.max(1, 2)), String(VF.max(1, 2, 3)), String(VF.max()));
+console.log(String(VF.min(4, 5)), String(VF.min(4, 5, 1)), String(VF.min()));
+console.log(String(VF.max(...[1, 5, 3])), String(VF.min(...[4, 2, 9])));
+console.log(String(VF.hypot(3, 4)), String(VF.hypot(1, 2, 2)), String(VF.hypot()));
+// f.length 那一格要函数的原型面，C 那条腿上还没有（P1-c）—— 只在 js262 里量
+console.log(VF.fcc(72, 105));
+// 同一个内建取两次还是同一格函数值
+console.log(String(Math.max === VF.max), String(VF.max === Math.max));
