@@ -200,8 +200,18 @@ extern char *omni_arena_end;
 void *omni_alloc_slow(size_t n);
 char *omni_alloc_bytes_slow(int64_t n);
 
+/* 分配的量口（`OMNI_MEM_DEBUG=3`）：调用次数、请求字节、按大小分桶的直方图。
+   为什么值得在热路径上留一格分支：arena 自带的量口只数得出"开了多少块"，而
+   "一趟 emit-c 申请 11 GB"到底是几千万次多大的分配，那张表决定该动 `omni_grow`
+   （arena 上它是"新开一块、拷过去、丢掉旧的"）还是该动"一格小记录要五次分配"
+   （AST 每个节点 / token / span 都是一格哈希表）。不量就是在猜 —— 这一轮已经猜错过两次。
+   关着的时候是一次全局读 + 一个必然预测正确的分支。 */
+extern int omni_mem_count_on;
+void omni_mem_note(size_t n);
+
 /* 对齐的分配，给结构体和容器用 */
 static inline void *omni_alloc(size_t n) {
+  if (omni_mem_count_on) omni_mem_note(n);
   char *p = (char *)(((uintptr_t)omni_arena_ptr + (OMNI_ALIGN - 1)) & ~(uintptr_t)(OMNI_ALIGN - 1));
   if (p > omni_arena_end || n > (size_t)(omni_arena_end - p)) return omni_alloc_slow(n);
   omni_arena_ptr = p + n;
@@ -212,6 +222,7 @@ static inline void *omni_alloc(size_t n) {
    omni_str_cat 的"在 arena 顶上原地追加"命中（见 omni_str.c） */
 static inline char *omni_alloc_bytes(int64_t n) {
   if (n < 0) omni_error("negative allocation");
+  if (omni_mem_count_on) omni_mem_note((size_t)n);
   if ((size_t)n > (size_t)(omni_arena_end - omni_arena_ptr)) return omni_alloc_bytes_slow(n);
   char *p = omni_arena_ptr;
   omni_arena_ptr = p + n;

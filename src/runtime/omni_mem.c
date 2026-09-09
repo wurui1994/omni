@@ -62,12 +62,47 @@ static size_t omni_arena_nblock = 0;
 static size_t omni_arena_bytes = 0;
 static int omni_arena_reported = 0;
 
+/* 分配的量口（`OMNI_MEM_DEBUG=3`）。arena 那两个数只说得出"开了多少块"，
+   而"一趟 emit-c 申请 11 GB"到底是几千万次多大的分配 —— 那张表才决定动哪一头：
+   `omni_grow`（这条路上它是"新开一块、拷过去、丢掉旧的"），还是"一格小记录要五次分配"
+   （AST 每个节点 / token / span 都是一格哈希表，struct + keys + vals + live + idx）。
+   桶 b 覆盖 (16<<(b-1), 16<<b]，b=0 是 <=16 字节。 */
+int omni_mem_count_on = 0;
+static uint64_t omni_mem_calls = 0;
+static uint64_t omni_mem_req = 0;
+#define OMNI_MEM_NBUCKET 24
+static uint64_t omni_mem_hist[OMNI_MEM_NBUCKET];
+
+void omni_mem_note(size_t n) {
+  int b = 0;
+  while (b + 1 < OMNI_MEM_NBUCKET && n > ((size_t)16 << b)) b++;
+  omni_mem_calls++;
+  omni_mem_req += (uint64_t)n;
+  omni_mem_hist[b]++;
+}
+
+static void omni_mem_count_report(void) {
+  if (omni_mem_calls == 0) return;
+  fprintf(stderr, "omni_mem: 分配 %llu 次、请求 %.1f MiB（平均 %.1f 字节）\n",
+          (unsigned long long)omni_mem_calls,
+          (double)omni_mem_req / (double)(1u << 20),
+          (double)omni_mem_req / (double)omni_mem_calls);
+  for (int b = 0; b < OMNI_MEM_NBUCKET; b++) {
+    if (omni_mem_hist[b] == 0) continue;
+    fprintf(stderr, "omni_mem:   <=%-9llu %10llu 次  %6.1f%%\n",
+            (unsigned long long)((size_t)16 << b),
+            (unsigned long long)omni_mem_hist[b],
+            100.0 * (double)omni_mem_hist[b] / (double)omni_mem_calls);
+  }
+}
+
 static void omni_arena_report(void) {
   if (omni_arena_reported) return;
   omni_arena_reported = 1;
   fprintf(stderr, "omni_mem: arena 块 %zu、字节 %zu（%.1f MiB）\n",
           omni_arena_nblock, omni_arena_bytes,
           (double) omni_arena_bytes / (double) (1u << 20));
+  omni_mem_count_report();
 }
 
 /* 开一个新块。请求超过块大小时按请求开（大数组也走 arena，不另设 large-object 路径）。 */
@@ -82,7 +117,12 @@ static void omni_arena_new_block(size_t n) {
   omni_arena_head = b;  /* 保持全局可达，LeakSanitizer 才不会把它当泄漏 */
   omni_arena_ptr = base;
   omni_arena_end = base + cap;
-  if (omni_arena_nblock == 0 && getenv("OMNI_MEM_DEBUG")) atexit(omni_arena_report);
+  if (omni_arena_nblock == 0 && getenv("OMNI_MEM_DEBUG")) {
+    const char *d = getenv("OMNI_MEM_DEBUG");
+    /* `=3` 连每次分配一起数（热路径上多一格分支，见 omni.h 的 omni_alloc） */
+    if (d[0] == '3') omni_mem_count_on = 1;
+    atexit(omni_arena_report);
+  }
   omni_arena_nblock++;
   omni_arena_bytes += cap;
   /* `OMNI_MEM_DEBUG=2`：每翻一倍就印一行。被 SIGKILL（OOM）打死时 atexit 不会跑，
