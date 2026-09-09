@@ -3598,11 +3598,22 @@ class Lower {
     }
     const lv = this.lvalue(t, e.span);
     if (!lv) return undefExpr();
-    if (e.op === '&&=') return ternary(truthy(lv.get()), this.lazy(() => lv.set(this.expr(e.value))), lv.get());
-    if (e.op === '||=') return ternary(truthy(lv.get()), lv.get(), this.lazy(() => lv.set(this.expr(e.value))));
-    if (e.op === '??=') {
-      return ternary(boolOp('js_eq', [lv.get(), nullExpr()], { strict: false }),
-        this.lazy(() => lv.set(this.expr(e.value))), lv.get());
+    if (e.op === '&&=' || e.op === '||=' || e.op === '??=') {
+      /* 三格逻辑赋值（规范 13.15.2）：目标**只读一次** —— 先取值、按它决定要不要写。
+       * 从前条件里与"保持原值"那一支各读一次，于是取值器被叫了两遍
+       * （`q.v ??= f()` 里 `get v()` 跑两趟，量出来的静默分叉）。
+       * 惰性位置（`c ? (a ||= 1) : 0`）开不了语句，那儿只能退回读两次的老形状 ——
+       * 成员目标在那种位置本来就当场报（接收者要临时量），所以退回的只有名字目标那一格。 */
+      let cur = () => lv.get();
+      if (this.fn.lazies === 0) {
+        const tv = this.temp();
+        this.emitPre(exprStmt(assign(varRef(tv), lv.get())), e.span);
+        cur = () => varRef(tv);
+      }
+      const set = () => this.lazy(() => lv.set(this.expr(e.value)));
+      if (e.op === '&&=') return ternary(truthy(cur()), set(), cur());
+      if (e.op === '||=') return ternary(truthy(cur()), cur(), set());
+      return ternary(boolOp('js_eq', [cur(), nullExpr()], { strict: false }), set(), cur());
     }
     return lv.set(this.applyOp(e.op.slice(0, -1), lv.get(), this.expr(e.value), e.span));
   }
