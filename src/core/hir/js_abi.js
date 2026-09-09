@@ -207,6 +207,11 @@ export const JS_ABI = {
   // **C 侧还没落地**（omni_js_object.c 是下一片）。现在没有任何降级会发这些 op，所以
   // 生成的 C 里引用不到它们 —— 这一条写在明处，不假装两边已经齐了。
   js_obj_new_p: { js: '$js_obj_new_p', c: 'omni_js_obj_new_p', arity: 1 },
+  /* **带属性位的对象**那一格（ADR-0020 P1-c）。JS 那条腿上它就是 $js_obj_new()（一格以 Object.prototype
+   * 为原型的真对象）；C 那条腿上普通对象是 dict，而有些对象**必须**是真对象 —— 类对象身上要挂
+   * 不可枚举的 prototype / constructor / 静态方法，extends 还要把父类当自己的原型；带访问器的
+   * 对象字面量（`{ get x() {} }`）也要槽。所以这一格单独一条 op，不与普通对象字面量共用。 */
+  js_obj_slots: { js: '$js_obj_new', c: 'omni_js_obj_slots', arity: 0 },
   /* Object.create(proto[, descs])：第二个实参那一支等于"造完再 defineProperty 一遍"。
      throws: true —— 里面走 js_obj_def，而它会过代理的 defineProperty 陷阱（用户代码）。 */
   js_obj_create: { js: '$js_obj_create', c: 'omni_js_obj_create', arity: 2, throws: true },
@@ -899,13 +904,18 @@ const P1_JS_ONLY = [
   // 这条腿上"普通对象"是 dict、数组是一段 items，都没有属性位，所以描述符是照实合成的
   // 那一格（数据属性 + 三档锁算出来的三个位）。defineProperty 照旧拒 —— `{ value: 1 }`
   // 在规范里造的是不可枚举、不可写、不可配置的属性，dict 表达不出来，收下就是悄悄的错答案。
-  'js_obj_def',
+  // defineProperty（js_obj_def）与 new.target 那两格也落地了：槽表本来就带 w/e/c 三个位，
+  // 所以描述符不再是"表达不出来"的东西。还拒的是 defineProperties（js_obj_defs）与
+  // Object.create(proto, descs) 里那一层批量描述符。
   // Object.fromEntries 与 Object.groupBy 有 C 孪生了（omni_js_str_arr.h）：JS 那条腿上
   // 它们造的是真对象（后者还是 null 原型），而这条腿上"普通对象"就是 dict —— 可观察的
   // 那几样（取键、Object.keys、JSON、分组的原顺序）逐格相同，原型那一格本来就问不着。
   // js_for_in_keys 有 C 孪生了：这条腿上没有原型链，所以"自有 + 继承"只剩自有那一段，
   // 正好是 omni_js_obj_keys 的三支（见 omni_js_obj.h）。
-  'js_instanceof', 'js_instanceof_p', 'js_to_prim', 'js_iter_proto', 'js_iter_next',
+  // instanceof 那两格有 C 孪生了（omni_js_obj.h）：真对象有原型链了，所以"沿链找 C.prototype"
+  // 这件事能做了。to_prim 只在 prelude 内部用（降级器不发它），iter_proto / iter_next
+  // 要迭代器协议那格真对象上的 next，还在下一步。
+  'js_to_prim', 'js_iter_proto', 'js_iter_next',
   // Symbol 那一族已经有 C 孪生了（runtime/omni_js_sym.c，ADR-0020 P1-c 的第一步），
   // 所以不在这张单子里 —— 真对象那一片还在，见下面几行。
   'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
@@ -921,7 +931,14 @@ const P1_JS_ONLY = [
   'js_jobs_run',
   'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',
-  'js_fn_construct', 'js_nt_take', 'js_nt_put', 'js_src_eval', 'js_src_fn',
+  /* js_fn_construct 的 C 孪生**已经写好了**（omni_js_obj.h：函数不是真对象，所以那格
+   * prototype 住在一张按同一性索引的旁表上，与 prelude 的 $FNPROTO 对应），可这一格还
+   * 留在拒绝单子上 —— 它一开，`new f()` 那一族就把 07-classes 整个放进 C 那条腿，而那份
+   * 用例里还有两处没通：**局部类**（函数体里 `class P {…}`，走 classExpr 那条老路造的是
+   * 带自有方法的 dict）与**自带 toString 的对象**（String(o) 要调回调，而 to_s16 住在
+   * 普通 .c 里造不出实参 list）。宁可整族先拒，也不要让一份用例半通半不通 —— 下一步就是
+   * 这两格（ADR-0020 P1-c 的第十一步）。 */
+  'js_fn_construct', 'js_src_eval', 'js_src_fn',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 

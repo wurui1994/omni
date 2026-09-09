@@ -66,6 +66,7 @@ static omni_dyn omni_js_setp(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv);
 static omni_dyn omni_js_obj_own_keys_o_(omni_dyn o, int sel); \
 static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own); \
 static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k); \
+static omni_dyn omni_js_fn_proto_(omni_dyn f); \
 static omni_dyn omni_js_obj_new(void) { return omni_js_dict_wrap(DT##_new()); } \
 /* JS 里数组也是对象，身上可以挂字段（asy 前端的 do-while 就往那一格更新列表上挂一个 dw）。
    这个值域里 list 只是一段 items/len、没有属性槽，所以额外属性放在一张**按同一性索引的
@@ -228,6 +229,11 @@ static void omni_js_nullish_err_(const char *verb, omni_str key, bool has_key, o
  * 解释器把 OIR 节点当 dict 读，`e.kind` 这类取字段全落在这里，是原生构建最热的一条。 */ \
 static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   DT d; \
+  /* f.prototype：函数不是真对象，那格原型住在旁表上（JS 那条腿上它是 Function.prototype
+     身上的一格访问器 —— 同一件事的两种写法）。`F.prototype.m = …` 就靠这一支。 */ \
+  if (o.tag == OMNI_DYN_FN && key.len == 9 && memcmp(key.p, "prototype", 9) == 0) { \
+    return omni_js_fn_proto_(o); \
+  } \
   /* 真对象走槽表 + 原型链（ADR-0020 P1-c）：`o.x` 与 `o["x"]` 是同一条路 */ \
   if (o.tag == OMNI_DYN_OBJ) { \
     return omni_js_getp(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), omni_dyn_undef()); \
@@ -348,15 +354,21 @@ static omni_str omni_js_prop_k(omni_dyn k) { \
   return omni_js_prop(k.tag == OMNI_DYN_REAL ? omni_js_str(k) : k); \
 } \
 static omni_dyn omni_js_obj_get(omni_dyn o, omni_dyn k) { \
+  /* 真对象那一支要拿**原样的键**：符号键按同一性发键，过一遍 omni_js_prop_k 就成了串
+     （类对象上那格 $init 用的就是符号键 Symbol.omni.classInit）。 */ \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_getp(o, k, omni_dyn_undef()); \
   return omni_js_obj_getk(o, omni_js_prop_k(k)); \
 } \
 static omni_dyn omni_js_obj_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
+  if (o.tag == OMNI_DYN_OBJ) { omni_js_setp(o, k, v, omni_dyn_undef()); return o; } \
   return omni_js_obj_setk(o, omni_js_prop_k(k), v); \
 } \
 static bool omni_js_obj_has(omni_dyn o, omni_dyn k) { \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_has_o_(o, k, false); \
   return omni_js_obj_hask(o, omni_js_prop_k(k)); \
 } \
 static bool omni_js_obj_delete(omni_dyn o, omni_dyn k) { \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_del_o_(o, k); \
   return omni_js_obj_deletek(o, omni_js_prop_k(k)); \
 } \
 /* ---- 真对象（ADR-0020 P1-c 的第十步）--------------------------------------
@@ -369,6 +381,11 @@ static omni_str omni_js_pkey_(omni_dyn k) { \
   return omni_js_key_tag_('s', omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k)))); \
 } \
 static DT omni_js_ps_(omni_dyn o) { return (DT)((omni_js_objv *)o.u.ref)->ps; } \
+/* 一格 ASCII 名字当属性键。omni_js_s16_lit 住在 JSON 那一段（比这一段后展开），
+   所以这儿自己转一次 —— 只在 defineProperty 与 instanceof 那两条冷路上用。 */ \
+static omni_dyn omni_js_name_(const char *s, int64_t n) { \
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new(s, n))); \
+} \
 static LT omni_js_slot_new_(omni_dyn keyd, omni_dyn v, bool w, bool e, bool c) { \
   LT s = LT##_new(); \
   LT##_reserve(s, 8); \
@@ -390,6 +407,9 @@ static omni_dyn omni_js_obj_new_p(omni_dyn proto) { \
   ov->ex = true; \
   return omni_dyn_of_ref((void *)ov, OMNI_DYN_OBJ); \
 } \
+/* 带属性位的那一格对象：一格真对象（原型是 null —— realm 上那格 Object.prototype 还在
+   P1-c 里）。与普通对象字面量刻意分开，见 js_abi.js 里 js_obj_slots 那条注。 */ \
+static omni_dyn omni_js_obj_slots(void) { return omni_js_obj_new_p(omni_dyn_null()); } \
 /* 沿原型链找一格槽；找到时把**持有者**写进 *holder（setp 要它分清"自有"与"继承"）。 */ \
 static LT omni_js_find_slot_(omni_dyn o, omni_str key, omni_dyn *holder) { \
   omni_dyn cur = o; \
@@ -510,8 +530,36 @@ static omni_dyn omni_js_obj_proto_get(omni_dyn o) { \
 static omni_dyn omni_js_obj_proto_set(omni_dyn o, omni_dyn p) { \
   if (o.tag == OMNI_DYN_OBJ) { \
     ((omni_js_objv *)o.u.ref)->pr = p.tag == OMNI_DYN_UNDEF ? omni_dyn_null() : p; \
+    return o; \
   } \
+  /* dict 带不了原型（这条腿上"普通对象"就是一格 dict，没有 pr 那一格）。**刻意当场报** ——
+     静静地不设就等于把继承丢了：`class Q extends P` 的类对象正是这么串起静态成员的，
+     不报的话 Q 上查父类的 static 方法会静悄悄地变成 undefined。 */ \
+  omni_errorf("backend-c: setPrototypeOf on a %s — 这条腿上只有真对象带得下原型" \
+              "（ADR-0020 P1-c：普通对象是一格 dict）；这份程序请走 --backend js 或解释器", \
+              omni_dyn_tag_name(o.tag)); \
   return o; \
+} \
+/* x instanceof C（规范 13.10.2）：沿 x 的原型链找 C.prototype。这条腿上链的末端可能是
+   一格 dict（类的原型是真对象，Object.create({…}) 那种的末端是 dict），所以两种都要认。
+   原始值一律为假（规范如此：1 instanceof Number 是 false）；数组 / Map 那些的原型住在
+   realm 上，而 realm 还在 P1-c 里 —— 那条路上右边取不出 prototype，到不了这儿。 */ \
+static bool omni_js_instanceof_p(omni_dyn v, omni_dyn proto) { \
+  omni_dyn cur = v.tag == OMNI_DYN_OBJ ? ((omni_js_objv *)v.u.ref)->pr : omni_dyn_null(); \
+  while (cur.tag == OMNI_DYN_OBJ || omni_js_cont_proto_(cur)) { \
+    if (cur.tag == proto.tag && cur.u.ref == proto.u.ref) return true; \
+    if (cur.tag != OMNI_DYN_OBJ) break; \
+    cur = ((omni_js_objv *)cur.u.ref)->pr; \
+  } \
+  return false; \
+} \
+static bool omni_js_instanceof(omni_dyn v, omni_dyn ctor) { \
+  omni_dyn proto = omni_js_obj_get(ctor, omni_js_name_("prototype", 9)); \
+  if (proto.tag != OMNI_DYN_OBJ && !omni_js_cont_proto_(proto)) { \
+    omni_js_type_err_c("right-hand side of 'instanceof' is not callable"); \
+    return false; \
+  } \
+  return omni_js_instanceof_p(v, proto); \
 } \
 /* Object.create(proto[, descs])：descs 那一格要 defineProperty 的全套位，还在 P1-c 里 ——
    给了就当场报，不悄悄忽略。 */ \
@@ -551,6 +599,102 @@ static bool omni_js_reflect_proto_set(omni_dyn o, omni_dyn p) { \
 static bool omni_js_reflect_prevent_ext(omni_dyn o) { \
   omni_js_obj_prevent_ext(o); \
   return true; \
+} \
+/* new.target 那一格槽（ADR-0020）：与 this 那一格同一招 —— 调之前放进去，被调的入口取一次
+   就清。类的构造走 $init 那格闭包，不经过 js_fn_construct，所以放槽这件事在降级器里做。 */ \
+static omni_dyn omni_js_nt_slot_ = { OMNI_DYN_UNDEF, { 0 } }; \
+static omni_dyn omni_js_nt_take(void) { \
+  omni_dyn v = omni_js_nt_slot_; \
+  omni_js_nt_slot_ = omni_dyn_undef(); \
+  return v; \
+} \
+static omni_dyn omni_js_nt_put(omni_dyn v) { \
+  omni_js_nt_slot_ = v; \
+  return v; \
+} \
+/* Object.defineProperty（规范 10.1.6）。真对象上是全套：数据槽或访问器槽，三个位缺省
+   都是 false（规范如此 —— `{ value: 1 }` 造的是不可枚举、不可写、不可配置的那一格）。
+   数组上**没有描述符这一层**（一排稠密的 dyn + 一张旁表），所以只收"能原样表达出来"的
+   那一种：下标在长度里、数据描述符、三个位都真 —— 那正好就是 a[i] = v。别的当场报：
+   写进去只能对上一半，那是悄悄的错答案。与 prelude 的 $js_obj_def / $js_arr_def 对着写。 */ \
+static omni_dyn omni_js_obj_def(omni_dyn o, omni_dyn k, omni_dyn desc) { \
+  bool has_get = omni_js_obj_has(desc, omni_js_name_("get", 3)); \
+  bool has_set = omni_js_obj_has(desc, omni_js_name_("set", 3)); \
+  bool has_val = omni_js_obj_has(desc, omni_js_name_("value", 5)); \
+  bool w = omni_js_truthy(omni_js_obj_get(desc, omni_js_name_("writable", 8))); \
+  bool e = omni_js_truthy(omni_js_obj_get(desc, omni_js_name_("enumerable", 10))); \
+  bool c = omni_js_truthy(omni_js_obj_get(desc, omni_js_name_("configurable", 12))); \
+  if (o.tag == OMNI_DYN_LIST) { \
+    int64_t idx = omni_js_dec_index(omni_js_prop_k(k)); \
+    if (has_get || has_set || !has_val || !w || !e || !c \
+        || idx < 0 || idx >= ((LT)o.u.ref)->len) { \
+      omni_errorf("backend-c: defineProperty on an array only takes a plain writable/" \
+                  "enumerable/configurable data descriptor for an index inside the length " \
+                  "—— list 上没有描述符这一层（ADR-0020）；这份程序请走 --backend js 或解释器"); \
+      return o; \
+    } \
+    omni_js_arr_set(o, omni_dyn_of_real((double)idx), \
+                    omni_js_obj_get(desc, omni_js_name_("value", 5))); \
+    return o; \
+  } \
+  if (o.tag != OMNI_DYN_OBJ) { \
+    omni_errorf("backend-c: defineProperty on a %s — 这条腿上只有真对象与数组带得下属性" \
+                "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器", \
+                omni_dyn_tag_name(o.tag)); \
+    return o; \
+  } \
+  omni_str key = omni_js_pkey_(k); \
+  DT ps = omni_js_ps_(o); \
+  int64_t at = DT##_find(ps, key); \
+  if (at < 0 && !((omni_js_objv *)o.u.ref)->ex) { \
+    omni_js_type_err_c("object is not extensible"); \
+    return o; \
+  } \
+  LT sl = at >= 0 ? (LT)ps->vals[at].u.ref \
+                  : omni_js_slot_new_(k.tag == OMNI_DYN_SYM ? k : omni_js_str(k), \
+                                      omni_dyn_undef(), false, false, false); \
+  if (has_get || has_set) { \
+    sl->items[1] = omni_dyn_of_bool(true); \
+    sl->items[0] = omni_dyn_undef(); \
+    if (has_get) sl->items[2] = omni_js_obj_get(desc, omni_js_name_("get", 3)); \
+    if (has_set) sl->items[3] = omni_js_obj_get(desc, omni_js_name_("set", 3)); \
+  } else { \
+    sl->items[1] = omni_dyn_of_bool(false); \
+    if (has_val) sl->items[0] = omni_js_obj_get(desc, omni_js_name_("value", 5)); \
+    sl->items[4] = omni_dyn_of_bool(w); \
+  } \
+  sl->items[5] = omni_dyn_of_bool(e); \
+  sl->items[6] = omni_dyn_of_bool(c); \
+  if (at < 0) DT##_set(ps, key, omni_js_arr_wrap(sl)); \
+  return o; \
+} \
+/* 普通函数当构造器（ADR-0020）：`new f(a)` = 造一格以 f.prototype 为原型的对象、拿它当
+   接收者跑 f、f 返回对象就用那一格。函数在这个值域里**不是**真对象，所以那格 prototype
+   住在一张按同一性索引的旁表上（键就是 omni_js_key 给引用值发的地址）——
+   与 prelude 的 $FNPROTO 逐条对应。旁表上那格原型身上挂一格不可枚举的 constructor。 */ \
+static DT omni_js_fnproto_tbl_; \
+static omni_dyn omni_js_fn_proto_(omni_dyn f) { \
+  if (omni_js_fnproto_tbl_ == NULL) omni_js_fnproto_tbl_ = DT##_new(); \
+  omni_str id = omni_js_key(f); \
+  int64_t e = DT##_find(omni_js_fnproto_tbl_, id); \
+  if (e >= 0) return omni_js_fnproto_tbl_->vals[e]; \
+  omni_dyn p = omni_js_obj_new_p(omni_dyn_null()); \
+  omni_js_def_data_(p, omni_js_name_("constructor", 11), f, true, false, true); \
+  DT##_set(omni_js_fnproto_tbl_, id, p); \
+  return p; \
+} \
+static omni_dyn omni_js_fn_construct(omni_dyn f, omni_dyn args) { \
+  if (f.tag != OMNI_DYN_FN) { \
+    if (!omni_js_pending()) omni_js_type_err_c("not a function"); \
+    return omni_dyn_undef(); \
+  } \
+  omni_dyn o = omni_js_obj_new_p(omni_js_fn_proto_(f)); \
+  omni_js_nt_slot_ = f; \
+  omni_dyn r = omni_js_call_this(f, o, args); \
+  omni_js_nt_slot_ = omni_dyn_undef(); \
+  if (omni_js_pending()) return omni_dyn_undef(); \
+  /* 构造器 return 一格**对象**时值是那一格（规范 10.2.2 第 13 步）：数组、Map、函数都算 */ \
+  return omni_js_is_object(r) ? r : o; \
 } \
 /* Object.keys / values / entries 也认**串**（规范里先 ToObject，串成了类数组）：
    键是下标的十进制串、值是一个个码元。与 prelude 那份对着写。 */ \

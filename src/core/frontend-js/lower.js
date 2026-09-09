@@ -974,7 +974,7 @@ class Lower {
      * （规范如此 —— 所以子类身上能查到父类的 static 方法）。 */
     const supProto = sup === null ? undefExpr() : globalRef(this.globals.get(protoGlobalName(sup)).name);
     out.push(exprStmt(assign(protoG(), op('js_obj_new_p', [supProto]))));
-    out.push(exprStmt(assign(classG(), op('js_obj_new', []))));
+    out.push(exprStmt(assign(classG(), op('js_obj_slots', []))));
     if (sup !== null) {
       out.push(exprStmt(op('js_obj_proto_set', [classG(), globalRef(this.globals.get(sup).name)])));
     }
@@ -2717,7 +2717,13 @@ class Lower {
       }
       return this.propValue(p);
     });
-    let out = op('js_obj_new', []);
+    /* 带**访问器**（或 `__proto__:`）的字面量要一格**真对象**：访问器与原型都住在属性槽上，
+     * 而这个值域里普通对象在 C 那条腿上是一格 dict（没有槽）。JS 那条腿上两种都是 $js_obj_new，
+     * 所以这一句只改 C 那边的表示，不改任何可观察的答案（ADR-0020 P1-c）。 */
+    const wantSlots = e.props.some((p) => p.kind === 'get' || p.kind === 'set'
+      || (!p.computed && !p.method && p.shorthand !== true && p.key !== undefined
+        && (p.key.name === '__proto__' || p.key.value === '__proto__')));
+    let out = op(wantSlots ? 'js_obj_slots' : 'js_obj_new', []);
     e.props.forEach((p, i) => {
       if (vals[i] === null) return;
       if (p.kind === 'spread') { out = op('js_obj_assign', [out, vals[i]]); return; }
