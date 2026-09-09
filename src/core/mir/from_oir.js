@@ -76,6 +76,12 @@ class ToMir {
         capTypes: c.captures.map((x) => this.ty(x.type)),
         // `(fnref f)` 的薄适配器要发**单件**（见 sexpr/lower.js 的 fnRef）
         single: c.single === true,
+        /* fn.name / fn.length（ADR-0020）：函数在这个值域里还不是真对象，这两格存在闭包
+           记录里，由 Function.prototype 上的两个访问器读。只有 JS 前端会填 —— 别的前端
+           的记录照旧只有 fp 与捕获。带过来是因为 MIR 解释器要照样填进记录：不填就是
+           静默的错答案（`f.name` 空串、`f.length` 0），而它是五条腿里的一条。 */
+        fnName: c.fnName,
+        fnLen: c.fnLen,
       });
     }
     this.closureNo = new Map();

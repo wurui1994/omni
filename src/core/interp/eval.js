@@ -460,6 +460,15 @@ class Interp {
         mirrorPendingToHost();
         return r;
       });
+      /* fn.name / fn.length（ADR-0020）：函数在这个值域里还不是真对象，这两格存在**闭包记录
+       * 里**，由 Function.prototype 上的两个访问器读（prelude 的 $js_fn_name）——
+       * 这条腿与 JS 后端共用那份 prelude，所以记录里少这两格就是静默的错答案：
+       * `f.name` 给空串、`f.length` 给 0（连 bind 出来的 "bound f" 也跟着塌）。
+       * 与 backend-js 的 closureMake 一一对应：只有 JS 前端会填 fnName。 */
+      if (def.fnName !== undefined) {
+        jf.$nm = def.fnName;
+        jf.$ln = def.fnLen === undefined ? 0 : def.fnLen;
+      }
       if (def.single === true && def.captures.length === 0) def.$one = jf;
       return jf;
     }
