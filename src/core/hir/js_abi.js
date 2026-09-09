@@ -938,8 +938,10 @@ const P1_JS_ONLY = [
   // Promise 的核心三格（new / resolve / reject）与 then / catch / finally 有 C 孪生了
   // （omni_js_obj.h）：三格槽 $st / $val / $cbs + 一格静态作业队列。组合器那五格还在 ——
   // 它们要"几格共享的可变状态"，每一格都得再排一个 sel。
-  'js_promise_all',
-  'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',
+  // all / allSettled / race / try 也有 C 孪生了：几格共享的可变状态就是一格 list
+  // （[p, vals, 计数盒]），每个 per-item 的原生载荷是 [状态, 下标]。
+  // any 还在 —— 它全拒时要一格 AggregateError，而那一族在这条腿上还没有。
+  'js_promise_any',
   // matchAll 与 flags_g 有 C 孪生了（omni_js_re.h）：exec 的结果本来就把 index / input /
   // groups 挂在 list 的旁表上，所以差的只是"惰性迭代器"那一层 —— C 这条腿交的是一条现摊
   // 好的 list（matchAll 有限、无副作用，for-of 与展开逐格相同），手写 it.next() 那条路

@@ -90,6 +90,7 @@ static omni_dyn omni_js_prom_react_(omni_dyn p, omni_dyn f, omni_dyn r); \
 static void omni_js_prom_settle_(omni_dyn p, int64_t st, omni_dyn val); \
 static void omni_js_async_tick_(omni_dyn p, omni_dyn step, omni_dyn v, int64_t mode); \
 static LT omni_js_prom_slot_(omni_dyn p, const char *nm, int64_t n); \
+static void omni_js_comb_dec_(LT st); \
 static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode); \
 /* 函数值的 prototype 那张按同一性索引的旁表（$FNPROTO 的孪生）：realm_ctor 要往里预先坐一格，
    而它排在 fn_proto_ 前头，所以表在这儿声明。 */ \
@@ -1070,6 +1071,37 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       omni_js_async_tick_(pay->items[0], pay->items[1], a0, n->sel == 22 ? 0 : 2); \
       return omni_dyn_undef(); \
     } \
+    case 29: {                                          /* all 的每一格：兑现 */ \
+      LT pay = (LT)n->a.u.ref; \
+      LT st = (LT)pay->items[0].u.ref; \
+      LT vals = (LT)st->items[1].u.ref; \
+      vals->items[(int64_t)pay->items[1].u.r] = a0; \
+      omni_js_comb_dec_(st); \
+      return omni_dyn_undef(); \
+    } \
+    case 30: {                                          /* 直接 reject 这一格 promise */ \
+      LT pay = (LT)n->a.u.ref; \
+      omni_js_prom_settle_(pay->items[0], 2, a0); \
+      return omni_dyn_undef(); \
+    } \
+    case 31: {                                          /* 直接 resolve 这一格 promise（race） */ \
+      LT pay = (LT)n->a.u.ref; \
+      omni_js_prom_settle_(pay->items[0], 1, a0); \
+      return omni_dyn_undef(); \
+    } \
+    case 32: case 33: {                                 /* allSettled 的每一格 */ \
+      LT pay = (LT)n->a.u.ref; \
+      LT st = (LT)pay->items[0].u.ref; \
+      LT vals = (LT)st->items[1].u.ref; \
+      omni_dyn o = omni_js_obj_new(); \
+      omni_js_obj_setk(o, omni_str_new("status", 6), \
+                       omni_dyn_of_s16(omni_s16_of_utf8(n->sel == 32 \
+                         ? omni_str_new("fulfilled", 9) : omni_str_new("rejected", 8)))); \
+      omni_js_obj_setk(o, n->sel == 32 ? omni_str_new("value", 5) : omni_str_new("reason", 6), a0); \
+      vals->items[(int64_t)pay->items[1].u.r] = o; \
+      omni_js_comb_dec_(st); \
+      return omni_dyn_undef(); \
+    } \
     case 24: {                                          /* p.then(f, r) */ \
       omni_dyn a1t = args != NULL && args->len > 1 ? args->items[1] : omni_dyn_undef(); \
       return omni_js_prom_react_(self, a0, a1t); \
@@ -1460,6 +1492,88 @@ static void omni_js_async_tick_(omni_dyn p, omni_dyn step, omni_dyn v, int64_t m
     return; \
   } \
   omni_js_await_then_(p, step, omni_js_obj_getk(r, omni_str_new("value", 5))); \
+} \
+/* Promise 的组合器（all / allSettled / race / try）。每一格都要"几格共享的可变状态"，
+   而这条腿上没有宿主闭包 —— 所以状态就是一格 list：[p, vals, cnt]（cnt 自己也是一格
+   单元素 list，当可变的计数盒用），每个 per-item 的原生载荷是 [状态, 下标]。 */ \
+static void omni_js_comb_dec_(LT st) { \
+  LT cnt = (LT)st->items[2].u.ref; \
+  double left = cnt->items[0].u.r - 1.0; \
+  cnt->items[0] = omni_dyn_of_real(left); \
+  if (left <= 0.0) omni_js_prom_settle_(st->items[0], 1, st->items[1]); \
+} \
+static omni_dyn omni_js_comb_state_(omni_dyn p, int64_t n) { \
+  LT vals = LT##_new(); \
+  for (int64_t i = 0; i < n; i++) LT##_push(vals, omni_dyn_undef()); \
+  LT cnt = LT##_new(); \
+  LT##_push(cnt, omni_dyn_of_real((double)n)); \
+  LT st = LT##_new(); \
+  LT##_push(st, p); \
+  LT##_push(st, omni_js_arr_wrap(vals)); \
+  LT##_push(st, omni_js_arr_wrap(cnt)); \
+  return omni_js_arr_wrap(st); \
+} \
+static omni_dyn omni_js_comb_pay_(omni_dyn st, int64_t i) { \
+  LT pay = LT##_new(); \
+  LT##_push(pay, st); \
+  LT##_push(pay, omni_dyn_of_real((double)i)); \
+  return omni_js_arr_wrap(pay); \
+} \
+static omni_dyn omni_js_promise_all(omni_dyn items) { \
+  omni_dyn xs = omni_js_iter(items); \
+  LT l = (LT)xs.u.ref; \
+  omni_dyn p = omni_js_prom_new_(); \
+  int64_t n = l == NULL ? 0 : l->len; \
+  if (n == 0) { \
+    omni_js_prom_settle_(p, 1, omni_js_arr_wrap(LT##_new())); \
+    return p; \
+  } \
+  omni_dyn st = omni_js_comb_state_(p, n); \
+  LT pl = LT##_new(); \
+  LT##_push(pl, p); \
+  omni_dyn rej = omni_js_nat_(30, omni_js_arr_wrap(pl)); \
+  for (int64_t i = 0; i < n; i++) { \
+    omni_js_prom_react_(omni_js_promise_resolved(l->items[i]), \
+                        omni_js_nat_(29, omni_js_comb_pay_(st, i)), rej); \
+  } \
+  return p; \
+} \
+static omni_dyn omni_js_promise_all_settled(omni_dyn items) { \
+  omni_dyn xs = omni_js_iter(items); \
+  LT l = (LT)xs.u.ref; \
+  omni_dyn p = omni_js_prom_new_(); \
+  int64_t n = l == NULL ? 0 : l->len; \
+  if (n == 0) { \
+    omni_js_prom_settle_(p, 1, omni_js_arr_wrap(LT##_new())); \
+    return p; \
+  } \
+  omni_dyn st = omni_js_comb_state_(p, n); \
+  for (int64_t i = 0; i < n; i++) { \
+    omni_js_prom_react_(omni_js_promise_resolved(l->items[i]), \
+                        omni_js_nat_(32, omni_js_comb_pay_(st, i)), \
+                        omni_js_nat_(33, omni_js_comb_pay_(st, i))); \
+  } \
+  return p; \
+} \
+static omni_dyn omni_js_promise_race(omni_dyn items) { \
+  omni_dyn xs = omni_js_iter(items); \
+  LT l = (LT)xs.u.ref; \
+  omni_dyn p = omni_js_prom_new_(); \
+  LT pl = LT##_new(); \
+  LT##_push(pl, p); \
+  omni_dyn pay = omni_js_arr_wrap(pl); \
+  for (int64_t i = 0; l != NULL && i < l->len; i++) { \
+    omni_js_prom_react_(omni_js_promise_resolved(l->items[i]), \
+                        omni_js_nat_(31, pay), omni_js_nat_(30, pay)); \
+  } \
+  return p; \
+} \
+static omni_dyn omni_js_promise_try(omni_dyn f) { \
+  omni_dyn p = omni_js_prom_new_(); \
+  omni_dyn v = omni_js_call_this(f, omni_dyn_undef(), omni_js_arr_wrap(LT##_new())); \
+  if (omni_js_pending()) { omni_js_prom_settle_(p, 2, omni_js_take_pending()); return p; } \
+  omni_js_prom_settle_(p, 1, v); \
+  return p; \
 } \
 static omni_dyn omni_js_async_run(omni_dyn step) { \
   omni_dyn p = omni_js_prom_new_(); \
