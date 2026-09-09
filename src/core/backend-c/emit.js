@@ -60,6 +60,10 @@ class CEmitter {
   constructor(mod, opts = {}) {
     this.mod = mod;
     this.out = [];
+    /* 按源文件的产出分布（P1）：文件路径 -> {funcs, lines, bytes}。
+     * `emit-c --stats` 与 `build --stats` 印它 —— 42 万行落在一个翻译单元里时，
+     * "是谁撑起来的"这件事从前压根没有答案。P2 分文件发射用的也是这一格分组。 */
+    this.stats = new Map();
     this.indent = 0;
     this.tmp = 0;
     // 函数级计时（第八十八刀，见 profTable）：`--profile` 或 `OMNI_PROFILE=1` 打开。
@@ -324,7 +328,23 @@ class CEmitter {
     this.line();
     for (const c of closures) this.closureMake(c);
     const fnMetaN = this.fnMetaTable(closures);
-    for (const f of this.mod.funcs) this.func(f);
+    /* 按源文件记一笔产出（P1）：每个函数发了多少行、多少字节。
+     * `--stats` 靠它印"42 万行是哪几个源文件撑起来的" —— 单体构建里这件事从前压根看不见，
+     * 而它同时也是 P2 分文件发射的分组依据（`f.file` 来自 lower.js 的 fileOfSpan）。
+     * 只在这一格量：字面量池、容器实例化、成员派发器那些是**整份程序共用**的，摊给谁都不对，
+     * 所以它们归到 stats 的 '(shared)' 那一行里（见 cli.js 印表那儿）。 */
+    for (const f of this.mod.funcs) {
+      const i0 = this.out.length;
+      this.func(f);
+      let bytes = 0;
+      for (let i = i0; i < this.out.length; i++) bytes += this.out[i].length + 1;
+      const k = typeof f.file === 'string' && f.file !== '' ? f.file : '(unknown)';
+      const s = this.stats.get(k) ?? { funcs: 0, lines: 0, bytes: 0 };
+      s.funcs += 1;
+      s.lines += this.out.length - i0;
+      s.bytes += bytes;
+      this.stats.set(k, s);
+    }
     // 线性内存的 data 段（ADR-0017 第二刀）：字节发成 static 数组，main 里一次拷进去。
     // 与 backend-llvm 的 private constant、backend-js 的数组字面量是同一件事的三种写法。
     const mem = this.mod.mem === undefined ? null : this.mod.mem;
@@ -1713,4 +1733,15 @@ function cString(bytes) {
 /** @param {any} mod OIR 模块 @param {{amalgamate?: boolean}} opts */
 export function emitC(mod, opts = {}) {
   return new CEmitter(mod, opts).emit();
+}
+
+/**
+ * 与 `emitC` 同一趟，但把**按源文件的产出分布**也交出来：`{ text, stats }`。
+ * 另开一个入口而不是改 `emitC` 的返回形状：`emitC` 有一二十个调用点，而它交的是一个字符串 ——
+ * 改形状要一二十处一起动，多一条只是多一条（与 host 那边 spawn / spawnIn 同一条理由）。
+ */
+export function emitCWithStats(mod, opts = {}) {
+  const e = new CEmitter(mod, opts);
+  const text = e.emit();
+  return { text, stats: e.stats };
 }

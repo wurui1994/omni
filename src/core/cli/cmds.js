@@ -35,6 +35,9 @@ const F_BACKEND_BUILD = {
  * 量出来的：`tests/jnc` 里那条「找不着 import」的门在「不认识的开关直接骂」之后
  * 报的是「不认识 '-I'」而不是它该报的那句话。 */
 const F_INC = { name: '-I', arity: 1, value: 'DIR', brief: '找 import / #include 的目录，可重复' };
+/* 产出分布：每个源文件发了多少行、多少字节、多少个函数（印到 stderr）。
+   单体构建里"是谁撑起了那几十万行"从前没有答案，而看不见正是最贵的那一笔。 */
+const F_STATS = { name: '--stats', arity: 0, brief: '印按源文件的产出分布（stderr）' };
 
 /* ---- C 前端那几格（`-I` 这种只在这儿出现，不在顶层）。 */
 const C_CPP_FLAGS = [
@@ -222,12 +225,12 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',
       brief: '编译成产物',
-      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC],
+      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS],
     },
     {
       name: 'emit', key: 'emit', usage: 'FORM FILE',
       brief: '印某个中间/目标形态：ast|oir|mir|sx|asy|js|c|llvm|spirv',
-      flags: [F_MODE, F_WORK, F_INC,
+      flags: [F_MODE, F_WORK, F_INC, F_STATS,
         { name: '--amalgamate', arity: 0, brief: '（c）把整份运行时内联进一个文件' },
         { name: '--bytes', arity: 0, brief: '（mir）印大小与每个函数的内容哈希' },
         { name: '--kernel', arity: 1, value: 'NAME', brief: '（spirv）哪一个 kernel' }],
@@ -288,7 +291,7 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
     { name: 'emit-js', key: 'emit-js', hidden: true, flags: [F_MODE, F_INC] },
     {
       name: 'emit-c', key: 'emit-c', hidden: true,
-      flags: [F_MODE, F_INC, { name: '--amalgamate', arity: 0 }],
+      flags: [F_MODE, F_INC, F_STATS, { name: '--amalgamate', arity: 0 }],
     },
     { name: 'emit-llvm', key: 'emit-llvm', hidden: true, flags: [F_MODE, F_INC] },
     {

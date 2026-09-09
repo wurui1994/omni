@@ -60,7 +60,7 @@ import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
-import { emitC } from './backend-c/emit.js';
+import { emitC, emitCWithStats } from './backend-c/emit.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
@@ -579,6 +579,7 @@ function modeFor(path, argv, fallback = 'mixed') {
  * 时间是墙上时间（js_now_ms）：大头是 cc 与子进程，CPU 时间量不到它们。
  */
 let VERBOSE = false;
+let STATS = false;
 let vMark = 0;
 let vRss = 0;
 
@@ -603,6 +604,29 @@ function vStep(msg) {
   const grew = rss > vRss;
   vRss = rss;
   stderr(`omni: ${msg}  [${d}ms${grew ? ` peak ${fmtBytes(rss)}` : ''}]\n`);
+}
+
+/**
+ * 按源文件的产出分布（`--stats`）。印到 **stderr** —— stdout 上是产物，测试里逐字节比对。
+ *
+ * 回答的是"这 42 万行是谁撑起来的"：单体构建里这件事从前压根没有答案，而"看不见"正是
+ * 分文件构建之前最贵的那一笔。共用的那几样（字面量池、容器实例化、成员派发器、内联的运行时）
+ * 摊给任何一个源文件都不对，所以单列一行 —— 它等于总字节减掉所有函数的字节。
+ */
+function vStats(cText, stats) {
+  if (!STATS) return;
+  const rows = [...stats.entries()].sort((a, b) => b[1].bytes - a[1].bytes);
+  let sum = 0;
+  for (const r of rows) sum = sum + r[1].bytes;
+  const total = cText.length;
+  const pct = (n) => (total > 0 ? `${(n * 100 / total).toFixed(1)}%` : '0.0%');
+  stderr(`omni: 产出分布  共 ${fmtBytes(total)} / ${rows.length} 个源文件\n`);
+  for (const r of rows) {
+    stderr(`  ${pct(r[1].bytes).padStart(6)}  ${fmtBytes(r[1].bytes).padStart(7)}`
+      + `  ${String(r[1].lines).padStart(7)} 行  ${String(r[1].funcs).padStart(5)} fn  ${r[0]}\n`);
+  }
+  stderr(`  ${pct(total - sum).padStart(6)}  ${fmtBytes(total - sum).padStart(7)}`
+    + `  ${''.padStart(7)}       ${''.padStart(5)}     (共用：字面量池 / 容器 / 成员派发器 / 运行时)\n`);
 }
 
 /* `-v` 走管线表那一份渲染（ADR-0018 决策五，分片 2 后半）。
@@ -2103,9 +2127,10 @@ function buildNative(mod, outPath, workDir) {
   const dir = workDir === undefined ? workDirFor('c', hash16(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const cPath = join(dir, `${basename(outPath)}.c`);
-  const cText = emitC(mod);
+  const { text: cText, stats } = emitCWithStats(mod);
   writeText(cPath, cText);
   vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
+  vStats(cText, stats);
   const cc = findCC();
   // 运行时是 src/runtime/ 下真正的 C 文件，预编成 .o 缓存起来；热的叶子函数是
   // omni.h 里的 static inline，所以不靠 LTO 也能内联（tcc 没有 -flto）
@@ -2554,6 +2579,7 @@ function main(argv) {
   // 上一片加 `ownsVerbose` 时旧的那行没删掉，而它在后面，于是**把这一行整个盖掉了**。
   // 没门抓到它：`omni c cpp -v` 的那些门只比 stdout，而 `--verbose` 写 stderr。
   VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
+  STATS = rest.includes('--stats');
   vMark = nowMs();
   /* `--help` 在**任何一级**都由同一个函数处理：`findCmd` 走到第一个不是子命令名的记号就停，
    * 所以 `omni c --help` 落在 `c` 上、`omni c link --help` 落在 `link` 上，不必特判。 */
@@ -2935,7 +2961,9 @@ function main(argv) {
     }
     case 'emit-c': {
       const { mod } = compile(path, rest);
-      stdout(emitC(mod, { amalgamate: rest.includes('--amalgamate') }));
+      const r = emitCWithStats(mod, { amalgamate: rest.includes('--amalgamate') });
+      stdout(r.text);
+      vStats(r.text, r.stats);
       return 0;
     }
     case 'build': {

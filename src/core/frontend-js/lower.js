@@ -99,6 +99,18 @@ function patternNames(pat, lower, span, out = []) {
 
 /* ---- 捕获分析（6b）：只需要"哪些名字被内层函数引用过"，宁可多算不能少算 ---- */
 
+/**
+ * 一个 span 属于哪个源文件（P1：分文件发射的唯一依据）。
+ *
+ * span 里本来就挂着整个 SourceFile（见 eachChild 那句注释），所以这一格是**现成的** ——
+ * 从前只是没往 OIR 传。没有它，42 万行 C 落在一个翻译单元里：编不快（clang -O1 要 137 秒）、
+ * 不能并行、不能增量，也看不出是哪个源文件撑起来的。
+ * 拿不到就交空串：调用方按"归到无主那一格"处理，而不是崩。
+ */
+function fileOfSpan(span) {
+  return span && span.file && typeof span.file.path === 'string' ? span.file.path : '';
+}
+
 /** 遍历一个 AST 节点的子节点。跳过 span（里面挂着整个 SourceFile） */
 function eachChild(node, f) {
   for (const k of Object.keys(node)) {
@@ -444,7 +456,15 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
       if (s.type === 'ClassDecl') this.classDecl(s);
     }
     // 顶层的其余语句是 omni_main 的函数体；模块级变量的初始化也在这里发生
-    const main = { name: 'main', mangled: 'omni_main', ret: { k: 'void' }, params: [], body: null };
+    // file：整批顶层就是一个模块，取第一句所在的文件（P1，见 fileOfSpan）
+    const main = {
+      name: 'main',
+      mangled: 'omni_main',
+      file: program.body.length > 0 ? fileOfSpan(program.body[0].span) : '',
+      ret: { k: 'void' },
+      params: [],
+      body: null,
+    };
     this.fn = this.newFrame(program.body, { isMain: true });
     const stmts = [];
     program.body.forEach((s, i) => {
@@ -728,6 +748,11 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     const f = {
       name,
       mangled,
+      /* 定义在哪个源文件（P1）。span 里挂着整个 SourceFile，所以这一格是**现成的**，
+       * 只是从前没往下传。它是"分文件发射"与"按文件看产出分布"的唯一依据 ——
+       * 今天 C 那侧的名字里没有模块痕迹，于是 42 万行落在一个翻译单元里，
+       * 既编不快也看不出是谁撑起来的。 */
+      file: fileOfSpan(span),
       ret: D,
       params: [{ name: 'args', type: listType(D) }],
       // JS 的函数走到底没 return 就是 undefined；OIR 要求非 void 的函数有返回值
@@ -942,7 +967,7 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     }
     const body = block([...this.fn.prelude, ...stmts, { kind: 'Return', value: this.readEntry(self) }]);
     this.fn = outer;
-    this.funcs.push({ name: s.id, mangled: rec.mangled, ret: D, params: [{ name: 'args', type: listType(D) }], body });
+    this.funcs.push({ name: s.id, mangled: rec.mangled, file: fileOfSpan(s.span), ret: D, params: [{ name: 'args', type: listType(D) }], body });
   }
 
   /**
@@ -4329,6 +4354,8 @@ export class JsFrontSession {
     const main = {
       name: entry,
       mangled: entry,
+      // 入口那一格属于**这一批的第一句**所在的文件（整批就是一个模块的顶层）
+      file: program.body.length > 0 ? fileOfSpan(program.body[0].span) : '',
       ret: wantValue ? D : { k: 'void' },
       params: [],
       body: block([...L.fn.prelude, ...stmts, ...tail]),
