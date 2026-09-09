@@ -2252,6 +2252,11 @@ class Lower {
      * （每个 realm 一份）。挂上去的东西读得回来；内建（Math / JSON …）不在它身上 ——
      * 那是画出来的边界，不是悄悄给个空对象。用户自己声明了同名变量的话上面就接住了。 */
     if (e.name === 'globalThis') return op('js_global_this', []);
+    /* 内建构造器**当值用**（ADR-0020 P1-f）：`const A = Array` / `[].constructor === Array`。
+     * 要在 GLOBAL_CALLS 之前 —— String / Number / Boolean 那三个既在这儿也在那儿，而
+     * `"".constructor === String` 要为真，两条路必须给**同一个值**，所以一律走 realm 这一格。
+     * 静态面（Array.isArray）挂不到函数值上，从值上取是运行期报错，见 prelude $js_mk_ctors。 */
+    if (REALM_CTORS.has(e.name)) return op('js_realm_ctor', [], { ctor: e.name });
     /* 全局内建函数当值用（见 builtinFnValue）：`[1,2].map(Number)` /
      * `["1","2"].map(parseInt)`（后者照规范是 [1, NaN, NaN] —— 第二个实参是下标，
      * 被当成了进制）。这一格要在 STATIC_NS 之前 —— `Number` / `String` 既是命名空间
@@ -2628,6 +2633,15 @@ class Lower {
           return this.memberOn(this.builtinFnValue(base, e.object, e.object.name, bs), e);
         }
       }
+      /* 内建构造器身上的 name / length（Array.name / Number.length）：构造器现在取得出值来
+       * （js_realm_ctor），这两格就是那个值上的普通属性读（住在 Function.prototype 上）。
+       * **只**放这两个名字过 —— 别的静态面照旧当场报，不然 `Array.fromAsync` 这类没做的
+       * 东西会从"响的拒绝"变成"静静地 undefined"。 */
+      if (!e.computed && e.object.type === 'Ident' && REALM_CTORS.has(e.object.name)
+        && !this.lookup(e.object.name) && !this.classes.has(e.object.name)
+        && (e.name === 'name' || e.name === 'length')) {
+        return op('js_obj_get', [op('js_realm_ctor', [], { ctor: e.object.name }), s16(e.name)]);
+      }
       this.err(e.span, `'${path}' is not in the closed ABI (ADR-0011 decision 2)`);
       return undefExpr();
     }
@@ -2692,6 +2706,10 @@ class Lower {
 
   memberOn(obj, e) {
     if (e.computed) return op('js_idx_get', [obj, this.expr(e.prop)]);
+    /* x.constructor（ADR-0020 P1-f）：读法与普通属性读一模一样，单独占一格 op 只为让
+     * C 那条腿在**发射期**就拒 —— 构造器对象住在 realm 里（真对象那一族，JS 独有），
+     * 走 js_obj_get 的话 C 会静静地给 undefined。计算写法 o["constructor"] 不走这儿。 */
+    if (e.name === 'constructor') return op('js_ctor_get', [obj]);
     if (Object.hasOwn(JS_PROPS, e.name)) return op(`js_p_${e.name}`, [obj]);
     return op('js_obj_get', [obj, this.propKey(e.name)]);
   }

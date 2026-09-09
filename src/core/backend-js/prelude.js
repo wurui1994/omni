@@ -2544,6 +2544,13 @@ function $js_fn_construct(f, args) {
     }
   }
   const g = $js_asFn(f);
+  /* 内建构造器当值用（$js_mk_ctors 里标了 $ctor 的那批）：new A(3) 与 A(3) 同一件事，
+     交出来的东西（数组、串、正则…）不一定是"真对象"，所以不能落到下面那句
+     "不是对象就还给新造的那格"上 —— 那会把数组悄悄换成一格空对象。 */
+  if (g.$ctor === true) {
+    const rc = $callThis(g, undefined, $js_arr_of(args));
+    return $js_pending() ? undefined : rc;
+  }
   const o = $js_obj_new_p($js_fn_proto(g));
   $js_nt_slot = g;
   const r = $callThis(g, o, $js_arr_of(args));
@@ -2859,7 +2866,57 @@ function $mkRealm() {
   for (const p of [r.arrP, r.strP, r.mapP, r.setP]) {
     $js_def_data(p, $js_sym_wk("iterator"), $nat("[Symbol.iterator]", 0, (t) => $js_it_src(t)), true, false, true);
   }
+  $js_mk_ctors(r);
   return r;
+}
+/* 内建构造器**当值用**（ADR-0020 P1-f 的第二半）：const A = Array、[].constructor === Array。
+   与 $js_realm_proto 同一个路子 —— 名字是编译期常量，每个 realm 一份，取两次是同一个值，
+   所以 === 为真。它是一格**闭包记录**而不是真对象：函数在这个值域里还不是真对象，
+   于是静态面（Array.isArray / Object.keys）挂不上去 —— 那些名字只能从**成员写法**取
+   （Array.isArray(x) 那条静态路），从值上取（A.isArray）是运行期
+   "undefined is not a function"。响，且写在 ADR 里。
+   prototype 那一格靠 $FNPROTO 预先坐好，于是 A.prototype 与 x instanceof A 都对；
+   $ctor 那格标记给 $js_fn_construct 看：内建构造器交出来的东西（数组、串…）不一定是
+   "真对象"，不能被那句"不是对象就还给新造的那格"吞掉。 */
+function $js_mk_ctors(r) {
+  r.ctors = new Map();
+  const mk = (name, len, proto, fn) => {
+    const c = $nat(name, len, fn);
+    c.$ctor = true;
+    $FNPROTO.set(c, proto);
+    $js_def_data(proto, "constructor", c, true, false, true);
+    r.ctors.set(name, c);
+  };
+  /* 收不了的那几个：Function 要编译器在场（见 $js_src_eval），Map / Set / Date 的实参面
+     （可迭代物 / 七个时间格）还没有运行期那一格。一律当场报，不给半对的值。 */
+  const no = (name) => () => $rt_error("'" + name + "' as a value cannot be called here; call it by name instead");
+  mk("Object", 1, r.objP, (t, a) => {
+    if (a[0] === undefined || a[0] === null) return $js_obj_new();
+    if ($js_isobj(a[0]) || Array.isArray(a[0])) return a[0];
+    return $rt_error("Object(primitive) would need a wrapper object; not supported");
+  });
+  mk("Array", 1, r.arrP, (t, a) => (a.length === 1 ? $js_arr_new_n(a[0]) : a.slice()));
+  mk("String", 1, r.strP, (t, a) => (a.length === 0 ? "" : $js_str(a[0])));
+  mk("Number", 1, r.numP, (t, a) => (a.length === 0 ? 0 : $js_num_of(a[0])));
+  mk("Boolean", 1, r.boolP, (t, a) => $js_truthy(a[0]));
+  mk("Symbol", 0, r.symP, (t, a) => $js_sym_new(a[0]));
+  mk("RegExp", 2, r.reP, (t, a) => $js_re_new(a[0], a[1]));
+  mk("Function", 1, r.funP, no("Function"));
+  mk("Map", 0, r.mapP, no("Map"));
+  mk("Set", 0, r.setP, no("Set"));
+  mk("Date", 7, r.dateP, no("Date"));
+}
+function $js_realm_ctor(name) {
+  const c = $realm().ctors.get(name);
+  if (c === undefined) $rt_error("no such builtin constructor: " + name);
+  return c;
+}
+/* x.constructor：就是一次普通的属性读（原型链上那一格 constructor）。
+   自己占一格 op 的**唯一**理由是 C 那条腿：realm 与真对象是 JS 独有的（P1_JS_ONLY），
+   走 js_obj_get 的话 C 会静静地给 undefined 而 JS 给构造器 —— 两条腿的答案不一样。
+   现在 C 在**发射期**就拒。计算写法 o["constructor"] 不走这儿，那是留着的一格窄口。 */
+function $js_ctor_get(o) {
+  return $js_isobj(o) ? $js_getp(o, "constructor", o) : $js_prim_get(o, "constructor");
 }
 /* ---------------------------------------- 作业队列（微任务）与 Promise
    这个值域里**没有事件循环**：队列是一格数组，降级器在 main 末尾补一句 js_jobs_run
@@ -3787,12 +3844,10 @@ function $js_instanceof(v, ctor) {
   const proto = $js_isobj(ctor) ? $js_getp(ctor, "prototype", undefined)
     : ($dynTag(ctor) === "function" ? $js_fn_proto(ctor) : undefined);
   if (!$js_isobj(proto)) $rt_error("right-hand side of 'instanceof' is not callable");
-  let cur = $js_isobj(v) ? v.pr : null;
-  while (cur !== null && cur !== undefined) {
-    if (cur === proto) return true;
-    cur = $js_isobj(cur) ? cur.pr : null;
-  }
-  return false;
+  /* 走链那一步与静态那条路（js_instanceof_p）共用一份 —— 数组 / Map / Set / 正则这些在 JS
+     里都是对象，可在这个值域里不是"真对象"，起点得从 $js_proto_of_prim 取。从前这儿只认
+     真对象，于是 [] instanceof A（A 是取出来的 Array 构造器）静静地给 false。 */
+  return $js_instanceof_p(v, proto);
 }
 /* x instanceof Object / Array / …（ADR-0020）：右边给的是 realm 上那一格 prototype 本身
    （那些构造器在这个值域里取不出函数值来）。原始值一律为假 —— 规范如此：

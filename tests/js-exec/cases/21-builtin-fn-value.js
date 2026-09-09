@@ -1,11 +1,15 @@
-// 内建函数**当值用**（ADR-0020 P1-f）：`const f = Math.abs` / `xs.map(Number)`。
+// 内建函数**当值用**（ADR-0020 P1-f）：`const f = Math.abs` / `xs.map(parseInt)`。
 // 降级出来的是一个薄包装闭包，体就是那一句 ABI 调用 —— 所以这条路**五条腿都走得通**，
 // 不是 JS 那侧的特产。这条用例刻意只用数与串那几格 op（真对象那一族在 C 那侧还没有）。
+//
+// `map(Number)` / `map(String)` 从前也在这儿。它们挪去了 js262/builtin-fn-value.js：
+// String / Number / Boolean 这三个名字当值用时现在给的是 **realm 上那一格构造器对象**
+// （`"".constructor === String` 要为真，见 ADR-0020），而 realm 是真对象那一族的东西，
+// 只有 JS 那条腿有。这一格因此是**发射期**的拒，不是静悄悄的错值。
 const abs = Math.abs;
 console.log(`abs ${abs(-3)} ${abs(2.5)}`);
 const xs = [-1, -2, 3];
 console.log(`map ${xs.map(Math.abs).join(",")}`);
-console.log(`map ${["1", "2", "3"].map(Number).join(",")}`);
 // map 传下去的第二个实参是下标，被 parseInt 当成了进制 —— 照规范，第二格起是 NaN
 console.log(`radix ${["1", "2", "3"].map(parseInt).join(",")}`);
 const f = Math.max;
@@ -14,7 +18,6 @@ console.log(`max ${f(3, 7)} ${f(-1, -9)}`);
 console.log(`same ${Math.abs === Math.abs} ${Math.abs === Math.floor}`);
 const sq = Math.sqrt;
 console.log(`sqrt ${sq(16)} ${sq(2) > 1.414}`);
-console.log(`str ${[1, true].map(String).join("|")}`);
 
 // 可变实参与展开（同一刀）：op 是定长的，所以 3 个以上摊成一串两两调用、展开则是
 // "整条实参表先求成 list，再按形状接下去"。这几行在 C 那条腿上走的是 js_arr_reduce /
