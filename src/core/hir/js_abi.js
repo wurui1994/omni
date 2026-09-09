@@ -314,7 +314,9 @@ export const JS_ABI = {
   js_sym_wk: { js: '$js_sym_wk', c: 'omni_js_sym_wk', arity: 0, lit: ['wk'], litText: true },
   // 内建原型（Object / Function / Array / String / Number / Boolean / Symbol /
   // Error / Map / Set / RegExp / Iterator）—— 内建方法就住在这些对象上
-  js_realm_proto: { js: '$js_realm_proto', c: 'omni_js_realm_proto', arity: 0, lit: ['proto'] },
+  /* 内建原型（ADR-0020 P1-c 的第十三步）。litText：C 侧收的是一格 omni_str（名字整词），
+   * 不是单字符 —— 不标的话发射器会写出 'Object' 这种多字符字符常量。 */
+  js_realm_proto: { js: '$js_realm_proto', c: 'omni_js_realm_proto', arity: 0, lit: ['proto'], litText: true },
   /* 内建构造器**当值用**（`const A = Array`）与 `x.constructor`。名字同样是编译期常量。
      两格都只有 JS 那条腿：构造器对象住在 realm 里，而 realm 是真对象那一族的东西。
      js_ctor_get 单独占一格的理由写在 prelude 的 $js_ctor_get 上头 —— 让 C 在**发射期**
@@ -920,7 +922,10 @@ const P1_JS_ONLY = [
   'js_to_prim',
   // Symbol 那一族已经有 C 孪生了（runtime/omni_js_sym.c，ADR-0020 P1-c 的第一步），
   // 所以不在这张单子里 —— 真对象那一片还在，见下面几行。
-  'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
+  // js_realm_proto 有 C 孪生了（omni_js_obj.h）：Object.prototype 那一格成员挂全了（规范
+  // 20.1.3 那张短表），别的原型是一格带 get 陷阱的代理 —— 同一性成立（instanceof 只比它），
+  // 读成员当场报。realm_ctor / ctor_get / global_this 还在。
+  'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
   // Date.UTC 与 Date.parse 有 C 孪生了（runtime/omni_js_date.c）：它们交出来的是一个毫秒数，
   // 与真对象无关。new Date(…) 与 new Date(y, mo, d) 照旧拒 —— 前者造真对象，后者要本地时区。
   // 代理有 C 孪生了（omni_js_obj.h）：px_t / px_h 挂在真对象的载荷上，get / set / has /

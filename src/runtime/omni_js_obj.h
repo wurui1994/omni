@@ -68,6 +68,8 @@ static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own); \
 static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k); \
 static omni_dyn omni_js_fn_proto_(omni_dyn f); \
 static omni_dyn omni_js_obj_keys(omni_dyn o); \
+static omni_dyn omni_js_realm_proto(omni_str name); \
+static omni_dyn omni_js_proto_of_tag_(omni_dyn v); \
 static omni_dyn omni_js_obj_new(void) { return omni_js_dict_wrap(DT##_new()); } \
 /* JS 里数组也是对象，身上可以挂字段（asy 前端的 do-while 就往那一格更新列表上挂一个 dw）。
    这个值域里 list 只是一段 items/len、没有属性槽，所以额外属性放在一张**按同一性索引的
@@ -267,8 +269,16 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   } \
   /* contains + get 是两次哈希 —— 取属性是解释器最热的一条，只探一次 */ \
   int64_t e = DT##_find(d, key); \
-  if (e < 0) return omni_dyn_undef(); \
-  return d->vals[e]; \
+  if (e >= 0) return d->vals[e]; \
+  /* 普通对象（这条腿上是一格 dict）的原型是 Object.prototype（规范如此）：取不到的名字要
+     接着往那儿找 —— `({a:1}).hasOwnProperty("a")` 就靠这一条。
+     **list 那一支刻意不接**：数组的原型是 Array.prototype，而那一格现在是"读成员就报"的
+     代理（realm 只搬了 Object.prototype），接上去会把 `a.zork` 从 undefined 变成一句响错。 */ \
+  if (o.tag == OMNI_DYN_DICT) { \
+    return omni_js_getp(omni_js_realm_proto(omni_str_new("Object", 6)), \
+                        omni_dyn_of_s16(omni_s16_of_utf8(key)), o); \
+  } \
+  return omni_dyn_undef(); \
 } \
 static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
   if (o.tag == OMNI_DYN_OBJ) { \
@@ -401,20 +411,24 @@ static LT omni_js_slot_new_(omni_dyn keyd, omni_dyn v, bool w, bool e, bool c) {
   s->len = 8; \
   return s; \
 } \
-/* proto 缺席（undefined）时**这条腿上是 null 原型**，而 prelude 的 $js_obj_new_p 在那一格
-   给的是 realm 上的 Object.prototype（`proto === undefined ? $realm().objP : proto`）。
-   现在看不出来：realm 还在 P1-c 里，`x instanceof Object` 这一族在 C 上整格拒。
-   **realm 落地的那一刀必须同时改这儿** —— 不改的话类的实例（降级器发的是
-   js_obj_new_p(undefined)）的链走不到 Object.prototype，`p instanceof Object` 会静静地
-   给 false（JS 那条腿与两把尺子都给 true，量过）。 */ \
-static omni_dyn omni_js_obj_new_p(omni_dyn proto) { \
+/* proto **缺席**（undefined）时原型是 realm 上那格 Object.prototype，给 null 才是真的没有
+   原型 —— 与 prelude 的 $js_obj_new_p 一字不差（`proto === undefined ? $realm().objP : proto`）。
+   这一条要紧：降级器给类的原型发的正是 js_obj_new_p(undefined)，链走不到 Object.prototype
+   的话 `p instanceof Object` 会静静地给 false（两把尺子都给 true）。
+   omni_js_new_bare_ 是**不带默认值**的那一格：realm 自己造 Object.prototype 时用它，
+   不然就无限递归了。 */ \
+static omni_dyn omni_js_new_bare_(omni_dyn proto) { \
   omni_js_objv *ov = (omni_js_objv *)omni_alloc(sizeof(omni_js_objv)); \
-  ov->pr = proto.tag == OMNI_DYN_UNDEF ? omni_dyn_null() : proto; \
+  ov->pr = proto; \
   ov->ps = (void *)DT##_new(); \
   ov->ex = true; \
   ov->px_t = omni_dyn_undef(); \
   ov->px_h = omni_dyn_undef(); \
   return omni_dyn_of_ref((void *)ov, OMNI_DYN_OBJ); \
+} \
+static omni_dyn omni_js_obj_new_p(omni_dyn proto) { \
+  return omni_js_new_bare_(proto.tag == OMNI_DYN_UNDEF \
+    ? omni_js_realm_proto(omni_str_new("Object", 6)) : proto); \
 } \
 /* 带属性位的那一格对象：一格真对象（原型是 null —— realm 上那格 Object.prototype 还在
    P1-c 里）。与普通对象字面量刻意分开，见 js_abi.js 里 js_obj_slots 那条注。 */ \
@@ -648,11 +662,21 @@ static omni_dyn omni_js_obj_proto_set(omni_dyn o, omni_dyn p) { \
    原始值一律为假（规范如此：1 instanceof Number 是 false）；数组 / Map 那些的原型住在
    realm 上，而 realm 还在 P1-c 里 —— 那条路上右边取不出 prototype，到不了这儿。 */ \
 static bool omni_js_instanceof_p(omni_dyn v, omni_dyn proto) { \
-  omni_dyn cur = v.tag == OMNI_DYN_OBJ ? ((omni_js_objv *)v.u.ref)->pr : omni_dyn_null(); \
-  while (cur.tag == OMNI_DYN_OBJ || omni_js_cont_proto_(cur)) { \
+  /* 原始值一律为假（规范如此：1 instanceof Number 是 false）；数组 / Map / 正则那些"不是
+     真对象但有原型"的值从 realm 上那格起步 —— 见 omni_js_proto_of_tag_。 */ \
+  if (v.tag == OMNI_DYN_REAL || v.tag == OMNI_DYN_INT || v.tag == OMNI_DYN_UINT \
+      || v.tag == OMNI_DYN_BOOL || v.tag == OMNI_DYN_STR16 || v.tag == OMNI_DYN_STRING \
+      || v.tag == OMNI_DYN_SYM || v.tag == OMNI_DYN_NULL || v.tag == OMNI_DYN_UNDEF) { \
+    return false; \
+  } \
+  /* 每一步都过 omni_js_proto_of_tag_：链上可能夹着一格 dict（Object.create({…}) 那种），
+     那一格的"原型"是 realm 上的 Object.prototype，所以尾巴也接得上。
+     步数封顶纯粹是防成环（原型链成环在 JS 里本来就该被 setPrototypeOf 拦，这条腿上还没拦）。 */ \
+  omni_dyn cur = omni_js_proto_of_tag_(v); \
+  for (int64_t guard = 0; guard < 1000; guard++) { \
+    if (cur.tag == OMNI_DYN_NULL || cur.tag == OMNI_DYN_UNDEF) return false; \
     if (cur.tag == proto.tag && cur.u.ref == proto.u.ref) return true; \
-    if (cur.tag != OMNI_DYN_OBJ) break; \
-    cur = ((omni_js_objv *)cur.u.ref)->pr; \
+    cur = omni_js_proto_of_tag_(cur); \
   } \
   return false; \
 } \
@@ -829,6 +853,136 @@ static omni_dyn omni_js_iter_o_(omni_dyn v) { \
     LT##_push(out, omni_js_obj_get(r, omni_js_name_("value", 5))); \
   } \
   return omni_js_arr_wrap(out); \
+} \
+/* ---- realm（ADR-0020 P1-c 的第十三步）--------------------------------------
+   realm 是两件事，这一步落的是**同一性**那一半外加 Object.prototype 那一格：
+
+   1. `x instanceof Array` 只问"Array.prototype 在不在 x 的链上"，压根不读原型上的成员 ——
+      所以每个内建标签一格**规范的原型对象**就够（omni_js_proto_of_tag_ 把标签映到它）。
+   2. `Object.prototype` 的成员表**短而封闭**（规范 20.1.3），写得全，所以这一格是真的可用。
+      别的原型（Array / String…）的成员表还没搬过来，所以它们是一格**带 get 陷阱的代理**：
+      读成员当场报，不给 undefined —— 少一个名字给 undefined 就是悄悄的错答案。
+
+   原生函数值：闭包记录就是 `{ omni_fnptr fp; …捕获的 }`（见 omni_js_wrap_s），所以这儿一格
+   `{ fp, sel, a }` 的记录 + 一个按 sel 分派的入口就够了。接收者走 this 那格槽（读一次就清）。 */ \
+struct omni_js_nat_s { omni_fnptr fp; int64_t sel; omni_dyn a; }; \
+static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
+  struct omni_js_nat_s *n = (struct omni_js_nat_s *)me; \
+  omni_dyn self = omni_js_this_take(); \
+  omni_dyn a0 = args != NULL && args->len > 0 ? args->items[0] : omni_dyn_undef(); \
+  switch (n->sel) { \
+    case 1: case 2: return omni_js_obj_to_string(self); /* toString / toLocaleString */ \
+    case 3: return self;                                /* valueOf */ \
+    case 4: {                                           /* hasOwnProperty */ \
+      bool r = self.tag == OMNI_DYN_OBJ ? omni_js_obj_has_o_(self, a0, true) \
+             : (self.tag == OMNI_DYN_DICT || self.tag == OMNI_DYN_LIST) \
+               ? omni_js_obj_has(self, a0) : false; \
+      return omni_dyn_of_bool(r); \
+    } \
+    case 5: {                                           /* isPrototypeOf */ \
+      omni_dyn cur = a0.tag == OMNI_DYN_OBJ ? ((omni_js_objv *)a0.u.ref)->pr : omni_dyn_null(); \
+      while (cur.tag == OMNI_DYN_OBJ) { \
+        if (cur.u.ref == self.u.ref && self.tag == OMNI_DYN_OBJ) return omni_dyn_of_bool(true); \
+        cur = ((omni_js_objv *)cur.u.ref)->pr; \
+      } \
+      return omni_dyn_of_bool(false); \
+    } \
+    case 6: {                                           /* propertyIsEnumerable */ \
+      if (self.tag != OMNI_DYN_OBJ) { \
+        return omni_dyn_of_bool(self.tag == OMNI_DYN_DICT && omni_js_obj_has(self, a0)); \
+      } \
+      DT ps = omni_js_ps_(self); \
+      int64_t e = DT##_find(ps, omni_js_pkey_(a0)); \
+      return omni_dyn_of_bool(e >= 0 && ((LT)ps->vals[e].u.ref)->items[5].u.b); \
+    } \
+    default: {                                          /* 别的原型上的 get 陷阱 */ \
+      omni_str nm = omni_s16_to_utf8(omni_js_as_s16(n->a)); \
+      omni_str k = omni_s16_to_utf8(omni_js_as_s16(omni_js_str(a0))); \
+      omni_errorf("backend-c: reading '%.*s' off %.*s.prototype — 内建原型上的成员还没搬到 " \
+                  "C 那条腿（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器", \
+                  (int)k.len, k.p, (int)nm.len, nm.p); \
+      return omni_dyn_undef(); \
+    } \
+  } \
+} \
+static omni_dyn omni_js_nat_(int64_t sel, omni_dyn a) { \
+  struct omni_js_nat_s *n = (struct omni_js_nat_s *)omni_alloc(sizeof *n); \
+  n->fp = (omni_fnptr)omni_js_nat_call_; \
+  n->sel = sel; \
+  n->a = a; \
+  return omni_dyn_of_fn((omni_fn)n); \
+} \
+/* realm 上那几格原型。名字与 prelude 的 $js_realm_proto 那个 switch 一一对应；认不出来的
+   名字**当场报**，不给一格空对象。 */ \
+static omni_dyn omni_js_realm_tbl_[12]; \
+static int omni_js_realm_ix_(omni_str name) { \
+  static const char *names[12] = { "Object", "Function", "Array", "String", "Number", \
+    "Boolean", "Symbol", "Error", "RegExp", "Map", "Set", "Promise" }; \
+  for (int i = 0; i < 12; i++) { \
+    int64_t n = (int64_t)strlen(names[i]); \
+    if (name.len == n && memcmp(name.p, names[i], (size_t)n) == 0) return i; \
+  } \
+  return -1; \
+} \
+static omni_dyn omni_js_realm_proto(omni_str name) { \
+  int ix = omni_js_realm_ix_(name); \
+  if (ix < 0) { \
+    omni_errorf("backend-c: %.*s.prototype — realm 上这一格还没搬到 C 那条腿" \
+                "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器", \
+                (int)name.len, name.p); \
+    return omni_dyn_undef(); \
+  } \
+  if (omni_js_realm_tbl_[ix].tag == OMNI_DYN_OBJ) return omni_js_realm_tbl_[ix]; \
+  if (ix == 0) { \
+    /* Object.prototype：原型是 null（链的顶），成员按规范 20.1.3 挂全，都不可枚举 */ \
+    omni_dyn p = omni_js_new_bare_(omni_dyn_null()); \
+    omni_js_realm_tbl_[0] = p; \
+    omni_js_def_data_(p, omni_js_name_("toString", 8), omni_js_nat_(1, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(p, omni_js_name_("toLocaleString", 14), omni_js_nat_(2, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(p, omni_js_name_("valueOf", 7), omni_js_nat_(3, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(p, omni_js_name_("hasOwnProperty", 14), omni_js_nat_(4, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(p, omni_js_name_("isPrototypeOf", 13), omni_js_nat_(5, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(p, omni_js_name_("propertyIsEnumerable", 20), \
+                      omni_js_nat_(6, omni_dyn_undef()), true, false, true); \
+    return p; \
+  } \
+  /* 别的原型：一格带 get 陷阱的代理，读成员当场报 —— 同一性照旧成立（instanceof 只比它） */ \
+  omni_dyn h = omni_js_new_bare_(omni_dyn_null()); \
+  omni_dyn nm = omni_dyn_of_s16(omni_s16_of_utf8(name)); \
+  omni_js_def_data_(h, omni_js_name_("get", 3), omni_js_nat_(7, nm), true, false, true); \
+  /* 原型自己的原型是 Object.prototype（规范如此）—— 少了这一条，`[] instanceof Object`
+     会静静地给 false（链走到 Array.prototype 就断了）。 */ \
+  omni_dyn objp = omni_js_realm_proto(omni_str_new("Object", 6)); \
+  omni_dyn px = omni_js_new_bare_(objp); \
+  omni_js_objv *ov = (omni_js_objv *)px.u.ref; \
+  ov->px_t = omni_js_new_bare_(objp); \
+  ov->px_h = h; \
+  omni_js_realm_tbl_[ix] = px; \
+  return px; \
+} \
+/* 一格值的原型（规范里的 [[Prototype]]）。真对象自己带着，别的按标签映到 realm 上 ——
+   `[] instanceof Array` 与 `x instanceof Object` 全靠这一格。 */ \
+static omni_dyn omni_js_proto_of_tag_(omni_dyn v) { \
+  switch (v.tag) { \
+    case OMNI_DYN_OBJ: return ((omni_js_objv *)v.u.ref)->pr; \
+    case OMNI_DYN_DICT: return omni_js_realm_proto(omni_str_new("Object", 6)); \
+    case OMNI_DYN_LIST: return omni_js_realm_proto(omni_str_new("Array", 5)); \
+    case OMNI_DYN_STR16: case OMNI_DYN_STRING: \
+      return omni_js_realm_proto(omni_str_new("String", 6)); \
+    case OMNI_DYN_REAL: return omni_js_realm_proto(omni_str_new("Number", 6)); \
+    case OMNI_DYN_BOOL: return omni_js_realm_proto(omni_str_new("Boolean", 7)); \
+    case OMNI_DYN_FN: return omni_js_realm_proto(omni_str_new("Function", 8)); \
+    case OMNI_DYN_MAP: return omni_js_realm_proto(omni_str_new("Map", 3)); \
+    case OMNI_DYN_SET: return omni_js_realm_proto(omni_str_new("Set", 3)); \
+    case OMNI_DYN_RE: return omni_js_realm_proto(omni_str_new("RegExp", 6)); \
+    case OMNI_DYN_SYM: return omni_js_realm_proto(omni_str_new("Symbol", 6)); \
+    default: return omni_dyn_null(); \
+  } \
 } \
 /* 普通函数当构造器（ADR-0020）：`new f(a)` = 造一格以 f.prototype 为原型的对象、拿它当
    接收者跑 f、f 返回对象就用那一格。函数在这个值域里**不是**真对象，所以那格 prototype

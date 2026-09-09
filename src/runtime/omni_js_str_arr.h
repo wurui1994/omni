@@ -392,7 +392,17 @@ static omni_dyn omni_js_obj_from_entries(omni_dyn pairs) { \
 static omni_dyn omni_js_own_ts_(omni_dyn v) { \
   if (v.tag != OMNI_DYN_OBJ && v.tag != OMNI_DYN_DICT) return omni_dyn_undef(); \
   omni_dyn k = omni_dyn_of_s16(omni_js_s16_lit("toString")); \
-  return v.tag == OMNI_DYN_OBJ ? omni_js_getp(v, k, omni_dyn_undef()) : omni_js_obj_get(v, k); \
+  omni_dyn ts = v.tag == OMNI_DYN_OBJ ? omni_js_getp(v, k, omni_dyn_undef()) \
+                                      : omni_js_obj_get(v, k); \
+  if (ts.tag != OMNI_DYN_FN) return omni_dyn_undef(); \
+  /* **继承来的那格 Object.prototype.toString 不算"自带"**：落回 to_s16 那套按标签直说的
+     逻辑去（异常对象是 "Name: message"、Map 是 "[object Map]"、数组是 join(",")…）。
+     realm 落地之后每格对象的链上都有那一格，不认出来的话 String(new Error("x")) 会从
+     "Error: x" 变成 "[object Object]"（这条是五条腿那道闸当场量出来的）。 */ \
+  omni_dyn base = omni_js_getp(omni_js_realm_proto(omni_str_new("Object", 6)), k, \
+                               omni_dyn_undef()); \
+  if (base.tag == OMNI_DYN_FN && base.u.ref == ts.u.ref) return omni_dyn_undef(); \
+  return ts; \
 } \
 static omni_dyn omni_js_str_v(omni_dyn v) { \
   omni_dyn ts = omni_js_own_ts_(v); \
