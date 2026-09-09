@@ -1768,8 +1768,11 @@ function $js_arr_cmp(f, x, y) {
     const a = $js_str(x), b = $js_str(y);
     return a < b ? -1 : (a > b ? 1 : 0);
   }
+  /* 比较器交出来的东西先 ToNumber（规范 23.1.3.30.2 第 3 步）—— 不是"只认数、别的当 0"。
+     差别就在 (x, y) => x > y 这种常见的写错上：那给的是布尔，规范里 true 是 1、false 是 0，
+     于是它**排得对**；从前那一支当 0，于是一格都不动、静静地交回原来的次序。 */
   const r = $callFn(f, [x, y]);
-  const d = $dynTag(r) === "real" ? r : ($dynTag(r) === "int" ? Number(r) : 0);
+  const d = $js_num_of(r);
   return Number.isNaN(d) ? 0 : (d < 0 ? -1 : (d > 0 ? 1 : 0));
 }
 function $js_arr_sort(a, f) { $js_arr_of(a).sort((x, y) => $js_arr_cmp(f, x, y)); return a; }
@@ -2734,6 +2737,11 @@ function $mkRealm() {
      [1,2].toString() 落到 Object.prototype 上、印出 [object Array]（量出来的分叉）。 */
   $natm(r.arrP, "toString", 0, (t) => $js_arr_join(t, undefined));
   $natm(r.arrP, "slice", 2, (t, a) => $js_arr_slice(t, a[0], a[1]));
+  /* sort / toSorted 当值用（[].sort.length、Array.prototype.sort.call(xs, cmp)）：
+     成员位上走的是定长 op，这儿补的是原型上那一格函数值 —— 从前 [].sort 是 undefined，
+     于是 .length 当场报。比较器照旧那一份（$js_arr_cmp），两条路语义同一格。 */
+  $natm(r.arrP, "sort", 1, (t, a) => $js_arr_sort(t, a[0]));
+  $natm(r.arrP, "toSorted", 1, (t, a) => $js_arr_to_sorted(t, a[0]));
   $natm(r.arrP, "concat", 1, (t, a) => $js_arr_concat(t, a[0]));
   // splice / toSpliced 收可变实参，而且**实参个数是语义的一部分**，所以整串传下去
   $natm(r.arrP, "splice", 2, (t, a) => $js_arr_splice(t, a));

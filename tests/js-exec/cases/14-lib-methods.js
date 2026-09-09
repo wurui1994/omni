@@ -17,6 +17,9 @@ const sorted = src.toSorted((a, b) => a - b);
 // toSorted 不动原数组，这一行是它和 sort 的分水岭
 console.log(`toSorted ${JSON.stringify(sorted)} ${JSON.stringify(src)}`);
 console.log(`toSortedDefault ${JSON.stringify([10, 9, 1].toSorted())}`);
+// 比较器交出来的东西照规范先 ToNumber：交串的那种写法从前一律当 0，一格都不动
+console.log(`sortStrCmp ${JSON.stringify([3, 1, 2].toSorted((x, y) => x < y ? "-1" : (x > y ? "1" : "0")))}`);
+console.log(`sortUndef ${JSON.stringify([3, undefined, 1].toSorted((x, y) => x - y))}`);
 
 console.log(`replaceAll ${"a-b-c".replaceAll("-", "+")}`);
 console.log(`replaceAll ${"aaa".replaceAll("aa", "b")}`);

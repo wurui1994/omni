@@ -531,7 +531,10 @@ static int omni_js_arr_cmp(omni_dyn f, omni_dyn x, omni_dyn y) { \
   args->items[1] = y; \
   args->len = 2; \
   omni_dyn r = omni_js_call(f, args); \
-  double d = r.tag == OMNI_DYN_REAL ? r.u.r : (r.tag == OMNI_DYN_INT ? (double)r.u.i : 0.0); \
+  /* 比较器交出来的东西先 ToNumber（规范 23.1.3.30.2 第 3 步）：`(x, y) => x > y` 那种
+     写错给的是布尔，true 是 1、false 是 0，于是它排得对；从前非数一律当 0，一格都不动。 */ \
+  omni_dyn rn = omni_js_num_of(r); \
+  double d = rn.tag == OMNI_DYN_REAL ? rn.u.r : (rn.tag == OMNI_DYN_INT ? (double)rn.u.i : 0.0); \
   if (isnan(d)) return 0; \
   return d < 0 ? -1 : (d > 0 ? 1 : 0); \
 } \
