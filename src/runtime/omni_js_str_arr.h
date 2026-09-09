@@ -358,6 +358,45 @@ static omni_dyn omni_js_idx_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
       return omni_dyn_undef(); \
   } \
 } \
+/* Object.fromEntries（规范 20.1.2.7）：把一串 [k, v] 摊成一格对象。JS 那条腿上造的是
+   真对象（$JSObj + Object.prototype），这条腿上"普通对象"就是 dict —— 键都过一遍
+   ToPropertyKey、值原样存，可观察的那几样（取键、Object.keys、JSON）逐格相同。 */ \
+static omni_dyn omni_js_obj_from_entries(omni_dyn pairs) { \
+  omni_dyn o = omni_js_obj_new(); \
+  LT xs = omni_js_arr_of(omni_js_iter(pairs)); \
+  for (int64_t i = 0; i < xs->len; i++) { \
+    omni_dyn p = xs->items[i]; \
+    /* 键过一遍 ToPropertyKey：符号原样，别的**一律转串**（`[[true,"b"]]` 的键是 "true"）。
+       不能直接交给 omni_js_obj_set —— 那条路上的 omni_js_prop_k 只把数转串，别的标签
+       撞在 "bool is not a string" 上（量出来的）。那句断言是"降级发错了"的固定签名，
+       不该被这一族正常写法碰上，所以在这儿先规范化。 */ \
+    omni_dyn k = omni_js_idx_get(p, omni_dyn_of_real(0.0)); \
+    omni_js_obj_set(o, k.tag == OMNI_DYN_SYM ? k : omni_js_str(k), \
+                       omni_js_idx_get(p, omni_dyn_of_real(1.0))); \
+  } \
+  return o; \
+} \
+/* Object.groupBy（ES2024）：走一遍迭代，回调收 (value, index)，每组按**原顺序**攒成一个
+   数组。规范说交出来的是一格 null 原型的对象 —— 这条腿上没有原型链，dict 就是那格对象
+   （`Object.getPrototypeOf` 本来就还在 P1_JS_ONLY 里，问不着）。键照规范过 ToPropertyKey：
+   符号原样、别的转串。回调每调一次都要问一句待决错误，不然抛了还接着分组。 */ \
+static omni_dyn omni_js_obj_group_by(omni_dyn items, omni_dyn f) { \
+  omni_dyn out = omni_js_obj_new(); \
+  LT xs = omni_js_arr_of(omni_js_iter(items)); \
+  for (int64_t i = 0; i < xs->len; i++) { \
+    const omni_dyn tmp[2] = { xs->items[i], omni_dyn_of_real((double)i) }; \
+    omni_dyn kv = omni_js_call(f, LT##_from(tmp, 2)); \
+    if (omni_js_pending()) return out; \
+    omni_dyn k = kv.tag == OMNI_DYN_SYM ? kv : omni_js_str(kv); \
+    omni_dyn g = omni_js_obj_get(out, k); \
+    if (g.tag != OMNI_DYN_LIST) { \
+      g = omni_js_arr_wrap(LT##_new()); \
+      omni_js_obj_set(out, k, g); \
+    } \
+    LT##_push((LT)g.u.ref, xs->items[i]); \
+  } \
+  return out; \
+} \
 /* 异常对象就是普通对象：{ $cls: [类名…，最派生的在前], message }（ADR-0011 决策 15）。
    `x instanceof C` 查 $cls 链 —— 被抛出来的可以是任何值（字符串也行），所以不认的
    一律给 false，不报错。 */ \

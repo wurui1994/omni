@@ -894,7 +894,10 @@ const P1_JS_ONLY = [
   // js_is_obj 与 js_obj_to_string 也有 C 孪生了（omni_js.c）：两条都是照标签直说 ——
   // 这条腿上没有真对象，所以既没有 Symbol.toStringTag 也没有原型链。
   'js_obj_own_keys',
-  'js_obj_from_entries', 'js_obj_descs',
+  'js_obj_descs',
+  // Object.fromEntries 与 Object.groupBy 有 C 孪生了（omni_js_str_arr.h）：JS 那条腿上
+  // 它们造的是真对象（后者还是 null 原型），而这条腿上"普通对象"就是 dict —— 可观察的
+  // 那几样（取键、Object.keys、JSON、分组的原顺序）逐格相同，原型那一格本来就问不着。
   // js_for_in_keys 有 C 孪生了：这条腿上没有原型链，所以"自有 + 继承"只剩自有那一段，
   // 正好是 omni_js_obj_keys 的三支（见 omni_js_obj.h）。
   'js_instanceof', 'js_instanceof_p', 'js_to_prim', 'js_iter_proto', 'js_iter_next',
@@ -904,8 +907,6 @@ const P1_JS_ONLY = [
   'js_date_parse', 'js_proxy_new', 'js_date_utc',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
   'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',
-  // groupBy 里 Object 那一格造的是**真对象**（null 原型），所以跟着这一族
-  'js_obj_group_by',
   // matchAll 的结果带 index / input / groups —— 那是 list 旁表，C 那侧还没有
   'js_re_match_all', 'js_re_flags_g',
   'js_jobs_run',

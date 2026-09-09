@@ -282,3 +282,14 @@ console.log(String(sa), `v=${sa}`, "" + sa);
 console.log(String([1, [2, [3]]]), String([null, undefined, 5]), String([]));
 console.log(String({ a: 1 }), String(new Error("x")), String(new TypeError("bad")));
 console.log("t: " + new Error("cat"));
+
+// Object.fromEntries 与 Object.groupBy 现在**五条腿都有**（ADR-0020 P1-c）：JS 那条腿上
+// 造的是真对象（groupBy 还是 null 原型），C 这条腿上"普通对象"就是 dict —— 可观察的
+// 那几样（取键、Object.keys、JSON、分组的原顺序）逐格相同。
+const fe = Object.fromEntries([["x", 1], ["y", 2], ["x", 3]]);
+console.log(JSON.stringify(fe), Object.keys(fe).join(","));
+console.log(JSON.stringify(Object.fromEntries(new Map([["a", 1], ["b", [2]]]))));
+console.log(JSON.stringify(Object.fromEntries([[1, "n"], [true, "b"]])));
+const gb = Object.groupBy(["ada", "bo", "cy", "dee"], (s) => (s.length > 2 ? "long" : "short"));
+console.log(JSON.stringify(gb), gb.long.join("+"));
+console.log(JSON.stringify(Object.groupBy([10, 11, 12], (v, i) => i % 2)));
