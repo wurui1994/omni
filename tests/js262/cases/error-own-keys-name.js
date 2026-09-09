@@ -32,3 +32,13 @@ const ec = new Error("c", { cause: 7 });
 console.log(JSON.stringify(ec), ec.cause, Object.keys(ec).length);
 // 带数组 replacer 那一格走 [[Get]]，不可枚举的自有属性照样看得见
 console.log(JSON.stringify(t, ["message"]), JSON.stringify(t, ["name"]));
+// AggregateError 的 errors 那一格、剩下两个内建错误名，与 Object.prototype.toString 的标签
+const ag = new AggregateError([new Error("a"), new Error("b")], "many");
+console.log(ag.message, ag.name, ag.errors.length, ag instanceof AggregateError, ag instanceof Error);
+console.log(new URIError("u").name, new EvalError("v").name, new Error().message === "");
+console.log(Object.prototype.toString.call(e), Object.prototype.toString.call(t));
+// cause 的值是对象也照样只是 own 不可枚举
+const deep = new Error("m", { cause: new Error("inner") });
+console.log(deep.cause.message, "cause" in new Error("no"), JSON.stringify(deep));
+// err.stack 这个值域里没有（"stack" in e 是 false）。它是**已知的差**，不在这儿断言 ——
+// 这条门要求与 qjs 逐字节相同，理由与补法写在 ADR-0020 的"没做"那一节。
