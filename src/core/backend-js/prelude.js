@@ -4835,13 +4835,18 @@ function $js_re_last_index(r) {
   return r.li;
 }
 // source / flags：正则对象身上那两格只读属性（new RegExp(src, flags) 也从它们回读）
+/* 这两格有两个身份：re.source / re.flags 的取值面（接收者一定是正则，成员派发按标签走），
+   以及"把**运行期**的那一格实参摊成 (源, 旗标)"—— 后者是 $js_str_replace 那一族早就在用的
+   办法，match / matchAll / search 收非字面量正则时也走它（见 lower.js 的 regexCall）。
+   所以非正则不报错，照规范 ToString 当**模式**收下（"abc".match("b") 就是这个意思），
+   undefined 当空模式（不是 "undefined"）。 */
 function $js_re_source(r) {
-  if ($dynTag(r) !== "regexp") $rt_error($dynTag(r) + " is not a regexp");
-  return r.src;
+  if ($dynTag(r) === "regexp") return r.src;
+  return r === undefined ? "" : $js_str(r);
 }
 function $js_re_flags(r) {
-  if ($dynTag(r) !== "regexp") $rt_error($dynTag(r) + " is not a regexp");
-  return r.flags;
+  if ($dynTag(r) === "regexp") return r.flags;
+  return "";
 }
 // search：头一处匹配的下标，找不到给 -1。**不动 lastIndex**（规范 22.1.3.22 存了再复原），
 // 所以 /g 与不带 g 的答案一样

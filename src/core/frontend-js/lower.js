@@ -3100,8 +3100,19 @@ class Lower {
     if (!re) {
       // 串模式那几支各有自己的成员 op（js_m_replace / js_m_replaceAll / js_m_split）
       if (c.name === 'split' || c.name === 'replace' || c.name === 'replaceAll') return null;
-      this.err(e.span, `'${c.name}' needs a regex literal as its first argument`);
-      return undefExpr();
+      /* match / matchAll / search 的实参不是字面量正则（`const re = /…/g` 带了 g、或者
+       * `new RegExp(s)` 存进了变量）：把它**在运行期**摊成 (源, 旗标) 再交给同一格 op ——
+       * 与 $js_str_replace 那一族早就在用的办法一字不差（见 prelude 的 $js_re_source）。
+       * 从前这儿是编译期硬报错。差的一格写在明处：matchAll 照规范该从实参的 lastIndex
+       * 起走，这儿总是从 0 起（那三个方法里只有它看 lastIndex）。 */
+      const t = this.temp();
+      this.emitPre(exprStmt(assign(varRef(t), this.expr(e.args[0]))), e.span);
+      const name0 = { match: 'js_re_match', matchAll: 'js_re_match_all', search: 'js_re_search' }[c.name];
+      return op(name0, [
+        op('js_re_source', [varRef(t)]),
+        op('js_re_flags', [varRef(t)]),
+        this.expr(c.object),
+      ]);
     }
     /* replaceAll 收正则时规范要求带 g（不带是 TypeError）—— 这儿是编译期报错。
        带 g 的话它与 replace 完全同义，所以接到同一格 op 上。 */

@@ -241,11 +241,18 @@ static omni_js_re_obj *omni_js_re_want(omni_dyn rd) { \
 static omni_dyn omni_js_re_last_index(omni_dyn rd) { \
   return omni_dyn_of_real((double)omni_js_re_want(rd)->li); \
 } \
-/* source / flags：正则对象身上那两格只读属性 */ \
+/* source / flags：正则对象身上那两格只读属性。它们还有第二个身份 —— "把**运行期**的那一格
+   实参摊成 (源, 旗标)"，那是 omni_js_str_replace 那一族早就在用的办法，match / matchAll /
+   search 收非字面量正则时也走它（见 lower.js 的 regexCall）。所以非正则不报错，照规范
+   ToString 当**模式**收下；undefined 当空模式。与 prelude 的那两格对着写。 */ \
 static omni_dyn omni_js_re_source(omni_dyn rd) { \
+  if (rd.tag != OMNI_DYN_RE) { \
+    return rd.tag == OMNI_DYN_UNDEF ? omni_dyn_of_s16(omni_js_s16_lit("")) : omni_js_str(rd); \
+  } \
   return omni_dyn_of_s16(omni_js_re_want(rd)->src); \
 } \
 static omni_dyn omni_js_re_flags(omni_dyn rd) { \
+  if (rd.tag != OMNI_DYN_RE) return omni_dyn_of_s16(omni_js_s16_lit("")); \
   return omni_dyn_of_s16(omni_js_re_want(rd)->flags); \
 } \
 /* 正则对象上的 test：与 exec 共用那套 lastIndex 行为 */ \
