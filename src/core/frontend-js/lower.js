@@ -373,8 +373,17 @@ function mayThrow(node) {
   return false;
 }
 
-class Lower {
-  /** @param {import('../source/diag.js').Diagnostics} diags */
+/**
+ * 这一句是不是"一次 pending 检查"（`if (js_pending()) <退出这一层>`）。
+ * 只按形状认：条件是 js_pending()、没有 else。withCheck 用它去掉紧挨着的第二次检查。
+ */
+function isPendingCheck(st) {
+  return st !== null && typeof st === 'object' && st.kind === 'If' && st.otherwise === null
+    && st.cond !== undefined && st.cond !== null
+    && st.cond.kind === 'Builtin' && st.cond.name === 'js_pending';
+}
+
+class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
   constructor(diags) {
     this.diags = diags;
     this.funcs = [];
@@ -1334,6 +1343,12 @@ class Lower {
   withCheck(s, stmts) {
     if (s.type === 'Throw' || s.type === 'Return' || s.type === 'Break' || s.type === 'Continue') return stmts;
     if (!mayThrow(stmts)) return stmts;
+    /* 已经以一次检查收尾的就不再补一次（量出来的：自举那份 13.7MB 的 JS 里 57487 次检查有
+     * 7781 次是紧挨着的两句 —— guard() 把"会抛的子表达式"提成"临时量 + 一次检查"落进 sink，
+     * 而 mayThrow 看的是整棵子树，于是这儿又补一次）。判据是**词法**的：这一句剩下的活儿
+     * 已经没有了（检查就是最后一句），两次之间没有任何能置上 pending 的东西，所以第二次
+     * 恒为假。省下来的不只是字节：五条腿每次都要真的去问一次 pending。 */
+    if (stmts.length > 0 && isPendingCheck(stmts[stmts.length - 1])) return stmts;
     return [...stmts, { kind: 'If', cond: boolOp('js_pending', []), then: block([this.unwind()]), otherwise: null }];
   }
 
