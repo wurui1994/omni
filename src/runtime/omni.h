@@ -521,6 +521,10 @@ omni_dyn omni_js_sym_wk(omni_str name);
    所以既没有 Symbol.toStringTag 也没有原型链（ADR-0020 P1-c）。 */
 bool omni_js_is_object(omni_dyn v);
 omni_dyn omni_js_obj_to_string(omni_dyn t);
+/* Date 里只算数的那两格（omni_js_date.c）。new Date(…) 造的是真对象，那一格还在 P1-c 里。 */
+omni_dyn omni_js_date_utc(omni_dyn y, omni_dyn mo, omni_dyn d, omni_dyn h,
+                          omni_dyn mi, omni_dyn s, omni_dyn ms);
+omni_dyn omni_js_date_parse(omni_dyn s);
 /* dynamic 的运行期标签名（JS 域口径）。解释器靠它认标签，见 ADR-0013 与 omni_js.c */
 omni_dyn omni_js_type_tag(omni_dyn v);
 /* real 的两种文本化，给解释器用（ADR-0013）。就是 print / repr 自己用的那两个函数，

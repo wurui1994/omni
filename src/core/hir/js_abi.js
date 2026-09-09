@@ -906,7 +906,9 @@ const P1_JS_ONLY = [
   // Symbol 那一族已经有 C 孪生了（runtime/omni_js_sym.c，ADR-0020 P1-c 的第一步），
   // 所以不在这张单子里 —— 真对象那一片还在，见下面几行。
   'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
-  'js_date_parse', 'js_proxy_new', 'js_date_utc',
+  // Date.UTC 与 Date.parse 有 C 孪生了（runtime/omni_js_date.c）：它们交出来的是一个毫秒数，
+  // 与真对象无关。new Date(…) 与 new Date(y, mo, d) 照旧拒 —— 前者造真对象，后者要本地时区。
+  'js_proxy_new',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
   'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',
   // matchAll 与 flags_g 有 C 孪生了（omni_js_re.h）：exec 的结果本来就把 index / input /
