@@ -106,8 +106,18 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
     } \
     d = omni_js_xprops_(o, false); \
     if (d == NULL) return omni_dyn_undef(); \
-  } else { \
+  } else if (o.tag == OMNI_DYN_DICT) { \
     d = omni_js_dict_of(o); \
+  } else { \
+    /* 原始值 / Map / Set 身上的**表外**成员：JS 那条腿上它走 realm 的原型链（$js_prim_get），
+       而 realm 是 P1_JS_ONLY —— C 侧一格原型表都没有。从前这儿掉进 omni_js_dict_of 的断言，
+       报的是 "dynamic value is str16, expected dict"：响是响了，可像是我们内部炸了。
+       现在照实说是哪一格、哪条腿。**刻意不给 undefined** —— 那会把"原型上确实有的名字"
+       悄悄答成没有，而悄悄的错答案比拒绝坏。 */ \
+    omni_errorf("backend-c: cannot read '%.*s' of a %s — 原始值的原型链还只在 node 宿主上" \
+      "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器", \
+      (int)key.len, key.p, omni_dyn_tag_name(o.tag)); \
+    return omni_dyn_undef(); \
   } \
   /* contains + get 是两次哈希 —— 取属性是解释器最热的一条，只探一次 */ \
   int64_t e = DT##_find(d, key); \
