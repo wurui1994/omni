@@ -268,17 +268,76 @@ static omni_dyn omni_js_iter(omni_dyn v) { \
       return omni_js_arr_wrap(LT##_new()); \
   } \
 } \
-/* for-of 的惰性形态（ADR-0020）：C 这侧只有 list 那一支 —— 真迭代器（生成器、带
-   Symbol.iterator 的对象）是 JS 那条腿独有的，走到这儿本来就是 "not iterable"。
-   所以把手就是那个 list，done 只是比下标，close 是空操作。 */ \
-static omni_dyn omni_js_iter_open(omni_dyn v) { return omni_js_iter(v); } \
-static bool omni_js_iter_done(omni_dyn h, omni_dyn i) { \
-  return omni_js_arr_i(i) >= omni_js_arr_of(h)->len; \
+/* for-of 与解构的**惰性**形态（ADR-0020）。上游不是真对象（list / 串 / Map / Set）时把手
+   就是那条 list、done 只是比下标；上游是真对象（生成器、自己写了 Symbol.iterator 的对象）
+   时把手是一格三槽真对象 [$it, $d, $v]，每轮**恰好**拉一次 next —— 与 prelude 的
+   $JsIterH 一一对应。
+   从前这条腿上 iter_open 就是 iter（先把上游整个摊成一条 list），于是
+   `for (const x of nat()) { if (x > 3) break; }` 在无穷生成器上**挂住**：qjs 与另外三条腿
+   印三行就收，C 这条腿转到超时。挂死比错答案更坏，所以这一格必须惰性。 */ \
+static omni_dyn omni_js_iter_open(omni_dyn v) { \
+  omni_dyn h, it; \
+  if (v.tag != OMNI_DYN_OBJ) return omni_js_iter(v); \
+  it = omni_js_iter_proto(v); \
+  h = omni_js_new_bare_(omni_dyn_null()); \
+  omni_js_def_data_(h, omni_js_name_("$it", 3), it, true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("$d", 2), omni_dyn_of_real(0.0), true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("$v", 2), omni_dyn_undef(), true, false, true); \
+  return h; \
 } \
-static omni_dyn omni_js_iter_cur(omni_dyn h, omni_dyn i) { return omni_js_arr_at(h, i); } \
-static void omni_js_iter_close(omni_dyn h) { (void)h; } \
+static bool omni_js_iter_done(omni_dyn h, omni_dyn i) { \
+  LT ds, vs; \
+  omni_dyn r; \
+  if (h.tag != OMNI_DYN_OBJ) return omni_js_arr_i(i) >= omni_js_arr_of(h)->len; \
+  ds = omni_js_prom_slot_(h, "$d", 2); \
+  vs = omni_js_prom_slot_(h, "$v", 2); \
+  if (ds->items[0].u.r != 0.0) return true; \
+  r = omni_js_iter_next(omni_js_prom_slot_(h, "$it", 3)->items[0]); \
+  /* 协议里报的错（next 交出来的不是对象）能 catch：接住就当 done，调用点的检查接着退 */ \
+  if (omni_js_pending()) { ds->items[0] = omni_dyn_of_real(1.0); return true; } \
+  if (omni_js_truthy(omni_js_obj_get(r, omni_js_name_("done", 4)))) { \
+    ds->items[0] = omni_dyn_of_real(1.0); \
+    vs->items[0] = omni_dyn_undef(); \
+    return true; \
+  } \
+  vs->items[0] = omni_js_obj_get(r, omni_js_name_("value", 5)); \
+  return false; \
+} \
+static omni_dyn omni_js_iter_cur(omni_dyn h, omni_dyn i) { \
+  if (h.tag != OMNI_DYN_OBJ) return omni_js_arr_at(h, i); \
+  return omni_js_prom_slot_(h, "$v", 2)->items[0]; \
+} \
+/* 循环出口补一次 return()：正常跑完时迭代器已经 done，这一格是空操作；break 出来才真调
+   （带 finally 的生成器于是跑得到清理）。 */ \
+static void omni_js_iter_close(omni_dyn h) { \
+  LT ds; \
+  omni_dyn it, rf; \
+  if (h.tag != OMNI_DYN_OBJ) return; \
+  ds = omni_js_prom_slot_(h, "$d", 2); \
+  if (ds->items[0].u.r != 0.0) return; \
+  ds->items[0] = omni_dyn_of_real(1.0); \
+  it = omni_js_prom_slot_(h, "$it", 3)->items[0]; \
+  rf = omni_js_obj_get(it, omni_js_name_("return", 6)); \
+  if (rf.tag == OMNI_DYN_FN) omni_js_call_this(rf, it, omni_js_arr_wrap(LT##_new())); \
+} \
+/* 数组解构的 rest：从第 i 格起收成一条 list。list 那一支是 slice，真迭代器那一支抽到 done */ \
 static omni_dyn omni_js_iter_rest(omni_dyn h, omni_dyn i) { \
-  return omni_js_arr_slice(h, i, omni_dyn_undef()); \
+  LT out, ds; \
+  omni_dyn it, r; \
+  if (h.tag != OMNI_DYN_OBJ) return omni_js_arr_slice(h, i, omni_dyn_undef()); \
+  out = LT##_new(); \
+  ds = omni_js_prom_slot_(h, "$d", 2); \
+  it = omni_js_prom_slot_(h, "$it", 3)->items[0]; \
+  for (;;) { \
+    if (ds->items[0].u.r != 0.0) return omni_js_arr_wrap(out); \
+    r = omni_js_iter_next(it); \
+    if (omni_js_pending()) { ds->items[0] = omni_dyn_of_real(1.0); return omni_js_arr_wrap(out); } \
+    if (omni_js_truthy(omni_js_obj_get(r, omni_js_name_("done", 4)))) { \
+      ds->items[0] = omni_dyn_of_real(1.0); \
+      return omni_js_arr_wrap(out); \
+    } \
+    LT##_push(out, omni_js_obj_get(r, omni_js_name_("value", 5))); \
+  } \
 } \
 /* String.raw 的**普通调用**形态（tag 形态在降级器那儿就折成字面量了）：段数看 raw.length，
    最后一段后面不再拼插值；插值不够就当没有，不是拼 "undefined"。 */ \
