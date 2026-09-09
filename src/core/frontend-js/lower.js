@@ -2364,7 +2364,7 @@ class Lower {
         const raws = this.seq(e.exprs, (x) => this.expr(x));
         let out = s16(e.quasis[0].raw);
         for (let i = 0; i < raws.length; i++) {
-          out = op('js_add', [out, raws[i]]);
+          out = op('js_add', [out, op('js_str', [raws[i]])]);
           out = op('js_add', [out, s16(e.quasis[i + 1].raw)]);
         }
         return out;
@@ -2410,7 +2410,10 @@ class Lower {
     const vals = this.seq(e.exprs, (x) => this.expr(x));
     let out = s16(e.quasis[0].cooked);
     for (let i = 0; i < vals.length; i++) {
-      out = op('js_add', [out, vals[i]]);
+      /* 插值那一格照规范走 **ToString**（13.2.8.5 第 5 步），不是 `+` 的那套 ToPrimitive
+       * default —— 差别在带 valueOf 的对象上：`${{valueOf(){return 3},toString(){return "S"}}}`
+       * 规范里是 "S"（string 提示先问 toString），从前走 js_add 的默认提示、静静地给 3。 */
+      out = op('js_add', [out, op('js_str', [vals[i]])]);
       out = op('js_add', [out, s16(e.quasis[i + 1].cooked)]);
     }
     return out;
