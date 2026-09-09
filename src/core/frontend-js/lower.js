@@ -629,6 +629,10 @@ class Lower {
   funcOf(name, mangled, params, rest, bodyStmts, span, opts = {}) {
     const outer = this.fn;
     this.fn = this.newFrame(bodyStmts, opts);
+    /* 形参默认值里的闭包也要算捕获（`function f(x, y = () => x)`）：capturedNames 只扫体，
+     * 于是从前那个箭头里的 x 是"未定义的名字"（量出来的 —— 直接写 `y = x + 1` 是通的，
+     * 只有装进闭包那一格漏了）。形参自己就是这一帧的局部量，加进 captured 就够了。 */
+    for (const n of capturedNames(params)) this.fn.captured.add(n);
     const stmts = [];
     /* `this`（ADR-0020 P1）：普通函数与方法自己在**入口**取一次接收者。
      * 两种情况不取：
@@ -698,7 +702,8 @@ class Lower {
    * main 那一帧不走这条路 —— 那儿的顶层名字是真全局，defineVar 有自己的一支。
    */
   preCells(bodyStmts) {
-    if (this.fn.isMain) return [];
+    // main 的**顶层**名字是真全局（defineVar 有自己的一支）；它里面的块照常走这条路
+    if (this.fn.isMain && this.fn.scopes.length === 1) return [];
     const sink = { err: () => {} };
     const scope = this.fn.scopes[this.fn.scopes.length - 1];
     const out = [];
@@ -1351,7 +1356,7 @@ class Lower {
       case 'Empty': return [];
       case 'Block': {
         this.pushScope();
-        const out = s.body.flatMap((x) => this.stmt(x));
+        const out = this.blockBody(s.body);
         this.popScope();
         return [block(out)];
       }
@@ -1449,11 +1454,27 @@ class Lower {
   bodyBlock(s) {
     if (s.type === 'Block') {
       this.pushScope();
-      const out = s.body.flatMap((x) => this.stmt(x));
+      const out = this.blockBody(s.body);
       this.popScope();
       return block(out);
     }
     return block(this.stmt(s));
+  }
+
+  /**
+   * 一个块里的语句表。块**自己**也提升函数声明（规范 14.2.3：块级的函数声明是块作用域的
+   * 绑定，块一进去就绑好），所以 `if (f) { function g(){…} return g(); }` 与
+   * `while (…) { const s = 1; function h(){ return s; } }` 这两种写法通了 —— 从前是当场报
+   * "a nested function declaration is only supported at the top of a function body"。
+   * 顺序与栈帧入口那儿一致：先给被闭包引用的块级量立 cell（preCells），再造那些闭包。
+   * `hoisted` 要存一存再还回去：里层的块有它自己的一套名字。
+   */
+  blockBody(stmts) {
+    const prevHoisted = this.fn.hoisted;
+    const pre = [...this.preCells(stmts), ...this.hoistFuncDecls(stmts)];
+    const out = stmts.flatMap((x) => this.stmt(x));
+    this.fn.hoisted = prevHoisted;
+    return [...pre, ...out];
   }
 
   varDecl(s) {

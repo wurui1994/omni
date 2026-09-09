@@ -51,3 +51,37 @@ async function main() {
   console.log([...outerGen()].join(","));
 }
 main();
+/* 块级的函数声明（规范 14.2.3：绑定是**块**作用域的，块一进去就绑好）。
+   从前这一族当场报 "a nested function declaration is only supported at the top of a
+   function body"。块里的量与块里的声明一起提升，所以两种次序都通。 */
+function inBlock() {
+  {
+    const v = 1;
+    function f() { return v; }
+    return f();
+  }
+}
+console.log(inBlock());
+function inIf(flag) {
+  if (flag) { function f() { return "yes"; } return f(); }
+  return "no";
+}
+console.log(inIf(true), inIf(false));
+function inLoop() {
+  let n = 0;
+  while (n < 1) { const step = 2; function bump() { return step; } n += bump(); }
+  return n;
+}
+console.log(inLoop());
+/* 里外同名那一格**不量**：块级函数声明在严格/模块语义里是块作用域的（我们这一档），而
+   qjs 当脚本跑、node 当 CJS 跑走的是 Annex B.3.3 的旧网页语义（提到函数作用域去）——
+   `{ function f(){…} }` 之后再读 f，两种语义给的是两个答案（`qjs -m` 与我们一致）。
+   记在 ADR-0020 里，用例不量。 */
+/* 形参默认值里的闭包看得见前面的形参（规范 10.2.11 的形参作用域）：直接写 `y = x + 1`
+   本来就通，装进闭包那一格从前漏了 —— capturedNames 只扫体，不扫形参表。 */
+function dflt(x, y = x + 1, z = () => x + y) { return `${x}${y}${z()}`; }
+console.log(dflt(1), dflt(1, 5));
+const arrowDflt = (a, b = () => a * 2) => `${a}${b()}`;
+console.log(arrowDflt(3), arrowDflt(4, () => 9));
+function patDflt({ p = 1 } = {}, q = () => p) { return `${p}${q()}`; }
+console.log(patDflt(), patDflt({ p: 7 }));

@@ -188,3 +188,20 @@ function order() {
   return get();
 }
 console.log(`order ${order()}`);
+/* 块级的函数声明（规范 14.2.3：绑定是块作用域的，块一进去就绑好）。从前当场报
+   "a nested function declaration is only supported at the top of a function body"。
+   里外同名那一格不在这儿量：脚本语义（Annex B.3.3）与模块语义给的是两个答案。 */
+function inIf(flag) {
+  if (flag) { const tag = "y"; function f() { return `${tag}es`; } return f(); }
+  return "no";
+}
+console.log(`block ${inIf(true)} ${inIf(false)}`);
+function inLoop() {
+  let n = 0;
+  while (n < 1) { const step = 2; function bump() { return step; } n += bump(); }
+  return n;
+}
+console.log(`block ${inLoop()}`);
+// 形参默认值里的闭包看得见前面的形参
+function dflt(x, y = x + 1, z = () => x + y) { return `${x}${y}${z()}`; }
+console.log(`dfltcap ${dflt(1)} ${dflt(1, 5)}`);
