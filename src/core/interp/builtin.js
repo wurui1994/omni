@@ -1356,6 +1356,11 @@ export function jsPendingText() {
  */
 export function jsCallFn(f, args) {
   flushOut();
+  /* 先把解释器这一份槽里的待决错误**搬给宿主**再调：`undefined.f()` 是"取属性 + 当函数调"
+     两步，取属性那一步已经放好了 "cannot read property 'f' of undefined"，而嵌在一句里的
+     两个 op 中间没有哨卡。宿主的 js_asFn 会先问一句 $js_pending()，见了就不再盖上一句
+     "not a function" —— 可它问的是**宿主**那一份槽。不搬的话解释器上量出来的是第二句话。 */
+  mirrorPendingToHost();
   const r = callJsOp('js_call_fn', [f, args]);
   /* 动态调用是**两个方向都会**留下待决错误的一格，所以这里和 invoke 一样要搬一次：
      - 被调的是解释器造的闭包：它的 throw 落在解释器这一份槽里，makeClosure 的包装又把它
@@ -1379,6 +1384,12 @@ function pullPendingFromHost() {
 /** op 里的运行期错误会直接退出，所以缓冲要先落盘 —— 不然错误消息会跑到正常输出前面 */
 function invoke(name, abi, args) {
   flushOut();
+  /* 手里已经有一格待决错误、而这一格 op 自己也会抛：先把它**搬给宿主**再调。
+     一句里嵌着两个 op 的时候中间没有哨卡（`undefined.f()` 是"取属性 + 当函数调"），
+     而宿主的 js_asFn 只会问**宿主**那一份槽 —— 不搬就被第二句话
+     "not a function" 盖掉了第一句 "cannot read property 'f' of undefined"。
+     只在真有待决错误时才搬，热路径上不多一次调用。 */
+  if (abi.throws === true && pendingSet) mirrorPendingToHost();
   const r = callJsOp(name, args);
   /* 宿主那一份 op **自己**抛出来的错（prelude 的 $js_throw —— JSON.parse 的语法错、
      decodeURIComponent 的畸形输入那一族，见 prelude 的 $HostBad）落在 **prelude 的**

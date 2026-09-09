@@ -184,7 +184,11 @@ export const JS_ABI = {
   // Map/Set -> 同一种 dict，但键是带标签的规范化字符串，条目里存着原键 ——
   // 量过的源码里有两张 Map 用数字键，"1" 不能和 1n 撞（见 ADR-0011 的"已量过的宿主面"）。
   js_obj_new: { js: '$js_obj_new', c: 'omni_js_obj_new', arity: 0 },
-  js_obj_get: { js: '$js_obj_get', c: 'omni_js_obj_get', arity: 2 },
+  /* 取属性也会抛：null / undefined 上取属性是能 catch 的 TypeError（规范 7.3.2 的 GetV
+     先 ToObject），访问器里的 throw 也从这儿冒出来。不标 throws 的话那格错要等到下一个
+     哨卡才被看见 —— 中间那几句照跑，解释器上量出来的样子是 catch 里的 console.log 整句
+     不见了。读比写热，这一格哨卡是有代价的，可"错落在下一句"是悄悄的错答案。 */
+  js_obj_get: { js: '$js_obj_get', c: 'omni_js_obj_get', arity: 2, throws: true },
   js_obj_set: { js: '$js_obj_set', c: 'omni_js_obj_set', arity: 3, throws: true },
   js_obj_has: { js: '$js_obj_has', c: 'omni_js_obj_has', arity: 2, ret: 'bool' },
   js_obj_delete: { js: '$js_obj_delete', c: 'omni_js_obj_delete', arity: 2, ret: 'bool' },
@@ -573,7 +577,7 @@ export const JS_ABI = {
      另一种静默 —— 量出来的：展开一个 next 不交对象的迭代器，那一句照跑完，catch 到下一句
      才生效。 */
   js_iter: { js: '$js_iter', c: 'omni_js_iter', arity: 1, throws: true },
-  js_idx_get: { js: '$js_idx_get', c: 'omni_js_idx_get', arity: 2 },
+  js_idx_get: { js: '$js_idx_get', c: 'omni_js_idx_get', arity: 2, throws: true },
   js_idx_set: { js: '$js_idx_set', c: 'omni_js_idx_set', arity: 3, throws: true },
 
   // ---------------------------------------------------------------- node 宿主面

@@ -41,7 +41,13 @@ static omni_dyn omni_js_call(omni_dyn f, LT args) { \
   /* 取到的那一格不是函数：规范里是**能 catch** 的 TypeError（o.foo() 里 foo 不存在那一格）。
      omni_js_as_fn 住在 omni.h 里，那儿造不出异常对象（$cls 是一条 list），所以检查放在这儿 ——
      这是 C 侧所有 JS 调用的独木桥。消息与 prelude 的 $js_asFn 逐字相同。 */ \
-  if (f.tag != OMNI_DYN_FN) { omni_js_type_err_c("not a function"); return omni_dyn_undef(); } \
+  if (f.tag != OMNI_DYN_FN) { \
+    /* 已经有一格错在等着了就别盖掉它：undefined.f() 是先"取属性"再"当函数调"，第一步
+       已经放好了 "cannot read property 'f' of undefined"，第二步看到的 undefined 只是
+       那件事的后果。两把尺子报的都是第一句。与 prelude 的 $js_asFn 逐条对齐。 */ \
+    if (!omni_js_pending()) omni_js_type_err_c("not a function"); \
+    return omni_dyn_undef(); \
+  } \
   omni_fn fp = omni_js_as_fn(f); \
   return ((omni_dyn (*)(omni_fn, LT))omni_fn_ck(fp)->fp)(fp, args); \
 } \

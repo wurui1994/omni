@@ -162,11 +162,35 @@ static int64_t omni_js_dec_index(omni_str key) { \
   } \
   return n; \
 } \
+/* null / undefined 上取属性 / 写属性是**能 catch** 的 TypeError（规范 7.3.2 的 GetV 与
+   7.3.4 的 SetV 都先 ToObject）。消息与 prelude 的 $js_prim_get / $js_obj_set 逐字相同，
+   也就是 qjs 的那句话（node 那边是另一句，js262 的尺子是 qjs）。算出来的键那条路
+   （`null[0]`）qjs 不把键印进消息，所以 has_key 分开传。 */ \
+static void omni_js_nullish_err_(const char *verb, omni_str key, bool has_key, omni_dyn o) { \
+  omni_str m = omni_str_new(verb, (int64_t)strlen(verb)); \
+  if (has_key) { \
+    m = omni_str_cat(m, omni_str_new(" property '", 11)); \
+    m = omni_str_cat(m, key); \
+    m = omni_str_cat(m, omni_str_new("' of ", 5)); \
+  } else { \
+    m = omni_str_cat(m, omni_str_new(" property of ", 13)); \
+  } \
+  m = o.tag == OMNI_DYN_NULL ? omni_str_cat(m, omni_str_new("null", 4)) \
+                             : omni_str_cat(m, omni_str_new("undefined", 9)); \
+  char *z = (char *)omni_alloc((size_t)m.len + 1); \
+  for (int64_t i = 0; i < m.len; i++) z[i] = m.p[i]; \
+  z[m.len] = 0; \
+  omni_js_type_err_c(z); \
+} \
 /* 键是编译期字面量时走这四条：字典里的键本来就是 UTF-8，字面量池已经把它算好了
  * （见 backend-c/emit.js 的 s16PoolLines），omni_js_prop 那次转换和分配就整个省掉。
  * 解释器把 OIR 节点当 dict 读，`e.kind` 这类取字段全落在这里，是原生构建最热的一条。 */ \
 static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   DT d; \
+  if (o.tag == OMNI_DYN_NULL || o.tag == OMNI_DYN_UNDEF) { \
+    omni_js_nullish_err_("cannot read", key, true, o); \
+    return omni_dyn_undef(); \
+  } \
   if (o.tag == OMNI_DYN_LIST) { \
     /* 下标形状的字符串键就是下标（`a["1"]`）—— 与写那一边同一条判据 */ \
     int64_t idx = omni_js_dec_index(key); \
@@ -195,6 +219,10 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   return d->vals[e]; \
 } \
 static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
+  if (o.tag == OMNI_DYN_NULL || o.tag == OMNI_DYN_UNDEF) { \
+    omni_js_nullish_err_("cannot set", key, true, o); \
+    return o; \
+  } \
   if (o.tag == OMNI_DYN_LIST && key.len == 6 && memcmp(key.p, "length", 6) == 0) { \
     /* a.length = n 是**改长度**，不是往旁表里挂一个叫 length 的字段（从前是后者，于是
        a.length = 0 静静地什么也没做）。短了截掉、长了补 undefined —— 规范 10.4.2.4。 */ \

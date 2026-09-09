@@ -323,6 +323,12 @@ static omni_dyn omni_js_idx_get(omni_dyn o, omni_dyn k) { \
     case OMNI_DYN_DICT: return omni_js_obj_get(o, k); \
     case OMNI_DYN_BYTES: return omni_js_buf_get_u8(o, k); \
     default: \
+      /* null / undefined 上的 o[k]：能 catch 的 TypeError。算出来的键这条路 qjs 不把键
+         印进消息（量过：null[0] 是 "cannot read property of null"）—— 照它走。 */ \
+      if (o.tag == OMNI_DYN_NULL || o.tag == OMNI_DYN_UNDEF) { \
+        omni_js_nullish_err_("cannot read", omni_str_new("", 0), false, o); \
+        return omni_dyn_undef(); \
+      } \
       omni_errorf("cannot index a %s", omni_dyn_tag_name(o.tag)); \
       return omni_dyn_undef(); \
   } \
@@ -342,6 +348,12 @@ static omni_dyn omni_js_idx_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
       return v; \
     } \
     default: \
+      /* null / undefined 上的 o[k] = v：能 catch 的 TypeError，键印在消息里
+         （量过 qjs：u[1] = 2 那句是 "cannot set property '1' of undefined"）。 */ \
+      if (o.tag == OMNI_DYN_NULL || o.tag == OMNI_DYN_UNDEF) { \
+        omni_js_nullish_err_("cannot set", omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k))), true, o); \
+        return v; \
+      } \
       omni_errorf("cannot assign to an index of a %s", omni_dyn_tag_name(o.tag)); \
       return omni_dyn_undef(); \
   } \

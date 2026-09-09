@@ -893,7 +893,13 @@ function $js_call_n_this(f, recv, args) {
    消息跟 qjs：not a function。 */
 const $NOFN = { fp: () => undefined };
 function $js_asFn(v) {
-  if ($dynTag(v) !== "function") { $js_type_err("not a function"); return $NOFN; }
+  if ($dynTag(v) !== "function") {
+    /* 已经有一格错在等着了就别盖掉它：undefined.f() 是先"取属性"再"当函数调"，
+       第一步已经放了 "cannot read property 'f' of undefined"，第二步看到的 undefined
+       只是那件事的后果。两把尺子报的都是第一句。 */
+    if (!$js_pending()) $js_type_err("not a function");
+    return $NOFN;
+  }
   return v;
 }
 function $js_truthy(v) {
@@ -2071,6 +2077,13 @@ function $js_idx_get(o, k) {
     // Map/Set 上的 o[k] 照旧当场报（那在 JS 里是属性访问而不是条目，容易看错），
     // 只放**符号键**过去 —— m[Symbol.iterator] 是协议本身，不是"把条目当下标取"。
     default:
+      /* null / undefined 上的 o[k]：能 catch 的 TypeError。qjs 在**算出来的**键这条路上
+         不把键印进消息（量过：null[0] 是 "cannot read property of null"，而 null.x 是
+         "cannot read property 'x' of null"）—— 照它走。 */
+      if (o === undefined || o === null) {
+        $js_type_err("cannot read property of " + $dynTag(o));
+        return undefined;
+      }
       if ($dynTag(k) === "symbol") return $js_prim_get(o, k);
       $rt_error("cannot index a " + $dynTag(o));
   }
@@ -2105,7 +2118,14 @@ function $js_idx_set(o, k, v) {
       o.li = $js_idx(v, 0);
       return v;
     }
-    default: $rt_error("cannot assign to an index of a " + $dynTag(o));
+    default:
+      /* null / undefined 上的 o[k] = v：能 catch 的 TypeError，键印在消息里
+         （量过 qjs：u[1] = 2 那句是 "cannot set property '1' of undefined"）。 */
+      if (o === undefined || o === null) {
+        $js_type_err("cannot set property '" + $js_key_str($js_pkey(k)) + "' of " + $dynTag(o));
+        return v;
+      }
+      $rt_error("cannot assign to an index of a " + $dynTag(o));
   }
 }
 
@@ -2175,6 +2195,13 @@ function $js_obj_get(o, k) {
 }
 // set 返回对象本身，这样对象字面量可以降级成一串链式调用，不需要临时变量
 function $js_obj_set(o, k, v) {
+  /* null / undefined 上写属性也是**能 catch** 的 TypeError（规范 7.3.4 的 SetV）——
+     从前落到底下 $js_dict_of 的断言上，报的是 "dynamic value is null, expected dict"：
+     响是响了，可像是我们内部炸了，而且 catch 不住。消息照 qjs。 */
+  if (o === undefined || o === null) {
+    $js_type_err("cannot set property '" + $js_key_str($js_pkey(k)) + "' of " + $dynTag(o));
+    return o;
+  }
   if ($js_isobj(o)) { $js_setp(o, k, v); return o; }
   if ($dynTag(o) === "list") {
     const key = $js_hkey(k);
@@ -2550,10 +2577,16 @@ function $js_setp(o, k, v, recv) {
   $js_def_data(tgt, key, v, true, true, true);
   return v;
 }
-// 原始值上的取属性：查它那一族的原型（内建方法就住在那儿），外加 string 的 length 与下标。
+/* 原始值上的取属性：查它那一族的原型（内建方法就住在那儿），外加 string 的 length 与下标。
+   null / undefined 上取属性是**能 catch** 的 TypeError（规范 7.3.2 的 GetV 先 ToObject）——
+   从前这儿是 $rt_error，于是 try { null.x } catch {} 整个进程就没了。消息照 qjs
+   （"cannot read property 'x' of null"；node 那边是另一句话，js262 的尺子是 qjs）。 */
 function $js_prim_get(o, k) {
   const key = $js_pkey(k);
-  if (o === undefined || o === null) $rt_error("cannot read '" + $js_key_str(key) + "' of " + $dynTag(o));
+  if (o === undefined || o === null) {
+    $js_type_err("cannot read property '" + $js_key_str(key) + "' of " + $dynTag(o));
+    return undefined;
+  }
   /* 可调用代理（目标是函数的那一支）：它是一格闭包记录而不是 $JSObj，所以取属性走这儿。
      get 陷阱要在函数那张面（name / length / call / apply / bind）之前问。 */
   if (typeof o === "object" && o.px !== undefined && o.fp !== undefined) {
