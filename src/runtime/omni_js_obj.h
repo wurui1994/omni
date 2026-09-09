@@ -95,6 +95,14 @@ static void omni_js_async_tick_(omni_dyn p, omni_dyn step, omni_dyn v, int64_t m
 static LT omni_js_prom_slot_(omni_dyn p, const char *nm, int64_t n); \
 static void omni_js_comb_dec_(LT st); \
 static omni_dyn omni_js_agg_err_(omni_dyn errs); \
+/* ES2025 的迭代器 helper（Iterator.prototype 上那 11 格）：造一格惰性 helper 与几个小工具。
+   排在 nat_call_ 之后，所以这儿先声明。 */ \
+static omni_dyn omni_js_it_up_(omni_dyn v); \
+static void omni_js_it_close_(omni_dyn it); \
+static bool omni_js_it_done_(omni_dyn r); \
+static omni_dyn omni_js_it_val_(omni_dyn r); \
+static int64_t omni_js_it_count_(omni_dyn n, const char *who); \
+static omni_dyn omni_js_it_help_(int64_t kind, omni_dyn up, omni_dyn fn, int64_t n); \
 static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode); \
 /* 函数值的 prototype 那张按同一性索引的旁表（$FNPROTO 的孪生）：realm_ctor 要往里预先坐一格，
    而它排在 fn_proto_ 前头，所以表在这儿声明。 */ \
@@ -1117,6 +1125,171 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       if (left <= 0.0) omni_js_prom_settle_(st->items[0], 2, omni_js_agg_err_(st->items[1])); \
       return omni_dyn_undef(); \
     } \
+    case 35:                                            /* Iterator.prototype.next 是抽象的 */ \
+      omni_errorf("Iterator.prototype.next is abstract"); \
+      return omni_dyn_undef(); \
+    case 36: return omni_js_it_help_(0, self, omni_dyn_undef(), omni_js_it_count_(a0, "take")); \
+    case 37: return omni_js_it_help_(1, self, omni_dyn_undef(), omni_js_it_count_(a0, "drop")); \
+    case 38: return omni_js_it_help_(2, self, a0, 0); \
+    case 39: return omni_js_it_help_(3, self, a0, 0); \
+    case 40: return omni_js_it_help_(4, self, a0, 0); \
+    case 41: {                                          /* toArray */ \
+      LT out = LT##_new(); \
+      for (;;) { \
+        omni_dyn r = omni_js_iter_next(self); \
+        if (omni_js_pending() || omni_js_it_done_(r)) return omni_js_arr_wrap(out); \
+        LT##_push(out, omni_js_it_val_(r)); \
+      } \
+    } \
+    case 42: case 43: case 44: case 45: case 46: { \
+      /* 终结的那五格（forEach / reduce / some / every / find）：就地把上游拉完或短路，
+         短路时关掉上游。回调收 (value, counter)，counter 从 0 起 —— reduce 少了初值时
+         头一格当初值，于是它的 counter 从 1 起（规范如此）。 */ \
+      double i = 0.0; \
+      omni_dyn acc = args != NULL && args->len > 1 ? args->items[1] : omni_dyn_undef(); \
+      if (n->sel == 43 && acc.tag == OMNI_DYN_UNDEF) { \
+        omni_dyn r0 = omni_js_iter_next(self); \
+        if (omni_js_pending()) return omni_dyn_undef(); \
+        if (omni_js_it_done_(r0)) { \
+          omni_errorf("reduce of empty iterator with no initial value"); \
+          return omni_dyn_undef(); \
+        } \
+        acc = omni_js_it_val_(r0); \
+        i = 1.0; \
+      } \
+      for (;;) { \
+        LT ca = LT##_new(); \
+        omni_dyn v, out; \
+        omni_dyn r = omni_js_iter_next(self); \
+        if (omni_js_pending()) return omni_dyn_undef(); \
+        if (omni_js_it_done_(r)) { \
+          if (n->sel == 43) return acc; \
+          if (n->sel == 44) return omni_dyn_of_bool(false); \
+          if (n->sel == 45) return omni_dyn_of_bool(true); \
+          return omni_dyn_undef(); \
+        } \
+        v = omni_js_it_val_(r); \
+        if (n->sel == 43) LT##_push(ca, acc); \
+        LT##_push(ca, v); \
+        LT##_push(ca, omni_dyn_of_real(i)); \
+        out = omni_js_call_this(a0, omni_dyn_undef(), omni_js_arr_wrap(ca)); \
+        if (omni_js_pending()) return omni_dyn_undef(); \
+        i = i + 1.0; \
+        if (n->sel == 43) { acc = out; continue; } \
+        if (n->sel == 44 && omni_js_truthy(out)) { \
+          omni_js_it_close_(self); \
+          return omni_dyn_of_bool(true); \
+        } \
+        if (n->sel == 45 && !omni_js_truthy(out)) { \
+          omni_js_it_close_(self); \
+          return omni_dyn_of_bool(false); \
+        } \
+        if (n->sel == 46 && omni_js_truthy(out)) { omni_js_it_close_(self); return v; } \
+      } \
+    } \
+    case 47: {                                          /* helper 自己的 next */ \
+      LT fs = omni_js_prom_slot_(self, "$f", 2); \
+      LT cs = omni_js_prom_slot_(self, "$c", 2); \
+      LT is = omni_js_prom_slot_(self, "$i", 2); \
+      LT ns = omni_js_prom_slot_(self, "$n", 2); \
+      LT ins = omni_js_prom_slot_(self, "$in", 3); \
+      int64_t kind = (int64_t)omni_js_prom_slot_(self, "$k", 2)->items[0].u.r; \
+      omni_dyn up = omni_js_prom_slot_(self, "$up", 3)->items[0]; \
+      omni_dyn fn = omni_js_prom_slot_(self, "$fn", 3)->items[0]; \
+      omni_dyn r, v; \
+      if (cs->items[0].u.r != 0.0 || fs->items[0].u.r != 0.0) { \
+        return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+      } \
+      if (kind == 0) {                                  /* take */ \
+        if (ns->items[0].u.r <= 0.0) { \
+          fs->items[0] = omni_dyn_of_real(1.0); \
+          omni_js_it_close_(up); \
+          return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+        } \
+        ns->items[0] = omni_dyn_of_real(ns->items[0].u.r - 1.0); \
+        r = omni_js_iter_next(up); \
+        if (omni_js_pending() || omni_js_it_done_(r)) { \
+          fs->items[0] = omni_dyn_of_real(1.0); \
+          return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+        } \
+        return omni_js_gen_res(omni_js_it_val_(r), omni_dyn_of_bool(false)); \
+      } \
+      if (kind == 1) {                                  /* drop */ \
+        while (ns->items[0].u.r > 0.0) { \
+          ns->items[0] = omni_dyn_of_real(ns->items[0].u.r - 1.0); \
+          r = omni_js_iter_next(up); \
+          if (omni_js_pending() || omni_js_it_done_(r)) { \
+            fs->items[0] = omni_dyn_of_real(1.0); \
+            return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+          } \
+        } \
+        r = omni_js_iter_next(up); \
+        if (omni_js_pending() || omni_js_it_done_(r)) { \
+          fs->items[0] = omni_dyn_of_real(1.0); \
+          return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+        } \
+        return omni_js_gen_res(omni_js_it_val_(r), omni_dyn_of_bool(false)); \
+      } \
+      if (kind == 2) {                                  /* map */ \
+        LT ca = LT##_new(); \
+        r = omni_js_iter_next(up); \
+        if (omni_js_pending() || omni_js_it_done_(r)) { \
+          fs->items[0] = omni_dyn_of_real(1.0); \
+          return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+        } \
+        LT##_push(ca, omni_js_it_val_(r)); \
+        LT##_push(ca, is->items[0]); \
+        v = omni_js_call_this(fn, omni_dyn_undef(), omni_js_arr_wrap(ca)); \
+        is->items[0] = omni_dyn_of_real(is->items[0].u.r + 1.0); \
+        return omni_js_gen_res(v, omni_dyn_of_bool(false)); \
+      } \
+      if (kind == 3) {                                  /* filter */ \
+        for (;;) { \
+          LT ca = LT##_new(); \
+          bool keep; \
+          r = omni_js_iter_next(up); \
+          if (omni_js_pending() || omni_js_it_done_(r)) break; \
+          v = omni_js_it_val_(r); \
+          LT##_push(ca, v); \
+          LT##_push(ca, is->items[0]); \
+          keep = omni_js_truthy(omni_js_call_this(fn, omni_dyn_undef(), omni_js_arr_wrap(ca))); \
+          is->items[0] = omni_dyn_of_real(is->items[0].u.r + 1.0); \
+          if (omni_js_pending()) break; \
+          if (keep) return omni_js_gen_res(v, omni_dyn_of_bool(false)); \
+        } \
+        fs->items[0] = omni_dyn_of_real(1.0); \
+        return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+      } \
+      for (;;) {                                        /* flatMap */ \
+        LT ca = LT##_new(); \
+        if (ins->items[0].tag != OMNI_DYN_UNDEF) { \
+          omni_dyn ir = omni_js_iter_next(ins->items[0]); \
+          if (omni_js_pending()) break; \
+          if (!omni_js_it_done_(ir)) { \
+            return omni_js_gen_res(omni_js_it_val_(ir), omni_dyn_of_bool(false)); \
+          } \
+          ins->items[0] = omni_dyn_undef(); \
+        } \
+        r = omni_js_iter_next(up); \
+        if (omni_js_pending() || omni_js_it_done_(r)) break; \
+        LT##_push(ca, omni_js_it_val_(r)); \
+        LT##_push(ca, is->items[0]); \
+        v = omni_js_call_this(fn, omni_dyn_undef(), omni_js_arr_wrap(ca)); \
+        if (omni_js_pending()) break; \
+        ins->items[0] = omni_js_it_up_(v); \
+        is->items[0] = omni_dyn_of_real(is->items[0].u.r + 1.0); \
+      } \
+      fs->items[0] = omni_dyn_of_real(1.0); \
+      return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+    } \
+    case 48: {                                          /* helper 自己的 return：把上游也关掉 */ \
+      LT cs = omni_js_prom_slot_(self, "$c", 2); \
+      if (cs->items[0].u.r == 0.0) { \
+        cs->items[0] = omni_dyn_of_real(1.0); \
+        omni_js_it_close_(omni_js_prom_slot_(self, "$up", 3)->items[0]); \
+      } \
+      return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+    } \
     case 24: {                                          /* p.then(f, r) */ \
       omni_dyn a1t = args != NULL && args->len > 1 ? args->items[1] : omni_dyn_undef(); \
       return omni_js_prom_react_(self, a0, a1t); \
@@ -1346,6 +1519,27 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
                       omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
     return gp; \
   } \
+  /* Iterator.prototype（ES2025）：**真对象**，next 是抽象的，另外 11 格是迭代器 helper。
+     惰性的五格（take / drop / map / filter / flatMap）交一格 helper 对象回去，
+     终结的六格（toArray / forEach / reduce / some / every / find）就地把上游拉完或短路。
+     [Symbol.iterator] 交回自己 —— 于是 helper 与生成器都能直接进 for-of 与展开。 */ \
+  if (ix == 13) { \
+    static const char *inms[11] = { "take", "drop", "map", "filter", "flatMap", "toArray", \
+                                    "forEach", "reduce", "some", "every", "find" }; \
+    static const int64_t inls[11] = { 4, 4, 3, 6, 7, 7, 7, 6, 4, 5, 4 }; \
+    int k; \
+    omni_dyn ip = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Object", 6))); \
+    omni_js_realm_tbl_[13] = ip; \
+    omni_js_def_data_(ip, omni_js_name_("next", 4), omni_js_nat_(35, omni_dyn_undef()), \
+                      true, false, true); \
+    for (k = 0; k < 11; k++) { \
+      omni_js_def_data_(ip, omni_js_name_(inms[k], inls[k]), \
+                        omni_js_nat_(36 + k, omni_dyn_undef()), true, false, true); \
+    } \
+    omni_js_def_data_(ip, omni_js_sym_wk(omni_str_new("iterator", 8)), \
+                      omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
+    return ip; \
+  } \
   /* 别的原型：一格带 get 陷阱的代理，读成员当场报 —— 同一性照旧成立（instanceof 只比它） */ \
   omni_dyn h = omni_js_new_bare_(omni_dyn_null()); \
   omni_dyn nm = omni_dyn_of_s16(omni_s16_of_utf8(name)); \
@@ -1376,6 +1570,50 @@ static omni_dyn omni_js_src_iter_(omni_dyn v) { \
   omni_js_def_data_(it, omni_js_sym_wk(omni_str_new("iterator", 8)), \
                     omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
   return it; \
+} \
+/* ES2025 的迭代器 helper（`Iterator.prototype` 上那 11 格，与 prelude 的 $js_it_* 逐条对齐）。
+   这条腿上没有宿主闭包，所以每一格**惰性** helper 都是一格真对象，状态全摊在槽里：
+     $k 种类（0 take / 1 drop / 2 map / 3 filter / 4 flatMap）、$up 上游迭代器、
+     $fn 回调、$n 还要几格（take / drop 用）、$i 计数器、$f 上游完了没、$c 自己关了没、
+     $in flatMap 的内层。
+   next / return 两格原生（sel 47 / 48）坐在它**自己身上**（与 omni_js_src_iter_ 同一个做法，
+   都是不可枚举的，所以 keys / JSON 上看不见）。return 要把上游也关掉 —— 少这一格，
+   `g().map(f).take(3)` 拉完之后生成器的 finally 不会跑。 */ \
+static omni_dyn omni_js_it_up_(omni_dyn v) { \
+  return v.tag == OMNI_DYN_OBJ ? omni_js_iter_proto(v) : omni_js_src_iter_(v); \
+} \
+static void omni_js_it_close_(omni_dyn it) { \
+  omni_dyn rf; \
+  if (it.tag != OMNI_DYN_OBJ) return; \
+  rf = omni_js_obj_get(it, omni_js_name_("return", 6)); \
+  if (rf.tag == OMNI_DYN_FN) omni_js_call_this(rf, it, omni_js_arr_wrap(LT##_new())); \
+} \
+static bool omni_js_it_done_(omni_dyn r) { \
+  return omni_js_truthy(omni_js_obj_get(r, omni_js_name_("done", 4))); \
+} \
+static omni_dyn omni_js_it_val_(omni_dyn r) { \
+  return omni_js_obj_get(r, omni_js_name_("value", 5)); \
+} \
+static int64_t omni_js_it_count_(omni_dyn n, const char *who) { \
+  double d = n.tag == OMNI_DYN_UNDEF ? -1.0 : (double)omni_js_arr_i(n); \
+  if (!(d >= 0.0)) omni_errorf("%s count must not be negative", who); \
+  return (int64_t)d; \
+} \
+static omni_dyn omni_js_it_help_(int64_t kind, omni_dyn up, omni_dyn fn, int64_t n) { \
+  omni_dyn h = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Iterator", 8))); \
+  omni_js_def_data_(h, omni_js_name_("$k", 2), omni_dyn_of_real((double)kind), true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("$up", 3), up, true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("$fn", 3), fn, true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("$n", 2), omni_dyn_of_real((double)n), true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("$i", 2), omni_dyn_of_real(0.0), true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("$f", 2), omni_dyn_of_real(0.0), true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("$c", 2), omni_dyn_of_real(0.0), true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("$in", 3), omni_dyn_undef(), true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("next", 4), omni_js_nat_(47, omni_dyn_undef()), \
+                    true, false, true); \
+  omni_js_def_data_(h, omni_js_name_("return", 6), omni_js_nat_(48, omni_dyn_undef()), \
+                    true, false, true); \
+  return h; \
 } \
 /* 作业队列（微任务，ADR-0020 P2）：一格静态 list + 一个游标（不 shift，省得每次搬）。
    这个值域里没有事件循环 —— 降级器在 main 末尾补一句 js_jobs_run 把它排空。 */ \
