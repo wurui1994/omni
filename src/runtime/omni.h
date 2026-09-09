@@ -536,6 +536,7 @@ omni_dyn omni_js_str_at(omni_dyn s, omni_dyn i);
 omni_dyn omni_js_str_char_at(omni_dyn s, omni_dyn i);
 omni_dyn omni_js_str_char_code_at(omni_dyn s, omni_dyn i);
 omni_dyn omni_js_str_code_point_at(omni_dyn s, omni_dyn i);
+omni_dyn omni_js_str_locale_cmp(omni_dyn a, omni_dyn b);
 omni_dyn omni_js_str_slice(omni_dyn s, omni_dyn a, omni_dyn b);
 omni_dyn omni_js_str_repeat(omni_dyn s, omni_dyn n);
 omni_dyn omni_js_str_pad_start(omni_dyn s, omni_dyn n, omni_dyn fill);

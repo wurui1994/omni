@@ -84,6 +84,43 @@ omni_dyn omni_js_str_code_point_at(omni_dyn s, omni_dyn i) {
   return omni_dyn_of_real((double)c);
 }
 
+/* localeCompare（规范 22.1.3.12 的口径是"实现定义但一致"）。没有 ICU，所以照 qjs 那份：
+   按**码点**比（代理对先拼起来），第一处不同给两个码点的差，一个是另一个的前缀就给码点
+   个数的差。与 prelude 的 $js_str_locale_cmp 逐行对着写。 */
+static uint32_t cp_at(omni_s16 v, int64_t k, int64_t *step) {
+  uint32_t c = v.p[k];
+  if (c >= 0xd800 && c <= 0xdbff && k + 1 < v.len && v.p[k + 1] >= 0xdc00 && v.p[k + 1] <= 0xdfff) {
+    *step = 2;
+    return 0x10000 + ((c - 0xd800) << 10) + (v.p[k + 1] - 0xdc00);
+  }
+  *step = 1;
+  return c;
+}
+
+static int64_t cp_count(omni_s16 v, int64_t from) {
+  int64_t n = 0;
+  int64_t step = 1;
+  for (int64_t k = from; k < v.len; k += step) {
+    cp_at(v, k, &step);
+    n++;
+  }
+  return n;
+}
+
+omni_dyn omni_js_str_locale_cmp(omni_dyn a, omni_dyn b) {
+  omni_s16 x = want_s16(a);
+  omni_s16 y = omni_js_as_s16(omni_js_str(b));
+  int64_t i = 0, j = 0, si = 1, sj = 1;
+  while (i < x.len && j < y.len) {
+    uint32_t cx = cp_at(x, i, &si);
+    uint32_t cy = cp_at(y, j, &sj);
+    if (cx != cy) return omni_dyn_of_real((double)((int64_t)cx - (int64_t)cy));
+    i += si;
+    j += sj;
+  }
+  return omni_dyn_of_real((double)(cp_count(x, i) - cp_count(y, j)));
+}
+
 /* ---------------------------------------------------------------- 切与拼 */
 
 omni_dyn omni_js_str_slice(omni_dyn s, omni_dyn a, omni_dyn b) {

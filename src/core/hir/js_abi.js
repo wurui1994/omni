@@ -58,6 +58,10 @@ export const JS_ABI = {
   js_str_char_at: { js: '$js_str_char_at', c: 'omni_js_str_char_at', arity: 2 },
   js_str_char_code_at: { js: '$js_str_char_code_at', c: 'omni_js_str_char_code_at', arity: 2 },
   js_str_code_point_at: { js: '$js_str_code_point_at', c: 'omni_js_str_code_point_at', arity: 2 },
+  /* localeCompare（规范 22.1.3.12：口径是"实现定义但一致"）。没有 ICU，所以照 qjs 那份来 ——
+     按**码元**比，第一处不同给 a - b 的差，一个是另一个的前缀就给长度差。node 带 ICU，
+     所以只有**符号**在两把尺子上一致（非 ASCII 的次序更是不一样），断言要留神。 */
+  js_str_locale_cmp: { js: '$js_str_locale_cmp', c: 'omni_js_str_locale_cmp', arity: 2 },
   js_str_slice: { js: '$js_str_slice', c: 'omni_js_str_slice', arity: 3 },
   js_str_repeat: { js: '$js_str_repeat', c: 'omni_js_str_repeat', arity: 2 },
   /* String.raw 的**普通调用**形态（第二格是插值摊成的一格数组）。tag 形态在降级器那儿
@@ -685,6 +689,7 @@ export const JS_METHODS = {
   charAt: { on: { string: 'js_str_char_at' } },
   charCodeAt: { on: { string: 'js_str_char_code_at' } },
   codePointAt: { on: { string: 'js_str_code_point_at' } },
+  localeCompare: { on: { string: 'js_str_locale_cmp' } },
   repeat: { on: { string: 'js_str_repeat' } },
   padStart: { on: { string: 'js_str_pad_start' } },
   padEnd: { on: { string: 'js_str_pad_end' } },

@@ -1163,8 +1163,35 @@ function $js_str_code_point_at(s, i) {
   const v = $js_asS16(s), k = $js_idx(i, 0);
   return k < 0 || k >= v.length ? undefined : v.codePointAt(k);
 }
-function $js_str_slice(s, a, b) {
-  const v = $js_asS16(s);
+/* localeCompare（规范 22.1.3.12 的口径是"实现定义但一致"）。没有 ICU，所以照 qjs 那份：
+   按**码点**比（代理对要先拼起来），第一处不同给两个码点的差，一个是另一个的前缀就给
+   码点个数的差。量过 qjs："é".localeCompare("e") 是 132（0xE9 - 0x65）、
+   "\u{1F600}".localeCompare("\uFFFF") 是 62977（0x1F600 - 0xFFFF）—— 后一格证明它比的是
+   码点而不是码元（按码元的话头一格是 0xD83D，差会是负的）。
+   node 带 ICU，所以只有**符号**在两把尺子上一致（非 ASCII 的次序更是不一样）。
+   C 那份（omni_js_str_locale_cmp）逐行对着写。 */
+function $js_str_locale_cmp(a, b) {
+  const x = $js_asS16(a), y = $js_asS16($js_str(b));
+  let i = 0, j = 0;
+  while (i < x.length && j < y.length) {
+    const cx = x.codePointAt(i), cy = y.codePointAt(j);
+    if (cx !== cy) return cx - cy;
+    i += cx > 0xFFFF ? 2 : 1;
+    j += cy > 0xFFFF ? 2 : 1;
+  }
+  return $js_cp_count(x, i) - $js_cp_count(y, j);
+}
+// 从 from 起还有几个**码点**（代理对算一个）
+function $js_cp_count(v, from) {
+  let n = 0;
+  let k = from;
+  while (k < v.length) {
+    k += v.codePointAt(k) > 0xFFFF ? 2 : 1;
+    n++;
+  }
+  return n;
+}
+function $js_str_slice(s, a, b) {  const v = $js_asS16(s);
   return v.slice($js_idx(a, 0), $js_idx(b, v.length));
 }
 function $js_str_repeat(s, n) {
