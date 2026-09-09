@@ -28,6 +28,15 @@ struct omni_js_wrap_s { omni_fnptr fp; omni_dyn inner; };
    翻译单元的，静态函数先声明后定义是合法的。 */ \
 static void omni_js_type_err_c(const char *msg); \
 static void omni_js_range_err_c(const char *msg); \
+/* 三档锁（ADR-0020：Object.freeze / seal / preventExtensions 落在数组上）。
+   表与判据**定义**在 OBJ 段（那儿有 omni_js_key 发的同一性键），这儿只先声明 ——
+   宏段按 ARR -> OBJ -> … 的次序摊进同一个翻译单元，静态函数先声明后定义是合法的。
+   lk_* 交出"拦下来了吗"，并在拦下时放一格能 catch 的 TypeError；frozen_ / noext_ 只问不抛。 */ \
+static bool omni_js_lk_ext(omni_dyn a); \
+static bool omni_js_lk_del(omni_dyn a); \
+static bool omni_js_lk_wr(omni_dyn a, int64_t i); \
+static bool omni_js_frozen_(omni_dyn a); \
+static bool omni_js_noext_(omni_dyn a); \
 static omni_dyn omni_js_call(omni_dyn f, LT args) { \
   /* 取到的那一格不是函数：规范里是**能 catch** 的 TypeError（o.foo() 里 foo 不存在那一格）。
      omni_js_as_fn 住在 omni.h 里，那儿造不出异常对象（$cls 是一条 list），所以检查放在这儿 ——
@@ -144,6 +153,10 @@ static void omni_js_arr_set(omni_dyn a, omni_dyn i, omni_dyn v) { \
   LT l = omni_js_arr_of(a); \
   int64_t k = omni_js_arr_i(i); \
   if (k < 0) omni_errorf("negative array index %lld", (long long)k); \
+  /* 冻住的那格：**赋值**静静地不写（非严格模式的口径，与 prelude 的 $js_arr_set 同一句）；
+     不可扩展的长不了 */ \
+  if (omni_js_frozen_(a)) return; \
+  if (k >= l->len && omni_js_noext_(a)) return; \
   if (k >= l->len) { \
     LT##_reserve(l, k + 1); \
     for (int64_t j = l->len; j <= k; j++) l->items[j] = omni_dyn_undef(); \
@@ -153,6 +166,7 @@ static void omni_js_arr_set(omni_dyn a, omni_dyn i, omni_dyn v) { \
 } \
 static omni_dyn omni_js_arr_push(omni_dyn a, omni_dyn v) { \
   LT l = omni_js_arr_of(a); \
+  if (omni_js_lk_ext(a)) return omni_dyn_of_real((double)l->len); \
   LT##_push(l, v); \
   return omni_dyn_of_real((double)l->len); \
 } \
@@ -160,12 +174,14 @@ static omni_dyn omni_js_arr_push(omni_dyn a, omni_dyn v) { \
    可变实参，而 push 的实参个数是源码里定的，所以摊成"一个 list"最省事。 */ \
 static omni_dyn omni_js_arr_push_all(omni_dyn a, omni_dyn items) { \
   LT l = omni_js_arr_of(a); \
+  if (omni_js_lk_ext(a)) return omni_dyn_of_real((double)l->len); \
   LT src = omni_js_arr_of(items); \
   for (int64_t i = 0; i < src->len; i++) LT##_push(l, src->items[i]); \
   return omni_dyn_of_real((double)l->len); \
 } \
 static omni_dyn omni_js_arr_pop(omni_dyn a) { \
   LT l = omni_js_arr_of(a); \
+  if (omni_js_lk_del(a)) return omni_dyn_undef(); \
   if (l->len == 0) return omni_dyn_undef(); \
   return l->items[--l->len]; \
 } \
@@ -173,6 +189,7 @@ static omni_dyn omni_js_arr_pop(omni_dyn a) { \
    再从后往前挪一位。O(n) —— JS 那边也是。 */ \
 static omni_dyn omni_js_arr_unshift(omni_dyn a, omni_dyn v) { \
   LT l = omni_js_arr_of(a); \
+  if (omni_js_lk_ext(a)) return omni_dyn_of_real((double)l->len); \
   LT##_push(l, v); \
   for (int64_t i = l->len - 1; i > 0; i--) l->items[i] = l->items[i - 1]; \
   l->items[0] = v; \
@@ -181,6 +198,9 @@ static omni_dyn omni_js_arr_unshift(omni_dyn a, omni_dyn v) { \
 /* shift：摘掉头一格并交出来（空数组给 undefined）。判据与 prelude 的 $js_arr_shift 相同。 */ \
 static omni_dyn omni_js_arr_shift(omni_dyn a) { \
   LT l = omni_js_arr_of(a); \
+  /* 先往 0 号格写、再削长度 —— 冻住的抱怨"写"，封住的抱怨"删"（尺子的口径） */ \
+  if (l->len > 0 && omni_js_lk_wr(a, 0)) return omni_dyn_undef(); \
+  if (omni_js_lk_del(a)) return omni_dyn_undef(); \
   if (l->len == 0) return omni_dyn_undef(); \
   omni_dyn head = l->items[0]; \
   for (int64_t i = 1; i < l->len; i++) l->items[i - 1] = l->items[i]; \
@@ -257,6 +277,7 @@ static omni_dyn omni_js_arr_concat(omni_dyn a, omni_dyn b) { \
 } \
 static omni_dyn omni_js_arr_reverse(omni_dyn a) { \
   LT l = omni_js_arr_of(a); \
+  if (l->len > 1 && omni_js_lk_wr(a, 0)) return a; \
   for (int64_t i = 0, j = l->len - 1; i < j; i++, j--) { \
     omni_dyn t = l->items[i]; l->items[i] = l->items[j]; l->items[j] = t; \
   } \
@@ -266,6 +287,7 @@ static omni_dyn omni_js_arr_fill(omni_dyn a, omni_dyn v, omni_dyn s, omni_dyn e)
   LT l = omni_js_arr_of(a); \
   int64_t start = omni_js_arr_rel(s.tag == OMNI_DYN_UNDEF ? 0 : omni_js_arr_i(s), l->len); \
   int64_t end = omni_js_arr_rel(e.tag == OMNI_DYN_UNDEF ? l->len : omni_js_arr_i(e), l->len); \
+  if (start < end && omni_js_lk_wr(a, start)) return a; \
   for (int64_t i = start; i < end; i++) l->items[i] = v; \
   return a; \
 } \
@@ -279,6 +301,7 @@ static omni_dyn omni_js_arr_copy_within(omni_dyn a, omni_dyn t, omni_dyn s, omni
   int64_t n = end - start; \
   if (n > l->len - to) n = l->len - to; \
   if (n <= 0) return a; \
+  if (omni_js_lk_wr(a, to)) return a; \
   LT tmp = LT##_new(); \
   LT##_reserve(tmp, n); \
   for (int64_t i = 0; i < n; i++) tmp->items[tmp->len++] = l->items[start + i]; \
@@ -567,6 +590,20 @@ static omni_dyn omni_js_arr_sort(omni_dyn a, omni_dyn f) { \
   LT l = omni_js_arr_of(a); \
   int64_t n = l->len; \
   if (n < 2) return a; \
+  /* 冻住的数组只在**真要动格子**的时候才撞锁（尺子上已经有序的 sort() 不抛，
+     sort((x,y)=>y-x) 抛）。所以先排在拷贝上，看结果是不是同一排 —— 与 prelude 的
+     $js_arr_sort 同一招。 */ \
+  if (omni_js_frozen_(a)) { \
+    LT cp = LT##_new(); \
+    LT##_reserve(cp, n); \
+    for (int64_t i = 0; i < n; i++) cp->items[i] = l->items[i]; \
+    cp->len = n; \
+    omni_js_arr_sort(omni_js_arr_wrap(cp), f); \
+    for (int64_t i = 0; i < n; i++) { \
+      if (!omni_js_eq(true, cp->items[i], l->items[i])) { omni_js_lk_wr(a, i); return a; } \
+    } \
+    return a; \
+  } \
   omni_dyn *buf = (omni_dyn *)omni_alloc((size_t)n * sizeof(omni_dyn)); \
   for (int64_t w = 1; w < n; w *= 2) { \
     for (int64_t lo = 0; lo < n; lo += 2 * w) { \
@@ -636,6 +673,13 @@ static omni_dyn omni_js_arr_splice_(omni_dyn a, omni_dyn argsv, bool copy) { \
     if (dc > len - start) dc = len - start; \
   } \
   int64_t ins = args->len > 2 ? args->len - 2 : 0; \
+  /* 三档锁（只管就地那一支；toSpliced 拷一份，原数组不动）。次序与 prelude 的
+     $js_arr_splice 逐条相同：先"写"、再"删"、再"长"。 */ \
+  if (!copy && omni_js_noext_(a) && (dc > 0 || ins > 0)) { \
+    if (omni_js_lk_wr(a, start)) return omni_js_arr_wrap(LT##_new()); \
+    if (dc != ins && omni_js_lk_del(a)) return omni_js_arr_wrap(LT##_new()); \
+    if (ins > dc && omni_js_lk_ext(a)) return omni_js_arr_wrap(LT##_new()); \
+  } \
   LT rem = LT##_new(); \
   LT##_reserve(rem, dc); \
   for (int64_t i = 0; i < dc; i++) rem->items[i] = l->items[start + i]; \

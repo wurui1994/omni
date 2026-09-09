@@ -79,6 +79,76 @@ static DT omni_js_xprops_(omni_dyn o, bool make) { \
   DT##_set(omni_js_xprops_tbl_, id, omni_js_dict_wrap(d)); \
   return d; \
 } \
+/* 三档锁：Object.freeze / seal / preventExtensions（ADR-0020）。
+   这条腿上没有真对象，所以能被锁的只有"容器"那几格（list / dict / Map / Set / bytes）——
+   它们身上没有属性槽表，标记只能挂在旁边，与 xprops 同一招：键就是 omni_js_key 给引用值
+   发的那个（地址），这个运行时不搬对象也不回收，所以地址在一趟里就是同一性。
+   三档是包含关系：冻住 ⊂ 封住 ⊂ 不可扩展。原始值照规范：冻住、封住都算，不可扩展。
+   与 prelude 的 $FROZEN / $SEALED / $NOEXT 逐条对齐。 */ \
+static DT omni_js_frozen_tbl_, omni_js_sealed_tbl_, omni_js_noext_tbl_; \
+static bool omni_js_lockable_(omni_dyn o) { \
+  return o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT || o.tag == OMNI_DYN_MAP \
+    || o.tag == OMNI_DYN_SET || o.tag == OMNI_DYN_BYTES; \
+} \
+static bool omni_js_lk_has_(DT t, omni_dyn o) { \
+  return t != NULL && DT##_find(t, omni_js_key(o)) >= 0; \
+} \
+static void omni_js_lk_add_(DT *t, omni_dyn o) { \
+  if (*t == NULL) *t = DT##_new(); \
+  DT##_set(*t, omni_js_key(o), omni_dyn_of_bool(true)); \
+} \
+static bool omni_js_frozen_(omni_dyn a) { return omni_js_lk_has_(omni_js_frozen_tbl_, a); } \
+static bool omni_js_noext_(omni_dyn a) { return omni_js_lk_has_(omni_js_noext_tbl_, a); } \
+/* lk_* 交出"拦下来了吗"，拦下时放一格**能 catch** 的 TypeError（消息与 prelude 逐字相同）。
+   调用点必须写成"拦下来就 return"的形状，让那格错走出去。 */ \
+static bool omni_js_lk_ext(omni_dyn a) { \
+  if (!omni_js_noext_(a)) return false; \
+  omni_js_type_err_c("object is not extensible"); \
+  return true; \
+} \
+static bool omni_js_lk_del(omni_dyn a) { \
+  if (!omni_js_lk_has_(omni_js_sealed_tbl_, a)) return false; \
+  omni_js_type_err_c("could not delete property"); \
+  return true; \
+} \
+static bool omni_js_lk_wr(omni_dyn a, int64_t i) { \
+  if (!omni_js_frozen_(a)) return false; \
+  omni_str m = omni_str_cat(omni_str_new("'", 1), omni_str_int(i)); \
+  m = omni_str_cat(m, omni_str_new("' is read-only", 14)); \
+  char *z = (char *)omni_alloc((size_t)m.len + 1); \
+  for (int64_t j = 0; j < m.len; j++) z[j] = m.p[j]; \
+  z[m.len] = 0; \
+  omni_js_type_err_c(z); \
+  return true; \
+} \
+static omni_dyn omni_js_obj_freeze(omni_dyn o) { \
+  if (omni_js_lockable_(o)) { \
+    omni_js_lk_add_(&omni_js_frozen_tbl_, o); \
+    omni_js_lk_add_(&omni_js_sealed_tbl_, o); \
+    omni_js_lk_add_(&omni_js_noext_tbl_, o); \
+  } \
+  return o; \
+} \
+static omni_dyn omni_js_obj_seal(omni_dyn o) { \
+  if (omni_js_lockable_(o)) { \
+    omni_js_lk_add_(&omni_js_sealed_tbl_, o); \
+    omni_js_lk_add_(&omni_js_noext_tbl_, o); \
+  } \
+  return o; \
+} \
+static omni_dyn omni_js_obj_prevent_ext(omni_dyn o) { \
+  if (omni_js_lockable_(o)) omni_js_lk_add_(&omni_js_noext_tbl_, o); \
+  return o; \
+} \
+static bool omni_js_obj_is_frozen(omni_dyn o) { \
+  return !omni_js_lockable_(o) || omni_js_frozen_(o); \
+} \
+static bool omni_js_obj_is_sealed(omni_dyn o) { \
+  return !omni_js_lockable_(o) || omni_js_lk_has_(omni_js_sealed_tbl_, o); \
+} \
+static bool omni_js_obj_is_ext(omni_dyn o) { \
+  return omni_js_lockable_(o) && !omni_js_noext_(o); \
+} \
 /* 键是不是一格**规范的十进制下标**（"0" / "12"；不收 "01" / "+1" / "1e2"）。不是就给 -1。
    数组身上的 `0 in a`、`a["1"]` 的读与写都靠它 —— 与 prelude 那份的判据对着写。 */ \
 static int64_t omni_js_dec_index(omni_str key) { \
@@ -132,6 +202,8 @@ static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
     int64_t n = omni_js_arr_i(v); \
     /* 越界是能 catch 的 RangeError（规范 10.4.2.4 的 ArraySetLength）—— 从前是硬错 */ \
     if (n < 0) { omni_js_range_err_c("invalid array length"); return o; } \
+    /* 封住 / 冻住 / 不可扩展的那格：改长度要么删格子要么加格子，两样都不许 —— 静静地不改 */ \
+    if (omni_js_noext_(o)) return o; \
     if (n < l->len) { l->len = n; return o; } \
     LT##_reserve(l, n); \
     while (l->len < n) l->items[l->len++] = omni_dyn_undef(); \
@@ -143,6 +215,12 @@ static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
   if (o.tag == OMNI_DYN_LIST) { \
     int64_t idx = omni_js_dec_index(key); \
     if (idx >= 0) { omni_js_arr_set(o, omni_dyn_of_real((double)idx), v); return o; } \
+  } \
+  /* 三档锁（ADR-0020）：不可扩展就加不上新名字，冻住连改都不行 —— 非严格赋值，静静地不写 */ \
+  if (omni_js_noext_(o)) { \
+    DT ex = o.tag == OMNI_DYN_LIST ? omni_js_xprops_(o, false) : omni_js_dict_of(o); \
+    bool had = ex != NULL && DT##_contains(ex, key); \
+    if (!had || omni_js_frozen_(o)) return o; \
   } \
   DT##_set(o.tag == OMNI_DYN_LIST ? omni_js_xprops_(o, true) : omni_js_dict_of(o), key, v); \
   return o; \
@@ -167,6 +245,9 @@ static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
        表达不出洞，写 undefined 进去只对得上一半，那是悄悄的错答案。所以当场报。
        与 prelude 的 $js_obj_delete 逐字对着写。 */ \
     int64_t hi = omni_js_dec_index(key); \
+    /* 封住 / 冻住的那格根本删不掉：照实交 false，一格洞也不会出现（非严格 delete 的口径），
+       所以下面那句"表达不出洞"的报错不该拦在前面 */ \
+    if (omni_js_lk_has_(omni_js_sealed_tbl_, o)) return false; \
     if (hi >= 0 && hi < ((LT)o.u.ref)->len) { \
       omni_errorf("delete of an array index would leave a hole; use splice(%lld, 1)", \
                   (long long) hi); \
@@ -174,6 +255,7 @@ static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
     DT d = omni_js_xprops_(o, false); \
     return d == NULL ? true : DT##_remove(d, key); \
   } \
+  if (omni_js_lk_has_(omni_js_sealed_tbl_, o)) return false; \
   return DT##_remove(omni_js_dict_of(o), key); \
 } \
 /* get / set / has / delete 的键是同一个口径：规范先 ToPropertyKey，**数按串形算**

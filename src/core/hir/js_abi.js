@@ -884,7 +884,10 @@ const P1_JS_ONLY = [
   'js_obj_new_p', 'js_obj_create', 'js_obj_defs', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
   'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
   'js_reflect_set', 'js_reflect_def', 'js_reflect_proto_set', 'js_reflect_prevent_ext',
-  'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',  'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
+  // freeze / seal / preventExtensions 那六格已经有 C 孪生了（omni_js_obj.h 的三档锁）：
+  // 这条腿上能被锁的只有容器（list / dict / Map / Set / bytes），而真对象在 C 上还不存在，
+  // 所以那一支本来就到不了 —— 六格在 C 上是**完整**的，不是半对的。
+  'js_obj_own_keys', 'js_obj_to_string',
   'js_obj_from_entries', 'js_obj_descs',
   'js_instanceof', 'js_instanceof_p', 'js_is_obj', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   // Symbol 那一族已经有 C 孪生了（runtime/omni_js_sym.c，ADR-0020 P1-c 的第一步），
