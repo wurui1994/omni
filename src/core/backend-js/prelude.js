@@ -3414,7 +3414,36 @@ function $js_obj_has_own(o, k) {
   if ($dynTag(o) === "dict") return $js_dict_of(o).has($js_hkey(k));
   return false;
 }
-function $js_obj_own_keys(kind, o) { return $js_isobj(o) ? $js_own_keys(o, kind) : []; }
+/* Object.getOwnPropertyNames / getOwnPropertySymbols（'s' / 'y'）。真对象以外的那几格也要
+   认：数组与串在 JS 里都是对象，length 是它们的一格**自有属性**（不可枚举），下标也是。
+   从前非真对象一律给空表 —— 那是悄悄的错答案（量出来的：getOwnPropertyNames([1,2,3])
+   该给 0,1,2,length）。次序照规范：整数下标升序在前，然后是别的字符串键（length 是建得
+   最早的那一格，所以排在旁表那些前面）。
+   Symbol 那一档（'y'）在这几格上确实是空的：旁表只收字符串键。 */
+function $js_obj_own_keys(kind, o) {
+  if ($js_isobj(o)) return $js_own_keys(o, kind);
+  if (kind !== "s") return [];
+  const t = $dynTag(o);
+  if (t === "list") {
+    const out = $js_arr_idx_keys(o);
+    out.push("length");
+    const x = $js_xprops(o, false);
+    if (x !== undefined) for (const k of x.keys()) if (typeof k === "string" && !$js_isidx(k)) out.push(k);
+    return out;
+  }
+  if (t === "string") {
+    const out = $js_str_idx_keys(o);
+    out.push("length");
+    return out;
+  }
+  return [];
+}
+// 数组的下标键（十进制串，升序）—— 与 $js_arr_own_keys 的头一段同一套
+function $js_arr_idx_keys(a) {
+  const l = $js_arr_of(a), out = [];
+  for (let i = 0; i < l.length; i++) out.push($js_str(i));
+  return out;
+}
 function $js_obj_freeze(o) {
   if ($js_isobj(o)) {
     o.ex = false;
