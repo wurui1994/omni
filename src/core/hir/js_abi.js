@@ -886,7 +886,6 @@ const P1_JS_ONLY = [
   // normalize：NFC/NFD 要 Unicode 的分解与组合表，C 侧还没有（见上面那条 op 的注）
   'js_str_normalize',
   'js_obj_new_p', 'js_obj_create', 'js_obj_defs', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
-  'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own',
   'js_reflect_set', 'js_reflect_def', 'js_reflect_proto_set', 'js_reflect_prevent_ext',
   // freeze / seal / preventExtensions 那六格已经有 C 孪生了（omni_js_obj.h 的三档锁）：
   // 这条腿上能被锁的只有容器（list / dict / Map / Set / bytes），而真对象在 C 上还不存在，

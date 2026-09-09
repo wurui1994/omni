@@ -376,6 +376,36 @@ static omni_dyn omni_js_obj_from_entries(omni_dyn pairs) { \
   } \
   return o; \
 } \
+/* Object.hasOwn / Reflect.has / Reflect.deleteProperty 那三格。JS 那条腿上它们先问真对象的
+   槽表、再走原型链或代理陷阱；这条腿上"普通对象"是 dict、数组是一段 items —— 自有键就是
+   全部键（没有原型链），所以三格都落回容器那一套。
+   刻意保留 omni_js_obj_get 的那句响错：Map / 原始值上取表外成员在这条腿上还没有落点，
+   给 false 会把"原型上确实有的名字"悄悄答成没有。 */ \
+static bool omni_js_obj_has_own(omni_dyn o, omni_dyn k) { \
+  if (o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT) return omni_js_obj_has(o, k); \
+  /* 串上的下标与 length 也是**自有**属性（规范 10.4.3） */ \
+  if (o.tag == OMNI_DYN_STR16) { \
+    omni_str key = omni_js_prop_k(k); \
+    if (key.len == 6 && memcmp(key.p, "length", 6) == 0) return true; \
+    int64_t idx = omni_js_dec_index(key); \
+    return idx >= 0 && idx < o.u.s16.len; \
+  } \
+  return false; \
+} \
+static bool omni_js_obj_has_p(omni_dyn o, omni_dyn k) { \
+  if (o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT || o.tag == OMNI_DYN_STR16) { \
+    return omni_js_obj_has_own(o, k); \
+  } \
+  return omni_js_obj_get(o, k).tag != OMNI_DYN_UNDEF; \
+} \
+static bool omni_js_obj_del_p(omni_dyn o, omni_dyn k) { \
+  if (o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT) { \
+    /* 没有那一格时规范交 true（21.1.3.5 的 [[Delete]]："删不掉"才是 false） */ \
+    if (!omni_js_obj_has(o, k)) return true; \
+    return omni_js_obj_delete(o, k); \
+  } \
+  return true; \
+} \
 /* 属性描述符（规范 6.2.6）。这条腿上"普通对象"是 dict、数组是一段 items —— 都**没有
    属性位**（没有访问器、没有不可写／不可枚举的自有槽），所以描述符只能是照实合成的那一格：
    数据属性、三个位按值域算。三档锁是唯一能把位改掉的东西（冻住 → 不可写、不可配置；

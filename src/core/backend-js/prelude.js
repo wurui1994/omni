@@ -3817,6 +3817,13 @@ function $js_obj_has_own(o, k) {
   // 数组与 dict 上也要认（Object.hasOwn(a, 0) / Object.hasOwn({1:"a"}, 1)）
   if ($dynTag(o) === "list") return $js_arr_has_key(o, $js_hkey(k));
   if ($dynTag(o) === "dict") return $js_dict_of(o).has($js_hkey(k));
+  /* 串上的下标与 length 也是**自有**属性（规范 10.4.3）—— 从前这一支落到底下那句
+     return false 上，于是 Object.hasOwn("ab", 0) 静静地给 false（两把尺子都给 true）。 */
+  if ($dynTag(o) === "string") {
+    const key = $js_pkey(k), s = $js_asS16(o);
+    if (key === "length") return true;
+    return typeof key === "string" && $js_isidx(key) && Number(key) < s.length;
+  }
   return false;
 }
 /* Object.getOwnPropertyNames / getOwnPropertySymbols（'s' / 'y'）。真对象以外的那几格也要

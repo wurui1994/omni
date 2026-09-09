@@ -293,3 +293,14 @@ console.log(JSON.stringify(Object.fromEntries([[1, "n"], [true, "b"]])));
 const gb = Object.groupBy(["ada", "bo", "cy", "dee"], (s) => (s.length > 2 ? "long" : "short"));
 console.log(JSON.stringify(gb), gb.long.join("+"));
 console.log(JSON.stringify(Object.groupBy([10, 11, 12], (v, i) => i % 2)));
+
+// Object.hasOwn / in / Reflect.has / Reflect.deleteProperty 现在**五条腿都有**：这条腿上
+// 没有原型链，所以"自有键"就是全部键。串上的下标与 length 也是自有属性（规范 10.4.3）。
+const ho = { a: 1, b: undefined };
+console.log(Object.hasOwn(ho, "a"), Object.hasOwn(ho, "b"), Object.hasOwn(ho, "z"));
+const ha = [7, 8];
+ha.tag = "t";
+console.log(Object.hasOwn(ha, 0), Object.hasOwn(ha, 2), Object.hasOwn(ha, "length"), Object.hasOwn(ha, "tag"));
+console.log(Object.hasOwn("ab", 0), Object.hasOwn("ab", "length"), Object.hasOwn(1, "x"));
+console.log(Reflect.has(ho, "a"), Reflect.has(ho, "z"), Reflect.has(ha, 1));
+console.log(Reflect.deleteProperty(ho, "a"), JSON.stringify(ho), Reflect.deleteProperty(ho, "nope"));
