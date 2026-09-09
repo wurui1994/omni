@@ -2942,6 +2942,19 @@ function $mkRealm() {
   $natm(r.iterP, "every", 1, (t, a) => $js_it_every(t, a[0]));
   $natm(r.iterP, "find", 1, (t, a) => $js_it_find(t, a[0]));
   $js_def_data(r.iterP, $js_sym_wk("iterator"), $nat("[Symbol.iterator]", 0, (t) => t), true, false, true);
+  /* Number.prototype 的那几格（规范 21.1.3）。从前 numP 身上一格都没挂 —— 于是
+     (5).toFixed 在这条腿上是 undefined，而 C 那条腿照成员表答"是个函数"，两条腿分叉
+     （量出来的：js-exec 的 35 号当场抓住）。借方法那条路
+     （Number.prototype.toFixed.call(x, 2)）也靠这几格。
+     这一整份是 String.raw 模板的正文：注释里也不许出现反引号。 */
+  $natm(r.numP, "toFixed", 1, (t, a) => $js_num_to_fixed(t, a[0]));
+  $natm(r.numP, "toExponential", 1, (t, a) => $js_num_to_exp(t, a[0]));
+  $natm(r.numP, "toPrecision", 1, (t, a) => $js_num_to_precision(t, a[0]));
+  $natm(r.numP, "toString", 1, (t, a) => $js_num_to_string(t, a[0]));
+  $natm(r.numP, "valueOf", 0, (t) => t);
+  // Boolean.prototype 同理（规范 20.3.3）：两格都只是把接收者交回去 / 印出来
+  $natm(r.boolP, "toString", 0, (t) => $js_str(t));
+  $natm(r.boolP, "valueOf", 0, (t) => t);
   // Symbol 的两格：description 是访问器（规范如此），toString 给 "Symbol(desc)"
   $js_def_acc(r.symP, "description", $nat("description", 0, (t) => $dynAsSym(t).d), undefined, false, true);
   $natm(r.symP, "toString", 0, (t) => $js_sym_str(t));

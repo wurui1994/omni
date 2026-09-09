@@ -26,6 +26,10 @@
    前缀刻意**不**用 omni_str_fmt("s%.*s")：printf 的 %s 在第一个 NUL 处就停了，于是
    "" 与 "\0" 撞成同一个键，而 node 上它们是两个键 —— 一处静默分叉。字符串键里真的会
    出现 U+0000（词法器的转义表里就有一条 '0' -> '\0'）。 */
+/* 原生选择子里“原型成员”那一段的起点（见 OMNI_JS_OBJ 里 omni_js_pm_* 那几格）。
+   摆在宏外头：宏体里不能有 #define。 */
+#define OMNI_JS_PM_SEL 1000
+
 #define OMNI_JS_OBJ(LT, DT) \
 static DT omni_js_dict_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_DICT); } \
 static omni_dyn omni_js_dict_wrap(DT d) { return omni_dyn_of_ref((void *)d, OMNI_DYN_DICT); } \
@@ -74,6 +78,19 @@ static omni_dyn omni_js_proto_of_tag_(omni_dyn v); \
 struct omni_js_nat_s { omni_fnptr fp; int64_t sel; omni_dyn a; }; \
 static omni_dyn omni_js_nat_(int64_t sel, omni_dyn a); \
 static omni_dyn omni_js_nat_call_(omni_fn me, LT args); \
+/* 内建原型上的成员（`Array.prototype.map` 那一族，ADR-0020 P1-c）。那 93 格的实现是 emit 期
+   照 JS_MEMBERS 生成的 static 函数（backend-c 的 memberDispatch），住在这一段**之后**，
+   所以这儿只留两格函数指针：一格按 (原型名, 成员名) 查号，一格按号调。main 里登记一次
+   （protoMembers 发的 omni_js_pm_init_）。没登记的时候读成员照旧当场报。
+   sel 从 OMNI_JS_PM_SEL 起就是"第 ix 格原型成员"，载荷是 [名字, 形参个数]。 */ \
+typedef int64_t (*omni_js_pm_find_t)(omni_str pr, omni_str nm, int64_t *argc); \
+typedef omni_dyn (*omni_js_pm_call_t)(int64_t ix, LT args, omni_dyn self); \
+static omni_js_pm_find_t omni_js_pm_find_ = NULL; \
+static omni_js_pm_call_t omni_js_pm_call_ = NULL; \
+static void omni_js_pm_set_(omni_js_pm_find_t f, omni_js_pm_call_t c) { \
+  omni_js_pm_find_ = f; \
+  omni_js_pm_call_ = c; \
+} \
 /* 原生的名字与形参个数（sel 一格一行）。JS 那条腿上它们是 $nat(name, len, …) 里那两格，
    这儿按 sel 查 —— 一格都不能少，少了 `f.call.name` 会静静地给空串。 */ \
 static const char *omni_js_nat_name_(int64_t sel, int64_t *len) { \
@@ -273,6 +290,11 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
         LT bp = (LT)nn_->a.u.ref; \
         return key.len == 6 ? bp->items[3] : bp->items[2]; \
       } \
+      /* 原型成员那一格：名字与形参个数也是每一格自己的，存在载荷 list 的第 0 / 1 格 */ \
+      if (nn_->sel >= OMNI_JS_PM_SEL) { \
+        LT pp = (LT)nn_->a.u.ref; \
+        return key.len == 6 ? pp->items[1] : pp->items[0]; \
+      } \
       int64_t nl = 0; \
       const char *nn = omni_js_nat_name_(((struct omni_js_nat_s *)o.u.ref)->sel, &nl); \
       if (key.len == 6) return omni_dyn_of_real((double)nl); \
@@ -315,29 +337,27 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
       return idx < l->len ? l->items[idx] : omni_dyn_undef(); \
     } \
     d = omni_js_xprops_(o, false); \
-    if (d == NULL) return omni_dyn_undef(); \
+    if (d == NULL) return omni_js_getp(omni_js_proto_of_tag_(o), \
+                                       omni_dyn_of_s16(omni_s16_of_utf8(key)), o); \
   } else if (o.tag == OMNI_DYN_DICT) { \
     d = omni_js_dict_of(o); \
   } else { \
-    /* 原始值 / Map / Set 身上的**表外**成员：JS 那条腿上它走 realm 的原型链（$js_prim_get），
-       而 realm 是 P1_JS_ONLY —— C 侧一格原型表都没有。从前这儿掉进 omni_js_dict_of 的断言，
-       报的是 "dynamic value is str16, expected dict"：响是响了，可像是我们内部炸了。
-       现在照实说是哪一格、哪条腿。**刻意不给 undefined** —— 那会把"原型上确实有的名字"
-       悄悄答成没有，而悄悄的错答案比拒绝坏。 */ \
-    omni_errorf("backend-c: cannot read '%.*s' of a %s — 原始值的原型链还只在 node 宿主上" \
-      "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器", \
-      (int)key.len, key.p, omni_dyn_tag_name(o.tag)); \
-    return omni_dyn_undef(); \
+    /* 原始值 / Map / Set 身上的**表外**成员：走它那格 realm 原型（`omni_js_proto_of_tag_`）。
+       那些原型是带 get 陷阱的代理，陷阱照**成员表**答：表里有 C 孪生的发一个原生
+       （`"ab".toUpperCase` 取出来能调）、表里有而 C 那侧还没落地的当场报、
+       根本不在表里的名字给 undefined —— 那才是这个值域里的答案（`[].zork`）。 */ \
+    return omni_js_getp(omni_js_proto_of_tag_(o), \
+                        omni_dyn_of_s16(omni_s16_of_utf8(key)), o); \
   } \
   /* contains + get 是两次哈希 —— 取属性是解释器最热的一条，只探一次 */ \
   int64_t e = DT##_find(d, key); \
   if (e >= 0) return d->vals[e]; \
-  /* 普通对象（这条腿上是一格 dict）的原型是 Object.prototype（规范如此）：取不到的名字要
-     接着往那儿找 —— `({a:1}).hasOwnProperty("a")` 就靠这一条。
-     **list 那一支刻意不接**：数组的原型是 Array.prototype，而那一格现在是"读成员就报"的
-     代理（realm 只搬了 Object.prototype），接上去会把 `a.zork` 从 undefined 变成一句响错。 */ \
-  if (o.tag == OMNI_DYN_DICT) { \
-    return omni_js_getp(omni_js_realm_proto(omni_str_new("Object", 6)), \
+  /* 取不到的名字接着往那格原型上找（规范如此）：dict 是 Object.prototype、list 是
+     Array.prototype —— `({a:1}).hasOwnProperty("a")` 与 `[].map` 各靠这一条。
+     成员表落地之后 list 那一支也接得上了：陷阱认不出的名字答 undefined，
+     所以 `a.zork` 照旧是 undefined，不会变成一句响错。 */ \
+  if (o.tag == OMNI_DYN_DICT || o.tag == OMNI_DYN_LIST) { \
+    return omni_js_getp(omni_js_proto_of_tag_(o), \
                         omni_dyn_of_s16(omni_s16_of_utf8(key)), o); \
   } \
   return omni_dyn_undef(); \
@@ -1014,12 +1034,42 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       for (int64_t i = 1; args != NULL && i < args->len; i++) LT##_push(bp, args->items[i]); \
       return omni_js_nat_(10, omni_js_arr_wrap(bp)); \
     } \
-    default: {                                          /* 别的原型上的 get 陷阱 */ \
+    case 7: {                                           /* 别的原型上的 get 陷阱 */ \
       omni_str nm = omni_s16_to_utf8(omni_js_as_s16(n->a)); \
-      omni_str k = omni_s16_to_utf8(omni_js_as_s16(omni_js_str(a0))); \
+      /* 陷阱的实参是 (目标, 键, 接收者)：**键是第二格**。从前这儿读的是 a0（目标），
+         于是那句拒绝里印出来的"成员名"是 "[object Object]"，而照成员表查更是一定查不着。 */ \
+      omni_dyn kd = args != NULL && args->len > 1 ? args->items[1] : a0; \
+      omni_str k = omni_s16_to_utf8(omni_js_as_s16(omni_js_str(kd))); \
+      /* 照成员表查一格：查着了就发一个"第 ix 格原型成员"的原生（载荷记着名字与形参个数），
+         于是 `Array.prototype.map` / `[].map` 取出来是个能调的函数值，`.call` 也照旧成立。
+         查不着照旧当场报 —— 那句话是"成员表缺一格"的固定签名。 */ \
+      /* valueOf 不在成员表里（它不是一格 ABI 成员）：这个值域里它在任何原型上都只把接收者
+         交回去，所以直接发那格现成的原生（sel 3）—— 与 prelude 里 numP / boolP 上挂的
+         那两格一字不差。少这一支 `(5).valueOf` 在这条腿上是 undefined，而 JS 那条腿是函数。 */ \
+      if (k.len == 7 && memcmp(k.p, "valueOf", 7) == 0) return omni_js_nat_(3, omni_dyn_undef()); \
+      if (omni_js_pm_find_ != NULL) { \
+        int64_t argc = 0; \
+        int64_t ix = omni_js_pm_find_(nm, k, &argc); \
+        if (ix >= 0) { \
+          LT pp = LT##_new(); \
+          LT##_push(pp, omni_dyn_of_s16(omni_s16_of_utf8(k))); \
+          LT##_push(pp, omni_dyn_of_real((double)argc)); \
+          return omni_js_nat_(OMNI_JS_PM_SEL + ix, omni_js_arr_wrap(pp)); \
+        } \
+        /* 表里没有这个名字：在这个值域里它**本来就不存在**，答 undefined 才是规范的答案
+           （`[].zork`）。只有"成员表里有、可 C 那侧还没落地"（号 -2）才当场报。 */ \
+        if (ix == -1) return omni_dyn_undef(); \
+      } \
       omni_errorf("backend-c: reading '%.*s' off %.*s.prototype — 内建原型上的成员还没搬到 " \
                   "C 那条腿（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器", \
                   (int)k.len, k.p, (int)nm.len, nm.p); \
+      return omni_dyn_undef(); \
+    } \
+    default: {                                          /* 原型成员那一格：按号调 */ \
+      if (n->sel >= OMNI_JS_PM_SEL && omni_js_pm_call_ != NULL) { \
+        return omni_js_pm_call_(n->sel - OMNI_JS_PM_SEL, args, self); \
+      } \
+      omni_errorf("backend-c: 未知的原生选择子 %lld（内部不一致）", (long long)n->sel); \
       return omni_dyn_undef(); \
     } \
   } \

@@ -88,6 +88,8 @@ class CEmitter {
     // 用到的**聚合元素**数组形状（门槛 2 第八刀：asy 的 pair[]）。标量元素不进这里 ——
     // 那四份在运行时里已经单态好了，这张表只管"要在这份 .c 里包一层"的那些。
     this.arrs = new Map();
+    // 内建原型成员表有多少行（0 就不发表，main 里也不登记）
+    this.protoMemberN = 0;
   }
 
   line(s = '') {
@@ -350,7 +352,9 @@ class CEmitter {
     // fn.name / fn.length 那张表（见 fnMetaTable）：登记一次，之后 `f.name` 就按 fp 查它
     const fnMetaReg = fnMetaN > 0 ? ` omni_js_fnmeta_set(omni_js_fnmeta_tbl, ${fnMetaN});` : '';
     const strHookReg = this.dynSegs === true ? ' omni_js_prim_hook_init_();' : '';
-    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${strHookReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+    // 内建原型上那 93 格成员的表（见 protoMembers）：登记一次，之后读成员就查它
+    const pmReg = this.protoMemberN > 0 ? ' omni_js_pm_init_();' : '';
+    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${strHookReg}${pmReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     this.out[this.s16At] = this.s16PoolLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
@@ -647,6 +651,7 @@ class CEmitter {
       this.dynSegs = true;
       // 成员派发器：调的全是上面这些宏摊出来的 static 函数，所以只能在这之后生成
       this.memberDispatch();
+      this.protoMembers();
       this.callOpDispatch();
     }
   }
@@ -771,6 +776,93 @@ class CEmitter {
       this.indent--;
       this.line('}');
     }
+  }
+
+
+  /**
+   * 内建原型上的成员（`Array.prototype.map` 那一族，ADR-0020 P1-c）：**照成员表生成**。
+   *
+   * 降级器碰到 `[].map(f)` 时直接发 `js_m_map`，不走原型 —— 这一格要的是**把成员当值取**
+   * （`Array.prototype.map.call(x, f)`、`const m = arr.map` 之类）。运行时那边（omni_js_obj.h）
+   * 只留两格函数指针：按 (原型名, 成员名) 查号、按号调；实现是这儿生成的那 93 个 static
+   * 函数（memberDispatch 发的），所以表只能在它们之后发、main 里登记一次。
+   *
+   * 只发**方法**：属性那 13 格（`length` / `size` …）不是函数值，取它们走的是另一条路。
+   * 一个成员可能挂在几个原型上（`slice` 在 Array 与 String 上都有），那就是表里几行、
+   * 同一个号 —— 按接收者标签分派是那个 static 函数自己的事。
+   */
+  protoMembers() {
+    const TAG_PROTO = {
+      list: 'Array', string: 'String', real: 'Number', int: 'Number', uint: 'Number',
+      bool: 'Boolean', Map: 'Map', Set: 'Set', regexp: 'RegExp',
+    };
+    const rows = [];
+    const cases = [];
+    for (const d of Object.values(JS_MEMBERS)) {
+      const m = d.member;
+      if (m.kind === 'prop') continue;
+      const protos = new Set();
+      for (const tag of Object.keys(m.on)) {
+        const pr = TAG_PROTO[tag];
+        if (pr !== undefined) protos.add(pr);
+      }
+      if (protos.size === 0) continue;
+      /* 只有 JS 那条腿有实现的成员（noC）也进表，号是 -2：读它照旧**当场报** ——
+       * 而**根本不在表里**的名字（`a.zork`）就是 undefined，那是规范里的答案。
+       * 少了这一分，"成员表缺一格"与"这个名字本来就没有"会挤成同一个答案。 */
+      if (d.noC === true) {
+        for (const pr of protos) rows.push({ pr, nm: m.name, argc: m.argc, ix: -2 });
+        continue;
+      }
+      const ix = cases.length;
+      const args = [];
+      for (let i = 0; i < m.argc; i++) args.push(`omni_js_pm_arg_(args, ${i})`);
+      const call = `${d.c}(${['self', ...args].join(', ')})`;
+      cases.push(`case ${ix}: return ${d.ret === 'bool' ? `omni_dyn_of_bool(${call})` : call};`);
+      for (const pr of protos) rows.push({ pr, nm: m.name, argc: m.argc, ix });
+    }
+    if (rows.length === 0) return;
+    this.line('static omni_dyn omni_js_pm_arg_(omni_list_dynamic a, int64_t i) {');
+    this.line('  return a != NULL && i < a->len ? a->items[i] : omni_dyn_undef();');
+    this.line('}');
+    this.line('static omni_dyn omni_js_pm_call_impl_(int64_t ix, omni_list_dynamic args, omni_dyn self) {');
+    this.indent++;
+    this.line('switch (ix) {');
+    this.indent++;
+    for (const c of cases) this.line(c);
+    this.line('default: break;');
+    this.indent--;
+    this.line('}');
+    this.line('return omni_dyn_undef();');
+    this.indent--;
+    this.line('}');
+    this.line(`static const struct { const char *pr; const char *nm; int64_t argc; int64_t ix; }`
+      + ` omni_js_pm_tbl_[${rows.length}] = {`);
+    this.indent++;
+    for (const r of rows) {
+      this.line(`{ ${JSON.stringify(r.pr)}, ${JSON.stringify(r.nm)}, ${r.argc}, ${r.ix} },`);
+    }
+    this.indent--;
+    this.line('};');
+    this.line('static int64_t omni_js_pm_find_impl_(omni_str pr, omni_str nm, int64_t *argc) {');
+    this.indent++;
+    this.line(`for (int64_t i = 0; i < ${rows.length}; i++) {`);
+    this.indent++;
+    this.line('const char *p = omni_js_pm_tbl_[i].pr;');
+    this.line('const char *n = omni_js_pm_tbl_[i].nm;');
+    this.line('if ((int64_t)strlen(p) != pr.len || memcmp(p, pr.p, (size_t)pr.len) != 0) continue;');
+    this.line('if ((int64_t)strlen(n) != nm.len || memcmp(n, nm.p, (size_t)nm.len) != 0) continue;');
+    this.line('*argc = omni_js_pm_tbl_[i].argc;');
+    this.line('return omni_js_pm_tbl_[i].ix;');
+    this.indent--;
+    this.line('}');
+    this.line('return -1;');
+    this.indent--;
+    this.line('}');
+    this.line('static void omni_js_pm_init_(void) {');
+    this.line('  omni_js_pm_set_(omni_js_pm_find_impl_, omni_js_pm_call_impl_);');
+    this.line('}');
+    this.protoMemberN = rows.length;
   }
 
   /** 零值构造：容器字段必须是**新建的空容器**，不能是 NULL —— 与 JS 后端的 $new_S 对齐 */
