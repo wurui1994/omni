@@ -4986,19 +4986,36 @@ function $js_re_result(m, str) {
    —— 展开、for-of、Array.from 都成，next() 那一面不在这个值域里（画出来的边界）。
    空匹配往前挪一格，不然在原地打转；不动接收者那格 lastIndex（规范里 matchAll 用克隆）。
    这一格只有 JS 侧：结果上的 index / input / groups 靠 list 的旁表，C 那侧没有（P1-c）。 */
+/* matchAll 交出来的是**一格迭代器**（规范 22.2.6.9 的 %RegExpStringIterator%），不是数组 ——
+   于是 .next() 与"惰性"两格都成立，而展开与 for-of 照旧。
+   从前这儿一次扫完交一条 list：展开与 for-of 看不出差别，.next 却是 undefined（量出来的）。
+   简化的一格写在明处：规范给它一格共享的原型（%RegExpStringIteratorPrototype%），这儿把
+   next 与 Symbol.iterator 那两格**直接挂在对象上**（不可枚举）—— 两格方法因此不共享，
+   it1.next === it2.next 是假。 */
 function $js_re_match_all(body, flags, sd) {
   if (!flags.includes("g")) $rt_error("matchAll needs the g flag");
   const s = $js_asS16(sd);
   const re = $js_re_get(body, flags);
-  const out = [];
   let at = 0;
-  while (at <= s.length) {
-    const m = $js_re_find(re, s, at);
-    if (m === null) break;
-    out.push($js_re_result(m, s));
+  let done = false;
+  const it = $js_obj_new_p($realm().objP);
+  $js_def_data(it, "next", $nat("next", 0, () => {
+    const r = $js_obj_new_p($realm().objP);
+    const m = done ? null : $js_re_find(re, s, at);
+    if (m === null) {
+      done = true;
+      $js_obj_set(r, "value", undefined);
+      $js_obj_set(r, "done", true);
+      return r;
+    }
     at = m.index + (m[0].length === 0 ? 1 : m[0].length);
-  }
-  return out;
+    if (at > s.length) done = true;
+    $js_obj_set(r, "value", $js_re_result(m, s));
+    $js_obj_set(r, "done", false);
+    return r;
+  }), true, false, true);
+  $js_def_data(it, $js_sym_wk("iterator"), $nat("[Symbol.iterator]", 0, (t) => t), true, false, true);
+  return it;
 }
 // 正则对象上的 exec，照 ECMA-262 22.2.7.2：带 g 才用 lastIndex，找到就把它推到匹配的末尾
 // （**不加 1** —— 空匹配在 JS 里就是停在原地，那是调用方的事，这里不许自己"修好"），

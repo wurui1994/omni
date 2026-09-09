@@ -27,3 +27,18 @@ console.log(JSON.stringify("abc".match(undefined)));
 
 // 字面量那条老路一格不变
 console.log(JSON.stringify("12-ab".match(/(\d+)/)), "12-ab".search(/-/));
+
+/* matchAll 交出来的是**一格迭代器**（规范 22.2.6.9 的 %RegExpStringIterator%），不是数组：
+   .next() 与惰性两格都成立，展开与 for-of 照旧。从前这儿一次扫完交一条 list，展开与
+   for-of 看不出差别，.next 却是 undefined。 */
+const mi = "1a 2b".matchAll(/(\d)(\w)/g);
+console.log(typeof mi.next, typeof mi[Symbol.iterator]);
+const f0 = mi.next();
+console.log(f0.done, f0.value[0], f0.value[1], f0.value.index, f0.value.input);
+console.log(mi.next().value[0], JSON.stringify(mi.next()), JSON.stringify(mi.next()));
+// 一个都不匹配时头一次 next 就 done
+console.log(JSON.stringify("zz".matchAll(/x/g).next()), [..."zz".matchAll(/x/g)].length);
+// 空匹配照旧一格一格往前挪（不然会死循环）
+console.log([..."aaa".matchAll(/a*?/g)].length);
+// 惰性：只取头一格时后面不扫（这儿只能量"取一次就能拿到"）
+for (const m of "1a 2b".matchAll(/(\d)(\w)/g)) { console.log("first", m[0]); break; }
