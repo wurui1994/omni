@@ -31,3 +31,19 @@ for (let x = 0; x < 4; x++) {
   out += x % 2 === 0 ? `${a++}` : `${a}`;
 }
 console.log(out, a);
+
+// 解构的默认值也是**惰性位置**：属性/元素在的时候那个表达式一次都不该跑。会抛的调用会被
+// guard 提成"临时量 + 一次 pending 检查"，那两句从前摊在整条 If 前面 —— 于是每次都算。
+const ev = [];
+const gv = (t, v) => { ev.push(t); return v; };
+const { d1 = gv("d1", 1) } = { d1: 0 };
+const { p2: d2 = gv("d2", 2) } = { p2: 0 };
+const [d3 = gv("d3", 3)] = [0];
+const { p4: { d4 = gv("d4", 4) } = gv("obj4", {}) } = { p4: { d4: 0 } };
+let d5;
+({ d5 = gv("d5", 5) } = { d5: 0 });
+console.log(`dflt ${d1}${d2}${d3}${d4}${d5} [${ev.join(",")}]`);
+// 缺席的那几格照旧要算，而且只算一次
+const { e1 = gv("e1", 1) } = {};
+const [e2 = gv("e2", 2)] = [];
+console.log(`dflt ${e1}${e2} [${ev.join(",")}]`);

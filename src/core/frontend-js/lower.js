@@ -1299,6 +1299,22 @@ class Lower {
     this.fn.sink.push(st);
   }
 
+  /**
+   * 把 f() 期间落进 sink 的那几句**捞出来**，别让它们漏到外层语句前面。
+   * 解构的默认值要它：`const { a = g() } = o` 里 g() 只在 a 缺席时才该跑，而 g() 这种
+   * 会抛的调用会被 guard 提成"临时量 + 一次 pending 检查"落进 sink —— 从前那两句就摊在
+   * 整条 If 的**前面**，于是默认值每次都算（量出来的静默分叉：属性在的时候副作用照样发生）。
+   * 与 lazy() 的分工：那边是"这一格根本不能有 sink"（当场报），这边是"能有，但要跟着走"。
+   */
+  captureSink(f) {
+    const outer = this.fn.sink;
+    const pre = [];
+    this.fn.sink = pre;
+    const v = f();
+    this.fn.sink = outer;
+    return [pre, v];
+  }
+
   stmtInner(s) {
     switch (s.type) {
       case 'Empty': return [];
@@ -1536,12 +1552,13 @@ class Lower {
         /* 嵌套模式带默认值（`function f({x} = {})`、`const {b: {c} = {}} = o`）：默认值
          * 只在这一格是 undefined 时生效，所以先把值落在一个临时量上、补过默认值，再往里拆。 */
         const t = this.declare('_v').name;
+        const [pre, dv] = this.captureSink(() => this.expr(el.right));
         return [
           localStmt(t, value),
           {
             kind: 'If',
             cond: boolOp('js_eq', [varRef(t), undefExpr()], { strict: true }),
-            then: block([exprStmt(assign(varRef(t), this.expr(el.right)))]),
+            then: block([...pre, exprStmt(assign(varRef(t), dv))]),
             otherwise: null,
           },
           ...this.bindPattern(el.left, varRef(t)),
@@ -1549,10 +1566,11 @@ class Lower {
       }
       const ref = () => this.refVar(el.left.name);
       const decl = this.defineVar(el.left.name, () => value);
+      const [pre, dv] = this.captureSink(() => this.expr(el.right));
       return [...decl, {
         kind: 'If',
         cond: boolOp('js_eq', [ref(), undefExpr()], { strict: true }),
-        then: block([exprStmt(this.writeVar(el.left.name, this.expr(el.right)))]),
+        then: block([...pre, exprStmt(this.writeVar(el.left.name, dv))]),
         otherwise: null,
       }];
     }
@@ -3487,10 +3505,11 @@ class Lower {
       if (leaf.type === 'AssignPattern') {
         const t = this.temp();
         this.emitPre(exprStmt(assign(varRef(t), value)), span);
+        const [pre, dv] = this.captureSink(() => this.expr(leaf.right));
         this.emitPre({
           kind: 'If',
           cond: boolOp('js_eq', [varRef(t), undefExpr()], { strict: true }),
-          then: block([exprStmt(assign(varRef(t), this.expr(leaf.right)))]),
+          then: block([...pre, exprStmt(assign(varRef(t), dv))]),
           otherwise: null,
         }, span);
         put(leaf.left, varRef(t));

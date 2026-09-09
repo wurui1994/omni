@@ -39,6 +39,23 @@ console.log(g1, g2.join(","));
 // 默认值只在 undefined 时用；嵌套模式再来一层
 const [p = 9, [q] = [8]] = [undefined];
 console.log(p, q);
+/* 默认值那个表达式是**惰性位置**：那一格在的时候一次都不该跑。会抛的调用被 guard 提成
+   "临时量 + 一次 pending 检查"，那两句从前摊在整条 If 前面 —— 于是副作用每次都发生。 */
+const ev = [];
+const gv = (t, v) => { ev.push(t); return v; };
+const { d1 = gv("d1", 1) } = { d1: 0 };
+const { p2: d2 = gv("d2", 2) } = { p2: 0 };
+const [d3 = gv("d3", 3)] = [0];
+const { p4: { d4 = gv("d4", 4) } = gv("obj4", {}) } = { p4: { d4: 0 } };
+let d5;
+({ d5 = gv("d5", 5) } = { d5: 0 });
+console.log(d1, d2, d3, d4, d5, `[${ev.join(",")}]`);
+// 缺席的那几格照旧要算，而且只算一次
+const { e1 = gv("e1", 1) } = {};
+const [e2 = gv("e2", 2)] = [];
+let e3;
+({ e3 = gv("e3", 3) } = {});
+console.log(e1, e2, e3, `[${ev.join(",")}]`);
 // 成员目标
 const o = {};
 [o.x, o.y] = nat();
