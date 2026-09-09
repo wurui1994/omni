@@ -4069,7 +4069,10 @@ function $js_obj_has_own(o, k) {
    最早的那一格，所以排在旁表那些前面）。
    Symbol 那一档（'y'）在这几格上确实是空的：旁表只收字符串键。 */
 function $js_obj_own_keys(kind, o) {
-  if ($js_isobj(o)) return $js_own_keys(o, kind);
+  /* $cls 是异常对象的内部标记（决策 15），**任何**视图里都不该出现 —— 从前
+     Object.getOwnPropertyNames(new TypeError("t")) 在这条腿上给 ["$cls","message"]，
+     两把尺子给 ["stack","message"]（stack 我们没有，那一格另算）。C 那侧同一个口径。 */
+  if ($js_isobj(o)) return $js_own_keys(o, kind).filter((k) => k !== "$cls");
   if (kind !== "s") return [];
   const t = $dynTag(o);
   if (t === "list") {

@@ -657,7 +657,9 @@ static omni_dyn omni_js_obj_own_keys(int sel, omni_dyn o) { \
     LT##_push(ks, omni_dyn_of_s16(omni_js_s16_lit("length"))); \
     return omni_js_arr_wrap(ks); \
   } \
-  return omni_js_obj_keys(o); \
+  /* 'n' / 's' 这一档是 getOwnPropertyNames：不可枚举的自有属性也要报，所以
+     message / cause 留着（只挡内部标记 $cls 与住在原型上的 name）。 */ \
+  return omni_js_dict_keys_(o, false); \
 } \
 /* Object.getOwnPropertyDescriptors：每个自有键一格描述符 */ \
 static omni_dyn omni_js_obj_descs(omni_dyn o) { \

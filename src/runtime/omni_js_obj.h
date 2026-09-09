@@ -2078,18 +2078,39 @@ static omni_dyn omni_js_arr_own_get(omni_dyn a, omni_dyn key) { \
   if (idx >= 0 && idx < l->len) return l->items[idx]; \
   return omni_js_obj_getk(a, k); \
 } \
+/* 异常对象在这条腿上还是一格 dict（ADR-0011 决策 15），而 dict 没有"可枚举"这一格属性 ——
+   不挡的话内部标记就漏出来了。量出来的分叉：Object.keys(new TypeError("t")) 在这条腿上给
+   ["$cls","name","message"]，另外三条腿与两把尺子都给 []。按视图分：
+     $cls   内部标记，**四种视图一律不出现**
+     name   规范里住在原型上，所以自有视图都不该有它
+     message / cause  是 own 但**不可枚举** —— 枚举那几种视图里没有，
+                      getOwnPropertyNames 里有（en = false 那一支）
+   四格名字与 JSON 那一处的白名单是同一份（omni_js_json.h 的 iserr 那一支）。 */ \
+static bool omni_js_ekey_(omni_s16 k, const char *nm, int64_t n) { \
+  return omni_s16_eq(k, omni_s16_of_utf8(omni_str_new(nm, n))); \
+} \
+static omni_dyn omni_js_dict_keys_(omni_dyn o, bool en) { \
+  DT d = omni_js_dict_of(o); \
+  LT out = LT##_new(); \
+  bool iserr = omni_js_obj_has(o, omni_js_name_("$cls", 4)); \
+  LT##_reserve(out, d->count); \
+  for (int64_t i = 0; i < d->n; i++) { \
+    if (!d->live[i]) continue; \
+    if (iserr) { \
+      omni_s16 k = omni_s16_of_utf8(d->keys[i]); \
+      if (omni_js_ekey_(k, "$cls", 4) || omni_js_ekey_(k, "name", 4)) continue; \
+      if (en && (omni_js_ekey_(k, "message", 7) || omni_js_ekey_(k, "cause", 5))) continue; \
+    } \
+    out->items[out->len++] = omni_dyn_of_s16(omni_s16_of_utf8(d->keys[i])); \
+  } \
+  return omni_js_arr_wrap(out); \
+} \
 static omni_dyn omni_js_obj_keys(omni_dyn o) { \
   if (o.tag == OMNI_DYN_STR16) return omni_js_str_idx_keys(o.u.s16); \
   if (o.tag == OMNI_DYN_LIST) return omni_js_arr_own_keys(o); \
   /* 真对象：自有的**可枚举字符串键**（Object.keys 那一档，规范 20.1.2.17） */ \
   if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_own_keys_o_(o, 'e'); \
-  DT d = omni_js_dict_of(o); \
-  LT out = LT##_new(); \
-  LT##_reserve(out, d->count); \
-  for (int64_t i = 0; i < d->n; i++) { \
-    if (d->live[i]) out->items[out->len++] = omni_dyn_of_s16(omni_s16_of_utf8(d->keys[i])); \
-  } \
-  return omni_js_arr_wrap(out); \
+  return omni_js_dict_keys_(o, true); \
 } \
 /* for-in 走一遍的那一串键（ADR-0020 P3）。规范是"自有 + 继承来的可枚举字符串键，去重"。
    容器那几支没有原型链，所以只剩自有那一段；**真对象**这一支要连着原型链走（ADR-0020
@@ -2157,10 +2178,12 @@ static omni_dyn omni_js_obj_values(omni_dyn o) { \
     } \
     return omni_js_arr_wrap(lout); \
   } \
-  DT d = omni_js_dict_of(o); \
+  LT ks2 = omni_js_arr_of(omni_js_dict_keys_(o, true)); \
   LT out = LT##_new(); \
-  LT##_reserve(out, d->count); \
-  for (int64_t i = 0; i < d->n; i++) if (d->live[i]) out->items[out->len++] = d->vals[i]; \
+  LT##_reserve(out, ks2->len); \
+  for (int64_t i = 0; i < ks2->len; i++) { \
+    out->items[out->len++] = omni_js_obj_get(o, ks2->items[i]); \
+  } \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_obj_entries(omni_dyn o) { \
@@ -2207,15 +2230,14 @@ static omni_dyn omni_js_obj_entries(omni_dyn o) { \
     } \
     return omni_js_arr_wrap(lout); \
   } \
-  DT d = omni_js_dict_of(o); \
+  LT ks3 = omni_js_arr_of(omni_js_dict_keys_(o, true)); \
   LT out = LT##_new(); \
-  LT##_reserve(out, d->count); \
-  for (int64_t i = 0; i < d->n; i++) { \
-    if (!d->live[i]) continue; \
+  LT##_reserve(out, ks3->len); \
+  for (int64_t i = 0; i < ks3->len; i++) { \
     LT pair = LT##_new(); \
     LT##_reserve(pair, 2); \
-    pair->items[0] = omni_dyn_of_s16(omni_s16_of_utf8(d->keys[i])); \
-    pair->items[1] = d->vals[i]; \
+    pair->items[0] = ks3->items[i]; \
+    pair->items[1] = omni_js_obj_get(o, ks3->items[i]); \
     pair->len = 2; \
     out->items[out->len++] = omni_js_arr_wrap(pair); \
   } \
