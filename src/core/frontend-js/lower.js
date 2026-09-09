@@ -158,6 +158,13 @@ function nestedFns(node, out = []) {
     out.push(node);
     return out;
   }
+  /* static 初始化块同理：那一段是在一格无参闭包里跑的（classProtoStmts 的 staticBlock 那一支），
+   * 所以块里提到的外层名字也得装 cell。量出来的：函数里 `class A { static { A.x = 1; } }`
+   * 报 unresolved 'A'（类名自己就是外层那格 let 绑定）。 */
+  if (node.kind === 'staticBlock' && node.body) {
+    out.push(node);
+    return out;
+  }
   eachChild(node, (x) => nestedFns(x, out));
   return out;
 }
@@ -989,6 +996,12 @@ class Lower {
     }
     out.push(exprStmt(this.defHidden(classG(), s16('length'), constReal(clen))));
     out.push(exprStmt(this.defHidden(classG(), s16('name'), s16(name))));
+    /* 局部类：**类对象刚造好就先写进它的绑定那一格**。静态块与静态字段初始化式是在"类定义
+     * 那一刻"跑的，它们里面的 `A.x = 1` 读的就是那一格 —— 等到 `let A = …` 那一句才写就晚了
+     * （量出来的：函数里 `class A { static { A.x = seed; } }` 报 "cannot assign to an index
+     * of a undefined"）。规范里类体内部那个类名是**另一格绑定**、在这一刻就已初始化好，
+     * 所以先写一次是对的口径，不只是绕开顺序问题。 */
+    if (opts.afterCreate !== undefined) out.push(opts.afterCreate());
 
     let ctor = null;
     const fields = [];
@@ -1142,12 +1155,14 @@ class Lower {
     const protoT = this.temp();
     const classT = this.temp();
     const node = { id: name, superClass: e.superClass ?? null, members: e.members, span: e.span };
+    const bindTo = e.bindTo ?? null;
     const stmts = this.classProtoStmts(node, {
       name,
       classOf,
       superName,
       protoRef: () => varRef(protoT),
       classRef: () => varRef(classT),
+      afterCreate: bindTo === null ? undefined : () => exprStmt(this.writeEntry(bindTo, varRef(classT))),
     });
     for (const st of stmts) this.emitPre(st, e.span);
     return varRef(classT);
@@ -1543,7 +1558,18 @@ class Lower {
           kind: 'let',
           decls: [{
             id: { type: 'Ident', name: s.id, span: s.span },
-            init: { type: 'ClassExpr', id: s.id, superClass: s.superClass, members: s.members, span: s.span },
+            /* bindTo：绑定那一格（preCells 立的 cell）。静态块与静态字段初始化式在"类定义
+             * 那一刻"就读类名，所以类对象一造好就先往那一格写一次（classProtoStmts 的
+             * afterCreate）。引用了类名的静态块 / 字段会让 capturedNames 收下这个名字
+             * （nestedFns 认字段与 staticBlock），于是这时候那一格一定已经立好了。 */
+            init: {
+              type: 'ClassExpr',
+              id: s.id,
+              superClass: s.superClass,
+              members: s.members,
+              span: s.span,
+              bindTo: this.lookup(s.id),
+            },
           }],
           span: s.span,
         });
