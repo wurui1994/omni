@@ -2179,6 +2179,10 @@ function $js_obj_assign(dst, src) {
     for (const kv of $js_obj_entries(src)) $js_obj_set(dst, kv[0], kv[1]);
     return dst;
   }
+  /* 别的原始值当源：**什么都不抄**（规范 20.1.2.1 第 4 步 a-ii 是 ToObject 之后走自有可枚举
+     键，数 / 布尔 / bigint / symbol 包起来一格键都没有）。从前落到 $js_dict_of 上、当场报
+     "real is not an object" —— Object.assign({}, x) 里 x 是数是很常见的一格写法。 */
+  if (ts === "real" || ts === "int" || ts === "bool" || ts === "symbol") return dst;
   if ($js_isobj(dst) || $js_isobj(src)) {
     const ks = $js_isobj(src) ? $js_own_keys(src, "e") : [...$js_dict_of(src).keys()];
     for (const k of ks) $js_obj_set(dst, k, $js_obj_get(src, k));

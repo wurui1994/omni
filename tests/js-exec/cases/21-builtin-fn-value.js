@@ -34,6 +34,8 @@ console.log(`spread ${String.fromCharCode(...[72, 105])}`);
 console.log(`from ${Array.from([1, 2], (x) => x * 2).join(",")} ${Array.from({ length: 3 }, (v, i) => i).join(",")}`);
 console.log(`from ${Array.from("ab").join(",")} ${Array.from([1, 2], (v, i) => `${v}@${i}`).join("|")}`);
 console.log(`assign ${JSON.stringify(Object.assign({}, { a: 1 }, { b: 2 }, { a: 3 }))}`);
+// 原始值当源：串摊成下标键，数 / 布尔一格键都没有，null / undefined 跳过（规范 20.1.2.1）
+console.log(`assign ${JSON.stringify(Object.assign({}, "ab", null, undefined, 3, true))}`);
 console.log(`round ${Math.round(-0.5)} ${Math.round(0.5)} ${Math.round(2.5)} ${Math.round(-1.5)}`);
 console.log(`round ${Math.round(0.49999999999999994)} ${Math.round(-1.2)} ${Math.round(NaN)}`);
 console.log(-0, 0, String(-0), 1 / Math.round(-0.2) < 0);

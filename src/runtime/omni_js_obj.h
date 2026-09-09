@@ -302,7 +302,7 @@ static omni_dyn omni_js_obj_entries(omni_dyn o) { \
   return omni_js_arr_wrap(out); \
 } \
 /* { ...src, k: v } 的 src 那一步：把 src 的自有键逐个抄进 dst，返回 dst。
-   undefined / null 当空对象（JS 就是这么规定的），其余非对象是错误。 */ \
+   undefined / null 当空对象（JS 就是这么规定的），别的原始值一格键都没有、照样空手回。 */ \
 static omni_dyn omni_js_obj_assign(omni_dyn dst, omni_dyn src) { \
   if (src.tag == OMNI_DYN_UNDEF || src.tag == OMNI_DYN_NULL) return dst; \
   /* 源是数组或字符串：抄的是它的**自有可枚举键**（下标那几格，数组还有旁表里那些名字）——
@@ -316,6 +316,11 @@ static omni_dyn omni_js_obj_assign(omni_dyn dst, omni_dyn src) { \
     } \
     return dst; \
   } \
+  /* 别的原始值当源：**什么都不抄**（规范 20.1.2.1 第 4 步 a-ii 是 ToObject 之后走自有可枚举
+     键，数 / 布尔 / bigint 包起来一格键都没有）。与 prelude 的 $js_obj_assign 同一条判据 ——
+     从前落到 omni_js_dict_of 上、当场报 "dynamic value is real, expected dict"。 */ \
+  if (src.tag == OMNI_DYN_BOOL || src.tag == OMNI_DYN_INT || src.tag == OMNI_DYN_REAL \
+      || src.tag == OMNI_DYN_UINT) return dst; \
   DT s = omni_js_dict_of(src); \
   DT d = omni_js_dict_of(dst); \
   for (int64_t i = 0; i < s->n; i++) if (s->live[i]) DT##_set(d, s->keys[i], s->vals[i]); \
