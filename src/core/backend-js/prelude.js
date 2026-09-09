@@ -1906,10 +1906,10 @@ function $js_arr_with(a, i, v) {
   l[k] = v;
   return l;
 }
-function $js_arr_entries(a) { return $js_arr_of(a).map((v, i) => [i, v]); }
+function $js_arr_entries(a) { return $js_it_src($js_arr_of(a).map((v, i) => [i, v])); }
 // keys / values（数组那一支）：迭代器在这个值域里就是一格 list，与 entries 同一个口径
-function $js_arr_keys(a) { return $js_arr_of(a).map((v, i) => i); }
-function $js_arr_values(a) { return $js_arr_of(a).slice(); }
+function $js_arr_keys(a) { return $js_it_src($js_arr_of(a).map((v, i) => i)); }
+function $js_arr_values(a) { return $js_it_src($js_arr_of(a).slice()); }
 // split 的字符串分隔符形式（正则形式是 $js_re_split）。空分隔符按码元切，不按码点。
 // 第三个实参是 limit：结果长度的上界（规范 22.1.3.23）—— 从前这一格被丢掉了，
 // "a-b-c".split("-", 2) 于是给出三段（silent 的错答案，量出来的）。
@@ -1982,8 +1982,8 @@ function $js_for_in_keys(o) {
 function $js_iter(v) {
   switch ($dynTag(v)) {
     case "list": return v;
-    case "Map": return $js_map_entries(v);
-    case "Set": return $js_set_items(v);
+    case "Map": return $js_map_pairs(v);
+    case "Set": return $js_set_list(v);
     case "string": return [...v];
     // Uint8Array 也可迭代（[...u8] / for-of / Array.from）：一格一个字节的数
     case "bytes": return [...$js_bytes(v, "iteration").u8];
@@ -4312,12 +4312,16 @@ function $js_map_set(m, k, v) { $js_map_of(m).set($js_key(k), [k, v]); return m;
 function $js_map_delete(m, k) { return $js_map_of(m).delete($js_key(k)); }
 // clear：整格清空，交出 undefined（规范 24.1.3.1）
 function $js_map_clear(m) { $js_map_of(m).clear(); }
-function $js_map_keys(m) { return [...$js_map_of(m).values()].map((p) => p[0]); }
-function $js_map_values(m) { return [...$js_map_of(m).values()].map((p) => p[1]); }
+function $js_map_keys(m) { return $js_it_src($js_map_pairs(m).map((p) => p[0])); }
+function $js_map_values(m) { return $js_it_src($js_map_pairs(m).map((p) => p[1])); }
 /* Map 的 entries（也是 for-of / 展开走的那一条）：交出来的每一格都是**新的**两元数组 ——
    内部存的那一格不能漏出去，不然往那一格上写会改到 Map 自己（量出来的：两把尺子上
    两次展开取到的第一格互不相等，我们从前是同一格）。 */
-function $js_map_entries(m) { return [...$js_map_of(m).values()].map((p) => [p[0], p[1]]); }
+function $js_map_entries(m) { return $js_it_src($js_map_pairs(m)); }
+/* 摊平成一条 list 的那一半（$js_iter / new Map(x) / 集合运算都走它）：公开的
+   entries / keys / values 交的是**真迭代器**，而这些内部用处要的就是一条 list ——
+   不拆开的话 $js_iter 收到一格真对象会当场打转（量出来过）。 */
+function $js_map_pairs(m) { return [...$js_map_of(m).values()].map((p) => [p[0], p[1]]); }
 /* Map / Set 的 forEach：回调收 (value, key, map) 与 (value, value, set)（规范 24.1.3.5
    与 24.2.3.6 —— Set 那边两格都是元素本身）。从前整族缺失，m.forEach(...) 在运行期
    报 "undefined is not a function"。 */
@@ -4332,12 +4336,14 @@ function $js_set_add(s, v) { $js_set_of(s).set($js_key(v), v); return s; }
 function $js_set_delete(s, v) { return $js_set_of(s).delete($js_key(v)); }
 // clear：整格清空，交出 undefined（规范 24.2.3.2）
 function $js_set_clear(s) { $js_set_of(s).clear(); }
-function $js_set_items(s) { return [...$js_set_of(s).values()]; }
+function $js_set_items(s) { return $js_it_src($js_set_list(s)); }
+// 同上：摊平成一条 list 的那一半
+function $js_set_list(s) { return [...$js_set_of(s).values()]; }
 function $js_set_for_each(s, f) {
   for (const v of [...$js_set_of(s).values()]) $js_call3(f, v, v, s);
 }
 // Set 的 entries()：每格是 [v, v]（规范 24.2.3.5 —— 键与值都是元素本身）
-function $js_set_entries(s) { return [...$js_set_of(s).values()].map((v) => [v, v]); }
+function $js_set_entries(s) { return $js_it_src($js_set_list(s).map((v) => [v, v])); }
 /* Set 的集合运算（ES2025）。实参只认**真 Set**（qjs 那边非 set-like 是 TypeError，
    这个值域里没有可 catch 的错，所以由 $js_set_of 当场报）。次序照规范量过的那样：
      union            先 this 的次序，再把 other 里新的接在后面
@@ -4345,41 +4351,41 @@ function $js_set_entries(s) { return [...$js_set_of(s).values()].map((v) => [v, 
      difference       this 的次序减去 other 里有的
      symmetricDifference  先 this 独有的（this 次序），再 other 独有的（other 次序） */
 function $js_set_union(a, b) {
-  const out = $js_set_of_list($js_set_items(a));
-  const ys = $js_set_items(b);
+  const out = $js_set_of_list($js_set_list(a));
+  const ys = $js_set_list(b);
   for (let i = 0; i < ys.length; i++) $js_set_add(out, ys[i]);
   return out;
 }
 function $js_set_intersection(a, b) {
   const aFirst = $js_set_size(a) <= $js_set_size(b);
-  const xs = $js_set_items(aFirst ? a : b);
+  const xs = $js_set_list(aFirst ? a : b);
   const other = aFirst ? b : a;
   const out = $js_set_new();
   for (let i = 0; i < xs.length; i++) if ($js_set_has(other, xs[i])) $js_set_add(out, xs[i]);
   return out;
 }
 function $js_set_difference(a, b) {
-  const xs = $js_set_items(a);
+  const xs = $js_set_list(a);
   const out = $js_set_new();
   for (let i = 0; i < xs.length; i++) if (!$js_set_has(b, xs[i])) $js_set_add(out, xs[i]);
   return out;
 }
 function $js_set_sym_difference(a, b) {
   const out = $js_set_difference(a, b);
-  const ys = $js_set_items(b);
+  const ys = $js_set_list(b);
   for (let i = 0; i < ys.length; i++) if (!$js_set_has(a, ys[i])) $js_set_add(out, ys[i]);
   return out;
 }
 function $js_set_is_subset(a, b) {
   if ($js_set_size(a) > $js_set_size(b)) return false;
-  const xs = $js_set_items(a);
+  const xs = $js_set_list(a);
   for (let i = 0; i < xs.length; i++) if (!$js_set_has(b, xs[i])) return false;
   return true;
 }
 function $js_set_is_superset(a, b) { return $js_set_is_subset(b, a); }
 function $js_set_is_disjoint(a, b) {
   const aFirst = $js_set_size(a) <= $js_set_size(b);
-  const xs = $js_set_items(aFirst ? a : b);
+  const xs = $js_set_list(aFirst ? a : b);
   const other = aFirst ? b : a;
   for (let i = 0; i < xs.length; i++) if ($js_set_has(other, xs[i])) return false;
   return true;
@@ -4390,7 +4396,9 @@ function $js_set_is_disjoint(a, b) {
 function $js_map_of_pairs(init) {
   const m = $js_map_new();
   if (init === undefined) return m;
-  const src = $dynTag(init) === "Map" ? $js_map_entries(init) : $js_arr_of(init);
+  // 初值收任何可迭代的东西（规范 24.1.1.1）：Map 走它自己的次序，别的走通用的那一条 ——
+  // new Map(m.entries()) 与 new Map(x.keys()) 现在送进来的是**真迭代器**，不再是 list
+  const src = $dynTag(init) === "Map" ? $js_map_pairs(init) : $js_iter(init);
   for (const p of src) $js_map_set(m, $js_arr_get(p, 0), $js_arr_get(p, 1));
   return m;
 }

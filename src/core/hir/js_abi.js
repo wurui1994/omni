@@ -573,9 +573,11 @@ export const JS_ABI = {
   // 而且**不认** 0x / Infinity 以外的那些 strtod 扩展（C 那份为此手划前缀再 strtod）。
   js_num_parse_float: { js: '$js_num_parse_float', c: 'omni_js_num_parse_float', arity: 1 },
   js_arr_entries: { js: '$js_arr_entries', c: 'omni_js_arr_entries', arity: 1 },
-  /* keys / values（数组那一支）：这个值域里"迭代器"就是一格 list（entries 从来就是这样），
-     所以 `[...a.keys()]` 与 `for (const i of a.keys())` 成立，而 `a.keys().next()`
-     还是 loud —— 真迭代器对象要等 P2 那条线。 */
+  /* keys / values / entries（数组那三支）：交的是一格**真迭代器**（P2 落地之后，ADR-0020）——
+     原型是 Iterator.prototype，`next` 与 `[Symbol.iterator]` 都在它身上，于是
+     `a.keys().next()` 与 ES2025 那批 helper（`a.values().map(f)`）都接得上。
+     摊平成 list 的那一半是另外的内部助手（Map / Set 那侧是 map_pairs_ / set_list_）——
+     `js_iter` / `new Map(x)` / 集合运算走那一半，不然摊平那条路会收到真对象、当场打转。 */
   js_arr_keys: { js: '$js_arr_keys', c: 'omni_js_arr_keys', arity: 1 },
   js_arr_values: { js: '$js_arr_values', c: 'omni_js_arr_values', arity: 1 },
 

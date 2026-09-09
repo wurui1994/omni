@@ -709,14 +709,18 @@ static omni_dyn omni_js_arr_splice(omni_dyn a, omni_dyn args) { \
 static omni_dyn omni_js_arr_to_spliced(omni_dyn a, omni_dyn args) { \
   return omni_js_arr_splice_(a, args, true); \
 } \
-/* keys / values（数组那一支）：迭代器在这个值域里就是一格 list，与 entries 同一个口径 */ \
+/* keys / values / entries（数组那三格）：交一格**真迭代器** —— next 与 Symbol.iterator 都在
+   它身上，于是 `a.values().next()` 与 ES2025 那批 helper（`a.values().map(f)`）都接得上。
+   造那一格的 omni_js_src_iter_ 住在 OBJ 段（排在这一段后面），所以这儿先声明一句 ——
+   与 STR_ARR 借 omni_js_err_new 同一个做法。 */ \
+static omni_dyn omni_js_src_iter_(omni_dyn v); \
 static omni_dyn omni_js_arr_keys(omni_dyn a) { \
   LT l = omni_js_arr_of(a); \
   LT out = LT##_new(); \
   LT##_reserve(out, l->len); \
   for (int64_t i = 0; i < l->len; i++) out->items[i] = omni_dyn_of_real((double)i); \
   out->len = l->len; \
-  return omni_js_arr_wrap(out); \
+  return omni_js_src_iter_(omni_js_arr_wrap(out)); \
 } \
 static omni_dyn omni_js_arr_values(omni_dyn a) { \
   LT l = omni_js_arr_of(a); \
@@ -724,7 +728,7 @@ static omni_dyn omni_js_arr_values(omni_dyn a) { \
   LT##_reserve(out, l->len); \
   for (int64_t i = 0; i < l->len; i++) out->items[i] = l->items[i]; \
   out->len = l->len; \
-  return omni_js_arr_wrap(out); \
+  return omni_js_src_iter_(omni_js_arr_wrap(out)); \
 } \
 static omni_dyn omni_js_arr_entries(omni_dyn a) { \
   LT l = omni_js_arr_of(a); \
@@ -739,7 +743,7 @@ static omni_dyn omni_js_arr_entries(omni_dyn a) { \
     out->items[i] = omni_js_arr_wrap(pair); \
   } \
   out->len = l->len; \
-  return omni_js_arr_wrap(out); \
+  return omni_js_src_iter_(omni_js_arr_wrap(out)); \
 }
 
 

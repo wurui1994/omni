@@ -265,9 +265,12 @@ c('mget/miss', js('js_map_get', [MAP(), real(2)]), `${MAPS}.get(2)`);
 c('msize', js('js_map_size', [MAP()]), `${MAPS}.size`);
 c('mhas', jsBool('js_map_has', [MAP(), real(1)]), `${MAPS}.has(1)`);
 c('mdelete', jsBool('js_map_delete', [MAP(), str('1')]), `${MAPS}.delete("1")`);
-c('mkeys', js('js_arr_join', [js('js_map_keys', [MAP()]), str('|')]), `[...${MAPS}.keys()].join("|")`);
-c('mvalues', js('js_arr_join', [js('js_map_values', [MAP()]), str('|')]), `[...${MAPS}.values()].join("|")`);
-c('mkeys/tag', js('js_typeof', [js('js_arr_get', [js('js_map_keys', [MAP()]), real(0)])]), `typeof [...${MAPS}.keys()][0]`);
+/* keys / values / entries / set 的那几格现在交的是**真迭代器**（ADR-0020：`m.keys().next()`
+   与 ES2025 那批 helper 都要接得上），所以 op 一层要先过一遍 js_iter 才是一条 list ——
+   参照那一侧写的是 [...m.keys()]，本来就是同一件事。 */
+c('mkeys', js('js_arr_join', [js('js_iter', [js('js_map_keys', [MAP()])]), str('|')]), `[...${MAPS}.keys()].join("|")`);
+c('mvalues', js('js_arr_join', [js('js_iter', [js('js_map_values', [MAP()])]), str('|')]), `[...${MAPS}.values()].join("|")`);
+c('mkeys/tag', js('js_typeof', [js('js_arr_get', [js('js_iter', [js('js_map_keys', [MAP()])]), real(0)])]), `typeof [...${MAPS}.keys()][0]`);
 
 const SET = () => js('js_set_add', [js('js_set_add', [js('js_set_add', [js('js_set_new', []), str('x')]), real(2)]), str('x')]);
 const SETS = 'new Set(["x", 2, "x"])';
@@ -275,7 +278,7 @@ c('ssize', js('js_set_size', [SET()]), `${SETS}.size`);
 c('shas', jsBool('js_set_has', [SET(), real(2)]), `${SETS}.has(2)`);
 c('shas/miss', jsBool('js_set_has', [SET(), str('2')]), `${SETS}.has("2")`);
 c('sdelete', jsBool('js_set_delete', [SET(), str('x')]), `${SETS}.delete("x")`);
-c('sitems', js('js_arr_join', [js('js_set_items', [SET()]), str('|')]), `[...${SETS}].join("|")`);
+c('sitems', js('js_arr_join', [js('js_iter', [js('js_set_items', [SET()])]), str('|')]), `[...${SETS}].join("|")`);
 
 // 标签分家（普通对象 / Map / Set 三个不同的 DYN 标签）：成员派发要靠标签，但从
 // JS 语义看这三样都还是 "object"，而 JSON.stringify 对 Map/Set 一律给 "{}"。
@@ -307,14 +310,14 @@ c('disp/indexOf-list', m('indexOf', [A(), real(2), undef]), `${AS}.indexOf(2)`);
 c('disp/indexOf-str', m('indexOf', [H(), str('l'), real(4)]), `${HS}.indexOf("l", 4)`);
 c('disp/includes-list', mBool('includes', [A(), real(1)]), `${AS}.includes(1)`);
 c('disp/includes-str', mBool('includes', [H(), str('é')]), `${HS}.includes("é")`);
-c('disp/entries-list', js('js_arr_get', [js('js_arr_get', [m('entries', [A()]), real(1)]), real(1)]), `[...${AS}.entries()][1][1]`);
-c('disp/entries-map', js('js_arr_get', [js('js_arr_get', [m('entries', [MAP()]), real(0)]), real(0)]), `[...${MAPS}.entries()][0][0]`);
+c('disp/entries-list', js('js_arr_get', [js('js_arr_get', [js('js_iter', [m('entries', [A()])]), real(1)]), real(1)]), `[...${AS}.entries()][1][1]`);
+c('disp/entries-map', js('js_arr_get', [js('js_arr_get', [js('js_iter', [m('entries', [MAP()])]), real(0)]), real(0)]), `[...${MAPS}.entries()][0][0]`);
 c('disp/has-map', mBool('has', [MAP(), str('1')]), `${MAPS}.has("1")`);
 c('disp/has-set', mBool('has', [SET(), real(2)]), `${SETS}.has(2)`);
 c('disp/delete-map', mBool('delete', [MAP(), real(1)]), `${MAPS}.delete(1)`);
 c('disp/delete-set', mBool('delete', [SET(), str('x')]), `${SETS}.delete("x")`);
 c('disp/get', m('get', [MAP(), real(1)]), `${MAPS}.get(1)`);
-c('disp/keys', m('join', [m('keys', [MAP()]), str('|')]), `[...${MAPS}.keys()].join("|")`);
+c('disp/keys', m('join', [js('js_iter', [m('keys', [MAP()])]), str('|')]), `[...${MAPS}.keys()].join("|")`);
 // 大小写只折 ASCII（两个后端同样残缺，见 omni_js_str.c 的注释），所以这条用纯 ASCII
 c('disp/upper', m('toUpperCase', [str('hello')]), '"hello".toUpperCase()');
 c('disp/trim', m('trim', [str('  x  ')]), '"  x  ".trim()');
@@ -598,9 +601,9 @@ c('parseInt/no-radix-dec', PI('08'), 'parseInt("08")');
 c('parseInt/0x-with-16', PI('0x1f', 16), 'parseInt("0x1f", 16)');
 c('parseInt/empty', PI('', 10), 'parseInt("", 10)');
 
-c('arr/entries', J(js('js_arr_entries', [arr(str('a'), real(2), nul)])),
+c('arr/entries', J(js('js_iter', [js('js_arr_entries', [arr(str('a'), real(2), nul)])])),
   'JSON.stringify([...["a", 2, null].entries()])');
-c('arr/entries-empty', J(js('js_arr_entries', [arr()])), 'JSON.stringify([...[].entries()])');
+c('arr/entries-empty', J(js('js_iter', [js('js_arr_entries', [arr()])])), 'JSON.stringify([...[].entries()])');
 // new Array(n)：长度 n、每格 undefined（stringify 里印成 null，与宿主的洞数组一致）。
 // 实参不是数时就是那一格元素。fill 是现成的 op，串起来才是源码里真正用的那一句。
 c('arr/new-n', J(js('js_arr_new_n', [real(3)])), 'JSON.stringify(new Array(3))');

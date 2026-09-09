@@ -117,9 +117,9 @@ static omni_dyn omni_js_arr_from(omni_dyn v, omni_dyn f) { \
     } \
     src = omni_js_arr_wrap(cps); \
   } else if (v.tag == OMNI_DYN_MAP) { \
-    src = omni_js_map_entries(v); \
+    src = omni_js_map_pairs_(v); \
   } else if (v.tag == OMNI_DYN_SET) { \
-    src = omni_js_set_items(v); \
+    src = omni_js_set_list_(v); \
   } else if (v.tag == OMNI_DYN_BYTES) { \
     /* Uint8Array：一格一个字节的数（omni_js_iter 那一支在这一段之后才定义，所以这儿
        自己摊一遍，与它一字一句对着写） */ \
@@ -231,8 +231,8 @@ static void omni_js_range_err_c(const char *msg) { \
 static omni_dyn omni_js_iter(omni_dyn v) { \
   switch (v.tag) { \
     case OMNI_DYN_LIST: return v; \
-    case OMNI_DYN_MAP: return omni_js_map_entries(v); \
-    case OMNI_DYN_SET: return omni_js_set_items(v); \
+    case OMNI_DYN_MAP: return omni_js_map_pairs_(v); \
+    case OMNI_DYN_SET: return omni_js_set_list_(v); \
     /* Uint8Array 也可迭代（[...u8] / for-of / Array.from）：一格一个字节的数 */ \
     case OMNI_DYN_BYTES: { \
       LT out = LT##_new(); \

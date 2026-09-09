@@ -1562,7 +1562,10 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
    这一格自己身上，不另立一格原型 —— 这条腿上唯一可观察的差别是它们算自有属性。
    for-of 与展开走的是 js_iter 那条快路、不经过这儿；手写协议与 yield* [1,2] 才落到这一格。 */ \
 static omni_dyn omni_js_src_iter_(omni_dyn v) { \
-  omni_dyn it = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Object", 6))); \
+  /* 原型是 Iterator.prototype（不是 Object.prototype）：ES2025 那批 helper 住在那儿，
+     于是 `a.values().map(f)` 与 `new Set(x).values().take(2)` 都接得上。少了这一条，
+     JS 那条腿（$js_it_src 造的那格原型链上有 iterP）给函数、这条腿给 undefined。 */ \
+  omni_dyn it = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Iterator", 8))); \
   omni_js_def_data_(it, omni_js_name_("$src", 4), omni_js_iter(v), true, false, true); \
   omni_js_def_data_(it, omni_js_name_("$ix", 3), omni_dyn_of_real(0.0), true, false, true); \
   omni_js_def_data_(it, omni_js_name_("next", 4), omni_js_nat_(17, omni_dyn_undef()), \
@@ -2295,7 +2298,7 @@ static omni_dyn omni_js_map_keys(omni_dyn m) { \
   for (int64_t i = 0; i < d->n; i++) { \
     if (d->live[i]) out->items[out->len++] = ((LT)d->vals[i].u.ref)->items[0]; \
   } \
-  return omni_js_arr_wrap(out); \
+  return omni_js_src_iter_(omni_js_arr_wrap(out)); \
 } \
 static omni_dyn omni_js_map_values(omni_dyn m) { \
   DT d = omni_js_map_of(m); \
@@ -2304,11 +2307,11 @@ static omni_dyn omni_js_map_values(omni_dyn m) { \
   for (int64_t i = 0; i < d->n; i++) { \
     if (d->live[i]) out->items[out->len++] = ((LT)d->vals[i].u.ref)->items[1]; \
   } \
-  return omni_js_arr_wrap(out); \
+  return omni_js_src_iter_(omni_js_arr_wrap(out)); \
 } \
 /* entries 交出来的每一格都是**新的**两元数组：内部存的那一格不能漏出去，
    不然 `[...m][0][0] = x` 会改到 Map 自己（prelude 那份同一条） */ \
-static omni_dyn omni_js_map_entries(omni_dyn m) { \
+static omni_dyn omni_js_map_pairs_(omni_dyn m) { \
   DT d = omni_js_map_of(m); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
@@ -2323,6 +2326,13 @@ static omni_dyn omni_js_map_entries(omni_dyn m) { \
     out->items[out->len++] = omni_js_arr_wrap(pair); \
   } \
   return omni_js_arr_wrap(out); \
+} \
+/* 公开的那格 `entries()`：交一格**真迭代器**（`next` 与 `[Symbol.iterator]` 都在它身上，
+   于是 ES2025 那批 helper 也接得上）。上面 `pairs_` 那一半是"摊平成一条 list"，
+   给 `omni_js_iter` / `new Map(x)` / 集合运算用 —— 两半不拆开的话摊平那条路会收到一格
+   真对象、`omni_js_iter` 当场打转。 */ \
+static omni_dyn omni_js_map_entries(omni_dyn m) { \
+  return omni_js_src_iter_(omni_js_map_pairs_(m)); \
 } \
 static omni_dyn omni_js_set_new(void) { return omni_js_set_wrap(DT##_new()); } \
 static omni_dyn omni_js_set_size(omni_dyn s) { \
@@ -2342,18 +2352,23 @@ static void omni_js_set_clear(omni_dyn s) { \
   DT d = omni_js_set_of(s); \
   for (int64_t i = 0; i < d->n; i++) if (d->live[i]) DT##_remove(d, d->keys[i]); \
 } \
-static omni_dyn omni_js_set_items(omni_dyn s) { \
+static omni_dyn omni_js_set_list_(omni_dyn s) { \
   DT d = omni_js_set_of(s); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
   for (int64_t i = 0; i < d->n; i++) if (d->live[i]) out->items[out->len++] = d->vals[i]; \
   return omni_js_arr_wrap(out); \
 } \
+/* 公开的那格 `values()` / `keys()`（Set 上两个名字都落到这儿，规范如此）：交真迭代器。
+   `list_` 那一半是摊平成一条 list，理由同上面 map 那一处。 */ \
+static omni_dyn omni_js_set_items(omni_dyn s) { \
+  return omni_js_src_iter_(omni_js_set_list_(s)); \
+} \
 /* Map / Set 的 forEach：回调收 (value, key, map) 与 (value, value, set)（规范 24.1.3.5、
    24.2.3.6 —— Set 那边两格都是元素本身）。键是任意值，所以走 omni_js_call 现拼一格
    三实参的表：固定三格的 omni_js_call3 第二格只收 int64 下标。 */ \
 static void omni_js_map_for_each(omni_dyn m, omni_dyn f) { \
-  LT es = omni_js_arr_of(omni_js_map_entries(m)); \
+  LT es = omni_js_arr_of(omni_js_map_pairs_(m)); \
   for (int64_t i = 0; i < es->len; i++) { \
     LT p = omni_js_arr_of(es->items[i]); \
     const omni_dyn tmp[3] = { p->len > 1 ? p->items[1] : omni_dyn_undef(), \
@@ -2362,7 +2377,7 @@ static void omni_js_map_for_each(omni_dyn m, omni_dyn f) { \
   } \
 } \
 static void omni_js_set_for_each(omni_dyn s, omni_dyn f) { \
-  LT xs = omni_js_arr_of(omni_js_set_items(s)); \
+  LT xs = omni_js_arr_of(omni_js_set_list_(s)); \
   for (int64_t i = 0; i < xs->len; i++) { \
     const omni_dyn tmp[3] = { xs->items[i], xs->items[i], s }; \
     omni_js_call(f, LT##_from(tmp, 3)); \
@@ -2370,7 +2385,7 @@ static void omni_js_set_for_each(omni_dyn s, omni_dyn f) { \
 } \
 /* Set 的 entries()：每格是 [v, v]（规范 24.2.3.5 —— 键与值都是元素本身） */ \
 static omni_dyn omni_js_set_entries(omni_dyn s) { \
-  LT xs = omni_js_arr_of(omni_js_set_items(s)); \
+  LT xs = omni_js_arr_of(omni_js_set_list_(s)); \
   LT out = LT##_new(); \
   LT##_reserve(out, xs->len); \
   for (int64_t i = 0; i < xs->len; i++) { \
@@ -2382,7 +2397,7 @@ static omni_dyn omni_js_set_entries(omni_dyn s) { \
     out->items[i] = omni_js_arr_wrap(pair); \
   } \
   out->len = xs->len; \
-  return omni_js_arr_wrap(out); \
+  return omni_js_src_iter_(omni_js_arr_wrap(out)); \
 } \
 /* new Map(pairs) / new Set(items)。初值收 list，**也收同类容器**（浅拷贝）；
    JS 的可迭代协议整体不在这个值域里，别的类型仍然报错；
@@ -2392,7 +2407,7 @@ static omni_dyn omni_js_map_of_pairs(omni_dyn init) { \
   if (init.tag == OMNI_DYN_UNDEF) return m; \
   /* 真对象：先走一遍迭代协议摊成 list（ADR-0020 P1-c 的第十一步） */ \
   if (init.tag == OMNI_DYN_OBJ) init = omni_js_iter_o_(init); \
-  LT l = omni_js_arr_of(init.tag == OMNI_DYN_MAP ? omni_js_map_entries(init) : init); \
+  LT l = omni_js_arr_of(init.tag == OMNI_DYN_MAP ? omni_js_map_pairs_(init) : init); \
   for (int64_t i = 0; i < l->len; i++) { \
     LT p = omni_js_arr_of(l->items[i]); \
     omni_js_map_set(m, p->len > 0 ? p->items[0] : omni_dyn_undef(), \
@@ -2417,22 +2432,22 @@ static omni_dyn omni_js_set_of_list(omni_dyn init) { \
     } \
     return s; \
   } \
-  LT l = omni_js_arr_of(init.tag == OMNI_DYN_SET ? omni_js_set_items(init) \
-    : (init.tag == OMNI_DYN_MAP ? omni_js_map_entries(init) : init)); \
+  LT l = omni_js_arr_of(init.tag == OMNI_DYN_SET ? omni_js_set_list_(init) \
+    : (init.tag == OMNI_DYN_MAP ? omni_js_map_pairs_(init) : init)); \
   for (int64_t i = 0; i < l->len; i++) omni_js_set_add(s, l->items[i]); \
   return s; \
 } \
 /* Set 的集合运算（ES2025）：与 prelude 那份一字一句对着写 —— 次序照规范
    （intersection / isDisjointFrom 走小的那个，别的以 this 的次序为主）。 */ \
 static omni_dyn omni_js_set_union(omni_dyn a, omni_dyn b) { \
-  omni_dyn out = omni_js_set_of_list(omni_js_set_items(a)); \
-  LT ys = omni_js_arr_of(omni_js_set_items(b)); \
+  omni_dyn out = omni_js_set_of_list(omni_js_set_list_(a)); \
+  LT ys = omni_js_arr_of(omni_js_set_list_(b)); \
   for (int64_t i = 0; i < ys->len; i++) omni_js_set_add(out, ys->items[i]); \
   return out; \
 } \
 static omni_dyn omni_js_set_intersection(omni_dyn a, omni_dyn b) { \
   bool a_first = omni_js_set_of(a)->count <= omni_js_set_of(b)->count; \
-  LT xs = omni_js_arr_of(omni_js_set_items(a_first ? a : b)); \
+  LT xs = omni_js_arr_of(omni_js_set_list_(a_first ? a : b)); \
   omni_dyn other = a_first ? b : a; \
   omni_dyn out = omni_js_set_new(); \
   for (int64_t i = 0; i < xs->len; i++) { \
@@ -2441,7 +2456,7 @@ static omni_dyn omni_js_set_intersection(omni_dyn a, omni_dyn b) { \
   return out; \
 } \
 static omni_dyn omni_js_set_difference(omni_dyn a, omni_dyn b) { \
-  LT xs = omni_js_arr_of(omni_js_set_items(a)); \
+  LT xs = omni_js_arr_of(omni_js_set_list_(a)); \
   omni_dyn out = omni_js_set_new(); \
   for (int64_t i = 0; i < xs->len; i++) { \
     if (!omni_js_set_has(b, xs->items[i])) omni_js_set_add(out, xs->items[i]); \
@@ -2450,7 +2465,7 @@ static omni_dyn omni_js_set_difference(omni_dyn a, omni_dyn b) { \
 } \
 static omni_dyn omni_js_set_sym_difference(omni_dyn a, omni_dyn b) { \
   omni_dyn out = omni_js_set_difference(a, b); \
-  LT ys = omni_js_arr_of(omni_js_set_items(b)); \
+  LT ys = omni_js_arr_of(omni_js_set_list_(b)); \
   for (int64_t i = 0; i < ys->len; i++) { \
     if (!omni_js_set_has(a, ys->items[i])) omni_js_set_add(out, ys->items[i]); \
   } \
@@ -2458,14 +2473,14 @@ static omni_dyn omni_js_set_sym_difference(omni_dyn a, omni_dyn b) { \
 } \
 static bool omni_js_set_is_subset(omni_dyn a, omni_dyn b) { \
   if (omni_js_set_of(a)->count > omni_js_set_of(b)->count) return false; \
-  LT xs = omni_js_arr_of(omni_js_set_items(a)); \
+  LT xs = omni_js_arr_of(omni_js_set_list_(a)); \
   for (int64_t i = 0; i < xs->len; i++) if (!omni_js_set_has(b, xs->items[i])) return false; \
   return true; \
 } \
 static bool omni_js_set_is_superset(omni_dyn a, omni_dyn b) { return omni_js_set_is_subset(b, a); } \
 static bool omni_js_set_is_disjoint(omni_dyn a, omni_dyn b) { \
   bool a_first = omni_js_set_of(a)->count <= omni_js_set_of(b)->count; \
-  LT xs = omni_js_arr_of(omni_js_set_items(a_first ? a : b)); \
+  LT xs = omni_js_arr_of(omni_js_set_list_(a_first ? a : b)); \
   omni_dyn other = a_first ? b : a; \
   for (int64_t i = 0; i < xs->len; i++) if (omni_js_set_has(other, xs->items[i])) return false; \
   return true; \
