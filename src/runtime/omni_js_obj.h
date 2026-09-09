@@ -326,6 +326,17 @@ static omni_dyn omni_js_obj_keys(omni_dyn o) { \
   } \
   return omni_js_arr_wrap(out); \
 } \
+/* for-in 走一遍的那一串键（ADR-0020 P3）。规范是"自有 + 继承来的可枚举字符串键，去重"，
+   而这条腿上**没有原型链**（真对象还在 P1-c 里），所以只剩自有那一段 —— 正好就是
+   omni_js_obj_keys 的三支（串按下标、list 按下标 + 旁表里的非下标名、dict 按键）。
+   容器之外（数 / 布尔 / null / undefined / 函数值 …）在 JS 里也走不出键来：交空表。
+   与 prelude 的 $js_for_in_keys 逐支对齐。 */ \
+static omni_dyn omni_js_for_in_keys(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_STR16 || o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT) { \
+    return omni_js_obj_keys(o); \
+  } \
+  return omni_js_arr_wrap(LT##_new()); \
+} \
 static omni_dyn omni_js_obj_values(omni_dyn o) { \
   if (o.tag == OMNI_DYN_STR16) { \
     omni_s16 v = o.u.s16; \

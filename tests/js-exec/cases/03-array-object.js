@@ -254,3 +254,22 @@ nk[-1] = 7;
 nk[1.5] = 8;
 console.log(`nk ${nk.length} ${nk.join(",")} ${nk[-1]} ${nk[1.5]}`);
 console.log(`nk ${JSON.stringify(nk)} ${nk[-2] === undefined} ${nk[2] === undefined}`);
+
+// for-in（ADR-0020 P3）现在**四条腿都有**：C 侧 omni_js_for_in_keys 走 omni_js_obj_keys
+// 的三支（串按下标、list 按下标 + 旁表里的非下标名、dict 按键）。这条腿上没有原型链，
+// 所以规范里"自有 + 继承"只剩自有那一段。
+const fio = { a: 1, b: 2 };
+const fks = [];
+for (const k in fio) fks.push(k);
+console.log(fks.join(","));
+const fia = [10, 20, 30];
+const fis = [];
+for (const i in fia) fis.push(i + ":" + fia[i]);
+console.log(fis.join("|"));
+const fstr = [];
+for (const i in "ab") fstr.push(i);
+console.log(fstr.join(","));
+// 循环体里 continue / break 照旧
+const fpick = [];
+for (const k in fio) { if (k === "a") continue; fpick.push(k); }
+console.log(fpick.join(","), String("a" in fio), String("z" in fio));

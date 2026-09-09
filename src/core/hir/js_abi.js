@@ -889,7 +889,9 @@ const P1_JS_ONLY = [
   // 所以那一支本来就到不了 —— 六格在 C 上是**完整**的，不是半对的。
   'js_obj_own_keys', 'js_obj_to_string',
   'js_obj_from_entries', 'js_obj_descs',
-  'js_instanceof', 'js_instanceof_p', 'js_is_obj', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
+  // js_for_in_keys 有 C 孪生了：这条腿上没有原型链，所以"自有 + 继承"只剩自有那一段，
+  // 正好是 omni_js_obj_keys 的三支（见 omni_js_obj.h）。
+  'js_instanceof', 'js_instanceof_p', 'js_is_obj', 'js_to_prim', 'js_iter_proto', 'js_iter_next',
   // Symbol 那一族已经有 C 孪生了（runtime/omni_js_sym.c，ADR-0020 P1-c 的第一步），
   // 所以不在这张单子里 —— 真对象那一片还在，见下面几行。
   'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
