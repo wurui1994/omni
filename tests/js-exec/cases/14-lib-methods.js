@@ -30,6 +30,9 @@ function emptyReduce() {
   try { return `${[].reduce((s, x) => s + x)}`; } catch (e) { return `${e.name}:${e instanceof TypeError}`; }
 }
 console.log(`idx ${emptyReduce()} ${[].reduce((s, x) => s + x, 7)}`);
+// Math.* 的实参照规范 ToNumber（从前两条腿都是严格标签检查、当场报）
+console.log(`math ${Math.abs("-3")} ${Math.max("2", 1)} ${Math.trunc("-4.7")} ${Math.sqrt("9")}`);
+console.log(`math ${Math.sign("-2")} ${Math.hypot("3", 4)} ${Math.pow("2", "3")} ${Math.min("5", 2)}`);
 
 console.log(`replaceAll ${"a-b-c".replaceAll("-", "+")}`);
 console.log(`replaceAll ${"aaa".replaceAll("aa", "b")}`);

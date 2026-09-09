@@ -1214,7 +1214,8 @@ function $js_str_slice(s, a, b) {  const v = $js_asS16(s);
 }
 function $js_str_repeat(s, n) {
   const k = $js_idx(n, 0);
-  if (k < 0) $rt_error("repeat count must not be negative");
+  // 负数（与 Infinity）是 RangeError，**能 catch**（规范 22.1.3.18 第 4/5 步）
+  if (k < 0) return $js_range_err("repeat count must not be negative");
   return $js_asS16(s).repeat(k);
 }
 /* String.raw 的**普通调用**形态：String.raw({ raw: [...] }, ...subs)。tag 形态在降级器
@@ -4246,7 +4247,8 @@ function $js_bigint_as_uint_n(bits, v) {
   return BigInt.asUintN(n, v);
 }
 function $js_num_to_precision(v, digits) {
-  const p = $js_real(digits, "toPrecision");
+  // 实参照规范 ToIntegerOrInfinity（21.1.3.5 起那几格都是）：串 / 布尔 / null 都收得下
+  const p = $js_idx(digits, 0);
   if (p < 1 || p > 100) return $js_range_err("toPrecision() argument must be between 1 and 100, got " + p);
   return $js_real(v, "toPrecision").toPrecision(p);
 }
@@ -4255,19 +4257,19 @@ function $js_num_to_precision(v, digits) {
    "2"），要在 C 里对上得走十进制那条路（见 interp/libc.js 里那段量口）。所以这两格
    进 P1_JS_ONLY：C 那条腿当场报错，不给一个"多数时候对"的答案。 */
 function $js_num_to_fixed(v, digits) {
-  const d = digits === undefined ? 0 : $js_real(digits, "toFixed");
+  const d = $js_idx(digits, 0);
   if (d < 0 || d > 100) return $js_range_err("toFixed() argument must be between 0 and 100, got " + d);
   return $js_real(v, "toFixed").toFixed(d);
 }
 function $js_num_to_exp(v, digits) {
   const x = $js_real(v, "toExponential");
   if (digits === undefined) return x.toExponential();
-  const d = $js_real(digits, "toExponential");
+  const d = $js_idx(digits, 0);
   if (d < 0 || d > 100) return $js_range_err("toExponential() argument must be between 0 and 100, got " + d);
   return x.toExponential(d);
 }
 function $js_num_to_string(v, radix) {
-  const r = radix === undefined ? 10 : $js_real(radix, "toString");
+  const r = $js_idx(radix, 10);
   if (r < 2 || r > 36) return $js_range_err("toString() radix must be between 2 and 36, got " + r);
   /* 接收者也可能是 int（这个值域里的 bigint）或 bool。int 不先转 double：2^53 之上的
      int64 转过去要掉精度，而 bigint 自己就会按位印。 */
@@ -4282,7 +4284,9 @@ function $js_num_to_string(v, radix) {
   return x.toString(r);
 }
 function $js_math(op, a, b) {
-  const x = $js_real(a, "Math");
+  /* Math.* 的实参照规范 **ToNumber**（21.3.2.x 每一格的第一步）：Math.abs("-3") 是 3、
+     Math.max("2", 1) 是 2。从前是严格的标签检查、当场报（量出来的）。 */
+  const x = $js_real($js_num_of(a), "Math");
   if (op === "a") return Math.abs(x);
   if (op === "t") return Math.trunc(x);
   if (op === "f") return Math.floor(x);
@@ -4325,7 +4329,7 @@ function $js_math(op, a, b) {
   if (op === "F") return Math.fround(x);
   // clz32：先 ToUint32 再数前导零（Math.clz32 自己就做这一步转换）
   if (op === "Z") return Math.clz32(x);
-  const y = $js_real(b, "Math");
+  const y = $js_real($js_num_of(b), "Math");
   if (op === "M") return Math.max(x, y);
   if (op === "m") return Math.min(x, y);
   if (op === "p") return Math.pow(x, y);

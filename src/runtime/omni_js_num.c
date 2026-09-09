@@ -238,7 +238,9 @@ omni_dyn omni_js_bigint_as_uint_n(omni_dyn bits, omni_dyn v) {
 }
 
 omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
-  double x = want_real(a, "Math");
+  /* 实参照规范 ToNumber（21.3.2.x 每一格的第一步）：Math.abs("-3") 是 3。
+     与 prelude 的 $js_math 同一条口径 —— 从前两边都是严格标签检查、当场报。 */
+  double x = want_real(omni_js_num_of(a), "Math");
   switch (op) {
     case 'a': return omni_dyn_of_real(fabs(x));
     case 't': return omni_dyn_of_real(trunc(x));
@@ -309,7 +311,7 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
     }
     default: break;
   }
-  double y = want_real(b, "Math");
+  double y = want_real(omni_js_num_of(b), "Math");
   /* NaN 会传染，而且 Math.max(-0, 0) 是 0 —— 用 fmax/fmin 正好是这个语义 */
   if (op == 'M') return omni_dyn_of_real(isnan(x) || isnan(y) ? (double)NAN : fmax(x, y));
   if (op == 'm') return omni_dyn_of_real(isnan(x) || isnan(y) ? (double)NAN : fmin(x, y));
