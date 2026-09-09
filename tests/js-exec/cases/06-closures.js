@@ -161,3 +161,30 @@ console.log(`grid ${grid.map((f) => f()).join(",")}`);
 // name / length 那两格在 tests/js262 里量 —— 函数上的属性读要真原型，C 那条腿还没有（P1-c）。
 const fact = function fx(n) { return n <= 1 ? 1 : n * fx(n - 1); };
 console.log(`fx ${fact(5)} ${fact(1)}`);
+/* 提升的嵌套函数声明看得见外层体里的局部量：声明在入口就造出来，而那些量是体里后面才
+   声明的 —— 所以入口先给被引用的那几个各立一格 cell（preCells），到声明那一句再往里写。
+   从前这一族当场报 unresolved（箭头与函数表达式没这毛病，它们在声明之后才降级）。 */
+function nest() {
+  const base = 10;
+  let bump = 1;
+  function inner(n) { return n + base + bump; }
+  bump = 2;
+  const viaArrow = () => inner(1);
+  return `${inner(0)} ${viaArrow()}`;
+}
+console.log(`nest ${nest()}`);
+// 互相递归的两格声明，都要看得见外层的量
+function mutual(n) {
+  const tag = "t";
+  function even(k) { return k === 0 ? `${tag}even` : odd(k - 1); }
+  function odd(k) { return k === 0 ? `${tag}odd` : even(k - 1); }
+  return even(n);
+}
+console.log(`mutual ${mutual(4)} ${mutual(3)}`);
+// 声明写在用它的那一句前面也一样（提升）
+function order() {
+  const v = 5;
+  function get() { return v; }
+  return get();
+}
+console.log(`order ${order()}`);

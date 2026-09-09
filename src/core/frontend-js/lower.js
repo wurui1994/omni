@@ -668,6 +668,7 @@ class Lower {
       const ent = this.declare(rest.type === 'Ident' ? rest.name : '_rest');
       stmts.push(this.declStmt(ent, op('js_arr_slice', [argsDyn(), constReal(params.length), undefExpr()])));
     }
+    stmts.push(...this.preCells(bodyStmts));
     stmts.push(...this.hoistFuncDecls(bodyStmts));
     for (const st of bodyStmts) stmts.push(...this.stmt(st));
     const f = {
@@ -684,6 +685,35 @@ class Lower {
     // 捕获表在**外层**这边解释：MakeClosure 的实参是外层的那些 cell
     f.captureList = capScope ? [...uses].map((n) => capScope.get(n)) : [];
     return f;
+  }
+
+  /**
+   * 提升的嵌套函数声明在**入口**就造出来（规范：体首就看得见它），可它们引用的名字常常是
+   * 体里后面才声明的 —— 造闭包那一刻作用域里还没有，于是
+   * `function outer(){ const v = 1; function inner(){ return v; } }` 当场报
+   * unresolved 'v'（箭头与函数表达式没这毛病：它们在声明之后才降级）。
+   * 所以入口先给"被闭包引用的、这一层体**顶层**声明的"名字各立一格 cell（值先是
+   * undefined），到声明那一句再往里写（defineVar 认得出这一格是预立的）。
+   * 只管顶层：块里的声明另有作用域，提到帧入口来就把生存期改宽了。
+   * main 那一帧不走这条路 —— 那儿的顶层名字是真全局，defineVar 有自己的一支。
+   */
+  preCells(bodyStmts) {
+    if (this.fn.isMain) return [];
+    const sink = { err: () => {} };
+    const scope = this.fn.scopes[this.fn.scopes.length - 1];
+    const out = [];
+    for (const s of bodyStmts) {
+      if (s.type !== 'VarDecl') continue;
+      for (const d of s.decls) {
+        for (const n of patternNames(d.id, sink, s.span)) {
+          if (!this.fn.captured.has(n) || scope.has(n)) continue;
+          const ent = this.declare(n);
+          ent.pre = true;
+          out.push(localStmt(ent.name, arrLit([undefExpr()])));
+        }
+      }
+    }
+    return out;
   }
 
   /**
@@ -815,6 +845,7 @@ class Lower {
         const ent = this.declare(ctor.rest.type === 'Ident' ? ctor.rest.name : '_rest');
         stmts.push(this.declStmt(ent, op('js_arr_slice', [argsDyn(), constReal(ctor.params.length), undefExpr()])));
       }
+      stmts.push(...this.preCells(bodyStmts));
       stmts.push(...this.hoistFuncDecls(bodyStmts));
       for (const st of bodyStmts) stmts.push(...this.stmt(st));
     }
@@ -1457,6 +1488,13 @@ class Lower {
       return [exprStmt(assign(globalRef(this.globals.get(name).name), initFn()))];
     }
     if (this.fn.captured.has(name)) {
+      /* 入口预立的那一格（preCells）：cell 已经在了，这儿只往里写 —— 再 localStmt 一次
+       * 会是**另一格** cell，提升的那些闭包捕获的还是旧的那一格。 */
+      const pre = this.fn.scopes[this.fn.scopes.length - 1].get(name);
+      if (pre !== undefined && pre.pre === true) {
+        pre.pre = false;
+        return [exprStmt(this.writeEntry(pre, initFn()))];
+      }
       const ent = this.declare(name);
       return [localStmt(ent.name, arrLit([undefExpr()])), exprStmt(this.writeEntry(ent, initFn()))];
     }
@@ -2229,6 +2267,12 @@ class Lower {
        * 同一个路子），这儿只要读它。没有那一格就是"不在函数里"或箭头 —— 给 undefined。 */
       case 'NewTarget':
         return this.fn.ntLocal ? varRef(this.fn.ntLocal) : undefExpr();
+      /* 顶层 await（ES2022）：模块体本身还不是一台可挂起的状态机（genfn.js 只改造
+       * async 函数），所以这一格**当场报**，而且要报清楚 —— 从前落在下面那条兜底上，
+       * 印的是 "cannot lower expression 'Await'"，看不出是这件事。 */
+      case 'Await':
+        this.err(e.span, "top-level 'await' is not supported; put it inside an async function");
+        return undefExpr();
       default:
         this.err(e.span, `cannot lower expression '${e.type}'`);
         return undefExpr();

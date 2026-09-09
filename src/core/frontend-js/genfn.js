@@ -872,10 +872,29 @@ export function genToStateMachine(node, err) {
   checkNames(node, err);
   const sx = new Split(err, isAsync);
   const entry = sx.newBlock();
-  /* 体里顶层的函数声明留在外层函数体上：那儿有降级器的提升（hoistFuncDecls），
-   * 而状态机的段是 if 块 —— 声明留在段里就只有那一段看得见它。 */
-  const fns = node.body.body.filter((s) => s.type === 'FuncDecl');
-  const rest = node.body.body.filter((s) => s.type !== 'FuncDecl');
+  /* 表达式体的箭头（`async () => e`）先摊成 `{ return e; }`：这一格从前直接读
+   * node.body.body，于是 async 箭头的简写形态把编译器**崩**成宿主 TypeError。 */
+  const bodyStmts = node.body.type === 'Block' ? node.body.body : [ret(node.body, node.body.span ?? sp)];
+  const fns = bodyStmts.filter((s) => s.type === 'FuncDecl');
+  const rest = bodyStmts.filter((s) => s.type !== 'FuncDecl');
+  /* 体里顶层的函数声明：**名字**提到外层（切段要跨过它的生存期，每一段都得看得见它），
+   * 而函数**值**在入口段里造。从前整个声明搬到外层去 —— 那儿看不见体里那些局部量（它们
+   * 的赋值在 step 里），于是 `async function f(){ const v=1; function g(){return v;} }`
+   * 当场报 unresolved 'v'（箭头与函数表达式没这个毛病，它们本来就留在段里）。
+   * 造的位置是入口段的**最前面**，与"函数声明提升到体首"这条规范一致。 */
+  for (const f of fns) {
+    sx.hoist.push(f.id);
+    sx.emit(entry, exprStmt(assign(ident(f.id, sp), {
+      type: 'FuncExpr',
+      id: f.id,
+      params: f.params,
+      rest: f.rest,
+      body: f.body,
+      async: f.async === true,
+      generator: f.generator === true,
+      span: f.span,
+    }, sp), sp));
+  }
   const last = sx.stmts(rest, entry, { brk: -1, cont: -1, fin: -1, cat: -1 });
   // 走到体的尽头就是 done（值 undefined）
   if (last >= 0) {
@@ -905,7 +924,6 @@ export function genToStateMachine(node, err) {
     letDecl(CAT, num(0, sp), sp),
     letDecl(EX, undef(sp), sp),
   ];
-  for (const f of fns) out.push(f);
   const seen = new Set();
   for (const n of sx.hoist) {
     if (seen.has(n)) continue;
@@ -915,7 +933,7 @@ export function genToStateMachine(node, err) {
   out.push({ type: 'VarDecl', kind: 'const', decls: [{ id: ident(STEP, sp), init: step }], span: sp });
   const tail = isGen && isAsync ? 'js_agen_new' : (isAsync ? 'js_async_run' : 'js_gen_new');
   out.push(ret(opCall(tail, [ident(STEP, sp)], sp), sp));
-  return { ...node, generator: false, async: false, body: block(out, sp) };
+  return { ...node, generator: false, async: false, expression: false, body: block(out, sp) };
 }
 
 
