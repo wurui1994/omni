@@ -574,17 +574,35 @@ omni_dyn omni_js_buf_len(omni_dyn b) {
 }
 
 /* 用 memmove：两个视图可能落在同一块内存上并且重叠，宿主的 TypedArray.set 也是安全的 */
-void omni_js_buf_set(omni_dyn dst, omni_dyn src) {
+/* .set(src[, offset])（规范 23.2.3.26）与 .fill(v[, start[, end]])（23.2.3.9）：
+   从前这两格的 op 少一/两个形参，成员派发器把多出来的实参**静静地丢了** ——
+   d.set(src, 2) 写到 0 去、f.fill(9, 1, 3) 把整格填满。与 prelude 那两格对着写：
+   下标照数组那一族的规矩，负数从末尾数，夹到 [0, len]。 */
+static int64_t buf_clamp(omni_dyn v, int64_t dflt, int64_t len, const char *who) {
+  double d;
+  int64_t i;
+  if (v.tag == OMNI_DYN_UNDEF) return dflt;
+  d = want_bufnum(v, who);
+  i = (int64_t)trunc(d);
+  if (i < 0) i += len;
+  if (i < 0) return 0;
+  return i > len ? len : i;
+}
+void omni_js_buf_set(omni_dyn dst, omni_dyn src, omni_dyn off) {
   omni_js_bytes *d = want_bytes(dst, ".set");
   omni_js_bytes *s = want_bytes(src, ".set");
-  if (s->len > d->len) omni_error("byte-buffer .set source is too long");
-  if (s->len > 0) memmove(d->p, s->p, (size_t)s->len);
+  int64_t o = off.tag == OMNI_DYN_UNDEF ? 0 : (int64_t)trunc(want_bufnum(off, ".set"));
+  if (o < 0) omni_error("byte-buffer .set offset is out of range");
+  if (s->len + o > d->len) omni_error("byte-buffer .set source is too long");
+  if (s->len > 0) memmove(d->p + o, s->p, (size_t)s->len);
 }
 
-omni_dyn omni_js_buf_fill(omni_dyn bd, omni_dyn v) {
+omni_dyn omni_js_buf_fill(omni_dyn bd, omni_dyn v, omni_dyn start, omni_dyn end) {
   omni_js_bytes *b = want_bytes(bd, ".fill");
   uint8_t x = js_to_u8(want_bufnum(v, ".fill"));
-  if (b->len > 0) memset(b->p, (int)x, (size_t)b->len);
+  int64_t a = buf_clamp(start, 0, b->len, ".fill");
+  int64_t z = buf_clamp(end, b->len, b->len, ".fill");
+  if (z > a) memset(b->p + a, (int)x, (size_t)(z - a));
   return bd;
 }
 

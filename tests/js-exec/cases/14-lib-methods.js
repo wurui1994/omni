@@ -75,6 +75,17 @@ console.log(`bytes ${ta[2]}`);
 const fromArr = new Uint8Array([256, -1, 1.7, NaN, "3", true, null, undefined]);
 console.log(`bytes ${fromArr.length} ${fromArr[0]} ${fromArr[1]} ${fromArr[2]} ${fromArr[3]}`);
 console.log(`bytes ${fromArr[4]} ${fromArr[5]} ${fromArr[6]} ${fromArr[7]} ${new Uint8Array([]).length}`);
+// .set(src[, offset]) 与 .fill(v[, start[, end]])：从前这两格的 op 少一/两个形参，
+// 成员派发器把多出来的实参**静静地丢了** —— set 写到 0 去、fill 把整格填满。
+const dst = new Uint8Array(4);
+dst.set(new Uint8Array([5, 6]), 2);
+console.log(`bytes ${dst[0]} ${dst[1]} ${dst[2]} ${dst[3]}`);
+const fl = new Uint8Array([1, 2, 3, 4]);
+fl.fill(9, 1, 3);
+console.log(`bytes ${fl[0]} ${fl[1]} ${fl[2]} ${fl[3]}`);
+const fl2 = new Uint8Array([1, 2, 3, 4]);
+fl2.fill(7, -2);
+console.log(`bytes ${fl2[0]} ${fl2[1]} ${fl2[2]} ${fl2[3]} ${new Uint8Array(2).fill(1)[1]}`);
 
 // typeof 一个没声明的名字是 "undefined"，不是编译错（特性探测靠这一条）。
 // 名字得是**哪儿都没有**的：structuredClone 那种在 node 里是函数，比不成。

@@ -5288,14 +5288,24 @@ function $js_buf_view(b, off, len) {
   return new $JsBytes(new Uint8Array(src.buffer, src.byteOffset + o, n));
 }
 function $js_buf_len(b) { return $js_bytes(b, ".length").u8.byteLength; }
-function $js_buf_set(dst, src) {
+/* .set(src[, offset])（规范 23.2.3.26）与 .fill(v[, start[, end]])（23.2.3.9）：
+   从前这两格的 op 少一/两个形参，成员派发器把多出来的实参**静静地丢了** ——
+   d.set(src, 2) 写到 0 去、f.fill(9, 1, 3) 把整格填满。两处都是静悄悄的错值。
+   下标照数组那一族的规矩：负数从末尾数，夹到 [0, len]。 */
+function $js_buf_set(dst, src, off) {
   const d = $js_bytes(dst, ".set").u8, s = $js_bytes(src, ".set").u8;
-  if (s.byteLength > d.byteLength) $rt_error("byte-buffer .set source is too long");
-  d.set(s);
+  const o = off === undefined ? 0 : $js_real($js_num_of(off), ".set");
+  if (!Number.isInteger(o) || o < 0) $rt_error("byte-buffer .set offset is out of range");
+  if (s.byteLength + o > d.byteLength) $rt_error("byte-buffer .set source is too long");
+  d.set(s, o);
   return undefined;
 }
-function $js_buf_fill(b, v) {
-  $js_bytes(b, ".fill").u8.fill($js_real(v, ".fill") & 255);
+function $js_buf_fill(b, v, start, end) {
+  const u = $js_bytes(b, ".fill").u8;
+  const a = $js_idx(start, 0), z = $js_idx(end, u.byteLength);
+  u.fill($js_real($js_num_of(v), ".fill") & 255,
+    Math.min(Math.max(a < 0 ? u.byteLength + a : a, 0), u.byteLength),
+    Math.min(Math.max(z < 0 ? u.byteLength + z : z, 0), u.byteLength));
   return b;
 }
 function $js_buf_at(v, at, size, who) {
