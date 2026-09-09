@@ -326,23 +326,170 @@ omni_dyn omni_js_math(int op, omni_dyn a, omni_dyn b) {
   return omni_dyn_null();
 }
 
-/* toFixed / toExponential：这一侧**当场报错**，不凑近似。理由是舍入口径：JS 在
-   **恰好一半**上进位（(2.5).toFixed(0) 是 "3"），而 C 的 %.Nf 就近取偶给 "2" ——
-   两者只差这一处，而那一处恰恰是会被人量到的。要在 C 里对上得走十进制那条路（把 double
-   的精确十进制展开写出来再舍），那是另一刀。成员派发是运行期的，C 那张表里躲不开这个
-   名字（进不了 P1_JS_ONLY），所以只能在这儿喊。 */
+/* toFixed / toExponential（规范 21.1.3.3 / 21.1.3.2）。
+   舍入口径是这两条的全部难处：JS 在那个 double 的**精确十进制值**上四舍五入，恰好一半时
+   取绝对值更大的那个（"两个 n 一样近就选大的"），而 C 的 `%.Nf` 是**就近取偶** ——
+   `(2.5).toFixed(0)` 一个给 "3"、一个给 "2"，而这一处恰恰是会被人量到的。
+
+   底座：double 是二进制小数，所以它的十进制展开**有限**（最长 1074 位小数），而这两个宿主的
+   printf 给的就是精确位（不是近似）。所以先把精确展开印出来，再自己在第 f 位上按
+   "下一位 >= 5 就进"舍 —— 有了精确位，这一条判据与规范逐字等价（"4 后面全是 9" 仍然是
+   舍去，因为它的值确实小于一半）。 */
+#define OMNI_JS_DEC_FRAC 1100
+#define OMNI_JS_DEC_BUF 1600
+
+/* 精确展开成"数字串 + 整数部分的位数"（dot 之前有几位）。 */
+static void js_dec_exact_(double a, char *digits, int *ndig, int *dot) {
+  char buf[OMNI_JS_DEC_BUF];
+  snprintf(buf, sizeof buf, "%.*f", OMNI_JS_DEC_FRAC, a);
+  int n = 0;
+  int d = -1;
+  /* 只收数字：`-0.0` 那一格 printf 会印出一个负号（a 是 x 本身、而 -0 < 0 为假），
+     跟着当数字收进去的话 `(-0).toFixed(2)` 会给 "-0.00"（量出来的：qjs 是 "0.00"）。 */
+  for (const char *q = buf; *q != 0; q++) {
+    if (*q == '.') { d = n; continue; }
+    if (*q < '0' || *q > '9') continue;
+    digits[n++] = *q;
+  }
+  digits[n] = 0;
+  *ndig = n;
+  *dot = d < 0 ? n : d;
+}
+
+/* 在 keep 位上舍（其余丢掉）。返回 true 表示"全是 9、进位溢出到最高位之前"——
+   那时候调用方要在前面补一个 '1'（并把小数点 / 指数挪一格）。 */
+static bool js_dec_round_(char *d, int ndig, int keep) {
+  if (keep >= ndig) return false;
+  bool up = d[keep] >= '5';
+  d[keep] = 0;
+  if (!up) return false;
+  for (int i = keep - 1; i >= 0; i--) {
+    if (d[i] != '9') { d[i]++; return false; }
+    d[i] = '0';
+  }
+  return true;
+}
+
+static omni_dyn js_num_str_(const char *s) {
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", s)));
+}
+
+static omni_dyn js_num_nonfinite_(double x, bool *done) {
+  *done = true;
+  if (isnan(x)) return js_num_str_("NaN");
+  if (x > 0) return js_num_str_("Infinity");
+  return js_num_str_("-Infinity");
+}
+
 omni_dyn omni_js_num_to_fixed(omni_dyn v, omni_dyn digits) {
-  (void)v;
-  (void)digits;
-  omni_error("toFixed is not implemented on the C leg (ADR-0020 P1-c)");
-  return omni_dyn_undef();
+  double x = want_real(v, "toFixed");
+  int f = digits.tag == OMNI_DYN_UNDEF ? 0 : (int)want_real(digits, "toFixed");
+  if (f < 0 || f > 100) {
+    omni_errorf("toFixed() argument must be between 0 and 100, got %d", f);
+  }
+  if (!isfinite(x)) { bool done = false; return js_num_nonfinite_(x, &done); }
+  bool neg = x < 0;
+  double a = neg ? -x : x;
+  /* 1e21 起换成 ToString（规范如此）：那儿的十进制展开比 f 位小数长得多，
+     而规范明说这一档直接走 ToNumber 的那套印法。 */
+  if (a >= 1e21) return omni_js_str(omni_dyn_of_real(x));
+  char dg[OMNI_JS_DEC_BUF];
+  int nd = 0;
+  int dot = 0;
+  js_dec_exact_(a, dg, &nd, &dot);
+  bool ov = js_dec_round_(dg, nd, dot + f);
+  char out[256];
+  char *o = out;
+  if (neg) *o++ = '-';
+  const char *ip = dg;
+  int ilen = dot;
+  if (ov) { *o++ = '1'; }
+  if (ilen == 0 && !ov) *o++ = '0';
+  memcpy(o, ip, (size_t)ilen);
+  o += ilen;
+  if (f > 0) {
+    *o++ = '.';
+    memcpy(o, dg + ilen, (size_t)f);
+    o += f;
+  }
+  *o = 0;
+  return js_num_str_(out);
+}
+
+/* toExponential。省略实参那一档要"刚好唯一表示这个 double 的位数"（规范 21.1.3.2 步 10）：
+   这儿从 0 位起往上试，头一个能原样解析回来的就是它 —— 与宿主的 toExponential() 逐字节对上。 */
+static void js_exp_fmt_(const char *sig, int keep, int e, bool neg, char *out) {
+  char *o = out;
+  if (neg) *o++ = '-';
+  *o++ = sig[0];
+  if (keep > 1) {
+    *o++ = '.';
+    memcpy(o, sig + 1, (size_t)(keep - 1));
+    o += keep - 1;
+  }
+  *o++ = 'e';
+  *o++ = e >= 0 ? '+' : '-';
+  o += snprintf(o, 8, "%d", e >= 0 ? e : -e);
+  *o = 0;
+}
+
+static void js_exp_round_(const char *dg, int nd, int fs, int keep, char *sig, int *e) {
+  char tmp[OMNI_JS_DEC_BUF];
+  int n = nd - fs;
+  memcpy(tmp, dg + fs, (size_t)n);
+  tmp[n] = 0;
+  if (js_dec_round_(tmp, n, keep)) {
+    /* 全是 9：进位之后是 1 后面 keep-1 个 0，指数多一格（9.99 -> 1.0e+1） */
+    sig[0] = '1';
+    for (int i = 1; i < keep; i++) sig[i] = '0';
+    sig[keep] = 0;
+    *e = *e + 1;
+    return;
+  }
+  int m = (int)strlen(tmp);
+  for (int i = 0; i < keep; i++) sig[i] = i < m ? tmp[i] : '0';
+  sig[keep] = 0;
 }
 
 omni_dyn omni_js_num_to_exp(omni_dyn v, omni_dyn digits) {
-  (void)v;
-  (void)digits;
-  omni_error("toExponential is not implemented on the C leg (ADR-0020 P1-c)");
-  return omni_dyn_undef();
+  double x = want_real(v, "toExponential");
+  if (!isfinite(x)) { bool done = false; return js_num_nonfinite_(x, &done); }
+  bool auto_f = digits.tag == OMNI_DYN_UNDEF;
+  int f = auto_f ? 0 : (int)want_real(digits, "toExponential");
+  if (!auto_f && (f < 0 || f > 100)) {
+    omni_errorf("toExponential() argument must be between 0 and 100, got %d", f);
+  }
+  bool neg = x < 0;
+  double a = neg ? -x : x;
+  char out[256];
+  if (a == 0.0) {
+    char sig[128];
+    for (int i = 0; i <= f; i++) sig[i] = '0';
+    sig[f + 1] = 0;
+    js_exp_fmt_(sig, f + 1, 0, neg, out);
+    return js_num_str_(out);
+  }
+  char dg[OMNI_JS_DEC_BUF];
+  int nd = 0;
+  int dot = 0;
+  js_dec_exact_(a, dg, &nd, &dot);
+  int fs = 0;
+  while (fs < nd && dg[fs] == '0') fs++;
+  int e0 = dot - 1 - fs;
+  char sig[128];
+  if (!auto_f) {
+    int e = e0;
+    js_exp_round_(dg, nd, fs, f + 1, sig, &e);
+    js_exp_fmt_(sig, f + 1, e, neg, out);
+    return js_num_str_(out);
+  }
+  for (int k = 0; k <= 17; k++) {
+    int e = e0;
+    js_exp_round_(dg, nd, fs, k + 1, sig, &e);
+    js_exp_fmt_(sig, k + 1, e, neg, out);
+    if (strtod(out, NULL) == x) return js_num_str_(out);
+  }
+  return js_num_str_(out);
 }
 
 /* Number.prototype.toPrecision（ECMA-262）。编译器用 toPrecision(17) 把 double 写进
