@@ -4068,11 +4068,21 @@ function $js_obj_has_own(o, k) {
    该给 0,1,2,length）。次序照规范：整数下标升序在前，然后是别的字符串键（length 是建得
    最早的那一格，所以排在旁表那些前面）。
    Symbol 那一档（'y'）在这几格上确实是空的：旁表只收字符串键。 */
+const $JS_SLOTS = ["$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src",
+  "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v"];
 function $js_obj_own_keys(kind, o) {
-  /* $cls 是异常对象的内部标记（决策 15），**任何**视图里都不该出现 —— 从前
-     Object.getOwnPropertyNames(new TypeError("t")) 在这条腿上给 ["$cls","message"]，
-     两把尺子给 ["stack","message"]（stack 我们没有，那一格另算）。C 那侧同一个口径。 */
-  if ($js_isobj(o)) return $js_own_keys(o, kind).filter((k) => k !== "$cls");
+  /* 运行时自己的内部槽不该从**任何**视图里露出来：枚举那几种靠"不可枚举"就挡住了，
+     getOwnPropertyNames 这一档得按名字挡（量出来的：$cls 在异常对象上、$st/$val/$cbs 在
+     promise 上、$stp/$gst 在生成器上、$ms 在 Date 上，node 那几格都是 []）。
+     $JS_SLOTS 是一张**封闭表**，所以用户自己往对象上挂的同名属性会被一起挡掉 ——
+     这是画出来的边界，写在 ADR-0020 里。C 那侧 omni_js_slot_ 是逐字对应的一份。 */
+  if ($js_isobj(o)) {
+    const ks = $js_own_keys(o, kind);
+    if (kind === "e") return ks;
+    const out = [];
+    for (const k of ks) if (!(typeof k === "string" && $JS_SLOTS.includes(k))) out.push(k);
+    return out;
+  }
   if (kind !== "s") return [];
   const t = $dynTag(o);
   if (t === "list") {

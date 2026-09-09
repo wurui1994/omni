@@ -749,6 +749,19 @@ static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k) { \
 /* 自有键，按**插入序**（规范说整数下标先升序 —— 真对象上没有下标槽的常见形状，
    而 prelude 那份也是按 ps 的插入序走的，两边对齐）。sel：'s' 字符串键、'e' 可枚举的
    字符串键、'y' 符号键。 */ \
+/* 运行时自己的内部槽名（ADR-0011 决策 15 的 $cls，加上 ADR-0020 P2 那几族）。一张封闭表，
+   与 prelude 的 $JS_SLOTS 逐字对应。 */ \
+static bool omni_js_slot_(omni_dyn k) { \
+  static const char *nms[20] = { "$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src", \
+    "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v" }; \
+  if (k.tag != OMNI_DYN_STR16) return false; \
+  for (int i = 0; i < 20; i++) { \
+    if (omni_s16_eq(k.u.s16, omni_s16_of_utf8(omni_str_new(nms[i], (int64_t)strlen(nms[i]))))) { \
+      return true; \
+    } \
+  } \
+  return false; \
+} \
 static omni_dyn omni_js_obj_own_keys_o_(omni_dyn o, int sel) { \
   LT out = LT##_new(); \
   if (o.tag != OMNI_DYN_OBJ) return omni_js_arr_wrap(out); \
@@ -784,6 +797,12 @@ static omni_dyn omni_js_obj_own_keys_o_(omni_dyn o, int sel) { \
     if (sel == 'y') { if (!is_sym) continue; } \
     else if (is_sym) continue; \
     if (sel == 'e' && !sl->items[5].u.b) continue; \
+    /* 内部槽（$st / $stp / $ms …）不该从**任何**视图里露出来：枚举那几种视图靠"不可枚举"
+       就挡住了，getOwnPropertyNames 这一档得按名字挡（量出来的：
+       Object.getOwnPropertyNames(new Promise(r => r(1))) 给 ["$st","$val","$cbs"]，
+       node 给 []）。名字是一张**封闭表**（omni_js_slot_ 那一行），所以用户自己往对象上挂的
+       同名属性会被一起挡掉 —— 这是画出来的边界，写在 ADR-0020 里。 */ \
+    if (sel != 'e' && omni_js_slot_(sl->items[7])) continue; \
     LT##_push(out, sl->items[7]); \
   } \
   return omni_js_arr_wrap(out); \
