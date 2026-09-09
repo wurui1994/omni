@@ -336,6 +336,21 @@ export function nowMs() {
 }
 
 /**
+ * 到此刻为止的**峰值**常驻内存，字节。
+ *
+ * 为什么值得占一格宿主 ABI：这条腿上墙上时间的大头常常不是 CPU 而是内存压力 —— 量出来的，
+ * emit-c 编译器自己一趟是 35.6s 墙 / 25.9s 用户 / **峰值 1.56 GB**、页回收 147 万，
+ * 同一步在不同轮次能差两倍。没有这个数，"慢"就只能靠猜。
+ *
+ * 单位统一成**字节**：node 的 `resourceUsage().maxRSS` 是 KB（所有平台一样，node 自己归一
+ * 过），而 C 那侧 `getrusage` 的 `ru_maxrss` 在 macOS 上是字节、在 Linux 上是 KB ——
+ * 两个宿主各自在自己那一侧换成字节，别把这个坑留给调用方。
+ */
+export function maxRssBytes() {
+  return process.resourceUsage().maxRSS * 1024;
+}
+
+/**
  * **本地时间**的日历字段，14 位数字：`YYYYMMDDHHMMSS`（月 01-12、日 01-31，全部补零）。
  *
  * 为什么是一个字符串而不是一串数：`__DATE__` / `__TIME__` 要六个字段是**同一个瞬间**的

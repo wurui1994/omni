@@ -11,6 +11,7 @@
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdirAll, rename,
   args as procArgs, env, setEnv, stdout, stderr, setExitCode, spawn, evalJs, hasJsEngine, nowMs,
+  maxRssBytes,
   cwd, installDir, isDir, writeBinary, readBinary, runTimeout,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
@@ -579,13 +580,29 @@ function modeFor(path, argv, fallback = 'mixed') {
  */
 let VERBOSE = false;
 let vMark = 0;
+let vRss = 0;
+
+/** 字节数印成 1.5G / 240M / 900K —— 只给人看，所以一位小数就够。 */
+function fmtBytes(n) {
+  if (n >= 1024 * 1024 * 1024) return `${(n / (1024 * 1024 * 1024)).toFixed(1)}G`;
+  if (n >= 1024 * 1024) return `${Math.round(n / (1024 * 1024))}M`;
+  if (n >= 1024) return `${Math.round(n / 1024)}K`;
+  return `${n}B`;
+}
 
 function vStep(msg) {
   if (!VERBOSE) return;
   const now = nowMs();
   const d = Math.trunc(now - vMark);
   vMark = now;
-  stderr(`omni: ${msg}  [${d}ms]\n`);
+  /* 峰值常驻内存**只在它长了的时候**印：它是单调的，每行都印是噪声，而"是哪一步把它顶上去
+     的"才是要看的那件事。这一格与耗时同等重要 —— 这条腿上墙上时间的大头常常是内存压力而
+     不是 CPU（量出来的：emit-c 编译器自己一趟 35.6s 墙 / 25.9s 用户 / 峰值 1.56 GB /
+     页回收 147 万，同一步在不同轮次能差两倍）。 */
+  const rss = Math.trunc(maxRssBytes());
+  const grew = rss > vRss;
+  vRss = rss;
+  stderr(`omni: ${msg}  [${d}ms${grew ? ` peak ${fmtBytes(rss)}` : ''}]\n`);
 }
 
 /* `-v` 走管线表那一份渲染（ADR-0018 决策五，分片 2 后半）。
@@ -1968,9 +1985,80 @@ function glPlugin() {
 }
 
 /**
+ * 作业数。`OMNI_JOBS` 覆盖（1 = 退回串行），否则问 `getconf` 拿在线核数，上限 16。
+ * 问不出来就 4 —— 猜一个小的比猜一个大的安全（作业数超了核数只会互相抢）。
+ */
+let JOBS_CACHE = 0;
+function jobCount() {
+  if (JOBS_CACHE !== 0) return JOBS_CACHE;
+  const o = env('OMNI_JOBS');
+  if (o !== undefined && o !== '') {
+    const n = Number(o);
+    JOBS_CACHE = Number.isInteger(n) && n > 0 ? n : 1;
+    return JOBS_CACHE;
+  }
+  const r = spawn('getconf', ['_NPROCESSORS_ONLN'], 'c');
+  const n = r[0] === 0 ? Number(String(r[1]).trim()) : 0;
+  JOBS_CACHE = Number.isInteger(n) && n > 0 ? (n > 16 ? 16 : n) : 4;
+  return JOBS_CACHE;
+}
+
+/** sh 的单引号引法：把每个 `'` 换成 `'\''`，别的原样 —— 路径里有空格、`$`、`?` 都不怕。 */
+function shQuote(s) {
+  return `'${String(s).split("'").join("'\\''")}'`;
+}
+
+/**
+ * 并行跑一批命令，等它们全都结束。回一条与入参同序的 `[status, out, out]`
+ * （形状与 `spawn` 一致，两个流合在一起 —— 调用方要的是"哪一条挂了、它说了什么"）。
+ *
+ * **为什么不加宿主原语**：`spawn` 是同步的（node 那侧是 `spawnSync`），而 node 没有
+ * "同步等多个"这一格。要么把整条 CLI 变成 async（那会传染到每一处），要么另开一个宿主 ABI
+ * 再在两个宿主上各写一份、然后在错误归属上分叉。这儿走第三条：**生成一个 sh 脚本**，
+ * 里头是 `cmd & cmd & wait`，每个作业把退出码写进自己的 rc 文件、两个流写进自己的 log。
+ * 于是两个宿主共用同一份实现（都只是 `spawn` 一次 `/bin/sh`），没有可分叉的地方。
+ *
+ * **一批一批而不是一个池**：`wait -n` 要 bash 4.3，而 macOS 的 `/bin/sh` 是 bash 3.2；
+ * `xargs -P` 又得在引号上玩花样。一批 N 个、批内并行、批间串行 —— 打包比真池差一点，
+ * 可是 POSIX、可预测，而且这儿每个作业的耗时本来就在同一个量级。
+ */
+function spawnPar(jobs) {
+  const n = jobCount();
+  if (n <= 1 || jobs.length <= 1) {
+    return jobs.map((j) => spawn(j[0], j.slice(1), 'c'));
+  }
+  // 键里带一格时刻：同一批命令跑两趟不能捡到上一趟的 rc 文件
+  const dir = workDirFor('par', hash16(`${nowMs()}|${jobs.map((j) => j.join(' ')).join('\n')}`));
+  const lines = ['#!/bin/sh'];
+  for (let i = 0; i < jobs.length; i += n) {
+    for (let k = i; k < jobs.length && k < i + n; k++) {
+      const cmd = jobs[k].map(shQuote).join(' ');
+      const log = shQuote(join(dir, `o${k}`));
+      const rc = shQuote(join(dir, `r${k}`));
+      lines.push(`{ ${cmd} > ${log} 2>&1; echo $? > ${rc}; } &`);
+    }
+    lines.push('wait');
+  }
+  const sh = join(dir, 'run.sh');
+  writeText(sh, `${lines.join('\n')}\n`);
+  const r = spawn('/bin/sh', [sh], 'c');
+  return jobs.map((_, k) => {
+    const rc = join(dir, `r${k}`);
+    const log = join(dir, `o${k}`);
+    // rc 文件不在 = 那一格根本没跑起来（sh 自己都没起来）：把 sh 的话交出去
+    if (!exists(rc)) return [r[0] === 0 ? 1 : r[0], r[1], r[2]];
+    const text = exists(log) ? readText(log) : '';
+    return [Number(readText(rc).trim()), text, text];
+  });
+}
+
+/**
  * 运行时的 .o 缓存。不缓存就是每次 build 都重编 8 个翻译单元：实测 757ms -> 73ms，10 倍。
  * 自举时编译器要反复重建自己，这条直接决定开发循环还能不能用。
  * 缓存键 = 编译器 + flags + 运行时目录下每个 .c/.h 的 mtime 与大小（改 omni.h 会让全部失效）。
+ *
+ * 未命中那一路**并行编**：20 个翻译单元串行量出来 3.0s，而它们互相无关。
+ * 改运行时头文件时全表失效，所以这一路在开发循环里天天走。
  */
 function runtimeObjects(cc) {
   const flags = ccFlags(cc);
@@ -1991,17 +2079,17 @@ function runtimeObjects(cc) {
   // 先编进暂存目录再整体 rename：中断不会留下半个缓存
   const stage = workDirFor('rt-stage', key);
   const staged = srcs.map((p) => join(stage, `${basename(p, '.c')}.o`));
-  for (let i = 0; i < srcs.length; i++) {
-    const r = spawn(cc, [...flags, '-c', '-o', staged[i], srcs[i]], 'c');
-    if (r[0] !== 0) {
-      throw new OmniError(`omni runtime failed to compile with ${cc}:\n${r[2]}`);
+  const rs = spawnPar(srcs.map((p, i) => [cc, ...flags, '-c', '-o', staged[i], p]));
+  for (let i = 0; i < rs.length; i++) {
+    if (rs[i][0] !== 0) {
+      throw new OmniError(`omni runtime failed to compile with ${cc}:\n${rs[i][2]}`);
     }
   }
   // 目标已存在 = 别人先建好了，下面那句会用它（rename 到一个非空目录在两个宿主上都是硬错，
   // 而宿主的错误不是可以 catch 的异常，所以先看一眼）。父目录得先在，rename 才有地方落。
   mkdirAll(join(cacheRoot(), 'rt'));
   if (!exists(dir)) rename(stage, dir);
-  vStep(`runtime .o  ${srcs.length} objects compiled with ${cc}`);
+  vStep(`runtime .o  ${srcs.length} objects compiled with ${cc}, ${jobCount()} jobs`);
   return objs.every((o) => exists(o)) ? objs : staged;
 }
 

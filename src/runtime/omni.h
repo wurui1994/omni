@@ -768,6 +768,9 @@ bool omni_js_proc_stdin_is_tty(void);
 omni_dyn omni_js_proc_read_line(void);
 omni_dyn omni_js_os_tmpdir(void);
 omni_dyn omni_js_now_ms(void);
+/* 到此刻为止的峰值常驻内存，**字节**（单位在宿主这一侧归一：macOS 的 ru_maxrss 是字节、
+   Linux 是 KB、node 的 maxRSS 是 KB）。这条腿上墙上时间的大头常常是内存压力而不是 CPU。 */
+omni_dyn omni_js_max_rss(void);
 /* 一趟"跑"的墙上时限（`omni run --timeout`）：毫秒 <= 0 = 撤掉。这一侧只有一把闹钟 ——
    有正在 wait 的子进程就杀它（超时那句话归上面那层印），没有就自己印完 _exit(124)。 */
 omni_dyn omni_js_run_timeout(omni_dyn ms, omni_dyn msg);

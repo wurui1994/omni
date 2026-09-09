@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -421,6 +422,21 @@ omni_dyn omni_js_now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   return omni_dyn_of_real((double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6);
+}
+
+/* 到此刻为止的**峰值**常驻内存，**字节**。
+   单位必须在这一侧归一：`ru_maxrss` 在 macOS 上是字节、在 Linux 上是 KB（POSIX 没规定），
+   而 node 那侧的 `resourceUsage().maxRSS` 一律是 KB。两个宿主各自换成字节，调用方不必
+   知道自己在哪 —— 这本来就是宿主 ABI 该吸收的差异。
+   刻意是 real 而不是 int：node 那边它是 number，两侧的 dynamic 得同类。 */
+omni_dyn omni_js_max_rss(void) {
+  struct rusage ru;
+  if (getrusage(RUSAGE_SELF, &ru) != 0) return omni_dyn_of_real(0.0);
+#if defined(__APPLE__)
+  return omni_dyn_of_real((double)ru.ru_maxrss);
+#else
+  return omni_dyn_of_real((double)ru.ru_maxrss * 1024.0);
+#endif
 }
 
 /* ---- 一趟"跑"的墙上时限（`omni run --timeout`，node 那侧是 host/native.js 的 runTimeout）

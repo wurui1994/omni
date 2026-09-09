@@ -5571,6 +5571,9 @@ function $js_run_timeout(ms, msg) {
 }
 function $js_os_tmpdir() { return $node("node:os").tmpdir(); }
 function $js_now_ms() { return Date.now(); }
+// 峰值常驻内存，**字节**。node 的 maxRSS 是 KB（它自己归一过），C 那侧 getrusage 在
+// macOS 上是字节、Linux 上是 KB —— 两边都在自己那一侧换成字节，见 host/native.js。
+function $js_max_rss() { return process.resourceUsage().maxRSS * 1024; }
 // 本地时间的日历字段，14 位数字 YYYYMMDDHHMMSS。与 host/native.js 的 localStamp 逐字对齐
 // （那份是 node 上的真实现，这份是拼进产物的）。C 侧是 omni_js_local_stamp 的 strftime。
 function $js_local_stamp() {

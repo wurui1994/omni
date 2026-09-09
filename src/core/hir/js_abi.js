@@ -652,6 +652,9 @@ export const JS_ABI = {
   // 墙上时钟毫秒。要计的是"这一步花了多久"，大头是子进程（clang、另一代编译器），
   // 所以必须是墙上时间而不是 CPU 时间。
   js_now_ms: { js: '$js_now_ms', c: 'omni_js_now_ms', arity: 0 },
+  // 峰值常驻内存（字节）。单位在**宿主那一侧**归一：node 的 maxRSS 是 KB，C 的 ru_maxrss
+  // 在 macOS 上是字节、Linux 上是 KB —— 两边都换成字节，调用方不必知道自己在哪。
+  js_max_rss: { js: '$js_max_rss', c: 'omni_js_max_rss', arity: 0 },
   /* 一趟"跑"的墙上时限（`omni run --timeout`）：第一个参数是毫秒（<= 0 = 撤掉），
      第二个是到点要印的那句话 —— 印字的人不一定还是编译器自己（本进程那一路是看门狗
      线程 / SIGALRM 处理函数在印），所以文本得先交给宿主。

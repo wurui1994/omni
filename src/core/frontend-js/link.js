@@ -72,6 +72,9 @@ const NATIVE_OPS = {
   spawnIn: 'js_proc_spawn_in',
   tmpDir: 'js_os_tmpdir',
   nowMs: 'js_now_ms',
+  /* 峰值常驻内存（字节）：这条腿上墙上时间的大头常常是内存压力而不是 CPU，
+   * 没这一格"慢"就只能靠猜。两个宿主各自把单位换成字节，见 host/native.js。 */
+  maxRssBytes: 'js_max_rss',
   /* `omni run --timeout` 的那一格：两种"跑"（子进程 / 本进程）都只有宿主能中断，
    * 所以时限本身是宿主状态，不是 CLI 里的一个变量。 */
   runTimeout: 'js_run_timeout',
