@@ -289,6 +289,9 @@ export const JS_ABI = {
   js_date_new: { js: '$js_date_new', c: 'omni_js_date_new', arity: 1 },
   // new Date(y, mo, …) 的那一族：算出毫秒（本地时区），再交给 js_date_new
   js_date_parts: { js: '$js_date_parts', c: 'omni_js_date_parts', arity: 7 },
+  /* Date.UTC(y[, mo, d, h, mi, s, ms])：与 js_date_parts 同一族，只是**按 UTC** 算而不是
+     本地时区。年缺席就是 NaN（规范：ToNumber(undefined) 是 NaN），别的缺席按 0/1 补。 */
+  js_date_utc: { js: '$js_date_utc', c: 'omni_js_date_utc', arity: 7 },
   js_date_parse: { js: '$js_date_parse', c: 'omni_js_date_parse', arity: 1 },
   /* new Proxy(target, handler)（ADR-0020 P4）：代理与普通对象是同一种值，差别只在
      属性访问的五个入口上多问一句陷阱（get / set / has / deleteProperty / ownKeys）。
@@ -825,7 +828,7 @@ const P1_JS_ONLY = [
   'js_instanceof', 'js_instanceof_p', 'js_is_obj', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
   'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
   'js_sym_wk', 'js_realm_proto', 'js_global_this', 'js_date_new', 'js_date_parts',
-  'js_date_parse', 'js_proxy_new',
+  'js_date_parse', 'js_proxy_new', 'js_date_utc',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
   'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',
   // groupBy 里 Object 那一格造的是**真对象**（null 原型），所以跟着这一族

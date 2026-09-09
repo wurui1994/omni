@@ -3412,6 +3412,14 @@ function $js_date_parts(y, mo, d, h, mi, s, ms) {
 }
 // Date.parse(串)：交出毫秒（认不出来就是 NaN）
 function $js_date_parse(s) { return Date.parse($js_asS16($js_str(s))); }
+/* Date.UTC(y[, mo, d, h, mi, s, ms])：与 $js_date_parts 同一族，只是按 UTC 算。
+   年缺席就是 NaN（规范：ToNumber(undefined) 是 NaN），别的缺席按 0/1 补。
+   0..99 的年份映到 1900+y 那一条由宿主的 Date.UTC 自己管（规范 MakeFullYear）。 */
+function $js_date_utc(y, mo, d, h, mi, s, ms) {
+  if (y === undefined) return NaN;
+  const num = (v, dflt) => (v === undefined ? dflt : Math.trunc($js_real($js_num_of(v), "Date.UTC")));
+  return Date.UTC(num(y, 1970), num(mo, 0), num(d, 1), num(h, 0), num(mi, 0), num(s, 0), num(ms, 0));
+}
 function $js_obj_to_string(t) {
   if (t === undefined) return "[object Undefined]";
   if (t === null) return "[object Null]";

@@ -48,3 +48,15 @@ u2.setUTCFullYear(1999);
 u2.setUTCMonth(11);
 u2.setUTCDate(31);
 console.log(u2.toISOString(), typeof u2.setDate(2));
+
+/* Date.UTC(y[, mo, d, h, mi, s, ms])：与 new Date(y, mo, …) 同一族，只是**按 UTC** 算。
+   年缺席就是 NaN（规范：ToNumber(undefined) 是 NaN），别的缺席按 0/1 补；0..99 的年份
+   映到 1900+y（规范 MakeFullYear）；月份越界照旧进位。从前这一格当场报
+   "'Date.UTC' is not in the closed ABI"。 */
+console.log(Date.UTC(2020, 0, 2, 3, 4, 5, 6), Date.UTC(2020, 0, 2), Date.UTC(2020));
+console.log(Date.UTC(70, 0, 1), Date.UTC());
+console.log(new Date(Date.UTC(2020, 0, 2)).toISOString());
+console.log(Date.UTC(2020, 12, 1) === Date.UTC(2021, 0, 1));
+// 当值用（表里带 len，所以取得成一格薄包装的函数值）
+const U = Date.UTC;
+console.log(U(2020, 0, 1) === Date.UTC(2020, 0, 1), Date.UTC.length, Date.UTC.name);

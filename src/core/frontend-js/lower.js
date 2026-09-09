@@ -3671,6 +3671,9 @@ const STATIC_CALLS = {
   'Date.now': { op: 'js_now_ms', argc: 0, len: 0 },
   // Date.parse(串)：交出毫秒（认不出来是 NaN）。new Date(串) 走的是同一条解析
   'Date.parse': { op: 'js_date_parse', argc: 1, len: 1 },
+  // Date.UTC：按 UTC 算的那一格（js_date_parts 是本地时区那一格）。缺席的实参由降级器
+  // 补成 undefined，默认值在 $js_date_utc 里按规范给。
+  'Date.UTC': { op: 'js_date_utc', argc: 7, len: 7 },
   // Promise 的三个静态面（ADR-0020 P2）。用到它们就要在 main 末尾排一次微任务队列，
   // 所以 abiCall 里对这几个 op 打一下 usesJobs
   'Promise.resolve': { op: 'js_promise_resolved', argc: 1, len: 1 },
