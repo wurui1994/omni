@@ -277,10 +277,17 @@ static omni_dyn omni_js_buf_index_of(omni_dyn b, omni_dyn v) { \
 static bool omni_js_buf_includes(omni_dyn b, omni_dyn v) { \
   return omni_js_arr_includes(omni_js_iter(b), v, omni_dyn_undef()); \
 } \
-/* 下标是数就是元素，否则是**挂在数组身上的属性**（JS 里数组也是对象，见 omni_js_obj.h
-   的旁表）。`a.foo` 与 `a["foo"]` 于是走到同一个地方 —— 降级器把成员赋值发成 idx_set。 */ \
+/* 下标是**规范的数组下标**（非负整数）就是元素，否则是**挂在数组身上的属性**
+   （JS 里数组也是对象，见 omni_js_obj.h 的旁表）。`a.foo` 与 `a["foo"]` 于是走到同一个
+   地方 —— 降级器把成员赋值发成 idx_set。负数与带小数的也走属性那一支（规范 10.4.2.1 的
+   CanonicalNumericIndexString）：a[-1] = 7 不动 length，从前撞在 "negative array index"
+   上。与 prelude 的 $js_num_key 对着写。 */ \
 static bool omni_js_num_key(omni_dyn k) { \
-  return k.tag == OMNI_DYN_INT || k.tag == OMNI_DYN_REAL || k.tag == OMNI_DYN_UINT; \
+  double d; \
+  if (k.tag == OMNI_DYN_UINT) return true; \
+  if (k.tag != OMNI_DYN_INT && k.tag != OMNI_DYN_REAL) return false; \
+  d = (k.tag == OMNI_DYN_INT) ? (double)k.u.i : k.u.r; \
+  return d >= 0.0 && d == trunc(d); \
 } \
 static omni_dyn omni_js_idx_get(omni_dyn o, omni_dyn k) { \
   switch (o.tag) { \

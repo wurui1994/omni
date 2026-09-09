@@ -1967,7 +1967,13 @@ function $js_idx_get(o, k) {
 }
 function $js_num_key(k) {
   const t = $dynTag(k);
-  return t === "int" || t === "real";
+  if (t !== "int" && t !== "real") return false;
+  /* 只有**规范的数组下标**（非负整数）才是"那一格元素"（规范 10.4.2.1 的
+     CanonicalNumericIndexString）；负数与带小数的一律是**挂在数组身上的属性** ——
+     a[-1] = 7 在 JS 里不动 length、JSON 也看不见它。从前这儿把它们都当下标，
+     a[-1] = 7 撞在 "negative array index" 上。 */
+  const n = Number(k);
+  return Number.isInteger(n) && n >= 0;
 }
 // idx_set 的结果是**被赋的值**（JS 里赋值表达式的值就是右边），不是容器本身 ——
 // 和 obj_set 那个"返回对象好串成字面量"的约定不一样，别混。

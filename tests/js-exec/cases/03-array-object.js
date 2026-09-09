@@ -245,3 +245,12 @@ console.log(`sk ${sk.join(",")} ${sk.length} ${sk["1"]} ${sk[1]}`);
 sk["01"] = "x";
 sk.foo = "y";
 console.log(`sk ${sk.length} ${Object.keys(sk).join(",")} ${sk["01"]} ${sk.foo}`);
+/* 只有**规范的数组下标**（非负整数）才是"那一格元素"（规范 10.4.2.1 的
+   CanonicalNumericIndexString）：负数与带小数的一律是**挂在数组身上的属性** ——
+   a[-1] = 7 不动 length、JSON 也看不见它。从前那一格撞在 "negative array index" 上，
+   响是响的，可与 JS 分叉。 */
+const nk = [1, 2];
+nk[-1] = 7;
+nk[1.5] = 8;
+console.log(`nk ${nk.length} ${nk.join(",")} ${nk[-1]} ${nk[1.5]}`);
+console.log(`nk ${JSON.stringify(nk)} ${nk[-2] === undefined} ${nk[2] === undefined}`);
