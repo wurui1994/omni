@@ -3669,8 +3669,8 @@ const STATIC_CALLS = {
   'Symbol.for': { op: 'js_sym_for', argc: 1 },
   'Symbol.keyFor': { op: 'js_sym_key_for', argc: 1 },
   'Reflect.getPrototypeOf': { op: 'js_obj_proto_get', argc: 1 },
-  'Reflect.setPrototypeOf': { op: 'js_obj_proto_set', argc: 2 },
-  'Reflect.defineProperty': { op: 'js_obj_def', argc: 3 },
+  'Reflect.setPrototypeOf': { op: 'js_reflect_proto_set', argc: 2 },
+  'Reflect.defineProperty': { op: 'js_reflect_def', argc: 3 },
   'Reflect.getOwnPropertyDescriptor': { op: 'js_obj_desc', argc: 2 },
   'Reflect.ownKeys': { op: 'js_obj_own_keys', argc: 1, lit: { sel: 'a' }, len: 1 },
   'Reflect.has': { op: 'js_obj_has_p', argc: 2, len: 2 },
@@ -3678,7 +3678,7 @@ const STATIC_CALLS = {
   'Reflect.set': { op: 'js_reflect_set', argc: 4, len: 3 },
   'Reflect.deleteProperty': { op: 'js_obj_del_p', argc: 2 },
   'Reflect.isExtensible': { op: 'js_obj_is_ext', argc: 1 },
-  'Reflect.preventExtensions': { op: 'js_obj_prevent_ext', argc: 1 },
+  'Reflect.preventExtensions': { op: 'js_reflect_prevent_ext', argc: 1 },
   /* Reflect.apply / Reflect.construct：就是"带 this 的调用"与"拿函数值当构造器"那两格 op
      （第三格实参本来就是一格数组，与 js_call_this / js_fn_construct 的形状对得上）。 */
   'Reflect.apply': { op: 'js_call_this', argc: 3, len: 3 },

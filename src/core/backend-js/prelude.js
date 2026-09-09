@@ -3533,9 +3533,34 @@ function $js_obj_defs(o, descs) {
   return o;
 }
 function $js_obj_proto_get(o) { return $js_isobj(o) ? o.pr : $js_proto_of_prim(o); }
+/* [[SetPrototypeOf]]（规范 10.1.2）：不可扩展的对象上换原型是 TypeError（**能 catch**）——
+   换成同一格原型不算换，照规范先放过。从前这儿静静地换成了。
+   非对象（数与串这些）照 Object.setPrototypeOf 的规矩原样交回去，不报错。 */
 function $js_obj_proto_set(o, p) {
-  if ($js_isobj(o)) o.pr = p === undefined || p === null ? null : p;
+  if (!$js_isobj(o)) return o;
+  const want = p === undefined || p === null ? null : p;
+  if (o.pr === want) return o;
+  if (o.ex === false) return $js_type_err("cannot set the prototype of a non-extensible object");
+  o.pr = want;
   return o;
+}
+/* Reflect 那三格与 Object 同名的不一样：它们交出**布尔**，而且"做不到"是 false 而不是抛
+   （规范 28.1.3 / 28.1.10 / 28.1.9）。所以这儿把底下那一格的 pending 接住换成 false ——
+   Object.defineProperty 那条路照旧抛。 */
+function $js_reflect_def(o, k, d) {
+  $js_obj_def(o, k, d);
+  if ($js_pending()) { $js_take_pending(); return false; }
+  return true;
+}
+function $js_reflect_proto_set(o, p) {
+  $js_obj_proto_set(o, p);
+  if ($js_pending()) { $js_take_pending(); return false; }
+  return true;
+}
+function $js_reflect_prevent_ext(o) {
+  $js_obj_prevent_ext(o);
+  if ($js_pending()) { $js_take_pending(); return false; }
+  return true;
 }
 function $js_obj_has_own(o, k) {
   if ($js_isobj(o)) return o.ps.has($js_pkey(k));

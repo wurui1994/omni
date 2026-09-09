@@ -204,7 +204,12 @@ export const JS_ABI = {
   // Object.defineProperties(o, descs)：与 Object.create 的第二个实参共用同一段（规范同名步骤）
   js_obj_defs: { js: '$js_obj_defs', c: 'omni_js_obj_defs', arity: 2, throws: true },
   js_obj_proto_get: { js: '$js_obj_proto_get', c: 'omni_js_obj_proto_get', arity: 1 },
-  js_obj_proto_set: { js: '$js_obj_proto_set', c: 'omni_js_obj_proto_set', arity: 2 },
+  js_obj_proto_set: { js: '$js_obj_proto_set', c: 'omni_js_obj_proto_set', arity: 2, throws: true },
+  /* Reflect 那三格交出**布尔**，"做不到"是 false 而不是抛（规范 28.1.3 / 28.1.9 / 28.1.10）
+     —— 与 Object 同名的那三个不是一回事，所以各占一格 op。 */
+  js_reflect_def: { js: '$js_reflect_def', c: 'omni_js_reflect_def', arity: 3, ret: 'bool' },
+  js_reflect_proto_set: { js: '$js_reflect_proto_set', c: 'omni_js_reflect_proto_set', arity: 2, ret: 'bool' },
+  js_reflect_prevent_ext: { js: '$js_reflect_prevent_ext', c: 'omni_js_reflect_prevent_ext', arity: 1, ret: 'bool' },
   // 取/设属性的**完整语义**：沿原型链、触发访问器、按可写性决定落不落自有槽。
   /* 取属性（沿原型链）。**第三格是接收者**：访问器要拿它当 this ——
      `super.v` 与 `Reflect.get(t, k, recv)` 都靠这一格（少了它，super 上的 getter
@@ -835,7 +840,7 @@ export const JS_METHODS = {
 const P1_JS_ONLY = [
   'js_obj_new_p', 'js_obj_create', 'js_obj_defs', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
   'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
-  'js_reflect_set',
+  'js_reflect_set', 'js_reflect_def', 'js_reflect_proto_set', 'js_reflect_prevent_ext',
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',  'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
   'js_obj_from_entries', 'js_obj_descs',
   'js_instanceof', 'js_instanceof_p', 'js_is_obj', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
