@@ -122,6 +122,26 @@ export function lexJs(file, diags) {
       i += 5;
       return String.fromCharCode(parseInt(hex, 16));
     }
+    /* 传统八进制转义（`\101`、`\7`，以及 `\0` 后面还跟数字的那种）：模块里是严格模式，
+       规范把它们整族禁掉（12.9.4.1 的 LegacyOctalEscapeSequence 只在 Annex B 的非严格
+       脚本里）。从前它落到底下那条"任何其它字符就是它自己"上 —— `"\101"` 于是是三个字符
+       `101`，**每一把尺子都不是这个答案**（脚本里是 "A"，模块里是 SyntaxError）。
+       悄悄给个第三种答案是最坏的一档，所以这儿当场报，并把两种写法写在消息里。 */
+    if (c >= '1' && c <= '7') {
+      let j = i;
+      while (j < n && src[j] >= '0' && src[j] <= '7' && j - i < 3) j++;
+      const oct = src.slice(i, j);
+      err(start, j, `legacy octal escape '\\${oct}' is not allowed; write \\x${
+        parseInt(oct, 8).toString(16).padStart(2, '0')} or \\u${
+        parseInt(oct, 8).toString(16).padStart(4, '0')}`);
+      i = j;
+      return '';
+    }
+    if (c === '0' && src[i + 1] >= '0' && src[i + 1] <= '9') {
+      err(start, i + 2, "legacy octal escape after '\\0' is not allowed; write \\x00 for a NUL");
+      i += 2;
+      return '';
+    }
     i++;
     return c; // \" \' \` \\ \/ \$ 以及任何其它字符：就是它自己
   };
