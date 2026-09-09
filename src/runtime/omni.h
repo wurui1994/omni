@@ -555,7 +555,7 @@ typedef struct { const void *fp; const char *nm; int64_t nmlen; int64_t len; } o
    omni_js.c 造不出来。所以让段那边（omni_js_prim_v，在 OMNI_JS_STR_ARR 里）在 main 里
    登记进来：它交回来的是**原始值**（可能是个数 —— `{toString(){return 42}} + 1` 是 43，
    不是 "421"），没有自带 toString 时原样交回。没登记的时候（不是 JS 那条腿）照旧当场报。 */
-typedef omni_dyn (*omni_js_prim_hook)(omni_dyn);
+typedef omni_dyn (*omni_js_prim_hook)(omni_dyn, int);
 void omni_js_prim_hook_set(omni_js_prim_hook h);
 void omni_js_fnmeta_set(const omni_js_fn_meta *t, int64_t n);
 const omni_js_fn_meta *omni_js_fnmeta_find(const void *fp);

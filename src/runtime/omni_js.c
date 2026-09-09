@@ -303,7 +303,7 @@ static omni_s16 to_s16(omni_dyn v) {
       if (js_obj_has_own_tostring(v)) {
         if (js_prim_hook != NULL && js_prim_depth == 0) {
           js_prim_depth++;
-          omni_dyn r = js_prim_hook(v);
+          omni_dyn r = js_prim_hook(v, 's');
           js_prim_depth--;
           /* 交回来的是原始值（可能是个数），所以还要按原始值那套印一遍 */
           if (!js_objlike(r)) return to_s16(r);
@@ -349,7 +349,7 @@ static omni_s16 to_s16(omni_dyn v) {
         if (ts != NULL && ts->tag == OMNI_DYN_FN) {
           if (js_prim_hook != NULL && js_prim_depth == 0) {
             js_prim_depth++;
-            omni_dyn r = js_prim_hook(v);
+            omni_dyn r = js_prim_hook(v, 's');
             js_prim_depth--;
             if (!js_objlike(r)) return to_s16(r);
           }
@@ -500,7 +500,7 @@ static omni_dyn js_prim1(omni_dyn v) {
   if (!js_objlike(v)) return v;
   if (js_prim_hook != NULL && js_prim_depth == 0) {
     js_prim_depth++;
-    omni_dyn r = js_prim_hook(v);
+    omni_dyn r = js_prim_hook(v, 'd');
     js_prim_depth--;
     if (!js_objlike(r)) return r;
   }

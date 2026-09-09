@@ -404,14 +404,46 @@ static omni_dyn omni_js_own_ts_(omni_dyn v) { \
   if (base.tag == OMNI_DYN_FN && base.u.ref == ts.u.ref) return omni_dyn_undef(); \
   return ts; \
 } \
-/* ToPrimitive 的段那一半（omni.h 的 omni_js_prim_hook）：自带 toString 就调它、把**原始值**
-   原样交回去（可能是个数）；没有就原样交回接收者，让 omni_js.c 那边落回按标签的那串。 */ \
-static omni_dyn omni_js_prim_v(omni_dyn v) { \
-  omni_dyn ts = omni_js_own_ts_(v); \
-  if (ts.tag != OMNI_DYN_FN) return v; \
-  omni_dyn r = omni_js_call_this(ts, v, omni_js_arr_wrap(LT##_new())); \
-  if (omni_js_pending()) return v; \
-  return r; \
+/* 自带的某一格方法（`omni_js_own_ts_` 的泛化）：realm 的 Object.prototype 身上那一份
+   **不算自带**（每个对象的链上都有它），判据与 own_ts_ 一字不差。 */ \
+static omni_dyn omni_js_own_m_(omni_dyn v, omni_dyn k) { \
+  if (v.tag != OMNI_DYN_OBJ && v.tag != OMNI_DYN_DICT) return omni_dyn_undef(); \
+  /* dict 上根本挂不了符号键（键是 UTF-8 串），所以那一问直接是"没有" ——
+     不先挡一道的话 omni_js_obj_get 会喊 "symbol is not a string"。 */ \
+  if (v.tag == OMNI_DYN_DICT && k.tag == OMNI_DYN_SYM) return omni_dyn_undef(); \
+  omni_dyn m = v.tag == OMNI_DYN_OBJ ? omni_js_getp(v, k, omni_dyn_undef()) \
+                                     : omni_js_obj_get(v, k); \
+  if (m.tag != OMNI_DYN_FN) return omni_dyn_undef(); \
+  omni_dyn base = omni_js_getp(omni_js_realm_proto(omni_str_new("Object", 6)), k, \
+                               omni_dyn_undef()); \
+  if (base.tag == OMNI_DYN_FN && base.u.ref == m.u.ref) return omni_dyn_undef(); \
+  return m; \
+} \
+/* ToPrimitive 的段那一半（omni.h 的 omni_js_prim_hook）。hint 是 's'（串）时先 toString、
+   否则先 valueOf —— 规范 7.1.1 的那两条次序，`{valueOf(){return 7}} + 1` 是 8 而
+   `String(它)` 是 "[object Object]" 全靠这一格。交回来的是**原始值**（可能是个数）；
+   两个都没有（或都交回对象）就原样交回接收者，让 omni_js.c 那边落回按标签的那串。
+   `Symbol.toPrimitive` 还没有：**有它就当场报**，不悄悄按 valueOf / toString 走 —— 那会是
+   一个静默的错答案。 */ \
+static omni_dyn omni_js_prim_v(omni_dyn v, int hint) { \
+  omni_dyn sp = omni_js_own_m_(v, omni_js_sym_wk(omni_str_new("toPrimitive", 11))); \
+  if (sp.tag == OMNI_DYN_FN) { \
+    omni_errorf("backend-c: Symbol.toPrimitive 还没搬到 C 那条腿（ADR-0020 P1-c）；" \
+                "这份程序请走 --backend js 或解释器"); \
+    return v; \
+  } \
+  const char *order = hint == 's' ? "ts\0vo" : "vo\0ts"; \
+  for (int i = 0; i < 2; i++) { \
+    const char *which = i == 0 ? order : order + 3; \
+    omni_dyn k = omni_dyn_of_s16(which[0] == 't' ? omni_js_s16_lit("toString") \
+                                                 : omni_js_s16_lit("valueOf")); \
+    omni_dyn m = omni_js_own_m_(v, k); \
+    if (m.tag != OMNI_DYN_FN) continue; \
+    omni_dyn r = omni_js_call_this(m, v, omni_js_arr_wrap(LT##_new())); \
+    if (omni_js_pending()) return v; \
+    if (!omni_js_is_object(r)) return r; \
+  } \
+  return v; \
 } \
 static omni_dyn omni_js_str_v(omni_dyn v) { \
   omni_dyn ts = omni_js_own_ts_(v); \

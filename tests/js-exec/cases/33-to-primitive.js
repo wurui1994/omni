@@ -14,3 +14,10 @@ console.log(n + 1, 1 + n, n * 2, `${n}`);
 
 console.log([1, 2] + 1, {} + 1, 1 + [2], [3] * 2, [] + 1);
 console.log("" + {}, "" + [1, 2], "" + new Error("e"));
+
+// valueOf 也在里头：默认口径（+ 与 *）先 valueOf，串口径（String / 模板）先 toString。
+// 两个都有的时候这两条次序会给出**不同**的答案 —— 所以它是一格判据，不是摆设。
+const vo = { valueOf() { return 7; } };
+console.log(vo + 1, vo * 2, `${vo}`, String(vo));
+const both = { valueOf() { return 7; }, toString() { return "B"; } };
+console.log(both + 1, both * 2, `${both}`, String(both));
