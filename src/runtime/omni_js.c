@@ -180,6 +180,23 @@ static omni_str js_num_str(double v) {
   return omni_str_fmt("%s", out);
 }
 
+/* dict 里按名字取一格（只读、线性扫）。错误对象只有三四格，String() 这条路也不热，
+   所以不去碰模板的哈希索引 —— 那要连 idx / 探测链一起复述，代价与收益不成比例。 */
+static const omni_dyn *js_dict_find(const omni_js_dict_view *d, const char *name) {
+  int64_t n = (int64_t)strlen(name);
+  for (int64_t i = 0; i < d->n; i++) {
+    if (!d->live[i]) continue;
+    if (d->keys[i].len == n && memcmp(d->keys[i].p, name, (size_t)n) == 0) return &d->vals[i];
+  }
+  return NULL;
+}
+
+/* 自引用的数组：`const a = [1]; a.push(a); String(a)` 在两把尺子上都是**栈溢出**
+   （qjs 报 InternalError: stack overflow）。宿主崩是最坏的一档，所以这儿自己拦一道 ——
+   深到这个数就当场报，说清是哪种情况。 */
+#define OMNI_JS_S16_MAX_DEPTH 128
+static int js_s16_depth = 0;
+
 /* JS 域里的字符串一律是 str16（ADR-0011 第 8 节）。UTF-8 的 omni_str 只在
    转码的两个出入口出现，所以这里把 to_s16 收成一个内部函数，op 层只见 str16。 */
 static omni_s16 to_s16(omni_dyn v) {
@@ -208,6 +225,54 @@ static omni_s16 to_s16(omni_dyn v) {
        特批 —— 这个值域里两条路都落在这一格上，所以两边一致地给文本。与 prelude 的
        $js_str 同一个口径（ADR-0020 记着这一格是有意的分叉）。 */
     case OMNI_DYN_SYM: return omni_js_as_s16(omni_js_sym_str(v));
+    /* String([1,2,"x"]) 是 "1,2,x"：规范 23.1.3.36 里 Array.prototype.toString 就是
+       join(",")，而 join 把 null / undefined 那格写成空串、嵌套的数组递归下去。
+       两把尺子在这一格上一致（量过），prelude 走宿主的 String() 也是这个答案 ——
+       从前 C 这条腿在这儿硬报 "cannot convert list to string"，一条腿死、三条腿活。 */
+    case OMNI_DYN_LIST: {
+      const omni_js_list_view *l = (const omni_js_list_view *)v.u.ref;
+      omni_s16 out = omni_s16_of_utf8(omni_str_new("", 0));
+      if (js_s16_depth >= OMNI_JS_S16_MAX_DEPTH) {
+        omni_errorf("String() of an array nested deeper than %d (a self-referential array?)",
+                    OMNI_JS_S16_MAX_DEPTH);
+        return out;
+      }
+      js_s16_depth++;
+      for (int64_t i = 0; i < l->len; i++) {
+        if (i > 0) out = omni_s16_cat(out, omni_s16_of_utf8(omni_str_new(",", 1)));
+        omni_dyn e = l->items[i];
+        if (e.tag == OMNI_DYN_NULL || e.tag == OMNI_DYN_UNDEF) continue;
+        out = omni_s16_cat(out, to_s16(e));
+      }
+      js_s16_depth--;
+      return out;
+    }
+    /* dict 有两副面孔。一副是**普通对象**（`{a:1}`）—— 规范里它走
+       Object.prototype.toString，答案是 "[object Object]"。另一副是**异常对象**
+       （ADR-0011 决策 15：带 $cls 的那种 dict）—— Error.prototype.toString 是
+       "Name: message"，message 空时只剩 "Name"（规范 20.5.3.4）。 */
+    case OMNI_DYN_DICT: {
+      const omni_js_dict_view *d = (const omni_js_dict_view *)v.u.ref;
+      if (js_dict_find(d, "$cls") == NULL) {
+        /* 自带 toString 的那种对象（`{ toString() { return "T"; } }`）：规范的
+           ToPrimitive 会**调**它。调回调要现拼一条实参 list，而 list 的具体类型只在
+           生成的那个翻译单元里 —— 这儿造不出来。刻意当场报而不是给 "[object Object]"：
+           那是一个悄悄的错答案，比拒绝坏（ADR-0020 的排序）。 */
+        const omni_dyn *ts = js_dict_find(d, "toString");
+        if (ts != NULL && ts->tag == OMNI_DYN_FN) {
+          omni_errorf("backend-c: String() of an object with its own toString — "
+                      "自带 toString 的对象现在只在 node 宿主上成立"
+                      "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器");
+        }
+        return omni_s16_of_utf8(omni_str_new("[object Object]", 15));
+      }
+      const omni_dyn *nm = js_dict_find(d, "name");
+      const omni_dyn *ms = js_dict_find(d, "message");
+      omni_s16 name = nm == NULL ? omni_s16_of_utf8(omni_str_new("Error", 5)) : to_s16(*nm);
+      omni_s16 msg = ms == NULL ? omni_s16_of_utf8(omni_str_new("", 0)) : to_s16(*ms);
+      if (msg.len == 0) return name;
+      return omni_s16_cat(omni_s16_cat(name, omni_s16_of_utf8(omni_str_new(": ", 2))), msg);
+    }
     default:
       omni_errorf("cannot convert %s to string", omni_dyn_tag_name(v.tag));
       return omni_s16_of_utf8(omni_str_new("", 0));

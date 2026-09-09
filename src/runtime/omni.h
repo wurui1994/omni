@@ -91,6 +91,20 @@ typedef struct {
   union { bool b; int64_t i; double r; omni_str s; omni_s16 s16; void *ref; } u;
 } omni_dyn;
 
+/* JS 域里那两种容器的**布局视图**。真正的类型是容器模板摊出来的
+   （omni_container.h 的 OMNI_LIST_BODY / OMNI_DICT_BODY，JS 域里一定是
+   list<dynamic> 与 dict<string,dynamic>），而那些类型只在**生成的那个翻译单元**里存在 ——
+   宏段与生成代码都在那儿，所以它们直接写 `((LT)v.u.ref)->len`。
+   omni_js.c 是一份普通的 .c，看不见那些名字，可是 String([1,2]) 这条路必须在这儿走
+   （js_add 的 "" + a、模板拼接都落到 to_s16 上，绕不开）。所以照模板的字段次序原样
+   复述一遍布局，只读、不构造。两个模板的 body 就在上面提到的那两个宏里，改了要同时改这儿。 */
+typedef struct { omni_dyn *items; int64_t len; int64_t cap; } omni_js_list_view;
+typedef struct {
+  omni_str *keys; omni_dyn *vals; bool *live;
+  int64_t n; int64_t cap; int64_t count;
+  int64_t *idx; int64_t icap;
+} omni_js_dict_view;
+
 /* 函数值（ADR-0010）：指向闭包记录的指针。记录的第一个字段是被调函数的地址，
    后面紧跟捕获的变量 —— 每个 lambda 有自己的记录布局，由生成的 C 定义。
    闭包记录本身当作 self 传进被调函数，所以函数只要一个参数就能同时拿到

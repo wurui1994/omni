@@ -273,3 +273,12 @@ console.log(fstr.join(","));
 const fpick = [];
 for (const k in fio) { if (k === "a") continue; fpick.push(k); }
 console.log(fpick.join(","), String("a" in fio), String("z" in fio));
+
+// String(容器)（ADR-0020）：数组是 join(",")、null/undefined 那格是空串、嵌套递归；
+// 普通对象是 "[object Object]"；异常对象是 "Name: message"。C 那条腿从前在这儿硬报
+// "cannot convert list to string" —— 一条腿死、三条腿活。
+const sa = [1, 2, "x"];
+console.log(String(sa), `v=${sa}`, "" + sa);
+console.log(String([1, [2, [3]]]), String([null, undefined, 5]), String([]));
+console.log(String({ a: 1 }), String(new Error("x")), String(new TypeError("bad")));
+console.log("t: " + new Error("cat"));
