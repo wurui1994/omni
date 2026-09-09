@@ -684,6 +684,23 @@ static omni_dyn omni_js_fn_proto_(omni_dyn f) { \
   return p; \
 } \
 static omni_dyn omni_js_fn_construct(omni_dyn f, omni_dyn args) { \
+  /* 右边是一格**类对象**（`new this()` / 局部类：那时候类是一格局部量，降级器发的是这条
+     通用路）。类对象不是函数值 —— 构造要走它身上那两格：prototype 当原型、Symbol.omni.classInit
+     那格闭包初始化实例。形状与降级器里静态那条路一样，只是类是运行期拿到的。
+     与 prelude 的 $js_fn_construct 逐支对齐。 */ \
+  if (f.tag == OMNI_DYN_OBJ) { \
+    omni_dyn init = omni_js_getp(f, omni_js_sym_wk(omni_str_new("omni.classInit", 14)), \
+                                 omni_dyn_undef()); \
+    if (init.tag == OMNI_DYN_FN) { \
+      omni_dyn o = omni_js_obj_new_p(omni_js_getp(f, omni_js_name_("prototype", 9), \
+                                                  omni_dyn_undef())); \
+      omni_js_nt_slot_ = f; \
+      omni_dyn r0 = omni_js_call_this(init, o, args); \
+      omni_js_nt_slot_ = omni_dyn_undef(); \
+      if (omni_js_pending()) return omni_dyn_undef(); \
+      return omni_js_is_object(r0) ? r0 : o; \
+    } \
+  } \
   if (f.tag != OMNI_DYN_FN) { \
     if (!omni_js_pending()) omni_js_type_err_c("not a function"); \
     return omni_dyn_undef(); \

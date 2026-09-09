@@ -933,14 +933,10 @@ const P1_JS_ONLY = [
   'js_jobs_run',
   'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',
-  /* js_fn_construct 的 C 孪生**已经写好了**（omni_js_obj.h：函数不是真对象，所以那格
-   * prototype 住在一张按同一性索引的旁表上，与 prelude 的 $FNPROTO 对应），可这一格还
-   * 留在拒绝单子上 —— 它一开，`new f()` 那一族就把 07-classes 整个放进 C 那条腿，而那份
-   * 用例里还有两处没通：**局部类**（函数体里 `class P {…}`，走 classExpr 那条老路造的是
-   * 带自有方法的 dict）与**自带 toString 的对象**（String(o) 要调回调，而 to_s16 住在
-   * 普通 .c 里造不出实参 list）。宁可整族先拒，也不要让一份用例半通半不通 —— 下一步就是
-   * 这两格（ADR-0020 P1-c 的第十一步）。 */
-  'js_fn_construct', 'js_src_eval', 'js_src_fn',
+  // js_fn_construct 有 C 孪生了（omni_js_obj.h）：函数不是真对象，所以那格 prototype 住在
+  // 一张按同一性索引的旁表上（与 prelude 的 $FNPROTO 对应）；右边是**类对象**时（局部类、
+  // new this()）走它身上的 prototype 与 Symbol.omni.classInit 那格闭包。
+  'js_src_eval', 'js_src_fn',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 
