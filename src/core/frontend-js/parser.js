@@ -176,9 +176,12 @@ class JsParser {
     if (loop) return { type: 'Labeled', label: start.value, body, span: sp };
     /* 标签打在**块**上（`L: { … break L; }`）：摊成 `L: while (true) { … ; break; }` ——
      * 于是 `break L` 还是"跳出一层循环"那条现成的边。降级器认 block 这一位：
-     * `continue L` 在规范里就是 SyntaxError，摊完之后它会变成死循环，所以要挡住。 */
+     * `continue L` 在规范里就是 SyntaxError，摊完之后它会变成死循环，所以要挡住。
+     * 别的形状（`L: ;`、`L: foo();`）记一条错就**原样交回去** —— this.error 只记不抛，
+     * 从前这儿接着往下走、在 body.body 上崩成宿主的 TypeError（一格没有诊断的崩）。 */
     if (body.type !== 'Block') {
       this.error(sp, 'a label is only supported on a loop or a block');
+      return { type: 'Labeled', label: start.value, body, span: sp };
     }
     const once = {
       type: 'While',

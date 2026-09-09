@@ -1,0 +1,3 @@
+tests/errors/js_label_on_empty_stmt.js:9:1: error: a label is only supported on a loop or a block
+  lbl: ;
+  ^^^^^^
