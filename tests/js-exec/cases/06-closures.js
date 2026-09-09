@@ -205,3 +205,19 @@ console.log(`block ${inLoop()}`);
 // 形参默认值里的闭包看得见前面的形参
 function dflt(x, y = x + 1, z = () => x + y) { return `${x}${y}${z()}`; }
 console.log(`dfltcap ${dflt(1)} ${dflt(1, 5)}`);
+/* var 是函数作用域的：块里写的出了块还看得见，闭包捕获的是同一格（块外再改也看得见）。
+   从前 var 跟 let 一样按块声明，`{ var x = 1; } return x;` 当场报 unresolved 'x'。 */
+function varScope() {
+  { var x = 1; }
+  if (true) { var y = 2; }
+  for (var i = 0; i < 2; i++) { var z = i; }
+  return `${x}${y}${z}${i}`;
+}
+console.log(`var ${varScope()}`);
+function varCapture() {
+  const fns = [];
+  { var m = 5; fns.push(() => m); }
+  m = 6;
+  return fns[0]();
+}
+console.log(`var ${varCapture()} ${(function () { const t = typeof v; var v = 1; return `${t}${v}`; })()}`);

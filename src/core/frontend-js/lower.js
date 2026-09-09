@@ -295,6 +295,21 @@ function boundNames(fn) {
   return out;
 }
 
+/** 这一层里 `var` 声明的名字（不钻进内层函数；`for (var i …)` 的 init 也算）。
+ *
+ * `var` 是**函数**作用域的，所以它们要在栈帧入口一次立好 —— 块里、if 里、循环里写的
+ * `var` 出了块还看得见（量出来的：`{ var x = 1; } return x;` 从前报 unresolved 'x'）。 */
+function varNames(node, out = new Set()) {
+  if (!node || typeof node !== 'object') return out;
+  if (isFnNode(node)) return out;
+  if (node.type === 'VarDecl' && node.kind === 'var' && Array.isArray(node.decls)) {
+    const sink = { err: () => {} };
+    for (const d of node.decls) for (const n of patternNames(d.id, sink, node.span)) out.add(n);
+  }
+  eachChild(node, (x) => varNames(x, out));
+  return out;
+}
+
 /** 直接嵌在 `fn` 里的那些函数（不含 `fn` 自己）。 */
 function directNestedFns(fn) {
   const out = [];
@@ -438,6 +453,14 @@ class Lower {
   }
 
   collectTop(s, i) {
+    /* 块里写的 `var` 也是这一层的（var 是函数作用域的，模块顶层就是全局槽）——
+     * 从前只收顶层那一句，于是 `{ var x = 1; } console.log(x);` 当场报 unresolved 'x'。
+     * 不带 lexIdx：TDZ 是 let / const 的事，var 声明前读到 undefined 是对的。 */
+    if (s.type !== 'FuncDecl' && s.type !== 'ClassDecl') {
+      for (const n of varNames(s)) {
+        if (!this.globals.has(n)) this.globals.set(n, { name: cSafe(n), lexIdx: undefined });
+      }
+    }
     switch (s.type) {
       case 'FuncDecl':
         if (this.topFns.has(s.id)) this.err(s.span, `duplicate function '${s.id}'`);
@@ -672,6 +695,7 @@ class Lower {
       const ent = this.declare(rest.type === 'Ident' ? rest.name : '_rest');
       stmts.push(this.declStmt(ent, op('js_arr_slice', [argsDyn(), constReal(params.length), undefExpr()])));
     }
+    stmts.push(...this.hoistVars(bodyStmts));
     stmts.push(...this.preCells(bodyStmts));
     stmts.push(...this.hoistFuncDecls(bodyStmts));
     for (const st of bodyStmts) stmts.push(...this.stmt(st));
@@ -692,6 +716,31 @@ class Lower {
   }
 
   /**
+   * `var` 是**函数**作用域的：块里、if 里、循环里写的 `var` 出了块还看得见，声明之前读它
+   * 是 undefined 而不是错。所以栈帧入口把这一层所有 `var` 的名字一次立好（值 undefined），
+   * 声明那一句只剩"写一次"（见 varDecl 里那一支）。从前它们跟 let 一样按块声明 ——
+   * `{ var x = 1; } return x;` 于是当场报 unresolved 'x'（量出来的）。
+   * 形参同名（`function f(p){ var p = p + 1; }`）不另立一格：规范里那就是同一个绑定。
+   * main 那一帧不走这条路 —— 那儿的 var 是真全局（collectTop 收，块里的也收）。
+   */
+  hoistVars(bodyStmts) {
+    if (this.fn.isMain) return [];
+    const names = new Set();
+    for (const s of bodyStmts) varNames(s, names);
+    if (!names.size) return [];
+    this.fn.varNames = names;
+    const scope = this.fn.scopes[this.fn.scopes.length - 1];
+    const out = [];
+    for (const n of names) {
+      if (scope.has(n)) continue;
+      const ent = this.declare(n);
+      ent.varSlot = true;
+      out.push(this.declStmt(ent, undefExpr()));
+    }
+    return out;
+  }
+
+  /**
    * 提升的嵌套函数声明在**入口**就造出来（规范：体首就看得见它），可它们引用的名字常常是
    * 体里后面才声明的 —— 造闭包那一刻作用域里还没有，于是
    * `function outer(){ const v = 1; function inner(){ return v; } }` 当场报
@@ -708,7 +757,8 @@ class Lower {
     const scope = this.fn.scopes[this.fn.scopes.length - 1];
     const out = [];
     for (const s of bodyStmts) {
-      if (s.type !== 'VarDecl') continue;
+      // 只管 let / const：var 是函数作用域的，它那一格由 hoistVars（或 main 的全局槽）立
+      if (s.type !== 'VarDecl' || s.kind === 'var') continue;
       for (const d of s.decls) {
         for (const n of patternNames(d.id, sink, s.span)) {
           if (!this.fn.captured.has(n) || scope.has(n)) continue;
@@ -1493,6 +1543,27 @@ class Lower {
         }
         return d.init ? this.expr(d.init) : undefExpr();
       };
+      /* `var`：名字在栈帧入口就立好了（hoistVars），这儿只剩"写一次" —— 没有初始化式的
+       * `var x;` 一句都不发（规范里再声明一次不清零）。模块顶层的 var 是全局槽，块里写的
+       * 也是同一格（collectTop 连块里的一起收），所以那一支直接写那个全局。 */
+      if (s.kind === 'var') {
+        const ent = d.id.type === 'Ident' ? this.lookup(d.id.name) : null;
+        if (ent && ent.varSlot === true) {
+          if (d.init) out.push(exprStmt(this.writeEntry(ent, init())));
+          continue;
+        }
+        const glob = d.id.type === 'Ident' && !ent && this.fn.isMain
+          && this.globals.has(d.id.name) ? this.globals.get(d.id.name) : null;
+        if (glob) {
+          if (d.init) out.push(exprStmt(assign(globalRef(glob.name), init())));
+          continue;
+        }
+        // 解构的 var（`{ var {a} = o; }`）：名字也提升过了，所以按"往已有绑定里写"那条路走
+        if (d.id.type !== 'Ident' && (this.fn.varNames?.size || this.fn.isMain)) {
+          if (d.init) this.destructInto(d.id, init(), s.span);
+          continue;
+        }
+      }
       if (d.id.type === 'Ident') out.push(...this.defineVar(d.id.name, init));
       else out.push(...this.bindPattern(d.id, init()));
     }
