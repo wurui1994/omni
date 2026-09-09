@@ -128,7 +128,16 @@ static omni_s16 omni_js_json_nl(omni_s16 gap, int64_t depth) { \
   omni_s16 r; r.p = out; r.len = n; return r; \
 } \
 static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, omni_s16 gap, int64_t depth, const void **seen) { \
-  if (v.tag == OMNI_DYN_DICT) { \
+  /* toJSON（规范 SerializeJSONProperty 第 2 步）：真对象那一支从前**漏了** —— 于是
+     JSON.stringify(new Date(…)) 在这条腿上是 "{}"，而 node 给那串 ISO 时间（量出来的）。
+     dict 与真对象两支都得问，取法不同（真对象要走原型链：Date 的 toJSON 住在 dateP 上）。 */ \
+  if (v.tag == OMNI_DYN_OBJ) { \
+    omni_dyn tj = omni_js_getp(v, omni_dyn_of_s16(omni_js_s16_lit("toJSON")), v); \
+    if (tj.tag == OMNI_DYN_FN) { \
+      LT noargs = LT##_new(); \
+      v = omni_js_call_this(tj, v, omni_js_arr_wrap(noargs)); \
+    } \
+  } else if (v.tag == OMNI_DYN_DICT) { \
     omni_dyn tj = omni_js_obj_get(v, omni_dyn_of_s16(omni_js_s16_lit("toJSON"))); \
     if (tj.tag == OMNI_DYN_FN) { \
       LT noargs = LT##_new(); \

@@ -3237,6 +3237,11 @@ function $mkRealm() {
     const ms = $js_date_ms(t);
     return Number.isNaN(ms) ? null : new Date(ms).toISOString();
   });
+  /* toUTCString / toDateString（规范 21.4.4.43 与 .35）：这两格的排版是**规范写死的**
+     （"Wed, 09 Sep 2026 21:01:08 GMT" / "Wed Sep 09 2026"），没有时区名字，所以五条腿
+     都答得出同一串 —— 与 toString 那一格正好相反。 */
+  $natm(r.dateP, "toUTCString", 0, (t) => new Date($js_date_ms(t)).toUTCString());
+  $natm(r.dateP, "toDateString", 0, (t) => new Date($js_date_ms(t)).toDateString());
   $natm(r.dateP, "toString", 0, (t) => new Date($js_date_ms(t)).toString());
   /* Date.prototype[Symbol.toPrimitive]（规范 21.4.4.45）：隐式强转那条路早就对
      （d2 - d1 走 valueOf、模板串走 toString），缺的只是**显式取那一格函数**。

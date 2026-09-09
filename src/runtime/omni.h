@@ -562,10 +562,24 @@ void omni_js_prim_hook_set(omni_js_prim_hook h);
 omni_dyn omni_js_to_prim_c(omni_dyn v, int hint);
 void omni_js_fnmeta_set(const omni_js_fn_meta *t, int64_t n);
 const omni_js_fn_meta *omni_js_fnmeta_find(const void *fp);
-/* Date 里只算数的那两格（omni_js_date.c）。new Date(…) 造的是真对象，那一格还在 P1-c 里。 */
+/* Date 那一族的算术（omni_js_date.c）。真对象自己（$ms 槽 + dateP 原型）在 omni_js_obj.h
+   那一段里造 —— 造对象要那个翻译单元里的 list / dict 类型。 */
 omni_dyn omni_js_date_utc(omni_dyn y, omni_dyn mo, omni_dyn d, omni_dyn h,
                           omni_dyn mi, omni_dyn s, omni_dyn ms);
+omni_dyn omni_js_date_parts(omni_dyn y, omni_dyn mo, omni_dyn d, omni_dyn h,
+                            omni_dyn mi, omni_dyn s, omni_dyn ms);
 omni_dyn omni_js_date_parse(omni_dyn s);
+/* 取一格字段：0 年 1 月（0 起） 2 日 3 时 4 分 5 秒 6 毫秒 7 星期（0 = 周日）。
+   utc 为假就先加上**当时**的本地偏移（localtime_r 拿的，不是猜的）。 */
+double omni_js_date_field_d(double t, int which, bool utc);
+/* getTimezoneOffset()：分钟，符号与偏移相反（UTC - 本地）。 */
+double omni_js_date_tzoff_d(double t);
+/* 七格字段（年, 月 0 起, 日, 时, 分, 秒, 毫秒）→ 毫秒。set* 那一族就是"取七格、改几格、
+   再合成"，所以取值与写值共用这一对原语。 */
+double omni_js_date_make_d(const double *f, bool utc);
+/* 规范写死的三种文本：0 toISOString、1 toUTCString、2 toDateString。
+   toString / toTimeString **不在这儿** —— 那两格带时区名字，三把尺子各说各话。 */
+omni_dyn omni_js_date_fmt(double t, int kind);
 /* dynamic 的运行期标签名（JS 域口径）。解释器靠它认标签，见 ADR-0013 与 omni_js.c */
 omni_dyn omni_js_type_tag(omni_dyn v);
 /* real 的两种文本化，给解释器用（ADR-0013）。就是 print / repr 自己用的那两个函数，

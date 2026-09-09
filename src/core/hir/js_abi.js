@@ -935,9 +935,12 @@ const P1_JS_ONLY = [
   // （每个 realm 一份）—— 自举那条腿只差它一个 op 就能整份 emit-c（量过：survey 只剩这一格）。
   // js_realm_ctor / js_ctor_get 有 C 孪生了：构造器是一格原生（sel 从 OMNI_JS_CTOR_SEL 起），
   // prototype 预先坐进 fnproto 旁表，原型上那格 constructor 由 get 陷阱答。
-  'js_date_new', 'js_date_parts',
-  // Date.UTC 与 Date.parse 有 C 孪生了（runtime/omni_js_date.c）：它们交出来的是一个毫秒数，
-  // 与真对象无关。new Date(…) 与 new Date(y, mo, d) 照旧拒 —— 前者造真对象，后者要本地时区。
+  // Date 整族有 C 孪生了（runtime/omni_js_date.c + omni_js_obj.h）：真对象 + $ms 槽 +
+  // realm 上那格 Date.prototype，四十格取值面走一个 sel 段。本地时区**只**问 localtime_r
+  // （这台机器上 node / qjs 用的是同一份 tz 数据），"猜一个偏移"才是悄悄的错答案。
+  // 唯一过不去的是 toString / toTimeString：括号里那个时区名字三把尺子各说各话
+  // （node 给 ICU 长名、qjs 什么都不给、C 的 %Z 给缩写），所以那两格在 C 上当场报 ——
+  // 连着 String(d) / `${d}`（走 [Symbol.toPrimitive] 的串口径）也一起报。d2 - d1 照旧是个数。
   // 代理有 C 孪生了（omni_js_obj.h）：px_t / px_h 挂在真对象的载荷上，get / set / has /
   // deleteProperty / ownKeys 五个入口各多问一句陷阱。**可调用的代理**（目标是函数）那一支
   // 当场报 —— 那要一格闭包记录，只有生成的代码造得出来。

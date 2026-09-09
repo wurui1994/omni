@@ -31,6 +31,10 @@
 #define OMNI_JS_PM_SEL 1000
 /* 内建构造器当值用那一段的起点（见 omni_js_realm_ctor）。 */
 #define OMNI_JS_CTOR_SEL 2000
+/* Date.prototype 上那四十格取值面（外加 [Symbol.toPrimitive] 一格）的起点。摆在 CTOR 那段
+   之前是够的：一共 41 格，离 OMNI_JS_PM_SEL 还差得远。 */
+#define OMNI_JS_DATE_SEL 100
+#define OMNI_JS_DATE_N 41
 
 #define OMNI_JS_OBJ(LT, DT) \
 static DT omni_js_dict_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_DICT); } \
@@ -113,6 +117,10 @@ static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode); \
    所以两格都排在 nat_call_ 之后、这儿先声明。 */ \
 static void omni_js_agen_tick_(omni_dyn g, omni_dyn p, omni_dyn v, int64_t mode); \
 static omni_dyn omni_js_agen_step_(omni_dyn g, omni_dyn v, int64_t mode); \
+/* Date 那一族（ADR-0020 P4）：真对象 + $ms 槽，取值面那四十格都落到同一个 date_m_
+   （sel 从 OMNI_JS_DATE_SEL 起 + 表里的号）。算术全在 omni_js_date.c 里，这儿只管对象。 */ \
+static omni_dyn omni_js_date_m_(int64_t ix, omni_dyn self, LT args); \
+static omni_dyn omni_js_date_new(omni_dyn v); \
 /* 函数值的 prototype 那张按同一性索引的旁表（$FNPROTO 的孪生）：realm_ctor 要往里预先坐一格，
    而它排在 fn_proto_ 前头，所以表在这儿声明。 */ \
 static DT omni_js_fnproto_tbl_; \
@@ -135,6 +143,32 @@ static const char *omni_js_ctor_nm_[19] = { "Object", "Function", "Array", "Stri
 static const int64_t omni_js_ctor_ln_[19] = { 1, 1, 1, 1, 1, 1, 0, 2, 0, 0, 7, \
   1, 1, 1, 1, 1, 1, 1, 2 }; \
 static omni_dyn omni_js_ctor_tbl_[19]; \
+/* Date.prototype 上那四十格。kind：0 取本地字段 1 取 UTC 字段 2 毫秒本身 3 时区偏移
+   4 setTime 5 写本地那一族 6 写 UTC 那一族 7 规范写死的文本 8 toJSON 9 这条腿上过不去。
+   arg 对 0/1 是字段号、对 5/6 是**头一个**被写的字段号（于是 setHours(h, mi, s, ms) 就是
+   "从第 3 格起连着写四格"，与规范 21.4.4 那一族的写法一字不差）、对 7 是文本形态。
+   名字长度不手写（realm 表上那种漂过一次），install 的时候 strlen 现算。 */ \
+struct omni_js_datem_s { const char *nm; int64_t argc; int kind; int arg; }; \
+static const struct omni_js_datem_s omni_js_datem_[40] = { \
+  { "getFullYear", 0, 0, 0 }, { "getMonth", 0, 0, 1 }, { "getDate", 0, 0, 2 }, \
+  { "getHours", 0, 0, 3 }, { "getMinutes", 0, 0, 4 }, { "getSeconds", 0, 0, 5 }, \
+  { "getMilliseconds", 0, 0, 6 }, { "getDay", 0, 0, 7 }, \
+  { "getUTCFullYear", 0, 1, 0 }, { "getUTCMonth", 0, 1, 1 }, { "getUTCDate", 0, 1, 2 }, \
+  { "getUTCHours", 0, 1, 3 }, { "getUTCMinutes", 0, 1, 4 }, { "getUTCSeconds", 0, 1, 5 }, \
+  { "getUTCMilliseconds", 0, 1, 6 }, { "getUTCDay", 0, 1, 7 }, \
+  { "getTime", 0, 2, 0 }, { "valueOf", 0, 2, 0 }, { "getTimezoneOffset", 0, 3, 0 }, \
+  { "setTime", 1, 4, 0 }, \
+  { "setFullYear", 3, 5, 0 }, { "setMonth", 2, 5, 1 }, { "setDate", 1, 5, 2 }, \
+  { "setHours", 4, 5, 3 }, { "setMinutes", 3, 5, 4 }, { "setSeconds", 2, 5, 5 }, \
+  { "setMilliseconds", 1, 5, 6 }, \
+  { "setUTCFullYear", 3, 6, 0 }, { "setUTCMonth", 2, 6, 1 }, { "setUTCDate", 1, 6, 2 }, \
+  { "setUTCHours", 4, 6, 3 }, { "setUTCMinutes", 3, 6, 4 }, { "setUTCSeconds", 2, 6, 5 }, \
+  { "setUTCMilliseconds", 1, 6, 6 }, \
+  { "toISOString", 0, 7, 0 }, { "toUTCString", 0, 7, 1 }, { "toDateString", 0, 7, 2 }, \
+  { "toJSON", 1, 8, 0 }, \
+  /* 这两格带括号里的时区**名字**，而三把尺子各说各话（node 给 ICU 长名、qjs 什么都不给、
+     C 的 %Z 给缩写）—— 半张对的表比一句响错坏，所以它们在这条腿上当场报。 */ \
+  { "toString", 0, 9, 0 }, { "toTimeString", 0, 9, 0 } }; \
 typedef int64_t (*omni_js_pm_find_t)(omni_str pr, omni_str nm, int64_t *argc); \
 typedef omni_dyn (*omni_js_pm_call_t)(int64_t ix, LT args, omni_dyn self); \
 static omni_js_pm_find_t omni_js_pm_find_ = NULL; \
@@ -1478,6 +1512,10 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       return omni_dyn_undef(); \
     } \
     default: { \
+      /* Date.prototype 上那一族（ADR-0020 P4）：一个 sel 段 + 表里的号，别的都在 date_m_ 里 */ \
+      if (n->sel >= OMNI_JS_DATE_SEL && n->sel < OMNI_JS_DATE_SEL + OMNI_JS_DATE_N) { \
+        return omni_js_date_m_(n->sel - OMNI_JS_DATE_SEL, self, args); \
+      } \
       /* 内建构造器当值调（`const A = Array; A(3)`）：只做得了这几格 —— Function / Map /
          Set / Date 的实参面这条腿上还没有，当场报（与 prelude 的 no() 一字不差）。 */ \
       if (n->sel >= OMNI_JS_CTOR_SEL) { \
@@ -1547,16 +1585,16 @@ static omni_dyn omni_js_nat_(int64_t sel, omni_dyn a) { \
 } \
 /* realm 上那几格原型。名字与 prelude 的 $js_realm_proto 那个 switch 一一对应；认不出来的
    名字**当场报**，不给一格空对象。 */ \
-static omni_dyn omni_js_realm_tbl_[24]; \
+static omni_dyn omni_js_realm_tbl_[25]; \
 static int omni_js_realm_ix_(omni_str name) { \
   /* Generator / Iterator 排在最后两格：生成器那一族（ADR-0020 P2）落在 C 上要它们 */ \
   /* 16..22 是异常那七族自己的原型（Error 本身是 ix 7）：八个构造器共用一格原型的话，
      它们往原型上写的 constructor 会互相盖掉 —— 与 prelude 的 r.errPs 一一对应。 */ \
-  static const char *names[24] = { "Object", "Function", "Array", "String", "Number", \
+  static const char *names[25] = { "Object", "Function", "Array", "String", "Number", \
     "Boolean", "Symbol", "Error", "RegExp", "Map", "Set", "Promise", "Generator", "Iterator", \
     "IteratorHelper", "ArrayIterator", \
     "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", \
-    "AggregateError", "AsyncGenerator" }; \
+    "AggregateError", "AsyncGenerator", "Date" }; \
   /* 上界按 sizeof 算：手写常数在加名字时漂过一次（表 24 格、循环只走 23，于是
      AsyncGenerator 那一格永远查不着） */ \
   for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) { \
@@ -1665,6 +1703,29 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
     omni_js_def_data_(ap, omni_js_sym_wk(omni_str_new("asyncIterator", 13)), \
                       omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
     return ap; \
+  } \
+  /* Date.prototype（ADR-0020 P4）：真对象，那四十格取值面加 [Symbol.toPrimitive] 都落到
+     同一个 date_m_（sel 从 OMNI_JS_DATE_SEL 起）。constructor 得**真坐一格**（prelude 的
+     mk 就是这么做的），否则 d.constructor 会一路走到 Object.prototype 上答成 Object。
+     先把表填上再叫 realm_ctor：那一格会回头要 Date.prototype，填过了就不打转。 */ \
+  if (ix == 24) { \
+    size_t di; \
+    omni_dyn dp = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Object", 6))); \
+    omni_js_realm_tbl_[24] = dp; \
+    for (di = 0; di < sizeof(omni_js_datem_) / sizeof(omni_js_datem_[0]); di++) { \
+      const char *dn = omni_js_datem_[di].nm; \
+      omni_js_def_data_(dp, omni_js_name_(dn, (int64_t)strlen(dn)), \
+                        omni_js_nat_(OMNI_JS_DATE_SEL + (int64_t)di, omni_dyn_undef()), \
+                        true, false, true); \
+    } \
+    /* 规范 21.4.4.45：Date 是唯一一个 default hint 走**串**的内建，所以 `"" + d` 与
+       `${d}` 都要它；"number" 那一格给毫秒，于是 d2 - d1 是个数。 */ \
+    omni_js_def_data_(dp, omni_js_sym_wk(omni_str_new("toPrimitive", 11)), \
+                      omni_js_nat_(OMNI_JS_DATE_SEL + 40, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(dp, omni_js_name_("constructor", 11), \
+                      omni_js_realm_ctor(omni_str_new("Date", 4)), true, false, true); \
+    return dp; \
   } \
   if (ix >= 16 && ix <= 22) { \
     omni_dyn ep = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Error", 5))); \
@@ -2196,6 +2257,120 @@ static omni_dyn omni_js_realm_ctor(omni_str name) { \
 } \
 /* x.constructor：就是一次普通的属性读（原型链上那一格 constructor）。真对象走槽表与链，
    别的按标签走它那格 realm 原型 —— 那儿的 get 陷阱认得 "constructor"。 */ \
+/* --- Date 那一族的对象面（ADR-0020 P4） --------------------------------------
+   $ms 是隐藏槽（不可枚举，而且在 omni_js_slot_ 那张闭表里，所以 getOwnPropertyNames
+   也看不见它）。算术全在 omni_js_date.c 里 —— 这儿只做"取槽、调那边、写回槽"。 */ \
+static double omni_js_date_ms_(omni_dyn t) { \
+  omni_dyn v = omni_dyn_undef(); \
+  if (t.tag == OMNI_DYN_OBJ) v = omni_js_getp(t, omni_js_name_("$ms", 3), t); \
+  if (v.tag != OMNI_DYN_REAL) { \
+    /* 取到的不是数就说明接收者不是这一族的对象 —— 报一句，别悄悄算出 NaN
+       （与 prelude 的 $js_date_ms 一字不差）。 */ \
+    omni_js_type_err_c("this is not a Date"); \
+    return (double)NAN; \
+  } \
+  return v.u.r; \
+} \
+/* 一格实参照 ToNumber 再截断（prelude 里就是 Math.trunc($js_real($js_num_of(v)))）。 */ \
+static double omni_js_date_arg_(omni_dyn v) { \
+  omni_dyn n = omni_js_num_of(v); \
+  double x = n.tag == OMNI_DYN_REAL ? n.u.r \
+           : n.tag == OMNI_DYN_INT ? (double)n.u.i \
+           : n.tag == OMNI_DYN_UINT ? (double)omni_dyn_u64(n) : (double)NAN; \
+  return isfinite(x) ? trunc(x) : (double)NAN; \
+} \
+static void omni_js_date_put_(omni_dyn self, double ms) { \
+  omni_js_setp(self, omni_js_name_("$ms", 3), omni_dyn_of_real(ms), self); \
+} \
+static omni_dyn omni_js_date_m_(int64_t ix, omni_dyn self, LT args) { \
+  const struct omni_js_datem_s *m; \
+  double t; \
+  omni_dyn a0 = args != NULL && args->len > 0 ? args->items[0] : omni_dyn_undef(); \
+  if (ix == 40) { \
+    /* [Symbol.toPrimitive]：数值口径给毫秒（于是 d2 - d1 是个数），串与默认口径都要
+       toString —— 那一格在这条腿上过不去，所以照实报，不给半个答案。 */ \
+    t = omni_js_date_ms_(self); \
+    if (omni_js_pending()) return omni_dyn_undef(); \
+    if (a0.tag == OMNI_DYN_STR16) { \
+      omni_str h = omni_s16_to_utf8(a0.u.s16); \
+      if (h.len == 6 && memcmp(h.p, "number", 6) == 0) return omni_dyn_of_real(t); \
+    } \
+    omni_errorf("backend-c: 把 Date 转成串（String(d) / \"\" + d / `${d}`）要 " \
+                "Date.prototype.toString，而那一格括号里的时区名字三把尺子各说各话" \
+                "（ADR-0020 P4）；请改用 toISOString() / getTime()，或走 --backend js 或解释器"); \
+    return omni_dyn_undef(); \
+  } \
+  m = &omni_js_datem_[ix]; \
+  t = omni_js_date_ms_(self); \
+  if (omni_js_pending()) return omni_dyn_undef(); \
+  switch (m->kind) { \
+    case 0: return omni_dyn_of_real(omni_js_date_field_d(t, m->arg, false)); \
+    case 1: return omni_dyn_of_real(omni_js_date_field_d(t, m->arg, true)); \
+    case 2: return omni_dyn_of_real(t); \
+    case 3: return omni_dyn_of_real(omni_js_date_tzoff_d(t)); \
+    case 4: { \
+      double ms = omni_js_date_arg_(a0); \
+      ms = !isfinite(ms) || fabs(ms) > 8.64e15 ? (double)NAN : trunc(ms) + 0.0; \
+      omni_js_date_put_(self, ms); \
+      return omni_dyn_of_real(ms); \
+    } \
+    case 5: case 6: { \
+      bool utc = m->kind == 6; \
+      double f[7], base = t, ms; \
+      bool bu = utc; \
+      int k; \
+      if (!isfinite(t)) { \
+        /* 规范 21.4.4.21 / .31：只有 setFullYear / setUTCFullYear 在无效日期上活得过来
+           （把 t 当 +0，而且**不**先转本地）；别的那一族第 3 步就交 NaN 了。 */ \
+        if (m->arg != 0) return omni_dyn_of_real((double)NAN); \
+        base = 0.0; \
+        bu = true; \
+      } \
+      for (k = 0; k < 7; k++) f[k] = omni_js_date_field_d(base, k, bu); \
+      for (k = 0; k < (int)m->argc; k++) { \
+        omni_dyn av = args != NULL && args->len > (int64_t)k \
+                    ? args->items[k] : omni_dyn_undef(); \
+        if (av.tag == OMNI_DYN_UNDEF) break; \
+        f[m->arg + k] = omni_js_date_arg_(av); \
+      } \
+      ms = omni_js_date_make_d(f, utc); \
+      omni_js_date_put_(self, ms); \
+      return omni_dyn_of_real(ms); \
+    } \
+    case 7: \
+      /* 无效日期上 toISOString 是 RangeError（规范 21.4.4.36 第 3 步），能 catch；
+         toUTCString / toDateString 那两格照规范给 "Invalid Date"。 */ \
+      if (m->arg == 0 && !isfinite(t)) { \
+        omni_js_range_err_c("Invalid time value"); \
+        return omni_dyn_undef(); \
+      } \
+      return omni_js_date_fmt(t, m->arg); \
+    case 8: \
+      /* toJSON（规范 21.4.4.37 第 3 步）：无效日期交 null，**不**抛 */ \
+      return isfinite(t) ? omni_js_date_fmt(t, 0) : omni_dyn_null(); \
+    default: \
+      omni_errorf("backend-c: Date.prototype.%s —— 括号里那个时区**名字**三把尺子各说各话" \
+                  "（node 给 ICU 长名、qjs 什么都不给、C 的 %%Z 给缩写），半张对的表比一句" \
+                  "响错坏，所以这一格在这条腿上不给答案（ADR-0020 P4）；" \
+                  "请改用 toISOString() / toUTCString()，或走 --backend js 或解释器", m->nm); \
+      return omni_dyn_undef(); \
+  } \
+} \
+/* new Date(v)：v 是串就解析（规范 21.4.2.1 第 4 步），别的先 ToNumber 再 TimeClip。
+   实参那七格的形态由降级器摊成 js_date_parts，交到这儿时已经是一个毫秒数了。 */ \
+static omni_dyn omni_js_date_new(omni_dyn v) { \
+  double ms; \
+  omni_dyn o; \
+  if (v.tag == OMNI_DYN_STR16) { \
+    ms = omni_js_date_parse(v).u.r; \
+  } else { \
+    ms = omni_js_date_arg_(v); \
+    ms = !isfinite(ms) || fabs(ms) > 8.64e15 ? (double)NAN : ms + 0.0; \
+  } \
+  o = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Date", 4))); \
+  omni_js_def_data_(o, omni_js_name_("$ms", 3), omni_dyn_of_real(ms), true, false, true); \
+  return o; \
+} \
 static omni_dyn omni_js_ctor_get(omni_dyn o) { \
   /* omni_js_s16_lit 住在 JSON 段（它排在这一段后头），所以这儿自己造那格名字 */ \
   omni_dyn ck = omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("constructor", 11))); \
