@@ -352,6 +352,8 @@ class Lower {
     this.globals = new Map();
     /** 正在降级第几句顶层语句（TDZ 的静态判据要它；不在顶层时是 null） */
     this.topIdx = null;
+    /** 带标签模板的站点计数（每个站点一格模块级的槽，见 template） */
+    this.tplSites = 0;
     /** 顶层函数声明：名字 -> mangled。互相递归靠的就是先收一遍再降级 */
     this.topFns = new Map();
     /** 顶层函数的形参个数（fn.length 要它；topFnValue 那边已经看不到形参表） */
@@ -2352,13 +2354,24 @@ class Lower {
       /* 一般的带标签模板（ADR-0020 P3）：`t\`a${x}\`` 就是 `t(strings, x)`，其中 strings
        * 是那几段字面量的数组、身上再挂一格 `raw`（原文那一份）。数组身上挂属性这个值域
        * 支持（js_obj_set 对 list 走旁表），所以不必为它新造一种值。
-       * 每次求值都新造一个 strings —— 规范里同一处模板站点该复用同一个数组（用它当
-       * WeakMap 键的库会看出差别），那一格记在 ADR-0020，等模板站点缓存那一片。 */
-      const strings = op('js_obj_set', [
-        arrLit(e.quasis.map((q) => s16(q.cooked))),
-        s16('raw'),
-        arrLit(e.quasis.map((q) => s16(q.raw))),
-      ]);
+       *
+       * 同一处模板站点复用**同一格** strings（规范 13.2.8.4 的模板缓存）：拿它当 WeakMap
+       * 键的库（lit-html / graphql-tag 那一类）靠的就是这个身份 —— 每次新造一格的话缓存
+       * 永远打不中，而且 `t\`x\` === t\`x\`` 静静地为假。做法是给每个站点配一格模块级的槽，
+       * **第一次求值时**才装（不是在 main 开头装：站点可能在别的全局初始化的过程中被跑到）。
+       * 键用 `@tpl<n>`（不是合法的 JS 标识符，撞不上用户的名字）。 */
+      const key = `@tpl${this.tplSites++}`;
+      if (!this.globals.has(key)) this.globals.set(key, { name: cSafe(key) });
+      const slot = () => globalRef(this.globals.get(key).name);
+      const strings = ternary(
+        boolOp('js_eq', [slot(), undefExpr()], { strict: true }),
+        assign(slot(), op('js_obj_set', [
+          arrLit(e.quasis.map((q) => s16(q.cooked))),
+          s16('raw'),
+          arrLit(e.quasis.map((q) => s16(q.raw))),
+        ])),
+        slot(),
+      );
       const items = [strings, ...this.seq(e.exprs, (x) => this.expr(x))];
       const argl = box({ kind: 'ListLit', type: listType(D), items }, listType(D));
       if (e.tag.type === 'Member' && !this.staticPath(e.tag)) {
