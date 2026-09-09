@@ -70,6 +70,26 @@ static omni_dyn omni_js_fn_proto_(omni_dyn f); \
 static omni_dyn omni_js_obj_keys(omni_dyn o); \
 static omni_dyn omni_js_realm_proto(omni_str name); \
 static omni_dyn omni_js_proto_of_tag_(omni_dyn v); \
+/* 原生函数值（realm 上那些成员、以及 f.call / f.apply）：造一格与按 sel 分派 */ \
+struct omni_js_nat_s { omni_fnptr fp; int64_t sel; omni_dyn a; }; \
+static omni_dyn omni_js_nat_(int64_t sel, omni_dyn a); \
+static omni_dyn omni_js_nat_call_(omni_fn me, LT args); \
+/* 原生的名字与形参个数（sel 一格一行）。JS 那条腿上它们是 $nat(name, len, …) 里那两格，
+   这儿按 sel 查 —— 一格都不能少，少了 `f.call.name` 会静静地给空串。 */ \
+static const char *omni_js_nat_name_(int64_t sel, int64_t *len) { \
+  switch (sel) { \
+    case 1: *len = 0; return "toString"; \
+    case 2: *len = 0; return "toLocaleString"; \
+    case 3: *len = 0; return "valueOf"; \
+    case 4: *len = 1; return "hasOwnProperty"; \
+    case 5: *len = 1; return "isPrototypeOf"; \
+    case 6: *len = 1; return "propertyIsEnumerable"; \
+    case 8: *len = 1; return "call"; \
+    case 9: *len = 2; return "apply"; \
+    case 11: *len = 1; return "bind"; \
+    default: *len = 0; return ""; \
+  } \
+} \
 static omni_dyn omni_js_obj_new(void) { return omni_js_dict_wrap(DT##_new()); } \
 /* JS 里数组也是对象，身上可以挂字段（asy 前端的 do-while 就往那一格更新列表上挂一个 dw）。
    这个值域里 list 只是一段 items/len、没有属性槽，所以额外属性放在一张**按同一性索引的
@@ -243,12 +263,41 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   if (o.tag == OMNI_DYN_FN \
       && ((key.len == 4 && memcmp(key.p, "name", 4) == 0) \
           || (key.len == 6 && memcmp(key.p, "length", 6) == 0))) { \
-    const omni_js_fn_meta *fm = omni_js_fnmeta_find((const void *)omni_fn_ck((omni_fn)o.u.ref)->fp); \
+    omni_fnptr fp = omni_fn_ck((omni_fn)o.u.ref)->fp; \
+    /* 原生的那些（realm 的成员、call / apply）按 sel 查名字：它们共用一个 fp，
+       所以那张按 fp 索引的表认不出来 —— 少这一支 `f.call.name` 会静静地给空串。 */ \
+    if (fp == (omni_fnptr)omni_js_nat_call_) { \
+      struct omni_js_nat_s *nn_ = (struct omni_js_nat_s *)o.u.ref; \
+      /* bind 出来的那一格：名字与形参个数是每一格自己的，存在载荷 list 的第 2 / 3 格 */ \
+      if (nn_->sel == 10) { \
+        LT bp = (LT)nn_->a.u.ref; \
+        return key.len == 6 ? bp->items[3] : bp->items[2]; \
+      } \
+      int64_t nl = 0; \
+      const char *nn = omni_js_nat_name_(((struct omni_js_nat_s *)o.u.ref)->sel, &nl); \
+      if (key.len == 6) return omni_dyn_of_real((double)nl); \
+      return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new(nn, (int64_t)strlen(nn)))); \
+    } \
+    const omni_js_fn_meta *fm = omni_js_fnmeta_find((const void *)fp); \
     if (key.len == 4) { \
       omni_str nm = fm == NULL ? omni_str_new("", 0) : omni_str_new(fm->nm, fm->nmlen); \
       return omni_dyn_of_s16(omni_s16_of_utf8(nm)); \
     } \
     return omni_dyn_of_real(fm == NULL ? 0.0 : (double)fm->len); \
+  } \
+  /* f.call / f.apply：一格捕获了目标函数的原生（sel 8 / 9）。接收者走 this 那格槽，
+     与别的调用一个路子（omni_js_call_this）。bind 还没有 —— 它的 name 是
+     "bound " + 目标的名字，那要把名字存进载荷里，等下一刀。 */ \
+  if (o.tag == OMNI_DYN_FN \
+      && ((key.len == 4 && memcmp(key.p, "call", 4) == 0) \
+          || (key.len == 5 && memcmp(key.p, "apply", 5) == 0))) { \
+    return omni_js_nat_(key.len == 4 ? 8 : 9, o); \
+  } \
+  /* f.bind：sel 10，载荷是一格 list `[目标, this, 名字, 形参个数, …预置的实参]` ——
+     名字与个数是**每一格自己的**（"bound f" / max(0, len - 预置个数)），所以不能像别的
+     原生那样按 sel 查一张静态表，得存进载荷里。 */ \
+  if (o.tag == OMNI_DYN_FN && key.len == 4 && memcmp(key.p, "bind", 4) == 0) { \
+    return omni_js_nat_(11, o); \
   } \
   /* 真对象走槽表 + 原型链（ADR-0020 P1-c）：`o.x` 与 `o["x"]` 是同一条路 */ \
   if (o.tag == OMNI_DYN_OBJ) { \
@@ -878,7 +927,6 @@ static omni_dyn omni_js_iter_o_(omni_dyn v) { \
 
    原生函数值：闭包记录就是 `{ omni_fnptr fp; …捕获的 }`（见 omni_js_wrap_s），所以这儿一格
    `{ fp, sel, a }` 的记录 + 一个按 sel 分派的入口就够了。接收者走 this 那格槽（读一次就清）。 */ \
-struct omni_js_nat_s { omni_fnptr fp; int64_t sel; omni_dyn a; }; \
 static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
   struct omni_js_nat_s *n = (struct omni_js_nat_s *)me; \
   omni_dyn self = omni_js_this_take(); \
@@ -907,6 +955,44 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       DT ps = omni_js_ps_(self); \
       int64_t e = DT##_find(ps, omni_js_pkey_(a0)); \
       return omni_dyn_of_bool(e >= 0 && ((LT)ps->vals[e].u.ref)->items[5].u.b); \
+    } \
+    case 8: {                                           /* f.call(thisArg, …) */ \
+      LT rest = LT##_new(); \
+      for (int64_t i = 1; args != NULL && i < args->len; i++) LT##_push(rest, args->items[i]); \
+      return omni_js_call_this(n->a, a0, omni_js_arr_wrap(rest)); \
+    } \
+    case 9: {                                           /* f.apply(thisArg, argsArray) */ \
+      omni_dyn a1 = args != NULL && args->len > 1 ? args->items[1] : omni_dyn_undef(); \
+      if (a1.tag == OMNI_DYN_UNDEF || a1.tag == OMNI_DYN_NULL) { \
+        return omni_js_call_this(n->a, a0, omni_js_arr_wrap(LT##_new())); \
+      } \
+      if (a1.tag != OMNI_DYN_LIST) { \
+        omni_js_type_err_c("apply expects an array of arguments"); \
+        return omni_dyn_undef(); \
+      } \
+      return omni_js_call_this(n->a, a0, a1); \
+    } \
+    case 10: {                                          /* bind 出来的那一格：预置实参 + 定住的 this */ \
+      LT bp = (LT)n->a.u.ref; \
+      LT all = LT##_new(); \
+      for (int64_t i = 4; i < bp->len; i++) LT##_push(all, bp->items[i]); \
+      for (int64_t i = 0; args != NULL && i < args->len; i++) LT##_push(all, args->items[i]); \
+      return omni_js_call_this(bp->items[0], bp->items[1], omni_js_arr_wrap(all)); \
+    } \
+    case 11: {                                          /* f.bind(thisArg, …预置) */ \
+      int64_t pre = args == NULL || args->len == 0 ? 0 : args->len - 1; \
+      omni_dyn tn = omni_js_obj_getk(n->a, omni_str_new("name", 4)); \
+      omni_dyn tl = omni_js_obj_getk(n->a, omni_str_new("length", 6)); \
+      double left = (tl.tag == OMNI_DYN_REAL ? tl.u.r : 0.0) - (double)pre; \
+      if (left < 0.0) left = 0.0; \
+      LT bp = LT##_new(); \
+      LT##_push(bp, n->a); \
+      LT##_push(bp, a0); \
+      LT##_push(bp, omni_dyn_of_s16(omni_s16_cat(omni_s16_of_utf8(omni_str_new("bound ", 6)), \
+                                                 omni_js_as_s16(tn)))); \
+      LT##_push(bp, omni_dyn_of_real(left)); \
+      for (int64_t i = 1; args != NULL && i < args->len; i++) LT##_push(bp, args->items[i]); \
+      return omni_js_nat_(10, omni_js_arr_wrap(bp)); \
     } \
     default: {                                          /* 别的原型上的 get 陷阱 */ \
       omni_str nm = omni_s16_to_utf8(omni_js_as_s16(n->a)); \
