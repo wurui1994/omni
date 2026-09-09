@@ -2641,10 +2641,16 @@ class Lower {
      * 它前面那些格先落进临时量。量出来的静默分叉：
      * `[b.splice(1,1).length, b.join(",")]` 里 join 跑在了 splice 前面。 */
     const vals = this.seq(e.elements, (el) => {
-      // 洞（`[1,,3]`）：这个值域里没有"稀疏数组"那一格，所以洞就是 undefined。
-      // 与 JS 的差别只剩 `1 in [1,,3]`（那边是 false，我们是 true）—— 记在 ADR-0020，
-      // 等真数组对象那一片（P4 的 TypedArray/Array exotic）再对齐。
-      if (el === null) return undefExpr();
+      /* 洞（`[1,,3]`）**当场报**。这个值域里的 list 是一排稠密的 dyn，表达不出洞，而洞
+       * 与 undefined 只对得上一半：从前这儿悄悄填 undefined，于是 `1 in [1,,3]` 给 true
+       * （qjs 是 false）、`forEach` 会走进那一格、`Object.keys` 也多列一个 "1" ——
+       * 三处都是**悄悄的错答案**（从前的注只记了 `in` 那一格，量下来不止）。
+       * 与 `delete a[i]` 那一格同一条判据、同一个理由：不假装做到了。
+       * 真想要一格 undefined 就写出来。 */
+      if (el === null) {
+        this.err(e.span, 'a hole in an array literal cannot be represented; write undefined instead');
+        return undefExpr();
+      }
       if (el.type === 'Spread') return this.guarded(op('js_iter', [this.expr(el.arg)]));
       return this.expr(el);
     });
