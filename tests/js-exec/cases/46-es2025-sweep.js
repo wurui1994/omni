@@ -1,12 +1,11 @@
 // 常写的 ES2020..ES2025 面各一小段，一次量六族（数值与串、对象与属性、类、解构与展开、
 // 可选链与逻辑赋值、标签模板与正则）。这一格不是为某个新功能加的 —— 是**扫**出来的：
 // 五条腿逐字节相同、并且与 qjs 也逐字节相同。它钉住的是"别人改动别处时不要悄悄弄坏这些"。
-// 唯一从这份扫描里被摘掉的一行是 "ß".toUpperCase()：整张 Unicode 大小写表还没有，
-// 那一格是**响错**（ADR-0020 的"要么整张表要么拒掉"），不是静静的错答案。
+// 当年从这份扫描里摘掉的那一行（"ß".toUpperCase()）现在放回来了：整张大小写表落地了。
 // 1 数值与串
 console.log((1234.5678).toFixed(2), (0.000001234).toExponential(3), (255).toString(16));
 console.log("abc".at(-1), "abc".padEnd(5, "*"), "a-b-c".replaceAll("-", "+"));
-console.log([..."héllo"].length, "abc".toUpperCase(), "ABC".toLowerCase());
+console.log([..."héllo"].length, "ß".toUpperCase(), "İ".toLowerCase().length);
 console.log(Number("0x1f"), Number(""), Number("  12  "), parseInt("08"), parseFloat(".5e1"));
 console.log(0.1 + 0.2, 1e21, 1e-7, (-0).toString(), Object.is(-0, 0));
 // 2 对象与属性
