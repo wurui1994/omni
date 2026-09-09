@@ -169,6 +169,10 @@ static omni_dyn omni_js_str_split(omni_dyn sd, omni_dyn sepd, omni_dyn limitd) {
     LT##_push(out, omni_dyn_of_s16(s)); \
     return omni_js_arr_wrap(out); \
   } \
+  /* 运行期的正则（new RegExp(...) 存进变量再用）：转给正则那一支，与 replace 同办法 */ \
+  if (sepd.tag == OMNI_DYN_RE) { \
+    return omni_js_re_split(omni_js_re_source(sepd), omni_js_re_flags(sepd), sd, limitd); \
+  } \
   omni_s16 sep = omni_js_as_s16(sepd); \
   /* limit 是结果长度的**上界**（规范 22.1.3.23）；缺席或负数就是不限 */ \
   int64_t lim = (limitd.tag == OMNI_DYN_UNDEF) ? -1 : omni_js_arr_i(limitd); \

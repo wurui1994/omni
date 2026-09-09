@@ -1790,6 +1790,8 @@ function $js_arr_values(a) { return $js_arr_of(a).slice(); }
 function $js_str_split(s, sep, limit) {
   const v = $js_asS16(s);
   if (sep === undefined) return [v];
+  // 运行期的正则（new RegExp(...) 存进变量再用）：转给正则那一支，与 $js_str_replace 同办法
+  if ($dynTag(sep) === "regexp") return $js_re_split($js_re_source(sep), $js_re_flags(sep), s, limit);
   const p = $js_asS16(sep);
   const parts = p.length === 0 ? [...v.split("")] : v.split(p);
   if (limit === undefined) return parts;

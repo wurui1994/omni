@@ -31,3 +31,8 @@ console.log(`src ${new RegExp("a/b").test("a/b")} ${new RegExp(new RegExp("a/b")
 const cp = new RegExp(/a\/b/i);
 console.log(`cp ${cp.source} ${cp.flags} ${cp.test("XA/B")} ${new RegExp(/a/g, "").flags === ""}`);
 console.log(`cp ${new RegExp().source} ${new RegExp(undefined).source} ${new RegExp(null).source}`);
+
+// split 收运行期的正则：转给正则那一支（从前 C 那腿撞在 "regexp is not a string" 上）
+const sp = new RegExp("[-_]", "g");
+console.log(`sp ${"a-b_c".split(sp).join("|")} ${"a-b_c".split(new RegExp("(-)")).join("|")}`);
+console.log(`sp ${"a-b-c".split(sp, 2).join("|")} ${"abc".split(new RegExp("z")).join("|")}`);

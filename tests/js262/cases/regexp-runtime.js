@@ -26,3 +26,8 @@ console.log(JSON.stringify(cp.source), cp.flags, cp.test("xa/b"));
 console.log(JSON.stringify(new RegExp(/a/g, "m").flags), JSON.stringify(new RegExp(/a/g).flags));
 // 模式缺席是空模式，不是 "undefined"；null 照 ToString 走
 console.log(new RegExp().source, new RegExp(undefined).source, new RegExp(null).source);
+// split 收运行期的正则：转给正则那一支（从前撞在 "regexp is not a string" 上）
+const sp = new RegExp("[-_]", "g");
+console.log("a-b_c".split(sp).join("|"), "a-b_c".split(new RegExp("(-)")).join("|"));
+console.log("a1b".split(/(\d)/).join("|"), "x".split(new RegExp("")).length);
+console.log("a-b-c".split(sp, 2).join("|"), "abc".split(new RegExp("z")).join("|"));
