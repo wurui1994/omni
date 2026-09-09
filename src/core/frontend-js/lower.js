@@ -150,6 +150,14 @@ function nestedFns(node, out = []) {
     out.push(node);
     return out;
   }
+  /* 类的**字段初始化式**也算："`#n = start` 里那句表达式是在 `$init` 那格闭包里跑的"
+   * （classInitClosure），所以 start 是被内层引用的名字，外层得给它装 cell。
+   * 漏掉它就是 "unresolved identifier 'start'" —— 量出来的：
+   * `function f(start) { class C { #n = start; … } }`。 */
+  if (node.kind === 'field' && node.value) {
+    out.push(node);
+    return out;
+  }
   eachChild(node, (x) => nestedFns(x, out));
   return out;
 }
@@ -757,6 +765,16 @@ class Lower {
     const scope = this.fn.scopes[this.fn.scopes.length - 1];
     const out = [];
     for (const s of bodyStmts) {
+      /* 块里 / 体里的类声明也是一格 let 绑定（见 stmt 的 ClassDecl 那一支），而且**必须**
+         走这条路：方法体里的 `new Point(…)` 捕获的就是这个名字，按值捕获会在类值还没装进去
+         之前就取一次 —— 量出来的是 "Cannot access 'v_Point' before initialization"。 */
+      if (s.type === 'ClassDecl' && typeof s.id === 'string') {
+        if (!this.fn.captured.has(s.id) || scope.has(s.id)) continue;
+        const ent = this.declare(s.id);
+        ent.pre = true;
+        out.push(localStmt(ent.name, arrLit([undefExpr()])));
+        continue;
+      }
       // 只管 let / const：var 是函数作用域的，它那一格由 hoistVars（或 main 的全局槽）立
       if (s.type !== 'VarDecl' || s.kind === 'var') continue;
       for (const d of s.decls) {
@@ -1101,7 +1119,7 @@ class Lower {
    */
   classExpr(e) {
     if (e.superClass) {
-      this.err(e.span, "'extends' in a class expression is not supported; declare the class");
+      this.err(e.span, "'extends' is only supported for a class declared at the top level of a module");
       return undefExpr();
     }
     const name = e.id ?? '';
@@ -1498,8 +1516,21 @@ class Lower {
         if (this.classes.get(s.id)?.node === s) {
           return this.classes.get(s.id).isError ? [] : this.classProtoStmts(s);
         }
-        this.err(s.span, 'a class declaration is only supported at the top level of a module');
-        return [];
+        /* 函数体里 / 块里的类声明。规范里它就是一格 let 绑定加一格类值（14.7.14 的
+         * ClassDeclaration: BindingClassDeclarationEvaluation），所以照这个意思降：
+         * `class A { … }` ≡ `let A = class A { … }`，值那一边走 classExpr 那条现成的路。
+         * 从前这儿一律当场报"只支持模块顶层" —— 而函数里放一个小类是再普通不过的 JS。
+         * `extends` 还是不收：那要父类的原型对象与 $init，而那两格只对"这个文件里声明过的类"
+         * 存在（classExpr 里同一条边界）。 */
+        return this.varDecl({
+          type: 'VarDecl',
+          kind: 'let',
+          decls: [{
+            id: { type: 'Ident', name: s.id, span: s.span },
+            init: { type: 'ClassExpr', id: s.id, superClass: s.superClass, members: s.members, span: s.span },
+          }],
+          span: s.span,
+        });
       case 'ImportDecl': case 'ExportNamed': case 'ExportDefault': case 'ExportDecl':
         return [];   // collectTop 已经报过了
       default:

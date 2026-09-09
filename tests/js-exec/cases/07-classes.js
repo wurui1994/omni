@@ -150,3 +150,34 @@ console.log(String(xs.push()));
 console.log(String(xs.push(...[2, 3])));
 console.log(String(xs.push(4, 5)));
 console.log(xs.join(","));
+
+// 函数体里 / 块里的类声明（规范 14.7.14 就是一格 let 绑定加一格类值）。方法体里引用类名
+// 那一格靠 preCells 先立的 cell —— 按值捕获会在类值装进去之前取一次。
+function mkPoint(n) {
+  class Point {
+    constructor(x, y) { this.x = x; this.y = y; }
+    get sum() { return this.x + this.y; }
+    scale(k) { return new Point(this.x * k, this.y * k); }
+    static origin() { return new Point(0, 0); }
+    toString() { return "(" + this.x + "," + this.y + ")"; }
+  }
+  const p = new Point(n, n + 1);
+  return [String(p), String(p.sum), String(p.scale(2)), String(Point.origin()), String(p instanceof Point)].join(" ");
+}
+console.log(mkPoint(1));
+console.log(mkPoint(10));
+// 每次求值都是一格新的类
+function classOf() { class A { m() { return 1; } } return A; }
+const A1 = classOf(), A2 = classOf();
+console.log(String(A1 === A2), String(new A1() instanceof A1), String(new A1() instanceof A2));
+{
+  class B { v() { return "b"; } }
+  console.log(new B().v());
+}
+// 捕获外层局部 + 私有字段
+function counterClass(start) {
+  class C { #n = start; bump() { this.#n += 1; return this.#n; } }
+  const c = new C();
+  return c.bump() + "," + c.bump();
+}
+console.log(counterClass(5));
