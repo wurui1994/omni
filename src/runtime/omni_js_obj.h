@@ -94,6 +94,9 @@ static bool omni_js_prom_is_(omni_dyn v); \
 static omni_dyn omni_js_prom_react_(omni_dyn p, omni_dyn f, omni_dyn r); \
 static void omni_js_prom_settle_(omni_dyn p, int64_t st, omni_dyn val); \
 static void omni_js_async_tick_(omni_dyn p, omni_dyn step, omni_dyn v, int64_t mode); \
+/* Promise.resolve(v)：for await 那两格（aiter 的 next 与包元素那格处理器）要它，
+   而它排在这一段后头。 */ \
+static omni_dyn omni_js_promise_resolved(omni_dyn v); \
 static LT omni_js_prom_slot_(omni_dyn p, const char *nm, int64_t n); \
 static void omni_js_comb_dec_(LT st); \
 static omni_dyn omni_js_agg_err_(omni_dyn errs); \
@@ -106,6 +109,10 @@ static omni_dyn omni_js_it_val_(omni_dyn r); \
 static int64_t omni_js_it_count_(omni_dyn n, const char *who); \
 static omni_dyn omni_js_it_help_(int64_t kind, omni_dyn up, omni_dyn fn, int64_t n); \
 static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode); \
+/* async 生成器（ADR-0020 P2）：那格递归的 tick 在这条腿上是带载荷的原生（sel 49 / 50），
+   所以两格都排在 nat_call_ 之后、这儿先声明。 */ \
+static void omni_js_agen_tick_(omni_dyn g, omni_dyn p, omni_dyn v, int64_t mode); \
+static omni_dyn omni_js_agen_step_(omni_dyn g, omni_dyn v, int64_t mode); \
 /* 函数值的 prototype 那张按同一性索引的旁表（$FNPROTO 的孪生）：realm_ctor 要往里预先坐一格，
    而它排在 fn_proto_ 前头，所以表在这儿声明。 */ \
 static DT omni_js_fnproto_tbl_; \
@@ -758,11 +765,12 @@ static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k) { \
 /* 运行时自己的内部槽名（ADR-0011 决策 15 的 $cls，加上 ADR-0020 P2 那几族）。一张封闭表，
    与 prelude 的 $JS_SLOTS 逐字对应。 */ \
 static bool omni_js_slot_(omni_dyn k) { \
-  static const char *nms[23] = { "$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src", \
+  static const char *nms[25] = { "$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src", \
     "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v", \
-    "$nx", "$hu", "$hs" }; \
+    "$nx", "$hu", "$hs", "$asrc", "$aix" }; \
   if (k.tag != OMNI_DYN_STR16) return false; \
-  for (int i = 0; i < 23; i++) { \
+  /* 上界按 sizeof 算：从前是手写的常数，加名字时漂过一次（表 25 格、循环只走 24） */ \
+  for (size_t i = 0; i < sizeof(nms) / sizeof(nms[0]); i++) { \
     if (omni_s16_eq(k.u.s16, omni_s16_of_utf8(omni_str_new(nms[i], (int64_t)strlen(nms[i]))))) { \
       return true; \
     } \
@@ -1328,6 +1336,40 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       } \
       return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
     } \
+    case 56: {                                          /* 同步串包成异步迭代器的 next */ \
+      LT sl = omni_js_prom_slot_(self, "$asrc", 5); \
+      LT ix = omni_js_prom_slot_(self, "$aix", 4); \
+      LT xs = (LT)sl->items[0].u.ref; \
+      int64_t i = (int64_t)ix->items[0].u.r; \
+      omni_dyn x; \
+      if (xs == NULL || i >= xs->len) { \
+        return omni_js_promise_resolved(omni_js_gen_res(omni_dyn_undef(), \
+                                                       omni_dyn_of_bool(true))); \
+      } \
+      x = xs->items[i]; \
+      ix->items[0] = omni_dyn_of_real((double)(i + 1)); \
+      return omni_js_prom_react_(omni_js_promise_resolved(x), \
+                                 omni_js_nat_(57, omni_dyn_undef()), omni_dyn_undef()); \
+    } \
+    case 57: return omni_js_gen_res(a0, omni_dyn_of_bool(false)); \
+    case 49: case 50: {                                 /* agen：await 回来接着走 */ \
+      LT pay = (LT)n->a.u.ref; \
+      omni_js_agen_tick_(pay->items[0], pay->items[1], a0, n->sel == 49 ? 0 : 2); \
+      return omni_dyn_undef(); \
+    } \
+    case 51: {                                          /* agen：让出去的值 await 过了 */ \
+      LT pay = (LT)n->a.u.ref; \
+      omni_js_prom_settle_(pay->items[1], 1, omni_js_gen_res(a0, omni_dyn_of_bool(false))); \
+      return omni_dyn_undef(); \
+    } \
+    case 52: {                                          /* agen：让出去的那格被拒了 */ \
+      LT pay = (LT)n->a.u.ref; \
+      omni_js_prom_slot_(pay->items[0], "$gst", 4)->items[0] = omni_dyn_of_real(2.0); \
+      omni_js_prom_settle_(pay->items[1], 2, a0); \
+      return omni_dyn_undef(); \
+    } \
+    case 53: case 54: case 55:                          /* agen 的 next / return / throw */ \
+      return omni_js_agen_step_(self, a0, n->sel - 53); \
     case 24: {                                          /* p.then(f, r) */ \
       omni_dyn a1t = args != NULL && args->len > 1 ? args->items[1] : omni_dyn_undef(); \
       return omni_js_prom_react_(self, a0, a1t); \
@@ -1505,19 +1547,21 @@ static omni_dyn omni_js_nat_(int64_t sel, omni_dyn a) { \
 } \
 /* realm 上那几格原型。名字与 prelude 的 $js_realm_proto 那个 switch 一一对应；认不出来的
    名字**当场报**，不给一格空对象。 */ \
-static omni_dyn omni_js_realm_tbl_[23]; \
+static omni_dyn omni_js_realm_tbl_[24]; \
 static int omni_js_realm_ix_(omni_str name) { \
   /* Generator / Iterator 排在最后两格：生成器那一族（ADR-0020 P2）落在 C 上要它们 */ \
   /* 16..22 是异常那七族自己的原型（Error 本身是 ix 7）：八个构造器共用一格原型的话，
      它们往原型上写的 constructor 会互相盖掉 —— 与 prelude 的 r.errPs 一一对应。 */ \
-  static const char *names[23] = { "Object", "Function", "Array", "String", "Number", \
+  static const char *names[24] = { "Object", "Function", "Array", "String", "Number", \
     "Boolean", "Symbol", "Error", "RegExp", "Map", "Set", "Promise", "Generator", "Iterator", \
     "IteratorHelper", "ArrayIterator", \
     "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", \
-    "AggregateError" }; \
-  for (int i = 0; i < 23; i++) { \
+    "AggregateError", "AsyncGenerator" }; \
+  /* 上界按 sizeof 算：手写常数在加名字时漂过一次（表 24 格、循环只走 23，于是
+     AsyncGenerator 那一格永远查不着） */ \
+  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) { \
     int64_t n = (int64_t)strlen(names[i]); \
-    if (name.len == n && memcmp(name.p, names[i], (size_t)n) == 0) return i; \
+    if (name.len == n && memcmp(name.p, names[i], (size_t)n) == 0) return (int)i; \
   } \
   return -1; \
 } \
@@ -1607,7 +1651,22 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
      不是住在每格迭代器对象自己身上）。从前那两格是**自有**属性，于是
      Object.getOwnPropertyNames(it.map(f)) 多两格，而 node 给 [] —— 静默的分叉。
      两格的原型都是 Iterator.prototype，于是 helper 上还能接着串 helper。 */ \
-  if (ix >= 16) { \
+  /* AsyncGenerator.prototype（ADR-0020 P2）：真对象，三格原生 next / return / throw 都落到
+     agen_step（mode 0 / 1 / 2），再加一格 [Symbol.asyncIterator] 交回自己。 */ \
+  if (ix == 23) { \
+    omni_dyn ap = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Object", 6))); \
+    omni_js_realm_tbl_[23] = ap; \
+    omni_js_def_data_(ap, omni_js_name_("next", 4), omni_js_nat_(53, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(ap, omni_js_name_("return", 6), omni_js_nat_(54, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(ap, omni_js_name_("throw", 5), omni_js_nat_(55, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(ap, omni_js_sym_wk(omni_str_new("asyncIterator", 13)), \
+                      omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
+    return ap; \
+  } \
+  if (ix >= 16 && ix <= 22) { \
     omni_dyn ep = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Error", 5))); \
     omni_js_realm_tbl_[ix] = ep; \
     return ep; \
@@ -1941,6 +2000,107 @@ static omni_dyn omni_js_promise_try(omni_dyn f) { \
   omni_js_prom_settle_(p, 1, v); \
   return p; \
 } \
+/* async 生成器（ADR-0020 P2）。与同步生成器的差别有两处，都量过：
+   - 体里 await 那一步交出来的是一格带 $aw 的记号（gen_awt），要接着 await 再回到这儿；
+   - 每次 yield **让出去的值还要再 await 一遍**才结算这一次 next 的 promise（规范 27.6.3.8 的
+     AsyncGeneratorYield）—— 少这一拍，for await 的循环体会比尺子早两拍跑。
+   这条腿上没有宿主闭包，所以那格递归的 tick 是带载荷 [g, p] 的原生（sel 49 / 50），
+   yield 那两格是 51 / 52。规则照 prelude 的 $js_agen_step 逐条抄。 */ \
+static void omni_js_agen_tick_(omni_dyn g, omni_dyn p, omni_dyn v, int64_t mode) { \
+  LT gs = omni_js_prom_slot_(g, "$gst", 4); \
+  omni_dyn step = omni_js_prom_slot_(g, "$stp", 4)->items[0]; \
+  LT a = LT##_new(); \
+  LT pay; \
+  omni_dyn r, val; \
+  LT##_push(a, v); \
+  LT##_push(a, omni_dyn_of_real((double)mode)); \
+  r = omni_js_call_this(step, omni_dyn_undef(), omni_js_arr_wrap(a)); \
+  /* 体里抛出来的：机器里还有活着的 catch 就用 mode 2 送回去，没有就成了这一次 next 的 reject */ \
+  if (omni_js_pending()) { \
+    LT a2 = LT##_new(); \
+    LT##_push(a2, omni_js_take_pending()); \
+    LT##_push(a2, omni_dyn_of_real(2.0)); \
+    r = omni_js_call_this(step, omni_dyn_undef(), omni_js_arr_wrap(a2)); \
+    if (omni_js_pending()) { \
+      gs->items[0] = omni_dyn_of_real(2.0); \
+      omni_js_prom_settle_(p, 2, omni_js_take_pending()); \
+      return; \
+    } \
+  } \
+  if (omni_js_truthy(omni_js_obj_getk(r, omni_str_new("$aw", 3)))) { \
+    pay = LT##_new(); \
+    LT##_push(pay, g); \
+    LT##_push(pay, p); \
+    omni_js_prom_react_(omni_js_promise_resolved(omni_js_obj_getk(r, omni_str_new("value", 5))), \
+                        omni_js_nat_(49, omni_js_arr_wrap(pay)), \
+                        omni_js_nat_(50, omni_js_arr_wrap(pay))); \
+    return; \
+  } \
+  val = omni_js_obj_getk(r, omni_str_new("value", 5)); \
+  if (omni_js_truthy(omni_js_obj_getk(r, omni_str_new("done", 4)))) { \
+    gs->items[0] = omni_dyn_of_real(2.0); \
+    omni_js_prom_settle_(p, 1, omni_js_gen_res(val, omni_dyn_of_bool(true))); \
+    return; \
+  } \
+  pay = LT##_new(); \
+  LT##_push(pay, g); \
+  LT##_push(pay, p); \
+  omni_js_prom_react_(omni_js_promise_resolved(val), \
+                      omni_js_nat_(51, omni_js_arr_wrap(pay)), \
+                      omni_js_nat_(52, omni_js_arr_wrap(pay))); \
+} \
+static omni_dyn omni_js_agen_step_(omni_dyn g, omni_dyn v, int64_t mode) { \
+  LT gs = omni_js_prom_slot_(g, "$gst", 4); \
+  omni_dyn p; \
+  int64_t st; \
+  if (gs == NULL) { \
+    omni_js_type_err_c("this is not an async generator"); \
+    return omni_dyn_undef(); \
+  } \
+  p = omni_js_prom_new_(); \
+  st = (int64_t)gs->items[0].u.r; \
+  /* 没开始就 return / throw，或者已经完了：不进体（与同步生成器同一条规矩） */ \
+  if (st == 2 || (st == 0 && mode != 0)) { \
+    gs->items[0] = omni_dyn_of_real(2.0); \
+    if (mode == 2) omni_js_prom_settle_(p, 2, v); \
+    else omni_js_prom_settle_(p, 1, omni_js_gen_res(mode == 1 ? v : omni_dyn_undef(), \
+                                                    omni_dyn_of_bool(true))); \
+    return p; \
+  } \
+  gs->items[0] = omni_dyn_of_real(1.0); \
+  omni_js_agen_tick_(g, p, v, mode); \
+  return p; \
+} \
+static omni_dyn omni_js_agen_new(omni_dyn step) { \
+  omni_dyn g = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("AsyncGenerator", 14))); \
+  omni_js_def_data_(g, omni_js_name_("$stp", 4), step, true, false, true); \
+  omni_js_def_data_(g, omni_js_name_("$gst", 4), omni_dyn_of_real(0.0), true, false, true); \
+  return g; \
+} \
+/* for await 的异步迭代协议（规范 27.1.4.1 / CreateAsyncFromSyncIterator）。
+   Symbol.asyncIterator 有就用它；没有就把同步那一串包一层 —— 那一层里**元素的值也要 await
+   一遍**，所以 for await (const v of [Promise.resolve(1)]) 拿到的是 1 而不是那格 promise。
+   包出来的那一格状态摊在两格槽里（$asrc 摊平好的 list、$aix 下标），next 是 sel 56，
+   把元素 await 一遍再包成 {value, done:false} 的那格处理器是 sel 57。 */ \
+static omni_dyn omni_js_aiter(omni_dyn v) { \
+  omni_dyn key = omni_js_sym_wk(omni_str_new("asyncIterator", 13)); \
+  omni_dyn f = v.tag == OMNI_DYN_OBJ ? omni_js_getp(v, key, omni_dyn_undef()) \
+                                     : omni_dyn_undef(); \
+  omni_dyn o; \
+  if (f.tag != OMNI_DYN_UNDEF && f.tag != OMNI_DYN_NULL) { \
+    return omni_js_call_this(f, v, omni_js_arr_wrap(LT##_new())); \
+  } \
+  o = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Object", 6))); \
+  omni_js_def_data_(o, omni_js_name_("$asrc", 5), omni_js_iter(v), true, false, true); \
+  omni_js_def_data_(o, omni_js_name_("$aix", 4), omni_dyn_of_real(0.0), true, false, true); \
+  omni_js_def_data_(o, omni_js_name_("next", 4), omni_js_nat_(56, omni_dyn_undef()), \
+                    true, false, true); \
+  return o; \
+} \
+static omni_dyn omni_js_aiter_next(omni_dyn it) { \
+  omni_dyn f = omni_js_obj_getk(it, omni_str_new("next", 4)); \
+  return omni_js_promise_resolved(omni_js_call_this(f, it, omni_js_arr_wrap(LT##_new()))); \
+} \
 static omni_dyn omni_js_async_run(omni_dyn step) { \
   omni_dyn p = omni_js_prom_new_(); \
   /* 第一段是**同步**跑的（规范如此：async 函数体一直跑到第一个 await） */ \
@@ -2009,9 +2169,12 @@ static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode) { \
    那些名字只能从成员写法取。这一格与 JS 那条腿是同一条边界（写在 prelude 的 $js_mk_ctors 上）。 */ \
 static omni_dyn omni_js_realm_ctor(omni_str name) { \
   int ix = -1; \
-  for (int i = 0; i < 19; i++) { \
+  for (size_t i = 0; i < sizeof(omni_js_ctor_nm_) / sizeof(omni_js_ctor_nm_[0]); i++) { \
     int64_t l = (int64_t)strlen(omni_js_ctor_nm_[i]); \
-    if (name.len == l && memcmp(name.p, omni_js_ctor_nm_[i], (size_t)l) == 0) { ix = i; break; } \
+    if (name.len == l && memcmp(name.p, omni_js_ctor_nm_[i], (size_t)l) == 0) { \
+      ix = (int)i; \
+      break; \
+    } \
   } \
   if (ix < 0) { \
     omni_errorf("no such builtin constructor: %.*s", (int)name.len, name.p); \

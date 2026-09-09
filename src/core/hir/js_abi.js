@@ -952,9 +952,10 @@ const P1_JS_ONLY = [
   // js_gen_new / js_gen_res 有 C 孪生了（omni_js_obj.h）：状态机的改写在前端就做完了，
   // 运行时这一侧只有"带 $stp / $gst 两槽的真对象 + {value,done} + gen_step"三格。
   // js_gen_awt / js_async_run / js_agen_new 还在 —— 那要 Promise 与作业队列先落地。
-  // js_gen_awt / js_async_run 也有 C 孪生了；异步生成器（js_agen_new）还要 agen 那格原型
-  'js_agen_new',
-  'js_aiter', 'js_aiter_next',
+  // js_gen_awt / js_async_run / js_agen_new 都有 C 孪生了：async 生成器那一格递归的 tick 在
+  // C 上是带载荷 [g, p] 的原生（sel 49 / 50），yield 让出去的值再 await 一遍那两格是 51 / 52，
+  // AsyncGenerator.prototype 是 realm 上第 23 格真对象（next / return / throw + asyncIterator）。
+
   // js_fn_construct 有 C 孪生了（omni_js_obj.h）：函数不是真对象，所以那格 prototype 住在
   // 一张按同一性索引的旁表上（与 prelude 的 $FNPROTO 对应）；右边是**类对象**时（局部类、
   // new this()）走它身上的 prototype 与 Symbol.omni.classInit 那格闭包。

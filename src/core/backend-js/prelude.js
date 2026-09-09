@@ -4106,7 +4106,7 @@ function $js_obj_has_own(o, k) {
    Symbol 那一档（'y'）在这几格上确实是空的：旁表只收字符串键。 */
 const $JS_SLOTS = ["$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src",
   "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v",
-  "$nx", "$hu", "$hs"];
+  "$nx", "$hu", "$hs", "$asrc", "$aix"];
 function $js_obj_own_keys(kind, o) {
   /* 运行时自己的内部槽不该从**任何**视图里露出来：枚举那几种靠"不可枚举"就挡住了，
      getOwnPropertyNames 这一档得按名字挡（量出来的：$cls 在异常对象上、$st/$val/$cbs 在
