@@ -1499,13 +1499,21 @@ function $js_arr_get(a, i) {
 function $js_arr_set(a, i, v) {
   const l = $js_arr_of(a), k = $js_idx(i, 0);
   if (k < 0) $rt_error("negative array index " + k);
+  // 冻住的那格：**赋值**静静地不写（非严格模式的口径，见 $FROZEN 那段注）；长不了也一样
+  if ($FROZEN.has(l)) return;
+  if (k >= l.length && $NOEXT.has(l)) return;
   while (l.length < k) l.push(undefined);
   l[k] = v;
 }
-function $js_arr_push(a, v) { return $js_arr_of(a).push(v); }
+function $js_arr_push(a, v) {
+  const l = $js_arr_of(a);
+  if ($js_lk_ext(l)) return l.length;
+  return l.push(v);
+}
 // a.push(x, ...ys)：实参先被拼成一个 list，这里整段追加（定长的 op 表达不了可变实参）
 function $js_arr_push_all(a, items) {
   const l = $js_arr_of(a);
+  if ($js_lk_ext(l)) return l.length;
   for (const v of $js_arr_of(items)) l.push(v);
   return l.length;
 }
@@ -1517,10 +1525,24 @@ function $js_arr_push_dyn(a, items) {
   // 接收者要传下去（ADR-0020 P1）：sc.push() 里的 this 就是 sc
   return $js_call_n_this($js_obj_get(a, "push"), a, $js_arr_of(items));
 }
-function $js_arr_pop(a) { return $js_arr_of(a).pop(); }
-function $js_arr_unshift(a, v) { return $js_arr_of(a).unshift(v); }
+function $js_arr_pop(a) {
+  const l = $js_arr_of(a);
+  if ($js_lk_del(l)) return undefined;
+  return l.pop();
+}
+function $js_arr_unshift(a, v) {
+  const l = $js_arr_of(a);
+  if ($js_lk_ext(l)) return l.length;
+  return l.unshift(v);
+}
 // shift：摘掉头一格并交出来（空数组给 undefined）
-function $js_arr_shift(a) { return $js_arr_of(a).shift(); }
+function $js_arr_shift(a) {
+  const l = $js_arr_of(a);
+  // 先往 0 号格写、再削长度 —— 冻住的抱怨的是"写"，封住的抱怨的是"删"（尺子的口径）
+  if (l.length > 0 && $js_lk_wr(l, 0)) return undefined;
+  if ($js_lk_del(l)) return undefined;
+  return l.shift();
+}
 // a.at(i)：负下标从尾部数，越界 undefined（a[-1] 是取属性，不是这一条）
 function $js_arr_at(a, i) {
   const l = $js_arr_of(a);
@@ -1537,17 +1559,26 @@ function $js_arr_slice(a, s, e) {
 function $js_arr_concat(a, b) {
   return $js_arr_of(a).concat($dynTag(b) === "list" ? $js_arr_of(b) : [b]);
 }
-function $js_arr_reverse(a) { $js_arr_of(a).reverse(); return a; }
+function $js_arr_reverse(a) {
+  const l = $js_arr_of(a);
+  if (l.length > 1 && $js_lk_wr(l, 0)) return a;
+  l.reverse();
+  return a;
+}
 function $js_arr_fill(a, v, s, e) {
   const l = $js_arr_of(a);
-  l.fill(v, $js_idx(s, 0), $js_idx(e, l.length));
+  const from = $js_idx(s, 0), to = $js_idx(e, l.length);
+  if (from < to && $js_lk_wr(l, from < 0 ? 0 : from)) return a;
+  l.fill(v, from, to);
   return a;
 }
 /* copyWithin：同一格数组里把 [s, e) 挪到 t 起（区间会重叠，宿主的 copyWithin 自己
    处理挪的向；C 那份是先拷一份再写的等价实现）。 */
 function $js_arr_copy_within(a, t, s, e) {
   const l = $js_arr_of(a);
-  l.copyWithin($js_idx(t, 0), $js_idx(s, 0), $js_idx(e, l.length));
+  const at = $js_idx(t, 0);
+  if (l.length > 0 && $js_lk_wr(l, at < 0 ? 0 : at)) return a;
+  l.copyWithin(at, $js_idx(s, 0), $js_idx(e, l.length));
   return a;
 }
 function $js_arr_is_array(v) {
@@ -1794,7 +1825,18 @@ function $js_arr_cmp(f, x, y) {
   const d = $js_num_of(r);
   return Number.isNaN(d) ? 0 : (d < 0 ? -1 : (d > 0 ? 1 : 0));
 }
-function $js_arr_sort(a, f) { $js_arr_of(a).sort((x, y) => $js_arr_cmp(f, x, y)); return a; }
+/* sort 只在**真要动格子**的时候才撞上冻住那道锁 —— 尺子上冻住的数组 sort() 不抛（已经
+   有序，一格都没写），sort((x,y)=>y-x) 抛。所以先排在拷贝上，看结果是不是同一排。 */
+function $js_arr_sort(a, f) {
+  const l = $js_arr_of(a);
+  if ($FROZEN.has(l)) {
+    const s = l.slice().sort((x, y) => $js_arr_cmp(f, x, y));
+    for (let i = 0; i < l.length; i++) if (s[i] !== l[i]) { $js_lk_wr(l, i); return a; }
+    return a;
+  }
+  l.sort((x, y) => $js_arr_cmp(f, x, y));
+  return a;
+}
 // toSorted：整段拷贝再就地排，稳定性与比较器语义完全跟着 sort 那一份
 function $js_arr_to_sorted(a, f) { return $js_arr_sort($js_arr_of(a).slice(), f); }
 // toReversed / with：同一族的另外两格 —— 拷一份再改，原数组不动
@@ -1803,8 +1845,18 @@ function $js_arr_to_reversed(a) { return $js_arr_of(a).slice().reverse(); }
    splice(1) 删到底，splice(1, undefined) 一格都不删）。这条腿上直接把那串实参
    apply 给宿主的 splice，夹取与"删到底"那些边界就是宿主的；C 那份是手划的同一套。 */
 function $js_arr_splice(a, args) {
-  const l = $js_arr_of(a);
-  return l.splice.apply(l, $js_arr_of(args));
+  const l = $js_arr_of(a), xs = $js_arr_of(args);
+  if ($NOEXT.has(l)) {
+    const start = xs.length > 0 ? $js_idx(xs[0], 0) : 0;
+    const dc = xs.length > 1 ? $js_idx(xs[1], 0) : l.length - start;
+    const ins = xs.length > 2 ? xs.length - 2 : 0;
+    if (dc > 0 || ins > 0) {
+      if ($js_lk_wr(l, start < 0 ? 0 : start)) return [];
+      if (dc !== ins && $js_lk_del(l)) return [];
+      if (ins > dc && $js_lk_ext(l)) return [];
+    }
+  }
+  return l.splice.apply(l, xs);
 }
 function $js_arr_to_spliced(a, args) {
   const l = $js_arr_of(a).slice();
@@ -2110,6 +2162,10 @@ function $js_obj_set(o, k, v) {
        [[Set]] 先把键 ToString，再看它是不是数组下标）。从前这一支落进旁表，于是那次写
        静静地丢了（读那一边一直是对的 —— 所以更藏得住）。 */
     if ($js_isidx(key)) { $js_arr_set(o, Number(key), v); return o; }
+    // 旁表上那些名字（a.x = 1）：不可扩展就加不上去 —— 非严格赋值，静静地不写
+    const x = $js_xprops(o, false);
+    if ($NOEXT.has(o) && (x === undefined || !x.has(key))) return o;
+    if ($FROZEN.has(o)) return o;
     $js_xprops(o, true).set(key, v);
     return o;
   }
@@ -2120,6 +2176,8 @@ function $js_arr_set_len(o, v) {
   const l = $js_arr_of(o), n = Math.trunc($js_real(v, "length"));
   // 写 length 越界同样是能 catch 的 RangeError（规范 10.4.2.4 的 ArraySetLength）
   if (!Number.isFinite(n) || n < 0) { $js_range_err("invalid array length"); return; }
+  // 封住 / 冻住 / 不可扩展的那格：改长度要么删格子要么加格子，两样都不许 —— 静静地不改
+  if ($NOEXT.has(l)) return;
   if (n < l.length) { l.length = n; return; }
   while (l.length < n) l.push(undefined);
 }
@@ -2150,6 +2208,9 @@ function $js_obj_delete(o, k) {
        想"去掉一格"照旧写 a.splice(i, 1)。 */
     const ix = $js_hkey(k);
     if ($js_isidx(ix) && Number(ix) < $js_arr_of(o).length) {
+      // 封住 / 冻住的那格根本删不掉：照实交出 false，一格洞也不会出现（非严格 delete
+      // 的口径），所以下面那句"表达不出洞"的报错不该拦在前面
+      if ($SEALED.has(o)) return false;
       $rt_error("delete of an array index would leave a hole; use splice(" + ix + ", 1)");
     }
     const x = $js_xprops(o, false);
@@ -3728,35 +3789,63 @@ function $js_arr_idx_keys(a) {
   for (let i = 0; i < l.length; i++) out.push($js_str(i));
   return out;
 }
+/* 数组 / Map / Set / dict / bytes 在这个值域里还不是真对象（没有 ps 那张槽表），所以
+   "冻住 / 封住 / 不可扩展"这三格标记挂在旁边的三张弱表里。从前这三格对它们是**空操作**：
+   Object.isFrozen(冻过的数组) 给 false、往里写还写得进去 —— 两头都是悄悄的错答案。
+   尺子（qjs 跑脚本，非严格）分得很细，这儿照抄：
+   - 不可扩展：长不了。push / unshift 抛 TypeError "object is not extensible"。
+   - 封住：还删不了。pop 抛 "could not delete property"；写现有那几格照旧成立。
+   - 冻住：连写都不行。shift / reverse / fill / copyWithin / splice / sort 抛
+     "'i' is read-only"，而**赋值**（a[0] = x、a.length = 0、a.x = 1、delete a[0]）
+     是静静地忽略 —— 非严格模式下的赋值就是这样，不是我们漏了。
+   三格是包含关系：冻住 ⊂ 封住 ⊂ 不可扩展。 */
+const $FROZEN = new WeakSet(), $SEALED = new WeakSet(), $NOEXT = new WeakSet();
 function $js_obj_freeze(o) {
   if ($js_isobj(o)) {
     o.ex = false;
     for (const [, sl] of o.ps) { sl.c = false; if (!sl.a) sl.w = false; }
+    return o;
   }
+  if (!$js_obj_frozenish(o)) { $FROZEN.add(o); $SEALED.add(o); $NOEXT.add(o); }
   return o;
 }
 function $js_obj_seal(o) {
-  if ($js_isobj(o)) { o.ex = false; for (const [, sl] of o.ps) sl.c = false; }
+  if ($js_isobj(o)) { o.ex = false; for (const [, sl] of o.ps) sl.c = false; return o; }
+  if (!$js_obj_frozenish(o)) { $SEALED.add(o); $NOEXT.add(o); }
   return o;
 }
-/* isFrozen / isSealed 只对**真对象**有意义。数组在这个值域里还不是真对象（P4 的
-   array exotic 那一片），Object.freeze(数组) 是空操作 —— 所以这儿照实说"没冻住"，
-   而不是跟着"不是对象就算冻住"那条走（那会让代码以为改不动了，是更危险的一边）。
-   原始值照规范：冻住、封住都算。 */
+/* 原始值照规范：冻住、封住都算（没有属性可改）。容器那几格由上面三张表回答。 */
 function $js_obj_frozenish(o) {
   const t = $dynTag(o);
   return !(t === "list" || t === "dict" || t === "Map" || t === "Set" || t === "bytes");
 }
 function $js_obj_is_frozen(o) {
-  if (!$js_isobj(o)) return $js_obj_frozenish(o);
+  if (!$js_isobj(o)) return $js_obj_frozenish(o) || $FROZEN.has(o);
   if (o.ex) return false;
   for (const [, sl] of o.ps) if (sl.c || (!sl.a && sl.w)) return false;
   return true;
 }
 function $js_obj_is_sealed(o) {
-  if (!$js_isobj(o)) return $js_obj_frozenish(o);
+  if (!$js_isobj(o)) return $js_obj_frozenish(o) || $SEALED.has(o);
   if (o.ex) return false;
   for (const [, sl] of o.ps) if (sl.c) return false;
+  return true;
+}
+/* 三格锁的守卫。都交出"拦下来了吗"，抛的是**能 catch** 的 TypeError（$js_type_err 放一格
+   待决错误再回来），所以调用点必须写成"拦下来就 return"的形状，让那格错走出去。 */
+function $js_lk_ext(a) {
+  if (!$NOEXT.has(a)) return false;
+  $js_type_err("object is not extensible");
+  return true;
+}
+function $js_lk_del(a) {
+  if (!$SEALED.has(a)) return false;
+  $js_type_err("could not delete property");
+  return true;
+}
+function $js_lk_wr(a, i) {
+  if (!$FROZEN.has(a)) return false;
+  $js_type_err("'" + i + "' is read-only");
   return true;
 }
 /* isExtensible / preventExtensions（规范 10.5.3 / 10.5.4）：代理身上先问陷阱。
@@ -3769,17 +3858,18 @@ function $js_obj_prevent_ext(o) {
     return o;
   }
   if ($js_isobj(o)) o.ex = false;
+  else if (!$js_obj_frozenish(o)) $NOEXT.add(o);
   return o;
 }
-// 数组 / Map / Set 还不是真对象，但它们**确实**还能往上加东西 —— 照实说"可扩展"
-// （与 isFrozen / isSealed 那两格同一口径，见 $js_obj_frozenish）
+// 数组 / Map / Set 不是真对象，可不可扩展看旁边那张 $NOEXT 表（原始值照规范：不可扩展）
 function $js_obj_is_ext(o) {
   if (o !== null && typeof o === "object" && o.px !== undefined) {
     const f = $js_px_trap(o, "isExtensible");
     if (f !== undefined) return $js_truthy($callThis(f, o.px.h, [o.px.t]));
     return $js_obj_is_ext(o.px.t);
   }
-  return $js_isobj(o) ? o.ex : !$js_obj_frozenish(o);
+  if ($js_isobj(o)) return o.ex;
+  return !$js_obj_frozenish(o) && !$NOEXT.has(o);
 }
 // defineProperty。desc 是一格真对象；缺席的字段照规范取 false/undefined。
 // 已有槽的时候只覆盖 desc 里**出现过**的字段（规范 ValidateAndApplyPropertyDescriptor）。

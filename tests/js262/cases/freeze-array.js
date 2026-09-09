@@ -1,0 +1,50 @@
+// Object.freeze / seal / preventExtensions 落在**数组**上（ADR-0020）。数组在这个值域里
+// 还不是真对象，三格标记挂在旁边的弱表里；从前这三格对数组是空操作，于是 isFrozen 给 false、
+// 往里写还写得进去 —— 两头都是悄悄的错答案。
+// 尺子（qjs 跑脚本，非严格）的口径：赋值静静地忽略，而 push / pop / reverse 这些方法照抛。
+const a = Object.freeze([1, 2]);
+const r = [];
+const t = (l, f) => { try { r.push(l + "=" + String(f())); } catch (e) { r.push(l + "!" + e.name); } };
+t("isFrozen", () => Object.isFrozen(a));
+t("isSealed", () => Object.isSealed(a));
+t("isExt", () => Object.isExtensible(a));
+t("set0", () => { a[0] = 9; return a[0]; });
+t("set2", () => { a[2] = 9; return a.length; });
+t("push", () => a.push(3));
+t("pop", () => a.pop());
+t("len", () => { a.length = 0; return a.length; });
+t("sort", () => a.sort().join(","));
+t("reverse", () => a.reverse().join(","));
+t("prop", () => { a.x = 1; return a.x; });
+t("delete", () => { delete a[0]; return a[0]; });
+t("read", () => a[0] + "," + a.length + "," + a.map(x=>x*2).join("/"));
+const s = Object.seal([1, 2]);
+t("s.isSealed", () => Object.isSealed(s));
+t("s.isFrozen", () => Object.isFrozen(s));
+t("s.set0", () => { s[0] = 9; return s[0]; });
+t("s.push", () => s.push(3));
+const m = Object.freeze(new Map([["k", 1]]));
+t("m.isFrozen", () => Object.isFrozen(m));
+t("m.set", () => { m.set("j", 2); return m.size; });
+console.log(r.join("\n"));
+const r2 = [];
+const t2 = (l, f) => { try { f(); r2.push(l + " ok"); } catch (e) { r2.push(l + " " + e.name + ": " + e.message); } };
+const fa = Object.freeze([1, 2]);
+t2("push", () => fa.push(3));
+t2("pop", () => fa.pop());
+t2("shift", () => fa.shift());
+t2("unshift", () => fa.unshift(0));
+t2("reverse", () => fa.reverse());
+t2("fill", () => fa.fill(0));
+t2("copyWithin", () => fa.copyWithin(0, 1));
+t2("splice", () => fa.splice(0, 1));
+t2("sort-desc", () => fa.sort((x, y) => y - x));
+const fs = Object.seal([1, 2]);
+t2("fs.push", () => fs.push(3));
+t2("fs.pop", () => fs.pop());
+t2("fs.reverse", () => fs.reverse());
+t2("fs.fill", () => fs.fill(0));
+const n = Object.preventExtensions([1, 2]);
+t2("n.push", () => n.push(3));
+t2("n.pop", () => n.pop());
+console.log(r2.join("\n"));

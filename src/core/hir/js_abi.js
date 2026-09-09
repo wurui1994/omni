@@ -109,25 +109,25 @@ export const JS_ABI = {
   js_arr_len: { js: '$js_arr_len', c: 'omni_js_arr_len', arity: 1 },
   js_arr_get: { js: '$js_arr_get', c: 'omni_js_arr_get', arity: 2 },
   js_arr_set: { js: '$js_arr_set', c: 'omni_js_arr_set', arity: 3, ret: 'void' },
-  js_arr_push: { js: '$js_arr_push', c: 'omni_js_arr_push', arity: 2 },
+  js_arr_push: { js: '$js_arr_push', c: 'omni_js_arr_push', arity: 2, throws: true },
   // a.push(x, ...ys)：实参拼成一个 list 整段追加（定长的 op 表达不了可变实参）。
   // 落到的是**派发器**：接收者不是 list 时退回"取属性、当函数调"（决策 12），
   // 因为 `x.push()` / `x.push(...xs)` 这两种形状在降级时分不出接收者是谁。
-  js_arr_push_all: { js: '$js_arr_push_dyn', c: 'omni_js_arr_push_dyn', arity: 2 },
-  js_arr_pop: { js: '$js_arr_pop', c: 'omni_js_arr_pop', arity: 1 },
+  js_arr_push_all: { js: '$js_arr_push_dyn', c: 'omni_js_arr_push_dyn', arity: 2, throws: true },
+  js_arr_pop: { js: '$js_arr_pop', c: 'omni_js_arr_pop', arity: 1, throws: true },
   // a.unshift(x)：往头上插一格（第一百〇四刀）。从前 ABI 里没有它，而编译器自己
   // 新写的代码用上了（asy 前端往 `(main …)` 头上补一句），量出来的样子是自举出来的
   // 那份当场 `omni rt: undefined is not a function` —— 动态接收者上取 "unshift"
   // 取到 undefined。**只收一个实参**：可变实参的形状与 push 一样要走派发器，
   // 而源码里只有一处、只插一格，等真有第二处再长那一格。
-  js_arr_unshift: { js: '$js_arr_unshift', c: 'omni_js_arr_unshift', arity: 2 },
+  js_arr_unshift: { js: '$js_arr_unshift', c: 'omni_js_arr_unshift', arity: 2, throws: true },
   // shift：摘掉头一格并交出来（空数组给 undefined）。pop / unshift 都在，独缺这一格。
-  js_arr_shift: { js: '$js_arr_shift', c: 'omni_js_arr_shift', arity: 1 },
+  js_arr_shift: { js: '$js_arr_shift', c: 'omni_js_arr_shift', arity: 1, throws: true },
   js_arr_slice: { js: '$js_arr_slice', c: 'omni_js_arr_slice', arity: 3 },
   js_arr_concat: { js: '$js_arr_concat', c: 'omni_js_arr_concat', arity: 2 },
-  js_arr_reverse: { js: '$js_arr_reverse', c: 'omni_js_arr_reverse', arity: 1 },
-  js_arr_fill: { js: '$js_arr_fill', c: 'omni_js_arr_fill', arity: 4 },
-  js_arr_copy_within: { js: '$js_arr_copy_within', c: 'omni_js_arr_copy_within', arity: 4 },
+  js_arr_reverse: { js: '$js_arr_reverse', c: 'omni_js_arr_reverse', arity: 1, throws: true },
+  js_arr_fill: { js: '$js_arr_fill', c: 'omni_js_arr_fill', arity: 4, throws: true },
+  js_arr_copy_within: { js: '$js_arr_copy_within', c: 'omni_js_arr_copy_within', arity: 4, throws: true },
   js_arr_is_array: { js: '$js_arr_is_array', c: 'omni_js_arr_is_array', arity: 1, ret: 'bool' },
   // Array.from(v[, mapFn])：mapFn 收 (value, index)，类数组（有 length）也认
   js_arr_from: { js: '$js_arr_from', c: 'omni_js_arr_from', arity: 2, throws: true },
@@ -172,7 +172,7 @@ export const JS_ABI = {
   /* splice / toSpliced（ES2023 的后者）：实参个数**是语义的一部分**（`splice(1)` 删到底，
      `splice(1, undefined)` 一格都不删），所以第二格收的是**整串实参摊成的一格 list**，
      不是定长的 start/deleteCount —— 降级器那儿照 push_all 的做法拼这一格。 */
-  js_arr_splice: { js: '$js_arr_splice', c: 'omni_js_arr_splice', arity: 2 },
+  js_arr_splice: { js: '$js_arr_splice', c: 'omni_js_arr_splice', arity: 2, throws: true },
   js_arr_to_spliced: { js: '$js_arr_to_spliced', c: 'omni_js_arr_to_spliced', arity: 2 },
 
   // ------------------------------------------------- 普通对象 / Map / Set
