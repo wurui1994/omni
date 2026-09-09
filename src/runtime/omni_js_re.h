@@ -238,6 +238,38 @@ static omni_js_re_obj *omni_js_re_want(omni_dyn rd) { \
   if (rd.tag != OMNI_DYN_RE) omni_errorf("%s is not a regexp", omni_dyn_tag_name(rd.tag)); \
   return (omni_js_re_obj *)rd.u.ref; \
 } \
+/* matchAll 的旗标那一格：真正则交出它自己的 flags，别的（运行期摊成"模式 + 旗标"的那条路）
+   当 "g" 收下。与 prelude 的 $js_re_flags_g 逐字对应。 */ \
+static omni_dyn omni_js_re_flags_g(omni_dyn rd) { \
+  if (rd.tag != OMNI_DYN_RE) return omni_dyn_of_s16(omni_js_s16_lit("g")); \
+  return omni_dyn_of_s16(((omni_js_re_obj *)rd.u.ref)->flags); \
+} \
+/* String.prototype.matchAll（规范 22.1.3.14）。JS 那条腿上它交出一格**惰性迭代器对象**
+   （真对象 + next），这条腿上没有真对象 —— 交的是一条**现摊好的 list**，每格就是 exec
+   的那种结果（整体匹配 + 捕获组，身上挂着 index / input / groups）。
+   画在明处的差别：`for (const m of …)` 与 `[...…]` 逐格相同（matchAll 有限、无副作用，
+   摊开与惰性看不出分别），而手写 `it.next()` 在这条腿上取不到 —— 那是一句响错，不是
+   悄悄的答案。不带 g 照规范当场抛**能 catch** 的 TypeError（22.1.3.14 第 3 步 b）。 */ \
+static omni_dyn omni_js_re_match_all(omni_dyn body, omni_dyn flags, omni_dyn sd) { \
+  omni_s16 f = omni_js_as_s16(flags); \
+  bool g = false; \
+  for (int64_t i = 0; i < f.len; i++) if (f.p[i] == (uint16_t)'g') g = true; \
+  if (!g) { \
+    omni_js_type_err_c("regexp must have the 'g' flag"); \
+    return omni_dyn_undef(); \
+  } \
+  omni_re re = omni_js_re_get(body, flags); \
+  omni_s16 s = omni_js_as_s16(sd); \
+  int64_t caps[2 * OMNI_RE_MAX_CAPS]; \
+  int64_t at = 0; \
+  LT out = LT##_new(); \
+  while (at <= s.len && omni_re_search(re, s, at, caps)) { \
+    LT##_push(out, omni_js_re_result(re, s, caps)); \
+    /* 空匹配停在原地是 JS 的规矩，往前挪一格才不会死循环（与 prelude 那句 +1 对着写） */ \
+    at = caps[1] == caps[0] ? caps[0] + 1 : caps[1]; \
+  } \
+  return omni_js_arr_wrap(out); \
+} \
 static omni_dyn omni_js_re_last_index(omni_dyn rd) { \
   return omni_dyn_of_real((double)omni_js_re_want(rd)->li); \
 } \

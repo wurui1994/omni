@@ -26,3 +26,20 @@ console.log(`e ${e2[0]} ${e2.index} ${e2.groups.d} ${re.lastIndex}`);
 const all = "aXbXc".match(/X/g);
 console.log(`all ${all.length} ${all.join("|")} ${all.index}`);
 console.log(`none ${"no".match(/z/)}`);
+
+// matchAll 现在**五条腿都有**（ADR-0020 P1-c）：JS 那条腿交的是惰性迭代器对象，C 这条腿
+// 交的是一条现摊好的 list —— for-of 与展开逐格相同（matchAll 有限、无副作用）。
+const ma = [..."a1 b2".matchAll(/(\w)(\d)/g)];
+console.log(`ma ${ma.length} ${ma[0][0]} ${ma[0].index} ${ma[1][1]} ${ma[1][2]}`);
+for (const mm of "p1 q2".matchAll(/(?<L>\w)(?<D>\d)/g)) {
+  console.log(`each ${mm[0]} ${mm.groups.L}${mm.groups.D} ${mm.index}`);
+}
+console.log(`empty ${[..."aaa".matchAll(/a*/g)].map((x) => x[0].length + "@" + x.index).join(",")}`);
+console.log(`miss ${[..."no".matchAll(/z/g)].length}`);
+let mag = "no-throw";
+try {
+  [..."x".matchAll(/x/)];
+} catch (e) {
+  mag = e instanceof TypeError ? "TypeError" : e.name;
+}
+console.log(`no-g ${mag}`);

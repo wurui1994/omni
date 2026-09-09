@@ -907,8 +907,10 @@ const P1_JS_ONLY = [
   'js_date_parse', 'js_proxy_new', 'js_date_utc',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
   'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',
-  // matchAll 的结果带 index / input / groups —— 那是 list 旁表，C 那侧还没有
-  'js_re_match_all', 'js_re_flags_g',
+  // matchAll 与 flags_g 有 C 孪生了（omni_js_re.h）：exec 的结果本来就把 index / input /
+  // groups 挂在 list 的旁表上，所以差的只是"惰性迭代器"那一层 —— C 这条腿交的是一条现摊
+  // 好的 list（matchAll 有限、无副作用，for-of 与展开逐格相同），手写 it.next() 那条路
+  // 在那儿是一句响错。
   'js_jobs_run',
   'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',

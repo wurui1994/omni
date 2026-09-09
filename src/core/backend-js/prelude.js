@@ -5472,8 +5472,9 @@ function $js_re_result(m, str) {
    next 与 Symbol.iterator 那两格**直接挂在对象上**（不可枚举）—— 两格方法因此不共享，
    it1.next === it2.next 是假。 */
 function $js_re_match_all(body, flags, sd) {
-  // 不带 g 的真正则：规范 22.1.3.14 第 3 步 b 明写 TypeError —— **能 catch** 的那一种
-  if (!flags.includes("g")) return $js_type_err("matchAll must be called with a global RegExp");
+  // 不带 g 的真正则：规范 22.1.3.14 第 3 步 b 明写 TypeError —— **能 catch** 的那一种。
+  // 消息照 qjs 那一句（逐字节的用例在 tests/js262/cases/re-match-all.js 里）
+  if (!flags.includes("g")) return $js_type_err("regexp must have the 'g' flag");
   const s = $js_asS16(sd);
   const re = $js_re_get(body, flags);
   let at = 0;
