@@ -69,34 +69,44 @@ static bool NAME##_contains(NAME a, T v) { \
 }
 
 /* dict：条目数组保持插入序，另有一张开放寻址索引表。
-   idx[h]：0 = 空槽，>0 = 条目下标+1，-1 = 墓碑（删除后仍要保持探测链） */
+   idx[h]：0 = 空槽，>0 = 条目下标+1，-1 = 墓碑（删除后仍要保持探测链）
+   ihash[h]：那一格键的**完整**哈希。探测时先比这 8 个字节，只有相等才去调 EQ ——
+   EQ 对字符串键是一次真调用 + memcmp，而 -O0 下那两样都不便宜。量出来的（自举那条腿，
+   emit-c 一趟 15 秒的采样）：omni_dict_string_dynamic_find 2917 样本、memcmp 252、
+   omni_hash_string 547 —— 属性取值这一条路占掉一半以上的 CPU。 */ \
 #define OMNI_DICT_BODY(NAME, KT, VT) \
 struct NAME##_s { \
   KT *keys; VT *vals; bool *live; \
   int64_t n;      /* 条目数（含墓碑） */ \
   int64_t cap; \
   int64_t count;  /* 存活条目数 */ \
-  int64_t *idx; int64_t icap; \
+  int64_t *idx; uint64_t *ihash; int64_t icap; \
 };
 
 #define OMNI_DICT_DEFINE(NAME, KT, VT, HASH, EQ, KSTR, LNAME) \
 static NAME NAME##_new(void) { \
   NAME d = (NAME)omni_alloc(sizeof(struct NAME##_s)); \
   d->keys = NULL; d->vals = NULL; d->live = NULL; \
-  d->n = 0; d->cap = 0; d->count = 0; d->idx = NULL; d->icap = 0; \
+  d->n = 0; d->cap = 0; d->count = 0; d->idx = NULL; d->ihash = NULL; d->icap = 0; \
   return d; \
 } \
-static int64_t NAME##_find(NAME d, KT k) { \
+/* 哈希已经算好的那一份入口：键是编译期字面量时（backend-c 的 constKey 那条特化）
+   哈希也是编译期常量，于是连 HASH(k) 都不必再走一趟。 */ \
+static int64_t NAME##_find_h(NAME d, KT k, uint64_t hv) { \
   if (d->icap == 0) return -1; \
   uint64_t mask = (uint64_t)d->icap - 1; \
-  uint64_t h = (uint64_t)HASH(k) & mask; \
+  uint64_t h = hv & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \
     int64_t e = d->idx[h]; \
     if (e == 0) return -1; \
-    if (e > 0 && EQ(d->keys[e - 1], k)) return e - 1; \
+    if (e > 0 && d->ihash[h] == hv && EQ(d->keys[e - 1], k)) return e - 1; \
     h = (h + 1) & mask; \
   } \
   return -1; \
+} \
+static int64_t NAME##_find(NAME d, KT k) { \
+  if (d->icap == 0) return -1; \
+  return NAME##_find_h(d, k, (uint64_t)HASH(k)); \
 } \
 static void NAME##_rebuild(NAME d) { \
   int64_t w = 0; \
@@ -109,19 +119,22 @@ static void NAME##_rebuild(NAME d) { \
   int64_t ic = d->icap ? d->icap : 8; \
   while (ic < (d->n + 1) * 2) ic *= 2; \
   d->idx = (int64_t *)omni_alloc(sizeof(int64_t) * (size_t)ic); \
+  d->ihash = (uint64_t *)omni_alloc(sizeof(uint64_t) * (size_t)ic); \
   d->icap = ic; \
-  for (int64_t i = 0; i < ic; i++) d->idx[i] = 0; \
+  for (int64_t i = 0; i < ic; i++) { d->idx[i] = 0; d->ihash[i] = 0; } \
   uint64_t mask = (uint64_t)ic - 1; \
   for (int64_t i = 0; i < d->n; i++) { \
-    uint64_t h = (uint64_t)HASH(d->keys[i]) & mask; \
+    uint64_t hv = (uint64_t)HASH(d->keys[i]); \
+    uint64_t h = hv & mask; \
     while (d->idx[h] != 0) h = (h + 1) & mask; \
     d->idx[h] = i + 1; \
+    d->ihash[h] = hv; \
   } \
 } \
 static int64_t NAME##_len(NAME d) { return d->count; } \
 static bool NAME##_contains(NAME d, KT k) { return NAME##_find(d, k) >= 0; } \
-static VT NAME##_set(NAME d, KT k, VT v) { \
-  int64_t e = NAME##_find(d, k); \
+static VT NAME##_set_h(NAME d, KT k, VT v, uint64_t hv) { \
+  int64_t e = NAME##_find_h(d, k, hv); \
   if (e >= 0) { d->vals[e] = v; return v; } \
   if (d->n + 1 > d->cap) { \
     int64_t c = d->cap ? d->cap * 2 : 4; \
@@ -134,11 +147,13 @@ static VT NAME##_set(NAME d, KT k, VT v) { \
   int64_t slot = d->n++; \
   d->keys[slot] = k; d->vals[slot] = v; d->live[slot] = true; d->count++; \
   uint64_t mask = (uint64_t)d->icap - 1; \
-  uint64_t h = (uint64_t)HASH(k) & mask; \
+  uint64_t h = hv & mask; \
   while (d->idx[h] > 0) h = (h + 1) & mask; \
   d->idx[h] = slot + 1; \
+  d->ihash[h] = hv; \
   return v; \
 } \
+static VT NAME##_set(NAME d, KT k, VT v) { return NAME##_set_h(d, k, v, (uint64_t)HASH(k)); } \
 static VT NAME##_get(NAME d, KT k) { \
   int64_t e = NAME##_find(d, k); \
   if (e < 0) { omni_str ks = KSTR(k); omni_errorf("key not found: %.*s", (int)ks.len, ks.p); } \
@@ -147,11 +162,14 @@ static VT NAME##_get(NAME d, KT k) { \
 static bool NAME##_remove(NAME d, KT k) { \
   if (d->icap == 0) return false; \
   uint64_t mask = (uint64_t)d->icap - 1; \
-  uint64_t h = (uint64_t)HASH(k) & mask; \
+  uint64_t hv = (uint64_t)HASH(k); \
+  uint64_t h = hv & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \
     int64_t e = d->idx[h]; \
     if (e == 0) return false; \
-    if (e > 0 && EQ(d->keys[e - 1], k)) { d->live[e - 1] = false; d->idx[h] = -1; d->count--; return true; } \
+    if (e > 0 && d->ihash[h] == hv && EQ(d->keys[e - 1], k)) { \
+      d->live[e - 1] = false; d->idx[h] = -1; d->count--; return true; \
+    } \
     h = (h + 1) & mask; \
   } \
   return false; \

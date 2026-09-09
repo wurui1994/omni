@@ -588,7 +588,10 @@ static omni_dyn omni_js_obj_desc(omni_dyn o, omni_dyn k) { \
   /* 真对象上描述符是**槽自己的位**（访问器那一支交 get / set 两格，规范 6.2.6.4） */ \
   if (o.tag == OMNI_DYN_OBJ) { \
     DT ps = omni_js_ps_(o); \
-    int64_t e = DT##_find(ps, omni_js_pkey_(k)); \
+    int64_t e; \
+    /* 内部槽在这个视图里也不存在（与 hasOwnProperty / in 同一张封闭表） */ \
+    if (omni_js_slot_(k)) return omni_dyn_undef(); \
+    e = DT##_find(ps, omni_js_pkey_(k)); \
     if (e < 0) return omni_dyn_undef(); \
     LT sl = (LT)ps->vals[e].u.ref; \
     if (!sl->items[1].u.b) { \
@@ -630,7 +633,14 @@ static omni_dyn omni_js_obj_desc(omni_dyn o, omni_dyn k) { \
   } \
   if (o.tag == OMNI_DYN_DICT) { \
     DT d = omni_js_dict_of(o); \
-    int64_t e = DT##_find(d, key); \
+    int64_t e; \
+    /* 异常对象在这条腿上是一格 dict：$cls 内部、name 在 node 上住在 Error.prototype 上 ——
+       与 omni_js_dict_keys_ 的非枚举视图、以及 hasOwnProperty 同一条规则。 */ \
+    if (omni_js_dict_iserr_(o)) { \
+      omni_s16 ks = omni_js_as_s16(omni_js_str(k)); \
+      if (omni_js_ekey_(ks, "$cls", 4) || omni_js_ekey_(ks, "name", 4)) return omni_dyn_undef(); \
+    } \
+    e = DT##_find(d, key); \
     if (e < 0) return omni_dyn_undef(); \
     return omni_js_desc_mk_(d->vals[e], w, true, c); \
   } \

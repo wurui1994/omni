@@ -75,6 +75,14 @@ static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv); \
 static omni_dyn omni_js_setp(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv); \
 static omni_dyn omni_js_obj_own_keys_o_(omni_dyn o, int sel); \
 static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own); \
+/* 内部槽那张封闭表（$ms / $st / $cls …）：定义排在后头，而 has_o_ 就要问它 */ \
+static bool omni_js_slot_(omni_dyn k); \
+/* 一格 dict 键与某个名字相等（键是编码过的，所以不能直接 memcmp）：hasOwnProperty 上
+   异常对象那条视图规则要它，而它排在后头。 */ \
+static bool omni_js_ekey_(omni_s16 k, const char *nm, int64_t n); \
+/* 「自有属性有没有」的那四支（真对象 / list / dict / 串）：住在 STR_ARR 段，而
+   Object.prototype.hasOwnProperty 就是它。 */ \
+static bool omni_js_obj_has_own(omni_dyn o, omni_dyn k); \
 static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k); \
 static omni_dyn omni_js_fn_proto_(omni_dyn f); \
 static omni_dyn omni_js_obj_keys(omni_dyn o); \
@@ -508,6 +516,11 @@ static bool omni_js_obj_hask(omni_dyn o, omni_str key) { \
     DT d = omni_js_xprops_(o, false); \
     return d == NULL ? false : DT##_contains(d, key); \
   } \
+  /* $cls 是内部的一格，从**任何**视图里都不该露出来（`"$cls" in new TypeError("x")` 在
+     node 上是 false）。挡在这儿而不是 omni_js_obj_has 里：`'k' in o` 的键是字面量时
+     backend-c 会直接发这一格（emit.js 的 constKey 那条特化），绕过 obj_has。
+     JS 那条腿上异常对象已经是真对象了，那边由 $js_is_slot 挡。 */ \
+  if (key.len == 4 && memcmp(key.p, "$cls", 4) == 0) return false; \
   return DT##_contains(omni_js_dict_of(o), key); \
 } \
 static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
@@ -562,6 +575,15 @@ static omni_dyn omni_js_obj_get(omni_dyn o, omni_dyn k) { \
 static omni_dyn omni_js_obj_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
   if (o.tag == OMNI_DYN_OBJ) { omni_js_setp(o, k, v, omni_dyn_undef()); return o; } \
   return omni_js_obj_setk(o, omni_js_prop_k(k), v); \
+} \
+/* 一格 dict 是不是异常对象（决策 15 的表示）。走 hask 而不是 obj_has：obj_has 自己就要
+   问这一格来决定藏不藏 $cls，绕回去会互相咬。 */ \
+static bool omni_js_dict_iserr_(omni_dyn o) { \
+  /* 直接问容器：omni_js_obj_hask 自己要藏 $cls，绕回去只会永远答"不是异常对象"。
+     omni_js_name_ 排在后头，所以那格键在这儿现造。 */ \
+  omni_dyn ck = omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("$cls", 4))); \
+  return o.tag == OMNI_DYN_DICT \
+      && DT##_contains(omni_js_dict_of(o), omni_js_prop_k(ck)); \
 } \
 static bool omni_js_obj_has(omni_dyn o, omni_dyn k) { \
   if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_has_o_(o, k, false); \
@@ -769,6 +791,11 @@ static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own) { \
                                           omni_js_px_target_(o), k, omni_dyn_undef(), 2)); \
   } \
   omni_str key = omni_js_pkey_(k); \
+  /* 内部槽从**这个视图**里也得藏起来（hasOwnProperty 与 `in` 都走这儿）：少了这一句，
+     new Date(0).hasOwnProperty("$ms") 是 true 而 node 给 false。名字是同一张封闭表
+     （omni_js_slot_），与 prelude 的 $js_is_slot 逐字对应。读写那一侧照旧走 getp / setp，
+     不问这一格 —— 运行时自己就是靠那条路存状态的。 */ \
+  if (omni_js_slot_(k)) return false; \
   if (own) return DT##_find(omni_js_ps_(o), key) >= 0; \
   if (omni_js_find_slot_(o, key, NULL) != NULL) return true; \
   omni_dyn tail = omni_js_proto_tail_(o); \
@@ -798,16 +825,30 @@ static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k) { \
    字符串键、'y' 符号键。 */ \
 /* 运行时自己的内部槽名（ADR-0011 决策 15 的 $cls，加上 ADR-0020 P2 那几族）。一张封闭表，
    与 prelude 的 $JS_SLOTS 逐字对应。 */ \
+/* 一段 UTF-16 与一个 ASCII 字面量比：**不分配**。
+   从前这两处（omni_js_slot_ / omni_js_ekey_）走的是
+   `omni_s16_eq(k, omni_s16_of_utf8(omni_str_new(nm, n)))` —— 每比一次就现造一份 s16
+   （arena 分配 + 一趟 UTF-8→UTF-16 转换）。slot_ 一次要比 25 个名字，而它现在挂在
+   hasOwnProperty / `in` / own_keys 的 'e' 视图这三条**热路**上：自举那条腿量出来
+   emit-c 从 46s 涨到 105s。这一格换成逐码元比，分配为零。 */ \
+static bool omni_js_s16_ascii_(omni_s16 k, const char *nm, int64_t n) { \
+  if (k.len != n) return false; \
+  for (int64_t i = 0; i < n; i++) { \
+    if (k.p[i] != (uint16_t)(unsigned char)nm[i]) return false; \
+  } \
+  return true; \
+} \
 static bool omni_js_slot_(omni_dyn k) { \
   static const char *nms[25] = { "$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src", \
     "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v", \
     "$nx", "$hu", "$hs", "$asrc", "$aix" }; \
   if (k.tag != OMNI_DYN_STR16) return false; \
+  /* 这 25 个名字都以 '$' 起头，长度都 >= 2 —— 先挡这一道，于是**几乎所有**真实的属性名
+     一次比较就走完，25 次逐字比只留给真的以 '$' 开头的键。 */ \
+  if (k.u.s16.len < 2 || k.u.s16.p[0] != (uint16_t)'$') return false; \
   /* 上界按 sizeof 算：从前是手写的常数，加名字时漂过一次（表 25 格、循环只走 24） */ \
   for (size_t i = 0; i < sizeof(nms) / sizeof(nms[0]); i++) { \
-    if (omni_s16_eq(k.u.s16, omni_s16_of_utf8(omni_str_new(nms[i], (int64_t)strlen(nms[i]))))) { \
-      return true; \
-    } \
+    if (omni_js_s16_ascii_(k.u.s16, nms[i], (int64_t)strlen(nms[i]))) return true; \
   } \
   return false; \
 } \
@@ -1106,9 +1147,17 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
     case 1: case 2: return omni_js_obj_to_string(self); /* toString / toLocaleString */ \
     case 3: return self;                                /* valueOf */ \
     case 4: {                                           /* hasOwnProperty */ \
-      bool r = self.tag == OMNI_DYN_OBJ ? omni_js_obj_has_o_(self, a0, true) \
-             : (self.tag == OMNI_DYN_DICT || self.tag == OMNI_DYN_LIST) \
-               ? omni_js_obj_has(self, a0) : false; \
+      /* 四种接收者都要认（真对象走属性位，list / dict / 串走容器那一问）—— has_own 就是
+         这四支，所以直接借它。从前 JS 那条腿只认真对象，[1,2].hasOwnProperty("0") 静静地
+         给 false，而 node 给 true。 */ \
+      bool r = omni_js_obj_has_own(self, a0); \
+      /* 异常对象在这条腿上是一格 dict（决策 15）：name 在 node 上住在 Error.prototype 上、
+         **不是自有属性**（$cls 那一格更早就在 hask 里挡掉了）。message / cause 照旧算自有，
+         node 也这么说 —— 与 omni_js_dict_keys_ 的非枚举视图同一条规则。 */ \
+      if (r && omni_js_dict_iserr_(self)) { \
+        omni_s16 ks = omni_js_as_s16(omni_js_str(a0)); \
+        if (omni_js_ekey_(ks, "name", 4)) r = false; \
+      } \
       return omni_dyn_of_bool(r); \
     } \
     case 5: {                                           /* isPrototypeOf */ \
@@ -1502,9 +1551,20 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
           LT##_push(pp, omni_dyn_of_real((double)argc)); \
           return omni_js_nat_(OMNI_JS_PM_SEL + ix, omni_js_arr_wrap(pp)); \
         } \
-        /* 表里没有这个名字：在这个值域里它**本来就不存在**，答 undefined 才是规范的答案
-           （`[].zork`）。只有"成员表里有、可 C 那侧还没落地"（号 -2）才当场报。 */ \
-        if (ix == -1) return omni_dyn_undef(); \
+        /* 成员表里没有这个名字 —— 但链还没到头：realm 上这几格代理原型的**原型是 null**
+           （它们只答同一性），所以从前 Object.prototype 那六格在原始值那一族上够不着 ——
+           量出来的：`typeof [1,2].hasOwnProperty` 在这条腿上是 "undefined" 而 node 给
+           "function"，可 `Object.prototype.hasOwnProperty.call([1,2], "0")` 明明是对的。
+           表要**先**问（Array.prototype.toString 与 Object.prototype.toString 不是一格）。 */ \
+        if (ix == -1) { \
+          if (nm.len != 6 || memcmp(nm.p, "Object", 6) != 0) { \
+            omni_dyn m = omni_js_obj_get(omni_js_realm_proto(omni_str_new("Object", 6)), kd); \
+            if (m.tag != OMNI_DYN_UNDEF) return m; \
+          } \
+          /* Object.prototype 上也没有：在这个值域里它本来就不存在，答 undefined 才是
+             规范的答案（`[].zork`）。只有"表里有、可 C 那侧还没落地"（号 -2）才当场报。 */ \
+          return omni_dyn_undef(); \
+        } \
       } \
       omni_errorf("backend-c: reading '%.*s' off %.*s.prototype — 内建原型上的成员还没搬到 " \
                   "C 那条腿（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器", \
@@ -2525,12 +2585,12 @@ static omni_dyn omni_js_arr_own_get(omni_dyn a, omni_dyn key) { \
                       getOwnPropertyNames 里有（en = false 那一支）
    四格名字与 JSON 那一处的白名单是同一份（omni_js_json.h 的 iserr 那一支）。 */ \
 static bool omni_js_ekey_(omni_s16 k, const char *nm, int64_t n) { \
-  return omni_s16_eq(k, omni_s16_of_utf8(omni_str_new(nm, n))); \
+  return omni_js_s16_ascii_(k, nm, n); \
 } \
 static omni_dyn omni_js_dict_keys_(omni_dyn o, bool en) { \
   DT d = omni_js_dict_of(o); \
   LT out = LT##_new(); \
-  bool iserr = omni_js_obj_has(o, omni_js_name_("$cls", 4)); \
+  bool iserr = omni_js_dict_iserr_(o); \
   LT##_reserve(out, d->count); \
   for (int64_t i = 0; i < d->n; i++) { \
     if (!d->live[i]) continue; \
@@ -2701,6 +2761,33 @@ static omni_dyn omni_js_obj_assign(omni_dyn dst, omni_dyn src) { \
      从前落到 omni_js_dict_of 上、当场报 "dynamic value is real, expected dict"。 */ \
   if (src.tag == OMNI_DYN_BOOL || src.tag == OMNI_DYN_INT || src.tag == OMNI_DYN_REAL \
       || src.tag == OMNI_DYN_UINT) return dst; \
+  /* 两头有一头是**真对象**：走自有可枚举键那条路（`{ ...new Date(0) }` 是 `{}` —— 隐藏槽
+     不可枚举，own_keys 的 'e' 视图自己就把它们滤掉了）。从前这一支直接落到 dict_of 上、
+     当场报 "dynamic value is object, expected dict"，于是展开一格 promise / 生成器 /
+     Date 在这条腿上根本走不通（量出来的）。判据与 prelude 的 $js_obj_assign 一字不差。 */ \
+  if (src.tag == OMNI_DYN_OBJ || dst.tag == OMNI_DYN_OBJ) { \
+    if (src.tag == OMNI_DYN_OBJ) { \
+      LT ks = omni_js_arr_of(omni_js_obj_own_keys_o_(src, 'e')); \
+      LT ys; \
+      int64_t i; \
+      for (i = 0; i < ks->len; i++) { \
+        omni_js_obj_set(dst, ks->items[i], omni_js_getp(src, ks->items[i], src)); \
+      } \
+      /* Symbol 键也抄（Object.assign 抄自有可枚举的**所有**键，含 Symbol） */ \
+      ys = omni_js_arr_of(omni_js_obj_own_keys_o_(src, 'y')); \
+      for (i = 0; i < ys->len; i++) { \
+        omni_js_obj_set(dst, ys->items[i], omni_js_getp(src, ys->items[i], src)); \
+      } \
+    } else { \
+      /* dict 当源、真对象当目标：走 obj_keys 而不是直接掏 DT 的键表 —— dict 里存的键是
+         编码过的（属性位那套前缀），拿原样去 obj_set 会造出错名字。 */ \
+      LT ks = omni_js_arr_of(omni_js_obj_keys(src)); \
+      for (int64_t i = 0; i < ks->len; i++) { \
+        omni_js_obj_set(dst, ks->items[i], omni_js_obj_get(src, ks->items[i])); \
+      } \
+    } \
+    return dst; \
+  } \
   DT s = omni_js_dict_of(src); \
   DT d = omni_js_dict_of(dst); \
   for (int64_t i = 0; i < s->n; i++) if (s->live[i]) DT##_set(d, s->keys[i], s->vals[i]); \
@@ -2715,6 +2802,26 @@ static omni_dyn omni_js_arr_push_dyn(omni_dyn a, omni_dyn items) { \
   if (a.tag == OMNI_DYN_LIST) return omni_js_arr_push_all(a, items); \
   LT l = omni_js_arr_of(items); \
   return omni_js_call_n_this(omni_js_obj_getk(a, omni_str_new("push", 4)), a, l->len, l->items); \
+} \
+/* splice / toSpliced 的派发器，与 push 那一格一字不差的理由：**splice 是个很常见的用户方法名**
+   （C 前端的 Cpp.splice() 就是"跳过行拼接"，asy 前端的 push 也一样）。这两条 op 收的是可变
+   实参，所以降级器不走定长的成员派发器、直接发它们 —— 静态分不出接收者，只能在运行期看标签。
+   量出来的：少了这一句，`this.splice()` 在**两条编出来的腿上都炸**（C 是 "dynamic value is
+   object, expected list"、emit-js 是 "object is not an array"），而 node 直接跑源码时它是
+   一次普通的方法调用，所以四道闸一个都没抓着 —— omni c tcc 这条路只在 node 上被测过。 */ \
+static omni_dyn omni_js_arr_splice_dyn_(omni_dyn a, omni_dyn args, bool copy, \
+                                        const char *nm, int64_t nn) { \
+  if (a.tag == OMNI_DYN_LIST) return omni_js_arr_splice_(a, args, copy); \
+  { \
+    LT l = omni_js_arr_of(args); \
+    return omni_js_call_n_this(omni_js_obj_getk(a, omni_str_new(nm, nn)), a, l->len, l->items); \
+  } \
+} \
+static omni_dyn omni_js_arr_splice(omni_dyn a, omni_dyn args) { \
+  return omni_js_arr_splice_dyn_(a, args, false, "splice", 6); \
+} \
+static omni_dyn omni_js_arr_to_spliced(omni_dyn a, omni_dyn args) { \
+  return omni_js_arr_splice_dyn_(a, args, true, "toSpliced", 9); \
 } \
 OMNI_JS_MAP(LT, DT)
 

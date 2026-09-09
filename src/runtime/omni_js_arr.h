@@ -703,12 +703,9 @@ static omni_dyn omni_js_arr_splice_(omni_dyn a, omni_dyn argsv, bool copy) { \
   l->cap = out->cap; \
   return omni_js_arr_wrap(rem); \
 } \
-static omni_dyn omni_js_arr_splice(omni_dyn a, omni_dyn args) { \
-  return omni_js_arr_splice_(a, args, false); \
-} \
-static omni_dyn omni_js_arr_to_spliced(omni_dyn a, omni_dyn args) { \
-  return omni_js_arr_splice_(a, args, true); \
-} \
+/* splice / toSpliced 的公开那一格**不在这儿**，在 omni_js_obj.h：接收者不是 list 时要走
+   "取属性、带接收者调"，而那要 omni_js_obj_getk / omni_js_call_n_this —— 这个宏先展开，
+   还看不见它们。与 omni_js_arr_push_dyn 同一条理由。 */ \
 /* keys / values / entries（数组那三格）：交一格**真迭代器** —— next 与 Symbol.iterator 都在
    它身上，于是 `a.values().next()` 与 ES2025 那批 helper（`a.values().map(f)`）都接得上。
    造那一格的 omni_js_src_iter_ 住在 OBJ 段（排在这一段后面），所以这儿先声明一句 ——

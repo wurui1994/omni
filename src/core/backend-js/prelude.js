@@ -2066,6 +2066,15 @@ function $js_arr_to_reversed(a) { return $js_arr_of(a).slice().reverse(); }
    splice(1) 删到底，splice(1, undefined) 一格都不删）。这条腿上直接把那串实参
    apply 给宿主的 splice，夹取与"删到底"那些边界就是宿主的；C 那份是手划的同一套。 */
 function $js_arr_splice(a, args) {
+  /* 接收者不是 list：splice 是个很常见的**用户方法名**（C 前端的 Cpp.splice() 就是
+     "跳过行拼接"）。这两条 op 收的是可变实参，所以降级器不走定长的成员派发器、直接发
+     它们 —— 静态分不出接收者，只能在运行期看标签，与 $js_arr_push_dyn 同一条路。
+     少了这一句，this.splice() 在**编出来的**两条腿上都炸（emit-js 是 "object is not an
+     array"、C 是 "dynamic value is object, expected list"），而 node 直接跑源码时它是
+     一次普通的方法调用 —— 所以四道闸一个都没抓着。 */
+  if ($dynTag(a) !== "list") {
+    return $js_call_n_this($js_obj_get(a, "splice"), a, $js_arr_of(args));
+  }
   const l = $js_arr_of(a), xs = $js_arr_of(args);
   if ($NOEXT.has(l)) {
     const start = xs.length > 0 ? $js_idx(xs[0], 0) : 0;
@@ -2080,6 +2089,10 @@ function $js_arr_splice(a, args) {
   return l.splice.apply(l, xs);
 }
 function $js_arr_to_spliced(a, args) {
+  // 接收者不是 list 时的那一支，理由见 $js_arr_splice
+  if ($dynTag(a) !== "list") {
+    return $js_call_n_this($js_obj_get(a, "toSpliced"), a, $js_arr_of(args));
+  }
   const l = $js_arr_of(a).slice();
   l.splice.apply(l, $js_arr_of(args));
   return l;
@@ -3069,7 +3082,22 @@ function $mkRealm() {
   $R = r;
   // 生成的那一遍先挂（见 $js_pm_install 那段注）：手写的排在后面，于是它们说了算
   $js_pm_install(r);
-  $natm(objP, "hasOwnProperty", 1, (t, a) => $js_isobj(t) && t.ps.has($js_pkey(a[0])));
+  /* hasOwnProperty 从前只认**真对象**当接收者，别的一律 false —— 于是
+     [1,2].hasOwnProperty("0") 与 "ab".hasOwnProperty("0") 都是 false，而 node 给 true。
+     四支都要认，而 $js_obj_has_own 正好就是那四支（Object.hasOwn 用的也是它）。 */
+  $natm(objP, "hasOwnProperty", 1, (t, a) => {
+    const k = a[0];
+    if ($js_isobj(t)) return !$js_is_slot(k) && t.ps.has($js_pkey(k));
+    if (!$js_obj_has_own(t, k)) return false;
+    /* 异常对象万一是一格 dict（决策 15 那个表示，C 那条腿上现役）：name 在 node 上住在
+       Error.prototype 上、**不是自有属性**，$cls 更是内部的 —— 与 $js_dict_keys 的
+       非枚举视图同一条规则（message / cause 照旧算自有，node 也这么说）。 */
+    if ($dynTag(t) === "dict" && $js_obj_has(t, "$cls")) {
+      const ks = $js_asS16($js_str(k));
+      if (ks === "$cls" || ks === "name") return false;
+    }
+    return true;
+  });
   $natm(objP, "isPrototypeOf", 1, (t, a) => {
     let cur = $js_isobj(a[0]) ? a[0].pr : null;
     while (cur !== null && cur !== undefined) { if (cur === t) return true; cur = $js_isobj(cur) ? cur.pr : null; }
@@ -4120,6 +4148,11 @@ function $js_obj_has_own(o, k) {
 const $JS_SLOTS = ["$cls", "$st", "$val", "$cbs", "$stp", "$gst", "$ms", "$src",
   "$ix", "$k", "$up", "$fn", "$n", "$i", "$f", "$c", "$in", "$it", "$d", "$v",
   "$nx", "$hu", "$hs", "$asrc", "$aix"];
+/* 一格键是不是内部槽。getOwnPropertyNames 那一档之外，hasOwnProperty / in /
+   getOwnPropertyDescriptor 这三个视图也得问它 —— 少了的话
+   new Date(0).hasOwnProperty("$ms") 是 true 而 node 给 false（量出来的，五条腿一起错）。
+   读写那一侧照旧走 $js_getp / $js_setp，不问这一格：运行时自己就是靠那条路存状态的。 */
+function $js_is_slot(k) { return typeof k === "string" && $JS_SLOTS.includes(k); }
 function $js_obj_own_keys(kind, o) {
   /* 运行时自己的内部槽不该从**任何**视图里露出来：枚举那几种靠"不可枚举"就挡住了，
      getOwnPropertyNames 这一档得按名字挡（量出来的：$cls 在异常对象上、$st/$val/$cbs 在
@@ -4130,7 +4163,7 @@ function $js_obj_own_keys(kind, o) {
     const ks = $js_own_keys(o, kind);
     if (kind === "e") return ks;
     const out = [];
-    for (const k of ks) if (!(typeof k === "string" && $JS_SLOTS.includes(k))) out.push(k);
+    for (const k of ks) if (!$js_is_slot(k)) out.push(k);
     return out;
   }
   if (kind !== "s") return [];
@@ -4414,7 +4447,7 @@ function $js_obj_desc(o, k) {
     if (f === undefined) return $js_obj_desc(o.px.t, k);
     return $js_desc_complete($callThis(f, o.px.h, [o.px.t, $js_pkey(k)]));
   }
-  const sl = o.ps.get($js_pkey(k));
+  const sl = $js_is_slot(k) ? undefined : o.ps.get($js_pkey(k));
   if (sl === undefined) return undefined;
   const d = $js_obj_new_p(undefined);
   if (sl.a) {
@@ -4447,7 +4480,7 @@ function $js_obj_has_p(o, k) {
     return f === undefined ? $js_obj_has_p(o.px.t, k)
       : $js_truthy($callThis(f, o.px.h, [o.px.t, $js_pkey(k)]));
   }
-  return $js_find_slot(o, $js_pkey(k)) !== null;
+  return !$js_is_slot(k) && $js_find_slot(o, $js_pkey(k)) !== null;
 }
 // Object.fromEntries：走一遍迭代（数组、Map、自定义可迭代对象都收），每一项按 [k, v] 取。
 function $js_obj_from_entries(pairs) {
