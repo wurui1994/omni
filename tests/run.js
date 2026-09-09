@@ -124,9 +124,13 @@ for (const f of readdirSync(casesDir).filter((f) => SRC_EXT.test(f)).sort()) {
 // ------------------------------------------------------------ 诊断用例：只比对编译期错误文本
 
 const errorsDir = join(here, 'errors');
+/* 诊断用例也收 .js：JS 前端有一批**编译期**的拒（TDZ、封闭 ABI 之外的名字、带 extends 的
+   类表达式…），它们在 js262 / 五腿那两道门里量不到 —— 那两道门比的是**跑出来的输出**，
+   而这些用例根本编不过。所以扩展名单独一格，只给 errors/ 用。 */
+const DIAG_EXT = /\.(omni[ds]?|js)$/;
 if (existsSync(errorsDir)) {
   process.stdout.write('diagnostics (snapshot)\n');
-  for (const f of readdirSync(errorsDir).filter((f) => SRC_EXT.test(f)).sort()) {
+  for (const f of readdirSync(errorsDir).filter((f) => DIAG_EXT.test(f)).sort()) {
     if (filters.length && !filters.some((x) => f.includes(x))) continue;
     const path = join(errorsDir, f);
     const r = run('run', path);
@@ -138,7 +142,7 @@ if (existsSync(errorsDir)) {
       record(`${f} [should fail]`, false, '  expected a compile error, but compilation succeeded');
       continue;
     }
-    if (checkSnapshot(f, path.replace(SRC_EXT, '.expected'), r.stderr)) record(`${f} [diagnostics]`, true, '');
+    if (checkSnapshot(f, path.replace(DIAG_EXT, '.expected'), r.stderr)) record(`${f} [diagnostics]`, true, '');
   }
 }
 
@@ -154,8 +158,8 @@ if (existsSync(errorsDir)) {
 
 {
   process.stdout.write('check (前端 + 检查器)\n');
-  const pick = (dir) => (existsSync(dir)
-    ? readdirSync(dir).filter((f) => SRC_EXT.test(f)).sort()
+  const pick = (dir, ext) => (existsSync(dir)
+    ? readdirSync(dir).filter((f) => (ext ?? SRC_EXT).test(f)).sort()
       .filter((f) => !filters.length || filters.some((x) => f.includes(x)))
     : []);
   for (const f of pick(casesDir)) {
@@ -165,7 +169,7 @@ if (existsSync(errorsDir)) {
       record(`${f} [check]`, false, `  没印 ok 那一行：${JSON.stringify(r.stdout.slice(0, 60))}`);
     } else record(`${f} [check]`, true, '');
   }
-  for (const f of pick(errorsDir)) {
+  for (const f of pick(errorsDir, DIAG_EXT)) {
     const r = run('check', join(errorsDir, f));
     if (r.code === 0) {
       record(`${f} [check 该红]`, false, '  check 回了 0，可这份用例是编译期错误 —— check 少查了几样');

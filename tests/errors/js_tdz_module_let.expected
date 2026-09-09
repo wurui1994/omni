@@ -1,0 +1,3 @@
+tests/errors/js_tdz_module_let.js:14:7: error: 'readEarly' is read before its declaration (TDZ; JS throws a ReferenceError here)
+  try { readEarly; } catch (e) { console.log("never gets here", e); }
+        ^^^^^^^^^

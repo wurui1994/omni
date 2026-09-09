@@ -350,6 +350,8 @@ class Lower {
     this.funcs = [];
     /** 模块级的 const/let/var：名字 -> 全局槽（后端各发一个真全局） */
     this.globals = new Map();
+    /** 正在降级第几句顶层语句（TDZ 的静态判据要它；不在顶层时是 null） */
+    this.topIdx = null;
     /** 顶层函数声明：名字 -> mangled。互相递归靠的就是先收一遍再降级 */
     this.topFns = new Map();
     /** 顶层函数的形参个数（fn.length 要它；topFnValue 那边已经看不到形参表） */
@@ -391,7 +393,7 @@ class Lower {
     // 原生宿主面（ADR-0011 决策 17）：链接器给出"名字 -> ABI op"，这些名字只能被调用
     this.natives = program.natives ?? new Map();
     this.cnatives = program.cnatives ?? new Map();
-    for (const s of program.body) this.collectTop(s);
+    program.body.forEach((s, i) => this.collectTop(s, i));
     for (const s of program.body) {
       if (s.type === 'FuncDecl') this.funcDecl(s);
     }
@@ -402,10 +404,13 @@ class Lower {
     const main = { name: 'main', mangled: 'omni_main', ret: { k: 'void' }, params: [], body: null };
     this.fn = this.newFrame(program.body, { isMain: true });
     const stmts = [];
-    for (const s of program.body) {
-      if (s.type === 'FuncDecl') continue;
+    program.body.forEach((s, i) => {
+      if (s.type === 'FuncDecl') return;
+      // TDZ 的静态判据要"现在在第几句"（见 expr 里 globals 那一格）
+      this.topIdx = i;
       stmts.push(...this.stmt(s));
-    }
+    });
+    this.topIdx = null;
     main.body = block([...this.fn.prelude, ...stmts, ...this.jobsTail()]);
     this.fn = null;
     this.funcs.push(main);
@@ -430,7 +435,7 @@ class Lower {
     };
   }
 
-  collectTop(s) {
+  collectTop(s, i) {
     switch (s.type) {
       case 'FuncDecl':
         if (this.topFns.has(s.id)) this.err(s.span, `duplicate function '${s.id}'`);
@@ -450,7 +455,10 @@ class Lower {
             this.regexConsts.set(d.id.name, { body: d.init.body, flags: d.init.flags });
             continue;
           }
-          for (const n of patternNames(d.id, this, s.span)) this.globals.set(n, { name: cSafe(n) });
+          for (const n of patternNames(d.id, this, s.span)) {
+            // lexIdx 只给 let / const：TDZ 是它们的事，var 声明前读到 undefined 是对的
+            this.globals.set(n, { name: cSafe(n), lexIdx: s.kind === 'var' ? undefined : i });
+          }
         }
         break;
       case 'ClassDecl': {
@@ -2241,7 +2249,19 @@ class Lower {
       const r = this.regexConsts.get(e.name);
       return op('js_re_new', [s16(r.body), s16(r.flags)]);
     }
-    if (this.globals.has(e.name)) return globalRef(this.globals.get(e.name).name);
+    /* TDZ（规范 9.1.1.1 的 uninitialized binding）：模块级的 let / const 在这个值域里是
+     * **全局槽**，所以声明**之前**读它从前静静地给 undefined —— 规范那儿是 ReferenceError。
+     * 函数体里的同一件事早就是响的（"unresolved identifier"，名字还没进作用域），
+     * 差的只有顶层这一格。判据只看**词法**：同一格顶层语句表里，读它的那句在声明那句之前。
+     * 闭包体不算（那儿的 fn.isMain 是假）—— 它什么时候跑是运行期的事，静态判不了。 */
+    if (this.globals.has(e.name)) {
+      const g = this.globals.get(e.name);
+      if (g.lexIdx !== undefined && this.topIdx !== null && this.topIdx < g.lexIdx
+        && this.fn !== null && this.fn.isMain === true) {
+        this.err(e.span, `'${e.name}' is read before its declaration (TDZ; JS throws a ReferenceError here)`);
+      }
+      return globalRef(g.name);
+    }
     // 顶层函数当值用：包一个零捕获的转发闭包（每个函数只包一次）
     if (this.topFns.has(e.name)) return this.topFnValue(e.name);
     if (this.classes.has(e.name)) {
