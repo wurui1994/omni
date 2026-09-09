@@ -47,3 +47,17 @@ console.log(`dflt ${d1}${d2}${d3}${d4}${d5} [${ev.join(",")}]`);
 const { e1 = gv("e1", 1) } = {};
 const [e2 = gv("e2", 2)] = [];
 console.log(`dflt ${e1}${e2} [${ev.join(",")}]`);
+
+// 惰性位置里对成员 / 下标目标做 ++ / --（从前整族拒："hoist it into a statement"）
+const lo = { i: 0, next() { return this.i < 3 ? { value: this.i++, done: false } : { done: true }; } };
+console.log(JSON.stringify(lo.next()), JSON.stringify(lo.next()), JSON.stringify(lo.next()), JSON.stringify(lo.next()));
+const la = [10, 20, 30];
+let lk = 0;
+const pick = (c) => c ? la[lk++] : "no";
+console.log(pick(true), pick(true), pick(false), String(lk));
+const lb = { n: 5, m: 7 };
+const which = "n";
+console.log(String(true ? ++lb.n : 0), String(true ? lb[which]++ : 0), String(lb.n));
+let li = 0;
+const lstep = () => (li < 2 && la[li++] === 10) ? "hit" + li : "miss" + li;
+console.log(lstep(), lstep(), lstep());

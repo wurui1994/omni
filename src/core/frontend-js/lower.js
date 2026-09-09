@@ -3844,21 +3844,44 @@ class Lower {
 
   /** ++ / --：只对 number 有意义（js_arith 不许 bigint 与 number 混用） */
   update(e, discard) {
-    const lv = this.lvalue(e.arg, e.span);
-    if (!lv) return undefExpr();
     // '+' 不在 js_arith 里（字符串拼接与加法是同一个 op），所以自增走 js_add
     const bump = (x) => (e.op === '++'
       ? op('js_add', [x, constReal(1)])
       : op('js_arith', [x, constReal(1)], { op: '-' }));
+    /* 惰性位置（三元的分支、`&&` 的右边）里开不了语句 —— 那儿 emitPre 会报
+     * "hoist it into a statement"，而 lvalue 对**成员目标**头一件事就是 emitPre 存接收者。
+     * 所以这一支要抢在 lvalue 之前：把"存接收者"与"存计算键"也折进表达式，靠
+     * "三元的条件一定先算、两条分支又一样"来定顺序。于是 get 与 set 里读到的是同一格临时量，
+     * C 那边实参求值次序未指定也不再要紧（从前正因为这一点整族拒了）。
+     * 量出来的是最常见的手写迭代器：
+     *   next() { return this.i < 3 ? { value: this.i++, done: false } : { done: true }; }
+     * 从前报 "hoist it into a statement"，而它是再普通不过的 JS。 */
+    if (this.fn.lazies > 0 && e.arg.type === 'Member' && !this.staticPath(e.arg)) {
+      const seq = (first, then) => ternary(truthy(first), then, then);
+      const rT = this.temp();
+      const kT = e.arg.computed ? this.temp() : null;
+      const key = () => (kT === null ? this.propKey(e.arg.name) : varRef(kT));
+      const body = () => {
+        const got = () => op('js_idx_get', [varRef(rT), key()]);
+        // 前缀（与"值不要"的那一档）：值就是写回去的新值，js_idx_set 正好交出它
+        if (discard || e.prefix) return op('js_idx_set', [varRef(rT), key(), bump(got())]);
+        // 后缀的值是旧的：先存进 t0 再写回，最后读 t0
+        const t0 = this.temp();
+        const wrote = op('js_idx_set', [varRef(rT), key(), bump(assign(varRef(t0), got()))]);
+        return ternary(truthy(wrote), varRef(t0), varRef(t0));
+      };
+      const inner = kT === null
+        ? body()
+        : seq(assign(varRef(kT), this.expr(e.arg.prop)), body());
+      return seq(assign(varRef(rT), this.expr(e.arg.object)), inner);
+    }
+    const lv = this.lvalue(e.arg, e.span);
+    if (!lv) return undefExpr();
     if (discard || e.prefix) return lv.set(bump(lv.get()));
     /* 后缀的值是**旧的**，所以先存一份再写回。平时摊成两句（干净、也不挑目标形状）。
-     *
-     * 惰性位置（三元的分支、`&&` 的右边）里开不了语句 —— 那儿 emitPre 会报
-     * "hoist it into a statement"。名字这一支可以不摊：把两次写折进一个表达式
+     * 名字这一支在惰性位置里也不必摊：把两次写折进一个表达式
      *   (t = i) 先存旧值 -> i = t + 1 写回 -> 值是 t
-     * 三元的两条分支都是"读同一格临时量"，所以复制的只是一个变量引用，没有重复求值。
-     * 只给名字开这条路：成员/下标目标要在 set 与 get 里各求一次接收者，而 C 那边
-     * 实参求值次序是未指定的，两条腿会分叉。 */
+     * 三元的两条分支都是"读同一格临时量"，所以复制的只是一个变量引用，没有重复求值。 */
     if (this.fn.lazies > 0 && e.arg.type === 'Ident') {
       const t0 = this.temp();
       const wrote = lv.set(bump(assign(varRef(t0), lv.get())));
