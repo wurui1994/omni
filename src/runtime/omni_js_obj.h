@@ -29,6 +29,8 @@
 /* 原生选择子里“原型成员”那一段的起点（见 OMNI_JS_OBJ 里 omni_js_pm_* 那几格）。
    摆在宏外头：宏体里不能有 #define。 */
 #define OMNI_JS_PM_SEL 1000
+/* 内建构造器当值用那一段的起点（见 omni_js_realm_ctor）。 */
+#define OMNI_JS_CTOR_SEL 2000
 
 #define OMNI_JS_OBJ(LT, DT) \
 static DT omni_js_dict_of(omni_dyn v) { return (DT)omni_dyn_as_ref(v, OMNI_DYN_DICT); } \
@@ -73,6 +75,10 @@ static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k); \
 static omni_dyn omni_js_fn_proto_(omni_dyn f); \
 static omni_dyn omni_js_obj_keys(omni_dyn o); \
 static omni_dyn omni_js_realm_proto(omni_str name); \
+static omni_dyn omni_js_realm_ctor(omni_str name); \
+/* 函数值的 prototype 那张按同一性索引的旁表（$FNPROTO 的孪生）：realm_ctor 要往里预先坐一格，
+   而它排在 fn_proto_ 前头，所以表在这儿声明。 */ \
+static DT omni_js_fnproto_tbl_; \
 static omni_dyn omni_js_proto_of_tag_(omni_dyn v); \
 /* 原生函数值（realm 上那些成员、以及 f.call / f.apply）：造一格与按 sel 分派 */ \
 struct omni_js_nat_s { omni_fnptr fp; int64_t sel; omni_dyn a; }; \
@@ -83,6 +89,11 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args); \
    所以这儿只留两格函数指针：一格按 (原型名, 成员名) 查号，一格按号调。main 里登记一次
    （protoMembers 发的 omni_js_pm_init_）。没登记的时候读成员照旧当场报。
    sel 从 OMNI_JS_PM_SEL 起就是"第 ix 格原型成员"，载荷是 [名字, 形参个数]。 */ \
+/* 内建构造器的名字与形参个数（与 prelude 的 $js_mk_ctors 那 11 行一一对应）。 */ \
+static const char *omni_js_ctor_nm_[11] = { "Object", "Function", "Array", "String", "Number", \
+  "Boolean", "Symbol", "RegExp", "Map", "Set", "Date" }; \
+static const int64_t omni_js_ctor_ln_[11] = { 1, 1, 1, 1, 1, 1, 0, 2, 0, 0, 7 }; \
+static omni_dyn omni_js_ctor_tbl_[11]; \
 typedef int64_t (*omni_js_pm_find_t)(omni_str pr, omni_str nm, int64_t *argc); \
 typedef omni_dyn (*omni_js_pm_call_t)(int64_t ix, LT args, omni_dyn self); \
 static omni_js_pm_find_t omni_js_pm_find_ = NULL; \
@@ -289,6 +300,13 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
       if (nn_->sel == 10) { \
         LT bp = (LT)nn_->a.u.ref; \
         return key.len == 6 ? bp->items[3] : bp->items[2]; \
+      } \
+      /* 内建构造器那一格：名字与形参个数按 sel 查那两张静态表 */ \
+      if (nn_->sel >= OMNI_JS_CTOR_SEL) { \
+        int ci = (int)(nn_->sel - OMNI_JS_CTOR_SEL); \
+        if (key.len == 6) return omni_dyn_of_real((double)omni_js_ctor_ln_[ci]); \
+        return omni_dyn_of_s16(omni_s16_of_utf8( \
+          omni_str_new(omni_js_ctor_nm_[ci], (int64_t)strlen(omni_js_ctor_nm_[ci])))); \
       } \
       /* 原型成员那一格：名字与形参个数也是每一格自己的，存在载荷 list 的第 0 / 1 格 */ \
       if (nn_->sel >= OMNI_JS_PM_SEL) { \
@@ -1047,6 +1065,8 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
          交回去，所以直接发那格现成的原生（sel 3）—— 与 prelude 里 numP / boolP 上挂的
          那两格一字不差。少这一支 `(5).valueOf` 在这条腿上是 undefined，而 JS 那条腿是函数。 */ \
       if (k.len == 7 && memcmp(k.p, "valueOf", 7) == 0) return omni_js_nat_(3, omni_dyn_undef()); \
+      /* 原型身上那格 constructor（规范如此）：`[].constructor === Array` 靠它。 */ \
+      if (k.len == 11 && memcmp(k.p, "constructor", 11) == 0) return omni_js_realm_ctor(nm); \
       if (omni_js_pm_find_ != NULL) { \
         int64_t argc = 0; \
         int64_t ix = omni_js_pm_find_(nm, k, &argc); \
@@ -1065,7 +1085,39 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
                   (int)k.len, k.p, (int)nm.len, nm.p); \
       return omni_dyn_undef(); \
     } \
-    default: {                                          /* 原型成员那一格：按号调 */ \
+    default: { \
+      /* 内建构造器当值调（`const A = Array; A(3)`）：只做得了这几格 —— Function / Map /
+         Set / Date 的实参面这条腿上还没有，当场报（与 prelude 的 no() 一字不差）。 */ \
+      if (n->sel >= OMNI_JS_CTOR_SEL) { \
+        int ci = (int)(n->sel - OMNI_JS_CTOR_SEL); \
+        int64_t na = args == NULL ? 0 : args->len; \
+        omni_dyn a1 = na > 1 ? args->items[1] : omni_dyn_undef(); \
+        switch (ci) { \
+          case 0: /* Object */ \
+            if (a0.tag == OMNI_DYN_UNDEF || a0.tag == OMNI_DYN_NULL) return omni_js_obj_new(); \
+            if (omni_js_is_object(a0) || a0.tag == OMNI_DYN_LIST) return a0; \
+            omni_errorf("Object(primitive) would need a wrapper object; not supported"); \
+            return omni_dyn_undef(); \
+          case 2: { /* Array */ \
+            if (na == 1) return omni_js_arr_new_n(a0); \
+            LT l = LT##_new(); \
+            for (int64_t i = 0; i < na; i++) LT##_push(l, args->items[i]); \
+            return omni_js_arr_wrap(l); \
+          } \
+          /* omni_js_str（不是 str_v）：str_v 住在 STR_ARR 段、排在这一段后头。自带 toString
+             的对象照旧调得到 —— to_s16 那儿过的是 ToPrimitive 钩子。 */ \
+          case 3: return na == 0 ? omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("", 0))) \
+                                 : omni_js_str(a0); \
+          case 4: return na == 0 ? omni_dyn_of_real(0.0) : omni_js_num_of(a0); \
+          case 5: return omni_dyn_of_bool(omni_js_truthy(a0)); \
+          case 6: return omni_js_sym_new(a0); \
+          case 7: return omni_js_re_new(a0, a1); \
+          default: \
+            omni_errorf("'%s' as a value cannot be called here; call it by name instead", \
+                        omni_js_ctor_nm_[ci]); \
+            return omni_dyn_undef(); \
+        } \
+      } \
       if (n->sel >= OMNI_JS_PM_SEL && omni_js_pm_call_ != NULL) { \
         return omni_js_pm_call_(n->sel - OMNI_JS_PM_SEL, args, self); \
       } \
@@ -1118,6 +1170,11 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
                       true, false, true); \
     omni_js_def_data_(p, omni_js_name_("propertyIsEnumerable", 20), \
                       omni_js_nat_(6, omni_dyn_undef()), true, false, true); \
+    /* constructor 那一格（规范 20.1.3.1）：`({}).constructor === Object` 靠它。
+       别的原型上这一格由 get 陷阱答，只有 Object.prototype 是真对象、要真坐一格。
+       这儿回头调 realm_ctor 不会打转：realm_tbl_[0] 在上面已经填过了。 */ \
+    omni_js_def_data_(p, omni_js_name_("constructor", 11), \
+                      omni_js_realm_ctor(omni_str_new("Object", 6)), true, false, true); \
     return p; \
   } \
   /* 别的原型：一格带 get 陷阱的代理，读成员当场报 —— 同一性照旧成立（instanceof 只比它） */ \
@@ -1133,6 +1190,39 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
   ov->px_h = h; \
   omni_js_realm_tbl_[ix] = px; \
   return px; \
+} \
+/* 内建构造器**当值用**（ADR-0020 P1-f 的第二半）：`const A = Array`、`[].constructor === Array`。
+   与 realm_proto 同一个路子 —— 名字是编译期常量、每个 realm 一份，所以取两次是同一个值、
+   `===` 为真。它是一格原生（sel 从 OMNI_JS_CTOR_SEL 起）；prototype 那一格**预先坐进**
+   fnproto 旁表，于是 `A.prototype` 与 `x instanceof A` 都对。
+   静态面（`Array.isArray` / `Object.keys`）挂不上去 —— 函数在这个值域里还不是真对象，
+   那些名字只能从成员写法取。这一格与 JS 那条腿是同一条边界（写在 prelude 的 $js_mk_ctors 上）。 */ \
+static omni_dyn omni_js_realm_ctor(omni_str name) { \
+  int ix = -1; \
+  for (int i = 0; i < 11; i++) { \
+    int64_t l = (int64_t)strlen(omni_js_ctor_nm_[i]); \
+    if (name.len == l && memcmp(name.p, omni_js_ctor_nm_[i], (size_t)l) == 0) { ix = i; break; } \
+  } \
+  if (ix < 0) { \
+    omni_errorf("no such builtin constructor: %.*s", (int)name.len, name.p); \
+    return omni_dyn_undef(); \
+  } \
+  if (omni_js_ctor_tbl_[ix].tag == OMNI_DYN_FN) return omni_js_ctor_tbl_[ix]; \
+  omni_dyn c = omni_js_nat_(OMNI_JS_CTOR_SEL + ix, omni_dyn_undef()); \
+  omni_js_ctor_tbl_[ix] = c; \
+  /* prototype 预先坐好（$FNPROTO 的孪生）：不坐的话 fn_proto_ 会现造一格空的， \
+     于是 `[] instanceof Array` 静静地变成 false。 */ \
+  if (omni_js_fnproto_tbl_ == NULL) omni_js_fnproto_tbl_ = DT##_new(); \
+  DT##_set(omni_js_fnproto_tbl_, omni_js_key(c), omni_js_realm_proto(name)); \
+  return c; \
+} \
+/* x.constructor：就是一次普通的属性读（原型链上那一格 constructor）。真对象走槽表与链，
+   别的按标签走它那格 realm 原型 —— 那儿的 get 陷阱认得 "constructor"。 */ \
+static omni_dyn omni_js_ctor_get(omni_dyn o) { \
+  /* omni_js_s16_lit 住在 JSON 段（它排在这一段后头），所以这儿自己造那格名字 */ \
+  omni_dyn ck = omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("constructor", 11))); \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_getp(o, ck, o); \
+  return omni_js_getp(omni_js_proto_of_tag_(o), ck, o); \
 } \
 /* globalThis（ADR-0020 P4）：这个值域里没有全局环境记录（模块的顶层名字是模块局部的），
    所以它就是**一格普通的真对象**，每个 realm 一份 —— 与 prelude 里 realm 上那格 gt 逐条
@@ -1168,7 +1258,6 @@ static omni_dyn omni_js_proto_of_tag_(omni_dyn v) { \
    接收者跑 f、f 返回对象就用那一格。函数在这个值域里**不是**真对象，所以那格 prototype
    住在一张按同一性索引的旁表上（键就是 omni_js_key 给引用值发的地址）——
    与 prelude 的 $FNPROTO 逐条对应。旁表上那格原型身上挂一格不可枚举的 constructor。 */ \
-static DT omni_js_fnproto_tbl_; \
 static omni_dyn omni_js_fn_proto_(omni_dyn f) { \
   if (omni_js_fnproto_tbl_ == NULL) omni_js_fnproto_tbl_ = DT##_new(); \
   omni_str id = omni_js_key(f); \

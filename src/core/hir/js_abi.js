@@ -321,7 +321,7 @@ export const JS_ABI = {
      两格都只有 JS 那条腿：构造器对象住在 realm 里，而 realm 是真对象那一族的东西。
      js_ctor_get 单独占一格的理由写在 prelude 的 $js_ctor_get 上头 —— 让 C 在**发射期**
      就拒，而不是走 js_obj_get 静静地给 undefined。 */
-  js_realm_ctor: { js: '$js_realm_ctor', c: 'omni_js_realm_ctor', arity: 0, lit: ['ctor'] },
+  js_realm_ctor: { js: '$js_realm_ctor', c: 'omni_js_realm_ctor', arity: 0, lit: ['ctor'], litText: true },
   js_ctor_get: { js: '$js_ctor_get', c: 'omni_js_ctor_get', arity: 1 },
   // globalThis：一格普通的真对象，每个 realm 一份（见 prelude 里 gt 那一格的说明）
   js_global_this: { js: '$js_global_this', c: 'omni_js_global_this', arity: 0 },
@@ -927,7 +927,9 @@ const P1_JS_ONLY = [
   // 读成员当场报。realm_ctor / ctor_get 还在。
   // js_global_this 也有 C 孪生了：它就是一格以 Object.prototype 为原型的普通真对象
   // （每个 realm 一份）—— 自举那条腿只差它一个 op 就能整份 emit-c（量过：survey 只剩这一格）。
-  'js_realm_ctor', 'js_ctor_get', 'js_date_new', 'js_date_parts',
+  // js_realm_ctor / js_ctor_get 有 C 孪生了：构造器是一格原生（sel 从 OMNI_JS_CTOR_SEL 起），
+  // prototype 预先坐进 fnproto 旁表，原型上那格 constructor 由 get 陷阱答。
+  'js_date_new', 'js_date_parts',
   // Date.UTC 与 Date.parse 有 C 孪生了（runtime/omni_js_date.c）：它们交出来的是一个毫秒数，
   // 与真对象无关。new Date(…) 与 new Date(y, mo, d) 照旧拒 —— 前者造真对象，后者要本地时区。
   // 代理有 C 孪生了（omni_js_obj.h）：px_t / px_h 挂在真对象的载荷上，get / set / has /
