@@ -929,6 +929,11 @@ function $js_str(v) {
     // 数组的 String() 就是 join(",")（Array.prototype.toString），ADR-0020 P1
     case "list": return $js_arr_prim(v);
     case "symbol": return $js_sym_str(v);
+    /* String(new Map()) 是 "[object Map]"：规范里它走 Object.prototype.toString，
+       而那一格看的是 Symbol.toStringTag（Map / Set 各有一格）。照标签直说，
+       与 C 的 to_s16 对着写。 */
+    case "Map": return "[object Map]";
+    case "Set": return "[object Set]";
     default: $rt_error("cannot convert " + $dynTag(v) + " to string");
   }
 }
@@ -3502,6 +3507,17 @@ function $js_obj_to_string(t) {
   if (t === null) return "[object Null]";
   const tag = $js_isobj(t) ? $js_getp(t, $js_sym_wk("toStringTag"), undefined) : undefined;
   if (typeof tag === "string") return "[object " + tag + "]";
+  /* 规范 20.1.3.6 的 builtinTag 看的是**内部槽**；这个值域里的替身是原型链 —— Date /
+     Error / Promise 造出来的那格对象自己没有 cl（都是 "Object"），认它们的原型。
+     realm 还没建起来就不必建：那时候手里绝不可能有这几格原型。 */
+  if ($js_isobj(t) && $R !== null) {
+    for (let cur = t.pr; $js_isobj(cur); cur = cur.pr) {
+      if (cur === $R.dateP) return "[object Date]";
+      if (cur === $R.errP) return "[object Error]";
+      if (cur === $R.promP) return "[object Promise]";
+      if (cur === $R.reP) return "[object RegExp]";
+    }
+  }
   if ($js_isobj(t)) return "[object " + t.cl + "]";
   switch ($dynTag(t)) {
     case "list": return "[object Array]";
@@ -3509,6 +3525,12 @@ function $js_obj_to_string(t) {
     case "real": case "int": return "[object Number]";
     case "bool": return "[object Boolean]";
     case "function": return "[object Function]";
+    /* 这几格在 JS 里都是对象，可在这个值域里不是"真对象"，所以照标签直说。
+       WeakMap / WeakSet 就是 Map / Set（ADR-0020 P4 画的边界），因此也报 Map / Set。 */
+    case "Map": return "[object Map]";
+    case "Set": return "[object Set]";
+    case "regexp": return "[object RegExp]";
+    case "symbol": return "[object Symbol]";
     default: return "[object Object]";
   }
 }

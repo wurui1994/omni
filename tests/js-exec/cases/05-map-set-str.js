@@ -177,3 +177,7 @@ e1[0][1] = 99;
 console.log(`ent ${em.get("a")} ${[...em][0].join(":")} ${e1[0].join(":")}`);
 for (const pair of em) { pair[0] = "zz"; }
 console.log(`ent ${[...em.keys()].join(",")} ${em.has("a")}`);
+
+// String(new Map()) 是 "[object Map]"（规范里它走 Object.prototype.toString，那一格看的是
+// Symbol.toStringTag）。从前两侧都撞在 "cannot convert Map to string" 上。
+console.log(`str ${String(new Map())} ${String(new Set())} ${`${new Map([[1, 2]])}`}`);

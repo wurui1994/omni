@@ -197,6 +197,11 @@ static omni_s16 to_s16(omni_dyn v) {
       omni_s16 slash = omni_s16_of_utf8(omni_str_new("/", 1));
       return omni_s16_cat(omni_s16_cat(omni_s16_cat(slash, r->src), slash), r->flags);
     }
+    /* String(new Map()) 是 "[object Map]"：规范里它走 Object.prototype.toString，
+       而那一格看的是 Symbol.toStringTag（Map / Set 各有一格）。这儿不用 realm ——
+       照标签直说，与 prelude 的 $js_str 对着写。 */
+    case OMNI_DYN_MAP: return omni_s16_of_utf8(omni_str_new("[object Map]", 12));
+    case OMNI_DYN_SET: return omni_s16_of_utf8(omni_str_new("[object Set]", 12));
     default:
       omni_errorf("cannot convert %s to string", omni_dyn_tag_name(v.tag));
       return omni_s16_of_utf8(omni_str_new("", 0));
