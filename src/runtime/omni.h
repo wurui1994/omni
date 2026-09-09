@@ -108,7 +108,9 @@ typedef struct { omni_dyn *items; int64_t len; int64_t cap; } omni_js_list_view;
 typedef struct {
   omni_str *keys; omni_dyn *vals; bool *live;
   int64_t n; int64_t cap; int64_t count;
-  int64_t *idx; int64_t icap;
+  /* idx 是 int32：索引表总比条目数大一倍以上，是内存里的主角之一（见 omni_container.h
+     那段注释里量出来的 1.46 GB）。**这一行与模板必须同步改** —— 它是布局的复述。 */
+  int32_t *idx; int64_t icap;
 } omni_js_dict_view;
 
 /* 真对象的载荷（ADR-0020 P1-c 的第十步）。ps 是那张**有序的**槽表（键 -> 一格槽），

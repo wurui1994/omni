@@ -70,24 +70,31 @@ static bool NAME##_contains(NAME a, T v) { \
 
 /* dict：条目数组保持插入序，另有一张开放寻址索引表。
    idx[h]：0 = 空槽，>0 = 条目下标+1，-1 = 墓碑（删除后仍要保持探测链）
-   ihash[h]：那一格键的**完整**哈希。探测时先比这 8 个字节，只有相等才去调 EQ ——
-   EQ 对字符串键是一次真调用 + memcmp，而 -O0 下那两样都不便宜。量出来的（自举那条腿，
-   emit-c 一趟 15 秒的采样）：omni_dict_string_dynamic_find 2917 样本、memcmp 252、
-   omni_hash_string 547 —— 属性取值这一条路占掉一半以上的 CPU。 */ \
+
+   **idx 是 int32 而不是 int64**：这张表的大小是 (n+1)*2 向上取整到 2 的幂，也就是**总是
+   比条目数大一倍以上**，所以它在内存里不是配角 —— 一个 4 条目的 dict：keys+vals 128 字节、
+   idx 就要 8 格。量出来的：`omni check src/cli.js`（一个字节产物都不出）峰值 1.46 GB，
+   6.5 MB 源码涨了 225 倍，而 AST 的每个节点都是一格 dict。条目数上不了 2^31，
+   所以 int32 是白拿的一半。
+
+   曾经这儿还并排存过一份完整哈希（探测时先比 8 个字节再调 EQ）。**量下来是白做的**：
+   emit-c 一趟 35.6s -> 36.2s、用户 CPU 25.9 -> 25.5s，全在噪声里 —— `find` 那 2917 个
+   采样是 -O0 下探测循环**本身**（没有寄存器分配、每个 static inline 都是真调用），不是比较。
+   而它每个 dict 多要 icap*8 字节，正压在真正的瓶颈上，所以撤了。记在这儿免得再试一次。 */ \
 #define OMNI_DICT_BODY(NAME, KT, VT) \
 struct NAME##_s { \
   KT *keys; VT *vals; bool *live; \
   int64_t n;      /* 条目数（含墓碑） */ \
   int64_t cap; \
   int64_t count;  /* 存活条目数 */ \
-  int64_t *idx; uint64_t *ihash; int64_t icap; \
+  int32_t *idx; int64_t icap; \
 };
 
 #define OMNI_DICT_DEFINE(NAME, KT, VT, HASH, EQ, KSTR, LNAME) \
 static NAME NAME##_new(void) { \
   NAME d = (NAME)omni_alloc(sizeof(struct NAME##_s)); \
   d->keys = NULL; d->vals = NULL; d->live = NULL; \
-  d->n = 0; d->cap = 0; d->count = 0; d->idx = NULL; d->ihash = NULL; d->icap = 0; \
+  d->n = 0; d->cap = 0; d->count = 0; d->idx = NULL; d->icap = 0; \
   return d; \
 } \
 /* 哈希已经算好的那一份入口：键是编译期字面量时（backend-c 的 constKey 那条特化）
@@ -97,9 +104,9 @@ static int64_t NAME##_find_h(NAME d, KT k, uint64_t hv) { \
   uint64_t mask = (uint64_t)d->icap - 1; \
   uint64_t h = hv & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \
-    int64_t e = d->idx[h]; \
+    int32_t e = d->idx[h]; \
     if (e == 0) return -1; \
-    if (e > 0 && d->ihash[h] == hv && EQ(d->keys[e - 1], k)) return e - 1; \
+    if (e > 0 && EQ(d->keys[e - 1], k)) return e - 1; \
     h = (h + 1) & mask; \
   } \
   return -1; \
@@ -118,17 +125,14 @@ static void NAME##_rebuild(NAME d) { \
   d->n = w; \
   int64_t ic = d->icap ? d->icap : 8; \
   while (ic < (d->n + 1) * 2) ic *= 2; \
-  d->idx = (int64_t *)omni_alloc(sizeof(int64_t) * (size_t)ic); \
-  d->ihash = (uint64_t *)omni_alloc(sizeof(uint64_t) * (size_t)ic); \
+  d->idx = (int32_t *)omni_alloc(sizeof(int32_t) * (size_t)ic); \
   d->icap = ic; \
-  for (int64_t i = 0; i < ic; i++) { d->idx[i] = 0; d->ihash[i] = 0; } \
+  for (int64_t i = 0; i < ic; i++) d->idx[i] = 0; \
   uint64_t mask = (uint64_t)ic - 1; \
   for (int64_t i = 0; i < d->n; i++) { \
-    uint64_t hv = (uint64_t)HASH(d->keys[i]); \
-    uint64_t h = hv & mask; \
+    uint64_t h = (uint64_t)HASH(d->keys[i]) & mask; \
     while (d->idx[h] != 0) h = (h + 1) & mask; \
-    d->idx[h] = i + 1; \
-    d->ihash[h] = hv; \
+    d->idx[h] = (int32_t)(i + 1); \
   } \
 } \
 static int64_t NAME##_len(NAME d) { return d->count; } \
@@ -149,8 +153,7 @@ static VT NAME##_set_h(NAME d, KT k, VT v, uint64_t hv) { \
   uint64_t mask = (uint64_t)d->icap - 1; \
   uint64_t h = hv & mask; \
   while (d->idx[h] > 0) h = (h + 1) & mask; \
-  d->idx[h] = slot + 1; \
-  d->ihash[h] = hv; \
+  d->idx[h] = (int32_t)(slot + 1); \
   return v; \
 } \
 static VT NAME##_set(NAME d, KT k, VT v) { return NAME##_set_h(d, k, v, (uint64_t)HASH(k)); } \
@@ -162,12 +165,11 @@ static VT NAME##_get(NAME d, KT k) { \
 static bool NAME##_remove(NAME d, KT k) { \
   if (d->icap == 0) return false; \
   uint64_t mask = (uint64_t)d->icap - 1; \
-  uint64_t hv = (uint64_t)HASH(k); \
-  uint64_t h = hv & mask; \
+  uint64_t h = (uint64_t)HASH(k) & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \
-    int64_t e = d->idx[h]; \
+    int32_t e = d->idx[h]; \
     if (e == 0) return false; \
-    if (e > 0 && d->ihash[h] == hv && EQ(d->keys[e - 1], k)) { \
+    if (e > 0 && EQ(d->keys[e - 1], k)) { \
       d->live[e - 1] = false; d->idx[h] = -1; d->count--; return true; \
     } \
     h = (h + 1) & mask; \
@@ -186,12 +188,12 @@ static NAME NAME##_from(const KT *ks, const VT *vs, int64_t n) { \
   return d; \
 }
 
-/* set 复用 dict 的索引结构，只是没有值数组 */
+/* set 复用 dict 的索引结构，只是没有值数组（idx 同样是 int32，理由见 dict 那段） */
 #define OMNI_SET_BODY(NAME, T) \
 struct NAME##_s { \
   T *keys; bool *live; \
   int64_t n; int64_t cap; int64_t count; \
-  int64_t *idx; int64_t icap; \
+  int32_t *idx; int64_t icap; \
 };
 
 #define OMNI_SET_DEFINE(NAME, T, HASH, EQ, LNAME) \
@@ -206,7 +208,7 @@ static int64_t NAME##_find(NAME d, T k) { \
   uint64_t mask = (uint64_t)d->icap - 1; \
   uint64_t h = (uint64_t)HASH(k) & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \
-    int64_t e = d->idx[h]; \
+    int32_t e = d->idx[h]; \
     if (e == 0) return -1; \
     if (e > 0 && EQ(d->keys[e - 1], k)) return e - 1; \
     h = (h + 1) & mask; \
@@ -223,14 +225,14 @@ static void NAME##_rebuild(NAME d) { \
   d->n = w; \
   int64_t ic = d->icap ? d->icap : 8; \
   while (ic < (d->n + 1) * 2) ic *= 2; \
-  d->idx = (int64_t *)omni_alloc(sizeof(int64_t) * (size_t)ic); \
+  d->idx = (int32_t *)omni_alloc(sizeof(int32_t) * (size_t)ic); \
   d->icap = ic; \
   for (int64_t i = 0; i < ic; i++) d->idx[i] = 0; \
   uint64_t mask = (uint64_t)ic - 1; \
   for (int64_t i = 0; i < d->n; i++) { \
     uint64_t h = (uint64_t)HASH(d->keys[i]) & mask; \
     while (d->idx[h] != 0) h = (h + 1) & mask; \
-    d->idx[h] = i + 1; \
+    d->idx[h] = (int32_t)(i + 1); \
   } \
 } \
 static int64_t NAME##_len(NAME d) { return d->count; } \
@@ -249,14 +251,14 @@ static void NAME##_add(NAME d, T k) { \
   uint64_t mask = (uint64_t)d->icap - 1; \
   uint64_t h = (uint64_t)HASH(k) & mask; \
   while (d->idx[h] > 0) h = (h + 1) & mask; \
-  d->idx[h] = slot + 1; \
+  d->idx[h] = (int32_t)(slot + 1); \
 } \
 static bool NAME##_remove(NAME d, T k) { \
   if (d->icap == 0) return false; \
   uint64_t mask = (uint64_t)d->icap - 1; \
   uint64_t h = (uint64_t)HASH(k) & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \
-    int64_t e = d->idx[h]; \
+    int32_t e = d->idx[h]; \
     if (e == 0) return false; \
     if (e > 0 && EQ(d->keys[e - 1], k)) { d->live[e - 1] = false; d->idx[h] = -1; d->count--; return true; } \
     h = (h + 1) & mask; \
