@@ -3221,6 +3221,17 @@ class Lower {
         this.err(e.span, `new ${n}(buf[, offset[, length]]) takes one to three arguments`);
         return undefExpr();
       }
+      /* new Uint8Array([…])：实参是一格数组就按元素填字节（ToUint8）。数组与字节缓冲在
+       * 这个值域里是两种值，而"是哪一种"只有运行期知道，所以在这儿按标签挑 op ——
+       * 填字节那一格（js_buf_of_list）住在能走 list 的宏段里，见 js_abi.js 的说明。
+       * DataView 不收数组（规范里那是 TypeError），所以只给 Uint8Array 这一支。 */
+      if (n === 'Uint8Array' && as.length === 1) {
+        const t = this.temp();
+        this.emitPre(exprStmt(assign(varRef(t), as[0])), e.span);
+        return ternary(boolOp('js_arr_is_array', [varRef(t)]),
+          op('js_buf_of_list', [varRef(t)]),
+          op('js_buf_view', [varRef(t), undefExpr(), undefExpr()]));
+      }
       return op('js_buf_view', [as[0], as[1] ?? undefExpr(), as[2] ?? undefExpr()]);
     }
     /* new Date(...)（ADR-0020 P4）：一格真对象，毫秒在隐藏槽里，取值面挂在 realm 的

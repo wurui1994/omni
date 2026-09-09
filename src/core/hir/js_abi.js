@@ -495,6 +495,10 @@ export const JS_ABI = {
   // 存取一律**显式按字节拼**（不 memcpy 一个 int64/double 下去）：这样与宿主的 DataView
   // 逐位相同，不看机器的字节序。le 那个实参照 DataView 的签名收，两种都真支持。
   js_buf_new: { js: '$js_buf_new', c: 'omni_js_buf_new', arity: 1 },
+  /* new Uint8Array([…]) 那一支：实参是一格 list 就按元素填字节（ToUint8）。它必须住在
+     **能走 list 的宏段**里（omni_js_arr.h 的 OMNI_JS_ARR_3）—— omni_js.c 拿不到 list 的
+     类型实例，所以 omni_js_buf_view 分不出这一支。降级器按运行期标签在两格 op 之间挑。 */
+  js_buf_of_list: { js: '$js_buf_of_list', c: 'omni_js_buf_of_list', arity: 1 },
   js_buf_view: { js: '$js_buf_view', c: 'omni_js_buf_view', arity: 3 },
   js_buf_len: { js: '$js_buf_len', c: 'omni_js_buf_len', arity: 1 },
   js_buf_set: { js: '$js_buf_set', c: 'omni_js_buf_set', arity: 2, ret: 'void' },

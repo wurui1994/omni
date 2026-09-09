@@ -315,6 +315,18 @@ OMNI_JS_ARR_3(LT, DT)
    默认排序（不给比较器）按元素的字符串形式比码元，不是按数值 —— [10,9] 排出来是
    [10,9] 而不是 [9,10]，这是 JS 的规定，照抄。 */
 #define OMNI_JS_ARR_3(LT, DT) \
+/* new Uint8Array([…]) 那一支：实参是一格 list 就按元素填字节。每一格照规范 ToNumber
+   再 ToUint8（js_to_u8 在 omni_js.c 里，截零、模 256、NaN 归 0），所以 "3" / true / null
+   都收得下。这一格必须住在**能走 list 的宏段**里 —— omni_js.c 拿不到 list 的类型实例，
+   所以 omni_js_buf_view 分不出这一支；降级器按运行期标签在两格 op 之间挑。 */ \
+static omni_dyn omni_js_buf_of_list(omni_dyn ad) { \
+  LT l = omni_js_arr_of(ad); \
+  omni_dyn b = omni_js_buf_new(omni_dyn_of_real((double)l->len)); \
+  for (int64_t i = 0; i < l->len; i++) { \
+    omni_js_buf_set_u8(b, omni_dyn_of_real((double)i), omni_js_num_of(l->items[i])); \
+  } \
+  return b; \
+} \
 static omni_dyn omni_js_arr_join(omni_dyn a, omni_dyn sep) { \
   LT l = omni_js_arr_of(a); \
   /* 分隔符照规范 ToString（22.1.3.18 第 4 步）：缺席才是 ","，null 是 "null" 而不是报错 */ \

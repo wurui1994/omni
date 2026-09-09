@@ -5267,6 +5267,15 @@ function $js_buf_new(n) {
   if (!Number.isInteger(len) || len < 0) $rt_error("invalid byte length");
   return new $JsBytes(new Uint8Array(new ArrayBuffer(len)));
 }
+/* new Uint8Array([…]) 那一支：实参是一格 list 就按元素填字节。每一格照规范 ToNumber 再
+   ToUint8（宿主的 u[i] = x 就是这一步：截零、模 256、NaN 归 0），所以 "3" / true / null
+   都收得下。降级器按运行期标签在这一格与 js_buf_view 之间挑（见 lower.js）。 */
+function $js_buf_of_list(a) {
+  const l = $js_arr_of(a);
+  const u = new Uint8Array(l.length);
+  for (let i = 0; i < l.length; i++) u[i] = $js_real($js_num_of(l[i]), "new Uint8Array");
+  return new $JsBytes(u);
+}
 function $js_buf_view(b, off, len) {
   // new Uint8Array(n) 那一支：实参是个数就是"新开 n 字节"，不是开视图
   if ($dynTag(b) === "real") return $js_buf_new(b);

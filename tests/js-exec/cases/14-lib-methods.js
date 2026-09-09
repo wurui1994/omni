@@ -69,6 +69,12 @@ ta[1] = 300;
 console.log(`bytes ${ta[0]} ${ta[1]} ${ta[2]} ${ta.length}`);
 ta[2] = ta[0] - 1;
 console.log(`bytes ${ta[2]}`);
+// new Uint8Array([…])：实参是数组就按元素填字节，每格照规范 ToNumber 再 ToUint8
+// （截零、模 256、NaN 归 0）。数组与字节缓冲是两种值，"是哪一种"只有运行期知道，
+// 所以降级器按标签在 js_buf_of_list 与 js_buf_view 之间挑。
+const fromArr = new Uint8Array([256, -1, 1.7, NaN, "3", true, null, undefined]);
+console.log(`bytes ${fromArr.length} ${fromArr[0]} ${fromArr[1]} ${fromArr[2]} ${fromArr[3]}`);
+console.log(`bytes ${fromArr[4]} ${fromArr[5]} ${fromArr[6]} ${fromArr[7]} ${new Uint8Array([]).length}`);
 
 // typeof 一个没声明的名字是 "undefined"，不是编译错（特性探测靠这一条）。
 // 名字得是**哪儿都没有**的：structuredClone 那种在 node 里是函数，比不成。
