@@ -86,6 +86,12 @@ console.log(`bytes ${fl[0]} ${fl[1]} ${fl[2]} ${fl[3]}`);
 const fl2 = new Uint8Array([1, 2, 3, 4]);
 fl2.fill(7, -2);
 console.log(`bytes ${fl2[0]} ${fl2[1]} ${fl2[2]} ${fl2[3]} ${new Uint8Array(2).fill(1)[1]}`);
+// JSON.stringify 的缩进照规范 25.5.2 第 4-6 步：**数**是那么多空格（最多 10）、
+// **串**是它自己（最多前 10 个码元）、别的没有缩进。从前只认数，给串静静地印成一行。
+console.log(JSON.stringify([1, [2]], null, "\t"));
+console.log(JSON.stringify({ a: { b: 1 } }, null, 2));
+console.log(JSON.stringify({ a: 1 }, null, "ab"), JSON.stringify({ a: 1 }, null, ""));
+console.log(`gap ${JSON.stringify({ a: 1 }, null, 20).length} ${JSON.stringify({ a: 1 }, null, "0123456789xyz").split("\n")[1]}`);
 
 // typeof 一个没声明的名字是 "undefined"，不是编译错（特性探测靠这一条）。
 // 名字得是**哪儿都没有**的：structuredClone 那种在 node 里是函数，比不成。

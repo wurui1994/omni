@@ -85,7 +85,7 @@ static OMNI_NORETURN void omni_js_json_fail(const char *kind, omni_s16 msg) { \
 static OMNI_NORETURN void omni_js_json_failc(const char *kind, const char *msg) { \
   omni_js_json_fail(kind, omni_js_s16_lit(msg)); \
 } \
-static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t depth, const void **seen); \
+static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, omni_s16 gap, int64_t depth, const void **seen); \
 static omni_dyn omni_js_json_apply(omni_dyn rep, omni_s16 key, omni_dyn v) { \
   /* replacer 只有**函数**形态才调（数组形态是白名单，见 omni_js_json_list） */ \
   if (rep.tag != OMNI_DYN_FN) return v; \
@@ -115,15 +115,19 @@ static omni_dyn omni_js_json_list(omni_dyn rep) { \
   } \
   return omni_js_arr_wrap(out); \
 } \
-static omni_s16 omni_js_json_nl(int64_t gap, int64_t depth) { \
-  if (gap <= 0) return omni_js_s16_lit(""); \
-  uint16_t *out = (uint16_t *)omni_alloc((size_t)(gap * depth + 1) * sizeof(uint16_t)); \
+/* 缩进那一格是**一个串**（规范 25.5.2 第 4-6 步：数是那么多空格、串是它自己），
+   所以换行那一格是 "\n" 加 depth 遍 gap。与 prelude 的 $js_json_nl 对着写。 */ \
+static omni_s16 omni_js_json_nl(omni_s16 gap, int64_t depth) { \
+  if (gap.len <= 0) return omni_js_s16_lit(""); \
+  uint16_t *out = (uint16_t *)omni_alloc((size_t)(gap.len * depth + 1) * sizeof(uint16_t)); \
   int64_t n = 0; \
   out[n++] = '\n'; \
-  for (int64_t i = 0; i < gap * depth; i++) out[n++] = ' '; \
+  for (int64_t d = 0; d < depth; d++) { \
+    for (int64_t i = 0; i < gap.len; i++) out[n++] = gap.p[i]; \
+  } \
   omni_s16 r; r.p = out; r.len = n; return r; \
 } \
-static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t depth, const void **seen) { \
+static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, omni_s16 gap, int64_t depth, const void **seen) { \
   if (v.tag == OMNI_DYN_DICT) { \
     omni_dyn tj = omni_js_obj_get(v, omni_dyn_of_s16(omni_js_s16_lit("toJSON"))); \
     if (tj.tag == OMNI_DYN_FN) { \
@@ -191,7 +195,7 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
           first = false; \
           out = omni_s16_cat(out, sep); \
           out = omni_s16_cat(out, omni_js_json_quote_s16(key)); \
-          out = omni_s16_cat(out, omni_js_s16_lit(gap > 0 ? ": " : ":")); \
+          out = omni_s16_cat(out, omni_js_s16_lit(gap.len > 0 ? ": " : ":")); \
           out = omni_s16_cat(out, s); \
         } \
         if (first) return omni_js_s16_lit("{}"); \
@@ -218,7 +222,7 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
         first = false; \
         out = omni_s16_cat(out, sep); \
         out = omni_s16_cat(out, omni_js_json_quote_s16(key)); \
-        out = omni_s16_cat(out, omni_js_s16_lit(gap > 0 ? ": " : ":")); \
+        out = omni_s16_cat(out, omni_js_s16_lit(gap.len > 0 ? ": " : ":")); \
         out = omni_s16_cat(out, s); \
       } \
       if (first) return omni_js_s16_lit("{}"); \
@@ -236,10 +240,22 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, int64_t gap, int64_t 
    jmp_buf 是一格静态量，所以入口先把它存一份再装自己那一份 —— replacer / toJSON 是用户
    代码，里面完全可以再调一次 JSON.stringify（嵌套），不存就把外层那个落点冲掉了。 */ \
 static omni_dyn omni_js_json_stringify(omni_dyn v, omni_dyn rep, omni_dyn indent) { \
-  int64_t gap = 0; \
-  if (indent.tag == OMNI_DYN_REAL && indent.u.r > 0) { \
-    gap = (int64_t)indent.u.r; \
-    if (gap > 10) gap = 10; \
+  /* 缩进照规范 25.5.2 第 4-6 步：**数**是那么多个空格（最多 10）、**串**是它自己
+     （最多前 10 个码元）、别的没有缩进。从前只认数，JSON.stringify(x, null, "\t")
+     静静地印成一行。与 prelude 的 $js_json_stringify 对着写。 */ \
+  omni_s16 gap = omni_js_s16_lit(""); \
+  if (indent.tag == OMNI_DYN_REAL || indent.tag == OMNI_DYN_INT) { \
+    int64_t n = (int64_t)omni_js_arr_i(indent); \
+    if (n > 10) n = 10; \
+    if (n > 0) { \
+      uint16_t *sp = (uint16_t *)omni_alloc((size_t)n * sizeof(uint16_t)); \
+      for (int64_t i = 0; i < n; i++) sp[i] = ' '; \
+      gap.p = sp; \
+      gap.len = n; \
+    } \
+  } else if (indent.tag == OMNI_DYN_STR16) { \
+    omni_s16 s = omni_js_as_s16(indent); \
+    gap = s.len > 10 ? omni_s16_slice(s, 0, 10) : s; \
   } \
   const void *seen[OMNI_JS_JSON_MAXDEPTH]; \
   jmp_buf save; \

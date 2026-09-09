@@ -4402,7 +4402,7 @@ function $js_json_list(rep) {
   }
   return out;
 }
-function $js_json_nl(gap, depth) { return gap > 0 ? "\n" + " ".repeat(gap * depth) : ""; }
+function $js_json_nl(gap, depth) { return gap === "" ? "" : "\n" + gap.repeat(depth); }
 // undefined 与函数值"该省略"：在对象里跳过、在数组里变成 null。用 undefined 当哨兵。
 // toJSON（规范 SerializeJSONProperty 第 2 步）：对象身上有可调用的 toJSON 就先换成它的
 // 返回值 —— Date 的序列化就是这么来的。与规范差的一格：规范里 toJSON 在 replacer
@@ -4467,7 +4467,7 @@ function $js_json_body(v, t, rep, gap, depth, seen) {
         if (s === undefined) continue;
         if (!first) out += ",";
         first = false;
-        out += sep + $js_json_quote(k) + (gap > 0 ? ": " : ":") + s;
+        out += sep + $js_json_quote(k) + (gap === "" ? ":" : ": ") + s;
       }
       return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
     }
@@ -4476,7 +4476,7 @@ function $js_json_body(v, t, rep, gap, depth, seen) {
       if (s === undefined) continue;
       if (!first) out += ",";
       first = false;
-      out += sep + $js_json_quote(k) + (gap > 0 ? ": " : ":") + s;
+      out += sep + $js_json_quote(k) + (gap === "" ? ":" : ": ") + s;
     }
     return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
   }
@@ -4495,15 +4495,24 @@ function $js_json_body(v, t, rep, gap, depth, seen) {
       if (s === undefined) continue;
       if (!first) out += ",";
       first = false;
-      out += sep + $js_json_quote(k) + (gap > 0 ? ": " : ":") + s;
+      out += sep + $js_json_quote(k) + (gap === "" ? ":" : ": ") + s;
     }
     return first ? "{}" : out + $js_json_nl(gap, depth) + "}";
   }
   throw new $HostBad("do not know how to serialize a " + t, "TypeError");
 }
+/* 缩进那一格照规范 25.5.2 第 4-6 步：**数**是那么多个空格（最多 10），**串**是它自己
+   （最多前 10 个码元），别的一律没有缩进。从前只认数，JSON.stringify(x, null, "\t")
+   静静地印成一行 —— 所以 gap 一路是个串，不是"几个空格"。 */
 function $js_json_stringify(v, rep, indent) {
-  let gap = 0;
-  if ($dynTag(indent) === "real" && indent > 0) gap = Math.min(Math.trunc(indent), 10);
+  let gap = "";
+  const t = $dynTag(indent);
+  if (t === "real" || t === "int") {
+    const n = Math.min(Math.trunc($js_real($js_num_of(indent), "JSON.stringify")), 10);
+    if (n > 0) gap = " ".repeat(n);
+  } else if (t === "string") {
+    gap = $js_asS16(indent).slice(0, 10);
+  }
   try {
     return $js_json_val($js_json_apply(rep, "", v), rep, gap, 0, []);
   } catch (e) {
