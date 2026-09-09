@@ -942,7 +942,10 @@ const P1_JS_ONLY = [
   // 好的 list（matchAll 有限、无副作用，for-of 与展开逐格相同），手写 it.next() 那条路
   // 在那儿是一句响错。
   'js_jobs_run',
-  'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
+  // js_gen_new / js_gen_res 有 C 孪生了（omni_js_obj.h）：状态机的改写在前端就做完了，
+  // 运行时这一侧只有"带 $stp / $gst 两槽的真对象 + {value,done} + gen_step"三格。
+  // js_gen_awt / js_async_run / js_agen_new 还在 —— 那要 Promise 与作业队列先落地。
+  'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',
   // js_fn_construct 有 C 孪生了（omni_js_obj.h）：函数不是真对象，所以那格 prototype 住在
   // 一张按同一性索引的旁表上（与 prelude 的 $FNPROTO 对应）；右边是**类对象**时（局部类、

@@ -76,6 +76,13 @@ static omni_dyn omni_js_fn_proto_(omni_dyn f); \
 static omni_dyn omni_js_obj_keys(omni_dyn o); \
 static omni_dyn omni_js_realm_proto(omni_str name); \
 static omni_dyn omni_js_realm_ctor(omni_str name); \
+/* 生成器的驱动（ADR-0020 P2）：nat_call_ 里那三格原生要它，而它排在后头 */ \
+/* 原始值那一族的可迭代来源（list / 串 / Map / Set 摊成一条 list）：住在 STR_ARR 段，
+   同一个翻译单元里先声明后定义合法。 */ \
+static omni_dyn omni_js_iter(omni_dyn v); \
+static omni_dyn omni_js_src_iter_(omni_dyn v); \
+static omni_dyn omni_js_gen_res(omni_dyn v, omni_dyn done); \
+static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode); \
 /* 函数值的 prototype 那张按同一性索引的旁表（$FNPROTO 的孪生）：realm_ctor 要往里预先坐一格，
    而它排在 fn_proto_ 前头，所以表在这儿声明。 */ \
 static DT omni_js_fnproto_tbl_; \
@@ -477,6 +484,11 @@ static omni_dyn omni_js_obj_get(omni_dyn o, omni_dyn k) { \
   /* 真对象那一支要拿**原样的键**：符号键按同一性发键，过一遍 omni_js_prop_k 就成了串
      （类对象上那格 $init 用的就是符号键 Symbol.omni.classInit）。 */ \
   if (o.tag == OMNI_DYN_OBJ) return omni_js_getp(o, k, omni_dyn_undef()); \
+  /* 别的接收者上的符号键：dict / list 自己挂不了符号，可它那格 realm 原型上可能有
+     （数组的 Symbol.iterator 就是）—— 所以往原型上问，而不是当场报。 */ \
+  if (k.tag == OMNI_DYN_SYM && o.tag != OMNI_DYN_NULL && o.tag != OMNI_DYN_UNDEF) { \
+    return omni_js_getp(omni_js_proto_of_tag_(o), k, o); \
+  } \
   return omni_js_obj_getk(o, omni_js_prop_k(k)); \
 } \
 static omni_dyn omni_js_obj_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
@@ -1014,6 +1026,27 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       int64_t e = DT##_find(ps, omni_js_pkey_(a0)); \
       return omni_dyn_of_bool(e >= 0 && ((LT)ps->vals[e].u.ref)->items[5].u.b); \
     } \
+    case 12: case 13: case 14:                           /* 生成器的 next / return / throw */ \
+      return omni_js_gen_step_(self, a0, n->sel - 12); \
+    case 15: return self;                               /* 迭代器的 [Symbol.iterator]：交回自己 */ \
+    case 16: return omni_js_src_iter_(self);            /* 数组 / 串 / Map / Set 的 [Symbol.iterator] */ \
+    case 17: {                                          /* 源迭代器的 next */ \
+      omni_str sk = omni_js_pkey_(omni_js_name_("$src", 4)); \
+      omni_str xk = omni_js_pkey_(omni_js_name_("$ix", 3)); \
+      LT ss = self.tag == OMNI_DYN_OBJ ? omni_js_find_slot_(self, sk, NULL) : NULL; \
+      LT xs = self.tag == OMNI_DYN_OBJ ? omni_js_find_slot_(self, xk, NULL) : NULL; \
+      if (ss == NULL || xs == NULL) { \
+        omni_js_type_err_c("this is not an iterator"); \
+        return omni_dyn_undef(); \
+      } \
+      LT src = (LT)ss->items[0].u.ref; \
+      int64_t ix = (int64_t)xs->items[0].u.r; \
+      if (src == NULL || ix >= src->len) { \
+        return omni_js_gen_res(omni_dyn_undef(), omni_dyn_of_bool(true)); \
+      } \
+      xs->items[0] = omni_dyn_of_real((double)(ix + 1)); \
+      return omni_js_gen_res(src->items[ix], omni_dyn_of_bool(false)); \
+    } \
     case 8: {                                           /* f.call(thisArg, …) */ \
       LT rest = LT##_new(); \
       for (int64_t i = 1; args != NULL && i < args->len; i++) LT##_push(rest, args->items[i]); \
@@ -1067,6 +1100,12 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       if (k.len == 7 && memcmp(k.p, "valueOf", 7) == 0) return omni_js_nat_(3, omni_dyn_undef()); \
       /* 原型身上那格 constructor（规范如此）：`[].constructor === Array` 靠它。 */ \
       if (k.len == 11 && memcmp(k.p, "constructor", 11) == 0) return omni_js_realm_ctor(nm); \
+      /* 原始值那一族的 Symbol.iterator（数组 / 串 / Map / Set）：交出一格真迭代器对象。
+         手写协议与 yield* [1,2] 落在这一格；for-of 与展开走的是 js_iter 那条快路。 */ \
+      if (kd.tag == OMNI_DYN_SYM \
+          && kd.u.ref == omni_js_sym_wk(omni_str_new("iterator", 8)).u.ref) { \
+        return omni_js_nat_(16, omni_dyn_undef()); \
+      } \
       if (omni_js_pm_find_ != NULL) { \
         int64_t argc = 0; \
         int64_t ix = omni_js_pm_find_(nm, k, &argc); \
@@ -1135,11 +1174,12 @@ static omni_dyn omni_js_nat_(int64_t sel, omni_dyn a) { \
 } \
 /* realm 上那几格原型。名字与 prelude 的 $js_realm_proto 那个 switch 一一对应；认不出来的
    名字**当场报**，不给一格空对象。 */ \
-static omni_dyn omni_js_realm_tbl_[12]; \
+static omni_dyn omni_js_realm_tbl_[14]; \
 static int omni_js_realm_ix_(omni_str name) { \
-  static const char *names[12] = { "Object", "Function", "Array", "String", "Number", \
-    "Boolean", "Symbol", "Error", "RegExp", "Map", "Set", "Promise" }; \
-  for (int i = 0; i < 12; i++) { \
+  /* Generator / Iterator 排在最后两格：生成器那一族（ADR-0020 P2）落在 C 上要它们 */ \
+  static const char *names[14] = { "Object", "Function", "Array", "String", "Number", \
+    "Boolean", "Symbol", "Error", "RegExp", "Map", "Set", "Promise", "Generator", "Iterator" }; \
+  for (int i = 0; i < 14; i++) { \
     int64_t n = (int64_t)strlen(names[i]); \
     if (name.len == n && memcmp(name.p, names[i], (size_t)n) == 0) return i; \
   } \
@@ -1177,6 +1217,23 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
                       omni_js_realm_ctor(omni_str_new("Object", 6)), true, false, true); \
     return p; \
   } \
+  /* Generator.prototype（ADR-0020 P2）：**真对象**，三格原生 next / return / throw 都落到
+     同一个 gen_step（mode 0 / 1 / 2），再加一格 [Symbol.iterator] 交回自己。
+     它自己的原型是 Iterator.prototype ——那格是"读成员就报"的代理，于是 ES2025 那批 helper
+     （map / take …）在这条腿上是一句响错，不是静静的 undefined。 */ \
+  if (ix == 12) { \
+    omni_dyn gp = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Iterator", 8))); \
+    omni_js_realm_tbl_[12] = gp; \
+    omni_js_def_data_(gp, omni_js_name_("next", 4), omni_js_nat_(12, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(gp, omni_js_name_("return", 6), omni_js_nat_(13, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(gp, omni_js_name_("throw", 5), omni_js_nat_(14, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(gp, omni_js_sym_wk(omni_str_new("iterator", 8)), \
+                      omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
+    return gp; \
+  } \
   /* 别的原型：一格带 get 陷阱的代理，读成员当场报 —— 同一性照旧成立（instanceof 只比它） */ \
   omni_dyn h = omni_js_new_bare_(omni_dyn_null()); \
   omni_dyn nm = omni_dyn_of_s16(omni_s16_of_utf8(name)); \
@@ -1190,6 +1247,71 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
   ov->px_h = h; \
   omni_js_realm_tbl_[ix] = px; \
   return px; \
+} \
+/* 生成器（ADR-0020 P2）。状态机的改写在前端（frontend-js/genfn.js）就做完了，运行时这一侧
+   只有三格：一格带 $stp（状态机闭包）/ $gst（0 没开始 / 1 跑过 / 2 完了）两槽的真对象、
+   一格 {value, done}、以及驱动它的 gen_step。规则照 prelude 的 $js_gen_step 逐条对齐。 */ \
+/* 原始值那一族的 Symbol.iterator 交出来的**真迭代器对象**（与 prelude 的 $js_it_src 对应）：
+   先把来源摊成一条 list（omni_js_iter），再按下标喂。next 与 [Symbol.iterator] 直接坐在
+   这一格自己身上，不另立一格原型 —— 这条腿上唯一可观察的差别是它们算自有属性。
+   for-of 与展开走的是 js_iter 那条快路、不经过这儿；手写协议与 yield* [1,2] 才落到这一格。 */ \
+static omni_dyn omni_js_src_iter_(omni_dyn v) { \
+  omni_dyn it = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Object", 6))); \
+  omni_js_def_data_(it, omni_js_name_("$src", 4), omni_js_iter(v), true, false, true); \
+  omni_js_def_data_(it, omni_js_name_("$ix", 3), omni_dyn_of_real(0.0), true, false, true); \
+  omni_js_def_data_(it, omni_js_name_("next", 4), omni_js_nat_(17, omni_dyn_undef()), \
+                    true, false, true); \
+  omni_js_def_data_(it, omni_js_sym_wk(omni_str_new("iterator", 8)), \
+                    omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
+  return it; \
+} \
+static omni_dyn omni_js_gen_res(omni_dyn v, omni_dyn done) { \
+  omni_dyn o = omni_js_obj_new(); \
+  omni_js_obj_setk(o, omni_str_new("value", 5), v); \
+  omni_js_obj_setk(o, omni_str_new("done", 4), omni_dyn_of_bool(omni_js_truthy(done))); \
+  return o; \
+} \
+static omni_dyn omni_js_gen_new(omni_dyn step) { \
+  omni_dyn g = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Generator", 9))); \
+  omni_js_def_data_(g, omni_js_name_("$stp", 4), step, true, false, true); \
+  omni_js_def_data_(g, omni_js_name_("$gst", 4), omni_dyn_of_real(0.0), true, false, true); \
+  return g; \
+} \
+static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode) { \
+  /* find_slot_ 收的是**加了标签的键**（omni_js_pkey_ 发的那种），不是名字本身 */ \
+  omni_str sk = omni_js_pkey_(omni_js_name_("$stp", 4)); \
+  omni_str gk = omni_js_pkey_(omni_js_name_("$gst", 4)); \
+  LT sl = g.tag == OMNI_DYN_OBJ ? omni_js_find_slot_(g, sk, NULL) : NULL; \
+  LT gs = g.tag == OMNI_DYN_OBJ ? omni_js_find_slot_(g, gk, NULL) : NULL; \
+  if (sl == NULL || gs == NULL) { \
+    omni_js_type_err_c("this is not a generator"); \
+    return omni_dyn_undef(); \
+  } \
+  double st = gs->items[0].tag == OMNI_DYN_REAL ? gs->items[0].u.r : 0.0; \
+  /* 没开始就 return/throw，或者已经跑完了：**不进体**（规范如此）。 */ \
+  if (st == 2.0 || (st == 0.0 && mode != 0)) { \
+    gs->items[0] = omni_dyn_of_real(2.0); \
+    if (mode == 2) { omni_js_throw(v); return omni_dyn_undef(); } \
+    return omni_js_gen_res(mode == 1 ? v : omni_dyn_undef(), omni_dyn_of_bool(true)); \
+  } \
+  gs->items[0] = omni_dyn_of_real(1.0); \
+  LT a1 = LT##_new(); \
+  LT##_push(a1, v); \
+  LT##_push(a1, omni_dyn_of_real((double)mode)); \
+  omni_dyn r = omni_js_call_this(sl->items[0], omni_dyn_undef(), omni_js_arr_wrap(a1)); \
+  /* 体里抛出来的东西在挂起槽里：机器里还有活着的 catch 就用 mode 3 送回去接着跑
+     （genfn.js 的 tryCatch）；没有的话机器原样抛回来，生成器就此完。 */ \
+  if (omni_js_pending()) { \
+    LT a2 = LT##_new(); \
+    LT##_push(a2, omni_js_take_pending()); \
+    LT##_push(a2, omni_dyn_of_real(2.0)); \
+    r = omni_js_call_this(sl->items[0], omni_dyn_undef(), omni_js_arr_wrap(a2)); \
+    if (omni_js_pending()) { gs->items[0] = omni_dyn_of_real(2.0); return omni_dyn_undef(); } \
+  } \
+  if (omni_js_truthy(omni_js_obj_getk(r, omni_str_new("done", 4)))) { \
+    gs->items[0] = omni_dyn_of_real(2.0); \
+  } \
+  return r; \
 } \
 /* 内建构造器**当值用**（ADR-0020 P1-f 的第二半）：`const A = Array`、`[].constructor === Array`。
    与 realm_proto 同一个路子 —— 名字是编译期常量、每个 realm 一份，所以取两次是同一个值、
