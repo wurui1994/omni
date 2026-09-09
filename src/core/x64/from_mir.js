@@ -248,7 +248,10 @@ class x64FnGen {
   constructor(mod, f, buf, callLabels, strSyms) {
     this.mod = mod;
     this.f = f;
-    this.buf = buf === undefined ? new CodeBuf() : buf;
+    // 惰性求值位置里不许藏需要临时量的构造（ADR-0011）：拆成一句 if
+    let buf0 = buf;
+    if (buf0 === undefined) buf0 = new CodeBuf();
+    this.buf = buf0;
     this.callLabels = callLabels === undefined ? null : callLabels;
     this.strSyms = strSyms === undefined ? null : strSyms;
     this.valBase = f.slots.length;

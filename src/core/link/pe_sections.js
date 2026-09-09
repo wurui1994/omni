@@ -478,9 +478,8 @@ export function peSections(inp) {
   const ptrSize = c32 ? 4 : 8;
   const tlsSize = hasTls ? 4 * ptrSize + 8 : 0;
 
-  const reloc = hasReloc
-    ? { name: '.reloc', type: PSEC_SHT_PROGBITS, flags: 0, size: 0, bytes: new Uint8Array(0) }
-    : null;
+  let reloc = null;
+  if (hasReloc) reloc = { name: '.reloc', type: PSEC_SHT_PROGBITS, flags: 0, size: 0, bytes: new Uint8Array(0) };
   if (reloc !== null) secs.push(reloc);
 
   /* 按类插入排序（`pe_assign_addresses` 开头那一段）。 */

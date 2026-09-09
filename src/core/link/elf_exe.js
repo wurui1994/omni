@@ -1458,7 +1458,8 @@ export function elfExeImage(inp) {
   // ---- 节的字节：可以落笔了
   for (let i = 1; i <= SHSTR; i++) {
     const s = secs[i];
-    s.bytes = s.type === EE_SHT_NOBITS ? new Uint8Array(0) : new Uint8Array(s.data);
+    if (s.type === EE_SHT_NOBITS) s.bytes = new Uint8Array(0);
+    else s.bytes = new Uint8Array(s.data);
   }
 
   // ---- relocate_syms + relocate_sections

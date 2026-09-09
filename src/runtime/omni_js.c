@@ -206,18 +206,41 @@ static int js_s16_depth = 0;
    "看一眼"，看见了让调用点当场报，不给 "[object Object]"（那是悄悄的错答案）。
    槽表的键是 omni_js_pkey_ 发的：一个 's' 标签字节 + UTF-8 的名字，所以 "toString" 是
    9 个字节的 "stoString"。 */
+/* 一格真对象**自有**槽里的 toString：找到给出那格的槽（没有给 NULL）。 */
+static const omni_js_list_view *js_obj_own_ts_slot_(omni_dyn o) {
+  const omni_js_objv *ov = (const omni_js_objv *)o.u.ref;
+  const omni_js_dict_view *ps = (const omni_js_dict_view *)ov->ps;
+  for (int64_t i = 0; i < ps->n; i++) {
+    if (!ps->live[i]) continue;
+    if (ps->keys[i].len != 9 || memcmp(ps->keys[i].p, "stoString", 9) != 0) continue;
+    return (const omni_js_list_view *)ps->vals[i].u.ref;
+  }
+  return NULL;
+}
+
 static bool js_obj_has_own_tostring(omni_dyn v) {
+  /* **继承来的那格 Object.prototype.toString 不算"自带"**（与 omni_js_own_ts_ 同一条判据）：
+     realm 落地之后每个真对象的链上都有它，一律算自带的话 String(任何真对象) 都会当场报 ——
+     class 的实例、globalThis 全中招（量出来的）。这儿认不出 realm 那张表（它住在生成单元的
+     宏段里），所以按**链尾**认：链的末端那一格就是 Object.prototype，最近的那格 toString
+     与链尾那格是同一个函数就是继承来的。 */
+  const omni_js_list_view *near = NULL;
+  const omni_js_list_view *tail = NULL;
   omni_dyn cur = v;
   while (cur.tag == OMNI_DYN_OBJ) {
-    const omni_js_objv *ov = (const omni_js_objv *)cur.u.ref;
-    const omni_js_dict_view *ps = (const omni_js_dict_view *)ov->ps;
-    for (int64_t i = 0; i < ps->n; i++) {
-      if (!ps->live[i]) continue;
-      if (ps->keys[i].len != 9 || memcmp(ps->keys[i].p, "stoString", 9) != 0) continue;
-      const omni_js_list_view *sl = (const omni_js_list_view *)ps->vals[i].u.ref;
-      if (sl->items[1].u.b || sl->items[0].tag == OMNI_DYN_FN) return true;
+    const omni_js_list_view *sl = js_obj_own_ts_slot_(cur);
+    if (sl != NULL) {
+      if (near == NULL) near = sl;
+      tail = sl;
     }
-    cur = ov->pr;
+    cur = ((const omni_js_objv *)cur.u.ref)->pr;
+  }
+  if (near != NULL) {
+    /* 取值器（`get toString()`）一律算自带：realm 上那格是普通数据槽。 */
+    if (near->items[1].u.b) return true;
+    if (near->items[0].tag != OMNI_DYN_FN) return false;
+    if (near == tail) return false;
+    return near->items[0].u.ref != tail->items[0].u.ref;
   }
   if (cur.tag == OMNI_DYN_DICT) {
     const omni_dyn *ts = js_dict_find((const omni_js_dict_view *)cur.u.ref, "toString");

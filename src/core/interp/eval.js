@@ -149,7 +149,8 @@ class Interp {
       }
       b.iscoped = s;
     }
-    return s ? new Env(env) : env;
+    if (s) return new Env(env);
+    return env;
   }
 
   stmt(s, env, frame) {

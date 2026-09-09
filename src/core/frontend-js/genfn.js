@@ -41,7 +41,7 @@
  */
 
 /** 遍历子节点（与 lower.js 的同名函数同形：跳过 span 与 type） */
-function eachChild(node, f) {
+function gEachChild(node, f) {
   for (const k of Object.keys(node)) {
     if (k === 'span' || k === 'type') continue;
     const v = node[k];
@@ -68,7 +68,7 @@ function hasSuspend(node, top = true) {
   if (node.type === 'Yield' || node.type === 'Await') return true;
   if (node.type === 'ForOf' && node.await === true) return true;
   let hit = false;
-  eachChild(node, (x) => { if (!hit) hit = hasSuspend(x, false); });
+  gEachChild(node, (x) => { if (!hit) hit = hasSuspend(x, false); });
   return hit;
 }
 
@@ -91,7 +91,7 @@ function freeJump(node, want, inLoop, inSwitch, top) {
     || node.type === 'For' || node.type === 'ForOf' || node.type === 'ForIn';
   const sw = inSwitch || node.type === 'Switch';
   let hit = false;
-  eachChild(node, (x) => { if (!hit) hit = freeJump(x, want, loop, sw, false); });
+  gEachChild(node, (x) => { if (!hit) hit = freeJump(x, want, loop, sw, false); });
   return hit;
 }
 
@@ -119,7 +119,7 @@ function hoistable(e) {
   // 对象字面量：只认普通的 key: value 那一格（方法体里的挂起属于里面那个函数）
   if (e.type === 'Object' && e.props.some((p) => hasSuspend(p) && (p.method === true || p.kind !== 'init'))) return false;
   let all = true;
-  eachChild(e, (x) => { if (all) all = hoistable(x); });
+  gEachChild(e, (x) => { if (all) all = hoistable(x); });
   return all;
 }
 const HOISTABLE_KINDS = new Set([
@@ -131,18 +131,18 @@ const HOISTABLE_KINDS = new Set([
 /* ---- 造 AST 的那几件小工具（形状按 parser.js 里的字面量来） ---- */
 
 const ident = (name, sp) => ({ type: 'Ident', name, span: sp });
-const num = (v, sp) => ({ type: 'Num', value: v, raw: String(v), span: sp });
+const gNum = (v, sp) => ({ type: 'Num', value: v, raw: String(v), span: sp });
 const lit = (v, sp) => ({ type: 'Lit', value: v, span: sp });
 const undef = (sp) => ident('undefined', sp);
 const opCall = (op, args, sp) => ({ type: 'OpCall', op, args, span: sp });
-const exprStmt = (e, sp) => ({ type: 'ExprStmt', expr: e, span: sp });
-const assign = (target, value, sp) => ({ type: 'Assign', op: '=', target, value, span: sp });
+const gExprStmt = (e, sp) => ({ type: 'ExprStmt', expr: e, span: sp });
+const gAssign = (target, value, sp) => ({ type: 'Assign', op: '=', target, value, span: sp });
 const bin = (op, left, right, sp) => ({ type: 'Binary', op, left, right, span: sp });
 const member = (obj, name, sp) => ({
   type: 'Member', object: obj, name, computed: false, optional: false, span: sp,
 });
-const block = (body, sp) => ({ type: 'Block', body, span: sp });
-const ret = (arg, sp) => ({ type: 'Return', arg, span: sp });
+const gBlock = (body, sp) => ({ type: 'Block', body, span: sp });
+const gRet = (arg, sp) => ({ type: 'Return', arg, span: sp });
 const ifSt = (test, cons, alt, sp) => ({ type: 'If', test, cons, alt, span: sp });
 const letDecl = (name, init, sp) => ({
   type: 'VarDecl', kind: 'let', decls: [{ id: ident(name, sp), init }], span: sp,
@@ -166,7 +166,7 @@ function rewriteReturns(node) {
   if (isFnBoundary(node)) return node;
   if (node.type === 'Return') {
     const a = node.arg ? node.arg : undef(node.span);
-    return ret(genRes(a, true, node.span), node.span);
+    return gRet(genRes(a, true, node.span), node.span);
   }
   const out = { type: node.type, span: node.span };
   for (const k of Object.keys(node)) {
@@ -203,7 +203,7 @@ class Split {
   /** `_g_st = k; continue;` —— 派发循环的 goto */
   goto(b, k, sp) {
     if (this.term[b]) return;
-    this.blocks[b].push(exprStmt(assign(ident(ST, sp), num(k, sp), sp), sp));
+    this.blocks[b].push(gExprStmt(gAssign(ident(ST, sp), gNum(k, sp), sp), sp));
     this.blocks[b].push({ type: 'Continue', label: null, span: sp });
     this.term[b] = true;
   }
@@ -211,16 +211,16 @@ class Split {
   /** `_g_st = k; return js_gen_res(v, false);` —— 让出去，下次从第 k 段接着跑 */
   yieldTo(b, v, k, sp) {
     if (this.term[b]) return;
-    this.blocks[b].push(exprStmt(assign(ident(ST, sp), num(k, sp), sp), sp));
-    this.blocks[b].push(ret(genRes(v, false, sp), sp));
+    this.blocks[b].push(gExprStmt(gAssign(ident(ST, sp), gNum(k, sp), sp), sp));
+    this.blocks[b].push(gRet(genRes(v, false, sp), sp));
     this.term[b] = true;
   }
 
   /** `_g_st = k; return js_gen_awt(v);` —— 等一格 promise，恢复者是微任务 */
   awaitTo(b, v, k, sp) {
     if (this.term[b]) return;
-    this.blocks[b].push(exprStmt(assign(ident(ST, sp), num(k, sp), sp), sp));
-    this.blocks[b].push(ret(opCall('js_gen_awt', [v], sp), sp));
+    this.blocks[b].push(gExprStmt(gAssign(ident(ST, sp), gNum(k, sp), sp), sp));
+    this.blocks[b].push(gRet(opCall('js_gen_awt', [v], sp), sp));
     this.term[b] = true;
   }
 
@@ -252,7 +252,7 @@ class Split {
     if (x.type === 'Ident' || x.type === 'Num' || x.type === 'Str' || x.type === 'Lit') return x;
     const sp = x.span;
     const t = this.temp('h');
-    pre.push(exprStmt(assign(ident(t, sp), x, sp), sp));
+    pre.push(gExprStmt(gAssign(ident(t, sp), x, sp), sp));
     return ident(t, sp);
   }
 
@@ -278,7 +278,7 @@ class Split {
     if (e.type === 'Await' || e.type === 'Yield') {
       const arg = e.arg && hasSuspend(e.arg) ? this.hoistExpr(e.arg, pre) : e.arg;
       const t = this.temp('h');
-      pre.push(exprStmt(assign(ident(t, sp), { ...e, arg }, sp), sp));
+      pre.push(gExprStmt(gAssign(ident(t, sp), { ...e, arg }, sp), sp));
       return ident(t, sp);
     }
     switch (e.type) {
@@ -372,7 +372,7 @@ class Split {
           return cur;
         }
         // 跳出带 catch 的 try 体：那格 catch 得摘下来（不然后面抛的东西会跳回它）
-        if (ctx.cat >= 0) this.emit(cur, exprStmt(assign(ident(CAT, sp), num(0, sp), sp), sp));
+        if (ctx.cat >= 0) this.emit(cur, gExprStmt(gAssign(ident(CAT, sp), gNum(0, sp), sp), sp));
         this.goto(cur, to, sp);
         return -1;
       }
@@ -406,8 +406,8 @@ class Split {
         }
         const t = this.temp('c');
         return this.stmts([
-          exprStmt(assign(ident(t, sp), e.value, sp), sp),
-          exprStmt({ ...e, value: ident(t, sp) }, sp),
+          gExprStmt(gAssign(ident(t, sp), e.value, sp), sp),
+          gExprStmt({ ...e, value: ident(t, sp) }, sp),
         ], cur, ctx);
       }
       if (e.target.type !== 'Ident') {
@@ -420,7 +420,7 @@ class Split {
      * 提不出来的（惰性位置、不认的形状）才落到下面那句报错。 */
     const lifted = this.lift(e, sp);
     if (lifted && lifted.pre.length > 0) {
-      return this.stmts([...lifted.pre, exprStmt(lifted.expr, sp)], cur, ctx);
+      return this.stmts([...lifted.pre, gExprStmt(lifted.expr, sp)], cur, ctx);
     }
     this.err(sp, "'yield' / 'await' in this position is not supported; write it as its own statement ('yield e;' or 'const x = await e;')");
     return cur;
@@ -440,13 +440,13 @@ class Split {
       }
       const nextA = this.newBlock();
       this.awaitTo(cur, e.arg ? e.arg : undef(sp), nextA, sp);
-      if (target) this.emit(nextA, exprStmt(assign(target, ident(SENT, sp), sp), sp));
+      if (target) this.emit(nextA, gExprStmt(gAssign(target, ident(SENT, sp), sp), sp));
       return nextA;
     }
     if (e.delegate) return this.delegate(e, target, cur, ctx);
     const next = this.newBlock();
     this.yieldTo(cur, e.arg ? e.arg : undef(sp), next, sp);
-    if (target) this.emit(next, exprStmt(assign(target, ident(SENT, sp), sp), sp));
+    if (target) this.emit(next, gExprStmt(gAssign(target, ident(SENT, sp), sp), sp));
     return next;
   }
 
@@ -474,7 +474,7 @@ class Split {
       prop: dot(ident('Symbol', sp), 'iterator'),
     };
     const body = [
-      exprStmt(assign(ident(r, sp),
+      gExprStmt(gAssign(ident(r, sp),
         { type: 'Call', callee: dot(ident(it, sp), 'next'), args: [], optional: false, span: sp }, sp), sp),
       {
         type: 'If',
@@ -482,7 +482,7 @@ class Split {
         cons: {
           type: 'Block',
           body: [
-            ...(target ? [exprStmt(assign(target, dot(ident(r, sp), 'value'), sp), sp)] : []),
+            ...(target ? [gExprStmt(gAssign(target, dot(ident(r, sp), 'value'), sp), sp)] : []),
             { type: 'Break', label: null, span: sp },
           ],
           span: sp,
@@ -490,10 +490,10 @@ class Split {
         alt: null,
         span: sp,
       },
-      exprStmt({ type: 'Yield', arg: dot(ident(r, sp), 'value'), delegate: false, span: sp }, sp),
+      gExprStmt({ type: 'Yield', arg: dot(ident(r, sp), 'value'), delegate: false, span: sp }, sp),
     ];
     return this.stmts([
-      exprStmt(assign(ident(it, sp),
+      gExprStmt(gAssign(ident(it, sp),
         { type: 'Call', callee: symIter, args: [], optional: false, span: sp }, sp), sp),
       {
         type: 'While',
@@ -524,13 +524,13 @@ class Split {
         const lifted = this.lift(d.init, sp);
         if (lifted && lifted.pre.length > 0) {
           b = this.stmts([...lifted.pre,
-            exprStmt(assign(ident(d.id.name, sp), lifted.expr, sp), sp)], b, ctx);
+            gExprStmt(gAssign(ident(d.id.name, sp), lifted.expr, sp), sp)], b, ctx);
           continue;
         }
         this.err(sp, "'yield' / 'await' in this position is not supported; write it as its own statement");
         continue;
       }
-      this.emit(b, exprStmt(assign(ident(d.id.name, sp), d.init, sp), sp));
+      this.emit(b, gExprStmt(gAssign(ident(d.id.name, sp), d.init, sp), sp));
     }
     return b;
   }
@@ -561,20 +561,20 @@ class Split {
     this.closeOpenIters(b, sp);
     if (ctx.fin >= 0) {
       // 还在 try 里：先把值收好、标上"在为 return 跑 finally"，再跳到 finally 的入口
-      this.emit(b, exprStmt(assign(ident(UNW, sp), num(1, sp), sp), sp));
-      this.emit(b, exprStmt(assign(ident(RV, sp), arg, sp), sp));
+      this.emit(b, gExprStmt(gAssign(ident(UNW, sp), gNum(1, sp), sp), sp));
+      this.emit(b, gExprStmt(gAssign(ident(RV, sp), arg, sp), sp));
       this.goto(b, ctx.fin, sp);
       return -1;
     }
-    this.emit(b, ret(genRes(arg, true, sp), sp));
+    this.emit(b, gRet(genRes(arg, true, sp), sp));
     this.term[b] = true;
     return -1;
   }
 
   /** 一格 `{ _g_st = k; continue; }` —— 派发循环里的条件跳转用它当分支体 */
   gotoBlock(k, sp) {
-    return block([
-      exprStmt(assign(ident(ST, sp), num(k, sp), sp), sp),
+    return gBlock([
+      gExprStmt(gAssign(ident(ST, sp), gNum(k, sp), sp), sp),
       { type: 'Continue', label: null, span: sp },
     ], sp);
   }
@@ -656,7 +656,7 @@ class Split {
     }
     const x = this.stmt(s.body, bodyB, { ...ctx, brk: exit, cont: upd });
     if (x >= 0) this.goto(x, upd, sp);
-    if (s.update) this.emit(upd, exprStmt(s.update, sp));
+    if (s.update) this.emit(upd, gExprStmt(s.update, sp));
     this.goto(upd, head, sp);
     return exit;
   }
@@ -684,8 +684,8 @@ class Split {
     const items = lazy
       ? opCall('js_iter_open', [s.right], sp)
       : opCall('js_for_in_keys', [s.right], sp);
-    this.emit(cur, exprStmt(assign(ident(it, sp), items, sp), sp));
-    this.emit(cur, exprStmt(assign(ident(ix, sp), num(0, sp), sp), sp));
+    this.emit(cur, gExprStmt(gAssign(ident(it, sp), items, sp), sp));
+    this.emit(cur, gExprStmt(gAssign(ident(ix, sp), gNum(0, sp), sp), sp));
     const head = this.newBlock();
     const bodyB = this.newBlock();
     const exit = this.newBlock();
@@ -699,23 +699,23 @@ class Split {
         this.gotoBlock(bodyB, sp), this.gotoBlock(exit, sp), sp));
     this.term[head] = true;
     // 先取值再进位：`continue` 于是可以直接跳回 head
-    this.emit(bodyB, exprStmt(assign(ident(s.left.name, sp),
+    this.emit(bodyB, gExprStmt(gAssign(ident(s.left.name, sp),
       opCall(lazy ? 'js_iter_cur' : 'js_idx_get', [ident(it, sp), ident(ix, sp)], sp), sp), sp));
-    this.emit(bodyB, exprStmt(assign(ident(ix, sp), bin('+', ident(ix, sp), num(1, sp), sp), sp), sp));
+    this.emit(bodyB, gExprStmt(gAssign(ident(ix, sp), bin('+', ident(ix, sp), gNum(1, sp), sp), sp), sp));
     if (lazy) this.openIters.push(it);
     const x = this.stmt(s.body, bodyB, { ...ctx, brk: exit, cont: head });
     if (lazy) this.openIters.pop();
     if (x >= 0) this.goto(x, head, sp);
     /* 出口补一次 close：正常跑完时迭代器已经 done，那是空操作；break 出来才真调 it.return()。
      * `return` 出去那条路不经过这儿，所以 retStmt 另有一份（见 closeOpenIters）。 */
-    if (lazy) this.emit(exit, exprStmt(opCall('js_iter_close', [ident(it, sp)], sp), sp));
+    if (lazy) this.emit(exit, gExprStmt(opCall('js_iter_close', [ident(it, sp)], sp), sp));
     return exit;
   }
 
   /** `return` 穿出 for-of 时把还开着的迭代器关掉（由内往外），规范的 IteratorClose */
   closeOpenIters(b, sp) {
     for (let i = this.openIters.length - 1; i >= 0; i--) {
-      this.emit(b, exprStmt(opCall('js_iter_close', [ident(this.openIters[i], sp)], sp), sp));
+      this.emit(b, gExprStmt(opCall('js_iter_close', [ident(this.openIters[i], sp)], sp), sp));
     }
   }
 
@@ -730,18 +730,18 @@ class Split {
     }
     const it = this.temp('ai');
     const r = this.temp('ar');
-    this.emit(cur, exprStmt(assign(ident(it, sp), opCall('js_aiter', [s.right], sp), sp), sp));
+    this.emit(cur, gExprStmt(gAssign(ident(it, sp), opCall('js_aiter', [s.right], sp), sp), sp));
     const head = this.newBlock();
     const after = this.newBlock();
     const bodyB = this.newBlock();
     const exit = this.newBlock();
     this.goto(cur, head, sp);
     this.awaitTo(head, opCall('js_aiter_next', [ident(it, sp)], sp), after, sp);
-    this.emit(after, exprStmt(assign(ident(r, sp), ident(SENT, sp), sp), sp));
+    this.emit(after, gExprStmt(gAssign(ident(r, sp), ident(SENT, sp), sp), sp));
     this.emit(after, ifSt(member(ident(r, sp), 'done', sp),
       this.gotoBlock(exit, sp), this.gotoBlock(bodyB, sp), sp));
     this.term[after] = true;
-    this.emit(bodyB, exprStmt(assign(ident(s.left.name, sp), member(ident(r, sp), 'value', sp), sp), sp));
+    this.emit(bodyB, gExprStmt(gAssign(ident(s.left.name, sp), member(ident(r, sp), 'value', sp), sp), sp));
     const x = this.stmt(s.body, bodyB, { ...ctx, brk: exit, cont: head });
     if (x >= 0) this.goto(x, head, sp);
     return exit;
@@ -791,7 +791,7 @@ class Split {
     const unw = s.finalizer ? this.newBlock() : -1;
     const norm = s.finalizer ? this.newBlock() : -1;
     const join = this.newBlock();
-    const setState = (b, name, v) => this.emit(b, exprStmt(assign(ident(name, sp), num(v, sp), sp), sp));
+    const setState = (b, name, v) => this.emit(b, gExprStmt(gAssign(ident(name, sp), gNum(v, sp), sp), sp));
     if (catchB >= 0) setState(cur, CAT, catchB);
     if (unw >= 0) setState(cur, FIN, unw);
     this.goto(cur, bodyB, sp);
@@ -807,7 +807,7 @@ class Split {
     if (catchB >= 0) {
       if (s.param) {
         this.hoist.push(s.param.name);
-        this.emit(catchB, exprStmt(assign(ident(s.param.name, sp), ident(EX, sp), sp), sp));
+        this.emit(catchB, gExprStmt(gAssign(ident(s.param.name, sp), ident(EX, sp), sp), sp));
       }
       // catch 体仍在 finally 的保护下（里面的 return 要先跑 finally），但不再被自己接住
       const c = this.stmts(s.handler.body, catchB, {
@@ -824,9 +824,9 @@ class Split {
       setState(unw, FIN, 0);
       if (catchB >= 0) setState(unw, CAT, 0);
       this.emit(unw, s.finalizer);
-      this.emit(unw, ifSt(bin('===', ident(UNW, sp), num(2, sp), sp),
-        block([{ type: 'Throw', arg: ident(RV, sp), span: sp }], sp), null, sp));
-      this.emit(unw, ret(genRes(ident(RV, sp), true, sp), sp));
+      this.emit(unw, ifSt(bin('===', ident(UNW, sp), gNum(2, sp), sp),
+        gBlock([{ type: 'Throw', arg: ident(RV, sp), span: sp }], sp), null, sp));
+      this.emit(unw, gRet(genRes(ident(RV, sp), true, sp), sp));
       this.term[unw] = true;
     }
     return join;
@@ -839,7 +839,7 @@ function checkNames(node, err) {
   const walk = (n) => {
     if (!n || typeof n !== 'object') return;
     if (n.type === 'Ident' && typeof n.name === 'string' && n.name.startsWith('_g_')) bad.add(n.name);
-    eachChild(n, walk);
+    gEachChild(n, walk);
   };
   walk(node.body);
   for (const n of bad) err(node.span, `the name '${n}' is reserved by the generator rewrite; rename it`);
@@ -850,32 +850,32 @@ const STEP = '_g_step';
 /** step 的开头几句：it.return(v) / it.throw(e) / "体里抛出来的送回来" 进来时先看一眼
  *  有没有活着的 catch 或 finally 要接手（`_g_cat` / `_g_fin`）。 */
 function modePrologue(sp) {
-  const unwindTo = (kind) => block([
-    exprStmt(assign(ident(UNW, sp), num(kind, sp), sp), sp),
-    exprStmt(assign(ident(RV, sp), ident(SENT, sp), sp), sp),
-    exprStmt(assign(ident(ST, sp), ident(FIN, sp), sp), sp),
+  const unwindTo = (kind) => gBlock([
+    gExprStmt(gAssign(ident(UNW, sp), gNum(kind, sp), sp), sp),
+    gExprStmt(gAssign(ident(RV, sp), ident(SENT, sp), sp), sp),
+    gExprStmt(gAssign(ident(ST, sp), ident(FIN, sp), sp), sp),
   ], sp);
-  const noFin = bin('===', ident(FIN, sp), num(0, sp), sp);
+  const noFin = bin('===', ident(FIN, sp), gNum(0, sp), sp);
   /* 抛进来的那一格（it.throw 与"体里抛出来的"是同一件事）：
    *   有活着的 catch  -> 跳到 catch 段，值放在 _g_ex 上
    *   否则有 finally  -> 跑 finally，跑完把异常接回去（unw 段）
    *   都没有          -> 原样抛回去，让它继续往调用者那边冒 */
-  const toCatch = block([
-    exprStmt(assign(ident(EX, sp), ident(SENT, sp), sp), sp),
-    exprStmt(assign(ident(ST, sp), ident(CAT, sp), sp), sp),
-    exprStmt(assign(ident(CAT, sp), num(0, sp), sp), sp),
+  const toCatch = gBlock([
+    gExprStmt(gAssign(ident(EX, sp), ident(SENT, sp), sp), sp),
+    gExprStmt(gAssign(ident(ST, sp), ident(CAT, sp), sp), sp),
+    gExprStmt(gAssign(ident(CAT, sp), gNum(0, sp), sp), sp),
   ], sp);
-  const thrownIn = block([
-    ifSt(bin('!==', ident(CAT, sp), num(0, sp), sp), toCatch,
-      block([
-        ifSt(noFin, block([{ type: 'Throw', arg: ident(SENT, sp), span: sp }], sp), unwindTo(2), sp),
+  const thrownIn = gBlock([
+    ifSt(bin('!==', ident(CAT, sp), gNum(0, sp), sp), toCatch,
+      gBlock([
+        ifSt(noFin, gBlock([{ type: 'Throw', arg: ident(SENT, sp), span: sp }], sp), unwindTo(2), sp),
       ], sp), sp),
   ], sp);
   return [
-    ifSt(bin('===', ident(MODE, sp), num(1, sp), sp), block([
-      ifSt(noFin, block([ret(genRes(ident(SENT, sp), true, sp), sp)], sp), unwindTo(1), sp),
+    ifSt(bin('===', ident(MODE, sp), gNum(1, sp), sp), gBlock([
+      ifSt(noFin, gBlock([gRet(genRes(ident(SENT, sp), true, sp), sp)], sp), unwindTo(1), sp),
     ], sp), null, sp),
-    ifSt(bin('===', ident(MODE, sp), num(2, sp), sp), thrownIn, null, sp),
+    ifSt(bin('===', ident(MODE, sp), gNum(2, sp), sp), thrownIn, null, sp),
   ];
 }
 
@@ -897,7 +897,7 @@ export function genToStateMachine(node, err) {
   const entry = sx.newBlock();
   /* 表达式体的箭头（`async () => e`）先摊成 `{ return e; }`：这一格从前直接读
    * node.body.body，于是 async 箭头的简写形态把编译器**崩**成宿主 TypeError。 */
-  const bodyStmts = node.body.type === 'Block' ? node.body.body : [ret(node.body, node.body.span ?? sp)];
+  const bodyStmts = node.body.type === 'Block' ? node.body.body : [gRet(node.body, node.body.span ?? sp)];
   const fns = bodyStmts.filter((s) => s.type === 'FuncDecl');
   const rest = bodyStmts.filter((s) => s.type !== 'FuncDecl');
   /* 体里顶层的函数声明：**名字**提到外层（切段要跨过它的生存期，每一段都得看得见它），
@@ -907,7 +907,7 @@ export function genToStateMachine(node, err) {
    * 造的位置是入口段的**最前面**，与"函数声明提升到体首"这条规范一致。 */
   for (const f of fns) {
     sx.hoist.push(f.id);
-    sx.emit(entry, exprStmt(assign(ident(f.id, sp), {
+    sx.emit(entry, gExprStmt(gAssign(ident(f.id, sp), {
       type: 'FuncExpr',
       id: f.id,
       params: f.params,
@@ -921,30 +921,30 @@ export function genToStateMachine(node, err) {
   const last = sx.stmts(rest, entry, { brk: -1, cont: -1, fin: -1, cat: -1 });
   // 走到体的尽头就是 done（值 undefined）
   if (last >= 0) {
-    sx.emit(last, ret(genRes(undef(sp), true, sp), sp));
+    sx.emit(last, gRet(genRes(undef(sp), true, sp), sp));
     sx.term[last] = true;
   }
   const chain = [];
   for (let i = 0; i < sx.blocks.length; i++) {
-    chain.push(ifSt(bin('===', ident(ST, sp), num(i, sp), sp), block(sx.blocks[i], sp), null, sp));
+    chain.push(ifSt(bin('===', ident(ST, sp), gNum(i, sp), sp), gBlock(sx.blocks[i], sp), null, sp));
   }
   // 派发不中（不该发生，也包括"跑完之后又被叫一次"）：当 done
-  chain.push(ret(genRes(undef(sp), true, sp), sp));
+  chain.push(gRet(genRes(undef(sp), true, sp), sp));
   const step = {
     type: 'Arrow',
     params: [ident(SENT, sp), ident(MODE, sp)],
     rest: null,
-    body: block([...modePrologue(sp),
-      { type: 'While', test: lit(true, sp), body: block(chain, sp), span: sp }], sp),
+    body: gBlock([...modePrologue(sp),
+      { type: 'While', test: lit(true, sp), body: gBlock(chain, sp), span: sp }], sp),
     expression: false,
     span: sp,
   };
   const out = [
-    letDecl(ST, num(0, sp), sp),
-    letDecl(UNW, num(0, sp), sp),
+    letDecl(ST, gNum(0, sp), sp),
+    letDecl(UNW, gNum(0, sp), sp),
     letDecl(RV, undef(sp), sp),
-    letDecl(FIN, num(0, sp), sp),
-    letDecl(CAT, num(0, sp), sp),
+    letDecl(FIN, gNum(0, sp), sp),
+    letDecl(CAT, gNum(0, sp), sp),
     letDecl(EX, undef(sp), sp),
   ];
   const seen = new Set();
@@ -955,8 +955,8 @@ export function genToStateMachine(node, err) {
   }
   out.push({ type: 'VarDecl', kind: 'const', decls: [{ id: ident(STEP, sp), init: step }], span: sp });
   const tail = isGen && isAsync ? 'js_agen_new' : (isAsync ? 'js_async_run' : 'js_gen_new');
-  out.push(ret(opCall(tail, [ident(STEP, sp)], sp), sp));
-  return { ...node, generator: false, async: false, expression: false, body: block(out, sp) };
+  out.push(gRet(opCall(tail, [ident(STEP, sp)], sp), sp));
+  return { ...node, generator: false, async: false, expression: false, body: gBlock(out, sp) };
 }
 
 

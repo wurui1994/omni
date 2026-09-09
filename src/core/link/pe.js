@@ -152,13 +152,17 @@ export function readImage(bytes) {
     for (let k = 0; k < 8 && bytes[at + k] !== 0; k++) name += String.fromCharCode(bytes[at + k]);
     const rawSize = dv.getUint32(at + 16, true);
     const rawPtr = dv.getUint32(at + 20, true);
+    /* 文件里那一段原样留着（已经是按 FileAlignment 补齐过的长度）。
+     * 惰性求值位置里不许藏需要临时量的构造（ADR-0011），所以先落成一句。 */
+    let raw = null;
+    if (rawSize === 0) raw = new Uint8Array(0);
+    else raw = bytes.slice(rawPtr, rawPtr + rawSize);
     secs.push({
       name,
       vsize: dv.getUint32(at + 8, true),
       vaddr: dv.getUint32(at + 12, true),
       chars: dv.getUint32(at + 36, true),
-      /* 文件里那一段原样留着（已经是按 FileAlignment 补齐过的长度）。 */
-      bytes: rawSize === 0 ? new Uint8Array(0) : bytes.slice(rawPtr, rawPtr + rawSize),
+      bytes: raw,
     });
   }
 
@@ -570,7 +574,9 @@ export function buildUnwind(u) {
   const stride = arm64 ? 8 : 12;
   const pdata = new Uint8Array(u.funcs.length * stride);
   const pv = new DataView(pdata.buffer);
-  const xdata = arm64 ? new Uint8Array(u.funcs.length * 8) : new Uint8Array(0);
+  let xdata = null;
+  if (arm64) xdata = new Uint8Array(u.funcs.length * 8);
+  else xdata = new Uint8Array(0);
   const xv = new DataView(xdata.buffer);
 
   for (let i = 0; i < u.funcs.length; i++) {

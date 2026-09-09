@@ -1382,7 +1382,8 @@ export function machoExe(inp) {
   for (let i = 1; i <= secs.length - 1; i++) {
     const s = secs[i];
     if (s.bytes !== undefined) continue;
-    s.bytes = s.type === MO_SHT_NOBITS ? new Uint8Array(0) : new Uint8Array(s.data);
+    if (s.type === MO_SHT_NOBITS) s.bytes = new Uint8Array(0);
+    else s.bytes = new Uint8Array(s.data);
   }
   const symAddr = (idx) => {
     const s = syms[idx];

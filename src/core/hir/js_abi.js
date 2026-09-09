@@ -924,8 +924,10 @@ const P1_JS_ONLY = [
   // 所以不在这张单子里 —— 真对象那一片还在，见下面几行。
   // js_realm_proto 有 C 孪生了（omni_js_obj.h）：Object.prototype 那一格成员挂全了（规范
   // 20.1.3 那张短表），别的原型是一格带 get 陷阱的代理 —— 同一性成立（instanceof 只比它），
-  // 读成员当场报。realm_ctor / ctor_get / global_this 还在。
-  'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
+  // 读成员当场报。realm_ctor / ctor_get 还在。
+  // js_global_this 也有 C 孪生了：它就是一格以 Object.prototype 为原型的普通真对象
+  // （每个 realm 一份）—— 自举那条腿只差它一个 op 就能整份 emit-c（量过：survey 只剩这一格）。
+  'js_realm_ctor', 'js_ctor_get', 'js_date_new', 'js_date_parts',
   // Date.UTC 与 Date.parse 有 C 孪生了（runtime/omni_js_date.c）：它们交出来的是一个毫秒数，
   // 与真对象无关。new Date(…) 与 new Date(y, mo, d) 照旧拒 —— 前者造真对象，后者要本地时区。
   // 代理有 C 孪生了（omni_js_obj.h）：px_t / px_h 挂在真对象的载荷上，get / set / has /

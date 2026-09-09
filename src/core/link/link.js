@@ -22,7 +22,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import { RELOC_ARM64 as RELOC } from '../arm64/asm.js';
+import { RELOC_ARM64 } from '../arm64/asm.js';
 import { RELOC as XRELOC } from '../x64/asm.js';
 
 const MH_MAGIC_64 = 0xfeedfacf;
@@ -55,14 +55,14 @@ const X86_64_RELOC_BRANCH = 2;
  */
 const KIND_OF_TYPE = {
   arm64: {
-    [ARM64_RELOC_BRANCH26]: RELOC.BRANCH26,
-    [ARM64_RELOC_PAGE21]: RELOC.PAGE21,
-    [ARM64_RELOC_PAGEOFF12]: RELOC.PAGEOFF12,
+    [ARM64_RELOC_BRANCH26]: RELOC_ARM64.BRANCH26,
+    [ARM64_RELOC_PAGE21]: RELOC_ARM64.PAGE21,
+    [ARM64_RELOC_PAGEOFF12]: RELOC_ARM64.PAGEOFF12,
     /* 过 GOT 那一对。arm64 上取**任何**符号的地址都走它（量过尺子），所以这一层
      * 一定会读到 —— 与 `PAGE21` 同一类待遇：填不了，原样转出去（GOT 那一格要等
      * 最终地址，是出可执行文件那一步的事）。 */
-    [ARM64_RELOC_GOT_LOAD_PAGE21]: RELOC.GOT_PAGE21,
-    [ARM64_RELOC_GOT_LOAD_PAGEOFF12]: RELOC.GOT_PAGEOFF12,
+    [ARM64_RELOC_GOT_LOAD_PAGE21]: RELOC_ARM64.GOT_PAGE21,
+    [ARM64_RELOC_GOT_LOAD_PAGEOFF12]: RELOC_ARM64.GOT_PAGEOFF12,
   },
   x86_64: {
     [X86_64_RELOC_UNSIGNED]: XRELOC.UNSIGNED,
@@ -310,7 +310,7 @@ export function linkObjects(objs) {
 
   const text = new Uint8Array(textParts);
   /** 这一族是「同一节内的相对跳转」—— 各架构一条。 */
-  const BRANCH = arch === 'arm64' ? RELOC.BRANCH26 : XRELOC.BRANCH;
+  const BRANCH = arch === 'arm64' ? RELOC_ARM64.BRANCH26 : XRELOC.BRANCH;
   const relocs = [];
   let filled = 0;
   for (const part of shifted) {

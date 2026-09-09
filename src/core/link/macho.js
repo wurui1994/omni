@@ -33,7 +33,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import { RELOC_ARM64 as RELOC } from '../arm64/asm.js';
+import { RELOC_ARM64 } from '../arm64/asm.js';
 
 /* ---------------------------------------------------------------- 常量
  * 名字与值都照 <mach-o/loader.h>。 */
@@ -172,11 +172,11 @@ class machStrTab {
 }
 
 const MACH_RELOC_TYPE = {};
-MACH_RELOC_TYPE[RELOC.BRANCH26] = { type: ARM64_RELOC_BRANCH26, pcrel: 1, len: 2 };
-MACH_RELOC_TYPE[RELOC.PAGE21] = { type: ARM64_RELOC_PAGE21, pcrel: 1, len: 2 };
-MACH_RELOC_TYPE[RELOC.PAGEOFF12] = { type: ARM64_RELOC_PAGEOFF12, pcrel: 0, len: 2 };
-MACH_RELOC_TYPE[RELOC.GOT_PAGE21] = { type: ARM64_RELOC_GOT_LOAD_PAGE21, pcrel: 1, len: 2 };
-MACH_RELOC_TYPE[RELOC.GOT_PAGEOFF12] = { type: ARM64_RELOC_GOT_LOAD_PAGEOFF12, pcrel: 0, len: 2 };
+MACH_RELOC_TYPE[RELOC_ARM64.BRANCH26] = { type: ARM64_RELOC_BRANCH26, pcrel: 1, len: 2 };
+MACH_RELOC_TYPE[RELOC_ARM64.PAGE21] = { type: ARM64_RELOC_PAGE21, pcrel: 1, len: 2 };
+MACH_RELOC_TYPE[RELOC_ARM64.PAGEOFF12] = { type: ARM64_RELOC_PAGEOFF12, pcrel: 0, len: 2 };
+MACH_RELOC_TYPE[RELOC_ARM64.GOT_PAGE21] = { type: ARM64_RELOC_GOT_LOAD_PAGE21, pcrel: 1, len: 2 };
+MACH_RELOC_TYPE[RELOC_ARM64.GOT_PAGEOFF12] = { type: ARM64_RELOC_GOT_LOAD_PAGEOFF12, pcrel: 0, len: 2 };
 MACH_RELOC_TYPE.X86_64_RELOC_BRANCH = { type: X86_64_RELOC_BRANCH, pcrel: 1, len: 2 };
 MACH_RELOC_TYPE.X86_64_RELOC_SIGNED = { type: X86_64_RELOC_SIGNED, pcrel: 1, len: 2 };
 MACH_RELOC_TYPE.X86_64_RELOC_UNSIGNED = { type: X86_64_RELOC_UNSIGNED, pcrel: 0, len: 2 };
@@ -197,8 +197,8 @@ const MACH_ARCH = {
   arm64: {
     cpu: MACH_CPU_TYPE_ARM64,
     sub: MACH_CPU_SUBTYPE_ARM64_ALL,
-    kinds: [RELOC.BRANCH26, RELOC.PAGE21, RELOC.PAGEOFF12,
-      RELOC.GOT_PAGE21, RELOC.GOT_PAGEOFF12, 'POINTER64'],
+    kinds: [RELOC_ARM64.BRANCH26, RELOC_ARM64.PAGE21, RELOC_ARM64.PAGEOFF12,
+      RELOC_ARM64.GOT_PAGE21, RELOC_ARM64.GOT_PAGEOFF12, 'POINTER64'],
   },
   x86_64: {
     cpu: MACH_CPU_TYPE_X86_64,
@@ -219,7 +219,8 @@ const MACH_ARCH = {
  * `.bss` 那一段本来就全是零，占着文件里的零字节只是胖一点，语义一样。
  */
 function foldRo(data, defs, relocs, opts, dal) {
-  const base0 = data === undefined ? new Uint8Array(0) : data;
+  let base0 = data;
+  if (base0 === undefined) base0 = new Uint8Array(0);
   const ro = opts === undefined || opts.rodata === undefined ? null : opts.rodata;
   const bssSize = opts === undefined || opts.bssSize === undefined ? 0 : opts.bssSize;
   const roLen = ro === null ? 0 : ro.length;
@@ -256,7 +257,7 @@ function foldRo(data, defs, relocs, opts, dal) {
  * @param data  数据字节（`Uint8Array`，可以是空的 —— 那就不写第二节）
  * @param defs  这个文件**定义**的符号：`[{name, off, sect}]`，`sect` 1 是代码、2 是数据，
  *              `off` 是在那一节里的字节偏移
- * @param relocs 要等链接器填的地方：`[{at, kind, sym, sect}]`，`kind` 是 `RELOC.*`
+ * @param relocs 要等链接器填的地方：`[{at, kind, sym, sect}]`，`kind` 是 `RELOC_ARM64.*`
  *               或 `'POINTER64'`，`sym` 是符号名（不带下划线，这儿加）。
  *               `at` 是**自己那一节里**的偏移，`sect` 1 是代码（默认）、2 是数据。
  * @param arch  `'arm64'`（默认）或 `'x86_64'`

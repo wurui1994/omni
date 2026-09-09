@@ -166,7 +166,8 @@ export function loadProgram({ path, text, mode, diags, state }) {
     if (seen !== undefined) return seen;
 
     stack.push({ real, spec });
-    const src = file ?? new SourceFile(display(real), readText(real));
+    let src = file;
+    if (src === undefined || src === null) src = new SourceFile(display(real), readText(real));
     const ast = parse(src, diags);
     // id 不写成三元里的 `nextId++`：自举那条腿要求"惰性求值位置里不许藏副作用"（ADR-0011）
     let id = forceId;
@@ -209,7 +210,8 @@ export function loadProgram({ path, text, mode, diags, state }) {
 
   const onDisk = text === undefined && exists(path);
   const real = onDisk ? realPath(path) : resolve(path);
-  const entryFile = onDisk ? null : new SourceFile(path, text ?? '');
+  let entryFile = null;
+  if (!onDisk) entryFile = new SourceFile(path, text ?? '');
   // 入口的包根 = 它自己所在的目录。相对导入不能爬到入口目录之外：入口在哪，包就在哪。
   const root = onDisk ? dirname(real) : process.cwd();
   // 增量加载时会话根固定是模块 0：后一批要看得见前一批的顶层名字，而可见性规则是按模块 id 判的

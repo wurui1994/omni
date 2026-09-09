@@ -965,6 +965,17 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
   omni_js_realm_tbl_[ix] = px; \
   return px; \
 } \
+/* globalThis（ADR-0020 P4）：这个值域里没有全局环境记录（模块的顶层名字是模块局部的），
+   所以它就是**一格普通的真对象**，每个 realm 一份 —— 与 prelude 里 realm 上那格 gt 逐条
+   对应。挂上去的东西读得回来；内建（Math / JSON …）不在它身上，那是画出来的边界，
+   不是悄悄给个空对象。 */ \
+static omni_dyn omni_js_gt_tbl_[1]; \
+static omni_dyn omni_js_global_this(void) { \
+  if (omni_js_gt_tbl_[0].tag != OMNI_DYN_OBJ) { \
+    omni_js_gt_tbl_[0] = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Object", 6))); \
+  } \
+  return omni_js_gt_tbl_[0]; \
+} \
 /* 一格值的原型（规范里的 [[Prototype]]）。真对象自己带着，别的按标签映到 realm 上 ——
    `[] instanceof Array` 与 `x instanceof Object` 全靠这一格。 */ \
 static omni_dyn omni_js_proto_of_tag_(omni_dyn v) { \

@@ -3264,6 +3264,34 @@ class Lower {
         for (let i = 0; i < argc; i++) out.push(op('js_arr_at', [i === 0 ? lst : varRef(t), constReal(i)]));
         return op(`js_m_${name}`, out);
       }
+      /* unshift 的多实参（`a.unshift(x, y)`）：op 是定长的（一次插一格），而语义是"整段
+       * 插到头上"。先把接收者与实参**从左到右**求进临时量（求值次序是可观察的），再**倒着**
+       * 一格格 unshift —— 最后插的是第一个实参，于是插进去的次序与规范一致，返回值也正是
+       * 最后那一次交出来的新长度。
+       * 不这么摊的话它会落到下面"实参比派发器多"那一支，被当成用户自己的同名方法：
+       * 接收者是 list，`js_obj_get(list, "unshift")` 给 undefined，于是运行期一句
+       * "not a function"（量出来的：自举的 C1 跑自己时就死在这儿）。 */
+      if (name === 'unshift' && e.args.some((a) => a.type === 'Spread')) {
+        this.err(e.span, "'unshift' with a spread argument is not supported; push the items one by one");
+        return undefExpr();
+      }
+      if (name === 'unshift' && e.args.length > 1) {
+        const rt = this.temp();
+        this.emitPre(exprStmt(assign(varRef(rt), recv)), e.span);
+        const ts = [];
+        for (const a of e.args) {
+          const t = this.temp();
+          this.emitPre(exprStmt(assign(varRef(t), this.expr(a))), e.span);
+          ts.push(t);
+        }
+        let out = undefExpr();
+        for (let i = ts.length - 1; i >= 0; i--) {
+          const call = op('js_arr_unshift', [varRef(rt), varRef(ts[i])]);
+          if (i === 0) out = call;
+          else this.emitPre(exprStmt(call), e.span);
+        }
+        return out;
+      }
       if (e.args.length > argc) {
         // 不是 ABI 表里那个成员，而是用户自己的同名方法 —— 接收者照样要传（P1）。
         // recv 用两次，所以先落进临时量（理由同上面那处 js_call_this）。

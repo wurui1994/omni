@@ -18,6 +18,7 @@ import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
 import { C_ABI, C_TYPE, C_IN, C_OUT } from '../hir/c_abi.js';
 import { utf8Bytes } from '../host/utf8.js';
 import { OmniError } from '../source/diag.js';
+import { env } from '../host/native.js';
 
 /** dict/set 的键需要 hash；list.contains 只需要 eq */
 const HASH_FN = { int: 'omni_hash_int', real: 'omni_hash_real', bool: 'omni_hash_bool', string: 'omni_hash_string' };
@@ -63,9 +64,9 @@ class CEmitter {
     this.tmp = 0;
     // 函数级计时（第八十八刀，见 profTable）：`--profile` 或 `OMNI_PROFILE=1` 打开。
     // 关着时 profTable 什么都不发、func/Return 里那两句也不发 —— 生成的 C 逐字节不变。
-    this.prof = opts.profile === true
-      || (typeof process !== 'undefined' && process.env !== undefined
-        && process.env.OMNI_PROFILE === '1');
+    // 读环境走封闭 ABI 的 `env`（ADR-0011 决策 2）：`process.env` 只在 node 上有，
+    // 自举那条腿发射时会当场拒。
+    this.prof = opts.profile === true || env('OMNI_PROFILE') === '1';
     this.profId = -1;
     this.profRetT = 'void';
     // 循环标签栈（第四十刀）。C 里没有带标签的 break，多层跳只能是 goto，而且 break 与

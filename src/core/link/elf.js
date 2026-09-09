@@ -34,7 +34,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
-import { RELOC_ARM64 as RELOC } from '../arm64/asm.js';
+import { RELOC_ARM64 } from '../arm64/asm.js';
 
 /* ---------------------------------------------------------------- 常量
  * 名字与值照 `<elf.h>`。 */
@@ -116,11 +116,11 @@ const R_X86_64_RELATIVE = 8;
  * 读走原地的字节当加数，原地清零。tcc 写出来的 `.data` 就是清过零的。
  */
 const RELOC_TYPE = {};
-RELOC_TYPE[RELOC.BRANCH26] = { arch: 'arm64', type: R_AARCH64_CALL26, pcSub: 0, inPlace: 0 };
-RELOC_TYPE[RELOC.PAGE21] = { arch: 'arm64', type: R_AARCH64_ADR_PREL_PG_HI21, pcSub: 0, inPlace: 0 };
-RELOC_TYPE[RELOC.PAGEOFF12] = { arch: 'arm64', type: R_AARCH64_ADD_ABS_LO12_NC, pcSub: 0, inPlace: 0 };
-RELOC_TYPE[RELOC.GOT_PAGE21] = { arch: 'arm64', type: R_AARCH64_ADR_GOT_PAGE, pcSub: 0, inPlace: 0 };
-RELOC_TYPE[RELOC.GOT_PAGEOFF12] = {
+RELOC_TYPE[RELOC_ARM64.BRANCH26] = { arch: 'arm64', type: R_AARCH64_CALL26, pcSub: 0, inPlace: 0 };
+RELOC_TYPE[RELOC_ARM64.PAGE21] = { arch: 'arm64', type: R_AARCH64_ADR_PREL_PG_HI21, pcSub: 0, inPlace: 0 };
+RELOC_TYPE[RELOC_ARM64.PAGEOFF12] = { arch: 'arm64', type: R_AARCH64_ADD_ABS_LO12_NC, pcSub: 0, inPlace: 0 };
+RELOC_TYPE[RELOC_ARM64.GOT_PAGE21] = { arch: 'arm64', type: R_AARCH64_ADR_GOT_PAGE, pcSub: 0, inPlace: 0 };
+RELOC_TYPE[RELOC_ARM64.GOT_PAGEOFF12] = {
   arch: 'arm64', type: R_AARCH64_LD64_GOT_LO12_NC, pcSub: 0, inPlace: 0,
 };
 RELOC_TYPE.X86_64_RELOC_BRANCH = { arch: 'x86_64', type: R_X86_64_PLT32, pcSub: 4, inPlace: 0 };
@@ -736,9 +736,9 @@ export function readObject(bytes) {
      * 这一层留一个空数组，长度那一格由 `type` 决定该不该写（`writeSections`）。
      * 于是往返写回去时 `.bss` 的 `sh_size` 会变成 0。真正要并合 `.bss` 的时候
      * 这一格要单独带上，那属于链接器那一片。 */
-    const body = s.type === SHT_NOBITS
-      ? new Uint8Array(0)
-      : bytes.subarray(s.off, s.off + s.size);
+    let body = null;
+    if (s.type === SHT_NOBITS) body = new Uint8Array(0);
+    else body = bytes.subarray(s.off, s.off + s.size);
     secs.push({
       name: nameOf(s.strx),
       strx: s.strx,

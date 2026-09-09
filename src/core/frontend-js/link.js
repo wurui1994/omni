@@ -297,6 +297,31 @@ export function linkJs(entry, read, diags) {
   const body = [];
   const natives = new Map();
   const cnatives = new Map();
+  /* 改名摊出来的那一句绑定（`const 本地名 = 原名;`）也占**同一个**模块级作用域，所以它
+   * 得跟真声明一样过一遍重名检查，而且同一个本地名只该摊一次。
+   *
+   * 从前每个导入方各摊一句：三个文件都写 `import { RELOC_ARM64 as RELOC }`，于是程序里有
+   * 三句 `const RELOC = RELOC_ARM64`——同一个全局槽被反复赋值。更糟的是 `x64/asm.js` 自己
+   * 导出了一格**不同**的 `RELOC`：那个槽先被 x64 的表填上，再被 arm64 的表盖掉，x64 的代码
+   * 生成读到的就成了 arm64 的重定位号（量出来的静默错答案）。判据只有一条：本地名相同而
+   * 来源不同就是撞名，当场报；来源相同则只留第一句。 */
+  const aliasOf = new Map();
+  const bindAlias = (local, from, span) => {
+    const prev = aliasOf.get(local);
+    if (prev !== undefined) {
+      if (prev !== from) {
+        diags.error(span, `'${local}' is bound to both '${prev}' and '${from}' at module scope; rename one`);
+      }
+      return false;
+    }
+    const own = owner.get(local);
+    if (own !== undefined) {
+      diags.error(span, `'${local}' is already declared at module scope in '${own}'; rename the alias`);
+      return false;
+    }
+    aliasOf.set(local, from);
+    return true;
+  };
   for (const m of order) {
     for (const n of m.cnatives) {
       const prev = cnatives.get(n.local);
@@ -323,6 +348,7 @@ export function linkJs(entry, read, diags) {
          * getter（`ns.mut` 要看得见后来的改动）。这一格因此只在 JS 那条腿上成立：
          * 取值器要真对象，C 那边发射时会拒（ADR-0020 P1-c）。 */
         if (sp.kind === 'namespace') {
+          if (!bindAlias(sp.local, `* from ${imp.path}`, imp.span)) continue;
           const props = [];
           for (const [exported, local] of target.exports) {
             props.push({
@@ -358,6 +384,7 @@ export function linkJs(entry, read, diags) {
             diags.error(imp.span, `'${imp.path}' has no default export`);
             continue;
           }
+          if (!bindAlias(sp.local, local, imp.span)) continue;
           body.push({
             type: 'VarDecl',
             kind: 'const',
@@ -375,7 +402,7 @@ export function linkJs(entry, read, diags) {
           continue;
         }
         // 别名摊成一句模块级的绑定：不重命名，也就不需要作用域分析
-        if (sp.local !== sp.imported) {
+        if (sp.local !== sp.imported && bindAlias(sp.local, sp.imported, imp.span)) {
           body.push({
             type: 'VarDecl',
             kind: 'const',
@@ -391,6 +418,7 @@ export function linkJs(entry, read, diags) {
     body.push(...m.body);
     // 改名的导出：绑定排在模块体**之后**（本地那一格可能是 const，要先声明再引用）
     for (const al of m.aliases) {
+      if (!bindAlias(al.to, al.from, al.span)) continue;
       body.push({
         type: 'VarDecl',
         kind: 'const',
