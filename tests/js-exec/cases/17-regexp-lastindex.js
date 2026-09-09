@@ -21,3 +21,13 @@ const n = /a/;
 console.log(`li ${n.lastIndex}`);
 m = n.exec("xa");
 console.log(`li ${JSON.stringify(m)} ${n.lastIndex}`);
+
+// .source 是 escape 过的那一格（规范 22.2.6.13.1）：裸 / 写成 \/，空模式写成 (?:)，
+// 已经escape过的不再escape一遍，字符组里的 / 不动。塞回 new RegExp 还是同一个正则。
+console.log(`src ${new RegExp("a/b").source} ${new RegExp("a\\/b").source} ${new RegExp("[/]").source}`);
+console.log(`src ${JSON.stringify(new RegExp("").source)} ${JSON.stringify(new RegExp("a\nb").source)}`);
+console.log(`src ${new RegExp("a/b").test("a/b")} ${new RegExp(new RegExp("a/b").source).test("a/b")}`);
+// new RegExp(re)：照抄源与旗标；模式缺席是空模式，不是 "undefined"
+const cp = new RegExp(/a\/b/i);
+console.log(`cp ${cp.source} ${cp.flags} ${cp.test("XA/B")} ${new RegExp(/a/g, "").flags === ""}`);
+console.log(`cp ${new RegExp().source} ${new RegExp(undefined).source} ${new RegExp(null).source}`);

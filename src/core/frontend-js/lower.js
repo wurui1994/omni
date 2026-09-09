@@ -3216,13 +3216,16 @@ class Lower {
         this.err(sp.span, "spread is not supported in a 'new RegExp' call");
         return undefExpr();
       }
-      if (e.args.length < 1 || e.args.length > 2) {
-        this.err(e.span, "'new RegExp(src[, flags])' takes one or two arguments");
+      if (e.args.length > 2) {
+        this.err(e.span, "'new RegExp(src[, flags])' takes at most two arguments");
         return undefExpr();
       }
+      /* 实参不在这里 ToString：new RegExp(re) 要**照抄** re 的源与旗标（不是把它印成
+       * "/a/g" 再当模式），undefined 模式是空模式而不是 "undefined"，这两条都得让
+       * 运行期那一格看见原样的实参才分得清。 */
       return op('js_re_new', [
-        op('js_str', [this.expr(e.args[0])]),
-        e.args.length > 1 ? op('js_str', [this.expr(e.args[1])]) : s16(''),
+        e.args.length > 0 ? this.expr(e.args[0]) : undefExpr(),
+        e.args.length > 1 ? this.expr(e.args[1]) : undefExpr(),
       ]);
     }
     /* new Promise(executor)（ADR-0020 P2）：状态与回调表在隐藏槽里，then / catch /

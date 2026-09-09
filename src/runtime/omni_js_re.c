@@ -855,9 +855,22 @@ omni_re omni_js_re_get(omni_dyn pattern_d, omni_dyn flags_d) {  omni_s16 pattern
    `new RegExp(bad)` 一样，不能等到第一次 exec 才响。 */
 omni_dyn omni_js_re_new(omni_dyn source, omni_dyn flags) {
   omni_js_re_obj *r = (omni_js_re_obj *)omni_alloc((int64_t)sizeof(omni_js_re_obj));
-  omni_js_re_get(source, flags);
-  r->src = omni_js_as_s16(source);
-  r->flags = omni_js_as_s16(flags);
+  omni_s16 empty = {NULL, 0};
+  omni_s16 src, fl;
+  /* 规范 22.2.4.1 的三条：实参本身是正则就照抄它的源（旗标缺席时连旗标一起抄），
+     模式缺席是空模式而不是 "undefined"，旗标缺席是无旗标。抄的是没 escape 过的原样源
+     —— .source 那一格自己会 escape。与 prelude 的 $js_re_new 对着写。 */
+  if (source.tag == OMNI_DYN_RE) {
+    omni_js_re_obj *o = (omni_js_re_obj *)source.u.ref;
+    src = o->src;
+    fl = flags.tag == OMNI_DYN_UNDEF ? o->flags : omni_js_as_s16(omni_js_str(flags));
+  } else {
+    src = source.tag == OMNI_DYN_UNDEF ? empty : omni_js_as_s16(omni_js_str(source));
+    fl = flags.tag == OMNI_DYN_UNDEF ? empty : omni_js_as_s16(omni_js_str(flags));
+  }
+  omni_js_re_get(omni_dyn_of_s16(src), omni_dyn_of_s16(fl));
+  r->src = src;
+  r->flags = fl;
   r->li = 0;
   return omni_dyn_of_ref((void *)r, OMNI_DYN_RE);
 }

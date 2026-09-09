@@ -245,11 +245,40 @@ static omni_dyn omni_js_re_last_index(omni_dyn rd) { \
    实参摊成 (源, 旗标)"，那是 omni_js_str_replace 那一族早就在用的办法，match / matchAll /
    search 收非字面量正则时也走它（见 lower.js 的 regexCall）。所以非正则不报错，照规范
    ToString 当**模式**收下；undefined 当空模式。与 prelude 的那两格对着写。 */ \
+/* EscapeRegExpPattern（规范 22.2.6.13.1）：.source 交出去的那一格要能塞回 /…/ 里再读一遍，
+   所以裸 / 写成 \/，换行写成两个字符的 \n，空模式写成 (?:)。反斜杠后头那一格照抄（已经写成
+   \/ 的字面量不能再 escape 一遍），字符组 [...] 里的 / 不动。与 prelude 的 $js_re_esc_src
+   一字不差。 */ \
+static omni_s16 omni_js_re_esc_src(omni_s16 p) { \
+  if (p.len == 0) return omni_js_s16_lit("(?:)"); \
+  omni_s16_buf out = {0}; \
+  bool cls = false; \
+  for (int64_t i = 0; i < p.len; i++) { \
+    uint16_t c = p.p[i]; \
+    if (c == '\\') { \
+      omni_s16_buf_add_unit(&out, c); \
+      i++; \
+      if (i < p.len) omni_s16_buf_add_unit(&out, p.p[i]); \
+      continue; \
+    } \
+    if (c == '\n') { omni_s16_buf_add_unit(&out, '\\'); omni_s16_buf_add_unit(&out, 'n'); continue; } \
+    if (c == '\r') { omni_s16_buf_add_unit(&out, '\\'); omni_s16_buf_add_unit(&out, 'r'); continue; } \
+    if (c == '[') cls = true; \
+    else if (c == ']') cls = false; \
+    else if (c == '/' && !cls) { \
+      omni_s16_buf_add_unit(&out, '\\'); \
+      omni_s16_buf_add_unit(&out, '/'); \
+      continue; \
+    } \
+    omni_s16_buf_add_unit(&out, c); \
+  } \
+  return omni_s16_buf_done(&out); \
+} \
 static omni_dyn omni_js_re_source(omni_dyn rd) { \
   if (rd.tag != OMNI_DYN_RE) { \
     return rd.tag == OMNI_DYN_UNDEF ? omni_dyn_of_s16(omni_js_s16_lit("")) : omni_js_str(rd); \
   } \
-  return omni_dyn_of_s16(omni_js_re_want(rd)->src); \
+  return omni_dyn_of_s16(omni_js_re_esc_src(omni_js_re_want(rd)->src)); \
 } \
 static omni_dyn omni_js_re_flags(omni_dyn rd) { \
   if (rd.tag != OMNI_DYN_RE) return omni_dyn_of_s16(omni_js_s16_lit("")); \

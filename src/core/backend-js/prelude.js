@@ -4917,7 +4917,18 @@ function $js_re_find(re, s, start) {
   return re.exec(s);
 }
 // 正则当值：造一格与 C 侧同形的三元组（source / flags / lastIndex）
-function $js_re_new(src, flags) { return new $JsRe($js_asS16(src), $js_asS16(flags)); }
+/* 三条规范细节（22.2.4.1）：实参本身是正则就**照抄**它的源（旗标缺席时连旗标一起抄），
+   模式缺席（new RegExp() / new RegExp(undefined)）是空模式，不是 "undefined"，
+   旗标缺席是无旗标。抄的是没 escape 过的原样源 —— .source 那一格自己会 escape。 */
+function $js_re_new(src, flags) {
+  if ($dynTag(src) === "regexp") {
+    return new $JsRe(src.src, flags === undefined ? src.flags : $js_asS16($js_str(flags)));
+  }
+  return new $JsRe(
+    src === undefined ? "" : $js_asS16($js_str(src)),
+    flags === undefined ? "" : $js_asS16($js_str(flags)),
+  );
+}
 function $js_re_last_index(r) {
   if ($dynTag(r) !== "regexp") $rt_error($dynTag(r) + " is not a regexp");
   return r.li;
@@ -4928,8 +4939,30 @@ function $js_re_last_index(r) {
    办法，match / matchAll / search 收非字面量正则时也走它（见 lower.js 的 regexCall）。
    所以非正则不报错，照规范 ToString 当**模式**收下（"abc".match("b") 就是这个意思），
    undefined 当空模式（不是 "undefined"）。 */
+/* EscapeRegExpPattern（规范 22.2.6.13.1）：.source 交出去的那一格要能塞回 /…/ 里再读一遍，
+   所以裸 / 得写成 \/，换行得写成两个字符的 \n，空模式得写成 (?:)。
+   两条要点：反斜杠后头那一格照抄（已经写成 \/ 的字面量不能再escape一遍），
+   字符组 [...] 里的 / 不用管（qjs 与 V8 都不动它）。
+   \u2028 / \u2029 qjs 不escape，跟着 qjs。
+   这一格escape过的模式塞回引擎还是同一个正则，所以内部那条"摊成 (源, 旗标)"的路照用不误。 */
+function $js_re_esc_src(p) {
+  if (p.length === 0) return "(?:)";
+  let out = "";
+  let cls = false;
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === "\\") { out += c; i++; if (i < p.length) out += p[i]; continue; }
+    if (c === "\n") { out += "\\n"; continue; }
+    if (c === "\r") { out += "\\r"; continue; }
+    if (c === "[") cls = true;
+    else if (c === "]") cls = false;
+    else if (c === "/" && !cls) { out += "\\/"; continue; }
+    out += c;
+  }
+  return out;
+}
 function $js_re_source(r) {
-  if ($dynTag(r) === "regexp") return r.src;
+  if ($dynTag(r) === "regexp") return $js_re_esc_src(r.src);
   return r === undefined ? "" : $js_str(r);
 }
 function $js_re_flags(r) {
