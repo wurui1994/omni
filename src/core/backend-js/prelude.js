@@ -2761,6 +2761,14 @@ function $mkRealm() {
   $natm(r.dateP, "toISOString", 0, (t) => new Date($js_date_ms(t)).toISOString());
   $natm(r.dateP, "toJSON", 1, (t) => new Date($js_date_ms(t)).toISOString());
   $natm(r.dateP, "toString", 0, (t) => new Date($js_date_ms(t)).toString());
+  /* Date.prototype[Symbol.toPrimitive]（规范 21.4.4.45）：隐式强转那条路早就对
+     （d2 - d1 走 valueOf、模板串走 toString），缺的只是**显式取那一格函数**。
+     口径照规范："number" 给毫秒，"string" 与 "default" 都给 toString —— Date 是
+     唯一一个 default 走串的内建。 */
+  $js_def_data(r.dateP, $js_sym_wk("toPrimitive"),
+    $nat("[Symbol.toPrimitive]", 1, (t, args) => (args[0] === "number"
+      ? $js_date_ms(t)
+      : new Date($js_date_ms(t)).toString())), true, false, true);
   $natm(r.dateP, "getFullYear", 0, (t) => new Date($js_date_ms(t)).getFullYear());
   $natm(r.dateP, "getMonth", 0, (t) => new Date($js_date_ms(t)).getMonth());
   $natm(r.dateP, "getDate", 0, (t) => new Date($js_date_ms(t)).getDate());

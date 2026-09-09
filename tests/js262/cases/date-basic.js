@@ -60,3 +60,13 @@ console.log(Date.UTC(2020, 12, 1) === Date.UTC(2021, 0, 1));
 // 当值用（表里带 len，所以取得成一格薄包装的函数值）
 const U = Date.UTC;
 console.log(U(2020, 0, 1) === Date.UTC(2020, 0, 1), Date.UTC.length, Date.UTC.name);
+
+/* Date.prototype[Symbol.toPrimitive]（规范 21.4.4.45）：隐式强转那条路早就对，缺的是
+   **显式取那一格函数**。口径照规范："number" 给毫秒，"string" 与 "default" 都给
+   toString —— Date 是唯一一个 default 走串的内建。 */
+const sp = new Date(86400000);
+console.log(typeof sp[Symbol.toPrimitive], sp[Symbol.toPrimitive]("number"));
+console.log(sp[Symbol.toPrimitive]("string") === sp.toString());
+console.log(sp[Symbol.toPrimitive]("default") === sp.toString());
+console.log(sp - new Date(0), `${sp}` === sp.toString(), +sp);
+console.log(Object.getOwnPropertySymbols(Object.getPrototypeOf(sp)).length > 0);
