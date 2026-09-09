@@ -2097,6 +2097,11 @@ static omni_dyn omni_js_aiter(omni_dyn v) { \
                     true, false, true); \
   return o; \
 } \
+static void omni_js_aiter_close(omni_dyn it) { \
+  omni_dyn f = it.tag == OMNI_DYN_OBJ \
+    ? omni_js_getp(it, omni_js_name_("return", 6), omni_dyn_undef()) : omni_dyn_undef(); \
+  if (f.tag == OMNI_DYN_FN) omni_js_call_this(f, it, omni_js_arr_wrap(LT##_new())); \
+} \
 static omni_dyn omni_js_aiter_next(omni_dyn it) { \
   omni_dyn f = omni_js_obj_getk(it, omni_str_new("next", 4)); \
   return omni_js_promise_resolved(omni_js_call_this(f, it, omni_js_arr_wrap(LT##_new()))); \

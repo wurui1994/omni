@@ -372,6 +372,10 @@ export const JS_ABI = {
   js_agen_new: { js: '$js_agen_new', c: 'omni_js_agen_new', arity: 1 },
   js_aiter: { js: '$js_aiter', c: 'omni_js_aiter', arity: 1, throws: true },
   js_aiter_next: { js: '$js_aiter_next', c: 'omni_js_aiter_next', arity: 1, throws: true },
+  /* for await 的出口（规范 27.1.4.5 的 AsyncIteratorClose）：拿到 return 就调一次。
+     交出来的 promise **不等** —— 等它要在状态机里再切一段，而量出来的次序（node 在 break
+     之后立刻跑那格 finally）用同步调就已经对上了。 */
+  js_aiter_close: { js: '$js_aiter_close', c: 'omni_js_aiter_close', arity: 1, ret: 'void', throws: true },
   /* 普通函数当构造器与 new.target（ADR-0020）。函数还不是真对象，所以 `f.prototype`
      住在一张 side table 上（prelude 的 $FNPROTO），funP 上的访问器读它；new.target 走
      一格运行期的槽，与 this 同一个路子（放的人只有 js_fn_construct，取的人是函数入口）。 */

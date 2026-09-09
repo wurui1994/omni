@@ -702,7 +702,7 @@ class Split {
     this.emit(bodyB, gExprStmt(gAssign(ident(s.left.name, sp),
       opCall(lazy ? 'js_iter_cur' : 'js_idx_get', [ident(it, sp), ident(ix, sp)], sp), sp), sp));
     this.emit(bodyB, gExprStmt(gAssign(ident(ix, sp), bin('+', ident(ix, sp), gNum(1, sp), sp), sp), sp));
-    if (lazy) this.openIters.push(it);
+    if (lazy) this.openIters.push({ v: it, op: 'js_iter_close' });
     const x = this.stmt(s.body, bodyB, { ...ctx, brk: exit, cont: head });
     if (lazy) this.openIters.pop();
     if (x >= 0) this.goto(x, head, sp);
@@ -715,7 +715,8 @@ class Split {
   /** `return` 穿出 for-of 时把还开着的迭代器关掉（由内往外），规范的 IteratorClose */
   closeOpenIters(b, sp) {
     for (let i = this.openIters.length - 1; i >= 0; i--) {
-      this.emit(b, gExprStmt(opCall('js_iter_close', [ident(this.openIters[i], sp)], sp), sp));
+      const o = this.openIters[i];
+      this.emit(b, gExprStmt(opCall(o.op, [ident(o.v, sp)], sp), sp));
     }
   }
 
@@ -742,8 +743,13 @@ class Split {
       this.gotoBlock(exit, sp), this.gotoBlock(bodyB, sp), sp));
     this.term[after] = true;
     this.emit(bodyB, gExprStmt(gAssign(ident(s.left.name, sp), member(ident(r, sp), 'value', sp), sp), sp));
+    this.openIters.push({ v: it, op: 'js_aiter_close' });
     const x = this.stmt(s.body, bodyB, { ...ctx, brk: exit, cont: head });
+    this.openIters.pop();
     if (x >= 0) this.goto(x, head, sp);
+    /* 出口补一次 close（与同步 for-of 那条对称）：正常跑完时上游已经 done，那是空操作；
+     * break 出来才真调 it.return() —— 少这一格，async 生成器的 finally 静静地不跑。 */
+    this.emit(exit, gExprStmt(opCall('js_aiter_close', [ident(it, sp)], sp), sp));
     return exit;
   }
 

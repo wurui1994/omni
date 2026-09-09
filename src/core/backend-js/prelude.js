@@ -3943,6 +3943,14 @@ function $js_aiter(v) {
   });
   return o;
 }
+/* for await 的出口：拿到 return 就调一次。交出来的 promise 这儿不等 —— 等它要在状态机里
+   再切一段，而量出来的次序（node 在 break 之后立刻跑那格 finally）用同步调就已经对上了。
+   同步可迭代物的兜底那一格没有 return，于是这儿是空操作。 */
+function $js_aiter_close(it) {
+  const f = $js_isobj(it) ? $js_getp(it, "return", undefined) : undefined;
+  if ($dynTag(f) === "function") $callThis(f, it, []);
+  return undefined;
+}
 function $js_aiter_next(it) {
   const f = $js_getp(it, "next", undefined);
   return $js_promise_resolved($callThis(f, it, []));
