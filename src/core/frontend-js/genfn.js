@@ -188,6 +188,7 @@ class Split {
     this.blocks = [];   // 每一段的语句表
     this.term = [];     // 这一段已经跳走了吗（跳走之后再 emit 就是死代码）
     this.hoist = [];    // 要提到外层函数体的名字（切段要跨过它们的生存期）
+    this.openIters = []; // 当前还开着的 for-of 迭代器把手（return 穿出去时要关，见 closeOpenIters）
     this.tmp = 0;
   }
 
@@ -556,6 +557,8 @@ class Split {
         return -1;
       }
     }
+    // 穿出 for-of 时把还开着的迭代器关掉（规范的 IteratorClose）—— 出口那条路由 forInOf 自己补
+    this.closeOpenIters(b, sp);
     if (ctx.fin >= 0) {
       // 还在 try 里：先把值收好、标上"在为 return 跑 finally"，再跳到 finally 的入口
       this.emit(b, exprStmt(assign(ident(UNW, sp), num(1, sp), sp), sp));
@@ -658,9 +661,11 @@ class Split {
     return exit;
   }
 
-  /* for-of / for-in 摊成"取一串 + 下标走"：这个值域里的 js_iter 收出来的是一格 list
-   * （for-of 的降级本来也吃它，见 lower.js 的 forOf）。所以生成器里的 for-of 与外面
-   * 一样是**先收齐再走** —— 无穷的可迭代对象在这儿会挂住，那是同一格已知的账。 */
+  /* for-in 摊成"取一串键 + 下标走"（键本来就得先收齐）。
+   * for-of 走**惰性**那套把手（js_iter_open / done / cur / close，与 lower.js 的 forOf 逐行
+   * 对齐）：从前这儿也用 js_iter 先收齐，于是**生成器里套一个惰性源就挂住** ——
+   * 量出来的是 `function* take(it,n){ for (const v of it){ … } }` 配一个无穷生成器，
+   * 直接不返回（比错答案还糟：既不响也不停）。有限源上也看得见：take 之后源还被拉到底。 */
   forInOf(s, cur, ctx) {
     const sp = s.span;
     if (hasSuspend(s.right)) {
@@ -675,25 +680,43 @@ class Split {
     if (s.await === true) return this.forAwait(s, cur, ctx);
     const it = this.temp('it');
     const ix = this.temp('ix');
-    const items = s.type === 'ForIn'
-      ? opCall('js_for_in_keys', [s.right], sp)
-      : opCall('js_iter', [s.right], sp);
+    const lazy = s.type !== 'ForIn';
+    const items = lazy
+      ? opCall('js_iter_open', [s.right], sp)
+      : opCall('js_for_in_keys', [s.right], sp);
     this.emit(cur, exprStmt(assign(ident(it, sp), items, sp), sp));
     this.emit(cur, exprStmt(assign(ident(ix, sp), num(0, sp), sp), sp));
     const head = this.newBlock();
     const bodyB = this.newBlock();
     const exit = this.newBlock();
     this.goto(cur, head, sp);
-    this.emit(head, ifSt(bin('<', ident(ix, sp), opCall('js_arr_len', [ident(it, sp)], sp), sp),
-      this.gotoBlock(bodyB, sp), this.gotoBlock(exit, sp), sp));
+    /* 惰性那一支：`js_iter_done(it, ix)` 这一问**就是**"往前走一格"，所以每轮恰好一次
+     * next（cond 在体之前跑，continue 也回到 head）。真为了省一个"取非"，把两条分支调了个头。 */
+    this.emit(head, lazy
+      ? ifSt(opCall('js_iter_done', [ident(it, sp), ident(ix, sp)], sp),
+        this.gotoBlock(exit, sp), this.gotoBlock(bodyB, sp), sp)
+      : ifSt(bin('<', ident(ix, sp), opCall('js_arr_len', [ident(it, sp)], sp), sp),
+        this.gotoBlock(bodyB, sp), this.gotoBlock(exit, sp), sp));
     this.term[head] = true;
     // 先取值再进位：`continue` 于是可以直接跳回 head
     this.emit(bodyB, exprStmt(assign(ident(s.left.name, sp),
-      opCall('js_idx_get', [ident(it, sp), ident(ix, sp)], sp), sp), sp));
+      opCall(lazy ? 'js_iter_cur' : 'js_idx_get', [ident(it, sp), ident(ix, sp)], sp), sp), sp));
     this.emit(bodyB, exprStmt(assign(ident(ix, sp), bin('+', ident(ix, sp), num(1, sp), sp), sp), sp));
+    if (lazy) this.openIters.push(it);
     const x = this.stmt(s.body, bodyB, { ...ctx, brk: exit, cont: head });
+    if (lazy) this.openIters.pop();
     if (x >= 0) this.goto(x, head, sp);
+    /* 出口补一次 close：正常跑完时迭代器已经 done，那是空操作；break 出来才真调 it.return()。
+     * `return` 出去那条路不经过这儿，所以 retStmt 另有一份（见 closeOpenIters）。 */
+    if (lazy) this.emit(exit, exprStmt(opCall('js_iter_close', [ident(it, sp)], sp), sp));
     return exit;
+  }
+
+  /** `return` 穿出 for-of 时把还开着的迭代器关掉（由内往外），规范的 IteratorClose */
+  closeOpenIters(b, sp) {
+    for (let i = this.openIters.length - 1; i >= 0; i--) {
+      this.emit(b, exprStmt(opCall('js_iter_close', [ident(this.openIters[i], sp)], sp), sp));
+    }
   }
 
   /* `for await (const v of xs)`（ADR-0020 P2）：走异步迭代协议 —— 每一圈 await 一格
