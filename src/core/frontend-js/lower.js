@@ -3357,6 +3357,10 @@ class Lower {
       this.emitPre(exprStmt(assign(varRef(t),
         op('js_obj_new_p', [globalRef(this.globals.get(protoGlobalName(n)).name)]))), e.span);
       const r = this.temp();
+      /* new.target 是**被 new 的那一格类对象**（规范 10.2.2）。类的构造走 $init 那格闭包，
+       * 不经过 js_fn_construct，所以要在这儿把类对象放进槽里 —— 不放的话类构造器里的
+       * new.target 是 undefined（`new.target === C` 静静地为假）。 */
+      this.emitPre(exprStmt(op('js_nt_put', [globalRef(this.globals.get(n).name)])), e.span);
       this.emitPre(exprStmt(assign(varRef(r), op('js_call_this', [
         op('js_obj_get', [globalRef(this.globals.get(n).name), classInitKey()]),
         varRef(t),

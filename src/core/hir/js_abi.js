@@ -352,6 +352,9 @@ export const JS_ABI = {
      一格运行期的槽，与 this 同一个路子（放的人只有 js_fn_construct，取的人是函数入口）。 */
   js_fn_construct: { js: '$js_fn_construct', c: 'omni_js_fn_construct', arity: 2, throws: true },
   js_nt_take: { js: '$js_nt_take', c: 'omni_js_nt_take', arity: 0 },
+  /* new.target 的**放**那一侧：类的构造走的是 $init 那格闭包（不是 js_fn_construct），
+     所以要在调它之前把类对象放进槽里 —— 不放的话类构造器里的 new.target 是 undefined。 */
+  js_nt_put: { js: '$js_nt_put', c: 'omni_js_nt_put', arity: 1, ret: 'void' },
   /* eval 与 Function(src)（ADR-0020 P6）：这两样要**编译器在运行期在场**。落点是一格运行期
      的钩子（host/src_eval.js 装上，prelude 的 $js_src_eval 顺着宿主全局找它）—— 在本进程里
      跑的时候（omni run / REPL）有，编成独立产物之后没有，那时当场报错而不是假装能跑。
@@ -860,7 +863,7 @@ const P1_JS_ONLY = [
   'js_jobs_run',
   'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',
-  'js_fn_construct', 'js_nt_take', 'js_src_eval', 'js_src_fn',
+  'js_fn_construct', 'js_nt_take', 'js_nt_put', 'js_src_eval', 'js_src_fn',
 ];
 for (const n of P1_JS_ONLY) JS_ABI[n].noC = true;
 

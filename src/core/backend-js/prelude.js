@@ -2531,7 +2531,8 @@ function $js_fn_proto(f) {
   return p;
 }
 /* new.target：走一格运行期的槽，与 this 同一个路子（js_this_take 那一段的说明）。
-   放的人只有 js_fn_construct，取的人是**函数入口**（读一次就清）。已知的窄口：
+   放的人是 js_fn_construct 与 js_nt_put（类的构造走 $init 那格闭包，不经过前者），
+   取的人是**函数入口**（读一次就清）。已知的窄口：
    一个用 new 调起来、自己**不提** new.target 的函数，在它体内直接调另一个提 new.target
    的普通函数时，那一格还没被清掉 —— 量过的源码里没有这种写法，先记在这儿。 */
 let $js_nt_slot = undefined;
@@ -2539,6 +2540,10 @@ function $js_nt_take() {
   const v = $js_nt_slot;
   $js_nt_slot = undefined;
   return v;
+}
+function $js_nt_put(v) {
+  $js_nt_slot = v;
+  return undefined;
 }
 function $js_fn_construct(f, args) {
   /* 代理身上的 construct 陷阱最先问（规范 10.5.13）：目标是函数还是类对象都算，所以
@@ -2563,7 +2568,10 @@ function $js_fn_construct(f, args) {
     const init = $js_getp(f, $js_sym_wk("omni.classInit"), undefined);
     if ($dynTag(init) === "function") {
       const o = $js_obj_new_p($js_getp(f, "prototype", undefined));
+      // new.target 是**被 new 的那一格类对象**（规范 10.2.2）—— 子类里它是子类
+      $js_nt_slot = f;
       const r0 = $callThis(init, o, $js_arr_of(args));
+      $js_nt_slot = undefined;
       if ($js_pending()) return undefined;
       return $js_isobj(r0) ? r0 : o;
     }
@@ -2698,6 +2706,12 @@ function $mkRealm() {
   $js_def_acc(funP, "length", $nat("length", 0, (t) => $js_fn_len(t)), undefined, false, true);
   // prototype：函数不是真对象，这一格从 side table 上取（第一次问起才建）
   $js_def_acc(funP, "prototype", $nat("prototype", 0, (t) => $js_fn_proto(t)), undefined, false, false);
+  /* Function.prototype.toString：规范要的是**源文本**，而这个值域里的产物不带它。
+     从前这一格落到 Object.prototype.toString 上，交出 "[object Function]" —— 一格
+     静静的谎（f.toString().includes("named") 为假），而且与 String(f) 自相矛盾
+     （那边是硬错 "cannot convert function to string"）。现在两条路一样地响。 */
+  $natm(funP, "toString", 0, () => $rt_error(
+    "Function.prototype.toString needs the source text, which this value domain does not keep"));
   $natm(funP, "bind", 1, (t, a) => {
     /* bind 出来的那一格：name 是 "bound " 加原来的名字、length 是原来的减掉预先绑上的实参
        个数（不小于 0）—— 规范 20.2.3.2。量过 qjs 与 node 都是这样。 */

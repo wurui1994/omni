@@ -44,3 +44,15 @@ console.log(m.v, m instanceof Mk);
 // 实参照常求值，形参照常绑
 function Many(a, b, c) { this.all = [a, b, c].join("-"); }
 console.log(new Many(1, 2).all);
+
+/* new.target 在**类**构造器里（规范 10.2.2）：类的构造走 $init 那格闭包、不经过
+   js_fn_construct，所以从前那一格是 undefined —— new.target === C 静静地为假。
+   子类里它是**被 new 的那一格**（子类），这一点两条路都要对上。 */
+class NT { constructor() { this.who = new.target === NT ? "NT" : "other"; } }
+class NTSub extends NT {}
+console.log(new NT().who, new NTSub().who);
+// 运行期拿到的类对象（不是顶层名字）走 js_fn_construct 那条路，答案要一样
+const Held = NT;
+console.log(new Held().who);
+const bag = { C: NT };
+console.log(new bag.C().who);
