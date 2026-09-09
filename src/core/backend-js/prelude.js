@@ -3452,7 +3452,48 @@ function $js_obj_prevent_ext(o) { if ($js_isobj(o)) o.ex = false; return o; }
 function $js_obj_is_ext(o) { return $js_isobj(o) ? o.ex : !$js_obj_frozenish(o); }
 // defineProperty。desc 是一格真对象；缺席的字段照规范取 false/undefined。
 // 已有槽的时候只覆盖 desc 里**出现过**的字段（规范 ValidateAndApplyPropertyDescriptor）。
+/* 数组上的 defineProperty，只收能原样表达的那一种（理由见 $js_obj_def 的第一段注）。
+   要留神**新键的默认是 false**：Object.defineProperty(a, "tag", { value: v }) 建出来的那一格
+   在 JS 里是不可枚举的（qjs 的 Object.keys(a) 因此看不见它），而旁表没有这一层 ——
+   所以新键必须把 enumerable 明写成 true 才收，否则当场报。已有的键则是"缺的字段保持原样"，
+   旁表那一格本来就是可枚举的，于是 { value } 一种就够。 */
+function $js_arr_def(a, k, desc) {
+  const has = (n) => $js_isobj(desc) && desc.ps.has(n);
+  const bad = (n) => has(n) && !$js_truthy($js_getp(desc, n, undefined));
+  if (has("get") || has("set")) {
+    $rt_error("defineProperty: an accessor on an array needs a real object");
+  }
+  if (bad("writable") || bad("enumerable") || bad("configurable")) {
+    $rt_error("defineProperty: a non-default writable/enumerable/configurable on an array"
+      + " cannot be represented");
+  }
+  const key = $js_hkey(k);
+  const v = has("value") ? $js_getp(desc, "value", undefined) : undefined;
+  if ($js_isidx(key)) {
+    const i = Number(key);
+    if (i >= $js_arr_of(a).length) {
+      $rt_error("defineProperty: index " + i + " is past the end of the array; push instead");
+    }
+    if (has("value")) $js_arr_set(a, i, v);
+    return a;
+  }
+  // length 是"截断/加长"，不是旁表里的一格 —— 写过去只会造一格看不见的影子
+  if (key === "length") $rt_error("defineProperty: 'length' of an array is not settable here");
+  if (!$js_obj_has(a, key) && !(has("enumerable") && $js_truthy($js_getp(desc, "enumerable", undefined)))) {
+    $rt_error("defineProperty: a new non-enumerable key on an array cannot be represented"
+      + " (pass enumerable: true, or assign it)");
+  }
+  $js_obj_set(a, key, v);
+  return a;
+}
 function $js_obj_def(o, k, desc) {
+  /* 数组上的 defineProperty（ADR-0020）：list 是一排稠密的 dyn + 一张旁表，**没有描述符
+     这一层**，所以只收"能原样表达出来"的那一种形状：下标在长度里、数据描述符、三个位
+     都是 true（缺省就按已有那一格算 —— 数组元素本来就是可写可枚举可配置的）。
+     那一种正好就是 a[i] = v。别的（writable/enumerable/configurable 里有 false、访问器、
+     下标越过长度）**当场报**：写进去只能对上一半，那是悄悄的错答案。
+     从前整支落在 "defineProperty on list" 上，连 { value } 这一种也不收。 */
+  if ($dynTag(o) === "list") return $js_arr_def(o, k, desc);
   if (!$js_isobj(o)) $rt_error("defineProperty on " + $dynTag(o));
   /* defineProperty 陷阱（ADR-0020）：没有陷阱就落到目标上 —— 不这么做的话
      Object.defineProperty(代理, …) 会把那一格写在代理对象自己身上，读回来又走陷阱到目标。 */
