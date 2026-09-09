@@ -3196,6 +3196,10 @@ class Lower {
       for (let i = 1; i < args.length; i++) out = op(spec.op, [out, this.expr(args[i])], spec.lit ?? {});
       return out;
     }
+    /* 一格实参都不给：`fold` 那一族是"逐个码元拼串"，空的归约就是空串（规范 22.1.2.1 /
+       22.1.2.2 的 length 为 0 那一步）。落到底下"缺席补 undefined"那条的话，
+       `$js_idx(undefined, 0)` 是 0 —— 印出来是一格 NUL，静静地多一个字符。 */
+    if (spec.fold !== undefined && spec.argc === 1 && args.length === 0) return s16('');
     if (args.length > spec.argc) {
       /* `fold`：这个名字在 JS 里收可变实参，而 ABI 的 op 是定长的。**能不能摊开**取决于
          语义是不是可结合的两两归约 —— `String.fromCharCode(a, b, c)` 就是三次单实参调用
@@ -3920,7 +3924,7 @@ const STATIC_CALLS = {
   'Array.isArray': { op: 'js_arr_is_array', argc: 1, len: 1 },
   'Array.from': { op: 'js_arr_from', argc: 2, len: 1 },
   'String.fromCharCode': { op: 'js_str_of_char_code', argc: 1, fold: 'js_add' },
-  'String.fromCodePoint': { op: 'js_str_of_code_point', argc: 1 },
+  'String.fromCodePoint': { op: 'js_str_of_code_point', argc: 1, fold: 'js_add' },
   'Number.isNaN': { op: 'js_num_is_nan', argc: 1, len: 1 },
   'Number.isFinite': { op: 'js_num_is_finite', argc: 1, len: 1 },
   'Number.isInteger': { op: 'js_num_is_integer', argc: 1, len: 1 },
