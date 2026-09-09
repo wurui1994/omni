@@ -71,7 +71,13 @@ enum {
      `Symbol("a") !== Symbol("a")` 靠这一条，而 omni_js_key 的兜底本来就按地址发键，
      所以符号当属性键不必另开一支。新标签排在**末尾**：前面那些的号是产物里到处写着的，
      插在中间等于把老产物的标签全挪一格。 */
-  OMNI_DYN_SYM
+  OMNI_DYN_SYM,
+  /* 真对象（ADR-0020 P1-c 的第十步）。载荷是 omni_js_objv*：原型 + 一张**有序的**槽表 +
+     可扩展位。这个值域里"普通对象"照旧是 dict（对象字面量、JSON 摊出来的那些都是），
+     真对象只在**要原型或要属性位**的地方出现 —— Object.create、类的实例、访问器。
+     两种表示并存是有意的：dict 那条路是热路径（取字段最常见），不该为原型链付账。
+     新标签排在**末尾**：前面那些的号是产物里到处写着的。 */
+  OMNI_DYN_OBJ
 };
 
 /* Symbol 的载荷。`has_d` 分开记：`Symbol()` 的描述是 undefined，而 `Symbol("")` 是空串，
@@ -104,6 +110,13 @@ typedef struct {
   int64_t n; int64_t cap; int64_t count;
   int64_t *idx; int64_t icap;
 } omni_js_dict_view;
+
+/* 真对象的载荷（ADR-0020 P1-c 的第十步）。ps 是那张**有序的**槽表（键 -> 一格槽），
+   真正的类型是宏段里的 dict —— 在这儿只能是 void*，段里 (DT)ov->ps 地取。
+   pr 是原型（null 或另一格对象），ex 是"可扩展"。与 prelude 的
+   $JSObj { pr, ps, ex, cl, px } 逐格对着写：cl 那格这条腿上不需要（obj_to_string
+   照标签直说），px（代理）还在 P1-c 里。 */
+typedef struct { omni_dyn pr; void *ps; bool ex; } omni_js_objv;
 
 /* 函数值（ADR-0010）：指向闭包记录的指针。记录的第一个字段是被调函数的地址，
    后面紧跟捕获的变量 —— 每个 lambda 有自己的记录布局，由生成的 C 定义。

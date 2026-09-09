@@ -61,6 +61,10 @@ omni_dyn omni_js_type_tag(omni_dyn v) {
     case OMNI_DYN_BYTES: n = "bytes"; break;
     case OMNI_DYN_TEXTENC: n = "TextEncoder"; break;
     case OMNI_DYN_SYM: n = "symbol"; break;
+    /* 真对象（ADR-0020 P1-c）：解释器的成员派发靠这个名字认接收者，与 prelude 的
+       $js_type_tag 对 $JSObj 给的 "object" 逐字一致 —— 默认那一支是 "function"，
+       落进去就会把对象当函数值派发。 */
+    case OMNI_DYN_OBJ: n = "object"; break;
     default: n = "function"; break;
   }
   return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
@@ -197,6 +201,31 @@ static const omni_dyn *js_dict_find(const omni_js_dict_view *d, const char *name
 #define OMNI_JS_S16_MAX_DEPTH 128
 static int js_s16_depth = 0;
 
+/* 真对象上有没有一格自己的 toString（ADR-0020 P1-c）。有就得**调**它，而调回调要现拼一条
+   实参 list —— list 的具体类型只在生成的那个翻译单元里，这儿造不出来。所以这儿只负责
+   "看一眼"，看见了让调用点当场报，不给 "[object Object]"（那是悄悄的错答案）。
+   槽表的键是 omni_js_pkey_ 发的：一个 's' 标签字节 + UTF-8 的名字，所以 "toString" 是
+   9 个字节的 "stoString"。 */
+static bool js_obj_has_own_tostring(omni_dyn v) {
+  omni_dyn cur = v;
+  while (cur.tag == OMNI_DYN_OBJ) {
+    const omni_js_objv *ov = (const omni_js_objv *)cur.u.ref;
+    const omni_js_dict_view *ps = (const omni_js_dict_view *)ov->ps;
+    for (int64_t i = 0; i < ps->n; i++) {
+      if (!ps->live[i]) continue;
+      if (ps->keys[i].len != 9 || memcmp(ps->keys[i].p, "stoString", 9) != 0) continue;
+      const omni_js_list_view *sl = (const omni_js_list_view *)ps->vals[i].u.ref;
+      if (sl->items[1].u.b || sl->items[0].tag == OMNI_DYN_FN) return true;
+    }
+    cur = ov->pr;
+  }
+  if (cur.tag == OMNI_DYN_DICT) {
+    const omni_dyn *ts = js_dict_find((const omni_js_dict_view *)cur.u.ref, "toString");
+    return ts != NULL && ts->tag == OMNI_DYN_FN;
+  }
+  return false;
+}
+
 /* JS 域里的字符串一律是 str16（ADR-0011 第 8 节）。UTF-8 的 omni_str 只在
    转码的两个出入口出现，所以这里把 to_s16 收成一个内部函数，op 层只见 str16。 */
 static omni_s16 to_s16(omni_dyn v) {
@@ -229,6 +258,17 @@ static omni_s16 to_s16(omni_dyn v) {
        join(",")，而 join 把 null / undefined 那格写成空串、嵌套的数组递归下去。
        两把尺子在这一格上一致（量过），prelude 走宿主的 String() 也是这个答案 ——
        从前 C 这条腿在这儿硬报 "cannot convert list to string"，一条腿死、三条腿活。 */
+    /* 真对象（ADR-0020 P1-c）：没有自己的 toString 时 String(o) 是 "[object Object]"
+       （规范 20.1.3.6 走的是 Object.prototype.toString）。有自己那一格就当场报，
+       理由见 js_obj_has_own_tostring 上面那段注。 */
+    case OMNI_DYN_OBJ: {
+      if (js_obj_has_own_tostring(v)) {
+        omni_errorf("backend-c: String() of an object with its own toString — "
+                    "自带 toString 的对象现在只在 node 宿主上成立"
+                    "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器");
+      }
+      return omni_s16_of_utf8(omni_str_new("[object Object]", 15));
+    }
     case OMNI_DYN_LIST: {
       const omni_js_list_view *l = (const omni_js_list_view *)v.u.ref;
       omni_s16 out = omni_s16_of_utf8(omni_str_new("", 0));

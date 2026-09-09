@@ -321,6 +321,8 @@ static omni_dyn omni_js_idx_get(omni_dyn o, omni_dyn k) { \
       return omni_js_num_key(k) ? omni_js_arr_get(o, k) : omni_js_obj_get(o, k); \
     case OMNI_DYN_STR16: return omni_js_str_index(o, k); \
     case OMNI_DYN_DICT: return omni_js_obj_get(o, k); \
+    /* 真对象：o[k] 与 o.k 是同一条路 —— 沿原型链、触发访问器（ADR-0020 P1-c） */ \
+    case OMNI_DYN_OBJ: return omni_js_getp(o, k, omni_dyn_undef()); \
     case OMNI_DYN_BYTES: return omni_js_buf_get_u8(o, k); \
     default: \
       /* null / undefined 上的 o[k]：能 catch 的 TypeError。算出来的键这条路 qjs 不把键
@@ -339,6 +341,7 @@ static omni_dyn omni_js_idx_set(omni_dyn o, omni_dyn k, omni_dyn v) { \
       if (omni_js_num_key(k)) omni_js_arr_set(o, k, v); else omni_js_obj_set(o, k, v); \
       return v; \
     case OMNI_DYN_DICT: omni_js_obj_set(o, k, v); return v; \
+    case OMNI_DYN_OBJ: omni_js_setp(o, k, v, omni_dyn_undef()); return v; \
     case OMNI_DYN_BYTES: omni_js_buf_set_u8(o, k, v); return v; \
     case OMNI_DYN_RE: { \
       if (!omni_s16_eq(omni_js_as_s16(omni_js_str(k)), omni_js_s16_lit("lastIndex"))) { \
@@ -382,6 +385,7 @@ static omni_dyn omni_js_obj_from_entries(omni_dyn pairs) { \
    刻意保留 omni_js_obj_get 的那句响错：Map / 原始值上取表外成员在这条腿上还没有落点，
    给 false 会把"原型上确实有的名字"悄悄答成没有。 */ \
 static bool omni_js_obj_has_own(omni_dyn o, omni_dyn k) { \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_has_o_(o, k, true); \
   if (o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT) return omni_js_obj_has(o, k); \
   /* 串上的下标与 length 也是**自有**属性（规范 10.4.3） */ \
   if (o.tag == OMNI_DYN_STR16) { \
@@ -393,12 +397,14 @@ static bool omni_js_obj_has_own(omni_dyn o, omni_dyn k) { \
   return false; \
 } \
 static bool omni_js_obj_has_p(omni_dyn o, omni_dyn k) { \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_has_o_(o, k, false); \
   if (o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT || o.tag == OMNI_DYN_STR16) { \
     return omni_js_obj_has_own(o, k); \
   } \
   return omni_js_obj_get(o, k).tag != OMNI_DYN_UNDEF; \
 } \
 static bool omni_js_obj_del_p(omni_dyn o, omni_dyn k) { \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_del_o_(o, k); \
   if (o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT) { \
     /* 没有那一格时规范交 true（21.1.3.5 的 [[Delete]]："删不掉"才是 false） */ \
     if (!omni_js_obj_has(o, k)) return true; \
@@ -423,6 +429,24 @@ static omni_dyn omni_js_desc_mk_(omni_dyn v, bool w, bool e, bool c) { \
   return d; \
 } \
 static omni_dyn omni_js_obj_desc(omni_dyn o, omni_dyn k) { \
+  /* 真对象上描述符是**槽自己的位**（访问器那一支交 get / set 两格，规范 6.2.6.4） */ \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    DT ps = omni_js_ps_(o); \
+    int64_t e = DT##_find(ps, omni_js_pkey_(k)); \
+    if (e < 0) return omni_dyn_undef(); \
+    LT sl = (LT)ps->vals[e].u.ref; \
+    if (!sl->items[1].u.b) { \
+      return omni_js_desc_mk_(sl->items[0], sl->items[4].u.b, sl->items[5].u.b, sl->items[6].u.b); \
+    } \
+    omni_dyn d = omni_js_obj_new(); \
+    omni_js_obj_set(d, omni_dyn_of_s16(omni_js_s16_lit("get")), sl->items[2]); \
+    omni_js_obj_set(d, omni_dyn_of_s16(omni_js_s16_lit("set")), sl->items[3]); \
+    omni_js_obj_set(d, omni_dyn_of_s16(omni_js_s16_lit("enumerable")), \
+                    omni_dyn_of_bool(sl->items[5].u.b)); \
+    omni_js_obj_set(d, omni_dyn_of_s16(omni_js_s16_lit("configurable")), \
+                    omni_dyn_of_bool(sl->items[6].u.b)); \
+    return d; \
+  } \
   omni_str key = omni_js_prop_k(k); \
   bool w = !omni_js_frozen_(o); \
   bool c = !omni_js_lk_has_(omni_js_sealed_tbl_, o); \
@@ -460,6 +484,7 @@ static omni_dyn omni_js_obj_desc(omni_dyn o, omni_dyn k) { \
    's' 要字符串键（含不可枚举的 length）、'e' 只要可枚举的、'y' 只要符号键 ——
    这条腿上没有符号键的自有槽，所以 'y' 一律是空表。与 prelude 的 $js_obj_own_keys 对着写。 */ \
 static omni_dyn omni_js_obj_own_keys(int sel, omni_dyn o) { \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_own_keys_o_(o, sel); \
   if (sel == 'y') return omni_js_arr_wrap(LT##_new()); \
   if (sel == 'e') return omni_js_obj_keys(o); \
   if (o.tag == OMNI_DYN_LIST) { \

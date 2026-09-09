@@ -19,6 +19,8 @@ const char *omni_dyn_tag_name(int t) {
     "bytes", "TextEncoder",
     /* Symbol（ADR-0020 P1）：JS 的 typeof 是 "symbol"，错误消息里也用这个名字 */
     "symbol",
+    /* 真对象（ADR-0020 P1-c）：typeof 是 "object"，错误消息里也这么叫 */
+    "object",
   };
   return names[t];
 }

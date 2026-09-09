@@ -885,8 +885,11 @@ export const JS_METHODS = {
 const P1_JS_ONLY = [
   // normalize：NFC/NFD 要 Unicode 的分解与组合表，C 侧还没有（见上面那条 op 的注）
   'js_str_normalize',
-  'js_obj_new_p', 'js_obj_create', 'js_obj_defs', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
-  'js_reflect_set', 'js_reflect_def', 'js_reflect_proto_set', 'js_reflect_prevent_ext',
+  // 真对象那一族有 C 孪生了（omni_js_obj.h 的 OMNI_DYN_OBJ + 槽表 + 原型链，P1-c 的第十步）：
+  // obj_new_p / obj_create / getp / setp / proto_get / proto_set 都在。还留在这张单子上的是
+  // 要**属性位**的那两格（defineProperty 那一族），以及 realm / 代理 / Date 对象那几片。
+  'js_obj_defs',
+  'js_reflect_def',
   // freeze / seal / preventExtensions 那六格已经有 C 孪生了（omni_js_obj.h 的三档锁）：
   // 这条腿上能被锁的只有容器（list / dict / Map / Set / bytes），而真对象在 C 上还不存在，
   // 所以那一支本来就到不了 —— 六格在 C 上是**完整**的，不是半对的。

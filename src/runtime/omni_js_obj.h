@@ -59,6 +59,13 @@ static omni_str omni_js_key(omni_dyn k) { \
   } \
 } \
 static omni_str omni_js_prop(omni_dyn k) { return omni_s16_to_utf8(omni_js_as_s16(k)); } \
+/* 真对象那一族（ADR-0020 P1-c 的第十步）：定义在这一段的后半（那儿 obj_get / obj_set 都
+   已经摊开了），这儿先声明 —— 同一个翻译单元里静态函数先声明后定义是合法的。 */ \
+static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv); \
+static omni_dyn omni_js_setp(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv); \
+static omni_dyn omni_js_obj_own_keys_o_(omni_dyn o, int sel); \
+static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own); \
+static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k); \
 static omni_dyn omni_js_obj_new(void) { return omni_js_dict_wrap(DT##_new()); } \
 /* JS 里数组也是对象，身上可以挂字段（asy 前端的 do-while 就往那一格更新列表上挂一个 dw）。
    这个值域里 list 只是一段 items/len、没有属性槽，所以额外属性放在一张**按同一性索引的
@@ -121,7 +128,36 @@ static bool omni_js_lk_wr(omni_dyn a, int64_t i) { \
   omni_js_type_err_c(z); \
   return true; \
 } \
+/* 真对象上的三档锁走**它自己的位**（ex 与每格槽的 w/c），不走上面那三张旁表：那是给
+   容器用的（容器没有属性位）。规范 7.3.15 / 20.1.2.6：freeze = 不可扩展 + 每格不可写、
+   不可配置；seal = 不可扩展 + 每格不可配置。判据反着算 —— 只要还有一格能写／能配置，
+   或者还能扩展，就不算冻住／封住。 */ \
+static bool omni_js_obj_lock_o_(omni_dyn o, bool no_write) { \
+  omni_js_objv *ov = (omni_js_objv *)o.u.ref; \
+  DT ps = (DT)ov->ps; \
+  ov->ex = false; \
+  for (int64_t i = 0; i < ps->n; i++) { \
+    if (!ps->live[i]) continue; \
+    LT sl = (LT)ps->vals[i].u.ref; \
+    sl->items[6] = omni_dyn_of_bool(false); \
+    if (no_write && !sl->items[1].u.b) sl->items[4] = omni_dyn_of_bool(false); \
+  } \
+  return true; \
+} \
+static bool omni_js_obj_locked_o_(omni_dyn o, bool need_write) { \
+  omni_js_objv *ov = (omni_js_objv *)o.u.ref; \
+  DT ps = (DT)ov->ps; \
+  if (ov->ex) return false; \
+  for (int64_t i = 0; i < ps->n; i++) { \
+    if (!ps->live[i]) continue; \
+    LT sl = (LT)ps->vals[i].u.ref; \
+    if (sl->items[6].u.b) return false; \
+    if (need_write && !sl->items[1].u.b && sl->items[4].u.b) return false; \
+  } \
+  return true; \
+} \
 static omni_dyn omni_js_obj_freeze(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_OBJ) { omni_js_obj_lock_o_(o, true); return o; } \
   if (omni_js_lockable_(o)) { \
     omni_js_lk_add_(&omni_js_frozen_tbl_, o); \
     omni_js_lk_add_(&omni_js_sealed_tbl_, o); \
@@ -130,6 +166,7 @@ static omni_dyn omni_js_obj_freeze(omni_dyn o) { \
   return o; \
 } \
 static omni_dyn omni_js_obj_seal(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_OBJ) { omni_js_obj_lock_o_(o, false); return o; } \
   if (omni_js_lockable_(o)) { \
     omni_js_lk_add_(&omni_js_sealed_tbl_, o); \
     omni_js_lk_add_(&omni_js_noext_tbl_, o); \
@@ -137,16 +174,20 @@ static omni_dyn omni_js_obj_seal(omni_dyn o) { \
   return o; \
 } \
 static omni_dyn omni_js_obj_prevent_ext(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_OBJ) { ((omni_js_objv *)o.u.ref)->ex = false; return o; } \
   if (omni_js_lockable_(o)) omni_js_lk_add_(&omni_js_noext_tbl_, o); \
   return o; \
 } \
 static bool omni_js_obj_is_frozen(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_locked_o_(o, true); \
   return !omni_js_lockable_(o) || omni_js_frozen_(o); \
 } \
 static bool omni_js_obj_is_sealed(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_locked_o_(o, false); \
   return !omni_js_lockable_(o) || omni_js_lk_has_(omni_js_sealed_tbl_, o); \
 } \
 static bool omni_js_obj_is_ext(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_OBJ) return ((omni_js_objv *)o.u.ref)->ex; \
   return omni_js_lockable_(o) && !omni_js_noext_(o); \
 } \
 /* 键是不是一格**规范的十进制下标**（"0" / "12"；不收 "01" / "+1" / "1e2"）。不是就给 -1。
@@ -187,6 +228,10 @@ static void omni_js_nullish_err_(const char *verb, omni_str key, bool has_key, o
  * 解释器把 OIR 节点当 dict 读，`e.kind` 这类取字段全落在这里，是原生构建最热的一条。 */ \
 static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   DT d; \
+  /* 真对象走槽表 + 原型链（ADR-0020 P1-c）：`o.x` 与 `o["x"]` 是同一条路 */ \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    return omni_js_getp(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), omni_dyn_undef()); \
+  } \
   if (o.tag == OMNI_DYN_NULL || o.tag == OMNI_DYN_UNDEF) { \
     omni_js_nullish_err_("cannot read", key, true, o); \
     return omni_dyn_undef(); \
@@ -219,6 +264,10 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   return d->vals[e]; \
 } \
 static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    omni_js_setp(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), v, omni_dyn_undef()); \
+    return o; \
+  } \
   if (o.tag == OMNI_DYN_NULL || o.tag == OMNI_DYN_UNDEF) { \
     omni_js_nullish_err_("cannot set", key, true, o); \
     return o; \
@@ -254,6 +303,9 @@ static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
   return o; \
 } \
 static bool omni_js_obj_hask(omni_dyn o, omni_str key) { \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    return omni_js_obj_has_o_(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), false); \
+  } \
   if (o.tag == OMNI_DYN_LIST) { \
     /* 元素那几格**也算键**（`0 in a` 是 true）：下标在 0..len-1 里就有，length 也是自有的
        一格。从前这儿只问了旁表，于是 0 in [1,2] 静静地给 false。 */ \
@@ -267,6 +319,9 @@ static bool omni_js_obj_hask(omni_dyn o, omni_str key) { \
   return DT##_contains(omni_js_dict_of(o), key); \
 } \
 static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    return omni_js_obj_del_o_(o, omni_dyn_of_s16(omni_s16_of_utf8(key))); \
+  } \
   if (o.tag == OMNI_DYN_LIST) { \
     /* `delete a[i]`（i 在长度里）在 JS 里造一格**洞** —— 长度不变、`i in a` 为假、
        JSON 那一格是 null、forEach / Object.keys 全跳过。list 是一排稠密的 dyn，
@@ -303,6 +358,199 @@ static bool omni_js_obj_has(omni_dyn o, omni_dyn k) { \
 } \
 static bool omni_js_obj_delete(omni_dyn o, omni_dyn k) { \
   return omni_js_obj_deletek(o, omni_js_prop_k(k)); \
+} \
+/* ---- 真对象（ADR-0020 P1-c 的第十步）--------------------------------------
+   槽是一条**8 格的 list**：[v, a, g, s, w, e, c, key]（值、是不是访问器、getter、setter、
+   可写、可枚举、可配置、原来的键）。用 list 而不是新开一种 C 结构：这一段里 list 现成，
+   而 arena 不回收，少一种要管的东西。键的口径与 prelude 的 $js_pkey 逐格对齐 ——
+   符号按**同一性**（地址）发键，别的一律 ToString，所以 o[1] 与 o["1"] 是同一格。 */ \
+static omni_str omni_js_pkey_(omni_dyn k) { \
+  if (k.tag == OMNI_DYN_SYM) return omni_str_fmt("y%p", k.u.ref); \
+  return omni_js_key_tag_('s', omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k)))); \
+} \
+static DT omni_js_ps_(omni_dyn o) { return (DT)((omni_js_objv *)o.u.ref)->ps; } \
+static LT omni_js_slot_new_(omni_dyn keyd, omni_dyn v, bool w, bool e, bool c) { \
+  LT s = LT##_new(); \
+  LT##_reserve(s, 8); \
+  s->items[0] = v; \
+  s->items[1] = omni_dyn_of_bool(false); \
+  s->items[2] = omni_dyn_undef(); \
+  s->items[3] = omni_dyn_undef(); \
+  s->items[4] = omni_dyn_of_bool(w); \
+  s->items[5] = omni_dyn_of_bool(e); \
+  s->items[6] = omni_dyn_of_bool(c); \
+  s->items[7] = keyd; \
+  s->len = 8; \
+  return s; \
+} \
+static omni_dyn omni_js_obj_new_p(omni_dyn proto) { \
+  omni_js_objv *ov = (omni_js_objv *)omni_alloc(sizeof(omni_js_objv)); \
+  ov->pr = proto.tag == OMNI_DYN_UNDEF ? omni_dyn_null() : proto; \
+  ov->ps = (void *)DT##_new(); \
+  ov->ex = true; \
+  return omni_dyn_of_ref((void *)ov, OMNI_DYN_OBJ); \
+} \
+/* 沿原型链找一格槽；找到时把**持有者**写进 *holder（setp 要它分清"自有"与"继承"）。 */ \
+static LT omni_js_find_slot_(omni_dyn o, omni_str key, omni_dyn *holder) { \
+  omni_dyn cur = o; \
+  while (cur.tag == OMNI_DYN_OBJ) { \
+    DT ps = omni_js_ps_(cur); \
+    int64_t e = DT##_find(ps, key); \
+    if (e >= 0) { \
+      if (holder != NULL) *holder = cur; \
+      return (LT)ps->vals[e].u.ref; \
+    } \
+    cur = ((omni_js_objv *)cur.u.ref)->pr; \
+  } \
+  return NULL; \
+} \
+static void omni_js_def_data_(omni_dyn o, omni_dyn k, omni_dyn v, bool w, bool e, bool c) { \
+  DT##_set(omni_js_ps_(o), omni_js_pkey_(k), \
+           omni_js_arr_wrap(omni_js_slot_new_(k.tag == OMNI_DYN_SYM ? k : omni_js_str(k), \
+                                              v, w, e, c))); \
+} \
+/* 原型链走到尽头时手里那一格。**可能不是真对象** —— 这条腿上对象字面量是 dict，所以
+   Object.create({…}) 与类的原型都会让链的末端是一格 dict。取属性、问 in、for-in 都要
+   接着在那一格上按容器找；写不用（写只会在接收者身上新建一格自有槽）。 */ \
+static omni_dyn omni_js_proto_tail_(omni_dyn o) { \
+  omni_dyn cur = o; \
+  while (cur.tag == OMNI_DYN_OBJ) cur = ((omni_js_objv *)cur.u.ref)->pr; \
+  return cur; \
+} \
+static bool omni_js_cont_proto_(omni_dyn v) { \
+  return v.tag == OMNI_DYN_DICT || v.tag == OMNI_DYN_LIST || v.tag == OMNI_DYN_STR16; \
+} \
+/* [[Get]]（规范 10.1.8）：沿链找，数据槽给值，访问器**调 getter**，接收者是 recv（缺省是
+   起点那一格）。真对象之外照旧落回容器那一套 —— 与 prelude 的 $js_getp 逐支对齐。 */ \
+static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv) { \
+  if (o.tag != OMNI_DYN_OBJ) return omni_js_obj_get(o, k); \
+  omni_dyn self = recv.tag == OMNI_DYN_UNDEF ? o : recv; \
+  LT sl = omni_js_find_slot_(o, omni_js_pkey_(k), NULL); \
+  if (sl == NULL) { \
+    omni_dyn tail = omni_js_proto_tail_(o); \
+    return omni_js_cont_proto_(tail) ? omni_js_obj_get(tail, k) : omni_dyn_undef(); \
+  } \
+  if (!sl->items[1].u.b) return sl->items[0]; \
+  if (sl->items[2].tag != OMNI_DYN_FN) return omni_dyn_undef(); \
+  return omni_js_call_this(sl->items[2], self, omni_js_arr_wrap(LT##_new())); \
+} \
+/* [[Set]]（规范 10.1.9）：链上的 setter 优先；只有自有的可写数据槽原地写，别的在**接收者**
+   身上新建一格（接收者不可扩展就静静地丢 —— 非严格赋值的口径）。 */ \
+static omni_dyn omni_js_setp(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv) { \
+  if (o.tag != OMNI_DYN_OBJ) return omni_js_obj_set(o, k, v); \
+  omni_dyn self = recv.tag == OMNI_DYN_UNDEF ? o : recv; \
+  omni_str key = omni_js_pkey_(k); \
+  LT sl = omni_js_find_slot_(o, key, NULL); \
+  if (sl != NULL && sl->items[1].u.b) { \
+    if (sl->items[3].tag != OMNI_DYN_FN) return v; \
+    LT args = LT##_new(); \
+    LT##_push(args, v); \
+    omni_js_call_this(sl->items[3], self, omni_js_arr_wrap(args)); \
+    return v; \
+  } \
+  if (self.tag != OMNI_DYN_OBJ) { omni_js_obj_set(self, k, v); return v; } \
+  DT ps = omni_js_ps_(self); \
+  int64_t e = DT##_find(ps, key); \
+  if (e >= 0) { \
+    LT own = (LT)ps->vals[e].u.ref; \
+    if (!own->items[1].u.b) { \
+      if (own->items[4].u.b) own->items[0] = v; \
+      return v; \
+    } \
+  } \
+  if (!((omni_js_objv *)self.u.ref)->ex) return v; \
+  omni_js_def_data_(self, k, v, true, true, true); \
+  return v; \
+} \
+static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own) { \
+  if (o.tag != OMNI_DYN_OBJ) return false; \
+  omni_str key = omni_js_pkey_(k); \
+  if (own) return DT##_find(omni_js_ps_(o), key) >= 0; \
+  if (omni_js_find_slot_(o, key, NULL) != NULL) return true; \
+  omni_dyn tail = omni_js_proto_tail_(o); \
+  return omni_js_cont_proto_(tail) && omni_js_obj_has(tail, k); \
+} \
+/* [[Delete]]：不可配置的槽删不掉（交 false），没有那一格也算成功（规范如此）。 */ \
+static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k) { \
+  if (o.tag != OMNI_DYN_OBJ) return true; \
+  DT ps = omni_js_ps_(o); \
+  omni_str key = omni_js_pkey_(k); \
+  int64_t e = DT##_find(ps, key); \
+  if (e < 0) return true; \
+  if (!((LT)ps->vals[e].u.ref)->items[6].u.b) return false; \
+  return DT##_remove(ps, key); \
+} \
+/* 自有键，按**插入序**（规范说整数下标先升序 —— 真对象上没有下标槽的常见形状，
+   而 prelude 那份也是按 ps 的插入序走的，两边对齐）。sel：'s' 字符串键、'e' 可枚举的
+   字符串键、'y' 符号键。 */ \
+static omni_dyn omni_js_obj_own_keys_o_(omni_dyn o, int sel) { \
+  LT out = LT##_new(); \
+  if (o.tag != OMNI_DYN_OBJ) return omni_js_arr_wrap(out); \
+  DT ps = omni_js_ps_(o); \
+  for (int64_t i = 0; i < ps->n; i++) { \
+    if (!ps->live[i]) continue; \
+    LT sl = (LT)ps->vals[i].u.ref; \
+    bool is_sym = sl->items[7].tag == OMNI_DYN_SYM; \
+    if (sel == 'y') { if (!is_sym) continue; } \
+    else if (is_sym) continue; \
+    if (sel == 'e' && !sl->items[5].u.b) continue; \
+    LT##_push(out, sl->items[7]); \
+  } \
+  return omni_js_arr_wrap(out); \
+} \
+static omni_dyn omni_js_obj_proto_get(omni_dyn o) { \
+  if (o.tag == OMNI_DYN_OBJ) return ((omni_js_objv *)o.u.ref)->pr; \
+  /* 别的标签的原型是 realm 上那几格（Array.prototype…），realm 还在 P1-c 里 ——
+     照实说，不给 null：null 会把"确实有原型"悄悄答成没有。 */ \
+  omni_errorf("backend-c: Object.getPrototypeOf of a %s — 内建原型（realm）现在只在 node " \
+              "宿主上成立（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器", \
+              omni_dyn_tag_name(o.tag)); \
+  return omni_dyn_null(); \
+} \
+static omni_dyn omni_js_obj_proto_set(omni_dyn o, omni_dyn p) { \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    ((omni_js_objv *)o.u.ref)->pr = p.tag == OMNI_DYN_UNDEF ? omni_dyn_null() : p; \
+  } \
+  return o; \
+} \
+/* Object.create(proto[, descs])：descs 那一格要 defineProperty 的全套位，还在 P1-c 里 ——
+   给了就当场报，不悄悄忽略。 */ \
+static omni_dyn omni_js_obj_create(omni_dyn proto, omni_dyn descs) { \
+  if (descs.tag != OMNI_DYN_UNDEF) { \
+    omni_errorf("backend-c: Object.create with a descriptor map — 属性描述符那一族现在只在 " \
+                "node 宿主上成立（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器"); \
+    return omni_dyn_undef(); \
+  } \
+  return omni_js_obj_new_p(proto); \
+} \
+/* Reflect.set / setPrototypeOf / preventExtensions：与赋值那条路的差别只在**答案**上 ——
+   交一个布尔，写不进去（不可写、只有 getter、接收者不可扩展）时是 false。
+   与 prelude 的 $js_reflect_* 逐条对齐。 */ \
+static bool omni_js_reflect_set(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv) { \
+  if (o.tag != OMNI_DYN_OBJ) { omni_js_obj_set(o, k, v); return true; } \
+  omni_dyn self = recv.tag == OMNI_DYN_UNDEF ? o : recv; \
+  omni_str key = omni_js_pkey_(k); \
+  LT sl = omni_js_find_slot_(o, key, NULL); \
+  if (sl != NULL && sl->items[1].u.b) { \
+    if (sl->items[3].tag != OMNI_DYN_FN) return false; \
+    omni_js_setp(o, k, v, recv); \
+    return true; \
+  } \
+  if (sl != NULL && !sl->items[4].u.b) return false; \
+  if (self.tag == OMNI_DYN_OBJ) { \
+    DT ps = omni_js_ps_(self); \
+    if (DT##_find(ps, key) < 0 && !((omni_js_objv *)self.u.ref)->ex) return false; \
+  } \
+  omni_js_setp(o, k, v, recv); \
+  return true; \
+} \
+static bool omni_js_reflect_proto_set(omni_dyn o, omni_dyn p) { \
+  omni_js_obj_proto_set(o, p); \
+  return true; \
+} \
+static bool omni_js_reflect_prevent_ext(omni_dyn o) { \
+  omni_js_obj_prevent_ext(o); \
+  return true; \
 } \
 /* Object.keys / values / entries 也认**串**（规范里先 ToObject，串成了类数组）：
    键是下标的十进制串、值是一个个码元。与 prelude 那份对着写。 */ \
@@ -346,6 +594,8 @@ static omni_dyn omni_js_arr_own_get(omni_dyn a, omni_dyn key) { \
 static omni_dyn omni_js_obj_keys(omni_dyn o) { \
   if (o.tag == OMNI_DYN_STR16) return omni_js_str_idx_keys(o.u.s16); \
   if (o.tag == OMNI_DYN_LIST) return omni_js_arr_own_keys(o); \
+  /* 真对象：自有的**可枚举字符串键**（Object.keys 那一档，规范 20.1.2.17） */ \
+  if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_own_keys_o_(o, 'e'); \
   DT d = omni_js_dict_of(o); \
   LT out = LT##_new(); \
   LT##_reserve(out, d->count); \
@@ -354,18 +604,54 @@ static omni_dyn omni_js_obj_keys(omni_dyn o) { \
   } \
   return omni_js_arr_wrap(out); \
 } \
-/* for-in 走一遍的那一串键（ADR-0020 P3）。规范是"自有 + 继承来的可枚举字符串键，去重"，
-   而这条腿上**没有原型链**（真对象还在 P1-c 里），所以只剩自有那一段 —— 正好就是
-   omni_js_obj_keys 的三支（串按下标、list 按下标 + 旁表里的非下标名、dict 按键）。
-   容器之外（数 / 布尔 / null / undefined / 函数值 …）在 JS 里也走不出键来：交空表。
+/* for-in 走一遍的那一串键（ADR-0020 P3）。规范是"自有 + 继承来的可枚举字符串键，去重"。
+   容器那几支没有原型链，所以只剩自有那一段；**真对象**这一支要连着原型链走（ADR-0020
+   P1-c 的第十步），并且去重 —— 子对象上遮住的名字只报一次。
+   容器与真对象之外（数 / 布尔 / null / undefined / 函数值 …）在 JS 里也走不出键来：交空表。
    与 prelude 的 $js_for_in_keys 逐支对齐。 */ \
 static omni_dyn omni_js_for_in_keys(omni_dyn o) { \
   if (o.tag == OMNI_DYN_STR16 || o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT) { \
     return omni_js_obj_keys(o); \
   } \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    LT out = LT##_new(); \
+    DT seen = DT##_new(); \
+    omni_dyn cur = o; \
+    while (cur.tag == OMNI_DYN_OBJ) { \
+      LT ks = omni_js_arr_of(omni_js_obj_own_keys_o_(cur, 'e')); \
+      for (int64_t i = 0; i < ks->len; i++) { \
+        omni_str key = omni_js_pkey_(ks->items[i]); \
+        if (DT##_contains(seen, key)) continue; \
+        DT##_set(seen, key, omni_dyn_of_bool(true)); \
+        LT##_push(out, ks->items[i]); \
+      } \
+      cur = ((omni_js_objv *)cur.u.ref)->pr; \
+    } \
+    /* 链的末端可能是一格 dict（对象字面量就是 dict）：那一格的键也算继承来的 */ \
+    if (omni_js_cont_proto_(cur)) { \
+      LT ks = omni_js_arr_of(omni_js_obj_keys(cur)); \
+      for (int64_t i = 0; i < ks->len; i++) { \
+        omni_str key = omni_js_pkey_(ks->items[i]); \
+        if (DT##_contains(seen, key)) continue; \
+        DT##_set(seen, key, omni_dyn_of_bool(true)); \
+        LT##_push(out, ks->items[i]); \
+      } \
+    } \
+    return omni_js_arr_wrap(out); \
+  } \
   return omni_js_arr_wrap(LT##_new()); \
 } \
 static omni_dyn omni_js_obj_values(omni_dyn o) { \
+  /* 真对象：自有可枚举键的值，走 [[Get]]（访问器会被调） */ \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    LT ks = omni_js_arr_of(omni_js_obj_own_keys_o_(o, 'e')); \
+    LT vout = LT##_new(); \
+    LT##_reserve(vout, ks->len); \
+    for (int64_t i = 0; i < ks->len; i++) { \
+      vout->items[vout->len++] = omni_js_getp(o, ks->items[i], omni_dyn_undef()); \
+    } \
+    return omni_js_arr_wrap(vout); \
+  } \
   if (o.tag == OMNI_DYN_STR16) { \
     omni_s16 v = o.u.s16; \
     LT sout = LT##_new(); \
@@ -391,6 +677,21 @@ static omni_dyn omni_js_obj_values(omni_dyn o) { \
   return omni_js_arr_wrap(out); \
 } \
 static omni_dyn omni_js_obj_entries(omni_dyn o) { \
+  /* 真对象：[键, 值] 两元组，值走 [[Get]] */ \
+  if (o.tag == OMNI_DYN_OBJ) { \
+    LT ks = omni_js_arr_of(omni_js_obj_own_keys_o_(o, 'e')); \
+    LT eout = LT##_new(); \
+    LT##_reserve(eout, ks->len); \
+    for (int64_t i = 0; i < ks->len; i++) { \
+      LT pr = LT##_new(); \
+      LT##_reserve(pr, 2); \
+      pr->items[0] = ks->items[i]; \
+      pr->items[1] = omni_js_getp(o, ks->items[i], omni_dyn_undef()); \
+      pr->len = 2; \
+      eout->items[eout->len++] = omni_js_arr_wrap(pr); \
+    } \
+    return omni_js_arr_wrap(eout); \
+  } \
   if (o.tag == OMNI_DYN_STR16) { \
     omni_s16 v = o.u.s16; \
     LT sout = LT##_new(); \

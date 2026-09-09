@@ -171,6 +171,32 @@ static omni_s16 omni_js_json_val(omni_dyn v, omni_dyn rep, omni_s16 gap, int64_t
       out = omni_s16_cat(out, omni_js_json_nl(gap, depth)); \
       return omni_s16_cat(out, omni_js_s16_lit("]")); \
     } \
+    /* 真对象（ADR-0020 P1-c 的第十步）：自有的**可枚举字符串键**，值走 [[Get]]（所以
+       访问器会被调）。形状与下面 dict 那一支一样，只是键与值的来路不同。 */ \
+    case OMNI_DYN_OBJ: { \
+      omni_dyn only = omni_js_json_list(rep); \
+      LT ks = only.tag == OMNI_DYN_LIST ? (LT)only.u.ref \
+                                        : omni_js_arr_of(omni_js_obj_own_keys_o_(v, 'e')); \
+      omni_s16 out = omni_js_s16_lit("{"); \
+      omni_s16 sep = omni_js_json_nl(gap, depth + 1); \
+      bool first = true; \
+      for (int64_t i = 0; i < ks->len; i++) { \
+        if (ks->items[i].tag != OMNI_DYN_STR16) continue; \
+        omni_s16 key = ks->items[i].u.s16; \
+        omni_dyn x = omni_js_json_apply(rep, key, omni_js_getp(v, ks->items[i], omni_dyn_undef())); \
+        omni_s16 s = omni_js_json_val(x, rep, gap, depth + 1, seen); \
+        if (!s.p) continue; \
+        if (!first) out = omni_s16_cat(out, omni_js_s16_lit(",")); \
+        first = false; \
+        out = omni_s16_cat(out, sep); \
+        out = omni_s16_cat(out, omni_js_json_quote_s16(key)); \
+        out = omni_s16_cat(out, omni_js_s16_lit(gap.len > 0 ? ": " : ":")); \
+        out = omni_s16_cat(out, s); \
+      } \
+      if (first) return omni_js_s16_lit("{}"); \
+      out = omni_s16_cat(out, omni_js_json_nl(gap, depth)); \
+      return omni_s16_cat(out, omni_js_s16_lit("}")); \
+    } \
     case OMNI_DYN_DICT: { \
       DT d = (DT)v.u.ref; \
       omni_dyn only = omni_js_json_list(rep); \
