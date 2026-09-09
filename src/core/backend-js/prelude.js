@@ -95,6 +95,9 @@ function $js_host_err(e) {
 // 值域越界那一族（toFixed / toExponential / toString 的位数与进制）：错误点就在入口那一句，
 // 不必绕信号，直接放一格 pending 的 RangeError。
 function $js_range_err(msg) { return $js_host_err(new $HostBad(msg, "RangeError")); }
+// 规范明写"抛 TypeError"的那些（描述符校验那一族）：能 catch。**我们自己**"表达不出来"的
+// 拒绝不走这一格 —— 那是硬错（见 $js_arr_def），两者刻意分开。
+function $js_type_err(msg) { return $js_host_err(new $HostBad(msg, "TypeError")); }
 
 // 截断除（C 的 /）。两个 number 的快路借取模走：a % b 在整数上是**精确**的（fmod
 // 对整数操作数不丢位），a - r 是 b 的整数倍，于是 (a-r)/b 的商正好可表示、除法精确。
@@ -3441,7 +3444,10 @@ function $js_obj_new_p(proto) { return new $JSObj(proto === undefined ? $realm()
    20.1.2.2 就是这么说的：ObjectDefineProperties）。descs 上只算**自有可枚举**的键，
    Symbol 键也算。从前第二个实参在降级那儿当场报 "takes at most 1 argument(s)"。 */
 function $js_obj_create(proto, descs) {
-  const o = $js_obj_new_p(proto);
+  return $js_obj_defs($js_obj_new_p(proto), descs);
+}
+// Object.defineProperties(o, descs)：descs 上只算**自有可枚举**的键（Symbol 键也算）
+function $js_obj_defs(o, descs) {
   if (descs === undefined || descs === null) return o;
   for (const k of $js_obj_own_keys("e", descs)) $js_obj_def(o, k, $js_getp(descs, k, undefined));
   for (const k of $js_obj_own_keys("y", descs)) {
@@ -3588,7 +3594,7 @@ function $js_obj_def(o, k, desc) {
   const old = o.ps.get(key);
   const isAcc = has("get") || has("set");
   if (old === undefined) {
-    if (!o.ex) $rt_error("object is not extensible");
+    if (!o.ex) return $js_type_err("object is not extensible");
     if (isAcc) {
       o.ps.set(key, new $Slot(true, undefined, has("get") ? get("get") : undefined,
         has("set") ? get("set") : undefined, false, has("enumerable") ? $js_truthy(get("enumerable")) : false,
@@ -3601,9 +3607,33 @@ function $js_obj_def(o, k, desc) {
     }
     return o;
   }
-  if (!old.c && !(has("value") && !old.a && old.w)) {
-    if (has("configurable") && $js_truthy(get("configurable"))) $rt_error("cannot redefine property");
-    if (has("enumerable") && $js_truthy(get("enumerable")) !== old.e) $rt_error("cannot redefine property");
+  /* 不可配置的槽上能改什么（规范 10.1.6.3 ValidateAndApplyPropertyDescriptor）：
+     只有"可写的数据属性改 value / 把 writable 降成 false"这两样。别的一律 TypeError ——
+     从前这儿只挡了 configurable 与 enumerable 两格，于是 defineProperty 在一个
+     不可配置不可写的属性上改 value **静静地改成了**（量出来的：qjs 抛 TypeError）。 */
+  if (!old.c) {
+    if (has("configurable") && $js_truthy(get("configurable"))) {
+      return $js_type_err("cannot redefine property");
+    }
+    if (has("enumerable") && $js_truthy(get("enumerable")) !== old.e) {
+      return $js_type_err("cannot redefine property");
+    }
+    // 数据 <-> 访问器的互换在不可配置的槽上不许
+    if (isAcc !== old.a && (isAcc || has("value") || has("writable"))) {
+      return $js_type_err("cannot redefine property");
+    }
+    if (!old.a && !old.w) {
+      if (has("writable") && $js_truthy(get("writable"))) {
+        return $js_type_err("cannot redefine property");
+      }
+      if (has("value") && !Object.is(get("value"), old.v)) {
+        return $js_type_err("cannot redefine property");
+      }
+    }
+    if (old.a) {
+      if (has("get") && !Object.is(get("get"), old.g)) return $js_type_err("cannot redefine property");
+      if (has("set") && !Object.is(get("set"), old.s)) return $js_type_err("cannot redefine property");
+    }
   }
   if (isAcc) {
     old.a = true;

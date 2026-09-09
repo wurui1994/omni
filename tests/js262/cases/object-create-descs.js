@@ -32,3 +32,20 @@ console.log(d2.skipped, d2.taken);
 const sk = Symbol("sk");
 const d3 = Object.create(null, { [sk]: { value: 3, enumerable: true } });
 console.log(d3[sk], Object.getOwnPropertySymbols(d3).length);
+
+/* Object.defineProperties(o, descs)：与上面那一支共用同一段（规范里就是同一个步骤
+   ObjectDefineProperties）。从前当场报 "'Object.defineProperties' is not in the closed ABI"。 */
+const dp = {};
+console.log(Object.defineProperties(dp, {
+  a: { value: 1, enumerable: true },
+  b: { value: 2 },
+  c: { get() { return 3; }, enumerable: true },
+}) === dp);
+console.log(dp.a, dp.b, dp.c, Object.keys(dp).join(","), Object.getOwnPropertyNames(dp).join(","));
+// 已有的键上"缺的字段保持原样"；不可配置不可写的槽上改 value 是 TypeError
+try { Object.defineProperties(dp, { a: { value: 9 } }); } catch (e) { console.log("redef", e.name, dp.a); }
+const dw = {};
+Object.defineProperties(dw, { k: { value: 1, writable: true, enumerable: true } });
+Object.defineProperties(dw, { k: { value: 2 } });
+console.log(dw.k, Object.keys(dw).join(","));
+console.log(JSON.stringify(Object.getOwnPropertyDescriptors({ x: 1 })));

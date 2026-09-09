@@ -201,6 +201,8 @@ export const JS_ABI = {
   /* Object.create(proto[, descs])：第二个实参那一支等于"造完再 defineProperty 一遍"。
      throws: true —— 里面走 js_obj_def，而它会过代理的 defineProperty 陷阱（用户代码）。 */
   js_obj_create: { js: '$js_obj_create', c: 'omni_js_obj_create', arity: 2, throws: true },
+  // Object.defineProperties(o, descs)：与 Object.create 的第二个实参共用同一段（规范同名步骤）
+  js_obj_defs: { js: '$js_obj_defs', c: 'omni_js_obj_defs', arity: 2, throws: true },
   js_obj_proto_get: { js: '$js_obj_proto_get', c: 'omni_js_obj_proto_get', arity: 1 },
   js_obj_proto_set: { js: '$js_obj_proto_set', c: 'omni_js_obj_proto_set', arity: 2 },
   // 取/设属性的**完整语义**：沿原型链、触发访问器、按可写性决定落不落自有槽。
@@ -822,7 +824,7 @@ export const JS_METHODS = {
  * 发它们，C 那条腿上的 JS 程序就会在链接期缺符号 —— 所以 C 孪生必须在"降级器翻过去"
  * 之前落地（ADR-0020 的 P1-c）。 */
 const P1_JS_ONLY = [
-  'js_obj_new_p', 'js_obj_create', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
+  'js_obj_new_p', 'js_obj_create', 'js_obj_defs', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
   'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
   'js_reflect_set',
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',  'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
