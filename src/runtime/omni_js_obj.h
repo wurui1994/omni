@@ -401,6 +401,12 @@ static LT omni_js_slot_new_(omni_dyn keyd, omni_dyn v, bool w, bool e, bool c) {
   s->len = 8; \
   return s; \
 } \
+/* proto 缺席（undefined）时**这条腿上是 null 原型**，而 prelude 的 $js_obj_new_p 在那一格
+   给的是 realm 上的 Object.prototype（`proto === undefined ? $realm().objP : proto`）。
+   现在看不出来：realm 还在 P1-c 里，`x instanceof Object` 这一族在 C 上整格拒。
+   **realm 落地的那一刀必须同时改这儿** —— 不改的话类的实例（降级器发的是
+   js_obj_new_p(undefined)）的链走不到 Object.prototype，`p instanceof Object` 会静静地
+   给 false（JS 那条腿与两把尺子都给 true，量过）。 */ \
 static omni_dyn omni_js_obj_new_p(omni_dyn proto) { \
   omni_js_objv *ov = (omni_js_objv *)omni_alloc(sizeof(omni_js_objv)); \
   ov->pr = proto.tag == OMNI_DYN_UNDEF ? omni_dyn_null() : proto; \
