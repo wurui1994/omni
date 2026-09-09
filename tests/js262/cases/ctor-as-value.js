@@ -28,3 +28,6 @@ console.log(new Map().constructor === Map, new Set().constructor === Set);
 class C {}
 console.log(new C().constructor === C, new C().constructor.name);
 console.log(({}).constructor.name, Object.getPrototypeOf([]) === Array.prototype);
+// Array.prototype 在规范里自己就是一格数组（exotic array）。这个值域里它是真对象，
+// 所以 Array.isArray 单独认它一下 —— 不然这一格静静地给 false。
+console.log(Array.isArray(Array.prototype), Array.isArray(Object.prototype), Array.isArray([]));

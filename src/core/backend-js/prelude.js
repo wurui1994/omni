@@ -1521,7 +1521,13 @@ function $js_arr_copy_within(a, t, s, e) {
   l.copyWithin($js_idx(t, 0), $js_idx(s, 0), $js_idx(e, l.length));
   return a;
 }
-function $js_arr_is_array(v) { return $dynTag(v) === "list"; }
+function $js_arr_is_array(v) {
+  if ($dynTag(v) === "list") return true;
+  /* Array.prototype 在规范里**自己就是一格数组**（exotic array）。这个值域里它是一格真对象
+     （内建方法住在上头），所以单独认一下 —— 不然 Array.isArray(Array.prototype) 静静地给
+     false。realm 还没建起来就不必建：那时候手里绝不可能有 arrP。 */
+  return $R !== null && v === $R.arrP;
+}
 // Array.from：走一遍迭代（ADR-0020 P1）——数组是恒等、字符串按码点、Map/Set 给条目，
 // 自定义可迭代对象走 Symbol.iterator 协议。再 slice 一份，免得把原数组交出去。
 // 第二个实参是 mapFn，收 (value, index)（规范 23.1.2.1）。**类数组**（有 length、
@@ -1576,7 +1582,8 @@ function $js_arr_includes(a, v, from) {
   return false;
 }
 function $js_arr_join(a, sep) {
-  const s = sep === undefined ? "," : $js_asS16(sep);
+  // 分隔符照规范 ToString（22.1.3.18 第 4 步）：缺席才是 ","，null 是 "null" 而不是报错
+  const s = sep === undefined ? "," : $js_asS16($js_str(sep));
   let out = "";
   const l = $js_arr_of(a);
   for (let i = 0; i < l.length; i++) {

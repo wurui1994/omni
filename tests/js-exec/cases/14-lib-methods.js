@@ -179,6 +179,9 @@ console.log(`nan ${Number.isNaN("x")} ${Number.isFinite("3")} ${isFinite(null)} 
 console.log(`pos ${"abc".endsWith("b", 2)} ${"abc".endsWith("c")} ${"abc".endsWith("b")} ${"abc".endsWith("a", 1)}`);
 console.log(`pos ${"abcabc".includes("b", 2)} ${"abcabc".includes("b", 5)} ${"abc".startsWith("b", 1)}`);
 console.log(`pos ${"abc".split().length} ${"abc".split(undefined)[0]} ${"a-b-c".split("-", 2).join(",")}`);
+// join 的分隔符照规范 ToString（22.1.3.18 第 4 步）：只有**缺席**才是 ","，
+// null 是 "null" 而不是报错（从前两侧都撞在 "null is not a string" 上）
+console.log(`join ${[1, 2, 3].join(undefined)} ${[1, 2, 3].join(null)} ${[1, 2].join(0)}`);
 
 
 

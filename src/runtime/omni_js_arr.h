@@ -317,8 +317,9 @@ OMNI_JS_ARR_3(LT, DT)
 #define OMNI_JS_ARR_3(LT, DT) \
 static omni_dyn omni_js_arr_join(omni_dyn a, omni_dyn sep) { \
   LT l = omni_js_arr_of(a); \
+  /* 分隔符照规范 ToString（22.1.3.18 第 4 步）：缺席才是 ","，null 是 "null" 而不是报错 */ \
   omni_s16 s = sep.tag == OMNI_DYN_UNDEF \
-    ? omni_s16_of_utf8(omni_str_new(",", 1)) : omni_js_as_s16(sep); \
+    ? omni_s16_of_utf8(omni_str_new(",", 1)) : omni_js_as_s16(omni_js_str(sep)); \
   omni_s16 out = omni_s16_of_utf8(omni_str_new("", 0)); \
   for (int64_t i = 0; i < l->len; i++) { \
     if (i) out = omni_s16_cat(out, s); \
