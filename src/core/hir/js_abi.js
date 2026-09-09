@@ -104,7 +104,8 @@ export const JS_ABI = {
   // new Array(n)：长度 n、每一格 undefined。这个值域里"洞"与 undefined 不可区分 ——
   // C 侧的 list 本来就是密的，所以两侧都老老实实把每一格填成 undefined。
   // 实参不是数时与 JS 一样：那就是一格元素（new Array("x") 是 ["x"]）。
-  js_arr_new_n: { js: '$js_arr_new_n', c: 'omni_js_arr_new_n', arity: 1 },
+  /* new Array(n) 的长度越界是能 catch 的 RangeError（23.1.1.1 第 3 步 b），所以带 throws */
+  js_arr_new_n: { js: '$js_arr_new_n', c: 'omni_js_arr_new_n', arity: 1, throws: true },
   js_arr_len: { js: '$js_arr_len', c: 'omni_js_arr_len', arity: 1 },
   js_arr_get: { js: '$js_arr_get', c: 'omni_js_arr_get', arity: 2 },
   js_arr_set: { js: '$js_arr_set', c: 'omni_js_arr_set', arity: 3, ret: 'void' },
@@ -415,7 +416,8 @@ export const JS_ABI = {
   js_global_is_nan: { js: '$js_global_is_nan', c: 'omni_js_global_is_nan', arity: 1, ret: 'bool' },
   js_global_is_finite: { js: '$js_global_is_finite', c: 'omni_js_global_is_finite', arity: 1, ret: 'bool' },
   js_num_of: { js: '$js_num_of', c: 'omni_js_num_of', arity: 1 },
-  js_bigint_of: { js: '$js_bigint_of', c: 'omni_js_bigint_of', arity: 1 },
+  /* BigInt(x) 的两格错都是能 catch 的（串是 SyntaxError、非整数是 RangeError），所以带 throws */
+  js_bigint_of: { js: '$js_bigint_of', c: 'omni_js_bigint_of', arity: 1, throws: true },
   js_bigint_as_int_n: { js: '$js_bigint_as_int_n', c: 'omni_js_bigint_as_int_n', arity: 2 },
   // asUintN 的结果可能落在 [2^63, 2^64)：JS 那边是个普通 BigInt，C 那边装不进
   // int64_t，所以值域里多一格无符号 64 位（omni.h 的 OMNI_DYN_UINT）。

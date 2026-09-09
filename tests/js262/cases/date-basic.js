@@ -79,3 +79,9 @@ console.log(Number.isNaN(new Date(8.64e15 + 1).getTime()), Number.isNaN(new Date
 console.log(Number.isNaN(new Date(Infinity).getTime()), Number.isNaN(new Date(NaN).getTime()));
 console.log(new Date(1.5).getTime(), new Date(-1.5).getTime(), 1 / new Date(-0.5).getTime());
 console.log(Number.isNaN(Date.UTC(275760, 8, 14)), new Date(Date.UTC(275760, 8, 13)).toISOString());
+/* 无效日期上的 toISOString 是**能 catch** 的 RangeError（规范 21.4.4.36 第 3 步）。从前直接
+   转手宿主的同名方法 —— 宿主抛的是宿主异常，一路冒到顶把进程崩掉（印出一整片 node 栈）。
+   toJSON 不一样：规范 21.4.4.37 第 3 步在无效日期上交 null，不抛。 */
+try { new Date(NaN).toISOString(); } catch (e) { console.log("iso", e.name, e instanceof RangeError); }
+console.log(new Date(NaN).toJSON(), JSON.stringify({ d: new Date(NaN) }), String(new Date(NaN)));
+console.log(new Date(0).toJSON(), JSON.stringify({ d: new Date(0) }));

@@ -95,6 +95,7 @@ function $js_host_err(e) {
 // 值域越界那一族（toFixed / toExponential / toString 的位数与进制）：错误点就在入口那一句，
 // 不必绕信号，直接放一格 pending 的 RangeError。
 function $js_range_err(msg) { return $js_host_err(new $HostBad(msg, "RangeError")); }
+function $js_syntax_err(msg) { return $js_host_err(new $HostBad(msg, "SyntaxError")); }
 // 规范明写"抛 TypeError"的那些（描述符校验那一族）：能 catch。**我们自己**"表达不出来"的
 // 拒绝不走这一格 —— 那是硬错（见 $js_arr_def），两者刻意分开。
 function $js_type_err(msg) { return $js_host_err(new $HostBad(msg, "TypeError")); }
@@ -1216,7 +1217,10 @@ function $js_str_repeat(s, n) {
   const k = $js_idx(n, 0);
   // 负数（与 Infinity）是 RangeError，**能 catch**（规范 22.1.3.18 第 4/5 步）
   if (k < 0) return $js_range_err("repeat count must not be negative");
-  return $js_asS16(s).repeat(k);
+  const v = $js_asS16(s);
+  // 结果超过串长上限同样交 RangeError，别让宿主那一格崩上来
+  if (v.length * k > $S16_MAX) return $js_range_err("Invalid string length");
+  return v.repeat(k);
 }
 /* String.raw 的**普通调用**形态：String.raw({ raw: [...] }, ...subs)。tag 形态在降级器
    那儿就折成字面量了，这一份只管手写的调用。规范 22.1.2.6：段数看 raw.length，最后一段
@@ -1321,11 +1325,19 @@ function $js_uri(op, x) {
 // isWellFormed / toWellFormed（ES2024）：落单的代理项（没配对的 D800..DFFF）算"不良",// toWellFormed 把每个落单的替成 U+FFFD。C 那份是手划码元的同一套判据。
 function $js_str_is_well_formed(s) { return $js_asS16(s).isWellFormed(); }
 function $js_str_to_well_formed(s) { return $js_asS16(s).toWellFormed(); }
+/* 串长上限：宿主超了会抛**宿主**的 RangeError，一路冒到顶把进程崩掉（量出来的：
+   padStart(2**31) 印出一整片 node 栈）。所以先自己拦一道，交能 catch 的 RangeError ——
+   两把尺子上这一格都是 RangeError。数取 node 那一档（2^29-24）。 */
+const $S16_MAX = 536870888;
 function $js_str_pad_start(s, n, fill) {
-  return $js_asS16(s).padStart($js_idx(n, 0), fill === undefined ? " " : $js_asS16(fill));
+  const k = $js_idx(n, 0);
+  if (k > $S16_MAX) return $js_range_err("Invalid string length");
+  return $js_asS16(s).padStart(k, fill === undefined ? " " : $js_asS16(fill));
 }
 function $js_str_pad_end(s, n, fill) {
-  return $js_asS16(s).padEnd($js_idx(n, 0), fill === undefined ? " " : $js_asS16(fill));
+  const k = $js_idx(n, 0);
+  if (k > $S16_MAX) return $js_range_err("Invalid string length");
+  return $js_asS16(s).padEnd(k, fill === undefined ? " " : $js_asS16(fill));
 }
 // replaceAll 的字符串模式那一支。替换串里的 $& / $1 一律当**普通字符**：
 // 宿主的 replaceAll 会认它们，所以这里不能直接转手，手写一遍才和 C 侧同样残缺。
@@ -1473,7 +1485,8 @@ function $js_arr_new() { return []; }
 // 那样两个后端就分叉了。长度的合法范围照 JS（整数、0..2^32-1），越界是 RangeError。
 function $js_arr_new_n(n) {
   if ($dynTag(n) !== "real") return [n];
-  if (!Number.isInteger(n) || n < 0 || n > 4294967295) $rt_error("invalid array length");
+  // 越界是**能 catch** 的 RangeError（规范 23.1.1.1 第 3 步 b）—— 从前是硬错
+  if (!Number.isInteger(n) || n < 0 || n > 4294967295) return $js_range_err("invalid array length");
   const a = new Array(n);
   for (let i = 0; i < n; i++) a[i] = undefined;
   return a;
@@ -2105,7 +2118,8 @@ function $js_obj_set(o, k, v) {
 }
 function $js_arr_set_len(o, v) {
   const l = $js_arr_of(o), n = Math.trunc($js_real(v, "length"));
-  if (!Number.isFinite(n) || n < 0) $rt_error("invalid array length");
+  // 写 length 越界同样是能 catch 的 RangeError（规范 10.4.2.4 的 ArraySetLength）
+  if (!Number.isFinite(n) || n < 0) { $js_range_err("invalid array length"); return; }
   if (n < l.length) { l.length = n; return; }
   while (l.length < n) l.push(undefined);
 }
@@ -2837,8 +2851,19 @@ function $mkRealm() {
      用到 Date 的程序编不成 C，tests/js-exec 会把它的 C 腿标成 skip-c。 */
   $natm(r.dateP, "getTime", 0, (t) => $js_date_ms(t));
   $natm(r.dateP, "valueOf", 0, (t) => $js_date_ms(t));
-  $natm(r.dateP, "toISOString", 0, (t) => new Date($js_date_ms(t)).toISOString());
-  $natm(r.dateP, "toJSON", 1, (t) => new Date($js_date_ms(t)).toISOString());
+  /* toISOString 在**无效日期**上是 RangeError（规范 21.4.4.36 第 3 步），能 catch。
+     从前直接转手宿主的同名方法 —— 宿主那一格抛的是**宿主**异常，一路冒到顶把进程崩掉
+     （量出来的：new Date(NaN).toISOString() 印出一整片 node 栈）。toJSON 不一样：
+     规范 21.4.4.37 第 3 步在无效日期上交 null，不抛。 */
+  $natm(r.dateP, "toISOString", 0, (t) => {
+    const ms = $js_date_ms(t);
+    if (Number.isNaN(ms)) return $js_range_err("Invalid time value");
+    return new Date(ms).toISOString();
+  });
+  $natm(r.dateP, "toJSON", 1, (t) => {
+    const ms = $js_date_ms(t);
+    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+  });
   $natm(r.dateP, "toString", 0, (t) => new Date($js_date_ms(t)).toString());
   /* Date.prototype[Symbol.toPrimitive]（规范 21.4.4.45）：隐式强转那条路早就对
      （d2 - d1 走 valueOf、模板串走 toString），缺的只是**显式取那一格函数**。
@@ -4212,18 +4237,42 @@ function $js_str_to_int(s) {
   if (v < $INT_MIN || v > 18446744073709551615n) $rt_error('invalid integer: "' + s + '"');
   return v;
 }
+/* BigInt(串) 的合法形态（规范 7.1.14 的 StringToBigInt）：可选正负号 + 十进制数字，
+   或 0x/0o/0b 前缀 + 至少一位。这一格自己先验一遍 —— 底下那个 $js_str_to_int 是**方言
+   共用**的转换原语，报的是硬错（那儿该硬），而 BigInt("x") 在 JS 里是能 catch 的
+   SyntaxError（量出来的：从前印 "invalid integer" 就把进程停了）。 */
+function $js_int_str_ok(s) {
+  let i = 0;
+  if (i < s.length && (s[i] === "+" || s[i] === "-")) i++;
+  if (i + 1 < s.length && s[i] === "0"
+    && (s[i + 1] === "x" || s[i + 1] === "X" || s[i + 1] === "o" || s[i + 1] === "O"
+      || s[i + 1] === "b" || s[i + 1] === "B")) {
+    return s.length > i + 2;
+  }
+  if (i >= s.length) return false;
+  for (; i < s.length; i++) {
+    if (s[i] < "0" || s[i] > "9") return false;
+  }
+  return true;
+}
 function $js_bigint_of(v) {
   const t = $dynTag(v);
   if (t === "int") return v;
   if (t === "bool") return v ? 1n : 0n;
   if (t === "real") {
+    // 非整数与 Infinity 是 RangeError（规范 7.1.13 的 NumberToBigInt），能 catch
     if (!Number.isFinite(v) || !Number.isInteger(v)) {
-      $rt_error("cannot convert a non-integer number to a bigint");
+      return $js_range_err("cannot convert a non-integer number to a bigint");
     }
     return BigInt(v);
   }
-  if (t === "string") return $js_str_to_int(v);
-  $rt_error("cannot convert " + t + " to a bigint");
+  if (t === "string") {
+    const s = $js_asS16(v).trim();
+    if (s.length === 0) return 0n;
+    if (!$js_int_str_ok(s)) return $js_syntax_err("cannot convert " + v + " to a bigint");
+    return $js_str_to_int(s);
+  }
+  return $js_type_err("cannot convert " + t + " to a bigint");
 }
 // BigInt.asIntN / BigInt.asUintN。宽度收 0..64：这个值域里的 int 是 int64
 // （ADR-0005），宽度超过 64 的结果装不下，当场报错比悄悄算错好。

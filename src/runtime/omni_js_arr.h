@@ -27,6 +27,7 @@ struct omni_js_wrap_s { omni_fnptr fp; omni_dyn inner; };
    都已经展开过了），这儿只先声明 —— 宏段是按 ARR -> OBJ -> … -> STR_ARR 的次序摊进同一个
    翻译单元的，静态函数先声明后定义是合法的。 */ \
 static void omni_js_type_err_c(const char *msg); \
+static void omni_js_range_err_c(const char *msg); \
 static omni_dyn omni_js_call(omni_dyn f, LT args) { \
   omni_fn fp = omni_js_as_fn(f); \
   return ((omni_dyn (*)(omni_fn, LT))omni_fn_ck(fp)->fp)(fp, args); \
@@ -100,7 +101,9 @@ static omni_dyn omni_js_arr_new_n(omni_dyn n) { \
     return omni_js_arr_wrap(l); \
   } \
   if (!(n.u.r >= 0 && n.u.r <= 4294967295.0 && n.u.r == floor(n.u.r))) { \
-    omni_error("invalid array length"); \
+    /* 越界是能 catch 的 RangeError（规范 23.1.1.1 第 3 步 b）—— 从前是硬错 */ \
+    omni_js_range_err_c("invalid array length"); \
+    return omni_js_arr_wrap(LT##_new()); \
   } \
   len = (int64_t)n.u.r; \
   LT##_reserve(l, len); \

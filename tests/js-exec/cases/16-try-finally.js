@@ -195,3 +195,4 @@ function forOfBad(v) {
 }
 console.log(`iter ${forOfBad(undefined)} ${forOfBad("ab")} ${forOfBad(true)}`);
 console.log("iter after");
+

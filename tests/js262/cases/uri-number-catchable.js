@@ -26,3 +26,19 @@ for (const r of [2, 1, 16, 40]) {
   try { acc += (255).toString(r).length; } catch (e) { acc += 100; }
 }
 console.log(acc);
+
+/* 又几格从前是硬错、现在能 catch 的：数组长度越界（规范 23.1.1.1 / 10.4.2.4）、
+   BigInt(串) 的语法错与 BigInt(非整数)（7.1.14 / 7.1.13）、还有串长上限 ——
+   最后那一格从前是**宿主**的 RangeError 一路冒到顶把进程崩掉（印出一整片 node 栈）。 */
+function kind(f) {
+  try { f(); return "no-throw"; } catch (e) { return `${e.name}:${e instanceof RangeError}`; }
+}
+console.log(kind(() => new Array(-1)), kind(() => new Array(2 ** 33)), kind(() => { [].length = -1; }));
+console.log(kind(() => "x".padStart(2 ** 31)), kind(() => "x".repeat(2 ** 30)), kind(() => "x".repeat(-1)));
+console.log(kind(() => BigInt(1.5)), kind(() => BigInt(Infinity)));
+function bigkind(f) {
+  try { return `${f()}`; } catch (e) { return `${e.name}:${e instanceof SyntaxError}`; }
+}
+console.log(bigkind(() => BigInt("x")), bigkind(() => BigInt("12")), bigkind(() => BigInt("")), bigkind(() => BigInt(" 0x10 ")));
+console.log(bigkind(() => BigInt("+7")), bigkind(() => BigInt("-8")), bigkind(() => BigInt("1.5")), bigkind(() => BigInt("0b")));
+console.log(new Array(2).length, new Array(0).length, "x".repeat(3), "y".padStart(3, "0"));

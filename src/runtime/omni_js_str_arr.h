@@ -217,6 +217,16 @@ static void omni_js_type_err_c(const char *msg) { \
   omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("message")), omni_dyn_of_s16(omni_js_s16_lit(msg))); \
   omni_js_throw(o); \
 } \
+static void omni_js_range_err_c(const char *msg) { \
+  LT cls = LT##_new(); \
+  LT##_push(cls, omni_dyn_of_s16(omni_js_s16_lit("RangeError"))); \
+  LT##_push(cls, omni_dyn_of_s16(omni_js_s16_lit("Error"))); \
+  omni_dyn o = omni_js_obj_new(); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("$cls")), omni_js_arr_wrap(cls)); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("name")), omni_dyn_of_s16(omni_js_s16_lit("RangeError"))); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("message")), omni_dyn_of_s16(omni_js_s16_lit(msg))); \
+  omni_js_throw(o); \
+} \
 static omni_dyn omni_js_iter(omni_dyn v) { \
   switch (v.tag) { \
     case OMNI_DYN_LIST: return v; \

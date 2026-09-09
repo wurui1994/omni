@@ -120,7 +120,8 @@ static omni_dyn omni_js_obj_setk(omni_dyn o, omni_str key, omni_dyn v) { \
        a.length = 0 静静地什么也没做）。短了截掉、长了补 undefined —— 规范 10.4.2.4。 */ \
     LT l = (LT)o.u.ref; \
     int64_t n = omni_js_arr_i(v); \
-    if (n < 0) omni_error("invalid array length"); \
+    /* 越界是能 catch 的 RangeError（规范 10.4.2.4 的 ArraySetLength）—— 从前是硬错 */ \
+    if (n < 0) { omni_js_range_err_c("invalid array length"); return o; } \
     if (n < l->len) { l->len = n; return o; } \
     LT##_reserve(l, n); \
     while (l->len < n) l->items[l->len++] = omni_dyn_undef(); \
