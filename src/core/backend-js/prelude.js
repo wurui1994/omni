@@ -3,7 +3,12 @@
 // 这里的每个函数都必须和 C 运行时（runtime/c_runtime.js）逐位等价，包括**错误消息文本**，
 // 否则四后端差分测试立刻会红。数值/打印/字符串规格见 docs/adr/0005-value-semantics.md。
 
-export const JS_PRELUDE = String.raw`
+// 数值/打印/字符串规格见 docs/adr/0005-value-semantics.md。
+// 末尾那一段（内建原型上的成员）不是手写的：照 hir/js_abi.js 的 JS_MEMBERS 生成，
+// 与 C 后端的 protoMembers 同源 —— 见这份文件末尾的 pmRowsText。
+import { JS_ABI, JS_MEMBERS } from '../hir/js_abi.js';
+
+export const JS_PRELUDE_RAW = String.raw`
 // ---------------------------------------------------------------- int 的表示
 // 方言的 int 是 **i64**（回绕、精确），而 JS 只有 number（安全到 2^53-1）与 BigInt。
 // 从前一律用 BigInt，量出来是最大的一块成本：同一个内核换成 number 快 3 倍
@@ -2784,6 +2789,35 @@ function $natm(o, name, len, fn) {
   $js_def_data(o, name, $nat(name, len, fn), true, false, true);
   return o;
 }
+/* 内建原型上的成员表（ADR-0020 P1-c）。与 C 那侧的 omni_js_pm_* 同源：两边都是照
+   hir/js_abi.js 的 JS_MEMBERS **生成**的，降级器在 main 里登记一次（emit 的 protoMembers）。
+   一行是 [原型名, 成员名, 形参个数, 实现]。
+   从前这一半是手写的：只挂了常用的那几十格，于是 typeof [1,2].at / "s".padStart 这种
+   **把成员当值读**的写法在这条腿上给 undefined，而 C 那条腿（表是生成的）给函数 ——
+   既与 qjs 不同，也是腿之间的分叉。现在两边同源。
+   手写的那几格仍然排在这一遍**之后**，于是形状特殊的那些（Object.prototype 那一族、
+   f.call / f.apply、Symbol.iterator、访问器 …）照旧说了算。 */
+let $PMROWS = [];
+function $js_pm_set(rows) { $PMROWS = rows; }
+function $js_pm_proto(r, name) {
+  switch (name) {
+    case "Array": return r.arrP;
+    case "String": return r.strP;
+    case "Number": return r.numP;
+    case "Boolean": return r.boolP;
+    case "Map": return r.mapP;
+    case "Set": return r.setP;
+    case "RegExp": return r.reP;
+    default: return null;
+  }
+}
+function $js_pm_install(r) {
+  for (let i = 0; i < $PMROWS.length; i++) {
+    const row = $PMROWS[i];
+    const p = $js_pm_proto(r, row[0]);
+    if (p !== null) $natm(p, row[1], row[2], row[3]);
+  }
+}
 // Symbol 的两张表：Symbol.for 的注册表，与 well-known 那一族。
 const $SYMREG = new Map();
 const $WKSYM = new Map();
@@ -2846,6 +2880,8 @@ function $mkRealm() {
     gt: new $JSObj(objP, "Object"),
   };
   $R = r;
+  // 生成的那一遍先挂（见 $js_pm_install 那段注）：手写的排在后面，于是它们说了算
+  $js_pm_install(r);
   $natm(objP, "hasOwnProperty", 1, (t, a) => $js_isobj(t) && t.ps.has($js_pkey(a[0])));
   $natm(objP, "isPrototypeOf", 1, (t, a) => {
     let cur = $js_isobj(a[0]) ? a[0].pr : null;
@@ -5896,6 +5932,45 @@ function $dynNeg(a) {
 // 整个 prelude 是一个 String.raw 模板字面量：注释里出现反引号会提前把它闭合，
 // 于是 JS_PRELUDE 变成某个表达式的值（栽过两次，第二次是布尔）。当场炸掉比让
 // emit 抛 "trim is not a function" 好找。
-if (typeof JS_PRELUDE !== 'string') {
+if (typeof JS_PRELUDE_RAW !== 'string') {
   throw new Error('prelude.js 里出现了未转义的反引号，模板字面量被提前闭合了');
 }
+
+/**
+ * 内建原型上那批成员的登记（ADR-0020 P1-c）。C 后端的 protoMembers 是孪生 —— 两边都照
+ * hir/js_abi.js 的 JS_MEMBERS **生成**，不再手写一半。
+ *
+ * 为什么摆在 prelude 的**末尾**而不是降级器里：这份 prelude 有三个用户（整程序、片段、
+ * 以及解释器那条腿的 host/native.js 用 new Function 跑起来的那一份）。摆在这儿三个用户
+ * 一起拿到；摆在降级器里第三个用户就漏了 —— 量出来过：JS 与 C 一致了、interp 还给 undefined。
+ *
+ * 每一行按**原型**（而不是标签）挂，所以实现直接叫那格 op，不经过 $js_m_* 那层按标签分派的
+ * 包装（那一层是降级器生成的，prelude 里没有）。带 lit 的把编译期常量排在前面，
+ * 与 memberDispatch 同一套次序。
+ */
+function pmRowsText() {
+  const TAG_PROTO = {
+    list: 'Array', string: 'String', real: 'Number', int: 'Number', uint: 'Number',
+    bool: 'Boolean', Map: 'Map', Set: 'Set', regexp: 'RegExp',
+  };
+  const rows = [];
+  for (const d of Object.values(JS_MEMBERS)) {
+    const m = d.member;
+    // prop（length / size / flags …）在这条腿上是访问器，形状不一样，prelude 里手写好了
+    if (m.kind === 'prop') continue;
+    for (const [tag, op] of Object.entries(m.on)) {
+      const pr = TAG_PROTO[tag];
+      if (pr === undefined) continue;
+      const abi = JS_ABI[op];
+      const lits = Object.values(m.lit ?? {}).map((v) => JSON.stringify(v));
+      const dyn = ['t'];
+      for (let i = 0; i < m.argc; i++) dyn.push(`a[${i}]`);
+      const args = [...lits, ...dyn.slice(0, abi.arity)];
+      rows.push(`[${JSON.stringify(pr)}, ${JSON.stringify(m.name)}, ${m.argc}, `
+        + `(t, a) => ${abi.js}(${args.join(', ')})],`);
+    }
+  }
+  return `\n$js_pm_set([\n${rows.join('\n')}\n]);\n`;
+}
+
+export const JS_PRELUDE = JS_PRELUDE_RAW + pmRowsText();
