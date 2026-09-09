@@ -3569,11 +3569,27 @@ function $js_obj_defs(o, descs) {
   }
   return o;
 }
-function $js_obj_proto_get(o) { return $js_isobj(o) ? o.pr : $js_proto_of_prim(o); }
-/* [[SetPrototypeOf]]（规范 10.1.2）：不可扩展的对象上换原型是 TypeError（**能 catch**）——
-   换成同一格原型不算换，照规范先放过。从前这儿静静地换成了。
+/* [[GetPrototypeOf]]（规范 10.5.1）：代理身上先问 getPrototypeOf 陷阱。从前不问 ——
+   Object.getPrototypeOf(proxy) 静静地交出**目标**的原型，陷阱一次也没被叫到。 */
+function $js_obj_proto_get(o) {
+  if (o !== null && typeof o === "object" && o.px !== undefined) {
+    const f = $js_px_trap(o, "getPrototypeOf");
+    if (f !== undefined) return $callThis(f, o.px.h, [o.px.t]);
+    return $js_obj_proto_get(o.px.t);
+  }
+  return $js_isobj(o) ? o.pr : $js_proto_of_prim(o);
+}
+/* [[SetPrototypeOf]]（规范 10.1.2 / 10.5.2）：代理身上先问 setPrototypeOf 陷阱；
+   不可扩展的对象上换原型是 TypeError（**能 catch**）—— 换成同一格原型不算换，
+   照规范先放过。从前这儿静静地换成了。
    非对象（数与串这些）照 Object.setPrototypeOf 的规矩原样交回去，不报错。 */
 function $js_obj_proto_set(o, p) {
+  if (o !== null && typeof o === "object" && o.px !== undefined) {
+    const f = $js_px_trap(o, "setPrototypeOf");
+    if (f !== undefined) { $callThis(f, o.px.h, [o.px.t, p === undefined ? null : p]); return o; }
+    $js_obj_proto_set(o.px.t, p);
+    return o;
+  }
   if (!$js_isobj(o)) return o;
   const want = p === undefined || p === null ? null : p;
   if (o.pr === want) return o;
@@ -3667,10 +3683,28 @@ function $js_obj_is_sealed(o) {
   for (const [, sl] of o.ps) if (sl.c) return false;
   return true;
 }
-function $js_obj_prevent_ext(o) { if ($js_isobj(o)) o.ex = false; return o; }
+/* isExtensible / preventExtensions（规范 10.5.3 / 10.5.4）：代理身上先问陷阱。
+   从前不问 —— Object.isExtensible(proxy) 静静地报的是**目标**那一格。 */
+function $js_obj_prevent_ext(o) {
+  if (o !== null && typeof o === "object" && o.px !== undefined) {
+    const f = $js_px_trap(o, "preventExtensions");
+    if (f !== undefined) { $callThis(f, o.px.h, [o.px.t]); return o; }
+    $js_obj_prevent_ext(o.px.t);
+    return o;
+  }
+  if ($js_isobj(o)) o.ex = false;
+  return o;
+}
 // 数组 / Map / Set 还不是真对象，但它们**确实**还能往上加东西 —— 照实说"可扩展"
 // （与 isFrozen / isSealed 那两格同一口径，见 $js_obj_frozenish）
-function $js_obj_is_ext(o) { return $js_isobj(o) ? o.ex : !$js_obj_frozenish(o); }
+function $js_obj_is_ext(o) {
+  if (o !== null && typeof o === "object" && o.px !== undefined) {
+    const f = $js_px_trap(o, "isExtensible");
+    if (f !== undefined) return $js_truthy($callThis(f, o.px.h, [o.px.t]));
+    return $js_obj_is_ext(o.px.t);
+  }
+  return $js_isobj(o) ? o.ex : !$js_obj_frozenish(o);
+}
 // defineProperty。desc 是一格真对象；缺席的字段照规范取 false/undefined。
 // 已有槽的时候只覆盖 desc 里**出现过**的字段（规范 ValidateAndApplyPropertyDescriptor）。
 /* 数组上的 defineProperty，只收能原样表达的那一种（理由见 $js_obj_def 的第一段注）。
@@ -3925,13 +3959,15 @@ function $js_instanceof(v, ctor) {
 function $js_instanceof_p(v, proto) {
   const t = $dynTag(v);
   let cur = null;
-  if (t === "object") cur = v.pr;
+  if (t === "object") cur = $js_obj_proto_get(v);
   else if (t === "list" || t === "dict" || t === "Map" || t === "Set" || t === "regexp"
     || t === "bytes" || t === "function" || t === "TextEncoder") cur = $js_proto_of_prim(v);
   else return false;
+  /* 每一跳都走 $js_obj_proto_get，代理身上的 getPrototypeOf 陷阱才算得上 ——
+     从前直接读 .pr，带 getPrototypeOf 陷阱的代理 instanceof Array 静静地给 false。 */
   while (cur !== null && cur !== undefined) {
     if (cur === proto) return true;
-    cur = $js_isobj(cur) ? cur.pr : null;
+    cur = $js_isobj(cur) ? $js_obj_proto_get(cur) : null;
   }
   return false;
 }

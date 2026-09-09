@@ -2,7 +2,8 @@
 // 差别只在属性访问的那几个入口上多问一句陷阱：get / set / has / deleteProperty /
 // ownKeys / getOwnPropertyDescriptor / defineProperty。处理器上没有那一格就落到目标身上。
 //
-// 不做的写在明处：getPrototypeOf，以及规范里那一整套"不变量校验"。
+// 不做的写在明处：规范里那一整套"不变量校验"，与 Proxy.revocable。
+// getPrototypeOf / setPrototypeOf / isExtensible / preventExtensions 这四格补上了（见文末）。
 const always42 = new Proxy({}, { get() { return 42; } });
 console.log(always42.anything, always42.x);
 
@@ -77,3 +78,21 @@ const cv = new Proxy(function () { return arguments.length; }, {
 console.log(cv(1, 2, 3));
 console.log([1, 2, 3].map(new Proxy(function (n) { return n; },
   { apply(t, th, a) { return a[0] * 2; } })).join(","));
+
+/* getPrototypeOf / setPrototypeOf / isExtensible / preventExtensions 这四格陷阱
+   （规范 10.5.1-10.5.4）。从前一格都不问 —— Object.getPrototypeOf(proxy) 静静地报的是
+   **目标**那一格，instanceof 也跟着错（它走的是同一条链）。 */
+const plog = [];
+const pp = new Proxy({ a: 1 }, {
+  getPrototypeOf(o) { plog.push("gp"); return Array.prototype; },
+  setPrototypeOf(o, v) { plog.push("sp:" + (v === null)); return true; },
+  isExtensible(o) { plog.push("ie"); return Reflect.isExtensible(o); },
+  preventExtensions(o) { plog.push("pe"); return Reflect.preventExtensions(o); },
+});
+console.log(Object.getPrototypeOf(pp) === Array.prototype, pp instanceof Array);
+console.log(Object.setPrototypeOf(pp, null) === pp, Object.isExtensible(pp));
+console.log(Reflect.setPrototypeOf(pp, null), Reflect.getPrototypeOf(pp) === Array.prototype);
+console.log(plog.join("|"));
+// 没有陷阱时一路落到目标身上（原型链、instanceof、可扩展性都跟着目标）
+const bareP = new Proxy(Object.create(Array.prototype), {});
+console.log(Object.getPrototypeOf(bareP) === Array.prototype, bareP instanceof Array, Object.isExtensible(bareP));
