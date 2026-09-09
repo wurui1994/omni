@@ -920,10 +920,16 @@ function $js_typeof(v) {
      不是函数值 —— 可 typeof 得说 "function"，不然 typeof A === "function" 这类最常见的
      鸭子判断会静静地走错。判据取**自有**的 classInit 槽：不走 [[Get]]，所以不会碰上取值器。
      C 那条腿上没有类对象（ADR-0020 P1-c），这一支在那儿到不了。 */
-  if (t === "object" && v.ps !== undefined && v.ps.has($js_pkey($js_sym_wk("omni.classInit")))) {
-    return "function";
-  }
+  if ($js_is_class(v)) return "function";
+  // 剩下的（真对象、list、dict、Map / Set、bytes、text …）在 JS 里 typeof 都是 "object"
   return "object";
+}
+/* 这一格是不是"类对象"（原型 + $init 那格闭包，见降级器的 classInitKey）。
+   判据取**自有**的 classInit 槽，刻意**不走 [[Get]]**：那条路会碰上取值器，也会被代理的
+   get 陷阱接住 —— 内部标记本来就不该被观察到。typeTag 与 JSON 的序列化都问这一格。 */
+function $js_is_class(v) {
+  return $dynTag(v) === "object" && v.ps !== undefined
+    && v.ps.has($js_pkey($js_sym_wk("omni.classInit")));
 }
 function $js_str(v) {
   switch ($dynTag(v)) {
@@ -4633,10 +4639,11 @@ function $js_json_val(v, rep, gap, depth, seen) {
   if (t === "undefined" || t === "function" || t === "symbol") return undefined;
   /* 类对象在 JS 里**是函数**，JSON.stringify(SomeClass) 于是是 undefined。这个值域里类是
      一格真对象，靠它身上那格符号键（omni.classInit，见 lower.js 的 classInitKey）认出来 ——
-     从前印的是 {}（量出来的静默分叉）。 */
-  if (t === "object" && $js_getp(v, $js_sym_wk("omni.classInit"), undefined) !== undefined) {
-    return undefined;
-  }
+     从前印的是 {}（量出来的静默分叉）。
+     判据必须取**自有**的槽（$js_is_class）而不是走 [[Get]]：代理的 get 陷阱会把这一问也接住，
+     量出来的是"每个键都答一句"的那种校验代理 —— JSON.stringify(proxy) 静静地给 undefined，
+     而两把尺子都老老实实序列化（内部标记本来就不该被观察到）。 */
+  if ($js_is_class(v)) return undefined;
   if (t === "null") return "null";
   if (t === "bool") return v ? "true" : "false";
   if (t === "real") return Number.isFinite(v) ? $js_str(v) : "null";
