@@ -181,3 +181,24 @@ function counterClass(start) {
   return c.bump() + "," + c.bump();
 }
 console.log(counterClass(5));
+
+// 局部类带 extends：父类只认顶层声明过的非 Error 类（原型对象与 $init 是模块级全局）。
+// super.m() / super(...) 靠一格合成的 classes 表键（@cls<n>）问父类名。
+class LBase { constructor(n) { this.n = n; } m() { return "base" + this.n; } static tag() { return "B"; } }
+function mkKid(n) {
+  class Kid extends LBase {
+    constructor(x) { super(x); this.extra = x * 2; }
+    m() { return "kid(" + super.m() + ")," + this.extra; }
+    static tag2() { return Kid.tag() + "-kid"; }
+  }
+  const k = new Kid(n);
+  return [k.m(), String(k instanceof Kid), String(k instanceof LBase), Kid.tag2(), Kid.name].join(" | ");
+}
+console.log(mkKid(1));
+console.log(mkKid(3));
+{
+  class InBlock extends LBase { m() { return "blk:" + super.m(); } }
+  console.log(new InBlock(7).m());
+}
+const Anon = class extends LBase { m() { return "anon:" + super.m(); } };
+console.log(new Anon(9).m());

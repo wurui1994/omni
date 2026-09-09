@@ -377,6 +377,8 @@ class Lower {
     this.topIdx = null;
     /** 带标签模板的站点计数（每个站点一格模块级的槽，见 template） */
     this.tplSites = 0;
+    // 类表达式的合成表键（见 classExpr）—— 与模板站点那格计数同一招
+    this.clsSites = 0;
     /** 顶层函数声明：名字 -> mangled。互相递归靠的就是先收一遍再降级 */
     this.topFns = new Map();
     /** 顶层函数的形参个数（fn.length 要它；topFnValue 那边已经看不到形参表） */
@@ -1112,24 +1114,38 @@ class Lower {
    * 观察的：`mk(1) !== mk(2)`、两次求值造出来的实例互不 instanceof（qjs 就是这样）。
    *
    * 两处画出来的边界：
-   *   - `class X extends Y {}` 当表达式还不收 —— 原型链要拿父类的原型对象与 `$init`，
-   *     而那两格现在只对"这个文件里声明过的类"存在（见 classProtoStmts 的 sup 那一段）。
+   *   - `extends` 只认**这个文件顶层声明过的非 Error 类**：原型链要拿父类的原型对象与
+   *     `$init`，而那两格是模块级全局，只有顶层声明的类才有。别的（`extends Error`、
+   *     `extends Array`、表达式当父类）当场报。
    *   - 有名字的类表达式（`class Named {}`）：名字只落到类对象的 `name` 上，**不**在类体
    *     内部当一格绑定用（规范里它是的）。要那一格得多开一层作用域。
    */
   classExpr(e) {
+    let superName = null;
+    let classOf = null;
     if (e.superClass) {
-      this.err(e.span, "'extends' is only supported for a class declared at the top level of a module");
-      return undefExpr();
+      const sn = e.superClass.type === 'Ident' && !this.lookup(e.superClass.name)
+        ? e.superClass.name : null;
+      const srec = sn === null ? null : this.classes.get(sn);
+      if (srec === undefined || srec === null || srec.isError) {
+        this.err(e.span, "'extends' here only accepts a non-Error class declared at the top level of this module");
+        return undefExpr();
+      }
+      superName = sn;
+      /* `super.m()` 与 `super(...)` 靠 `fn.classOf` 去 classes 表里问父类名（superProtoRef
+       * 与 Super 那一支）。类表达式没有自己的表项，所以配一格**合成的键** —— 用 `@cls<n>`
+       * 是因为它不是合法的 JS 标识符，撞不上用户的类名（与模板站点那格 `@tpl<n>` 同一招）。 */
+      classOf = `@cls${this.clsSites++}`;
+      this.classes.set(classOf, { superName, isError: false, node: null });
     }
     const name = e.id ?? '';
     const protoT = this.temp();
     const classT = this.temp();
-    const node = { id: name, superClass: null, members: e.members, span: e.span };
+    const node = { id: name, superClass: e.superClass ?? null, members: e.members, span: e.span };
     const stmts = this.classProtoStmts(node, {
       name,
-      classOf: null,
-      superName: null,
+      classOf,
+      superName,
       protoRef: () => varRef(protoT),
       classRef: () => varRef(classT),
     });
