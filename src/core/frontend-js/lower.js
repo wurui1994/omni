@@ -1306,6 +1306,14 @@ class Lower {
    */
   guard(e) {
     if (this.fn.lazies > 0) return e;
+    /* void 的 op（console.log 那一族）不能落进临时量 —— C 那侧 "assigning to omni_dyn from
+     * incompatible type void" 直接编不过（量出来的：实参子树里有会抛的 op 时，mayThrow 对
+     * 整句为真，于是连这一句一起被提走）。当一句发出去就行，它的值本来就是 undefined。 */
+    if (e.kind === 'Builtin' && JS_ALL[e.name] !== undefined && JS_ALL[e.name].ret === 'void') {
+      this.fn.sink.push(exprStmt(e));
+      this.fn.sink.push({ kind: 'If', cond: boolOp('js_pending', []), then: block([this.unwind()]), otherwise: null });
+      return undefExpr();
+    }
     const t = this.temp();
     this.fn.sink.push(exprStmt(assign(varRef(t), e)));
     this.fn.sink.push({ kind: 'If', cond: boolOp('js_pending', []), then: block([this.unwind()]), otherwise: null });
@@ -2564,7 +2572,7 @@ class Lower {
       // 与 JS 的差别只剩 `1 in [1,,3]`（那边是 false，我们是 true）—— 记在 ADR-0020，
       // 等真数组对象那一片（P4 的 TypedArray/Array exotic）再对齐。
       if (el === null) return undefExpr();
-      if (el.type === 'Spread') return op('js_iter', [this.expr(el.arg)]);
+      if (el.type === 'Spread') return this.guarded(op('js_iter', [this.expr(el.arg)]));
       return this.expr(el);
     });
     /** @type {any[]} 一段段拼：连续的普通元素是一个 ListLit，展开的是 js_iter */
@@ -2928,7 +2936,7 @@ class Lower {
       if (a && a.spread !== undefined) {
         if (run.length) { parts.push(arrLit(run)); run = []; }
         if (parts.length === 0) firstIsSpread = true;
-        parts.push(op('js_iter', [a.spread]));
+        parts.push(this.guarded(op('js_iter', [a.spread])));
         continue;
       }
       run.push(a);

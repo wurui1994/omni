@@ -205,6 +205,18 @@ static omni_dyn omni_js_utf8_bytes(omni_dyn sd) { \
   out->len = u.len; \
   return omni_js_arr_wrap(out); \
 } \
+/* 一格能 catch 的 TypeError（异常对象就是 { $cls: […], name, message }，ADR-0011 决策 15）。
+   摆在 omni_js_iter 前面：那儿要用它，而 omni_js_err_new 在这个文件里排得更后。 */ \
+static void omni_js_type_err_c(const char *msg) { \
+  LT cls = LT##_new(); \
+  LT##_push(cls, omni_dyn_of_s16(omni_js_s16_lit("TypeError"))); \
+  LT##_push(cls, omni_dyn_of_s16(omni_js_s16_lit("Error"))); \
+  omni_dyn o = omni_js_obj_new(); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("$cls")), omni_js_arr_wrap(cls)); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("name")), omni_dyn_of_s16(omni_js_s16_lit("TypeError"))); \
+  omni_js_obj_set(o, omni_dyn_of_s16(omni_js_s16_lit("message")), omni_dyn_of_s16(omni_js_s16_lit(msg))); \
+  omni_js_throw(o); \
+} \
 static omni_dyn omni_js_iter(omni_dyn v) { \
   switch (v.tag) { \
     case OMNI_DYN_LIST: return v; \
@@ -233,8 +245,12 @@ static omni_dyn omni_js_iter(omni_dyn v) { \
       return omni_js_arr_wrap(out); \
     } \
     default: \
-      omni_errorf("%s is not iterable", omni_dyn_tag_name(v.tag)); \
-      return omni_dyn_undef(); \
+      /* 不可迭代（规范 7.4.2 的 GetIterator）是 TypeError，**能 catch** —— `[...null]` 与
+         `for (const x of 5)` 两把尺子上都是 catch 得住的。从前是硬错，进程就停在那儿。
+         报过之后交一格空表回去：调用点（js_iter_open 那一族都带 throws）紧跟的 pending
+         检查会接着退，中间这一格不会被真的用到。 */ \
+      omni_js_type_err_c("value is not iterable"); \
+      return omni_js_arr_wrap(LT##_new()); \
   } \
 } \
 /* for-of 的惰性形态（ADR-0020）：C 这侧只有 list 那一支 —— 真迭代器（生成器、带

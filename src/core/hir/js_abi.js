@@ -556,7 +556,10 @@ export const JS_ABI = {
   // ------------------------------------------------- for-of 与 o[k]（lower.js 用）
   // iter：数组原样返回（下标迭代是活的），字符串按码点切，Map 给 [k,v]，Set 给元素。
   // idx_get/idx_set：o[k] 按接收者标签派发 —— 这不是"成员名"，进不了 JS_METHODS 表。
-  js_iter: { js: '$js_iter', c: 'omni_js_iter', arity: 1 },
+  /* iter 带 throws：不可迭代是能 catch 的 TypeError（规范 7.4.2），而"报了不马上查"就成了
+     另一种静默 —— 量出来的：展开一个 next 不交对象的迭代器，那一句照跑完，catch 到下一句
+     才生效。 */
+  js_iter: { js: '$js_iter', c: 'omni_js_iter', arity: 1, throws: true },
   js_idx_get: { js: '$js_idx_get', c: 'omni_js_idx_get', arity: 2 },
   js_idx_set: { js: '$js_idx_set', c: 'omni_js_idx_set', arity: 3 },
 

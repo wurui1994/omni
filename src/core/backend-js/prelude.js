@@ -1886,13 +1886,22 @@ function $js_iter(v) {
     // （生成器那一刀之后，for-of 才有真正的惰性形态）。
     case "object": {
       const it = $js_iter_proto(v), out = [];
+      // 取把手就报了（没有 Symbol.iterator）：接住就收场，别再拿 undefined 去问 next
+      if ($js_pending()) return out;
       for (;;) {
         const r = $js_iter_next(it);
+        // 协议里报的错（不可迭代 / next 交出来的不是对象）是**能 catch** 的，接住就收场
+        if ($js_pending()) return out;
         if ($js_truthy($js_getp(r, "done", undefined))) return out;
         out.push($js_getp(r, "value", undefined));
       }
     }
-    default: $rt_error($dynTag(v) + " is not iterable");
+    /* 不可迭代（规范 7.4.2 的 GetIterator）是 **TypeError**，能 catch —— 展开一个 null、
+       for-of 一个数，两把尺子上都是 catch 得住的。从前是硬错，整个进程就停在那儿。
+       报过之后交一格空表回去：调用点（js_iter_open 那一族都带 throws）紧跟着的 pending
+       检查会接着退，中间这一格不会被真的用到。消息不带标签名 —— 要与 C 那条腿一字一样，
+       而两边的标签名对不齐（普通对象在 C 那侧是 dict、这侧是 object）。 */
+    default: { $js_type_err("value is not iterable"); return []; }
   }
 }
 /* for-of 的惰性形态（ADR-0020）：一格迭代把手 —— 真迭代器（生成器、带 Symbol.iterator 的
@@ -1913,6 +1922,8 @@ function $js_iter_done(h, i) {
   if (!(h instanceof $JsIterH)) return $js_idx(i, 0) >= h.length;
   if (h.d) return true;
   const r = $js_iter_next(h.it);
+  // 协议里报的错（next 交出来的不是对象）能 catch：接住就当 done，调用点的检查接着退
+  if ($js_pending()) { h.d = true; return true; }
   if ($js_truthy($js_getp(r, "done", undefined))) { h.d = true; h.v = undefined; return true; }
   h.v = $js_getp(r, "value", undefined);
   return false;
@@ -1936,6 +1947,7 @@ function $js_iter_rest(h, i) {
   for (;;) {
     if (h.d) return out;
     const r = $js_iter_next(h.it);
+    if ($js_pending()) { h.d = true; return out; }
     if ($js_truthy($js_getp(r, "done", undefined))) { h.d = true; return out; }
     out.push($js_getp(r, "value", undefined));
   }
@@ -4006,13 +4018,15 @@ function $js_instanceof_p(v, proto) {
 // 迭代器协议。iterProto 那一格是给内建迭代器用的；这一条是"按协议驱动一个对象"。
 function $js_iter_proto(v) {
   const f = $js_isobj(v) ? $js_getp(v, $js_sym_wk("iterator"), undefined) : $js_prim_get(v, $js_sym_wk("iterator"));
-  if (f === undefined || f === null) $rt_error($dynTag(v) + " is not iterable");
+  // 规范 7.4.2：没有 Symbol.iterator 是 TypeError，能 catch（从前是硬错）
+  if (f === undefined || f === null) return $js_type_err("value is not iterable");
   return $callThis(f, v, []);
 }
 function $js_iter_next(it) {
   const f = $js_getp(it, "next", undefined);
   const r = $callThis(f, it, []);
-  if (!$js_isobj(r)) $rt_error("iterator result is not an object");
+  // 规范 7.4.4：next 交出来的不是对象是 TypeError，能 catch（从前是硬错）
+  if (!$js_isobj(r)) return $js_type_err("iterator result is not an object");
   return r;
 }
 // ToPrimitive（hint: 'n' number / 's' string / 'd' default）。Symbol.toPrimitive 优先，

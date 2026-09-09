@@ -179,3 +179,19 @@ function catchOnly() {
   return o.join(",");
 }
 console.log(`lab ${catchOnly()}`);
+
+/* 不可迭代是**能 catch** 的 TypeError（规范 7.4.2），从前两条腿都是硬错、进程停在那儿。
+   而且要当场响：js_iter 因此带上 throws，展开那一格也自己 guard（报了不马上查，那一句会
+   照跑完，catch 到下一句才生效 —— 另一种静默）。 */
+function notIterable(v) {
+  try { const a = [...v]; return `no-throw${a.length}`; }
+  catch (e) { return `${e.name}:${e instanceof TypeError}`; }
+}
+console.log(`iter ${notIterable(null)} ${notIterable(5)} ${notIterable([1, 2])}`);
+function forOfBad(v) {
+  const seen = [];
+  try { for (const x of v) seen.push(x); } catch (e) { seen.push(e.name); }
+  return seen.join("|");
+}
+console.log(`iter ${forOfBad(undefined)} ${forOfBad("ab")} ${forOfBad(true)}`);
+console.log("iter after");
