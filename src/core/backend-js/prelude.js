@@ -1325,6 +1325,18 @@ function $js_uri(op, x) {
 // isWellFormed / toWellFormed（ES2024）：落单的代理项（没配对的 D800..DFFF）算"不良",// toWellFormed 把每个落单的替成 U+FFFD。C 那份是手划码元的同一套判据。
 function $js_str_is_well_formed(s) { return $js_asS16(s).isWellFormed(); }
 function $js_str_to_well_formed(s) { return $js_asS16(s).toWellFormed(); }
+/* normalize（规范 22.1.3.15）。形态名缺席时是 "NFC"，不在四个里是**能 catch** 的 RangeError
+   （第 4 步）。底下转手宿主那一份 —— 分解与组合表就是宿主的那套，所以这一格是 JS-only
+   （js_abi 的 P1_JS_ONLY），C 那条腿在发射期整格拒，不会悄悄给个没规范化的串。 */
+function $js_str_normalize(s, form) {
+  const v = $js_asS16(s);
+  if (form === undefined) return v.normalize();
+  const f = $js_str(form);
+  if (f !== "NFC" && f !== "NFD" && f !== "NFKC" && f !== "NFKD") {
+    return $js_range_err("bad normalization form");
+  }
+  return v.normalize(f);
+}
 /* 串长上限：宿主超了会抛**宿主**的 RangeError，一路冒到顶把进程崩掉（量出来的：
    padStart(2**31) 印出一整片 node 栈）。所以先自己拦一道，交能 catch 的 RangeError ——
    两把尺子上这一格都是 RangeError。数取 node 那一档（2^29-24）。 */

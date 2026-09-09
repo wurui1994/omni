@@ -89,6 +89,10 @@ export const JS_ABI = {
   // isWellFormed / toWellFormed（ES2024）：落单的代理项算"不良"，后者替成 U+FFFD
   js_str_is_well_formed: { js: '$js_str_is_well_formed', c: 'omni_js_str_is_well_formed', arity: 1, ret: 'bool' },
   js_str_to_well_formed: { js: '$js_str_to_well_formed', c: 'omni_js_str_to_well_formed', arity: 1 },
+  /* normalize（规范 22.1.3.15）。**只有 JS 那条腿**（P1_JS_ONLY）：NFC/NFD 那套要 Unicode 的
+     分解与组合表，C 侧现在没有，与其两条腿悄悄不一样，不如让 C 在发射期整格拒。
+     形态名不在四个里是**能 catch** 的 RangeError，所以带 throws。 */
+  js_str_normalize: { js: '$js_str_normalize', c: 'omni_js_str_normalize', arity: 2, throws: true },
   js_str_last_index_of: { js: '$js_str_last_index_of', c: 'omni_js_str_last_index_of', arity: 3 },
   js_str_includes: { js: '$js_str_includes', c: 'omni_js_str_includes', arity: 3, ret: 'bool' },
   js_str_starts_with: { js: '$js_str_starts_with', c: 'omni_js_str_starts_with', arity: 3, ret: 'bool' },
@@ -783,6 +787,7 @@ export const JS_METHODS = {
      它与 exec 共用一套 lastIndex 行为 —— 就是"exec 出来不是 null"。 */
   test: { on: { regexp: 'js_re_test_o' } },
   isWellFormed: { on: { string: 'js_str_is_well_formed' } },
+  normalize: { on: { string: 'js_str_normalize' } },
   toWellFormed: { on: { string: 'js_str_to_well_formed' } },
   // 字节缓冲上的那几个（DataView / Uint8Array 的方法）
   getUint8: { on: { bytes: 'js_buf_get_u8' } },
@@ -867,14 +872,15 @@ export const JS_METHODS = {
  * 发它们，C 那条腿上的 JS 程序就会在链接期缺符号 —— 所以 C 孪生必须在"降级器翻过去"
  * 之前落地（ADR-0020 的 P1-c）。 */
 const P1_JS_ONLY = [
+  // normalize：NFC/NFD 要 Unicode 的分解与组合表，C 侧还没有（见上面那条 op 的注）
+  'js_str_normalize',
   'js_obj_new_p', 'js_obj_create', 'js_obj_defs', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
   'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
   'js_reflect_set', 'js_reflect_def', 'js_reflect_proto_set', 'js_reflect_prevent_ext',
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',  'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
   'js_obj_from_entries', 'js_obj_descs',
   'js_instanceof', 'js_instanceof_p', 'js_is_obj', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
-  'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',
-  'js_sym_wk', 'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
+  'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',  'js_sym_wk', 'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
   'js_date_parse', 'js_proxy_new', 'js_date_utc',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
   'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',
@@ -928,4 +934,14 @@ for (const [name, m] of Object.entries(JS_METHODS)) {
 
 /** 发射器认的全部 op：ABI 表 + 生成出来的成员派发器 */
 export const JS_ALL = { ...JS_ABI, ...JS_MEMBERS };
+
+/* `noC` 往成员上传播：一个成员的**每一条**分支都只有 JS 侧的实现时，这个成员在 C 那条腿上
+ * 整格不存在 —— 于是 C 后端在**发射期**就拒（builtin 里那一条），而不是生成一句调用不存在的
+ * omni_js_* 再让 clang 报 "call to undeclared function"（量出来的：normalize 就是这样漏过去的，
+ * 报错指着生成出来的 .c 文件，看不出是"这条腿还没有这一格"）。
+ * 只有分支**全是** noC 才传播：混着的那种（接收者标签决定走哪支）在发射期分不出来。 */
+for (const d of Object.values(JS_MEMBERS)) {
+  const ops = Object.values(d.member.on);
+  if (ops.length > 0 && ops.every((op) => JS_ABI[op].noC === true)) d.noC = true;
+}
 

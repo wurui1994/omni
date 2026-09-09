@@ -17,6 +17,7 @@ import { cTypeName, listType, typeKey, cArrOps, arrIsBlob, loopLabelNeeds } from
 import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
 import { C_ABI, C_TYPE, C_IN, C_OUT } from '../hir/c_abi.js';
 import { utf8Bytes } from '../host/utf8.js';
+import { OmniError } from '../source/diag.js';
 
 /** dict/set 的键需要 hash；list.contains 只需要 eq */
 const HASH_FN = { int: 'omni_hash_int', real: 'omni_hash_real', bool: 'omni_hash_bool', string: 'omni_hash_string' };
@@ -689,6 +690,9 @@ class CEmitter {
    */
   memberDispatch() {
     for (const d of Object.values(JS_MEMBERS)) {
+      // 每条分支都只有 JS 侧实现的成员（js_abi 里传播上来的 noC）：这一格在 C 上整个不生成，
+      // 用到它的程序在 builtin 那儿就被拒 —— 不生成一句调用不存在的符号再让 clang 去骂
+      if (d.noC === true) continue;
       const m = d.member;
       const ps = ['r'];
       for (let i = 0; i < m.argc; i++) ps.push(`a${i}`);
@@ -1460,8 +1464,10 @@ class CEmitter {
          * 在**发射的时候**就骂，而不是让它落成一个 C 链接期的 undefined symbol ——
          * 那种错误会指向生成的 .c 的某一行，而真相是"这条腿还没修完"。 */
         if (abi.noC === true) {
-          throw new Error(`backend-c: op '${e.name}' 还没有 C 实现（ADR-0020 P1-c）——`
-            + 'JS 的真对象/Symbol 那一族现在只在 node 宿主上成立；'
+          /* 用 OmniError 而不是裸 Error：这是一句**给人看的拒绝**，CLI 那边只印 message
+             一行。从前是裸 Error，印出来是一整片 node 栈 —— 响是响了，可看着像我们崩了。 */
+          throw new OmniError(`backend-c: '${e.name}' 还没有 C 实现（ADR-0020 P1-c）——`
+            + 'JS 的真对象 / Symbol / normalize 那一族现在只在 node 宿主上成立；'
             + '这份程序请走 --backend js 或解释器');
         }
         const lits = (abi.lit ?? []).map((k) => {
