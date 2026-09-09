@@ -895,7 +895,6 @@ const P1_JS_ONLY = [
   // 真对象那一族有 C 孪生了（omni_js_obj.h 的 OMNI_DYN_OBJ + 槽表 + 原型链，P1-c 的第十步）：
   // obj_new_p / obj_create / getp / setp / proto_get / proto_set 都在。还留在这张单子上的是
   // 要**属性位**的那两格（defineProperty 那一族），以及 realm / 代理 / Date 对象那几片。
-  'js_obj_defs',
   'js_reflect_def',
   // freeze / seal / preventExtensions 那六格已经有 C 孪生了（omni_js_obj.h 的三档锁）：
   // 这条腿上能被锁的只有容器（list / dict / Map / Set / bytes），而真对象在 C 上还不存在，
@@ -906,9 +905,8 @@ const P1_JS_ONLY = [
   // 这条腿上"普通对象"是 dict、数组是一段 items，都没有属性位，所以描述符是照实合成的
   // 那一格（数据属性 + 三档锁算出来的三个位）。defineProperty 照旧拒 —— `{ value: 1 }`
   // 在规范里造的是不可枚举、不可写、不可配置的属性，dict 表达不出来，收下就是悄悄的错答案。
-  // defineProperty（js_obj_def）与 new.target 那两格也落地了：槽表本来就带 w/e/c 三个位，
-  // 所以描述符不再是"表达不出来"的东西。还拒的是 defineProperties（js_obj_defs）与
-  // Object.create(proto, descs) 里那一层批量描述符。
+  // defineProperty / defineProperties / Object.create(proto, descs) / new.target 都落地了：
+  // 槽表本来就带 w/e/c 三个位，所以描述符不再是"表达不出来"的东西。
   // Object.fromEntries 与 Object.groupBy 有 C 孪生了（omni_js_str_arr.h）：JS 那条腿上
   // 它们造的是真对象（后者还是 null 原型），而这条腿上"普通对象"就是 dict —— 可观察的
   // 那几样（取键、Object.keys、JSON、分组的原顺序）逐格相同，原型那一格本来就问不着。

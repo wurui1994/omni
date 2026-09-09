@@ -67,6 +67,7 @@ static omni_dyn omni_js_obj_own_keys_o_(omni_dyn o, int sel); \
 static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own); \
 static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k); \
 static omni_dyn omni_js_fn_proto_(omni_dyn f); \
+static omni_dyn omni_js_obj_keys(omni_dyn o); \
 static omni_dyn omni_js_obj_new(void) { return omni_js_dict_wrap(DT##_new()); } \
 /* JS 里数组也是对象，身上可以挂字段（asy 前端的 do-while 就往那一格更新列表上挂一个 dw）。
    这个值域里 list 只是一段 items/len、没有属性槽，所以额外属性放在一张**按同一性索引的
@@ -561,15 +562,11 @@ static bool omni_js_instanceof(omni_dyn v, omni_dyn ctor) { \
   } \
   return omni_js_instanceof_p(v, proto); \
 } \
-/* Object.create(proto[, descs])：descs 那一格要 defineProperty 的全套位，还在 P1-c 里 ——
-   给了就当场报，不悄悄忽略。 */ \
+/* Object.create(proto[, descs]) 与 Object.defineProperties：定义在 obj_def 之后（那儿才有
+   全套属性位），这儿先声明。 */ \
+static omni_dyn omni_js_obj_defs(omni_dyn o, omni_dyn descs); \
 static omni_dyn omni_js_obj_create(omni_dyn proto, omni_dyn descs) { \
-  if (descs.tag != OMNI_DYN_UNDEF) { \
-    omni_errorf("backend-c: Object.create with a descriptor map — 属性描述符那一族现在只在 " \
-                "node 宿主上成立（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器"); \
-    return omni_dyn_undef(); \
-  } \
-  return omni_js_obj_new_p(proto); \
+  return omni_js_obj_defs(omni_js_obj_new_p(proto), descs); \
 } \
 /* Reflect.set / setPrototypeOf / preventExtensions：与赋值那条路的差别只在**答案**上 ——
    交一个布尔，写不进去（不可写、只有 getter、接收者不可扩展）时是 false。
@@ -666,6 +663,25 @@ static omni_dyn omni_js_obj_def(omni_dyn o, omni_dyn k, omni_dyn desc) { \
   sl->items[5] = omni_dyn_of_bool(e); \
   sl->items[6] = omni_dyn_of_bool(c); \
   if (at < 0) DT##_set(ps, key, omni_js_arr_wrap(sl)); \
+  return o; \
+} \
+/* Object.defineProperties(o, descs)：descs 上只算**自有可枚举**的键（符号键也算）。
+   与 prelude 的 $js_obj_defs 逐条对齐。 */ \
+static omni_dyn omni_js_obj_defs(omni_dyn o, omni_dyn descs) { \
+  if (descs.tag == OMNI_DYN_UNDEF || descs.tag == OMNI_DYN_NULL) return o; \
+  LT ks = omni_js_arr_of(descs.tag == OMNI_DYN_OBJ ? omni_js_obj_own_keys_o_(descs, 'e') \
+                                                   : omni_js_obj_keys(descs)); \
+  for (int64_t i = 0; i < ks->len; i++) { \
+    omni_js_obj_def(o, ks->items[i], omni_js_obj_get(descs, ks->items[i])); \
+    if (omni_js_pending()) return o; \
+  } \
+  if (descs.tag == OMNI_DYN_OBJ) { \
+    LT ys = omni_js_arr_of(omni_js_obj_own_keys_o_(descs, 'y')); \
+    for (int64_t i = 0; i < ys->len; i++) { \
+      omni_js_obj_def(o, ys->items[i], omni_js_obj_get(descs, ys->items[i])); \
+      if (omni_js_pending()) return o; \
+    } \
+  } \
   return o; \
 } \
 /* 普通函数当构造器（ADR-0020）：`new f(a)` = 造一格以 f.prototype 为原型的对象、拿它当
