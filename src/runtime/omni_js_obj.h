@@ -684,6 +684,50 @@ static omni_dyn omni_js_obj_defs(omni_dyn o, omni_dyn descs) { \
   } \
   return o; \
 } \
+/* Reflect.defineProperty：与 Object.defineProperty 同一格，只是把"成没成"变成一个布尔。 */ \
+static bool omni_js_reflect_def(omni_dyn o, omni_dyn k, omni_dyn d) { \
+  omni_js_obj_def(o, k, d); \
+  if (omni_js_pending()) { omni_js_take_pending(); return false; } \
+  return true; \
+} \
+/* 迭代协议那两格（规范 7.4.2 / 7.4.4）：GetIterator = 取 Symbol.iterator 再调，
+   IteratorNext = 取 next 再调、结果必须是对象。两处都是**能 catch** 的 TypeError。
+   与 prelude 的 $js_iter_proto / $js_iter_next 逐条对齐。 */ \
+static omni_dyn omni_js_iter_proto(omni_dyn v) { \
+  omni_dyn key = omni_js_sym_wk(omni_str_new("iterator", 8)); \
+  omni_dyn f = v.tag == OMNI_DYN_OBJ ? omni_js_getp(v, key, omni_dyn_undef()) \
+                                     : omni_js_obj_get(v, key); \
+  if (f.tag == OMNI_DYN_UNDEF || f.tag == OMNI_DYN_NULL) { \
+    omni_js_type_err_c("value is not iterable"); \
+    return omni_dyn_undef(); \
+  } \
+  return omni_js_call_this(f, v, omni_js_arr_wrap(LT##_new())); \
+} \
+static omni_dyn omni_js_iter_next(omni_dyn it) { \
+  omni_dyn f = omni_js_obj_get(it, omni_js_name_("next", 4)); \
+  omni_dyn r = omni_js_call_this(f, it, omni_js_arr_wrap(LT##_new())); \
+  if (omni_js_pending()) return omni_dyn_undef(); \
+  if (!omni_js_is_object(r)) { \
+    omni_js_type_err_c("iterator result is not an object"); \
+    return omni_dyn_undef(); \
+  } \
+  return r; \
+} \
+/* 走一遍迭代协议、摊成一条 list。真对象唯一的"可迭代"来路就是这条（Symbol.iterator +
+   next），Array.from / new Set(x) / new Map(x) / omni_js_iter 那几处都用它。
+   协议里报的错是能 catch 的：接住就把手里那截交回去，调用点的 pending 检查会接着退。 */ \
+static omni_dyn omni_js_iter_o_(omni_dyn v) { \
+  LT out = LT##_new(); \
+  omni_dyn it = omni_js_iter_proto(v); \
+  if (omni_js_pending()) return omni_js_arr_wrap(out); \
+  for (;;) { \
+    omni_dyn r = omni_js_iter_next(it); \
+    if (omni_js_pending()) return omni_js_arr_wrap(out); \
+    if (omni_js_truthy(omni_js_obj_get(r, omni_js_name_("done", 4)))) break; \
+    LT##_push(out, omni_js_obj_get(r, omni_js_name_("value", 5))); \
+  } \
+  return omni_js_arr_wrap(out); \
+} \
 /* 普通函数当构造器（ADR-0020）：`new f(a)` = 造一格以 f.prototype 为原型的对象、拿它当
    接收者跑 f、f 返回对象就用那一格。函数在这个值域里**不是**真对象，所以那格 prototype
    住在一张按同一性索引的旁表上（键就是 omni_js_key 给引用值发的地址）——
@@ -1083,6 +1127,8 @@ static omni_dyn omni_js_set_entries(omni_dyn s) { \
 static omni_dyn omni_js_map_of_pairs(omni_dyn init) { \
   omni_dyn m = omni_js_map_new(); \
   if (init.tag == OMNI_DYN_UNDEF) return m; \
+  /* 真对象：先走一遍迭代协议摊成 list（ADR-0020 P1-c 的第十一步） */ \
+  if (init.tag == OMNI_DYN_OBJ) init = omni_js_iter_o_(init); \
   LT l = omni_js_arr_of(init.tag == OMNI_DYN_MAP ? omni_js_map_entries(init) : init); \
   for (int64_t i = 0; i < l->len; i++) { \
     LT p = omni_js_arr_of(l->items[i]); \
@@ -1094,6 +1140,7 @@ static omni_dyn omni_js_map_of_pairs(omni_dyn init) { \
 static omni_dyn omni_js_set_of_list(omni_dyn init) { \
   omni_dyn s = omni_js_set_new(); \
   if (init.tag == OMNI_DYN_UNDEF) return s; \
+  if (init.tag == OMNI_DYN_OBJ) init = omni_js_iter_o_(init); \
   /* 初值收 list / Set / 字符串（规范 24.2.1.1 说的是"任何可迭代的东西"）。字符串按**码点**
      拆 —— 这一段比 omni_js_iter 先展开（宏段顺序），所以在本段里自己拆一遍。 */ \
   if (init.tag == OMNI_DYN_STR16) { \

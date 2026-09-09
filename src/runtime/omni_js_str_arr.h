@@ -100,6 +100,7 @@ static omni_dyn omni_js_str_replace_all(omni_dyn sd, omni_dyn patd, omni_dyn rep
    那是 Array.from({length:n}, f) 的用法。它落在这一段是因为要 omni_js_obj_get 与
    omni_js_s16_lit，那两格分别在 obj / json 那两段里，都比 arr 那段后展开。 */ \
 static omni_dyn omni_js_arr_from(omni_dyn v, omni_dyn f) { \
+  if (v.tag == OMNI_DYN_OBJ) v = omni_js_iter_o_(v); \
   LT out = LT##_new(); \
   LT l; \
   omni_dyn src = v; \
@@ -254,6 +255,10 @@ static omni_dyn omni_js_iter(omni_dyn v) { \
       } \
       return omni_js_arr_wrap(out); \
     } \
+    /* 真对象：走**迭代协议**（Symbol.iterator + next），摊成一条 list。
+       与 prelude 的 $js_iter 那一支逐条对齐 —— 协议里报的错都是能 catch 的，
+       接住就收场，别再拿 undefined 去问 next。 */ \
+    case OMNI_DYN_OBJ: return omni_js_iter_o_(v); \
     default: \
       /* 不可迭代（规范 7.4.2 的 GetIterator）是 TypeError，**能 catch** —— `[...null]` 与
          `for (const x of 5)` 两把尺子上都是 catch 得住的。从前是硬错，进程就停在那儿。

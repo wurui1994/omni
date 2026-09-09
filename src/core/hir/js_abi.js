@@ -895,7 +895,6 @@ const P1_JS_ONLY = [
   // 真对象那一族有 C 孪生了（omni_js_obj.h 的 OMNI_DYN_OBJ + 槽表 + 原型链，P1-c 的第十步）：
   // obj_new_p / obj_create / getp / setp / proto_get / proto_set 都在。还留在这张单子上的是
   // 要**属性位**的那两格（defineProperty 那一族），以及 realm / 代理 / Date 对象那几片。
-  'js_reflect_def',
   // freeze / seal / preventExtensions 那六格已经有 C 孪生了（omni_js_obj.h 的三档锁）：
   // 这条腿上能被锁的只有容器（list / dict / Map / Set / bytes），而真对象在 C 上还不存在，
   // 所以那一支本来就到不了 —— 六格在 C 上是**完整**的，不是半对的。
@@ -915,7 +914,10 @@ const P1_JS_ONLY = [
   // instanceof 那两格有 C 孪生了（omni_js_obj.h）：真对象有原型链了，所以"沿链找 C.prototype"
   // 这件事能做了。to_prim 只在 prelude 内部用（降级器不发它），iter_proto / iter_next
   // 要迭代器协议那格真对象上的 next，还在下一步。
-  'js_to_prim', 'js_iter_proto', 'js_iter_next',
+  // 迭代协议那两格（js_iter_proto / js_iter_next）与 Reflect.defineProperty 也有 C 孪生了：
+  // 真对象有槽、符号键按同一性发键，所以 [Symbol.iterator]() {…} 那种可迭代对象在 C 上也成立。
+  // js_to_prim 只在 prelude 内部用（降级器不发它），留在这儿只是没人要它。
+  'js_to_prim',
   // Symbol 那一族已经有 C 孪生了（runtime/omni_js_sym.c，ADR-0020 P1-c 的第一步），
   // 所以不在这张单子里 —— 真对象那一片还在，见下面几行。
   'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
