@@ -887,11 +887,13 @@ const P1_JS_ONLY = [
   // freeze / seal / preventExtensions 那六格已经有 C 孪生了（omni_js_obj.h 的三档锁）：
   // 这条腿上能被锁的只有容器（list / dict / Map / Set / bytes），而真对象在 C 上还不存在，
   // 所以那一支本来就到不了 —— 六格在 C 上是**完整**的，不是半对的。
-  'js_obj_own_keys', 'js_obj_to_string',
+  // js_is_obj 与 js_obj_to_string 也有 C 孪生了（omni_js.c）：两条都是照标签直说 ——
+  // 这条腿上没有真对象，所以既没有 Symbol.toStringTag 也没有原型链。
+  'js_obj_own_keys',
   'js_obj_from_entries', 'js_obj_descs',
   // js_for_in_keys 有 C 孪生了：这条腿上没有原型链，所以"自有 + 继承"只剩自有那一段，
   // 正好是 omni_js_obj_keys 的三支（见 omni_js_obj.h）。
-  'js_instanceof', 'js_instanceof_p', 'js_is_obj', 'js_to_prim', 'js_iter_proto', 'js_iter_next',
+  'js_instanceof', 'js_instanceof_p', 'js_to_prim', 'js_iter_proto', 'js_iter_next',
   // Symbol 那一族已经有 C 孪生了（runtime/omni_js_sym.c，ADR-0020 P1-c 的第一步），
   // 所以不在这张单子里 —— 真对象那一片还在，见下面几行。
   'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',

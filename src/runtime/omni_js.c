@@ -216,6 +216,42 @@ static omni_s16 to_s16(omni_dyn v) {
 
 omni_dyn omni_js_str(omni_dyn v) { return omni_dyn_of_s16(to_s16(v)); }
 
+/* 规范意义上的 "Type(v) is Object"：不是那七格原始值就算（ADR-0020）。用处主要是构造器的
+   return —— 返回数组、返回函数也算对象，所以判据不能只认某一个标签。
+   与 prelude 的 $js_is_object 逐格对齐（那边是"不在 $JS_PRIMS 里"）。 */
+bool omni_js_is_object(omni_dyn v) {
+  switch (v.tag) {
+    case OMNI_DYN_NULL: case OMNI_DYN_UNDEF: case OMNI_DYN_BOOL:
+    case OMNI_DYN_INT: case OMNI_DYN_UINT: case OMNI_DYN_REAL:
+    case OMNI_DYN_STR16: case OMNI_DYN_STRING: case OMNI_DYN_SYM:
+      return false;
+    default: return true;
+  }
+}
+
+/* Object.prototype.toString.call(x)（规范 20.1.3.6）。规范先问 Symbol.toStringTag、再看
+   内部槽；这条腿上**没有真对象**（还在 P1-c 里），所以既没有 toStringTag 也没有原型链 ——
+   照标签直说，与 prelude 的 $js_obj_to_string 那个 switch 逐支对齐。
+   WeakMap / WeakSet 在这个值域里就是 Map / Set（ADR-0020 P4 画的边界），所以也报 Map / Set。 */
+omni_dyn omni_js_obj_to_string(omni_dyn t) {
+  const char *n;
+  switch (t.tag) {
+    case OMNI_DYN_UNDEF: n = "[object Undefined]"; break;
+    case OMNI_DYN_NULL: n = "[object Null]"; break;
+    case OMNI_DYN_LIST: n = "[object Array]"; break;
+    case OMNI_DYN_STR16: case OMNI_DYN_STRING: n = "[object String]"; break;
+    case OMNI_DYN_REAL: case OMNI_DYN_INT: case OMNI_DYN_UINT: n = "[object Number]"; break;
+    case OMNI_DYN_BOOL: n = "[object Boolean]"; break;
+    case OMNI_DYN_FN: n = "[object Function]"; break;
+    case OMNI_DYN_MAP: n = "[object Map]"; break;
+    case OMNI_DYN_SET: n = "[object Set]"; break;
+    case OMNI_DYN_RE: n = "[object RegExp]"; break;
+    case OMNI_DYN_SYM: n = "[object Symbol]"; break;
+    default: n = "[object Object]"; break;
+  }
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
+}
+
 /* console.log 印一格值：与 ToString 只差一处 —— **-0 印成 "-0"**（String(-0) 是 "0"，
    而 qjs 与 node 的 console.log 都印 -0，量过）。 */
 omni_dyn omni_js_disp(omni_dyn v) {

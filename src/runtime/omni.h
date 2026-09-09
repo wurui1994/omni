@@ -501,6 +501,12 @@ omni_dyn omni_js_sym_desc(omni_dyn s);
 omni_dyn omni_js_sym_str(omni_dyn s);
 /* well-known symbol：名字是编译期常量，按 omni_str 传（js_abi 的 litText）。同名一格。 */
 omni_dyn omni_js_sym_wk(omni_str name);
+
+/* 规范意义上的 "Type(v) is Object"（不是那七格原始值就算），以及
+   Object.prototype.toString.call(x)。两条都是**照标签直说** —— 这条腿上没有真对象，
+   所以既没有 Symbol.toStringTag 也没有原型链（ADR-0020 P1-c）。 */
+bool omni_js_is_object(omni_dyn v);
+omni_dyn omni_js_obj_to_string(omni_dyn t);
 /* dynamic 的运行期标签名（JS 域口径）。解释器靠它认标签，见 ADR-0013 与 omni_js.c */
 omni_dyn omni_js_type_tag(omni_dyn v);
 /* real 的两种文本化，给解释器用（ADR-0013）。就是 print / repr 自己用的那两个函数，

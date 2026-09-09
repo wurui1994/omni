@@ -2678,7 +2678,7 @@ function $js_fn_construct(f, args) {
     if (c !== undefined) {
       const r = $callThis(c, f.px.h, [f.px.t, $js_arr_of(args), f]);
       if ($js_pending()) return undefined;
-      if (!$js_isobj(r)) $rt_error("a proxy construct trap must return an object");
+      if (!$js_is_object(r)) $rt_error("a proxy construct trap must return an object");
       return r;
     }
     // 没有陷阱就落到目标上（可调用代理的 fp 只管 apply 那一侧）
@@ -2697,7 +2697,7 @@ function $js_fn_construct(f, args) {
       const r0 = $callThis(init, o, $js_arr_of(args));
       $js_nt_slot = undefined;
       if ($js_pending()) return undefined;
-      return $js_isobj(r0) ? r0 : o;
+      return $js_is_object(r0) ? r0 : o;
     }
   }
   const g = $js_asFn(f);
@@ -2713,8 +2713,12 @@ function $js_fn_construct(f, args) {
   const r = $callThis(g, o, $js_arr_of(args));
   $js_nt_slot = undefined;
   if ($js_pending()) return undefined;
-  // 构造器返回一格对象就用它，别的（包括 undefined）一律给新造的那一格（规范如此）
-  return $js_isobj(r) ? r : o;
+  /* 构造器返回一格对象就用它，别的（包括 undefined）一律给新造的那一格（规范 10.2.2 第 13 步）。
+     判据是规范的 "Type(v) is Object" —— 这个值域里数组、Map、函数、正则都算，所以要问
+     $js_is_object（"不是那七格原始值"）而不是 $js_isobj（"是一格真对象"）：从前问的是后者，
+     于是 function Wrap(v) { return [v, v]; } 里 new Wrap(3) 悄悄给出一格空对象（量出来的，
+     qjs 给 [3, 3]）。上面类那条路（$init 的返回值）同一处坑。 */
+  return $js_is_object(r) ? r : o;
 }
 /* eval 与 Function(src)（ADR-0020 P6）：这两样要**编译器在运行期在场**。
    产物自己是自洽的一份 JS，里面没有编译器 —— 所以在本进程里跑的时候（omni run 与 REPL）
