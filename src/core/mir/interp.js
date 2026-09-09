@@ -1093,7 +1093,7 @@ class MirInterp {
           });
         /* fn.name / fn.length 也存在记录里（与 backend-js 的 closureMake、interp/eval.js 的
            makeClosure 一一对应）：这条腿与它们共用那份 prelude，少这两格就是静默的错答案。 */
-        if (def.fnName !== undefined) {
+        if (typeof def.fnName === 'string') {
           F.v[i].$nm = def.fnName;
           F.v[i].$ln = def.fnLen === undefined ? 0 : def.fnLen;
         }

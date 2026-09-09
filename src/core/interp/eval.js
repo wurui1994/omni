@@ -465,7 +465,7 @@ class Interp {
        * 这条腿与 JS 后端共用那份 prelude，所以记录里少这两格就是静默的错答案：
        * `f.name` 给空串、`f.length` 给 0（连 bind 出来的 "bound f" 也跟着塌）。
        * 与 backend-js 的 closureMake 一一对应：只有 JS 前端会填 fnName。 */
-      if (def.fnName !== undefined) {
+      if (typeof def.fnName === 'string') {
         jf.$nm = def.fnName;
         jf.$ln = def.fnLen === undefined ? 0 : def.fnLen;
       }

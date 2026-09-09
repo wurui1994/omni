@@ -60,9 +60,15 @@ omni_dyn omni_js_num_of(omni_dyn v) {
       if (*end != '\0') return omni_dyn_of_real((double)NAN);
       return omni_dyn_of_real(d);
     }
-    default:
+    default: {
+      /* 对象先 ToPrimitive（数值口径）：`Number({valueOf(){return 7}})` 是 7、
+         `Number({})` 是 NaN（"[object Object]" 解析不动）、`Number([2])` 是 2。
+         交回来的还是它自己就说明这一格根本不是对象 —— 那时候才是真该报的。 */
+      omni_dyn p = omni_js_to_prim_c(v, 'n');
+      if (p.tag != v.tag || p.u.ref != v.u.ref) return omni_js_num_of(p);
       omni_errorf("cannot convert %s to a number", omni_dyn_tag_name(v.tag));
       return omni_dyn_null();
+    }
   }
 }
 

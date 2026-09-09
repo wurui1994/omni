@@ -426,14 +426,30 @@ static omni_dyn omni_js_own_m_(omni_dyn v, omni_dyn k) { \
    `Symbol.toPrimitive` 还没有：**有它就当场报**，不悄悄按 valueOf / toString 走 —— 那会是
    一个静默的错答案。 */ \
 static omni_dyn omni_js_prim_v(omni_dyn v, int hint) { \
+  /* Symbol.toPrimitive 优先（规范 7.1.1 第 2 步）：实参是那个 hint 的**名字**，
+     三个名字与规范一字不差 —— 传错的话回调里 `h === "number"` 那种分派会走错支。 */ \
   omni_dyn sp = omni_js_own_m_(v, omni_js_sym_wk(omni_str_new("toPrimitive", 11))); \
   if (sp.tag == OMNI_DYN_FN) { \
-    omni_errorf("backend-c: Symbol.toPrimitive 还没搬到 C 那条腿（ADR-0020 P1-c）；" \
-                "这份程序请走 --backend js 或解释器"); \
-    return v; \
+    const char *hn = hint == 's' ? "string" : hint == 'n' ? "number" : "default"; \
+    LT ha = LT##_new(); \
+    LT##_push(ha, omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new(hn, (int64_t)strlen(hn))))); \
+    omni_dyn r = omni_js_call_this(sp, v, omni_js_arr_wrap(ha)); \
+    if (omni_js_pending()) return v; \
+    if (omni_js_is_object(r)) { \
+      omni_js_type_err_c("Symbol.toPrimitive returned an object"); \
+      return v; \
+    } \
+    return r; \
   } \
-  const char *order = hint == 's' ? "ts\0vo" : "vo\0ts"; \
-  for (int i = 0; i < 2; i++) { \
+  /* 串口径**只看 toString**：规范里那一步是"toString 再 valueOf"，而每个对象的链上都有
+     Object.prototype.toString —— 它永远成功（答案就是按标签那一串），所以 valueOf 那一步
+     在串口径上根本到不了。这儿把继承来的那一格当"没有自带"处理（好让 omni_js.c 去按标签
+     印），于是**不能**接着去问 valueOf：接了的话 `String({valueOf(){return 7}})` 会从
+     "[object Object]" 变成 "7"（量出来的，就是自己的探针抓的）。
+     默认 / 数值口径照规范先 valueOf、再 toString。 */ \
+  const char *order = hint == 's' ? "ts" : "vo\0ts"; \
+  int steps = hint == 's' ? 1 : 2; \
+  for (int i = 0; i < steps; i++) { \
     const char *which = i == 0 ? order : order + 3; \
     omni_dyn k = omni_dyn_of_s16(which[0] == 't' ? omni_js_s16_lit("toString") \
                                                  : omni_js_s16_lit("valueOf")); \

@@ -557,6 +557,9 @@ typedef struct { const void *fp; const char *nm; int64_t nmlen; int64_t len; } o
    不是 "421"），没有自带 toString 时原样交回。没登记的时候（不是 JS 那条腿）照旧当场报。 */
 typedef omni_dyn (*omni_js_prim_hook)(omni_dyn, int);
 void omni_js_prim_hook_set(omni_js_prim_hook h);
+/* 一格值的 ToPrimitive（hint 是 's' 串 / 'n' 数 / 'd' 默认）。容器与真对象过一遍钩子，
+   别的原样交回 —— Number(x) 那一侧（omni_js_num.c）也要它，所以不是 static。 */
+omni_dyn omni_js_to_prim_c(omni_dyn v, int hint);
 void omni_js_fnmeta_set(const omni_js_fn_meta *t, int64_t n);
 const omni_js_fn_meta *omni_js_fnmeta_find(const void *fp);
 /* Date 里只算数的那两格（omni_js_date.c）。new Date(…) 造的是真对象，那一格还在 P1-c 里。 */

@@ -2735,7 +2735,11 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     /* 带**访问器**（或 `__proto__:`）的字面量要一格**真对象**：访问器与原型都住在属性槽上，
      * 而这个值域里普通对象在 C 那条腿上是一格 dict（没有槽）。JS 那条腿上两种都是 $js_obj_new，
      * 所以这一句只改 C 那边的表示，不改任何可观察的答案（ADR-0020 P1-c）。 */
-    const wantSlots = e.props.some((p) => p.kind === 'get' || p.kind === 'set'
+    /* 计算键也走真对象：`{[s]: 1}` 里 s 可能是个**符号**，而这条腿上的"普通对象"是一格
+     * dict —— dict 的键是串，挂不了符号（C 那侧当场报："符号键只在真对象上成立"）。
+     * 静态判不出那个键是串还是符号，所以一律给真对象；字面量里带计算键的写法本来就少，
+     * 而这一格换来的是"符号键的对象字面量四条腿都成立"。 */
+    const wantSlots = e.props.some((p) => p.kind === 'get' || p.kind === 'set' || p.computed === true
       || (!p.computed && !p.method && p.shorthand !== true && p.key !== undefined
         && (p.key.name === '__proto__' || p.key.value === '__proto__')));
     let out = op(wantSlots ? 'js_obj_slots' : 'js_obj_new', []);

@@ -300,19 +300,19 @@ static omni_s16 to_s16(omni_dyn v) {
        （规范 20.1.3.6 走的是 Object.prototype.toString）。有自己那一格就当场报，
        理由见 js_obj_has_own_tostring 上面那段注。 */
     case OMNI_DYN_OBJ: {
-      if (js_obj_has_own_tostring(v)) {
-        if (js_prim_hook != NULL && js_prim_depth == 0) {
-          js_prim_depth++;
-          omni_dyn r = js_prim_hook(v, 's');
-          js_prim_depth--;
-          /* 交回来的是原始值（可能是个数），所以还要按原始值那套印一遍 */
-          if (!js_objlike(r)) return to_s16(r);
-        }
-        if (js_prim_hook == NULL) {
-          omni_errorf("backend-c: String() of an object with its own toString — "
-                      "自带 toString 的对象现在只在 node 宿主上成立"
-                      "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器");
-        }
+      /* 串口径的 ToPrimitive 先过一遍钩子（Symbol.toPrimitive / 自带 toString / valueOf 都
+         在它里头）：没有那几格时它把接收者原样交回来，于是落到下面按标签的那一句。
+         钩子没登记（不是 JS 那条腿）而对象确实自带 toString 时照旧当场报。 */
+      if (js_prim_hook != NULL && js_prim_depth == 0) {
+        js_prim_depth++;
+        omni_dyn r = js_prim_hook(v, 's');
+        js_prim_depth--;
+        /* 交回来的是原始值（可能是个数），所以还要按原始值那套印一遍 */
+        if (!js_objlike(r)) return to_s16(r);
+      } else if (js_prim_hook == NULL && js_obj_has_own_tostring(v)) {
+        omni_errorf("backend-c: String() of an object with its own toString — "
+                    "自带 toString 的对象现在只在 node 宿主上成立"
+                    "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器");
       }
       return omni_s16_of_utf8(omni_str_new("[object Object]", 15));
     }
@@ -345,15 +345,14 @@ static omni_s16 to_s16(omni_dyn v) {
            ToPrimitive 会**调**它。调回调要现拼一条实参 list，而 list 的具体类型只在
            生成的那个翻译单元里 —— 这儿造不出来。刻意当场报而不是给 "[object Object]"：
            那是一个悄悄的错答案，比拒绝坏（ADR-0020 的排序）。 */
-        const omni_dyn *ts = js_dict_find(d, "toString");
-        if (ts != NULL && ts->tag == OMNI_DYN_FN) {
-          if (js_prim_hook != NULL && js_prim_depth == 0) {
-            js_prim_depth++;
-            omni_dyn r = js_prim_hook(v, 's');
-            js_prim_depth--;
-            if (!js_objlike(r)) return to_s16(r);
-          }
-          if (js_prim_hook == NULL) {
+        if (js_prim_hook != NULL && js_prim_depth == 0) {
+          js_prim_depth++;
+          omni_dyn r = js_prim_hook(v, 's');
+          js_prim_depth--;
+          if (!js_objlike(r)) return to_s16(r);
+        } else if (js_prim_hook == NULL) {
+          const omni_dyn *ts = js_dict_find(d, "toString");
+          if (ts != NULL && ts->tag == OMNI_DYN_FN) {
             omni_errorf("backend-c: String() of an object with its own toString — "
                         "自带 toString 的对象现在只在 node 宿主上成立"
                         "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器");
@@ -496,11 +495,11 @@ static void want_num(int op, omni_dyn a, omni_dyn b) {
    钩子），没有就落回按标签的那串（数组是 join(",")、普通对象是 "[object Object]"…）。
    段没登记钩子的时候（不是 JS 那条腿）objlike 一律落回按标签的串 —— 与从前"当场报"相比，
    这是把**规范里本来就有的答案**给出来，不是猜。 */
-static omni_dyn js_prim1(omni_dyn v) {
+omni_dyn omni_js_to_prim_c(omni_dyn v, int hint) {
   if (!js_objlike(v)) return v;
   if (js_prim_hook != NULL && js_prim_depth == 0) {
     js_prim_depth++;
-    omni_dyn r = js_prim_hook(v, 'd');
+    omni_dyn r = js_prim_hook(v, hint);
     js_prim_depth--;
     if (!js_objlike(r)) return r;
   }
@@ -511,7 +510,7 @@ static omni_dyn to_num1(omni_dyn v) {
   if (is_int(v) || v.tag == OMNI_DYN_REAL) return v;
   /* 对象先 ToPrimitive（`[3] * 2` 是 6、`{} * 2` 是 NaN）—— 从前这儿掉进
      omni_js_num_of 的那句 "cannot convert list to a number"，一条腿死、三条腿活。 */
-  if (js_objlike(v)) v = js_prim1(v);
+  if (js_objlike(v)) v = omni_js_to_prim_c(v, 'n');
   return omni_js_num_of(v);
 }
 
@@ -519,8 +518,8 @@ omni_dyn omni_js_add(omni_dyn a, omni_dyn b) {
   /* 对象操作数先 ToPrimitive（规范 13.15.3 第 3 步）：`[1,2] + 1` 是 "1,21"、
      `{toString(){return 42}} + 1` 是 43（数，不是串）。次序也照规范：两边都先取到原始值，
      **然后**才看有没有串。 */
-  if (js_objlike(a)) a = js_prim1(a);
-  if (js_objlike(b)) b = js_prim1(b);
+  if (js_objlike(a)) a = omni_js_to_prim_c(a, 'd');
+  if (js_objlike(b)) b = omni_js_to_prim_c(b, 'd');
   if (a.tag == OMNI_DYN_STR16 || b.tag == OMNI_DYN_STR16) {
     return omni_dyn_of_s16(omni_s16_cat(to_s16(a), to_s16(b)));
   }

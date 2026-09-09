@@ -424,6 +424,15 @@ static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
    （`d[1] = 5`、`0 in a`、`delete d[1]` 里那个下标都是个数）。omni_js_prop 本身只收串 ——
    那句 "real is not a string" 是「降级发错了」的固定签名，不该被这一族正常写法撞上。 */ \
 static omni_str omni_js_prop_k(omni_dyn k) { \
+  /* 符号键落到这儿就说明接收者**不是**真对象（普通对象在这条腿上是一格 dict，而 dict 的键
+     是 UTF-8 串，挂不了符号）。照实说是哪条腿缺哪一格 —— 从前它掉进 omni_js_as_s16 的
+     那句 "symbol is not a string"，响是响了，可像是我们内部炸了。 */ \
+  if (k.tag == OMNI_DYN_SYM) { \
+    omni_errorf("backend-c: 符号键只在**真对象**上成立，而这一格是普通对象 / 数组" \
+                "（ADR-0020 P1-c：带计算键的对象字面量还降成 dict）；" \
+                "这份程序请走 --backend js 或解释器"); \
+    return omni_str_new("", 0); \
+  } \
   return omni_js_prop(k.tag == OMNI_DYN_REAL ? omni_js_str(k) : k); \
 } \
 static omni_dyn omni_js_obj_get(omni_dyn o, omni_dyn k) { \
@@ -569,7 +578,13 @@ static omni_dyn omni_js_proxy_new(omni_dyn t, omni_dyn h) { \
 /* [[Get]]（规范 10.1.8）：沿链找，数据槽给值，访问器**调 getter**，接收者是 recv（缺省是
    起点那一格）。真对象之外照旧落回容器那一套 —— 与 prelude 的 $js_getp 逐支对齐。 */ \
 static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv) { \
-  if (o.tag != OMNI_DYN_OBJ) return omni_js_obj_get(o, k); \
+  /* 链的尾巴可能是一格 dict（`Object.create({…})` 那种）。dict 的键是 UTF-8 串、挂不了符号，
+     所以符号键落在那儿就是**没有** —— 不能当场报：那会把一次普通的"链上找不到"变成响错
+     （量出来的：`String(Object.create({…}))` 在问 Symbol.toPrimitive 时就撞上了）。 */ \
+  if (o.tag != OMNI_DYN_OBJ) { \
+    if (k.tag == OMNI_DYN_SYM) return omni_dyn_undef(); \
+    return omni_js_obj_get(o, k); \
+  } \
   omni_dyn self = recv.tag == OMNI_DYN_UNDEF ? o : recv; \
   if (omni_js_is_px_(o)) { \
     omni_dyn f = omni_js_px_trap_(o, "get", 3); \
@@ -579,6 +594,11 @@ static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv) { \
   LT sl = omni_js_find_slot_(o, omni_js_pkey_(k), NULL); \
   if (sl == NULL) { \
     omni_dyn tail = omni_js_proto_tail_(o); \
+    /* 链的尾巴可能是一格 dict（`Object.create({…})`）：dict 挂不了符号键，所以符号在那儿
+       就是"没有" —— 接着往 obj_get 走会撞上"符号键只在真对象上成立"那句响错，而这只是
+       一次普通的"链上找不到"（量出来的：`String(Object.create({…}))` 问 Symbol.toPrimitive
+       时就撞上了）。 */ \
+    if (k.tag == OMNI_DYN_SYM) return omni_dyn_undef(); \
     return omni_js_cont_proto_(tail) ? omni_js_obj_get(tail, k) : omni_dyn_undef(); \
   } \
   if (!sl->items[1].u.b) return sl->items[0]; \
@@ -620,7 +640,7 @@ static omni_dyn omni_js_setp(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv) 
   return v; \
 } \
 static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own) { \
-  if (o.tag != OMNI_DYN_OBJ) return false; \
+  if (o.tag != OMNI_DYN_OBJ) return false;   /* dict 尾巴：符号键在那儿也是"没有" */ \
   if (omni_js_is_px_(o)) { \
     omni_dyn f = omni_js_px_trap_(o, "has", 3); \
     if (f.tag == OMNI_DYN_UNDEF) { \

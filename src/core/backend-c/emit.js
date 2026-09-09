@@ -382,7 +382,10 @@ class CEmitter {
    * @returns {number} 表里有多少格（0 就不发表，main 里也不登记）
    */
   fnMetaTable(closures) {
-    const named = closures.filter((c) => c.fnName !== undefined);
+    /* 判据是"**是个串**"而不是"不是 undefined"：计算键的方法（`{ [k]() {} }`）的名字
+       只有运行期才知道，降级器那儿给的是 **null** —— 按 undefined 判会让 null 漏进来，
+       utf8Bytes(null) 当场把宿主炸掉（量出来的：宿主崩是最坏的一档）。 */
+    const named = closures.filter((c) => typeof c.fnName === 'string');
     if (named.length === 0) return 0;
     this.line(`static const omni_js_fn_meta omni_js_fnmeta_tbl[${named.length}] = {`);
     this.indent++;
