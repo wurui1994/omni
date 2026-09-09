@@ -910,6 +910,13 @@ function $js_typeof(v) {
   if (t === "function") return "function";
   if (t === "symbol") return "symbol";
   if (t === "undefined") return "undefined";
+  /* 类对象在这个值域里是一格**真对象**（原型 + $init 那格闭包，见降级器的 classInitKey），
+     不是函数值 —— 可 typeof 得说 "function"，不然 typeof A === "function" 这类最常见的
+     鸭子判断会静静地走错。判据取**自有**的 classInit 槽：不走 [[Get]]，所以不会碰上取值器。
+     C 那条腿上没有类对象（ADR-0020 P1-c），这一支在那儿到不了。 */
+  if (t === "object" && v.ps !== undefined && v.ps.has($js_pkey($js_sym_wk("omni.classInit")))) {
+    return "function";
+  }
   return "object";
 }
 function $js_str(v) {

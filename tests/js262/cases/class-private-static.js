@@ -39,3 +39,21 @@ class Scoped {
   }
 }
 console.log(Scoped.v, typeof tmp);
+
+/* typeof 一格类对象是 "function"。类在这个值域里是**真对象**（原型 + 一格符号键的
+   初始化闭包），可 typeof A === "function" 是最常见的鸭子判断，说 "object" 就是静静地
+   走错分支 —— 判据取自有的 Symbol.omni.classInit 槽，不走 [[Get]]。 */
+console.log(typeof Counter, typeof Cfg, typeof class {}, typeof class Named {});
+console.log(typeof Counter === "function", typeof {} === "object", typeof (() => {}));
+// #x in o（ES2022 的 ergonomic brand check）与 super 上的取值器
+class Base { #p = 3; get v() { return this.#p; } has(o) { return #p in o; } call() { return this.#p; } }
+class Sub extends Base { get v() { return super.v * 10; } callSuper() { return super.call(); } }
+const s = new Sub();
+console.log(s.v, s.callSuper(), s.has(s), s.has({}), s instanceof Base);
+// 字段初始化跑在 super() 之后、构造体之前
+class P { constructor() { this.order = []; } }
+class Q extends P { f = (this.order.push("f"), 1); constructor() { super(); this.order.push("ctor"); } }
+console.log(new Q().order.join(","), Object.getOwnPropertyNames(Base.prototype).sort().join(","));
+// static 的计算键 / 串键 / 数字键
+class K { static [Symbol.iterator]() {} static "str"() {} static 5() {} }
+console.log(typeof K.str, typeof K[5], typeof K[Symbol.iterator]);
