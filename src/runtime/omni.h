@@ -116,7 +116,13 @@ typedef struct {
    pr 是原型（null 或另一格对象），ex 是"可扩展"。与 prelude 的
    $JSObj { pr, ps, ex, cl, px } 逐格对着写：cl 那格这条腿上不需要（obj_to_string
    照标签直说），px（代理）还在 P1-c 里。 */
-typedef struct { omni_dyn pr; void *ps; bool ex; } omni_js_objv;
+typedef struct {
+  omni_dyn pr; void *ps; bool ex;
+  /* 代理（ADR-0020 P4）：px_h 不是 undefined 就说明这一格是代理，px_t 是目标、px_h 是处理器。
+     代理与普通对象是**同一种值**（typeof 都给 "object"），差别只在那几个入口上多问一句陷阱。
+     可调用的代理（目标是函数）这条腿上还造不出来 —— 那要一格闭包记录，见 js_proxy_new。 */
+  omni_dyn px_t; omni_dyn px_h;
+} omni_js_objv;
 
 /* 函数值（ADR-0010）：指向闭包记录的指针。记录的第一个字段是被调函数的地址，
    后面紧跟捕获的变量 —— 每个 lambda 有自己的记录布局，由生成的 C 定义。

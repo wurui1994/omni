@@ -923,7 +923,9 @@ const P1_JS_ONLY = [
   'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
   // Date.UTC 与 Date.parse 有 C 孪生了（runtime/omni_js_date.c）：它们交出来的是一个毫秒数，
   // 与真对象无关。new Date(…) 与 new Date(y, mo, d) 照旧拒 —— 前者造真对象，后者要本地时区。
-  'js_proxy_new',
+  // 代理有 C 孪生了（omni_js_obj.h）：px_t / px_h 挂在真对象的载荷上，get / set / has /
+  // deleteProperty / ownKeys 五个入口各多问一句陷阱。**可调用的代理**（目标是函数）那一支
+  // 当场报 —— 那要一格闭包记录，只有生成的代码造得出来。
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
   'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',
   // matchAll 与 flags_g 有 C 孪生了（omni_js_re.h）：exec 的结果本来就把 index / input /

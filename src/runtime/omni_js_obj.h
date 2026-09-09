@@ -406,6 +406,8 @@ static omni_dyn omni_js_obj_new_p(omni_dyn proto) { \
   ov->pr = proto.tag == OMNI_DYN_UNDEF ? omni_dyn_null() : proto; \
   ov->ps = (void *)DT##_new(); \
   ov->ex = true; \
+  ov->px_t = omni_dyn_undef(); \
+  ov->px_h = omni_dyn_undef(); \
   return omni_dyn_of_ref((void *)ov, OMNI_DYN_OBJ); \
 } \
 /* 带属性位的那一格对象：一格真对象（原型是 null —— realm 上那格 Object.prototype 还在
@@ -441,11 +443,57 @@ static omni_dyn omni_js_proto_tail_(omni_dyn o) { \
 static bool omni_js_cont_proto_(omni_dyn v) { \
   return v.tag == OMNI_DYN_DICT || v.tag == OMNI_DYN_LIST || v.tag == OMNI_DYN_STR16; \
 } \
+/* 代理（ADR-0020 P4）。这条腿上只有**目标是对象**的那一种：可调用的代理要一格闭包记录
+   （typeof 得给 "function"、p() 走 apply 陷阱），而闭包记录只有生成的代码造得出来 ——
+   那一支当场报，不悄悄给一格不能调的对象。
+   px_h 不是 undefined 就说明是代理；陷阱在处理器上按名字取，取不到就落到目标上。 */ \
+static bool omni_js_is_px_(omni_dyn o) { \
+  return o.tag == OMNI_DYN_OBJ && ((omni_js_objv *)o.u.ref)->px_h.tag != OMNI_DYN_UNDEF; \
+} \
+static omni_dyn omni_js_px_trap_(omni_dyn o, const char *name, int64_t n) { \
+  if (!omni_js_is_px_(o)) return omni_dyn_undef(); \
+  omni_dyn h = ((omni_js_objv *)o.u.ref)->px_h; \
+  omni_dyn f = omni_js_obj_get(h, omni_js_name_(name, n)); \
+  return f.tag == OMNI_DYN_NULL ? omni_dyn_undef() : f; \
+} \
+static omni_dyn omni_js_px_target_(omni_dyn o) { return ((omni_js_objv *)o.u.ref)->px_t; } \
+static omni_dyn omni_js_px_call_(omni_dyn f, omni_dyn h, omni_dyn a0, omni_dyn a1, \
+                                 omni_dyn a2, int64_t n) { \
+  LT args = LT##_new(); \
+  LT##_reserve(args, n); \
+  if (n > 0) args->items[0] = a0; \
+  if (n > 1) args->items[1] = a1; \
+  if (n > 2) args->items[2] = a2; \
+  args->len = n; \
+  return omni_js_call_this(f, h, omni_js_arr_wrap(args)); \
+} \
+static omni_dyn omni_js_proxy_new(omni_dyn t, omni_dyn h) { \
+  if (t.tag == OMNI_DYN_FN) { \
+    omni_errorf("backend-c: new Proxy over a function — 可调用的代理要一格闭包记录，" \
+                "只有生成的代码造得出来（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器"); \
+    return omni_dyn_undef(); \
+  } \
+  if ((t.tag != OMNI_DYN_OBJ && t.tag != OMNI_DYN_DICT && t.tag != OMNI_DYN_LIST) \
+      || (h.tag != OMNI_DYN_OBJ && h.tag != OMNI_DYN_DICT)) { \
+    omni_js_type_err_c("new Proxy takes an object target and handler"); \
+    return omni_dyn_undef(); \
+  } \
+  omni_dyn p = omni_js_obj_new_p(omni_dyn_null()); \
+  omni_js_objv *ov = (omni_js_objv *)p.u.ref; \
+  ov->px_t = t; \
+  ov->px_h = h; \
+  return p; \
+} \
 /* [[Get]]（规范 10.1.8）：沿链找，数据槽给值，访问器**调 getter**，接收者是 recv（缺省是
    起点那一格）。真对象之外照旧落回容器那一套 —— 与 prelude 的 $js_getp 逐支对齐。 */ \
 static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv) { \
   if (o.tag != OMNI_DYN_OBJ) return omni_js_obj_get(o, k); \
   omni_dyn self = recv.tag == OMNI_DYN_UNDEF ? o : recv; \
+  if (omni_js_is_px_(o)) { \
+    omni_dyn f = omni_js_px_trap_(o, "get", 3); \
+    if (f.tag == OMNI_DYN_UNDEF) return omni_js_getp(omni_js_px_target_(o), k, self); \
+    return omni_js_px_call_(f, ((omni_js_objv *)o.u.ref)->px_h, omni_js_px_target_(o), k, self, 3); \
+  } \
   LT sl = omni_js_find_slot_(o, omni_js_pkey_(k), NULL); \
   if (sl == NULL) { \
     omni_dyn tail = omni_js_proto_tail_(o); \
@@ -460,6 +508,12 @@ static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv) { \
 static omni_dyn omni_js_setp(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv) { \
   if (o.tag != OMNI_DYN_OBJ) return omni_js_obj_set(o, k, v); \
   omni_dyn self = recv.tag == OMNI_DYN_UNDEF ? o : recv; \
+  if (omni_js_is_px_(o)) { \
+    omni_dyn f = omni_js_px_trap_(o, "set", 3); \
+    if (f.tag == OMNI_DYN_UNDEF) { omni_js_setp(omni_js_px_target_(o), k, v, self); return v; } \
+    omni_js_px_call_(f, ((omni_js_objv *)o.u.ref)->px_h, omni_js_px_target_(o), k, v, 3); \
+    return v; \
+  } \
   omni_str key = omni_js_pkey_(k); \
   LT sl = omni_js_find_slot_(o, key, NULL); \
   if (sl != NULL && sl->items[1].u.b) { \
@@ -485,6 +539,15 @@ static omni_dyn omni_js_setp(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv) 
 } \
 static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own) { \
   if (o.tag != OMNI_DYN_OBJ) return false; \
+  if (omni_js_is_px_(o)) { \
+    omni_dyn f = omni_js_px_trap_(o, "has", 3); \
+    if (f.tag == OMNI_DYN_UNDEF) { \
+      omni_dyn t = omni_js_px_target_(o); \
+      return t.tag == OMNI_DYN_OBJ ? omni_js_obj_has_o_(t, k, own) : omni_js_obj_has(t, k); \
+    } \
+    return omni_js_truthy(omni_js_px_call_(f, ((omni_js_objv *)o.u.ref)->px_h, \
+                                          omni_js_px_target_(o), k, omni_dyn_undef(), 2)); \
+  } \
   omni_str key = omni_js_pkey_(k); \
   if (own) return DT##_find(omni_js_ps_(o), key) >= 0; \
   if (omni_js_find_slot_(o, key, NULL) != NULL) return true; \
@@ -494,6 +557,15 @@ static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own) { \
 /* [[Delete]]：不可配置的槽删不掉（交 false），没有那一格也算成功（规范如此）。 */ \
 static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k) { \
   if (o.tag != OMNI_DYN_OBJ) return true; \
+  if (omni_js_is_px_(o)) { \
+    omni_dyn f = omni_js_px_trap_(o, "deleteProperty", 14); \
+    if (f.tag == OMNI_DYN_UNDEF) { \
+      omni_dyn t = omni_js_px_target_(o); \
+      return t.tag == OMNI_DYN_OBJ ? omni_js_obj_del_o_(t, k) : omni_js_obj_delete(t, k); \
+    } \
+    return omni_js_truthy(omni_js_px_call_(f, ((omni_js_objv *)o.u.ref)->px_h, \
+                                          omni_js_px_target_(o), k, omni_dyn_undef(), 2)); \
+  } \
   DT ps = omni_js_ps_(o); \
   omni_str key = omni_js_pkey_(k); \
   int64_t e = DT##_find(ps, key); \
@@ -507,6 +579,30 @@ static bool omni_js_obj_del_o_(omni_dyn o, omni_dyn k) { \
 static omni_dyn omni_js_obj_own_keys_o_(omni_dyn o, int sel) { \
   LT out = LT##_new(); \
   if (o.tag != OMNI_DYN_OBJ) return omni_js_arr_wrap(out); \
+  if (omni_js_is_px_(o)) { \
+    omni_dyn t = omni_js_px_target_(o); \
+    omni_dyn f = omni_js_px_trap_(o, "ownKeys", 7); \
+    if (f.tag == OMNI_DYN_UNDEF) { \
+      return t.tag == OMNI_DYN_OBJ ? omni_js_obj_own_keys_o_(t, sel) : omni_js_obj_keys(t); \
+    } \
+    /* 陷阱交回来的是一串键；'y' 只要符号键、别的只要字符串键。'e'（Object.keys 那一档）
+       照规范还要问一遍目标上那一格可不可枚举 —— 这条腿上目标要么是真对象（问得着）、
+       要么是一格 dict（键都可枚举），所以两种都按"在目标上有没有"算。 */ \
+    LT ks = omni_js_arr_of(omni_js_px_call_(f, ((omni_js_objv *)o.u.ref)->px_h, t, \
+                                           omni_dyn_undef(), omni_dyn_undef(), 1)); \
+    for (int64_t i = 0; i < ks->len; i++) { \
+      bool is_sym = ks->items[i].tag == OMNI_DYN_SYM; \
+      if (sel == 'y') { if (!is_sym) continue; } \
+      else if (is_sym) continue; \
+      if (sel == 'e') { \
+        bool there = t.tag == OMNI_DYN_OBJ ? omni_js_obj_has_o_(t, ks->items[i], true) \
+                                           : omni_js_obj_has(t, ks->items[i]); \
+        if (!there) continue; \
+      } \
+      LT##_push(out, ks->items[i]); \
+    } \
+    return omni_js_arr_wrap(out); \
+  } \
   DT ps = omni_js_ps_(o); \
   for (int64_t i = 0; i < ps->n; i++) { \
     if (!ps->live[i]) continue; \
