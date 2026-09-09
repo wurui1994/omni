@@ -940,8 +940,9 @@ const P1_JS_ONLY = [
   // 它们要"几格共享的可变状态"，每一格都得再排一个 sel。
   // all / allSettled / race / try 也有 C 孪生了：几格共享的可变状态就是一格 list
   // （[p, vals, 计数盒]），每个 per-item 的原生载荷是 [状态, 下标]。
-  // any 还在 —— 它全拒时要一格 AggregateError，而那一族在这条腿上还没有。
-  'js_promise_any',
+  // any 也有了：兑现那一半借 race 的 sel 31，拒绝那一半自己一格 sel 34（倒数到零时交的是
+  // AggregateError 而不是那条表）。AggregateError 只在这儿**造**得出来 —— 那一族当值用
+  // （`new AggregateError(...)` 以外的写法）在每条腿上都还没有。
   // matchAll 与 flags_g 有 C 孪生了（omni_js_re.h）：exec 的结果本来就把 index / input /
   // groups 挂在 list 的旁表上，所以差的只是"惰性迭代器"那一层 —— C 这条腿交的是一条现摊
   // 好的 list（matchAll 有限、无副作用，for-of 与展开逐格相同），手写 it.next() 那条路

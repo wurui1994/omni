@@ -8,3 +8,11 @@ Promise.all([1, Promise.reject("no")]).catch((e) => console.log("all rej", e));
 Promise.allSettled([Promise.resolve(1), Promise.reject("e")]).then((v) => console.log("settled", JSON.stringify(v)));
 Promise.race([new Promise((r) => r("first")), Promise.reject("late")]).then((v) => console.log("race", v));
 Promise.try(() => 7).then((v) => console.log("try", v));
+// any 是 all 的镜像：第一个**兑现**的赢，全拒才结算成一格 AggregateError（errors 按下标排）。
+// 空数组这一格是**立刻拒绝**，所以它印在最前面 —— 次序也是量出来的。
+// message 那一格**故意不印**：规范里它是空串（qjs 照此），而 node/V8 塞的是
+// "All promises were rejected" —— 两把尺子在这一格上本来就不一样，我们跟规范与 qjs。
+Promise.any([Promise.reject("a"), Promise.resolve(2), 3]).then((v) => console.log("any", v));
+Promise.any([1, Promise.reject("x")]).then((v) => console.log("any first", v));
+Promise.any([Promise.reject("e1"), Promise.reject("e2")]).catch((e) => console.log("any all rej", e.name, e.errors.join("|"), typeof e.message));
+Promise.any([]).catch((e) => console.log("any empty", e.name, e.errors.length));

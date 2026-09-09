@@ -82,6 +82,9 @@ static omni_dyn omni_js_realm_ctor(omni_str name); \
 static omni_dyn omni_js_iter(omni_dyn v); \
 static omni_dyn omni_js_src_iter_(omni_dyn v); \
 static omni_dyn omni_js_gen_res(omni_dyn v, omni_dyn done); \
+/* 异常对象的构造（$cls 链 + message）：住在 STR_ARR 段，而 Promise.any 全拒时要在这儿
+   造一格 AggregateError。 */ \
+static omni_dyn omni_js_err_new(omni_dyn msg, omni_dyn cls, omni_dyn opts); \
 /* Promise 与作业队列（ADR-0020 P2）：核心四格 + 一格静态队列，形状与 prelude 的
    $js_prom_* 逐条对应。C 这边每个回调都得是带载荷的原生，所以 sel 又排了一段（18..28）。 */ \
 static omni_dyn omni_js_prom_new_(void); \
@@ -91,6 +94,7 @@ static void omni_js_prom_settle_(omni_dyn p, int64_t st, omni_dyn val); \
 static void omni_js_async_tick_(omni_dyn p, omni_dyn step, omni_dyn v, int64_t mode); \
 static LT omni_js_prom_slot_(omni_dyn p, const char *nm, int64_t n); \
 static void omni_js_comb_dec_(LT st); \
+static omni_dyn omni_js_agg_err_(omni_dyn errs); \
 static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode); \
 /* 函数值的 prototype 那张按同一性索引的旁表（$FNPROTO 的孪生）：realm_ctor 要往里预先坐一格，
    而它排在 fn_proto_ 前头，所以表在这儿声明。 */ \
@@ -1102,6 +1106,17 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       omni_js_comb_dec_(st); \
       return omni_dyn_undef(); \
     } \
+    case 34: {                                          /* any 的每一格：拒绝 */ \
+      LT pay = (LT)n->a.u.ref; \
+      LT st = (LT)pay->items[0].u.ref; \
+      LT errs = (LT)st->items[1].u.ref; \
+      errs->items[(int64_t)pay->items[1].u.r] = a0; \
+      LT cnt = (LT)st->items[2].u.ref; \
+      double left = cnt->items[0].u.r - 1.0; \
+      cnt->items[0] = omni_dyn_of_real(left); \
+      if (left <= 0.0) omni_js_prom_settle_(st->items[0], 2, omni_js_agg_err_(st->items[1])); \
+      return omni_dyn_undef(); \
+    } \
     case 24: {                                          /* p.then(f, r) */ \
       omni_dyn a1t = args != NULL && args->len > 1 ? args->items[1] : omni_dyn_undef(); \
       return omni_js_prom_react_(self, a0, a1t); \
@@ -1519,6 +1534,17 @@ static omni_dyn omni_js_comb_pay_(omni_dyn st, int64_t i) { \
   LT##_push(pay, omni_dyn_of_real((double)i)); \
   return omni_js_arr_wrap(pay); \
 } \
+/* Promise.any 全拒时交出来的那一格 AggregateError。形状照 prelude 的 $js_promise_any：
+   $cls 链是 ["AggregateError", "Error"]、message 空串、errors 是**按下标**排好的那条表。 */ \
+static omni_dyn omni_js_agg_err_(omni_dyn errs) { \
+  LT cls = LT##_new(); \
+  LT##_push(cls, omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("AggregateError", 14)))); \
+  LT##_push(cls, omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("Error", 5)))); \
+  omni_dyn e = omni_js_err_new(omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("", 0))), \
+                               omni_js_arr_wrap(cls), omni_dyn_undef()); \
+  omni_js_obj_set(e, omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("errors", 6))), errs); \
+  return e; \
+} \
 static omni_dyn omni_js_promise_all(omni_dyn items) { \
   omni_dyn xs = omni_js_iter(items); \
   LT l = (LT)xs.u.ref; \
@@ -1565,6 +1591,28 @@ static omni_dyn omni_js_promise_race(omni_dyn items) { \
   for (int64_t i = 0; l != NULL && i < l->len; i++) { \
     omni_js_prom_react_(omni_js_promise_resolved(l->items[i]), \
                         omni_js_nat_(31, pay), omni_js_nat_(30, pay)); \
+  } \
+  return p; \
+} \
+/* Promise.any：与 all 镜像 —— 第一个**兑现**的赢，全拒才结算，errors 按下标排好。
+   兑现那一半可以直接借 race 的 sel 31（载荷是 [p]）；拒绝那一半自己一格 sel 34，
+   因为倒数到零时要交的是 AggregateError 而不是那条 vals 表。 */ \
+static omni_dyn omni_js_promise_any(omni_dyn items) { \
+  omni_dyn xs = omni_js_iter(items); \
+  LT l = (LT)xs.u.ref; \
+  omni_dyn p = omni_js_prom_new_(); \
+  int64_t n = l == NULL ? 0 : l->len; \
+  if (n == 0) { \
+    omni_js_prom_settle_(p, 2, omni_js_agg_err_(omni_js_arr_wrap(LT##_new()))); \
+    return p; \
+  } \
+  omni_dyn st = omni_js_comb_state_(p, n); \
+  LT pl = LT##_new(); \
+  LT##_push(pl, p); \
+  omni_dyn res = omni_js_nat_(31, omni_js_arr_wrap(pl)); \
+  for (int64_t i = 0; i < n; i++) { \
+    omni_js_prom_react_(omni_js_promise_resolved(l->items[i]), \
+                        res, omni_js_nat_(34, omni_js_comb_pay_(st, i))); \
   } \
   return p; \
 } \
