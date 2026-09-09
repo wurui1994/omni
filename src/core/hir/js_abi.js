@@ -467,13 +467,16 @@ export const JS_ABI = {
   /* matchAll（ES2020）：一趟趟找，每一趟一格与 exec 同形的结果（带 index / input /
      groups）。那三格靠 list 的旁表，C 那侧没有（P1-c），所以这一条进 P1_JS_ONLY。
      交出来的是**数组**而不是迭代器对象 —— 展开 / for-of / Array.from 都成。 */
-  js_re_match_all: { js: '$js_re_match_all', c: 'omni_js_re_match_all', arity: 3 },
+  js_re_match_all: { js: '$js_re_match_all', c: 'omni_js_re_match_all', arity: 3, throws: true },
   /* 正则对象的 lastIndex（ADR-0020 P4）。它本来就在两侧的三元组里（src/flags/li）——
      缺的只是"能读能写"。写的那一条不走成员表：`r.lastIndex = 0` 降成 js_idx_set，
      所以 idx_set 里认这一格（regexp 上只有这一个可写的属性）。 */
   js_re_last_index: { js: '$js_re_last_index', c: 'omni_js_re_last_index', arity: 1 },
   // source / flags：正则身上那两格只读属性
   js_re_source: { js: '$js_re_source', c: 'omni_js_re_source', arity: 1 },
+  /* matchAll 那一支专用的旗标读法：非正则实参照规范补 g（22.1.3.14 第 3 步 c）。
+     只有 JS 那条腿 —— matchAll 本身就是 JS 独有的（它交出一格真的迭代器对象）。 */
+  js_re_flags_g: { js: '$js_re_flags_g', c: 'omni_js_re_flags_g', arity: 1 },
   js_re_flags: { js: '$js_re_flags', c: 'omni_js_re_flags', arity: 1 },
   // 正则对象上的 test：与 exec 共用 lastIndex 行为（"exec 出来不是 null"）
   js_re_test_o: { js: '$js_re_test_o', c: 'omni_js_re_test_o', arity: 2, ret: 'bool' },
@@ -844,7 +847,7 @@ const P1_JS_ONLY = [
   // groupBy 里 Object 那一格造的是**真对象**（null 原型），所以跟着这一族
   'js_obj_group_by',
   // matchAll 的结果带 index / input / groups —— 那是 list 旁表，C 那侧还没有
-  'js_re_match_all',
+  'js_re_match_all', 'js_re_flags_g',
   'js_jobs_run',
   'js_gen_new', 'js_gen_res', 'js_gen_awt', 'js_async_run', 'js_agen_new',
   'js_aiter', 'js_aiter_next',

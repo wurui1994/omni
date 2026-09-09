@@ -3126,9 +3126,13 @@ class Lower {
       const t = this.temp();
       this.emitPre(exprStmt(assign(varRef(t), this.expr(e.args[0]))), e.span);
       const name0 = { match: 'js_re_match', matchAll: 'js_re_match_all', search: 'js_re_search' }[c.name];
+      /* matchAll 收**非正则**时规范给它补上 g（22.1.3.14 第 3 步 c：RegExpCreate(R, "g")），
+       * 所以 "aXbX".matchAll("X") 是两处而不是 "matchAll needs the g flag"。真正则照旧读它
+       * 自己的旗标 —— 不带 g 的真正则该报错，这一格不能顺手替它补上。 */
+      const fl = c.name === 'matchAll' ? 'js_re_flags_g' : 'js_re_flags';
       return op(name0, [
         op('js_re_source', [varRef(t)]),
-        op('js_re_flags', [varRef(t)]),
+        op(fl, [varRef(t)]),
         this.expr(c.object),
       ]);
     }

@@ -5033,6 +5033,12 @@ function $js_re_flags(r) {
   if ($dynTag(r) === "regexp") return r.flags;
   return "";
 }
+/* matchAll 那一支专用：非正则实参照规范补 g（22.1.3.14 第 3 步 c 的 RegExpCreate(R, "g")），
+   所以 "aXbX".matchAll("X") 是两处。真正则照旧读它自己的旗标 —— 不带 g 的真正则该报错，
+   这一格不替它补。 */
+function $js_re_flags_g(r) {
+  return $dynTag(r) === "regexp" ? r.flags : "g";
+}
 // search：头一处匹配的下标，找不到给 -1。**不动 lastIndex**（规范 22.1.3.22 存了再复原），
 // 所以 /g 与不带 g 的答案一样
 function $js_re_search(pat, flags, s) {
@@ -5090,7 +5096,8 @@ function $js_re_result(m, str) {
    next 与 Symbol.iterator 那两格**直接挂在对象上**（不可枚举）—— 两格方法因此不共享，
    it1.next === it2.next 是假。 */
 function $js_re_match_all(body, flags, sd) {
-  if (!flags.includes("g")) $rt_error("matchAll needs the g flag");
+  // 不带 g 的真正则：规范 22.1.3.14 第 3 步 b 明写 TypeError —— **能 catch** 的那一种
+  if (!flags.includes("g")) return $js_type_err("matchAll must be called with a global RegExp");
   const s = $js_asS16(sd);
   const re = $js_re_get(body, flags);
   let at = 0;
