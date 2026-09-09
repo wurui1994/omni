@@ -70,3 +70,12 @@ console.log(sp[Symbol.toPrimitive]("string") === sp.toString());
 console.log(sp[Symbol.toPrimitive]("default") === sp.toString());
 console.log(sp - new Date(0), `${sp}` === sp.toString(), +sp);
 console.log(Object.getOwnPropertySymbols(Object.getPrototypeOf(sp)).length > 0);
+
+/* TimeClip（规范 21.4.1.31）：时间值只在 ±8.64e15 毫秒之内，出了界是 NaN，不是"很大的数"。
+   从前 new Date(8.64e15 + 1).getTime() 把那个数原样交了出去 —— 静悄悄的错值，
+   接着 toISOString 就印出一个规范里不存在的年份。小数照 trunc 往零走，-0 归 0。 */
+console.log(new Date(8.64e15).toISOString(), new Date(8.64e15).getTime());
+console.log(Number.isNaN(new Date(8.64e15 + 1).getTime()), Number.isNaN(new Date(-8.64e15 - 1).getTime()));
+console.log(Number.isNaN(new Date(Infinity).getTime()), Number.isNaN(new Date(NaN).getTime()));
+console.log(new Date(1.5).getTime(), new Date(-1.5).getTime(), 1 / new Date(-0.5).getTime());
+console.log(Number.isNaN(Date.UTC(275760, 8, 14)), new Date(Date.UTC(275760, 8, 13)).toISOString());

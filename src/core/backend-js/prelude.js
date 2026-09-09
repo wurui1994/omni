@@ -3486,10 +3486,18 @@ function $js_date_ms(t) {
 }
 /* new Date(v)：v 是串就**解析**（规范 21.4.2.1 第 4 步 —— ISO 那一套与宿主认的那些），
    别的先 ToNumber。从前只收毫秒数，串形态在降级那儿当场报。 */
+/* TimeClip（规范 21.4.1.31）：时间值只在 ±8.64e15 毫秒之内，出了界是 NaN，不是"很大的数"。
+   从前 new Date(8.64e15 + 1).getTime() 静静地把那个数原样交了出去。
+   取整用 trunc（规范是 ToIntegerOrInfinity，负数往零走），-0 归 0。 */
+function $js_time_clip(ms) {
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return NaN;
+  const t = Math.trunc(ms);
+  return t === 0 ? 0 : t;
+}
 function $js_date_new(v) {
   const o = $js_obj_new_p($realm().dateP);
   const ms = $dynTag(v) === "string" ? Date.parse($js_asS16(v))
-    : $js_real($js_num_of(v), "new Date");
+    : $js_time_clip($js_real($js_num_of(v), "new Date"));
   $js_def_data(o, "$ms", ms, true, false, true);
   return o;
 }
