@@ -379,6 +379,31 @@ static omni_dyn omni_js_obj_from_entries(omni_dyn pairs) { \
   } \
   return o; \
 } \
+/* String(o) / console.log(o)：对象**自带的 toString** 要调（规范 7.1.17 的 ToString 走
+   ToPrimitive）。这一格必须在**宏段**里 —— 调回调要现拼一条实参 list，而 list 的具体类型
+   只在生成的那个翻译单元里；运行时那份 to_s16 住在普通 .c 里造不出来，所以那儿只能照标签
+   直说。于是 js_str / js_disp 两条 op 指到这儿，to_s16 里那两句响错就成了**兜底**
+   （内部路径如 js_add 的 "" + o 还会撞上它，记在 ADR-0020 里）。 */ \
+static omni_dyn omni_js_own_ts_(omni_dyn v) { \
+  if (v.tag != OMNI_DYN_OBJ && v.tag != OMNI_DYN_DICT) return omni_dyn_undef(); \
+  omni_dyn k = omni_dyn_of_s16(omni_js_s16_lit("toString")); \
+  return v.tag == OMNI_DYN_OBJ ? omni_js_getp(v, k, omni_dyn_undef()) : omni_js_obj_get(v, k); \
+} \
+static omni_dyn omni_js_str_v(omni_dyn v) { \
+  omni_dyn ts = omni_js_own_ts_(v); \
+  if (ts.tag == OMNI_DYN_FN) { \
+    omni_dyn r = omni_js_call_this(ts, v, omni_js_arr_wrap(LT##_new())); \
+    if (omni_js_pending()) return omni_dyn_of_s16(omni_js_s16_lit("")); \
+    /* toString 交回来的还是个对象时照规范再试 valueOf —— 这个值域里没有那一格，
+       所以落回标签那一句（与 prelude 的 $js_to_prim 差的只是那一步） */ \
+    if (!omni_js_is_object(r)) return omni_js_str(r); \
+  } \
+  return omni_js_str(v); \
+} \
+static omni_dyn omni_js_disp_v(omni_dyn v) { \
+  if (omni_js_own_ts_(v).tag == OMNI_DYN_FN) return omni_js_str_v(v); \
+  return omni_js_disp(v); \
+} \
 /* Object.hasOwn / Reflect.has / Reflect.deleteProperty 那三格。JS 那条腿上它们先问真对象的
    槽表、再走原型链或代理陷阱；这条腿上"普通对象"是 dict、数组是一段 items —— 自有键就是
    全部键（没有原型链），所以三格都落回容器那一套。

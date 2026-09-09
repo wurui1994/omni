@@ -23,10 +23,12 @@ export const JS_ABI = {
   js_asFn: { js: '$js_asFn', c: 'omni_js_as_fn', arity: 1, raw: true },
   js_truthy: { js: '$js_truthy', c: 'omni_js_truthy', arity: 1, ret: 'bool' },
   js_typeof: { js: '$js_typeof', c: 'omni_js_typeof', arity: 1 },
-  js_str: { js: '$js_str', c: 'omni_js_str', arity: 1 },
+  js_str: { js: '$js_str', c: 'omni_js_str_v', arity: 1 },
   /* console.log 印一格值时用的字符串化：与 ToString 只差一处 —— **-0 印成 "-0"**
      （String(-0) 是 "0"，而 qjs 与 node 的 console.log 都印 -0，量过）。 */
-  js_disp: { js: '$js_disp', c: 'omni_js_disp', arity: 1 },
+  /* 印一格值 / String(v)：C 侧指向**宏段**里那两条（omni_js_str_v / omni_js_disp_v）——
+   * 对象自带的 toString 要调，而调回调只有段里造得出实参 list（见那儿的注）。 */
+  js_disp: { js: '$js_disp', c: 'omni_js_disp_v', arity: 1 },
   js_add: { js: '$js_add', c: 'omni_js_add', arity: 2 },
   js_neg: { js: '$js_neg', c: 'omni_js_neg', arity: 1 },
   // op: '-' '*' '/' '%' 加 'p' 幂（JS 的 `**`）。`+` 不在这儿 —— 它要先问字符串，是 js_add。
