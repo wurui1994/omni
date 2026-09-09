@@ -284,6 +284,22 @@ static omni_dyn omni_js_re_flags(omni_dyn rd) { \
   if (rd.tag != OMNI_DYN_RE) return omni_dyn_of_s16(omni_js_s16_lit("")); \
   return omni_dyn_of_s16(omni_js_re_want(rd)->flags); \
 } \
+/* 旗标那一族的布尔属性（规范 22.2.6.4 起的 global / ignoreCase / … ）：就是问 flags 串里
+   有没有那个字母。不是正则的接收者一律 false —— 派发器只把 regexp 这一支路到这儿，
+   别的标签照旧走普通属性读。 */ \
+static bool omni_js_re_has_flag(omni_dyn rd, uint16_t ch) { \
+  if (rd.tag != OMNI_DYN_RE) return false; \
+  omni_s16 f = omni_js_re_want(rd)->flags; \
+  for (int64_t i = 0; i < f.len; i++) if (f.p[i] == ch) return true; \
+  return false; \
+} \
+static omni_dyn omni_js_re_global(omni_dyn rd) { return omni_dyn_of_bool(omni_js_re_has_flag(rd, (uint16_t)'g')); } \
+static omni_dyn omni_js_re_ignore_case(omni_dyn rd) { return omni_dyn_of_bool(omni_js_re_has_flag(rd, (uint16_t)'i')); } \
+static omni_dyn omni_js_re_multiline(omni_dyn rd) { return omni_dyn_of_bool(omni_js_re_has_flag(rd, (uint16_t)'m')); } \
+static omni_dyn omni_js_re_dot_all(omni_dyn rd) { return omni_dyn_of_bool(omni_js_re_has_flag(rd, (uint16_t)'s')); } \
+static omni_dyn omni_js_re_unicode(omni_dyn rd) { return omni_dyn_of_bool(omni_js_re_has_flag(rd, (uint16_t)'u')); } \
+static omni_dyn omni_js_re_sticky(omni_dyn rd) { return omni_dyn_of_bool(omni_js_re_has_flag(rd, (uint16_t)'y')); } \
+static omni_dyn omni_js_re_has_indices(omni_dyn rd) { return omni_dyn_of_bool(omni_js_re_has_flag(rd, (uint16_t)'d')); } \
 /* 正则对象上的 test：与 exec 共用那套 lastIndex 行为 */ \
 static bool omni_js_re_test_o(omni_dyn rd, omni_dyn sd) { \
   return omni_js_re_exec(rd, sd).tag != OMNI_DYN_NULL; \

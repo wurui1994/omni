@@ -36,3 +36,9 @@ console.log(`cp ${new RegExp().source} ${new RegExp(undefined).source} ${new Reg
 const sp = new RegExp("[-_]", "g");
 console.log(`sp ${"a-b_c".split(sp).join("|")} ${"a-b_c".split(new RegExp("(-)")).join("|")}`);
 console.log(`sp ${"a-b-c".split(sp, 2).join("|")} ${"abc".split(new RegExp("z")).join("|")}`);
+// 旗标那一族的布尔属性（规范 22.2.6.4 起）：从前一格都不在属性表里，re.global 给 undefined。
+// 这儿只用 g / i / m：C 那条腿的正则引擎还不收 dotAll 与 sticky（造的时候就响），
+// 那两格为真的样子在 js262 里量。
+const fl = /a/gim;
+console.log(`fl ${fl.global} ${fl.ignoreCase} ${fl.multiline} ${fl.dotAll} ${fl.sticky} ${/b/.global}`);
+console.log(`fl ${new RegExp("x", "g").global} ${new RegExp("x", "i").ignoreCase} ${sp.global} ${sp.hasIndices}`);

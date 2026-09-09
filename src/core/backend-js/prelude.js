@@ -5172,6 +5172,19 @@ function $js_re_flags(r) {
   if ($dynTag(r) === "regexp") return r.flags;
   return "";
 }
+/* 旗标那一族的布尔属性（规范 22.2.6.4 起的 global / ignoreCase / … ）：就是问 flags 串里
+   有没有那个字母。不是正则的接收者一律 false —— 派发器只把 regexp 这一支路到这儿，别的标签
+   照旧走普通属性读。从前这一族根本不在属性表里，r.global 静静地给 undefined。 */
+function $js_re_has_flag(r, ch) {
+  return $dynTag(r) === "regexp" && r.flags.includes(ch);
+}
+function $js_re_global(r) { return $js_re_has_flag(r, "g"); }
+function $js_re_ignore_case(r) { return $js_re_has_flag(r, "i"); }
+function $js_re_multiline(r) { return $js_re_has_flag(r, "m"); }
+function $js_re_dot_all(r) { return $js_re_has_flag(r, "s"); }
+function $js_re_unicode(r) { return $js_re_has_flag(r, "u"); }
+function $js_re_sticky(r) { return $js_re_has_flag(r, "y"); }
+function $js_re_has_indices(r) { return $js_re_has_flag(r, "d"); }
 /* matchAll 那一支专用：非正则实参照规范补 g（22.1.3.14 第 3 步 c 的 RegExpCreate(R, "g")），
    所以 "aXbX".matchAll("X") 是两处。真正则照旧读它自己的旗标 —— 不带 g 的真正则该报错，
    这一格不替它补。 */

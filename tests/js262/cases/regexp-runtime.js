@@ -31,3 +31,12 @@ const sp = new RegExp("[-_]", "g");
 console.log("a-b_c".split(sp).join("|"), "a-b_c".split(new RegExp("(-)")).join("|"));
 console.log("a1b".split(/(\d)/).join("|"), "x".split(new RegExp("")).length);
 console.log("a-b-c".split(sp, 2).join("|"), "abc".split(new RegExp("z")).join("|"));
+/* 旗标那一族的布尔属性（规范 22.2.6.4 起）：从前一格都不在属性表里，`re.global` 静静地给
+   undefined —— `if (re.global)` 于是走错一支。别的标签照旧走普通属性读（对象上自己的
+   `global` 字段还是它自己的值）。 */
+const all = /a/gimsuy;
+console.log(all.global, all.ignoreCase, all.multiline, all.dotAll, all.unicode, all.sticky, all.hasIndices);
+const none = /b/;
+console.log(none.global, none.ignoreCase, none.multiline, none.dotAll, none.unicode, none.sticky);
+console.log(/c/d.hasIndices, new RegExp("x", "gy").global, new RegExp("x").sticky, sp.global);
+console.log(({ global: 1, dotAll: 2 }).global, ({ sticky: 3 }).sticky);

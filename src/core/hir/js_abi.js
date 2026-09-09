@@ -486,6 +486,15 @@ export const JS_ABI = {
      只有 JS 那条腿 —— matchAll 本身就是 JS 独有的（它交出一格真的迭代器对象）。 */
   js_re_flags_g: { js: '$js_re_flags_g', c: 'omni_js_re_flags_g', arity: 1 },
   js_re_flags: { js: '$js_re_flags', c: 'omni_js_re_flags', arity: 1 },
+  /* 旗标那一族的布尔属性（规范 22.2.6.4 起）：一格一个 op —— 属性派发器要的是一元的。
+     底下都是同一件事"flags 串里有没有那个字母"，非正则一律 false。 */
+  js_re_global: { js: '$js_re_global', c: 'omni_js_re_global', arity: 1 },
+  js_re_ignore_case: { js: '$js_re_ignore_case', c: 'omni_js_re_ignore_case', arity: 1 },
+  js_re_multiline: { js: '$js_re_multiline', c: 'omni_js_re_multiline', arity: 1 },
+  js_re_dot_all: { js: '$js_re_dot_all', c: 'omni_js_re_dot_all', arity: 1 },
+  js_re_unicode: { js: '$js_re_unicode', c: 'omni_js_re_unicode', arity: 1 },
+  js_re_sticky: { js: '$js_re_sticky', c: 'omni_js_re_sticky', arity: 1 },
+  js_re_has_indices: { js: '$js_re_has_indices', c: 'omni_js_re_has_indices', arity: 1 },
   // 正则对象上的 test：与 exec 共用 lastIndex 行为（"exec 出来不是 null"）
   js_re_test_o: { js: '$js_re_test_o', c: 'omni_js_re_test_o', arity: 2, ret: 'bool' },
 
@@ -707,6 +716,14 @@ export const JS_PROPS = {
   lastIndex: { regexp: 'js_re_last_index' },
   source: { regexp: 'js_re_source' },
   flags: { regexp: 'js_re_flags' },
+  // 旗标那一族的布尔属性（规范 22.2.6.4 起）：只给 regexp 这一支，别的标签照旧走普通属性读
+  global: { regexp: 'js_re_global' },
+  ignoreCase: { regexp: 'js_re_ignore_case' },
+  multiline: { regexp: 'js_re_multiline' },
+  dotAll: { regexp: 'js_re_dot_all' },
+  unicode: { regexp: 'js_re_unicode' },
+  sticky: { regexp: 'js_re_sticky' },
+  hasIndices: { regexp: 'js_re_has_indices' },
   // ArrayBuffer 与 DataView 上都叫 byteLength；这一格里三者是同一种值，所以同一个 op
   byteLength: { bytes: 'js_buf_len' },
 };
