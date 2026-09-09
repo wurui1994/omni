@@ -349,7 +349,8 @@ class CEmitter {
     const profReg = this.prof && this.mod.funcs.length > 0 ? ' atexit(omni_prof_dump);' : '';
     // fn.name / fn.length 那张表（见 fnMetaTable）：登记一次，之后 `f.name` 就按 fp 查它
     const fnMetaReg = fnMetaN > 0 ? ` omni_js_fnmeta_set(omni_js_fnmeta_tbl, ${fnMetaN});` : '';
-    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+    const strHookReg = this.dynSegs === true ? ' omni_js_prim_hook_init_();' : '';
+    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${strHookReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     this.out[this.s16At] = this.s16PoolLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
@@ -636,6 +637,11 @@ class CEmitter {
       this.line('OMNI_JS_RE(omni_list_dynamic, omni_dict_string_dynamic)');
       this.line('OMNI_JS_STR_ARR(omni_list_dynamic, omni_dict_string_dynamic)');
       this.line('OMNI_JS_HOST(omni_list_dynamic, omni_dict_string_dynamic)');
+      /* "会调 toString 的转串"那一格（见 omni.h 的 omni_js_str_hook）：`String(o)` / `"" + o`
+         里 o 自带 toString 时要调它，而 omni_js.c 造不出实参 list。这儿把段里那份登记进去 ——
+         main 里调一次。没这一句的话那条路照旧当场报（不是 JS 那条腿时正是这样）。 */
+      this.line('static void omni_js_prim_hook_init_(void) { omni_js_prim_hook_set(omni_js_prim_v); }');
+      this.dynSegs = true;
       // 成员派发器：调的全是上面这些宏摊出来的 static 函数，所以只能在这之后生成
       this.memberDispatch();
       this.callOpDispatch();

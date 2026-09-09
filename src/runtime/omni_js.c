@@ -218,6 +218,21 @@ static const omni_js_list_view *js_obj_own_ts_slot_(omni_dyn o) {
   return NULL;
 }
 
+/* 段那边那份"会调 toString 的转串"（见 omni.h）。递归深度那一格是防自套：
+   str_v 里 toString 又交回来一个对象时它会落回 omni_js_str，那一路又会走到这儿 ——
+   深度非零就直接按标签印（正是规范里"再试 valueOf，这个值域里没有那一格"的落点）。 */
+static omni_js_prim_hook js_prim_hook = NULL;
+static int js_prim_depth = 0;
+
+void omni_js_prim_hook_set(omni_js_prim_hook h) { js_prim_hook = h; }
+
+/* 容器与真对象那一族（ToPrimitive 要过一遍的那些）。函数不在里头：`f + 1` 在规范里是
+   函数的源码文本，这个值域里没有那一格。 */
+static bool js_objlike(omni_dyn v) {
+  return v.tag == OMNI_DYN_OBJ || v.tag == OMNI_DYN_DICT || v.tag == OMNI_DYN_LIST
+    || v.tag == OMNI_DYN_MAP || v.tag == OMNI_DYN_SET || v.tag == OMNI_DYN_RE;
+}
+
 static bool js_obj_has_own_tostring(omni_dyn v) {
   /* **继承来的那格 Object.prototype.toString 不算"自带"**（与 omni_js_own_ts_ 同一条判据）：
      realm 落地之后每个真对象的链上都有它，一律算自带的话 String(任何真对象) 都会当场报 ——
@@ -286,9 +301,18 @@ static omni_s16 to_s16(omni_dyn v) {
        理由见 js_obj_has_own_tostring 上面那段注。 */
     case OMNI_DYN_OBJ: {
       if (js_obj_has_own_tostring(v)) {
-        omni_errorf("backend-c: String() of an object with its own toString — "
-                    "自带 toString 的对象现在只在 node 宿主上成立"
-                    "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器");
+        if (js_prim_hook != NULL && js_prim_depth == 0) {
+          js_prim_depth++;
+          omni_dyn r = js_prim_hook(v);
+          js_prim_depth--;
+          /* 交回来的是原始值（可能是个数），所以还要按原始值那套印一遍 */
+          if (!js_objlike(r)) return to_s16(r);
+        }
+        if (js_prim_hook == NULL) {
+          omni_errorf("backend-c: String() of an object with its own toString — "
+                      "自带 toString 的对象现在只在 node 宿主上成立"
+                      "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器");
+        }
       }
       return omni_s16_of_utf8(omni_str_new("[object Object]", 15));
     }
@@ -323,9 +347,17 @@ static omni_s16 to_s16(omni_dyn v) {
            那是一个悄悄的错答案，比拒绝坏（ADR-0020 的排序）。 */
         const omni_dyn *ts = js_dict_find(d, "toString");
         if (ts != NULL && ts->tag == OMNI_DYN_FN) {
-          omni_errorf("backend-c: String() of an object with its own toString — "
-                      "自带 toString 的对象现在只在 node 宿主上成立"
-                      "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器");
+          if (js_prim_hook != NULL && js_prim_depth == 0) {
+            js_prim_depth++;
+            omni_dyn r = js_prim_hook(v);
+            js_prim_depth--;
+            if (!js_objlike(r)) return to_s16(r);
+          }
+          if (js_prim_hook == NULL) {
+            omni_errorf("backend-c: String() of an object with its own toString — "
+                        "自带 toString 的对象现在只在 node 宿主上成立"
+                        "（ADR-0020 P1-c）；这份程序请走 --backend js 或解释器");
+          }
         }
         return omni_s16_of_utf8(omni_str_new("[object Object]", 15));
       }
@@ -459,12 +491,36 @@ static void want_num(int op, omni_dyn a, omni_dyn b) {
 /* 非数的原始值先 ToNumber（规范 ApplyStringOrNumericBinaryOperator 第 3 步的 ToNumeric）：
    "3" * "4" 是 12、true + true 是 2、null + 1 是 1。bigint 不转（混着算照旧由 want_num
    当场报），判据与 prelude 的 $js_tonum 相同。 */
+/* 一格值的 ToPrimitive（规范 7.1.1，hint 是 default）。这个值域里 valueOf 那一格
+   在任何对象上都只会交回自己，所以答案只由"自带的 toString"决定：有就调它（段那边那份
+   钩子），没有就落回按标签的那串（数组是 join(",")、普通对象是 "[object Object]"…）。
+   段没登记钩子的时候（不是 JS 那条腿）objlike 一律落回按标签的串 —— 与从前"当场报"相比，
+   这是把**规范里本来就有的答案**给出来，不是猜。 */
+static omni_dyn js_prim1(omni_dyn v) {
+  if (!js_objlike(v)) return v;
+  if (js_prim_hook != NULL && js_prim_depth == 0) {
+    js_prim_depth++;
+    omni_dyn r = js_prim_hook(v);
+    js_prim_depth--;
+    if (!js_objlike(r)) return r;
+  }
+  return omni_dyn_of_s16(to_s16(v));
+}
+
 static omni_dyn to_num1(omni_dyn v) {
   if (is_int(v) || v.tag == OMNI_DYN_REAL) return v;
+  /* 对象先 ToPrimitive（`[3] * 2` 是 6、`{} * 2` 是 NaN）—— 从前这儿掉进
+     omni_js_num_of 的那句 "cannot convert list to a number"，一条腿死、三条腿活。 */
+  if (js_objlike(v)) v = js_prim1(v);
   return omni_js_num_of(v);
 }
 
 omni_dyn omni_js_add(omni_dyn a, omni_dyn b) {
+  /* 对象操作数先 ToPrimitive（规范 13.15.3 第 3 步）：`[1,2] + 1` 是 "1,21"、
+     `{toString(){return 42}} + 1` 是 43（数，不是串）。次序也照规范：两边都先取到原始值，
+     **然后**才看有没有串。 */
+  if (js_objlike(a)) a = js_prim1(a);
+  if (js_objlike(b)) b = js_prim1(b);
   if (a.tag == OMNI_DYN_STR16 || b.tag == OMNI_DYN_STR16) {
     return omni_dyn_of_s16(omni_s16_cat(to_s16(a), to_s16(b)));
   }

@@ -404,6 +404,15 @@ static omni_dyn omni_js_own_ts_(omni_dyn v) { \
   if (base.tag == OMNI_DYN_FN && base.u.ref == ts.u.ref) return omni_dyn_undef(); \
   return ts; \
 } \
+/* ToPrimitive 的段那一半（omni.h 的 omni_js_prim_hook）：自带 toString 就调它、把**原始值**
+   原样交回去（可能是个数）；没有就原样交回接收者，让 omni_js.c 那边落回按标签的那串。 */ \
+static omni_dyn omni_js_prim_v(omni_dyn v) { \
+  omni_dyn ts = omni_js_own_ts_(v); \
+  if (ts.tag != OMNI_DYN_FN) return v; \
+  omni_dyn r = omni_js_call_this(ts, v, omni_js_arr_wrap(LT##_new())); \
+  if (omni_js_pending()) return v; \
+  return r; \
+} \
 static omni_dyn omni_js_str_v(omni_dyn v) { \
   omni_dyn ts = omni_js_own_ts_(v); \
   if (ts.tag == OMNI_DYN_FN) { \

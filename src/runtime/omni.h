@@ -549,6 +549,14 @@ omni_dyn omni_js_obj_to_string(omni_dyn t);
    造闭包那条热路上一点开销都不加。表里没有的（Omni 域的闭包、匿名的那些）答 "" / 0，
    与 JS 那条腿上 $js_fn_name 读不到 $nm 时的答案一致。 */
 typedef struct { const void *fp; const char *nm; int64_t nmlen; int64_t len; } omni_js_fn_meta;
+
+/* ToPrimitive 那一格（ADR-0020 P1-c）。`String(o)` / `"" + o` / `o * 2` 里 o 自带 toString
+   时要**调**它，而调回调得现拼一条实参 list —— list 的具体类型只在生成的那个翻译单元里，
+   omni_js.c 造不出来。所以让段那边（omni_js_prim_v，在 OMNI_JS_STR_ARR 里）在 main 里
+   登记进来：它交回来的是**原始值**（可能是个数 —— `{toString(){return 42}} + 1` 是 43，
+   不是 "421"），没有自带 toString 时原样交回。没登记的时候（不是 JS 那条腿）照旧当场报。 */
+typedef omni_dyn (*omni_js_prim_hook)(omni_dyn);
+void omni_js_prim_hook_set(omni_js_prim_hook h);
 void omni_js_fnmeta_set(const omni_js_fn_meta *t, int64_t n);
 const omni_js_fn_meta *omni_js_fnmeta_find(const void *fp);
 /* Date 里只算数的那两格（omni_js_date.c）。new Date(…) 造的是真对象，那一格还在 P1-c 里。 */
