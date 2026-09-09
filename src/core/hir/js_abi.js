@@ -935,17 +935,20 @@ const P1_JS_ONLY = [
   // 代理有 C 孪生了（omni_js_obj.h）：px_t / px_h 挂在真对象的载荷上，get / set / has /
   // deleteProperty / ownKeys 五个入口各多问一句陷阱。**可调用的代理**（目标是函数）那一支
   // 当场报 —— 那要一格闭包记录，只有生成的代码造得出来。
-  'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
+  // Promise 的核心三格（new / resolve / reject）与 then / catch / finally 有 C 孪生了
+  // （omni_js_obj.h）：三格槽 $st / $val / $cbs + 一格静态作业队列。组合器那五格还在 ——
+  // 它们要"几格共享的可变状态"，每一格都得再排一个 sel。
+  'js_promise_all',
   'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',
   // matchAll 与 flags_g 有 C 孪生了（omni_js_re.h）：exec 的结果本来就把 index / input /
   // groups 挂在 list 的旁表上，所以差的只是"惰性迭代器"那一层 —— C 这条腿交的是一条现摊
   // 好的 list（matchAll 有限、无副作用，for-of 与展开逐格相同），手写 it.next() 那条路
   // 在那儿是一句响错。
-  'js_jobs_run',
   // js_gen_new / js_gen_res 有 C 孪生了（omni_js_obj.h）：状态机的改写在前端就做完了，
   // 运行时这一侧只有"带 $stp / $gst 两槽的真对象 + {value,done} + gen_step"三格。
   // js_gen_awt / js_async_run / js_agen_new 还在 —— 那要 Promise 与作业队列先落地。
-  'js_gen_awt', 'js_async_run', 'js_agen_new',
+  // js_gen_awt / js_async_run 也有 C 孪生了；异步生成器（js_agen_new）还要 agen 那格原型
+  'js_agen_new',
   'js_aiter', 'js_aiter_next',
   // js_fn_construct 有 C 孪生了（omni_js_obj.h）：函数不是真对象，所以那格 prototype 住在
   // 一张按同一性索引的旁表上（与 prelude 的 $FNPROTO 对应）；右边是**类对象**时（局部类、

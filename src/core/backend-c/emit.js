@@ -1117,6 +1117,18 @@ class CEmitter {
       }
       case 'ForIn': this.forIn(s); break;
       case 'Return':
+        /* 值是一格 **void 的 op**（`(v) => console.log(v)` 这种箭头，promise 的回调里满是）：
+         * C 里不能 `return f(x)` —— 那是"从返回 omni_dyn 的函数里返回 void"，clang 当场骂。
+         * 先把它当一句发出去，再返回 undefined —— JS 那条腿上这式子的值本来就是 undefined。
+         * 只在"这个函数自己不返回 void"时这么改；返回 void 的照旧原样发。 */
+        if (s.value !== undefined && s.value !== null && s.value.kind === 'Builtin'
+          && JS_ABI[s.value.name] !== undefined && JS_ABI[s.value.name].ret === 'void'
+          && this.profRetT !== 'void') {
+          this.line(`${this.expr(s.value)};`);
+          if (this.profId >= 0) this.line(`omni_prof_exit(${this.profId});`);
+          this.line('return omni_dyn_undef();');
+          break;
+        }
         // 计时打开时，每条 return 之前先结账（见 profTable）。带值那一支要先把值
         // 求出来存进临时量 —— 表达式里可能还会调别的函数，不能先停表。
         if (this.profId >= 0) {

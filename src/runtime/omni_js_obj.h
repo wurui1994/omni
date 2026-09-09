@@ -82,6 +82,14 @@ static omni_dyn omni_js_realm_ctor(omni_str name); \
 static omni_dyn omni_js_iter(omni_dyn v); \
 static omni_dyn omni_js_src_iter_(omni_dyn v); \
 static omni_dyn omni_js_gen_res(omni_dyn v, omni_dyn done); \
+/* Promise 与作业队列（ADR-0020 P2）：核心四格 + 一格静态队列，形状与 prelude 的
+   $js_prom_* 逐条对应。C 这边每个回调都得是带载荷的原生，所以 sel 又排了一段（18..28）。 */ \
+static omni_dyn omni_js_prom_new_(void); \
+static bool omni_js_prom_is_(omni_dyn v); \
+static omni_dyn omni_js_prom_react_(omni_dyn p, omni_dyn f, omni_dyn r); \
+static void omni_js_prom_settle_(omni_dyn p, int64_t st, omni_dyn val); \
+static void omni_js_async_tick_(omni_dyn p, omni_dyn step, omni_dyn v, int64_t mode); \
+static LT omni_js_prom_slot_(omni_dyn p, const char *nm, int64_t n); \
 static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode); \
 /* 函数值的 prototype 那张按同一性索引的旁表（$FNPROTO 的孪生）：realm_ctor 要往里预先坐一格，
    而它排在 fn_proto_ 前头，所以表在这儿声明。 */ \
@@ -1030,6 +1038,51 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
       return omni_js_gen_step_(self, a0, n->sel - 12); \
     case 15: return self;                               /* 迭代器的 [Symbol.iterator]：交回自己 */ \
     case 16: return omni_js_src_iter_(self);            /* 数组 / 串 / Map / Set 的 [Symbol.iterator] */ \
+    case 18: omni_js_prom_settle_(n->a, 1, a0); return omni_dyn_undef();  /* resolve(p) */ \
+    case 19: omni_js_prom_settle_(n->a, 2, a0); return omni_dyn_undef();  /* reject(p) */ \
+    case 20: {                                          /* 跟随 thenable 那格作业 */ \
+      LT pay = (LT)n->a.u.ref; \
+      omni_js_prom_react_(pay->items[1], omni_js_nat_(18, pay->items[0]), \
+                          omni_js_nat_(19, pay->items[0])); \
+      return omni_dyn_undef(); \
+    } \
+    case 21: {                                          /* schedule 那格作业 */ \
+      LT cb = (LT)n->a.u.ref; \
+      omni_dyn pp = cb->items[0]; \
+      omni_dyn child = cb->items[3]; \
+      LT ss = omni_js_prom_slot_(pp, "$st", 3); \
+      int64_t st = (int64_t)ss->items[0].u.r; \
+      omni_dyn val = omni_js_prom_slot_(pp, "$val", 4)->items[0]; \
+      omni_dyn h = st == 1 ? cb->items[1] : cb->items[2]; \
+      if (h.tag != OMNI_DYN_FN) { omni_js_prom_settle_(child, st, val); return omni_dyn_undef(); } \
+      LT ha = LT##_new(); \
+      LT##_push(ha, val); \
+      omni_dyn out = omni_js_call_this(h, omni_dyn_undef(), omni_js_arr_wrap(ha)); \
+      if (omni_js_pending()) { \
+        omni_js_prom_settle_(child, 2, omni_js_take_pending()); \
+        return omni_dyn_undef(); \
+      } \
+      omni_js_prom_settle_(child, 1, out); \
+      return omni_dyn_undef(); \
+    } \
+    case 22: case 23: {                                 /* async 的 tick（兑现 / 拒绝） */ \
+      LT pay = (LT)n->a.u.ref; \
+      omni_js_async_tick_(pay->items[0], pay->items[1], a0, n->sel == 22 ? 0 : 2); \
+      return omni_dyn_undef(); \
+    } \
+    case 24: {                                          /* p.then(f, r) */ \
+      omni_dyn a1t = args != NULL && args->len > 1 ? args->items[1] : omni_dyn_undef(); \
+      return omni_js_prom_react_(self, a0, a1t); \
+    } \
+    case 25: return omni_js_prom_react_(self, omni_dyn_undef(), a0);  /* p.catch(r) */ \
+    case 26: return omni_js_prom_react_(self, omni_js_nat_(27, a0), omni_js_nat_(28, a0)); \
+    case 27: case 28: {                                 /* finally：跑一趟处理器，再原样传下去 */ \
+      LT ha = LT##_new(); \
+      omni_js_call_this(n->a, omni_dyn_undef(), omni_js_arr_wrap(ha)); \
+      if (omni_js_pending()) return omni_dyn_undef(); \
+      if (n->sel == 28) { omni_js_throw(a0); return omni_dyn_undef(); } \
+      return a0; \
+    } \
     case 17: {                                          /* 源迭代器的 next */ \
       omni_str sk = omni_js_pkey_(omni_js_name_("$src", 4)); \
       omni_str xk = omni_js_pkey_(omni_js_name_("$ix", 3)); \
@@ -1221,6 +1274,18 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
      同一个 gen_step（mode 0 / 1 / 2），再加一格 [Symbol.iterator] 交回自己。
      它自己的原型是 Iterator.prototype ——那格是"读成员就报"的代理，于是 ES2025 那批 helper
      （map / take …）在这条腿上是一句响错，不是静静的 undefined。 */ \
+  /* Promise.prototype（ADR-0020 P2）：真对象，三格原生 then / catch / finally 都落到 react。 */ \
+  if (ix == 11) { \
+    omni_dyn pp = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Object", 6))); \
+    omni_js_realm_tbl_[11] = pp; \
+    omni_js_def_data_(pp, omni_js_name_("then", 4), omni_js_nat_(24, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(pp, omni_js_name_("catch", 5), omni_js_nat_(25, omni_dyn_undef()), \
+                      true, false, true); \
+    omni_js_def_data_(pp, omni_js_name_("finally", 7), omni_js_nat_(26, omni_dyn_undef()), \
+                      true, false, true); \
+    return pp; \
+  } \
   if (ix == 12) { \
     omni_dyn gp = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Iterator", 8))); \
     omni_js_realm_tbl_[12] = gp; \
@@ -1265,10 +1330,153 @@ static omni_dyn omni_js_src_iter_(omni_dyn v) { \
                     omni_js_nat_(15, omni_dyn_undef()), true, false, true); \
   return it; \
 } \
+/* 作业队列（微任务，ADR-0020 P2）：一格静态 list + 一个游标（不 shift，省得每次搬）。
+   这个值域里没有事件循环 —— 降级器在 main 末尾补一句 js_jobs_run 把它排空。 */ \
+static LT omni_js_jobq_; \
+static int64_t omni_js_jobq_at_; \
+static void omni_js_job_(omni_dyn f) { \
+  if (omni_js_jobq_ == NULL) omni_js_jobq_ = LT##_new(); \
+  LT##_push(omni_js_jobq_, f); \
+} \
+static omni_dyn omni_js_jobs_run(void) { \
+  while (omni_js_jobq_ != NULL && omni_js_jobq_at_ < omni_js_jobq_->len) { \
+    omni_dyn f = omni_js_jobq_->items[omni_js_jobq_at_]; \
+    omni_js_jobq_at_ = omni_js_jobq_at_ + 1; \
+    omni_js_call_this(f, omni_dyn_undef(), omni_js_arr_wrap(LT##_new())); \
+    /* 作业里抛出来的东西没人接手（JS 里那是 unhandledRejection）：清掉槽接着走 */ \
+    if (omni_js_pending()) omni_js_take_pending(); \
+  } \
+  return omni_dyn_undef(); \
+} \
+static LT omni_js_prom_slot_(omni_dyn p, const char *nm, int64_t n) { \
+  if (p.tag != OMNI_DYN_OBJ) return NULL; \
+  return omni_js_find_slot_(p, omni_js_pkey_(omni_js_name_(nm, n)), NULL); \
+} \
+static bool omni_js_prom_is_(omni_dyn v) { return omni_js_prom_slot_(v, "$st", 3) != NULL; } \
+static omni_dyn omni_js_prom_new_(void) { \
+  omni_dyn p = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Promise", 7))); \
+  omni_js_def_data_(p, omni_js_name_("$st", 3), omni_dyn_of_real(0.0), true, false, true); \
+  omni_js_def_data_(p, omni_js_name_("$val", 4), omni_dyn_undef(), true, false, true); \
+  omni_js_def_data_(p, omni_js_name_("$cbs", 4), omni_js_arr_wrap(LT##_new()), true, false, true); \
+  return p; \
+} \
+/* 排一格作业：跑的时候按 $st 选 f / r，没有那格处理器就把状态直接传给 child，
+   处理器自己抛了就 reject child（见 sel 21）。 */ \
+static void omni_js_prom_sched_(omni_dyn p, omni_dyn f, omni_dyn r, omni_dyn child) { \
+  LT cb = LT##_new(); \
+  LT##_push(cb, p); \
+  LT##_push(cb, f); \
+  LT##_push(cb, r); \
+  LT##_push(cb, child); \
+  omni_js_job_(omni_js_nat_(21, omni_js_arr_wrap(cb))); \
+} \
+/* 注册一对处理器、交出子 promise。**已经结算的也要排队**、不能当场调 ——
+   微任务的次序（先把同步代码跑完）就是靠这一条。 */ \
+static omni_dyn omni_js_prom_react_(omni_dyn p, omni_dyn f, omni_dyn r) { \
+  if (!omni_js_prom_is_(p)) { \
+    omni_js_type_err_c("this is not a Promise"); \
+    return omni_dyn_undef(); \
+  } \
+  omni_dyn child = omni_js_prom_new_(); \
+  LT ss = omni_js_prom_slot_(p, "$st", 3); \
+  if ((int64_t)ss->items[0].u.r == 0) { \
+    LT cbs = (LT)omni_js_prom_slot_(p, "$cbs", 4)->items[0].u.ref; \
+    LT one = LT##_new(); \
+    LT##_push(one, f); \
+    LT##_push(one, r); \
+    LT##_push(one, child); \
+    LT##_push(cbs, omni_js_arr_wrap(one)); \
+  } else { \
+    omni_js_prom_sched_(p, f, r, child); \
+  } \
+  return child; \
+} \
+static void omni_js_prom_settle_(omni_dyn p, int64_t st, omni_dyn val) { \
+  LT ss = omni_js_prom_slot_(p, "$st", 3); \
+  if (ss == NULL || (int64_t)ss->items[0].u.r != 0) return; \
+  /* resolve 收到一格 promise 就跟着它走，而且**多花一拍**（规范的
+     NewPromiseResolveThenableJob）—— 少这一拍两条独立链的交错次序就与 qjs 不同。 */ \
+  if (st == 1 && omni_js_prom_is_(val)) { \
+    LT pay = LT##_new(); \
+    LT##_push(pay, p); \
+    LT##_push(pay, val); \
+    omni_js_job_(omni_js_nat_(20, omni_js_arr_wrap(pay))); \
+    return; \
+  } \
+  ss->items[0] = omni_dyn_of_real((double)st); \
+  omni_js_prom_slot_(p, "$val", 4)->items[0] = val; \
+  LT cbs = (LT)omni_js_prom_slot_(p, "$cbs", 4)->items[0].u.ref; \
+  for (int64_t i = 0; i < cbs->len; i++) { \
+    LT one = (LT)cbs->items[i].u.ref; \
+    omni_js_prom_sched_(p, one->items[0], one->items[1], one->items[2]); \
+  } \
+  cbs->len = 0; \
+} \
+static omni_dyn omni_js_promise_resolved(omni_dyn v) { \
+  if (omni_js_prom_is_(v)) return v; \
+  omni_dyn p = omni_js_prom_new_(); \
+  omni_js_prom_settle_(p, 1, v); \
+  return p; \
+} \
+static omni_dyn omni_js_promise_rejected(omni_dyn e) { \
+  omni_dyn p = omni_js_prom_new_(); \
+  omni_js_prom_settle_(p, 2, e); \
+  return p; \
+} \
+static omni_dyn omni_js_promise_new(omni_dyn exec) { \
+  omni_dyn p = omni_js_prom_new_(); \
+  LT a = LT##_new(); \
+  LT##_push(a, omni_js_nat_(18, p)); \
+  LT##_push(a, omni_js_nat_(19, p)); \
+  omni_js_call_this(exec, omni_dyn_undef(), omni_js_arr_wrap(a)); \
+  /* executor 自己抛了：照规范当作 reject */ \
+  if (omni_js_pending()) omni_js_prom_settle_(p, 2, omni_js_take_pending()); \
+  return p; \
+} \
+/* await 那一步：把结果接回状态机（兑现走 mode 0、拒绝走 mode 2） */ \
+static void omni_js_await_then_(omni_dyn p, omni_dyn step, omni_dyn v) { \
+  LT pay = LT##_new(); \
+  LT##_push(pay, p); \
+  LT##_push(pay, step); \
+  omni_js_prom_react_(omni_js_promise_resolved(v), \
+                      omni_js_nat_(22, omni_js_arr_wrap(pay)), \
+                      omni_js_nat_(23, omni_js_arr_wrap(pay))); \
+} \
+static void omni_js_async_tick_(omni_dyn p, omni_dyn step, omni_dyn v, int64_t mode) { \
+  LT a = LT##_new(); \
+  LT##_push(a, v); \
+  LT##_push(a, omni_dyn_of_real((double)mode)); \
+  omni_dyn r = omni_js_call_this(step, omni_dyn_undef(), omni_js_arr_wrap(a)); \
+  /* 体里抛出来的：有 catch / finally 接手就送回去（mode 2），没有就成了这格 promise 的 reject */ \
+  if (omni_js_pending()) { \
+    LT a2 = LT##_new(); \
+    LT##_push(a2, omni_js_take_pending()); \
+    LT##_push(a2, omni_dyn_of_real(2.0)); \
+    r = omni_js_call_this(step, omni_dyn_undef(), omni_js_arr_wrap(a2)); \
+    if (omni_js_pending()) { omni_js_prom_settle_(p, 2, omni_js_take_pending()); return; } \
+  } \
+  if (omni_js_truthy(omni_js_obj_getk(r, omni_str_new("done", 4)))) { \
+    omni_js_prom_settle_(p, 1, omni_js_obj_getk(r, omni_str_new("value", 5))); \
+    return; \
+  } \
+  omni_js_await_then_(p, step, omni_js_obj_getk(r, omni_str_new("value", 5))); \
+} \
+static omni_dyn omni_js_async_run(omni_dyn step) { \
+  omni_dyn p = omni_js_prom_new_(); \
+  /* 第一段是**同步**跑的（规范如此：async 函数体一直跑到第一个 await） */ \
+  omni_js_async_tick_(p, step, omni_dyn_undef(), 0); \
+  return p; \
+} \
 static omni_dyn omni_js_gen_res(omni_dyn v, omni_dyn done) { \
   omni_dyn o = omni_js_obj_new(); \
   omni_js_obj_setk(o, omni_str_new("value", 5), v); \
   omni_js_obj_setk(o, omni_str_new("done", 4), omni_dyn_of_bool(omni_js_truthy(done))); \
+  return o; \
+} \
+/* await 那一步的收尾（ADR-0020 P2）：与 gen_res 同一格形状，多一个 $aw 标记。 */ \
+static omni_dyn omni_js_gen_awt(omni_dyn v) { \
+  omni_dyn o = omni_js_gen_res(v, omni_dyn_of_bool(false)); \
+  omni_js_obj_setk(o, omni_str_new("$aw", 3), omni_dyn_of_bool(true)); \
   return o; \
 } \
 static omni_dyn omni_js_gen_new(omni_dyn step) { \
