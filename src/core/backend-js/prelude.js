@@ -3334,6 +3334,15 @@ function $mkRealm() {
   for (const p of [r.arrP, r.strP, r.mapP, r.setP]) {
     $js_def_data(p, $js_sym_wk("iterator"), $nat("[Symbol.iterator]", 0, (t) => $js_it_src(t)), true, false, true);
   }
+  /* 每族异常一格**自己的**原型（原型的原型是 errP）。两个理由：
+     - new TypeError("t").constructor 要给 TypeError（量出来四条腿都给 Object）；
+     - 八个构造器共用 errP 的话，mk 往原型上写的那格 constructor 会互相盖掉。
+     name 仍旧是 errP 上那对存取器，顺着链读得到；instanceof 走原型链也就自然对了
+     （new TypeError("t") instanceof RangeError 为假、instanceof Error 为真）。 */
+  r.errPs = new Map();
+  for (const nm of $JS_ERR_LIST) {
+    r.errPs.set(nm, nm === "Error" ? r.errP : new $JSObj(r.errP, nm));
+  }
   $js_mk_ctors(r);
   return r;
 }
@@ -3373,6 +3382,20 @@ function $js_mk_ctors(r) {
   mk("Map", 0, r.mapP, no("Map"));
   mk("Set", 0, r.setP, no("Set"));
   mk("Date", 7, r.dateP, no("Date"));
+  /* 异常那八族（ADR-0020）：都落到 js_err_new，$cls 链的头按名字。AggregateError 的实参
+     次序是 (errors, message, opts)、length 是 2，别的 length 是 1（照 node / qjs 量的）。 */
+  for (const nm of $JS_ERR_LIST) {
+    const chain = nm === "Error" ? ["Error"] : [nm, "Error"];
+    if (nm === "AggregateError") {
+      mk(nm, 2, r.errPs.get(nm), (t, a) => {
+        const e = $js_err_new(a[1], chain, a[2]);
+        $js_obj_set(e, "errors", [...$js_iter(a[0])]);
+        return e;
+      });
+    } else {
+      mk(nm, 1, r.errPs.get(nm), (t, a) => $js_err_new(a[0], chain, a[1]));
+    }
+  }
 }
 function $js_realm_ctor(name) {
   const c = $realm().ctors.get(name);
@@ -4422,6 +4445,9 @@ function $js_obj_from_entries(pairs) {
 function $js_global_this() { return $realm().gt; }
 function $js_realm_proto(name) {
   const r = $realm();
+  // 异常那八族各有一格自己的原型（见 $realm 里建它们那一段）
+  const ep = r.errPs.get(name);
+  if (ep !== undefined) return ep;
   switch (name) {
     case "Object": return r.objP;
     case "Function": return r.funP;
@@ -5276,7 +5302,13 @@ function $js_check_uncaught() {
 // 原型是 **Error.prototype**（errP）：String(err) 与模板里的 err 要落到它身上的 toString，
 // 不然走的是 Object.prototype 那一格、印出 [object Object]（量出来的分叉）。
 function $js_err_new(msg, cls, opts) {
-  const o = $js_obj_new_p($realm().errP);
+  /* 原型按 $cls 那条链的头挑（认不出来的 —— 用户自己 extends 的 —— 落回 errP）：
+     这样 e.constructor 与 e instanceof TypeError 走原型链就都对了。（这一段在 String.raw
+     的正文里，注释里也不许出现反引号。） */
+  const r0 = $realm();
+  const c0 = $dynTag(cls) === "list" && cls.length > 0 ? $js_asS16($js_str(cls[0])) : "Error";
+  const p0 = r0.errPs.get(c0);
+  const o = $js_obj_new_p(p0 === undefined ? r0.errP : p0);
   /* $cls 与 message 都是**不可枚举**的（w/e/c = true/false/true）：JS 里 message 是 own
      但不可枚举、name 在原型上，所以 Object.keys(err) 是空的、JSON.stringify(new Error("x"))
      是 {}。从前这儿走的是普通的 obj_set，于是 $cls 这个内部标记也跟着漏进 JSON 与 keys 里
@@ -5296,10 +5328,9 @@ function $js_err_new(msg, cls, opts) {
   return o;
 }
 // 内建错误名那一族：$cls 那条链里第一个落在这里面的就是 name 该给的值（子类不算）
-const $JS_ERR_NAMES = new Set([
-  "Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError",
-  "URIError", "AggregateError",
-]);
+const $JS_ERR_LIST = ["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError",
+  "EvalError", "URIError", "AggregateError"];
+const $JS_ERR_NAMES = new Set($JS_ERR_LIST);
 function $js_err_bname(t) {
   const c = $js_getp(t, "$cls", undefined);
   if ($dynTag(c) === "list") {

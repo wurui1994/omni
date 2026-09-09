@@ -2532,7 +2532,12 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
      * 要在 GLOBAL_CALLS 之前 —— String / Number / Boolean 那三个既在这儿也在那儿，而
      * `"".constructor === String` 要为真，两条路必须给**同一个值**，所以一律走 realm 这一格。
      * 静态面（Array.isArray）挂不到函数值上，从值上取是运行期报错，见 prelude $js_mk_ctors。 */
-    if (REALM_CTORS.has(e.name)) return op('js_realm_ctor', [], { ctor: e.name });
+    /* 异常那八族也走这一格（ADR-0020）：`const E = Error` / `er.constructor === TypeError`。
+     * 它们各有一格自己的原型，所以 `x instanceof E`（右手是变量）走原型链也是对的 ——
+     * 右手是**名字**的那条路仍旧查 $cls 链，见 binary 里的 instanceof。 */
+    if (REALM_CTORS.has(e.name) || ERROR_CTORS.has(e.name)) {
+      return op('js_realm_ctor', [], { ctor: e.name });
+    }
     /* 全局内建函数当值用（见 builtinFnValue）：`[1,2].map(Number)` /
      * `["1","2"].map(parseInt)`（后者照规范是 [1, NaN, NaN] —— 第二个实参是下标，
      * 被当成了进制）。这一格要在 STATIC_NS 之前 —— `Number` / `String` 既是命名空间

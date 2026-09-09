@@ -85,6 +85,8 @@ static omni_dyn omni_js_gen_res(omni_dyn v, omni_dyn done); \
 /* 异常对象的构造（$cls 链 + message）：住在 STR_ARR 段，而 Promise.any 全拒时要在这儿
    造一格 AggregateError。 */ \
 static omni_dyn omni_js_err_new(omni_dyn msg, omni_dyn cls, omni_dyn opts); \
+/* `x instanceof C` 查 $cls 链的那一格（住在 STR_ARR 段）：instanceof 右手是异常构造器值时要它 */ \
+static bool omni_js_is_a(omni_dyn v, omni_dyn n); \
 /* Promise 与作业队列（ADR-0020 P2）：核心四格 + 一格静态队列，形状与 prelude 的
    $js_prom_* 逐条对应。C 这边每个回调都得是带载荷的原生，所以 sel 又排了一段（18..28）。 */ \
 static omni_dyn omni_js_prom_new_(void); \
@@ -118,10 +120,14 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args); \
    （protoMembers 发的 omni_js_pm_init_）。没登记的时候读成员照旧当场报。
    sel 从 OMNI_JS_PM_SEL 起就是"第 ix 格原型成员"，载荷是 [名字, 形参个数]。 */ \
 /* 内建构造器的名字与形参个数（与 prelude 的 $js_mk_ctors 那 11 行一一对应）。 */ \
-static const char *omni_js_ctor_nm_[11] = { "Object", "Function", "Array", "String", "Number", \
-  "Boolean", "Symbol", "RegExp", "Map", "Set", "Date" }; \
-static const int64_t omni_js_ctor_ln_[11] = { 1, 1, 1, 1, 1, 1, 0, 2, 0, 0, 7 }; \
-static omni_dyn omni_js_ctor_tbl_[11]; \
+static const char *omni_js_ctor_nm_[19] = { "Object", "Function", "Array", "String", "Number", \
+  "Boolean", "Symbol", "RegExp", "Map", "Set", "Date", \
+  /* 11..18 是异常那八族（ADR-0020）：当值用时落到 omni_js_err_new，$cls 链见 ctor_cls_ */ \
+  "Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", \
+  "URIError", "AggregateError" }; \
+static const int64_t omni_js_ctor_ln_[19] = { 1, 1, 1, 1, 1, 1, 0, 2, 0, 0, 7, \
+  1, 1, 1, 1, 1, 1, 1, 2 }; \
+static omni_dyn omni_js_ctor_tbl_[19]; \
 typedef int64_t (*omni_js_pm_find_t)(omni_str pr, omni_str nm, int64_t *argc); \
 typedef omni_dyn (*omni_js_pm_call_t)(int64_t ix, LT args, omni_dyn self); \
 static omni_js_pm_find_t omni_js_pm_find_ = NULL; \
@@ -854,6 +860,18 @@ static bool omni_js_instanceof_p(omni_dyn v, omni_dyn proto) { \
   return false; \
 } \
 static bool omni_js_instanceof(omni_dyn v, omni_dyn ctor) { \
+  /* 右手是异常那八族的构造器**值**时按 $cls 链算（这条腿上异常对象是 dict，没有原型链 ——
+     不这么算的话 `const E = TypeError; e instanceof E` 会静静地给 false，而 JS 那条腿
+     走原型链给 true）。 */ \
+  if (ctor.tag == OMNI_DYN_FN \
+      && ((struct omni_js_nat_s *)ctor.u.ref)->fp == (omni_fnptr)omni_js_nat_call_) { \
+    int64_t sl = ((struct omni_js_nat_s *)ctor.u.ref)->sel; \
+    if (sl >= OMNI_JS_CTOR_SEL + 11 && sl <= OMNI_JS_CTOR_SEL + 18) { \
+      int ci = (int)(sl - OMNI_JS_CTOR_SEL); \
+      return omni_js_is_a(v, omni_dyn_of_s16(omni_s16_of_utf8( \
+        omni_str_new(omni_js_ctor_nm_[ci], (int64_t)strlen(omni_js_ctor_nm_[ci]))))); \
+    } \
+  } \
   omni_dyn proto = omni_js_obj_get(ctor, omni_js_name_("prototype", 9)); \
   if (proto.tag != OMNI_DYN_OBJ && !omni_js_cont_proto_(proto)) { \
     omni_js_type_err_c("right-hand side of 'instanceof' is not callable"); \
@@ -1444,6 +1462,26 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
           case 5: return omni_dyn_of_bool(omni_js_truthy(a0)); \
           case 6: return omni_js_sym_new(a0); \
           case 7: return omni_js_re_new(a0, a1); \
+          case 11: case 12: case 13: case 14: case 15: case 16: case 17: case 18: { \
+            /* 异常那八族当值用（`const E = TypeError; new E("x")`）：都落到 err_new，
+               $cls 链是 [自己的名字, "Error"]（Error 自己只有一格）。AggregateError 的
+               实参次序是 (errors, message, opts) —— 与 prelude 的 mk_ctors 一字不差。 */ \
+            LT cls = LT##_new(); \
+            omni_dyn a2 = na > 2 ? args->items[2] : omni_dyn_undef(); \
+            omni_dyn e; \
+            LT##_push(cls, omni_dyn_of_s16(omni_s16_of_utf8( \
+              omni_str_new(omni_js_ctor_nm_[ci], (int64_t)strlen(omni_js_ctor_nm_[ci]))))); \
+            if (ci != 11) { \
+              LT##_push(cls, omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("Error", 5)))); \
+            } \
+            if (ci == 18) { \
+              e = omni_js_err_new(a1, omni_js_arr_wrap(cls), a2); \
+              omni_js_obj_set(e, omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("errors", 6))), \
+                              omni_js_iter(a0)); \
+              return e; \
+            } \
+            return omni_js_err_new(a0, omni_js_arr_wrap(cls), a1); \
+          } \
           default: \
             omni_errorf("'%s' as a value cannot be called here; call it by name instead", \
                         omni_js_ctor_nm_[ci]); \
@@ -1467,13 +1505,17 @@ static omni_dyn omni_js_nat_(int64_t sel, omni_dyn a) { \
 } \
 /* realm 上那几格原型。名字与 prelude 的 $js_realm_proto 那个 switch 一一对应；认不出来的
    名字**当场报**，不给一格空对象。 */ \
-static omni_dyn omni_js_realm_tbl_[16]; \
+static omni_dyn omni_js_realm_tbl_[23]; \
 static int omni_js_realm_ix_(omni_str name) { \
   /* Generator / Iterator 排在最后两格：生成器那一族（ADR-0020 P2）落在 C 上要它们 */ \
-  static const char *names[16] = { "Object", "Function", "Array", "String", "Number", \
+  /* 16..22 是异常那七族自己的原型（Error 本身是 ix 7）：八个构造器共用一格原型的话，
+     它们往原型上写的 constructor 会互相盖掉 —— 与 prelude 的 r.errPs 一一对应。 */ \
+  static const char *names[23] = { "Object", "Function", "Array", "String", "Number", \
     "Boolean", "Symbol", "Error", "RegExp", "Map", "Set", "Promise", "Generator", "Iterator", \
-    "IteratorHelper", "ArrayIterator" }; \
-  for (int i = 0; i < 16; i++) { \
+    "IteratorHelper", "ArrayIterator", \
+    "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", \
+    "AggregateError" }; \
+  for (int i = 0; i < 23; i++) { \
     int64_t n = (int64_t)strlen(names[i]); \
     if (name.len == n && memcmp(name.p, names[i], (size_t)n) == 0) return i; \
   } \
@@ -1565,6 +1607,11 @@ static omni_dyn omni_js_realm_proto(omni_str name) { \
      不是住在每格迭代器对象自己身上）。从前那两格是**自有**属性，于是
      Object.getOwnPropertyNames(it.map(f)) 多两格，而 node 给 [] —— 静默的分叉。
      两格的原型都是 Iterator.prototype，于是 helper 上还能接着串 helper。 */ \
+  if (ix >= 16) { \
+    omni_dyn ep = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Error", 5))); \
+    omni_js_realm_tbl_[ix] = ep; \
+    return ep; \
+  } \
   if (ix == 14 || ix == 15) { \
     omni_dyn hp = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Iterator", 8))); \
     omni_js_realm_tbl_[ix] = hp; \
@@ -1962,7 +2009,7 @@ static omni_dyn omni_js_gen_step_(omni_dyn g, omni_dyn v, int64_t mode) { \
    那些名字只能从成员写法取。这一格与 JS 那条腿是同一条边界（写在 prelude 的 $js_mk_ctors 上）。 */ \
 static omni_dyn omni_js_realm_ctor(omni_str name) { \
   int ix = -1; \
-  for (int i = 0; i < 11; i++) { \
+  for (int i = 0; i < 19; i++) { \
     int64_t l = (int64_t)strlen(omni_js_ctor_nm_[i]); \
     if (name.len == l && memcmp(name.p, omni_js_ctor_nm_[i], (size_t)l) == 0) { ix = i; break; } \
   } \
@@ -1984,6 +2031,24 @@ static omni_dyn omni_js_realm_ctor(omni_str name) { \
 static omni_dyn omni_js_ctor_get(omni_dyn o) { \
   /* omni_js_s16_lit 住在 JSON 段（它排在这一段后头），所以这儿自己造那格名字 */ \
   omni_dyn ck = omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new("constructor", 11))); \
+  /* 异常对象在这条腿上是一格 dict（决策 15），没有原型链 —— 不特判的话会一路走到
+     Object.prototype 上、把 constructor 答成 Object（量出来的：node 给 TypeError）。
+     js_ctor_get 本来就自己占一格 op，正是为了两条腿能说同一句话，所以这一句放在这儿。 */ \
+  if (o.tag == OMNI_DYN_DICT) { \
+    omni_dyn cl = omni_js_obj_get(o, omni_js_name_("$cls", 4)); \
+    if (cl.tag == OMNI_DYN_LIST) { \
+      LT l = omni_js_arr_of(cl); \
+      if (l->len > 0 && l->items[0].tag == OMNI_DYN_STR16) { \
+        omni_str nm = omni_s16_to_utf8(l->items[0].u.s16); \
+        for (int i = 11; i < 19; i++) { \
+          int64_t ln = (int64_t)strlen(omni_js_ctor_nm_[i]); \
+          if (nm.len == ln && memcmp(nm.p, omni_js_ctor_nm_[i], (size_t)ln) == 0) { \
+            return omni_js_realm_ctor(nm); \
+          } \
+        } \
+      } \
+    } \
+  } \
   if (o.tag == OMNI_DYN_OBJ) return omni_js_getp(o, ck, o); \
   return omni_js_getp(omni_js_proto_of_tag_(o), ck, o); \
 } \
