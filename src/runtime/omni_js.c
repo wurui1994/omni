@@ -34,6 +34,7 @@ omni_dyn omni_js_typeof(omni_dyn v) {
     case OMNI_DYN_REAL: n = "number"; break;
     case OMNI_DYN_STR16: n = "string"; break;
     case OMNI_DYN_FN: n = "function"; break;
+    case OMNI_DYN_SYM: n = "symbol"; break;
     default: n = "object"; break;
   }
   return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
@@ -59,6 +60,7 @@ omni_dyn omni_js_type_tag(omni_dyn v) {
     case OMNI_DYN_RE: n = "regexp"; break;
     case OMNI_DYN_BYTES: n = "bytes"; break;
     case OMNI_DYN_TEXTENC: n = "TextEncoder"; break;
+    case OMNI_DYN_SYM: n = "symbol"; break;
     default: n = "function"; break;
   }
   return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
@@ -202,6 +204,10 @@ static omni_s16 to_s16(omni_dyn v) {
        照标签直说，与 prelude 的 $js_str 对着写。 */
     case OMNI_DYN_MAP: return omni_s16_of_utf8(omni_str_new("[object Map]", 12));
     case OMNI_DYN_SET: return omni_s16_of_utf8(omni_str_new("[object Set]", 12));
+    /* String(Symbol("s")) 是 "Symbol(s)"。规范里 `"" + sym` 是 TypeError、只有 String()
+       特批 —— 这个值域里两条路都落在这一格上，所以两边一致地给文本。与 prelude 的
+       $js_str 同一个口径（ADR-0020 记着这一格是有意的分叉）。 */
+    case OMNI_DYN_SYM: return omni_js_as_s16(omni_js_sym_str(v));
     default:
       omni_errorf("cannot convert %s to string", omni_dyn_tag_name(v.tag));
       return omni_s16_of_utf8(omni_str_new("", 0));

@@ -657,9 +657,12 @@ class CEmitter {
       this.line(`case ${len}:`);
       this.indent++;
       for (const [name, abi] of byLen.get(len)) {
-        const lits = (abi.lit ?? []).map((k, i) => (k === 'strict'
-          ? `omni_js_truthy(${A(i)})`
-          : `(char)omni_js_op_key_(${A(i)}).p[0]`));
+        const lits = (abi.lit ?? []).map((k, i) => {
+          if (k === 'strict') return `omni_js_truthy(${A(i)})`;
+          // litText：整个词按 omni_str 传（见 js_abi 的 js_sym_wk）
+          if (abi.litText === true) return `omni_js_op_name_(${A(i)})`;
+          return `(char)omni_js_op_key_(${A(i)}).p[0]`;
+        });
         const as = [];
         for (let ai = 0; ai < abi.arity; ai++) {
           const x = A(ai + lits.length);
@@ -1472,6 +1475,11 @@ class CEmitter {
         }
         const lits = (abi.lit ?? []).map((k) => {
           const v = e[k];
+          // litText：整个词按 omni_str 传（见 js_abi 的 js_sym_wk）；别的字符串 lit 是一格 op 码
+          if (abi.litText === true && typeof v === 'string') {
+            const bytes = utf8Bytes(v);
+            return `omni_str_new(${cString(bytes)}, ${bytes.length})`;
+          }
           return typeof v === 'string' ? `'${v}'` : String(v === true);
         });
         // 少给的尾部实参补 undefined。JS 那边少传就是 undefined，C 是定参函数 ——

@@ -66,8 +66,17 @@ enum {
      别名关系于是天然成立，interp/builtin.js 模拟指针内存靠的正是这个（ADR-0016）。
      TextEncoder 无状态，但 `new TextEncoder().encode(t)` 是两步，所以那一格也得有个值；
      单独一个标签而不是拿 bytes 塞哨兵 —— 哨兵一漏就是悄悄算错。 */
-  OMNI_DYN_BYTES, OMNI_DYN_TEXTENC
+  OMNI_DYN_BYTES, OMNI_DYN_TEXTENC,
+  /* Symbol（ADR-0020 P1）。载荷是 omni_js_sym*（描述文本）。**同一性就是地址** ——
+     `Symbol("a") !== Symbol("a")` 靠这一条，而 omni_js_key 的兜底本来就按地址发键，
+     所以符号当属性键不必另开一支。新标签排在**末尾**：前面那些的号是产物里到处写着的，
+     插在中间等于把老产物的标签全挪一格。 */
+  OMNI_DYN_SYM
 };
+
+/* Symbol 的载荷。`has_d` 分开记：`Symbol()` 的描述是 undefined，而 `Symbol("")` 是空串，
+   两者可观察地不同（`String(Symbol())` 是 "Symbol()"、`Symbol().description` 是 undefined）。 */
+typedef struct { omni_str d; bool has_d; } omni_js_sym;
 
 /* 字节缓冲的视图。p 指进底层那块内存，所以两个视图重叠时改一个另一个看得见 —— 与
    ArrayBuffer 上开两个 TypedArray 是同一件事。 */
@@ -482,6 +491,16 @@ omni_s16 omni_s16_trim(omni_s16 s, bool left, bool right);
    JS 的 truthiness / `+` 的双重含义 / `==` 的强制转换只活在这里，Omni 语言本身不受影响。 */
 bool omni_js_truthy(omni_dyn v);
 omni_dyn omni_js_typeof(omni_dyn v);
+
+/* omni_js_sym.c —— Symbol（ADR-0020 P1）。同一性就是地址（`Symbol("a") !== Symbol("a")`）；
+   Symbol.for 那一格另有一张全局注册表，所以同名共用一格。与 prelude 的 $js_sym_* 逐条对齐。 */
+omni_dyn omni_js_sym_new(omni_dyn desc);
+omni_dyn omni_js_sym_for(omni_dyn key);
+omni_dyn omni_js_sym_key_for(omni_dyn s);
+omni_dyn omni_js_sym_desc(omni_dyn s);
+omni_dyn omni_js_sym_str(omni_dyn s);
+/* well-known symbol：名字是编译期常量，按 omni_str 传（js_abi 的 litText）。同名一格。 */
+omni_dyn omni_js_sym_wk(omni_str name);
 /* dynamic 的运行期标签名（JS 域口径）。解释器靠它认标签，见 ADR-0013 与 omni_js.c */
 omni_dyn omni_js_type_tag(omni_dyn v);
 /* real 的两种文本化，给解释器用（ADR-0013）。就是 print / repr 自己用的那两个函数，

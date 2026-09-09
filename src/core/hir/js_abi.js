@@ -296,7 +296,11 @@ export const JS_ABI = {
   // toStringTag / hasInstance / …）。lit 的字段名**刻意不叫 name** —— OIR 的 Builtin
   // 节点自己有一格 `name`（op 的名字），lit 铺进去会把它盖掉（量出来的：
   // "js.builtin: toStringTag"）。
-  js_sym_wk: { js: '$js_sym_wk', c: 'omni_js_sym_wk', arity: 0, lit: ['wk'] },
+  /* `litText`：这一格的 string lit 在 C 那侧按 **omni_str** 传，不是按 char 传。
+     别的 op 的字符串 lit 都是**一个字符**的 op 码（'M' / 'l' / 'e' …），C 那边收 char；
+     而 well-known symbol 的名字是整个词，塞进 char 里就成了多字符字符常量
+     （实现定义的打包值，clang 只是警告）。所以单独标一位，三处发射点各自照它走。 */
+  js_sym_wk: { js: '$js_sym_wk', c: 'omni_js_sym_wk', arity: 0, lit: ['wk'], litText: true },
   // 内建原型（Object / Function / Array / String / Number / Boolean / Symbol /
   // Error / Map / Set / RegExp / Iterator）—— 内建方法就住在这些对象上
   js_realm_proto: { js: '$js_realm_proto', c: 'omni_js_realm_proto', arity: 0, lit: ['proto'] },
@@ -883,7 +887,9 @@ const P1_JS_ONLY = [
   'js_obj_own_keys', 'js_obj_freeze', 'js_obj_seal', 'js_obj_prevent_ext',  'js_obj_is_frozen', 'js_obj_is_sealed', 'js_obj_is_ext', 'js_obj_to_string',
   'js_obj_from_entries', 'js_obj_descs',
   'js_instanceof', 'js_instanceof_p', 'js_is_obj', 'js_to_prim', 'js_iter_proto', 'js_iter_next', 'js_for_in_keys',
-  'js_sym_new', 'js_sym_for', 'js_sym_key_for', 'js_sym_desc', 'js_sym_str',  'js_sym_wk', 'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
+  // Symbol 那一族已经有 C 孪生了（runtime/omni_js_sym.c，ADR-0020 P1-c 的第一步），
+  // 所以不在这张单子里 —— 真对象那一片还在，见下面几行。
+  'js_realm_proto', 'js_realm_ctor', 'js_ctor_get', 'js_global_this', 'js_date_new', 'js_date_parts',
   'js_date_parse', 'js_proxy_new', 'js_date_utc',
   'js_promise_new', 'js_promise_resolved', 'js_promise_rejected', 'js_promise_all',
   'js_promise_all_settled', 'js_promise_any', 'js_promise_race', 'js_promise_try',

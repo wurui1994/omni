@@ -17,6 +17,8 @@ const char *omni_dyn_tag_name(int t) {
     "regexp",
     /* 字节缓冲与 TextEncoder（ADR-0011）：ArrayBuffer 与它上面的两种视图是同一个标签 */
     "bytes", "TextEncoder",
+    /* Symbol（ADR-0020 P1）：JS 的 typeof 是 "symbol"，错误消息里也用这个名字 */
+    "symbol",
   };
   return names[t];
 }
