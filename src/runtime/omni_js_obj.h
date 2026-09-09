@@ -237,6 +237,19 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   if (o.tag == OMNI_DYN_FN && key.len == 9 && memcmp(key.p, "prototype", 9) == 0) { \
     return omni_js_fn_proto_(o); \
   } \
+  /* f.name / f.length：按**模板**查那张按 fp 索引的静态表（见 omni.h 的 omni_js_fn_meta）。
+     表里没有的答 "" / 0 —— 与 JS 那条腿上 $js_fn_name 读不到 $nm 时一模一样，不是悄悄的
+     错答案。别的名字（call / apply / bind …）照旧落到下面那句响错。 */ \
+  if (o.tag == OMNI_DYN_FN \
+      && ((key.len == 4 && memcmp(key.p, "name", 4) == 0) \
+          || (key.len == 6 && memcmp(key.p, "length", 6) == 0))) { \
+    const omni_js_fn_meta *fm = omni_js_fnmeta_find((const void *)omni_fn_ck((omni_fn)o.u.ref)->fp); \
+    if (key.len == 4) { \
+      omni_str nm = fm == NULL ? omni_str_new("", 0) : omni_str_new(fm->nm, fm->nmlen); \
+      return omni_dyn_of_s16(omni_s16_of_utf8(nm)); \
+    } \
+    return omni_dyn_of_real(fm == NULL ? 0.0 : (double)fm->len); \
+  } \
   /* 真对象走槽表 + 原型链（ADR-0020 P1-c）：`o.x` 与 `o["x"]` 是同一条路 */ \
   if (o.tag == OMNI_DYN_OBJ) { \
     return omni_js_getp(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), omni_dyn_undef()); \

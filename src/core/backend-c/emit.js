@@ -321,6 +321,7 @@ class CEmitter {
     for (const f of this.mod.funcs) this.line(`${this.proto(f)};`);
     this.line();
     for (const c of closures) this.closureMake(c);
+    const fnMetaN = this.fnMetaTable(closures);
     for (const f of this.mod.funcs) this.func(f);
     // 线性内存的 data 段（ADR-0017 第二刀）：字节发成 static 数组，main 里一次拷进去。
     // 与 backend-llvm 的 private constant、backend-js 的数组字面量是同一件事的三种写法。
@@ -346,7 +347,9 @@ class CEmitter {
     // 退出码走 omni_host_exit_code —— process.exitCode 是个可写的槽，不是返回值。
     // 入口过一层 omni_run_entry：那一层把活挪到一条大栈的线程上（见 omni_js_host.c）。
     const profReg = this.prof && this.mod.funcs.length > 0 ? ' atexit(omni_prof_dump);' : '';
-    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+    // fn.name / fn.length 那张表（见 fnMetaTable）：登记一次，之后 `f.name` 就按 fp 查它
+    const fnMetaReg = fnMetaN > 0 ? ` omni_js_fnmeta_set(omni_js_fnmeta_tbl, ${fnMetaN});` : '';
+    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     this.out[this.s16At] = this.s16PoolLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
@@ -365,6 +368,32 @@ class CEmitter {
     for (const f of c.captures) this.line(`${cTypeName(f.type)} c_${f.name};`);
     this.indent--;
     this.line('};');
+  }
+
+  /**
+   * fn.name / fn.length 的表（ADR-0020 P1-c）。函数在这个值域里还不是真对象，这两格是
+   * Function.prototype 上的两个访问器；JS 那条腿把值存在闭包记录里（`$nm` / `$ln`），
+   * 而这条腿的记录是"函数指针 + 捕获"，加两个字段就得动每一份记录的布局与每一处捕获的下标。
+   *
+   * 所以按**模板**走：同一个模板发出来的每一格函数，名字与形参个数都一样（bind 出来的那种
+   * 这条腿上还没有），于是一张按 `fp` 索引的静态表就够 —— 造闭包那条热路上一点开销都不加。
+   * 只有 JS 前端会填 fnName，别的前端这张表是空的（一个字节都不发）。
+   * @returns {number} 表里有多少格（0 就不发表，main 里也不登记）
+   */
+  fnMetaTable(closures) {
+    const named = closures.filter((c) => c.fnName !== undefined);
+    if (named.length === 0) return 0;
+    this.line(`static const omni_js_fn_meta omni_js_fnmeta_tbl[${named.length}] = {`);
+    this.indent++;
+    for (const c of named) {
+      const bytes = utf8Bytes(c.fnName);
+      const len = c.fnLen === undefined ? 0 : c.fnLen;
+      this.line(`{ (const void *)(omni_fnptr)${c.mangled}, ${cString(bytes)}, ${bytes.length}, ${len} },`);
+    }
+    this.indent--;
+    this.line('};');
+    this.line();
+    return named.length;
   }
 
   closureMake(c) {

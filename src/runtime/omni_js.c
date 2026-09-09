@@ -361,6 +361,24 @@ bool omni_js_is_object(omni_dyn v) {
    内部槽；这条腿上**没有真对象**（还在 P1-c 里），所以既没有 toStringTag 也没有原型链 ——
    照标签直说，与 prelude 的 $js_obj_to_string 那个 switch 逐支对齐。
    WeakMap / WeakSet 在这个值域里就是 Map / Set（ADR-0020 P4 画的边界），所以也报 Map / Set。 */
+/* 函数值的 name / length 那张按 fp 索引的表（见 omni.h 上的那段说明）。生成的代码在 main 里
+   登记一次，这儿只存指针 —— 表是静态的、活得比程序里任何一格闭包都长。
+   查表是线性的：读 `f.name` 是冷路径（造闭包才是热路径，而那条路一点没动）。 */
+static const omni_js_fn_meta *js_fnmeta = NULL;
+static int64_t js_fnmeta_n = 0;
+
+void omni_js_fnmeta_set(const omni_js_fn_meta *t, int64_t n) {
+  js_fnmeta = t;
+  js_fnmeta_n = n;
+}
+
+const omni_js_fn_meta *omni_js_fnmeta_find(const void *fp) {
+  for (int64_t i = 0; i < js_fnmeta_n; i++) {
+    if (js_fnmeta[i].fp == fp) return &js_fnmeta[i];
+  }
+  return NULL;
+}
+
 omni_dyn omni_js_obj_to_string(omni_dyn t) {
   const char *n;
   switch (t.tag) {

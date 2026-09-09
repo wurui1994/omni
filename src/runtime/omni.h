@@ -540,6 +540,17 @@ omni_dyn omni_js_sym_wk(omni_str name);
    所以既没有 Symbol.toStringTag 也没有原型链（ADR-0020 P1-c）。 */
 bool omni_js_is_object(omni_dyn v);
 omni_dyn omni_js_obj_to_string(omni_dyn t);
+
+/* 函数值的 name / length（ADR-0020）。函数在这个值域里还不是真对象，这两格是
+   Function.prototype 上的两个访问器，值住在闭包记录里 —— 而 C 侧的记录是"函数指针 +
+   捕获"，加两个字段就得动每一份记录的布局。所以这儿按**模板**走：同一个闭包模板发出来的
+   每一格函数，名字与形参个数都一样（bind 出来的那种这条腿上还没有），于是一张按 fp 索引的
+   静态表就够，生成的代码在 main 里一次性登记（见 backend-c/emit.js 的 fnMetaTable）——
+   造闭包那条热路上一点开销都不加。表里没有的（Omni 域的闭包、匿名的那些）答 "" / 0，
+   与 JS 那条腿上 $js_fn_name 读不到 $nm 时的答案一致。 */
+typedef struct { const void *fp; const char *nm; int64_t nmlen; int64_t len; } omni_js_fn_meta;
+void omni_js_fnmeta_set(const omni_js_fn_meta *t, int64_t n);
+const omni_js_fn_meta *omni_js_fnmeta_find(const void *fp);
 /* Date 里只算数的那两格（omni_js_date.c）。new Date(…) 造的是真对象，那一格还在 P1-c 里。 */
 omni_dyn omni_js_date_utc(omni_dyn y, omni_dyn mo, omni_dyn d, omni_dyn h,
                           omni_dyn mi, omni_dyn s, omni_dyn ms);
