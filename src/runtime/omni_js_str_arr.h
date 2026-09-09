@@ -376,6 +376,87 @@ static omni_dyn omni_js_obj_from_entries(omni_dyn pairs) { \
   } \
   return o; \
 } \
+/* 属性描述符（规范 6.2.6）。这条腿上"普通对象"是 dict、数组是一段 items —— 都**没有
+   属性位**（没有访问器、没有不可写／不可枚举的自有槽），所以描述符只能是照实合成的那一格：
+   数据属性、三个位按值域算。三档锁是唯一能把位改掉的东西（冻住 → 不可写、不可配置；
+   封住 → 不可配置），所以那两张表要问一句。
+   数组与字符串照规范 10.4.2.1：下标是可写／可枚举／可配置的数据属性（字符串上是只读、
+   不可配置），length 可写但**不可枚举、不可配置**（字符串上连写都不行）。
+   Object.defineProperty 那一格**照旧拒**：`{ value: 1 }` 在规范里造的是不可枚举、不可写、
+   不可配置的属性，而 dict 表达不出来 —— 收下就是悄悄的错答案。 */ \
+static omni_dyn omni_js_desc_mk_(omni_dyn v, bool w, bool e, bool c) { \
+  omni_dyn d = omni_js_obj_new(); \
+  omni_js_obj_set(d, omni_dyn_of_s16(omni_js_s16_lit("value")), v); \
+  omni_js_obj_set(d, omni_dyn_of_s16(omni_js_s16_lit("writable")), omni_dyn_of_bool(w)); \
+  omni_js_obj_set(d, omni_dyn_of_s16(omni_js_s16_lit("enumerable")), omni_dyn_of_bool(e)); \
+  omni_js_obj_set(d, omni_dyn_of_s16(omni_js_s16_lit("configurable")), omni_dyn_of_bool(c)); \
+  return d; \
+} \
+static omni_dyn omni_js_obj_desc(omni_dyn o, omni_dyn k) { \
+  omni_str key = omni_js_prop_k(k); \
+  bool w = !omni_js_frozen_(o); \
+  bool c = !omni_js_lk_has_(omni_js_sealed_tbl_, o); \
+  bool len_key = key.len == 6 && memcmp(key.p, "length", 6) == 0; \
+  int64_t idx = omni_js_dec_index(key); \
+  if (o.tag == OMNI_DYN_STR16) { \
+    omni_s16 s = o.u.s16; \
+    if (len_key) return omni_js_desc_mk_(omni_dyn_of_real((double)s.len), false, false, false); \
+    if (idx >= 0 && idx < s.len) { \
+      return omni_js_desc_mk_(omni_dyn_of_s16(omni_s16_slice(s, idx, idx + 1)), false, true, false); \
+    } \
+    return omni_dyn_undef(); \
+  } \
+  if (o.tag == OMNI_DYN_LIST) { \
+    LT l = (LT)o.u.ref; \
+    if (len_key) return omni_js_desc_mk_(omni_dyn_of_real((double)l->len), w, false, false); \
+    if (idx >= 0) { \
+      if (idx >= l->len) return omni_dyn_undef(); \
+      return omni_js_desc_mk_(l->items[idx], w, true, c); \
+    } \
+    DT x = omni_js_xprops_(o, false); \
+    int64_t e = x == NULL ? -1 : DT##_find(x, key); \
+    if (e < 0) return omni_dyn_undef(); \
+    return omni_js_desc_mk_(x->vals[e], w, true, c); \
+  } \
+  if (o.tag == OMNI_DYN_DICT) { \
+    DT d = omni_js_dict_of(o); \
+    int64_t e = DT##_find(d, key); \
+    if (e < 0) return omni_dyn_undef(); \
+    return omni_js_desc_mk_(d->vals[e], w, true, c); \
+  } \
+  return omni_dyn_undef(); \
+} \
+/* Object.getOwnPropertyNames / Reflect.ownKeys 那一格。sel 是编译期的一个字符：
+   's' 要字符串键（含不可枚举的 length）、'e' 只要可枚举的、'y' 只要符号键 ——
+   这条腿上没有符号键的自有槽，所以 'y' 一律是空表。与 prelude 的 $js_obj_own_keys 对着写。 */ \
+static omni_dyn omni_js_obj_own_keys(int sel, omni_dyn o) { \
+  if (sel == 'y') return omni_js_arr_wrap(LT##_new()); \
+  if (sel == 'e') return omni_js_obj_keys(o); \
+  if (o.tag == OMNI_DYN_LIST) { \
+    LT out = omni_js_arr_of(omni_js_arr_own_keys(o)); \
+    LT ks = LT##_new(); \
+    int64_t n = ((LT)o.u.ref)->len; \
+    for (int64_t i = 0; i < n; i++) LT##_push(ks, out->items[i]); \
+    LT##_push(ks, omni_dyn_of_s16(omni_js_s16_lit("length"))); \
+    for (int64_t i = n; i < out->len; i++) LT##_push(ks, out->items[i]); \
+    return omni_js_arr_wrap(ks); \
+  } \
+  if (o.tag == OMNI_DYN_STR16) { \
+    LT ks = omni_js_arr_of(omni_js_str_idx_keys(o.u.s16)); \
+    LT##_push(ks, omni_dyn_of_s16(omni_js_s16_lit("length"))); \
+    return omni_js_arr_wrap(ks); \
+  } \
+  return omni_js_obj_keys(o); \
+} \
+/* Object.getOwnPropertyDescriptors：每个自有键一格描述符 */ \
+static omni_dyn omni_js_obj_descs(omni_dyn o) { \
+  omni_dyn out = omni_js_obj_new(); \
+  LT ks = omni_js_arr_of(omni_js_obj_own_keys('s', o)); \
+  for (int64_t i = 0; i < ks->len; i++) { \
+    omni_js_obj_set(out, ks->items[i], omni_js_obj_desc(o, ks->items[i])); \
+  } \
+  return out; \
+} \
 /* Object.groupBy（ES2024）：走一遍迭代，回调收 (value, index)，每组按**原顺序**攒成一个
    数组。规范说交出来的是一格 null 原型的对象 —— 这条腿上没有原型链，dict 就是那格对象
    （`Object.getPrototypeOf` 本来就还在 P1_JS_ONLY 里，问不着）。键照规范过 ToPropertyKey：

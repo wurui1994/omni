@@ -886,15 +886,18 @@ const P1_JS_ONLY = [
   // normalize：NFC/NFD 要 Unicode 的分解与组合表，C 侧还没有（见上面那条 op 的注）
   'js_str_normalize',
   'js_obj_new_p', 'js_obj_create', 'js_obj_defs', 'js_obj_proto_get', 'js_obj_proto_set', 'js_getp', 'js_setp',
-  'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own', 'js_obj_def', 'js_obj_desc',
+  'js_obj_has_p', 'js_obj_del_p', 'js_obj_has_own',
   'js_reflect_set', 'js_reflect_def', 'js_reflect_proto_set', 'js_reflect_prevent_ext',
   // freeze / seal / preventExtensions 那六格已经有 C 孪生了（omni_js_obj.h 的三档锁）：
   // 这条腿上能被锁的只有容器（list / dict / Map / Set / bytes），而真对象在 C 上还不存在，
   // 所以那一支本来就到不了 —— 六格在 C 上是**完整**的，不是半对的。
   // js_is_obj 与 js_obj_to_string 也有 C 孪生了（omni_js.c）：两条都是照标签直说 ——
   // 这条腿上没有真对象，所以既没有 Symbol.toStringTag 也没有原型链。
-  'js_obj_own_keys',
-  'js_obj_descs',
+  // getOwnPropertyDescriptor(s) 与 getOwnPropertyNames 有 C 孪生了（omni_js_str_arr.h）：
+  // 这条腿上"普通对象"是 dict、数组是一段 items，都没有属性位，所以描述符是照实合成的
+  // 那一格（数据属性 + 三档锁算出来的三个位）。defineProperty 照旧拒 —— `{ value: 1 }`
+  // 在规范里造的是不可枚举、不可写、不可配置的属性，dict 表达不出来，收下就是悄悄的错答案。
+  'js_obj_def',
   // Object.fromEntries 与 Object.groupBy 有 C 孪生了（omni_js_str_arr.h）：JS 那条腿上
   // 它们造的是真对象（后者还是 null 原型），而这条腿上"普通对象"就是 dict —— 可观察的
   // 那几样（取键、Object.keys、JSON、分组的原顺序）逐格相同，原型那一格本来就问不着。

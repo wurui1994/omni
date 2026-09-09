@@ -45,3 +45,11 @@ const m = Object.freeze(new Map([["k", 1]]));
 console.log(String(Object.isFrozen(m)), String(m.set("j", 2).size));
 // 原始值照规范：冻住、封住都算，不可扩展
 console.log(String(Object.isFrozen(1)), String(Object.isSealed("s")), String(Object.isExtensible(true)));
+// 描述符现在**五条腿都有**（ADR-0020 P1-c）：数据属性 + 三档锁算出来的三个位。
+// 冻住那格的 writable / configurable 是 false —— JS 那条腿从前写死 true，写进去却确实被拦下。
+console.log(JSON.stringify(Object.getOwnPropertyDescriptor(a, "0")));
+console.log(JSON.stringify(Object.getOwnPropertyDescriptor(s, "0")));
+console.log(JSON.stringify(Object.getOwnPropertyDescriptor({ q: 1 }, "q")));
+console.log(JSON.stringify(Object.getOwnPropertyDescriptor([5], "length")));
+console.log(Object.getOwnPropertyNames({ x: 1, y: 2 }).join(","), Object.getOwnPropertyNames([5]).join(","));
+console.log(JSON.stringify(Object.getOwnPropertyDescriptors({ z: 3 })));

@@ -4082,15 +4082,19 @@ function $js_obj_desc(o, k) {
       $js_def_data(d, "configurable", c, true, true, true);
       return d;
     };
-    if (key === "length") return mk(len, t === "list", false, false);
+    /* 三档锁要算进去（ADR-0020）：冻住的那格不可写、不可配置，封住的只是不可配置 ——
+       从前这三支写死了 true，于是 Object.freeze([1,2]) 之后描述符还说 writable: true，
+       而写进去确实被拦下了。两把尺子都给 false（量过），这是悄悄的错答案。 */
+    const w = !$FROZEN.has(o), c = !$SEALED.has(o);
+    if (key === "length") return mk(len, t === "list" && w, false, false);
     if (typeof key === "string" && $js_isidx(key)) {
       const i = Number(key);
       if (i >= len) return undefined;
-      return t === "list" ? mk(o[i], true, true, true) : mk($js_asS16(o)[i], false, true, false);
+      return t === "list" ? mk(o[i], w, true, c) : mk($js_asS16(o)[i], false, true, false);
     }
     if (t === "list") {
       const x = $js_xprops(o, false);
-      if (x !== undefined && x.has(key)) return mk(x.get(key), true, true, true);
+      if (x !== undefined && x.has(key)) return mk(x.get(key), w, true, c);
     }
     return undefined;
   }
