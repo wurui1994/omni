@@ -61,6 +61,8 @@ import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
+/* 后端过一格注册表（ADR-0021 S3）：调用点不叫函数名，可选加载才有立足处 */
+import { target } from './plugin.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
@@ -1623,7 +1625,7 @@ function asyModsBuild(path, dir) {
     const d = new Diagnostics();
     const mod = lowerCoreSexpr(new SourceFile(`${u.name}.sx`, u.text), d, `omni_init_${jsUnitSym(u.name)}`);
     d.throwIfErrors();
-    writeText(jsPath, emitJs(mod, { esm: true }));
+    writeText(jsPath, target('js').emit(mod, { esm: true }));
     // 下一趟要复用这一份时，前端连它的正文都不降 —— 那时靠的就是这三格：
     // `.sec` 是它定义的名字与签名（别人引它要发的 `(sig …)`），
     // `.wk` 是它引到的那些 weak 项的正文（那一档按程序生成，不生就成了未声明），
@@ -2215,7 +2217,7 @@ function buildLlvm(mod, outPath, workDir) {
   const mir = lowerToMir(mod);
   const errs = verifyMir(mir);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
-  const ir = emitLlvm(mir);
+  const ir = target('llvm').emit(mir);
   const dir = workDir === undefined ? workDirFor('ll', hash16(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const llPath = join(dir, `${basename(outPath)}.ll`);
@@ -2313,7 +2315,7 @@ function runViaJit(mod, argv, srcPath) {
   const mir = lowerToMir(mod);
   const errs = verifyMir(mir);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
-  const ir = emitLlvm(mir);
+  const ir = target('llvm').emit(mir);
   const llPath = join(dir, 'jit.ll');
   writeText(llPath, ir);
   vStep(`backend llvm  ${ir.length} bytes -> ${llPath}`);
@@ -2811,7 +2813,7 @@ function main(argv) {
       quick: rest.includes('-q') || rest.includes('--quick'),
       emitOf: (kind, p) => {
         const { mod } = compile(p, []);
-        return kind === 'c' ? emitC(mod, {}) : emitJs(mod);
+        return kind === 'c' ? target('c').emit(mod) : target('js').emit(mod);
       },
       buildTo: (p, out, work) => buildNative(compile(p, []).mod, out, work).cc,
     });
@@ -2941,7 +2943,7 @@ function main(argv) {
       // 注意这不是"原生构建少了一种能力"：JS 源码在两边都能编能跑（tests/js-exec 那条轴
       // 在自举出来的编译器上也过），少的只是"直接吃一段 JS 文本当程序跑"的那个引擎。
       if (hasJsEngine()) {
-        const js = emitJs(mod);
+        const js = target('js').emit(mod);
         vStep(`backend js  ${js.length} bytes`);
         if (cacheable) jsCachePut(path, js, lastAsyDeps);
         // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）：跑在本进程里的这一条
@@ -2956,7 +2958,7 @@ function main(argv) {
     }
     case 'emit-js': {
       const { mod } = compile(path, rest);
-      stdout(emitJs(mod));
+      stdout(target('js').emit(mod));
       return 0;
     }
     case 'emit-c': {
@@ -3022,7 +3024,7 @@ function main(argv) {
       const oi = rest.indexOf('-o');
       const stem = basename(path).replace(/\.(omni|omnis|omnid|js|sx|asy)$/, '');
       const out = oi >= 0 ? rest[oi + 1] : `${stem}.js`;
-      const js = emitJs(mod);
+      const js = target('js').emit(mod);
       writeText(out, js);
       stderr(`omni: built ${out} (${js.length} 字节，node ${basename(out)} 就能跑)\n`);
       return 0;
@@ -3062,7 +3064,7 @@ function main(argv) {
       const mir = lowerToMir(mod);
       const errs = verifyMir(mir);
       if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
-      stdout(emitLlvm(mir));
+      stdout(target('llvm').emit(mir));
       return 0;
     }
     case 'run-llvm': {
@@ -3077,7 +3079,7 @@ function main(argv) {
       const errs = verifyMir(mir);
       if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
       const ki = rest.indexOf('--kernel');
-      stdout(emitSpirv(mir, ki >= 0 ? rest[ki + 1] : undefined));
+      stdout(target('spirv').emit(mir, { kernel: ki >= 0 ? rest[ki + 1] : undefined }));
       return 0;
     }
     case 'run-jit': {
