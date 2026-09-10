@@ -23,6 +23,7 @@ import { parseAsyBuiltins } from '../frontend-asy/types.js';
 import { Diagnostics, SourceFile } from '../source/diag.js';
 import { lowerAsy } from '../frontend-asy/lower.js';
 import { lowerCoreSexpr } from '../sexpr/lower.js';
+import { asyUnitModules } from '../frontend-asy/link.js';
 
 /* cli.js 那个 loadGrammar 是"读表 + 印一行"，而这一份不许伸手去拿 cli 的东西 ——
    表还是同一个 loadGrammarTable（缓存就在它里面），只是印那一行走注入进来的 log。 */
@@ -356,4 +357,92 @@ export function compileAsy(path) {
   const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, asyText(path)), diags);
   diags.throwIfErrors();
   return { ast: null, mod, diags };
+}
+
+/**
+ * 一个单元 -> 它那份产物的名字（盘上就叫这个，只换后缀）。
+ *
+ * 名字取**源文件的基名 + 一段身份哈希**。基名是给人看的；哈希那一段是必须的 ——
+ * 只取基名时两个不同目录下同名的源文件共用一份产物与一份清单，而清单里记的是**它**
+ * 那个源文件的路径，那个文件没动就算"命中"。量到的样子：`omni run /tmp/tri2.asy`
+ * 一步前端都不走，跑出来的是 `/tmp/asyfp/tri2.asy` 那一份的输出（一份画图的 EPS，
+ * 而 /tmp/tri2.asy 里一句画图都没有）。这不是慢，是**跑错程序**。
+ * 与 rustc 的 `-C metadata`、Cargo 的 fingerprint 同一个做法：身份进名字。
+ *
+ * 身份是「解析到的真文件 + 模块身份」两样一起哈：模块身份是 `collections.iter(T=int)`
+ * 那样的东西（同一个文件的两次模板实例化是两份产物），真文件把同名不同目录分开。
+ */
+export function unitName(info) {
+  const k = info === undefined || info === null ? null : info;
+  const src = k === null ? '' : (k.file !== '' ? k.file : k.key);
+  if (src === '') return 'omni_entry';
+  const cut = Math.max(src.lastIndexOf('/'), src.lastIndexOf('\\'));
+  const nm = cut < 0 ? src : src.slice(cut + 1);
+  const dot = nm.lastIndexOf('.');
+  const base = dot <= 0 ? nm : nm.slice(0, dot);
+  return `${base}__${hash16(`${src}|${k === null ? '' : k.key}`).slice(0, 8)}`;
+}
+
+/**
+ * 产物名 -> **JS 标识符**里能用的那一段（`omni_init_<这一段>`）。
+ *
+ * 产物名是照源文件名起的，而文件名里的字符不都能当标识符 —— 量出来的形状是
+ * examples/xxsq01x-1.asy：入口单元叫 `xxsq01x-1`（入口那份不带 hash 后缀），
+ * 于是 `main-xxsq01x-1.js` 里那句 `import { omni_init_xxsq01x-1 } …` 是
+ * `SyntaxError: Unexpected token '-'`，例子在**加载模块**这一步就炸了（连诊断都发不出）。
+ *
+ * 洗法：不合法的字符换成 `_`；**洗过的**再缀一段原名的 hash —— 不缀就把
+ * `a-b` 与 `a_b` 洗成同一个名字，那是"另一个例子的初始化"那一类的错。
+ * 文件名照旧用没洗过的那个（import 路径是字符串，什么字符都行）。
+ */
+export function jsUnitSym(name) {
+  const clean = name.replace(/[^A-Za-z0-9_$]/g, '_');
+  if (clean === name) return name;
+  return `${clean}__n${hash16(name).slice(0, 8)}`;
+}
+
+/** 一个源文件路径 -> 产物名（清单那一路只有路径，没有单元信息）。 */
+export function fileUnitName(p) {  return unitName({ key: p, file: p, tpl: false });
+}
+
+/**
+ * `_mainname()` 会降成什么（源文件的基名，去掉 `.asy` —— 与 lower.js 的 rootModName 同一条规矩）。
+ * 单元的印记里那格 `main:` 用它，见 asyModsBuild 里的 stampOf。
+ */
+export function asyMainWord(p) {
+  const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  const nm = cut < 0 ? p : p.slice(cut + 1);
+  return nm.endsWith('.asy') ? nm.slice(0, nm.length - 4) : nm;
+}
+
+/**
+ * asy -> **每个源文件一份**核心方言模块（第七十五刀）。
+ * 每一份里用到的别人家的名字是 `(sig "出处" (…))`，所以每一份都能单独编 ——
+ * 一个库改了只重编它自己那一份，别的照旧从盘上拿。
+ */
+export function asyUnitTexts(path, skip) {
+  const out = {};
+  asyText(path, out, skip === undefined || skip === null ? null : skip.fn,
+    skip === undefined || skip === null ? null : skip.iface);
+  if (out.sections === undefined) throw new OmniError('asy: 这一趟没有分段信息');
+  // 复用那几份带进来的"只剩产物"的模块（见 asyModsSkip）
+  out.sections.extra = skip === undefined || skip === null ? [] : [...skip.extras.values()];
+  // 哪些单元这一趟**一格产物都不留**（`OMNI_ASY_UNITS=1`，见 lower.js 的 unitWhy）
+  if (env('OMNI_ASY_UNITS') === '1') {
+    for (const w of out.sections.unitWhy === undefined ? [] : out.sections.unitWhy) {
+      API.log(`asy 单元 ${w.why}  ${w.key === '' ? '<无源文件>' : w.key}`);
+    }
+  }
+  const r = asyUnitModules(out.sections, unitName, out.sections.tail);
+  API.log(`asy units      ${r.units.length} 份新拼、${r.reused.length} 份原样留着`);
+  return r;
+}
+
+/**
+ * 登记（ADR-0021 S4）：内建时核心调一次，做成动态库之后由 `omni_plugin_init` 调同一个 —— 
+ * 注册表那一层看不出区别。宿主服务先经 `initAsy` 收下（asy 那几格印记服务比 wat / sx 多）。
+ */
+export function register(api) {
+  initAsy(api);
+  api.registerLang(['.asy'], 'asy', (path) => compileAsy(path));
 }
