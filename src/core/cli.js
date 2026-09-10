@@ -60,7 +60,7 @@ import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
-import { emitC, emitCWithStats } from './backend-c/emit.js';
+import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
@@ -2961,6 +2961,25 @@ function main(argv) {
     }
     case 'emit-c': {
       const { mod } = compile(path, rest);
+      /* `--split[=N]`：分文件发射（P2）。N + 1 个 TU 落到 `--work DIR` 里，清单印到 stderr。
+       * 这一步只证"切出来的每一格能各自编、链起来跑得对"——并行编与内容寻址的缓存在 build
+       * 那一边。默认（不给这个开关）走单体那条路，一个字节都不变。 */
+      const si = rest.findIndex((a) => a === '--split' || a.startsWith('--split='));
+      if (si >= 0) {
+        const a = rest[si];
+        const n = a.includes('=') ? Number(a.slice(a.indexOf('=') + 1)) : Number(rest[si + 1]);
+        const wi = rest.indexOf('--work');
+        if (wi < 0) throw new OmniError('emit c --split 要 --work DIR：N + 1 个 TU 得有个落点');
+        const dir = rest[wi + 1];
+        mkdirAll(dir);
+        const u = emitCUnits(mod, { groups: Number.isFinite(n) && n > 0 ? n : 16 });
+        for (const t of u.units) {
+          writeText(join(dir, `${t.name}.c`), t.text);
+          vStep(`${t.name}.c  ${fmtBytes(t.text.length)}`);
+        }
+        vStats(u.units.map((t) => t.text).join(''), u.stats);
+        return 0;
+      }
       const r = emitCWithStats(mod, { amalgamate: rest.includes('--amalgamate') });
       stdout(r.text);
       vStats(r.text, r.stats);

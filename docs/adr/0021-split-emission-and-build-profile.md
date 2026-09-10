@@ -344,6 +344,31 @@ clang 连代码都不生成（上面 528 字节那一条）。
 
 生成的函数本身要去掉 `static`（原型也一样，emit.js:1059 的 `proto`），否则跨 TU 调不到。
 
+### 试了，响着坏了：P2a 到底还是前提（配方上面那一段少数了三样）
+
+按上面的配方把发射器切开（`emit c --split=N --work DIR`，已落），12 + 1 个 TU：
+
+```
+发射   13 个 TU，每个约 8 MB（共用前段 6.8 MB + 自己的 1.5 MB）
+编译   10 路并行 7.4 s 墙上 / 24.6 s CPU（单体是 11.0 s 墙上）
+链接   0.9 s，产物 21.2 MB（单体 18.9 MB，+12% 是复制的 helper）
+跑     omni: uncaught: TypeError: cannot set property 'items' of undefined   <- 响着坏了
+```
+
+**坏在我数漏了：模板实例化自己就带状态。** `OMNI_JS_OBJ(...)` 是在**生成的 C 里**展开的
+（emit.js:665），而它里面有
+
+- `static omni_dyn omni_js_realm_tbl_[25]`（omni_js_obj.h:1723）—— 内建原型那 25 格
+- `static DT omni_js_xprops_tbl_`（:241）—— list / Map / Set 身上"表外属性"的旁表
+- `static omni_dyn omni_js_ctor_tbl_[19]`（:184）—— 构造器那 19 格
+
+复制它们等于每个 TU 一套对象模型：在 u0 里给数组挂的属性，u3 看不见。所以
+**P2a（给容器 / JS 那一族宏加存储类参数，让"声明"与"定义一次"分开）确实是前提** ——
+原来的计划是对的，我上面那一段"只有三样不能复制"数漏了模板自己的状态。
+
+好在这一趟不是白试的，它把三件事钉住了：切分的发射器已经能用、并行编 7.4 s 是真的、
+体积代价 +12% 是真的。下一步就是 P2a，然后这条路直接就通。
+
 ## 顺带记下的两个坑（都不是性能问题，是这一轮量的时候撞上的）
 
 **`dist` 安装跑不了 `omni c tcc`。** 它把 libc 头解析到 `<dist>/include`，而 bootstrap 的

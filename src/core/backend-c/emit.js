@@ -64,6 +64,17 @@ class CEmitter {
      * `emit-c --stats` 与 `build --stats` 印它 —— 42 万行落在一个翻译单元里时，
      * "是谁撑起来的"这件事从前压根没有答案。P2 分文件发射用的也是这一格分组。 */
     this.stats = new Map();
+    /* 分文件发射（P2）：默认关，开了之后
+     *   - 生成的函数与它的原型去掉 `static`（跨 TU 要调得到）
+     *   - 模块级变量在共用前段里发 extern，定义只留一份
+     *   - 三个下标把输出切成"共用前段 / 只发一次的那段 / 每个函数 / 尾巴"
+     * 共用前段照抄进每个 TU：没被引用的 static 一份机器码都不生成（量出来 528 字节），
+     * 所以复制它只花每个 TU 约 0.46 秒的编译税。带状态的那三样不能复制 —— 见 ADR-0021。 */
+    this.split = opts.split === true;
+    this.markA = -1;
+    this.markB = -1;
+    this.markC = -1;
+    this.fnRanges = [];
     /* 认得的函数名（mangled）。stackArgs 只对这些用栈上的实参 list ——
      * 闭包的 make、外部符号那些不在表里，走老路。 */
     this.knownFuncs = new Set();
@@ -322,14 +333,30 @@ class CEmitter {
     for (const c of classes) this.classNew(c);
     // JS 前端的模块级变量（ADR-0011）：顶层函数要能互相看见，所以是真全局，
     // 不是 omni_main 的局部量。初值一律 undefined，赋值发生在 omni_main 里。
-    for (const g of this.mod.jsGlobals ?? []) this.line(`static omni_dyn g_${g.name} = { .tag = OMNI_DYN_UNDEF };`);
+    /* 分文件时模块级变量是**唯一一格真共享的状态**：共用前段里只发 extern，定义在
+     * "只发一次"那段（见构造器那条注释与 ADR-0021 的配方）。复制它就是复制状态。 */
+    const gdefs = [];
+    for (const g of this.mod.jsGlobals ?? []) {
+      const def = `omni_dyn g_${g.name} = { .tag = OMNI_DYN_UNDEF };`;
+      if (this.split) { this.line(`extern ${def.slice(0, def.indexOf(' =') )};`); gdefs.push(def); }
+      else this.line(`static ${def}`);
+    }
     // 核心方言的模块级变量（第二十四刀）：有类型，所以发的是那个类型的静态量。
     // 不给初值 —— C 的静态存储本来就零，而真正的初值是 omni_main 最前面那几句赋值
     // （字符串的"零"是个池子里的空串常量，那不是常量表达式，只能在运行时赋）。
-    for (const g of this.mod.globals ?? []) this.line(`static ${cTypeName(g.type)} g_${g.name};`);
+    for (const g of this.mod.globals ?? []) {
+      const def = `${cTypeName(g.type)} g_${g.name};`;
+      if (this.split) { this.line(`extern ${def}`); gdefs.push(def); }
+      else this.line(`static ${def}`);
+    }
     this.profTable();
     for (const f of this.mod.funcs) this.line(`${this.proto(f)};`);
+    /* 闭包的 make 也要跨 TU 调得到：原型进共用前段，定义留在"只发一次"那段 ——
+     * 单例闭包的 `static omni_fn one` 是状态，复制它 `f === f` 会假。 */
+    if (this.split) for (const c of closures) this.line(`${this.closureProto(c)};`);
     this.line();
+    this.markA = this.out.length;
+    for (const d of gdefs) this.line(d);
     for (const c of closures) this.closureMake(c);
     const fnMetaN = this.fnMetaTable(closures);
     /* 按源文件记一笔产出（P1）：每个函数发了多少行、多少字节。
@@ -337,6 +364,7 @@ class CEmitter {
      * 而它同时也是 P2 分文件发射的分组依据（`f.file` 来自 lower.js 的 fileOfSpan）。
      * 只在这一格量：字面量池、容器实例化、成员派发器那些是**整份程序共用**的，摊给谁都不对，
      * 所以它们归到 stats 的 '(shared)' 那一行里（见 cli.js 印表那儿）。 */
+    this.markB = this.out.length;
     for (const f of this.mod.funcs) {
       const i0 = this.out.length;
       this.func(f);
@@ -348,7 +376,9 @@ class CEmitter {
       s.lines += this.out.length - i0;
       s.bytes += bytes;
       this.stats.set(k, s);
+      this.fnRanges.push({ file: k, i0, i1: this.out.length, bytes });
     }
+    this.markC = this.out.length;
     // 线性内存的 data 段（ADR-0017 第二刀）：字节发成 static 数组，main 里一次拷进去。
     // 与 backend-llvm 的 private constant、backend-js 的数组字面量是同一件事的三种写法。
     const mem = this.mod.mem === undefined ? null : this.mod.mem;
@@ -428,9 +458,54 @@ class CEmitter {
     return named.length;
   }
 
+  closureProto(c) {
+    const ps = c.captures.map((f) => `${cTypeName(f.type)} c_${f.name}`);
+    return `omni_fn ${c.make}(${ps.length ? ps.join(', ') : 'void'})`;
+  }
+
+  /**
+   * 把发好的这一份切成 N 个翻译单元（P2）。共用前段照抄进每一格 —— 没被引用的 static
+   * clang 一份机器码都不生成（量出来 528 字节），代价只是每个 TU 约 0.46 秒的编译税。
+   * 最后一格带 main、模块级变量的定义、闭包的 make 与那两张表（都是"只能有一份"的东西）。
+   */
+  units(groups = 16) {
+    if (!this.split) throw new Error('c.units: 只有 split 模式能切');
+    const j = (a, b) => this.out.slice(a, b).join('\n');
+    const shared = j(0, this.markA);
+    const once = j(this.markA, this.markB);
+    const tail = j(this.markC, this.out.length);
+    /* 先按源文件聚，再按字节装箱（大的先放，放进当前最小的那个桶）：94 个源文件里
+     * 最大的一个也只占 5.6%，所以装得挺平；同一个源文件的函数不拆开，热路径上
+     * "改一个文件只重编一个 TU"才成立。 */
+    const byFile = new Map();
+    for (const r of this.fnRanges) {
+      const g = byFile.get(r.file) ?? { bytes: 0, parts: [] };
+      g.bytes += r.bytes;
+      g.parts.push(j(r.i0, r.i1));
+      byFile.set(r.file, g);
+    }
+    const bins = [];
+    for (let i = 0; i < Math.max(1, groups); i++) bins.push({ bytes: 0, parts: [] });
+    for (const [, g] of [...byFile.entries()].sort((a, b) => b[1].bytes - a[1].bytes)) {
+      let m = bins[0];
+      for (const b of bins) if (b.bytes < m.bytes) m = b;
+      m.bytes += g.bytes;
+      m.parts.push(...g.parts);
+    }
+    const units = [];
+    let n = 0;
+    for (const b of bins) {
+      if (b.parts.length === 0) continue;
+      units.push({ name: `u${n}`, text: `${shared}\n${b.parts.join('\n')}\n` });
+      n++;
+    }
+    units.push({ name: 'main', text: `${shared}\n${once}\n${tail}\n` });
+    return units;
+  }
+
   closureMake(c) {
     const ps = c.captures.map((f) => `${cTypeName(f.type)} c_${f.name}`);
-    this.line(`static omni_fn ${c.make}(${ps.length ? ps.join(', ') : 'void'}) {`);
+    this.line(`${this.split ? '' : 'static '}omni_fn ${c.make}(${ps.length ? ps.join(', ') : 'void'}) {`);
     this.indent++;
     // 带 `single` 的那一格（`(fnref f)` 的薄适配器）发**单件**：同一个具名函数取出来的值
     // 必须是同一个东西，不然 `f == g` 这种按身份比的式子永远为假。量过 asy：具名函数
@@ -1056,7 +1131,7 @@ class CEmitter {
     // `static inline __attribute__((always_inline))`，36.0s -> 38.5s（没变好）。
     // 真要消掉热路径上那些调用（`asy__rm` 3.2 亿次、`triple * real` 各 2578 万次），
     // 只有两条路：**发射器自己在调用点摊开**，或者把编译等级提到 `-O1`（那是 ADR 级的决定）。
-    return `static ${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
+    return `${this.split ? '' : 'static '}${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
   }
 
   func(f) {
@@ -1779,4 +1854,15 @@ export function emitCWithStats(mod, opts = {}) {
   const e = new CEmitter(mod, opts);
   const text = e.emit();
   return { text, stats: e.stats };
+}
+
+/**
+ * 分文件发射（P2）：交 N + 1 个翻译单元（最后一个带 main）与那份分布。
+ * 与 `emitC` 是两条路而不是一个开关：单体那条路一个字节都不动（`split` 默认关），
+ * 于是"分文件"能独立验收 —— 两条路各自跑出来的程序必须表现一样。
+ */
+export function emitCUnits(mod, opts = {}) {
+  const e = new CEmitter(mod, { ...opts, split: true });
+  e.emit();
+  return { units: e.units(opts.groups ?? 16), stats: e.stats };
 }

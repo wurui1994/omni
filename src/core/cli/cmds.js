@@ -232,6 +232,7 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
       brief: '印某个中间/目标形态：ast|oir|mir|sx|asy|js|c|llvm|spirv',
       flags: [F_MODE, F_WORK, F_INC, F_STATS,
         { name: '--amalgamate', arity: 0, brief: '（c）把整份运行时内联进一个文件' },
+        { name: '--split', arity: 1, value: 'N', brief: '（c）分成 N 个翻译单元落到 --work DIR' },
         { name: '--bytes', arity: 0, brief: '（mir）印大小与每个函数的内容哈希' },
         { name: '--kernel', arity: 1, value: 'NAME', brief: '（spirv）哪一个 kernel' }],
     },
