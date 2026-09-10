@@ -2301,10 +2301,15 @@ function main(argv) {
        * 一个是给人读的 IR，一个是给 V8 吃的产物。**声明了就得能用**：`run x.c
        * --backend js` 跑的就是这段文本，那 `emit js x.c` 就得能把它印出来。 */
       else if (form === 'js') cmd = 'c-emit-js';
+      /* `llvm`：C -> **原生** MIR -> LLVM IR（ADR-0022 的 J4）。C 是外部符号最多的一条腿
+       * （libc 那一族全是 extern 函数与 CCALL），所以它同时是"LLVM 这条腿能不能调外部
+       * C 函数"的验收面。 */
+      else if (form === 'llvm') cmd = 'c-emit-llvm';
       else {
         throw new OmniError(`emit ${form} x.c: 没有这一条 —— C 的终点是 MIR，`
-          + '不经过 OIR，所以 `.c` 只有 `omni emit mir`（IR）与 `omni emit js`'
-          + '（MIR -> JS 源码）；要目标文件用 `omni c obj`，要可执行文件用 `omni build`');
+          + '不经过 OIR，所以 `.c` 只有 `omni emit mir`（IR）、`omni emit js`'
+          + '（MIR -> JS 源码）与 `omni emit llvm`（原生 MIR -> LLVM IR）；'
+          + '要目标文件用 `omni c obj`，要可执行文件用 `omni build`');
       }
     }
   }
@@ -2865,6 +2870,27 @@ function main(argv) {
     case 'c-emit-js': {
       const { flags, prog } = cSplitArgs(rest);
       stdout(emitMirJs(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
+      return 0;
+    }
+    /**
+     * `emit llvm x.c`：C -> **原生** MIR -> LLVM IR（ADR-0022 的 J4）。
+     *
+     * 走 `c.toMirNative`（与 `c obj` 同一条）而不是 `c.toMir`：后者出来的 MIR 带线性内存、
+     * 指针是内存里的偏移 —— 拿它去调真的 libc 是错的（量出来就是 `declare i32
+     * @printf(i64, i64)`，那两个"地址"其实是偏移）。这条腿是真机器，地址就得是真地址。
+     */
+    case 'c-emit-llvm': {
+      const { flags } = cSplitArgs(rest);
+      const { mod, warnings } = cap('c.toMirNative')(path, {
+        includeDirs: incDirs(flags),
+        sysIncludeDirs: sysIncDirs(flags) ?? cap('c.sysInclude')(),
+        arch: 'arm64',
+        os: undefined,
+      }, defArgs(flags));
+      for (const w of warnings) stderr(`${w}\n`);
+      const errs = verifyMir(mod);
+      if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+      stdout(target('llvm').emit(mod));
       return 0;
     }
     case 'c-run': {

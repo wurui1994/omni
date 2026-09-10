@@ -113,7 +113,20 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
      `invalid redefinition of function 'main'`。
 
   所以 `emit llvm x.c` 这扇门**暂时不开**（试过，能跑通到"clang 拒绝"这一步，
-  正是靠它把上面三条定出来的）：按这个项目的规矩，降不了就该拒，不该开一扇出无效 IR 的门。
+  正是靠它把上面三条定出来的）。
+
+  **三条都补完了，门开了**：extern 函数发 `declare`（签名从调用点收）、模块自带 `main`
+  时不发包装（C 的 `main` 就是进程入口，`c obj` 那条路也是这么链的；顺带一个旁证：
+  原生 C 的 MIR 里 `entry` 是**文件路径**，压根不是函数）、胖指针在外部调用点抽出地址
+  （`externArg`）。第三条是量出来的：`strlen("abcdefg")` 侥幸对（地址正好落在第一格），
+  而 `strcmp("abc","abc")` 直接 **segfault** —— 16 字节的聚合在 arm64 与 x86_64 上都占
+  两格寄存器，于是第二个指针实参落错了位置。抽地址之后 `declare i32 @strcmp(ptr, ptr)`，
+  两份用例的退出码分别是 10 与 7，都对。
+
+  **下一格边界（已定位）**：`extern FILE *stdout` 那一类**外部全局量** ——
+  `emit llvm hello.c` 现在停在 `llvm 后端目前不支持 dyn：模块级变量 __stdinp`。
+  它要的是 `@__stdinp = external global ptr`（jancy 那边 `mapVariable` 管的就是这一类），
+  补上之后 `printf` 那一族才通，而那正好也是 J4 后半（宿主把地址映进 JIT）的第一个真用例。
 
 - **J5 FFI 第二刀（JIT → 任意库）**：库表 + `dlopen` 回退，用 `libm` 的 `sin`/`cos` 验收。
   C_ABI 里 `lib: null` 的那些（libc）走 `dlsym(RTLD_DEFAULT, …)`，第三方库走 `--lib`。

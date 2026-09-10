@@ -339,6 +339,24 @@ class LlvmEmitter {
   /** `<类型> <值>`，call/store 那些地方要的形式。 */
   typed(ref) { return `${this.ty(this.tyOf(ref), 'operand')} ${this.val(ref)}`; }
 
+  /**
+   * 一个实参**按 C 的 ABI**摆（外部符号的调用点用它，ADR-0022 的 J4）。
+   *
+   * 唯一要动的是**胖指针**（`T_STR` -> `[2 x i64]`：地址 + 长度）：真 C 那边收的是一格
+   * `const char *`，而一个 16 字节的聚合在 arm64 与 x86_64 上都要占**两格**寄存器 ——
+   * 于是第二个指针实参就落错了位置。量出来的：`strlen("abcdefg")` 侥幸对（地址正好在
+   * 第一格），`strcmp("abc","abc")` 直接 segfault。所以在调用点把地址抽出来。
+   */
+  externArg(ref) {
+    const at = this.tyOf(ref);
+    if (at !== T_STR) return { text: this.typed(ref), ty: this.ty(at, '外部符号的形参') };
+    const a0 = this.fresh();
+    this.line(`  ${a0} = extractvalue [2 x i64] ${this.val(ref)}, 0`);
+    const p = this.fresh();
+    this.line(`  ${p} = inttoptr i64 ${a0} to ptr`);
+    return { text: `ptr ${p}`, ty: 'ptr' };
+  }
+
   /* --------------------------------------------------------------- 基本块 */
 
   startBlock(name) {
@@ -526,26 +544,40 @@ class LlvmEmitter {
     }
     if (this.strs.size > 0) this.line('');
 
-    // main 与 C 后端那一行逐句对应（backend-c/emit.js:152）：argc/argv 要存下来，
-    // 退出码是 omni_host_exit_code 里的槽，不是 omni_main 的返回值。
-    this.line('define i32 @main(i32 %argc, ptr %argv) {');
-    this.line('entry:');
-    this.line('  call void @omni_host_init(i32 %argc, ptr %argv)');
-    // 内存要在入口之前就位（第二刀）：先建、再拷 data 段，与 wasm 的 instantiate 同序。
-    if (this.mir.mem !== null) {
-      this.line(`  call void @omni_lin_init(i64 ${this.mir.mem.min}, i64 ${this.mir.mem.max})`);
-      let di = 0;
-      for (const d of this.mir.mem.data) {
-        this.line(`  call void @omni_lin_data(i64 ${d.off}, ptr @omni_data_${di}, i64 ${d.bytes.length})`);
-        di++;
+    /* 包装的 main 只在**模块自己没有 main** 时发。
+     *
+     * C 那条腿上程序自己的 `main` 就是进程入口（`c obj` 那条路也是这么链的：真 crt +
+     * 用户的 main，没有包装），而这一层的包装也叫 `main` —— 两个撞在一起，clang 直接报
+     * `invalid redefinition of function 'main'`。顺带一个旁证：原生 C 的 MIR 里
+     * `entry` 是**文件路径**（`@/tmp/x.c`），压根不是一个函数 —— 那条腿没有"入口函数"
+     * 这回事，所以包装里那句 `omni_run_entry(@entry)` 对它本来就无意义。
+     */
+    const hasOwnMain = this.mir.funcs.some((g) => g.name === 'main' && g.extern !== true);
+    if (hasOwnMain) {
+      this.line('; 模块自己带 main（C 那条腿），不发包装 —— 见上面那段');
+      this.line('');
+    } else {
+      // main 与 C 后端那一行逐句对应（backend-c/emit.js:152）：argc/argv 要存下来，
+      // 退出码是 omni_host_exit_code 里的槽，不是 omni_main 的返回值。
+      this.line('define i32 @main(i32 %argc, ptr %argv) {');
+      this.line('entry:');
+      this.line('  call void @omni_host_init(i32 %argc, ptr %argv)');
+      // 内存要在入口之前就位（第二刀）：先建、再拷 data 段，与 wasm 的 instantiate 同序。
+      if (this.mir.mem !== null) {
+        this.line(`  call void @omni_lin_init(i64 ${this.mir.mem.min}, i64 ${this.mir.mem.max})`);
+        let di = 0;
+        for (const d of this.mir.mem.data) {
+          this.line(`  call void @omni_lin_data(i64 ${d.off}, ptr @omni_data_${di}, i64 ${d.bytes.length})`);
+          di++;
+        }
       }
+      this.line(`  call void @omni_run_entry(ptr @${this.mir.entry})`);
+      this.line('  call void @omni_js_check_uncaught()');
+      this.line('  %fl = call i32 @fflush(ptr null)');
+      this.line('  %code = call i32 @omni_host_exit_code()');
+      this.line('  ret i32 %code');
+      this.line('}');
     }
-    this.line(`  call void @omni_run_entry(ptr @${this.mir.entry})`);
-    this.line('  call void @omni_js_check_uncaught()');
-    this.line('  %fl = call i32 @fflush(ptr null)');
-    this.line('  %code = call i32 @omni_host_exit_code()');
-    this.line('  ret i32 %code');
-    this.line('}');
     /* 外部 C 符号的声明回填（见构造器里那格 cabiDecl）：签名是从**调用点**收上来的，
        所以只能等函数体全发完。一个都没有时把占位那一行**抽掉**而不是留成空行 ——
        否则整份 IR 的行号平移一行，tests/llvm 的快照当场红（就是这么被抓着的）。 */
@@ -977,23 +1009,28 @@ class LlvmEmitter {
     if (op === OP.CALL) {
       const g = this.mir.funcs[f.a[i]];
       const refs = f.argsOf(f.b[i]);
-      const args = refs.map((r) => this.typed(r));
       const rt = this.ty(g.ret, `${g.name} 的返回值`);
-      /* 被调者的体不在这个模块里（`MirFunc.extern`）：签名从**这个调用点**收上来，
-         与 CCALL 共用那一格回填（原生腿的外部函数记录上没有 params）。 */
+      /* 被调者的体不在这个模块里（`MirFunc.extern`）：实参按 C 的 ABI 摆（胖指针要抽地址，
+         见 externArg），签名从**这个调用点**收上来，与 CCALL 共用那一格回填 ——
+         原生腿的外部函数记录上没有 params。 */
       if (g.extern === true) {
-        const fixed = refs.map((r) => this.ty(this.tyOf(r), `${g.name} 的形参`));
-        const sig = `${rt} (${fixed.concat(g.variadic === true ? ['...'] : []).join(', ')})`;
+        const as = refs.map((r) => this.externArg(r));
+        const sig = `${rt} (${as.map((a) => a.ty).concat(g.variadic === true ? ['...'] : []).join(', ')})`;
         const was = this.cabiDecl.get(g.name);
         if (was === undefined) this.cabiDecl.set(g.name, sig);
         else if (was !== sig) {
           throw new OmniError(`llvm: ${g.name} 在两处的签名不一样（${was} vs ${sig}）—— `
             + '同一个外部符号只能有一份声明');
         }
+        const cargs = as.map((a) => a.text).join(', ');
+        const call = g.variadic === true
+          ? `call ${sig} @${g.name}(${cargs})`
+          : `call ${rt} @${g.name}(${cargs})`;
+        this.line(rt === 'void' ? `  ${call}` : `  ${dst} = ${call}`);
+        return;
       }
-      const call = g.extern === true && g.variadic === true
-        ? `call ${this.cabiDecl.get(g.name)} @${g.name}(${args.join(', ')})`
-        : `call ${rt} @${g.name}(${args.join(', ')})`;
+      const args = refs.map((r) => this.typed(r));
+      const call = `call ${rt} @${g.name}(${args.join(', ')})`;
       this.line(rt === 'void' ? `  ${call}` : `  ${dst} = ${call}`);
       return;
     }
@@ -1030,13 +1067,12 @@ class LlvmEmitter {
           + 'IR 上这儿只有实参）—— 用 --backend interp');
       }
       const refs = f.argsOf(f.b[i]);
-      const args = refs.map((r) => this.typed(r));
+      const as = refs.map((r) => this.externArg(r));
       const rt = this.ty(t, `${entry} 的返回值`);
       const nfixed = f.aux[i];
       const variadic = nfixed !== 0;
       /* 声明只按**定参**发：同一个变参函数在不同调用点的实参个数不同，而定参那几格一样。 */
-      const fixed = refs.slice(0, variadic ? nfixed : refs.length)
-        .map((r) => this.ty(this.tyOf(r), `${entry} 的形参`));
+      const fixed = as.slice(0, variadic ? nfixed : as.length).map((a) => a.ty);
       const sig = `${rt} (${fixed.concat(variadic ? ['...'] : []).join(', ')})`;
       const was = this.cabiDecl.get(entry);
       if (was === undefined) this.cabiDecl.set(entry, sig);
@@ -1045,9 +1081,10 @@ class LlvmEmitter {
           + '同一个外部符号只能有一份声明');
       }
       /* 变参的调用点必须写出函数类型（LLVM 要靠它知道哪几格是定参）；不是变参的照常写。 */
+      const cargs = as.map((a) => a.text).join(', ');
       const call = variadic
-        ? `call ${sig} @${entry}(${args.join(', ')})`
-        : `call ${rt} @${entry}(${args.join(', ')})`;
+        ? `call ${sig} @${entry}(${cargs})`
+        : `call ${rt} @${entry}(${cargs})`;
       this.line(rt === 'void' ? `  ${call}` : `  ${dst} = ${call}`);
       return;
     }
