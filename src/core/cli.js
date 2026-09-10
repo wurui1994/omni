@@ -65,21 +65,14 @@ import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
 import {
   target, registerTarget, registerLang, lang, registerRunner, runner, noteUnloadable,
 } from './plugin.js';
-import { registerJsTarget } from './target/js.js';
-import { registerCTarget } from './target/c.js';
-import { registerLlvmTarget } from './target/llvm.js';
-import { registerSpirvTarget } from './target/spirv.js';
 /* 已经搬成独立模块的语言（ADR-0021 S4）：它们不 import 这一份，所以能独立编译。
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
 import { sdkRoot, sdkUsrInclude, sdkUsrLib, cSysInclude, cMir } from './lang/c.js';
-import { registerWatLang } from './lang/wat.js';
-import { registerGlslLang } from './lang/glsl.js';
-import { registerSxLang } from './lang/sx.js';
-import { registerJncLang, jncText, compileJnc } from './lang/jnc.js';
+import { jncText, compileJnc } from './lang/jnc.js';
+import { registerBuiltins } from './lang/builtin.js';
 import {
   asyText, compileAsy, asyLastDeps, unitName, jsUnitSym, fileUnitName, asyMainWord, asyUnitTexts,
-  registerAsyLang,
 } from './lang/asy.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
@@ -615,21 +608,6 @@ function vNext(...verbs) {
   }
 }
 
-/**
- * `.js` 入口走 JS 语法前端：链接整棵 import 树，再降级成 OIR（ADR-0011 第 6 步）。
- * 自举就是这一条路 —— 编译器自己的源码是 JS，喂给它自己就得到下一代。
- * 这里没有 check()：OIR 是降级器直接造的，类型早已确定（全是 dynamic）。
- */
-function compileJs(path) {
-  const diags = new Diagnostics();
-  const ast = linkJs(path, (p) => (exists(p) ? readText(p) : null), diags);
-  diags.throwIfErrors();
-  vStep(`js front end  link ${path}`);
-  const mod = lowerJs(ast, diags);
-  diags.throwIfErrors();
-  vStep(`js lower -> OIR  ${mod.funcs.length} funcs, ${mod.structs.length} structs`);
-  return { ast, mod, diags };
-}
 
 /**
  * WAT（WebAssembly 文本格式）-> OIR。S 表达式那条路径上的第一个真语法前端，
@@ -652,18 +630,8 @@ function compile(path, argv = []) {
 /* 前端在这儿登记（ADR-0021 S3）：内建的现在就登记，`dlopen` 出来的插件在
  * `omni_plugin_init` 里调同一个 registerLang —— 这一层看不出内建与外挂的区别。
  * 核心方言（.omni / .omnid / .omnis）不登记：它跟 driver 是一体的，永远在核心里。 */
-registerLang(['.js'], 'js', (path) => compileJs(path));
-registerJsTarget(pluginApi());
-registerCTarget(pluginApi());
-registerLlvmTarget(pluginApi());
-registerSpirvTarget(pluginApi());
-registerWatLang(pluginApi());
-registerGlslLang(pluginApi());
-registerSxLang(pluginApi());
 /* asy 那一份拿着核心给的宿主服务过日子（ADR-0021 S4）：印记那三格是驱动侧的
  * 缓存格式，AST 缓存的键沿用了它 —— 那处层次串门记在 lang/asy.js 的文件头里。 */
-registerAsyLang(pluginApi());
-registerJncLang(pluginApi());
 
 /**
  * 交给插件的那一格宿主服务（ADR-0021 的 S4）。
@@ -700,6 +668,9 @@ function pluginApi() {
  * （pluginLoad 里三种坏法各说清下一步），不许悄悄跳过 —— 悄悄跳过就成了
  * "我明明装了它，它却说没这门语言"。
  */
+/* 内建那一串（ADR-0021 S4）：收在 lang/builtin.js 里 —— 编薄核心时换掉那一份就行。 */
+registerBuiltins(pluginApi());
+
 function discoverPlugins() {
   const dir = join(installDir(), '..', '..', 'plugins');
   if (!isDir(dir)) return;
