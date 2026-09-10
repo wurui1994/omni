@@ -451,6 +451,56 @@ omni_js_json.h json_jb(jmp_buf)
 顺序于是变成：**搬状态（十一格）-> 模块 .o + 并行 + 内容寻址缓存 -> P5 可选子系统
 -> （可选）P2a 收体积**。
 
+## 形状定死：分语言 = 动态库 + 按需加载，`.o` 只是路上的一步
+
+上面那些 `.o` 的活儿都不是目的。目的是：**`omni` 核心是一个薄二进制，每种语言（前端）
+与每个目标（后端）各自是一个动态库，用到了才 `dlopen`。** 不是"都链进来但可以不链"，
+是"根本不在核心里"。
+
+核心里留什么：driver + OIR/HIR + host + **js 前端 + c 后端**（最小构建那条路，
+也是自举要走的那条）。别的一律出去：
+
+```
+核心（估）  共享段 7.75 M + frontend_js 1.90 + backend_c 0.53 + hir 0.56 + host 1.13
+            + cli 0.86 + parse 0.24 + 零碎 ≈ 13 M 的 C（今天是 25.9 M）
+插件（各自一个 .dylib / .so）
+  omni-lang-asy   2.48 M      omni-target-llvm   0.41 M
+  omni-lang-c     2.03 M      omni-target-spirv  0.18 M
+  omni-lang-jnc   1.42 M      omni-target-js     0.27 M
+  omni-lang-glsl  0.84 M      omni-native（link/mir/x64/arm64/interp）4.06 M
+  omni-lang-wat   0.24 M      omni-glr（sexpr/glr）0.87 M
+```
+
+### 三条硬约束（前两条已经量到，第三条是设计）
+
+1. **插件里不能有第二套对象模型。** 今天容器 / JS 那一族模板在**生成的 C 里**展开、
+   带静态状态（十一格，上一节列了）。插件是另一个映像，模板再展开一遍就是又一套
+   `realm_tbl_` / `xprops_tbl_` —— 就是那句 `TypeError: cannot set property 'items' of
+   undefined`。所以"搬状态"从"可选的便宜路"升级成**动态库的前提**：状态住在核心，
+   插件通过动态符号解析拿到（macOS `-Wl,-export_dynamic` + 插件侧
+   `-undefined dynamic_lookup`；Linux `-rdynamic`）。
+2. **自举链要 `backend_js`。** C1 / C2 两条不动点是 `emit-js` 出来的 `omni.mjs`。
+   所以要么 js 后端也内建，要么自举时把 `omni-target-js` 当第一个被加载的插件跑通 ——
+   后者更好：它顺带把插件机制自己变成自举的一部分，坏了当场就红。
+3. **插件 ABI 要是 C ABI 且带版本。** 形状：
+   `const omni_plugin_v1 *omni_plugin_init(const omni_host_v1 *)`，交一张
+   `{ abi_version, kind: lang|target, name, exts[], lower(), emit() }`。版本不合**响着拒**
+   （"这个插件是给 ABI 2 编的，我是 1"），不许按名字猜、不许静默降级。
+
+底子已经有了：`host/native_c.js` 与 `runtime/omni_r3.c` 里已经在用 `dlopen` / `dlsym`
+（LLVM-C 与 GL 那两条路），所以宿主原语不用新造。
+
+### 落地顺序（每一格能独立验收）
+
+- **S1 搬状态**：十一格进 `omni.h` 声明 / 一个 `.c` 定义（`DT` / `LT` 三格存 `void *`）。
+  验收：四门 + 自举全绿，单体产物功能不变。
+- **S2 核心 / 插件的 C 分家**：按模块发的 `.c` 分成"核心组"与"每个插件一组"，
+  插件组的函数外部链接。验收：核心单独链得起来（不含任何插件），`omni run t.js --backend c` 能跑。
+- **S3 一个插件走通**：先 `omni-target-js`（自举要它，坏了当场红）。`dlopen` + ABI 版本检查 +
+  找不到插件时的**响错**（"asy 前端没装：缺 omni-lang-asy.dylib"，不是 "unknown extension"）。
+- **S4 其余插件搬出去** + `--only` 决定构建哪些 + `bootstrap` 分步表把每个插件的时间/体积摆出来。
+- **S5**（可选）P2a 收共享段那 7.75 M。
+
 ## 顺带记下的两个坑（都不是性能问题，是这一轮量的时候撞上的）
 
 **`dist` 安装跑不了 `omni c tcc`。** 它把 libc 头解析到 `<dist>/include`，而 bootstrap 的
