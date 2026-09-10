@@ -66,6 +66,7 @@ import { target, registerLang, lang, registerRunner, runner } from './plugin.js'
 /* 已经搬成独立模块的语言（ADR-0021 S4）：它们不 import 这一份，所以能独立编译。
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
+import { sdkRoot, sdkUsrInclude, sdkUsrLib, cSysInclude, cMir } from './lang/c.js';
 import { registerWatLang } from './lang/wat.js';
 import { registerGlslLang } from './lang/glsl.js';
 import { registerSxLang } from './lang/sx.js';
@@ -208,63 +209,7 @@ function inclArgs(argv) {
  *
  * 一个都不成（不是 macOS、SDK 没装）就只剩自带那一段，与这一片之前一样。
  */
-let sdkRootCache;
-function sdkRoot() {
-  if (sdkRootCache !== undefined) return sdkRootCache;
-  const roots = [];
-  const fromEnv = env('SDKROOT');
-  if (fromEnv !== undefined && fromEnv !== '') roots.push(fromEnv);
-  roots.push('/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk');
-  roots.push('/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform'
-    + '/Developer/SDKs/MacOSX.sdk');
-  for (const r of roots) {
-    if (isDir(join(r, 'usr', 'include'))) {
-      sdkRootCache = r;
-      return r;
-    }
-  }
-  let out = '';
-  try {
-    const [code, so] = spawn('xcrun', ['--show-sdk-path'], 'c');
-    if (code === 0) out = so.trim();
-  } catch {
-    out = '';
-  }
-  sdkRootCache = out !== '' && isDir(out) ? out : null;
-  return sdkRootCache;
-}
-function sdkUsrInclude() {
-  const r = sdkRoot();
-  if (r === null) return null;
-  const p = join(r, 'usr', 'include');
-  return isDir(p) ? p : null;
-}
-/** SDK 的 `usr/lib` —— `-l` 找库的那一格，与 `tcc_add_macos_sdkpath` 找的同一处。 */
-function sdkUsrLib() {
-  const r = sdkRoot();
-  if (r === null) return null;
-  const p = join(r, 'usr', 'lib');
-  return isDir(p) ? p : null;
-}
 
-/**
- * C 前端的系统头目录，与 tcc 的 `sysinclude_paths` 同一形状：**自带那一份在前**
- * （tcc 的 `{B}/include`，我们是 `src/include` —— 位置与 `RUNTIME_DIR` 同一手法：
- * 相对程序镜像固定两级上去，于是不依赖当前工作目录），**本机 SDK 的
- * `/usr/include` 在后**（第八十八片）。`-isystem` 给的排在这两段前头，
- * `-nostdinc` 把这两段一起掐掉。
- *
- * `libDir` 给了就**换掉**自带那一份（`libDir/include`）—— 那是 tcc 的 `-B`
- * （`tcc_lib_path`）：tcc 里 `{B}/include` 就是自带那一份的位置，不是多一条。
- * SDK 那一段照留（tcc 的 `CONFIG_TCC_SYSINCLUDEPATHS` 也不受 `-B` 影响）。
- */
-function cSysInclude(libDir) {
-  const out = [libDir === undefined ? join(installDir(), '..', '..', 'include')
-    : join(libDir, 'include')];
-  const sdk = sdkUsrInclude();
-  if (sdk !== null) out.push(sdk);
-  return out;
-}
 
 /**
  * 一份 `.c` -> 预处理后的文本。**格式与 `tcc -E` 逐字节相同**（ADR-0017 第五刀）：
@@ -351,29 +296,6 @@ function depTarget(file) {
   return i > 0 ? `${b.slice(0, i)}.o` : 'a.out';
 }
 
-/**
- * 一份 `.c` -> MIR（ADR-0017 第六刀）。宿主回调与 `cppText` 同一套。
- * 良构检查在这里做完 —— 前端刚长出来，让 verifier 先骂比让解释器崩掉好查。
- */
-function cMir(path, incs, defs, args, sysIncs) {
-  const { mod, warnings } = lowerC(path, readText(path), {
-    readFile: (p) => {
-      try {
-        return readText(p);
-      } catch {
-        return null;
-      }
-    },
-    includeDirs: incs,
-    sysIncludeDirs: sysIncs ?? cSysInclude(),
-    dirname,
-    join,
-  }, defs.map(([name, body]) => ({ name, body })), args);
-  for (const w of warnings) stderr(`${w}\n`);
-  const errs = verifyMir(mod);
-  if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
-  return mod;
-}
 
 /**
  * 7 号往后那几节**造出来的次序**上的位置（第九刀第一百一十八片）。
