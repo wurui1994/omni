@@ -918,6 +918,14 @@ export class MirModule {
     this.accIndex = new Map();
     this.cabi = [];               // C_ABI 入口名，CCALL 的 a
     this.cabiIndex = new Map();
+    /* 与 `cabi` 同下标的**签名**（ADR-0022 的 J4b）：`{params:[…], ret}`，词汇就是 C_ABI
+     * 那七个标量（hir/c_abi.js 的 C_TYPE）。`undefined` = 「这一条在构建期那张封闭表里」。
+     *
+     * 为什么要有这一格：`hir/c_abi.js` 的 `C_ABI` 是**构建期**的常量表、键是 JS 的导入名，
+     * 前端造不出新条目。而 jancy 的 `opaque class` 宿主方法（opaque.rst:15-29）是**源码里
+     * 声明的**外部符号 —— 名字与签名只有前端知道。LLVM 那条腿不需要这一格（它的 declare
+     * 是从调用点收上来的），C 那条腿需要：`.c` 里得有一份 extern 原型。 */
+    this.cabiSig = [];
     this.closures = [];           // {make, funcName, captures:[名字]}
     // 线性内存（第二刀）。`null` = 这个模块不用内存 —— 于是既有的五个前端一个字节都不多发。
     // `{min, max, data}`：页数下界/上界（`max === 0` 表示不设上界），data 是
@@ -1189,12 +1197,33 @@ export class MirModule {
     return i;
   }
 
-  cabiNo(entry) {
+  /**
+   * 外部 C 符号的入口号（`CCALL` 的 a）。
+   *
+   * `sig`（`{params:[…], ret}`，可省）是**这个模块自己声明的**那一条的签名，见 `cabiSig`
+   * 头上那段。同一个名字两处给了**不一样的**签名就在这儿停：真发出去的话，C 那条腿会写出
+   * 两份对不上的 extern 原型，而 C 里重复声明成不同类型是硬错误 —— 报在那儿离原因很远。
+   */
+  cabiNo(entry, sig) {
     const hit = this.cabiIndex.get(entry);
-    if (hit !== undefined) return hit;
+    if (hit !== undefined) {
+      if (sig !== undefined) this.setCabiSig(hit, entry, sig);
+      return hit;
+    }
     const i = this.cabi.length;
     this.cabi.push(entry);
     this.cabiIndex.set(entry, i);
+    if (sig !== undefined) this.setCabiSig(i, entry, sig);
     return i;
+  }
+
+  /** 记下（或核对）一条外部 C 符号的签名。文本形式就是「(形参…)->返回」，比较用它。 */
+  setCabiSig(i, entry, sig) {
+    const was = this.cabiSig[i];
+    const text = `(${sig.params.join(',')})->${sig.ret}`;
+    if (was === undefined) { this.cabiSig[i] = { params: sig.params.slice(), ret: sig.ret, text }; return; }
+    if (was.text !== text) {
+      throw new Error(`mir: 外部 C 符号 ${entry} 在两处的签名不一样（${was.text} vs ${text}）`);
+    }
   }
 }

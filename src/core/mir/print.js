@@ -116,7 +116,12 @@ export function printMir(mod) {
   }
   for (const c of mod.closures) L.push(`closure ${c.make} -> ${c.funcName}  captures: ${c.captures.join(' ')}`);
   for (let i = 0; i < mod.ops.length; i++) L.push(`op ${pad(`o${i}`, 5)} ${opText(mod, i)}`);
-  for (let i = 0; i < mod.cabi.length; i++) L.push(`cabi c${i} ${mod.cabi[i]}`);
+  for (let i = 0; i < mod.cabi.length; i++) {
+    // 模块自己声明的那些带签名（ADR-0022 的 J4b）；构建期封闭表里的那些没有这一格。
+    const sig = (mod.cabiSig ?? [])[i];
+    L.push(`cabi c${i} ${mod.cabi[i]}${sig === undefined ? '' : ` ${sig.text}`}`);
+  }
+
 
   for (const f of mod.funcs) L.push('', ...printFunc(mod, f));
   return L.join('\n') + '\n';

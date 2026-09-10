@@ -363,7 +363,17 @@ class CEmitter {
     const used = this.mod.cabi ?? [];
     if (used.length === 0) return [];
     const out = ['/* 外部 C 符号（src/hir/c_abi.js） */'];
-    for (const name of used) {
+    for (let i = 0; i < used.length; i++) {
+      const name = used[i];
+      /* 模块自己声明的那些（ADR-0022 的 J4b，`mod.cabiSig`）：签名从**源码**来，
+         符号名就是那个名字本身 —— 构建期那张封闭表里没有它。jancy 的 `opaque class`
+         宿主方法走的是这一条。这些一律要发原型：标准头里不会有它们。 */
+      const own = (this.mod.cabiSig ?? [])[i];
+      if (own !== undefined) {
+        const ps = own.params.length > 0 ? own.params.map((p) => C_TYPE[p]).join(', ') : 'void';
+        out.push(`extern ${C_TYPE[own.ret]} ${name}(${ps});`);
+        continue;
+      }
       const sig = C_ABI[name];
       if (sig.std) continue;   // 标准头已经声明过，见 c_abi.js 里 std 的说明
       const ps = sig.params.length > 0 ? sig.params.map((p) => C_TYPE[p]).join(', ') : 'void';

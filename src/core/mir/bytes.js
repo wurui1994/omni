@@ -126,7 +126,14 @@ function callAuxDigest(v) {
 /** aux（或 a）上那个数字。`k` 是它是第几个字段 —— CCALL 的 a 与 aux **都是数字、
  * 意思不同**（入口号 / 变参分界），少了 `k` 会把「固定实参 2 个」印成一个 C 入口名。 */
 function auxDigest(mod, op, v, k) {
-  if (op === OP.CCALL) return k === 0 ? `cabi:${mod.cabi[v]}` : callAuxDigest(v);
+  /* 签名也进摘要（ADR-0022 的 J4b）：同一个名字、不同签名是**两个**外部符号，
+     不带它的话「把 `(ptr)->void` 改成 `(ptr,i32)->void`」这种改动摘要一个字都不变。 */
+  if (op === OP.CCALL) {
+    if (k !== 0) return callAuxDigest(v);
+    const sig = (mod.cabiSig ?? [])[v];
+    return `cabi:${mod.cabi[v]}${sig === undefined ? '' : sig.text}`;
+  }
+
   if (op === OP.CALLI) return callAuxDigest(v);
   if (op === OP.CALL) return `func:${mod.funcs[v].name}`;
   if (op === OP.FADDR) return `faddr:${mod.funcs[v].name}`;

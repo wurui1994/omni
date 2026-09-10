@@ -210,6 +210,33 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   - **不透明指针之后 `LLVMTypeOf(f)` 就是一个 `ptr`**。对它 `LLVMGetElementType` 拿到的是
     垃圾，当场 segfault。函数的类型要走 `LLVMGlobalGetValueType`。
 
+- **J4b jancy 的 `opaque class` 宿主方法**（`tests/jnc/bad/opaque-host-*.jnc` 现在还被拒着）。
+  两个前提先确认过了：
+
+  1. **地址模型对得上**。jancy 那条腿**没有线性内存** —— `emit-llvm 62-opaque.jnc` 里一条
+     `omni_lin_init`/`omni_lin_at` 都没有，对象是 `omni_ll_alloc` 从 arena 里切的**真地址**。
+     所以把 `self` 交给宿主的 C 函数是有意义的（C 的线性内存腿不是这样：那边指针是偏移）。
+  2. **现在没有任何一条路能说出"调这个 C 符号"**。`hir/c_abi.js` 的 `C_ABI` 是**构建期**的
+     常量表、键是 JS 的导入名，前端造不出新条目；sexpr 方言里也没有 extern-C 那个形式
+     （`cfn` 是闭包签名，不是这件事）。
+
+  **已落的第一格：MIR 那一侧**。`MirModule.cabiNo(entry, sig)` 现在能记下**这个模块自己
+  声明的**签名（`cabiSig[i]`，词汇就是 C_ABI 那七个标量），同名两处签名不一样就在那儿停 ——
+  真发出去的话 C 那条腿会写出两份对不上的 extern 原型，而 C 里重复声明成不同类型是硬错误。
+  签名也进了摘要（`bytes.js`）与清单（`print.js`）：同一个名字、不同签名是**两个**外部符号。
+  `backend-c` 的 `cAbiExterns()` 优先看这一格。
+
+  **下一格是一个设计点，量清楚了再动**：OIR 的 `CCall` 现在的含义是「**dynamic 域**的 C
+  调用」—— 实参逐个 `omni_cabi_*` marshal 进去、返回值 marshal 回来（`backend-c` 的
+  `case 'CCall'`）。而 jancy 那边值是**有类型的机器值**，要的是「不 marshal 的 C 调用」。
+  两者必须能分开，否则 backend-c 会把 marshaler 套在已经是机器值的东西上。所以这一刀是：
+  给 OIR 的 `CCall` 加一位 `raw`（实参已是声明的那几个 C 类型，不 marshal）+ OIR 模块上一张
+  名字到签名的表，`from_oir` 把它带进 `cabiNo(entry, sig)`；MIR 的 `CCALL` 本来就是「实参是
+  机器上的值」那个含义（见 backend-llvm 那一支的注释），所以 `raw` 与它是天然对上的。
+  三条腿各自的落点：`backend-c` 发 `sym(a, b)` 加强制转换；`backend-llvm`/arm64 什么都不用改
+  （签名从调用点收）；`emit_js`/`interp` 照旧拒（那两条腿没有 C 调用约定）。
+  最后 jnc 把无体的 opaque 方法降成对 `Class_method(self, …)` 的调用。
+
 - **J5 FFI 第二刀（JIT → 任意库）——已落**：`--dl` 让表里没有的名字再问一次进程的动态
   符号表（`dlsym(RTLD_DEFAULT, …)`），`--lib PATH` 先 `dlopen(…, RTLD_NOW|RTLD_GLOBAL)`
   再走同一条路（于是它顺带打开 `--dl`：要一个库进来，本来就是"表里没有的去外面找"这件事）。
