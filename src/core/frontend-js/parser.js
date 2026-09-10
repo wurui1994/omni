@@ -962,6 +962,19 @@ class JsParser {
         }
         case 'import': {
           const start = this.next();
+          /* **动态 import**（ES2020 的 `import(specifier)`）：它是一个表达式，不是那条
+             `import … from …` 声明。ES2025 允许第二个实参（import attributes），一起收下 ——
+             这一层只管读得进来、印得出去；能不能降是 lower.js 的事（现在明着报）。
+             逼出这一条的是我们自己的测试文件：`tests/c/run.js` 里
+             `await import('../../src/core/lang/c.js')` 让 js-roundtrip 那一轴解析不过。 */
+          if (this.at('(')) {
+            this.next();
+            const source = this.assignExpr();
+            const opts = this.eat(',') && !this.at(')') ? this.assignExpr() : null;
+            this.eat(',');
+            this.expect(')');
+            return { type: 'ImportCall', source, opts, span: this.spanFrom(start) };
+          }
           this.expect('.');
           const name = this.memberName();
           if (name !== 'meta') this.error(this.spanFrom(start), `unsupported 'import.${name}'`);

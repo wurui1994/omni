@@ -2486,6 +2486,12 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
       case 'ImportMeta':
         this.err(e.span, 'import.meta is not supported');
         return undefExpr();
+      /* 动态 import（`import(…)`）：读得进来、也印得出去（parser 与 gen 都认它），但**降不了** ——
+       * 这个值域里没有"运行期再拉一个模块进来"这回事（模块图在链那一步就定死了，ADR-0011）。
+       * 明着报是哪件事，别落到下面那条兜底的 "cannot lower expression 'ImportCall'"。 */
+      case 'ImportCall':
+        this.err(e.span, "dynamic import('...') is not supported (the module graph is fixed at link time)");
+        return undefExpr();
       /* new.target（ADR-0020）：函数入口用 js_nt_take 取一次存进一格临时量（与 this
        * 同一个路子），这儿只要读它。没有那一格就是"不在函数里"或箭头 —— 给 undefined。 */
       case 'NewTarget':

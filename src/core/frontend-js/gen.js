@@ -91,6 +91,11 @@ function startsBadly(e) {
   for (let n = e; n; ) {
     switch (n.type) {
       case 'Object': return true;
+      /* 解构赋值的目标（`({a, b} = o);` / `[a, b] = arr;`）：对象那一种也得加括号 ——
+         语句开头的 `{` 会被读成一个**块**，再解析一遍就是三条莫名的诊断
+         （`expected an expression, found '='`）。逼出这一条的是 js-roundtrip 上
+         03-array-object / 19-lazy-update / destructure-lazy 三份。 */
+      case 'ObjectPattern': return true;
       case 'FuncExpr': case 'ClassExpr': return true;
       case 'Binary': case 'Logical': n = n.left; continue;
       case 'Assign': n = n.target; continue;
@@ -136,6 +141,18 @@ class Gen {
       case 'Ident': this.emit(n.name); return;
       case 'This': this.emit('this'); return;
       case 'ImportMeta': this.emit('import.meta'); return;
+      /* 动态 import（ES2020；第二个实参是 ES2025 的 import attributes）。印成一次调用的
+         样子就够 —— `import` 在这个位置是关键字，不会与别的表达式混起来。 */
+      case 'ImportCall': {
+        this.emit('import(');
+        this.expr(n.source, PREC.Assign);
+        if (n.opts) {
+          this.emit(', ');
+          this.expr(n.opts, PREC.Assign);
+        }
+        this.emit(')');
+        return;
+      }
       case 'NewTarget': this.emit('new.target'); return;
 
       case 'Template': {
@@ -317,6 +334,10 @@ class Gen {
   /** 对象/类成员的键。能写成标识符就写成标识符（规范形式，幂等靠它）。 */
   key(k, computed) {
     if (computed) { this.emit('['); this.expr(k); this.emit(']'); return; }
+    /* **私名**（`#n`）不是字符串键：`IDENT_KEY` 不收 `#`，照那条路走会印成
+       `static '#n' = 1;` —— 那是一格普通的字符串属性，与 `A.#n` 的读法对不上，
+       再解析一遍就换了意思。所以私名原样印。 */
+    if (k.type === 'Ident' && k.name.startsWith('#')) { this.emit(k.name); return; }
     if (k.type === 'Ident') { this.emit(IDENT_KEY.test(k.name) ? k.name : quote(k.name)); return; }
     if (k.type === 'Str') { this.emit(IDENT_KEY.test(k.value) ? k.value : quote(k.value)); return; }
     this.expr(k);
@@ -470,6 +491,14 @@ class Gen {
     for (const m of n.members) {
       this.nl();
       if (m.static) this.emit('static ');
+      /* `static { … }`（ES2022 的类静态初始化块）：它没有键 —— `key` 是 null。
+         从前这一格直接落到下面的 `this.key(m.key, …)` 上，印出来的是一句宿主崩
+         （`Cannot read properties of null (reading 'type')`），而不是一份产物；
+         js-roundtrip 那一轴上有四份用例是这么红的。 */
+      if (m.kind === 'staticBlock') {
+        this.block(m.body);
+        continue;
+      }
       if (m.kind === 'field') {
         this.key(m.key, m.computed);
         if (m.value) { this.emit(' = '); this.expr(m.value, PREC.Assign); }

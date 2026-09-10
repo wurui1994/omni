@@ -73,12 +73,26 @@ const generated = new Map();
 
 for (const f of files) {
   const abs = join(root, f);
+  /* `tests/errors/` 下的是**反例**：那些文件存在的意义就是被拒（`js_label_on_empty_stmt.js`
+     钉的是"标签打在空语句上要报一条诊断"）。往返这一轴对它们的要求因此翻过来 ——
+     解析**报一条诊断**就算过；崩在宿主里（TypeError 那种，没有位置也没有源码行）才算红。
+     不把它们整个跳掉：跳掉就等于这一轴对"报错路径"一无所知，而那正是它们的用处。 */
+  const negative = f.startsWith(join('tests', 'errors'));
   let g1;
   try {
     g1 = regen(f, readFileSync(abs, 'utf8'));
   } catch (e) {
+    const diag = /:\d+:\d+: error:/.test(e.message);
+    if (negative && diag) {
+      record(`${f} [反例：解析报了诊断]`, true);
+      continue;
+    }
     record(`${f} [parse]`, false, indent(e.message));
     continue;
+  }
+  if (negative) {
+    // 反例解析得过也行（错在后面的阶段，比如 TDZ）—— 那就照常量往返
+    record(`${f} [反例：解析过得去，按往返查]`, true);
   }
   if (f.startsWith('src/core/')) generated.set(relative('src/core', f), g1);
   let g2;
