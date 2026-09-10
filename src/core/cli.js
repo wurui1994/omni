@@ -641,7 +641,9 @@ function compile(path, argv = []) {
   // 摇树（第一百〇六刀）：所有前端都是"把库整份降下来"，从入口不可达的那些函数一个都不发。
   // `OMNI_PRUNE=0` 关掉 —— 要对比"摇没摇"两份产物时用。
   if (env('OMNI_PRUNE') !== '0' && r !== undefined && r.mod !== undefined) {
-    const n = pruneFuncs(r.mod);
+    /* `--plugin NAME` 那一支：NAME 是摇树的另一个根（见 prune.js 的根三）。 */
+    const pi = argv.indexOf('--plugin');
+    const n = pruneFuncs(r.mod, pi >= 0 && argv[pi + 1] !== undefined ? [argv[pi + 1]] : []);
     if (n.after !== n.before) vStep(`prune  ${n.before} -> ${n.after} funcs（摇掉 ${n.before - n.after}）`);
   }
   return r;
@@ -1650,11 +1652,11 @@ function runtimeObjects(cc) {
  * 都能直接翻出那份 C 来看。不给的时候落在 `.omni-cache/work/c-<产物名>` 底下，
  * 名字是确定的（从前是 /var/folders 里一个随机名，出了问题捞不着）。
  */
-function buildNative(mod, outPath, workDir) {
+function buildNative(mod, outPath, workDir, plugin) {
   const dir = workDir === undefined ? workDirFor('c', hash16(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const cPath = join(dir, `${basename(outPath)}.c`);
-  const { text: cText, stats } = emitCWithStats(mod);
+  const { text: cText, stats } = emitCWithStats(mod, plugin === undefined ? {} : { plugin: plugin });
   writeText(cPath, cText);
   vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
   vStats(cText, stats);
@@ -1663,7 +1665,16 @@ function buildNative(mod, outPath, workDir) {
   // omni.h 里的 static inline，所以不靠 LTO 也能内联（tcc 没有 -flto）
   // 外部 C 符号用到的库跟在后面（ADR-0014 决策 4）；libc 的那些 lib 是 null，不产生 -l
   const libs = cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`);
-  const cargs = [...ccFlags(cc), cPath, ...runtimeObjects(cc), '-o', outPath, '-lm', ...libs];
+  /* 插件是一格动态库，两处与可执行文件不同：
+   *   - **不链运行时的 .o**：状态住在核心里（ADR-0021 的 S1），链进自己那一份就等于自带
+   *     一套 realm / xprops / this 槽 —— 那正是要避开的坑。符号靠动态解析过去。
+   *   - 平台看**输出的名字**：`.dylib` 要 `-undefined dynamic_lookup`（Mach-O 默认不许留
+   *     未定义符号），`.so` 留着就行。名字里已经说了是哪个平台，不必再猜一遍。 */
+  const dylib = outPath.endsWith('.dylib');
+  const shared = ['-fPIC', '-shared'].concat(dylib ? ['-undefined', 'dynamic_lookup'] : []);
+  const cargs = plugin === undefined
+    ? [...ccFlags(cc), cPath, ...runtimeObjects(cc), '-o', outPath, '-lm', ...libs]
+    : [...ccFlags(cc), ...shared, cPath, '-o', outPath, ...libs];
   const r = spawn(cc, cargs, 'o');
   if (r[0] !== 0) {
     throw new OmniError(`C backend produced code that ${cc} rejected:\n${r[2]}\n(kept at ${cPath})`);
@@ -2494,7 +2505,10 @@ function main(argv) {
       const out = oi >= 0 ? rest[oi + 1] : basename(path).replace(/\.(omni|omnis|omnid|js)$/, '');
       // --work DIR：生成的 C 留在 DIR 里而不是临时目录（自举链要能事后翻中间产物）
       const wi = rest.indexOf('--work');
-      const { cc } = buildNative(mod, out, wi >= 0 ? rest[wi + 1] : undefined);
+      /* `--plugin NAME`：出一格动态库而不是可执行文件，NAME 是它的 register 函数。 */
+      const pi = rest.indexOf('--plugin');
+      const { cc } = buildNative(mod, out, wi >= 0 ? rest[wi + 1] : undefined,
+        pi >= 0 ? rest[pi + 1] : undefined);
       /* 优化档要印出来：`-O0` 与 `-O1` 在这条腿上是 12 秒对 137 秒的差别（ADR-0021），
          而它从前只藏在 OMNI_OPT 里 —— 看不见的档等于每次都要猜这一趟慢是不是因为它。 */
       stderr(`omni: built ${out} via ${cc} ${cc.endsWith('tcc') ? '（tcc：不分档）' : optFlag()}\n`);

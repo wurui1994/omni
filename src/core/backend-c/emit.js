@@ -71,6 +71,9 @@ class CEmitter {
      * 共用前段照抄进每个 TU：没被引用的 static 一份机器码都不生成（量出来 528 字节），
      * 所以复制它只花每个 TU 约 0.46 秒的编译税。带状态的那三样不能复制 —— 见 ADR-0021。 */
     this.split = opts.split === true;
+    /* 插件（ADR-0021 S4）：不发 main，改发一格 `omni_plugin_init(api)` —— 值是那个
+     * 顶层 register 函数的名字。宿主初始化不能重做（见下面发那一句的地方）。 */
+    this.plugin = opts.plugin === undefined || opts.plugin === null ? null : opts.plugin;
     this.markA = -1;
     this.markB = -1;
     this.markC = -1;
@@ -408,7 +411,30 @@ class CEmitter {
     const strHookReg = this.dynSegs === true ? ' omni_js_prim_hook_init_();' : '';
     // 内建原型上那 93 格成员的表（见 protoMembers）：登记一次，之后读成员就查它
     const pmReg = this.protoMemberN > 0 ? ' omni_js_pm_init_();' : '';
-    this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${strHookReg}${pmReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+    if (this.plugin !== null) {
+      /* 插件那一支：**不发 main**，也不做宿主初始化 —— `omni_host_init` 与那几格 hook
+       * 核心早做过了，重做一遍会把共享的运行时状态（realm / 原型那两张表）重新播一遍种，
+       * 已经造出来的对象身份当场就不对了。这里只做两件事：跑一遍**这一份**的模块级语句
+       * （`omni_main`，那是它自己的 let / const），然后把 api 递给它的 register。
+       * `once_`：同一格插件被装两遍时模块级语句也只跑一次。 */
+      let reg = null;
+      for (const f of this.mod.funcs) if (f.name === this.plugin) reg = f;
+      if (reg === null) {
+        throw new OmniError(`--plugin ${this.plugin}：这份程序里没有这个顶层函数`
+          + '（插件的入口要是一个 export 出来的顶层函数，比如 registerAsyLang）');
+      }
+      /* 顶层函数的签名就是"一格实参 list"（闭包才多一格 self_，见 proto）。
+       * 形状不对就**响着拒** —— 悄悄少传一个参数在 C 那侧是能编过去的。 */
+      if (!Array.isArray(reg.params) || reg.params.length !== 1) {
+        throw new OmniError(`--plugin ${this.plugin}：它得收**一格**参数（那格 api），`
+          + `现在是 ${Array.isArray(reg.params) ? reg.params.length : '?'} 格`);
+      }
+      this.line(`omni_dyn omni_plugin_init(omni_dyn api) { static bool once_ = false;`
+        + ` if (!once_) { once_ = true; ${this.mod.entry}(); }`
+        + ` return ${reg.mangled}(&(struct omni_list_dynamic_s){ (omni_dyn[]){ api }, 1, 1 }); }`);
+    } else {
+      this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${strHookReg}${pmReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+    }
     this.out[this.s16At] = this.s16PoolLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事

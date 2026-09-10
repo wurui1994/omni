@@ -48,7 +48,7 @@ function walkStrings(x, hit, seen) {
  * 摇树。**原地改** mod.funcs（后端拿到的就是摇过的那一份）。
  * @returns {{before:number, after:number}} 摇之前 / 之后的函数个数
  */
-export function pruneFuncs(mod) {
+export function pruneFuncs(mod, roots) {
   const funcs = mod.funcs;
   if (!Array.isArray(funcs) || funcs.length === 0) return { before: 0, after: 0 };
   // 一个符号名可能同时是 name 与 mangled（入口那份两格不同），两格都认。
@@ -71,6 +71,9 @@ export function pruneFuncs(mod) {
     return { before: funcs.length, after: funcs.length };
   }
   reach(mod.entry);
+  /* 根三：插件的入口（ADR-0021 的 S4）。谁都不调它 —— 是核心 dlopen 之后从 C 那侧调进来的，
+     所以摇树看不见它，不当根就会被摇掉（量出来的：--plugin registerWatLang 报"没这个函数"）。 */
+  if (Array.isArray(roots)) for (const r of roots) reach(r);
   // 根二：funcs 之外那几格里提到的函数（方法表、闭包描述子、容器助手…）
   for (const k of Object.keys(mod)) {
     if (k === 'funcs') continue;

@@ -225,7 +225,8 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',
       brief: '编译成产物',
-      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS],
+      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
+        { name: '--plugin', arity: 1, value: 'NAME', brief: '出一格插件动态库，NAME 是它的 register 函数' }],
     },
     {
       name: 'emit', key: 'emit', usage: 'FORM FILE',
