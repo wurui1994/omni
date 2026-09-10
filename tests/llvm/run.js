@@ -117,27 +117,50 @@ if (update) {
 // 为什么不并进第 1 节：那一节的输入是 omni/wat/sx，走 `run-llvm`（自带 host 与线性内存）；
 // 这一组走的是 `emit llvm x.c` + `clang -x ir`，MIR 是**认真地址**的那一种（`c.toMirNative`），
 // 没有 host、没有线性内存 —— 两种模块在这一层是两条路，混在一张表里会看不出坏在哪条。
+//
+// **两个优化档都跑**（`-O0` 与 `-O2`）：这一层发出去的 IR 要在优化之后还是同一个答案，
+// 而「少了一位属性/少了一个 volatile」这一类错**只在开优化之后才露出来** ——
+// `04-setjmp.c` 就是这么被抓着的：`-O0` 逐字节相同，而 `-O1` 起 LLVM 把跳回来还要用的
+// 局部量提到了寄存器里，跳成一个不停印的死循环。所以跑的时候一律**带时限、带上限**：
+// 死循环不该把测试机的磁盘写满。
 const sysDir = join(root, 'tests', 'c', 'sys');
+const OPT_LEVELS = ['-O0', '-O2'];
+const RUN_MS = 20000;
+const OUT_CAP = 1 << 20;   // 1MB：这一组用例的输出都是几十字节，超出就是跑飞了
+/** 跑一个可执行文件，带时限与输出上限。 */
+function runBin(path) {
+  const r = spawnSync(path, [], { encoding: 'utf8', timeout: RUN_MS, maxBuffer: OUT_CAP });
+  const why = r.error === undefined || r.error === null ? null : r.error.code ?? String(r.error.message);
+  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status, why };
+}
 if (existsSync(sysDir)) {
   const tmp = mkdtempSync(join(tmpdir(), 'omni-llvm-c-'));
   for (const f of readdirSync(sysDir).sort()) {
     if (!f.endsWith('.c')) continue;
     const src = join(sysDir, f);
     const irPath = join(tmp, `${f}.ll`);
-    const binPath = join(tmp, `${f}.bin`);
     const em = run(['emit', 'llvm', src]);
     if (em.code !== 0) { bad(`c-extern/${f}`, `    emit llvm 没过：${em.err.trim().split('\n')[0]}`); continue; }
     writeFileSync(irPath, em.out);
-    const cc = spawnSync('clang', ['-x', 'ir', irPath, '-o', binPath], { encoding: 'utf8' });
-    if (cc.status !== 0) { bad(`c-extern/${f}`, `    clang -x ir 没过：${(cc.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`); continue; }
-    const ll = spawnSync(binPath, [], { encoding: 'utf8' });
     const c = run(['c', 'run', src]);
     const detail = [];
-    if (ll.stdout !== c.out) detail.push(`    stdout 与 omni-c 不同\n      omni-c ${JSON.stringify(c.out)}\n      llvm   ${JSON.stringify(ll.stdout)}`);
-    if (ll.stderr !== c.err) detail.push(`    stderr 与 omni-c 不同\n      omni-c ${JSON.stringify(c.err)}\n      llvm   ${JSON.stringify(ll.stderr)}`);
-    if (ll.status !== c.code) detail.push(`    退出码不同：llvm ${ll.status}, omni-c ${c.code}`);
+    let shape = '';
+    for (const opt of OPT_LEVELS) {
+      const binPath = join(tmp, `${f}${opt}.bin`);
+      const cc = spawnSync('clang', ['-x', 'ir', opt, irPath, '-o', binPath], { encoding: 'utf8' });
+      if (cc.status !== 0) {
+        detail.push(`    clang -x ir ${opt} 没过：${(cc.stderr ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
+        continue;
+      }
+      const ll = runBin(binPath);
+      if (ll.why !== null) { detail.push(`    ${opt} 没能正常跑完：${ll.why}（时限 ${RUN_MS}ms、输出上限 ${OUT_CAP} 字节）`); continue; }
+      if (ll.out !== c.out) detail.push(`    ${opt} stdout 与 omni-c 不同\n      omni-c ${JSON.stringify(c.out.slice(0, 200))}\n      llvm   ${JSON.stringify(ll.out.slice(0, 200))}`);
+      if (ll.err !== c.err) detail.push(`    ${opt} stderr 与 omni-c 不同\n      omni-c ${JSON.stringify(c.err.slice(0, 200))}\n      llvm   ${JSON.stringify(ll.err.slice(0, 200))}`);
+      if (ll.code !== c.code) detail.push(`    ${opt} 退出码不同：llvm ${ll.code}, omni-c ${c.code}`);
+      shape = `exit=${ll.code}, ${ll.out.length}+${ll.err.length} bytes`;
+    }
     if (detail.length > 0) bad(`c-extern/${f}`, detail.join('\n'));
-    else ok(`c-extern/${f} [llvm == omni-c] exit=${ll.status}, ${ll.stdout.length}+${ll.stderr.length} bytes`);
+    else ok(`c-extern/${f} [llvm == omni-c @ ${OPT_LEVELS.join(' ')}] ${shape}`);
   }
   rmSync(tmp, { recursive: true, force: true });
 }

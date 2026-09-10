@@ -210,10 +210,21 @@ const FCMP = new Map([[OP.EQ, 'oeq'], [OP.NE, 'une'], [OP.LT, 'olt'], [OP.GE, 'o
  */
 const NOPE = 'llvm 后端目前不支持';
 
-/* `setjmp` / `longjmp` 那一族：这一层不收。它们要的是**帧**（回到同一帧的同一条指令），
-   而 IR 上这儿只有实参。emit_js 的 JS_NOJMP、interp 的 SETJMP_NAMES/LONGJMP_NAMES
-   是同一张名单 —— 三条腿的边界必须一样，某条路悄悄多支持一点就是个假象。 */
-const LL_NOJMP = new Set(['setjmp', '_setjmp', 'sigsetjmp', '__sigsetjmp',
+/* `setjmp` / `longjmp` 那一族。这一层对它们的态度**按模块的地址模型分两种**：
+ *
+ * - 认真地址那条腿（`mod.native`，C 前端的 `toMirNative`）：它们**真的能用** —— 帧是真帧、
+ *   调的是真 libc，`tests/c/sys/04-setjmp.c` 在这条腿上与 `omni c run` 逐字节相同。
+ *   要补的只有一件事：声明上得有 `returns_twice`，否则优化器会假定 `setjmp` 只回一次，
+ *   把跳回来之后还要用的值当死值删掉 —— `-O0` 下看不出来，开优化就是个静悄悄的错答案。
+ * - 线性内存那几条腿：不收。那边「外部函数」是宿主的实现，回到同一帧的同一条指令这件事
+ *   没有落点 —— 与 emit_js 的 JS_NOJMP、interp 的 SETJMP_NAMES/LONGJMP_NAMES 同一张名单，
+ *   三条腿的边界必须一样，某条路悄悄多支持一点就是个假象。
+ */
+const LL_SETJMP = new Set(['setjmp', '_setjmp', 'sigsetjmp', '__sigsetjmp']);
+/** 跳走的那一半：它们**不回来**（C11 7.13.2.1）。IR 上的说法是 `noreturn`。 */
+const LL_LONGJMP = new Set(['longjmp', '_longjmp', 'siglongjmp']);
+/** 两半合起来才是「`setjmp`/`longjmp` 那一族」，边界（收不收）看的是这一张。 */
+const LL_JMPFAMILY = new Set(['setjmp', '_setjmp', 'sigsetjmp', '__sigsetjmp',
   'longjmp', '_longjmp', 'siglongjmp']);
 
 /* 线性内存的访问描述符 -> **内存里那几个字节**的 LLVM 类型（ADR-0017 第二刀）。
@@ -241,6 +252,7 @@ class LlvmEmitter {
     this.tmp = 0;           // 临时值编号（%t0…），与 %v<i> 分开，不会撞
     this.labels = 0;
     this.regions = [];      // 结构化控制流的区域栈，层数语义与 wasm 相同
+    this.vol = '';          // 槽位读写要不要 `volatile`（见 func 里那一段）
     this.live = false;      // 当前基本块还没被终结子关掉
     // 字符串常量的字节池。函数体里遇到才登记，模块末尾统一发 —— LLVM 不要求
     // 全局在使用之前出现，所以不必先扫一遍。键是内容，同一份字面量只发一次。
@@ -466,6 +478,50 @@ class LlvmEmitter {
     const a0 = this.fresh();
     this.line(`  ${a0} = extractvalue [2 x i64] ${this.val(ref)}, 0`);
     return { text: `i64 ${a0}`, ty: 'i64' };
+  }
+
+  /**
+   * 登记一个外部符号的声明（`CCALL` 与「体不在这个模块里的 `CALL`」两支共用）。
+   *
+   * 签名是从**调用点**收上来的 —— 原生腿的外部函数记录上没有 params，没有别的来处。
+   * 所以「同一个名字在两处收到不一样的签名」就是这一层算错了，当场停：真发出去的话
+   * 是两条 `declare` 撞在一个名字上，LLVM 那边的报错离原因很远。
+   *
+   * `setjmp` 那一族的边界也在这儿收（`LL_SETJMP`），两支才不会一支拒一支放 ——
+   * 从前拒的判断只写在 `CCALL` 那一支上，而 C 的 `setjmp` 走的是桩（`CALL`），
+   * 于是它从那条拒绝旁边绕过去了。
+   */
+  externDecl(name, sig) {
+    if (LL_JMPFAMILY.has(name) && this.mir.native !== true) {
+      throw new OmniError(`${NOPE} ${name}（它要回到同一帧的同一条指令，而这个模块的地址`
+        + '是线性内存里的偏移，没有那个帧）—— 用 --backend interp');
+    }
+    const was = this.cabiDecl.get(name);
+    if (was === undefined) { this.cabiDecl.set(name, sig); return; }
+    if (was !== sig) {
+      throw new OmniError(`llvm: ${name} 在两处的签名不一样（${was} vs ${sig}）—— `
+        + '同一个外部符号只能有一份声明');
+    }
+  }
+
+  /**
+   * 这个函数里有 `setjmp`/`longjmp` 那一族的调用吗（见 `func` 里 `this.vol` 那一段）。
+   *
+   * 两条路都要看：`CCALL`（名字在 `cabi` 表里）与「体不在这个模块里的 `CALL`」——
+   * C 的 `setjmp` 走的是后者（前端给外部函数包了桩，`externThunk`），只看前者会漏。
+   */
+  hasJmp(f) {
+    let i = 0;
+    while (i < f.count()) {
+      const op = f.op[i];
+      if (op === OP.CCALL && LL_JMPFAMILY.has(this.mir.cabi[f.a[i]])) return true;
+      if (op === OP.CALL) {
+        const g = this.mir.funcs[f.a[i]];
+        if (g !== undefined && LL_JMPFAMILY.has(g.name)) return true;
+      }
+      i++;
+    }
+    return false;
   }
 
   /* --------------------------------------------------------------- 基本块 */
@@ -709,7 +765,13 @@ class LlvmEmitter {
     const decls = [];
     for (const [name, sig] of this.cabiDecl) {
       const paren = sig.indexOf(' (');
-      decls.push(`declare ${sig.slice(0, paren)} @${name}${sig.slice(paren + 1)}`);
+      /* `setjmp` 那一族要 `returns_twice`（见 LL_SETJMP 头上那段）：不写的话优化器假定
+         它只回一次，把「跳回来之后还要用」的值当死值删掉 —— `-O0` 看不出来，开优化就是
+         一个静悄悄的错答案。这一位挂在**声明**上，LLVM 从那儿传到每个调用点。 */
+      const attr = LL_SETJMP.has(name) ? ' returns_twice'
+        : (LL_LONGJMP.has(name) ? ' noreturn' : '');
+
+      decls.push(`declare ${sig.slice(0, paren)} @${name}${sig.slice(paren + 1)}${attr}`);
     }
     if (this.cabiAt >= 0) {
       if (decls.length === 0) this.out.splice(this.cabiAt, 1);
@@ -805,6 +867,14 @@ class LlvmEmitter {
     this.tmp = 0;
     this.labels = 0;
     this.regions = [];
+    /* **这个函数里有 `setjmp` 那一族的调用吗** —— 有的话它的槽位一律按 `volatile` 读写。
+       C11 7.13.2.1 只保证 `volatile` 的自动变量在 `longjmp` 之后还是那个值，而 MIR 上
+       没有 `volatile` 这一位（C 前端到这一层已经把它丢了）。不管的话 LLVM 从 `-O1` 起就
+       把这些 alloca 提到寄存器里，跳回来读到的是过时的值 —— 量出来是 `04-setjmp.c` 在
+       `-O0` 上与 `omni c run` 逐字节相同，而 `-O1`/`-O2` 上跳成了一个不停印的死循环。
+       整个函数都按 volatile 是**比 C 要求的更强**的一边：只会更对，代价只落在真的用了
+       setjmp 的那几个函数上。真正的解法是把 `volatile` 带进 MIR，那是另一刀。 */
+    this.vol = this.hasJmp(f) ? 'volatile ' : '';
     // 闭包体的第一个形参是闭包记录自己（ADR-0010），与 C 那条腿的 `omni_fn self_` 同一个
     // 约定。它**不占槽**：MIR 里捕获是 OP.CAPTURE（按下标从记录里读），不是形参。
     const ps = [];
@@ -962,12 +1032,12 @@ class LlvmEmitter {
     // 除零/溢出的那两个辅助函数是 i64 签名，移位掩码也是 63。见下面 i32 的两处分流。
     const is32 = typeKind(t) === T_I32;
     if (op === OP.LOAD) {
-      this.line(`  ${dst} = load ${this.ty(t, 'slot')}, ptr %s${f.aux[i]}`);
+      this.line(`  ${dst} = load ${this.vol}${this.ty(t, 'slot')}, ptr %s${f.aux[i]}`);
       return;
     }
     if (op === OP.STORE) {
       const st = this.ty(f.slots[f.aux[i]].t, 'slot');
-      this.line(`  store ${st} ${this.val(f.a[i])}, ptr %s${f.aux[i]}`);
+      this.line(`  store ${this.vol}${st} ${this.val(f.a[i])}, ptr %s${f.aux[i]}`);
       return;
     }
     // 模块级变量（第二十四刀）：与槽位那两条同一个形状，只是地址是 `@g_名字` 而不是
@@ -1174,12 +1244,7 @@ class LlvmEmitter {
       if (g.extern === true) {
         const as = refs.map((r) => this.externArg(r));
         const sig = `${rt} (${as.map((a) => a.ty).concat(g.variadic === true ? ['...'] : []).join(', ')})`;
-        const was = this.cabiDecl.get(g.name);
-        if (was === undefined) this.cabiDecl.set(g.name, sig);
-        else if (was !== sig) {
-          throw new OmniError(`llvm: ${g.name} 在两处的签名不一样（${was} vs ${sig}）—— `
-            + '同一个外部符号只能有一份声明');
-        }
+        this.externDecl(g.name, sig);
         const cargs = as.map((a) => a.text).join(', ');
         const call = g.variadic === true
           ? `call ${sig} @${g.name}(${cargs})`
@@ -1215,15 +1280,11 @@ class LlvmEmitter {
      * int 是 i32/i64）。JS 那条腿要在门口装卸 BigInt，是因为那条腿的整数是 BigInt，
      * 与这一格无关（见 mir/emit_js.js 的 CCALL）。
      *
-     * `setjmp` / `longjmp` 这一层不收：它们要的是**帧**，而 IR 上这儿只有实参。
-     * emit_js 那侧同一格拒（JS_NOJMP），理由一模一样 —— 两条腿的边界必须一样。
+     * `setjmp` / `longjmp` 的边界在 `externDecl` 里收（`LL_SETJMP`）：认真地址那条腿上
+     * 它们真的能用，线性内存那几条腿上不收 —— 一处判断，两支共用。
      */
     if (op === OP.CCALL) {
       const entry = this.mir.cabi[f.a[i]];
-      if (LL_NOJMP.has(entry)) {
-        throw new OmniError(`${NOPE} ${entry}（它要回到同一帧的同一条指令，`
-          + 'IR 上这儿只有实参）—— 用 --backend interp');
-      }
       const refs = f.argsOf(f.b[i]);
       const as = refs.map((r) => this.externArg(r));
       const rt = this.ty(t, `${entry} 的返回值`);
@@ -1242,12 +1303,7 @@ class LlvmEmitter {
       /* 声明只按**定参**发：同一个变参函数在不同调用点的实参个数不同，而定参那几格一样。 */
       const fixed = as.slice(0, variadic ? nfixed : as.length).map((a) => a.ty);
       const sig = `${rt} (${fixed.concat(variadic ? ['...'] : []).join(', ')})`;
-      const was = this.cabiDecl.get(entry);
-      if (was === undefined) this.cabiDecl.set(entry, sig);
-      else if (was !== sig) {
-        throw new OmniError(`llvm: ${entry} 在两处的签名不一样（${was} vs ${sig}）—— `
-          + '同一个外部符号只能有一份声明');
-      }
+      this.externDecl(entry, sig);
       /* 变参的调用点必须写出函数类型（LLVM 要靠它知道哪几格是定参）；不是变参的照常写。 */
       const cargs = as.map((a) => a.text).join(', ');
       const call = variadic
