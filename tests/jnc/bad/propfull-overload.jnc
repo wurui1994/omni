@@ -1,0 +1,22 @@
+// 完整声明式的属性里**两个存值器**（第七十五刀留的账）。jancy 收这种写法
+// （samples/jnc/34_BindableProperties.jnc:57-58 的 `void set(int x)` 与 `void set(double x)`），
+// 挑哪一个靠**重载决议** —— 而这一层的属性只认一格存值器（名字是自己拼的 `p$set`）。
+// 悄悄挑一个就是"改了程序的意思"，所以当场拒。
+property g_p {
+	int get() {
+		return 1;
+	}
+
+	void set(int x) {
+		printf("int %d\n", x);
+	}
+
+	void set(double x) {
+		printf("double %f\n", x);
+	}
+}
+
+int main() {
+	g_p = 1;
+	return 0;
+}

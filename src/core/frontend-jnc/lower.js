@@ -1411,10 +1411,13 @@ class JncLower {
    * 查名用 `resolve`，两边看的都是这一格。
    */
   run(tree) {
-    const items = this.nsFlat(tree, '', []);
+    let items = this.nsFlat(tree, '', []);
     // 被 import 的文件在这儿续到同一份名单后面（第六十刀）—— 一定要**在下面那些遍之前**：
     // 它们的类型名、签名、模块级变量与这个文件的是平权的一堆，不是"外面的库"。
     this.impDrain(items);
+    // 完整声明式的属性改写成简单声明式加两个函数（第七十五刀）—— 排在最前面：底下每一遍
+    // 看的都是改写之后的名单，属性那一整套一个字都不用动。
+    items = this.expandFullProps(items);
     // 结构体的名字先坐下（第十七刀）：`Node* m_next` 要在自己的体里查得着 Node。
     for (const e of items) {
       this.ns = e.ns;
@@ -1656,6 +1659,120 @@ class JncLower {
       }
     }
     return false;
+  }
+
+  /** 造一格节点（第七十五刀改写属性时要）：span 借现成那一格，诊断照旧指得到源码上。 */
+  mkL(span, ...items) { return { kind: 'list', items, span }; }
+
+  mkA(span, value) { return { kind: 'atom', value, span }; }
+
+  /**
+   * 完整声明式的属性（第七十五刀）→ **改写成**简单声明式加两个体外的函数。
+   *
+   * `property g_p { int get() { … } void set(int x) { … } }` 与
+   *
+   *     int property g_p;
+   *     int g_p.get() { … }
+   *     void g_p.set(int x) { … }
+   *
+   * 在 jancy 那边是同一件事：那对花括号开的是**一层命名空间**（prop_full.rst:15），取/存两个
+   * 函数写在里面还是写在外面都行。所以这一刀不动属性那一整套（第六十八到七十二刀），只在名单
+   * 成型之前做一次改写 —— 语料里 86 处 `property NAME { … }` 就是这个形状（`uint_t get() { … }`
+   * 加 `void set(uint_t value) { … }`，UdpDispatch.jnc:11-29）。
+   *
+   * 改写不动的两种当场说清：体里写字段（`autoget int m_x;` 那半，prop_full.rst:34 那句
+   * "implicitly makes property autoget"）、以及存值器的**重载**（`set(int)` 与 `set(double)`
+   * 两个，要重载决议）。
+   */
+  expandFullProps(items) {
+    const out = [];
+    for (const e of items) {
+      const it = e.it;
+      if (!isList(it) || head(it) !== 'fn-def') { out.push(e); continue; }
+      const dcl = it.items[2];
+      if (!this.propMod(it.items[1]) && !this.tailMods(dcl).includes('property')) {
+        out.push(e);
+        continue;
+      }
+      const ex = this.fullProp(it);
+      // 说不通的照原样留着：`fnSig0` 那条诊断照旧发，理由不会因为这一刀变模糊。
+      if (ex === null) { out.push(e); continue; }
+      for (const x of ex) out.push({ it: x, ns: e.ns });
+    }
+    return out;
+  }
+
+  /** 一格完整声明式的属性 -> 三条（声明 + 取 + 存）。**报过错的回空表**（那一条就此丢掉，
+   *  免得 fnSig0 再报一遍同一件事）；压根不是这个形状的回 null（照原样留着）。 */
+  fullProp(it) {
+    const dcl = it.items[2];
+    const body = it.items[3];
+    if (!isList(dcl) || head(dcl) !== 'dcl') return null;
+    const core = dcl.items[2];
+    const nm = this.qname(core);
+    if (nm === null) return null;                    // 特殊名（get / construct…）不是这一格
+    if (!isList(body) || head(body) !== 'compound') return null;
+    if (this.flat(dcl.items[3]).length > 0) {
+      this.nope(it, `完整声明式的属性 '${nm}' 的名字后面还挂着东西（形参或下标）`);
+      return [];
+    }
+    const accs = [];
+    for (const m of this.flat(body.items[1])) {
+      const md = isList(m) && head(m) === 'fn-def' ? m.items[2] : null;
+      const mc = md === null ? null : md.items[2];
+      // `(accessor "get")` 里那一格是**串**（语法里写的是带引号的字面量），与 isLabel 那处同理。
+      const av = isList(mc) && head(mc) === 'accessor' ? mc.items[1] : null;
+      const kind = av !== null && (isAtom(av) || isStr(av)) ? av.value : null;
+      if (kind === null) {
+        this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条 —— 只收带体的 get / set`
+          + '（体里的字段那一半是 prop_full.rst:34 说的 autoget，另一刀）');
+        return [];
+      }
+      if (accs.some((a) => a.kind === kind)) {
+        this.nope(m, `完整声明式的属性 '${nm}' 里两个 ${kind}（要重载决议）`);
+        return [];
+      }
+      accs.push({ kind, node: m });
+    }
+    const g = accs.find((a) => a.kind === 'get');
+    if (g === undefined) {
+      this.nope(it, `完整声明式的属性 '${nm}' 里没有 get —— 属性的类型是从取值器的`
+        + '返回类型来的');
+      return [];
+    }
+    const out = [this.propDeclOf(g.node.items[1], g.node.items[2].items[1], core)];
+    for (const a of accs) {
+      const ad = a.node.items[2];
+      const qs = this.mkL(ad.span, this.mkA(ad.span, 'qualified-special'), core, ad.items[2]);
+      out.push(this.mkL(a.node.span, this.mkA(a.node.span, 'fn-def'), a.node.items[1],
+        this.mkL(ad.span, this.mkA(ad.span, 'dcl'), ad.items[1], qs, ad.items[3], ad.items[4]),
+        a.node.items[3]));
+    }
+    return out;
+  }
+
+  /**
+   * 那条简单声明式（第七十五刀）：类型抄取值器的 —— 说明符照抄，`*` 那一串也照抄
+   * （`log.Writer* get()` 的属性是 `log.Writer* property m_x`）。`property` 这个词落在哪儿按
+   * 第七十二刀那条规矩：没有 `*` 就进说明符表的后一组，有 `*` 就跟在**最后一个** `*` 后面。
+   */
+  propDeclOf(gsp, gptrs, core) {
+    const sp = this.mkL(gsp.span, ...gsp.items);
+    const ptrs = this.mkL(gptrs.span, ...gptrs.items);
+    if (ptrs.items.length === 1) {
+      const post = sp.items[3];
+      sp.items[3] = this.mkL(post.span, ...post.items, this.mkA(post.span, 'property'));
+    } else {
+      const last = ptrs.items[ptrs.items.length - 1];
+      const ms = last.items[1];
+      ptrs.items[ptrs.items.length - 1] = this.mkL(last.span, last.items[0],
+        this.mkL(ms.span, ...ms.items, this.mkA(ms.span, 'property')));
+    }
+    const d = this.mkL(core.span, this.mkA(core.span, 'dcl'), ptrs, core,
+      this.mkL(core.span, this.mkA(core.span, 'suffixes')),
+      this.mkL(core.span, this.mkA(core.span, 'no-ctor')));
+    return this.mkL(core.span, this.mkA(core.span, 'var-decl'), sp,
+      this.mkL(core.span, this.mkA(core.span, 'dcls'), d));
   }
 
   /**
@@ -3628,14 +3745,19 @@ class JncLower {
   }
 
   fnSig0(n) {
-    // 完整声明式的属性（第七十刀）：`property p { … }` 在语法上是一格**带体的 fn-def** ——
-    // 说明符位置没有类型、只有 `property` 那个词，体里是取/存两个函数与属性自己的字段
-    //（prop_full.rst:15：那对花括号开的是一层命名空间）。这一层还接不上那一层，而落到下面
-    // specs 那儿报的是"这条声明没有类型"—— 认错了人。
-    //
-    // 那个词也可能写在星号后面（第七十二刀）：`log.Writer* const property m_logWriter { … }`
-    // 是语料里最常见的一种。这一问漏了它就会落到 ptrsTy 那儿报"指针后面的修饰符 'property'"
-    // —— 同样是认错了人，真拦路的是那对花括号。
+    /* 完整声明式的属性（第七十刀记的边界，第七十五刀把常见的那一种接上了）：
+     * `property p { … }` 在语法上是一格**带体的 fn-def** —— 说明符位置没有类型、只有
+     * `property` 那个词，体里是取/存两个函数与属性自己的字段（prop_full.rst:15：那对花括号
+     * 开的是一层命名空间）。
+     *
+     * 常见的那一种（体里只有带体的 get / set）在 `expandFullProps` 那一遍就已经改写成
+     * "简单声明式 + 两个体外的函数"，走不到这儿；能落到这儿的是改写不动的形状（比如名字
+     * 后面还挂着东西、或者说明符里带着别的词）。落到下面 specs 那儿报的是"这条声明没有
+     * 类型"—— 认错了人，所以这一格照旧留着。
+     *
+     * 那个词也可能写在星号后面（第七十二刀）：`log.Writer* const property m_logWriter { … }`
+     * 是语料里最常见的一种。这一问漏了它就会落到 ptrsTy 那儿报"指针后面的修饰符 'property'"
+     * —— 同样是认错了人，真拦路的是那对花括号。 */
     if (this.propMod(n.items[1]) || this.tailMods(n.items[2]).includes('property')) {
       return this.nope(n, '完整声明式的属性（`property p { … }` 那对花括号开的是一层命名空间，'
         + 'prop_full.rst:15）');
