@@ -63,6 +63,11 @@ import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
 /* 后端过一格注册表（ADR-0021 S3）：调用点不叫函数名，可选加载才有立足处 */
 import { target, registerLang, lang } from './plugin.js';
+/* 已经搬成独立模块的语言（ADR-0021 S4）：它们不 import 这一份，所以能独立编译。
+ * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
+ * —— 两条路在注册表那一层看不出区别。 */
+import { register as registerWat } from './lang/wat.js';
+import { register as registerSx } from './lang/sx.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
@@ -696,13 +701,6 @@ function compileJs(path) {
  * WAT（WebAssembly 文本格式）-> OIR。S 表达式那条路径上的第一个真语法前端，
  * 也是 OIR 的第三个生产者 —— 边界与理由见 frontend-wat/lower.js 的文件头。
  */
-function compileWat(path) {
-  const diags = new Diagnostics();
-  const mod = lowerWat(new SourceFile(path, readText(path)), diags);
-  diags.throwIfErrors();
-  vStep(`wat front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
-  return { ast: null, mod, diags };
-}
 
 function compile(path, argv = []) {
   const r = compileFront(path, argv);
@@ -719,8 +717,8 @@ function compile(path, argv = []) {
  * `omni_plugin_init` 里调同一个 registerLang —— 这一层看不出内建与外挂的区别。
  * 核心方言（.omni / .omnid / .omnis）不登记：它跟 driver 是一体的，永远在核心里。 */
 registerLang(['.js'], 'js', (path) => compileJs(path));
-registerLang(['.wat'], 'wat', (path) => compileWat(path));
-registerLang(['.sx'], 'sx', (path) => compileSexpr(path));
+registerWat({ registerLang, log: vStep });
+registerSx({ registerLang, log: vStep });
 registerLang(['.asy'], 'asy', (path) => compileAsy(path));
 registerLang(['.jnc'], 'jnc', (path, argv) => compileJnc(path, incDirs(argv)));
 
@@ -1787,13 +1785,6 @@ function asyModsFast(path, dir) {
  * `omni glr GRAMMAR FILE` 的输出就是这份方言，所以「加一门语言 = grammar + 映射标注」
  * 走的是同一条路：那边印出来，这边读进来，中间没有为那门语言写的代码。
  */
-function compileSexpr(path) {
-  const diags = new Diagnostics();
-  const mod = lowerCoreSexpr(new SourceFile(path, readText(path)), diags);
-  diags.throwIfErrors();
-  vStep(`core sexpr front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
-  return { ast: null, mod, diags };
-}
 
 /**
  * jancy 前端（ADR-0016 分步 7）。零件比 asy 那一份少得多：只有语法表 + 词法，
