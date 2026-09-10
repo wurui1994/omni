@@ -14,6 +14,7 @@ import { OmniError } from '../source/diag.js';
 import { join, resolve } from '../host/path.js';
 import { readText, writeText, exists, mkdirAll, mtimeMs, fileSize, installDir, cwd } from '../host/native.js';
 import { cacheRoot } from '../host/cache.js';
+import { dataPath, dataTried } from '../host/data.js';
 import { hash16 } from '../host/hash.js';
 import { readGrammar } from '../glr/grammar.js';
 import { loadGrammarTable } from '../glr/load.js';
@@ -172,13 +173,19 @@ export function asyFrontEnd() {
   const inpPath = api.inpPath;
   const inpOk = api.inpOk;
   const inpField = api.inpField;
-  const gpath = join(installDir(), '..', 'frontend-asy', 'asy.grammar');
-  if (!exists(gpath)) throw new OmniError(`找不到 asy 语法文件：${gpath}`);
+  /* 语法表与内建绑定表是**数据**，按布局找（host/data.js）：从源码跑是 src/core/frontend-asy，
+     装好的样子是 dist/share/frontend-asy —— 启动时不许为这个要参数。 */
+  const gpath = dataPath(join('frontend-asy', 'asy.grammar'));
+  if (gpath === null) {
+    throw new OmniError(`找不到 asy 语法文件（试过 ${dataTried(join('frontend-asy', 'asy.grammar'))}）`);
+  }
   const tb = asyLoadGrammar(gpath, log);
   // 内建函数的绑定表是**数据**，跟语法表一个路子。数学不是 asy 的语法
   //（asy 自己那边也是 builtin.cc 里一张表）。
-  const btab = join(installDir(), '..', 'frontend-asy', 'builtins.tab');
-  if (!exists(btab)) throw new OmniError(`找不到 asy 内建绑定表：${btab}`);
+  const btab = dataPath(join('frontend-asy', 'builtins.tab'));
+  if (btab === null) {
+    throw new OmniError(`找不到 asy 内建绑定表（试过 ${dataTried(join('frontend-asy', 'builtins.tab'))}）`);
+  }
   const builtins = parseAsyBuiltins(readText(btab));
   log(`asy builtins   ${builtins.size} 条绑定`);
   // ---- 解析缓存（第七十二刀）----
@@ -267,7 +274,7 @@ export function asyFrontEnd() {
   // 当前目录之后按 `ASYMPTOTE_DIR`（asy 自己的那个环境变量，冒号分隔）找，最后是
   // 我们自己的 src/lib/asy。**base/*.asy 不抄一份**：plain/graph 那一堆是 asy
   // 源码，要引的就是真的那些；我们只补 C++ 那一侧的内建面（lib/asy 里那一份）。
-  const libDir = join(installDir(), '..', '..', 'lib', 'asy');
+  const libDir = dataPath(join('lib', 'asy')) ?? join(installDir(), '..', '..', 'lib', 'asy');
   const searchDirs = [];
   const envDir = env('ASYMPTOTE_DIR');
   if (envDir !== undefined && envDir !== '') {

@@ -233,6 +233,13 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
         { name: '--bind', arity: 1, value: 'FILE', brief: '按核心的 .syms 决定发哪些：它有的绑过去，没有的自己发' }],
     },
     {
+      name: 'plugins', key: 'plugins', usage: '--core FILE [-o DIR]',
+      brief: '把默认那一套插件一次编齐（核心什么都不内建）',
+      flags: [F_OUT, F_WORK, F_STATS,
+        { name: '--core', arity: 1, value: 'FILE', brief: '核心产物（按它旁边那份 .syms 绑符号）' },
+        { name: '--only', arity: 1, value: 'A,B', brief: '只编这几格（名字见 core/plugin-set.js）' }],
+    },
+    {
       name: 'emit', key: 'emit', usage: 'FORM FILE',
       brief: '印某个中间/目标形态：ast|oir|mir|sx|asy|js|c|llvm|spirv',
       flags: [F_MODE, F_WORK, F_INC, F_STATS,

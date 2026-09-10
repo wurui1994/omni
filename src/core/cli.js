@@ -17,6 +17,7 @@ import {
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { installSrcEvalHook } from './host/src_eval.js';
 import { cacheRoot } from './host/cache.js';
+import { dataPath } from './host/data.js';
 import { hash16 } from './host/hash.js';
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
 import { ROOT, LEGACY } from './cli/cmds.js';
@@ -52,6 +53,7 @@ import {
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
 import { registerBuiltins } from './lang/builtin.js';
+import { PLUGIN_SET, pluginRegName } from './plugin-set.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
@@ -618,9 +620,23 @@ function pluginApi() {
 /* 内建那一串（ADR-0021 S4）：收在 lang/builtin.js 里 —— 编薄核心时换掉那一份就行。 */
 registerBuiltins(pluginApi());
 
+/**
+ * 插件摆在**产物旁边**：`dist/omni` 的插件就是 `dist/plugins/`（ADR-0021 的 S4）。
+ *
+ * 启动时不许要参数 —— 装哪些插件是**布局**说的，不是命令行说的。所以按顺序试几处：
+ * 产物同级的 `plugins/`（装好的样子）、上一层与上两层（开发时把核心搁在 dist/build 那种），
+ * 最后是 `<当前目录>/dist/plugins` —— 从源码跑的那条腿走这一条：它装不动，但要**看见**
+ * 有哪几格，才能在用到那门语言时说"装了但这条腿加载不了"。
+ */
+function pluginsDir() {
+  const cands = [join(installDir(), 'plugins'), join(installDir(), '..', 'plugins'),
+    join(installDir(), '..', '..', 'plugins'), join(cwd(), 'dist', 'plugins')];
+  return cands.find((d) => isDir(d)) ?? null;
+}
+
 function discoverPlugins() {
-  const dir = join(installDir(), '..', '..', 'plugins');
-  if (!isDir(dir)) return;
+  const dir = pluginsDir();
+  if (dir === null) return;
   for (const f of readDir(dir)) {
     const named = f.startsWith('omni-lang-') || f.startsWith('omni-target-');
     if (!named || !(f.endsWith('.dylib') || f.endsWith('.so'))) continue;
@@ -2240,6 +2256,66 @@ function main(argv) {
     return startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni',
       { asy: cap('asy.frontEnd'), asyPrelude: () => (env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins') },
       ei >= 0 ? rest[ei + 1] : 'interp');
+  }
+  /**
+   * `omni plugins` —— 把**默认那一套插件**一次编齐。不用给参数：
+   * 核心默认是 `dist/omni`，插件落 `dist/plugins/`，数据落 `dist/share/`。
+   *
+   * 核心什么都不内建（lang/builtin-core.js），所以这一条才是"让 omni 能干活"的那一步：
+   * 清单在 core/plugin-set.js，一格一个 `.dylib`；`--bind` 用的是核心 `build --extern`
+   * 时落下的 `.syms`（谁有哪些符号是**数据**，不是规则 —— 核心是剪过枝的）。
+   */
+  if (cmd === 'plugins') {
+    const ci = rest.indexOf('--core');
+    const core = ci >= 0 ? rest[ci + 1] : join(cwd(), 'dist', 'omni');
+    const oi = rest.indexOf('-o');
+    const dir = oi >= 0 ? rest[oi + 1] : join(dirname(core), 'plugins');
+    const symsPath = `${core}.syms`;
+    if (!exists(symsPath)) {
+      throw new OmniError(`找不到 ${symsPath} —— 核心得用 \`build --extern\` 编（那时才落 .syms）`
+        + '；`npm run native` 会把核心与插件一次做齐');
+    }
+    const bind = new Set(readText(symsPath).split('\n').filter((s) => s !== ''));
+    mkdirAll(dir);
+    const only = rest.indexOf('--only');
+    const want = only >= 0 && rest[only + 1] !== undefined ? rest[only + 1].split(',') : null;
+    /* 插件的入口摆在 `src/plugin/`。从源码跑时 installDir() 是 `src/core/<某一格>`，
+       编出来的核心在 `dist/build` —— 两条腿的相对位置不同，所以按顺序试，试不着就直说。 */
+    const cands = [join(installDir(), '..', '..', 'plugin'), join(installDir(), '..', 'plugin'),
+      join(cwd(), 'src', 'plugin')];
+    const srcDir = cands.find((d) => isDir(d));
+    if (srcDir === undefined) {
+      throw new OmniError(`找不到插件入口那个目录（试过 ${cands.join('、')}）—— plugins 要源码树`);
+    }
+    let n = 0;
+    let tot = 0;
+    for (const p of PLUGIN_SET) {
+      if (want !== null && !want.includes(p.name)) continue;
+      const out = join(dir, `omni-${p.name}.dylib`);
+      const { mod } = compile(join(srcDir, `${p.name}.js`), [...rest, '--plugin', pluginRegName(p.name)]);
+      buildNative(mod, out, undefined, pluginRegName(p.name), true, p.own, bind);
+      n += 1;
+      tot += fileSize(out);
+      stderr(`omni: plugin ${basename(out)}  ${fmtBytes(fileSize(out))}\n`);
+    }
+    stderr(`omni: ${n} 格插件，合计 ${fmtBytes(tot)} -> ${dir}/ ${optFlag()}\n`);
+    /* 插件的**数据**跟着搬（host/data.js 那一串候选根里的 `<产物同级>/share`）：
+       asy 的语法表、内建绑定表与 lib/asy。不搬的话装好的那份 omni 一跑 `.asy` 就报
+       "找不到 asy 语法文件" —— 数据不是代码，编译器不会把它们编进 dylib。 */
+    const share = join(dirname(dir), 'share');
+    const files = [join('frontend-asy', 'asy.grammar'), join('frontend-asy', 'builtins.tab')];
+    const libSrc = dataPath(join('lib', 'asy'));
+    if (libSrc !== null) for (const f of readDir(libSrc)) files.push(join('lib', 'asy', f));
+    let nd = 0;
+    for (const rel of files) {
+      const src = dataPath(rel);
+      if (src === null) continue;
+      mkdirAll(dirname(join(share, rel)));
+      writeText(join(share, rel), readText(src));
+      nd += 1;
+    }
+    stderr(`omni: ${nd} 份数据 -> ${share}/\n`);
+    return 0;
   }
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
   if (cmd === 'bootstrap') {

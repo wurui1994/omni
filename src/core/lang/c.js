@@ -125,7 +125,9 @@ export function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, ve
       }
     },
     includeDirs: incs,
-    sysIncludeDirs: sysIncs ?? cap('c.sysInclude')(),
+    /* 自己那一格直接调本地函数 —— 不绕 cap()：这一份独立成插件时 `cap` 不在它的作用域里
+       （量出来是 `unresolved function 'cap'`），而"C 的系统头在哪"本来就是它自己的事。 */
+    sysIncludeDirs: sysIncs ?? cSysInclude(),
     dirname,
     join,
     /* 目标（`--arch` / `--os`）：预定义宏那一整张表按它分（第一百二十九片）。
