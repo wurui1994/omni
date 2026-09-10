@@ -1387,15 +1387,23 @@ class CEmitter {
     /* 插件的那格入口（模块级 let/const 的赋值都在里面）**只能是自己的**：它与核心的
      * 入口同名（都叫 omni_main，而且 P1 把它的来源记成了 host/path.js），只按名字+文件
      * 绑就会绑到**核心的 main** 上 —— 量出来是「插件的类对象一个都没建」，
-     * 报 `符号键只在真对象上成立`。发成 static：同一个名字，各自一份。 */
-    const st = this.plugin !== null && f.mangled === this.mod.entry ? 'static '
+     * 报 `符号键只在真对象上成立`。发成 static：同一个名字，各自一份。
+     * 切出来的那一串 `omni_init_N` 同理，而且更危险：编号是**按这一份的模块顺序**给的，
+     * 核心的第 N 格与插件的第 N 格压根不是同一个文件（见 isEntry）。 */
+    const st = this.isEntry(f) ? 'static '
       : (this.extern ? '' : 'static ');
     return `${st}${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
   }
 
-  /** 这个函数是这一份的入口吗（插件那格入口永远自己发，见 proto 里那段） */
+  /**
+   * 这个函数是这一份的入口吗（插件那格入口永远自己发，见 proto 里那段）。
+   *
+   * 「入口」现在不止 `omni_main` 一格：整份程序的模块级初始化按模块切成了一串
+   * `omni_init_N`（frontend-js/lower.js 里那格 `isInit`）。这三件事对每一格都得成立 ——
+   * 永远自己发、在插件里发成 static、initGuard 认它。
+   */
   isEntry(f) {
-    return this.plugin !== null && f.mangled === this.mod.entry;
+    return this.plugin !== null && (f.mangled === this.mod.entry || f.isInit === true);
   }
 
   /**
