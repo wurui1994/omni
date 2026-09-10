@@ -655,6 +655,10 @@ export const JS_ABI = {
   // 峰值常驻内存（字节）。单位在**宿主那一侧**归一：node 的 maxRSS 是 KB，C 的 ru_maxrss
   // 在 macOS 上是字节、Linux 上是 KB —— 两边都换成字节，调用方不必知道自己在哪。
   js_max_rss: { js: '$js_max_rss', c: 'omni_js_max_rss', arity: 0 },
+  /* 插件加载（ADR-0021 S4）：第一个参数是 .dylib 的路径，第二个是核心递过去的那格 api。
+     C 那条腿 dlopen + dlsym("omni_plugin_init")；node 与 JS 那两条腿**响着拒** ——
+     它们没有这条路（node 没有同步的 ESM import，而驱动是同步的），拒得响比悄悄没插件好。 */
+  js_plugin_load: { js: '$js_plugin_load', c: 'omni_js_plugin_load', arity: 2 },
   /* 一趟"跑"的墙上时限（`omni run --timeout`）：第一个参数是毫秒（<= 0 = 撤掉），
      第二个是到点要印的那句话 —— 印字的人不一定还是编译器自己（本进程那一路是看门狗
      线程 / SIGALRM 处理函数在印），所以文本得先交给宿主。

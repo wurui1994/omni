@@ -351,6 +351,19 @@ export function maxRssBytes() {
 }
 
 /**
+ * 插件加载（ADR-0021 的 S4）：**这条腿上没有**。
+ *
+ * node 没有同步的 ESM import（`import()` 是异步的，而驱动整条是同步的），所以开发时
+ * 这条腿只有内建那一套 —— 装着什么就是编进来的那些。产品是 C 那条腿：它有 `dlopen`，
+ * 扫目录、按文件名认、`dlsym("omni_plugin_init")` 全是同步的。
+ * 拒得响而不是悄悄当"没装"：后者会让人以为插件坏了。
+ */
+export function pluginLoad(path) {
+  throw new Error(`node 这条腿上没有插件加载（${path}）：装着的就是编进来的那些；`
+    + '插件是 C 那条腿的事（dlopen + omni_plugin_init）');
+}
+
+/**
  * **本地时间**的日历字段，14 位数字：`YYYYMMDDHHMMSS`（月 01-12、日 01-31，全部补零）。
  *
  * 为什么是一个字符串而不是一串数：`__DATE__` / `__TIME__` 要六个字段是**同一个瞬间**的

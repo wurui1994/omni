@@ -14,6 +14,7 @@
 #include "omni.h"
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -404,6 +405,32 @@ omni_dyn omni_js_proc_read_line(void) {
   }
   if (len && buf[len - 1] == '\r') len--;
   return s16_of_bytes(buf, (int64_t)len);
+}
+
+/* 插件加载（ADR-0021 的 S4）。
+ *
+ * 关键是**插件也是 omni 编出来的**，与核心共用同一份运行时：状态早就搬进运行时了（S1），
+ * 那个 dylib 实验也证过（核心写 realm_tbl_g[0]=7，插件读到 7）。所以插件里的 register
+ * 编出来就是 dylib 里一个普通函数 —— `omni_plugin_init` 拿核心递过去的 api（一格 omni_dyn）
+ * 调它一次，登记进来的是 omni_fn，注册表那一层一个字都不用改。
+ *
+ * 三种坏法都**响着拒**，各说清下一步：装不上（路径 / 架构 / 缺符号，dlerror 原话带上）、
+ * 里头没有那个入口（不是插件，或者编的时候没导出）、以及 node 那条腿（压根没有这条路）。
+ * RTLD_LOCAL：插件自己那份模板函数不该顶掉核心的同名符号，只有状态是共用的
+ * （状态在核心里，靠 -Wl,-export_dynamic + 插件侧 -undefined dynamic_lookup 解析过去）。
+ */
+omni_dyn omni_js_plugin_load(omni_dyn path, omni_dyn api) {
+  char *p = cpath(path);
+  void *h = dlopen(p, RTLD_NOW | RTLD_LOCAL);
+  if (h == NULL) {
+    const char *e = dlerror();
+    omni_errorf("插件装不上：%s（%s）", p, e == NULL ? "dlopen 没说原因" : e);
+  }
+  omni_dyn (*init)(omni_dyn) = (omni_dyn (*)(omni_dyn))dlsym(h, "omni_plugin_init");
+  if (init == NULL) {
+    omni_errorf("%s 里没有 omni_plugin_init：它不是一格 omni 插件（或者编的时候没导出）", p);
+  }
+  return init(api);
 }
 
 omni_dyn omni_js_os_tmpdir(void) {
