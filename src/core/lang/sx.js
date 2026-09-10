@@ -9,7 +9,11 @@ import { readText } from '../host/native.js';
 import { lowerCoreSexpr } from '../sexpr/lower.js';
 
 /** @param api `{ registerLang, log }` */
-export function register(api) {
+/* 名字带前缀是**这条腿的硬约束**：自举链的链接器要求模块作用域的名字在整份程序里唯一
+   （tests/bootstrap/ratchet.js 的第一条断言），而四门语言现在还都链在同一个程序里。
+   等每门语言各自成一个动态库、各自独立编译，C ABI 那一层的入口才是统一的
+   `omni_plugin_init`，JS 这一侧的名字就不必再避让了。 */
+export function registerSxLang(api) {
   api.registerLang(['.sx'], 'sx', (path) => {
     const diags = new Diagnostics();
     const mod = lowerCoreSexpr(new SourceFile(path, readText(path)), diags);

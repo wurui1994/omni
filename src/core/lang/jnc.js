@@ -14,20 +14,20 @@ import { lowerJnc } from '../frontend-jnc/lower.js';
 import { lowerCoreSexpr } from '../sexpr/lower.js';
 
 /* 核心交过来的宿主服务。 */
-let API = null;
+let JNC_API = null;
 
 export function initJnc(api) {
-  API = api;
+  JNC_API = api;
 }
 
 /* 与 lang/asy.js 里那一份同样的十行：读表 + 印一行。两份语言各留一份而不是共用 ——
    插件之间不许互相依赖，共用就等于装 jnc 得先装 asy。表还是同一个 loadGrammarTable。 */
-function loadGrammarWith(path) {
+function jncLoadGrammar(path) {
   const { g, tb, hit, cachePath } = loadGrammarTable(path);
-  if (hit) API.log(`grammar ${g.name}  ${tb.states.length} states, cache hit ${cachePath}`);
+  if (hit) JNC_API.log(`grammar ${g.name}  ${tb.states.length} states, cache hit ${cachePath}`);
   else {
-    API.log(`grammar ${g.name}  ${tb.states.length} states, ${tb.conflicts.length} conflicts left to GLR`);
-    API.log(`grammar ${g.name}  table cached at ${cachePath}`);
+    JNC_API.log(`grammar ${g.name}  ${tb.states.length} states, ${tb.conflicts.length} conflicts left to GLR`);
+    JNC_API.log(`grammar ${g.name}  table cached at ${cachePath}`);
   }
   return tb;
 }
@@ -40,7 +40,7 @@ function loadGrammarWith(path) {
 export function jncFrontEnd() {
   const gpath = join(installDir(), '..', 'frontend-jnc', 'jnc.grammar');
   if (!exists(gpath)) throw new OmniError(`找不到 jnc 语法文件：${gpath}`);
-  return loadGrammarWith(gpath);
+  return jncLoadGrammar(gpath);
 }
 
 /**
@@ -55,7 +55,7 @@ export function jncParse(tb, path, diags) {
   const file = new SourceFile(path, readText(path));
   const toks = lexText(tb.grammar.lex, file, diags);
   if (diags.errorCount() > n0) throw new OmniError(diags.format());
-  API.log(`jnc lexer      ${path} -> ${toks.length} tokens`);
+  JNC_API.log(`jnc lexer      ${path} -> ${toks.length} tokens`);
   const tree = glrParse(tb, toks, diags);
   if (diags.errorCount() > n0) throw new OmniError(diags.format());
   if (tree === null) throw new OmniError(`解析不了：${path}`);
@@ -141,12 +141,16 @@ export function compileJnc(path, dirs = []) {
   const diags = new Diagnostics();
   const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, jncText(path, dirs)), diags);
   diags.throwIfErrors();
-  API.log(`jnc front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
+  JNC_API.log(`jnc front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
   return { ast: null, mod, diags };
 }
 
 /** 登记：内建时核心调一次，做成动态库之后由 `omni_plugin_init` 调同一个。 */
-export function register(api) {
+/* 名字带前缀是**这条腿的硬约束**：自举链的链接器要求模块作用域的名字在整份程序里唯一
+   （tests/bootstrap/ratchet.js 的第一条断言），而四门语言现在还都链在同一个程序里。
+   等每门语言各自成一个动态库、各自独立编译，C ABI 那一层的入口才是统一的
+   `omni_plugin_init`，JS 这一侧的名字就不必再避让了。 */
+export function registerJncLang(api) {
   initJnc(api);
   api.registerLang(['.jnc'], 'jnc', (path, argv) => compileJnc(path, api.incDirs(argv)));
 }

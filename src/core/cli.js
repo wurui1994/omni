@@ -66,12 +66,12 @@ import { target, registerLang, lang } from './plugin.js';
 /* 已经搬成独立模块的语言（ADR-0021 S4）：它们不 import 这一份，所以能独立编译。
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
-import { register as registerWat } from './lang/wat.js';
-import { register as registerSx } from './lang/sx.js';
-import { register as registerJnc, jncText, compileJnc } from './lang/jnc.js';
+import { registerWatLang } from './lang/wat.js';
+import { registerSxLang } from './lang/sx.js';
+import { registerJncLang, jncText, compileJnc } from './lang/jnc.js';
 import {
   asyText, compileAsy, asyLastDeps, unitName, jsUnitSym, fileUnitName, asyMainWord, asyUnitTexts,
-  register as registerAsy,
+  registerAsyLang,
 } from './lang/asy.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
@@ -722,12 +722,12 @@ function compile(path, argv = []) {
  * `omni_plugin_init` 里调同一个 registerLang —— 这一层看不出内建与外挂的区别。
  * 核心方言（.omni / .omnid / .omnis）不登记：它跟 driver 是一体的，永远在核心里。 */
 registerLang(['.js'], 'js', (path) => compileJs(path));
-registerWat({ registerLang, log: vStep });
-registerSx({ registerLang, log: vStep });
+registerWatLang({ registerLang, log: vStep });
+registerSxLang({ registerLang, log: vStep });
 /* asy 那一份拿着核心给的宿主服务过日子（ADR-0021 S4）：印记那三格是驱动侧的
  * 缓存格式，AST 缓存的键沿用了它 —— 那处层次串门记在 lang/asy.js 的文件头里。 */
-registerAsy({ registerLang, log: vStep, inpPath, inpOk, inpField, srcIdNote });
-registerJnc({ registerLang, log: vStep, incDirs });
+registerAsyLang({ registerLang, log: vStep, inpPath, inpOk, inpField, srcIdNote });
+registerJncLang({ registerLang, log: vStep, incDirs });
 
 function compileFront(path, argv) {
   const l = lang(path);

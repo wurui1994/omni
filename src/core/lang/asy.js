@@ -29,19 +29,19 @@ import { asyUnitModules } from '../frontend-asy/link.js';
    表还是同一个 loadGrammarTable（缓存就在它里面），只是印那一行走注入进来的 log。 */
 /* 核心交过来的宿主服务（log 与驱动侧印记那三格）。插件被加载时给一次，之后一直用它 ——
    这与 dlopen 出来的那一格在 omni_plugin_init 里收下 host 表是同一件事。 */
-let API = null;
+let ASY_API = null;
 /** 这一趟 asy 读过的文件（主文件在第一格）。产物缓存的依赖清单问它，而不是伸手进来读变量。 */
 let asyDeps = [];
 
 export function initAsy(api) {
-  API = api;
+  ASY_API = api;
 }
 
 export function asyLastDeps() {
   return asyDeps;
 }
 
-function loadGrammarWith(path, log) {
+function asyLoadGrammar(path, log) {
   const { g, tb, hit, cachePath } = loadGrammarTable(path);
   if (hit) log(`grammar ${g.name}  ${tb.states.length} states, cache hit ${cachePath}`);
   else {
@@ -163,7 +163,7 @@ export function astUnpack(s, file) {
  * 共用这一份，所以"从哪里找模块"这类规则不会有两份实现。
  */
 export function asyFrontEnd() {
-  const api = API;
+  const api = ASY_API;
   /* 宿主服务从这一格拿，不许伸手去 import cli.js。
      inpPath 是驱动那边"印记"格式（路径:改动时间:字节数:h内容哈希）的读法 —— 搬这一块的时候
      才发现前端在读它，那是一处层次串门：AST 缓存的键沿用了产物缓存的印记格式。
@@ -174,7 +174,7 @@ export function asyFrontEnd() {
   const inpField = api.inpField;
   const gpath = join(installDir(), '..', 'frontend-asy', 'asy.grammar');
   if (!exists(gpath)) throw new OmniError(`找不到 asy 语法文件：${gpath}`);
-  const tb = loadGrammarWith(gpath, log);
+  const tb = asyLoadGrammar(gpath, log);
   // 内建函数的绑定表是**数据**，跟语法表一个路子。数学不是 asy 的语法
   //（asy 自己那边也是 builtin.cc 里一张表）。
   const btab = join(installDir(), '..', 'frontend-asy', 'builtins.tab');
@@ -225,7 +225,7 @@ export function asyFrontEnd() {
     /* 备忘是**驱动侧**印记的那一格（srcIdMemo），所以经 api 递过去，前端不碰它。
        哈希用个 thunk 传：只有真要存的时候才算，与原来"对不上才哈希"一字不差。 */
     const seed = () => {
-      API.srcIdNote(p, mtimeMs(p), fileSize(p), () => hash16(text));
+      ASY_API.srcIdNote(p, mtimeMs(p), fileSize(p), () => hash16(text));
     };
     if (cpath !== '' && exists(spath) && exists(cpath)) {
       const fs = readText(spath).split('|');
@@ -348,7 +348,7 @@ export function asyText(path, out, skipBody, ifaceFn) {
   // 所以必须是**加载完之后**取 —— fe.seen 是 loader 一路 push 进去的。
   asyDeps = [path];
   for (const p of fe.seen) if (!asyDeps.includes(p)) asyDeps.push(p);
-  API.log(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
+  ASY_API.log(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
   return text;
 }
 
@@ -430,11 +430,11 @@ export function asyUnitTexts(path, skip) {
   // 哪些单元这一趟**一格产物都不留**（`OMNI_ASY_UNITS=1`，见 lower.js 的 unitWhy）
   if (env('OMNI_ASY_UNITS') === '1') {
     for (const w of out.sections.unitWhy === undefined ? [] : out.sections.unitWhy) {
-      API.log(`asy 单元 ${w.why}  ${w.key === '' ? '<无源文件>' : w.key}`);
+      ASY_API.log(`asy 单元 ${w.why}  ${w.key === '' ? '<无源文件>' : w.key}`);
     }
   }
   const r = asyUnitModules(out.sections, unitName, out.sections.tail);
-  API.log(`asy units      ${r.units.length} 份新拼、${r.reused.length} 份原样留着`);
+  ASY_API.log(`asy units      ${r.units.length} 份新拼、${r.reused.length} 份原样留着`);
   return r;
 }
 
@@ -442,7 +442,11 @@ export function asyUnitTexts(path, skip) {
  * 登记（ADR-0021 S4）：内建时核心调一次，做成动态库之后由 `omni_plugin_init` 调同一个 —— 
  * 注册表那一层看不出区别。宿主服务先经 `initAsy` 收下（asy 那几格印记服务比 wat / sx 多）。
  */
-export function register(api) {
+/* 名字带前缀是**这条腿的硬约束**：自举链的链接器要求模块作用域的名字在整份程序里唯一
+   （tests/bootstrap/ratchet.js 的第一条断言），而四门语言现在还都链在同一个程序里。
+   等每门语言各自成一个动态库、各自独立编译，C ABI 那一层的入口才是统一的
+   `omni_plugin_init`，JS 这一侧的名字就不必再避让了。 */
+export function registerAsyLang(api) {
   initAsy(api);
   api.registerLang(['.asy'], 'asy', (path) => compileAsy(path));
 }
