@@ -100,4 +100,24 @@ export class Diagnostics {
   throwIfErrors() {
     if (this.hasErrors()) throw new OmniError(this.format());
   }
+
+  /**
+   * **警告要真的印出来**（ADR-0022 的 J4d）。从前它们只是攒在 `items` 里，一个字都不出去
+   * —— 于是「类型推不出来时给一条 warning」这条承诺是空的：`import … as g` 猜签名、
+   * `with "h"` 里跳过的那些声明，用的人一句都看不到。
+   *
+   * 回的是要印的文本（空串 = 没有警告）。**印在 stderr 上**：stdout 是程序自己的输出，
+   * 每条腿都在按字节比它。
+   */
+  warnings() {
+    const out = [];
+    for (const d of this.items) {
+      if (d.severity !== 'warning') continue;
+      if (!d.span) { out.push(`omni: warning: ${d.msg}`); continue; }
+      const { file, start } = d.span;
+      const { line, col } = file.lineCol(start);
+      out.push(`${file.path}:${line}:${col}: warning: ${d.msg}`);
+    }
+    return out.length === 0 ? '' : `${out.join('\n')}\n`;
+  }
 }

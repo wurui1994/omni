@@ -6,7 +6,7 @@
 
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
 import { join, dirname, resolve, isAbsolute } from '../host/path.js';
-import { readText, exists, installDir } from '../host/native.js';
+import { readText, exists, installDir, stderr } from '../host/native.js';
 import { dataPath, dataTried } from '../host/data.js';
 import { loadGrammarTable } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
@@ -161,6 +161,11 @@ export function jncText(path, dirs = [], needEntry = true) {
     dirs,
     needEntry,
   });
+  /* 警告要真的印出去（ADR-0022 的 J4d）：`import … as g` 猜签名、`with "h"` 里跳过的
+     那些声明，都是"能跑但你该知道"的事。印在 **stderr** 上 —— stdout 是程序自己的输出，
+     每条腿都在按字节比它。 */
+  const w = diags.warnings();
+  if (w !== '') stderr(w);
   diags.throwIfErrors();
   return text;
 }

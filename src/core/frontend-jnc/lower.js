@@ -817,6 +817,9 @@ class JncLower {
        名字 -> `{ kind: 'int'|'real'|'str', value }`；用到的地方（`case 'name'`）当场
        变成一格字面量，所以它们不占运行期的任何东西。 */
     this.cconsts = new Map();
+    /* `import "libfoo.dylib" as g`（**没有** `with`）里那个 `g`。一个类型都不知道 ——
+       调用点按实参推一份签名出来，并且报一条 warning。 */
+    this.cLibNs = new Set();
 
     // 格式化字面量里 `$(…)` 那一段要再解析一遍（第六十四刀）。没给就当没有那一格。
     this.parseExpr = opts.parseExpr === undefined ? null : opts.parseExpr;
@@ -1310,7 +1313,10 @@ class JncLower {
    */
   nsFlat(tree, ns, out) {
     for (const it of this.flat(tree)) {
-      if (isList(it) && head(it) === 'import') { this.impAdd(it); continue; }
+      if (isList(it) && (head(it) === 'import' || head(it) === 'import-as')) {
+        this.impAdd(it);
+        continue;
+      }
       if (isList(it) && head(it) === 'namespace') {
         const nm = this.qname(it.items[1]);
         if (nm === null) { this.err(it, '认不出的命名空间名字'); continue; }
@@ -3564,6 +3570,13 @@ class JncLower {
     const a = it.items[1];
     const spec = isStr(a) || isAtom(a) ? a.value : null;
     if (spec === null) return this.err(it, 'import 后面要一个字符串');
+    /* `as g`（ADR-0022 的 J4d）：那个库里的**函数**挂在 `g` 底下（`g.glfwInit()`）。
+       一个真库有几百个名字，全摊进全局那一格是不礼貌的。宏与枚举常量**不挂** ——
+       它们在 C 里本来就没有命名空间，挂上去反而是一种发明。 */
+    const asNs = head(it) === 'import-as';
+    const ns = asNs ? this.qname(it.items[2]) : null;
+    const hdrNode = asNs ? it.items[3] : it.items[2];
+    if (asNs && ns === null) return this.err(it, 'import … as 后面那个名字认不出来');
     if (spec.endsWith('.jncx')) {
       return this.nope(it, `import "${spec}"（.jncx 是编译好的扩展库、不是源码；`
         + '这一层走的是另一条路：直接 import "libfoo.dylib"，声明照旧写在源码里）');
@@ -3579,9 +3592,13 @@ class JncLower {
       /* `with "foo.h"`（ADR-0022 的 J4d）：那个头文件里的函数声明**一条条变成 `(cabi …)`**。
          收不下的（float、struct 按值、老式声明…）跳过并记一笔 —— 一个真头文件里总有几条
          落不进 C_ABI 那七个词，而其中一条都不该让整次 import 失败。 */
-      const hdr = it.items[2];
-      const hspec = hdr === undefined ? null : (isStr(hdr) || isAtom(hdr) ? hdr.value : null);
-      if (hspec !== null) this.impWith(it, spec, hspec);
+      const hspec = hdrNode === undefined || hdrNode === null
+        ? null : (isStr(hdrNode) || isAtom(hdrNode) ? hdrNode.value : null);
+      if (hspec !== null) this.impWith(it, spec, hspec, ns);
+      /* `as g` 而**没有** `with`：一个类型都不知道。那一路照旧收下 —— 名字记进
+         `cLibNs`，调用点按实参**推**一份签名出来，并且报一条 warning（ADR-0022 的 J4d：
+         「不强制，但遇到崩溃不该惊讶，权利和方便留给使用者」）。 */
+      if (ns !== null && hspec === null) this.cLibNs.add(ns);
       return null;
     }
     if (this.impFind === null || this.impParse === null) {
@@ -3605,7 +3622,7 @@ class JncLower {
    * **变参这一版收得下**：`(cabi f R (T ...))`，分界（定参个数）在声明里，下游是
    * `CCALL` 的 aux。于是 `printf` 那一族也从头文件里进得来。
    */
-  impWith(it, lib, hspec) {
+  impWith(it, lib, hspec, ns) {
     if (this.impDecls === null) {
       return this.nope(it, `import "${lib}" with "${hspec}"（这一趟降级没带 C 头文件解析）`);
     }
@@ -3622,7 +3639,12 @@ class JncLower {
       const ps = d.variadic === true ? d.params.concat(['...']) : d.params;
       this.decls.push(`  (cabi ${d.name} ${d.ret} (${ps.join(' ')}))`);
       this.cabiNames.add(d.name);
-      this.cabiSigs.set(d.name, { ret: d.ret, params: d.params, variadic: d.variadic === true });
+      /* `as g` 那一路：查表的键带上前缀（`g.glfwInit`，就是调用点 `qname` 出来的样子），
+         而 `sym` 始终是**真的 C 符号名** —— 命名空间是这一侧的事，那一端不知道有这回事。 */
+      const key = ns === null || ns === undefined ? d.name : `${ns}.${d.name}`;
+      this.cabiSigs.set(key, {
+        ret: d.ret, params: d.params, variadic: d.variadic === true, sym: d.name,
+      });
       n++;
     }
     /* 跳过的那些只报**一条**汇总：一个 `<stdio.h>` 能跳过上百条，逐条报会把真正的诊断埋掉。
@@ -6098,9 +6120,58 @@ class JncLower {
       parts.push(v.code);
     }
     const ret = CABI_RET.get(sig.ret);
+    /* 发的是**真的 C 符号名**（`as g` 那一路上 `nm` 带着前缀，那是这一侧的名字）。 */
+    const sym = sig.sym === undefined ? nm : sig.sym;
     return {
-      code: `(ccall ${nm}${parts.length === 0 ? '' : ` ${parts.join(' ')}`})`,
+      code: `(ccall ${sym}${parts.length === 0 ? '' : ` ${parts.join(' ')}`})`,
       type: ret === undefined ? J_I64 : ret,
+    };
+  }
+
+  /**
+   * `import "libfoo.dylib" as g`（**没有** `with`）里 `g.foo(…)` 的调用点（J4d）。
+   *
+   * 一个类型都不知道，所以按**实参**推一份签名出来：整数 -> `i64`、`real` -> `f64`、
+   * 字符串与指针 -> `ptr`，返回值当 `i64`。这是 ffi 那一族的常规做法，也是 ADR-0022 里
+   * 说的那条 —— 不强制写声明，但**报一条 warning**：推错了那一端会当场崩，而"权利和方便
+   * 留给使用者"的前提是他知道自己在赌什么。要准就写 `with "h.h"`（那才是查得到的出处）。
+   */
+  ccallGuess(n, nsName, sym) {
+    const args = this.flat(n.items[2]);
+    const parts = [];
+    const words = [];
+    for (const a of args) {
+      const v = this.expr(a, null);
+      if (v === null) return null;
+      const k = v.type === null || v.type === undefined ? '?' : v.type.k;
+      const w = k === 'int' ? 'i64'
+        : k === 'real' ? 'f64'
+          : (k === 'string' || k === 'ptr' || k === 'tptr' || k === 'arr') ? 'ptr' : null;
+      if (w === null) {
+        return this.err(a, `${nsName}.${sym}：${tyName(v.type)} 这一格猜不出 C 那边要什么`
+          + ' —— 写 `import … with "头文件"`，或者手写一句声明');
+      }
+      words.push(w);
+      parts.push(v.code);
+    }
+    /* 同一个名字调两次只发一句声明（方言那侧重复声明是错）。第二次起签名必须一样 ——
+       不一样就说明两个调用点对它的类型看法不同，那正是该报出来的事。 */
+    const key = `${nsName}.${sym}`;
+    const was = this.cabiSigs.get(key);
+    if (was === undefined) {
+      this.warn(n, `${nsName}.${sym}(…)：这个库是 \`as ${nsName}\` 进来的、没有头文件，`
+        + `所以签名是**从调用点猜的**（(${words.join(' ')}) -> i64）。`
+        + `猜错了那一端会崩 —— 要准就写 import "…" with "头文件"`);
+      this.decls.push(`  (cabi ${sym} i64 (${words.join(' ')}))`);
+      this.cabiNames.add(sym);
+      this.cabiSigs.set(key, { ret: 'i64', params: words, sym });
+    } else if (was.params.join(' ') !== words.join(' ')) {
+      return this.err(n, `${nsName}.${sym}：前一个调用点猜的是 (${was.params.join(' ')})，`
+        + `这一个是 (${words.join(' ')}) —— 两处对不上，写一句声明说清`);
+    }
+    return {
+      code: `(ccall ${sym}${parts.length === 0 ? '' : ` ${parts.join(' ')}`})`,
+      type: J_I64,
     };
   }
 
@@ -6706,6 +6777,12 @@ class JncLower {
        签名是从头文件里收来的那一份（`cabiSigs`），不是从调用点猜的。 */
     if (nm === null && nm0 !== null && this.cabiSigs.has(nm0)) {
       return this.ccallSite(n, nm0, this.cabiSigs.get(nm0));
+    }
+    /* `import "libfoo.dylib" as g`（没有 `with`）：`g.foo(…)` 的类型从调用点猜，带 warning。 */
+    if (nm === null && nm0 !== null && nm0.includes('.')) {
+      const dot = nm0.lastIndexOf('.');
+      const pre = nm0.slice(0, dot);
+      if (this.cLibNs.has(pre)) return this.ccallGuess(n, pre, nm0.slice(dot + 1));
     }
     if (nm === null) return this.err(n, `没有这个函数：'${nm0}'`);
     // 方法体里裸写 `foo()` 就是 `this.foo()`（类是一层命名空间，所以 resolve 已经找着了

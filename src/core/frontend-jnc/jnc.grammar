@@ -149,6 +149,10 @@
       ;; 量过参考树：83 份 `.jnc` 里出现过这个词，全在字符串与文档注释里，一处当标识符用的
       ;; 都没有 —— 所以保留它的代价是零。
       "with"
+      ;; `as`（同一刀）：`import "libfoo.dylib" as g;` —— 那个库里的函数挂在 `g` 底下。
+      ;; 这一个**没有量过参考树**（这台机器上没有那棵树），所以代价不敢说是零：真撞上一份
+      ;; 拿 `as` 当标识符的 jancy 源码，就要把它改成上下文关键字（只在 import 那一行里认）。
+      "as"
       "dynamic")
     (punct SHLASSIGN "<<=")
     (punct SHRASSIGN ">>=")
@@ -192,6 +196,11 @@
     ;; `with` 因此成了保留字。量过参考树：83 份 `.jnc` 里出现过 `with` 这个词，**全在字符串
     ;; 与文档注释里**，一处当标识符用的都没有 —— 所以这个保留的代价是零。
     (-> ("import" LITERAL "with" LITERAL) (import $2 $4))
+    ;; `import "libfoo.dylib" as g;` / `import "libfoo.dylib" with "foo.h" as g;`（同一刀）
+    ;; —— 那个库里的函数挂在 `g` 底下（`g.glfwInit()`），于是一个真库的几百个名字不占
+    ;; 全局那一格。宏与枚举常量**不挂**：它们在 C 里本来就没有命名空间。
+    (-> ("import" LITERAL "as" qname) (import-as $2 $4))
+    (-> ("import" LITERAL "with" LITERAL "as" qname) (import-as $2 $6 $4))
     (-> ("namespace" qname "{" unit "}") (namespace $2 $4))
     (-> ("extension" qname base-list "{" unit "}") (extension $2 $3 $5))
     (-> ("dylib" qname "{" unit "}") (dylib $2 $4))

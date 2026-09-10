@@ -337,6 +337,61 @@ if (existsSync(sysDir)) {
   }
 }
 
+// ------------------------------------------------- 8. `import "…" as g`（J4d）
+//
+// 两条：**有头文件**时名字挂在 `g` 底下（签名从头文件来）；**没有头文件**时签名从调用点
+// 猜出来，而且必须**印一条 warning** —— 「不强制写声明，但遇到崩溃不该惊讶」的前提是
+// 用的人看得到自己在赌什么。从前 `diags.warn` 攒下来的东西一个字都不出去，那条承诺是空的。
+{
+  const dir = join(here, 'cabi');
+  const hostC = join(dir, 'host.c');
+  const tmp = mkdtempSync(join(tmpdir(), 'omni-asns-'));
+  const ext = process.platform === 'darwin' ? 'dylib' : 'so';
+  const libPath = join(tmp, `libhost.${ext}`);
+  const so = spawnSync('clang', ['-shared', '-fPIC', hostC, '-o', libPath], { encoding: 'utf8' });
+  if (so.status !== 0) bad('as-ns', `    dylib 编不出来：${(so.stderr ?? '').trim().split('\n')[0]}`);
+  else {
+    const src = join(tmp, 'guess.jnc');
+    writeFileSync(src, `import ${JSON.stringify(libPath)} as p;\n\n`
+      + 'int main() {\n'
+      + '    printf("sum %d\\n", p.omni_probe_add(20, 22));\n'
+      + '    return 0;\n'
+      + '}\n');
+    const r = run(['run-jit', src], 90000);
+    const detail = [];
+    if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 2).join('\n      ')}`);
+    else if (r.out !== 'sum 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "sum 42\\n"）`);
+    if (!(r.err ?? '').includes('warning:')) {
+      detail.push('    没有 warning：签名是从调用点猜的，这件事必须说出来');
+    }
+    if (!(r.err ?? '').includes('(i64 i64) -> i64')) {
+      detail.push(`    warning 里没写猜出来的那份签名：${JSON.stringify((r.err ?? '').slice(0, 200))}`);
+    }
+    if (detail.length > 0) bad('as-ns', detail.join('\n'));
+    else ok('as-ns [import "…" as p：签名从调用点猜、带 warning，调到的还是真符号]');
+
+    /* 有头文件的那一条：签名从头文件来，名字挂在 `h` 底下，**一句 warning 都不该有**。 */
+    const hdrPath = join(tmp, 'probe.h');
+    writeFileSync(hdrPath, '#include <stdint.h>\nint64_t omni_probe_add(int64_t a, int64_t b);\n');
+    const src2 = join(tmp, 'withas.jnc');
+    writeFileSync(src2, `import ${JSON.stringify(libPath)} with "probe.h" as h;\n\n`
+      + 'int main() {\n'
+      + '    printf("sum %d\\n", h.omni_probe_add(20, 22));\n'
+      + '    return 0;\n'
+      + '}\n');
+    const r2 = run(['run-jit', src2], 90000);
+    const d2 = [];
+    if (r2.code !== 0) d2.push(`    run-jit exit=${r2.code}\n      ${(r2.err ?? '').trim().split('\n').slice(0, 2).join('\n      ')}`);
+    else if (r2.out !== 'sum 42\n') d2.push(`    输出不对：${JSON.stringify(r2.out)}（要 "sum 42\\n"）`);
+    if ((r2.err ?? '').includes('warning:')) {
+      d2.push(`    有头文件就不该有 warning：${JSON.stringify((r2.err ?? '').slice(0, 200))}`);
+    }
+    if (d2.length > 0) bad('with-as-ns', d2.join('\n'));
+    else ok('with-as-ns [import "…" with "h" as h：签名从头文件来，没有 warning]');
+  }
+  rmSync(tmp, { recursive: true, force: true });
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 
 if (fail) {
