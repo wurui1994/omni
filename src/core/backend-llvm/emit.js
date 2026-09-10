@@ -227,6 +227,15 @@ const LL_LONGJMP = new Set(['longjmp', '_longjmp', 'siglongjmp']);
 const LL_JMPFAMILY = new Set(['setjmp', '_setjmp', 'sigsetjmp', '__sigsetjmp',
   'longjmp', '_longjmp', 'siglongjmp']);
 
+/* C_ABI 的类型词（`hir/c_abi.js` 的 C_TYPE）-> LLVM 的类型。声明里与调用点都用它。
+ *
+ * `ptr` 落在 `i64` 上而不是 `ptr`：MIR 上指针本来就是 i64（原生腿的地址是真地址那个数），
+ * 两者在 arm64/x86_64 上是同一个寄存器类，而"同一个符号在两处的签名必须一样"这条规矩
+ * 要的是**一致** —— 见 `externArg` 头上那段量出来的那个 bug。 */
+const CABI_LL = {
+  i32: 'i32', i64: 'i64', ptr: 'i64', f32: 'float', f64: 'double', bool: 'i1', void: 'void',
+};
+
 /* 线性内存的访问描述符 -> **内存里那几个字节**的 LLVM 类型（ADR-0017 第二刀）。
  * 一张表管读写两侧：`i8s`/`i8u` 与 `i8` 落到同一个 `i8`，差别只在扩展方向，
  * 而那件事由描述符名字的最后一个字母决定（见 memInsn）。 */
@@ -522,6 +531,60 @@ class LlvmEmitter {
       i++;
     }
     return false;
+  }
+
+  /**
+   * 一个实参**按声明的那一格 C 类型**摆（`mod.cabiSig`，ADR-0022 的 J4d）。
+   *
+   * 与 `externArg` 的分工：那一条是"没有声明，只能按值本身的类型发"；这一条是"有声明，
+   * **声明说了算**"。有声明时必须走这一条 —— 方言里只有 `real`（f64），而 C 那边
+   * `glColor3f(float, float, float)` 要的是三格**单精度**；按 f64 传就是错的调用约定
+   * （arm64 与 x86_64 上单精度在寄存器里的摆法与双精度不同）。同理 `i32` 的形参要从
+   * i64 截一刀 —— 这两件事都只有声明知道。
+   */
+  cabiArg(ref, word) {
+    const at = this.tyOf(ref);
+    /* 胖指针先抽地址（与 externArg 同一个理由：16 字节的聚合占两格寄存器）。 */
+    let cur = at === T_STR ? 'i64' : this.ty(at, `外部符号的形参（要 ${word}）`);
+    let v = this.val(ref);
+    if (at === T_STR) {
+      const a0 = this.fresh();
+      this.line(`  ${a0} = extractvalue [2 x i64] ${v}, 0`);
+      v = a0;
+    } else if (cur === '{ ptr, ptr, ptr }') {
+      /* 方言的指针是**带界的三个字**（基、当前、上界，见 T_PTR）。C 那边要的只是"当前"
+         那一格 —— 与 `OP.PTHIN` 取的是同一格（第 0 格）。界检查留在这一侧：交出去之后
+         C 那边爱怎么走就怎么走，那是把权利交给用的人的代价，写在 ADR-0022 的 J4d 里。 */
+      const p0 = this.fresh();
+      this.line(`  ${p0} = extractvalue { ptr, ptr, ptr } ${v}, 0`);
+      const n0 = this.fresh();
+      this.line(`  ${n0} = ptrtoint ptr ${p0} to i64`);
+      v = n0;
+      cur = 'i64';
+    }
+    const want = CABI_LL[word];
+    if (want === undefined) throw new OmniError(`${NOPE} 外部符号的形参类型 ${word}`);
+    if (cur === want) return { text: `${want} ${v}`, ty: want };
+    const t = this.fresh();
+    /* 浮点两边：double <-> float 是 fptrunc / fpext。 */
+    if (cur === 'double' && want === 'float') this.line(`  ${t} = fptrunc double ${v} to float`);
+    else if (cur === 'float' && want === 'double') this.line(`  ${t} = fpext float ${v} to double`);
+    /* 整数两边：窄了截、宽了按有符号扩（C_ABI 的整数都是有符号的，见 hir/c_abi.js）。 */
+    else if (cur === 'i64' && want === 'i32') this.line(`  ${t} = trunc i64 ${v} to i32`);
+    else if (cur === 'i32' && want === 'i64') this.line(`  ${t} = sext i32 ${v} to i64`);
+    else if (cur === 'i1' && want === 'i32') this.line(`  ${t} = zext i1 ${v} to i32`);
+    else if (cur === 'i1' && want === 'i64') this.line(`  ${t} = zext i1 ${v} to i64`);
+    else if (cur === 'i32' && want === 'i1') this.line(`  ${t} = trunc i32 ${v} to i1`);
+    else if (cur === 'i64' && want === 'i1') this.line(`  ${t} = trunc i64 ${v} to i1`);
+    /* 整数 <-> 浮点：C 那边这是隐式转换（`glClearColor(0, 0, 0, 1)` 常这么写）。 */
+    else if ((cur === 'i32' || cur === 'i64') && (want === 'float' || want === 'double')) {
+      this.line(`  ${t} = sitofp ${cur} ${v} to ${want}`);
+    } else if ((cur === 'float' || cur === 'double') && (want === 'i32' || want === 'i64')) {
+      this.line(`  ${t} = fptosi ${cur} ${v} to ${want}`);
+    } else {
+      throw new OmniError(`${NOPE} 把 ${cur} 交给声明成 ${word} 的形参`);
+    }
+    return { text: `${want} ${t}`, ty: want };
   }
 
   /* --------------------------------------------------------------- 基本块 */
@@ -1286,8 +1349,6 @@ class LlvmEmitter {
     if (op === OP.CCALL) {
       const entry = this.mir.cabi[f.a[i]];
       const refs = f.argsOf(f.b[i]);
-      const as = refs.map((r) => this.externArg(r));
-      const rt = this.ty(t, `${entry} 的返回值`);
       /* `long double` 的返回值在 x87 的 st0 里（CALL_LDRET）：那是 x86_64 才有的回法，
          IR 这一层没有那个类型 —— 撞上就在这儿停，别让它悄悄按 double 回。 */
       if (callLdRet(f.aux[i])) {
@@ -1300,6 +1361,41 @@ class LlvmEmitter {
          于是印出一个垃圾数）。这一格只经 `callVaFixed` 读，别自己算。 */
       const nfixed = callVaFixed(f.aux[i]);
       const variadic = nfixed >= 0;
+      /**
+       * **有声明就按声明发**（`mod.cabiSig`，ADR-0022 的 J4d）。
+       *
+       * 没有声明时只能按值本身的类型发（`externArg`），而那对 `float` 是错的：方言里
+       * 只有 `real`（f64），而 `glColor3f(float,float,float)` 要三格单精度 —— 按 f64 传
+       * 就是错的调用约定。`i32` 的形参同理要从 i64 截一刀。这两件事只有声明知道。
+       */
+      const decl = (this.mir.cabiSig ?? [])[f.a[i]];
+      if (decl !== undefined && !variadic) {
+        if (refs.length !== decl.params.length) {
+          throw new OmniError(`llvm: ${entry} 声明成 ${decl.params.length} 个形参，`
+            + `调用点给了 ${refs.length} 个`);
+        }
+        const as2 = refs.map((r, k) => this.cabiArg(r, decl.params[k]));
+        const drt = CABI_LL[decl.ret];
+        if (drt === undefined) throw new OmniError(`${NOPE} ${entry} 的返回类型 ${decl.ret}`);
+        const sig2 = `${drt} (${decl.params.map((p) => CABI_LL[p]).join(', ')})`;
+        this.externDecl(entry, sig2);
+        const cargs2 = as2.map((a) => a.text).join(', ');
+        if (drt === 'void') { this.line(`  call void @${entry}(${cargs2})`); return; }
+        /* 回来的那一格也要按**这条指令的类型**摆：C 那边回 `float`，而方言里接它的是
+           `real`（f64）—— 中间少一句 fpext 就是读一个半截的数。 */
+        const want = this.ty(t, `${entry} 的返回值`);
+        if (want === drt) { this.line(`  ${dst} = call ${drt} @${entry}(${cargs2})`); return; }
+        const raw = this.fresh();
+        this.line(`  ${raw} = call ${drt} @${entry}(${cargs2})`);
+        if (drt === 'float' && want === 'double') this.line(`  ${dst} = fpext float ${raw} to double`);
+        else if (drt === 'i32' && want === 'i64') this.line(`  ${dst} = sext i32 ${raw} to i64`);
+        else if (drt === 'i64' && want === 'i32') this.line(`  ${dst} = trunc i64 ${raw} to i32`);
+        else if (drt === 'i1' && (want === 'i32' || want === 'i64')) this.line(`  ${dst} = zext i1 ${raw} to ${want}`);
+        else throw new OmniError(`${NOPE} ${entry} 回 ${decl.ret} 而这条指令要 ${want}`);
+        return;
+      }
+      const as = refs.map((r) => this.externArg(r));
+      const rt = this.ty(t, `${entry} 的返回值`);
       /* 声明只按**定参**发：同一个变参函数在不同调用点的实参个数不同，而定参那几格一样。 */
       const fixed = as.slice(0, variadic ? nfixed : as.length).map((a) => a.ty);
       const sig = `${rt} (${fixed.concat(variadic ? ['...'] : []).join(', ')})`;

@@ -220,6 +220,13 @@ export class Cpp {
     this.includeDirs = host.includeDirs ?? [];
     /** 自带的系统头目录（tcc 的 `sysinclude_paths`）。在 `-I` **之后**试，见 `parseInclude` */
     this.sysIncludeDirs = host.sysIncludeDirs ?? [];
+    /* **framework 的头文件目录**（macOS，ADR-0022 的 J4d）。`#include <OpenGL/gl.h>` 在
+     * 苹果那边不是"某个目录下的 OpenGL/gl.h"，而是
+     * `<F>/OpenGL.framework/Headers/gl.h` —— clang 的 `-F` 那张表管的就是它。
+     * 量出来的：`<GLFW/glfw3.h>` 第 237 行 include 的正是 `<OpenGL/gl.h>`，
+     * 少了这张表，一份真的 GLFW 头连预处理都过不去。 */
+    this.frameworkDirs = host.frameworkDirs ?? [];
+
     this.dirnameOf = host.dirname ?? defaultDirname;
     this.joinPath = host.join ?? defaultJoin;
     /** 目标架构（`--arch`）。预定义宏里目标 CPU 那三条按它换，见 tccdefs 的 `CPU_DEFS` */
@@ -2056,6 +2063,17 @@ export class Cpp {
     let i = 2;
     for (const d of this.includeDirs) put(i++, this.joinPath(d, name));
     for (const d of this.sysIncludeDirs) put(i++, this.joinPath(d, name));
+    /* framework（macOS）：`Foo/Bar.h` -> `<F>/Foo.framework/Headers/Bar.h`。
+       排在最后，与 clang 一样 —— 普通目录里真有一个 `OpenGL/gl.h` 时那一份优先。
+       名字里没有斜杠就不是 framework 的写法（`<stdio.h>` 不该去试 `stdio.framework`）。 */
+    const slash = name.indexOf('/');
+    if (slash > 0 && this.frameworkDirs.length > 0) {
+      const fw = name.slice(0, slash);
+      const rest = name.slice(slash + 1);
+      for (const d of this.frameworkDirs) {
+        put(i++, this.joinPath(this.joinPath(d, `${fw}.framework`), this.joinPath('Headers', rest)));
+      }
+    }
     return tries;
   }
 

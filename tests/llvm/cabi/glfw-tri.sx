@@ -1,0 +1,106 @@
+;; 一个**真的** OpenGL 程序：GLFW 开窗、legacy GL 画一个转的三角形（ADR-0022 的 J4d）。
+;;
+;; 这一份是核心方言（`.sx`）那一侧的写法：库与声明都明写。
+;;   (lib "…")  —— 那些符号的体在哪个库里
+;;   (cabi …)   —— 那一端的 C 是怎么声明的
+;;   (ccall …)  —— 调它，实参已经是机器值（不 marshal）
+;;
+;; 为什么 `float` 那几格必须是 `f32` 而不是 `f64`：ABI 上单精度是自己那一格。
+;; `glColor3f(float,float,float)` 按 double 传就是错的调用约定 —— 后端按声明在调用点
+;; 补 `fptrunc`（方言里只有 `real`），那一句由 `mod.cabiSig` 说，不是猜的。
+;;
+;; macOS 上不设 `glfwWindowHint`：默认给的就是 legacy 的 2.1 上下文，glBegin/glEnd 能用。
+(module
+  (lib "/opt/homebrew/lib/libglfw.dylib")
+  (lib "libm")
+
+  ;; ---- GLFW ----
+  (cabi glfwInit i32 ())
+  (cabi glfwTerminate void ())
+  (cabi glfwCreateWindow ptr (i32 i32 ptr ptr ptr))
+  (cabi glfwDestroyWindow void (ptr))
+  (cabi glfwMakeContextCurrent void (ptr))
+  (cabi glfwSwapInterval void (i32))
+  (cabi glfwWindowShouldClose i32 (ptr))
+  (cabi glfwSetWindowShouldClose void (ptr i32))
+  (cabi glfwSwapBuffers void (ptr))
+  (cabi glfwPollEvents void ())
+  (cabi glfwGetTime f64 ())
+  (cabi glfwGetFramebufferSize void (ptr ptr ptr))
+
+  ;; ---- OpenGL（legacy 那一族）----
+  (cabi glViewport void (i32 i32 i32 i32))
+  (cabi glClearColor void (f32 f32 f32 f32))
+  (cabi glClear void (i32))
+  (cabi glBegin void (i32))
+  (cabi glEnd void ())
+  (cabi glColor3f void (f32 f32 f32))
+  (cabi glVertex3f void (f32 f32 f32))
+
+  ;; ---- libm ----
+  (cabi sin f64 (f64))
+  (cabi cos f64 (f64))
+
+  ;; 一个顶点：绕原点转 `a` 弧度、半径 0.8，颜色由角度定。
+  (fn vertexAt ((a real) (r real) (cr real) (cg real) (cb real)) void
+    (expr (ccall glColor3f (var cr) (var cg) (var cb)))
+    (expr (ccall glVertex3f
+      (bin "*" (var r) (ccall cos (var a)))
+      (bin "*" (var r) (ccall sin (var a)))
+      (real 0.0))))
+
+  (main
+    (if (bin "==" (ccall glfwInit) (int 0))
+      (do
+        (print (str "glfwInit failed"))
+        (ret)))
+
+    ;; 窗口：800x600，标题从字面量来（胖指针在调用点抽地址，见 externArg/cabiArg）
+    (let win int (ccall glfwCreateWindow (int 800) (int 600) (str "Omni × GLFW") (int 0) (int 0)))
+    (if (bin "==" (var win) (int 0))
+      (do
+        (print (str "glfwCreateWindow failed"))
+        (expr (ccall glfwTerminate))
+        (ret)))
+
+    (expr (ccall glfwMakeContextCurrent (var win)))
+    (expr (ccall glfwSwapInterval (int 1)))
+
+    ;; framebuffer 的实际像素（retina 上是窗口尺寸的两倍）
+    (let wp (ptr int) (pnew (ptr int) (int 1)))
+    (let hp (ptr int) (pnew (ptr int) (int 1)))
+    (expr (ccall glfwGetFramebufferSize (var win) (var wp) (var hp)))
+    (print (str "framebuffer:"))
+    (print (pload (var wp)))
+    (print (pload (var hp)))
+    (expr (ccall glViewport (int 0) (int 0) (pload (var wp)) (pload (var hp))))
+
+    ;; 这一份要能在没有显示器的机器上跑完，所以**按帧数收**而不是等人关窗：
+    ;; 画 120 帧就退。`OMNI_GL_FRAMES` 那种开关方言里还没有，所以写死。
+    (let frame int (int 0))
+    (while (bin "&&" (bin "<" (var frame) (int 120))
+                     (bin "==" (ccall glfwWindowShouldClose (var win)) (int 0)))
+      (do
+        (let t real (ccall glfwGetTime))
+        ;; 背景色随时间走一圈
+        (expr (ccall glClearColor
+          (bin "*" (real 0.5) (bin "+" (real 1.0) (ccall sin (var t))))
+          (real 0.15)
+          (bin "*" (real 0.5) (bin "+" (real 1.0) (ccall cos (var t))))
+          (real 1.0)))
+        ;; GL_COLOR_BUFFER_BIT = 0x4000
+        (expr (ccall glClear (int 16384)))
+        ;; GL_TRIANGLES = 0x0004
+        (expr (ccall glBegin (int 4)))
+        (expr (call vertexAt (var t) (real 0.8) (real 1.0) (real 0.2) (real 0.2)))
+        (expr (call vertexAt (bin "+" (var t) (real 2.0943951)) (real 0.8) (real 0.2) (real 1.0) (real 0.2)))
+        (expr (call vertexAt (bin "+" (var t) (real 4.1887902)) (real 0.8) (real 0.2) (real 0.2) (real 1.0)))
+        (expr (ccall glEnd))
+        (expr (ccall glfwSwapBuffers (var win)))
+        (expr (ccall glfwPollEvents))
+        (set frame (bin "+" (var frame) (int 1)))))
+
+    (print (str "frames:"))
+    (print (var frame))
+    (expr (ccall glfwDestroyWindow (var win)))
+    (expr (ccall glfwTerminate))))

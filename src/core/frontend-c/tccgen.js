@@ -7951,7 +7951,8 @@ function cabiWordOf(ty, isRet) {
   if (bt === VT_BOOL) return 'bool';
   if (isPtr(ty.t) || isArray(ty.t)) return 'ptr';
   if (bt === VT_DOUBLE) return 'f64';
-  if (bt === VT_FLOAT || bt === VT_LDOUBLE) return null;
+  if (bt === VT_FLOAT) return 'f32';
+  if (bt === VT_LDOUBLE) return null;
   if (isStruct(ty.t) || isFunc(ty.t)) return null;
   if (isInteger(ty.t)) {
     const n = typeSize(ty).size;

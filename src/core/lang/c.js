@@ -78,6 +78,29 @@ export function cSysInclude(libDir) {
 }
 
 /**
+ * **framework 的头文件目录**（macOS，ADR-0022 的 J4d）。clang 的 `-F` 那张表。
+ *
+ * `#include <OpenGL/gl.h>` 在苹果那边不是"某个目录下的 OpenGL/gl.h"，而是
+ * `<F>/OpenGL.framework/Headers/gl.h`。量出来的：`<GLFW/glfw3.h>` 第 237 行 include 的
+ * 正是 `<OpenGL/gl.h>` —— 少了这张表，一份真的 GLFW 头连预处理都过不去。
+ *
+ * SDK 里那一份在前、系统那两处在后（与 clang 的默认顺序一样）。不存在的目录不放进来：
+ * 这张表每 include 一次就要走一遍，放一堆不存在的路径只是白试。
+ */
+export function cFrameworks() {
+  const out = [];
+  const r = sdkRoot();
+  if (r !== null) {
+    const p = join(r, 'System', 'Library', 'Frameworks');
+    if (isDir(p)) out.push(p);
+  }
+  for (const p of ['/Library/Frameworks', '/System/Library/Frameworks']) {
+    if (isDir(p)) out.push(p);
+  }
+  return out;
+}
+
+/**
  * 一份 `.c` -> MIR（ADR-0017 第六刀）。宿主回调与 `cppText` 同一套。
  * 良构检查在这里做完 —— 前端刚长出来，让 verifier 先骂比让解释器崩掉好查。
  */
@@ -181,6 +204,7 @@ export function cMirNative(path, opts, defs) {
     },
     includeDirs: opts.includeDirs,
     sysIncludeDirs: opts.sysIncludeDirs,
+    frameworkDirs: opts.frameworkDirs ?? cFrameworks(),
     dirname,
     join,
     arch: opts.arch,
@@ -206,6 +230,7 @@ export function cDeclsOf(path, opts, defs) {
     },
     includeDirs: opts.includeDirs,
     sysIncludeDirs: opts.sysIncludeDirs,
+    frameworkDirs: opts.frameworkDirs ?? cFrameworks(),
     dirname,
     join,
     arch: opts.arch,

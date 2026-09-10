@@ -72,9 +72,9 @@ const TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', 
  *
  * `cstr` 不在表里：它要 UTF-8 的装卸，而那是 dynamic 域那条路的事（`omni_cabi_cstr`）——
  * 这一格上的实参已经是机器值了，没有地方放那次转换。 */
-const CABI_CORE = { i32: INT, i64: INT, ptr: INT, f64: REAL, bool: BOOL, void: VOID };
-const CABI_NAMES = 'i32 / i64 / f64 / bool / ptr / void';
-const CABI_ARG_NAMES = 'i32 / i64 / f64 / bool / ptr';
+const CABI_CORE = { i32: INT, i64: INT, ptr: INT, f64: REAL, f32: REAL, bool: BOOL, void: VOID };
+const CABI_NAMES = 'i32 / i64 / f32 / f64 / bool / ptr / void';
+const CABI_ARG_NAMES = 'i32 / i64 / f32 / f64 / bool / ptr';
 
 /* 线性内存的访问描述符（ADR-0017 第二刀）。名字与 mir/ir.js 的 MLOAD_KINDS / MSTORE_KINDS
  * 逐字相同 —— 这一层不 import 那两张表（方言不依赖 MIR），但两处的名字是同一套约定，
@@ -2048,10 +2048,24 @@ class CoreLowerer {
       }
       let ci = 0;
       while (ci < args.length) {
-        const want = CABI_CORE[d.params[ci]];
-        if (!sameCoreType(args[ci].type, want)) {
-          return this.err(n, `'${nm}' 的第 ${ci + 1} 个形参声明成 ${d.params[ci]}`
-            + `（这一端是 ${coreTypeText(want)}），给的是 ${coreTypeText(args[ci].type)}`);
+        const w = d.params[ci];
+        const want = CABI_CORE[w];
+        /* `ptr` 的形参**也收 `string` 与方言的指针**（ADR-0022 的 J4d）：C 那边拿到的都是
+           一个地址。量出来的必要性：`glfwCreateWindow(w, h, "标题", …)` 的第三格是
+           `const char *`，而 `glfwGetFramebufferSize(win, &w, &h)` 的后两格是 `int *` ——
+           一个真程序两种都要。
+           - `string`：后端在调用点抽胖指针的第 0 格（见 cabiArg）。字面量**带结尾的零**
+             （池子每条多发一个 `i8 0`），所以 C 那边读得停下来；算出来的串没有那个保证，
+             那是用的人要负的责。
+           - `(ptr T)` / `(tptr T)`：这个方言里它本来就是一个地址（native 腿上是真地址）。 */
+        const at = args[ci].type;
+        const isAddr = at !== null && at !== undefined && (at.k === 'ptr' || at.k === 'tptr');
+        const ok = sameCoreType(at, want)
+          || (w === 'ptr' && (sameCoreType(at, STRING) || isAddr));
+        if (!ok) {
+          return this.err(n, `'${nm}' 的第 ${ci + 1} 个形参声明成 ${w}`
+            + `（这一端是 ${coreTypeText(want)}${w === 'ptr' ? '、string 或指针' : ''}），`
+            + `给的是 ${coreTypeText(at)}`);
         }
         ci++;
       }

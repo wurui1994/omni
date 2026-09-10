@@ -74,6 +74,11 @@ export const C_TYPE = {
   i32: 'int32_t',
   i64: 'int64_t',
   f64: 'double',
+  /* `float`（ADR-0022 的 J4d）：**不能拿 `f64` 顶** —— ABI 上单精度是自己那一格，
+     按 double 传就是错的调用约定。量出来的：一份真的 `<GLFW/glfw3.h>`（连着 OpenGL 的头）
+     里 704 条声明有 67 条只因为 `float` 收不下，而那 67 条正是 `glColor3f`/`glClearColor`/
+     `glVertex3f` 那一族 —— 一个经典 OpenGL 程序的正中心。 */
+  f32: 'float',
   bool: 'bool',
   cstr: 'const char *',
   ptr: 'void *',
