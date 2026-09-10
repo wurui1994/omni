@@ -567,6 +567,37 @@ host: realm_tbl_g[1].u.r=99
   node 腿**响着拒**，说清"这条腿上没有插件加载，装了什么就是编进来的那些"），
   以及构建那边"把一门语言连它的私有依赖编成一个 dylib"。
 
+### S4 的机制整条通了（能装、能发现、能用）
+
+```
+omni build src/core/lang/wat.js --plugin registerWatLang -o omni-lang-wat.dylib
+  发射器：不发 main，发 omni_plugin_init(api) = 跑一遍这一份的模块级语句 + 把 api 递给 register
+  摇树：register 多算一个根（谁都不调它，是核心 dlopen 之后从 C 那侧调进来的）
+  链接：不链运行时的 .o（状态住核心），.dylib 加 -undefined dynamic_lookup
+核心：启动时扫 <installDir>/../../plugins，按名字认，dlopen + dlsym("omni_plugin_init")
+```
+
+**证到底的那一步**：把 `lang/wat.js` 抄成一份只认 `.wat2` 的插件，而核心是在那之前编好的、
+压根不知道 `.wat2` —— 插件在目录里 `emit oir t.wat2` 出 OIR，插件挪走就落到核心方言、
+报 `unexpected character: "$"`。`--explain` 的计划行也跟着问注册表了（从前它会印成
+"omni（mixed）"，那是在说谎）。
+
+### 卡在最后一格：**核心还没变薄**，因为 node 腿装不动插件
+
+机制通了，但今天六门语言仍然编进核心 —— 要真变薄，得让核心**不 import 它们**。
+而这里有一条硬约束：`.asy` / `.jnc` 那些门（gates）跑在 **node 腿**上，而 node 腿没有
+`dlopen`（没有同步的 ESM import）。把它们从核心里摘掉，node 腿上那些门当场全红。
+
+所以"内建哪些"必须是一格**按腿分的接缝**，而不是一个运行期开关：
+
+- node 腿（开发 / 自举宿主）：全都内建 —— 它本来就没有插件这条路。
+- C 腿（产品）：核心只留 js -> c，其余由 `bootstrap` 编成 `dist/plugins/omni-lang-*.dylib`。
+
+接缝落在哪儿是下一个决定：静态 import 没法按条件取消，所以要么
+（a）把内建那一串收进 `lang/builtin.js`，编薄核心时让 link.js 把它换成另一份；
+（b）`bootstrap` 生成那一份（"这次编进来哪几门"是构建产物，不是源码里的一个 if）。
+（b）更像这条链上别处的做法（语法表、字面量池都是生成的），代价是多一格生成物。
+
 - **S4 其余插件搬出去**：每个语言 / 目标一个独立编译的动态库，落到约定目录里；
   核心启动时扫一遍（自动发现，无开关）；`bootstrap` 分步表把每个插件的时间与体积摆出来。
 - **S5**（可选）P2a 收共享段那 7.75 M 与产物那 +50%。
