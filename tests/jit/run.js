@@ -226,6 +226,47 @@ else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同�
         else ok(`lib-libm [--lib 装上库，sin/cos 与 AOT 相同] ${JSON.stringify((jr.stdout ?? '').trim())}`);
       }
     }
+
+    /* 4f **对象码缓存**（J7）：`--objcache PATH` —— 第一次跑生成对象码并落盘，第二次直接
+       摆那份对象码进去，一次代码生成都不做。这一条钉三件事：miss/hit 的先后、缓存文件真的
+       出来了、**两次的输出逐字节相同**（缓存不许改变可观测行为）。
+       走宿主直调而不是 `run-jit`：那条路的缓存目录是共享的，第一次跑是不是 miss 取决于
+       别人跑过没有 —— 判据不该有那种依赖。 */
+    {
+      const src = join(tmp, 'oc.c');
+      writeFileSync(src, '#include <stdio.h>\nint main(void) { printf("oc ok\\n"); return 7; }\n');
+      const em2 = spawnSync('node', [cli, 'emit', 'llvm', src], { encoding: 'utf8' });
+      if (em2.status !== 0) bad('objcache', `    emit llvm 没过：${(em2.stderr ?? '').trim().split('\n')[0]}`);
+      else {
+        const irPath = join(tmp, 'oc.ll');
+        writeFileSync(irPath, em2.stdout);
+        const ocPath = join(tmp, 'oc.o');
+        const env2 = { ...process.env, OMNI_JIT_TRACE: '1' };
+        const opts2 = { encoding: 'utf8', timeout: 30000, maxBuffer: 1 << 20, env: env2 };
+        /* `--dl`：这份 IR 要 `printf` 那一族（libc）—— 默认那扇门是关着的（决策 2）。 */
+        const r1 = spawnSync(host, [irPath, '--dl', '--objcache', ocPath], opts2);
+        const r2 = spawnSync(host, [irPath, '--dl', '--objcache', ocPath], opts2);
+        const d6 = [];
+        if (!(r1.stderr ?? '').includes('objcache miss')) {
+          d6.push(`    第一次不是 miss：${JSON.stringify((r1.stderr ?? '').slice(0, 200))}`);
+        }
+        if (!existsSync(ocPath)) d6.push('    第一次跑完没有落下那份对象码');
+        if (!(r2.stderr ?? '').includes('objcache hit')) {
+          d6.push(`    第二次不是 hit：${JSON.stringify((r2.stderr ?? '').slice(0, 200))}`);
+        }
+        if ((r1.stdout ?? '') !== 'oc ok\n' || (r2.stdout ?? '') !== 'oc ok\n') {
+          d6.push(`    输出不对：${JSON.stringify(r1.stdout)} / ${JSON.stringify(r2.stdout)}`);
+        }
+        if (r1.status !== 7 || r2.status !== 7) {
+          d6.push(`    退出码不对：${r1.status} / ${r2.status}（要 7）`);
+        }
+        if (d6.length > 0) bad('objcache', d6.join('\n'));
+        else {
+          ok('objcache [--objcache：第一次 miss 并落盘，第二次 hit，两次输出与退出码相同]'
+            + ` ${statSync(ocPath).size} bytes`);
+        }
+      }
+    }
   }
 }
 

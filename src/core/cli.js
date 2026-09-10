@@ -2077,6 +2077,13 @@ function runViaJit(mod, argv, srcPath) {
     jitArgs.push('--lib', lib.endsWith('.framework') ? frameworkPath(lib) : lib);
   }
   if (wantDl) jitArgs.push('--dl');
+  /* **对象码缓存**（J7）：键是「这份 IR 的内容 + 那个宿主二进制」——宿主的路径里已经编进了
+     编译器、LLVM 的版本与运行时的 .o（见 buildJitHost 的缓存键），所以把它算进去就够了。
+     内容寻址于是没有失效问题：IR 改一个字节就是另一个文件。落在 `.omni-cache/jitobj/`。
+     写不下来不算错（宿主那侧就是这么处理的）—— 缓存是可选的。 */
+  const objDir = join(cacheRoot(), 'jitobj');
+  mkdirAll(objDir);
+  jitArgs.push('--objcache', join(objDir, `${hash16([host, ir].join('|'))}.o`));
   const code = spawn(host, jitArgs, 'i')[0];
   vStep(`orc jit ${llPath}  exit=${code}`);
   return code;

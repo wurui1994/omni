@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* LLVMInitializeNativeTarget 一族是 Target.h 里的 static inline，展开成
    当前架构那几个真符号。这里照 LLVM 自己的宏来，别的架构加一条 #elif 就行。 */
@@ -59,6 +60,43 @@ static int omni_jit_main_thread(void) {
 #else
   return 1;
 #endif
+}
+
+/* ------------------------------------------------------- 对象码缓存（J7）
+ *
+ * ORC 是惰性物化的：真正花时间的是"查地址"那一句触发的**代码生成**。同一份 IR 反复跑
+ * （REPL、跑测试、同一个程序改一行外面的东西）每次都重新生成一遍机器码，而那一份机器码
+ * 是 IR 的纯函数 —— 所以可以存下来。
+ *
+ * 落法是 ORC 自己的两个口子：
+ *   - **写**：`ObjTransformLayer` 上挂一个变换，编译器吐出对象码时顺手落盘（原样传下去）。
+ *   - **读**：`LLVMOrcLLJITAddObjectFile` —— 直接摆一份对象码进去，不经 IR。
+ *
+ * 缓存的键由**调用方**（cli.js）算：IR 的内容 + 那个宿主二进制自己（它编进了 LLVM 的版本
+ * 与运行时的 .o）。所以这一层只认一个路径，不判断"新不新" —— 内容寻址的缓存没有失效问题。
+ *
+ * 写不下来**不算错**：缓存是可选的。这条很重要 —— 一个只读的缓存目录不该让程序跑不起来。
+ */
+static char omni_objcache[4096];
+
+static LLVMErrorRef omni_objcache_write(void *ctx, LLVMMemoryBufferRef *obj) {
+  (void)ctx;
+  if (omni_objcache[0] == '\0' || obj == NULL || *obj == NULL) return NULL;
+  /* 先写临时名再 rename：两个进程同时跑同一份 IR 时，谁也不会读到半个文件。 */
+  char tmp[4200];
+  snprintf(tmp, sizeof tmp, "%s.%d.tmp", omni_objcache, (int)getpid());
+  FILE *f = fopen(tmp, "wb");
+  if (f == NULL) return NULL;
+  const char *p = LLVMGetBufferStart(*obj);
+  size_t n = LLVMGetBufferSize(*obj);
+  size_t w = fwrite(p, 1, n, f);
+  int ok = (fclose(f) == 0) && (w == n);
+  if (ok) {
+    if (rename(tmp, omni_objcache) != 0) remove(tmp);
+  } else {
+    remove(tmp);
+  }
+  return NULL;
 }
 
 static int omni_jit_fail(LLVMErrorRef e, const char *what) {  char *m = LLVMGetErrorMessage(e);
@@ -206,7 +244,7 @@ static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModul
 int main(int argc, char **argv) {
   if (argc < 2) {
     fprintf(stderr, "usage: omni-jit FILE.ll [SYMBOL] [--call SYM]... [--repeat N]"
-            " [--dl] [--lib PATH]... [-- ARG...]\n");
+            " [--dl] [--lib PATH]... [--objcache PATH] [-- ARG...]\n");
 
     return 64;
   }
@@ -256,6 +294,18 @@ int main(int argc, char **argv) {
         return 70;
       }
       dl = 1;
+      continue;
+    }
+    /* `--objcache PATH`：这份 IR 的对象码存在哪儿（J7）。键由调用方算（内容寻址），
+       所以这一层只认路径 —— 有就用、没有就生成完落一份。 */
+    if (strcmp(argv[i], "--objcache") == 0) {
+      if (i + 1 >= argc) { fprintf(stderr, "omni-jit: --objcache 要一个路径\n"); return 64; }
+      const char *op = argv[++i];
+      if (strlen(op) + 1 > sizeof omni_objcache) {
+        fprintf(stderr, "omni-jit: --objcache 的路径太长\n");
+        return 64;
+      }
+      snprintf(omni_objcache, sizeof omni_objcache, "%s", op);
       continue;
     }
     if (argv[i][0] == '-') {
@@ -335,11 +385,36 @@ int main(int argc, char **argv) {
     }
   }
 
-  LLVMOrcThreadSafeContextRef tsc = LLVMOrcCreateNewThreadSafeContext();
-  LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(mod, tsc);
-  err = LLVMOrcLLJITAddLLVMIRModule(jit, jd, tsm);
-  if (err != NULL) return omni_jit_fail(err, "cannot add module");
-
+  /* **对象码缓存**（J7，见 `omni_objcache_write` 上面那段）：缓存里有就直接摆一份对象码
+     进去，一次代码生成都不做；没有就照旧交 IR，顺手在 ObjTransformLayer 上把生成出来的
+     对象码落盘。入口的**形状**已经从 IR 上读完了（上面那一段），所以这两条路下游完全一样。 */
+  int objhit = 0;
+  if (omni_objcache[0] != '\0') {
+    LLVMMemoryBufferRef ob = NULL;
+    char *omsg = NULL;
+    if (LLVMCreateMemoryBufferWithContentsOfFile(omni_objcache, &ob, &omsg) == 0) {
+      /* 走这条路 IR 就不要了 —— 两份都摆进去等于重复定义。 */
+      LLVMDisposeModule(mod);
+      err = LLVMOrcLLJITAddObjectFile(jit, jd, ob);
+      if (err != NULL) return omni_jit_fail(err, "cannot add cached object");
+      objhit = 1;
+    } else if (omsg != NULL) {
+      LLVMDisposeMessage(omsg);   /* 缓存不在（第一次跑）不是错 */
+    }
+  }
+  if (objhit == 0) {
+    if (omni_objcache[0] != '\0') {
+      LLVMOrcObjectTransformLayerSetTransform(LLVMOrcLLJITGetObjTransformLayer(jit),
+                                              omni_objcache_write, NULL);
+    }
+    LLVMOrcThreadSafeContextRef tsc = LLVMOrcCreateNewThreadSafeContext();
+    LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(mod, tsc);
+    err = LLVMOrcLLJITAddLLVMIRModule(jit, jd, tsm);
+    if (err != NULL) return omni_jit_fail(err, "cannot add module");
+  }
+  if (omni_objcache[0] != '\0' && getenv("OMNI_JIT_TRACE") != NULL) {
+    fprintf(stderr, "omni-jit: objcache %s %s\n", objhit != 0 ? "hit" : "miss", omni_objcache);
+  }
   /* 查地址那一句才是真正触发编译的地方（ORC 是惰性物化的）—— 「JIT 延迟」量的就是它。
      多个入口按命令行上的顺序来；`--repeat` 是给"同一个入口反复调"用的（kernel dispatch
      与将来的 REPL 都要它），退出码取最后一个 main 形状那次的返回值。 */
