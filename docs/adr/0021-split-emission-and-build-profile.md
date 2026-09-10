@@ -530,6 +530,43 @@ host: realm_tbl_g[1].u.r=99
   这正是 S1 要换来的东西。剩下的是注册表与 ABI 那一半（纯管线）：
   把 `emitJs` / `lowerAsy` 这些**直接调用**改成过一格注册表，node 腿用动态 `import()`、
   C 腿用 `dlopen`，宿主原语已有（`host/native_c.js`、`runtime/omni_r3.c`）。
+### S4 已落的一半：六门语言 + 四个目标都自己登记了
+
+`src/core/lang/{wat,sx,asy,jnc,glsl,c}.js` 与 `src/core/target/{js,c,llvm,spirv}.js` ——
+每一份都**不 import cli.js**，宿主服务由 `register(api)` / `init*(api)` 给一次。
+`cli.js` 从 3258 行降到 3033 行；`plugin.js` 现在只 import `OmniError`。
+
+三件搬的时候才看清的事（都写在代码旁边了）：
+
+- **注册表要两半**：语言那半答"怎么变成 OIR"，跑法（RUNNERS）那半答"怎么跑" ——
+  `.frag` 的执行是渲一帧写 PNG，它没有 OIR 那一层。混一张表就得在 compile 的返回值上
+  编个"其实没有 mod"的特例。
+- **模块作用域的名字要整份程序唯一**（自举链的链接器断言）。所以现在是
+  `registerAsyLang` / `ASY_API` / `asyLoadGrammar` 这种带前缀的名字。等每门语言各自成一个
+  动态库、各自独立编译，C ABI 那一层的入口才是统一的 `omni_plugin_init`。
+- **两处层次串门**：AST 缓存的键沿用了驱动侧"印记"的格式（`inpPath` / `inpOk` / `inpField`），
+  `parseText` 还直接写驱动的 `srcIdMemo`。先按服务注进去（`api.srcIdNote`），
+  把这份格式收回驱动侧是单独一刀。
+
+### 加载那一半怎么落：插件是**同一个运行时里的一段程序**，不是外来的 C 库
+
+一个卡了半天的问题：注册表里存的是 JS 侧的函数值，而 `dlopen` 出来的是 C 函数指针 ——
+两边怎么接？答案是根本不用接：**插件也是 omni 编出来的**，它和核心共用同一份运行时
+（S1 把状态搬进运行时、S3 那个 dylib 实验已经证过：核心写 `realm_tbl_g[0]=7`，插件读到 7）。
+所以插件里那个 `register` 编出来就是 dylib 里的一个普通函数，`omni_plugin_init` 只是
+拿着核心递过去的 api（一格 `omni_dyn`）调它一次 —— 登记进来的是 `omni_fn`，
+注册表那一层一个字都不用改。
+
+由此定下两条：
+
+- **自动发现是 C 那条腿的事。** node 腿上没有同步的 ESM import（`import()` 是异步的，
+  而驱动是同步的），所以开发时 node 腿只有内建那一套；发出去的产品是 C 腿，
+  它有 `dlopen`，扫目录、按文件名认、`dlsym("omni_plugin_init")` 全是同步的。
+  这不是妥协：node 腿是自举的宿主，C 腿才是产品。
+- **要加的东西只有两样**：一格宿主 op `plugin_load(path)`（C 腿 `dlopen` + `dlsym` + 调 init；
+  node 腿**响着拒**，说清"这条腿上没有插件加载，装了什么就是编进来的那些"），
+  以及构建那边"把一门语言连它的私有依赖编成一个 dylib"。
+
 - **S4 其余插件搬出去**：每个语言 / 目标一个独立编译的动态库，落到约定目录里；
   核心启动时扫一遍（自动发现，无开关）；`bootstrap` 分步表把每个插件的时间与体积摆出来。
 - **S5**（可选）P2a 收共享段那 7.75 M 与产物那 +50%。
