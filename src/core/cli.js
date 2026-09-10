@@ -513,6 +513,10 @@ function modeFor(path, argv, fallback = 'mixed') {
  * 时间是墙上时间（js_now_ms）：大头是 cc 与子进程，CPU 时间量不到它们。
  */
 let VERBOSE = false;
+/* `--builtins min`：这一份产物只内建 js -> c，别的语言/目标靠 plugins/ 装（ADR-0021 S4）。
+   接缝是 linkJs 的 read 回调 —— 编译器读源码全过它，所以"换掉 builtin.js 那一份文本"
+   就等于"不把那几门 import 进来"，链接器与摇树都跟着少活。 */
+let BUILTIN_SET = 'full';
 let STATS = false;
 let vMark = 0;
 let vRss = 0;
@@ -640,6 +644,22 @@ function compile(path, argv = []) {
  * `omni_plugin_init` 拿这一格调同一个 register。两条路只差登记的时刻，形状一模一样，
  * 于是"把一门语言从内建搬成插件"不必改它一行。
  */
+/**
+ * 编译器读一份**模块源码**时过这儿（ADR-0021 的 S4）。
+ *
+ * 平时就是 readText。`--builtins min` 时只换一份：`lang/builtin.js` 交的是 `builtin-min.js`
+ * 的内容 —— 于是那几门语言的 `import` 根本不存在，链接器不会去读它们，摇树也不必再摇。
+ * 换在这一层而不是让语言自己判：**编进来哪几门是构建的决定**，不是某一门语言的事。
+ */
+function readModule(p) {
+  if (BUILTIN_SET === 'min' && p.endsWith('/lang/builtin.js')) {
+    const alt = `${p.slice(0, p.length - 'builtin.js'.length)}builtin-min.js`;
+    vStep(`builtins min  ${alt}`);
+    return readText(alt);
+  }
+  return exists(p) ? readText(p) : null;
+}
+
 function pluginApi() {
   return {
     registerLang: registerLang,
@@ -654,6 +674,7 @@ function pluginApi() {
     srcIdNote: srcIdNote,
     incDirs: incDirs,
     findCC: findCC,
+    readModule: readModule,
   };
 }
 
@@ -2046,6 +2067,12 @@ function main(argv) {
   // 没门抓到它：`omni c cpp -v` 的那些门只比 stdout，而 `--verbose` 写 stderr。
   VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
   STATS = rest.includes('--stats');
+  const bi = rest.indexOf('--builtins');
+  if (bi >= 0) {
+    const v = rest[bi + 1];
+    if (v !== 'min' && v !== 'full') throw new OmniError(`--builtins 只认 min 与 full，给的是 '${v}'`);
+    BUILTIN_SET = v;
+  }
   /* 发现插件摆在这儿而不是模块作用域：一来 `-v` 刚解析出来，装了哪几格才印得出来；
      二来插件装不上是**响错**，那句话得走 main 的错误出口（模块作用域抛出来的话，
      连 `omni help` 都印不出来了 —— 一格坏插件不该让整个 CLI 说不出话）。 */

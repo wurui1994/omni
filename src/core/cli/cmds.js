@@ -226,7 +226,8 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
       name: 'build', key: 'build', usage: 'FILE -o NAME',
       brief: '编译成产物',
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
-        { name: '--plugin', arity: 1, value: 'NAME', brief: '出一格插件动态库，NAME 是它的 register 函数' }],
+        { name: '--plugin', arity: 1, value: 'NAME', brief: '出一格插件动态库，NAME 是它的 register 函数' },
+        { name: '--builtins', arity: 1, value: 'min|full', brief: '这份产物内建哪些语言/目标（min 只留 js -> c）' }],
     },
     {
       name: 'emit', key: 'emit', usage: 'FORM FILE',
@@ -234,6 +235,7 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
       flags: [F_MODE, F_WORK, F_INC, F_STATS,
         { name: '--amalgamate', arity: 0, brief: '（c）把整份运行时内联进一个文件' },
         { name: '--split', arity: 0, brief: '（c）按模块分成一个个 .c 落到 --work DIR' },
+        { name: '--builtins', arity: 1, value: 'min|full', brief: '这份产物内建哪些语言/目标（min 只留 js -> c）' },
         { name: '--bytes', arity: 0, brief: '（mir）印大小与每个函数的内容哈希' },
         { name: '--kernel', arity: 1, value: 'NAME', brief: '（spirv）哪一个 kernel' }],
     },

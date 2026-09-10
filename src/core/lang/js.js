@@ -5,7 +5,7 @@
 // 但形状还是跟别人一样，不给它开特例。
 
 import { Diagnostics } from '../source/diag.js';
-import { readText, exists } from '../host/native.js';
+import { readText } from '../host/native.js';
 import { linkJs } from '../frontend-js/link.js';
 import { lowerJs } from '../frontend-js/lower.js';
 
@@ -18,7 +18,9 @@ let JS_API = null;
  */
 function compileJs(path) {
   const diags = new Diagnostics();
-  const ast = linkJs(path, (p) => (exists(p) ? readText(p) : null), diags);
+  /* 读模块过宿主那一格（JS_API.readModule）：`--builtins min` 就在那儿把 builtin.js
+     换成 builtin-min.js —— "编进来哪几门"是构建的决定，这一层不判。 */
+  const ast = linkJs(path, (p) => JS_API.readModule(p), diags);
   diags.throwIfErrors();
   JS_API.log(`js front end  link ${path}`);
   const mod = lowerJs(ast, diags);

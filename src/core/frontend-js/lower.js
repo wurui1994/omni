@@ -498,13 +498,19 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     };
   }
 
+  /* 每一格模块级变量记下它是**哪个源文件**声明的（P1 的另一半，ADR-0021 的 S4）。
+   * 函数早就有 `file` 了（fileOfSpan），全局没有 —— 于是"这个全局该由插件定义、还是该
+   * 引用核心那一份"判不出来，而判错就是**状态分叉**（两份 let，各写各的）。
+   * 分语言独立构建卡在这一格上，所以先补它。 */
   collectTop(s, i) {
     /* 块里写的 `var` 也是这一层的（var 是函数作用域的，模块顶层就是全局槽）——
      * 从前只收顶层那一句，于是 `{ var x = 1; } console.log(x);` 当场报 unresolved 'x'。
      * 不带 lexIdx：TDZ 是 let / const 的事，var 声明前读到 undefined 是对的。 */
     if (s.type !== 'FuncDecl' && s.type !== 'ClassDecl') {
       for (const n of varNames(s)) {
-        if (!this.globals.has(n)) this.globals.set(n, { name: cSafe(n), lexIdx: undefined });
+        if (!this.globals.has(n)) {
+          this.globals.set(n, { name: cSafe(n), lexIdx: undefined, file: fileOfSpan(s.span) });
+        }
       }
     }
     switch (s.type) {
@@ -528,7 +534,9 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
           }
           for (const n of patternNames(d.id, this, s.span)) {
             // lexIdx 只给 let / const：TDZ 是它们的事，var 声明前读到 undefined 是对的
-            this.globals.set(n, { name: cSafe(n), lexIdx: s.kind === 'var' ? undefined : i });
+            this.globals.set(n, {
+              name: cSafe(n), lexIdx: s.kind === 'var' ? undefined : i, file: fileOfSpan(s.span),
+            });
           }
         }
         break;
@@ -557,8 +565,10 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
          * （`C.staticM()`、`C.prototype`、`x instanceof C` 都是查它）。
          * 原型那一格的名字带前缀，撞上用户自己的同名变量的可能性留在这儿，不装作没有。 */
         if (!isError) {
-          this.globals.set(s.id, { name: cSafe(s.id) });
-          this.globals.set(protoGlobalName(s.id), { name: cSafe(protoGlobalName(s.id)) });
+          this.globals.set(s.id, { name: cSafe(s.id), file: fileOfSpan(s.span) });
+          this.globals.set(protoGlobalName(s.id), {
+            name: cSafe(protoGlobalName(s.id)), file: fileOfSpan(s.span),
+          });
         }
         break;
       }
