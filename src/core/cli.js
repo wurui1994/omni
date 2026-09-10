@@ -2300,12 +2300,18 @@ function main(argv) {
     }
     stderr(`omni: ${n} 格插件，合计 ${fmtBytes(tot)} -> ${dir}/ ${optFlag()}\n`);
     /* 插件的**数据**跟着搬（host/data.js 那一串候选根里的 `<产物同级>/share`）：
-       asy 的语法表、内建绑定表与 lib/asy。不搬的话装好的那份 omni 一跑 `.asy` 就报
-       "找不到 asy 语法文件" —— 数据不是代码，编译器不会把它们编进 dylib。 */
+       哪几份归哪一格写在 plugin-set.js 的 `data` 里。不搬的话装好的那份 omni 一跑
+       `.asy` 就报"找不到 asy 语法文件" —— 数据不是代码，编译器不会把它们编进 dylib。 */
     const share = join(dirname(dir), 'share');
-    const files = [join('frontend-asy', 'asy.grammar'), join('frontend-asy', 'builtins.tab')];
-    const libSrc = dataPath(join('lib', 'asy'));
-    if (libSrc !== null) for (const f of readDir(libSrc)) files.push(join('lib', 'asy', f));
+    const files = [];
+    for (const p of PLUGIN_SET) {
+      if (want !== null && !want.includes(p.name)) continue;
+      for (const rel of p.data ?? []) {
+        if (!rel.endsWith('/')) { files.push(rel); continue; }
+        const d = dataPath(rel.slice(0, rel.length - 1));
+        if (d !== null) for (const f of readDir(d)) files.push(`${rel}${f}`);
+      }
+    }
     let nd = 0;
     for (const rel of files) {
       const src = dataPath(rel);

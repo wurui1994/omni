@@ -7,6 +7,7 @@
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
 import { join, dirname, resolve, isAbsolute } from '../host/path.js';
 import { readText, exists, installDir } from '../host/native.js';
+import { dataPath, dataTried } from '../host/data.js';
 import { loadGrammarTable } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
@@ -38,8 +39,10 @@ function jncLoadGrammar(path) {
  * 没有 base/ 那样每次都重解析的库）。模块加载有了，见 jncText 里的 find / parse（第六十刀）。
  */
 export function jncFrontEnd() {
-  const gpath = join(installDir(), '..', 'frontend-jnc', 'jnc.grammar');
-  if (!exists(gpath)) throw new OmniError(`找不到 jnc 语法文件：${gpath}`);
+  /* 语法表是**数据**，按布局找（host/data.js）—— 与 asy 那一门同一条规矩。 */
+  const rel = join('frontend-jnc', 'jnc.grammar');
+  const gpath = dataPath(rel);
+  if (gpath === null) throw new OmniError(`找不到 jnc 语法文件（试过 ${dataTried(rel)}）`);
   return jncLoadGrammar(gpath);
 }
 
