@@ -2961,23 +2961,30 @@ function main(argv) {
     }
     case 'emit-c': {
       const { mod } = compile(path, rest);
-      /* `--split[=N]`：分文件发射（P2）。N + 1 个 TU 落到 `--work DIR` 里，清单印到 stderr。
-       * 这一步只证"切出来的每一格能各自编、链起来跑得对"——并行编与内容寻址的缓存在 build
-       * 那一边。默认（不给这个开关）走单体那条路，一个字节都不变。 */
+      /* `--split`：按**模块**发射（P2）—— 一个源文件一个 `.c`，跟正常的 C 工程一样，
+       * 外加一份共享段（`_shared.c`：声明 + 只能有一份的那些 + main）。
+       * 现在还编不起来：共享段里的容器 / JS 那一族宏自带静态状态，得先变成"只有声明的头 +
+       * 一个定义 TU"（P2a，见 ADR-0021）。所以这一步先把**分布**摆出来 —— 哪个模块多少行、
+       * 多少字节、多少函数，这是"看得见"的那一半，也是并行与增量的分组依据。 */
       const si = rest.findIndex((a) => a === '--split' || a.startsWith('--split='));
       if (si >= 0) {
-        const a = rest[si];
-        const n = a.includes('=') ? Number(a.slice(a.indexOf('=') + 1)) : Number(rest[si + 1]);
         const wi = rest.indexOf('--work');
-        if (wi < 0) throw new OmniError('emit c --split 要 --work DIR：N + 1 个 TU 得有个落点');
+        if (wi < 0) throw new OmniError('emit c --split 要 --work DIR：每个模块的 .c 得有个落点');
         const dir = rest[wi + 1];
         mkdirAll(dir);
-        const u = emitCUnits(mod, { groups: Number.isFinite(n) && n > 0 ? n : 16 });
+        const u = emitCUnits(mod);
+        writeText(join(dir, '_shared.c'), `${u.shared}\n${u.once}\n${u.tail}\n`);
+        let tot = 0;
         for (const t of u.units) {
           writeText(join(dir, `${t.name}.c`), t.text);
-          vStep(`${t.name}.c  ${fmtBytes(t.text.length)}`);
+          tot += t.text.length;
         }
-        vStats(u.units.map((t) => t.text).join(''), u.stats);
+        const ord = [...u.units].sort((a, b) => b.bytes - a.bytes);
+        stderr(`omni: ${u.units.length} 个模块 TU，合计 ${fmtBytes(tot)}`
+          + `，共享段 ${fmtBytes(u.shared.length + u.once.length + u.tail.length)}\n`);
+        for (const t of ord.slice(0, 12)) {
+          stderr(`  ${t.name}  ${fmtBytes(t.bytes)}  ${t.funcs} funcs\n`);
+        }
         return 0;
       }
       const r = emitCWithStats(mod, { amalgamate: rest.includes('--amalgamate') });
@@ -2992,7 +2999,9 @@ function main(argv) {
       // --work DIR：生成的 C 留在 DIR 里而不是临时目录（自举链要能事后翻中间产物）
       const wi = rest.indexOf('--work');
       const { cc } = buildNative(mod, out, wi >= 0 ? rest[wi + 1] : undefined);
-      stderr(`omni: built ${out} via ${cc}\n`);
+      /* 优化档要印出来：`-O0` 与 `-O1` 在这条腿上是 12 秒对 137 秒的差别（ADR-0021），
+         而它从前只藏在 OMNI_OPT 里 —— 看不见的档等于每次都要猜这一趟慢是不是因为它。 */
+      stderr(`omni: built ${out} via ${cc} ${cc.endsWith('tcc') ? '（tcc：不分档）' : optFlag()}\n`);
       return 0;
     }
     case 'build-js': {
@@ -3077,7 +3086,7 @@ function main(argv) {
       const out = oi >= 0 ? rest[oi + 1] : basename(path).replace(/\.(omni|omnis|omnid|js|wat)$/, '');
       const wi = rest.indexOf('--work');
       const { cc } = buildLlvm(mod, out, wi >= 0 ? rest[wi + 1] : undefined);
-      stderr(`omni: built ${out} via llvm ir + ${cc}\n`);
+      stderr(`omni: built ${out} via llvm ir + ${cc} ${optFlag()}\n`);
       return 0;
     }
     // 自己的解释器（ADR-0013 阶段 1）：不生成 JS、不生成 C，直接走 OIR。

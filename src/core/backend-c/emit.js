@@ -464,43 +464,39 @@ class CEmitter {
   }
 
   /**
-   * 把发好的这一份切成 N 个翻译单元（P2）。共用前段照抄进每一格 —— 没被引用的 static
-   * clang 一份机器码都不生成（量出来 528 字节），代价只是每个 TU 约 0.46 秒的编译税。
-   * 最后一格带 main、模块级变量的定义、闭包的 make 与那两张表（都是"只能有一份"的东西）。
+   * 按**模块**切：一个源文件一个翻译单元一个 `.o`，跟正常的 C 工程一样 ——
+   * 不是把一体的输出按字节装箱塞进 N 个桶（试过，那是在造膨胀：共用前段抄进每一格，
+   * 13 个 TU 就是 104 MB 的 C；而且模块与 TU 不对齐，"改一个文件重编一个 TU"也不成立）。
+   *
+   * 这一格现在只交"每个模块的函数体"和三段边界，**还不能直接编** —— 共享部分得先变成
+   * 一份只有声明的头 + 一个定义 TU（容器 / JS 那一族宏要加存储类参数，见 ADR-0021 的 P2a：
+   * 它们自带静态状态 `realm_tbl_` / `xprops_tbl_` / `ctor_tbl_`，复制一份就是每个 TU
+   * 一套对象模型 —— 量出来是 `TypeError: cannot set property 'items' of undefined`）。
    */
-  units(groups = 16) {
+  units() {
     if (!this.split) throw new Error('c.units: 只有 split 模式能切');
     const j = (a, b) => this.out.slice(a, b).join('\n');
-    const shared = j(0, this.markA);
-    const once = j(this.markA, this.markB);
-    const tail = j(this.markC, this.out.length);
-    /* 先按源文件聚，再按字节装箱（大的先放，放进当前最小的那个桶）：94 个源文件里
-     * 最大的一个也只占 5.6%，所以装得挺平；同一个源文件的函数不拆开，热路径上
-     * "改一个文件只重编一个 TU"才成立。 */
-    const byFile = new Map();
+    const byMod = new Map();
     for (const r of this.fnRanges) {
-      const g = byFile.get(r.file) ?? { bytes: 0, parts: [] };
+      const g = byMod.get(r.file) ?? { bytes: 0, funcs: 0, parts: [] };
       g.bytes += r.bytes;
+      g.funcs += 1;
       g.parts.push(j(r.i0, r.i1));
-      byFile.set(r.file, g);
-    }
-    const bins = [];
-    for (let i = 0; i < Math.max(1, groups); i++) bins.push({ bytes: 0, parts: [] });
-    for (const [, g] of [...byFile.entries()].sort((a, b) => b[1].bytes - a[1].bytes)) {
-      let m = bins[0];
-      for (const b of bins) if (b.bytes < m.bytes) m = b;
-      m.bytes += g.bytes;
-      m.parts.push(...g.parts);
+      byMod.set(r.file, g);
     }
     const units = [];
-    let n = 0;
-    for (const b of bins) {
-      if (b.parts.length === 0) continue;
-      units.push({ name: `u${n}`, text: `${shared}\n${b.parts.join('\n')}\n` });
-      n++;
+    for (const [file, g] of byMod) {
+      units.push({ file, name: modUnitName(file), funcs: g.funcs, bytes: g.bytes, text: `${g.parts.join('\n')}\n` });
     }
-    units.push({ name: 'main', text: `${shared}\n${once}\n${tail}\n` });
-    return units;
+    return {
+      /* 只有声明的那一份（现在还含定义 —— P2a 之后才真的只剩声明） */
+      shared: j(0, this.markA),
+      /* 只能有一份的那些：模块级变量的定义、闭包的 make、那两张表 */
+      once: j(this.markA, this.markB),
+      /* main 与线性内存的 data 段 */
+      tail: j(this.markC, this.out.length),
+      units,
+    };
   }
 
   closureMake(c) {
@@ -1839,6 +1835,20 @@ function cString(bytes) {
   return `${s}"`;
 }
 
+/**
+ * 模块路径 -> 翻译单元名。取 `src/` 之后那一段、去掉扩展名、非字母数字换成下划线 ——
+ * 这样 `.c` / `.o` 的名字与源码树一一对应（`core_frontend-js_lower.c`），
+ * 出了问题一眼看出是哪个模块，缓存键也能按模块算。
+ */
+function modUnitName(file) {
+  const s = typeof file === 'string' ? file : '';
+  const i = s.lastIndexOf('/src/');
+  const rel = i >= 0 ? s.slice(i + 5) : s;
+  const cut = rel.replace(/\.[A-Za-z0-9]+$/, '');
+  const nm = cut.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return nm === '' ? 'unknown' : nm;
+}
+
 /** @param {any} mod OIR 模块 */
 /** @param {any} mod OIR 模块 @param {{amalgamate?: boolean}} opts */
 export function emitC(mod, opts = {}) {
@@ -1857,12 +1867,12 @@ export function emitCWithStats(mod, opts = {}) {
 }
 
 /**
- * 分文件发射（P2）：交 N + 1 个翻译单元（最后一个带 main）与那份分布。
- * 与 `emitC` 是两条路而不是一个开关：单体那条路一个字节都不动（`split` 默认关），
- * 于是"分文件"能独立验收 —— 两条路各自跑出来的程序必须表现一样。
+ * 分文件发射（P2）：**一个模块一个翻译单元**，跟正常的 C 工程一样 ——
+ * `{ shared, once, tail, units: [{ file, name, funcs, bytes, text }] }`。
+ * 与 `emitC` 是两条路而不是一个开关：单体那条路一个字节都不动（`split` 默认关）。
  */
 export function emitCUnits(mod, opts = {}) {
   const e = new CEmitter(mod, { ...opts, split: true });
   e.emit();
-  return { units: e.units(opts.groups ?? 16), stats: e.stats };
+  return { ...e.units(), stats: e.stats };
 }
