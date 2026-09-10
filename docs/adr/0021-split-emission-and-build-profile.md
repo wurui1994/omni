@@ -665,10 +665,20 @@ JS 宿主没有 dlopen（`host/native.js` 的 `pluginsOk`），所以 `emit js` 
 
 ## 顺带记下的两个坑（都不是性能问题，是这一轮量的时候撞上的）
 
-**`dist` 安装跑不了 `omni c tcc`。** 它把 libc 头解析到 `<dist>/include`，而 bootstrap 的
-layout 只铺 `lib / runtime / jit / grammar`，从来不铺 `include/`；仓库里也根本没有
-`stdio.h`（从 node 跑时 C 前端走的是另一条找系统头的路）。所以"从 dist 装出来的 omni 跑
-C 前端"这个组合是坏的 —— 属于 P5 的打包边界，动它要先定 `include` 该由谁提供。
+**`omni c obj` / `omni c tcc` 在原生腿上是红的，原因定到点了：`.buffer` 没实现。**
+五行就能复现：
+
+```js
+const b = new Uint8Array(8);
+console.log(typeof b.buffer);      // node: "object"    omni: "undefined"
+new DataView(b.buffer);            // omni: a byte-buffer view expects a byte buffer, found undefined
+```
+
+`link/macho.js:99-100` 就是这么写的（`new Uint8Array(n)` 之后 `new DataView(b.buffer)` 往里
+填字节），所以整条 `.c -> .o` 在编出来的腿上走不到底。这一格归 bytes 的 realm 原型
+（任务 #4：Uint8Array 与 DataView 共用一个标签），要在四条腿上一起补 —— 不是打包边界问题。
+（从前记的是"`dist` 安装跑不了 `omni c tcc`，因为 `include/` 没铺"—— 那句话是错的：
+`include` 那条现在按布局找得到，真正拦住的是 `.buffer`。）
 
 **用户方法与内建成员同名，在两条编出来的腿上都炸。** `splice` / `toSpliced` / `push` 这
 三条收可变实参，降级器不走定长的成员派发器、直接发 op，静态分不出接收者。`push` 早就有那句
