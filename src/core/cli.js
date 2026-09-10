@@ -62,7 +62,13 @@ import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
 /* 后端过一格注册表（ADR-0021 S3）：调用点不叫函数名，可选加载才有立足处 */
-import { target, registerLang, lang, registerRunner, runner } from './plugin.js';
+import {
+  target, registerTarget, registerLang, lang, registerRunner, runner,
+} from './plugin.js';
+import { registerJsTarget } from './target/js.js';
+import { registerCTarget } from './target/c.js';
+import { registerLlvmTarget } from './target/llvm.js';
+import { registerSpirvTarget } from './target/spirv.js';
 /* 已经搬成独立模块的语言（ADR-0021 S4）：它们不 import 这一份，所以能独立编译。
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
@@ -645,6 +651,10 @@ function compile(path, argv = []) {
  * `omni_plugin_init` 里调同一个 registerLang —— 这一层看不出内建与外挂的区别。
  * 核心方言（.omni / .omnid / .omnis）不登记：它跟 driver 是一体的，永远在核心里。 */
 registerLang(['.js'], 'js', (path) => compileJs(path));
+registerJsTarget({ registerTarget });
+registerCTarget({ registerTarget });
+registerLlvmTarget({ registerTarget });
+registerSpirvTarget({ registerTarget });
 registerWatLang({ registerLang, log: vStep });
 registerGlslLang({ registerRunner, findCC });
 registerSxLang({ registerLang, log: vStep });
