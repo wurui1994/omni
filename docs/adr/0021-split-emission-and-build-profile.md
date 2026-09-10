@@ -755,3 +755,60 @@ clang 报的是 `redeclaration with different linkage`。哈希撞了当场骂�
 而同一句话在 node 腿上印 3。改成 `dataDir('lib', 'json.omni')`（与语法表同一条规矩），
 并把 `lib` 收进 `CORE_DATA` —— 它属于核心，不属于哪一格插件。
 
+## 一体化构建还在：`--fat`
+
+分插件之后**一体化那条路一步没少**，它是同一个 `build` 的一格开关：
+
+```
+node src/cli.js build src/cli.js --fat -o dist/omni-fat     # 13.2s，19.17 MB，单文件
+```
+
+它把所有语言与后端都编进一份可执行文件，不读 `plugins/`。要注意的只有两件事，都是**数据**
+而不是代码的问题：`.asy` / `.jnc` 的语法表还是得有 `share/`（数据从来不进二进制），
+而它旁边**不能摆着别的核心编出来的 `plugins/`** —— 那些插件绑的是另一份 `.syms`，
+dlopen 会报 `symbol not found in flat namespace`。摆对了之后 `emit c` 的 asy 产出与
+node 腿逐字节一致，`run` 也通。
+
+## bootstrap 的每一阶段：花在哪、砍了哪一刀
+
+分步表（`omni bootstrap` 收尾自动印）先把账摆开。砍掉两处**重算**之后是 **171.1s -> 135.0s**：
+
+- 阶段 4 的 js 参照与阶段 1 的 C1 是同一次 `emitOf('js', source)`；
+- 阶段 5 的 N1 一侧与阶段 4 跑的是同一条命令 —— N1 是确定的。
+
+```
+    24.9s  18%  fixpoint C1 == C2（node 跑那份 13.5 MB 的 JS 再发一遍）
+    24.4s  18%  fixpoint N1 emit-js == C0
+    23.3s  17%  fixpoint N1 emit-js == N2
+    18.3s  13%  N2 = N1 build
+    13.2s   9%  fixpoint N1 emit-c == C0
+    11.2s   8%  fixpoint N1 emit-c == N2
+    11.1s   8%  plugins 12 格 + 43 份数据
+     6.2s   4%  N1 = clang(emit-c)
+     1.8s   1%  C1 = emit-js
+     56ms   0%  layout
+```
+
+剩下的**全是"编出来的编译器比 node 慢一个数量级"**：同一份 fat JS，node 发一遍 1.8s，
+N1 发一遍 24s。所以下一刀不在链上，在运行时（任务 #13 arena、#14 属性取值）。
+
+### 为了看清那一个数量级：插件也进函数级计时
+
+`OMNI_PROFILE=1` 从前只覆盖核心 —— 插件那一支没有 main，没人 atexit `omni_prof_dump`，
+而语言前端与后端**全在插件里**。补上之后（每张表带标签 `prof[omniLangJs]:`）拿到第一份全景，
+自编译 `emit c src/cli.js` 14.4s：
+
+- `lang-js`：`u_lexJs` 1.20s / 66 次、`l_JsParser_peek` 0.93s / 219 万次、`l_fn` 0.71s / 575 万次
+- `target-c`：`l_CEmitter_expr` 0.77s / 48.7 万次、`l_CEmitter_builtin` 0.61s / 21 万次
+- `core`：`u_walkStrings` 1.94s（摇树那一趟整份遍历）、`l_reach` 0.35s / 109 万次
+
+注意跨产物的**自用时间会重复计**：每份产物各有一张自己的影子栈，核心看不见插件的帧，
+所以 `u_compileFront` 自用 8.6s 里含着插件的活。分档看各自那张表才对。
+
+按这份榜砍了一刀（池子的内容哈希记住算过的，`s16Lit`/`strLit` 是按每次用叫的）——
+node 腿上发射：核心 295 -> 210ms、12 格插件合计 551 -> 425ms。
+
+**一处量出来是负的，记下来免得再试**：`walkStrings` 压栈前先 `typeof` 过滤掉数字与布尔
+（少压少弹一大半），自用 1.94s -> 2.08s ——在这条腿上一次 `typeof` 与一次压栈/弹栈一样贵。
+已回退。
+
