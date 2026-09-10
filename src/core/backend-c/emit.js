@@ -78,6 +78,18 @@ class CEmitter {
      * 分语言独立构建就是这一格：插件只装它自己那几个模块，其余在加载时绑到核心上。
      * 判据是 P1 的 `f.file` 与（刚补的）`g.file`。 */
     this.own = Array.isArray(opts.own) && opts.own.length > 0 ? opts.own : null;
+    /* `bind`：核心那一份**实际留下**的符号集（它 `--extern` 构建时落的 `.syms`）。
+     * 每一行是 `符号|源文件` —— **必须带源文件**：mangled 名里的 `__2` 那截是每个程序
+     * 各自去重时编的号，跨程序独立编译时同一个名字可能落在**不同函数**上。只按名字绑
+     * 量出来是 `dynamic value is (null), expected list` 与 `undefined is not a function`。
+     *
+     * 为什么 `own` 那套按文件名的规则不够：核心是按根剪过枝的（pruneFuncs），
+     * `hir/types.js` 的 `bufType` 在薄核心里没人调，于是压根没发；插件按"不是我的文件
+     * 就 extern"发了个外部引用，dlopen 当场报 `symbol not found in flat namespace
+     * '_u_bufType'`。剪枝的结果只有核心自己知道，所以这一格必须是**数据**，不是规则。 */
+    this.bind = opts.bind instanceof Set && opts.bind.size > 0 ? opts.bind : null;
+    /** 这一份实际发了哪些符号（`.syms` 就是它）：`符号|源文件`，函数、模块级变量、闭包的 make。 */
+    this.syms = [];
     /* 插件（ADR-0021 S4）：不发 main，改发一格 `omni_plugin_init(api)` —— 值是那个
      * 顶层 register 函数的名字。宿主初始化不能重做（见下面发那一句的地方）。 */
     this.plugin = opts.plugin === undefined || opts.plugin === null ? null : opts.plugin;
@@ -348,16 +360,24 @@ class CEmitter {
     const gdefs = [];
     for (const g of this.mod.jsGlobals ?? []) {
       const def = `omni_dyn g_${g.name} = { .tag = OMNI_DYN_UNDEF };`;
-      if (this.extern) { this.line(`extern ${def.slice(0, def.indexOf(' =') )};`); gdefs.push(this.owns(g.file) ? def : null); }
-      else this.line(`static ${def}`);
+      if (this.extern) {
+        this.line(`extern ${def.slice(0, def.indexOf(' =') )};`);
+        const mine = this.emitsSym(`g_${g.name}`, g.file);
+        gdefs.push(mine ? def : null);
+        if (mine) this.noteSym(`g_${g.name}`, g.file);
+      } else this.line(`static ${def}`);
     }
     // 核心方言的模块级变量（第二十四刀）：有类型，所以发的是那个类型的静态量。
     // 不给初值 —— C 的静态存储本来就零，而真正的初值是 omni_main 最前面那几句赋值
     // （字符串的"零"是个池子里的空串常量，那不是常量表达式，只能在运行时赋）。
     for (const g of this.mod.globals ?? []) {
       const def = `${cTypeName(g.type)} g_${g.name};`;
-      if (this.extern) { this.line(`extern ${def}`); gdefs.push(this.owns(g.file) ? def : null); }
-      else this.line(`static ${def}`);
+      if (this.extern) {
+        this.line(`extern ${def}`);
+        const mine = this.emitsSym(`g_${g.name}`, g.file);
+        gdefs.push(mine ? def : null);
+        if (mine) this.noteSym(`g_${g.name}`, g.file);
+      } else this.line(`static ${def}`);
     }
     this.profTable();
     for (const f of this.mod.funcs) this.line(`${this.proto(f)};`);
@@ -367,7 +387,12 @@ class CEmitter {
     this.line();
     this.markA = this.out.length;
     for (const d of gdefs) if (d !== null) this.line(d);
-    for (const c of closures) if (this.ownsFn(c.mangled)) this.closureMake(c);
+    for (const c of closures) {
+      const cf = this.fileOfMangled(c.mangled);
+      if (!this.emitsSym(c.make, cf)) continue;
+      this.closureMake(c);
+      this.noteSym(c.make, cf);
+    }
     const fnMetaN = this.fnMetaTable(closures);
     /* 按源文件记一笔产出（P1）：每个函数发了多少行、多少字节。
      * `--stats` 靠它印"42 万行是哪几个源文件撑起来的" —— 单体构建里这件事从前压根看不见，
@@ -377,7 +402,8 @@ class CEmitter {
     this.markB = this.out.length;
     for (const f of this.mod.funcs) {
       /* 不属于这一份的：原型已经发过（extern 模式下就是外部声明），体不发 —— 加载时绑到核心那一份上 */
-      if (!this.owns(f.file)) continue;
+      if (!this.emitsSym(f.mangled, f.file)) continue;
+      this.noteSym(f.mangled, f.file);
       const i0 = this.out.length;
       this.func(f);
       let bytes = 0;
@@ -501,14 +527,36 @@ class CEmitter {
     return false;
   }
 
+  /**
+   * 这个符号由这一份**发定义**吗。两格规则叠着用，缺一不可：
+   *   - `own` 说了是我的文件 -> 我发（便宜的先判）。
+   *   - 否则查 `bind`：核心留下了**同名同源文件**的那一格就绑过去，否则自己发 ——
+   *     带上源文件是必须的，理由在构造器里那段注释。
+   */
+  emitsSym(sym, file) {
+    if (this.own !== null && this.owns(file)) return true;
+    if (this.bind !== null) return !this.bind.has(`${sym}|${typeof file === 'string' ? file : ''}`);
+    return this.owns(file);
+  }
+
+  /** `.syms` 的一行：符号 + 它的源文件。 */
+  noteSym(sym, file) {
+    this.syms.push(`${sym}|${typeof file === 'string' ? file : ''}`);
+  }
+
   /** 按 mangled 名找它的源文件再判：闭包记录上没有 file，但同名的函数记录上有 */
   ownsFn(mangled) {
     if (this.own === null) return true;
+    return this.owns(this.fileOfMangled(mangled));
+  }
+
+  /** mangled -> 源文件。闭包的 make 要判归属时用它（闭包记录上没有 file）。 */
+  fileOfMangled(mangled) {
     if (this.fileOfFn === undefined) {
       this.fileOfFn = new Map();
       for (const f of this.mod.funcs) this.fileOfFn.set(f.mangled, f.file);
     }
-    return this.owns(this.fileOfFn.get(mangled));
+    return this.fileOfFn.get(mangled);
   }
 
   closureProto(c) {
@@ -1916,7 +1964,7 @@ export function emitC(mod, opts = {}) {
 export function emitCWithStats(mod, opts = {}) {
   const e = new CEmitter(mod, opts);
   const text = e.emit();
-  return { text, stats: e.stats };
+  return { text, stats: e.stats, syms: e.syms };
 }
 
 /**

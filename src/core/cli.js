@@ -1574,12 +1574,13 @@ function runtimeObjects(cc) {
  * 都能直接翻出那份 C 来看。不给的时候落在 `.omni-cache/work/c-<产物名>` 底下，
  * 名字是确定的（从前是 /var/folders 里一个随机名，出了问题捞不着）。
  */
-function buildNative(mod, outPath, workDir, plugin, extern, own) {
+function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   const dir = workDir === undefined ? workDirFor('c', hash16(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const cPath = join(dir, `${basename(outPath)}.c`);
-  const { text: cText, stats } = emitCWithStats(mod, {
+  const { text: cText, stats, syms } = emitCWithStats(mod, {
     plugin: plugin, extern: extern === true, own: own === undefined ? null : own,
+    bind: bind === undefined ? null : bind,
   });
   writeText(cPath, cText);
   vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
@@ -1607,6 +1608,13 @@ function buildNative(mod, outPath, workDir, plugin, extern, own) {
     throw new OmniError(`C backend produced code that ${cc} rejected:\n${r[2]}\n(kept at ${cPath})`);
   }
   vStep(`${cc}  ${cargs.length} args -> ${outPath}  ${fileSize(outPath)} bytes`);
+  /* `--extern` 的产物旁边落一份 `.syms`：**这一份实际留下了哪些符号**。
+     插件构建拿 `--bind <它>`，于是"核心有的绑过去、没有的自己发"是查表而不是猜 ——
+     核心是按根剪过枝的，剪掉了什么只有它自己知道（见 emit.js 那格 bind 的注释）。 */
+  if (extern === true) {
+    writeText(`${outPath}.syms`, `${syms.join('\n')}\n`);
+    vStep(`syms  ${syms.length} 个符号 -> ${outPath}.syms`);
+  }
   return { cPath, cc };
 }
 
@@ -2443,8 +2451,14 @@ function main(argv) {
       /* `--own A,B`：这一份只发这些文件里的函数与全局，别的当 extern（分语言独立构建）。 */
       const owi = rest.indexOf('--own');
       const own = owi >= 0 && rest[owi + 1] !== undefined ? rest[owi + 1].split(',') : undefined;
+      /* `--bind <核心的 .syms>`：插件按**核心实际留下的符号表**决定发哪些函数体 ——
+         比 `--own` 那套按文件名猜准，因为核心是剪过枝的（见 emit.js 那格 bind 的注释）。 */
+      const bi = rest.indexOf('--bind');
+      const bind = bi >= 0 && rest[bi + 1] !== undefined
+        ? new Set(readText(rest[bi + 1]).split('\n').filter((s) => s !== '')) : undefined;
       const { cc } = buildNative(mod, out, wi >= 0 ? rest[wi + 1] : undefined,
-        pi >= 0 ? rest[pi + 1] : undefined, rest.includes('--extern') || own !== undefined, own);
+        pi >= 0 ? rest[pi + 1] : undefined,
+        rest.includes('--extern') || own !== undefined || bind !== undefined, own, bind);
       /* 优化档要印出来：`-O0` 与 `-O1` 在这条腿上是 12 秒对 137 秒的差别（ADR-0021），
          而它从前只藏在 OMNI_OPT 里 —— 看不见的档等于每次都要猜这一趟慢是不是因为它。 */
       stderr(`omni: built ${out} via ${cc} ${cc.endsWith('tcc') ? '（tcc：不分档）' : optFlag()}\n`);
