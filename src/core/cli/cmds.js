@@ -230,7 +230,8 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
         { name: '--fat', arity: 0, brief: '把所有语言都编进核心（默认是薄核心 + plugins/）' },
         { name: '--extern', arity: 0, brief: '生成的函数用外部链接并导出（插件要能绑到它）' },
         { name: '--own', arity: 1, value: 'A,B', brief: '只发这些文件里的函数与全局，别的当 extern' },
-        { name: '--bind', arity: 1, value: 'FILE', brief: '按核心的 .syms 决定发哪些：它有的绑过去，没有的自己发' }],
+        { name: '--bind', arity: 1, value: 'FILE', brief: '按核心的 .syms 决定发哪些：它有的绑过去，没有的自己发' },
+        { name: '--plugins', arity: 0, brief: '核心编完接着把默认那一套插件编齐（同一条进程，流水账才算得齐）' }],
     },
     {
       name: 'plugins', key: 'plugins', usage: '--core FILE [-o DIR]',

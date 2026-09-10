@@ -442,12 +442,90 @@ let STATS = false;
 let vMark = 0;
 let vRss = 0;
 
-/** 字节数印成 1.5G / 240M / 900K —— 只给人看，所以一位小数就够。 */
+/** 字节数印成 1.5G / 12.8M / 900K —— 只给人看，所以一位小数就够。
+    M 那一档带小数是要紧的：追膨胀时"12M -> 12M"什么都没说，而 12.8M -> 11.6M 说了。 */
 function fmtBytes(n) {
   if (n >= 1024 * 1024 * 1024) return `${(n / (1024 * 1024 * 1024)).toFixed(1)}G`;
-  if (n >= 1024 * 1024) return `${Math.round(n / (1024 * 1024))}M`;
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)}M`;
   if (n >= 1024) return `${Math.round(n / 1024)}K`;
   return `${n}B`;
+}
+
+/** 毫秒印成 1m12s / 6.7s / 340ms —— 与 fmtBytes 同一个路数，给人看的。 */
+function fmtDur(ms) {
+  const s = ms / 1000;
+  if (s >= 60) return `${Math.trunc(s / 60)}m${Math.round(s % 60)}s`;
+  if (s >= 1) return `${s.toFixed(1)}s`;
+  return `${Math.round(ms)}ms`;
+}
+
+/**
+ * 构建流水账：**核心一档、插件一档**。
+ *
+ * 从前一次 `npm run native` 只在最后说一句"多久"，而"分语言之后总体积涨了 50%"这件事
+ * 压根看不见 —— 核心与 12 格插件各自多大、各自花多久，得人拿 wc 一个个去量。核心与插件
+ * 走的是同一个 `buildNative`，所以账记在那里，命令收尾时印一次。
+ *
+ * 记的是**生成的 C**（行/字节）与产物大小，两样分开：C 那一侧是膨胀，产物那一侧是 cc
+ * 的结果，压缩比不一样，混成一个数就没法判断该往哪儿下刀。
+ */
+let TALLY = [];
+
+/**
+ * 前端那一段的耗时（读文件、解析、检查、降级），由**叫 compile 的那一处**填。
+ *
+ * 它不在 buildNative 里面：那时 mod 已经在手上了。而流水账要能对上墙上时间 —— 不含前端的
+ * 行加起来永远少一截，看的人只能猜那一截去哪了。所以留这一格，tally 取走时清零。
+ */
+let FE_MS = 0;
+
+/** 数换行。`split('\n').length` 在 22 MB 的串上要多申一整个数组，这条路上不值得。 */
+function nlCount(s) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n = n + 1;
+  return n;
+}
+
+function tally(name, isPlugin, cText, binBytes, genMs, ccMs) {
+  TALLY.push({
+    name, plugin: isPlugin, cBytes: cText.length, cLines: nlCount(cText),
+    bin: binBytes, feMs: FE_MS, genMs, ccMs,
+  });
+  FE_MS = 0;
+}
+
+/** 一档的合计（核心那档一行，插件那档 12 行）。 */
+function tallySum(rows) {
+  const t = { n: rows.length, cBytes: 0, cLines: 0, bin: 0, feMs: 0, genMs: 0, ccMs: 0 };
+  for (const r of rows) {
+    t.cBytes = t.cBytes + r.cBytes;
+    t.cLines = t.cLines + r.cLines;
+    t.bin = t.bin + r.bin;
+    t.feMs = t.feMs + r.feMs;
+    t.genMs = t.genMs + r.genMs;
+    t.ccMs = t.ccMs + r.ccMs;
+  }
+  return t;
+}
+
+function tallyRow(label, t) {
+  stderr(`  ${label.padStart(4)} ${String(t.n).padStart(3)} 份`
+    + `  C ${fmtBytes(t.cBytes).padStart(6)} / ${String(t.cLines).padStart(7)} 行`
+    + `  产物 ${fmtBytes(t.bin).padStart(6)}`
+    + `  前端 ${fmtDur(t.feMs).padStart(6)} + 发射 ${fmtDur(t.genMs).padStart(6)}`
+    + ` + cc ${fmtDur(t.ccMs).padStart(6)}\n`);
+}
+
+/** 收尾时印流水账。一份产物就不印分档（那时它自己就是全部，vStep 已经说过了）。 */
+function vTally() {
+  if (TALLY.length < 2) { TALLY = []; return; }
+  const core = TALLY.filter((r) => !r.plugin);
+  const plug = TALLY.filter((r) => r.plugin);
+  stderr('omni: 构建流水账（core / plugin）\n');
+  if (core.length > 0) tallyRow('核心', tallySum(core));
+  if (plug.length > 0) tallyRow('插件', tallySum(plug));
+  tallyRow('合计', tallySum(TALLY));
+  TALLY = [];
 }
 
 function vStep(msg) {
@@ -1610,11 +1688,13 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
      那句话把人往"编译器坏了"上带。 */
   mkdirAll(dirname(outPath));
   const cPath = join(dir, `${basename(outPath)}.c`);
+  const tGen0 = nowMs();
   const { text: cText, stats, syms } = cap('cgen.stats')(mod, {
     plugin: plugin, extern: extern === true, own: own === undefined ? null : own,
     bind: bind === undefined ? null : bind,
   });
   writeText(cPath, cText);
+  const tGen = nowMs() - tGen0;
   vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
   vStats(cText, stats);
   const cc = findCC();
@@ -1635,11 +1715,14 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   const cargs = plugin === undefined
     ? [...ccFlags(cc), ...ex, cPath, ...runtimeObjects(cc), '-o', outPath, '-lm', ...libs]
     : [...ccFlags(cc), ...shared, cPath, '-o', outPath, ...libs];
+  const tCc0 = nowMs();
   const r = spawn(cc, cargs, 'o');
   if (r[0] !== 0) {
     throw new OmniError(`C backend produced code that ${cc} rejected:\n${r[2]}\n(kept at ${cPath})`);
   }
   vStep(`${cc}  ${cargs.length} args -> ${outPath}  ${fileSize(outPath)} bytes`);
+  /* 这一份记进流水账（核心一档、插件一档，收尾时 vTally 印）。 */
+  tally(basename(outPath), plugin !== undefined, cText, fileSize(outPath), tGen, nowMs() - tCc0);
   /* `--extern` 的产物旁边落一份 `.syms`：**这一份实际留下了哪些符号**。
      插件构建拿 `--bind <它>`，于是"核心有的绑过去、没有的自己发"是查表而不是猜 ——
      核心是按根剪过枝的，剪掉了什么只有它自己知道（见 emit.js 那格 bind 的注释）。 */
@@ -1680,11 +1763,19 @@ function buildPluginSet(core, dir, want, argv) {
   for (const p of PLUGIN_SET) {
     if (want !== null && !want.includes(p.name)) continue;
     const out = join(dir, `omni-${p.name}.dylib`);
+    const tFe0 = nowMs();
     const { mod } = compile(join(srcDir, `${p.name}.js`), [...argv, '--plugin', pluginRegName(p.name)]);
+    FE_MS = nowMs() - tFe0;
     buildNative(mod, out, undefined, pluginRegName(p.name), true, p.own, bind);
     n += 1;
     tot += fileSize(out);
-    stderr(`omni: plugin ${basename(out)}  ${fmtBytes(fileSize(out))}\n`);
+    /* 一格一行：产物多大、它那份 C 多大/多少行、发射与 cc 各花多久。这一行从前只有产物
+       大小 —— 而要判断"哪一格膨胀了"看的是 C 那一侧（cc 的压缩比每格不一样）。 */
+    const row = TALLY[TALLY.length - 1];
+    stderr(`omni: plugin ${basename(out).padEnd(26)} ${fmtBytes(fileSize(out)).padStart(6)}`
+      + `  C ${fmtBytes(row.cBytes).padStart(6)} / ${String(row.cLines).padStart(6)} 行`
+      + `  ${fmtDur(row.feMs).padStart(6)} + ${fmtDur(row.genMs).padStart(6)}`
+      + ` + ${fmtDur(row.ccMs).padStart(6)}\n`);
   }
   stderr(`omni: ${n} 格插件，合计 ${fmtBytes(tot)} -> ${dir}/ ${optFlag()}\n`);
   /* 数据跟着搬（host/data.js 那一串候选根里的 `<产物同级>/share`）：核心自己要的那几个
@@ -2354,6 +2445,7 @@ function main(argv) {
     const only = rest.indexOf('--only');
     const want = only >= 0 && rest[only + 1] !== undefined ? rest[only + 1].split(',') : null;
     buildPluginSet(core, dir, want, rest);
+    vTally();
     return 0;
   }
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
@@ -2566,7 +2658,9 @@ function main(argv) {
       return 0;
     }
     case 'build': {
+      const tFe0 = nowMs();
       const { mod } = compile(path, rest);
+      FE_MS = nowMs() - tFe0;
       const oi = rest.indexOf('-o');
       const out = oi >= 0 ? rest[oi + 1] : basename(path).replace(/\.(omni|omnis|omnid|js)$/, '');
       // --work DIR：生成的 C 留在 DIR 里而不是临时目录（自举链要能事后翻中间产物）
@@ -2585,8 +2679,18 @@ function main(argv) {
         pi >= 0 ? rest[pi + 1] : undefined,
         rest.includes('--extern') || own !== undefined || bind !== undefined, own, bind);
       /* 优化档要印出来：`-O0` 与 `-O1` 在这条腿上是 12 秒对 137 秒的差别（ADR-0021），
-         而它从前只藏在 OMNI_OPT 里 —— 看不见的档等于每次都要猜这一趟慢是不是因为它。 */
-      stderr(`omni: built ${out} via ${cc} ${cc.endsWith('tcc') ? '（tcc：不分档）' : optFlag()}\n`);
+         而它从前只藏在 OMNI_OPT 里 —— 看不见的档等于每次都要猜这一趟慢是不是因为它。
+         生成的 C 有多大/多少行、发射与 cc 各花多久也一并报（流水账里那一行，见 tally）：
+         `npm run build:native` 的核心那一步只有这一句能看见，不开 `-v` 也该看得见。 */
+      const row = TALLY[TALLY.length - 1];
+      stderr(`omni: built ${out} ${fmtBytes(row.bin)}  C ${fmtBytes(row.cBytes)} / ${row.cLines} 行`
+        + `  前端 ${fmtDur(row.feMs)} + 发射 ${fmtDur(row.genMs)} + cc ${fmtDur(row.ccMs)}`
+        + `  via ${cc} ${cc.endsWith('tcc') ? '（tcc：不分档）' : optFlag()}\n`);
+      /* `--plugins`：核心编完**接着**把默认那一套插件编齐（`npm run build:native` 就这一句）。
+         一条进程做齐两件事不只是少打一行命令 —— 流水账要的是"核心 + 插件一共多少 C"，
+         跨进程那个数只能拼，拼出来的数迟早对不上。 */
+      if (rest.includes('--plugins')) buildPluginSet(out, join(dirname(out), 'plugins'), null, rest);
+      vTally();
       return 0;
     }
     case 'build-js': {
