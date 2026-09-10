@@ -1,0 +1,42 @@
+// 完整声明式的属性里那格字段与那格事件（第七十六刀）。出处：
+//   - prop_full.rst:34 —— "declaring a field with 'autoget' modifier implicitly makes the
+//     whole property autoget"；事件那一条同理（`bindable event m_e();` 让整格属性 bindable，
+//     samples/jnc/34_BindableProperties.jnc:46-59 就是这一份的原型）；
+//   - 两格的**名字是写的人定的**（这里叫 `m_x` / `m_e`）—— 默认那两个名字才是 `m_value` 与
+//     `m_onChanged`（prop_autoget.rst:26、prop_bindable.rst:23-29）。存值器体里裸写它们，靠的是
+//     "属性是一层命名空间"（prop_full.rst:15）。
+//   - 通知是手写的（同一份 sample:15-17），同值不通知那一句也是手写的。
+// 取值器**没写**：那一格由编译器生成（读那格存储，prop_autoget.rst:17 的两半）。
+
+property g_prop {
+	autoget int m_x;
+	bindable event m_e();
+
+	void set(int x) {
+		printf("set (%d)\n", x);
+
+		if (m_x == x)
+			return;
+
+		m_x = x;
+		m_e();
+	}
+}
+
+void onChanged() {
+	printf("changed %d\n", g_prop);
+}
+
+int main() {
+	bindingof(g_prop) += onChanged;
+
+	g_prop = 5;
+
+	// 同一个值写第二遍：存值器自己拦住，一个订阅都不叫
+	g_prop = 5;
+
+	g_prop = 9;
+
+	printf("done %d\n", g_prop);
+	return 0;
+}

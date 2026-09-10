@@ -878,6 +878,10 @@ class JncLower {
     this.bindProps = [];
     // 那格"照单子挨个叫一遍"的助手：签名 -> 名字（一种签名一格）。
     this.mcFires = new Map();
+    /* 完整声明式的属性里，体内那格字段与那格事件的**名字**（第七十六刀）：属性全名 ->
+       `{store, onch}`。改写出来的简单声明式记不住它们（写的人叫它 `m_x` / `m_e`，而默认是
+       `m_value` / `m_onChanged`），所以在改写那一遍记一笔，autoStore / bindStore 照它拼。 */
+    this.propMemName = new Map();
     // 取/存那两个函数的名字 -> 属性的全名（第七十一刀）。函数体降下来时靠它把 `this.ns`
     // 再往里挪一层：属性在 jancy 那边**本来就是一层命名空间**（prop_full.rst:15）。
     this.propOf = new Map();
@@ -1694,7 +1698,11 @@ class JncLower {
         out.push(e);
         continue;
       }
+      // `this.qual()` 要当时那一层命名空间（体内那两格的名字要按全名记账）
+      const saveNs = this.ns;
+      this.ns = e.ns;
       const ex = this.fullProp(it);
+      this.ns = saveNs;
       // 说不通的照原样留着：`fnSig0` 那条诊断照旧发，理由不会因为这一刀变模糊。
       if (ex === null) { out.push(e); continue; }
       for (const x of ex) out.push({ it: x, ns: e.ns });
@@ -1717,15 +1725,29 @@ class JncLower {
       return [];
     }
     const accs = [];
+    let fld = null;                    // 体里那格 autoget 字段（prop_full.rst:34）
+    let evt = null;                    // 体里那格 bindable 事件（同处，34_BindableProperties.jnc:55）
     for (const m of this.flat(body.items[1])) {
+      if (isList(m) && head(m) === 'var-decl') {
+        const r = this.fullPropMember(nm, m);
+        if (r === null) return [];
+        if (r.kind === 'field') {
+          if (fld !== null) { this.nope(m, `完整声明式的属性 '${nm}' 里两格字段`); return []; }
+          fld = r;
+        } else {
+          if (evt !== null) { this.nope(m, `完整声明式的属性 '${nm}' 里两格事件`); return []; }
+          evt = r;
+        }
+        continue;
+      }
       const md = isList(m) && head(m) === 'fn-def' ? m.items[2] : null;
       const mc = md === null ? null : md.items[2];
       // `(accessor "get")` 里那一格是**串**（语法里写的是带引号的字面量），与 isLabel 那处同理。
       const av = isList(mc) && head(mc) === 'accessor' ? mc.items[1] : null;
       const kind = av !== null && (isAtom(av) || isStr(av)) ? av.value : null;
       if (kind === null) {
-        this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条 —— 只收带体的 get / set`
-          + '（体里的字段那一半是 prop_full.rst:34 说的 autoget，另一刀）');
+        this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条 —— 只收带体的 get / set 与`
+          + '`autoget` 的字段 / `bindable` 的事件（prop_full.rst:34）');
         return [];
       }
       if (accs.some((a) => a.kind === kind)) {
@@ -1735,12 +1757,25 @@ class JncLower {
       accs.push({ kind, node: m });
     }
     const g = accs.find((a) => a.kind === 'get');
-    if (g === undefined) {
-      this.nope(it, `完整声明式的属性 '${nm}' 里没有 get —— 属性的类型是从取值器的`
-        + '返回类型来的');
+    /* 类型的出处有两个：写了取值器就抄它的返回类型，没写就抄体里那格 autoget 字段
+     * （那时取值器由编译器生成 —— prop_autoget.rst:17 的两半）。两个都没有就说不通。 */
+    if (g === undefined && fld === null) {
+      this.nope(it, `完整声明式的属性 '${nm}' 里既没有 get 也没有 autoget 的字段 ——`
+        + '属性的类型没处抄');
       return [];
     }
-    const out = [this.propDeclOf(g.node.items[1], g.node.items[2].items[1], core)];
+    const src = fld !== null ? fld : { sp: g.node.items[1], ptrs: g.node.items[2].items[1] };
+    const extra = [];
+    if (fld !== null) extra.push('autoget');
+    if (evt !== null) extra.push('bindable');
+    /* 体里那两格的**名字**是写的人定的（`m_x` / `m_e`，不是默认的 `m_value` / `m_onChanged`）。
+     * 改写出来的简单声明式记不住它们，所以在这儿记一笔 —— autoStore / bindStore 按它拼那格
+     * 生成物的名字，于是存值器体里裸写的 `m_x` 由属性那层命名空间直接查得着。 */
+    const full = this.qual(nm);
+    if (fld !== null || evt !== null) {
+      this.propMemName.set(full, { store: fld === null ? null : fld.name, onch: evt === null ? null : evt.name });
+    }
+    const out = [this.propDeclOf(src.sp, src.ptrs, core, extra)];
     for (const a of accs) {
       const ad = a.node.items[2];
       const qs = this.mkL(ad.span, this.mkA(ad.span, 'qualified-special'), core, ad.items[2]);
@@ -1752,21 +1787,67 @@ class JncLower {
   }
 
   /**
+   * 完整声明式的属性体里的一条**声明**（第七十六刀）：只有两种。
+   *
+   *   - `autoget int m_x;` —— 那格编译器生成的存储，名字是写的人定的（默认才叫 `m_value`，
+   *     prop_autoget.rst:26）。它反过来给整格属性加上 `autoget`（prop_full.rst:34 那句
+   *     "'autoget' field implicitly makes property 'autoget'"）。
+   *   - `bindable event m_e();` —— 那格事件，同理给整格属性加上 `bindable`
+   *     （samples/jnc/34_BindableProperties.jnc:52-55）。
+   *
+   * 回 `{kind, name, sp, ptrs}`；说不通时**自己报**并回 null。
+   */
+  fullPropMember(nm, m) {
+    const sp = m.items[1];
+    const mods = [...this.flat(sp.items[2]), ...this.flat(sp.items[3])]
+      .filter((x) => isAtom(x)).map((x) => x.value);
+    const ds = this.flat(m.items[2]);
+    if (ds.length !== 1 || !isList(ds[0]) || head(ds[0]) !== 'dcl') {
+      this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条（一条声明只收一格）`);
+      return null;
+    }
+    const d = ds[0];
+    const name = this.qname(d.items[2]);
+    if (name === null || name.includes('.')) {
+      this.nope(m, `完整声明式的属性 '${nm}' 体里这一条的名字`);
+      return null;
+    }
+    if (mods.includes('event') || mods.includes('multicast')) {
+      // 事件那一格的实参表要是空的：属性的 `onChanged` 在 jancy 那边就是 `multicast ()`
+      // （`StdType_SimpleMulticast`，jnc_ct_TypeMgr.cpp:195-197）。
+      const sfx = this.flat(d.items[3]);
+      const ps = sfx.length === 1 && head(sfx[0]) === 'fn-suffix' ? this.flat(sfx[0].items[1]) : null;
+      if (ps === null || ps.length > 0) {
+        this.nope(m, `完整声明式的属性 '${nm}' 里的事件 '${name}' 带着实参（属性的那一格是`
+          + ' `multicast ()`）');
+        return null;
+      }
+      return { kind: 'event', name, sp, ptrs: d.items[1] };
+    }
+    if (mods.includes('autoget')) return { kind: 'field', name, sp, ptrs: d.items[1] };
+    this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条 —— 字段要写 \`autoget\`、事件要写`
+      + ' `bindable event`（prop_full.rst:34）');
+    return null;
+  }
+
+  /**
    * 那条简单声明式（第七十五刀）：类型抄取值器的 —— 说明符照抄，`*` 那一串也照抄
    * （`log.Writer* get()` 的属性是 `log.Writer* property m_x`）。`property` 这个词落在哪儿按
    * 第七十二刀那条规矩：没有 `*` 就进说明符表的后一组，有 `*` 就跟在**最后一个** `*` 后面。
    */
-  propDeclOf(gsp, gptrs, core) {
+  propDeclOf(gsp, gptrs, core, extra = []) {
     const sp = this.mkL(gsp.span, ...gsp.items);
     const ptrs = this.mkL(gptrs.span, ...gptrs.items);
+    const words = ['property', ...extra];
     if (ptrs.items.length === 1) {
       const post = sp.items[3];
-      sp.items[3] = this.mkL(post.span, ...post.items, this.mkA(post.span, 'property'));
+      sp.items[3] = this.mkL(post.span, ...post.items,
+        ...words.map((w) => this.mkA(post.span, w)));
     } else {
       const last = ptrs.items[ptrs.items.length - 1];
       const ms = last.items[1];
       ptrs.items[ptrs.items.length - 1] = this.mkL(last.span, last.items[0],
-        this.mkL(ms.span, ...ms.items, this.mkA(ms.span, 'property')));
+        this.mkL(ms.span, ...ms.items, ...words.map((w) => this.mkA(ms.span, w))));
     }
     const d = this.mkL(core.span, this.mkA(core.span, 'dcl'), ptrs, core,
       this.mkL(core.span, this.mkA(core.span, 'suffixes')),
@@ -1871,7 +1952,10 @@ class JncLower {
       return this.nope(d, `类型是 ${tyName(t)} 的 autoget 属性 —— 编译器要生成的那一格存储`
         + '得是能一句读完的一格');
     }
-    const name = `${full}$m_value`;
+    // 完整声明式里那格字段的名字是写的人定的（第七十六刀）；简单声明式里它就叫 `m_value`
+    // （prop_autoget.rst:26）。
+    const mem = this.propMemName.get(full);
+    const name = `${full}$${mem !== undefined && mem.store !== null ? mem.store : 'm_value'}`;
     if (cls === null) {
       if (this.globals.has(name)) return this.err(d, `模块级变量 '${shown(name)}' 声明了两次`);
       this.globals.set(name, t);
@@ -1903,7 +1987,10 @@ class JncLower {
       return this.nope(d, '类的成员上的 bindable 属性（那格事件在 jancy 那边是类里的一格'
         + '字段，而这一层的事件是一格数组，方言的字段放不下）');
     }
-    const name = `${full}$m_onChanged`;
+    // 完整声明式里那格事件的名字是写的人定的（第七十六刀，jancy 那边记在
+    // `PropertyType::m_bindableEventName` 上）；简单声明式里它就叫 `m_onChanged`。
+    const mem = this.propMemName.get(full);
+    const name = `${full}$${mem !== undefined && mem.onch !== null ? mem.onch : 'm_onChanged'}`;
     if (this.globals.has(name)) return this.err(d, `模块级变量 '${shown(name)}' 声明了两次`);
     this.globals.set(name, J_MC);
     this.bindProps.push({ full, name });

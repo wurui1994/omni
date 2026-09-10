@@ -4555,6 +4555,32 @@ samples/jnc/34_BindableProperties.jnc:57-58，要重载决议）。
 类里的事件、`没有这个类型 'Scheduler'`）。一份也没真跑起来 —— 那 34 份是 ioninja 的插件，
 还压着 `.jncx` 那一格。
 
+## 第七十六刀：完整声明式里那格字段与那格事件
+
+上一刀把体里"只有带体的 get / set"那一种接上了，尺子随后指的就是体里那格字段
+（`'g_prop' 体里的这一条` 6 份、`'m_prop' …` 3 份）。这一刀接它。
+
+**jancy 的两条隐含规则**（prop_full.rst:34）：体里写一格 `autoget` 的字段，整格属性就是
+autoget；写一格 `bindable event`，整格属性就是 bindable。samples/jnc/34_BindableProperties.jnc:46-59
+就是这个形状 —— 而且那两格的**名字是写的人定的**（`m_x` / `m_e`），默认的 `m_value` /
+`m_onChanged` 只是"没写完整声明式时"的名字（prop_autoget.rst:26、prop_bindable.rst:23-29）。
+
+**落法还是那一次改写**：体里那两条声明各出一格信息 —— 字段给出**属性的类型**（这时取值器可以
+不写，由编译器生成）、事件给出 bindable。改写出来的简单声明式因此是
+`int autoget bindable property g_prop;`。名字这一格记在 `propMemName` 上（属性全名 ->
+`{store, onch}`），`autoStore` / `bindStore` 照它拼那格生成物的名字 —— 于是存值器体里裸写的
+`m_x` / `m_e()` 由"属性是一层命名空间"直接查得着，一个特判都不用加。
+
+**量出来的**（`tests/jnc` 156/0 -> **157/0**）：`cases/73-propfullauto.jnc` 是 sample 34 里
+`g_prop` 那一格的等价物（`autoget int m_x;` + `bindable event m_e();` + 手写存值器 + 手写通知
++ 同值不通知），六条腿逐字节相同；`bad/propfull-field` 退役（它现在能跑），换成
+`bad/propfull-plainfield` —— 体里写**不带 `autoget`** 的字段照旧拒（不拒就会把那格字段悄悄
+丢掉，体里读它成了"未声明的变量"）。
+
+**尺子**（同一份 34 份的口径）：`'g_prop' 体里的这一条` **6 -> 2**，好几份换成了更靠里的
+`import "*.jncx"`（6 份）与别的 import；剩下的是体里还有别的成员（不带 `autoget` 的字段、
+`alias` 之类）与 2 份语法就没过的（`unexpected "*"`）。
+
 ## 后果与代价
 
 
