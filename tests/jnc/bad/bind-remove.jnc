@@ -1,0 +1,20 @@
+// 事件上的 `-=`（ADR-0016 第七十三刀的边界）。jancy 那边 `+=` 回来的是一格 **cookie**
+// （多播类的 `add` 回 `handle`，jnc_ct_TypeMgr.cpp:969），`-=` 收的就是那一格
+// （同处:970 的 remove）。这一层的 `+=` 还不回那个句柄，所以退不了订。
+int autoget bindable property g_prop;
+
+void g_prop.set(int x) {
+	m_value = x;
+	m_onChanged();
+}
+
+void onChanged() {
+	printf("changed %d\n", g_prop);
+}
+
+int main() {
+	bindingof(g_prop) += onChanged;
+	bindingof(g_prop) -= onChanged;
+	g_prop = 1;
+	return 0;
+}

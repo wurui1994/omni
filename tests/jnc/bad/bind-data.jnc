@@ -1,0 +1,13 @@
+// bindable data（ADR-0016 第七十三刀的边界）。光写 `bindable` 不写 `property` 在 jancy 里
+// 是一格**整格都由编译器生成**的属性：取值器读那格存储、存值器是
+// `if (m_value != x) { m_value = x; m_onChanged(); }`
+// （`Property::compileAutoSetter`，jnc_ct_Property.cpp:788-822 —— 那个 `!=` 就是"同值不通知"
+// 的出处）。samples/jnc/34_BindableProperties.jnc:87-90 就是这一格。
+// 现在收的是"手写存值器"那一半（cases/69-propbind.jnc），生成整格的这一半还没落。
+int bindable g_data;
+
+int main() {
+	g_data = 1000;
+	printf("%d\n", g_data);
+	return 0;
+}

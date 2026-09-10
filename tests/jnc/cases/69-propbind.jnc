@@ -1,0 +1,46 @@
+// jancy 的 bindable 属性（第七十三刀）。出处：
+//   - samples/jnc/34_BindableProperties.jnc:21-40 —— 简单声明式的 `int autoget bindable
+//     property`，存值器写在别处，体里裸写 `m_value` 与 `m_onChanged`；
+//   - 同一份 :15-17 —— "The firing of the bindable event must be done manually"，所以这里
+//     的 `m_onChanged()` 是**手写的**（同值不通知那一句 `if (m_value == x) return;` 也是）；
+//   - 同一份 :115-122 —— `bindingof(p) += handler` 是订阅的写法；
+//   - prop_bindable.rst:23-29 —— "name of compiler-generated event is 'm_onChanged'"。
+// 通知的顺序是**加进来的顺序**（jnc_ct_MulticastClassType.cpp:64-94 那段从下标 0 往上走）。
+// `= null` 是清空（多播类上 `:=`/`=` 那格运算符别名是 setup，jnc_ct_TypeMgr.cpp:968）。
+
+int autoget bindable property g_prop;
+
+void g_prop.set(int x) {
+	printf("set (%d)\n", x);
+
+	if (m_value == x)
+		return;
+
+	m_value = x;
+	m_onChanged();
+}
+
+void onFirst() {
+	printf("first: %d\n", g_prop);
+}
+
+void onSecond() {
+	printf("second: %d\n", g_prop);
+}
+
+int main() {
+	bindingof(g_prop) += onFirst;
+	g_prop = 100;
+
+	bindingof(g_prop) += onSecond;
+	g_prop = 200;
+
+	// 同一个值写第二遍：存值器自己拦住，一个订阅都不叫
+	g_prop = 200;
+
+	bindingof(g_prop) = null;
+	g_prop = 300;
+
+	printf("done %d\n", g_prop);
+	return 0;
+}

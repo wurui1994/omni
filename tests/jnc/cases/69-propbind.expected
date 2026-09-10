@@ -1,0 +1,8 @@
+set (100)
+first: 100
+set (200)
+first: 200
+second: 200
+set (200)
+set (300)
+done 300

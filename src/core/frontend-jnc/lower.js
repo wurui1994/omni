@@ -229,6 +229,10 @@ const J_REAL = { k: 'real' };
 const J_BOOL = { k: 'bool' };
 const J_VOID = { k: 'void' };
 const J_STR = { k: 'string' };
+/** 一格多播（第七十三刀）：`multicast ()` / `event ()` —— 属性的 `m_onChanged` 就是它。 */
+const J_MC = { k: 'mc' };
+/** 通知那一格助手在方言里的名字（一份程序一格，见 emitMcFire）。 */
+const MC_FIRE = 'jnc$mc_fire';
 /* 一个 f64 写成方言的 `(real …)` 收得下的样子。`String(x)` 给的形状
    （`1` / `-0.5` / `1e-7` / `1e+21`）正好都在 realLit 那条正则里；`Infinity`/`NaN`
    到不了这儿（`evalCConst` 那侧已经拦掉）。整数值补一个 `.0` 只是为了读的人一眼
@@ -549,6 +553,11 @@ function tyText(t) {
   // 函数指针就是方言的函数值那一格（第五十五刀）：`(fnty (形参…) 返回)`。
   if (t.k === 'fnptr') return `(fnty (${t.params.map(slotText).join(' ')}) ${slotText(t.ret)})`;
   if (t.k === 'int') return 'int';
+  /* 多播（第七十三刀）：jancy 的 `multicast ()` 是一格类，里头是"一串函数指针 + 个数"
+   * （`jnc_Multicast`，include/jnc_RuntimeStructs.h:169-181）。方言里现成的形状就是
+   * **元素是函数值的数组**：加一个订阅是 `apush`、通知是照 `alen` 走一遍 `callfn`，
+   * 顺序与 jancy 的 `McSnapshot.call` 一样（从 0 往上，jnc_ct_MulticastClassType.cpp:64-94）。 */
+  if (t.k === 'mc') return '(arr (fnty () void))';
   // 枚举在方言里就是它的基整数（第三十九刀）—— 四种位宽在方言里都是 `int`，所以这儿也是
   if (t.k === 'enum') return 'int';
   return t.k;
@@ -611,6 +620,8 @@ function tyName(t) {
     return `${tyName(t.ret)} function${t.thin ? ' thin*' : '*'}(${t.params.map(tyName).join(', ')})`;
   }
   if (t.k === 'int') return `${t.u ? 'unsigned ' : ''}${INT_NAMES.get(t.w)}`;
+  // 多播（第七十三刀）：眼下只有 `void ()` 那一种（属性的 `m_onChanged` 就是它）。
+  if (t.k === 'mc') return 'multicast ()';
   if (t.k === 'enum') return shown(t.name);
   return t.k;
 }
@@ -675,7 +686,7 @@ const LV_SHAPES = new Set(['name', 'field', 'index', 'ptr-field', 'indirect', 't
 /** `T* … property p` 里，最后一个 `*` 后面那一组词里**这一层认得的**那几个（第七十二刀）。
  *  取自 jancy 那张 `TypeModifierMaskKind_Property`（jnc_ct_Decl.h:75-85）：属性这条声明能带
  *  的就是那一张表。别的词落在那儿明说不收 —— 免得"提上来"变成"悄悄丢掉"。 */
-const PROP_TAIL_MODS = new Set(['property', 'autoget', 'const', 'readonly', 'cmut', 'errorcode']);
+const PROP_TAIL_MODS = new Set(['property', 'autoget', 'bindable', 'const', 'readonly', 'cmut', 'errorcode']);
 
 /** 这条语句是 `名字:` 那种标签吗（第五十九刀）。语法上 `catch:` / `finally:` / `nestedscope:`
  *  都发成 `(label "名字")`，见 jnc.grammar 那三条。 */
@@ -853,6 +864,12 @@ class JncLower {
     // `m_value`，prop_autoget.rst:26）。这张单子攒的是"要发的那一格 + 要合成的取值器"，
     // 发出去的时机排在 gTaken 数完之后（那一问决定顶层那一格要不要提到自己的内存里）。
     this.autoProps = [];
+    // `bindable` 属性（第七十三刀）：那格**编译器生成的事件**要落地 —— 一格模块级的
+    // `(arr (fnty () void))`，名字是 `<属性全名>$m_onChanged`（源码里写的是 `m_onChanged`，
+    // prop_bindable.rst:23-29）。发的时机与 autoProps 同一处。
+    this.bindProps = [];
+    // 那格"照单子挨个叫一遍"的助手发过没有（一份程序只发一格，名字全局唯一）。
+    this.mcFired = false;
     // 取/存那两个函数的名字 -> 属性的全名（第七十一刀）。函数体降下来时靠它把 `this.ns`
     // 再往里挪一层：属性在 jancy 那边**本来就是一层命名空间**（prop_full.rst:15）。
     this.propOf = new Map();
@@ -1503,6 +1520,14 @@ class JncLower {
       this.methods.set(g, a.cls);
       pi.get = true;
     }
+    /* `bindable` 那格生成的事件（第七十三刀）：一格模块级的"函数值数组"，出来是空的。
+     * 与 autoget 那一格不同，它**不用问 gTaken** —— 事件不是标量，`&m_onChanged` 在 jancy
+     * 那边也取不到一格可算术的地址（那是个类引用）。 */
+    for (const b of this.bindProps) {
+      this.decls.push(`  (global ${b.name} ${tyText(J_MC)})`);
+      this.globalCells.push(`    (set ${b.name} (anew ${tyText(J_MC)} (int 0)))`);
+    }
+    if (this.bindProps.length > 0) this.emitMcFire();
     for (const e of items) {
       if (!isList(e.it)) continue;
       this.ns = e.ns;
@@ -1669,8 +1694,11 @@ class JncLower {
       //（同处:26）。与索引属性互斥，那是同一份文档最后一句（:47）。
       const store = dsp.agt ? this.autoStore(d, full, cls, info.type, idx) : null;
       if (dsp.agt && store === null) continue;
+      // `bindable`（第七十三刀）：编译器生成一格事件，名字是 `m_onChanged`。
+      const onch = dsp.bnd ? this.bindStore(d, full, cls) : null;
+      if (dsp.bnd && onch === null) continue;
       this.props.set(full, {
-        type: info.type, cls, cst: dsp.cst, idx, get: false, set: false, store,
+        type: info.type, cls, cst: dsp.cst, idx, get: false, set: false, store, onch,
       });
     }
     return null;
@@ -1712,6 +1740,52 @@ class JncLower {
     fs.push({ name, type: t });
     this.autoProps.push({ full, name, cls, type: t });
     return name;
+  }
+
+  /**
+   * `bindable` 那格生成的事件（第七十三刀）。回它在**方言里**的名字，接不上时发诊断回 null。
+   *
+   * 名字是 `<属性全名>$m_onChanged`：源码里写的就是 `m_onChanged`
+   * （prop_bindable.rst:23-29 那句 "name of compiler-generated event is 'm_onChanged'"），
+   * 而属性在 jancy 那边**本来就是一层命名空间**（prop_full.rst:15）—— 存值器的体降下来时
+   * `this.ns` 已经挪进了属性那一层（见 propNs），所以裸写的 `m_onChanged` 由 resolve 直接
+   * 找到这一格，不用像 `m_value` 那样再换一次名。
+   *
+   * 只收顶层的：类的成员那一格在 jancy 那边是**类里的一格字段**
+   * （`Property::createOnChanged` 的头一支，jnc_ct_Property.cpp:131-134），而这一层的
+   * 事件是"元素是函数值的数组"，方言的结构体字段还放不下它。
+   */
+  bindStore(d, full, cls) {
+    if (cls !== null) {
+      return this.nope(d, '类的成员上的 bindable 属性（那格事件在 jancy 那边是类里的一格'
+        + '字段，而这一层的事件是一格数组，方言的字段放不下）');
+    }
+    const name = `${full}$m_onChanged`;
+    if (this.globals.has(name)) return this.err(d, `模块级变量 '${shown(name)}' 声明了两次`);
+    this.globals.set(name, J_MC);
+    this.bindProps.push({ full, name });
+    return name;
+  }
+
+  /**
+   * 通知那一格（第七十三刀）：照单子从头到尾叫一遍。一份程序只发一格，名字全局唯一
+   * （自举那一遍要求模块级的名字唯一，见第五十九刀那处）。
+   *
+   * 顺序与 jancy 一样是**加进来的顺序**（`McSnapshot.call` 从下标 0 往上走，
+   * jnc_ct_MulticastClassType.cpp:64-94）。jancy 那边先取一份快照再叫，为的是"叫的过程中
+   * 有人加/减"不会乱；这一层直接走那格数组，所以每一圈都重问一次 `alen` —— 叫的过程中
+   * 加进来的会被叫到。这是**可观测的差别**，记成账：真要快照就得先抄一份数组。
+   */
+  emitMcFire() {
+    if (this.mcFired) return;
+    this.mcFired = true;
+    const at = tyText(J_MC);
+    this.decls.push(`  (fn ${MC_FIRE} ((m ${at})) void\n`
+      + '    (let i int (int 0))\n'
+      + '    (while (bin "<" (var i) (alen (var m))) (do\n'
+      + '      (expr (callfn (aget (var m) (var i))))\n'
+      + '      (set i (bin "+" (var i) (int 1))))))');
+    this.fns.set(MC_FIRE, { params: [J_MC], ret: J_VOID });
   }
 
   /**
@@ -2640,6 +2714,7 @@ class JncLower {
     let prop = false;
     let cst = false;
     let agt = false;
+    let bnd = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
       // `errorcode`（第五十八刀，exceptions.rst:17）：它说的是"这个函数的返回值就是错误码"。
@@ -2689,6 +2764,13 @@ class JncLower {
       // 一格存储**、读它就是读那一格"。简单声明式里那格存储的名字是 `m_value`（同一处:26 那句
       // "name of compiler-generated field is 'm_value'"）—— 存值器的体里就是这么写它的。
       if (m === 'autoget') { agt = true; continue; }
+      /* `bindable`（第七十三刀，prop_bindable.rst）：它说的是"这一格属性变了要通知订阅的人"。
+       * jancy 那边编译器给它生成一格事件，名字是 `m_onChanged`
+       * （`Property::createOnChanged`，jnc_ct_Property.cpp:125-147，类型是
+       * `StdType_SimpleMulticast` = `multicast ()`）—— 存值器的体里就是这么写它的。
+       * 通知**是手写的**，除非整格属性都是编译器生成的（那种叫 bindable data，
+       * samples/jnc/34_BindableProperties.jnc:15-17）。 */
+      if (m === 'bindable') { bnd = true; continue; }
       // 访问控制的 **Java 式写法**（第六十七刀）。jancy 只有 public 与 protected 两种，
       // 两种写法都收：C++ 式的标签，和这一格"写在声明说明符里"（dual_modifiers.rst:22-24），
       // 而且**顶层的成员也能写**（同处:26 那句 "Global namespace members can also have
@@ -2767,7 +2849,16 @@ class JncLower {
         + '属性体内那格字段上，同处:34）');
       return null;
     }
-    return { type: base, thin, stat, fnptr, virt, errc, prop, cst, agt };
+    /* 光写 `bindable` 不写 `property` 是 **bindable data**（`int bindable g_data;`，
+     * samples/jnc/34_BindableProperties.jnc:87-90）：整格属性都由编译器生成 —— 取值器读那格
+     * 存储、存值器是 `if (m_value != x) { m_value = x; m_onChanged(); }`
+     * （`Property::compileAutoSetter`，jnc_ct_Property.cpp:788-822）。那一格是下一刀。 */
+    if (bnd && !prop) {
+      this.nope(ts, 'bindable data（`int bindable g_data;` —— 取值器与存值器整格都由'
+        + '编译器生成，prop_bindable.rst 那半）');
+      return null;
+    }
+    return { type: base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd };
   }
 
   /**
@@ -3253,6 +3344,72 @@ class JncLower {
   }
 
   /**
+   * 这个表达式指的是一格**事件**吗（第七十三刀）。是就把它在方言里的读法回来，不是这种形状
+   * 回 undefined，算不出来回 null（与 propTarget 同一个约定）。
+   *
+   * 两种写法：
+   *   - `bindingof(p)`：属性那格 `m_onChanged`。jancy 把这个运算符直接落在
+   *     `getPropertyOnChanged` 上（Expr.llk:898-901），不是 bindable 的属性它报
+   *     `'…' has no bindable event`（jnc_ct_OperatorMgr_Property.cpp:390）—— 这儿照说。
+   *   - 裸名字 `m_onChanged`：存值器体里就是这么写的。属性在 jancy 那边是一层命名空间
+   *     （prop_full.rst:15），而这一层把属性的全名当前缀，所以普通的名字查找就找着了。
+   */
+  mcRef(n) {
+    if (!isList(n)) return undefined;
+    if (head(n) === 'bindingof') {
+      const pn = this.propRef(n.items[1]);
+      if (pn === null) return this.err(n, 'bindingof(…) 里头要是一格属性');
+      const pi = this.props.get(pn);
+      if (pi === undefined || pi.onch === null) {
+        return this.err(n, `属性 '${shown(pn)}' 上没有 bindable 事件`
+          + '（jancy 那句 "has no bindable event"）—— 它的声明里没写 `bindable`');
+      }
+      return { code: `(var ${pi.onch})`, name: pi.onch };
+    }
+    if (head(n) === 'name' && isAtom(n.items[1])) {
+      const r = this.lookupRef(n.items[1].value);
+      if (r !== null && r.type.k === 'mc') return { code: `(var ${r.dname})`, name: r.dname };
+    }
+    return undefined;
+  }
+
+  /**
+   * 事件上的那几格运算（第七十三刀）。jancy 把它们做成多播类上的**运算符别名**
+   * （jnc_ct_TypeMgr.cpp:968-973）：`:=`/`=` 是 setup（只留这一个）、`+=` 是 add、
+   * `-=` 是 remove。
+   *
+   *   - `m = null` -> 清空（换一格空的单子上去）
+   *   - `m = f` / `m := f` -> 只留这一个
+   *   - `m += f` -> 加一个订阅
+   *   - `m -= …` -> **不收**：jancy 那边 `-=` 收的是 `+=` 回来的那格 cookie
+   *     （`MulticastMethodKind_Remove` 收 `handle`），这一层的 `+=` 还不回 cookie。
+   */
+  mcAssign(n, mc, op, rhs, pad) {
+    if (op === '-=') {
+      return this.nope(n, '事件上的 `-=`（jancy 那边收的是 `+=` 回来的那格 cookie，'
+        + '这一层的 `+=` 还不回那一格）');
+    }
+    if (op !== '=' && op !== ':=' && op !== '+=') {
+      this.err(n, `事件上写不了 '${op}'（只有 = / := / += 三格）`);
+      return null;
+    }
+    const fresh = `${pad}(set ${mc.name} (anew ${tyText(J_MC)} (int 0)))`;
+    if (isList(rhs) && head(rhs) === 'null') {
+      if (op === '+=') { this.err(n, '`+= null` 加不了一个空的订阅'); return null; }
+      return [fresh];
+    }
+    const want = tFn([], J_VOID);
+    const v = this.expr(rhs, want);
+    if (v === null) return null;
+    if (v.type.k !== 'fnptr' || v.type.params.length > 0 || v.type.ret !== J_VOID) {
+      this.err(n, `事件上挂的得是一格 \`void ()\`，这里是 ${tyName(v.type)}`);
+      return null;
+    }
+    const add = `${pad}(apush ${mc.code} ${v.code})`;
+    return op === '+=' ? [add] : [fresh, add];
+  }
+
+  /**
    * 读一格属性（第六十八刀）：就是调取值器。属性在源码里长得像变量，所以这一问挂在
    * "名字查不着变量"之后 —— 见 `case 'name'`。成员属性多传一格对象（第六十九刀）。
    */
@@ -3395,7 +3552,7 @@ class JncLower {
     const sp = special === null || special === 'get' ? this.specs(n.items[1], true)
       : {
         type: J_VOID, thin: false, stat: false, fnptr: false,
-        virt: null, errc: false, prop: false, cst: false, agt: false,
+        virt: null, errc: false, prop: false, cst: false, agt: false, bnd: false,
       };
     if (sp === null) return null;
     const info = this.declarator(n.items[2], sp);
@@ -4637,6 +4794,11 @@ class JncLower {
       // 之前 —— 属性没有"可写的那一格"，lvalue 会去查变量、查不着就报"未声明"。
       const pt = this.propRef(n.items[2]);
       if (pt !== null) return this.propSet(n, pt, op, n.items[3], pad);
+      /* 事件上的 `+=` / `=`（第七十三刀）：同一条理由排在 lvalue 之前 —— `bindingof(p)`
+       * 压根不是一格变量，而事件那一格在方言里是一格数组，写它走 apush 不走赋值。 */
+      const mcl = this.mcRef(n.items[2]);
+      if (mcl === null) return null;
+      if (mcl !== undefined) return this.mcAssign(n, mcl, op, n.items[3], pad);
       // `c.m_a = 5` —— 成员属性（第六十九刀）：同样是调存值器，对象当第一个实参。同一条理由
       // 排在 lvalue 之前 —— 属性没有"可写的那一格"。
       const lhs = n.items[2];
@@ -4793,6 +4955,19 @@ class JncLower {
     const args = this.flat(n.items[2]);
     if (isList(callee) && head(callee) === 'name' && callee.items[1].value === 'printf') {
       return this.printf(n, args, ind);
+    }
+    /* `m_onChanged();` / `bindingof(p)();`（第七十三刀）：叫一格事件不是"调一个函数"，是
+     * 照单子从头到尾叫一遍（jancy 那边 `m(…)` 走的是多播类的 `call` 方法，
+     * jnc_ct_TypeMgr.cpp:962-975 那张表里的 `type->m_callOperator`）。 */
+    const mc = this.mcRef(callee);
+    if (mc === null) return null;
+    if (mc !== undefined) {
+      if (args.length > 0) {
+        return this.nope(n, '带实参的事件（这一层只有 `multicast ()` 那一种，'
+          + '属性的 m_onChanged 就是它）');
+      }
+      this.emitMcFire();
+      return [`${pad}(expr (call ${MC_FIRE} ${mc.code}))`];
     }
     const v = this.expr(n, null);
     if (v === null) return null;

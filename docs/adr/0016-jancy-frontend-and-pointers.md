@@ -4396,6 +4396,46 @@ property … { … }` 的文件里，同一份文件本来就另有一格普通�
 `onChanged`）、完整声明式 **78 份**（那对花括号是一层命名空间，还要存值器的重载决议）、
 `event` 82 份。
 
+## 第七十三刀：`bindable` 属性 —— 一格事件加手写的通知
+
+上一刀数出来"下一刀是 `bindable`"，这一刀就是它。
+
+**它是什么**（出处全在 jancy 自己的源码里）：`bindable` 写在属性上，编译器给这格属性生成
+一格**事件**，名字是 `m_onChanged`，类型是 `multicast ()`（`Property::createOnChanged`，
+jnc_ct_Property.cpp:125-147，`StdType_SimpleMulticast` 的定义在 jnc_ct_TypeMgr.cpp:195-197）。
+`bindingof(p)` 就是"把那一格拿出来"（Expr.llk:898-901 直接落在 `getPropertyOnChanged` 上）。
+**通知是手写的**——`samples/jnc/34_BindableProperties.jnc:15-17` 那句 "The firing of the
+bindable event must be done manually, unless the entire property is compiler-generated"。
+自动通知只有一处：整格属性都由编译器生成的那种（bindable data），它的存值器是
+`if (m_value != x) { m_value = x; m_onChanged(); }`（`compileAutoSetter`，
+jnc_ct_Property.cpp:788-822 —— 那个 `!=` 就是"同值不通知"的出处）。
+
+**方言里不用加东西**。多播在 jancy 的运行期是"一串函数指针 + 个数"
+（`jnc_Multicast`，include/jnc_RuntimeStructs.h:169-181），而方言现成就有**元素是函数值的
+数组**：订阅是 `apush`、通知是照 `alen` 走一遍 `callfn`、清空是换一格空的上去。顺序也对得上
+——jancy 的 `McSnapshot.call` 从下标 0 往上走（jnc_ct_MulticastClassType.cpp:64-94）。
+先拿一份 `.sx` 探针量过这四件事在解释器上就是通的，然后才动前端。
+
+**落法**：新的一格 jnc 类型 `mc`（`multicast ()`，`tyText` 出来就是
+`(arr (fnty () void))`）；`bindable` 的属性登记时生成一格模块级的
+`<属性全名>$m_onChanged`，与 `autoget` 那格 `$m_value` 同一处发；通知那一格助手
+`jnc$mc_fire` 一份程序发一格。裸写的 `m_onChanged` **不用特判**——属性在 jancy 那边本来就是
+一层命名空间（prop_full.rst:15），而这一层把属性全名当前缀，普通的名字查找就找着了。
+
+**一处可观测的差别，记成账**：jancy 通知前先取一份快照，所以"叫的过程中有人加/减"不影响这
+一轮；这一层每圈重问一次 `alen`，于是叫的过程中加进来的**会被叫到**。要快照就得先抄一份数组。
+
+**量出来的**（`tests/jnc` 145/0 -> **150/0**）：`cases/69-propbind.jnc` 是 sample 34 简单声明
+式那一半的等价物（订阅两个、同值不通知、`= null` 清空），六条腿逐字节相同；四条边界各钉一条
+——类的成员上的 bindable（那格事件在 jancy 那边是类里的字段，方言的字段放不下函数值）、
+事件上的 `-=`（jancy 收的是 `+=` 回来的 cookie）、`bindingof` 用在非 bindable 的属性上
+（照 jancy 那句 "has no bindable event" 说）、bindable data（整格生成的那一半，下一刀）。
+
+**尺子**（只量提到 `bindable` 的那 67 份，口径是"第一条诊断的理由"）：
+`修饰符 'bindable'` **11 份 -> 0**。这 11 份一份也没真降下来，它们换了更靠里的拦路项 ——
+`event` 2->5、`reactor` 6->7、bindable data 0->2、`destruct` +2、`variant_t` 1->2。也就是说
+这个词不再是墙，墙在它后面：**带实参的事件**、`reactor`、以及 `.jncx` 那种编译好的扩展库。
+
 ## 后果与代价
 
 

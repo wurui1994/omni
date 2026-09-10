@@ -1,0 +1,1 @@
+属性 'g_prop' 上没有 bindable 事件（jancy 那句 "has no bindable event"）—— 它的声明里没写 `bindable`

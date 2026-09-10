@@ -1,0 +1,18 @@
+// `bindingof` 用在**不是 bindable** 的属性上（ADR-0016 第七十三刀）。jancy 自己也拒：
+// `'%s' has no bindable event`（`OperatorMgr::getPropertyOnChanged`，
+// jnc_ct_OperatorMgr_Property.cpp:384-392 那一问看的是 `PropertyTypeFlag_Bindable`）。
+int autoget property g_prop;
+
+void g_prop.set(int x) {
+	m_value = x;
+}
+
+void onChanged() {
+	printf("changed %d\n", g_prop);
+}
+
+int main() {
+	bindingof(g_prop) += onChanged;
+	g_prop = 1;
+	return 0;
+}
