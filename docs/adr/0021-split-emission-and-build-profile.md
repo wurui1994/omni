@@ -326,6 +326,24 @@ clang -std=c11 -O0 -I src/runtime -c pro.c   ->  0.46 s，pro.o 528 字节
 - 要量的代价有一个：常用 helper 会在每个 TU 各留一份机器码，产物会变大 —— 那正好是 P2a
   以后要收的账，先量出来再决定。
 
+### 切分的配方（读代码读出来的，不是猜的）：只有三样东西不能复制
+
+复制一份共用前段是安全的，**除了带状态的那几格** —— 复制它们就是复制状态，等于静默的错答案：
+
+- **模块级变量** `static omni_dyn g_*` / `static <T> g_*`（emit.js:325、329）。
+  切分时共用前段里发 `extern`，定义只放在带 `main` 的那个 TU。
+- **单例闭包的缓存** `static omni_fn one = NULL;`（emit.js:438，`c.single === true`）。
+  复制它 -> 同一个"单例"闭包在两个 TU 里是两格，`f === f` 会假。所以 closure maker 必须
+  外部链接、定义一次。
+- **剖面器的栈** `static int omni_prof_sp / omni_prof_ovf`（emit.js:974-975）。
+  它是全程一根栈，复制成每个 TU 一根，`--prof` 的输出就废了。
+
+其余都是无状态的，复制没有语义后果（字面量池、容器/blob/vec 模板、box、enum 构造器、
+成员派发器、`omni_js_op_key_`、fnmeta 与 data 那两张 const 表）—— 而且没被引用的那份
+clang 连代码都不生成（上面 528 字节那一条）。
+
+生成的函数本身要去掉 `static`（原型也一样，emit.js:1059 的 `proto`），否则跨 TU 调不到。
+
 ## 顺带记下的两个坑（都不是性能问题，是这一轮量的时候撞上的）
 
 **`dist` 安装跑不了 `omni c tcc`。** 它把 libc 头解析到 `<dist>/include`，而 bootstrap 的
