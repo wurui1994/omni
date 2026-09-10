@@ -984,6 +984,36 @@ static inline int64_t omni_hash_dyn(omni_dyn v) { return omni_hash_int(v.tag); }
 static inline bool omni_eq_dyn(omni_dyn a, omni_dyn b) { return omni_dyn_eq(a, b); }
 static inline bool omni_eq_ref(void *a, void *b) { return a == b; }
 
+/* ---- JS 那一族模板里的**状态**：一格都不留在模板里（ADR-0021 S1）----
+ *
+ * 那一族宏（OMNI_JS_OBJ / OMNI_JS_ARR ...）是在**生成的 C 里**展开的。分语言那条路上
+ * 每个前端 / 后端是一个动态库，也是另一个映像 —— 模板在那儿再展开一遍，就是又一套
+ * realm / xprops / this 槽，于是"在核心里给数组挂的属性，插件里看不见"。量到过：
+ * 按模块切开之后 `TypeError: cannot set property 'items' of undefined`。
+ *
+ * 所以状态住在这一层（运行时只有一份，插件按动态符号解析拿到同一份），模板里只剩代码。
+ * 模板类型（DT / LT / 函数指针）那几格存 void *，在模板里强转回来 —— 那是下一刀。
+ */
+extern omni_dyn omni_js_realm_tbl_g[25];
+extern omni_dyn omni_js_ctor_tbl_g[19];
+extern omni_dyn omni_js_gt_tbl_g[1];
+extern omni_dyn omni_js_nt_slot_g;
+extern omni_dyn omni_js_this_slot_g;
+extern int64_t omni_js_jobq_at_g;
+/* 模板类型那几格（DT / LT / 模板里定义的函数指针类型）：这一层只能是 void *，
+   模板里强转回来 —— 类型是每份程序自己生成的，这一层看不见它。 */
+extern void *omni_js_fnproto_tbl_g;
+extern void *omni_js_xprops_tbl_g;
+extern void *omni_js_jobq_g;
+extern void *omni_js_pm_find_g;
+extern void *omni_js_pm_call_g;
+#define omni_js_realm_tbl_ omni_js_realm_tbl_g
+#define omni_js_ctor_tbl_ omni_js_ctor_tbl_g
+#define omni_js_gt_tbl_ omni_js_gt_tbl_g
+#define omni_js_nt_slot_ omni_js_nt_slot_g
+#define omni_js_this_slot_ omni_js_this_slot_g
+#define omni_js_jobq_at_ omni_js_jobq_at_g
+
 #include "omni_container.h"
 #include "omni_dyn_bridge.h"
 #include "omni_js_arr.h"

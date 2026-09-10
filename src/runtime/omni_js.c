@@ -1028,3 +1028,18 @@ omni_dyn omni_js_text_encode(omni_dyn e, omni_dyn s) {
   return bytes_wrap(p, u.len);
 }
 
+
+/* JS 那一族模板里的状态（ADR-0021 S1）：定义在这儿，只有一份。
+   为什么不留在模板里：模板在生成的 C 里展开，插件是另一个映像，展开两遍就是两套对象模型。
+   声明与那几个 #define 在 omni.h 里 —— 模板里的名字照旧，指过来的是这几格。 */
+omni_dyn omni_js_realm_tbl_g[25];
+omni_dyn omni_js_ctor_tbl_g[19];
+omni_dyn omni_js_gt_tbl_g[1];
+omni_dyn omni_js_nt_slot_g = { OMNI_DYN_UNDEF, { 0 } };
+omni_dyn omni_js_this_slot_g = { OMNI_DYN_UNDEF, { 0 } };
+int64_t omni_js_jobq_at_g;
+void *omni_js_fnproto_tbl_g = NULL;
+void *omni_js_xprops_tbl_g = NULL;
+void *omni_js_jobq_g = NULL;
+void *omni_js_pm_find_g = NULL;
+void *omni_js_pm_call_g = NULL;

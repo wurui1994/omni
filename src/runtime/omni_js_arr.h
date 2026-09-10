@@ -62,7 +62,6 @@ static omni_dyn omni_js_call_fn(omni_dyn f, omni_dyn args) { \
      1. 只有 js_call_this 会往槽里放东西，而且**返回之后一律清成 undefined**； \
      2. 取的人是函数入口，读一次就清。 \
    于是"没有接收者的那些调用"看到的一定是 undefined，不管上一趟留下过什么。 */ \
-static omni_dyn omni_js_this_slot_ = { OMNI_DYN_UNDEF, { 0 } }; \
 static omni_dyn omni_js_this_take(void) { \
   omni_dyn v = omni_js_this_slot_; \
   omni_js_this_slot_ = omni_dyn_undef(); \

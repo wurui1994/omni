@@ -162,7 +162,6 @@ static omni_dyn omni_js_date_m_(int64_t ix, omni_dyn self, LT args); \
 static omni_dyn omni_js_date_new(omni_dyn v); \
 /* 函数值的 prototype 那张按同一性索引的旁表（$FNPROTO 的孪生）：realm_ctor 要往里预先坐一格，
    而它排在 fn_proto_ 前头，所以表在这儿声明。 */ \
-static DT omni_js_fnproto_tbl_; \
 static omni_dyn omni_js_proto_of_tag_(omni_dyn v); \
 /* 原生函数值（realm 上那些成员、以及 f.call / f.apply）：造一格与按 sel 分派 */ \
 struct omni_js_nat_s { omni_fnptr fp; int64_t sel; omni_dyn a; }; \
@@ -181,7 +180,6 @@ static const char *omni_js_ctor_nm_[19] = { "Object", "Function", "Array", "Stri
   "URIError", "AggregateError" }; \
 static const int64_t omni_js_ctor_ln_[19] = { 1, 1, 1, 1, 1, 1, 0, 2, 0, 0, 7, \
   1, 1, 1, 1, 1, 1, 1, 2 }; \
-static omni_dyn omni_js_ctor_tbl_[19]; \
 /* Date.prototype 上那四十格。kind：0 取本地字段 1 取 UTC 字段 2 毫秒本身 3 时区偏移
    4 setTime 5 写本地那一族 6 写 UTC 那一族 7 规范写死的文本 8 toJSON 9 这条腿上过不去。
    arg 对 0/1 是字段号、对 5/6 是**头一个**被写的字段号（于是 setHours(h, mi, s, ms) 就是
@@ -210,11 +208,11 @@ static const struct omni_js_datem_s omni_js_datem_[40] = { \
   { "toString", 0, 9, 0 }, { "toTimeString", 0, 9, 0 } }; \
 typedef int64_t (*omni_js_pm_find_t)(omni_str pr, omni_str nm, int64_t *argc); \
 typedef omni_dyn (*omni_js_pm_call_t)(int64_t ix, LT args, omni_dyn self); \
-static omni_js_pm_find_t omni_js_pm_find_ = NULL; \
-static omni_js_pm_call_t omni_js_pm_call_ = NULL; \
+/* 这两格住在运行时（omni.h 的 omni_js_pm_find_g / _call_g）：类型是模板里定的，
+   那一层只能存 void *，所以取用的时候强转回来。 */ \
 static void omni_js_pm_set_(omni_js_pm_find_t f, omni_js_pm_call_t c) { \
-  omni_js_pm_find_ = f; \
-  omni_js_pm_call_ = c; \
+  omni_js_pm_find_g = (void *)f; \
+  omni_js_pm_call_g = (void *)c; \
 } \
 /* 原生的名字与形参个数（sel 一格一行）。JS 那条腿上它们是 $nat(name, len, …) 里那两格，
    这儿按 sel 查 —— 一格都不能少，少了 `f.call.name` 会静静地给空串。 */ \
@@ -238,18 +236,19 @@ static omni_dyn omni_js_obj_new(void) { return omni_js_dict_wrap(DT##_new()); } 
    旁表**里：键就是 omni_js_key 给引用值发的那个（地址）。list 本身于是不为此多一个字段，
    没挂过属性的 list 一分钱不付。刻意只对 list 开这条路 —— 字符串、Map 上取不到的成员
    照旧当场报，那句话是「成员表缺一格」的固定签名，不能让它变成静悄悄的 undefined。 */ \
-static DT omni_js_xprops_tbl_; \
 static DT omni_js_xprops_(omni_dyn o, bool make) { \
   omni_str id = omni_js_key(o); \
-  if (omni_js_xprops_tbl_ == NULL) { \
+  DT t = (DT)omni_js_xprops_tbl_g; \
+  if (t == NULL) { \
     if (!make) return NULL; \
-    omni_js_xprops_tbl_ = DT##_new(); \
+    t = DT##_new(); \
+    omni_js_xprops_tbl_g = (void *)t; \
   } \
-  int64_t e = DT##_find(omni_js_xprops_tbl_, id); \
-  if (e >= 0) return (DT)omni_js_xprops_tbl_->vals[e].u.ref; \
+  int64_t e = DT##_find(t, id); \
+  if (e >= 0) return (DT)t->vals[e].u.ref; \
   if (!make) return NULL; \
   DT d = DT##_new(); \
-  DT##_set(omni_js_xprops_tbl_, id, omni_js_dict_wrap(d)); \
+  DT##_set(t, id, omni_js_dict_wrap(d)); \
   return d; \
 } \
 /* 三档锁：Object.freeze / seal / preventExtensions（ADR-0020）。
@@ -1074,7 +1073,6 @@ static bool omni_js_reflect_prevent_ext(omni_dyn o) { \
 } \
 /* new.target 那一格槽（ADR-0020）：与 this 那一格同一招 —— 调之前放进去，被调的入口取一次
    就清。类的构造走 $init 那格闭包，不经过 js_fn_construct，所以放槽这件事在降级器里做。 */ \
-static omni_dyn omni_js_nt_slot_ = { OMNI_DYN_UNDEF, { 0 } }; \
 static omni_dyn omni_js_nt_take(void) { \
   omni_dyn v = omni_js_nt_slot_; \
   omni_js_nt_slot_ = omni_dyn_undef(); \
@@ -1617,9 +1615,9 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
           && kd.u.ref == omni_js_sym_wk(omni_str_new("iterator", 8)).u.ref) { \
         return omni_js_nat_(16, omni_dyn_undef()); \
       } \
-      if (omni_js_pm_find_ != NULL) { \
+      if (omni_js_pm_find_g != NULL) { \
         int64_t argc = 0; \
-        int64_t ix = omni_js_pm_find_(nm, k, &argc); \
+        int64_t ix = ((omni_js_pm_find_t)omni_js_pm_find_g)(nm, k, &argc); \
         if (ix >= 0) { \
           LT pp = LT##_new(); \
           LT##_push(pp, omni_dyn_of_s16(omni_s16_of_utf8(k))); \
@@ -1703,8 +1701,8 @@ static omni_dyn omni_js_nat_call_(omni_fn me, LT args) { \
             return omni_dyn_undef(); \
         } \
       } \
-      if (n->sel >= OMNI_JS_PM_SEL && omni_js_pm_call_ != NULL) { \
-        return omni_js_pm_call_(n->sel - OMNI_JS_PM_SEL, args, self); \
+      if (n->sel >= OMNI_JS_PM_SEL && omni_js_pm_call_g != NULL) { \
+        return ((omni_js_pm_call_t)omni_js_pm_call_g)(n->sel - OMNI_JS_PM_SEL, args, self); \
       } \
       omni_errorf("backend-c: 未知的原生选择子 %lld（内部不一致）", (long long)n->sel); \
       return omni_dyn_undef(); \
@@ -1720,7 +1718,6 @@ static omni_dyn omni_js_nat_(int64_t sel, omni_dyn a) { \
 } \
 /* realm 上那几格原型。名字与 prelude 的 $js_realm_proto 那个 switch 一一对应；认不出来的
    名字**当场报**，不给一格空对象。 */ \
-static omni_dyn omni_js_realm_tbl_[25]; \
 static int omni_js_realm_ix_(omni_str name) { \
   /* Generator / Iterator 排在最后两格：生成器那一族（ADR-0020 P2）落在 C 上要它们 */ \
   /* 16..22 是异常那七族自己的原型（Error 本身是 ix 7）：八个构造器共用一格原型的话，
@@ -1952,15 +1949,13 @@ static omni_dyn omni_js_it_help_(int64_t kind, omni_dyn up, omni_dyn fn, int64_t
 } \
 /* 作业队列（微任务，ADR-0020 P2）：一格静态 list + 一个游标（不 shift，省得每次搬）。
    这个值域里没有事件循环 —— 降级器在 main 末尾补一句 js_jobs_run 把它排空。 */ \
-static LT omni_js_jobq_; \
-static int64_t omni_js_jobq_at_; \
 static void omni_js_job_(omni_dyn f) { \
-  if (omni_js_jobq_ == NULL) omni_js_jobq_ = LT##_new(); \
-  LT##_push(omni_js_jobq_, f); \
+  if (omni_js_jobq_g == NULL) omni_js_jobq_g = (void *)LT##_new(); \
+  LT##_push((LT)omni_js_jobq_g, f); \
 } \
 static omni_dyn omni_js_jobs_run(void) { \
-  while (omni_js_jobq_ != NULL && omni_js_jobq_at_ < omni_js_jobq_->len) { \
-    omni_dyn f = omni_js_jobq_->items[omni_js_jobq_at_]; \
+  while (omni_js_jobq_g != NULL && omni_js_jobq_at_ < ((LT)omni_js_jobq_g)->len) { \
+    omni_dyn f = ((LT)omni_js_jobq_g)->items[omni_js_jobq_at_]; \
     omni_js_jobq_at_ = omni_js_jobq_at_ + 1; \
     omni_js_call_this(f, omni_dyn_undef(), omni_js_arr_wrap(LT##_new())); \
     /* 作业里抛出来的东西没人接手（JS 里那是 unhandledRejection）：清掉槽接着走 */ \
@@ -2386,8 +2381,8 @@ static omni_dyn omni_js_realm_ctor(omni_str name) { \
   omni_js_ctor_tbl_[ix] = c; \
   /* prototype 预先坐好（$FNPROTO 的孪生）：不坐的话 fn_proto_ 会现造一格空的， \
      于是 `[] instanceof Array` 静静地变成 false。 */ \
-  if (omni_js_fnproto_tbl_ == NULL) omni_js_fnproto_tbl_ = DT##_new(); \
-  DT##_set(omni_js_fnproto_tbl_, omni_js_key(c), omni_js_realm_proto(name)); \
+  if (omni_js_fnproto_tbl_g == NULL) omni_js_fnproto_tbl_g = (void *)DT##_new(); \
+  DT##_set((DT)omni_js_fnproto_tbl_g, omni_js_key(c), omni_js_realm_proto(name)); \
   return c; \
 } \
 /* x.constructor：就是一次普通的属性读（原型链上那一格 constructor）。真对象走槽表与链，
@@ -2534,7 +2529,6 @@ static omni_dyn omni_js_ctor_get(omni_dyn o) { \
    所以它就是**一格普通的真对象**，每个 realm 一份 —— 与 prelude 里 realm 上那格 gt 逐条
    对应。挂上去的东西读得回来；内建（Math / JSON …）不在它身上，那是画出来的边界，
    不是悄悄给个空对象。 */ \
-static omni_dyn omni_js_gt_tbl_[1]; \
 static omni_dyn omni_js_global_this(void) { \
   if (omni_js_gt_tbl_[0].tag != OMNI_DYN_OBJ) { \
     omni_js_gt_tbl_[0] = omni_js_new_bare_(omni_js_realm_proto(omni_str_new("Object", 6))); \
@@ -2573,13 +2567,14 @@ static omni_dyn omni_js_proto_of_tag_(omni_dyn v) { \
    住在一张按同一性索引的旁表上（键就是 omni_js_key 给引用值发的地址）——
    与 prelude 的 $FNPROTO 逐条对应。旁表上那格原型身上挂一格不可枚举的 constructor。 */ \
 static omni_dyn omni_js_fn_proto_(omni_dyn f) { \
-  if (omni_js_fnproto_tbl_ == NULL) omni_js_fnproto_tbl_ = DT##_new(); \
+  if (omni_js_fnproto_tbl_g == NULL) omni_js_fnproto_tbl_g = (void *)DT##_new(); \
+  DT ft = (DT)omni_js_fnproto_tbl_g; \
   omni_str id = omni_js_key(f); \
-  int64_t e = DT##_find(omni_js_fnproto_tbl_, id); \
-  if (e >= 0) return omni_js_fnproto_tbl_->vals[e]; \
+  int64_t e = DT##_find(ft, id); \
+  if (e >= 0) return ft->vals[e]; \
   omni_dyn p = omni_js_obj_new_p(omni_dyn_null()); \
   omni_js_def_data_(p, omni_js_name_("constructor", 11), f, true, false, true); \
-  DT##_set(omni_js_fnproto_tbl_, id, p); \
+  DT##_set(ft, id, p); \
   return p; \
 } \
 static omni_dyn omni_js_fn_construct(omni_dyn f, omni_dyn args) { \
