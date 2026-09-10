@@ -370,8 +370,12 @@ class CEmitter {
          宿主方法走的是这一条。这些一律要发原型：标准头里不会有它们。 */
       const own = (this.mod.cabiSig ?? [])[i];
       if (own !== undefined) {
+        /* 变参那一格照 C 写：`printf(int64_t, ...)`。少了 `...` 而调用点给了三个实参，
+           C 编译器报的是"实参个数不对"，那句话离原因（声明少了一格）很远。
+           C 里 `...` 前面至少要有一格定参，而 `(cabi …)` 那侧已经把这条挡住了。 */
         const ps = own.params.length > 0 ? own.params.map((p) => C_TYPE[p]).join(', ') : 'void';
-        out.push(`extern ${C_TYPE[own.ret]} ${name}(${ps});`);
+        const all = own.variadic === true ? `${ps}, ...` : ps;
+        out.push(`extern ${C_TYPE[own.ret]} ${name}(${all});`);
         continue;
       }
       const sig = C_ABI[name];
@@ -1793,7 +1797,18 @@ class CEmitter {
            返回值同理：这一格的类型就是核心类型，不是 dynamic。 */
         if (e.raw === true) {
           const ps = e.sig.params;
-          const as = e.args.map((a, i) => `(${C_TYPE[ps[i]]})(${this.expr(a)})`);
+          const as = e.args.map((a, i) => {
+            /* 变参那一段（`(cabi f R (T ...))` 的 `...` 之后）没有声明的类型可用 ——
+               按**实参自己**那一格来，这正是 C 的默认实参提升：整数一律 int64_t、
+               `real` 一律 double。别的（string/指针/bool）在这一层不发：C 里它们各有
+               自己的提升规则，猜错就是读错栈。 */
+            if (i < ps.length) return `(${C_TYPE[ps[i]]})(${this.expr(a)})`;
+            const k = a.type === null || a.type === undefined ? '?' : a.type.k;
+            if (k === 'int') return `(int64_t)(${this.expr(a)})`;
+            if (k === 'real') return `(double)(${this.expr(a)})`;
+            throw new OmniError(`c: ${e.entry} 的第 ${i + 1} 个实参落在变参那一段，`
+              + `而 ${k} 在这一层的默认实参提升里没有位置`);
+          });
           return `${e.entry}(${as.join(', ')})`;
         }
         const sig = C_ABI[e.entry];

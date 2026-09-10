@@ -226,6 +226,11 @@ if (existsSync(sysDir)) {
         if (!ce.out.includes('extern void omni_probe_hi(void);')) {
           detail.push('    emit c 里没有 omni_probe_hi 的 extern 原型');
         }
+        /* 变参那一格要带着 `...` 发（ADR-0022 的 J4d）：少了它，C 编译器报的是
+           "实参个数不对"，而真正的原因是声明少了一格。 */
+        if (!ce.out.includes('extern int64_t omni_probe_sum(int64_t, ...);')) {
+          detail.push('    emit c 里 omni_probe_sum 的原型没带 `...`');
+        }
         if (ce.out.includes('omni_cabi_i64(') || ce.out.includes('omni_cabi_of_i64(')) {
           detail.push('    emit c 把 marshaler 套在了已经是机器值的实参上（raw 那一位没生效）');
         }

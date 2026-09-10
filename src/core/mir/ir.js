@@ -1221,11 +1221,17 @@ export class MirModule {
     return i;
   }
 
-  /** 记下（或核对）一条外部 C 符号的签名。文本形式就是「(形参…)->返回」，比较用它。 */
+  /** 记下（或核对）一条外部 C 符号的签名。文本形式就是「(形参…)->返回」，比较用它。
+   *  变参的形参表末尾多一格 `...`：于是 `f(ptr)` 与 `f(ptr,...)` 是两条**不同的**签名，
+   *  写混了在这儿停 —— 那两者的调用约定真的不同（苹果 arm64 上变参走栈）。 */
   setCabiSig(i, entry, sig) {
     const was = this.cabiSig[i];
-    const text = `(${sig.params.join(',')})->${sig.ret}`;
-    if (was === undefined) { this.cabiSig[i] = { params: sig.params.slice(), ret: sig.ret, text }; return; }
+    const va = sig.variadic === true;
+    const text = `(${(va ? sig.params.concat(['...']) : sig.params).join(',')})->${sig.ret}`;
+    if (was === undefined) {
+      this.cabiSig[i] = { params: sig.params.slice(), ret: sig.ret, variadic: va, text };
+      return;
+    }
     if (was.text !== text) {
       throw new Error(`mir: 外部 C 符号 ${entry} 在两处的签名不一样（${was.text} vs ${text}）`);
     }

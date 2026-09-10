@@ -615,15 +615,31 @@ class CoreLowerer {
     }
     if (!isList(f.items[3])) return this.err(f, `(cabi ${nm} ${rt} (形参类型...)) 缺形参表`);
     const params = [];
+    /* 变参（ADR-0022 的 J4d）：形参表最后一格写 `...`，前面那些是**定参**。
+       为什么分界必须由声明说：苹果 arm64 上变参一律走栈，把一个变参当定参传就是读错地方
+       （量出来是 `printf("hi %d\n", 7)` 印出一个垃圾数）。下游那一格是 `CCALL` 的 aux。 */
+    let variadic = false;
     for (const p of f.items[3].items) {
       const t = isAtom(p) ? p.value : null;
+      if (t === '...') {
+        if (params.length === 0) {
+          this.err(p, `(cabi ${nm} …) 的 \`...\` 前面至少要有一格定参（C 也这么要求）`);
+          return null;
+        }
+        variadic = true;
+        continue;
+      }
+      if (variadic) {
+        this.err(p, `(cabi ${nm} …) 的 \`...\` 只能写在形参表最后`);
+        return null;
+      }
       if (t === null || CABI_CORE[t] === undefined || t === 'void') {
-        this.err(p, `外部 C 符号的形参类型只能是 ${CABI_ARG_NAMES}`);
+        this.err(p, `外部 C 符号的形参类型只能是 ${CABI_ARG_NAMES}（变参写 \`...\`）`);
         return null;
       }
       params.push(t);
     }
-    this.cabis.set(nm, { params, ret: rt, node: f });
+    this.cabis.set(nm, { params, ret: rt, variadic, node: f });
     return null;
   }
 
@@ -964,7 +980,7 @@ class CoreLowerer {
     const cabiSigs = [];
     for (const [nm, d] of this.cabis) {
       cabiNames.push(nm);
-      cabiSigs.push({ params: d.params, ret: d.ret });
+      cabiSigs.push({ params: d.params, ret: d.ret, variadic: d.variadic === true });
     }
     if (this.mem !== null && !this.memEmitted) {
 
@@ -2043,11 +2059,13 @@ class CoreLowerer {
         if (v === null) return null;
         args.push(v);
       }
-      if (args.length !== d.params.length) {
-        return this.err(n, `外部 C 符号 '${nm}' 要 ${d.params.length} 个实参，给了 ${args.length} 个`);
+      if (args.length !== d.params.length && !(d.variadic === true && args.length >= d.params.length)) {
+        return this.err(n, d.variadic === true
+          ? `外部 C 符号 '${nm}' 至少要 ${d.params.length} 个定参，给了 ${args.length} 个`
+          : `外部 C 符号 '${nm}' 要 ${d.params.length} 个实参，给了 ${args.length} 个`);
       }
       let ci = 0;
-      while (ci < args.length) {
+      while (ci < d.params.length) {
         const w = d.params[ci];
         const want = CABI_CORE[w];
         /* `ptr` 的形参**也收 `string` 与方言的指针**（ADR-0022 的 J4d）：C 那边拿到的都是
@@ -2069,9 +2087,26 @@ class CoreLowerer {
         }
         ci++;
       }
+      /* 变参那几格：C 的默认实参提升在这一层只认三种 —— 整数、`real`（C 里 float 也提升成
+         double，而方言里只有 double）、地址（string 与方言的指针）。`bool` 不收：C 会把它
+         提升成 `int`，而这一层没有那一步，传一格 i1 过去就是读半个寄存器。 */
+      while (ci < args.length) {
+        const at = args[ci].type;
+        const isAddr = at !== null && at !== undefined && (at.k === 'ptr' || at.k === 'tptr');
+        const okVa = sameCoreType(at, INT) || sameCoreType(at, REAL)
+          || sameCoreType(at, STRING) || isAddr;
+        if (!okVa) {
+          return this.err(n, `'${nm}' 的第 ${ci + 1} 个实参落在变参那一段，`
+            + `而 ${coreTypeText(at)} 在 C 的默认实参提升里没有位置`
+            + '（整数、real、string 或指针可以）');
+        }
+        ci++;
+      }
       return {
         kind: 'CCall', entry: nm, args, raw: true,
-        sig: { params: d.params, ret: d.ret }, type: CABI_CORE[d.ret],
+        va: d.variadic === true ? d.params.length : undefined,
+        sig: { params: d.params, ret: d.ret, variadic: d.variadic === true },
+        type: CABI_CORE[d.ret],
       };
     }
     if (h === 'call') {

@@ -3599,11 +3599,11 @@ class JncLower {
    * 走的是注入的 `decls` 钩子（`cap('c.declsOf')`）—— 那一格用的是这个仓库里已有的那份 C
    * 前端（tcc 的移植，现在就在读真的 SDK 头），所以不外挂 tcc、也不另写一个 C 解析器。
    *
-   * 收不下的一律**跳过并记一笔**（`warn`），不让一条声明把整次 import 弄失败：一个真头文件
-   * 里总有几条落不进 C_ABI 那七个词（`float`、struct 按值、老式声明…）。
+   * 收不下的一律**跳过并记一笔**（`warn`），不让一条声明把整次 import 失败：一个真头文件
+   * 里总有几条落不进 C_ABI 那七个词（`long double`、struct 按值、老式声明…）。
    *
-   * **变参的这一版也跳过**：方言的 `(cabi …)` 还说不出变参分界（`printf` 那一族因此进不来）。
-   * 那一格是下一刀 —— MIR 与后端早就支持（`CCALL` 的 aux 就是它），缺的只有方言那一句语法。
+   * **变参这一版收得下**：`(cabi f R (T ...))`，分界（定参个数）在声明里，下游是
+   * `CCALL` 的 aux。于是 `printf` 那一族也从头文件里进得来。
    */
   impWith(it, lib, hspec) {
     if (this.impDecls === null) {
@@ -3613,14 +3613,16 @@ class JncLower {
     if (got === null) return this.err(it, `找不着头文件 '${hspec}'`);
     let n = 0;
     for (const d of got.decls) {
-      if (d.variadic === true) {
-        this.warn(it, `${d.name}：变参的外部函数这一层还收不下（方言的 (cabi …) `
-          + '说不出变参分界）—— 要它就手写一句声明');
+      /* 变参也收（`(cabi f R (T ...))`）：分界在声明里，下游是 `CCALL` 的 aux。
+         C 里 `...` 前面至少要有一格定参，一格都没有的（真头文件里基本不存在）跳过。 */
+      if (d.variadic === true && d.params.length === 0) {
+        this.warn(it, `${d.name}：变参而一格定参都没有，C 里那种声明不合法 —— 跳过`);
         continue;
       }
-      this.decls.push(`  (cabi ${d.name} ${d.ret} (${d.params.join(' ')}))`);
+      const ps = d.variadic === true ? d.params.concat(['...']) : d.params;
+      this.decls.push(`  (cabi ${d.name} ${d.ret} (${ps.join(' ')}))`);
       this.cabiNames.add(d.name);
-      this.cabiSigs.set(d.name, { ret: d.ret, params: d.params });
+      this.cabiSigs.set(d.name, { ret: d.ret, params: d.params, variadic: d.variadic === true });
       n++;
     }
     /* 跳过的那些只报**一条**汇总：一个 `<stdio.h>` 能跳过上百条，逐条报会把真正的诊断埋掉。
@@ -6053,19 +6055,34 @@ class JncLower {
    * 松一些：整数（句柄/地址）、jnc 的指针（fat 与 thin）、字符串字面量都收 ——
    * 后两样在方言那一侧抽的都是"当前"那一格（见 sexpr/lower.js 的 ccall）。
    *
-   * 变参的这一层还进不来（`impWith` 那侧就跳过了），所以这儿不必处理分界。
+   * 变参（`printf` 那一族）：定参按声明查，后面那些按 C 的默认实参提升 —— 整数、
+   * `real`、地址都行，`bool` 不行（C 会把它提升成 int，这一层没有那一步）。
+   * 分界写在声明里（`(cabi f R (T ...))`），下游是 `CCALL` 的 aux。
    */
   ccallSite(n, nm, sig) {
     const args = this.flat(n.items[2]);
-    if (args.length !== sig.params.length) {
-      return this.err(n, `'${nm}' 要 ${sig.params.length} 个实参，这里给了 ${args.length} 个`);
+    const va = sig.variadic === true;
+    if (va ? args.length < sig.params.length : args.length !== sig.params.length) {
+      return this.err(n, va
+        ? `'${nm}' 至少要 ${sig.params.length} 个定参，这里给了 ${args.length} 个`
+        : `'${nm}' 要 ${sig.params.length} 个实参，这里给了 ${args.length} 个`);
     }
     const parts = [];
     for (let i = 0; i < args.length; i++) {
-      const w = sig.params[i];
+      /* 变参那一段没有声明的类型可对 —— C 的默认实参提升说了算（整数、real、地址）。
+         方言那一侧 `(ccall …)` 会再查一遍，那儿才是最后一道。 */
+      const w = i < sig.params.length ? sig.params[i] : 'ptr';
       const want = CABI_WANT.get(w);
       let v = this.expr(args[i], want === undefined ? null : want);
       if (v === null) return null;
+      if (i >= sig.params.length) {
+        if (v.type.k === 'bool') {
+          return this.err(args[i], `'${nm}' 的第 ${i + 1} 个实参落在变参那一段，`
+            + '而 bool 在 C 里会被提升成 int —— 这一层没有那一步，写 `(int)` 转一下');
+        }
+        parts.push(v.code);
+        continue;
+      }
       if (w === 'ptr') {
         if (!isInt(v.type) && !jncIsPtr(v.type) && v.type.k !== 'string' && !isArr(v.type)) {
           return this.err(args[i], `'${nm}' 的第 ${i + 1} 个实参是 C 的指针，`

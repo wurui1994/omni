@@ -495,9 +495,12 @@ class ToMir {
       case 'CCall':
         /* `e.sig` 只有**源码里声明的**那些带（`(cabi …)`，ADR-0022 的 J4b）：把它带进 MIR，
            C 那条腿靠它发 extern 原型。构建期封闭表里的那些没有这一格 —— 那边的签名
-           `hir/c_abi.js` 里就有。 */
+           `hir/c_abi.js` 里就有。
+           `e.va` 是**变参分界**（定参个数，`(cabi f R (T ...))` 那一句说的）。aux 上记的是
+           「定参个数 + 1」，0 才是「这个调用点不是变参的」—— 这个编码只经 `callVaFixed`
+           读，别自己算（差一个的后果是把第一个变参当定参传）。 */
         return f.emit(OP.CCALL, this.ty(e.type), this.mod.cabiNo(e.entry, e.sig),
-          this.args(e.args), 0);
+          this.args(e.args), e.va === undefined || e.va === null ? 0 : e.va + 1);
 
       case 'MakeClosure': {
         const no = this.closureNo.get(e.make);
