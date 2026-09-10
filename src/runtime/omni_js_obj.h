@@ -49,23 +49,51 @@ static omni_str omni_js_key_tag_(char t, omni_str u) { \
   if (u.len > 0) memcpy(p + 1, u.p, (size_t)u.len); \
   omni_str r; r.p = p; r.len = u.len + 1; return r; \
 } \
+/* 键里的整数与地址自己写位，不走 snprintf。量出来的（/usr/bin/sample，一趟 emit c）：
+   printf 那一族（__vfprintf / __v2printf / __sfvwrite）约 625 个样本，其中 356 落在
+   omni_js_key —— Map / Set 的引用键与 xprops 旁表每次都要把一个地址格成串。 */ \
+static omni_str omni_js_key_dec_(char t, uint64_t v, bool neg) { \
+  char *p = (char *)omni_alloc(24); \
+  char tmp[20]; \
+  int n = 0; \
+  do { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v); \
+  int64_t len = 0; \
+  p[len++] = t; \
+  if (neg) p[len++] = '-'; \
+  while (n > 0) p[len++] = tmp[--n]; \
+  omni_str r; r.p = p; r.len = len; return r; \
+} \
+/* 地址键的**写法**变了（从前是 %p），但这个号只在内部当键用 —— 键与值都原样存着、
+   迭代不看它，所以两边输出仍然逐字节相同（理由见下面 default 那一支的注释）。 */ \
+static omni_str omni_js_key_ptr_(const void *q) { \
+  static const char hx[] = "0123456789abcdef"; \
+  char *p = (char *)omni_alloc(20); \
+  uint64_t v = (uint64_t)(uintptr_t)q; \
+  p[0] = 'o'; p[1] = '0'; p[2] = 'x'; \
+  for (int i = 0; i < 16; i++) p[3 + i] = hx[(v >> (60 - i * 4)) & 0xf]; \
+  omni_str r; r.p = p; r.len = 19; return r; \
+} \
 static omni_str omni_js_key(omni_dyn k) { \
   switch (k.tag) { \
     case OMNI_DYN_STR16: return omni_js_key_tag_('s', omni_s16_to_utf8(k.u.s16)); \
     /* 核心方言的 string 也可能经 dynamic 走到这里：它必须与 STR16 同键（内容相同就是
        同一个键），**不能**掉进底下那条按地址认的路 —— 那会把两个相等的字符串算成两个键。 */ \
     case OMNI_DYN_STRING: return omni_js_key_tag_('s', k.u.s); \
-    case OMNI_DYN_INT: return omni_str_fmt("i%lld", (long long)k.u.i); \
-    case OMNI_DYN_UINT: return omni_str_fmt("i%llu", (unsigned long long)omni_dyn_u64(k)); \
+    case OMNI_DYN_INT: { \
+      bool neg = k.u.i < 0; \
+      uint64_t m = neg ? (uint64_t)(-(k.u.i + 1)) + 1u : (uint64_t)k.u.i; \
+      return omni_js_key_dec_('i', m, neg); \
+    } \
+    case OMNI_DYN_UINT: return omni_js_key_dec_('i', omni_dyn_u64(k), false); \
     case OMNI_DYN_REAL: \
       return omni_js_key_tag_('n', omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k)))); \
-    case OMNI_DYN_BOOL: return omni_str_fmt("b%d", k.u.b ? 1 : 0); \
+    case OMNI_DYN_BOOL: return omni_str_new(k.u.b ? "b1" : "b0", 2); \
     case OMNI_DYN_NULL: return omni_str_new("z", 1); \
     case OMNI_DYN_UNDEF: return omni_str_new("u", 1); \
     /* 引用值按**同一性**当键（JS 就是这么规定的）。这个运行时不搬对象、也不回收
        （bump arena），所以地址在一趟里就是同一性。号只在内部当键用 —— 键与值都原样
        存着、迭代不看它，所以 JS 侧发计数器、这里发地址，两边输出仍然逐字节相同。 */ \
-    default: return omni_str_fmt("o%p", k.u.ref); \
+    default: return omni_js_key_ptr_(k.u.ref); \
   } \
 } \
 static omni_str omni_js_prop(omni_dyn k) { return omni_s16_to_utf8(omni_js_as_s16(k)); } \

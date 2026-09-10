@@ -37,7 +37,9 @@ omni_dyn omni_js_typeof(omni_dyn v) {
     case OMNI_DYN_SYM: n = "symbol"; break;
     default: n = "object"; break;
   }
-  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
+  /* 常量串不必过一遍 snprintf：of_utf8 那张 intern 表会把它认出来（omni_str16.c）。
+     量出来的：printf 那一族约 625 个样本，其中 485 落在 omni_js_typeof 这一条上。 */
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new(n, (int64_t)strlen(n))));
 }
 
 /* dynamic 的运行期标签名（JS 域口径）。解释器靠它认出一个 dynamic 里装的是什么
@@ -67,7 +69,9 @@ omni_dyn omni_js_type_tag(omni_dyn v) {
     case OMNI_DYN_OBJ: n = "object"; break;
     default: n = "function"; break;
   }
-  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
+  /* 常量串不必过一遍 snprintf：of_utf8 那张 intern 表会把它认出来（omni_str16.c）。
+     量出来的：printf 那一族约 625 个样本，其中 485 落在 omni_js_typeof 这一条上。 */
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new(n, (int64_t)strlen(n))));
 }
 
 /* real 的两种文本化，给解释器用（ADR-0013）。刻意就是 print / repr 自己用的那两个
@@ -426,7 +430,9 @@ omni_dyn omni_js_obj_to_string(omni_dyn t) {
     case OMNI_DYN_SYM: n = "[object Symbol]"; break;
     default: n = "[object Object]"; break;
   }
-  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_fmt("%s", n)));
+  /* 常量串不必过一遍 snprintf：of_utf8 那张 intern 表会把它认出来（omni_str16.c）。
+     量出来的：printf 那一族约 625 个样本，其中 485 落在 omni_js_typeof 这一条上。 */
+  return omni_dyn_of_s16(omni_s16_of_utf8(omni_str_new(n, (int64_t)strlen(n))));
 }
 
 /* console.log 印一格值：与 ToString 只差一处 —— **-0 印成 "-0"**（String(-0) 是 "0"，
