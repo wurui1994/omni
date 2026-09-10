@@ -767,7 +767,21 @@ static omni_dyn omni_js_getp_k(omni_dyn o, omni_str key, omni_dyn recv) { \
   if (omni_js_is_px_(o)) { \
     return omni_js_getp(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), self); \
   } \
-  LT sl = omni_js_find_slot_(o, omni_js_key_tag_('s', key), NULL); \
+  /* 带前缀的槽键**放在栈上**：查槽这条路只**读**键（算哈希 + memcmp），不留它 ——
+     只有插入（def_data_ / setp）才会把键存进表里，那是另一条路。于是常见长度的键
+     一次分配都不要。量出来的（归属表）：上一刀之后剩下的第一名就是这个 key_tag_ 的
+     那一块（约 600 万次）。太长的键（>= 63）照旧走 key_tag_，不为极少数情况开大栈帧。 */ \
+  char kbuf[64]; \
+  omni_str pk; \
+  if (key.len < (int64_t)sizeof(kbuf) - 1) { \
+    kbuf[0] = 's'; \
+    if (key.len > 0) memcpy(kbuf + 1, key.p, (size_t)key.len); \
+    pk.p = kbuf; \
+    pk.len = key.len + 1; \
+  } else { \
+    pk = omni_js_key_tag_('s', key); \
+  } \
+  LT sl = omni_js_find_slot_(o, pk, NULL); \
   if (sl == NULL) { \
     /* 链的尾巴可能是一格 dict（`Object.create({…})`）：接着按 UTF-8 键往那儿问，
        又省掉一次"dyn -> prop_k -> UTF-8"的往返。 */ \
