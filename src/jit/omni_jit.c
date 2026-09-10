@@ -140,26 +140,59 @@ static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModul
   return 0;
 }
 
+/* 一次能叫几个入口。够用就行 —— 真要成百上千个入口时该做的是 J6 那格会话，不是把这个数改大。 */
+#define OMNI_JIT_MAX_CALLS 16
+
 int main(int argc, char **argv) {
   if (argc < 2) {
-    fprintf(stderr, "usage: omni-jit FILE.ll [SYMBOL] [-- ARG...]\n");
+    fprintf(stderr, "usage: omni-jit FILE.ll [SYMBOL] [--call SYM]... [--repeat N] [-- ARG...]\n");
     return 64;
   }
   const char *path = argv[1];
-  int i = 2;
-  const char *sym = "main";
-  if (i < argc && strcmp(argv[i], "--") != 0) sym = argv[i++];
+  const char *calls[OMNI_JIT_MAX_CALLS];
+  int ncalls = 0;
+  long repeat = 1;
+  const char *pos = NULL;   /* 老写法里那个位置参数（等价于一个 --call） */
 
   /* 被调那个 main 看到的 argv：第 0 格照旧是 `.ll` 的路径（没有 `--` 时的老行为就是
      `argv+1`，一个字节都不变），`--` 之后的原样接在后面。argv 本身可写，所以把 `--`
      那一格改写成路径就够了 —— 不用另分配一个数组。 */
   char **eargv = argv + 1;
   int eargc = argc - 1;
-  if (i < argc && strcmp(argv[i], "--") == 0) {
-    argv[i] = (char *)path;
-    eargv = argv + i;
-    eargc = argc - i;
+
+  for (int i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "--") == 0) {
+      argv[i] = (char *)path;
+      eargv = argv + i;
+      eargc = argc - i;
+      break;
+    }
+    if (strcmp(argv[i], "--call") == 0) {
+      if (i + 1 >= argc) { fprintf(stderr, "omni-jit: --call 要一个符号名\n"); return 64; }
+      if (ncalls >= OMNI_JIT_MAX_CALLS) {
+        fprintf(stderr, "omni-jit: --call 最多 %d 个\n", OMNI_JIT_MAX_CALLS);
+        return 64;
+      }
+      calls[ncalls++] = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--repeat") == 0) {
+      if (i + 1 >= argc) { fprintf(stderr, "omni-jit: --repeat 要一个次数\n"); return 64; }
+      repeat = atol(argv[++i]);
+      if (repeat < 1) { fprintf(stderr, "omni-jit: --repeat 要 >= 1\n"); return 64; }
+      continue;
+    }
+    if (argv[i][0] == '-') {
+      fprintf(stderr, "omni-jit: 不认识的开关 %s\n", argv[i]);
+      return 64;
+    }
+    if (pos != NULL) {
+      fprintf(stderr, "omni-jit: 位置参数只能有一个（要叫多个入口用 --call）\n");
+      return 64;
+    }
+    pos = argv[i];
   }
+  if (ncalls == 0) calls[ncalls++] = pos != NULL ? pos : "main";
 
   size_t len = 0;
   char *text = omni_jit_slurp(path, &len);
@@ -192,17 +225,49 @@ int main(int argc, char **argv) {
   int rc = omni_jit_define(jit, jd, mod);
   if (rc != 0) return rc;
 
+  /* 每个入口的**形状**从 IR 上读，不另发明一套签名语法（J3）。这一层只会调两种：
+       0 格参数 -> `void(void)`（omni 的 `omni_main` 那类、kernel）
+       2 格参数 -> `int(int, char**)`（与 AOT 同一个 main）
+     形状读完才能把 mod 交给 ThreadSafeModule —— 交出去之后这份 mod 就不属于我们了。 */
+  int kind[OMNI_JIT_MAX_CALLS];
+  for (int k = 0; k < ncalls; k++) {
+    LLVMValueRef f = LLVMGetNamedFunction(mod, calls[k]);
+    if (f == NULL) {
+      fprintf(stderr, "omni-jit: 这份 IR 里没有 %s 这个函数\n", calls[k]);
+      return 70;
+    }
+    if (LLVMIsDeclaration(f) != 0) {
+      fprintf(stderr, "omni-jit: %s 在这份 IR 里只有声明没有体\n", calls[k]);
+      return 70;
+    }
+    unsigned np = LLVMCountParams(f);
+    if (np == 0) kind[k] = 0;
+    else if (np == 2) kind[k] = 1;
+    else {
+      fprintf(stderr, "omni-jit: %s 收 %u 格参数 —— 这一层只调 `void(void)` 与 "
+              "`int(int,char**)` 两种形状（要别的形状是 J4 那格 FFI 的事）\n", calls[k], np);
+      return 70;
+    }
+  }
+
   LLVMOrcThreadSafeContextRef tsc = LLVMOrcCreateNewThreadSafeContext();
   LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(mod, tsc);
   err = LLVMOrcLLJITAddLLVMIRModule(jit, jd, tsm);
   if (err != NULL) return omni_jit_fail(err, "cannot add module");
 
-  /* 这一句才是真正触发编译的地方（ORC 是惰性物化的）—— 所以「JIT 延迟」量的就是它 */
-  LLVMOrcJITTargetAddress addr = 0;
-  err = LLVMOrcLLJITLookup(jit, &addr, sym);
-  if (err != NULL) return omni_jit_fail(err, "cannot materialize");
-
-  int code = ((int (*)(int, char **))addr)(eargc, eargv);
+  /* 查地址那一句才是真正触发编译的地方（ORC 是惰性物化的）—— 「JIT 延迟」量的就是它。
+     多个入口按命令行上的顺序来；`--repeat` 是给"同一个入口反复调"用的（kernel dispatch
+     与将来的 REPL 都要它），退出码取最后一个 main 形状那次的返回值。 */
+  int code = 0;
+  for (int k = 0; k < ncalls; k++) {
+    LLVMOrcJITTargetAddress addr = 0;
+    err = LLVMOrcLLJITLookup(jit, &addr, calls[k]);
+    if (err != NULL) return omni_jit_fail(err, "cannot materialize");
+    for (long r = 0; r < repeat; r++) {
+      if (kind[k] == 1) code = ((int (*)(int, char **))addr)(eargc, eargv);
+      else ((void (*)(void))addr)();
+    }
+  }
 
   /* 故意不 DisposeLLJIT：被 JIT 的代码可能还持有运行时里的东西，而这个进程马上就退。
      卸载要等到「同一进程内解释与 JIT 混合执行」那一步，那时才有真正的生命周期问题。 */

@@ -103,13 +103,9 @@ for (const rel of others) {
 if (wrong.length > 0) bad('boundary/same-as-aot', wrong.join('\n'));
 else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同一条]`);
 
-// ------------------------------------------------- 4. 缺符号：装载**之前**按名字报出来
+// ------------------------------------------------- 4. 宿主直调那一组（缺符号 / 多入口）
 //
-// ADR-0022 决策 2 的可观测形式。宿主的符号可见性默认关（进程符号搜索故意没装），
-// 所以"IR 里要一个表上没有的名字"必须在物化之前就拒 —— 而不是让 ORC 在跑到一半时
-// 报它那句带平台前缀的 `Symbols not found: [ _foo ]`。
-//
-// 这一条直接调宿主二进制（`omni-jit FILE.ll`）：走 `run-jit` 进不来，那条路的输入是源码。
+// 这两条直接调宿主二进制（`omni-jit FILE.ll`）：走 `run-jit` 进不来，那条路的输入是源码。
 // 宿主的位置从缓存里捞 —— 上面那些用例已经把它编好了。J3 会给它一扇正门。
 {
   const hosts = [];
@@ -121,20 +117,43 @@ else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同�
     }
   } catch { /* 没这个目录就是没编过，下面按 skip 处理 */ }
   if (hosts.length === 0) {
-    process.stdout.write('  skip unresolved-symbol：缓存里找不到 omni-jit 宿主\n');
+    process.stdout.write('  skip 宿主直调那一组：缓存里找不到 omni-jit 宿主\n');
   } else {
     const host = hosts.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
-    const ll = join(mkdtempSync(join(tmpdir(), 'omni-jit-miss-')), 'miss.ll');
-    writeFileSync(ll, 'declare i64 @no_such_thing(i64)\n'
+    const tmp = mkdtempSync(join(tmpdir(), 'omni-jit-'));
+
+    /* 4a 缺符号：ADR-0022 决策 2 的可观测形式。宿主的符号可见性默认关（进程符号搜索
+       故意没装），所以"IR 里要一个表上没有的名字"必须在物化之前就拒 —— 而不是让 ORC
+       在跑到一半时报它那句带平台前缀的 `Symbols not found: [ _foo ]`。 */
+    const miss = join(tmp, 'miss.ll');
+    writeFileSync(miss, 'declare i64 @no_such_thing(i64)\n'
       + 'define i32 @main(i32 %argc, ptr %argv) {\n'
       + '  %r = call i64 @no_such_thing(i64 1)\n'
       + '  ret i32 0\n}\n');
-    const r2 = spawnSync(host, [ll], { encoding: 'utf8' });
+    const r2 = spawnSync(host, [miss], { encoding: 'utf8' });
     const err = r2.stderr ?? '';
     if (r2.status === 0) bad('unresolved-symbol', '    缺符号居然跑通了 —— 那说明还有别的解析路径');
     else if (!err.includes('unresolved: no_such_thing')) {
       bad('unresolved-symbol', `    报错的理由不对：${JSON.stringify(err.slice(0, 160))}`);
     } else ok('unresolved-symbol [装载前按名字报：unresolved: no_such_thing]');
+
+    /* 4b 多入口 + 反复调（J3）：一份 IR 里两个 `void(void)` 各调一次、再让一个调三次。
+       形状是从 IR 上读的（0 格参数 / 2 格参数），没有另发明签名语法。
+       顺带这一条也钉住了"运行时是靠宿主符号表解析的"：手写的 IR 里除了
+       `omni_print_int` 什么都没有，它只能从表里来。 */
+    const two = join(tmp, 'two.ll');
+    writeFileSync(two, 'declare void @omni_print_int(i64)\n'
+      + 'define void @first() {\n  call void @omni_print_int(i64 11)\n  ret void\n}\n'
+      + 'define void @second() {\n  call void @omni_print_int(i64 22)\n  ret void\n}\n');
+    const m1 = spawnSync(host, [two, '--call', 'first', '--call', 'second'], { encoding: 'utf8' });
+    const m2 = spawnSync(host, [two, '--call', 'first', '--repeat', '3'], { encoding: 'utf8' });
+    const d2 = [];
+    if (m1.status !== 0) d2.push(`    两个入口那次 exit=${m1.status}\n${m1.stderr}`);
+    else if (m1.stdout !== '11\n22\n') d2.push(`    两个入口的顺序/输出不对：${JSON.stringify(m1.stdout)}`);
+    if (m2.status !== 0) d2.push(`    --repeat 那次 exit=${m2.status}\n${m2.stderr}`);
+    else if (m2.stdout !== '11\n11\n11\n') d2.push(`    --repeat 3 的输出不对：${JSON.stringify(m2.stdout)}`);
+    if (d2.length > 0) bad('multi-entry', d2.join('\n'));
+    else ok('multi-entry [--call 两个入口按序各一次；--repeat 3 反复调同一个]');
   }
 }
 
