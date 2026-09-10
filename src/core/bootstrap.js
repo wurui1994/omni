@@ -98,22 +98,29 @@ export function bootstrapSelf(o) {
   let fail = 0;
   const details = [];
   const t00 = nowMs();
+  /* 分步表（P0 的最后一格）：每一步花了多久、占整条链多少。一行行的 `[12.7s]` 只回答
+     "这一步多久"，回答不了"该往哪儿下刀" —— 那要把它们按大小排开摆在一起看。 */
+  const steps = [];
   // 每条结果行末尾的时间是"上一条结果到这一条之间"花的墙上时间，也就是这一步本身
   let mark = t00;
   const lap = () => {
     const now = nowMs();
     const d = now - mark;
     mark = now;
-    return fmtMs(d);
+    return d;
   };
   const ok = (msg) => {
     pass = pass + 1;
-    stdout(`  ok   ${msg}  [${lap()}]\n`);
+    const d = lap();
+    steps.push({ msg, ms: d });
+    stdout(`  ok   ${msg}  [${fmtMs(d)}]\n`);
   };
   const bad = (msg, detail) => {
     fail = fail + 1;
     details.push(`${msg}\n    ${detail}`);
-    stdout(`  FAIL ${msg}  [${lap()}]\n`);
+    const d = lap();
+    steps.push({ msg, ms: d });
+    stdout(`  FAIL ${msg}  [${fmtMs(d)}]\n`);
   };
 
   // ---- 阶段 0：安装布局
@@ -166,7 +173,7 @@ export function bootstrapSelf(o) {
     else ok(`fixpoint C1 == C2  ${c1Text.split('\n').length} lines`);
   }
 
-  if (o.quick) return summarize(pass, fail, details, nowMs() - t00);
+  if (o.quick) return summarize(pass, fail, details, nowMs() - t00, steps);
 
   // ---- 阶段 3：N1 = clang(我 emit-c 我自己)
   const n1 = join(bin, 'omni');
@@ -181,12 +188,18 @@ export function bootstrapSelf(o) {
   else bad(`plugins -> ${o.outDir}/plugins`, '一格都没编出来');
 
   // ---- 阶段 4：N1 的产出必须与 C0 的逐字节相同（C 路径闭环）
+  /* N1 这两趟的产出留着给阶段 5 用：那儿要的是"N1 与 N2 一不一样"，而 N1 是确定的 ——
+     再跑一遍只是把同一份产出重算一次。量出来这两趟在编出来的腿上是 10s（c）与 23s（js），
+     整条链 171.1s 里的 33s 就花在重算上。 */
+  const n1Out = new Map();
   for (const kind of ['c', 'js']) {
-    const ref = o.emitOf(kind, o.source);
+    /* js 那份参照就是阶段 1 的 C1：`emitOf('js', source)` 是同一次调用、同一份确定的产出。 */
+    const ref = kind === 'js' ? c1Text : o.emitOf(kind, o.source);
     const r = spawn(n1, [`emit-${kind}`, o.source], 'c');
     if (r[0] !== 0) bad(`N1 emit-${kind} ${name}`, `exit=${r[0]}\n${r[2]}`);
     else if (r[1] !== ref) bad(`fixpoint N1 emit-${kind} == C0`, firstDiff(ref, r[1]));
     else ok(`fixpoint N1 emit-${kind} ${name} == C0  ${ref.length} bytes`);
+    if (r[0] === 0) n1Out.set(kind, r[1]);
   }
 
   // ---- 阶段 5：N2 = N1 编译出来的下一代原生编译器（真正的 stage2）
@@ -197,22 +210,33 @@ export function bootstrapSelf(o) {
   const built = spawn(n1, ['build', o.source, '-o', n2, '--work', work, '--extern'], 'c');
   if (built[0] !== 0 || !exists(n2)) {
     bad('N2 = N1 build (stage2)', `exit=${built[0]}\n${built[2]}`);
-    return summarize(pass, fail, details, nowMs() - t00);
+    return summarize(pass, fail, details, nowMs() - t00, steps);
   }
   ok(`N2 = N1 build ${name} -> ${n2}`);
   for (const kind of ['c', 'js']) {
-    const a = spawn(n1, [`emit-${kind}`, o.source], 'c');
+    /* N1 那一侧用阶段 4 存下来的（见那儿的注释）。阶段 4 要是栽了就没存，那时补跑一趟 ——
+       第二个错误消息比"跳过"有用。 */
+    const cached = n1Out.get(kind);
+    const a = cached === undefined ? spawn(n1, [`emit-${kind}`, o.source], 'c') : [0, cached, ''];
     const b = spawn(n2, [`emit-${kind}`, o.source], 'c');
     if (a[0] !== 0 || b[0] !== 0) bad(`N2 emit-${kind}`, `N1 exit=${a[0]} N2 exit=${b[0]}\n${b[2]}`);
     else if (a[1] !== b[1]) bad(`fixpoint N1 emit-${kind} == N2`, firstDiff(a[1], b[1]));
     else ok(`fixpoint N1 emit-${kind} == N2  ${a[1].length} bytes`);
   }
 
-  return summarize(pass, fail, details, nowMs() - t00);
+  return summarize(pass, fail, details, nowMs() - t00, steps);
 }
 
-function summarize(pass, fail, details, total) {
+function summarize(pass, fail, details, total, steps) {
   stdout(`\n${pass} passed, ${fail} failed  in ${fmtMs(total)}\n`);
+  /* 分步表：按耗时从大到小。百分比用整数算术（`toFixed` 不在语言子集里 —— 这段得能被
+     每一代编译器编出来，见 fmtMs 那段）。 */
+  const rows = steps.slice(0).sort((a, b) => b.ms - a.ms);
+  stdout('\n分步（墙上时间，从大到小）\n');
+  for (const r of rows) {
+    const pct = total > 0 ? Math.trunc(r.ms * 100 / total) : 0;
+    stdout(`  ${fmtMs(r.ms).padStart(7)}  ${String(pct).padStart(2)}%  ${r.msg}\n`);
+  }
   if (fail > 0) stdout(`\n${details.join('\n\n')}\n`);
   return { pass, fail };
 }
