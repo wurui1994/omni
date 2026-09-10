@@ -359,15 +359,26 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   机器现成），枚举常量在 C 前端的符号表里。收出来之后走 `(cconst NAME 值)` 那一类形式
   进方言，jnc 那侧把它们登记成常量。
 
-  **一个没查完的**：`tests/llvm/cabi/glfw-tri.sx` 在 `run-jit` 上 **SIGTRAP**（exit 133），
-  **一个字节输出都没有** —— 连 `main` 里第一句 `print` 都没跑到，所以是**装载期**的事，
-  不是 glfwInit。已经排掉的：同一个程序的 C 参照（clang 直编）在这台机器上跑通
-  （`framebuffer: 1600 1200` / `ok`），所以不是环境不给开窗；`--lib libglfw.dylib` 加在一份
-  **不引用任何 glfw 符号**的 IR 上不炸（照常印 `hi`），所以也不是 `dlopen` 本身。
-  剩下的疑点在"IR 里真引用了那些符号"这一步：GL 的符号不在 libglfw 里而在
-  OpenGL.framework 里（靠 dlopen libglfw 带进来，`RTLD_DEFAULT` 找得到，所以
-  `omni_jit_define` 没报 unresolved）—— 下一步从 `LLVMOrcAbsoluteSymbols` 那一批的
-  定义顺序与 `--dl` 那条兜底查。
+  **一个没查完的**：`tests/llvm/cabi/glfw-tri.sx` 在 `run-jit` 上 **SIGTRAP**（exit 133）。
+
+  **先纠一句我自己写错的**：上一版这里写"一个字节输出都没有，连 `main` 里第一句 `print`
+  都没跑到，所以是**装载期**的事"。这是错的 —— 在 lldb 底下 `before` **印出来了**。看不到
+  它只是因为进程死于**信号**，libc 那份带缓冲的 stdout 没来得及刷。所以失败点不在装载期，
+  在 `glfwInit` 那一带。判断一个"没有输出"的崩溃，得先问输出是不是被缓冲吃掉了。
+
+  已经排掉的：同一个程序的 C 参照（clang 直接链 glfw）在这台机器上跑通
+  （`framebuffer: 1600 1200` / `ok`），所以不是环境不给开窗；`ref2.c`（运行期 `dlopen` +
+  `dlsym` + `glfwInit`）也跑通，所以 `dlopen` 进来的 glfw 去初始化 AppKit 这件事本身没问题；
+  `--lib libglfw.dylib` 加在一份**不引用任何 glfw 符号**的 IR 上不炸（照常印 `hi`）。
+
+  lldb 给出的真实现场：`EXC_BREAKPOINT` 落在 AppKit 的 `NSUpdateCycleInitialize`，
+  控制台一句 `NSUpdateCycle was already initialized.`，还带一句 `Main thread potentially
+  initialized incorrectly` —— 也就是 AppKit 被**初始化了两次**，而且它认为主线程不对。
+  于是加了一条常驻诊断（`omni_jit.c`，`pthread_main_np()`）量那次调用到底在哪个线程上，
+  答案是 **`main thread = 1`**：入口就在进程主线程上跑。所以"物化/调用跑到工作线程去了"
+  这条猜想被证伪，**两次初始化**从哪儿来还没有答案。下一步：把 ORC 的编译线程数按 0 设成
+  单线程，把"物化在工作线程上"这个变量整个去掉；如果还是双初始化，就查在 `glfwInit`
+  之前**谁先碰了 AppKit**（例如 `--lib` 那次 `dlopen` 的初始化器是不是已经跑过一遍）。
 
 - **J5 FFI 第二刀（JIT → 任意库）——已落**：`--dl` 让表里没有的名字再问一次进程的动态
   符号表（`dlsym(RTLD_DEFAULT, …)`），`--lib PATH` 先 `dlopen(…, RTLD_NOW|RTLD_GLOBAL)`

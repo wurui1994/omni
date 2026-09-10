@@ -36,6 +36,7 @@
 #include "omni_jit_symbols.h"
 
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,8 +48,20 @@ static void omni_jit_init_target(void) {
   LLVMInitializeNativeAsmPrinter();
 }
 
-static int omni_jit_fail(LLVMErrorRef e, const char *what) {
-  char *m = LLVMGetErrorMessage(e);
+/* **入口跑在哪个线程上**（ADR-0022 的 J4d）。macOS 上这不是好奇心：AppKit 只能在进程的
+   真主线程上首次初始化，而 `glfwInit` 一进去就是 `[NSApplication sharedApplication]`。
+   不在主线程上的话症状是 `NSUpdateCycle was already initialized.` 加一个 SIGTRAP，
+   **一句诊断都没有** —— 而且我们那份带缓冲的 stdout 会跟着一起丢，看起来像"什么都没跑"。
+   查得到就报真话，查不到（不是 macOS/BSD 那族）就当"是主线程"，不假装知道。 */
+static int omni_jit_main_thread(void) {
+#if defined(__APPLE__) || defined(__FreeBSD__)
+  return pthread_main_np() != 0;
+#else
+  return 1;
+#endif
+}
+
+static int omni_jit_fail(LLVMErrorRef e, const char *what) {  char *m = LLVMGetErrorMessage(e);
   fprintf(stderr, "omni-jit: %s: %s\n", what, m);
   LLVMDisposeErrorMessage(m);
   return 70;   /* 与 omni_error 的退出码一致 */
@@ -331,6 +344,15 @@ int main(int argc, char **argv) {
      多个入口按命令行上的顺序来；`--repeat` 是给"同一个入口反复调"用的（kernel dispatch
      与将来的 REPL 都要它），退出码取最后一个 main 形状那次的返回值。 */
   int code = 0;
+  /* 不在主线程就明说，把一个信号换成一句话（见 omni_jit_main_thread 上面那段）。 */
+  if (!omni_jit_main_thread()) {
+    fprintf(stderr, "omni-jit: 入口不在进程的主线程上 —— 用 GUI 库（GLFW/AppKit 那一族）"
+            "的话它们会在这儿硬崩（NSUpdateCycle was already initialized.）\n");
+  }
+  if (getenv("OMNI_JIT_TRACE") != NULL) {
+    fprintf(stderr, "omni-jit: main thread = %d\n", omni_jit_main_thread());
+  }
+
   for (int k = 0; k < ncalls; k++) {
     LLVMOrcJITTargetAddress addr = 0;
     err = LLVMOrcLLJITLookup(jit, &addr, calls[k]);
