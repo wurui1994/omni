@@ -732,7 +732,19 @@ export class MirFunc {
      * 落点是 `CCALL`，得有一个真的桩（见 `externThunk`）。
      */
     this.extern = false;
+    /**
+     * **只声明**（ADR-0022 的 J6 第二件事）：正文在**别的产物**里，但调用约定还是我们
+     * 自己的那一套。与 `extern` 的差别正在这里 —— 那一条是「C 那边的符号」，调用点按 C 的
+     * ABI 摆实参（胖指针抽地址、签名从调用处收），而这一条上形参与返回值都在 `params`/`ret`
+     * 上、是真类型，调用点与模块内的调用**一模一样**，后端只是发 `declare` 而不发 `define`。
+     *
+     * 逼出这一格的是 REPL 会话：第二批调第一批定义的函数，两批是两份产物。
+     */
+    this.decl = false;
   }
+
+  /** 声明「正文在别的产物里，调用约定还是我们自己的」。见 `decl` 头上那段。 */
+  setDecl() { this.decl = true; }
 
   /** 声明「这个模块里没有它的函数体」。见 `extern` 头上那段。 */
   setExtern() { this.extern = true; }

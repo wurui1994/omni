@@ -416,9 +416,10 @@ if (existsSync(sysDir)) {
 {
   const tmp = mkdtempSync(join(tmpdir(), 'omni-session-'));
   const texts = [
-    '(let base int (int 100))\n(print (var base))\n',
+    '(fn f1 ((n int)) int (ret (bin "+" (var n) (int 1))))\n(let base int (int 100))\n(print (var base))\n',
     '(set base (bin "+" (var base) (int 1)))\n(print (var base))\n',
     '(print (bin "*" (var base) (int 2)))\n',
+    '(print (call f1 (var base)))\n',
   ];
   const cs = new CoreSession();
   const lls = [];
@@ -437,18 +438,26 @@ if (existsSync(sysDir)) {
     // 第一批**定义**那一格（外部链接，后面几批要找得到），后面几批只**声明**
     const want = k === 1 ? '@g_base = global i64 zeroinitializer' : '@g_base = external global i64';
     if (!ir.includes(want)) detail.push(`    第 ${k} 批里没有 \`${want}\``);
+    /* 跨批**调函数**（J6 的第二件事）：第四批调第一批定义的 f1，于是它里面该有一句
+       `declare`（omni 自己的调用约定，不是 C ABI 那条路），而且不许有第二份正文。 */
+    if (k === 4) {
+      if (!ir.includes('declare i64 @s_f1(i64)')) detail.push('    第 4 批里没有 `declare i64 @s_f1(i64)`');
+      if (/define [^\n]*@s_f1\(/.test(ir)) detail.push('    第 4 批把 f1 又定义了一遍');
+    }
   }
   writeFileSync(join(tmp, 'drv.c'), `#include <stdio.h>
 void omni_host_init(int argc, char **argv);
 void omni_chunk_1(void);
 void omni_chunk_2(void);
 void omni_chunk_3(void);
+void omni_chunk_4(void);
 int omni_host_exit_code(void);
 int main(int argc, char **argv) {
   omni_host_init(argc, argv);
   omni_chunk_1();
   omni_chunk_2();
   omni_chunk_3();
+  omni_chunk_4();
   fflush(NULL);
   return omni_host_exit_code();
 }
@@ -462,12 +471,12 @@ int main(int argc, char **argv) {
   } else {
     const r = spawnSync(exe, [], { encoding: 'utf8', timeout: 20000, maxBuffer: 1 << 20 });
     if (r.status !== 0) detail.push(`    跑挂了 exit=${r.status}：${(r.stderr ?? '').trim().split('\n')[0]}`);
-    else if (r.stdout !== '100\n101\n202\n') {
-      detail.push(`    输出不对：${JSON.stringify(r.stdout)}（要 "100\\n101\\n202\\n"）`);
+    else if (r.stdout !== '100\n101\n202\n102\n') {
+      detail.push(`    输出不对：${JSON.stringify(r.stdout)}（要 "100\\n101\\n202\\n102\\n"）`);
     }
   }
   if (detail.length > 0) bad('session-aot', detail.join('\n'));
-  else ok('session-aot [三批产物链成一个程序：第二批改第一批的变量，第三批还读得到]');
+  else ok('session-aot [四批产物链成一个程序：跨批改变量、跨批调函数]');
   rmSync(tmp, { recursive: true, force: true });
 }
 

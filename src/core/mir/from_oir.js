@@ -104,10 +104,20 @@ class ToMir {
     this.closureNo = new Map();
     for (let i = 0; i < m.closures.length; i++) this.closureNo.set(m.closures[i].make, i);
     // 函数也要先全部登记：CALL 用下标，而调用可以往前也可以往后
+    /* 会话里前几批定义、这一批调过的那些先登记成**只声明**（ADR-0022 的 J6 第二件事）：
+       CALL 找的是模块内的下标，所以名字必须先在这张表里坐下；`setDecl` 让后端发 `declare`
+       而不是一份假的空体。不登记的后果是降级当场挂（`mir: 没有这个函数 s_f1`）。
+       它们排在前面，于是下面按下标取正文那一句要**加上这个偏移**。 */
+    const declN = (this.oir.externFuncs ?? []).length;
+    for (const f of this.oir.externFuncs ?? []) {
+      const mf = new MirFunc(f.mangled, f.params.map((p) => ({ name: p.name, t: this.ty(p.type) })), this.ty(f.ret));
+      mf.setDecl();
+      m.addFunc(mf);
+    }
     for (const f of this.oir.funcs) {
       m.addFunc(new MirFunc(f.mangled, f.params.map((p) => ({ name: p.name, t: this.ty(p.type) })), this.ty(f.ret)));
     }
-    for (let i = 0; i < this.oir.funcs.length; i++) this.func(this.oir.funcs[i], m.funcs[i]);
+    for (let i = 0; i < this.oir.funcs.length; i++) this.func(this.oir.funcs[i], m.funcs[declN + i]);
     return m;
   }
 

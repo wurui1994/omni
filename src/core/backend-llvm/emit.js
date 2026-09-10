@@ -941,6 +941,16 @@ class LlvmEmitter {
        从前这儿照常发 `define`，出来的是 `define i64 @strlen() { ret i64 0 }`：形参丢了、
        体是假的 —— 一份把 libc 的 strlen 覆盖掉的假实现。 */
     if (f.extern === true) return;
+    /* **只声明**（MirFunc.decl，ADR-0022 的 J6 第二件事）：正文在别的产物里，但调用约定
+       是我们自己的 —— 形参与返回值都在 MIR 上，所以签名照 `define` 那一份摆，只是发
+       `declare`、不发体。会话里第二批调第一批的函数走的就是这一条。 */
+    if (f.decl === true) {
+      const ds = f.params.map((p, k) => this.ty(p.t, `参数 ${p.name ?? k}`));
+      if (f.closureId !== undefined) ds.unshift('ptr');
+      this.line(`declare ${this.ty(f.ret, '返回值')} @${f.name}(${ds.join(', ')})`);
+      this.line('');
+      return;
+    }
     this.f = f;
     this.tmp = 0;
     this.labels = 0;

@@ -154,6 +154,9 @@ class CoreLowerer {
        会话里前几批定义的那几格，这一批的产物要为它们发一句声明，而"发哪几条"就按这个
        集合 —— 全发出来的话每批的字节数会随会话长度涨，那正是 REPL 增量要钉住的东西。 */
     this.gUsed = new Set();
+    /* 这一批**调过**哪几个函数（ADR-0022 的 J6 第二件事）。与 `gUsed` 同一种性质：
+       会话里前几批定义的那些，这一批的产物要为它们发一句声明。 */
+    this.fnCalled = new Set();
     // 线性内存（ADR-0017 第二刀）：`null` = 这份模块不用内存。一个模块**一块**（wasm MVP
     // 就是这样），所以这里是一个字段而不是一张表。`emitted` 记的是"这一批产物里发过了吗" ——
     // REPL 一批一份产物，内存只该在声明它的那一批里被建起来，后面几批要接着用同一块。
@@ -410,8 +413,9 @@ class CoreLowerer {
       structs: this.structs.size, classes: this.classes.size, globals: this.globals.size,
       closures: this.closures.size, lifted: this.lifted.length, fnUsed: this.fnUsed.size,
     };
-    // 这一批提到了哪几格全局，从零数起（跨批的那几条声明按它发，见 `gUsed`）
+    // 这一批提到了哪几格全局、调了哪几个函数，从零数起（跨批的那几条声明按它们发）
     this.gUsed = new Set();
+    this.fnCalled = new Set();
     const top = nodes.length === 1 && head(nodes[0]) === 'module' ? nodes[0] : null;
     if (top === null) {
       this.err(nodes[0], '一份核心方言的源文件是恰好一个 (module ...)');
@@ -981,6 +985,19 @@ class CoreLowerer {
       }
       globals.push({ name: nm, mangled: `g_${nm}`, type: t, shared: session });
     }
+    /* 会话里前几批定义、这一批**调过**的那些函数（ADR-0022 的 J6 第二件事）：只发一句
+       声明。判据是"名字在表里、但这一批没定义它" —— 函数表是跨批留着的，而 `funcs`
+       里装的正是这一批定义的那些。整程序那条路上这一格永远是空的。 */
+    const externFuncs = [];
+    if (session) {
+      const defined = new Set(funcs.map((f) => f.name));
+      for (const nm of this.fnCalled) {
+        if (defined.has(nm)) continue;
+        const d = this.funcs.get(nm);
+        if (d === undefined || this.sigOnly.fns.has(nm)) continue;
+        externFuncs.push({ name: d.name, mangled: d.mangled, params: d.params, ret: d.ret });
+      }
+    }
     // 闭包提升出来的函数体排在最后（跟 hir/check.js 一样：合成的东西放在用户函数之后）。
     const lifted = [];
     let li = base.lifted;
@@ -1029,6 +1046,8 @@ class CoreLowerer {
       /* 会话里**别人家**定义、这一批提到过的那几格（ADR-0022 的 J6）：只声明，不占字节。
          整程序那条路上永远是空的。 */
       externGlobals: externGlobals,
+      /* 会话里前几批定义、这一批调过的那些函数（同上）：只声明，正文在别人家。 */
+      externFuncs: externFuncs,
       /* 外部 C 符号（`(cabi …)`，ADR-0022 的 J4b）：名字与签名同下标。C 后端靠这两格
          发 extern 原型 —— 少了它生成的 `.c` 里就是一次没有声明的调用（C99 里是错）。 */
       cabi: cabiNames,
@@ -2190,6 +2209,9 @@ class CoreLowerer {
         }
         i++;
       }
+      // 这一批**调过**谁（ADR-0022 的 J6 第二件事）：会话里前几批定义的那些，
+      // 这一批的产物要为它们发一句声明
+      this.fnCalled.add(nm);
       return { kind: 'Call', func: d.mangled, name: d.name, args: args, type: d.ret };
     }
     if (h === 'splat' || h === 'vlit' || h === 'lane' || h === 'hsum') return this.vecExpr(n, h);
