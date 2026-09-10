@@ -89,7 +89,17 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   两个入口各调一次，答案与 AOT 相同（为 kernel dispatch 与 REPL 备好）。
 - **J4 FFI 第一刀（宿主 → JIT）**：无体声明 + 宿主表里的实现。jancy 与核心方言各一份用例；
   jancy 那一份就是 `opaque class` 的宿主方法（现在在 `tests/jnc/bad` 里被拒的那两条）。
+
+  **量到的前提（做 J4 之前先补这一格）**：`MIR` 早就带着 `cabi` 与 `OP.CCALL`
+  （`mir/from_oir.js:493`、`mir/bytes.js:129`），JS 后端与解释器都实现了它，
+  而 **`backend-llvm` 里一个 `CCALL` 的分支都没有** —— 也就是说 LLVM/JIT 这条腿
+  **压根调不了外部 C 函数**。`tests/cabi` 那份用例进不来是另一个原因（它是 JS 前端 +
+  dyn 模块级变量，超出 LLVM 的支持面），所以这条空白一直没被照到。
+  J4 于是分成两半：先教 `backend-llvm` 发 `declare` 并降 `CCALL`（类型词汇就是 C_ABI
+  那七个标量，`cstr` 的 marshal 照 backend-c 那一份），再让宿主解析那些名字。
+
 - **J5 FFI 第二刀（JIT → 任意库）**：库表 + `dlopen` 回退，用 `libm` 的 `sin`/`cos` 验收。
+  C_ABI 里 `lib: null` 的那些（libc）走 `dlsym(RTLD_DEFAULT, …)`，第三方库走 `--lib`。
 - **J6 会话进编译器进程**：新增 ABI（`jit_open/jit_add/jit_map/jit_lookup/jit_call_i`），
   目标是把那 220ms 压到一次会话内的物化时间；同时给 REPL 一条 JIT 引擎。
 - **J7 与增量缓存接线**：ADR-0014 决策 5 的对象码缓存挂到会话上（同一份 IR 不重编）。
