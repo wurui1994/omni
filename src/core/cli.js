@@ -68,6 +68,7 @@ import { target, registerLang, lang } from './plugin.js';
  * —— 两条路在注册表那一层看不出区别。 */
 import { register as registerWat } from './lang/wat.js';
 import { register as registerSx } from './lang/sx.js';
+import { register as registerJnc, jncText, compileJnc } from './lang/jnc.js';
 import {
   asyText, compileAsy, asyLastDeps, unitName, jsUnitSym, fileUnitName, asyMainWord, asyUnitTexts,
   register as registerAsy,
@@ -726,7 +727,7 @@ registerSx({ registerLang, log: vStep });
 /* asy 那一份拿着核心给的宿主服务过日子（ADR-0021 S4）：印记那三格是驱动侧的
  * 缓存格式，AST 缓存的键沿用了它 —— 那处层次串门记在 lang/asy.js 的文件头里。 */
 registerAsy({ registerLang, log: vStep, inpPath, inpOk, inpField, srcIdNote });
-registerLang(['.jnc'], 'jnc', (path, argv) => compileJnc(path, incDirs(argv)));
+registerJnc({ registerLang, log: vStep, incDirs });
 
 function compileFront(path, argv) {
   const l = lang(path);
@@ -1432,118 +1433,10 @@ function asyModsFast(path, dir) {
  * 走的是同一条路：那边印出来，这边读进来，中间没有为那门语言写的代码。
  */
 
-/**
- * jancy 前端（ADR-0016 分步 7）。零件比 asy 那一份少得多：只有语法表 + 词法，
- * 没有内建绑定表（jancy 的标准库这一刀不接）、也没有解析缓存（一份 `.jnc` 就是一趟，
- * 没有 base/ 那样每次都重解析的库）。模块加载有了，见 jncText 里的 find / parse（第六十刀）。
- */
-function jncFrontEnd() {
-  const gpath = join(installDir(), '..', 'frontend-jnc', 'jnc.grammar');
-  if (!exists(gpath)) throw new OmniError(`找不到 jnc 语法文件：${gpath}`);
-  return loadGrammar(gpath);
-}
 
-/**
- * 一份 `.jnc` -> 语法树。入口文件与被 import 进来的文件走的是同一条（第六十刀）。
- *
- * 抛不抛只看**这个文件自己**新添了错没有，而不是 `throwIfErrors`。一趟降级现在会解好几个
- * 文件，而前面那些文件已经记下的"还不收"不该把后面的解析掐掉 —— 掐掉的话这一趟就只报得出
- * 第一条拦路项，语料尺子跟着少数。
- */
-function jncParse(tb, path, diags) {
-  const n0 = diags.errorCount();
-  const file = new SourceFile(path, readText(path));
-  const toks = lexText(tb.grammar.lex, file, diags);
-  if (diags.errorCount() > n0) throw new OmniError(diags.format());
-  vStep(`jnc lexer      ${path} -> ${toks.length} tokens`);
-  const tree = glrParse(tb, toks, diags);
-  if (diags.errorCount() > n0) throw new OmniError(diags.format());
-  if (tree === null) throw new OmniError(`解析不了：${path}`);
-  return tree;
-}
 
-/**
- * 一段**表达式源码** -> 那棵表达式的树（第六十四刀，给格式化字面量里的 `$(…)` 用）。
- *
- * 语法只有一个起点（`unit`），所以把这段源码裹成一个合法的单元再解析，再把 `return` 底下
- * 那一棵挖出来。jancy 那边是词法层做的（`lit_fmt_opener` 之后 `fcall main`，Lexer.rl:142，
- * 于是里头那段就是普通 token 流）；这一层的词法是一张 DFA，没有 fcall / fret，所以改成
- * "整块当一个 token、要用时再解析一遍"—— 认的是同一门语言。
- *
- * 裹的时候按**原文的行列**补空白：头一段占第一行，再补 line-1 个换行与 col-1 个空格，于是
- * 里头报的位置就是真文件里的真位置。字面量落在第一行时补不出来（头那段自己占着第一行），
- * 那时列往右偏 —— 行仍旧是对的。
- */
-function jncParseExpr(tb, file, text, offset, diags) {
-  const n0 = diags.errorCount();
-  const { line, col } = file.lineCol(offset);
-  const head = 'void __fmt__() { return (';
-  const pad = line > 1 ? '\n'.repeat(line - 1) + ' '.repeat(col - 1) : '';
-  const wrapped = new SourceFile(file.path, `${head}${pad}${text}); }`);
-  const toks = lexText(tb.grammar.lex, wrapped, diags);
-  if (toks === null || diags.errorCount() > n0) return null;
-  const tree = glrParse(tb, toks, diags);
-  if (tree === null || diags.errorCount() > n0) return null;
-  const dig = (nd) => {
-    if (nd === null || typeof nd !== 'object' || !Array.isArray(nd.items)) return null;
-    const h = nd.items[0];
-    if (nd.items.length > 1 && h !== undefined && h !== null && h.value === 'return') return nd.items[1];
-    for (const it of nd.items) {
-      const r = dig(it);
-      if (r !== null) return r;
-    }
-    return null;
-  };
-  return dig(tree);
-}
 
-/**
- * 一份 `.jnc` -> 核心方言的文本。`omni sx` 那条路也走它，所以降级只有一份实现。
- *
- * `needEntry`（第六十五刀）：要跑的那几条腿要一个 `int main()`；`omni sx` 只要降下来的
- * 文本，库模块本来就没有入口（语料 662 份里 408 份是这种），所以那条路上不要。
- */
-function jncText(path, dirs = [], needEntry = true) {
-  const tb = jncFrontEnd();
-  const diags = new Diagnostics();
-  const tree = jncParse(tb, path, diags);
-  // import 的找法（第六十刀定的形，第六十二刀补上 `-I`）：绝对路径原样看在不在；否则先
-  // **在写这条 import 的文件自己的目录里**找，再按给的顺序逐个试 `-I` 的目录 —— 与
-  // jancy 的 findImportFile 一模一样（io::findFilePath(fileName, unit->getDir(),
-  // &m_importDirList, false)，jnc_ct_ImportMgr.cpp:110-119；那个 false 是
-  // doFindInCurrentDir，所以**进程的当前目录不算一格**，axl_io_FilePathUtils.cpp:428-446）。
-  // 路径过一遍 resolve（jancy 那边是 io::getFullFilePath，jnc_ct_Module.cpp:386）——
-  // 查重认的是这一格，所以 `./a.jnc` 与 `a.jnc` 是同一个文件。
-  const find = (spec, from) => {
-    if (isAbsolute(spec)) return exists(spec) ? resolve(spec) : null;
-    const here = join(dirname(from), spec);
-    if (exists(here)) return resolve(here);
-    for (const d of dirs) {
-      const p = join(d, spec);
-      if (exists(p)) return resolve(p);
-    }
-    return null;
-  };
-  const text = lowerJnc(tree, diags, {
-    path,
-    unit: resolve(path),
-    find,
-    parse: (p) => jncParse(tb, p, diags),
-    parseExpr: (file, src, offset) => jncParseExpr(tb, file, src, offset, diags),
-    dirs,
-    needEntry,
-  });
-  diags.throwIfErrors();
-  return text;
-}
 
-function compileJnc(path, dirs = []) {
-  const diags = new Diagnostics();
-  const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, jncText(path, dirs)), diags);
-  diags.throwIfErrors();
-  vStep(`jnc front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
-  return { ast: null, mod, diags };
-}
 
 /**
  * 入口 -> 模块图 -> 检查 -> OIR。
