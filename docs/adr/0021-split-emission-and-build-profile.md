@@ -429,6 +429,28 @@ host 1.13 M / cli 0.86 M / hir 0.56 M / parse 0.24 M / repl 0.12 M / 其余 < 0.
 与 `--only=js2c,js`（能自举）。这一格是 P5，前置是 P2a：摘掉一个子系统等于**不链它的 `.o`**，
 而 `.o` 得先存在。
 
+### P2a 有一条便宜得多的路：把**状态**搬进运行时，别动宏
+
+宏加存储类参数要把六个 header 里几百个函数一个个改成"声明 / 定义"两态（宏体里带逗号的
+类型还会把参数切断），是一大刀。但真正拦路的只是**状态**，函数复制一份是无害的
+（一样的代码，代价只是产物 +12%，已量）。而状态只有十一格，全在这三个 header 里：
+
+```
+omni_js_obj.h  fnproto_tbl_(DT)  ctor_tbl_[19](omni_dyn)  pm_find_/pm_call_(函数指针)
+               xprops_tbl_(DT)   nt_slot_(omni_dyn)       realm_tbl_[25](omni_dyn)
+               jobq_(LT) jobq_at_(int64)                  gt_tbl_[1](omni_dyn)
+omni_js_arr.h  this_slot_(omni_dyn)
+omni_js_json.h json_jb(jmp_buf)
+```
+
+`omni_dyn` / `int64_t` / 函数指针 / `jmp_buf` 都是**运行时自己的类型**，可以直接搬进
+`omni.h` 声明、某个 `.c` 里定义；`DT` / `LT` 那三格是指针，在运行时存成 `void *`、
+在模板里强转回来就行。十一格搬完，模块 `.c` 就能各自编、链起来跑对，
+而 P2a（真正的声明/定义分离）降级成"以后想收那 +12% 体积再说"的优化。
+
+顺序于是变成：**搬状态（十一格）-> 模块 .o + 并行 + 内容寻址缓存 -> P5 可选子系统
+-> （可选）P2a 收体积**。
+
 ## 顺带记下的两个坑（都不是性能问题，是这一轮量的时候撞上的）
 
 **`dist` 安装跑不了 `omni c tcc`。** 它把 libc 头解析到 `<dist>/include`，而 bootstrap 的
