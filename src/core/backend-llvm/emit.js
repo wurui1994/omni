@@ -638,6 +638,12 @@ class LlvmEmitter {
   /* ------------------------------------------------------------------ 函数 */
 
   func(f) {
+    /* **这个模块里没有它的函数体**（MirFunc.extern，第九刀第一百二十八片）：只发 `declare`，
+       而声明的签名是从**调用点**收上来的（externDecl，与 CCALL 共用那一格）—— 原生那条腿
+       的外部函数记录上没有 params，所以签名只能从调用处得到。
+       从前这儿照常发 `define`，出来的是 `define i64 @strlen() { ret i64 0 }`：形参丢了、
+       体是假的 —— 一份把 libc 的 strlen 覆盖掉的假实现。 */
+    if (f.extern === true) return;
     this.f = f;
     this.tmp = 0;
     this.labels = 0;
@@ -970,9 +976,24 @@ class LlvmEmitter {
     }
     if (op === OP.CALL) {
       const g = this.mir.funcs[f.a[i]];
-      const args = f.argsOf(f.b[i]).map((r) => this.typed(r));
+      const refs = f.argsOf(f.b[i]);
+      const args = refs.map((r) => this.typed(r));
       const rt = this.ty(g.ret, `${g.name} 的返回值`);
-      const call = `call ${rt} @${g.name}(${args.join(', ')})`;
+      /* 被调者的体不在这个模块里（`MirFunc.extern`）：签名从**这个调用点**收上来，
+         与 CCALL 共用那一格回填（原生腿的外部函数记录上没有 params）。 */
+      if (g.extern === true) {
+        const fixed = refs.map((r) => this.ty(this.tyOf(r), `${g.name} 的形参`));
+        const sig = `${rt} (${fixed.concat(g.variadic === true ? ['...'] : []).join(', ')})`;
+        const was = this.cabiDecl.get(g.name);
+        if (was === undefined) this.cabiDecl.set(g.name, sig);
+        else if (was !== sig) {
+          throw new OmniError(`llvm: ${g.name} 在两处的签名不一样（${was} vs ${sig}）—— `
+            + '同一个外部符号只能有一份声明');
+        }
+      }
+      const call = g.extern === true && g.variadic === true
+        ? `call ${this.cabiDecl.get(g.name)} @${g.name}(${args.join(', ')})`
+        : `call ${rt} @${g.name}(${args.join(', ')})`;
       this.line(rt === 'void' ? `  ${call}` : `  ${dst} = ${call}`);
       return;
     }
