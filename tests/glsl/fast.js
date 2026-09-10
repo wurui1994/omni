@@ -205,10 +205,14 @@ function jitHost() {
  *
  * `--` 之前是宿主自己的位置参数（`.ll`、可选的符号名），之后才是**给被调 main 的**
  * 命令行参数。少了这个 `--`，`samples` 会被当成要查的符号名（第一版就是这么红的：
- * `Symbols not found: [ _samples ]`）。 */
+ * `Symbols not found: [ _samples ]`）。
+ *
+ * `--dl`：这份 IR 里的驱动要 libc（`printf`/`strcmp`/`atoi`/`clock_gettime`），而宿主的
+ * 符号表默认是**关**着的（ADR-0022 决策 2 / J5）—— 不给这个开关就是四条
+ * `unresolved:` 加 exit 70。这一条是那个默认翻过去之后没跟上的地方。 */
 function jitRun(host, ll, args) {
   const t0 = process.hrtime.bigint();
-  const argv = args.length === 0 ? [ll] : [ll, '--', ...args];
+  const argv = args.length === 0 ? [ll, '--dl'] : [ll, '--dl', '--', ...args];
   const r = spawnSync(host, argv, { encoding: 'utf8', maxBuffer: 1 << 26 });
   return [r.status, r.stdout ?? '', Number(process.hrtime.bigint() - t0) / 1e6, r.stderr ?? ''];
 }
