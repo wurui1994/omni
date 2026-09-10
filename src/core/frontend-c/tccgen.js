@@ -7932,6 +7932,102 @@ function isRoType(ty) {
   return (t.t & VT_CONSTANT) !== 0;
 }
 
+/**
+ * 一个 C 类型 -> C_ABI 那七个词里的哪一个（`hir/c_abi.js` 的 `C_TYPE`）。
+ * 落不进去的回 `null` —— 那不是错，是「这一条声明这一层收不了」。
+ *
+ * 几条刻意的取舍：
+ *   - `float` / `long double` **不收**，不悄悄放宽成 `f64`：`float` 的形参按 double 传就是
+ *     错的调用约定（ABI 上它是单精度那一格），而错的 ABI 比"没这一条"难查得多。
+ *   - 指针一律 `ptr`，包括 `char *` —— **不用 `cstr`**：那个词的意思是"把一个字符串
+ *     marshal 成 UTF-8"，那是 dynamic 域那条路的事；这一格上的值已经是地址了。
+ *   - 数组形参在 C 里退化成指针，所以也是 `ptr`（`isArray` 同时带着 `VT_PTR`）。
+ *   - struct/union 按值、函数类型按值、VLA：`null`。要它们得先有 ABI 的实参分类，
+ *     而那正是 ADR-0014 决策 4 刻意避开的坑（jancy 为此手写了十六个调用约定类）。
+ */
+function cabiWordOf(ty, isRet) {
+  const bt = btype(ty.t);
+  if (bt === VT_VOID) return isRet === true ? 'void' : null;
+  if (bt === VT_BOOL) return 'bool';
+  if (isPtr(ty.t) || isArray(ty.t)) return 'ptr';
+  if (bt === VT_DOUBLE) return 'f64';
+  if (bt === VT_FLOAT || bt === VT_LDOUBLE) return null;
+  if (isStruct(ty.t) || isFunc(ty.t)) return null;
+  if (isInteger(ty.t)) {
+    const n = typeSize(ty).size;
+    if (n <= 4) return 'i32';
+    if (n === 8) return 'i64';
+    return null;
+  }
+  return null;
+}
+
+/**
+ * **一份 C 头文件里声明了哪些函数**（ADR-0022 的 J4d 的第二条路：`import … with "h"`）。
+ *
+ * 用的是与 `lowerCNative` 同一个前端 —— 不外挂 tcc、也不另写一个 C 解析器：那一份现在就在
+ * 读真的 SDK 头（`tests/c/sys/01-sdk-headers.c`）。这儿只是**在 `unit()` 之后把符号表读一遍**，
+ * 后面那些（`sealExternSymbols`、全局量摊字节、发代码）一步都不做 —— 我们只要签名。
+ *
+ * 为什么不能从 MIR 上读：原生腿的外部 `MirFunc` 上**没有 params**（签名在那条路上被丢了，
+ * 见 backend-llvm 那一支的注释：它的 `declare` 只能从调用点收）。签名还在的地方只有这里。
+ *
+ * 回 `{decls, skipped}`：`decls` 是收得下的那些（`{name, ret, params, variadic}`，
+ * 类型是 C_ABI 的词），`skipped` 是收不下的那些（`{name, why}`）—— 一个真头文件里
+ * 总有几条落不进七个词，**不能让其中一条把整次 import 弄失败**。
+ */
+export function declsOfC(path, text, host, defs) {
+  setLdoubleTarget(host === undefined ? 'arm64' : host.arch);
+  setWcharTarget(host === undefined ? 'osx' : host.os);
+  setCharTarget(host === undefined ? 'arm64' : host.arch,
+    host === undefined ? 'osx' : host.os);
+  const cpp = new Cpp(host);
+  cpp.installPredefs(path, false);
+  for (const d of defs ?? []) {
+    if (d.body === null) cpp.undefine(d.name);
+    else cpp.define(d.name, d.body);
+  }
+  const mod = new MirModule(path);
+  mod.setNative();
+  const gen = new CGen(cpp, mod, { native: true });
+  gen.preamble(COMPILE_PREAMBLE);
+  cpp.startParse(path, text);
+  gen.unit();
+
+  const decls = [];
+  const skipped = [];
+  for (const [name, info] of gen.funcs) {
+    /* 名字带 `$` 的是这一层自己造的（桩、`$ext$…`）—— 不是头文件里的声明。 */
+    if (name.indexOf('$') >= 0) continue;
+    if (info.params === null) {
+      skipped.push({ name, why: '只见过调用点、没见过原型，形参类型无从得知' });
+      continue;
+    }
+    /* 老式声明（`int f();`）：C 里那**不是**「没有形参」，是「形参表没说」—— 调用点给几个
+       都合法。收下它就会发出 `declare i32 @f()` 而调用点给两个实参，签名当场对不上。
+       量出来的：`int foo_old();` 出来是 `() -> i32`，与 `int foo_old(void);` 一模一样。 */
+    if (info.old === true) {
+      skipped.push({ name, why: '老式声明（`f()` 不是 `f(void)`，形参表没说）' });
+      continue;
+    }
+    const rt = cabiWordOf(info.ret, true);
+    if (rt === null) {
+      skipped.push({ name, why: `返回类型 ${cTypeText(info.ret)} 落不进 C_ABI 的七个词` });
+      continue;
+    }
+    const ps = [];
+    let bad = null;
+    for (const p of info.params) {
+      const w = cabiWordOf(p.ty, false);
+      if (w === null) { bad = `形参 ${p.name} 的类型 ${cTypeText(p.ty)} 落不进 C_ABI 的七个词`; break; }
+      ps.push(w);
+    }
+    if (bad !== null) { skipped.push({ name, why: bad }); continue; }
+    decls.push({ name, ret: rt, params: ps, variadic: info.variadic === true });
+  }
+  return { decls, skipped };
+}
+
 export function lowerCNative(path, text, host, defs) {
   /* `long double` 的宽度按目标拨（第一百一十一片）：x86_64 是 16 字节的 x87 80 位，
    * arm64-macho 与 PE 是 8。它是 ctype.js 里一格模块级状态（tcc 那边是编译期常量），

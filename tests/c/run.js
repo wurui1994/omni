@@ -542,6 +542,39 @@ for (const f of pick('diag')) {
   }
 }
 
+/* ------------------------------------- c.declsOf：一份头文件里声明了哪些函数（J4d）
+ *
+ * `import "libfoo.dylib" with "foo.h"` 要的那一格。这一条钉两件事：
+ *   1. **收得下的签名要准**（形参与返回都落在 C_ABI 那七个词上）；
+ *   2. **收不下的要带一句为什么，而且不许被悄悄放宽** —— `float` 按 double 传是错的调用
+ *      约定，`f()` 当成 `f(void)` 是错的实参个数，两样都比"没这一条"难查得多。
+ * 参照是 `decls/foo.expected`，逐字节比。
+ */
+{
+  const ddir = join(here, 'decls');
+  const hdr = join(ddir, 'foo.h');
+  const wantPath = join(ddir, 'foo.expected');
+  if (!existsSync(hdr) || !existsSync(wantPath)) {
+    process.stdout.write('  skip decls/foo.h：缺 fixture\n');
+  } else {
+    const { cDeclsOf } = await import('../../src/core/lang/c.js');
+    const r = cDeclsOf(hdr, { includeDirs: [], sysIncludeDirs: [], arch: 'arm64', os: undefined }, []);
+    const lines = [];
+    for (const d of r.decls) lines.push(`ok   ${d.name} (${d.params.join(',')})${d.variadic ? '+...' : ''} -> ${d.ret}`);
+    for (const s of r.skipped) lines.push(`skip ${s.name} — ${s.why}`);
+    const got = `${lines.join('\n')}\n`;
+    const want = readFileSync(wantPath, 'utf8');
+    if (got === want) ok(`decls/foo.h [${r.decls.length} 条收下、${r.skipped.length} 条带理由跳过]`);
+    else {
+      const wl = want.split('\n');
+      const gl = got.split('\n');
+      let i = 0;
+      while (i < wl.length && i < gl.length && wl[i] === gl[i]) i++;
+      bad('decls/foo.h', `    第 ${i + 1} 行起不同\n    want: ${JSON.stringify(wl[i])}\n    got:  ${JSON.stringify(gl[i])}`);
+    }
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}\n`);if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

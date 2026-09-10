@@ -10,7 +10,7 @@
 import { OmniError } from '../source/diag.js';
 import { join, dirname } from '../host/path.js';
 import { env, isDir, installDir, readText, spawn, stderr } from '../host/native.js';
-import { lowerC, lowerCNative } from '../frontend-c/tccgen.js';
+import { lowerC, lowerCNative, declsOfC } from '../frontend-c/tccgen.js';
 import { Cpp } from '../frontend-c/tccpp.js';
 import { verifyMir } from '../mir/verify.js';
 
@@ -188,10 +188,36 @@ export function cMirNative(path, opts, defs) {
   }, defs.map(([name, body]) => ({ name, body })));
 }
 
+/**
+ * **一份 C 头文件里声明了哪些函数**（ADR-0022 的 J4d：`import "libfoo.dylib" with "foo.h"`）。
+ *
+ * 与 `cMirNative` 同一个前端、同一套 include 路径 —— 不外挂 tcc、也不另写一个 C 解析器。
+ * 回 `{decls, skipped}`：收得下的那些带 C_ABI 的词，收不下的带一句为什么
+ * （一个真头文件里总有几条落不进那七个词，不能让其中一条把整次 import 弄失败）。
+ */
+export function cDeclsOf(path, opts, defs) {
+  return declsOfC(path, readText(path), {
+    readFile: (p) => {
+      try {
+        return readText(p);
+      } catch {
+        return null;
+      }
+    },
+    includeDirs: opts.includeDirs,
+    sysIncludeDirs: opts.sysIncludeDirs,
+    dirname,
+    join,
+    arch: opts.arch,
+    os: opts.os,
+  }, (defs ?? []).map(([name, body]) => ({ name, body })));
+}
+
 export function registerCLang(api) {
   api.registerCap('c.toMir', cMir);
   api.registerCap('c.sysInclude', cSysInclude);
   api.registerCap('c.usrLib', sdkUsrLib);
   api.registerCap('c.preprocess', cppText);
   api.registerCap('c.toMirNative', cMirNative);
+  api.registerCap('c.declsOf', cDeclsOf);
 }

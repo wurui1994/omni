@@ -1,0 +1,14 @@
+ok   foo_add (i32,i32) -> i32
+ok   foo_scale (f64,i64) -> f64
+ok   foo_len (ptr) -> i64
+ok   foo_hi () -> void
+ok   foo_ok (ptr) -> bool
+ok   foo_printf (ptr)+... -> i32
+ok   foo_cb (ptr) -> i32
+ok   foo_sum (ptr,i32) -> i32
+ok   foo_paint (i32) -> i32
+skip foo_f — 返回类型 float 落不进 C_ABI 的七个词
+skip foo_ld — 返回类型 long double 落不进 C_ABI 的七个词
+skip foo_area — 形参 p 的类型 struct P 落不进 C_ABI 的七个词
+skip foo_mk — 返回类型 struct P 落不进 C_ABI 的七个词
+skip foo_old — 老式声明（`f()` 不是 `f(void)`，形参表没说）
