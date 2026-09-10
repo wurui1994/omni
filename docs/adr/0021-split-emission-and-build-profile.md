@@ -401,6 +401,34 @@ frontend_js_lower 1M/307 —— 每函数 3-4 KB，均匀，没有单点膨胀�
 剩下的两步没变，顺序是死的：**P2a**（宏加存储类参数 -> 共享段变成"只有声明的头 +
 一个定义 TU"）-> 然后每个模块 `.c` 才编得起来、`.o` 才能按内容寻址缓存、并行才有意义。
 
+### 最小构建（只留 js -> c）值多少：量出来了，76%
+
+按模块切完，把 94 个 TU 按子系统加起来（`emit c src/cli.js --split`，字节）：
+
+```
+共享段            7.75 M      <- 字面量池 + 模板实例化 + 原型（P2a 之后是"一份头 + 一个 TU"）
+frontend_asy      2.48 M (10)      link            1.55 M (11)
+frontend_c        2.03 M ( 6)      mir             0.93 M ( 9)
+frontend_js       1.90 M ( 5)      interp          0.69 M ( 3)
+frontend_jnc      1.42 M ( 1)      x64             0.49 M ( 3)
+frontend_glsl     0.84 M ( 4)      arm64           0.44 M ( 3)
+frontend_wat      0.24 M ( 1)      backend_llvm    0.41 M ( 1)
+sexpr             0.58 M ( 3)      backend_js      0.27 M ( 2)
+glr              0.29 M ( 5)      backend_spirv   0.18 M ( 1)
+host 1.13 M / cli 0.86 M / hir 0.56 M / parse 0.24 M / repl 0.12 M / 其余 < 0.1 M
+```
+
+**只留 js -> c 这条路**：留下 frontend_js + backend_c + hir + host + cli + module + source
++ parse ≈ **5.4 M**，摘掉别的前端（asy / c / jnc / glsl / wat / sexpr / glr ≈ 7.9 M）与
+别的后端与原生那一摊（link / mir / interp / x64 / arm64 / llvm / spirv ≈ 5.0 M）
+—— **能砍掉约 12.9 M / 17 M 的独占部分，76%**。生成的 C 从 25.9 M 掉到约 13 M
+（其中 7.75 M 是共享段，那一份等 P2a 之后自己会瘦）。
+
+一条硬边界：`backend_js` 不能在**自举链**里摘 —— `bootstrap` 的 C1 / C2 两条不动点是
+`emit-js` 出来的 `omni.mjs`。所以"最小构建"有两档：`--only=js2c`（跑用户程序，最小）
+与 `--only=js2c,js`（能自举）。这一格是 P5，前置是 P2a：摘掉一个子系统等于**不链它的 `.o`**，
+而 `.o` 得先存在。
+
 ## 顺带记下的两个坑（都不是性能问题，是这一轮量的时候撞上的）
 
 **`dist` 安装跑不了 `omni c tcc`。** 它把 libc 头解析到 `<dist>/include`，而 bootstrap 的
