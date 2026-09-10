@@ -10,6 +10,10 @@ import { CheckSession } from '../../src/core/hir/check.js';
 import { CoreSession } from '../../src/core/sexpr/lower.js';
 import { InterpSession } from '../../src/core/interp/eval.js';
 import { JsSession } from '../../src/core/repl.js';
+/* JS 后端是一格插件（ADR-0021 的 S4），REPL 拿它走注册表。这个用例直接 new JsSession，
+   没经过 cli.js 那条装插件的路，所以自己登记一次 —— 与"没插件就一格后端都没有"这条一致。 */
+import { registerJsTarget } from '../../src/core/target/js.js';
+import { registerTarget, registerCap } from '../../src/core/plugin.js';
 import { loadProgram, newLoadState } from '../../src/core/module/load.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { AsySession } from '../../src/core/frontend-asy/lower.js';
@@ -25,6 +29,8 @@ import { fileURLToPath } from 'node:url';
 
 const N = 40;
 let fail = 0;
+
+registerJsTarget({ registerTarget, registerCap });
 
 const bad = (msg) => {
   process.stdout.write(`  FAIL ${msg}\n`);
