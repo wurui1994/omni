@@ -783,6 +783,16 @@ class JncLower {
     // 所以 `import` 到自己身上是一句空话，不会把整份源码再摊一遍。
     this.impFind = opts.find === undefined ? null : opts.find;
     this.impParse = opts.parse === undefined ? null : opts.parse;
+    /* `import "libfoo.dylib" with "foo.h"` 的那一半（ADR-0022 的 J4d）：
+       `decls(spec, from)` 回 `{decls, skipped}`（`cap('c.declsOf')` 那一格）或者 `null`
+       （找不着那个头文件）。与 `find`/`parse` 同一种带法 —— 这一层不碰文件系统。 */
+    this.impDecls = opts.decls === undefined ? null : opts.decls;
+    /* `with "h.h"` 收进来的那些外部符号名（ADR-0022 的 J4d）。**眼下只用来把诊断说准**：
+       声明进得来（`emit sx` 里看得见那几句 `(cabi …)`），而从 jnc 里**调**它们还没接上 ——
+       那一步与 `opaque class` 宿主方法是同一格（调用点要发 `(ccall …)`）。少了这一格，
+       写了 `with` 的人得到的是一句「没有这个函数」，而那句话是错的：函数是有的。 */
+    this.cabiNames = new Set();
+
     // 格式化字面量里 `$(…)` 那一段要再解析一遍（第六十四刀）。没给就当没有那一格。
     this.parseExpr = opts.parseExpr === undefined ? null : opts.parseExpr;
     // 要不要入口（第六十五刀）：跑的那几条腿要，`omni sx` 只降不跑，不要。
@@ -948,6 +958,12 @@ class JncLower {
 
   nope(node, what) {
     return this.err(node, `${JNC_NOPE}：${what}`);
+  }
+
+  /** 一条**警告**（不停下）。`import … with "h"` 里跳过的那些声明走这条，见 `impWith`。 */
+  warn(node, msg) {
+    this.diags.warn(node === null || node === undefined ? null : node.span, msg);
+    return null;
   }
 
   /** `(H)` / `(H X)` / `(H-add PREV X)` 三种形状摊成一条平的列表（与 asy 那份同一个套路） */
@@ -3531,12 +3547,57 @@ class JncLower {
        三个平台的后缀都收，`.so.6` 那种带版本号的也算（Linux 上很常见）。 */
     if (/\.(dylib|dll)$/.test(spec) || /\.so($|\.)/.test(spec)) {
       this.decls.push(`  (lib ${JSON.stringify(spec)})`);
+      /* `with "foo.h"`（ADR-0022 的 J4d）：那个头文件里的函数声明**一条条变成 `(cabi …)`**。
+         收不下的（float、struct 按值、老式声明…）跳过并记一笔 —— 一个真头文件里总有几条
+         落不进 C_ABI 那七个词，而其中一条都不该让整次 import 失败。 */
+      const hdr = it.items[2];
+      const hspec = hdr === undefined ? null : (isStr(hdr) || isAtom(hdr) ? hdr.value : null);
+      if (hspec !== null) this.impWith(it, spec, hspec);
       return null;
     }
     if (this.impFind === null || this.impParse === null) {
       return this.nope(it, `import "${spec}"（这一趟降级没带模块加载）`);
     }
     this.impQ.push({ node: it, spec, from: this.impFrom });
+    return null;
+  }
+
+  /**
+   * `import "libfoo.dylib" with "foo.h"` 的 `with` 那一半（ADR-0022 的 J4d）。
+   *
+   * 头文件里的函数声明一条条变成 `(cabi 名字 返回类型 (形参类型…))`。解析那件事**不在这儿**：
+   * 走的是注入的 `decls` 钩子（`cap('c.declsOf')`）—— 那一格用的是这个仓库里已有的那份 C
+   * 前端（tcc 的移植，现在就在读真的 SDK 头），所以不外挂 tcc、也不另写一个 C 解析器。
+   *
+   * 收不下的一律**跳过并记一笔**（`warn`），不让一条声明把整次 import 弄失败：一个真头文件
+   * 里总有几条落不进 C_ABI 那七个词（`float`、struct 按值、老式声明…）。
+   *
+   * **变参的这一版也跳过**：方言的 `(cabi …)` 还说不出变参分界（`printf` 那一族因此进不来）。
+   * 那一格是下一刀 —— MIR 与后端早就支持（`CCALL` 的 aux 就是它），缺的只有方言那一句语法。
+   */
+  impWith(it, lib, hspec) {
+    if (this.impDecls === null) {
+      return this.nope(it, `import "${lib}" with "${hspec}"（这一趟降级没带 C 头文件解析）`);
+    }
+    const got = this.impDecls(hspec, this.impFrom);
+    if (got === null) return this.err(it, `找不着头文件 '${hspec}'`);
+    let n = 0;
+    for (const d of got.decls) {
+      if (d.variadic === true) {
+        this.warn(it, `${d.name}：变参的外部函数这一层还收不下（方言的 (cabi …) `
+          + '说不出变参分界）—— 要它就手写一句声明');
+        continue;
+      }
+      this.decls.push(`  (cabi ${d.name} ${d.ret} (${d.params.join(' ')}))`);
+      this.cabiNames.add(d.name);
+      n++;
+    }
+    /* 跳过的那些只报**一条**汇总：一个 `<stdio.h>` 能跳过上百条，逐条报会把真正的诊断埋掉。
+       名字都在 `--verbose` 那一档里没有意义 —— 要查是哪一条，手写那一句声明就知道了。 */
+    if (got.skipped.length > 0) {
+      this.warn(it, `"${hspec}" 里有 ${got.skipped.length} 条声明落不进 C_ABI 的七个词`
+        + `（收下了 ${n} 条）；第一条：${got.skipped[0].name} —— ${got.skipped[0].why}`);
+    }
     return null;
   }
 
@@ -6520,6 +6581,13 @@ class JncLower {
         return this.nope(n, `'${shown(hostOwner)}.${mn}' —— 它是 opaque class 上的方法，`
           + '实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面');
       }
+    }
+    /* `with "h.h"` 收进来的那些（ADR-0022 的 J4d）：声明**是有的**（`emit sx` 里看得见
+       那几句 `(cabi …)`），缺的是调用点那一步 —— 要发 `(ccall …)` 而不是 `(call …)`，
+       与 `opaque class` 宿主方法同一格。报「没有这个函数」是错的，所以这儿单列一条。 */
+    if (nm === null && nm0 !== null && this.cabiNames.has(nm0)) {
+      return this.nope(n, `调 '${nm0}'（它的声明从 with "…" 那个头文件里收进来了，`
+        + '但从 jnc 里调外部 C 符号这一步还没接上）');
     }
     if (nm === null) return this.err(n, `没有这个函数：'${nm0}'`);
     // 方法体里裸写 `foo()` 就是 `this.foo()`（类是一层命名空间，所以 resolve 已经找着了

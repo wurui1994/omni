@@ -13,6 +13,11 @@ import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { lowerJnc } from '../frontend-jnc/lower.js';
 import { lowerCoreSexpr } from '../sexpr/lower.js';
+/* `import … with "h.h"` 要 C 前端那一格（`c.declsOf`）。走 `cap()` 而不是直接 import：
+   两门语言各是一个插件，jancy 不该在装载期就把 C 前端拖进来 —— 只有真写了 `with` 的
+   源码才会问它，那时候要么它在，要么当场报"没装 C 前端"。 */
+import { cap } from '../plugin.js';
+
 
 /* 核心交过来的宿主服务。 */
 let JNC_API = null;
@@ -132,6 +137,19 @@ export function jncText(path, dirs = [], needEntry = true) {
     unit: resolve(path),
     find,
     parse: (p) => jncParse(tb, p, diags),
+    /* `import "libfoo.dylib" with "foo.h"` 的那一半（ADR-0022 的 J4d）：头文件按与 `.jnc`
+       同一条规矩找（写这条 import 的文件旁边，再是 `-I` 那张表），找着了交给 `cap('c.declsOf')`
+       —— 那一格用的是这个仓库里已有的那份 C 前端，所以不外挂 tcc、也不另写一个解析器。 */
+    decls: (spec, from) => {
+      const p = find(spec, from);
+      if (p === null) return null;
+      return cap('c.declsOf')(p, {
+        includeDirs: dirs,
+        sysIncludeDirs: cap('c.sysInclude')(),
+        arch: 'arm64',
+        os: undefined,
+      }, []);
+    },
     parseExpr: (file, src, offset) => jncParseExpr(tb, file, src, offset, diags),
     dirs,
     needEntry,

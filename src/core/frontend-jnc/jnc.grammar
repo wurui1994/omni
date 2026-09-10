@@ -145,6 +145,10 @@
       "if" "else" "for" "while" "do" "break" "continue" "return" "switch" "case"
       "default" "once" "onevent" "try" "throw" "catch" "finally" "nestedscope"
       "assert" "await" "dylayout" "basetype" "this" "true" "false" "null"
+      ;; `with`（ADR-0022 的 J4d）：**jancy 没有这个关键字**，是 `import … with "h.h"` 加的。
+      ;; 量过参考树：83 份 `.jnc` 里出现过这个词，全在字符串与文档注释里，一处当标识符用的
+      ;; 都没有 —— 所以保留它的代价是零。
+      "with"
       "dynamic")
     (punct SHLASSIGN "<<=")
     (punct SHRASSIGN ">>=")
@@ -183,6 +187,11 @@
 
   (rule decl
     (-> ("import" LITERAL) (import $2))
+    ;; `import "libfoo.dylib" with "foo.h";`（ADR-0022 的 J4d）—— **这一条是我们加的**，
+    ;; jancy 没有：它那边动态库走 `.jncx`（一个 zip，把声明与共享库封在一起）。
+    ;; `with` 因此成了保留字。量过参考树：83 份 `.jnc` 里出现过 `with` 这个词，**全在字符串
+    ;; 与文档注释里**，一处当标识符用的都没有 —— 所以这个保留的代价是零。
+    (-> ("import" LITERAL "with" LITERAL) (import $2 $4))
     (-> ("namespace" qname "{" unit "}") (namespace $2 $4))
     (-> ("extension" qname base-list "{" unit "}") (extension $2 $3 $5))
     (-> ("dylib" qname "{" unit "}") (dylib $2 $4))
