@@ -66,6 +66,27 @@ export function lang(path) {
   return null;
 }
 
+/* ---- 跑法（runner）：有些语言的"执行"根本不产 OIR ----
+ *
+ * `.frag` / `.glsl` 的"跑"是**渲一帧、写一张 PNG**（ADR-0019 决策九），它没有 OIR 这一层。
+ * 所以注册表上另开一格：语言那半张表答"怎么变成 OIR"，这半张答"怎么跑"。
+ * 混在一张表里就得在 compile 的返回值上编个"其实没有 mod"的特例，那是把两件事拧在一起。
+ */
+const RUNNERS = new Map();
+
+/** @param exts 扩展名（带点）@param name 语言名 @param run (path, argv) -> 退出码 */
+export function registerRunner(exts, name, run) {
+  for (const e of exts) RUNNERS.set(e, { name, run });
+}
+
+/** 这个路径有没有自己的跑法；没有就交 null（调用方走"编出来再跑"那条常规路） */
+export function runner(path) {
+  for (const [ext, r] of RUNNERS) {
+    if (path.endsWith(ext)) return r;
+  }
+  return null;
+}
+
 /** 装着的语言都有哪些 */
 export function langNames() {
   const out = [];

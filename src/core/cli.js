@@ -62,11 +62,12 @@ import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
 /* 后端过一格注册表（ADR-0021 S3）：调用点不叫函数名，可选加载才有立足处 */
-import { target, registerLang, lang } from './plugin.js';
+import { target, registerLang, lang, registerRunner, runner } from './plugin.js';
 /* 已经搬成独立模块的语言（ADR-0021 S4）：它们不 import 这一份，所以能独立编译。
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
 import { registerWatLang } from './lang/wat.js';
+import { registerGlslLang } from './lang/glsl.js';
 import { registerSxLang } from './lang/sx.js';
 import { registerJncLang, jncText, compileJnc } from './lang/jnc.js';
 import {
@@ -723,6 +724,7 @@ function compile(path, argv = []) {
  * 核心方言（.omni / .omnid / .omnis）不登记：它跟 driver 是一体的，永远在核心里。 */
 registerLang(['.js'], 'js', (path) => compileJs(path));
 registerWatLang({ registerLang, log: vStep });
+registerGlslLang({ registerRunner, findCC });
 registerSxLang({ registerLang, log: vStep });
 /* asy 那一份拿着核心给的宿主服务过日子（ADR-0021 S4）：印记那三格是驱动侧的
  * 缓存格式，AST 缓存的键沿用了它 —— 那处层次串门记在 lang/asy.js 的文件头里。 */
@@ -1862,49 +1864,6 @@ function runViaJit(mod, argv, srcPath) {
 }
 
 
-/**
- * `omni run x.frag -o out.png`（ADR-0019 决策九）。这一层只做**参数**：把 `--size`
- * 与那一串 `--set` 翻成 `render.js` 要的形状，别的都在那一份里。
- *
- * `-o` 是必给的：一帧一张图，没有「印到 stdout」这个说法（PNG 是二进制）。
- */
-function runGlslFrag(path, rest) {
-  const oi = rest.indexOf('-o');
-  if (oi < 0) throw new OmniError(`run ${basename(path)}: 要给 -o OUT.png（一帧一张图）`);
-  const out = rest[oi + 1];
-  const si = rest.indexOf('--size');
-  const sz = si >= 0 ? rest[si + 1] : '256';
-  const xy = sz.split('x');
-  const w = Number(xy[0]);
-  const h = xy.length > 1 ? Number(xy[1]) : w;
-  if (!(w > 0) || !(h > 0)) throw new OmniError(`run: --size ${sz} 说不通（要 N 或 NxM）`);
-  /* `--set` 可重复，所以扫一遍而不是 `indexOf`。 */
-  const set = {};
-  for (let i = 0; i < rest.length; i++) {
-    if (rest[i] !== '--set') continue;
-    const kv = rest[i + 1] === undefined ? '' : rest[i + 1];
-    const eq = kv.indexOf('=');
-    if (eq <= 0) throw new OmniError(`run: --set 要 NAME=v[,v…]，给的是 '${kv}'`);
-    set[kv.slice(0, eq)] = kv.slice(eq + 1).split(',').map((s) => Number(s));
-  }
-  /* `--tex NAME=W,H,r,g,b,a,…` —— 采样器的值。与 `--set` 分开一个开关，因为它的形状
-   * 不一样：前两个数是宽高，后面是 W×H×4 个纹素分量（RGBA、行优先）。1D 的高给 1。 */
-  for (let i = 0; i < rest.length; i++) {
-    if (rest[i] !== '--tex') continue;
-    const kv = rest[i + 1] === undefined ? '' : rest[i + 1];
-    const eq = kv.indexOf('=');
-    if (eq <= 0) throw new OmniError(`run: --tex 要 NAME=W,H,v…，给的是 '${kv}'`);
-    const nums = kv.slice(eq + 1).split(',').map((s) => Number(s));
-    if (nums.length < 3) throw new OmniError(`run: --tex ${kv.slice(0, eq)} 至少要 W,H 加一个纹素`);
-    set[kv.slice(0, eq)] = { w: nums[0], h: nums[1], data: nums.slice(2) };
-  }
-  const root = join(installDir(), '..', '..', '..');
-  /* `env` 是宿主函数，**不能当值传** —— 封闭 ABI 里它只有"被调用"这一种用法。
-     包一层箭头函数：递过去的是普通闭包，里面那一句才是那次调用。 */
-  const r = glslRenderToPng(root, path, out, w, h, set, findCC(), (n) => env(n));
-  stdout(`${r.out}  ${w}x${h}  uniform ${r.uniforms.length} 个  ir ${r.irLines} 行\n`);
-  return 0;
-}
 
 /**
  * `omni run x.asy -f svg` / `omni run x.asy -o x.svg`（ADR-0015 那一节）。
@@ -2422,7 +2381,8 @@ function main(argv) {
       /* `.frag`/`.glsl` 走另一条腿（ADR-0019 决策九）：**渲一帧、写一张 PNG**。
        * 前端由扩展名选，与别处同一条规矩 —— 变的只是「执行」在这一门语言里是什么意思：
        * 片元着色器没有 main 可跑，它的「跑一遍」就是把每个像素算出来。 */
-      if (path.endsWith('.frag') || path.endsWith('.glsl')) return runGlslFrag(path, rest);
+      const rn = path === undefined || path === null ? null : runner(path);
+      if (rn !== null) return rn.run(path, rest);
       /* `.c`：**编 + 链 + 跑**，走自带的 C 前端 + 代码生成 + 链接器（见 `runCFile`）。
        * 从前这儿没有这一格，`.c` 一路掉到 omni 的前端上，报的是
        * `unexpected character: "#"` —— 前端由扩展名选那条规矩漏了 C 这一门。 */
