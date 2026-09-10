@@ -99,3 +99,17 @@ export function cMir(path, incs, defs, args, sysIncs) {
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
   return mod;
 }
+
+/**
+ * 登记（ADR-0021 的 S4）：C 这门语言交给驱动的那几格本事。
+ *
+ * 驱动**不许**直接 `import { cMir }` —— 只要还有一条直连，摇树就把这门语言整条拽进核心，
+ * "核心不带 C 前端"就是空话（量出来的：--builtins min 只省 96 KB）。所以按名字给。
+ * `.c` 不登记成"语言"：它由 `omni c` 那一组命令驱动（obj / tcc / mir 各有各的产物），
+ * 不走"按扩展名认 -> 出 OIR"那条路。
+ */
+export function registerCLang(api) {
+  api.registerCap('c.toMir', cMir);
+  api.registerCap('c.sysInclude', cSysInclude);
+  api.registerCap('c.usrLib', sdkUsrLib);
+}

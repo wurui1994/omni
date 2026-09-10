@@ -448,5 +448,19 @@ export function asyUnitTexts(path, skip) {
    `omni_plugin_init`，JS 这一侧的名字就不必再避让了。 */
 export function registerAsyLang(api) {
   initAsy(api);
+  /* 驱动要的那几格（按名字给，不让驱动直接 import —— 见 plugin.js 的 CAPS）：
+     产物缓存要"这一趟读过哪些文件"，JS 单元那条路要单元名与它的符号名，
+     `-o` 的默认名要主单元那个词。 */
+  api.registerCap('asy.toSx', asyText);
+  api.registerCap('asy.deps', asyLastDeps);
+  api.registerCap('asy.unitName', unitName);
+  api.registerCap('asy.jsUnitSym', jsUnitSym);
+  api.registerCap('asy.fileUnitName', fileUnitName);
+  api.registerCap('asy.mainWord', asyMainWord);
+  api.registerCap('asy.unitTexts', asyUnitTexts);
+  /* 这两格驱动是**当值**递出去的（不是调用），所以按名字要的时候也得有：
+     增量那条路要 AST 缓存的读法，REPL 那条路要整套 asy 前端。 */
+  api.registerCap('asy.astUnpack', astUnpack);
+  api.registerCap('asy.frontEnd', asyFrontEnd);
   api.registerLang(['.asy'], 'asy', (path) => compileAsy(path));
 }

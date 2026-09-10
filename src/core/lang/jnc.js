@@ -152,5 +152,8 @@ export function compileJnc(path, dirs = []) {
    `omni_plugin_init`，JS 这一侧的名字就不必再避让了。 */
 export function registerJncLang(api) {
   initJnc(api);
+  /* 驱动要的那一格：`omni emit sx x.jnc` 印的是降到核心方言的那份文本。按名字给，
+     不让驱动直接 import（理由见 plugin.js 的 CAPS）。 */
+  api.registerCap('jnc.toSx', jncText);
   api.registerLang(['.jnc'], 'jnc', (path, argv) => compileJnc(path, api.incDirs(argv)));
 }

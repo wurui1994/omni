@@ -15,6 +15,7 @@ import { registerSxLang } from './sx.js';
 import { registerAsyLang } from './asy.js';
 import { registerJncLang } from './jnc.js';
 import { registerGlslLang } from './glsl.js';
+import { registerCLang } from './c.js';
 import { registerJsTarget } from '../target/js.js';
 import { registerCTarget } from '../target/c.js';
 import { registerLlvmTarget } from '../target/llvm.js';
@@ -32,4 +33,5 @@ export function registerBuiltins(api) {
   registerAsyLang(api);
   registerJncLang(api);
   registerGlslLang(api);
+  registerCLang(api);
 }

@@ -99,6 +99,39 @@ export function runner(path) {
   return null;
 }
 
+/* ---- 能力（cap）：驱动要用某门语言的一格本事，按名字要，不许直接 import ----
+ *
+ * 量出来的（ADR-0021）：`--builtins min` 换掉 builtin.js 只省了 96 KB —— 因为驱动仍然
+ * `import { cMir } from './lang/c.js'`、`import { asyText } from './lang/asy.js'`，
+ * 摇树照样把那几门整条拽进来。只要还有一条直连，"核心不带这门语言"就是空话。
+ *
+ * 所以驱动那边全部改成按名字要：`cap('c.toMir')`。没装就**响着拒**（那门语言没装），
+ * 而不是 undefined is not a function。
+ */
+const CAPS = new Map();
+
+/** @param name 形如 `c.toMir` / `asy.toSx` @param fn 那一格本事 */
+export function registerCap(name, fn) {
+  CAPS.set(name, fn);
+}
+
+/** 有没有装这一格（驱动要先问再走另一条路时用，比如"没装 asy 就别去找 asy 的缓存"） */
+export function hasCap(name) {
+  return CAPS.has(name);
+}
+
+/** 要这一格；没装就响着拒 —— 名字前半段就是那门语言/目标 */
+export function cap(name) {
+  const f = CAPS.get(name);
+  if (f === undefined) {
+    const dot = name.indexOf('.');
+    const who = dot > 0 ? name.slice(0, dot) : name;
+    throw new OmniError(`${who} 没装：这份 omni 里没有 '${name}' 这一格`
+      + `（装一格 omni-lang-${who} 插件，或用带它的那份 omni）`);
+  }
+  return f;
+}
+
 /** 装着的语言都有哪些 */
 export function langNames() {
   const out = [];

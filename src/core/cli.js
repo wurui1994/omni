@@ -26,13 +26,8 @@ import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
-import { lowerAsy } from './frontend-asy/lower.js';
-import { asyUnitModules } from './frontend-asy/link.js';
-import { parseAsyBuiltins } from './frontend-asy/types.js';
-import { lowerJnc } from './frontend-jnc/lower.js';
-import { glslRenderToPng } from './frontend-glsl/render.js';
 import { Cpp } from './frontend-c/tccpp.js';
-import { lowerC, lowerCNative } from './frontend-c/tccgen.js';
+import { lowerCNative } from './frontend-c/tccgen.js';
 import { genArm64Module as genArm64 } from './arm64/from_mir.js';
 import { genModule as genX64 } from './x64/from_mir.js';
 import { writeObject } from './link/macho.js';
@@ -42,10 +37,8 @@ import { peLoad, PE_GUI } from './link/pe_load.js';
 import { peWrite } from './link/pe_link.js';
 import { elfExe } from './link/elf_exe.js';
 import { machoExe, isMachoBinary } from './link/macho_exe.js';
-import { readSexpr } from './sexpr/read.js';
 import { lowerCoreSexpr } from './sexpr/lower.js';
 import { printSexpr } from './sexpr/print.js';
-import { readGrammar } from './glr/grammar.js';
 import { dumpTable } from './glr/table.js';
 import { loadGrammarTable } from './glr/load.js';
 import { lexText } from './glr/lex.js';
@@ -64,16 +57,12 @@ import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
 /* 后端过一格注册表（ADR-0021 S3）：调用点不叫函数名，可选加载才有立足处 */
 import {
   target, registerTarget, registerLang, lang, registerRunner, runner, noteUnloadable,
+  registerCap, cap, langNames,
 } from './plugin.js';
 /* 已经搬成独立模块的语言（ADR-0021 S4）：它们不 import 这一份，所以能独立编译。
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
-import { sdkRoot, sdkUsrInclude, sdkUsrLib, cSysInclude, cMir } from './lang/c.js';
-import { jncText, compileJnc } from './lang/jnc.js';
 import { registerBuiltins } from './lang/builtin.js';
-import {
-  asyText, compileAsy, asyLastDeps, unitName, jsUnitSym, fileUnitName, asyMainWord, asyUnitTexts,
-} from './lang/asy.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
@@ -172,7 +161,7 @@ function sysIncDirs(argv) {
   }
   const bi = argv.indexOf('--tcc-lib-dir');
   if (bi >= 0 && argv[bi + 1] === undefined) throw new OmniError('--tcc-lib-dir 后面要一个目录');
-  if (!argv.includes('-nostdinc')) out.push(...cSysInclude(bi >= 0 ? argv[bi + 1] : undefined));
+  if (!argv.includes('-nostdinc')) out.push(...cap('c.sysInclude')(bi >= 0 ? argv[bi + 1] : undefined));
   return out;
 }
 
@@ -225,7 +214,7 @@ function inclArgs(argv) {
       }
     },
     includeDirs: incs,
-    sysIncludeDirs: sysIncs ?? cSysInclude(),
+    sysIncludeDirs: sysIncs ?? cap('c.sysInclude')(),
     dirname,
     join,
     /* 目标（`--arch` / `--os`）：预定义宏那一整张表按它分（第一百二十九片）。
@@ -378,7 +367,7 @@ function cObj(path, out, arch, incs, defs, fmt, os, sysIncs) {
       }
     },
     includeDirs: incs,
-    sysIncludeDirs: sysIncs ?? cSysInclude(),
+    sysIncludeDirs: sysIncs ?? cap('c.sysInclude')(),
     dirname,
     join,
     /* 预定义宏里目标 CPU 那三条跟着 `--arch` 走（第一百〇二片）：`__x86_64__` 一变，
@@ -665,6 +654,7 @@ function pluginApi() {
     registerLang: registerLang,
     registerTarget: registerTarget,
     registerRunner: registerRunner,
+    registerCap: registerCap,
     log: vStep,
     /* 印记那三格与 srcIdNote 是驱动侧产物缓存的格式（asy 的 AST 缓存借了它 ——
        那处层次串门记在 lang/asy.js 的文件头里）；incDirs / findCC 也是驱动的事。 */
@@ -715,6 +705,14 @@ function discoverPlugins() {
 function compileFront(path, argv) {
   const l = lang(path);
   if (l !== null) return l.compile(path, argv);
+  /* 不是核心方言、又没有哪门语言认它：**响着拒**，别拿核心方言去解析。
+     量到过（薄核心上跑 `.asy`）：落到核心方言之后报的是 `undefined function 'write'` ——
+     那句话把人往错的方向带，真相是"这份 omni 里没有 asy 这门语言"。 */
+  const core = path.endsWith('.omni') || path.endsWith('.omnid') || path.endsWith('.omnis');
+  if (!core) {
+    throw new OmniError(`不认识 ${basename(path)} 这种扩展名：这份 omni 带着 ${langNames().join(' / ')}`
+      + '（别的语言装一格 omni-lang-<名字> 插件，见 plugins/ 那个目录）');
+  }
   return compileProgram(path, undefined, modeFor(path, argv));
 }
 
@@ -837,7 +835,7 @@ function jsCachePut(path, js, deps) {
  * 一个字节都没变。命中之后剩下的只有 exec。
  *
  * 印记比 JS 那份多一格 **cc**：同一份源码用 clang 与用 tcc 链出来的是两个可执行文件。
- * 依赖清单与 jsCache 同一套（`路径\t改动时间\t字节数`，事后从 asyLastDeps() 取）。
+ * 依赖清单与 jsCache 同一套（`路径\t改动时间\t字节数`，事后从 cap('asy.deps')() 取）。
  * `OMNI_NO_EXECACHE=1` 关掉（对照用）。
  */
 function exeCacheDir() {
@@ -1049,7 +1047,7 @@ function asyModsSkip(dir, cs, mainTag) {
     return { name: nm, key: dep.key, need: dep.need, sigs, weak };
   };
   const skipFn = (info) => {
-    const nm = unitName(info);
+    const nm = cap('asy.unitName')(info);
     const me = load(nm);
     if (me === null) return null;
     // 它要带的那几份也得全齐（一份缺了就整个不跳过 —— 宁可老老实实降一遍）
@@ -1097,7 +1095,7 @@ function asyModsSkip(dir, cs, mainTag) {
       //   asy-units（只编译） 关 537/517/508ms   开 406/333/273ms
       //   run（编译 + 跑）    关 885/738/623ms   开 551/502/477ms
       if (env('OMNI_ASY_IFACE') !== '1') return null;
-      const nm = unitName(info);
+      const nm = cap('asy.unitName')(info);
       const p = join(dir, `${nm}.aif`);
       if (!exists(p)) { vStep(`asy 接口索引不命中 ${nm} 没有 .aif`); return null; }
       if (skipFn(info) === null) { vStep(`asy 接口索引不命中 ${nm} 产物那一套没齐`); return null; }
@@ -1115,7 +1113,7 @@ function asyModsSkip(dir, cs, mainTag) {
           lineText: () => '',
           text: '',
         },
-        unpack: astUnpack,
+        unpack: cap('asy.astUnpack'),
       };
     },
   };
@@ -1187,9 +1185,9 @@ function asyModsBuild(path, dir) {
   // 一格都不带，谁都能复用。判据故意**偏保守** —— 正文里恰好出现同名字符串的库会白重编
   // 一次，但绝不会拿着别的例子的名字跑。
   const cs = srcStamp();
-  const mainWord = asyMainWord(path);
+  const mainWord = cap('asy.mainWord')(path);
   const mainTag = `main:${mainWord}`;
-  const r = asyUnitTexts(path, asyModsSkip(dir, cs, mainTag));
+  const r = cap('asy.unitTexts')(path, asyModsSkip(dir, cs, mainTag));
   // ADR-0015 第一步与第二步：指纹与归属先只打印不接线，好验两样都与"入口是谁"无关。
   if (env('OMNI_ASY_FP') === '1') {
     const fps = asyFps([...r.units, ...r.reused], cs);
@@ -1257,7 +1255,7 @@ function asyModsBuild(path, dir) {
         : `asy 逐条切开对不上 ${u.name}`);
     }
     const d = new Diagnostics();
-    const mod = lowerCoreSexpr(new SourceFile(`${u.name}.sx`, u.text), d, `omni_init_${jsUnitSym(u.name)}`);
+    const mod = lowerCoreSexpr(new SourceFile(`${u.name}.sx`, u.text), d, `omni_init_${cap('asy.jsUnitSym')(u.name)}`);
     d.throwIfErrors();
     writeText(jsPath, target('js').emit(mod, { esm: true }));
     // 下一趟要复用这一份时，前端连它的正文都不降 —— 那时靠的就是这三格：
@@ -1297,10 +1295,10 @@ function asyModsBuild(path, dir) {
   for (const u of r.reused) if (u.name !== r.entry) names.push(u.name);
   names.sort();
   const lines = ["import './omni_rt.js';"];
-  for (const n of names) lines.push(`import { omni_init_${jsUnitSym(n)} } from './${n}.js';`);
-  lines.push(`import { omni_init_${jsUnitSym(r.entry)} } from './${r.entry}.js';`);
-  for (const n of names) lines.push(`omni_init_${jsUnitSym(n)}();`);
-  lines.push(`omni_init_${jsUnitSym(r.entry)}();`);
+  for (const n of names) lines.push(`import { omni_init_${cap('asy.jsUnitSym')(n)} } from './${n}.js';`);
+  lines.push(`import { omni_init_${cap('asy.jsUnitSym')(r.entry)} } from './${r.entry}.js';`);
+  for (const n of names) lines.push(`omni_init_${cap('asy.jsUnitSym')(n)}();`);
+  lines.push(`omni_init_${cap('asy.jsUnitSym')(r.entry)}();`);
   lines.push('$js_check_uncaught();');
   lines.push('$flush();');
   lines.push('');
@@ -1348,7 +1346,7 @@ function asyModsBuild(path, dir) {
 function asyModsEnv(path) {
   const d = env('ASYMPTOTE_DIR');
   const b = env('OMNI_ASY_BUILTINS');
-  const m = path === undefined ? '' : fileUnitName(path);
+  const m = path === undefined ? '' : cap('asy.fileUnitName')(path);
   return `env|${cwd()}|${d === undefined ? '' : d}|${b === undefined ? '' : b}|${m}`;
 }
 
@@ -1366,7 +1364,7 @@ function asyModsEnv(path) {
  * 编译器自己变了」每趟都在，没人细看）。
  */
 function asyModsFast(path, dir) {
-  const nm = fileUnitName(path);
+  const nm = cap('asy.fileUnitName')(path);
   const mainPath = join(dir, `main-${nm}.js`);
   const depPath = join(dir, `main-${nm}.dep`);
   // 不成立时**说清是哪一格不成立**：这条快路一旦悄悄失效，整个前端就白跑一趟
@@ -1713,7 +1711,7 @@ function runViaC(mod, argv, srcPath, cache) {
   if (wi >= 0) mkdirAll(dir);
   const exe = cached === null ? join(dir, 'a.out') : cached;
   const built = buildNative(mod, exe, wi >= 0 ? dir : undefined);
-  if (cached !== null) exeCachePut(srcPath, built.cc, asyLastDeps());
+  if (cached !== null) exeCachePut(srcPath, built.cc, cap('asy.deps')());
   /* 三维那一档的 GL 插件：顺手编一下、把**绝对路径**放进环境，子进程 dlopen 它。
      `OMNI_GL_LIB` 已经给了就不动（标定时要能指别的库）；编不出来就什么都不设，
      运行时那侧找不到库自然走 CPU 光栅器。 */
@@ -1914,7 +1912,7 @@ function asyRunSetup(path, rest) {
  */
 function cDefaultLibs(os) {
   if (os !== 'osx') return [];
-  return ['-lc', '-L', sdkUsrLib()];
+  return ['-lc', '-L', cap('c.usrLib')()];
 }
 
 /**
@@ -2219,7 +2217,7 @@ function main(argv) {
         const oi = rest.indexOf('-o');
         const out = oi >= 0 ? rest[oi + 1] : `${basename(path, '.c')}.js`;
         const { flags, prog } = cSplitArgs(rest);
-        const mir = cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
+        const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
         const text = emitMirJs(mir, { rtImport: join(installDir(), '..', 'mir', 'js_rt.js') });
         writeText(out, text);
         stderr(`omni: built ${out} (${text.length} 字节，MIR -> JS；`
@@ -2232,7 +2230,7 @@ function main(argv) {
         const oi = rest.indexOf('-o');
         const out = oi >= 0 ? rest[oi + 1] : `${basename(path, '.c')}.mir`;
         const { flags, prog } = cSplitArgs(rest);
-        const text = printMir(cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags)));
+        const text = printMir(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags)));
         writeText(out, text);
         stderr(`omni: built ${out} (${text.length} 字节，MIR —— 解释器吃的就是这一层；`
           + '喂回去跑还差「可回读的 IR」那一格，见 ADR-0018)\n');
@@ -2299,7 +2297,7 @@ function main(argv) {
     const li = rest.indexOf('--lang');
     const ei = rest.indexOf('--engine');
     return startRepl(modeFor('', rest, 'dynamic'), li >= 0 ? rest[li + 1] : 'omni',
-      { asy: asyFrontEnd, asyPrelude: () => (env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins') },
+      { asy: cap('asy.frontEnd'), asyPrelude: () => (env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins') },
       ei >= 0 ? rest[ei + 1] : 'interp');
   }
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
@@ -2366,7 +2364,7 @@ function main(argv) {
    * 而 `--explain` 的承诺是「一个字节都不写盘、不执行」。（第一版就摆错了，量出来了。） */
   if (cmd === 'check') {
     if (path.endsWith('.c')) {
-      const mod = cMir(path, incDirs(rest), defArgs(rest), [], sysIncDirs(rest));
+      const mod = cap('c.toMir')(path, incDirs(rest), defArgs(rest), [], sysIncDirs(rest));
       stdout(`ok  ${path}：${mod.funcs.length} 个函数（C 一遍过 + MIR 自检）\n`);
       return 0;
     }
@@ -2449,7 +2447,7 @@ function main(argv) {
       if (hasJsEngine()) {
         const js = target('js').emit(mod);
         vStep(`backend js  ${js.length} bytes`);
-        if (cacheable) jsCachePut(path, js, asyLastDeps());
+        if (cacheable) jsCachePut(path, js, cap('asy.deps')());
         // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）：跑在本进程里的这一条
         // 装得上那格钩子，编成独立产物的场合装不上 —— 那时那两个 op 当场报错
         installSrcEvalHook();
@@ -2621,7 +2619,7 @@ function main(argv) {
     // 而那份 .sx 是虚拟的（从不落盘），所以没有这一条就只能拿着行号猜。印出来的
     // 内容与 lowerCoreSexpr 拿到的**逐字节相同** —— 行号可以直接对。
     case 'sx': {
-      stdout(path.endsWith('.jnc') ? jncText(path, incDirs(rest), false) : asyText(path));
+      stdout(path.endsWith('.jnc') ? cap('jnc.toSx')(path, incDirs(rest), false) : cap('asy.toSx')(path));
       return 0;
     }
     // C 的预处理（ADR-0017 第五刀）。**格式与 `tcc -E` 逐字节相同** —— 那是它的
@@ -2672,17 +2670,17 @@ function main(argv) {
     // **退出码就是 C 的 `main` 的返回值**，与 `tcc -run` 逐条相同，那也是这一刀的 oracle。
     case 'c-mir': {
       const { flags, prog } = cSplitArgs(rest);
-      stdout(printMir(cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
+      stdout(printMir(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
       return 0;
     }
     case 'c-emit-js': {
       const { flags, prog } = cSplitArgs(rest);
-      stdout(emitMirJs(cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
+      stdout(emitMirJs(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
       return 0;
     }
     case 'c-run': {
       const { flags, prog } = cSplitArgs(rest);
-      const mod = cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
+      const mod = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
       return runMirModule({ structs: [], enums: [], classes: [], js: false }, mod);
     }
     /**
@@ -2697,7 +2695,7 @@ function main(argv) {
      */
     case 'c-run-js': {
       const { flags, prog } = cSplitArgs(rest);
-      const mir = cMir(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
+      const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
       const js = emitMirJs(mir);
       vStep(`backend js (from mir)  ${js.length} bytes`);
       return runMirJs(js);
@@ -2924,7 +2922,7 @@ function main(argv) {
         else if (rest[k].startsWith('-L') && rest[k].length > 2) libPaths.push(rest[k].slice(2));
       }
       libPaths.push('/usr/lib');
-      const sdkLib = sdkUsrLib();
+      const sdkLib = cap('c.usrLib')();
       if (sdkLib !== null) libPaths.push(sdkLib);
       const findLib = (name) => {
         const fmts = name.startsWith(':')
@@ -3035,7 +3033,7 @@ function main(argv) {
     // 那是唯一能抓住封闭 ABI 违规的门槛（详见 tests/bootstrap/run.js 阶段 8）。
     // asy 前端的中间形态：印出核心方言，`omni run x.asy` 吃的就是它（ADR-0014 第 2 道门槛）
     case 'emit-asy': {
-      stdout(asyText(path));
+      stdout(cap('asy.toSx')(path));
       return 0;
     }
     case 'glr-table': {
