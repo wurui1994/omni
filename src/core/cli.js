@@ -1644,11 +1644,13 @@ function runtimeObjects(cc) {
  * 都能直接翻出那份 C 来看。不给的时候落在 `.omni-cache/work/c-<产物名>` 底下，
  * 名字是确定的（从前是 /var/folders 里一个随机名，出了问题捞不着）。
  */
-function buildNative(mod, outPath, workDir, plugin) {
+function buildNative(mod, outPath, workDir, plugin, extern, own) {
   const dir = workDir === undefined ? workDirFor('c', hash16(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const cPath = join(dir, `${basename(outPath)}.c`);
-  const { text: cText, stats } = emitCWithStats(mod, plugin === undefined ? {} : { plugin: plugin });
+  const { text: cText, stats } = emitCWithStats(mod, {
+    plugin: plugin, extern: extern === true, own: own === undefined ? null : own,
+  });
   writeText(cPath, cText);
   vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
   vStats(cText, stats);
@@ -1664,8 +1666,11 @@ function buildNative(mod, outPath, workDir, plugin) {
    *     未定义符号），`.so` 留着就行。名字里已经说了是哪个平台，不必再猜一遍。 */
   const dylib = outPath.endsWith('.dylib');
   const shared = ['-fPIC', '-shared'].concat(dylib ? ['-undefined', 'dynamic_lookup'] : []);
+  /* `--extern` 的可执行文件要把符号**导出**给插件解析（否则插件只能自带一份）：
+     macOS / Linux 的 clang 都认 -Wl,-export_dynamic。 */
+  const ex = extern === true ? ['-Wl,-export_dynamic'] : [];
   const cargs = plugin === undefined
-    ? [...ccFlags(cc), cPath, ...runtimeObjects(cc), '-o', outPath, '-lm', ...libs]
+    ? [...ccFlags(cc), ...ex, cPath, ...runtimeObjects(cc), '-o', outPath, '-lm', ...libs]
     : [...ccFlags(cc), ...shared, cPath, '-o', outPath, ...libs];
   const r = spawn(cc, cargs, 'o');
   if (r[0] !== 0) {
@@ -2505,8 +2510,11 @@ function main(argv) {
       const wi = rest.indexOf('--work');
       /* `--plugin NAME`：出一格动态库而不是可执行文件，NAME 是它的 register 函数。 */
       const pi = rest.indexOf('--plugin');
+      /* `--own A,B`：这一份只发这些文件里的函数与全局，别的当 extern（分语言独立构建）。 */
+      const owi = rest.indexOf('--own');
+      const own = owi >= 0 && rest[owi + 1] !== undefined ? rest[owi + 1].split(',') : undefined;
       const { cc } = buildNative(mod, out, wi >= 0 ? rest[wi + 1] : undefined,
-        pi >= 0 ? rest[pi + 1] : undefined);
+        pi >= 0 ? rest[pi + 1] : undefined, rest.includes('--extern') || own !== undefined, own);
       /* 优化档要印出来：`-O0` 与 `-O1` 在这条腿上是 12 秒对 137 秒的差别（ADR-0021），
          而它从前只藏在 OMNI_OPT 里 —— 看不见的档等于每次都要猜这一趟慢是不是因为它。 */
       stderr(`omni: built ${out} via ${cc} ${cc.endsWith('tcc') ? '（tcc：不分档）' : optFlag()}\n`);

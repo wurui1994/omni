@@ -71,6 +71,13 @@ class CEmitter {
      * 共用前段照抄进每个 TU：没被引用的 static 一份机器码都不生成（量出来 528 字节），
      * 所以复制它只花每个 TU 约 0.46 秒的编译税。带状态的那三样不能复制 —— 见 ADR-0021。 */
     this.split = opts.split === true;
+    /* **外部链接**与**切文件**是两件事（ADR-0021 的 S4）：切文件必然要外部链接，
+     * 但"核心把符号导出去给插件用"不需要切文件。所以拆成两格开关。 */
+    this.extern = opts.split === true || opts.extern === true;
+    /* `own`：这一份产物**只发**这些文件里的函数与全局，别的只留原型（extern）——
+     * 分语言独立构建就是这一格：插件只装它自己那几个模块，其余在加载时绑到核心上。
+     * 判据是 P1 的 `f.file` 与（刚补的）`g.file`。 */
+    this.own = Array.isArray(opts.own) && opts.own.length > 0 ? opts.own : null;
     /* 插件（ADR-0021 S4）：不发 main，改发一格 `omni_plugin_init(api)` —— 值是那个
      * 顶层 register 函数的名字。宿主初始化不能重做（见下面发那一句的地方）。 */
     this.plugin = opts.plugin === undefined || opts.plugin === null ? null : opts.plugin;
@@ -341,7 +348,7 @@ class CEmitter {
     const gdefs = [];
     for (const g of this.mod.jsGlobals ?? []) {
       const def = `omni_dyn g_${g.name} = { .tag = OMNI_DYN_UNDEF };`;
-      if (this.split) { this.line(`extern ${def.slice(0, def.indexOf(' =') )};`); gdefs.push(def); }
+      if (this.extern) { this.line(`extern ${def.slice(0, def.indexOf(' =') )};`); gdefs.push(this.owns(g.file) ? def : null); }
       else this.line(`static ${def}`);
     }
     // 核心方言的模块级变量（第二十四刀）：有类型，所以发的是那个类型的静态量。
@@ -349,18 +356,18 @@ class CEmitter {
     // （字符串的"零"是个池子里的空串常量，那不是常量表达式，只能在运行时赋）。
     for (const g of this.mod.globals ?? []) {
       const def = `${cTypeName(g.type)} g_${g.name};`;
-      if (this.split) { this.line(`extern ${def}`); gdefs.push(def); }
+      if (this.extern) { this.line(`extern ${def}`); gdefs.push(this.owns(g.file) ? def : null); }
       else this.line(`static ${def}`);
     }
     this.profTable();
     for (const f of this.mod.funcs) this.line(`${this.proto(f)};`);
     /* 闭包的 make 也要跨 TU 调得到：原型进共用前段，定义留在"只发一次"那段 ——
      * 单例闭包的 `static omni_fn one` 是状态，复制它 `f === f` 会假。 */
-    if (this.split) for (const c of closures) this.line(`${this.closureProto(c)};`);
+    if (this.extern) for (const c of closures) this.line(`${this.closureProto(c)};`);
     this.line();
     this.markA = this.out.length;
-    for (const d of gdefs) this.line(d);
-    for (const c of closures) this.closureMake(c);
+    for (const d of gdefs) if (d !== null) this.line(d);
+    for (const c of closures) if (this.ownsFn(c.mangled)) this.closureMake(c);
     const fnMetaN = this.fnMetaTable(closures);
     /* 按源文件记一笔产出（P1）：每个函数发了多少行、多少字节。
      * `--stats` 靠它印"42 万行是哪几个源文件撑起来的" —— 单体构建里这件事从前压根看不见，
@@ -369,6 +376,8 @@ class CEmitter {
      * 所以它们归到 stats 的 '(shared)' 那一行里（见 cli.js 印表那儿）。 */
     this.markB = this.out.length;
     for (const f of this.mod.funcs) {
+      /* 不属于这一份的：原型已经发过（extern 模式下就是外部声明），体不发 —— 加载时绑到核心那一份上 */
+      if (!this.owns(f.file)) continue;
       const i0 = this.out.length;
       this.func(f);
       let bytes = 0;
@@ -484,6 +493,24 @@ class CEmitter {
     return named.length;
   }
 
+  /** 这个文件属于这一份产物吗（`own` 没给就全算自己的） */
+  owns(file) {
+    if (this.own === null) return true;
+    const f = typeof file === 'string' ? file : '';
+    for (const p of this.own) if (f.includes(p)) return true;
+    return false;
+  }
+
+  /** 按 mangled 名找它的源文件再判：闭包记录上没有 file，但同名的函数记录上有 */
+  ownsFn(mangled) {
+    if (this.own === null) return true;
+    if (this.fileOfFn === undefined) {
+      this.fileOfFn = new Map();
+      for (const f of this.mod.funcs) this.fileOfFn.set(f.mangled, f.file);
+    }
+    return this.owns(this.fileOfFn.get(mangled));
+  }
+
   closureProto(c) {
     const ps = c.captures.map((f) => `${cTypeName(f.type)} c_${f.name}`);
     return `omni_fn ${c.make}(${ps.length ? ps.join(', ') : 'void'})`;
@@ -527,7 +554,7 @@ class CEmitter {
 
   closureMake(c) {
     const ps = c.captures.map((f) => `${cTypeName(f.type)} c_${f.name}`);
-    this.line(`${this.split ? '' : 'static '}omni_fn ${c.make}(${ps.length ? ps.join(', ') : 'void'}) {`);
+    this.line(`${this.extern ? '' : 'static '}omni_fn ${c.make}(${ps.length ? ps.join(', ') : 'void'}) {`);
     this.indent++;
     // 带 `single` 的那一格（`(fnref f)` 的薄适配器）发**单件**：同一个具名函数取出来的值
     // 必须是同一个东西，不然 `f == g` 这种按身份比的式子永远为假。量过 asy：具名函数
@@ -1153,7 +1180,7 @@ class CEmitter {
     // `static inline __attribute__((always_inline))`，36.0s -> 38.5s（没变好）。
     // 真要消掉热路径上那些调用（`asy__rm` 3.2 亿次、`triple * real` 各 2578 万次），
     // 只有两条路：**发射器自己在调用点摊开**，或者把编译等级提到 `-O1`（那是 ADR 级的决定）。
-    return `${this.split ? '' : 'static '}${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
+    return `${this.extern ? '' : 'static '}${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
   }
 
   func(f) {

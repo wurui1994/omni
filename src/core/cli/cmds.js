@@ -227,7 +227,9 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
       brief: '编译成产物',
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
         { name: '--plugin', arity: 1, value: 'NAME', brief: '出一格插件动态库，NAME 是它的 register 函数' },
-        { name: '--builtins', arity: 1, value: 'min|full', brief: '这份产物内建哪些语言/目标（min 只留 js -> c）' }],
+        { name: '--builtins', arity: 1, value: 'min|full', brief: '这份产物内建哪些语言/目标（min 只留 js -> c）' },
+        { name: '--extern', arity: 0, brief: '生成的函数用外部链接并导出（插件要能绑到它）' },
+        { name: '--own', arity: 1, value: 'A,B', brief: '只发这些文件里的函数与全局，别的当 extern' }],
     },
     {
       name: 'emit', key: 'emit', usage: 'FORM FILE',
