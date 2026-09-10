@@ -68,7 +68,7 @@ import { target, registerLang, lang } from './plugin.js';
  * —— 两条路在注册表那一层看不出区别。 */
 import { register as registerWat } from './lang/wat.js';
 import { register as registerSx } from './lang/sx.js';
-import { astPack, astUnpack, asyFrontEnd } from './lang/asy.js';
+import { initAsy, asyText, compileAsy, asyLastDeps } from './lang/asy.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
@@ -720,6 +720,9 @@ function compile(path, argv = []) {
 registerLang(['.js'], 'js', (path) => compileJs(path));
 registerWat({ registerLang, log: vStep });
 registerSx({ registerLang, log: vStep });
+/* asy 那一份拿着核心给的宿主服务过日子（ADR-0021 S4）：印记那三格是驱动侧的
+ * 缓存格式，AST 缓存的键沿用了它 —— 那处层次串门记在 lang/asy.js 的文件头里。 */
+initAsy({ log: vStep, inpPath, inpOk, inpField, srcIdNote });
 registerLang(['.asy'], 'asy', (path) => compileAsy(path));
 registerLang(['.jnc'], 'jnc', (path, argv) => compileJnc(path, incDirs(argv)));
 
@@ -734,7 +737,6 @@ function compileFront(path, argv) {
  * 上一趟 asyText 读过的文件（主文件在第一格）。产物缓存的依赖清单用它 ——
  * 模块是**加载期**才知道的（`import` 在源码里），所以只能事后取。
  */
-let lastAsyDeps = [];
 
 /**
  * 编译器自己那一份的印记：src/core 底下每个文件的「路径 + 改动时间 + 字节数」。
@@ -849,7 +851,7 @@ function jsCachePut(path, js, deps) {
  * 一个字节都没变。命中之后剩下的只有 exec。
  *
  * 印记比 JS 那份多一格 **cc**：同一份源码用 clang 与用 tcc 链出来的是两个可执行文件。
- * 依赖清单与 jsCache 同一套（`路径\t改动时间\t字节数`，事后从 lastAsyDeps 取）。
+ * 依赖清单与 jsCache 同一套（`路径\t改动时间\t字节数`，事后从 asyLastDeps() 取）。
  * `OMNI_NO_EXECACHE=1` 关掉（对照用）。
  */
 function exeCacheDir() {
@@ -896,48 +898,7 @@ function exeCachePath(path) {
   return join(exeCacheDir(), `e-${hash16(path)}.bin`);
 }
 
-/**
- * asymptote -> 核心方言 -> OIR（ADR-0014 第 2 道门槛）。
- * 语法那一半是数据（`frontend-asy/asy.grammar`，从 camp.y 照原样转写）；这里只做
- * 类型定向的那一半，出来的仍然是核心方言文本 —— 于是六条腿一条都不知道 asy 存在。
- */
-function asyText(path, out, skipBody, ifaceFn) {
-  const fe = asyFrontEnd({ log: vStep, inpPath, inpOk, inpField });
-  const diags = new Diagnostics();
-  const tree = fe.parseText(path, readText(path), diags);
-  const text = lowerAsy(tree, diags, {
-    path, load: fe.loader(diags), builtins: fe.builtins,
-    // asy 的 C++ 内建面（path/pen/frame/… 那一族）做成一个模块，每个单元隐式 import
-    // 一次（见 lower.js 的 builtinsIn）。**默认开着** —— 真 asy 那边这一面是运行时自带的，
-    // `size(100);` 不用 import 任何东西就能跑，所以要它对上就不能靠环境变量。
-    // 与 ASYMPTOTE_DIR 一起用就是"引真的 base/*.asy"。OMNI_ASY_BUILTINS=0 关掉（
-    // 调这一面自己的时候用：它自己是 asy 源码，不能隐式引进自己）。
-    prelude: env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins',
-    // 模块名 -> 它解析到的真文件。**只 stat 不加载** —— 产物名里带这个路径的哈希，
-    // 而"这个库的产物还能用吗"要在加载之前就问得出来（见 asyFrontEnd 的 resolve）。
-    pathOf: (n) => fe.resolve(n),
-    // 产物还在、源文件没动的库：正文一步都不降（第七十六刀，见 lower.js 的 skipBody）
-    skipBody: skipBody === undefined ? null : skipBody,
-    // 库的接口索引要把默认实参那些表达式打包进去（第七十八刀，见 iface.js）
-    astPack,
-    // 产物齐了的库：连源码都不读，声明从 `.aif` 认（第七十八刀）
-    iface: ifaceFn === undefined ? null : ifaceFn,
-  }, out);
-  diags.throwIfErrors();
-  // 这一趟读过的文件（主文件 + 真的加载了的模块）。产物缓存的依赖清单就是它，
-  // 所以必须是**加载完之后**取 —— fe.seen 是 loader 一路 push 进去的。
-  lastAsyDeps = [path];
-  for (const p of fe.seen) if (!lastAsyDeps.includes(p)) lastAsyDeps.push(p);
-  vStep(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
-  return text;
-}
 
-function compileAsy(path) {
-  const diags = new Diagnostics();
-  const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, asyText(path)), diags);
-  diags.throwIfErrors();
-  return { ast: null, mod, diags };
-}
 
 /**
  * 一个单元 -> 它那份产物的名字（盘上就叫这个，只换后缀）。
@@ -1056,6 +1017,18 @@ function asyModsDir() {
 const srcIdMemo = new Map();
 
 /** `{mtime, len, hash}`；文件不在就回 null。同一趟里一个文件只哈希一次。 */
+/**
+ * 前端手上已经有文本了，把这份内容的身份记进印记备忘 —— 省得下面真要哈希时再读一遍文件。
+ * 入口在驱动这一侧：`srcIdMemo` 是产物缓存的备忘，前端只是"顺手告诉一声"（经 api 递进来）。
+ * `hash` 是个 thunk：只有真要存的时候才算。
+ */
+function srcIdNote(p, mtime, len, hash) {
+  const had = srcIdMemo.get(p);
+  if (had === undefined || had.mtime !== mtime || had.len !== len) {
+    srcIdMemo.set(p, { mtime: mtime, len: len, hash: hash() });
+  }
+}
+
 function srcId(p) {
   if (p === '' || !exists(p)) return null;
   const m = mtimeMs(p);
@@ -1922,7 +1895,7 @@ function runViaC(mod, argv, srcPath, cache) {
   if (wi >= 0) mkdirAll(dir);
   const exe = cached === null ? join(dir, 'a.out') : cached;
   const built = buildNative(mod, exe, wi >= 0 ? dir : undefined);
-  if (cached !== null) exeCachePut(srcPath, built.cc, lastAsyDeps);
+  if (cached !== null) exeCachePut(srcPath, built.cc, asyLastDeps());
   /* 三维那一档的 GL 插件：顺手编一下、把**绝对路径**放进环境，子进程 dlopen 它。
      `OMNI_GL_LIB` 已经给了就不动（标定时要能指别的库）；编不出来就什么都不设，
      运行时那侧找不到库自然走 CPU 光栅器。 */
@@ -2687,7 +2660,7 @@ function main(argv) {
       if (hasJsEngine()) {
         const js = target('js').emit(mod);
         vStep(`backend js  ${js.length} bytes`);
-        if (cacheable) jsCachePut(path, js, lastAsyDeps);
+        if (cacheable) jsCachePut(path, js, asyLastDeps());
         // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）：跑在本进程里的这一条
         // 装得上那格钩子，编成独立产物的场合装不上 —— 那时那两个 op 当场报错
         installSrcEvalHook();

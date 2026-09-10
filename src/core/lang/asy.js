@@ -20,10 +20,26 @@ import { loadGrammarTable } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { parseAsyBuiltins } from '../frontend-asy/types.js';
-import { SourceFile } from '../source/diag.js';
+import { Diagnostics, SourceFile } from '../source/diag.js';
+import { lowerAsy } from '../frontend-asy/lower.js';
+import { lowerCoreSexpr } from '../sexpr/lower.js';
 
 /* cli.js 那个 loadGrammar 是"读表 + 印一行"，而这一份不许伸手去拿 cli 的东西 ——
    表还是同一个 loadGrammarTable（缓存就在它里面），只是印那一行走注入进来的 log。 */
+/* 核心交过来的宿主服务（log 与驱动侧印记那三格）。插件被加载时给一次，之后一直用它 ——
+   这与 dlopen 出来的那一格在 omni_plugin_init 里收下 host 表是同一件事。 */
+let API = null;
+/** 这一趟 asy 读过的文件（主文件在第一格）。产物缓存的依赖清单问它，而不是伸手进来读变量。 */
+let asyDeps = [];
+
+export function initAsy(api) {
+  API = api;
+}
+
+export function asyLastDeps() {
+  return asyDeps;
+}
+
 function loadGrammarWith(path, log) {
   const { g, tb, hit, cachePath } = loadGrammarTable(path);
   if (hit) log(`grammar ${g.name}  ${tb.states.length} states, cache hit ${cachePath}`);
@@ -145,7 +161,8 @@ export function astUnpack(s, file) {
  * 降级器只拿解析好的东西 —— 整份文件的编译（asyText）与 REPL（repl.js 的 AsyLang）
  * 共用这一份，所以"从哪里找模块"这类规则不会有两份实现。
  */
-export function asyFrontEnd(api) {
+export function asyFrontEnd() {
+  const api = API;
   /* 宿主服务从这一格拿，不许伸手去 import cli.js。
      inpPath 是驱动那边"印记"格式（路径:改动时间:字节数:h内容哈希）的读法 —— 搬这一块的时候
      才发现前端在读它，那是一处层次串门：AST 缓存的键沿用了产物缓存的印记格式。
@@ -204,13 +221,10 @@ export function asyFrontEnd(api) {
     const cpath = base === '' ? '' : join(astDir, `${base}.ast`);
     const spath = base === '' ? '' : join(astDir, `${base}.stamp`);
     // 这一趟的文本已经在手上，把这份内容的身份记进备忘（下面真要哈希时不用再读一遍文件）
+    /* 备忘是**驱动侧**印记的那一格（srcIdMemo），所以经 api 递过去，前端不碰它。
+       哈希用个 thunk 传：只有真要存的时候才算，与原来"对不上才哈希"一字不差。 */
     const seed = () => {
-      const m = mtimeMs(p);
-      const n = fileSize(p);
-      const had = srcIdMemo.get(p);
-      if (had === undefined || had.mtime !== m || had.len !== n) {
-        srcIdMemo.set(p, { mtime: m, len: n, hash: hash16(text) });
-      }
+      API.srcIdNote(p, mtimeMs(p), fileSize(p), () => hash16(text));
     };
     if (cpath !== '' && exists(spath) && exists(cpath)) {
       const fs = readText(spath).split('|');
@@ -299,4 +313,47 @@ export function asyFrontEnd(api) {
     parseText: parseText, loader: loader, builtins: builtins, libDir: libDir, seen: seen,
     paths: paths, resolve: resolve,
   };
+}
+
+/**
+ * asymptote -> 核心方言 -> OIR（ADR-0014 第 2 道门槛）。
+ * 语法那一半是数据（`frontend-asy/asy.grammar`，从 camp.y 照原样转写）；这里只做
+ * 类型定向的那一半，出来的仍然是核心方言文本 —— 于是六条腿一条都不知道 asy 存在。
+ */
+export function asyText(path, out, skipBody, ifaceFn) {
+  const fe = asyFrontEnd();
+  const diags = new Diagnostics();
+  const tree = fe.parseText(path, readText(path), diags);
+  const text = lowerAsy(tree, diags, {
+    path, load: fe.loader(diags), builtins: fe.builtins,
+    // asy 的 C++ 内建面（path/pen/frame/… 那一族）做成一个模块，每个单元隐式 import
+    // 一次（见 lower.js 的 builtinsIn）。**默认开着** —— 真 asy 那边这一面是运行时自带的，
+    // `size(100);` 不用 import 任何东西就能跑，所以要它对上就不能靠环境变量。
+    // 与 ASYMPTOTE_DIR 一起用就是"引真的 base/*.asy"。OMNI_ASY_BUILTINS=0 关掉（
+    // 调这一面自己的时候用：它自己是 asy 源码，不能隐式引进自己）。
+    prelude: env('OMNI_ASY_BUILTINS') === '0' ? '' : 'asy_builtins',
+    // 模块名 -> 它解析到的真文件。**只 stat 不加载** —— 产物名里带这个路径的哈希，
+    // 而"这个库的产物还能用吗"要在加载之前就问得出来（见 asyFrontEnd 的 resolve）。
+    pathOf: (n) => fe.resolve(n),
+    // 产物还在、源文件没动的库：正文一步都不降（第七十六刀，见 lower.js 的 skipBody）
+    skipBody: skipBody === undefined ? null : skipBody,
+    // 库的接口索引要把默认实参那些表达式打包进去（第七十八刀，见 iface.js）
+    astPack,
+    // 产物齐了的库：连源码都不读，声明从 `.aif` 认（第七十八刀）
+    iface: ifaceFn === undefined ? null : ifaceFn,
+  }, out);
+  diags.throwIfErrors();
+  // 这一趟读过的文件（主文件 + 真的加载了的模块）。产物缓存的依赖清单就是它，
+  // 所以必须是**加载完之后**取 —— fe.seen 是 loader 一路 push 进去的。
+  asyDeps = [path];
+  for (const p of fe.seen) if (!asyDeps.includes(p)) asyDeps.push(p);
+  API.log(`asy front end  ${path} -> 核心方言 ${text.length} bytes`);
+  return text;
+}
+
+export function compileAsy(path) {
+  const diags = new Diagnostics();
+  const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, asyText(path)), diags);
+  diags.throwIfErrors();
+  return { ast: null, mod, diags };
 }
