@@ -123,10 +123,18 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   两格寄存器，于是第二个指针实参落错了位置。抽地址之后 `declare i32 @strcmp(ptr, ptr)`，
   两份用例的退出码分别是 10 与 7，都对。
 
-  **下一格边界（已定位）**：`extern FILE *stdout` 那一类**外部全局量** ——
+  **下一格边界（已定位，连接缝都找着了）**：`extern FILE *stdout` 那一类**外部全局量** ——
   `emit llvm hello.c` 现在停在 `llvm 后端目前不支持 dyn：模块级变量 __stdinp`。
-  它要的是 `@__stdinp = external global ptr`（jancy 那边 `mapVariable` 管的就是这一类），
-  补上之后 `printf` 那一族才通，而那正好也是 J4 后半（宿主把地址映进 JIT）的第一个真用例。
+  MIR 那一侧的记法是 `MirModule.setGlobalExtern(i, size, align)`（`globalBlob[i].extern`
+  = true，`mir/ir.js:1156`，只有 native 这条腿有），符号名在 `globalSym[i]`（不给就用
+  `globals[i]`）。所以这一刀要做三件事：
+  1. `globalBlob[i].extern` 的那些发 `@<真符号> = external global [<size> x i8]`，
+     **不带 `@g_` 前缀**（那个前缀是这一层给自己的模块级变量用的）；
+  2. `GLOAD`/`GSTORE` 到这些格子上时按**指令自己的类型**读写（外部块在我们眼里是裸内存，
+     `dyn` 那条拒绝不该照到它身上）；
+  3. 顺带就是 J4 后半的第一个真用例：JIT 里这些名字由宿主 `map` 进去
+     （jancy 的 `mapVariable` 管的正是这一类，`jnc_ct_Jit.cpp:189-215`）。
+  补完之后 `printf` 那一族才通，而 `tests/c/sys/*.c` 那一组就是现成的验收面。
 
 - **J5 FFI 第二刀（JIT → 任意库）**：库表 + `dlopen` 回退，用 `libm` 的 `sin`/`cos` 验收。
   C_ABI 里 `lib: null` 的那些（libc）走 `dlsym(RTLD_DEFAULT, …)`，第三方库走 `--lib`。
