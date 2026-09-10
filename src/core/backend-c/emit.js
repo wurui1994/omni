@@ -117,6 +117,10 @@ class CEmitter {
     this.opts = opts;
     // JS 字符串字面量池（见 s16Lit）。Map 保证发射顺序稳定 —— 自举要逐字节可复现。
     this.s16pool = new Map();
+    /* 池子里每条**按形态**记用过没有（见 strLit 那段注释里的量）：s16 那一对（u16 数组 +
+       描述符）与 UTF-8 那一对（字节串 + 描述符）各自只在用到时才发。 */
+    this.s16need = new Set();
+    this.strneed = new Set();
     this.s16At = -1;
     // 用到的向量形状（typeKey -> 类型）。和字面量池同一套路：边发射边收，最后回填。
     // 为什么不在 mod 里像 containers 那样先算好：向量没有实例化那一层（没有方法、
@@ -147,6 +151,27 @@ class CEmitter {
    * 500MB 常驻里绝大部分是这些一次性的键。字面量是编译期已知的，转换也就该在编译期做完。
    */
   s16Lit(s) {
+    const id = this.poolId(s);
+    this.s16need.add(id);
+    return id;
+  }
+
+  /**
+   * 同一个字面量的 **UTF-8 孪生体**（`${id}_s`，一格 `omni_str`）。对象的键在字典里就是
+   * UTF-8，取属性走它免掉一次转换与分配。
+   *
+   * 与 `s16Lit` 分开记是为了**别把两份都发出来**：量过核心那份 C —— 池子里每条都发四行
+   * （u16 数组 2.46 MB + 字节串 1.02 MB + 两个描述符 0.79 MB = 4.27 MB，占整份 14.86 MB 的
+   * 29%），而绝大多数字面量只按一种形态用过。哪一种用过就只发哪一种。
+   */
+  strLit(s) {
+    const id = this.poolId(s);
+    this.strneed.add(id);
+    return `${id}_s`;
+  }
+
+  /** 池子里的编号（两种形态共用一个）。 */
+  poolId(s) {
     let id = this.s16pool.get(s);
     if (id === undefined) {
       id = `k_s16_${this.s16pool.size}`;
@@ -295,15 +320,23 @@ class CEmitter {
   s16PoolLines() {
     const out = [];
     for (const [s, id] of this.s16pool) {
-      const units = [];
-      for (let i = 0; i < s.length; i++) units.push(`0x${s.charCodeAt(i).toString(16)}`);
-      // 空串也得有个合法的数组：C 里 {} 不是有效的初始化式
-      out.push(`static const uint16_t ${id}_u[] = { ${units.length > 0 ? units.join(', ') : '0'} };`);
-      out.push(`static const omni_s16 ${id} = { ${id}_u, ${s.length} };`);
-      // UTF-8 的孪生体：对象的键在字典里就是 UTF-8，取属性走 ${id}_s 直接免掉一次转换和分配
-      const bytes = utf8Bytes(s);
-      out.push(`static const char ${id}_b[] = ${cString(bytes)};`);
-      out.push(`static const omni_str ${id}_s = { ${id}_b, ${bytes.length} };`);
+      /* 只发**用过的那一种形态**（见 strLit 那段注释里的量）。两种都没用过的不可能存在：
+         进池子只有 s16Lit / strLit 两条路。 */
+      if (this.s16need.has(id)) {
+        const units = [];
+        /* 十进制、逗号后不留空格：这一格是**整份 C 里最大的一块文本**（核心里 2.46 MB）。
+           `0x6c, ` 是 6 个字符，`108,` 是 4 —— 同样的数据少三分之一。生成的 C 不是给人读的
+           主要面（要读的是函数体），这一格换成紧的写法很值。 */
+        for (let i = 0; i < s.length; i++) units.push(`${s.charCodeAt(i)}`);
+        // 空串也得有个合法的数组：C 里 {} 不是有效的初始化式
+        out.push(`static const uint16_t ${id}_u[] = {${units.length > 0 ? units.join(',') : '0'}};`);
+        out.push(`static const omni_s16 ${id} = { ${id}_u, ${s.length} };`);
+      }
+      if (this.strneed.has(id)) {
+        const bytes = utf8Bytes(s);
+        out.push(`static const char ${id}_b[] = ${cString(bytes)};`);
+        out.push(`static const omni_str ${id}_s = { ${id}_b, ${bytes.length} };`);
+      }
     }
     return out;
   }
@@ -954,7 +987,7 @@ class CEmitter {
           : `case ${JS_TAG_C[tag]}: return ${call};`);
       }
       // 表外的接收者：属性就是普通属性，方法就是"取属性再当函数调"（ADR-0011 决策 12）
-      const get = `omni_js_obj_getk(r, ${this.s16Lit(m.name)}_s)`;
+      const get = `omni_js_obj_getk(r, ${this.strLit(m.name)})`;
       if (m.kind === 'prop') {
         this.line(`default: return ${get};`);
       } else {
@@ -1867,7 +1900,7 @@ class CEmitter {
       case 'js_obj_get': case 'js_obj_set': case 'js_obj_has': case 'js_obj_delete': {
         const k = constKey(e.args[1]);
         if (k !== null) {
-          const args = [a[0], `${this.s16Lit(k)}_s`, ...a.slice(2)];
+          const args = [a[0], this.strLit(k), ...a.slice(2)];
           return `omni_${e.name}k(${args.join(', ')})`;
         }
         return `${JS_ALL[e.name].c}(${a.join(', ')})`;
