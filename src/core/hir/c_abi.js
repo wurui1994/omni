@@ -42,6 +42,33 @@ export const C_ABI = {
   c_getpid: { sym: 'getpid', lib: null, params: [], ret: 'i32' },
 };
 
+/**
+ * **预登记的 C 系统库**（ADR-0022 的 J4c）：名字 -> 怎么装。
+ *
+ * C 的系统库必须特殊对待，不能与第三方库走同一条「按路径 dlopen」：
+ *   - macOS 上它们根本不是磁盘上的文件 —— `existsSync('/usr/lib/libSystem.B.dylib')`
+ *     回 **false**（在 dyld 的共享缓存里），照路径判存在会把整条路静默跳过（量过）；
+ *   - 而且它们**已经在这个进程里**了（宿主自己链着 libc/libm），所以要的不是"装进来"，
+ *     是"去问进程的动态符号表" —— JIT 那侧就是 `--dl`，链接那侧是什么都不用加。
+ *
+ * `dl: true` = 走 RTLD_DEFAULT；`link` = 链接命令上要加的那一项（`null` = 不用加）。
+ * 表外的名字当成**路径**（第三方库，`dlopen` / 链接命令上原样写上去）。
+ */
+export const C_SYSLIBS = {
+  libc: { dl: true, link: null },
+  /* libm：macOS 上在 libSystem 里（不用 -lm），Linux/BSD 上要 -lm。
+     两边都已经在进程里，所以 JIT 那侧一律 `--dl`。 */
+  libm: { dl: true, link: '-lm' },
+  libpthread: { dl: true, link: '-lpthread' },
+  libdl: { dl: true, link: '-ldl' },
+};
+
+/** 一个 `(lib …)` 的名字是不是预登记的系统库。 */
+export function cSysLib(name) {
+  const hit = C_SYSLIBS[name];
+  return hit === undefined ? null : hit;
+}
+
 /** C 的类型拼写。extern 原型与调用处的强制转换都用它。 */
 export const C_TYPE = {
   i32: 'int32_t',

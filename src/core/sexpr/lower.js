@@ -184,6 +184,19 @@ class CoreLowerer {
      * 但这一层只收其中五个，见 `cabiDecl`。
      */
     this.cabis = new Map();
+    /**
+     * 要装的**动态库**（`(lib "…")`，ADR-0022 的 J4c）：路径或者预登记的系统库名。
+     *
+     * 与 jancy 的 `.jncx` 不是一回事：那是一个 zip、里头装着 `.jnc` 声明加一份编译好的
+     * 扩展库（`ImportMgr::addImport` 里 `isExtensionLib` 那一支）。我们这边**声明在源码里**
+     * （`(cabi …)` / `opaque class` 上的方法原型），这一格只说「那些符号的体在哪个库里」——
+     * 于是不需要 `.jncx` 那层封装，jnc 那侧写 `import "libfoo.dylib"` 就落在这儿。
+     *
+     * 顺序是声明序、去重（`Set` 记见过的），所以同一份输入两次降级出来的命令行一样。
+     */
+    this.libs = [];
+    this.libSeen = new Set();
+
 
     this.lifted = [];
     this.fnUsed = new Map();
@@ -521,6 +534,7 @@ class CoreLowerer {
       const h = head(f);
       if (h === 'cfn') { this.cfnSig(f); continue; }
       if (h === 'cabi') { this.cabiDecl(f); continue; }
+      if (h === 'lib') { this.libDecl(f); continue; }
 
       if (h !== 'fn' && h !== 'kernel') continue;
       const nm = isAtom(f.items[1]) ? f.items[1].value : null;
@@ -610,6 +624,30 @@ class CoreLowerer {
       params.push(t);
     }
     this.cabis.set(nm, { params, ret: rt, node: f });
+    return null;
+  }
+
+  /**
+   * `(lib "libfoo.dylib")` / `(lib "libm")` —— 要装的**动态库**（ADR-0022 的 J4c）。
+   *
+   * 这一层只**记下名字**，一个字节都不读：库里有什么由源码里的 `(cabi …)` 说，而"那些符号
+   * 的体在哪儿"由这一格说。两件事分开是刻意的 —— 与 jancy 的 `.jncx`（一个 zip，把声明和
+   * 编译好的扩展库封在一起）相比，这条路上"声明"始终是源码，于是**不需要一种新的文件格式**。
+   *
+   * 三个平台的后缀（`.dylib`/`.so`/`.dll`）都收：写的是那台机器上那个文件。不带后缀的当成
+   * **预登记的系统库名**（`hir/c_abi.js` 的 `C_SYSLIBS`）—— C 的系统库必须特殊对待，
+   * 因为它们未必是磁盘上的文件：macOS 上 `existsSync('/usr/lib/libSystem.B.dylib')` 回
+   * false（它在 dyld 的共享缓存里），照文件路径去 dlopen 是碰运气。那一类走的是
+   * 「问进程的动态符号表」那条路（`omni-jit --dl` / 链接时什么都不加）。
+   */
+  libDecl(f) {
+    const a = f.items[1];
+    const spec = isStr(a) || isAtom(a) ? a.value : null;
+    if (spec === null) return this.err(f, '(lib "路径或系统库名")');
+    if (spec.length === 0) return this.err(f, '(lib …) 的名字是空的');
+    if (this.libSeen.has(spec)) return null;   // 同一个库写两遍是一句空话，不是错
+    this.libSeen.add(spec);
+    this.libs.push(spec);
     return null;
   }
 
@@ -869,7 +907,8 @@ class CoreLowerer {
       if (h === 'global') continue;                    // 第二遍已经收过了
       if (h === 'memory' || h === 'data') continue;    // 第二遍半已经收过了
       if (h === 'cabi') continue;                      // 第三遍已经收过了（cabiDecl）
-      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (memory ...) / (data ...) / (cabi ...) / (fn ...) / (cfn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
+      if (h === 'lib') continue;                       // 第三遍已经收过了（libDecl）
+      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (memory ...) / (data ...) / (cabi ...) / (lib ...) / (fn ...) / (cfn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
     }
     // REPL 的一批里没有 `(main …)` 是正常的（只写了个函数定义）；整程序时必须有入口。
     if (!sawMain && entryName === 'omni_main') this.err(null, '缺入口：加一个 (main ...)');
@@ -941,6 +980,9 @@ class CoreLowerer {
          发 extern 原型 —— 少了它生成的 `.c` 里就是一次没有声明的调用（C99 里是错）。 */
       cabi: cabiNames,
       cabiSig: cabiSigs,
+      /* 要装的动态库（`(lib …)`，ADR-0022 的 J4c）。JIT 那条腿把它变成 `--lib`，
+         AOT 那条变成链接命令上的一项 —— 两处都只认这一格，不各自去猜。 */
+      libs: this.libs.slice(),
       imports: this.sigImports,
       entry: entryName,
       // 线性内存只在**声明它的那一批**里发出去（见构造器里的 memEmitted）：

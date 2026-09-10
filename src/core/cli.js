@@ -44,7 +44,7 @@ import { IncrCache, compileIncremental, incrReport } from './incr/cache.js';
 import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
-import { cAbiLibs } from './hir/c_abi.js';
+import { cAbiLibs, cSysLib } from './hir/c_abi.js';
 import {
   target, registerTarget, registerLang, lang, registerRunner, runner, noteUnloadable,
   registerCap, cap, langNames,
@@ -1987,7 +1987,18 @@ function runViaJit(mod, argv, srcPath) {
   writeText(llPath, ir);
   vStep(`backend llvm  ${ir.length} bytes -> ${llPath}`);
   const host = buildJitHost();
-  const code = spawn(host, [llPath], 'i')[0];
+  /* 要装的动态库（`(lib …)`，ADR-0022 的 J4c）：预登记的系统库只要一个 `--dl`（去问进程的
+     动态符号表 —— 它们本来就在这个进程里，而 macOS 上它们连磁盘上的文件都不是），
+     别的按路径 `--lib`。宿主那侧默认是**关**的，所以这几个开关一个都不能少（决策 2）。 */
+  const jitArgs = [llPath];
+  let wantDl = false;
+  for (const lib of mir.libs ?? []) {
+    const sys = cSysLib(lib);
+    if (sys !== null) { wantDl = true; continue; }
+    jitArgs.push('--lib', lib);
+  }
+  if (wantDl) jitArgs.push('--dl');
+  const code = spawn(host, jitArgs, 'i')[0];
   vStep(`orc jit ${llPath}  exit=${code}`);
   return code;
 }

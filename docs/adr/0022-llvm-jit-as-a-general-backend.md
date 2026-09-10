@@ -264,6 +264,33 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   **还剩最后一步**：jnc 把无体的 opaque 方法降成对 `Class_method(self, …)` 的 `(ccall …)`。
   路已经通了，剩的是名字的约定（`opaque.rst` 那边是 `JNC_BEGIN_CLASS` 那一串登记的）。
 
+- **J4c 动态库导入：`import "libfoo.dylib"`，不做 `.jncx`**。jancy 的扩展库是 `.jncx` ——
+  一个 zip，里头封着 `.jnc` 声明**加**一份编译好的共享库（`ImportMgr::addImport` 里
+  `isExtensionLib` 那一支走 `loadDynamicLib`）。我们**换一条路**：那两件事本来可以分开 ——
+  「有哪些符号」由源码里的声明说（`(cabi …)` / `opaque class` 上的方法原型），「它们的体在
+  哪儿」由一句 import 说。于是不需要一种新的文件格式，也不需要在编译器里读 zip。
+
+  ```
+  import "libfoo.dylib";   // jnc：.so / .dll 同样收，.so.6 那种带版本号的也算
+  (lib "libfoo.dylib")     // 方言里对应的那一句（jnc 降出来就是它）
+  ```
+
+  **C 的系统库必须特殊对待，而且是预登记的**（`hir/c_abi.js` 的 `C_SYSLIBS`：
+  `libc`/`libm`/`libpthread`/`libdl`）。两条量出来的理由：
+  1. 它们**未必是磁盘上的文件** —— macOS 上 `existsSync('/usr/lib/libSystem.B.dylib')`
+     回 **false**（在 dyld 的共享缓存里），照文件路径去 dlopen 是碰运气；
+  2. 它们**已经在这个进程里**了（宿主自己链着 libc/libm），所以要的不是"装进来"，
+     是"去问进程的动态符号表"。
+  所以这一类不走 dlopen，走 `omni-jit --dl`（RTLD_DEFAULT）；表里还记着链接那侧要不要
+  加一项（`libm` 在 Linux 上要 `-lm`，macOS 上不用）。表外的名字当成路径。
+
+  这一格在管线上是一条**独立的线**：`(lib …)` -> OIR 模块的 `libs` -> `MirModule.libs` ->
+  `runViaJit` 把它变成 `--lib` / `--dl`。**IR 里不带它** —— `.ll` 是给 LLVM 的，装哪个库
+  是宿主的事；手工跑 `omni-jit x.ll` 的时候开关自己给。
+  验收面在 `tests/llvm` 的第 6 节 `lib-decl`：一条第三方库（临时目录里编出来的 dylib，
+  走 `--lib`）、一条预登记的系统库（`(lib "libm")` + `sqrt`，走 `--dl`），都用
+  `run-jit` 跑 —— 一条命令、不手工给开关，钉的就是整条链。
+
 - **J5 FFI 第二刀（JIT → 任意库）——已落**：`--dl` 让表里没有的名字再问一次进程的动态
   符号表（`dlsym(RTLD_DEFAULT, …)`），`--lib PATH` 先 `dlopen(…, RTLD_NOW|RTLD_GLOBAL)`
   再走同一条路（于是它顺带打开 `--dl`：要一个库进来，本来就是"表里没有的去外面找"这件事）。

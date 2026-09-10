@@ -235,6 +235,51 @@ if (existsSync(sysDir)) {
   }
 }
 
+// ------------------------------------------------- 6. 源码里说要装哪个动态库（J4c）
+//
+// `(lib "…")`：与 jancy 的 `.jncx`（一个 zip，把声明和编译好的扩展库封在一起）换了一条路 ——
+// 「有哪些符号」由源码里的 `(cabi …)` 说，「它们的体在哪儿」由 `(lib …)` 说。于是不需要一种
+// 新的文件格式，而 jnc 那侧写 `import "libfoo.dylib"` 就落在这一句上。
+//
+// 这一条钉的是**整条链**：源码 -> OIR -> MIR -> `runViaJit` 把它变成 `omni-jit --lib`。
+// 所以它走 `run-jit`（一条命令，不手工给开关）—— 手工给 `--lib` 的那一路在第 5 节。
+// 库的路径是运行时才知道的（临时目录），所以 `.sx` 由测试自己写出来。
+{
+  const dir = join(here, 'cabi');
+  const hostC = join(dir, 'host.c');
+  const tmp = mkdtempSync(join(tmpdir(), 'omni-lib-'));
+  const ext = process.platform === 'darwin' ? 'dylib' : 'so';
+  const libPath = join(tmp, `libhost.${ext}`);
+  const so = spawnSync('clang', ['-shared', '-fPIC', hostC, '-o', libPath], { encoding: 'utf8' });
+  if (so.status !== 0) bad('lib-decl', `    dylib 编不出来：${(so.stderr ?? '').trim().split('\n')[0]}`);
+  else {
+    const sxPath = join(tmp, 'uselib.sx');
+    writeFileSync(sxPath, '(module\n'
+      + `  (lib ${JSON.stringify(libPath)})\n`
+      + '  (cabi omni_probe_add i64 (i64 i64))\n'
+      + '  (main\n'
+      + '    (print (ccall omni_probe_add (int 20) (int 22)))))\n');
+    const r = run(['run-jit', sxPath]);
+    const detail = [];
+    if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 2).join('\n      ')}`);
+    else if (r.out !== '42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "42\\n"）`);
+    /* 预登记的系统库（`hir/c_abi.js` 的 C_SYSLIBS）走的是另一条：不 dlopen 路径，
+       而是让宿主去问进程的动态符号表（`--dl`）—— macOS 上 libSystem 连磁盘上的文件都不是。 */
+    const sysPath = join(tmp, 'uselibm.sx');
+    writeFileSync(sysPath, '(module\n'
+      + '  (lib "libm")\n'
+      + '  (cabi sqrt f64 (f64))\n'
+      + '  (main\n'
+      + '    (print (ccall sqrt (real 2.25)))))\n');
+    const r2 = run(['run-jit', sysPath]);
+    if (r2.code !== 0) detail.push(`    (lib "libm") 那一路 exit=${r2.code}\n      ${(r2.err ?? '').trim().split('\n').slice(0, 2).join('\n      ')}`);
+    else if (r2.out !== '1.5\n') detail.push(`    (lib "libm") 的输出不对：${JSON.stringify(r2.out)}（要 "1.5\\n"）`);
+    if (detail.length > 0) bad('lib-decl', detail.join('\n'));
+    else ok('lib-decl [(lib …) 一路变成 omni-jit 的 --lib / --dl：第三方库与预登记的系统库各一条]');
+  }
+  rmSync(tmp, { recursive: true, force: true });
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 
 if (fail) {

@@ -926,6 +926,10 @@ export class MirModule {
      * 声明的**外部符号 —— 名字与签名只有前端知道。LLVM 那条腿不需要这一格（它的 declare
      * 是从调用点收上来的），C 那条腿需要：`.c` 里得有一份 extern 原型。 */
     this.cabiSig = [];
+    /* 要装的**动态库**（`(lib …)`，ADR-0022 的 J4c）：路径或者预登记的系统库名。
+     * 这一层不解释它 —— 解释的人是 `runViaJit`（变成 `omni-jit --lib`）与链接那一步。
+     * 与 `cabi` 是两件事：那一格说「要调哪些符号」，这一格说「它们的体在哪个库里」。 */
+    this.libs = [];
     this.closures = [];           // {make, funcName, captures:[名字]}
     // 线性内存（第二刀）。`null` = 这个模块不用内存 —— 于是既有的五个前端一个字节都不多发。
     // `{min, max, data}`：页数下界/上界（`max === 0` 表示不设上界），data 是

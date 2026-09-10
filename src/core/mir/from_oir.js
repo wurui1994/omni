@@ -56,6 +56,9 @@ class ToMir {
 
   run() {
     const m = this.mod;
+    /* 要装的动态库（`(lib …)`，ADR-0022 的 J4c）：原样带过来。这一层不解释它 ——
+       解释的人是 `runViaJit`（变成 `--lib`）与链接那一步（变成命令行上的一项）。 */
+    if (Array.isArray(this.oir.libs)) m.libs = this.oir.libs.slice();
     // 线性内存（第二刀）：模块级的一格，先建起来 —— MLOAD/MSTORE 的 verifier 要查
     // "这个模块有没有内存"，而那一步在函数体降完之后才跑，所以顺序上只要在 run 里就行。
     if (this.oir.mem !== undefined && this.oir.mem !== null) {

@@ -3508,15 +3508,30 @@ class JncLower {
    * `items` 后面 —— 后面那一串"命名空间成员不看声明顺序"的遍数于是自动管到被 import 的文件。
    *
    * `.jncx` 不收：那是**编译好的动态扩展库**（addImport 里 `isExtensionLib` 那一支走的是
-   * `loadDynamicLib`），不是源码；整棵参考树里一个 `.jncx` 文件都没有 —— 它们是构建产物。
+   * `loadDynamicLib`），一个 zip，里头封着 `.jnc` 声明加一份共享库；整棵参考树里一个
+   * `.jncx` 文件都没有 —— 它们是构建产物。
+   *
+   * **我们这边换了一条路**（ADR-0022 的 J4c）：直接 `import "libfoo.dylib"`（`.so`/`.dll`
+   * 同样收）。理由是那两件事本来可以分开 —— 「有哪些符号」由源码里的声明说（`opaque class`
+   * 上的方法原型），「它们的体在哪儿」由这一句说。于是不需要 `.jncx` 那层封装：一句
+   * `(lib "…")` 传给下游，JIT 那侧变成 `--lib`、链接那侧变成命令行上的一项。
+   *
+   * C 的系统库不写路径、写名字（`libc`/`libm`…，见 `hir/c_abi.js` 的 `C_SYSLIBS`）：
+   * 它们**已经在这个进程里**了，而 macOS 上它们连磁盘上的文件都不是。
    */
   impAdd(it) {
     const a = it.items[1];
     const spec = isStr(a) || isAtom(a) ? a.value : null;
     if (spec === null) return this.err(it, 'import 后面要一个字符串');
     if (spec.endsWith('.jncx')) {
-      return this.nope(it, `import "${spec}"（.jncx 是编译好的扩展库、不是源码，`
-        + '整棵参考树里也没有一个这样的文件）');
+      return this.nope(it, `import "${spec}"（.jncx 是编译好的扩展库、不是源码；`
+        + '这一层走的是另一条路：直接 import "libfoo.dylib"，声明照旧写在源码里）');
+    }
+    /* 动态库：不进那张"再解一份源码"的待办表，而是记成一句 `(lib …)`。
+       三个平台的后缀都收，`.so.6` 那种带版本号的也算（Linux 上很常见）。 */
+    if (/\.(dylib|dll)$/.test(spec) || /\.so($|\.)/.test(spec)) {
+      this.decls.push(`  (lib ${JSON.stringify(spec)})`);
+      return null;
     }
     if (this.impFind === null || this.impParse === null) {
       return this.nope(it, `import "${spec}"（这一趟降级没带模块加载）`);
