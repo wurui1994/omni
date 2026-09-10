@@ -427,6 +427,14 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   判据：`tests/llvm/run.js` 第 8 节两条 —— 没有头文件时输出对、warning 在、warning 里写出
   猜的那份签名；有头文件时输出对、**一句 warning 都没有**。
 
+  **一处已知的边界**（还没修）：`with "stdio.h"` 这类**标准头**在 **C 那条腿**上会把
+  `printf` 一族重新声明一遍（`extern int32_t printf(int64_t, ...);`），而 `omni.h` 已经
+  include 过真的 `<stdio.h>` —— C 里同名不同型的重复声明是硬错误。JIT/LLVM 那两条腿没有
+  这个问题（IR 里没有"标准头"这回事）。要修的话是在 `cAbiExterns` 里跳过"封闭表里
+  `std: true` 的那些符号名"，但那张表是个对象、按 `sym` 反查要枚举它，而 `Object.keys`
+  不在 JS 子集里（ADR-0011）—— 所以那一格要先在 `hir/c_abi.js` 里加一个正查的小助手。
+  眼下的建议是：要 libc 的东西就手写那一句 `(cabi …)`，或者只在 JIT 那条腿上用它。
+
   **那个 SIGTRAP —— 查清了，是我们自己的线程**：`tests/llvm/cabi/glfw-tri.sx` 在 `run-jit`
   上 SIGTRAP（exit 133），现在跑通了（`framebuffer: 1600 1200` / `frames: 120`，与 C 参照
   逐字一致）。整条查法值得留着，因为每一步都差点走错。
