@@ -416,10 +416,13 @@ if (existsSync(sysDir)) {
 {
   const tmp = mkdtempSync(join(tmpdir(), 'omni-session-'));
   const texts = [
-    '(fn f1 ((n int)) int (ret (bin "+" (var n) (int 1))))\n(let base int (int 100))\n(print (var base))\n',
+    '(fn f1 ((n int)) int (ret (bin "+" (var n) (int 1))))\n'
+      + '(fn g1 ((n int)) int (ret (call f1 (var n))))\n'
+      + '(let base int (int 100))\n(print (var base))\n',
     '(set base (bin "+" (var base) (int 1)))\n(print (var base))\n',
     '(print (bin "*" (var base) (int 2)))\n',
-    '(print (call f1 (var base)))\n',
+    '(print (call g1 (int 10)))\n',
+    '(fn f1 ((n int)) int (ret (bin "*" (var n) (int 100))))\n(print (call g1 (int 10)))\n',
   ];
   const cs = new CoreSession();
   const lls = [];
@@ -435,14 +438,28 @@ if (existsSync(sysDir)) {
     writeFileSync(p, ir);
     lls.push(p);
     if (/define i32 @main\(/.test(ir)) detail.push(`    第 ${k} 批还带着包装的 main`);
-    // 第一批**定义**那一格（外部链接，后面几批要找得到），后面几批只**声明**
-    const want = k === 1 ? '@g_base = global i64 zeroinitializer' : '@g_base = external global i64';
-    if (!ir.includes(want)) detail.push(`    第 ${k} 批里没有 \`${want}\``);
-    /* 跨批**调函数**（J6 的第二件事）：第四批调第一批定义的 f1，于是它里面该有一句
-       `declare`（omni 自己的调用约定，不是 C ABI 那条路），而且不许有第二份正文。 */
+    /* 第一批**定义**那一格（外部链接，后面几批要找得到），第二、三批只**声明**。
+       第四、五批压根没提 `base`（它们只调 g1）—— 那正是"只声明这一批提到过的"该有的样子，
+       所以这两批里一句 `@g_base` 都不该有。 */
+    if (k === 1 && !ir.includes('@g_base = global i64 zeroinitializer')) {
+      detail.push('    第 1 批里没有 `@g_base = global i64 zeroinitializer`');
+    }
+    if ((k === 2 || k === 3) && !ir.includes('@g_base = external global i64')) {
+      detail.push(`    第 ${k} 批里没有 \`@g_base = external global i64\``);
+    }
+    if ((k === 4 || k === 5) && ir.includes('@g_base')) {
+      detail.push(`    第 ${k} 批没提 base，却发了一句 @g_base`);
+    }
+    /* 跨批**调函数**（J6 的第二件事）与**重新定义**（第四件事）：会话里的函数调用点走
+       一格函数指针全局，所以第四批里该有 `@g_fp_g1` 的一句声明（落点在第一批），
+       而第五批重新定义 f1 的那一代是另一个符号（`s_f1__2`），旧代码照旧走同一格全局。 */
     if (k === 4) {
-      if (!ir.includes('declare i64 @s_f1(i64)')) detail.push('    第 4 批里没有 `declare i64 @s_f1(i64)`');
-      if (/define [^\n]*@s_f1\(/.test(ir)) detail.push('    第 4 批把 f1 又定义了一遍');
+      if (!ir.includes('@g_fp_g1 = external global')) detail.push('    第 4 批里没有 `@g_fp_g1` 的声明');
+      if (/define [^\n]*@s_g1\(/.test(ir)) detail.push('    第 4 批把 g1 又定义了一遍');
+    }
+    if (k === 5) {
+      if (!/define i64 @s_f1__2\(/.test(ir)) detail.push('    第 5 批里没有第二代 `s_f1__2` 的正文');
+      if (/define i64 @s_f1\(/.test(ir)) detail.push('    第 5 批把第一代 f1 又定义了一遍');
     }
   }
   writeFileSync(join(tmp, 'drv.c'), `#include <stdio.h>
@@ -451,6 +468,7 @@ void omni_chunk_1(void);
 void omni_chunk_2(void);
 void omni_chunk_3(void);
 void omni_chunk_4(void);
+void omni_chunk_5(void);
 int omni_host_exit_code(void);
 int main(int argc, char **argv) {
   omni_host_init(argc, argv);
@@ -458,6 +476,7 @@ int main(int argc, char **argv) {
   omni_chunk_2();
   omni_chunk_3();
   omni_chunk_4();
+  omni_chunk_5();
   fflush(NULL);
   return omni_host_exit_code();
 }
@@ -471,12 +490,12 @@ int main(int argc, char **argv) {
   } else {
     const r = spawnSync(exe, [], { encoding: 'utf8', timeout: 20000, maxBuffer: 1 << 20 });
     if (r.status !== 0) detail.push(`    跑挂了 exit=${r.status}：${(r.stderr ?? '').trim().split('\n')[0]}`);
-    else if (r.stdout !== '100\n101\n202\n102\n') {
-      detail.push(`    输出不对：${JSON.stringify(r.stdout)}（要 "100\\n101\\n202\\n102\\n"）`);
+    else if (r.stdout !== '100\n101\n202\n11\n1000\n') {
+      detail.push(`    输出不对：${JSON.stringify(r.stdout)}（要 "100\\n101\\n202\\n11\\n1000\\n"）`);
     }
   }
   if (detail.length > 0) bad('session-aot', detail.join('\n'));
-  else ok('session-aot [四批产物链成一个程序：跨批改变量、跨批调函数]');
+  else ok('session-aot [五批产物链成一个程序：跨批改变量、跨批调函数、重新定义之后旧代码也换身体]');
   rmSync(tmp, { recursive: true, force: true });
 }
 

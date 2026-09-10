@@ -89,6 +89,10 @@ class ToMir {
     for (const c of this.oir.closures ?? []) {
       m.closures.push({
         make: c.make, funcName: c.mangled,
+        /* OIR 那侧的**闭包 id** 原样带过来（ADR-0022 的 J6）：函数体上挂的是 id，而这张表
+           在会话（REPL）里只装**这一批**的记录 —— 第二批里 id 为 2 的记录在表里的下标是 0。
+           从前下游按下标取，于是会话里一用 `(fnref …)` 就崩。别的前端不给 id 就还是下标。 */
+        id: c.id,
         captures: c.captures.map((x) => x.name),
         capTypes: c.captures.map((x) => this.ty(x.type)),
         // `(fnref f)` 的薄适配器要发**单件**（见 sexpr/lower.js 的 fnRef）
@@ -175,7 +179,18 @@ class ToMir {
     if (src.kernel === true) mf.kernel = true;
     if (src.closureId !== undefined) {
       mf.closureId = src.closureId;
-      this.captures = this.mod.closures[src.closureId].captures;
+      /* 先按**下标**取（那是从前的行为，逐字节不变），下标那一条对不上 id 才按 id 找
+         （ADR-0022 的 J6）：闭包 id 是降级器里全局递增的，而会话（REPL）的一批 delta 只带
+         这一批的记录 —— 第二批里 id 为 2 的记录在表里的下标是 0，按下标取就崩在
+         `Cannot read properties of undefined (reading 'captures')`。
+         **次序要紧**：反过来先按 id 找会踩到"别的前端里 id 与 closureId 不是同一套编号"
+         那一格 —— 量出来是自举链上 `omni bootstrap` 那一步整片红（捕获全取错了）。 */
+      const cs = this.mod.closures ?? [];
+      const at = cs[src.closureId];
+      const rec = at !== undefined && (at.id === undefined || at.id === src.closureId)
+        ? at : cs.find((c) => c.id === src.closureId);
+      if (rec === undefined) throw new Error(`mir: 找不到 ${src.closureId} 号闭包记录（函数 ${src.mangled}）`);
+      this.captures = rec.captures;
     } else {
       this.captures = [];
     }

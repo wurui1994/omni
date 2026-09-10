@@ -157,6 +157,10 @@ class CoreLowerer {
     /* 这一批**调过**哪几个函数（ADR-0022 的 J6 第二件事）。与 `gUsed` 同一种性质：
        会话里前几批定义的那些，这一批的产物要为它们发一句声明。 */
     this.fnCalled = new Set();
+    /* 会话里一个名字被**重新定义**过几次（ADR-0022 的 J6 第四件事）：名字 -> 代数。
+       第 2 代起 mangled 名带上代号（`s_f1__2`），于是两代的正文各有自己的符号；而调用点
+       看的是那格函数指针全局，所以**旧代码也换到新身体**（与 JS 那条腿上全局改名同效）。 */
+    this.fnGen = new Map();
     // 线性内存（ADR-0017 第二刀）：`null` = 这份模块不用内存。一个模块**一块**（wasm MVP
     // 就是这样），所以这里是一个字段而不是一张表。`emitted` 记的是"这一批产物里发过了吗" ——
     // REPL 一批一份产物，内存只该在声明它的那一批里被建起来，后面几批要接着用同一块。
@@ -556,7 +560,10 @@ class CoreLowerer {
       if (h !== 'fn' && h !== 'kernel') continue;
       const nm = isAtom(f.items[1]) ? f.items[1].value : null;
       if (nm === null) { this.err(f, `(${h} NAME ...) 缺名字`); continue; }
-      if (this.funcs.has(nm) || this.kernels.has(nm)) { this.err(f, `'${nm}' 重复定义`); continue; }
+      /* 会话（REPL）里 `(fn …)` **允许重新定义**（ADR-0022 的 J6 第四件事）：改一个函数
+         再试一次是 REPL 里最常做的事。kernel 与"函数撞 kernel 名"照旧是错。 */
+      const redef = entryName !== 'omni_main' && h === 'fn' && this.funcs.has(nm);
+      if ((this.funcs.has(nm) && !redef) || this.kernels.has(nm)) { this.err(f, `'${nm}' 重复定义`); continue; }
       if (h === 'kernel') {
         const ps = this.params(f.items[2]);
         if (ps === null) continue;
@@ -570,7 +577,37 @@ class CoreLowerer {
       const ps = this.params(f.items[2]);
       const ret = this.ty(f.items[3], `函数 ${nm} 的返回值`);
       if (ps === null || ret === null) continue;
-      this.funcs.set(nm, { name: nm, mangled: `s_${nm}`, ret: ret, params: ps });
+      /* 会话里的函数**多带两格**（J6 第四件事）：
+         - `fp`：一格函数指针全局的名字。调用点走它（见 `(call …)` 那一支），定义它的那一批
+           在自己入口的最前面往里存一个 `(fnref …)` —— 于是重新定义之后**旧代码也看见新的
+           身体**，而 JIT 那侧不需要 ResourceTracker（同一格全局换个指针而已）。
+         - `gen`：第几代。第 2 代起 mangled 名带上代号，两代的正文各有自己的符号。
+         整程序那条路两格都不给，`(call …)` 照旧发直接调用 —— 产物逐字节不变。 */
+      if (entryName === 'omni_main') {
+        this.funcs.set(nm, { name: nm, mangled: `s_${nm}`, ret: ret, params: ps });
+        continue;
+      }
+      const old = redef ? this.funcs.get(nm) : null;
+      if (old !== null) {
+        const same = old.params.length === ps.length && sameCoreType(old.ret, ret)
+          && old.params.every((p, i) => sameCoreType(p.type, ps[i].type));
+        if (!same) {
+          const was = coreTypeText(fnType(old.params.map((p) => p.type), old.ret));
+          const now = coreTypeText(fnType(ps.map((p) => p.type), ret));
+          this.err(f, `'${nm}' 重新定义时签名变了（原来是 ${was}，现在是 ${now}）`
+            + ' —— 前几批的调用点是按旧签名查过的');
+          continue;
+        }
+      }
+      const gen = old === null ? 1 : (this.fnGen.get(nm) ?? 1) + 1;
+      this.fnGen.set(nm, gen);
+      const fp = `fp_${nm}`;
+      const ft = fnType(ps.map((p) => p.type), ret);
+      this.globals.set(fp, ft);
+      this.funcs.set(nm, {
+        name: nm, mangled: gen === 1 ? `s_${nm}` : `s_${nm}__${gen}`, ret: ret, params: ps,
+        fp: fp, gen: gen, span: f,
+      });
     }
     return this.assemble(forms, entryName, base);
   }
@@ -872,6 +909,10 @@ class CoreLowerer {
         },
       });
     }
+    /* 零初始化到这里为止 —— 那格函数指针的赋值要**插在它后面**（见下面的 fpStores）：
+       不然会话里 `(set fp_f1 (fnref f1))` 会被紧随其后的 `fp_f1 = NullFn` 冲掉，
+       量出来就是一句 `call of a null function value`。 */
+    const zeroN = mainStmts.length;
     for (const f of forms) {
       const h = head(f);
       if (h === 'fn') {
@@ -945,6 +986,33 @@ class CoreLowerer {
     }
     // REPL 的一批里没有 `(main …)` 是正常的（只写了个函数定义）；整程序时必须有入口。
     if (!sawMain && entryName === 'omni_main') this.err(null, '缺入口：加一个 (main ...)');
+    /* 会话里这一批定义的函数：在入口的**最前面**把 `(fnref …)` 存进那格函数指针全局
+       （J6 第四件事）。摆在最前面是必须的 —— 同一批里后面的语句就已经会调它了。
+       重新定义的那一代存进去的是新适配器，于是前几批的调用点（走同一格全局）跟着换身体。 */
+    const fpStores = [];
+    for (const f of forms) {
+      if (head(f) !== 'fn') continue;
+      const fnm = isAtom(f.items[1]) ? f.items[1].value : null;
+      if (fnm === null) continue;
+      const fd = this.funcs.get(fnm);
+      if (fd === undefined || fd.fp === undefined) continue;
+      const ft = fnType(fd.params.map((p) => p.type), fd.ret);
+      // 这一批**提到过**这格全局（前几批定义的那些要按它发声明，见 `gUsed`）
+      this.gUsed.add(fd.fp);
+      const ref = this.fnRef({
+        kind: 'list',
+        items: [{ kind: 'atom', value: 'fnref', span: f.span }, { kind: 'atom', value: fnm, span: f.span }],
+        span: f.span,
+      });
+      if (ref === null) continue;
+      fpStores.push({
+        kind: 'ExprStmt',
+        expr: {
+          kind: 'Assign', target: { kind: 'GlobalRef', name: fd.fp, type: ft }, value: ref, type: ft,
+        },
+      });
+    }
+    mainStmts.splice(zeroN, 0, ...fpStores);
     mainStmts.push({ kind: 'Return', value: null });
     funcs.push({
       name: entryName === 'omni_main' ? 'main' : entryName,
@@ -1647,7 +1715,12 @@ class CoreLowerer {
         ? `'${nm}' 是 (cfn ...)，当值用写 (mkclo ${nm} ...)`
         : `没有叫 '${nm}' 的函数`);
     }
-    const key = `&${nm}`;
+    /* 适配器按**这一代**起名（J6 第四件事）：会话里同一个名字可以重新定义，两代各有自己的
+       正文，适配器与那格单件也就得分开 —— 不分开的话第二批发的 `omni_clo_ref_f1` 与第一批
+       的撞名，同一个符号空间里就是重复定义。整程序那条路上 `gen` 是 undefined，名字一个
+       字都不变。 */
+    const suf = d.gen === undefined || d.gen === 1 ? '' : `__${d.gen}`;
+    const key = `&${nm}${suf}`;
     if (!this.closures.has(key)) {
       const pts = [];
       const ps = [];
@@ -1668,7 +1741,7 @@ class CoreLowerer {
       const tail = { kind: 'Return', value: d.ret === VOID ? null : zeroValue(d.ret) };
       this.closures.set(key, {
         // 名字按**被取地址的那个函数**起（同上：不能用"第几个"编号）
-        id, mangled: `omni_clo_ref_${nm}`, make: `omni_mk_ref_${nm}`,
+        id, mangled: `omni_clo_ref_${nm}${suf}`, make: `omni_mk_ref_${nm}${suf}`,
         captures: [], params: ps, ret: d.ret, type: t, node: n,
         // **同一个函数取出来的值要是同一个东西**：`(fnref f)` 每求值一次就造一条新记录的话
         // `f == f` 就是假。asy 那边量过：具名函数 `f == f` 真，而同一个 lambda 求值两次
@@ -1677,7 +1750,7 @@ class CoreLowerer {
         single: true,
       });
       this.lifted.push({
-        name: key, mangled: `omni_clo_ref_${nm}`, ret: d.ret, params: ps,
+        name: key, mangled: `omni_clo_ref_${nm}${suf}`, ret: d.ret, params: ps,
         body: { kind: 'Block', stmts: [stmt, tail] }, closureId: id,
       });
     }
@@ -2212,6 +2285,21 @@ class CoreLowerer {
       // 这一批**调过**谁（ADR-0022 的 J6 第二件事）：会话里前几批定义的那些，
       // 这一批的产物要为它们发一句声明
       this.fnCalled.add(nm);
+      /* 会话里的函数：调用点走那格函数指针全局（J6 第四件事）。于是"第 5 批重新定义 f1"
+         之后，**第 1 批里那句 `(call f1 …)` 也走到新身体上** —— 代价是一次间接调用
+         （`(fnref …)` 那层薄适配器），只落在会话这条路上。 */
+      if (d.fp !== undefined) {
+        const ft = fnType(d.params.map((p) => p.type), d.ret);
+        this.useFnType(ft);
+        this.gUsed.add(d.fp);
+        return {
+          kind: 'CallFn',
+          callee: { kind: 'GlobalRef', name: d.fp, type: ft },
+          fnType: ft,
+          args: args,
+          type: d.ret,
+        };
+      }
       return { kind: 'Call', func: d.mangled, name: d.name, args: args, type: d.ret };
     }
     if (h === 'splat' || h === 'vlit' || h === 'lane' || h === 'hsum') return this.vecExpr(n, h);
@@ -2720,6 +2808,8 @@ export class CoreSession {
       structs: new Map(l.structs), classes: new Map(l.classes), tmpNo: l.tmpNo, no: this.no,
       topScope: l.topScope,
       vars: l.topScope === null ? null : new Map(l.topScope[0]),
+      // 重定义的代数也要能退回去（J6 第四件事）：失败的一批不许把代号往前推
+      fnGen: new Map(l.fnGen),
     };
   }
 
@@ -2733,6 +2823,7 @@ export class CoreSession {
     l.tmpNo = s.tmpNo;
     l.topScope = s.topScope;
     if (s.topScope !== null) s.topScope[0] = s.vars;
+    l.fnGen = s.fnGen;
     this.no = s.no;
   }
 

@@ -279,10 +279,13 @@ else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同�
        顺带钉一条边界：`--objcache` 的键是**一份** IR 的内容，与 `--add` 一起用要明着报错。 */
     {
       const texts = [
-        '(fn f1 ((n int)) int (ret (bin "+" (var n) (int 1))))\n(let base int (int 100))\n(print (var base))\n',
+        '(fn f1 ((n int)) int (ret (bin "+" (var n) (int 1))))\n'
+          + '(fn g1 ((n int)) int (ret (call f1 (var n))))\n'
+          + '(let base int (int 100))\n(print (var base))\n',
         '(set base (bin "+" (var base) (int 1)))\n(print (var base))\n',
         '(print (bin "*" (var base) (int 2)))\n',
-        '(print (call f1 (var base)))\n',
+        '(print (call g1 (int 10)))\n',
+        '(fn f1 ((n int)) int (ret (bin "*" (var n) (int 100))))\n(print (call g1 (int 10)))\n',
       ];
       const cs = new CoreSession();
       const lls = [];
@@ -304,8 +307,8 @@ else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同�
       const d7 = [];
       if (sr.status !== 0) {
         d7.push(`    exit=${sr.status}：${(sr.stderr ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-      } else if ((sr.stdout ?? '') !== '100\n101\n202\n102\n') {
-        d7.push(`    输出不对：${JSON.stringify(sr.stdout)}（要 "100\\n101\\n202\\n102\\n"）`);
+      } else if ((sr.stdout ?? '') !== '100\n101\n202\n11\n1000\n') {
+        d7.push(`    输出不对：${JSON.stringify(sr.stdout)}（要 "100\\n101\\n202\\n11\\n1000\\n"）`);
       }
       const oc = spawnSync(host, [...args, ...calls, '--objcache', join(tmp, 'sess.o')],
         { encoding: 'utf8', timeout: 60000, maxBuffer: 1 << 20 });
@@ -313,7 +316,7 @@ else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同�
         d7.push(`    --objcache 与 --add 一起用该报错：exit=${oc.status} ${JSON.stringify((oc.stderr ?? '').slice(0, 120))}`);
       }
       if (d7.length > 0) bad('session', d7.join('\n'));
-      else ok('session [--add：四批 IR 进同一个 JITDylib，跨批改变量、跨批调函数，答案与 AOT 相同]');
+      else ok('session [--add：五批 IR 进同一个 JITDylib，跨批改变量、跨批调函数、重新定义之后旧代码也换身体，答案与 AOT 相同]');
     }
   }
 }
