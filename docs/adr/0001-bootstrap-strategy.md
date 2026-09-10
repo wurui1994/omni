@@ -251,6 +251,20 @@ pthread 就在 libSystem 里、这个开关等于空操作；glibc 2.34 起也�
 `重名多了：243 -> 244` 并把最后几条打出来。它排在 `bootstrap/run.js` **前面**
 （`tests/all.js`）—— 棘轮红了说明新长了债，那比旧债要紧。
 
+#### 棘轮退役：三类债都是 0，链通了
+
+那一门自己写着「链通了（exit 0）也骂 —— 那时候该把这一门删掉」。它现在就是这么红的：
+`omni emit-js src/core/cli.js` **回 0、stderr 一条 `error:` 都没有**（产物 1380 万字节）。
+三类债的终值：重名 **243 -> 0**、`import * as` **4 -> 0**、缺 ABI op **8 -> 0**
+（最后那 8 处是 `readBinary`/`writeBinary`/`removeFile`/`stdoutBytes`/`stderrBytes`
+这 5 个名字 —— 现在三条腿上都有了：`link.js` 的 `NATIVE_OPS` 里有映射、
+`hir/js_abi.js` 里有那一格、JS prelude 与 C 运行时各有一份实现）。
+
+于是 `tests/bootstrap/ratchet.js` 删掉，换成 `tests/bootstrap/link.js`：**同一个动作、
+相反的判据** —— `emit-js` 必须回 0、stderr 里不许有 `error:`。为什么不干脆只留
+`bootstrap/run.js`：那条整门要跑四分钟（C0 -> C1 -> C2 的不动点、逐用例对照、C 路径与
+stage2），而链断了的话这半秒就能说清断在哪一类上，所以失败时照旧按那四类分好再报。
+
 ### 然后还了第一类的大头：243 -> 22
 
 `tests/bootstrap/dedup.js` 是配套的还债工具。它只做**能证明安全**的那一部分：
