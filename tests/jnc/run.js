@@ -10,9 +10,10 @@
 // `cases/jnc` 那一组里量（526/528 份真实 `.jnc` 唯一成树）。这里量的是**降级**。
 //
 // 四件事：
-//   1. cases/*.jnc 在 run / run-c / interp / interp --mir / run-llvm 五条腿上逐字节相同，
-//      且等于 .expected。五方一致比对上期望值更强 —— 指针在这五条腿上是**两套实现**
-//      （arena 模拟 vs 真指针，ADR-0016），逐字节相同不是巧合。
+//   1. cases/*.jnc 在 run / run-c / interp / interp --mir / run-llvm / run-jit 六条腿上
+//      逐字节相同，且等于 .expected。多方一致比对上期望值更强 —— 指针在这些腿上是**两套实现**
+//      （arena 模拟 vs 真指针，ADR-0016），逐字节相同不是巧合。第六条腿（ORC JIT）是
+//      **jancy 自己的执行路径**（它没有 AOT），见 ADR-0022 的 J1；没有 libLLVM 时跳过。
 //   2. rt/*.jnc 在五条腿上报**同一句**运行期错误。
 //   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：多维数组、
 //      数组之间的赋值、`threadlocal`、对 string 的模块级变量取地址、`%p`、
@@ -171,6 +172,20 @@ const LEGS = [
   { tag: 'run-llvm', args: (p) => ['run-llvm', p] },
 ];
 
+/* 第六条腿：ORC JIT（ADR-0022 的 J1）。它与 `run-llvm` 读**同一份 IR**，换的只是装载方式 ——
+   而 jancy 自己的执行路径就是这一条（它没有 AOT，`jnc` 是 JIT 跑的）。所以这门语言的用例
+   尤其该在它上面钉住：量出来 69 份里 68 份本来就对，第 69 份差的是 `-I` 没透过去。
+   这台机器上没有 libLLVM 时**跳过而不是算失败**（与 tests/jit 同一条规矩）：那时"JIT 这条腿"
+   根本无从验证，谎报成功更糟。探一次就够，探针用最小的那份用例。 */
+{
+  const probe = cmd(['run-jit', join(here, 'cases', '01-pointers.jnc')]);
+  if (probe.code === 0) {
+    LEGS.push({ tag: 'run-jit', args: (p) => ['run-jit', p] });
+  } else {
+    process.stdout.write(`  skip run-jit 这条腿：${(probe.err.trim().split('\n')[0] ?? '?')}\n`);
+  }
+}
+
 const list = (sub, ext) => readdirSync(join(here, sub)).filter((x) => x.endsWith(ext)).sort();
 
 /**
@@ -207,7 +222,7 @@ for (const f of list('cases', '.jnc')) {
   else if (first.out !== expected) {
     bad.push(`    对不上期望值\n      want: ${JSON.stringify(expected)}\n      got:  ${JSON.stringify(first.out)}`);
   }
-  if (bad.length === 0) ok(`cases/${name} [五方一致 == ${name}.expected]`);
+  if (bad.length === 0) ok(`cases/${name} [${LEGS.length} 腿一致 == ${name}.expected]`);
   else no(`cases/${name}`, bad.join('\n'));
 }
 
@@ -226,7 +241,7 @@ for (const f of list('rt', '.jnc')) {
       bad.push(`    ${leg.tag} 的消息不对\n      want: ${JSON.stringify(exp.trim())}\n      got:  ${JSON.stringify(r.err.trim())}`);
     }
   }
-  if (bad.length === 0) ok(`rt/${name} [五条腿同一句：${exp.trim()}]`);
+  if (bad.length === 0) ok(`rt/${name} [${LEGS.length} 腿同一句：${exp.trim()}]`);
   else no(`rt/${name}`, bad.join('\n'));
 }
 
