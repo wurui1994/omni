@@ -11,6 +11,7 @@
  */
 
 import { newPlan, addStage } from './stages.js';
+import { lang } from '../plugin.js';
 
 /** 从 `rest` 里捞一个带值开关（与实现那一侧同一个捞法）。 */
 function planOpt(rest, name, dflt) {
@@ -49,6 +50,17 @@ function frontOf(path, rest) {
         { verb: 'lower', in: 'AST', out: '核心方言文本', note: `omni emit sx 印的就是这一格` },
         { verb: 'read', in: '核心方言文本', out: 's-expr' },
       ],
+    };
+  }
+  /* 插件带来的语言（ADR-0021 的 S4）：注册表认得它，而上面那几支不认识 ——
+     从前这里会印成 "omni（mixed）"，那是**在说谎**：真跑起来走的是插件那门语言。
+     所以先问注册表。步骤只说"前端"两个字：插件内部分几步，这一层不该猜。 */
+  const reg = lang(path);
+  if (reg !== null) {
+    return {
+      lang: reg.name,
+      ast: false,
+      steps: [{ verb: '前端', in: 'text', out: 'OIR', note: '插件（omni-lang-*）' }],
     };
   }
   const m = mode !== null ? mode
