@@ -14,6 +14,9 @@
  */
 #include "omni.h"
 
+/* 按调用栈归属分配（`OMNI_MEM_DEBUG=4`）要它。只在量口那条路上用，平时一个符号都不碰。 */
+#include <execinfo.h>
+
 /* class 引用的显式空检查（`omni_nullck`）挪去 omni.h 当 static inline 了 ——
    它是生成代码里最密的一个调用，跨编译单元内联不了就只剩纯调用开销（见那儿的注）。 */
 
@@ -73,12 +76,111 @@ static uint64_t omni_mem_req = 0;
 #define OMNI_MEM_NBUCKET 24
 static uint64_t omni_mem_hist[OMNI_MEM_NBUCKET];
 
+/* ---- 按**调用栈**归属（`OMNI_MEM_DEBUG=4`，采样间隔看 OMNI_MEM_EVERY，默认 1000）
+ *
+ * 为什么必须有这一格：大小直方图只说得出"多大"，说不出"谁"。靠"88% 是小块所以大概是
+ * 实参 list"去改代码就是猜 —— 已经猜错过两次（dict 并排存哈希、实参 list 上栈），
+ * 两次都只动了百分之几。这儿采样 `backtrace()` 再按栈聚合，答案是**量出来的**：
+ * 哪一条 JS 级函数、经过哪几层运行时，一共分配了多少次、多少字节。
+ * -O0 有帧指针，所以 backtrace 拿得到；每 N 次才采一次，热路径上只多一次取模。 */
+#define OMNI_BT_DEPTH 10
+#define OMNI_BT_SLOTS 8192
+typedef struct {
+  void *fr[OMNI_BT_DEPTH];
+  int n;
+  uint64_t count;
+  uint64_t bytes;
+} omni_bt_entry;
+static omni_bt_entry omni_bt_tab[OMNI_BT_SLOTS];
+static int omni_bt_used = 0;
+static uint64_t omni_bt_every = 0;   /* 0 = 不采 */
+static uint64_t omni_bt_seen = 0;
+static uint64_t omni_bt_taken = 0;
+
+static void omni_bt_sample(size_t n) {
+  void *fr[OMNI_BT_DEPTH + 3];
+  int got = backtrace(fr, OMNI_BT_DEPTH + 3);
+  /* 跳掉 backtrace / omni_bt_sample / omni_mem_note 这三层 —— 它们对谁都一样 */
+  int skip = got > 3 ? 3 : 0;
+  int m = got - skip;
+  if (m > OMNI_BT_DEPTH) m = OMNI_BT_DEPTH;
+  if (m <= 0) return;
+  uint64_t h = 1469598103934665603ULL;
+  for (int i = 0; i < m; i++) {
+    h ^= (uint64_t)(uintptr_t)fr[skip + i];
+    h *= 1099511628211ULL;
+  }
+  omni_bt_taken++;
+  int slot = (int)(h & (OMNI_BT_SLOTS - 1));
+  for (int probe = 0; probe < OMNI_BT_SLOTS; probe++) {
+    omni_bt_entry *e = &omni_bt_tab[slot];
+    if (e->n == 0) {
+      memcpy(e->fr, fr + skip, sizeof(void *) * (size_t)m);
+      e->n = m;
+      e->count = 1;
+      e->bytes = (uint64_t)n;
+      omni_bt_used++;
+      return;
+    }
+    if (e->n == m && memcmp(e->fr, fr + skip, sizeof(void *) * (size_t)m) == 0) {
+      e->count++;
+      e->bytes += (uint64_t)n;
+      return;
+    }
+    slot = (slot + 1) & (OMNI_BT_SLOTS - 1);
+  }
+}
+
 void omni_mem_note(size_t n) {
   int b = 0;
   while (b + 1 < OMNI_MEM_NBUCKET && n > ((size_t)16 << b)) b++;
   omni_mem_calls++;
   omni_mem_req += (uint64_t)n;
   omni_mem_hist[b]++;
+  if (omni_bt_every != 0 && ++omni_bt_seen % omni_bt_every == 0) omni_bt_sample(n);
+}
+
+/* 只印一个函数名：backtrace_symbols 那一行是
+   "3   omni   0x0000000100a24f98 omni_js_arr_of + 52"，取倒数第三段。 */
+static void omni_bt_print_frame(const char *sym) {
+  const char *plus = strrchr(sym, '+');
+  const char *end = plus ? plus : sym + strlen(sym);
+  while (end > sym && (end[-1] == ' ' || end[-1] == '\t')) end--;
+  const char *beg = end;
+  while (beg > sym && beg[-1] != ' ' && beg[-1] != '\t') beg--;
+  fprintf(stderr, "%.*s", (int)(end - beg), beg);
+}
+
+static void omni_bt_report(void) {
+  if (omni_bt_taken == 0) return;
+  /* 按次数排：只印前 24 条栈，尾巴太长没人看 */
+  int order[OMNI_BT_SLOTS];
+  int m = 0;
+  for (int i = 0; i < OMNI_BT_SLOTS; i++) if (omni_bt_tab[i].n != 0) order[m++] = i;
+  for (int i = 1; i < m; i++) {
+    int k = order[i], j = i - 1;
+    while (j >= 0 && omni_bt_tab[order[j]].count < omni_bt_tab[k].count) { order[j + 1] = order[j]; j--; }
+    order[j + 1] = k;
+  }
+  fprintf(stderr, "omni_mem: 调用栈归属（每 %llu 次采一次，共采到 %llu 条、%d 个不同的栈）\n",
+          (unsigned long long)omni_bt_every, (unsigned long long)omni_bt_taken, m);
+  int top = m < 24 ? m : 24;
+  for (int i = 0; i < top; i++) {
+    omni_bt_entry *e = &omni_bt_tab[order[i]];
+    double pct = 100.0 * (double)e->count / (double)omni_bt_taken;
+    fprintf(stderr, "omni_mem: [%2d] %5.1f%%  约 %llu 次  约 %.0f MiB\n", i + 1, pct,
+            (unsigned long long)(e->count * omni_bt_every),
+            (double)(e->bytes * omni_bt_every) / (double)(1u << 20));
+    char **syms = backtrace_symbols(e->fr, e->n);
+    if (syms == NULL) continue;
+    fprintf(stderr, "omni_mem:      ");
+    for (int k = 0; k < e->n; k++) {
+      if (k > 0) fprintf(stderr, " < ");
+      omni_bt_print_frame(syms[k]);
+    }
+    fprintf(stderr, "\n");
+    free(syms);
+  }
 }
 
 static void omni_mem_count_report(void) {
@@ -94,6 +196,7 @@ static void omni_mem_count_report(void) {
             (unsigned long long)omni_mem_hist[b],
             100.0 * (double)omni_mem_hist[b] / (double)omni_mem_calls);
   }
+  omni_bt_report();
 }
 
 static void omni_arena_report(void) {
@@ -119,8 +222,14 @@ static void omni_arena_new_block(size_t n) {
   omni_arena_end = base + cap;
   if (omni_arena_nblock == 0 && getenv("OMNI_MEM_DEBUG")) {
     const char *d = getenv("OMNI_MEM_DEBUG");
-    /* `=3` 连每次分配一起数（热路径上多一格分支，见 omni.h 的 omni_alloc） */
-    if (d[0] == '3') omni_mem_count_on = 1;
+    /* `=3` 连每次分配一起数（热路径上多一格分支，见 omni.h 的 omni_alloc）
+       `=4` 再加上按调用栈采样归属 —— 大小直方图说得出"多大"，说不出"谁"。 */
+    if (d[0] == '3' || d[0] == '4') omni_mem_count_on = 1;
+    if (d[0] == '4') {
+      const char *ev = getenv("OMNI_MEM_EVERY");
+      long v = ev == NULL ? 0 : strtol(ev, NULL, 10);
+      omni_bt_every = v > 0 ? (uint64_t)v : 1000;
+    }
     atexit(omni_arena_report);
   }
   omni_arena_nblock++;
