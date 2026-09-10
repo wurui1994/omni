@@ -12,7 +12,7 @@ import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdirAll, rename,
   args as procArgs, env, setEnv, stdout, stderr, setExitCode, spawn, evalJs, hasJsEngine, nowMs,
   maxRssBytes,
-  cwd, installDir, isDir, writeBinary, readBinary, runTimeout,
+  cwd, installDir, isDir, writeBinary, readBinary, runTimeout, pluginLoad, pluginsOk,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { installSrcEvalHook } from './host/src_eval.js';
@@ -63,7 +63,7 @@ import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
 /* 后端过一格注册表（ADR-0021 S3）：调用点不叫函数名，可选加载才有立足处 */
 import {
-  target, registerTarget, registerLang, lang, registerRunner, runner,
+  target, registerTarget, registerLang, lang, registerRunner, runner, noteUnloadable,
 } from './plugin.js';
 import { registerJsTarget } from './target/js.js';
 import { registerCTarget } from './target/c.js';
@@ -651,17 +651,72 @@ function compile(path, argv = []) {
  * `omni_plugin_init` 里调同一个 registerLang —— 这一层看不出内建与外挂的区别。
  * 核心方言（.omni / .omnid / .omnis）不登记：它跟 driver 是一体的，永远在核心里。 */
 registerLang(['.js'], 'js', (path) => compileJs(path));
-registerJsTarget({ registerTarget });
-registerCTarget({ registerTarget });
-registerLlvmTarget({ registerTarget });
-registerSpirvTarget({ registerTarget });
-registerWatLang({ registerLang, log: vStep });
-registerGlslLang({ registerRunner, findCC });
-registerSxLang({ registerLang, log: vStep });
+registerJsTarget(pluginApi());
+registerCTarget(pluginApi());
+registerLlvmTarget(pluginApi());
+registerSpirvTarget(pluginApi());
+registerWatLang(pluginApi());
+registerGlslLang(pluginApi());
+registerSxLang(pluginApi());
 /* asy 那一份拿着核心给的宿主服务过日子（ADR-0021 S4）：印记那三格是驱动侧的
  * 缓存格式，AST 缓存的键沿用了它 —— 那处层次串门记在 lang/asy.js 的文件头里。 */
-registerAsyLang({ registerLang, log: vStep, inpPath, inpOk, inpField, srcIdNote });
-registerJncLang({ registerLang, log: vStep, incDirs });
+registerAsyLang(pluginApi());
+registerJncLang(pluginApi());
+
+/**
+ * 交给插件的那一格宿主服务（ADR-0021 的 S4）。
+ *
+ * 内建与外挂用**同一份** —— 内建就是核心自己调一次 register，外挂是 `dlopen` 之后
+ * `omni_plugin_init` 拿这一格调同一个 register。两条路只差登记的时刻，形状一模一样，
+ * 于是"把一门语言从内建搬成插件"不必改它一行。
+ */
+function pluginApi() {
+  return {
+    registerLang: registerLang,
+    registerTarget: registerTarget,
+    registerRunner: registerRunner,
+    log: vStep,
+    /* 印记那三格与 srcIdNote 是驱动侧产物缓存的格式（asy 的 AST 缓存借了它 ——
+       那处层次串门记在 lang/asy.js 的文件头里）；incDirs / findCC 也是驱动的事。 */
+    inpPath: inpPath,
+    inpOk: inpOk,
+    inpField: inpField,
+    srcIdNote: srcIdNote,
+    incDirs: incDirs,
+    findCC: findCC,
+  };
+}
+
+/**
+ * 自动发现：约定目录里放着的每一格插件都装上（ADR-0021 的 S4）。
+ *
+ * **没有开关。** "带哪些语言"是那个目录的内容，不是命令行上的白名单 —— 装了就有、
+ * 没装就没有。目录不在就是没装插件，那不是错。
+ *
+ * 只认约定的名字（`omni-lang-<名字>` / `omni-target-<名字>`）与本平台的后缀：目录里放着
+ * 别的东西（README、旧版本的备份）不该被当成插件去 dlopen。真装不上要**响错**
+ * （pluginLoad 里三种坏法各说清下一步），不许悄悄跳过 —— 悄悄跳过就成了
+ * "我明明装了它，它却说没这门语言"。
+ */
+function discoverPlugins() {
+  const dir = join(installDir(), '..', '..', 'plugins');
+  if (!isDir(dir)) return;
+  for (const f of readDir(dir)) {
+    const named = f.startsWith('omni-lang-') || f.startsWith('omni-target-');
+    if (!named || !(f.endsWith('.dylib') || f.endsWith('.so'))) continue;
+    /* 这条腿装不动（node / JS 腿没有 dlopen）：记下名字，等真用到那门语言才响 ——
+       理由与那句话本身都在 plugin.js 的 UNLOADABLE 那一段。 */
+    if (!pluginsOk()) {
+      const dot = f.lastIndexOf('.');
+      const head = f.startsWith('omni-lang-') ? 'omni-lang-'.length : 'omni-target-'.length;
+      noteUnloadable(f.slice(head, dot < 0 ? f.length : dot));
+      continue;
+    }
+    vStep(`plugin ${f}`);
+    pluginLoad(join(dir, f), pluginApi());
+  }
+}
+
 
 function compileFront(path, argv) {
   const l = lang(path);
@@ -2009,6 +2064,13 @@ function main(argv) {
   // 没门抓到它：`omni c cpp -v` 的那些门只比 stdout，而 `--verbose` 写 stderr。
   VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
   STATS = rest.includes('--stats');
+  /* 发现插件摆在这儿而不是模块作用域：一来 `-v` 刚解析出来，装了哪几格才印得出来；
+     二来插件装不上是**响错**，那句话得走 main 的错误出口（模块作用域抛出来的话，
+     连 `omni help` 都印不出来了 —— 一格坏插件不该让整个 CLI 说不出话）。 */
+  /* 计时的基准点在这儿起：发现插件是**第一步**，而 vMark 从前是等到进管线才置的 ——
+     量出来的：第一行印成 `[1789012444800ms]`（拿 0 当基准，等于整个 epoch）。 */
+  vMark = nowMs();
+  discoverPlugins();
   vMark = nowMs();
   /* `--help` 在**任何一级**都由同一个函数处理：`findCmd` 走到第一个不是子命令名的记号就停，
    * 所以 `omni c --help` 落在 `c` 上、`omni c link --help` 落在 `link` 上，不必特判。 */

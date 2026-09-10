@@ -786,6 +786,7 @@ omni_dyn omni_js_now_ms(void);
 omni_dyn omni_js_max_rss(void);
 /* 插件加载（ADR-0021 S4）：dlopen + dlsym("omni_plugin_init")，插件与核心共用这一份运行时 */
 omni_dyn omni_js_plugin_load(omni_dyn path, omni_dyn api);
+bool omni_js_plugin_ok(void);
 /* 一趟"跑"的墙上时限（`omni run --timeout`）：毫秒 <= 0 = 撤掉。这一侧只有一把闹钟 ——
    有正在 wait 的子进程就杀它（超时那句话归上面那层印），没有就自己印完 _exit(124)。 */
 omni_dyn omni_js_run_timeout(omni_dyn ms, omni_dyn msg);

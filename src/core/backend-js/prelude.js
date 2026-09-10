@@ -5577,6 +5577,8 @@ function $js_max_rss() { return process.resourceUsage().maxRSS * 1024; }
 
 /* 插件加载：JS 这条腿上没有（见 js_abi 的 js_plugin_load）。拒得响 —— 悄悄当成"没装插件"
    会让人以为插件坏了，而真相是这条腿压根没有这条路。 */
+function $js_plugin_ok() { return false; }
+
 function $js_plugin_load(p, api) {
   throw new Error('这条腿上没有插件加载（' + p + '）：装着的就是编进来的那些；'
     + '插件是 C 那条腿的事（dlopen + omni_plugin_init）');

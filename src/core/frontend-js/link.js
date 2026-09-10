@@ -77,6 +77,7 @@ const NATIVE_OPS = {
   maxRssBytes: 'js_max_rss',
   /* 插件加载（ADR-0021 S4）：只有 C 那条腿真有，别的腿响着拒 */
   pluginLoad: 'js_plugin_load',
+  pluginsOk: 'js_plugin_ok',
   /* `omni run --timeout` 的那一格：两种"跑"（子进程 / 本进程）都只有宿主能中断，
    * 所以时限本身是宿主状态，不是 CLI 里的一个变量。 */
   runTimeout: 'js_run_timeout',

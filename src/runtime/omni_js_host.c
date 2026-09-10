@@ -419,6 +419,11 @@ omni_dyn omni_js_proc_read_line(void) {
  * RTLD_LOCAL：插件自己那份模板函数不该顶掉核心的同名符号，只有状态是共用的
  * （状态在核心里，靠 -Wl,-export_dynamic + 插件侧 -undefined dynamic_lookup 解析过去）。
  */
+/* 这条腿装得动插件（有 dlopen）。node 与 JS 那两条腿答假 —— 见 host/native.js。 */
+bool omni_js_plugin_ok(void) {
+  return true;
+}
+
 omni_dyn omni_js_plugin_load(omni_dyn path, omni_dyn api) {
   char *p = cpath(path);
   void *h = dlopen(p, RTLD_NOW | RTLD_LOCAL);

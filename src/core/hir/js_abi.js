@@ -659,6 +659,9 @@ export const JS_ABI = {
      C 那条腿 dlopen + dlsym("omni_plugin_init")；node 与 JS 那两条腿**响着拒** ——
      它们没有这条路（node 没有同步的 ESM import，而驱动是同步的），拒得响比悄悄没插件好。 */
   js_plugin_load: { js: '$js_plugin_load', c: 'omni_js_plugin_load', arity: 2 },
+  /* 这条腿装得动插件吗。有了它，"装了插件但这条腿加载不了"能推迟到**用到那门语言时**才响，
+     而不是一开机就把整个编译器噎住（自举链的 C2 那道不动点当场抓到过）。 */
+  js_plugin_ok: { js: '$js_plugin_ok', c: 'omni_js_plugin_ok', arity: 0, ret: 'bool' },
   /* 一趟"跑"的墙上时限（`omni run --timeout`）：第一个参数是毫秒（<= 0 = 撤掉），
      第二个是到点要印的那句话 —— 印字的人不一定还是编译器自己（本进程那一路是看门狗
      线程 / SIGALRM 处理函数在印），所以文本得先交给宿主。

@@ -358,6 +358,17 @@ export function maxRssBytes() {
  * 扫目录、按文件名认、`dlsym("omni_plugin_init")` 全是同步的。
  * 拒得响而不是悄悄当"没装"：后者会让人以为插件坏了。
  */
+/**
+ * 这条腿装得动插件吗（ADR-0021 的 S4）。
+ *
+ * 有了它，"装了插件但这条腿加载不了"就能**在用到那门语言的时候**才响 —— 而不是一开机
+ * 就把整个编译器噎住。量出来的：dist/plugins 里放一格插件之后，`C2 = C1 emit-js`
+ * 那道不动点当场红了（omni.mjs 一启动就抛），而它跟那门语言半点关系都没有。
+ */
+export function pluginsOk() {
+  return false;
+}
+
 export function pluginLoad(path) {
   throw new Error(`node 这条腿上没有插件加载（${path}）：装着的就是编进来的那些；`
     + '插件是 C 那条腿的事（dlopen + omni_plugin_init）');

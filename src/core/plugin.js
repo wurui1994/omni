@@ -44,10 +44,36 @@ export function registerLang(exts, name, compile) {
   for (const e of exts) LANGS.set(e, { name, compile });
 }
 
+/* 目录里躺着、但**这条腿装不动**的那些（ADR-0021 的 S4）：名字先记下来，等真用到那门语言
+   才响。一开机就抛的话，一格插件能把整个编译器噎住 —— 自举链的 `C2 = C1 emit-js` 当场
+   抓到过：dist/plugins 里放一格插件，omni.mjs 一启动就抛，而它跟那门语言半点关系没有。 */
+const UNLOADABLE = [];
+
+/** @param name 语言名（从 `omni-lang-<名字>.dylib` 的文件名里取） */
+export function noteUnloadable(name) {
+  if (!UNLOADABLE.includes(name)) UNLOADABLE.push(name);
+}
+
+/** 这个路径的扩展名对上某个装不动的插件了吗；对上就交那门语言的名字，否则 null。
+ *  约定：`omni-lang-asy` 认 `.asy` —— 扩展名就是语言名。 */
+export function unloadableFor(path) {
+  for (const n of UNLOADABLE) {
+    if (path.endsWith(`.${n}`)) return n;
+  }
+  return null;
+}
+
 /** 这个路径归哪种语言；不归任何登记过的语言就交 null（调用方落到核心方言那一支） */
 export function lang(path) {
   for (const [ext, l] of LANGS) {
     if (path.endsWith(ext)) return l;
+  }
+  /* 没登记，但目录里躺着一格装不动的同名插件：**这时候**才响，而且说清是哪条腿的事。
+     悄悄落到核心方言那一支去解析一份 .asy，只会报一堆语法错，真相却是"这条腿装不动插件"。 */
+  const un = unloadableFor(path);
+  if (un !== null) {
+    throw new OmniError(`${un} 这门语言装着插件，但**这条腿**装不动它`
+      + `（node / JS 腿没有 dlopen）—— 用 C 那条腿编出来的 omni 跑同一条命令`);
   }
   return null;
 }
