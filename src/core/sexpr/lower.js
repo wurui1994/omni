@@ -184,6 +184,8 @@ class CoreLowerer {
      * 但这一层只收其中五个，见 `cabiDecl`。
      */
     this.cabis = new Map();
+    /* 真被 `(ccall …)` 调过的那些名字。发不发原型看它 —— 见 assemble 里那段。 */
+    this.cabiUsed = new Set();
     /**
      * 要装的**动态库**（`(lib "…")`，ADR-0022 的 J4c）：路径或者预登记的系统库名。
      *
@@ -974,11 +976,19 @@ class CoreLowerer {
     for (const t of this.fnUsed.values()) if (fi++ >= base.fnUsed) fnTys.push(t);
     // 线性内存：只有声明它的那一批产物负责把它建起来（见构造器里的 memEmitted）。
     let memOut = null;
-    /* `(cabi …)` 声明过的那些摊成两个同下标的数组（C 后端要的形状）。顺序是声明序，
-       所以同一份输入两次降级出来的文本一样。 */
+    /* `(cabi …)` 声明过、**并且真被调过**的那些摊成两个同下标的数组（C 后端要的形状）。
+       顺序是声明序，所以同一份输入两次降级出来的文本一样。
+
+       **只发用到的**（ADR-0022 的 J4d）：`import … with "math.h"` 一句能带进来 119 条声明，
+       而一个程序通常只调其中两个。多发出来的那些不是白纸 —— C 那条腿会为每一条发一句
+       extern 原型，而其中一条与标准头对不上就是**硬错误**（量出来的：`alloca` 在 SDK 里是
+       `#define alloca(x) __builtin_alloca(x)`，我们那句 `extern void *alloca(int64_t);`
+       被宏展开后与编译器自己那份原型冲突，整个程序编不过）。没被调的声明本来就不该
+       落进产物里 —— 这既是正确性，也是"声明是免费的"这件事该有的样子。 */
     const cabiNames = [];
     const cabiSigs = [];
     for (const [nm, d] of this.cabis) {
+      if (!this.cabiUsed.has(nm)) continue;
       cabiNames.push(nm);
       cabiSigs.push({ params: d.params, ret: d.ret, variadic: d.variadic === true });
     }
@@ -2059,6 +2069,8 @@ class CoreLowerer {
         if (v === null) return null;
         args.push(v);
       }
+      /* 这个名字**真被调过**了 —— 发不发 extern 原型看这一格（见 assemble 那段）。 */
+      this.cabiUsed.add(nm);
       if (args.length !== d.params.length && !(d.variadic === true && args.length >= d.params.length)) {
         return this.err(n, d.variadic === true
           ? `外部 C 符号 '${nm}' 至少要 ${d.params.length} 个定参，给了 ${args.length} 个`

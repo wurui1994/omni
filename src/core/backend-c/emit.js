@@ -1798,18 +1798,34 @@ class CEmitter {
         if (e.raw === true) {
           const ps = e.sig.params;
           const as = e.args.map((a, i) => {
-            /* 变参那一段（`(cabi f R (T ...))` 的 `...` 之后）没有声明的类型可用 ——
-               按**实参自己**那一格来，这正是 C 的默认实参提升：整数一律 int64_t、
-               `real` 一律 double。别的（string/指针/bool）在这一层不发：C 里它们各有
-               自己的提升规则，猜错就是读错栈。 */
-            if (i < ps.length) return `(${C_TYPE[ps[i]]})(${this.expr(a)})`;
             const k = a.type === null || a.type === undefined ? '?' : a.type.k;
+            /* `string` 交给 C 的是**那块字节的地址**（`omni_str` 是 `{p, len}` 两个字，
+               整个结构体强制转成 `void *` 是错的 —— clang 当场就拒）。与 LLVM 那条腿
+               `cabiArg` 抽胖指针第 0 格是同一件事，两条腿必须同形。
+               结尾的零：字面量是 C 的字符串字面量，本来就带；算出来的串没有那个保证，
+               那是用的人要负的责（与 LLVM 那侧同一句话）。 */
+            if (k === 'string') return `(void *)((${this.expr(a)}).p)`;
+            /* 方言的 `(ptr T)` 在 C 这一侧是 `omni_ptr`（`{a, b, e}` 三个字，界在里头）——
+               交给 C 的是"当前"那一格 `.a`，与 LLVM 那条腿抽第 0 格是同一件事。
+               界检查留在这一侧：C 那边拿到的就是一个裸地址，越界与否它不知道。
+               `(tptr T)`（thin）本来就是一个裸指针，直接转。 */
+            if (k === 'ptr') return `(void *)((${this.expr(a)}).a)`;
+            if (k === 'tptr') return `(void *)(${this.expr(a)})`;
+            if (i < ps.length) return `(${C_TYPE[ps[i]]})(${this.expr(a)})`;
+            /* 变参那一段（`...` 之后）没有声明的类型可用 —— 按**实参自己**那一格来，
+               这正是 C 的默认实参提升：整数一律 int64_t、`real` 一律 double。
+               别的（bool 那些）在这一层不发：C 里它们各有自己的提升规则，猜错就是读错栈。 */
             if (k === 'int') return `(int64_t)(${this.expr(a)})`;
             if (k === 'real') return `(double)(${this.expr(a)})`;
             throw new OmniError(`c: ${e.entry} 的第 ${i + 1} 个实参落在变参那一段，`
               + `而 ${k} 在这一层的默认实参提升里没有位置`);
           });
-          return `${e.entry}(${as.join(', ')})`;
+          /* 返回 `ptr`/`cstr` 的那些：方言这一侧接它的是 `int`（地址就是一个整数），
+             而 C 那边回的是 `void *` —— 指针到整数在 C 里要**明写**这一刀。
+             别的词（i32/f32/bool）靠 C 自己的隐式加宽就够。 */
+          const call = `${e.entry}(${as.join(', ')})`;
+          const rw = e.sig.ret;
+          return (rw === 'ptr' || rw === 'cstr') ? `(int64_t)(${call})` : call;
         }
         const sig = C_ABI[e.entry];
         const args = e.args.map((a, i) => `${C_IN[sig.params[i]]}(${this.expr(a)})`);

@@ -20,6 +20,11 @@
 // macOS 上不设 `glfwWindowHint`：默认给的就是 legacy 的 2.1 上下文，glBegin/glEnd 能用。
 
 import "/opt/homebrew/lib/libglfw.dylib" with "GLFW/glfw3.h";
+// GL 的符号**不在 libglfw 里**：它们在 OpenGL.framework 里。JIT 那条腿上 dlopen libglfw
+// 顺手把它带进了进程（`RTLD_DEFAULT` 找得着），AOT 那条腿上必须明写 —— 少了这一句，
+// `run-llvm` 是一串 undefined symbol 而 `run-jit` 跑得好好的，那种不对称本身就是错。
+// `Foo.framework` 这个形状：链接期变成 `-framework Foo`，JIT 那侧变成共享缓存里那个路径。
+import "OpenGL.framework";
 // `sin`/`cos` 不在 glfw 的头里 —— 数学库自己一句。系统库写**名字**不写路径：
 // 它已经在这个进程里了（macOS 上 libSystem 连磁盘上的文件都不是）。
 import "libm" with "math.h";

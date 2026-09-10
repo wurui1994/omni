@@ -8006,6 +8006,13 @@ export function declsOfC(path, text, host, defs) {
   for (const [name, info] of gen.funcs) {
     /* 名字带 `$` 的是这一层自己造的（桩、`$ext$…`）—— 不是头文件里的声明。 */
     if (name.indexOf('$') >= 0) continue;
+    /* **`__` 开头的一概不收，而且不记一笔**：C 把这一族名字整个留给实现（C11 7.1.3），
+       所以它们不是"用的人会去调的东西"，而是标准头与编译器自己的内部件
+       （`__fpclassifyl`、`__sincos`、`__builtin_alloca`…）。收它们有两个实实在在的害处：
+       一是 `<math.h>` 那种头里它们占了跳过名单的绝大多数，把真正要看的那一条埋掉；
+       二是 C 那条腿上重新声明 `__builtin_alloca` 是**硬错误**（编译器自己有一份不同的
+       原型）—— 量出来的：一个 `with "math.h"` 的程序在 `run-c` 上就死在那儿。 */
+    if (name.indexOf('__') === 0) continue;
     if (info.params === null) {
       skipped.push({ name, why: '只见过调用点、没见过原型，形参类型无从得知' });
       continue;

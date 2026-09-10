@@ -1555,6 +1555,51 @@ function mainStackFlags(cc) {
 }
 
 /**
+ * 源码里 `(lib …)` 说的那些库，摆到**链接命令**上（ADR-0022 的 J4c/J4d）。
+ *
+ * JIT 那条腿走的是 `--lib`/`--dl`（`runViaJit`），AOT 这两条（`run-llvm` 的产物与 C 后端的
+ * 产物）走的就是这儿 —— 少了它，一个 `import "…/libglfw.dylib"` 的程序在 AOT 上是一串
+ * undefined symbol，而 JIT 上跑得好好的。同一份源码在两条腿上要么都行要么都不行，
+ * 这种不对称本身就是错。
+ *
+ * 预登记的系统库按表走（`libm` -> `-lm`，`libc` 什么都不加）；表外的当**路径**，原样写上去
+ * （`.dylib`/`.so` 直接给链接器，与 `dlopen` 那侧写的是同一个文件）。
+ */
+function libLinkArgs(libs) {
+  const out = [];
+  const seen = new Set();
+  for (const l of libs ?? []) {
+    if (seen.has(l)) continue;
+    seen.add(l);
+    const sys = cSysLib(l);
+    if (sys !== null) {
+      if (sys.link !== null) out.push(sys.link);
+      continue;
+    }
+    /* macOS 的 **framework**：`(lib "OpenGL.framework")` -> `-framework OpenGL`。
+       为什么要单列这一格：GL 的符号不在 libglfw 里，而在 OpenGL.framework 里，而那个
+       framework 的二进制**在 dyld 的共享缓存里、磁盘上没有那个文件** —— 把路径原样交给
+       链接器是链不上的（JIT 那侧 dlopen 反而行，见 `frameworkPath`）。 */
+    if (l.endsWith('.framework')) {
+      if (!hostIsDarwin()) {
+        throw new OmniError(`(lib "${l}")：framework 是 macOS 的东西，这台机器不是`);
+      }
+      out.push('-framework');
+      out.push(l.slice(0, l.length - '.framework'.length));
+      continue;
+    }
+    out.push(l);
+  }
+  return out;
+}
+
+/** `Foo.framework` 在磁盘上的那个二进制（JIT 那侧 `dlopen` 要一个路径）。 */
+function frameworkPath(l) {
+  const n = l.slice(0, l.length - '.framework'.length);
+  return `/System/Library/Frameworks/${n}.framework/${n}`;
+}
+
+/**
  * 三维那一档的 **OpenGL 后端插件**（`libomnigl`）。照 asy 自己的分法：它的
  * `libasyopengl.so` / `libasyvulkan.so` 也是运行期 dlopen 的（rendererloader.cc），
  * 拿不到就回落。所以这一格**只是"顺手编一下"，编不出来不算错** ——
@@ -1743,8 +1788,8 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   const ex = extern === true ? ['-Wl,-export_dynamic'] : [];
   const cargs = plugin === undefined
     ? [...ccFlags(cc), ...mainStackFlags(cc), ...ex, cPath, ...runtimeObjects(cc),
-      '-o', outPath, '-lm', ...libs]
-    : [...ccFlags(cc), ...shared, cPath, '-o', outPath, ...libs];
+      '-o', outPath, '-lm', ...libs, ...libLinkArgs(mod.libs)]
+    : [...ccFlags(cc), ...shared, cPath, '-o', outPath, ...libs, ...libLinkArgs(mod.libs)];
   const tCc0 = nowMs();
   const r = spawn(cc, cargs, 'o');
   if (r[0] !== 0) {
@@ -1917,7 +1962,8 @@ function buildLlvm(mod, outPath, workDir) {
   vStep(`backend llvm  ${ir.length} bytes -> ${llPath}`);
   const cc = findClang();
   const args = [optFlag(), '-w', '-ffp-contract=off', '-pthread', ...mainStackFlags(cc),
-    '-I', RUNTIME_DIR, llPath, ...runtimeObjects(cc), '-o', outPath, '-lm'];
+    '-I', RUNTIME_DIR, llPath, ...runtimeObjects(cc), '-o', outPath, '-lm',
+    ...libLinkArgs(mir.libs)];
   const r = spawn(cc, args, 'o');
   if (r[0] !== 0) {
     throw new OmniError(`llvm backend produced IR that ${cc} rejected:\n${r[2]}\n(kept at ${llPath})`);
@@ -2026,7 +2072,9 @@ function runViaJit(mod, argv, srcPath) {
   for (const lib of mir.libs ?? []) {
     const sys = cSysLib(lib);
     if (sys !== null) { wantDl = true; continue; }
-    jitArgs.push('--lib', lib);
+    /* framework 那一格（`(lib "OpenGL.framework")`）：链接期是 `-framework OpenGL`，
+       这一侧要一个**路径** —— 共享缓存里的那个二进制，磁盘上没有文件但 dlopen 认它。 */
+    jitArgs.push('--lib', lib.endsWith('.framework') ? frameworkPath(lib) : lib);
   }
   if (wantDl) jitArgs.push('--dl');
   const code = spawn(host, jitArgs, 'i')[0];

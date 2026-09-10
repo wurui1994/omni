@@ -3587,7 +3587,7 @@ class JncLower {
        它们已经在这个进程里了，macOS 上连磁盘上的文件都不是（见 `hir/c_abi.js` 的
        `C_SYSLIBS`）。这儿只按形状分流，名字对不对由下游那一处表说。 */
     if (/\.(dylib|dll)$/.test(spec) || /\.so($|\.)/.test(spec)
-      || /^lib[a-z0-9_]+$/.test(spec)) {
+      || /^lib[a-z0-9_]+$/.test(spec) || /\.framework$/.test(spec)) {
       this.decls.push(`  (lib ${JSON.stringify(spec)})`);
       /* `with "foo.h"`（ADR-0022 的 J4d）：那个头文件里的函数声明**一条条变成 `(cabi …)`**。
          收不下的（float、struct 按值、老式声明…）跳过并记一笔 —— 一个真头文件里总有几条

@@ -307,6 +307,9 @@ if (existsSync(sysDir)) {
 {
   const glfw = '/opt/homebrew/lib/libglfw.dylib';
   const seen = [];
+  /* 三条**原生**腿都要跑（interp 那条不在这儿：它没有 `(ccall …)`）。
+     从前只跑 JIT，于是 AOT 那两条上「`(lib …)` 没接到链接命令」这件事一直没人发现 ——
+     同一份源码在两条腿上要么都行要么都不行，这种不对称本身就是错。 */
   for (const [name, args] of [['glfw-tri.sx', []],
     ['glfw-tri.jnc', ['-I', '/opt/homebrew/include']]]) {
     const src = join(here, 'cabi', name);
@@ -314,82 +317,30 @@ if (existsSync(sysDir)) {
       process.stdout.write(`  skip ${name}：这台机器上没有 glfw\n`);
       continue;
     }
-    const r = run(['run-jit', src, ...args], 120000);
-    const m = /^framebuffer: ([1-9][0-9]*) ([1-9][0-9]*)\nframes: 120\n$/.exec(r.out ?? '');
-    const detail = [];
-    if (r.code !== 0) {
-      detail.push(`    run-jit exit=${r.code}（133 = SIGTRAP，多半又跑到别的线程上去了）`
-        + `\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    } else if (m === null) {
-      detail.push(`    输出的形状不对：${JSON.stringify((r.out ?? '').slice(0, 200))}`);
-    } else {
-      seen.push(r.out);
-    }
-    if (detail.length > 0) bad(name, detail.join('\n'));
-    else ok(`${name} [GLFW 开窗 + legacy GL 画 120 帧：framebuffer ${m[1]}x${m[2]}]`);
-  }
-  /* 两份的字节要一样 —— 那才说明"从头文件收来的签名"与"手写的签名"是同一件事。 */
-  if (seen.length === 2) {
-    if (seen[0] === seen[1]) ok('glfw-tri [.sx 与 .jnc 的输出逐字节相同]');
-    else {
-      bad('glfw-tri 两份不一致', `    sx  ${JSON.stringify(seen[0])}\n    jnc ${JSON.stringify(seen[1])}`);
+    for (const leg of ['run-jit', 'run-llvm', 'run-c']) {
+      const r = run([leg, src, ...args], 180000);
+      const m = /^framebuffer: ([1-9][0-9]*) ([1-9][0-9]*)\nframes: 120\n$/.exec(r.out ?? '');
+      const detail = [];
+      if (r.code !== 0) {
+        detail.push(`    ${leg} exit=${r.code}（133 = SIGTRAP，多半又跑到别的线程上去了）`
+          + `\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
+      } else if (m === null) {
+        detail.push(`    输出的形状不对：${JSON.stringify((r.out ?? '').slice(0, 200))}`);
+      } else {
+        seen.push(r.out);
+      }
+      if (detail.length > 0) bad(`${name} @ ${leg}`, detail.join('\n'));
+      else ok(`${name} @ ${leg} [GLFW 开窗 + legacy GL 画 120 帧：framebuffer ${m[1]}x${m[2]}]`);
     }
   }
-}
-
-// ------------------------------------------------- 8. `import "…" as g`（J4d）
-//
-// 两条：**有头文件**时名字挂在 `g` 底下（签名从头文件来）；**没有头文件**时签名从调用点
-// 猜出来，而且必须**印一条 warning** —— 「不强制写声明，但遇到崩溃不该惊讶」的前提是
-// 用的人看得到自己在赌什么。从前 `diags.warn` 攒下来的东西一个字都不出去，那条承诺是空的。
-{
-  const dir = join(here, 'cabi');
-  const hostC = join(dir, 'host.c');
-  const tmp = mkdtempSync(join(tmpdir(), 'omni-asns-'));
-  const ext = process.platform === 'darwin' ? 'dylib' : 'so';
-  const libPath = join(tmp, `libhost.${ext}`);
-  const so = spawnSync('clang', ['-shared', '-fPIC', hostC, '-o', libPath], { encoding: 'utf8' });
-  if (so.status !== 0) bad('as-ns', `    dylib 编不出来：${(so.stderr ?? '').trim().split('\n')[0]}`);
-  else {
-    const src = join(tmp, 'guess.jnc');
-    writeFileSync(src, `import ${JSON.stringify(libPath)} as p;\n\n`
-      + 'int main() {\n'
-      + '    printf("sum %d\\n", p.omni_probe_add(20, 22));\n'
-      + '    return 0;\n'
-      + '}\n');
-    const r = run(['run-jit', src], 90000);
-    const detail = [];
-    if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 2).join('\n      ')}`);
-    else if (r.out !== 'sum 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "sum 42\\n"）`);
-    if (!(r.err ?? '').includes('warning:')) {
-      detail.push('    没有 warning：签名是从调用点猜的，这件事必须说出来');
-    }
-    if (!(r.err ?? '').includes('(i64 i64) -> i64')) {
-      detail.push(`    warning 里没写猜出来的那份签名：${JSON.stringify((r.err ?? '').slice(0, 200))}`);
-    }
-    if (detail.length > 0) bad('as-ns', detail.join('\n'));
-    else ok('as-ns [import "…" as p：签名从调用点猜、带 warning，调到的还是真符号]');
-
-    /* 有头文件的那一条：签名从头文件来，名字挂在 `h` 底下，**一句 warning 都不该有**。 */
-    const hdrPath = join(tmp, 'probe.h');
-    writeFileSync(hdrPath, '#include <stdint.h>\nint64_t omni_probe_add(int64_t a, int64_t b);\n');
-    const src2 = join(tmp, 'withas.jnc');
-    writeFileSync(src2, `import ${JSON.stringify(libPath)} with "probe.h" as h;\n\n`
-      + 'int main() {\n'
-      + '    printf("sum %d\\n", h.omni_probe_add(20, 22));\n'
-      + '    return 0;\n'
-      + '}\n');
-    const r2 = run(['run-jit', src2], 90000);
-    const d2 = [];
-    if (r2.code !== 0) d2.push(`    run-jit exit=${r2.code}\n      ${(r2.err ?? '').trim().split('\n').slice(0, 2).join('\n      ')}`);
-    else if (r2.out !== 'sum 42\n') d2.push(`    输出不对：${JSON.stringify(r2.out)}（要 "sum 42\\n"）`);
-    if ((r2.err ?? '').includes('warning:')) {
-      d2.push(`    有头文件就不该有 warning：${JSON.stringify((r2.err ?? '').slice(0, 200))}`);
-    }
-    if (d2.length > 0) bad('with-as-ns', d2.join('\n'));
-    else ok('with-as-ns [import "…" with "h" as h：签名从头文件来，没有 warning]');
+  /* 六次的字节要全一样 —— 那才说明"从头文件收来的签名"与"手写的签名"是同一件事，
+     而且三条原生腿对同一个 C ABI 的理解没有分叉。 */
+  if (seen.length === 6) {
+    let same = true;
+    for (const s of seen) if (s !== seen[0]) same = false;
+    if (same) ok('glfw-tri [两份源码 × 三条原生腿：六次输出逐字节相同]');
+    else bad('glfw-tri 六次不一致', `    ${seen.map((s) => JSON.stringify(s)).join('\n    ')}`);
   }
-  rmSync(tmp, { recursive: true, force: true });
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

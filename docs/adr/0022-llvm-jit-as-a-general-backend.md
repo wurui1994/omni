@@ -427,13 +427,36 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   判据：`tests/llvm/run.js` 第 8 节两条 —— 没有头文件时输出对、warning 在、warning 里写出
   猜的那份签名；有头文件时输出对、**一句 warning 都没有**。
 
-  **一处已知的边界**（还没修）：`with "stdio.h"` 这类**标准头**在 **C 那条腿**上会把
-  `printf` 一族重新声明一遍（`extern int32_t printf(int64_t, ...);`），而 `omni.h` 已经
-  include 过真的 `<stdio.h>` —— C 里同名不同型的重复声明是硬错误。JIT/LLVM 那两条腿没有
-  这个问题（IR 里没有"标准头"这回事）。要修的话是在 `cAbiExterns` 里跳过"封闭表里
-  `std: true` 的那些符号名"，但那张表是个对象、按 `sym` 反查要枚举它，而 `Object.keys`
-  不在 JS 子集里（ADR-0011）—— 所以那一格要先在 `hir/c_abi.js` 里加一个正查的小助手。
-  眼下的建议是：要 libc 的东西就手写那一句 `(cabi …)`，或者只在 JIT 那条腿上用它。
+  **第八格：AOT 两条腿也要能跑同一个程序**（已落）。这一格是被上面那个 OpenGL 程序**逼出来**
+  的：它在 `run-jit` 上跑得好好的，而 `run-llvm` 与 `run-c` 上是一串 undefined symbol ——
+  同一份源码在几条腿上要么都行要么都不行，这种不对称本身就是错。补的五件事：
+
+  1. **`(lib …)` 接到链接命令上**（`cli.js` 的 `libLinkArgs`）。从前只有 `runViaJit` 认这一格，
+     AOT 那两处一个字都没用。预登记的系统库按表走（`libm` → `-lm`），表外的当路径原样写上。
+  2. **macOS 的 framework**：`(lib "OpenGL.framework")` → `-framework OpenGL`。为什么它必须
+     单列一格：GL 的符号不在 libglfw 里，而在 OpenGL.framework 里，而那个 framework 的
+     二进制**在 dyld 的共享缓存里、磁盘上没有那个文件** —— 路径原样交给链接器是链不上的
+     （JIT 那侧反而行：`dlopen` 认共享缓存里的路径，所以那一侧把它展开成
+     `/System/Library/Frameworks/X.framework/X`）。
+  3. **C 那条腿上 `string` 与 `(ptr T)` 的交法**。`omni_str` 是 `{p, len}` 两个字、`omni_ptr` 是
+     `{a, b, e}` 三个字，整个结构体强制转成 `void *` clang 当场就拒。交出去的是 `.p` / `.a`
+     —— 与 LLVM 那条腿抽第 0 格是同一件事。界检查留在这一侧。
+  4. **返回 `ptr`/`cstr` 的那些要明写一刀**（`(int64_t)(…)`）：方言这一侧接它的是 `int`，
+     而 C 那边回的是 `void *`，指针到整数在 C 里不许隐式。
+  5. **`__` 开头的声明一概不收**（`declsOfC`）。C 把这一族名字整个留给实现（C11 7.1.3），
+     它们是标准头与编译器自己的内部件。收它们有两个实实在在的害处：`<math.h>` 里它们占了
+     跳过名单的绝大多数（把真要看的那条埋掉），而 C 那条腿上重新声明 `__builtin_alloca`
+     是**硬错误**。
+
+  **顺带把上面那条"已知边界"也解掉了**：`with "stdio.h"` 之类会不会与标准头撞，取决于
+  「我们发了多少条 extern 原型」—— 而从前是**声明了多少发多少**。现在只发**真被 `(ccall …)`
+  调过的**（`cabiUsed`）：一句 `with "math.h"` 带进来 119 条声明，一个程序通常只调其中两个，
+  剩下 117 条本来就不该落进产物。这既少了一大片撞名的机会，也是"声明是免费的"该有的样子。
+  真撞上的那一条（`alloca` 在 SDK 里是 `#define alloca(x) __builtin_alloca(x)`）就是这么
+  暴露出来的：它被展开成 `__builtin_alloca`，与编译器自己那份原型冲突。
+
+  判据：`tests/llvm/run.js` 第 7 节 —— 两份源码 × 三条**原生**腿（`run-jit`/`run-llvm`/`run-c`）
+  各跑一遍，六次输出**逐字节相同**。interp 那条不在里头：它没有 `(ccall …)`。
 
   **那个 SIGTRAP —— 查清了，是我们自己的线程**：`tests/llvm/cabi/glfw-tri.sx` 在 `run-jit`
   上 SIGTRAP（exit 133），现在跑通了（`framebuffer: 1600 1200` / `frames: 120`，与 C 参照
