@@ -146,7 +146,8 @@ if (c1 && !quick) {
   // ---- 阶段 6：原生编译器上的 `run` --------------------------------------------
   // 那一代没有 JS 引擎，`run` 于是走 C 路径（cli.js 里先问 hasJsEngine 再决定）。
   // 门槛是**逐字节等于 node 上 run 的输出**：换了执行方式不等于换了语义。
-  const n1 = join(dir, 'dist', 'src', 'host', 'omni');
+  // 产物只落 dist：核心就是 `dist/omni`（ADR-0021 的 S4；从前是 dist/src/host/omni）
+  const n1 = join(dir, 'dist', 'omni');
   if (r.code === 0) {
     const sample2 = join(root, 'tests', 'cases', '01_basics.omni');
     const ref = spawnSync('node', [cli, 'run', sample2], { encoding: 'utf8' });

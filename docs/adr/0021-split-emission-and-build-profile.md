@@ -598,8 +598,69 @@ omni build src/core/lang/wat.js --plugin registerWatLang -o omni-lang-wat.dylib
 （b）`bootstrap` 生成那一份（"这次编进来哪几门"是构建产物，不是源码里的一个 if）。
 （b）更像这条链上别处的做法（语法表、字面量池都是生成的），代价是多一格生成物。
 
-- **S4 其余插件搬出去**：每个语言 / 目标一个独立编译的动态库，落到约定目录里；
-  核心启动时扫一遍（自动发现，无开关）；`bootstrap` 分步表把每个插件的时间与体积摆出来。
+## 落定了：核心什么都不内建，js -> c 也是插件（S4 收尾）
+
+上面那两条路选了 (a) 的形状，但**默认反过来了**：不是"核心留 js -> c、别的当插件"，而是
+**核心一格都不留**。omni 的核心 = 驱动 + 注册表 + 插件加载器；语言前端、目标后端，连
+js -> c 那条都是 `dist/plugins/` 里的动态库。没有插件的 omni 只会印用法然后响着拒
+（"这份 omni 里一门语言都没装"）。
+
+接缝还是 `lang/builtin.js`：编译器读它时拿到的是 `lang/builtin-core.js`（一格都不登记）。
+**从源码跑的那条腿不过这个接缝**（它走自己的 import），所以 node 腿一直是全的 —— 它本来
+就没有 dlopen，而它正是把插件编出来的那条腿。
+
+```
+dist/omni          核心（--extern 编，10.60 MB；全内建那份是 19.06 MB）
+dist/omni.syms     它实际留下的符号（插件 --bind 要它）
+dist/plugins/      12 格：lang-{js,wat,sx,asy,jnc,glsl,c,grammar} + target-{js,c,llvm,spirv}
+dist/share/        数据：runtime / jit / runtime-gl / frontend-asy / frontend-jnc / lib
+```
+
+命令与启动都不许再要一串参数：`npm run native`（核心不在就先建，然后跑 dist/omni）、
+`npm run build:native`、`omni plugins`（默认 `--core dist/omni`、`-o dist/plugins`）。
+
+### 插件按什么决定"发哪些函数体"：`.syms`，不是文件名
+
+这是整条路上真正卡住的一格。`--own`（按文件名判归属）不成，量出来两个坑：
+
+1. **核心是剪过枝的**。`hir/types.js` 的 `bufType` 在薄核心里没人调，压根没发；插件按
+   "不是我的文件就 extern"发了外部引用 -> dlopen 报
+   `symbol not found in flat namespace '_u_bufType'`。剪枝结果只有核心自己知道。
+2. **mangled 名里的 `__2` 是每个程序各自编的号**。只按名字绑，核心的 `g_X` 与插件的 `g_X`
+   可能来自不同模块 -> `dynamic value is (null), expected list`，换个地方是
+   `undefined is not a function`。
+
+所以加的是一格**数据**：`--extern` 的产物旁边落 `<产物>.syms`，每行 `符号|源文件`
+（函数、模块级变量、闭包的 make）；插件用 `--bind <那份 .syms>` 构建，**同名同源文件**才
+绑过去，否则自己发。
+
+### 跨程序共享状态的两条铁律（都是踩出来的）
+
+- **插件的入口只能是自己的**。P1 把 `omni_main` 的来源记成了 `host/path.js`，名字与文件都
+  与核心一样，于是 `--bind` 把它绑到了**核心的 main** 上 —— 插件的模块级 let/const 一个都
+  没建，报 `符号键只在真对象上成立`。现在插件的入口永远自己发（发成 `static`，同名各一份）。
+- **插件的入口不许重建不属于自己的模块级变量**。核心先建了 `g_INT`，插件的入口又建一个新的
+  塞回同一格，而核心与先装的插件已经把旧的那个捕获进了自己的表里 —— 于是 `t !== INT` 成立，
+  诊断印成「字段 file.fd … 这里是 int」这种自相矛盾的话。现在那种句子发成
+  `if (g_X.tag == OMNI_DYN_UNDEF) { … }`：谁先装谁定。
+
+### 一条按腿分的例外：出 JS 产物的那两条命令全内建
+
+JS 宿主没有 dlopen（`host/native.js` 的 `pluginsOk`），所以 `emit js` / `build js` 出来的
+`omni.mjs` 要是也只剩驱动，它一门语言都不认 —— 自举链第二道门槛（C2 = C1 emit-js）当场报
+"这份 omni 里一门语言都没装"。这两条置 `LANGS_FAT`；C 那条照旧是薄核心 + plugins/。
+
+### 量出来的（都在纯插件核心上跑，与 node 腿 `cmp` 逐字节相同）
+
+- `emit c hello.js`、`emit js hello.js`、`interp hello.js`
+- `emit c tests/asy/cases/01-arith.asy`（asy 插件里带着 sexpr 与 glr）
+- `emit c tests/jnc/cases/01-pointers.jnc`
+- `emit c src/cli.js` —— 14.78 MB，与 node 腿逐字节相同（自己编自己那道门）
+- `dist/omni build src/cli.js --extern` 19.0s + `dist/omni plugins` 31.3s -> 第二代产物，
+  它的 `emit c` 仍然逐字节相同（插件这条路上的 stage2）
+- 一格插件重编 **2.2 秒**（改 asy 只重编 lang-asy.dylib，不动核心）
+- `npm run bootstrap`：**10 项全绿，170.1s**（比这一轮开始时的 212.9s 还快）
+
 - **S5**（可选）P2a 收共享段那 7.75 M 与产物那 +50%。
 
 ## 顺带记下的两个坑（都不是性能问题，是这一轮量的时候撞上的）
