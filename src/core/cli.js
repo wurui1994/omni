@@ -44,9 +44,6 @@ import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs } from './hir/c_abi.js';
-import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
-import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
-/* 后端过一格注册表（ADR-0021 S3）：调用点不叫函数名，可选加载才有立足处 */
 import {
   target, registerTarget, registerLang, lang, registerRunner, runner, noteUnloadable,
   registerCap, cap, langNames,
@@ -434,10 +431,11 @@ function modeFor(path, argv, fallback = 'mixed') {
  * 时间是墙上时间（js_now_ms）：大头是 cc 与子进程，CPU 时间量不到它们。
  */
 let VERBOSE = false;
-/* `--builtins min`：这一份产物只内建 js -> c，别的语言/目标靠 plugins/ 装（ADR-0021 S4）。
+/* 编出来的核心默认只内建 js -> c，别的语言/目标各自一格 plugins/ 里的插件（ADR-0021 S4）。
    接缝是 linkJs 的 read 回调 —— 编译器读源码全过它，所以"换掉 builtin.js 那一份文本"
-   就等于"不把那几门 import 进来"，链接器与摇树都跟着少活。 */
-let BUILTIN_SET = 'full';
+   就等于"不把那几门 import 进来"，链接器与摇树都跟着少活。
+   `--fat` 是逃生门：把所有语言都编进核心（一份不用装插件的胖二进制）。 */
+let LANGS_FAT = false;
 let STATS = false;
 let vMark = 0;
 let vRss = 0;
@@ -568,14 +566,20 @@ function compile(path, argv = []) {
 /**
  * 编译器读一份**模块源码**时过这儿（ADR-0021 的 S4）。
  *
- * 平时就是 readText。`--builtins min` 时只换一份：`lang/builtin.js` 交的是 `builtin-min.js`
- * 的内容 —— 于是那几门语言的 `import` 根本不存在，链接器不会去读它们，摇树也不必再摇。
+ * 平时就是 readText。只有一份要换：`lang/builtin.js` 交的是 `builtin-core.js` 的内容 ——
+ * 于是那几门语言的 `import` 在编出来的产物里根本不存在，链接器不会去读它们。
+ *
+ * **这是默认，不是一个档**：编出来的核心就是 js -> c，别的语言各自一格
+ * `plugins/omni-lang-*.dylib`（`build --fat` 才把它们全编进核心，那是逃生门）。
+ * 从源码跑的那条腿不过这个接缝（它走自己的 import），所以开发腿一直是全的 ——
+ * node 没有同步 ESM import，装不动插件，只能这样。
+ *
  * 换在这一层而不是让语言自己判：**编进来哪几门是构建的决定**，不是某一门语言的事。
  */
 function readModule(p) {
-  if (BUILTIN_SET === 'min' && p.endsWith('/lang/builtin.js')) {
-    const alt = `${p.slice(0, p.length - 'builtin.js'.length)}builtin-min.js`;
-    vStep(`builtins min  ${alt}`);
+  if (!LANGS_FAT && p.endsWith('/lang/builtin.js')) {
+    const alt = `${p.slice(0, p.length - 'builtin.js'.length)}builtin-core.js`;
+    vStep(`builtins core  ${alt}`);
     return readText(alt);
   }
   return exists(p) ? readText(p) : null;
@@ -642,8 +646,12 @@ function compileFront(path, argv) {
      那句话把人往错的方向带，真相是"这份 omni 里没有 asy 这门语言"。 */
   const core = path.endsWith('.omni') || path.endsWith('.omnid') || path.endsWith('.omnis');
   if (!core) {
-    throw new OmniError(`不认识 ${basename(path)} 这种扩展名：这份 omni 带着 ${langNames().join(' / ')}`
-      + '（别的语言装一格 omni-lang-<名字> 插件，见 plugins/ 那个目录）');
+    /* 一格语言都没装是**正常**的一种状态（ADR-0021 S4）：核心里什么前端都没有，
+       连 js 都是插件。那时候别印"这份 omni 带着 "后面跟一个空 —— 直说没装。 */
+    const have = langNames();
+    throw new OmniError(`不认识 ${basename(path)} 这种扩展名：`
+      + (have.length === 0 ? '这份 omni 里一门语言都没装' : `这份 omni 带着 ${have.join(' / ')}`)
+      + '（语言各自一格 plugins/omni-lang-<名字> 插件）');
   }
   return compileProgram(path, undefined, modeFor(path, argv));
 }
@@ -1128,7 +1136,7 @@ function asyModsBuild(path, dir) {
       vStep(`asy 归属  ${own === '' ? '<运行时>' : own}  ${nm}`);
     }
   }
-  writeText(join(dir, 'omni_rt.js'), emitJsRuntimeModule());
+  writeText(join(dir, 'omni_rt.js'), cap('jsgen.runtimeModule')());
   // 一份产物的印记（这一格决定重不重编）：`编译器 | 它自己那个源文件 | 它引到的那几个源文件`，
   // 每一格是 `路径:改动时间:字节数:h内容哈希`（见 inpField）。**身份是内容哈希** ——
   // touch 一下、重新 checkout 一遍都不该重编；改动时间与字节数只是省一次读的预检。
@@ -1576,7 +1584,7 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   const dir = workDir === undefined ? workDirFor('c', hash16(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const cPath = join(dir, `${basename(outPath)}.c`);
-  const { text: cText, stats, syms } = emitCWithStats(mod, {
+  const { text: cText, stats, syms } = cap('cgen.stats')(mod, {
     plugin: plugin, extern: extern === true, own: own === undefined ? null : own,
     bind: bind === undefined ? null : bind,
   });
@@ -2008,12 +2016,7 @@ function main(argv) {
   // 没门抓到它：`omni c cpp -v` 的那些门只比 stdout，而 `--verbose` 写 stderr。
   VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
   STATS = rest.includes('--stats');
-  const bi = rest.indexOf('--builtins');
-  if (bi >= 0) {
-    const v = rest[bi + 1];
-    if (v !== 'min' && v !== 'full') throw new OmniError(`--builtins 只认 min 与 full，给的是 '${v}'`);
-    BUILTIN_SET = v;
-  }
+  LANGS_FAT = rest.includes('--fat');
   /* 发现插件摆在这儿而不是模块作用域：一来 `-v` 刚解析出来，装了哪几格才印得出来；
      二来插件装不上是**响错**，那句话得走 main 的错误出口（模块作用域抛出来的话，
      连 `omni help` 都印不出来了 —— 一格坏插件不该让整个 CLI 说不出话）。 */
@@ -2414,7 +2417,7 @@ function main(argv) {
         if (wi < 0) throw new OmniError('emit c --split 要 --work DIR：每个模块的 .c 得有个落点');
         const dir = rest[wi + 1];
         mkdirAll(dir);
-        const u = emitCUnits(mod);
+        const u = cap('cgen.units')(mod);
         /* `_decl.h` 是共用的那一份（类型、容器 / JS 模板、字面量池、全部原型），每个模块
          * `#include` 它；`_shared.c` 只放"只能有一份"的那些（模块级变量的定义、闭包的 make、
          * 那两张表）与 main。状态已经不在模板里了（S1），所以模板复制一份是无害的。 */
@@ -2433,7 +2436,7 @@ function main(argv) {
         }
         return 0;
       }
-      const r = emitCWithStats(mod, { amalgamate: rest.includes('--amalgamate') });
+      const r = cap('cgen.stats')(mod, { amalgamate: rest.includes('--amalgamate') });
       stdout(r.text);
       vStats(r.text, r.stats);
       return 0;
@@ -2967,7 +2970,7 @@ function main(argv) {
       const byName = new Map();
       for (const f of mod.funcs) byName.set(f.mangled, f);
       const cache = new IncrCache(dir);
-      const res = compileIncremental(mir, 'js', cache, (name) => emitJsFunc(mod, byName.get(name)));
+      const res = compileIncremental(mir, 'js', cache, (name) => cap('jsgen.func')(mod, byName.get(name)));
       vStep(`incr  ${res.units.length} units, ${res.hits} hit, ${res.misses} miss  cache ${dir}`);
       stdout(incrReport(res, rest.includes('--list')));
       return 0;

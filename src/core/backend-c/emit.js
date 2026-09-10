@@ -402,7 +402,7 @@ class CEmitter {
     this.markB = this.out.length;
     for (const f of this.mod.funcs) {
       /* 不属于这一份的：原型已经发过（extern 模式下就是外部声明），体不发 —— 加载时绑到核心那一份上 */
-      if (!this.emitsSym(f.mangled, f.file)) continue;
+      if (!this.emitsSym(f.mangled, f.file) && !this.isEntry(f)) continue;
       this.noteSym(f.mangled, f.file);
       const i0 = this.out.length;
       this.func(f);
@@ -1228,10 +1228,45 @@ class CEmitter {
     // `static inline __attribute__((always_inline))`，36.0s -> 38.5s（没变好）。
     // 真要消掉热路径上那些调用（`asy__rm` 3.2 亿次、`triple * real` 各 2578 万次），
     // 只有两条路：**发射器自己在调用点摊开**，或者把编译等级提到 `-O1`（那是 ADR 级的决定）。
-    return `${this.extern ? '' : 'static '}${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
+    /* 插件的那格入口（模块级 let/const 的赋值都在里面）**只能是自己的**：它与核心的
+     * 入口同名（都叫 omni_main，而且 P1 把它的来源记成了 host/path.js），只按名字+文件
+     * 绑就会绑到**核心的 main** 上 —— 量出来是「插件的类对象一个都没建」，
+     * 报 `符号键只在真对象上成立`。发成 static：同一个名字，各自一份。 */
+    const st = this.plugin !== null && f.mangled === this.mod.entry ? 'static '
+      : (this.extern ? '' : 'static ');
+    return `${st}${cTypeName(f.ret)} ${f.mangled}(${params.length ? params.join(', ') : 'void'})`;
+  }
+
+  /** 这个函数是这一份的入口吗（插件那格入口永远自己发，见 proto 里那段） */
+  isEntry(f) {
+    return this.plugin !== null && f.mangled === this.mod.entry;
+  }
+
+  /**
+   * 插件入口里那句"给不属于自己的模块级变量赋初值"—— 包成"还没人初始化过才做"。
+   * 不是这种句子就交 null（照原样发）。
+   *
+   * 判据要窄：只在**入口**里、只认 `g_X = …` 这一种整句、且 `g_X` 不是自己发的那些。
+   */
+  initGuard(s) {
+    if (!this.inEntry || this.bind === null) return null;
+    const e = s.expr;
+    if (e === undefined || e === null || e.kind !== 'Assign') return null;
+    const t = e.target;
+    if (t === undefined || t === null || (t.kind !== 'JsGlobal' && t.kind !== 'GlobalRef')) return null;
+    if (this.gFile === undefined) {
+      this.gFile = new Map();
+      for (const g of this.mod.jsGlobals ?? []) this.gFile.set(g.name, g.file);
+    }
+    if (!this.gFile.has(t.name)) return null;      // 有类型的那种（核心方言）不管
+    if (this.emitsSym(`g_${t.name}`, this.gFile.get(t.name))) return null;
+    return `if (g_${t.name}.tag == OMNI_DYN_UNDEF) { ${this.expr(e)}; }`;
   }
 
   func(f) {
+    /* 现在发的是不是这一份的入口（模块级变量的赋值都在它里头）—— initGuard 只认这一格：
+     * 函数体里对模块级变量的赋值是**真赋值**，包不得（`asyDeps = []` 那种）。 */
+    this.inEntry = this.isEntry(f);
     this.line(`${this.proto(f)} {`);
     this.indent++;
     if (f.closureId !== undefined) {
@@ -1266,9 +1301,16 @@ class CEmitter {
         this.noteVec(s.type);
         this.line(`${cTypeName(s.type)} v_${s.name} = ${this.expr(s.init)};`);
         break;
-      case 'ExprStmt':
-        this.line(`${this.expr(s.expr)};`);
+      case 'ExprStmt': {
+        /* 插件的入口里，**不属于自己的**模块级变量只在"还没人初始化过"时才初始化
+         * （ADR-0021 的 S4）。不加这一格的话：核心的 omni_main 先建了 `g_INT`，
+         * 插件的入口又建一个新的塞回同一格，而核心（与先装的别的插件）在模块初始化时
+         * 已经把**旧的那个**捕获进了自己的表里 —— 于是 `t !== INT` 成立，
+         * 量出来是「字段 file.fd … 这里是 int」这种自相矛盾的诊断。 */
+        const g = this.initGuard(s);
+        this.line(g !== null ? g : `${this.expr(s.expr)};`);
         break;
+      }
       case 'If':
         this.line(`if (${this.expr(s.cond)}) {`);
         this.indent++;
