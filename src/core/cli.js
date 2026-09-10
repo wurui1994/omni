@@ -1785,7 +1785,9 @@ function buildPluginSet(core, dir, want, argv) {
   const files = [];
   for (const c of CORE_DATA) {
     const d = dataDir(c.dir, c.probe);
-    if (d !== null) for (const f of readDir(d)) files.push(`${c.dir}/${f}`);
+    /* 只抄这一层的**文件**：`lib` 底下还有 `lib/asy`（那是 asy 插件的数据，跟着那一格走），
+       当文件抄会在 readText 上炸。 */
+    if (d !== null) for (const f of readDir(d)) if (!isDir(join(d, f))) files.push(`${c.dir}/${f}`);
   }
   for (const p of PLUGIN_SET) {
     if (want !== null && !want.includes(p.name)) continue;

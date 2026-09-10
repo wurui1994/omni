@@ -19,12 +19,18 @@
 
 import { readText, exists, realPath, readDir, installDir } from '../host/native.js';
 import { join, dirname, resolve, relative, isAbsolute, basename } from '../host/path.js';
+import { dataDir } from '../host/data.js';
 import { SourceFile, OmniError } from '../source/diag.js';
 import { parse } from '../parse/parser.js';
 
-// installDir() 是"程序镜像所在目录"（node 上就是 src/host）；lib 相对它固定两级上去。
-// 导出是给 `omni bootstrap` 用的：它要把这棵 lib 复制进产物目录，布局才立得住。
-export const LIB_DIR = resolve(installDir(), '..', '..', 'lib');
+/* `std` 那个包的根。按**布局**找（host/data.js 那串候选根）：
+ *   从源码跑    src/lib
+ *   装好的样子  dist/share/lib
+ * 从前写死成 `installDir()/../../lib`：源码腿上对（src/core/host -> src/lib），编出来的
+ * 腿上错 —— 量出来是原生 omni 里 `print(<dynamic>)` 报 "no such module: 'std/json.omni'
+ * （looked for <仓库的上一级>/lib/json.omni）"。`json.omni` 当标志文件：这棵树里它一定在。
+ * 兜底留着旧算法（bootstrap 复制这棵树时也用 LIB_DIR）。 */
+export const LIB_DIR = dataDir('lib', 'json.omni') ?? resolve(installDir(), '..', '..', 'lib');
 
 /** 内置清单。将来会被真正的项目清单文件取代，但形态不变：名字 -> 根目录，一层间接，没有搜索。 */
 export const PACKAGES = new Map([['std', LIB_DIR]]);
