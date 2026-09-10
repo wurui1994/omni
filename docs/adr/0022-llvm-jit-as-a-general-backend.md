@@ -335,6 +335,40 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
 
   三条路最后都落在同一格（`mod.cabiSig` 的那条签名），所以后端一个字都不用改。
 
+  **拿一个真的 OpenGL 程序量出来的四格**（homebrew 的 glfw 3.5.1 + 它的真头文件）：
+  1. **framework 的头文件目录**（macOS）。`<GLFW/glfw3.h>` 第 237 行 include 的是
+     `<OpenGL/gl.h>` —— 苹果那边它是 `<F>/OpenGL.framework/Headers/gl.h`（clang 的 `-F`）。
+     少了这张表，一份真的 GLFW 头**连预处理都过不去**。补上之后一趟收下 637 条声明。
+  2. **`f32` 进那张类型词表**。补完 framework 之后剩下的 67 条跳过**全都只因为 `float`**，
+     而那 67 条正是 `glColor3f`/`glClearColor`/`glVertex3f` 那一族 —— 一个经典 OpenGL 程序的
+     正中心。`float` 不许拿 `f64` 顶：ABI 上单精度是自己那一格。
+  3. **有声明就按声明发**（`backend-llvm` 的 `cabiArg` + `CABI_LL`）。签名从前是从调用点的
+     **值**收的，而方言里只有 `real`（f64）—— 那对 `float` 必然错。现在 `mod.cabiSig` 在的
+     时候由它说：形参在调用点补 `fptrunc`/`trunc`/`sext`/`sitofp`，返回值反向补。
+  4. **`ptr` 的形参也收 `string` 与方言的指针**。一个真程序两种都要：
+     `glfwCreateWindow(w, h, "标题", …)` 的第三格是 `const char *`，
+     `glfwGetFramebufferSize(win, &w, &h)` 的后两格是 `int *`。方言的 `(ptr T)` 是**带界的
+     三个字**，交给 C 的是"当前"那一格（与 `OP.PTHIN` 同一格）—— 界检查留在这一侧。
+
+  **还差一格，而它是 `with` 的正当理由**：**宏与枚举常量**。`GL_COLOR_BUFFER_BIT`、
+  `GL_TRIANGLES`、`GLFW_CONTEXT_VERSION_MAJOR` 这些在 C 里是 `#define`，不是函数 ——
+  `c.declsOf` 现在只收函数，所以一个 jancy 写的 OpenGL 程序**只能把 `16384` 手抄进源码**
+  （`tests/llvm/cabi/glfw-tri.sx` 里就是这么写的，那正是不该有的样子）。用 `with "h"` 的
+  全部意义就在这儿：**头文件是那些名字的唯一出处**。要补的两半都在手边 ——
+  `Cpp.defines` 是宏表（`MACRO_OBJ` 且体是一个常量表达式的那些可以求值，`#if` 的求值
+  机器现成），枚举常量在 C 前端的符号表里。收出来之后走 `(cconst NAME 值)` 那一类形式
+  进方言，jnc 那侧把它们登记成常量。
+
+  **一个没查完的**：`tests/llvm/cabi/glfw-tri.sx` 在 `run-jit` 上 **SIGTRAP**（exit 133），
+  **一个字节输出都没有** —— 连 `main` 里第一句 `print` 都没跑到，所以是**装载期**的事，
+  不是 glfwInit。已经排掉的：同一个程序的 C 参照（clang 直编）在这台机器上跑通
+  （`framebuffer: 1600 1200` / `ok`），所以不是环境不给开窗；`--lib libglfw.dylib` 加在一份
+  **不引用任何 glfw 符号**的 IR 上不炸（照常印 `hi`），所以也不是 `dlopen` 本身。
+  剩下的疑点在"IR 里真引用了那些符号"这一步：GL 的符号不在 libglfw 里而在
+  OpenGL.framework 里（靠 dlopen libglfw 带进来，`RTLD_DEFAULT` 找得到，所以
+  `omni_jit_define` 没报 unresolved）—— 下一步从 `LLVMOrcAbsoluteSymbols` 那一批的
+  定义顺序与 `--dl` 那条兜底查。
+
 - **J5 FFI 第二刀（JIT → 任意库）——已落**：`--dl` 让表里没有的名字再问一次进程的动态
   符号表（`dlsym(RTLD_DEFAULT, …)`），`--lib PATH` 先 `dlopen(…, RTLD_NOW|RTLD_GLOBAL)`
   再走同一条路（于是它顺带打开 `--dl`：要一个库进来，本来就是"表里没有的去外面找"这件事）。
