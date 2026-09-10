@@ -753,6 +753,10 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
        * 今天 C 那侧的名字里没有模块痕迹，于是 42 万行落在一个翻译单元里，
        * 既编不快也看不出是谁撑起来的。 */
       file: fileOfSpan(span),
+      /* 实参 list 逃不逃逸（P3b）：只有 `arguments` 把它当值交出去时才逃
+       * （绑形参是只读的 js_arr_get、rest 是拷一份的 js_arr_slice）。不逃的话调用方
+       * 可以把那条 list 放在**栈**上，省掉每次调用两次 arena 分配。 */
+      argsEscapes: this.fn.argsEscapes === true,
       ret: D,
       params: [{ name: 'args', type: listType(D) }],
       // JS 的函数走到底没 return 就是 undefined；OIR 要求非 void 的函数有返回值
@@ -2582,6 +2586,11 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
         this.err(e.span, "an arrow function has no 'arguments'; take a rest parameter instead");
         return undefExpr();
       }
+      /* 这一句是**实参 list 唯一逃逸的地方**（P3b）：`arguments` 把那条 list 当值交出去，
+       * 于是它可能活得比这一次调用长。别的用法都不逃逸 —— 绑形参是 js_arr_get（只读）、
+       * rest 是 js_arr_slice（拷一份）。记下来，调用方那侧就能对**不逃逸**的函数把实参
+       * list 放在栈上（省掉每次调用两次 arena 分配，量出来一趟 emit-c 一共 3.7 亿次分配）。 */
+      this.fn.argsEscapes = true;
       return argsDyn();
     }
     this.err(e.span, `unresolved identifier '${e.name}'`);

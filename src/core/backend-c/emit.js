@@ -64,6 +64,11 @@ class CEmitter {
      * `emit-c --stats` 与 `build --stats` 印它 —— 42 万行落在一个翻译单元里时，
      * "是谁撑起来的"这件事从前压根没有答案。P2 分文件发射用的也是这一格分组。 */
     this.stats = new Map();
+    /* mangled -> 这一格的实参 list 会不会逃逸（lower.js 记的）。stackArgs 靠它决定
+     * 调用点能不能把实参 list 放在栈上。表里没有的名字（闭包的 make、外部符号…）一律
+     * 当成会逃逸 —— 不确定就走老路。 */
+    this.argsEscapes = new Map();
+    for (const f of mod.funcs) this.argsEscapes.set(f.mangled, f.argsEscapes === true);
     this.indent = 0;
     this.tmp = 0;
     // 函数级计时（第八十八刀，见 profTable）：`--profile` 或 `OMNI_PROFILE=1` 打开。
@@ -1408,7 +1413,10 @@ class CEmitter {
       case 'IndexGet': return `${cTypeName(e.recvType)}_get(${this.expr(e.obj)}, ${this.expr(e.index)})`;
       case 'IndexSet':
         return `${cTypeName(e.recvType)}_set(${this.expr(e.obj)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
-      case 'Call': return `${e.func}(${e.args.map((a) => this.expr(a)).join(', ')})`;
+      case 'Call': {
+        const st = this.stackArgs(e);
+        return st !== null ? st : `${e.func}(${e.args.map((a) => this.expr(a)).join(', ')})`;
+      }
       case 'Builtin': return this.builtin(e);
       // 外部 C 符号（ADR-0014 决策 4）：实参逐个 marshal，返回值再 marshal 回来。
       // void 的那些包成逗号表达式，让整条仍然是个 dynamic 表达式。
@@ -1423,9 +1431,38 @@ class CEmitter {
     }
   }
 
+  /**
+   * 实参 list 上栈（ADR-0021 的 P3b）。
+   *
+   * 调用约定是"每个 JS 函数收一条 `list<dynamic>`"，于是每次调用都
+   * `omni_list_dynamic_from((omni_dyn[]){…}, n)` —— **两次 arena 分配**（struct + items），
+   * 而实参本来就已经在一个栈数组里了。量出来的：一趟 `emit-c src/cli.js` 一共 3.7 亿次
+   * 分配、平均 27.2 字节、88% 在 32 字节以内，就是这一类"每个操作一块新内存"堆起来的。
+   *
+   * 什么时候能上栈：被调的那一格**不把 args 当值交出去**。唯一会交出去的是 `arguments`
+   * （lower.js 那儿记了 `argsEscapes`）—— 绑形参走只读的 `js_arr_get`、rest 走拷一份的
+   * `js_arr_slice`，都不留住那条 list。于是它活不过这一次调用，可以是一个 C99 的
+   * **复合字面量**：块作用域上有自动存储期，覆盖整个调用，而且仍然是**一个表达式**，
+   * 不必把调用点改成语句。
+   *
+   * 只认"实参正好是一条列表字面量"这一个形状；别的（展开、转发一条现成的 list）照旧。
+   * @returns {string | null}
+   */
+  stackArgs(e) {
+    const esc = this.argsEscapes.get(e.func);
+    if (esc === undefined || esc === true) return null;
+    if (e.args.length !== 1) return null;
+    let a = e.args[0];
+    if (a && a.kind === 'Box') a = a.expr;
+    if (!a || a.kind !== 'ListLit' || a.items.length === 0) return null;
+    const n = cTypeName(a.type);
+    const items = a.items.map((x) => this.expr(x)).join(', ');
+    return `${e.func}(&(struct ${n}_s){ (${cTypeName(a.type.elem)}[]){${items}}, `
+      + `${a.items.length}, ${a.items.length} })`;
+  }
+
   /** 容器字面量用复合字面量传数组，避免为了构造值而引入语句表达式 */
-  listLit(e) {
-    const n = cTypeName(e.type);
+  listLit(e) {    const n = cTypeName(e.type);
     if (!e.items.length) return `${n}_from(NULL, 0)`;
     const items = e.items.map((x) => this.expr(x)).join(', ');
     return `${n}_from((${cTypeName(e.type.elem)}[]){${items}}, ${e.items.length})`;
