@@ -2973,10 +2973,14 @@ function main(argv) {
         const dir = rest[wi + 1];
         mkdirAll(dir);
         const u = emitCUnits(mod);
-        writeText(join(dir, '_shared.c'), `${u.shared}\n${u.once}\n${u.tail}\n`);
+        /* `_decl.h` 是共用的那一份（类型、容器 / JS 模板、字面量池、全部原型），每个模块
+         * `#include` 它；`_shared.c` 只放"只能有一份"的那些（模块级变量的定义、闭包的 make、
+         * 那两张表）与 main。状态已经不在模板里了（S1），所以模板复制一份是无害的。 */
+        writeText(join(dir, '_decl.h'), `${u.shared}\n`);
+        writeText(join(dir, '_shared.c'), `#include "_decl.h"\n${u.once}\n${u.tail}\n`);
         let tot = 0;
         for (const t of u.units) {
-          writeText(join(dir, `${t.name}.c`), t.text);
+          writeText(join(dir, `${t.name}.c`), `#include "_decl.h"\n${t.text}`);
           tot += t.text.length;
         }
         const ord = [...u.units].sort((a, b) => b.bytes - a.bytes);
