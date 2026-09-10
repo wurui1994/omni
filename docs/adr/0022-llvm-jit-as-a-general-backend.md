@@ -200,8 +200,30 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   对了但过粗；C 那侧 `volatile int x` 与普通 `int x` 在别处（比如 MMIO、信号处理器里那些
   变量）也该有区别，而这一层看不见。要做就在 `MirFunc.slots` 那一格上加一位。
 
-- **J5 FFI 第二刀（JIT → 任意库）**：库表 + `dlopen` 回退，用 `libm` 的 `sin`/`cos` 验收。
-  C_ABI 里 `lib: null` 的那些（libc）走 `dlsym(RTLD_DEFAULT, …)`，第三方库走 `--lib`。
+  **J4 的最后一格：这一切在 JIT 上也成立**。同一份 IR 交给 `omni-jit` 之后，`tests/c/sys`
+  五份的 stdout、stderr、退出码与 `omni c run` 逐字节相同（`tests/jit` 的 `c-jit/*`）。
+  路上又是两个错：
+
+  - **`int main(void)` 的退出码被丢了**。宿主判入口形状只数**参数个数**（0 格 -> `void(void)`、
+    2 格 -> `int(int,char**)`），而 C 的 `int main(void)` 正好是「0 格参数但有退出码」——
+    量出来是五份用例 stdout 全对而退出码全成了 0。现在回值也看：0 格 + 回 i32 -> `int(void)`。
+  - **不透明指针之后 `LLVMTypeOf(f)` 就是一个 `ptr`**。对它 `LLVMGetElementType` 拿到的是
+    垃圾，当场 segfault。函数的类型要走 `LLVMGlobalGetValueType`。
+
+- **J5 FFI 第二刀（JIT → 任意库）——已落**：`--dl` 让表里没有的名字再问一次进程的动态
+  符号表（`dlsym(RTLD_DEFAULT, …)`），`--lib PATH` 先 `dlopen(…, RTLD_NOW|RTLD_GLOBAL)`
+  再走同一条路（于是它顺带打开 `--dl`：要一个库进来，本来就是"表里没有的去外面找"这件事）。
+  与 jancy 的 `JitDefinitionGenerator::tryToGenerate` 同一个形状 —— 一个「找不到就问外面」
+  的兜底生成器，区别是我们把它做成**显式开关**。
+
+  **默认那一边没有变**：不给 `--dl` 时照旧在物化之前按名字停下（决策 2）。这一点有自己的
+  用例（`dl-closed`），而且报错里要指出 `--dl` 这条路 —— 一个开关的价值全在默认那一边是
+  哪一边上。验收面两条：C 那条腿的五份（libc + 三条标准流，走 `--dl`），以及 `sin`/`cos`
+  走 `--lib`（对账的对象是 **AOT** 而不是解释器 —— 解释器压根没有 libm，它会明着说
+  `C ABI call 'sin' is not supported`）。
+  顺带量到一个坑：macOS 上 `existsSync('/usr/lib/libSystem.B.dylib')` 回 **false**
+  （它在 dyld 的共享缓存里，磁盘上没有那个文件），而 `dlopen` 照样成 —— 按"文件在不在"
+  挑库路径会把这条用例静默跳过。
 - **J6 会话进编译器进程**：新增 ABI（`jit_open/jit_add/jit_map/jit_lookup/jit_call_i`），
   目标是把那 220ms 压到一次会话内的物化时间；同时给 REPL 一条 JIT 引擎。
 - **J7 与增量缓存接线**：ADR-0014 决策 5 的对象码缓存挂到会话上（同一份 IR 不重编）。

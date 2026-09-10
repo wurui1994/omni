@@ -35,6 +35,7 @@
 
 #include "omni_jit_symbols.h"
 
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,8 +89,16 @@ static const char *omni_jit_name(LLVMValueRef v, char *buf, size_t cap) {
  *     时程序可能已经打了半屏输出，而且那句话里是带平台前缀的 `_foo`。
  *
  * 模块自己有体的同名符号归模块（现在没有这样的名字；FFI 覆盖运行时某一格时就会有）。
+ *
+ * `dl != 0`（`--dl`，ADR-0022 的 J5）时，表里没有的名字**再问一次进程的动态符号表**
+ * （`dlsym(RTLD_DEFAULT, …)`）—— C 那条腿的 `printf`/`__stdoutp` 那一族就是这么进来的。
+ * 它默认是**关**的，这一点是 J2 那个决定的全部内容：`--dl` 一给，这个进程里所有导出的
+ * 东西就都在射程内了，那必须是显式要来的，不能是默认。`--lib` 先 `dlopen` 再走同一条路
+ * （`RTLD_GLOBAL`，于是 `RTLD_DEFAULT` 找得到）—— 与 jancy 的 `JitDefinitionGenerator`
+ * 同一个形状：一个"找不到就问外面"的兜底生成器，只是我们把它做成显式开关。
  */
-static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModuleRef mod) {
+static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModuleRef mod,
+                           int dl) {
   size_t n = 0;
   while (OMNI_JIT_SYMS[n].name != NULL) n++;
   LLVMOrcCSymbolMapPair *pairs = (LLVMOrcCSymbolMapPair *)malloc(sizeof(LLVMOrcCSymbolMapPair) * n);
@@ -115,6 +124,19 @@ static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModul
   free(pairs);
   if (err != NULL) return omni_jit_fail(err, "cannot define host symbols");
 
+  /* 表里没有的那些：先数一遍声明（要给 dlsym 那批留位置），再走一遍决定每一个的去处。 */
+  size_t ndecl = 0;
+  for (LLVMValueRef f = LLVMGetFirstFunction(mod); f != NULL; f = LLVMGetNextFunction(f)) ndecl++;
+  for (LLVMValueRef g = LLVMGetFirstGlobal(mod); g != NULL; g = LLVMGetNextGlobal(g)) ndecl++;
+  LLVMOrcCSymbolMapPair *dls = NULL;
+  if (dl != 0 && ndecl > 0) {
+    dls = (LLVMOrcCSymbolMapPair *)malloc(sizeof(LLVMOrcCSymbolMapPair) * ndecl);
+    if (dls == NULL) {
+      fprintf(stderr, "omni-jit: out of memory\n");
+      return 70;
+    }
+  }
+  size_t nd = 0;
   char buf[256];
   int missing = 0;
   for (LLVMValueRef f = LLVMGetFirstFunction(mod); f != NULL; f = LLVMGetNextFunction(f)) {
@@ -122,19 +144,44 @@ static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModul
     if (LLVMGetIntrinsicID(f) != 0) continue;   /* llvm.* 由 LLVM 自己降 */
     const char *nm = omni_jit_name(f, buf, sizeof buf);
     if (nm == NULL || omni_jit_symbol(nm) != NULL) continue;
-    fprintf(stderr, "omni-jit: unresolved: %s\n", nm);
-    missing++;
+    void *a = dl != 0 ? dlsym(RTLD_DEFAULT, nm) : NULL;
+    if (a == NULL) { fprintf(stderr, "omni-jit: unresolved: %s\n", nm); missing++; continue; }
+    dls[nd].Name = LLVMOrcLLJITMangleAndIntern(jit, nm);
+    dls[nd].Sym.Address = (LLVMOrcExecutorAddress)(uintptr_t)a;
+    dls[nd].Sym.Flags.GenericFlags =
+      (uint8_t)(LLVMJITSymbolGenericFlagsExported | LLVMJITSymbolGenericFlagsCallable);
+    dls[nd].Sym.Flags.TargetFlags = 0;
+    nd++;
   }
   for (LLVMValueRef g = LLVMGetFirstGlobal(mod); g != NULL; g = LLVMGetNextGlobal(g)) {
     if (LLVMIsDeclaration(g) == 0) continue;
     const char *nm = omni_jit_name(g, buf, sizeof buf);
     if (nm == NULL || omni_jit_symbol(nm) != NULL) continue;
-    fprintf(stderr, "omni-jit: unresolved: %s\n", nm);
-    missing++;
+    void *a = dl != 0 ? dlsym(RTLD_DEFAULT, nm) : NULL;
+    if (a == NULL) { fprintf(stderr, "omni-jit: unresolved: %s\n", nm); missing++; continue; }
+    /* 数据符号：不带 Callable —— 这一位是给"能跳进去"的东西的。 */
+    dls[nd].Name = LLVMOrcLLJITMangleAndIntern(jit, nm);
+    dls[nd].Sym.Address = (LLVMOrcExecutorAddress)(uintptr_t)a;
+    dls[nd].Sym.Flags.GenericFlags = (uint8_t)LLVMJITSymbolGenericFlagsExported;
+    dls[nd].Sym.Flags.TargetFlags = 0;
+    nd++;
+  }
+  if (nd > 0) {
+    LLVMErrorRef e2 = LLVMOrcJITDylibDefine(jd, LLVMOrcAbsoluteSymbols(dls, nd));
+    free(dls);
+    if (e2 != NULL) return omni_jit_fail(e2, "cannot define dlsym symbols");
+  } else if (dls != NULL) {
+    free(dls);
   }
   if (missing > 0) {
-    fprintf(stderr, "omni-jit: %d 个符号宿主表里没有（要么补进 src/jit/omni_jit_symbols.c，"
-            "要么是后端发错了名字）\n", missing);
+    if (dl != 0) {
+      fprintf(stderr, "omni-jit: %d 个符号宿主表与进程的动态符号表里都没有"
+              "（--lib 把带它的那个库加进来，或者补进 src/jit/omni_jit_symbols.c）\n", missing);
+    } else {
+      fprintf(stderr, "omni-jit: %d 个符号宿主表里没有（补进 src/jit/omni_jit_symbols.c，"
+              "或者用 --dl 让它们去问进程的动态符号表，"
+              "或者是后端发错了名字）\n", missing);
+    }
     return 70;
   }
   return 0;
@@ -145,13 +192,16 @@ static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModul
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    fprintf(stderr, "usage: omni-jit FILE.ll [SYMBOL] [--call SYM]... [--repeat N] [-- ARG...]\n");
+    fprintf(stderr, "usage: omni-jit FILE.ll [SYMBOL] [--call SYM]... [--repeat N]"
+            " [--dl] [--lib PATH]... [-- ARG...]\n");
+
     return 64;
   }
   const char *path = argv[1];
   const char *calls[OMNI_JIT_MAX_CALLS];
   int ncalls = 0;
   long repeat = 1;
+  int dl = 0;               /* --dl / --lib：表里没有的名字去问进程的动态符号表（J5） */
   const char *pos = NULL;   /* 老写法里那个位置参数（等价于一个 --call） */
 
   /* 被调那个 main 看到的 argv：第 0 格照旧是 `.ll` 的路径（没有 `--` 时的老行为就是
@@ -182,7 +232,21 @@ int main(int argc, char **argv) {
       if (repeat < 1) { fprintf(stderr, "omni-jit: --repeat 要 >= 1\n"); return 64; }
       continue;
     }
+    if (strcmp(argv[i], "--dl") == 0) { dl = 1; continue; }
+    /* `--lib PATH`：把那个库装进这个进程（`RTLD_GLOBAL`，于是 `RTLD_DEFAULT` 找得到），
+       并且顺带打开 `--dl` —— 要一个库进来，本来就是"表里没有的去外面找"这件事。 */
+    if (strcmp(argv[i], "--lib") == 0) {
+      if (i + 1 >= argc) { fprintf(stderr, "omni-jit: --lib 要一个路径\n"); return 64; }
+      const char *lib = argv[++i];
+      if (dlopen(lib, RTLD_NOW | RTLD_GLOBAL) == NULL) {
+        fprintf(stderr, "omni-jit: 装不上 %s：%s\n", lib, dlerror());
+        return 70;
+      }
+      dl = 1;
+      continue;
+    }
     if (argv[i][0] == '-') {
+
       fprintf(stderr, "omni-jit: 不认识的开关 %s\n", argv[i]);
       return 64;
     }
@@ -222,12 +286,16 @@ int main(int argc, char **argv) {
   /* 进程符号搜索**故意不装**（从前那句 LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess
      在这儿）：JIT 出来的代码只能看见宿主明确摆上的那些名字。理由三条在
      omni_jit_symbols.h 的文件头，可观测的形式是宿主链接时不再要 `-Wl,-export_dynamic`。 */
-  int rc = omni_jit_define(jit, jd, mod);
+  int rc = omni_jit_define(jit, jd, mod, dl);
   if (rc != 0) return rc;
 
-  /* 每个入口的**形状**从 IR 上读，不另发明一套签名语法（J3）。这一层只会调两种：
-       0 格参数 -> `void(void)`（omni 的 `omni_main` 那类、kernel）
-       2 格参数 -> `int(int, char**)`（与 AOT 同一个 main）
+  /* 每个入口的**形状**从 IR 上读，不另发明一套签名语法（J3）。这一层只会调三种：
+       0 格参数、回 void -> `void(void)`（omni 的 `omni_main` 那类、kernel）
+       0 格参数、回 i32  -> `int(void)`（C 的 `int main(void)` —— 退出码是它的返回值）
+       2 格参数         -> `int(int, char**)`（与 AOT 同一个 main）
+     回值也要看，不能只数参数：C 那条腿的 `int main(void)` 正是「0 格参数但有退出码」，
+     只数参数会把它当 `void(void)` 调，于是**退出码一律是 0** —— 量出来是
+     `tests/c/sys/*` 五份的 stdout 都对而退出码全成了 0。
      形状读完才能把 mod 交给 ThreadSafeModule —— 交出去之后这份 mod 就不属于我们了。 */
   int kind[OMNI_JIT_MAX_CALLS];
   for (int k = 0; k < ncalls; k++) {
@@ -241,11 +309,15 @@ int main(int argc, char **argv) {
       return 70;
     }
     unsigned np = LLVMCountParams(f);
-    if (np == 0) kind[k] = 0;
+    /* 函数的类型要走 `LLVMGlobalGetValueType`：不透明指针之后 `LLVMTypeOf(f)` 就是
+       一个 `ptr`，对它 `LLVMGetElementType` 拿到的是垃圾（量出来是当场 segfault）。 */
+    LLVMTypeRef rt = LLVMGetReturnType(LLVMGlobalGetValueType(f));
+    int i32ret = LLVMGetTypeKind(rt) == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(rt) == 32;
+    if (np == 0) kind[k] = i32ret ? 2 : 0;
     else if (np == 2) kind[k] = 1;
     else {
-      fprintf(stderr, "omni-jit: %s 收 %u 格参数 —— 这一层只调 `void(void)` 与 "
-              "`int(int,char**)` 两种形状（要别的形状是 J4 那格 FFI 的事）\n", calls[k], np);
+      fprintf(stderr, "omni-jit: %s 收 %u 格参数 —— 这一层只调 `void(void)`、`int(void)` "
+              "与 `int(int,char**)` 三种形状（要别的形状是 J4 那格 FFI 的事）\n", calls[k], np);
       return 70;
     }
   }
@@ -265,6 +337,7 @@ int main(int argc, char **argv) {
     if (err != NULL) return omni_jit_fail(err, "cannot materialize");
     for (long r = 0; r < repeat; r++) {
       if (kind[k] == 1) code = ((int (*)(int, char **))addr)(eargc, eargv);
+      else if (kind[k] == 2) code = ((int (*)(void))addr)();
       else ((void (*)(void))addr)();
     }
   }

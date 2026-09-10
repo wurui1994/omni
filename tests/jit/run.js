@@ -154,6 +154,78 @@ else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同�
     else if (m2.stdout !== '11\n11\n11\n') d2.push(`    --repeat 3 的输出不对：${JSON.stringify(m2.stdout)}`);
     if (d2.length > 0) bad('multi-entry', d2.join('\n'));
     else ok('multi-entry [--call 两个入口按序各一次；--repeat 3 反复调同一个]');
+
+    /* 4c C 那条腿在 JIT 上（ADR-0022 的 J4 后半 + J5）：`emit llvm x.c` 出来的 IR
+       喂给宿主，答案要与 `omni c run` 逐字节相同 —— stdout、stderr、退出码三样。
+       这一组的符号全在**进程的动态符号表**里（`printf`、`__stdoutp`、`write`…），
+       所以要 `--dl`；不给的那一条在 4d 上钉着。 */
+    const sysDir = join(root, 'tests', 'c', 'sys');
+    if (existsSync(sysDir)) {
+      for (const f of readdirSync(sysDir).sort()) {
+        if (!f.endsWith('.c')) continue;
+        const src = join(sysDir, f);
+        const em = spawnSync('node', [cli, 'emit', 'llvm', src], { encoding: 'utf8' });
+        if (em.status !== 0) { bad(`c-jit/${f}`, `    emit llvm 没过：${(em.stderr ?? '').trim().split('\n')[0]}`); continue; }
+        const irPath = join(tmp, `${f}.ll`);
+        writeFileSync(irPath, em.stdout);
+        /* 带时限与输出上限：一份跑飞的用例不该把测试机的磁盘写满。 */
+        const jr = spawnSync(host, [irPath, '--dl'], { encoding: 'utf8', timeout: 20000, maxBuffer: 1 << 20 });
+        const cr = spawnSync('node', [cli, 'c', 'run', src], { encoding: 'utf8' });
+        const d3 = [];
+        if (jr.error !== undefined && jr.error !== null) d3.push(`    没能正常跑完：${jr.error.code ?? jr.error.message}`);
+        if ((jr.stdout ?? '') !== cr.stdout) d3.push(`    stdout 与 omni-c 不同\n      omni-c ${JSON.stringify(cr.stdout.slice(0, 200))}\n      jit    ${JSON.stringify((jr.stdout ?? '').slice(0, 200))}`);
+        if ((jr.stderr ?? '') !== cr.stderr) d3.push(`    stderr 与 omni-c 不同\n      omni-c ${JSON.stringify(cr.stderr.slice(0, 200))}\n      jit    ${JSON.stringify((jr.stderr ?? '').slice(0, 200))}`);
+        if (jr.status !== cr.status) d3.push(`    退出码不同：jit ${jr.status}, omni-c ${cr.status}`);
+        if (d3.length > 0) bad(`c-jit/${f}`, d3.join('\n'));
+        else ok(`c-jit/${f} [jit --dl == omni-c] exit=${jr.status}, ${(jr.stdout ?? '').length}+${(jr.stderr ?? '').length} bytes`);
+      }
+
+      /* 4d 默认还是**关**的（ADR-0022 决策 2 没有被 J5 推翻）：同一份 IR 不给 `--dl`
+         必须在物化之前停下，而且那句话里要指出 `--dl` 这条路 —— 一个开关的价值全在
+         「默认那一边是哪一边」上，所以它要有一条自己的用例。 */
+      const irOne = join(tmp, '02-streams.c.ll');
+      if (existsSync(irOne)) {
+        const closed = spawnSync(host, [irOne], { encoding: 'utf8', timeout: 20000, maxBuffer: 1 << 20 });
+        const e4 = closed.stderr ?? '';
+        if (closed.status === 0) bad('dl-closed', '    不给 --dl 居然也跑通了 —— 那 J2 那个决定就没了');
+        else if (!e4.includes('unresolved: __stdoutp') || !e4.includes('--dl')) {
+          bad('dl-closed', `    报错的理由/指路不对：${JSON.stringify(e4.slice(0, 240))}`);
+        } else ok('dl-closed [不给 --dl 就在物化前停，并指出 --dl 这条路]');
+      }
+
+      /* 4e `--lib`（J5 的验收面）：`sin`/`cos` 在 libm 里，不在宿主表里。装上那个库之后
+         同一份 IR 就跑得通，而对账的对象是 **AOT**（`clang -x ir`）而不是解释器 ——
+         解释器那条腿压根没有 libm（它会明着说 `C ABI call 'sin' is not supported`）。
+         库的路径按平台挑：macOS 上 libm 在 libSystem 里，Linux 上是 libm.so.6。
+         macOS 那一格**不能用 existsSync 判**：libSystem 早就不在磁盘上了（在 dyld 的
+         共享缓存里），`existsSync` 回 false 而 `dlopen` 照样成 —— 按文件在不在挑会把
+         这条用例静默跳过。所以那一格直接给名字，装不上时按 skip 处理。 */
+      const LIBM_PATH = process.platform === 'darwin' ? '/usr/lib/libSystem.B.dylib'
+        : ['/lib/x86_64-linux-gnu/libm.so.6', '/lib/aarch64-linux-gnu/libm.so.6',
+          '/usr/lib/libm.so.6'].find((p) => existsSync(p));
+      const mSrc = join(tmp, 'libm.c');
+      writeFileSync(mSrc, '#include <stdio.h>\ndouble sin(double);\ndouble cos(double);\n'
+        + 'int main(void) { printf("%.6f %.6f\\n", sin(1.0), cos(1.0)); return 0; }\n');
+      const em = spawnSync('node', [cli, 'emit', 'llvm', mSrc], { encoding: 'utf8' });
+      if (LIBM_PATH === undefined) process.stdout.write('  skip lib-libm：这台机器上找不到 libm\n');
+      else if (em.status !== 0) bad('lib-libm', `    emit llvm 没过：${(em.stderr ?? '').trim().split('\n')[0]}`);
+      else {
+        const irPath = join(tmp, 'libm.ll');
+        writeFileSync(irPath, em.stdout);
+        const binPath = join(tmp, 'libm.bin');
+        const cc = spawnSync('clang', ['-x', 'ir', irPath, '-o', binPath], { encoding: 'utf8' });
+        const jr = spawnSync(host, [irPath, '--lib', LIBM_PATH], { encoding: 'utf8', timeout: 20000, maxBuffer: 1 << 20 });
+        const d5 = [];
+        if (cc.status !== 0) d5.push(`    clang -x ir 没过：${(cc.stderr ?? '').trim().split('\n')[0]}`);
+        else {
+          const ar = spawnSync(binPath, [], { encoding: 'utf8', timeout: 20000, maxBuffer: 1 << 20 });
+          if ((jr.stdout ?? '') !== (ar.stdout ?? '')) d5.push(`    与 AOT 不同\n      aot ${JSON.stringify(ar.stdout)}\n      jit ${JSON.stringify(jr.stdout)}\n      jit-err ${JSON.stringify((jr.stderr ?? '').slice(0, 200))}`);
+          if (jr.status !== ar.status) d5.push(`    退出码不同：jit ${jr.status}, aot ${ar.status}`);
+        }
+        if (d5.length > 0) bad('lib-libm', d5.join('\n'));
+        else ok(`lib-libm [--lib 装上库，sin/cos 与 AOT 相同] ${JSON.stringify((jr.stdout ?? '').trim())}`);
+      }
+    }
   }
 }
 
