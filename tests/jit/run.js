@@ -24,6 +24,11 @@ import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SUPPORTED } from '../llvm/supported.js';
+/* 4g（会话那一节）直接用编译器的模块降一批 delta —— CLI 上还没有"编一批"这个动词 */
+import { CoreSession } from '../../src/core/sexpr/lower.js';
+import { Diagnostics } from '../../src/core/source/diag.js';
+import { lowerToMir } from '../../src/core/mir/from_oir.js';
+import { emitLlvm } from '../../src/core/backend-llvm/emit.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
@@ -266,6 +271,49 @@ else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同�
             + ` ${statSync(ocPath).size} bytes`);
         }
       }
+    }
+    /* 4g **一次会话摆好几份 IR 进同一个 JITDylib**（`--add`，J6）。REPL 一批一份产物：
+       第二份里的 `@g_base` 是一句 `external global`、`@s_f1` 是一句 `declare`，落点在第一份
+       里 —— 这一条要证的就是 ORC 自己把它们接上了，而且**与 AOT 那条腿的答案逐字节相同**
+       （tests/llvm 第 10 节 session-aot 把同样这四份链成一个可执行文件，也是这四行）。
+       顺带钉一条边界：`--objcache` 的键是**一份** IR 的内容，与 `--add` 一起用要明着报错。 */
+    {
+      const texts = [
+        '(fn f1 ((n int)) int (ret (bin "+" (var n) (int 1))))\n(let base int (int 100))\n(print (var base))\n',
+        '(set base (bin "+" (var base) (int 1)))\n(print (var base))\n',
+        '(print (bin "*" (var base) (int 2)))\n',
+        '(print (call f1 (var base)))\n',
+      ];
+      const cs = new CoreSession();
+      const lls = [];
+      const calls = [];
+      let k = 0;
+      for (const t of texts) {
+        k++;
+        const diags = new Diagnostics();
+        const delta = cs.add(t, diags);
+        diags.throwIfErrors();
+        const p = join(tmp, `chunk${k}.ll`);
+        writeFileSync(p, emitLlvm(lowerToMir(delta), { repl: true }));
+        lls.push(p);
+        calls.push('--call', `omni_chunk_${k}`);
+      }
+      const args = [lls[0]];
+      for (const p of lls.slice(1)) args.push('--add', p);
+      const sr = spawnSync(host, [...args, ...calls], { encoding: 'utf8', timeout: 60000, maxBuffer: 1 << 20 });
+      const d7 = [];
+      if (sr.status !== 0) {
+        d7.push(`    exit=${sr.status}：${(sr.stderr ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
+      } else if ((sr.stdout ?? '') !== '100\n101\n202\n102\n') {
+        d7.push(`    输出不对：${JSON.stringify(sr.stdout)}（要 "100\\n101\\n202\\n102\\n"）`);
+      }
+      const oc = spawnSync(host, [...args, ...calls, '--objcache', join(tmp, 'sess.o')],
+        { encoding: 'utf8', timeout: 60000, maxBuffer: 1 << 20 });
+      if (oc.status !== 64 || !(oc.stderr ?? '').includes('--objcache 与 --add 不能一起用')) {
+        d7.push(`    --objcache 与 --add 一起用该报错：exit=${oc.status} ${JSON.stringify((oc.stderr ?? '').slice(0, 120))}`);
+      }
+      if (d7.length > 0) bad('session', d7.join('\n'));
+      else ok('session [--add：四批 IR 进同一个 JITDylib，跨批改变量、跨批调函数，答案与 AOT 相同]');
     }
   }
 }

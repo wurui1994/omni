@@ -130,6 +130,34 @@ static const char *omni_jit_name(LLVMValueRef v, char *buf, size_t cap) {
   return buf;
 }
 
+/** 这个名字收过了吗；没收过就记下来。一批模块里同一个 `declare` 会出现好多次。 */
+static int omni_jit_seen(char (*seen)[256], size_t *nseen, const char *nm) {
+  for (size_t i = 0; i < *nseen; i++) {
+    if (strcmp(seen[i], nm) == 0) return 1;
+  }
+  snprintf(seen[*nseen], 256, "%s", nm);
+  (*nseen)++;
+  return 0;
+}
+
+/**
+ * 这一批模块里有谁**定义**了这个名字吗（ADR-0022 的 J6）。
+ *
+ * 一次会话是**好几份产物摆进同一个 JITDylib**：第二批里的 `@g_base` 是一句
+ * `external global`、`@s_f1` 是一句 `declare`，它们的落点在**第一批**里。所以扫描那一步
+ * 不能把这类名字当"外面的符号"—— 那会得到一句假的 `unresolved: g_base`，而 ORC 自己
+ * 一查就找到了。
+ */
+static int omni_jit_defined_in(LLVMModuleRef *mods, int nmods, const char *nm) {
+  for (int i = 0; i < nmods; i++) {
+    LLVMValueRef f = LLVMGetNamedFunction(mods[i], nm);
+    if (f != NULL && LLVMIsDeclaration(f) == 0) return 1;
+    LLVMValueRef g = LLVMGetNamedGlobal(mods[i], nm);
+    if (g != NULL && LLVMIsDeclaration(g) == 0) return 1;
+  }
+  return 0;
+}
+
 /**
  * 宿主符号：**表里有的定义进去，表里没有的当场报**（ADR-0022 决策 2）。
  *
@@ -141,6 +169,9 @@ static const char *omni_jit_name(LLVMValueRef v, char *buf, size_t cap) {
  *
  * 模块自己有体的同名符号归模块（现在没有这样的名字；FFI 覆盖运行时某一格时就会有）。
  *
+ * **一次收下这一批模块**（J6）：一格名字只能定义一次，而 `omni_print_int` 这种
+ * 每批的 IR 里都有一句声明 —— 分批调这个函数就是重复定义。所以两步都跨整批做一遍。
+ *
  * `dl != 0`（`--dl`，ADR-0022 的 J5）时，表里没有的名字**再问一次进程的动态符号表**
  * （`dlsym(RTLD_DEFAULT, …)`）—— C 那条腿的 `printf`/`__stdoutp` 那一族就是这么进来的。
  * 它默认是**关**的，这一点是 J2 那个决定的全部内容：`--dl` 一给，这个进程里所有导出的
@@ -148,8 +179,8 @@ static const char *omni_jit_name(LLVMValueRef v, char *buf, size_t cap) {
  * （`RTLD_GLOBAL`，于是 `RTLD_DEFAULT` 找得到）—— 与 jancy 的 `JitDefinitionGenerator`
  * 同一个形状：一个"找不到就问外面"的兜底生成器，只是我们把它做成显式开关。
  */
-static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModuleRef mod,
-                           int dl) {
+static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModuleRef *mods,
+                           int nmods, int dl) {
   size_t n = 0;
   while (OMNI_JIT_SYMS[n].name != NULL) n++;
   LLVMOrcCSymbolMapPair *pairs = (LLVMOrcCSymbolMapPair *)malloc(sizeof(LLVMOrcCSymbolMapPair) * n);
@@ -160,10 +191,7 @@ static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModul
   size_t m = 0;
   for (size_t i = 0; i < n; i++) {
     const char *nm = OMNI_JIT_SYMS[i].name;
-    LLVMValueRef f = LLVMGetNamedFunction(mod, nm);
-    if (f != NULL && LLVMIsDeclaration(f) == 0) continue;
-    LLVMValueRef g = LLVMGetNamedGlobal(mod, nm);
-    if (g != NULL && LLVMIsDeclaration(g) == 0) continue;
+    if (omni_jit_defined_in(mods, nmods, nm)) continue;
     pairs[m].Name = LLVMOrcLLJITMangleAndIntern(jit, nm);
     pairs[m].Sym.Address = (LLVMOrcExecutorAddress)(uintptr_t)OMNI_JIT_SYMS[i].addr;
     pairs[m].Sym.Flags.GenericFlags =
@@ -175,10 +203,14 @@ static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModul
   free(pairs);
   if (err != NULL) return omni_jit_fail(err, "cannot define host symbols");
 
-  /* 表里没有的那些：先数一遍声明（要给 dlsym 那批留位置），再走一遍决定每一个的去处。 */
+  /* 表里没有的那些：先数一遍声明（要给 dlsym 那批留位置），再走一遍决定每一个的去处。
+     一批里同一个名字会出现好多次（每份 IR 都有自己的 `declare printf`），所以要有一格
+     "收过了吗" —— 不然既会重复定义、又会把同一句 unresolved 报好几遍。 */
   size_t ndecl = 0;
-  for (LLVMValueRef f = LLVMGetFirstFunction(mod); f != NULL; f = LLVMGetNextFunction(f)) ndecl++;
-  for (LLVMValueRef g = LLVMGetFirstGlobal(mod); g != NULL; g = LLVMGetNextGlobal(g)) ndecl++;
+  for (int mi = 0; mi < nmods; mi++) {
+    for (LLVMValueRef f = LLVMGetFirstFunction(mods[mi]); f != NULL; f = LLVMGetNextFunction(f)) ndecl++;
+    for (LLVMValueRef g = LLVMGetFirstGlobal(mods[mi]); g != NULL; g = LLVMGetNextGlobal(g)) ndecl++;
+  }
   LLVMOrcCSymbolMapPair *dls = NULL;
   if (dl != 0 && ndecl > 0) {
     dls = (LLVMOrcCSymbolMapPair *)malloc(sizeof(LLVMOrcCSymbolMapPair) * ndecl);
@@ -187,36 +219,55 @@ static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModul
       return 70;
     }
   }
+  char (*seen)[256] = NULL;
+  if (ndecl > 0) {
+    seen = (char (*)[256])malloc(256 * ndecl);
+    if (seen == NULL) {
+      free(dls);
+      fprintf(stderr, "omni-jit: out of memory\n");
+      return 70;
+    }
+  }
+  size_t nseen = 0;
   size_t nd = 0;
   char buf[256];
   int missing = 0;
-  for (LLVMValueRef f = LLVMGetFirstFunction(mod); f != NULL; f = LLVMGetNextFunction(f)) {
-    if (LLVMIsDeclaration(f) == 0) continue;
-    if (LLVMGetIntrinsicID(f) != 0) continue;   /* llvm.* 由 LLVM 自己降 */
-    const char *nm = omni_jit_name(f, buf, sizeof buf);
-    if (nm == NULL || omni_jit_symbol(nm) != NULL) continue;
-    void *a = dl != 0 ? dlsym(RTLD_DEFAULT, nm) : NULL;
-    if (a == NULL) { fprintf(stderr, "omni-jit: unresolved: %s\n", nm); missing++; continue; }
-    dls[nd].Name = LLVMOrcLLJITMangleAndIntern(jit, nm);
-    dls[nd].Sym.Address = (LLVMOrcExecutorAddress)(uintptr_t)a;
-    dls[nd].Sym.Flags.GenericFlags =
-      (uint8_t)(LLVMJITSymbolGenericFlagsExported | LLVMJITSymbolGenericFlagsCallable);
-    dls[nd].Sym.Flags.TargetFlags = 0;
-    nd++;
+  for (int mi = 0; mi < nmods; mi++) {
+    LLVMModuleRef mod = mods[mi];
+    for (LLVMValueRef f = LLVMGetFirstFunction(mod); f != NULL; f = LLVMGetNextFunction(f)) {
+      if (LLVMIsDeclaration(f) == 0) continue;
+      if (LLVMGetIntrinsicID(f) != 0) continue;   /* llvm.* 由 LLVM 自己降 */
+      const char *nm = omni_jit_name(f, buf, sizeof buf);
+      if (nm == NULL || omni_jit_symbol(nm) != NULL) continue;
+      /* 落点在这一批**别的模块**里（会话里跨批调函数就是这个形状）：不是外面的符号 */
+      if (omni_jit_defined_in(mods, nmods, nm)) continue;
+      if (omni_jit_seen(seen, &nseen, nm)) continue;
+      void *a = dl != 0 ? dlsym(RTLD_DEFAULT, nm) : NULL;
+      if (a == NULL) { fprintf(stderr, "omni-jit: unresolved: %s\n", nm); missing++; continue; }
+      dls[nd].Name = LLVMOrcLLJITMangleAndIntern(jit, nm);
+      dls[nd].Sym.Address = (LLVMOrcExecutorAddress)(uintptr_t)a;
+      dls[nd].Sym.Flags.GenericFlags =
+        (uint8_t)(LLVMJITSymbolGenericFlagsExported | LLVMJITSymbolGenericFlagsCallable);
+      dls[nd].Sym.Flags.TargetFlags = 0;
+      nd++;
+    }
+    for (LLVMValueRef g = LLVMGetFirstGlobal(mod); g != NULL; g = LLVMGetNextGlobal(g)) {
+      if (LLVMIsDeclaration(g) == 0) continue;
+      const char *nm = omni_jit_name(g, buf, sizeof buf);
+      if (nm == NULL || omni_jit_symbol(nm) != NULL) continue;
+      if (omni_jit_defined_in(mods, nmods, nm)) continue;
+      if (omni_jit_seen(seen, &nseen, nm)) continue;
+      void *a = dl != 0 ? dlsym(RTLD_DEFAULT, nm) : NULL;
+      if (a == NULL) { fprintf(stderr, "omni-jit: unresolved: %s\n", nm); missing++; continue; }
+      /* 数据符号：不带 Callable —— 这一位是给"能跳进去"的东西的。 */
+      dls[nd].Name = LLVMOrcLLJITMangleAndIntern(jit, nm);
+      dls[nd].Sym.Address = (LLVMOrcExecutorAddress)(uintptr_t)a;
+      dls[nd].Sym.Flags.GenericFlags = (uint8_t)LLVMJITSymbolGenericFlagsExported;
+      dls[nd].Sym.Flags.TargetFlags = 0;
+      nd++;
+    }
   }
-  for (LLVMValueRef g = LLVMGetFirstGlobal(mod); g != NULL; g = LLVMGetNextGlobal(g)) {
-    if (LLVMIsDeclaration(g) == 0) continue;
-    const char *nm = omni_jit_name(g, buf, sizeof buf);
-    if (nm == NULL || omni_jit_symbol(nm) != NULL) continue;
-    void *a = dl != 0 ? dlsym(RTLD_DEFAULT, nm) : NULL;
-    if (a == NULL) { fprintf(stderr, "omni-jit: unresolved: %s\n", nm); missing++; continue; }
-    /* 数据符号：不带 Callable —— 这一位是给"能跳进去"的东西的。 */
-    dls[nd].Name = LLVMOrcLLJITMangleAndIntern(jit, nm);
-    dls[nd].Sym.Address = (LLVMOrcExecutorAddress)(uintptr_t)a;
-    dls[nd].Sym.Flags.GenericFlags = (uint8_t)LLVMJITSymbolGenericFlagsExported;
-    dls[nd].Sym.Flags.TargetFlags = 0;
-    nd++;
-  }
+  free(seen);
   if (nd > 0) {
     LLVMErrorRef e2 = LLVMOrcJITDylibDefine(jd, LLVMOrcAbsoluteSymbols(dls, nd));
     free(dls);
@@ -241,16 +292,24 @@ static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModul
 /* 一次能叫几个入口。够用就行 —— 真要成百上千个入口时该做的是 J6 那格会话，不是把这个数改大。 */
 #define OMNI_JIT_MAX_CALLS 16
 
+/* 一次能摆几份 IR 进同一个 JITDylib（`--add`，J6）。REPL 一批一份，够长的会话要的是
+   真会话 ABI（那时这个数就该没有了），所以这里也只要一个够用的上界。 */
+#define OMNI_JIT_MAX_MODS 32
+
 int main(int argc, char **argv) {
   if (argc < 2) {
-    fprintf(stderr, "usage: omni-jit FILE.ll [SYMBOL] [--call SYM]... [--repeat N]"
-            " [--dl] [--lib PATH]... [--objcache PATH] [-- ARG...]\n");
+    fprintf(stderr, "usage: omni-jit FILE.ll [SYMBOL] [--call SYM]... [--add FILE.ll]..."
+            " [--repeat N] [--dl] [--lib PATH]... [--objcache PATH] [-- ARG...]\n");
 
     return 64;
   }
   const char *path = argv[1];
   const char *calls[OMNI_JIT_MAX_CALLS];
   int ncalls = 0;
+  /* 摆进同一个 JITDylib 的那几份 IR（`--add`，J6）：第 0 格是位置上那一份。 */
+  const char *paths[OMNI_JIT_MAX_MODS];
+  int nmods = 0;
+  paths[nmods++] = path;
   long repeat = 1;
   int dl = 0;               /* --dl / --lib：表里没有的名字去问进程的动态符号表（J5） */
   const char *pos = NULL;   /* 老写法里那个位置参数（等价于一个 --call） */
@@ -284,6 +343,18 @@ int main(int argc, char **argv) {
       continue;
     }
     if (strcmp(argv[i], "--dl") == 0) { dl = 1; continue; }
+    /* `--add FILE.ll`：再摆一份 IR 进**同一个** JITDylib（J6）。会话就是这个形状 ——
+       第二批里的 `@g_base` 是一句 external global、`@s_f1` 是一句 declare，落点在第一批
+       那份 IR 里，由 ORC 自己接上。 */
+    if (strcmp(argv[i], "--add") == 0) {
+      if (i + 1 >= argc) { fprintf(stderr, "omni-jit: --add 要一个路径\n"); return 64; }
+      if (nmods >= OMNI_JIT_MAX_MODS) {
+        fprintf(stderr, "omni-jit: --add 最多 %d 份\n", OMNI_JIT_MAX_MODS - 1);
+        return 64;
+      }
+      paths[nmods++] = argv[++i];
+      continue;
+    }
     /* `--lib PATH`：把那个库装进这个进程（`RTLD_GLOBAL`，于是 `RTLD_DEFAULT` 找得到），
        并且顺带打开 `--dl` —— 要一个库进来，本来就是"表里没有的去外面找"这件事。 */
     if (strcmp(argv[i], "--lib") == 0) {
@@ -320,12 +391,11 @@ int main(int argc, char **argv) {
     pos = argv[i];
   }
   if (ncalls == 0) calls[ncalls++] = pos != NULL ? pos : "main";
-
-  size_t len = 0;
-  char *text = omni_jit_slurp(path, &len);
-  if (text == NULL) {
-    fprintf(stderr, "omni-jit: cannot read %s\n", path);
-    return 66;
+  /* 对象码缓存的键是**一份 IR** 的内容（J7 里由调用方算），一次会话有好几份 —— 两者一起
+     用等于让几份 IR 抢同一个文件。所以明着拒绝，而不是留一个静悄悄错的组合。 */
+  if (nmods > 1 && omni_objcache[0] != '\0') {
+    fprintf(stderr, "omni-jit: --objcache 与 --add 不能一起用（缓存的键是一份 IR 的内容）\n");
+    return 64;
   }
 
   omni_jit_init_target();
@@ -334,22 +404,34 @@ int main(int argc, char **argv) {
   LLVMErrorRef err = LLVMOrcCreateLLJIT(&jit, NULL);
   if (err != NULL) return omni_jit_fail(err, "cannot create LLJIT");
 
-  /* 文本 -> Module。MemoryBuffer 接管 text 的所有权（不复制），所以不能提前 free。 */
+  /* 文本 -> Module。MemoryBuffer 接管 text 的所有权（不复制），所以不能提前 free。
+     几份 IR 进**同一个 LLVMContext**（`--add`，J6）：它们互相引用符号，类型也要在同一个
+     上下文里才敢摆进同一个 JITDylib。 */
   LLVMContextRef ctx = LLVMContextCreate();
-  LLVMMemoryBufferRef mb = LLVMCreateMemoryBufferWithMemoryRange(text, len, path, 0);
-  LLVMModuleRef mod = NULL;
-  char *msg = NULL;
-  if (LLVMParseIRInContext(ctx, mb, &mod, &msg) != 0) {
-    fprintf(stderr, "omni-jit: %s is not valid IR: %s\n", path, msg == NULL ? "?" : msg);
-    LLVMDisposeMessage(msg);
-    return 65;
+  LLVMModuleRef mods[OMNI_JIT_MAX_MODS];
+  for (int mi = 0; mi < nmods; mi++) {
+    size_t len = 0;
+    char *text = omni_jit_slurp(paths[mi], &len);
+    if (text == NULL) {
+      fprintf(stderr, "omni-jit: cannot read %s\n", paths[mi]);
+      return 66;
+    }
+    LLVMMemoryBufferRef mb = LLVMCreateMemoryBufferWithMemoryRange(text, len, paths[mi], 0);
+    mods[mi] = NULL;
+    char *msg = NULL;
+    if (LLVMParseIRInContext(ctx, mb, &mods[mi], &msg) != 0) {
+      fprintf(stderr, "omni-jit: %s is not valid IR: %s\n", paths[mi], msg == NULL ? "?" : msg);
+      LLVMDisposeMessage(msg);
+      return 65;
+    }
   }
+  LLVMModuleRef mod = mods[0];
 
   LLVMOrcJITDylibRef jd = LLVMOrcLLJITGetMainJITDylib(jit);
   /* 进程符号搜索**故意不装**（从前那句 LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess
      在这儿）：JIT 出来的代码只能看见宿主明确摆上的那些名字。理由三条在
      omni_jit_symbols.h 的文件头，可观测的形式是宿主链接时不再要 `-Wl,-export_dynamic`。 */
-  int rc = omni_jit_define(jit, jd, mod, dl);
+  int rc = omni_jit_define(jit, jd, mods, nmods, dl);
   if (rc != 0) return rc;
 
   /* 每个入口的**形状**从 IR 上读，不另发明一套签名语法（J3）。这一层只会调三种：
@@ -359,16 +441,17 @@ int main(int argc, char **argv) {
      回值也要看，不能只数参数：C 那条腿的 `int main(void)` 正是「0 格参数但有退出码」，
      只数参数会把它当 `void(void)` 调，于是**退出码一律是 0** —— 量出来是
      `tests/c/sys/*` 五份的 stdout 都对而退出码全成了 0。
-     形状读完才能把 mod 交给 ThreadSafeModule —— 交出去之后这份 mod 就不属于我们了。 */
+     形状读完才能把 mod 交给 ThreadSafeModule —— 交出去之后这份 mod 就不属于我们了。
+     入口可以在**这一批里任何一份** IR 上（`--add`）：会话里第 k 批的入口就在第 k 份里。 */
   int kind[OMNI_JIT_MAX_CALLS];
   for (int k = 0; k < ncalls; k++) {
-    LLVMValueRef f = LLVMGetNamedFunction(mod, calls[k]);
-    if (f == NULL) {
-      fprintf(stderr, "omni-jit: 这份 IR 里没有 %s 这个函数\n", calls[k]);
-      return 70;
+    LLVMValueRef f = NULL;
+    for (int mi = 0; mi < nmods && f == NULL; mi++) {
+      LLVMValueRef c = LLVMGetNamedFunction(mods[mi], calls[k]);
+      if (c != NULL && LLVMIsDeclaration(c) == 0) f = c;
     }
-    if (LLVMIsDeclaration(f) != 0) {
-      fprintf(stderr, "omni-jit: %s 在这份 IR 里只有声明没有体\n", calls[k]);
+    if (f == NULL) {
+      fprintf(stderr, "omni-jit: 这几份 IR 里没有 %s 的函数体\n", calls[k]);
       return 70;
     }
     unsigned np = LLVMCountParams(f);
@@ -407,10 +490,14 @@ int main(int argc, char **argv) {
       LLVMOrcObjectTransformLayerSetTransform(LLVMOrcLLJITGetObjTransformLayer(jit),
                                               omni_objcache_write, NULL);
     }
-    LLVMOrcThreadSafeContextRef tsc = LLVMOrcCreateNewThreadSafeContext();
-    LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(mod, tsc);
-    err = LLVMOrcLLJITAddLLVMIRModule(jit, jd, tsm);
-    if (err != NULL) return omni_jit_fail(err, "cannot add module");
+    /* 一份一份摆进**同一个** JITDylib（`--add`，J6）：跨模块的引用由 ORC 自己接 ——
+       第二份里的 `@g_base`/`@s_f1` 找的就是第一份摆进去的那两个符号。 */
+    for (int mi = 0; mi < nmods; mi++) {
+      LLVMOrcThreadSafeContextRef tsc = LLVMOrcCreateNewThreadSafeContext();
+      LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(mods[mi], tsc);
+      err = LLVMOrcLLJITAddLLVMIRModule(jit, jd, tsm);
+      if (err != NULL) return omni_jit_fail(err, "cannot add module");
+    }
   }
   if (omni_objcache[0] != '\0' && getenv("OMNI_JIT_TRACE") != NULL) {
     fprintf(stderr, "omni-jit: objcache %s %s\n", objhit != 0 ? "hit" : "miss", omni_objcache);
