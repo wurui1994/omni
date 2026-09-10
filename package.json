@@ -10,7 +10,10 @@
   },
   "scripts": {
     "omni": "node src/cli.js",
-    "build:self": "node src/cli.js bootstrap -o dist",
+    "check:self": "node src/cli.js emit js src/cli.js > /dev/null && node src/cli.js emit c src/cli.js > /dev/null && echo \"check:self ok（发射 + 链接器的模块名唯一性）\"",
+    "build:self": "node src/cli.js build src/cli.js --backend c -o dist/build/omni-self",
+    "fix:self": "node src/cli.js emit c src/cli.js > dist/build/self-node.c && dist/build/omni-self emit c src/cli.js > dist/build/self-n1.c && cmp dist/build/self-node.c dist/build/self-n1.c && echo \"fix:self ok（自己编自己，逐字节相同）\"",
+    "bootstrap": "node src/cli.js bootstrap -o dist",
     "test": "node tests/run.js",
     "test:oracle": "node tests/oracle/run.js",
     "test:js": "node tests/js-roundtrip/run.js",
