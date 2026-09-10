@@ -753,10 +753,6 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
        * 今天 C 那侧的名字里没有模块痕迹，于是 42 万行落在一个翻译单元里，
        * 既编不快也看不出是谁撑起来的。 */
       file: fileOfSpan(span),
-      /* 实参 list 逃不逃逸（P3b）：只有 `arguments` 把它当值交出去时才逃
-       * （绑形参是只读的 js_arr_get、rest 是拷一份的 js_arr_slice）。不逃的话调用方
-       * 可以把那条 list 放在**栈**上，省掉每次调用两次 arena 分配。 */
-      argsEscapes: this.fn.argsEscapes === true,
       ret: D,
       params: [{ name: 'args', type: listType(D) }],
       // JS 的函数走到底没 return 就是 undefined；OIR 要求非 void 的函数有返回值
@@ -2586,12 +2582,21 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
         this.err(e.span, "an arrow function has no 'arguments'; take a rest parameter instead");
         return undefExpr();
       }
-      /* 这一句是**实参 list 唯一逃逸的地方**（P3b）：`arguments` 把那条 list 当值交出去，
-       * 于是它可能活得比这一次调用长。别的用法都不逃逸 —— 绑形参是 js_arr_get（只读）、
-       * rest 是 js_arr_slice（拷一份）。记下来，调用方那侧就能对**不逃逸**的函数把实参
-       * list 放在栈上（省掉每次调用两次 arena 分配，量出来一趟 emit-c 一共 3.7 亿次分配）。 */
-      this.fn.argsEscapes = true;
-      return argsDyn();
+      /* `arguments` **拷一份**再交出去（P3b）。
+       *
+       * 这是整条链上的关键一句：实参 list 本来是"活不过这一次调用"的，唯一会把它当值留住的
+       * 就是这儿。改成拷贝之后，"实参 list 不逃逸"变成一条**处处成立的不变量** ——
+       * 于是每一个调用点（生成的代码里、运行时的回调 helper 里）都能把它放在栈上，
+       * 而不必先证明"被调的这一格不用 arguments"。
+       *
+       * 量出来的账（emit-c src/cli.js 的调用栈归属，OMNI_MEM_DEBUG=4）：光词法器里那句
+       * Array.prototype.find 走 omni_js_call3 -> omni_list_dynamic_from，就是 2300 万次
+       * 分配、1 GB。全部调用点加起来是 3.58 亿次分配里的一大块。
+       *
+       * 语义代价：规范里非严格函数的 arguments 与形参是**联动的**（改 a 能看见
+       * arguments[0] 变）。这个值域里本来就没有那一条（形参在入口绑成局部量），
+       * 所以拷贝不改变任何可观察行为 —— 只是把"别人可能留住它"这件事去掉了。 */
+      return op('js_arr_slice', [argsDyn(), constReal(0), undefExpr()]);
     }
     this.err(e.span, `unresolved identifier '${e.name}'`);
     return undefExpr();

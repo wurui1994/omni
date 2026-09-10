@@ -76,10 +76,15 @@ static omni_dyn omni_js_call_this(omni_dyn f, omni_dyn thisv, omni_dyn args) { \
 } \
 OMNI_JS_ARR_WRAP(LT, DT) \
 static omni_dyn omni_js_call3(omni_dyn f, omni_dyn a, int64_t i, omni_dyn self) { \
-  /* 精确三格，不走 reserve（那按最小 4 分配，1/4 是白扔的，而 arena 不回收）： \
-     这是整个运行时最热的分配点 —— 量过，编译整个编译器有 127 万次回调从这里过。 */ \
-  const omni_dyn tmp[3] = { a, omni_dyn_of_real((double)i), self }; \
-  return omni_js_call(f, LT##_from(tmp, 3)); \
+  /* 实参 list **在栈上**（ADR-0021 的 P3b）：这是整个运行时最热的分配点 —— 按调用栈归属
+     量出来的（OMNI_MEM_DEBUG=4），光词法器里那句 Array.prototype.find 从这儿过就是
+     2300 万次分配、1 GB。
+     能上栈的依据是一条**处处成立的不变量**：实参 list 不逃逸 —— 绑形参走只读的 js_arr_get、
+     rest 走拷一份的 js_arr_slice，而唯一会把它当值留住的 `arguments` 现在自己拷一份
+     （见 frontend-js/lower.js 那一句）。所以这条 list 活不过 omni_js_call 那一次调用。 */ \
+  omni_dyn tmp[3] = { a, omni_dyn_of_real((double)i), self }; \
+  struct LT##_s ls = { tmp, 3, 3 }; \
+  return omni_js_call(f, &ls); \
 } \
 /* 成员派发的兜底（ADR-0011 决策 12）：接收者的标签没有内建实现时，o.m(x) 就是
    "取属性，再当函数调"。派发器的形参个数是表里的最大值，末尾多出来的 undefined

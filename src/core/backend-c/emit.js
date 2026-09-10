@@ -64,11 +64,10 @@ class CEmitter {
      * `emit-c --stats` 与 `build --stats` 印它 —— 42 万行落在一个翻译单元里时，
      * "是谁撑起来的"这件事从前压根没有答案。P2 分文件发射用的也是这一格分组。 */
     this.stats = new Map();
-    /* mangled -> 这一格的实参 list 会不会逃逸（lower.js 记的）。stackArgs 靠它决定
-     * 调用点能不能把实参 list 放在栈上。表里没有的名字（闭包的 make、外部符号…）一律
-     * 当成会逃逸 —— 不确定就走老路。 */
-    this.argsEscapes = new Map();
-    for (const f of mod.funcs) this.argsEscapes.set(f.mangled, f.argsEscapes === true);
+    /* 认得的函数名（mangled）。stackArgs 只对这些用栈上的实参 list ——
+     * 闭包的 make、外部符号那些不在表里，走老路。 */
+    this.knownFuncs = new Set();
+    for (const f of mod.funcs) this.knownFuncs.add(f.mangled);
     this.indent = 0;
     this.tmp = 0;
     // 函数级计时（第八十八刀，见 profTable）：`--profile` 或 `OMNI_PROFILE=1` 打开。
@@ -1439,9 +1438,9 @@ class CEmitter {
    * 而实参本来就已经在一个栈数组里了。量出来的：一趟 `emit-c src/cli.js` 一共 3.7 亿次
    * 分配、平均 27.2 字节、88% 在 32 字节以内，就是这一类"每个操作一块新内存"堆起来的。
    *
-   * 什么时候能上栈：被调的那一格**不把 args 当值交出去**。唯一会交出去的是 `arguments`
-   * （lower.js 那儿记了 `argsEscapes`）—— 绑形参走只读的 `js_arr_get`、rest 走拷一份的
-   * `js_arr_slice`，都不留住那条 list。于是它活不过这一次调用，可以是一个 C99 的
+   * 什么时候能上栈：**总是**。实参 list 不逃逸是一条处处成立的不变量 —— 绑形参走只读的
+   * `js_arr_get`、rest 走拷一份的 `js_arr_slice`，而唯一会把它当值留住的 `arguments`
+   * 现在自己拷一份（见 lower.js 那一句）。于是它活不过这一次调用，可以是一个 C99 的
    * **复合字面量**：块作用域上有自动存储期，覆盖整个调用，而且仍然是**一个表达式**，
    * 不必把调用点改成语句。
    *
@@ -1449,8 +1448,7 @@ class CEmitter {
    * @returns {string | null}
    */
   stackArgs(e) {
-    const esc = this.argsEscapes.get(e.func);
-    if (esc === undefined || esc === true) return null;
+    if (!this.knownFuncs.has(e.func)) return null;
     if (e.args.length !== 1) return null;
     let a = e.args[0];
     if (a && a.kind === 'Box') a = a.expr;
