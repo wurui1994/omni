@@ -552,6 +552,37 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
     前一句定义的东西后一句还在）在进程外根本做不出来 —— 那不是延迟问题，是语义问题。
 
   换句话说 J6 该从"性能格"改判成"REPL 那条路上的能力格"，动它之前先把 REPL 要什么写清楚。
+
+  **REPL 要什么（挨个试出来的，不是想出来的）**。REPL 的引擎接口只有两句
+  （`install(delta)` / `runEntry(name)`，见 `src/core/repl.js` 的 `newEngine`），
+  所以"加一条 JIT 引擎"听起来是补一个 `JitSession`。把 `CoreSession` 的两批 delta
+  各自往 `lowerToMir` → `emitLlvm` 上送一遍之后，挡在前面的四件事是这样的
+  （前三件**都在编译器这一侧，与宿主无关**）：
+
+  1. **会话的顶层变量现在不是全局**。`(let base int (int 100))` 在 REPL 里降成的是
+     chunk 函数体里的一句 `%s0 = alloca i64` —— 批一结束就没了。解释器不受影响
+     （顶层 Env 常驻在宿主那一侧），JS 后端靠 `hoistTop` 把它提成模块级 var；
+     任何**编译**引擎都要求同一件事在 OIR 那一层做成"模块级全局"。不做这一格，
+     第二批读 `base` 直接在降级时挂：`mir: 未绑定的变量 'base'（函数 omni_chunk_2）`。
+  2. **MIR 的 CALL 是模块内的函数下标 —— 闭世界**。第二批调第一批定义的 `f1`：
+     `mir: 没有这个函数 s_f1`。要的是一格"外部函数"（按**符号名**声明、omni 的调用
+     约定）；C ABI 那条路（`OP.CCALL` + `cabiSig`）已经是这个形状，但那张表的词汇只有
+     C 的八个词，omni 的 string 是两字、class 引用是三字，得另立。全局同理：要能
+     只**声明**不定义。
+  3. **每一批都发一个 `define i32 @main`**（还带 `omni_host_init`/`omni_run_entry`
+     那一套）。同一个 JITDylib 里第二次 add 就是重复定义。REPL 模式要的是：不发 main、
+     宿主开会话时把 host_init 做一次，模块里只留 `omni_chunk_N` 这一个入口符号。
+  4. **宿主那一侧真正新增的只有"撤"**：失败的一批要能从 dylib 上撤掉（ORC 的
+     `ResourceTracker`），否则 `cs.restore(snap)` 把编译器侧退回去了、JIT 侧还留着
+     半个批次的符号。运行期错误照 `JsSession` 定过的形状办：边界上只过字符串。
+
+  不是障碍的一格也记下来：字符串字面量发的是 `private unnamed_addr constant`，
+  批与批之间不撞名 —— "常量池要不要跨批共享"在这条腿上不存在。
+
+  于是 J6 的次序是**倒过来的**：1–3 是编译器自己的事，落完之后 AOT 那两条腿也能吃
+  "一串 chunk"（可以先用 `run-llvm` 对账，不必等任何新 ABI），`jit_open/jit_add/…`
+  反倒是最后一小格。判据照 `tests/repl/incremental.js` 那三条抄（每批新发的东西是
+  常数、跨批可见性、失败不留痕迹），第三条在 JIT 上才是新工作量。
 - **J7 对象码缓存 —— 已落**（`--objcache PATH`）。ORC 是惰性物化的，真正花时间的是"查地址"
   那一句触发的**代码生成**，而那份机器码是 IR 的纯函数 —— 所以可以存下来。落法用 ORC 自己
   的两个口子：写走 `ObjTransformLayer` 上挂的一个变换（编译器吐出对象码时顺手落盘、原样
