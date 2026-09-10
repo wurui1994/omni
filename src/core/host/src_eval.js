@@ -16,11 +16,16 @@
 import { SourceFile, Diagnostics } from '../source/diag.js';
 import { parseJs } from '../frontend-js/parser.js';
 import { JsFrontSession } from '../frontend-js/lower.js';
-import { emitJs } from '../backend-js/emit.js';
 import { evalJs } from './native.js';
 
-/** 装一次就够（重复调用是空操作）。 */
-export function installSrcEvalHook() {
+/**
+ * 装一次就够（重复调用是空操作）。
+ *
+ * `emit(mod, opts)` 由**叫它的那一处**给（cli.js 传 `target('js').emit`）：这一格在 host 层，
+ * 直接 import backend-js 等于把一整套 JS 后端焊进核心 —— 那是 target-js 插件的事
+ * （ADR-0021 的 S4）。
+ */
+export function installSrcEvalHook(emit) {
   if (typeof globalThis.$OMNI_SRC_EVAL === 'function') return;
   globalThis.$OMNI_SRC_EVAL = (src) => {
     const diags = new Diagnostics();
@@ -29,7 +34,7 @@ export function installSrcEvalHook() {
     const mod = sess.add(prog, diags, { valueOfLast: true });
     diags.throwIfErrors();
     // chunk 形态：不带 prelude、不带入口调用（那一份运行时已经在宿主全局上了）
-    evalJs(emitJs(mod, { repl: true }));
+    evalJs(emit(mod, { repl: true }));
     return evalJs(`${mod.entry}()`);
   };
 }

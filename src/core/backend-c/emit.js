@@ -17,6 +17,7 @@ import { cTypeName, listType, typeKey, cArrOps, arrIsBlob, loopLabelNeeds } from
 import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
 import { C_ABI, C_TYPE, C_IN, C_OUT } from '../hir/c_abi.js';
 import { utf8Bytes } from '../host/utf8.js';
+import { hash16 } from '../host/hash.js';
 import { OmniError } from '../source/diag.js';
 import { env } from '../host/native.js';
 
@@ -87,8 +88,7 @@ class CEmitter {
      * `hir/types.js` 的 `bufType` 在薄核心里没人调，于是压根没发；插件按"不是我的文件
      * 就 extern"发了个外部引用，dlopen 当场报 `symbol not found in flat namespace
      * '_u_bufType'`。剪枝的结果只有核心自己知道，所以这一格必须是**数据**，不是规则。 */
-    this.bind = opts.bind instanceof Set && opts.bind.size > 0 ? opts.bind : null;
-    /** 这一份实际发了哪些符号（`.syms` 就是它）：`符号|源文件`，函数、模块级变量、闭包的 make。 */
+    this.bind = opts.bind instanceof Set && opts.bind.size > 0 ? opts.bind : null;    /** 这一份实际发了哪些符号（`.syms` 就是它）：`符号|源文件`，函数、模块级变量、闭包的 make。 */
     this.syms = [];
     /* 插件（ADR-0021 S4）：不发 main，改发一格 `omni_plugin_init(api)` —— 值是那个
      * 顶层 register 函数的名字。宿主初始化不能重做（见下面发那一句的地方）。 */
@@ -124,6 +124,33 @@ class CEmitter {
     this.s16need = new Set();
     this.strneed = new Set();
     this.s16At = -1;
+    /* 字面量池**跨产物共用**（把每格插件重发一整套池子那件事收掉）。
+     *
+     * 量出来的：12 格插件的池子合计 2.7 MB，其中与核心重合的 60~100%（target-js 那格
+     * 1810 条 1.08 MB 全都在核心里 —— 那是 JS 运行时的模板串）。字面量是**内容寻址**的：
+     * 同一个串在哪一份里都是同一份数据，没有"每个程序各自编号"那种歧义（函数名有，见 bind）。
+     * 所以核心把池子里每条按 `符号|@s16:<内容哈希>` 记进 `.syms`，插件按哈希查表：
+     * 查得着就发一行 `extern`（约 40 字节），查不着才自己发（数组 + 描述符，几百字节）。
+     *
+     * 哈希用 host/hash.js 的 hash16（64 位、两条方向相反的滚动哈希）：同一个输入在 node
+     * 与降级后的两代里给同一个结果，这一格是自举逐字节可复现的前提。真撞了就当场骂 ——
+     * 撞了还接着绑等于把**另一个串**当成这个串，那种错查起来要人命。 */
+    this.poolBindS16 = new Map();
+    this.poolBindStr = new Map();
+    /** 这一份要 extern 声明的池子条目：符号 -> 'omni_s16' | 'omni_str'。 */
+    this.poolExt = new Map();
+    /** 内容哈希 -> 串（撞了要认出来）。 */
+    this.poolByHash = new Map();
+    if (this.bind !== null) {
+      for (const row of this.bind) {
+        const bar = row.indexOf('|@');
+        if (bar < 0) continue;
+        const sym = row.slice(0, bar);
+        const tag = row.slice(bar + 2);
+        if (tag.startsWith('s16:')) this.poolBindS16.set(tag.slice(4), sym);
+        else if (tag.startsWith('str:')) this.poolBindStr.set(tag.slice(4), sym);
+      }
+    }
     // 用到的向量形状（typeKey -> 类型）。和字面量池同一套路：边发射边收，最后回填。
     // 为什么不在 mod 里像 containers 那样先算好：向量没有实例化那一层（没有方法、
     // 没有装箱桥），一个形状要发的就是几个 static inline，边遇边记最省事。
@@ -153,6 +180,8 @@ class CEmitter {
    * 500MB 常驻里绝大部分是这些一次性的键。字面量是编译期已知的，转换也就该在编译期做完。
    */
   s16Lit(s) {
+    const shared = this.poolBindS16.get(this.poolHash(s));
+    if (shared !== undefined) { this.poolExt.set(shared, 'omni_s16'); return shared; }
     const id = this.poolId(s);
     this.s16need.add(id);
     return id;
@@ -167,16 +196,33 @@ class CEmitter {
    * 29%），而绝大多数字面量只按一种形态用过。哪一种用过就只发哪一种。
    */
   strLit(s) {
+    const shared = this.poolBindStr.get(this.poolHash(s));
+    if (shared !== undefined) { this.poolExt.set(shared, 'omni_str'); return shared; }
     const id = this.poolId(s);
     this.strneed.add(id);
     return `${id}_s`;
   }
 
-  /** 池子里的编号（两种形态共用一个）。 */
+  /** 字面量的内容哈希（跨产物共用池子的键，见构造器里那段）。 */
+  poolHash(s) {
+    const h = hash16(s);
+    const was = this.poolByHash.get(h);
+    if (was === undefined) this.poolByHash.set(h, s);
+    else if (was !== s) {
+      throw new OmniError(`internal: 字面量池的内容哈希撞了（${h}）—— 两个不同的串`
+        + '算出同一个键，绑过去就等于把另一个串当成它。换 host/hash.js 的哈希再来');
+    }
+    return h;
+  }
+
+  /** 池子里的本地编号（两种形态共用一个）。 */
   poolId(s) {
     let id = this.s16pool.get(s);
     if (id === undefined) {
-      id = `k_s16_${this.s16pool.size}`;
+      /* 插件那一份要跟核心共处一个符号空间：核心的池子叫 `k_s16_<号>`，而"号"是各自程序
+         里的顺序 —— 同名不同物。所以插件自己发的那些换个前缀，免得与 extern 来的那一批
+         撞名（撞了 clang 报的是 redeclaration with different linkage，不是"名字重了"）。 */
+      id = this.bind === null ? `k_s16_${this.s16pool.size}` : `k_s16_p${this.s16pool.size}`;
       this.s16pool.set(s, id);
     }
     return id;
@@ -321,6 +367,14 @@ class CEmitter {
 
   s16PoolLines() {
     const out = [];
+    /* 绑到别人（核心）那一份上的：只发一行声明。数据在核心的镜像里，插件不再自带一份。 */
+    for (const [sym, ty] of this.poolExt) out.push(`extern const ${ty} ${sym};`);
+    /* 自己发的那些。`--extern` 的产物（核心）里池子要**外部链接** —— 插件按内容哈希绑它。
+       底下的 `_u` / `_b` 数组照旧 static：只有描述符会被别人引用，数组是它的初始化式。
+       `--split` 是例外：共用前段会被抄进每个 TU，外部链接就成了重复定义（ld 报 duplicate
+       symbol）。切文件那一档里池子照旧 static —— 没被引用的 static 一份数据都不生成。 */
+    const link = this.extern && !this.split ? '' : 'static ';
+    const share = link === '';
     for (const [s, id] of this.s16pool) {
       /* 只发**用过的那一种形态**（见 strLit 那段注释里的量）。两种都没用过的不可能存在：
          进池子只有 s16Lit / strLit 两条路。 */
@@ -332,12 +386,14 @@ class CEmitter {
         for (let i = 0; i < s.length; i++) units.push(`${s.charCodeAt(i)}`);
         // 空串也得有个合法的数组：C 里 {} 不是有效的初始化式
         out.push(`static const uint16_t ${id}_u[] = {${units.length > 0 ? units.join(',') : '0'}};`);
-        out.push(`static const omni_s16 ${id} = { ${id}_u, ${s.length} };`);
+        out.push(`${link}const omni_s16 ${id} = { ${id}_u, ${s.length} };`);
+        if (share) this.syms.push(`${id}|@s16:${this.poolHash(s)}`);
       }
       if (this.strneed.has(id)) {
         const bytes = utf8Bytes(s);
         out.push(`static const char ${id}_b[] = ${cString(bytes)};`);
-        out.push(`static const omni_str ${id}_s = { ${id}_b, ${bytes.length} };`);
+        out.push(`${link}const omni_str ${id}_s = { ${id}_b, ${bytes.length} };`);
+        if (share) this.syms.push(`${id}_s|@str:${this.poolHash(s)}`);
       }
     }
     return out;

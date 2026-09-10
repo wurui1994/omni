@@ -29,11 +29,12 @@
 import { stdout, stderr, stdinIsTty, readLine, evalJs, hasJsEngine } from './host/native.js';
 import { SourceFile, Diagnostics, OmniError } from './source/diag.js';
 import { lex } from './parse/lexer.js';
-import { emitJs, emitJsRuntimeModule } from './backend-js/emit.js';
-import { emitC } from './backend-c/emit.js';
 import { loadProgram, newLoadState } from './module/load.js';
 import { check, CheckSession } from './hir/check.js';
-import { cap } from './plugin.js';
+/* 后端一律走注册表（ADR-0021 的 S4）：REPL 直接 import backend-js / backend-c 的话，
+   **核心里就又有了一整套 JS 与 C 后端** —— 量出来那是核心 12.3 MB 里的一大块，而
+   target-js / target-c 两格插件把同样的代码又发了一遍（target-c 那格 819 KB）。 */
+import { cap, target } from './plugin.js';
 import { parseJs } from './frontend-js/parser.js';
 import { lowerJs, JsFrontSession } from './frontend-js/lower.js';
 import { InterpSession } from './interp/eval.js';
@@ -328,7 +329,7 @@ class JsLang {
  */
 export class JsSession {
   constructor() {
-    evalJs(emitJsRuntimeModule());
+    evalJs(cap('jsgen.runtimeModule')());
     // 运行期错误默认是"打一行、退 70"，在 REPL 里那等于杀掉会话。装个钩子改成 throw；
     // 消息先落在一个全局槽里，于是**跨回这一侧的只有字符串**（宿主的异常对象在这个
     // 值域里不是 dict，漏进来就是一句莫名的 "function is not an object"）。
@@ -338,7 +339,7 @@ export class JsSession {
   }
 
   install(mod) {
-    const src = emitJs(mod, { repl: true });
+    const src = target('js').emit(mod, { repl: true });
     this.lastBytes = src.length;
     evalJs(src);
   }
@@ -529,7 +530,7 @@ function command(s, line) {
     case ':c':
       try {
         const mod = s.lang.full(s.chunks);
-        stdout(cmd === ':js' ? emitJs(mod) : emitC(mod));
+        stdout(cmd === ':js' ? target('js').emit(mod) : target('c').emit(mod));
       } catch (e) {
         if (!(e instanceof OmniError)) throw e;
         stderr(`${e.message}\n`);
