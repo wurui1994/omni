@@ -33,6 +33,8 @@
 #include <llvm-c/Orc.h>
 #include <llvm-c/Target.h>
 
+#include "omni_jit_symbols.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,6 +66,78 @@ static char *omni_jit_slurp(const char *path, size_t *len) {
   *len = (size_t)n;
   fclose(f);
   return buf;
+}
+
+/** 名字拷进一格缓冲：LLVMGetValueName2 给的是 (指针, 长度)，别指望它一定收尾 */
+static const char *omni_jit_name(LLVMValueRef v, char *buf, size_t cap) {
+  size_t len = 0;
+  const char *p = LLVMGetValueName2(v, &len);
+  if (p == NULL || len == 0 || len >= cap) return NULL;
+  memcpy(buf, p, len);
+  buf[len] = 0;
+  return buf;
+}
+
+/**
+ * 宿主符号：**表里有的定义进去，表里没有的当场报**（ADR-0022 决策 2）。
+ *
+ * 两步分开做，因为它们回答的是两个问题：
+ *   - 定义那一步要**无条件**摆上整张表 —— 代码生成器自己合成的 `memcpy`/`bzero`
+ *     在 IR 里看不见，靠"扫一遍 declare"发现不了（jancy 的 addStdSymbols 同理）。
+ *   - 扫描那一步只为**诊断**：ORC 是惰性物化的，等它自己报"Symbols not found"
+ *     时程序可能已经打了半屏输出，而且那句话里是带平台前缀的 `_foo`。
+ *
+ * 模块自己有体的同名符号归模块（现在没有这样的名字；FFI 覆盖运行时某一格时就会有）。
+ */
+static int omni_jit_define(LLVMOrcLLJITRef jit, LLVMOrcJITDylibRef jd, LLVMModuleRef mod) {
+  size_t n = 0;
+  while (OMNI_JIT_SYMS[n].name != NULL) n++;
+  LLVMOrcCSymbolMapPair *pairs = (LLVMOrcCSymbolMapPair *)malloc(sizeof(LLVMOrcCSymbolMapPair) * n);
+  if (pairs == NULL) {
+    fprintf(stderr, "omni-jit: out of memory\n");
+    return 70;
+  }
+  size_t m = 0;
+  for (size_t i = 0; i < n; i++) {
+    const char *nm = OMNI_JIT_SYMS[i].name;
+    LLVMValueRef f = LLVMGetNamedFunction(mod, nm);
+    if (f != NULL && LLVMIsDeclaration(f) == 0) continue;
+    LLVMValueRef g = LLVMGetNamedGlobal(mod, nm);
+    if (g != NULL && LLVMIsDeclaration(g) == 0) continue;
+    pairs[m].Name = LLVMOrcLLJITMangleAndIntern(jit, nm);
+    pairs[m].Sym.Address = (LLVMOrcExecutorAddress)(uintptr_t)OMNI_JIT_SYMS[i].addr;
+    pairs[m].Sym.Flags.GenericFlags =
+      (uint8_t)(LLVMJITSymbolGenericFlagsExported | LLVMJITSymbolGenericFlagsCallable);
+    pairs[m].Sym.Flags.TargetFlags = 0;
+    m++;
+  }
+  LLVMErrorRef err = LLVMOrcJITDylibDefine(jd, LLVMOrcAbsoluteSymbols(pairs, m));
+  free(pairs);
+  if (err != NULL) return omni_jit_fail(err, "cannot define host symbols");
+
+  char buf[256];
+  int missing = 0;
+  for (LLVMValueRef f = LLVMGetFirstFunction(mod); f != NULL; f = LLVMGetNextFunction(f)) {
+    if (LLVMIsDeclaration(f) == 0) continue;
+    if (LLVMGetIntrinsicID(f) != 0) continue;   /* llvm.* 由 LLVM 自己降 */
+    const char *nm = omni_jit_name(f, buf, sizeof buf);
+    if (nm == NULL || omni_jit_symbol(nm) != NULL) continue;
+    fprintf(stderr, "omni-jit: unresolved: %s\n", nm);
+    missing++;
+  }
+  for (LLVMValueRef g = LLVMGetFirstGlobal(mod); g != NULL; g = LLVMGetNextGlobal(g)) {
+    if (LLVMIsDeclaration(g) == 0) continue;
+    const char *nm = omni_jit_name(g, buf, sizeof buf);
+    if (nm == NULL || omni_jit_symbol(nm) != NULL) continue;
+    fprintf(stderr, "omni-jit: unresolved: %s\n", nm);
+    missing++;
+  }
+  if (missing > 0) {
+    fprintf(stderr, "omni-jit: %d 个符号宿主表里没有（要么补进 src/jit/omni_jit_symbols.c，"
+            "要么是后端发错了名字）\n", missing);
+    return 70;
+  }
+  return 0;
 }
 
 int main(int argc, char **argv) {
@@ -112,11 +186,11 @@ int main(int argc, char **argv) {
   }
 
   LLVMOrcJITDylibRef jd = LLVMOrcLLJITGetMainJITDylib(jit);
-  LLVMOrcDefinitionGeneratorRef gen = NULL;
-  err = LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
-    &gen, LLVMOrcLLJITGetGlobalPrefix(jit), NULL, NULL);
-  if (err != NULL) return omni_jit_fail(err, "cannot create process symbol generator");
-  LLVMOrcJITDylibAddGenerator(jd, gen);
+  /* 进程符号搜索**故意不装**（从前那句 LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess
+     在这儿）：JIT 出来的代码只能看见宿主明确摆上的那些名字。理由三条在
+     omni_jit_symbols.h 的文件头，可观测的形式是宿主链接时不再要 `-Wl,-export_dynamic`。 */
+  int rc = omni_jit_define(jit, jd, mod);
+  if (rc != 0) return rc;
 
   LLVMOrcThreadSafeContextRef tsc = LLVMOrcCreateNewThreadSafeContext();
   LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(mod, tsc);

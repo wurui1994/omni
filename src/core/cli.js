@@ -1946,22 +1946,27 @@ function buildJitHost() {
   if (inc[0] !== 0 || libdir[0] !== 0) throw new OmniError(`${lc} did not report its paths`);
   const src = join(JIT_DIR, 'omni_jit.c');
   if (!exists(src)) throw new OmniError(`jit host source is missing: ${src}`);
+  /* 宿主符号表（ADR-0022 决策 2）：与宿主一起编。它进缓存键 —— 表里多一行就该重编，
+     否则"补了符号还是报 unresolved"会让人去怀疑编译器。 */
+  const symSrc = join(JIT_DIR, 'omni_jit_symbols.c');
+  if (!exists(symSrc)) throw new OmniError(`jit host source is missing: ${symSrc}`);
 
   const objs = runtimeObjects(cc);
-  const key = hash16([cc, ver[1].trim(), src, mtimeMs(src), fileSize(src), ...objs].join('|'));
+  const key = hash16([cc, ver[1].trim(), src, mtimeMs(src), fileSize(src),
+    symSrc, mtimeMs(symSrc), fileSize(symSrc), ...objs].join('|'));
   const dir = join(cacheRoot(), 'jit', key);
   const exe = join(dir, 'omni-jit');
   if (exists(exe)) {
     vStep(`jit host  cache hit ${exe}`);
     return exe;
   }
-  // 运行时的 .o 直接链进宿主，JIT 出来的代码靠「进程符号搜索」找到它们（见 omni_jit.c）。
-  // -Wl,-export_dynamic 是必须的：默认情况下可执行文件的符号不进动态符号表，
-  // ORC 就找不到 omni_print_int 这些。
+  /* 运行时的 .o 直接链进宿主，地址由 omni_jit_symbols.c 里那张表**按名字摆进 JIT**
+     （ADR-0022 决策 2）。所以从前那句 `-Wl,-export_dynamic` 不再需要了 ——
+     去掉它正是"进程符号表不再是解析路径"的可观测形式：留着的话这条断言就没法验。 */
   const stage = workDirFor('jit-stage', key);
   const staged = join(stage, 'omni-jit');
-  const args = ['-O2', '-w', '-pthread', '-I', inc[1].trim(), '-I', RUNTIME_DIR, src, ...objs,
-    '-L', libdir[1].trim(), '-lLLVM', '-lm', '-Wl,-export_dynamic', '-o', staged];
+  const args = ['-O2', '-w', '-pthread', '-I', inc[1].trim(), '-I', RUNTIME_DIR, src, symSrc,
+    ...objs, '-L', libdir[1].trim(), '-lLLVM', '-lm', '-o', staged];
   const r = spawn(cc, args, 'o');
   if (r[0] !== 0) throw new OmniError(`the jit host failed to build with ${cc}:\n${r[2]}`);
   mkdirAll(join(cacheRoot(), 'jit'));

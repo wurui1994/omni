@@ -18,7 +18,8 @@
 //   node tests/jit/run.js
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readdirSync, existsSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,6 +102,41 @@ for (const rel of others) {
 }
 if (wrong.length > 0) bad('boundary/same-as-aot', wrong.join('\n'));
 else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同一条]`);
+
+// ------------------------------------------------- 4. 缺符号：装载**之前**按名字报出来
+//
+// ADR-0022 决策 2 的可观测形式。宿主的符号可见性默认关（进程符号搜索故意没装），
+// 所以"IR 里要一个表上没有的名字"必须在物化之前就拒 —— 而不是让 ORC 在跑到一半时
+// 报它那句带平台前缀的 `Symbols not found: [ _foo ]`。
+//
+// 这一条直接调宿主二进制（`omni-jit FILE.ll`）：走 `run-jit` 进不来，那条路的输入是源码。
+// 宿主的位置从缓存里捞 —— 上面那些用例已经把它编好了。J3 会给它一扇正门。
+{
+  const hosts = [];
+  const jitRoot = join(root, '.omni-cache', 'jit');
+  try {
+    for (const d of readdirSync(jitRoot)) {
+      const p = join(jitRoot, d, 'omni-jit');
+      if (existsSync(p)) hosts.push(p);
+    }
+  } catch { /* 没这个目录就是没编过，下面按 skip 处理 */ }
+  if (hosts.length === 0) {
+    process.stdout.write('  skip unresolved-symbol：缓存里找不到 omni-jit 宿主\n');
+  } else {
+    const host = hosts.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+    const ll = join(mkdtempSync(join(tmpdir(), 'omni-jit-miss-')), 'miss.ll');
+    writeFileSync(ll, 'declare i64 @no_such_thing(i64)\n'
+      + 'define i32 @main(i32 %argc, ptr %argv) {\n'
+      + '  %r = call i64 @no_such_thing(i64 1)\n'
+      + '  ret i32 0\n}\n');
+    const r2 = spawnSync(host, [ll], { encoding: 'utf8' });
+    const err = r2.stderr ?? '';
+    if (r2.status === 0) bad('unresolved-symbol', '    缺符号居然跑通了 —— 那说明还有别的解析路径');
+    else if (!err.includes('unresolved: no_such_thing')) {
+      bad('unresolved-symbol', `    报错的理由不对：${JSON.stringify(err.slice(0, 160))}`);
+    } else ok('unresolved-symbol [装载前按名字报：unresolved: no_such_thing]');
+  }
+}
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 if (fail) {

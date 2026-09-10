@@ -1,0 +1,143 @@
+/*
+ * Omni — JIT 宿主符号表的内容（ADR-0022 决策 2）。表的来由见 omni_jit_symbols.h。
+ *
+ * 这张表是**量出来的**，不是猜的：把 tests/ 底下能发 IR 的每一份源码（.omni/.omnis/
+ * .jnc/.sx）都发一遍，取里头**外部引用**的名字的并集 —— 84 个运行时函数 + 2 个运行时
+ * 变量 + 2 个 libc。两种形态都要取（第一版只 grep 了 `declare`，漏掉 `= external global`
+ * 那两格，tests/jit 当场抓着；只量了两个语料，漏掉 51 个数组/线性内存/数学的名字，
+ * 又被抓一次）：
+ *
+ *   for f in $(find tests -name '*.omni' -o -name '*.omnis' -o -name '*.jnc' -o -name '*.sx'); do
+ *     node src/cli.js emit llvm "$f" 2>/dev/null; done \
+ *     | grep -o '^declare[^@]*@[A-Za-z0-9_.]*\|^@[A-Za-z0-9_.]* = external[^,]*' \
+ *     | grep -o '@[A-Za-z0-9_.]*' | sed 's/@//' | sort -u
+ *
+ * 后端多发一个运行时调用，这张表就要跟着长一行。漏了的后果是**装载之前**一句
+ * `omni-jit: unresolved: X`，不是跑到一半崩 —— 那是这一刀的全部意义。
+ */
+
+#include "omni_jit_symbols.h"
+#include "omni.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+
+const omni_jit_sym OMNI_JIT_SYMS[] = {
+  /* ---- 运行时的函数：宿主里链着那一份（omni.h 给的是真原型） ---- */
+  { "omni_alloc_slow", (void *)omni_alloc_slow },
+  { "omni_arr_b8_get", (void *)omni_arr_b8_get },
+  { "omni_arr_b8_len", (void *)omni_arr_b8_len },
+  { "omni_arr_b8_new", (void *)omni_arr_b8_new },
+  { "omni_arr_b8_pop", (void *)omni_arr_b8_pop },
+  { "omni_arr_b8_push", (void *)omni_arr_b8_push },
+  { "omni_arr_b8_set", (void *)omni_arr_b8_set },
+  { "omni_arr_blob_at", (void *)omni_arr_blob_at },
+  { "omni_arr_blob_len", (void *)omni_arr_blob_len },
+  { "omni_arr_blob_new", (void *)omni_arr_blob_new },
+  { "omni_arr_blob_pop", (void *)omni_arr_blob_pop },
+  { "omni_arr_blob_push", (void *)omni_arr_blob_push },
+  { "omni_arr_f64_get", (void *)omni_arr_f64_get },
+  { "omni_arr_f64_len", (void *)omni_arr_f64_len },
+  { "omni_arr_f64_new", (void *)omni_arr_f64_new },
+  { "omni_arr_f64_pop", (void *)omni_arr_f64_pop },
+  { "omni_arr_f64_push", (void *)omni_arr_f64_push },
+  { "omni_arr_f64_set", (void *)omni_arr_f64_set },
+  { "omni_arr_i64_get", (void *)omni_arr_i64_get },
+  { "omni_arr_i64_len", (void *)omni_arr_i64_len },
+  { "omni_arr_i64_new", (void *)omni_arr_i64_new },
+  { "omni_arr_i64_pop", (void *)omni_arr_i64_pop },
+  { "omni_arr_i64_push", (void *)omni_arr_i64_push },
+  { "omni_arr_i64_set", (void *)omni_arr_i64_set },
+  { "omni_arr_str_get", (void *)omni_arr_str_get },
+  { "omni_arr_str_len", (void *)omni_arr_str_len },
+  { "omni_arr_str_new", (void *)omni_arr_str_new },
+  { "omni_arr_str_pop", (void *)omni_arr_str_pop },
+  { "omni_arr_str_push", (void *)omni_arr_str_push },
+  { "omni_arr_str_set", (void *)omni_arr_str_set },
+  { "omni_chr", (void *)omni_chr },
+  { "omni_error", (void *)omni_error },
+  { "omni_errorf", (void *)omni_errorf },
+  { "omni_fail", (void *)omni_fail },
+  { "omni_get_env", (void *)omni_get_env },
+  { "omni_host_exit_code", (void *)omni_host_exit_code },
+  { "omni_host_init", (void *)omni_host_init },
+  { "omni_index_of", (void *)omni_index_of },
+  { "omni_js_check_uncaught", (void *)omni_js_check_uncaught },
+  { "omni_lin_at", (void *)omni_lin_at },
+  { "omni_lin_data", (void *)omni_lin_data },
+  { "omni_lin_grow", (void *)omni_lin_grow },
+  { "omni_lin_init", (void *)omni_lin_init },
+  { "omni_lin_size", (void *)omni_lin_size },
+  { "omni_nullck", (void *)omni_nullck },
+  { "omni_pchk", (void *)omni_pchk },
+  { "omni_pnew", (void *)omni_pnew },
+  { "omni_print_bool", (void *)omni_print_bool },
+  { "omni_print_int", (void *)omni_print_int },
+  { "omni_print_real", (void *)omni_print_real },
+  { "omni_print_string", (void *)omni_print_string },
+  { "omni_psub", (void *)omni_psub },
+  { "omni_r_bits", (void *)omni_r_bits },
+  { "omni_r_ceil", (void *)omni_r_ceil },
+  { "omni_r_fabs", (void *)omni_r_fabs },
+  { "omni_r_floor", (void *)omni_r_floor },
+  { "omni_r_fmod", (void *)omni_r_fmod },
+  { "omni_r_frombits", (void *)omni_r_frombits },
+  { "omni_r_nextafter", (void *)omni_r_nextafter },
+  { "omni_r_pow", (void *)omni_r_pow },
+  { "omni_r_round", (void *)omni_r_round },
+  { "omni_r_sqrt", (void *)omni_r_sqrt },
+  { "omni_read_text", (void *)omni_read_text },
+  { "omni_refid", (void *)omni_refid },
+  { "omni_run_entry", (void *)omni_run_entry },
+  { "omni_run_proc", (void *)omni_run_proc },
+  { "omni_str_base", (void *)omni_str_base },
+  { "omni_str_bool", (void *)omni_str_bool },
+  { "omni_str_cat", (void *)omni_str_cat },
+  { "omni_str_fixed", (void *)omni_str_fixed },
+  { "omni_str_gen", (void *)omni_str_gen },
+  { "omni_str_genk", (void *)omni_str_genk },
+  { "omni_str_int", (void *)omni_str_int },
+  { "omni_str_length", (void *)omni_str_length },
+  { "omni_str_real", (void *)omni_str_real },
+  { "omni_str_realg", (void *)omni_str_realg },
+  { "omni_str_repeat", (void *)omni_str_repeat },
+  { "omni_str_sci", (void *)omni_str_sci },
+  { "omni_str_sub", (void *)omni_str_sub },
+  { "omni_str_upper", (void *)omni_str_upper },
+  { "omni_tchk", (void *)omni_tchk },
+  { "omni_trunc", (void *)omni_trunc },
+  { "omni_write_string", (void *)omni_write_string },
+  { "omni_write_text", (void *)omni_write_text },
+
+  /* ---- 运行时的**变量**：要的是那格存储的地址，不是它现在的值。arena 的两个游标就是
+         这一类（`omni_alloc` 的快路径在 IR 里原地重建，于是它直接读写这两格）。
+         jancy 那边这一类走 mapVariable、与 mapFunction 分成两个口子，理由正是
+         这个"地址 vs 值"。 ---- */
+  { "omni_arena_ptr", (void *)&omni_arena_ptr },
+  { "omni_arena_end", (void *)&omni_arena_end },
+
+  /* ---- libc：IR 里**直接** declare 的那两个 ---- */
+  { "fflush", (void *)fflush },
+  { "memcmp", (void *)memcmp },
+
+  /* ---- libc：**代码生成器自己合成**的那几个（聚合体的拷贝与清零）。IR 里看不见它们，
+         所以"扫一遍 declare"发现不了 —— 这一格必须无条件摆上。与 jancy 的
+         addStdSymbols 同一个理由（jnc_ct_Jit.cpp:99-112，它连 darwin 上的
+         `bzero` / `__bzero` 都单列）。 ---- */
+  { "memcpy", (void *)memcpy },
+  { "memset", (void *)memset },
+  { "memmove", (void *)memmove },
+  { "bzero", (void *)bzero },
+  { "__bzero", (void *)bzero },
+
+  { NULL, NULL },
+};
+
+void *omni_jit_symbol(const char *name) {
+  if (name == NULL) return NULL;
+  for (int i = 0; OMNI_JIT_SYMS[i].name != NULL; i++) {
+    if (strcmp(OMNI_JIT_SYMS[i].name, name) == 0) return OMNI_JIT_SYMS[i].addr;
+  }
+  return NULL;
+}
