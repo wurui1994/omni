@@ -903,6 +903,15 @@ export class MirModule {
     /* 与 globals 同下标的「这一块是第几个领到字节的」（第九刀第一百二十五片）：
      * 见 `strSeq`。 */
     this.globalSeq = [];
+    /* 与 globals 同下标的**跨模块链接**（ADR-0022 的 J6 第一件事）：缺省 `undefined`
+     * = 「这一格只有这个模块用」（后端发 `internal`）。REPL 的会话是好几份产物摆进
+     * 同一个符号空间的，于是要两个说法：
+     *   - `'def'`：这个模块定义它，**符号要让后面几批看得见**（发的是外部链接）；
+     *   - `'ref'`：别人家定义的，这里只**声明**（发 `external global`，不占字节）。
+     * 与 `setGlobalExtern` 的差别是那一条只认「一块裸字节」（C 前端的形状、native 腿
+     * 独有），而这里带着 `globalTy` 上的真类型 —— 会话里第二批读第一批的 `int base`，
+     * 要的正是「类型知道、定义在别处」。 */
+    this.globalLink = [];
     /* 与 funcs 同下标的「这个名字是第几个被提到的」（第九刀第一百二十六片）：也在
      * `strSeq` 那个轴上。tcc 的符号表就是**建符号的次序**，按绑定分成局部/非局部两段
      * 之后各自保持原序（`tccelf.c:866` 的 `sort_syms`）—— 所以函数也得有个号。
@@ -1173,6 +1182,16 @@ export class MirModule {
 
   /** 给一个已登记的全局钉上类型（核心方言的 `(global …)`；不叫就还是 T_DYN）。 */
   setGlobalTy(i, t) { this.globalTy[i] = t; }
+
+  /**
+   * 声明这一格全局的**跨模块链接**：`'def'` = 这里定义、符号给别的模块看；
+   * `'ref'` = 别人家定义、这里只声明。见构造器里 `globalLink` 头上那段。
+   */
+  setGlobalLink(i, kind) {
+    if (this.globals[i] === undefined) throw new Error(`mir: 没有 ${i} 号模块级变量`);
+    if (kind !== 'def' && kind !== 'ref') throw new Error(`mir: 全局的链接只能是 def / ref，给了 ${kind}`);
+    this.globalLink[i] = kind;
+  }
 
   /**
    * 运行时 op。名字是**单态**的（`len.list`、`print.int`）—— MIR 不带 OIR 的

@@ -245,8 +245,10 @@ const MEM_LL_TY = {
 };
 
 class LlvmEmitter {
-  constructor(mir) {
+  constructor(mir, opts) {
     this.mir = mir;
+    // 一批**会话**的产物吗（ADR-0022 的 J6 第三件事）：真的话不发包装的 main
+    this.repl = opts !== undefined && opts !== null && opts.repl === true;
     this.out = [];
     this.needDiv = false;   // 除法/取模的辅助函数只在用到时才发
     this.needMod = false;
@@ -669,7 +671,16 @@ class LlvmEmitter {
         continue;
       }
       const t = this.mir.globalTy[i];
-      this.line(`@g_${this.mir.globals[i]} = internal global ${this.ty(t, `模块级变量 ${this.mir.globals[i]}`)} zeroinitializer`);
+      /* 跨模块的链接（`globalLink`，ADR-0022 的 J6 第一件事）：`'ref'` 只发一句声明
+         （别人家定义的，这里不占字节也不给初值），`'def'` 发定义但**不是** internal ——
+         会话里后面几批要按名字找到它。缺省照旧 `internal`：整程序那条路上一格全局只有
+         这一份产物用，internal 让优化器看得见"没有别人改它"。 */
+      const link = (this.mir.globalLink ?? [])[i];
+      const nm = this.globalRef(i);
+      const ty = this.ty(t, `模块级变量 ${this.mir.globals[i]}`);
+      if (link === 'ref') this.line(`${nm} = external global ${ty}`);
+      else if (link === 'def') this.line(`${nm} = global ${ty} zeroinitializer`);
+      else this.line(`${nm} = internal global ${ty} zeroinitializer`);
       sawGlobal = true;
     }
     if (sawGlobal) this.line('');
@@ -797,7 +808,11 @@ class LlvmEmitter {
      * 这回事，所以包装里那句 `omni_run_entry(@entry)` 对它本来就无意义。
      */
     const hasOwnMain = this.mir.funcs.some((g) => g.name === 'main' && g.extern !== true);
-    if (hasOwnMain) {
+    if (this.repl) {
+      // 会话的一批：入口是 `omni_chunk_N` 这个符号，包装那一套由开会话的人做一次
+      this.line('; 会话的一批（--repl），不发包装的 main —— 见 emitLlvm 头上那段');
+      this.line('');
+    } else if (hasOwnMain) {
       this.line('; 模块自己带 main（C 那条腿），不发包装 —— 见上面那段');
       this.line('');
     } else {
@@ -2444,9 +2459,16 @@ ok:
 `;
 }
 
-/** MIR 模块 -> LLVM IR 文本。 */
-export function emitLlvm(mir) {
-  return new LlvmEmitter(mir).emit();
+/**
+ * MIR 模块 -> LLVM IR 文本。
+ *
+ * `opts.repl`：一批**会话**的产物（ADR-0022 的 J6 第三件事）。差别只有一件事 ——
+ * 不发那个包装的 `main`：会话里好几份产物摆在同一个符号空间里，第二批带 main 就是重复
+ * 定义；`omni_host_init`/`omni_run_entry` 那一套由开会话的人做一次，每批留下的入口是
+ * `omni_chunk_N` 这个符号，谁查到谁调。
+ */
+export function emitLlvm(mir, opts) {
+  return new LlvmEmitter(mir, opts).emit();
 }
 
 

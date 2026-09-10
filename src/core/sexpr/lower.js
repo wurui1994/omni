@@ -150,6 +150,10 @@ class CoreLowerer {
     // 模块级变量（第二十四刀）：名字 -> OIR 类型。查名字时它是**最外层的兜底** ——
     // 局部量与形参先赢，所以同名的局部量是遮蔽而不是错。
     this.globals = new Map();
+    /* 这一批**提到过**的模块级变量名（ADR-0022 的 J6）。每批清一次（见 `chunk`）：
+       会话里前几批定义的那几格，这一批的产物要为它们发一句声明，而"发哪几条"就按这个
+       集合 —— 全发出来的话每批的字节数会随会话长度涨，那正是 REPL 增量要钉住的东西。 */
+    this.gUsed = new Set();
     // 线性内存（ADR-0017 第二刀）：`null` = 这份模块不用内存。一个模块**一块**（wasm MVP
     // 就是这样），所以这里是一个字段而不是一张表。`emitted` 记的是"这一批产物里发过了吗" ——
     // REPL 一批一份产物，内存只该在声明它的那一批里被建起来，后面几批要接着用同一块。
@@ -385,7 +389,12 @@ class CoreLowerer {
   nameRef(name) {
     const local = this.lookup(name);
     if (local !== null) return { type: local, global: false };
-    if (this.globals.has(name)) return { type: this.globals.get(name), global: true };
+    if (this.globals.has(name)) {
+      // 这一批**提到过**哪几格全局（ADR-0022 的 J6）：会话里前几批定义的那些，
+      // 这一批的产物要为它们发一句声明，而"发哪几条"就按这个集合。
+      this.gUsed.add(name);
+      return { type: this.globals.get(name), global: true };
+    }
     return null;
   }
 
@@ -401,6 +410,8 @@ class CoreLowerer {
       structs: this.structs.size, classes: this.classes.size, globals: this.globals.size,
       closures: this.closures.size, lifted: this.lifted.length, fnUsed: this.fnUsed.size,
     };
+    // 这一批提到了哪几格全局，从零数起（跨批的那几条声明按它发，见 `gUsed`）
+    this.gUsed = new Set();
     const top = nodes.length === 1 && head(nodes[0]) === 'module' ? nodes[0] : null;
     if (top === null) {
       this.err(nodes[0], '一份核心方言的源文件是恰好一个 (module ...)');
@@ -950,12 +961,25 @@ class CoreLowerer {
     }
     // 模块级变量按**声明顺序**发出去（Map 记的就是插入序）：MIR 的全局号按这个顺序分配，
     // 所以同一份输入两次编译出来的字节与哈希都一样。
+    //
+    // 会话（REPL）里这一格分成两半（ADR-0022 的 J6）：这一批**新定义**的带 `shared`
+    // （符号要让后面几批看得见），前几批定义、这一批**提到过**的进 `externGlobals`
+    // （只声明，不占字节）。整程序那条路上两者都不出现 —— `session` 是假的，
+    // `externGlobals` 是空的，产物逐字节不变。
+    const session = entryName !== 'omni_main';
     const globals = [];
+    const externGlobals = [];
     let gj = 0;
     for (const [nm, t] of this.globals) {
-      if (gj++ < base.globals) continue;
+      const old = gj++ < base.globals;
       if (this.sigOnly.globals.has(nm)) continue;
-      globals.push({ name: nm, mangled: `g_${nm}`, type: t });
+      if (old) {
+        if (session && this.gUsed.has(nm)) {
+          externGlobals.push({ name: nm, mangled: `g_${nm}`, type: t });
+        }
+        continue;
+      }
+      globals.push({ name: nm, mangled: `g_${nm}`, type: t, shared: session });
     }
     // 闭包提升出来的函数体排在最后（跟 hir/check.js 一样：合成的东西放在用户函数之后）。
     const lifted = [];
@@ -1002,6 +1026,9 @@ class CoreLowerer {
       closures: clos, fnTypes: fnTys,
       funcs: funcs.concat(lifted),
       globals: globals,
+      /* 会话里**别人家**定义、这一批提到过的那几格（ADR-0022 的 J6）：只声明，不占字节。
+         整程序那条路上永远是空的。 */
+      externGlobals: externGlobals,
       /* 外部 C 符号（`(cabi …)`，ADR-0022 的 J4b）：名字与签名同下标。C 后端靠这两格
          发 extern 原型 —— 少了它生成的 `.c` 里就是一次没有声明的调用（C99 里是错）。 */
       cabi: cabiNames,
@@ -1178,6 +1205,23 @@ class CoreLowerer {
       const v = this.expr(n.items[3]);
       if (v === null) return null;
       if (!sameCoreType(v.type, t)) return this.err(n, `变量 ${nm} 是 ${coreTypeText(t)}，初值是 ${coreTypeText(v.type)}`);
+      /* REPL 的**会话顶层**：`(let …)` 提成一格模块级变量，语句只剩赋值（ADR-0022 的 J6
+         第一件事）。为什么不能照旧留成入口函数体里的局部：那样它的存活期就是这一批 ——
+         解释器躲过这一条是因为顶层 Env 常驻在宿主那一侧，JS 后端躲过是因为 hoistTop 把它
+         提成模块级 var，而**编译**出来的一批（LLVM/C）里它就是一句 alloca，批一结束就没了。
+         提到 OIR 这一层做，五条腿于是说的是同一件事（解释器那边照样对：全局的值存在
+         InterpSession.I.globals 里，也是跨批留住的）。 */
+      const atTop = this.topScope !== null && this.scopes === this.topScope && this.scopes.length === 1;
+      if (atTop) {
+        if (this.globals.has(nm)) return this.err(n, `'${nm}' 在这一层已经声明过了`);
+        this.globals.set(nm, t);
+        return {
+          kind: 'ExprStmt',
+          expr: {
+            kind: 'Assign', target: { kind: 'GlobalRef', name: nm, type: t }, value: v, type: t,
+          },
+        };
+      }
       // 同一层里重名是错的；外层同名是遮蔽，合法
       if (this.scopes[this.scopes.length - 1].has(nm)) return this.err(n, `'${nm}' 在这一层已经声明过了`);
       this.scopes[this.scopes.length - 1].set(nm, t);

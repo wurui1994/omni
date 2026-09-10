@@ -68,7 +68,21 @@ class ToMir {
     for (const g of this.oir.jsGlobals ?? []) m.globalNo(g.name);
     // 核心方言的模块级变量（第二十四刀）：同一个全局池，先按声明顺序登记，
     // 全局号因此是稳定的（bytes.js 的哈希要它稳定）。
-    for (const g of this.oir.globals ?? []) m.setGlobalTy(m.globalNo(g.name), this.ty(g.type));
+    /* 会话里**别人家**定义的那些先登记（ADR-0022 的 J6 第一件事）：REPL 第二批读第一批的
+       `base`，类型这一批是知道的（降级器的表跨批留着），定义不在这一批 —— 于是登记时
+       钉上类型、链接标成 `'ref'`，后端发一句声明就够。不登记的后果是那个名字在这里
+       第一次出现时按缺省的 T_DYN 落座，LLVM 那条腿当场拒绝（`不支持 dyn`）。 */
+    for (const g of this.oir.externGlobals ?? []) {
+      const no = m.globalNo(g.name);
+      m.setGlobalTy(no, this.ty(g.type));
+      m.setGlobalLink(no, 'ref');
+    }
+    for (const g of this.oir.globals ?? []) {
+      const no = m.globalNo(g.name);
+      m.setGlobalTy(no, this.ty(g.type));
+      // 会话里定义的那些：符号要让后面几批看得见（普通产物照旧是 internal）
+      if (g.shared === true) m.setGlobalLink(no, 'def');
+    }
     // 闭包模板先登记：MakeClosure 要按 make 名字查号，而它可能出现在模板之前。
     // capTypes 是捕获的**类型码**：C 那条腿从 OIR 上取类型，但 LLVM 那条腿只看 MIR，
     // 而它要按这份布局发闭包记录的命名类型（`%clo_0 = type { ptr, i64 }`）。

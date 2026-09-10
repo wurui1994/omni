@@ -19,6 +19,13 @@ import { join, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { SUPPORTED } from './supported.js';
+/* 第 10 节（会话的几批链成一个程序）直接用编译器的模块，不经 CLI：那一节要的是
+   "一批 delta -> 一份产物"，而 CLI 上还没有"编一批"这个动词（J6 的最后一格才会有）。 */
+import { CoreSession } from '../../src/core/sexpr/lower.js';
+import { Diagnostics } from '../../src/core/source/diag.js';
+import { lowerToMir } from '../../src/core/mir/from_oir.js';
+import { emitLlvm } from '../../src/core/backend-llvm/emit.js';
+import { runtimeSources, RUNTIME_DIR } from '../../src/core/runtime/c_runtime.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
@@ -392,6 +399,75 @@ if (existsSync(sysDir)) {
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法降成 (ccall Owner_method self …)，两次调用同一个 self]');
   }
+  rmSync(tmp, { recursive: true, force: true });
+}
+
+// ------------------------------------------- 10. 会话的几批链成一个程序（ADR-0022 的 J6）
+//
+// REPL 的一批一份产物。跨批可见性在解释器上是白拿的（顶层 Env 常驻在宿主那一侧），
+// 在**编译**出来的那条腿上不是：`(let base …)` 原先降成入口函数体里的一句 alloca，
+// 批一结束就没了。J6 的第一件事把它提成模块级全局，第三件事让会话的一批**不发 main**
+// （好几份产物摆在同一个符号空间里，第二批带 main 就是重复定义）。
+//
+// 这一节把三批产物 + 一个只管按顺序调 `omni_chunk_N` 的小驱动链成一个可执行文件跑起来 ——
+// 于是"第二批改第一批的变量、第三批还读得到"是**真跑出来**的，不是看 IR 的形状猜的。
+// 这条路不需要任何新的宿主 ABI（jit_open/jit_add 那一格还没做）：ADR 里说的
+// "1–3 落完 AOT 那两条腿也能吃一串 chunk"就是这一节。
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'omni-session-'));
+  const texts = [
+    '(let base int (int 100))\n(print (var base))\n',
+    '(set base (bin "+" (var base) (int 1)))\n(print (var base))\n',
+    '(print (bin "*" (var base) (int 2)))\n',
+  ];
+  const cs = new CoreSession();
+  const lls = [];
+  const detail = [];
+  let k = 0;
+  for (const t of texts) {
+    k++;
+    const diags = new Diagnostics();
+    const delta = cs.add(t, diags);
+    diags.throwIfErrors();
+    const ir = emitLlvm(lowerToMir(delta), { repl: true });
+    const p = join(tmp, `chunk${k}.ll`);
+    writeFileSync(p, ir);
+    lls.push(p);
+    if (/define i32 @main\(/.test(ir)) detail.push(`    第 ${k} 批还带着包装的 main`);
+    // 第一批**定义**那一格（外部链接，后面几批要找得到），后面几批只**声明**
+    const want = k === 1 ? '@g_base = global i64 zeroinitializer' : '@g_base = external global i64';
+    if (!ir.includes(want)) detail.push(`    第 ${k} 批里没有 \`${want}\``);
+  }
+  writeFileSync(join(tmp, 'drv.c'), `#include <stdio.h>
+void omni_host_init(int argc, char **argv);
+void omni_chunk_1(void);
+void omni_chunk_2(void);
+void omni_chunk_3(void);
+int omni_host_exit_code(void);
+int main(int argc, char **argv) {
+  omni_host_init(argc, argv);
+  omni_chunk_1();
+  omni_chunk_2();
+  omni_chunk_3();
+  fflush(NULL);
+  return omni_host_exit_code();
+}
+`);
+  const exe = join(tmp, 'session');
+  const cc = spawnSync('clang', ['-w', '-I', RUNTIME_DIR, '-o', exe,
+    join(tmp, 'drv.c'), ...runtimeSources(), ...lls, '-lm'],
+  { encoding: 'utf8', timeout: 180000, maxBuffer: 8 << 20 });
+  if (cc.status !== 0) {
+    detail.push(`    链不起来：${(cc.stderr ?? '').trim().split('\n').slice(0, 4).join('\n      ')}`);
+  } else {
+    const r = spawnSync(exe, [], { encoding: 'utf8', timeout: 20000, maxBuffer: 1 << 20 });
+    if (r.status !== 0) detail.push(`    跑挂了 exit=${r.status}：${(r.stderr ?? '').trim().split('\n')[0]}`);
+    else if (r.stdout !== '100\n101\n202\n') {
+      detail.push(`    输出不对：${JSON.stringify(r.stdout)}（要 "100\\n101\\n202\\n"）`);
+    }
+  }
+  if (detail.length > 0) bad('session-aot', detail.join('\n'));
+  else ok('session-aot [三批产物链成一个程序：第二批改第一批的变量，第三批还读得到]');
   rmSync(tmp, { recursive: true, force: true });
 }
 
