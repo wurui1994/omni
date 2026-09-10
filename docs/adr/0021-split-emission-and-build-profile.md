@@ -747,3 +747,11 @@ clang 报的是 `redeclaration with different linkage`。哈希撞了当场骂�
 `omni_main`（模块初始化那一大坨）每份产物 155 KB，那是"每份产物都要自己初始化"的代价，
 真要收得先有 P1 那种按语句的来源标注。
 
+### 顺带抓到的一个布局坑：`std` 那个包按写死的相对路径找
+
+`print(<dynamic>)` 要 `std/json.omni`。`LIB_DIR` 从前是 `installDir()/../../lib` ——
+源码腿上对（`src/core/host` -> `src/lib`），编出来的腿上是 `dist/../../lib`，也就是
+仓库的**上一级**。所以 `./dist/omni repl` 里 `x + 2` 报 "no such module: 'std/json.omni'"，
+而同一句话在 node 腿上印 3。改成 `dataDir('lib', 'json.omni')`（与语法表同一条规矩），
+并把 `lib` 收进 `CORE_DATA` —— 它属于核心，不属于哪一格插件。
+
