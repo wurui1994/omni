@@ -63,6 +63,19 @@ import { utf8Bytes } from '../host/utf8.js';
 
 const TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
 
+/* 外部 C 符号的类型词汇（`(cabi …)` / `(ccall …)`，ADR-0022 的 J4b）-> 方言里的核心类型。
+ *
+ * 键是**那一端的 C** 是怎么声明的（沿用 hir/c_abi.js 的那套名字），值是这一端的值是什么。
+ * `i32`/`i64`/`ptr` 都落在 `int` 上：这个方言没有 i32、也没有指针类型 —— 地址就是一个整数
+ * （native 那几条腿上它是真地址，见 ADR-0022 的 J4b 那一节）。差别只体现在 C 那侧的原型
+ * 文本与调用点的强制转换上，那两处都由 `mod.cabiSig` 说。
+ *
+ * `cstr` 不在表里：它要 UTF-8 的装卸，而那是 dynamic 域那条路的事（`omni_cabi_cstr`）——
+ * 这一格上的实参已经是机器值了，没有地方放那次转换。 */
+const CABI_CORE = { i32: INT, i64: INT, ptr: INT, f64: REAL, bool: BOOL, void: VOID };
+const CABI_NAMES = 'i32 / i64 / f64 / bool / ptr / void';
+const CABI_ARG_NAMES = 'i32 / i64 / f64 / bool / ptr';
+
 /* 线性内存的访问描述符（ADR-0017 第二刀）。名字与 mir/ir.js 的 MLOAD_KINDS / MSTORE_KINDS
  * 逐字相同 —— 这一层不 import 那两张表（方言不依赖 MIR），但两处的名字是同一套约定，
  * 而 from_oir 会把这里的名字翻成那里的号。值是"读出来/写进去的是 int 还是 real"。 */
@@ -162,6 +175,16 @@ class CoreLowerer {
     // 函数体（发到 funcs 的末尾，跟 hir/check.js 一样）；fnUsed 收用到的签名 ——
     // C 后端要为每个签名发一个类型化的调用助手，少一个就编不过。
     this.closures = new Map();
+    /**
+     * 外部 C 符号（`(cabi 名字 返回类型 (形参类型…))`，ADR-0022 的 J4b）：名字 -> 签名。
+     *
+     * 与 `hir/c_abi.js` 的 `C_ABI` 是两回事：那张表是**构建期**的常量、键是 JS 的导入名，
+     * 前端造不出新条目；这一格是**源码里声明的**那些 —— jancy 的 `opaque class` 宿主方法
+     * （opaque.rst:15-29）就落在这儿。类型词汇沿用 C_ABI 那七个（`hir/c_abi.js` 的 C_TYPE），
+     * 但这一层只收其中五个，见 `cabiDecl`。
+     */
+    this.cabis = new Map();
+
     this.lifted = [];
     this.fnUsed = new Map();
     // 正在降 (cfn …) 的那一份的捕获表（名字 -> 类型）。`(cap c)` 只在这里面查 ——
@@ -497,6 +520,8 @@ class CoreLowerer {
     for (const f of forms) {
       const h = head(f);
       if (h === 'cfn') { this.cfnSig(f); continue; }
+      if (h === 'cabi') { this.cabiDecl(f); continue; }
+
       if (h !== 'fn' && h !== 'kernel') continue;
       const nm = isAtom(f.items[1]) ? f.items[1].value : null;
       if (nm === null) { this.err(f, `(${h} NAME ...) 缺名字`); continue; }
@@ -552,6 +577,39 @@ class CoreLowerer {
       id, mangled: `omni_clo_${nm}`, make: `omni_mk_${nm}`,
       captures: caps, params: ps, ret: ret, type: t, node: f,
     });
+    return null;
+  }
+
+  /**
+   * `(cabi 名字 返回类型 (形参类型…))` —— 声明一个**外部 C 符号**（ADR-0022 的 J4b）。
+   *
+   * 类型词汇是 C_ABI 那一套的名字（`i32`/`i64`/`f64`/`bool`/`ptr`/`void`），**不是**方言的
+   * 类型 —— 写的是「那一端的 C 是怎么声明的」，而不是「这一端的值是什么」。两者的对应在
+   * `CABI_CORE` 里：`i32`/`i64`/`ptr` 都落在方言的 `int` 上（这个方言没有 i32，也没有
+   * 指针类型 —— 地址就是一个整数），差别只体现在 C 那侧的原型文本与强制转换上。
+   *
+   * `cstr` 这一层**不收**：它要 UTF-8 的装卸，而那是 dynamic 域那条路的事（`omni_cabi_cstr`）。
+   * 这一格上的实参已经是机器值了，没有地方放那次转换。
+   */
+  cabiDecl(f) {
+    const nm = isAtom(f.items[1]) ? f.items[1].value : null;
+    if (nm === null) return this.err(f, '(cabi 名字 返回类型 (形参类型...)) 缺名字');
+    if (this.cabis.has(nm)) return this.err(f, `外部 C 符号 '${nm}' 重复声明`);
+    const rt = isAtom(f.items[2]) ? f.items[2].value : null;
+    if (rt === null || CABI_CORE[rt] === undefined) {
+      return this.err(f, `(cabi ${nm} …) 的返回类型只能是 ${CABI_NAMES}`);
+    }
+    if (!isList(f.items[3])) return this.err(f, `(cabi ${nm} ${rt} (形参类型...)) 缺形参表`);
+    const params = [];
+    for (const p of f.items[3].items) {
+      const t = isAtom(p) ? p.value : null;
+      if (t === null || CABI_CORE[t] === undefined || t === 'void') {
+        this.err(p, `外部 C 符号的形参类型只能是 ${CABI_ARG_NAMES}`);
+        return null;
+      }
+      params.push(t);
+    }
+    this.cabis.set(nm, { params, ret: rt, node: f });
     return null;
   }
 
@@ -810,7 +868,8 @@ class CoreLowerer {
       if (h === 'struct' || h === 'class') continue;   // 第一遍已经收过了
       if (h === 'global') continue;                    // 第二遍已经收过了
       if (h === 'memory' || h === 'data') continue;    // 第二遍半已经收过了
-      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (memory ...) / (data ...) / (fn ...) / (cfn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
+      if (h === 'cabi') continue;                      // 第三遍已经收过了（cabiDecl）
+      this.err(f, `(module ...) 里只能是 (struct ...) / (class ...) / (global ...) / (memory ...) / (data ...) / (cabi ...) / (fn ...) / (cfn ...) / (kernel ...) / (main ...)，见到 '${h}'`);
     }
     // REPL 的一批里没有 `(main …)` 是正常的（只写了个函数定义）；整程序时必须有入口。
     if (!sawMain && entryName === 'omni_main') this.err(null, '缺入口：加一个 (main ...)');
@@ -860,7 +919,16 @@ class CoreLowerer {
     for (const t of this.fnUsed.values()) if (fi++ >= base.fnUsed) fnTys.push(t);
     // 线性内存：只有声明它的那一批产物负责把它建起来（见构造器里的 memEmitted）。
     let memOut = null;
+    /* `(cabi …)` 声明过的那些摊成两个同下标的数组（C 后端要的形状）。顺序是声明序，
+       所以同一份输入两次降级出来的文本一样。 */
+    const cabiNames = [];
+    const cabiSigs = [];
+    for (const [nm, d] of this.cabis) {
+      cabiNames.push(nm);
+      cabiSigs.push({ params: d.params, ret: d.ret });
+    }
     if (this.mem !== null && !this.memEmitted) {
+
       memOut = this.mem;
       this.memEmitted = true;
     }
@@ -869,6 +937,10 @@ class CoreLowerer {
       closures: clos, fnTypes: fnTys,
       funcs: funcs.concat(lifted),
       globals: globals,
+      /* 外部 C 符号（`(cabi …)`，ADR-0022 的 J4b）：名字与签名同下标。C 后端靠这两格
+         发 extern 原型 —— 少了它生成的 `.c` 里就是一次没有声明的调用（C99 里是错）。 */
+      cabi: cabiNames,
+      cabiSig: cabiSigs,
       imports: this.sigImports,
       entry: entryName,
       // 线性内存只在**声明它的那一批**里发出去（见构造器里的 memEmitted）：
@@ -1906,6 +1978,45 @@ class CoreLowerer {
       }
       if (r.global) return { kind: 'GlobalRef', name: nm, type: r.type };
       return { kind: 'VarRef', name: nm, type: r.type };
+    }
+    /**
+     * `(ccall 名字 实参…)` —— 调一个 `(cabi …)` 声明过的**外部 C 符号**（ADR-0022 的 J4b）。
+     *
+     * 与 dynamic 域那条 C 调用（`hir/c_abi.js` + `backend-c` 的 `case 'CCall'`）是**两回事**：
+     * 那条要把每个实参 `omni_cabi_*` 装进去、返回值再装回来，因为那一端的值是 dynamic；
+     * 这一条上的实参**已经是机器值**了（这个方言是有类型的），所以节点上点一位 `raw` ——
+     * 少了它，backend-c 会把 marshaler 套在已经是机器值的东西上。
+     */
+    if (h === 'ccall') {
+      const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+      if (nm === null) return this.err(n, '(ccall 名字 实参...)');
+      const d = this.cabis.get(nm);
+      if (d === undefined) {
+        return this.err(n, `未声明的外部 C 符号 '${nm}' —— 先写一句 `
+          + `(cabi ${nm} 返回类型 (形参类型...))`);
+      }
+      const args = [];
+      for (const a of n.items.slice(2)) {
+        const v = this.expr(a);
+        if (v === null) return null;
+        args.push(v);
+      }
+      if (args.length !== d.params.length) {
+        return this.err(n, `外部 C 符号 '${nm}' 要 ${d.params.length} 个实参，给了 ${args.length} 个`);
+      }
+      let ci = 0;
+      while (ci < args.length) {
+        const want = CABI_CORE[d.params[ci]];
+        if (!sameCoreType(args[ci].type, want)) {
+          return this.err(n, `'${nm}' 的第 ${ci + 1} 个形参声明成 ${d.params[ci]}`
+            + `（这一端是 ${coreTypeText(want)}），给的是 ${coreTypeText(args[ci].type)}`);
+        }
+        ci++;
+      }
+      return {
+        kind: 'CCall', entry: nm, args, raw: true,
+        sig: { params: d.params, ret: d.ret }, type: CABI_CORE[d.ret],
+      };
     }
     if (h === 'call') {
       const nm = isAtom(n.items[1]) ? n.items[1].value : null;

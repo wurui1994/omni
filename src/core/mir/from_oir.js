@@ -490,7 +490,12 @@ class ToMir {
         return f.emit(OP.CALLFN, this.ty(e.type), this.expr(c), this.args(e.args), 0);
       }
       case 'CCall':
-        return f.emit(OP.CCALL, this.ty(e.type), this.mod.cabiNo(e.entry), this.args(e.args), 0);
+        /* `e.sig` 只有**源码里声明的**那些带（`(cabi …)`，ADR-0022 的 J4b）：把它带进 MIR，
+           C 那条腿靠它发 extern 原型。构建期封闭表里的那些没有这一格 —— 那边的签名
+           `hir/c_abi.js` 里就有。 */
+        return f.emit(OP.CCALL, this.ty(e.type), this.mod.cabiNo(e.entry, e.sig),
+          this.args(e.args), 0);
+
       case 'MakeClosure': {
         const no = this.closureNo.get(e.make);
         if (no === undefined) throw new OmniError(`mir: 没有这个闭包模板 ${e.make}`);

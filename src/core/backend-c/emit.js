@@ -1787,6 +1787,15 @@ class CEmitter {
       // 外部 C 符号（ADR-0014 决策 4）：实参逐个 marshal，返回值再 marshal 回来。
       // void 的那些包成逗号表达式，让整条仍然是个 dynamic 表达式。
       case 'CCall': {
+        /* `raw`（ADR-0022 的 J4b）：实参**已经是机器值**了（有类型的方言那一侧），
+           所以一个 marshaler 都不套 —— 只按声明的 C 类型加强制转换。套上去的话是把
+           `omni_cabi_i64(int64_t)` 当成 dynamic 装箱，类型当场对不上。
+           返回值同理：这一格的类型就是核心类型，不是 dynamic。 */
+        if (e.raw === true) {
+          const ps = e.sig.params;
+          const as = e.args.map((a, i) => `(${C_TYPE[ps[i]]})(${this.expr(a)})`);
+          return `${e.entry}(${as.join(', ')})`;
+        }
         const sig = C_ABI[e.entry];
         const args = e.args.map((a, i) => `${C_IN[sig.params[i]]}(${this.expr(a)})`);
         const call = `${sig.sym}(${args.join(', ')})`;

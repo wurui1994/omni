@@ -14,7 +14,7 @@
 //   node tests/llvm/run.js --update      # 重写 IR 快照
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +41,21 @@ function run(args) {
   const r = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
   return { out: r.stdout, err: r.stderr, code: r.status };
 }
+
+/** 缓存里那个 omni-jit 宿主（第 5 节的 JIT 那一路要它）。没编过就回 null，那一路按 skip 处理。 */
+function findJitHost() {
+  const jitRoot = join(root, '.omni-cache', 'jit');
+  const hosts = [];
+  try {
+    for (const d of readdirSync(jitRoot)) {
+      const p = join(jitRoot, d, 'omni-jit');
+      if (existsSync(p)) hosts.push(p);
+    }
+  } catch { /* 没这个目录就是没编过 */ }
+  if (hosts.length === 0) return null;
+  return hosts.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+}
+const jitHost = findJitHost();
 
 // ------------------------------------------------- 1. 三方一致（llvm / interp / c）
 
@@ -165,7 +180,63 @@ if (existsSync(sysDir)) {
   rmSync(tmp, { recursive: true, force: true });
 }
 
+// ------------------------------------------------- 5. 源码里声明的外部 C 符号（J4b）
+//
+// `(cabi 名字 返回类型 (形参类型…))` + `(ccall 名字 实参…)`：与 `hir/c_abi.js` 那张构建期的
+// 封闭表是两回事 —— 这两个形式说的是「这个模块要调这几个 C 符号」，名字与签名从**源码**来。
+// jancy 的 `opaque class` 宿主方法要的就是这条路。
+//
+// 这一节走 **JIT** 那一路（`--lib`，J5）：host.c 编成 dylib 装进来，符号是**运行期**解析的。
+// 为什么不顺手也走一遍 AOT：`.sx` 模块的 IR 还要整份 omni 运行时（`omni_print_int` 那些）
+// 才链得上，而那件事第 1 节的 `run-llvm` 已经在钉了 —— 这一节要证的是**外部符号那一格**，
+// JIT 那一路把它证完了。C 那条腿另外用一条文本判据钉住（extern 原型 + 不带 marshaler 的调用）。
+{
+  const dir = join(here, 'cabi');
+  const src = join(dir, 'probe.sx');
+  const hostC = join(dir, 'host.c');
+  const want = existsSync(join(dir, 'probe.expected')) ? readFileSync(join(dir, 'probe.expected'), 'utf8') : null;
+  if (want === null) bad('cabi-decl', '    缺 tests/llvm/cabi/probe.expected');
+  else {
+    const tmp = mkdtempSync(join(tmpdir(), 'omni-cabi-'));
+    const irPath = join(tmp, 'probe.ll');
+    const em = run(['emit-llvm', src]);
+    const detail = [];
+    if (em.code !== 0) detail.push(`    emit-llvm 没过：${em.err.trim().split('\n')[0]}`);
+    else {
+      writeFileSync(irPath, em.out);
+      const ext = process.platform === 'darwin' ? 'dylib' : 'so';
+      const libPath = join(tmp, `libhost.${ext}`);
+      const so = spawnSync('clang', ['-shared', '-fPIC', hostC, '-o', libPath], { encoding: 'utf8' });
+      if (so.status !== 0) detail.push(`    dylib 编不出来：${(so.stderr ?? '').trim().split('\n')[0]}`);
+      else if (jitHost === null) process.stdout.write('  skip cabi-decl：缓存里找不到 omni-jit 宿主\n');
+      else {
+        const r = spawnSync(jitHost, [irPath, '--lib', libPath], { encoding: 'utf8', timeout: 20000, maxBuffer: 1 << 20 });
+        if ((r.stdout ?? '') !== want) detail.push(`    jit --lib 的输出不对\n      want ${JSON.stringify(want)}\n      got  ${JSON.stringify(r.stdout)}\n      err  ${JSON.stringify((r.stderr ?? '').slice(0, 200))}`);
+      }
+      /* C 那条腿：原型要发出来（少了它生成的 `.c` 里就是一次没有声明的调用），
+         而调用点**不许**套 marshaler（`omni_cabi_*` 是 dynamic 域那条路的东西）。 */
+      const ce = run(['emit', 'c', src]);
+      if (ce.code !== 0) detail.push(`    emit c 没过：${ce.err.trim().split('\n')[0]}`);
+      else {
+        if (!ce.out.includes('extern int64_t omni_probe_add(int64_t, int64_t);')) {
+          detail.push('    emit c 里没有 omni_probe_add 的 extern 原型');
+        }
+        if (!ce.out.includes('extern void omni_probe_hi(void);')) {
+          detail.push('    emit c 里没有 omni_probe_hi 的 extern 原型');
+        }
+        if (ce.out.includes('omni_cabi_i64(') || ce.out.includes('omni_cabi_of_i64(')) {
+          detail.push('    emit c 把 marshaler 套在了已经是机器值的实参上（raw 那一位没生效）');
+        }
+      }
+    }
+    if (detail.length > 0) bad('cabi-decl', detail.join('\n'));
+    else ok('cabi-decl [(cabi …)/(ccall …)：jit --lib 调到宿主的 C 函数，C 那条腿发原型且不套 marshaler]');
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

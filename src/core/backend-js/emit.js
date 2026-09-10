@@ -648,7 +648,13 @@ class JsEmitter {
       // 仍然要把实参发出来 —— 它们可能有副作用，而且这样这份 JS 依然是可读的。
       case 'CCall': {
         const args = e.args.map((a) => this.rvalue(a, a.type)).join(', ');
-        return `$js_cabi_unavailable(${JSON.stringify(C_ABI[e.entry].sym)}${args ? `, ${args}` : ''})`;
+        /* 名字：构建期封闭表里的那些用表上的**真符号名**（`c_strlen` -> `strlen`），
+           源码里声明的那些（`(cabi …)`，ADR-0022 的 J4b）名字本身就是符号名 ——
+           从前这儿一律查表，撞上后一种就是 `C_ABI[…].sym` 读到 undefined 上，
+           一个 TypeError 代替了本该有的那句诊断。 */
+        const known = C_ABI[e.entry];
+        const sym = known === undefined ? e.entry : known.sym;
+        return `$js_cabi_unavailable(${JSON.stringify(sym)}${args ? `, ${args}` : ''})`;
       }
       default: throw new Error(`js.expr: ${e.kind}`);
     }

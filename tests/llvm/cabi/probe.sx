@@ -1,0 +1,26 @@
+;; 源码里声明的外部 C 符号（ADR-0022 的 J4b）：`(cabi …)` + `(ccall …)`。
+;;
+;; 与 `hir/c_abi.js` 的那张封闭表是两回事：那张是**构建期**的常量、键是 JS 的导入名；
+;; 这两个形式说的是「这个模块要调这几个 C 符号，它们那边是这么声明的」—— jancy 的
+;; `opaque class` 宿主方法（opaque.rst:15-29）要的就是这条路。
+;;
+;; 实参在这一格上**已经是机器值**了（这个方言是有类型的），所以一个 marshaler 都不套 ——
+;; 那与 dynamic 域那条 C 调用的区别，就是 OIR 节点上 `raw` 那一位。
+;;
+;; 四种形状各走一遍：i64 进出、f64 进出、ptr（这个方言里就是一个整数）、void 返回。
+;; 体在 host.c 里；`omni_probe_hi` 印一行，好证明它真的被调到了。
+(module
+  (cabi omni_probe_add i64 (i64 i64))
+  (cabi omni_probe_scale f64 (f64 i64))
+  (cabi omni_probe_len i64 (ptr))
+  (cabi omni_probe_hi void ())
+
+  (fn go ((a int) (b int)) int
+    (ret (ccall omni_probe_add (var a) (var b))))
+
+  (main
+    (expr (ccall omni_probe_hi))
+    (print (call go (int 20) (int 22)))
+    (print (ccall omni_probe_scale (real 1.5) (int 4)))
+    ;; ptr 那一格：这个方言里地址就是一个整数，所以传 0 —— 那一端拿它当空指针，回 -1。
+    (print (ccall omni_probe_len (int 0)))))

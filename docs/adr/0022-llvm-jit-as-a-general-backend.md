@@ -229,13 +229,40 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   **下一格是一个设计点，量清楚了再动**：OIR 的 `CCall` 现在的含义是「**dynamic 域**的 C
   调用」—— 实参逐个 `omni_cabi_*` marshal 进去、返回值 marshal 回来（`backend-c` 的
   `case 'CCall'`）。而 jancy 那边值是**有类型的机器值**，要的是「不 marshal 的 C 调用」。
-  两者必须能分开，否则 backend-c 会把 marshaler 套在已经是机器值的东西上。所以这一刀是：
-  给 OIR 的 `CCall` 加一位 `raw`（实参已是声明的那几个 C 类型，不 marshal）+ OIR 模块上一张
-  名字到签名的表，`from_oir` 把它带进 `cabiNo(entry, sig)`；MIR 的 `CCALL` 本来就是「实参是
-  机器上的值」那个含义（见 backend-llvm 那一支的注释），所以 `raw` 与它是天然对上的。
-  三条腿各自的落点：`backend-c` 发 `sym(a, b)` 加强制转换；`backend-llvm`/arm64 什么都不用改
-  （签名从调用点收）；`emit_js`/`interp` 照旧拒（那两条腿没有 C 调用约定）。
-  最后 jnc 把无体的 opaque 方法降成对 `Class_method(self, …)` 的调用。
+  两者必须能分开，否则 backend-c 会把 marshaler 套在已经是机器值的东西上。
+
+  **这一格也落了**。方言里多两个形式：
+
+  ```
+  (cabi omni_probe_add i64 (i64 i64))     ;; 声明：那一端的 C 是这么声明的
+  (ccall omni_probe_add (var a) (var b))  ;; 调用：实参已经是机器值
+  ```
+
+  类型词汇是 C_ABI 那一套的**名字**（`i32`/`i64`/`f64`/`bool`/`ptr`/`void`），不是方言的
+  类型 —— 写的是「那一端怎么声明的」，而不是「这一端的值是什么」。`i32`/`i64`/`ptr` 都落在
+  方言的 `int` 上（这个方言没有 i32、也没有指针类型：地址就是一个整数），差别只体现在 C
+  那侧的原型文本与强制转换上。`cstr` **不收**：它要 UTF-8 的装卸，而这一格上的实参已经是
+  机器值了，没有地方放那次转换。
+
+  OIR 的 `CCall` 上因此多一位 `raw`，四条腿各自的落点：
+  - `backend-llvm`/arm64：什么都不用改 —— 签名是从调用点收上来的，MIR 的 `CCALL` 本来就是
+    「实参是机器值」那个含义。
+  - `backend-c`：`raw` 的发 `sym((int64_t)(a), …)`，一个 marshaler 都不套；原型从
+    `mod.cabiSig` 发。
+  - `emit_js`/`interp`：照旧拒（那两条腿没有 C 调用约定）。顺带修掉两处**崩**而不是拒：
+    `C_ABI[e.entry].sym` 在源码声明的那些名字上读到 undefined 上，一个 TypeError 代替了
+    本该有的那句诊断。
+
+  验收面（`tests/llvm` 的第 5 节 `cabi-decl`，fixture 在 `tests/llvm/cabi/`）：四种形状各走
+  一遍（i64 进出、f64 进出、ptr、void 返回），体在一份独立的 `host.c` 里 —— 编成 dylib 之后
+  `omni-jit --lib` 装进来，符号是**运行期**解析的（J5 那条路）；C 那条腿另用一条文本判据钉住
+  （extern 原型要在、`omni_cabi_*` 不许出现）。顺带量出一个 print 的老 bug：`CCALL` 的 `a`
+  与 `aux` 都是数字、意思不同，而 `print.js` 只看 op 不看第几格，于是 aux 也被当成入口号印了
+  一遍（`CCALL void omni_probe_hi () omni_probe_add` —— 末尾那个名字是 0 号入口，而它真正的
+  意思是「这个调用点不是变参的」）。
+
+  **还剩最后一步**：jnc 把无体的 opaque 方法降成对 `Class_method(self, …)` 的 `(ccall …)`。
+  路已经通了，剩的是名字的约定（`opaque.rst` 那边是 `JNC_BEGIN_CLASS` 那一串登记的）。
 
 - **J5 FFI 第二刀（JIT → 任意库）——已落**：`--dl` 让表里没有的名字再问一次进程的动态
   符号表（`dlsym(RTLD_DEFAULT, …)`），`--lib PATH` 先 `dlopen(…, RTLD_NOW|RTLD_GLOBAL)`

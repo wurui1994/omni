@@ -11,6 +11,7 @@
 
 import {
   OP, OP_NAMES, OP_MODES, REF_NONE, refText, typeText, CVT_NAMES, isConstRef, memDescText,
+  callVaFixed, callLdRet,
 } from './ir.js';
 
 /** 常量的文本：字符串要转义（快照里得能看出空白与换行）。 */
@@ -54,7 +55,18 @@ function operands(mod, f, i) {
     if (op === OP.CVT) { out.push(CVT_NAMES[v]); continue; }
     if (op === OP.CALL) { out.push(mod.funcs[v] === undefined ? `fn?${v}` : mod.funcs[v].name); continue; }
     if (op === OP.CALLOP) { out.push(opText(mod, v)); continue; }
-    if (op === OP.CCALL) { out.push(mod.cabi[v] === undefined ? `c?${v}` : mod.cabi[v]); continue; }
+    /* CCALL 的 `a` 与 `aux` **都是数字、意思不同**（入口号 / 变参分界，见 mir/ir.js 的
+       callVaFixed）。从前这儿只看 op 不看第几格，于是 aux 也被当成入口号印了一遍 ——
+       量出来是 `CCALL void omni_probe_hi () omni_probe_add`：末尾那个名字是 0 号入口，
+       而它真正的意思是「这个调用点不是变参的」。 */
+    if (op === OP.CCALL) {
+      if (k === 0) { out.push(mod.cabi[v] === undefined ? `c?${v}` : mod.cabi[v]); continue; }
+      const nf = callVaFixed(v);
+      if (nf >= 0) out.push(`va:${nf}`);
+      if (callLdRet(v)) out.push('ldret');
+      continue;
+    }
+
     if (op === OP.CLOSURE) { out.push(mod.closures[v] === undefined ? `cl?${v}` : mod.closures[v].make); continue; }
     if (op === OP.NEW || op === OP.COPY || op === OP.ETAG || op === OP.IDXGET
         || op === OP.IDXSET || op === OP.AGGLIT || op === OP.MKENUM) {
