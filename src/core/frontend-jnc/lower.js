@@ -864,6 +864,9 @@ class JncLower {
     // 宿主那边的成员（第六十六刀）：`hostFns` 是方法的裸名 -> 类名，`hostCtors` 是
     // "construct 在宿主那边"的类名。两者都只在**按名字查不着**之后才问，见 callName。
     this.hostFns = new Map();
+    /* 那些方法的**签名**（`类名$方法名` -> `{owner, ret, params}`，jnc 类型）。调用点靠它
+       发 `(cabi Owner_method …)` 与 `(ccall Owner_method self …)`（ADR-0022 的 J4b 最后一步）。 */
+    this.hostSigs = new Map();
     this.hostCtors = new Set();
     this.methods = new Map();
     this.methodNames = new Set();
@@ -2193,11 +2196,19 @@ class JncLower {
         if (info.formals !== null) {
           if (!cls) this.nope(d, '结构体里的方法');
           else if (sp.virt !== null) this.methodProto(d, name, info, sp);
-          // `opaque class` 里的原型（第六十六刀）：**没有体外那个定义** —— 实现在宿主的
-          // C++ 里（opaque.rst:15-29 的 `io.Serial` 就是这个形状）。记下名字，等到真去调
-          // 它的时候好说清楚是"缺宿主"而不是"缺这个函数"。体外真写了定义时这一格用不上：
-          // 调用那边先按名字查，查着了就不问这里。
-          if (cls && key === 'opaque class') this.hostFns.set(info.name, name);
+          /* `opaque class` 里的原型（第六十六刀 + ADR-0022 的 J4b）：**没有体外那个定义** ——
+             实现在宿主的 C/C++ 里（opaque.rst:15-29 的 `io.Serial` 就是这个形状）。
+             名字与**签名**都记下来：调用点据此发 `(ccall Owner_method self …)`。
+             体外真写了定义时这一格用不上（调用那边先按名字查，查着了就不问这里）。 */
+          if (cls && key === 'opaque class') {
+            this.hostFns.set(info.name, name);
+            const hps = this.formalList(info.formals);
+            if (hps !== null) {
+              this.hostSigs.set(`${name}$${info.name}`, {
+                owner: name, ret: info.type, params: hps.map((p) => p.type),
+              });
+            }
+          }
           continue;
         }
         // 字段上写不了那三个（第五十七刀）：它管的是"调哪一个方法"。
@@ -6081,6 +6092,96 @@ class JncLower {
    * `real`、地址都行，`bool` 不行（C 会把它提升成 int，这一层没有那一步）。
    * 分界写在声明里（`(cabi f R (T ...))`），下游是 `CCALL` 的 aux。
    */
+  /**
+   * jnc 类型 -> C_ABI 的那几个词。落不进的回 null（调用点据此明说，不悄悄放宽）。
+   *
+   * 类引用也是 `ptr`：这一侧它是一格带界的三字指针，交给 C 的是"当前"那一格 ——
+   * 与 `(ptr T)` 同一条。`void` 只在返回位上成立。
+   */
+  cabiWordOfJnc(t, isRet) {
+    if (t === null || t === undefined) return null;
+    if (t.k === 'void') return isRet === true ? 'void' : null;
+    if (t.k === 'bool') return 'bool';
+    if (t.k === 'real') return 'f64';
+    if (t.k === 'int') return t.w <= 32 ? 'i32' : 'i64';
+    if (t.k === 'ptr' || t.k === 'tptr' || t.k === 'class' || t.k === 'string' || t.k === 'arr') {
+      return 'ptr';
+    }
+    return null;
+  }
+
+  /**
+   * `opaque class` 上那些**体在宿主里**的方法的调用点（ADR-0022 的 J4b 最后一步）。
+   *
+   * jancy 那边这一格由扩展库登记（`JNC_BEGIN_CLASS` 那一串，abi.rst:60-70），对象由 jancy
+   * 分配、方法是宿主的函数、第一个实参是对象自己。我们照同一个形状，只把"登记"换成
+   * **按名字约定**：`Owner.method` -> C 符号 `Owner_method`，第一个形参是 `ptr`（那个对象）。
+   *
+   * 为什么用 `_` 而不是 `$`：`$` 不是可移植的 C 标识符字符（clang 收，标准不收）。
+   * 命名空间里的类名本来带 `$`，一并换成 `_`。
+   *
+   * 体在哪个库里由源码另说一句（`import "libfoo.dylib"`）—— 与 `(cabi …)`/`(lib …)` 的
+   * 分工完全一致：这一格只说"有这么个符号、它是这么声明的"。
+   */
+  hostMethodCall(n, callee, owner, mn) {
+    const sig = this.hostSigs.get(`${owner}$${mn}`);
+    if (sig === undefined) {
+      return this.nope(n, `'${shown(owner)}.${mn}'（这个方法的原型没收下来）`);
+    }
+    if (head(callee) !== 'field') {
+      return this.err(n, `'${shown(owner)}.${mn}' 要一个对象来调它`);
+    }
+    const ob = callee.items[1];
+    let bv = null;
+    if (isList(ob) && LV_SHAPES.has(head(ob))) {
+      const o = this.lvalue(ob);
+      if (o === null) return null;
+      bv = { code: this.read(o), type: o.type };
+    } else {
+      bv = this.expr(ob, null);
+      if (bv === null) return null;
+    }
+    if (!isClass(bv.type)) {
+      return this.err(n, `'${tyName(bv.type)}' 不是类，上面问不出方法 '${mn}'`);
+    }
+    const sym = `${owner.replace(/\$/g, '_')}_${mn}`;
+    const rw = this.cabiWordOfJnc(sig.ret, true);
+    if (rw === null) {
+      return this.nope(n, `'${shown(owner)}.${mn}' 的返回类型 ${tyName(sig.ret)}`
+        + '（落不进 C_ABI 的那几个词）');
+    }
+    const args = this.flat(n.items[2]);
+    if (args.length !== sig.params.length) {
+      return this.err(n, `'${shown(owner)}.${mn}' 要 ${sig.params.length} 个实参，`
+        + `这里给了 ${args.length} 个`);
+    }
+    const words = ['ptr'];
+    const parts = [bv.code];
+    for (let i = 0; i < args.length; i++) {
+      const w = this.cabiWordOfJnc(sig.params[i], false);
+      if (w === null) {
+        return this.nope(n, `'${shown(owner)}.${mn}' 的第 ${i + 1} 个形参的类型 `
+          + `${tyName(sig.params[i])}（落不进 C_ABI 的那几个词）`);
+      }
+      let v = this.expr(args[i], sig.params[i]);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(sig.params[i])) v = intConv(v, sig.params[i]);
+      if (!this.assignOk(v.type, sig.params[i])) {
+        return this.err(args[i], `'${shown(owner)}.${mn}' 的第 ${i + 1} 个实参要 `
+          + `${tyName(sig.params[i])}，这里是 ${tyName(v.type)}`);
+      }
+      words.push(w);
+      parts.push(v.code);
+    }
+    /* 一个符号只发一句声明（方言那侧重复声明是错）。 */
+    if (!this.cabiNames.has(sym)) {
+      this.decls.push(`  (cabi ${sym} ${rw} (${words.join(' ')}))`);
+      this.cabiNames.add(sym);
+      this.cabiSigs.set(sym, { ret: rw, params: words, sym });
+    }
+    return { code: `(ccall ${sym} ${parts.join(' ')})`, type: sig.ret };
+  }
+
   ccallSite(n, nm, sig) {
     const args = this.flat(n.items[2]);
     const va = sig.variadic === true;
@@ -6762,15 +6863,11 @@ class JncLower {
       self = m.self;
     }
     if (nm === null && nm0 === null) return this.nope(n, '不是直接调一个名字的调用');
-    // 名字查不着，而它是某个 `opaque class` 上声明过的方法（第六十六刀）：那不是"没有这个
-    // 函数"，是**实现在宿主那边**。jancy 那边这一格由扩展库登记（JNC_BEGIN_CLASS 那一串，
-    // abi.rst:60-70），我们还没有宿主面，所以这儿只能明说。
+    /* 名字查不着，而它是某个 `opaque class` 上声明过的方法（第六十六刀 + ADR-0022 的 J4b）：
+       那不是"没有这个函数"，是**实现在宿主那边** —— 发 `(ccall Owner_method self …)`。 */
     if (nm === null) {
       const hostOwner = mn === null ? undefined : this.hostFns.get(mn);
-      if (hostOwner !== undefined) {
-        return this.nope(n, `'${shown(hostOwner)}.${mn}' —— 它是 opaque class 上的方法，`
-          + '实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面');
-      }
+      if (hostOwner !== undefined) return this.hostMethodCall(n, callee, hostOwner, mn);
     }
     /* `with "h.h"` 收进来的那些（ADR-0022 的 J4d）：调用点发 `(ccall …)` 而不是
        `(call …)` —— 实参已经是机器值，不过 marshaler。实参与返回都按**声明**检查，

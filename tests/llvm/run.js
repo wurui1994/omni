@@ -343,6 +343,58 @@ if (existsSync(sysDir)) {
   }
 }
 
+// ------------------------------------------------- 9. `opaque class` 的宿主方法（J4b 最后一步）
+//
+// jancy 的 `opaque class`：**对象由那一侧分配**，方法的体在宿主的 C/C++ 里
+// （opaque.rst:15-29 的 `io.Serial` 就是这个形状，登记走 JNC_BEGIN_CLASS 那一串）。
+// 我们照同一个形状，只把"登记"换成**按名字约定**：`Owner.method` 对着 C 符号 `Owner_method`，
+// 第一个形参是那个对象（`ptr`）。宿主看不见对象的布局 —— 那正是 opaque 的意思，所以
+// `host.c` 那边拿指针当键、状态放在自己的一张小表里。
+//
+// 这一条要证的是"同一个对象"这件事：`add(20)` 之后 `value()` 必须回 20 —— 两次调用里
+// 宿主看到的必须是同一个 self。
+{
+  const dir = join(here, 'cabi');
+  const hostC = join(dir, 'host.c');
+  const tmp = mkdtempSync(join(tmpdir(), 'omni-opaque-'));
+  const ext = process.platform === 'darwin' ? 'dylib' : 'so';
+  const libPath = join(tmp, `libhost.${ext}`);
+  const so = spawnSync('clang', ['-shared', '-fPIC', hostC, '-o', libPath], { encoding: 'utf8' });
+  if (so.status !== 0) bad('opaque-host', `    dylib 编不出来：${(so.stderr ?? '').trim().split('\n')[0]}`);
+  else {
+    const src = join(tmp, 'opaque.jnc');
+    /* 方法名不用 `get`：那是 jancy 的关键字（属性的取值器）—— 量出来的，`c.get()` 在语法上
+       根本不是一次方法调用。 */
+    writeFileSync(src, `import ${JSON.stringify(libPath)};\n\n`
+      + 'opaque class Counter {\n'
+      + '    long add(long d);\n'
+      + '    long value();\n'
+      + '}\n\n'
+      + 'int main() {\n'
+      + '    Counter* c = new Counter;\n'
+      + '    c.add(20);\n'
+      + '    c.add(22);\n'
+      + '    long v = c.value();\n'
+      + '    printf("count %d\\n", v);\n'
+      + '    return 0;\n'
+      + '}\n');
+    const r = run(['run-jit', src], 90000);
+    const detail = [];
+    if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
+    else if (r.out !== 'count 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 42\\n"）`);
+    /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
+       后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。 */
+    const sx = run(['emit', 'sx', src], 90000);
+    if (sx.code !== 0) detail.push(`    emit sx 没过：${(sx.err ?? '').trim().split('\n')[0]}`);
+    else if (!sx.out.includes('(cabi Counter_add i64 (ptr i64))')) {
+      detail.push('    emit sx 里没有 `(cabi Counter_add i64 (ptr i64))`');
+    }
+    if (detail.length > 0) bad('opaque-host', detail.join('\n'));
+    else ok('opaque-host [opaque class 的方法降成 (ccall Owner_method self …)，两次调用同一个 self]');
+  }
+  rmSync(tmp, { recursive: true, force: true });
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 
 if (fail) {

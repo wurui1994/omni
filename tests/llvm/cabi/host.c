@@ -32,3 +32,31 @@ int64_t omni_probe_sum(int64_t n, ...) {
   va_end(ap);
   return acc;
 }
+
+/* `opaque class` 那一格（ADR-0022 的 J4b 最后一步）。形状与 jancy 一样：**对象由那一侧
+   分配**，宿主只拿到指针；`Owner.method` 对着的 C 符号是 `Owner_method`，第一个形参是
+   那个对象。宿主看不见对象的布局（那正是 opaque 的意思），所以状态放在自己这边一张
+   小表里、拿指针当键 —— 一个真宿主对一个不透明句柄就是这么做的。 */
+#define OMNI_PROBE_SLOTS 16
+static void *probe_keys[OMNI_PROBE_SLOTS];
+static int64_t probe_vals[OMNI_PROBE_SLOTS];
+
+static int64_t *probe_slot(void *self) {
+  for (int i = 0; i < OMNI_PROBE_SLOTS; i++) if (probe_keys[i] == self) return &probe_vals[i];
+  for (int i = 0; i < OMNI_PROBE_SLOTS; i++) {
+    if (probe_keys[i] == NULL) { probe_keys[i] = self; probe_vals[i] = 0; return &probe_vals[i]; }
+  }
+  return NULL;
+}
+
+int64_t Counter_add(void *self, int64_t d) {
+  int64_t *p = probe_slot(self);
+  if (p == NULL) return -1;
+  *p += d;
+  return *p;
+}
+
+int64_t Counter_value(void *self) {
+  int64_t *p = probe_slot(self);
+  return p == NULL ? -1 : *p;
+}

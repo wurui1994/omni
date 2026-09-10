@@ -1,15 +1,19 @@
-// `opaque class` 上声明的方法，实现在宿主那边（ADR-0016 第六十六刀）。
-// jancy 的扩展库用 JNC_BEGIN_CLASS 那一串把名字映到 C++ 的函数地址上（abi.rst:60-70），
-// 于是 `p.lock()` 在它那边是一次**真的调用**。我们还没有宿主面，所以这一句得明说 ——
-// 而不能落回"没有这个函数"：那会让人以为是源码写错了。
+// `opaque class` 上的方法**现在能降了**（ADR-0022 的 J4b 最后一步）：`p.lock()` 是一次对
+// `Lock_lock(self, …)` 的真调用，正面判据在 `tests/llvm/run.js` 第 9 节（那儿有宿主的体）。
+//
+// 这一条留下来钉的是**边界**：签名要落进 C_ABI 那几个词。枚举落不进 —— 它在这一侧是一格
+// 有自己规范形的类型（第三十九刀），而那一端只有 i32/i64/f64/bool/ptr/void 可写。
+// 悄悄按底整数传过去是**猜**，而猜错的调用约定比报一句错难查得多。
+enum Mode { fast, slow }
+
 opaque class Lock {
 	int m_depth;
 
-	void lock();
+	void lock(Mode m);
 }
 
 int main() {
 	Lock* p = new Lock();
-	p.lock();
+	p.lock(Mode.fast);
 	return 0;
 }

@@ -210,7 +210,8 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   - **不透明指针之后 `LLVMTypeOf(f)` 就是一个 `ptr`**。对它 `LLVMGetElementType` 拿到的是
     垃圾，当场 segfault。函数的类型要走 `LLVMGlobalGetValueType`。
 
-- **J4b jancy 的 `opaque class` 宿主方法**（`tests/jnc/bad/opaque-host-*.jnc` 现在还被拒着）。
+- **J4b jancy 的 `opaque class` 宿主方法 —— 已落**（从前 `tests/jnc/bad/opaque-host-*.jnc`
+  被拒着，那句"这一层还没有宿主面"现在不成立了）。
   两个前提先确认过了：
 
   1. **地址模型对得上**。jancy 那条腿**没有线性内存** —— `emit-llvm 62-opaque.jnc` 里一条
@@ -261,8 +262,30 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   一遍（`CCALL void omni_probe_hi () omni_probe_add` —— 末尾那个名字是 0 号入口，而它真正的
   意思是「这个调用点不是变参的」）。
 
-  **还剩最后一步**：jnc 把无体的 opaque 方法降成对 `Class_method(self, …)` 的 `(ccall …)`。
-  路已经通了，剩的是名字的约定（`opaque.rst` 那边是 `JNC_BEGIN_CLASS` 那一串登记的）。
+  **最后一步也落了**：jnc 把无体的 opaque 方法降成 `(ccall Owner_method self …)`。
+
+  形状与 jancy 一样 —— **对象由这一侧分配**、方法的体在宿主里、第一个实参是那个对象；
+  只把 jancy 的"登记"（`JNC_BEGIN_CLASS` 那一串，abi.rst:60-70）换成**按名字约定**：
+  `Owner.method` 对着的 C 符号是 `Owner_method`。用 `_` 不用 `$`：后者不是可移植的 C
+  标识符字符（clang 收，标准不收），而命名空间里的类名本来带 `$`，一并换掉。
+  第一个形参的词是 `ptr`（类引用在这一侧是一格带界的三字指针，交给 C 的是"当前"那一格），
+  别的形参与返回按原型上的 jnc 类型对到 C_ABI 的词上（`cabiWordOfJnc`）；落不进那几个词的
+  就在调用点明说，不悄悄放宽。体在哪个库里由源码另说一句 `import "libfoo.dylib"` ——
+  与 `(cabi …)`/`(lib …)` 的分工完全一致。
+
+  ```
+  opaque class Counter { long add(long d); long value(); }
+  Counter* c = new Counter;
+  c.add(20);                 // -> (ccall Counter_add (var c) (int 20))
+  ```
+
+  判据（`tests/llvm/run.js` 第 9 节）：`host.c` 那边**看不见对象的布局**（那正是 opaque 的
+  意思），所以它拿指针当键、状态放自己一张小表里 —— 于是 `add(20)`、`add(22)`、`value()`
+  回 42 这件事，证的正是"两次调用里宿主看到的是同一个 self"。生成的 `.sx` 里那句
+  `(cabi Counter_add i64 (ptr i64))` 也逐字比。
+
+  **量出来的一条语法事实**：方法名不能叫 `get` —— 那是 jancy 的关键字（属性的取值器），
+  `c.get()` 在语法上根本不是一次方法调用，报出来的是"没有这个函数"。判据里用 `value()`。
 
 - **J4c 动态库导入：`import "libfoo.dylib"`，不做 `.jncx`**。jancy 的扩展库是 `.jncx` ——
   一个 zip，里头封着 `.jnc` 声明**加**一份编译好的共享库（`ImportMgr::addImport` 里
