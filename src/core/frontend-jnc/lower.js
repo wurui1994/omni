@@ -1508,6 +1508,22 @@ class JncLower {
         this.decls.push(`  (fn ${g} () ${slotText(a.type)}\n    (ret ${rd}))`);
         this.fns.set(g, { params: [], ret: a.type });
         pi.get = true;
+        /* bindable data（第七十三刀后一半）：存值器也是编译器生成的 ——
+         * `if (m_value != x) { m_value = x; m_onChanged(); }`
+         * （`Property::compileAutoSetter`，jnc_ct_Property.cpp:788-822 那三句 getPropertyAutoGet
+         * / BinOpKind_Ne / fireOnChanged）。那个 `!=` 就是"同值不通知"的出处，也是
+         * samples/jnc/34_BindableProperties.jnc:128-129 那两句的判据。 */
+        if (pi.bdata === true && !pi.set) {
+          const s = `${a.full}$set`;
+          const st = this.gLifted.has(a.name)
+            ? `(pstore (var ${a.name}) (var x))` : `(set ${a.name} (var x))`;
+          this.decls.push(`  (fn ${s} ((x ${slotText(a.type)})) void\n`
+            + `    (if (bin "!=" ${rd} (var x)) (do\n`
+            + `      ${st}\n`
+            + `      (expr (call ${MC_FIRE} (var ${pi.onch}))))))`);
+          this.fns.set(s, { params: [a.type], ret: J_VOID });
+          pi.set = true;
+        }
         continue;
       }
       // 成员的那一格已经跟着整条链那格结构体发出去了（propName 那一遍在 classLayout 之前往
@@ -1620,7 +1636,9 @@ class JncLower {
   propMod(n, dcls = null) {
     if (isList(n) && head(n) === 'specs') {
       for (const m of [...this.flat(n.items[2]), ...this.flat(n.items[3])]) {
-        if (isAtom(m) && m.value === 'property') return true;
+        // 光写 `bindable` 也是一格属性（bindable data，第七十三刀）—— 那种写法整格由编译器
+        // 生成，所以这一问要连它一起认，否则 globalDecl 会把它当一格普通的模块级变量。
+        if (isAtom(m) && (m.value === 'property' || m.value === 'bindable')) return true;
       }
     }
     // 星号后面那一边（第七十二刀）：`Icon* property m_icon;` 的 property 在声明符里 ——
@@ -1699,6 +1717,7 @@ class JncLower {
       if (dsp.bnd && onch === null) continue;
       this.props.set(full, {
         type: info.type, cls, cst: dsp.cst, idx, get: false, set: false, store, onch,
+        bdata: dsp.bdata === true,
       });
     }
     return null;
@@ -2852,13 +2871,13 @@ class JncLower {
     /* 光写 `bindable` 不写 `property` 是 **bindable data**（`int bindable g_data;`，
      * samples/jnc/34_BindableProperties.jnc:87-90）：整格属性都由编译器生成 —— 取值器读那格
      * 存储、存值器是 `if (m_value != x) { m_value = x; m_onChanged(); }`
-     * （`Property::compileAutoSetter`，jnc_ct_Property.cpp:788-822）。那一格是下一刀。 */
-    if (bnd && !prop) {
-      this.nope(ts, 'bindable data（`int bindable g_data;` —— 取值器与存值器整格都由'
-        + '编译器生成，prop_bindable.rst 那半）');
-      return null;
-    }
-    return { type: base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd };
+     * （`Property::compileAutoSetter`，jnc_ct_Property.cpp:788-822）。所以这儿把它**补成
+     * 一格 autoget 的属性**：那两个生成物正好是 autoget 的存储加上这一刀的存值器。
+     * 写在别处（局部量、形参、字段）的 `bindable` 由那几处各自拦 —— 属性在函数体里本来就
+     * 不收（bad/prop-ptr 那条）。 */
+    let bdata = false;
+    if (bnd && !prop) { prop = true; agt = true; bdata = true; }
+    return { type: base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata };
   }
 
   /**
@@ -3552,7 +3571,7 @@ class JncLower {
     const sp = special === null || special === 'get' ? this.specs(n.items[1], true)
       : {
         type: J_VOID, thin: false, stat: false, fnptr: false,
-        virt: null, errc: false, prop: false, cst: false, agt: false, bnd: false,
+        virt: null, errc: false, prop: false, cst: false, agt: false, bnd: false, bdata: false,
       };
     if (sp === null) return null;
     const info = this.declarator(n.items[2], sp);

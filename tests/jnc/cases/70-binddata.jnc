@@ -1,0 +1,35 @@
+// bindable data（第七十三刀的后一半）：光写 `bindable` 不写 `property`。出处：
+//   - samples/jnc/34_BindableProperties.jnc:87-90 —— "bindable data is a wholly
+//     compiler-generated property with trivial getter and setter - the sole purpose of
+//     bindable data is to track data changes"；
+//   - 同一份 :128-129 —— 同一个值写第二遍"is not going to get fired"；
+//   - `Property::compileAutoSetter`（jnc_ct_Property.cpp:788-822）—— 生成的存值器是
+//     `if (m_value != x) { m_value = x; m_onChanged(); }`，那个 `!=` 就是上面那句话的实现。
+// 与 cases/69-propbind.jnc 的差别：那一份的存值器是**手写**的（通知也是手写的），这一份两个
+// 都是生成的 —— 所以这里连 `m_value` 都不出现。
+
+int bindable g_data;
+
+void onFirst() {
+	printf("first: %d\n", g_data);
+}
+
+void onSecond() {
+	printf("second: %d\n", g_data);
+}
+
+int main() {
+	printf("start %d\n", g_data);
+
+	bindingof(g_data) += onFirst;
+	g_data = 1000;
+
+	// 同一个值写第二遍：生成的存值器自己拦住
+	g_data = 1000;
+
+	bindingof(g_data) += onSecond;
+	g_data = 7;
+
+	printf("done %d\n", g_data);
+	return 0;
+}

@@ -4436,6 +4436,37 @@ jnc_ct_Property.cpp:788-822 —— 那个 `!=` 就是"同值不通知"的出处�
 `event` 2->5、`reactor` 6->7、bindable data 0->2、`destruct` +2、`variant_t` 1->2。也就是说
 这个词不再是墙，墙在它后面：**带实参的事件**、`reactor`、以及 `.jncx` 那种编译好的扩展库。
 
+### 后一半：bindable data（整格由编译器生成）
+
+`int bindable g_data;` —— 光写 `bindable` 不写 `property`，在 jancy 里是一格**整格生成**的
+属性："a wholly compiler-generated property with trivial getter and setter - the sole purpose
+of bindable data is to track data changes"（samples/jnc/34_BindableProperties.jnc:87-90）。
+
+落法只有一句话：**把它补成一格 `autoget` 的属性**。那样取值器与那格 `$m_value` 存储都是
+现成的（第七十一刀），这一刀只多发一格存值器：
+
+```
+(fn g_data$set ((x int)) void
+  (if (bin "!=" (var g_data$m_value) (var x)) (do
+    (set g_data$m_value (var x))
+    (expr (call jnc$mc_fire (var g_data$m_onChanged))))))
+```
+
+那个 `!=` 不是我们的设计，是抄的：`Property::compileAutoSetter`
+（jnc_ct_Property.cpp:788-822）里 `BinOpKind_Ne` 那一句就是"同值不通知"
+（同一份 sample:128-129）的实现。顺带一格判据：`propMod` 那一问也要认光写 `bindable` 的
+那种，否则 `globalDecl` 会把它当一格普通的模块级变量 —— 那就悄悄丢掉了通知。
+
+**量出来的**：`cases/70-binddata.jnc`（`start 0` / 订阅 / 同值不通知 / 第二个订阅），六条腿
+逐字节相同；`tests/jnc` **150/0**（`bad/bind-data` 那条边界随之退役 —— 它变成了能跑的用例）。
+尺子上 `bindable data` **2 份 -> 0**，两份各换了更靠里的一格（`reactor` +1、类的成员上的
+bindable +1）。
+
+**属性这一族剩下的账**：完整声明式 **78 份**（那对花括号是一层命名空间，还要存值器的重载
+决议）、`event` 82 份（**带实参的**多播 —— 这一刀只有 `void ()` 那一种）、类的成员上的
+bindable（那格事件要能当类的字段，而方言的结构体字段还放不下函数值的数组）。
+
+
 ## 后果与代价
 
 
