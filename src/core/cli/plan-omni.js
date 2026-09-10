@@ -11,7 +11,7 @@
  */
 
 import { newPlan, addStage } from './stages.js';
-import { lang } from '../plugin.js';
+import { lang, unloadableFor } from '../plugin.js';
 
 /** 从 `rest` 里捞一个带值开关（与实现那一侧同一个捞法）。 */
 function planOpt(rest, name, dflt) {
@@ -55,6 +55,19 @@ function frontOf(path, rest) {
   /* 插件带来的语言（ADR-0021 的 S4）：注册表认得它，而上面那几支不认识 ——
      从前这里会印成 "omni（mixed）"，那是**在说谎**：真跑起来走的是插件那门语言。
      所以先问注册表。步骤只说"前端"两个字：插件内部分几步，这一层不该猜。 */
+  /* 目录里躺着一格**这条腿装不动**的同名插件（plugin.js 的 UNLOADABLE）：计划这一层
+     不该为此抛 —— 它只是在说"这份文件会怎么编"。从前这儿直接调 `lang()`（那一格在装不动
+     时是要响的），于是 `--verbose` 一开就连 `omni glr-table x.grammar --verbose` 都成了
+     exit 1，而不带 `--verbose` 的同一条命令好好的：tests/glr 的 cache/* 六条就是这么红的
+     （它们要的正是 `--verbose` 那行 cache hit）。 */
+  const un = unloadableFor(path);
+  if (un !== null) {
+    return {
+      lang: `${un}（插件，这条腿装不动）`,
+      ast: false,
+      steps: [{ verb: '前端', in: 'text', out: 'OIR', note: '插件（omni-lang-*）—— 这条腿没有 dlopen' }],
+    };
+  }
   const reg = lang(path);
   if (reg !== null) {
     return {
