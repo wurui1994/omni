@@ -72,6 +72,9 @@ static omni_str omni_js_prop(omni_dyn k) { return omni_s16_to_utf8(omni_js_as_s1
 /* 真对象那一族（ADR-0020 P1-c 的第十步）：定义在这一段的后半（那儿 obj_get / obj_set 都
    已经摊开了），这儿先声明 —— 同一个翻译单元里静态函数先声明后定义是合法的。 */ \
 static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv); \
+/* 取属性，键是**已经编好的 UTF-8 串**（生成的代码里那些字面量键就是这个形态）。
+   见它自己那儿的注释：一次 o.foo 从前要三次分配，这一格只要一次。 */ \
+static omni_dyn omni_js_getp_k(omni_dyn o, omni_str key, omni_dyn recv); \
 static omni_dyn omni_js_setp(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv); \
 static omni_dyn omni_js_obj_own_keys_o_(omni_dyn o, int sel); \
 static bool omni_js_obj_has_o_(omni_dyn o, omni_dyn k, bool own); \
@@ -424,7 +427,8 @@ static omni_dyn omni_js_obj_getk(omni_dyn o, omni_str key) { \
   } \
   /* 真对象走槽表 + 原型链（ADR-0020 P1-c）：`o.x` 与 `o["x"]` 是同一条路 */ \
   if (o.tag == OMNI_DYN_OBJ) { \
-    return omni_js_getp(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), omni_dyn_undef()); \
+    /* 键本来就是 UTF-8（对的形态）：别再 UTF-8 -> UTF-16 -> UTF-8 转一圈，见 getp_k */ \
+    return omni_js_getp_k(o, key, omni_dyn_undef()); \
   } \
   if (o.tag == OMNI_DYN_NULL || o.tag == OMNI_DYN_UNDEF) { \
     omni_js_nullish_err_("cannot read", key, true, o); \
@@ -740,6 +744,35 @@ static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv) { \
        时就撞上了）。 */ \
     if (k.tag == OMNI_DYN_SYM) return omni_dyn_undef(); \
     return omni_js_cont_proto_(tail) ? omni_js_obj_get(tail, k) : omni_dyn_undef(); \
+  } \
+  if (!sl->items[1].u.b) return sl->items[0]; \
+  if (sl->items[2].tag != OMNI_DYN_FN) return omni_dyn_undef(); \
+  return omni_js_call_this(sl->items[2], self, omni_js_arr_wrap(LT##_new())); \
+} \
+/* 取属性，键是**已经编好的 UTF-8 串**。
+ *
+ * 从前 `obj_getk` 的真对象那一支要 `getp(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), …)`，
+ * 而 `getp` 又 `pkey_(k)` 把它转回 UTF-8、再 `key_tag_` 开一块加那个字节的前缀 ——
+ * 一次 `o.foo` 走 **UTF-8 -> UTF-16 -> UTF-8 三次分配**，而那个键在生成的 C 里本来就是
+ * 编译期常量。按调用栈归属量出来（`OMNI_MEM_DEBUG=4`），这条链是实参 list 那一刀之后的
+ * **第一名**：`omni_s16_of_utf8 / omni_s16_to_utf8 / omni_js_key_tag_ < pkey_ < getp
+ * < obj_getk < l_JsParser_peek`，前八名全是它。
+ *
+ * 这一格只补前缀（一次分配）。dyn 形态只有**代理陷阱**那一支才真要 —— 那时候才现造，
+ * 而代理在热路径上根本不出现。符号键不走这儿（它们有自己的 dyn 入口）。
+ */ \
+static omni_dyn omni_js_getp_k(omni_dyn o, omni_str key, omni_dyn recv) { \
+  omni_dyn self = recv.tag == OMNI_DYN_UNDEF ? o : recv; \
+  /* 代理：陷阱要的是**键本身**，所以这一支现造那格 dyn 再走通用的 getp（口径一字不差） */ \
+  if (omni_js_is_px_(o)) { \
+    return omni_js_getp(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), self); \
+  } \
+  LT sl = omni_js_find_slot_(o, omni_js_key_tag_('s', key), NULL); \
+  if (sl == NULL) { \
+    /* 链的尾巴可能是一格 dict（`Object.create({…})`）：接着按 UTF-8 键往那儿问，
+       又省掉一次"dyn -> prop_k -> UTF-8"的往返。 */ \
+    omni_dyn tail = omni_js_proto_tail_(o); \
+    return omni_js_cont_proto_(tail) ? omni_js_obj_getk(tail, key) : omni_dyn_undef(); \
   } \
   if (!sl->items[1].u.b) return sl->items[0]; \
   if (sl->items[2].tag != OMNI_DYN_FN) return omni_dyn_undef(); \
