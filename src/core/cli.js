@@ -2541,6 +2541,13 @@ function main(argv) {
     asyRunSetup(path, rest);
   }
 
+  /* 出 JS 产物就得全内建 —— 判据是**改写后的 cmd**，不是用户敲的那个动词。
+     上面那一格按 `node.key` 判，于是 `emit js x.js`（新写法，cmd 在 FORMS 那儿才变成
+     `emit-js`）漏了：量出来它出的 omni.mjs 只有 6.46 MB（fat 是 13.5 MB），一跑就报
+     "这份 omni 里一门语言都没装" —— 而 `emit-js`（老写法）好的，同一件事两种拼法两种结果。
+     `build --backend js` 同理（那条也在 --backend 那张表里改写成 build-js）。 */
+  if (cmd === 'emit-js' || cmd === 'build-js') LANGS_FAT = true;
+
   switch (cmd) {
     case 'run': {
       /* `.frag`/`.glsl` 走另一条腿（ADR-0019 决策九）：**渲一帧、写一张 PNG**。

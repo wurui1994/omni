@@ -141,6 +141,8 @@ class CEmitter {
     this.poolExt = new Map();
     /** 内容哈希 -> 串（撞了要认出来）。 */
     this.poolByHash = new Map();
+    /** 串 -> 内容哈希（poolHash 的备忘录，见那儿的量）。 */
+    this.hashOf = new Map();
     if (this.bind !== null) {
       for (const row of this.bind) {
         const bar = row.indexOf('|@');
@@ -205,6 +207,10 @@ class CEmitter {
 
   /** 字面量的内容哈希（跨产物共用池子的键，见构造器里那段）。 */
   poolHash(s) {
+    /* 记住算过的：`s16Lit` / `strLit` 是**按每次用**叫的（一格插件里 6.7 万次），而一份池子
+       只有两三千条不同的串。量出来没有这一格时 hash16 + hex8 是 0.5s，占那一趟 14.4s 的 3.5%。 */
+    const memo = this.hashOf.get(s);
+    if (memo !== undefined) return memo;
     const h = hash16(s);
     const was = this.poolByHash.get(h);
     if (was === undefined) this.poolByHash.set(h, s);
@@ -212,6 +218,7 @@ class CEmitter {
       throw new OmniError(`internal: 字面量池的内容哈希撞了（${h}）—— 两个不同的串`
         + '算出同一个键，绑过去就等于把另一个串当成它。换 host/hash.js 的哈希再来');
     }
+    this.hashOf.set(s, h);
     return h;
   }
 
@@ -562,8 +569,12 @@ class CEmitter {
       /* 这两个名字在这一句里被叫到，原型那一段得留着（见 protoLines）。 */
       this.useFn(this.mod.entry);
       this.useFn(reg.mangled);
+      /* 计时表也要在插件这一支登记（`OMNI_PROFILE=1`）：核心那侧是 main 里 atexit，插件没有
+         main，从前于是**一格插件的函数都进不了榜** —— 而语言前端与后端全在插件里，量出来
+         核心榜上 `u_compileFront` 自用 8.3s 那一坨其实大半是插件的活，看不见。
+         atexit 挂在装载时：dylib 一直活到进程退出，回调有效。 */
       this.line(`omni_dyn omni_plugin_init(omni_dyn api) { static bool once_ = false;`
-        + ` if (!once_) { once_ = true; ${this.mod.entry}(); }`
+        + ` if (!once_) { once_ = true;${profReg} ${this.mod.entry}(); }`
         + ` return ${reg.mangled}(&(struct omni_list_dynamic_s){ (omni_dyn[]){ api }, 1, 1 }); }`);
     } else {
       this.useFn(this.mod.entry);
@@ -1312,8 +1323,10 @@ class CEmitter {
     this.line('    }');
     this.line('  }');
     this.line('}');
-    this.line('static void omni_prof_dump(void) {');
-    this.line('  int ord[OMNI_PROF_N];');
+    /* 每份产物各有一张自己的表（都是 static），所以印的时候要说清是**谁**的 ——
+       核心 + 12 格插件一起跑时，不带标签的 13 张表混在 stderr 上分不出谁是谁。 */
+    this.line(`static const char *omni_prof_tag = ${JSON.stringify(this.plugin === null ? 'core' : this.plugin)};`);
+    this.line('static void omni_prof_dump(void) {');    this.line('  int ord[OMNI_PROF_N];');
     this.line('  int m = 0;');
     this.line('  for (int i = 0; i < OMNI_PROF_N; i++) if (omni_prof_calls[i]) ord[m++] = i;');
     this.line('  for (int a = 1; a < m; a++) {');
@@ -1328,13 +1341,13 @@ class CEmitter {
     this.line('  const char *omni_pf = getenv("OMNI_PROF_GREP");');
     this.line('  const char *omni_pt = getenv("OMNI_PROF_TOP");');
     this.line('  int omni_ptop = omni_pt && omni_pt[0] ? atoi(omni_pt) : 40;');
-    this.line('  fprintf(stderr, "prof: %d 个函数被调用过（自用 ms / 含子 ms / 次数，按自用降序）\\n", m);');
-    this.line('  if (omni_prof_ovf) fprintf(stderr, "prof: 影子栈超过 %d 层，自用时间不可信（深层子树被记到父亲头上）\\n", OMNI_PROF_STK);');
+    this.line('  fprintf(stderr, "prof[%s]: %d 个函数被调用过（自用 ms / 含子 ms / 次数，按自用降序）\\n", omni_prof_tag, m);');
+    this.line('  if (omni_prof_ovf) fprintf(stderr, "prof[%s]: 影子栈超过 %d 层，自用时间不可信（深层子树被记到父亲头上）\\n", omni_prof_tag, OMNI_PROF_STK);');
     this.line('  for (int a = 0; a < m; a++) {');
     this.line('    int i = ord[a];');
     this.line('    if (omni_pf && omni_pf[0]) { if (!strstr(omni_prof_name[i], omni_pf)) continue; }');
     this.line('    else if (a >= omni_ptop) break;');
-    this.line('    fprintf(stderr, "prof: %10.3f %10.3f %12llu  %s\\n",');
+    this.line('    fprintf(stderr, "prof[%s]: %10.3f %10.3f %12llu  %s\\n", omni_prof_tag,');
     this.line('            omni_prof_self[i] / 1000000.0, omni_prof_ns[i] / 1000000.0,');
     this.line('            omni_prof_calls[i], omni_prof_name[i]);');
     this.line('  }');
