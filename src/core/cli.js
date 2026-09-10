@@ -55,8 +55,6 @@ import {
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
 import { registerBuiltins } from './lang/builtin.js';
-import { emitLlvm } from './backend-llvm/emit.js';
-import { emitSpirv } from './backend-spirv/emit.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
