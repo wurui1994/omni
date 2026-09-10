@@ -486,12 +486,19 @@ export const OP_NAMES = [];
 export const OP_MODES = [];
 // 展开：`for (let i = ...)` 在模块顶层会被降级器判成「循环变量可能被闭包捕获」
 // （封闭子集的保守规则），所以用 for-of + 一个显式计数器。
+//
+// **这一格必须重跑无害**（ADR-0021 的 S4）：插件是同一个程序里的一段，它的入口会把整条
+// 模块初始化再走一遍，而 `OP` / `OP_NAMES` 与 `opNoCounter` 都绑在核心那一份上 ——
+// 不挡的话第二遍从核心留下的计数接着编号，把**核心的 OP 表整张改号**：量出来是 C 前端
+// 出的 MIR 到了核心的 verify 里成了「%0 BLOCK: ELSE 不在 IF 里」。填过就不再填。
 let opNoCounter = 0;
-for (const row of OPS) {
-  OP[row[0]] = opNoCounter;
-  OP_NAMES.push(row[0]);
-  OP_MODES.push([row[1], row[2], row[3]]);
-  opNoCounter++;
+if (OP_NAMES.length === 0) {
+  for (const row of OPS) {
+    OP[row[0]] = opNoCounter;
+    OP_NAMES.push(row[0]);
+    OP_MODES.push([row[1], row[2], row[3]]);
+    opNoCounter++;
+  }
 }
 
 /**

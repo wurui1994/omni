@@ -630,7 +630,13 @@ registerBuiltins(pluginApi());
  */
 function pluginsDir() {
   const cands = [join(installDir(), 'plugins'), join(installDir(), '..', 'plugins'),
-    join(installDir(), '..', '..', 'plugins'), join(cwd(), 'dist', 'plugins')];
+    join(installDir(), '..', '..', 'plugins')];
+  /* `<当前目录>/dist/plugins` 只给**装不动插件的那条腿**（从源码跑的 JS 腿）留着：它要的是
+     "看见有哪几格"，好在用到那门语言时说"装了但这条腿加载不了"。编出来的核心不能吃这一条 ——
+     当前目录是偶然的，量到过：`/tmp` 底下一份 `--fat` 的核心，因为 cwd 恰好是仓库，
+     去装了仓库 dist/plugins 里的插件，然后报 `symbol not found '_g_CALL_LDRET'`
+     （它自己没 `--extern`，本来也不该装谁）。 */
+  if (!pluginsOk()) cands.push(join(cwd(), 'dist', 'plugins'));
   return cands.find((d) => isDir(d)) ?? null;
 }
 
