@@ -465,58 +465,16 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
       params: [],
       body: null,
     };
-    /* 顶层的其余语句**按模块切成一格一格的 `omni_init_N`**，入口只管按链接序挨个调。
-     *
-     * 为什么不像从前那样都摊在 `omni_main` 里：MIR 那条腿上 ref 是 16 位的，一个函数体
-     * 上界 32766 条指令（见 mir/ir.js 的 REF_NONE），而整份编译器降下来的入口有 **1712 条
-     * 顶层语句、十来万个 AST 节点** —— 超两倍半。于是 LLVM 那条腿压根编不动编译器自己
-     * （`mir: 函数 omni_main 超过 32766 条指令`，tests/mir 的 lower/cli.js 就是这么红的）。
-     *
-     * 按**连续段**切，一段就是一个源文件（链接器把每个模块的顶层摆在一起）：那份编译器是
-     * 87 段，最大一段三万个节点上下，都在上界以内，而且没有哪一条单句接近上界。
-     *
-     * 语义上搬走的只是"初始化那几句"：模块级的 const/let/var 本来就是 JsGlobal
-     * （见文件头第 10-12 行），跨模块可见性一个字都不用改。每段自己一个 frame（临时量与
-     * prelude 跟着走），微任务泵 `jobsTail()` 照旧留在入口最后。TDZ 的静态判据问的是
-     * "整份 body 里的第几句"，所以 `topIdx` 给的仍是全局下标，不是段内下标。 */
-    const groups = [];
+    this.fn = this.newFrame(program.body, { isMain: true });
+    const stmts = [];
     program.body.forEach((s, i) => {
       if (s.type === 'FuncDecl') return;
-      const f = fileOfSpan(s.span);
-      const last = groups.length > 0 ? groups[groups.length - 1] : null;
-      if (last !== null && last.file === f) last.items.push({ s, i });
-      else groups.push({ file: f, items: [{ s, i }] });
+      // TDZ 的静态判据要"现在在第几句"（见 expr 里 globals 那一格）
+      this.topIdx = i;
+      stmts.push(...this.stmt(s));
     });
-    const initCalls = [];
-    let gi = 0;
-    for (const g of groups) {
-      const nm = `omni_init_${gi}`;
-      gi++;
-      this.fn = this.newFrame(g.items.map((x) => x.s), { isMain: true });
-      const ss = [];
-      for (const it of g.items) {
-        // TDZ 的静态判据要"现在在第几句"（见 expr 里 globals 那一格）
-        this.topIdx = it.i;
-        ss.push(...this.stmt(it.s));
-      }
-      this.topIdx = null;
-      this.funcs.push({
-        name: nm,
-        mangled: nm,
-        file: g.file,
-        ret: { k: 'void' },
-        params: [],
-        body: block([...this.fn.prelude, ...ss]),
-      });
-      this.fn = null;
-      initCalls.push({
-        kind: 'ExprStmt',
-        expr: { kind: 'Call', func: nm, name: nm, args: [], type: { k: 'void' } },
-      });
-    }
-    this.fn = this.newFrame([], { isMain: true });
-    const jobs = this.jobsTail();
-    main.body = block([...this.fn.prelude, ...initCalls, ...jobs]);
+    this.topIdx = null;
+    main.body = block([...this.fn.prelude, ...stmts, ...this.jobsTail()]);
     this.fn = null;
     this.funcs.push(main);
     return {
