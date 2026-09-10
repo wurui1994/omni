@@ -209,6 +209,12 @@ const FCMP = new Map([[OP.EQ, 'oeq'], [OP.NE, 'une'], [OP.LT, 'olt'], [OP.GE, 'o
  */
 const NOPE = 'llvm 后端目前不支持';
 
+/* `setjmp` / `longjmp` 那一族：这一层不收。它们要的是**帧**（回到同一帧的同一条指令），
+   而 IR 上这儿只有实参。emit_js 的 JS_NOJMP、interp 的 SETJMP_NAMES/LONGJMP_NAMES
+   是同一张名单 —— 三条腿的边界必须一样，某条路悄悄多支持一点就是个假象。 */
+const LL_NOJMP = new Set(['setjmp', '_setjmp', 'sigsetjmp', '__sigsetjmp',
+  'longjmp', '_longjmp', 'siglongjmp']);
+
 /* 线性内存的访问描述符 -> **内存里那几个字节**的 LLVM 类型（ADR-0017 第二刀）。
  * 一张表管读写两侧：`i8s`/`i8u` 与 `i8` 落到同一个 `i8`，差别只在扩展方向，
  * 而那件事由描述符名字的最后一个字母决定（见 memInsn）。 */
@@ -226,6 +232,11 @@ class LlvmEmitter {
     this.needUDiv = false;  // 无符号那两个（第六十一刀），同一条规矩
     this.needUMod = false;
     this.f = null;          // 当前函数
+    /* 外部 C 符号（`OP.CCALL`，ADR-0014 决策 4 / ADR-0022 的 J4）：名字 -> 那一格的签名。
+       声明要发在模块最前面，而"用到了哪些、每个的定参类型是什么"只有发完函数体才知道 ——
+       所以照 backend-c 的老手法占一行、最后回填（cabiAt）。 */
+    this.cabiDecl = new Map();
+    this.cabiAt = -1;
     this.tmp = 0;           // 临时值编号（%t0…），与 %v<i> 分开，不会撞
     this.labels = 0;
     this.regions = [];      // 结构化控制流的区域栈，层数语义与 wasm 相同
@@ -360,6 +371,9 @@ class LlvmEmitter {
     this.line('declare i32 @omni_host_exit_code()');
     this.line('declare void @omni_js_check_uncaught()');
     this.line('declare i32 @fflush(ptr)');
+    /* 外部 C 符号的声明位（回填，见构造器里那格 cabiDecl）。 */
+    this.cabiAt = this.out.length;
+    this.line('');
     this.line('');
     // 结构体的命名类型。按类型池的顺序发，与用到没用到无关 —— 判断"用到了"要先扫一遍
     // 函数体，而多一个没人用的 `type` 在 LLVM 里没有代价，扫一遍的那点代码却要维护。
@@ -532,6 +546,18 @@ class LlvmEmitter {
     this.line('  %code = call i32 @omni_host_exit_code()');
     this.line('  ret i32 %code');
     this.line('}');
+    /* 外部 C 符号的声明回填（见构造器里那格 cabiDecl）：签名是从**调用点**收上来的，
+       所以只能等函数体全发完。一个都没有时把占位那一行**抽掉**而不是留成空行 ——
+       否则整份 IR 的行号平移一行，tests/llvm 的快照当场红（就是这么被抓着的）。 */
+    const decls = [];
+    for (const [name, sig] of this.cabiDecl) {
+      const paren = sig.indexOf(' (');
+      decls.push(`declare ${sig.slice(0, paren)} @${name}${sig.slice(paren + 1)}`);
+    }
+    if (this.cabiAt >= 0) {
+      if (decls.length === 0) this.out.splice(this.cabiAt, 1);
+      else this.out[this.cabiAt] = decls.join('\n');
+    }
     return this.out.join('\n') + '\n';
   }
 
@@ -965,8 +991,46 @@ class LlvmEmitter {
       this.line(d.ret === 'void' ? `  ${call}` : `  ${dst} = ${call}`);
       return;
     }
-    if (op === OP.CAPTURE) {
-      const p = this.fresh();
+    /**
+     * 外部 C 符号（ADR-0014 决策 4 / ADR-0022 的 J4）：`a` 是 C_ABI 入口号，
+     * `aux` 是**变参分界** —— 0 表示不是变参，否则就是定参个数（与 `CALLI` 同一个编码）。
+     *
+     * 这一层不做 marshal：MIR 到这儿的实参已经是**机器上的值**了（cstr 是 ptr、
+     * int 是 i32/i64）。JS 那条腿要在门口装卸 BigInt，是因为那条腿的整数是 BigInt，
+     * 与这一格无关（见 mir/emit_js.js 的 CCALL）。
+     *
+     * `setjmp` / `longjmp` 这一层不收：它们要的是**帧**，而 IR 上这儿只有实参。
+     * emit_js 那侧同一格拒（JS_NOJMP），理由一模一样 —— 两条腿的边界必须一样。
+     */
+    if (op === OP.CCALL) {
+      const entry = this.mir.cabi[f.a[i]];
+      if (LL_NOJMP.has(entry)) {
+        throw new OmniError(`${NOPE} ${entry}（它要回到同一帧的同一条指令，`
+          + 'IR 上这儿只有实参）—— 用 --backend interp');
+      }
+      const refs = f.argsOf(f.b[i]);
+      const args = refs.map((r) => this.typed(r));
+      const rt = this.ty(t, `${entry} 的返回值`);
+      const nfixed = f.aux[i];
+      const variadic = nfixed !== 0;
+      /* 声明只按**定参**发：同一个变参函数在不同调用点的实参个数不同，而定参那几格一样。 */
+      const fixed = refs.slice(0, variadic ? nfixed : refs.length)
+        .map((r) => this.ty(this.tyOf(r), `${entry} 的形参`));
+      const sig = `${rt} (${fixed.concat(variadic ? ['...'] : []).join(', ')})`;
+      const was = this.cabiDecl.get(entry);
+      if (was === undefined) this.cabiDecl.set(entry, sig);
+      else if (was !== sig) {
+        throw new OmniError(`llvm: ${entry} 在两处的签名不一样（${was} vs ${sig}）—— `
+          + '同一个外部符号只能有一份声明');
+      }
+      /* 变参的调用点必须写出函数类型（LLVM 要靠它知道哪几格是定参）；不是变参的照常写。 */
+      const call = variadic
+        ? `call ${sig} @${entry}(${args.join(', ')})`
+        : `call ${rt} @${entry}(${args.join(', ')})`;
+      this.line(rt === 'void' ? `  ${call}` : `  ${dst} = ${call}`);
+      return;
+    }
+    if (op === OP.CAPTURE) {      const p = this.fresh();
       this.line(`  ${p} = getelementptr %clo_${this.f.closureId}, ptr %self, i64 0, i32 ${f.aux[i] + 1}`);
       this.line(`  ${dst} = load ${this.ty(t, 'capture')}, ptr ${p}`);
       return;

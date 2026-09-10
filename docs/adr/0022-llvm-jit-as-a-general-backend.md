@@ -98,6 +98,23 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
   J4 于是分成两半：先教 `backend-llvm` 发 `declare` 并降 `CCALL`（类型词汇就是 C_ABI
   那七个标量，`cstr` 的 marshal 照 backend-c 那一份），再让宿主解析那些名字。
 
+  **`CCALL` 已经降了**（`OP.CCALL` -> `call`，声明按调用点收上来的签名回填；变参按 `aux`
+  的定参分界发 `declare RET @f(T…, ...)` 并在调用点写出函数类型；`setjmp`/`longjmp`
+  照 emit_js 与 interp 的同一张名单拒）。回填那一格有个坑量到了：一个外部符号都没有时
+  占位那行必须**抽掉**而不是留成空行 —— 否则整份 IR 平移一行，`tests/llvm` 的快照当场红。
+
+  **但 C 那条腿还接不上，三处都定到点了**（拿 `strlen`/`abs` 两个调用的 `.c` 量的）：
+  1. 原生降级把每个外部符号包成一个**桩函数**（`externThunk`，MIR 里是
+     `func strlen(s:i64)`，体里一条 `CCALL`），而 LLVM 后端把桩发成了
+     `define i64 @strlen() { ret i64 0 }` —— 形参丢了、体是假的。它该发的是 `declare`。
+  2. 调用点的实参是**胖指针**（`[2 x i64]`，地址 + 长度），桩的形参是 `i64` ——
+     两边对不上。`c obj` 那条腿在生成机器码时把它摊平了，LLVM 这边要照同一个约定。
+  3. 程序自己的 `main` 与包装的 `main` 撞名，clang 直接报
+     `invalid redefinition of function 'main'`。
+
+  所以 `emit llvm x.c` 这扇门**暂时不开**（试过，能跑通到"clang 拒绝"这一步，
+  正是靠它把上面三条定出来的）：按这个项目的规矩，降不了就该拒，不该开一扇出无效 IR 的门。
+
 - **J5 FFI 第二刀（JIT → 任意库）**：库表 + `dlopen` 回退，用 `libm` 的 `sin`/`cos` 验收。
   C_ABI 里 `lib: null` 的那些（libc）走 `dlsym(RTLD_DEFAULT, …)`，第三方库走 `--lib`。
 - **J6 会话进编译器进程**：新增 ABI（`jit_open/jit_add/jit_map/jit_lookup/jit_call_i`），
