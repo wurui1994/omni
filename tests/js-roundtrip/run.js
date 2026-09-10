@@ -138,8 +138,14 @@ function buildTree() {
     writeFileSync(dest, readFileSync(join(SRC, rel)));
   }
   /* runtime / lib 与 `src/core` **同一级**（`installDir()` 从 `core/host/native.js` 往上
-   * 数两层就到它们），所以重建出来的树也得是 `src/runtime`、`src/lib`。 */
-  for (const sub of ['runtime', 'lib']) {
+   * 数两层就到它们），所以重建出来的树也得是 `src/runtime`、`src/lib`。
+   *
+   * `runtime-gl` 也得拷：`omni_r3.c` 里有一句 `#include "../runtime-gl/omni_gl.h"`，
+   * 少了它这棵树上的 C 运行时**编不过**（量出来是 `fatal error: '../runtime-gl/omni_gl.h'
+   * file not found`），于是 `run-c` 全线红 —— 从前那两条"重新生成的编译器答案不同"
+   * （`01_basics.omni [js==c]` 与 oracle 的 `closures`）根本不是语义问题，是这棵树缺了
+   * 一个目录。判据里"两边答案一样"要成立，得先让两边都跑得起来。 */
+  for (const sub of ['runtime', 'runtime-gl', 'lib']) {
     const from = join(root, 'src', sub);
     for (const rel of walk(from)) {
       const dest = join(OUT, 'src', sub, rel);
