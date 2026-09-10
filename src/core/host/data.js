@@ -41,3 +41,18 @@ export function dataPath(rel) {
 export function dataTried(rel) {
   return dataRoots().map((r) => join(r, rel)).join('、');
 }
+
+/**
+ * 一个数据**目录**的实际路径，靠里头一份标志文件认出来。
+ *
+ * 为什么要标志文件：光按目录名找会撞上同名的**代码**目录 —— 量出来的：
+ * `dataPath('runtime')` 命中了 `src/core/runtime`（那是 c_runtime.js 住的地方），
+ * 于是 `-I` 指到了没有 omni.h 的目录，clang 报 `'omni.h' file not found`。
+ */
+export function dataDir(rel, probe) {
+  for (const r of dataRoots()) {
+    const d = join(r, rel);
+    if (exists(join(d, probe))) return d;
+  }
+  return null;
+}

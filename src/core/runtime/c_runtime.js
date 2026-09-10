@@ -10,16 +10,20 @@
 
 import { readText, readDir, installDir } from '../host/native.js';
 import { join, basename } from '../host/path.js';
+import { dataDir } from '../host/data.js';
 
-// installDir() 是"程序镜像所在目录"（node 上就是 src/host）。运行时相对它固定两级上去。
-export const RUNTIME_DIR = join(installDir(), '..', '..', 'runtime');
+/* 运行时的 C 源码是**数据**（不进二进制），所以按布局找（host/data.js）：从源码跑是
+   `src/runtime`，装好的样子是 `<产物同级>/share/runtime`。**认的是里头的标志文件**——
+   光按目录名找会撞上 `src/core/runtime`（这个文件住的地方），量出来是
+   clang 报 `'omni.h' file not found`。找不着就退回老的相对位置。 */
+export const RUNTIME_DIR = dataDir('runtime', 'omni.h') ?? join(installDir(), '..', '..', 'runtime');
 
 /**
  * ORC JIT 宿主的 C 源码（ADR-0014 决策 3 第二阶段）。
  * 和运行时分开放，因为它要 LLVM 头，而普通的 C 后端不该因此依赖 LLVM ——
  * runtimeSources() 是把 runtime/*.c **全都**喂给 cc 的，混在一起就等于强制依赖。
  */
-export const JIT_DIR = join(installDir(), '..', '..', 'jit');
+export const JIT_DIR = dataDir('jit', 'omni_jit.c') ?? join(installDir(), '..', '..', 'jit');
 
 /**
  * 三维那一档 OpenGL 后端（`libomnigl`）的源码目录。**故意与 RUNTIME_DIR 分开**：
@@ -27,7 +31,7 @@ export const JIT_DIR = join(installDir(), '..', '..', 'jit');
  * `-framework`，塞进去会把 tcc 那条腿带坏（理由写在 omni_r3_gl.c 的文件头）。
  * cli.js 单独把它编成一个动态库，运行期由 omni_r3.c dlopen；拿不到就回落 CPU 光栅器。
  */
-export const GL_DIR = join(installDir(), '..', '..', 'runtime-gl');
+export const GL_DIR = dataDir('runtime-gl', 'omni_gl.h') ?? join(installDir(), '..', '..', 'runtime-gl');
 
 
 /** 生成的 .c 开头只需要这一行；其余靠 -I RUNTIME_DIR + 链接 runtimeSources() */

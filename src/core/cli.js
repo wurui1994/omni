@@ -17,7 +17,7 @@ import {
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { installSrcEvalHook } from './host/src_eval.js';
 import { cacheRoot } from './host/cache.js';
-import { dataPath } from './host/data.js';
+import { dataPath, dataDir } from './host/data.js';
 import { hash16 } from './host/hash.js';
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
 import { ROOT, LEGACY } from './cli/cmds.js';
@@ -53,7 +53,7 @@ import {
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
 import { registerBuiltins } from './lang/builtin.js';
-import { PLUGIN_SET, pluginRegName } from './plugin-set.js';
+import { PLUGIN_SET, pluginRegName, CORE_DATA } from './plugin-set.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
@@ -1599,6 +1599,10 @@ function runtimeObjects(cc) {
 function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   const dir = workDir === undefined ? workDirFor('c', hash16(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
+  /* 产物所在的目录得先有 —— `build -o dist/omni` 是**默认**的写法，而 dist 可能刚被删掉；
+     不建的话 ld 报的是 `open() failed, errno=2 for 'dist/omni'`（量到过），
+     那句话把人往"编译器坏了"上带。 */
+  mkdirAll(dirname(outPath));
   const cPath = join(dir, `${basename(outPath)}.c`);
   const { text: cText, stats, syms } = cap('cgen.stats')(mod, {
     plugin: plugin, extern: extern === true, own: own === undefined ? null : own,
@@ -2304,6 +2308,10 @@ function main(argv) {
        `.asy` 就报"找不到 asy 语法文件" —— 数据不是代码，编译器不会把它们编进 dylib。 */
     const share = join(dirname(dir), 'share');
     const files = [];
+    for (const c of CORE_DATA) {
+      const d = dataDir(c.dir, c.probe);
+      if (d !== null) for (const f of readDir(d)) files.push(`${c.dir}/${f}`);
+    }
     for (const p of PLUGIN_SET) {
       if (want !== null && !want.includes(p.name)) continue;
       for (const rel of p.data ?? []) {

@@ -43,3 +43,19 @@ export function pluginRegName(name) {
   for (const part of name.split('-')) out += part.charAt(0).toUpperCase() + part.slice(1);
   return out;
 }
+
+/**
+ * **核心自己**要的数据（不属于哪一格插件）：运行时的 C 源码、JIT 宿主、GL 后端。
+ * 生成的 C 只写一句 `#include "omni.h"`，剩下靠 `-I runtime` 与把 `runtime/*.c` 一起
+ * 喂给 cc —— 所以那几份源码得跟着产物走，否则装好的 omni 编不出可执行文件
+ * （量出来：`ENOENT: cannot read directory '<repo>/runtime'`）。
+ *
+ * `probe` 是认这个目录的标志文件：光按名字找会撞上同名的**代码**目录 ——
+ * `runtime` 在源码树里有两个（`src/runtime` 是 C，`src/core/runtime` 是 JS），
+ * 抄错的那次把 `c_runtime.js` 抄进了 dist/share/runtime，然后 clang 说找不到 omni.h。
+ */
+export const CORE_DATA = [
+  { dir: 'runtime', probe: 'omni.h' },
+  { dir: 'jit', probe: 'omni_jit.c' },
+  { dir: 'runtime-gl', probe: 'omni_gl.h' },
+];
