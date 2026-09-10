@@ -1,0 +1,9 @@
+// 写了返回类型的事件（ADR-0016 第七十四刀）。jancy 自己也拒：
+// "Multicasts must return void"（`TypeMgr::getMulticastType`，jnc_ct_TypeMgr.cpp:907-911）。
+// 悄悄把返回值丢掉就是骗人 —— 所以这一条当场响着拒。
+int event g_onDone(int code);
+
+int main() {
+	printf("%d\n", 1);
+	return 0;
+}

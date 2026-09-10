@@ -229,9 +229,11 @@ const J_REAL = { k: 'real' };
 const J_BOOL = { k: 'bool' };
 const J_VOID = { k: 'void' };
 const J_STR = { k: 'string' };
-/** 一格多播（第七十三刀）：`multicast ()` / `event ()` —— 属性的 `m_onChanged` 就是它。 */
-const J_MC = { k: 'mc' };
-/** 通知那一格助手在方言里的名字（一份程序一格，见 emitMcFire）。 */
+/** 一格多播（第七十三刀）：`multicast (T…)` / `event (T…)` —— 处理函数一律回 void。
+ *  属性的 `m_onChanged` 是不带实参的那一种（`StdType_SimpleMulticast`）。 */
+const mcTy = (params = []) => ({ k: 'mc', params });
+const J_MC = mcTy();
+/** 通知那一格助手在方言里的名字（按签名一格，见 emitMcFire）。 */
 const MC_FIRE = 'jnc$mc_fire';
 /* 一个 f64 写成方言的 `(real …)` 收得下的样子。`String(x)` 给的形状
    （`1` / `-0.5` / `1e-7` / `1e+21`）正好都在 realLit 那条正则里；`Infinity`/`NaN`
@@ -557,7 +559,7 @@ function tyText(t) {
    * （`jnc_Multicast`，include/jnc_RuntimeStructs.h:169-181）。方言里现成的形状就是
    * **元素是函数值的数组**：加一个订阅是 `apush`、通知是照 `alen` 走一遍 `callfn`，
    * 顺序与 jancy 的 `McSnapshot.call` 一样（从 0 往上，jnc_ct_MulticastClassType.cpp:64-94）。 */
-  if (t.k === 'mc') return '(arr (fnty () void))';
+  if (t.k === 'mc') return `(arr (fnty (${t.params.map(slotText).join(' ')}) void))`;
   // 枚举在方言里就是它的基整数（第三十九刀）—— 四种位宽在方言里都是 `int`，所以这儿也是
   if (t.k === 'enum') return 'int';
   return t.k;
@@ -620,8 +622,8 @@ function tyName(t) {
     return `${tyName(t.ret)} function${t.thin ? ' thin*' : '*'}(${t.params.map(tyName).join(', ')})`;
   }
   if (t.k === 'int') return `${t.u ? 'unsigned ' : ''}${INT_NAMES.get(t.w)}`;
-  // 多播（第七十三刀）：眼下只有 `void ()` 那一种（属性的 `m_onChanged` 就是它）。
-  if (t.k === 'mc') return 'multicast ()';
+  // 多播（第七十三刀）：`event m_e(int x)` 那一种带实参（第七十四刀）。
+  if (t.k === 'mc') return `multicast (${t.params.map(tyName).join(', ')})`;
   if (t.k === 'enum') return shown(t.name);
   return t.k;
 }
@@ -642,6 +644,12 @@ function sameTy(a, b) {
     if (a.params.length !== b.params.length) return false;
     for (let i = 0; i < a.params.length; i++) if (!sameTy(a.params[i], b.params[i])) return false;
     return sameTy(a.ret, b.ret);
+  }
+  // 多播的同型看那一串实参（第七十四刀）：处理函数一律回 void，所以只有这一串。
+  if (a.k === 'mc') {
+    if (a.params.length !== b.params.length) return false;
+    for (let i = 0; i < a.params.length; i++) if (!sameTy(a.params[i], b.params[i])) return false;
+    return true;
   }
   if (a.k === 'int') return a.w === b.w && !a.u === !b.u;
   if (a.k === 'enum') return a.name === b.name;
@@ -868,8 +876,8 @@ class JncLower {
     // `(arr (fnty () void))`，名字是 `<属性全名>$m_onChanged`（源码里写的是 `m_onChanged`，
     // prop_bindable.rst:23-29）。发的时机与 autoProps 同一处。
     this.bindProps = [];
-    // 那格"照单子挨个叫一遍"的助手发过没有（一份程序只发一格，名字全局唯一）。
-    this.mcFired = false;
+    // 那格"照单子挨个叫一遍"的助手：签名 -> 名字（一种签名一格）。
+    this.mcFires = new Map();
     // 取/存那两个函数的名字 -> 属性的全名（第七十一刀）。函数体降下来时靠它把 `this.ns`
     // 再往里挪一层：属性在 jancy 那边**本来就是一层命名空间**（prop_full.rst:15）。
     this.propOf = new Map();
@@ -1520,7 +1528,7 @@ class JncLower {
           this.decls.push(`  (fn ${s} ((x ${slotText(a.type)})) void\n`
             + `    (if (bin "!=" ${rd} (var x)) (do\n`
             + `      ${st}\n`
-            + `      (expr (call ${MC_FIRE} (var ${pi.onch}))))))`);
+            + `      (expr (call ${this.mcFire(J_MC)} (var ${pi.onch}))))))`);
           this.fns.set(s, { params: [a.type], ret: J_VOID });
           pi.set = true;
         }
@@ -1543,7 +1551,6 @@ class JncLower {
       this.decls.push(`  (global ${b.name} ${tyText(J_MC)})`);
       this.globalCells.push(`    (set ${b.name} (anew ${tyText(J_MC)} (int 0)))`);
     }
-    if (this.bindProps.length > 0) this.emitMcFire();
     for (const e of items) {
       if (!isList(e.it)) continue;
       this.ns = e.ns;
@@ -1787,24 +1794,30 @@ class JncLower {
   }
 
   /**
-   * 通知那一格（第七十三刀）：照单子从头到尾叫一遍。一份程序只发一格，名字全局唯一
-   * （自举那一遍要求模块级的名字唯一，见第五十九刀那处）。
+   * 通知那一格（第七十三刀，第七十四刀按签名分）：照单子从头到尾叫一遍，回那一格助手的名字。
+   * 一种签名一格（名字里带签名，模块级的名字要全局唯一 —— 见第五十九刀那处）。
    *
    * 顺序与 jancy 一样是**加进来的顺序**（`McSnapshot.call` 从下标 0 往上走，
    * jnc_ct_MulticastClassType.cpp:64-94）。jancy 那边先取一份快照再叫，为的是"叫的过程中
    * 有人加/减"不会乱；这一层直接走那格数组，所以每一圈都重问一次 `alen` —— 叫的过程中
    * 加进来的会被叫到。这是**可观测的差别**，记成账：真要快照就得先抄一份数组。
    */
-  emitMcFire() {
-    if (this.mcFired) return;
-    this.mcFired = true;
-    const at = tyText(J_MC);
-    this.decls.push(`  (fn ${MC_FIRE} ((m ${at})) void\n`
+  mcFire(t) {
+    const at = tyText(t);
+    const had = this.mcFires.get(at);
+    if (had !== undefined) return had;
+    const sig = t.params.map((p) => tyText(p).replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, ''));
+    const name = sig.length === 0 ? MC_FIRE : `${MC_FIRE}$${sig.join('$')}`;
+    const ps = t.params.map((p, i) => ` ($a${i} ${slotText(p)})`).join('');
+    const as = t.params.map((p, i) => ` (var $a${i})`).join('');
+    this.decls.push(`  (fn ${name} ((m ${at})${ps}) void\n`
       + '    (let i int (int 0))\n'
       + '    (while (bin "<" (var i) (alen (var m))) (do\n'
-      + '      (expr (callfn (aget (var m) (var i))))\n'
+      + `      (expr (callfn (aget (var m) (var i))${as}))\n`
       + '      (set i (bin "+" (var i) (int 1))))))');
-    this.fns.set(MC_FIRE, { params: [J_MC], ret: J_VOID });
+    this.fns.set(name, { params: [t, ...t.params], ret: J_VOID });
+    this.mcFires.set(at, name);
+    return name;
   }
 
   /**
@@ -1830,6 +1843,21 @@ class JncLower {
       else if (dh === 'ref-init') { this.nope(d, '引用初始化（`:=`）'); continue; }
       const info = this.declarator(dcl, sp);
       if (info === null) continue;
+      /* 顶层的事件（第七十四刀）：`event m_onDone(int code);` —— 一格模块级的"处理函数单子"。
+       * 带实参那一串写在**声明符的括号里**，所以这一问必须排在"顶层的函数原型"那条之前 ——
+       * 否则 `event m_e()` 会被当成一条函数原型拒掉。 */
+      if (sp.evt === true) {
+        const ps = info.formals === null ? [] : this.formalList(info.formals);
+        if (ps === null) continue;
+        if (initNode !== null) { this.nope(dcl, '事件的初值'); continue; }
+        const nm = this.qual(info.name);
+        if (this.globals.has(nm)) { this.err(dcl, `模块级变量 '${shown(nm)}' 声明了两次`); continue; }
+        const t = mcTy(ps.map((p) => p.type));
+        this.globals.set(nm, t);
+        this.decls.push(`  (global ${nm} ${tyText(t)})`);
+        this.globalCells.push(`    (set ${nm} (anew ${tyText(t)} (int 0)))`);
+        continue;
+      }
       if (info.formals !== null) { this.nope(dcl, '顶层的函数原型（只收带体的定义）'); continue; }
       // 声明符尾巴上的构造实参只有类的变量收得下（第五十三刀，与局部量同一条）。
       if (info.ctor !== null && !(isClass(info.type) && info.type.own === true)) {
@@ -2283,6 +2311,29 @@ class JncLower {
         // 字段后面挂构造实参（`C1 m_a(10);`）—— jancy 那边它是"内嵌那一格的构造实参"，
         // 而内嵌本身这一层还不收（下面那条），所以这儿先明说，免得实参被悄悄丢掉。
         if (info.ctor !== null) { this.nope(d, '字段后面的构造实参'); continue; }
+        /* 类里的事件（第七十四刀留的账）：`event m_onDone(int code);` —— 它在 jancy 那边是
+         * 类里的一格字段（`Property::createOnChanged` 的头一支同理）。这一格要连"对象造出来
+         * 时把那格单子也建起来"一起接（方言的字段放得下 `(arr …)`，量过了），是自己一刀。
+         * 这一问必须排在"声明符上带括号就是方法原型"那条**之前** —— 否则它会被悄悄登记成
+         * 一格返回 void 的方法原型，而那是把整格事件丢掉。 */
+        /* 类/结构体里的事件（第七十四刀量出来的边界）：语料里 `event` 全是这个形状
+         * （iox_HostNameResolver.jnc:42、iox_FpgaUploader.jnc:80），jancy 那边它就是类里的
+         * 一格字段（与 bindable 属性那格 `m_onChanged` 同一支，jnc_ct_Property.cpp:131-134）。
+         *
+         * **试过，退回来了**：这一层的类在方言里是一格 `(struct 根 …)` 加 `(ptr 根)`
+         * （第五十二刀），而方言的**结构体字段**放不下"一格数组的句柄" ——
+         * `形参 $this：结构体 'Button' 里有落不进内存的字段`（hir/types.js 的 structLayout）。
+         * 先前拿 `.sx` 探针量的是 `(class Box (evt (arr …)))`，那是方言的**类**（按名字存的对象
+         * 槽），不是这一层用的结构体 —— 探针量错了形状。要它得先让方言的结构体布局收下数组
+         * 句柄，那是 ADR 级的一刀（与第五十五刀"函数值的字段"同一堵墙）。
+         *
+         * 这一问必须排在"声明符上带括号就是方法原型"那条**之前** —— 否则它会被悄悄登记成
+         * 一格返回 void 的方法原型，整格事件就丢了。 */
+        if (sp.evt === true) {
+          this.nope(d, `${cls ? '类' : '结构体'}里的事件 '${info.name}'（那一格是`
+            + '一格数组的句柄，方言的结构体字段还放不下它 —— 与函数值的字段同一堵墙）');
+          continue;
+        }
         // 声明符上带括号的是**方法原型**（`void foo();`）：与 fn-proto 那一支同一件事，
         // 体在类外。类里跳过它，结构体里照旧不收。原型上写的 `virtual`/`abstract`/`override`
         // 要在这儿记下来（第五十七刀）—— 体写在类外时那个词只出现在原型上。
@@ -2734,6 +2785,7 @@ class JncLower {
     let cst = false;
     let agt = false;
     let bnd = false;
+    let evt = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
       // `errorcode`（第五十八刀，exceptions.rst:17）：它说的是"这个函数的返回值就是错误码"。
@@ -2790,6 +2842,13 @@ class JncLower {
        * 通知**是手写的**，除非整格属性都是编译器生成的（那种叫 bindable data，
        * samples/jnc/34_BindableProperties.jnc:15-17）。 */
       if (m === 'bindable') { bnd = true; continue; }
+      /* `event` / `multicast`（第七十四刀）：都是**类型修饰符**（Lexer.rl:212-240），说的是
+       * "这一格里放的是一串处理函数"。两者的差别只在**能不能从外面叫**：`event` 那一格
+       * 只让加/减（`MulticastMethodFlag_InaccessibleViaEventPtr`，jnc_ct_TypeMgr.cpp:940-975），
+       * `multicast` 连 `call` / `clear` / `setup` 都放出去。这一层没有可见性检查（与第五十二刀
+       * 同一笔账），所以两个词落地是同一件事。处理函数一律回 void
+       * （"Multicasts must return void"，同处:907-911）。 */
+      if (m === 'event' || m === 'multicast') { evt = true; continue; }
       // 访问控制的 **Java 式写法**（第六十七刀）。jancy 只有 public 与 protected 两种，
       // 两种写法都收：C++ 式的标签，和这一格"写在声明说明符里"（dual_modifiers.rst:22-24），
       // 而且**顶层的成员也能写**（同处:26 那句 "Global namespace members can also have
@@ -2811,7 +2870,14 @@ class JncLower {
       return null;
     }
     const ts = n.items[1];
-    if (isList(ts) && head(ts) === 'no-type') { this.err(n, '这条声明没有类型'); return null; }
+    /* `event m_e(int x);` 的说明符里**没有类型**（jnc.grammar:263 那条注）：多播的处理函数
+     * 一律回 void，所以那一格不用写。带实参那一串挂在声明符的括号里，由调用方（globalDecl /
+     * 类的字段那一遍）从 formals 上读，这儿只把"这是一格事件"传上去。 */
+    if (isList(ts) && head(ts) === 'no-type') {
+      if (evt) return { type: J_MC, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt };
+      this.err(n, '这条声明没有类型');
+      return null;
+    }
     let base = null;
     if (isAtom(ts)) {
       const s = ts.value;
@@ -2877,7 +2943,14 @@ class JncLower {
      * 不收（bad/prop-ptr 那条）。 */
     let bdata = false;
     if (bnd && !prop) { prop = true; agt = true; bdata = true; }
-    return { type: base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata };
+    /* 写了类型的事件：只能是 `void`（"Multicasts must return void"，
+     * jnc_ct_TypeMgr.cpp:907-911）。别的写法当场拒 —— 悄悄把返回值丢掉就是骗人。 */
+    if (evt && base !== J_VOID) {
+      this.err(ts, `多播的处理函数只能回 void（jancy 那句 "Multicasts must return void"），`
+        + `这里写的是 ${tyName(base)}`);
+      return null;
+    }
+    return { type: evt ? J_MC : base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata, evt };
   }
 
   /**
@@ -3383,11 +3456,16 @@ class JncLower {
         return this.err(n, `属性 '${shown(pn)}' 上没有 bindable 事件`
           + '（jancy 那句 "has no bindable event"）—— 它的声明里没写 `bindable`');
       }
-      return { code: `(var ${pi.onch})`, name: pi.onch };
+      return { code: `(var ${pi.onch})`, store: (v) => `(set ${pi.onch} ${v})`, type: J_MC };
     }
     if (head(n) === 'name' && isAtom(n.items[1])) {
-      const r = this.lookupRef(n.items[1].value);
-      if (r !== null && r.type.k === 'mc') return { code: `(var ${r.dname})`, name: r.dname };
+      const nm = n.items[1].value;
+      const r = this.lookupRef(nm);
+      if (r !== null && r.type.k === 'mc') {
+        return { code: `(var ${r.dname})`, store: (v) => `(set ${r.dname} ${v})`, type: r.type };
+      }
+      // 方法体里裸写的事件字段：等类里的事件那一刀（见 typeDecl 里那条边界）—— 那格字段
+      // 现在压根登记不上，所以这儿也不用问。
     }
     return undefined;
   }
@@ -3412,16 +3490,16 @@ class JncLower {
       this.err(n, `事件上写不了 '${op}'（只有 = / := / += 三格）`);
       return null;
     }
-    const fresh = `${pad}(set ${mc.name} (anew ${tyText(J_MC)} (int 0)))`;
+    const fresh = `${pad}${mc.store(`(anew ${tyText(mc.type)} (int 0))`)}`;
     if (isList(rhs) && head(rhs) === 'null') {
       if (op === '+=') { this.err(n, '`+= null` 加不了一个空的订阅'); return null; }
       return [fresh];
     }
-    const want = tFn([], J_VOID);
+    const want = tFn(mc.type.params, J_VOID);
     const v = this.expr(rhs, want);
     if (v === null) return null;
-    if (v.type.k !== 'fnptr' || v.type.params.length > 0 || v.type.ret !== J_VOID) {
-      this.err(n, `事件上挂的得是一格 \`void ()\`，这里是 ${tyName(v.type)}`);
+    if (v.type.k !== 'fnptr' || !sameTy(v.type, want)) {
+      this.err(n, `事件上挂的得是一格 \`${tyName(want)}\`，这里是 ${tyName(v.type)}`);
       return null;
     }
     const add = `${pad}(apush ${mc.code} ${v.code})`;
@@ -3572,6 +3650,7 @@ class JncLower {
       : {
         type: J_VOID, thin: false, stat: false, fnptr: false,
         virt: null, errc: false, prop: false, cst: false, agt: false, bnd: false, bdata: false,
+        evt: false,
       };
     if (sp === null) return null;
     const info = this.declarator(n.items[2], sp);
@@ -4981,12 +5060,19 @@ class JncLower {
     const mc = this.mcRef(callee);
     if (mc === null) return null;
     if (mc !== undefined) {
-      if (args.length > 0) {
-        return this.nope(n, '带实参的事件（这一层只有 `multicast ()` 那一种，'
-          + '属性的 m_onChanged 就是它）');
+      const want = mc.type.params;
+      if (args.length !== want.length) {
+        this.err(n, `这格事件要 ${want.length} 个实参，给了 ${args.length} 个`);
+        return null;
       }
-      this.emitMcFire();
-      return [`${pad}(expr (call ${MC_FIRE} ${mc.code}))`];
+      const vs = [];
+      for (let i = 0; i < args.length; i++) {
+        const v = this.expr(args[i], want[i]);
+        if (v === null) return null;
+        vs.push(isInt(want[i]) && isInt(v.type) ? intConv(v, want[i]) : v);
+      }
+      return [`${pad}(expr (call ${this.mcFire(mc.type)} ${mc.code}`
+        + `${vs.map((v) => ` ${v.code}`).join('')}))`];
     }
     const v = this.expr(n, null);
     if (v === null) return null;

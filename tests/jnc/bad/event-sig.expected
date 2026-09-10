@@ -1,0 +1,1 @@
+事件上挂的得是一格 `void function*(int)`，这里是 void function*(int, int)

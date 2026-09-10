@@ -1,0 +1,53 @@
+// jancy 的 `event` / `multicast`（第七十四刀）：顶层那一格。出处：
+//   - Lexer.rl:212-240 —— `event` / `multicast` 都是**类型修饰符**，所以它们落在说明符表里；
+//   - jnc.grammar:263 那条注 —— `event m_e();` 的说明符里**没有类型**（处理函数一律回 void，
+//     jnc_ct_TypeMgr.cpp:907-911 那句 "Multicasts must return void"）；
+//   - jnc_ct_TypeMgr.cpp:962-973 —— 多播类上那几格运算符别名：`:=`/`=` 是 setup、`+=` 是 add、
+//     `-=` 是 remove、`m(…)` 走 call；
+//   - jnc_ct_MulticastClassType.cpp:64-94 —— 叫的顺序是**加进来的顺序**（从下标 0 往上）；
+//   - 语料里的形状：test/ioninja/common/iox_HostNameResolver.jnc:42 的 `event m_onCompleted();`
+//     与 iox_FpgaUploader.jnc:80 的 `event m_onUpdateCompleted(bool result);`（那两份是类的
+//     成员，成员那一格还没落 —— 见 bad/event-member）。
+// `event` 与 `multicast` 的差别只在"能不能从外面叫"（`MulticastMethodFlag_
+// InaccessibleViaEventPtr`，同处:940-975）。这一层没有可见性检查（与第五十二刀同一笔账），
+// 所以两个词落地是同一件事。
+
+event g_onTick();
+event g_onDone(int code);
+multicast g_onPair(int a, int b);
+
+void tick() {
+	printf("tick\n");
+}
+
+void first(int code) {
+	printf("first %d\n", code);
+}
+
+void second(int code) {
+	printf("second %d\n", code * 2);
+}
+
+void pair(int a, int b) {
+	printf("pair %d %d\n", a, b);
+}
+
+int main() {
+	g_onTick += tick;
+	g_onDone += first;
+	g_onDone += second;
+	g_onPair += pair;
+
+	g_onTick();
+	g_onDone(7);
+	g_onPair(1, 2);
+
+	// `= null` 是清空（setup 那一格）
+	g_onDone = null;
+	g_onDone(8);
+
+	// 清完还能再订阅
+	g_onDone += second;
+	g_onDone(9);
+	return 0;
+}

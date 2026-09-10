@@ -1,0 +1,14 @@
+// 订阅的形状不对（ADR-0016 第七十四刀）。多播那一格里放的是**同签名**的处理函数
+// （`m_ptr` 指着的是一串 `functionPtrType`，jnc_ct_TypeMgr.cpp:920-925），所以挂上去的那个
+// 得与事件的实参表一样。jancy 那边这是一次普通的赋值转换失败。
+event g_onDone(int code);
+
+void wrong(int a, int b) {
+	printf("wrong %d %d\n", a, b);
+}
+
+int main() {
+	g_onDone += wrong;
+	g_onDone(1);
+	return 0;
+}

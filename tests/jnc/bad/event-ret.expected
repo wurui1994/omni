@@ -1,0 +1,1 @@
+多播的处理函数只能回 void（jancy 那句 "Multicasts must return void"），这里写的是 int
