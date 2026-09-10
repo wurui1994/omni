@@ -14,8 +14,9 @@
 //   node tests/llvm/run.js --update      # 重写 IR 快照
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { SUPPORTED } from './supported.js';
 
@@ -104,6 +105,41 @@ if (update) {
     while (i < wl.length && i < gl.length && wl[i] === gl[i]) i++;
     bad('snapshot/02-control', `    第 ${i + 1} 行起不同\n    want: ${JSON.stringify(wl[i])}\n    got:  ${JSON.stringify(gl[i])}`);
   }
+}
+
+// ------------------------------------------------- 4. C 那条腿的外部符号（ADR-0022 的 J4）
+//
+// `tests/c/sys/*.c` 是**外部符号最密的一组**：`printf` 那一族（变参）、`stdout`/`stderr`
+// （外部全局量）、`write`/`open`（真 syscall 包装）、`setjmp`。这一节钉的是「LLVM 这条腿
+// 调真 libc 的结果与 `omni c run` 逐字节相同」——
+// 三样都比：stdout、stderr、退出码。
+//
+// 为什么不并进第 1 节：那一节的输入是 omni/wat/sx，走 `run-llvm`（自带 host 与线性内存）；
+// 这一组走的是 `emit llvm x.c` + `clang -x ir`，MIR 是**认真地址**的那一种（`c.toMirNative`），
+// 没有 host、没有线性内存 —— 两种模块在这一层是两条路，混在一张表里会看不出坏在哪条。
+const sysDir = join(root, 'tests', 'c', 'sys');
+if (existsSync(sysDir)) {
+  const tmp = mkdtempSync(join(tmpdir(), 'omni-llvm-c-'));
+  for (const f of readdirSync(sysDir).sort()) {
+    if (!f.endsWith('.c')) continue;
+    const src = join(sysDir, f);
+    const irPath = join(tmp, `${f}.ll`);
+    const binPath = join(tmp, `${f}.bin`);
+    const em = run(['emit', 'llvm', src]);
+    if (em.code !== 0) { bad(`c-extern/${f}`, `    emit llvm 没过：${em.err.trim().split('\n')[0]}`); continue; }
+    writeFileSync(irPath, em.out);
+    const cc = spawnSync('clang', ['-x', 'ir', irPath, '-o', binPath], { encoding: 'utf8' });
+    if (cc.status !== 0) { bad(`c-extern/${f}`, `    clang -x ir 没过：${(cc.stderr ?? '').trim().split('\n').slice(0, 3).join('\n    ')}`); continue; }
+    const ll = spawnSync(binPath, [], { encoding: 'utf8' });
+    const c = run(['c', 'run', src]);
+    const detail = [];
+    if (ll.stdout !== c.out) detail.push(`    stdout 与 omni-c 不同\n      omni-c ${JSON.stringify(c.out)}\n      llvm   ${JSON.stringify(ll.stdout)}`);
+    if (ll.stderr !== c.err) detail.push(`    stderr 与 omni-c 不同\n      omni-c ${JSON.stringify(c.err)}\n      llvm   ${JSON.stringify(ll.stderr)}`);
+    if (ll.status !== c.code) detail.push(`    退出码不同：llvm ${ll.status}, omni-c ${c.code}`);
+    if (detail.length > 0) bad(`c-extern/${f}`, detail.join('\n'));
+    else ok(`c-extern/${f} [llvm == omni-c] exit=${ll.status}, ${ll.stdout.length}+${ll.stderr.length} bytes`);
+  }
+  rmSync(tmp, { recursive: true, force: true });
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

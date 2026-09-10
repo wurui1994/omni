@@ -136,6 +136,47 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
      （jancy 的 `mapVariable` 管的正是这一类，`jnc_ct_Jit.cpp:189-215`）。
   补完之后 `printf` 那一族才通，而 `tests/c/sys/*.c` 那一组就是现成的验收面。
 
+  **那三件事都做了，`tests/c/sys/*.c` 五份全部逐字节对上**（stdout / stderr / 退出码
+  三样都比，新的第 4 节 `c-extern/*` 在 `tests/llvm/run.js` 里）。做的过程里量出**六个
+  各自独立的错**，全都是「这条腿从来没跑过认真地址的模块」留下的：
+
+  1. **变参分界差一个**。`CCALL` 的 aux 是「固定实参个数 **+ 1**」（0 才是「不是变参」，
+     见 `mir/ir.js` 的 `callVaFixed`），而这一层直接把 aux 当个数用了。于是
+     `printf("hi %d\n", 7)` 出来的是 `declare i32 @printf(ptr, i32, ...)` —— 7 成了
+     **定参**，而苹果 arm64 上变参一律走栈，印出来是 `hi 1860954544`。
+     顺带这个 bug 还让「同一个符号两处签名必须一样」误报（不同调用点实参个数不同）。
+  2. **串常量没有结尾的零**。Omni 的字符串带长度，所以池子里从来不放 `\0`；而 C 那边
+     `printf("a\n")` 到 libc 手上只是一个 `char *`。量出来是 `printf("a\n")` 印完 `a`
+     之后接着把池子里下一个字面量也印了半句。
+  3. **`bytes` 那一种常量被当成文本发了**。`T_STR` 有两个 kind（`mir/ir.js` 的
+     `ConstPool.bytes`）：`str` 存文本，`bytes` 存**十六进制**。C 的串字面量里有 0x80
+     以上的字节时前端走 `bytesOnce` —— 于是那条十六进制**本身**成了数据段里的内容，
+     `strlen("stdout 也是一格")` 回 38（19 个字节的十六进制正好 38 个字符）。
+  4. **`MLOAD`/`MSTORE` 在原生腿上不是线性内存**。那边指针是真地址，这两条就是解引用；
+     照旧过 `omni_lin_at` 查界，量出来是链接时缺 `_omni_lin_at` —— 而就算把那个符号链
+     进去，查的也是错的那块内存。现在按 `mod.native` 分岔（`nativeMemInsn`）。
+  5. **`static` 没落到 `internal` 上**。头文件里那些没被用到的 `static inline`（SDK 的
+     `__sputc`）在我们手上是一个 0 条指令的函数体，照默认的外部链接发出去就是
+     `define i32 @__sputc() { ret i32 0 }` —— **一份把 libc 名字占住的空实现**。
+     JIT 那侧更险：`omni_jit_define` 让模块自己定义的名字优先。
+  6. **外部符号的形参不能一处 `ptr` 一处 `i64`**。`externArg` 从前把胖指针抽出来之后
+     转成了 `ptr`，于是 `strlen("abc")`（字面量）与 `strlen(s)`（一个 i64 变量）成了
+     `i64 (ptr)` 与 `i64 (i64)` 两份声明。MIR 上指针本来就是 i64，两者同一个寄存器类
+     —— 统一按 i64 传。同一个道理：**原生腿上串常量的值就是地址**（一个 i64），
+     不是胖指针，不然是 `store i64 [i64 …, i64 …]`，LLVM 当场说类型对不上。
+
+  这一刀实际落下来的四格（都在 `backend-llvm/emit.js`）：`globalRef`（原生腿一律用真
+  符号名，`@g_` 只留给线性内存那几条腿）、`blobGlobal`（字节块全局：外部的发
+  `external global`，自己的发定义 —— 初值里的**地址**是 `ptrtoint` 常量表达式，塞不进
+  `[n x i8]` 的元素里，所以有 fixup 的块发成一个紧凑结构体，clang 出来的也是这个形状）、
+  `GADDR`/`FRAME`（前者一条 `ptrtoint`，后者在入口块按 `frames` 表各发一个 alloca ——
+  原生腿上 `&x` 就是这一条）、以及上面第 1/2/3/6 条那几处。
+
+  **下一格边界**：`04-setjmp.c` 在这条腿上**跑对了**，但 `declare` 上没有
+  `returns_twice` —— `-O0` 下没事，开优化就是一个静悄悄的错答案。而 `LL_NOJMP` 那张
+  名单只照到 `CCALL` 一支，外部 `CALL` 那一支从它旁边绕过去了。两者要一起收：
+  名单上的那几个名字发 `declare … #returns_twice`，两支共用同一处判断。
+
 - **J5 FFI 第二刀（JIT → 任意库）**：库表 + `dlopen` 回退，用 `libm` 的 `sin`/`cos` 验收。
   C_ABI 里 `lib: null` 的那些（libc）走 `dlsym(RTLD_DEFAULT, …)`，第三方库走 `--lib`。
 - **J6 会话进编译器进程**：新增 ABI（`jit_open/jit_add/jit_map/jit_lookup/jit_call_i`），

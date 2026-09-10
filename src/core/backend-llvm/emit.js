@@ -37,6 +37,7 @@ import {
   isFloatType, CVT_I2F, CVT_F2I, CVT_F2U, CVT_U2F,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff, memBytes,
+  callVaFixed, callLdRet, hexBytes,
 } from '../mir/ir.js';
 
 /**
@@ -301,7 +302,21 @@ class LlvmEmitter {
     if (c.t === T_BOOL) return c.text === 'true' ? 'true' : 'false';
     if (c.t === T_F64) return llFloat(c.text);
     if (c.t === T_F32) return llFloat32(c.text);
-    if (c.t === T_STR) return this.strConst(c.text);
+    if (c.t === T_STR) {
+      /* T_STR 有**两种** kind（见 ConstPool.bytes）：`str` 存文本、后端按 UTF-8 编码；
+         `bytes` 存十六进制、就是那几个字节。C 的串字面量里有 0x80 以上的字节时前端走
+         `bytesOnce` —— 从前这儿一律当文本，于是那条十六进制**本身**被当成串写了出去
+         （量出来是 `strlen("stdout 也是一格")` 回 38：19 个字节的十六进制正好 38 个字符）。 */
+      const name = this.poolName(ref);
+      /* **原生腿上串常量的值就是那块字节的地址**（一个 i64），不是胖指针：C 里
+         `"abc"` 的类型是 `char *`，MIR 上那条指令的类型也是 i64 —— 发胖指针的话就是
+         `store i64 [i64 …, i64 …]`，LLVM 当场说类型对不上。胖指针（地址 + 长度）是
+         ADR-0005 的 Omni string，那是线性内存那几条腿的事。 */
+      if (this.mir.native === true) return `ptrtoint (ptr ${name} to i64)`;
+      const n = this.strs.get(`${c.kind}:${c.text}`).bytes.length;
+      return `[i64 ptrtoint (ptr ${name} to i64), i64 ${n}]`;
+    }
+
     // 空引用（OIR 的 NullRef）。方言里写不出 null，但两条路走得到它：「非 void 的函数掉出
     // 尾巴」会补一个零值 return（类的零值就是它），以及多维数组那一刀 —— `(anew (arr (arr T)) N)`
     // 的行零值是空引用（见 sexpr/lower.js 的 anew），那个常量的类型码是 T_ARR 而不是 T_AGG。
@@ -321,40 +336,136 @@ class LlvmEmitter {
    * 编码用的是与 C 后端同一份 utf8Bytes（host/utf8.js），落单代理项的处理也因此一致。
    */
   strConst(text) {
-    let e = this.strs.get(text);
+    return this.poolConst('str', text, utf8Bytes(text));
+  }
+
+  /**
+   * 池子里的一条：回那个 `[2 x i64]` 的常量表达式，顺手登记要发的字节。
+   *
+   * 键上带 kind 是必须的：`bytes` 那一种的 `text` 是**十六进制**，与某个正好长成
+   * `"e4b99f"` 的文本串会撞在同一格上，而它们要发的字节完全不同。
+   */
+  poolConst(kind, text, bytes) {
+    const key = `${kind}:${text}`;
+    let e = this.strs.get(key);
     if (e === undefined) {
-      const bytes = utf8Bytes(text);
       e = { name: `@.omni_s${this.strs.size}`, bytes: bytes };
-      this.strs.set(text, e);
+      this.strs.set(key, e);
     }
     return `[i64 ptrtoint (ptr ${e.name} to i64), i64 ${e.bytes.length}]`;
   }
 
   /** ref 的类型码。 */
   tyOf(ref) {
-    if (isConstRef(ref)) return this.mir.consts.get(ref).t;
+    if (isConstRef(ref)) {
+      const c = this.mir.consts.get(ref);
+      /* 原生腿上串常量的值是**地址**（见 `val`），所以它的类型也是 i64 —— 报 T_STR 的话
+         `typed()` 会写出 `[2 x i64] ptrtoint (…)`，而 `externArg` 会去 extractvalue
+         一个 i64。类型与值必须在同一处决定。 */
+      if (c.t === T_STR && this.mir.native === true) return T_I64;
+      return c.t;
+    }
     return this.resultTy(this.f, this.f.at(ref));
   }
 
   /** `<类型> <值>`，call/store 那些地方要的形式。 */
+  /**
+   * 一个模块级变量在 IR 里的名字。
+   *
+   * 线性内存那条腿上前面加 `g_`（这一层给自己的命名空间）；**原生腿上用真符号名** ——
+   * 那边的模块级变量就是 C 的全局量，`extern FILE *stdout` 在 SDK 里是 `__stdoutp`，
+   * 链接器/JIT 要按那个名字找它，而我们自己定义的那些也得让别的目标文件按名字找得到
+   * （MIR 那侧：`setGlobalExtern` / `globalSym`，两者都只有 native 腿有）。
+   */
+  globalRef(gi) {
+    if (this.mir.native === true) {
+      return `@${(this.mir.globalSym ?? [])[gi] ?? this.mir.globals[gi]}`;
+    }
+    return `@g_${this.mir.globals[gi]}`;
+  }
+
+  /** 串常量池里那一条的符号名（全局初值里的地址要它，见 `blobGlobal`）。 */
+  poolName(ref) {
+    const c = this.mir.consts.get(ref);
+    if (c.kind === 'bytes') this.poolConst('bytes', c.text, hexBytes(c.text));
+    else this.poolConst('str', c.text, utf8Bytes(c.text));
+    return this.strs.get(`${c.kind}:${c.text}`).name;
+  }
+
+  /**
+   * 一个**字节块**全局（`setGlobalData`/`setGlobalExtern`，只有原生腿有）。
+   *
+   * 体不在这个模块里的发 `external global`；自己的发定义，初值就是那几个字节 ——
+   * 除了 `fixups` 那几格：初值里的**地址**编译期算不出来（那是链接器的事），
+   * 在 IR 上它们是 `ptrtoint` 常量表达式，而常量表达式塞不进 `[n x i8]` 的元素里。
+   * 所以有 fixup 的块发成一个**紧凑结构体**，字节段与 i64 地址段交替 —— clang 对
+   * `static const char *p = "x";` 出来的也是这个形状。
+   *
+   * `static`（`globalLocal`）落在 `internal` 上：两个翻译单元里各有一个同名的
+   * `static int nb_syms` 不该撞（C11 6.2.2 的内部链接）。
+   */
+  blobGlobal(gi, blob) {
+    const name = this.globalRef(gi);
+    const size = blob.size > 0 ? blob.size : 8;
+    if (blob.extern === true) {
+      this.line(`${name} = external global [${size} x i8]`);
+      return;
+    }
+    const bytes = blob.bytes ?? [];
+    const byteRun = (from, to) => {
+      const bs = [];
+      for (let k = from; k < to; k++) bs.push(`i8 ${bytes[k] ?? 0}`);
+      return { ty: `[${to - from} x i8]`, text: `[${bs.join(', ')}]` };
+    };
+    const fixups = (blob.fixups ?? []).slice().sort((a, b) => a.off - b.off);
+    const parts = [];
+    let pos = 0;
+    for (const fx of fixups) {
+      if (fx.off > pos) parts.push(byteRun(pos, fx.off));
+      let at;
+      if (fx.kind === 'g') at = `ptrtoint (ptr ${this.globalRef(fx.no)} to i64)`;
+      else if (fx.kind === 'f') at = `ptrtoint (ptr @${this.mir.funcs[fx.no].name} to i64)`;
+      else at = `ptrtoint (ptr ${this.poolName(fx.no)} to i64)`;
+      const add = fx.add === undefined ? 0n : BigInt(fx.add);
+      parts.push({ ty: 'i64', text: add === 0n ? at : `add (i64 ${at}, i64 ${add})` });
+      pos = fx.off + 8;
+    }
+    if (pos < size) parts.push(byteRun(pos, size));
+    const link = (this.mir.globalLocal ?? [])[gi] === true;
+    const kw = link ? 'internal global' : 'global';
+    const align = blob.align > 0 ? blob.align : 1;
+    if (parts.length === 1) {
+      this.line(`${name} = ${kw} ${parts[0].ty} ${parts[0].text}, align ${align}`);
+      return;
+    }
+    const ty = `<{ ${parts.map((p) => p.ty).join(', ')} }>`;
+    const init = `<{ ${parts.map((p) => `${p.ty} ${p.text}`).join(', ')} }>`;
+    this.line(`${name} = ${kw} ${ty} ${init}, align ${align}`);
+  }
+
   typed(ref) { return `${this.ty(this.tyOf(ref), 'operand')} ${this.val(ref)}`; }
 
   /**
    * 一个实参**按 C 的 ABI**摆（外部符号的调用点用它，ADR-0022 的 J4）。
    *
-   * 唯一要动的是**胖指针**（`T_STR` -> `[2 x i64]`：地址 + 长度）：真 C 那边收的是一格
+   * 要动的是**胖指针**（`T_STR` -> `[2 x i64]`：地址 + 长度）：真 C 那边收的是一格
    * `const char *`，而一个 16 字节的聚合在 arm64 与 x86_64 上都要占**两格**寄存器 ——
    * 于是第二个指针实参就落错了位置。量出来的：`strlen("abcdefg")` 侥幸对（地址正好在
    * 第一格），`strcmp("abc","abc")` 直接 segfault。所以在调用点把地址抽出来。
+   *
+   * 抽出来之后**就按 i64 传，不转成 `ptr`**：MIR 上指针本来就是 i64（原生腿的地址是真
+   * 地址那个数），两者在 arm64/x86_64 上是同一个寄存器类，而「同一个符号在两处的签名
+   * 必须一样」这条规矩要的是**一致**。转成 ptr 的话，同一个 `strlen` 在
+   * `strlen("abc")`（字面量，抽出来是 ptr）与 `strlen(s)`（一个 i64 变量）两处就成了
+   * `i64 (ptr)` 与 `i64 (i64)` 两份声明 —— 量出来是 `tests/c/sys/01-sdk-headers.c`
+   * 当场停在那条「两处的签名不一样」上。
    */
   externArg(ref) {
     const at = this.tyOf(ref);
     if (at !== T_STR) return { text: this.typed(ref), ty: this.ty(at, '外部符号的形参') };
     const a0 = this.fresh();
     this.line(`  ${a0} = extractvalue [2 x i64] ${this.val(ref)}, 0`);
-    const p = this.fresh();
-    this.line(`  ${p} = inttoptr i64 ${a0} to ptr`);
-    return { text: `ptr ${p}`, ty: 'ptr' };
+    return { text: `i64 ${a0}`, ty: 'i64' };
   }
 
   /* --------------------------------------------------------------- 基本块 */
@@ -428,6 +539,16 @@ class LlvmEmitter {
     // omni_main 最前面那几句 store —— 字符串的零是池子里的空串，不是常量表达式。
     let sawGlobal = false;
     for (let i = 0; i < this.mir.globals.length; i++) {
+      const blob = (this.mir.globalBlob ?? [])[i];
+      /* **一块字节**（`setGlobalData`/`setGlobalExtern`，只有原生腿有）：按裸字节发。
+         在我们眼里 `extern FILE *stdout` 与 `static const char *PATH = "/tmp/x"` 都只是
+         一块内存，类型是 C 那边的事 —— 它们的类型在 MIR 里就是 `T_DYN`（C 前端不给全局块
+         钉类型），照常走 `ty()` 会撞上那条 dyn 的拒绝。 */
+      if (blob !== undefined && blob !== null) {
+        this.blobGlobal(i, blob);
+        sawGlobal = true;
+        continue;
+      }
       const t = this.mir.globalTy[i];
       this.line(`@g_${this.mir.globals[i]} = internal global ${this.ty(t, `模块级变量 ${this.mir.globals[i]}`)} zeroinitializer`);
       sawGlobal = true;
@@ -539,8 +660,12 @@ class LlvmEmitter {
     // 字符串字面量的字节。放在最后是因为它们是函数体发到一半才登记的；
     // 顺序按登记顺序，所以同一份输入两次发出来逐字节相同（快照轴要这个）。
     for (const e of this.strs.values()) {
-      const bs = e.bytes.map((b) => `i8 ${b}`).join(', ');
-      this.line(`${e.name} = private unnamed_addr constant [${e.bytes.length} x i8] [${bs}]`);
+      /* 末尾多一个 `\0`（长度那一格不数它）：Omni 的字符串带长度、不需要它，但**C 需要** ——
+         `printf("a\n")` 到了 libc 手上只是一个 `char *`，没有零它就一直读到下一个字面量
+         里去（量出来是 `printf("a\n")` 印出 `a` 之后又印了半句 `b %d`）。一个字节换掉
+         「池子里相邻的两串会串味」这一类 bug，而且与 C 后端那侧的字面量池一样。 */
+      const bs = e.bytes.map((b) => `i8 ${b}`).concat(['i8 0']).join(', ');
+      this.line(`${e.name} = private unnamed_addr constant [${e.bytes.length + 1} x i8] [${bs}]`);
     }
     if (this.strs.size > 0) this.line('');
 
@@ -689,13 +814,27 @@ class LlvmEmitter {
       ps.push(`${this.ty(f.params[pi].t, `参数 ${f.params[pi].name}`)} %a${pi}`);
       pi++;
     }
-    this.line(`define ${this.ty(f.ret, '返回值')} @${f.name}(${ps.join(', ')}) {`);
+    /* `static`（`MirFunc.local`）在 IR 上就是 `internal`：这条腿上它不只是个标注 ——
+       头文件里那些没被用到的 `static inline`（SDK 的 `__sputc` 之类）在我们手上是一个
+       0 条指令的函数体，照默认的外部链接发出去，就是**用一份空实现占住了一个 libc 名字**。
+       JIT 那侧更险：`omni_jit_define` 会让模块自己定义的名字优先，于是那份空实现会盖掉真的。 */
+    const link = f.local === true ? 'internal ' : '';
+    this.line(`define ${link}${this.ty(f.ret, '返回值')} @${f.name}(${ps.join(', ')}) {`);
     this.startBlock('entry');
     // 槽位一律 alloca：MIR 不做 mem2reg，那是 LLVM 的活（ADR-0014 决策 6 的三处偏离之一）
     let s = 0;
     while (s < f.slots.length) {
       this.line(`  %s${s} = alloca ${this.ty(f.slots[s].t, `槽位 ${f.slots[s].name}`)}`);
       s++;
+    }
+    /* 帧存储（`FRAME`，原生腿上「取地址」的落脚点）：每块一个 alloca，大小与对齐照
+       `frames` 表 —— 那张表是编译期就定死的，所以这儿一次发完，`FRAME` 只剩取地址。
+       发在入口块而不是 `FRAME` 那一行：alloca 不出循环，摆在循环里栈会一直长。 */
+    let fr = 0;
+    while (fr < f.frames.length) {
+      const b = f.frames[fr];
+      this.line(`  %fr${fr} = alloca [${b.size} x i8], align ${b.align}`);
+      fr++;
     }
     // 形参占前几个槽（from_oir 里 declare(p.name) 就是这么排的），入口处存进去
     let p = 0;
@@ -834,12 +973,31 @@ class LlvmEmitter {
     // 模块级变量（第二十四刀）：与槽位那两条同一个形状，只是地址是 `@g_名字` 而不是
     // `%s号`。类型从全局池取（GLOAD 的 `t` 也是它，两处必须一致 —— verify 盯着这条）。
     if (op === OP.GLOAD) {
-      this.line(`  ${dst} = load ${this.ty(t, 'global')}, ptr @g_${this.mir.globals[f.aux[i]]}`);
+      this.line(`  ${dst} = load ${this.ty(t, 'global')}, ptr ${this.globalRef(f.aux[i])}`);
       return;
     }
     if (op === OP.GSTORE) {
-      const gt = this.ty(this.mir.globalTy[f.aux[i]], 'global');
-      this.line(`  store ${gt} ${this.val(f.a[i])}, ptr @g_${this.mir.globals[f.aux[i]]}`);
+      /* 字节块按**这条指令自己的类型**写（它在我们眼里是裸内存，全局池里那一格是 T_DYN）；
+         「一格」那种照旧按全局池的类型 —— verify 盯着「GLOAD/GSTORE 与全局池两处一致」这条。 */
+      const blob = (this.mir.globalBlob ?? [])[f.aux[i]];
+      const gt = blob !== undefined && blob !== null
+        ? this.ty(this.tyOf(f.a[i]), 'global')
+        : this.ty(this.mir.globalTy[f.aux[i]], 'global');
+      this.line(`  store ${gt} ${this.val(f.a[i])}, ptr ${this.globalRef(f.aux[i])}`);
+      return;
+    }
+    /* 取模块级变量的地址（`aux` = 全局号，结果是 i64）。原生腿上这条有两个来处：
+       `&全局量`，和「取一个**外部变参函数**的地址」—— 后者前端登记成一个同名的外部全局量
+       再发 GADDR（见 tccgen 的第三十一片：`pf *fp = printf;`）。两处都只要那个符号的地址，
+       所以这儿就是一条 `ptrtoint`；`@g_x` 与外部真符号的分野在 `globalRef` 里。 */
+    if (op === OP.GADDR) {
+      this.line(`  ${dst} = ptrtoint ptr ${this.globalRef(f.aux[i])} to i64`);
+      return;
+    }
+    /* 帧上那一块的地址（`aux` = 帧块号）。alloca 在入口块就发好了（见 `func`），
+       这儿只剩「把它当成一个数」—— 原生腿上 `&x` 就是这一条。 */
+    if (op === OP.FRAME) {
+      this.line(`  ${dst} = ptrtoint ptr %fr${f.aux[i]} to i64`);
       return;
     }
     // 结构体四条（ADR-0014 门槛 2 第十二刀）：NEW/COPY 从 arena 拿一块，FLD/FLDSET 是
@@ -1069,8 +1227,18 @@ class LlvmEmitter {
       const refs = f.argsOf(f.b[i]);
       const as = refs.map((r) => this.externArg(r));
       const rt = this.ty(t, `${entry} 的返回值`);
-      const nfixed = f.aux[i];
-      const variadic = nfixed !== 0;
+      /* `long double` 的返回值在 x87 的 st0 里（CALL_LDRET）：那是 x86_64 才有的回法，
+         IR 这一层没有那个类型 —— 撞上就在这儿停，别让它悄悄按 double 回。 */
+      if (callLdRet(f.aux[i])) {
+        throw new OmniError(`${NOPE} ${entry} 的 long double 返回值（它在 x87 的 st0 里）`
+          + ' —— 用 --backend interp');
+      }
+      /* 变参分界（ADR-0014 决策 4）：aux 上记的是**「固定实参个数 + 1」**，0 才是
+         「这个调用点不是变参的」—— 直接拿 aux 当个数是差一个的（量出来是
+         `printf("hi %d\n", 7)` 把 7 当成了**定参**，而苹果 arm64 上变参一律在栈上，
+         于是印出一个垃圾数）。这一格只经 `callVaFixed` 读，别自己算。 */
+      const nfixed = callVaFixed(f.aux[i]);
+      const variadic = nfixed >= 0;
       /* 声明只按**定参**发：同一个变参函数在不同调用点的实参个数不同，而定参那几格一样。 */
       const fixed = as.slice(0, variadic ? nfixed : as.length).map((a) => a.ty);
       const sig = `${rt} (${fixed.concat(variadic ? ['...'] : []).join(', ')})`;
@@ -1513,6 +1681,11 @@ class LlvmEmitter {
    * LLVM 会假定自然对齐，在 arm64 上生成的指令对非对齐地址是未定义行为。
    */
   memInsn(f, i, op, dst, t) {
+    /* **原生腿上这四条不是线性内存**（ADR-0017 第七片）：那边的指针是真地址，
+       MLOAD/MSTORE 就是「解引用」。照旧过 `omni_lin_at` 是把一个真地址当成偏移去查界 ——
+       量出来是 `fprintf(stdout, …)` 链接时缺 `_omni_lin_at`，而就算把那个符号链进去，
+       查的也是错的那块内存。所以这条腿先分岔，分岔点是模块自己那一位（`mod.native`）。 */
+    if (this.mir.native === true) { this.nativeMemInsn(f, i, op, dst, t); return; }
     this.needLinMem = true;
     if (op === OP.MSIZE) { this.line(`  ${dst} = call i64 @omni_lin_size()`); return; }
     if (op === OP.MGROW) {
@@ -1554,6 +1727,54 @@ class LlvmEmitter {
     // 这条指令的结果是**存进去之前的那个值**（另外三条腿也是），不是回读 —— 存 i8 的 300
     // 回读得到 44，那就与解释器分叉了。`select i1 true` 是恒等且对 -0.0 安全的写法
     // （`fadd 0.0` 会把 -0.0 变成 0.0），LLVM 当场折掉它。
+    this.line(`  ${dst} = select i1 true, ${rt} ${v}, ${rt} ${v}`);
+  }
+
+  /**
+   * MLOAD/MSTORE 的**原生**一路：地址是真地址，所以只有 `inttoptr` + load/store。
+   *
+   * 宽度、偏移、符号扩展那三件事与线性内存那一路逐字相同（同一个 aux 编码，同一张
+   * `MEM_LL_TY`）—— 分岔只在「地址怎么来」这一步。`align 1`：这一层不知道 C 那边给了什么
+   * 对齐，而 arm64 上按自然对齐去读一个非对齐地址是未定义行为，保守的那一边是对的。
+   *
+   * `MSIZE`/`MGROW` 在这条腿上没有意义（没有线性内存可量、可长），撞上就停。
+   */
+  nativeMemInsn(f, i, op, dst, t) {
+    if (op === OP.MSIZE || op === OP.MGROW) {
+      throw new OmniError(`${NOPE} ${OP_NAMES[op]}（这个模块认真地址，没有线性内存）`);
+    }
+    const isLoad = op === OP.MLOAD;
+    const x = f.aux[i];
+    const kind = (isLoad ? MLOAD_KINDS : MSTORE_KINDS)[memKindNo(x)];
+    const off = memOff(x);
+    let a = this.val(f.a[i]);
+    if (off !== 0) {
+      const s = this.fresh();
+      this.line(`  ${s} = add i64 ${a}, ${off}`);
+      a = s;
+    }
+    const p = this.fresh();
+    this.line(`  ${p} = inttoptr i64 ${a} to ptr`);
+    const nt = MEM_LL_TY[kind];
+    const rt = this.ty(t, '内存访问');
+    if (isLoad) {
+      if (nt === rt) { this.line(`  ${dst} = load ${nt}, ptr ${p}, align 1`); return; }
+      const raw = this.fresh();
+      this.line(`  ${raw} = load ${nt}, ptr ${p}, align 1`);
+      if (kind.charCodeAt(0) === 102) this.line(`  ${dst} = fpext ${nt} ${raw} to ${rt}`);
+      else if (kind.endsWith('u')) this.line(`  ${dst} = zext ${nt} ${raw} to ${rt}`);
+      else this.line(`  ${dst} = sext ${nt} ${raw} to ${rt}`);
+      return;
+    }
+    const v = this.val(f.b[i]);
+    let w = v;
+    if (nt !== rt) {
+      w = this.fresh();
+      if (kind.charCodeAt(0) === 102) this.line(`  ${w} = fptrunc ${rt} ${v} to ${nt}`);
+      else this.line(`  ${w} = trunc ${rt} ${v} to ${nt}`);
+    }
+    this.line(`  store ${nt} ${w}, ptr ${p}, align 1`);
+    // 与线性内存那一路同一条规矩：结果是**存进去之前的那个值**。
     this.line(`  ${dst} = select i1 true, ${rt} ${v}, ${rt} ${v}`);
   }
 
