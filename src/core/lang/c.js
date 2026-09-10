@@ -10,7 +10,8 @@
 import { OmniError } from '../source/diag.js';
 import { join, dirname } from '../host/path.js';
 import { env, isDir, installDir, readText, spawn, stderr } from '../host/native.js';
-import { lowerC } from '../frontend-c/tccgen.js';
+import { lowerC, lowerCNative } from '../frontend-c/tccgen.js';
+import { Cpp } from '../frontend-c/tccpp.js';
 import { verifyMir } from '../mir/verify.js';
 
 /* SDK 根找一次就记住（一趟里 spawn xcrun 那一下是几十毫秒，而系统头每个文件都要问一遍）。
@@ -108,8 +109,87 @@ export function cMir(path, incs, defs, args, sysIncs) {
  * `.c` 不登记成"语言"：它由 `omni c` 那一组命令驱动（obj / tcc / mir 各有各的产物），
  * 不走"按扩展名认 -> 出 OIR"那条路。
  */
+/**
+ * 一份 `.c` -> 预处理后的文本。**格式与 `tcc -E` 逐字节相同**（ADR-0017 第五刀）：
+ * 默认带 GCC 那种 `# 行号 "文件"` 的行标，`-P` 一族把它换掉或关掉。
+ * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
+ * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
+ */
+export function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, verbose, tgt) {
+  const cpp = new Cpp({
+    readFile: (p) => {
+      try {
+        return readText(p);
+      } catch {
+        return null;
+      }
+    },
+    includeDirs: incs,
+    sysIncludeDirs: sysIncs ?? cap('c.sysInclude')(),
+    dirname,
+    join,
+    /* 目标（`--arch` / `--os`）：预定义宏那一整张表按它分（第一百二十九片）。
+     * `__x86_64__` 与 `__linux__` 一变，头文件就走另一支 —— 于是「拿哪个 tcc 当尺子」
+     * 这件事在命令行上说得出来。 */
+    arch: tgt?.arch,
+    os: tgt?.os,
+  });
+  /* `-dD` = 3、`-dM` = 7（tcc 的 `dflag`）。拨在装预定义**之前** —— `-dD`/`-dM` 要印的
+   * 头一批就是预定义那几行，攒行的开关得先开（见 tccpp.js 的 `cmdlineDump`）。
+   * `ppOnly` 同理：命令行那一层出的警告，前头那个空行也得算进输出里。 */
+  cpp.dflag = dflag ?? 0;
+  cpp.ppOnly = true;
+  cpp.installPredefs(path);
+  /* `-include`：开工前先读的那几份（压在主文件上面的 `<command line>` 那一层）。 */
+  if (incls !== undefined) cpp.cmdlineIncls = incls;
+  /* `-v` 的那一格：2 = 每开一个文件印一行 `->`，3 = 连试不开的也印（`nf`）。 */
+  cpp.verbose = verbose ?? 0;
+  /* `-D` 与 `-U` 共用一条顺序（宏体 `null` = `#undef`）。 */
+  for (const [name, body] of defs) {
+    if (body === null) cpp.undefine(name);
+    else cpp.define(name, body);
+  }
+  /* `-P` 那一格（tcc 的 `Pflag`）：0 = `# 行号 "文件"`、1 = 不印、2 = `#line`、11 = `-P10`。 */
+  cpp.Pflag = pflag ?? 0;
+  /* `-M` 一族：把读过的头记下来（`genDeps`），`-M`/`-MD` 连系统头一起记。 */
+  if (deps !== undefined) {
+    cpp.genDeps = true;
+    cpp.includeSysDeps = deps.sys === true;
+    cpp.targetDeps.push(path);   // 主文件在最前（tcc 是 `tcc_add_file_internal` 加的）
+  }
+  const out = cpp.preprocessToText(path, readText(path));  for (const w of cpp.warnings) stderr(`${w}\n`);
+  if (deps !== undefined) deps.list = cpp.targetDeps;
+  return out;
+}
+
+/**
+ * `.c` -> **原生** MIR（`omni c obj` 那条路）。与 `cMir` 的差别只有一个：走 `lowerCNative`，
+ * 出来的 MIR 没有线性内存，地址就是真地址。
+ *
+ * 读文件、预处理、降级都在这一门语言里 —— 驱动只递参数、拿 `{ mod, warnings }`。
+ */
+export function cMirNative(path, opts, defs) {
+  return lowerCNative(path, readText(path), {
+    readFile: (p) => {
+      try {
+        return readText(p);
+      } catch {
+        return null;
+      }
+    },
+    includeDirs: opts.includeDirs,
+    sysIncludeDirs: opts.sysIncludeDirs,
+    dirname,
+    join,
+    arch: opts.arch,
+    os: opts.os,
+  }, defs.map(([name, body]) => ({ name, body })));
+}
+
 export function registerCLang(api) {
   api.registerCap('c.toMir', cMir);
   api.registerCap('c.sysInclude', cSysInclude);
   api.registerCap('c.usrLib', sdkUsrLib);
+  api.registerCap('c.preprocess', cppText);
+  api.registerCap('c.toMirNative', cMirNative);
 }

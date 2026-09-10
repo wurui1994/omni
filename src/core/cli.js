@@ -26,8 +26,6 @@ import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
-import { Cpp } from './frontend-c/tccpp.js';
-import { lowerCNative } from './frontend-c/tccgen.js';
 import { genArm64Module as genArm64 } from './arm64/from_mir.js';
 import { genModule as genX64 } from './x64/from_mir.js';
 import { writeObject } from './link/macho.js';
@@ -199,57 +197,6 @@ function inclArgs(argv) {
  */
 
 
-/**
- * 一份 `.c` -> 预处理后的文本。**格式与 `tcc -E` 逐字节相同**（ADR-0017 第五刀）：
- * 默认带 GCC 那种 `# 行号 "文件"` 的行标，`-P` 一族把它换掉或关掉。
- * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
- * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
- */function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, verbose, tgt) {
-  const cpp = new Cpp({
-    readFile: (p) => {
-      try {
-        return readText(p);
-      } catch {
-        return null;
-      }
-    },
-    includeDirs: incs,
-    sysIncludeDirs: sysIncs ?? cap('c.sysInclude')(),
-    dirname,
-    join,
-    /* 目标（`--arch` / `--os`）：预定义宏那一整张表按它分（第一百二十九片）。
-     * `__x86_64__` 与 `__linux__` 一变，头文件就走另一支 —— 于是「拿哪个 tcc 当尺子」
-     * 这件事在命令行上说得出来。 */
-    arch: tgt?.arch,
-    os: tgt?.os,
-  });
-  /* `-dD` = 3、`-dM` = 7（tcc 的 `dflag`）。拨在装预定义**之前** —— `-dD`/`-dM` 要印的
-   * 头一批就是预定义那几行，攒行的开关得先开（见 tccpp.js 的 `cmdlineDump`）。
-   * `ppOnly` 同理：命令行那一层出的警告，前头那个空行也得算进输出里。 */
-  cpp.dflag = dflag ?? 0;
-  cpp.ppOnly = true;
-  cpp.installPredefs(path);
-  /* `-include`：开工前先读的那几份（压在主文件上面的 `<command line>` 那一层）。 */
-  if (incls !== undefined) cpp.cmdlineIncls = incls;
-  /* `-v` 的那一格：2 = 每开一个文件印一行 `->`，3 = 连试不开的也印（`nf`）。 */
-  cpp.verbose = verbose ?? 0;
-  /* `-D` 与 `-U` 共用一条顺序（宏体 `null` = `#undef`）。 */
-  for (const [name, body] of defs) {
-    if (body === null) cpp.undefine(name);
-    else cpp.define(name, body);
-  }
-  /* `-P` 那一格（tcc 的 `Pflag`）：0 = `# 行号 "文件"`、1 = 不印、2 = `#line`、11 = `-P10`。 */
-  cpp.Pflag = pflag ?? 0;
-  /* `-M` 一族：把读过的头记下来（`genDeps`），`-M`/`-MD` 连系统头一起记。 */
-  if (deps !== undefined) {
-    cpp.genDeps = true;
-    cpp.includeSysDeps = deps.sys === true;
-    cpp.targetDeps.push(path);   // 主文件在最前（tcc 是 `tcc_add_file_internal` 加的）
-  }
-  const out = cpp.preprocessToText(path, readText(path));  for (const w of cpp.warnings) stderr(`${w}\n`);
-  if (deps !== undefined) deps.list = cpp.targetDeps;
-  return out;
-}
 
 /**
  * `gen_makedeps`（tcctools.c:599）：一条 make 规则。
@@ -358,24 +305,17 @@ function ehFrameOf(blob, arch, os) {
  * `arch` 给 `x86_64` 就在 Apple Silicon 上交叉出 Rosetta 能跑的码，不给按本机。
  */
 function cObj(path, out, arch, incs, defs, fmt, os, sysIncs) {
-  const { mod, warnings } = lowerCNative(path, readText(path), {
-    readFile: (p) => {
-      try {
-        return readText(p);
-      } catch {
-        return null;
-      }
-    },
+  /* C -> 原生 MIR 那一步按名字要（ADR-0021 的 S4）：读文件、预处理、降级都在 C 那门语言里，
+     驱动这一层只管把参数递过去、再把产物写成目标文件。 */
+  const { mod, warnings } = cap('c.toMirNative')(path, {
     includeDirs: incs,
     sysIncludeDirs: sysIncs ?? cap('c.sysInclude')(),
-    dirname,
-    join,
     /* 预定义宏里目标 CPU 那三条跟着 `--arch` 走（第一百〇二片）：`__x86_64__` 一变，
      * tinycc 自己的源码就走 x86_64 那一支，不必手工递 `-DTCC_TARGET_X86_64`。
      * 剩下那四十几条跟着 `--os` 走（第一百二十九片），`wchar_t` 的宽度也是（第一百三十片）。 */
     arch: arch === 'x86_64' ? 'x86_64' : 'arm64',
     os,
-  }, defs.map(([name, body]) => ({ name, body })));
+  }, defs);
   for (const w of warnings) stderr(`${w}\n`);
   const errs = verifyMir(mod);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
@@ -2654,7 +2594,7 @@ function main(argv) {
       const cai = rest.indexOf('--arch');
       const csi = rest.indexOf('--os');
       const tgt = { arch: cai >= 0 ? rest[cai + 1] : 'arm64', os: csi >= 0 ? rest[csi + 1] : 'osx' };
-      const out = cppText(path, incDirs(rest), defArgs(rest), dflag, pflag, deps,
+      const out = cap('c.preprocess')(path, incDirs(rest), defArgs(rest), dflag, pflag, deps,
         sysIncDirs(rest), inclArgs(rest), verbose, tgt);
       if (wantDeps) {
         const target = oi >= 0 ? rest[oi + 1] : depTarget(path);
