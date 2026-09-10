@@ -101,6 +101,8 @@ class CEmitter {
      * 闭包的 make、外部符号那些不在表里，走老路。 */
     this.knownFuncs = new Set();
     for (const f of mod.funcs) this.knownFuncs.add(f.mangled);
+    /* 这一份的函数体里叫到了哪些函数（原型那一段按它裁，见 protoLines）。 */
+    this.usedFns = new Set();
     this.indent = 0;
     this.tmp = 0;
     // 函数级计时（第八十八刀，见 profTable）：`--profile` 或 `OMNI_PROFILE=1` 打开。
@@ -413,7 +415,11 @@ class CEmitter {
       } else this.line(`static ${def}`);
     }
     this.profTable();
-    for (const f of this.mod.funcs) this.line(`${this.proto(f)};`);
+    /* 原型：**这一份用得着的那些**才发（ADR-0021 的 S4）。整份程序有 5891 个函数，而一格
+       插件自己发的加自己叫到的通常只有几百个 —— 从前每格插件都重发一整套（核心里 3 万行）。
+       与字面量池同一个手法：先占一行，等函数体发完、`useFn` 记全了再回填。 */
+    this.protoAt = this.out.length;
+    this.line('');
     /* 闭包的 make 也要跨 TU 调得到：原型进共用前段，定义留在"只发一次"那段 ——
      * 单例闭包的 `static omni_fn one` 是状态，复制它 `f === f` 会假。 */
     if (this.extern) for (const c of closures) this.line(`${this.closureProto(c)};`);
@@ -497,13 +503,18 @@ class CEmitter {
         throw new OmniError(`--plugin ${this.plugin}：它得收**一格**参数（那格 api），`
           + `现在是 ${Array.isArray(reg.params) ? reg.params.length : '?'} 格`);
       }
+      /* 这两个名字在这一句里被叫到，原型那一段得留着（见 protoLines）。 */
+      this.useFn(this.mod.entry);
+      this.useFn(reg.mangled);
       this.line(`omni_dyn omni_plugin_init(omni_dyn api) { static bool once_ = false;`
         + ` if (!once_) { once_ = true; ${this.mod.entry}(); }`
         + ` return ${reg.mangled}(&(struct omni_list_dynamic_s){ (omni_dyn[]){ api }, 1, 1 }); }`);
     } else {
+      this.useFn(this.mod.entry);
       this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${strHookReg}${pmReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     }
     this.out[this.s16At] = this.s16PoolLines().join('\n');
+    this.out[this.protoAt] = this.protoLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
     this.out[this.vecAt] = this.vecLines().concat(this.bufLines()).concat(this.arrLines()).join('\n');
@@ -537,11 +548,15 @@ class CEmitter {
     /* 判据是"**是个串**"而不是"不是 undefined"：计算键的方法（`{ [k]() {} }`）的名字
        只有运行期才知道，降级器那儿给的是 **null** —— 按 undefined 判会让 null 漏进来，
        utf8Bytes(null) 当场把宿主炸掉（量出来的：宿主崩是最坏的一档）。 */
-    const named = closures.filter((c) => typeof c.fnName === 'string');
+    const named = closures.filter((c) => typeof c.fnName === 'string'
+      /* 插件只登记**自己发的**那些：表里每条都要拿函数指针，别人的那些既不是它的事，
+         又会把整套原型拖进来（那是每格插件 3 万行的来源之一）。 */
+      && this.emitsSym(c.make, this.fileOfMangled(c.mangled)));
     if (named.length === 0) return 0;
     this.line(`static const omni_js_fn_meta omni_js_fnmeta_tbl[${named.length}] = {`);
     this.indent++;
     for (const c of named) {
+      this.useFn(c.mangled);
       const bytes = utf8Bytes(c.fnName);
       const len = c.fnLen === undefined ? 0 : c.fnLen;
       this.line(`{ (const void *)(omni_fnptr)${c.mangled}, ${cString(bytes)}, ${bytes.length}, ${len} },`);
@@ -552,7 +567,30 @@ class CEmitter {
     return named.length;
   }
 
-  /** 这个文件属于这一份产物吗（`own` 没给就全算自己的） */
+  /**
+   * 原型那一段（回填进 `protoAt`）。
+   *
+   * 不切分、也不 `--bind` 的那份（单体可执行文件）照旧全发：它自己就是全部，一个都不多。
+   * 插件那份只发**用得着的**：自己发定义的 + 自己叫到的（`useFn` 在发函数体时记下来的）。
+   * 少发一个的后果是 clang 当场骂 `use of undeclared identifier`，所以这一格漏不掉。
+   */
+  protoLines() {
+    const all = this.bind === null;
+    const out = [];
+    for (const f of this.mod.funcs) {
+      if (all || this.usedFns.has(f.mangled) || this.emitsSym(f.mangled, f.file) || this.isEntry(f)) {
+        out.push(`${this.proto(f)};`);
+      }
+    }
+    return out;
+  }
+
+  /** 发函数体时记下"叫到了谁"（原型那一段按它裁）。 */
+  useFn(name) {
+    if (typeof name === 'string') this.usedFns.add(name);
+  }
+
+
   owns(file) {
     if (this.own === null) return true;
     const f = typeof file === 'string' ? file : '';
@@ -634,6 +672,8 @@ class CEmitter {
   }
 
   closureMake(c) {
+    /* 体里要拿 `${c.mangled}` 的函数指针，所以原型那一段得留着它（见 protoLines）。 */
+    this.useFn(c.mangled);
     const ps = c.captures.map((f) => `${cTypeName(f.type)} c_${f.name}`);
     this.line(`${this.extern ? '' : 'static '}omni_fn ${c.make}(${ps.length ? ps.join(', ') : 'void'}) {`);
     this.indent++;
@@ -1660,6 +1700,7 @@ class CEmitter {
       case 'IndexSet':
         return `${cTypeName(e.recvType)}_set(${this.expr(e.obj)}, ${this.expr(e.index)}, ${this.expr(e.value)})`;
       case 'Call': {
+        this.useFn(e.func);
         const st = this.stackArgs(e);
         return st !== null ? st : `${e.func}(${e.args.map((a) => this.expr(a)).join(', ')})`;
       }
