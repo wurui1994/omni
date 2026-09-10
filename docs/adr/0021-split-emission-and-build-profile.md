@@ -140,6 +140,52 @@ omni_mem:   <=512           147801 次     0.0%
 这三条都不需要动 AST 的表示，也不需要第二个 arena；"给前端一格 scratch arena"于是从
 第一选择降级成备选（它还得先解开"span 指着 SourceFile"这条逃逸）。
 
+### 按归属改的第一刀（已落）与它量出来的结果
+
+**实参 list 一律走栈。** 归属表的第一名是
+`omni_list_dynamic_from < omni_js_call3 < omni_js_arr_find < omni_js_m_find < u_lexJs`，
+6.4%、约 2300 万次、约 1 GB —— 回调每处理一格元素就现拼一条实参 list。
+
+修法不是在调用点上一个个判断，而是**把责任翻过来**：让"实参 list 不逃逸"成为一条处处成立
+的不变量 —— 绑形参走只读的 `js_arr_get`、rest 走拷一份的 `js_arr_slice`，而唯一会把它当值
+留住的 `arguments` 自己拷一份（`lower.js` 那一句）。于是 `omni_js_call3` 与生成代码里的
+直接调用都能把那条 list 放在栈上。（规范里非严格函数的 `arguments` 与形参联动，这个值域
+本来就没有那一条 —— 形参在入口绑成局部量，所以拷贝不改变任何可观察行为。）
+
+```
+分配   357.8M -> 333.2M   (-6.9%；连上"直接调用上栈"那一刀累计 370.2M -> 333.2M)
+arena  10571 -> 9260 MiB  (-12.4%)
+```
+
+再跑一次归属确认它落在了该落的地方：`call3` 那条栈**从前八名里消失了**。
+
+### 下一刀：属性键的三次编码（归属表现在的第一名）
+
+新的前八名是同一个模式（各 0.6%，只是被精确帧元组拆开了）：
+
+```
+omni_s16_of_utf8 / omni_s16_to_utf8 / omni_js_key_tag_
+  < omni_js_pkey_ < omni_js_getp < omni_js_obj_getk < l_JsParser_peek
+```
+
+一次 `o.foo` 在真对象上要走 **UTF-8 -> UTF-16 -> UTF-8 三次分配**，位置很具体：
+
+1. `omni_js_obj_getk` 的 OBJ 那一支（`omni_js_obj.h`）：
+   `return omni_js_getp(o, omni_dyn_of_s16(omni_s16_of_utf8(key)), omni_dyn_undef());`
+   —— 它收到的 `key` 本来就是 UTF-8（对的形态），却转成 STR16 只为了凑 `getp` 的 dyn 形参。
+2. `omni_js_getp` -> `omni_js_pkey_(k)` -> `omni_s16_to_utf8`：又转回 UTF-8。
+3. `omni_js_pkey_` -> `omni_js_key_tag_('s', u)`：再开一块，只为在前面加一个字节的前缀。
+
+而这个键在生成的 C 里**两种编码的静态副本都已经躺在字面量池里了**（`k_s16_N` 与
+`k_s16_N_s`）。两步走：
+
+- **先 3 -> 1**：加一格 `omni_js_getp_k(o, omni_str key, omni_dyn recv)`，直接收 UTF-8 键，
+  只在真要 dyn 键的地方（代理陷阱、访问器的 this）才现造。`obj_getk` 的 OBJ 支改叫它。
+  不动发射器，纯运行时。
+- **再 1 -> 0**：发射器给每个字面量多发一份**带前缀的**静态键（`k_s16_N_p`，就是
+  `"s" + utf8`），`...k` 那条特化把它一起传下去。前缀存在的理由是"串键与符号键不能撞"
+  （符号按 `y%p` 发键），所以不能简单地去掉前缀 —— 只能把它挪到编译期。
+
 - **P4 属性取值**。字面量键带编译期哈希、动态键去掉 UTF-16/UTF-8 往返、按调用点 inline
   cache。容器那一半已经落了一点：索引表多存一份完整哈希（`ihash`），探测先比那 8 个字节再
   调 EQ；`_find_h` / `_set_h` 让字面量键连 `HASH(k)` 都省掉。目标 emit-c 用户 CPU < 5 s。
