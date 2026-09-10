@@ -43,3 +43,32 @@ export function target(name) {
 export function targetNames() {
   return Object.keys(TARGETS);
 }
+
+/* ---- 语言（前端）：按扩展名认，谁装了谁**自己登记** ----
+ *
+ * 与目标那半张表的差别：前端的实现住在 cli.js 里（它们要用 cli 的一整套读盘 / 诊断 /
+ * 缓存），所以这一层不 import 它们（会成环），改成"加载完自己来登记"。
+ * 这正好是插件要的形状：`dlopen` 出来的那一格在 `omni_plugin_init` 里调 registerLang，
+ * 与内建项走同一条路 —— 内建与外挂在这一层看不出区别，只是登记的时刻不同。
+ */
+const LANGS = new Map();
+
+/** @param exts 扩展名（带点）@param name 语言名 @param compile (path, argv) -> { mod, ... } */
+export function registerLang(exts, name, compile) {
+  for (const e of exts) LANGS.set(e, { name, compile });
+}
+
+/** 这个路径归哪种语言；不归任何登记过的语言就交 null（调用方落到核心方言那一支） */
+export function lang(path) {
+  for (const [ext, l] of LANGS) {
+    if (path.endsWith(ext)) return l;
+  }
+  return null;
+}
+
+/** 装着的语言都有哪些 */
+export function langNames() {
+  const out = [];
+  for (const [, l] of LANGS) if (!out.includes(l.name)) out.push(l.name);
+  return out;
+}

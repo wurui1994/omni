@@ -62,7 +62,7 @@ import { cAbiLibs } from './hir/c_abi.js';
 import { emitJs, emitJsFunc, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC, emitCWithStats, emitCUnits } from './backend-c/emit.js';
 /* 后端过一格注册表（ADR-0021 S3）：调用点不叫函数名，可选加载才有立足处 */
-import { target } from './plugin.js';
+import { target, registerLang, lang } from './plugin.js';
 import { emitLlvm } from './backend-llvm/emit.js';
 import { emitSpirv } from './backend-spirv/emit.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
@@ -715,12 +715,18 @@ function compile(path, argv = []) {
   return r;
 }
 
+/* 前端在这儿登记（ADR-0021 S3）：内建的现在就登记，`dlopen` 出来的插件在
+ * `omni_plugin_init` 里调同一个 registerLang —— 这一层看不出内建与外挂的区别。
+ * 核心方言（.omni / .omnid / .omnis）不登记：它跟 driver 是一体的，永远在核心里。 */
+registerLang(['.js'], 'js', (path) => compileJs(path));
+registerLang(['.wat'], 'wat', (path) => compileWat(path));
+registerLang(['.sx'], 'sx', (path) => compileSexpr(path));
+registerLang(['.asy'], 'asy', (path) => compileAsy(path));
+registerLang(['.jnc'], 'jnc', (path, argv) => compileJnc(path, incDirs(argv)));
+
 function compileFront(path, argv) {
-  if (path.endsWith('.js')) return compileJs(path);
-  if (path.endsWith('.wat')) return compileWat(path);
-  if (path.endsWith('.sx')) return compileSexpr(path);
-  if (path.endsWith('.asy')) return compileAsy(path);
-  if (path.endsWith('.jnc')) return compileJnc(path, incDirs(argv));
+  const l = lang(path);
+  if (l !== null) return l.compile(path, argv);
   return compileProgram(path, undefined, modeFor(path, argv));
 }
 
