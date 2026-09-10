@@ -3658,11 +3658,24 @@ class JncLower {
       });
       n++;
     }
-    /* 跳过的那些只报**一条**汇总：一个 `<stdio.h>` 能跳过上百条，逐条报会把真正的诊断埋掉。
-       名字都在 `--verbose` 那一档里没有意义 —— 要查是哪一条，手写那一句声明就知道了。 */
+    /* 跳过的那些只报**一条**汇总：一个 `<math.h>` 能跳过五六十条，逐条报会把真正的诊断埋掉。
+       而"第一条是什么"信息量很低 —— 一个真头文件里跳过的东西**成族**（`math.h` 里几乎全是
+       `long double` 那一族的 `acosl`/`asinl`/…）。所以按理由分组，报最大的那一族加上它的
+       条数：读的人一眼看出"这是 long double 那一族，不是我写错了什么"。 */
     if (got.skipped.length > 0) {
-      this.warn(it, `"${hspec}" 里有 ${got.skipped.length} 条声明落不进 C_ABI 的七个词`
-        + `（收下了 ${n} 条）；第一条：${got.skipped[0].name} —— ${got.skipped[0].why}`);
+      const byWhy = new Map();
+      for (const s of got.skipped) {
+        /* 分组的键要把**形参的名字**去掉：`形参 $p0 的类型 long double …` 与
+           `形参 x 的类型 long double …` 是同一族，留着名字就分成了几十组。 */
+        const key = s.why.replace(/形参 [^ ]+ 的/, '形参的');
+        byWhy.set(key, (byWhy.get(key) ?? 0) + 1);
+      }
+      let topWhy = '';
+      let topN = 0;
+      for (const [w, c] of byWhy) if (c > topN) { topWhy = w; topN = c; }
+      const kinds = byWhy.size === 1 ? '' : `，共 ${byWhy.size} 类`;
+      this.warn(it, `"${hspec}" 里有 ${got.skipped.length} 条声明落不进 C_ABI 的那几个词`
+        + `（收下了 ${n} 条${kinds}）；最多的一类 ${topN} 条：${topWhy}`);
     }
     /* 常量（宏 + 枚举常量）。**后来的不盖先来的**：同一个名字在两个头文件里出现时，
        第一次那个赢 —— 与 C 的 `#ifndef` 守卫同一个方向。求不出值的那些一句都不报：

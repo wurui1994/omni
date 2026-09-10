@@ -8026,14 +8026,14 @@ export function declsOfC(path, text, host, defs) {
     }
     const rt = cabiWordOf(info.ret, true);
     if (rt === null) {
-      skipped.push({ name, why: `返回类型 ${cTypeText(info.ret)} 落不进 C_ABI 的七个词` });
+      skipped.push({ name, why: `返回类型 ${cTypeText(info.ret)} 落不进 C_ABI 的那几个词` });
       continue;
     }
     const ps = [];
     let bad = null;
     for (const p of info.params) {
       const w = cabiWordOf(p.ty, false);
-      if (w === null) { bad = `形参 ${p.name} 的类型 ${cTypeText(p.ty)} 落不进 C_ABI 的七个词`; break; }
+      if (w === null) { bad = `形参 ${p.name} 的类型 ${cTypeText(p.ty)} 落不进 C_ABI 的那几个词`; break; }
       ps.push(w);
     }
     if (bad !== null) { skipped.push({ name, why: bad }); continue; }
