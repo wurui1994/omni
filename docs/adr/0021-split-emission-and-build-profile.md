@@ -510,6 +510,21 @@ clang -O0 x 95，10 路并行       13.6 s 墙上 / 86 s CPU     （单体 11.0 
   改一个模块 1.4 s，对上单体 11 s 全量。**
 - **S3 一个插件走通**：先 `omni-target-js`（自举要它，坏了当场红）。`dlopen` + ABI 版本检查 +
   找不到插件时的**响错**（"asy 前端没装：缺 omni-lang-asy.dylib"，不是 "unknown extension"）。
+
+  **链接那一半先单独证了**（S1 之后立刻能证，不必等注册表）：拿按模块发出来的 `_decl.h`
+  编一个 `plug.dylib`（`-fPIC -shared -undefined dynamic_lookup`）与一个核心可执行文件
+  （`-Wl,-export_dynamic` + 运行时），核心写 `omni_js_realm_tbl_g[0] = 7`、`dlopen` + `dlsym`
+  之后插件读到 7，插件写 `[1] = 99`、核心也看得见：
+
+```
+plug: realm_tbl_g[0].tag=3 u.r=7
+host: realm_tbl_g[1].u.r=99
+```
+
+  也就是说：**模板在插件里再展开一遍无害（无状态了），而状态是同一份。**
+  这正是 S1 要换来的东西。剩下的是注册表与 ABI 那一半（纯管线）：
+  把 `emitJs` / `lowerAsy` 这些**直接调用**改成过一格注册表，node 腿用动态 `import()`、
+  C 腿用 `dlopen`，宿主原语已有（`host/native_c.js`、`runtime/omni_r3.c`）。
 - **S4 其余插件搬出去** + `--only` 决定构建哪些 + `bootstrap` 分步表把每个插件的时间/体积摆出来。
 - **S5**（可选）P2a 收共享段那 7.75 M 与产物那 +50%。
 
