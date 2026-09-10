@@ -350,35 +350,85 @@ JIT 层看见的只有 IR 与符号。这条是这一份 ADR 的全部意义：G
      `glfwGetFramebufferSize(win, &w, &h)` 的后两格是 `int *`。方言的 `(ptr T)` 是**带界的
      三个字**，交给 C 的是"当前"那一格（与 `OP.PTHIN` 同一格）—— 界检查留在这一侧。
 
-  **还差一格，而它是 `with` 的正当理由**：**宏与枚举常量**。`GL_COLOR_BUFFER_BIT`、
-  `GL_TRIANGLES`、`GLFW_CONTEXT_VERSION_MAJOR` 这些在 C 里是 `#define`，不是函数 ——
-  `c.declsOf` 现在只收函数，所以一个 jancy 写的 OpenGL 程序**只能把 `16384` 手抄进源码**
-  （`tests/llvm/cabi/glfw-tri.sx` 里就是这么写的，那正是不该有的样子）。用 `with "h"` 的
-  全部意义就在这儿：**头文件是那些名字的唯一出处**。要补的两半都在手边 ——
-  `Cpp.defines` 是宏表（`MACRO_OBJ` 且体是一个常量表达式的那些可以求值，`#if` 的求值
-  机器现成），枚举常量在 C 前端的符号表里。收出来之后走 `(cconst NAME 值)` 那一类形式
-  进方言，jnc 那侧把它们登记成常量。
+  **第五格：宏与枚举常量 —— `with` 的正当理由**（已落）。`GL_COLOR_BUFFER_BIT`、
+  `GL_TRIANGLES`、`GLFW_CONTEXT_VERSION_MAJOR` 这些在 C 里是 `#define`，不是函数。
+  没有这一格，一个 jancy 写的 OpenGL 程序只能把 `16384` 手抄进源码（`glfw-tri.sx` 里
+  就是那个样子，那正是不该有的样子）。用 `with "h"` 的全部意义就在这儿：
+  **头文件是那些名字的唯一出处**。
 
-  **一个没查完的**：`tests/llvm/cabi/glfw-tri.sx` 在 `run-jit` 上 **SIGTRAP**（exit 133）。
+  两处来源，一处出口：`gen.enumConsts`（枚举常量的值在解析时就算好了）与 `cpp.defines`
+  里的对象宏（宏体先用 `tokPrint` 还原成文本，再当常量表达式求值）。求值器是新写的一小份
+  `src/core/frontend-c/cconst.js` —— **两个现成的都不合用**：`Cpp.exprPreprocess` 是 `#if`
+  那一套，只有整数，而且**没定义的名字一律当 0**（这里最不能要的就是这条：拼错的名字要
+  报"不知道"）；`CGen.constExpr` 要一个正在解析中的记号流，而这儿手上只有一段文本、
+  而且要在 `unit()` 之后按名字一条条问。范围是宏体里真会出现的那些：整数/浮点/字符/
+  字符串字面量、一元与二元运算、`?:`、括号，以及**别的常量名**（于是
+  `#define GLFW_KEY_LAST GLFW_KEY_MENU` 这种转手的链自然work）。类型转换
+  （`(unsigned)x`）不认 —— 认它要一份类型解析，而宏体里并不常见；碰上了带理由跳过。
+
+  量出来的（GLFW + GL 的真头文件一趟）：**704 条函数声明、0 条跳过；1825 个常量、
+  121 条跳过**，跳过的基本全是 include 守卫（体是空的）和 `__attribute__` 那一族 ——
+  它们本来就不是常量。`GL_COLOR_BUFFER_BIT = 16384`、`GLFW_KEY_LAST = 348` 都在里头。
+
+  **jnc 那一侧两格一起接上了**：常量在用到的地方当场变成一格字面量（`cconstLit`，
+  所以运行期什么都不占），而调用点发的是 `(ccall …)`（`ccallSite`，实参按 C 那边的声明
+  检查、返回类型按声明给）。于是一个 jancy 写的 OpenGL 程序**一条 `import` 就够**：
+
+      import "/opt/homebrew/lib/libglfw.dylib" with "GLFW/glfw3.h";
+      import "libm" with "math.h";        // 系统库写名字不写路径
+
+  `tests/llvm/cabi/glfw-tri.jnc` 就是它，与 `.sx` 那一份**逐字节同一个输出**
+  （`framebuffer: 1600 1200` / `frames: 120`）—— 那才说明"从头文件收来的签名"与
+  "手写的签名"是同一件事。顺带补的两格：`import "libm"`（预登记的系统库写名字）与
+  **系统头**（`math.h` 不在 `-I` 里也不在源码旁边，那一路递一份 `#include <math.h>`
+  给 C 前端，按它自己那条 include 搜索路径找 —— `cDeclsOf` 的 `opts.text`）。
+
+  判据：`tests/c/decls/foo.h` 里那一段常量（十六进制/八进制/字符/浮点/转手引用/
+  `?:`/字符串各一条，加三条求不出来的）逐字节比；`tests/llvm/run.js` 第 7 节两份
+  glfw 程序各跑一遍。
+
+  **那个 SIGTRAP —— 查清了，是我们自己的线程**：`tests/llvm/cabi/glfw-tri.sx` 在 `run-jit`
+  上 SIGTRAP（exit 133），现在跑通了（`framebuffer: 1600 1200` / `frames: 120`，与 C 参照
+  逐字一致）。整条查法值得留着，因为每一步都差点走错。
 
   **先纠一句我自己写错的**：上一版这里写"一个字节输出都没有，连 `main` 里第一句 `print`
-  都没跑到，所以是**装载期**的事"。这是错的 —— 在 lldb 底下 `before` **印出来了**。看不到
-  它只是因为进程死于**信号**，libc 那份带缓冲的 stdout 没来得及刷。所以失败点不在装载期，
-  在 `glfwInit` 那一带。判断一个"没有输出"的崩溃，得先问输出是不是被缓冲吃掉了。
+  都没跑到，所以是**装载期**的事"。这是错的 —— 在 lldb 底下第一句**印出来了**。看不到它
+  只是因为进程死于**信号**，libc 那份带缓冲的 stdout 没来得及刷。判断一个"没有输出"的
+  崩溃，第一件事是问输出是不是被缓冲吃掉了，而不是从"没跑到"往下推。
 
-  已经排掉的：同一个程序的 C 参照（clang 直接链 glfw）在这台机器上跑通
-  （`framebuffer: 1600 1200` / `ok`），所以不是环境不给开窗；`ref2.c`（运行期 `dlopen` +
-  `dlsym` + `glfwInit`）也跑通，所以 `dlopen` 进来的 glfw 去初始化 AppKit 这件事本身没问题；
-  `--lib libglfw.dylib` 加在一份**不引用任何 glfw 符号**的 IR 上不炸（照常印 `hi`）。
+  排掉的：C 参照（clang 直接链 glfw）跑通，所以不是环境不给开窗；`ref2.c`（运行期
+  `dlopen` + `dlsym` + `glfwInit`）也跑通，所以 dlopen 进来的 glfw 去初始化 AppKit 本身
+  没问题；`--lib libglfw.dylib` 加在一份不引用任何 glfw 符号的 IR 上不炸。
 
-  lldb 给出的真实现场：`EXC_BREAKPOINT` 落在 AppKit 的 `NSUpdateCycleInitialize`，
-  控制台一句 `NSUpdateCycle was already initialized.`，还带一句 `Main thread potentially
-  initialized incorrectly` —— 也就是 AppKit 被**初始化了两次**，而且它认为主线程不对。
-  于是加了一条常驻诊断（`omni_jit.c`，`pthread_main_np()`）量那次调用到底在哪个线程上，
-  答案是 **`main thread = 1`**：入口就在进程主线程上跑。所以"物化/调用跑到工作线程去了"
-  这条猜想被证伪，**两次初始化**从哪儿来还没有答案。下一步：把 ORC 的编译线程数按 0 设成
-  单线程，把"物化在工作线程上"这个变量整个去掉；如果还是双初始化，就查在 `glfwInit`
-  之前**谁先碰了 AppKit**（例如 `--lib` 那次 `dlopen` 的初始化器是不是已经跑过一遍）。
+  现场：`EXC_BREAKPOINT` 落在 AppKit 的 `NSUpdateCycleInitialize`，一句
+  `NSUpdateCycle was already initialized.` 加一句 `Main thread potentially initialized
+  incorrectly`。我先在 `omni_jit.c` 的调用循环前量了一句 `pthread_main_np()`，答案是
+  `main thread = 1`，于是**误以为**"跑到工作线程上"这条被证伪了。差的是一层：那句量的是
+  **宿主的调用点**，而真正把活挪走的在下一层。`bt all` 一下就看见了：
+
+      thread #1  omni-jit`omni_run_entry + 164 -> _pthread_join      ← 主线程在等
+    * thread #2  glfwInit -> _glfwInitCocoa -> -[NSApplication run]  ← 崩在这儿
+
+  `omni_run_entry`（`src/runtime/omni_js_host.c`）把入口跑在一条自己开的、栈 512MB 的
+  pthread 上 —— 那是为编译器自己那条深递归留的余量（8MB 的主线程栈上，"多编译一个文件"
+  就是随机的 Segmentation fault）。而 macOS 上 AppKit 只能在**真主线程**上首次初始化。
+  两个要求撞在一起。**这件事仓库里早就写着**：`src/runtime-gl/omni_r3_gl.c` 的文件头那段
+  「上下文用 CGL，不用 GLFW」讲的就是同一个坑 —— 一年前量过一次，这回又从头量了一遍。
+
+  **修法不是二选一**：macOS 上主线程栈的大小是**链接期**定死的，那就链接期给大 ——
+  `-Wl,-stack_size,0x20000000`（512MB，只保留地址空间）。于是 `omni_run_entry` 的判断
+  倒过来：**先问主线程的栈够不够大**，够就留在主线程上（两个要求同时满足），不够才开
+  线程。查栈大小 macOS/BSD 用 `pthread_get_stacksize_np`，别处用 `getrlimit(RLIMIT_STACK)`；
+  tcc 不认那个 `-Wl,`，那条腿照旧走线程 —— 它上面本来也没有 GUI。
+  落点：`cli.js` 的 `mainStackFlags(cc)`，加在**可执行文件**的三处链接上
+  （backend-c 的产物、`run-llvm` 的产物、JIT 宿主），插件那格不加。
+
+  判据：`tests/llvm/run.js` 第 7 节 —— 开窗、画 120 帧、自己退，只查输出的形状
+  （retina 上 framebuffer 是窗口的两倍，尺寸不写死），没有 glfw 就 skip。
+
+  顺带一条一般性的：**ORC 默认就是单线程编译的**（LLJIT 的编译线程数默认 0，物化发生在
+  查地址那条线程上），C API 里连设它的入口都没有。所以"让 ORC 单线程化"这个实验从一开始
+  就是空转 —— 幸好先看了 `bt all`。
 
 - **J5 FFI 第二刀（JIT → 任意库）——已落**：`--dl` 让表里没有的名字再问一次进程的动态
   符号表（`dlsym(RTLD_DEFAULT, …)`），`--lib PATH` 先 `dlopen(…, RTLD_NOW|RTLD_GLOBAL)`

@@ -344,11 +344,10 @@ int main(int argc, char **argv) {
      多个入口按命令行上的顺序来；`--repeat` 是给"同一个入口反复调"用的（kernel dispatch
      与将来的 REPL 都要它），退出码取最后一个 main 形状那次的返回值。 */
   int code = 0;
-  /* 不在主线程就明说，把一个信号换成一句话（见 omni_jit_main_thread 上面那段）。 */
-  if (!omni_jit_main_thread()) {
-    fprintf(stderr, "omni-jit: 入口不在进程的主线程上 —— 用 GUI 库（GLFW/AppKit 那一族）"
-            "的话它们会在这儿硬崩（NSUpdateCycle was already initialized.）\n");
-  }
+  /* 这儿量的是**宿主的调用点**在哪个线程上（一直是主线程）。真正会把活挪走的是
+     入口那一层的 `omni_run_entry`（omni_js_host.c）—— 它宁可留在主线程也不开线程，
+     条件是主线程的栈已经够大（链接时的 `-Wl,-stack_size`）。头一版我把这句诊断放在
+     这里就以为量到了答案，其实差了一层：那次是 `omni_run_entry` 开的线程在崩。 */
   if (getenv("OMNI_JIT_TRACE") != NULL) {
     fprintf(stderr, "omni-jit: main thread = %d\n", omni_jit_main_thread());
   }

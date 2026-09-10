@@ -216,11 +216,16 @@ export function cMirNative(path, opts, defs) {
  * **一份 C 头文件里声明了哪些函数**（ADR-0022 的 J4d：`import "libfoo.dylib" with "foo.h"`）。
  *
  * 与 `cMirNative` 同一个前端、同一套 include 路径 —— 不外挂 tcc、也不另写一个 C 解析器。
- * 回 `{decls, skipped}`：收得下的那些带 C_ABI 的词，收不下的带一句为什么
- * （一个真头文件里总有几条落不进那七个词，不能让其中一条把整次 import 弄失败）。
+ * 回 `{decls, skipped, consts, constSkipped}`：收得下的那些带 C_ABI 的词，收不下的带一句
+ * 为什么（一个真头文件里总有几条落不进那七个词，不能让其中一条把整次 import 弄失败）。
+ *
+ * `opts.text` 那一路是给**系统头**用的（`import "libm" with "math.h"`）：那种头不在 `-I`
+ * 的目录里、也不在源码旁边，找它的规则就是 C 前端自己那条 include 搜索路径。所以那一路
+ * 不读文件，而是把一份合出来的 `#include <math.h>` 递进来；`path` 只当"这段文本在哪儿"
+ * 用（`__FILE__` 与相对 include 的起点）。
  */
 export function cDeclsOf(path, opts, defs) {
-  return declsOfC(path, readText(path), {
+  return declsOfC(path, opts.text === undefined ? readText(path) : opts.text, {
     readFile: (p) => {
       try {
         return readText(p);

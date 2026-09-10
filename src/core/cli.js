@@ -1519,10 +1519,39 @@ function optFlag() {
  * 是**逐个运算**的语义，编译器不许替我们改写 —— 这跟数学库怎么绑没关系。
  */
 function ccFlags(cc) {
-  // -pthread：入口跑在一条大栈的线程上（omni_run_entry），编译与链接两边都要这一位。
+  // -pthread：入口可能跑在一条大栈的线程上（omni_run_entry），编译与链接两边都要这一位。
   // macOS 上 pthread 就在 libSystem 里、这个开关等于空操作；glibc 2.34 起也已并进 libc。
   return cc === 'tcc' ? ['-I', RUNTIME_DIR]
     : [optFlag(), '-std=c99', '-ffp-contract=off', '-w', '-pthread', '-I', RUNTIME_DIR];
+}
+
+/**
+ * **主线程的栈**（只在链接可执行文件时给）。macOS 上主线程栈的大小是链接期定死的
+ * （默认 8MB），而 `omni_run_entry` 宁可留在主线程也不想开线程 —— 因为 AppKit 只能在
+ * 真主线程上首次初始化（GLFW 的 `glfwInit` 一进去就是它），挪到别的线程上是一个
+ * 没有任何输出的 SIGTRAP（ADR-0022 J4d 量的）。给到 512MB，两个条件就一起满足了：
+ * 栈够深（编译器自己那条递归要它）+ 还在主线程上。
+ *
+ * 只保留地址空间，页用到才落地。Linux 上主线程栈按 `ulimit -s` 动态长，链接期没有
+ * 这个开关，也不需要 —— 那边的 GUI 库不挑线程；`omni_run_entry` 自己会去问
+ * `getrlimit`，不够大就照旧开线程。tcc 不认这个 `-Wl,`，那条腿走线程回退。
+ *
+ * 平台从 `uname -s` 来而不是 `process.platform`：这份源码要能被自己编译，而
+ * `process.platform` 不在封闭 ABI 里（ADR-0011 决策 2）。问一次 `uname` 记住 ——
+ * 和 `jobCount()` 问 `getconf` 是同一条路子。
+ */
+let DARWIN_CACHE = 0;
+function hostIsDarwin() {
+  if (DARWIN_CACHE === 0) {
+    const r = spawn('uname', ['-s'], 'c');
+    DARWIN_CACHE = (r[0] === 0 && r[1].trim() === 'Darwin') ? 1 : 2;
+  }
+  return DARWIN_CACHE === 1;
+}
+
+function mainStackFlags(cc) {
+  if (cc === 'tcc' || !hostIsDarwin()) return [];
+  return ['-Wl,-stack_size,0x20000000'];
 }
 
 /**
@@ -1713,7 +1742,8 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
      macOS / Linux 的 clang 都认 -Wl,-export_dynamic。 */
   const ex = extern === true ? ['-Wl,-export_dynamic'] : [];
   const cargs = plugin === undefined
-    ? [...ccFlags(cc), ...ex, cPath, ...runtimeObjects(cc), '-o', outPath, '-lm', ...libs]
+    ? [...ccFlags(cc), ...mainStackFlags(cc), ...ex, cPath, ...runtimeObjects(cc),
+      '-o', outPath, '-lm', ...libs]
     : [...ccFlags(cc), ...shared, cPath, '-o', outPath, ...libs];
   const tCc0 = nowMs();
   const r = spawn(cc, cargs, 'o');
@@ -1886,8 +1916,8 @@ function buildLlvm(mod, outPath, workDir) {
   writeText(llPath, ir);
   vStep(`backend llvm  ${ir.length} bytes -> ${llPath}`);
   const cc = findClang();
-  const args = [optFlag(), '-w', '-ffp-contract=off', '-pthread', '-I', RUNTIME_DIR, llPath,
-    ...runtimeObjects(cc), '-o', outPath, '-lm'];
+  const args = [optFlag(), '-w', '-ffp-contract=off', '-pthread', ...mainStackFlags(cc),
+    '-I', RUNTIME_DIR, llPath, ...runtimeObjects(cc), '-o', outPath, '-lm'];
   const r = spawn(cc, args, 'o');
   if (r[0] !== 0) {
     throw new OmniError(`llvm backend produced IR that ${cc} rejected:\n${r[2]}\n(kept at ${llPath})`);
@@ -1953,7 +1983,7 @@ function buildJitHost() {
 
   const objs = runtimeObjects(cc);
   const key = hash16([cc, ver[1].trim(), src, mtimeMs(src), fileSize(src),
-    symSrc, mtimeMs(symSrc), fileSize(symSrc), ...objs].join('|'));
+    symSrc, mtimeMs(symSrc), fileSize(symSrc), ...mainStackFlags(cc), ...objs].join('|'));
   const dir = join(cacheRoot(), 'jit', key);
   const exe = join(dir, 'omni-jit');
   if (exists(exe)) {
@@ -1965,7 +1995,8 @@ function buildJitHost() {
      去掉它正是"进程符号表不再是解析路径"的可观测形式：留着的话这条断言就没法验。 */
   const stage = workDirFor('jit-stage', key);
   const staged = join(stage, 'omni-jit');
-  const args = ['-O2', '-w', '-pthread', '-I', inc[1].trim(), '-I', RUNTIME_DIR, src, symSrc,
+  const args = ['-O2', '-w', '-pthread', ...mainStackFlags(cc), '-I', inc[1].trim(),
+    '-I', RUNTIME_DIR, src, symSrc,
     ...objs, '-L', libdir[1].trim(), '-lLLVM', '-lm', '-o', staged];
   const r = spawn(cc, args, 'o');
   if (r[0] !== 0) throw new OmniError(`the jit host failed to build with ${cc}:\n${r[2]}`);

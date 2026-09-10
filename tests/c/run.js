@@ -562,10 +562,18 @@ for (const f of pick('diag')) {
     const lines = [];
     for (const d of r.decls) lines.push(`ok   ${d.name} (${d.params.join(',')})${d.variadic ? '+...' : ''} -> ${d.ret}`);
     for (const s of r.skipped) lines.push(`skip ${s.name} — ${s.why}`);
+    /* 常量那一半（宏 + 枚举常量）。名字排过序 —— 宏表的遍历顺序是记号编号的顺序，
+       与源码里的先后不完全一样，而这一条要比的是"收了哪些、值是多少"。 */
+    const cs = (r.consts ?? []).slice().sort((a, b) => (a.name < b.name ? -1 : 1));
+    for (const c of cs) lines.push(`const ${c.name} = ${c.kind} ${c.kind === 'str' ? JSON.stringify(c.value) : c.value}`);
+    const cskip = (r.constSkipped ?? []).slice().sort((a, b) => (a.name < b.name ? -1 : 1));
+    for (const s of cskip) lines.push(`noconst ${s.name} — ${s.why}`);
     const got = `${lines.join('\n')}\n`;
     const want = readFileSync(wantPath, 'utf8');
-    if (got === want) ok(`decls/foo.h [${r.decls.length} 条收下、${r.skipped.length} 条带理由跳过]`);
-    else {
+    if (got === want) {
+      ok(`decls/foo.h [${r.decls.length} 条收下、${r.skipped.length} 条带理由跳过；`
+        + `常量 ${cs.length} 个、${cskip.length} 个带理由跳过]`);
+    } else {
       const wl = want.split('\n');
       const gl = got.split('\n');
       let i = 0;

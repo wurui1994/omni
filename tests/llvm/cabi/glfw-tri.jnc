@@ -1,0 +1,76 @@
+// 与 `glfw-tri.sx` 同一个程序，**用 jancy 写**（ADR-0022 的 J4d）。
+//
+// 这一份要证的是核心方言那一份证不了的东西：一条 `import` 就够。
+//
+//   import "…/libglfw.dylib" with "GLFW/glfw3.h";
+//
+// 左边那个 `.dylib` 说"体在哪儿"（变成方言的 `(lib …)`，再变成 `omni-jit --lib`），
+// 右边那个头文件说"名字与类型是什么" —— 704 条函数声明变成 `(cabi …)`，
+// 1800 多个宏与枚举常量变成编译期的字面量。所以下面这段里：
+//
+//   - `glfwInit()` 这些**没有一句手写的声明**，签名是从头文件里收来的（`c.declsOf`）；
+//   - `GL_COLOR_BUFFER_BIT` / `GL_TRIANGLES` 是**头文件里的宏**，不是抄进来的 16384。
+//     用 `with` 的全部理由就在这一条上：那些名字在 C 里是 `#define`，不是函数，
+//     头文件是它们的唯一出处。
+//
+// `float` 那几格（`glColor3f`）由声明说了算 —— 后端在调用点补 `fptrunc`，
+// 按 double 传是错的调用约定。这一条与 `.sx` 那一份共用同一套 `mod.cabiSig`。
+//
+// 窗口句柄用 `long`：jancy 的 `int` 是 **32 位**（C 的规矩），装地址会截断。
+// macOS 上不设 `glfwWindowHint`：默认给的就是 legacy 的 2.1 上下文，glBegin/glEnd 能用。
+
+import "/opt/homebrew/lib/libglfw.dylib" with "GLFW/glfw3.h";
+// `sin`/`cos` 不在 glfw 的头里 —— 数学库自己一句。系统库写**名字**不写路径：
+// 它已经在这个进程里了（macOS 上 libSystem 连磁盘上的文件都不是）。
+import "libm" with "math.h";
+
+// 一个顶点：绕原点转 `a` 弧度、半径 r，颜色由调用方给。
+void vertexAt(double a, double r, double cr, double cg, double cb) {
+    glColor3f(cr, cg, cb);
+    glVertex3f(r * cos(a), r * sin(a), 0);
+}
+
+int main() {
+    if (glfwInit() == 0) {
+        printf("glfwInit failed\n");
+        return 0;
+    }
+
+    long win = glfwCreateWindow(800, 600, "Omni × GLFW (jancy)", 0, 0);
+    if (win == 0) {
+        printf("glfwCreateWindow failed\n");
+        glfwTerminate();
+        return 0;
+    }
+
+    glfwMakeContextCurrent(win);
+    glfwSwapInterval(1);
+
+    // framebuffer 的实际像素（retina 上是窗口尺寸的两倍）
+    int w = 0;
+    int h = 0;
+    glfwGetFramebufferSize(win, &w, &h);
+    printf("framebuffer: %d %d\n", w, h);
+    glViewport(0, 0, w, h);
+
+    // 这一份要能在没人看着的机器上跑完，所以**按帧数收**而不是等人关窗。
+    int frame = 0;
+    while (frame < 120 && glfwWindowShouldClose(win) == 0) {
+        double t = glfwGetTime();
+        glClearColor(0.5 * (1 + sin(t)), 0.15, 0.5 * (1 + cos(t)), 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_TRIANGLES);
+        vertexAt(t, 0.8, 1, 0.2, 0.2);
+        vertexAt(t + 2.0943951, 0.8, 0.2, 1, 0.2);
+        vertexAt(t + 4.1887902, 0.8, 0.2, 0.2, 1);
+        glEnd();
+        glfwSwapBuffers(win);
+        glfwPollEvents();
+        frame++;
+    }
+
+    printf("frames: %d\n", frame);
+    glfwDestroyWindow(win);
+    glfwTerminate();
+    return 0;
+}

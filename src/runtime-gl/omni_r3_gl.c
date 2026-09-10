@@ -33,11 +33,12 @@
 #include <string.h>
 
 #define GL_SILENCE_DEPRECATION 1
-/* **上下文用 CGL，不用 GLFW。** 量出来的：我们的宿主程序把入口跑在一条大栈的
- * pthread 上（cli.js:1923 的 `-pthread` + omni_run_entry），而 macOS 上 GLFW 的
- * `glfwInit` 要主线程 —— 在那条线程上调它当场 `Trace/BPT trap: 5`（SIGTRAP），
- * 宿主连一行错都留不下。CGL 是 macOS 上 GL 的底层接口，不碰 NSApp、不要主线程，
- * 离屏渲染（FBO + glReadPixels）本来也不需要窗口。
+/* **上下文用 CGL，不用 GLFW。** 量出来的：我们的宿主程序曾经把入口跑在一条大栈的
+ * pthread 上（omni_run_entry），而 macOS 上 GLFW 的 `glfwInit` 要主线程 —— 在那条线程上
+ * 调它当场 `Trace/BPT trap: 5`（SIGTRAP），宿主连一行错都留不下。
+ * （那个约束后来解掉了：链接期把主线程的栈给到 512MB，入口就留在主线程上，
+ * 见 ADR-0022 的 J4d。但这一格照旧用 CGL —— 它是 macOS 上 GL 的底层接口，
+ * 不碰 NSApp、不要主线程、也不要窗口，而离屏渲染（FBO + glReadPixels）本来就不需要窗口。）
  * `kCGLOGLPVersion_3_2_Core` 在 Apple Silicon 上给到的就是 4.1 core。 */
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl3.h>

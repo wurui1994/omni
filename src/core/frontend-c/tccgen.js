@@ -167,8 +167,10 @@ import {
   TOK_BUILTIN_VA_START, TOK_BUILTIN_VA_ARG, TOK_BUILTIN_VA_END, TOK_BUILTIN_VA_COPY,
   TOK_BUILTIN_EXPECT, TOK_BUILTIN_TYPES_COMPATIBLE_P,
   TOK___FUNCTION__, TOK___FUNC__, TOK_LINENUM,
+  MACRO_FUNC,
   isAssignOp, assignOpOf,
 } from './tcctok.js';
+import { evalCConst } from './cconst.js';
 import {
   VT_VOID, VT_BYTE, VT_SHORT, VT_INT, VT_LLONG, VT_BOOL, VT_PTR, VT_FUNC, VT_STRUCT,
   VT_BTYPE, VT_UNSIGNED, VT_DEFSIGN, VT_LONG, VT_FLOAT, VT_DOUBLE,
@@ -7988,6 +7990,10 @@ export function declsOfC(path, text, host, defs) {
     if (d.body === null) cpp.undefine(d.name);
     else cpp.define(d.name, d.body);
   }
+  /* 「哪些宏是**头文件**带来的」= 现在这一批之外的。预定义（`__STDC__` 一族）与命令行
+     `-D` 都在这一刻已经在表里了，所以照个相就够 —— 不必去猜名字的形状。 */
+  const preMacros = new Set();
+  for (const v of cpp.defines.keys()) preMacros.add(v);
   const mod = new MirModule(path);
   mod.setNative();
   const gen = new CGen(cpp, mod, { native: true });
@@ -8026,7 +8032,69 @@ export function declsOfC(path, text, host, defs) {
     if (bad !== null) { skipped.push({ name, why: bad }); continue; }
     decls.push({ name, ret: rt, params: ps, variadic: info.variadic === true });
   }
-  return { decls, skipped };
+  const cs = constsOfC(cpp, gen, preMacros);
+  return { decls, skipped, consts: cs.consts, constSkipped: cs.skipped };
+}
+
+/**
+ * **常量那一半**：`#define GL_COLOR_BUFFER_BIT 0x00004000` 与 `enum { … }` 里的名字。
+ *
+ * 这不是锦上添花 —— 一个 OpenGL 程序不用宏就只能把 `16384` 抄进源码，而 `with "h"`
+ * 的全部意义就是"那些名字的唯一出处是头文件"（ADR-0022 J4d）。
+ *
+ * 两处来源，一处出口：
+ *   - `gen.enumConsts`：枚举常量，值在解析时就已经算好（`enumDecl`），直接收。
+ *   - `cpp.defines`：对象宏。宏体是一串记号，先用 `tokPrint` 还原成文本，再交给
+ *     `evalCConst` 当常量表达式求值 —— 于是 `GLFW_KEY_LAST GLFW_KEY_MENU` 这种
+ *     转手的名字、`(1 << 3)` 这种算出来的值都work，而 `#define GL_APIENTRY __stdcall`
+ *     那种求不出来的会带着理由进 `skipped`。
+ *
+ * 函数宏一概不收：它是一段**代码**，不是一个值。
+ */
+function constsOfC(cpp, gen, preMacros) {
+  /* 名字 -> 宏体文本。求值要能按名字回查（宏引用宏），所以先把表摊平。 */
+  const bodies = new Map();
+  for (const [v, s] of cpp.defines) {
+    if (preMacros.has(v)) continue;                      // 预定义与 -D，不是头文件的
+    if (s === null || s === undefined || s.special === true) continue;
+    if ((s.type & MACRO_FUNC) !== 0) continue;
+    const nm = cpp.tokStr(v, null);
+    if (typeof nm !== 'string' || nm === '') continue;
+    bodies.set(nm, cpp.tokPrint(s.str, '').trim());
+  }
+
+  const consts = [];
+  const skipped = [];
+  const done = new Map();      // 名字 -> {k,v}（求成功的）
+  const failed = new Map();    // 名字 -> why（求失败的，避免同一条算两遍）
+
+  /** 求值时遇到的名字：枚举常量、已求出的宏、还没求的宏（就地递归）。 */
+  const look = (nm, depth) => {
+    const e = gen.enumConsts.get(nm);
+    if (e !== undefined) return { k: 'int', v: e.val };
+    const d = done.get(nm);
+    if (d !== undefined) return d;
+    if (failed.has(nm)) return null;
+    if (!bodies.has(nm)) return null;
+    const r = evalCConst(bodies.get(nm), look, depth);
+    if (r.kind === 'no') { failed.set(nm, r.why); return null; }
+    const val = { k: r.kind, v: r.value };
+    done.set(nm, val);
+    return val;
+  };
+
+  for (const [nm, ec] of gen.enumConsts) {
+    consts.push({ name: nm, kind: 'int', value: ec.val });
+  }
+  for (const nm of bodies.keys()) {
+    const v = look(nm, 0);
+    if (v === null) {
+      skipped.push({ name: nm, why: failed.get(nm) ?? '求不出值' });
+      continue;
+    }
+    consts.push({ name: nm, kind: v.k, value: v.v });
+  }
+  return { consts, skipped };
 }
 
 export function lowerCNative(path, text, host, defs) {

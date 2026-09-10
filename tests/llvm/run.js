@@ -37,8 +37,10 @@ const bad = (label, detail) => {
 
 /** 第一阶段能降的那些在 supported.js 里 —— tests/jit 也读同一份，见那个文件的头 */
 
-function run(args) {
-  const r = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
+/* `ms` 与输出上限都有默认值：产物一旦跑起来就可能不肯停（曾经一个 setjmp 的 -O2 版本
+   往 /tmp 里写了 51GB）。所以这一层永远带着时限和 8MB 的上限，谁都不必自己记得加。 */
+function run(args, ms = 60000) {
+  const r = spawnSync('node', [cli, ...args], { encoding: 'utf8', timeout: ms, maxBuffer: 8 << 20 });
   return { out: r.stdout, err: r.stderr, code: r.status };
 }
 
@@ -278,6 +280,56 @@ if (existsSync(sysDir)) {
     else ok('lib-decl [(lib …) 一路变成 omni-jit 的 --lib / --dl：第三方库与预登记的系统库各一条]');
   }
   rmSync(tmp, { recursive: true, force: true });
+}
+
+// ------------------------------------------------- 7. 一个真的 OpenGL 程序（J4d）
+//
+// `glfw-tri.sx`：GLFW 开窗、legacy GL 画一个转的三角形，120 帧后自己退。它同时压住四格 ——
+// `f32` 那一格（`glColor3f` 按 double 传就是错的调用约定）、字面量在调用点抽地址、
+// `(ptr int)` 交出「当前」那一格、以及 `(lib …)` 一路变成 `--lib`。
+//
+// **为什么这一节必须存在**：入口曾经跑在 `omni_run_entry` 开的那条大栈线程上，而 macOS 上
+// AppKit 只能在真主线程上首次初始化 —— `glfwInit` 当场 SIGTRAP，连缓冲里的 stdout 都丢了，
+// 看起来像"一个字节都没跑"（ADR-0022 J4d）。修法是链接时把主线程的栈给到 512MB
+// （`-Wl,-stack_size`），于是入口留在主线程上。这条测试就是那件事的判据。
+//
+// 尺寸不写死：retina 上 framebuffer 是窗口的两倍，别的机器不是。所以只查形状。
+// 没有 glfw、或者机器上开不出窗（无头）就 skip —— 那不是编译器的事。
+//
+// 两份源码同一个程序：`.sx`（库与声明都明写）与 `.jnc`（一条 `import … with "h"` 就够，
+// 声明与 1800 多个宏都从头文件里收）。**两份的输出必须逐字节相同** —— 那才说明
+// "从头文件收来的签名"与"手写的签名"是同一件事。
+{
+  const glfw = '/opt/homebrew/lib/libglfw.dylib';
+  const seen = [];
+  for (const [name, args] of [['glfw-tri.sx', []],
+    ['glfw-tri.jnc', ['-I', '/opt/homebrew/include']]]) {
+    const src = join(here, 'cabi', name);
+    if (!existsSync(src) || !existsSync(glfw)) {
+      process.stdout.write(`  skip ${name}：这台机器上没有 glfw\n`);
+      continue;
+    }
+    const r = run(['run-jit', src, ...args], 120000);
+    const m = /^framebuffer: ([1-9][0-9]*) ([1-9][0-9]*)\nframes: 120\n$/.exec(r.out ?? '');
+    const detail = [];
+    if (r.code !== 0) {
+      detail.push(`    run-jit exit=${r.code}（133 = SIGTRAP，多半又跑到别的线程上去了）`
+        + `\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
+    } else if (m === null) {
+      detail.push(`    输出的形状不对：${JSON.stringify((r.out ?? '').slice(0, 200))}`);
+    } else {
+      seen.push(r.out);
+    }
+    if (detail.length > 0) bad(name, detail.join('\n'));
+    else ok(`${name} [GLFW 开窗 + legacy GL 画 120 帧：framebuffer ${m[1]}x${m[2]}]`);
+  }
+  /* 两份的字节要一样 —— 那才说明"从头文件收来的签名"与"手写的签名"是同一件事。 */
+  if (seen.length === 2) {
+    if (seen[0] === seen[1]) ok('glfw-tri [.sx 与 .jnc 的输出逐字节相同]');
+    else {
+      bad('glfw-tri 两份不一致', `    sx  ${JSON.stringify(seen[0])}\n    jnc ${JSON.stringify(seen[1])}`);
+    }
+  }
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

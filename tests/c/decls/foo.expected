@@ -12,3 +12,20 @@ skip foo_ld — 返回类型 long double 落不进 C_ABI 的七个词
 skip foo_area — 形参 p 的类型 struct P 落不进 C_ABI 的七个词
 skip foo_mk — 返回类型 struct P 落不进 C_ABI 的七个词
 skip foo_old — 老式声明（`f()` 不是 `f(void)`，形参表没说）
+const FOO_CHR = int 65
+const FOO_COND = int 10
+const FOO_ENUM = int 1
+const FOO_EXP = real 1500
+const FOO_HEX = int 16384
+const FOO_NAME = str "omni"
+const FOO_NEG = int -1
+const FOO_OCT = int 493
+const FOO_ONE = int 1
+const FOO_PI = real 3.5
+const FOO_SHIFT = int 8
+const FOO_SUM = int 9
+const GREEN = int 1
+const RED = int 0
+noconst FOO_CALL — `foo_add(…)` 是一次调用，不是常量
+noconst FOO_GUARD — 宏体是空的
+noconst FOO_UNKNOWN — `NOT_A_CONSTANT` 不是一个已知的常量

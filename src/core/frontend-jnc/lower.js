@@ -229,6 +229,23 @@ const J_REAL = { k: 'real' };
 const J_BOOL = { k: 'bool' };
 const J_VOID = { k: 'void' };
 const J_STR = { k: 'string' };
+/* 一个 f64 写成方言的 `(real …)` 收得下的样子。`String(x)` 给的形状
+   （`1` / `-0.5` / `1e-7` / `1e+21`）正好都在 realLit 那条正则里；`Infinity`/`NaN`
+   到不了这儿（`evalCConst` 那侧已经拦掉）。整数值补一个 `.0` 只是为了读的人一眼
+   看出这是 real —— 方言两种都收。 */
+const jncRealText = (x) => (x === Math.floor(x) && x > -1e15 && x < 1e15 ? `${x}.0` : `${x}`);
+/* C_ABI 的那几个词与 jnc 类型的对法（ADR-0022 的 J4d）。实参那一侧：`ptr` 不在表里 ——
+   它收的东西不止一种（整数句柄、jnc 的指针、字符串），由 `ccallSite` 单独判。
+   返回那一侧：`ptr` 就是一格 64 位的地址值（与 `.sx` 里手写 `(let win int (ccall …))`
+   同形），`cstr` 也一样 —— 那是一个**地址**，把它当 jnc 字符串是错的。 */
+const CABI_WANT = new Map([
+  ['i32', J_I32], ['i64', J_I64], ['bool', J_BOOL],
+  ['f32', J_REAL], ['f64', J_REAL], ['cstr', J_STR],
+]);
+const CABI_RET = new Map([
+  ['void', J_VOID], ['i32', J_I32], ['i64', J_I64], ['bool', J_BOOL],
+  ['f32', J_REAL], ['f64', J_REAL], ['ptr', J_I64], ['cstr', J_I64],
+]);
 const tPtr = (t) => ({ k: 'ptr', target: t });
 const tThin = (t) => ({ k: 'tptr', target: t });
 /**
@@ -784,14 +801,22 @@ class JncLower {
     this.impFind = opts.find === undefined ? null : opts.find;
     this.impParse = opts.parse === undefined ? null : opts.parse;
     /* `import "libfoo.dylib" with "foo.h"` 的那一半（ADR-0022 的 J4d）：
-       `decls(spec, from)` 回 `{decls, skipped}`（`cap('c.declsOf')` 那一格）或者 `null`
-       （找不着那个头文件）。与 `find`/`parse` 同一种带法 —— 这一层不碰文件系统。 */
+       `decls(spec, from)` 回 `{decls, skipped, consts, constSkipped}`（`cap('c.declsOf')`
+       那一格）或者 `null`。与 `find`/`parse` 同一种带法 —— 这一层不碰文件系统。 */
     this.impDecls = opts.decls === undefined ? null : opts.decls;
-    /* `with "h.h"` 收进来的那些外部符号名（ADR-0022 的 J4d）。**眼下只用来把诊断说准**：
-       声明进得来（`emit sx` 里看得见那几句 `(cabi …)`），而从 jnc 里**调**它们还没接上 ——
-       那一步与 `opaque class` 宿主方法是同一格（调用点要发 `(ccall …)`）。少了这一格，
-       写了 `with` 的人得到的是一句「没有这个函数」，而那句话是错的：函数是有的。 */
+    /* `with "h.h"` 收进来的那些外部符号名（ADR-0022 的 J4d）。调用点在 `ccallSite` 那儿
+       发 `(ccall …)`，签名从 `cabiSigs` 来。这张名字表留着是给**诊断**用的：一个名字在
+       表里而签名对不上时，说的是"实参不对"而不是"没有这个函数"。 */
     this.cabiNames = new Set();
+    /* 名字 -> `{ ret, params }`（C_ABI 的那几个词）。调用点靠它发 `(ccall …)`：
+       实参按声明检查、返回类型按声明给 —— 都不是猜的。 */
+    this.cabiSigs = new Map();
+    /* `with "h.h"` 收进来的**常量**（宏与枚举常量，ADR-0022 的 J4d）。用 `with` 的
+       全部理由就在这儿：`GL_COLOR_BUFFER_BIT` 在 C 里是 `#define`，不是函数 ——
+       头文件是那个名字的唯一出处，没有这一格，一个 OpenGL 程序只能把 `16384` 抄进源码。
+       名字 -> `{ kind: 'int'|'real'|'str', value }`；用到的地方（`case 'name'`）当场
+       变成一格字面量，所以它们不占运行期的任何东西。 */
+    this.cconsts = new Map();
 
     // 格式化字面量里 `$(…)` 那一段要再解析一遍（第六十四刀）。没给就当没有那一格。
     this.parseExpr = opts.parseExpr === undefined ? null : opts.parseExpr;
@@ -3544,8 +3569,12 @@ class JncLower {
         + '这一层走的是另一条路：直接 import "libfoo.dylib"，声明照旧写在源码里）');
     }
     /* 动态库：不进那张"再解一份源码"的待办表，而是记成一句 `(lib …)`。
-       三个平台的后缀都收，`.so.6` 那种带版本号的也算（Linux 上很常见）。 */
-    if (/\.(dylib|dll)$/.test(spec) || /\.so($|\.)/.test(spec)) {
+       三个平台的后缀都收，`.so.6` 那种带版本号的也算（Linux 上很常见）。
+       预登记的**系统库**写名字不写路径（`libc`/`libm`/`libpthread`/`libdl`）——
+       它们已经在这个进程里了，macOS 上连磁盘上的文件都不是（见 `hir/c_abi.js` 的
+       `C_SYSLIBS`）。这儿只按形状分流，名字对不对由下游那一处表说。 */
+    if (/\.(dylib|dll)$/.test(spec) || /\.so($|\.)/.test(spec)
+      || /^lib[a-z0-9_]+$/.test(spec)) {
       this.decls.push(`  (lib ${JSON.stringify(spec)})`);
       /* `with "foo.h"`（ADR-0022 的 J4d）：那个头文件里的函数声明**一条条变成 `(cabi …)`**。
          收不下的（float、struct 按值、老式声明…）跳过并记一笔 —— 一个真头文件里总有几条
@@ -3565,7 +3594,8 @@ class JncLower {
   /**
    * `import "libfoo.dylib" with "foo.h"` 的 `with` 那一半（ADR-0022 的 J4d）。
    *
-   * 头文件里的函数声明一条条变成 `(cabi 名字 返回类型 (形参类型…))`。解析那件事**不在这儿**：
+   * 头文件里的函数声明一条条变成 `(cabi 名字 返回类型 (形参类型…))`，宏与枚举常量进
+   * `cconsts`（用到的地方当场变成字面量，见 `cconstLit`）。解析那件事**不在这儿**：
    * 走的是注入的 `decls` 钩子（`cap('c.declsOf')`）—— 那一格用的是这个仓库里已有的那份 C
    * 前端（tcc 的移植，现在就在读真的 SDK 头），所以不外挂 tcc、也不另写一个 C 解析器。
    *
@@ -3590,6 +3620,7 @@ class JncLower {
       }
       this.decls.push(`  (cabi ${d.name} ${d.ret} (${d.params.join(' ')}))`);
       this.cabiNames.add(d.name);
+      this.cabiSigs.set(d.name, { ret: d.ret, params: d.params });
       n++;
     }
     /* 跳过的那些只报**一条**汇总：一个 `<stdio.h>` 能跳过上百条，逐条报会把真正的诊断埋掉。
@@ -3597,6 +3628,14 @@ class JncLower {
     if (got.skipped.length > 0) {
       this.warn(it, `"${hspec}" 里有 ${got.skipped.length} 条声明落不进 C_ABI 的七个词`
         + `（收下了 ${n} 条）；第一条：${got.skipped[0].name} —— ${got.skipped[0].why}`);
+    }
+    /* 常量（宏 + 枚举常量）。**后来的不盖先来的**：同一个名字在两个头文件里出现时，
+       第一次那个赢 —— 与 C 的 `#ifndef` 守卫同一个方向。求不出值的那些一句都不报：
+       一份真头文件里的求不出来的宏基本全是 include 守卫和 `__attribute__` 那一族，
+       它们本来就不是常量，报出来只会是噪音。真用到一个求不出来的名字时，
+       报的是「未声明的变量」—— 那句话在那个位置是对的。 */
+    for (const c of got.consts ?? []) {
+      if (!this.cconsts.has(c.name)) this.cconsts.set(c.name, c);
     }
     return null;
   }
@@ -6006,8 +6045,68 @@ class JncLower {
     return { code: `(int ${v})`, type: v > 0x7fffffffn ? J_I64 : J_I32 };
   }
 
-  expr0(n, want) {
-    if (isStr(n)) return { code: `(str ${JSON.stringify(n.value)})`, type: J_STR };
+  /**
+   * `with "h.h"` 收来的一个 C 函数的调用点（ADR-0022 的 J4d）。发的是方言的
+   * `(ccall 名字 实参…)` —— 实参已经是机器值，**不过 marshaler**。
+   *
+   * 实参按 C 那边的声明检查，词与 jnc 类型的对法在 `CABI_WANT` 里。`ptr` 那一格
+   * 松一些：整数（句柄/地址）、jnc 的指针（fat 与 thin）、字符串字面量都收 ——
+   * 后两样在方言那一侧抽的都是"当前"那一格（见 sexpr/lower.js 的 ccall）。
+   *
+   * 变参的这一层还进不来（`impWith` 那侧就跳过了），所以这儿不必处理分界。
+   */
+  ccallSite(n, nm, sig) {
+    const args = this.flat(n.items[2]);
+    if (args.length !== sig.params.length) {
+      return this.err(n, `'${nm}' 要 ${sig.params.length} 个实参，这里给了 ${args.length} 个`);
+    }
+    const parts = [];
+    for (let i = 0; i < args.length; i++) {
+      const w = sig.params[i];
+      const want = CABI_WANT.get(w);
+      let v = this.expr(args[i], want === undefined ? null : want);
+      if (v === null) return null;
+      if (w === 'ptr') {
+        if (!isInt(v.type) && !jncIsPtr(v.type) && v.type.k !== 'string' && !isArr(v.type)) {
+          return this.err(args[i], `'${nm}' 的第 ${i + 1} 个实参是 C 的指针，`
+            + `这里是 ${tyName(v.type)}`);
+        }
+      } else {
+        if (isInt(v.type) && isInt(want)) v = intConv(v, want);
+        if (!this.assignOk(v.type, want)) {
+          return this.err(args[i], `'${nm}' 的第 ${i + 1} 个实参要 ${w}（C 那边这么声明的），`
+            + `这里是 ${tyName(v.type)}`);
+        }
+      }
+      parts.push(v.code);
+    }
+    const ret = CABI_RET.get(sig.ret);
+    return {
+      code: `(ccall ${nm}${parts.length === 0 ? '' : ` ${parts.join(' ')}`})`,
+      type: ret === undefined ? J_I64 : ret,
+    };
+  }
+
+  /**
+   * `with "h.h"` 收来的一格常量当值用（ADR-0022 的 J4d）。不认识这个名字就回 null ——
+   * 那时候上面那句「未声明的变量」是对的。
+   *
+   * 类型按**值**挑，与整数字面量同一条规矩（`intLit`）：装得进 32 位就是 `int`，
+   * 装不进是 `long`。这一点与 C 那边宏的类型不完全一样（C 的 `#define A 0x4000` 参与
+   * 运算时按 `int` 走），但方言里 `int` 就是 64 位，而 jnc 的 32/64 只影响溢出与除法 ——
+   * 挑小的那一格才与"人手写这个字面量"完全同形。
+   */
+  cconstLit(n, nm) {
+    const c = this.cconsts.get(nm);
+    if (c === undefined) return null;
+    if (c.kind === 'str') return { code: `(str ${JSON.stringify(c.value)})`, type: J_STR };
+    if (c.kind === 'real') return { code: `(real ${jncRealText(c.value)})`, type: J_REAL };
+    const v = c.value;
+    if (v >= -0x80000000n && v <= 0x7fffffffn) return { code: `(int ${v})`, type: J_I32 };
+    return { code: `(int ${v})`, type: J_I64 };
+  }
+
+  expr0(n, want) {    if (isStr(n)) return { code: `(str ${JSON.stringify(n.value)})`, type: J_STR };
     // 相邻字面量的拼接（第五十四刀）：`"a" "b"` 在**编译期**折成一格字面量，
     // 与 C 一样（jancy 的 `literal` 就是 `literal_atom+`，见 jnc.grammar 那处注释）。
     if (isList(n) && head(n) === 'concat') {
@@ -6048,6 +6147,9 @@ class JncLower {
           // 那一条连基类链一起找，`this` 由 propGet 那一处补上。
           const pq = this.propBare(nm);
           if (pq !== null) return this.propGet(n, pq);
+          // `with "h.h"` 收来的常量（第 J4d 刀）：宏与枚举常量在这儿变成一格字面量。
+          const cv = this.cconstLit(n, nm);
+          if (cv !== null) return cv;
           return this.err(n, `未声明的变量 '${nm}'`);
         }
         // 它在方言里叫什么：见 lvalue 那一处同一句
@@ -6582,12 +6684,11 @@ class JncLower {
           + '实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面');
       }
     }
-    /* `with "h.h"` 收进来的那些（ADR-0022 的 J4d）：声明**是有的**（`emit sx` 里看得见
-       那几句 `(cabi …)`），缺的是调用点那一步 —— 要发 `(ccall …)` 而不是 `(call …)`，
-       与 `opaque class` 宿主方法同一格。报「没有这个函数」是错的，所以这儿单列一条。 */
-    if (nm === null && nm0 !== null && this.cabiNames.has(nm0)) {
-      return this.nope(n, `调 '${nm0}'（它的声明从 with "…" 那个头文件里收进来了，`
-        + '但从 jnc 里调外部 C 符号这一步还没接上）');
+    /* `with "h.h"` 收进来的那些（ADR-0022 的 J4d）：调用点发 `(ccall …)` 而不是
+       `(call …)` —— 实参已经是机器值，不过 marshaler。实参与返回都按**声明**检查，
+       签名是从头文件里收来的那一份（`cabiSigs`），不是从调用点猜的。 */
+    if (nm === null && nm0 !== null && this.cabiSigs.has(nm0)) {
+      return this.ccallSite(n, nm0, this.cabiSigs.get(nm0));
     }
     if (nm === null) return this.err(n, `没有这个函数：'${nm0}'`);
     // 方法体里裸写 `foo()` 就是 `this.foo()`（类是一层命名空间，所以 resolve 已经找着了

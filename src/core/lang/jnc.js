@@ -139,16 +139,23 @@ export function jncText(path, dirs = [], needEntry = true) {
     parse: (p) => jncParse(tb, p, diags),
     /* `import "libfoo.dylib" with "foo.h"` 的那一半（ADR-0022 的 J4d）：头文件按与 `.jnc`
        同一条规矩找（写这条 import 的文件旁边，再是 `-I` 那张表），找着了交给 `cap('c.declsOf')`
-       —— 那一格用的是这个仓库里已有的那份 C 前端，所以不外挂 tcc、也不另写一个解析器。 */
+       —— 那一格用的是这个仓库里已有的那份 C 前端，所以不外挂 tcc、也不另写一个解析器。
+
+       **找不着不等于没有**：`math.h` 这种系统头既不在源码旁边、也不在 `-I` 里，找它的规则
+       就是 C 前端自己那条 include 搜索路径。所以那一路改成递一份 `#include <spec>` 进去，
+       让 C 前端按它自己的规矩找 —— 真找不着时报的错也就出自那一侧（"include file not found"），
+       而不是这一层含混的"找不着头文件"。 */
     decls: (spec, from) => {
-      const p = find(spec, from);
-      if (p === null) return null;
-      return cap('c.declsOf')(p, {
+      const opts = {
         includeDirs: dirs,
         sysIncludeDirs: cap('c.sysInclude')(),
         arch: 'arm64',
         os: undefined,
-      }, []);
+      };
+      const p = find(spec, from);
+      if (p !== null) return cap('c.declsOf')(p, opts, []);
+      opts.text = `#include <${spec}>\n`;
+      return cap('c.declsOf')(from, opts, []);
     },
     parseExpr: (file, src, offset) => jncParseExpr(tb, file, src, offset, diags),
     dirs,

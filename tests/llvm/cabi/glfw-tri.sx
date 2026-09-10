@@ -67,12 +67,14 @@
     (expr (ccall glfwSwapInterval (int 1)))
 
     ;; framebuffer 的实际像素（retina 上是窗口尺寸的两倍）
+    ;; 一行印完 —— 与 `glfw-tri.jnc` 的 `printf("framebuffer: %d %d\n", w, h)` 逐字节相同，
+    ;; 那份判据要的就是"两条路出来的字节一样"。
     (let wp (ptr int) (pnew (ptr int) (int 1)))
     (let hp (ptr int) (pnew (ptr int) (int 1)))
     (expr (ccall glfwGetFramebufferSize (var win) (var wp) (var hp)))
-    (print (str "framebuffer:"))
-    (print (pload (var wp)))
-    (print (pload (var hp)))
+    (print (bin "+" (bin "+" (bin "+" (str "framebuffer: ") (tostr (pload (var wp))))
+                             (str " "))
+                    (tostr (pload (var hp)))))
     (expr (ccall glViewport (int 0) (int 0) (pload (var wp)) (pload (var hp))))
 
     ;; 这一份要能在没有显示器的机器上跑完，所以**按帧数收**而不是等人关窗：
@@ -100,7 +102,6 @@
         (expr (ccall glfwPollEvents))
         (set frame (bin "+" (var frame) (int 1)))))
 
-    (print (str "frames:"))
-    (print (var frame))
+    (print (bin "+" (str "frames: ") (tostr (var frame))))
     (expr (ccall glfwDestroyWindow (var win)))
     (expr (ccall glfwTerminate))))

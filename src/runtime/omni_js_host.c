@@ -42,12 +42,23 @@ void omni_host_init(int argc, char **argv) {
 
 int omni_host_exit_code(void) { return host_exit_code; }
 
-/* 入口跑在一条自己开的线程上，栈 512MB。为什么不留在主线程：那个栈的大小是链接期
-   定死的（macOS 上 8MB），而这条链上最深的递归就是编译器自己 —— `emit-c` 一份 16 万行
-   的 JS，词法/语法/降级三遍全是递归下降，8MB 上只剩一点余量，于是"多编译一个文件"
-   就成了 Segmentation fault，看起来还像随机的。512MB 只是**保留**地址空间，页要用到
-   才落地，小程序不为此付一分钱。开不出线程就退回直接调用 —— 那种机器上小程序照旧跑，
-   只是没有这份余量。 */
+/* 入口要一条 512MB 的栈。为什么：那个栈的大小是链接期定死的（macOS 上默认 8MB），
+   而这条链上最深的递归就是编译器自己 —— `emit-c` 一份 16 万行的 JS，词法/语法/降级
+   三遍全是递归下降，8MB 上只剩一点余量，于是"多编译一个文件"就成了 Segmentation
+   fault，看起来还像随机的。512MB 只是**保留**地址空间，页要用到才落地，小程序不为此
+   付一分钱。
+
+   **但栈大不是唯一的约束**：macOS 上 AppKit 只能在进程的**真主线程**上首次初始化，
+   而 GLFW 的 `glfwInit` 一进去就是 `[NSApplication sharedApplication]`。把入口挪到
+   一条自己开的线程上，`glfwInit` 当场 `EXC_BREAKPOINT`（`NSUpdateCycle was already
+   initialized.` + `Main thread potentially initialized incorrectly`），而且带缓冲的
+   stdout 跟着一起丢 —— 看起来像"一个字节都没跑"。这条是 lldb 底下量出来的
+   （ADR-0022 J4d）。
+
+   所以顺序反过来：**先问主线程的栈够不够大**。够（我们链接时给了
+   `-Wl,-stack_size`，见 cli.js 的 ccFlags/宿主链接）就留在主线程上，两个条件一起满足；
+   不够才开线程 —— 那时栈的余量比 GUI 更要紧，而这条腿上本来也没有 GUI。
+   开不出线程就退回直接调用。 */
 static void (*run_entry_fn)(void);
 
 static void *run_entry_thread(void *arg) {
@@ -56,9 +67,23 @@ static void *run_entry_thread(void *arg) {
   return NULL;
 }
 
+/* 主线程现在有多大的栈。查不到就报 0 = "不知道，按不够算"。 */
+static size_t omni_main_stack_bytes(void) {
+#if defined(__APPLE__) || defined(__FreeBSD__)
+  if (pthread_main_np() == 0) return 0;
+  return pthread_get_stacksize_np(pthread_self());
+#else
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_STACK, &rl) != 0) return 0;
+  if (rl.rlim_cur == RLIM_INFINITY) return (size_t)-1;
+  return (size_t)rl.rlim_cur;
+#endif
+}
+
 void omni_run_entry(void (*entry)(void)) {
   pthread_attr_t attr;
   pthread_t th;
+  if (omni_main_stack_bytes() >= (size_t)256 * 1024 * 1024) { entry(); return; }
   run_entry_fn = entry;
   if (pthread_attr_init(&attr) != 0) { entry(); return; }
   if (pthread_attr_setstacksize(&attr, (size_t)512 * 1024 * 1024) != 0
