@@ -36,14 +36,14 @@ import {
   readText, writeText, exists, readDir, mkdirAll, nowMs, spawn, env, stdout, installDir,
 } from './host/native.js';
 import { join, basename } from './host/path.js';
+import { dataDir } from './host/data.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR } from './runtime/c_runtime.js';
 import { LIB_DIR } from './module/load.js';
 
-/* 语法与内建表是**数据**，不进二进制：两个语法驱动的前端在 `installDir()/../frontend-*`
-   底下找它们（cli.js 的 asyGrammar / jncGrammar）。所以这里的源目录也照同一条算 ——
-   装好的那一份自己再 bootstrap 时，这两个常量指的就是它自己带的那份。 */
-const ASY_DIR = join(installDir(), '..', 'frontend-asy');
-const JNC_DIR = join(installDir(), '..', 'frontend-jnc');
+/* 语法与内建表是**数据**，不进二进制：两个语法驱动的前端按布局找它们（host/data.js）。
+   这里的源目录也照同一条算 —— 装好的那一份自己再 bootstrap 时，指的就是它自己带的那份。 */
+const ASY_DIR = dataDir('frontend-asy', 'asy.grammar') ?? join(installDir(), '..', 'frontend-asy');
+const JNC_DIR = dataDir('frontend-jnc', 'jnc.grammar') ?? join(installDir(), '..', 'frontend-jnc');
 
 /** 文本树复制。产物要自包含，所以是复制而不是 symlink —— 打包带走才不会断。 */
 function copyTree(from, to, exts) {
@@ -83,11 +83,15 @@ function fmtMs(dt) {
 /**
  * @param {{source: string, outDir: string, quick: boolean,
  *          emitOf: (kind: string, path: string) => string,
- *          buildTo: (path: string, out: string, work: string) => string}} o
+ *          buildTo: (path: string, out: string, work: string) => string,
+ *          pluginsFor: (core: string, dir: string) => {plugins: number, data: number}}} o
  * @returns {{pass: number, fail: number}}
  */
 export function bootstrapSelf(o) {
-  const bin = join(o.outDir, 'src', 'host');
+  /* 产物**只落 dist**（ADR-0021 的 S4）：核心 `dist/omni`、C1 `dist/omni.mjs`、
+     插件 `dist/plugins/`、数据 `dist/share/`。从前是 `dist/src/host/omni` 加
+     `dist/src/frontend-asy` 那种"照源码树摆"的样子 —— 装好的东西里没有 src 这回事。 */
+  const bin = o.outDir;
   const work = join(o.outDir, 'build');
   const name = basename(o.source);
   let pass = 0;
@@ -115,21 +119,25 @@ export function bootstrapSelf(o) {
   // ---- 阶段 0：安装布局
   mkdirAll(bin);
   mkdirAll(work);
-  const libN = copyTree(LIB_DIR, join(o.outDir, 'lib'), ['.omni']);
-  // asy 的那份 base（`lib/asy/*.asy`）：`import settings;` 这些从这里找（cli.js 的 asyLibDir）。
+  /* 数据全落 `<out>/share/`（与 `omni plugins` 抄的是同一个地方，host/data.js 按布局找）。
+     从前是 `<out>/lib`、`<out>/runtime`、`<out>/src/frontend-asy` 那几处 —— 那是照着
+     源码树摆的，而装好的东西里没有 src 这回事。 */
+  const share = join(o.outDir, 'share');
+  const libN = copyTree(LIB_DIR, join(share, 'lib'), ['.omni']);
+  // asy 的那份 base（`lib/asy/*.asy`）：`import settings;` 这些从这里找（lang/asy.js 的 libDir）。
   // copyTree 是平的，所以子目录要单独来一趟。
-  const libAsyN = copyTree(join(LIB_DIR, 'asy'), join(o.outDir, 'lib', 'asy'), ['.asy']);
-  const rtN = copyTree(RUNTIME_DIR, join(o.outDir, 'runtime'), ['.c', '.h']);
+  const libAsyN = copyTree(join(LIB_DIR, 'asy'), join(share, 'lib', 'asy'), ['.asy']);
+  const rtN = copyTree(RUNTIME_DIR, join(share, 'runtime'), ['.c', '.h']);
   // JIT 宿主的 C 源码也要带走，否则 N1 的 run-jit 找不到它（布局错，不是编译器错）
-  const jitN = copyTree(JIT_DIR, join(o.outDir, 'jit'), ['.c', '.h']);
+  const jitN = copyTree(JIT_DIR, join(share, 'jit'), ['.c', '.h']);
   // 三维那一档的 GL 插件源码同理（cli.js 的 glPlugin 现编现用）。不带走只是**少一条腿**：
   // 那侧找不到源码就回 null，运行时走 CPU 光栅器 —— 所以这一格不进下面的计数断言。
-  copyTree(GL_DIR, join(o.outDir, 'runtime-gl'), ['.c', '.h']);
-  // 语法与内建表同理：它们是**数据**、不进二进制，而两个语法驱动的前端在
-  // `installDir()/../frontend-*` 底下按名字找（cli.js:248/253/1083）。不带走的话装好的
-  // 编译器一跑 `.asy` 就报"找不到 asy 语法文件"—— 同样是布局错，不是编译器错。
-  const gAsyN = copyTree(ASY_DIR, join(o.outDir, 'src', 'frontend-asy'), ['.grammar', '.tab']);
-  const gJncN = copyTree(JNC_DIR, join(o.outDir, 'src', 'frontend-jnc'), ['.grammar']);
+  copyTree(GL_DIR, join(share, 'runtime-gl'), ['.c', '.h']);
+  // 语法与内建表同理：它们是**数据**、不进二进制，而两个语法驱动的前端按布局找它们
+  // （host/data.js）。不带走的话装好的编译器一跑 `.asy` 就报"找不到 asy 语法文件"——
+  // 同样是布局错，不是编译器错。
+  const gAsyN = copyTree(ASY_DIR, join(share, 'frontend-asy'), ['.grammar', '.tab']);
+  const gJncN = copyTree(JNC_DIR, join(share, 'frontend-jnc'), ['.grammar']);
   const counts = `lib ${libN}+${libAsyN} files, runtime ${rtN} files, jit ${jitN} files,`
     + ` grammar ${gAsyN}+${gJncN} files`;
   if (libN > 0 && libAsyN > 0 && rtN > 0 && jitN > 0 && gAsyN > 0 && gJncN > 0) {
@@ -165,6 +173,13 @@ export function bootstrapSelf(o) {
   const cc = o.buildTo(o.source, n1, work);
   ok(`N1 = ${cc}(emit-c ${name}) -> ${n1}`);
 
+  /* ---- 阶段 3b：N1 的插件。核心里一格语言/后端都没有（ADR-0021 的 S4），所以这一步
+     不是附赠品 —— 不做的话下面每一道门槛都会栽在"这份 omni 里一门语言都没装"上。
+     绑的是 N1 旁边那份 `.syms`（`buildTo` 用 `--extern` 编，那时才落）。 */
+  const pl = o.pluginsFor(n1, join(o.outDir, 'plugins'));
+  if (pl.plugins > 0) ok(`plugins ${pl.plugins} 格 + ${pl.data} 份数据 -> ${o.outDir}/plugins`);
+  else bad(`plugins -> ${o.outDir}/plugins`, '一格都没编出来');
+
   // ---- 阶段 4：N1 的产出必须与 C0 的逐字节相同（C 路径闭环）
   for (const kind of ['c', 'js']) {
     const ref = o.emitOf(kind, o.source);
@@ -176,7 +191,10 @@ export function bootstrapSelf(o) {
 
   // ---- 阶段 5：N2 = N1 编译出来的下一代原生编译器（真正的 stage2）
   const n2 = join(work, 'omni-n2');
-  const built = spawn(n1, ['build', o.source, '-o', n2, '--work', work], 'c');
+  /* `--extern` 不是可选的：N2 也得把符号导出去，否则**它的**插件（就是 N1 那一套，
+     绑的是同一份符号名）dlopen 不上 —— 量出来是
+     `symbol not found in flat namespace '_g_CALL_LDRET'`。 */
+  const built = spawn(n1, ['build', o.source, '-o', n2, '--work', work, '--extern'], 'c');
   if (built[0] !== 0 || !exists(n2)) {
     bad('N2 = N1 build (stage2)', `exit=${built[0]}\n${built[2]}`);
     return summarize(pass, fail, details, nowMs() - t00);

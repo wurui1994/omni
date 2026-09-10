@@ -1645,6 +1645,72 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
 }
 
 /**
+ * 把**默认那一套插件**编出来，外加它们要的数据（ADR-0021 的 S4）。
+ *
+ * `core` 是核心产物的路径（旁边那份 `.syms` 决定哪些符号绑过去）；`dir` 是插件的落点，
+ * 数据落在 `dirname(dir)/share`。`want` 给 null 就是全套。
+ *
+ * 单独成一个函数是因为**两处要它**：`omni plugins` 那条命令，与自举链
+ * （N1 建好之后得先有插件，否则它连 `emit c` 都做不了 —— 核心里一格后端都没有）。
+ */
+function buildPluginSet(core, dir, want, argv) {
+  const symsPath = `${core}.syms`;
+  if (!exists(symsPath)) {
+    throw new OmniError(`找不到 ${symsPath} —— 核心得用 \`build --extern\` 编（那时才落 .syms）`
+      + '；`npm run native` 会把核心与插件一次做齐');
+  }
+  const bind = new Set(readText(symsPath).split('\n').filter((s) => s !== ''));
+  mkdirAll(dir);
+  /* 插件的入口摆在 `src/plugin/`。从源码跑时 installDir() 是 `src/core/<某一格>`，
+     编出来的核心在 dist 底下 —— 两条腿的相对位置不同，所以按顺序试，试不着就直说。 */
+  const cands = [join(installDir(), '..', '..', 'plugin'), join(installDir(), '..', 'plugin'),
+    join(cwd(), 'src', 'plugin')];
+  const srcDir = cands.find((d) => isDir(d));
+  if (srcDir === undefined) {
+    throw new OmniError(`找不到插件入口那个目录（试过 ${cands.join('、')}）—— plugins 要源码树`);
+  }
+  let n = 0;
+  let tot = 0;
+  for (const p of PLUGIN_SET) {
+    if (want !== null && !want.includes(p.name)) continue;
+    const out = join(dir, `omni-${p.name}.dylib`);
+    const { mod } = compile(join(srcDir, `${p.name}.js`), [...argv, '--plugin', pluginRegName(p.name)]);
+    buildNative(mod, out, undefined, pluginRegName(p.name), true, p.own, bind);
+    n += 1;
+    tot += fileSize(out);
+    stderr(`omni: plugin ${basename(out)}  ${fmtBytes(fileSize(out))}\n`);
+  }
+  stderr(`omni: ${n} 格插件，合计 ${fmtBytes(tot)} -> ${dir}/ ${optFlag()}\n`);
+  /* 数据跟着搬（host/data.js 那一串候选根里的 `<产物同级>/share`）：核心自己要的那几个
+     目录在 CORE_DATA，插件各自要的写在 plugin-set.js 的 `data` 里。数据不是代码，
+     编译器不会把它们编进产物 —— 不搬的话装好的 omni 一跑 `.asy` 就说找不到语法文件。 */
+  const share = join(dirname(dir), 'share');
+  const files = [];
+  for (const c of CORE_DATA) {
+    const d = dataDir(c.dir, c.probe);
+    if (d !== null) for (const f of readDir(d)) files.push(`${c.dir}/${f}`);
+  }
+  for (const p of PLUGIN_SET) {
+    if (want !== null && !want.includes(p.name)) continue;
+    for (const rel of p.data ?? []) {
+      if (!rel.endsWith('/')) { files.push(rel); continue; }
+      const d = dataPath(rel.slice(0, rel.length - 1));
+      if (d !== null) for (const f of readDir(d)) files.push(`${rel}${f}`);
+    }
+  }
+  let nd = 0;
+  for (const rel of files) {
+    const src = dataPath(rel);
+    if (src === null) continue;
+    mkdirAll(dirname(join(share, rel)));
+    writeText(join(share, rel), readText(src));
+    nd += 1;
+  }
+  stderr(`omni: ${nd} 份数据 -> ${share}/\n`);
+  return { plugins: n, data: nd };
+}
+
+/**
  * C 路径上的"直接执行"：编出一个可执行文件再跑掉，退出码原样传回。
  * `run-c` 就是它；原生构建上的 `run` 也是它（那一代没有 JS 引擎）。
  * `--work DIR` 会把可执行文件和生成的 C 都留在 DIR 里，方便事后看。
@@ -2065,6 +2131,11 @@ function main(argv) {
     stdout(renderHelp(node, cpath));
     return 1;
   }
+  /* **出 JS 产物的那两条得全内建**（ADR-0021 的 S4）：JS 宿主没有 dlopen（host/native.js
+     的 pluginsOk），装不动插件 —— 编出来的 `omni.mjs` 要是也只剩驱动，那它一门语言都不认，
+     自举链第二道门槛（C2 = C1 emit-js）当场报"这份 omni 里一门语言都没装"。
+     C 那条产物照旧是薄核心 + plugins/。 */
+  if (node.key === 'emit-js' || node.key === 'build-js') LANGS_FAT = true;
   /* `omni c tcc`（决策三）：它自己一套解析器（tcc 的 `-v`/`-r`/`-f` 与 omni 的不同义），
    * 翻成「哪一条 omni 命令 + 那条命令的 argv」之后**原路再走一遍** —— 实现一份都不复制，
    * 而且别处的规矩（别名铺平、`splitArgv`、`--explain`、`-v` 那张表）自动都适用。
@@ -2274,61 +2345,9 @@ function main(argv) {
     const core = ci >= 0 ? rest[ci + 1] : join(cwd(), 'dist', 'omni');
     const oi = rest.indexOf('-o');
     const dir = oi >= 0 ? rest[oi + 1] : join(dirname(core), 'plugins');
-    const symsPath = `${core}.syms`;
-    if (!exists(symsPath)) {
-      throw new OmniError(`找不到 ${symsPath} —— 核心得用 \`build --extern\` 编（那时才落 .syms）`
-        + '；`npm run native` 会把核心与插件一次做齐');
-    }
-    const bind = new Set(readText(symsPath).split('\n').filter((s) => s !== ''));
-    mkdirAll(dir);
     const only = rest.indexOf('--only');
     const want = only >= 0 && rest[only + 1] !== undefined ? rest[only + 1].split(',') : null;
-    /* 插件的入口摆在 `src/plugin/`。从源码跑时 installDir() 是 `src/core/<某一格>`，
-       编出来的核心在 `dist/build` —— 两条腿的相对位置不同，所以按顺序试，试不着就直说。 */
-    const cands = [join(installDir(), '..', '..', 'plugin'), join(installDir(), '..', 'plugin'),
-      join(cwd(), 'src', 'plugin')];
-    const srcDir = cands.find((d) => isDir(d));
-    if (srcDir === undefined) {
-      throw new OmniError(`找不到插件入口那个目录（试过 ${cands.join('、')}）—— plugins 要源码树`);
-    }
-    let n = 0;
-    let tot = 0;
-    for (const p of PLUGIN_SET) {
-      if (want !== null && !want.includes(p.name)) continue;
-      const out = join(dir, `omni-${p.name}.dylib`);
-      const { mod } = compile(join(srcDir, `${p.name}.js`), [...rest, '--plugin', pluginRegName(p.name)]);
-      buildNative(mod, out, undefined, pluginRegName(p.name), true, p.own, bind);
-      n += 1;
-      tot += fileSize(out);
-      stderr(`omni: plugin ${basename(out)}  ${fmtBytes(fileSize(out))}\n`);
-    }
-    stderr(`omni: ${n} 格插件，合计 ${fmtBytes(tot)} -> ${dir}/ ${optFlag()}\n`);
-    /* 插件的**数据**跟着搬（host/data.js 那一串候选根里的 `<产物同级>/share`）：
-       哪几份归哪一格写在 plugin-set.js 的 `data` 里。不搬的话装好的那份 omni 一跑
-       `.asy` 就报"找不到 asy 语法文件" —— 数据不是代码，编译器不会把它们编进 dylib。 */
-    const share = join(dirname(dir), 'share');
-    const files = [];
-    for (const c of CORE_DATA) {
-      const d = dataDir(c.dir, c.probe);
-      if (d !== null) for (const f of readDir(d)) files.push(`${c.dir}/${f}`);
-    }
-    for (const p of PLUGIN_SET) {
-      if (want !== null && !want.includes(p.name)) continue;
-      for (const rel of p.data ?? []) {
-        if (!rel.endsWith('/')) { files.push(rel); continue; }
-        const d = dataPath(rel.slice(0, rel.length - 1));
-        if (d !== null) for (const f of readDir(d)) files.push(`${rel}${f}`);
-      }
-    }
-    let nd = 0;
-    for (const rel of files) {
-      const src = dataPath(rel);
-      if (src === null) continue;
-      mkdirAll(dirname(join(share, rel)));
-      writeText(join(share, rel), readText(src));
-      nd += 1;
-    }
-    stderr(`omni: ${nd} 份数据 -> ${share}/\n`);
+    buildPluginSet(core, dir, want, rest);
     return 0;
   }
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
@@ -2344,10 +2363,19 @@ function main(argv) {
       outDir,
       quick: rest.includes('-q') || rest.includes('--quick'),
       emitOf: (kind, p) => {
+        /* JS 产物全内建、C 产物薄核心 —— 与 `emit js` / `emit c` 两条命令同一条规矩
+           （理由在 node.key 那两行旁边）。这一格得在 compile 之前置：接缝在 readModule。 */
+        LANGS_FAT = kind === 'js';
         const { mod } = compile(p, []);
         return kind === 'c' ? target('c').emit(mod) : target('js').emit(mod);
       },
-      buildTo: (p, out, work) => buildNative(compile(p, []).mod, out, work).cc,
+      /* N1 用 `--extern` 编：它旁边那份 `.syms` 就是插件 `--bind` 要的东西
+         （核心里一格语言都没有，插件是它能干活的前提）。 */
+      buildTo: (p, out, work) => {
+        LANGS_FAT = false;
+        return buildNative(compile(p, []).mod, out, work, undefined, true).cc;
+      },
+      pluginsFor: (core, dir) => buildPluginSet(core, dir, null, []),
     });
     return r.fail > 0 ? 1 : 0;
   }
