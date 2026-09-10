@@ -62,7 +62,7 @@ omni_s16 omni_s16_of_units(const uint16_t *p, int64_t len) {
 
 /* UTF-8 -> UTF-16。非法字节序列按 U+FFFD 吞掉一个字节：解析器不该因为源文件里
    有一段坏字节就崩，而且 node 读文件时也是这么替换的。 */
-omni_s16 omni_s16_of_utf8(omni_str s) {
+static omni_s16 omni_s16_of_utf8_raw(omni_str s) {
   /* 上界：每个字节最多产出一个码元（4 字节序列产出 2 个，但它占了 4 个字节） */
   uint16_t *out = alloc16(s.len);
   int64_t n = 0;
@@ -98,9 +98,44 @@ omni_s16 omni_s16_of_utf8(omni_str s) {
   return mk(out, n);
 }
 
+/* 短串转出来的那一份记住（intern）。
+
+   量出来的（OMNI_MEM_DEBUG=4 的归属表，ADR-0021）：一次 `emit c src/cli.js` 里
+   alloc16 < omni_s16_of_utf8 < omni_js_dict_keys_ < omni_js_obj_keys < u_eachChild
+   这一条约 430 万次分配 / 38 MiB —— Object.keys / for-in / JSON 每次都把**同一批**
+   属性名重新转一遍码，而全程不同的键其实只有几百个。
+
+   同内容共用一份缓冲区是安全的：omni_s16 是 const 视图（omni.h 那行 typedef），串不可变，
+   没有一处按地址判串相等（查过；Symbol 才按地址，那是另一个 tag，不经这里）。
+   表定长，冲突就顶掉旧的那一格 —— 命中率不满 100% 只是少省一次，不会错。
+   长串不收：各不相同，比一遍内容还不如直接转。 */
+#define OMNI_S16_IN_MAX 40   /* 字节。属性名、关键字、AST 的 type 都在这个量级 */
+#define OMNI_S16_IN_N   4096 /* 2 的幂 */
+static struct { omni_str k; omni_s16 v; } omni_s16_in_[OMNI_S16_IN_N];
+
+omni_s16 omni_s16_of_utf8(omni_str s) {
+  if (s.len <= 0 || s.len > OMNI_S16_IN_MAX) return omni_s16_of_utf8_raw(s);
+  uint64_t h = 1469598103934665603ull;
+  for (int64_t i = 0; i < s.len; i++) {
+    h ^= (unsigned char)s.p[i];
+    h *= 1099511628211ull;
+  }
+  size_t ix = (size_t)(h & (OMNI_S16_IN_N - 1));
+  if (omni_s16_in_[ix].k.len == s.len
+    && memcmp(omni_s16_in_[ix].k.p, s.p, (size_t)s.len) == 0) return omni_s16_in_[ix].v;
+  omni_s16 v = omni_s16_of_utf8_raw(s);
+  /* 入参可能落在栈上（查槽那条路就用栈上的 kbuf），所以键得拷进 arena 才能留下 */
+  char *kp = omni_alloc_bytes((size_t)s.len);
+  memcpy(kp, s.p, (size_t)s.len);
+  omni_s16_in_[ix].k.p = kp;
+  omni_s16_in_[ix].k.len = s.len;
+  omni_s16_in_[ix].v = v;
+  return v;
+}
+
 /* UTF-16 -> UTF-8。落单的代理项写成 U+FFFD：WTF-8 会更"无损"，但落单代理项在编译器
    源码里不存在，而 WTF-8 会让外面的工具读不懂输出。 */
-omni_str omni_s16_to_utf8(omni_s16 s) {
+static omni_str omni_s16_to_utf8_raw(omni_s16 s) {
   char *out = omni_alloc_bytes(s.len * 3 + 1);
   int64_t n = 0;
   for (int64_t i = 0; i < s.len; i++) {
@@ -129,6 +164,29 @@ omni_str omni_s16_to_utf8(omni_s16 s) {
   }
   out[n] = '\0';
   return omni_str_new(out, n);
+}
+
+/* 反方向也记一份。属性访问的键在 JS 那边是 UTF-16，落到 dict 上要变回 UTF-8：
+   一次 emit c 自举里 omni_s16_to_utf8 是自时间榜第 5（/usr/bin/sample 的 20 秒采样里
+   574 个样本），而键的取值只有几百种。多一个好处：命中时返回的是**同一份**缓冲区，
+   于是 omni_eq_string 的指针快路径也跟着命中，dict 查找连 memcmp 都省了。
+   安全性同 of_utf8 那一段：串不可变，没有一处按地址判串相等。 */
+static struct { omni_s16 k; omni_str v; } omni_u8_in_[OMNI_S16_IN_N];
+
+omni_str omni_s16_to_utf8(omni_s16 s) {
+  if (s.len <= 0 || s.len > OMNI_S16_IN_MAX) return omni_s16_to_utf8_raw(s);
+  uint64_t h = 1469598103934665603ull;
+  for (int64_t i = 0; i < s.len; i++) {
+    h ^= s.p[i];
+    h *= 1099511628211ull;
+  }
+  size_t ix = (size_t)(h & (OMNI_S16_IN_N - 1));
+  if (omni_u8_in_[ix].k.len == s.len
+    && memcmp(omni_u8_in_[ix].k.p, s.p, (size_t)s.len * 2) == 0) return omni_u8_in_[ix].v;
+  omni_str v = omni_s16_to_utf8_raw(s);
+  omni_u8_in_[ix].k = omni_s16_of_units(s.p, s.len); /* 入参可能在栈上，键要自己留一份 */
+  omni_u8_in_[ix].v = v;
+  return v;
 }
 
 /* ---------------------------------------------------------------- 拼接与切片 */

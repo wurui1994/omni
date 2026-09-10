@@ -970,7 +970,15 @@ static inline int64_t omni_hash_string(omni_str s) {
   for (int64_t i = 0; i < s.len; i++) { h ^= (unsigned char)s.p[i]; h *= 1099511628211ULL; }
   return (int64_t)h;
 }
-static inline bool omni_eq_string(omni_str a, omni_str b) { return omni_str_cmp(a, b) == 0; }
+/* 相等不必走 cmp：先看长度（不等就完了，连 memcmp 都不必），再看是不是同一份缓冲区
+   （短串转码那一层会 intern，见 omni_str16.c —— 属性名这种反复出现的键常常就是同一格）。
+   量出来的：dict 查找那一串（omni_hash_string / _find / memcmp）是 emit c 自举里最大的一坨
+   自时间，而 omni_str_cmp 对长度不同的键也要先 memcmp 一遍公共前缀。 */
+static inline bool omni_eq_string(omni_str a, omni_str b) {
+  if (a.len != b.len) return false;
+  if (a.p == b.p) return true;
+  return a.len == 0 || memcmp(a.p, b.p, (size_t)a.len) == 0;
+}
 
 static inline int64_t omni_hash_dyn(omni_dyn v) { return omni_hash_int(v.tag); }
 static inline bool omni_eq_dyn(omni_dyn a, omni_dyn b) { return omni_dyn_eq(a, b); }
