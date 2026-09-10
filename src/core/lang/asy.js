@@ -21,8 +21,8 @@ import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { parseAsyBuiltins } from '../frontend-asy/types.js';
 import { Diagnostics, SourceFile } from '../source/diag.js';
-import { lowerAsy } from '../frontend-asy/lower.js';
-import { lowerCoreSexpr } from '../sexpr/lower.js';
+import { lowerAsy, AsySession } from '../frontend-asy/lower.js';
+import { lowerCoreSexpr, lowerCoreSession, CoreSession } from '../sexpr/lower.js';
 import { asyUnitModules } from '../frontend-asy/link.js';
 
 /* cli.js 那个 loadGrammar 是"读表 + 印一行"，而这一份不许伸手去拿 cli 的东西 ——
@@ -439,6 +439,150 @@ export function asyUnitTexts(path, skip) {
 }
 
 /**
+ * `omni repl --lang asy` 那条腿。从 repl.js 搬过来的（ADR-0021 的 S4）—— 驱动不该为了
+ * 一门语言的交互式会话去 import frontend-asy。
+ *
+ * 前半段是 asy 自己的（语法表解析 + 降成核心方言），后半段与 `sx` 那条**同一份**
+ * （CoreSession：方言 -> OIR 的增量、跨批可见性、失败回滚）。asy 本身是有 REPL 的，
+ * 所以这一条不是附赠品；而它落地时唯一新写的东西是"每批只印这一批"（AsySession），
+ * 增量的那一半没有第二份实现。
+ *
+ * 语法零件由 deps 注入（`deps.asy()` = asyFrontEnd）：文件 IO 与表加载归调用方，
+ * 这边只拿解析好的东西。
+ */
+class AsyReplLang {
+  constructor(deps) {
+    this.name = 'asy';
+    if (deps === undefined || deps.asy === undefined) {
+      throw new OmniError('omni: repl --lang asy 需要 asy 的语法零件（由 cli 注入）');
+    }
+    this.fe = deps.asy();
+    // 这一批的诊断袋：模块加载器是在 add 里面被调起来的，所以它得能拿到当前这一袋
+    this.diags = new Diagnostics();
+    this.preludeName = deps.asyPrelude === undefined ? 'asy_builtins' : deps.asyPrelude();
+    // `run` 那一路有的两样，这里一样要有（第一百〇四刀）：**模块加载器**与那层隐式的
+    // `asy_builtins`。从前是 `load: null`，于是 REPL 里 `import settings;` 报的是
+    // "asy 前端第一刀还不支持：模块 'settings'（这条路上没有模块加载器）" —— 同一门语言
+    // 在 REPL 里少了一半，而 asy 自己的 REPL 是能 import 的。
+    this.as = new AsySession({
+      path: '<repl>', builtins: this.fe.builtins,
+      load: (nm) => this.fe.loader(this.diags)(nm),
+      pathOf: (n) => this.fe.resolve(n),
+      prelude: this.preludeName,
+    });
+    this.cs = new CoreSession();
+  }
+
+  // asy 的类型都写在源码里，没有"缺省注解怎么办"这回事
+  getMode() { return 'static'; }
+
+  setMode(m) { throw new OmniError('omni: asy has no type modes to switch'); }
+
+  prelude() { return null; }
+
+  blank(text) {
+    return text.replace(/\/\/[^\n]*/g, '').trim() === '';
+  }
+
+  complete(text) { return asyReplBalanced(text); }
+
+  /** asy 里"打印一个值"是 `write(...)`，所以回显就是包成它 */
+  echo(text) { return asyReplLooksLikeExpr(text) ? `write(${text});` : null; }
+
+  echoOptional(text) { return text.trim().endsWith(')'); }
+
+  asStmt(text) { return /[;}]$/.test(text.trim()) ? text : `${text};`; }
+
+  snapshot() { return { as: this.as.snapshot(), cs: this.cs.snapshot() }; }
+
+  restore(s) {
+    this.as.restore(s.as);
+    this.cs.restore(s.cs);
+  }
+
+  add(text, diags) {
+    this.diags = diags;
+    const tree = this.fe.parseText('<repl>', `${text}\n`, diags);
+    diags.throwIfErrors();
+    const sx = this.as.add(tree, diags);
+    diags.throwIfErrors();
+    const delta = this.cs.add(sx, diags);
+    diags.throwIfErrors();
+    return delta;
+  }
+
+  full(chunks) {
+    const diags = new Diagnostics();
+    this.diags = diags;
+    const text = `${chunks.join('\n')}\n`;
+    const tree = this.fe.parseText('<repl>', text, diags);
+    diags.throwIfErrors();
+    const sx = lowerAsy(tree, diags, {
+      path: '<repl>', builtins: this.fe.builtins,
+      load: (nm) => this.fe.loader(diags)(nm),
+      pathOf: (n) => this.fe.resolve(n),
+      prelude: this.preludeName,
+    });
+    diags.throwIfErrors();
+    const mod = lowerCoreSession(sx, diags);
+    diags.throwIfErrors();
+    return mod;
+  }
+}
+
+/** 括号平衡（字符串与注释里的不算）。repl.js 那边 JS 腿也有一份同形的 —— 插件不许伸手
+    去拿驱动的东西，所以这里是自己的一份（三十行，比引入一层依赖便宜）。 */
+function asyReplBalanced(text) {
+  let depth = 0;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"' || c === "'") {
+      const q = c;
+      i++;
+      while (i < text.length && text[i] !== q) {
+        if (text[i] === '\\') i++;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    i++;
+  }
+  return depth <= 0;
+}
+
+/** 要不要回显。与 Omni 那条同一套判据，只是不借词法器（asy 的词法在语法表里）。 */
+function asyReplLooksLikeExpr(text) {
+  const t = text.trim();
+  if (!t || /[;}]$/.test(t)) return false;
+  if (/^(if|else|while|for|do|return|break|continue|struct|typedef|import|access|include|from|void|new)\b/.test(t)) return false;
+  // 顶层的赋值/自增算语句（`x = 5`、`i++` 不回显，和 Python 一致）
+  const bare = t.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
+  if (/(\+\+|--)/.test(bare)) return false;
+  let depth = 0;
+  for (let i = 0; i < bare.length; i++) {
+    const c = bare[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (depth === 0 && c === '=' && bare[i + 1] !== '=' && '=!<>+-*/%'.indexOf(bare[i - 1] ?? ' ') < 0) return false;
+  }
+  return true;
+}
+
+/**
  * 登记（ADR-0021 S4）：内建时核心调一次，做成动态库之后由 `omni_plugin_init` 调同一个 —— 
  * 注册表那一层看不出区别。宿主服务先经 `initAsy` 收下（asy 那几格印记服务比 wat / sx 多）。
  */
@@ -462,5 +606,7 @@ export function registerAsyLang(api) {
      增量那条路要 AST 缓存的读法，REPL 那条路要整套 asy 前端。 */
   api.registerCap('asy.astUnpack', astUnpack);
   api.registerCap('asy.frontEnd', asyFrontEnd);
+  /* REPL 那条腿整个在这一侧（从前 repl.js 里的 AsyLang）：驱动只按名字要一格。 */
+  api.registerCap('asy.repl', (deps) => new AsyReplLang(deps));
   api.registerLang(['.asy'], 'asy', (path) => compileAsy(path));
 }

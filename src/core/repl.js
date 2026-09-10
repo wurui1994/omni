@@ -33,8 +33,7 @@ import { emitJs, emitJsRuntimeModule } from './backend-js/emit.js';
 import { emitC } from './backend-c/emit.js';
 import { loadProgram, newLoadState } from './module/load.js';
 import { check, CheckSession } from './hir/check.js';
-import { lowerCoreSession, CoreSession } from './sexpr/lower.js';
-import { lowerAsy, AsySession } from './frontend-asy/lower.js';
+import { cap } from './plugin.js';
 import { parseJs } from './frontend-js/parser.js';
 import { lowerJs, JsFrontSession } from './frontend-js/lower.js';
 import { InterpSession } from './interp/eval.js';
@@ -178,163 +177,18 @@ class OmniLang {
 }
 
 /**
- * 核心 S 表达式方言那条腿：CoreSession。
- *
- * 语法驱动的前端（asy/jancy）印出来的就是这份方言，所以这一条**不是**为 .sx 文件加的功能，
- * 而是"新语言从语法来"这条路上 REPL 的落点：那门语言只要能把一批输入印成方言，
- * 增量、回滚、跨批可见性就都已经在这里了。
+ * 核心 S 表达式方言那条腿（CoreSession）与 asy 那条腿都搬去了 lang/{sx,asy}.js
+ * （ADR-0021 的 S4）：一门语言的 REPL 会话是那门语言自带的东西，驱动只按名字要
+ * 一格（`cap('sx.repl')` / `cap('asy.repl')`）。于是 `--builtins min` 的核心里
+ * sexpr/lower.js 与 frontend-asy/* 都不必进来。
  */
-class CoreLang {
-  constructor() {
-    this.name = 'sx';
-    this.cs = new CoreSession();
-  }
 
-  // 方言里类型都写明了，没有"缺省注解怎么办"这回事，所以模式是固定的
-  getMode() { return 'static'; }
 
-  setMode(m) { throw new OmniError(`omni: ${this.name} has no type modes to switch`); }
 
-  prelude() { return null; }
 
-  /** 空动作：`;` 到行尾是注释，去掉之后什么都不剩就不编译 */
-  blank(text) {
-    return text.replace(/;[^\n]*/g, '').trim() === '';
-  }
 
-  complete(text) {
-    let depth = 0;
-    let str = false;
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      if (str) {
-        if (c === '\\') i++;
-        else if (c === '"') str = false;
-        continue;
-      }
-      if (c === '"') str = true;
-      else if (c === ';') { while (i < text.length && text[i] !== '\n') i++; }
-      else if (c === '(') depth++;
-      else if (c === ')') depth--;
-    }
-    return depth <= 0 && !str;
-  }
-
-  // 方言里"打印一个值"就是 `(print E)`，写法本身已经是语句，没有回显这一层
-  echo(text) { return null; }
-
-  echoOptional(text) { return true; }
-
-  asStmt(text) { return text; }
-
-  snapshot() { return this.cs.snapshot(); }
-
-  restore(s) { this.cs.restore(s); }
-
-  add(text, diags) {
-    const delta = this.cs.add(text, diags);
-    diags.throwIfErrors();
-    return delta;
-  }
-
-  full(chunks) {
-    const diags = new Diagnostics();
-    const mod = lowerCoreSession(`${chunks.join('\n')}\n`, diags);
-    diags.throwIfErrors();
-    return mod;
-  }
-}
-
-/**
- * asy 那条腿。前半段是 asy 自己的（语法表解析 + 降成核心方言），后半段与 `sx` **同一份**
- * （CoreSession：方言 -> OIR 的增量、跨批可见性、失败回滚）。asy 本身是有 REPL 的，
- * 所以这一条不是附赠品；而它落地时唯一新写的东西是"每批只印这一批"（AsySession），
- * 增量的那一半没有第二份实现。
- *
- * 语法零件由 cli.js 注入（`deps.asy()`）：文件 IO 与表加载归它，这边只拿解析好的东西。
- */
-class AsyLang {
-  constructor(deps) {
-    this.name = 'asy';
-    if (deps === undefined || deps.asy === undefined) {
-      throw new OmniError('omni: repl --lang asy 需要 asy 的语法零件（由 cli 注入）');
-    }
-    this.fe = deps.asy();
-    // 这一批的诊断袋：模块加载器是在 add 里面被调起来的，所以它得能拿到当前这一袋
-    this.diags = new Diagnostics();
-    this.preludeName = deps.asyPrelude === undefined ? 'asy_builtins' : deps.asyPrelude();
-    // `run` 那一路有的两样，这里一样要有（第一百〇四刀）：**模块加载器**与那层隐式的
-    // `asy_builtins`。从前是 `load: null`，于是 REPL 里 `import settings;` 报的是
-    // "asy 前端第一刀还不支持：模块 'settings'（这条路上没有模块加载器）" —— 同一门语言
-    // 在 REPL 里少了一半，而 asy 自己的 REPL 是能 import 的。文件 IO 与解析缓存都在
-    // fe 那一侧（cli.js 注入），这边只是把它接上。
-    this.as = new AsySession({
-      path: '<repl>', builtins: this.fe.builtins,
-      load: (nm) => this.fe.loader(this.diags)(nm),
-      pathOf: (n) => this.fe.resolve(n),
-      prelude: this.preludeName,
-    });
-    this.cs = new CoreSession();
-  }
-
-  // asy 的类型都写在源码里，没有"缺省注解怎么办"这回事
-  getMode() { return 'static'; }
-
-  setMode(m) { throw new OmniError('omni: asy has no type modes to switch'); }
-
-  prelude() { return null; }
-
-  blank(text) {
-    return text.replace(/\/\/[^\n]*/g, '').trim() === '';
-  }
-
-  complete(text) { return asyBalanced(text); }
-
-  /** asy 里"打印一个值"是 `write(...)`，所以回显就是包成它 */
-  echo(text) { return asyLooksLikeExpr(text) ? `write(${text});` : null; }
-
-  echoOptional(text) { return text.trim().endsWith(')'); }
-
-  asStmt(text) { return /[;}]$/.test(text.trim()) ? text : `${text};`; }
-
-  snapshot() { return { as: this.as.snapshot(), cs: this.cs.snapshot() }; }
-
-  restore(s) {
-    this.as.restore(s.as);
-    this.cs.restore(s.cs);
-  }
-
-  add(text, diags) {
-    this.diags = diags;
-    const tree = this.fe.parseText('<repl>', `${text}\n`, diags);
-    diags.throwIfErrors();
-    const sx = this.as.add(tree, diags);
-    diags.throwIfErrors();
-    const delta = this.cs.add(sx, diags);
-    diags.throwIfErrors();
-    return delta;
-  }
-
-  full(chunks) {
-    const diags = new Diagnostics();
-    this.diags = diags;
-    const text = `${chunks.join('\n')}\n`;
-    const tree = this.fe.parseText('<repl>', text, diags);
-    diags.throwIfErrors();
-    const sx = lowerAsy(tree, diags, {
-      path: '<repl>', builtins: this.fe.builtins,
-      load: (nm) => this.fe.loader(diags)(nm),
-      pathOf: (n) => this.fe.resolve(n),
-      prelude: this.preludeName,
-    });
-    diags.throwIfErrors();
-    const mod = lowerCoreSession(sx, diags);
-    diags.throwIfErrors();
-    return mod;
-  }
-}
-
-/** 括号平衡（字符串与注释里的不算）。asy 与核心方言的续行判断都用它，只是括号集不同。 */
+/** 括号平衡（字符串与注释里的不算）。JS 那条腿的续行判断用它（asy 那条在 lang/asy.js
+ *  自己有一份同形的 —— 插件不许伸手拿驱动的东西）。 */
 function asyBalanced(text) {
   let depth = 0;
   let i = 0;
@@ -367,29 +221,13 @@ function asyBalanced(text) {
   return depth <= 0;
 }
 
-/** 要不要回显。与 Omni 那条同一套判据，只是不借词法器（asy 的词法表在 cli 那边）。 */
-function asyLooksLikeExpr(text) {
-  const t = text.trim();
-  if (!t || /[;}]$/.test(t)) return false;
-  if (/^(if|else|while|for|do|return|break|continue|struct|typedef|import|access|include|from|void|new)\b/.test(t)) return false;
-  // 顶层的赋值/自增算语句（`x = 5`、`i++` 不回显，和 Python 一致）
-  const bare = t.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
-  if (/(\+\+|--)/.test(bare)) return false;
-  let depth = 0;
-  for (let i = 0; i < bare.length; i++) {
-    const c = bare[i];
-    if (c === '(' || c === '[' || c === '{') depth++;
-    else if (c === ')' || c === ']' || c === '}') depth--;
-    else if (depth === 0 && c === '=' && bare[i + 1] !== '=' && '=!<>+-*/%'.indexOf(bare[i - 1] ?? ' ') < 0) return false;
-  }
-  return true;
-}
-
-/** `--lang` -> 语言模块。加一门语言就是加一行（前提是它能印出核心方言）。 */
+/** `--lang` -> 语言模块。加一门语言就是加一行（前提是它能印出核心方言）。
+ *  sx / asy 那两条的整套会话在 lang/{sx,asy}.js 里（ADR-0021 S4）：REPL 也是一门语言
+ *  自带的东西，驱动只按名字要一格 —— 于是薄核心里 frontend-asy 与 sexpr 都不必进来。 */
 function replLang(name, mode, deps) {
   if (name === 'omni') return new OmniLang(mode);
-  if (name === 'sx') return new CoreLang();
-  if (name === 'asy') return new AsyLang(deps);
+  if (name === 'sx') return cap('sx.repl')();
+  if (name === 'asy') return cap('asy.repl')(deps);
   if (name === 'js') return new JsLang();
   throw new OmniError(`omni: repl: unknown language '${name}' (have: omni, sx, asy, js)`);
 }
