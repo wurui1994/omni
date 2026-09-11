@@ -1,0 +1,91 @@
+// 第一百二十九刀：**结构体的 `construct`**。`--group` 那张榜上 std 那一批剩的两格之一
+// （14 处诊断；语料里 struct/union 上的构造 28 处，最常见的写法是 `construct() thin {}`）。
+//
+// 类那一侧第五十三刀（体内的 construct）与第一百〇三刀（`T v(a, b)` 的构造实参）都收了，
+// 结构体这一侧要多想一件事：**它是按值的**。可这一层里"按值"恰好省事 —— 结构体那一格的名字里
+// 放的**本来就是地址**（第十二刀），所以 `this` 直接传那一格，不用先提到堆上。于是四处接上去：
+//   1. `aggHoist` 把体里的 `construct` 也提到顶层（名字由 fnSig0 拼成 `S$construct`）；
+//   2. `fnSig0` 认结构体当主人（`this` 那一格的类型用结构体自己，与第一百〇一刀的方法一样）；
+//   3. 局部量 `S s;` / `S s(a, b)` 与 `new S(…)` 三处调用点；
+//   4. **字段自己的构造**（下面 Outer / Wrap 那两格）。
+//
+// 第 4 条是这一刀真正的内容，也是唯一一处不做就会**静默错**的地方：`Outer` 里内嵌一格
+// `Inner m_in`，只构造外面那一格的话 `m_in` 就停在零值上 —— 源码明明写了 `Inner.construct`。
+// 所以：自己写了 construct 的，那几句补在体**之前**（与字段默认值同一条口径，体里再赋值会盖掉）；
+// 自己**没写**的（`Wrap`），给它**合成一个**（`synthStructCtors`，与类那一侧的 synthCtors 是一对）。
+//
+// 还不收的两格，各记一句：`static construct`（要一道 once 闸门）与 `new S[n]`（n 格要每格
+// 都调一遍，得一个循环）。要实参的内嵌构造也明说不补。
+//
+// 尺子 `/tmp/c126.c`：C 里没有构造，手写的是"编译器该替你调的那几句" —— 那正是这一刀做的事。
+// 同一串数（1 2 3 / 3 4 7 / 5 9 / 7 8 / 5 5 7 / 5 0）。
+
+struct Zero {
+	int m_x;
+	int m_y;
+
+	construct() {
+		m_x = 1;
+		m_y = 2;
+	}
+
+	int sum() {
+		return m_x + m_y;
+	}
+}
+
+struct Args {
+	int m_x;
+	int m_y;
+
+	// 带实参、带默认值，`thin` 是语料里最常见的写法
+	construct(int x, int y = 9) thin {
+		m_x = x;
+		m_y = y;
+	}
+}
+
+struct Inner {
+	int m_v;
+
+	construct() thin {
+		m_v = 5;
+	}
+}
+
+// 自己写了 construct：`m_in` 那一格由编译器补在体之前
+struct Outer {
+	Inner m_in;
+	int m_n;
+
+	construct() thin {
+		m_n = 7;
+	}
+}
+
+// 自己没写：整个 construct 都是合成的（不然 m_in 停在零值上）
+struct Wrap {
+	Inner m_in;
+	int m_n;
+}
+
+int main() {
+	Zero z;
+	printf("%d %d %d\n", z.m_x, z.m_y, z.sum());
+
+	Args a(3, 4);
+	printf("%d %d %d\n", a.m_x, a.m_y, a.m_x + a.m_y);
+
+	Args b(5);                           // 默认实参
+	printf("%d %d\n", b.m_x, b.m_y);
+
+	Args* c = new Args(7, 8);            // new 那一处
+	printf("%d %d\n", c.m_x, c.m_y);
+
+	Outer o;
+	printf("%d %d %d\n", o.m_in.m_v, o.m_in.m_v, o.m_n);
+
+	Wrap w;
+	printf("%d %d\n", w.m_in.m_v, w.m_n);
+	return 0;
+}

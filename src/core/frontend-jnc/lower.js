@@ -1218,6 +1218,59 @@ class JncLower {
   }
 
   /**
+   * 结构体里那几格**字段自己的构造**那几行（第一百二十九刀）。
+   *
+   * 只管结构体：类那一侧的字段还不收类类型（那一条界另有一句话），而结构体的字段是**内嵌**的，
+   * 所以"外面那一格构造了、里面那一格没构造"就是静默的错答案。
+   *
+   * 要实参的那一种补不出来 —— 与基类那一条（第九十四刀）同一条口径：明说，不猜。
+   */
+  memCtorLines(name, pad) {
+    if (this.classes.has(name)) return [];
+    const out = [];
+    for (const f of this.structs.get(name) ?? []) {
+      if (!jncIsStruct(f.type)) continue;
+      const c = this.ctors.get(f.type.name);
+      if (c === undefined) continue;
+      if (c.params.length > 0) {
+        this.err(null, `${shown(name)} 里的字段 '${f.name}' 的类型 ${shown(f.type.name)} 的 `
+          + `construct 要 ${c.params.length} 个实参 —— 内嵌的那一格补不出来`);
+        continue;
+      }
+      out.push(`${pad}(expr (call ${c.name} (pfield (var $this) ${f.name})))`);
+    }
+    return out;
+  }
+
+  /**
+   * 结构体的**合成构造**（第一百二十九刀）：自己没写 `construct`、可字段里有带构造的结构体时，
+   * 给它合成一个 —— 不然那几格字段永远不会被构造（静默的错答案）。
+   *
+   * 与类那一侧的 `synthCtors` 是一对；这儿要按"字段依赖"跑到不动点：`A` 里有 `B`、`B` 里有 `C`，
+   * 那么 C 的先有、B 的才补得出来。一遍最多补一格，所以最多跑字段深度那么多遍。
+   */
+  synthStructCtors() {
+    for (let pass = 0; pass < 16; pass++) {
+      let added = false;
+      for (const [name, fs] of this.structs) {
+        if (this.classes.has(name) || this.ctors.has(name)) continue;
+        const mem = fs.filter((f) => jncIsStruct(f.type) && this.ctors.has(f.type.name));
+        if (mem.length === 0) continue;
+        const full = `${name}$construct`;
+        if (this.fns.has(full)) continue;
+        const self = { k: 'struct', name };
+        this.fns.set(full, { params: [self], ret: J_VOID });
+        this.methods.set(full, name);
+        this.ctors.set(name, { name: full, params: [] });
+        const calls = this.memCtorLines(name, '    ').join('\n');
+        this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n${calls})`);
+        added = true;
+      }
+      if (!added) break;
+    }
+  }
+
+  /**
    * 类里那几格事件的**建单子**那几行（第八十三刀）。
    *
    * 一格事件在方言里就是一格数组的句柄（多播的处理函数单子，第七十三刀）。对象刚造出来时
@@ -2076,8 +2129,11 @@ class JncLower {
       const isCls = isClassAgg(agg);
       if (h === 'fn-def') {
         const sk = specialCore(m.items[2]);
+        /* `construct` 从第一百二十九刀起**结构体那一侧也提** —— 它与普通方法落法一样
+           （一个自由函数、`this` 当第一个形参），只是名字由 fnSig0 拼成 `S$construct`。
+           `static construct` 仍旧只在类那一侧：那一格要一道 once 闸门，是另一笔账。 */
         if (sk === null || accessorNamed(m.items[2])
-          || (isCls && (sk === 'construct' || sk === 'static construct'))) {
+          || sk === 'construct' || (isCls && sk === 'static construct')) {
           out.push({ ns: inner, it: m });
         }
         continue;
@@ -2221,6 +2277,9 @@ class JncLower {
     // 不合成就等于 `D d;` 悄悄跳过了基类的构造 —— 那是骗人。按深度从上往下走，所以基类
     // 那一个（可能也是合成的）已经在表里了。
     this.synthCtors();
+    /* 结构体那一侧的合成构造（第一百二十九刀）：自己没写 construct、可字段里有带构造的结构体时
+       给它合成一个 —— 排在 synthCtors 之后、函数体那一遍之前（体那一遍要按 ctors 发那几句）。 */
+    this.synthStructCtors();
     // `&` 过谁先数一遍（第二十四刀）：模块级的标量被取过地址时，那一格要提到一段**自己的
     // 内存**里去（与第九刀对局部量做的是同一件事）。这一问必须在 `(global …)` 发出去之前
     // 答完 —— 而 `&g` 出现在函数体里，也就是后面那一遍。数的是整份源码里所有 `&名字`，
@@ -4302,10 +4361,10 @@ class JncLower {
            形参。体已经由 aggHoist 提到顶层了，这儿跳过。 */
         if (!cls) {
           const sk0 = specialCore(m.items[2]);
-          /* `construct` / `destruct` 在结构体里还不收（构造那一族是自己一刀）。裸写的
-             `get` / `set` 是**下标运算符**那一族（见 accessorNamed）—— 名字写在前面的
-             `p.get()` 是属性的取值器，那一格照旧提上去。 */
-          if (sk0 !== null && !accessorNamed(m.items[2])) {
+          /* `construct` 从第一百二十九刀起收了（体由 aggHoist 提到顶层，与普通方法同一条路），
+             所以这儿只拦剩下的那几个。裸写的 `get` / `set` 是**下标运算符**那一族
+             （见 accessorNamed）—— 名字写在前面的 `p.get()` 是属性的取值器，那一格照旧提上去。 */
+          if (sk0 !== null && sk0 !== 'construct' && !accessorNamed(m.items[2])) {
             this.nope(m, `结构体里的 '${sk0}'`);
           }
           continue;
@@ -6383,14 +6442,21 @@ class JncLower {
     // `C.construct()` 名字里本来就带着 `C.`），所以两种放法到这儿又是同一格。
     if (info.special !== null) {
       if (info.special === 'get' || info.special === 'set') return this.propSig(n, info, ps);
+      /* 构造的主人（第五十三刀是类；第一百二十九刀把**结构体**也算上）：先按类查，查不着再按
+         结构体查 —— 两边的落法只差 `this` 那一格的类型（类是一条引用 tClass，结构体那一格里
+         放的本来就是地址，所以直接用那个结构体类型，与第一百〇一刀的方法一模一样）。 */
       const owner = info.name === ''
-        ? (this.classes.has(this.ns) ? this.ns : null)
-        : this.resolve(info.name, (k) => this.classes.has(k));
+        ? (this.structs.has(this.ns) ? this.ns : null)
+        : this.resolve(info.name, (k) => this.structs.has(k));
+      const ownStruct = owner !== null && !this.classes.has(owner);
       if (owner === null) {
-        return this.err(n, `'${info.special}' 只能是类的成员（写在类体里，或写成 `
+        return this.err(n, `'${info.special}' 只能是类或结构体的成员（写在体里，或写成 `
           + `'${info.name === '' ? 'C' : shown(info.name)}.construct()'）`);
       }
       const stat = info.special === 'static construct';
+      if (stat && ownStruct) {
+        return this.nope(n, `结构体里的 'static construct'（那一格要一道 once 闸门，是另一笔账）`);
+      }
       const full = stat ? `${owner}$construct$static` : `${owner}$construct`;
       // 构造的**重载** jancy 是收的（形参不同的好几个 `construct`），这一层一个名字一格函数。
       if (this.fns.has(full)) {
@@ -6404,7 +6470,12 @@ class JncLower {
         if (ps.length > 0) return this.err(n, "'static construct' 不带形参");
         this.sctors.set(owner, full);
       } else {
-        ps.unshift({ name: 'this', type: tClass(owner, false), formals: null, def: null });
+        ps.unshift({
+          name: 'this',
+          type: ownStruct ? { k: 'struct', name: owner } : tClass(owner, false),
+          formals: null,
+          def: null,
+        });
         this.methods.set(full, owner);
         this.ctors.set(owner, {
           name: full,
@@ -7029,6 +7100,11 @@ class JncLower {
          上下文已经摆好了（this.ns 在类上、`this` 别名成 `$this`、形参都 push 过），
          所以这儿直接用当前上下文降，不另开一格。 */
       for (const l of this.fieldInitLines(owner, 4)) pre.push(l);
+      /* 结构体里那几格**字段自己的构造**（第一百二十九刀）：`Outer` 的构造里要把
+         `Inner m_in` 那一格也构造一遍 —— jancy 那边这是 initializeFields 的一部分。
+         不发这几句就是**静默的错答案**（那一格停在零值上，而源码明明写了 construct）。
+         排在用户写的体之前：体里再给同一格赋值会盖掉它，与字段默认值同一条口径。 */
+      for (const l of this.memCtorLines(owner, '    ')) pre.push(l);
     }
     const save = this.retTy;
     this.retTy = isMain ? J_VOID : info.type;
@@ -7321,19 +7397,21 @@ class JncLower {
       if (info.formals !== null) {
         /* `A a(x, y);`（第一百〇三刀）：那对括号里是**构造实参**，不是形参表 —— 判据与
            "怎么当实参用"都在 ctorArgsOf 那儿。凑齐了就走第五十三刀那条现成的路。 */
-        const ca = isClass(info.type) && info.type.own === true
+        // `T v(a, b)`（第一百〇三刀）：类的变量收得下，结构体从第一百二十九刀起也收得下
+        const ca = (isClass(info.type) && info.type.own === true) || jncIsStruct(info.type)
           ? this.ctorArgsOf(info.formals) : null;
         if (ca === null) {
-          this.nope(dcl, '局部量上的形参表（`T v(a, b)` 那种构造实参只有类的变量收得下）');
+          this.nope(dcl, '局部量上的形参表（`T v(a, b)` 那种构造实参只有类与结构体的变量收得下）');
           return null;
         }
         info.ctor = ca;
         info.formals = null;
       }
-      // 声明符尾巴上的构造实参只有类的变量收得下（第五十三刀）：别的类型那一格 jancy 也没有
-      // 构造可调 —— 不明说就会被悄悄丢掉。
-      if (info.ctor !== null && !(isClass(info.type) && info.type.own === true)) {
-        this.err(dcl, `'${info.name}' 不是类的变量，后面挂不了构造实参`);
+      // 声明符尾巴上的构造实参只有类与**结构体**的变量收得下（第五十三刀 + 第一百二十九刀）：
+      // 别的类型那一格 jancy 也没有构造可调 —— 不明说就会被悄悄丢掉。
+      if (info.ctor !== null && !(isClass(info.type) && info.type.own === true)
+        && !jncIsStruct(info.type)) {
+        this.err(dcl, `'${info.name}' 不是类或结构体的变量，后面挂不了构造实参`);
         return null;
       }
       // `static int x = 1;` 是另一回事：那一格程序启动时就分配好、初值**只跑一次**
@@ -7417,6 +7495,14 @@ class JncLower {
         out.push(`${pad}(let ${info.name} ${st} (pnew ${st} (int 1)))`);
         if (srcCode !== null) {
           if (this.copyAgg(`(var ${info.name})`, srcCode, info.type.name, pad, out) === null) return null;
+        }
+        /* 结构体的构造（第一百二十九刀）：`P p;` / `P p(1, 2);` 造完紧接着调 —— 与类那一侧
+           （第五十三刀）同一个 ctorCall，`this` 那一格传的就是这一格名字（结构体的名字里放的
+           **本来就是地址**，所以不用先提到堆上）。写了初值的那一种不调：那是"抄一份"，
+           源头已经构造过了（与 jancy 的 copy construct 同一条口径 —— 这一层没有拷贝构造）。 */
+        if (srcCode === null
+          && this.ctorCall(dcl, info.type.name, `(var ${info.name})`, info.ctor, pad, out) === null) {
+          return null;
         }
         continue;
       }
@@ -10829,8 +10915,8 @@ class JncLower {
     const t = this.newTy(tnNode);
     if (t === null) return null;
     if (t === J_VOID) return this.err(n, 'new void');
-    if (argsNode !== null && !isClass(t)) {
-      return this.err(n, `new ${tyName(t)}(…)：只有类有构造，实参没处去`);
+    if (argsNode !== null && !isClass(t) && !jncIsStruct(t)) {
+      return this.err(n, `new ${tyName(t)}(…)：只有类与结构体有构造，实参没处去`);
     }
     // `new C`（第五十二刀）：出来的是一条**类引用**，不是"指向类指针的指针"——
     // jancy 的 `new` 对类给的就是 `C*`（也就是这一层的类类型自己）。`new C[n]` 没有：
@@ -10874,6 +10960,28 @@ class JncLower {
       if (c === null) return null;
       if (!isInt(c.type)) return this.err(countNode, `new T[n] 的 n 要整数，这里是 ${tyName(c.type)}`);
       count = c.code;
+    }
+    /* `new S` / `new S(…)`（第一百二十九刀）：结构体也有构造了 —— 造完那一格紧接着调它。
+       与类那一支同一条路：`new` 是**表达式**，而"造一格 + 调构造 + 交出去"是三句，所以照
+       第二十五刀那条路抬成一个函数。`new S[n]` 那一种不调 —— 一次造 n 格，"每格都构造一遍"
+       要一个循环，是单独一笔账（明说）。 */
+    if (jncIsStruct(t) && (this.ctors.has(t.name) || argsNode !== null)) {
+      if (countNode !== null) {
+        return this.nope(n, `new ${tyName(t)}[n] —— 那一格有构造，n 格要每格都调一遍`
+          + '（要一个循环，是单独一笔账）');
+      }
+      const c = this.ctorArgs(n, t.name, argsNode === null ? [] : this.flat(argsNode));
+      if (this.ctors.has(t.name) && c === null) return null;
+      const vals = c === null ? [] : c.vals;
+      const pt = tyText(tPtr(t));
+      const ps = vals.map((v, i) => `($i${i} ${slotText(v.type)})`).join(' ');
+      const as = vals.map((v, i) => ` (var $i${i})`).join('');
+      const fn = `$news${this.tmp++}`;
+      this.decls.push(`  (fn ${fn} (${ps}) ${pt}\n    (do\n`
+        + `      (let $p ${pt} (pnew ${pt} (int 1)))\n`
+        + (c === null ? '' : `      (expr (call ${c.name} (var $p)${as}))\n`)
+        + `      (ret (var $p))))`);
+      return { code: `(call ${fn}${vals.map((v) => ` ${v.code}`).join('')})`, type: tPtr(t) };
     }
     return { code: `(pnew ${tyText(tPtr(t))} ${count})`, type: tPtr(t) };
   }
