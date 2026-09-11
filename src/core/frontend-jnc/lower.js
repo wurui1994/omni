@@ -1100,6 +1100,11 @@ class JncLower {
     this.bitAggs = new Set();
     /** 已经发出去的 variant 装箱 / 拆箱助手（第一百一十三刀）—— 一格一次。 */
     this.varFns = new Set();
+    /* 类型是**函数指针的字段**的名字（第一百一十七刀）。只有一处用：`c.m_f(…)` 这种
+       "从一格函数指针字段上调"要与"调一个方法"分得开。放一张名字表而不是就地去问，是因为
+       就地问要先求左边那个值、而求值会发诊断 —— 那会给真的"没有这个函数"多发一条。
+       与 `methodNames` / `propNames` 是同一个办法。 */
+    this.fnFieldNames = new Set();
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
      * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
      * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
@@ -2630,7 +2635,11 @@ class JncLower {
         /* 这一组里的位域（第一百一十二刀）：`io_UsbTransfer.jnc:63-71` 那一格 —— 一格 union 里
            一半是整字节、另一半是同一段字节上的几位。存储那一格进 out（它是真字段），位域
            自己带着 `bit` 一起回给调用方去登记 bitPath。 */
-        if (info.bits !== null) {
+        /* 判"是不是位域"要问**正面**（是个数），不能问 `!== null`（第一百一十七刀量出来的一个
+           洞）：declarator 有三个出口，函数指针那一个与特殊成员那一个先前不带 `bits` 字段，
+           于是 `undefined !== null` 成立 —— `int function* m_op(int, int)` 会被当成位域。
+           三个出口现在都写了 `bits: null`，这一句再问正面，两头都堵上。 */
+        if (typeof info.bits === 'number') {
           if (!isInt(t)) {
             this.nope(d, `位域 '${info.name}' 的类型是 ${tyName(t)}（位域只在整数上 ——`
               + ' jancy 那边它的宽度就是 `getSize() * 8`）');
@@ -4078,20 +4087,25 @@ class JncLower {
           this.err(d, `字段 '${info.name}[]' 的长度得写出来`);
           continue;
         }
-        // 函数指针的字段（第五十五刀）。量过：方言的**结构体**字段放不下 `(fnty …)`
-        //（hir/types.js 的 structLayout 拒"落不进内存的字段"），而这一层的类与结构体都是
-        // 一格 `(struct …)` + `pfield`。所以它是自己一格 —— 也正是虚表要落地的那一格。
-        if (isFn(info.type)) {
-          this.nope(d, `类型是函数指针（${tyName(info.type)}）的字段 —— 方言的结构体字段`
-            + '还放不下函数值（见 hir/types.js 的 structLayout）');
-          continue;
-        }
+        /* 函数指针的字段（第五十五刀留的账，第一百一十七刀收的）。这一格先前拦着，理由是
+           "方言的结构体字段放不下 `(fnty …)`" —— 那道墙由 ADR-0028 拆了：函数值在四条腿上
+           本来就是**一个字**（C 那边 `omni_fn` 是 `struct omni_closure_s *` 的 typedef、
+           LLVM 那边是 `ptr`），所以 `sizeOf` 从 0 改成 8 之后两条原生腿一个字都没改。
+           于是这一层什么都不用做：`fieldText((fnty …))` 本来就发得出来，读写走的是与别的字段
+           同一条 `pfield` + `pload` / `pstore`。
+           jancy 的 `function*` 是**胖的**（fp + 闭包），这一层的函数值是一个指针
+           （ADR-0010:84-85）—— 在"能存能取能调"这几件可观测的事上两者一样，差别记在
+           ADR-0016 那一节里。 */
         /* 位域（第一百一十二刀）：`uint8_t m_flag : 1;` —— 它**不占自己的格子**，是同一格
            存储里的几位，所以这儿一个字段都不 push，只登记 bitPath（读写落法见 read / store）。
            `class` 那一侧不收：那要"整条继承链共用一格结构体"（第五十六刀）里的 `$b<N>` 也按
            链合起来，而位偏移是按**本类体内的顺序**算出来的 —— 语料里类上一格位域都没有
            （13 份带位域的语料全是 struct），所以那一格留着当账记。 */
-        if (info.bits !== null) {
+        /* 判"是不是位域"要问**正面**（是个数），不能问 `!== null`（第一百一十七刀量出来的一个
+           洞）：declarator 有三个出口，函数指针那一个与特殊成员那一个先前不带 `bits` 字段，
+           于是 `undefined !== null` 成立 —— `int function* m_op(int, int)` 会被当成位域。
+           三个出口现在都写了 `bits: null`，这一句再问正面，两头都堵上。 */
+        if (typeof info.bits === 'number') {
           if (!isInt(info.type)) {
             this.nope(d, `位域 '${info.name}' 的类型是 ${tyName(info.type)}（位域只在整数上 ——`
               + ' jancy 那边它的宽度就是 `getSize() * 8`）');
@@ -4112,6 +4126,9 @@ class JncLower {
           continue;
         }
         bs.last = null;                  // 普通字段隔在中间就断开上一组位域
+        // 函数指针的字段（第一百一十七刀）：名字记一格，调用点据此把 `c.m_f(…)` 认成
+        // "从一格函数指针上调"而不是"调一个方法"（见 callSite 那一支）。
+        if (isFn(info.type)) this.fnFieldNames.add(info.name);
         fields.push({ name: info.name, type: info.type });
         // 带初值的那几格记下来（第七十八刀）。排在所有"这一格不收"之后 —— 不收的那些
         // 已经 continue 掉了，不会带着一条永远发不出来的初值往下走。
@@ -5066,6 +5083,7 @@ class JncLower {
         ctor: null,
         special: sk,
         sp,
+        bits: null,
       };
     }
     const name = this.qname(d.items[2]);
@@ -5219,7 +5237,9 @@ class JncLower {
       if (ft === J_VOID) continue;                 // `void` 的形参表就是"不带形参"（C 与 jancy 同）
       params.push(ft);
     }
-    return { name, type: tFn(params, sp.type, sp.thin), formals: null, ctor, special: null, sp };
+    return {
+      name, type: tFn(params, sp.type, sp.thin), formals: null, ctor, special: null, sp, bits: null,
+    };
   }
 
   /* -------------------------------------------------------------- 函数 */
@@ -9813,6 +9833,20 @@ class JncLower {
       const dot = nm0.lastIndexOf('.');
       const pre = nm0.slice(0, dot);
       if (this.cLibNs.has(pre)) return this.ccallGuess(n, pre, nm0.slice(dot + 1));
+    }
+    /* 从一格**函数指针的字段**上调（第一百一十七刀）：`c.m_f(3, 4)`，以及方法体里**裸写**
+       字段名的 `m_op(a, b)`（那时 callee 是一格 `name`，`fnCallee` 那一支问的是 lookupRef，
+       裸字段名不在里头）。
+       排在这么后面是刻意的 —— 前面所有"按名字找"的路子都试过了，所以这一支不会把方法调用
+       抢过来；而它要先求左边那个值（会发诊断），所以只在名字确实是一格函数指针字段时才走
+       （`fnFieldNames`）。落法与从变量上调完全同一条：读出那一格，再 `callThrough`。 */
+    if (nm === null && (mh === 'field' || mh === 'name')) {
+      const fname = mh === 'field' ? mn : nm0;
+      if (fname !== null && this.fnFieldNames.has(fname)) {
+        const lv = this.lvalue(callee);
+        if (lv === null) return null;
+        if (isFn(lv.type)) return this.callThrough(n, { code: this.read(lv), type: lv.type });
+      }
     }
     if (nm === null) return this.err(n, `没有这个函数：'${nm0}'`);
     // 方法体里裸写 `foo()` 就是 `this.foo()`（类是一层命名空间，所以 resolve 已经找着了

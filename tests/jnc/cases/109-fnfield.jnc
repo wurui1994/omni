@@ -1,0 +1,68 @@
+// 第一百一十七刀：**类型是函数指针的字段**。榜上最大的一格 —— 两行合起来 170 对
+// （`类型是函数指针（void function*()）的字段` 90 + `（string function*(unsigned long)）` 80）。
+//
+// 这一刀的活其实在方言那一侧：ADR-0028 让函数值能落进内存（8 字节，走 ADR-0024 那一格 ——
+// 函数值在四条腿上本来就是**一个字**，所以两条原生腿一个字都没改）。前端这一侧只做了两件事：
+//   1. 把第五十五刀那句"方言的结构体字段还放不下函数值"的拦子撤掉 —— 那道墙没了；
+//   2. 加一支：`c.m_f(3, 4)` 是"从一格函数指针**字段**上调"，不是"调一个方法"。
+//      这一支排在所有"按名字找"的路子之后，而且只在名字确实是一格函数指针字段时才走
+//      （`fnFieldNames`）—— 否则它会给真的"没有这个函数"多发一条诊断。
+//
+// jancy 的 `function*` 是**胖的**（fp + 闭包），这一层的函数值是**一个**指针
+// （ADR-0010:84-85 选的就是一个指针，胖值在那份 ADR 的否决清单里）。在"能存能取能调、
+// 拷一份两边指同一个"这几件可观测的事上两者一样 —— 带闭包那一半在方言那一层的
+// `tests/sexpr/cases/42-fn-field.sx` 里钉过了（那份用 `mkclo` 真带捕获）。
+//
+// 尺子 `/tmp/c115.c`：一格 C 结构体里两条函数指针，同一串数（5 7 12 / 12 / 10 10）。
+
+typedef int Binop(int a, int b);
+
+int add(int a, int b) {
+	return a + b;
+}
+
+int mul(int a, int b) {
+	return a * b;
+}
+
+struct Calc {
+	int m_n;
+	Binop* m_f;
+	Binop* m_g;
+}
+
+// 类上也能有（类与结构体在这一层是同一格 `(struct …)` + pfield）。这一格刻意用
+// **`int function*` 那种写法**（不走 typedef）—— 它正是先前 `bad/fnptr-field` 钉着的那一句，
+// 那份界随这一刀删了，写法搬到这儿来接着验。
+class Holder {
+	int function* m_op(int, int);
+
+	int apply(int a, int b) {
+		return m_op(a, b);           // 方法体里裸写字段名再调
+	}
+}
+
+int main() {
+	Calc* c = new Calc;
+	c.m_n = 5;
+	c.m_f = add;
+	c.m_g = mul;
+	printf("%d %d %d\n", c.m_n, c.m_f(3, 4), c.m_g(3, 4));
+
+	c.m_f = mul;                     // 换一个进去
+	printf("%d\n", c.m_f(3, 4));
+
+	// 按字段拷一份：拷的是那一格函数值，两份指同一个
+	Calc* d = new Calc;
+	d.m_n = c.m_n;
+	d.m_f = c.m_f;
+	d.m_g = c.m_g;
+	printf("%d %d\n", d.m_f(2, 5), d.m_g(2, 5));
+
+	Holder h;
+	h.m_op = add;
+	printf("%d\n", h.apply(20, 22));
+	h.m_op = mul;
+	printf("%d\n", h.apply(6, 7));
+	return 0;
+}
