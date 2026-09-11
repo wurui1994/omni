@@ -19,6 +19,7 @@
 //   node tests/lib/jnc-sweep.js --top 40     印前 40 名
 //   node tests/lib/jnc-sweep.js --only ioninja   只扫路径里含这个词的
 //   node tests/lib/jnc-sweep.js --group test/ioninja/api   那一批**当一个模块**编一次
+//                                （这一格自己记一份基线，会印出与上一趟的差、以及**哪一行整行没了**）
 //   JANCY=/path/to/jancy node tests/lib/jnc-sweep.js
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -47,7 +48,10 @@ const only = (() => {
    **逐份**编 —— 于是 `ui.StdColor` 这种"在同一批里、可这一份没写 import"的名字全落在
    `没有这个类型` / `没有这个函数` / `未声明的变量` 那三行上。那三行里有多少是**口径**、
    多少是真的缺，只有这一格量得出来。
-   它**不动**默认那一遍、也不写 json/log —— 上一趟的基线要保持可比。 */
+   它**不动**默认那一遍的基线（json / log 各自一份），可它自己那一份基线要留 ——
+   判一刀看的是"**哪一行不见了**"（ADR-0016 第一百一十八刀立的口径），而那件事只有
+   上一趟的榜在手里才说得出来。先前这一格什么都不留，于是第一百三十二刀那一节里
+   只能写"另一种落在榜印不出来的那一段里，说不出是哪一行"—— 这一格就是补它。 */
 const group = (() => {
   const i = argv.indexOf('--group');
   return i < 0 ? null : argv[i + 1];
@@ -105,12 +109,41 @@ if (group !== null) {
     const k = `${d.kind} ${d.why}`;
     gt.set(k, (gt.get(k) ?? 0) + 1);
   }
+  // 这一格自己那一份基线（按目录记账，与默认那一遍的 json 分开放）
+  const gRootC = process.env.OMNI_CACHE_DIR || join(root, '.omni-cache');
+  const gJson = join(gRootC, 'test', 'jnc-sweep-group.json');
+  const gPrevAll = (() => {
+    try {
+      return JSON.parse(readFileSync(gJson, 'utf8'));
+    } catch {
+      return {};
+    }
+  })();
+  const gPrev = gPrevAll[dir] ?? null;
+  const gd = (now, was) => (was === undefined || was === null ? ''
+    : `（上一趟 ${was}${now === was ? '，没动' : `，${now > was ? '+' : '−'}${Math.abs(now - was)}`}）`);
   process.stdout.write(`一整批当一个模块编：${names.length} 份（${dir}）`
-    + ` —— 退出码 ${gCode}、诊断 ${gn} 条、理由 ${gt.size} 种\n\n`);
+    + ` —— 退出码 ${gCode}、诊断 ${gn} 条${gd(gn, gPrev?.n)}`
+    + `、理由 ${gt.size} 种${gd(gt.size, gPrev?.reasons)}\n\n`);
+  const gPrevBoard = new Map(Object.entries(gPrev?.board ?? {}));
   for (const [k, v] of [...gt.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN)) {
-    process.stdout.write(`  ${String(v).padStart(4)}  ${k}\n`);
+    const was = gPrevBoard.get(k);
+    process.stdout.write(`  ${String(v).padStart(4)}  ${k}`
+      + `${was === undefined ? '  ← 新' : (was === v ? '' : `  （上一趟 ${was}）`)}\n`);
   }
-  process.stdout.write(`\n（这一格不写 json/log —— 默认那一遍的基线要保持可比）\n`);
+  /* **哪一行不见了** —— 判一刀就看这一栏（ADR-0016 第一百一十八刀）。它不受 --top 限制：
+     一行整整消失是这把尺子上最要紧的一件事，不能因为它排在第 26 名就印不出来。 */
+  const gone = [...gPrevBoard.entries()].filter(([k]) => !gt.has(k))
+    .sort((a, b) => b[1] - a[1]);
+  if (gone.length > 0) {
+    process.stdout.write('\n整行没了（上一趟有、这一趟一处都不剩）\n');
+    for (const [k, v] of gone) process.stdout.write(`  ${String(v).padStart(4)}  ${k}\n`);
+  }
+  mkdirSync(join(gRootC, 'test'), { recursive: true });
+  gPrevAll[dir] = { n: gn, reasons: gt.size, board: Object.fromEntries(gt) };
+  writeFileSync(gJson, `${JSON.stringify(gPrevAll, null, 1)}\n`);
+  process.stdout.write('\n（这一格不写 log，json 也是自己那一份'
+    + ' —— 默认那一遍的基线要保持可比）\n');
   process.exit(0);
 }
 
