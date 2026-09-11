@@ -18,7 +18,7 @@
 - `unexpected "int"` 4 份（`test/jnc/unit_stdt_{Array,BoxList,HashTable,RbTree}.jnc`）——
   那是**实例化那一侧**（`stdt.Array<int>`），与这一格是同一件事。
 
-所以这一格的账面是 **12 + 4 = 16 份文件**，而「真降得下来」这个数字已经在 61 停了三刀。
+所以这一格的账面是 **12 + 4 = 16 份文件**，而「真降得下来」这个数字当时在 61 停了三刀（今天是 83，见本文末尾那一节的复量）。
 它是现在最大的一格单点。
 
 形状（`src/jnc_ext/jnc_std/jnc/stdt_Array.jnc:19-32`）：
@@ -215,3 +215,95 @@ typedef IteratorImpl<BoxIteratorBase<T> > BoxIterator<T>; // test157.jnc:32     
 - `jnc.AutoConst<T,C>` / `jnc.ReadOnly<T,C>` 那两格编译器内建的双 const 模板
   （`jnc_ct_TemplateMgr.cpp:57-75`）—— 它们在 `instantiateImpl:161-168` 就短路了，
   是可变性那一族的账，与这一格无关。
+
+## 第一百一十七刀之后复量了一遍：这一节里三处数与三处机制要改
+
+第一百一十二～一百一十七刀之后（对数 7510、真降得下来 83）把这一格从头量了一遍。
+**先改这份 ADR 自己的账**：
+
+- 上面写"「真降得下来」这个数字已经在 61 停了三刀" —— 那是第一百一十三刀之前的账，
+  今天是 **83**；
+- 上面把 16 份分成"12 份声明侧 + 4 份实例化侧"。**分得不对**，逐份跑出来是
+  **10 份声明头 + 2 份基类表里的用 + 4 份类型位置的用**：`test158.jnc:7:24`
+  （`class C: stdt.ListEntry<C>`）与 `unit_stdt_List.jnc:7:32`
+  （`struct TestNode: stdt.ListEntry<TestNode>`）**自己一格泛型都没声明** ——
+  它们只是继承了一格泛型的实例。这一格对落法有用：基类表那一条要单独接；
+- GLR 的基线状态数也漂了：这份 ADR 记的 653，今天是 **654**（冲突数 1443 没动）。
+
+**jancy 那一侧有三处这份 ADR 说得不全（都在 `jnc_ct_Template.cpp` / `.h`，不在
+`src/jnc_ct/` 顶层）**：
+
+1. 实例化那一遍所在的命名空间是 **`NamespaceKind_TemplateInstantiation`**
+   （`jnc_ct_Template.cpp:217-218`），`TemplateDeclaration` 只管**声明**时参数名坐哪儿
+   （`Parser.cpp:1176-1191`）；
+2. `instantiateImpl` 还有一支 **`m_declType`**（`:169-196`）—— **typedef 模板与函数模板**
+   走那一支。这份 ADR 的摘录只有 struct/class/union 那一支；
+3. **孤儿（orphan）那一段（`:241-257`）这份 ADR 一个字没提**，而它正是
+   `bool errorcode Array<T>.set(size_t, T e) { … }`（`stdt_Array.jnc:82`）这种**体外定义**
+   如何被逐实例重新挂上去的机制：`cloneOrphan` + `addTemplateInstantiation(argArray)`。
+   落法上这一条与第一百〇七刀（extension 把体外方法挂到已有类型上）是同一个形状。
+
+声明时**体是没解析的记号串**（`declareTemplate` 末尾那句 `setBody(templ, bodyTokenList)`，
+`Parser.cpp:1275`）—— 也就是说 jancy 在声明处**一个字都不检查体**，实例化时才按实参重解一遍
+（`Template.cpp:88-103` 的 `parser.parseTokenList`）。这一条决定了我们这一层不能照抄：
+这一层没有"存一串记号回头再解"的机制，所以只能走**克隆 AST + 替换类型参数**。
+
+### 数（全 655 份扫出来的，脚本一次性）
+
+- 泛型声明 **59** 格（class/struct **39** + typedef **20**），分布在 **10 份**文件里；
+  不同名字 **50** 个；泛型 union **0** 格（jancy 语法给，语料里没有）；函数模板 **0** 格；
+- 类型参数名只有 **10** 个（`B C E H I K M P T V`）；最大元数 **4**
+  （`BinTreeNodeBase<T, K, V, P>`，`stdt_BinTree.jnc:21`）；带默认实参的 **3** 格（4 个槽）；
+- `名字<…>` 的用点 **247** 处，不同的 (名字, 实参签名) 对 **102** 个；
+- **落地（实参全具体）的实例化根只有 17 对 (文件, 签名)，在 8 份文件里。**
+
+### 这一栏答了"要不要单态化"：**要**
+
+全语料有 **3 格泛型被两套落地实参用过**：
+
+- `Array` —— `<int>`（`unit_stdt_Array.jnc:10`）与 `<Bucket*>`（`stdt_HashTable.jnc:69`）；
+- `Iterator` —— `<TestNode>`（`unit_stdt_List.jnc:54`）与 `<RbTreeNode<int,int> >`
+  （`unit_stdt_RbTree.jnc:141`）；
+- `RbTree` —— `<int,int>`（`:10`）与 `<int,int,Gt<int> >`（`:206`，同一份文件里）。
+
+所以"一格泛型只造一份实例"这条捷径**走不通**，按实参签名 memoise 的单态化是必须的 ——
+与 jancy 自己那一遍（`instantiateImpl` 开头拼 signature 再查 `m_instanceMap`，`:144-148`）
+同一个办法。上面"不做的"里那条"类型擦除走不通"因此又多一条理由：不是只有布局的问题，
+是同一格泛型真的要出两份不同的类型。
+
+### `<` 的歧义：jancy 用的是**语义谓词**，不是语法
+
+两处都是同一句话 —— **左边那个名字已经解成一格 Template 时，`<` 才是实例化算子**：
+
+- 表达式侧 `jnc_ct_Expr.llk:803`：`resolver ({ return m_lastPostfixValueKind == ValueKind_Template; })`；
+- 类型名侧 `jnc_ct_Name.llk:32-42`：`if ($.m_item->getItemKind() == ModuleItemKind_Template)`。
+
+这一条与上面 S1 量到的"类型位置那条产生式一条冲突都没添、类头那条添了 70"合起来看，
+方向就清楚了：**这一层不需要语义谓词** —— GLR 本来就允许两条路并行走、由后面的归约决定，
+而量出来的代价（+0 / +70 条冲突）已经在可接受范围里。这与 jancy 用 llk + resolver 的做法
+不同，但答案一样。
+
+### 还剩一格没量（下一趟的活，别猜）
+
+**克隆 AST 那一步：量过了，是纯的。** `src/core/sexpr/read.js:15-17` 那三种节点就是全部形状：
+
+```
+{kind:'list',   items, span}
+{kind:'atom',   value, span}          原样的文本，不做数字解析
+{kind:'string', value, raw, span}     value 是解码后的码点串，raw 是引号内的原文
+```
+
+而降级那一遍**往节点上一个字段都不写**（在 `lower.js` 里搜过 `节点.字段 = ` 那个形状，
+除了读 `items` / `value` / `span` 之外一处赋值都没有）。所以"递归抄一份、把类型参数那个 atom
+换掉"就是完整的替换，不用管别名与共享。
+
+还有一条更硬的证据：**这一层已经在合成节点了** —— 第一百〇五刀的 `defConstNode` 就地造
+`{kind:'atom', value, span}` 与 `{kind:'list', …}` 塞回去当默认值，一路降下来没事。
+也就是说合成出来的节点与解析出来的节点在下游是同一等公民。
+
+**真正还没量的只有一格**：17 格落地实例里有几格是**嵌套**的
+（`Iterator<RbTreeNode<int,int> >`，`unit_stdt_RbTree.jnc:141` 就是），嵌套要先实例化里层
+再实例化外层 —— 递归的闸门与"同一份实参不重复造"这两条要一起写，而闸门的判据
+（多深算深、报什么话）这份 ADR 的验收清单里第 5 条已经写了要求，但没定数。
+
+
