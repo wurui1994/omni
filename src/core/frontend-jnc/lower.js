@@ -2498,13 +2498,46 @@ class JncLower {
    * 别的表。指针（fat 是三个字）、string 与句柄（旁边挂着表，ADR-0024 / ADR-0026）重叠之后
    * 说不清那张表上的东西归谁 —— 与方言那一层 `(union …)` 划的界一字不差（ADR-0027）。
    */
-  unionMembers(ag, cls) {
+  unionMembers(ag, cls, owner, gidx, min = 2) {
     const out = [];
+    let sidx = 0;
     for (const m0 of this.flat(ag.items[4])) {
       const m = unattr(m0);
       if (isList(m) && head(m) === 'empty-stmt') continue;
+      /* union 里再套一格**匿名 struct**（第一百一十一刀）：C 的老写法 —— 一格 union 里几组
+         字段轮流用同一段字节（`io_win_DeviceMonitorNotify.jnc:175/184`）。落法：给那一组合成
+         一格真结构体（名字 `<外层>$u<N>$s<M>`）当 union 的一格成员，再把它里头每一格的名字
+         登记成"一串取字段"—— 就是第一百〇四刀那张 `aliasPath` 表（`hdr.m_a` ->
+         `(pfield (pfield p $s0) m_a)`）。于是源码里直接写 `hdr.m_a` 照旧解得开。 */
+      if (isList(m) && head(m) === 'type-decl') {
+        const inner = m.items[1];
+        const ik = isList(inner) && head(inner) === 'agg' && isAtom(inner.items[1])
+          ? inner.items[1].value : null;
+        const ianon = ik !== null && isList(inner.items[2]) && head(inner.items[2]) === 'anon';
+        if (ik !== 'struct' || !ianon) {
+          this.nope(m, 'union 体里除字段与匿名 struct 以外的成员');
+          return null;
+        }
+        const sf = this.unionMembers(inner, cls, owner, gidx, 1);   // 里头那一组：一格也行
+        if (sf === null) return null;
+        const sname = `${owner}$u${gidx}$s${sidx}`;
+        const mem = `$s${sidx}`;
+        sidx += 1;
+        this.structs.set(sname, sf);
+        this.decls.push(`  (struct ${sname} ${sf.map((f) => `(${f.name} ${fieldText(f.type)})`).join(' ')})`);
+        for (const f of sf) {
+          const key = `${owner}$${f.name}`;
+          if (this.aliasPath.has(key)) {
+            this.nope(m, `union 里两组都有 '${f.name}' —— 那两个名字在外层撞车了`);
+            return null;
+          }
+          this.aliasPath.set(key, { path: [mem, f.name], type: f.type });
+        }
+        out.push({ name: mem, type: { k: 'struct', name: sname } });
+        continue;
+      }
       if (!isList(m) || head(m) !== 'var-decl') {
-        this.nope(m, 'union 体里除字段以外的成员');
+        this.nope(m, 'union 体里除字段与匿名 struct 以外的成员');
         return null;
       }
       const sp = this.specs(m.items[1], cls);
@@ -2521,7 +2554,7 @@ class JncLower {
         out.push({ name: info.name, type: t });
       }
     }
-    if (out.length < 2) {
+    if (out.length < min) {
       this.nope(ag, 'union 里只有一格成员（一格就直接当字段写）');
       return null;
     }
@@ -3444,7 +3477,7 @@ class JncLower {
         const ak = isList(ag) && head(ag) === 'agg' && isAtom(ag.items[1]) ? ag.items[1].value : null;
         const anon = ak !== null && isList(ag.items[2]) && head(ag.items[2]) === 'anon';
         if (ak === 'union' && anon && !cls) {
-          const ms = this.unionMembers(ag, cls);
+          const ms = this.unionMembers(ag, cls, name, fields.length);
           if (ms !== null) {
             /* 成员**摊平**进这张字段表 —— 这一层查名（memberOf / 字段的默认值那几处）看的就是
                它，所以 `hdr.m_pid` 一处都不用改。"它们是一格 union" 记在 `uni` 上，只在发

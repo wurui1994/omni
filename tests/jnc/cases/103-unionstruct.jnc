@@ -1,0 +1,44 @@
+// 第一百一十一刀：**union 里再套一格匿名 `struct { … }`**（C 的老写法：一格 union 里几组字段
+// 轮流用同一段字节）。榜上 `union 体里除字段以外的成员` 11 份 / 14 处 / sole 3，拆开只有这一种，
+// 出处 `src/jnc_ext/jnc_io_devmon/jnc/io_win_DeviceMonitorNotify.jnc:175/184`。
+//
+// 落法：给那一组合成一格**真结构体**（名字 `<外层>$u<N>$s<M>`）当 union 的一格成员，再把它
+// 里头每一格的名字登记成"一串取字段"—— 就是第一百〇四刀那张 `aliasPath` 表
+// （`h.m_a` -> `(pfield (pfield p $s0) m_a)`）。于是源码里直接写 `h.m_a` 照旧解得开，
+// 而"两组共用同一段字节"由 ADR-0027 那层的布局给。
+//
+// 界：嵌套只做一层（union 里的 struct 里再套 union 不收）；两组之间**同名成员撞车**要报清
+// （`bad/union-dup.jnc`）。
+//
+// 尺子 `/tmp/c28.c` 里刻意写的是 `int64_t` —— 方言的整数在内存里一律 8 字节
+// （`bad/sizeof` 那条界），所以第一组是 16 字节、第二组 8 字节，union 取 16。
+// `m_a` 与 `m_c` 共用头 8 个字节，`m_b` 在后 8 个。
+
+struct H {
+	int m_code;
+
+	union {
+		struct {
+			int32_t m_a;
+			int32_t m_b;
+		}
+		struct {
+			int64_t m_c;
+		}
+	}
+
+	int m_tail;
+}
+
+int main() {
+	H* h = new H;
+	h.m_code = 3;
+	h.m_tail = 11;
+	h.m_c = 0;
+	h.m_a = 7;
+	h.m_b = 0;
+	printf("%d %d %d %lld %d\n", h.m_code, h.m_a, h.m_b, h.m_c, h.m_tail);
+	h.m_c = 9;                       // 写第二组，按第一组读出来是同一段字节
+	printf("%d %d %lld\n", h.m_a, h.m_b, h.m_c);
+	return 0;
+}

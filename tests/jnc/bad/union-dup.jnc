@@ -1,0 +1,21 @@
+// 第一百一十一刀的界：union 里两组匿名 struct **同名成员撞车**要报清 —— 那两个名字在外层是
+// 同一个（成员是摊到外层查名的），谁也说不清 `h.m_a` 指哪一组。C 那边同样是错。
+struct H {
+	int m_code;
+
+	union {
+		struct {
+			int32_t m_a;
+		}
+		struct {
+			int64_t m_a;
+		}
+	}
+}
+
+int main() {
+	H* h = new H;
+	h.m_code = 3;
+	printf("%d\n", h.m_code);
+	return 0;
+}
