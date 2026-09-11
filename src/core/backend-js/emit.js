@@ -367,6 +367,11 @@ class JsEmitter {
       // 而 arena 是字节 + 偏移，跟这个对象表示无关。留一格 N 个元素零值的数组，
       // 是为了让"逐字段铺零"这条路对每种字段都有东西可写。
       case 'blk': return `new Array(${t.n}).fill(${this.zero(t.el)})`;
+      /* 匿名 union 的字段（ADR-0027）：与上面 blk 那一格同一个道理 —— **观察不到**。
+         成员只能经 `(pfield …)` 在 arena 里碰（那边是字节 + 偏移，几格成员共用同一段），
+         而 `(fld …)` / `(fldset …)` 在成员名上本来就查不着（布局那张平表才有它们）。
+         留一格 0 是为了让"逐字段铺零"这条路对每种字段都有东西可写。 */
+      case 'union': return '0n';
       default: throw new Error(`zero: ${t.k}`);
     }
   }

@@ -142,6 +142,17 @@ export function alignOf(t) {
      C 那边是 `omni_str{const char* p; int64_t len;}`（omni.h:33-34）、LLVM 那边是
      `[2 x i64]`（backend-llvm/emit.js:49），本来就是 16 字节的按值聚合。 */
   if (t.k === 'string') return 8;
+  /* 匿名 union（ADR-0027）：对齐是**最大成员的对齐** —— 与 C 的 union 同一条，所以 C 那边
+     发出来的真 union 的自然布局与这一层算的偏移对得上。 */
+  if (t.k === 'union') {
+    let a = 1;
+    for (const f of t.fields) {
+      const x = alignOf(f.type);
+      if (x === 0) return 0;
+      a = Math.max(a, x);
+    }
+    return a;
+  }
   return 0;   // 不可落地的类型：调用方要先问 ptrTargetOk / layoutOk
 }
 
@@ -176,6 +187,18 @@ export function sizeOf(t) {
      "一格句柄 id + 字节长度"（见 interp/builtin.js 的 ptrLoad / ptrStore）——
      **两套实现的尺寸与偏移必须一样**，这就是为什么这一层定 16 而不是 8。 */
   if (t.k === 'string') return 16;
+  /* 匿名 union（ADR-0027）：尺寸是**最大成员的尺寸**。成员的偏移在 structLayout 里摊开
+     （都等于这一格 union 自己的偏移）—— 于是四条腿的 `(pfield p 成员名)` 一处都不用改，
+     字段访问本来就是按字节偏移发的。 */
+  if (t.k === 'union') {
+    let m = 0;
+    for (const f of t.fields) {
+      const s = sizeOf(f.type);
+      if (s === 0) return 0;
+      m = Math.max(m, s);
+    }
+    return m;
+  }
   return 0;
 }
 
@@ -189,7 +212,16 @@ export function structLayout(t) {
     const s = sizeOf(f.type);
     if (a === 0 || s === 0) return null;
     off = Math.ceil(off / a) * a;
-    fields.push({ name: f.name, type: f.type, off });
+    /* 匿名 union（ADR-0027）：成员**共用这一格的偏移**，摊进这张平表里 —— 于是
+       `(pfield p 成员名)` 在四条腿上算出来的都是同一个字节偏移，后端一处都不用改
+       （字段访问一律 `omni_padd(p, off, 1)` / `$padd(…)`，见 backend-c/emit.js 那段
+       "根本不经过它。要紧的只有尺寸与对齐"）。union 自己在这张表里**没有一格** ——
+       它不是一个值，只是"这几格共用这段字节"这件事。 */
+    if (f.type.k === 'union') {
+      for (const m of f.type.fields) fields.push({ name: m.name, type: m.type, off });
+    } else {
+      fields.push({ name: f.name, type: f.type, off });
+    }
     off += s;
     align = Math.max(align, a);
   }

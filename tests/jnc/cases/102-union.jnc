@@ -1,0 +1,45 @@
+// 第一百一十刀：结构体里的**匿名 union**。榜上 `结构体里的嵌套类型` 17 份 / 37 处 / sole 3，
+// 拆开只有这一种源头 —— jancy 那些协议头（`src/jnc_ext/jnc_io_devmon/jnc/io_DeviceMonitorNotify.jnc:59`、
+// `io_win_DeviceMonitorNotify.jnc:49/85/92/105`）：同一块字节按两个名字读。
+//
+// 前置是方言那一层（ADR-0027）：`sizeOf(union)` = 最大成员、`structLayout` 把成员摊进平表且
+// 偏移都等于 union 自己的偏移。这一层要做的只有两件事：
+//   - 语法上它是一格 agg（key 是 `union`、名字是 `(anon)`）—— 把成员**摊平**进这个结构体的
+//     字段表（于是 `h.m_a` 那一处查名一个字都不用改），并记一格 `uni` 标记；
+//   - 发 `(struct …)` 那一句时把 `uni` 相同的那一串括回成 `(union …)`（unionGroups）。
+//
+// 界：带名字的 union 与类里的 union 照旧不收；成员只收整数 / 实数 / 布尔 / 枚举 / 另一个结构体
+// （指针、string 与数组那几种旁边还挂着表，重叠之后说不清归谁 —— 与 ADR-0027 那条界一字不差）。
+//
+// 期望输出的出处：/tmp/c27.c（`cc -O0 -std=c99 -Wall`）。
+
+struct Pair {
+	int64_t m_x;
+	int64_t m_y;
+}
+
+struct H {
+	int m_code;
+
+	union {
+		int64_t m_a;
+		int64_t m_b;
+		Pair m_p;
+	}
+
+	int m_tail;
+}
+
+int main() {
+	H* h = new H;
+	h.m_code = 3;
+	h.m_tail = 11;
+	h.m_a = 7;
+	printf("%d %lld %lld %d\n", h.m_code, h.m_a, h.m_b, h.m_tail);
+	h.m_b = 9;
+	printf("%lld %lld\n", h.m_a, h.m_b);
+	h.m_p.m_x = 21;
+	h.m_p.m_y = 22;
+	printf("%lld %lld %lld %d\n", h.m_p.m_x, h.m_p.m_y, h.m_a, h.m_tail);
+	return 0;
+}

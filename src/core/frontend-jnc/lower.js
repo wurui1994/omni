@@ -637,6 +637,32 @@ function fieldText(t) {
   return t.k === 'arr' ? blkText(t) : tyText(t);
 }
 
+/**
+ * 发 `(struct …)` 那一串字段（第一百一十刀）：`uni` 相同的那**一串**括成一格 `(union …)`。
+ *
+ * 这一层的字段表是**摊平**的（union 的成员就在里头，所以查名一处都不用改），"它们共用一段
+ * 字节"这件事只在发给方言的那一句里体现 —— 方言那边从 ADR-0027 起认这个形状。
+ */
+function unionGroups(fields) {
+  const out = [];
+  let i = 0;
+  while (i < fields.length) {
+    const g = fields[i].uni;
+    if (g === undefined) {
+      out.push(`(${fields[i].name} ${fieldText(fields[i].type)})`);
+      i += 1;
+      continue;
+    }
+    const ms = [];
+    while (i < fields.length && fields[i].uni === g) {
+      ms.push(`(${fields[i].name} ${fieldText(fields[i].type)})`);
+      i += 1;
+    }
+    out.push(`(union ${ms.join(' ')})`);
+  }
+  return out;
+}
+
 /** 给人看的写法（诊断里用）。跟 jancy 自己的拼法一致：`int*` / `int thin*` / `char`。 */
 const INT_NAMES = new Map([[8, 'char'], [16, 'short'], [32, 'int'], [64, 'long']]);
 
@@ -2464,6 +2490,44 @@ class JncLower {
     return out;
   }
 
+  /**
+   * 匿名 union 体里那几格成员（第一百一十刀）。只收**普通字段** —— 方法、嵌套类型、属性、
+   * 默认值那些在 union 里都说不清"是谁的"（几格成员共用同一段字节）。
+   *
+   * 成员的类型只收整数 / 实数 / 布尔 / 枚举 / 另一个结构体：那几种的零值是全零位、旁边也没有
+   * 别的表。指针（fat 是三个字）、string 与句柄（旁边挂着表，ADR-0024 / ADR-0026）重叠之后
+   * 说不清那张表上的东西归谁 —— 与方言那一层 `(union …)` 划的界一字不差（ADR-0027）。
+   */
+  unionMembers(ag, cls) {
+    const out = [];
+    for (const m0 of this.flat(ag.items[4])) {
+      const m = unattr(m0);
+      if (isList(m) && head(m) === 'empty-stmt') continue;
+      if (!isList(m) || head(m) !== 'var-decl') {
+        this.nope(m, 'union 体里除字段以外的成员');
+        return null;
+      }
+      const sp = this.specs(m.items[1], cls);
+      if (sp === null) return null;
+      for (const d of this.flat(m.items[2])) {
+        const info = this.declarator(d, sp, m.items[1], cls);
+        if (info === null) return null;
+        const t = info.type;
+        if (!(isInt(t) || t === J_REAL || t === J_BOOL || jncIsEnum(t) || jncIsStruct(t))) {
+          this.nope(d, `union 里的成员 '${info.name}'（只收整数 / 实数 / 布尔 / 枚举 /`
+            + ' 另一个结构体 —— 指针、string 与数组那几种旁边还挂着表，重叠之后说不清归谁）');
+          return null;
+        }
+        out.push({ name: info.name, type: t });
+      }
+    }
+    if (out.length < 2) {
+      this.nope(ag, 'union 里只有一格成员（一格就直接当字段写）');
+      return null;
+    }
+    return out;
+  }
+
   expandFullProps(items) {
     const out = [];
     for (const e of items) {
@@ -3370,6 +3434,26 @@ class JncLower {
       // 嵌套类型（`class C { struct S { … } }`）在 nsFlat 那一遍已经提到顶层了（名字是
       // `C.S`），这儿跳过。结构体里的嵌套类型照旧不收 —— 那要先有"结构体也是一层命名空间"。
       if (isList(m) && head(m) === 'type-decl') {
+        /* 结构体里的**匿名 union**（第一百一十刀）：语法上它是一格 agg —— key 是 `union`、
+           名字是 `(anon)`。方言那一层从 ADR-0027 起认 `(union (名字 类型) …)`（几格成员共用
+           同一个偏移），所以这儿把成员摊出来、当**一格字段**放进去就完了。
+           语料里的出处：`io_DeviceMonitorNotify.jnc:59` 那一族协议头（同一块字节按两个名字读）。
+           带名字的 union 与类里的 union 照旧不收：前者要"结构体也是一层命名空间"，
+           后者方言那边本来就只给结构体（类是引用、字段在堆上那一格里）。 */
+        const ag = m.items[1];
+        const ak = isList(ag) && head(ag) === 'agg' && isAtom(ag.items[1]) ? ag.items[1].value : null;
+        const anon = ak !== null && isList(ag.items[2]) && head(ag.items[2]) === 'anon';
+        if (ak === 'union' && anon && !cls) {
+          const ms = this.unionMembers(ag, cls);
+          if (ms !== null) {
+            /* 成员**摊平**进这张字段表 —— 这一层查名（memberOf / 字段的默认值那几处）看的就是
+               它，所以 `hdr.m_pid` 一处都不用改。"它们是一格 union" 记在 `uni` 上，只在发
+               `(struct …)` 那一句时用来把这一串括回去（见下面拼 fs 那一处）。 */
+            const gid = `u${fields.length}`;
+            for (const mm of ms) fields.push({ name: mm.name, type: mm.type, uni: gid });
+          }
+          continue;
+        }
         if (!cls) this.nope(m, '结构体里的嵌套类型');
         continue;
       }
@@ -3622,7 +3706,9 @@ class JncLower {
       }
     }
     this.ns = saveNs;
-    const fs = fields.map((f) => `(${f.name} ${fieldText(f.type)})`).join(' ');
+    // 匿名 union 的成员在这张表里是**摊平**的，`uni` 相同的那一串在这儿括回成 `(union …)`
+    // （第一百一十刀 / ADR-0027）。
+    const fs = unionGroups(fields).join(' ');
     if (!cls) {
       this.decls.push(`  (struct ${name} ${fs})`);
       return null;
@@ -3787,7 +3873,8 @@ class JncLower {
       // 而这一层的对象头里只需要"是哪个类"这一件事 —— 虚派发按它挑实现。它同时把
       // "一个字段都没有的类"（`class T {}`，test124.jnc:18 与 test151.jnc:21）那一格填上了：
       // 方言的结构体至少要一个字段。`$` 不在 jancy 的标识符里，源码里碰不到这一格。
-      const fs = fields.map((f) => `(${f.name} ${fieldText(f.type)})`).join(' ');
+    const fs = unionGroups(fields).join(' ');
+
       this.decls.push(`  (struct ${root} ($tag int)${fs === '' ? '' : ` ${fs}`})`);
     }
   }

@@ -13,7 +13,7 @@
 // 只有"按值嵌套"的 struct 需要拓扑排序。
 
 import { RUNTIME_INCLUDE, amalgamate } from '../runtime/c_runtime.js';
-import { cTypeName, listType, typeKey, cArrOps, arrIsBlob, loopLabelNeeds } from '../hir/types.js';
+import { cTypeName, listType, typeKey, cArrOps, arrIsBlob, loopLabelNeeds, sizeOf } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS, JS_TAG_C } from '../hir/js_abi.js';
 import { C_ABI, C_TYPE, C_IN, C_OUT } from '../hir/c_abi.js';
 import { utf8Bytes } from '../host/utf8.js';
@@ -904,6 +904,14 @@ class CEmitter {
    * 对齐，摊平不改这两样 —— `int64_t x[2][3]` 与 `int64_t x[6]` 在 C 里同尺寸同对齐。
    */
   fieldDecl(t, name) {
+    /* 匿名 union（ADR-0027）：发一格**真的** C union —— 它的尺寸与对齐正是"最大成员"，
+       与这一层算的（hir/types.js 的 sizeOf/alignOf）一模一样，所以这个 C 结构体的自然布局
+       与 arena 那一侧的偏移仍旧对得上。成员的名字在这儿无所谓（上面那段：arena 是字节 +
+       偏移，根本不经过它）。 */
+    if (t.k === 'union') {
+      const ms = t.fields.map((f) => this.fieldDecl(f.type, `f_${f.name}`)).join(' ');
+      return `union { ${ms} } ${name};`;
+    }
     if (t.k !== 'blk') return `${cTypeName(this.noteVec(t))} ${name};`;
     const { el, n } = flatBlk(t);
     return `${cTypeName(this.noteVec(el))} ${name}[${n}];`;
@@ -1226,6 +1234,13 @@ class CEmitter {
       if (f.type.k === 'blk') {
         const { el, n } = flatBlk(f.type);
         this.line(`for (int64_t oi = 0; oi < INT64_C(${n}); oi++) v.f_${f.name}[oi] = ${this.zeroExpr(el)};`);
+        continue;
+      }
+      /* 匿名 union（ADR-0027）：C 里它是**匿名类型**，写不出复合字面量（`= {0}` 只在初始化
+         里合法，这儿是赋值）。而这一格本来就观察不到（成员只经 `(pfield …)` 在 arena 里碰），
+         所以按字节铺零 —— 尺寸用这一层算的那个，与 arena 那一侧一致。 */
+      if (f.type.k === 'union') {
+        this.line(`memset(&v.f_${f.name}, 0, ${sizeOf(f.type)});`);
         continue;
       }
       this.line(`v.f_${f.name} = ${this.zeroExpr(f.type)};`);

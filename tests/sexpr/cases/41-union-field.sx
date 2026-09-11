@@ -1,0 +1,48 @@
+;; 41 —— 结构体里的匿名 union（ADR-0027）
+;;
+;; 与 39（arr 那种句柄）、40（string 落进内存）是同一族的第三格，可它逼出来的是**布局**那一层：
+;; union 的语义是"几格字段共用同一个偏移"，而这一层的布局一直是"一格一格往后排"。
+;;
+;; 落法只在两处：hir/types.js（sizeOf = 最大成员、alignOf = 最大成员、structLayout 把成员摊进
+;; 平表且偏移都等于 union 自己的偏移）与这条语法（字段位置收 `(union …)`）。**后端一处都没改**
+;; 指针那一侧 —— 字段访问本来就是 `omni_padd(p, off, 1)` / `$padd(…)` 按字节偏移发的
+;; （backend-c/emit.js 那段："那个 C 结构体只是那段内存的值表示…根本不经过它。要紧的只有
+;; 尺寸与对齐"）。值那一侧补了两处：C 发一格真 union（尺寸对齐才对得上）、铺零走 memset
+;; （匿名类型写不出复合字面量），JS 那条腿留一格 0（与 blk 那一格同一个道理：观察不到）。
+;;
+;; 逼出它的是 jancy 那些协议头：`io_DeviceMonitorNotify.jnc:59` 那一族，同一块字节按两个名字读。
+;;
+;; 钉四件事：
+;;   1. 写一格、按另一个名字读出来是同一块字节；
+;;   2. 反过来也一样（写 b 读 a）；
+;;   3. union 的尺寸是**最大成员**：里头有一格 16 字节的结构体，所以写它的两格碰不到 tail；
+;;   4. union 之后那格字段的偏移是对的（tail 全程不变）。
+;; 期望输出的出处：/tmp/c27.c（cc -O0 -std=c99 -Wall）。
+(module
+  (struct Pair (x int) (y int))
+
+  (struct H
+    (code int)
+    (union (a int) (b int) (d real) (p Pair))
+    (tail int))
+
+  (main
+    (let h (ptr H) (pnew (ptr H) (int 1)))
+    (pstore (pfield (var h) code) (int 3))
+    (pstore (pfield (var h) tail) (int 11))
+    (pstore (pfield (var h) a) (int 7))
+    (print (bin "+" (tostr (pload (pfield (var h) code)))
+      (bin "+" (str " ") (bin "+" (tostr (pload (pfield (var h) a)))
+        (bin "+" (str " ") (bin "+" (tostr (pload (pfield (var h) b)))
+          (bin "+" (str " ") (tostr (pload (pfield (var h) tail))))))))))
+
+    (pstore (pfield (var h) b) (int 9))
+    (print (bin "+" (tostr (pload (pfield (var h) a)))
+      (bin "+" (str " ") (tostr (pload (pfield (var h) b))))))
+
+    (pstore (pfield (pfield (var h) p) x) (int 21))
+    (pstore (pfield (pfield (var h) p) y) (int 22))
+    (print (bin "+" (tostr (pload (pfield (pfield (var h) p) x)))
+      (bin "+" (str " ") (bin "+" (tostr (pload (pfield (pfield (var h) p) y)))
+        (bin "+" (str " ") (bin "+" (tostr (pload (pfield (var h) a)))
+          (bin "+" (str " ") (tostr (pload (pfield (var h) tail))))))))))))

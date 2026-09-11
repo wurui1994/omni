@@ -793,6 +793,39 @@ class CoreLowerer {
     const fields = [];
     const seen = new Map();
     for (const fd of n.items.slice(2)) {
+      /* 匿名 union（ADR-0027）：`(union (名字 类型) …)` —— 那几格成员**共用同一个偏移**。
+         逼出它的是 jancy 那些协议头（`io_DeviceMonitorNotify.jnc:59` 那一族：同一块字节按
+         两个名字读）。布局那一层（hir/types.js 的 structLayout）把成员摊进平表、偏移都等于
+         这一格 union 自己的偏移，所以四条腿的 `(pfield p 成员名)` 一处都不用改。
+         **成员只能经指针碰**：`(fld …)` / `(fldset …)` 找的是下面这张没摊开的表，里头没有
+         成员的名字，于是照旧报"没有这个字段"—— 与 `(blk T N)` 那一格同一个道理（那一格也
+         观察不到，见 backend-js/emit.js 的 zero 里 blk 那段注释）。 */
+      if (isList(fd) && head(fd) === 'union') {
+        if (kind !== 'struct') return this.err(fd, `${what} '${nm}' 里的 union —— 只有结构体收`);
+        const ms = [];
+        for (const md of fd.items.slice(1)) {
+          if (!isList(md) || md.items.length !== 2 || !isAtom(md.items[0])) {
+            return this.err(md, 'union 里的一个成员是 (名字 类型)');
+          }
+          const mn = md.items[0].value;
+          if (seen.has(mn)) return this.err(md, `${what} '${nm}' 里有两个字段叫 '${mn}'`);
+          const mt = this.ty(md.items[1], `字段 ${nm}.${mn}`);
+          if (mt === null) return null;
+          // 界：成员只收"零值是全零位、也没有旁表"的那几种 —— 重叠之后句柄 / string 那种
+          // 带旁表的说不清是谁的，而 arena 里那段字节是真共用的。
+          if (mt !== INT && mt !== REAL && mt !== BOOL && mt.k !== 'vec' && mt.k !== 'struct') {
+            return this.err(md, `字段 ${nm}.${mn}：union 的成员只收 int / real / bool、`
+              + `(vec T N) 或另一个结构体，这里是 ${coreTypeText(mt)}`);
+          }
+          seen.set(mn, true);
+          ms.push({ name: mn, type: mt });
+        }
+        if (ms.length < 2) return this.err(fd, 'union 至少要两格成员（一格就直接当字段写）');
+        // 值那一侧要一格槽的名字（C 的结构体声明、JS 的逐字段铺零都按名字走），
+        // 而它**观察不到** —— 源码里写不出这个名字。
+        fields.push({ name: `$u${fields.length}`, type: { k: 'union', fields: ms } });
+        continue;
+      }
       if (!isList(fd) || fd.items.length !== 2 || !isAtom(fd.items[0])) {
         return this.err(fd, '一个字段是 (名字 类型)');
       }
@@ -1467,8 +1500,20 @@ class CoreLowerer {
   /** 字段查表。找不到时把有哪些字段一起说出来 —— 拼错字段名是最常见的手误。 */
   field(n, t, nm) {
     for (const f of t.fields) if (f.name === nm) return f;
+    /* 名字是一格 union 的成员时说清是哪一种"找不着"（ADR-0027）：它在，只是**按值那条路上
+       碰不着** —— 与 `(blk T N)` 那一格同一个道理（见 blkNotAValue）。不这么说的话报出来的是
+       "有的是 code / $u1"，而 `$u1` 是这一层自己起的名字、源码里写不出来。 */
+    for (const f of t.fields) {
+      if (f.type.k !== 'union') continue;
+      for (const m of f.type.fields) {
+        if (m.name !== nm) continue;
+        return this.err(n, `'${nm}' 是 ${t.name} 里一格 union 的成员 —— 那几格共用同一段字节，`
+          + '只能经指针碰（`(pfield p 成员名)`），`(fld …)` / `(fldset …)` 走的是按值那条路');
+      }
+    }
     const names = [];
-    for (const f of t.fields) names.push(f.name);
+    // `$u…` 是 union 那一格的内部名字，源码里写不出来 —— 别摆进"有的是"里误导人。
+    for (const f of t.fields) if (!f.name.startsWith('$u')) names.push(f.name);
     return this.err(n, `${t.k === 'class' ? '类' : '结构体'} ${t.name} 没有字段 '${nm}' —— 有的是 ${names.join(' / ')}`);
   }
 

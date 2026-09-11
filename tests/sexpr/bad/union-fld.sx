@@ -1,0 +1,12 @@
+;; ADR-0027 的界：union 的成员**只能经指针碰**。
+;; `(fld …)` / `(fldset …)` 找的是那张没摊开的字段表（union 在里头是一格观察不到的槽），
+;; 所以成员的名字在那儿查不着 —— 与 `(blk T N)` 那一格同一个道理。
+;; 要按值拿走一格 union 的成员，得先有"值那一侧的重叠"，那是另一刀。
+(module
+  (struct H
+    (code int)
+    (union (a int) (b int)))
+
+  (main
+    (let h H (new H))
+    (print (fld (var h) a))))
