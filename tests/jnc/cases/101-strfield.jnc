@@ -1,0 +1,38 @@
+// ADR-0026 在 jnc 那一侧的后果：**类与结构体的字段可以是 string 了**。
+//
+// 这一份不是 jnc 前端的一刀 —— 前端一个字都没改。挡着它的一直是方言那一层：
+// `hir/types.js` 的 `sizeOf` 对 string 没有分支、落到 `return 0`，于是 `structLayout` 把整格
+// 结构体判成"落不进内存"（`结构体 'V' 里有落不进内存的字段，指不到它身上`）。而 jnc 的类与
+// 结构体局部量一律走 `(pnew (ptr V) …)`，所以每一次都撞那条路。
+//
+// ADR-0026 把 `sizeOf(string)` 定成 **16**（C 那边 `omni_str{p,len}`、LLVM 那边 `[2 x i64]`
+// 本来就是 16 字节的按值聚合；JS 那一族在这 16 字节里放"句柄 id + 字节长度"）。于是这一格
+// 白得。语料上的意义：variant_t 的 payload 现在放得下 string 了（任务 #35 那一刀的前置）。
+//
+// 期望输出的出处：/tmp/c110.c（`cc -O0 -std=c99 -Wall`）。
+
+struct Item {
+	string_t m_name;
+	int m_n;
+}
+
+struct Box {
+	Item m_it;
+	string_t m_tag;
+}
+
+int main() {
+	Box b;
+	b.m_it.m_name = "hi";
+	b.m_it.m_n = 5;
+	b.m_tag = "top";
+	printf("%s %d %s\n", b.m_it.m_name, b.m_it.m_n, b.m_tag);
+
+	Box c = b;                   // 整格拷贝里带两格 string
+	c.m_tag = "copy";
+	printf("%s %s\n", b.m_tag, c.m_tag);
+
+	Item d;                      // 没写过的那一格是空串，不是错
+	printf("[%s]\n", d.m_name);
+	return 0;
+}

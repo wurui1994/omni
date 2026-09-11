@@ -266,6 +266,23 @@ function $pload_h(a) {
 }
 function $pstore_h(a, o) { $mdv.setBigInt64(a, BigInt($hid(o)), true); return o; }
 
+/* string 落进那块 arena（ADR-0026）：这一层定的尺寸是 16 字节（hir/types.js 的 sizeOf）——
+   C 那边 omni_str 就是 {p, len}、LLVM 那边是 [2 x i64]，两条原生腿本来就按 16 字节搬。
+   这条腿的 arena 是 ArrayBuffer、JS 字符串塞不进去，所以那 16 字节里放的是
+   **句柄 id（第 0 个字）+ UTF-8 字节长度（第 1 个字，与 C 那边的 len 对上）**。
+   与 $pload_h 差一格：**id 0 是空串、不是错** —— string 的零值就是空串，而 $pnew 出来的
+   那一格是零，所以"没写过的 string 字段"读出来是空串。 */
+function $pload_s(a) {
+  const id = Number($mdv.getBigInt64(a, true));
+  return id === 0 ? "" : $H[id];
+}
+function $pstore_s(a, s) {
+  const t = s === null || s === undefined ? "" : s;
+  $mdv.setBigInt64(a, BigInt(t === "" ? 0 : $hid(t)), true);
+  $mdv.setBigInt64(a + 8, BigInt($slen(t)), true);
+  return s;
+}
+
 /* 线性内存（ADR-0017 第二刀）。与上面那块 arena（$mem/$mtop，指针用的）是**两块**内存：
    arena 是"分配出来的块"，这一块是"一整片可寻址的字节"。名字全带 lin 前缀，别混。
    算法与 interp/builtin.js 里那一份逐条相同（那份是宿主函数、这份是拼进产物的文本），

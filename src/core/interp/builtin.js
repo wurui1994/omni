@@ -457,6 +457,17 @@ export function ptrLoad(kind, a) {
     if (id === 0) rtError('null reference');
     return handles[id];
   }
+  /* string 落进内存（ADR-0026）：这一层定的尺寸是 **16 字节**（hir/types.js 的 sizeOf）——
+     C 与 LLVM 那两条腿本来就按 `omni_str{p,len}` / `[2 x i64]` 搬 16 字节。这条腿的 arena
+     是一块 ArrayBuffer、JS 字符串塞不进去，所以那 16 字节里放的是**一格句柄 id + 字节长度**
+     （第二个字与 C 那边的 `len` 对上，读的时候不用它，写的时候记上 —— 免得那 8 字节是垃圾）。
+     **与 arr 不同的一格**：id 0 **不是**错，是**空串** —— 方言里 string 的零值就是 `""`
+     （backend-js/emit.js 的零值、mir/interp.js 的 zeroOfCode 都是空串），而 `pnew` 出来的
+     内存是零。所以没写过的 string 字段读出来是 `""`，不是 `null reference`。 */
+  if (kind === 'string') {
+    const id = Number(ptrDv.getBigInt64(a, true));
+    return id === 0 ? '' : handles[id];
+  }
   return ptrDv.getUint8(a) !== 0;
 }
 
@@ -469,7 +480,15 @@ export function ptrStore(kind, a, v) {
     ptrDv.setBigInt64(a + 16, BigInt(v[2]), true);
   } else if (kind === 'tptr') ptrDv.setBigInt64(a, BigInt(v), true);
   else if (kind === 'arr') ptrDv.setBigInt64(a, BigInt(handleId(v)), true);
-  else ptrDv.setUint8(a, v ? 1 : 0);
+  /* string（ADR-0026）：句柄 id 放第 0 个字，UTF-8 的字节长度放第 1 个字（与 C 那边
+     `omni_str.len` 对上）。空串写 id 0 —— 于是"写过空串"与"压根没写过"读出来是同一件事，
+     正是 string 的零值语义。 */
+  else if (kind === 'string') {
+    const s = v === null || v === undefined ? '' : v;
+    ptrDv.setBigInt64(a, BigInt(s === '' ? 0 : handleId(s)), true);
+    ptrDv.setBigInt64(a + 8, BigInt(encodeUtf8(s).length), true);
+  } else ptrDv.setUint8(a, v ? 1 : 0);
+
   return v;
 }
 

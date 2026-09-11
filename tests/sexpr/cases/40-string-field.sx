@@ -1,0 +1,41 @@
+;; 40 —— string 当结构体字段（ADR-0026）
+;;
+;; 与 39（arr 那种句柄）是**两件事**，这一份专门钉那几处差别：
+;;   C     `omni_str {const char* p; int64_t len;}` —— 16 字节的**按值聚合**（omni.h:33-34）
+;;   LLVM  `[2 x i64]`（backend-llvm/emit.js:49）
+;;   JS 与两个解释器  arena 是 ArrayBuffer、JS 字符串塞不进去，所以那 16 字节里放
+;;         **句柄 id + UTF-8 字节长度**（$pload_s / $pstore_s、builtin.js 的 ptrLoad）
+;; —— 所以这一层把 sizeOf 定成 **16**（不是 arr 那种 8）：一套语义两套实现，尺寸与偏移必须一样。
+;;
+;; 钉五件事：
+;;   1. 字段能存能取；
+;;   2. **值语义**（与 39 判据 2 正好相反）：拷一份之后改一份，另一份不动 ——
+;;      string 是不可变的（omni.h:33），所以"共用底下那块字节"观察不到；
+;;   3. **没写过的那一格读出来是空串**，不是 `null reference`（string 的零值就是空串，
+;;      而 pnew 出来的内存是零 —— 这正是 id 0 在这一格不当错的理由）；
+;;   4. 一格结构体里两条 string 各自独立；
+;;   5. 非 ASCII 原样进出（那 16 字节的第二个字记的是**字节**长度，不是 UTF-16 长度）。
+(module
+  (struct Tag (n int) (s string) (t string))
+
+  (main
+    (let b (ptr Tag) (pnew (ptr Tag) (int 1)))
+    (pstore (pfield (var b) n) (int 5))
+    (pstore (pfield (var b) s) (str "hi"))
+    (pstore (pfield (var b) t) (str "yo"))
+    (print (pload (pfield (var b) n)))
+    (print (bin "+" (pload (pfield (var b) s)) (pload (pfield (var b) t))))
+
+    ;; 判据 2：按字段拷一份，改新的那一份，旧的不动
+    (let c (ptr Tag) (pnew (ptr Tag) (int 1)))
+    (pstore (pfield (var c) s) (pload (pfield (var b) s)))
+    (pstore (pfield (var c) s) (bin "+" (pload (pfield (var c) s)) (str "!")))
+    (print (bin "+" (pload (pfield (var c) s)) (bin "+" (str " ") (pload (pfield (var b) s)))))
+
+    ;; 判据 3：c 的 t 从来没写过 —— 读出来是空串
+    (print (bin "+" (str "[") (bin "+" (pload (pfield (var c) t)) (str "]"))))
+
+    ;; 判据 5：非 ASCII
+    (pstore (pfield (var b) s) (str "中文 ok"))
+    (print (pload (pfield (var b) s)))
+    (print (slen (pload (pfield (var b) s))))))

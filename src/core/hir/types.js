@@ -138,6 +138,10 @@ export function alignOf(t) {
   }
   // 引用语义的句柄（ADR-0024）：一个字，按字对齐 —— 理由见 sizeOf 那处那段。
   if (t.k === 'arr') return 8;
+  /* string 落进内存（ADR-0026）：**两个字**，按字对齐。它不是 arr 那种"一个字的句柄"——
+     C 那边是 `omni_str{const char* p; int64_t len;}`（omni.h:33-34）、LLVM 那边是
+     `[2 x i64]`（backend-llvm/emit.js:49），本来就是 16 字节的按值聚合。 */
+  if (t.k === 'string') return 8;
   return 0;   // 不可落地的类型：调用方要先问 ptrTargetOk / layoutOk
 }
 
@@ -164,6 +168,14 @@ export function sizeOf(t) {
      一个字，所以是 8。这一格**只给 arr** —— string / buf / fn / class 各有各的账，
      一次只放一格（理由见 ADR-0024 的「不做的」）。 */
   if (t.k === 'arr') return 8;
+  /* string 落进内存（ADR-0026）：**16 字节**。它落的不是 ADR-0024 那一格（"引用语义的句柄，
+     一个字"），是第十六刀 fat 指针那一格（"多个字的值"）—— C 那边 `omni_str` 就是
+     `{const char* p; int64_t len;}`（omni.h:33-34）、LLVM 那边是 `[2 x i64]`
+     （backend-llvm/emit.js:49），两条原生腿本来就按 16 字节按值搬。
+     JS 那一族 arena 是一块 ArrayBuffer、JS 字符串塞不进去，所以那一族在这 16 字节里放
+     "一格句柄 id + 字节长度"（见 interp/builtin.js 的 ptrLoad / ptrStore）——
+     **两套实现的尺寸与偏移必须一样**，这就是为什么这一层定 16 而不是 8。 */
+  if (t.k === 'string') return 16;
   return 0;
 }
 

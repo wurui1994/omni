@@ -170,6 +170,9 @@ function memKind(t) {
   // 这一支忘了加就会落到下面那个 bool 上 —— 那是个静默的错答案（量过：那时 arrLen 拿到的
   // 是 undefined，报出来的是宿主的 TypeError，不是 "null reference"）。
   if (t === T_ARR) return 'arr';
+  /* string 落进内存（ADR-0026）：16 字节里放"句柄 id + 字节长度"。与 arr 差一格 ——
+     id 0 是**空串**、不是错（string 的零值就是空串，见下面 zeroOfCode）。 */
+  if (t === T_STR) return 'string';
   return 'bool';
 }
 
