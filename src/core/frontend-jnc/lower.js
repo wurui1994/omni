@@ -959,6 +959,15 @@ class JncLower {
      * 初值里可以引用模块级变量，而那些在签名那一遍还没登记。 */
     this.fieldInits = new Map();
     this.synthFI = new Set();
+    /* 类里的事件那几格字段（第八十三刀）。类名 -> `[{ name, type }]`。
+     * 那一格在方言里是一格数组的句柄（多播的处理函数单子），所以**造对象的时候要把单子
+     * 建起来**：`(pstore (pfield (var $this) m_e) (anew (arr …) (int 0)))`。
+     * 发那几行的地方与字段默认值同一处（fnDef 的 pre 与 emitFieldInitCtors）—— 排在
+     * 源码写的字段初值**之前**，因为初值里可以引用这格事件（`m_e += h` 那种）。 */
+    this.evtFields = new Map();
+    /* 那几格事件字段的**名字**（第八十三刀）。mcRef 拿它做一次便宜的预筛：对着任何 `a.b`
+       都去求左边那个对象会多发诊断，所以先按名字问一句"这可能是事件吗"。 */
+    this.evtNames = new Set();
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
      * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
      * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
@@ -1009,7 +1018,7 @@ class JncLower {
     for (const { name, node } of order) {
       const base = this.bases.get(name);
       const bc = base === null || base === undefined ? undefined : this.ctors.get(base);
-      const hasFI = this.fieldInits.has(name);
+      const hasFI = this.fieldInits.has(name) || this.evtFields.has(name);
       if (this.ctors.has(name)) {
         // 自己写了 construct：字段初值由 fnDef 插到它开头；基类那一个由
         // `basetype.construct(…)` 显式调，没写就在 fnDef 那处自动补一句（与 jancy 的
@@ -1036,6 +1045,20 @@ class JncLower {
       this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n`
         + `    (expr (call ${bc.name} (var $this))))`);
     }
+  }
+
+  /**
+   * 类里那几格事件的**建单子**那几行（第八十三刀）。
+   *
+   * 一格事件在方言里就是一格数组的句柄（多播的处理函数单子，第七十三刀）。对象刚造出来时
+   * 那一格是零（`pnew` 出来的内存是零），读它会报 `null reference` —— 所以构造里第一件事
+   * 就是把单子建起来。排在源码写的字段初值**之前**：初值里可以写 `m_e += h`。
+   */
+  evtInitLines(cls, pad) {
+    const list = this.evtFields.get(cls);
+    if (list === undefined) return [];
+    return list.map((e) => `${pad}(pstore (pfield (var $this) ${e.name}) `
+      + `(anew ${tyText(e.type)} (int 0)))`);
   }
 
   /**
@@ -1082,6 +1105,7 @@ class JncLower {
       const bc = base === null || base === undefined ? undefined : this.ctors.get(base);
       if (bc !== undefined) pre.push(`    (expr (call ${bc.name} (var $this)))`);
       if (this.sctors.has(cls)) for (const l of this.gateLines(cls, '    ')) pre.push(l);
+      for (const l of this.evtInitLines(cls, '    ')) pre.push(l);
       const saveNs = this.ns;
       const saveSelf = this.selfClass;
       const savePr = this.selfProp;
@@ -1619,9 +1643,10 @@ class JncLower {
       this.methods.set(full, cls);
       this.ctors.set(cls, { name: full, params: [] });
       this.synthSC.add(cls);
-      /* 这个类还带着字段默认值（第七十八刀）：那就把体交给 emitFieldInitCtors ——
-         它会先发闸门那几行、再发字段初值。两处各发一格 `(fn C$construct …)` 就重名了。 */
-      if (this.fieldInits.has(cls)) { this.synthFI.add(cls); continue; }
+      /* 这个类还带着字段默认值或者事件（第七十八 / 八十三刀）：那就把体交给
+         emitFieldInitCtors —— 它会先发闸门那几行、再建事件的单子、再发字段初值。
+         两处各发一格 `(fn C$construct …)` 就重名了。 */
+      if (this.fieldInits.has(cls) || this.evtFields.has(cls)) { this.synthFI.add(cls); continue; }
       this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n`
         + `${this.gateLines(cls, '    ').join('\n')})`);
     }
@@ -2597,6 +2622,7 @@ class JncLower {
     const fields = this.structs.get(name);
     if (fields === undefined || fields.length > 0) return null;   // 上一遍已经报过重复了
     const inits = [];                    // 带默认值的那几格（第七十八刀）
+    const evts = [];                     // 事件那几格（第八十三刀）—— 造对象时要建单子
     // 类体里查名从**这个类**这一层起（第五十二刀）：嵌套类型在 nsFlat 那一遍登记成了 `C.S`，
     // 而字段与方法原型写的是裸名字 `S`（test97.jnc:8）。结构体不动 —— 它不是一层命名空间。
     const saveNs = this.ns;
@@ -2685,27 +2711,32 @@ class JncLower {
         // 字段后面挂构造实参（`C1 m_a(10);`）—— jancy 那边它是"内嵌那一格的构造实参"，
         // 而内嵌本身这一层还不收（下面那条），所以这儿先明说，免得实参被悄悄丢掉。
         if (info.ctor !== null) { this.nope(d, '字段后面的构造实参'); continue; }
-        /* 类里的事件（第七十四刀留的账）：`event m_onDone(int code);` —— 它在 jancy 那边是
-         * 类里的一格字段（`Property::createOnChanged` 的头一支同理）。这一格要连"对象造出来
-         * 时把那格单子也建起来"一起接（方言的字段放得下 `(arr …)`，量过了），是自己一刀。
-         * 这一问必须排在"声明符上带括号就是方法原型"那条**之前** —— 否则它会被悄悄登记成
-         * 一格返回 void 的方法原型，而那是把整格事件丢掉。 */
-        /* 类/结构体里的事件（第七十四刀量出来的边界）：语料里 `event` 全是这个形状
-         * （iox_HostNameResolver.jnc:42、iox_FpgaUploader.jnc:80），jancy 那边它就是类里的
-         * 一格字段（与 bindable 属性那格 `m_onChanged` 同一支，jnc_ct_Property.cpp:131-134）。
+        /* 类里的事件（第八十三刀，第七十四刀留的账）：`event m_onDone(int code);` ——
+         * jancy 那边它就是类里的**一格字段**（与 bindable 属性那格 `m_onChanged` 同一支，
+         * jnc_ct_Property.cpp:131-134）。语料里 `event` 全是这个形状
+         * （iox_HostNameResolver.jnc:42、iox_FpgaUploader.jnc:80）。
          *
-         * **试过，退回来了**：这一层的类在方言里是一格 `(struct 根 …)` 加 `(ptr 根)`
-         * （第五十二刀），而方言的**结构体字段**放不下"一格数组的句柄" ——
-         * `形参 $this：结构体 'Button' 里有落不进内存的字段`（hir/types.js 的 structLayout）。
-         * 先前拿 `.sx` 探针量的是 `(class Box (evt (arr …)))`，那是方言的**类**（按名字存的对象
-         * 槽），不是这一层用的结构体 —— 探针量错了形状。要它得先让方言的结构体布局收下数组
-         * 句柄，那是 ADR 级的一刀（与第五十五刀"函数值的字段"同一堵墙）。
+         * 第七十四刀试过一次、退回来了：那时方言的**结构体字段**放不下"一格数组的句柄"
+         * （`形参 $this：结构体 'Button' 里有落不进内存的字段`）。那堵墙由 ADR-0024 的
+         * S1/S2 拆掉了（`sizeOf((arr T))` 现在是 8，JS 那一族用句柄表），所以这一格能落了。
          *
          * 这一问必须排在"声明符上带括号就是方法原型"那条**之前** —— 否则它会被悄悄登记成
-         * 一格返回 void 的方法原型，整格事件就丢了。 */
+         * 一格返回 void 的方法原型，整格事件就丢了。
+         *
+         * 结构体里的还不收：那一格要"造出来的时候把单子建起来"，而这一层的结构体没有构造
+         * 那条路（与字段的默认值同一条理由，见 bad/fielddefault-struct.jnc）。 */
         if (sp.evt === true) {
-          this.nope(d, `${cls ? '类' : '结构体'}里的事件 '${info.name}'（那一格是`
-            + '一格数组的句柄，方言的结构体字段还放不下它 —— 与函数值的字段同一堵墙）');
+          if (!cls) {
+            this.nope(d, `结构体里的事件 '${info.name}'（那一格要在造出来的时候把单子建起来，`
+              + '而这一层的结构体没有构造那条路）');
+            continue;
+          }
+          const eps = info.formals === null ? [] : this.formalList(info.formals);
+          if (eps === null) continue;
+          const ety = mcTy(eps.map((p) => p.type));
+          fields.push({ name: info.name, type: ety });
+          evts.push({ name: info.name, type: ety });
+          this.evtNames.add(info.name);
           continue;
         }
         // 声明符上带括号的是**方法原型**（`void foo();`）：与 fn-proto 那一支同一件事，
@@ -2781,6 +2812,7 @@ class JncLower {
     this.bases.set(name, base);
     this.ownFields.set(name, fields.slice());
     if (inits.length > 0) this.fieldInits.set(name, inits);
+    if (evts.length > 0) this.evtFields.set(name, evts);
     this.pendingCls.push({ name, node: n });
     return null;
   }
@@ -3929,8 +3961,35 @@ class JncLower {
       if (r !== null && r.type.k === 'mc') {
         return { code: `(var ${r.dname})`, store: (v) => `(set ${r.dname} ${v})`, type: r.type };
       }
-      // 方法体里裸写的事件字段：等类里的事件那一刀（见 typeDecl 里那条边界）—— 那格字段
-      // 现在压根登记不上，所以这儿也不用问。
+      /* 方法体里**裸写**的事件字段（第八十三刀）：`m_e += h` 就是 `this.m_e += h` ——
+         类是一层命名空间，与裸写普通字段名走同一条路（selfField）。局部量遮住它，
+         所以这一问排在 lookupRef 之后。 */
+      if (r === null) {
+        const f = this.selfField(nm);
+        if (f !== null && f.type.k === 'mc') {
+          const ad = `(pfield (var $this) ${f.name})`;
+          return {
+            code: `(pload ${ad})`,
+            store: (v) => `(pstore ${ad} ${v})`,
+            type: f.type,
+          };
+        }
+      }
+    }
+    /* `obj.m_e` / `p.m_e`（第八十三刀）：那一格是类里的一格字段，所以它的读写就是
+       `(pload (pfield 对象 m_e))` / `(pstore …)`。先按**名字**便宜地问一句是不是事件字段，
+       是了才去求左边那个对象 —— 不然对着任何 `a.b` 都跑一遍左值会多发诊断。 */
+    if ((head(n) === 'field' || head(n) === 'ptr-field') && isAtom(n.items[2])
+      && this.evtNames.has(n.items[2].value)) {
+      const lv = this.lvalue(n);
+      if (lv === null) return null;
+      if (lv.type.k === 'mc') {
+        return {
+          code: `(pload ${lv.code})`,
+          store: (v) => `(pstore ${lv.code} ${v})`,
+          type: lv.type,
+        };
+      }
     }
     return undefined;
   }
@@ -4751,6 +4810,9 @@ class JncLower {
           pre.push(`    (expr (call ${bc.name} (var $this)))`);
         }
       }
+      /* 类里那几格事件的单子（第八十三刀）：排在字段初值**之前** —— 初值里可以写
+         `m_e += h`，那时单子必须已经建好。 */
+      for (const l of this.evtInitLines(owner, '    ')) pre.push(l);
       /* 字段的默认值（第七十八刀）：排在基类构造与静态构造之后、用户写的那个体之前 ——
          正是 jancy 那四句的第三句（jnc_ct_Parser.cpp:3005-3009 的 initializeFields）。
          所以 construct 里再给同一格字段赋值会**盖掉**默认值，与 jancy 一致。

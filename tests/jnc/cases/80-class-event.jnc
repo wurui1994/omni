@@ -1,0 +1,64 @@
+// 类里的事件（第八十三刀，第七十四刀留的账）
+//
+// 语料里 `event` 全是这个形状 —— test/ioninja/common/iox_HostNameResolver.jnc:42 的
+// `event m_onCompleted();`、iox_FpgaUploader.jnc:80 的
+// `event m_onUpdateCompleted(bool result);`。jancy 那边它就是类里的**一格字段**
+// （与 bindable 属性那格 `m_onChanged` 同一支，jnc_ct_Property.cpp:131-134）。
+//
+// 第七十四刀试过一次、退回来了：那时方言的结构体字段放不下"一格数组的句柄"
+// （`形参 $this：结构体 'Button' 里有落不进内存的字段`）。那堵墙由 ADR-0024 的 S1/S2
+// 拆掉了（`sizeOf((arr T))` 现在是 8，JS 那一族用句柄表），所以这一刀才落得下来。
+//
+// 这里钉五件事：
+//   1. 类里声明一格事件，`obj.m_e += 处理函数` 挂两个，`obj.m_e(实参)` 两个都跑到
+//   2. 方法体里**裸写**事件名（`m_onClick(code)` 就是 `this.m_onClick(code)`）
+//   3. 单子是**造对象的时候**建起来的：`Button b;` 与 `new Button` 两条路都要建
+//      （不建的话读那一格是零 -> `null reference`）
+//   4. 两个对象各有自己的一张单子（互不影响）
+//   5. 没有 construct 的类也有那格单子 —— 那个构造是合成出来的（与第七十八刀同一处）
+//
+// `-=` 不在这里：那一格与顶层事件是同一条边界（jancy 收的是 `+=` 回来的那格 cookie，
+// 这一层的 `+=` 还不回那一格），见 bad/bind-remove.jnc。
+
+int g_a = 0;
+int g_b = 0;
+
+void onA(int code) {
+	g_a = g_a + code;
+}
+
+void onB(int code) {
+	g_b = g_b + code * 10;
+}
+
+class Button {
+	int m_id = 7;
+	event m_onClick(int code);
+
+	// 2. 方法体里裸写事件名
+	void fire(int code) {
+		m_onClick(code);
+	}
+}
+
+int main() {
+	// 5. Button 没写 construct —— 那格单子由合成出来的那一个建
+	Button b;
+	printf("%d\n", b.m_id);
+
+	b.m_onClick += onA;
+	b.m_onClick += onB;
+	b.fire(3);
+	printf("%d %d\n", g_a, g_b);
+
+	// 1. 从外面调也一样
+	b.m_onClick(1);
+	printf("%d %d\n", g_a, g_b);
+
+	// 3 + 4. new 出来的那一格也有自己的单子，且与 b 那张互不影响
+	Button* p = new Button;
+	p.m_onClick += onA;
+	p.fire(100);
+	printf("%d %d\n", g_a, g_b);
+	return 0;
+}
