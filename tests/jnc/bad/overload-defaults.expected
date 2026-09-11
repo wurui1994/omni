@@ -1,1 +1,1 @@
-'q' 的重载里有 2 条都收 1 个实参（默认值让可接受的个数重叠了 —— 要按参数类型排序的重载决议）
+'q' 的同元重载在这一句上分不出来（int 对两条一样合得上 —— jancy 那边这也是 "ambiguous call to overloaded function"）

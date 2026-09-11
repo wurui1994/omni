@@ -4143,7 +4143,7 @@ class JncLower {
           + '"\'%s\' is abstract and hence cannot have a body"）');
       }
       if (this.fns.has(base)) {
-        const alt = this.overloadName(n, base, ps.length, sp);
+        const alt = this.overloadName(n, base, ps, sp);
         if (alt === null) return null;
         info.name = alt;
       }
@@ -4192,61 +4192,169 @@ class JncLower {
    *
    * @returns 新的方言名，或 null（已经报过错）
    */
-  overloadName(n, base, arity, sp) {
+  overloadName(n, base, ps, sp) {
     const cands = this.overloads.get(base) ?? [base];
     if (this.virt.has(base) || (sp !== undefined && sp !== null && sp.virt !== null)) {
       return this.nope(n, `虚方法 '${shown(base)}' 的重载（这一层的虚派发按方法名接，`
         + '同名两条会撞在一格分派表上）');
     }
+    const mine = ps.map((p) => p.type);
     for (const c of cands) {
       const s = this.fns.get(c);
       if (s === undefined) continue;
-      // 方法的 params 里第 0 格是 this，元数要减掉它才跟源码里写的那一串对得上
-      const k = this.methods.has(c) ? s.params.length - 1 : s.params.length;
-      if (k === arity) {
-        return this.nope(n, `'${shown(base)}' 的同元重载（两条都收 ${arity} 个实参 —— `
-          + '要按参数类型排序的重载决议，见 ADR-0016 那一节）');
+      // 方法的 params 里第 0 格是 this —— 那一格两边一样，比的是后面那一串
+      const theirs = this.methods.has(c) ? s.params.slice(1) : s.params;
+      if (this.sameArgs(mine, theirs)) {
+        return this.err(n, `函数 '${shown(base)}' 定义了两次`);
       }
     }
-    const alt = `${base}$o${arity}`;
-    if (this.fns.has(alt)) return this.err(n, `函数 '${shown(base)}' 定义了两次`);
-    this.overloads.set(base, [...cands, alt]);
-    return alt;
+    this.overloads.set(base, [...cands, `${base}$o${cands.length}`]);
+    return `${base}$o${cands.length}`;
   }
 
   /**
-   * 调用点在一族重载里挑一条（第七十九刀）：按**给了几个实参**挑。
+   * 实参那一串的类型完全一样吗（第八十刀）。jancy 判"这是重载还是重定义"就问这一句
+   * （`getArgSignature`，jnc_ct_FunctionType.h:289-326）—— 返回类型与 `errorcode` 都不算。
+   */
+  sameArgs(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameTy(a[i], b[i])) return false;
+    return true;
+  }
+
+  /**
+   * 一格实参的类型**不降就问得出来**吗（第八十刀）。
    *
-   * 每个候选可接受的个数是一个区间：`元数 − 末尾带默认值的个数` .. `元数`（第七十七刀那格
-   * `defs` 现成的）。区间套住了就是候选；正好一条就用它，两条以上说还不收（语料里有 10 组
-   * 是这样 —— 默认值让区间重叠），一条都没有就照旧报"要几个实参"，报的是**基名那一条**。
+   * 同元的重载要按参数类型挑，而挑之前就得知道实参是什么类型 —— 可这一层的 `expr` 是
+   * **按 want 定向**的（`null` 要 want 才知道是哪种指针、花括号要 want、整数字面量的宽度
+   * 也看 want），而且降的时候会发码（传播的提升、提临时量）。所以不能"先降一遍拿类型、
+   * 再按选中的那一条降第二遍"。
+   *
+   * 这一格因此只回**不降也知道**的那几种：字面量、`true`/`false`、以及查得着的名字
+   * （局部量 / 形参 / 模块级 / 方法体里裸写的字段 —— 那三个查名都是纯查表，不发一个字）。
+   * 别的回 null，调用点那儿就说"还不收"，绝不猜。
+   *
+   * 整数**字面量**单独标一格 `lit`：jancy 对常量的 int -> int 加宽算 `Identity`
+   * （jnc_ct_CastOp_Int.h:23-111），于是 `p(int)` / `p(long)` 喂 `1` 在它那儿是
+   * **ambiguous**。所以这一层对字面量一律不给"完全一样"那一档 —— 两条同分、当场拒，
+   * 与 jancy 一样不给答案。
+   *
+   * @returns `{ ty, lit }` 或 null（问不出来）
+   */
+  cheapTy(n) {
+    if (isStr(n)) return { ty: J_STR, lit: true };
+    if (isAtom(n)) {
+      const s = n.value;
+      if (/^(0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|0[0-7]+|[0-9]+)$/.test(s)) {
+        return { ty: J_I32, lit: true };          // 宽度不管：字面量那一档下面一律算 int -> int
+      }
+      if (/^[0-9]+(\.[0-9]*([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)$/.test(s)) {
+        return { ty: J_REAL, lit: true };
+      }
+      return null;
+    }
+    if (!isList(n)) return null;
+    const h = head(n);
+    if (h === 'true' || h === 'false') return { ty: J_BOOL, lit: true };
+    if (h === 'name' && isAtom(n.items[1])) {
+      const nm = n.items[1].value;
+      const r = this.lookupRef(nm);
+      if (r !== null) return { ty: r.type, lit: false };
+      const f = this.selfField(nm);
+      if (f !== null) return { ty: f.type, lit: false };
+      return null;
+    }
+    return null;
+  }
+
+  /**
+   * 一格实参配一格形参有多合得上（第八十刀）。档次照 jancy 的 `CastKind`
+   * （jnc_ct_CastOp.h:26-35）**相对次序**排，只是粗一些 —— 这一层可行的隐式转换本来就少
+   * （量过：`double d = 1;` 收，`int i = 2.5;` 拒）：
+   *
+   *   4 完全一样（Identity）
+   *   3 int 之间（两个方向 jancy 都是 Implicit）、类的上转
+   *   1 int -> real（ImplicitCrossFamily，严格差于 Implicit）、bool -> int、枚举 -> int
+   *   0 合不上
+   *
+   * 字面量不给 4（见 cheapTy 那段）。次序与 jancy 一致这一点是关键：我们**给出答案时**
+   * 与 jancy 挑的是同一条；分不出来时说还不收，而不是猜。
+   */
+  argCost(from, to, lit) {
+    if (isInt(from) && isInt(to)) return lit ? 3 : (sameTy(from, to) ? 4 : 3);
+    if (sameTy(from, to)) return 4;
+    if (isClass(from) && isClass(to) && this.isBase(to.name, from.name)) return 3;
+    if (to === J_REAL && isInt(from)) return 1;
+    if (isInt(to) && from === J_BOOL) return 1;
+    if (isInt(to) && jncIsEnum(from)) return 1;
+    return 0;
+  }
+
+  /**
+   * 调用点在一族重载里挑一条（第七十九刀 + 第八十刀）。两步：
+   *
+   *   1. 按**给了几个实参**筛。每个候选可接受的个数是一个区间
+   *      `元数 − 末尾带默认值的个数` .. `元数`（第七十七刀那格 `defs` 现成的）。
+   *   2. 剩下不止一条时按**参数类型**排（`argCost` / `cheapTy`）：每个候选取各实参里**最差**
+   *      的那一档，取最高分 —— 与 jancy 的 `chooseOverload` 同一个算法
+   *      （jnc_ct_FunctionTypeOverload.cpp:44-91）。平手或者哪个实参的类型问不出来，
+   *      当场说还不收，不猜。
    *
    * @returns 挑中的方言名，或 null（已经报过错）
    */
-  pickOverload(n, base, given, hasSelf) {
+  pickOverload(n, base, argNodes, hasSelf) {
     const cands = this.overloads.get(base);
     if (cands === undefined) return base;
-    const fits = [];
-    for (const c of cands) {
+    const given = argNodes.length;
+    const shape = (c) => {
       const s = this.fns.get(c);
-      if (s === undefined) continue;
       const want = hasSelf ? s.params.slice(1) : s.params;
       const defs = s.defs === undefined || s.defs === null ? null
         : (hasSelf ? s.defs.slice(1) : s.defs);
-      const opt = defs === null ? 0 : defs.filter((d) => d !== null).length;
-      if (given >= want.length - opt && given <= want.length) fits.push(c);
-    }
-    if (fits.length === 1) return fits[0];
-    if (fits.length > 1) {
-      return this.nope(n, `'${shown(base)}' 的重载里有 ${fits.length} 条都收 ${given} 个实参`
-        + '（默认值让可接受的个数重叠了 —— 要按参数类型排序的重载决议）');
-    }
-    const counts = cands.map((c) => {
-      const s = this.fns.get(c);
-      return this.methods.has(c) ? s.params.length - 1 : s.params.length;
+      return { want, opt: defs === null ? 0 : defs.filter((d) => d !== null).length };
+    };
+    const fits = cands.filter((c) => {
+      if (this.fns.get(c) === undefined) return false;
+      const { want, opt } = shape(c);
+      return given >= want.length - opt && given <= want.length;
     });
-    return this.err(n, `'${shown(base)}' 有 ${cands.length} 条重载，收的实参个数是 `
-      + `${counts.join(' / ')}，这里给了 ${given} 个`);
+    if (fits.length === 1) return fits[0];
+    if (fits.length === 0) {
+      const counts = cands.map((c) => shape(c).want.length);
+      return this.err(n, `'${shown(base)}' 有 ${cands.length} 条重载，收的实参个数是 `
+        + `${counts.join(' / ')}，这里给了 ${given} 个`);
+    }
+    // 按类型排。先把这几个实参的类型问出来 —— 有一个问不出来就整条不猜。
+    const tys = argNodes.map((a) => this.cheapTy(a));
+    if (tys.some((t) => t === null)) {
+      return this.nope(n, `'${shown(base)}' 的同元重载：第 `
+        + `${tys.findIndex((t) => t === null) + 1} 个实参的类型这一层还得先降一遍才知道`
+        + '（同元重载要按参数类型挑，见 ADR-0016 第八十刀）');
+    }
+    let best = -1;
+    let bestScore = 0;
+    let tie = false;
+    for (const c of fits) {
+      const { want } = shape(c);
+      let score = 5;
+      for (let i = 0; i < tys.length; i++) {
+        const one = this.argCost(tys[i].ty, want[i], tys[i].lit);
+        if (one < score) score = one;
+      }
+      if (score === 0) continue;                       // 这一条根本合不上
+      if (score === bestScore) tie = true;
+      if (score > bestScore) { bestScore = score; best = c; tie = false; }
+    }
+    if (best === -1) {
+      return this.err(n, `'${shown(base)}' 的 ${fits.length} 条重载没有一条收得下这几个实参`
+        + `（${tys.map((t) => tyName(t.ty)).join(', ')}）`);
+    }
+    if (tie) {
+      return this.nope(n, `'${shown(base)}' 的同元重载在这一句上分不出来`
+        + `（${tys.map((t) => tyName(t.ty)).join(', ')} 对两条一样合得上 —— jancy 那边这也是`
+        + ' "ambiguous call to overloaded function"）');
+    }
+    return best;
   }
 
   /** 那道闸门那几行（第五十三刀）：`if (!跑过) { 跑过 = true; 静态构造(); }`。
@@ -7703,7 +7811,7 @@ class JncLower {
        才定下来（方法体里裸写 `foo()` 那条也补好了 `this`），而方法的元数要减掉 this 那一格。
        挑完再往下走 —— 下面那一整段（默认值、个数、类型）一个字都不用改。 */
     if (this.overloads.has(nm)) {
-      const pick = this.pickOverload(n, nm, args0.length, self !== null);
+      const pick = this.pickOverload(n, nm, args0, self !== null);
       if (pick === null) return null;
       nm = pick;
     }

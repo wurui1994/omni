@@ -4747,9 +4747,9 @@ node tests/lib/jnc-sweep.js --top 40
    每个候选可接受的个数是一个区间 `元数 − 末尾默认值个数 .. 元数` —— 第七十七刀那格 `defs`
    现成的。改名要小心一处：owner 与"源码里那个方法名"必须从**没改名的**基名算，
    `C$open$o1` 按最后一个 `$` 切出来的 owner 是 `C$open`，那是错的。
-2. **同元的**当场说还不收（`bad/overload-samearity`）—— 要按参数类型排序，而这一层只有
-   `assignOk` 那个"是/不是"的答案，排不出序。jancy 那套（一个标量）可以照抄，但要先有一张
-   这一层的隐式转换代价表，那是自己一刀。
+2. **同元的**当场说还不收（**下一刀就是它** —— 见第八十刀，那一刀把这条界改成了"按参数类型
+   挑，问不出类型才拒"）—— 要按参数类型排序，而这一层只有 `assignOk` 那个"是/不是"的答案，
+   排不出序。jancy 那套（一个标量）可以照抄，但要先有一张这一层的隐式转换代价表。
 3. **默认值让可接受个数重叠**的，界划在**调用点**（`bad/overload-defaults`）：两条声明本身
    收下来，撞车的那一句才拒 —— 只声明不那么调是合法的，jancy 也一样。
 4. **虚方法上的**不收（`bad/overload-virtual`）：第五十七刀的虚派发是"整数标签 + 按标签分派"，
@@ -4773,6 +4773,59 @@ node tests/lib/jnc-sweep.js --top 40
   （新榜首四条是同元重载的 367 对：3 个实参 124、2 个 92、1 个 86、4 个 65）。
   这条尺子量的是"还有多少拦路项看得见"，不是"离得多远" —— 一刀之后它涨，说明这一刀
   真的往前走了一段。真正的进度信号是上面那个 55。
+
+## 第八十刀：同元的重载 —— 按参数类型挑，分不出来就不猜
+
+第七十九刀留下的那一半：同元重载在尺子上是 367 对（3 个实参 124、2 个 92、1 个 86、4 个 65）。
+
+**jancy 的挑法**（`FunctionTypeOverload::chooseOverload`，jnc_ct_FunctionTypeOverload.cpp:44-91）
+是一个**标量**，不是 C++ 那种逐参数的偏序：每个候选取 `OperatorMgr::getArgCastKind`
+（jnc_ct_OperatorMgr.cpp:721-759）—— 各实参 `CastKind` 里**最差**的那一档 —— 然后取最高分。
+平手报 `ambiguous call to overloaded function`，一条都不可行报
+`none of the %d overloads accept the specified argument list`。档次在 jnc_ct_CastOp.h:26-35：
+`None < Dynamic < Explicit < ImplicitLossyFuntionCall < ImplicitCrossFamily <
+ImplicitCrossConst < Implicit < Identity`。它自己的 `test/jnc/test32.jnc` 量的就是这条：
+`foo(int)` / `foo(double)` 喂 `3.14` 挑 double、喂 `10` 挑 int。
+
+**这一层的代价表**（`argCost`）照那个**相对次序**排，只是粗 —— 这一层可行的隐式转换本来就少
+（量过：`double d = 1;` 收、`int i = 2.5;` 拒）：
+
+- 4 完全一样（Identity）
+- 3 int 之间（两个方向 jancy 都是 Implicit）、类的上转
+- 1 int -> real（ImplicitCrossFamily，严格差于 Implicit）、bool -> int、枚举 -> int
+- 0 合不上
+
+挑法与 jancy 同一个算法（每条取最差的那一档、取最高分）。**次序一致**是这一刀的全部立足点：
+我们给出答案时挑的与 jancy 是同一条；分不出来时说"还不收"，绝不猜。
+
+**两处刻意与 jancy 不一样，都是"我们更保守"**：
+
+1. **整数字面量不给"完全一样"那一档**。jancy 对常量的 int -> int 加宽算 `Identity`
+   （jnc_ct_CastOp_Int.h:23-111），于是 `p(int)` / `p(long)` 喂 `1` 在它那儿是 ambiguous。
+   这一层对字面量一律按"int 之间"（3）算 —— 两条同分、当场拒，与 jancy 一样不给答案。
+2. **实参的类型问不出来就不排**（`bad/overload-argtype-unknown`）。这是这一刀真正的拦路石：
+   排序要**先知道实参是什么类型**，而这一层的 `expr` 是**按 want 定向**的（`null` 要 want 才知道
+   是哪种指针、花括号要 want、整数字面量的宽度也看 want），并且降的时候**会发码**（errorcode 的
+   传播提升、提临时量）。所以不能"先降一遍拿类型、再按选中的那一条降第二遍"—— 那会把同一段
+   代码发两遍。于是 `cheapTy` 只回**不降也知道**的那几种：字面量、`true`/`false`、
+   以及查得着的名字（局部量 / 形参 / 模块级 / 方法体里裸写的字段 —— 那三个查名都是纯查表，
+   不发一个字）。别的当场说清。要全收得先给 `expr` 加一格"只问类型、不发码"的干跑模式。
+
+顺带把第七十九刀那个"同元就拒"的登记规则也改对了：登记时只有**实参那一串完全一样**才是
+`定义了两次`（与 jancy 的 `getArgSignature` 同），别的都收下来当重载；名字从
+`<全名>$o<元数>` 改成 `<全名>$o<序号>` —— 同元的两条现在能共存了，元数当不了名字。
+
+**量出来的**：`tests/jnc` 166/0 -> **167/0**（`bad/overload-samearity` 从 bad/ 搬进
+`cases/77-overload-types.jnc` —— 它现在过得去了）。那一份在六条腿上逐字节相同，钉五件事：
+整数字面量挑 int、实数字面量挑 double、**变量**也分得开（不只是字面量）、类的上转
+（`D*` 在 `q(B*)` 与 `q(int)` 之间挑前者）、元数与类型混着分。
+
+**尺子（655 份）**：
+
+- 「真降得下来」：**55，没动**；
+- 「没有还不收的行」的文件：142 -> **143**（+1 —— 第七十九刀丢掉的那一格回来了）；
+- (文件, 拦路项) 对：9006 -> **8803**（−203）。同元重载那 367 对从榜上消失了，剩下的是
+  那两处保守里漏出来的零头。
 
 ## 后果与代价
 

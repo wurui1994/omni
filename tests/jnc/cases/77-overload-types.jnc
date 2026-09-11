@@ -1,0 +1,76 @@
+// 同元的重载 —— 按参数类型挑（第八十刀）
+//
+// 出处：jancy 的挑法是 `FunctionTypeOverload::chooseOverload`
+// （jnc_ct_FunctionTypeOverload.cpp:44-91）：每个候选算**一个标量** ——
+// `OperatorMgr::getArgCastKind`（jnc_ct_OperatorMgr.cpp:721-759）取各实参 `CastKind` 里
+// **最差**的那一档，然后取最高分；平手报 "ambiguous call to overloaded function"，
+// 一条都不可行报 "none of the %d overloads accept the specified argument list"。
+// 档次在 jnc_ct_CastOp.h:26-35：None < Dynamic < Explicit < ImplicitLossyFuntionCall
+// < ImplicitCrossFamily < ImplicitCrossConst < Implicit < Identity。**没有** C++ 那种逐参数
+// 的偏序，就这一个标量。jancy 自己的 test/jnc/test32.jnc 量的就是这条：
+// `foo(int)` / `foo(double)` 喂 `3.14` 挑 double、喂 `10` 挑 int。
+//
+// 这一层的档次照那个**相对次序**排，粗一些（可行的隐式转换本来就少）：
+//   4 完全一样、3 int 之间 / 类的上转、1 int→real / bool→int / 枚举→int、0 合不上。
+//
+// 这里钉五件事：
+//   1. 整数字面量挑 int 那一条（int 之间 3 > int→real 1）
+//   2. 实数字面量挑 double 那一条（完全一样 4）
+//   3. **变量**也分得开（不只是字面量）：`int` 的变量挑 int、`double` 的变量挑 double
+//   4. 类的上转：`D` 的对象在 `q(B*)` 与 `q(int)` 之间挑前者
+//   5. 元数与类型混着分：`r(int)` / `r(double)` / `r(int, int)`
+
+void p(int v) {
+	printf("p int %d\n", v);
+}
+
+void p(double v) {
+	printf("p double %.1f\n", v);
+}
+
+class B {
+	int m_b = 1;
+}
+
+class D: B {
+	int m_d = 2;
+}
+
+void q(int v) {
+	printf("q int %d\n", v);
+}
+
+void q(B* b) {
+	printf("q B %d\n", b.m_b);
+}
+
+void r(int a) {
+	printf("r 1 int %d\n", a);
+}
+
+void r(double a) {
+	printf("r 1 double %.1f\n", a);
+}
+
+void r(int a, int b) {
+	printf("r 2 %d\n", a + b);
+}
+
+int main() {
+	p(1);
+	p(2.5);
+
+	int i = 3;
+	double d = 4.5;
+	p(i);
+	p(d);
+
+	D* dp = new D;
+	q(dp);
+	q(9);
+
+	r(1);
+	r(1.5);
+	r(1, 2);
+	return 0;
+}

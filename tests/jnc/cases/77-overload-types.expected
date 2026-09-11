@@ -1,0 +1,9 @@
+p int 1
+p double 2.5
+p int 3
+p double 4.5
+q B 1
+q int 9
+r 1 int 1
+r 1 double 1.5
+r 2 3
