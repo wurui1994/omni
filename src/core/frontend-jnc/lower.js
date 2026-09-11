@@ -487,13 +487,21 @@ function baseCtorCalls(n, out = new Set()) {
 
 /** 声明符的核心是个**特殊成员**吗（第五十二刀）：`construct` / `destruct` /
  *  `static construct` / 属性的 `get` `set`。是就回那个关键字，不是回 null。
- *  这几种在语法里是自己一格（`special` / `accessor`，jnc.grammar 的 special 规则）。 */
+ *  这几种在语法里是自己一格（`special` / `accessor`，jnc.grammar 的 special 规则）。
+ *
+ *  算符重载（第一百三十刀）也从这儿回：`(operator :=)` -> `'operator :='`。语法上它也是
+ *  自己一格，落法与特殊成员同一条路（提到顶层、`this` 当第一个形参），只是**名字**由
+ *  fnSig0 拼成 `Owner$op$assign` 那种，调用点按算符去找它。 */
 function specialCore(dcl) {
   if (!isList(dcl) || head(dcl) !== 'dcl') return null;
   let core = dcl.items[2];
   if (isList(core) && head(core) === 'qualified-special') core = core.items[2];
   if (!isList(core)) return null;
   const h = head(core);
+  if (h === 'operator') {
+    const op = isStr(core.items[1]) || isAtom(core.items[1]) ? core.items[1].value : '?';
+    return `operator ${op}`;
+  }
   if (h !== 'special' && h !== 'accessor') return null;
   return isStr(core.items[1]) || isAtom(core.items[1]) ? core.items[1].value : h;
 }
@@ -1027,6 +1035,8 @@ class JncLower {
     // 只调一次**（jnc_ct_Parser.cpp:3005-3009 那四句的第二句 + MemberBlock 里那个
     // `ModuleItemFlag_Constructed` 闸门），所以要一格模块级的 bool。
     this.ctors = new Map();
+    /** 赋值算符（第一百三十刀）：主人 -> `{name, param, ret}`。赋值那一处按左边的类型来这儿找。 */
+    this.opAssign = new Map();
     this.sctors = new Map();
     this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
     // 方法名 -> 它那段闭包 thunk（第五十五刀）。`c.foo` 当值用时捕的是对象，一个方法一段。
@@ -1268,6 +1278,37 @@ class JncLower {
       }
       if (!added) break;
     }
+  }
+
+  /**
+   * `operator :=` 的签名（第一百三十刀）。落法与方法一模一样 —— 一个自由函数、`this` 当第一个
+   * 形参，名字拼成 `Owner$op$assign`；调用点（赋值那一处）按**左边那一格的类型**去 `opAssign`
+   * 里找它。
+   *
+   * 只收**一个**形参、一格 owner 上只收**一个** `operator :=`：jancy 那边多个是按实参类型挑
+   * （重载决议），那与第八十刀的同元重载是同一笔账 —— 明说不收第二个，不猜。
+   */
+  opAssignSig(n, info, ps) {
+    const owner = info.name === ''
+      ? (this.structs.has(this.ns) ? this.ns : null)
+      : this.resolve(info.name, (k) => this.structs.has(k));
+    if (owner === null) {
+      return this.err(n, "'operator :=' 只能是类或结构体的成员（写在体里）");
+    }
+    if (ps.length !== 1) {
+      return this.nope(n, `'operator :=' 收 ${ps.length} 个形参（这一层只收一个）`);
+    }
+    const full = `${owner}$op$assign`;
+    if (this.fns.has(full)) {
+      return this.nope(n, `${shown(owner)} 的第二个 'operator :='（要按实参类型挑，见第八十刀）`);
+    }
+    info.name = full;
+    const self = this.classes.has(owner) ? tClass(owner, false) : { k: 'struct', name: owner };
+    ps.unshift({ name: 'this', type: self, formals: null, def: null });
+    this.methods.set(full, owner);
+    this.opAssign.set(owner, { name: full, param: ps[1].type, ret: info.type });
+    this.fns.set(full, sigOf(ps, info.type));
+    return { info, ps, isMain: false };
   }
 
   /**
@@ -2133,7 +2174,8 @@ class JncLower {
            （一个自由函数、`this` 当第一个形参），只是名字由 fnSig0 拼成 `S$construct`。
            `static construct` 仍旧只在类那一侧：那一格要一道 once 闸门，是另一笔账。 */
         if (sk === null || accessorNamed(m.items[2])
-          || sk === 'construct' || (isCls && sk === 'static construct')) {
+          || sk === 'construct' || sk.startsWith('operator ')
+          || (isCls && sk === 'static construct')) {
           out.push({ ns: inner, it: m });
         }
         continue;
@@ -4364,7 +4406,8 @@ class JncLower {
           /* `construct` 从第一百二十九刀起收了（体由 aggHoist 提到顶层，与普通方法同一条路），
              所以这儿只拦剩下的那几个。裸写的 `get` / `set` 是**下标运算符**那一族
              （见 accessorNamed）—— 名字写在前面的 `p.get()` 是属性的取值器，那一格照旧提上去。 */
-          if (sk0 !== null && sk0 !== 'construct' && !accessorNamed(m.items[2])) {
+          if (sk0 !== null && sk0 !== 'construct' && !sk0.startsWith('operator ')
+            && !accessorNamed(m.items[2])) {
             this.nope(m, `结构体里的 '${sk0}'`);
           }
           continue;
@@ -4392,6 +4435,7 @@ class JncLower {
         }
         const sk = specialCore(m.items[2]);
         if (sk !== null && sk !== 'construct' && sk !== 'static construct'
+          && !sk.startsWith('operator ')            // 算符重载（第一百三十刀）由 fnSig0 那一遍办
           && !accessorNamed(m.items[2])) this.specialNope(m, sk);
         continue;
       }
@@ -5664,7 +5708,12 @@ class JncLower {
       // 属性的取/存（第六十八刀）：`int g_p.get()` / `g_p.set(int x)` —— 与 construct
       // 一样是"限定名 + 特殊名 + 一对括号"，只是取值器那一格有返回类型（从 sp 抄）。
       const acc = sk === 'get' || sk === 'set';
-      if (!acc && sk !== 'construct' && sk !== 'static construct') {
+      /* 算符重载（第一百三十刀）：今天只收**赋值**那一个（`operator :=`，语料里 11 处，
+         全在 std 那一批）。剩下那几个（`*` / `->` / `++` / `--` / `()`）各要在一元或二元
+         那几处的求值路上认，是自己一刀 —— 明说，不混进来。 */
+      const isOp = sk.startsWith('operator ');
+      if (isOp && sk !== 'operator :=') return this.nope(d.items[2], `算符重载 '${sk}'`);
+      if (!acc && !isOp && sk !== 'construct' && sk !== 'static construct') {
         return this.specialNope(d.items[2], sk);
       }
       const core = d.items[2];
@@ -5686,7 +5735,7 @@ class JncLower {
       // 先前这儿直接抄 `sp.type`，于是星号被吞掉 —— 类型是指针的属性因此永远对不上它自己的
       // 取值器（报的是"回的是 int，而属性是 int*"，认错了人）。
       let at = J_VOID;
-      if (acc) {
+      if (acc || isOp) {
         at = this.ptrsTy(sp, d.items[1], d, dropTail);
         if (at === null) return null;
       }
@@ -6413,7 +6462,11 @@ class JncLower {
     const special = specialCore(n.items[2]);
     // 属性的**取值器**有返回类型（`int g_p.get()`，prop_simple.rst:25），所以它照常问 specs；
     // 存值器与构造一样没有说明符（第六十八刀）。
-    const sp = special === null || special === 'get' ? this.specs(n.items[1], true)
+    /* 算符重载（第一百三十刀）也照常问 specs：`size_t errorcode operator := (…)` 是**有**返回
+       类型的。这一格漏了的话返回类型被吞成 void，体里的 `return m_v` 于是报成"main 里 return
+       一个非 0 的值"—— 认错了人（这是这一刀量出来的一个洞，先前那句话谁看了都会去查 main）。 */
+    const sp = special === null || special === 'get' || special.startsWith('operator ')
+      ? this.specs(n.items[1], true)
       : {
         type: J_VOID, thin: false, stat: false, fnptr: false,
         virt: null, errc: false, prop: false, cst: false, agt: false, bnd: false, bdata: false,
@@ -6442,6 +6495,8 @@ class JncLower {
     // `C.construct()` 名字里本来就带着 `C.`），所以两种放法到这儿又是同一格。
     if (info.special !== null) {
       if (info.special === 'get' || info.special === 'set') return this.propSig(n, info, ps);
+      // 赋值算符（第一百三十刀）：自己一处，落法与方法同一条
+      if (info.special === 'operator :=') return this.opAssignSig(n, info, ps);
       /* 构造的主人（第五十三刀是类；第一百二十九刀把**结构体**也算上）：先按类查，查不着再按
          结构体查 —— 两边的落法只差 `this` 那一格的类型（类是一条引用 tClass，结构体那一格里
          放的本来就是地址，所以直接用那个结构体类型，与第一百〇一刀的方法一模一样）。 */
@@ -8086,6 +8141,25 @@ class JncLower {
       }
       const lv = this.lvalue(n.items[2]);
       if (lv === null) return null;
+      /* 赋值算符（第一百三十刀）：左边那一格的类型上写了 `operator :=` 就调它。
+         排在下面"类的变量赋不了值"与同型检查**之前** —— 那一句正是这个算符要盖掉的
+         （jancy 的 std_String / std_Buffer 就靠它，`s = "abc"`）。
+         三条判据写清：
+           - 只在 `=` 上认（`+=` 那一族在 jancy 那边是另外的算符，还不收）；
+           - 右边**同型**时不认：那是"抄一份"，是拷贝不是转换；
+           - 右边要对得上它那**一个**形参（对不上就落回老路，让那儿说"两边不同型"）。
+         右边按**算符那一格形参**的类型求值（`want` 给对了，字面量才落得对）。 */
+      const oa = (isClass(lv.type) || jncIsStruct(lv.type))
+        ? this.opAssign.get(lv.type.name) : undefined;
+      if (op === '=' && oa !== undefined) {
+        let ov = this.expr(n.items[3], oa.param);
+        if (ov === null) return null;
+        if (isInt(ov.type) && isInt(oa.param)) ov = intConv(ov, oa.param);
+        if (!sameTy(ov.type, lv.type) && this.assignOk(ov.type, oa.param)) {
+          const self = lv.kind === 'agg' ? lv.code : this.read(lv);
+          return [`${pad}(expr (call ${oa.name} ${self} ${ov.code}))`];
+        }
+      }
       // 类的变量赋不了值（第五十二刀）：type_class.rst:19 那句 "You cannot assign varibles
       // or fields of class types"。类**指针**照旧可以赋（那是换个引用，不是拷贝对象）。
       if (isClass(lv.type) && lv.type.own === true) {
