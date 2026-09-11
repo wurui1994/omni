@@ -1,0 +1,56 @@
+// 第一百一十四刀：**赋值当表达式**。第一百一十三刀翻出来的那一行 —— 榜上 `表达式 'assign'`
+// 111 对，可源码里只有 14 处（其余是 import 摊出来的，数字的注见 ADR-0016 那一节）：
+//   `return <左值> = <表达式>;` 7 处（ui_ComboBox.jnc:74、ui_ListWidget.jnc:67、
+//   stdt_Iterator.jnc:37/41、stdt_Map.jnc:45、stdt_BoxList.jnc:45、test157.jnc:28）
+//   链式 `a = b = c` 7 处（Df1Layer.jnc:182-187、SerialTapProDecoder.jnc:132、
+//   SerialMonSession.jnc:200、ui_LogRecordCodeFilterUi.jnc:33、ui_ToggleUi.jnc:48）
+//
+// jancy 里赋值是表达式，值是**存进去的那个值**（不是回头再读一次）。落法与第一百一十三刀装箱
+// 那几格助手同一个办法 —— 一格生成的函数：
+//
+//   (fn jnc$asgn$int ((p (ptr int)) (x int)) int (pstore (var p) (var x)) (ret (var x)))
+//
+// 于是 `(call jnc$asgn$int 地址 值)` 在表达式里就地成立，`expr` 这一层不用能挂语句。
+// 方言一个字没改。
+//
+// 界：左边只收**一格内存**（字段、指针指到的那一格、被取过地址的局部量）。SSA 里的局部量
+// 没有地址，助手写不进去 —— 语料里 14 处逐处看过，一处都不是那种（见 bad/asgnexpr-local）。
+//
+// 尺子 `/tmp/c113.c` 里写的就是同一个 `asgn_i` 助手，而且刻意**没有**把两个带副作用的东西
+// 放进同一个 printf 的实参表 —— C 里实参的求值顺序是 unspecified，那样的对照物自己就不可靠。
+
+struct P { int m_value; }
+
+class C {
+	int m_currentIndex;
+
+	// `ui_ComboBox.jnc:74` 那一处的形状
+	int setIt(int v) {
+		return m_currentIndex = v + 1;
+	}
+}
+
+int main() {
+	C c;
+	int r = c.setIt(4);
+	printf("%d %d\n", r, c.m_currentIndex);
+
+	// 链式：右边那一句的值喂给左边那一句（`Df1Layer.jnc:182` 那一处的形状）
+	P* p = new P;
+	P* q = new P;
+	p.m_value = q.m_value = 9;
+	printf("%d %d\n", p.m_value, q.m_value);
+
+	// 指针指到的那一格
+	int x = 0;
+	int* xp = &x;
+	int r2 = *xp = 5;
+	printf("%d %d\n", r2, x);
+
+	// 隐式收窄照赋值那一条走：存进去的是 44，整条表达式的值也是 44
+	char cc = 0;
+	char* cp = &cc;
+	int r3 = *cp = 300;
+	printf("%d %d\n", r3, cc);
+	return 0;
+}

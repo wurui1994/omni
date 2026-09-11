@@ -3139,6 +3139,58 @@ class JncLower {
   }
 
   /**
+   * 赋值当**表达式**（第一百一十四刀）：`return m_currentIndex = insertItem(…)`。
+   * jancy 里赋值是表达式（值就是**存进去的那个值**，不是回头再读一次），这一层的赋值只在语句
+   * 位置成立。落法与装箱那几格助手同一个办法 —— 一格生成的函数：
+   *
+   *   (fn jnc$asgn$int ((p (ptr int)) (x int)) int (pstore (var p) (var x)) (ret (var x)))
+   *
+   * 于是 `(call jnc$asgn$int 地址 值)` 在表达式里就地成立，`expr` 这一层不用能挂语句。
+   *
+   * 左边**只收一格内存**（lvalue 的 `ptr`）：字段、指针指到的那一格、被取过地址的局部量、
+   * 模块级变量。SSA 里的局部量（`var`）不行 —— 那一格没有地址，助手写不进去。语料里 14 处
+   * 逐处看过，左边全是字段路径或指针（`m_currentIndex`、`m_p.m_value`、`p = p0 = next`），
+   * 一处都不是 SSA 局部量，所以这条界不挡任何真写法。
+   */
+  asgnExpr(n) {
+    const op = isStr(n.items[1]) ? n.items[1].value : null;
+    if (op !== '=') return this.nope(n, `表达式里的复合赋值 '${op}'`);
+    /* 花括号初值、属性、事件、索引属性那几条在语句那一侧是**分岔出去**的（curlyEmit /
+       propSet / mcAssign）—— 表达式位置上还不收：它们要发的是一次调用或一串写，
+       而"整条表达式的值"在那几种上说不清是哪一个。 */
+    if (isList(n.items[3]) && head(n.items[3]) === 'curly') {
+      return this.nope(n, '表达式里右边是一对花括号的赋值');
+    }
+    const lv = this.lvalue(n.items[2]);
+    if (lv === null) return null;
+    if (lv.kind !== 'ptr') {
+      return this.nope(n, `表达式里给这一格赋值（左边要是一格**内存** —— 字段、指针指到的那一格、`
+        + `被取过地址的局部量；这里是 ${lv.kind === 'agg' ? '一整格结构体或数组' : (lv.kind === 'bits' ? '一格位域' : 'SSA 里的一格局部量')}）`);
+    }
+    let v = this.expr(n.items[3], lv.type);
+    if (v === null) return null;
+    // 与语句那一侧一字不差：整数之间是隐式收窄，别的要同型。
+    if (isInt(lv.type) && isInt(v.type)) v = intConv(v, lv.type);
+    if (!this.assignOk(v.type, lv.type)) {
+      return this.err(n, `赋值两边不同型：左是 ${tyName(lv.type)}，右是 ${tyName(v.type)}`);
+    }
+    return { code: `(call ${this.asgnFn(lv.type)} ${lv.code} ${v.code})`, type: lv.type };
+  }
+
+  /** 上面那一格助手，按方言类型一格（`int` 那一格四种位宽共用 —— 存进去的位一样）。 */
+  asgnFn(t) {
+    const ty = tyText(t);
+    const key = ty.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    const name = `jnc$asgn$${key}`;
+    if (this.varFns.has(name)) return name;
+    this.decls.push(`  (fn ${name} ((p (ptr ${ty})) (x ${ty})) ${ty}\n`
+      + '    (pstore (var p) (var x))\n'
+      + '    (ret (var x)))');
+    this.varFns.add(name);
+    return name;
+  }
+
+  /**
    * 模块级变量（第十一刀）。降成方言的 `(global 名字 类型)` 加 `(main …)` 开头的一句赋值。
    *
    * 存储类照 decl_storage.rst：**不写就是 static**（"If storage specifier is omitted, then
@@ -9248,6 +9300,9 @@ class JncLower {
       }
       case 'addr':
         return this.addrOf(n);
+      // 赋值当表达式（第一百一十四刀）：`return m_currentIndex = insertItem(…)`。
+      case 'assign':
+        return this.asgnExpr(n);
       case 'pre-inc': case 'post-inc': case 'pre-dec': case 'post-dec':
         return this.nope(n, `表达式里的 ${h}（方言里它是语句；单独写成一行就行）`);
       default:
