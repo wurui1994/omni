@@ -1,0 +1,15 @@
+// 第一百二十三刀的界：一条 `typedef` 里**既有泛型的名字又有别的名字**。
+// `typedef Impl<T, T> Pair<T>, Plain;` —— 前一格要按签名单态化（一个签名一份），后一格是
+// 一条普通别名（就此坐下）。两件事要在同一条语句上分头做，而"那个 `T` 归谁"没有唯一答案。
+// 语料里 10 处泛型 typedef 全是一条一个名字，所以这条界不挡任何真写法。
+struct Impl<A, B> {
+	A m_a;
+	B m_b;
+}
+
+typedef Impl<T, T> Pair<T>, Plain;
+
+int main() {
+	Pair<int>* p = new Pair<int>;
+	return 0;
+}

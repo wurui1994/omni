@@ -1,0 +1,53 @@
+// 第一百二十三刀：泛型的 **typedef**（`typedef Impl<T, T> Pair<T>;`）。语料里 10 处，
+// 三份文件（stdt_Iterator 4、stdt_Map 4、stdt_BoxList 2），全是同一个用法 ——
+// "给一长串实例化起个短名字"：
+//
+//   typedef IteratorImpl<IteratorBase<T*>, IteratorBase<T*> > Iterator<T>;   （stdt_Iterator.jnc:72）
+//
+// 记账与泛型的**类**是同一套（`templates` 那张表、按签名 memoise、工作队列跑到不动点），
+// 只有实例化那一步不同：合成出来的是**一条 typedef**，没有体、也不用 aggHoist。名字那一格
+// 换成实例名，specs / ptrs / suffixes 替换完照抄 —— specs 里那一串 `Impl<int,int>` 由
+// `tinstRewrite` 接着解，所以"泛型 typedef 指向另一格泛型"是自然跑通的（下面 Quad 那一格）。
+//
+// 排在哪一遍不用另想：合成的这一条落进名单之后，`run()` 里 typedef 那一遍（typeName 之后、
+// typeDecl 之前）照常收它 —— 与第一百二十刀那格"给指针起名字"的 typedef 同一个位置。
+//
+// 尺子 `/tmp/c121.c`：手抄单态化之后那几个 C 结构体 —— C 那边 typedef 起的也是别名，
+// 所以两侧的形状是一对一的。同一串数（3 4 / 65 66 / 1 2 / 3）。
+
+struct Impl<A, B> {
+	A m_a;
+	B m_b;
+	A geta() { return m_a; }
+}
+
+struct Two<X, Y> {
+	X m_x;
+	Y m_y;
+}
+
+typedef Impl<T, T> Pair<T>;
+
+// 泛型 typedef 指向另一格泛型 typedef —— stdt_Iterator 里 AutoConstIterator<T> 就是这个形状
+typedef Two<Pair<T>, Pair<T> > Quad<T>;
+
+int main() {
+	Pair<int>* p = new Pair<int>;
+	p.m_a = 3;
+	p.m_b = 4;
+	printf("%d %d\n", p.m_a, p.m_b);
+
+	Pair<char>* q = new Pair<char>;
+	q.m_a = 65;
+	q.m_b = 66;
+	printf("%d %d\n", q.m_a, q.m_b);
+
+	Quad<int>* z = new Quad<int>;
+	z.m_x.m_a = 1;
+	z.m_y.m_b = 2;
+	printf("%d %d\n", z.m_x.m_a, z.m_y.m_b);
+
+	// 别名后面那一格的方法照旧（提到顶层那一步是**类**那一侧做的，typedef 只是个名字）
+	printf("%d\n", p.geta());
+	return 0;
+}

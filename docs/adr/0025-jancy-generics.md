@@ -570,4 +570,46 @@ map 边填边长（后一格默认值可以引前一格），补出来的那一�
 
 五刀（118–122）的曲线：+16 / +1 / +13 / −6 / 0。
 
+## S5 的第五格落了（第一百二十三刀）：泛型的 **typedef** —— 第一份文件**整份降下来了**
+
+语料里 10 处，三份文件（stdt_Iterator 4、stdt_Map 4、stdt_BoxList 2），全是同一个用法：
+"给一长串实例化起个短名字"——
+
+```
+typedef IteratorImpl<IteratorBase<T*>, IteratorBase<T*> > Iterator<T>;   （stdt_Iterator.jnc:72）
+```
+
+记账与泛型的**类**是同一套（`templates` 那张表、按签名 memoise、工作队列跑到不动点）；
+只有实例化那一步不同：合成出来的是**一条 typedef**，没有体、也不用 aggHoist。名字那一格换成
+实例名，`specs` / `ptrs` / `suffixes` 替换完照抄 —— `specs` 里那一串 `Impl<int,int>` 由
+`tinstRewrite` 接着解，所以"泛型 typedef 指向另一格泛型 typedef"（`AutoConstIterator<T>`
+那个形状）是自然跑通的，一个字都没为它写。
+
+排在哪一遍也不用另想：合成的这一条落进名单之后，`run()` 里 typedef 那一遍照常收它 ——
+与第一百二十刀那格"给指针起名字"的 typedef 同一个位置。**同一个位置连着接住了两刀合成出来的
+东西**，这是"排班排对了"的证据。
+
+界 `bad/generic-tdefmix`：一条 `typedef` 里既有泛型的名字又有别的名字（`Pair<T>, Plain`）——
+前一格要按签名单态化、后一格就此坐下，"那个 `T` 归谁"没有唯一答案。语料里 10 处全是一条
+一个名字，这条界不挡任何真写法。
+
+### 账：lowered **83 → 84**、clean **151 → 154**、pairs **7580 → 7563（−17）**
+
+**`stdt_Iterator.jnc` 整份降下来了**（5 条 → **0**）—— 这一族六刀以来第一次有语料文件走到零。
+逐份：`BoxList` 6→2、`List` 6→2、`Map` 8→5、`test157` 8→7，`BinTree` / `RbTree` / `Operator` /
+`Array` / `HashTable` 没动。
+
+为什么这一刀的收成比前几刀大得多：前五刀拆的是**一格一格的形状**，而这一刀拆的是
+`stdt` 那一族**互相引用的那张网**上的一个结 —— `Iterator<T>` 这个短名字是别的文件引进来用的
+入口，它一通，跟着它的那几条也就通了。判一刀的量级要看它在依赖图上的**位置**，不只看
+它挡住几处写法。
+
+### 还剩的
+
+- `stdt_Operator.jnc` 只剩一条：`static size_t operator () (string_t key)` —— **运算符重载**，
+  不是泛型这一族的。
+- `BinTree` / `RbTree` 各剩 11 / 12 条，最靠前的是 `结构体里除字段以外的成员`
+  （`typedef P EntryPtr;` 写在结构体里）与 `这种类型说明符`。
+- 参数当基类；非类型参数；函数模板的实参推导；S4（报错落到实例化那一处的实参上）。
+
 

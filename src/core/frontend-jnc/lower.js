@@ -2742,14 +2742,28 @@ class JncLower {
     for (const e of items) {
       const it = unattr(e.it);
       const ag = isList(it) && head(it) === 'type-decl' ? it.items[1] : null;
-      const nm = isList(ag) && head(ag) === 'agg' ? ag.items[2] : null;
+      let nm = isList(ag) && head(ag) === 'agg' ? ag.items[2] : null;
+      /* 泛型的 **typedef**（第一百二十三刀）：`typedef IteratorImpl<…> Iterator<T>;`
+         —— 名字那一格是声明符里的 `tinst`。语料里 10 处（stdt_Iterator 4、stdt_Map 4、
+         stdt_BoxList 2），全是"给一长串实例化起个短名字"。它与泛型的类走同一套记账，
+         只是实例化那一步合成出来的是一条 typedef 而不是一格 type-decl。 */
+      let td = null;
+      if (nm === null && isList(it) && head(it) === 'typedef') {
+        const ds = this.flat(it.items[2]);
+        const core = ds.length === 1 && isList(ds[0]) ? ds[0].items[2] : null;
+        if (isList(core) && head(core) === 'tinst') { nm = core; td = { it, dcl: ds[0] }; }
+        else if (ds.length > 1 && ds.some((d) => isList(d) && isList(d.items[2]) && head(d.items[2]) === 'tinst')) {
+          this.nope(it, '一条 typedef 里既有泛型的名字又有别的名字');
+          continue;
+        }
+      }
       if (nm === null || !isList(nm) || head(nm) !== 'tinst') { out.push(e); continue; }
       const full = this.tmplName(e.ns, nm.items[1]);
       if (full === null) continue;
       const ps = this.tmplParams(nm.items[2]);
       if (ps === null) continue;
       if (this.templates.has(full)) { this.err(nm, `泛型 '${shown(full)}' 声明了两次`); continue; }
-      this.templates.set(full, { full, ns: e.ns, params: ps, agg: ag });
+      this.templates.set(full, { full, ns: e.ns, params: ps, agg: ag, td });
     }
     // B：工作队列。`i` 之前的都扫过了，合成出来的追加在后面，于是循环自然跑到不动点。
     // `tdepth` 是这一条**属于第几层实例**（顶层名单是 0）—— 递归的闸门看的就是它，见 tinstOne。
@@ -2931,6 +2945,19 @@ class JncLower {
     // 参数名 -> 实参那格 type-spec
     const map = new Map();
     for (let i = 0; i < tm.params.length; i++) map.set(tm.params[i].name, specs[i]);
+    /* 泛型的 typedef（第一百二十三刀）：合成出来的是**一条 typedef**，不是一格 type-decl ——
+       所以没有体、也不用 aggHoist。名字那一格换成实例名，别的（specs / ptrs / suffixes）
+       替换完照抄；specs 里那一串 `IteratorImpl<…>` 由 tinstRewrite 接着解。 */
+    if (tm.td !== null && tm.td !== undefined) {
+      const sp1 = n.span;
+      const mk = (h, ...rest) => ({ kind: 'list', span: sp1, items: [{ kind: 'atom', value: h, span: sp1 }, ...rest] });
+      const d0 = tm.td.dcl;
+      const td = mk('typedef', this.tmplSubst(tm.td.it.items[1], map),
+        mk('dcls', mk('dcl', this.tmplSubst(d0.items[1], map), this.tmplNameNode(inst, sp1),
+          this.tmplSubst(d0.items[3], map), d0.items[4])));
+      out.push({ ns: '', done: true, it: this.tinstRewrite(td, tm.ns, out, depth + 1) });
+      return inst;
+    }
     const ag = this.tmplSubst(tm.agg, map);
     // 名字那一格换成实例名（`(tinst …)` -> `(name Box$int)`）
     const sp0 = ag.items[2].span;
