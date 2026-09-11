@@ -4259,8 +4259,30 @@ class JncLower {
       // `unsigned` 是**类型修饰符**（decl_advanced.rst:22），所以它落在这张表里而不是
       // 说明符那一格上。第三十三刀把它接了：位宽与符号性合起来才是一格整数类型。
       if (m === 'unsigned') { uns = true; continue; }
+      /* 第一百〇九刀：这一行诊断（`修饰符 '…'`）按真话拆开是 11 个词，只有下面这几个"收下
+       * 不看"**不可能给出错答案**，逐词的理由：
+       *
+       *   - `cdecl` / `stdcall` / `thiscall` —— 调用约定。方言今天的目标是 arm64 与
+       *     x86-64 SysV，这三者在那上面**本来就是同一套 ABI**（stdcall/thiscall 只在 32 位
+       *     x86 上与 cdecl 不同）。所以忽略它不是"少做一件事"，是"这件事在这些目标上不存在"。
+       *     **代价明写**：哪天真加 32 位 x86 Windows 目标，这三个词要原样拿回来落成真的约定；
+       *   - `safe` —— 这一层默认就是安全的那一档（转 thin 指针要写 `unsafe { … }`，见第几刀
+       *     那条 `bad/thin-outside-unsafe`），写出来与不写是同一件事；
+       *   - `unsafe`（写在声明上的那种，不是 `unsafe { … }` 语句块）—— 忽略它只会让体里那些
+       *     真需要 unsafe 的写法**照旧被拒**，也就是拒得更严，放不过错的东西；
+       *   - `mutable` —— 它是 `const` 那一位的反面，而默认就是可写的（MUT_MODS 那一族里
+       *     `const` / `readonly` 也是收下不看的），所以写出来与不写同一件事。
+       *
+       * 剩下那几个**刻意仍旧拦着**，理由各不相同，都记在 ADR-0016 那份候选清单里：
+       * `bigendian`（36 份 / 212 处，收下不看会把数读错 —— 真的错答案）、
+       * `async`（31 份，协程）、`disposable`（6 份，管的是**时机**，这一层没有 GC）、
+       * `weak`（4 份，没有 GC 就永远不会变 null，程序拿它当判据时行为不同）、
+       * `indexed`（1 份，属性带下标运算符，忽略了 `p[i]` 就接错人）。 */
+      if (m === 'cdecl' || m === 'stdcall' || m === 'thiscall') continue;
+      if (m === 'safe' || m === 'unsafe' || m === 'mutable') continue;
       this.nope(n, `修饰符 '${m}'`);
       return null;
+
     }
     const ts = n.items[1];
     /* `event m_e(int x);` 的说明符里**没有类型**（jnc.grammar:263 那条注）：多播的处理函数

@@ -1,0 +1,37 @@
+// 第一百〇九刀：`修饰符 '…'` 那一行里**收下不看不可能给错答案**的几个。
+//
+// 第一百〇八刀之后这一行涨到 78 份，按真话拆开是 11 个词。逐词判据（详表在 ADR-0016 的候选
+// 清单里）：收的是 `cdecl` / `stdcall` / `thiscall` / `safe` / `unsafe` / `mutable`，
+// 拦的仍旧是 `bigendian` 36 份 / 212 处（收下不看会把数读错 —— 真的错答案）、
+// `async` 31 份（协程）、`disposable` 6 份（管的是时机，这一层没有 GC）、
+// `weak` 4 份（没有 GC 就永远不会变 null，程序拿它当判据时行为不同）、
+// `indexed` 1 份（属性带下标运算符，忽略了 `p[i]` 就接错人）。
+//
+// 三个调用约定为什么是"不存在"而不是"少做"：方言今天的目标是 arm64 与 x86-64 SysV，
+// `stdcall` / `thiscall` 只在 **32 位 x86** 上才与 `cdecl` 不同。**代价明写**：哪天真加
+// 32 位 x86 Windows 目标，这三个词要原样拿回来落成真的约定。
+//
+// 期望输出的出处：/tmp/c109.c（`cc -O0 -std=c99 -Wall`）。
+
+int cdecl twice(int x) {
+	return x * 2;
+}
+
+int stdcall thrice(int x) {
+	return x * 3;
+}
+
+int safe four(int x) {
+	return x * 4;
+}
+
+struct S {
+	mutable int m_n;
+}
+
+int main() {
+	S s;
+	s.m_n = 5;
+	printf("%d %d %d %d\n", twice(21), thrice(2), four(2), s.m_n);
+	return 0;
+}
