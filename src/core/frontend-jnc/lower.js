@@ -1115,6 +1115,9 @@ class JncLower {
     this.templates = new Map();
     /** 已经合成过的实例名（按实参签名 memoise，与 jancy 的 `m_instanceMap` 同一个办法）。 */
     this.tmplInsts = new Set();
+    /* 实参带 `*` 时给那一格指针类型合成的 typedef 名（第一百二十刀）。替换只在 type-spec
+       那一层 —— 所以带 `*` 的实参先**起个名字**，再拿这个名字当一格普通类型名替进去。 */
+    this.tmplPtrs = new Set();
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
      * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
      * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
@@ -2783,22 +2786,39 @@ class JncLower {
     return out.length === 0 ? this.nope(targs, '泛型的参数表是空的') : out;
   }
 
-  /** 一格 `targ` 里那格 **type-spec**（ADR-0025 定的替换层次）。带 `*` 的当场拒。 */
+  /** 一格 `targ` 里那格 **type-spec**（ADR-0025 定的替换层次）。`*` 那一格由 tinstOne 接。 */
   tmplSpec(tn) {
     if (!isList(tn) || head(tn) !== 'type-name') return this.nope(tn, '认不出的泛型实参');
-    if (this.flat(tn.items[2]).length > 0) {
-      return this.nope(tn, '泛型的实参带 `*`（替换只在 type-spec 那一层做，见 ADR-0025）');
-    }
     const sp = tn.items[1];
     if (!isList(sp) || head(sp) !== 'specs') return this.nope(tn, '认不出的泛型实参');
     if (this.flat(sp.items[2]).length > 0 || this.flat(sp.items[3] ?? sp.items[2]).length > 0) {
       // specs 上带修饰符（const / bigendian …）的实参先不收：那几个词的意思要连着替换一起想
       return this.nope(tn, '泛型的实参上带修饰符');
     }
-    /* 实参本身是一格实例化（`Iterator<Node<int> >`）也从这儿原样回去 —— 那一格 `tinst`
+    /* 实参本身是一格实例化（`Iter<Node<int> >`）也从这儿原样回去 —— 那一格 `tinst`
        由 `tinstOne` **先解里层**（第一百一十九刀）。参数表那一侧不受影响：`tmplParams`
        接着就要求这一格是裸名字。 */
     return sp.items[1];
+  }
+
+  /** 一格 `(name X)`。 */
+  tmplNameNode(v, span) {
+    return { kind: 'list', span, items: [{ kind: 'atom', value: 'name', span }, { kind: 'atom', value: v, span }] };
+  }
+
+  /**
+   * 给带 `*` 的实参起名字那一条（第一百二十刀）：合成
+   * `typedef <spec><ptrs> <alias>;` —— 形状照解析出来的那一份抄
+   * （`(typedef (specs …) (dcls (dcl (ptrs…) (name …) (suffixes) (no-ctor))))`）。
+   * `specs` 上那两格修饰符表直接借实参那一处的（`tmplSpec` 已经查过它们是空的）。
+   */
+  tmplPtrDef(spec, tn, alias) {
+    const sp = tn.span;
+    const mk = (h, ...rest) => ({ kind: 'list', span: sp, items: [{ kind: 'atom', value: h, span: sp }, ...rest] });
+    const specs0 = tn.items[1];
+    const specs = mk('specs', spec, specs0.items[2], specs0.items[3] ?? specs0.items[2]);
+    const dcl = mk('dcl', tn.items[2], this.tmplNameNode(alias, sp), mk('suffixes'), mk('no-ctor'));
+    return mk('typedef', specs, mk('dcls', dcl));
   }
 
   /** 实参那格 type-spec 拼进实例名里的那一段。 */
@@ -2854,24 +2874,44 @@ class JncLower {
     }
     const tm = this.templates.get(full);
     const specs = [];
+    const keys = [];
     for (const t of this.flat(n.items[2])) {
       if (!isList(t) || head(t) !== 'targ') return null;
-      let sp = this.tmplSpec(t.items[1]);
+      const tn = t.items[1];
+      let sp = this.tmplSpec(tn);
       if (sp === null) return null;
+      let key;
       // 实参本身是一格实例化：先把里层造出来，再拿它的名字当一格普通类型名用
       if (isList(sp) && head(sp) === 'tinst') {
         const inner = this.tinstOne(sp, ns, out, depth + 1);
         if (inner === null) return null;
-        sp = { kind: 'list', span: sp.span, items: [{ kind: 'atom', value: 'name', span: sp.span }, { kind: 'atom', value: inner, span: sp.span }] };
+        key = inner.replace(/\$/g, '_');
+        sp = this.tmplNameNode(inner, sp.span);
+      } else {
+        key = this.tmplKey(sp);
+        if (key === null) return null;
+      }
+      /* 实参带 `*`（第一百二十刀）：替换只在 type-spec 那一层 —— 所以先给那一格指针类型
+         **起个名字**（合成一格 `typedef Bucket* jnc$tp$Bucket_p;`），再拿这个名字替进去。
+         语言里"给类型起名字"本来就是 typedef 那一格，不用新造机制；合成的那一条排在名单里，
+         `run()` 的 typedef 那一遍（排在 typeName 之后、typeDecl 之前）照常收它。 */
+      const np = isList(tn) ? this.flat(tn.items[2]).length : 0;
+      if (np > 0) {
+        key = `${key}${'_p'.repeat(np)}`;
+        const alias = `jnc$tp$${key}`;
+        if (!this.tmplPtrs.has(alias)) {
+          this.tmplPtrs.add(alias);
+          out.push({ ns: '', done: true, it: this.tmplPtrDef(sp, tn, alias) });
+        }
+        sp = this.tmplNameNode(alias, tn.span);
       }
       specs.push(sp);
+      keys.push(key);
     }
     if (specs.length !== tm.params.length) {
       this.err(n, `泛型 '${shown(full)}' 要 ${tm.params.length} 个实参，这里给了 ${specs.length} 个`);
       return null;
     }
-    const keys = specs.map((s) => this.tmplKey(s));
-    if (keys.some((k) => k === null)) return null;
     const inst = `${full}$${keys.join('$')}`;
     if (this.tmplInsts.has(inst)) return inst;
     this.tmplInsts.add(inst);

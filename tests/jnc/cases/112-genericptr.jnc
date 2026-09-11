@@ -1,0 +1,43 @@
+// 第一百二十刀：泛型的实参**带 `*`**（语料里那一格是 `Array<Bucket*>`）。这一格原先是
+// `bad/generic-ptrarg` 钉着的界 —— 那份界随这一刀删了，写法搬到这儿接着验。
+//
+// 判据一个字没改（ADR-0025：替换只在 **type-spec 那一层**）。做法是绕开而不是破例：
+// 带 `*` 的实参先**起个名字** —— 合成一格 `typedef Bucket* jnc$tp$Bucket_p;` 追进名单，
+// 再拿这个名字当一格普通 type-spec 替进去。"给类型起名字"在语言里本来就是 typedef 那一格，
+// 一个新机制都不用造；合成的那一条由 `run()` 里 typedef 那一遍照常收（它排在 typeName 之后、
+// typeDecl 之前，正好赶上）。实例名于是是 `Box$Bucket_p`（每颗星记一个 `_p`）。
+//
+// 两颗星那一格（`Box<Bucket**>`）也在这儿 —— 只是别写成 `(*b2.m_v).m_n`：那一句在**不带泛型**
+// 的写法上也报"'->' 的目标不是结构体：B*"（`/tmp/g8.jnc` 单独验过），是这一层早就有的一格洞、
+// 与泛型无关。这儿先接到一格局部量上再取字段，绕开它。
+//
+// 尺子 `/tmp/c118.c`：手抄单态化之后那三个 C 结构体，同一串数（12 12 / 34 / 5）。
+
+struct Bucket {
+	int m_n;
+}
+
+struct Box<T> {
+	T m_v;
+	T get_v() { return m_v; }
+}
+
+int main() {
+	Box<Bucket*>* b = new Box<Bucket*>;
+	b.m_v = new Bucket;
+	b.m_v.m_n = 12;
+	printf("%d %d\n", b.m_v.m_n, b.get_v().m_n);
+
+	Box<Bucket**>* b2 = new Box<Bucket**>;
+	Bucket* one = new Bucket;
+	one.m_n = 34;
+	b2.m_v = &one;
+	Bucket* got = *b2.m_v;
+	printf("%d\n", got.m_n);
+
+	// 不带星那一格照旧（同一格泛型，两套实参各一份）
+	Box<int>* bi = new Box<int>;
+	bi.m_v = 5;
+	printf("%d\n", bi.get_v());
+	return 0;
+}
