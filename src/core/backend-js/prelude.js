@@ -245,6 +245,26 @@ function $pstore_p(a, p) {
   return p;
 }
 function $pstore_t(a, v) { $mdv.setBigInt64(a, BigInt(v), true); return v; }
+/* 引用语义的句柄落进那块 arena（ADR-0024）：这条腿的 (arr T) 是一个**普通 JS 数组**，
+   而 arena 是一块 ArrayBuffer —— 对象塞不进去。所以字段里存的是一格 **id**，对象挂在
+   $H 这张表上；id 0 是空句柄（$pnew 出来的那一格是零，读它报 "null reference"，
+   与 $anullck、与 C 那条腿的零指针是同一句话）。
+   同一个数组存两次会拿到两个 id，可它们指的是**同一个对象** —— 引用语义因此没变
+   （按值拷一份结构体之后两份共用同一条数组，正是靠这一点）。
+   代价写在明处：这张表**不会自己缩** —— 见 ADR-0024 与任务 #13。
+   （这段注释里一个反引号都不能有：整份 prelude 是 String.raw 的模板串。） */
+const $H = [null];
+function $hid(o) {
+  if (o === null || o === undefined) return 0;
+  $H.push(o);
+  return $H.length - 1;
+}
+function $pload_h(a) {
+  const id = Number($mdv.getBigInt64(a, true));
+  if (id === 0) $rt_error("null reference");
+  return $H[id];
+}
+function $pstore_h(a, o) { $mdv.setBigInt64(a, BigInt($hid(o)), true); return o; }
 
 /* 线性内存（ADR-0017 第二刀）。与上面那块 arena（$mem/$mtop，指针用的）是**两块**内存：
    arena 是"分配出来的块"，这一块是"一整片可寻址的字节"。名字全带 lin 前缀，别混。

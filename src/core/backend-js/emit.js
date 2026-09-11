@@ -36,10 +36,15 @@ const jsPtrChk = (self, p, size) => (p.type.k === 'tptr'
   ? `$tchk(${self.expr(p)})` : `$pchk(${self.expr(p)}, ${size})`);
 // 目标类型是**指针自己**时，读写的是三个字（fat）或一个字（thin）——
 // 见 prelude 的 $pload_p / $pload_t（ADR-0016 第十六刀）。
+// `arr` 那一格是**句柄**（ADR-0024）：arena 里存一格 id，对象在 $H 那张表上。
+// 这两条链的**最后一格是 bool**，所以每加一种"能落进内存"的类型都得在这儿加一支 ——
+// 忘了就会被默默当 bool 读写，那是个静默的错答案。
 const jsPtrLoad = (t) => (t.k === 'int' ? '$pload_i' : (t.k === 'real' ? '$pload_r'
-  : (t.k === 'ptr' ? '$pload_p' : (t.k === 'tptr' ? '$pload_t' : '$pload_b'))));
+  : (t.k === 'ptr' ? '$pload_p' : (t.k === 'tptr' ? '$pload_t'
+    : (t.k === 'arr' ? '$pload_h' : '$pload_b')))));
 const jsPtrStore = (t) => (t.k === 'int' ? '$pstore_i' : (t.k === 'real' ? '$pstore_r'
-  : (t.k === 'ptr' ? '$pstore_p' : (t.k === 'tptr' ? '$pstore_t' : '$pstore_b'))));
+  : (t.k === 'ptr' ? '$pstore_p' : (t.k === 'tptr' ? '$pstore_t'
+    : (t.k === 'arr' ? '$pstore_h' : '$pstore_b')))));
 
 
 class JsEmitter {

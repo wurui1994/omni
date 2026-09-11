@@ -1,6 +1,6 @@
 # ADR-0024：引用语义的句柄能不能放进一格结构体字段
 
-- 状态：**已量清，还没落**（这一份是设计，不是记录）
+- 状态：**S1 + S2 已落**（判据 1/2/3 五条腿全绿），S3/S4/S5 还没落
 - 起因：jancy 前端第八十二刀之后，尺子上排在前面的两条账都堵在同一堵墙上
 - 相关：ADR-0014（方言与四个后端）、ADR-0016（jancy 前端，第五十五 / 五十七 / 七十三 / 七十四刀）
 
@@ -96,14 +96,38 @@ JS 与两个解释器过不去的原因很具体：**一个 JS 数组塞不进 A
 
 ## 分步
 
-- **S1**：`sizeOf`/`alignOf` 给 `arr` 定成 8/8，只放开 C / LLVM / MIR 三条腿，JS 与两个
-  解释器**当场报"这条腿还放不下"**（不是默默当 bool —— 那是现在最危险的一格：
-  `backend-js/emit.js:39-42` 的默认分支）。这一步就能让判据 1 在三条腿上先绿。
-- **S2**：句柄表落到 `interp/builtin.js`（两个解释器共用）与 `backend-js/prelude.js`，
-  判据 1/2/3 五条腿全绿。
+- **S1**（已落）：`sizeOf`/`alignOf` 给 `arr` 定成 8/8（`hir/types.js`）。C / LLVM / MIR
+  三条腿**一个字都没改** —— 与上面量出来的一致：`omni_arr_i64` 本来就是指针的 typedef、
+  LLVM 那边 `T_ARR -> ptr`、MIR 的 `PLOAD`/`PSTORE` 本来就带类型与字节数。
+- **S2**（已落）：句柄表落到 `interp/builtin.js`（两个解释器共用，`handles`/`handleId`）
+  与 `backend-js/prelude.js`（`$H`/`$hid`/`$pload_h`/`$pstore_h`）。
 - **S3**：jnc 那边把"类里的事件"接上（第七十四刀留的账），判据 4。
 - **S4**：`bindable` 的成员属性（尺子上那 104 对）跟着 S3 一起过。
 - **S5**：`reactor` 才有前提（那是自己一刀，不在这一份里）。
+
+### S1/S2 落下来时踩到的两格「静默的默认」
+
+两处都是"链式三元表达式的最后一格是 bool"，加一种能落进内存的类型时**忘了加一支就会被
+默默当 bool 读写**。这不是这一刀引进的，是这一刀撞上的 —— 记在这儿，下次加类型先看这两处：
+
+1. `backend-js/emit.js` 的 `jsPtrLoad` / `jsPtrStore`：`int / real / ptr / tptr` 之后
+   直接 `'$pload_b'`。
+2. `mir/interp.js` 的 `memKind`：同样的形状，最后一格 `'bool'`。量出来的症状不是红，是
+   **宿主的 TypeError**（`arrLen` 拿到 `undefined`，`Cannot convert undefined to a BigInt`）——
+   一句用户看不懂、也不指向真问题的话。
+
+第三处顺手确认了不用改：`hir/types.js` 的 `ptrTargetOk` 仍然拒 `(ptr (arr T))`
+（`types.js:98-101`）—— 那是"指向句柄自己"，与"句柄当字段"是两件事（见「不做的」）。
+
+### S1/S2 的验收（都跑过了）
+
+- `tests/sexpr/cases/39-handle-field.sx` + `rt/handle-null.sx`：**五条腿**逐字节相同
+  （`OMNI_LEGS=all node tests/sexpr/run.js` -> 85/0）。判据 1、2、3 全在这两份里：
+  存取、按字段拷一份之后两份共用同一条数组（`5 7 9 1 2 11 1`）、空句柄五条腿同一句
+  `null reference`。
+- 改的是汇聚层（`hir/types.js`），所以按 ADR-0023 那条规矩跑了 `all`：
+  **17/17 个套件通过，252.9s**（跳过 1 条：输入没变）。
+- 判据 5（那张表不许成为静默的泄漏）：**还没做** —— 现在它只涨不缩，账记在这儿与任务 #13。
 
 ## 不做的
 

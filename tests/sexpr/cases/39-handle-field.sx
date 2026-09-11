@@ -1,0 +1,40 @@
+;; 39 —— 引用语义的句柄当结构体字段（ADR-0024 的 S1/S2）
+;;
+;; 这一份是那一刀的**本体判据**：四条腿对 `(arr T)` 的表示各不相同 ——
+;;   C     `omni_arr_i64` 是个指针的 typedef（runtime/omni.h:322-344）
+;;   LLVM  `ptr`（backend-llvm/emit.js:56-58）
+;;   JS 与两个解释器  一个**普通 JS 数组**，而那块 arena 是 ArrayBuffer，对象塞不进去，
+;;         所以存的是一格 id、对象挂在旁边那张表上（$H / handles）
+;; —— 逐字节相同才说明"句柄"这个概念在四条腿上是同一个东西。
+;;
+;; 钉三件事：
+;;   1. 字段能存能取：pstore 一格 anew 进去，pload 出来 apush / aget / alen 都对
+;;   2. **引用语义**：把那格结构体按字段拷一份，两份共用同一条数组 —— 改一份另一份看得见
+;;      （backend-llvm/emit.js:1616-1618 那段注释早就承诺了这条行为，这里把它写成测试）
+;;   3. 一格结构体里能有两条数组，各自独立
+(module
+  (struct Box (n int) (xs (arr int)) (ys (arr int)))
+
+  (main
+    (let b (ptr Box) (pnew (ptr Box) (int 1)))
+    (pstore (pfield (var b) n) (int 5))
+    (pstore (pfield (var b) xs) (anew (arr int) (int 0)))
+    (pstore (pfield (var b) ys) (anew (arr int) (int 0)))
+    (apush (pload (pfield (var b) xs)) (int 7))
+    (apush (pload (pfield (var b) ys)) (int 9))
+    (print (pload (pfield (var b) n)))
+    (print (aget (pload (pfield (var b) xs)) (int 0)))
+    (print (aget (pload (pfield (var b) ys)) (int 0)))
+    (print (alen (pload (pfield (var b) xs))))
+
+    ;; 2. 按字段拷一份 —— 拷的是**句柄**，所以两份共用同一条数组
+    (let c (ptr Box) (pnew (ptr Box) (int 1)))
+    (pstore (pfield (var c) n) (pload (pfield (var b) n)))
+    (pstore (pfield (var c) xs) (pload (pfield (var b) xs)))
+    (pstore (pfield (var c) ys) (pload (pfield (var b) ys)))
+    (apush (pload (pfield (var c) xs)) (int 11))
+    ;; b 那一边看得见（长度 2、第二格是 11）
+    (print (alen (pload (pfield (var b) xs))))
+    (print (aget (pload (pfield (var b) xs)) (int 1)))
+    ;; 而 ys 没被动过
+    (print (alen (pload (pfield (var b) ys))))))

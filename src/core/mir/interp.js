@@ -37,7 +37,7 @@ import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
-  T_VOID, T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32,
+  T_VOID, T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32, T_ARR,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
   CVT_I2F, CVT_F2I, CVT_F2U, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
   fnPtrNo,
@@ -166,6 +166,10 @@ function memKind(t) {
   if (t === T_F64) return 'real';
   if (t === T_PTR) return 'ptr';
   if (t === T_TPTR) return 'tptr';
+  // 引用语义的句柄（ADR-0024）：内存里存的是一格 id，对象在 builtin 那张表上。
+  // 这一支忘了加就会落到下面那个 bool 上 —— 那是个静默的错答案（量过：那时 arrLen 拿到的
+  // 是 undefined，报出来的是宿主的 TypeError，不是 "null reference"）。
+  if (t === T_ARR) return 'arr';
   return 'bool';
 }
 

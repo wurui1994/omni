@@ -136,6 +136,8 @@ export function alignOf(t) {
     for (const f of t.fields) a = Math.max(a, alignOf(f.type));
     return a;
   }
+  // 引用语义的句柄（ADR-0024）：一个字，按字对齐 —— 理由见 sizeOf 那处那段。
+  if (t.k === 'arr') return 8;
   return 0;   // 不可落地的类型：调用方要先问 ptrTargetOk / layoutOk
 }
 
@@ -155,6 +157,13 @@ export function sizeOf(t) {
     const l = structLayout(t);
     return l === null ? 0 : l.size;
   }
+  /* 引用语义的句柄能当字段（ADR-0024）：`(arr T)` 存的是**句柄本身**，不是元素 ——
+     C 侧 `omni_arr_i64` 就是个指针的 typedef（runtime/omni.h:322-344）、LLVM 侧是 `ptr`、
+     MIR 里 T_ARR 的注释也写着"一个指针"。JS 与两个解释器那边 arena 是一块 ArrayBuffer，
+     对象塞不进去，所以存的是一格 id、对象挂在旁边那张表上（$H / handles）。
+     一个字，所以是 8。这一格**只给 arr** —— string / buf / fn / class 各有各的账，
+     一次只放一格（理由见 ADR-0024 的「不做的」）。 */
+  if (t.k === 'arr') return 8;
   return 0;
 }
 

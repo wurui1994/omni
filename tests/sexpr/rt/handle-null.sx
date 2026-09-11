@@ -1,0 +1,10 @@
+;; 一格从没存过东西的数组字段（ADR-0024 的判据 3）。
+;;
+;; `pnew` 出来的那一块是**零**，所以那一格字段里是"空句柄"。读它必须报与 `arrNullck`
+;; 同一句话（C 那条腿是 omni_err_null，runtime/omni.h:356；JS 与两个解释器那边是句柄表里的
+;; id 0）—— 五条腿一模一样，不然"句柄"这个概念在四条腿上就不是同一个东西。
+(module
+  (struct Box (xs (arr int)))
+  (main
+    (let b (ptr Box) (pnew (ptr Box) (int 1)))
+    (print (alen (pload (pfield (var b) xs))))))

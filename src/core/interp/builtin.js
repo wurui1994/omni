@@ -433,6 +433,17 @@ export function ptrTChk(a) {
 
 // kind 是**目标类型**的 k。指针自己也能当目标（ADR-0016 第十六刀）：fat 是三个字
 // {addr, base, end}、thin 是一个字，次序与 hir/types.js 那段注释里定的一样。
+/* 引用语义的句柄落进那块内存（ADR-0024）：这条腿的 `(arr T)` 是一个**普通 JS 数组**，
+   而 arena 是一块 ArrayBuffer —— 对象塞不进去。所以字段里存的是一格 **id**，对象挂在
+   下面这张表上；id 0 是空句柄（`pnew` 出来的那一格是零，读它报 `null reference`，
+   与 arrNullck 那一句、与 C 那条腿的零指针是同一句话）。
+   代价写在明处：这张表**不会自己缩** —— 见 ADR-0024 的「代价说清」与任务 #13。 */
+const handles = [null];
+function handleId(o) {
+  if (o === null || o === undefined) return 0;
+  handles.push(o);
+  return handles.length - 1;
+}
 export function ptrLoad(kind, a) {
   if (kind === 'int') return ptrDv.getBigInt64(a, true);
   if (kind === 'real') return ptrDv.getFloat64(a, true);
@@ -441,6 +452,11 @@ export function ptrLoad(kind, a) {
       Number(ptrDv.getBigInt64(a + 16, true))];
   }
   if (kind === 'tptr') return Number(ptrDv.getBigInt64(a, true));
+  if (kind === 'arr') {
+    const id = Number(ptrDv.getBigInt64(a, true));
+    if (id === 0) rtError('null reference');
+    return handles[id];
+  }
   return ptrDv.getUint8(a) !== 0;
 }
 
@@ -452,6 +468,7 @@ export function ptrStore(kind, a, v) {
     ptrDv.setBigInt64(a + 8, BigInt(v[1]), true);
     ptrDv.setBigInt64(a + 16, BigInt(v[2]), true);
   } else if (kind === 'tptr') ptrDv.setBigInt64(a, BigInt(v), true);
+  else if (kind === 'arr') ptrDv.setBigInt64(a, BigInt(handleId(v)), true);
   else ptrDv.setUint8(a, v ? 1 : 0);
   return v;
 }
