@@ -122,6 +122,11 @@
 //   - 二进制字面量 `0x"61 62"`、`__FILE__` 那族预定义宏、多行字面量、正则 switch。
 //     **相邻字面量的拼接**（`"a" "b"`）是第五十四刀（见 litFold）、**格式化字面量**
 //     `$"…"` 是第六十四刀（见 fmtLit）；混着拼（`"a" $"b"`）与 `$!` 还不收。
+//   - **形参的默认值**第七十七刀收了（见 withDefaults）：签名上记住那几个默认值的语法节点，
+//     调用点少给的那几格换成它们、走与写出来的实参同一条路。两条界：只收**末尾**那几个
+//     （jancy 还允许 `f(1,,3)` 那种空槽，我们的语法没有它），以及默认值的**形状**限死在
+//     字面量 / `true` / `false` / `null` / 限定写法的枚举成员与它们的运算上 —— 因为我们在
+//     调用点按调用点的作用域降它，而 jancy 按声明处的命名空间（ParseContext.cpp:32-38）。
 //   - union / property / reactor / 事件 / 多播 / 协程。`enum` 是第三十九刀、`class` 是第
 //     五十二刀、`construct` 与 `static construct` 是第五十三刀、**单继承**是第五十六刀
 //     （一条链在方言里共用一格 `(struct …)`，见 classLayout）、**虚派发**是第五十七刀
@@ -193,6 +198,19 @@ import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { OmniError } from '../source/diag.js';
 
 const JNC_NOPE = 'jancy 前端第一刀还不收';
+
+/**
+ * 一格签名：`{params, ret, defs}`（第七十七刀）。
+ *
+ * `defs` 是每一格形参的**默认值节点**（没写就是 null），一个都没有时整格是 null ——
+ * 绝大多数函数没有默认值，那时这一格连数组都不建。它与 `params` 一样长，所以方法上
+ * 第 0 格是 `this`（永远没有默认值）。
+ */
+function sigOf(ps, ret) {
+  const defs = ps.map((p) => p.def ?? null);
+  return { params: ps.map((p) => p.type), ret, defs: defs.some((d) => d !== null) ? defs : null };
+}
+
 
 /* ---------------------------------------------------------------- 类型
  * 这一层的类型就是核心方言那几个，外加"这是个指针"。刻意不建自己的一套类型系统：
@@ -3475,8 +3493,9 @@ class JncLower {
     return this.resolve(left, (k) => this.classes.has(k));
   }
 
-  /** 形参表 -> `{name, type, formals}` 一串（抽出来是因为方法**原型**也要问它：
-   *  `abstract void foo(int x);` 永远没有体，签名只能从原型上来，第五十七刀）。 */
+  /** 形参表 -> `{name, type, formals, def}` 一串（抽出来是因为方法**原型**也要问它：
+   *  `abstract void foo(int x);` 永远没有体，签名只能从原型上来，第五十七刀）。
+   *  `def` 是形参的默认值那一格的**语法节点**（第七十七刀），没写就是 null。 */
   formalList(formalsNode) {
     const ps = [];
     for (const f of this.flat(formalsNode)) {
@@ -3484,7 +3503,13 @@ class JncLower {
       if (fh === 'formals-varargs') return this.nope(f, '可变形参');
       if (fh === 'formal-anon') return this.nope(f, '无名形参');
       if (fh !== 'formal') return this.nope(f, `形参 '${fh}'`);
-      if (f.items[3] !== undefined) return this.nope(f, '形参的默认值');
+      const defNode = f.items[3] === undefined ? null : f.items[3];
+      /* 默认值只许挂在**末尾那几个**上（C++ 那条同样的规矩）：中间那格空着的话调用点
+         没法说"这一个用默认、后面那个我给"—— jancy 没有具名实参。 */
+      if (defNode === null && ps.length > 0 && ps[ps.length - 1].def !== null) {
+        return this.err(f, `形参 '${ps[ps.length - 1].name}' 有默认值，它后面这一个没有 ——`
+          + ' 默认值只能挂在末尾那几个上（没有具名实参，中间空一格调用点说不清）');
+      }
       const fsp = this.specs(f.items[1]);
       if (fsp === null) return null;
       // 形参上的 `property`（第七十刀）：那是一格**属性指针**（`int property* p`，
@@ -3509,9 +3534,52 @@ class JncLower {
         return this.err(f, `形参 '${fi.name}' 的类型是类（jancy 那句 "function cannot accept `
           + `'${tyName(fi.type)}' as an argument"）—— 类只能经引用传，写成 '${shown(fi.type.name)}*'`);
       }
-      ps.push(fi);
+      ps.push({ ...fi, def: defNode });
     }
     return ps;
+  }
+
+  /**
+   * 调用点补默认值（第七十七刀）：末尾少给的那几格换成声明里那几个默认值的**语法节点**，
+   * 于是它们与写出来的实参走同一条路（同一份类型检查、同一句诊断）。
+   *
+   * 补的位置是**调用点**，和 C++ / jancy 同一头。这带来一个真问题：默认值里如果写了名字，
+   * 查的是**调用点**的作用域，而不是声明那里的 —— 名字撞上调用方的局部量就会静静地取错。
+   * 所以这一层给默认值划一条窄界（defShapeOk）：字面量、`true`/`false`/`null`、枚举成员，
+   * 以及它们的一元/二元运算。语料量出来的形状正好在这条界里（null 124、0 114、1 59、
+   * false 39、-1 33、true 31、0x01/0x02 那些、以及 `State.Opened` 那种枚举成员）。
+   * 别的（调用、全局量、`sizeof`、字符串拼接…）当场说"还不收"，不猜。
+   */
+  withDefaults(args, want, defs) {
+    if (defs === null || args.length >= want.length) return args;
+    const out = args.slice();
+    for (let i = args.length; i < want.length; i++) {
+      const d = defs[i];
+      if (d === null) break;              // 中间那格没有默认值：个数照旧对不上，由调用方报
+      if (!this.defShapeOk(d)) {
+        return this.nope(d, '这个形状的默认值（默认值是在调用点算的，所以只收字面量、'
+          + '`true`/`false`/`null`、枚举成员，与它们的运算）');
+      }
+      out.push(d);
+    }
+    return out;
+  }
+
+  /** 默认值里允许的形状。`(field (name E) A)` 只在 E 真是个枚举时算数 —— 同一个形状也可能是
+   *  `obj.field`，那一格取的是调用方的局部量，正是这条界要拦的东西。 */
+  defShapeOk(n) {
+    if (!isList(n)) return true;                       // 字面量（数、字符）就是一格原子
+    if (isStr(n)) return true;
+    const h = head(n);
+    if (h === 'true' || h === 'false' || h === 'null') return true;
+    if (h === 'field') {
+      const base = n.items[1];
+      if (!isList(base) || head(base) !== 'name' || !isAtom(base.items[1])) return false;
+      return this.resolve(base.items[1].value, (k) => this.enums.has(k)) !== null;
+    }
+    // 一元 / 二元：第一格是运算符（一份字符串），后面才是操作数
+    if (h === 'unary' || h === 'binary') return n.items.slice(2).every((x) => this.defShapeOk(x));
+    return false;
   }
 
   /**
@@ -3834,7 +3902,7 @@ class JncLower {
     // 属性是一层命名空间（第七十一刀，prop_full.rst:15）：记下"这个函数属于哪格属性"，
     // 体降下来时靠它把 `this.ns` 挪进去 —— autoget 生成的 `m_value` 就那样查得着。
     this.propOf.set(full, pn);
-    this.fns.set(full, { params: ps.map((p) => p.type), ret });
+    this.fns.set(full, sigOf(ps, ret));
     return { info, ps, isMain: false };
   }
 
@@ -3912,11 +3980,15 @@ class JncLower {
         if (ps.length > 0) return this.err(n, "'static construct' 不带形参");
         this.sctors.set(owner, full);
       } else {
-        ps.unshift({ name: 'this', type: tClass(owner, false), formals: null });
+        ps.unshift({ name: 'this', type: tClass(owner, false), formals: null, def: null });
         this.methods.set(full, owner);
-        this.ctors.set(owner, { name: full, params: ps.slice(1).map((p) => p.type) });
+        this.ctors.set(owner, {
+          name: full,
+          params: ps.slice(1).map((p) => p.type),
+          defs: sigOf(ps.slice(1), J_VOID).defs,
+        });
       }
-      this.fns.set(full, { params: ps.map((p) => p.type), ret: J_VOID });
+      this.fns.set(full, sigOf(ps, J_VOID));
       return { info, ps, isMain: false };
     }
     // `int main()` 是入口：降成方言的 `(main …)`。jancy 的 main 回 int，而方言的入口
@@ -3960,7 +4032,7 @@ class JncLower {
       } else if (sp.virt !== null) {
         return this.err(n, `'${sp.virt}' 只能写在类的方法上（type_class.rst:178）`);
       }
-      this.fns.set(info.name, { params: ps.map((p) => p.type), ret: info.type });
+      this.fns.set(info.name, sigOf(ps, info.type));
       // errorcode（第五十八刀）：出错值由返回类型定，见 errcReg。
       if (sp.errc && this.errcReg(n, info.name, info.type) === null) return null;
     }
@@ -3983,18 +4055,21 @@ class JncLower {
    * 构造实参那一串（第五十三刀）：`C1 a(100)` / `new C1(100)` / `C1 a construct(100)`
    * 三处共用。检查与普通调用同一条规矩（个数、整数隐式转、类型对得上）。
    */
-  ctorArgs(node, cls, argNodes) {
+  ctorArgs(node, cls, argNodes0) {
     const ct = this.ctors.get(cls);
     if (ct === undefined) {
-      if (argNodes.length > 0) {
+      if (argNodes0.length > 0) {
         return this.err(node, `${shown(cls)} 没有 construct，后面挂不了构造实参`);
       }
       return null;                     // 没有构造：什么都不用调
     }
     const want = ct.params;
+    const argNodes = this.withDefaults(argNodes0, want,
+      ct.defs === undefined ? null : ct.defs);
+    if (argNodes === null) return null;
     if (argNodes.length !== want.length) {
       return this.err(node, `${shown(cls)} 的 construct 要 ${want.length} 个实参，`
-        + `这里给了 ${argNodes.length} 个`);
+        + `这里给了 ${argNodes0.length} 个`);
     }
     const vals = [];
     for (let i = 0; i < argNodes.length; i++) {
@@ -7403,10 +7478,16 @@ class JncLower {
       self = '(var $this)';
     }
     const sig = this.fns.get(nm);
-    const args = this.flat(n.items[2]);
+    const args0 = this.flat(n.items[2]);
     const want = self === null ? sig.params : sig.params.slice(1);
+    const defs = sig.defs === undefined || sig.defs === null ? null
+      : (self === null ? sig.defs : sig.defs.slice(1));
+    const args = this.withDefaults(args0, want, defs);
+    if (args === null) return null;
     if (args.length !== want.length) {
-      return this.err(n, `'${nm0 === null ? shown(nm) : nm0}' 要 ${want.length} 个实参，这里给了 ${args.length} 个`);
+      return this.err(n, `'${nm0 === null ? shown(nm) : nm0}' 要 ${want.length} 个实参`
+        + `${defs === null ? '' : `（末尾 ${defs.filter((d) => d !== null).length} 个有默认值）`}`
+        + `，这里给了 ${args0.length} 个`);
     }
     const parts = self === null ? [] : [self];
     for (let i = 0; i < args.length; i++) {

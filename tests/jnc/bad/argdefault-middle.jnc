@@ -1,0 +1,15 @@
+// 默认值只能挂在**末尾那几个**形参上（第七十七刀的第二条界）。
+//
+// jancy 比这宽：它允许中间那格空着调（`f(1,,3)`），空槽也拿默认值 ——
+// `castArgValueList` 的第一个循环就是干这个的（`OperatorMgr_Call.cpp:418-435`，
+// 缺默认值时报 "argument (%d) of '%s' has no default value"）。
+// 这一层没有那种空槽写法，所以"中间一格有默认值"根本没法用上：调用点说不出
+// "这一个用默认、后面那个我给"。于是这里当场拒，而不是收下一个用不着的东西。
+int f(int a = 1, int b) {
+	return a + b;
+}
+
+int main() {
+	printf("%d\n", f(1, 2));
+	return 0;
+}

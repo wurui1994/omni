@@ -1,0 +1,22 @@
+// 默认值的**形状**这一层划了一条窄界（第七十七刀）。jancy 那边没有这条界：默认值是一串
+// 没编译的记号（`FunctionArg` 的 `ModuleItemInitializer`，jnc_ct_FunctionArg.h:23-35），
+// 补的时候现编一遍（`OperatorMgr_Call.cpp:413-476` -> `OperatorMgr_New.cpp:329-362`），
+// 里头写调用、写全局量都行。
+//
+// 而它现编的那一遍**名字查的是那个形参声明所在的命名空间**（`ParseContext.cpp:32-38`：
+// 表达式那一档只保留调用方的 Scope，命名空间换成声明处的）。这一层的默认值是在调用点
+// 按调用点的作用域降的 —— 于是"名字"这一类只要撞上调用方的局部量就会静静地取错。
+// 所以这里只收算得清的那几种：字面量、`true`/`false`/`null`、**限定写法**的枚举成员
+// （`Color.Red`），以及它们的一元/二元运算。别的当场说"还不收"，不猜。
+int seed() {
+	return 7;
+}
+
+int f(int a, int b = seed()) {
+	return a + b;
+}
+
+int main() {
+	printf("%d\n", f(1));
+	return 0;
+}

@@ -1,0 +1,53 @@
+// 形参的默认值（第七十七刀）。出处：
+//   - 语法那一格是 `Declarator.llk:484-510` 里 `'=' expression_pass1`，收下来的东西存进
+//     `Declarator::m_initializer`（`Decl.h:344`，**一串没编译的记号**）；
+//   - 它跟着形参走：`createFormalArg` 把那串记号交给 `TypeMgr::createFunctionArg`
+//     （`Parser.cpp:2565-2574`、`TypeMgr.cpp:455-477`），`FunctionArg` 靠
+//     `ModuleItemInitializer` 存着（`jnc_ct_FunctionArg.h:23-35`）——
+//     所以 jancy 那边**没有**"默认值必须是编译期常量"这条要求；
+//   - 补的位置是**调用点**：`OperatorMgr::castArgValueList`（`OperatorMgr_Call.cpp:413-476`）
+//     在发那句 call 之前把缺的几格用 `parseFunctionArgDefaultValue` 现编出来
+//     （`OperatorMgr_New.cpp:329-362`），代码落在调用方的那个基本块里。
+//
+// 这一层收的是**末尾那几个**、而且默认值的形状限死在"字面量 / true / false / null /
+// 枚举成员 / 它们的运算"上 —— 理由与边界见 bad/argdefault-shape 与 bad/argdefault-middle。
+
+enum Color { Red, Green, Blue }
+
+int add(int a, int b = 1 << 3, Color c = Color.Blue, int d = -2) {
+	return a + b + (int)c + d;
+}
+
+// 默认值是**每次调用**现算的：这一格用它数一数到底算了几遍
+int g_calls;
+
+int bump() {
+	g_calls = g_calls + 1;
+	return g_calls;
+}
+
+class Box {
+	int m_w;
+	int m_h;
+
+	construct(int w, int h = 4) {
+		m_w = w;
+		m_h = h;
+	}
+
+	int area(int scale = 2) {
+		return m_w * m_h * scale;
+	}
+}
+
+int main() {
+	printf("%d %d %d\n", add(1), add(1, 2), add(1, 2, Color.Red, 0));
+	// 类那一头：construct 与方法上的默认值
+	Box* b = new Box(3);
+	printf("%d %d\n", b.area(), b.area(1));
+	Box* b2 = new Box(3, 10);
+	printf("%d\n", b2.area());
+	// 默认值不是"算一次存起来"：两次调用各算一遍（这里两次都不给实参）
+	printf("%d %d %d\n", add(bump()), add(bump()), g_calls);
+	return 0;
+}
