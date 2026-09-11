@@ -1,0 +1,18 @@
+// 第一百〇四刀留下的边界：路径**逐段解不开**的时候还是不收。这里 `m_list` 是一格字段、
+// 可是 `List` 里没有 `m_nope`，所以那一串取字段拼不出来 —— 报的是 alias 那条"目标收哪几种"，
+// 而不是"没有这个字段"（错的是 alias 这一行，不是哪一处用它的地方）。
+struct List {
+	int m_len;
+}
+
+class Map {
+	List m_list;
+
+	alias m_nope = m_list.m_nope;
+}
+
+int main() {
+	Map* m = new Map;
+	printf("%d\n", m.m_list.m_len);
+	return 0;
+}

@@ -1018,6 +1018,12 @@ class JncLower {
     this.protoDefs = new Map();
     /* 那些要等签名那一遍才办得了的 alias（第八十七刀）：目标是函数 / 方法的那些。 */
     this.aliasPend = [];
+    /* 目标是**字段路径**的 alias（第一百〇四刀）：`alias m_head = m_list.m_head;`
+       （stdt_Map.jnc:85）。别名全名 -> { path: ['m_list','m_head'], type }。
+       它落不成"一格既有的东西"（类型别名进 aliases、方法别名发转手函数），要的是查名那一步
+       多一层展开：`(pfield (pfield 基 m_list) m_head)`。展开点两处 —— 裸名字（selfPathLv）
+       与 `obj.别名`（memberOf）。 */
+    this.aliasPath = new Map();
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
      * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
      * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
@@ -1576,6 +1582,21 @@ class JncLower {
       ? this.selfProp.get(name) : name;
     const f = fs.find((x) => x.name === key);
     return f === undefined ? null : f;
+  }
+
+  /** 方法体里**裸写**一格字段路径别名（第一百〇四刀）：`m_head` -> `this.m_list.m_head`。
+   *  与 memberOf 那一处是同一张表、同一种叠法，只是基那一格是 `$this`。 */
+  selfPathLv(nm) {
+    if (this.selfClass === null) return null;
+    const ap = this.aliasPath.get(`${this.selfClass}$${nm}`);
+    if (ap === undefined) return null;
+    let code = '(var $this)';
+    for (const s of ap.path) code = `(pfield ${code} ${s})`;
+    return {
+      kind: jncIsStruct(ap.type) || isArr(ap.type) ? 'agg' : 'ptr',
+      code,
+      type: ap.type,
+    };
   }
 
   /* ---------------------------------------------------------- 取地址（第九刀）
@@ -2271,8 +2292,25 @@ class JncLower {
       if (cls !== null) { this.methods.set(full, cls); this.methodNames.add(name); }
       return;
     }
-    this.nope(d, `alias '${name}' 的目标 '${tgt}'（收的是一格类型名、一格函数、`
-      + '或者这个类里的一格方法 —— 字段路径的别名还不收）');
+    /* 目标是一格**字段路径**（第一百〇四刀）：`alias m_head = m_list.m_head;`。逐段在字段表里
+       解得开就记成一串取字段 —— `this.structs` 对类与结构体都有那张表，而类字段那一格里放的
+       也是地址，所以叠 `pfield` 时不用管中间那一格是类还是结构体。 */
+    if (cls !== null && tgt.includes('.')) {
+      const path = [];
+      let ty = { k: 'struct', name: cls };
+      let ok = true;
+      for (const s of tgt.split('.')) {
+        const on = ty !== null && (ty.k === 'struct' || ty.k === 'class') ? ty.name : null;
+        const fs = on === null ? undefined : this.structs.get(on);
+        const f = fs === undefined ? undefined : fs.find((x) => x.name === s);
+        if (f === undefined) { ok = false; break; }
+        path.push(s);
+        ty = f.type;
+      }
+      if (ok) { this.aliasPath.set(full, { path, type: ty }); return; }
+    }
+    this.nope(d, `alias '${name}' 的目标 '${tgt}'（收的是一格类型名、一格函数、这个类里的`
+      + '一格方法、或者这个类 / 结构体里逐段解得开的一串字段）');
   }
 
   /** 那些要等签名的 alias（第八十七刀）：排在签名那一遍之后。 */
@@ -6381,6 +6419,9 @@ class JncLower {
             type: f.type,
           };
         }
+        // 裸写一格字段路径别名（第一百〇四刀）
+        const apv = this.selfPathLv(nm);
+        if (apv !== null) return apv;
       }
       if (r === null) {
         // 属性不是一格内存（第六十九刀，与 memberOf 里那一条同一句）：`g_p++`、`&g_p` 落到
@@ -6502,6 +6543,18 @@ class JncLower {
     const fs = this.structs.get(structName);
     const f = fs === undefined ? undefined : fs.find((x) => x.name === nm);
     if (f === undefined) {
+      /* 字段路径的别名（第一百〇四刀）：`b.m_head` 里 m_head 是 `m_list.m_head` 的另一个名字
+         —— 叠成一串 pfield。查名这一步展开，之后读写与"真写出那一串"完全同一条路。 */
+      const ap = nm === null ? undefined : this.aliasPath.get(`${structName}$${nm}`);
+      if (ap !== undefined) {
+        let code = baseCode;
+        for (const s of ap.path) code = `(pfield ${code} ${s})`;
+        return {
+          kind: jncIsStruct(ap.type) || isArr(ap.type) ? 'agg' : 'ptr',
+          code,
+          type: ap.type,
+        };
+      }
       // 属性不是一格内存（第六十九刀）：`b.p++`、`&b.p` 这些"就地改/取地址"的写法会落到这儿。
       // 报"没有这个字段"是认错了人 —— 那个成员在，只是它那一格要走取/存两个函数。左边得是
       // **类**才问这一句：属性只长在类上，结构体那边同名的字段不存在时报的仍旧是"没有字段"。
@@ -8446,6 +8499,9 @@ class JncLower {
           // 那一条连基类链一起找，`this` 由 propGet 那一处补上。
           const pq = this.propBare(nm);
           if (pq !== null) return this.propGet(n, pq);
+          // 裸写一格字段路径别名（第一百〇四刀）：读那一侧（写那一侧在 nameLv）
+          const apr = this.selfPathLv(nm);
+          if (apr !== null) return this.load(n, apr);
           // 无名枚举漏出来的那些成员（第九十六刀）：`enum { A = 1 }` 之后裸写 `A`。
           const ex = this.exposedLit(nm);
           if (ex !== null) return ex;
