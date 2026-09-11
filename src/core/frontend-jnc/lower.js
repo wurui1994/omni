@@ -4691,8 +4691,14 @@ class JncLower {
    * 默认值"（语法里是一条空产生式，落成 `(unbound)`；语料里的写法见 ui_SocketUi.jnc:107）。
    * 落法与末尾那几格**完全一样**：把 `(unbound)` 换成那个形参的默认值节点，同一条界、
    * 同一句诊断。所以这一处先扫一遍空槽、再补末尾。
+   *
+   * **第一百〇五刀**：老那条界（defShapeOk）照旧一个字不动 —— 过得了它的仍旧原样搬过去。
+   * 过不了的再试一次"在**声明那一头**的作用域里当编译期整数折"（defConstNode）：折得动就把
+   * 那一格换成**一格字面量**。于是名字根本没进调用点，上面那条"名字撞上调用方局部量"的隐患
+   * 从源头没了 —— 换过去的是一个数，不是一个待查的名字。`defNs` 是那个函数全名去掉最后一段
+   * （`ui$ToolBar$addSpacing` -> `ui$ToolBar`），resolve 从那儿往外退，正是声明处的查名顺序。
    */
-  withDefaults(args, want, defs) {
+  withDefaults(args, want, defs, defNs = null) {
     const out = args.slice();
     for (let i = 0; i < out.length; i++) {
       if (!isList(out[i]) || head(out[i]) !== 'unbound') continue;
@@ -4700,24 +4706,57 @@ class JncLower {
       if (d === null) {
         return this.err(out[i], `第 ${i + 1} 个实参是空的，而它那个形参没有默认值`);
       }
-      if (!this.defShapeOk(d)) {
-        return this.nope(d, '这个形状的默认值（默认值是在调用点算的，所以只收字面量、'
-          + '`true`/`false`/`null`、枚举成员，与它们的运算）');
-      }
-      out[i] = d;
+      const v = this.defArg(d, defNs);
+      if (v === null) return null;
+      out[i] = v;
     }
     if (defs === null || out.length >= want.length) return out;
     for (let i = out.length; i < want.length; i++) {
       const d = defs[i];
       if (d === null) break;              // 中间那格没有默认值：个数照旧对不上，由调用方报
-      if (!this.defShapeOk(d)) {
-        return this.nope(d, '这个形状的默认值（默认值是在调用点算的，所以只收字面量、'
-          + '`true`/`false`/`null`、枚举成员，与它们的运算）');
-      }
-      out.push(d);
+      const v = this.defArg(d, defNs);
+      if (v === null) return null;
+      out.push(v);
     }
     return out;
   }
+
+  /** 一格默认值搬到调用点上：先过老那条界，再试折成字面量，都不成就是"还不收"。 */
+  defArg(d, defNs) {
+    if (this.defShapeOk(d)) return d;
+    const lit = this.defConstNode(d, defNs);
+    if (lit !== null) return lit;
+    return this.nope(d, '这个形状的默认值（默认值是在调用点算的，所以只收字面量、'
+      + '`true`/`false`/`null`、枚举成员、在声明那一头算得出来的编译期整数，与它们的运算）');
+  }
+
+  /**
+   * 把一格默认值当**编译期整数**折（第一百〇五刀），折得动就造一格字面量节点顶上去。
+   *
+   * 折是在 `defNs`（声明那一头）里做的 —— 语料里最多的一种就是这个：
+   * `void addSpacing(int size = Def_Spacing);`（ui_ToolBar.jnc:45，`Def_Spacing` 是
+   * `opaque class ToolBar` 里那格**无名枚举**的成员，第九十六刀漏到类那一层），
+   * 调用它的插件在别的命名空间里，按调用点查名一定查不着。
+   *
+   * 只走 constInt 这一条路 —— 它认字面量、字符字面量（第九十七刀）、枚举成员、无名枚举漏出来
+   * 的那些（第九十六刀）以及它们的一元 / 二元运算，都是**真的编译期常量**，折出来一个数。
+   * 折不动就返回 null，交回上面那句"还不收"。
+   */
+  defConstNode(d, defNs) {
+    const save = this.ns;
+    if (defNs !== null) this.ns = defNs;
+    const k = this.constInt(d);
+    this.ns = save;
+    if (k === null) return null;
+    const sp = d.span;
+    const at = (v) => ({ kind: 'atom', value: v, span: sp });
+    const lit = at(String(k < 0n ? -k : k));
+    // 负数：字面量本身只收非负那一串（numLit 的 `^[0-9]+$`），减号照 jancy 一样在字面量之外
+    return k < 0n
+      ? { kind: 'list', span: sp, items: [at('unary'), { kind: 'string', value: '-', span: sp }, lit] }
+      : lit;
+  }
+
 
   /** 默认值里允许的形状。`(field (name E) A)` 只在 E 真是个枚举时算数 —— 同一个形状也可能是
    *  `obj.field`，那一格取的是调用方的局部量，正是这条界要拦的东西。 */
@@ -5460,7 +5499,7 @@ class JncLower {
     }
     const want = ct.params;
     const argNodes = this.withDefaults(argNodes0, want,
-      ct.defs === undefined ? null : ct.defs);
+      ct.defs === undefined ? null : ct.defs, cls);
     if (argNodes === null) return null;
     if (argNodes.length !== want.length) {
       return this.err(node, `${shown(cls)} 的 construct 要 ${want.length} 个实参，`
@@ -9083,7 +9122,9 @@ class JncLower {
     const want = self === null ? sig.params : sig.params.slice(1);
     const defs = sig.defs === undefined || sig.defs === null ? null
       : (self === null ? sig.defs : sig.defs.slice(1));
-    const args = this.withDefaults(args0, want, defs);
+    // 默认值在**声明那一头**的作用域里折（第一百〇五刀）：全名去掉最后一段就是那一头
+    const cut = nm.lastIndexOf('$');
+    const args = this.withDefaults(args0, want, defs, cut < 0 ? '' : nm.slice(0, cut));
     if (args === null) return null;
     if (args.length !== want.length) {
       return this.err(n, `'${nm0 === null ? shown(nm) : nm0}' 要 ${want.length} 个实参`
