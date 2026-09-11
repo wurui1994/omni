@@ -1,4 +1,4 @@
-grammar jnc: 178 terminals, 57 nonterminals, 358 rules, 649 states
+grammar jnc: 180 terminals, 57 nonterminals, 360 rules, 651 states
   r0  unit -> <empty>
   r1  unit -> unit decl
   r2  decl -> "import" LITERAL
@@ -48,317 +48,321 @@ grammar jnc: 178 terminals, 57 nonterminals, 358 rules, 649 states
   r46  modifier -> "const"
   r47  modifier -> "readonly"
   r48  modifier -> "cmut"
-  r49  modifier -> "volatile"
-  r50  modifier -> "weak"
-  r51  modifier -> "thin"
-  r52  modifier -> "unsigned"
-  r53  modifier -> "bigendian"
-  r54  modifier -> "safe"
-  r55  modifier -> "unsafe"
-  r56  modifier -> "errorcode"
-  r57  modifier -> "cdecl"
-  r58  modifier -> "stdcall"
-  r59  modifier -> "jnccall"
-  r60  modifier -> "thiscall"
-  r61  modifier -> "property"
-  r62  modifier -> "bindable"
-  r63  modifier -> "autoget"
-  r64  modifier -> "indexed"
-  r65  modifier -> "multicast"
-  r66  modifier -> "event"
-  r67  modifier -> "reactor"
-  r68  modifier -> "async"
-  r69  modifier -> "public"
-  r70  modifier -> "protected"
-  r71  modifier -> "alias"
-  r72  modifier -> "dyfield"
-  r73  modifier -> "setas"
-  r74  modifier -> "function"
-  r75  modifier -> "array"
-  r76  type-spec -> "void"
-  r77  type-spec -> "bool"
-  r78  type-spec -> "int"
-  r79  type-spec -> "intptr"
-  r80  type-spec -> "char"
-  r81  type-spec -> "short"
-  r82  type-spec -> "long"
-  r83  type-spec -> "float"
-  r84  type-spec -> "double"
-  r85  type-spec -> "anydata"
-  r86  type-spec -> "class"   [prefer -1]
-  r87  type-spec -> "property" "{" unit "}"
-  r88  type-spec -> qname
-  r89  type-spec -> anon-type
-  r90  type-spec -> "typeof" "(" type-or-expr ")"
-  r91  named-type -> agg-key qname base-list "{" unit "}"
-  r92  named-type -> enum-key qname enum-base "{" enum-body "}"
-  r93  anon-type -> agg-key base-list "{" unit "}"
-  r94  anon-type -> enum-key enum-base "{" enum-body "}"
-  r95  agg-key -> "struct"
-  r96  agg-key -> "union"
-  r97  agg-key -> "class"
-  r98  agg-key -> "opaque class"
-  r99  enum-key -> "enum"
-  r100  enum-key -> "bitflag enum"
-  r101  base-list -> <empty>
-  r102  base-list -> ":" qname-list
-  r103  enum-base -> <empty>
-  r104  enum-base -> ":" specs
-  r105  qname-list -> qname
-  r106  qname-list -> qname-list "," qname
-  r107  enum-body -> <empty>
-  r108  enum-body -> enum-items
-  r109  enum-body -> enum-items ","
-  r110  enum-items -> enum-item
-  r111  enum-items -> enum-items "," enum-item
-  r112  enum-item -> ID
-  r113  enum-item -> ID "=" expr
-  r114  enum-item -> attr-block enum-item
-  r115  qname -> ID
-  r116  qname -> qname "." ID
-  r117  dcl-list -> init-dcl
-  r118  dcl-list -> dcl-list "," init-dcl
-  r119  init-dcl -> dcl
-  r120  init-dcl -> dcl "=" initializer
-  r121  init-dcl -> dcl REFASSIGN initializer
-  r122  dcl -> ptrs dcl-core suffixes ctor
-  r123  ptrs -> <empty>
-  r124  ptrs -> ptrs ptr-group
-  r125  ptr-group -> "*" mods
-  r126  ctor -> <empty>
-  r127  ctor -> "construct" "(" opt-args ")"
-  r128  ctor -> "(" expr ")"   [prefer -1]
-  r129  ctor -> "(" opt-arg-list "," opt-arg ")"   [prefer -1]
-  r130  dcl-core -> qname
-  r131  dcl-core -> special
-  r132  dcl-core -> qname "." special
-  r133  special-dcl -> ptrs special suffixes
-  r134  special-dcl -> ptrs qname "." special suffixes
-  r135  special -> "get"
-  r136  special -> "set"
-  r137  special -> "construct"
-  r138  special -> "destruct"
-  r139  special -> "static construct"
-  r140  special -> "operator" op-name
-  r141  special -> "postfix operator" op-name
-  r142  op-name -> "+"
-  r143  op-name -> "-"
-  r144  op-name -> "*"
-  r145  op-name -> "/"
-  r146  op-name -> "%"
-  r147  op-name -> "^"
-  r148  op-name -> "&"
-  r149  op-name -> "|"
-  r150  op-name -> "~"
-  r151  op-name -> "!"
-  r152  op-name -> "<"
-  r153  op-name -> ">"
-  r154  op-name -> "@"
-  r155  op-name -> EQ
-  r156  op-name -> NE
-  r157  op-name -> LE
-  r158  op-name -> GE
-  r159  op-name -> SHL
-  r160  op-name -> SHR
-  r161  op-name -> LOGAND
-  r162  op-name -> LOGOR
-  r163  op-name -> INC
-  r164  op-name -> DEC
-  r165  op-name -> "="
-  r166  op-name -> PTR
-  r167  op-name -> ADDASSIGN
-  r168  op-name -> SUBASSIGN
-  r169  op-name -> MULASSIGN
-  r170  op-name -> DIVASSIGN
-  r171  op-name -> MODASSIGN
-  r172  op-name -> SHLASSIGN
-  r173  op-name -> SHRASSIGN
-  r174  op-name -> ANDASSIGN
-  r175  op-name -> XORASSIGN
-  r176  op-name -> ORASSIGN
-  r177  op-name -> ATASSIGN
-  r178  op-name -> REFASSIGN
-  r179  op-name -> "(" ")"
-  r180  op-name -> "[" "]"
-  r181  op-name -> specs ptrs
-  r182  suffixes -> <empty>
-  r183  suffixes -> suffixes suffix
-  r184  suffix -> "(" formals ")"
-  r185  suffix -> "[" expr-or-empty "]"
-  r186  suffix -> "const"
-  r187  suffix -> ":" INTEGER   [prefer -1]
-  r188  formals -> <empty>
-  r189  formals -> formal-list
-  r190  formals -> ELLIPSIS
-  r191  formals -> formal-list "," ELLIPSIS
-  r192  formal-list -> formal
-  r193  formal-list -> formal-list "," formal
-  r194  formal -> specs dcl
-  r195  formal -> specs dcl "=" expr
-  r196  formal -> specs ptrs
-  r197  type-name -> specs ptrs
-  r198  type-name -> specs ptrs "(" formals ")"
-  r199  type-or-expr -> type-name   [prefer -1]
-  r200  type-or-expr -> expr
-  r201  initializer -> expr
-  r202  curly -> "{" curly-items "}"
-  r203  curly-items -> curly-list
-  r204  curly-list -> curly-item
-  r205  curly-list -> curly-list "," curly-item
-  r206  curly-item -> <empty>
-  r207  curly-item -> ID "=" initializer   [prefer 1]
-  r208  curly-item -> ID "=" curly   [prefer 1]
-  r209  curly-item -> "[" expr "]" "=" initializer   [prefer 1]
-  r210  curly-item -> curly
-  r211  curly-item -> initializer
-  r212  compound -> "{" unit "}"
-  r213  stmt -> ";"
-  r214  stmt -> compound
-  r215  stmt -> expr ";"
-  r216  stmt -> expr "." "construct" "(" opt-args ")"   [prefer -1]
-  r217  stmt -> "if" "(" expr ")" decl
-  r218  stmt -> "if" "(" expr ")" decl "else" decl
-  r219  stmt -> "while" "(" expr ")" decl
-  r220  stmt -> "do" decl "while" "(" expr ")" ";"
-  r221  stmt -> "for" "(" for-init ";" expr-or-empty ";" for-step ")" decl
-  r222  stmt -> "switch" "(" expr-list ")" "{" unit "}"
-  r223  stmt -> "case" expr ":"
-  r224  stmt -> "default" ":"
-  r225  stmt -> "break" ";"
-  r226  stmt -> "break2" ";"
-  r227  stmt -> "break3" ";"
-  r228  stmt -> "continue" ";"
-  r229  stmt -> "continue2" ";"
-  r230  stmt -> "continue3" ";"
-  r231  stmt -> "return" ";"
-  r232  stmt -> "return" expr ";"
-  r233  stmt -> "throw" ";"
-  r234  stmt -> "throw" expr ";"
-  r235  stmt -> "once" stmt
-  r236  stmt -> "try" compound
-  r237  stmt -> "unsafe" compound
-  r238  stmt -> "nestedscope" ":"
-  r239  stmt -> "catch" ":"
-  r240  stmt -> "finally" ":"
-  r241  stmt -> "assert" "(" expr ")"
-  r242  stmt -> "assert" "(" expr "," expr ")"
-  r243  stmt -> "dylayout" "(" expr ")" compound
-  r244  stmt -> "dyfield" "{" unit "}"   [prefer 1]
-  r245  stmt -> "dyfield" ID "{" unit "}"   [prefer 1]
-  r246  stmt -> "onevent" event-name "(" formals ")" compound
-  r247  event-name -> expr
-  r248  event-name -> "(" expr-list ")"   [prefer 1]
-  r249  for-init -> <empty>
-  r250  for-init -> expr-list
-  r251  for-init -> specs dcl-list   [prefer 1]
-  r252  for-step -> <empty>
-  r253  for-step -> expr-list
-  r254  decl -> stmt
-  r255  expr-or-empty -> <empty>
-  r256  expr-or-empty -> expr
-  r257  expr-list -> expr
-  r258  expr-list -> expr-list "," expr
-  r259  opt-args -> <empty>
-  r260  opt-args -> expr
-  r261  opt-args -> opt-arg-list "," opt-arg
-  r262  opt-arg-list -> opt-arg
-  r263  opt-arg-list -> opt-arg-list "," opt-arg
-  r264  opt-arg -> <empty>
-  r265  opt-arg -> expr
-  r266  member -> ID
-  r267  member -> "get"
-  r268  member -> "set"
-  r269  member -> "construct"
-  r270  member -> "destruct"
-  r271  expr -> expr LOGOR expr
-  r272  expr -> expr LOGAND expr
-  r273  expr -> expr "|" expr
-  r274  expr -> expr "^" expr
-  r275  expr -> expr "&" expr
-  r276  expr -> expr EQ expr
-  r277  expr -> expr NE expr
-  r278  expr -> expr MATCH expr
-  r279  expr -> expr NOTMATCH expr
-  r280  expr -> expr "<" expr
-  r281  expr -> expr ">" expr
-  r282  expr -> expr LE expr
-  r283  expr -> expr GE expr
-  r284  expr -> expr SHL expr
-  r285  expr -> expr SHR expr
-  r286  expr -> expr "+" expr
-  r287  expr -> expr "-" expr
-  r288  expr -> expr "*" expr
-  r289  expr -> expr "/" expr
-  r290  expr -> expr "%" expr
-  r291  expr -> expr "@" expr
-  r292  expr -> expr "?" expr ":" expr
-  r293  expr -> expr "=" expr
-  r294  expr -> expr "=" curly
-  r295  expr -> expr REFASSIGN expr
-  r296  expr -> expr ADDASSIGN expr
-  r297  expr -> expr SUBASSIGN expr
-  r298  expr -> expr MULASSIGN expr
-  r299  expr -> expr DIVASSIGN expr
-  r300  expr -> expr MODASSIGN expr
-  r301  expr -> expr SHLASSIGN expr
-  r302  expr -> expr SHRASSIGN expr
-  r303  expr -> expr ANDASSIGN expr
-  r304  expr -> expr XORASSIGN expr
-  r305  expr -> expr ORASSIGN expr
-  r306  expr -> expr ATASSIGN expr
-  r307  expr -> "+" expr
-  r308  expr -> "-" expr
-  r309  expr -> "~" expr
-  r310  expr -> "!" expr
-  r311  expr -> "&" expr
-  r312  expr -> "*" expr
-  r313  expr -> INC expr
-  r314  expr -> DEC expr
-  r315  expr -> "await" expr
-  r316  expr -> "try" expr
-  r317  expr -> "new" type-name
-  r318  expr -> "new" type-name "(" opt-args ")"   [prefer 1]
-  r319  expr -> "new" type-name "construct" "(" opt-args ")"
-  r320  expr -> "new" type-name "[" expr "]"
-  r321  expr -> "new" type-name curly
-  r322  expr -> "(" type-name ")" expr   [prefer 1]
-  r323  expr -> "dynamic" "(" type-name ")" expr
-  r324  expr -> expr "(" opt-args ")"
-  r325  expr -> expr "~" "(" opt-args ")"
-  r326  expr -> expr "[" expr-or-empty "]"
-  r327  expr -> expr INC
-  r328  expr -> expr DEC
-  r329  expr -> expr "." member
-  r330  expr -> expr PTR member
-  r331  expr -> "(" expr ")"
-  r332  expr -> ID
-  r333  expr -> "this"
-  r334  expr -> "basetype"
-  r335  expr -> "basetype1"
-  r336  expr -> "basetype2"
-  r337  expr -> INTEGER
-  r338  expr -> FP
-  r339  expr -> literal
-  r340  expr -> CAPTURE
-  r341  expr -> "true"
-  r342  expr -> "false"
-  r343  expr -> "null"
-  r344  expr -> "sizeof" "(" type-or-expr ")"
-  r345  expr -> "countof" "(" type-or-expr ")"
-  r346  expr -> "typeof" "(" type-or-expr ")"
-  r347  expr -> "declof" "(" type-or-expr ")"
-  r348  expr -> "offsetof" "(" expr ")"
-  r349  expr -> "bindingof" "(" expr ")"
-  r350  expr -> "dynamic sizeof" "(" expr ")"
-  r351  expr -> "dynamic countof" "(" expr ")"
-  r352  expr -> "dynamic typeof" "(" expr ")"
-  r353  expr -> "dynamic offsetof" "(" expr ")"
-  r354  literal -> LITERAL
-  r355  literal -> FMT_LITERAL
-  r356  literal -> literal LITERAL
-  r357  literal -> literal FMT_LITERAL
-  r358  $accept -> unit
+  r49  modifier -> "autoconst"
+  r50  modifier -> "constif"
+  r51  modifier -> "volatile"
+  r52  modifier -> "weak"
+  r53  modifier -> "thin"
+  r54  modifier -> "unsigned"
+  r55  modifier -> "bigendian"
+  r56  modifier -> "safe"
+  r57  modifier -> "unsafe"
+  r58  modifier -> "errorcode"
+  r59  modifier -> "cdecl"
+  r60  modifier -> "stdcall"
+  r61  modifier -> "jnccall"
+  r62  modifier -> "thiscall"
+  r63  modifier -> "property"
+  r64  modifier -> "bindable"
+  r65  modifier -> "autoget"
+  r66  modifier -> "indexed"
+  r67  modifier -> "multicast"
+  r68  modifier -> "event"
+  r69  modifier -> "reactor"
+  r70  modifier -> "async"
+  r71  modifier -> "public"
+  r72  modifier -> "protected"
+  r73  modifier -> "alias"
+  r74  modifier -> "dyfield"
+  r75  modifier -> "setas"
+  r76  modifier -> "function"
+  r77  modifier -> "array"
+  r78  type-spec -> "void"
+  r79  type-spec -> "bool"
+  r80  type-spec -> "int"
+  r81  type-spec -> "intptr"
+  r82  type-spec -> "char"
+  r83  type-spec -> "short"
+  r84  type-spec -> "long"
+  r85  type-spec -> "float"
+  r86  type-spec -> "double"
+  r87  type-spec -> "anydata"
+  r88  type-spec -> "class"   [prefer -1]
+  r89  type-spec -> "property" "{" unit "}"
+  r90  type-spec -> qname
+  r91  type-spec -> anon-type
+  r92  type-spec -> "typeof" "(" type-or-expr ")"
+  r93  named-type -> agg-key qname base-list "{" unit "}"
+  r94  named-type -> enum-key qname enum-base "{" enum-body "}"
+  r95  anon-type -> agg-key base-list "{" unit "}"
+  r96  anon-type -> enum-key enum-base "{" enum-body "}"
+  r97  agg-key -> "struct"
+  r98  agg-key -> "union"
+  r99  agg-key -> "class"
+  r100  agg-key -> "opaque class"
+  r101  enum-key -> "enum"
+  r102  enum-key -> "bitflag enum"
+  r103  base-list -> <empty>
+  r104  base-list -> ":" qname-list
+  r105  enum-base -> <empty>
+  r106  enum-base -> ":" specs
+  r107  qname-list -> qname
+  r108  qname-list -> qname-list "," qname
+  r109  enum-body -> <empty>
+  r110  enum-body -> enum-items
+  r111  enum-body -> enum-items ","
+  r112  enum-items -> enum-item
+  r113  enum-items -> enum-items "," enum-item
+  r114  enum-item -> ID
+  r115  enum-item -> ID "=" expr
+  r116  enum-item -> attr-block enum-item
+  r117  qname -> ID
+  r118  qname -> qname "." ID
+  r119  dcl-list -> init-dcl
+  r120  dcl-list -> dcl-list "," init-dcl
+  r121  init-dcl -> dcl
+  r122  init-dcl -> dcl "=" initializer
+  r123  init-dcl -> dcl REFASSIGN initializer
+  r124  dcl -> ptrs dcl-core suffixes ctor
+  r125  ptrs -> <empty>
+  r126  ptrs -> ptrs ptr-group
+  r127  ptr-group -> "*" mods
+  r128  ctor -> <empty>
+  r129  ctor -> "construct" "(" opt-args ")"
+  r130  ctor -> "(" expr ")"   [prefer -1]
+  r131  ctor -> "(" opt-arg-list "," opt-arg ")"   [prefer -1]
+  r132  dcl-core -> qname
+  r133  dcl-core -> special
+  r134  dcl-core -> qname "." special
+  r135  special-dcl -> ptrs special suffixes
+  r136  special-dcl -> ptrs qname "." special suffixes
+  r137  special -> "get"
+  r138  special -> "set"
+  r139  special -> "construct"
+  r140  special -> "destruct"
+  r141  special -> "static construct"
+  r142  special -> "operator" op-name
+  r143  special -> "postfix operator" op-name
+  r144  op-name -> "+"
+  r145  op-name -> "-"
+  r146  op-name -> "*"
+  r147  op-name -> "/"
+  r148  op-name -> "%"
+  r149  op-name -> "^"
+  r150  op-name -> "&"
+  r151  op-name -> "|"
+  r152  op-name -> "~"
+  r153  op-name -> "!"
+  r154  op-name -> "<"
+  r155  op-name -> ">"
+  r156  op-name -> "@"
+  r157  op-name -> EQ
+  r158  op-name -> NE
+  r159  op-name -> LE
+  r160  op-name -> GE
+  r161  op-name -> SHL
+  r162  op-name -> SHR
+  r163  op-name -> LOGAND
+  r164  op-name -> LOGOR
+  r165  op-name -> INC
+  r166  op-name -> DEC
+  r167  op-name -> "="
+  r168  op-name -> PTR
+  r169  op-name -> ADDASSIGN
+  r170  op-name -> SUBASSIGN
+  r171  op-name -> MULASSIGN
+  r172  op-name -> DIVASSIGN
+  r173  op-name -> MODASSIGN
+  r174  op-name -> SHLASSIGN
+  r175  op-name -> SHRASSIGN
+  r176  op-name -> ANDASSIGN
+  r177  op-name -> XORASSIGN
+  r178  op-name -> ORASSIGN
+  r179  op-name -> ATASSIGN
+  r180  op-name -> REFASSIGN
+  r181  op-name -> "(" ")"
+  r182  op-name -> "[" "]"
+  r183  op-name -> specs ptrs
+  r184  suffixes -> <empty>
+  r185  suffixes -> suffixes suffix
+  r186  suffix -> "(" formals ")"
+  r187  suffix -> "[" expr-or-empty "]"
+  r188  suffix -> "const"
+  r189  suffix -> ":" INTEGER   [prefer -1]
+  r190  formals -> <empty>
+  r191  formals -> formal-list
+  r192  formals -> ELLIPSIS
+  r193  formals -> formal-list "," ELLIPSIS
+  r194  formal-list -> formal
+  r195  formal-list -> formal-list "," formal
+  r196  formal -> specs dcl
+  r197  formal -> specs dcl "=" expr
+  r198  formal -> specs ptrs
+  r199  type-name -> specs ptrs
+  r200  type-name -> specs ptrs "(" formals ")"
+  r201  type-or-expr -> type-name   [prefer -1]
+  r202  type-or-expr -> expr
+  r203  initializer -> expr
+  r204  curly -> "{" curly-items "}"
+  r205  curly-items -> curly-list
+  r206  curly-list -> curly-item
+  r207  curly-list -> curly-list "," curly-item
+  r208  curly-item -> <empty>
+  r209  curly-item -> ID "=" initializer   [prefer 1]
+  r210  curly-item -> ID "=" curly   [prefer 1]
+  r211  curly-item -> "[" expr "]" "=" initializer   [prefer 1]
+  r212  curly-item -> curly
+  r213  curly-item -> initializer
+  r214  compound -> "{" unit "}"
+  r215  stmt -> ";"
+  r216  stmt -> compound
+  r217  stmt -> expr ";"
+  r218  stmt -> expr "." "construct" "(" opt-args ")"   [prefer -1]
+  r219  stmt -> "if" "(" expr ")" decl
+  r220  stmt -> "if" "(" expr ")" decl "else" decl
+  r221  stmt -> "while" "(" expr ")" decl
+  r222  stmt -> "do" decl "while" "(" expr ")" ";"
+  r223  stmt -> "for" "(" for-init ";" expr-or-empty ";" for-step ")" decl
+  r224  stmt -> "switch" "(" expr-list ")" "{" unit "}"
+  r225  stmt -> "case" expr ":"
+  r226  stmt -> "default" ":"
+  r227  stmt -> "break" ";"
+  r228  stmt -> "break2" ";"
+  r229  stmt -> "break3" ";"
+  r230  stmt -> "continue" ";"
+  r231  stmt -> "continue2" ";"
+  r232  stmt -> "continue3" ";"
+  r233  stmt -> "return" ";"
+  r234  stmt -> "return" expr ";"
+  r235  stmt -> "throw" ";"
+  r236  stmt -> "throw" expr ";"
+  r237  stmt -> "once" stmt
+  r238  stmt -> "try" compound
+  r239  stmt -> "unsafe" compound
+  r240  stmt -> "nestedscope" ":"
+  r241  stmt -> "catch" ":"
+  r242  stmt -> "finally" ":"
+  r243  stmt -> "assert" "(" expr ")"
+  r244  stmt -> "assert" "(" expr "," expr ")"
+  r245  stmt -> "dylayout" "(" expr ")" compound
+  r246  stmt -> "dyfield" "{" unit "}"   [prefer 1]
+  r247  stmt -> "dyfield" ID "{" unit "}"   [prefer 1]
+  r248  stmt -> "onevent" event-name "(" formals ")" compound
+  r249  event-name -> expr
+  r250  event-name -> "(" expr-list ")"   [prefer 1]
+  r251  for-init -> <empty>
+  r252  for-init -> expr-list
+  r253  for-init -> specs dcl-list   [prefer 1]
+  r254  for-step -> <empty>
+  r255  for-step -> expr-list
+  r256  decl -> stmt
+  r257  expr-or-empty -> <empty>
+  r258  expr-or-empty -> expr
+  r259  expr-list -> expr
+  r260  expr-list -> expr-list "," expr
+  r261  opt-args -> <empty>
+  r262  opt-args -> expr
+  r263  opt-args -> opt-arg-list "," opt-arg
+  r264  opt-arg-list -> opt-arg
+  r265  opt-arg-list -> opt-arg-list "," opt-arg
+  r266  opt-arg -> <empty>
+  r267  opt-arg -> expr
+  r268  member -> ID
+  r269  member -> "get"
+  r270  member -> "set"
+  r271  member -> "construct"
+  r272  member -> "destruct"
+  r273  expr -> expr LOGOR expr
+  r274  expr -> expr LOGAND expr
+  r275  expr -> expr "|" expr
+  r276  expr -> expr "^" expr
+  r277  expr -> expr "&" expr
+  r278  expr -> expr EQ expr
+  r279  expr -> expr NE expr
+  r280  expr -> expr MATCH expr
+  r281  expr -> expr NOTMATCH expr
+  r282  expr -> expr "<" expr
+  r283  expr -> expr ">" expr
+  r284  expr -> expr LE expr
+  r285  expr -> expr GE expr
+  r286  expr -> expr SHL expr
+  r287  expr -> expr SHR expr
+  r288  expr -> expr "+" expr
+  r289  expr -> expr "-" expr
+  r290  expr -> expr "*" expr
+  r291  expr -> expr "/" expr
+  r292  expr -> expr "%" expr
+  r293  expr -> expr "@" expr
+  r294  expr -> expr "?" expr ":" expr
+  r295  expr -> expr "=" expr
+  r296  expr -> expr "=" curly
+  r297  expr -> expr REFASSIGN expr
+  r298  expr -> expr ADDASSIGN expr
+  r299  expr -> expr SUBASSIGN expr
+  r300  expr -> expr MULASSIGN expr
+  r301  expr -> expr DIVASSIGN expr
+  r302  expr -> expr MODASSIGN expr
+  r303  expr -> expr SHLASSIGN expr
+  r304  expr -> expr SHRASSIGN expr
+  r305  expr -> expr ANDASSIGN expr
+  r306  expr -> expr XORASSIGN expr
+  r307  expr -> expr ORASSIGN expr
+  r308  expr -> expr ATASSIGN expr
+  r309  expr -> "+" expr
+  r310  expr -> "-" expr
+  r311  expr -> "~" expr
+  r312  expr -> "!" expr
+  r313  expr -> "&" expr
+  r314  expr -> "*" expr
+  r315  expr -> INC expr
+  r316  expr -> DEC expr
+  r317  expr -> "await" expr
+  r318  expr -> "try" expr
+  r319  expr -> "new" type-name
+  r320  expr -> "new" type-name "(" opt-args ")"   [prefer 1]
+  r321  expr -> "new" type-name "construct" "(" opt-args ")"
+  r322  expr -> "new" type-name "[" expr "]"
+  r323  expr -> "new" type-name curly
+  r324  expr -> "(" type-name ")" expr   [prefer 1]
+  r325  expr -> "dynamic" "(" type-name ")" expr
+  r326  expr -> expr "(" opt-args ")"
+  r327  expr -> expr "~" "(" opt-args ")"
+  r328  expr -> expr "[" expr-or-empty "]"
+  r329  expr -> expr INC
+  r330  expr -> expr DEC
+  r331  expr -> expr "." member
+  r332  expr -> expr PTR member
+  r333  expr -> "(" expr ")"
+  r334  expr -> ID
+  r335  expr -> "this"
+  r336  expr -> "basetype"
+  r337  expr -> "basetype1"
+  r338  expr -> "basetype2"
+  r339  expr -> INTEGER
+  r340  expr -> FP
+  r341  expr -> literal
+  r342  expr -> CAPTURE
+  r343  expr -> "true"
+  r344  expr -> "false"
+  r345  expr -> "null"
+  r346  expr -> "sizeof" "(" type-or-expr ")"
+  r347  expr -> "countof" "(" type-or-expr ")"
+  r348  expr -> "typeof" "(" type-or-expr ")"
+  r349  expr -> "declof" "(" type-or-expr ")"
+  r350  expr -> "offsetof" "(" expr ")"
+  r351  expr -> "bindingof" "(" expr ")"
+  r352  expr -> "dynamic sizeof" "(" expr ")"
+  r353  expr -> "dynamic countof" "(" expr ")"
+  r354  expr -> "dynamic typeof" "(" expr ")"
+  r355  expr -> "dynamic offsetof" "(" expr ")"
+  r356  literal -> LITERAL
+  r357  literal -> FMT_LITERAL
+  r358  literal -> literal LITERAL
+  r359  literal -> literal FMT_LITERAL
+  r360  $accept -> unit
 conflicts left to the GLR driver: 1423
+  state 1 on "opaque class": shift/reduce (2 actions)
+  state 1 on "enum": shift/reduce (2 actions)
   state 1 on "bitflag enum": shift/reduce (2 actions)
   state 1 on "public": shift/reduce (2 actions)
   state 1 on "protected": shift/reduce (2 actions)
@@ -380,8 +384,6 @@ conflicts left to the GLR driver: 1423
   state 1 on "struct": shift/reduce (2 actions)
   state 1 on "union": shift/reduce (2 actions)
   state 1 on "class": shift/reduce (2 actions)
-  state 1 on "opaque class": shift/reduce (2 actions)
-  state 1 on "enum": shift/reduce (2 actions)
   state 1 on "get": reduce/reduce (2 actions)
   state 1 on "set": reduce/reduce (2 actions)
   state 1 on "construct": reduce/reduce (2 actions)
@@ -428,154 +430,154 @@ conflicts left to the GLR driver: 1423
   state 1 on ORASSIGN: reduce/reduce (2 actions)
   state 1 on ATASSIGN: reduce/reduce (2 actions)
   state 1 on PTR: reduce/reduce (2 actions)
-  state 11 on "bitflag enum": shift/reduce (2 actions)
-  state 11 on "public": shift/reduce (2 actions)
-  state 11 on "protected": shift/reduce (2 actions)
-  state 11 on "{": shift/reduce (3 actions)
-  state 11 on ";": shift/reduce (3 actions)
-  state 11 on "unsafe": shift/reduce (2 actions)
-  state 11 on "[": shift/reduce (3 actions)
-  state 11 on "dyfield": shift/reduce (2 actions)
-  state 11 on "+": shift/reduce (3 actions)
-  state 11 on "-": shift/reduce (3 actions)
-  state 11 on "~": shift/reduce (3 actions)
-  state 11 on "&": shift/reduce (3 actions)
-  state 11 on "*": shift/reduce (3 actions)
-  state 11 on INC: shift/reduce (3 actions)
-  state 11 on DEC: shift/reduce (3 actions)
-  state 11 on "(": shift/reduce (3 actions)
-  state 11 on ID: shift/reduce (3 actions)
-  state 11 on "typeof": shift/reduce (2 actions)
-  state 11 on "struct": shift/reduce (2 actions)
-  state 11 on "union": shift/reduce (2 actions)
-  state 11 on "class": shift/reduce (2 actions)
-  state 11 on "opaque class": shift/reduce (2 actions)
-  state 11 on "enum": shift/reduce (2 actions)
-  state 11 on "get": reduce/reduce (2 actions)
-  state 11 on "set": reduce/reduce (2 actions)
-  state 11 on "construct": reduce/reduce (2 actions)
-  state 11 on "destruct": reduce/reduce (2 actions)
-  state 11 on "static construct": reduce/reduce (2 actions)
-  state 11 on "operator": reduce/reduce (2 actions)
-  state 11 on "postfix operator": reduce/reduce (2 actions)
-  state 11 on "const": reduce/reduce (2 actions)
-  state 11 on ":": reduce/reduce (2 actions)
-  state 11 on "=": reduce/reduce (2 actions)
-  state 11 on ",": reduce/reduce (2 actions)
-  state 11 on REFASSIGN: reduce/reduce (2 actions)
-  state 11 on ")": reduce/reduce (2 actions)
-  state 11 on "]": reduce/reduce (2 actions)
-  state 11 on "}": reduce/reduce (2 actions)
-  state 11 on ".": reduce/reduce (2 actions)
-  state 11 on LOGOR: reduce/reduce (2 actions)
-  state 11 on LOGAND: reduce/reduce (2 actions)
-  state 11 on "|": reduce/reduce (2 actions)
-  state 11 on "^": reduce/reduce (2 actions)
-  state 11 on EQ: reduce/reduce (2 actions)
-  state 11 on NE: reduce/reduce (2 actions)
-  state 11 on MATCH: reduce/reduce (2 actions)
-  state 11 on NOTMATCH: reduce/reduce (2 actions)
-  state 11 on "<": reduce/reduce (2 actions)
-  state 11 on ">": reduce/reduce (2 actions)
-  state 11 on LE: reduce/reduce (2 actions)
-  state 11 on GE: reduce/reduce (2 actions)
-  state 11 on SHL: reduce/reduce (2 actions)
-  state 11 on SHR: reduce/reduce (2 actions)
-  state 11 on "/": reduce/reduce (2 actions)
-  state 11 on "%": reduce/reduce (2 actions)
-  state 11 on "@": reduce/reduce (2 actions)
-  state 11 on "?": reduce/reduce (2 actions)
-  state 11 on ADDASSIGN: reduce/reduce (2 actions)
-  state 11 on SUBASSIGN: reduce/reduce (2 actions)
-  state 11 on MULASSIGN: reduce/reduce (2 actions)
-  state 11 on DIVASSIGN: reduce/reduce (2 actions)
-  state 11 on MODASSIGN: reduce/reduce (2 actions)
-  state 11 on SHLASSIGN: reduce/reduce (2 actions)
-  state 11 on SHRASSIGN: reduce/reduce (2 actions)
-  state 11 on ANDASSIGN: reduce/reduce (2 actions)
-  state 11 on XORASSIGN: reduce/reduce (2 actions)
-  state 11 on ORASSIGN: reduce/reduce (2 actions)
-  state 11 on ATASSIGN: reduce/reduce (2 actions)
-  state 11 on PTR: reduce/reduce (2 actions)
-  state 23 on "bitflag enum": shift/reduce (2 actions)
-  state 23 on "public": shift/reduce (2 actions)
-  state 23 on "protected": shift/reduce (2 actions)
-  state 23 on "{": shift/reduce (3 actions)
-  state 23 on ";": shift/reduce (3 actions)
-  state 23 on "unsafe": shift/reduce (2 actions)
-  state 23 on "[": shift/reduce (3 actions)
-  state 23 on "dyfield": shift/reduce (2 actions)
-  state 23 on "+": shift/reduce (3 actions)
-  state 23 on "-": shift/reduce (3 actions)
-  state 23 on "~": shift/reduce (3 actions)
-  state 23 on "&": shift/reduce (3 actions)
-  state 23 on "*": shift/reduce (3 actions)
-  state 23 on INC: shift/reduce (3 actions)
-  state 23 on DEC: shift/reduce (3 actions)
-  state 23 on "(": shift/reduce (3 actions)
-  state 23 on ID: shift/reduce (3 actions)
-  state 23 on "typeof": shift/reduce (2 actions)
-  state 23 on "struct": shift/reduce (2 actions)
-  state 23 on "union": shift/reduce (2 actions)
-  state 23 on "class": shift/reduce (2 actions)
-  state 23 on "opaque class": shift/reduce (2 actions)
-  state 23 on "enum": shift/reduce (2 actions)
-  state 23 on "get": reduce/reduce (2 actions)
-  state 23 on "set": reduce/reduce (2 actions)
-  state 23 on "construct": reduce/reduce (2 actions)
-  state 23 on "destruct": reduce/reduce (2 actions)
-  state 23 on "static construct": reduce/reduce (2 actions)
-  state 23 on "operator": reduce/reduce (2 actions)
-  state 23 on "postfix operator": reduce/reduce (2 actions)
-  state 23 on "const": reduce/reduce (2 actions)
-  state 23 on ":": reduce/reduce (2 actions)
-  state 23 on "=": reduce/reduce (2 actions)
-  state 23 on ",": reduce/reduce (2 actions)
-  state 23 on REFASSIGN: reduce/reduce (2 actions)
-  state 23 on ")": reduce/reduce (2 actions)
-  state 23 on "]": reduce/reduce (2 actions)
-  state 23 on "}": reduce/reduce (2 actions)
-  state 23 on ".": reduce/reduce (2 actions)
-  state 23 on LOGOR: reduce/reduce (2 actions)
-  state 23 on LOGAND: reduce/reduce (2 actions)
-  state 23 on "|": reduce/reduce (2 actions)
-  state 23 on "^": reduce/reduce (2 actions)
-  state 23 on EQ: reduce/reduce (2 actions)
-  state 23 on NE: reduce/reduce (2 actions)
-  state 23 on MATCH: reduce/reduce (2 actions)
-  state 23 on NOTMATCH: reduce/reduce (2 actions)
-  state 23 on "<": reduce/reduce (2 actions)
-  state 23 on ">": reduce/reduce (2 actions)
-  state 23 on LE: reduce/reduce (2 actions)
-  state 23 on GE: reduce/reduce (2 actions)
-  state 23 on SHL: reduce/reduce (2 actions)
-  state 23 on SHR: reduce/reduce (2 actions)
-  state 23 on "/": reduce/reduce (2 actions)
-  state 23 on "%": reduce/reduce (2 actions)
-  state 23 on "@": reduce/reduce (2 actions)
-  state 23 on "?": reduce/reduce (2 actions)
-  state 23 on ADDASSIGN: reduce/reduce (2 actions)
-  state 23 on SUBASSIGN: reduce/reduce (2 actions)
-  state 23 on MULASSIGN: reduce/reduce (2 actions)
-  state 23 on DIVASSIGN: reduce/reduce (2 actions)
-  state 23 on MODASSIGN: reduce/reduce (2 actions)
-  state 23 on SHLASSIGN: reduce/reduce (2 actions)
-  state 23 on SHRASSIGN: reduce/reduce (2 actions)
-  state 23 on ANDASSIGN: reduce/reduce (2 actions)
-  state 23 on XORASSIGN: reduce/reduce (2 actions)
-  state 23 on ORASSIGN: reduce/reduce (2 actions)
-  state 23 on ATASSIGN: reduce/reduce (2 actions)
-  state 23 on PTR: reduce/reduce (2 actions)
-  state 58 on "+": shift/reduce (2 actions)
-  state 58 on "-": shift/reduce (2 actions)
-  state 58 on "~": shift/reduce (2 actions)
-  state 58 on "&": shift/reduce (2 actions)
-  state 58 on "*": shift/reduce (2 actions)
-  state 58 on INC: shift/reduce (2 actions)
-  state 58 on DEC: shift/reduce (2 actions)
-  state 58 on "(": shift/reduce (2 actions)
-  state 58 on ID: shift/reduce (2 actions)
-  state 58 on "typeof": shift/reduce (2 actions)
+  state 13 on "opaque class": shift/reduce (2 actions)
+  state 13 on "enum": shift/reduce (2 actions)
+  state 13 on "bitflag enum": shift/reduce (2 actions)
+  state 13 on "public": shift/reduce (2 actions)
+  state 13 on "protected": shift/reduce (2 actions)
+  state 13 on "{": shift/reduce (3 actions)
+  state 13 on ";": shift/reduce (3 actions)
+  state 13 on "unsafe": shift/reduce (2 actions)
+  state 13 on "[": shift/reduce (3 actions)
+  state 13 on "dyfield": shift/reduce (2 actions)
+  state 13 on "+": shift/reduce (3 actions)
+  state 13 on "-": shift/reduce (3 actions)
+  state 13 on "~": shift/reduce (3 actions)
+  state 13 on "&": shift/reduce (3 actions)
+  state 13 on "*": shift/reduce (3 actions)
+  state 13 on INC: shift/reduce (3 actions)
+  state 13 on DEC: shift/reduce (3 actions)
+  state 13 on "(": shift/reduce (3 actions)
+  state 13 on ID: shift/reduce (3 actions)
+  state 13 on "typeof": shift/reduce (2 actions)
+  state 13 on "struct": shift/reduce (2 actions)
+  state 13 on "union": shift/reduce (2 actions)
+  state 13 on "class": shift/reduce (2 actions)
+  state 13 on "get": reduce/reduce (2 actions)
+  state 13 on "set": reduce/reduce (2 actions)
+  state 13 on "construct": reduce/reduce (2 actions)
+  state 13 on "destruct": reduce/reduce (2 actions)
+  state 13 on "static construct": reduce/reduce (2 actions)
+  state 13 on "operator": reduce/reduce (2 actions)
+  state 13 on "postfix operator": reduce/reduce (2 actions)
+  state 13 on "const": reduce/reduce (2 actions)
+  state 13 on ":": reduce/reduce (2 actions)
+  state 13 on "=": reduce/reduce (2 actions)
+  state 13 on ",": reduce/reduce (2 actions)
+  state 13 on REFASSIGN: reduce/reduce (2 actions)
+  state 13 on ")": reduce/reduce (2 actions)
+  state 13 on "]": reduce/reduce (2 actions)
+  state 13 on "}": reduce/reduce (2 actions)
+  state 13 on ".": reduce/reduce (2 actions)
+  state 13 on LOGOR: reduce/reduce (2 actions)
+  state 13 on LOGAND: reduce/reduce (2 actions)
+  state 13 on "|": reduce/reduce (2 actions)
+  state 13 on "^": reduce/reduce (2 actions)
+  state 13 on EQ: reduce/reduce (2 actions)
+  state 13 on NE: reduce/reduce (2 actions)
+  state 13 on MATCH: reduce/reduce (2 actions)
+  state 13 on NOTMATCH: reduce/reduce (2 actions)
+  state 13 on "<": reduce/reduce (2 actions)
+  state 13 on ">": reduce/reduce (2 actions)
+  state 13 on LE: reduce/reduce (2 actions)
+  state 13 on GE: reduce/reduce (2 actions)
+  state 13 on SHL: reduce/reduce (2 actions)
+  state 13 on SHR: reduce/reduce (2 actions)
+  state 13 on "/": reduce/reduce (2 actions)
+  state 13 on "%": reduce/reduce (2 actions)
+  state 13 on "@": reduce/reduce (2 actions)
+  state 13 on "?": reduce/reduce (2 actions)
+  state 13 on ADDASSIGN: reduce/reduce (2 actions)
+  state 13 on SUBASSIGN: reduce/reduce (2 actions)
+  state 13 on MULASSIGN: reduce/reduce (2 actions)
+  state 13 on DIVASSIGN: reduce/reduce (2 actions)
+  state 13 on MODASSIGN: reduce/reduce (2 actions)
+  state 13 on SHLASSIGN: reduce/reduce (2 actions)
+  state 13 on SHRASSIGN: reduce/reduce (2 actions)
+  state 13 on ANDASSIGN: reduce/reduce (2 actions)
+  state 13 on XORASSIGN: reduce/reduce (2 actions)
+  state 13 on ORASSIGN: reduce/reduce (2 actions)
+  state 13 on ATASSIGN: reduce/reduce (2 actions)
+  state 13 on PTR: reduce/reduce (2 actions)
+  state 25 on "opaque class": shift/reduce (2 actions)
+  state 25 on "enum": shift/reduce (2 actions)
+  state 25 on "bitflag enum": shift/reduce (2 actions)
+  state 25 on "public": shift/reduce (2 actions)
+  state 25 on "protected": shift/reduce (2 actions)
+  state 25 on "{": shift/reduce (3 actions)
+  state 25 on ";": shift/reduce (3 actions)
+  state 25 on "unsafe": shift/reduce (2 actions)
+  state 25 on "[": shift/reduce (3 actions)
+  state 25 on "dyfield": shift/reduce (2 actions)
+  state 25 on "+": shift/reduce (3 actions)
+  state 25 on "-": shift/reduce (3 actions)
+  state 25 on "~": shift/reduce (3 actions)
+  state 25 on "&": shift/reduce (3 actions)
+  state 25 on "*": shift/reduce (3 actions)
+  state 25 on INC: shift/reduce (3 actions)
+  state 25 on DEC: shift/reduce (3 actions)
+  state 25 on "(": shift/reduce (3 actions)
+  state 25 on ID: shift/reduce (3 actions)
+  state 25 on "typeof": shift/reduce (2 actions)
+  state 25 on "struct": shift/reduce (2 actions)
+  state 25 on "union": shift/reduce (2 actions)
+  state 25 on "class": shift/reduce (2 actions)
+  state 25 on "get": reduce/reduce (2 actions)
+  state 25 on "set": reduce/reduce (2 actions)
+  state 25 on "construct": reduce/reduce (2 actions)
+  state 25 on "destruct": reduce/reduce (2 actions)
+  state 25 on "static construct": reduce/reduce (2 actions)
+  state 25 on "operator": reduce/reduce (2 actions)
+  state 25 on "postfix operator": reduce/reduce (2 actions)
+  state 25 on "const": reduce/reduce (2 actions)
+  state 25 on ":": reduce/reduce (2 actions)
+  state 25 on "=": reduce/reduce (2 actions)
+  state 25 on ",": reduce/reduce (2 actions)
+  state 25 on REFASSIGN: reduce/reduce (2 actions)
+  state 25 on ")": reduce/reduce (2 actions)
+  state 25 on "]": reduce/reduce (2 actions)
+  state 25 on "}": reduce/reduce (2 actions)
+  state 25 on ".": reduce/reduce (2 actions)
+  state 25 on LOGOR: reduce/reduce (2 actions)
+  state 25 on LOGAND: reduce/reduce (2 actions)
+  state 25 on "|": reduce/reduce (2 actions)
+  state 25 on "^": reduce/reduce (2 actions)
+  state 25 on EQ: reduce/reduce (2 actions)
+  state 25 on NE: reduce/reduce (2 actions)
+  state 25 on MATCH: reduce/reduce (2 actions)
+  state 25 on NOTMATCH: reduce/reduce (2 actions)
+  state 25 on "<": reduce/reduce (2 actions)
+  state 25 on ">": reduce/reduce (2 actions)
+  state 25 on LE: reduce/reduce (2 actions)
+  state 25 on GE: reduce/reduce (2 actions)
+  state 25 on SHL: reduce/reduce (2 actions)
+  state 25 on SHR: reduce/reduce (2 actions)
+  state 25 on "/": reduce/reduce (2 actions)
+  state 25 on "%": reduce/reduce (2 actions)
+  state 25 on "@": reduce/reduce (2 actions)
+  state 25 on "?": reduce/reduce (2 actions)
+  state 25 on ADDASSIGN: reduce/reduce (2 actions)
+  state 25 on SUBASSIGN: reduce/reduce (2 actions)
+  state 25 on MULASSIGN: reduce/reduce (2 actions)
+  state 25 on DIVASSIGN: reduce/reduce (2 actions)
+  state 25 on MODASSIGN: reduce/reduce (2 actions)
+  state 25 on SHLASSIGN: reduce/reduce (2 actions)
+  state 25 on SHRASSIGN: reduce/reduce (2 actions)
+  state 25 on ANDASSIGN: reduce/reduce (2 actions)
+  state 25 on XORASSIGN: reduce/reduce (2 actions)
+  state 25 on ORASSIGN: reduce/reduce (2 actions)
+  state 25 on ATASSIGN: reduce/reduce (2 actions)
+  state 25 on PTR: reduce/reduce (2 actions)
+  state 60 on "+": shift/reduce (2 actions)
+  state 60 on "-": shift/reduce (2 actions)
+  state 60 on "~": shift/reduce (2 actions)
+  state 60 on "&": shift/reduce (2 actions)
+  state 60 on "*": shift/reduce (2 actions)
+  state 60 on INC: shift/reduce (2 actions)
+  state 60 on DEC: shift/reduce (2 actions)
+  state 60 on "(": shift/reduce (2 actions)
+  state 60 on ID: shift/reduce (2 actions)
+  state 60 on "typeof": shift/reduce (2 actions)
   state 109 on "+": shift/reduce (2 actions)
   state 109 on "-": shift/reduce (2 actions)
   state 109 on "*": shift/reduce (2 actions)
@@ -652,6 +654,8 @@ conflicts left to the GLR driver: 1423
   state 110 on REFASSIGN: shift/reduce (2 actions)
   state 110 on "(": shift/reduce (2 actions)
   state 110 on "[": shift/reduce (2 actions)
+  state 122 on "opaque class": shift/reduce (2 actions)
+  state 122 on "enum": shift/reduce (2 actions)
   state 122 on "bitflag enum": shift/reduce (2 actions)
   state 122 on "public": shift/reduce (2 actions)
   state 122 on "protected": shift/reduce (2 actions)
@@ -674,8 +678,6 @@ conflicts left to the GLR driver: 1423
   state 122 on "struct": shift/reduce (2 actions)
   state 122 on "union": shift/reduce (2 actions)
   state 122 on "class": shift/reduce (2 actions)
-  state 122 on "opaque class": shift/reduce (2 actions)
-  state 122 on "enum": shift/reduce (2 actions)
   state 122 on "get": reduce/reduce (2 actions)
   state 122 on "set": reduce/reduce (2 actions)
   state 122 on "construct": reduce/reduce (2 actions)
@@ -784,146 +786,146 @@ conflicts left to the GLR driver: 1423
   state 221 on "(": shift/reduce (2 actions)
   state 221 on ID: shift/reduce (2 actions)
   state 221 on "typeof": shift/reduce (2 actions)
-  state 225 on ID: reduce/reduce (2 actions)
-  state 225 on "*": reduce/reduce (2 actions)
-  state 225 on "get": reduce/reduce (2 actions)
-  state 225 on "set": reduce/reduce (2 actions)
-  state 225 on "construct": reduce/reduce (2 actions)
-  state 225 on "destruct": reduce/reduce (2 actions)
-  state 225 on "static construct": reduce/reduce (2 actions)
-  state 225 on "operator": reduce/reduce (2 actions)
-  state 225 on "postfix operator": reduce/reduce (2 actions)
-  state 225 on "{": reduce/reduce (2 actions)
-  state 225 on "(": reduce/reduce (2 actions)
-  state 225 on "[": reduce/reduce (2 actions)
-  state 225 on "const": reduce/reduce (2 actions)
-  state 225 on ":": reduce/reduce (2 actions)
-  state 225 on "=": reduce/reduce (2 actions)
-  state 225 on ";": reduce/reduce (2 actions)
-  state 225 on ",": reduce/reduce (2 actions)
-  state 225 on REFASSIGN: reduce/reduce (2 actions)
-  state 225 on ")": reduce/reduce (2 actions)
-  state 225 on "]": reduce/reduce (2 actions)
-  state 225 on "}": reduce/reduce (2 actions)
-  state 225 on ".": reduce/reduce (2 actions)
-  state 225 on LOGOR: reduce/reduce (2 actions)
-  state 225 on LOGAND: reduce/reduce (2 actions)
-  state 225 on "|": reduce/reduce (2 actions)
-  state 225 on "^": reduce/reduce (2 actions)
-  state 225 on "&": reduce/reduce (2 actions)
-  state 225 on EQ: reduce/reduce (2 actions)
-  state 225 on NE: reduce/reduce (2 actions)
-  state 225 on MATCH: reduce/reduce (2 actions)
-  state 225 on NOTMATCH: reduce/reduce (2 actions)
-  state 225 on "<": reduce/reduce (2 actions)
-  state 225 on ">": reduce/reduce (2 actions)
-  state 225 on LE: reduce/reduce (2 actions)
-  state 225 on GE: reduce/reduce (2 actions)
-  state 225 on SHL: reduce/reduce (2 actions)
-  state 225 on SHR: reduce/reduce (2 actions)
-  state 225 on "+": reduce/reduce (2 actions)
-  state 225 on "-": reduce/reduce (2 actions)
-  state 225 on "/": reduce/reduce (2 actions)
-  state 225 on "%": reduce/reduce (2 actions)
-  state 225 on "@": reduce/reduce (2 actions)
-  state 225 on "?": reduce/reduce (2 actions)
-  state 225 on ADDASSIGN: reduce/reduce (2 actions)
-  state 225 on SUBASSIGN: reduce/reduce (2 actions)
-  state 225 on MULASSIGN: reduce/reduce (2 actions)
-  state 225 on DIVASSIGN: reduce/reduce (2 actions)
-  state 225 on MODASSIGN: reduce/reduce (2 actions)
-  state 225 on SHLASSIGN: reduce/reduce (2 actions)
-  state 225 on SHRASSIGN: reduce/reduce (2 actions)
-  state 225 on ANDASSIGN: reduce/reduce (2 actions)
-  state 225 on XORASSIGN: reduce/reduce (2 actions)
-  state 225 on ORASSIGN: reduce/reduce (2 actions)
-  state 225 on ATASSIGN: reduce/reduce (2 actions)
-  state 225 on "~": reduce/reduce (2 actions)
-  state 225 on INC: reduce/reduce (2 actions)
-  state 225 on DEC: reduce/reduce (2 actions)
-  state 225 on PTR: reduce/reduce (2 actions)
+  state 223 on ID: reduce/reduce (2 actions)
+  state 223 on "*": reduce/reduce (2 actions)
+  state 223 on "get": reduce/reduce (2 actions)
+  state 223 on "set": reduce/reduce (2 actions)
+  state 223 on "construct": reduce/reduce (2 actions)
+  state 223 on "destruct": reduce/reduce (2 actions)
+  state 223 on "static construct": reduce/reduce (2 actions)
+  state 223 on "operator": reduce/reduce (2 actions)
+  state 223 on "postfix operator": reduce/reduce (2 actions)
+  state 223 on "{": reduce/reduce (2 actions)
+  state 223 on "(": reduce/reduce (2 actions)
+  state 223 on "[": reduce/reduce (2 actions)
+  state 223 on "const": reduce/reduce (2 actions)
+  state 223 on ":": reduce/reduce (2 actions)
+  state 223 on "=": reduce/reduce (2 actions)
+  state 223 on ";": reduce/reduce (2 actions)
+  state 223 on ",": reduce/reduce (2 actions)
+  state 223 on REFASSIGN: reduce/reduce (2 actions)
+  state 223 on ")": reduce/reduce (2 actions)
+  state 223 on "]": reduce/reduce (2 actions)
+  state 223 on "}": reduce/reduce (2 actions)
+  state 223 on ".": reduce/reduce (2 actions)
+  state 223 on LOGOR: reduce/reduce (2 actions)
+  state 223 on LOGAND: reduce/reduce (2 actions)
+  state 223 on "|": reduce/reduce (2 actions)
+  state 223 on "^": reduce/reduce (2 actions)
+  state 223 on "&": reduce/reduce (2 actions)
+  state 223 on EQ: reduce/reduce (2 actions)
+  state 223 on NE: reduce/reduce (2 actions)
+  state 223 on MATCH: reduce/reduce (2 actions)
+  state 223 on NOTMATCH: reduce/reduce (2 actions)
+  state 223 on "<": reduce/reduce (2 actions)
+  state 223 on ">": reduce/reduce (2 actions)
+  state 223 on LE: reduce/reduce (2 actions)
+  state 223 on GE: reduce/reduce (2 actions)
+  state 223 on SHL: reduce/reduce (2 actions)
+  state 223 on SHR: reduce/reduce (2 actions)
+  state 223 on "+": reduce/reduce (2 actions)
+  state 223 on "-": reduce/reduce (2 actions)
+  state 223 on "/": reduce/reduce (2 actions)
+  state 223 on "%": reduce/reduce (2 actions)
+  state 223 on "@": reduce/reduce (2 actions)
+  state 223 on "?": reduce/reduce (2 actions)
+  state 223 on ADDASSIGN: reduce/reduce (2 actions)
+  state 223 on SUBASSIGN: reduce/reduce (2 actions)
+  state 223 on MULASSIGN: reduce/reduce (2 actions)
+  state 223 on DIVASSIGN: reduce/reduce (2 actions)
+  state 223 on MODASSIGN: reduce/reduce (2 actions)
+  state 223 on SHLASSIGN: reduce/reduce (2 actions)
+  state 223 on SHRASSIGN: reduce/reduce (2 actions)
+  state 223 on ANDASSIGN: reduce/reduce (2 actions)
+  state 223 on XORASSIGN: reduce/reduce (2 actions)
+  state 223 on ORASSIGN: reduce/reduce (2 actions)
+  state 223 on ATASSIGN: reduce/reduce (2 actions)
+  state 223 on "~": reduce/reduce (2 actions)
+  state 223 on INC: reduce/reduce (2 actions)
+  state 223 on DEC: reduce/reduce (2 actions)
+  state 223 on PTR: reduce/reduce (2 actions)
   state 249 on "{": shift/reduce (2 actions)
   state 274 on ID: reduce/reduce (2 actions)
   state 274 on "{": reduce/reduce (2 actions)
   state 274 on ":": reduce/reduce (2 actions)
-  state 301 on "const": shift/reduce (2 actions)
-  state 358 on "(": shift/reduce (2 actions)
-  state 401 on ")": reduce/reduce (2 actions)
-  state 405 on ")": reduce/reduce (2 actions)
-  state 428 on "bitflag enum": shift/reduce (2 actions)
-  state 428 on "public": shift/reduce (2 actions)
-  state 428 on "protected": shift/reduce (2 actions)
-  state 428 on "{": shift/reduce (3 actions)
-  state 428 on ";": shift/reduce (3 actions)
-  state 428 on "unsafe": shift/reduce (2 actions)
-  state 428 on "[": shift/reduce (3 actions)
-  state 428 on "dyfield": shift/reduce (2 actions)
-  state 428 on "}": shift/reduce (3 actions)
-  state 428 on "+": shift/reduce (3 actions)
-  state 428 on "-": shift/reduce (3 actions)
-  state 428 on "~": shift/reduce (3 actions)
-  state 428 on "&": shift/reduce (3 actions)
-  state 428 on "*": shift/reduce (3 actions)
-  state 428 on INC: shift/reduce (3 actions)
-  state 428 on DEC: shift/reduce (3 actions)
-  state 428 on "(": shift/reduce (3 actions)
-  state 428 on ID: shift/reduce (3 actions)
-  state 428 on "typeof": shift/reduce (2 actions)
-  state 428 on "struct": shift/reduce (2 actions)
-  state 428 on "union": shift/reduce (2 actions)
-  state 428 on "class": shift/reduce (2 actions)
-  state 428 on "opaque class": shift/reduce (2 actions)
-  state 428 on "enum": shift/reduce (2 actions)
-  state 428 on "get": reduce/reduce (2 actions)
-  state 428 on "set": reduce/reduce (2 actions)
-  state 428 on "construct": reduce/reduce (2 actions)
-  state 428 on "destruct": reduce/reduce (2 actions)
-  state 428 on "static construct": reduce/reduce (2 actions)
-  state 428 on "operator": reduce/reduce (2 actions)
-  state 428 on "postfix operator": reduce/reduce (2 actions)
-  state 428 on "const": reduce/reduce (2 actions)
-  state 428 on ":": reduce/reduce (2 actions)
-  state 428 on "=": reduce/reduce (2 actions)
-  state 428 on ",": reduce/reduce (2 actions)
-  state 428 on REFASSIGN: reduce/reduce (2 actions)
-  state 428 on ")": reduce/reduce (2 actions)
-  state 428 on "]": reduce/reduce (2 actions)
-  state 428 on ".": reduce/reduce (2 actions)
-  state 428 on LOGOR: reduce/reduce (2 actions)
-  state 428 on LOGAND: reduce/reduce (2 actions)
-  state 428 on "|": reduce/reduce (2 actions)
-  state 428 on "^": reduce/reduce (2 actions)
-  state 428 on EQ: reduce/reduce (2 actions)
-  state 428 on NE: reduce/reduce (2 actions)
-  state 428 on MATCH: reduce/reduce (2 actions)
-  state 428 on NOTMATCH: reduce/reduce (2 actions)
-  state 428 on "<": reduce/reduce (2 actions)
-  state 428 on ">": reduce/reduce (2 actions)
-  state 428 on LE: reduce/reduce (2 actions)
-  state 428 on GE: reduce/reduce (2 actions)
-  state 428 on SHL: reduce/reduce (2 actions)
-  state 428 on SHR: reduce/reduce (2 actions)
-  state 428 on "/": reduce/reduce (2 actions)
-  state 428 on "%": reduce/reduce (2 actions)
-  state 428 on "@": reduce/reduce (2 actions)
-  state 428 on "?": reduce/reduce (2 actions)
-  state 428 on ADDASSIGN: reduce/reduce (2 actions)
-  state 428 on SUBASSIGN: reduce/reduce (2 actions)
-  state 428 on MULASSIGN: reduce/reduce (2 actions)
-  state 428 on DIVASSIGN: reduce/reduce (2 actions)
-  state 428 on MODASSIGN: reduce/reduce (2 actions)
-  state 428 on SHLASSIGN: reduce/reduce (2 actions)
-  state 428 on SHRASSIGN: reduce/reduce (2 actions)
-  state 428 on ANDASSIGN: reduce/reduce (2 actions)
-  state 428 on XORASSIGN: reduce/reduce (2 actions)
-  state 428 on ORASSIGN: reduce/reduce (2 actions)
-  state 428 on ATASSIGN: reduce/reduce (2 actions)
-  state 428 on PTR: reduce/reduce (2 actions)
+  state 303 on "const": shift/reduce (2 actions)
+  state 360 on "(": shift/reduce (2 actions)
+  state 403 on ")": reduce/reduce (2 actions)
+  state 407 on ")": reduce/reduce (2 actions)
+  state 430 on "opaque class": shift/reduce (2 actions)
+  state 430 on "enum": shift/reduce (2 actions)
+  state 430 on "bitflag enum": shift/reduce (2 actions)
+  state 430 on "public": shift/reduce (2 actions)
+  state 430 on "protected": shift/reduce (2 actions)
+  state 430 on "{": shift/reduce (3 actions)
+  state 430 on ";": shift/reduce (3 actions)
+  state 430 on "unsafe": shift/reduce (2 actions)
+  state 430 on "[": shift/reduce (3 actions)
+  state 430 on "dyfield": shift/reduce (2 actions)
+  state 430 on "}": shift/reduce (3 actions)
+  state 430 on "+": shift/reduce (3 actions)
+  state 430 on "-": shift/reduce (3 actions)
+  state 430 on "~": shift/reduce (3 actions)
+  state 430 on "&": shift/reduce (3 actions)
+  state 430 on "*": shift/reduce (3 actions)
+  state 430 on INC: shift/reduce (3 actions)
+  state 430 on DEC: shift/reduce (3 actions)
+  state 430 on "(": shift/reduce (3 actions)
+  state 430 on ID: shift/reduce (3 actions)
+  state 430 on "typeof": shift/reduce (2 actions)
+  state 430 on "struct": shift/reduce (2 actions)
+  state 430 on "union": shift/reduce (2 actions)
+  state 430 on "class": shift/reduce (2 actions)
+  state 430 on "get": reduce/reduce (2 actions)
+  state 430 on "set": reduce/reduce (2 actions)
+  state 430 on "construct": reduce/reduce (2 actions)
+  state 430 on "destruct": reduce/reduce (2 actions)
+  state 430 on "static construct": reduce/reduce (2 actions)
+  state 430 on "operator": reduce/reduce (2 actions)
+  state 430 on "postfix operator": reduce/reduce (2 actions)
+  state 430 on "const": reduce/reduce (2 actions)
+  state 430 on ":": reduce/reduce (2 actions)
+  state 430 on "=": reduce/reduce (2 actions)
+  state 430 on ",": reduce/reduce (2 actions)
+  state 430 on REFASSIGN: reduce/reduce (2 actions)
   state 430 on ")": reduce/reduce (2 actions)
-  state 432 on ")": shift/reduce (2 actions)
-  state 433 on "*": shift/reduce (2 actions)
-  state 433 on "(": shift/reduce (2 actions)
-  state 434 on ")": reduce/reduce (2 actions)
+  state 430 on "]": reduce/reduce (2 actions)
+  state 430 on ".": reduce/reduce (2 actions)
+  state 430 on LOGOR: reduce/reduce (2 actions)
+  state 430 on LOGAND: reduce/reduce (2 actions)
+  state 430 on "|": reduce/reduce (2 actions)
+  state 430 on "^": reduce/reduce (2 actions)
+  state 430 on EQ: reduce/reduce (2 actions)
+  state 430 on NE: reduce/reduce (2 actions)
+  state 430 on MATCH: reduce/reduce (2 actions)
+  state 430 on NOTMATCH: reduce/reduce (2 actions)
+  state 430 on "<": reduce/reduce (2 actions)
+  state 430 on ">": reduce/reduce (2 actions)
+  state 430 on LE: reduce/reduce (2 actions)
+  state 430 on GE: reduce/reduce (2 actions)
+  state 430 on SHL: reduce/reduce (2 actions)
+  state 430 on SHR: reduce/reduce (2 actions)
+  state 430 on "/": reduce/reduce (2 actions)
+  state 430 on "%": reduce/reduce (2 actions)
+  state 430 on "@": reduce/reduce (2 actions)
+  state 430 on "?": reduce/reduce (2 actions)
+  state 430 on ADDASSIGN: reduce/reduce (2 actions)
+  state 430 on SUBASSIGN: reduce/reduce (2 actions)
+  state 430 on MULASSIGN: reduce/reduce (2 actions)
+  state 430 on DIVASSIGN: reduce/reduce (2 actions)
+  state 430 on MODASSIGN: reduce/reduce (2 actions)
+  state 430 on SHLASSIGN: reduce/reduce (2 actions)
+  state 430 on SHRASSIGN: reduce/reduce (2 actions)
+  state 430 on ANDASSIGN: reduce/reduce (2 actions)
+  state 430 on XORASSIGN: reduce/reduce (2 actions)
+  state 430 on ORASSIGN: reduce/reduce (2 actions)
+  state 430 on ATASSIGN: reduce/reduce (2 actions)
+  state 430 on PTR: reduce/reduce (2 actions)
+  state 432 on ")": reduce/reduce (2 actions)
+  state 434 on ")": shift/reduce (2 actions)
+  state 435 on "*": shift/reduce (2 actions)
+  state 435 on "(": shift/reduce (2 actions)
+  state 436 on ")": reduce/reduce (2 actions)
   state 449 on "const": shift/reduce (2 actions)
   state 451 on "+": shift/reduce (2 actions)
   state 451 on "-": shift/reduce (2 actions)
@@ -935,218 +937,220 @@ conflicts left to the GLR driver: 1423
   state 451 on "(": shift/reduce (2 actions)
   state 451 on ID: shift/reduce (2 actions)
   state 451 on "typeof": shift/reduce (2 actions)
-  state 475 on ")": reduce/reduce (2 actions)
-  state 493 on ")": reduce/reduce (2 actions)
-  state 498 on "=": shift/reduce (2 actions)
-  state 506 on "bitflag enum": shift/reduce (2 actions)
-  state 506 on "public": shift/reduce (2 actions)
-  state 506 on "protected": shift/reduce (2 actions)
-  state 506 on "{": shift/reduce (3 actions)
-  state 506 on ";": shift/reduce (3 actions)
-  state 506 on "unsafe": shift/reduce (2 actions)
-  state 506 on "[": shift/reduce (3 actions)
-  state 506 on "dyfield": shift/reduce (2 actions)
-  state 506 on "+": shift/reduce (3 actions)
-  state 506 on "-": shift/reduce (3 actions)
-  state 506 on "~": shift/reduce (3 actions)
-  state 506 on "&": shift/reduce (3 actions)
-  state 506 on "*": shift/reduce (3 actions)
-  state 506 on INC: shift/reduce (3 actions)
-  state 506 on DEC: shift/reduce (3 actions)
-  state 506 on "(": shift/reduce (3 actions)
-  state 506 on ID: shift/reduce (3 actions)
-  state 506 on "typeof": shift/reduce (2 actions)
-  state 506 on "struct": shift/reduce (2 actions)
-  state 506 on "union": shift/reduce (2 actions)
-  state 506 on "class": shift/reduce (2 actions)
-  state 506 on "opaque class": shift/reduce (2 actions)
-  state 506 on "enum": shift/reduce (2 actions)
-  state 506 on "get": reduce/reduce (2 actions)
-  state 506 on "set": reduce/reduce (2 actions)
-  state 506 on "construct": reduce/reduce (2 actions)
-  state 506 on "destruct": reduce/reduce (2 actions)
-  state 506 on "static construct": reduce/reduce (2 actions)
-  state 506 on "operator": reduce/reduce (2 actions)
-  state 506 on "postfix operator": reduce/reduce (2 actions)
-  state 506 on "const": reduce/reduce (2 actions)
-  state 506 on ":": reduce/reduce (2 actions)
-  state 506 on "=": reduce/reduce (2 actions)
-  state 506 on ",": reduce/reduce (2 actions)
-  state 506 on REFASSIGN: reduce/reduce (2 actions)
-  state 506 on ")": reduce/reduce (2 actions)
-  state 506 on "]": reduce/reduce (2 actions)
-  state 506 on "}": reduce/reduce (2 actions)
-  state 506 on ".": reduce/reduce (2 actions)
-  state 506 on LOGOR: reduce/reduce (2 actions)
-  state 506 on LOGAND: reduce/reduce (2 actions)
-  state 506 on "|": reduce/reduce (2 actions)
-  state 506 on "^": reduce/reduce (2 actions)
-  state 506 on EQ: reduce/reduce (2 actions)
-  state 506 on NE: reduce/reduce (2 actions)
-  state 506 on MATCH: reduce/reduce (2 actions)
-  state 506 on NOTMATCH: reduce/reduce (2 actions)
-  state 506 on "<": reduce/reduce (2 actions)
-  state 506 on ">": reduce/reduce (2 actions)
-  state 506 on LE: reduce/reduce (2 actions)
-  state 506 on GE: reduce/reduce (2 actions)
-  state 506 on SHL: reduce/reduce (2 actions)
-  state 506 on SHR: reduce/reduce (2 actions)
-  state 506 on "/": reduce/reduce (2 actions)
-  state 506 on "%": reduce/reduce (2 actions)
-  state 506 on "@": reduce/reduce (2 actions)
-  state 506 on "?": reduce/reduce (2 actions)
-  state 506 on ADDASSIGN: reduce/reduce (2 actions)
-  state 506 on SUBASSIGN: reduce/reduce (2 actions)
-  state 506 on MULASSIGN: reduce/reduce (2 actions)
-  state 506 on DIVASSIGN: reduce/reduce (2 actions)
-  state 506 on MODASSIGN: reduce/reduce (2 actions)
-  state 506 on SHLASSIGN: reduce/reduce (2 actions)
-  state 506 on SHRASSIGN: reduce/reduce (2 actions)
-  state 506 on ANDASSIGN: reduce/reduce (2 actions)
-  state 506 on XORASSIGN: reduce/reduce (2 actions)
-  state 506 on ORASSIGN: reduce/reduce (2 actions)
-  state 506 on ATASSIGN: reduce/reduce (2 actions)
-  state 506 on PTR: reduce/reduce (2 actions)
-  state 507 on "bitflag enum": shift/reduce (2 actions)
-  state 507 on "public": shift/reduce (2 actions)
-  state 507 on "protected": shift/reduce (2 actions)
-  state 507 on "{": shift/reduce (3 actions)
-  state 507 on ";": shift/reduce (3 actions)
-  state 507 on "unsafe": shift/reduce (2 actions)
-  state 507 on "[": shift/reduce (3 actions)
-  state 507 on "dyfield": shift/reduce (2 actions)
-  state 507 on "+": shift/reduce (3 actions)
-  state 507 on "-": shift/reduce (3 actions)
-  state 507 on "~": shift/reduce (3 actions)
-  state 507 on "&": shift/reduce (3 actions)
-  state 507 on "*": shift/reduce (3 actions)
-  state 507 on INC: shift/reduce (3 actions)
-  state 507 on DEC: shift/reduce (3 actions)
-  state 507 on "(": shift/reduce (3 actions)
-  state 507 on ID: shift/reduce (3 actions)
-  state 507 on "typeof": shift/reduce (2 actions)
-  state 507 on "struct": shift/reduce (2 actions)
-  state 507 on "union": shift/reduce (2 actions)
-  state 507 on "class": shift/reduce (2 actions)
-  state 507 on "opaque class": shift/reduce (2 actions)
-  state 507 on "enum": shift/reduce (2 actions)
-  state 507 on "get": reduce/reduce (2 actions)
-  state 507 on "set": reduce/reduce (2 actions)
-  state 507 on "construct": reduce/reduce (2 actions)
-  state 507 on "destruct": reduce/reduce (2 actions)
-  state 507 on "static construct": reduce/reduce (2 actions)
-  state 507 on "operator": reduce/reduce (2 actions)
-  state 507 on "postfix operator": reduce/reduce (2 actions)
-  state 507 on "const": reduce/reduce (2 actions)
-  state 507 on ":": reduce/reduce (2 actions)
-  state 507 on "=": reduce/reduce (2 actions)
-  state 507 on ",": reduce/reduce (2 actions)
-  state 507 on REFASSIGN: reduce/reduce (2 actions)
-  state 507 on ")": reduce/reduce (2 actions)
-  state 507 on "]": reduce/reduce (2 actions)
-  state 507 on "}": reduce/reduce (2 actions)
-  state 507 on ".": reduce/reduce (2 actions)
-  state 507 on LOGOR: reduce/reduce (2 actions)
-  state 507 on LOGAND: reduce/reduce (2 actions)
-  state 507 on "|": reduce/reduce (2 actions)
-  state 507 on "^": reduce/reduce (2 actions)
-  state 507 on EQ: reduce/reduce (2 actions)
-  state 507 on NE: reduce/reduce (2 actions)
-  state 507 on MATCH: reduce/reduce (2 actions)
-  state 507 on NOTMATCH: reduce/reduce (2 actions)
-  state 507 on "<": reduce/reduce (2 actions)
-  state 507 on ">": reduce/reduce (2 actions)
-  state 507 on LE: reduce/reduce (2 actions)
-  state 507 on GE: reduce/reduce (2 actions)
-  state 507 on SHL: reduce/reduce (2 actions)
-  state 507 on SHR: reduce/reduce (2 actions)
-  state 507 on "/": reduce/reduce (2 actions)
-  state 507 on "%": reduce/reduce (2 actions)
-  state 507 on "@": reduce/reduce (2 actions)
-  state 507 on "?": reduce/reduce (2 actions)
-  state 507 on ADDASSIGN: reduce/reduce (2 actions)
-  state 507 on SUBASSIGN: reduce/reduce (2 actions)
-  state 507 on MULASSIGN: reduce/reduce (2 actions)
-  state 507 on DIVASSIGN: reduce/reduce (2 actions)
-  state 507 on MODASSIGN: reduce/reduce (2 actions)
-  state 507 on SHLASSIGN: reduce/reduce (2 actions)
-  state 507 on SHRASSIGN: reduce/reduce (2 actions)
-  state 507 on ANDASSIGN: reduce/reduce (2 actions)
-  state 507 on XORASSIGN: reduce/reduce (2 actions)
-  state 507 on ORASSIGN: reduce/reduce (2 actions)
-  state 507 on ATASSIGN: reduce/reduce (2 actions)
-  state 507 on PTR: reduce/reduce (2 actions)
-  state 519 on "bitflag enum": shift/reduce (2 actions)
-  state 519 on "public": shift/reduce (2 actions)
-  state 519 on "protected": shift/reduce (2 actions)
-  state 519 on "{": shift/reduce (3 actions)
-  state 519 on ";": shift/reduce (3 actions)
-  state 519 on "unsafe": shift/reduce (2 actions)
-  state 519 on "[": shift/reduce (3 actions)
-  state 519 on "dyfield": shift/reduce (2 actions)
-  state 519 on "}": shift/reduce (3 actions)
-  state 519 on "+": shift/reduce (3 actions)
-  state 519 on "-": shift/reduce (3 actions)
-  state 519 on "~": shift/reduce (3 actions)
-  state 519 on "&": shift/reduce (3 actions)
-  state 519 on "*": shift/reduce (3 actions)
-  state 519 on INC: shift/reduce (3 actions)
-  state 519 on DEC: shift/reduce (3 actions)
-  state 519 on "(": shift/reduce (3 actions)
-  state 519 on ID: shift/reduce (3 actions)
-  state 519 on "typeof": shift/reduce (2 actions)
-  state 519 on "struct": shift/reduce (2 actions)
-  state 519 on "union": shift/reduce (2 actions)
-  state 519 on "class": shift/reduce (2 actions)
-  state 519 on "opaque class": shift/reduce (2 actions)
-  state 519 on "enum": shift/reduce (2 actions)
-  state 519 on "get": reduce/reduce (2 actions)
-  state 519 on "set": reduce/reduce (2 actions)
-  state 519 on "construct": reduce/reduce (2 actions)
-  state 519 on "destruct": reduce/reduce (2 actions)
-  state 519 on "static construct": reduce/reduce (2 actions)
-  state 519 on "operator": reduce/reduce (2 actions)
-  state 519 on "postfix operator": reduce/reduce (2 actions)
-  state 519 on "const": reduce/reduce (2 actions)
-  state 519 on ":": reduce/reduce (2 actions)
-  state 519 on "=": reduce/reduce (2 actions)
-  state 519 on ",": reduce/reduce (2 actions)
-  state 519 on REFASSIGN: reduce/reduce (2 actions)
-  state 519 on ")": reduce/reduce (2 actions)
-  state 519 on "]": reduce/reduce (2 actions)
-  state 519 on ".": reduce/reduce (2 actions)
-  state 519 on LOGOR: reduce/reduce (2 actions)
-  state 519 on LOGAND: reduce/reduce (2 actions)
-  state 519 on "|": reduce/reduce (2 actions)
-  state 519 on "^": reduce/reduce (2 actions)
-  state 519 on EQ: reduce/reduce (2 actions)
-  state 519 on NE: reduce/reduce (2 actions)
-  state 519 on MATCH: reduce/reduce (2 actions)
-  state 519 on NOTMATCH: reduce/reduce (2 actions)
-  state 519 on "<": reduce/reduce (2 actions)
-  state 519 on ">": reduce/reduce (2 actions)
-  state 519 on LE: reduce/reduce (2 actions)
-  state 519 on GE: reduce/reduce (2 actions)
-  state 519 on SHL: reduce/reduce (2 actions)
-  state 519 on SHR: reduce/reduce (2 actions)
-  state 519 on "/": reduce/reduce (2 actions)
-  state 519 on "%": reduce/reduce (2 actions)
-  state 519 on "@": reduce/reduce (2 actions)
-  state 519 on "?": reduce/reduce (2 actions)
-  state 519 on ADDASSIGN: reduce/reduce (2 actions)
-  state 519 on SUBASSIGN: reduce/reduce (2 actions)
-  state 519 on MULASSIGN: reduce/reduce (2 actions)
-  state 519 on DIVASSIGN: reduce/reduce (2 actions)
-  state 519 on MODASSIGN: reduce/reduce (2 actions)
-  state 519 on SHLASSIGN: reduce/reduce (2 actions)
-  state 519 on SHRASSIGN: reduce/reduce (2 actions)
-  state 519 on ANDASSIGN: reduce/reduce (2 actions)
-  state 519 on XORASSIGN: reduce/reduce (2 actions)
-  state 519 on ORASSIGN: reduce/reduce (2 actions)
-  state 519 on ATASSIGN: reduce/reduce (2 actions)
-  state 519 on PTR: reduce/reduce (2 actions)
-  state 526 on ")": reduce/reduce (2 actions)
+  state 477 on ")": reduce/reduce (2 actions)
+  state 495 on ")": reduce/reduce (2 actions)
+  state 500 on "=": shift/reduce (2 actions)
+  state 508 on "opaque class": shift/reduce (2 actions)
+  state 508 on "enum": shift/reduce (2 actions)
+  state 508 on "bitflag enum": shift/reduce (2 actions)
+  state 508 on "public": shift/reduce (2 actions)
+  state 508 on "protected": shift/reduce (2 actions)
+  state 508 on "{": shift/reduce (3 actions)
+  state 508 on ";": shift/reduce (3 actions)
+  state 508 on "unsafe": shift/reduce (2 actions)
+  state 508 on "[": shift/reduce (3 actions)
+  state 508 on "dyfield": shift/reduce (2 actions)
+  state 508 on "+": shift/reduce (3 actions)
+  state 508 on "-": shift/reduce (3 actions)
+  state 508 on "~": shift/reduce (3 actions)
+  state 508 on "&": shift/reduce (3 actions)
+  state 508 on "*": shift/reduce (3 actions)
+  state 508 on INC: shift/reduce (3 actions)
+  state 508 on DEC: shift/reduce (3 actions)
+  state 508 on "(": shift/reduce (3 actions)
+  state 508 on ID: shift/reduce (3 actions)
+  state 508 on "typeof": shift/reduce (2 actions)
+  state 508 on "struct": shift/reduce (2 actions)
+  state 508 on "union": shift/reduce (2 actions)
+  state 508 on "class": shift/reduce (2 actions)
+  state 508 on "get": reduce/reduce (2 actions)
+  state 508 on "set": reduce/reduce (2 actions)
+  state 508 on "construct": reduce/reduce (2 actions)
+  state 508 on "destruct": reduce/reduce (2 actions)
+  state 508 on "static construct": reduce/reduce (2 actions)
+  state 508 on "operator": reduce/reduce (2 actions)
+  state 508 on "postfix operator": reduce/reduce (2 actions)
+  state 508 on "const": reduce/reduce (2 actions)
+  state 508 on ":": reduce/reduce (2 actions)
+  state 508 on "=": reduce/reduce (2 actions)
+  state 508 on ",": reduce/reduce (2 actions)
+  state 508 on REFASSIGN: reduce/reduce (2 actions)
+  state 508 on ")": reduce/reduce (2 actions)
+  state 508 on "]": reduce/reduce (2 actions)
+  state 508 on "}": reduce/reduce (2 actions)
+  state 508 on ".": reduce/reduce (2 actions)
+  state 508 on LOGOR: reduce/reduce (2 actions)
+  state 508 on LOGAND: reduce/reduce (2 actions)
+  state 508 on "|": reduce/reduce (2 actions)
+  state 508 on "^": reduce/reduce (2 actions)
+  state 508 on EQ: reduce/reduce (2 actions)
+  state 508 on NE: reduce/reduce (2 actions)
+  state 508 on MATCH: reduce/reduce (2 actions)
+  state 508 on NOTMATCH: reduce/reduce (2 actions)
+  state 508 on "<": reduce/reduce (2 actions)
+  state 508 on ">": reduce/reduce (2 actions)
+  state 508 on LE: reduce/reduce (2 actions)
+  state 508 on GE: reduce/reduce (2 actions)
+  state 508 on SHL: reduce/reduce (2 actions)
+  state 508 on SHR: reduce/reduce (2 actions)
+  state 508 on "/": reduce/reduce (2 actions)
+  state 508 on "%": reduce/reduce (2 actions)
+  state 508 on "@": reduce/reduce (2 actions)
+  state 508 on "?": reduce/reduce (2 actions)
+  state 508 on ADDASSIGN: reduce/reduce (2 actions)
+  state 508 on SUBASSIGN: reduce/reduce (2 actions)
+  state 508 on MULASSIGN: reduce/reduce (2 actions)
+  state 508 on DIVASSIGN: reduce/reduce (2 actions)
+  state 508 on MODASSIGN: reduce/reduce (2 actions)
+  state 508 on SHLASSIGN: reduce/reduce (2 actions)
+  state 508 on SHRASSIGN: reduce/reduce (2 actions)
+  state 508 on ANDASSIGN: reduce/reduce (2 actions)
+  state 508 on XORASSIGN: reduce/reduce (2 actions)
+  state 508 on ORASSIGN: reduce/reduce (2 actions)
+  state 508 on ATASSIGN: reduce/reduce (2 actions)
+  state 508 on PTR: reduce/reduce (2 actions)
+  state 509 on "opaque class": shift/reduce (2 actions)
+  state 509 on "enum": shift/reduce (2 actions)
+  state 509 on "bitflag enum": shift/reduce (2 actions)
+  state 509 on "public": shift/reduce (2 actions)
+  state 509 on "protected": shift/reduce (2 actions)
+  state 509 on "{": shift/reduce (3 actions)
+  state 509 on ";": shift/reduce (3 actions)
+  state 509 on "unsafe": shift/reduce (2 actions)
+  state 509 on "[": shift/reduce (3 actions)
+  state 509 on "dyfield": shift/reduce (2 actions)
+  state 509 on "+": shift/reduce (3 actions)
+  state 509 on "-": shift/reduce (3 actions)
+  state 509 on "~": shift/reduce (3 actions)
+  state 509 on "&": shift/reduce (3 actions)
+  state 509 on "*": shift/reduce (3 actions)
+  state 509 on INC: shift/reduce (3 actions)
+  state 509 on DEC: shift/reduce (3 actions)
+  state 509 on "(": shift/reduce (3 actions)
+  state 509 on ID: shift/reduce (3 actions)
+  state 509 on "typeof": shift/reduce (2 actions)
+  state 509 on "struct": shift/reduce (2 actions)
+  state 509 on "union": shift/reduce (2 actions)
+  state 509 on "class": shift/reduce (2 actions)
+  state 509 on "get": reduce/reduce (2 actions)
+  state 509 on "set": reduce/reduce (2 actions)
+  state 509 on "construct": reduce/reduce (2 actions)
+  state 509 on "destruct": reduce/reduce (2 actions)
+  state 509 on "static construct": reduce/reduce (2 actions)
+  state 509 on "operator": reduce/reduce (2 actions)
+  state 509 on "postfix operator": reduce/reduce (2 actions)
+  state 509 on "const": reduce/reduce (2 actions)
+  state 509 on ":": reduce/reduce (2 actions)
+  state 509 on "=": reduce/reduce (2 actions)
+  state 509 on ",": reduce/reduce (2 actions)
+  state 509 on REFASSIGN: reduce/reduce (2 actions)
+  state 509 on ")": reduce/reduce (2 actions)
+  state 509 on "]": reduce/reduce (2 actions)
+  state 509 on "}": reduce/reduce (2 actions)
+  state 509 on ".": reduce/reduce (2 actions)
+  state 509 on LOGOR: reduce/reduce (2 actions)
+  state 509 on LOGAND: reduce/reduce (2 actions)
+  state 509 on "|": reduce/reduce (2 actions)
+  state 509 on "^": reduce/reduce (2 actions)
+  state 509 on EQ: reduce/reduce (2 actions)
+  state 509 on NE: reduce/reduce (2 actions)
+  state 509 on MATCH: reduce/reduce (2 actions)
+  state 509 on NOTMATCH: reduce/reduce (2 actions)
+  state 509 on "<": reduce/reduce (2 actions)
+  state 509 on ">": reduce/reduce (2 actions)
+  state 509 on LE: reduce/reduce (2 actions)
+  state 509 on GE: reduce/reduce (2 actions)
+  state 509 on SHL: reduce/reduce (2 actions)
+  state 509 on SHR: reduce/reduce (2 actions)
+  state 509 on "/": reduce/reduce (2 actions)
+  state 509 on "%": reduce/reduce (2 actions)
+  state 509 on "@": reduce/reduce (2 actions)
+  state 509 on "?": reduce/reduce (2 actions)
+  state 509 on ADDASSIGN: reduce/reduce (2 actions)
+  state 509 on SUBASSIGN: reduce/reduce (2 actions)
+  state 509 on MULASSIGN: reduce/reduce (2 actions)
+  state 509 on DIVASSIGN: reduce/reduce (2 actions)
+  state 509 on MODASSIGN: reduce/reduce (2 actions)
+  state 509 on SHLASSIGN: reduce/reduce (2 actions)
+  state 509 on SHRASSIGN: reduce/reduce (2 actions)
+  state 509 on ANDASSIGN: reduce/reduce (2 actions)
+  state 509 on XORASSIGN: reduce/reduce (2 actions)
+  state 509 on ORASSIGN: reduce/reduce (2 actions)
+  state 509 on ATASSIGN: reduce/reduce (2 actions)
+  state 509 on PTR: reduce/reduce (2 actions)
+  state 521 on "opaque class": shift/reduce (2 actions)
+  state 521 on "enum": shift/reduce (2 actions)
+  state 521 on "bitflag enum": shift/reduce (2 actions)
+  state 521 on "public": shift/reduce (2 actions)
+  state 521 on "protected": shift/reduce (2 actions)
+  state 521 on "{": shift/reduce (3 actions)
+  state 521 on ";": shift/reduce (3 actions)
+  state 521 on "unsafe": shift/reduce (2 actions)
+  state 521 on "[": shift/reduce (3 actions)
+  state 521 on "dyfield": shift/reduce (2 actions)
+  state 521 on "}": shift/reduce (3 actions)
+  state 521 on "+": shift/reduce (3 actions)
+  state 521 on "-": shift/reduce (3 actions)
+  state 521 on "~": shift/reduce (3 actions)
+  state 521 on "&": shift/reduce (3 actions)
+  state 521 on "*": shift/reduce (3 actions)
+  state 521 on INC: shift/reduce (3 actions)
+  state 521 on DEC: shift/reduce (3 actions)
+  state 521 on "(": shift/reduce (3 actions)
+  state 521 on ID: shift/reduce (3 actions)
+  state 521 on "typeof": shift/reduce (2 actions)
+  state 521 on "struct": shift/reduce (2 actions)
+  state 521 on "union": shift/reduce (2 actions)
+  state 521 on "class": shift/reduce (2 actions)
+  state 521 on "get": reduce/reduce (2 actions)
+  state 521 on "set": reduce/reduce (2 actions)
+  state 521 on "construct": reduce/reduce (2 actions)
+  state 521 on "destruct": reduce/reduce (2 actions)
+  state 521 on "static construct": reduce/reduce (2 actions)
+  state 521 on "operator": reduce/reduce (2 actions)
+  state 521 on "postfix operator": reduce/reduce (2 actions)
+  state 521 on "const": reduce/reduce (2 actions)
+  state 521 on ":": reduce/reduce (2 actions)
+  state 521 on "=": reduce/reduce (2 actions)
+  state 521 on ",": reduce/reduce (2 actions)
+  state 521 on REFASSIGN: reduce/reduce (2 actions)
+  state 521 on ")": reduce/reduce (2 actions)
+  state 521 on "]": reduce/reduce (2 actions)
+  state 521 on ".": reduce/reduce (2 actions)
+  state 521 on LOGOR: reduce/reduce (2 actions)
+  state 521 on LOGAND: reduce/reduce (2 actions)
+  state 521 on "|": reduce/reduce (2 actions)
+  state 521 on "^": reduce/reduce (2 actions)
+  state 521 on EQ: reduce/reduce (2 actions)
+  state 521 on NE: reduce/reduce (2 actions)
+  state 521 on MATCH: reduce/reduce (2 actions)
+  state 521 on NOTMATCH: reduce/reduce (2 actions)
+  state 521 on "<": reduce/reduce (2 actions)
+  state 521 on ">": reduce/reduce (2 actions)
+  state 521 on LE: reduce/reduce (2 actions)
+  state 521 on GE: reduce/reduce (2 actions)
+  state 521 on SHL: reduce/reduce (2 actions)
+  state 521 on SHR: reduce/reduce (2 actions)
+  state 521 on "/": reduce/reduce (2 actions)
+  state 521 on "%": reduce/reduce (2 actions)
+  state 521 on "@": reduce/reduce (2 actions)
+  state 521 on "?": reduce/reduce (2 actions)
+  state 521 on ADDASSIGN: reduce/reduce (2 actions)
+  state 521 on SUBASSIGN: reduce/reduce (2 actions)
+  state 521 on MULASSIGN: reduce/reduce (2 actions)
+  state 521 on DIVASSIGN: reduce/reduce (2 actions)
+  state 521 on MODASSIGN: reduce/reduce (2 actions)
+  state 521 on SHLASSIGN: reduce/reduce (2 actions)
+  state 521 on SHRASSIGN: reduce/reduce (2 actions)
+  state 521 on ANDASSIGN: reduce/reduce (2 actions)
+  state 521 on XORASSIGN: reduce/reduce (2 actions)
+  state 521 on ORASSIGN: reduce/reduce (2 actions)
+  state 521 on ATASSIGN: reduce/reduce (2 actions)
+  state 521 on PTR: reduce/reduce (2 actions)
   state 528 on ")": reduce/reduce (2 actions)
+  state 530 on ")": reduce/reduce (2 actions)
+  state 538 on "opaque class": shift/reduce (2 actions)
+  state 538 on "enum": shift/reduce (2 actions)
   state 538 on "bitflag enum": shift/reduce (2 actions)
   state 538 on "public": shift/reduce (2 actions)
   state 538 on "protected": shift/reduce (2 actions)
@@ -1169,8 +1173,6 @@ conflicts left to the GLR driver: 1423
   state 538 on "struct": shift/reduce (2 actions)
   state 538 on "union": shift/reduce (2 actions)
   state 538 on "class": shift/reduce (2 actions)
-  state 538 on "opaque class": shift/reduce (2 actions)
-  state 538 on "enum": shift/reduce (2 actions)
   state 538 on "get": reduce/reduce (2 actions)
   state 538 on "set": reduce/reduce (2 actions)
   state 538 on "construct": reduce/reduce (2 actions)
@@ -1216,75 +1218,8 @@ conflicts left to the GLR driver: 1423
   state 538 on ORASSIGN: reduce/reduce (2 actions)
   state 538 on ATASSIGN: reduce/reduce (2 actions)
   state 538 on PTR: reduce/reduce (2 actions)
-  state 544 on "bitflag enum": shift/reduce (2 actions)
-  state 544 on "public": shift/reduce (2 actions)
-  state 544 on "protected": shift/reduce (2 actions)
-  state 544 on "{": shift/reduce (3 actions)
-  state 544 on ";": shift/reduce (3 actions)
-  state 544 on "unsafe": shift/reduce (2 actions)
-  state 544 on "[": shift/reduce (3 actions)
-  state 544 on "dyfield": shift/reduce (2 actions)
-  state 544 on "+": shift/reduce (3 actions)
-  state 544 on "-": shift/reduce (3 actions)
-  state 544 on "~": shift/reduce (3 actions)
-  state 544 on "&": shift/reduce (3 actions)
-  state 544 on "*": shift/reduce (3 actions)
-  state 544 on INC: shift/reduce (3 actions)
-  state 544 on DEC: shift/reduce (3 actions)
-  state 544 on "(": shift/reduce (3 actions)
-  state 544 on ID: shift/reduce (3 actions)
-  state 544 on "typeof": shift/reduce (2 actions)
-  state 544 on "}": shift/reduce (3 actions)
-  state 544 on "struct": shift/reduce (2 actions)
-  state 544 on "union": shift/reduce (2 actions)
-  state 544 on "class": shift/reduce (2 actions)
-  state 544 on "opaque class": shift/reduce (2 actions)
-  state 544 on "enum": shift/reduce (2 actions)
-  state 544 on "get": reduce/reduce (2 actions)
-  state 544 on "set": reduce/reduce (2 actions)
-  state 544 on "construct": reduce/reduce (2 actions)
-  state 544 on "destruct": reduce/reduce (2 actions)
-  state 544 on "static construct": reduce/reduce (2 actions)
-  state 544 on "operator": reduce/reduce (2 actions)
-  state 544 on "postfix operator": reduce/reduce (2 actions)
-  state 544 on "const": reduce/reduce (2 actions)
-  state 544 on ":": reduce/reduce (2 actions)
-  state 544 on "=": reduce/reduce (2 actions)
-  state 544 on ",": reduce/reduce (2 actions)
-  state 544 on REFASSIGN: reduce/reduce (2 actions)
-  state 544 on ")": reduce/reduce (2 actions)
-  state 544 on "]": reduce/reduce (2 actions)
-  state 544 on ".": reduce/reduce (2 actions)
-  state 544 on LOGOR: reduce/reduce (2 actions)
-  state 544 on LOGAND: reduce/reduce (2 actions)
-  state 544 on "|": reduce/reduce (2 actions)
-  state 544 on "^": reduce/reduce (2 actions)
-  state 544 on EQ: reduce/reduce (2 actions)
-  state 544 on NE: reduce/reduce (2 actions)
-  state 544 on MATCH: reduce/reduce (2 actions)
-  state 544 on NOTMATCH: reduce/reduce (2 actions)
-  state 544 on "<": reduce/reduce (2 actions)
-  state 544 on ">": reduce/reduce (2 actions)
-  state 544 on LE: reduce/reduce (2 actions)
-  state 544 on GE: reduce/reduce (2 actions)
-  state 544 on SHL: reduce/reduce (2 actions)
-  state 544 on SHR: reduce/reduce (2 actions)
-  state 544 on "/": reduce/reduce (2 actions)
-  state 544 on "%": reduce/reduce (2 actions)
-  state 544 on "@": reduce/reduce (2 actions)
-  state 544 on "?": reduce/reduce (2 actions)
-  state 544 on ADDASSIGN: reduce/reduce (2 actions)
-  state 544 on SUBASSIGN: reduce/reduce (2 actions)
-  state 544 on MULASSIGN: reduce/reduce (2 actions)
-  state 544 on DIVASSIGN: reduce/reduce (2 actions)
-  state 544 on MODASSIGN: reduce/reduce (2 actions)
-  state 544 on SHLASSIGN: reduce/reduce (2 actions)
-  state 544 on SHRASSIGN: reduce/reduce (2 actions)
-  state 544 on ANDASSIGN: reduce/reduce (2 actions)
-  state 544 on XORASSIGN: reduce/reduce (2 actions)
-  state 544 on ORASSIGN: reduce/reduce (2 actions)
-  state 544 on ATASSIGN: reduce/reduce (2 actions)
-  state 544 on PTR: reduce/reduce (2 actions)
+  state 546 on "opaque class": shift/reduce (2 actions)
+  state 546 on "enum": shift/reduce (2 actions)
   state 546 on "bitflag enum": shift/reduce (2 actions)
   state 546 on "public": shift/reduce (2 actions)
   state 546 on "protected": shift/reduce (2 actions)
@@ -1307,8 +1242,6 @@ conflicts left to the GLR driver: 1423
   state 546 on "struct": shift/reduce (2 actions)
   state 546 on "union": shift/reduce (2 actions)
   state 546 on "class": shift/reduce (2 actions)
-  state 546 on "opaque class": shift/reduce (2 actions)
-  state 546 on "enum": shift/reduce (2 actions)
   state 546 on "get": reduce/reduce (2 actions)
   state 546 on "set": reduce/reduce (2 actions)
   state 546 on "construct": reduce/reduce (2 actions)
@@ -1354,431 +1287,500 @@ conflicts left to the GLR driver: 1423
   state 546 on ORASSIGN: reduce/reduce (2 actions)
   state 546 on ATASSIGN: reduce/reduce (2 actions)
   state 546 on PTR: reduce/reduce (2 actions)
-  state 549 on "bitflag enum": shift/reduce (2 actions)
-  state 549 on "public": shift/reduce (2 actions)
-  state 549 on "protected": shift/reduce (2 actions)
-  state 549 on "{": shift/reduce (3 actions)
-  state 549 on ";": shift/reduce (3 actions)
-  state 549 on "unsafe": shift/reduce (2 actions)
-  state 549 on "[": shift/reduce (3 actions)
-  state 549 on "dyfield": shift/reduce (2 actions)
-  state 549 on "+": shift/reduce (3 actions)
-  state 549 on "-": shift/reduce (3 actions)
-  state 549 on "~": shift/reduce (3 actions)
-  state 549 on "&": shift/reduce (3 actions)
-  state 549 on "*": shift/reduce (3 actions)
-  state 549 on INC: shift/reduce (3 actions)
-  state 549 on DEC: shift/reduce (3 actions)
-  state 549 on "(": shift/reduce (3 actions)
-  state 549 on ID: shift/reduce (3 actions)
-  state 549 on "typeof": shift/reduce (2 actions)
-  state 549 on "}": shift/reduce (3 actions)
-  state 549 on "struct": shift/reduce (2 actions)
-  state 549 on "union": shift/reduce (2 actions)
-  state 549 on "class": shift/reduce (2 actions)
-  state 549 on "opaque class": shift/reduce (2 actions)
-  state 549 on "enum": shift/reduce (2 actions)
-  state 549 on "get": reduce/reduce (2 actions)
-  state 549 on "set": reduce/reduce (2 actions)
-  state 549 on "construct": reduce/reduce (2 actions)
-  state 549 on "destruct": reduce/reduce (2 actions)
-  state 549 on "static construct": reduce/reduce (2 actions)
-  state 549 on "operator": reduce/reduce (2 actions)
-  state 549 on "postfix operator": reduce/reduce (2 actions)
-  state 549 on "const": reduce/reduce (2 actions)
-  state 549 on ":": reduce/reduce (2 actions)
-  state 549 on "=": reduce/reduce (2 actions)
-  state 549 on ",": reduce/reduce (2 actions)
-  state 549 on REFASSIGN: reduce/reduce (2 actions)
-  state 549 on ")": reduce/reduce (2 actions)
-  state 549 on "]": reduce/reduce (2 actions)
-  state 549 on ".": reduce/reduce (2 actions)
-  state 549 on LOGOR: reduce/reduce (2 actions)
-  state 549 on LOGAND: reduce/reduce (2 actions)
-  state 549 on "|": reduce/reduce (2 actions)
-  state 549 on "^": reduce/reduce (2 actions)
-  state 549 on EQ: reduce/reduce (2 actions)
-  state 549 on NE: reduce/reduce (2 actions)
-  state 549 on MATCH: reduce/reduce (2 actions)
-  state 549 on NOTMATCH: reduce/reduce (2 actions)
-  state 549 on "<": reduce/reduce (2 actions)
-  state 549 on ">": reduce/reduce (2 actions)
-  state 549 on LE: reduce/reduce (2 actions)
-  state 549 on GE: reduce/reduce (2 actions)
-  state 549 on SHL: reduce/reduce (2 actions)
-  state 549 on SHR: reduce/reduce (2 actions)
-  state 549 on "/": reduce/reduce (2 actions)
-  state 549 on "%": reduce/reduce (2 actions)
-  state 549 on "@": reduce/reduce (2 actions)
-  state 549 on "?": reduce/reduce (2 actions)
-  state 549 on ADDASSIGN: reduce/reduce (2 actions)
-  state 549 on SUBASSIGN: reduce/reduce (2 actions)
-  state 549 on MULASSIGN: reduce/reduce (2 actions)
-  state 549 on DIVASSIGN: reduce/reduce (2 actions)
-  state 549 on MODASSIGN: reduce/reduce (2 actions)
-  state 549 on SHLASSIGN: reduce/reduce (2 actions)
-  state 549 on SHRASSIGN: reduce/reduce (2 actions)
-  state 549 on ANDASSIGN: reduce/reduce (2 actions)
-  state 549 on XORASSIGN: reduce/reduce (2 actions)
-  state 549 on ORASSIGN: reduce/reduce (2 actions)
-  state 549 on ATASSIGN: reduce/reduce (2 actions)
-  state 549 on PTR: reduce/reduce (2 actions)
-  state 564 on "+": shift/reduce (2 actions)
-  state 564 on "-": shift/reduce (2 actions)
-  state 564 on "~": shift/reduce (2 actions)
-  state 564 on "&": shift/reduce (2 actions)
-  state 564 on "*": shift/reduce (2 actions)
-  state 564 on INC: shift/reduce (2 actions)
-  state 564 on DEC: shift/reduce (2 actions)
-  state 564 on "(": shift/reduce (2 actions)
-  state 564 on ID: shift/reduce (2 actions)
-  state 564 on "typeof": shift/reduce (2 actions)
-  state 564 on ")": reduce/reduce (3 actions)
-  state 564 on ",": reduce/reduce (2 actions)
-  state 596 on "bitflag enum": shift/reduce (2 actions)
-  state 596 on "public": shift/reduce (2 actions)
-  state 596 on "protected": shift/reduce (2 actions)
-  state 596 on "{": shift/reduce (3 actions)
-  state 596 on ";": shift/reduce (3 actions)
-  state 596 on "unsafe": shift/reduce (2 actions)
-  state 596 on "[": shift/reduce (3 actions)
-  state 596 on "dyfield": shift/reduce (2 actions)
-  state 596 on "+": shift/reduce (3 actions)
-  state 596 on "-": shift/reduce (3 actions)
-  state 596 on "~": shift/reduce (3 actions)
-  state 596 on "&": shift/reduce (3 actions)
-  state 596 on "*": shift/reduce (3 actions)
-  state 596 on INC: shift/reduce (3 actions)
-  state 596 on DEC: shift/reduce (3 actions)
-  state 596 on "(": shift/reduce (3 actions)
-  state 596 on ID: shift/reduce (3 actions)
-  state 596 on "typeof": shift/reduce (2 actions)
-  state 596 on "}": shift/reduce (3 actions)
-  state 596 on "struct": shift/reduce (2 actions)
-  state 596 on "union": shift/reduce (2 actions)
-  state 596 on "class": shift/reduce (2 actions)
-  state 596 on "opaque class": shift/reduce (2 actions)
-  state 596 on "enum": shift/reduce (2 actions)
-  state 596 on "get": reduce/reduce (2 actions)
-  state 596 on "set": reduce/reduce (2 actions)
-  state 596 on "construct": reduce/reduce (2 actions)
-  state 596 on "destruct": reduce/reduce (2 actions)
-  state 596 on "static construct": reduce/reduce (2 actions)
-  state 596 on "operator": reduce/reduce (2 actions)
-  state 596 on "postfix operator": reduce/reduce (2 actions)
-  state 596 on "const": reduce/reduce (2 actions)
-  state 596 on ":": reduce/reduce (2 actions)
-  state 596 on "=": reduce/reduce (2 actions)
-  state 596 on ",": reduce/reduce (2 actions)
-  state 596 on REFASSIGN: reduce/reduce (2 actions)
-  state 596 on ")": reduce/reduce (2 actions)
-  state 596 on "]": reduce/reduce (2 actions)
-  state 596 on ".": reduce/reduce (2 actions)
-  state 596 on LOGOR: reduce/reduce (2 actions)
-  state 596 on LOGAND: reduce/reduce (2 actions)
-  state 596 on "|": reduce/reduce (2 actions)
-  state 596 on "^": reduce/reduce (2 actions)
-  state 596 on EQ: reduce/reduce (2 actions)
-  state 596 on NE: reduce/reduce (2 actions)
-  state 596 on MATCH: reduce/reduce (2 actions)
-  state 596 on NOTMATCH: reduce/reduce (2 actions)
-  state 596 on "<": reduce/reduce (2 actions)
-  state 596 on ">": reduce/reduce (2 actions)
-  state 596 on LE: reduce/reduce (2 actions)
-  state 596 on GE: reduce/reduce (2 actions)
-  state 596 on SHL: reduce/reduce (2 actions)
-  state 596 on SHR: reduce/reduce (2 actions)
-  state 596 on "/": reduce/reduce (2 actions)
-  state 596 on "%": reduce/reduce (2 actions)
-  state 596 on "@": reduce/reduce (2 actions)
-  state 596 on "?": reduce/reduce (2 actions)
-  state 596 on ADDASSIGN: reduce/reduce (2 actions)
-  state 596 on SUBASSIGN: reduce/reduce (2 actions)
-  state 596 on MULASSIGN: reduce/reduce (2 actions)
-  state 596 on DIVASSIGN: reduce/reduce (2 actions)
-  state 596 on MODASSIGN: reduce/reduce (2 actions)
-  state 596 on SHLASSIGN: reduce/reduce (2 actions)
-  state 596 on SHRASSIGN: reduce/reduce (2 actions)
-  state 596 on ANDASSIGN: reduce/reduce (2 actions)
-  state 596 on XORASSIGN: reduce/reduce (2 actions)
-  state 596 on ORASSIGN: reduce/reduce (2 actions)
-  state 596 on ATASSIGN: reduce/reduce (2 actions)
-  state 596 on PTR: reduce/reduce (2 actions)
-  state 599 on "bitflag enum": shift/reduce (2 actions)
-  state 599 on "public": shift/reduce (2 actions)
-  state 599 on "protected": shift/reduce (2 actions)
-  state 599 on "{": shift/reduce (3 actions)
-  state 599 on ";": shift/reduce (3 actions)
-  state 599 on "unsafe": shift/reduce (2 actions)
-  state 599 on "[": shift/reduce (3 actions)
-  state 599 on "dyfield": shift/reduce (2 actions)
-  state 599 on "+": shift/reduce (3 actions)
-  state 599 on "-": shift/reduce (3 actions)
-  state 599 on "~": shift/reduce (3 actions)
-  state 599 on "&": shift/reduce (3 actions)
-  state 599 on "*": shift/reduce (3 actions)
-  state 599 on INC: shift/reduce (3 actions)
-  state 599 on DEC: shift/reduce (3 actions)
-  state 599 on "(": shift/reduce (3 actions)
-  state 599 on ID: shift/reduce (3 actions)
-  state 599 on "typeof": shift/reduce (2 actions)
-  state 599 on "}": shift/reduce (3 actions)
-  state 599 on "struct": shift/reduce (2 actions)
-  state 599 on "union": shift/reduce (2 actions)
-  state 599 on "class": shift/reduce (2 actions)
-  state 599 on "opaque class": shift/reduce (2 actions)
-  state 599 on "enum": shift/reduce (2 actions)
-  state 599 on "get": reduce/reduce (2 actions)
-  state 599 on "set": reduce/reduce (2 actions)
-  state 599 on "construct": reduce/reduce (2 actions)
-  state 599 on "destruct": reduce/reduce (2 actions)
-  state 599 on "static construct": reduce/reduce (2 actions)
-  state 599 on "operator": reduce/reduce (2 actions)
-  state 599 on "postfix operator": reduce/reduce (2 actions)
-  state 599 on "const": reduce/reduce (2 actions)
-  state 599 on ":": reduce/reduce (2 actions)
-  state 599 on "=": reduce/reduce (2 actions)
-  state 599 on ",": reduce/reduce (2 actions)
-  state 599 on REFASSIGN: reduce/reduce (2 actions)
-  state 599 on ")": reduce/reduce (2 actions)
-  state 599 on "]": reduce/reduce (2 actions)
-  state 599 on ".": reduce/reduce (2 actions)
-  state 599 on LOGOR: reduce/reduce (2 actions)
-  state 599 on LOGAND: reduce/reduce (2 actions)
-  state 599 on "|": reduce/reduce (2 actions)
-  state 599 on "^": reduce/reduce (2 actions)
-  state 599 on EQ: reduce/reduce (2 actions)
-  state 599 on NE: reduce/reduce (2 actions)
-  state 599 on MATCH: reduce/reduce (2 actions)
-  state 599 on NOTMATCH: reduce/reduce (2 actions)
-  state 599 on "<": reduce/reduce (2 actions)
-  state 599 on ">": reduce/reduce (2 actions)
-  state 599 on LE: reduce/reduce (2 actions)
-  state 599 on GE: reduce/reduce (2 actions)
-  state 599 on SHL: reduce/reduce (2 actions)
-  state 599 on SHR: reduce/reduce (2 actions)
-  state 599 on "/": reduce/reduce (2 actions)
-  state 599 on "%": reduce/reduce (2 actions)
-  state 599 on "@": reduce/reduce (2 actions)
-  state 599 on "?": reduce/reduce (2 actions)
-  state 599 on ADDASSIGN: reduce/reduce (2 actions)
-  state 599 on SUBASSIGN: reduce/reduce (2 actions)
-  state 599 on MULASSIGN: reduce/reduce (2 actions)
-  state 599 on DIVASSIGN: reduce/reduce (2 actions)
-  state 599 on MODASSIGN: reduce/reduce (2 actions)
-  state 599 on SHLASSIGN: reduce/reduce (2 actions)
-  state 599 on SHRASSIGN: reduce/reduce (2 actions)
-  state 599 on ANDASSIGN: reduce/reduce (2 actions)
-  state 599 on XORASSIGN: reduce/reduce (2 actions)
-  state 599 on ORASSIGN: reduce/reduce (2 actions)
-  state 599 on ATASSIGN: reduce/reduce (2 actions)
-  state 599 on PTR: reduce/reduce (2 actions)
-  state 608 on ")": reduce/reduce (2 actions)
-  state 609 on ")": shift/reduce (2 actions)
-  state 617 on "bitflag enum": shift/reduce (2 actions)
-  state 617 on "public": shift/reduce (2 actions)
-  state 617 on "protected": shift/reduce (2 actions)
-  state 617 on "{": shift/reduce (3 actions)
-  state 617 on ";": shift/reduce (3 actions)
-  state 617 on "unsafe": shift/reduce (2 actions)
-  state 617 on "[": shift/reduce (3 actions)
-  state 617 on "dyfield": shift/reduce (2 actions)
-  state 617 on "+": shift/reduce (3 actions)
-  state 617 on "-": shift/reduce (3 actions)
-  state 617 on "~": shift/reduce (3 actions)
-  state 617 on "&": shift/reduce (3 actions)
-  state 617 on "*": shift/reduce (3 actions)
-  state 617 on INC: shift/reduce (3 actions)
-  state 617 on DEC: shift/reduce (3 actions)
-  state 617 on "(": shift/reduce (3 actions)
-  state 617 on ID: shift/reduce (3 actions)
-  state 617 on "typeof": shift/reduce (2 actions)
-  state 617 on "struct": shift/reduce (2 actions)
-  state 617 on "union": shift/reduce (2 actions)
-  state 617 on "class": shift/reduce (2 actions)
-  state 617 on "opaque class": shift/reduce (2 actions)
-  state 617 on "enum": shift/reduce (2 actions)
-  state 617 on "get": reduce/reduce (2 actions)
-  state 617 on "set": reduce/reduce (2 actions)
-  state 617 on "construct": reduce/reduce (2 actions)
-  state 617 on "destruct": reduce/reduce (2 actions)
-  state 617 on "static construct": reduce/reduce (2 actions)
-  state 617 on "operator": reduce/reduce (2 actions)
-  state 617 on "postfix operator": reduce/reduce (2 actions)
-  state 617 on "const": reduce/reduce (2 actions)
-  state 617 on ":": reduce/reduce (2 actions)
-  state 617 on "=": reduce/reduce (2 actions)
-  state 617 on ",": reduce/reduce (2 actions)
-  state 617 on REFASSIGN: reduce/reduce (2 actions)
-  state 617 on ")": reduce/reduce (2 actions)
-  state 617 on "]": reduce/reduce (2 actions)
-  state 617 on "}": reduce/reduce (2 actions)
-  state 617 on ".": reduce/reduce (2 actions)
-  state 617 on LOGOR: reduce/reduce (2 actions)
-  state 617 on LOGAND: reduce/reduce (2 actions)
-  state 617 on "|": reduce/reduce (2 actions)
-  state 617 on "^": reduce/reduce (2 actions)
-  state 617 on EQ: reduce/reduce (2 actions)
-  state 617 on NE: reduce/reduce (2 actions)
-  state 617 on MATCH: reduce/reduce (2 actions)
-  state 617 on NOTMATCH: reduce/reduce (2 actions)
-  state 617 on "<": reduce/reduce (2 actions)
-  state 617 on ">": reduce/reduce (2 actions)
-  state 617 on LE: reduce/reduce (2 actions)
-  state 617 on GE: reduce/reduce (2 actions)
-  state 617 on SHL: reduce/reduce (2 actions)
-  state 617 on SHR: reduce/reduce (2 actions)
-  state 617 on "/": reduce/reduce (2 actions)
-  state 617 on "%": reduce/reduce (2 actions)
-  state 617 on "@": reduce/reduce (2 actions)
-  state 617 on "?": reduce/reduce (2 actions)
-  state 617 on ADDASSIGN: reduce/reduce (2 actions)
-  state 617 on SUBASSIGN: reduce/reduce (2 actions)
-  state 617 on MULASSIGN: reduce/reduce (2 actions)
-  state 617 on DIVASSIGN: reduce/reduce (2 actions)
-  state 617 on MODASSIGN: reduce/reduce (2 actions)
-  state 617 on SHLASSIGN: reduce/reduce (2 actions)
-  state 617 on SHRASSIGN: reduce/reduce (2 actions)
-  state 617 on ANDASSIGN: reduce/reduce (2 actions)
-  state 617 on XORASSIGN: reduce/reduce (2 actions)
-  state 617 on ORASSIGN: reduce/reduce (2 actions)
-  state 617 on ATASSIGN: reduce/reduce (2 actions)
-  state 617 on PTR: reduce/reduce (2 actions)
-  state 620 on "bitflag enum": shift/reduce (2 actions)
-  state 620 on "public": shift/reduce (2 actions)
-  state 620 on "protected": shift/reduce (2 actions)
-  state 620 on "{": shift/reduce (3 actions)
-  state 620 on ";": shift/reduce (3 actions)
-  state 620 on "}": shift/reduce (3 actions)
-  state 620 on "unsafe": shift/reduce (2 actions)
-  state 620 on "[": shift/reduce (3 actions)
-  state 620 on "dyfield": shift/reduce (2 actions)
-  state 620 on "+": shift/reduce (3 actions)
-  state 620 on "-": shift/reduce (3 actions)
-  state 620 on "~": shift/reduce (3 actions)
-  state 620 on "&": shift/reduce (3 actions)
-  state 620 on "*": shift/reduce (3 actions)
-  state 620 on INC: shift/reduce (3 actions)
-  state 620 on DEC: shift/reduce (3 actions)
-  state 620 on "(": shift/reduce (3 actions)
-  state 620 on ID: shift/reduce (3 actions)
-  state 620 on "typeof": shift/reduce (2 actions)
-  state 620 on "struct": shift/reduce (2 actions)
-  state 620 on "union": shift/reduce (2 actions)
-  state 620 on "class": shift/reduce (2 actions)
-  state 620 on "opaque class": shift/reduce (2 actions)
-  state 620 on "enum": shift/reduce (2 actions)
-  state 620 on "get": reduce/reduce (2 actions)
-  state 620 on "set": reduce/reduce (2 actions)
-  state 620 on "construct": reduce/reduce (2 actions)
-  state 620 on "destruct": reduce/reduce (2 actions)
-  state 620 on "static construct": reduce/reduce (2 actions)
-  state 620 on "operator": reduce/reduce (2 actions)
-  state 620 on "postfix operator": reduce/reduce (2 actions)
-  state 620 on "const": reduce/reduce (2 actions)
-  state 620 on ":": reduce/reduce (2 actions)
-  state 620 on "=": reduce/reduce (2 actions)
-  state 620 on ",": reduce/reduce (2 actions)
-  state 620 on REFASSIGN: reduce/reduce (2 actions)
-  state 620 on ")": reduce/reduce (2 actions)
-  state 620 on "]": reduce/reduce (2 actions)
-  state 620 on ".": reduce/reduce (2 actions)
-  state 620 on LOGOR: reduce/reduce (2 actions)
-  state 620 on LOGAND: reduce/reduce (2 actions)
-  state 620 on "|": reduce/reduce (2 actions)
-  state 620 on "^": reduce/reduce (2 actions)
-  state 620 on EQ: reduce/reduce (2 actions)
-  state 620 on NE: reduce/reduce (2 actions)
-  state 620 on MATCH: reduce/reduce (2 actions)
-  state 620 on NOTMATCH: reduce/reduce (2 actions)
-  state 620 on "<": reduce/reduce (2 actions)
-  state 620 on ">": reduce/reduce (2 actions)
-  state 620 on LE: reduce/reduce (2 actions)
-  state 620 on GE: reduce/reduce (2 actions)
-  state 620 on SHL: reduce/reduce (2 actions)
-  state 620 on SHR: reduce/reduce (2 actions)
-  state 620 on "/": reduce/reduce (2 actions)
-  state 620 on "%": reduce/reduce (2 actions)
-  state 620 on "@": reduce/reduce (2 actions)
-  state 620 on "?": reduce/reduce (2 actions)
-  state 620 on ADDASSIGN: reduce/reduce (2 actions)
-  state 620 on SUBASSIGN: reduce/reduce (2 actions)
-  state 620 on MULASSIGN: reduce/reduce (2 actions)
-  state 620 on DIVASSIGN: reduce/reduce (2 actions)
-  state 620 on MODASSIGN: reduce/reduce (2 actions)
-  state 620 on SHLASSIGN: reduce/reduce (2 actions)
-  state 620 on SHRASSIGN: reduce/reduce (2 actions)
-  state 620 on ANDASSIGN: reduce/reduce (2 actions)
-  state 620 on XORASSIGN: reduce/reduce (2 actions)
-  state 620 on ORASSIGN: reduce/reduce (2 actions)
-  state 620 on ATASSIGN: reduce/reduce (2 actions)
-  state 620 on PTR: reduce/reduce (2 actions)
-  state 646 on "bitflag enum": shift/reduce (2 actions)
-  state 646 on "public": shift/reduce (2 actions)
-  state 646 on "protected": shift/reduce (2 actions)
-  state 646 on "{": shift/reduce (3 actions)
-  state 646 on ";": shift/reduce (3 actions)
-  state 646 on "unsafe": shift/reduce (2 actions)
-  state 646 on "[": shift/reduce (3 actions)
-  state 646 on "dyfield": shift/reduce (2 actions)
-  state 646 on "+": shift/reduce (3 actions)
-  state 646 on "-": shift/reduce (3 actions)
-  state 646 on "~": shift/reduce (3 actions)
-  state 646 on "&": shift/reduce (3 actions)
-  state 646 on "*": shift/reduce (3 actions)
-  state 646 on INC: shift/reduce (3 actions)
-  state 646 on DEC: shift/reduce (3 actions)
-  state 646 on "(": shift/reduce (3 actions)
-  state 646 on ID: shift/reduce (3 actions)
-  state 646 on "typeof": shift/reduce (2 actions)
-  state 646 on "struct": shift/reduce (2 actions)
-  state 646 on "union": shift/reduce (2 actions)
-  state 646 on "class": shift/reduce (2 actions)
-  state 646 on "opaque class": shift/reduce (2 actions)
-  state 646 on "enum": shift/reduce (2 actions)
-  state 646 on "get": reduce/reduce (2 actions)
-  state 646 on "set": reduce/reduce (2 actions)
-  state 646 on "construct": reduce/reduce (2 actions)
-  state 646 on "destruct": reduce/reduce (2 actions)
-  state 646 on "static construct": reduce/reduce (2 actions)
-  state 646 on "operator": reduce/reduce (2 actions)
-  state 646 on "postfix operator": reduce/reduce (2 actions)
-  state 646 on "const": reduce/reduce (2 actions)
-  state 646 on ":": reduce/reduce (2 actions)
-  state 646 on "=": reduce/reduce (2 actions)
-  state 646 on ",": reduce/reduce (2 actions)
-  state 646 on REFASSIGN: reduce/reduce (2 actions)
-  state 646 on ")": reduce/reduce (2 actions)
-  state 646 on "]": reduce/reduce (2 actions)
-  state 646 on "}": reduce/reduce (2 actions)
-  state 646 on ".": reduce/reduce (2 actions)
-  state 646 on LOGOR: reduce/reduce (2 actions)
-  state 646 on LOGAND: reduce/reduce (2 actions)
-  state 646 on "|": reduce/reduce (2 actions)
-  state 646 on "^": reduce/reduce (2 actions)
-  state 646 on EQ: reduce/reduce (2 actions)
-  state 646 on NE: reduce/reduce (2 actions)
-  state 646 on MATCH: reduce/reduce (2 actions)
-  state 646 on NOTMATCH: reduce/reduce (2 actions)
-  state 646 on "<": reduce/reduce (2 actions)
-  state 646 on ">": reduce/reduce (2 actions)
-  state 646 on LE: reduce/reduce (2 actions)
-  state 646 on GE: reduce/reduce (2 actions)
-  state 646 on SHL: reduce/reduce (2 actions)
-  state 646 on SHR: reduce/reduce (2 actions)
-  state 646 on "/": reduce/reduce (2 actions)
-  state 646 on "%": reduce/reduce (2 actions)
-  state 646 on "@": reduce/reduce (2 actions)
-  state 646 on "?": reduce/reduce (2 actions)
-  state 646 on ADDASSIGN: reduce/reduce (2 actions)
-  state 646 on SUBASSIGN: reduce/reduce (2 actions)
-  state 646 on MULASSIGN: reduce/reduce (2 actions)
-  state 646 on DIVASSIGN: reduce/reduce (2 actions)
-  state 646 on MODASSIGN: reduce/reduce (2 actions)
-  state 646 on SHLASSIGN: reduce/reduce (2 actions)
-  state 646 on SHRASSIGN: reduce/reduce (2 actions)
-  state 646 on ANDASSIGN: reduce/reduce (2 actions)
-  state 646 on XORASSIGN: reduce/reduce (2 actions)
-  state 646 on ORASSIGN: reduce/reduce (2 actions)
-  state 646 on ATASSIGN: reduce/reduce (2 actions)
-  state 646 on PTR: reduce/reduce (2 actions)
+  state 548 on "opaque class": shift/reduce (2 actions)
+  state 548 on "enum": shift/reduce (2 actions)
+  state 548 on "bitflag enum": shift/reduce (2 actions)
+  state 548 on "public": shift/reduce (2 actions)
+  state 548 on "protected": shift/reduce (2 actions)
+  state 548 on "{": shift/reduce (3 actions)
+  state 548 on ";": shift/reduce (3 actions)
+  state 548 on "unsafe": shift/reduce (2 actions)
+  state 548 on "[": shift/reduce (3 actions)
+  state 548 on "dyfield": shift/reduce (2 actions)
+  state 548 on "+": shift/reduce (3 actions)
+  state 548 on "-": shift/reduce (3 actions)
+  state 548 on "~": shift/reduce (3 actions)
+  state 548 on "&": shift/reduce (3 actions)
+  state 548 on "*": shift/reduce (3 actions)
+  state 548 on INC: shift/reduce (3 actions)
+  state 548 on DEC: shift/reduce (3 actions)
+  state 548 on "(": shift/reduce (3 actions)
+  state 548 on ID: shift/reduce (3 actions)
+  state 548 on "typeof": shift/reduce (2 actions)
+  state 548 on "}": shift/reduce (3 actions)
+  state 548 on "struct": shift/reduce (2 actions)
+  state 548 on "union": shift/reduce (2 actions)
+  state 548 on "class": shift/reduce (2 actions)
+  state 548 on "get": reduce/reduce (2 actions)
+  state 548 on "set": reduce/reduce (2 actions)
+  state 548 on "construct": reduce/reduce (2 actions)
+  state 548 on "destruct": reduce/reduce (2 actions)
+  state 548 on "static construct": reduce/reduce (2 actions)
+  state 548 on "operator": reduce/reduce (2 actions)
+  state 548 on "postfix operator": reduce/reduce (2 actions)
+  state 548 on "const": reduce/reduce (2 actions)
+  state 548 on ":": reduce/reduce (2 actions)
+  state 548 on "=": reduce/reduce (2 actions)
+  state 548 on ",": reduce/reduce (2 actions)
+  state 548 on REFASSIGN: reduce/reduce (2 actions)
+  state 548 on ")": reduce/reduce (2 actions)
+  state 548 on "]": reduce/reduce (2 actions)
+  state 548 on ".": reduce/reduce (2 actions)
+  state 548 on LOGOR: reduce/reduce (2 actions)
+  state 548 on LOGAND: reduce/reduce (2 actions)
+  state 548 on "|": reduce/reduce (2 actions)
+  state 548 on "^": reduce/reduce (2 actions)
+  state 548 on EQ: reduce/reduce (2 actions)
+  state 548 on NE: reduce/reduce (2 actions)
+  state 548 on MATCH: reduce/reduce (2 actions)
+  state 548 on NOTMATCH: reduce/reduce (2 actions)
+  state 548 on "<": reduce/reduce (2 actions)
+  state 548 on ">": reduce/reduce (2 actions)
+  state 548 on LE: reduce/reduce (2 actions)
+  state 548 on GE: reduce/reduce (2 actions)
+  state 548 on SHL: reduce/reduce (2 actions)
+  state 548 on SHR: reduce/reduce (2 actions)
+  state 548 on "/": reduce/reduce (2 actions)
+  state 548 on "%": reduce/reduce (2 actions)
+  state 548 on "@": reduce/reduce (2 actions)
+  state 548 on "?": reduce/reduce (2 actions)
+  state 548 on ADDASSIGN: reduce/reduce (2 actions)
+  state 548 on SUBASSIGN: reduce/reduce (2 actions)
+  state 548 on MULASSIGN: reduce/reduce (2 actions)
+  state 548 on DIVASSIGN: reduce/reduce (2 actions)
+  state 548 on MODASSIGN: reduce/reduce (2 actions)
+  state 548 on SHLASSIGN: reduce/reduce (2 actions)
+  state 548 on SHRASSIGN: reduce/reduce (2 actions)
+  state 548 on ANDASSIGN: reduce/reduce (2 actions)
+  state 548 on XORASSIGN: reduce/reduce (2 actions)
+  state 548 on ORASSIGN: reduce/reduce (2 actions)
+  state 548 on ATASSIGN: reduce/reduce (2 actions)
+  state 548 on PTR: reduce/reduce (2 actions)
+  state 551 on "opaque class": shift/reduce (2 actions)
+  state 551 on "enum": shift/reduce (2 actions)
+  state 551 on "bitflag enum": shift/reduce (2 actions)
+  state 551 on "public": shift/reduce (2 actions)
+  state 551 on "protected": shift/reduce (2 actions)
+  state 551 on "{": shift/reduce (3 actions)
+  state 551 on ";": shift/reduce (3 actions)
+  state 551 on "unsafe": shift/reduce (2 actions)
+  state 551 on "[": shift/reduce (3 actions)
+  state 551 on "dyfield": shift/reduce (2 actions)
+  state 551 on "+": shift/reduce (3 actions)
+  state 551 on "-": shift/reduce (3 actions)
+  state 551 on "~": shift/reduce (3 actions)
+  state 551 on "&": shift/reduce (3 actions)
+  state 551 on "*": shift/reduce (3 actions)
+  state 551 on INC: shift/reduce (3 actions)
+  state 551 on DEC: shift/reduce (3 actions)
+  state 551 on "(": shift/reduce (3 actions)
+  state 551 on ID: shift/reduce (3 actions)
+  state 551 on "typeof": shift/reduce (2 actions)
+  state 551 on "}": shift/reduce (3 actions)
+  state 551 on "struct": shift/reduce (2 actions)
+  state 551 on "union": shift/reduce (2 actions)
+  state 551 on "class": shift/reduce (2 actions)
+  state 551 on "get": reduce/reduce (2 actions)
+  state 551 on "set": reduce/reduce (2 actions)
+  state 551 on "construct": reduce/reduce (2 actions)
+  state 551 on "destruct": reduce/reduce (2 actions)
+  state 551 on "static construct": reduce/reduce (2 actions)
+  state 551 on "operator": reduce/reduce (2 actions)
+  state 551 on "postfix operator": reduce/reduce (2 actions)
+  state 551 on "const": reduce/reduce (2 actions)
+  state 551 on ":": reduce/reduce (2 actions)
+  state 551 on "=": reduce/reduce (2 actions)
+  state 551 on ",": reduce/reduce (2 actions)
+  state 551 on REFASSIGN: reduce/reduce (2 actions)
+  state 551 on ")": reduce/reduce (2 actions)
+  state 551 on "]": reduce/reduce (2 actions)
+  state 551 on ".": reduce/reduce (2 actions)
+  state 551 on LOGOR: reduce/reduce (2 actions)
+  state 551 on LOGAND: reduce/reduce (2 actions)
+  state 551 on "|": reduce/reduce (2 actions)
+  state 551 on "^": reduce/reduce (2 actions)
+  state 551 on EQ: reduce/reduce (2 actions)
+  state 551 on NE: reduce/reduce (2 actions)
+  state 551 on MATCH: reduce/reduce (2 actions)
+  state 551 on NOTMATCH: reduce/reduce (2 actions)
+  state 551 on "<": reduce/reduce (2 actions)
+  state 551 on ">": reduce/reduce (2 actions)
+  state 551 on LE: reduce/reduce (2 actions)
+  state 551 on GE: reduce/reduce (2 actions)
+  state 551 on SHL: reduce/reduce (2 actions)
+  state 551 on SHR: reduce/reduce (2 actions)
+  state 551 on "/": reduce/reduce (2 actions)
+  state 551 on "%": reduce/reduce (2 actions)
+  state 551 on "@": reduce/reduce (2 actions)
+  state 551 on "?": reduce/reduce (2 actions)
+  state 551 on ADDASSIGN: reduce/reduce (2 actions)
+  state 551 on SUBASSIGN: reduce/reduce (2 actions)
+  state 551 on MULASSIGN: reduce/reduce (2 actions)
+  state 551 on DIVASSIGN: reduce/reduce (2 actions)
+  state 551 on MODASSIGN: reduce/reduce (2 actions)
+  state 551 on SHLASSIGN: reduce/reduce (2 actions)
+  state 551 on SHRASSIGN: reduce/reduce (2 actions)
+  state 551 on ANDASSIGN: reduce/reduce (2 actions)
+  state 551 on XORASSIGN: reduce/reduce (2 actions)
+  state 551 on ORASSIGN: reduce/reduce (2 actions)
+  state 551 on ATASSIGN: reduce/reduce (2 actions)
+  state 551 on PTR: reduce/reduce (2 actions)
+  state 566 on "+": shift/reduce (2 actions)
+  state 566 on "-": shift/reduce (2 actions)
+  state 566 on "~": shift/reduce (2 actions)
+  state 566 on "&": shift/reduce (2 actions)
+  state 566 on "*": shift/reduce (2 actions)
+  state 566 on INC: shift/reduce (2 actions)
+  state 566 on DEC: shift/reduce (2 actions)
+  state 566 on "(": shift/reduce (2 actions)
+  state 566 on ID: shift/reduce (2 actions)
+  state 566 on "typeof": shift/reduce (2 actions)
+  state 566 on ")": reduce/reduce (3 actions)
+  state 566 on ",": reduce/reduce (2 actions)
+  state 598 on "opaque class": shift/reduce (2 actions)
+  state 598 on "enum": shift/reduce (2 actions)
+  state 598 on "bitflag enum": shift/reduce (2 actions)
+  state 598 on "public": shift/reduce (2 actions)
+  state 598 on "protected": shift/reduce (2 actions)
+  state 598 on "{": shift/reduce (3 actions)
+  state 598 on ";": shift/reduce (3 actions)
+  state 598 on "unsafe": shift/reduce (2 actions)
+  state 598 on "[": shift/reduce (3 actions)
+  state 598 on "dyfield": shift/reduce (2 actions)
+  state 598 on "+": shift/reduce (3 actions)
+  state 598 on "-": shift/reduce (3 actions)
+  state 598 on "~": shift/reduce (3 actions)
+  state 598 on "&": shift/reduce (3 actions)
+  state 598 on "*": shift/reduce (3 actions)
+  state 598 on INC: shift/reduce (3 actions)
+  state 598 on DEC: shift/reduce (3 actions)
+  state 598 on "(": shift/reduce (3 actions)
+  state 598 on ID: shift/reduce (3 actions)
+  state 598 on "typeof": shift/reduce (2 actions)
+  state 598 on "}": shift/reduce (3 actions)
+  state 598 on "struct": shift/reduce (2 actions)
+  state 598 on "union": shift/reduce (2 actions)
+  state 598 on "class": shift/reduce (2 actions)
+  state 598 on "get": reduce/reduce (2 actions)
+  state 598 on "set": reduce/reduce (2 actions)
+  state 598 on "construct": reduce/reduce (2 actions)
+  state 598 on "destruct": reduce/reduce (2 actions)
+  state 598 on "static construct": reduce/reduce (2 actions)
+  state 598 on "operator": reduce/reduce (2 actions)
+  state 598 on "postfix operator": reduce/reduce (2 actions)
+  state 598 on "const": reduce/reduce (2 actions)
+  state 598 on ":": reduce/reduce (2 actions)
+  state 598 on "=": reduce/reduce (2 actions)
+  state 598 on ",": reduce/reduce (2 actions)
+  state 598 on REFASSIGN: reduce/reduce (2 actions)
+  state 598 on ")": reduce/reduce (2 actions)
+  state 598 on "]": reduce/reduce (2 actions)
+  state 598 on ".": reduce/reduce (2 actions)
+  state 598 on LOGOR: reduce/reduce (2 actions)
+  state 598 on LOGAND: reduce/reduce (2 actions)
+  state 598 on "|": reduce/reduce (2 actions)
+  state 598 on "^": reduce/reduce (2 actions)
+  state 598 on EQ: reduce/reduce (2 actions)
+  state 598 on NE: reduce/reduce (2 actions)
+  state 598 on MATCH: reduce/reduce (2 actions)
+  state 598 on NOTMATCH: reduce/reduce (2 actions)
+  state 598 on "<": reduce/reduce (2 actions)
+  state 598 on ">": reduce/reduce (2 actions)
+  state 598 on LE: reduce/reduce (2 actions)
+  state 598 on GE: reduce/reduce (2 actions)
+  state 598 on SHL: reduce/reduce (2 actions)
+  state 598 on SHR: reduce/reduce (2 actions)
+  state 598 on "/": reduce/reduce (2 actions)
+  state 598 on "%": reduce/reduce (2 actions)
+  state 598 on "@": reduce/reduce (2 actions)
+  state 598 on "?": reduce/reduce (2 actions)
+  state 598 on ADDASSIGN: reduce/reduce (2 actions)
+  state 598 on SUBASSIGN: reduce/reduce (2 actions)
+  state 598 on MULASSIGN: reduce/reduce (2 actions)
+  state 598 on DIVASSIGN: reduce/reduce (2 actions)
+  state 598 on MODASSIGN: reduce/reduce (2 actions)
+  state 598 on SHLASSIGN: reduce/reduce (2 actions)
+  state 598 on SHRASSIGN: reduce/reduce (2 actions)
+  state 598 on ANDASSIGN: reduce/reduce (2 actions)
+  state 598 on XORASSIGN: reduce/reduce (2 actions)
+  state 598 on ORASSIGN: reduce/reduce (2 actions)
+  state 598 on ATASSIGN: reduce/reduce (2 actions)
+  state 598 on PTR: reduce/reduce (2 actions)
+  state 601 on "opaque class": shift/reduce (2 actions)
+  state 601 on "enum": shift/reduce (2 actions)
+  state 601 on "bitflag enum": shift/reduce (2 actions)
+  state 601 on "public": shift/reduce (2 actions)
+  state 601 on "protected": shift/reduce (2 actions)
+  state 601 on "{": shift/reduce (3 actions)
+  state 601 on ";": shift/reduce (3 actions)
+  state 601 on "unsafe": shift/reduce (2 actions)
+  state 601 on "[": shift/reduce (3 actions)
+  state 601 on "dyfield": shift/reduce (2 actions)
+  state 601 on "+": shift/reduce (3 actions)
+  state 601 on "-": shift/reduce (3 actions)
+  state 601 on "~": shift/reduce (3 actions)
+  state 601 on "&": shift/reduce (3 actions)
+  state 601 on "*": shift/reduce (3 actions)
+  state 601 on INC: shift/reduce (3 actions)
+  state 601 on DEC: shift/reduce (3 actions)
+  state 601 on "(": shift/reduce (3 actions)
+  state 601 on ID: shift/reduce (3 actions)
+  state 601 on "typeof": shift/reduce (2 actions)
+  state 601 on "}": shift/reduce (3 actions)
+  state 601 on "struct": shift/reduce (2 actions)
+  state 601 on "union": shift/reduce (2 actions)
+  state 601 on "class": shift/reduce (2 actions)
+  state 601 on "get": reduce/reduce (2 actions)
+  state 601 on "set": reduce/reduce (2 actions)
+  state 601 on "construct": reduce/reduce (2 actions)
+  state 601 on "destruct": reduce/reduce (2 actions)
+  state 601 on "static construct": reduce/reduce (2 actions)
+  state 601 on "operator": reduce/reduce (2 actions)
+  state 601 on "postfix operator": reduce/reduce (2 actions)
+  state 601 on "const": reduce/reduce (2 actions)
+  state 601 on ":": reduce/reduce (2 actions)
+  state 601 on "=": reduce/reduce (2 actions)
+  state 601 on ",": reduce/reduce (2 actions)
+  state 601 on REFASSIGN: reduce/reduce (2 actions)
+  state 601 on ")": reduce/reduce (2 actions)
+  state 601 on "]": reduce/reduce (2 actions)
+  state 601 on ".": reduce/reduce (2 actions)
+  state 601 on LOGOR: reduce/reduce (2 actions)
+  state 601 on LOGAND: reduce/reduce (2 actions)
+  state 601 on "|": reduce/reduce (2 actions)
+  state 601 on "^": reduce/reduce (2 actions)
+  state 601 on EQ: reduce/reduce (2 actions)
+  state 601 on NE: reduce/reduce (2 actions)
+  state 601 on MATCH: reduce/reduce (2 actions)
+  state 601 on NOTMATCH: reduce/reduce (2 actions)
+  state 601 on "<": reduce/reduce (2 actions)
+  state 601 on ">": reduce/reduce (2 actions)
+  state 601 on LE: reduce/reduce (2 actions)
+  state 601 on GE: reduce/reduce (2 actions)
+  state 601 on SHL: reduce/reduce (2 actions)
+  state 601 on SHR: reduce/reduce (2 actions)
+  state 601 on "/": reduce/reduce (2 actions)
+  state 601 on "%": reduce/reduce (2 actions)
+  state 601 on "@": reduce/reduce (2 actions)
+  state 601 on "?": reduce/reduce (2 actions)
+  state 601 on ADDASSIGN: reduce/reduce (2 actions)
+  state 601 on SUBASSIGN: reduce/reduce (2 actions)
+  state 601 on MULASSIGN: reduce/reduce (2 actions)
+  state 601 on DIVASSIGN: reduce/reduce (2 actions)
+  state 601 on MODASSIGN: reduce/reduce (2 actions)
+  state 601 on SHLASSIGN: reduce/reduce (2 actions)
+  state 601 on SHRASSIGN: reduce/reduce (2 actions)
+  state 601 on ANDASSIGN: reduce/reduce (2 actions)
+  state 601 on XORASSIGN: reduce/reduce (2 actions)
+  state 601 on ORASSIGN: reduce/reduce (2 actions)
+  state 601 on ATASSIGN: reduce/reduce (2 actions)
+  state 601 on PTR: reduce/reduce (2 actions)
+  state 610 on ")": reduce/reduce (2 actions)
+  state 611 on ")": shift/reduce (2 actions)
+  state 619 on "opaque class": shift/reduce (2 actions)
+  state 619 on "enum": shift/reduce (2 actions)
+  state 619 on "bitflag enum": shift/reduce (2 actions)
+  state 619 on "public": shift/reduce (2 actions)
+  state 619 on "protected": shift/reduce (2 actions)
+  state 619 on "{": shift/reduce (3 actions)
+  state 619 on ";": shift/reduce (3 actions)
+  state 619 on "unsafe": shift/reduce (2 actions)
+  state 619 on "[": shift/reduce (3 actions)
+  state 619 on "dyfield": shift/reduce (2 actions)
+  state 619 on "+": shift/reduce (3 actions)
+  state 619 on "-": shift/reduce (3 actions)
+  state 619 on "~": shift/reduce (3 actions)
+  state 619 on "&": shift/reduce (3 actions)
+  state 619 on "*": shift/reduce (3 actions)
+  state 619 on INC: shift/reduce (3 actions)
+  state 619 on DEC: shift/reduce (3 actions)
+  state 619 on "(": shift/reduce (3 actions)
+  state 619 on ID: shift/reduce (3 actions)
+  state 619 on "typeof": shift/reduce (2 actions)
+  state 619 on "struct": shift/reduce (2 actions)
+  state 619 on "union": shift/reduce (2 actions)
+  state 619 on "class": shift/reduce (2 actions)
+  state 619 on "get": reduce/reduce (2 actions)
+  state 619 on "set": reduce/reduce (2 actions)
+  state 619 on "construct": reduce/reduce (2 actions)
+  state 619 on "destruct": reduce/reduce (2 actions)
+  state 619 on "static construct": reduce/reduce (2 actions)
+  state 619 on "operator": reduce/reduce (2 actions)
+  state 619 on "postfix operator": reduce/reduce (2 actions)
+  state 619 on "const": reduce/reduce (2 actions)
+  state 619 on ":": reduce/reduce (2 actions)
+  state 619 on "=": reduce/reduce (2 actions)
+  state 619 on ",": reduce/reduce (2 actions)
+  state 619 on REFASSIGN: reduce/reduce (2 actions)
+  state 619 on ")": reduce/reduce (2 actions)
+  state 619 on "]": reduce/reduce (2 actions)
+  state 619 on "}": reduce/reduce (2 actions)
+  state 619 on ".": reduce/reduce (2 actions)
+  state 619 on LOGOR: reduce/reduce (2 actions)
+  state 619 on LOGAND: reduce/reduce (2 actions)
+  state 619 on "|": reduce/reduce (2 actions)
+  state 619 on "^": reduce/reduce (2 actions)
+  state 619 on EQ: reduce/reduce (2 actions)
+  state 619 on NE: reduce/reduce (2 actions)
+  state 619 on MATCH: reduce/reduce (2 actions)
+  state 619 on NOTMATCH: reduce/reduce (2 actions)
+  state 619 on "<": reduce/reduce (2 actions)
+  state 619 on ">": reduce/reduce (2 actions)
+  state 619 on LE: reduce/reduce (2 actions)
+  state 619 on GE: reduce/reduce (2 actions)
+  state 619 on SHL: reduce/reduce (2 actions)
+  state 619 on SHR: reduce/reduce (2 actions)
+  state 619 on "/": reduce/reduce (2 actions)
+  state 619 on "%": reduce/reduce (2 actions)
+  state 619 on "@": reduce/reduce (2 actions)
+  state 619 on "?": reduce/reduce (2 actions)
+  state 619 on ADDASSIGN: reduce/reduce (2 actions)
+  state 619 on SUBASSIGN: reduce/reduce (2 actions)
+  state 619 on MULASSIGN: reduce/reduce (2 actions)
+  state 619 on DIVASSIGN: reduce/reduce (2 actions)
+  state 619 on MODASSIGN: reduce/reduce (2 actions)
+  state 619 on SHLASSIGN: reduce/reduce (2 actions)
+  state 619 on SHRASSIGN: reduce/reduce (2 actions)
+  state 619 on ANDASSIGN: reduce/reduce (2 actions)
+  state 619 on XORASSIGN: reduce/reduce (2 actions)
+  state 619 on ORASSIGN: reduce/reduce (2 actions)
+  state 619 on ATASSIGN: reduce/reduce (2 actions)
+  state 619 on PTR: reduce/reduce (2 actions)
+  state 622 on "opaque class": shift/reduce (2 actions)
+  state 622 on "enum": shift/reduce (2 actions)
+  state 622 on "bitflag enum": shift/reduce (2 actions)
+  state 622 on "public": shift/reduce (2 actions)
+  state 622 on "protected": shift/reduce (2 actions)
+  state 622 on "{": shift/reduce (3 actions)
+  state 622 on ";": shift/reduce (3 actions)
+  state 622 on "}": shift/reduce (3 actions)
+  state 622 on "unsafe": shift/reduce (2 actions)
+  state 622 on "[": shift/reduce (3 actions)
+  state 622 on "dyfield": shift/reduce (2 actions)
+  state 622 on "+": shift/reduce (3 actions)
+  state 622 on "-": shift/reduce (3 actions)
+  state 622 on "~": shift/reduce (3 actions)
+  state 622 on "&": shift/reduce (3 actions)
+  state 622 on "*": shift/reduce (3 actions)
+  state 622 on INC: shift/reduce (3 actions)
+  state 622 on DEC: shift/reduce (3 actions)
+  state 622 on "(": shift/reduce (3 actions)
+  state 622 on ID: shift/reduce (3 actions)
+  state 622 on "typeof": shift/reduce (2 actions)
+  state 622 on "struct": shift/reduce (2 actions)
+  state 622 on "union": shift/reduce (2 actions)
+  state 622 on "class": shift/reduce (2 actions)
+  state 622 on "get": reduce/reduce (2 actions)
+  state 622 on "set": reduce/reduce (2 actions)
+  state 622 on "construct": reduce/reduce (2 actions)
+  state 622 on "destruct": reduce/reduce (2 actions)
+  state 622 on "static construct": reduce/reduce (2 actions)
+  state 622 on "operator": reduce/reduce (2 actions)
+  state 622 on "postfix operator": reduce/reduce (2 actions)
+  state 622 on "const": reduce/reduce (2 actions)
+  state 622 on ":": reduce/reduce (2 actions)
+  state 622 on "=": reduce/reduce (2 actions)
+  state 622 on ",": reduce/reduce (2 actions)
+  state 622 on REFASSIGN: reduce/reduce (2 actions)
+  state 622 on ")": reduce/reduce (2 actions)
+  state 622 on "]": reduce/reduce (2 actions)
+  state 622 on ".": reduce/reduce (2 actions)
+  state 622 on LOGOR: reduce/reduce (2 actions)
+  state 622 on LOGAND: reduce/reduce (2 actions)
+  state 622 on "|": reduce/reduce (2 actions)
+  state 622 on "^": reduce/reduce (2 actions)
+  state 622 on EQ: reduce/reduce (2 actions)
+  state 622 on NE: reduce/reduce (2 actions)
+  state 622 on MATCH: reduce/reduce (2 actions)
+  state 622 on NOTMATCH: reduce/reduce (2 actions)
+  state 622 on "<": reduce/reduce (2 actions)
+  state 622 on ">": reduce/reduce (2 actions)
+  state 622 on LE: reduce/reduce (2 actions)
+  state 622 on GE: reduce/reduce (2 actions)
+  state 622 on SHL: reduce/reduce (2 actions)
+  state 622 on SHR: reduce/reduce (2 actions)
+  state 622 on "/": reduce/reduce (2 actions)
+  state 622 on "%": reduce/reduce (2 actions)
+  state 622 on "@": reduce/reduce (2 actions)
+  state 622 on "?": reduce/reduce (2 actions)
+  state 622 on ADDASSIGN: reduce/reduce (2 actions)
+  state 622 on SUBASSIGN: reduce/reduce (2 actions)
+  state 622 on MULASSIGN: reduce/reduce (2 actions)
+  state 622 on DIVASSIGN: reduce/reduce (2 actions)
+  state 622 on MODASSIGN: reduce/reduce (2 actions)
+  state 622 on SHLASSIGN: reduce/reduce (2 actions)
+  state 622 on SHRASSIGN: reduce/reduce (2 actions)
+  state 622 on ANDASSIGN: reduce/reduce (2 actions)
+  state 622 on XORASSIGN: reduce/reduce (2 actions)
+  state 622 on ORASSIGN: reduce/reduce (2 actions)
+  state 622 on ATASSIGN: reduce/reduce (2 actions)
+  state 622 on PTR: reduce/reduce (2 actions)
+  state 648 on "opaque class": shift/reduce (2 actions)
+  state 648 on "enum": shift/reduce (2 actions)
+  state 648 on "bitflag enum": shift/reduce (2 actions)
+  state 648 on "public": shift/reduce (2 actions)
+  state 648 on "protected": shift/reduce (2 actions)
+  state 648 on "{": shift/reduce (3 actions)
+  state 648 on ";": shift/reduce (3 actions)
+  state 648 on "unsafe": shift/reduce (2 actions)
+  state 648 on "[": shift/reduce (3 actions)
+  state 648 on "dyfield": shift/reduce (2 actions)
+  state 648 on "+": shift/reduce (3 actions)
+  state 648 on "-": shift/reduce (3 actions)
+  state 648 on "~": shift/reduce (3 actions)
+  state 648 on "&": shift/reduce (3 actions)
+  state 648 on "*": shift/reduce (3 actions)
+  state 648 on INC: shift/reduce (3 actions)
+  state 648 on DEC: shift/reduce (3 actions)
+  state 648 on "(": shift/reduce (3 actions)
+  state 648 on ID: shift/reduce (3 actions)
+  state 648 on "typeof": shift/reduce (2 actions)
+  state 648 on "struct": shift/reduce (2 actions)
+  state 648 on "union": shift/reduce (2 actions)
+  state 648 on "class": shift/reduce (2 actions)
+  state 648 on "get": reduce/reduce (2 actions)
+  state 648 on "set": reduce/reduce (2 actions)
+  state 648 on "construct": reduce/reduce (2 actions)
+  state 648 on "destruct": reduce/reduce (2 actions)
+  state 648 on "static construct": reduce/reduce (2 actions)
+  state 648 on "operator": reduce/reduce (2 actions)
+  state 648 on "postfix operator": reduce/reduce (2 actions)
+  state 648 on "const": reduce/reduce (2 actions)
+  state 648 on ":": reduce/reduce (2 actions)
+  state 648 on "=": reduce/reduce (2 actions)
+  state 648 on ",": reduce/reduce (2 actions)
+  state 648 on REFASSIGN: reduce/reduce (2 actions)
+  state 648 on ")": reduce/reduce (2 actions)
+  state 648 on "]": reduce/reduce (2 actions)
+  state 648 on "}": reduce/reduce (2 actions)
+  state 648 on ".": reduce/reduce (2 actions)
+  state 648 on LOGOR: reduce/reduce (2 actions)
+  state 648 on LOGAND: reduce/reduce (2 actions)
+  state 648 on "|": reduce/reduce (2 actions)
+  state 648 on "^": reduce/reduce (2 actions)
+  state 648 on EQ: reduce/reduce (2 actions)
+  state 648 on NE: reduce/reduce (2 actions)
+  state 648 on MATCH: reduce/reduce (2 actions)
+  state 648 on NOTMATCH: reduce/reduce (2 actions)
+  state 648 on "<": reduce/reduce (2 actions)
+  state 648 on ">": reduce/reduce (2 actions)
+  state 648 on LE: reduce/reduce (2 actions)
+  state 648 on GE: reduce/reduce (2 actions)
+  state 648 on SHL: reduce/reduce (2 actions)
+  state 648 on SHR: reduce/reduce (2 actions)
+  state 648 on "/": reduce/reduce (2 actions)
+  state 648 on "%": reduce/reduce (2 actions)
+  state 648 on "@": reduce/reduce (2 actions)
+  state 648 on "?": reduce/reduce (2 actions)
+  state 648 on ADDASSIGN: reduce/reduce (2 actions)
+  state 648 on SUBASSIGN: reduce/reduce (2 actions)
+  state 648 on MULASSIGN: reduce/reduce (2 actions)
+  state 648 on DIVASSIGN: reduce/reduce (2 actions)
+  state 648 on MODASSIGN: reduce/reduce (2 actions)
+  state 648 on SHLASSIGN: reduce/reduce (2 actions)
+  state 648 on SHRASSIGN: reduce/reduce (2 actions)
+  state 648 on ANDASSIGN: reduce/reduce (2 actions)
+  state 648 on XORASSIGN: reduce/reduce (2 actions)
+  state 648 on ORASSIGN: reduce/reduce (2 actions)
+  state 648 on ATASSIGN: reduce/reduce (2 actions)
+  state 648 on PTR: reduce/reduce (2 actions)

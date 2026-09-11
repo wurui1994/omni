@@ -694,7 +694,14 @@ const LV_SHAPES = new Set(['name', 'field', 'index', 'ptr-field', 'indirect', 't
 /** `T* … property p` 里，最后一个 `*` 后面那一组词里**这一层认得的**那几个（第七十二刀）。
  *  取自 jancy 那张 `TypeModifierMaskKind_Property`（jnc_ct_Decl.h:75-85）：属性这条声明能带
  *  的就是那一张表。别的词落在那儿明说不收 —— 免得"提上来"变成"悄悄丢掉"。 */
-const PROP_TAIL_MODS = new Set(['property', 'autoget', 'bindable', 'const', 'readonly', 'cmut', 'errorcode']);
+/** 可变性那一族（第六十七刀）：jancy 把它们归进同一个互斥组（Decl.cpp:96 的
+ *  antiModifierTable）。`autoconst` 是**主拼法**，`cmut` / `constif` 是 legacy 别名
+ *  （Lexer.rl:216-218 那三行的注释写着 "legacy code support"）。这一层没有可变性检查，
+ *  所以五个词落地是同一件事：收下、不看。 */
+const MUT_MODS = new Set(['const', 'readonly', 'cmut', 'autoconst', 'constif']);
+
+const PROP_TAIL_MODS = new Set(['property', 'autoget', 'bindable', 'const', 'readonly', 'cmut',
+  'autoconst', 'constif', 'errorcode']);
 
 /** 这条语句是 `名字:` 那种标签吗（第五十九刀）。语法上 `catch:` / `finally:` / `nestedscope:`
  *  都发成 `(label "名字")`，见 jnc.grammar 那三条。 */
@@ -3030,7 +3037,7 @@ class JncLower {
       // 不做可见性检查同一笔账 —— 拒得更松，不改变能跑的程序的行为。
       // `const` 那一位要往上传（第六十八刀）：`T const property p` 是**只有取的属性**
       // （prop.rst:17："If a property has no setters then it is a const property"）。
-      if (m === 'const' || m === 'readonly' || m === 'cmut') { if (m === 'const') cst = true; continue; }
+      if (MUT_MODS.has(m)) { if (m === 'const') cst = true; continue; }
       // `property`（第六十八刀）是**类型修饰符**（Decl.cpp:35 那张表里的 TypeModifier_Property），
       // 所以它落在这张 mods 表里。它说的是"这一格不是一块内存，是一对函数（取/存）"——
       // 简单声明式（prop_simple.rst:19）就一个词，体写在别处：`T p.get() { … }` / `p.set(T x) { … }`。
@@ -3203,7 +3210,7 @@ class JncLower {
         // `TypeModifierMaskKind_Const`），这一层没有可变性检查，所以三个都是收下不看。
         // `volatile` **不在**那一组里（antiModifierTable 那一行是 0，它是自己的一位
         // `PtrTypeFlag_Volatile`，jnc_Type.h:220）—— 留着，它是自己一刀。
-        if (m === 'const' || m === 'readonly' || m === 'cmut') continue;
+        if (MUT_MODS.has(m)) continue;
         this.nope(node, `指针后面的修饰符 '${m}'`);
         return null;
       }
@@ -3385,7 +3392,7 @@ class JncLower {
       const mods = this.flat(g).flatMap((m) => this.flat(m)).map((m) => (isAtom(m) ? m.value : '?'));
       for (const m of mods) {
         // 与 ptrsTy 那处同一族（第六十七刀）：可变性那三个词收下不看。
-        if (m === 'const' || m === 'readonly' || m === 'cmut') continue;
+        if (MUT_MODS.has(m)) continue;
         // `weak` 是弱引用那一族（type_ptr_function.rst 的 "function weak*"）：它要 GC
         // 那一侧的弱引用语义，而这一层没有。
         return this.nope(d, `函数指针后面的修饰符 '${m}'`);

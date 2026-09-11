@@ -134,9 +134,10 @@
 //   node tests/jnc/run.js
 //   node tests/jnc/run.js pointers
 
-import { readdirSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { workDir } from '../work.js';
+import { RunCache } from '../lib/incr.js';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -145,10 +146,16 @@ const root = join(here, '../..');
 const cli = join(root, 'src', 'core', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
-const cmd = (args) => {
-  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd: root });
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
-};
+/* 增量层（tests/lib/incr.js）：一条用例六条腿、一条腿一次子进程，而输入常常一个字没变。
+ * 键是「命令行 + 实参里那几份文件的内容 + 上一趟装载过的那些模块」，所以：改 frontend-jnc
+ * 只让 jnc 这些用例失效，只加一份固件时别的用例全命中。`FORCE=1` 全部重跑。
+ *
+ * `extra` 是"命令行上看不见但也算输入"的那几格：`cases/imports/` 是 57 那条 `import` 进来的、
+ * `cases/incdirs/` 是 59 那条按 `-I` 找的 —— 它们是**数据**不是模块，钩子收不到，所以明写。 */
+const cache = new RunCache('jnc');
+const extraInputs = [join(here, 'cases', 'imports'), join(here, 'cases', 'incdirs')]
+  .filter((p) => existsSync(p));
+const cmd = (args) => cache.run([cli, ...args], { cwd: root, extra: extraInputs });
 const read = (p) => {
   try {
     return readFileSync(p, 'utf8');
@@ -199,6 +206,30 @@ const extraArgs = (sub, name) => {
   return t.split(/\s+/).filter((x) => x.length !== 0)
     .map((x) => (x.startsWith('-') ? x : join(here, x)));
 };
+
+// ------------------------------------------------- 0. 预热：把要跑的子进程并行跑掉
+//
+// ADR-0023 的 S4。下面三遍判定是顺序的（一条用例先跑第一条腿、再拿别的腿去比），改成并行要动
+// 整条轴的骨架；而贵的只是**子进程**那一步 —— 所以先把这一趟要跑的命令列出来、并行跑掉，
+// 顺序那三遍照旧走，只是每一次都命中缓存。并行度看 `JOBS`（默认 4，理由在 incr.js 的 warm 里）。
+
+{
+  const pre = [];
+  for (const f of list('cases', '.jnc')) {
+    if (!want(f)) continue;
+    const xargs = extraArgs('cases', basename(f, '.jnc'));
+    for (const leg of LEGS) pre.push([cli, ...leg.args(join(here, 'cases', f)), ...xargs]);
+  }
+  for (const f of list('rt', '.jnc')) {
+    if (!want(f)) continue;
+    for (const leg of LEGS) pre.push([cli, ...leg.args(join(here, 'rt', f))]);
+  }
+  for (const f of list('bad', '.jnc')) {
+    if (!want(f)) continue;
+    pre.push([cli, 'run', join(here, 'bad', f), ...extraArgs('bad', basename(f, '.jnc'))]);
+  }
+  await cache.warm(pre, { cwd: root, extra: extraInputs });
+}
 
 // ------------------------------------------------- 1. cases/：五条腿一致 + 对上期望值
 
@@ -285,7 +316,7 @@ for (const f of mods) {
   ok(`mods/${name} [没有入口也降得下来，降出来的 .sx 跑得动]`);
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+process.stdout.write(`\n${pass} passed, ${fail} failed  [${cache.report()}]\n`);
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

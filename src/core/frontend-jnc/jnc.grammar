@@ -136,7 +136,7 @@
       "import" "namespace" "extension" "dylib" "using" "friend" "public" "protected"
       "pragma" "setas" "typedef" "alias" "static" "threadlocal" "abstract" "virtual"
       "override" "mutable" "disposable" "dyfield" "unsigned" "bigendian" "const"
-      "readonly" "cmut" "volatile" "weak" "thin" "safe" "unsafe" "errorcode"
+      "readonly" "cmut" "autoconst" "constif" "volatile" "weak" "thin" "safe" "unsafe" "errorcode"
       "cdecl" "stdcall" "jnccall" "thiscall" "array" "function" "property" "bindable"
       "autoget" "indexed" "multicast" "event" "reactor" "async" "anydata"
       "void" "bool" "int" "intptr" "char" "short" "long" "float" "double"
@@ -275,7 +275,12 @@
   (rule modifier
     (-> ("static") $1) (-> ("threadlocal") $1) (-> ("abstract") $1) (-> ("virtual") $1)
     (-> ("override") $1) (-> ("mutable") $1) (-> ("disposable") $1) (-> ("const") $1)
-    (-> ("readonly") $1) (-> ("cmut") $1) (-> ("volatile") $1) (-> ("weak") $1)
+    (-> ("readonly") $1) (-> ("cmut") $1)
+    ;; `autoconst` 是**主拼法**，`cmut` / `constif` 是它的 legacy 别名（Lexer.rl:216-218
+    ;; 那三行的注释就写着 "legacy code support"）。先前只收了别名那一格，于是
+    ;; `MapEntry autoconst* readonly m_head;`（src/jnc_ext/jnc_std/jnc/std_RbTree.jnc:31）
+    ;; 这种真实写法在**语法**这一层就过不去 —— 三个都收。
+    (-> ("autoconst") $1) (-> ("constif") $1) (-> ("volatile") $1) (-> ("weak") $1)
     (-> ("thin") $1) (-> ("unsigned") $1) (-> ("bigendian") $1) (-> ("safe") $1)
     (-> ("unsafe") $1) (-> ("errorcode") $1) (-> ("cdecl") $1) (-> ("stdcall") $1)
     (-> ("jnccall") $1) (-> ("thiscall") $1) (-> ("property") $1) (-> ("bindable") $1)

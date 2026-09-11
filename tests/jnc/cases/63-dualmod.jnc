@@ -14,6 +14,17 @@
 public int g_pub = 7;
 protected int g_prot = 11;
 
+// `autoconst` 是**主拼法**，`cmut` / `constif` 是它的 legacy 别名（Lexer.rl:216-218 那三行的
+// 注释就写着 "legacy code support"）。先前只收了别名那一格，于是语料里真实的写法
+// `MapEntry autoconst* readonly m_head;`（src/jnc_ext/jnc_std/jnc/std_RbTree.jnc:31）在**语法**
+// 这一层就过不去 —— 三个词都收，落地与 `const` / `readonly` 同（收下、不看）。
+int autoconst g_ac = 13;
+int constif g_ci = 17;
+
+int derefAc(int* autoconst p) {
+	return *p;
+}
+
 // 结构体的字段、形参、返回类型上也是同一族（都走 specs 那一格）
 struct Pair {
 	int readonly m_a;
@@ -81,5 +92,6 @@ int main() {
 	p.m_c = 3;
 	printf("%d %d\n", p.m_a + p.m_b + p.m_c, addUp(4, 5));
 	printf("%d\n", deref(&p.m_a, &p.m_b));
+	printf("%d %d %d\n", g_ac, g_ci, derefAc(&g_ac));
 	return 0;
 }
