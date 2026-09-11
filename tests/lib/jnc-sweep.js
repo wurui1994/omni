@@ -224,6 +224,16 @@ for (const [k, v] of board.slice(0, topN)) {
   process.stdout.write(`  ${String(v.files).padStart(4)}  sole ${String(v.sole).padStart(3)}  ${k}`
     + `${was === undefined ? '  ← 新' : (was.files === v.files ? '' : `  （上一趟 ${was.files}）`)}\n`);
 }
+/* 与 `--group` 那一格同一条（第一百三十三刀之后补的）：**哪一行整行没了**单独一栏，
+   不受 `--top` 限制。判一刀看的就是这一句 —— 一行整整消失不能因为它排在第 26 名就印不出来。 */
+const goneRows = [...prevBoard.entries()].filter(([k]) => !tally.has(k))
+  .sort((a, b) => b[1].files - a[1].files);
+if (goneRows.length > 0) {
+  process.stdout.write('\n整行没了（上一趟有、这一趟一份文件都不剩）\n');
+  for (const [k, v] of goneRows) {
+    process.stdout.write(`  ${String(v.files).padStart(4)}  sole ${String(v.sole).padStart(3)}  ${k}\n`);
+  }
+}
 
 mkdirSync(join(cacheRoot, 'test', 'log'), { recursive: true });
 const lines = [`; jancy 语料尺子 —— ${files.length} 份（${JANCY}）`,
