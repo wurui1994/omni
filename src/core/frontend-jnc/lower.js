@@ -1103,6 +1103,12 @@ class JncLower {
     /* 相等算符（第一百四十刀）：`Owner$op$eq` / `$op$ne` -> { name, param }。
        语料里的原样是 std_Guid.jnc:80/84 —— `bool operator == (Guid const* op) thin const`。 */
     this.opCmp = new Map();
+    /* 枚举成员的值**算不出来时先记着**（第一百四十一刀）：初值可能引用**后面才声明的**枚举
+       （`Start = ui.StdColor.PastelPurple`，log_Representation.jnc:74 —— 而 ui_Color.jnc 排在
+       它后面）。jancy 那边是"先把名字都声明下来、再算值"的两遍，这一层是一遍，所以这儿留一格
+       重试的名单：这一遍走完再来几轮，跑到不动点。`enumRetry` 为真的那一遍才报。 */
+    this.enumTodo = [];
+    this.enumRetry = false;
     this.sctors = new Map();
     this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
     // 方法名 -> 它那段闭包 thunk（第五十五刀）。`c.foo` 当值用时捕的是对象，一个方法一段。
@@ -2594,6 +2600,25 @@ class JncLower {
     for (const e of items) {
       this.ns = e.ns;
       if (isList(e.it) && head(e.it) === 'type-decl') this.typeDecl(e.it.items[1]);
+    }
+    /* 枚举成员的值算不出来的那几格再来几轮（第一百四十一刀）：初值引用**后面才声明的**枚举时
+       上面那一遍必然算不出来（那时它的成员表还没填）。一轮解开一层，跑到不动点；一轮下来一格
+       都没解开就说明剩下的是真的算不出来（或者引用成环），那时再走一遍、这回报出来。
+       轮数天然有界：每一轮要么少一格，要么就是最后那一遍。 */
+    for (;;) {
+      const todo = this.enumTodo;
+      if (todo.length === 0) break;
+      this.enumTodo = [];
+      for (const t of todo) { this.ns = t.ns; this.enumDecl(t.n); }
+      if (this.enumTodo.length === 0) break;
+      if (this.enumTodo.length >= todo.length) {
+        this.enumRetry = true;
+        const rest = this.enumTodo;
+        this.enumTodo = [];
+        for (const t of rest) { this.ns = t.ns; this.enumDecl(t.n); }
+        this.enumRetry = false;
+        break;
+      }
     }
     // 属性的名字先坐下（第六十八刀）：取/存两个函数的签名要抄它的类型，而那两个函数在
     // 下面那一遍里就得成型 —— 模块级变量那一遍（globalDecl）排在签名之后，来不及。
@@ -4492,6 +4517,10 @@ class JncLower {
     const info = this.enums.get(en);
     const mn = isAtom(mem) ? mem.value : this.qname(mem);
     if (mn === null || !info.members.has(mn)) {
+      /* 正在算某个枚举成员的初值、而且还是第一遍（第一百四十一刀）：**别报**。那个枚举可能
+         排在后面、成员表还没填 —— 报出来就是"枚举 B 里没有 P"，一句指着别处的话。
+         回 undefined 让 constInt 算不出来，由 enumDecl 那儿记进重试名单。 */
+      if (this.constEnum !== null && !this.enumRetry) return undefined;
       return this.err(n, `枚举 '${shown(en)}' 里没有 '${mn}'`);
     }
     return {
@@ -4646,7 +4675,21 @@ class JncLower {
         this.constEnum = info;
         const k = this.constInt(m.items[2]);
         this.constEnum = null;
-        if (k === null) { this.nope(m.items[2], '枚举成员的值算不出来（要一个编译期整数常量）'); continue; }
+        if (k === null) {
+          /* 算不出来（第一百四十一刀）：**先别报**。初值可能引用后面才声明的枚举，那时它的
+             成员表还没填。整格枚举退回去（成员表清空、无名枚举漏出去的那几个名字也撤掉），
+             记进重试名单，等这一遍走完再来一轮。`enumRetry` 那一遍才真报。 */
+          if (!this.enumRetry) {
+            info.members.clear();
+            for (const [k2, v2] of [...this.exposedMems]) {
+              if (v2.en === name) this.exposedMems.delete(k2);
+            }
+            this.enumTodo.push({ n, ns: this.ns });
+            return null;
+          }
+          this.nope(m.items[2], '枚举成员的值算不出来（要一个编译期整数常量）');
+          continue;
+        }
         next = k;
       }
       info.members.set(mn, wrapVal(next, info.base));

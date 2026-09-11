@@ -1,0 +1,54 @@
+// 第一百四十一刀：枚举成员的初值引用**后面才声明的**枚举。
+//
+// 语料里的原样（ioninja 那 44 份一起编时量到的）：
+//   ui_Color.jnc:22          enum StdColor { Black = ColorFlags.Index | 0, …, PastelPurple }
+//   log_Representation.jnc:74  Start = ui.StdColor.PastelPurple
+// 合成的模块按文件名排 import，`log_Representation` 排在 `ui_Color` 前面，于是用它的那一格先降
+// —— 那时 StdColor 的成员表还没填。报出来是"枚举 'ui.StdColor' 里没有 'PastelPurple'"加一句
+// "枚举成员的值算不出来"，两句都指着别处：**因不在折叠上，在顺序上**。
+//
+// jancy 那边是"先把名字都声明下来、再算值"的两遍（`calcEnumConstValues` 在 `addItem` 那一遍
+// 之后），这一层是一遍。改法不是加一整遍，是**留一格重试的名单**：算不出来的先别报、整格枚举
+// 退回去（成员表清空、无名枚举漏出去的那几个名字也撤掉），这一遍走完再来几轮，跑到不动点。
+// 一轮下来一格都没解开就说明剩下的是真算不出来（或者引用成环），那时再走一遍、这回报出来
+// （`bad/enum-cycle`）。
+//
+// 顺手改一处**认错人的诊断**：算初值的第一遍里 `enumMember` 不许报"枚举 B 里没有 P"——
+// 那时它可能只是还没填。这一格与第一百三十二刀那次（"按值套回了自己"）是同一族：
+// **一遍就想算完的地方，报错要等到最后一遍**。
+//
+// 尺子 `/tmp/c139.c`：C 里 enum 的初值也只能引用**前面**已经定下的常量，所以手写的是
+// "值都算完之后的那张表"—— 那正是这一刀要的答案。同一串数（5 6 6 / 1073741824 1073741825 / 3）。
+
+enum A {
+	X = B.P,                             // B 声明在后面
+	Y,                                   // 接着数
+}
+
+enum B {
+	P = 5,
+	Q,
+}
+
+// 语料里那一格的形状：bitflag enum 在后面，前面那个枚举引用它
+enum Color {
+	Black = Flags.Index | 0,
+	Red,
+}
+
+bitflag enum Flags {
+	Undefined = 0x80000000,
+	Index     = 0x40000000,
+}
+
+// 隔一层也解得开（C -> A -> B）：一轮解开一层
+enum C2 {
+	Z = A.Y - 3,
+}
+
+int main() {
+	printf("%d %d %d\n", A.X, A.Y, B.Q);
+	printf("%d %d\n", Color.Black, Color.Red);
+	printf("%d\n", C2.Z);
+	return 0;
+}
