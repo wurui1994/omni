@@ -4702,6 +4702,54 @@ node tests/lib/jnc-sweep.js --top 40
 - 「真降得下来」（`sx` 退出码 0）：53 -> **54**（+1）—— 这一格从第六十刀起就没动过，
   这一刀是这几刀里第一次把它推上去的。
 
+## 下一刀（还没落）：函数重载 —— 量清了才好切
+
+尺子上排在前面的下一个真特性：`函数 '…' 定义了两次` **161 对**（1 份文件它是唯一拦路项）。
+那不是错，那是**重载**：语料里 `bool errorcode open()` 与 `bool errorcode open(uint_t port)`
+写在同一个类里（`test/ioninja/plugins/Udp/UdpDispatch.jnc:45,49`）。
+
+**jancy 的规矩（源码量的）**：
+
+- 判合法的只有一样东西 —— `FunctionType::getArgSignature()`
+  （`jnc_ct_FunctionType.h:289-326`）：那是**实参那一串**的签名。所以差在参数**类型**上就够，
+  不必差在个数上；而**返回类型不算**（它拼在 argSignature 的起点之前），`errorcode` / `unsafe`
+  / `async` / 调用约定也**不算**（`appendFlagSignature`，`jnc_ct_FunctionType.cpp:66-79`）——
+  只差这些的两条是 `illegal function overload: duplicate argument signature`
+  （`jnc_ct_FunctionTypeOverload.cpp:248-261`）。变参算（那个 `'.'`）。成员方法的 `this`
+  是**真实参**，所以它也进签名。
+- 登记：`Namespace::addFunction`（`jnc_ct_Namespace.cpp:603-660`）第二条时把那一格提成
+  `FunctionOverload`；构造走 `MemberBlock::addUnnamedMethod`（`jnc_ct_MemberBlock.cpp:254-284`）。
+  哪几种函数**不许**重载列在 `jnc_api/jnc_Function.cpp:60-88`（取值器、静态构造、析构、
+  转换算符…），`construct` 与存值器许。
+- 调用点：`FunctionTypeOverload::chooseOverload`（`jnc_ct_FunctionTypeOverload.cpp:44-91`）——
+  每个候选算**一个标量**：`OperatorMgr::getArgCastKind`（`jnc_ct_OperatorMgr.cpp:721-759`）取
+  各实参 `CastKind` 里**最差**的那个（`CastKind` 的档在 `jnc_ct_CastOp.h:26-35`：
+  `None < Dynamic < Explicit < ImplicitLossyFuntionCall < ImplicitCrossFamily <
+  ImplicitCrossConst < Implicit < Identity`）。取最高分，平手就
+  `ambiguous call to overloaded function`；一个都不可行就
+  `none of the %d overloads accept the specified argument list`。**没有** C++ 那种逐参数的
+  偏序，就这一个标量。
+
+**语料的形状（662 份，扫的是同一个作用域里同名的那些声明；方法见附注）**：
+
+- 重载组 **159** 个（另有 1137 组是"同一个签名写了两遍"—— 类体里的原型加体外的定义，不算）；
+- 只靠**实参个数**就分得开的：**92** 个（把末尾默认值算进"可接受的个数区间"之后）；
+  要看参数**类型**才分得开的：**67** 个（57 个真同元，10 个是默认值让区间重叠）；
+- 组的大小：123 个两条、27 个三条、7 个四条，最长的是 `log.Writer.write` **11** 条
+  （`test/ioninja/api/log_Writer.jnc:16-90`）；
+- `construct` 的重载 **14** 组；`errorcode` 与非 `errorcode` 同元撞车的 **0** 组。
+
+**所以这一刀该怎么切**（先记下来，落地时按这个走）：
+
+1. 先做**按实参个数**的重载：`this.fns` 仍按方言名字存，第二条起把名字改成
+   `<全名>$o<元数>`，另开一张 `overloads: 基名 -> [方言名…]`；调用点按"给了几个实参"
+   在候选里挑（默认值那一格已经有了 `defs`，所以区间是现成的）。那覆盖 92/159 组。
+2. **同元的**（67 组）当场说"还不收：要按参数类型排序的重载决议" —— 别猜。jancy 那套是
+   一个标量的排序，可以照抄，但那要先有一张"我们这一层的隐式转换代价表"，是自己一刀。
+3. `construct` 的重载（14 组）也先不收：`this.ctors` 现在一个类一格，要变成一串。
+4. `virtual` 的重载先不收：第五十七刀的虚派发是"整数标签 + 按标签分派"，按名字接的，
+   同名两条会撞。
+
 ## 后果与代价
 
 
