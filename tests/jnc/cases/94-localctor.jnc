@@ -1,0 +1,49 @@
+// 第一百〇三刀：`A a(x, y);` —— 局部量声明符尾巴上的那对括号是**构造实参**。
+//
+// 语料 69 对（`ui.Action action(icon, text);`，test/ioninja/api/doc_Plugin.jnc:80）。
+// 语法上它与"带形参表的声明符"长得一模一样（C++ 那个 most vexing parse），所以先前这一层
+// 报的是 `局部的函数原型（还不收）` —— **那句诊断的名字是错的**：源码里根本没有原型。
+//
+// 这一层要的两半本来都有：第五十三刀的"声明符尾巴上的构造实参"（info.ctor）在局部量那条路上
+// 是通的。缺的只是把语法树那一格认回来 —— GLR 在这处让"形参表"那条产生式赢了。判据与"怎么
+// 当实参用"都在 ctorArgsOf 那儿：每一格都得是无名形参、ptrs 空、mods 空、而那一格 type-spec
+// 归约出来的正是一格 `(name <ID>)` —— 那个节点在表达式那一侧本来就是"一个名字"，原样拿来用。
+//
+// 判不出来的（`int` 那种内建类型关键字、限定名、带 `*` 的）照旧当形参表看，报的是改对了的话：
+// `局部量上的形参表（…只有类的变量收得下）`（`bad/local-formals.jnc`）。
+//
+// 期望输出的出处：/tmp/c103.c（`cc -O0 -std=c99 -Wall`）。
+
+class A {
+	int m_v;
+
+	construct(int a, int b) {
+		m_v = a + b;
+	}
+}
+
+class B {
+	int m_n;
+
+	construct(int n) {
+		m_n = n * 10;
+	}
+}
+
+int main() {
+	int x = 2;
+	int y = 3;
+
+	A a(x, y);
+	printf("%d\n", a.m_v);
+
+	// 一格实参的那种、以及实参是另一格局部量的
+	int k = 4;
+	B b(k);
+	printf("%d\n", b.m_n);
+
+	// 与 `new A(…)` 是同一个构造（第五十三刀那条路）
+	A* p = new A(10, 20);
+	printf("%d\n", p.m_v);
+	return 0;
+}

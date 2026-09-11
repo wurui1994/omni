@@ -1,0 +1,17 @@
+// 局部量上的形参表（ADR-0016 第一百〇三刀的边界）。
+// `A a(x, y);` 那对括号收下来是因为判得出"里头是**名字**"（构造实参）。判不出来的照旧拦：
+// 这一份里 `int` 是个内建类型关键字，type-spec 归约出来不是 `(name <ID>)` —— 那它就真长得
+// 像一格形参表，而局部量上不该有形参表。
+class A {
+	int m_v;
+
+	construct(int a, int b) {
+		m_v = a + b;
+	}
+}
+
+int main() {
+	A a(int, int);
+	printf("%d\n", a.m_v);
+	return 0;
+}

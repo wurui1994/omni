@@ -1499,6 +1499,37 @@ class JncLower {
     return node.items.slice(1);
   }
 
+  /**
+   * `A a(x, y);` 里那对括号（第一百〇三刀）：语法上它与"带形参表的声明符"长得一模一样
+   * （C++ 那个 most vexing parse），语义上是**造一个局部对象、把 `(x, y)` 当构造实参**
+   * （`ui.Action action(icon, text);`，test/ioninja/api/doc_Plugin.jnc:80，语料 69 对）。
+   *
+   * 判据：每一格都是**无名形参**（`(formal-anon specs ptrs)` —— 语法上 `x` 只有"类型"没有
+   * 名字）、`ptrs` 空、`specs` 两侧的 mods 都空、而那一格 type-spec 归约出来的正是一格
+   * `(name <ID>)`。凑齐了就把那几格**原样**当实参用 —— `(name <ID>)` 在表达式那一侧本来就是
+   * 一个名字，一个节点都不用新造（试落第一趟栽在这儿：造了 `(name (name X))`，`qname` 要的是
+   * `items[1]` 是 atom，于是答 null、下游 `resolve` 拿它去 replace 就崩了）。
+   *
+   * 内建类型关键字（`int` 那些）归约出来不是 `(name …)`、限定名是 `(qualified …)` ——
+   * 两种都回 null，那时它当形参表看，由调用方报。
+   */
+  ctorArgsOf(fs) {
+    const out = [];
+    for (const f of this.flat(fs)) {
+      if (!isList(f) || head(f) !== 'formal-anon') return null;
+      const sp = f.items[1];
+      const pt = f.items[2];
+      if (!isList(sp) || head(sp) !== 'specs') return null;
+      if (isList(pt) && this.flat(pt).length > 0) return null;
+      if (this.flat(sp.items[2]).length > 0 || this.flat(sp.items[3]).length > 0) return null;
+      const ts = sp.items[1];
+      if (!isList(ts) || head(ts) !== 'name' || !isAtom(ts.items[1])) return null;
+      out.push(ts);
+    }
+    if (out.length === 0) return null;
+    return this.mkL(fs.span, this.mkA(fs.span, 'args'), ...out);
+  }
+
   /** 一格局部量进作用域。`dname` 是它在方言里的名字 —— 只有 `static` 的局部量不一样
    *  （第二十六刀：那一格是模块级的，名字带上函数名），所以默认就是它自己。 */
   push(name, type, dname) {
@@ -6017,7 +6048,18 @@ class JncLower {
       else if (dh === 'ref-init') { this.nope(d, '引用初始化（`:=`）'); return null; }
       const info = this.declarator(dcl, sp);
       if (info === null) return null;
-      if (info.formals !== null) { this.nope(dcl, '局部的函数原型'); return null; }
+      if (info.formals !== null) {
+        /* `A a(x, y);`（第一百〇三刀）：那对括号里是**构造实参**，不是形参表 —— 判据与
+           "怎么当实参用"都在 ctorArgsOf 那儿。凑齐了就走第五十三刀那条现成的路。 */
+        const ca = isClass(info.type) && info.type.own === true
+          ? this.ctorArgsOf(info.formals) : null;
+        if (ca === null) {
+          this.nope(dcl, '局部量上的形参表（`T v(a, b)` 那种构造实参只有类的变量收得下）');
+          return null;
+        }
+        info.ctor = ca;
+        info.formals = null;
+      }
       // 声明符尾巴上的构造实参只有类的变量收得下（第五十三刀）：别的类型那一格 jancy 也没有
       // 构造可调 —— 不明说就会被悄悄丢掉。
       if (info.ctor !== null && !(isClass(info.type) && info.type.own === true)) {
