@@ -18,9 +18,11 @@
 //   node tests/lib/jnc-sweep.js              全量，印前 25 名
 //   node tests/lib/jnc-sweep.js --top 40     印前 40 名
 //   node tests/lib/jnc-sweep.js --only ioninja   只扫路径里含这个词的
+//   node tests/lib/jnc-sweep.js --group test/ioninja/api   那一批**当一个模块**编一次
 //   JANCY=/path/to/jancy node tests/lib/jnc-sweep.js
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RunCache } from './incr.js';
@@ -38,6 +40,16 @@ const topN = (() => {
 })();
 const only = (() => {
   const i = argv.indexOf('--only');
+  return i < 0 ? null : argv[i + 1];
+})();
+/* `--group <目录>`：把那个目录里的 `.jnc` **当一个模块**编一次（合成一份只有 import 的文件）。
+   为什么要这一格：ioninja 那一支的 CMakeLists 就是把 api/ 整批一起编的，而默认那一遍是
+   **逐份**编 —— 于是 `ui.StdColor` 这种"在同一批里、可这一份没写 import"的名字全落在
+   `没有这个类型` / `没有这个函数` / `未声明的变量` 那三行上。那三行里有多少是**口径**、
+   多少是真的缺，只有这一格量得出来。
+   它**不动**默认那一遍、也不写 json/log —— 上一趟的基线要保持可比。 */
+const group = (() => {
+  const i = argv.indexOf('--group');
   return i < 0 ? null : argv[i + 1];
 })();
 
@@ -62,6 +74,45 @@ function corpus(dir, out = []) {
 const IONINJA_API = join(JANCY, 'test', 'ioninja', 'api');
 const argsFor = (p) => (p.includes(`${'/test/ioninja/'}`) && existsSync(IONINJA_API)
   ? [cli, 'sx', p, '-I', IONINJA_API] : [cli, 'sx', p]);
+
+/* `--group` 那一格（见上面那段注）：合成一份只有 import 的文件，一次编完整批。 */
+if (group !== null) {
+  const dir = group.startsWith('/') ? group : join(JANCY, group);
+  if (!existsSync(dir)) {
+    process.stdout.write(`没有这个目录：${dir}\n`);
+    process.exit(0);
+  }
+  const names = readdirSync(dir).sort().filter((x) => x.endsWith('.jnc'));
+  const gRoot = process.env.OMNI_CACHE_DIR || join(root, '.omni-cache');
+  mkdirSync(join(gRoot, 'test'), { recursive: true });
+  const modPath = join(gRoot, 'test', 'jnc-group.jnc');
+  writeFileSync(modPath, `${names.map((x) => `import "${x}"`).join('\n')}\n`);
+  let gErr = '';
+  let gCode = 0;
+  try {
+    execFileSync(process.execPath, [cli, 'sx', modPath, '-I', dir],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    gCode = e.status ?? 1;
+    gErr = e.stderr ?? '';
+  }
+  const gt = new Map();
+  let gn = 0;
+  for (const line of gErr.split('\n')) {
+    const d = reasonOf(line);
+    if (d === null) continue;
+    gn += 1;
+    const k = `${d.kind} ${d.why}`;
+    gt.set(k, (gt.get(k) ?? 0) + 1);
+  }
+  process.stdout.write(`一整批当一个模块编：${names.length} 份（${dir}）`
+    + ` —— 退出码 ${gCode}、诊断 ${gn} 条、理由 ${gt.size} 种\n\n`);
+  for (const [k, v] of [...gt.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN)) {
+    process.stdout.write(`  ${String(v).padStart(4)}  ${k}\n`);
+  }
+  process.stdout.write(`\n（这一格不写 json/log —— 默认那一遍的基线要保持可比）\n`);
+  process.exit(0);
+}
 
 const files = corpus(JANCY).filter((p) => only === null || p.includes(only));
 process.stdout.write(`语料 ${files.length} 份（${JANCY}）\n`);
