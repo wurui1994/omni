@@ -4488,12 +4488,11 @@ class JncLower {
       if (fh === 'formal-anon') return this.nope(f, '无名形参');
       if (fh !== 'formal') return this.nope(f, `形参 '${fh}'`);
       const defNode = f.items[3] === undefined ? null : f.items[3];
-      /* 默认值只许挂在**末尾那几个**上（C++ 那条同样的规矩）：中间那格空着的话调用点
-         没法说"这一个用默认、后面那个我给"—— jancy 没有具名实参。 */
-      if (defNode === null && ps.length > 0 && ps[ps.length - 1].def !== null) {
-        return this.err(f, `形参 '${ps[ps.length - 1].name}' 有默认值，它后面这一个没有 ——`
-          + ' 默认值只能挂在末尾那几个上（没有具名实参，中间空一格调用点说不清）');
-      }
+      /* 默认值挂在**哪一格上都行**（第九十九刀）。先前这儿照 C++ 那条"只能挂末尾"拦着，
+         理由写的是"中间那格空着调用点说不清"—— 那句在 jancy 上不成立：它检查默认值是
+         **按位置一格一格**问的（`OperatorMgr_Call.cpp:421-435` 与 :447-460 那两段循环，
+         报的是 "argument (%d) of '%s' has no default value"），而中间那一格空着怎么说，
+         第八十八刀已经给出来了 —— `f(1,,3)`。所以这儿不该拦。 */
       const fsp = this.specs(f.items[1]);
       if (fsp === null) return null;
       // 形参上的 `property`（第七十刀）：那是一格**属性指针**（`int property* p`，
@@ -8888,7 +8887,7 @@ class JncLower {
     if (args === null) return null;
     if (args.length !== want.length) {
       return this.err(n, `'${nm0 === null ? shown(nm) : nm0}' 要 ${want.length} 个实参`
-        + `${defs === null ? '' : `（末尾 ${defs.filter((d) => d !== null).length} 个有默认值）`}`
+        + `${defs === null ? '' : `（其中 ${defs.filter((d) => d !== null).length} 个有默认值）`}`
         + `，这里给了 ${args0.length} 个`);
     }
     const parts = self === null ? [] : [self];
