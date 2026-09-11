@@ -2979,8 +2979,13 @@ class JncLower {
     const np = isList(tn) ? this.flat(tn.items[2]).length : 0;
     const mods = isList(tn) && isList(tn.items[1]) ? this.tmplMods(tn.items[1]) : [];
     if (np > 0 || mods.length > 0) {
+      /* 这个别名的名字**照用户写的那样拼**（`T*`、`int const*`）—— 内部名（`jnc$tp$…`）
+         看着规矩，可它会**漏进诊断**：`stdt_Iterator.jnc:74` 那种泛型 typedef 里 `T` 是没绑上的，
+         下游那句于是印成"没有这个类型：'jnc$tp$T_p'"，用户根本不认得那是什么。名字里带 `*`
+         不碍事 —— typedef 名只活在这一层的名字表里，从不落进降出来的 .sx。
+         实例名那一段仍然用 `_p` / `_const` 那套（那是要当标识符用的）。 */
+      const alias = `${key}${mods.map((w) => ` ${w}`).join('')}${'*'.repeat(np)}`;
       key = `${key}${mods.map((w) => `_${w}`).join('')}${'_p'.repeat(np)}`;
-      const alias = `jnc$tp$${key}`;
       if (!this.tmplPtrs.has(alias)) {
         this.tmplPtrs.add(alias);
         out.push({ ns: '', done: true, it: this.tmplPtrDef(sp, tn, alias) });
