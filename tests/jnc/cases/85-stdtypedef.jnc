@@ -1,0 +1,49 @@
+// 第九十刀：文档里没列、源码里有的五格标准 typedef。
+//
+// `type_primitive.rst:25-40` 那份清单只列到 `intptr`，可编译器自己那张表里还有五格
+// （`TypeMgr::setupStdTypedefArray`，jnc_ct_TypeMgr.cpp:1758-1783）：
+//   - `intptr_t` / `uintptr_t` -> `TypeKind_IntPtr` / `_u`（这一层的指针是 8 字节，所以 64 位）；
+//   - `utf8_t` / `utf16_t` / `utf32_t` -> **有符号**的 Int8 / Int16 / Int32（同处 :1766 / :1771 / :1776
+//     —— 不是无符号，照源码抄）。
+// 语料里 69 处：intptr_t 31、utf32_t 14、uintptr_t 13、utf16_t 10、utf8_t 1
+// （例：test/ioninja/common/io_FileIdMgr.jnc:21 的 `intptr_t readonly m_lastLoFileId;`、
+// src/jnc_ext/jnc_std/jnc/std_MapEntry.jnc 里那两处）。
+//
+// 有符号那一条是这一份要钉住的：`utf16_t x = -1` 转成 int 是 -1（符号位伸出来），
+// 不是 65535。宽度那一条靠"截断"钉：写 -1 进 utf8_t、再看它当 int 是多少。
+//
+// 期望输出的出处：/tmp/c85.c（`cc -O0 -std=c99 -Wall`）。
+
+intptr_t g_p = -5;
+uintptr_t g_u = 7;
+utf8_t g_c8 = 65;
+utf16_t g_c16 = 66;
+utf32_t g_c32 = 67;
+
+// 结构体字段上也是同一族
+struct Pair {
+	intptr_t m_lo;
+	utf16_t m_ch;
+}
+
+int sum(intptr_t a, uintptr_t b) {
+	return (int)(a + (intptr_t)b);
+}
+
+int main() {
+	printf("%d %d\n", (int)g_p, (int)g_u);
+	printf("%d %d %d\n", (int)g_c8, (int)g_c16, (int)g_c32);
+	printf("%d\n", sum(g_p, g_u));
+
+	// 有符号：-1 伸成 int 还是 -1
+	utf8_t a = -1;
+	utf16_t b = -1;
+	utf32_t c = -1;
+	printf("%d %d %d\n", (int)a, (int)b, (int)c);
+
+	Pair p;
+	p.m_lo = -9;
+	p.m_ch = 90;
+	printf("%d %d\n", (int)p.m_lo, (int)p.m_ch);
+	return 0;
+}

@@ -5256,6 +5256,33 @@ jancy 那条规则叫 `this_modifier_suffix`（`jnc_ct_Declarator.llk:512-525`�
 opaque class 那一族），于是它们从那个数字里退出来。**这一格是那个口径先前被解析错撑起来的
 虚高** —— 记在这儿，免得下一趟看见 −8 以为是退步。
 
+## 第九十刀：文档里没列、源码里有的五格标准 typedef
+
+`没有这个类型：'…'` 那 354 对里，**8 份文件只差它一条**。挑三份量了一下缺的是什么：
+`std_MapEntry.jnc` 缺 `intptr_t` 与 `variant_t`、`ui_ListItem.jnc` 缺 `variant_t`、
+`Proto_Raw.jnc` 缺 `log.Representation`（那是别的模块里的类型，另一格账）。
+`variant_t` 是一整格动态值（另一刀），而 **`intptr_t` 这一格是一行表的事**。
+
+顺着源码把那张表整份对了一遍 —— `TypeMgr::setupStdTypedefArray`
+（`jnc_ct_TypeMgr.cpp:1758-1783`）里有 **`type_primitive.rst` 那份清单里没有的五格**：
+
+- `intptr_t` / `uintptr_t` -> `TypeKind_IntPtr` / `_u`（这一层的指针是 8 字节，所以落成 64 位）；
+- `utf8_t` / `utf16_t` / `utf32_t` -> **有符号**的 Int8 / Int16 / Int32（同处 :1766 / :1771 / :1776
+  —— 不是无符号，照源码抄，文档一个字都没提这三格）。
+
+语料里 69 处：`intptr_t` 31、`utf32_t` 14、`uintptr_t` 13、`utf16_t` 10、`utf8_t` 1
+（例：`io_FileIdMgr.jnc:21` 的 `intptr_t readonly m_lastLoFileId;`）。
+
+**这一刀就是 `INT_ALIASES` 里加五行**，出处写在旁边。**"文档没列的按源码算"这条又中了一次**
+——第八十一刀（没写类型就是 void）、第八十九刀（`this_modifier_suffix` 收三个）都是同一条。
+
+**量出来的**：`tests/jnc` 176/0 -> **177/0**。`cases/85-stdtypedef.jnc` 六条腿逐字节相同，
+尺子是手写的一份等价 C（`/tmp/c85.c`）：把**有符号**那一条钉住（`utf16_t x = -1` 转 int 是 -1，
+不是 65535）、宽度那一条也钉住（`intptr_t` 是 64 位），字段与形参上各走一遍。
+尺子（655 份）：(文件, 拦路项) 对 8294 -> **8267**（−27），「真降得下来」61 与
+「没有还不收」146 都不动 —— 那 8 份 sole 的文件里除了 `intptr_t` 还压着 `variant_t`
+与别的模块的类型，所以这一格只把对数往下推了 27。
+
 ## 后果与代价
 
 

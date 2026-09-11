@@ -621,14 +621,21 @@ const INT_NAMES = new Map([[8, 'char'], [16, 'short'], [32, 'int'], [64, 'long']
  * jancy 的语料里这几个到处是（`uint_t` / `size_t` / `dword_t`），拒了等于拒掉半份语料。
  */
 const INT_ALIASES = new Map([
-  ['int8_t', { w: 8, u: false }],
+  ['int8_t', { w: 8, u: false }], ['utf8_t', { w: 8, u: false }],
   ['uint8_t', { w: 8, u: true }], ['uchar_t', { w: 8, u: true }], ['byte_t', { w: 8, u: true }],
-  ['int16_t', { w: 16, u: false }],
+  ['int16_t', { w: 16, u: false }], ['utf16_t', { w: 16, u: false }],
   ['uint16_t', { w: 16, u: true }], ['ushort_t', { w: 16, u: true }], ['word_t', { w: 16, u: true }],
-  ['int32_t', { w: 32, u: false }],
+  ['int32_t', { w: 32, u: false }], ['utf32_t', { w: 32, u: false }],
   ['uint32_t', { w: 32, u: true }], ['uint_t', { w: 32, u: true }], ['dword_t', { w: 32, u: true }],
   ['int64_t', { w: 64, u: false }],
   ['uint64_t', { w: 64, u: true }], ['ulong_t', { w: 64, u: true }], ['qword_t', { w: 64, u: true }],
+  /* 这五格（第九十刀）文档那份清单里**没有**（type_primitive.rst:25-40 只列到 `intptr`），
+   * 出处是源码那张表：`TypeMgr::setupStdTypedefArray`（jnc_ct_TypeMgr.cpp:1758-1783）——
+   * `intptr_t` / `uintptr_t` 是 `TypeKind_IntPtr` / `_u`（这一层的指针是 8 字节，所以 64 位），
+   * 而 `utf8_t` / `utf16_t` / `utf32_t` 是**有符号**的 Int8 / Int16 / Int32（同处 :1766/:1771/:1776，
+   * 不是无符号 —— 照源码抄）。语料里 69 处：intptr_t 31、utf32_t 14、uintptr_t 13、utf16_t 10、
+   * utf8_t 1。 */
+  ['intptr_t', { w: 64, u: false }], ['uintptr_t', { w: 64, u: true }],
 ]);
 function tyName(t) {
   if (t.k === 'ptr' && t.target.k === 'arr') return `${tyName(t.target.el)}(*)[${t.target.n}]`;
