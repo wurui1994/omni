@@ -2045,8 +2045,13 @@ class JncLower {
          命名空间是这个类，于是 typedefDecl 里那句 `qual(info.name)` 拼出来的正是
          `C$Name`，类体内外查名都对得上。语料里最要紧的一格是**函数类型**的：
          `typedef string_t FormatFunc(uint64_t value);`（ui_InformationGrid.jnc:52），
-         紧接着下一行就是 `FormatFunc* m_formatFunc;`。 */
-      if (h === 'typedef' && isCls) out.push({ ns: inner, it: m });
+         紧接着下一行就是 `FormatFunc* m_formatFunc;`。
+         **结构体那一侧也提**（第一百二十四刀）：这一格与第一百〇一刀那个决定不冲突 ——
+         那一条说的是 `construct` / `destruct` / 嵌套类型"提上来会报两遍"，而 typedef 不报，
+         它只是**起一个名字**；结构体的名字早就是一层命名空间了（方法从第一百〇一刀起就提在
+         `S$m` 上）。语料里是 `struct RbTreeNodeBase { typedef P EntryPtr; … }`
+         （stdt_RbTree.jnc:20）那一族。 */
+      if (h === 'typedef') out.push({ ns: inner, it: m });
     }
   }
 
@@ -4144,9 +4149,14 @@ class JncLower {
     const evts = [];                     // 事件那几格（第八十三刀）—— 造对象时要建单子
     const bs = { last: null };           // 位域分组的游标（第一百一十二刀，见 bitSlot）
     // 类体里查名从**这个类**这一层起（第五十二刀）：嵌套类型在 nsFlat 那一遍登记成了 `C.S`，
-    // 而字段与方法原型写的是裸名字 `S`（test97.jnc:8）。结构体不动 —— 它不是一层命名空间。
+    // 而字段与方法原型写的是裸名字 `S`（test97.jnc:8）。
+    /* **结构体也一样**（第一百二十四刀）：体里的 `typedef` 从这一刀起也提到顶层、名字记成
+       `S$Num`，那么体里裸写的 `Num` 就得从 `S` 这一层查起。这一句不等于"结构体全面变成一层
+       命名空间"—— 嵌套类型、带名字的 union 那几条界各自的 nope 都还在原处，这儿只是把
+       **查名的起点**与"名字已经记在哪一层"对齐了（方法从第一百〇一刀起就记在 `S$m` 上，
+       所以起点本来就该是这一层，先前是欠着的）。 */
     const saveNs = this.ns;
-    if (cls) this.ns = name;
+    this.ns = name;
     for (const m0 of this.flat(n.items[4])) {
       const m = unattr(m0);            // 属性收下不看（第一百〇八刀）
       if (isList(m) && head(m) === 'empty-stmt') continue;
@@ -4247,9 +4257,9 @@ class JncLower {
         continue;
       }
       /* 类体里的 `typedef`（第一百〇六刀）：aggHoist 已经把它提到顶层那一批里、命名空间
-         记的是这个类，类型名那一遍会办。这儿跳过就好 —— 结构体那一侧不提，照旧落到下面
-         那句话上（与第一百〇一刀同一个决定：那儿的话更准，提上来只会报两遍）。 */
-      if (isList(m) && head(m) === 'typedef' && cls) continue;
+         记的是这个类，类型名那一遍会办。这儿跳过就好 —— **结构体那一侧从第一百二十四刀起
+         也一样**（结构体的名字早就是一层命名空间了，方法就提在 `S$m` 上）。 */
+      if (isList(m) && head(m) === 'typedef') continue;
       if (!isList(m) || head(m) !== 'var-decl') {
         this.nope(m, `${cls ? '类' : '结构体'}里除字段以外的成员`);
         continue;

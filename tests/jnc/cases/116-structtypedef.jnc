@@ -1,0 +1,50 @@
+// 第一百二十四刀：**结构体体里的 `typedef`**（第一百〇六刀在类那一侧收了，结构体那一侧
+// 当时留了界 —— `bad/struct-typedef`，那份界随这一刀删了，写法搬到这儿）。
+//
+// 两处改动，一处比一处要紧：
+//   1. `aggHoist` 里那句 `h === 'typedef' && isCls` 去掉 `isCls` —— 提上去，名字记成 `S$Num`。
+//      这与第一百〇一刀"结构体那一侧只提方法"不冲突：那一条说的是 `construct` / `destruct` /
+//      嵌套类型"提上来会报两遍"，而 typedef 不报，它只是**起一个名字**。
+//   2. `typeDecl` 里查名的起点：`if (cls) this.ns = name` 改成无条件 —— 体里裸写的 `Num`
+//      得从 `S` 这一层查起。这一句是**把欠的补上**：方法从第一百〇一刀起就记在 `S$m` 上了，
+//      查名的起点却还停在外面一层。它不等于"结构体全面变成一层命名空间" —— 嵌套类型、
+//      带名字的 union 那几条界各自的 nope 都还在原处（`bad/union-named` 照旧拦）。
+//
+// 语料里的出处：`struct RbTreeNodeBase { typedef P EntryPtr; … }`（stdt_RbTree.jnc:20）那一族。
+//
+// 尺子 `/tmp/c122.c`：C 里 struct 体内不能写 typedef，所以手抄的是"提到外面之后"的样子 ——
+// 这正是这一刀做的事。同一串数（42 7 / 9 / 5）。
+
+struct S {
+	typedef int Num;
+	// 函数类型的那一格（第一百〇六刀里最要紧的形状）在结构体上也一样
+	typedef Num Fn(int a, int b);
+
+	Num m_n;
+	Fn* m_f;
+
+	Num twice() {
+		return m_n * 2;              // 体里裸写字段：查名的起点是这一层
+	}
+}
+
+int add(int a, int b) {
+	return a + b;
+}
+
+int main() {
+	S s;
+	s.m_n = 21;
+	s.m_f = add;
+	printf("%d %d\n", s.twice(), s.m_f(3, 4));
+
+	// 体外用全名（`S.Num`）—— 与类那一侧一模一样
+	S.Num x = 9;
+	printf("%d\n", x);
+
+	// 先前 `bad/struct-typedef` 那一格写法（一条 typedef + 一格字段）照旧
+	S t;
+	t.m_n = 5;
+	printf("%d\n", t.m_n);
+	return 0;
+}
