@@ -1,0 +1,76 @@
+// 第一百三十七刀：查名走**基类那一层**。
+//
+// jancy 里类同时是一层命名空间（`ClassType` 派生自 `Namespace`），而派生类那一层是接在基类
+// 那一层上的 —— 查名沿 `m_baseTypeList` 上溯。这一层先前不走这一步：`resolve` 只顺着当前那层
+// 命名空间一层层往外退，从不看基类。于是
+//
+//     class B0 { typedef int X; }
+//     class D0: B0 { X m_v; }        // 报"没有这个类型：'X'"
+//
+// 这条与泛型无关（非泛型代码同样撞），可它正是 stdt 那一批里 `construct(EntryPtr p)`
+// （stdt_Iterator.jnc:62，EntryPtr 在基类 IteratorBase 那一层）与 `Iterator append(T value)`
+// （stdt_BoxList.jnc:68）那两族的形状。
+//
+// 落法：aggHoist 那一遍记一张"类的全名 -> { 当时那层命名空间, 源码里写的基类名字 }"——
+// 必须在那一遍记，因为 `this.bases` 是 typeDecl 才填的，而 typedef 与类型名那两遍都排在
+// typeDecl 之前。解成全名留到查名的时候（那时类都登记上了）。`resolve` 往外退到底之后再顺着
+// 这张表 BFS 上去，多格基类按**声明顺序**（与第九十四刀 mixins 同一条口径：第一格先）。
+//
+// 顺序要写清：**自己那几层先查完，才轮到基类**。所以 D0 自己也有一格 X 时，用的是自己那格。
+//
+// 尺子 `/tmp/c134.c`：C 里 typedef 没有继承这回事，手写的是"每一处该解成哪个类型"——
+// 那正是这一刀要的答案。同一串数（3 / 7 / 9 / 65）。
+
+class B0 {
+	typedef int X;
+
+	struct Pair {
+		int m_a;
+		int m_b;
+	}
+}
+
+// 一、基类的成员 typedef
+class D0: B0 {
+	X m_v;
+}
+
+// 二、基类的**嵌套类型**走同一条路
+class D1: B0 {
+	Pair m_p;
+}
+
+// 三、隔一层也走得上去（D2 -> M0 -> B0）
+class M0: B0 {
+	int m_mid;
+}
+
+class D2: M0 {
+	X m_v;
+}
+
+// 四、自己那一层有同名的就用自己那格（先查完自己，才轮到基类）
+class D3: B0 {
+	typedef char X;
+
+	X m_c;
+}
+
+int main() {
+	D0* a = new D0;
+	a.m_v = 3;
+	printf("%d\n", a.m_v);
+
+	D1* b = new D1;
+	b.m_p.m_a = 7;
+	printf("%d\n", b.m_p.m_a);
+
+	D2* c = new D2;
+	c.m_v = 9;
+	printf("%d\n", c.m_v);
+
+	D3* d = new D3;
+	d.m_c = 65;                          // char：自己那格 X
+	printf("%d\n", d.m_c);
+	return 0;
+}

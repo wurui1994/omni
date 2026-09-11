@@ -1172,6 +1172,11 @@ class JncLower {
        `模板名$实参键` 拼的，里头那个 `$` 不是一层命名空间 —— 查名往外退的时候要
        整块跳过去，见 resolve。 */
     this.instNs = new Map();
+    /* 基类那一层的名字表（第一百三十七刀）：类 / 结构体的全名 -> { ns, 源码里写的基类名字 }。
+       在 aggHoist 那一遍记（typeDecl 太晚，见那处注），解成全名留到 baseResolve。 */
+    this.aggBases = new Map();
+    /** baseResolve 自己要用 resolve 解基类名字 —— 一道闸门，别让它绕回来。 */
+    this.inBase = false;
     /* 实参带 `*` 时给那一格指针类型合成的 typedef 名（第一百二十刀）。替换只在 type-spec
        那一层 —— 所以带 `*` 的实参先**起个名字**，再拿这个名字当一格普通类型名替进去。 */
     this.tmplPtrs = new Set();
@@ -1786,7 +1791,53 @@ class JncLower {
       const full = `${this.nsExtra}$${k}`;
       if (has(full)) return full;
     }
-    return null;
+    // 往外退到底还没找着，最后再顺着**基类那一层**上去找一遍（第一百三十七刀）
+    return this.baseResolve(k, has);
+  }
+
+  /**
+   * 顺着基类链找一个名字（第一百三十七刀）。`class D0: B0 { X m_v; }` 里那个 `X` 可能是
+   * 基类的成员 typedef —— jancy 那边类**同时是一层命名空间**，而派生类那一层是接在基类
+   * 那一层上的（`ClassType` 派生自 `Namespace`，查名沿 `m_baseTypeList` 上溯）。
+   *
+   * 排在 `resolve` 的最后：自己那几层先查完，才轮到基类。多格基类按**声明顺序** BFS ——
+   * 与第九十四刀 mixins 那处同一条口径（第一格先）。
+   *
+   * 基类的名字解成全名要在**这时候**做（aggHoist 那一遍类还没登记上），所以这儿会回头调
+   * `resolve` —— `inBase` 是那道闸门：解基类名字的时候不再往基类上走，免得绕回来。
+   */
+  baseResolve(k, has) {
+    if (this.inBase || this.aggBases.size === 0) return null;
+    let p = this.ns;
+    for (;;) {
+      const q = [p];
+      const seen = new Set();
+      while (q.length > 0) {
+        const cur = q.shift();
+        if (seen.has(cur)) continue;                 // 环（第一百二十八刀那道闸门管的是布局）
+        seen.add(cur);
+        const e = this.aggBases.get(cur);
+        if (e === undefined) continue;
+        for (const bn of e.names) {
+          const saveNs = this.ns;
+          const saveIn = this.inBase;
+          this.ns = e.ns;
+          this.inBase = true;
+          const b = this.resolve(bn, (x) => this.classes.has(x) || this.structs.has(x));
+          this.ns = saveNs;
+          this.inBase = saveIn;
+          if (b === null) continue;
+          const full = `${b}$${k}`;
+          if (has(full)) return full;
+          q.push(b);
+        }
+      }
+      if (p === '') return null;
+      const j = this.instNs.get(p);
+      if (j !== undefined && j !== p) { p = j; continue; }
+      const i = p.lastIndexOf('$');
+      p = i < 0 ? '' : p.slice(0, i);
+    }
   }
 
   err(node, msg) {
@@ -2259,6 +2310,18 @@ class JncLower {
     if (cn === null) return;                          // 名字认不出来，那一遍会报
     const k = cn.replace(/\./g, '$');
     const inner = ns === '' ? k : `${ns}$${k}`;
+    /* 基类那一层的名字表（第一百三十七刀）：`class D0: B0 { X m_v; }` 里那个 `X` 可能是
+       **基类的成员 typedef**（`class B0 { typedef int X; }`）。查名要走得上去，而这一表必须在
+       **这一遍**记 —— `this.bases` 是 typeDecl 那一遍才填的，而 typedef 与类型名那两遍都排在
+       typeDecl 之前，那时问 `this.bases` 什么都没有。
+       记的是**源码里写的**基类名字加当时那一层命名空间：解成全名要等类都登记上，所以那一步
+       留到查名的时候做（见 baseResolve）。 */
+    const bns = [];
+    for (const b of this.flat(agg.items[3])) {
+      const bn = this.qname(b);
+      if (bn !== null) bns.push(bn);
+    }
+    if (bns.length > 0) this.aggBases.set(inner, { ns, names: bns });
     for (const m0 of this.flat(agg.items[4])) {
       const m = unattr(m0);            // 属性收下不看（第一百〇八刀）
       if (!isList(m)) continue;
