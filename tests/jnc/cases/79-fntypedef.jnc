@@ -1,0 +1,43 @@
+// 函数类型的 typedef（第八十二刀）
+//
+// 出处：jancy 的 `typedef` 是个存储类（DeclarationSpecifier.llk:83），后面跟的是普通声明符串 ——
+// 声明符上带函数后缀时算出来的就是一格 `TypeKind_Function`（`DeclTypeCalc` 的 `getFunctionType`，
+// jnc_ct_DeclTypeCalc.cpp:170-197）。函数类型的**变量**在 jancy 里不成立，能用的只有 `F*`
+// （`getFunctionPtrType`，同文件 674-685）。语料里这种名字一律当函数指针用：
+// `typedef string_t FormatFunc(void const* p);` 之后 `FormatFunc* m_format;`
+// （test/ioninja/api 那一片）。
+//
+// 这里钉三件事：
+//   1. `typedef int Binop(int, int);` 之后 `Binop*` 是一格函数指针，赋一个函数名进去能调
+//   2. 那一格能当**形参**（`apply(Binop* f, …)`），传的是函数名
+//   3. `thin` 的那一格（`Binop thin* q`）：与 `function thin*` 同一格表示（第五十五刀）
+//
+// 一格**不写返回类型**的 typedef（`typedef OnDone(int);`，语料里有）这一层还进不来 ——
+// 那要语法收下"一个说明符都没有的声明"，与不写类型的**裸**方法（`set2(int v) {}`）是同一格
+// 语法上的账，不在这一刀里（第八十一刀收的是"只有存储说明符"的那一种）。
+
+typedef int Binop(int a, int b);
+
+int add(int a, int b) {
+	return a + b;
+}
+
+int mul(int a, int b) {
+	return a * b;
+}
+
+int apply(Binop* f, int a, int b) {
+	return f(a, b);
+}
+
+int main() {
+	Binop* p = add;
+	printf("%d %d\n", p(2, 3), apply(mul, 2, 3));
+
+	p = mul;
+	printf("%d\n", p(4, 5));
+
+	Binop thin* q = add;
+	printf("%d\n", q(10, 1));
+	return 0;
+}

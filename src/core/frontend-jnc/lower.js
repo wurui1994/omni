@@ -294,6 +294,11 @@ const tArr = (t, n) => ({ k: 'arr', el: t, n });
  * fat 的一个特例：捕获为空），所以两者在这一层是同一格，差的只有诊断里的名字。
  */
 const tFn = (params, ret, thin = false) => ({ k: 'fnptr', params, ret, thin });
+/* 一格**函数类型**本身（第八十二刀）。只有 `typedef R F(实参…);` 起的那种名字是这一格 ——
+ * jancy 那边它是 `TypeKind_Function`，而"函数类型的变量"是不成立的，能用的只有 `F*`
+ * （`getFunctionPtrType`，jnc_ct_DeclTypeCalc.cpp:483-491 与 674-685）。所以这一格在
+ * ptrsTy 里碰到第一个 `*` 就变成 fnptr，一个 `*` 都不带的用法当场拒。 */
+const tFnTy = (params, ret) => ({ k: 'fnty0', params, ret });
 const isFn = (t) => t.k === 'fnptr';
 
 const isInt = (t) => t.k === 'int';
@@ -1766,7 +1771,23 @@ class JncLower {
       }
       const info = this.declarator(d, sp);
       if (info === null) continue;
-      if (info.formals !== null) { this.nope(d, '函数类型的 typedef'); continue; }
+      /* 函数类型的 typedef（第八十二刀）：`typedef string_t FormatFunc(void const* p);` ——
+       * 语料里这种名字一律当**函数指针**用（`FormatFunc* m_format;`）。
+       * jancy 那边这条 typedef 起的是一格 `TypeKind_Function`（声明符上的函数后缀由
+       * `DeclTypeCalc` 的 `getFunctionType` 接，jnc_ct_DeclTypeCalc.cpp:170-197），
+       * 而函数类型的**变量**不成立，能用的只有 `F*`（getFunctionPtrType，同文件 674-685）。
+       * 所以这儿存的是 fnty0 那一格，`*` 由 ptrsTy 加。 */
+      if (info.formals !== null) {
+        const ps = this.formalList(info.formals);
+        if (ps === null) continue;
+        const an0 = this.qual(info.name);
+        if (INT_ALIASES.has(info.name) || this.structs.has(an0) || this.aliases.has(an0)) {
+          this.err(d, `类型名 '${shown(an0)}' 重复定义`);
+          continue;
+        }
+        this.aliases.set(an0, tFnTy(ps.map((p) => p.type), info.type));
+        continue;
+      }
       const an = this.qual(info.name);
       if (INT_ALIASES.has(info.name) || this.structs.has(an) || this.aliases.has(an)) {
         this.err(d, `类型名 '${shown(an)}' 重复定义`);
@@ -3385,7 +3406,18 @@ class JncLower {
         t = tClass(t.name, false);
         continue;
       }
+      /* 函数类型的 typedef 上那个 `*`（第八十二刀）：`FormatFunc* m_f;` —— 那一格是**函数
+         指针**，不是"指向函数指针的指针"。jancy 同（getFunctionPtrType，
+         jnc_ct_DeclTypeCalc.cpp:674-685）。第二个 `*` 就落到下面那句上，与 `function**`
+         同一堵墙（那一格还不收）。 */
+      if (t.k === 'fnty0') { t = tFn(t.params, t.ret, thin); continue; }
       t = thin ? tThin(t) : tPtr(t);
+    }
+    /* 一个 `*` 都没带的函数类型名（第八十二刀）：`FormatFunc f;` —— jancy 那边也不成立
+       （函数类型的变量没有表示，能用的只有 `F*`）。当场说清，别让它悄悄落成一格别的东西。 */
+    if (t !== null && t !== undefined && t.k === 'fnty0') {
+      this.nope(node, '一格函数类型的变量（那是 typedef 起的函数类型名 —— 能用的只有 `名字*`）');
+      return null;
     }
     return t;
   }
@@ -3538,6 +3570,15 @@ class JncLower {
       return this.nope(s, `声明符后缀 '${sh}'`);
     }
     for (let i = dims.length - 1; i >= 0; i--) t = tArr(t, dims[i]);
+    /* 一个 `*` 都没带的函数类型名（第八十二刀）：`Binop f;` —— jancy 那边也不成立（函数类型
+       的变量没有表示，能用的只有 `F*`）。拦在这一处是因为这儿是**所有**声明符的出口：
+       局部量、模块级、字段、形参、返回类型都从这儿拿 type，漏一处就会把 fnty0 那一格
+       当成一个真类型带下去（量过：那时下游报的是"fnty0 的局部量不写初值"）。
+       `typedef` 自己那一处在它前面就分岔了（它要的正是这一格）。 */
+    if (t !== null && t !== undefined && t.k === 'fnty0') {
+      return this.nope(d, `一格函数类型的变量（'${name}' 的类型是 typedef 起的函数类型名 ——`
+        + ' 能用的只有 `名字*`）');
+    }
     return { name, type: t, formals, ctor, special: null, sp };
   }
 
