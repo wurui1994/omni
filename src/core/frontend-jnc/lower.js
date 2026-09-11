@@ -943,6 +943,17 @@ class JncLower {
     this.ownFields = new Map();   // 类名 -> 它自己那几格字段（基类的不算）
     this.pendingCls = [];         // 类的 `(struct …)` 推迟到整条链都知道了再发
     this.synthSC = new Set();     // 只有静态构造、那一个实例构造是合成出来的类
+    /* 字段的默认值（第七十八刀）。类名 -> `[{ name, type, expr, node }]`。
+     * jancy 那边**没有**单独的预构造：初值是挂在 `Field` 上的一串 token（jnc_ct_Field.h:21-42），
+     * 由 `MemberBlock::initializeFields`（MemberBlock.cpp:141-182）在**构造函数里面**重放 ——
+     * 要么在合成出来的默认构造里（DerivableType.cpp:909-927），要么插在用户写的 `construct`
+     * 开头、基类构造之后（Parser.cpp:2997-3010）。所以它们是构造体里的普通代码，能引用
+     * `this`、别的字段、方法、全局量 —— 这一层照做：把它们降成 `construct` 开头的几条赋值。
+     * `synthFI` 是"有初值但没写 construct、那一个由我们合成"的类：签名那一遍先把它登记进
+     * `ctors`（`C1 a;` / `new C1` 才接得上），**体推迟到函数体那一遍之后再发** ——
+     * 初值里可以引用模块级变量，而那些在签名那一遍还没登记。 */
+    this.fieldInits = new Map();
+    this.synthFI = new Set();
     // 虚派发（第五十七刀）。`virt` 是方言里那个方法名 -> 'virtual' | 'override' | 'abstract'，
     // `tags` 是类名 -> 那个类的整数标签（根那一格结构体里的 `$tag` 存的就是它，对象一造出来
     // 就写死）。`disp` 记着按标签分派的那段函数，一个（根, 方法名）一段。
@@ -966,7 +977,15 @@ class JncLower {
     this.guards = [];
   }
 
-  /** 派生类没写 construct 时合成一个（第五十六刀）：它做的事就是把基类那一个调一遍。 */
+  /**
+   * 类没写 construct 时合成一个。两种理由，合起来只有一格函数：
+   *   - 派生类（第五十六刀）：它做的事是把基类那一个调一遍。
+   *   - 有字段默认值（第七十八刀）：那几条赋值要有地方待着。
+   *
+   * 这一遍只**登记**（`ctors` / `fns` / `methods`）——`C1 a;` 与 `new C1` 从那张表接。
+   * 只有基类那一句的，体当场就发得出来；带字段初值的推迟到 emitFieldInitCtors
+   * （初值里可以引用模块级变量，那些在这一遍还没登记）。
+   */
   synthCtors() {
     const depth = (c) => {
       let d = 0;
@@ -977,20 +996,21 @@ class JncLower {
     const order = this.pendingCls.slice().sort((a, b) => depth(a.name) - depth(b.name));
     for (const { name, node } of order) {
       const base = this.bases.get(name);
-      if (base === null || base === undefined) continue;
-      const bc = this.ctors.get(base);
-      if (bc === undefined) continue;                 // 基类也没有构造，什么都不用做
+      const bc = base === null || base === undefined ? undefined : this.ctors.get(base);
+      const hasFI = this.fieldInits.has(name);
       if (this.ctors.has(name)) {
-        // 自己写了 construct：基类那一个由 `basetype.construct(…)` 显式调，没写就在 fnDef
-        // 那处自动补一句（与 jancy 的 callBaseTypeConstructors 同）。只有 static construct
-        // 的那一种上面已经合成过一个空的了，那一个不会调基类 —— 明说不收。
-        if (this.synthSC.has(name)) {
+        // 自己写了 construct：字段初值由 fnDef 插到它开头；基类那一个由
+        // `basetype.construct(…)` 显式调，没写就在 fnDef 那处自动补一句（与 jancy 的
+        // callBaseTypeConstructors 同）。只有 static construct 的那一种上面已经合成过一个
+        // 空的了，那一个不会调基类 —— 明说不收。
+        if (bc !== undefined && this.synthSC.has(name)) {
           this.nope(node, `${shown(name)} 只有 static construct 而基类 ${shown(base)} 有 construct`
             + '（合成出来的那一个还要把基类的构造调一遍）');
         }
         continue;
       }
-      if (bc.params.length > 0) {
+      if (bc === undefined && !hasFI) continue;   // 没有基类构造、也没有初值：不用有构造
+      if (bc !== undefined && bc.params.length > 0) {
         this.err(node, `${shown(name)} 没有 construct，而基类 ${shown(base)} 的 construct 要 `
           + `${bc.params.length} 个实参 —— 得自己写一个 construct 并在里面调 basetype.construct(…)`);
         continue;
@@ -1000,8 +1020,85 @@ class JncLower {
       this.fns.set(full, { params: [self], ret: J_VOID });
       this.methods.set(full, name);
       this.ctors.set(name, { name: full, params: [] });
+      if (hasFI) { this.synthFI.add(name); continue; }
       this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n`
         + `    (expr (call ${bc.name} (var $this))))`);
+    }
+  }
+
+  /**
+   * 一个类那几格字段默认值，降成 `construct` 开头的几条语句（第七十八刀）。
+   *
+   * 落法是**合成语句、走原来那条路**：`int m_x = 5;` 变成 `m_x = 5;` 这条赋值语句的 AST，
+   * 再交给 stmt 降 —— 于是"裸字段名补 this"（selfField）、类型检查、结构体的按格拷贝、
+   * 花括号初值（`Point m_p = { 1, 2 };`）、属性字段的赋值全是原来那一套，一处逻辑都没有
+   * 第二份。字段名在类这一层查得着，所以拼的就是源码里写的那个名字。
+   *
+   * 调用方负责摆好上下文（this.ns / selfClass / alias 的 this / scopes）：用户自己写了
+   * construct 的那种由 fnDef 摆（那儿本来就摆好了），合成的那种由 emitFieldInitCtors 摆。
+   */
+  fieldInitLines(cls, ind) {
+    const list = this.fieldInits.get(cls);
+    if (list === undefined) return [];
+    const out = [];
+    for (const f of list) {
+      const sp = f.node.span;
+      const at = (v) => ({ kind: 'atom', value: v, span: sp });
+      const lhs = { kind: 'list', span: sp, items: [at('name'), at(f.name)] };
+      const asg = {
+        kind: 'list',
+        span: sp,
+        items: [at('assign'), { kind: 'string', value: '=', span: sp }, lhs, f.expr],
+      };
+      const lines = this.stmt({ kind: 'list', span: sp, items: [at('expr-stmt'), asg] }, ind);
+      if (lines === null) continue;                 // 已经报过错了
+      for (const l of lines) out.push(l);
+    }
+    return out;
+  }
+
+  /**
+   * 合成出来的那些 construct 的**体**（第七十八刀）：类里有字段默认值、却没写 construct。
+   *
+   * 排在函数体那一遍之后 —— 初值里可以引用模块级变量和别的函数，那些前面几遍才登记完。
+   * 顺序照 jancy（jnc_ct_Parser.cpp:3005-3009）：基类构造 → 静态构造 → 字段初值。
+   */
+  emitFieldInitCtors() {
+    for (const cls of this.synthFI) {
+      const pre = [];
+      const base = this.bases.get(cls);
+      const bc = base === null || base === undefined ? undefined : this.ctors.get(base);
+      if (bc !== undefined) pre.push(`    (expr (call ${bc.name} (var $this)))`);
+      if (this.sctors.has(cls)) for (const l of this.gateLines(cls, '    ')) pre.push(l);
+      const saveNs = this.ns;
+      const saveSelf = this.selfClass;
+      const savePr = this.selfProp;
+      const saveAlias = this.alias;
+      const saveLifted = this.lifted;
+      const saveErr = this.curErr;
+      const saveRet = this.retTy;
+      this.scopes = [new Map()];
+      this.ns = cls;
+      this.selfClass = cls;
+      this.selfProp = null;
+      this.alias = new Map([['this', '$this']]);
+      this.lifted = new Set();
+      this.curErr = null;
+      this.retTy = J_VOID;
+      this.shield = 0;
+      this.guards = [];
+      const lines = this.fieldInitLines(cls, 4);
+      this.ns = saveNs;
+      this.selfClass = saveSelf;
+      this.selfProp = savePr;
+      this.alias = saveAlias;
+      this.lifted = saveLifted;
+      this.curErr = saveErr;
+      this.retTy = saveRet;
+      this.scopes = [];
+      const self = tClass(cls, false);
+      this.decls.push(`  (fn ${cls}$construct (($this ${slotText(self)})) void\n`
+        + `${[...pre, ...lines].join('\n')})`);
     }
   }
 
@@ -1509,9 +1606,12 @@ class JncLower {
       this.fns.set(full, { params: [self], ret: J_VOID });
       this.methods.set(full, cls);
       this.ctors.set(cls, { name: full, params: [] });
+      this.synthSC.add(cls);
+      /* 这个类还带着字段默认值（第七十八刀）：那就把体交给 emitFieldInitCtors ——
+         它会先发闸门那几行、再发字段初值。两处各发一格 `(fn C$construct …)` 就重名了。 */
+      if (this.fieldInits.has(cls)) { this.synthFI.add(cls); continue; }
       this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n`
         + `${this.gateLines(cls, '    ').join('\n')})`);
-      this.synthSC.add(cls);
     }
     // 派生类没写 construct（第五十六刀）。jancy 那边合成的那一个要**把基类的构造调一遍**
     // （`DerivableType::createDefaultMethods` 里 `createDefaultConstructor` 的那条链），
@@ -1599,6 +1699,9 @@ class JncLower {
       this.topItem(e.it);
     }
     this.ns = '';
+    /* 合成出来的那些 construct 的体（第七十八刀）。排在这儿而不是签名那一遍：字段初值里
+       可以引用模块级变量与别的函数，那些到这一步才全登记完。 */
+    this.emitFieldInitCtors();
     // 没有 `main` 的那种源码（第六十五刀）。语料 662 份里 408 份是这种 —— 它们是**库模块**，
     // 本来就不该有入口（jancy 那边 `jancy foo.jnc` 找不到 main 才报错，可 `jnc_ct` 把它当
     // 模块编译是成立的）。所以"要不要入口"由**调用方**说：`omni sx` 只要一份降下来的文本，
@@ -2465,6 +2568,7 @@ class JncLower {
     }
     const fields = this.structs.get(name);
     if (fields === undefined || fields.length > 0) return null;   // 上一遍已经报过重复了
+    const inits = [];                    // 带默认值的那几格（第七十八刀）
     // 类体里查名从**这个类**这一层起（第五十二刀）：嵌套类型在 nsFlat 那一遍登记成了 `C.S`，
     // 而字段与方法原型写的是裸名字 `S`（test97.jnc:8）。结构体不动 —— 它不是一层命名空间。
     const saveNs = this.ns;
@@ -2533,23 +2637,21 @@ class JncLower {
       // `static int m_table[10];` —— 静态字段是**类那一格上的**变量，不在对象里
       // （01_Classes.jnc:22）。它要一格模块级的槽加"从方法里查得着"，是另一刀。
       if (sp.stat) { this.nope(m, '类的静态字段'); continue; }
-      for (const d of this.flat(m.items[2])) {
-        /* 字段的默认值（尺子上第二大的真特性：179 对，其中 1 份是唯一拦路项）。
-         * 语法形状量清了：`int m_x = 5;` 是 `(init <dcl> <expr>)`（items[1] 是声明符、
-         * items[2] 是那个表达式）。
+      for (const d0 of this.flat(m.items[2])) {
+        /* 字段的默认值（第七十八刀）。语法形状：`int m_x = 5;` 是 `(init <dcl> <expr>)`
+         * （items[1] 是声明符、items[2] 是那个表达式）。落法见构造函数那处 `fieldInitLines`
+         * 与 this.fieldInits 的注释 —— 这里只把"哪个字段带什么表达式"记下来，一格都不发。
          *
-         * jancy 那边**没有**单独的预构造：初值是挂在 `Field` 上的一串 token
-         * （jnc_ct_Field.h:21-42），由 `MemberBlock::initializeFields`
-         * （MemberBlock.cpp:141-182）在**构造函数里面**重放 —— 要么在合成出来的默认构造里
-         * （DerivableType.cpp:909-927），要么插在用户写的 `construct` 开头、基类构造之后
-         * （Parser.cpp:2997-3010）。所以它们是构造体里的普通代码，能引用 `this`、别的字段、
-         * 方法、全局量；有初值却没写构造的类型会被合成一格（DerivableType.cpp:465-472）。
-         *
-         * 这一层还不收，理由是**落法要一整刀**而不是一句改写：得把这几句 store 接到
-         * `T$construct` 的开头、没有构造时先合成一格 —— 那之后 `ctorCall`（`C1 a;`）、
-         * `newPtr`（`new C1`）、模块级变量的那格序幕都从 `this.ctors` 自动接上。
-         * 收下来却不发那几句 store 更坏 —— 那是个静默的错答案。 */
-        if (isList(d) && head(d) === 'init') { this.nope(d, '字段的默认值'); continue; }
+         * 结构体的还不收：那一格在 jancy 那边也是构造里重放的（嵌套的结构体递归调），
+         * 而这一层的结构体没有构造那条路 —— `S s;` 只是一格内存，没有可以插代码的地方。
+         * 收下来却不发那几句赋值是个**静默的错答案**，所以明说。 */
+        let d = d0;
+        let dflt = null;
+        if (isList(d0) && head(d0) === 'init') {
+          if (!cls) { this.nope(d0, '结构体字段的默认值'); continue; }
+          d = d0.items[1];
+          dflt = d0.items[2];
+        }
         const info = this.declarator(d, sp);
         if (info === null) continue;
         // 字段后面挂构造实参（`C1 m_a(10);`）—— jancy 那边它是"内嵌那一格的构造实参"，
@@ -2631,6 +2733,9 @@ class JncLower {
           continue;
         }
         fields.push({ name: info.name, type: info.type });
+        // 带初值的那几格记下来（第七十八刀）。排在所有"这一格不收"之后 —— 不收的那些
+        // 已经 continue 掉了，不会带着一条永远发不出来的初值往下走。
+        if (dflt !== null) inits.push({ name: info.name, type: info.type, expr: dflt, node: d0 });
       }
     }
     this.ns = saveNs;
@@ -2647,6 +2752,7 @@ class JncLower {
     // 而"谁派生了我"要等所有 type-decl 都过完才知道（jancy 不要求先声明后使用）。
     this.bases.set(name, base);
     this.ownFields.set(name, fields.slice());
+    if (inits.length > 0) this.fieldInits.set(name, inits);
     this.pendingCls.push({ name, node: n });
     return null;
   }
@@ -4391,6 +4497,12 @@ class JncLower {
           pre.push(`    (expr (call ${bc.name} (var $this)))`);
         }
       }
+      /* 字段的默认值（第七十八刀）：排在基类构造与静态构造之后、用户写的那个体之前 ——
+         正是 jancy 那四句的第三句（jnc_ct_Parser.cpp:3005-3009 的 initializeFields）。
+         所以 construct 里再给同一格字段赋值会**盖掉**默认值，与 jancy 一致。
+         上下文已经摆好了（this.ns 在类上、`this` 别名成 `$this`、形参都 push 过），
+         所以这儿直接用当前上下文降，不另开一格。 */
+      for (const l of this.fieldInitLines(owner, 4)) pre.push(l);
     }
     const save = this.retTy;
     this.retTy = isMain ? J_VOID : info.type;

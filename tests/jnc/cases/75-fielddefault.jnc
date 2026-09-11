@@ -1,0 +1,61 @@
+// jancy 字段的默认值（第七十八刀）
+//
+// 出处：jancy 那边**没有**单独的预构造 —— 初值是挂在 `Field` 上的一串 token
+// （jnc_ct_Field.h:21-42），由 `MemberBlock::initializeFields`（jnc_ct_MemberBlock.cpp:141-182）
+// 在**构造函数里面**重放：要么在合成出来的默认构造里（jnc_ct_DerivableType.cpp:909-927），
+// 要么插在用户写的 `construct` 开头、基类构造之后（jnc_ct_Parser.cpp:2997-3010）。
+// 类有初值却没写 construct 时，jancy 给它合成一格（jnc_ct_DerivableType.cpp:465-472）。
+// 顺序是"基类构造 → 静态构造 → 字段初值 → 用户的体"（jnc_ct_Parser.cpp:3005-3009）。
+//
+// 语料里这一格是第二大的真特性（179 对 (文件, 拦路项)）。形状以字面量与枚举成员为主：
+// `true` / `0` / `1024` / `log.StdLogColor.Info`（ioninja 那一片到处是）。
+//
+// 这里钉七件事：
+//   1. 没写 construct 的类 —— 那一格是合成出来的（m_a、m_b）
+//   2. 初值可以是表达式、可以引用**模块级变量**（m_c = g_base + 1）
+//   3. 写了 construct 的类 —— 初值排在体**之前**，所以体里再赋值会盖掉它（m_x）
+//   4. 初值可以引用同一个类的**别的字段**（m_y = m_x + 1，按声明序，所以看得见 m_x 的初值）
+//   5. 初值可以调同一个类的方法（m_z = twice(3)）
+//   6. 继承：基类的初值也跑（D 里看得见 B 的 m_a），顺序在基类构造之后
+//   7. `new` 出来的那一格与栈上那一格走同一条路
+
+int g_base = 10;
+
+class B {
+	int m_a = 7;
+	bool m_b = true;
+	int m_c = g_base + 1;
+}
+
+class C {
+	int m_x = 1;
+	int m_y = m_x + 1;
+	int m_z = twice(3);
+
+	construct() {
+		m_x = 100;			// 盖掉上面那个 1 —— 初值排在体之前
+	}
+
+	int twice(int v) {
+		return v * 2;
+	}
+}
+
+class D: B {
+	int m_d = 4;
+}
+
+int main() {
+	B b;
+	printf("B %d %d %d\n", b.m_a, b.m_b, b.m_c);
+
+	C c;
+	printf("C %d %d %d\n", c.m_x, c.m_y, c.m_z);
+
+	D d;
+	printf("D %d %d %d %d\n", d.m_a, d.m_b, d.m_c, d.m_d);
+
+	B* p = new B;
+	printf("new %d %d %d\n", p.m_a, p.m_b, p.m_c);
+	return 0;
+}
