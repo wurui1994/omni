@@ -3042,8 +3042,22 @@ class JncLower {
       const ps = this.tmplParams(nm.items[2]);
       if (ps === null) continue;
       if (this.templates.has(full)) { this.err(nm, `泛型 '${shown(full)}' 声明了两次`); continue; }
-      this.templates.set(full, { full, ns: e.ns, params: ps, agg: ag, td });
+      this.templates.set(full, { full, ns: e.ns, params: ps, agg: ag, td, outer: [] });
     }
+    /* A2：泛型的成员**写在体外**（第一百三十五刀）—— `T Box<T>.fetch() { … }`。
+       声明符的核心是 `(qualified (tinst (name Box) …) fetch)`，最左那一格是 `tinst`。
+       这样的条目先前**原样留在名单里**：里头那个 `T` 谁也没绑过，于是它照字面降了下去，
+       报出来是一片"没有这个类型：'T'"（`--group std` 榜首 134 处里的大半）。
+       改法与体内那些成员同一条：摘出来记在那格泛型上，等实例化的时候**跟着实例一起替换
+       出来**（见 tinstOne 末尾那一段）。 */
+    const rest = [];
+    for (const e of out) {
+      const tm = this.tmplOuter(e);
+      if (tm === undefined) { rest.push(e); continue; }
+      tm.outer.push(e.it);
+    }
+    out.length = 0;
+    for (const e of rest) out.push(e);
     // B：工作队列。`i` 之前的都扫过了，合成出来的追加在后面，于是循环自然跑到不动点。
     // `tdepth` 是这一条**属于第几层实例**（顶层名单是 0）—— 递归的闸门看的就是它，见 tinstOne。
     // `done` 的那几条是 `tinstOne` 自己就地扫完了的（合成出来的那一格与它提上来的方法）：
@@ -3056,9 +3070,30 @@ class JncLower {
     return out;
   }
 
+  /**
+   * 这一条是**写在体外的泛型成员**吗（第一百三十五刀）：`T Box<T>.fetch() { … }` /
+   * `void Box<T>.put(T v);`。是就回那格泛型的账本，不是回 undefined。
+   *
+   * 认法：声明符的核心是一串 `qualified`，一层层往左剥到底 —— 最左那一格是 `tinst`、
+   * 而且那个名字在 `this.templates` 里，这一条就是那格泛型的成员。剥到底是因为
+   * `Box<T>.Inner.f` 这种写法左边还能再套（语料里没有，可判据要写得住）。
+   */
+  tmplOuter(e) {
+    const it = unattr(e.it);
+    if (!isList(it)) return undefined;
+    const h = head(it);
+    if (h !== 'fn-def' && h !== 'fn-proto') return undefined;
+    const dcl = it.items[2];
+    if (!isList(dcl) || head(dcl) !== 'dcl') return undefined;
+    let c = dcl.items[2];
+    while (isList(c) && (head(c) === 'qualified' || head(c) === 'qualified-special')) c = c.items[1];
+    if (!isList(c) || head(c) !== 'tinst') return undefined;
+    const full = this.tmplName(e.ns, c.items[1]);
+    return full === null ? undefined : this.templates.get(full);
+  }
+
   /** 泛型的全名（声明那一处）：与别的类型名同一条 —— 命名空间用 `$` 连。 */
-  tmplName(ns, q) {
-    const n = this.qname(q);
+  tmplName(ns, q) {    const n = this.qname(q);
     if (n === null) return this.nope(q, '认不出的泛型名字');
     return ns === '' ? n : `${ns}$${n}`;
   }
@@ -3253,6 +3288,15 @@ class JncLower {
        `T get() { … }` 就没人认领 —— 报出来是"没有这个函数：'b.get'"。命名空间同上取空，
        aggHoist 自己会把实例名接成 `Box$int$get`。 */
     if (isHoistAgg(decl.items[1])) this.aggHoist(decl.items[1], '', out);
+    /* 写在**体外**的那些成员（第一百三十五刀）：`T Box<T>.fetch() { … }` 与体内写的
+       `T fetch() { … }` 在 jancy 那边是同一件事、任选其一（type_class.rst:41-59，第五十二刀
+       就是按这一句办的）。所以这儿跟着实例一起替换出来一份 —— `tmplSubst` 把声明符里那格
+       `(tinst Box (targ T))` 的 `T` 也换成实参，于是 `tinstRewrite` 自然把它解成**当前这格
+       实例名**（`tmplInsts` 已经 memoise，不会重造），名字于是落成 `Box$int$fetch`，
+       与 aggHoist 提上来的那一批一模一样。命名空间取空，同上。 */
+    for (const o of tm.outer) {
+      out.push({ ns: '', done: true, it: this.tinstRewrite(this.tmplSubst(o, map), tm.ns, out, depth + 1) });
+    }
     // 这几条（合成的那一格 + 它提上来的方法）已经就地扫完了 —— 队列别再扫一遍，见 expandTemplates
     for (let k = at; k < out.length; k++) out[k].done = true;
     return inst;

@@ -1,0 +1,64 @@
+// 第一百三十五刀：泛型的成员**写在体外** —— `T Box<T>.fetch() { … }`。
+//
+// jancy 里"体内写"与"体外写"是同一件事、任选其一（type_class.rst:41-59）—— 第五十二刀就是按
+// 这一句办的（普通类的方法两种放法落在同一格 `C$foo` 上）。泛型这一侧先前只办了体内那一半：
+// 体外那些条目**原样留在名单里**，里头那个 `T` 谁也没绑过，于是它照字面降了下去。
+//
+// 报出来是一片"没有这个类型：'T'"—— `--group std` 那张榜的**榜首**（134 处里的大半是这个）。
+// 一句话：账记在别处，因在这儿。
+//
+// 改法与体内那些成员同一条：`expandTemplates` 的 A 遍之后把这样的条目摘出来记在那格泛型上
+// （`tmplOuter` 认它：声明符核心一层层往左剥到底，最左那一格是 `tinst`），实例化的时候跟着
+// 实例一起替换出来一份。`tmplSubst` 会把声明符里那格 `(tinst Box (targ T))` 的 `T` 也换掉，
+// 于是 `tinstRewrite` 自然把它解成**当前这格实例名**，名字落成 `Box$int$fetch` ——
+// 与 aggHoist 从体里提上来的那一批一模一样。
+//
+// 尺子 `/tmp/c132.c`：C 里没有泛型，手写的是"每格实参各出一份函数"——
+// 那正是这一刀做的事。同一串数（7 / 9 / 5 6 / 41）。
+
+struct Box<T> {
+	T m_v;
+
+	// 体里只写原型，体外补上（这是语料里 stdt_* 那一批的写法）
+	T fetch();
+	void put(T v);
+}
+
+T Box<T>.fetch() {
+	return m_v;
+}
+
+void Box<T>.put(T v) {
+	m_v = v;
+}
+
+struct Point {
+	int m_x;
+	int m_y;
+}
+
+int main() {
+	// 一、实参是内建类型
+	Box<int> a;
+	a.put(7);
+	printf("%d\n", a.fetch());
+
+	// 二、同一格泛型再实例化一次：两份函数各按自己那格实参替换
+	Box<char> c;
+	c.put(9);
+	printf("%d\n", c.fetch());
+
+	// 三、实参是结构体：体外那两条里的 `T` 是整格 Point（按值搬）
+	Box<Point> b;
+	Point p;
+	p.m_x = 5;
+	p.m_y = 6;
+	b.put(p);
+	Point q = b.fetch();
+	printf("%d %d\n", q.m_x, q.m_y);
+
+	// 四、体内写的成员照旧（这一刀不能把那一半弄坏）
+	b.m_v.m_x = 41;
+	printf("%d\n", b.fetch().m_x);
+	return 0;
+}
