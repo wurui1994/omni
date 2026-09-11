@@ -1,0 +1,57 @@
+// 第一百〇六刀：类体里的 `typedef`。榜上 `类里除字段以外的成员` 82 份 / 101 处，拆开只有
+// 一种源头，而且 80 多份是同一行经 `-I` 重读出来的：
+//
+//   opaque class InformationStatValue: InformationValue {
+//       typedef string_t FormatFunc(uint64_t value);
+//       FormatFunc* m_formatFunc;
+//       …
+//   }
+// （test/ioninja/api/ui_InformationGrid.jnc:52-54）
+//
+// 同一格还带着榜上另一行：`没有这个类型：'FormatFunc'` 80 份 —— 那就是这条 typedef 没登记
+// 之后下游的样子。两行一个根。
+//
+// 落法一处：类体里的 `typedef` 与**嵌套类型**走同一条路（第五十二刀那条 aggHoist）——
+// 提到顶层那一批里、命名空间记的是这个类，于是 typedefDecl 里那句 `qual(info.name)` 拼出来
+// 的正是 `C$Name`，类体内、类外限定名、以及函数类型那一支（第八十二刀的 fnty0，`*` 由
+// ptrsTy 加）一处都不用另外改。类体那一遍跟着跳过它就行。
+//
+// 结构体那一侧**不提**（与第一百〇一刀同一个决定：typeDecl 就地报的话更准，提上来会报两遍），
+// 边界见 `bad/struct-typedef.jnc`。
+//
+// 期望输出的出处：/tmp/c106.c（`cc -O0 -std=c99 -Wall`）。
+
+int twice(int x) {
+	return x * 2;
+}
+
+int thrice(int x) {
+	return x * 3;
+}
+
+class Stat {
+	typedef int Num;
+	typedef int FormatFunc(int value);
+
+	Num m_n;
+
+	int val() {
+		Num k = m_n;             // 类体里裸写这个名字
+		return k;
+	}
+}
+
+int main() {
+	Stat* s = new Stat;
+	s.m_n = 5;
+	printf("%d\n", s.val());
+
+	Stat.Num k = 7;              // 类外用限定名
+	printf("%d\n", k);
+
+	Stat.FormatFunc* f = twice;  // 函数类型的 typedef 当函数指针用
+	printf("%d\n", f(21));
+	f = thrice;
+	printf("%d\n", f(21));
+	return 0;
+}

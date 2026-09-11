@@ -1921,6 +1921,12 @@ class JncLower {
         out.push({ ns: inner, it: m });
         if (isHoistAgg(m.items[1])) this.aggHoist(m.items[1], inner, out);
       }
+      /* 类体里的 `typedef`（第一百〇六刀）：与嵌套类型走同一条路 —— 提到顶层那一批里，
+         命名空间是这个类，于是 typedefDecl 里那句 `qual(info.name)` 拼出来的正是
+         `C$Name`，类体内外查名都对得上。语料里最要紧的一格是**函数类型**的：
+         `typedef string_t FormatFunc(uint64_t value);`（ui_InformationGrid.jnc:52），
+         紧接着下一行就是 `FormatFunc* m_formatFunc;`。 */
+      if (h === 'typedef' && isCls) out.push({ ns: inner, it: m });
     }
   }
 
@@ -3366,6 +3372,10 @@ class JncLower {
         else this.specialNope(m, sk);
         continue;
       }
+      /* 类体里的 `typedef`（第一百〇六刀）：aggHoist 已经把它提到顶层那一批里、命名空间
+         记的是这个类，类型名那一遍会办。这儿跳过就好 —— 结构体那一侧不提，照旧落到下面
+         那句话上（与第一百〇一刀同一个决定：那儿的话更准，提上来只会报两遍）。 */
+      if (isList(m) && head(m) === 'typedef' && cls) continue;
       if (!isList(m) || head(m) !== 'var-decl') {
         this.nope(m, `${cls ? '类' : '结构体'}里除字段以外的成员`);
         continue;

@@ -5664,6 +5664,7 @@ JNC_MAP_FUNCTION("print",     jnc::std::print)      // jnc_std_StdLib.cpp:891
 降得下来 75、没有还不收 167、(文件, 拦路项) 对 7783       ; 第一百〇三刀之后（−295）
 降得下来 75、没有还不收 167、(文件, 拦路项) 对 7783       ; 第一百〇四刀之后（一格没动，账在那一节）
 降得下来 75、没有还不收 167、(文件, 拦路项) 对 7702       ; 第一百〇五刀之后（−81，只动了默认值那一格）
+降得下来 75、没有还不收 167、(文件, 拦路项) 对 7711       ; 第一百〇六刀之后（+9，−67 −4 +80，账在那一节）
 ```
 
 榜首那几组逐组分了类，**挑刀时按这个分类看，别按对数排**：
@@ -6086,6 +6087,50 @@ struct V { int m_tag; int64_t m_n; string_t m_s; }
 本来就是按类型泛型发的（`backend-c/emit.js:1715-1718`、`backend-llvm/emit.js:1768-1775`），
 真要动的是 **JS 那一族**（arena 是一块 `ArrayBuffer`，JS 字符串塞不进去）—— 那 16 字节里
 放什么由那一族自己定，先例是 fat 指针（JS 一族在 24 字节里写三个 arena 偏移）。
+
+## 第一百〇六刀：类体里的 `typedef` —— 对数**涨了 9**，涨在哪儿说得清
+
+`类里除字段以外的成员` 82 份 / 101 处，按上一节那条纪律拆开：**只有一种源头**，而 80 多份是
+同一行经 `-I` 重读出来的 ——
+
+```jancy
+opaque class InformationStatValue: InformationValue {
+    typedef string_t FormatFunc(uint64_t value);
+    FormatFunc* m_formatFunc;
+    …
+}
+```
+（`test/ioninja/api/ui_InformationGrid.jnc:52-54`）
+
+榜上另一行 `没有这个类型：'FormatFunc'` 80 份就是这条 typedef 没登记之后下游的样子。**两行一个根。**
+
+**落法一处**：类体里的 `typedef` 与嵌套类型走同一条路（第五十二刀那条 `aggHoist`）—— 提到顶层
+那一批里、命名空间记的是这个类。于是 `typedefDecl` 里那句 `qual(info.name)` 拼出来的正是
+`C$Name`；类体内裸写、类外限定名、以及函数类型那一支（第八十二刀的 `fnty0`，`*` 由 `ptrsTy` 加）
+一处都不用另外改。类体那一遍跟着跳过它。结构体那一侧**不提**（与第一百〇一刀同一个决定），
+边界钉在 `bad/struct-typedef.jnc`。
+
+**证据**：`cases/97-classtypedef.jnc` 四行对着 `/tmp/c106.c` —— 类体里裸写、类外 `Stat.Num`、
+函数类型的 typedef 当函数指针用、再换一个函数赋进去。
+`node tests/jnc/run.js` = 195 passed, 0 failed；`link.js` 2/0。
+
+**量出来的：对数 7702 → 7711（+9）**。逐组比下来只有三行动，加减对得上：
+
+- `类里除字段以外的成员` 82 → **15（−67）**；
+- `没有这个类型` 347 → **343（−4）** —— `FormatFunc` 那个名字解开了。**只掉 4 不是 80**：
+  那 80 份文件里除了 `FormatFunc` 还缺别的类型，整行按"份"数，所以只有 4 份是整行掉了；
+- 新出来一行 `类型是函数指针（string function*(unsigned long)）的字段` **80（+80）**。
+
+−67 −4 +80 = **+9**，一格不差。涨的那 80 是**走得更远之后撞上的下一堵墙**，而那堵墙是
+方言那一侧现成的一格：`hir/types.js` 的 `structLayout` 放不下函数值。榜上原先就有一行
+`类型是函数指针（void function*()）的字段` 90 / sole 1 —— 现在这一族合起来 **170 对**，
+与 #38（string 落进内存）是同一个家族的账：结构体字段今天只放得下标量与 `arr` 那种一个字的
+句柄。**这一刀换来的是"两行笼统的换一行说得清的"**：以前是"类里有个成员我不认"加"有个类型
+我没听说过"，现在是"这个字段的类型是函数指针，方言的布局放不下"。
+
+剩下那 15 份是另一格：`static EnumPropertyOption const m_baudRateTable[] = { … }`
+（`ui_SerialUi.jnc:205` 起五处、`iox_SshChannel.jnc:94`）—— **类里的静态成员带数组初值**，
+与 typedef 无关，单独一刀。
 
 ## 后果与代价
 
