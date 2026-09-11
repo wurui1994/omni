@@ -12,6 +12,13 @@ opaque class Counter {
 
 	construct(int n);
 	int bump(int d);
+
+	// 第九十三刀：`opaque class` 里那格**没有体**的 destruct —— 体在宿主的 C/C++ 那边
+	// （opaque.rst:15-29），而调它的是 GC、还是"不确定的时刻"（disposable.rst:17）。
+	// 这一层没有 GC，那个时刻永远不到，所以这一句收下、不落任何代码：
+	// **下面那份输出一个字节都没变**，这就是这一刀要的证据。带体的 destruct 照旧拦
+	// （`bad/destruct-body.jnc`）—— 那一格是真墙。
+	destruct();
 }
 
 Counter.construct(int n) {

@@ -5344,6 +5344,58 @@ jnc_TypeKind_SizeT = jnc_TypeKind_IntPtr_u,      // include/jnc_Type.h:136
 它照样值得做 —— 下一刀该往哪儿走，是这些具体的话指出来的（这 99 个对现在明明白白指着
 "宿主面"这一格，也就是 #28 与 opaque class 那条路）。
 
+## 第九十三刀：`opaque class` 里那格没有体的 `destruct();` —— 宿主实现、GC 不定时，收下不落码
+
+`destruct` 这一格是第五十三刀留下的两格之一，理由写得很硬：jancy 自己说
+"the destructor is called by the garbage collector at an unspecified moment"
+（disposable.rst:17），挑一个时机替它跑就是骗人。那条理由**对带体的 destruct 仍然成立**。
+
+可语料量下来，这一格 178 个对里挡住的**几乎全不是**带体的那种：
+
+- 11 份文件里它是**唯一**拦路项，其中 **10 份**是 `opaque class` 里一句
+  `destruct();`（`sys_Event` / `sys_Lock` / `sys_NotificationEvent`、
+  `ui_Widget` / `ui_Label` / `ui_Button` / `ui_LineEdit` / `ui_SpinBox` /
+  `ui_StatusBar` / `ui_ColorRangeTree` —— 后几份是顺着 `import "ui_Widget.jnc"` 带进来的）；
+- 剩下那 1 份是 `test/jnc/test138.jnc` 的**模块级** `destruct() { assert(false); }`，带体，照旧拦。
+
+`opaque class` 里那一句跟这个类里别的原型是**同一种东西**：体在宿主的 C/C++ 里
+（opaque.rst:15-29），这一层这儿一个字都发不出来。而"什么时候调"那一头 —— 调它的是 GC，
+且是不确定的时刻；这一层没有 GC，那个时刻**永远不到**。两头都空，所以收下这一句、不落
+任何代码，是**少做一件本来也看不见时刻的事**，不是把它算错。这跟第八十六刀（`volatile`
+收下、不看）是同一种收法，只是这一格的"代价"更小：那边丢的是一条内存序，这边丢的是一次
+本来就没有确定时刻的调用。
+
+改动是类体那一遍里 `fn-proto` 那条岔路上的一行（`lower.js`，紧挨着第六十六刀那句
+`hostCtors`）：
+
+```js
+if (cls && key === 'opaque class' && sk === 'destruct') continue;
+```
+
+**范围划得很紧**：只有 `opaque class` 里、只有**原型**（`fn-proto`）。普通 `class` 里的
+`destruct();`（体在类外、就在这份源码里）与任何带体的 `destruct() { … }` 都照旧走
+`specialNope` —— `bad/destruct-body.jnc` 守着这一边。
+
+**证据**：`cases/62-opaque.jnc` 的 `Counter` 里加了一句 `destruct();`，输出**一个字节
+都没变**（尺子还是那份 `/tmp/c62.c`）—— 这正是这一刀声称的事：这句话在这一层没有可观测
+效果。`node tests/jnc/run.js` = 180 passed, 0 failed。
+
+**量出来的**：三个数字同向，是这一路十来刀里最大的一次移动：
+
+- **真降得下来 61 → 71（+10）**：正好是那 10 份文件，一份没退（对着上一趟的 ok 名单逐份比过）；
+- **没有还不收 147 → 160（+13）**；
+- **(文件, 拦路项) 对 8269 → 8198（−71）**：全部来自这一组（178 → 107），别的组净零。
+
+榜上有几个 sole 涨了（`没有这个类型` 8 → 11、`结构体里的方法` 0 → 1、`函数指针字段`
+0 → 1）—— 那是文件走得更远之后露出的下一格，跟前几刀同一回事。
+
+**代价，写在这儿**：语料里有 **12 个** `opaque class` 声明了 `destruct();` 却**没有**声明
+`construct();`（`ui_Widget:Widget`、`ui_Menu:Menu`、`log_Log:Log`、`doc_Storage:Storage`
+等）。这一格的 `new` 不落在第六十六刀那个 `hostCtors` 的拦网里，所以那种对象**造得出来、
+析构永远不调，而且一声不响**。这不是这一刀新开的洞（`opaque class` 在这一层整个没有宿主面，
+它那些方法本来也都是空的），但它是这一刀之后**能走到的**一个洞 —— 记在这儿，等宿主面
+（ADR-0022 的 J4b）那一刀一起收。
+
 ## 后果与代价
 
 

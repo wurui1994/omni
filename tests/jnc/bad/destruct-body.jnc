@@ -1,0 +1,23 @@
+// 带体的 destruct（ADR-0016 第九十三刀留下的那格真墙）。
+// 第九十三刀收下的只有 `opaque class` 里那格**没有体**的 `destruct();` —— 体在宿主那边、
+// 调它的是 GC，这一层落不落代码都看不出差别。带着体的这一格不一样：源码里写着要跑的事，
+// 而 jancy 自己说那是"the destructor is called by the garbage collector at an unspecified
+// moment"（disposable.rst:17）—— 要一个确定的时机得先有 dispose / nestedscope 那一套。
+// 挑一个时机替它跑就是骗人，所以拦着。
+class Res {
+	int m_n;
+
+	construct(int n) {
+		m_n = n;
+	}
+
+	destruct() {
+		printf("bye %d\n", m_n);
+	}
+}
+
+int main() {
+	Res* r = new Res(7);
+	printf("%d\n", r.m_n);
+	return 0;
+}

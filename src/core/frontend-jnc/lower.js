@@ -3098,6 +3098,13 @@ class JncLower {
           if (cls && key === 'opaque class' && sk === 'construct') this.hostCtors.add(name);
           continue;
         }
+        /* `opaque class` 里那格**没有体**的 `destruct();`（第九十三刀）：它跟这个类里别的
+           原型是同一种东西 —— 体在宿主的 C/C++ 里（opaque.rst:15-29）。所以这一层这儿
+           一个字都发不出来，也**不该**发：调它的是 GC，而且是"不确定的时刻"
+           （disposable.rst:17）。这一层没有 GC，那个时刻永远不到 —— 收下这一句、不落任何
+           代码，是**少做一件本来也看不见时刻的事**，不是把它算错。带体的 destruct 照旧拦
+           （specialNope）：那一格是真墙。 */
+        if (cls && key === 'opaque class' && sk === 'destruct') continue;
         if (sk === null) this.nope(m, '类里的特殊成员声明');
         else this.specialNope(m, sk);
         continue;
