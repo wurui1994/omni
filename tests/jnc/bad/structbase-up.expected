@@ -1,0 +1,1 @@
+'sumxy' 的第 1 个实参要 Point*，这里是 Point3D*

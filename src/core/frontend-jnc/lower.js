@@ -1113,6 +1113,19 @@ class JncLower {
     /* 泛型（ADR-0025 的 S2）。全名 -> `{full, ns, params: [参数名…], agg}` ——
        泛型声明**不产出类型**，只记在这儿；类型是实例化那一步才造的（S3）。 */
     this.templates = new Map();
+    /** 结构体的名字 -> `{node, ns}`（第一百二十五刀）：基类那张字段表要按声明去找，而
+        顶层不保证先声明后使用 —— 碰上还没摊开的基类就地先摊，靠的是这张表。 */
+    this.structNodes = new Map();
+    /** 已经摊开过的结构体（同一格别摊两遍 —— 那会把 `(struct …)` 发两条）。 */
+    this.laidStructs = new Set();
+    /** 正在摊的那几格（基类绕回自己时当场拒，不然递归不停）。 */
+    this.layingStructs = new Set();
+    /* 结构体 -> 它的直接基类那几格（第一百二十五刀）。这一刀**只做布局**，上转（`D*` 装进
+       `B*`）还不收：与类那一侧不同，一条结构体继承链在方言里是**几格不同的结构体**（不能像
+       classLayout 那样合成一格 —— 结构体的字节布局是可观测的，语料里全是协议头，合起来
+       `Point` 就跟 `Point3D` 一样大了），而方言的指针没有类型重解释那一格。界记在
+       `bad/structbase-up`。这张表先留着：那一刀要用它判前缀关系。 */
+    this.structSuper = new Map();
     /** 已经合成过的实例名（按实参签名 memoise，与 jancy 的 `m_instanceMap` 同一个办法）。 */
     this.tmplInsts = new Set();
     /* 实参带 `*` 时给那一格指针类型合成的 typedef 名（第一百二十刀）。替换只在 type-spec
@@ -3970,6 +3983,10 @@ class JncLower {
       return this.err(n, `${cls0 ? '类' : '结构体'} '${shown(name)}' 声明了两次`);
     }
     this.structs.set(name, []);
+    /* 结构体的基类（第一百二十五刀）要**按声明去找基类那张字段表**，而顶层的 type-decl
+       不保证先声明后使用 —— 所以这一遍顺手把节点连当时那一层命名空间记下来，
+       typeDecl 那一遍碰上基类还没摊开时就地把它先摊了（见 structBaseFields）。 */
+    if (!cls0) this.structNodes.set(name, { node: n, ns: this.ns });
     // 类的名字另记一格（第五十二刀）：字段表与结构体共用，可"变量里放地址还是放那段内存"
     // 两者相反，所以类型那一格要分得清。
     if (cls0) this.classes.add(name);
@@ -4114,6 +4131,8 @@ class JncLower {
     const nm3 = this.qname(n.items[2]);
     if (nm3 === null) return this.err(n, `认不出的${cls ? '类' : '结构体'}名字`);
     const name = this.qual(nm3);
+    // 已经就地摊过了（第一百二十五刀：谁把它当基类，谁就先把它摊了）—— 别摊第二遍
+    if (!cls && this.laidStructs.has(name)) return null;
     const bases = this.flat(n.items[3]);
     // 基类（第五十六刀 + 第九十四刀）。jancy 的模型是**多继承**（type_class.rst:171-174：
     // "a simple multiple inheritance model (multiple instances of shared bases -- if any)"）。
@@ -4122,10 +4141,20 @@ class JncLower {
     // （一条链一格结构体，同一个基类只有一份 —— classLayout 那儿当场拒），以及结构体当基类
     // （同一处:218 那句 "it's ok to inherit from structs and even unions"，那要"结构体也能
     // 当一层基类"，是自己一格）。
-    if (bases.length > 0 && !cls) return this.nope(n, '结构体的基类');
+    let preBase = null;                  // 基类那几格字段（第一百二十五刀），下面 fields 拿到手再排进去
+    if (bases.length > 0 && !cls) {
+      /* 结构体的基类（第一百二十五刀）：jancy 收它（type_class.rst:218 那句 "it's ok to
+         inherit from structs and even unions"），而在这一层它是**纯布局**的一件事 ——
+         基类那几格字段排在前面，自己的排在后面。`pfield` 按名字找，名字都在同一张表里，
+         所以上转（`Base* b = &d` 那种写法）不需要任何一条新指令：`D` 的前缀本来就是 `B`。
+         语料里 50 处声明（22 份文件），`struct Point3D: Point` / `struct termios2: termios` /
+         Modbus 那一族全是这个形状 —— 纯数据、只继承字段。 */
+      preBase = this.structBases(n, name, bases);
+      if (preBase === null) return null;
+    }
     let base = null;
     const extra = [];
-    for (let i = 0; i < bases.length; i++) {
+    for (let i = 0; cls && i < bases.length; i++) {
       const bn = this.qname(bases[i]);
       if (bn === null) { this.nope(bases[i], '认不出的基类名字'); continue; }
       const b = this.resolve(bn, (k) => this.classes.has(k));
@@ -4145,6 +4174,8 @@ class JncLower {
     }
     const fields = this.structs.get(name);
     if (fields === undefined || fields.length > 0) return null;   // 上一遍已经报过重复了
+    // 基类那几格排在最前面（第一百二十五刀）—— 顺序就是布局，所以这一句得在自己的字段之前
+    if (preBase !== null) for (const f of preBase) fields.push({ ...f });
     const inits = [];                    // 带默认值的那几格（第七十八刀）
     const evts = [];                     // 事件那几格（第八十三刀）—— 造对象时要建单子
     const bs = { last: null };           // 位域分组的游标（第一百一十二刀，见 bitSlot）
@@ -4478,6 +4509,7 @@ class JncLower {
     // （第一百一十刀 / ADR-0027）。
     const fs = unionGroups(fields).join(' ');
     if (!cls) {
+      this.laidStructs.add(name);
       this.decls.push(`  (struct ${name} ${fs})`);
       return null;
     }
@@ -4494,6 +4526,75 @@ class JncLower {
     if (evts.length > 0) this.evtFields.set(name, evts);
     this.pendingCls.push({ name, node: n });
     return null;
+  }
+
+  /**
+   * 结构体的基类那几格字段（第一百二十五刀）。回"排在自己字段前面的那一串"，或 null（报过了）。
+   *
+   * 这一层的结构体继承是**纯布局**：基类的字段排前面、自己的排后面。`pfield` 按名字找，
+   * 名字都在同一张表里，所以上转不需要任何一条新指令 —— `D` 的前缀本来就是 `B`。
+   * 类当基类不收（那要对象头与派发那一套）；同名的字段当场拒（悄悄合成一格是"改了意思"，
+   * 与第九十四刀 mixins 那处同一条口径）。
+   */
+  structBases(n, name, bases) {
+    const out = [];
+    const seen = new Set();
+    for (const b0 of bases) {
+      const bn = this.qname(b0);
+      if (bn === null) { this.nope(b0, '认不出的基类名字'); return null; }
+      const b = this.resolve(bn, (k) => this.structs.has(k) && !this.classes.has(k));
+      if (b === null) {
+        if (this.resolve(bn, (k) => this.classes.has(k)) !== null) {
+          return this.nope(b0, `结构体 '${shown(name)}' 拿类 '${bn}' 当基类`
+            + '（类是引用语义、还带一格动态标签，摊进结构体里要先定"那个标签归谁"）');
+        }
+        this.err(b0, `没有这个基类：'${bn}'`);
+        return null;
+      }
+      if (b === name) { this.err(b0, `'${shown(name)}' 拿自己当基类`); return null; }
+      if (seen.has(b)) { this.err(b0, `'${shown(name)}' 的基类里 '${shown(b)}' 写了两遍`); return null; }
+      seen.add(b);
+      const bf = this.structLay(b, b0);
+      if (bf === null) return null;      for (const f of bf) {
+        if (out.some((x) => x.name === f.name)) {
+          this.nope(b0, `'${shown(name)}' 的两格基类里都有字段 '${f.name}'`);
+          return null;
+        }
+        out.push(f);
+      }
+    }
+    // 上转（`D*` 装进 `B*`）按这张表判，见 assignOk
+    this.structSuper.set(name, [...seen]);
+    return out;
+  }
+
+  /**
+   * 基类那一格还没摊开就**就地先摊**（顶层的 type-decl 不保证先声明后使用）。
+   * 回它的字段表或 null。摊过的记进 `laidStructs`，正在摊的记进 `layingStructs` ——
+   * 后者是环的闸门（`struct A: B` / `struct B: A` 不这么拦就递归不停）。
+   */
+  structLay(b, node) {
+    if (this.layingStructs.has(b)) {
+      this.err(node, `结构体 '${shown(b)}' 的基类链绕回了自己`);
+      return null;
+    }
+    const ent = this.structNodes.get(b);
+    if (ent !== undefined && !this.laidStructs.has(b)) {
+      this.layingStructs.add(b);
+      const save = this.ns;
+      this.ns = ent.ns;
+      this.typeDecl(ent.node);
+      this.ns = save;
+      this.layingStructs.delete(b);
+    }
+    /* 位域与匿名 union 在**基类**里的那两格先不收：它们的路子（bitPath / aliasPath）记的键是
+       `基类$字段`，派生那一格按自己的名字去查，查不着 —— 收下来会读到错的位置，那是静默的
+       错答案。要收得让那两张表跟着继承一起复制一份，是单独一笔账。 */
+    if (this.bitAggs.has(b)) return this.nope(node, `基类 '${shown(b)}' 里有位域`);
+    for (const k of this.aliasPath.keys()) {
+      if (k.startsWith(`${b}$`)) return this.nope(node, `基类 '${shown(b)}' 里有匿名 union`);
+    }
+    return this.structs.get(b) ?? null;
   }
 
   /**

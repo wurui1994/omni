@@ -1,0 +1,31 @@
+// 第一百二十五刀留下的那半格：**上转**（`D*` 装进 `B*`）还不收。
+//
+// 与类那一侧不同：类的一整条继承链在方言里共用**一格**结构体（第五十六刀），所以 `D*` 与 `B*`
+// 本来就是同一个方言类型、上转发零条指令。结构体不能那么合 —— 它的字节布局是**可观测的**
+// （语料里全是协议头、还能按值放进别的结构体里），合成一格之后 `Point` 就跟 `Point3D` 一样大了。
+// 而方言的指针没有类型重解释那一格（`pnew/pnull/pload/padd/psub/pisnull/pfield/pthin/pelem/peq`
+// 就这几个）。所以这一格要么给方言加一条"按前缀重解释"的指令、要么在前端插一格拷贝，两条各是
+// 一笔单独的账 —— 今天照实拦住。
+//
+// 拦的位置在**方言那一层**（前端把两边都当结构体指针放过去，检查器说"形参是 Point*，给的是
+// Point3D*"）。布局这一半已经收了，见 `cases/117-structbase.jnc`。
+struct Point {
+	int m_x;
+	int m_y;
+}
+
+struct Point3D: Point {
+	int m_z;
+}
+
+int sumxy(Point* p) {
+	return p.m_x + p.m_y;
+}
+
+int main() {
+	Point3D q;
+	q.m_x = 1;
+	q.m_y = 2;
+	printf("%d\n", sumxy(&q));
+	return 0;
+}

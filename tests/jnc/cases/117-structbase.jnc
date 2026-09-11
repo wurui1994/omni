@@ -1,0 +1,65 @@
+// 第一百二十五刀：**结构体的基类**（`struct Point3D: Point`）。榜上 67 份文件在这一行上，
+// 语料里 50 处声明（22 份文件）—— `struct termios2: termios`、`struct Point3D: Point`、
+// Modbus 那一族协议头，全是**纯数据、只继承字段**。
+//
+// 这一层它就是**布局**一件事：基类那几格字段排在前面，自己的排在后面（顺序就是布局）。
+// jancy 那句在 type_class.rst:218："it's ok to inherit from structs and even unions"。
+//
+// 两处机制值得记：
+//   1. 顶层的 type-decl **不保证先声明后使用**，所以基类那一格可能还没摊开 —— 碰上就地先摊
+//      （`structLay`，摊过的记进 `laidStructs`，正在摊的记进 `layingStructs` 当环的闸门）。
+//      下面 `Late: Early` 就是这个形状：基类写在**后面**。
+//   2. 两格基类里同名的字段当场拒（`bad/structbase-dup`）—— 悄悄合成一格是"改了意思"，
+//      与第九十四刀 mixins 那处同一条口径。
+//
+// **还不收的那半格**（记在 `bad/structbase-up`）：上转，`D*` 装进 `B*`。与类那一侧不同 ——
+// 那边一条链共用**一格**方言结构体所以上转是零条指令，而结构体不能那么合（字节布局是可观测的：
+// 语料里全是协议头，合起来 `Point` 就跟 `Point3D` 一样大了），而方言的指针又没有类型重解释
+// 那一格。所以那一格是单独一笔账。
+//
+// 尺子 `/tmp/c123.c`：C 里没有结构体继承，手抄的是"字段展平之后"的样子 —— 这正是这一刀做的事。
+// 同一串数（1 2 3 / 7 8 / 5 6 7 8）。
+
+struct Point {
+	int m_x;
+	int m_y;
+}
+
+struct Point3D: Point {
+	int m_z;
+}
+
+// 两层：基类自己也有基类
+struct Point4D: Point3D {
+	int m_w;
+}
+
+int main() {
+	Point3D q;
+	q.m_x = 1;
+	q.m_y = 2;
+	q.m_z = 3;
+	printf("%d %d %d\n", q.m_x, q.m_y, q.m_z);
+
+	// 基类写在后面（顶层不保证先声明后使用）
+	Late l;
+	l.m_a = 7;
+	l.m_b = 8;
+	printf("%d %d\n", l.m_a, l.m_b);
+
+	Point4D* p = new Point4D;
+	p.m_x = 5;
+	p.m_y = 6;
+	p.m_z = 7;
+	p.m_w = 8;
+	printf("%d %d %d %d\n", p.m_x, p.m_y, p.m_z, p.m_w);
+	return 0;
+}
+
+struct Late: Early {
+	int m_b;
+}
+
+struct Early {
+	int m_a;
+}

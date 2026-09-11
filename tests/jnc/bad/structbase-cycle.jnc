@@ -1,0 +1,16 @@
+// 第一百二十五刀的界：基类链**绕回自己**。基类那一格没摊开就就地先摊（顶层不保证先声明后
+// 使用），所以环不拦住就是无穷递归 —— `layingStructs` 那格闸门当场拒。
+struct A: B {
+	int m_a;
+}
+
+struct B: A {
+	int m_b;
+}
+
+int main() {
+	A a;
+	a.m_a = 1;
+	printf("%d\n", a.m_a);
+	return 0;
+}

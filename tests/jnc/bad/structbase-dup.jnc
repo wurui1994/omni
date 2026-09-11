@@ -1,0 +1,20 @@
+// 第一百二十五刀的界：两格基类里**同名的字段**。悄悄合成一格是"改了意思"（那是两块不同的
+// 内存），与第九十四刀 mixins 那处同一条口径 —— 当场拒。
+struct A {
+	int m_v;
+}
+
+struct B {
+	int m_v;
+}
+
+struct C: A, B {
+	int m_c;
+}
+
+int main() {
+	C c;
+	c.m_c = 1;
+	printf("%d\n", c.m_c);
+	return 0;
+}
