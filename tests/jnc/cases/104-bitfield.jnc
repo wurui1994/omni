@@ -1,0 +1,87 @@
+// 第一百一十二刀：**位域**（`uint8_t m_flag : 1;`）。榜上 `声明符后缀 'bitfield'`
+// 24 份 / 97 处 / sole 3，语料里 13 份带位域的文件**全是 struct**（协议头那一族：
+// `io_UsbTransfer.jnc:67`、`io_Modbus.jnc:204`、`io_Df1.jnc:250`、`log_RecordFile.jnc:26`、
+// `EzTapPro.jnc:73-134`、`test17.jnc:13-20`、`test08.jnc:13`）。
+//
+// 落法：一格位域**不占自己的格子** —— 几格连着的、声明类型一模一样的挤进同一格存储
+// （名字 `$b<N>`，源码里写不出来），读是 `(存储 >> off) & 掩码`（有符号再补符号位）、
+// 写是**读-改-写**。两句都在 read / store 里，所以 `=`、`++`、`+=`、`|=` 一条都不用单独接。
+// 方言一个字没改：存储那一格就是一格普通的整数字段。
+//
+// 分组规矩照 jancy 的 `StructType::layoutBitField`（jnc_ct_StructType.cpp:346-399）：
+// 并进上一格要三条同时成立 —— 上一格也是位域、声明类型**完全一样**、并且
+// `上一格的位偏移 + 这一格的位数 <= 声明类型的位宽`。所以下面这张表里：
+//   m_a/m_b 挤一格（4+4=8）；m_x 是普通字段，隔断；m_c 一格、m_d 又一格（5+5>8 挤不下）；
+//   m_e 换成 uint16_t，新开一格；m_s 换成 char，新开一格；m_off/m_cnt 挤一格（24+8=32）。
+//
+// 读出来的值照 `extractBitField`、写照 `mergeBitField`（jnc_ct_OperatorMgr_DataRef.cpp:272-350）。
+// `char m_s : 4` 存 0xF 读出来是 **-1** —— 有符号那一格要补符号位。
+//
+// 尺子 `/tmp/c111.c` 算了**两遍**：一遍显式的移位掩码（值那一侧），一遍真的 C 位域
+// （分组那一侧）。两遍逐字节相同。
+
+struct IpHdr {
+	uint8_t m_a : 4;
+	uint8_t m_b : 4;
+	int m_x;
+	uint8_t m_c : 5;
+	uint8_t m_d : 5;
+	uint16_t m_e : 5;
+	char m_s : 4;
+	uint32_t m_off : 24;
+	uint32_t m_cnt : 8;
+
+	// 结构体里的方法（第一百〇一刀）里**裸写**位域的名字：`m_a` 就是 `this.m_a`
+	int lowSum() {
+		return m_a + m_b;
+	}
+}
+
+// union 里再套一格匿名 struct（第一百一十一刀）里的位域 —— `io_UsbTransfer.jnc:63-71`
+// 那一格：同一段字节，一头整个读、一头按位读。
+struct Ctl {
+	union {
+		uint8_t m_value;
+
+		struct {
+			uint8_t m_recipient : 2;
+			uint8_t m_reserved  : 3;
+			uint8_t m_type      : 2;
+			uint8_t m_direction : 1;
+		}
+	}
+}
+
+int main() {
+	IpHdr* h = new IpHdr;
+	h.m_a = 5;
+	h.m_b = 9;
+	h.m_x = 100;
+	h.m_c = 30;
+	h.m_d = 1;
+	h.m_e = 17;
+	h.m_s = 0xF;                     // 4 位里存 1111 -> 读出来是 -1
+	h.m_off = 0xABCDEF;
+	h.m_cnt = 200;
+	printf("%d %d %d %d %d %d %d %d %d\n",
+		h.m_a, h.m_b, h.m_x, h.m_c, h.m_d, h.m_e, h.m_s, h.m_off, h.m_cnt);
+
+	h.m_a++;                         // 5 -> 6
+	h.m_b += 8;                      // 9 + 8 = 17，掩到 4 位 -> 1
+	h.m_c |= 1;                      // 30 | 1 -> 31
+	h.m_e = 33;                      // 掩到 5 位 -> 1
+	h.m_s = 7;
+	h.m_off += 1;
+	h.m_cnt = 300;                   // 掩到 8 位 -> 44
+	printf("%d %d %d %d %d %d %d\n",
+		h.m_a, h.m_b, h.m_c, h.m_e, h.m_s, h.m_off, h.m_cnt);
+
+	Ctl* c = new Ctl;
+	c.m_value = 0xC1;                // 1100 0001
+	printf("%d %d %d %d\n", c.m_recipient, c.m_reserved, c.m_type, c.m_direction);
+	c.m_type = 1;                    // 本来是 2 -> 1010 0001 = 161
+	printf("%d %d\n", c.m_value, c.m_type);
+
+	printf("%d\n", h.lowSum());
+	return 0;
+}

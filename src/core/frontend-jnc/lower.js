@@ -1063,6 +1063,18 @@ class JncLower {
        多一层展开：`(pfield (pfield 基 m_list) m_head)`。展开点两处 —— 裸名字（selfPathLv）
        与 `obj.别名`（memberOf）。 */
     this.aliasPath = new Map();
+    /* 位域（第一百一十二刀）。`uint8_t m_a : 4;` —— 它**不是一格字段**：同一格存储里的几位。
+       全名（`结构体$成员`）-> { path, type, off, cnt, bw }：
+         path 是从那格结构体的基走到**存储那一格**的一串 pfield（普通字段是 `['$b0']`，
+              匿名 union 里再套的匿名 struct 里那些是 `['$s0','$b0']`），
+         type 是**声明写的**那格整数类型（读出来的值是它 —— 有符号的要补符号位），
+         off/cnt 是它在存储里的位偏移与位数，bw 是存储那一格的位宽（声明类型的宽度）。
+       读是 `(存储 >> off) & 掩码`（有符号再补符号位），写是**读-改-写** —— 两处都在
+       read / store 里，于是 `=`、`++`、复合赋值一条都不用单独接。 */
+    this.bitPath = new Map();
+    /* 哪些结构体里有位域。只有一处用：花括号初值那一遍拦住它们（见 curlyMember）——
+       那儿是按"第几格字段"数的，而位域不占自己的格子，数下去就是个静默的错答案。 */
+    this.bitAggs = new Set();
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
      * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
      * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
@@ -1638,6 +1650,23 @@ class JncLower {
     };
   }
 
+  /** 一格位域当左值（第一百一十二刀）。`code` 走到**存储那一格**，`off` / `cnt` / `bw` 说的是
+   *  哪几位 —— 读写在 bitsRead / bitsStore 里，所以 `=`、`++`、`&=` 一条都不用单独接。 */
+  bitsLv(bp, baseCode) {
+    let code = baseCode;
+    for (const s of bp.path) code = `(pfield ${code} ${s})`;
+    return { kind: 'bits', code, type: bp.type, off: bp.off, cnt: bp.cnt, bw: bp.bw };
+  }
+
+  /** 方法体里**裸写**一格位域（第一百一十二刀）：`m_flag` 就是 `this.m_flag`。
+   *  与 selfPathLv 同一条路 —— 结构体从第一百〇一刀起也有方法，所以这一处是真会走到的。 */
+  selfBitLv(nm) {
+    if (this.selfClass === null) return null;
+    const bp = this.bitPath.get(`${this.selfClass}$${nm}`);
+    if (bp === undefined) return null;
+    return this.bitsLv(bp, '(var $this)');
+  }
+
   /* ---------------------------------------------------------- 取地址（第九刀）
    *
    * jancy 的做法照抄：**被 fat 取过地址的局部量提到 GC 堆上**（type_ptr_data.rst 里那句
@@ -1808,6 +1837,13 @@ class JncLower {
   /** 游标（或名字）落在哪一格：回一步"怎么走到它"与那一格的类型。 */
   curlyMember(node, type, idx, name) {
     if (jncIsStruct(type)) {
+      /* 带位域的结构体上还不收花括号初值（第一百一十二刀）。这一遍是**按第几格字段**数的
+         （`fs[idx]`），而位域不占自己的格子 —— 数下去写的是整格存储，是个静默的错答案。
+         按名字写的那一种也一起拦：要接它得让 curlyEmit 那张单子也认得"哪几位"。 */
+      if (this.bitAggs.has(type.name)) {
+        return this.nope(node, `${shown(type.name)} 里有位域，它的花括号初值 ——`
+          + '（这一遍是按第几格字段数的，而位域不占自己的格子）');
+      }
       const fs = this.structs.get(type.name);
       if (fs === undefined) return this.err(node, `内部错误：没有结构体 '${type.name}'`);
       const f = name === null ? fs[idx] : fs.find((x) => x.name === name);
@@ -2497,8 +2533,12 @@ class JncLower {
    * 成员的类型只收整数 / 实数 / 布尔 / 枚举 / 另一个结构体：那几种的零值是全零位、旁边也没有
    * 别的表。指针（fat 是三个字）、string 与句柄（旁边挂着表，ADR-0024 / ADR-0026）重叠之后
    * 说不清那张表上的东西归谁 —— 与方言那一层 `(union …)` 划的界一字不差（ADR-0027）。
+   *
+   * `bs` 不是 null 时这一层的体是个**匿名 struct**（第一百一十二刀），位域可以并进来；
+   * union 体**自己**那一层传 null —— 那儿每格成员都从偏移 0 起，"连着的几格挤一格存储"
+   * 这句话在那儿不成立（jancy 的 UnionType 也不走 layoutBitField）。
    */
-  unionMembers(ag, cls, owner, gidx, min = 2) {
+  unionMembers(ag, cls, owner, gidx, min = 2, bs = null) {
     const out = [];
     let sidx = 0;
     for (const m0 of this.flat(ag.items[4])) {
@@ -2518,18 +2558,34 @@ class JncLower {
           this.nope(m, 'union 体里除字段与匿名 struct 以外的成员');
           return null;
         }
-        const sf = this.unionMembers(inner, cls, owner, gidx, 1);   // 里头那一组：一格也行
+        const ibs = { last: null };                 // 里头那一组自己的位域分组（第一百一十二刀）
+        const sf = this.unionMembers(inner, cls, owner, gidx, 1, ibs);   // 里头那一组：一格也行
         if (sf === null) return null;
         const sname = `${owner}$u${gidx}$s${sidx}`;
         const mem = `$s${sidx}`;
         sidx += 1;
-        this.structs.set(sname, sf);
-        this.decls.push(`  (struct ${sname} ${sf.map((f) => `(${f.name} ${fieldText(f.type)})`).join(' ')})`);
+        /* 位域那几格**不是**这格结构体的字段（它们是某一格 `$b<N>` 里的几位），所以既不进
+           this.structs、也不进发出去的那一句 —— 它们走 bitPath。 */
+        const real = sf.filter((f) => f.bit === undefined);
+        this.structs.set(sname, real);
+        this.decls.push(`  (struct ${sname} ${real.map((f) => `(${f.name} ${fieldText(f.type)})`).join(' ')})`);
         for (const f of sf) {
           const key = `${owner}$${f.name}`;
-          if (this.aliasPath.has(key)) {
+          if (this.aliasPath.has(key) || this.bitPath.has(key)) {
             this.nope(m, `union 里两组都有 '${f.name}' —— 那两个名字在外层撞车了`);
             return null;
+          }
+          if (f.bit !== undefined) {
+            // 外层写 `hdr.m_a` 时的那一串：先进这一组（`$s0`）、再落到存储那一格（`$b0`）
+            this.bitPath.set(key, {
+              path: [mem, f.bit.slot], type: f.type, off: f.bit.off, cnt: f.bit.cnt, bw: f.bit.bw,
+            });
+            // 里层那格结构体自己也认得它（`hdr.$s0` 这个名字源码里写不出来，可路子要通）
+            this.bitPath.set(`${sname}$${f.name}`, {
+              path: [f.bit.slot], type: f.type, off: f.bit.off, cnt: f.bit.cnt, bw: f.bit.bw,
+            });
+            this.bitAggs.add(sname);
+            continue;
           }
           this.aliasPath.set(key, { path: [mem, f.name], type: f.type });
         }
@@ -2543,14 +2599,29 @@ class JncLower {
       const sp = this.specs(m.items[1], cls);
       if (sp === null) return null;
       for (const d of this.flat(m.items[2])) {
-        const info = this.declarator(d, sp, m.items[1], cls);
+        const info = this.declarator(d, sp, m.items[1], cls, bs !== null);
         if (info === null) return null;
         const t = info.type;
+        /* 这一组里的位域（第一百一十二刀）：`io_UsbTransfer.jnc:63-71` 那一格 —— 一格 union 里
+           一半是整字节、另一半是同一段字节上的几位。存储那一格进 out（它是真字段），位域
+           自己带着 `bit` 一起回给调用方去登记 bitPath。 */
+        if (info.bits !== null) {
+          if (!isInt(t)) {
+            this.nope(d, `位域 '${info.name}' 的类型是 ${tyName(t)}（位域只在整数上 ——`
+              + ' jancy 那边它的宽度就是 `getSize() * 8`）');
+            return null;
+          }
+          const sl = this.bitSlot(bs, out, t, info.bits, d);
+          if (sl === null) return null;
+          out.push({ name: info.name, type: t, bit: sl });
+          continue;
+        }
         if (!(isInt(t) || t === J_REAL || t === J_BOOL || jncIsEnum(t) || jncIsStruct(t))) {
           this.nope(d, `union 里的成员 '${info.name}'（只收整数 / 实数 / 布尔 / 枚举 /`
             + ' 另一个结构体 —— 指针、string 与数组那几种旁边还挂着表，重叠之后说不清归谁）');
           return null;
         }
+        if (bs !== null) bs.last = null;      // 普通字段隔在中间就断开上一组位域
         out.push({ name: info.name, type: t });
       }
     }
@@ -2559,6 +2630,43 @@ class JncLower {
       return null;
     }
     return out;
+  }
+
+  /**
+   * 位域的**分组**（第一百一十二刀）。一句话：几格连着的、声明类型**一模一样**的位域挤在
+   * 同一格存储里；挤不下（或者中间隔了个普通字段、或者换了个类型）就新开一格。
+   *
+   * 规矩逐条照 jancy 自己那一遍（`StructType::layoutBitField`，jnc_ct_StructType.cpp:346-399）：
+   *   - `baseBitCount = 声明类型的字节数 * 8` —— 所以 `uint8_t` 那一组只有 8 位，写到第 9 位
+   *     就新开一格。**位数超过它是错**（jancy 那句 "type of bit field too small for
+   *     number of bits"）；
+   *   - 能并进上一格的条件是三条同时成立：上一格也是位域、`getType()->isEqual()`（这一层就是
+   *     sameTy —— 位宽与符号性都要一样）、并且 `lastBitOffset + bitCount <= baseBitCount`；
+   *   - 并不进去就新开一格，位偏移从 0 起。
+   * 大端那一支（`PtrTypeFlag_BigEndian`）不用管：`bigendian` 这个词在这一层是**拦着**的
+   * （见 specs 那处第一百〇九刀的清单），所以带它的字段一格都到不了这儿。
+   *
+   * 存储那一格在方言里就是**一格普通的整数字段**（名字 `$b<N>`，源码里写不出来）。它的类型
+   * 记成**无符号**的那一格：读要先逻辑右移，而 `int64` 那一格上有符号右移会把高位的别人家的
+   * 位抹成符号位 —— 那是错答案。声明写的符号性在 bitPath 的 `type` 上，补符号位那一步用它。
+   */
+  bitSlot(bs, fields, st, cnt, node) {
+    const w = st.w;
+    if (cnt > w) {
+      this.err(node, `位域要 ${cnt} 位，而 ${tyName(st)} 只有 ${w} 位（jancy 那句 `
+        + '"type of bit field too small for number of bits"）');
+      return null;
+    }
+    const lb = bs.last;
+    if (lb !== null && sameTy(lb.type, st) && lb.next + cnt <= w) {
+      const off = lb.next;
+      lb.next += cnt;
+      return { slot: lb.slot, off, cnt, bw: w };
+    }
+    const slot = `$b${fields.length}`;
+    fields.push({ name: slot, type: mkInt(w, true) });
+    bs.last = { slot, type: st, next: cnt };
+    return { slot, off: 0, cnt, bw: w };
   }
 
   expandFullProps(items) {
@@ -3453,6 +3561,7 @@ class JncLower {
     if (fields === undefined || fields.length > 0) return null;   // 上一遍已经报过重复了
     const inits = [];                    // 带默认值的那几格（第七十八刀）
     const evts = [];                     // 事件那几格（第八十三刀）—— 造对象时要建单子
+    const bs = { last: null };           // 位域分组的游标（第一百一十二刀，见 bitSlot）
     // 类体里查名从**这个类**这一层起（第五十二刀）：嵌套类型在 nsFlat 那一遍登记成了 `C.S`，
     // 而字段与方法原型写的是裸名字 `S`（test97.jnc:8）。结构体不动 —— 它不是一层命名空间。
     const saveNs = this.ns;
@@ -3483,6 +3592,7 @@ class JncLower {
                它，所以 `hdr.m_pid` 一处都不用改。"它们是一格 union" 记在 `uni` 上，只在发
                `(struct …)` 那一句时用来把这一串括回去（见下面拼 fs 那一处）。 */
             const gid = `u${fields.length}`;
+            bs.last = null;              // 一格 union 隔在中间就断开上一组位域
             for (const mm of ms) fields.push({ name: mm.name, type: mm.type, uni: gid });
           }
           continue;
@@ -3610,7 +3720,7 @@ class JncLower {
           d = d0.items[1];
           dflt = d0.items[2];
         }
-        const info = this.declarator(d, sp);
+        const info = this.declarator(d, sp, null, false, !cls);
         if (info === null) continue;
         // 字段后面挂构造实参（`C1 m_a(10);`）—— jancy 那边它是"内嵌那一格的构造实参"，
         // 而内嵌本身这一层还不收（下面那条），所以这儿先明说，免得实参被悄悄丢掉。
@@ -3732,6 +3842,32 @@ class JncLower {
             + '还放不下函数值（见 hir/types.js 的 structLayout）');
           continue;
         }
+        /* 位域（第一百一十二刀）：`uint8_t m_flag : 1;` —— 它**不占自己的格子**，是同一格
+           存储里的几位，所以这儿一个字段都不 push，只登记 bitPath（读写落法见 read / store）。
+           `class` 那一侧不收：那要"整条继承链共用一格结构体"（第五十六刀）里的 `$b<N>` 也按
+           链合起来，而位偏移是按**本类体内的顺序**算出来的 —— 语料里类上一格位域都没有
+           （13 份带位域的语料全是 struct），所以那一格留着当账记。 */
+        if (info.bits !== null) {
+          if (!isInt(info.type)) {
+            this.nope(d, `位域 '${info.name}' 的类型是 ${tyName(info.type)}（位域只在整数上 ——`
+              + ' jancy 那边它的宽度就是 `getSize() * 8`）');
+            continue;
+          }
+          if (dflt !== null) {
+            this.nope(d0, `位域 '${info.name}' 的默认值`);
+            continue;
+          }
+          const sl = this.bitSlot(bs, fields, info.type, info.bits, d);
+          if (sl === null) continue;
+          const key = `${name}$${info.name}`;
+          if (this.bitPath.has(key)) { this.err(d, `字段 '${info.name}' 声明了两次`); continue; }
+          this.bitPath.set(key, {
+            path: [sl.slot], type: info.type, off: sl.off, cnt: sl.cnt, bw: sl.bw,
+          });
+          this.bitAggs.add(name);
+          continue;
+        }
+        bs.last = null;                  // 普通字段隔在中间就断开上一组位域
         fields.push({ name: info.name, type: info.type });
         // 带初值的那几格记下来（第七十八刀）。排在所有"这一格不收"之后 —— 不收的那些
         // 已经 continue 掉了，不会带着一条永远发不出来的初值往下走。
@@ -4602,8 +4738,10 @@ class JncLower {
    *  `static construct`，这时 `name` 是**类名那一半**（体外写法带着它，体内写法是空的）。
    *  `sp` 是**这一格声明符自己**的说明符袋子（第七十二刀）：`T* property p` 里那个 property
    *  写在星号后面，属于声明而不属于指针，所以袋子要按声明符补一次 —— 关心 prop / cst / agt
-   *  的调用方一律读 `info.sp`，不要读自己那一份。 */
-  declarator(d, sp, spNode = null, allowVirt = false) {
+   *  的调用方一律读 `info.sp`，不要读自己那一份。
+   *  `allowBits` 只有结构体的字段那两处开（第一百一十二刀）：位域后缀 `: 3` 在别处（局部量、
+   *  形参、返回类型）照旧当场拒 —— 那几处 jancy 自己也不给写。开着的时候位数进 `info.bits`。 */
+  declarator(d, sp, spNode = null, allowVirt = false, allowBits = false) {
     if (!isList(d) || head(d) !== 'dcl') return this.err(d, '认不出的声明符');
     // `T* … property p`（第七十二刀）：最后一个 `*` 后面那一组词是**这条声明**的词，不是那格
     // 指针的（三条引文都在 tailMods 那处）。这儿只把 property 那一族提上来，而且提的条件是
@@ -4692,6 +4830,7 @@ class JncLower {
     // `int[20]`，所以里层是最后那个 `[20]`。从左往右叠会得到 `int[20][10]` —— 一维时
     // 看不出差别，多维就错了。
     const dims = [];
+    let bits = null;
     for (const s of this.flat(d.items[3])) {
       const sh = isList(s) ? head(s) : null;
       if (sh === 'fn-suffix') {
@@ -4737,6 +4876,22 @@ class JncLower {
          的可变性与胖瘦 —— 这一层没有可变性检查、也没有 thin 那格调用约定，所以收下不看，
          与说明符里的 `const` / `readonly` / `thin` 同一条。 */
       if (sh === 'post-modifier') continue;
+      /* 位域（第一百一十二刀）：`uint8_t m_flag : 1;`（Declarator.llk:494-499）。
+         位数在这一层就要是个**编译期整数** —— jancy 那边它是 `parseConstIntegerExpression`
+         （Parser.cpp:2246 那一带），与数组长度、枚举成员的值同一个入口。
+         `allowBits` 关着的地方（局部量、形参、返回类型、类的字段）照旧当场拒：那几处
+         位域要么 jancy 自己也不给写，要么这一刀没落（类的那一格见 ADR-0016 那一节）。 */
+      if (sh === 'bitfield') {
+        if (!allowBits) {
+          return this.nope(s, '这个位置上的位域（`: 位数` 只在结构体的字段上）');
+        }
+        if (bits !== null) return this.err(s, '一格字段上写了两个 `: 位数`');
+        const kb = this.constInt(s.items[1]);
+        if (kb === null) return this.nope(s, '位域的位数不是能在编译期算出来的整数');
+        if (kb < 1n) return this.err(s, `位域的位数要至少 1，这里是 ${kb}`);
+        bits = Number(kb);
+        continue;
+      }
       return this.nope(s, `声明符后缀 '${sh}'`);
     }
     for (let i = dims.length - 1; i >= 0; i--) t = tArr(t, dims[i]);
@@ -4749,7 +4904,7 @@ class JncLower {
       return this.nope(d, `一格函数类型的变量（'${name}' 的类型是 typedef 起的函数类型名 ——`
         + ' 能用的只有 `名字*`）');
     }
-    return { name, type: t, formals, ctor, special: null, sp };
+    return { name, type: t, formals, ctor, special: null, sp, bits };
   }
 
   /**
@@ -6679,6 +6834,9 @@ class JncLower {
         // 裸写一格字段路径别名（第一百〇四刀）
         const apv = this.selfPathLv(nm);
         if (apv !== null) return apv;
+        // 裸写一格位域（第一百一十二刀）
+        const bpv = this.selfBitLv(nm);
+        if (bpv !== null) return bpv;
       }
       if (r === null) {
         // 属性不是一格内存（第六十九刀，与 memberOf 里那一条同一句）：`g_p++`、`&g_p` 落到
@@ -6812,6 +6970,10 @@ class JncLower {
           type: ap.type,
         };
       }
+      // 位域（第一百一十二刀）：与上面那张表是同一种展开，只是路走到**存储那一格**就停，
+      // 剩下的"哪几位"由 read / store 那两句办。
+      const bp = nm === null ? undefined : this.bitPath.get(`${structName}$${nm}`);
+      if (bp !== undefined) return this.bitsLv(bp, baseCode);
       // 属性不是一格内存（第六十九刀）：`b.p++`、`&b.p` 这些"就地改/取地址"的写法会落到这儿。
       // 报"没有这个字段"是认错了人 —— 那个成员在，只是它那一格要走取/存两个函数。左边得是
       // **类**才问这一句：属性只长在类上，结构体那边同名的字段不存在时报的仍旧是"没有字段"。
@@ -6829,12 +6991,63 @@ class JncLower {
   }
 
   store(lv, valueCode) {
+    if (lv.kind === 'bits') return this.bitsStore(lv, valueCode);
     return lv.kind === 'var' ? `(set ${lv.name} ${valueCode})` : `(pstore ${lv.code} ${valueCode})`;
+  }
+
+  /**
+   * 位域读出来那一句（第一百一十二刀）。照 jancy 的 `extractBitField`
+   * （jnc_ct_OperatorMgr_DataRef.cpp:272-314）一步不差：
+   *
+   *   `(存储 >> off) & ((1 << cnt) - 1)`，声明类型**有符号**时再补符号位。
+   *
+   * 两处细节要紧：
+   *   - 右移要**逻辑**移。存储那一格记成无符号（见 bitSlot），所以 64 位那一格上 uOp 会挑
+   *     `u>>`；窄的那几格里存的值本来就非负（写那一侧掩过），有符号右移也是同一个数。
+   *   - 补符号位用 `(x ^ s) - s`（s 是 `1 << (cnt-1)`）—— 与 wrapTo 里那一句是同一个恒等式，
+   *     jancy 那边写成 `value |= ~((signBit & value) - 1)`，两者逐位相同。
+   *     `cnt === bw` 时整格就是它，那一步就是"按声明的符号性读这一格"，走 intConv。
+   */
+  bitsRead(lv) {
+    const st = mkInt(lv.bw, true);
+    const raw = `(pload ${lv.code})`;
+    if (lv.cnt >= lv.bw) return intConv({ code: raw, type: st }, lv.type).code;
+    const sh = lv.off === 0 ? raw : `(bin "${uOp('>>', st)}" ${raw} (int ${lv.off}))`;
+    let code = `(bin "&" ${sh} (int ${(1n << BigInt(lv.cnt)) - 1n}))`;
+    if (!lv.type.u) {
+      const s = 1n << BigInt(lv.cnt - 1);
+      code = `(bin "-" (bin "^" ${code} (int ${s})) (int ${s}))`;
+    }
+    return code;
+  }
+
+  /**
+   * 位域写进去那一句（第一百一十二刀）。照 jancy 的 `mergeBitField`
+   * （同处 :316-350）：`(旧 & ~掩码) | ((值 & 位掩码) << off)`。
+   *
+   * 也就是**读-改-写** —— 一格位域没有自己的字节，写它非得把同一格里别人那几位原样带回去。
+   * `~掩码` 这一层写成 `旧 ^ (旧 & 掩码)`（把那几位清掉）：等价，而且不用发负数字面量。
+   * 地址那一串（`lv.code`）在这一句里出现两次 —— 与复合赋值那儿 `lv op= v` 的落法同一条
+   * （那儿也是 read 一次、store 一次），而这一层的地址串是纯的折offset，重求没有副作用。
+   */
+  bitsStore(lv, valueCode) {
+    const cm = (1n << BigInt(lv.cnt)) - 1n;
+    if (lv.cnt >= lv.bw) {
+      // 整格都是它：写进去的就是"掩到这一格宽度"的那个值（与赋值到窄格同一条规矩）
+      return `(pstore ${lv.code} ${wrapTo(valueCode, lv.bw, true)})`;
+    }
+    const mask = cm << BigInt(lv.off);
+    const old = `(pload ${lv.code})`;
+    const cleared = `(bin "^" ${old} (bin "&" ${old} (int ${mask})))`;
+    const put = `(bin "&" ${valueCode} (int ${cm}))`;
+    const shifted = lv.off === 0 ? put : `(bin "<<" ${put} (int ${lv.off}))`;
+    return `(pstore ${lv.code} (bin "|" ${cleared} ${shifted}))`;
   }
 
   /** 取值。`agg`（结构体那一格）的 code **就是**地址，所以不 pload —— 结构体的"值"在这一层
    *  一律用它那段内存的地址表示，要抄一份的地方由 copyAgg 逐字段抄。 */
   read(lv) {
+    if (lv.kind === 'bits') return this.bitsRead(lv);
     if (lv.kind === 'agg') return lv.code;
     return lv.kind === 'var' ? `(var ${lv.name})` : `(pload ${lv.code})`;
   }
@@ -8759,6 +8972,9 @@ class JncLower {
           // 裸写一格字段路径别名（第一百〇四刀）：读那一侧（写那一侧在 nameLv）
           const apr = this.selfPathLv(nm);
           if (apr !== null) return this.load(n, apr);
+          // 裸写一格位域（第一百一十二刀）：同样是读那一侧
+          const bpr = this.selfBitLv(nm);
+          if (bpr !== null) return this.load(n, bpr);
           // 无名枚举漏出来的那些成员（第九十六刀）：`enum { A = 1 }` 之后裸写 `A`。
           const ex = this.exposedLit(nm);
           if (ex !== null) return ex;
@@ -8955,6 +9171,13 @@ class JncLower {
     if (lv.kind !== 'ptr') {
       // 结构体那一格的 code **就是**地址，所以 `&s` / `&a[i]` / `&s.in` 都不发一个字（第十二刀）
       if (lv.kind === 'agg') return { code: lv.code, type: tPtr(lv.type) };
+      /* 一格位域没有自己的地址（第一百一十二刀）。jancy 自己也拒这一句 —— 它那边取地址回的是
+         带 `PtrTypeFlag_BitField` 的数据指针，也就是"地址 + 哪几位"三样东西，而这一层的
+         指针里只有地址。与第六十九刀"属性不是一格内存"是同一句话。 */
+      if (lv.kind === 'bits') {
+        return this.nope(n, '对一格位域取地址 —— 它没有自己的字节（jancy 那边那种指针里还带着'
+          + '"哪几位"，这一层的指针里只有地址）');
+      }
       // 标量的模块级变量走的是"提到一格自己的内存里"（第二十四刀，见 declareGlobal），
       // 所以能落到这儿的只剩方言放不进内存的那些类型（`string` 那一档）。
       if (lv.kind === 'var' && lv.global) {

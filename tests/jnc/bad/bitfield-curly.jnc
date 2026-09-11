@@ -1,0 +1,13 @@
+// 第一百一十二刀的界（三）：带位域的结构体上还不收**花括号初值**。这一层那一遍是按"第几格
+// 字段"数的（curlyMember 里 `fs[idx]`），而位域不占自己的格子 —— 数下去写的是整格存储，
+// 那是个**静默的错答案**，所以当场说清。要接它得让 curlyEmit 那张单子也认得"哪几位"。
+struct IpHdr {
+	uint8_t m_a : 4;
+	uint8_t m_b : 4;
+}
+
+int main() {
+	IpHdr h = { 5, 9 };
+	printf("%d %d\n", h.m_a, h.m_b);
+	return 0;
+}

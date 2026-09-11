@@ -1,0 +1,13 @@
+// 第一百一十二刀的界（四）：位数**超过声明类型的宽度**是错，不是"还不收"。jancy 自己就报
+// 这一句：`layoutBitField` 开头那句 "type of bit field too small for number of bits"
+// （jnc_ct_StructType.cpp:349-351）。`uint8_t` 只有 8 位，写 9 位没处放。
+struct IpHdr {
+	uint8_t m_a : 9;
+}
+
+int main() {
+	IpHdr* h = new IpHdr;
+	h.m_a = 1;
+	printf("%d\n", h.m_a);
+	return 0;
+}

@@ -1,0 +1,16 @@
+// 第一百一十二刀的界（二）：**对一格位域取地址**。它没有自己的字节，所以拿不出一格
+// "地址"来。jancy 自己那边取得出来 —— 可它回的是带 `PtrTypeFlag_BitField` 的数据指针，
+// 里头是"地址 + 位偏移 + 位数"三样东西（jnc_ct_DataPtrType.h:26），而这一层的指针里只有
+// 地址。与第六十九刀"属性不是一格内存"是同一句话。
+struct IpHdr {
+	uint8_t m_a : 4;
+	uint8_t m_b : 4;
+}
+
+int main() {
+	IpHdr* h = new IpHdr;
+	h.m_a = 5;
+	uint8_t* p = &h.m_a;
+	printf("%d\n", *p);
+	return 0;
+}

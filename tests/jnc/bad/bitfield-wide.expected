@@ -1,0 +1,1 @@
+位域要 9 位，而 unsigned char 只有 8 位（jancy 那句 "type of bit field too small for number of bits"）
