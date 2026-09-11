@@ -8033,6 +8033,25 @@ class JncLower {
   }
 
   /** 局部量。没写初值的按零初始化 —— jancy 保证"用户代码碰到之前每一格都是零"。 */
+  /**
+   * 一格局部声明降不下来时，那个名字**仍旧要进作用域**（第一百四十五刀）。
+   *
+   * `GroupProperty* prop = new GroupProperty(name);`（ui_PropertyGrid.jnc:420）初值那一句报了
+   * 一条（那个类的 construct 只有原型），先前这儿连名字都不记 —— 于是下面每一句用到 prop 的
+   * 都跟着报"未声明的变量 'prop'"。逐份那张榜上那一行 296 处、一起编那张榜上 45 处，
+   * 全是这么长出来的：**把这一句的账记到后面那些句子头上**，与"下一步算不出来记在这一步头上"
+   * 是同一个形状的错账（第一百四十二刀那条口径的反面）。
+   *
+   * 声明的类型是**写出来的**，初值算不出来一点也不影响它，所以记下来不是猜。这一格只改诊断的
+   * 落点：这条语句照旧算失败（一个字也不发、退出码照旧是 1）。
+   */
+  declBail(info) {
+    if (info !== null && info !== undefined && info.type !== null && info.type !== undefined) {
+      this.push(info.name, info.type);
+    }
+    return null;
+  }
+
   localDecl(n, ind) {
     const pad = ' '.repeat(ind);
     const sp = this.specs(n.items[1]);
@@ -8084,10 +8103,10 @@ class JncLower {
         let srcCode = null;
         if (initNode !== null) {
           const v = this.expr(initNode, info.type);
-          if (v === null) return null;
+          if (v === null) return this.declBail(info);
           if (!this.assignOk(v.type, info.type)) {
             this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(info.type)}`);
-            return null;
+            return this.declBail(info);
           }
           // 源头先钉住（要在目标那一格之前发：`int b[3] = b;` 里右边那个 b 指外层那个）
           srcCode = this.aggSource(v.code, slotText(info.type), pad, out);
@@ -8111,11 +8130,11 @@ class JncLower {
         if (initNode !== null) {
           this.err(initNode, `'${info.name}' 是类的变量，赋不了值（type_class.rst:19 那句 `
             + '"You cannot assign varibles or fields of class types"）—— 要一份拷贝得自己写 clone');
-          return null;
+          return this.declBail(info);
         }
         if (this.lifted.has(info.name)) {
           this.nope(dcl, `对类的变量取地址（&${info.name}）—— 那要一格 \`C**\``);
-          return null;
+          return this.declBail(info);
         }
         this.push(info.name, info.type);
         const ct = tyText(info.type);
@@ -8137,10 +8156,10 @@ class JncLower {
         let srcCode = null;
         if (initNode !== null) {
           const v = this.expr(initNode, info.type);
-          if (v === null) return null;
+          if (v === null) return this.declBail(info);
           if (!this.assignOk(v.type, info.type)) {
             this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(info.type)}`);
-            return null;
+            return this.declBail(info);
           }
           srcCode = v.code;
         }
@@ -8169,22 +8188,22 @@ class JncLower {
         // 调它是运行期的 "null function pointer" 错，要接得连那一格空值一起接。
         if (isFn(info.type)) {
           this.nope(dcl, `${tyName(info.type)} 的局部量不写初值（方言的函数值那一格没有空值）`);
-          return null;
+          return this.declBail(info);
         }
         code = zeroText(info.type);
         if (code === null) {
           // 走到这儿只剩 void 与 string 那几种不该出现在局部量上的类型（结构体与数组
           // 在上面两条分支里各自开了自己那一格内存）。
           this.nope(dcl, `${tyName(info.type)} 的局部量不写初值`);
-          return null;
+          return this.declBail(info);
         }
       } else {
         let v = this.expr(initNode, info.type);
-        if (v === null) return null;
+        if (v === null) return this.declBail(info);
         if (isInt(v.type) && isInt(info.type)) v = intConv(v, info.type);
         if (!this.assignOk(v.type, info.type)) {
           this.err(initNode, `初值的类型是 ${tyName(v.type)}，声明的是 ${tyName(info.type)}`);
-          return null;
+          return this.declBail(info);
         }
         code = v.code;
       }
