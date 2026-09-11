@@ -1100,6 +1100,9 @@ class JncLower {
        读是 `(存储 >> off) & 掩码`（有符号再补符号位），写是**读-改-写** —— 两处都在
        read / store 里，于是 `=`、`++`、复合赋值一条都不用单独接。 */
     this.bitPath = new Map();
+    /* `bigendian` 的字段（第一百二十六刀）：`类$字段` -> `{type, w}`。存储是一格普通整数，
+       读写各套一次字节序反转 —— 与位域那张表同一个位置、同一种用法。 */
+    this.bePath = new Map();
     /* 哪些结构体里有位域。只有一处用：花括号初值那一遍拦住它们（见 curlyMember）——
        那儿是按"第几格字段"数的，而位域不占自己的格子，数下去就是个静默的错答案。 */
     this.bitAggs = new Set();
@@ -1721,6 +1724,22 @@ class JncLower {
     const bp = this.bitPath.get(`${this.selfClass}$${nm}`);
     if (bp === undefined) return null;
     return this.bitsLv(bp, '(var $this)');
+  }
+
+  /** 一格 bigendian 字段当左值（第一百二十六刀）：`path` 与 aliasPath 那张表同一种叠法 ——
+   *  匿名 union 里再套匿名 struct 时它是两段（`$s0` / 字段名）。 */
+  beLv(bep, baseCode) {
+    let code = baseCode;
+    for (const s of bep.path) code = `(pfield ${code} ${s})`;
+    return { kind: 'be', code, type: bep.type, w: bep.w };
+  }
+
+  /** 方法体里**裸写**一格 bigendian 字段（第一百二十六刀）：与 selfBitLv 同一条路。 */
+  selfBeLv(nm) {
+    if (this.selfClass === null) return null;
+    const bep = this.bePath.get(`${this.selfClass}$${nm}`);
+    if (bep === undefined) return null;
+    return this.beLv(bep, '(var $this)');
   }
 
   /* ---------------------------------------------------------- 取地址（第九刀）
@@ -2652,6 +2671,14 @@ class JncLower {
             this.bitAggs.add(sname);
             continue;
           }
+          /* 匿名 struct 里的 bigendian 成员（第一百二十六刀）：路是两段（先进这一组、再落到
+             字段那一格）。里层那格结构体自己也登记一份 —— 与位域那两句同一个理由：
+             `hdr.$s0` 这个名字源码里写不出来，可路子要通。 */
+          if (f.be !== undefined) {
+            this.bePath.set(key, { path: [mem, f.name], type: f.type, w: f.be.w });
+            this.bePath.set(`${sname}$${f.name}`, { path: [f.name], type: f.type, w: f.be.w });
+            continue;
+          }
           this.aliasPath.set(key, { path: [mem, f.name], type: f.type });
         }
         out.push({ name: mem, type: { k: 'struct', name: sname } });
@@ -2691,6 +2718,21 @@ class JncLower {
           return null;
         }
         if (bs !== null) bs.last = null;      // 普通字段隔在中间就断开上一组位域
+        /* union 里的 bigendian 成员（第一百二十六刀）：协议头那一族正是"同一段字节，一半按
+           大端读、一半按字节看"。直接挂在这一层的名字上（union 的成员在外层那张字段表里是
+           **摊平**的，所以路只有一段）；套在匿名 struct 里的那一种由上面那一支带着 `be`
+           回给调用方，路是两段。 */
+        if (sp.be === true) {
+          const t1 = jncIsEnum(t) ? t.base : t;
+          if (!isInt(t1) || (t1.w !== 16 && t1.w !== 32 && t1.w !== 64)) {
+            this.nope(d, `bigendian 的字段 '${info.name}' 的类型是 ${tyName(t)}`
+              + '（字节序只在 16 / 32 / 64 位的整数与枚举上说得清）');
+            return null;
+          }
+          if (bs === null) this.bePath.set(`${owner}$${info.name}`, { path: [info.name], type: t, w: t1.w });
+          out.push({ name: info.name, type: t, be: { w: t1.w } });
+          continue;
+        }
         out.push({ name: info.name, type: t });
       }
     }
@@ -4498,6 +4540,20 @@ class JncLower {
         // 函数指针的字段（第一百一十七刀）：名字记一格，调用点据此把 `c.m_f(…)` 认成
         // "从一格函数指针上调"而不是"调一个方法"（见 callSite 那一支）。
         if (isFn(info.type)) this.fnFieldNames.add(info.name);
+        /* `bigendian` 的字段（第一百二十六刀）：存储照旧是一格普通整数，**读写各套一次字节序
+           反转**（bswapRead / bswapStore），路子记在 bePath 上 —— 与位域那一格同一个办法。
+           收下不看是不行的：那会把数读错，是真的错答案（这正是第一百〇九刀把它留着的理由）。
+           枚举也收：存的是它的基整数，反转那一步一模一样。 */
+        if (sp.be === true) {
+          const t0 = jncIsEnum(info.type) ? info.type.base : info.type;
+          if (!isInt(t0) || (t0.w !== 16 && t0.w !== 32 && t0.w !== 64)) {
+            this.nope(d, `bigendian 的字段 '${info.name}' 的类型是 ${tyName(info.type)}`
+              + '（字节序只在 16 / 32 / 64 位的整数与枚举上说得清 —— 一个字节的没有序，'
+              + '实数与聚合各是一笔单独的账）');
+            continue;
+          }
+          this.bePath.set(`${name}$${info.name}`, { path: [info.name], type: info.type, w: t0.w });
+        }
         fields.push({ name: info.name, type: info.type });
         // 带初值的那几格记下来（第七十八刀）。排在所有"这一格不收"之后 —— 不收的那些
         // 已经 continue 掉了，不会带着一条永远发不出来的初值往下走。
@@ -5104,6 +5160,7 @@ class JncLower {
     let thin = false;
     let stat = false;
     let uns = false;
+    let be = false;                      // `bigendian`（第一百二十六刀）
     let fnptr = false;
     let virt = null;
     let errc = false;
@@ -5236,6 +5293,10 @@ class JncLower {
        * `indexed`（1 份，属性带下标运算符，忽略了 `p[i]` 就接错人）。 */
       if (m === 'cdecl' || m === 'stdcall' || m === 'thiscall') continue;
       if (m === 'safe' || m === 'unsafe' || m === 'mutable') continue;
+      /* `bigendian`（第一百二十六刀）：这一格**不能收下不看** —— 那会把数读错，是真的错答案。
+         所以它落成一位，由字段那一遍记进 `bePath`，读写各套一个字节序反转（bswapRead /
+         bswapStore）。语料里 32 份文件、绝大多数是协议头上的 `bigendian uint16_t m_port;`。 */
+      if (m === 'bigendian') { be = true; continue; }
       this.nope(n, `修饰符 '${m}'`);
       return null;
 
@@ -5245,7 +5306,7 @@ class JncLower {
      * 一律回 void，所以那一格不用写。带实参那一串挂在声明符的括号里，由调用方（globalDecl /
      * 类的字段那一遍）从 formals 上读，这儿只把"这是一格事件"传上去。 */
     if (isList(ts) && head(ts) === 'no-type') {
-      if (evt) return { type: J_MC, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct, als };
+      if (evt) return { type: J_MC, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct, als, be };
       /* 说明符里一个类型都没写（第八十一刀）。语料里到处是：`override start() { … }`、
        * `abstract reset();`、`virtual decodeName(std.StringBuilder* s) {}` ——
        * `virtual` / `override` / `abstract` 在 jancy 那边是**存储说明符**，不是类型说明符
@@ -5263,8 +5324,8 @@ class JncLower {
        * 没有函数后缀的那种（`virtual m_x;`）在 jancy 那边报的是 `illegal use of type 'void'`
        * （jnc_ct_Parser.cpp:1094-1136 的 `case TypeKind_Void`）—— 这一层由下游那几处
        * "字段/变量不能是 void" 接着，报的话也是同一件事。 */
-      if (uns) return { type: mkInt(32, true), thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct, als };
-      return { type: J_VOID, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct, als };
+      if (uns) return { type: mkInt(32, true), thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct, als, be };
+      return { type: J_VOID, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct, als, be };
     }
     let base = null;
     if (isAtom(ts)) {
@@ -5349,7 +5410,7 @@ class JncLower {
         + `这里写的是 ${tyName(base)}`);
       return null;
     }
-    return { type: evt ? J_MC : base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata, evt, rct, als };
+    return { type: evt ? J_MC : base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata, evt, rct, als, be };
   }
 
   /**
@@ -7527,6 +7588,10 @@ class JncLower {
       // 方法体里裸写的字段名（第五十二刀）：`m_x` 就是 `this.m_x`，落在同一句 pfield 上。
       // 局部量与形参遮住它 —— 所以这一问排在 lookupRef 之后。
       if (r === null) {
+        /* 裸写一格 bigendian 字段（第一百二十六刀）：它**是**一格真字段，所以这一问要排在
+           `selfField` **之前** —— 排在后面就被那一支当普通字段接走了，字节序那一步就丢了。 */
+        const bev = this.selfBeLv(nm);
+        if (bev !== null) return bev;
         const f = this.selfField(nm);
         if (f !== null) {
           return {
@@ -7662,6 +7727,11 @@ class JncLower {
     const fs = this.structs.get(structName);
     const f = fs === undefined ? undefined : fs.find((x) => x.name === nm);
     if (f === undefined) {
+      /* 套在匿名 struct 里的 bigendian 成员（第一百二十六刀）：它在外层那张字段表里查不着
+         （名字挂在那一组的里层），所以这一问要排在别名那一张表**之前** —— 排在后面就被
+         aliasPath 当普通字段接走了，字节序那一步就丢了。 */
+      const bepA = nm === null ? undefined : this.bePath.get(`${structName}$${nm}`);
+      if (bepA !== undefined) return this.beLv(bepA, baseCode);
       /* 字段路径的别名（第一百〇四刀）：`b.m_head` 里 m_head 是 `m_list.m_head` 的另一个名字
          —— 叠成一串 pfield。查名这一步展开，之后读写与"真写出那一串"完全同一条路。 */
       const ap = nm === null ? undefined : this.aliasPath.get(`${structName}$${nm}`);
@@ -7687,6 +7757,10 @@ class JncLower {
       }
       return this.err(n, `${structName} 没有字段 '${nm}'`);
     }
+    /* bigendian 的字段（第一百二十六刀）：它**是**一格真字段（上面那一问找得着它），所以这一格
+       挂在最后这个出口上，而不是像位域那样挂在"找不着"那一支里。读写各套一次字节序反转。 */
+    const bep = this.bePath.get(`${structName}$${nm}`);
+    if (bep !== undefined) return this.beLv(bep, baseCode);
     return {
       kind: jncIsStruct(f.type) || isArr(f.type) ? 'agg' : 'ptr',
       code: `(pfield ${baseCode} ${nm})`,
@@ -7696,6 +7770,7 @@ class JncLower {
 
   store(lv, valueCode) {
     if (lv.kind === 'bits') return this.bitsStore(lv, valueCode);
+    if (lv.kind === 'be') return this.bswapStore(lv, valueCode);
     return lv.kind === 'var' ? `(set ${lv.name} ${valueCode})` : `(pstore ${lv.code} ${valueCode})`;
   }
 
@@ -7748,10 +7823,49 @@ class JncLower {
     return `(pstore ${lv.code} (bin "|" ${cleared} ${shifted}))`;
   }
 
+  /**
+   * 字节序反转（第一百二十六刀）：把 `code` 那个值的 w/8 个字节倒过来拼回去。
+   *
+   * 挑字节用**无符号**右移（`uOp`）—— 64 位那一格上有符号右移会把符号位摊进来，
+   * 挑出来的高字节就是错的。拼回去之后再按声明的类型回卷一次（`wrapTo`）：无符号只掩位，
+   * 有符号要把最高位摊成符号位 —— 与位域那一处（bitsRead）同一条规矩。
+   *
+   * `code` 在这儿会**出现好几次**（每个字节一次）。今天它一律是 `(pload …)`（纯读、没有
+   * 副作用），与 bitsStore 里 `old` 出现两次是同一笔账；哪天左边能是带副作用的表达式，
+   * 这两处要一起改成"先落一格临时量"。
+   */
+  bswapExpr(code, w, ty) {
+    const st = mkInt(w, true);
+    const n = w / 8;
+    const parts = [];
+    for (let i = 0; i < n; i++) {
+      const from = i * 8;
+      const to = (n - 1 - i) * 8;
+      let b = from === 0 ? code : `(bin "${uOp('>>', st)}" ${code} (int ${from}))`;
+      b = `(bin "&" ${b} (int 255))`;
+      parts.push(to === 0 ? b : `(bin "<<" ${b} (int ${to}))`);
+    }
+    const joined = parts.reduce((a, b) => `(bin "|" ${a} ${b})`);
+    return wrapTo(joined, w, ty.u === true);
+  }
+
+  /** 一格 bigendian 字段的读：先按机器序读出来，再把字节倒过来。 */
+  bswapRead(lv) {
+    const t0 = jncIsEnum(lv.type) ? lv.type.base : lv.type;
+    return this.bswapExpr(`(pload ${lv.code})`, lv.w, t0);
+  }
+
+  /** 一格 bigendian 字段的写：把要写的值先倒过来，再按机器序存。 */
+  bswapStore(lv, valueCode) {
+    const t0 = jncIsEnum(lv.type) ? lv.type.base : lv.type;
+    return `(pstore ${lv.code} ${this.bswapExpr(valueCode, lv.w, t0)})`;
+  }
+
   /** 取值。`agg`（结构体那一格）的 code **就是**地址，所以不 pload —— 结构体的"值"在这一层
    *  一律用它那段内存的地址表示，要抄一份的地方由 copyAgg 逐字段抄。 */
   read(lv) {
     if (lv.kind === 'bits') return this.bitsRead(lv);
+    if (lv.kind === 'be') return this.bswapRead(lv);
     if (lv.kind === 'agg') return lv.code;
     return lv.kind === 'var' ? `(var ${lv.name})` : `(pload ${lv.code})`;
   }

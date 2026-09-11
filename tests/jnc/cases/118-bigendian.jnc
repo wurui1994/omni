@@ -1,0 +1,63 @@
+// 第一百二十六刀：`bigendian` 的字段。榜上 72 份文件在 `修饰符 '…'` 那一行上，其中最大的一格
+// 就是它（32 份文件）—— 而它正是第一百〇九刀那一批里**刻意留着**的一个：那一刀把
+// `cdecl` / `safe` / `mutable` 那几个"收下不看"了，`bigendian` 留着的理由写得很清楚 ——
+// 收下不看会把数**读错**，那是真的错答案。
+//
+// 落法与位域（第一百一十二刀）是同一个办法：存储照旧是一格普通整数，**读写各套一次字节序
+// 反转**，路子记在 `bePath` 上（`beLv` / `bswapRead` / `bswapStore`）。于是 `=`、`++`、
+// 复合赋值、方法体里裸写字段名，一条都不用单独接。
+//
+// 三处要紧的顺序（都是"它是一格真字段"带来的）：
+//   1. `nameLv` 里这一问排在 `selfField` **之前** —— 排在后面就被当普通字段接走了；
+//   2. `propMember` 里"套在匿名 struct 里"那一种排在 `aliasPath` **之前**，同一条理由；
+//   3. 直接的 union 成员在外层字段表里**查得着**，所以那一种挂在最后那个出口上。
+//
+// 反转本身：挑字节用**无符号**右移（64 位那一格上有符号右移会把符号位摊进来），拼回去之后按
+// 声明的类型回卷一次 —— 有符号的要把最高位摊成符号位，与 bitsRead 那一处同一个恒等式。
+//
+// 尺子 `/tmp/c124.c`：C 那边手写字节数组（`{0x12, 0x34}`）当独立出处 —— 大端的意思就是
+// "高位字节在前"，那份尺子直接把字节摆出来，不用任何 htons。
+// 同一串数（4660 4660 287454020 -2 / 258 258 / 4660 13330 / 13330 4660）。
+
+struct Hdr {
+	bigendian uint16_t m_port;
+	uint16_t m_le;
+	bigendian uint32_t m_seq;
+	bigendian int16_t m_signed;
+
+	uint16_t port() {
+		return m_port;               // 方法体里裸写：与外面那一条走同一张表
+	}
+
+	void setPort(uint16_t p) {
+		m_port = p;
+	}
+}
+
+// 同一段字节，一半按大端读、一半按机器序读 —— 协议头那一族的常见写法，也是**字节序真的
+// 反过来了**这件事在这一层唯一能观测到的方式（这一层不许把结构体指针转成字节指针）。
+struct Ov {
+	union {
+		bigendian uint16_t m_be;
+		uint16_t m_le;
+	}
+}
+
+int main() {
+	Hdr* h = new Hdr;
+	h.m_port = 0x1234;
+	h.m_le = 0x1234;
+	h.m_seq = 0x11223344;
+	h.m_signed = -2;
+	printf("%d %d %d %d\n", h.m_port, h.m_le, h.m_seq, h.m_signed);
+
+	h.setPort(0x0102);
+	printf("%d %d\n", h.port(), h.m_port);
+
+	Ov* o = new Ov;
+	o.m_be = 0x1234;
+	printf("%d %d\n", o.m_be, o.m_le);
+	o.m_le = 0x1234;
+	printf("%d %d\n", o.m_be, o.m_le);
+	return 0;
+}
