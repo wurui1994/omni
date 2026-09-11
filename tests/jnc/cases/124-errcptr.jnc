@@ -1,0 +1,84 @@
+// 第一百三十三刀：`errorcode` 写在**星号后面**。
+//
+// 语料里 9 处，全是同一个形状（std_List.jnc:146 / std_HashTable.jnc:113 / std_RbTree.jnc:56）：
+//   ListEntry* errorcode add(variant_t data) { … }
+// 它与第七十二刀的 `T* property p` 是**同一条**：最后一个 `*` 后面那一组词是这条**声明**的词，
+// 不是那格指针的 —— `errorcode` 说的是"这个函数会把错误传回来"，与那格指针没关系。
+//
+// 第五十八刀那会儿这一格是刻意留着的（55-errorcode.jnc 里那三行注就是当时写下的），
+// 理由是"那是指针自己的修饰符位置"。理由不成立：星号后面那一组本来就归声明，第七十二刀
+// 已经为 property 立过这条规矩了，这一刀只是把 `errorcode` 也算进来。
+//
+// 提的条件写紧：那一组里除了 `errorcode` **全是可变性那几个词**（`const` / `readonly` / `cmut`，
+// 它们在指针上本来就是收下不看的）才提。混着别的词就照旧当场报 —— 悄悄丢掉一个没认出来的词
+// 就是改了意思。
+//
+// 顺手改对一处读错了袋子的地方：fnSig0 里那两处 errorcode 读的是它自己算的 `sp`，
+// 而星号后面那个词只有 declarator 那一遍认得（它记在 `info.sp` 里）。
+//
+// 尺子 `/tmp/c130.c`：errorcode 就是 C 的错误码加一层糖（exceptions.rst:15），所以手写的是
+// 把那层糖摊开的样子 —— 每次调用后面跟一句"是不是出错值，是就照样往上回"。
+// 同一串数（3 / 1 / 40 / 2 / 1）。
+
+struct Entry {
+	int m_v;
+}
+
+Entry* errorcode make(int v) {
+	if (v < 0) {
+		return null;                 // 指针那一支的出错值是 null（exceptions.rst:17）
+	}
+
+	Entry* e = new Entry;
+	e.m_v = v;
+	return e;
+}
+
+// 混着可变性那几个词的那一种：`Entry* const errorcode`
+Entry* const errorcode pick(Entry* a, Entry* b, int i) {
+	if (i < 0) {
+		return null;
+	}
+
+	if (i == 0) {
+		return a;
+	}
+
+	return b;
+}
+
+class Box {
+	int m_n;
+
+	construct(int n) {
+		m_n = n;
+	}
+
+	Entry* errorcode grab(int v) {
+		if (v > m_n) {
+			return null;
+		}
+
+		return make(v);              // 不写 try：自动往上传
+	}
+}
+
+int main() {
+	Entry* a = try make(3);
+	printf("%d\n", a.m_v);
+
+	Entry* z = try make(-1);
+	printf("%d\n", z == null);
+
+	Entry* b = try make(40);
+	Entry* c = try pick(a, b, 1);
+	printf("%d\n", c.m_v);
+
+	Box* box = new Box(10);
+	Entry* d = try box.grab(2);
+	printf("%d\n", d.m_v);
+
+	Entry* e = try box.grab(99);
+	printf("%d\n", e == null);
+	return 0;
+}

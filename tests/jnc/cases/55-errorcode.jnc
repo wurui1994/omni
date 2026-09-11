@@ -26,8 +26,9 @@ bool errorcode okay(int i) {
 }
 
 // 指针那一支的 `errorcode` 写在类型**前面**：jancy 的类型修饰符与类型说明符在同一个列表里
-// （`bool errorcode f()` 与 `errorcode bool f()` 都是它），而写在 `*` 后面那一格（与 `thin`
-// / `const` 同一处）这一层还不收 —— 那是指针自己的修饰符位置。
+// （`bool errorcode f()` 与 `errorcode bool f()` 都是它）。写在 `*` **后面**那一种
+// （`int* errorcode f()`）第一百三十三刀收了 —— 当时这三行注写的是"那是指针自己的修饰符位置、
+// 这一层还不收"，那个理由不成立：星号后面那一组词本来就归声明（第七十二刀）。见 124-errcptr。
 errorcode int* pick(int* p, int i) {
 	if (i < 0)
 		return null;

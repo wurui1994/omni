@@ -5756,6 +5756,27 @@ class JncLower {
       sp = sp2;
       dropTail = true;
     }
+    /* `errorcode` 写在星号后面（第一百三十三刀）：`ListEntry* errorcode add(variant_t data)`
+       （std_List.jnc:146，语料里这个形状 9 处，std_List / std_HashTable / std_RbTree）。
+       它与上面那个 `property` 是**同一条**（第七十二刀）：最后一个 `*` 后面那一组词是这条
+       **声明**的词 —— `errorcode` 说的是"这个函数会传错误码回来"，与那格指针无关。
+       只在这一组里除了 `errorcode` **全是可变性那几个词**时才提（那几个在指针上本来就是
+       收下不看的，第六十七刀）；混着别的词就照旧走下面那条路让它当场报出来 ——
+       悄悄把一个没认出来的词丢掉，那是改了意思。 */
+    if (!dropTail && tail.includes('errorcode')
+      && tail.every((m) => m === 'errorcode' || MUT_MODS.has(m))) {
+      // 说明符那一格拿得到就照常重问（那样 `errorcode` 与说明符里别的词一起过一遍规矩）；
+      // 拿不到的那几处（函数声明符那条路不传 spNode）就在袋子上补这一位 —— 两条路的结果
+      // 一样，只是后一条问不着"这个词与那个词打不打架"。
+      if (spNode !== null) {
+        const sp2 = this.specs(spNode, allowVirt, tail);
+        if (sp2 === null) return null;
+        sp = sp2;
+      } else if (!sp.errc) {
+        sp = { ...sp, errc: true };
+      }
+      dropTail = true;
+    }
     // `int property* p` 是**属性指针**（35_PropertyPtr.jnc:97-126）：那个词写在星号**前面**，
     // 于是它进的是那格 `*` 自己的 prefix，落出来是 `getPropertyPtrType`
     // （jnc_ct_DeclTypeCalc.cpp:80-85）—— 里头存的是"取/存两个函数 + 那个对象"，与一格普通
@@ -6624,7 +6645,8 @@ class JncLower {
       this.mainSeen = true;
       // `int errorcode main()`：入口没有"上一层"可传，而这一层的 main 连退出码都不回
       //（那条边界记在 bad/main-nonzero）—— 悄悄丢掉那个词就是骗人。
-      if (sp.errc) return this.nope(n, '`errorcode` 写在 `main` 上（错传不到调用方去）');
+      // 读 `info.sp`（第一百三十三刀）：那个词也可能写在星号后面，`declarator` 才知道。
+      if (info.sp.errc) return this.nope(n, '`errorcode` 写在 `main` 上（错传不到调用方去）');
     } else {
       // 名字带上命名空间前缀，而那个带前缀的名字**同时**就是方言里那个函数的名字。
       info.name = this.qual(info.name);
@@ -6679,8 +6701,9 @@ class JncLower {
         return this.err(n, `'${sp.virt}' 只能写在类的方法上（type_class.rst:178）`);
       }
       this.fns.set(info.name, sigOf(ps, info.type));
-      // errorcode（第五十八刀）：出错值由返回类型定，见 errcReg。
-      if (sp.errc && this.errcReg(n, info.name, info.type) === null) return null;
+      // errorcode（第五十八刀）：出错值由返回类型定，见 errcReg。读的是 `info.sp` ——
+      // 那个词写在星号后面时只有 declarator 那一遍认得它（第一百三十三刀）。
+      if (info.sp.errc && this.errcReg(n, info.name, info.type) === null) return null;
     }
     return { info, ps, isMain };
   }
