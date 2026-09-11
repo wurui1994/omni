@@ -1,0 +1,65 @@
+// 第八十七刀：`alias`。jancy 那边 alias 与 typedef 同族（都是存储类），一条 alias 就是
+// "另起一个名字指同一格东西"。语料里 55 处，出处：
+//   - 类型别名：`alias State = iox.SshChannel.State;`（test/ioninja/plugins/SshChannel/
+//     SshChannelSession.jnc:24）、顶层的 `alias ModbusStreamRoles = jnc.global.ModbusStreamRoles;`
+//     （plugins/Modbus/ModbusDispatchCode.jnc:42）；
+//   - 方法别名：`alias dispose = close;`（test/jnc/test61.jnc:25、src/jnc_ext/jnc_io_websocket/
+//     jnc/io_WebSocket.jnc:123）—— disposable 那个 duck-typed 模式的一半；
+//     `alias toString = getString;`（test/ioninja/protocols/io_Ethernet.jnc:89）；
+//   - 顶层的函数别名：`alias bar = foo;`（test/jnc/test89.jnc:36）。
+// 字段路径的别名（`alias m_head = m_list.m_head;`，src/jnc_ext/jnc_std/jnc/stdt_Map.jnc:85）
+// 还不收 —— 那一格要的是"名字 -> 一串取字段"的重写。
+//
+// 落法：类型那一支进 typedef 那张表（别名不是新类型）；函数 / 方法那一支发一格**转手的**，
+// 签名照抄 —— 于是虚方法、重载、当函数值用那几处一处都不用改。
+//
+// 期望输出的出处：/tmp/c83.c（`cc -O0 -std=c99 -Wall`）。
+
+enum Color {
+	Red,
+	Green,
+	Blue,
+}
+
+alias Hue = Color;
+
+int twice(int x) {
+	return x * 2;
+}
+
+alias dbl = twice;
+
+class File {
+	int m_fd;
+	Hue m_tint;
+
+	alias Shade = Color;
+
+	construct() {
+		m_fd = 3;
+		m_tint = Hue.Blue;
+	}
+
+	int close() {
+		m_fd = 0;
+		return 7;
+	}
+
+	// disposable 那个模式的一半：dispose 就是 close
+	alias dispose = close;
+
+	int tint() {
+		Shade s = m_tint;
+		return (int)s;
+	}
+}
+
+int main() {
+	Hue h = Hue.Green;
+	printf("%d %d\n", (int)h, dbl(21));
+
+	File* f = new File;
+	printf("%d %d\n", f.tint(), f.m_fd);
+	printf("%d %d\n", f.dispose(), f.m_fd);
+	return 0;
+}

@@ -1,0 +1,25 @@
+// **字段路径**的 alias（ADR-0016 第八十七刀那条边界）。语料里的写法是
+// `alias m_head = m_list.m_head;`（src/jnc_ext/jnc_std/jnc/stdt_Map.jnc:85-87 那三行）——
+// 别名指的不是一格类型、也不是一格函数，而是"另一格对象里的一格字段"。
+// 那要的是"名字 -> 一串取字段"的重写（读写都要，还要跟着 `&` 与结构体拷贝那几条），
+// 与类型别名 / 方法别名不是一回事。
+struct Node {
+	int m_val;
+}
+
+class List {
+	Node m_node;
+
+	// 这一格还不收
+	alias m_val = m_node.m_val;
+
+	construct() {
+		m_node.m_val = 5;
+	}
+}
+
+int main() {
+	List* l = new List;
+	printf("%d\n", l.m_val);
+	return 0;
+}

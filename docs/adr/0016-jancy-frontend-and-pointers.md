@@ -5134,6 +5134,62 @@ antiModifierTable 给它的是 0，所以 `readonly volatile` 一起写是合法
 (文件, 拦路项) 对 8330 -> **8269**（−61）；「真降得下来」61 与「没有还不收」154 都不动 ——
 那 60 对散在一大片文件里，每一份后面还压着 `.jncx`、opaque class 与 `io.` 那一族类型。
 
+## 第八十七刀：`alias` —— 另起一个名字，指同一格东西
+
+`volatile` 之后 `修饰符 '…'` 剩 85 对，里头最大的一格是 **`alias` 37 处**（余下的
+bigendian 20 / errorcode 18 / async 17 / disposable 11 各是自己一格账 —— `bigendian`
+**不能**收下不看，字节序是可观测的）。
+
+jancy 那边 `alias` 与 `typedef` 同族（都是存储类），一条 alias 就是"另起一个名字指同一格
+东西"。语料里 55 处，四种形状：
+
+- 类型别名：`alias State = iox.SshChannel.State;`（SshChannelSession.jnc:24），顶层的
+  `alias ModbusStreamRoles = jnc.global.ModbusStreamRoles;`（ModbusDispatchCode.jnc:42）；
+- 方法别名：`alias dispose = close;`（test61.jnc:25、io_WebSocket.jnc:123）—— 那是
+  disposable 那个 duck-typed 模式的一半（disposable.rst 里那句 "usually *aliased* to an
+  actual release method such as close"）；`alias toString = getString;`（io_Ethernet.jnc:89）；
+- 顶层的函数别名：`alias bar = foo;`（test89.jnc:36）；
+- **字段路径**别名：`alias m_head = m_list.m_head;`（stdt_Map.jnc:85-87）。
+
+**语法又是零改动**：`alias Hue = Color;` 解出来是
+`(var-decl (specs (no-type) (mods … "alias")) (dcls (init (dcl … (name Hue)) (name Color))))`
+—— 一格 var-decl，`alias` 落在 mods 里，目标就是那个 `init` 的第二半（`dotted` 摊得平）。
+
+**落法两支**：
+
+- 目标是**类型** -> 进 typedef 那张表（`this.aliases`）。别名不是新类型，所以 `sameTy`
+  看到的两边一模一样。顺带补了一处：`Hue.Green` 这种"经别名取枚举成员"先前查不着 ——
+  枚举成员那一处只问 `this.enums`，现在别名表里存的是解出来的那一格，问它的 `name`；
+- 目标是**函数 / 方法** -> 发一格**转手的**，签名照抄（`(fn Cls$dispose (($this …)) T
+  (ret (call Cls$close (var $this))))`）。比"调用点查一张别名表"简单，而且虚方法、重载、
+  当函数值用那几处一处都不用改。`obj.名字()` 那一处的便宜预筛表（`methodNames`）要跟着加。
+
+**分两趟**：类型那一支当场就办（类型名那一遍在前面），函数那一支记在 `aliasPend` 上、
+等签名那一遍过完再发 —— 那时才知道目标的签名。
+
+**界**：字段路径的别名明说不收（`bad/alias-fieldpath.jnc`）—— 那一格要的是"名字 -> 一串
+取字段"的重写，读、写、`&`、结构体拷贝四处都得跟着，与前两支不是一回事。
+
+**量出来的**：`tests/jnc` 172/0 -> **174/0**。`cases/83-alias.jnc` 六条腿逐字节相同，
+尺子是手写的一份等价 C（`/tmp/c83.c`）：类型别名（顶层与类里）、经别名取枚举成员、
+顶层的函数别名、类里的方法别名四件事各钉一条。
+
+**尺子（655 份）—— 这一刀的对数是 `+15`，说清为什么**：
+
+- `修饰符 '…'`：85 -> **59**（−26，`alias` 那一格清了）；
+- 新出来一格 `alias '…' 的目标 '…'`：**38 对**（sole 1）；
+- 「真降得下来」61、「没有还不收」154、对数 8269 -> **8284**。
+
+那 38 对里绝大多数**不是**字段路径的别名，而是 `alias State = iox.SshChannel.State;`
+这一族 —— 目标那个类型来自 `.jncx` 与 `import` 不着的模块，这一层压根没有它，所以
+"目标解不出来"。先前它们被 `修饰符 'alias'` 一句话盖住（那一格还与 `async`、`bigendian`
+共用同一条计数），现在换成了一句**说得清是什么**的诊断，于是同一份文件里的对数从 1 变成 2。
+**对数升了、话说清了**：这一刀真正接上的是"目标解得出来"的那些（类型、函数、方法），
+而尺子这个口径按"(文件, 拦路项) 对"数，把"一句笼统的"换成"一句具体的"就会 +1。
+
+顺带记一笔：`结构体里的 alias` 那一条原先落在"结构体字段的默认值"上（alias 那一句也长成
+`(init …)`）—— 已经把这一问挪到字段那一遍的最前面，诊断说的是 alias 而不是默认值。
+
 ## 后果与代价
 
 

@@ -977,6 +977,8 @@ class JncLower {
     /* 那些 reactor 成员的**短名**：`s.m_uiReactor.start()` 这种调用要先按名字便宜地筛一次
        （与 evtNames 同一条理由）。 */
     this.rctNames = new Set();
+    /* 那些要等签名那一遍才办得了的 alias（第八十七刀）：目标是函数 / 方法的那些。 */
+    this.aliasPend = [];
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
      * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
      * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
@@ -1838,6 +1840,11 @@ class JncLower {
     for (const e of items) {
       this.ns = e.ns;
       if (isList(e.it) && head(e.it) === 'typedef') this.typedefDecl(e.it);
+      /* 顶层的 alias（第八十七刀）排在同一遍里、同一条理由：它起的名字后面的声明要用得上。
+         `alias` 在语法里是一格 var-decl，所以先问一句 specs 里有没有它。 */
+      else if (isList(e.it) && head(e.it) === 'var-decl' && this.hasMod(e.it.items[1], 'alias')) {
+        for (const d of this.flat(e.it.items[2])) this.aliasDecl(d, null);
+      }
     }
     for (const e of items) {
       this.ns = e.ns;
@@ -1883,6 +1890,8 @@ class JncLower {
     }
     // `override` 那几条规矩（第五十七刀）：基类的方法这时才都在表里。
     this.vtCheck();
+    /* 目标是函数 / 方法的那些 alias（第八十七刀）：签名这时候才全在表里。 */
+    this.emitAliases();
     // 静态构造那道闸门（第五十三刀）。jancy 的静态构造是**从实例构造的开头调的、只调一次**
     // （`Parser::finalizeConstructor` 那四句里的第二句 `callStaticConstructor`，
     // jnc_ct_Parser.cpp:3005-3009；"只一次"是 `MemberBlock::callStaticConstructor` 里
@@ -2098,6 +2107,106 @@ class JncLower {
       this.aliases.set(an, info.type);
     }
     return null;
+  }
+
+  /**
+   * `alias 名字 = 目标;`（第八十七刀）。jancy 那边 `alias` 与 `typedef` 同族，是**存储类**，
+   * 一条 alias 就是"另起一个名字指同一格东西"。语料里 55 处，三种收、一种不收：
+   *
+   *   - 类型别名：`alias State = iox.SshChannel.State;`（SshChannelSession.jnc:24），
+   *     顶层的 `alias ModbusStreamRoles = jnc.global.ModbusStreamRoles;`（ModbusDispatchCode.jnc:42）；
+   *   - 方法别名：`alias dispose = close;`（test61.jnc:25、io_WebSocket.jnc:123）——
+   *     那是 disposable 那个 duck-typed 模式的一半（disposable.rst 那句 "usually aliased to
+   *     an actual release method such as close"）；`alias toString = getString;` 同一种；
+   *   - **字段路径**别名：`alias m_head = m_list.m_head;`（stdt_Map.jnc:85）—— 还不收，
+   *     那一格要的是"名字 -> 一串取字段"的重写，与前两种不是一回事。
+   *
+   * 语法上它是一格 `var-decl`，那一条 dcls 是 `(init (dcl … (name 别名)) 目标)`。
+   *
+   * 分两趟：类型那一支当场就办得了（类型名那一遍在前面），而**函数/方法**那一支要等签名
+   * 那一遍过完才知道目标的签名 —— 那些先记在 aliasPend 上，由 emitAliases 收尾。
+   */
+  aliasDecl(d, cls, late = false) {
+    if (!isList(d) || head(d) !== 'init') {
+      this.nope(d, 'alias 那一句只收 `alias 名字 = 目标;`');
+      return;
+    }
+    const dcl = d.items[1];
+    const name = isList(dcl) ? this.qname(dcl.items[2]) : null;
+    if (name === null || name.includes('.')) { this.err(d, 'alias 起的名字得是一个普通名字'); return; }
+    const tgt = this.dotted(d.items[2]);
+    if (tgt === null) { this.nope(d, 'alias 的目标只收一个名字或点串'); return; }
+    const full = cls === null ? this.qual(name) : `${cls}$${name}`;
+    // 目标是一格类型：与 typedef 起的名字落在同一张表里（别名不是新类型，见 typedefDecl）。
+    const ty = this.typeOfName(tgt);
+    if (ty !== null) {
+      if (this.aliases.has(full) || this.structs.has(full)) {
+        this.err(d, `类型名 '${shown(full)}' 重复定义`);
+        return;
+      }
+      this.aliases.set(full, ty);
+      return;
+    }
+    if (!late) { this.aliasPend.push({ cls, d, ns: this.ns }); return; }
+    /* 目标是一格函数或方法：发一格**转手的**，签名照抄 —— 比"调用点查一张别名表"简单，
+       而且虚方法、重载、当函数值用那几处一处都不用改。 */
+    const m = cls === null
+      ? this.resolve(tgt, (k) => this.fns.has(k) && !this.methods.has(k))
+      : this.findMethod(cls, tgt);
+    if (m !== null) {
+      const sig = this.fns.get(m);
+      if (this.fns.has(full)) { this.err(d, `'${shown(full)}' 声明了两次`); return; }
+      const ps = cls === null ? sig.params : sig.params.slice(1);
+      const decl = (cls === null ? [] : [`($this ${slotText(tClass(cls, false))})`])
+        .concat(ps.map((t, i) => `($a${i} ${slotText(t)})`)).join(' ');
+      const as = ps.map((t, i) => ` (var $a${i})`).join('');
+      const call = `(call ${m}${cls === null ? '' : ' (var $this)'}${as})`;
+      this.decls.push(`  (fn ${full} (${decl}) ${slotText(sig.ret)}\n`
+        + `    ${sig.ret === J_VOID ? `(expr ${call})` : `(ret ${call})`})`);
+      this.fns.set(full, {
+        params: cls === null ? [...ps] : [tClass(cls, false), ...ps], ret: sig.ret,
+      });
+      // `obj.名字()` 那一处先按名字便宜地筛一次（methodNames，第五十五刀）—— 别名也要进那张表。
+      if (cls !== null) { this.methods.set(full, cls); this.methodNames.add(name); }
+      return;
+    }
+    this.nope(d, `alias '${name}' 的目标 '${tgt}'（收的是一格类型名、一格函数、`
+      + '或者这个类里的一格方法 —— 字段路径的别名还不收）');
+  }
+
+  /** 那些要等签名的 alias（第八十七刀）：排在签名那一遍之后。 */
+  emitAliases() {
+    const saveNs = this.ns;
+    for (const p of this.aliasPend) {
+      this.ns = p.ns;
+      this.aliasDecl(p.d, p.cls, true);
+    }
+    this.ns = saveNs;
+  }
+
+  /** 一个写出来的名字指的是哪一格类型（第八十七刀抽出来的，与 specs 里那一串同一条）。 */
+  typeOfName(nm) {
+    const c = this.resolve(nm, (k) => this.classes.has(k));
+    if (c !== null) return tClass(c, true);
+    const s = this.resolve(nm, (k) => this.structs.has(k));
+    if (s !== null) return { k: 'struct', name: s };
+    const e = this.resolve(nm, (k) => this.enums.has(k));
+    if (e !== null) {
+      const en = this.enums.get(e);
+      return { k: 'enum', name: e, base: en.base, bits: en.bits === true };
+    }
+    const a = this.resolve(nm, (k) => this.aliases.has(k));
+    if (a !== null) return this.aliases.get(a);
+    return null;
+  }
+
+  /** 这张 mods 表里有这个词吗（第八十七刀）：与 propMod 同一个用途 —— 白问一次、不发诊断。 */
+  hasMod(n, word) {
+    if (!isList(n) || head(n) !== 'specs') return false;
+    for (const m of [...this.flat(n.items[2]), ...this.flat(n.items[3])]) {
+      if (isAtom(m) && m.value === word) return true;
+    }
+    return false;
   }
 
   /**
@@ -2509,6 +2618,8 @@ class JncLower {
   globalDecl(n) {
     // 属性那一条在前面那一遍（propName）已经登记过了（第六十八刀）—— 它不是一格内存。
     if (this.propMod(n.items[1], n.items[2])) return null;
+    // alias 也在前面那一遍（与 typedef 同一处，第八十七刀）——它也不是一格内存。
+    if (this.hasMod(n.items[1], 'alias')) return null;
     const sp = this.specs(n.items[1]);
     if (sp === null) return null;
     for (const d of this.flat(n.items[2])) {
@@ -2711,7 +2822,14 @@ class JncLower {
     if (!isList(ob) || (head(ob) !== 'name' && head(ob) !== 'field')) return undefined;
     const en0 = this.dotted(ob);
     if (en0 === null) return undefined;
-    const en = this.resolve(en0, (k) => this.enums.has(k));
+    let en = this.resolve(en0, (k) => this.enums.has(k));
+    /* 名字是一格 alias / typedef 起的（第八十七刀）：`alias Hue = Color;` 之后 `Hue.Green`
+       与 `Color.Green` 是同一格。别名表里存的是解出来的那一格类型，所以问它的 name。 */
+    if (en === null) {
+      const a = this.resolve(en0, (k) => this.aliases.has(k));
+      const t = a === null ? null : this.aliases.get(a);
+      if (t !== null && t !== undefined && t.k === 'enum' && this.enums.has(t.name)) en = t.name;
+    }
     if (en === null) return undefined;
     if (this.lookupRef(en0) !== null) return undefined;
     const info = this.enums.get(en);
@@ -2983,6 +3101,14 @@ class JncLower {
       // （01_Classes.jnc:22）。它要一格模块级的槽加"从方法里查得着"，是另一刀。
       if (sp.stat) { this.nope(m, '类的静态字段'); continue; }
       for (const d0 of this.flat(m.items[2])) {
+        /* 类里的 alias（第八十七刀）：`alias dispose = close;` / `alias State = …;`。
+           排在最前 —— 它那一条也长成 `(init …)`，落到下面就会被当成"字段的默认值"。
+           类型那一支当场办（类型名那一遍在前面），函数那一支记下来等签名（见 aliasDecl）。 */
+        if (sp.als === true) {
+          if (!cls) { this.nope(d0, '结构体里的 alias'); continue; }
+          this.aliasDecl(d0, name);
+          continue;
+        }
         /* 字段的默认值（第七十八刀）。语法形状：`int m_x = 5;` 是 `(init <dcl> <expr>)`
          * （items[1] 是声明符、items[2] 是那个表达式）。落法见构造函数那处 `fieldInitLines`
          * 与 this.fieldInits 的注释 —— 这里只把"哪个字段带什么表达式"记下来，一格都不发。
@@ -3514,6 +3640,7 @@ class JncLower {
     let bnd = false;
     let evt = false;
     let rct = false;
+    let als = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
       // `errorcode`（第五十八刀，exceptions.rst:17）：它说的是"这个函数的返回值就是错误码"。
@@ -3594,6 +3721,10 @@ class JncLower {
        * （`Parser::declareReactor`，jnc_ct_Parser.cpp:1897-1930）。这一层落成"一格 bool +
        * 几个反应函数"，见 emitReactors。 */
       if (m === 'reactor') { rct = true; continue; }
+      /* `alias`（第八十七刀）：jancy 那边它是**存储类**（与 typedef 同一处，
+       * DeclarationSpecifier.llk 那张表），语法上落进这张 mods 表。一条 alias 就是
+       * "另起一个名字指同一格东西"，见 aliasDecl。 */
+      if (m === 'alias') { als = true; continue; }
       // 访问控制的 **Java 式写法**（第六十七刀）。jancy 只有 public 与 protected 两种，
       // 两种写法都收：C++ 式的标签，和这一格"写在声明说明符里"（dual_modifiers.rst:22-24），
       // 而且**顶层的成员也能写**（同处:26 那句 "Global namespace members can also have
@@ -3619,7 +3750,7 @@ class JncLower {
      * 一律回 void，所以那一格不用写。带实参那一串挂在声明符的括号里，由调用方（globalDecl /
      * 类的字段那一遍）从 formals 上读，这儿只把"这是一格事件"传上去。 */
     if (isList(ts) && head(ts) === 'no-type') {
-      if (evt) return { type: J_MC, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct };
+      if (evt) return { type: J_MC, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct, als };
       /* 说明符里一个类型都没写（第八十一刀）。语料里到处是：`override start() { … }`、
        * `abstract reset();`、`virtual decodeName(std.StringBuilder* s) {}` ——
        * `virtual` / `override` / `abstract` 在 jancy 那边是**存储说明符**，不是类型说明符
@@ -3637,8 +3768,8 @@ class JncLower {
        * 没有函数后缀的那种（`virtual m_x;`）在 jancy 那边报的是 `illegal use of type 'void'`
        * （jnc_ct_Parser.cpp:1094-1136 的 `case TypeKind_Void`）—— 这一层由下游那几处
        * "字段/变量不能是 void" 接着，报的话也是同一件事。 */
-      if (uns) return { type: mkInt(32, true), thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct };
-      return { type: J_VOID, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct };
+      if (uns) return { type: mkInt(32, true), thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct, als };
+      return { type: J_VOID, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct, als };
     }
     let base = null;
     if (isAtom(ts)) {
@@ -3712,7 +3843,7 @@ class JncLower {
         + `这里写的是 ${tyName(base)}`);
       return null;
     }
-    return { type: evt ? J_MC : base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata, evt, rct };
+    return { type: evt ? J_MC : base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata, evt, rct, als };
   }
 
   /**
