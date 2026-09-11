@@ -1,1 +1,1 @@
-bitflag enum 'Neg' 里的负值
+bitflag enum 'Neg' 里 'B' 的自动取值超出了 32 位（上一格已经是最高位，"再往上一位"就没了）

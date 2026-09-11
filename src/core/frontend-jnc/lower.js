@@ -4671,6 +4671,18 @@ class JncLower {
       const mn = isAtom(m.items[1]) ? m.items[1].value : this.qname(m.items[1]);
       if (mn === null) { this.err(m, '认不出的枚举成员名字'); continue; }
       if (info.members.has(mn)) { this.err(m, `枚举 '${shown(name)}' 里 '${mn}' 出现了两次`); continue; }
+      /* 自动取值真要用上一格算出来的那个数时，才问一句"它还装得下吗"（第一百四十二刀）：
+         上一格已经是最高位（`0x8000000000000000`）的话，"再往上一位"就出了这一格的宽度。
+         jancy 那边这一步是 `2 << getHiBitIdx64(value)`，移出去之后是 0 —— 那是把两个成员
+         悄悄取成同一个值。宁可明说。 */
+      if (m.items[2] === undefined && info.bits) {
+        const bw0 = info.base !== undefined && info.base.w !== undefined ? info.base.w : 32;
+        if (next >= (1n << BigInt(bw0))) {
+          this.nope(m, `bitflag enum '${shown(name)}' 里 '${mn}' 的自动取值超出了 ${bw0} 位`
+            + '（上一格已经是最高位，"再往上一位"就没了）');
+          continue;
+        }
+      }
       if (m.items[2] !== undefined) {
         this.constEnum = info;
         const k = this.constInt(m.items[2]);
@@ -4706,11 +4718,16 @@ class JncLower {
       // （jnc_ct_EnumType.cpp:286-306）那一句：`value = value ? 2 << getHiBitIdx64(value) : 1`
       // —— **不是**乘二，是"最高位再往上一位"。所以显式写了 `0x20` 之后下一个是 `0x40`，
       // 而显式写了 `0x30`（两个位）之后下一个也是 `0x40`。
-      if (next < 0n) {
-        this.nope(m, `bitflag enum '${name}' 里的负值 —— jancy 那边 \`2 << getHiBitIdx64(负数)\` 是 C++ 的未定义行为，没有可对的答案`);
-        continue;
-      }
-      next = next === 0n ? 1n : 2n ** BigInt(next.toString(2).length);
+      /* bitflag 的下一格按**无符号那一面**算（第一百四十二刀）。
+         `Foldable = 0x8000000000000000`（log_RecordCode.jnc:18）在 64 位那一格里存的就是最高位，
+         按 signed 看是负数 —— 而 jancy 的 `getHiBitIdx64` 收的是 `uint64_t`，它从来没见过负数。
+         先前这一层按 signed 判负、当场拒，可那样的成员**根本不需要下一个值**（它常常就是最后
+         一个）：拒它是把"下一个算不出来"记到了"这一个"头上。
+         所以这儿只算，不判；算出来超出这一格的宽度也先不报 —— 等真有下一个成员要用它的时候
+         再报（见循环开头那一问）。 */
+      const bw = info.base !== undefined && info.base.w !== undefined ? info.base.w : 32;
+      const uv = next < 0n ? next + (1n << BigInt(bw)) : next;
+      next = uv === 0n ? 1n : 2n ** BigInt(uv.toString(2).length);
     }
     return null;
   }
