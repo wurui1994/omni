@@ -6770,7 +6770,72 @@ m_adapterProp.m_currentIndex = storage.readInt("adapterIdx");
 能力本身是真落了（fixture 钉着，两条腿一致），四处重复也真去掉了 —— 只是它买到的对数是 1。
 这两件事分开记。
 
-## 后果与代价
+## 量清了 #39（函数值当字段，榜上 170 对）：它是 ADR-0024 那一档，**不是**我先前记的胖值
+
+榜上剩下最大的一格是 `类型是函数指针（…）的字段`。这一节把它的形状量清，落之前先记账。
+
+**先纠一处我自己写错的前提。** 前面几处（包括任务 #39 的描述）说函数值是 ADR-0010 那个
+"胖值 `{fp, c_*}`"。**读错了**：ADR-0010 明明白白选的是**一个**指针 ——
+
+> `docs/adr/0010-function-values.md:84-85`：把"**记录自己当作第一个实参传进去**，而不是另外
+> 传一个 env 指针。于是函数值是**一个**指针，不是'函数指针 + 环境指针'的胖值"
+
+而胖值在同一份 ADR 的**否决清单**里（`:153`）。`{fp, c_*}` 是**堆上那条闭包记录**的布局，
+不是那格值的布局。这一处错得要紧：它决定了这一刀是哪一档。
+
+**结论：它是 ADR-0024 那一档（两条原生腿上本来就是一个字），不是 ADR-0026 那一档。**
+逐条证据：
+
+- C：`typedef struct omni_closure_s *omni_fn`（`src/runtime/omni.h:135-137`）—— 与 `arr` 那条
+  `typedef struct omni_arr_i64_s *` 一模一样的形状；
+- LLVM：`if (t.k === 'fn') return 'ptr'`（`backend-llvm/emit.js:1626`），而且那一行的注释
+  **已经**写着"与'类字段'同一条：引用语义，COPY 拷的是句柄"（:1624-1625）；
+- 这一层**已经**在需要数字的地方按 8 算了：`arrIsBlob` 把 `fn` 与 `class` / `arr` 放进同一桶
+  （`hir/types.js:371-373`），两条原生腿的数组元素步长就是 `esz = 8`
+  （`backend-llvm/emit.js:1651-1652`、`:2083`）；
+- `isRef` 早就把 `fn` 划进引用语义（`hir/types.js:233-234`）。
+
+所以 `sizeOf(fn) = 8`、`alignOf(fn) = 8`，**C 与 LLVM 两条腿一个字都不用改**（PLOAD/PSTORE
+在那两条腿上本来就按 `cTypeName` / `ty()` 泛型发 —— `backend-c/emit.js:1730-1733`、
+`backend-llvm/emit.js:1768-1776`），要改的是 JS 那一族与两个解释器，与 ADR-0024 的清单同形：
+
+1. `hir/types.js` 的 `alignOf` / `sizeOf` 各一支（今天落到 `return 0`，:156 / :202）；
+2. `interp/builtin.js` 的 `ptrLoad` / `ptrStore` 各一支（照 `'arr'` 那一支，:455-459 / :482）；
+3. `backend-js/prelude.js` 加 `$pload_f` / `$pstore_f`（挨着 `$pload_h` / `$pstore_h`，:262-267）；
+4. `backend-js/emit.js` 的 `jsPtrLoad` / `jsPtrStore` 各一支（:44-49）；
+5. `mir/interp.js` 的 `memKind`（:164-177）—— **这一格是唯一比 arr 难的地方，见下**；
+6. `tests/sexpr/cases/` 一格新用例（`39-handle-field.sx` / `40-string-field.sx` 那个位置）。
+
+`sexpr/lower.js` 的字段白名单、`ptrTargetOk`、`mir/ir.js`、`mir/verify.js`、两条原生腿的
+emit：**都不用动**。`(ptr (fnty …))` 只从 `pfield` 出来（`sexpr/lower.js:2565-2566`），
+与 arr / string 字段走的是同一条路 —— `ptrTargetOk` 那道门不要开，那是"指到句柄自己身上"，
+ADR-0024:137-138 与 ADR-0026:118-119 两处都明确不开。
+
+### 那个问题**用探针答了**：`T_AGG -> 'fn'` 是安全的
+
+`memKind` 拿到的只是 MIR 的**类型码**，而函数值**没有自己的码** —— 它与 struct / class /
+enum / 容器共用 `T_AGG = 7`（`mir/ir.js:59`、`mir/from_oir.js:150-152`）。`arr` 当初有自己的
+`T_ARR = 9`，所以那一刀直接 `T_ARR -> 'arr'` 就完了。于是要先答一句：**今天 `T_AGG` 会不会以
+别的身份走到 `memKind`**？
+
+探针（`/tmp/probe-clsfield.sx`：`(class C (n int))` + `(struct Box (c (ptr C)))`）三条腿给的是
+同一句话：
+
+```
+字段 Box.c：(ptr T) 的 T 只能是 int / real / bool / 结构体名 / 另一个指针 / (blk T N)，这里是 C
+```
+
+也就是说**方言的 `(class …)` 压根不是一个合法的指针目标** —— 类的句柄今天当不了字段，
+`T_AGG` 走不到 `memKind` 那一步。（jnc 那一层的类不走这条路：它从第五十二刀起就把类落成
+一格 `(struct …)`，指针指的是那格结构体，不是 `(class …)`。）
+
+结论：等这一刀把 `fn` 开了之后，**`T_AGG` 当指针目标只可能是函数值一种**，所以
+`memKind` 里加 `T_AGG -> 'fn'` 是安全的 —— 不需要给函数值另开一个 MIR 类型码。
+顺带也答了那个"更要紧的现成错答案"的担心：**没有**这个错答案，因为那条路今天整个是关着的。
+
+**于是 #39 的开放问题清零，清单就是上面那六条。** 落的时候记住 `hir/types.js` 是聚合层 ——
+按 ADR-0023 那条规矩要跑整套 `node tests/all.js`（ADR-0024 立的先例）。
+
 
 
 
