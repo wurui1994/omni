@@ -1,0 +1,63 @@
+// 第一百三十九刀：**转换算符** `operator bool`。
+//
+// 语法上它是 `(operator (cast-op (specs bool …) (ptrs)))` —— 目标类型那一格是一整棵说明符，
+// 不是一个词。所以 `specialCore` 先前把它回成 `operator ?`（`isAtom` 那一问不成立），榜上那一行
+// 印出来就是 `算符重载 'operator ?'`，谁看了都不知道是哪个算符。这一刀先把它认出来。
+//
+// 语料里这一族只有 `bool` 一种，用法是 `it ? it->m_value : undefinedValue`（stdt_Map.jnc:117）
+// —— 那个 `it` 就是"当条件用"。所以调用点只有一处：`truthy`。它一处管齐 `if` / `while` /
+// `? :` / `&&` / `||` —— 那几处的条件全从这一句过。
+//
+// 顺序是这一刀唯一要想清的事：这一问要排在**类那一支之前**。类引用当条件用在第五十二刀那儿
+// 是"跟零比"（一次空检查），而写了 `operator bool` 的那一格上，用户的意思是"问那个算符"——
+// 排错了就是**静默的错答案**（一个非 null、可算符说 false 的对象会被当成真）。
+// C1 那一格就是摆着量这件事的：对象是 new 出来的（不是 null），可它的算符回 false。
+//
+// 尺子 `/tmp/c137.c`：C 里没有转换算符，手写的是"每一处条件该调的那次调用"。
+// 同一串数（2 / yes / 2 / no / 7）。
+
+struct It {
+	int m_n;
+
+	bool operator bool () {
+		return m_n != 0;
+	}
+}
+
+// 类那一侧：对象非 null，可算符说 false —— 顺序排错了这一格就会印 yes
+class C1 {
+	int m_n;
+
+	bool operator bool () {
+		return m_n > 10;
+	}
+}
+
+int main() {
+	It a;
+	a.m_n = 0;
+	printf("%d\n", a ? 1 : 2);           // `? :`
+
+	a.m_n = 5;
+	if (a) {                             // if
+		printf("yes\n");
+	}
+
+	while (a) {                          // while
+		a.m_n = 0;
+	}
+
+	printf("%d\n", a ? 1 : 2);
+
+	C1* c = new C1;
+	c.m_n = 3;                           // 非 null，可 3 > 10 是假
+	if (c) {
+		printf("yes\n");
+	} else {
+		printf("no\n");
+	}
+
+	c.m_n = 40;
+	printf("%d\n", c ? 7 : 8);
+	return 0;
+}

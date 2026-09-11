@@ -503,7 +503,25 @@ function specialCore(dcl) {
   if (!isList(core)) return null;
   const h = head(core);
   if (h === 'operator' || h === 'postfix-operator') {
-    const op = isStr(core.items[1]) || isAtom(core.items[1]) ? core.items[1].value : '?';
+    const a = core.items[1];
+    /* 转换算符（第一百三十九刀）：`operator bool ()` 在语法上是 `(cast-op specs ptrs)`——
+       目标类型那一格是一整棵说明符，不是一个词。语料里这一族只有 `bool` 一种
+       （`it ? … : …` 里那个 `it` 走的就是它，stdt_Map.jnc:117），所以只把 `bool` 认出来；
+       别的形状回一句认得出的话（`operator (转换)`），让 declarator 那儿明说不收。 */
+    if (isList(a) && head(a) === 'cast-op') {
+      const sp = a.items[1];
+      const t0 = isList(sp) ? sp.items[1] : null;
+      const np = isList(a.items[2]) ? a.items[2].items.length - 1 : 0;
+      const nm = isAtom(t0) || isStr(t0) ? t0.value : null;
+      return np === 0 && nm === 'bool' ? 'operator bool' : 'operator (转换)';
+    }
+    /* 剩下两种也是自己一格节点（`operator ()` 是 `(call-op)`、`operator []` 是 `(index-op)`）。
+       两个都还不收，可**话要说出是哪一个** —— 先前它们与 cast-op 一起印成 `operator ?`，
+       榜上那一行谁看了都不知道说的是什么（第一百三十八刀刚记过这一条：榜上的名字是拦路那一句
+       话，不是那件事的名字）。`operator ()` 的原样在 stdt_Operator.jnc:97。 */
+    if (isList(a) && head(a) === 'call-op') return 'operator ()';
+    if (isList(a) && head(a) === 'index-op') return 'operator []';
+    const op = isStr(a) || isAtom(a) ? a.value : '?';
     return `${h === 'operator' ? '' : 'postfix '}operator ${op}`;
   }
   if (h !== 'special' && h !== 'accessor') return null;
@@ -525,6 +543,7 @@ const OP_NAME = new Map([
   ['postfix operator --', 'dec$post'],
   ['operator *', 'mul'],
   ['operator ->', 'arrow'],
+  ['operator bool', 'bool'],
 ]);
 
 /** 这个声明符是**属性的**取/存吗（第六十九刀）：`m_v.get()` 名字写在前面（语法上那是
@@ -1400,12 +1419,18 @@ class JncLower {
       return this.nope(n, `'${info.special}' 回 ${tyName(info.type)}（这一层要它回一格指针：`
         + '接下来那一步走的是"指针取字段"那条路）');
     }
+    /* 转换算符（第一百三十九刀）要回 bool：这一层只收 `operator bool`，而它落的地方是
+       "当条件用"那一处（truthy）—— 回别的类型那儿接不上。 */
+    if (suffix === 'bool' && info.type !== J_BOOL) {
+      return this.err(n, `'operator bool' 回 ${tyName(info.type)}，不是 bool`);
+    }
     info.name = full;
     const self = this.classes.has(owner) ? tClass(owner, false) : { k: 'struct', name: owner };
     ps.unshift({ name: 'this', type: self, formals: null, def: null });
     this.methods.set(full, owner);
-    if (suffix === 'mul' || suffix === 'arrow') this.opUnary.set(full, { name: full, ret: info.type });
-    else this.opIncDec.add(full);
+    if (suffix === 'mul' || suffix === 'arrow' || suffix === 'bool') {
+      this.opUnary.set(full, { name: full, ret: info.type });
+    } else this.opIncDec.add(full);
     this.fns.set(full, sigOf(ps, info.type));
     return { info, ps, isMain: false };
   }
@@ -9556,6 +9581,14 @@ class JncLower {
   truthy(v, node) {
     if (v === null) return null;
     if (v.type === J_BOOL) return v;
+    /* `operator bool`（第一百三十九刀）：主人的类型上写了它就调它。要排在下面**类那一支之前**
+       —— 那一支把类引用当条件用是"跟零比"（一次空检查），而写了转换算符的那一格上，用户的
+       意思是"问那个算符"，不是"问它是不是 null"。排错了就是静默的错答案。
+       语料里的用法：`it ? it->m_value : undefinedValue`（stdt_Map.jnc:117）。 */
+    if (isClass(v.type) || jncIsStruct(v.type)) {
+      const ob = this.opUnary.get(`${v.type.name}$op$bool`);
+      if (ob !== undefined) return { code: `(call ${ob.name} ${v.code})`, type: J_BOOL };
+    }
     if (isInt(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: J_BOOL };
     if (v.type === J_REAL) return { code: `(bin "!=" ${v.code} (real 0.0))`, type: J_BOOL };
     if (jncIsPtr(v.type)) return { code: `(un "!" (pisnull ${v.code}))`, type: J_BOOL };
