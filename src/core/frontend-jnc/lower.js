@@ -1816,32 +1816,45 @@ class JncLower {
    * 所以同型数组之间是抄一份。`Cast_Array::llvmCast` 那句"未实现"只挡**不同型**的那些
    * （长度不一样、或元素是同宽的另一种整数）。
    */
-  copyVal(dstCode, srcCode, type, pad, out) {
-    if (jncIsStruct(type)) return this.copyAgg(dstCode, srcCode, type.name, pad, out);
-    if (isArr(type)) return this.copyArr(dstCode, srcCode, type, pad, out);
+  copyVal(dstCode, srcCode, type, pad, out, seen = new Set()) {
+    if (jncIsStruct(type)) return this.copyAgg(dstCode, srcCode, type.name, pad, out, seen);
+    if (isArr(type)) return this.copyArr(dstCode, srcCode, type, pad, out, seen);
     out.push(`${pad}(pstore ${dstCode} (pload ${srcCode}))`);
     return out;
   }
 
   /** 逐格抄一整块。长度是编译期的字面量，所以这里就地展开（与 copyAgg 逐字段同一形状）。 */
-  copyArr(dstCode, srcCode, type, pad, out) {
+  copyArr(dstCode, srcCode, type, pad, out, seen = new Set()) {
     const d0 = `(pelem ${dstCode})`;
     const s0 = `(pelem ${srcCode})`;
     for (let i = 0; i < type.n; i++) {
       const d = i === 0 ? d0 : `(padd ${d0} (int ${i}))`;
       const s = i === 0 ? s0 : `(padd ${s0} (int ${i}))`;
-      if (this.copyVal(d, s, type.el, pad, out) === null) return null;
+      if (this.copyVal(d, s, type.el, pad, out, seen) === null) return null;
     }
     return out;
   }
 
-  copyAgg(dstCode, srcCode, name, pad, out) {
+  /**
+   * 逐字段抄一格结构体。`seen` 是**环的闸门**（第一百二十八刀）：一格结构体按值套到自己
+   * 里头本来就不是一个有大小的类型，可这一对函数先前顺着字段类型直接递归、一句拦的话都没有
+   * —— 泛型落地之后语料里真出现了那个形状（`stdt_RbTree.jnc:51` 把泛型自己的名字当类型实参
+   * 传），于是这儿**爆栈**：`RangeError: Maximum call stack size exceeded`，不说话、也带不出
+   * 位置。**崩是最坏的一种答案**，所以这一格宁可多一句 err 也不能少这个 Set。
+   */
+  copyAgg(dstCode, srcCode, name, pad, out, seen = new Set()) {
     const fs = this.structs.get(name);
     if (fs === undefined) return this.err(null, `内部错误：没有结构体 '${name}'`);
+    if (seen.has(name)) {
+      return this.err(null, `结构体 '${shown(name)}' 按值套到了自己里头 —— 这样的类型没有大小`
+        + '（拷一份会无穷递归）');
+    }
+    const inner = new Set(seen);
+    inner.add(name);
     for (const f of fs) {
       const d = `(pfield ${dstCode} ${f.name})`;
       const s = `(pfield ${srcCode} ${f.name})`;
-      if (this.copyVal(d, s, f.type, pad, out) === null) return null;
+      if (this.copyVal(d, s, f.type, pad, out, inner) === null) return null;
     }
     return out;
   }
@@ -3056,6 +3069,21 @@ class JncLower {
     } else {
       key = this.tmplKey(sp);
       if (key === null) return null;
+      /* 实参写的是**一格泛型自己的名字、一个实参都没带**（`BinTreeNodeBase<RbTreeNode, K, V, …>`，
+         stdt_RbTree.jnc:51）：jancy 那边这是"晚一点再绑"的写法（那个名字在实例化的上下文里
+         指的是**外层正在造的那一格**）。这一层没有那条路，而按字面替进去会造出一格**按值套回
+         自己**的结构体 —— 那就是第一百二十八刀量到的那个崩的来源。明说不收。 */
+      if (isList(sp) && head(sp) === 'name') {
+        const q = this.qname(sp);
+        const save2 = this.ns;
+        this.ns = ns;
+        const isT = q !== null && this.resolve(q, (k) => this.templates.has(k)) !== null;
+        this.ns = save2;
+        if (isT) {
+          return this.nope(tn, `泛型的实参 '${q}' 是一格泛型自己的名字、一个实参都没带`
+            + '（jancy 那边它指"外层正在造的那一格"，这一层还没有那条路）');
+        }
+      }
     }
     /* 替换只在 type-spec 那一层 —— 所以带 `*` / 带修饰符的实参先合成一格
        `typedef Bucket* jnc$tp$Bucket_p;`（或 `typedef int const* jnc$tp$int_const_p;`），
@@ -4561,6 +4589,16 @@ class JncLower {
       }
     }
     this.ns = saveNs;
+    /* 一格结构体按值**套回自己**（第一百二十八刀）：这样的类型没有大小。在**声明这一处**说清，
+       比等到"拷一份"那一步（copyAgg）报准得多 —— 那儿只有类型名、没有位置。
+       报完之后把那几格字段**摘掉**再往下走：留着它，这一层后面几处顺着字段走的路（逐字段拷、
+       花括号初值）照样会绕不出来。 */
+    for (let i = fields.length - 1; i >= 0; i--) {
+      if (!this.structSelf(name, fields[i].type)) continue;
+      this.err(n, `${cls ? '类' : '结构体'} '${shown(name)}' 里的字段 '${fields[i].name}' `
+        + '按值套回了自己 —— 这样的类型没有大小（要套自己得经一格指针）');
+      fields.splice(i, 1);
+    }
     // 匿名 union 的成员在这张表里是**摊平**的，`uni` 相同的那一串在这儿括回成 `(union …)`
     // （第一百一十刀 / ADR-0027）。
     const fs = unionGroups(fields).join(' ');
@@ -4582,6 +4620,23 @@ class JncLower {
     if (evts.length > 0) this.evtFields.set(name, evts);
     this.pendingCls.push({ name, node: n });
     return null;
+  }
+
+  /**
+   * 这格类型按值走下去够不够得着 `name` 自己（第一百二十八刀）。数组按元素走、结构体按字段走，
+   * 指针**不走**（经指针套自己是链表那一族，本来就该收）。`seen` 拦住别的环，免得这一问自己
+   * 也绕不出来。
+   */
+  structSelf(name, t, seen = new Set()) {
+    if (isArr(t)) return this.structSelf(name, t.el, seen);
+    if (!jncIsStruct(t)) return false;
+    if (t.name === name) return true;
+    if (seen.has(t.name)) return false;
+    seen.add(t.name);
+    for (const f of this.structs.get(t.name) ?? []) {
+      if (this.structSelf(name, f.type, seen)) return true;
+    }
+    return false;
   }
 
   /**
@@ -6917,7 +6972,7 @@ class JncLower {
           this.lifted = saveLifted;
           this.alias = saveAlias;
           this.scopes = [];
-          this.ns = saveNs;
+    this.ns = saveNs;
           this.selfClass = saveSelf;
           this.selfProp = savePr;
           this.curErr = saveErr;

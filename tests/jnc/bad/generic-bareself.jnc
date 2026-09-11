@@ -1,0 +1,18 @@
+// 第一百二十八刀的另一半：泛型的实参写的是**一格泛型自己的名字、一个实参都没带**。
+// 语料里那一处是 `struct RbTreeNode<K, V>: BinTreeNodeBase<RbTreeNode, K, V, RbTreeColor>`
+//（stdt_RbTree.jnc:51）—— jancy 那边这是"晚一点再绑"的写法：那个名字在实例化的上下文里指的是
+// **外层正在造的那一格**。这一层没有那条路，而按字面替进去会造出一格按值套回自己的结构体
+// （那正是上面那个崩的来源），所以明说不收。
+struct Node<T> {
+	T m_v;
+}
+
+struct Holder<A, B> {
+	A m_a;
+	B m_b;
+}
+
+int main() {
+	Holder<Node, int>* h = new Holder<Node, int>;
+	return 0;
+}

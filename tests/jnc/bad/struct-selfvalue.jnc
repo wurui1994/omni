@@ -1,0 +1,18 @@
+// 第一百二十八刀的界：一格结构体**按值套回自己**。这样的类型没有大小 —— 要套自己得经一格指针
+//（`S* m_next` 是链表，那一格早就收了）。
+//
+// 这一条先前**没有任何拦子**：copyVal / copyAgg（第十二刀那一对"按值抄一份"）顺着字段类型直接
+// 递归，于是爆栈 —— `RangeError: Maximum call stack size exceeded`，不说话、也带不出位置。
+// 崩是最坏的一种答案，所以这一刀两头都补：声明这一处报（有位置），copyAgg 那一对也留一个
+// Set 当闸门（万一将来还有别的路走到那儿）。
+struct S {
+	int m_a;
+	S m_self;
+}
+
+int main() {
+	S s;
+	s.m_a = 1;
+	printf("%d\n", s.m_a);
+	return 0;
+}
