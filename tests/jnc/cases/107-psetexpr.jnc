@@ -1,0 +1,52 @@
+// 第一百一十五刀：**表达式里给属性赋值**。上一刀量出来的那件硬事实 —— `表达式 'assign'`
+// 那 111 对里 **80 对压在这儿**：`ui_ComboBox.jnc:74` 那句
+// `return m_currentIndex = insertItem(index, text, data);` 里的 `m_currentIndex` 不是字段，
+// 是一格**属性**，于是上一刀的 lvalue 那一步报的是第六十九刀那句"属性不是一格内存"。
+//
+// 落法与上一刀同一个办法（一格生成的包装函数），只是包的东西不同 —— 存值器回的是 void：
+//
+//   (fn jnc$pset$C_m_val ((s (ptr C)) (x int)) int
+//     (expr (call C$m_val$set (var s) (var x)))
+//     (ret (var x)))
+//
+// **整条表达式的值是"存进去的那个值"**，不是回头再调一次取值器。这一条与普通赋值一字不差
+// （jancy 那边 `m_p = v` 的值就是 v），而且它要紧：取值器可以有副作用，多调一次就是错答案。
+// 下面故意让存值器把值改一下（乘 2 / 加 100），于是"表达式的值"与"再读一次"两个数不一样。
+//
+// 界：索引属性还不收（那几格下标也要进包装函数的形参表，个数按属性变）；const 属性照旧报
+// jancy 自己那句（prop.rst:17）。
+//
+// 尺子 `/tmp/c114.c` 里写的就是同一组"取值器 + 存值器 + 包装"。
+
+class C {
+	int m_n;
+
+	int property m_val;
+	int m_val.get() { return m_n; }
+	void m_val.set(int x) { m_n = x * 2; }
+
+	// `ui_ComboBox.jnc:74` 那一处的形状：体里裸写属性名
+	int bump(int v) {
+		return m_val = v + 1;
+	}
+}
+
+int g_k;
+int property g_p;
+int g_p.get() { return g_k; }
+void g_p.set(int x) { g_k = x + 100; }
+
+int main() {
+	C c;
+	int r = c.bump(4);
+	printf("%d %d\n", r, c.m_val);
+
+	// `对象.属性 = 值` 当表达式
+	int r2 = c.m_val = 7;
+	printf("%d %d\n", r2, c.m_val);
+
+	// 模块级的属性（没有 this 那一格）
+	int r3 = g_p = 3;
+	printf("%d %d\n", r3, g_p);
+	return 0;
+}

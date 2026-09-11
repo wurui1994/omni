@@ -3161,6 +3161,19 @@ class JncLower {
     if (isList(n.items[3]) && head(n.items[3]) === 'curly') {
       return this.nope(n, '表达式里右边是一对花括号的赋值');
     }
+    /* 属性当左边（第一百一十五刀）：那不是往一格内存里写，是**调存值器**。这两问要排在
+       lvalue 之前 —— 属性没有"可写的那一格"，lvalue 会去查变量、报"未声明"或者第六十九刀
+       那句"属性不是一格内存"。与语句那一侧（propSet）是同一条路，只多一件事：整条表达式的值
+       要由一格包装函数给出来（见 psetFn）。 */
+    const pt = this.propRef(n.items[2]);
+    if (pt !== null) return this.asgnProp(n, pt, null);
+    const lhs = n.items[2];
+    if (isList(lhs) && head(lhs) === 'field' && isAtom(lhs.items[2])
+      && this.propNames.has(lhs.items[2].value)) {
+      const pm = this.propMember(lhs, lhs.items[2].value);
+      if (pm === null) return null;
+      if (pm !== undefined) return this.asgnProp(n, pm.pn, pm.self);
+    }
     const lv = this.lvalue(n.items[2]);
     if (lv === null) return null;
     if (lv.kind !== 'ptr') {
@@ -3185,6 +3198,66 @@ class JncLower {
     if (this.varFns.has(name)) return name;
     this.decls.push(`  (fn ${name} ((p (ptr ${ty})) (x ${ty})) ${ty}\n`
       + '    (pstore (var p) (var x))\n'
+      + '    (ret (var x)))');
+    this.varFns.add(name);
+    return name;
+  }
+
+  /**
+   * 表达式里给**属性**赋值（第一百一十五刀）：`return m_currentIndex = insertItem(…)` 里的
+   * `m_currentIndex` 就是一格属性（`ui_ComboBox.jnc:74`）。第一百一十四刀量出来：那一行
+   * 111 对里 80 对压在这儿。
+   *
+   * 落法与上一刀同一个办法，只是包装的东西不同 —— 存值器回的是 void，所以包一层：
+   *
+   *   (fn jnc$pset$C_m_p ((s (ptr C)) (x int)) int (expr (call C$m_p$set (var s) (var x))) (ret (var x)))
+   *
+   * "整条表达式的值是**存进去的那个值**"这一条与普通赋值一字不差（jancy 那边 `m_p = v` 的值
+   * 就是 v，不是回头再调一次取值器 —— 那会把有副作用的取值器多调一次）。
+   */
+  asgnProp(n, pn, self) {
+    const pi = this.props.get(pn);
+    if (pi.cst) {
+      return this.err(n, `'${shown(pn)}' 是 const 属性（声明里写了 const，prop.rst:17），写不了`);
+    }
+    const s = `${pn}$set`;
+    if (!this.fns.has(s)) {
+      return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
+        + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
+    }
+    // 索引属性还不收：那几格下标也要进包装函数的形参表，而个数是按属性变的。
+    if (pi.idx.length > 0) {
+      return this.nope(n, `表达式里给索引属性 '${shown(pn)}' 赋值`);
+    }
+    const sf = this.propSelf(n, pn, pi, self);
+    if (sf === null) return null;
+    let v = this.expr(n.items[3], pi.type);
+    if (v === null) return null;
+    if (isInt(v.type) && isInt(pi.type)) v = intConv(v, pi.type);
+    if (!sameTy(v.type, pi.type)) {
+      return this.err(n, `属性 '${shown(pn)}' 是 ${tyName(pi.type)}，`
+        + `这儿给的是 ${tyName(v.type)}`);
+    }
+    const w = this.psetFn(pn, s, pi);
+    if (w === null) return this.nope(n, `表达式里给属性 '${shown(pn)}' 赋值（它的存值器`
+      + '的形参表不是这一层认得的 `[this?, 值]`）');
+    return { code: `(call ${w}${sf} ${v.code})`, type: pi.type };
+  }
+
+  /** 上面那一格包装函数，一个属性一格。 */
+  psetFn(pn, s, pi) {
+    const name = `jnc$pset$${pn.replace(/[^A-Za-z0-9]+/g, '_')}`;
+    if (this.varFns.has(name)) return name;
+    const sig = this.fns.get(s);
+    // 存值器的形参表是 `[this?, 值]`（propSig 那一处拼的）。对不上就不发这一格 ——
+    // 那说明属性那一族又长出了这一层没跟上的形状，宁可让调用方报"还不收"。
+    const hasSelf = pi.cls !== null;
+    if (sig.params.length !== (hasSelf ? 2 : 1)) return null;
+    const vt = slotText(pi.type);
+    const ps = hasSelf ? `($s ${slotText(sig.params[0])}) (x ${vt})` : `(x ${vt})`;
+    const as = hasSelf ? ' (var $s) (var x)' : ' (var x)';
+    this.decls.push(`  (fn ${name} (${ps}) ${vt}\n`
+      + `    (expr (call ${s}${as}))\n`
       + '    (ret (var x)))');
     this.varFns.add(name);
     return name;
