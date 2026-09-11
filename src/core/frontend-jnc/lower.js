@@ -1105,6 +1105,11 @@ class JncLower {
        就地问要先求左边那个值、而求值会发诊断 —— 那会给真的"没有这个函数"多发一条。
        与 `methodNames` / `propNames` 是同一个办法。 */
     this.fnFieldNames = new Set();
+    /* 泛型（ADR-0025 的 S2）。全名 -> `{full, ns, params: [参数名…], agg}` ——
+       泛型声明**不产出类型**，只记在这儿；类型是实例化那一步才造的（S3）。 */
+    this.templates = new Map();
+    /** 已经合成过的实例名（按实参签名 memoise，与 jancy 的 `m_instanceMap` 同一个办法）。 */
+    this.tmplInsts = new Set();
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
      * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
      * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
@@ -2056,6 +2061,10 @@ class JncLower {
     // 完整声明式的属性改写成简单声明式加两个函数（第七十五刀）—— 排在最前面：底下每一遍
     // 看的都是改写之后的名单，属性那一整套一个字都不用动。
     items = this.expandFullProps(items);
+    /* 泛型的单态化（ADR-0025 的 S2/S3）排在这儿：泛型声明**不能让下面那一遍 typeName 看见**
+       （它不产出类型），而它合成出来的那些实例底下每一遍都要看见。与 expandExtensions
+       正好是一对（那一个要查得着目标类型，所以在 typeName 之后）。 */
+    items = this.expandTemplates(items);
     // 类型的名字先坐下（第十七刀）：`Node* m_next` 要在自己的体里查得着 Node。
     for (const e of items) {
       this.ns = e.ns;
@@ -2701,6 +2710,170 @@ class JncLower {
     fields.push({ name: slot, type: mkInt(w, true) });
     bs.last = { slot, type: st, next: cnt };
     return { slot, off: 0, cnt, bw: w };
+  }
+
+  /**
+   * 泛型（ADR-0025 的 S2 + S3）—— 单态化那一遍。
+   *
+   * 排在 `expandFullProps` 之后、"类型的名字先坐下"（typeName）之前：与第一百〇七刀的
+   * `expandExtensions` 正好是一对 —— 那一个要**查得着**目标类型所以排在 typeName 之后，
+   * 泛型声明**不能让 typeName 看见**（它不产出类型）所以排在之前。
+   *
+   * 两件事：
+   *   A. 名字是 `tinst` 的 `type-decl` 摘出名单，记进 `this.templates`；
+   *   B. 工作队列扫剩下的名单找 `tinst` 用点：每格用点换成一格普通的类型名
+   *      （`Box$int`），同时按实参签名 memoise 地合成一格 `type-decl` 追加回名单 ——
+   *      新加的那几格再扫一遍，跑到不动点（嵌套实例化靠这一步自然解开）。
+   *
+   * 替换只在 **type-spec 那一层**（ADR-0025 里定的判据）：实参只收不带 `*` 的一格
+   * type-spec。带 `*` 的（`Array<Bucket*>`）与实参本身是一格实例化的（`Iterator<Node<int> >`）
+   * 明说不收 —— 那两格各是一笔单独的账，混进来会变成静默的错答案。
+   */
+  expandTemplates(items) {
+    const out = [];
+    for (const e of items) {
+      const it = unattr(e.it);
+      const ag = isList(it) && head(it) === 'type-decl' ? it.items[1] : null;
+      const nm = isList(ag) && head(ag) === 'agg' ? ag.items[2] : null;
+      if (nm === null || !isList(nm) || head(nm) !== 'tinst') { out.push(e); continue; }
+      const full = this.tmplName(e.ns, nm.items[1]);
+      if (full === null) continue;
+      const ps = this.tmplParams(nm.items[2]);
+      if (ps === null) continue;
+      if (this.templates.has(full)) { this.err(nm, `泛型 '${shown(full)}' 声明了两次`); continue; }
+      this.templates.set(full, { full, ns: e.ns, params: ps, agg: ag });
+    }
+    // B：工作队列。`i` 之前的都扫过了，合成出来的追加在后面，于是循环自然跑到不动点。
+    for (let i = 0; i < out.length; i++) {
+      out[i] = { ns: out[i].ns, it: this.tinstRewrite(out[i].it, out[i].ns, out) };
+    }
+    return out;
+  }
+
+  /** 泛型的全名（声明那一处）：与别的类型名同一条 —— 命名空间用 `$` 连。 */
+  tmplName(ns, q) {
+    const n = this.qname(q);
+    if (n === null) return this.nope(q, '认不出的泛型名字');
+    return ns === '' ? n : `${ns}$${n}`;
+  }
+
+  /** 参数表：`<T, K, V>` 里那几格必须是**裸名字**（那就是参数），带别的形状当场拒。 */
+  tmplParams(targs) {
+    const out = [];
+    for (const t of this.flat(targs)) {
+      if (!isList(t) || head(t) !== 'targ') return this.nope(t, '认不出的泛型参数');
+      if (t.items[2] !== undefined) return this.nope(t, '泛型参数的默认类型');
+      const sp = this.tmplSpec(t.items[1]);
+      if (sp === null) return null;
+      if (!isList(sp) || head(sp) !== 'name' || !isAtom(sp.items[1])) {
+        return this.nope(t, '泛型的参数不是一个裸名字');
+      }
+      out.push(sp.items[1].value);
+    }
+    return out.length === 0 ? this.nope(targs, '泛型的参数表是空的') : out;
+  }
+
+  /** 一格 `targ` 里那格 **type-spec**（ADR-0025 定的替换层次）。带 `*` 的当场拒。 */
+  tmplSpec(tn) {
+    if (!isList(tn) || head(tn) !== 'type-name') return this.nope(tn, '认不出的泛型实参');
+    if (this.flat(tn.items[2]).length > 0) {
+      return this.nope(tn, '泛型的实参带 `*`（替换只在 type-spec 那一层做，见 ADR-0025）');
+    }
+    const sp = tn.items[1];
+    if (!isList(sp) || head(sp) !== 'specs') return this.nope(tn, '认不出的泛型实参');
+    if (this.flat(sp.items[2]).length > 0 || this.flat(sp.items[3] ?? sp.items[2]).length > 0) {
+      // specs 上带修饰符（const / bigendian …）的实参先不收：那几个词的意思要连着替换一起想
+      return this.nope(tn, '泛型的实参上带修饰符');
+    }
+    /* 实参本身是一格实例化（`Iterator<Node<int> >`）：同一条判据的另一半。**明说一句** ——
+       不说的话它会掉到 tmplKey 那儿回 null，最后由下游报成含糊的"这种类型说明符"。 */
+    if (isList(sp.items[1]) && head(sp.items[1]) === 'tinst') {
+      return this.nope(tn, '泛型的实参本身是一格实例化（要先解里层再拼外层的名字，见 ADR-0025）');
+    }
+    return sp.items[1];
+  }
+
+  /** 实参那格 type-spec 拼进实例名里的那一段。 */
+  tmplKey(spec) {
+    if (isAtom(spec)) return spec.value;
+    const q = this.qname(spec);
+    return q === null ? null : q.replace(/\$/g, '_');
+  }
+
+  /**
+   * 把一格节点里所有**认得出的** `tinst` 换成普通类型名，顺手把要用到的实例合成出来
+   * 追加进 `out`。回一格新节点（树是纯的 —— read.js 出来的节点上降级过程一个字段都不写，
+   * 所以抄一份是完整的替换，见 ADR-0025）。
+   */
+  tinstRewrite(n, ns, out) {
+    if (!isList(n)) return n;
+    if (head(n) === 'tinst') {
+      const inst = this.tinstOne(n, ns, out);
+      if (inst !== null) return { kind: 'list', span: n.span, items: [{ kind: 'atom', value: 'name', span: n.span }, { kind: 'atom', value: inst, span: n.span }] };
+      // 认不出来（不是泛型、或者实参这一层不收）：原样留着，下游那句诊断会说清
+      return n;
+    }
+    const items = n.items.map((x) => this.tinstRewrite(x, ns, out));
+    /* 一格也没换的时候**回原来那颗节点** —— 不是无谓的省事：类体里那格 `reactor` / `fn-def`
+       与被 aggHoist 提到顶层的那一格是**同一个对象**，reactorBody 那一遍靠这条身份认领它
+       （见第八十二刀）。无条件抄一份会把那条身份切断，报出来是"reactor 'Inl.m_r' 声明了两次"
+       —— 泛型这一遍扫的是**每一个**文件，所以这一句护着的是所有不带泛型的写法。 */
+    if (items.every((x, i) => x === n.items[i])) return n;
+    return { kind: 'list', span: n.span, items };
+  }
+
+  /** 一格用点：解出实例名，没造过就造一格 `type-decl` 追加进 out。回实例名或 null。 */
+  tinstOne(n, ns, out) {
+    const base = this.qname(n.items[1]);
+    if (base === null) return null;
+    const save = this.ns;
+    this.ns = ns;
+    const full = this.resolve(base, (k) => this.templates.has(k));
+    this.ns = save;
+    if (full === null) return null;
+    const tm = this.templates.get(full);
+    const specs = [];
+    for (const t of this.flat(n.items[2])) {
+      if (!isList(t) || head(t) !== 'targ') return null;
+      const sp = this.tmplSpec(t.items[1]);
+      if (sp === null) return null;
+      specs.push(sp);
+    }
+    if (specs.length !== tm.params.length) {
+      this.err(n, `泛型 '${shown(full)}' 要 ${tm.params.length} 个实参，这里给了 ${specs.length} 个`);
+      return null;
+    }
+    const keys = specs.map((s) => this.tmplKey(s));
+    if (keys.some((k) => k === null)) return null;
+    const inst = `${full}$${keys.join('$')}`;
+    if (this.tmplInsts.has(inst)) return inst;
+    this.tmplInsts.add(inst);
+    // 参数名 -> 实参那格 type-spec
+    const map = new Map();
+    for (let i = 0; i < tm.params.length; i++) map.set(tm.params[i], specs[i]);
+    const ag = this.tmplSubst(tm.agg, map);
+    // 名字那一格换成实例名（`(tinst …)` -> `(name Box$int)`）
+    const sp0 = ag.items[2].span;
+    ag.items[2] = { kind: 'list', span: sp0, items: [{ kind: 'atom', value: 'name', span: sp0 }, { kind: 'atom', value: inst, span: sp0 }] };
+    /* 合成那一格的命名空间取**空** —— 实例名里已经把泛型的命名空间连进去了（`stdt$Array$int`），
+       再套一层就成了 `stdt$stdt$Array$int`。 */
+    const decl = this.tinstRewrite({ kind: 'list', span: ag.span, items: [{ kind: 'atom', value: 'type-decl', span: ag.span }, ag] }, tm.ns, out);
+    out.push({ ns: '', it: decl });
+    /* 体里的方法要**跟着提到顶层**：手写的 `struct` / `class` 是在 run() 最开头那一遍
+       （nsFlat -> aggHoist）提的，而这一格是那一遍之后才合成出来的，不补这一句它体里的
+       `T get() { … }` 就没人认领 —— 报出来是"没有这个函数：'b.get'"。命名空间同上取空，
+       aggHoist 自己会把实例名接成 `Box$int$get`。 */
+    if (isHoistAgg(decl.items[1])) this.aggHoist(decl.items[1], '', out);
+    return inst;
+  }
+
+  /** 抄一份、把 `(name 参数名)` 换成实参那格 type-spec。 */
+  tmplSubst(n, map) {
+    if (!isList(n)) return n;
+    if (head(n) === 'name' && isAtom(n.items[1]) && map.has(n.items[1].value)) {
+      return map.get(n.items[1].value);
+    }
+    return { kind: 'list', span: n.span, items: n.items.map((x) => this.tmplSubst(x, map)) };
   }
 
   expandFullProps(items) {

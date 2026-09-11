@@ -1,0 +1,65 @@
+// 第一百一十八刀（ADR-0025 的 S2 + S3）：**泛型**，按实参签名单态化。
+//
+// 榜上那一格是 16 个文件、59 处声明 / 247 处用点 —— 而其中有 3 格泛型在**两套**基实参上
+// 各用了一回，所以"一份声明只出一个类型"那条路是走不通的：非得按签名各造一份。
+//
+// 这一刀做的事全在**降级之前那一遍**（`expandTemplates`）：
+//   A. 名字是 `tinst` 的 `type-decl` 摘出名单记进 `templates` —— 它们**不**让 typeName 看见
+//      （泛型声明本身不产出类型）；
+//   B. 工作队列扫名单找用点，每格换成一格普通类型名（`Box$int`），按签名 memoise 地合成一格
+//      `type-decl` 追加回名单，新加的那几格再扫 —— 跑到不动点。`Pair<K,V>` 体里那格
+//      `Box<K> m_bk` 就是靠这一步解开的：先替换成 `Box<int>`，再由队列把它也实例化出来。
+//
+// 合成出来的那一格还得**跟着提到顶层**（aggHoist）：手写的 `struct` 是在 run() 最开头
+// 那一遍提的，而这一格是那之后才有的 —— 少这一句，体里的 `T get_v()` 就没人认领，报出来
+// 是"没有这个函数：'b.get_v'"（这正是第二个探针钉住的那一条）。
+//
+// 替换只在 **type-spec 那一层**（ADR-0025 里定的判据）：`Array<Bucket*>`（实参带 `*`）与
+// `Iterator<Node<int> >`（实参本身是一格实例化）明说还不收，各记成一笔单独的账。
+//
+// 尺子 `/tmp/c116.c`：手抄"单态化之后"那六个 C 结构体，同一串数（7 / 5 97 5 11 / 98 9 /
+// 42 / 122）。那份尺子里 `box_char_get_v` 是个 unused —— 与这边一样：`Box<char>` 是被
+// `Pair<char,int>` 体里那格字段带出来的，它的方法没人调。
+
+struct Box<T> {
+	T m_v;
+	T get_v() { return m_v; }
+}
+
+struct Pair<K, V> {
+	K m_k;
+	V m_v;
+	Box<K> m_bk;                     // 泛型体里用另一格泛型 —— 队列跑到不动点的那一步
+	K key() { return m_k; }
+}
+
+// 类那一侧走的是同一条（类与结构体在这一层都是一格 `(struct …)`）
+class Holder<T> {
+	T m_x;
+	void put(T v) { m_x = v; }
+	T take() { return m_x; }
+}
+
+int main() {
+	Box<int>* b = new Box<int>;
+	b.m_v = 7;
+	printf("%d\n", b.get_v());
+
+	Pair<int, char>* p = new Pair<int, char>;
+	p.m_k = 5; p.m_v = 'a'; p.m_bk.m_v = 11;
+	printf("%d %d %d %d\n", p.m_k, p.m_v, p.key(), p.m_bk.get_v());
+
+	// 同一格泛型、两个位置换了个 —— 这是**另一个**类型，各造一份
+	Pair<char, int>* q = new Pair<char, int>;
+	q.m_k = 'b'; q.m_v = 9;
+	printf("%d %d\n", q.m_k, q.m_v);
+
+	Holder<int> h;
+	h.put(42);
+	printf("%d\n", h.take());
+
+	Holder<char> hc;
+	hc.put('z');
+	printf("%d\n", hc.take());
+	return 0;
+}

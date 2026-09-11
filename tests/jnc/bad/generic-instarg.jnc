@@ -1,0 +1,15 @@
+// 同一条判据的另一半：实参**本身是一格实例化**（语料里是 `Iterator<Node<int> >`）也不收。
+// 语法上它是一格 `tinst` 落在 targ 的 type-spec 位置上，要收得让实例化那一遍**先把里层解开、
+// 再把外层的名字拼出来**（`Iterator$Node_int`），拼名字那条规则得连着定 —— 单独一笔账。
+struct Node<T> {
+	T m_v;
+}
+
+struct Iterator<T> {
+	T m_cur;
+}
+
+int main() {
+	Iterator<Node<int> >* it = new Iterator<Node<int> >;
+	return 0;
+}
