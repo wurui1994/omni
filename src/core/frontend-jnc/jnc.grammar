@@ -354,7 +354,34 @@
     (-> (attr-block enum-item) (attributed $1 $2)))
   (rule qname
     (-> (ID) (name $1))
-    (-> (qname "." ID) (qualified $1 $3)))
+    (-> (qname "." ID) (qualified $1 $3))
+    ;; 泛型（ADR-0025 的 S1）：`名字<实参…>`。
+    ;;
+    ;; 先前试的那一趟给"类头"与"类型位置"各接了一条产生式，量出来类头那条添了 70 条冲突。
+    ;; 这一版换成**一条**：`<实参…>` 接在 qname 自己身上。理由是量出来的 —— 语料里那四处
+    ;; `<` 全都从 qname 来：
+    ;;   类头        `(agg-key qname base-list "{" …)`（named-type）
+    ;;   类型位置    `type-spec -> (qname) (prec DECL_ID)`
+    ;;   基类表      `base-list -> ":" qname-list`，而 `qname-list -> qname`
+    ;;   体外定义    `Array<T>.set` —— 它是 `qname "<" … ">" "." ID`，正好落在这一条与
+    ;;               上面那条 `qname "." ID` 的组合上
+    ;; 所以一条接在 qname 上，四处一起有。
+    ;;
+    ;; **声明的参数表与用的实参表在语法上是同一条**（都是 targs）：`class Array<T>` 里的 T
+    ;; 与 `Array<int>` 里的 int 在这一层长得一样。分开它们靠的是位置 —— 类头那一处的实参
+    ;; 必须全是裸名字，那几个就是参数。这与"语法收得宽一点、意思在降级那一层分"是同一条路子
+    ;;（`type-or-expr` 那处也是这么办的）。
+    (-> (qname "<" targs ">") (tinst $1 $3)))
+  ;; 实参表。`>` 与 `>>` 的老问题这一层没有：语料里嵌套一律写成 `Iterator<RbTreeNode<int, int> >`
+  ;; 带空格（量过，一处不差），而 jancy 自己的词法也是这么要求的。
+  (rule targs
+    (-> (targ) (targs $1))
+    (-> (targs "," targ) (targs-add $1 $3)))
+  (rule targ
+    (-> (type-name) (targ $1))
+    ;; 带默认类型的参数（`class RbTree<K, V, C = stdt.Lt<K> >`，stdt_RbTree.jnc:51）——
+    ;; 语料里 3 格泛型有它，共 4 个槽。
+    (-> (type-name "=" type-name) (targ $1 $3)))
 
   ;; ---- 声明符 ------------------------------------------------------------------
   (rule dcl-list
