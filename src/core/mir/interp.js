@@ -37,7 +37,7 @@ import { lowerToMir } from './from_oir.js';
 import { verifyMir } from './verify.js';
 import {
   OP, OP_NAMES, REF_NONE, REF_BIAS, isConstRef, typeKind, typeLanes,
-  T_VOID, T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32, T_ARR,
+  T_VOID, T_I64, T_F64, T_STR, T_DYN, T_PTR, T_TPTR, T_I32, T_F32, T_ARR, T_AGG,
   MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
   CVT_I2F, CVT_F2I, CVT_F2U, CVT_BOX, CVT_U2F, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16, CVT_FCVT,
   fnPtrNo,
@@ -173,6 +173,14 @@ function memKind(t) {
   /* string 落进内存（ADR-0026）：16 字节里放"句柄 id + 字节长度"。与 arr 差一格 ——
      id 0 是**空串**、不是错（string 的零值就是空串，见下面 zeroOfCode）。 */
   if (t === T_STR) return 'string';
+  /* 函数值落进内存（ADR-0028）：与 arr 一字不差（一个字的句柄 id）。
+     它**没有自己的 MIR 类型码** —— 与 struct / class / enum / 容器共用 `T_AGG`
+     （mir/ir.js 那处注释）。这一支之所以能直接写成 `T_AGG -> 'fn'`，是量过的：
+       - `(pload p)` 里 p 指向结构体时 sexpr 那一层就拒（"整块读还没做 —— 用 (pfield …)"），
+       - `(ptr C)`（类）压根不是合法的指针目标（"(ptr T) 的 T 只能是 …"），
+       - 别的 T_AGG（enum / 容器）`sizeOf` 是 0，落不进内存、当不了指针目标。
+     所以 T_AGG 走到这儿只可能是函数值一种。哪天上面那三条里有一条松了，这一支要跟着改。 */
+  if (t === T_AGG) return 'fn';
   return 'bool';
 }
 

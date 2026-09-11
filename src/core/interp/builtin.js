@@ -468,6 +468,14 @@ export function ptrLoad(kind, a) {
     const id = Number(ptrDv.getBigInt64(a, true));
     return id === 0 ? '' : handles[id];
   }
+  /* 函数值落进内存（ADR-0028）：与 arr 一字不差 —— 一个字的句柄 id，闭包对象挂在旁边那张表上。
+     id 0 是**错**（不是空值）：方言里函数值没有"零值"这一格，没写过就读的那一格是 null
+     reference，与 arr 同一条（而 string 那一格 id 0 是空串，那是 string 自己的零值语义）。 */
+  if (kind === 'fn') {
+    const id = Number(ptrDv.getBigInt64(a, true));
+    if (id === 0) rtError('null reference');
+    return handles[id];
+  }
   return ptrDv.getUint8(a) !== 0;
 }
 
@@ -487,7 +495,8 @@ export function ptrStore(kind, a, v) {
     const s = v === null || v === undefined ? '' : v;
     ptrDv.setBigInt64(a, BigInt(s === '' ? 0 : handleId(s)), true);
     ptrDv.setBigInt64(a + 8, BigInt(encodeUtf8(s).length), true);
-  } else ptrDv.setUint8(a, v ? 1 : 0);
+  } else if (kind === 'fn') ptrDv.setBigInt64(a, BigInt(handleId(v)), true);   // ADR-0028，与 arr 同
+  else ptrDv.setUint8(a, v ? 1 : 0);
 
   return v;
 }

@@ -142,6 +142,12 @@ export function alignOf(t) {
      C 那边是 `omni_str{const char* p; int64_t len;}`（omni.h:33-34）、LLVM 那边是
      `[2 x i64]`（backend-llvm/emit.js:49），本来就是 16 字节的按值聚合。 */
   if (t.k === 'string') return 8;
+  /* 函数值落进内存（ADR-0028）：**一个字**，按字对齐 —— 与 arr 那一格同一条，不是 string
+     那一格。ADR-0010:84-85 定的函数值就是**一个**指针（"记录自己当作第一个实参传进去"，
+     胖值 `{fp, env}` 在那份 ADR 的否决清单里 :153），`{fp, c_*}` 是堆上那条闭包记录的布局、
+     不是这格值的布局。C 那边 `omni_fn` 是 `struct omni_closure_s *` 的 typedef
+     （omni.h:135-137）、LLVM 那边是 `ptr`（backend-llvm/emit.js:1626）。 */
+  if (t.k === 'fn') return 8;
   /* 匿名 union（ADR-0027）：对齐是**最大成员的对齐** —— 与 C 的 union 同一条，所以 C 那边
      发出来的真 union 的自然布局与这一层算的偏移对得上。 */
   if (t.k === 'union') {
@@ -187,6 +193,16 @@ export function sizeOf(t) {
      "一格句柄 id + 字节长度"（见 interp/builtin.js 的 ptrLoad / ptrStore）——
      **两套实现的尺寸与偏移必须一样**，这就是为什么这一层定 16 而不是 8。 */
   if (t.k === 'string') return 16;
+  /* 函数值落进内存（ADR-0028）：**8 字节**，走的是 ADR-0024 那一格（"引用语义的句柄，
+     一个字"），不是 string 那一格。两条原生腿上它本来就是一个字的指针 ——
+     C 是 `typedef struct omni_closure_s *omni_fn`（omni.h:135-137），与 arr 那条
+     `typedef struct omni_arr_i64_s *` 同形；LLVM 是 `ptr`（backend-llvm/emit.js:1626，
+     那一行的注释早就写着"与'类字段'同一条：引用语义，COPY 拷的是句柄"）。
+     这一层在别处也早就按 8 算了：`arrIsBlob` 把 fn 与 class / arr 放进同一桶（见下面），
+     两条腿的数组元素步长就是 8（backend-llvm/emit.js:1651-1652、:2083）。
+     JS 那一族 arena 是 ArrayBuffer、闭包对象塞不进去，所以那一族存的是一格 id、
+     对象挂在旁边那张表上（$H / handles）—— 与 arr 一字不差。 */
+  if (t.k === 'fn') return 8;
   /* 匿名 union（ADR-0027）：尺寸是**最大成员的尺寸**。成员的偏移在 structLayout 里摊开
      （都等于这一格 union 自己的偏移）—— 于是四条腿的 `(pfield p 成员名)` 一处都不用改，
      字段访问本来就是按字节偏移发的。 */

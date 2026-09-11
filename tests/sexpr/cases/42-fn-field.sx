@@ -1,0 +1,60 @@
+;; 42 —— 函数值当结构体字段，经**内存**那条路（ADR-0028）
+;;
+;; 与 39（arr 句柄当字段）是同一档：函数值在四条腿上都是**一个字** ——
+;;   C     `omni_fn` 是 `struct omni_closure_s *` 的 typedef（runtime/omni.h:135-137）
+;;   LLVM  `ptr`（backend-llvm/emit.js:1626）
+;;   JS 与两个解释器  闭包是个普通 JS 对象、arena 是 ArrayBuffer，所以存的是一格 id、
+;;         对象挂在旁边那张表上（$H / handles）—— 与 arr 复用同一对 $pload_h / $pstore_h
+;; ADR-0010:84-85 定的函数值就是一个指针（"记录自己当作第一个实参传进去"），胖值 `{fp, env}`
+;; 在那份 ADR 的否决清单里（:153）—— 所以它落的是 ADR-0024 那一格，不是 ADR-0026 那一格。
+;;
+;; **按值那条路本来就通**（`(fldset …)`，见 15-fnvalues.sx:58-66），这一份钉的是**内存**那条：
+;; `pnew` + `pfield` + `pload` / `pstore`。jnc 那一层的结构体与类局部量一律走 pnew，所以它每
+;; 一次都要这条路 —— 榜上 `类型是函数指针的字段` 那 170 对就是它。
+;;
+;; 钉五件事：
+;;   1. 普通函数当值存进字段、读出来能调
+;;   2. **带捕获的闭包**存进字段、读出来能调 —— 捕获那一份跟着记录走，不是跟着栈帧走
+;;      （闭包记录在同一块 arena 上，所以存进内存不会悬空）
+;;   3. 覆盖那一格：换一个函数值进去，读出来是新的
+;;   4. **引用语义**：按字段拷一份，两份共用同一条闭包记录
+;;   5. 一格结构体里两条函数值字段各自独立
+(module
+  (fn twice ((x int)) int (ret (bin "*" (var x) (int 2))))
+  (fn thrice ((x int)) int (ret (bin "*" (var x) (int 3))))
+  (cfn addk ((k int)) ((x int)) int (ret (bin "+" (var x) (cap k))))
+
+  (struct Box (n int) (f (fnty (int) int)) (g (fnty (int) int)))
+
+  (main
+    (let b (ptr Box) (pnew (ptr Box) (int 1)))
+    (pstore (pfield (var b) n) (int 5))
+
+    ;; 1. 普通函数
+    (pstore (pfield (var b) f) (fnref twice))
+    (print (pload (pfield (var b) n)))
+    (print (callfn (pload (pfield (var b) f)) (int 21)))
+
+    ;; 2. 带捕获的闭包 —— 捕获的 100 跟着记录走
+    (pstore (pfield (var b) g) (mkclo addk (int 100)))
+    (print (callfn (pload (pfield (var b) g)) (int 1)))
+
+    ;; 5. 两条字段各自独立
+    (print (callfn (pload (pfield (var b) f)) (int 10)))
+
+    ;; 3. 覆盖
+    (pstore (pfield (var b) f) (fnref thrice))
+    (print (callfn (pload (pfield (var b) f)) (int 21)))
+
+    ;; 4. 按字段拷一份 —— 拷的是句柄，两份共用同一条闭包记录
+    (let c (ptr Box) (pnew (ptr Box) (int 1)))
+    (pstore (pfield (var c) n) (pload (pfield (var b) n)))
+    (pstore (pfield (var c) f) (pload (pfield (var b) f)))
+    (pstore (pfield (var c) g) (pload (pfield (var b) g)))
+    (print (callfn (pload (pfield (var c) f)) (int 2)))
+    (print (callfn (pload (pfield (var c) g)) (int 2)))
+
+    ;; 2 再验一遍：在**另一个函数里**造的闭包，存进内存之后照旧能调
+    (pstore (pfield (var c) g) (mkclo addk (int 7)))
+    (print (callfn (pload (pfield (var c) g)) (int 3)))
+    (print (callfn (pload (pfield (var b) g)) (int 3)))))

@@ -41,12 +41,14 @@ const jsPtrChk = (self, p, size) => (p.type.k === 'tptr'
 // **空串**、不是错（string 的零值就是空串）。
 // 这两条链的**最后一格是 bool**，所以每加一种"能落进内存"的类型都得在这儿加一支 ——
 // 忘了就会被默默当 bool 读写，那是个静默的错答案。
+// 函数值（ADR-0028）**直接复用 arr 那一对**：两者在这条腿上是同一件事 —— 一个字的句柄 id、
+// 对象挂在 $H 上、id 0 是错（函数值没有零值那一格）。所以不用另开 `$pload_f`。
 const jsPtrLoad = (t) => (t.k === 'int' ? '$pload_i' : (t.k === 'real' ? '$pload_r'
   : (t.k === 'ptr' ? '$pload_p' : (t.k === 'tptr' ? '$pload_t'
-    : (t.k === 'arr' ? '$pload_h' : (t.k === 'string' ? '$pload_s' : '$pload_b'))))));
+    : (t.k === 'arr' || t.k === 'fn' ? '$pload_h' : (t.k === 'string' ? '$pload_s' : '$pload_b'))))));
 const jsPtrStore = (t) => (t.k === 'int' ? '$pstore_i' : (t.k === 'real' ? '$pstore_r'
   : (t.k === 'ptr' ? '$pstore_p' : (t.k === 'tptr' ? '$pstore_t'
-    : (t.k === 'arr' ? '$pstore_h' : (t.k === 'string' ? '$pstore_s' : '$pstore_b'))))));
+    : (t.k === 'arr' || t.k === 'fn' ? '$pstore_h' : (t.k === 'string' ? '$pstore_s' : '$pstore_b'))))));
 
 
 class JsEmitter {
