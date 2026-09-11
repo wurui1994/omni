@@ -420,9 +420,15 @@
   (rule suffix
     (-> ("(" formals ")") (fn-suffix $2))
     (-> ("[" expr-or-empty "]") (array-suffix $2))
-    ;; `void foo() const { }` —— 形参表之后的修饰符。jancy 这里**只收 const**
-    ;; （Declarator.llk:484..489），照收：放宽成任意修饰符只会凭空造歧义。
+    ;; `void foo() const { }` —— 形参表之后的修饰符。jancy 那条规则叫 `this_modifier_suffix`
+    ;; （Declarator.llk:512-525），收的是**三个**：`const`、`const?`（MaybeConst）与 `thin`。
+    ;; 先前这儿只写了 `const`、注释还说"jancy 只收 const" —— 读错了：语料里
+    ;; `bool errorcode parse(string_t string) thin;`（io_SocketAddress.jnc:121）与
+    ;; `MapEntry autoconst* find(variant_t key) const?;`（std_RbTree.jnc:57）都因此解析不了。
+    ;; 三个都收，落地都是"收下不看"（这一层没有可变性检查，thin 那格调用约定也没有）。
     (-> ("const") (post-modifier $1))
+    (-> ("const" "?") (post-modifier $1))
+    (-> ("thin") (post-modifier $1))
     ;; 位域：`uint8_t m_flag : 1;`（Declarator.llk:494..499）。jancy 在那条上挂了
     ;; `resolver({ return false; })`，注释写得很清楚："宁可当条件表达式"（`p = new int : 3`）。
     ;; 同一句话在这儿写成 `(prefer -1)`。

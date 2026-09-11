@@ -61,16 +61,18 @@ class Box2 {
 	public int readonly m_b;
 
 	construct(int a);
-	int sum();
+	int sum() const?;
 }
 
-Box2.construct(int a) {
+Box2.construct(int a) thin {
 	m_a = a;
 	// 自己人当 readonly 不存在（dual_modifiers.rst:59-61）
 	m_b = a * 2;
 }
 
-int Box2.sum() {
+// 形参表之后那格修饰符（第八十九刀）：jancy 的 this_modifier_suffix 收三个 ——
+// `const`、`const?`、`thin`（Declarator.llk:512-525）。落地都是收下不看。
+int Box2.sum() const? {
 	return m_a + m_b;
 }
 

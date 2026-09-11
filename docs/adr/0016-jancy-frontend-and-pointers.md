@@ -5224,7 +5224,37 @@ jancy 那边 `alias` 与 `typedef` 同族（都是存储类），一条 alias �
 要么有宿主面，要么给 opaque class 一条"声明当真"的路。空槽本身接上了 —— 一旦知道默认值，
 它就走通（`cases/84-argslot.jnc` 那一份钉的正是这个）。
 
-## 后果与代价
+## 第八十九刀：形参表之后那格修饰符 —— `const?` 与 `thin`（一条读错了的注）
+
+换个口径排了一遍尺子：**"每份文件只剩一条拦路项"（sole）现在有 102 份**，第一名不是语义，
+是**解析错**。前三组：`unexpected "<"` 12 份（jancy 的模板容器 `stdt_*`，另一格账）、
+`unexpected "thin"` 6 份、`unexpected "?"` 2 份。后两组是同一件事：
+
+```jnc
+bool errorcode parse(string_t string) thin;              // io_SocketAddress.jnc:121
+MapEntry autoconst* find(variant_t key) const?;          // std_RbTree.jnc:57
+construct() thin {}                                      // std_Guid.jnc:74
+```
+
+jancy 那条规则叫 `this_modifier_suffix`（`jnc_ct_Declarator.llk:512-525`），收的是**三个**：
+`const`、`const?`（MaybeConst）、`thin`。而 `jnc.grammar` 里只写了 `const`，旁边那条注还写着
+"jancy 这里只收 const（Declarator.llk:484..489）"—— **那是读错了**（484 那一带是形参表，
+不是 this 修饰符）。这一刀把三个都补上，注也换成对的出处。
+
+落地都是**收下不看**：那格修饰符说的是"`this` 那一格"的可变性与胖瘦，而这一层没有可变性检查
+（与 `const` / `readonly` / `cmut` 同一条，第六十七刀）、也没有 thin 那格调用约定。语义那一侧
+只要在两处把 `post-modifier` 放过去（普通声明符那一处、`construct` 那一处）。
+
+**量出来的**：`tests/jnc` 176/0 不动（`cases/63-dualmod.jnc` 里给 `Box2.construct` 加了
+`thin`、给 `Box2.sum` 加了 `const?` —— **输出一个字节都没变**）；`tests/glr` 的 jnc 表快照
+从 360 条产生式 / 651 个状态变成 362 / 653，**冲突数没变**（新加的两条不带歧义）。
+
+尺子（655 份）：对数 8309 -> **8294**（−15），「真降得下来」61 不动，而
+**「没有还不收的行」的文件 154 -> 146（−8）—— 这个数字掉了，而这一刀是对的**。
+说清：那 8 份先前**死在解析上**，一条 `N`（还不收）都还没来得及报，于是它们被算进了
+"没有还不收"。现在解析过去了，往下走撞到的是真正的语义墙（`disposable`、`variant_t`、
+opaque class 那一族），于是它们从那个数字里退出来。**这一格是那个口径先前被解析错撑起来的
+虚高** —— 记在这儿，免得下一趟看见 −8 以为是退步。
 
 ## 后果与代价
 

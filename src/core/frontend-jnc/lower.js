@@ -3993,6 +3993,9 @@ class JncLower {
       let formals0 = null;
       for (const s of this.flat(d.items[3])) {
         if (isList(s) && head(s) === 'fn-suffix') { formals0 = s.items[1]; continue; }
+        // `construct() thin { … }`（第八十九刀，std_Guid.jnc:74）：形参表之后那格修饰符
+        // 收下不看，与普通声明符那一处同一条。
+        if (isList(s) && head(s) === 'post-modifier') continue;
         return this.nope(s, `${sk} 上的声明符后缀 '${isList(s) ? head(s) : '?'}'`);
       }
       if (formals0 === null) return this.err(d, `'${sk}' 后面要一对括号`);
@@ -4065,6 +4068,11 @@ class JncLower {
         dims.push(nn);
         continue;
       }
+      /* 形参表之后的修饰符（第八十九刀）：`… ) const` / `const?` / `thin`
+         （jancy 的 this_modifier_suffix，Declarator.llk:512-525）。它说的是"this 那一格"
+         的可变性与胖瘦 —— 这一层没有可变性检查、也没有 thin 那格调用约定，所以收下不看，
+         与说明符里的 `const` / `readonly` / `thin` 同一条。 */
+      if (sh === 'post-modifier') continue;
       return this.nope(s, `声明符后缀 '${sh}'`);
     }
     for (let i = dims.length - 1; i >= 0; i--) t = tArr(t, dims[i]);
