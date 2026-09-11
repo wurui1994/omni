@@ -1,0 +1,86 @@
+// 第一百三十八刀：**下标算符** —— 类 / 结构体体里**裸写**的 `get` / `set`。
+//
+// jancy 里 `c[10]` 走 `get`、`c[10] = 100` 走 `set`（test90.jnc:12-24）。第六十九刀那条注早把
+// 这件事写下来了（"裸写的 `int get(int i)` 是下标算符，与属性没关系"），只是当时留给了以后 ——
+// 于是 `--group std` 那张榜上它以 `'get'（要属性那一套…）` 的名字挂了十几刀。**榜上的名字是
+// 拦路那一句话，不是那件事的名字。**
+//
+// 语料里这一族的形状只有一种（std_Array.jnc:26/31、std_Buffer、std_HashTable、std_RbTree
+// 各一对）：`variant_t get(size_t index) const` 加 `bool errorcode set(size_t index, …)`。
+//
+// 落法与前四族算符同一条（自由函数、`this` 当第一个形参），名字拼成
+// `Owner$op$index$get` / `$op$index$set`；调用点两处：求值那一侧的 `index`（排在索引属性之后、
+// derefLv 之前），赋值那一侧的 `index`（同上）。两处都先问一句"左边那格的类型上有没有它"。
+//
+// 三条界：下标只收**一个**；一格 owner 上只收一个 `get` 与一个 `set`；`set` 上写着的
+// `errorcode` 照第五十八刀那条老路登记与传播 —— 吞掉那个词，调用点就再也不检查错误码了。
+// `c[i] += 1` 明说不收（要先读一次再写一次，是另一笔账）。
+//
+// 尺子 `/tmp/c136.c`：C 里 `c[i]` 只能是指针加下标，所以手写的是"编译器该替你挑的那次调用"。
+// 同一串数（70 / 70 30 / 5 / 0 66 / 9）。
+
+class Box {
+	int m_a[4];
+
+	int get(int i) {
+		return m_a[i] * 10;
+	}
+
+	void set(int i, int v) {
+		m_a[i] = v;
+	}
+}
+
+// 语料里的原样：`get` 带 `const`、`set` 是 `bool errorcode`
+class Buf {
+	char m_a[4];
+
+	char get(int i) const {
+		return m_a[i];
+	}
+
+	bool errorcode set(int i, char c) {
+		if (i < 0) {
+			return false;
+		}
+
+		m_a[i] = c;
+		return true;
+	}
+}
+
+// 不写 try：出错自动往上传（第五十八刀）
+int errorcode put(Buf* b, int i, char c) {
+	b[i] = c;
+	return 0;
+}
+
+// 结构体那一侧同一条路
+struct SBox {
+	int m_a[4];
+
+	int get(int i) {
+		return m_a[i] + 1;
+	}
+
+	void set(int i, int v) {
+		m_a[i] = v;
+	}
+}
+
+int main() {
+	Box* c = new Box;
+	c[1] = 7;
+	printf("%d\n", c[1]);
+	c[2] = 3;
+	printf("%d %d\n", c[1], c[2]);
+
+	SBox s;
+	s[0] = 4;
+	printf("%d\n", s[0]);
+
+	Buf* b = new Buf;
+	printf("%d %d\n", try put(b, 2, 66), b[2]);
+	printf("%d\n", (try put(b, -1, 66)) == 0 ? 8 : 9);
+	return 0;
+}

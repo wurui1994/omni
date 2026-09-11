@@ -529,12 +529,24 @@ const OP_NAME = new Map([
 
 /** 这个声明符是**属性的**取/存吗（第六十九刀）：`m_v.get()` 名字写在前面（语法上那是
  *  `qualified-special`），而类体里裸写的 `int get(int i)` / `void set(int i, int v)` 是
- *  **下标运算符**（test90.jnc:12-24 里 `c[10] = 100` 走的就是它），与属性没关系 ——
- *  那一格照旧由 typeDecl 报"还不收"，不能混进属性这条路里。 */
+ *  **下标算符**（test90.jnc:12-24 里 `c[10] = 100` 走的就是它）—— 那一格见 bareAccessor。 */
 function accessorNamed(dcl) {
   if (!isList(dcl) || head(dcl) !== 'dcl') return false;
   const core = dcl.items[2];
   if (!isList(core) || head(core) !== 'qualified-special') return false;
+  const sk = specialCore(dcl);
+  return sk === 'get' || sk === 'set';
+}
+
+/** 类 / 结构体体里**裸写**的 `get` / `set` 吗（第一百三十八刀）：那是**下标算符**。
+ *  jancy 里 `c[10] = 100` 走的是 `set`、`c[10]` 走的是 `get`（test90.jnc:12-24）——
+ *  语料里这一族的形状只有一种：`variant_t get(size_t index)` 加 `bool errorcode set(…)`
+ *  （std_Array.jnc:26/31、std_Buffer、std_HashTable、std_RbTree 各一对）。
+ *  与属性那一族分得开的就是这一格：名字**没**写在前面（不是 `qualified-special`）。 */
+function bareAccessor(dcl) {
+  if (!isList(dcl) || head(dcl) !== 'dcl') return false;
+  const core = dcl.items[2];
+  if (!isList(core) || head(core) !== 'accessor') return false;
   const sk = specialCore(dcl);
   return sk === 'get' || sk === 'set';
 }
@@ -1064,6 +1076,9 @@ class JncLower {
     /* 取值那两个算符（第一百三十四刀）：`Owner$op$mul` / `Owner$op$arrow` -> { name, ret }。
        这一族的调用点在**求值**那条路上，所以要记住回的是什么类型（`*it` 整格的类型就是它）。 */
     this.opUnary = new Map();
+    /* 下标算符（第一百三十八刀）：owner -> { get: {name, sub, val}, set: {…} }。
+       类 / 结构体体里**裸写**的 `get` / `set` 就是它（`c[i]` / `c[i] = v` 走这两格）。 */
+    this.opIndex = new Map();
     this.sctors = new Map();
     this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
     // 方法名 -> 它那段闭包 thunk（第五十五刀）。`c.foo` 当值用时捕的是对象，一个方法一段。
@@ -1411,6 +1426,86 @@ class JncLower {
     const op = a ?? b;
     if (op === undefined) return undefined;
     return { code: `(call ${op.name} ${v.code})`, type: op.ret };
+  }
+
+  /**
+   * **下标算符**的签名（第一百三十八刀）：类 / 结构体体里**裸写**的 `get` / `set`。
+   *
+   * jancy 里 `c[10]` 走 `get`、`c[10] = 100` 走 `set`（test90.jnc:12-24）。语料里这一族的形状
+   * 只有一种（std_Array.jnc:26/31、std_Buffer、std_HashTable、std_RbTree 各一对）：
+   *
+   *     variant_t get(size_t index) const { … }
+   *     bool errorcode set(size_t index, variant_t v) { … }
+   *
+   * 落法与前四族算符同一条（自由函数、`this` 当第一个形参），名字拼成
+   * `Owner$op$index$get` / `Owner$op$index$set`。
+   *
+   * 三条界：下标只收**一个**（语料里全是一个）；一格 owner 上只收一个 `get` 与一个 `set`
+   * （重载要按实参类型挑，与第八十刀同一笔账）；`set` 上写着的 `errorcode` 照第五十八刀那条
+   * 老路登记 —— 漏了它那个词就被悄悄丢掉，调用点于是不再检查错误码。
+   */
+  opIndexSig(n, info, ps) {
+    const owner = this.structs.has(this.ns) ? this.ns : null;
+    if (owner === null) {
+      return this.err(n, `裸写的 '${info.special}' 是下标算符（'c[i]' 走它）—— `
+        + '只能是类或结构体的成员');
+    }
+    const isGet = info.special === 'get';
+    const want = isGet ? 1 : 2;
+    if (ps.length !== want) {
+      return this.nope(n, `下标算符 '${info.special}' 收 ${ps.length} 个形参（这一层只收 `
+        + `${want} 个：${isGet ? '一个下标' : '一个下标加一个值'}）`);
+    }
+    const full = `${owner}$op$index$${info.special}`;
+    if (this.fns.has(full)) {
+      return this.nope(n, `${shown(owner)} 的第二个下标 '${info.special}'（要按实参类型挑，见第八十刀）`);
+    }
+    info.name = full;
+    const self = this.classes.has(owner) ? tClass(owner, false) : { k: 'struct', name: owner };
+    ps.unshift({ name: 'this', type: self, formals: null, def: null });
+    this.methods.set(full, owner);
+    const e = this.opIndex.get(owner) ?? {};
+    e[info.special] = {
+      name: full, sub: ps[1].type, val: isGet ? info.type : ps[2].type, ret: info.type,
+    };
+    this.opIndex.set(owner, e);
+    this.fns.set(full, sigOf(ps, info.type));
+    // errorcode（第五十八刀）：`bool errorcode set(…)` 是语料里的原样，那个词不能吞
+    if (info.sp.errc && this.errcReg(n, full, info.type) === null) return null;
+    return { info, ps, isMain: false };
+  }
+
+  /** 下标算符那一格的账本（第一百三十八刀）：左边那格的类型上有没有它。 */
+  opIndexOf(t) {
+    if (t === null || t === undefined || !(isClass(t) || jncIsStruct(t))) return undefined;
+    return this.opIndex.get(t.name);
+  }
+
+  /**
+   * 调一次下标算符（第一百三十八刀）。读写两侧共用这一处 —— 差别只有"末尾多不多一个值"。
+   *
+   * `base` 是已经算好的左边那一格，`vNode` 非 null 就是写那一侧（`c[i] = v` 里的 v）。
+   * 下标按**算符那一格形参**的类型求值（`want` 给对了字面量才落得对，与第一百三十刀同一条）。
+   * `errorcode` 走 `propagate` —— 语料里 `set` 全是 `bool errorcode`，这一句漏了那个词就被
+   * 悄悄吞掉、调用点从此不再检查错误码。
+   */
+  opIndexCall(n, op, base, vNode) {
+    const i = this.expr(n.items[2], op.sub);
+    if (i === null) return null;
+    const parts = [base.code, i.code];
+    if (vNode !== null) {
+      let v = this.expr(vNode, op.val);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(op.val)) v = intConv(v, op.val);
+      if (!this.assignOk(v.type, op.val)) {
+        return this.err(n, `下标赋值两边不同型：这一格收 ${tyName(op.val)}，`
+          + `右边是 ${tyName(v.type)}`);
+      }
+      parts.push(v.code);
+    }
+    const code = `(call ${op.name}${parts.map((p) => ` ${p}`).join('')})`;
+    if (this.errFns.has(op.name)) return this.propagate(n, code, op.ret, shown(op.name));
+    return { code, type: op.ret };
   }
 
   /**
@@ -2341,7 +2436,7 @@ class JncLower {
         /* `construct` 从第一百二十九刀起**结构体那一侧也提** —— 它与普通方法落法一样
            （一个自由函数、`this` 当第一个形参），只是名字由 fnSig0 拼成 `S$construct`。
            `static construct` 仍旧只在类那一侧：那一格要一道 once 闸门，是另一笔账。 */
-        if (sk === null || accessorNamed(m.items[2])
+        if (sk === null || accessorNamed(m.items[2]) || bareAccessor(m.items[2])
           || sk === 'construct' || isOpSpecial(sk)
           || (isCls && sk === 'static construct')) {
           out.push({ ns: inner, it: m });
@@ -4618,9 +4713,11 @@ class JncLower {
         if (!cls) {
           const sk0 = specialCore(m.items[2]);
           /* `construct` 从第一百二十九刀起收了（体由 aggHoist 提到顶层，与普通方法同一条路），
-             所以这儿只拦剩下的那几个。裸写的 `get` / `set` 是**下标运算符**那一族
-             （见 accessorNamed）—— 名字写在前面的 `p.get()` 是属性的取值器，那一格照旧提上去。 */
+             所以这儿只拦剩下的那几个。裸写的 `get` / `set` 是**下标算符**那一族
+             （第一百三十八刀收了，见 bareAccessor）—— 名字写在前面的 `p.get()` 是属性的取值器，
+             那一格照旧提上去。 */
           if (sk0 !== null && sk0 !== 'construct' && !isOpSpecial(sk0)
+            && !bareAccessor(m.items[2])
             && !accessorNamed(m.items[2])) {
             this.nope(m, `结构体里的 '${sk0}'`);
           }
@@ -4650,6 +4747,7 @@ class JncLower {
         const sk = specialCore(m.items[2]);
         if (sk !== null && sk !== 'construct' && sk !== 'static construct'
           && !isOpSpecial(sk)                       // 算符重载（第一百三十刀）由 fnSig0 那一遍办
+          && !bareAccessor(m.items[2])              // 下标算符（第一百三十八刀）同上
           && !accessorNamed(m.items[2])) this.specialNope(m, sk);
         continue;
       }
@@ -6700,8 +6798,12 @@ class JncLower {
     // 存值器与构造一样没有说明符（第六十八刀）。
     /* 算符重载（第一百三十刀）也照常问 specs：`size_t errorcode operator := (…)` 是**有**返回
        类型的。这一格漏了的话返回类型被吞成 void，体里的 `return m_v` 于是报成"main 里 return
-       一个非 0 的值"—— 认错了人（这是这一刀量出来的一个洞，先前那句话谁看了都会去查 main）。 */
+       一个非 0 的值"—— 认错了人（这是这一刀量出来的一个洞，先前那句话谁看了都会去查 main）。
+       **下标算符**（第一百三十八刀）落在同一格上：裸写的 `set` 是 `bool errorcode set(…)`，
+       它也有返回类型 —— 只有**属性的**存值器（名字写在前面的 `p.set(T x)`）才是没有说明符的
+       那一种。同一条分支上第四次踩这个坑，判据这回按"裸写还是写了名字"分。 */
     const sp = special === null || special === 'get' || isOpSpecial(special)
+      || bareAccessor(n.items[2])
       ? this.specs(n.items[1], true)
       : {
         type: J_VOID, thin: false, stat: false, fnptr: false,
@@ -6745,6 +6847,11 @@ class JncLower {
       }
     }
     if (info.special !== null) {
+      /* 裸写的 `get` / `set`（第一百三十八刀）：那是**下标算符**，不是属性 —— 名字没写在前面
+         （`info.name === ''`）就是它。排在 propSig 之前，那儿第一句问的是"名字前面写了吗"。 */
+      if ((info.special === 'get' || info.special === 'set') && info.name === '') {
+        return this.opIndexSig(n, info, ps);
+      }
       if (info.special === 'get' || info.special === 'set') return this.propSig(n, info, ps);
       // 赋值算符（第一百三十刀）：自己一处，落法与方法同一条
       if (info.special === 'operator :=') return this.opAssignSig(n, info, ps);
@@ -8099,18 +8206,7 @@ class JncLower {
     if (h === 'index') {
       const a = this.expr(n.items[1], null);
       if (a === null) return null;
-      if (!jncIsPtr(a.type)) return this.err(n, `下标要一个指针，这里是 ${tyName(a.type)}`);
-      const i = this.expr(n.items[2], J_I64);
-      if (i === null) return null;
-      if (!isInt(i.type)) return this.err(n, `下标要整数，这里是 ${tyName(i.type)}`);
-      const tt = a.type.target;
-      // 一格里躺的是数组时（多维，第十九刀）那一格**就是地址** —— 与结构体同一档：
-      // 读它不发 pload（那一块不是一个值），退化那一步由 decay 的 `(pelem …)` 做。
-      return {
-        kind: jncIsStruct(tt) || isArr(tt) ? 'agg' : 'ptr',
-        code: `(padd ${a.code} ${i.code})`,
-        type: tt,
-      };
+      return this.subLv(n, a);
     }
     // `p->f = v` 与 `(*p).f = v` 是同一件事
     if (h === 'ptr-field') return this.fieldLv(n, n.items[1], n.items[2]);
@@ -8182,6 +8278,24 @@ class JncLower {
     if (!jncIsPtr(p.type)) return this.err(n, `'*' 要一个指针，这里是 ${tyName(p.type)}`);
     const tt = p.type.target;
     return { kind: jncIsStruct(tt) || isArr(tt) ? 'agg' : 'ptr', code: p.code, type: tt };
+  }
+
+  /** `p[i]` 那一格的位置（第一百三十八刀把它从 lvalue 里提出来）：`a` 是已经算好的左边那一格。
+   *  提出来的理由与 ptrLv 一样 —— 求值那一侧为了先问一句"有没有下标算符"已经把左边算过一遍，
+   *  再走 lvalue 就会算第二遍（诊断报两回、errorcode 的传播那两句插两回）。 */
+  subLv(n, a) {
+    if (!jncIsPtr(a.type)) return this.err(n, `下标要一个指针，这里是 ${tyName(a.type)}`);
+    const i = this.expr(n.items[2], J_I64);
+    if (i === null) return null;
+    if (!isInt(i.type)) return this.err(n, `下标要整数，这里是 ${tyName(i.type)}`);
+    const tt = a.type.target;
+    // 一格里躺的是数组时（多维，第十九刀）那一格**就是地址** —— 与结构体同一档：
+    // 读它不发 pload（那一块不是一个值），退化那一步由 decay 的 `(pelem …)` 做。
+    return {
+      kind: jncIsStruct(tt) || isArr(tt) ? 'agg' : 'ptr',
+      code: `(padd ${a.code} ${i.code})`,
+      type: tt,
+    };
   }
 
   /** 一个字段的位置：`(pfield 地址 f)`。字段自己是结构体或数组时它又是一格 `agg`（嵌套）。 */
@@ -8404,6 +8518,21 @@ class JncLower {
         // 没声明下标、类型又是指针的那些让路（第七十二刀）：那对方括号是读出来那一格的。
         if (t !== undefined && !this.propSubOnValue(t.pn)) {
           return this.propSet(n, t.pn, op, n.items[3], pad, t.self, ch.subs);
+        }
+        /* 下标算符（第一百三十八刀）：`c[i] = v` 走那一格裸写的 `set`。排在索引属性那一问
+           **之后**（那一族是自己的路），排在 lvalue **之前**（那儿只会报"下标要一个指针"）。
+           只在 `=` 上认 —— `c[i] += 1` 要先读一次再写一次，那是另一笔账（明说不收）。 */
+        if (this.opIndex.size > 0) {
+          const b = this.expr(lhs.items[1], null);
+          if (b === null) return null;
+          const oi = this.opIndexOf(b.type);
+          if (oi !== undefined && oi.set !== undefined) {
+            if (op !== '=') {
+              return this.nope(n, `下标算符上的 '${op}'（要先读一次再写一次，是另一笔账）`);
+            }
+            const r = this.opIndexCall(lhs, oi.set, b, n.items[3]);
+            return r === null ? null : [`${pad}(expr ${r.code})`];
+          }
         }
       }
       const lv = this.lvalue(n.items[2]);
@@ -10369,6 +10498,17 @@ class JncLower {
         // derefLv 之前问 —— 那儿只会报"下标要一个指针"。
         const ig = this.propIndexGet(n);
         if (ig !== undefined) return ig;
+        /* 下标算符（第一百三十八刀）：`c[i]` 里 c 是一格带裸写 `get` 的类 / 结构体就调它。
+           同样要排在 derefLv 之前，而左边算过一遍之后不能再算第二遍 —— 走 subLv 那条共用的
+           尾巴。整份文件里一个下标算符都没有时连这一步都不进。 */
+        if (this.opIndex.size > 0) {
+          const b = this.expr(n.items[1], null);
+          if (b === null) return null;
+          const oi = this.opIndexOf(b.type);
+          if (oi !== undefined && oi.get !== undefined) return this.opIndexCall(n, oi.get, b, null);
+          const lv = this.subLv(n, b);
+          return lv === null ? null : this.load(n, lv);
+        }
         return this.load(n, this.derefLv(n));
       }
       case 'ptr-field': return this.load(n, this.fieldLv(n, n.items[1], n.items[2]));

@@ -1,0 +1,22 @@
+// 第一百三十八刀的界：下标算符上的**复合赋值**。`c[i] += 1` 要"先调一次 get、算完再调一次
+// set"—— 那是两次调用加一次求值，与 `c[i] = v` 的一次不是同一件事（而且 get / set 的类型也
+// 不一定对得上）。明说不收，不猜。
+class Box {
+	int m_a[4];
+
+	int get(int i) {
+		return m_a[i];
+	}
+
+	void set(int i, int v) {
+		m_a[i] = v;
+	}
+}
+
+int main() {
+	Box* c = new Box;
+	c[1] = 7;
+	c[1] += 1;
+	printf("%d\n", c[1]);
+	return 0;
+}
