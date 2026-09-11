@@ -1,0 +1,76 @@
+// 第一百一十三刀：**`variant_t`** —— 榜上 sole 那一栏里唯一"前置已清、设计已定"的一格。
+//
+// 落法：`variant_t` 在这一层是**一格合成的结构体**
+// `(struct jnc$variant ($t int) ($n int) ($r real) ($s string))` —— `$t` 是标签，剩下三格是
+// 载荷。这一层的结构体已经有整套"变量里放地址、赋值逐字段抄、形参抄一份"的落法（第十二 /
+// 十三刀），而 variant 要的正是这些，所以**方言一个字没改**。前置（string 能落进内存）
+// 由 ADR-0026 补齐了 —— 在那之前这条路报的是"结构体里有落不进内存的字段"。
+//
+// 装箱与拆箱在 jancy 里**两个方向都是隐式的**（语料里写的就是 `*out = atoi(s);` 与
+// `m_editText = in;`，两句都不写强转），所以两条规则挂在 `expr(n, want)` —— 那是"要一个具体
+// 类型"的取值的唯一入口，于是初值、赋值、实参、返回值四处一起接上。
+//
+// 装箱 / 拆箱各是一格**生成的函数**（`jnc$var$i` / `jnc$var$to$i` …），不是内联的几句：
+// 装箱要 `pnew` 一格再逐格写，而 `expr` 这一层回的是一格值、没有能挂语句的地方。
+// 拆箱时标签对不上就 `(fail …)`（与 assert 同一格，第四十九刀）—— jancy 那边拆箱失败也是
+// 运行期的事，编译期拒了就把"转手一格 variant"这个压倒性的用法一起拒掉了。
+//
+// 尺子 `/tmp/c112.c` 是手写的带标签联合，逐格与这一格结构体对应。
+
+struct Entry {
+	int m_id;
+	variant_t m_data;
+}
+
+void dispatch(variant_t in, variant_t* out) {
+	*out = in;
+}
+
+enum Code {
+	First = 1,
+	Second,
+}
+
+int main() {
+	variant_t a = 7;
+	variant_t b = "hi";
+	variant_t c = null;              // 空的那一格（标签 0）—— 源码里读不出标签，只验它落得下来
+	variant_t d = 3.5;
+	variant_t e = true;
+
+	int i = a;
+	string_t s = b;
+	double r = d;
+	bool q = e;
+	printf("%d %s %f %d\n", i, s, r, q);
+
+	// 转手：语料里压倒性的那一种形状（84 份 ioninja 插件的 dispatch）
+	variant_t o = null;
+	dispatch(a, &o);
+	int i2 = o;
+	printf("%d\n", i2);
+	dispatch(b, &o);
+	string_t s2 = o;
+	printf("%s\n", s2);
+
+	// 装箱走的是隐式收窄那一条：`(char)300` 先收窄成 44 再装
+	variant_t w = (char)300;
+	int i3 = w;
+	printf("%d\n", i3);
+
+	// 枚举按基整数装
+	variant_t g = Code.Second;
+	int i4 = g;
+	printf("%d\n", i4);
+
+	// 当一格字段 + 结构体赋值逐字段抄一份（第十二刀）
+	Entry p1;
+	p1.m_id = 1;
+	p1.m_data = "x";
+	Entry p2 = p1;
+	p1.m_data = 99;
+	string_t s3 = p2.m_data;
+	int i5 = p1.m_data;
+	printf("%d %s %d %d\n", p2.m_id, s3, p1.m_id, i5);
+	return 0;
+}

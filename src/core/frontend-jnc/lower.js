@@ -254,6 +254,26 @@ const mcTy = (params = []) => ({ k: 'mc', params });
 const J_MC = mcTy();
 /** 通知那一格助手在方言里的名字（按签名一格，见 emitMcFire）。 */
 const MC_FIRE = 'jnc$mc_fire';
+/**
+ * `variant_t`（第一百一十三刀）。它在这一层是**一格合成的结构体** ——
+ * `(struct jnc$variant ($t int) ($n int) ($r real) ($s string))`：`$t` 是标签，
+ * 剩下三格是载荷（整数 / 实数 / 字符串各一格，不重叠 —— 重叠要 union，而那省下来的
+ * 16 字节买不到任何可观测的东西）。
+ *
+ * 为什么是结构体而不是方言的新一格：这一层的结构体已经有整套"变量里放地址、赋值逐字段抄、
+ * 形参抄一份"的落法（第十二 / 十三刀），而 variant 要的正是这些。方言一个字不用改 ——
+ * 前置（`string` 能落进内存）由 ADR-0026 补齐了。
+ *
+ * 标签的取值。0 是**空**（`variant_t v = null` 与刚 pnew 出来那一格都是它 —— 方言保证零值），
+ * 所以"没装东西"不用额外一位。
+ */
+const VARIANT = 'jnc$variant';
+const V_NULL = 0;
+const V_INT = 1;
+const V_REAL = 2;
+const V_BOOL = 3;
+const V_STR = 4;
+const isVar = (t) => t !== null && t !== undefined && t.k === 'struct' && t.name === VARIANT;
 /* 一个 f64 写成方言的 `(real …)` 收得下的样子。`String(x)` 给的形状
    （`1` / `-0.5` / `1e-7` / `1e+21`）正好都在 realLit 那条正则里；`Infinity`/`NaN`
    到不了这儿（`evalCConst` 那侧已经拦掉）。整数值补一个 `.0` 只是为了读的人一眼
@@ -693,6 +713,9 @@ function tyName(t) {
   if (t.k === 'tptr') return `${tyName(t.target)} thin*`;
   if (t.k === 'arr') return `${tyName(t.el)}[${t.n === null ? '' : t.n}]`;
   // 命名类型的名字内部带 `$` 前缀（第五十一刀），报错里换回点 —— 那是源码里写的样子。
+  // variant 那一格是**合成的**（第一百一十三刀），内部名字 `jnc$variant` 源码里写不出来，
+  // 所以按源码里的拼法报。
+  if (t.k === 'struct' && t.name === VARIANT) return 'variant_t';
   if (t.k === 'struct') return shown(t.name);
   // 类（第五十二刀）：不带 `*` 写出来的那一种就是 jancy 的 "class value"，带 `*` 的是它的
   // 类指针 —— jancy 自己的诊断里两者也是这么分的（`C` 与 `C*`）。
@@ -1075,6 +1098,8 @@ class JncLower {
     /* 哪些结构体里有位域。只有一处用：花括号初值那一遍拦住它们（见 curlyMember）——
        那儿是按"第几格字段"数的，而位域不占自己的格子，数下去就是个静默的错答案。 */
     this.bitAggs = new Set();
+    /** 已经发出去的 variant 装箱 / 拆箱助手（第一百一十三刀）—— 一格一次。 */
+    this.varFns = new Set();
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
      * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
      * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
@@ -3020,6 +3045,100 @@ class JncLower {
   }
 
   /**
+   * `variant_t` 那一格结构体（第一百一十三刀）—— 第一次用到才登记。
+   * 顺带把装箱 / 拆箱那几格助手一起发出去：它们是**函数**而不是内联的几句，为的是让装箱在
+   * 表达式里就地成立（`expr` 这一层回的是一格值，没有能挂语句的地方）。
+   */
+  variantTy() {
+    if (!this.structs.has(VARIANT)) {
+      this.structs.set(VARIANT, [
+        { name: '$t', type: J_I32 },
+        { name: '$n', type: J_I64 },
+        { name: '$r', type: J_REAL },
+        { name: '$s', type: J_STR },
+      ]);
+      this.decls.push(`  (struct ${VARIANT} ($t int) ($n int) ($r real) ($s string))`);
+    }
+    return { k: 'struct', name: VARIANT };
+  }
+
+  /**
+   * 装箱那一格助手：`(call jnc$var$<种> 值)` 回一格新的 variant。
+   * `fld` 是载荷落在哪一格、`tag` 是标签、`ty` 是那一格的方言类型文本。
+   */
+  varBox(kind, tag, fld, ty) {
+    const name = `jnc$var$${kind}`;
+    if (this.varFns.has(name)) return name;
+    const vt = `(ptr ${VARIANT})`;
+    const set = fld === null ? '' : `\n    (pstore (pfield (var v) ${fld}) (var x))`;
+    this.decls.push(`  (fn ${name} (${fld === null ? '' : `(x ${ty})`}) ${vt}\n`
+      + `    (let v ${vt} (pnew ${vt} (int 1)))\n`
+      + `    (pstore (pfield (var v) $t) (int ${tag}))${set}\n`
+      + '    (ret (var v)))');
+    this.varFns.add(name);
+    return name;
+  }
+
+  /**
+   * 拆箱那一格助手：标签对不上就 `(fail …)`（与 assert 落到同一格，第四十九刀）。
+   * jancy 那边拆箱失败也是运行期的事（`variant_t` 的强转走 `CastOp_Variant`），所以这一层
+   * 不在编译期拒 —— 拒了就把"转手一格 variant"这个压倒性的用法一起拒掉了。
+   */
+  varUnbox(kind, tag, fld, ty, what) {
+    const name = `jnc$var$to$${kind}`;
+    if (this.varFns.has(name)) return name;
+    const vt = `(ptr ${VARIANT})`;
+    this.decls.push(`  (fn ${name} ((v ${vt})) ${ty}\n`
+      + `    (if (bin "!=" (pload (pfield (var v) $t)) (int ${tag})) (do\n`
+      + `      (fail (str ${JSON.stringify(`variant_t 里装的不是${what}`)}))))\n`
+      + `    (ret (pload (pfield (var v) ${fld}))))`);
+    this.varFns.add(name);
+    return name;
+  }
+
+  /** 一格值装进 variant：回新的 `{code,type}`，装不进去回 null（调用方自己报）。 */
+  varBoxOf(v) {
+    if (isVar(v.type)) return v;
+    this.variantTy();
+    if (isInt(v.type)) {
+      return { code: `(call ${this.varBox('i', V_INT, '$n', 'int')} ${intConv(v, J_I64).code})`, type: this.variantTy() };
+    }
+    if (jncIsEnum(v.type)) {
+      const b = intConv({ code: v.code, type: v.type.base }, J_I64);
+      return { code: `(call ${this.varBox('i', V_INT, '$n', 'int')} ${b.code})`, type: this.variantTy() };
+    }
+    if (v.type === J_BOOL) {
+      return { code: `(call ${this.varBox('b', V_BOOL, '$n', 'int')} (sel ${v.code} (int 1) (int 0)))`, type: this.variantTy() };
+    }
+    if (v.type === J_REAL) {
+      return { code: `(call ${this.varBox('r', V_REAL, '$r', 'real')} ${v.code})`, type: this.variantTy() };
+    }
+    if (v.type === J_STR) {
+      return { code: `(call ${this.varBox('s', V_STR, '$s', 'string')} ${v.code})`, type: this.variantTy() };
+    }
+    return null;
+  }
+
+  /** variant 拆成一格有类型的值。拆不出来回 null（调用方自己报）。 */
+  varUnboxTo(v, want) {
+    if (isInt(want)) {
+      const g = `(call ${this.varUnbox('i', V_INT, '$n', 'int', '一格整数')} ${v.code})`;
+      return intConv({ code: g, type: J_I64 }, want);
+    }
+    if (want === J_BOOL) {
+      const g = `(call ${this.varUnbox('b', V_BOOL, '$n', 'int', '一格布尔')} ${v.code})`;
+      return { code: `(bin "!=" ${g} (int 0))`, type: J_BOOL };
+    }
+    if (want === J_REAL) {
+      return { code: `(call ${this.varUnbox('r', V_REAL, '$r', 'real', '一个实数')} ${v.code})`, type: J_REAL };
+    }
+    if (want === J_STR) {
+      return { code: `(call ${this.varUnbox('s', V_STR, '$s', 'string', '一格字符串')} ${v.code})`, type: J_STR };
+    }
+    return null;
+  }
+
+  /**
    * 模块级变量（第十一刀）。降成方言的 `(global 名字 类型)` 加 `(main …)` 开头的一句赋值。
    *
    * 存储类照 decl_storage.rst：**不写就是 static**（"If storage specifier is omitted, then
@@ -4595,6 +4714,12 @@ class JncLower {
        * 这一层的指针是 8 字节，所以落成 64 位无符号。 */
       else if (nm === 'size_t') base = mkInt(64, true);
       else if (nm === 'string_t') base = J_STR;
+      /* `variant_t`（第一百一十三刀）：这一层落成一格合成的结构体（见 VARIANT 那处注释）。
+         排在命名类型之前 —— 语料里没人拿它当自己的类型名，而 jancy 那边它是个内建类型。 */
+      else if (nm === 'variant_t') {
+        if (uns) { this.err(ts, "'variant_t' 上写不了 unsigned"); return null; }
+        base = this.variantTy();
+      }
       // 命名类型从里往外找（第五十一刀）：`namespace a` 里写 `S` 先看 `a.S`、再看全局的。
       // 类要排在结构体前面（第五十二刀）：两者的字段表在同一张 `this.structs` 里，
       // 分得清的是 `this.classes`。
@@ -8637,6 +8762,24 @@ class JncLower {
     // int -> real 的隐式加宽（jancy 与 C 同）。反过来**不**做：那是丢精度，
     // jancy 那边也要一次显式强制转换。
     if (want === J_REAL && isInt(v.type)) return { code: realOf(v.code, v.type), type: J_REAL };
+    /* `variant_t` 的装箱与拆箱（第一百一十三刀）。两个方向在 jancy 里**都是隐式的** ——
+       语料里的写法就是 `*out = atoi(s);`（装箱）与 `m_editText = in;`（拆箱），
+       两句都不写强制转换。所以这两条挂在这一处：它是"要一个具体类型"的取值的唯一入口，
+       于是初值、赋值、实参、返回值四处一起接上（与上面 bool -> 整数那条同一个理由）。
+
+       排在 int -> real 之后：`variant_t v = 1;` 要的是装一格**整数**，不是先变实数。 */
+    if (isVar(want) && !isVar(v.type)) {
+      const bx = this.varBoxOf(v);
+      if (bx !== null) return bx;
+      return this.nope(n, `把 ${tyName(v.type)} 装进一格 variant_t（今天收整数 / 实数 / 布尔 /`
+        + ' 枚举 / 字符串；指针、结构体与函数值那几种要 variant 里也能装那格表示）');
+    }
+    if (isVar(v.type) && want !== undefined && want !== null && !isVar(want)) {
+      const ux = this.varUnboxTo(v, want);
+      if (ux !== null) return ux;
+      return this.nope(n, `把一格 variant_t 拆成 ${tyName(want)}（今天拆得出整数 / 实数 /`
+        + ' 布尔 / 字符串）');
+    }
     // bool -> 整数的隐式转换（第三十七刀）。出处两条：1 位那一格用**零扩展**
     //（`m_ext_u`，jnc_ct_CastOp_Int.cpp:354），而扩展这一族的 getCastKind 就是
     // `CastKind_Implicit`（jnc_ct_CastOp_Int.h:63）。所以 `int b = a > 0;` 在 jancy 里合法，
@@ -8942,6 +9085,13 @@ class JncLower {
         // 类引用也是一种"指针"（第五十二刀）：`C* p = null` 与 `p == null` 都要它。
         if (want !== null && want !== undefined && isClass(want)) {
           return { code: `(pnull (ptr ${clsRoot(want.name)}))`, type: want };
+        }
+        /* `variant_t data = null`（第一百一十三刀，语料里 8 处）：一格**空**的 variant，
+           标签 0。这一条要在这儿而不是在 expr 那两条装箱规则里 —— `null` 自己没有类型，
+           走不到"v.type 是什么"那一步。 */
+        if (isVar(want)) {
+          this.variantTy();
+          return { code: `(call ${this.varBox('0', V_NULL, null, null)})`, type: this.variantTy() };
         }
         if (want === null || want === undefined || !jncIsPtr(want)) {
           return this.err(n, 'null 得从左边知道自己是哪种指针（这里问不出来）');
@@ -9359,6 +9509,14 @@ class JncLower {
     else if (a.type === J_REAL && isInt(b.type)) b = { code: realOf(b.code, b.type), type: J_REAL };
     if (!sameTy(a.type, b.type)) {
       return this.err(n, `'${op}' 两边不同型：左是 ${tyName(a.type)}，右是 ${tyName(b.type)}`);
+    }
+    /* 结构体之间没有算符（第一百一十三刀补的一个洞）。这一条**不是** variant 带来的 ——
+       `S a, b; a + b` 先前就落到下面那句上，发出一句 `(bin "+" 地址 地址)`，然后在后端
+       炸掉（`js.bin: + on struct`）。variant 让它变得容易碰上（`v1 + v2` 在 jancy 那边
+       是**合法**的，落法是按两边的标签在运行期选一条算），所以在这儿说清。 */
+    if (jncIsStruct(a.type)) {
+      return this.nope(n, `'${op}' 的两边是 ${tyName(a.type)}（结构体之间没有算符；`
+        + `${isVar(a.type) ? 'variant_t 上 jancy 那边是按两边的标签在运行期选一条算，那要一整张分派表' : '要就得自己写一个方法'}）`);
     }
     return { code: `(bin "${op}" ${a.code} ${b.code})`, type: cmp ? J_BOOL : a.type };
   }

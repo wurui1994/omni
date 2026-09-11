@@ -1,0 +1,12 @@
+// 第一百一十三刀的界（二）：variant 之间的**算术与比较**还不收。jancy 那边 `v1 + v2` 与
+// `v1 == -1` 都成立（`test/jnc_test_abi/main.jnc` 是语料里唯一用它的一份），落法是"按两边的
+// 标签在运行期选一条算" —— 那要一整张按标签分派的表，与"转手一格 variant"这个压倒性的用法
+// 不在一个量级上。这一层报的是结构体之间没有加法，理由与 `variant_t v = p` 那条一样：
+// 说清而不是悄悄挑一格。
+int main() {
+	variant_t v1 = 1;
+	variant_t v2 = 2;
+	int s = v1 + v2;
+	printf("%d\n", s);
+	return 0;
+}
