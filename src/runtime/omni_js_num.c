@@ -49,6 +49,24 @@ omni_dyn omni_js_num_of(omni_dyn v) {
     case OMNI_DYN_NULL: return omni_dyn_of_real(0.0);
     case OMNI_DYN_UNDEF: return omni_dyn_of_real((double)NAN);
     case OMNI_DYN_STR16: {
+      /* 纯十进制整数的快路（量出来的）：这条从前要走 omni_s16_to_utf8（一次分配 + 一次
+         intern 探测）→ omni_cstr（再抄一份）→ 空白扫描 → strtod。300k 次 105ms，
+         node 只要 5ms（**21 倍**）。而调用它的地方（GLR 建表里那两处 `Number(it.slice(…))`）
+         喂进来的全是几位数字。
+         界划在 15 位：那以内的十进制整数在 double 里是精确的，所以这条与 strtod 逐位同值。
+         带空白、带小数点或指数、更长的一律落回下面那条老路 —— 一个字都不猜。 */
+      const uint16_t *q = v.u.s16.p;
+      int64_t qn = v.u.s16.len;
+      if (qn > 0 && qn <= 15) {
+        int64_t acc = 0;
+        int64_t i = q[0] == (uint16_t)'-' ? 1 : 0;
+        bool ok = i < qn;
+        for (; i < qn; i++) {
+          if (q[i] < (uint16_t)'0' || q[i] > (uint16_t)'9') { ok = false; break; }
+          acc = acc * 10 + (int64_t)(q[i] - (uint16_t)'0');
+        }
+        if (ok) return omni_dyn_of_real(q[0] == (uint16_t)'-' ? -(double)acc : (double)acc);
+      }
       omni_str s = omni_s16_to_utf8(v.u.s16);
       char *c = omni_cstr(s);
       char *p = c;

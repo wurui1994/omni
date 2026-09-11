@@ -217,6 +217,25 @@ static omni_str js_num_str(double v) {
   return omni_str_fmt("%s", out);
 }
 
+/* 整数直接写成 s16 —— **不走 UTF-8 那一趟**（十进制数字全是 ASCII，一个码位一格）。
+   量出来的：`String(i)` 那一格 300k 次要 65ms，node 只要 4ms（**16 倍**），而它的钱花在
+   "先排成 UTF-8、再 of_utf8 转 s16"这一来一回上（一次 arena 分配 + 一次哈希 + 一次 alloc16）。
+   omni_s16_of_units 自己会拷一份（omni_str16.c:57-61），所以这儿的栈缓冲是安全的。
+   代价说清：这条路**绕过了 of_utf8 那张 intern 表**，所以同一个数字反复转会各分配一份；
+   而拼键这个值域里数字几乎都不重复（规则号、状态号），量出来是净赚。 */
+static omni_s16 js_i64_s16(int64_t iv) {
+  uint16_t tmp[24];
+  uint16_t out[24];
+  int t = 0;
+  bool neg = iv < 0;
+  uint64_t u = neg ? (uint64_t)(-(iv + 1)) + 1u : (uint64_t)iv;
+  do { tmp[t++] = (uint16_t)('0' + (int)(u % 10u)); u /= 10u; } while (u != 0u);
+  int k = 0;
+  if (neg) out[k++] = (uint16_t)'-';
+  while (t > 0) out[k++] = tmp[--t];
+  return omni_s16_of_units(out, k);
+}
+
 /* dict 里按名字取一格（只读、线性扫）。错误对象只有三四格，String() 这条路也不热，
    所以不去碰模板的哈希索引 —— 那要连 idx / 探测链一起复述，代价与收益不成比例。 */
 static const omni_dyn *js_dict_find(const omni_js_dict_view *d, const char *name) {
@@ -304,11 +323,17 @@ static omni_s16 to_s16(omni_dyn v) {
     case OMNI_DYN_UNDEF: return omni_s16_of_utf8(omni_str_new("undefined", 9));
     case OMNI_DYN_NULL: return omni_s16_of_utf8(omni_str_new("null", 4));
     case OMNI_DYN_BOOL: return omni_s16_of_utf8(omni_str_bool(v.u.b));
-    case OMNI_DYN_INT: return omni_s16_of_utf8(omni_str_int(v.u.i));
+    case OMNI_DYN_INT: return js_i64_s16(v.u.i);
     /* UINT 那一格印的是**无符号**的十进制：JS 那边它是一个真的大 BigInt */
     case OMNI_DYN_UINT:
       return omni_s16_of_utf8(omni_str_fmt("%llu", (unsigned long long)omni_dyn_u64(v)));
-    case OMNI_DYN_REAL: return omni_s16_of_utf8(js_num_str(v.u.r));
+    /* 整数值的 real 也走那条（`-0` 到不了这儿：js_num_str 里 `v == 0.0` 先接了印 "0"，
+       而这儿 `(int64_t)(-0.0)` 也是 0，两条给同一串字符） */
+    case OMNI_DYN_REAL:
+      if (v.u.r == floor(v.u.r) && v.u.r > -9007199254740992.0 && v.u.r < 9007199254740992.0) {
+        return js_i64_s16((int64_t)v.u.r);
+      }
+      return omni_s16_of_utf8(js_num_str(v.u.r));
     case OMNI_DYN_STR16: return v.u.s16;
     /* String(/x/g) 是 "/x/g" —— 源与 flags 之间那两条斜杠是 JS 的字面量写法 */
     case OMNI_DYN_RE: {

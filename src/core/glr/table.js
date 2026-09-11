@@ -85,6 +85,13 @@ function followSets(g, ns) {
 }
 
 const itemKey = (r, dot) => `${r}.${dot}`;
+/* 项是一串 `"规则号.点位"`（这个形状进了缓存的表文本，所以不能改）。拆它的地方有四处，
+   全走这两条而不是 `it.split('.')`：**量出来的** —— native 那趟 GLR 建表里
+   `split` 每次要新分配一个两格的列表加两段子串，而这四处合起来一趟要跑几十万遍
+   （/usr/bin/sample 的榜上 omni_list_dynamic_from 106、omni_js_arr_i 108 就是它）。
+   indexOf + slice 少两次列表分配。回的数与 split 那条路一模一样，所以表逐字节不变。 */
+const itemRule = (it) => Number(it.slice(0, it.indexOf('.')));
+const itemDot = (it) => Number(it.slice(it.indexOf('.') + 1));
 
 /** LR(0) 闭包：点后面是非终结符就把它的产生式都拉进来 */
 function closure(g, kernel) {
@@ -92,8 +99,8 @@ function closure(g, kernel) {
   const work = [...kernel];
   while (work.length > 0) {
     const it = work.pop();
-    const dot = Number(it.split('.')[1]);
-    const r = g.rules[Number(it.split('.')[0])];
+    const dot = itemDot(it);
+    const r = g.rules[itemRule(it)];
     const s = r.rhs[dot];
     if (s === undefined || !g.nonterms.has(s)) continue;
     for (const ri of g.nonterms.get(s).rules) {
@@ -135,8 +142,8 @@ export function buildTable(g) {
     // 按"点后面的那个符号"分组，每组一个后继状态
     const groups = new Map();
     for (const it of st.items) {
-      const ri = Number(it.split('.')[0]);
-      const dot = Number(it.split('.')[1]);
+      const ri = itemRule(it);
+      const dot = itemDot(it);
       const s = rules[ri].rhs[dot];
       if (s === undefined) continue;
       if (!groups.has(s)) groups.set(s, []);
@@ -152,8 +159,8 @@ export function buildTable(g) {
   // 归约与接受
   for (const st of states) {
     for (const it of st.items) {
-      const ri = Number(it.split('.')[0]);
-      const dot = Number(it.split('.')[1]);
+      const ri = itemRule(it);
+      const dot = itemDot(it);
       const r = rules[ri];
       if (dot !== r.rhs.length) continue;
       if (ri === acceptRule) { addAction(st, END, { kind: 'accept' }); continue; }
@@ -261,8 +268,8 @@ export function dumpTable(tb, brief = false) {
     const st = tb.states[i];
     lines.push(`state ${i}`);
     for (const it of st.items) {
-      const ri = Number(it.split('.')[0]);
-      const dot = Number(it.split('.')[1]);
+      const ri = itemRule(it);
+      const dot = itemDot(it);
       const r = tb.rules[ri];
       // 点插在第 dot 个符号前面。刻意不写 `parts.splice(dot, 0, '.')`：splice 不在封闭
       // ABI 里，node 上照跑，原生构建里当场报 "dynamic value is list, expected dict"。
