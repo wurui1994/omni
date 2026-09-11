@@ -6570,10 +6570,22 @@ variant 只是让它容易碰上，所以在这儿说清（`bad/variant-arith`�
 
 拆开看，涨的那一批里最大的一格是先前根本没露出来的一行：
 
-- **`表达式 '…'` 111 份 / sole 1** —— 逐份看是 **`表达式 'assign'`**：jancy 里赋值是**表达式**
-  （`while ((c = next()) != 0)`、`a = b = c`），而这一层的赋值只在语句位置成立。这一行现在是
-  榜上最大的一格 `N`，比泛型那 16 份的 sole 大得多（虽然 sole 只有 1 —— 那 111 份大多还带着
-  别的拦路项）；
+- **`表达式 '…'` 111 份 / sole 1** —— 逐份看是 **`表达式 'assign'`**：jancy 里赋值是**表达式**，
+  而这一层的赋值只在语句位置成立。这一行现在是榜上最大的一格 `N`。
+
+  **这个 111 要加一句注**（第一百〇四刀那一课）：全语料**源码里只有 14 处** ——
+  `return <左值> = <表达式>;` 7 处（`ui_ComboBox.jnc:74`、`ui_ListWidget.jnc:67`、
+  `stdt_Iterator.jnc:37/41`、`stdt_Map.jnc:45`、`stdt_BoxList.jnc:45`、`test157.jnc:28`）
+  与链式 `a = b = c` 7 处（`Df1Layer.jnc:182-187`、`SerialTapProDecoder.jnc:132`、
+  `SerialMonSession.jnc:200`、`ui_LogRecordCodeFilterUi.jnc:33`、`ui_ToggleUi.jnc:48`）。
+  111 是**import 摊出来的** —— `ui_ComboBox` / `ui_ListWidget` 被上百份 ioninja 插件 import，
+  一处根因摊成上百对。`while ((c = f()) != 0)` 那种形状语料里**一处都没有**。
+
+  这件事对下一刀的形状有决定性影响：14 处里的左值**全是字段路径或指针**
+  （`m_currentIndex`、`m_p.m_value`、`m_txParser.m_mode`、`p = p0 = next`），没有一处是
+  SSA 局部量。所以那一刀落成"一格生成的助手 `jnc$asgn$T(p, x) { pstore p x; ret x }`"就够 ——
+  与这一刀装箱那几格助手同一个办法，而"左边是局部量"那一种可以先明说不收；
+
 - `格式化字面量里印不出 variant_t` 3 份（jancy 自己也是一句 "don't know how to format"，
   Parser.cpp:3689）；
 - `把 X 装进一格 variant_t` / `把一格 variant_t 拆成 X` 各几份（X 是指针、结构体、`char*`）——
@@ -6595,8 +6607,8 @@ variant 只是让它容易碰上，所以在这儿说清（`bad/variant-arith`�
 覆盖装箱五种、拆箱四种、转手两趟、隐式收窄（`(char)300` -> 44）、枚举按基整数装、
 variant 当字段 + 结构体赋值抄一份。两条腿逐字节相同、逐字节等于尺子。
 
-**下一刀：`表达式 'assign'`**（赋值当表达式）。它是这一刀翻出来的，111 份，而且不用动方言 ——
-赋值那一句本来就在，要的是"发完那一句再把左边读一次当值"。
+**下一刀：`表达式 'assign'`**（赋值当表达式）。它是这一刀翻出来的，榜上 111 对、源码里 14 处
+（数字的注见上面那一段），而且不用动方言 —— 落成一格生成的助手 `jnc$asgn$T` 就够。
 
 ## 后果与代价
 
