@@ -491,20 +491,39 @@ function baseCtorCalls(n, out = new Set()) {
  *
  *  算符重载（第一百三十刀）也从这儿回：`(operator :=)` -> `'operator :='`。语法上它也是
  *  自己一格，落法与特殊成员同一条路（提到顶层、`this` 当第一个形参），只是**名字**由
- *  fnSig0 拼成 `Owner$op$assign` 那种，调用点按算符去找它。 */
+ *  fnSig0 拼成 `Owner$op$assign` 那种，调用点按算符去找它。
+ *
+ *  后缀那一族（第一百三十一刀）在语法里是**另一个头**（`(postfix-operator ++)`，
+ *  jnc.grammar:431）—— 回的话里把那个词留着：`'postfix operator ++'`。留着是因为它与前缀
+ *  是**两个函数**（jancy 的 stdt_Iterator.jnc:36-54 四个都写了），名字得分得开。 */
 function specialCore(dcl) {
   if (!isList(dcl) || head(dcl) !== 'dcl') return null;
   let core = dcl.items[2];
   if (isList(core) && head(core) === 'qualified-special') core = core.items[2];
   if (!isList(core)) return null;
   const h = head(core);
-  if (h === 'operator') {
+  if (h === 'operator' || h === 'postfix-operator') {
     const op = isStr(core.items[1]) || isAtom(core.items[1]) ? core.items[1].value : '?';
-    return `operator ${op}`;
+    return `${h === 'operator' ? '' : 'postfix '}operator ${op}`;
   }
   if (h !== 'special' && h !== 'accessor') return null;
   return isStr(core.items[1]) || isAtom(core.items[1]) ? core.items[1].value : h;
 }
+
+/** 这一格特殊名是**算符重载**吗（第一百三十一刀）—— 前缀与后缀两种头都算。先前四处各写着
+ *  `sk.startsWith('operator ')`，后缀那一种的话头上多了个词，四处会一齐认不出来。 */
+const isOpSpecial = (sk) => sk !== null
+  && (sk.startsWith('operator ') || sk.startsWith('postfix operator '));
+
+/** 这一层认得的算符重载，以及各自拼出来的名字后缀。名字里带 `$` —— 标识符里写不出这个字，
+ *  所以撞不上用户自己的函数（第五十二刀起类的方法就是这么拼的）。 */
+const OP_NAME = new Map([
+  ['operator :=', 'assign'],
+  ['operator ++', 'inc'],
+  ['operator --', 'dec'],
+  ['postfix operator ++', 'inc$post'],
+  ['postfix operator --', 'dec$post'],
+]);
 
 /** 这个声明符是**属性的**取/存吗（第六十九刀）：`m_v.get()` 名字写在前面（语法上那是
  *  `qualified-special`），而类体里裸写的 `int get(int i)` / `void set(int i, int v)` 是
@@ -1037,6 +1056,9 @@ class JncLower {
     this.ctors = new Map();
     /** 赋值算符（第一百三十刀）：主人 -> `{name, param, ret}`。赋值那一处按左边的类型来这儿找。 */
     this.opAssign = new Map();
+    /* 自增自减那一族的算符重载（第一百三十一刀）：拼好的名字进这一格。只用记"在不在" ——
+       调用点（`it++;` 那条语句）自己按主人的类型把名字拼回来。 */
+    this.opIncDec = new Set();
     this.sctors = new Map();
     this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
     // 方法名 -> 它那段闭包 thunk（第五十五刀）。`c.foo` 当值用时捕的是对象，一个方法一段。
@@ -1307,6 +1329,41 @@ class JncLower {
     ps.unshift({ name: 'this', type: self, formals: null, def: null });
     this.methods.set(full, owner);
     this.opAssign.set(owner, { name: full, param: ps[1].type, ret: info.type });
+    this.fns.set(full, sigOf(ps, info.type));
+    return { info, ps, isMain: false };
+  }
+
+  /**
+   * `operator ++` / `operator --`（含 postfix 两个变体）的签名（第一百三十一刀）。
+   *
+   * 语料里这一族的原样在 stdt_Iterator.jnc:36-54 —— 四个都写着，前缀回**新**值、后缀回
+   * **旧**值。落法与 `operator :=` 同一条（自由函数、`this` 当第一个形参），名字拼成
+   * `Owner$op$inc` / `$op$dec` / `$op$inc$post` / `$op$dec$post`。
+   *
+   * 一个字都不收形参：jancy 那边这一族本来就是零元（C++ 里 postfix 那个假的 `int` 形参在
+   * jancy 是靠 `postfix` 这个词分的，不是靠形参，jnc.grammar:431）。
+   */
+  opIncSig(n, info, ps) {
+    const suffix = OP_NAME.get(info.special);
+    const owner = info.name === ''
+      ? (this.structs.has(this.ns) ? this.ns : null)
+      : this.resolve(info.name, (k) => this.structs.has(k));
+    if (owner === null) {
+      return this.err(n, `'${info.special}' 只能是类或结构体的成员（写在体里）`);
+    }
+    if (ps.length !== 0) {
+      return this.err(n, `'${info.special}' 不收形参（这一族在 jancy 里是零元，`
+        + 'postfix 那一个也靠 `postfix` 这个词分，不靠形参）');
+    }
+    const full = `${owner}$op$${suffix}`;
+    if (this.fns.has(full)) {
+      return this.err(n, `${shown(owner)} 的第二个 '${info.special}'`);
+    }
+    info.name = full;
+    const self = this.classes.has(owner) ? tClass(owner, false) : { k: 'struct', name: owner };
+    ps.unshift({ name: 'this', type: self, formals: null, def: null });
+    this.methods.set(full, owner);
+    this.opIncDec.add(full);
     this.fns.set(full, sigOf(ps, info.type));
     return { info, ps, isMain: false };
   }
@@ -2174,7 +2231,7 @@ class JncLower {
            （一个自由函数、`this` 当第一个形参），只是名字由 fnSig0 拼成 `S$construct`。
            `static construct` 仍旧只在类那一侧：那一格要一道 once 闸门，是另一笔账。 */
         if (sk === null || accessorNamed(m.items[2])
-          || sk === 'construct' || sk.startsWith('operator ')
+          || sk === 'construct' || isOpSpecial(sk)
           || (isCls && sk === 'static construct')) {
           out.push({ ns: inner, it: m });
         }
@@ -4406,7 +4463,7 @@ class JncLower {
           /* `construct` 从第一百二十九刀起收了（体由 aggHoist 提到顶层，与普通方法同一条路），
              所以这儿只拦剩下的那几个。裸写的 `get` / `set` 是**下标运算符**那一族
              （见 accessorNamed）—— 名字写在前面的 `p.get()` 是属性的取值器，那一格照旧提上去。 */
-          if (sk0 !== null && sk0 !== 'construct' && !sk0.startsWith('operator ')
+          if (sk0 !== null && sk0 !== 'construct' && !isOpSpecial(sk0)
             && !accessorNamed(m.items[2])) {
             this.nope(m, `结构体里的 '${sk0}'`);
           }
@@ -4435,7 +4492,7 @@ class JncLower {
         }
         const sk = specialCore(m.items[2]);
         if (sk !== null && sk !== 'construct' && sk !== 'static construct'
-          && !sk.startsWith('operator ')            // 算符重载（第一百三十刀）由 fnSig0 那一遍办
+          && !isOpSpecial(sk)                       // 算符重载（第一百三十刀）由 fnSig0 那一遍办
           && !accessorNamed(m.items[2])) this.specialNope(m, sk);
         continue;
       }
@@ -5708,11 +5765,12 @@ class JncLower {
       // 属性的取/存（第六十八刀）：`int g_p.get()` / `g_p.set(int x)` —— 与 construct
       // 一样是"限定名 + 特殊名 + 一对括号"，只是取值器那一格有返回类型（从 sp 抄）。
       const acc = sk === 'get' || sk === 'set';
-      /* 算符重载（第一百三十刀）：今天只收**赋值**那一个（`operator :=`，语料里 11 处，
-         全在 std 那一批）。剩下那几个（`*` / `->` / `++` / `--` / `()`）各要在一元或二元
-         那几处的求值路上认，是自己一刀 —— 明说，不混进来。 */
-      const isOp = sk.startsWith('operator ');
-      if (isOp && sk !== 'operator :=') return this.nope(d.items[2], `算符重载 '${sk}'`);
+      /* 算符重载：第一百三十刀收了**赋值**那一个（`operator :=`），第一百三十一刀再收
+         **自增自减**那四个（`operator ++` / `operator --` 与它们的 postfix 变体，语料里
+         stdt_Iterator.jnc:36-54 四个都写着）。剩下那几个（`*` / `->` / `()` / `bool`）要在
+         **求值**那条路上认（那一格取的是值，不是语句），是自己一刀 —— 明说，不混进来。 */
+      const isOp = isOpSpecial(sk);
+      if (isOp && !OP_NAME.has(sk)) return this.nope(d.items[2], `算符重载 '${sk}'`);
       if (!acc && !isOp && sk !== 'construct' && sk !== 'static construct') {
         return this.specialNope(d.items[2], sk);
       }
@@ -6465,7 +6523,7 @@ class JncLower {
     /* 算符重载（第一百三十刀）也照常问 specs：`size_t errorcode operator := (…)` 是**有**返回
        类型的。这一格漏了的话返回类型被吞成 void，体里的 `return m_v` 于是报成"main 里 return
        一个非 0 的值"—— 认错了人（这是这一刀量出来的一个洞，先前那句话谁看了都会去查 main）。 */
-    const sp = special === null || special === 'get' || special.startsWith('operator ')
+    const sp = special === null || special === 'get' || isOpSpecial(special)
       ? this.specs(n.items[1], true)
       : {
         type: J_VOID, thin: false, stat: false, fnptr: false,
@@ -6497,6 +6555,8 @@ class JncLower {
       if (info.special === 'get' || info.special === 'set') return this.propSig(n, info, ps);
       // 赋值算符（第一百三十刀）：自己一处，落法与方法同一条
       if (info.special === 'operator :=') return this.opAssignSig(n, info, ps);
+      // 自增自减那四个（第一百三十一刀）：与赋值算符同一条路，只是不收形参
+      if (isOpSpecial(info.special)) return this.opIncSig(n, info, ps);
       /* 构造的主人（第五十三刀是类；第一百二十九刀把**结构体**也算上）：先按类查，查不着再按
          结构体查 —— 两边的落法只差 `this` 那一格的类型（类是一条引用 tClass，结构体那一格里
          放的本来就是地址，所以直接用那个结构体类型，与第一百〇一刀的方法一模一样）。 */
@@ -8244,10 +8304,32 @@ class JncLower {
       return [`${pad}${this.store(lv, `(bin "${bin}" ${this.read(lv)} ${v.code})`)}`];
     }
     if (h === 'pre-inc' || h === 'post-inc' || h === 'pre-dec' || h === 'post-dec') {
-      // 语句位置上前缀与后缀没有差别（都不取值）
+      // 内建那三种（指针 / 整数 / real）在语句位置上前缀与后缀没有差别（都不取值）；
+      // 重载那一族**有**差别（是两个函数），见下面那处。
       const lv = this.lvalue(n.items[1]);
       if (lv === null) return null;
       const up = h === 'pre-inc' || h === 'post-inc';
+      /* 算符重载（第一百三十一刀）：主人的类型上写了这一族就调它。
+         排在下面那三条（指针 / 整数 / real）**之前**，可其实撞不上 —— 类与结构体三条都不是，
+         走到底只会得到那句"要整数 / real / 指针"。真正要写清的是**前缀与后缀在这儿有差别**：
+         上面那句老注释说"语句位置上前缀与后缀没有差别"，对内建那三种成立（都不取值），对
+         重载**不成立** —— 它们是两个函数（stdt_Iterator.jnc:44 那个 postfix 回的是旧值，
+         副作用一样、回的值不一样）。所以后缀那一格先找 postfix 那个名字，没写才落回前缀
+         （jancy 同：postfix 是可选的）；反过来只写了 postfix 却写成前缀，就明说。 */
+      if (isClass(lv.type) || jncIsStruct(lv.type)) {
+        const base = `${lv.type.name}$op$${up ? 'inc' : 'dec'}`;
+        const post = h === 'post-inc' || h === 'post-dec';
+        const full = post && this.opIncDec.has(`${base}$post`) ? `${base}$post` : base;
+        if (this.opIncDec.has(full)) {
+          const self = lv.kind === 'agg' ? lv.code : this.read(lv);
+          return [`${pad}(expr (call ${full} ${self}))`];
+        }
+        if (!post && this.opIncDec.has(`${base}$post`)) {
+          this.err(n, `${shown(lv.type.name)} 上只写了 'postfix operator ${up ? '++' : '--'}'`
+            + `（前缀那一格没有）—— 写成 'x${up ? '++' : '--'}'`);
+          return null;
+        }
+      }
       if (jncIsPtr(lv.type)) {
         return [`${pad}${this.store(lv, `(padd ${this.read(lv)} (int ${up ? '1' : '-1'}))`)}`];
       }

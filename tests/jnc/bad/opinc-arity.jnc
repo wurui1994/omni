@@ -1,0 +1,18 @@
+// 第一百三十一刀的界二：`operator ++` 上写形参。这一族在 jancy 里是**零元** ——
+// C++ 里 postfix 那个假的 `int` 形参在 jancy 是靠 `postfix` 这个词分的，不靠形参
+// （jnc.grammar:431）。所以写了形参就是写错了，不是"还不收"。
+struct It {
+	int m_n;
+
+	int operator ++ (int d) {
+		m_n = m_n + d;
+		return m_n;
+	}
+}
+
+int main() {
+	It a;
+	++a;
+	printf("%d\n", a.m_n);
+	return 0;
+}

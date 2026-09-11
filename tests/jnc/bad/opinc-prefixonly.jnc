@@ -1,0 +1,20 @@
+// 第一百三十一刀的界一：只写了 `postfix operator ++`，用的时候写成**前缀**。
+// 这一层不替它落回后缀那一个 —— 前缀回新值、后缀回旧值，是两个不同的意思（语句位置上
+// 看不出来，可"该调哪个"这件事得由源码定，不由这一层猜）。反过来是收的（后缀没写就落回
+// 前缀，jancy 同：postfix 是可选的），所以只拦这一头。
+struct It {
+	int m_n;
+
+	int postfix operator ++ () {
+		int v = m_n;
+		m_n = m_n + 10;
+		return v;
+	}
+}
+
+int main() {
+	It a;
+	++a;
+	printf("%d\n", a.m_n);
+	return 0;
+}

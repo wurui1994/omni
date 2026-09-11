@@ -1,0 +1,72 @@
+// 第一百三十一刀：自增自减那一族的算符重载 —— `operator ++` / `operator --`，以及它们的
+// **后缀**变体 `postfix operator ++` / `postfix operator --`。
+//
+// 语料里这一族的原样只有一处，可那一处四个全写着（stdt_Iterator.jnc:36-54）：前缀回**新**值、
+// 后缀回**旧**值，副作用一样。所以这一刀要办的第一件事是**把后缀认出来** —— 语法上它是
+// 另一个头（`(postfix-operator ++)`，jnc.grammar:431），先前四处写着 `sk.startsWith('operator ')`
+// 的地方一齐认不出它，于是那一格会掉到"认不出的声明符"那条路上去。
+//
+// 三处改动：
+//   1. `specialCore` 把后缀那个头也回出来，话里留着 `postfix` 这个词（`'postfix operator ++'`）——
+//      前缀与后缀是**两个函数**，名字得分得开；
+//   2. `opIncSig` 登记四个名字（`Owner$op$inc` / `$op$dec` / `$op$inc$post` / `$op$dec$post`），
+//      落法与第一百三十刀的 `operator :=` 一模一样（自由函数、`this` 当第一个形参）；
+//   3. 自增自减那条**语句**上按主人的类型把名字拼回来去找它。
+//
+// 这儿要把一句老话改对：那条语句上原本注着"语句位置上前缀与后缀没有差别（都不取值）"——
+// 对内建那三种（指针 / 整数 / real）成立，对重载**不成立**：它们是两个函数。所以后缀那一格
+// 先找 postfix 那个名字，没写才落回前缀（jancy 同，postfix 是可选的）。
+//
+// 尺子 `/tmp/c128.c`：C 里没有算符重载，手写的是"编译器该替你挑的那个调用"——
+// 那正是这一刀做的事。同一串数（3 / 0 / 10 / 7 / 6 / 7）。
+
+struct It {
+	int m_n;
+
+	int operator ++ () {
+		m_n = m_n + 2;
+		return m_n;
+	}
+
+	int operator -- () {
+		m_n = m_n - 3;
+		return m_n;
+	}
+
+	// 后缀那一个：回**旧**值（stdt_Iterator.jnc:44 的形状）
+	int postfix operator ++ () {
+		int v = m_n;
+		m_n = m_n + 10;
+		return v;
+	}
+}
+
+// 只写前缀的那一格：`c++` 落回它（jancy 同）
+class C {
+	int m_n;
+
+	void operator ++ () {
+		m_n = m_n + 1;
+	}
+}
+
+int main() {
+	It a;
+	a.m_n = 1;
+	++a;                                 // 前缀：1 + 2
+	printf("%d\n", a.m_n);
+	--a;                                 // 前缀：3 - 3
+	printf("%d\n", a.m_n);
+	a++;                                 // 后缀那一个：0 + 10
+	printf("%d\n", a.m_n);
+	a--;                                 // 没写后缀的减 —— 落回前缀：10 - 3
+	printf("%d\n", a.m_n);
+
+	C* c = new C;
+	c.m_n = 5;
+	c++;                                 // 只写了前缀：5 + 1
+	printf("%d\n", c.m_n);
+	++c;                                 // 6 + 1
+	printf("%d\n", c.m_n);
+	return 0;
+}
