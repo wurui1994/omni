@@ -1,0 +1,61 @@
+// 第一百二十二刀：泛型的**默认类型参数**。语料里两处，都在 `stdt` 里：
+// `class HashTable<K, V, H, E = Eq<K> >`（stdt_HashTable.jnc:46）与
+// `class RbTree<K, V, C = stdt.Lt<K> >`（stdt_RbTree.jnc:51）—— 两处的默认值本身都是一格
+// **实例化**、而且引的是**前面那一格参数**，所以这一刀非得等第一百一十九刀（实参是实例化）
+// 先落地才做得动。
+//
+// 做法：给的实参不够时，拿声明处那几格默认 `targ` 补上；补的时候用**已经绑定的**那几格替换，
+// 而且 map 边填边长（后一格默认值可以引前一格的默认值）。补出来的那一格当成一格普通实参走
+// 同一条路（`tinstArg`：tinst / `*` / 修饰符那三支都用得上）。
+//
+// 要紧的一条：`H<int>` 与 `H<int, Eq<int> >` 补完之后**是同一格实例**（名字一样，memoise
+// 住的是同一份）。这一格在下面用一个函数钉住 —— 形参写 `H<int>*`，传进去的是按第二种写法
+// 造的那一格；两者要是两个类型，这一句当场不收。
+//
+// 界在 `bad/generic-defmid`：带默认值的那几格必须**排在后面**（不然"给了 2 个实参"落在
+// 哪几格上没有唯一答案）。
+//
+// 尺子 `/tmp/c120.c`：手抄单态化之后那四个 C 结构体，同一串数（5 6 5 / 65 9 / 5 / 7 12）。
+
+struct Eq<T> {
+	T m_t;
+}
+
+struct H<K, E = Eq<K> > {
+	K m_k;
+	E m_e;
+	K key() { return m_k; }
+}
+
+// 默认值不是实例化的那一种（`Base = int`）也走同一条路
+struct Slot<T, Base = int> {
+	T m_v;
+	Base m_b;
+}
+
+int getk(H<int>* h) {
+	return h.key();
+}
+
+int main() {
+	H<int>* h = new H<int>;
+	h.m_k = 5;
+	h.m_e.m_t = 6;
+	printf("%d %d %d\n", h.m_k, h.m_e.m_t, h.key());
+
+	// 第二格写全 —— 与上面那一格是**同一个**实例
+	H<char, Eq<int> >* h2 = new H<char, Eq<int> >;
+	h2.m_k = 65;
+	h2.m_e.m_t = 9;
+	printf("%d %d\n", h2.m_k, h2.m_e.m_t);
+
+	H<int, Eq<int> >* h3 = new H<int, Eq<int> >;
+	h3.m_k = 5;
+	printf("%d\n", getk(h3));            // 形参是 H<int>* —— 补完是同一格才收得下
+
+	Slot<char>* s = new Slot<char>;
+	s.m_v = 7;
+	s.m_b = 12;
+	printf("%d %d\n", s.m_v, s.m_b);
+	return 0;
+}

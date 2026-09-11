@@ -2770,18 +2770,30 @@ class JncLower {
     return ns === '' ? n : `${ns}$${n}`;
   }
 
-  /** 参数表：`<T, K, V>` 里那几格必须是**裸名字**（那就是参数），带别的形状当场拒。 */
+  /**
+   * 参数表：`<T, K, V>` 里那几格必须是**裸名字**（那就是参数）。回
+   * `[{name, def}]` —— `def` 是默认类型那一格 `type-name`（第一百二十二刀），没写就是 null。
+   *
+   * 带默认值的必须**排在后面**（与 C++ / jancy 同一条）：不然"给了 2 个实参"落到哪几格上
+   * 就没有唯一答案。
+   */
   tmplParams(targs) {
     const out = [];
+    let seenDef = false;
     for (const t of this.flat(targs)) {
       if (!isList(t) || head(t) !== 'targ') return this.nope(t, '认不出的泛型参数');
-      if (t.items[2] !== undefined) return this.nope(t, '泛型参数的默认类型');
+      const def = t.items[2] ?? null;
+      if (def === null && seenDef) {
+        this.err(t, '泛型的参数表里带默认类型的那几格必须排在后面');
+        return null;
+      }
+      if (def !== null) seenDef = true;
       const sp = this.tmplSpec(t.items[1]);
       if (sp === null) return null;
       if (!isList(sp) || head(sp) !== 'name' || !isAtom(sp.items[1])) {
         return this.nope(t, '泛型的参数不是一个裸名字');
       }
-      out.push(sp.items[1].value);
+      out.push({ name: sp.items[1].value, def });
     }
     return out.length === 0 ? this.nope(targs, '泛型的参数表是空的') : out;
   }
@@ -2887,51 +2899,38 @@ class JncLower {
     const keys = [];
     for (const t of this.flat(n.items[2])) {
       if (!isList(t) || head(t) !== 'targ') return null;
-      const tn = t.items[1];
-      let sp = this.tmplSpec(tn, true);
-      if (sp === null) return null;
-      let key;
-      // 实参本身是一格实例化：先把里层造出来，再拿它的名字当一格普通类型名用
-      if (isList(sp) && head(sp) === 'tinst') {
-        const inner = this.tinstOne(sp, ns, out, depth + 1);
-        if (inner === null) return null;
-        key = inner.replace(/\$/g, '_');
-        sp = this.tmplNameNode(inner, sp.span);
-      } else {
-        key = this.tmplKey(sp);
-        if (key === null) return null;
-      }
-      /* 实参带 `*`（第一百二十刀）或者带修饰符（`T const*`，第一百二十一刀）：替换只在
-         type-spec 那一层 —— 所以先给那一格类型**起个名字**（合成一格
-         `typedef Bucket* jnc$tp$Bucket_p;` / `typedef int const* jnc$tp$int_const_p;`），
-         再拿这个名字替进去。语言里"给类型起名字"本来就是 typedef 那一格，不用新造机制；
-         合成的那一条排在名单里，`run()` 的 typedef 那一遍（排在 typeName 之后、typeDecl
-         之前）照常收它。修饰符要**记进名字**里 —— `Box<int const*>` 与 `Box<int*>` 不是
-         同一个类型，名字不分开就成了静默的错答案。 */
-      const np = isList(tn) ? this.flat(tn.items[2]).length : 0;
-      const mods = isList(tn) && isList(tn.items[1]) ? this.tmplMods(tn.items[1]) : [];
-      if (np > 0 || mods.length > 0) {
-        key = `${key}${mods.map((w) => `_${w}`).join('')}${'_p'.repeat(np)}`;
-        const alias = `jnc$tp$${key}`;
-        if (!this.tmplPtrs.has(alias)) {
-          this.tmplPtrs.add(alias);
-          out.push({ ns: '', done: true, it: this.tmplPtrDef(sp, tn, alias) });
-        }
-        sp = this.tmplNameNode(alias, tn.span);
-      }
-      specs.push(sp);
-      keys.push(key);
+      const r = this.tinstArg(t.items[1], ns, out, depth);
+      if (r === null) return null;
+      specs.push(r.spec);
+      keys.push(r.key);
     }
-    if (specs.length !== tm.params.length) {
-      this.err(n, `泛型 '${shown(full)}' 要 ${tm.params.length} 个实参，这里给了 ${specs.length} 个`);
+    /* 默认类型参数（第一百二十二刀）：给的实参不够时，拿声明处那几格默认 `targ` 补上。
+       补的时候要用**已经绑定的**那几格替换 —— 语料里那两处正是
+       `class HashTable<K, V, H, E = Eq<K> >`（stdt_HashTable.jnc:46）与
+       `class RbTree<K, V, C = stdt.Lt<K> >`（stdt_RbTree.jnc:51）：默认值本身是一格
+       **实例化**，而且引的是前面那一格参数。所以 map 得边填边长，然后把补出来的那一格
+       当成一格普通实参走同一条路（`tinstArg` 里 tinst / `*` / 修饰符那三支都用得上）。 */
+    const req = tm.params.filter((p) => p.def === null).length;
+    if (specs.length < req || specs.length > tm.params.length) {
+      const want = req === tm.params.length ? `${req}` : `${req}~${tm.params.length}`;
+      this.err(n, `泛型 '${shown(full)}' 要 ${want} 个实参，这里给了 ${specs.length} 个`);
       return null;
+    }
+    const bound = new Map();
+    for (let i = 0; i < specs.length; i++) bound.set(tm.params[i].name, specs[i]);
+    for (let i = specs.length; i < tm.params.length; i++) {
+      const r = this.tinstArg(this.tmplSubst(tm.params[i].def, bound), ns, out, depth);
+      if (r === null) return null;
+      specs.push(r.spec);
+      keys.push(r.key);
+      bound.set(tm.params[i].name, r.spec);
     }
     const inst = `${full}$${keys.join('$')}`;
     if (this.tmplInsts.has(inst)) return inst;
     this.tmplInsts.add(inst);
     // 参数名 -> 实参那格 type-spec
     const map = new Map();
-    for (let i = 0; i < tm.params.length; i++) map.set(tm.params[i], specs[i]);
+    for (let i = 0; i < tm.params.length; i++) map.set(tm.params[i].name, specs[i]);
     const ag = this.tmplSubst(tm.agg, map);
     // 名字那一格换成实例名（`(tinst …)` -> `(name Box$int)`）
     const sp0 = ag.items[2].span;
@@ -2949,6 +2948,46 @@ class JncLower {
     // 这几条（合成的那一格 + 它提上来的方法）已经就地扫完了 —— 队列别再扫一遍，见 expandTemplates
     for (let k = at; k < out.length; k++) out[k].done = true;
     return inst;
+  }
+
+  /**
+   * 一格实参（一颗 `type-name`）解成 `{spec, key}`：`spec` 是替换用的那格 type-spec，
+   * `key` 是拼进实例名里的那一段。三支特殊形状都在这儿：
+   *   - 实参本身是一格实例化（第一百一十九刀）—— 先解里层；
+   *   - 实参带 `*`（第一百二十刀）、带修饰符（第一百二十一刀）—— 先给那一格类型起个名字。
+   * 默认类型参数补出来的那一格走的也是这儿（第一百二十二刀）。
+   */
+  tinstArg(tn, ns, out, depth) {
+    let sp = this.tmplSpec(tn, true);
+    if (sp === null) return null;
+    let key;
+    if (isList(sp) && head(sp) === 'tinst') {
+      const inner = this.tinstOne(sp, ns, out, depth + 1);
+      if (inner === null) return null;
+      key = inner.replace(/\$/g, '_');
+      sp = this.tmplNameNode(inner, sp.span);
+    } else {
+      key = this.tmplKey(sp);
+      if (key === null) return null;
+    }
+    /* 替换只在 type-spec 那一层 —— 所以带 `*` / 带修饰符的实参先合成一格
+       `typedef Bucket* jnc$tp$Bucket_p;`（或 `typedef int const* jnc$tp$int_const_p;`），
+       再拿这个名字替进去。语言里"给类型起名字"本来就是 typedef 那一格，不用新造机制；
+       合成的那一条排在名单里，`run()` 的 typedef 那一遍（typeName 之后、typeDecl 之前）
+       照常收它。修饰符要**记进名字** —— `Box<int const*>` 与 `Box<int*>` 不是同一个类型，
+       名字不分开就成了静默的错答案。 */
+    const np = isList(tn) ? this.flat(tn.items[2]).length : 0;
+    const mods = isList(tn) && isList(tn.items[1]) ? this.tmplMods(tn.items[1]) : [];
+    if (np > 0 || mods.length > 0) {
+      key = `${key}${mods.map((w) => `_${w}`).join('')}${'_p'.repeat(np)}`;
+      const alias = `jnc$tp$${key}`;
+      if (!this.tmplPtrs.has(alias)) {
+        this.tmplPtrs.add(alias);
+        out.push({ ns: '', done: true, it: this.tmplPtrDef(sp, tn, alias) });
+      }
+      sp = this.tmplNameNode(alias, tn.span);
+    }
+    return { spec: sp, key };
   }
 
   /** 抄一份、把 `(name 参数名)` 换成实参那格 type-spec。 */
