@@ -5968,6 +5968,56 @@ alias 这一行。所以这一刀真正的前置是 ADR-0025 那个 `<T>`：**�
 唯一还差的一格），但它的账是"补齐了一格语言的槽"，不是"降了 42 对"。
 
 
+## 把榜上头几行**拆开**数了一遍（第一百〇四刀那一课的直接后果）
+
+上一刀吃的教训是"按行认账会高估"。所以这一趟把尺子那张榜的前几行按**真报出来的话**逐份
+拆开数了（一次性的 `/tmp/board-split.mjs`，走的是尺子同一张 RunCache，口径一个字没改，
+所以不重编）。`份数 / 处数 / sole` 三栏里，**sole 是按真话算的**：这份文件从头到尾只被这
+一句话挡住。
+
+`E 没有这个类型` **347** 对拆开：
+
+```
+131 份 /  999 处 / sole 5   variant_t
+110 份 /  216 处 / sole 0   std.Error
+ 90 份 /   91 处 / sole 0   std.StringHashTable
+ 80 份 /   80 处 / sole 0   FormatFunc
+ 77 份 /  163 处 / sole 0   std.Guid
+ 64 份 /  112 处 / sole 0   std.Buffer
+ 41 / 40 / 38 / 38 份       ui.ChecksumInfoSet / ui.StdSessionInfoSet / …InfoSet / …PropertySet
+… 另有 291 种
+```
+
+`E 没有这个函数` **286** 对拆开：`readInt` 92、`addProperty` 88、`addWidget` 84 份 / **320 处**、
+`addSpacing` 81、`addItem` 81、`std.setError` 52、`addPart` 43 份 / **817 处** —— sole 全 0。
+
+`E 未声明的变量` **285** 对拆开：`prop` 88 份 / **2376 处**、`key` 90、`label` 81、
+`comboBox` 81、`item` 80 —— sole 全 0。**这一整行是级联出来的**：根在
+`ui_PropertyGrid.jnc:420` 那一句
+
+```jancy
+GroupProperty* prop = new GroupProperty(name);   // ui.GroupProperty 没有 construct，给不了构造实参
+finalizeCreateProperty(prop, …);                 // 于是这里、以及后面每一处用 prop 的地方
+return prop;                                     // 都再报一遍"未声明的变量 'prop'"
+```
+
+声明那一句失败之后**那一格局部量压根没登记**，于是一个根错误放大成几十条派生错误。
+`prop` 那 2376 处几乎全是这么来的。
+
+顺带两条也拆清了：`bitflag 里的负值` 168 份里 **166 份是同一个 `log$RecordCodeFlags`**；
+`没有这个基类` 117 份里 **77 份是 `jnc.Scheduler`**（宿主给的）。
+
+**三件事因此定下来**：
+
+1. 榜上头三行 347 + 286 + 285 = **918 对，是这张榜的 12%，而它们几乎全是宿主 API 那一层
+   加它带出来的级联** —— sole 合起来只有 variant_t 那 5 份。拿这三行的对数当"还差多少语言
+   特性"读，会把宿主面的账算到语言头上。
+2. `variant_t` **131 份 / 999 处**是整张榜上最大的**一个名字**，比第二名（`std.Error` 110）
+   高一头，而且是那三行里唯一有 sole 的。任务 #35 上原先记的"75 处"低估了一大截。
+3. **声明失败要不要照样登记那一格局部量**，是一笔独立的账（诊断的质量，不是新能力）：
+   落下来对数会掉一大片，可掉的全是派生的噪声。要落就得在 ADR 里明写"这一刀不新增能力"，
+   别混进"又收下一格语言特性"里去。
+
 ## 后果与代价
 
 
