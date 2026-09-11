@@ -2370,7 +2370,7 @@ class JncLower {
       if (f === undefined) {
         return name === null
           ? this.err(node, `第 ${idx + 1} 项越过了 ${type.name} 的 ${fs.length} 个字段`)
-          : this.err(node, `${type.name} 没有字段 '${name}'`);
+          : this.err(node, `${shown(type.name)} 没有字段 '${name}'`);
       }
       return { step: { f: f.name }, type: f.type };
     }
@@ -8423,7 +8423,8 @@ class JncLower {
         return this.nope(n, `属性 '${nm}' 当一格可写的内存用 —— 读写各是一次调用，`
           + '`++`、`&` 与复合赋值这类"就地改"的写法这一层接不上');
       }
-      return this.err(n, `${structName} 没有字段 '${nm}'`);
+      // 名字要走 shown()：内部拼法（`doc$PluginHost`）漏进诊断里，用户不认得那是什么
+      return this.err(n, `${shown(structName)} 没有字段 '${nm}'`);
     }
     /* bigendian 的字段（第一百二十六刀）：它**是**一格真字段（上面那一问找得着它），所以这一格
        挂在最后这个出口上，而不是像位域那样挂在"找不着"那一支里。读写各套一次字节序反转。 */
