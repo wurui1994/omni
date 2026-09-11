@@ -175,6 +175,27 @@ typedef IteratorImpl<BoxIteratorBase<T> > BoxIterator<T>; // test157.jnc:32     
 另外量到一件顺手的好事：语料里嵌套实例化一律写成 `Iterator<RbTreeNode<int, int> > it`
 （**`>` 前面有空格**，C++98 那个写法），所以 `>>` 那个老问题这儿**不存在**。
 
+## 又量到一条：整个 `std` 那一组，只差这一个 `<T>`
+
+第九十三刀之后顺着尺子的一个盲点（见 ADR-0016 那一节"语料里有些文件本来就不是一份一份编的"）
+拿"整目录一起编"的量法看了一眼 `src/jnc_ext/jnc_std/jnc`（19 份）：
+
+```
+/…/jnc_std/jnc/stdt_Array.jnc:19:12: error: unexpected "<" '<'; expected …
+  class Array<T> {
+             ^
+```
+
+**整组就这一条错。**别的 18 份（`std_Buffer` / `std_HashTable` / `std_List` /
+`std_String` / `std_Map` …）一条都没有。这一格比上面"12 份文件差一个 `<T>`"那个数字更硬：
+它说的是**这一层离一整个标准库只差这一件事** —— 而语料里 98 + 91 对
+`import "std_HashTable.jnc"` / `import "std_Buffer.jnc"` 找不着的账，正是要靠这一组落地
+才还得上（那两条 import 拦的不是路径，是"这一组还编不下来"）。
+
+所以判据 3 上再加一条：
+
+3'. `src/jnc_ext/jnc_std/jnc` 那 19 份用"整目录一起编"的壳量，错**归零**（现在是 1 条）。
+
 ## 判据
 
 1. **语料 655 份的解析结果与解析耗时都不退**（歧义报错 0 条）—— 原来写的"表的冲突数不涨"
