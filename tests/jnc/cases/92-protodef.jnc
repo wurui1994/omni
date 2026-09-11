@@ -1,0 +1,55 @@
+// 第一百刀：形参的默认值写在**原型**上。
+//
+// jancy 的默认值挂在 `FunctionArg` 上（`hasInitializer`），而"类里写原型、体写在类外"那种放法
+// 里它**只出现在原型上** —— 体外那个定义不必再写一遍。语料里的样子
+// （test/ioninja/api/ui_PropertyGrid.jnc:233-245）：
+//
+//   GroupProperty* createGroupProperty(Property* parentProp = null, Property* beforeProp = null,
+//                                     string_t name, string_t toolTip = null);
+//   GroupProperty* createGroupProperty(string_t name, string_t toolTip = null) {
+//       return createGroupProperty(,, name, toolTip);      // 第八十八刀的空槽
+//   }
+//   GroupProperty* PropertyGrid.createGroupProperty(Property* p, Property* b, …) { … }
+//
+// 这一层的签名那一遍看的是**定义**，所以先前那几格默认值整个丢了 —— 于是同一份文件里那句
+// `createGroupProperty(,, name, toolTip)` 报"第 1 个实参是空的，而它那个形参没有默认值"
+// （语料 96 对）。这一刀把原型上那几格记下来、在签名那一遍之后并进去。
+//
+// 这一份钉三件事：原型上的默认值管用、原型上"默认值挂在哪一格都行"（第九十九刀）配上空槽
+// （第八十八刀）能用、以及定义上自己写的默认值照旧。
+//
+// 语料里那个形状还多一层**同元重载**（4 个的与 2 个的两条），那一格由 ui_PropertyGrid.jnc
+// 自己在尺子上量 —— 这一份不掺重载进来：全 int 的两条在这一层与 jancy 那边都真的分不出来
+// （"ambiguous call to overloaded function"）。
+//
+// 期望输出的出处：/tmp/c100.c（`cc -O0 -std=c99 -Wall`，各种调用各自展开）。
+
+class C {
+	int add(int a = 1, int b = 2);
+
+	// 默认值挂在头两格上（第九十九刀），调用点用空槽跳过（第八十八刀）
+	int mk(int p = 7, int q = 8, int name, int tip = 9);
+
+	// 默认值写在**定义**上的那一种（第七十七刀）照旧
+	int mul(int a, int b = 3) {
+		return a * b;
+	}
+}
+
+int C.add(int a, int b) {
+	return a * 10 + b;
+}
+
+int C.mk(int p, int q, int name, int tip) {
+	return p * 1000 + q * 100 + name * 10 + tip;
+}
+
+int main() {
+	C* c = new C();
+	printf("%d %d %d\n", c.add(7, 8), c.add(7), c.add());
+	printf("%d\n", c.mk(5, 6, 4, 3));
+	printf("%d\n", c.mk(,, 4, 3));
+	printf("%d\n", c.mk(,, 4));
+	printf("%d %d\n", c.mul(5), c.mul(5, 4));
+	return 0;
+}

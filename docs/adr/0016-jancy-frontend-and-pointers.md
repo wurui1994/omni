@@ -5712,6 +5712,56 @@ jancy 那边本来也没有"必须在末尾"的规矩：它检查默认值是**�
 连带；`真降得下来` 75、`没有还不收` 167 都不动（那 100 对散在 80 多份文件里，每一份后面
 还压着别的）。
 
+## 第一百刀：形参的默认值写在**原型**上
+
+`第 1 个实参是空的，而它那个形参没有默认值` 96 对。逐份看下来全是同一个形状
+（`ui_PropertyGrid.jnc:233-245`）：
+
+```c
+GroupProperty* createGroupProperty(
+    Property* parentProp = null, Property* beforeProp = null,
+    string_t name, string_t toolTip = null);              // 类体里的原型：默认值在这儿
+
+GroupProperty* createGroupProperty(string_t name, string_t toolTip = null) {
+    return createGroupProperty(,, name, toolTip);          // 第八十八刀的空槽
+}
+
+GroupProperty* PropertyGrid.createGroupProperty(
+    Property* parentProp, Property* beforeProp, …) { … }   // 体外的定义：不再写一遍
+```
+
+jancy 的默认值挂在 `FunctionArg` 上（`hasInitializer`），而"类里写原型、体写在类外"那种放法里
+它**只出现在原型上**。这一层的签名那一遍看的是**定义**，于是那几格默认值整个丢了 ——
+同一份文件里那句空槽调用就报"那个形参没有默认值"。**先前那句诊断是对的，错的是它前面那步。**
+
+落法两处：类体那一遍见到方法原型时把默认值那几个语法节点按 `类名$方法名#元数` 记进
+`protoDefs`（只**照着语法树记**，不走 `formalList` —— 那一遍会发诊断，而这份形参表马上还要
+由体外那个定义再过一遍），然后签名那一遍之后一格 `mergeProtoDefs` 并进去：按元数在重载那一族
+里挑，定义上自己写了默认值的**不动**（那时按定义那一份算）。
+
+**证据**：`cases/92-protodef.jnc` 钉三件事 —— 原型上的默认值管用（`c.add(7)` / `c.add()`）、
+原型上"默认值挂在哪一格都行"（第九十九刀）配上空槽（第八十八刀）能用（`c.mk(,, 4, 3)`）、
+定义上写的照旧。尺子 `/tmp/c100.c` 把各种调用各自展开。语料里那个形状还多一层**同元重载**，
+那一格留给 `ui_PropertyGrid.jnc` 在尺子上量 —— 全 int 的两条在这一层与 jancy 那边都真的
+分不出来（"ambiguous call to overloaded function"），所以这一份不掺重载进来。
+`node tests/jnc/run.js` = 188 passed, 0 failed；`link.js` 2/0。
+
+**量出来的（这一刀的账最值得看，掉的与涨的都在同一个因果链上）**。对数 7976 → **7930
+（−46）**，把 stash 前后两份榜逐行对下来是：
+
+- **清零的**：`第 1 / 2 / 3 个实参是空的` −96 / −5 / −8 = **−109**；
+- **跟着不报了的**：各种"要 N 个实参，这里给了 M 个" −25（默认值补上之后个数就对了）；
+- **涨的（这一刀直接的后果）**：`这个形状的默认值` 3 → **84（+81）**、
+  `null 得从左边知道自己是哪种指针` 98 → 103（+5）。默认值现在**找得着了**，于是
+  `defShapeOk` 与 `null` 那两条界第一次真被这些默认值撞上 —— 前者拦的是
+  `int spacing = Def_Spacing` 这种**裸名字**（`ui_ToolBar.jnc:51`：那是个枚举常量，
+  而 `defShapeOk` 现在只认 `E.A` 那种写法），后者是 `= null` 落到调用点之后左边那格
+  类型还没传下来。
+- `真降得下来` 75 与 `没有还不收` 167 都不动。
+
+那 +81 是**下一刀**：`defShapeOk` 该认"裸名字指着一格编译期常量"——第九十六刀那些漏出来的
+无名枚举成员正是这个形状（`exposedLit` 已经能答），named 枚举的成员在自己那层里也一样。
+
 ## 后果与代价
 
 

@@ -1003,6 +1003,11 @@ class JncLower {
        因为那一格 fn-def 同时也待在被提到顶层的那一批里（nsFlat），reactorBody 那一遍要认得
        出"这一格已经当成员登记过了"。 */
     this.rctInline = new Set();
+    /* 写在**原型**上的形参默认值（第一百刀）：`类名$方法名#元数` -> 那几格默认值的语法节点。
+       jancy 的默认值是挂在 `FunctionArg` 上的（`hasInitializer`），而"体写在类外"那种放法里
+       它只出现在类体里那句原型上 —— 体外那个定义不必再写一遍（ui_PropertyGrid.jnc:233-245
+       就是这个形状）。签名那一遍看的是定义，所以这一格要单独记着、之后并进签名。 */
+    this.protoDefs = new Map();
     /* 那些要等签名那一遍才办得了的 alias（第八十七刀）：目标是函数 / 方法的那些。 */
     this.aliasPend = [];
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
@@ -1933,6 +1938,9 @@ class JncLower {
       const s = this.fnSig(e.it);
       if (s !== null) this.sigs.set(e.it, s);
     }
+    /* 原型上那几格默认值并进签名（第一百刀）：签名这一遍看的是**定义**，而"类里写原型、
+       体写在类外"那种放法里默认值只出现在原型上。 */
+    this.mergeProtoDefs();
     // `override` 那几条规矩（第五十七刀）：基类的方法这时才都在表里。
     this.vtCheck();
     /* 目标是函数 / 方法的那些 alias（第八十七刀）：签名这时候才全在表里。 */
@@ -3375,6 +3383,16 @@ class JncLower {
         if (info.formals !== null) {
           if (!cls) this.nope(d, '结构体里的方法');
           else if (sp.virt !== null) this.methodProto(d, name, info, sp);
+          /* 原型上那几格默认值（第一百刀）：只**照着语法树记**，不走 formalList ——
+             那一遍会发诊断，而这一格的形参表马上还要由体外那个定义再过一遍。 */
+          if (cls) {
+            const fs2 = this.flat(info.formals);
+            const dn2 = fs2.map((f) => (isList(f) && head(f) === 'formal'
+              && f.items[3] !== undefined ? f.items[3] : null));
+            if (dn2.some((x) => x !== null)) {
+              this.protoDefs.set(`${name}$${info.name}#${fs2.length}`, dn2);
+            }
+          }
           /* `opaque class` 里的原型（第六十六刀 + ADR-0022 的 J4b）：**没有体外那个定义** ——
              实现在宿主的 C/C++ 里（opaque.rst:15-29 的 `io.Serial` 就是这个形状）。
              名字与**签名**都记下来：调用点据此发 `(ccall Owner_method self …)`。
@@ -3775,6 +3793,42 @@ class JncLower {
       if (up !== null) {
         this.nope(null, `'${shown(full)}' 上写 '${kind}'，而基类那条链上已经有虚方法 '${mn}'`
           + '（覆盖它写 `override`）');
+      }
+    }
+  }
+
+  /**
+   * 把原型上那几格默认值并进签名（第一百刀）。
+   *
+   * jancy 的默认值挂在 `FunctionArg` 上（`hasInitializer`），而"类里写原型、体写在类外"那种
+   * 放法里它**只出现在原型上**——`ui_PropertyGrid.jnc:233-245` 就是这个形状：
+   *
+   *   GroupProperty* createGroupProperty(Property* parentProp = null, …, string_t name, …);
+   *   GroupProperty* PropertyGrid.createGroupProperty(Property* parentProp, …) { … }
+   *
+   * 签名那一遍看的是**定义**，所以先前那几格默认值整个丢了 —— 于是同一份文件里
+   * `createGroupProperty(,, name, toolTip)` 报"第 1 个实参是空的，而它那个形参没有默认值"。
+   *
+   * 排在签名那一遍之后（那时定义都在表里了）、重载决议之前。定义上自己写了默认值的**不动**
+   * ——那时两处都有，按定义那一份算（jancy 那边两处都写会报重复，这一层不追这一格）。
+   */
+  mergeProtoDefs() {
+    for (const [key, defs] of this.protoDefs) {
+      const cut = key.lastIndexOf('#');
+      const base = key.slice(0, cut);
+      const want = Number(key.slice(cut + 1));
+      const fam = this.overloads.get(base);
+      const cands = fam === undefined ? [base] : fam;
+      for (const full of cands) {
+        const sig = this.fns.get(full);
+        if (sig === undefined) continue;
+        const self = this.methods.has(full) ? 1 : 0;
+        if (sig.params.length - self !== want) continue;
+        const had = sig.defs !== undefined && sig.defs !== null
+          && sig.defs.some((d) => d !== null && d !== undefined);
+        if (had) break;
+        sig.defs = (self === 1 ? [null] : []).concat(defs);
+        break;
       }
     }
   }
