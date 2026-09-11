@@ -1,0 +1,39 @@
+// 第一百一十六刀：**属性当 `.` 的左边**（读那一侧）。上一节量出来的那件事 —— 榜上
+// `属性 … 当一格可写的内存用` 那 34 份里一处 `++` 都没有，真正的形状是"读一格属性（值是一格
+// 类引用），再拿读出来的那个对象往下用"：
+//   m_type.getValueString(p, formatSpec);                jnc_Field.jnc:40
+//   m_attributeBlock ? m_attributeBlock.findAttribute(name) : null   jnc_ModuleItem.jnc:97
+//
+// 根因是**同一段七行代码抄了四遍**：`lvalue0` 的 field 支接了"左边是属性就走取值器"
+// （第七十二刀），而 `methodCallee` / `methodRef` / `propMember` / 原型那一处各自抄了一遍
+// 却都没接。抽成一处（`baseVal`）之后四条路一起对。
+//
+// 界不变：**写**那一侧（`++`、`&`、复合赋值）照旧拦着 —— 属性没有可写的那一格（第六十九刀）。
+// 这一刀动的只有读那一侧。
+
+class Inner {
+	int m_k;
+	int twice() { return m_k * 2; }
+}
+
+class Outer {
+	Inner* m_i;
+
+	Inner* property m_p;
+	Inner* m_p.get() { return m_i; }
+	void m_p.set(Inner* x) { m_i = x; }
+
+	// 裸写属性名（`jnc_Field.jnc:40` 那一处的形状）
+	int viaBare() { return m_p.twice(); }
+	int viaBareField() { return m_p.m_k; }
+}
+
+int main() {
+	Outer o;
+	Inner i;
+	i.m_k = 5;
+	o.m_p = i;
+	printf("%d %d\n", o.viaBare(), o.viaBareField());
+	printf("%d %d\n", o.m_p.twice(), o.m_p.m_k);
+	return 0;
+}

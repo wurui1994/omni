@@ -5429,14 +5429,9 @@ class JncLower {
   propMember(n, mn) {
     const ob = n.items[1];
     let bv = null;
-    if (isList(ob) && LV_SHAPES.has(head(ob))) {
-      const o = this.lvalue(ob);
-      if (o === null) return null;
-      bv = { code: this.read(o), type: o.type };
-    } else {
-      bv = this.expr(ob, null);
-      if (bv === null) return null;
-    }
+    // `.` 的左边读出来那一格（第一百一十六刀抽成一处，属性走取值器）
+    bv = this.baseVal(ob);
+    if (bv === null) return null;
     if (!isClass(bv.type)) return undefined;
     const pn = this.findProp(bv.type.name, mn);
     if (pn === null) return undefined;
@@ -9028,14 +9023,9 @@ class JncLower {
     }
     const ob = callee.items[1];
     let bv = null;
-    if (isList(ob) && LV_SHAPES.has(head(ob))) {
-      const o = this.lvalue(ob);
-      if (o === null) return null;
-      bv = { code: this.read(o), type: o.type };
-    } else {
-      bv = this.expr(ob, null);
-      if (bv === null) return null;
-    }
+    // `.` 的左边读出来那一格（第一百一十六刀抽成一处，属性走取值器）
+    bv = this.baseVal(ob);
+    if (bv === null) return null;
     if (!isClass(bv.type)) {
       return this.err(n, `'${tyName(bv.type)}' 不是类，上面问不出方法 '${mn}'`);
     }
@@ -9932,13 +9922,34 @@ class JncLower {
 
   /** `c.foo(…)` / `p->foo(…)` 里的被调（第五十二刀）：回 `{name, self}`。
    *  左边那一格与取字段走同一条路 —— 类那一格的值**就是**对象那段内存的地址。 */
+  /**
+   * `.` 的左边读出来那一格**值**（第一百一十六刀把它抽成一处）。
+   *
+   * 左边是一格**属性**时读它就是**调取值器** —— 那与第六十九刀拦的"把属性当一格可写的内存用"
+   * 不是一回事：属性自己没被写。这一格先前只有 `lvalue0` 的 field 支接着（第七十二刀），
+   * 而 `methodCallee` / `methodRef` / `propMember` / 原型那一处**四处各抄了一遍**同样的七行、
+   * 都没接。于是 `o.m_p.twice()`（属性的值是一格类引用、拿它调方法）报的是那句管"就地改"的
+   * 诊断 —— 名字起错了，量下来榜上 34 份全是这一种（见 ADR-0016 那一节）。
+   *
+   * 抽成一处之后四条路一起对，而且以后再往这一格上加东西不会漏。
+   */
+  baseVal(ob) {
+    if (!isList(ob) || !LV_SHAPES.has(head(ob))) return this.expr(ob, null);
+    const pt = this.propTarget(ob);
+    if (pt === null) return null;
+    if (pt !== undefined) return this.propGet(ob, pt.pn, pt.self);
+    const o = this.lvalue(ob);
+    if (o === null) return null;
+    return { code: this.read(o), type: o.type };
+  }
+
   methodCallee(n, callee, mn) {
     const ob = callee.items[1];
     let bv = null;
-    if (head(callee) === 'field' && isList(ob) && LV_SHAPES.has(head(ob))) {
-      const o = this.lvalue(ob);
-      if (o === null) return null;
-      bv = { code: this.read(o), type: o.type };
+    if (head(callee) === 'field') {
+      // `.` 的左边读出来那一格（第一百一十六刀抽成一处，属性走取值器）
+      bv = this.baseVal(ob);
+      if (bv === null) return null;
     } else {
       bv = this.expr(ob, null);
       if (bv === null) return null;
@@ -9965,14 +9976,9 @@ class JncLower {
   methodRef(n, mn) {
     const ob = n.items[1];
     let bv = null;
-    if (isList(ob) && LV_SHAPES.has(head(ob))) {
-      const o = this.lvalue(ob);
-      if (o === null) return null;
-      bv = { code: this.read(o), type: o.type };
-    } else {
-      bv = this.expr(ob, null);
-      if (bv === null) return null;
-    }
+    // `.` 的左边读出来那一格（第一百一十六刀抽成一处，属性走取值器）
+    bv = this.baseVal(ob);
+    if (bv === null) return null;
     if (!isClass(bv.type)) return undefined;
     const full = this.findMethod(bv.type.name, mn);
     if (full === null) return undefined;
