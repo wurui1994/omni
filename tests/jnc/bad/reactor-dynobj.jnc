@@ -1,0 +1,36 @@
+// reactor 的反应里经**调用**读一格 bindable 属性（ADR-0016 第八十五刀那条边界）。
+// 语料 582 处读里有 79 处是"对象要算出来"的形状（`m_actionTable[ActionId.Connect].m_text`、
+// `m_ssh.m_remoteAddress.getString()` 那种）。这一层的订阅是在 `start()` 那一刻挂上去的，
+// 而这里那格对象要调一次函数才知道 —— 绑的就是那一刻回来的那一格，后来换了就绑错。
+// jancy 没这个问题：它每跑一遍重收一次依赖（jnc_ct_OperatorMgr.cpp:1441-1457 的
+// addReactorBinding 是在**运行期**插的）。
+class Cell {
+	int bindable m_v;
+}
+
+class Grid {
+	Cell* m_a;
+	int m_shown;
+
+	reactor m_uiReactor;
+
+	construct() {
+		m_a = new Cell;
+		m_shown = 0;
+	}
+
+	Cell* pick() {
+		return m_a;
+	}
+}
+
+reactor Grid.m_uiReactor {
+	m_shown = pick().m_v;
+}
+
+int main() {
+	Grid* g = new Grid;
+	g.m_uiReactor.start();
+	printf("%d\n", g.m_shown);
+	return 0;
+}

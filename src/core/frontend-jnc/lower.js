@@ -968,6 +968,15 @@ class JncLower {
     /* 那几格事件字段的**名字**（第八十三刀）。mcRef 拿它做一次便宜的预筛：对着任何 `a.b`
        都去求左边那个对象会多发诊断，所以先按名字问一句"这可能是事件吗"。 */
     this.evtNames = new Set();
+    /* reactor（第八十五刀）：全名 -> `{full, cls, on, body, node}`。
+     * `cls` 非 null 的那些是类的成员（语料里 49/49 都是这一种：类里写 `reactor m_uiReactor;`、
+     * 体写在类外 `reactor Cls.m_uiReactor { … }`），`on` 是"跑没跑"那一格的名字
+     * （成员是类里的一格 bool 字段，顶层是一格模块级 bool）。`body` 是那个 compound 节点，
+     * 声明与体分两处时由后面那一遍补上。 */
+    this.reactors = new Map();
+    /* 那些 reactor 成员的**短名**：`s.m_uiReactor.start()` 这种调用要先按名字便宜地筛一次
+       （与 evtNames 同一条理由）。 */
+    this.rctNames = new Set();
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
      * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
      * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
@@ -1136,6 +1145,242 @@ class JncLower {
       this.decls.push(`  (fn ${cls}$construct (($this ${slotText(self)})) void\n`
         + `${[...pre, ...lines].join('\n')})`);
     }
+  }
+
+  /**
+   * 那几格 reactor 的体（第八十五刀）。排在函数体那一遍之后 —— 反应里能引用模块级变量、
+   * 属性与别的函数，那些到这一步才全登记完（与 emitFieldInitCtors 同一条理由）。
+   *
+   * 一格 reactor 落成三样东西：
+   *   - 一格 bool（跑没跑）：类的成员是类里的一格字段，顶层是一格模块级变量；
+   *   - **一条顶层语句一格反应函数**（与 jancy 的 reactionIdx 同一条：每条 reactive_expression
+   *     进一次 `enterReactiveExpression`，jnc_ct_Expr.llk:179-185 / jnc_ct_Module.h:885-896），
+   *     体外面套一道 `if (跑没跑)` 的闸门；
+   *   - `start` / `stop`：start 先把订阅挂上（静态超集，见 rctReads）、再把所有反应跑一遍；
+   *     stop 只把 bool 关掉 —— 这一层的多播还摘不掉（`+=` 不回 cookie，第七十三刀那条边界），
+   *     所以订阅还挂着，只是不干活了。**记账**：jancy 的 stop 是真摘掉。
+   */
+  emitReactors() {
+    for (const r of this.reactors.values()) {
+      if (r.body === null) {
+        this.err(r.node, `reactor '${shown(r.full)}' 声明了却没有体`
+          + '（体写在类外：`reactor 类名.名字 { … }`）');
+        continue;
+      }
+      const self = r.cls === null ? null : tClass(r.cls, false);
+      const selfDecl = self === null ? '' : `($this ${slotText(self)})`;
+      const selfArg = self === null ? '' : ' (var $this)';
+      const onRd = self === null ? `(var ${r.on})` : `(pload (pfield (var $this) ${r.on}))`;
+      if (self === null) this.decls.push(`  (global ${r.on} bool)`);
+      const saveNs = this.ns;
+      const saveSelf = this.selfClass;
+      const savePr = this.selfProp;
+      const saveAlias = this.alias;
+      const saveLifted = this.lifted;
+      const saveErr = this.curErr;
+      const saveRet = this.retTy;
+      this.scopes = [new Map()];
+      this.ns = r.cls === null ? '' : r.cls;
+      this.selfClass = r.cls;
+      this.selfProp = null;
+      this.alias = r.cls === null ? new Map() : new Map([['this', '$this']]);
+      this.lifted = new Set();
+      this.curErr = null;
+      this.retTy = J_VOID;
+      this.shield = 0;
+      this.guards = [];
+      const binds = [];
+      const runs = [];
+      let k = 0;
+      for (const s of this.flat(r.body.items[1])) {
+        if (isList(s) && head(s) === 'onevent') {
+          this.rctOnEvent(r, s, k, binds, self, onRd);
+          k++;
+          continue;
+        }
+        const rn = `${r.full}$r${k}`;
+        k++;
+        const lines = this.stmt(s, 8);
+        if (lines === null) continue;
+        this.decls.push(`  (fn ${rn} (${selfDecl}) void\n    (if ${onRd}\n      (do\n`
+          + `${lines.join('\n')})))`);
+        const sig = { params: self === null ? [] : [self], ret: J_VOID };
+        this.fns.set(rn, sig);
+        if (r.cls !== null) this.methods.set(rn, r.cls);
+        const clo = self === null
+          ? `(fnref ${rn})` : `(mkclo ${this.methodThunk(rn, r.cls, sig)} (var $this))`;
+        const reads = [];
+        this.rctReads(s, reads);
+        for (const p of reads) {
+          /* 对象那一段里带下标或调用的读（语料 582 处里 79 处）明说不收：这一层是**在 start
+             那一刻**把订阅挂上去的，而 `m_actionTable[ActionId.Connect].m_text` 里那一格对象
+             要等下标算出来才知道 —— 绑的是那一刻算出来的那一格，后来换了就绑错了。
+             jancy 没这个问题：它每跑一遍重收一次依赖。 */
+          if (this.rctDyn(p)) {
+            this.nope(p, 'reactor 的反应里经下标 / 调用读一格 bindable 属性（这一层的订阅是在'
+              + ' start 那一刻绑的，那时算出来的对象与后来不一定是同一格）');
+            continue;
+          }
+          const mc = this.mcRef(this.mkL(p.span, this.mkA(p.span, 'bindingof'), p));
+          if (mc === null || mc === undefined) continue;
+          binds.push(`    (apush ${mc.code} ${clo})`);
+        }
+        runs.push(`    (expr (call ${rn}${selfArg}))`);
+      }
+      this.ns = saveNs;
+      this.selfClass = saveSelf;
+      this.selfProp = savePr;
+      this.alias = saveAlias;
+      this.lifted = saveLifted;
+      this.curErr = saveErr;
+      this.retTy = saveRet;
+      this.scopes = [];
+      /* 绑定只挂一次（`bound` 那一格，成员的那一格在**对象里**），而"跑一遍"每次 start 都做
+         —— restart（语料 2 处，注释写的是 "need to re-bind"）在这一层就是"再跑一遍"：
+         依赖是静态的，重绑是空操作。 */
+      const bd = r.cls === null ? `${r.full}$bound` : r.bound;
+      const bdRd = self === null ? `(var ${bd})` : `(pload (pfield (var $this) ${bd}))`;
+      const bdSet = self === null
+        ? `(set ${bd} (bool true))` : `(pstore (pfield (var $this) ${bd}) (bool true))`;
+      if (self === null) this.decls.push(`  (global ${bd} bool)`);
+      const onSet = (v) => (self === null
+        ? `(set ${r.on} (bool ${v}))` : `(pstore (pfield (var $this) ${r.on}) (bool ${v}))`);
+      this.decls.push(`  (fn ${r.full}$start (${selfDecl}) void\n`
+        + `    (if (un "!" ${bdRd})\n      (do\n        ${bdSet}\n`
+        + `${binds.map((b) => `    ${b}`).join('\n')}))\n`
+        + `    ${onSet(true)}\n${runs.join('\n')})`);
+      this.decls.push(`  (fn ${r.full}$stop (${selfDecl}) void\n    ${onSet(false)})`);
+      this.fns.set(`${r.full}$start`, { params: self === null ? [] : [self], ret: J_VOID });
+      this.fns.set(`${r.full}$stop`, { params: self === null ? [] : [self], ret: J_VOID });
+      if (r.cls !== null) {
+        this.methods.set(`${r.full}$start`, r.cls);
+        this.methods.set(`${r.full}$stop`, r.cls);
+      }
+    }
+  }
+
+  /**
+   * 一格 reactor 的 onevent（第八十五刀）：`onevent (事件…)(形参…) { 体 }`。
+   *
+   * 与反应不同 —— 它订阅的是**写出来的**那几格事件（samples/jnc/41_OnEventStmt.jnc:35-59：
+   * 一格 `bindingof(…)`、几格凑一串、或者一格普通事件名），所以不用收依赖。闸门同反应：
+   * stop 之后不干活。
+   */
+  rctOnEvent(r, s, k, binds, self, onRd) {
+    const hn = `${r.full}$e${k}`;
+    const ps = this.formalList(s.items[2]);
+    if (ps === null) return;
+    const decl = [self === null ? null : `($this ${slotText(self)})`]
+      .concat(ps.map((p) => `(${p.name} ${slotText(p.type)})`)).filter((x) => x !== null);
+    this.scopes.push(new Map());
+    for (const p of ps) this.push(p.name, p.type);
+    const body = this.block(s.items[3], 8);
+    this.scopes.pop();
+    if (body === null) return;
+    this.decls.push(`  (fn ${hn} (${decl.join(' ')}) void\n    (if ${onRd}\n      (do\n${body})))`);
+    const sig = { params: (self === null ? [] : [self]).concat(ps.map((p) => p.type)), ret: J_VOID };
+    this.fns.set(hn, sig);
+    if (r.cls !== null) this.methods.set(hn, r.cls);
+    const clo = self === null
+      ? `(fnref ${hn})` : `(mkclo ${this.methodThunk(hn, r.cls, sig)} (var $this))`;
+    const want = ps.map((p) => p.type);
+    for (const e of this.flat(s.items[1])) {
+      const mc = this.mcRef(e);
+      if (mc === null) continue;
+      if (mc === undefined) { this.err(e, 'onevent 里头要是一格事件（或 `bindingof(属性)`）'); continue; }
+      if (mc.type.params.length !== want.length
+        || mc.type.params.some((t, i) => !sameTy(t, want[i]))) {
+        this.err(e, `onevent 的形参与这格事件对不上：事件是 ${tyName(mc.type)}`);
+        continue;
+      }
+      binds.push(`    (apush ${mc.code} ${clo})`);
+    }
+  }
+
+  /**
+   * 一格 reactor 的**体**（第八十五刀）：`reactor Cls.m_r { … }` 与顶层 `reactor g_r { … }`。
+   *
+   * 语法上它就是一格 fn-def —— `(specs (no-type) (mods … "reactor"))` + 声明符 + compound
+   * （量过 /tmp 的探针：语法一个字没改）。所以这一问排在签名那一遍**之前**，收下了回 true，
+   * 那一遍与 topItem 都跳过它（不然它会被登记成一格返回 void 的函数）。
+   *
+   * 名字带限定的（`Cls.m_r`，语料 49/49）要在类里先声明过；不带的就是顶层那一格。
+   */
+  reactorBody(n) {
+    if (!isList(n) || head(n) !== 'fn-def') return false;
+    const sp = n.items[1];
+    if (!isList(sp) || head(sp) !== 'specs') return false;
+    const mods = [...this.flat(sp.items[2]), ...this.flat(sp.items[3])]
+      .filter((x) => isAtom(x)).map((x) => x.value);
+    if (!mods.includes('reactor')) return false;
+    const d = n.items[2];
+    const core = isList(d) ? d.items[2] : null;
+    if (!isList(core)) { this.err(n, 'reactor 的名字认不出来'); return true; }
+    if (head(core) === 'qualified') {
+      const cls = this.declOwner(d);
+      const nm = isAtom(core.items[2]) ? core.items[2].value : this.qname(core.items[2]);
+      if (cls === null || nm === null) {
+        this.err(n, 'reactor 的体写在类外时，前面那一格要是一个类（`reactor 类名.名字 { … }`）');
+        return true;
+      }
+      const r = this.reactors.get(`${cls}$${nm}`);
+      if (r === undefined) {
+        this.err(n, `${shown(cls)} 里没有见到 reactor '${nm}' 的声明（类里要先写一句 `
+          + `\`reactor ${nm};\`；也可能是那个类的体里前面有一条还不收的 —— 那时整格类都没登记）`);
+        return true;
+      }
+      if (r.body !== null) { this.err(n, `reactor '${shown(r.full)}' 有两个体`); return true; }
+      r.body = n.items[3];
+      return true;
+    }
+    const nm = this.qname(core);
+    if (nm === null) { this.err(n, 'reactor 的名字认不出来'); return true; }
+    const full = this.qual(nm);
+    if (this.reactors.has(full)) { this.err(n, `reactor '${shown(full)}' 声明了两次`); return true; }
+    this.reactors.set(full, { full, cls: null, on: `${full}$on`, body: n.items[3], node: n });
+    return true;
+  }
+
+  /**
+   * 一条反应里**读到**的那些 bindable 属性（第八十五刀）：往 out 里攒它们的语法节点。
+   *
+   * jancy 是**运行期**收依赖的：读一格 bindable 属性时顺手 `addOnChangedBinding(reactionIdx,
+   * onChanged)`（`OperatorMgr::prepareOperandType` 那一支，jnc_ct_OperatorMgr.cpp:1441-1457
+   * -> `addReactorBinding`，jnc_ct_OperatorMgr_Property.cpp:409-428），所以每跑一遍就重收
+   * 一次，分支变了依赖跟着变。这一层第一刀做**静态的超集**：把这条语句里所有读位置上的
+   * bindable 属性都算依赖，start 那一刻绑一次。差别记在 ADR 里 —— 多跑，不会漏跑。
+   *
+   * 只看"读"：赋值的左边那一格是**写**（jancy 那边靠 `OpFlag_KeepPropertyRef` 分的，同一处
+   * 1441 行那个 if），可左边的下标与实参里头照旧是读，所以那两处还要往里走。
+   */
+  rctReads(n, out, read = true) {
+    if (!isList(n)) return;
+    const h = head(n);
+    if (h === 'assign' && n.items.length >= 4) {
+      this.rctReads(n.items[2], out, false);
+      this.rctReads(n.items[3], out, true);
+      return;
+    }
+    if (read && (h === 'name' || h === 'field')) {
+      const pn = this.propTarget(n);
+      if (pn !== undefined && pn !== null) {
+        const pi = this.props.get(pn.pn);
+        if (pi !== undefined && pi.onch !== null) { out.push(n); return; }
+      }
+    }
+    // 左边那一格是写，可它里头的下标 / 实参照旧是读 —— 所以 field 的对象那一半也要往里走。
+    for (let i = 1; i < n.items.length; i++) {
+      this.rctReads(n.items[i], out, read || h === 'index' || h === 'call' || h === 'args');
+    }
+  }
+
+  /** 这条读里那格**对象**是算出来的吗（第八十五刀）：链上有下标或调用就算。 */
+  rctDyn(n) {
+    if (!isList(n)) return false;
+    const h = head(n);
+    if (h === 'index' || h === 'call') return true;
+    if (h === 'field' || h === 'ptr-field') return this.rctDyn(n.items[1]);
+    return false;
   }
 
   /** 当前命名空间下的全名（第五十一刀）。写的名字里带点（`struct a.S`）也一并换成 `$`。 */
@@ -1619,10 +1864,19 @@ class JncLower {
     // 类的那几格结构体在这儿才发（第五十六刀）：一整条继承链共用一格，而"谁派生了我"要等
     // 所有 type-decl 都过完才知道。排在签名那一遍之前 —— 方法的形参里有类指针。
     this.classLayout();
+    /* reactor 的体（第八十五刀）：语法上它是一格 fn-def，所以要在签名那一遍**之前**把它
+       挑出来 —— 不然会被登记成一格返回 void 的函数。挑出来的记在 rctBodies 上，下面两遍
+       （签名、topItem）都跳过它。 */
+    const rctBodies = new Set();
+    for (const e of items) {
+      if (!isList(e.it) || head(e.it) !== 'fn-def') continue;
+      this.ns = e.ns;
+      if (this.reactorBody(e.it)) rctBodies.add(e.it);
+    }
     // 签名先过一遍（第十五刀）：jancy 的命名空间不看顺序，所以"后面定义的函数"要在
     // 模块级变量的初值与所有函数体之前就查得着。
     for (const e of items) {
-      if (!isList(e.it) || head(e.it) !== 'fn-def') continue;
+      if (!isList(e.it) || head(e.it) !== 'fn-def' || rctBodies.has(e.it)) continue;
       this.ns = e.ns;
       const s = this.fnSig(e.it);
       if (s !== null) this.sigs.set(e.it, s);
@@ -1751,6 +2005,7 @@ class JncLower {
       if (isList(e.it)) {
         const h = head(e.it);
         if (h === 'type-decl' || h === 'var-decl' || h === 'var-decl-curly') continue;
+        if (rctBodies.has(e.it)) continue;              // reactor 的体（第八十五刀）另走一处
       }
       this.ns = e.ns;
       this.topItem(e.it);
@@ -1759,6 +2014,8 @@ class JncLower {
     /* 合成出来的那些 construct 的体（第七十八刀）。排在这儿而不是签名那一遍：字段初值里
        可以引用模块级变量与别的函数，那些到这一步才全登记完。 */
     this.emitFieldInitCtors();
+    /* reactor 的那几段（第八十五刀）：同一条理由 —— 反应里能引用模块级变量、属性与函数。 */
+    this.emitReactors();
     // 没有 `main` 的那种源码（第六十五刀）。语料 662 份里 408 份是这种 —— 它们是**库模块**，
     // 本来就不该有入口（jancy 那边 `jancy foo.jnc` 找不到 main 才报错，可 `jnc_ct` 把它当
     // 模块编译是成立的）。所以"要不要入口"由**调用方**说：`omni sx` 只要一份降下来的文本，
@@ -2773,8 +3030,34 @@ class JncLower {
           this.evtNames.add(info.name);
           continue;
         }
-        // 声明符上带括号的是**方法原型**（`void foo();`）：与 fn-proto 那一支同一件事，
-        // 体在类外。类里跳过它，结构体里照旧不收。原型上写的 `virtual`/`abstract`/`override`
+        /* 类里的 reactor 成员（第八十五刀）：`reactor m_uiReactor;` —— 语料里 49 处全是这个
+         * 形状，体写在类外（`reactor Cls.m_uiReactor { … }`）。jancy 那边它是"一格 reactor
+         * 类的字段"（`Parser::declareReactor`，jnc_ct_Parser.cpp:1897-1930 走的是
+         * `declareData`）；这一层落成**一格 bool 字段**（跑没跑）+ 几个反应函数，
+         * 名字与体由 emitReactors 发。这一问也要排在"带括号就是方法原型"之前。 */
+        if (sp.rct === true) {
+          if (!cls) {
+            this.nope(d, `结构体里的 reactor '${info.name}'（jancy 自己也拒 —— `
+              + "\"'%s' cannot contain reactor members\"，jnc_ct_Parser.cpp:1922）");
+            continue;
+          }
+          if (info.formals !== null) {
+            this.nope(d, `reactor '${info.name}' 的声明符上带括号（语料里 0 处，`
+              + 'reactive.rst:38 那个带括号的写法是旧语法）');
+            continue;
+          }
+          const on = `${name}$${info.name}$on`;
+          const bound = `${name}$${info.name}$bound`;
+          fields.push({ name: on, type: J_BOOL });
+          /* 订阅挂没挂上那一格也是**每个对象自己**的（第八十五刀那一处量出来的：先前它是一格
+             模块级 bool，于是第二个对象 start 的时候订阅被跳过、那格 reactor 从此不动）。 */
+          fields.push({ name: bound, type: J_BOOL });
+          this.reactors.set(`${name}$${info.name}`, {
+            full: `${name}$${info.name}`, cls: name, on, bound, body: null, node: d,
+          });
+          this.rctNames.add(info.name);
+          continue;
+        }
         // 要在这儿记下来（第五十七刀）—— 体写在类外时那个词只出现在原型上。
         if (info.formals !== null) {
           if (!cls) this.nope(d, '结构体里的方法');
@@ -3230,6 +3513,7 @@ class JncLower {
     let agt = false;
     let bnd = false;
     let evt = false;
+    let rct = false;
     for (const m of mods) {
       if (m === 'thin') { thin = true; continue; }
       // `errorcode`（第五十八刀，exceptions.rst:17）：它说的是"这个函数的返回值就是错误码"。
@@ -3293,6 +3577,12 @@ class JncLower {
        * 同一笔账），所以两个词落地是同一件事。处理函数一律回 void
        * （"Multicasts must return void"，同处:907-911）。 */
       if (m === 'event' || m === 'multicast') { evt = true; continue; }
+      /* `reactor`（第八十五刀）：也是**类型修饰符** —— jancy 把它算成一格类型
+       * （`TypeModifier_Reactor` -> `StdType_ReactorBase`，jnc_ct_DeclTypeCalc.cpp:165-168），
+       * 于是 `reactor m_uiReactor;` 在它那边就是"一格 reactor 类的字段"
+       * （`Parser::declareReactor`，jnc_ct_Parser.cpp:1897-1930）。这一层落成"一格 bool +
+       * 几个反应函数"，见 emitReactors。 */
+      if (m === 'reactor') { rct = true; continue; }
       // 访问控制的 **Java 式写法**（第六十七刀）。jancy 只有 public 与 protected 两种，
       // 两种写法都收：C++ 式的标签，和这一格"写在声明说明符里"（dual_modifiers.rst:22-24），
       // 而且**顶层的成员也能写**（同处:26 那句 "Global namespace members can also have
@@ -3318,7 +3608,7 @@ class JncLower {
      * 一律回 void，所以那一格不用写。带实参那一串挂在声明符的括号里，由调用方（globalDecl /
      * 类的字段那一遍）从 formals 上读，这儿只把"这是一格事件"传上去。 */
     if (isList(ts) && head(ts) === 'no-type') {
-      if (evt) return { type: J_MC, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt };
+      if (evt) return { type: J_MC, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct };
       /* 说明符里一个类型都没写（第八十一刀）。语料里到处是：`override start() { … }`、
        * `abstract reset();`、`virtual decodeName(std.StringBuilder* s) {}` ——
        * `virtual` / `override` / `abstract` 在 jancy 那边是**存储说明符**，不是类型说明符
@@ -3336,8 +3626,8 @@ class JncLower {
        * 没有函数后缀的那种（`virtual m_x;`）在 jancy 那边报的是 `illegal use of type 'void'`
        * （jnc_ct_Parser.cpp:1094-1136 的 `case TypeKind_Void`）—— 这一层由下游那几处
        * "字段/变量不能是 void" 接着，报的话也是同一件事。 */
-      if (uns) return { type: mkInt(32, true), thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt };
-      return { type: J_VOID, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt };
+      if (uns) return { type: mkInt(32, true), thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct };
+      return { type: J_VOID, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt, rct };
     }
     let base = null;
     if (isAtom(ts)) {
@@ -3411,7 +3701,7 @@ class JncLower {
         + `这里写的是 ${tyName(base)}`);
       return null;
     }
-    return { type: evt ? J_MC : base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata, evt };
+    return { type: evt ? J_MC : base, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata, evt, rct };
   }
 
   /**
@@ -5837,6 +6127,71 @@ class JncLower {
     return null;
   }
 
+  /**
+   * `<一格 reactor>.start()` / `.stop()` / `.restart()`（第八十五刀）。
+   * 不是这个形状回 undefined（那时调用照旧往下走），算不出来回 null。
+   *
+   * 语料里数过：一格 reactor 上被叫到的**只有这三个**（start 59、stop 2、restart 2，别的 0），
+   * 所以这一处不做"reactor 类"那一整套 —— 三个名字直接落到发出来的那两个函数上。
+   */
+  reactorCall(n, callee, args, pad) {
+    if (!isList(callee) || head(callee) !== 'field' || !isAtom(callee.items[2])) return undefined;
+    const meth = callee.items[2].value;
+    if (meth !== 'start' && meth !== 'stop' && meth !== 'restart') return undefined;
+    const ob = callee.items[1];
+    if (!isList(ob)) return undefined;
+    if (head(ob) === 'name' && isAtom(ob.items[1])) {
+      const nm = ob.items[1].value;
+      // 顶层那一格（`g_r.start()`）：按命名空间从里往外查。
+      const top = this.resolve(nm, (k) => this.reactors.has(k) && this.reactors.get(k).cls === null);
+      if (top !== null) return this.rctFire(n, this.reactors.get(top), meth, '', args, pad);
+      // 方法体里裸写成员名（`m_uiReactor.start()`）：与裸写字段名同一条，`this` 由这儿补。
+      if (this.rctNames.has(nm) && this.selfClass !== null) {
+        const r = this.rctOf(this.selfClass, nm);
+        if (r !== null) return this.rctFire(n, r, meth, ' (var $this)', args, pad);
+      }
+      return undefined;
+    }
+    // `obj.m_uiReactor.start()`：先按名字便宜地筛一次，再去求左边那个对象（与 mcRef 同一条）。
+    if (head(ob) !== 'field' || !isAtom(ob.items[2]) || !this.rctNames.has(ob.items[2].value)) {
+      return undefined;
+    }
+    const src = ob.items[1];
+    let bv = null;
+    if (isList(src) && LV_SHAPES.has(head(src))) {
+      const o = this.lvalue(src);
+      if (o === null) return null;
+      bv = { code: this.read(o), type: o.type };
+    } else {
+      bv = this.expr(src, null);
+      if (bv === null) return null;
+    }
+    if (!isClass(bv.type)) return undefined;
+    const r = this.rctOf(bv.type.name, ob.items[2].value);
+    if (r === null) return undefined;
+    return this.rctFire(n, r, meth, ` ${bv.code}`, args, pad);
+  }
+
+  /** 这条继承链上有这一格 reactor 吗（与 findProp / findMethod 同一个形状）。 */
+  rctOf(cls, nm) {
+    let cur = cls;
+    while (cur !== null && cur !== undefined) {
+      const r = this.reactors.get(`${cur}$${nm}`);
+      if (r !== undefined) return r;
+      cur = this.bases.get(cur);
+    }
+    return null;
+  }
+
+  /** 那三个名字发出来的样子（第八十五刀）：restart 就是先 stop 再 start。 */
+  rctFire(n, r, meth, self, args, pad) {
+    if (args.length > 0) return this.err(n, `reactor 的 ${meth}() 不收实参`);
+    if (meth === 'restart') {
+      return [`${pad}(expr (call ${r.full}$stop${self}))`, `${pad}(expr (call ${r.full}$start${self}))`];
+    }
+    return [`${pad}(expr (call ${r.full}$${meth}${self}))`];
+  }
+
   /** 调用当语句。printf 在这儿拆开；别的走普通调用，返回值丢掉。 */
   callStmt(n, ind) {
     const pad = ' '.repeat(ind);
@@ -5845,6 +6200,10 @@ class JncLower {
     if (isList(callee) && head(callee) === 'name' && callee.items[1].value === 'printf') {
       return this.printf(n, args, ind);
     }
+    /* `s.m_uiReactor.start()` / `g_r.start()`（第八十五刀）：一格 reactor 上能叫的只有
+       start / stop / restart 三个（语料里数过：59 / 2 / 2，别的一个都没有）。 */
+    const rc = this.reactorCall(n, callee, args, pad);
+    if (rc !== undefined) return rc;
     /* `m_onChanged();` / `bindingof(p)();`（第七十三刀）：叫一格事件不是"调一个函数"，是
      * 照单子从头到尾叫一遍（jancy 那边 `m(…)` 走的是多播类的 `call` 方法，
      * jnc_ct_TypeMgr.cpp:962-975 那张表里的 `type->m_callOperator`）。 */

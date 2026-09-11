@@ -1,0 +1,87 @@
+// 第八十五刀：reactor。出处与语料（662 份里 60 份写了它，111 处声明）：
+//   - 生产代码的唯一惯用法是"类里声明、体写在类外"：`reactor m_uiReactor;` +
+//     `reactor Cls.m_uiReactor { … }`（49 处，49/49 都成对；46 处名字就叫 m_uiReactor，
+//     例：test/ioninja/plugins/Serial/SerialSession.jnc:109 与 :984）；
+//   - 顶层那一格：samples/jnc/40_Reactors.jnc:81 的 `reactor g_colorReactor { … }`；
+//   - 能叫的只有三个：`.start()` 59 处、`.stop()` 2 处（test/jnc/test113.jnc:92）、
+//     `.restart()` 2 处（SerialTapSession.jnc:459，注释是 "need to re-bind DTE/DCE"）；
+//   - `onevent`：samples/jnc/41_OnEventStmt.jnc:35-59。
+//
+// 语义的出处是源码：一条语句一格"反应"（jnc_ct_Expr.llk:179-185 的 reactive_expression 每条
+// 进一次 `enterReactiveExpression`，jnc_ct_Module.h:885-896），而依赖是**读到 bindable 属性时
+// 顺手绑上的**（jnc_ct_OperatorMgr.cpp:1441-1457 -> addReactorBinding，
+// jnc_ct_OperatorMgr_Property.cpp:409-428）。这一层的第一刀绑的是**静态超集、start 时绑一次**
+// ——多跑、不漏跑，账记在 ADR-0016 第八十五刀那一节里。
+//
+// 这一份钉六件事：start 时先跑一遍、bindable 变了那一条反应重跑、onevent 订阅的是写出来的
+// 那格事件、stop 之后不干活（订阅还挂着，这一层摘不掉）、restart 是再跑一遍、
+// 两个对象各有自己的一格 reactor（那格"订阅挂没挂上"是每个对象自己的）。
+//
+// 期望输出的出处：/tmp/c82.c（`cc -O0 -std=c99 -Wall`）。
+
+int g_a;
+int bindable g_b;
+
+class Sess {
+	int bindable m_state;
+	int m_shown;
+	int m_pings;
+
+	event m_onPing();
+
+	reactor m_uiReactor;
+
+	construct() {
+		m_shown = 0;
+		m_pings = 0;
+	}
+
+	// 方法体里裸写那格 reactor 的名字：`this` 由这一层补（与裸写字段名同一条）
+	void wire() {
+		m_uiReactor.start();
+	}
+}
+
+reactor Sess.m_uiReactor {
+	m_shown = m_state * 2;
+
+	onevent m_onPing() {
+		m_pings++;
+		printf("ping %d\n", m_pings);
+	}
+}
+
+reactor g_r {
+	g_a = g_b + 1;
+	printf("g_r ran (g_b=%d)\n", g_b);
+}
+
+int main() {
+	Sess* s = new Sess;
+	s.wire();
+	printf("start: %d\n", s.m_shown);
+	s.m_state = 3;
+	printf("after 3: %d\n", s.m_shown);
+
+	s.m_onPing();
+
+	s.m_uiReactor.stop();
+	s.m_state = 5;
+	printf("stopped: %d\n", s.m_shown);
+	s.m_onPing();
+
+	s.m_uiReactor.restart();
+	printf("restarted: %d\n", s.m_shown);
+	s.m_state = 7;
+	printf("after 7: %d\n", s.m_shown);
+
+	Sess* t = new Sess;
+	t.m_uiReactor.start();
+	t.m_state = 1;
+	printf("t=%d s=%d\n", t.m_shown, s.m_shown);
+
+	g_r.start();
+	g_b = 5;
+	printf("g_a=%d\n", g_a);
+	return 0;
+}

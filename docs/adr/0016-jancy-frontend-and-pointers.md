@@ -5028,6 +5028,86 @@ ADR-0024 的 S1/S2）—— 所以这一刀不新开机制，只是把第二种�
 （opaque.rst:15-29）。所以它跟 `ui.*Property` 的构造是**同一堵墙**：要么有宿主面，要么给
 opaque class 一条"声明当真、实现留空"的路。不是属性这一族自己的账。
 
+## 第八十五刀：reactor —— 一条语句一格反应，依赖先按静态超集绑
+
+尺子上 `修饰符 '…'` 那 160 对里的大头是 `reactor`。先把语料量清（662 份，60 份写了它、
+111 处声明；下面这些数字都是拿"注释/串都认得的分词器 + 花括号配对"数出来的，不是行 grep）：
+
+- **生产代码的唯一惯用法是"类里声明、体写在类外"**：`reactor m_uiReactor;` +
+  `reactor Cls.m_uiReactor { … }` —— 49 处，**49/49 都成对**（同一份文件里），46 处名字
+  就叫 `m_uiReactor`（例：`test/ioninja/plugins/Serial/SerialSession.jnc:109` 与 `:984`）；
+- 就地带体的类成员 6 处、顶层 `reactor g_r { … }` 7 处，**都在 test/ 与 samples/ 里**；
+- 带括号的 `reactor F() { … }` 语料里 **0 处**（文档 reactive.rst:38 那个写法滞后了）；
+- 一格 reactor 上被叫到的**只有三个**：`.start()` 59、`.stop()` 2、`.restart()` 2，
+  别的方法与字段 0 处；
+- 62 个体、436 条顶层语句：赋值 **379（86.9%）**、调用 32、`onevent` 17、局部声明 5、
+  `if` **3**、循环 / switch / return **0**。最大的体 23 条（`SshSerialSession.jnc:762`）；
+- 582 处读：裸名 287、单层字段 207、**带下标或调用 79**、两层以上纯字段链 9；58 处在条件里。
+  `m_state` 一个名字占 174 处。
+
+**语法一个字没改** —— 三种形状本来就解得出来：`reactor Cls.m_r { … }` 是一格
+`(fn-def (specs (no-type) (mods … "reactor")) (dcl … (qualified …)) (compound …))`，
+`reactor m_r;` 是一格 `var-decl`（`reactor` 落在 mods 里），`onevent` 是自己一格节点。
+所以这一刀全在 lower.js 里。
+
+**jancy 那边是什么**（出处是源码，reactive.rst 只讲用法）：
+
+- 一条 reactive_expression 进一次 `enterReactiveExpression`（`jnc_ct_Expr.llk:179-185` /
+  `jnc_ct_Module.h:885-896`）—— **一条语句一格反应**，各自一个 reactionIdx；
+- 依赖不是静态分析出来的：读一格 bindable 属性（右值）时顺手插一句
+  `addOnChangedBinding(reactionIdx, 那格 onChanged)`（`jnc_ct_OperatorMgr.cpp:1441-1457`
+  那个 `if (!(opFlags & OpFlag_KeepPropertyRef))` 里的 `addReactorBinding`，
+  `jnc_ct_OperatorMgr_Property.cpp:409-428`）。所以**每跑一遍重收一次依赖**，
+  分支变了依赖跟着变；被赋值的左值保持 property-ref，不绑。
+
+**这一层的落法**：一格 reactor = 一格"跑没跑"的 bool + 一条语句一格反应函数 + `start`/`stop`。
+
+1. 类里那句声明加**两格 bool 字段**（`…$on` / `…$bound`），体由 `reactor Cls.m_r { … }`
+   那一遍挂上去；顶层那一格是两个模块级 bool。两格都在**对象里**是量出来的：`bound`
+   先前是模块级的，于是"第二个对象 start"把订阅整个跳过了，那格 reactor 从此不动；
+2. 反应 k 的体外面套一道 `if (跑没跑)`。所以 `stop()` 只是把 bool 关掉 ——
+   **订阅还挂着**（这一层的多播摘不掉：`+=` 不回 cookie，第七十三刀那条边界）。
+   记账：jancy 的 stop 是真摘掉；这一层是"挂着不干活"，代价是每次通知白跑一圈；
+3. 依赖按**静态超集**收（`rctReads`）：扫这条语句的读位置，读到的 bindable 属性都算依赖，
+   `start()` 里绑一次（`(apush 那格 onChanged (mkclo 反应 k 的 thunk 对象))`）。
+   带 `this` 的函数值不用新造 —— 第五十五刀的 `(cfn …)` + `(mkclo …)` 就是它；
+4. `onevent (事件…)(形参…) { … }` 是一格合成方法 + start 时往每格事件挂上去，闸门同反应。
+   形参与事件的签名对不上当场报；
+5. `restart()` = 先 stop 再 start，而 start 会把所有反应再跑一遍。语料那 2 处的注释是
+   "need to re-bind DTE/DCE" —— 在这一层"重绑"是空操作（依赖是静态的），**要的那个效果
+   （再跑一遍）有**。记账。
+
+**两格账，都明写**：
+
+- 反应会**多跑**：分支里的读也算依赖（`if` 只有 3 处、三元里 58 处读），jancy 只绑这一遍
+  真读到的那些。多跑不会算错值（反应是重算），可它对带副作用的反应（`printf`、
+  `updateLineInfoValue`）是可观测的；
+- 对象要算出来的读（79 处）**明说不收**：`m_actionTable[…].m_text` 这种，订阅在 start
+  那一刻绑的是那一刻算出来的那一格 —— 后来换了就绑错。`bad/reactor-dynobj.jnc` 钉住它。
+  局部声明（5 处，其中 3 处是 `bindable` 局部）也还不收。
+
+**量出来的**：`tests/jnc` 170/0 -> **172/0**。`cases/82-reactor.jnc` 六条腿逐字节相同，
+尺子是手写的一份等价 C（`/tmp/c82.c`，`cc -O0 -std=c99 -Wall`），钉六件事：start 时先跑一遍、
+bindable 变了那一条反应重跑、`onevent` 订阅的是写出来的那格事件、stop 之后不干活、
+restart 是再跑一遍、两个对象各有自己的一格 reactor。
+
+**尺子（655 份）—— 三刀以来第一次动了前两个数字**：
+
+- 「真降得下来」：58 -> **61**（+3）；
+- 「没有还不收的行」的文件：146 -> **154**（+8）；
+- (文件, 拦路项) 对：8333 -> **8330**（−3）。
+
+那 −3 要说清：`修饰符 '…'` 掉了 **15**（160 -> 145，就是 `reactor` 那一格），可**往前走一步
+就看见下一格**，+12 落在 `未声明的变量`（+5）、`没有这个函数`（−6 但换了别的形状）、
+`onevent 里头要是一格事件`（+3，那些 onevent 订阅的是 opaque class 上的属性）、
+`X 里没有见到 reactor '…' 的声明`（+3）这几处。最后那一格值得记一笔：
+那 3 处（`ModbusLayer.jnc:201`、`Df1Layer`）源码里**明明写了**那句声明 —— 拦在前面的是
+**多继承**（`ModbusLayer.jnc:19`，2 个基类），整格类因此没登记下来，reactor 的体自然找不着
+它的声明。所以那一格诊断里明说了"也可能是那个类的体里前面有一条还不收的"。
+
+对得起这一刀的是前两个数字：**8 份文件从此一条"还不收"都没有**，3 份**整份降得下来**——
+那正是 `reactor` 挡了很久的东西。
+
 ## 后果与代价
 
 
