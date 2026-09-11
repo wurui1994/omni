@@ -1,0 +1,16 @@
+// 写一格**没有存值器**的属性（ADR-0016 第六十八刀那条边界，第八十四刀挪到这儿来的）。
+// 简单声明式的属性体写在别处（`p.set(T x) { … }`，prop_simple.rst:29）—— 一个 set 都没写
+// 时 jancy 那边它就是**只读**的（prop.rst:15-17 那句 "optionally one or more setters"），
+// 而这一层的诊断落在写的那一句上：调不出一格不存在的存值器。
+//
+// 这一格与 prop-const-set 不是同一条：那边声明里写了 `const`，这边是**忘了写体**。
+class C {
+	int autoget bindable property m_p;
+}
+
+int main() {
+	C* c = new C;
+	c.m_p = 1;
+	printf("%d\n", c.m_p);
+	return 0;
+}

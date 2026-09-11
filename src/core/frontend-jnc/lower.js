@@ -1231,10 +1231,13 @@ class JncLower {
     if (this.selfClass === null) return null;
     const fs = this.structs.get(this.selfClass);
     if (fs === undefined) return null;
-    // 成员 autoget 属性的存值器体里那个 `m_value`（第七十一刀，prop_autoget.rst:26）：源码里
-    // 写的是这个名字，而类里那一格叫 `<属性名>$m_value` —— 在这儿换过去。回的是**字段自己**，
+    // 成员属性的存/取值器体里那些**编译器生成物的名字**（第七十一 / 八十四刀）：
+    // `m_value`（prop_autoget.rst:26）与 `m_onChanged`（prop_bindable.rst:23-29）——
+    // 源码里写的是这两个名字，而类里那两格叫 `<属性全名>$m_value` / `…$m_onChanged`。
+    // 换名的表由 fnDef 摆（selfProp：源码里的名字 -> 字段名）。回的是**字段自己**，
     // 所以下游一律拿 `f.name` 发 pfield，不能再用源码里写的那个名字。
-    const key = name === 'm_value' && this.selfProp !== null ? this.selfProp : name;
+    const key = this.selfProp !== null && this.selfProp.has(name)
+      ? this.selfProp.get(name) : name;
     const f = fs.find((x) => x.name === key);
     return f === undefined ? null : f;
   }
@@ -1704,14 +1707,31 @@ class JncLower {
         continue;
       }
       // 成员的那一格已经跟着整条链那格结构体发出去了（propName 那一遍在 classLayout 之前往
-      // ownFields 里加的），所以这儿只剩合成取值器这一件事。
-      if (pi.get) continue;
+      // ownFields 里加的），所以这儿只剩合成那两个函数。
       const self = tClass(a.cls, false);
-      this.decls.push(`  (fn ${g} (($this ${slotText(self)})) ${slotText(a.type)}\n`
-        + `    (ret (pload (pfield (var $this) ${a.name}))))`);
-      this.fns.set(g, { params: [self], ret: a.type });
-      this.methods.set(g, a.cls);
-      pi.get = true;
+      const ad = `(pfield (var $this) ${a.name})`;
+      if (!pi.get) {
+        this.decls.push(`  (fn ${g} (($this ${slotText(self)})) ${slotText(a.type)}\n`
+          + `    (ret (pload ${ad})))`);
+        this.fns.set(g, { params: [self], ret: a.type });
+        this.methods.set(g, a.cls);
+        pi.get = true;
+      }
+      /* 成员上的 bindable data（第八十四刀）：与顶层那一格同一个体，只是那两格生成物都在
+         对象里 —— 存储是 `(pfield (var $this) …$m_value)`，通知的那格单子是
+         `(pload (pfield (var $this) …$m_onChanged))`（第八十三刀那条路）。实参的顺序与
+         propSet 发的那一句对上：对象在前、值在后。 */
+      if (pi.bdata === true && !pi.set) {
+        const s = `${a.full}$set`;
+        this.decls.push(`  (fn ${s} (($this ${slotText(self)}) (x ${slotText(a.type)})) void\n`
+          + `    (if (bin "!=" (pload ${ad}) (var x)) (do\n`
+          + `      (pstore ${ad} (var x))\n`
+          + `      (expr (call ${this.mcFire(J_MC)} `
+          + `(pload (pfield (var $this) ${pi.onch})))))))`);
+        this.fns.set(s, { params: [self, a.type], ret: J_VOID });
+        this.methods.set(s, a.cls);
+        pi.set = true;
+      }
     }
     /* `bindable` 那格生成的事件（第七十三刀）：一格模块级的"函数值数组"，出来是空的。
      * 与 autoget 那一格不同，它**不用问 gTaken** —— 事件不是标量，`&m_onChanged` 在 jancy
@@ -2156,25 +2176,39 @@ class JncLower {
    * 名字是 `<属性全名>$m_onChanged`：源码里写的就是 `m_onChanged`
    * （prop_bindable.rst:23-29 那句 "name of compiler-generated event is 'm_onChanged'"），
    * 而属性在 jancy 那边**本来就是一层命名空间**（prop_full.rst:15）—— 存值器的体降下来时
-   * `this.ns` 已经挪进了属性那一层（见 propNs），所以裸写的 `m_onChanged` 由 resolve 直接
-   * 找到这一格，不用像 `m_value` 那样再换一次名。
+   * `this.ns` 已经挪进了属性那一层（见 propNs），所以**顶层**属性里裸写的 `m_onChanged`
+   * 由 resolve 直接找到那一格；成员属性那一格是类里的字段，换名的活儿在 selfField 里
+   * （靠 fnDef 摆的那张 selfProp 表，与 `m_value` 同一条）。
    *
-   * 只收顶层的：类的成员那一格在 jancy 那边是**类里的一格字段**
-   * （`Property::createOnChanged` 的头一支，jnc_ct_Property.cpp:131-134），而这一层的
-   * 事件是"元素是函数值的数组"，方言的结构体字段还放不下它。
+   * 两种落法（与 autoStore 的两种是一对）：
+   *   - 顶层的属性 -> 一格模块级变量，出来是一格空单子（发的那一步记在 bindProps 上）。
+   *   - 类的成员属性 -> 类自己那张字段表里加一格（第八十四刀）。jancy 那边这一格**就是**
+   *     类里的一格字段（`Property::createOnChanged` 的头一支，jnc_ct_Property.cpp:131-134：
+   *     `m_parentType` 非空就 `createField`），而第八十三刀已经把"类里的一格多播字段"整条
+   *     路走通了 —— 建单子那几行由 evtInitLines 发在构造的开头，所以这儿只要把字段加进去。
    */
   bindStore(d, full, cls) {
-    if (cls !== null) {
-      return this.nope(d, '类的成员上的 bindable 属性（那格事件在 jancy 那边是类里的一格'
-        + '字段，而这一层的事件是一格数组，方言的字段放不下）');
-    }
     // 完整声明式里那格事件的名字是写的人定的（第七十六刀，jancy 那边记在
     // `PropertyType::m_bindableEventName` 上）；简单声明式里它就叫 `m_onChanged`。
     const mem = this.propMemName.get(full);
     const name = `${full}$${mem !== undefined && mem.onch !== null ? mem.onch : 'm_onChanged'}`;
-    if (this.globals.has(name)) return this.err(d, `模块级变量 '${shown(name)}' 声明了两次`);
-    this.globals.set(name, J_MC);
-    this.bindProps.push({ full, name });
+    if (cls === null) {
+      if (this.globals.has(name)) return this.err(d, `模块级变量 '${shown(name)}' 声明了两次`);
+      this.globals.set(name, J_MC);
+      this.bindProps.push({ full, name });
+      return name;
+    }
+    const fs = this.ownFields.get(cls);
+    if (fs === undefined) {
+      return this.err(d, `'${shown(cls)}' 的字段表还没有 —— bindable 那一格加不进去`);
+    }
+    fs.push({ name, type: J_MC });
+    /* 建单子那张表（第八十三刀那一份）：typeDecl 那一遍已经 set 过了（类体里写的 `event`
+       字段），所以这儿是**往里加**而不是盖掉 —— 这一遍（propName）排在 typeDecl 之后、
+       synthCtors 之前，于是"这个类要不要一格合成的 construct"也能看见新加的这一格。 */
+    let ev = this.evtFields.get(cls);
+    if (ev === undefined) { ev = []; this.evtFields.set(cls, ev); }
+    ev.push({ name, type: J_MC });
     return name;
   }
 
@@ -3946,14 +3980,25 @@ class JncLower {
   mcRef(n) {
     if (!isList(n)) return undefined;
     if (head(n) === 'bindingof') {
-      const pn = this.propRef(n.items[1]);
-      if (pn === null) return this.err(n, 'bindingof(…) 里头要是一格属性');
-      const pi = this.props.get(pn);
+      /* 里头收 `p` / `obj.p` 两种形状 —— 与读写属性同一处判定（propTarget，第七十刀把两条路
+         并成一处），所以成员属性的那格对象由它算出来。 */
+      const t = this.propTarget(n.items[1]);
+      if (t === undefined) return this.err(n, 'bindingof(…) 里头要是一格属性');
+      if (t === null) return null;
+      const pi = this.props.get(t.pn);
       if (pi === undefined || pi.onch === null) {
-        return this.err(n, `属性 '${shown(pn)}' 上没有 bindable 事件`
+        return this.err(n, `属性 '${shown(t.pn)}' 上没有 bindable 事件`
           + '（jancy 那句 "has no bindable event"）—— 它的声明里没写 `bindable`');
       }
-      return { code: `(var ${pi.onch})`, store: (v) => `(set ${pi.onch} ${v})`, type: J_MC };
+      if (pi.cls === null) {
+        return { code: `(var ${pi.onch})`, store: (v) => `(set ${pi.onch} ${v})`, type: J_MC };
+      }
+      // 成员属性那一格是**类里的一格字段**（第八十四刀）：读写就是 pload / pstore，与第
+      // 八十三刀的 `obj.m_e` 同一条。
+      const sf = this.propSelf(n, t.pn, pi, t.self);
+      if (sf === null) return null;
+      const ad = `(pfield${sf} ${pi.onch})`;
+      return { code: `(pload ${ad})`, store: (v) => `(pstore ${ad} ${v})`, type: J_MC };
     }
     if (head(n) === 'name' && isAtom(n.items[1])) {
       const nm = n.items[1].value;
@@ -4728,14 +4773,26 @@ class JncLower {
     // 属性的取/存那两个函数（第七十一刀）：`this.ns` 再往里挪一层，摆到**属性**那一格上 ——
     // 属性在 jancy 那边本来就是一层命名空间（prop_full.rst:15）。顶层 autoget 生成的那格存储
     // 在方言里叫 `g_p$m_value`，于是体里写的 `m_value` 由 resolve 从 `g_p` 退出去时接着；
-    // 成员的那一格是类里的字段，名字换过去的活儿在 selfField 里（靠下面这格 selfProp）。
+    // 成员的那两格（`m_value` 第七十一刀 / `m_onChanged` 第八十四刀）是类里的字段，换名的
+    // 活儿在 selfField 里 —— 这儿摆的就是它那张"源码里的名字 -> 字段名"的表。
     const savePr = this.selfProp;
     this.selfProp = null;
     const pOf = this.propOf.get(info.name);
     if (pOf !== undefined) {
       this.ns = pOf;
       const pi = this.props.get(pOf);
-      if (pi !== undefined && pi.cls !== null) this.selfProp = pi.store;
+      if (pi !== undefined && pi.cls !== null) {
+        // 写的人给那两格起的名字（完整声明式，第七十六刀）；没记就是文档里的默认名。
+        const mem = this.propMemName.get(pOf);
+        const ren = new Map();
+        if (pi.store !== null) {
+          ren.set(mem !== undefined && mem.store !== null ? mem.store : 'm_value', pi.store);
+        }
+        if (pi.onch !== null) {
+          ren.set(mem !== undefined && mem.onch !== null ? mem.onch : 'm_onChanged', pi.onch);
+        }
+        if (ren.size > 0) this.selfProp = ren;
+      }
     }
 
     // 取地址那一遍（第九刀）：先扫一遍函数体，知道哪些名字要提到堆上，再降。

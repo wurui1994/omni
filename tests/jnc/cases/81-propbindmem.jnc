@@ -1,0 +1,99 @@
+// 第八十四刀：类的**成员**上的 bindable 属性 / bindable data。
+//
+// 第七十三刀把 `bindable` 那一格接上了，可只接了顶层：那格编译器生成的事件当时落成一格
+// **模块级**的多播（"元素是函数值的数组"），而 jancy 那边成员那一格是**类里的一格字段**
+// （`Property::createOnChanged` 的头一支，jnc_ct_Property.cpp:131-134：`m_parentType`
+// 非空就 `createField`）。第八十三刀把"类里的一格多播字段"整条路走通了（建单子那几行发在
+// 构造的开头），所以这一刀只是把 bindStore 的第二种落法接上去。
+//
+// 语料里 `bindable` 的主流写法正是成员上的 **bindable data**（`State bindable m_state;`，
+// 例：test/ioninja/plugins/TcpServer/TcpServerSession.jnc:68）—— 光写 `bindable` 不写
+// `property`，取/存两个函数都是编译器生成的（samples/jnc/34_BindableProperties.jnc:87-90
+// 那句 "bindable data is a wholly compiler-implemented property"）。存值器里那个 `!=` 是
+// "同值不通知"（`Property::compileAutoSetter`，jnc_ct_Property.cpp:788-822）。
+//
+// 两种都在这儿：
+//   - `int bindable m_state;` —— 存值器生成的，读写就是 `s.m_state`；
+//   - `int autoget bindable property m_p;` + 手写的存值器 —— 体里裸写的 `m_value` 与
+//     `m_onChanged` 是**对象里的两格字段**，换名的活儿在 selfField（prop_autoget.rst:26、
+//     prop_bindable.rst:23-29 那两个默认名）。
+// 订阅两种写法都收：类外 `bindingof(s.m_state)`，方法体里裸写 `bindingof(m_state)`
+//（属性名裸写补 `this`，第六十九刀那条）。`= null` 是清空（多播上的 setup）。
+//
+// 期望输出的出处：/tmp/c81.c（`cc -O0 -std=c99 -Wall`）。
+
+int g_hits;
+int g_log;
+
+class Session {
+	int m_seen;
+
+	int bindable m_state;
+
+	construct() {
+		m_seen = 0;
+	}
+
+	// 方法体里裸写属性名：`bindingof` 里头那一格由这一层补 `this`
+	void watch() {
+		bindingof(m_state) += onState;
+	}
+}
+
+void onState() {
+	g_hits++;
+	printf("state changed (%d)\n", g_hits);
+}
+
+class Box {
+	int m_hits;
+
+	int autoget bindable property m_p;
+
+	construct() {
+		m_hits = 0;
+	}
+
+	// 简单声明式的存值器写在别处（这儿是类体里）：`m_value` 与 `m_onChanged` 都是生成物
+	void m_p.set(int x) {
+		m_hits++;
+
+		if (m_value == x)
+			return;
+
+		m_value = x;
+		m_onChanged();
+	}
+}
+
+void onChange() {
+	g_log++;
+	printf("changed %d\n", g_log);
+}
+
+int main() {
+	Session* s = new Session;
+	s.watch();
+	bindingof(s.m_state) += onState;
+
+	// 两个订阅，所以每次真变都叫两遍；同一个值写第二遍一个都不叫
+	s.m_state = 1;
+	s.m_state = 1;
+	s.m_state = 2;
+	printf("state=%d hits=%d\n", s.m_state, g_hits);
+
+	// 两个对象各带自己那一格事件：另一格的订阅动不着这一格
+	Session* t = new Session;
+	t.m_state = 5;
+	printf("t=%d hits=%d\n", t.m_state, g_hits);
+
+	Box b;
+	bindingof(b.m_p) += onChange;
+	b.m_p = 7;
+	b.m_p = 7;
+	b.m_p = 9;
+	bindingof(b.m_p) = null;
+	b.m_p = 11;
+	printf("p=%d hits=%d log=%d\n", b.m_p, b.m_hits, g_log);
+	return 0;
+}

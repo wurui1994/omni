@@ -4427,7 +4427,8 @@ jnc_ct_Property.cpp:788-822 —— 那个 `!=` 就是"同值不通知"的出处�
 
 **量出来的**（`tests/jnc` 145/0 -> **150/0**）：`cases/69-propbind.jnc` 是 sample 34 简单声明
 式那一半的等价物（订阅两个、同值不通知、`= null` 清空），六条腿逐字节相同；四条边界各钉一条
-——类的成员上的 bindable（那格事件在 jancy 那边是类里的字段，方言的字段放不下函数值）、
+——类的成员上的 bindable（那格事件在 jancy 那边是类里的字段，方言的字段放不下函数值 ——
+**第八十四刀落了**，那条边界现在是 `bad/prop-noset.jnc` 那一格）、
 事件上的 `-=`（jancy 收的是 `+=` 回来的 cookie）、`bindingof` 用在非 bindable 的属性上
 （照 jancy 那句 "has no bindable event" 说）、bindable data（整格生成的那一半，下一刀）。
 
@@ -4945,6 +4946,87 @@ jnc_ct_Property.cpp:131-134）。
 
 紧跟着的是 `#28` 那 104 对（类的成员上的 bindable 属性）—— 它走的是同一条路
 （那格 `m_onChanged` 在 jancy 那边也是类里的一格字段）。
+
+## 第八十四刀：类的成员上的 bindable —— 那格 `m_onChanged` 也是类里的一格字段
+
+尺子上 `类的成员上的 bindable 属性` **104 对**。语料里 `bindable` 的主流写法压根不是顶层的
+属性，而是**类的成员上的 bindable data**（`State bindable m_state;`，
+`test/ioninja/plugins/TcpServer/TcpServerSession.jnc:68`；同一份 :59 `bool bindable
+m_isTransmitEnabled;`、:73 `size_t bindable m_clientCount;`）—— 光写 `bindable` 不写
+`property`，取值器与存值器**两个都是编译器生成的**（samples/jnc/34_BindableProperties.jnc:87-90
+那句 "bindable data is a wholly compiler-implemented property"）。
+
+第七十三刀把 `bindable` 接上时只接了顶层那一格，`bindStore` 里 `cls !== null` 是一句 nope，
+理由记的是"这一层的事件是一格数组、方言的字段放不下"。**那堵墙是第八十三刀拆的**（它靠的又是
+ADR-0024 的 S1/S2）—— 所以这一刀不新开机制，只是把第二种落法接上去，四处：
+
+1. `bindStore` 的第二支：往 `ownFields` 里加一格 `(名字 (arr …))`，名字与顶层同一条规则
+   （`<属性全名>$m_onChanged`，完整声明式里那个名字由写的人定 —— 第七十六刀），同时往
+   第八十三刀那张 `evtFields` 里**追加**（不是盖掉：`typeDecl` 那一遍已经把类体里写的
+   `event` 字段 set 进去了）。这一遍（`propName`）排在 `typeDecl` 之后、`classLayout` 与
+   `synthCtors` 之前，所以那一格既进得了结构体，也让"这个类要不要一格合成的 construct"看得见；
+2. 建单子那几行**一行没写**：`evtInitLines` 照着 `evtFields` 走，构造开头那一段与第八十三刀
+   共用（`fnDef` 的 `pre` 与 `emitFieldInitCtors`）；
+3. 存值器：bindable data 的成员那一格现在也**合成得出来**（原先只有顶层那一支）——
+   `if (m_value != x) { m_value = x; fire(m_onChanged); }`，两格生成物都在对象里
+   （`(pfield (var $this) …)`），实参顺序与 `propSet` 发的那一句对上（对象在前、值在后）。
+   出处还是 `Property::compileAutoSetter`（jnc_ct_Property.cpp:788-822）那个 `!=`；
+4. 读写那两格名字：手写的存值器体里裸写的 `m_value` / `m_onChanged` 是**对象里的两格字段**，
+   换名的活儿归 `selfField` —— 原先那儿只认死了 `m_value` 一个名字，这一刀把它换成 `fnDef`
+   摆的一张"源码里的名字 -> 字段名"的表（于是完整声明式里写的人自己起的名字也走同一条）。
+   `bindingof(…)` 里头从只认 `propRef`（`p` / `a.p`）换成 `propTarget` —— 与读写属性同一处
+   判定（第七十刀并的那一处），于是 `bindingof(obj.p)` 里那格对象由它算出来，`+=` 与 `= null`
+   两处拿到的 `code` / `store` 就是 `(pload (pfield 对象 …))` / `(pstore …)`。
+
+**记一笔账（与第八十三刀共有）**：`bindingof(obj.p) = h` 那一句里对象那段文本出现**两次**
+（清空一次 + 加一个），所以对象那个表达式会算两遍 —— 写成 `bindingof(mk().p) = h` 就是两次
+`mk()`。语料里左边全是 `this` 或一格变量，所以这一刀先记账不动；真要治就是"先把对象落进一格
+临时量"。`obj.m_e = h` 那一格同理。
+
+**界没动**：`-=` 还是不收（`bad/bind-remove.jnc`）；`bindingof` 用在不是 bindable 的属性上照旧
+报 jancy 那句 "has no bindable event"（`bad/bindingof-plain.jnc`）。
+
+**量出来的**：`tests/jnc` 170/0。`bad/bind-member.jnc` 从 bad/ 撤了 —— 它的主题现在过得去；
+它撞上的那格新墙（属性声明了却没写存值器）换成 `bad/prop-noset.jnc` 单独钉住。
+换进 `cases/81-propbindmem.jnc`，**六条腿逐字节相同**，尺子是手写的一份等价 C（`/tmp/c81.c`，
+`cc -O0 -std=c99 -Wall`）。那一份钉六件事：成员上的 bindable data 读写走生成的那两个函数、
+同值不通知、两个对象各带自己那一格事件、`bindingof(s.m_state)` 与方法体里裸写
+`bindingof(m_state)` 两种订阅、`= null` 清空、手写存值器里裸写的 `m_value` / `m_onChanged`
+指的是对象里那两格。
+
+**尺子（655 份）—— 只有一个数字动了，说清为什么**：
+
+- 「真降得下来」：58 -> **58**（没动）；
+- 「没有还不收的行」的文件：146 -> **146**（没动）；
+- (文件, 拦路项) 对：8462 -> **8333**（−129）。
+
+前两个数字不动是**该的**：那 104 对散在几十份文件里（`sole 0` —— 一份都不是"就差这一格"），
+每一份还压着 `import "*.jncx"`、`disposable`、`io.` 那一族类型、opaque class 的构造。
+
+−129 是**逐项对齐两趟榜量出来的**（把改动 stash 掉跑一趟，两份日志对着减）：
+
+- **−104**：这一格自己；
+- **−29**：`属性 '…' 当一格可写的内存用`（59 -> 30）—— **这一格是记账上的搬家，不是真过去了**，
+  说清楚：语料里到处写 `m_readParallelismProp.m_value = storage.readInt(…)`
+  （`ui_BufferPropertySet.jnc:183`），而 `ui.IntProperty.m_value` 是
+  `int bindable autoget property`（`api/ui_PropertyGrid.jnc:55`）—— 写了 `property` 就不是
+  bindable data，存值器该由写的人给，而那些类是 **opaque class**（存值器在宿主的 C++ 那边）。
+  先前那一句落在"属性当内存用"上，现在落在同一份文件里**本来就有**的
+  `写属性 '…' —— 它的存值器没有定义`上，于是少了一格 (文件, 拦路项) 对、那一行还是没过去；
+- **−15**：`bindingof(…) 里头要是一格属性`（17 -> 2）—— `bindingof(obj.p)` 这个形状认了；
+- **+10 / +5 / +1×6**：`读属性 '…' 的取值器没有定义`、`string 不能当条件用` 之类 ——
+  **往前走一步才看得见的下一格**，不是退步；
+- `ui.*Property` 那八格 **±88 抵平**：报的话从"没有 construct"换成"construct 要 0 个实参，
+  这里给了 1 个"。**这是这一刀的一个副作用**：那些 opaque class 里有 bindable 成员之后就有了
+  "要建单子"的活儿，于是 `synthCtors` 给它们合成了一格无参 construct（判据与"有字段初值"同一条）。
+  同一堵墙（构造在宿主的 C/C++ 那边）没动，只是撞上去的那句话变了。
+
+榜上第十一位现在是 **103 对**的 `写属性 '…' —— 它的存值器没有定义`（`sole 0`）—— 那是这一格
+后面紧挨着的下一格，而上面那 29 对搬过去之后它更实了。量清了它里头是什么：大头是
+**opaque class 上的属性**（`ui.IntProperty.m_value` / `m_minValue` / `m_spinBoxStep` 这一族，
+`api/ui_PropertyGrid.jnc:52-60`）—— 声明在 jancy 源码里、存值器在宿主的 C++ 那边
+（opaque.rst:15-29）。所以它跟 `ui.*Property` 的构造是**同一堵墙**：要么有宿主面，要么给
+opaque class 一条"声明当真、实现留空"的路。不是属性这一族自己的账。
 
 ## 后果与代价
 
