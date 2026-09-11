@@ -10574,6 +10574,15 @@ class JncLower {
           this.variantTy();
           return { code: `(call ${this.varBox('0', V_NULL, null, null)})`, type: this.variantTy() };
         }
+        /* 函数值那一格（第一百四十三刀）：左边**说得出**它要什么（一格 `(fnty …)`），所以
+           "问不出来"那句话在这儿是**认错人**。真拦路的是方言这一侧：函数值只能从一个真函数
+           做出来（`(fnref NAME)`，tests/sexpr/cases/15-fnvalues.sx:28），还没有"空的那一格"。
+           要收它得先给方言加一格空函数值 —— 那会渗到 MIR 与四个后端，是 ADR-0028 那一栏的事。
+           语料里的形状：`void function* onTriggered() = null`（ui_Action.jnc:39）。 */
+        if (want !== null && want !== undefined && isFn(want)) {
+          return this.nope(n, `null 当一格函数值（${tyName(want)}）—— 方言里的函数值只能从一个`
+            + '真函数做出来（`(fnref …)`），还没有"空的那一格"');
+        }
         if (want === null || want === undefined || !jncIsPtr(want)) {
           return this.err(n, 'null 得从左边知道自己是哪种指针（这里问不出来）');
         }
@@ -10877,7 +10886,9 @@ class JncLower {
     } else {
       a = this.expr(n.items[2], null);
       if (a === null) return null;
-      b = rhs((jncIsPtr(a.type) || isClass(a.type)) && rNull ? a.type : null);
+      // 函数值那一格也要把类型传给 null（第一百四十三刀）：`cb == null` 里左边说得出它是
+      // 什么，不传下去那边报的就是"问不出来"—— 又是一句认错人的话。真拦路的在方言那一侧。
+      b = rhs((jncIsPtr(a.type) || isClass(a.type) || isFn(a.type)) && rNull ? a.type : null);
     }
     if (a === null || b === null) return null;
     // `&&` / `||` 两边各自真值化（jancy 与 C 同：`p && n` 是合法的）。方言的

@@ -1,0 +1,18 @@
+// 第一百四十三刀的界：`null` 当一格**函数值**。
+//
+// 这一格拦的理由与别处不一样：左边**说得出**它要什么（一格 `(fnty …)`），所以先前那句
+// "null 得从左边知道自己是哪种指针（这里问不出来）"是**认错人**。真拦路的在**方言那一侧**：
+// 函数值只能从一个真函数做出来（`(fnref NAME)`，tests/sexpr/cases/15-fnvalues.sx:28），
+// 还没有"空的那一格"。要收它得先给方言加一格空函数值 —— 那会渗到 MIR 与四个后端，
+// 是 ADR-0028 那一栏的事，不是这一层一句话能办的。
+//
+// 语料里的形状（ioninja 那 44 份里）：`void function* onTriggered() = null`（ui_Action.jnc:39）
+// 与 `cb == null`。两处现在说的是同一句话。
+void def(void function* cb() = null) {
+	printf("%d\n", cb == null);
+}
+
+int main() {
+	def();
+	return 0;
+}
