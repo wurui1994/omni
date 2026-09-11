@@ -6435,6 +6435,79 @@ fixture `cases/104-bitfield` 里九格位域覆盖六种分组情形（挤一格
 这些文件先前有两个拦路项（位域 + 这一行），现在只剩这一行，于是变成 sole。这正是尺子该有的样子：
 sole 涨说明**下一刀的题目更集中了**，不是退步。
 
+## 尺子停在哪儿（第一百一十二刀之后）：布局那一族只剩一格，而**榜首换人了**
+
+第一百一十二刀之后把榜按"**只有一个拦路项**的文件"（sole）重排了一遍 —— 这一栏才是"下一刀能
+让几份文件真过去"。头几行：
+
+- **12** `没有这个类型：'…'`
+- **12** `unexpected "<" …`
+- **9** `bitflag enum 里的负值`（C++ 的未定义行为，没有可对的答案）
+- **4** `修饰符 '…'`、**4** `unexpected "int" …`
+- **3** `main 里 return 非 0`、**3** `原型没有带体的定义`、**3** `没有这个基类`、**3** `顶层的 '…'`
+
+拦路项个数的分布也量了：**80 份零拦路项、84 份只有一个、63 份两个、83 份三个**。也就是说
+"一刀能让它过去"的库存是 84 份，而这 84 份的题目集中在上面那六七行里。
+
+### 两个把之前的分类改了的发现
+
+**一、`unexpected "<"` 那 12 份全是泛型。** 逐份看过：`stdt_Array` / `stdt_BinTree` /
+`stdt_BoxList` / `stdt_HashTable` / `stdt_Iterator` / `stdt_List` / `stdt_Map` / `stdt_Operator` /
+`stdt_RbTree` 九份加 `test157` / `test158` / `unit_stdt_List`。`unexpected "int"` 那 4 份
+（`unit_stdt_Array` / `unit_stdt_BoxList` / `unit_stdt_HashTable` / `unit_stdt_RbTree`）是同一族的
+**用**那一侧（`stdt.Array<int>`）。所以泛型（#34 / ADR-0025）今天的账是 **sole 16**，与
+`没有这个类型` 并列榜首 —— 先前把它记成"19 份的 jnc_std"，量下来 sole 这一栏比想的大。
+
+**二、`没有这个类型` 那 12 份里，`variant_t` 独占 5 份。** 逐份跑出真名字：
+
+- 只差 `variant_t`：`std_MapEntry.jnc`、`ias_PluginDispatch.jnc`、`ui_ComboBox.jnc`、
+  `ui_ListItem.jnc`、`ui_ListWidget.jnc` —— **5 份**；
+- 只差宿主面的自省类型：`jnc_MemberBlock`（Field / Function / Property / Variable）、
+  `jnc_Module`（GlobalNamespace / Type）、`jnc_ModuleItem`（Attribute / … / Type / Unit，
+  外加 variant_t）、`Proto_Raw` / `Proto_Simple`（log.Representation）、
+  `log_RecordFile`（std.Guid）—— 6 份；
+- `test147fail.jnc` 那份**本来就该失败**（名字里写着 fail）。
+
+也就是说 `没有这个类型` 这一行不是一族，是两族加一份噪声，而 variant_t 那一半今天**没有前置了**。
+
+### variant_t 的墙确实拆了（探针）
+
+前面那一节（"`variant_t` 那一格的墙量出来了"）说它压在"string 能不能落进内存"上。ADR-0026 落了
+之后拿探针复量：
+
+```jancy
+struct V { int m_tag; int64_t m_n; string_t m_s; }
+V* v = new V;  v.m_tag = 1;  v.m_n = 42;  v.m_s = "hi";
+```
+
+`1 42 hi` / `2 hi` —— 过。当初报的那句"结构体 'V' 里有落不进内存的字段"不再出现。所以
+**variant_t 的载荷用一格合成的结构体表示，这条路今天通了**，任务 #35 的前置清空。
+
+余下要定的只有落法的三处（不是新问题，是把已定的设计写成代码）：装箱要**发语句**（`pnew` 一格
+再逐格 pstore），而 `expr` 这一层回的是一格值 —— 所以装箱得挂在那几处本来就有 `out` 数组的
+调用点上（赋值、声明的初值、实参、return），与 `aggSource` / `copyVal` 同一个位置。
+
+### `pragma(Alignment, 1)` 那条拦子要不要撤：**先记账，不动**
+
+`顶层的 '…'` sole 3 里两份是 `pragma`（`BacNetApdu.jnc:6`、`Osdp.jnc:29`），一份是
+`dylib`（`io_JLink.jnc:208`，宿主面）。`bad/pragma` 那条拦子当初的理由写着"收下不看 = 按默认对齐
+算偏移 = 与 jancy 那边不一样 = 安静的错答案"。
+
+**这条理由今天要修一处**：这一层的整数在内存里一律 8 字节（`bad/sizeof` 那条界），所以字段偏移
+**本来就**与 jancy 不同 —— 不是 `pragma` 造成的。拦着 `pragma` 保护的东西，8 字节那条决定早就
+放走了。真正还站得住的理由只剩一条：**一份程序若从宿主拿按 jancy 布局排好的字节**（协议头那一族
+正是这么用的），那时偏移对不上就是错答案；而 `pragma` 出现的两份恰好都是协议解析。
+
+所以结论是"先不动"，可**理由换了**：不是"忽略对齐会算错"，而是"`pragma` 出现的地方正好是唯一
+能观测到布局的地方（宿主喂进来的字节），而那一族的账要连 8 字节整数一起算"。这两份文件因此
+排在宿主面那一族后面，不是排在"便宜的前端格"里。
+
+### 挑下一刀
+
+按 sole 这一栏，能选的只有三格：泛型 16、宿主面 6+、**variant_t 5**。三格里 variant_t 是唯一
+**前置已清、设计已定**的一格（tag + 载荷的合成结构体、拆箱对不上就 `(fail …)`，见任务 #35），
+所以下一刀是它。泛型与宿主面各自还差一份"怎么落"的设计。
+
 ## 后果与代价
 
 
