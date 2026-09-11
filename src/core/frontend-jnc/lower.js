@@ -523,6 +523,8 @@ const OP_NAME = new Map([
   ['operator --', 'dec'],
   ['postfix operator ++', 'inc$post'],
   ['postfix operator --', 'dec$post'],
+  ['operator *', 'mul'],
+  ['operator ->', 'arrow'],
 ]);
 
 /** 这个声明符是**属性的**取/存吗（第六十九刀）：`m_v.get()` 名字写在前面（语法上那是
@@ -1059,6 +1061,9 @@ class JncLower {
     /* 自增自减那一族的算符重载（第一百三十一刀）：拼好的名字进这一格。只用记"在不在" ——
        调用点（`it++;` 那条语句）自己按主人的类型把名字拼回来。 */
     this.opIncDec = new Set();
+    /* 取值那两个算符（第一百三十四刀）：`Owner$op$mul` / `Owner$op$arrow` -> { name, ret }。
+       这一族的调用点在**求值**那条路上，所以要记住回的是什么类型（`*it` 整格的类型就是它）。 */
+    this.opUnary = new Map();
     this.sctors = new Map();
     this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
     // 方法名 -> 它那段闭包 thunk（第五十五刀）。`c.foo` 当值用时捕的是对象，一个方法一段。
@@ -1338,14 +1343,19 @@ class JncLower {
   }
 
   /**
-   * `operator ++` / `operator --`（含 postfix 两个变体）的签名（第一百三十一刀）。
+   * 零元的成员算符的签名：`operator ++` / `operator --`（含 postfix，第一百三十一刀），
+   * 以及取值那两个 `operator *` / `operator ->`（第一百三十四刀）。
    *
-   * 语料里这一族的原样在 stdt_Iterator.jnc:36-54 —— 四个都写着，前缀回**新**值、后缀回
-   * **旧**值。落法与 `operator :=` 同一条（自由函数、`this` 当第一个形参），名字拼成
-   * `Owner$op$inc` / `$op$dec` / `$op$inc$post` / `$op$dec$post`。
+   * 语料里前一族的原样在 stdt_Iterator.jnc:36-54 —— 四个都写着，前缀回**新**值、后缀回
+   * **旧**值；后一族在同一份的 :28-34，两个都回那格指针。落法与 `operator :=` 同一条
+   * （自由函数、`this` 当第一个形参），名字拼成 `Owner$op$inc` / `$op$dec` /
+   * `$op$inc$post` / `$op$dec$post` / `$op$mul` / `$op$arrow`。
    *
-   * 一个字都不收形参：jancy 那边这一族本来就是零元（C++ 里 postfix 那个假的 `int` 形参在
+   * 一个字都不收形参：jancy 那边这几个本来就是零元（C++ 里 postfix 那个假的 `int` 形参在
    * jancy 是靠 `postfix` 这个词分的，不是靠形参，jnc.grammar:431）。
+   *
+   * 两族的差别只在**调用点**：`++` 那一族落在语句上，`*` / `->` 落在求值那条路上，所以
+   * 后者还要把"回的是什么类型"记住（`opUnary`）—— `*it` 整格的类型就是它。
    */
   opIncSig(n, info, ps) {
     const suffix = OP_NAME.get(info.special);
@@ -1363,13 +1373,39 @@ class JncLower {
     if (this.fns.has(full)) {
       return this.err(n, `${shown(owner)} 的第二个 '${info.special}'`);
     }
+    /* 取值那两个要回**一格指针**：`*it` / `it->m_x` 接下来那一步走的是这一层原有的
+       "指针取字段"那条路，回别的东西那条路就接不上（jancy 那边 `operator *` 回什么都行，
+       接下来那一步按回的类型再算一遍 —— 那要一整套"重载之后再解析"的路，明说不收）。 */
+    if ((suffix === 'mul' || suffix === 'arrow') && !jncIsPtr(info.type)) {
+      return this.nope(n, `'${info.special}' 回 ${tyName(info.type)}（这一层要它回一格指针：`
+        + '接下来那一步走的是"指针取字段"那条路）');
+    }
     info.name = full;
     const self = this.classes.has(owner) ? tClass(owner, false) : { k: 'struct', name: owner };
     ps.unshift({ name: 'this', type: self, formals: null, def: null });
     this.methods.set(full, owner);
-    this.opIncDec.add(full);
+    if (suffix === 'mul' || suffix === 'arrow') this.opUnary.set(full, { name: full, ret: info.type });
+    else this.opIncDec.add(full);
     this.fns.set(full, sigOf(ps, info.type));
     return { info, ps, isMain: false };
+  }
+
+  /**
+   * 取值那两个算符的调用点（第一百三十四刀）：`v` 是左边那一格算出来的值，回的是"算符调完之后
+   * 那一格值"（一格指针），认不出来就回 undefined 让原来那条路照旧报。
+   *
+   * `which` 是 `'arrow'` 或 `'mul'`。**先找问的那一个、没写就用另一个**：这一层从第十九刀起
+   * 就把 `(*p).f` 与 `p->f` 收在同一条路上（普通指针上两者同义，fieldLv 收到的节点一模一样），
+   * 所以重载也只有一个选择点。jancy 那边 `(*x).f` 严格走 `operator *`—— 这一格记成账
+   * （ADR-0016 第一百三十四刀）：语料里那两个算符回的是同一格 `m_p`，所以看不出差别。
+   */
+  opUnaryCall(v, which) {
+    if (v === null || !(isClass(v.type) || jncIsStruct(v.type))) return undefined;
+    const a = this.opUnary.get(`${v.type.name}$op$${which}`);
+    const b = this.opUnary.get(`${v.type.name}$op$${which === 'arrow' ? 'mul' : 'arrow'}`);
+    const op = a ?? b;
+    if (op === undefined) return undefined;
+    return { code: `(call ${op.name} ${v.code})`, type: op.ret };
   }
 
   /**
@@ -7934,9 +7970,7 @@ class JncLower {
     if (h === 'indirect') {
       const p = this.expr(n.items[1], null);
       if (p === null) return null;
-      if (!jncIsPtr(p.type)) return this.err(n, `'*' 要一个指针，这里是 ${tyName(p.type)}`);
-      const tt = p.type.target;
-      return { kind: jncIsStruct(tt) || isArr(tt) ? 'agg' : 'ptr', code: p.code, type: tt };
+      return this.ptrLv(n, p);
     }
     // `p[i] = v`。jancy 的下标就是 `*(p + i)`，范围检查在解引用那一步
     // （type_ptr_data.rst：Range is checked on both array accesses and pointer dereferences）
@@ -8007,11 +8041,25 @@ class JncLower {
   }
 
   fieldLv(n, ptrNode, memNode) {
-    const p = this.expr(ptrNode, null);
+    let p = this.expr(ptrNode, null);
     if (p === null) return null;
+    /* `operator ->`（第一百三十四刀）：左边是一格带这个算符的类 / 结构体就先调它，
+       算出来的指针再走下面那条原来的路。读写两侧都从这儿过 —— `it->m_value = value`
+       （stdt_Map.jnc:150）靠的就是这一句。 */
+    const od = this.opUnaryCall(p, 'arrow');
+    if (od !== undefined) p = od;
     if (!jncIsPtr(p.type)) return this.err(n, `'->' 要一个指针，这里是 ${tyName(p.type)}`);
     if (!jncIsStruct(p.type.target)) return this.err(n, `'->' 的目标不是结构体：${tyName(p.type.target)}`);
     return this.memberOf(n, p.code, p.type.target.name, memNode);
+  }
+
+  /** `*p` 那一格的位置（第一百三十四刀把它从 lvalue 里提出来）：`p` 是已经算好的那格指针值。
+   *  提出来是因为求值那一侧也要用它 —— 那儿为了先问一句"有没有 `operator *`"已经把左边算过
+   *  一遍了，再走 lvalue 就会**算第二遍**（诊断会报两回、errorcode 的传播那两句会插两回）。 */
+  ptrLv(n, p) {
+    if (!jncIsPtr(p.type)) return this.err(n, `'*' 要一个指针，这里是 ${tyName(p.type)}`);
+    const tt = p.type.target;
+    return { kind: jncIsStruct(tt) || isArr(tt) ? 'agg' : 'ptr', code: p.code, type: tt };
   }
 
   /** 一个字段的位置：`(pfield 地址 f)`。字段自己是结构体或数组时它又是一格 `agg`（嵌套）。 */
@@ -10177,7 +10225,23 @@ class JncLower {
       case 'this': return this.load(n, this.lvalue(n));
       case 'char': return this.charLit(n);
       case 'binary': return this.binary(n);      case 'unary': return this.unary(n, want);
-      case 'indirect': return this.load(n, this.derefLv(n));
+      case 'indirect': {
+        /* `operator *`（第一百三十四刀）：`*it` 里 it 是一格带这个算符的类 / 结构体就调它，
+           整格的值与类型都由它给 —— 语料里那一句是 `T* p = *it;`（stdt_HashTable.jnc:107），
+           所以 `*it` **就是**算符回的那格指针，不是"再解引用一次"。
+           这一问要排在 derefLv 之前（那儿只会报"`*` 要一个指针"），而左边算过一遍之后
+           不能再让 derefLv 算第二遍 —— 所以走 ptrLv 那条共用的尾巴。
+           整份文件里一个这样的算符都没有时（243 份里 242 份）连这一步都不进。 */
+        if (this.opUnary.size > 0) {
+          const v = this.expr(n.items[1], null);
+          if (v === null) return null;
+          const od = this.opUnaryCall(v, 'mul');
+          if (od !== undefined) return od;
+          const lv = this.ptrLv(n, v);
+          return lv === null ? null : this.load(n, lv);
+        }
+        return this.load(n, this.derefLv(n));
+      }
       case 'index': {
         // 索引属性的读（第七十刀）：`p[i][j]` 是"调取值器、下标当实参"，不是解引用。要排在
         // derefLv 之前问 —— 那儿只会报"下标要一个指针"。

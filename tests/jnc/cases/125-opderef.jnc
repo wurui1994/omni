@@ -1,0 +1,59 @@
+// 第一百三十四刀：取值那两个算符 —— `operator *` 与 `operator ->`。
+//
+// 语料里这一族的声明在 stdt_Iterator.jnc:28-34（一格迭代器包着一格指针，两个算符都回那格指针），
+// 用它的地方在 stdt_HashTable.jnc:107 `T* p = *it;` 与 stdt_Map.jnc:142/150
+// `return it->m_value;` / `it->m_value = value;` —— **读写两侧都有**。
+//
+// 与前两刀（`operator :=`、`operator ++`）的差别：那两个的调用点在**语句**上，这一族在
+// **求值**那条路上 —— `*it` 是 `indirect`、`it->m_x` 是 `ptr-field`。所以这一刀要在三处认它：
+//   1. 取值（`expr` 的 `indirect` / `ptr-field`）；
+//   2. 取地址那一侧（`lvalue` 的同两处）—— `it->m_value = value` 靠它；
+//   3. 名字与登记照旧走第一百三十刀那条路（`Owner$op$mul` / `Owner$op$arrow`）。
+//
+// 落法一句话：`*it` 就是 `it.operator*()`，`it->m_x` 就是 `(it.operator->()).m_x` ——
+// 算符回的是一格指针，剩下那一步照旧是这一层原来那条指针取字段的路。
+//
+// 尺子 `/tmp/c131.c`：C 里没有算符重载，手写的是"编译器该替你插进去的那次调用"。
+// 同一串数（5 6 / 5 / 9 / 70 80）。
+
+struct Node {
+	int m_x;
+	int m_y;
+}
+
+struct It {
+	Node* m_p;
+
+	Node* operator * () {
+		return m_p;
+	}
+
+	Node* operator -> () {
+		return m_p;
+	}
+}
+
+int main() {
+	Node a;
+	a.m_x = 5;
+	a.m_y = 6;
+
+	Node b;
+	b.m_x = 70;
+	b.m_y = 80;
+
+	It it;
+	it.m_p = &a;
+
+	Node* p = *it;                       // operator *
+	printf("%d %d\n", p.m_x, p.m_y);
+
+	printf("%d\n", it->m_x);             // operator ->（读）
+
+	it->m_y = 9;                         // operator ->（写）
+	printf("%d\n", a.m_y);
+
+	it.m_p = &b;
+	printf("%d %d\n", (*it).m_x, it->m_y);
+	return 0;
+}
