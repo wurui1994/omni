@@ -1,0 +1,21 @@
+// 两格基类带同名的字段（ADR-0016 第九十四刀留下的第二条边界）。
+// jancy 那边 `C: I1, I2` 里 I1 与 I2 是同一个对象里的**两块**内存，两个 `m_x` 是两格；
+// 这一层一整块继承图共用一格结构体，两个同名字段会合成一格 —— 那是"改了意思"，所以当场拒。
+// 不同名的合得起来（cases/86-multibase.jnc 就是那一种）。
+class I1 {
+	int m_x;
+}
+
+class I2 {
+	int m_x;
+}
+
+class C: I1, I2 {
+	int m_c;
+}
+
+int main() {
+	C* c = new C();
+	printf("%d\n", c.m_c);
+	return 0;
+}

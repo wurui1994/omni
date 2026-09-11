@@ -1,0 +1,27 @@
+// 共享基类各一份实例（ADR-0016 第九十四刀留下的第一条边界）。
+// jancy 那句写得很明白："a simple multiple inheritance model (**multiple instances of
+// shared bases** -- if any)"（type_class.rst:171-174）—— `D: B1, B2` 而 B1 与 B2 都从 A
+// 来，那么一个 D 对象里有**两份** A，`m_a` 是两格不同的内存。
+// 这一层一整块连通的继承图共用一格结构体，同一个基类只有一份 —— 悄悄按一份算是改了意思，
+// 所以当场拒。
+class A {
+	int m_a;
+}
+
+class B1: A {
+	int m_b1;
+}
+
+class B2: A {
+	int m_b2;
+}
+
+class D: B1, B2 {
+	int m_d;
+}
+
+int main() {
+	D* d = new D();
+	printf("%d\n", d.m_d);
+	return 0;
+}

@@ -1,0 +1,67 @@
+// 第九十四刀：多个基类。jancy 的模型是**多继承**（type_class.rst:171-174："a simple
+// multiple inheritance model (multiple instances of shared bases -- if any). The infamous
+// virtual multiple inheritance model of C++ is not and will not be supported"），拿
+// `basetype1` .. `basetype9` 指第几格基类（同一处 :226）。
+//
+// 这一层的落法：第一格基类是"链"那条脊梁，第二格起在查名、上转、构造上与第一格**同待遇**；
+// 一整块连通的继承图共用**一格**方言结构体（字段是图上所有类的并集），所以上转照旧发零条
+// 指令。两条边界另有 bad/ 守着：
+//   - 同一个基类到得了两遍（jancy 那句"共享基类各一份实例"）—— bad/multibase-shared.jnc；
+//   - 两格基类带同名的字段（jancy 那边是两块内存）—— bad/multibase-field.jnc。
+//
+// 期望输出的出处：/tmp/c86.c（`cc -O0 -std=c99 -Wall`）—— 那份 C 把两段基类摊平成一格
+// 结构体，与这一层落出来的形状一样。
+
+class I1 {
+	int m_a;
+
+	construct(int a) {
+		m_a = a;
+	}
+
+	int one() {
+		return m_a + 1;
+	}
+}
+
+class I2 {
+	int m_b;
+
+	construct() {
+		m_b = 20;
+	}
+
+	int two() {
+		return m_b + 2;
+	}
+}
+
+class C3: I1, I2 {
+	int m_c;
+
+	construct(int a) {
+		// 第一格显式调（它要实参），第二格没写 —— 自动补一句（它不要实参）。
+		basetype1.construct(a);
+		m_c = 300;
+	}
+
+	int all() {
+		// 两格基类的方法都查得着，`basetype2.` 也指得着第二格。
+		return one() + two() + basetype2.two() + m_c;
+	}
+}
+
+int main() {
+	C3* c = new C3(5);
+	printf("%d\n", c.m_a);
+	printf("%d\n", c.m_b);
+	printf("%d\n", c.m_c);
+	printf("%d\n", c.all());
+
+	// 上转：两格基类都装得进，各发零条指令。
+	I1* p1 = c;
+	I2* p2 = c;
+	printf("%d\n", p1.one());
+	printf("%d\n", p2.two());
+	return 0;
+}

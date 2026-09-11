@@ -131,10 +131,11 @@
 //     五十二刀、`construct` 与 `static construct` 是第五十三刀、**单继承**是第五十六刀
 //     （一条链在方言里共用一格 `(struct …)`，见 classLayout）、**虚派发**是第五十七刀
 //     （`virtual`/`override`/`abstract`：对象头那一格 `$tag` 是动态类型，每个虚方法一段按
-//     标签挑实现的函数，见 dispatch）；类那一族剩下的是多继承与
-//     `basetype1..9`、拿结构体当基类、下转、同名方法上再写一遍 `virtual`、
-//     `destruct`（GC 不定时，disposable.rst:17）、`get` / `set`、构造的重载、
-//     内嵌的类字段与静态字段。
+//     标签挑实现的函数，见 dispatch）、**多个基类**与 `basetype1..9` 是第九十四刀
+//     （一整块继承图共用一格结构体）；类那一族剩下的是共享基类各一份实例、
+//     拿结构体当基类、下转、同名方法上再写一遍 `virtual`、
+//     `destruct`（GC 不定时，disposable.rst:17 —— `opaque class` 里没有体的那一格第九十三刀
+//     收下了）、`get` / `set`、构造的重载、内嵌的类字段与静态字段。
 //   - 函数指针（`R function* p(形参)`）第五十五刀收了 —— 落到方言的函数值那一格
 //     （`(fnty …)` / `(fnref …)` / `(mkclo …)` / `(callfn …)`），`c.foo` 捕的就是那个对象。
 //     剩下的四条：没写初值的那一格（方言的函数值没有空值，跟着 `if (p)` 也立不住）、
@@ -420,20 +421,22 @@ function fmtNode(n) {
   return null;
 }
 
-/** 这段树里有 `basetype.construct(…)` 吗（第五十六刀）。没有就自动补一句基类构造 ——
- *  jancy 也是这么做的（`callBaseTypeConstructors` 只在源码没显式调时才补）。 */
-function hasBaseCtorCall(n) {
-  if (!isList(n)) return false;
+/** 这段树里显式调了**第几格**基类的 construct（第五十六刀 + 第九十四刀）。没调的那几格自动
+ *  补一句 —— jancy 也是这么做的（`callBaseTypeConstructors` 只补源码没显式调的那些）。
+ *  回的是一格序号的集合（`basetype` 不带序号算第 1 格）。 */
+function baseCtorCalls(n, out = new Set()) {
+  if (!isList(n)) return out;
   if (head(n) === 'call') {
     const c = n.items[1];
     if (isList(c) && head(c) === 'field' && isList(c.items[1])
       && head(c.items[1]) === 'basetype'
       && (isAtom(c.items[2]) || isStr(c.items[2])) && c.items[2].value === 'construct') {
-      return true;
+      const bt = c.items[1];
+      out.add(isAtom(bt.items[1]) ? Number(bt.items[1].value) : 1);
     }
   }
-  for (const it of n.items) if (hasBaseCtorCall(it)) return true;
-  return false;
+  for (const it of n.items) baseCtorCalls(it, out);
+  return out;
 }
 
 /** 声明符的核心是个**特殊成员**吗（第五十二刀）：`construct` / `destruct` /
@@ -951,6 +954,12 @@ class JncLower {
     // 共用**一格** `(struct 根 …)`（字段是整条链的并集），所以 `D*` 与 `B*` 是同一个方言
     // 类型 —— 上转一个字都不用发，也不需要方言长出指针的重解释。
     this.bases = new Map();
+    /* 多继承（第九十四刀）：类名 -> 第二格起的那些基类。第一格照旧待在 `this.bases` 里 ——
+     * 它是"链"那条脊梁（构造顺序、basetype 不带序号时指谁都按它）。第二格起的这些在这一层
+     * 与第一格是**同一格待遇**：名字查得着、上转装得进、根合成同一格结构体。jancy 那句
+     * "multiple instances of shared bases"（type_class.rst:171-174）这一层做不到 ——
+     * 一条链一格结构体，同一个基类出现两次只有一份，所以那一种当场拒（见 classLayout）。 */
+    this.mixins = new Map();
     this.roots = new Map();
     this.ownFields = new Map();   // 类名 -> 它自己那几格字段（基类的不算）
     this.pendingCls = [];         // 类的 `(struct …)` 推迟到整条链都知道了再发
@@ -1028,30 +1037,34 @@ class JncLower {
   synthCtors() {
     const depth = (c) => {
       let d = 0;
-      let cur = this.bases.get(c);
-      while (cur !== null && cur !== undefined) { d++; cur = this.bases.get(cur); }
+      for (const b of this.dirBases(c)) d = Math.max(d, depth(b) + 1);
       return d;
     };
     const order = this.pendingCls.slice().sort((a, b) => depth(a.name) - depth(b.name));
     for (const { name, node } of order) {
-      const base = this.bases.get(name);
-      const bc = base === null || base === undefined ? undefined : this.ctors.get(base);
+      /* 基类的构造要**逐格都调**（第九十四刀）：jancy 那句就是复数的
+         `callBaseTypeConstructors`（jnc_ct_Parser.cpp:3005）。单继承时这一串只有一格，
+         与第五十六刀那时一个字不差。 */
+      const bcs = this.dirBases(name)
+        .map((b) => ({ cls: b, c: this.ctors.get(b) }))
+        .filter((x) => x.c !== undefined);
       const hasFI = this.fieldInits.has(name) || this.evtFields.has(name);
       if (this.ctors.has(name)) {
         // 自己写了 construct：字段初值由 fnDef 插到它开头；基类那一个由
         // `basetype.construct(…)` 显式调，没写就在 fnDef 那处自动补一句（与 jancy 的
         // callBaseTypeConstructors 同）。只有 static construct 的那一种上面已经合成过一个
         // 空的了，那一个不会调基类 —— 明说不收。
-        if (bc !== undefined && this.synthSC.has(name)) {
-          this.nope(node, `${shown(name)} 只有 static construct 而基类 ${shown(base)} 有 construct`
+        if (bcs.length > 0 && this.synthSC.has(name)) {
+          this.nope(node, `${shown(name)} 只有 static construct 而基类 ${shown(bcs[0].cls)} 有 construct`
             + '（合成出来的那一个还要把基类的构造调一遍）');
         }
         continue;
       }
-      if (bc === undefined && !hasFI) continue;   // 没有基类构造、也没有初值：不用有构造
-      if (bc !== undefined && bc.params.length > 0) {
-        this.err(node, `${shown(name)} 没有 construct，而基类 ${shown(base)} 的 construct 要 `
-          + `${bc.params.length} 个实参 —— 得自己写一个 construct 并在里面调 basetype.construct(…)`);
+      if (bcs.length === 0 && !hasFI) continue;   // 没有基类构造、也没有初值：不用有构造
+      const need = bcs.find((x) => x.c.params.length > 0);
+      if (need !== undefined) {
+        this.err(node, `${shown(name)} 没有 construct，而基类 ${shown(need.cls)} 的 construct 要 `
+          + `${need.c.params.length} 个实参 —— 得自己写一个 construct 并在里面调 basetype.construct(…)`);
         continue;
       }
       const full = `${name}$construct`;
@@ -1060,8 +1073,8 @@ class JncLower {
       this.methods.set(full, name);
       this.ctors.set(name, { name: full, params: [] });
       if (hasFI) { this.synthFI.add(name); continue; }
-      this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n`
-        + `    (expr (call ${bc.name} (var $this))))`);
+      const calls = bcs.map((x) => `    (expr (call ${x.c.name} (var $this)))`).join('\n');
+      this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n${calls})`);
     }
   }
 
@@ -1119,9 +1132,11 @@ class JncLower {
   emitFieldInitCtors() {
     for (const cls of this.synthFI) {
       const pre = [];
-      const base = this.bases.get(cls);
-      const bc = base === null || base === undefined ? undefined : this.ctors.get(base);
-      if (bc !== undefined) pre.push(`    (expr (call ${bc.name} (var $this)))`);
+      // 基类的构造逐格都调（第九十四刀）—— 单继承时这一串只有一格。
+      for (const b of this.dirBases(cls)) {
+        const bc = this.ctors.get(b);
+        if (bc !== undefined) pre.push(`    (expr (call ${bc.name} (var $this)))`);
+      }
       if (this.sctors.has(cls)) for (const l of this.gateLines(cls, '    ')) pre.push(l);
       for (const l of this.evtInitLines(cls, '    ')) pre.push(l);
       const saveNs = this.ns;
@@ -3034,29 +3049,33 @@ class JncLower {
     if (nm3 === null) return this.err(n, `认不出的${cls ? '类' : '结构体'}名字`);
     const name = this.qual(nm3);
     const bases = this.flat(n.items[3]);
-    // 基类（第五十六刀）。jancy 的模型是**多继承**（type_class.rst:171-174："a simple
-    // multiple inheritance model (multiple instances of shared bases -- if any)"），这一刀
-    // 只接**单**继承：两个以上的基类要 `basetype1..9` 与"同一个基类在链上出现两次算两份实例"
-    // 那一整套，是自己一格。结构体当基类 jancy 也收（同一处:218 那句 "it's ok to inherit
-    // from structs and even unions"），那要"结构体也能当一层基类"，也是自己一格。
+    // 基类（第五十六刀 + 第九十四刀）。jancy 的模型是**多继承**（type_class.rst:171-174：
+    // "a simple multiple inheritance model (multiple instances of shared bases -- if any)"）。
+    // 第五十六刀只接单继承；第九十四刀把"多个基类"这一格收下了 —— 第一格是链的脊梁，第二格起
+    // 在这一层与第一格同待遇（见 mixins 那处的注）。剩下两格还没收：**共享基类各一份实例**
+    // （一条链一格结构体，同一个基类只有一份 —— classLayout 那儿当场拒），以及结构体当基类
+    // （同一处:218 那句 "it's ok to inherit from structs and even unions"，那要"结构体也能
+    // 当一层基类"，是自己一格）。
     if (bases.length > 0 && !cls) return this.nope(n, '结构体的基类');
-    if (bases.length > 1) {
-      return this.nope(n, `多继承（这里有 ${bases.length} 个基类 —— 要 basetype1..9 与`
-        + '"共享基类各一份实例"，type_class.rst:171-174）');
-    }
     let base = null;
-    if (bases.length === 1) {
-      const bn = this.qname(bases[0]);
-      if (bn === null) return this.nope(bases[0], '认不出的基类名字');
-      base = this.resolve(bn, (k) => this.classes.has(k));
-      if (base === null) {
+    const extra = [];
+    for (let i = 0; i < bases.length; i++) {
+      const bn = this.qname(bases[i]);
+      if (bn === null) { this.nope(bases[i], '认不出的基类名字'); continue; }
+      const b = this.resolve(bn, (k) => this.classes.has(k));
+      if (b === null) {
         if (this.resolve(bn, (k) => this.structs.has(k)) !== null) {
-          return this.nope(bases[0], `拿结构体 '${bn}' 当基类（jancy 收它，`
-            + 'type_class.rst:218）');
+          this.nope(bases[i], `拿结构体 '${bn}' 当基类（jancy 收它，type_class.rst:218）`);
+          continue;
         }
-        return this.err(bases[0], `没有这个基类：'${bn}'`);
+        this.err(bases[i], `没有这个基类：'${bn}'`);
+        continue;
       }
-      if (base === name) return this.err(bases[0], `'${shown(name)}' 拿自己当基类`);
+      if (b === name) { this.err(bases[i], `'${shown(name)}' 拿自己当基类`); continue; }
+      if (base === null) base = b;
+      else if (b === base || extra.includes(b)) {
+        this.err(bases[i], `'${shown(name)}' 的基类里 '${shown(b)}' 写了两遍`);
+      } else extra.push(b);
     }
     const fields = this.structs.get(name);
     if (fields === undefined || fields.length > 0) return null;   // 上一遍已经报过重复了
@@ -3290,6 +3309,7 @@ class JncLower {
     // 发出去这一步推迟到 classLayout 那一遍（第五十六刀）：一整条继承链共用**一格**结构体，
     // 而"谁派生了我"要等所有 type-decl 都过完才知道（jancy 不要求先声明后使用）。
     this.bases.set(name, base);
+    if (extra.length > 0) this.mixins.set(name, extra);
     this.ownFields.set(name, fields.slice());
     if (inits.length > 0) this.fieldInits.set(name, inits);
     if (evts.length > 0) this.evtFields.set(name, evts);
@@ -3314,41 +3334,111 @@ class JncLower {
    * 用的是源码里的字段名。
    */
   classLayout() {
-    // 先把链走通：环要当场拒（不然下面那两个循环不停）
-    for (const { name, node } of this.pendingCls) {
-      const seen = new Set([name]);
-      let cur = this.bases.get(name);
-      while (cur !== null && cur !== undefined) {
-        if (seen.has(cur)) {
-          this.err(node, `'${shown(name)}' 的基类链绕回了自己（经过 '${shown(cur)}'）`);
-          this.bases.set(name, null);
-          break;
-        }
-        seen.add(cur);
-        cur = this.bases.get(cur);
-      }
-    }
-    const rootOf = (c) => {
-      let r = c;
-      for (;;) {
-        const b = this.bases.get(r);
-        if (b === null || b === undefined) return r;
-        r = b;
-      }
-    };
-    // 每个类的**可见**字段表 = 基类的 ++ 自己的（`this.structs` 那张表是这一层查名用的）
-    const chainFields = (c) => {
+    /* 直接基类那一串（第九十四刀）：第一格 ++ 第二格起。下面这一遍全按它走 —— 单继承时它
+       就是原来那条链，一个字的行为都没变。 */
+    const dir = (c) => {
       const b = this.bases.get(c);
-      const up = b === null || b === undefined ? [] : chainFields(b);
-      return up.concat(this.ownFields.get(c) === undefined ? [] : this.ownFields.get(c));
+      const m = this.mixins.get(c);
+      const out = b === null || b === undefined ? [] : [b];
+      return m === undefined ? out : out.concat(m);
+    };
+    // 先把图走通：环要当场拒（不然下面那几个循环不停）
+    for (const { name, node } of this.pendingCls) {
+      const path = new Set();
+      const walk = (c) => {
+        if (path.has(c)) {
+          this.err(node, `'${shown(name)}' 的基类链绕回了自己（经过 '${shown(c)}'）`);
+          this.bases.set(c, null);
+          this.mixins.delete(c);
+          return true;
+        }
+        path.add(c);
+        for (const b of dir(c)) if (walk(b)) return true;
+        path.delete(c);
+        return false;
+      };
+      walk(name);
+    }
+    /* 一个类的**所有**祖先，按"先深后广"排一遍（第九十四刀）。同一个祖先到得了两次就是
+       jancy 那句 "multiple instances of shared bases" —— 这一层一条链一格结构体，两次只有
+       一份，所以那一种当场拒，不能悄悄按一份算。 */
+    const ancestors = (c, node) => {
+      const seen = new Map();          // 祖先 -> 到过几次
+      const walk = (x) => {
+        for (const b of dir(x)) {
+          seen.set(b, (seen.get(b) === undefined ? 0 : seen.get(b)) + 1);
+          if (seen.get(b) > 1) continue;
+          walk(b);
+        }
+      };
+      walk(c);
+      const dup = [...seen.entries()].filter(([, n2]) => n2 > 1).map(([k]) => k);
+      if (dup.length > 0 && node !== undefined) {
+        this.nope(node, `'${shown(c)}' 的基类里 '${shown(dup[0])}' 到得了两遍 —— jancy 那边`
+          + '"共享基类各一份实例"（type_class.rst:171-174），而这一层一条链共用一格结构体，'
+          + '两遍只有一份');
+      }
+      return [...seen.keys()];
+    };
+    /* 根：一整个"由继承连起来"的连通块共用一格结构体。第一格基类的根胜出 —— 单继承时这与
+       原来那个"顺着 bases 一路往上"完全一样。 */
+    const par = new Map();
+    const find = (c) => {
+      let r = c;
+      while (par.get(r) !== undefined && par.get(r) !== r) r = par.get(r);
+      return r;
     };
     for (const { name } of this.pendingCls) {
+      const b = this.bases.get(name);
+      if (b !== null && b !== undefined) {
+        const rc = find(name);
+        const rb = find(b);
+        if (rc !== rb) par.set(rc, rb);
+      }
+      for (const m of this.mixins.get(name) === undefined ? [] : this.mixins.get(name)) {
+        const rm = find(m);
+        const rc = find(name);
+        if (rm !== rc) par.set(rm, rc);
+      }
+    }
+    const rootOf = (c) => find(c);
+    // 每个类的**可见**字段表 = 所有祖先的 ++ 自己的（`this.structs` 那张表是这一层查名用的）
+    const own = (c) => (this.ownFields.get(c) === undefined ? [] : this.ownFields.get(c));
+    const chainFields = (c) => {
+      const out = [];
+      for (const a of ancestors(c).reverse()) for (const f of own(a)) out.push(f);
+      for (const f of own(c)) out.push(f);
+      return out;
+    };
+    for (const { name, node } of this.pendingCls) {
       const root = rootOf(name);
       this.roots.set(name, root);
       CLS_ROOT.set(name, root);
+      if (this.mixins.has(name)) ancestors(name, node);   // 共享基类那一格在这儿拒
       this.structs.set(name, chainFields(name));
       // 动态类型那一格（第五十七刀）：标签从 1 起，0 是"这一格没写过"，撞不上任何一个类。
       this.tags.set(name, this.tags.size + 1);
+    }
+    /* 多个基类各自带字段（第九十四刀）：这一层一格对象只有一份那格字段，而 jancy 那边
+       `D: B1, B2` 里 B1 与 B2 是**两块**，两边同名的字段是两格不同的内存。同名就当场拒 ——
+       悄悄合成一格是"改了意思"。不同名的合得起来（与同一条链上的兄弟类同一条口径）。 */
+    for (const { name, node } of this.pendingCls) {
+      const ms = this.mixins.get(name);
+      if (ms === undefined) continue;
+      const seen = new Map();          // 字段名 -> 哪一格基类带来的
+      const b0 = this.bases.get(name);
+      const groups = (b0 === null || b0 === undefined ? [] : [b0]).concat(ms);
+      for (const g of groups) {
+        for (const f of [g, ...ancestors(g)].flatMap((a) => own(a))) {
+          const had = seen.get(f.name);
+          if (had !== undefined && had !== g) {
+            this.err(node, `'${shown(name)}' 的两格基类（'${shown(had)}' 与 '${shown(g)}'）`
+              + `都带一格叫 '${f.name}' 的字段 —— jancy 那边它们是两块不同的内存，`
+              + '而这一层一格对象只有一份');
+          }
+          if (had === undefined) seen.set(f.name, g);
+        }
+      }
     }
     // 每条链一格结构体：字段按"根先、派生后"的顺序并起来
     const merged = new Map();          // 根 -> 字段数组
@@ -3377,36 +3467,60 @@ class JncLower {
     }
   }
 
-  /** b 是 d 的（间接）基类吗（第五十六刀）。上转要它，而上转发零条指令。 */
+  /** 这个类连它所有祖先，先广后深排一遍（第九十四刀）。查名那一族都按它走。 */
+  baseWalk(cls) {
+    const out = [];
+    const seen = new Set();
+    const q = [cls];
+    while (q.length > 0) {
+      const cur = q.shift();
+      if (cur === null || cur === undefined || seen.has(cur)) continue;
+      seen.add(cur);
+      out.push(cur);
+      for (const b of this.dirBases(cur)) q.push(b);
+    }
+    return out;
+  }
+
+  /** 直接基类那一串（第九十四刀）：第一格 ++ 第二格起。查名与上转都按它走。 */
+  dirBases(c) {
+    const b = this.bases.get(c);
+    const m = this.mixins.get(c);
+    const out = b === null || b === undefined ? [] : [b];
+    return m === undefined ? out : out.concat(m);
+  }
+
+  /** b 是 d 的（间接）基类吗（第五十六刀 + 第九十四刀）。上转要它，而上转发零条指令。 */
   isBase(b, d) {
-    let cur = this.bases.get(d);
-    while (cur !== null && cur !== undefined) {
-      if (cur === b) return true;
-      cur = this.bases.get(cur);
+    const seen = new Set([d]);
+    const q = this.dirBases(d);
+    while (q.length > 0) {
+      const c = q.shift();
+      if (c === b) return true;
+      if (seen.has(c)) continue;
+      seen.add(c);
+      for (const x of this.dirBases(c)) q.push(x);
     }
     return false;
   }
 
-  /** 从这个类起沿基类链找一个方法（第五十六刀）：`d.val()` 里的 val 可以是基类的。
-   *  回的是方言里那个名字（`Base$val`），找不着回 null。派生的遮住基类的 —— 自下往上找。 */
+  /** 从这个类起顺着基类找一个方法（第五十六刀 + 第九十四刀）：`d.val()` 里的 val 可以是
+   *  基类的。回的是方言里那个名字（`Base$val`），找不着回 null。派生的遮住基类的 —— 按
+   *  **先广后深**走（第一格基类先、第二格起在后），与 jancy 那条"先自己、再按序号往上"同序。 */
   findMethod(cls, mn) {
-    let cur = cls;
-    while (cur !== null && cur !== undefined) {
+    for (const cur of this.baseWalk(cls)) {
       const full = `${cur}$${mn}`;
       if (this.fns.has(full)) return full;
-      cur = this.bases.get(cur);
     }
     return null;
   }
 
-  /** 从这个类起沿基类链找一格属性（第六十九刀）：与 findMethod 同一条 —— 派生的遮住基类的。
+  /** 从这个类起顺着基类找一格属性（第六十九刀）：与 findMethod 同一条 —— 派生的遮住基类的。
    *  回的是 props 里那个名字（`Base$m_a`），找不着回 null。 */
   findProp(cls, pn) {
-    let cur = cls;
-    while (cur !== null && cur !== undefined) {
+    for (const cur of this.baseWalk(cls)) {
       const full = `${cur}$${pn}`;
       if (this.props.has(full)) return full;
-      cur = this.bases.get(cur);
     }
     return null;
   }
@@ -3476,11 +3590,9 @@ class JncLower {
    *  与 findMethod 差一条：**不是虚方法的同名方法不算**。jancy 那边没写 override 的同名方法
    *  只是遮住了名字，虚表那一格还是基类的，所以动态派发看的是这一条链。 */
   findVirt(cls, mn) {
-    let cur = cls;
-    while (cur !== null && cur !== undefined) {
+    for (const cur of this.baseWalk(cls)) {
       const full = `${cur}$${mn}`;
       if (this.virt.has(full)) return full;
-      cur = this.bases.get(cur);
     }
     return null;
   }
@@ -3494,11 +3606,18 @@ class JncLower {
       const owner = this.methods.get(full);
       if (owner === undefined) continue;               // 报过错了
       const mn = full.slice(owner.length + 1);
-      const base = this.bases.get(owner);
-      const up = base === null || base === undefined ? null : this.findVirt(base, mn);
+      // 基类里那一格（第九十四刀：多格基类就逐格问，第一格先）
+      const inBases = (f) => {
+        for (const b of this.dirBases(owner)) {
+          const r = f(b);
+          if (r !== null) return r;
+        }
+        return null;
+      };
+      const up = inBases((b) => this.findVirt(b, mn));
       if (kind === 'override') {
         if (up === null) {
-          const shad = base === null || base === undefined ? null : this.findMethod(base, mn);
+          const shad = inBases((b) => this.findMethod(b, mn));
           this.err(null, `覆盖不了 '${shown(full)}'：${shad === null
             ? `基类里没有方法 '${mn}'`
             : `基类那个 '${mn}' 不是虚方法`}（jancy 那句 "cannot override '%s': method ${shad === null
@@ -3545,7 +3664,7 @@ class JncLower {
    */
   absLeft(cls) {
     const seen = new Set();
-    for (let cur = cls; cur !== null && cur !== undefined; cur = this.bases.get(cur)) {
+    for (const cur of this.baseWalk(cls)) {
       for (const full of this.virt.keys()) {
         if (!full.startsWith(`${cur}$`)) continue;
         const mn = full.slice(cur.length + 1);
@@ -5352,16 +5471,18 @@ class JncLower {
     if (owner !== undefined && info.name === `${owner}$construct` && this.sctors.has(owner)) {
       for (const l of this.gateLines(owner, '    ')) pre.push(l);
     }
-    // 基类的构造（第五十六刀）。jancy 的顺序里它排在最前（同一处 3005 行的第一句
-    // `callBaseTypeConstructors`）：源码里写了 `basetype.construct(…)` 就用那一句，没写就
-    // **自动补**一句 —— 而基类那一个要实参时补不出来，那时报错（jancy 同）。
+    // 基类的构造（第五十六刀 + 第九十四刀）。jancy 的顺序里它排在最前（同一处 3005 行的第一句
+    // `callBaseTypeConstructors`，那是**复数**）：源码里写了 `basetypeN.construct(…)` 的那几格
+    // 就用那一句，没写的自动补 —— 而那一格要实参时补不出来，那时报错（jancy 同）。
     if (owner !== undefined && info.name === `${owner}$construct`) {
-      const base = this.bases.get(owner);
-      const bc = base === null || base === undefined ? undefined : this.ctors.get(base);
-      if (bc !== undefined && !hasBaseCtorCall(n.items[3])) {
+      const called = baseCtorCalls(n.items[3]);
+      const dirs = this.dirBases(owner);
+      for (let i = 0; i < dirs.length; i++) {
+        const bc = this.ctors.get(dirs[i]);
+        if (bc === undefined || called.has(i + 1)) continue;
         if (bc.params.length > 0) {
-          this.err(n, `${shown(owner)} 的 construct 里没有调 basetype.construct(…)，而基类 `
-            + `${shown(base)} 的 construct 要 ${bc.params.length} 个实参`);
+          this.err(n, `${shown(owner)} 的 construct 里没有调 basetype${dirs.length > 1 ? i + 1 : ''}`
+            + `.construct(…)，而基类 ${shown(dirs[i])} 的 construct 要 ${bc.params.length} 个实参`);
         } else {
           pre.push(`    (expr (call ${bc.name} (var $this)))`);
         }
@@ -6383,11 +6504,9 @@ class JncLower {
 
   /** 这条继承链上有这一格 reactor 吗（与 findProp / findMethod 同一个形状）。 */
   rctOf(cls, nm) {
-    let cur = cls;
-    while (cur !== null && cur !== undefined) {
+    for (const cur of this.baseWalk(cls)) {
       const r = this.reactors.get(`${cur}$${nm}`);
       if (r !== undefined) return r;
-      cur = this.bases.get(cur);
     }
     return null;
   }
@@ -8441,22 +8560,24 @@ class JncLower {
   }
 
   /**
-   * `basetype.成员`（第五十六刀）。jancy 拿 `basetype` 与 `basetype1` .. `basetype9`
-   * 指基类，用处是**构造**与**名字解析**（type_class.rst:226）。这一刀只有单继承，所以
-   * 只有 `basetype`（语法树里是 `(basetype 1)`）；`basetype2` 起是多继承那一族。
+   * `basetype.成员`（第五十六刀 + 第九十四刀）。jancy 拿 `basetype` 与 `basetype1` .. `basetype9`
+   * 指基类，用处是**构造**与**名字解析**（type_class.rst:226）。不带序号的就是第 1 格
+   * （语法树里 `(basetype 1)`），`basetype2` 起指第二格往后的那些基类。
    *
    * 回的是方言里那个函数名 —— 静态绑定，`basetype.foo()` 说的就是"调基类那一个"。
    */
   baseTarget(n, bt, mn) {
     const idx = isAtom(bt.items[1]) ? Number(bt.items[1].value) : 1;
-    if (idx !== 1) {
-      return this.nope(bt, `'basetype${idx}'（多继承那一族：type_class.rst:226 的 basetype1..9）`);
-    }
     if (this.selfClass === null) return this.err(n, "'basetype' 只能写在方法体里");
-    const base = this.bases.get(this.selfClass);
-    if (base === null || base === undefined) {
+    const dirs = this.dirBases(this.selfClass);
+    if (dirs.length === 0) {
       return this.err(n, `${shown(this.selfClass)} 没有基类，'basetype' 指不着谁`);
     }
+    if (idx < 1 || idx > dirs.length) {
+      return this.err(n, `${shown(this.selfClass)} 只有 ${dirs.length} 格基类，`
+        + `'basetype${idx}' 指不着谁`);
+    }
+    const base = dirs[idx - 1];
     if (mn === null) return this.nope(n, "'basetype' 后面那个成员认不出来");
     if (mn === 'construct') {
       const c = this.ctors.get(base);
