@@ -6018,6 +6018,49 @@ return prop;                                     // 都再报一遍"未声明的
    落下来对数会掉一大片，可掉的全是派生的噪声。要落就得在 ADR 里明写"这一刀不新增能力"，
    别混进"又收下一格语言特性"里去。
 
+## `variant_t` 那一格的墙量出来了：它压在"方言的 string 能不能落进内存"上
+
+上一节把 `variant_t` 认成下一刀（131 份 / 999 处 / sole 5，榜上最大的一个名字）。落之前先量
+语料到底怎么用它 —— 全仓 190 处，形状就这么几种：
+
+```jancy
+variant_t in, variant_t* out                  // 压倒性的一种：当**转手**用（84 份 ioninja 插件里的 dispatch）
+variant_t v1 = -1;                            // 装箱：整数字面量
+*out = m_remoteAddressCombo.m_currentText;    // 装箱：一格 string
+*out = atoi(…);                               // 装箱：整数表达式
+m_remoteAddressCombo.m_editText = in;         // 拆箱：赋给一格有类型的槽（隐式）
+m_localPortCombo.m_editText = $"%d"((uint_t)in);  // 拆箱：写出来的强转
+assert(v1 == -1);  return v1 + v2 + v3 + v4;  // 比较与算术（只在 test/jnc_test_abi/main.jnc 里）
+```
+
+任务 #35 里想的落法是"前端自己造一格 `{ tag, payload }` 的结构体 + 一套生成的助手"，不动方言。
+**这条路当场撞墙了**，两个探针都是同一句话：
+
+```
+struct V { int m_tag; int64_t m_n; string_t m_s; }
+-> 结构体 'V' 里有落不进内存的字段，指不到它身上（见 hir/types.js 的 structLayout）
+```
+
+换成 `class V { … }` 一字不差地报同一句（类的那一格布局走的也是 `structLayout`）。根在
+`src/core/hir/types.js:144-168`：`sizeOf` 对 `t.k === 'string'` 没有分支，落到最后 `return 0`，
+于是 `structLayout`（:178）判整格结构体"落不了地"。
+
+所以 **variant_t 的 payload 里放不下 string**，而语料里最要紧的那一种（`*out = 一格 string`）
+正是 string。三条路摆着：
+
+1. **只收非 string 的 variant**（整数 / 实数 / 布尔 / 枚举 / 指针）。`jnc_test_abi/main.jnc`
+   那一份能过，ioninja 那 84 份 dispatch 里"把一格 string 转手"的仍旧不行 —— 半格；
+2. **先把方言那一格补上**：让一格 `string` 能落进内存（当字段、当数组元素）。
+   `hir/types.js:160-166` 那段注释里 ADR-0024 已经把门修好了 —— "引用语义的句柄能当字段"，
+   `(arr T)` 就是照这条落的（存句柄本身、一个字、8 字节），而且那段注释明写着
+   "string / buf / fn / class 各有各的账，一次只放一格"。给 string 补这一格，同时也就解掉
+   榜上 `string 的数组` 那 90 对；
+3. 给方言加一格真正的动态值类型 —— 渗到 MIR 与四个后端，最贵。
+
+**判断：2 是正路**，而且它不是"为了 variant 特开的口子"，是 ADR-0024 那条已经定下来的模板的
+下一格应用。所以 variant_t 这一刀先压住，前置换成"string 能落进内存"。这一条按上面那条纪律
+另开一格账去量（要动的是 MIR 与四个后端，不是这一层），量完再回来落 variant。
+
 ## 后果与代价
 
 
