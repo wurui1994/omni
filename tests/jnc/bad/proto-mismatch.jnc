@@ -1,0 +1,12 @@
+// 原型与定义的签名对不上（ADR-0016 第九十二刀）。jancy 那边这也是错的 —— 两份签名要一致。
+// 悄悄按其中一份算是骗人：调用点按原型检查、体按定义编，两边就错开了。
+int twice(int x);
+
+int main() {
+	printf("%d\n", twice(3));
+	return 0;
+}
+
+int twice(double x) {
+	return (int)(x * 2);
+}

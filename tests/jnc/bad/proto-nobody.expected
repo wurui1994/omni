@@ -1,0 +1,1 @@
+原型 'missing' 没有带体的定义（实现在宿主那边的走 opaque class 那条路，在别的模块里的要 import 得着）

@@ -54,6 +54,14 @@ struct P {
     int y;
 }
 
+// 原型也可以写（第九十二刀）：jancy 那边它就是"先把签名说一遍"，与不写没有可观测差别 ——
+// 签名那一遍（fnSig）本来就先过完，所以这一层见到原型只做一件事：**跟那个定义的签名对一下**，
+// 对不上当场报（`bad/proto-mismatch.jnc`）、没有定义也当场报（`bad/proto-nobody.jnc`）。
+// 所以下面这三条与上面那份 C 里的三条原型是同一句话，而这一份的输出一个字节都没变。
+int isOdd(int n);
+int later(int x);
+P wrap(int a);
+
 int g = later(2);
 
 int isEven(int n) {

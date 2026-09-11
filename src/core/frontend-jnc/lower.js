@@ -2652,7 +2652,30 @@ class JncLower {
         this.globalCells.push(`    (set ${nm} (anew ${tyText(t)} (int 0)))`);
         continue;
       }
-      if (info.formals !== null) { this.nope(dcl, '顶层的函数原型（只收带体的定义）'); continue; }
+      /* 顶层的函数原型（第九十二刀）：`void foo(int x);` —— 声明在前、定义在后那种 C++ 式的
+         写法。签名那一遍（fnSig）排在这一遍**之前**，所以"这个名字有没有带体的定义"这时候
+         问得出来：
+           - 有定义 -> 这条原型是多余的一句，跳过它（jancy 那边也只是把两份签名对一下）；
+           - 没有定义 -> 那就是"实现在别处"（宿主的 C/C++、或者 import 不着的模块），
+             这一层接不上，说清是这一种，而不是笼统的"只收带体的定义"。
+         签名对不上时当场报 —— 悄悄按其中一份算是骗人。 */
+      if (info.formals !== null) {
+        const fn = this.qual(info.name);
+        const have = this.fns.get(fn);
+        if (have === undefined) {
+          this.nope(dcl, `原型 '${shown(fn)}' 没有带体的定义（实现在宿主那边的走 opaque class`
+            + ' 那条路，在别的模块里的要 import 得着）');
+          continue;
+        }
+        const ps = this.formalList(info.formals);
+        if (ps === null) continue;
+        const same = have.params.length === ps.length
+          && have.params.every((t, i) => sameTy(t, ps[i].type)) && sameTy(have.ret, info.type);
+        if (!same) {
+          this.err(dcl, `原型 '${shown(fn)}' 与它那个定义的签名对不上`);
+        }
+        continue;
+      }
       // 声明符尾巴上的构造实参只有类的变量收得下（第五十三刀，与局部量同一条）。
       if (info.ctor !== null && !(isClass(info.type) && info.type.own === true)) {
         this.err(dcl, `'${info.name}' 不是类的变量，后面挂不了构造实参`);
