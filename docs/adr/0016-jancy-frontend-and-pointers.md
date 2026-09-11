@@ -5523,6 +5523,50 @@ class C1 {
 `未声明的变量` 289 → 287（sole 2 → 1，剩下那一份是 `test107.jnc` 的 `sys` 命名空间 ——
 宿主面）；`没有还不收` 170 不动（这两份文件本来就没有"还不收"，卡的是一句普通错）。
 
+## 第九十六刀：无名的枚举 —— 成员漏到外面那层命名空间里
+
+语料 38 处、31 份文件（`io_PcapFile.jnc:13` 那三格签名与版本号、`XModem.jnc:13`、
+`BacNetMsTp.jnc:14` …），先前一句 `认不出的枚举名字` 挡掉 105 对。语法早就认得它
+（`jnc.grammar` 的 enum 规则第二条产出 `(enum key (anon) …)`），挡在的是"名字取不出来"。
+
+jancy 那边无名枚举**隐含 exposed**，两处源码说得很直：
+
+```c
+if (name.isEmpty()) { flags |= EnumTypeFlag_Exposed; … }   // Parser.cpp:2587-2589
+flags &= ~EnumTypeFlag_Exposed; // unnamed enums imply 'exposed' anyway
+                                                          // EnumType.cpp:409-411
+```
+
+exposed 的意思是成员**直接坐在外面那层命名空间里**（`Namespace.cpp:736` 那句注反过来说了
+同一件事："exposed enum, not unnamed"）—— 也就是 C 的无名 enum。
+
+落法：给那一格枚举编一个碰不到的名字（`$anon<序号>`，`$` 不在 jancy 的标识符里），成员照旧
+记在那一格枚举上、值的类型**还是那一格枚举**（所以 `bitflag` 的 1/2/4 与默认底类型 32 位
+有符号都不用另写一份），另外记一张 `exposedMems`：外面看到的名字 -> 那一格成员。查名时在
+三处多问一次 —— 表达式里的裸名字（排在"未声明的变量"之前）、`ns.Inner` 这种整体是一个名字
+的 field 串（排在"把左边当值算"之前）、以及 `constInt`（数组长度与别的枚举的初值要算得动）。
+名字那一遍与体那一遍拿同一个编出来的名字，靠一张按**节点**记的 `anonEnum`。
+
+`enumName` / `enumDecl` 里那两处 `qname` 抽成了一格 `enumSelfName`，两遍共用。
+
+**边界**：两格无名枚举漏出同一个名字当场报（`bad/anonenum-dup.jnc`）—— jancy 那边这是
+`addItem` 失败，谁赢都不对。
+
+**证据**：`cases/87-anonenum.jnc` 钉五件事：裸名字读得着、底类型默认 32 位有符号
+（所以 `0xa1b2c3d4` 是 −1582119980）、`bitflag` 那一格照旧 1/2/4、编译期算得动
+（`int g_arr[Major + 1]` 的 `countof` 是 3）、命名空间里那一格要写 `ns.名字`；有名字的那一种
+一个字没变。尺子是 `/tmp/c87.c`（C 的无名 enum 是同一句话），四行逐字节相同。
+`node tests/jnc/run.js` = 184 passed, 0 failed。
+
+**量出来的（诚实那一栏）**：
+
+- `认不出的枚举名字` 105 → **0**；对数 8157 → **8088（−69）**；
+- `枚举成员的值算不出来` 95 → **105（+10）**，`没有还不收` 170 → **169（−1）** —— 这两个是
+  **同一件事**：`io_PcapFile.jnc`（先前那 105 对的唯一 sole）现在走过了 enum 这一行，撞上
+  下一格 `PcapFileSignature = '\xa1\xb2\xc3\xd4'` —— 多字符字面量，这一层算不出来。
+  它于是从"只有普通错"变成"有一格还不收"。这一格照旧记着，是下一刀的候选；
+- `真降得下来` 73 不动。
+
 ## 后果与代价
 
 

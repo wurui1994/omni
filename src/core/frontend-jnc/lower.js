@@ -838,6 +838,12 @@ class JncLower {
     this.constEnum = null;
     this.aliases = new Map();  // typedef 起的类型名 -> 解出来的那一格（第三十八刀）
     this.enums = new Map();    // 枚举名 -> { base, members: Map(名字 -> BigInt) }（第三十九刀）
+    /* 无名枚举（第九十六刀）：那一格声明的节点 -> 给它编的名字（`$anon<序号>`）。按节点记 ——
+       名字那一遍与体那一遍要拿到同一个。 */
+    this.anonEnum = new Map();
+    /* 无名枚举**漏到外面那层命名空间**的那些成员（第九十六刀，jancy 那边叫 exposed）：
+       外面看到的那个名字 -> { en, mn }。查名时在"未声明的变量"之前多问这一张。 */
+    this.exposedMems = new Map();
     this.tmp = 0;              // 生成名字的计数（do-while 的那格标志）
     this.lifted = new Set();   // 这个函数里被取过地址的局部量名（ADR-0016 第九刀）
     this.globals = new Map();  // 模块级变量：名字 -> 类型（第十一刀）
@@ -2879,6 +2885,19 @@ class JncLower {
    * `E.M` —— 枚举成员（第三十九刀）。左边不是"某个枚举的名字"时返回 `undefined`，那就是普通的
    * 字段访问，交给 lvalue 那一支。同名的变量优先当变量看（那样才轮不到这条）。
    */
+  /** 无名枚举漏到外面那层的一格成员（第九十六刀）：裸名字查得着就回那一格字面量。 */
+  exposedLit(nm) {
+    const k = this.resolve(nm, (x) => this.exposedMems.has(x));
+    if (k === null) return null;
+    const { en, mn } = this.exposedMems.get(k);
+    const info = this.enums.get(en);
+    if (info === undefined || !info.members.has(mn)) return null;
+    return {
+      code: `(int ${info.members.get(mn)})`,
+      type: { k: 'enum', name: en, base: info.base, bits: info.bits === true },
+    };
+  }
+
   enumMember(n, ob, mem) {
     // 左边可以是**限定名**（`a.Color`，第五十一刀）：那在表达式里是一串 `field`。
     if (!isList(ob) || (head(ob) !== 'name' && head(ob) !== 'field')) return undefined;
@@ -2973,14 +2992,40 @@ class JncLower {
   enumName(n) {
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
     if (key !== 'enum' && key !== 'bitflag enum') { this.nope(n, `'${key}'`); return null; }
-    const nm1 = this.qname(n.items[2]);
-    if (nm1 === null) return this.err(n, '认不出的枚举名字');
-    const name = this.qual(nm1);
+    const name = this.enumSelfName(n);
+    if (name === null) return this.err(n, '认不出的枚举名字');
     if (this.enums.has(name) || this.structs.has(name)) {
       return this.err(n, `类型名 '${shown(name)}' 重复定义`);
     }
-    this.enums.set(name, { base: J_I32, members: new Map(), bits: key === 'bitflag enum' });
+    this.enums.set(name, {
+      base: J_I32, members: new Map(), bits: key === 'bitflag enum', anon: this.anonEnum.has(n),
+    });
     return null;
+  }
+
+  /**
+   * 一格枚举声明的名字（第九十六刀）。语法树里无名的那一种是 `(enum key (anon) …)`
+   * （jnc.grammar 的 enum 规则第二条）—— jancy 那边它**隐含 exposed**：
+   *
+   *   if (name.isEmpty()) { flags |= EnumTypeFlag_Exposed; … }   // Parser.cpp:2587-2589
+   *   flags &= ~EnumTypeFlag_Exposed; // unnamed enums imply 'exposed' anyway
+   *                                                             // EnumType.cpp:409-411
+   *
+   * 也就是成员直接坐在**外面那层命名空间**里（`Namespace.cpp:736` 那句注也在说这件事：
+   * "exposed enum, not unnamed"）。这一层给它编一个碰不到的名字（`$anon<序号>`，`$` 不在
+   * jancy 的标识符里），成员照旧记在那一格枚举上、类型也还是那一格枚举 —— 只是**另外**
+   * 记一张"裸名字 -> 那一格成员"的表（exposedMems），查名时多问一次。
+   */
+  enumSelfName(n) {
+    const nm1 = this.qname(n.items[2]);
+    if (nm1 !== null) return this.qual(nm1);
+    const a = n.items[2];
+    if (!isList(a) || head(a) !== 'anon') return null;
+    const had = this.anonEnum.get(n);
+    if (had !== undefined) return had;
+    const made = this.qual(`$anon${this.anonEnum.size + 1}`);
+    this.anonEnum.set(n, made);
+    return made;
   }
 
   /**
@@ -2991,9 +3036,8 @@ class JncLower {
    * 值按基类型那一格回卷（与别处同一个 wrapTo），所以存进表里的就是规范形。
    */
   enumDecl(n) {
-    const nm2 = this.qname(n.items[2]);
-    if (nm2 === null) return null;
-    const name = this.qual(nm2);
+    const name = this.enumSelfName(n);
+    if (name === null) return null;
     const info = this.enums.get(name);
     if (info === undefined || info.members.size > 0) return null;   // 上一遍报过重复了
     const bn = n.items[3];
@@ -3025,6 +3069,14 @@ class JncLower {
         next = k;
       }
       info.members.set(mn, wrapVal(next, info.base));
+      /* 无名枚举的成员漏到外面那层（第九十六刀）。撞了名就当场说清 —— jancy 那边这一格是
+         `addItem` 失败，报的是重名。 */
+      if (info.anon === true) {
+        const outer = this.qual(mn);
+        if (this.exposedMems.has(outer)) {
+          this.err(m, `无名枚举的成员 '${mn}' 与外面那层已经有的一格同名`);
+        } else this.exposedMems.set(outer, { en: name, mn });
+      }
       if (!info.bits) { next += 1n; continue; }
       // `bitflag enum` 的下一格（第四十七刀）。照抄 `calcBitflagEnumConstValues`
       // （jnc_ct_EnumType.cpp:286-306）那一句：`value = value ? 2 << getHiBitIdx64(value) : 1`
@@ -7578,7 +7630,18 @@ class JncLower {
       const nm = this.qname(e);
       if (nm === null) return null;
       const v = this.constEnum.members.get(nm);
-      return v === undefined ? null : BigInt(v);
+      if (v !== undefined) return BigInt(v);
+    }
+    /* 无名枚举漏出来的那些成员（第九十六刀）：`int a[Major + 1]` 与
+       `enum X { A = Major }` 都要在编译期算得出它。裸名字与带命名空间前缀的都从
+       exposedLit 那一张表来 —— 与表达式那一侧同一句。 */
+    if (isList(e) && (head(e) === 'name' || head(e) === 'field')) {
+      const dn = this.dotted(e);
+      const ex = dn === null ? null : this.exposedLit(dn);
+      if (ex !== null) {
+        const m = ex.code.match(/^\(int (-?\d+)\)$/);
+        if (m !== null) return BigInt(m[1]);
+      }
     }
     if (isList(e) && head(e) === 'binary' && isStr(e.items[1])) {
       return this.constBin(e, e.items[1].value);
@@ -8151,6 +8214,9 @@ class JncLower {
           // 那一条连基类链一起找，`this` 由 propGet 那一处补上。
           const pq = this.propBare(nm);
           if (pq !== null) return this.propGet(n, pq);
+          // 无名枚举漏出来的那些成员（第九十六刀）：`enum { A = 1 }` 之后裸写 `A`。
+          const ex = this.exposedLit(nm);
+          if (ex !== null) return ex;
           // `with "h.h"` 收来的常量（第 J4d 刀）：宏与枚举常量在这儿变成一格字面量。
           const cv = this.cconstLit(n, nm);
           if (cv !== null) return cv;
@@ -8193,6 +8259,11 @@ class JncLower {
         // 不是一格值。值在编译期就定了，发出去的就是一个字面量。
         const em = this.enumMember(n, ob, n.items[2]);
         if (em !== undefined) return em;
+        /* 无名枚举漏到某一层命名空间里的成员（第九十六刀）：`ns.Inner` 整体是**一个名字**。
+           要排在"把左边当值算"之前 —— 左边那个 `ns` 不是一格值。 */
+        const dn = this.dotted(n);
+        const ex = dn === null ? null : this.exposedLit(dn);
+        if (ex !== null) return ex;
         // `flags.ReadOnly` —— 左边是一格**枚举的值**（第四十七刀）。要排在下面那两支之前：
         // 枚举不是结构体，走到 lvalue 那儿只会报"'.' 的左边不是结构体"。
         const ev = this.enumValueMember(n, ob, n.items[2]);

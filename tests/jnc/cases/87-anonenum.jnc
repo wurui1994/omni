@@ -1,0 +1,53 @@
+// 第九十六刀：无名的枚举 —— 成员漏到外面那层命名空间里。
+//
+// 语料里 38 处、31 份文件（例：test/ioninja/common/io_PcapFile.jnc:13 那三格签名与版本号、
+// test/ioninja/plugins/XModem/XModem.jnc:13）。jancy 那边它**隐含 exposed**：
+//
+//   if (name.isEmpty()) { flags |= EnumTypeFlag_Exposed; … }   // Parser.cpp:2587-2589
+//   flags &= ~EnumTypeFlag_Exposed; // unnamed enums imply 'exposed' anyway
+//                                                             // EnumType.cpp:409-411
+//
+// 也就是成员直接坐在外面那层里（`Namespace.cpp:736` 那句注："exposed enum, not unnamed"）。
+// 这一层给它编一个碰不到的名字（`$anon<序号>`），成员照旧记在那一格枚举上、类型还是那一格
+// 枚举，另外记一张"外面看到的名字 -> 那一格成员"的表。
+//
+// 这一份钉五件事：裸名字读得着、底类型默认是 32 位有符号（所以 0xa1b2c3d4 是个负数）、
+// `bitflag` 那一格照旧 1/2/4、编译期算得动（数组长度）、命名空间里的那一格要写 `ns.名字`。
+//
+// 期望输出的出处：/tmp/c87.c（`cc -O0 -std=c99 -Wall`）—— C 的无名 enum 也是这个意思。
+
+enum {
+	Sig = 0xa1b2c3d4,
+	Major = 2,
+	Minor = 4,
+}
+
+bitflag enum {
+	FlagA,
+	FlagB,
+	FlagC,
+}
+
+// 有名字的那一种一个字没变：成员照旧只在自己那层里（type_enum.rst:17）。
+enum Named {
+	Zero,
+	One,
+}
+
+namespace ns {
+
+enum {
+	Inner = 7,
+}
+
+}
+
+int g_arr[Major + 1];
+
+int main() {
+	printf("%d %d %d\n", Sig, Major, Minor);
+	printf("%d %d %d\n", FlagA, FlagB, FlagC);
+	printf("%d %d\n", Named.One, ns.Inner);
+	printf("%d\n", countof(g_arr));
+	return 0;
+}
