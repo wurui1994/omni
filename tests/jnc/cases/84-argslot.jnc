@@ -1,0 +1,56 @@
+// 第八十八刀：调用点的**空槽** —— `f(1,,3)`。
+//
+// jancy 允许把中间那一格留空，意思是"这一格用形参的默认值"（语法里就是一条空产生式，
+// 见 jnc.grammar 的 opt-arg；语料里的写法例：test/ioninja/common/ui_SocketUi.jnc:107）。
+// 第七十七刀把默认值接上了，可只接了**末尾**少给的那几格 —— 空槽当时是那一刀记的边界。
+//
+// 落法与末尾那几格完全一样：把 `(unbound)` 那一格换成那个形参默认值的**语法节点**，
+// 于是它与写出来的实参走同一条路（同一份类型检查、同一句诊断）。默认值的形状还是第七十七刀
+// 那条窄界（字面量 / `true`/`false`/`null` / 枚举成员，与它们的运算）—— 因为默认值是在
+// **调用点**按调用点的作用域降的，而 jancy 按声明处的命名空间（ParseContext.cpp:32-38）。
+//
+// 空着的那一格没有默认值时当场报错（`bad/argslot-nodefault.jnc`）。
+//
+// 期望输出的出处：/tmp/c84.c（`cc -O0 -std=c99 -Wall`）。
+
+enum Level {
+	Low,
+	High,
+}
+
+int add3(int a, int b = 20, int c = 300) {
+	return a + b + c;
+}
+
+void show(int x, bool flag = true, int tag = -1, Level lv = Level.High) {
+	printf("%d %d %d %d\n", x, flag ? 1 : 0, tag, (int)lv);
+}
+
+class Box {
+	int m_n;
+
+	construct() {
+		m_n = 0;
+	}
+
+	int bump(int step = 1, int times = 2) {
+		m_n += step * times;
+		return m_n;
+	}
+}
+
+int main() {
+	printf("%d %d %d %d\n", add3(1), add3(1, 2), add3(1, , 3), add3(1, 2, 3));
+
+	// 两格空槽连着
+	printf("%d\n", add3(1, , ));
+
+	show(7);
+	show(7, , 9);
+	show(7, false, , Level.Low);
+
+	// 方法上也是同一条（this 那一格不在这张单子里）
+	Box b;
+	printf("%d %d\n", b.bump(), b.bump( , 10));
+	return 0;
+}

@@ -4233,11 +4233,28 @@ class JncLower {
    * 以及它们的一元/二元运算。语料量出来的形状正好在这条界里（null 124、0 114、1 59、
    * false 39、-1 33、true 31、0x01/0x02 那些、以及 `State.Opened` 那种枚举成员）。
    * 别的（调用、全局量、`sizeof`、字符串拼接…）当场说"还不收"，不猜。
+   *
+   * **空槽**（第八十八刀）：jancy 还允许 `f(1,,3)` / `f(,x)` —— 中间那一格空着就是"用它的
+   * 默认值"（语法里是一条空产生式，落成 `(unbound)`；语料里的写法见 ui_SocketUi.jnc:107）。
+   * 落法与末尾那几格**完全一样**：把 `(unbound)` 换成那个形参的默认值节点，同一条界、
+   * 同一句诊断。所以这一处先扫一遍空槽、再补末尾。
    */
   withDefaults(args, want, defs) {
-    if (defs === null || args.length >= want.length) return args;
     const out = args.slice();
-    for (let i = args.length; i < want.length; i++) {
+    for (let i = 0; i < out.length; i++) {
+      if (!isList(out[i]) || head(out[i]) !== 'unbound') continue;
+      const d = defs === null || i >= want.length ? null : defs[i];
+      if (d === null) {
+        return this.err(out[i], `第 ${i + 1} 个实参是空的，而它那个形参没有默认值`);
+      }
+      if (!this.defShapeOk(d)) {
+        return this.nope(d, '这个形状的默认值（默认值是在调用点算的，所以只收字面量、'
+          + '`true`/`false`/`null`、枚举成员，与它们的运算）');
+      }
+      out[i] = d;
+    }
+    if (defs === null || out.length >= want.length) return out;
+    for (let i = out.length; i < want.length; i++) {
       const d = defs[i];
       if (d === null) break;              // 中间那格没有默认值：个数照旧对不上，由调用方报
       if (!this.defShapeOk(d)) {
