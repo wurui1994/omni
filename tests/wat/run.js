@@ -20,7 +20,7 @@ import { mkdtempSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { mixedRunner } from '../lib/incr.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { readSexpr } from '../../src/core/sexpr/read.js';
 import { printSexpr } from '../../src/core/sexpr/print.js';
@@ -28,10 +28,9 @@ import { printSexpr } from '../../src/core/sexpr/print.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '../../src/core/cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
-const run = (cmd, args) => {
-  const r = spawnSync(cmd, args, { encoding: 'utf8' });
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
-};
+/* 只记依赖、不缓存（ADR-0023 的 S7）：这条轴照旧一次不少地跑，但会把"这一趟装了哪些模块"
+   记下来 —— 于是改 jnc / asy 的前端不会再让这条轴重跑（迟装之后它压根不装那些）。 */
+const { cache, run } = mixedRunner('wat');
 const read = (p) => {
   try {
     return readFileSync(p, 'utf8');
@@ -141,7 +140,9 @@ for (const file of pick('bad')) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n\n(kept in ${dir})\n`);
   process.exitCode = 1;

@@ -108,13 +108,19 @@ function dataFingerprint() {
  * 所以一条记录长这样：`{ deps: [路径…], depsHash, code, out, err }`。
  */
 export class RunCache {
-  constructor(axis) {
+  constructor(axis, o = {}) {
     this.axis = axis;
     this.force = process.env.FORCE === '1';
-    this.off = process.env.NOCACHE === '1';
+    /* `record: true` = **只记依赖、不缓存**。给那些"产物是磁盘上的文件"或者判据本身要求
+       每次真跑的轴用（ADR-0023 §6）：它们照旧一次不少地跑，但会把"这一趟到底装了哪些模块"
+       记下来 —— 轴级指纹要的就是这一份。不记的话指纹只能退回整棵 src，于是改任何一门语言
+       的前端都会让它重跑（量出来过：改一行 lower.js，wat / cabi 照旧全跑）。 */
+    this.record = o.record === true;
+    this.off = process.env.NOCACHE === '1' || this.record;
     const base = process.env.OMNI_CACHE_DIR || join(ROOT, '.omni-cache');
     this.dir = join(base, 'test', 'verdict');
     this.path = join(this.dir, `${axis}.json`);
+    this.depsPath = join(this.dir, `${axis}.deps.json`);
     this.tmp = join(this.dir, `${axis}-deps`);
     this.db = new Map();
     if (!this.off && existsSync(this.path)) {
@@ -127,6 +133,11 @@ export class RunCache {
     this.hit = 0;
     this.miss = 0;
     this.dirty = false;
+    /* **这一趟真用到的那些依赖**（命中的与真跑的都算）。轴级指纹要的就是这一份 ——
+       不是"这份缓存文件里历史上出现过的所有依赖"：那一份只会越攒越胖，而且迟装
+       （ADR-0023 S7）之前留下的老记录里含着每一门语言的前端，于是"改 jnc 前端"照旧会让
+       每条轴的指纹变掉。量出来过：改一行 lower.js，sexpr / wat / cabi 三条轴仍旧重跑。 */
+    this.touched = new Set();
     /* 这一趟**自己写进去**的那些键：`FORCE=1` 只该越过「上一趟留下的」，不该把预热刚跑出来的
        那一份也当作不存在 —— 否则每个子进程要跑两遍（踩过，量出来正好两倍慢）。 */
     this.fresh = new Set();
@@ -145,7 +156,7 @@ export class RunCache {
   /** 一次调用的**查得到的那一段**键：命令行 + 环境 + 实参里那几份文件 + 那批数据文件。 */
   static keyOf(args, cwd, o) {
     const inputs = RunCache.inputsOf(args, o.extra ?? []);
-    return sha(JSON.stringify([args, cwd, o.env ?? null,
+    return sha(JSON.stringify([args, cwd, o.env ?? null, o.input ?? null,
       inputs.map((p) => `${p}:${fileHash(p)}`), dataFingerprint()]));
   }
 
@@ -166,13 +177,15 @@ export class RunCache {
       // 记下来的那份模块清单现在还是不是同一份内容 —— 对得上才算命中
       if (hashList(had.deps) === had.depsHash) {
         this.hit++;
+        for (const d of had.deps) this.touched.add(d);
         return {
           code: had.code, out: had.out, err: had.err, status: had.status ?? null, cached: true,
         };
       }
     }
     this.miss++;
-    const r = this.spawn(args, cwd, o.env, o.timeout);
+    const r = this.spawn(args, cwd, o.env, o.timeout, o.input);
+    for (const d of r.deps) this.touched.add(d);
     /* **超时不入册**：那不是这份输入的"结果"，是这台机器这一刻的状态（别的轴在并行、
        机器在换页）。记下来就会把一次偶然的卡顿钉成永久的红。 */
     if (!this.off && r.timedOut !== true) {
@@ -193,13 +206,17 @@ export class RunCache {
   }
 
   /** 真跑一次（同步），顺手把"装载过哪些模块"收回来。 */
-  spawn(args, cwd, env, timeout) {
+  spawn(args, cwd, env, timeout, input) {
     const list = this.depsFile();
     const opts = {
       encoding: 'utf8',
       cwd,
+      /* 64 MB：这一层要能收下最大的那些输出（tests/oir 与 tests/oracle 本来就把 maxBuffer
+         开到这个数 —— 默认 1 MB 会把大输出截断，而截断表现成"输出不一样"，最难查）。 */
+      maxBuffer: 1 << 26,
       env: { ...process.env, ...(env ?? {}), OMNI_DEPS_OUT: list },
     };
+    if (input !== undefined) opts.input = input;
     if (timeout !== undefined) {
       opts.timeout = timeout;
       opts.killSignal = 'SIGKILL';
@@ -315,6 +332,7 @@ export class RunCache {
         const r = await this.spawnAsync(t.args, cwd, o.env, o.timeout);
         this.warmed = (this.warmed ?? 0) + 1;
         if (r.timedOut === true) continue; // 超时不入册（理由同 run()）
+        for (const d of r.deps) this.touched.add(d);
         this.db.set(t.key, {
           deps: r.deps,
           depsHash: hashList(r.deps),
@@ -332,9 +350,17 @@ export class RunCache {
 
   /** 落盘（跑完叫一次）。顺手印一行命中率 —— 那是这一层唯一要看的数。 */
   report(write = true) {
-    if (write && this.dirty && !this.off) {
+    if (write) {
       mkdirSync(this.dir, { recursive: true });
-      writeFileSync(this.path, `${JSON.stringify(Object.fromEntries(this.db))}\n`);
+      if (this.dirty && !this.off) {
+        writeFileSync(this.path, `${JSON.stringify(Object.fromEntries(this.db))}\n`);
+      }
+      /* **这一趟真用到的依赖**单独落一份：轴级指纹按它算（见 axisDeps）。
+         与 verdict 那份分开是有意的 —— verdict 是"输入 -> 输出"的账，这一份是"这条轴现在
+         到底装了哪些模块"，后者会随迟装而变瘦，前者不该被它带着重写。 */
+      if (this.touched.size > 0 && process.env.NOCACHE !== '1') {
+        writeFileSync(this.depsPath, `${JSON.stringify([...this.touched].sort(), null, 1)}\n`);
+      }
     }
     const n = this.hit + this.miss;
     return n === 0 ? '' : `子进程 ${n} 次：命中 ${this.hit}、真跑 ${this.miss}`;
@@ -344,6 +370,37 @@ export class RunCache {
 /** 一串路径的内容哈希（路径 + 内容都算 —— 少一份文件也是变了）。 */
 function hashList(paths) {
   return sha(paths.map((p) => `${p}:${fileHash(p)}`).join('\n'));
+}
+
+/**
+ * 给"什么都 spawn"的那些轴用的一格包装（ADR-0023 的 S7）。
+ *
+ * 那些轴的 `run(cmd, args)` 什么都收：`node`、`clang`、`qjs`、刚编出来的可执行文件。
+ * 这一格按 `cmd` 分岔 —— 是 node 就走 RunCache（于是**这一趟装了哪些模块**记得下来，
+ * 轴级指纹才能精确到"改 jnc 前端不动 wat"）；别的照旧原样跑：外部工具没有模块图可记，
+ * 记不出东西来，硬塞进缓存只会假装精确。
+ *
+ * 默认 `record: true`（只记依赖、不缓存）：这些轴里落文件的步骤太多，缓存要一条条量过
+ * 才敢开（§6 那条规矩）。要给某条轴开缓存就显式传 `{}`。
+ */
+export function mixedRunner(axis, o = { record: true }) {
+  const cache = new RunCache(axis, o);
+  const run = (cmd, args, opts = {}) => {
+    if (cmd === process.execPath || cmd === 'node') {
+      const r = cache.run(args, opts);
+      return {
+        out: r.out, err: r.err, code: r.code, status: r.status,
+      };
+    }
+    const r = spawnSync(cmd, args, { encoding: 'utf8', ...opts });
+    return {
+      out: r.stdout ?? '',
+      err: r.stderr ?? '',
+      code: r.status ?? 1,
+      status: r.status === undefined ? null : r.status,
+    };
+  };
+  return { cache, run };
 }
 
 /* ---------------------------------------------------------------- 轴级那一层
@@ -371,10 +428,24 @@ export function hashTree(dir) {
   return sha(out.join('\n'));
 }
 
-/** 这条轴上一趟装载过的模块（并起来）。没有缓存记录时回 null —— 那时只能按整棵 src 算。 */
+/**
+ * 这条轴**上一趟真装过**的那些模块。出处按顺序两处：
+ *   1. `<轴>.deps.json` —— 上一趟用到的那一份（精确，RunCache.report 写的）；
+ *   2. 退回 verdict 里所有记录的并集 —— 那是**历史**的并集，只会越攒越胖（迟装之前留下的
+ *      老记录里含着每一门语言的前端），所以只在还没有 1 的时候用。
+ * 两处都没有就回 null —— 那时只能按整棵 src 算。
+ */
 export function axisDeps(axis) {
   const base = process.env.OMNI_CACHE_DIR || join(ROOT, '.omni-cache');
-  const p = join(base, 'test', 'verdict', `${axis}.json`);
+  const dir = join(base, 'test', 'verdict');
+  const fresh = join(dir, `${axis}.deps.json`);
+  if (existsSync(fresh)) {
+    try {
+      const list = JSON.parse(readFileSync(fresh, 'utf8'));
+      if (Array.isArray(list) && list.length > 0) return [...list].sort();
+    } catch { /* 坏了就当没有 */ }
+  }
+  const p = join(dir, `${axis}.json`);
   if (!existsSync(p)) return null;
   try {
     const db = JSON.parse(readFileSync(p, 'utf8'));

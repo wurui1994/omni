@@ -21,11 +21,12 @@
 //
 //   node tests/glsl/run.js
 
-import { spawnSync } from 'node:child_process';
+import { RunCache } from '../lib/incr.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const cache = new RunCache('glsl', { record: true });
 const PARTS = ['parse.js', 'check.js', 'lower.js', 'render.js', 'bench.js',
   'interp.js', 'raster.js', 'stmt.js', 'ops.js', 'mat.js', 'fns.js', 'pp.js', 'fast.js',
   'oracle.js', 'examples.js', 'vispy.js', 'vispy_draw.js'];
@@ -33,8 +34,15 @@ const PARTS = ['parse.js', 'check.js', 'lower.js', 'render.js', 'bench.js',
 let bad = 0;
 for (const p of PARTS) {
   process.stdout.write(`\n--- glsl/${p} ---\n`);
-  const r = spawnSync('node', [join(here, p)], { stdio: 'inherit' });
-  if (r.status !== 0) bad++;
+  /* 走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：轴级指纹要"这一趟装了哪些模块"这一份 ——
+     不然改 jnc / asy 的前端会把这条 61s 的轴带着重跑。代价是输出改成攒完再印（RunCache 收
+     管道），所以这里跑完立刻整块印出来，顺序与从前一样。 */
+  const r = cache.run([join(here, p)]);
+  process.stdout.write(r.out);
+  if (r.err !== '') process.stderr.write(r.err);
+  if (r.code !== 0) bad++;
 }
-process.stdout.write(`\n${PARTS.length - bad}/${PARTS.length} 组绿\n`);
+process.stdout.write(`\n${PARTS.length - bad}/${PARTS.length} 组绿`);
+const rep = cache.report();
+process.stdout.write(`${rep === '' ? '' : `  （${rep}）`}\n`);
 process.exit(bad === 0 ? 0 : 1);

@@ -1,5 +1,52 @@
 import { OmniError } from './source/diag.js';
 
+/* ---- 迟装：**声明**了但还没装进来的那些（ADR-0023 的 S7）----
+ *
+ * 从前内建那几门语言是在开机时**全部**登记的，代价是"跑任何一条腿都等于装整个编译器"：
+ * 每条测试轴的依赖并集因此是同一份 112 个模块，改一门语言的前端会让所有轴重跑
+ * （量出来一趟 8 分钟，而其中绝大多数轴的输出一个字节没动）。
+ *
+ * 现在多一层：一格提供方可以只**声明**它能答什么（认哪些后缀、叫什么名字、有哪几格 cap），
+ * 真被问到时才 `load()`。load 里走的还是下面那几个 `register*` —— 内建、迟装、插件三条路
+ * 在注册表这一层看不出区别，只差登记的时刻。
+ *
+ * **声明与登记要对得上**：装完之后如果它并没有登记声称的那一格，当场响错（下面
+ * `resolvePending` 的最后一句）。所以"后缀在两处各写一遍"不会悄悄走散 —— 走散就红。
+ */
+const PENDING = [];
+
+/**
+ * 声明一格还没装进来的提供方。
+ * @param claim `{ name, exts?, runnerExts?, targets?, caps?, from? }`
+ * @param load 真要用时叫一次（里头调 register*）
+ */
+export function declareProvider(claim, load) {
+  PENDING.push({ claim, load, done: false });
+}
+
+/** 声明里"能答这一问"的那格提供方，装进来；装了就回 true（调用方重查一遍）。 */
+function resolvePending(kind, key) {
+  for (const p of PENDING) {
+    if (p.done) continue;
+    const list = p.claim[kind];
+    if (list === undefined || list === null) continue;
+    const hit = kind === 'exts' || kind === 'runnerExts'
+      ? list.some((e) => key.endsWith(e)) : list.includes(key);
+    if (!hit) continue;
+    p.done = true;                    // 先记上：装一次就够，装完还没有就是它自己说错了
+    p.load();
+    return true;
+  }
+  return false;
+}
+
+/** 装完还是答不上 —— 那是声明与登记走散了，当场说清是哪一格。 */
+function pendingMismatch(kind, key) {
+  return new OmniError(`迟装那一格对不上：声明里说 ${kind} 有 '${key}'，`
+    + '装进来之后注册表里却没有它（lang/builtin.js 的声明表与那门语言自己的 register* 走散了）');
+}
+
+
 /* ---- 目标（后端）：谁装了谁自己登记 ----
  *
  * 从前这儿是一张写死的表，四个后端都 import 进来 —— 那就是四条静态依赖，
@@ -17,16 +64,24 @@ export function registerTarget(name, ir, emit) {
 
 export function target(name) {
   const t = TARGETS.get(name);
-  if (t === undefined) {
-    throw new OmniError(`目标 '${name}' 没装：装着的是 ${targetNames().join(' / ')}`);
+  if (t !== undefined) return t;
+  if (resolvePending('targets', name)) {
+    const t2 = TARGETS.get(name);
+    if (t2 === undefined) throw pendingMismatch('targets', name);
+    return t2;
   }
-  return t;
+  throw new OmniError(`目标 '${name}' 没装：装着的是 ${targetNames().join(' / ')}`);
 }
 
-/** 装着的目标都有哪些（`--help` 与诊断用同一份，不许各写一遍） */
+/** 装着的目标都有哪些（`--help` 与诊断用同一份，不许各写一遍）。
+ *  **声明了还没装**的也算 —— 装没装是这一层的实现细节，用户看见的是"有没有这门目标"。 */
 export function targetNames() {
   const out = [];
   for (const [n] of TARGETS) out.push(n);
+  for (const p of PENDING) {
+    if (p.done || p.claim.targets === undefined) continue;
+    for (const n of p.claim.targets) if (!out.includes(n)) out.push(n);
+  }
   return out;
 }
 
@@ -68,6 +123,14 @@ export function lang(path) {
   for (const [ext, l] of LANGS) {
     if (path.endsWith(ext)) return l;
   }
+  /* 声明了还没装的那些（迟装）：装进来再问一遍。这一步刻意在 UNLOADABLE 之前 ——
+     内建的那门语言在就该用它，"装不动插件"是另一回事。 */
+  if (resolvePending('exts', path)) {
+    for (const [ext, l] of LANGS) {
+      if (path.endsWith(ext)) return l;
+    }
+    throw pendingMismatch('exts', path);
+  }
   /* 没登记，但目录里躺着一格装不动的同名插件：**这时候**才响，而且说清是哪条腿的事。
      悄悄落到核心方言那一支去解析一份 .asy，只会报一堆语法错，真相却是"这条腿装不动插件"。 */
   const un = unloadableFor(path);
@@ -96,6 +159,12 @@ export function runner(path) {
   for (const [ext, r] of RUNNERS) {
     if (path.endsWith(ext)) return r;
   }
+  if (resolvePending('runnerExts', path)) {
+    for (const [ext, r] of RUNNERS) {
+      if (path.endsWith(ext)) return r;
+    }
+    throw pendingMismatch('runnerExts', path);
+  }
   return null;
 }
 
@@ -117,24 +186,36 @@ export function registerCap(name, fn) {
 
 /** 有没有装这一格（驱动要先问再走另一条路时用，比如"没装 asy 就别去找 asy 的缓存"） */
 export function hasCap(name) {
-  return CAPS.has(name);
+  if (CAPS.has(name)) return true;
+  /* 声明里有就算"有" —— 但**不装**：这一问的用处正是"要不要走那条路"，为了答一句
+     "有"就把整门语言装进来，迟装就白做了。真去用它时 cap() 会装。 */
+  return PENDING.some((p) => !p.done && p.claim.caps !== undefined
+    && p.claim.caps.includes(name));
 }
 
 /** 要这一格；没装就响着拒 —— 名字前半段就是那门语言/目标 */
 export function cap(name) {
   const f = CAPS.get(name);
-  if (f === undefined) {
-    const dot = name.indexOf('.');
-    const who = dot > 0 ? name.slice(0, dot) : name;
-    throw new OmniError(`${who} 没装：这份 omni 里没有 '${name}' 这一格`
-      + `（装一格 omni-lang-${who} 插件，或用带它的那份 omni）`);
+  if (f !== undefined) return f;
+  if (resolvePending('caps', name)) {
+    const f2 = CAPS.get(name);
+    if (f2 === undefined) throw pendingMismatch('caps', name);
+    return f2;
   }
-  return f;
+  const dot = name.indexOf('.');
+  const who = dot > 0 ? name.slice(0, dot) : name;
+  throw new OmniError(`${who} 没装：这份 omni 里没有 '${name}' 这一格`
+    + `（装一格 omni-lang-${who} 插件，或用带它的那份 omni）`);
 }
 
-/** 装着的语言都有哪些 */
+/** 装着的语言都有哪些（声明了还没装的也算 —— 与 targetNames 同一条理由） */
 export function langNames() {
   const out = [];
   for (const [, l] of LANGS) if (!out.includes(l.name)) out.push(l.name);
+  for (const p of PENDING) {
+    if (p.done) continue;
+    const isLang = p.claim.exts !== undefined || p.claim.runnerExts !== undefined;
+    if (isLang && !out.includes(p.claim.name)) out.push(p.claim.name);
+  }
   return out;
 }

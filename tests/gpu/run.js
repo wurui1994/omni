@@ -25,6 +25,7 @@
 // 里的东西，不该成为 `npm test` 的硬依赖。
 
 import { spawnSync } from 'node:child_process';
+import { mixedRunner } from '../lib/incr.js';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
@@ -34,6 +35,7 @@ import { KERNELS, NO_KERNEL, DEVICE } from './kernels.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
 const cli = join(root, 'src', 'core', 'cli.js');
+const { cache, run: mixedRun } = mixedRunner('gpu');
 const update = process.argv.includes('--update');
 const dir = workDir('gpu');
 
@@ -47,9 +49,11 @@ const ok = (msg) => { pass++; process.stdout.write(`  ok   ${msg}\n`); };
 const no = (name, why) => { fail++; failures.push(`${name}\n${why}`); process.stdout.write(`  FAIL ${name}\n`); };
 const skip = (msg) => { skipped++; process.stdout.write(`  skip ${msg}\n`); };
 
+/* node 那几次走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：轴级指纹要"这一趟装了哪些
+   模块"这一份；`which` / 驱动那些外部命令照旧原样跑。 */
 const cmd = (bin, args) => {
-  const r = spawnSync(bin, args, { encoding: 'utf8' });
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
+  const r = mixedRun(bin, args);
+  return { out: r.out, err: r.err, code: r.code };
 };
 const omni = (args) => cmd(process.execPath, [cli, ...args]);
 const has = (bin) => cmd('which', [bin]).code === 0;
@@ -229,7 +233,9 @@ function buildVkHost() {
   return exe;
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed, ${skipped} skipped\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed, ${skipped} skipped${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n\n(kept in ${dir})\n`);
   process.exitCode = 1;

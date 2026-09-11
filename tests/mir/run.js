@@ -19,6 +19,7 @@
 
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { RunCache } from '../lib/incr.js';
 import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,7 @@ import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { loadProgram, MODE_BY_EXT } from '../../src/core/module/load.js';
 import { check } from '../../src/core/hir/check.js';
 import { linkJs } from '../../src/core/frontend-js/link.js';
+import { builtinAlt } from '../../src/core/lang/builtin-pick.js';
 import { lowerJs } from '../../src/core/frontend-js/lower.js';
 import { lowerWat } from '../../src/core/frontend-wat/lower.js';
 import { lowerToMir } from '../../src/core/mir/from_oir.js';
@@ -35,6 +37,7 @@ import { funcBytes, funcHash, moduleHashes } from '../../src/core/mir/bytes.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
+const cache = new RunCache('mir', { record: true });
 const update = process.argv.includes('--update');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const keep = (name) => filters.length === 0 || filters.some((x) => name.includes(x));
@@ -53,7 +56,14 @@ const bad = (label, detail) => {
 function toOir(path) {
   const diags = new Diagnostics();
   if (path.endsWith('.js')) {
-    const ast = linkJs(path, (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null), diags);
+    /* 读源码时要过 builtinAlt（见 src/core/lang/builtin-pick.js）：这条轴把 cli.js 自己降到
+       MIR，而 `lang/builtin.js` 那一份是**迟装**的（`createRequire`），我们自己的前端不认它 ——
+       编我们自己的源码时它该换成全静态那一份（fat）。 */
+    const ast = linkJs(path, (p) => {
+      const alt = builtinAlt(p, true);
+      const q = alt === null ? p : alt;
+      return existsSync(q) ? readFileSync(q, 'utf8') : null;
+    }, diags);
     diags.throwIfErrors();
     const mod = lowerJs(ast, diags);
     diags.throwIfErrors();
@@ -200,8 +210,12 @@ if (keep('hash')) {
     const name = u.replace(/\.mjs$/, '');
     if (!keep(name)) continue;
     const unitPath = join(here, 'units', u);
-    const leg = (which) => spawnSync('node', [join(here, 'unit-leg.mjs'), unitPath, which],
-      { encoding: 'utf8' });
+    /* 走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：这条轴的指纹要"这一趟装了哪些模块"
+       这一份，不然改任何一门语言的前端都会把它带着重跑。回的形状照旧是 spawnSync 那三格。 */
+    const leg = (which) => {
+      const r = cache.run([join(here, 'unit-leg.mjs'), unitPath, which]);
+      return { status: r.status, stdout: r.out, stderr: r.err };
+    };
     const re = leg('expected');
     if (re.status !== 0) { bad(`unit/${name} expected`, `    exit=${re.status}\n    ${re.stderr.trim()}`); continue; }
     const want = re.stdout;
@@ -236,7 +250,9 @@ if (keep('hash')) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

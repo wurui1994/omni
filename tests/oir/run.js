@@ -16,6 +16,7 @@ import { workDir } from '../work.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { mixedRunner } from '../lib/incr.js';
 import { emitJs } from '../../src/core/backend-js/emit.js';
 import { emitC } from '../../src/core/backend-c/emit.js';
 import { runtimeSources, RUNTIME_DIR } from '../../src/core/runtime/c_runtime.js';
@@ -23,6 +24,7 @@ import { listType, dictType } from '../../src/core/hir/types.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
+const { cache, run: mixedRun } = mixedRunner('oir');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 // ---------------------------------------------------------------- OIR 构造助手
@@ -840,9 +842,12 @@ c('throw/non-string', js('js_typeof', [js('js_throw', [arr(real(1))])]), '"undef
 c('throw/take-obj', J(js('js_take_pending', [])), 'JSON.stringify([1])');
 
 
+/* node 那几次走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：这条轴要的是"这一趟到底装了
+   哪些模块"，轴级指纹按它算才精确 —— 不然改任何一门语言的前端都会把这条轴带着重跑。
+   别的命令（`echo` / `false` 那两格探针）照旧原样跑。 */
 function run(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8', cwd: root, maxBuffer: 64 * 1024 * 1024, ...opts });
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? -1 };
+  const r = mixedRun(cmd, args, { cwd: root, ...opts });
+  return { out: r.out, err: r.err, code: r.status === null ? -1 : r.status };
 }
 
 const cases = CASES.filter((x) => !filters.length || filters.some((f) => x.name.includes(f)));
@@ -945,7 +950,9 @@ if (!filters.length || filters.some((f) => 'uncaught'.includes(f))) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n\n(kept in ${dir})\n`);
   process.exitCode = 1;

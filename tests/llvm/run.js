@@ -18,6 +18,7 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync, rmSy
 import { join, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { RunCache } from '../lib/incr.js';
 import { SUPPORTED } from './supported.js';
 /* 第 10 节（会话的几批链成一个程序）直接用编译器的模块，不经 CLI：那一节要的是
    "一批 delta -> 一份产物"，而 CLI 上还没有"编一批"这个动词（J6 的最后一格才会有）。 */
@@ -31,6 +32,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
 const cli = join(root, 'src', 'core', 'cli.js');
 const update = process.argv.includes('--update');
+const cache = new RunCache('llvm', { record: true });
 
 let pass = 0;
 let fail = 0;
@@ -47,8 +49,11 @@ const bad = (label, detail) => {
 /* `ms` 与输出上限都有默认值：产物一旦跑起来就可能不肯停（曾经一个 setjmp 的 -O2 版本
    往 /tmp 里写了 51GB）。所以这一层永远带着时限和 8MB 的上限，谁都不必自己记得加。 */
 function run(args, ms = 60000) {
-  const r = spawnSync('node', [cli, ...args], { encoding: 'utf8', timeout: ms, maxBuffer: 8 << 20 });
-  return { out: r.stdout, err: r.stderr, code: r.status };
+  /* 走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：轴级指纹要"这一趟装了哪些模块"这一份，
+     不然改任何一门语言的前端都会把这条轴带着重跑。时限交给 RunCache（超时不入册），
+     上限它给到 64MB；clang 与编出来的产物照旧原样跑（下面那些 spawnSync）。 */
+  const r = cache.run([cli, ...args], { timeout: ms });
+  return { out: r.out, err: r.err, code: r.status };
 }
 
 /** 缓存里那个 omni-jit 宿主（第 5 节的 JIT 那一路要它）。没编过就回 null，那一路按 skip 处理。 */
@@ -499,7 +504,8 @@ int main(int argc, char **argv) {
   rmSync(tmp, { recursive: true, force: true });
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === "" ? "" : `  （${rep}）`}\n`);
 
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);

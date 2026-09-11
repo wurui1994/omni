@@ -47,12 +47,13 @@ import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
 import {
   target, registerTarget, registerLang, lang, registerRunner, runner, noteUnloadable,
-  registerCap, cap, langNames,
+  registerCap, cap, langNames, declareProvider,
 } from './plugin.js';
 /* 已经搬成独立模块的语言（ADR-0021 S4）：它们不 import 这一份，所以能独立编译。
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
  * —— 两条路在注册表那一层看不出区别。 */
 import { registerBuiltins } from './lang/builtin.js';
+import { builtinAlt } from './lang/builtin-pick.js';
 import { PLUGIN_SET, pluginRegName, CORE_DATA } from './plugin-set.js';
 import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
@@ -657,9 +658,11 @@ function compile(path, argv = []) {
  * 换在这一层而不是让语言自己判：**编进来哪几门是构建的决定**，不是某一门语言的事。
  */
 function readModule(p) {
-  if (!LANGS_FAT && p.endsWith('/lang/builtin.js')) {
-    const alt = `${p.slice(0, p.length - 'builtin.js'.length)}builtin-core.js`;
-    vStep(`builtins core  ${alt}`);
+  /* 三份 builtin 的分工与"为什么这条规则单独一份"见 lang/builtin-pick.js：
+     迟装那一份（builtin.js）只给从源码跑的这条腿，编的时候必须换成 fat 或 core。 */
+  const alt = builtinAlt(p, LANGS_FAT);
+  if (alt !== null) {
+    vStep(`builtins ${LANGS_FAT ? 'fat ' : 'core'}  ${alt}`);
     return readText(alt);
   }
   return exists(p) ? readText(p) : null;
@@ -671,6 +674,9 @@ function pluginApi() {
     registerTarget: registerTarget,
     registerRunner: registerRunner,
     registerCap: registerCap,
+    /* 迟装（ADR-0023 S7）：内建那几门先只**声明**，真被问到才装进来。插件那条路不用它
+       （dlopen 出来的那一格已经在内存里了，直接 register 就是）。 */
+    declareProvider: declareProvider,
     log: vStep,
     /* 印记那三格与 srcIdNote 是驱动侧产物缓存的格式（asy 的 AST 缓存借了它 ——
        那处层次串门记在 lang/asy.js 的文件头里）；incDirs / findCC 也是驱动的事。 */

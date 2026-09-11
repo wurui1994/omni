@@ -18,6 +18,7 @@
 //   node tests/jit/run.js
 
 import { spawnSync } from 'node:child_process';
+import { RunCache } from '../lib/incr.js';
 import { mkdtempSync, readdirSync, existsSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { workDir } from '../work.js';
@@ -33,6 +34,7 @@ import { emitLlvm } from '../../src/core/backend-llvm/emit.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
 const cli = join(root, 'src', 'core', 'cli.js');
+const cache = new RunCache('jit', { record: true });
 
 let pass = 0;
 let fail = 0;
@@ -44,9 +46,11 @@ const bad = (label, detail) => {
   process.stdout.write(`  FAIL ${label}\n`);
 };
 
+/* node 那几次走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：轴级指纹按"这一趟装了哪些
+   模块"算才精确；JIT 宿主那个可执行文件与 clang 照旧原样跑（下面那些 spawnSync）。 */
 function run(args) {
-  const r = spawnSync('node', [cli, ...args], { encoding: 'utf8' });
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status };
+  const r = cache.run([cli, ...args]);
+  return { out: r.out, err: r.err, code: r.status };
 }
 
 // 宿主要先编一次（约 1s，之后是内容寻址缓存命中）。先单独跑一发，
@@ -321,7 +325,9 @@ else ok(`boundary/same-as-aot [${declined} 份 case 被拒，理由与 AOT 同�
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

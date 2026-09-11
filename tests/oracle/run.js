@@ -19,9 +19,11 @@ import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { mixedRunner } from '../lib/incr.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
+const { cache, run: mixedRun } = mixedRunner('oracle');
 const CLI = process.env.OMNI_CLI || join(root, 'src', 'core', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
@@ -31,10 +33,12 @@ function have(cmd) {
 
 const HAS_PY = have('python3');
 
-/** @returns {{out: string, err: string, code: number}} */
+/** @returns {{out: string, err: string, code: number}}
+ *  node 那几次走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）—— 轴级指纹要"这一趟装了
+ *  哪些模块"这一份；qjs / clang 那些外部工具照旧原样跑。 */
 function run(cmd, args) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8', cwd: root, maxBuffer: 64 * 1024 * 1024 });
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? -1 };
+  const r = mixedRun(cmd, args, { cwd: root });
+  return { out: r.out, err: r.err, code: r.status === null ? -1 : r.status };
 }
 
 function firstDiff(a, b) {
@@ -108,7 +112,9 @@ function record(name, ok, detail) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

@@ -16,6 +16,7 @@ import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { mixedRunner } from '../lib/incr.js';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { linkJs } from '../../src/core/frontend-js/link.js';
 import { lowerJs } from '../../src/core/frontend-js/lower.js';
@@ -25,10 +26,10 @@ import { runtimeSources, RUNTIME_DIR } from '../../src/core/runtime/c_runtime.js
 
 const here = dirname(fileURLToPath(import.meta.url));
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
-const run = (cmd, args) => {
-  const r = spawnSync(cmd, args, { encoding: 'utf8' });
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
-};
+/* node 那几次走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：轴级指纹要"这一趟装了哪些
+   模块"这一份 —— 不然改 jnc / asy 的前端会把这条 184s 的轴带着重跑。clang 与编出来的
+   可执行文件照旧原样跑。 */
+const { cache, run } = mixedRunner('js-exec');
 
 const dir = workDir('jsexec');
 const cc = ['clang', 'cc', 'gcc'].find((x) => run('which', [x]).code === 0);
@@ -122,7 +123,9 @@ for (const file of cases) {
   process.stdout.write(`  FAIL ${name}\n`);
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (skipC.length) {
   process.stdout.write(`（C 那条腿跳过 ${skipC.length} 个：${skipC.join(' ')}`
     + ' —— 真对象/Symbol 那一族还没有 C 实现，见 ADR-0020 P1-c）\n');

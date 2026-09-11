@@ -117,8 +117,54 @@
   是外部工具（clang / qjs / node 跑生成出来的 .mjs）与**落文件**的那几步（`.ll`、`.o`、可执行
   文件），缓存它们等于把副作用跳过去；`incr` 那条轴测的就是编译器自己的缓存；`bootstrap` 往
   `dist/` 写整套产物。这几条只靠**轴级跳过**（S2）拿收益。
-- **S5 整体判据**：什么都不改的一趟 `test:all` ≤ 30s（现在 23 分钟）；只改一处前端时只重跑受
-  影响的轴；任何一趟的完整输出都能从日志回读。
+- **S7 依赖图变精确：语言迟装 + 只记这一趟的依赖**（已落）。这一条是**前面几步的前提**，
+  不是优化：没有它，"轴级跳过"永远跳不动，因为每条轴的依赖并集都一样胖。
+
+  **量出来的病根**：每条轴的依赖并集都是同一份 **112 个模块**，里头含着每一门语言的前端
+  （`cli.js` -> `lang/builtin.js` 静态 import 了 8 门语言 4 个目标）。所以改
+  `frontend-jnc/lower.js` 会让 wat / cabi / sexpr / js-exec 这些**语义上毫无关系**的轴指纹全变、
+  全部重跑 —— 一趟 8 分钟，而其中绝大多数轴的输出一个字节都没动。
+
+  **三处改动**：
+
+  1. **注册表学会"声明了但还没装"**（`plugin.js` 的 `declareProvider` + `resolvePending`）：
+     一门语言先只交"认哪些后缀 / 叫什么名字 / 有哪几格 cap / 怎么把自己装进来"，
+     真被 `lang()` / `target()` / `cap()` / `runner()` 问到才 `load()`。装完**核对**它是否真登记了
+     声称的那一格，对不上当场响错 —— 于是"后缀在声明表与 register* 里各写一遍"不会悄悄走散。
+     同步装靠 `createRequire`（node 22.12 起 `require()` 能装没有顶层 await 的 ESM，而我们所有
+     模块都没有）。**刻意不用 `import()`**：那是异步的，会把"查一门语言"染成 async，而它埋在
+     编译路径深处。
+  2. **三份 builtin，一条规则**（`lang/builtin-pick.js` 的 `builtinAlt`）：`builtin.js` 迟装（只给
+     从源码跑的这条腿）、`builtin-fat.js` 全静态（编产物时用 —— 我们自己的 JS 前端明说不认
+     `import()`：*"dynamic import('...') is not supported (the module graph is fixed at link time)"*，
+     也不认顶层 `await`）、`builtin-core.js` 一格都不装（编出来的核心）。规则单独一份的理由是
+     踩出来的：cli.js 的 readModule 要它，**tests/mir 那条轴也要它**（它把 cli.js 自己降到 MIR），
+     少一处就报"前端不认 `export const BUILTINS = [`"，而真相是"读错了文件"。
+  3. **轴级指纹按"这一趟真用到的依赖"算**（`<轴>.deps.json`，`RunCache.touched`）：从前是
+     verdict 里**所有历史记录**的并集，那一份只会越攒越胖 —— 迟装之前留下的老记录里含着每一门
+     语言的前端，于是改 jnc 前端照旧让所有轴重跑（量出来过：sexpr / wat / cabi 仍旧全跑）。
+     另外给那些"产物是磁盘文件、不能缓存"的轴加了 `record: true`（只记依赖、不缓存）：
+     wat / cabi / oir / oracle / core / mir / llvm / jit / gpu / js-exec / glsl 都走这一格。
+
+  **判据（都量了）**：
+
+  - 一次调用的依赖集：`run x.sx` **112 -> 71** 个模块（jnc / asy / glsl / spirv 各 0 个）、
+    `run x.jnc` 77（jnc 2 个、asy 0 个）、`run x.wat` 70、`run x.asy` 84（asy 11 个）。
+  - 启动：装全套 `lang/builtin.js` 0.12s -> 只装一门 0.05~0.06s（node 自己 0.04s）。
+  - **碰一下 `frontend-jnc/lower.js`**，`node tests/all.js sexpr jnc glr wat cabi`：
+    从"5 条全跑 60s"变成 **4 条 skip、只有 jnc 跑**。
+  - 有两条轴**天生**依赖整棵 `src`，它们照旧退回整棵源码算指纹，那是**对的**不是漏的：
+    `bootstrap`（把整个编译器编一遍）与 `js-roundtrip`（把整棵树重新生成再跑全套）。
+
+- **S5 整体判据**：什么都不改的一趟 `test:all` ≤ 30s（原来 23 分钟）；**只改一处前端时只重跑
+  受影响的轴**（S7 之后这一条才立得住）；任何一趟的完整输出都能从日志回读。
+
+### 什么时候该跑哪几条轴（这条规矩是花了两趟 8 分钟买来的）
+
+- 改了某一门语言的前端 / 某一个后端：跑那条轴 + `bootstrap/link`（半秒的快检）。别跑 `all`。
+- 改了汇聚层（`hir/` `mir/` `sexpr/` `module/`）或驱动（`cli*`）：那是**真的**牵动所有人，跑 `all`。
+- 改了 `tests/` 里某条轴自己的固件：只跑那条轴（指纹里轴目录那一格会变，别的轴不动）。
+- 提交前 / 发版前：`FORCE=1 node tests/all.js`（不看指纹，全跑）。
 
 ### 量出来的两条教训（都踩过）
 

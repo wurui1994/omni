@@ -16,12 +16,14 @@ import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { RunCache } from './lib/incr.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 // `OMNI_CLI` 可以把整套用例指向另一份编译器。js 语法前端的往返测试用它：把 src/core 整棵树
 // 重新生成一遍，再用生成出来的编译器跑这里的全部用例，输出必须一模一样（ADR-0001 第三条测试轴）。
 const CLI = process.env.OMNI_CLI || join(root, 'src', 'core', 'cli.js');
+const cache = new RunCache('core', { record: true });
 const args = process.argv.slice(2);
 const update = args.includes('--update');
 const filters = args.filter((a) => !a.startsWith('-'));
@@ -29,15 +31,16 @@ const filters = args.filter((a) => !a.startsWith('-'));
 /** 三种类型模式对应三个后缀（ADR-0008）：.omni 混合 / .omnid 纯动态 / .omnis 纯静态 */
 const SRC_EXT = /\.omni[ds]?$/;
 
-/** 用相对路径 + 固定 cwd 运行，保证诊断快照里不出现机器相关的绝对路径 */
+/** 用相对路径 + 固定 cwd 运行，保证诊断快照里不出现机器相关的绝对路径。
+ *  走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：轴级指纹要"这一趟装了哪些模块"这一份。 */
 function run(cmd, file, flag) {
   const rel = relative(root, file);
   const argv = flag === undefined ? [CLI, cmd, rel] : [CLI, cmd, rel, flag];
-  const r = spawnSync(process.execPath, argv, { encoding: 'utf8', cwd: root });
+  const r = cache.run(argv, { cwd: root });
   return {
-    stdout: r.stdout ?? '',
-    stderr: r.stderr ?? '',
-    code: r.status ?? -1,
+    stdout: r.out,
+    stderr: r.err,
+    code: r.status === null ? -1 : r.status,
   };
 }
 
@@ -216,7 +219,9 @@ if (existsSync(replDir)) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

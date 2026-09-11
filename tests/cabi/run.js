@@ -18,7 +18,7 @@ import { mkdtempSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { mixedRunner } from '../lib/incr.js';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { linkJs } from '../../src/core/frontend-js/link.js';
 import { lowerJs } from '../../src/core/frontend-js/lower.js';
@@ -30,10 +30,9 @@ import { cAbiLibs } from '../../src/core/hir/c_abi.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '../../src/core/cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
-const run = (cmd, args) => {
-  const r = spawnSync(cmd, args, { encoding: 'utf8' });
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
-};
+/* 只记依赖、不缓存（ADR-0023 的 S7）：clang 与编出来的可执行文件照旧真跑，node 那几次走
+   RunCache 好把"这一趟装了哪些模块"记下来 —— 轴级指纹要它才精确到"改 jnc 前端不动这条轴"。 */
+const { cache, run } = mixedRunner('cabi');
 
 // 三条腿各自的拒绝理由。前两条是同一句话（native_c.js 与 backend-js/prelude.js 逐字对齐），
 // 解释器那条不同：它连"C 是什么"都不知道，报的是自己那句。
@@ -136,7 +135,9 @@ for (const file of readdirSync(badDir).filter((f) => f.endsWith('.js')).sort()
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n\n(kept in ${dir})\n`);
   process.exitCode = 1;
