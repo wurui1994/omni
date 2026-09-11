@@ -1,0 +1,25 @@
+// 虚方法上的重载 —— 这一层不收（第七十九刀的第三条界）。
+//
+// jancy 收：重载在它那边是 `FunctionOverload`（jnc_ct_FunctionOverload.cpp:38-50），虚表那一格
+// 按**完整类型**匹配覆盖（`FunctionOverload::findShortOverload`，同文件 22-36，从
+// jnc_ct_ClassType.cpp:563 调）。
+//
+// 这一层的虚派发（第五十七刀）不是"对象里一格函数指针"—— 方言的结构体字段放不下函数值，
+// 所以它是**一格整数标签加一段按标签分派的函数**，而那张分派表是按**方法名**接的。
+// 同名两条会撞在同一格上：收下来就会调错那一条。要收得先让分派表按"名字 + 元数"分格，
+// 那要连着第五十七刀一起改。
+class B {
+	virtual void v() {
+		printf("B.v\n");
+	}
+
+	void v(int a) {
+		printf("B.v %d\n", a);
+	}
+}
+
+int main() {
+	B b;
+	b.v();
+	return 0;
+}

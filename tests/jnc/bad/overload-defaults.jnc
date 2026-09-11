@@ -1,0 +1,22 @@
+// 重载与默认值一起，把"可接受的实参个数"撞重了 —— 这一层不收（第七十九刀的第二条界）。
+//
+// `q(int)` 收 1 个；`q(int, int = 5)` 收 1 个或 2 个。所以 `q(1)` 这一句两条都合得上 ——
+// 元数分得开，可**能接受的个数**没分开。jancy 在这里也要看类型才挑得出来
+// （chooseOverload 的那个标量，jnc_ct_FunctionTypeOverload.cpp:44-91），而这一层还没有
+// 那张代价表（见 bad/overload-samearity.jnc）。语料 159 个重载组里有 10 组是这种形状
+// （`io.enumerateSerialPorts`、`jnc.Regex.reset`、`io.PcapFilter.compile` …）。
+//
+// 注意界划在**调用点**而不是声明处：只声明不这么调是合法的（jancy 也一样），所以两条声明
+// 本身收下来，撞车的那一句才拒。
+int q(int a) {
+	return a;
+}
+
+int q(int a, int b = 5) {
+	return a + b;
+}
+
+int main() {
+	printf("%d\n", q(1));
+	return 0;
+}

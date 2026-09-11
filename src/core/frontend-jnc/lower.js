@@ -954,6 +954,13 @@ class JncLower {
      * 初值里可以引用模块级变量，而那些在签名那一遍还没登记。 */
     this.fieldInits = new Map();
     this.synthFI = new Set();
+    /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
+     * 第二条起的方言名是 `<基名>$o<元数>` —— jancy 那边判合法只看**实参那一串的签名**
+     * （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326：返回类型与
+     * `errorcode` 都不算），调用点按各实参 CastKind 里最差的那个排序挑
+     * （`FunctionTypeOverload::chooseOverload`，jnc_ct_FunctionTypeOverload.cpp:44-91）。
+     * 这一层先只做**按实参个数**分得开的那一半（语料 159 组里 92 组），同元的说还不收。 */
+    this.overloads = new Map();
     // 虚派发（第五十七刀）。`virt` 是方言里那个方法名 -> 'virtual' | 'override' | 'abstract'，
     // `tags` 是类名 -> 那个类的整数标签（根那一格结构体里的 `$tag` 存的就是它，对象一造出来
     // 就写死）。`disp` 记着按标签分派的那段函数，一个（根, 方法名）一段。
@@ -4125,21 +4132,29 @@ class JncLower {
     } else {
       // 名字带上命名空间前缀，而那个带前缀的名字**同时**就是方言里那个函数的名字。
       info.name = this.qual(info.name);
+      /* 重载（第七十九刀）之后 `info.name` 可能被改名，而 owner 与"源码里那个方法名"
+         要从**没改名的**那个算 —— `C$open$o1` 上按最后一个 `$` 切出来的 owner 是
+         `C$open`，那是错的。所以基名单独留一格。 */
+      const base = info.name;
       // 原型上写了 `abstract`、体又写在类外（第五十七刀）：报的得是"abstract 不能有体"，
       // 而不是下面那句"定义了两次"—— 原型那一遍已经把签名放进 fns 了。
-      if (this.virt.get(info.name) === 'abstract') {
-        return this.err(n, `'${shown(info.name)}' 是 abstract，不能有函数体（jancy 那句 `
+      if (this.virt.get(base) === 'abstract') {
+        return this.err(n, `'${shown(base)}' 是 abstract，不能有函数体（jancy 那句 `
           + '"\'%s\' is abstract and hence cannot have a body"）');
       }
-      if (this.fns.has(info.name)) return this.err(n, `函数 '${shown(info.name)}' 定义了两次`);
+      if (this.fns.has(base)) {
+        const alt = this.overloadName(n, base, ps.length, sp);
+        if (alt === null) return null;
+        info.name = alt;
+      }
       // 方法（第五十二刀）：名字的前一格是个**类**时这就是它的方法 —— 体内写的那些在 nsFlat
       // 那一遍已经把 ns 设成了类名，体外写的 `void C.foo()` 名字里本来就带着 `C.`，两条路
       // 到这儿是同一个全名（`C$foo`）。落法是一个**自由函数**，`this` 当第一个形参。
-      const cut = info.name.lastIndexOf('$');
-      const owner = cut < 0 ? null : info.name.slice(0, cut);
+      const cut = base.lastIndexOf('$');
+      const owner = cut < 0 ? null : base.slice(0, cut);
       if (owner !== null && this.classes.has(owner)) {
         this.methods.set(info.name, owner);
-        this.methodNames.add(info.name.slice(cut + 1));
+        this.methodNames.add(base.slice(cut + 1));
         ps.unshift({ name: 'this', type: tClass(owner, false), formals: null });
         // 虚方法（第五十七刀）。`abstract` 的那一个**没有体** —— jancy 自己那句话就是
         // "'%s' is abstract and hence cannot have a body"（jnc_ct_ModuleItem.h:690）。
@@ -4160,10 +4175,83 @@ class JncLower {
     return { info, ps, isMain };
   }
 
+  /**
+   * 同一个名字的第二条定义（第七十九刀）：是重载就换个方言名字，不是就报"定义了两次"。
+   *
+   * jancy 判合法只看**实参那一串的签名**（`getArgSignature`，jnc_ct_FunctionType.h:289-326）——
+   * 返回类型不算、`errorcode` / `unsafe` / `async` 也不算，所以只差这些的两条它自己就拒
+   * （`illegal function overload: duplicate argument signature`，
+   * jnc_ct_FunctionTypeOverload.cpp:248-261）。
+   *
+   * 这一层先只做**按实参个数**分得开的那一半（语料 159 组里 92 组）：元数不同就收，
+   * 同元的当场说还不收 —— 同元要按参数类型排序（jancy 那是一个标量：各实参 CastKind 里
+   * 最差的那个，jnc_ct_OperatorMgr.cpp:721-759），而那要先有一张这一层的隐式转换代价表。
+   *
+   * 虚方法上的重载也不收：第五十七刀的虚派发是"整数标签 + 按标签分派"，分派表按**方法名**
+   * 接，同名两条会撞。
+   *
+   * @returns 新的方言名，或 null（已经报过错）
+   */
+  overloadName(n, base, arity, sp) {
+    const cands = this.overloads.get(base) ?? [base];
+    if (this.virt.has(base) || (sp !== undefined && sp !== null && sp.virt !== null)) {
+      return this.nope(n, `虚方法 '${shown(base)}' 的重载（这一层的虚派发按方法名接，`
+        + '同名两条会撞在一格分派表上）');
+    }
+    for (const c of cands) {
+      const s = this.fns.get(c);
+      if (s === undefined) continue;
+      // 方法的 params 里第 0 格是 this，元数要减掉它才跟源码里写的那一串对得上
+      const k = this.methods.has(c) ? s.params.length - 1 : s.params.length;
+      if (k === arity) {
+        return this.nope(n, `'${shown(base)}' 的同元重载（两条都收 ${arity} 个实参 —— `
+          + '要按参数类型排序的重载决议，见 ADR-0016 那一节）');
+      }
+    }
+    const alt = `${base}$o${arity}`;
+    if (this.fns.has(alt)) return this.err(n, `函数 '${shown(base)}' 定义了两次`);
+    this.overloads.set(base, [...cands, alt]);
+    return alt;
+  }
+
+  /**
+   * 调用点在一族重载里挑一条（第七十九刀）：按**给了几个实参**挑。
+   *
+   * 每个候选可接受的个数是一个区间：`元数 − 末尾带默认值的个数` .. `元数`（第七十七刀那格
+   * `defs` 现成的）。区间套住了就是候选；正好一条就用它，两条以上说还不收（语料里有 10 组
+   * 是这样 —— 默认值让区间重叠），一条都没有就照旧报"要几个实参"，报的是**基名那一条**。
+   *
+   * @returns 挑中的方言名，或 null（已经报过错）
+   */
+  pickOverload(n, base, given, hasSelf) {
+    const cands = this.overloads.get(base);
+    if (cands === undefined) return base;
+    const fits = [];
+    for (const c of cands) {
+      const s = this.fns.get(c);
+      if (s === undefined) continue;
+      const want = hasSelf ? s.params.slice(1) : s.params;
+      const defs = s.defs === undefined || s.defs === null ? null
+        : (hasSelf ? s.defs.slice(1) : s.defs);
+      const opt = defs === null ? 0 : defs.filter((d) => d !== null).length;
+      if (given >= want.length - opt && given <= want.length) fits.push(c);
+    }
+    if (fits.length === 1) return fits[0];
+    if (fits.length > 1) {
+      return this.nope(n, `'${shown(base)}' 的重载里有 ${fits.length} 条都收 ${given} 个实参`
+        + '（默认值让可接受的个数重叠了 —— 要按参数类型排序的重载决议）');
+    }
+    const counts = cands.map((c) => {
+      const s = this.fns.get(c);
+      return this.methods.has(c) ? s.params.length - 1 : s.params.length;
+    });
+    return this.err(n, `'${shown(base)}' 有 ${cands.length} 条重载，收的实参个数是 `
+      + `${counts.join(' / ')}，这里给了 ${given} 个`);
+  }
+
   /** 那道闸门那几行（第五十三刀）：`if (!跑过) { 跑过 = true; 静态构造(); }`。
    *  与第二十六刀 `static` 局部量的初值用的是同一个形状（那边的出处是 jancy 的 `once`）。 */
-  gateLines(cls, pad) {
-    const gate = this.gates.get(cls);
+  gateLines(cls, pad) {    const gate = this.gates.get(cls);
     return [
       `${pad}(if (un "!" (var ${gate}))`,
       `${pad}  (do`,
@@ -7041,6 +7129,12 @@ class JncLower {
           const fq = this.resolve(nm, (k) => this.fns.has(k));
           // 函数名当值用（第五十五刀）：那就是一格函数指针。方法要一个对象才拼得出那一格
           // （闭包里捕的是它），方法体里裸写的名字捕的是 `this` —— 与 `foo()` 补 this 同一条。
+          // 重载过的名字**取不出一格函数值**（第七十九刀）：一族里挑哪一条由那一格函数指针的
+          // 类型说，而这里左边要什么还没传下来。jancy 那边靠 getFunctionPtrCastKind 排序挑。
+          if (fq !== null && this.overloads.has(fq)) {
+            return this.nope(n, `把重载过的名字 '${shown(fq)}' 当函数值用（挑哪一条要看`
+              + '左边那格函数指针的类型，这一层还传不下来）');
+          }
           if (fq !== null) return this.fnValue(n, fq, null);
           // 属性（第六十八刀）：源码里它长得像变量，所以这一问排在"查不着变量、也不是
           // 函数名"之后。读它就是调取值器。方法体里裸写的属性名走 propBare（第六十九刀）：
@@ -7604,8 +7698,16 @@ class JncLower {
       }
       self = '(var $this)';
     }
-    const sig = this.fns.get(nm);
     const args0 = this.flat(n.items[2]);
+    /* 重载（第七十九刀）：这一族里按**给了几个实参**挑一条。排在这儿是因为 `self` 到这一步
+       才定下来（方法体里裸写 `foo()` 那条也补好了 `this`），而方法的元数要减掉 this 那一格。
+       挑完再往下走 —— 下面那一整段（默认值、个数、类型）一个字都不用改。 */
+    if (this.overloads.has(nm)) {
+      const pick = this.pickOverload(n, nm, args0.length, self !== null);
+      if (pick === null) return null;
+      nm = pick;
+    }
+    const sig = this.fns.get(nm);
     const want = self === null ? sig.params : sig.params.slice(1);
     const defs = sig.defs === undefined || sig.defs === null ? null
       : (self === null ? sig.defs : sig.defs.slice(1));

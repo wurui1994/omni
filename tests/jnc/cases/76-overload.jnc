@@ -1,0 +1,99 @@
+// jancy 函数重载（第七十九刀）—— 先做按**实参个数**分得开的那一半
+//
+// 出处：jancy 判两条同名声明合不合法只看**实参那一串的签名**
+// （`FunctionType::getArgSignature`，jnc_ct_FunctionType.h:289-326）。返回类型不算、
+// `errorcode` / `unsafe` / `async` / 调用约定也不算（`appendFlagSignature`，
+// jnc_ct_FunctionType.cpp:66-79）—— 只差这些的两条它自己就拒（"illegal function overload:
+// duplicate argument signature"，jnc_ct_FunctionTypeOverload.cpp:248-261）。登记在
+// `Namespace::addFunction`（jnc_ct_Namespace.cpp:603-660）。调用点是
+// `FunctionTypeOverload::chooseOverload`（jnc_ct_FunctionTypeOverload.cpp:44-91）：
+// 每个候选算一个标量 —— 各实参 CastKind 里最差的那个（jnc_ct_OperatorMgr.cpp:721-759），
+// 取最高分，平手报 "ambiguous call to overloaded function"。
+//
+// 语料里这一格 161 对 (文件, 拦路项)：`bool errorcode open()` 与
+// `bool errorcode open(uint_t port)` 写在同一个类里（test/ioninja/plugins/Udp/UdpDispatch.jnc:45,49）。
+// 159 个重载组里 92 组只靠实参个数就分得开 —— 这一刀收的就是那 92 组的形状，
+// 同元的、construct 的、虚方法上的当场说"还不收"（见 bad/overload-samearity.jnc）。
+//
+// 这里钉五件事：
+//   1. 自由函数的三条重载（0 / 1 / 2 个实参）
+//   2. 类的方法的三条重载（元数不算 this 那一格）
+//   3. 方法体里**裸写**的重载调用（补 this 之后再挑，所以元数要减掉 this）
+//   4. 重载与命名空间：`a.g()` 与 `a.g(int)`
+//   5. 重载与末尾默认值一起（第七十七刀）：`h(int)` 与 `h(int, int = 5)` 分得开 ——
+//      两条可接受的个数分别是 {1} 与 {1,2}？不 —— 那样就重叠了，所以这里写的是
+//      `h()` 与 `h(int, int = 5)`：{0} 与 {1,2}，不重叠。重叠的那种是 bad/overload-defaults。
+
+int f() {
+	return 1;
+}
+
+int f(int a) {
+	return a * 10;
+}
+
+int f(int a, int b) {
+	return a + b;
+}
+
+int h() {
+	return 100;
+}
+
+int h(int a, int b = 5) {
+	return a + b;
+}
+
+namespace a {
+
+int g() {
+	return 7;
+}
+
+int g(int v) {
+	return v + 7;
+}
+
+} // namespace a
+
+class C {
+	int m_n;
+
+	void put() {
+		m_n = 1;
+	}
+
+	void put(int v) {
+		m_n = v;
+	}
+
+	void put(int v, int w) {
+		m_n = v + w;
+	}
+
+	int fetch() {
+		return m_n;
+	}
+
+	// 方法体里裸写的重载调用（第三件事）：`put(…)` 就是 `this.put(…)`
+	void bump() {
+		put(m_n, 1);
+	}
+}
+
+int main() {
+	printf("f %d %d %d\n", f(), f(5), f(3, 4));
+	printf("h %d %d %d\n", h(), h(1), h(1, 2));
+	printf("g %d %d\n", a.g(), a.g(1));
+
+	C c;
+	c.put();
+	printf("C %d", c.fetch());
+	c.put(7);
+	printf(" %d", c.fetch());
+	c.put(3, 40);
+	printf(" %d", c.fetch());
+	c.bump();
+	printf(" %d\n", c.fetch());
+	return 0;
+}
