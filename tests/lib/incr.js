@@ -26,11 +26,17 @@ import os from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { CORE_DATA, PLUGIN_SET } from '../../src/core/plugin-set.js';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '../..');
 const HOOK = join(HERE, 'deps-hook.mjs');
 
 const sha = (s) => createHash('sha256').update(s).digest('hex').slice(0, 32);
+
+/** 超时那一格的消息。轴自己印的那句原本长这样，保持一字不差好让固件不必改。 */
+const timeoutText = (ms) => `超时（${(ms ?? 0) / 1000}s 没跑完）`;
+
 
 /** 一份文件的内容哈希（一趟里只读一次 —— 一条轴上同一份源文件会被问几百遍）。 */
 const fileHashes = new Map();
@@ -50,6 +56,47 @@ function dirHash(d) {
   const names = readdirSync(d).sort();
   return sha(names.map((n) => `${n}:${fileHash(join(d, n))}`).join('\n'));
 }
+
+/* ------------------------------------------------------------ 数据文件那一格
+ *
+ * 依赖钩子只看得见 **`import` 进去的模块**。而编译器还读一批**数据**：语法表
+ * （`asy.grammar` / `jnc.grammar`）、内建绑定表（`builtins.tab`）、库源码（`lib/`、
+ * `lib/asy/`）、运行时 C（`runtime/`）、JIT 宿主（`jit/`）。改它们等于改编译器的行为，
+ * 但 `load` 钩子一格都收不到 —— 缓存于是会拿旧输出骗人（ADR-0023 记的那个洞）。
+ *
+ * 哪些文件算数据**不用另立一张表**：`src/core/plugin-set.js` 里每格插件的 `data` 与
+ * `CORE_DATA` 就是那张表（它本来的用途是 `omni plugins` 往 dist/share 抄哪些东西）。
+ * 这里把它们**整份**哈希一次，混进每一个键 —— 保守（改 `runtime/omni.h` 会让所有轴失效，
+ * 而那是对的：每条 C 腿都读它），但不会说谎。整趟只算一次，量出来 4ms。
+ */
+const DATA_RELS = [
+  ...PLUGIN_SET.flatMap((p) => p.data.map((rel) => ({ rel, probe: null }))),
+  ...CORE_DATA.map((c) => ({ rel: `${c.dir}/`, probe: c.probe })),
+];
+
+let dataFp = null;
+function dataFingerprint() {
+  if (dataFp !== null) return dataFp;
+  const parts = [];
+  for (const { rel, probe } of [...DATA_RELS].sort((a, b) => (a.rel < b.rel ? -1 : 1))) {
+    const isDir = rel.endsWith('/');
+    const clean = isDir ? rel.slice(0, -1) : rel;
+    let h = 'x';
+    /* 与 host/data.js 的 dataRoots 同序（src/core 先、src 后）。`probe` 是同名目录的
+       消歧标志 —— `runtime` 在源码树里有两个（src/runtime 是 C、src/core/runtime 是 JS）。 */
+    for (const r of [join(ROOT, 'src', 'core'), join(ROOT, 'src')]) {
+      const p = join(r, clean);
+      if (!existsSync(p)) continue;
+      if (probe !== null && !existsSync(join(p, probe))) continue;
+      h = isDir ? hashTree(p) : fileHash(p);
+      break;
+    }
+    parts.push(`${rel}:${h}`);
+  }
+  dataFp = sha(parts.join('\n'));
+  return dataFp;
+}
+
 
 /**
  * 一条轴的运行缓存。
@@ -95,53 +142,92 @@ export class RunCache {
     return out.sort();
   }
 
+  /** 一次调用的**查得到的那一段**键：命令行 + 环境 + 实参里那几份文件 + 那批数据文件。 */
+  static keyOf(args, cwd, o) {
+    const inputs = RunCache.inputsOf(args, o.extra ?? []);
+    return sha(JSON.stringify([args, cwd, o.env ?? null,
+      inputs.map((p) => `${p}:${fileHash(p)}`), dataFingerprint()]));
+  }
+
   /**
    * 跑一次（或者把上一次的结果交出来）。
    *
    * @param {string[]} args node 的实参（第一个通常是那份 cli.js）
-   * @param {{cwd?: string, extra?: string[], env?: object}} o
-   *        `extra` 是"命令行里看不见但也算输入"的路径（比如用例旁边的 `imports/` 目录）
+   * @param {{cwd?: string, extra?: string[], env?: object, timeout?: number}} o
+   *        `extra` 是"命令行里看不见但也算输入"的路径（比如用例旁边的 `imports/` 目录）；
+   *        `timeout` 是这一次的上限（毫秒）—— **超时的那一次不入册**，见下。
    * @returns {{code: number, out: string, err: string, cached: boolean}}
    */
   run(args, o = {}) {
     const cwd = o.cwd ?? ROOT;
-    const inputs = RunCache.inputsOf(args, o.extra ?? []);
-    const key = sha(JSON.stringify([args, cwd, o.env ?? null,
-      inputs.map((p) => `${p}:${fileHash(p)}`)]));
+    const key = RunCache.keyOf(args, cwd, o);
     const had = this.db.get(key);
     if (had !== undefined && !this.off && (!this.force || this.fresh.has(key))) {
       // 记下来的那份模块清单现在还是不是同一份内容 —— 对得上才算命中
       if (hashList(had.deps) === had.depsHash) {
         this.hit++;
-        return { code: had.code, out: had.out, err: had.err, cached: true };
+        return {
+          code: had.code, out: had.out, err: had.err, status: had.status ?? null, cached: true,
+        };
       }
     }
     this.miss++;
-    const r = this.spawn(args, cwd, o.env);
-    if (!this.off) {
-      this.db.set(key, { deps: r.deps, depsHash: hashList(r.deps), code: r.code, out: r.out, err: r.err });
+    const r = this.spawn(args, cwd, o.env, o.timeout);
+    /* **超时不入册**：那不是这份输入的"结果"，是这台机器这一刻的状态（别的轴在并行、
+       机器在换页）。记下来就会把一次偶然的卡顿钉成永久的红。 */
+    if (!this.off && r.timedOut !== true) {
+      this.db.set(key, {
+        deps: r.deps,
+        depsHash: hashList(r.deps),
+        code: r.code,
+        out: r.out,
+        err: r.err,
+        status: r.status,
+      });
       this.fresh.add(key);
       this.dirty = true;
     }
-    return { code: r.code, out: r.out, err: r.err, cached: false };
+    return {
+      code: r.code, out: r.out, err: r.err, status: r.status, cached: false,
+    };
   }
 
   /** 真跑一次（同步），顺手把"装载过哪些模块"收回来。 */
-  spawn(args, cwd, env) {
+  spawn(args, cwd, env, timeout) {
     const list = this.depsFile();
-    const r = spawnSync(process.execPath, ['--import', HOOK, ...args], {
+    const opts = {
       encoding: 'utf8',
       cwd,
       env: { ...process.env, ...(env ?? {}), OMNI_DEPS_OUT: list },
-    });
-    return { code: r.status ?? 1, out: r.stdout ?? '', err: r.stderr ?? '', deps: this.readDeps(list) };
+    };
+    if (timeout !== undefined) {
+      opts.timeout = timeout;
+      opts.killSignal = 'SIGKILL';
+    }
+    const r = spawnSync(process.execPath, ['--import', HOOK, ...args], opts);
+    const deps = this.readDeps(list);
+    if (r.error !== undefined && r.error !== null && r.error.code === 'ETIMEDOUT') {
+      return {
+        code: 124, status: 124, out: r.stdout ?? '', err: timeoutText(timeout), deps, timedOut: true,
+      };
+    }
+    /* `status` 是**原样**的退出码（信号打死时是 null）。`code` 是归一过的那份（null -> 1）。
+       两个都留着：多数轴只看 `code !== 0`，而 tests/c 那条轴拿退出码本身当 oracle 的一部分
+       （tcc 与我们要同一个数），把"被信号打死"混成 1 会让那条比对变虚。 */
+    return {
+      code: r.status ?? 1,
+      status: r.status === undefined ? null : r.status,
+      out: r.stdout ?? '',
+      err: r.stderr ?? '',
+      deps,
+    };
   }
 
   /**
    * 真跑一次（异步）。预热那一格用它 —— **`spawnSync` 会把整条事件循环堵住**，几条 worker
    * 于是一条接一条地跑，量出来不但没快，还因为多跑一遍变成两倍慢（这一格踩过）。
    */
-  spawnAsync(args, cwd, env) {
+  spawnAsync(args, cwd, env, timeout) {
     const list = this.depsFile();
     return new Promise((resolve) => {
       const p = spawn(process.execPath, ['--import', HOOK, ...args], {
@@ -151,12 +237,27 @@ export class RunCache {
       });
       let out = '';
       let err = '';
+      let killed = false;
+      const timer = timeout === undefined ? null : setTimeout(() => {
+        killed = true;
+        p.kill('SIGKILL');
+      }, timeout);
       p.stdout.setEncoding('utf8');
       p.stderr.setEncoding('utf8');
       p.stdout.on('data', (c) => { out += c; });
       p.stderr.on('data', (c) => { err += c; });
       p.on('close', (code) => {
-        resolve({ code: code === null ? 1 : code, out, err, deps: this.readDeps(list) });
+        if (timer !== null) clearTimeout(timer);
+        const deps = this.readDeps(list);
+        if (killed) {
+          resolve({
+            code: 124, status: 124, out, err: timeoutText(timeout), deps, timedOut: true,
+          });
+          return;
+        }
+        resolve({
+          code: code === null ? 1 : code, status: code, out, err, deps,
+        });
       });
     });
   }
@@ -195,9 +296,7 @@ export class RunCache {
     const cwd = o.cwd ?? ROOT;
     const todo = [];
     for (const args of argLists) {
-      const inputs = RunCache.inputsOf(args, o.extra ?? []);
-      const key = sha(JSON.stringify([args, cwd, o.env ?? null,
-        inputs.map((p) => `${p}:${fileHash(p)}`)]));
+      const key = RunCache.keyOf(args, cwd, o);
       const had = this.db.get(key);
       if (!this.force && had !== undefined && hashList(had.deps) === had.depsHash) continue;
       todo.push({ args, key });
@@ -213,13 +312,19 @@ export class RunCache {
         if (i >= todo.length) return;
         const t = todo[i];
         // eslint-disable-next-line no-await-in-loop -- worker 自己就是一条队列，串行是故意的
-        const r = await this.spawnAsync(t.args, cwd, o.env);
+        const r = await this.spawnAsync(t.args, cwd, o.env, o.timeout);
+        this.warmed = (this.warmed ?? 0) + 1;
+        if (r.timedOut === true) continue; // 超时不入册（理由同 run()）
         this.db.set(t.key, {
-          deps: r.deps, depsHash: hashList(r.deps), code: r.code, out: r.out, err: r.err,
+          deps: r.deps,
+          depsHash: hashList(r.deps),
+          code: r.code,
+          out: r.out,
+          err: r.err,
+          status: r.status,
         });
         this.fresh.add(t.key);
         this.dirty = true;
-        this.warmed = (this.warmed ?? 0) + 1;
       }
     };
     await Promise.all(Array.from({ length: jobs }, () => worker()));
@@ -284,11 +389,12 @@ export function axisDeps(axis) {
 /**
  * 一条轴的指纹。`deps` 有记录就按它算（精确）；没有就退回"整棵 src + 整棵 tests/<轴>"——
  * 那时只要源码动一个字节这条轴就重跑，是**保守但不会说谎**的一头。
+ * 两头都再混一格**数据文件**的指纹：语法表那些不是模块，钩子看不见（见 dataFingerprint）。
  */
 export function axisFingerprint(axis, axisDir) {
   const deps = axisDeps(axis);
   const dep = deps === null ? hashTree(join(ROOT, 'src')) : hashList(deps);
-  return sha(`${hashTree(axisDir)}|${dep}|${deps === null ? 'src' : 'deps'}`);
+  return sha(`${hashTree(axisDir)}|${dep}|${dataFingerprint()}|${deps === null ? 'src' : 'deps'}`);
 }
 
 /** 轴级状态（`{指纹, 上一趟的退出码}`）。只有绿的那一趟才写进去。 */

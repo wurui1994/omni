@@ -26,7 +26,7 @@ import { mkdtempSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { RunCache } from '../lib/incr.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
@@ -34,11 +34,16 @@ const cli = join(root, 'src', 'core', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const dir = workDir('sexpr');
 
+// 走**运行缓存**（ADR-0023 的 S3）：一次调用的输入是 {命令行, 那份 .sx, 装载过的模块,
+// 数据文件}，一个字节没变就把上次的输出交出来。这条轴 36×5 + 6×5 + 38 ≈ 250 次子进程，
+// 而其中绝大多数在两次之间一模一样。
+const cache = new RunCache('sexpr');
+
 const cmd = (args) => {
   // cwd 钉在仓库根上：cases 里有一份要**读文件**的（19-readtext），它的路径是相对仓库根
   // 写的，而这份 run.js 可能从任何目录被叫起来（tests/run.js 就是从根叫的）。
-  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd: root });
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
+  const r = cache.run([cli, ...args], { cwd: root });
+  return { out: r.out, err: r.err, code: r.code };
 };
 const read = (p) => {
   try {
@@ -89,6 +94,35 @@ function agree(sx, expected) {
     bad.push(`    对不上期望值\n      want: ${JSON.stringify(expected)}\n      got:  ${JSON.stringify(first.out)}`);
   }
   return bad;
+}
+
+// -------------------------------- 0. 预热：这一趟要跑的子进程里没命中的那些，先并行跑掉
+//
+// 判定是顺序的（第一条腿当基准），但贵的是子进程。mini 那一节不进来：它要先由 glr 生成
+// .sx 才知道跑什么，只把生成那一步预热掉。
+{
+  const argLists = [];
+  for (const f of readdirSync(join(here, 'cases')).filter((x) => x.endsWith('.sx')).sort()) {
+    if (!want(f)) continue;
+    for (const leg of LEGS) argLists.push([cli, ...leg.args(join(here, 'cases', f))]);
+  }
+  for (const f of readdirSync(join(here, 'rt')).filter((x) => x.endsWith('.sx')).sort()) {
+    if (!want(f)) continue;
+    for (const leg of LEGS) argLists.push([cli, ...leg.args(join(here, 'rt', f))]);
+  }
+  for (const f of readdirSync(join(here, 'bad')).filter((x) => x.endsWith('.sx')).sort()) {
+    if (!want(f)) continue;
+    argLists.push([cli, 'run', join(here, 'bad', f)]);
+  }
+  for (const f of readdirSync(join(here, 'mini')).filter((x) => x.endsWith('.mini')).sort()) {
+    if (!want(f)) continue;
+    argLists.push([cli, 'glr', join(root, 'tests', 'glr', 'grammars', 'mini.grammar'),
+      join(here, 'mini', f)]);
+  }
+  await cache.warm(argLists, { cwd: root });
+  if ((cache.warmed ?? 0) > 0) {
+    process.stdout.write(`  --   预热 ${cache.warmed} 次子进程（并行）\n`);
+  }
 }
 
 // ------------------------------------------------- 1. 方言本身：cases/*.sx
@@ -182,7 +216,9 @@ for (const f of readdirSync(join(here, 'rt')).filter((x) => x.endsWith('.sx')).s
   else no(`rt/${name}`, bad.join('\n'));
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n\n(kept in ${dir})\n`);
   process.exitCode = 1;

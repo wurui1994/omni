@@ -27,6 +27,7 @@ import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { RunCache } from '../lib/incr.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '../../src/core/cli.js');
@@ -35,7 +36,18 @@ const update = process.env.UPDATE === '1';
 const dir = workDir('glr');
 mkdirSync(join(here, 'snapshots'), { recursive: true });
 
+const cache = new RunCache('glr');
 const run = (args) => {
+  const r = cache.run([cli, ...args]);
+  return { out: r.out, err: r.err, code: r.code };
+};
+/**
+ * **不许缓存**的那一格（ADR-0023：什么不能进缓存）。下面 1b 那一节的判据是
+ * "同一条命令跑两遍，第二遍要报 cache hit" —— 它测的正是**第二次调用与第一次不同**
+ * 这件事。走缓存的话两次的键一模一样，第二次会把第一次的 stderr 交回来（那里面没有
+ * cache hit），于是这一节永远红。所以那两遍走原始 spawn。
+ */
+const runRaw = (args) => {
   const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
   return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
 };
@@ -123,8 +135,8 @@ function firstDiff(want, got) {
 for (const file of grammars) {
   const name = basename(file, '.grammar');
   const gpath = gpathOf(file);
-  const a = run(['glr-table', gpath, '--brief', '--verbose']);
-  const b = run(['glr-table', gpath, '--brief', '--verbose']);
+  const a = runRaw(['glr-table', gpath, '--brief', '--verbose']);
+  const b = runRaw(['glr-table', gpath, '--brief', '--verbose']);
   if (a.code !== 0 || b.code !== 0) {
     no(`cache/${name}`, `    glr-table exit=${a.code}/${b.code}\n${a.err}${b.err}`);
     continue;
@@ -276,7 +288,9 @@ if (grammars.includes('asy.grammar')) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n\n(kept in ${dir})\n`);
   process.exitCode = 1;

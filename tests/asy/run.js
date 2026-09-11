@@ -47,6 +47,7 @@ import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { workDir } from '../work.js';
+import { RunCache } from '../lib/incr.js';
 
 import { ASY_NOPE } from '../../src/core/frontend-asy/types.js';
 
@@ -60,15 +61,32 @@ const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 // examples 里 pdb / stereoscopic / threeviews 在这台机器上 120s 都跑不完。
 const TIMEOUT = 30000;
 
-const cmd = (args, cwd, extraEnv) => {
-  const opts = { encoding: 'utf8', cwd, timeout: TIMEOUT, killSignal: 'SIGKILL' };
-  if (extraEnv !== undefined) opts.env = { ...process.env, ...extraEnv };
-  const r = spawnSync(process.execPath, [cli, ...args], opts);
-  if (r.error !== undefined && r.error !== null && r.error.code === 'ETIMEDOUT') {
-    return { out: r.stdout ?? '', err: `超时（${TIMEOUT / 1000}s 没跑完）`, code: 124 };
+/**
+ * 我们这边的调用走**运行缓存**（ADR-0023 的 S3）：输入（命令行 + 那份 .asy + 那些
+ * `mod_*.asy` + 装载过的模块 + 数据文件）一个字节都没变就把上次的输出交出来。
+ * 超时那一次**不入册** —— 那是这台机器这一刻的状态，不是这份输入的结果。
+ *
+ * `mod_*.asy` 要显式登记：它们是被 `import` 的**源文件**，命令行上看不见，而依赖钩子
+ * 只看得见 JS 模块（第二十五刀的那些用例就靠它们）。
+ */
+const cache = new RunCache('asy');
+const modsIn = new Map();
+const mods = (dir) => {
+  let list = modsIn.get(dir);
+  if (list === undefined) {
+    list = readdirSync(dir).filter((f) => f.startsWith('mod_') && f.endsWith('.asy'))
+      .map((f) => join(dir, f)).sort();
+    modsIn.set(dir, list);
   }
-  return { out: r.stdout ?? '', err: r.stderr ?? '', code: r.status ?? 1 };
+  return list;
 };
+const cmd = (args, cwd, extraEnv) => {
+  const r = cache.run([cli, ...args], {
+    cwd, extra: mods(cwd), env: extraEnv, timeout: TIMEOUT,
+  });
+  return { out: r.out, err: r.err, code: r.code };
+};
+
 /** 判分用的真 asy。同一条 30s 上限；超时按"没跑成"回（status 124）。 */
 const asyRun = (args, cwd) => {
   const r = spawnSync(asyBin, args, {
@@ -150,6 +168,40 @@ function findAsy() {
   return null;
 }
 const asyBin = findAsy();
+
+// ------------------------------------------------- 0. 预热：把没命中的那些子进程并行跑掉
+//
+// 判定那几节是顺序的（一条腿当基准、别的腿跟它比），但**贵的是子进程**。所以先把这一趟
+// 要跑的命令列出来，缓存里没有的那些并行跑掉；下面顺序那一遍每一次都命中。
+// 真 asy（asyRun）不进这一格：那是外部工具，输出还落文件，缓存管不了它。
+{
+  const jobs = [];
+  for (const sec of ['cases', 'tol', 'draw']) {
+    const dir = join(here, sec);
+    for (const f of readdirSync(dir).filter(isCase).sort()) {
+      if (!want(f)) continue;
+      for (const leg of LEGS) jobs.push({ dir, args: [cli, ...leg.args(join(dir, f))] });
+    }
+  }
+  for (const sec of ['bad', 'strict']) {
+    const dir = join(here, sec);
+    for (const f of readdirSync(dir).filter(isCase).sort()) {
+      if (!want(f)) continue;
+      jobs.push({ dir, args: [cli, 'run', join(dir, f)] });
+    }
+  }
+  const byDir = new Map();
+  for (const j of jobs) {
+    if (!byDir.has(j.dir)) byDir.set(j.dir, []);
+    byDir.get(j.dir).push(j.args);
+  }
+  for (const [dir, argLists] of byDir) {
+    // eslint-disable-next-line no-await-in-loop -- 每个目录自己一批（extra 是目录里的 mod_*）
+    await cache.warm(argLists, { cwd: dir, extra: mods(dir), timeout: TIMEOUT });
+  }
+  if ((cache.warmed ?? 0) > 0) lap(`预热 ${cache.warmed} 次子进程（并行）`);
+}
+
 
 // ------------------------------------------------- 1+2. cases/：五方一致 + 真 asy 判分
 
@@ -367,8 +419,10 @@ for (const f of readdirSync(join(here, 'draw')).filter(isCase).sort()) {
 }
 lap('draw');
 
+const rep = cache.report();
 process.stdout.write(`\n${pass} passed, ${fail} failed  （腿：${LEGS.map((l) => l.tag).join(', ')}`
-  + `${LEGS.length === ALL_LEGS.length ? '' : '，OMNI_LEGS=all 跑齐五条'}，总 ${((Date.now() - t0) / 1000).toFixed(1)}s）\n`);
+  + `${LEGS.length === ALL_LEGS.length ? '' : '，OMNI_LEGS=all 跑齐五条'}，总 ${((Date.now() - t0) / 1000).toFixed(1)}s`
+  + `${rep === '' ? '' : `，${rep}`}）\n`);
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

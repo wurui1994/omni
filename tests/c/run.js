@@ -37,6 +37,7 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { RunCache } from '../lib/incr.js';
 import { Cpp } from '../../src/core/frontend-c/tccpp.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -45,6 +46,21 @@ const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const TCC = join(TCC_DIR, 'tcc');
 const CLI = join(root, 'src', 'core', 'cli.js');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
+
+/**
+ * 我们这一侧的每次 CLI 调用都走**运行缓存**（ADR-0023 的 S3）。tcc 那一侧不进缓存：
+ * 它是外部二进制，钩子收不到依赖清单，缓存也就永远不命中（那是对的 —— 尺子每次都要真量）。
+ *
+ * `extra` 里放**用例所在的那个目录**：一份 `.c` 可能 `#include "x.h"`，而那份头在命令行上
+ * 看不见、也不是 JS 模块。整组一起算输入是保守的一头（同组改一份、整组重跑），但不会说谎。
+ * 还剩一处量不到：**系统头**（SDK 里的 `stdio.h` 一族）不在任何一格输入里 —— 换 SDK 之后
+ * 这条轴的缓存会偏旧。判断是：换 SDK 是件大事，那时 `FORCE=1` 跑一遍即可。
+ */
+const cache = new RunCache('c');
+const cliRun = (args, extra = []) => {
+  const r = cache.run([CLI, ...args], { extra });
+  return { code: r.status, out: r.out, err: r.err };
+};
 
 
 let pass = 0;
@@ -216,13 +232,13 @@ function depsCase(group, file, incDirs, flags) {
     bad(name, `    tcc 自己就拒了：\n${(w.stderr ?? '').trim()}`);
     return;
   }
-  const g = spawnSync(process.execPath, [CLI, 'cpp', path, ...args], { encoding: 'utf8' });
-  if (g.status !== 0) {
-    bad(name, `    我们拒了，tcc 没拒：\n${(g.stderr ?? '').trim()}`);
+  const g = cliRun(['cpp', path, ...args], [join(here, group)]);
+  if (g.code !== 0) {
+    bad(name, `    我们拒了，tcc 没拒：\n${(g.err ?? '').trim()}`);
     return;
   }
-  if (g.stdout !== w.stdout) {
-    bad(name, `    --- tcc ---\n${w.stdout}    --- ours ---\n${g.stdout}`);
+  if (g.out !== w.stdout) {
+    bad(name, `    --- tcc ---\n${w.stdout}    --- ours ---\n${g.out}`);
     return;
   }
   const n = w.stdout.replace(/\n$/, '').split('\n').length;
@@ -256,13 +272,13 @@ function optCase(group, file, flags, dropBanner = false) {
   /* `-v` 一族下 tcc 的第一行是版本条（也在标准输出上，`tcc version …`）——
    * Omni 没有对应的东西，掐掉再比。 */
   const want = dropBanner ? w.stdout.slice(w.stdout.indexOf('\n') + 1) : w.stdout;
-  const g = spawnSync(process.execPath, [CLI, 'cpp', path, '-P', ...flags], { encoding: 'utf8' });
-  if (g.status !== 0) {
-    bad(name, `    我们拒了，tcc 没拒：\n${(g.stderr ?? '').trim()}`);
+  const g = cliRun(['cpp', path, '-P', ...flags], [join(here, group)]);
+  if (g.code !== 0) {
+    bad(name, `    我们拒了，tcc 没拒：\n${(g.err ?? '').trim()}`);
     return;
   }
-  if (g.stdout !== want) {
-    bad(name, `    --- tcc ---\n${want}    --- ours ---\n${g.stdout}`);
+  if (g.out !== want) {
+    bad(name, `    --- tcc ---\n${want}    --- ours ---\n${g.out}`);
     return;
   }
   const n = want === '' ? 0 : want.replace(/\n$/, '').split('\n').length;
@@ -363,10 +379,9 @@ function isTccDiag(err) {
 
 /** 我们这一条腿：`cli.js c-run`（C -> MIR -> 闭包解释器），退出码同样是 main 的返回值。 */
 function cRun(path, incDirs = []) {
-  const args = [CLI, 'c-run', path];
+  const args = ['c-run', path];
   for (const d of incDirs) args.push('-I', d);
-  const r = spawnSync(process.execPath, args, { encoding: 'utf8' });
-  return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
+  return cliRun(args, [dirname(path)]);
 }
 
 /**
@@ -449,10 +464,9 @@ for (const f of pick('sys')) {
  * 分叉全都会在这三项里露出来 —— 静默的错答案是这条腿最大的风险（它是 oracle 的对照物）。
  */
 function cRunJs(path, incDirs = []) {
-  const args = [CLI, 'run', path, '--backend', 'js'];
+  const args = ['run', path, '--backend', 'js'];
   for (const d of incDirs) args.push('-I', d);
-  const r = spawnSync(process.execPath, args, { encoding: 'utf8' });
-  return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
+  return cliRun(args, [dirname(path)]);
 }
 
 function jsLegCase(group, f, incDirs = []) {
@@ -507,8 +521,8 @@ function tccCompile(path) {
 
 /** 我们这一条腿：`c-mir`（不跑，只编译）。 */
 function cCompile(path) {
-  const r = spawnSync(process.execPath, [CLI, 'c-mir', path], { encoding: 'utf8' });
-  return { code: r.status, err: (r.stderr ?? '').trim() };
+  const r = cliRun(['c-mir', path], [dirname(path)]);
+  return { code: r.code, err: (r.err ?? '').trim() };
 }
 
 /**
@@ -583,7 +597,8 @@ for (const f of pick('diag')) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}\n`);if (fail) {
+const rep = cache.report();
+process.stdout.write(`\n${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}${rep === '' ? '' : `  （${rep}）`}\n`);if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;
 }
