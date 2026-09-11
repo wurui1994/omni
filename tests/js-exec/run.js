@@ -23,6 +23,7 @@ import { lowerJs } from '../../src/core/frontend-js/lower.js';
 import { emitJs } from '../../src/core/backend-js/emit.js';
 import { emitC } from '../../src/core/backend-c/emit.js';
 import { runtimeSources, RUNTIME_DIR } from '../../src/core/runtime/c_runtime.js';
+import { FULL_LEGS } from '../lib/legs.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
@@ -99,26 +100,33 @@ for (const file of cases) {
     skipC.push(name);
   }
 
-  // 第三条腿：自己的执行器（ADR-0013）。同一段 JS，同一棵 OIR，解释一遍 —— 参照还是 node。
-  // 走 CLI 而不是在进程内 new Interp：解释器的输出缓冲、退出码、uncaught 都在那条路上。
-  const viaI = run(process.execPath, [join(here, '../../src/core/cli.js'), 'interp', path]);
-  // 第四条腿：MIR 上的闭包编译解释器（ADR-0014 决策 7）。同一棵 OIR 再往下降一层。
-  // 它与上一条的差别不是"换个写法"：求值顺序、短路的落法、循环层数都在 MIR 里被钉死了，
-  // 而槽位取代了作用域链 —— 两条给出同一串字节，才说明那一层降级没有偷偷改语义。
-  const viaM = run(process.execPath, [join(here, '../../src/core/cli.js'), 'interp', path, '--mir']);
+  /* 后两条腿平时不跑（tests/lib/legs.js 那条规矩，`OMNI_LEGS=all` 跑齐）：这条轴的判分人是
+     **node 自己**，`omni-js` 与 `omni-c` 那两条已经把"我们跑出来的字节等于 node 的"钉住了；
+     解释器那两条盯的是"腿与腿分叉"，留给提交前那一遍。
+     第三条腿：自己的执行器（ADR-0013）。同一段 JS，同一棵 OIR，解释一遍 —— 参照还是 node。
+     走 CLI 而不是在进程内 new Interp：解释器的输出缓冲、退出码、uncaught 都在那条路上。
+     第四条腿：MIR 上的闭包编译解释器（ADR-0014 决策 7）。同一棵 OIR 再往下降一层。
+     它与上一条的差别不是"换个写法"：求值顺序、短路的落法、循环层数都在 MIR 里被钉死了，
+     而槽位取代了作用域链 —— 两条给出同一串字节，才说明那一层降级没有偷偷改语义。 */
+  const viaI = FULL_LEGS
+    ? run(process.execPath, [join(here, '../../src/core/cli.js'), 'interp', path]) : null;
+  const viaM = FULL_LEGS
+    ? run(process.execPath, [join(here, '../../src/core/cli.js'), 'interp', path, '--mir']) : null;
 
   const okJs = viaJs.code === 0 && viaJs.out === ref.out;
   const okC = viaC.code === 0 && viaC.out === ref.out;
-  const okI = viaI.code === 0 && viaI.out === ref.out;
-  const okM = viaM.code === 0 && viaM.out === ref.out;
+  const okI = viaI === null || (viaI.code === 0 && viaI.out === ref.out);
+  const okM = viaM === null || (viaM.code === 0 && viaM.out === ref.out);
   if (okJs && okC && okI && okM) {
     pass++;
     const n = ref.out === '' ? 0 : ref.out.replace(/\n$/, '').split('\n').length;
-    process.stdout.write(`  ok   ${name} [node == omni-js == omni-c == interp == interp-mir] ${n} lines\n`);
+    const legs = FULL_LEGS ? 'node == omni-js == omni-c == interp == interp-mir'
+      : 'node == omni-js == omni-c';
+    process.stdout.write(`  ok   ${name} [${legs}] ${n} lines\n`);
     continue;
   }
   fail++;
-  const show = (label, r) => `    ${label} exit=${r.code}\n${r.out}${r.err ? `    stderr: ${r.err}` : ''}`;
+  const show = (label, r) => (r === null ? '' : `    ${label} exit=${r.code}\n${r.out}${r.err ? `    stderr: ${r.err}` : ''}`);
   failures.push(`${name}\n    node    exit=${ref.code}\n${ref.out}${show('omni-js', viaJs)}${show('omni-c ', viaC)}${show('interp ', viaI)}${show('interp-mir', viaM)}`);
   process.stdout.write(`  FAIL ${name}\n`);
 }

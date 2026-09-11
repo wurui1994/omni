@@ -138,6 +138,11 @@ export class RunCache {
        （ADR-0023 S7）之前留下的老记录里含着每一门语言的前端，于是"改 jnc 前端"照旧会让
        每条轴的指纹变掉。量出来过：改一行 lower.js，sexpr / wat / cabi 三条轴仍旧重跑。 */
     this.touched = new Set();
+    /* 真跑掉的那些的耗时（预热并行那一遍也记）：一条轴慢下来的时候要能立刻说出
+       "哪几条命令最贵"，而不是只知道"这条轴 60s"。 */
+    this.spent = 0;
+    this.runs = [];
+
     /* 这一趟**自己写进去**的那些键：`FORCE=1` 只该越过「上一趟留下的」，不该把预热刚跑出来的
        那一份也当作不存在 —— 否则每个子进程要跑两遍（踩过，量出来正好两倍慢）。 */
     this.fresh = new Set();
@@ -179,12 +184,16 @@ export class RunCache {
         this.hit++;
         for (const d of had.deps) this.touched.add(d);
         return {
-          code: had.code, out: had.out, err: had.err, status: had.status ?? null, cached: true,
+          code: had.code, out: had.out, err: had.err, status: had.status ?? null, cached: true, ms: 0,
         };
       }
     }
     this.miss++;
+    const t0 = Date.now();
     const r = this.spawn(args, cwd, o.env, o.timeout, o.input);
+    const ms = Date.now() - t0;
+    this.spent = (this.spent ?? 0) + ms;
+    this.runs.push({ args, ms });
     for (const d of r.deps) this.touched.add(d);
     /* **超时不入册**：那不是这份输入的"结果"，是这台机器这一刻的状态（别的轴在并行、
        机器在换页）。记下来就会把一次偶然的卡顿钉成永久的红。 */
@@ -201,7 +210,7 @@ export class RunCache {
       this.dirty = true;
     }
     return {
-      code: r.code, out: r.out, err: r.err, status: r.status, cached: false,
+      code: r.code, out: r.out, err: r.err, status: r.status, cached: false, ms,
     };
   }
 
@@ -329,7 +338,9 @@ export class RunCache {
         if (i >= todo.length) return;
         const t = todo[i];
         // eslint-disable-next-line no-await-in-loop -- worker 自己就是一条队列，串行是故意的
+        const tw = Date.now();
         const r = await this.spawnAsync(t.args, cwd, o.env, o.timeout);
+        this.runs.push({ args: t.args, ms: Date.now() - tw });
         this.warmed = (this.warmed ?? 0) + 1;
         if (r.timedOut === true) continue; // 超时不入册（理由同 run()）
         for (const d of r.deps) this.touched.add(d);
@@ -348,7 +359,41 @@ export class RunCache {
     await Promise.all(Array.from({ length: jobs }, () => worker()));
   }
 
+  /**
+   * 最贵的那几条命令（一行一条）。慢下来的时候先看这张榜 —— 它直接说出钱花在哪几个
+   * 子进程上；命中的那些不在榜上（它们不花钱）。名字掐成"命令 + 最后那个路径"，
+   * 因为完整命令行里前面那一大截 `node …/cli.js` 每条都一样、没有信息量。
+   */
+  slowest(n = 8, minMs = 200) {
+    const top = [...this.runs].sort((a, b) => b.ms - a.ms).slice(0, n)
+      .filter((x) => x.ms >= minMs);
+    if (top.length === 0) return '';
+    const brief = (args) => {
+      const rest = args.slice(1).filter((a) => !a.endsWith('cli.js'));
+      const last = rest.length === 0 ? '' : rest[rest.length - 1];
+      const tail = last.includes('/') ? last.slice(last.lastIndexOf('/') + 1) : last;
+      return `${rest.slice(0, -1).join(' ')} ${tail}`.trim();
+    };
+    return top.map((x) => `${brief(x.args)} ${(x.ms / 1000).toFixed(2)}s`).join('、');
+  }
+
+  /**
+   * 按**命令**（第一格动词）把真跑掉的时间加起来：`run 3.2s、run-c 12.1s、run-llvm 9.8s…`。
+   * 这是"要不要少跑几条腿"这个决定唯一的依据 —— 不看这张表就只能拍脑袋。
+   */
+  byCmd() {
+    const sum = new Map();
+    for (const r of this.runs) {
+      const verb = r.args.find((a) => !a.endsWith('cli.js') && !a.startsWith('-')) ?? '?';
+      sum.set(verb, (sum.get(verb) ?? 0) + r.ms);
+    }
+    const rows = [...sum.entries()].sort((a, b) => b[1] - a[1]);
+    return rows.map(([k, v]) => `${k} ${(v / 1000).toFixed(1)}s`).join('、');
+  }
+
   /** 落盘（跑完叫一次）。顺手印一行命中率 —— 那是这一层唯一要看的数。 */
+
+
   report(write = true) {
     if (write) {
       mkdirSync(this.dir, { recursive: true });
@@ -363,7 +408,13 @@ export class RunCache {
       }
     }
     const n = this.hit + this.miss;
-    return n === 0 ? '' : `子进程 ${n} 次：命中 ${this.hit}、真跑 ${this.miss}`;
+    if (n === 0) return '';
+    /* 真跑掉的秒数也印出来 —— "命中率 100%" 不等于"不慢"：一条轴慢下来的时候要一眼看出
+       钱花在"子进程"还是"轴自己那点在进程内的活"上。预热并行跑掉的那些不算在这里
+       （它们的墙上时间在预热那一行）。 */
+    const sec = ((this.spent ?? 0) / 1000).toFixed(1);
+    return `子进程 ${n} 次：命中 ${this.hit}、真跑 ${this.miss}`
+      + `${this.miss > 0 ? `（顺序那一遍真跑 ${sec}s）` : ''}`;
   }
 }
 

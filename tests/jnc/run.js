@@ -14,7 +14,11 @@
 //      逐字节相同，且等于 .expected。多方一致比对上期望值更强 —— 指针在这些腿上是**两套实现**
 //      （arena 模拟 vs 真指针，ADR-0016），逐字节相同不是巧合。第六条腿（ORC JIT）是
 //      **jancy 自己的执行路径**（它没有 AOT），见 ADR-0022 的 J1；没有 libLLVM 时跳过。
-//   2. rt/*.jnc 在五条腿上报**同一句**运行期错误。
+//      **默认只跑 run-jit 与 run 两条** —— jancy 没有 AOT，真的 `jnc` 就是 JIT 跑的，
+//      所以这门语言最要紧的那条腿是 `run-jit`；`run` 是最快的基准，且它那边的指针是
+//      arena 模拟、JIT 那边是真指针，两套实现各留一边。`OMNI_LEGS=all` 跑齐六条 ——
+//      理由与量出来的数在下面 LEGS 那儿。
+//   2. rt/*.jnc 在这几条腿上报**同一句**运行期错误。
 //   3. bad/*.jnc 必须被拒绝，且拒在正确的理由上。这一组是那些边界的本体：多维数组、
 //      数组之间的赋值、`threadlocal`、对 string 的模块级变量取地址、`%p`、
 //      `unsafe` 之外的 thin 转换、`%zd` 那一族的长度修饰、函数类型的
@@ -138,6 +142,7 @@ import { readdirSync, readFileSync, writeFileSync, mkdtempSync, existsSync } fro
 import { join, dirname, basename } from 'node:path';
 import { workDir } from '../work.js';
 import { RunCache } from '../lib/incr.js';
+import { pickLegs, legNote } from '../lib/legs.js';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -167,11 +172,32 @@ const read = (p) => {
 let pass = 0;
 let fail = 0;
 const failures = [];
-const ok = (msg) => { pass++; process.stdout.write(`  ok   ${msg}\n`); };
-const no = (name, why) => { fail++; failures.push(`${name}\n${why}`); process.stdout.write(`  FAIL ${name}\n`); };
+/* 每个例子的耗时都要看得见（否则"这条轴 60s"这句话没法往下问）。
+   `ok`/`no` 都从 `mark()` 拿这一格的墙上时间，末尾再印总耗时与最慢的几个。 */
+const t0all = Date.now();
+let tCase = Date.now();
+const times = [];
+const mark = (name) => {
+  const ms = Date.now() - tCase;
+  tCase = Date.now();
+  times.push({ name, ms });
+  return ms;
+};
+const secs = (ms) => `${(ms / 1000).toFixed(2)}s`;
+const ok = (msg, name) => {
+  pass++;
+  const ms = mark(name ?? msg);
+  process.stdout.write(`  ok   ${msg}  ${secs(ms)}\n`);
+};
+const no = (name, why) => {
+  fail++;
+  const ms = mark(name);
+  failures.push(`${name}\n${why}`);
+  process.stdout.write(`  FAIL ${name}  ${secs(ms)}\n`);
+};
 const want = (f) => (!filters.length || filters.some((x) => f.includes(x)));
 
-const LEGS = [
+const ALL_LEGS = [
   { tag: 'run', args: (p) => ['run', p] },
   { tag: 'run-c', args: (p) => ['run-c', p] },
   { tag: 'interp', args: (p) => ['interp', p] },
@@ -184,14 +210,30 @@ const LEGS = [
    尤其该在它上面钉住：量出来 69 份里 68 份本来就对，第 69 份差的是 `-I` 没透过去。
    这台机器上没有 libLLVM 时**跳过而不是算失败**（与 tests/jit 同一条规矩）：那时"JIT 这条腿"
    根本无从验证，谎报成功更糟。探一次就够，探针用最小的那份用例。 */
+const JIT_LEG = { tag: 'run-jit', args: (p) => ['run-jit', p] };
 {
-  const probe = cmd(['run-jit', join(here, 'cases', '01-pointers.jnc')]);
-  if (probe.code === 0) {
-    LEGS.push({ tag: 'run-jit', args: (p) => ['run-jit', p] });
-  } else {
-    process.stdout.write(`  skip run-jit 这条腿：${(probe.err.trim().split('\n')[0] ?? '?')}\n`);
-  }
+  const probe = cmd(JIT_LEG.args(join(here, 'cases', '01-pointers.jnc')));
+  if (probe.code === 0) ALL_LEGS.push(JIT_LEG);
+  else process.stdout.write(`  skip run-jit 这条腿：${(probe.err.trim().split('\n')[0] ?? '?')}\n`);
 }
+
+/**
+ * 平时跑哪几条：开关在 tests/lib/legs.js（`OMNI_LEGS=all` 跑齐全部，提交前那一遍用它），
+ * 但**留哪几条是这门语言自己的事**。
+ *
+ * 这条轴留 `run-jit` 与 `run`：
+ *   - `run-jit` 是**jancy 的原生执行路径** —— 它没有 AOT，真的 `jnc` 就是 ORC JIT 跑的
+ *     （ADR-0022 的 J1）。这门语言最要紧的那条腿是它，不是别的轴上那条 `run-llvm`。
+ *     没有 libLLVM 的机器上它探不着，那时这一趟就退到剩下的那条（不谎报）。
+ *   - `run` 是最快的基准，而且它的指针是 **arena 模拟**、JIT 那边是**真指针**
+ *     （ADR-0016）—— 上面那句"多方一致比对上期望值更强"靠的就是这两套实现逐字节相同。
+ *
+ * 这笔钱是量过的：一趟冷跑 578 次子进程 38.9s，按腿分的真跑耗时 interp 35.1s、run 34.7s、
+ * run-c 30.1s、run-llvm 27.3s、run-jit 24.8s、sx 0.2s（合 152s CPU / 8 核 ≈ 38s 墙上时间）。
+ * 每条腿都是等价的一份钱，砍到两条就是 ~14s。中间那三条（run-c / interp / interp --mir）
+ * 盯的是"腿与腿分叉"，那是 tests/sexpr 与 tests/oir 的活。
+ */
+const LEGS = pickLegs(ALL_LEGS, ['run-jit', 'run']);
 
 const list = (sub, ext) => readdirSync(join(here, sub)).filter((x) => x.endsWith(ext)).sort();
 
@@ -228,10 +270,19 @@ const extraArgs = (sub, name) => {
     if (!want(f)) continue;
     pre.push([cli, 'run', join(here, 'bad', f), ...extraArgs('bad', basename(f, '.jnc'))]);
   }
+  const tWarm = Date.now();
   await cache.warm(pre, { cwd: root, extra: extraInputs });
+  /* 预热那一格自己报时间。不报的话它会被算到**第一个例子**头上（量出来过：
+     `cases/01-pointers 37.39s`，而那一格其实是整趟预热）。报完把计时归零。 */
+  if ((cache.warmed ?? 0) > 0) {
+    const jobs = process.env.JOBS ?? '默认';
+    process.stdout.write(`  --   预热 ${cache.warmed} 次子进程（并行 ${jobs}）`
+      + ` ${((Date.now() - tWarm) / 1000).toFixed(1)}s\n`);
+  }
+  tCase = Date.now();
 }
 
-// ------------------------------------------------- 1. cases/：五条腿一致 + 对上期望值
+// ------------------------------------------------- 1. cases/：几条腿一致 + 对上期望值
 
 for (const f of list('cases', '.jnc')) {
   if (!want(f)) continue;
@@ -257,7 +308,7 @@ for (const f of list('cases', '.jnc')) {
   else no(`cases/${name}`, bad.join('\n'));
 }
 
-// ------------------------------------------------- 2. rt/：运行期错误，五条腿同一句话
+// ------------------------------------------------- 2. rt/：运行期错误，每条腿同一句话
 
 for (const f of list('rt', '.jnc')) {
   if (!want(f)) continue;
@@ -316,7 +367,22 @@ for (const f of mods) {
   ok(`mods/${name} [没有入口也降得下来，降出来的 .sx 跑得动]`);
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed  [${cache.report()}]\n`);
+/* 总耗时 + 最慢的几个例子 + 最贵的几条子进程命令。慢下来的时候先看这两张榜：
+   它们直接说出钱花在哪儿，不必再"为了看清楚"重跑一遍（ADR-0023 那条规矩）。
+   例子名掐到方括号之前 —— 后面那一串"几腿一致"每条都一样，没有信息量。 */
+const short = (s) => (s.includes(' [') ? s.slice(0, s.indexOf(' [')) : s);
+const slow = [...times].sort((a, b) => b.ms - a.ms).slice(0, 8).filter((x) => x.ms >= 200);
+process.stdout.write(`\n${pass} passed, ${fail} failed  [${cache.report()}]`
+  + `${legNote(LEGS) === '' ? '' : `  ${legNote(LEGS)}`}`
+  + `  总 ${((Date.now() - t0all) / 1000).toFixed(1)}s\n`);
+if (slow.length > 0) {
+  process.stdout.write(`  最慢的例子：${slow.map((x) => `${short(x.name)} ${secs(x.ms)}`).join('、')}\n`);
+}
+const hot = cache.slowest();
+if (hot !== '') process.stdout.write(`  最贵的子进程：${hot}\n`);
+const per = cache.byCmd();
+if (per !== '') process.stdout.write(`  按腿分的真跑耗时：${per}\n`);
+
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n`);
   process.exitCode = 1;

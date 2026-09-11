@@ -27,6 +27,7 @@ import { workDir } from '../work.js';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RunCache } from '../lib/incr.js';
+import { pickLegs, legNote } from '../lib/legs.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
@@ -56,6 +57,7 @@ const read = (p) => {
 let pass = 0;
 let fail = 0;
 const failures = [];
+const t0all = Date.now();
 const ok = (msg) => { pass++; process.stdout.write(`  ok   ${msg}\n`); };
 const no = (name, why) => { fail++; failures.push(`${name}\n${why}`); process.stdout.write(`  FAIL ${name}\n`); };
 const want = (f) => (!filters.length || filters.some((x) => f.includes(x)));
@@ -69,13 +71,26 @@ const want = (f) => (!filters.length || filters.some((x) => f.includes(x)));
  * 哪天方言加了新节点而 LLVM 那边没跟上，这里立刻红。
  * `run-jit` 不在这里 —— 它要 libLLVM，可能不在环境里，由 tests/jit 那条轴管。
  */
-const LEGS = [
+const ALL_LEGS = [
   { tag: 'run', args: (p) => ['run', p] },
   { tag: 'run-c', args: (p) => ['run-c', p] },
   { tag: 'interp', args: (p) => ['interp', p] },
   { tag: 'interp --mir', args: (p) => ['interp', p, '--mir'] },
   { tag: 'run-llvm', args: (p) => ['run-llvm', p] },
 ];
+
+/**
+ * 平时跑哪几条：开关在 tests/lib/legs.js（`OMNI_LEGS=all` 跑齐五条，提交前那一遍用它）。
+ *
+ * 这条轴留 `run` 与 `run-llvm`。这里没有"原生执行路径"可言 —— 核心方言是我们自己的汇聚层，
+ * 它的真实消费者就是那几个后端。所以留最快的那条当基准（`run`，也是 `omni run` 的默认路径）
+ * 加优先级最高的那个后端（`run-llvm`，这条轴那句"后端支持面覆盖整个汇聚层"就挂在它上面）。
+ * 中间那三条（run-c / interp / interp --mir）是提交前那一遍的活。
+ */
+const LEGS = pickLegs(ALL_LEGS, ['run', 'run-llvm']);
+
+/** 报告里那句"几方一致"要跟真跑了几条腿对上 —— 不跑齐就写它们的名字，别虚报 */
+const AGREE = LEGS.length === ALL_LEGS.length ? '五方一致' : LEGS.map((l) => l.tag).join(' == ');
 
 /** 一份 .sx + 一份期望值 -> 四方一致 + 对上期望值。返回失败明细（空数组 = 过） */
 function agree(sx, expected) {
@@ -131,7 +146,7 @@ for (const f of readdirSync(join(here, 'cases')).filter((x) => x.endsWith('.sx')
   if (!want(f)) continue;
   const name = basename(f, '.sx');
   const bad = agree(join(here, 'cases', f), read(join(here, 'cases', `${name}.expected`)));
-  if (bad.length === 0) ok(`core/${name} [五方一致 == ${name}.expected]`);
+  if (bad.length === 0) ok(`core/${name} [${AGREE} == ${name}.expected]`);
   else no(`core/${name}`, bad.join('\n'));
 }
 
@@ -150,7 +165,7 @@ for (const f of readdirSync(join(here, 'mini')).filter((x) => x.endsWith('.mini'
   const sx = join(dir, `${name}.sx`);
   writeFileSync(sx, g.out);
   const bad = agree(sx, read(join(here, 'mini', `${name}.expected`)));
-  if (bad.length === 0) ok(`mini/${name} [grammar -> 核心方言 -> 五方一致]`);
+  if (bad.length === 0) ok(`mini/${name} [grammar -> 核心方言 -> ${AGREE}]`);
   else no(`mini/${name}`, bad.join('\n'));
 }
 
@@ -212,12 +227,18 @@ for (const f of readdirSync(join(here, 'rt')).filter((x) => x.endsWith('.sx')).s
       bad.push(`    ${leg.tag} 的消息不对\n      want: ${JSON.stringify(exp.trim())}\n      got:  ${JSON.stringify(r.err.trim())}`);
     }
   }
-  if (bad.length === 0) ok(`rt/${name} [五条腿同一句：${exp.trim()}]`);
+  if (bad.length === 0) ok(`rt/${name} [${LEGS.length} 条腿同一句：${exp.trim()}]`);
   else no(`rt/${name}`, bad.join('\n'));
 }
 
 const rep = cache.report();
-process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
+const note = legNote(LEGS);
+process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}`
+  + `${note === '' ? '' : `  ${note}`}  总 ${((Date.now() - t0all) / 1000).toFixed(1)}s\n`);
+const hot = cache.slowest();
+if (hot !== '') process.stdout.write(`  最贵的子进程：${hot}\n`);
+const per = cache.byCmd();
+if (per !== '') process.stdout.write(`  按腿分的真跑耗时：${per}\n`);
 
 if (fail) {
   process.stdout.write(`\n${failures.join('\n\n')}\n\n(kept in ${dir})\n`);

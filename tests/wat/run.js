@@ -24,6 +24,7 @@ import { mixedRunner } from '../lib/incr.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { readSexpr } from '../../src/core/sexpr/read.js';
 import { printSexpr } from '../../src/core/sexpr/print.js';
+import { FULL_LEGS } from '../lib/legs.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '../../src/core/cli.js');
@@ -96,11 +97,15 @@ for (const file of pick('cases')) {
 
   const viaJs = run(process.execPath, [cli, 'run', path]);
   const viaC = run(process.execPath, [cli, 'run-c', path]);
-  const viaI = run(process.execPath, [cli, 'interp', path]);
-  // 第四个执行器：MIR 上的闭包编译解释器（ADR-0014 决策 7）。.wat 这一支特别值得比 ——
-  // wasm 的 block/loop/br 与 MIR 的区域标记是**同一套层数语义**，两边都对了才算真的同一套。
-  const viaM = run(process.execPath, [cli, 'interp', path, '--mir']);
+  /* 后两条腿平时不跑（tests/lib/legs.js 那条规矩，`OMNI_LEGS=all` 跑齐）：这条轴盯的是
+     .wat 那个前端，判据是 `.expected`，一条腿就问得清；`interp` 与 `interp --mir` 盯的是
+     "腿与腿分叉"。留着那句注释是因为 MIR 那一条在这条轴上确实特别值得比 —— 提交前那一遍会跑。
+     第四个执行器：MIR 上的闭包编译解释器（ADR-0014 决策 7）。.wat 这一支特别值得比 ——
+     wasm 的 block/loop/br 与 MIR 的区域标记是**同一套层数语义**，两边都对了才算真的同一套。 */
+  const viaI = FULL_LEGS ? run(process.execPath, [cli, 'interp', path]) : null;
+  const viaM = FULL_LEGS ? run(process.execPath, [cli, 'interp', path, '--mir']) : null;
   const check = (label, r) => {
+    if (r === null) return;
     if (r.code !== 0) bad.push(`    ${label} exit=${r.code}\n${r.err}`);
     else if (r.out !== want) bad.push(`    ${label} output differs\n    want: ${JSON.stringify(want)}\n    got:  ${JSON.stringify(r.out)}`);
   };
@@ -112,7 +117,9 @@ for (const file of pick('cases')) {
   if (bad.length === 0) {
     pass++;
     const n = want === '' ? 0 : want.replace(/\n$/, '').split('\n').length;
-    process.stdout.write(`  ok   ${name} [omni-js == omni-c == interp == interp-mir == expected] ${n} lines\n`);
+    const legs = FULL_LEGS ? 'omni-js == omni-c == interp == interp-mir == expected'
+      : 'omni-js == omni-c == expected';
+    process.stdout.write(`  ok   ${name} [${legs}] ${n} lines\n`);
     continue;
   }
   fail++;

@@ -2534,6 +2534,21 @@ class JncLower {
       // （01_Classes.jnc:22）。它要一格模块级的槽加"从方法里查得着"，是另一刀。
       if (sp.stat) { this.nope(m, '类的静态字段'); continue; }
       for (const d of this.flat(m.items[2])) {
+        /* 字段的默认值（尺子上第二大的真特性：179 对，其中 1 份是唯一拦路项）。
+         * 语法形状量清了：`int m_x = 5;` 是 `(init <dcl> <expr>)`（items[1] 是声明符、
+         * items[2] 是那个表达式）。
+         *
+         * jancy 那边**没有**单独的预构造：初值是挂在 `Field` 上的一串 token
+         * （jnc_ct_Field.h:21-42），由 `MemberBlock::initializeFields`
+         * （MemberBlock.cpp:141-182）在**构造函数里面**重放 —— 要么在合成出来的默认构造里
+         * （DerivableType.cpp:909-927），要么插在用户写的 `construct` 开头、基类构造之后
+         * （Parser.cpp:2997-3010）。所以它们是构造体里的普通代码，能引用 `this`、别的字段、
+         * 方法、全局量；有初值却没写构造的类型会被合成一格（DerivableType.cpp:465-472）。
+         *
+         * 这一层还不收，理由是**落法要一整刀**而不是一句改写：得把这几句 store 接到
+         * `T$construct` 的开头、没有构造时先合成一格 —— 那之后 `ctorCall`（`C1 a;`）、
+         * `newPtr`（`new C1`）、模块级变量的那格序幕都从 `this.ctors` 自动接上。
+         * 收下来却不发那几句 store 更坏 —— 那是个静默的错答案。 */
         if (isList(d) && head(d) === 'init') { this.nope(d, '字段的默认值'); continue; }
         const info = this.declarator(d, sp);
         if (info === null) continue;

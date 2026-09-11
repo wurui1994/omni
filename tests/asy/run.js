@@ -48,6 +48,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { workDir } from '../work.js';
 import { RunCache } from '../lib/incr.js';
+import { pickLegs } from '../lib/legs.js';
 
 import { ASY_NOPE } from '../../src/core/frontend-asy/types.js';
 
@@ -134,15 +135,15 @@ const ALL_LEGS = [
 ];
 
 /**
- * **默认只跑两条腿**（`OMNI_LEGS=all` 跑齐五条，提交前的那一遍与 tests/bootstrap 用它）。
- * 理由是量出来的：一次 CLI 调用里 node 自己的启动就 0.21s，五条腿 × 四十个用例
- * 是 74s，而其中 run-c / interp / interp --mir 三条在这条轴上**从来不是第一个报错的人**
+ * 平时跑哪几条：开关在 tests/lib/legs.js（`OMNI_LEGS=all` 跑齐五条，提交前的那一遍与
+ * tests/bootstrap 用它）。留哪几条是这门语言自己的事，这条轴留的理由是量出来的：
+ * 一次 CLI 调用里 node 自己的启动就 0.21s，五条腿 × 四十个用例是 74s，
+ * 而其中 run-c / interp / interp --mir 三条在这条轴上**从来不是第一个报错的人**
  * —— 它们盯的是"腿与腿分叉"，那是 tests/sexpr 与 tests/oir 的活。这条轴盯的是
- * asy 前端，所以默认留下 `run`（最快的那条，当基准）与 `run-llvm`（优先级最高的后端）。
- * 一致性因此不是"不查"，是"不在每次迭代里查"。
+ * asy 前端，判分的人是真 asy，所以留 `run`（最快的那条，当基准）与
+ * `run-llvm`（优先级最高的后端）。一致性因此不是"不查"，是"不在每次迭代里查"。
  */
-const LEGS = process.env.OMNI_LEGS === 'all' ? ALL_LEGS
-  : ALL_LEGS.filter((l) => l.tag === 'run' || l.tag === 'run-llvm');
+const LEGS = pickLegs(ALL_LEGS, ['run', 'run-llvm']);
 
 /** 计时：每一节印一行。慢下来要当场看得见，不然只会越来越慢。 */
 const t0 = Date.now();
