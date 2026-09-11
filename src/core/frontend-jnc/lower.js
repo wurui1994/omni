@@ -3800,7 +3800,12 @@ class JncLower {
       // 但不冲突（`uint8_t` 本来就是无符号），所以照收。
       const alias = INT_ALIASES.get(nm);
       if (alias !== undefined) base = mkInt(alias.w, alias.u || uns);
-      else if (nm === 'size_t') base = J_I64;           // jancy 的语料里到处是它
+      /* `size_t`（第九十一刀改对的）：jancy 那边它是 **`TypeKind_IntPtr_u`** ——
+       * `jnc_TypeKind_SizeT = jnc_TypeKind_IntPtr_u`（include/jnc_Type.h:136），
+       * 也就是"指针宽的**无符号**整数"。先前这儿写的是 J_I64（有符号），那是个真差别：
+       * `size_t i = -1; i > 0` 在 jancy 那边是真、按有符号算是假；`/` `%` `>>` 也各差一格。
+       * 这一层的指针是 8 字节，所以落成 64 位无符号。 */
+      else if (nm === 'size_t') base = mkInt(64, true);
       else if (nm === 'string_t') base = J_STR;
       // 命名类型从里往外找（第五十一刀）：`namespace a` 里写 `S` 先看 `a.S`、再看全局的。
       // 类要排在结构体前面（第五十二刀）：两者的字段表在同一张 `this.structs` 里，

@@ -45,5 +45,14 @@ int main() {
 	p.m_lo = -9;
 	p.m_ch = 90;
 	printf("%d %d\n", (int)p.m_lo, (int)p.m_ch);
+
+	/* `size_t` 是**无符号**的（第九十一刀改对的）：`jnc_TypeKind_SizeT =
+	   jnc_TypeKind_IntPtr_u`（include/jnc_Type.h:136）。这三句各钉一格差别：
+	   比较（-1 > 0 是真）、除法（0xFFFF…/3 不是 0）、右移（逻辑移，高位不填 1）。
+	   先前这一层把它当有符号 64 位，三句会分别答 0 / 0 / -1。 */
+	size_t n = -1;
+	printf("%d\n", n > 0 ? 1 : 0);
+	printf("%d\n", (int)(n / 3));
+	printf("%d\n", (int)(n >> 60));
 	return 0;
 }
