@@ -1,0 +1,74 @@
+// 第一百四十刀：相等算符 `operator ==` / `operator !=`。
+//
+// 语料里的原样在 std_Guid.jnc:80/84：`bool operator == (Guid const* op) thin const` ——
+// 一个形参、回 bool，而那个形参是**指向同一格结构体的指针**，不是那格值本身。
+//
+// 调用点在二元比较那一处。要放开的只有类型那一问：这一层结构体那一格里放的**就是地址**
+// （第十二刀），所以 `a == b` 里那格值的 code 拿去当指针传本来就是对的 —— 形参是指针、
+// 而它指的正是右边那格结构体时也算对得上。
+//
+// 顺序与第一百三十九刀同一条：这一问要排在**类那一支之前**。类引用上的 `==` 在第五十二刀那儿
+// 是"比是不是同一个对象"（peq），而写了算符的那一格上用户的意思是"问那个算符"。
+// C1 那一格就是摆着量这件事的：两个**不同的**对象、内容相同 —— 走算符该说相等，走 peq 会说
+// 不相等。排错了就是静默的错答案。
+//
+// 两条界：`==` 与 `!=` **各自登记、互不代替**（只写了 `==` 而源码写 `!=` 时不替它取反 ——
+// jancy 那边也是各挑各的重载，语料里两个都写了）；跟 `null` 比不走这条（那一问是"这一格在不在"，
+// 与内容相等不是一件事）。
+//
+// 尺子 `/tmp/c138.c`：C 里结构体之间没有 `==`，所以手写的是"编译器该替你挑的那次调用"。
+// 同一串数（1 0 / 0 1 / eq / ne）。
+
+struct Guid {
+	int m_a;
+	int m_b;
+
+	bool operator == (Guid const* op) {
+		return m_a == op.m_a && m_b == op.m_b;
+	}
+
+	bool operator != (Guid const* op) {
+		return m_a != op.m_a || m_b != op.m_b;
+	}
+}
+
+// 类那一侧：两个不同的对象、内容相同 —— 顺序排错了这一格会印 ne
+class C1 {
+	int m_n;
+
+	bool operator == (C1* op) {
+		return m_n == op.m_n;
+	}
+}
+
+int main() {
+	Guid x;
+	x.m_a = 1;
+	x.m_b = 2;
+
+	Guid y;
+	y.m_a = 1;
+	y.m_b = 2;
+	printf("%d %d\n", x == y, x != y);
+
+	y.m_b = 3;
+	printf("%d %d\n", x == y, x != y);
+
+	C1* p = new C1;
+	C1* q = new C1;
+	p.m_n = 9;
+	q.m_n = 9;                           // 两个对象，内容相同
+	if (p == q) {
+		printf("eq\n");
+	} else {
+		printf("ne\n");
+	}
+
+	q.m_n = 10;
+	if (p == q) {
+		printf("eq\n");
+	} else {
+		printf("ne\n");
+	}
+	return 0;
+}

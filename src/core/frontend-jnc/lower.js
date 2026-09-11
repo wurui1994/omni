@@ -544,6 +544,8 @@ const OP_NAME = new Map([
   ['operator *', 'mul'],
   ['operator ->', 'arrow'],
   ['operator bool', 'bool'],
+  ['operator ==', 'eq'],
+  ['operator !=', 'ne'],
 ]);
 
 /** 这个声明符是**属性的**取/存吗（第六十九刀）：`m_v.get()` 名字写在前面（语法上那是
@@ -1098,6 +1100,9 @@ class JncLower {
     /* 下标算符（第一百三十八刀）：owner -> { get: {name, sub, val}, set: {…} }。
        类 / 结构体体里**裸写**的 `get` / `set` 就是它（`c[i]` / `c[i] = v` 走这两格）。 */
     this.opIndex = new Map();
+    /* 相等算符（第一百四十刀）：`Owner$op$eq` / `$op$ne` -> { name, param }。
+       语料里的原样是 std_Guid.jnc:80/84 —— `bool operator == (Guid const* op) thin const`。 */
+    this.opCmp = new Map();
     this.sctors = new Map();
     this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
     // 方法名 -> 它那段闭包 thunk（第五十五刀）。`c.foo` 当值用时捕的是对象，一个方法一段。
@@ -1501,8 +1506,7 @@ class JncLower {
   }
 
   /** 下标算符那一格的账本（第一百三十八刀）：左边那格的类型上有没有它。 */
-  opIndexOf(t) {
-    if (t === null || t === undefined || !(isClass(t) || jncIsStruct(t))) return undefined;
+  opIndexOf(t) {    if (t === null || t === undefined || !(isClass(t) || jncIsStruct(t))) return undefined;
     return this.opIndex.get(t.name);
   }
 
@@ -1531,6 +1535,64 @@ class JncLower {
     const code = `(call ${op.name}${parts.map((p) => ` ${p}`).join('')})`;
     if (this.errFns.has(op.name)) return this.propagate(n, code, op.ret, shown(op.name));
     return { code, type: op.ret };
+  }
+
+  /**
+   * **相等算符**的签名（第一百四十刀）：`operator ==` / `operator !=`。
+   *
+   * 语料里的原样在 std_Guid.jnc:80/84 —— `bool operator == (Guid const* op) thin const`：
+   * 一个形参、回 bool，而那个形参是**指向同一格结构体的指针**（不是那格值本身）。
+   *
+   * 落法与前几族同一条（自由函数、`this` 当第一个形参），名字拼成 `Owner$op$eq` / `$op$ne`。
+   * 回的必须是 bool —— 这一族落的地方是二元比较那一处，回别的东西那儿接不上。
+   *
+   * `==` 与 `!=` **各自登记、互不代替**：只写了 `==` 而源码写 `!=` 时不替它取反
+   * （jancy 那边也是各挑各的重载；语料里 std_Guid 两个都写了）。
+   */
+  opCmpSig(n, info, ps) {
+    const suffix = OP_NAME.get(info.special);
+    const owner = info.name === ''
+      ? (this.structs.has(this.ns) ? this.ns : null)
+      : this.resolve(info.name, (k) => this.structs.has(k));
+    if (owner === null) {
+      return this.err(n, `'${info.special}' 只能是类或结构体的成员（写在体里）`);
+    }
+    if (ps.length !== 1) {
+      return this.nope(n, `'${info.special}' 收 ${ps.length} 个形参（这一层只收一个）`);
+    }
+    if (info.type !== J_BOOL) {
+      return this.err(n, `'${info.special}' 回 ${tyName(info.type)}，不是 bool`);
+    }
+    const full = `${owner}$op$${suffix}`;
+    if (this.fns.has(full)) {
+      return this.nope(n, `${shown(owner)} 的第二个 '${info.special}'（要按实参类型挑，见第八十刀）`);
+    }
+    info.name = full;
+    const self = this.classes.has(owner) ? tClass(owner, false) : { k: 'struct', name: owner };
+    ps.unshift({ name: 'this', type: self, formals: null, def: null });
+    this.methods.set(full, owner);
+    this.opCmp.set(full, { name: full, param: ps[1].type });
+    this.fns.set(full, sigOf(ps, info.type));
+    return { info, ps, isMain: false };
+  }
+
+  /**
+   * 二元比较那一处问一句"有没有重载"（第一百四十刀）。认不出来回 undefined，让原来那条路照旧。
+   *
+   * 右边那一格的类型对得上形参就成。语料里的形参是 `Guid const*` 而写出来的是
+   * `a == b`（两边都是 Guid 值）—— 这一层结构体那一格里放的**就是地址**（第十二刀），
+   * 所以那格值的 code 拿去当指针传是对的；要放开的只是类型那一问：形参是指针、
+   * 而它指的正是右边那格结构体时也算对得上。
+   */
+  opCmpCall(n, op, a, b) {
+    const t = op.param;
+    const ok = this.assignOk(b.type, t)
+      || (jncIsPtr(t) && jncIsStruct(b.type) && sameTy(t.target, b.type));
+    if (!ok) {
+      return this.err(n, `'${op.name.endsWith('$eq') ? '==' : '!='}' 右边是 ${tyName(b.type)}，`
+        + `而那个算符收 ${tyName(t)}`);
+    }
+    return { code: `(call ${op.name} ${a.code} ${b.code})`, type: J_BOOL };
   }
 
   /**
@@ -6880,6 +6942,10 @@ class JncLower {
       if (info.special === 'get' || info.special === 'set') return this.propSig(n, info, ps);
       // 赋值算符（第一百三十刀）：自己一处，落法与方法同一条
       if (info.special === 'operator :=') return this.opAssignSig(n, info, ps);
+      // 相等算符（第一百四十刀）：一个形参、回 bool，调用点在二元比较那一处
+      if (info.special === 'operator ==' || info.special === 'operator !=') {
+        return this.opCmpSig(n, info, ps);
+      }
       // 自增自减那四个（第一百三十一刀）：与赋值算符同一条路，只是不收形参
       if (isOpSpecial(info.special)) return this.opIncSig(n, info, ps);
       /* 构造的主人（第五十三刀是类；第一百二十九刀把**结构体**也算上）：先按类查，查不着再按
@@ -10760,6 +10826,16 @@ class JncLower {
       const tb = this.truthy(b, n.items[3]);
       if (ta === null || tb === null) return null;
       return { code: `(bin "${op}" ${ta.code} ${tb.code})`, type: J_BOOL };
+    }
+    /* 相等算符（第一百四十刀）：主人的类型上写了 `operator ==` / `!=` 就调它。要排在下面
+       **类那一支之前** —— 那一支上类引用的 `==` 是"比是不是同一个对象"（peq），而写了算符的
+       那一格上用户的意思是"问那个算符"（std_Guid 比的是四个字段）。与第一百三十九刀
+       `operator bool` 那处是同一条口径：排错了就是静默的错答案。
+       跟 `null` 比不走这条 —— 那一问在两边都是"这一格在不在"，与内容相等不是一件事。 */
+    if ((op === '==' || op === '!=') && !lNull && !rNull && this.opCmp.size > 0) {
+      const oc = (isClass(a.type) || jncIsStruct(a.type))
+        ? this.opCmp.get(`${a.type.name}$op$${op === '==' ? 'eq' : 'ne'}`) : undefined;
+      if (oc !== undefined) return this.opCmpCall(n, oc, a, b);
     }
     // 类引用的相等比较（第五十二刀）。jancy 的类指针**没有算术、没有大小比较**
     // （type_ptr_class.rst 开头那两句：不能对类指针做指针算术，有效性就是一次空检查），
