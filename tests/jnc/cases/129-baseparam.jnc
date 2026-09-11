@@ -1,0 +1,54 @@
+// 泛型的**参数当基类**（`struct Impl<B>: B` / `class Impl<B>: B`）—— ADR-0025 的"还剩的"那一栏
+// 里一直记着这一格没收，第一百三十七刀之后回头量，发现它**已经收了**：
+//
+//   - 基类那一格写的是参数，`tmplSubst` 把它换成实参那格类型说明符，剩下的与手写基类同一条路
+//     （结构体那一侧是第一百二十五刀的"纯前缀布局"，类那一侧是第五十二刀那条链）；
+//   - 基类里的**成员 typedef**（`Entry`）第一百三十七刀才查得着 —— 先前这一份会报
+//     "没有这个类型：'Entry'"。所以这一格是那一刀真正的收成，只是语料里没有一处只差它。
+//
+// 记账的规矩是"欠着的要写下来"，同一条规矩也管反面：**收了的要划掉**。所以这一份进来，
+// 顺手把 ADR-0025 那一栏里那句改对。
+//
+// 尺子 `/tmp/c135.c`：C 里没有泛型也没有继承，手写的是"替换与前缀布局该落成什么"。
+// 同一串数（5 6 / 7 8）。
+
+struct BaseS {
+	int m_v;
+
+	typedef int Entry;
+}
+
+struct ImplS<B>: B {
+	int m_n;
+
+	Entry val() {
+		return m_v;
+	}
+}
+
+class BaseC {
+	int m_v;
+
+	typedef int Entry;
+}
+
+class ImplC<B>: B {
+	int m_n;
+
+	Entry val() {
+		return m_v;
+	}
+}
+
+int main() {
+	ImplS<BaseS> a;
+	a.m_v = 5;
+	a.m_n = 6;
+	printf("%d %d\n", a.val(), a.m_n);
+
+	ImplC<BaseC>* b = new ImplC<BaseC>;
+	b.m_v = 7;
+	b.m_n = 8;
+	printf("%d %d\n", b.val(), b.m_n);
+	return 0;
+}
