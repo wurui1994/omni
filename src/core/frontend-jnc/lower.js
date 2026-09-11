@@ -7213,7 +7213,95 @@ class JncLower {
       if (f !== null) return { ty: f.type, lit: false };
       return null;
     }
+    /* 下面这五格是第一百四十四刀添的。守的仍旧是这一格原来那两条：**一个字都不发**
+       （不碰 expr / specs / err / nope，只查表），而且**只在问得准时才回**，别的照旧回 null。
+       挑这五种是量出来的 —— 语料里那一行拦着的实参全是它们：
+         `new ui.Icon(iconFileName)`（doc_Plugin.jnc:68）、`new Label(label)`（ui_Layout.jnc:107）
+         `text.m_p` / `text.m_length`（log_Writer.jnc:75）
+         `std.getLastError()` / `sys.getPreciseTimestamp()`（同上:101、105）
+         `StdRecordCode.SyncId`（同上:136）、`&syncId`（同上，第 2 个）。 */
+    if (h === 'field') {
+      const et = this.cheapEnumMem(n);
+      if (et !== null) return { ty: et, lit: false };
+      const ft = this.cheapField(n.items[1], n.items[2]);
+      return ft === null ? null : { ty: ft, lit: false };
+    }
+    if (h === 'ptr-field') {
+      const ft = this.cheapField(n.items[1], n.items[2]);
+      return ft === null ? null : { ty: ft, lit: false };
+    }
+    // `&x`：取地址不改"那一格是什么类型"这件事 —— 与 addrOf 的三个出口一样都是 `T*`。
+    if (h === 'addr') {
+      const b = this.cheapTy(n.items[1]);
+      return b === null || b.lit ? null : { ty: tPtr(b.ty), lit: false };
+    }
+    if (h === 'new') return this.cheapNew(n);
+    if (h === 'call') return this.cheapCall(n);
     return null;
+  }
+
+  /** `E.M` 里那格枚举类型 —— enumMember 的**纯查表**那一半（第一百四十四刀）。
+   *  差别只在"查不着就回 null"：那儿要报错，这儿一个字都不许发。 */
+  cheapEnumMem(n) {
+    const ob = n.items[1];
+    if (!isList(ob) || (head(ob) !== 'name' && head(ob) !== 'field')) return null;
+    const en0 = this.dotted(ob);
+    if (en0 === null || this.lookupRef(en0) !== null) return null;
+    const en = this.resolve(en0, (k) => this.enums.has(k));
+    if (en === null) return null;
+    const info = this.enums.get(en);
+    const mn = isAtom(n.items[2]) ? n.items[2].value : null;
+    if (mn === null || !info.members.has(mn)) return null;
+    return { k: 'enum', name: en, base: info.base, bits: info.bits === true };
+  }
+
+  /** `x.f` / `p->f` 里那格字段的类型（第一百四十四刀）：memberOf 的纯查表那一半。
+   *  属性与方法名一律回 null —— 那两种右边的名字**不是**字段，`autoget` 的属性还有一格同名的
+   *  底层字段，拿它的类型当答案就是接错人（读它其实是一次调用，类型是取值器的返回类型）。 */
+  cheapField(obNode, memNode) {
+    const nm = isAtom(memNode) ? memNode.value : null;
+    if (nm === null || this.propNames.has(nm) || this.methodNames.has(nm)) return null;
+    const b = this.cheapTy(obNode);
+    if (b === null || b.lit) return null;
+    const t = jncIsPtr(b.ty) ? b.ty.target : b.ty;
+    if (!jncIsStruct(t) && !isClass(t)) return null;
+    const fs = this.structs.get(t.name);
+    const f = fs === undefined ? undefined : fs.find((x) => x.name === nm);
+    // 位域与 bigendian 的字段在这张表里查不着（各走自己那条路），于是自然回 null。
+    return f === undefined || f.type === undefined ? null : f.type;
+  }
+
+  /** `new C(…)` 那一格的类型（第一百四十四刀）：**只**收"一个名字、没有指针后缀、没有修饰符"
+   *  这一种写法 —— 那时类型就写在那儿，一次 resolve 就问得准。别的（`new T*`、`new int[n]`、
+   *  带 `thin` 之类的修饰符）回 null：那些要走 specs，而 specs 会报诊断。 */
+  cheapNew(n) {
+    const tn = n.items[1];
+    if (!isList(tn) || head(tn) !== 'type-name') return null;
+    if (this.flat(tn.items[2]).length > 0) return null;         // 有指针后缀
+    const sp = tn.items[1];
+    if (!isList(sp) || head(sp) !== 'specs') return null;
+    if (this.flat(sp.items[2]).length > 0 || this.flat(sp.items[3]).length > 0) return null;
+    const nm = this.qname(sp.items[1]);
+    if (nm === null) return null;
+    const cn = this.resolve(nm, (k) => this.classes.has(k));
+    // 类那一支：`new C` 给的就是 `C*`，也就是这一层的类类型自己（第五十二刀，见 newPtr）。
+    if (cn !== null) return { ty: tClass(cn, false), lit: false };
+    const sn = this.resolve(nm, (k) => this.structs.has(k));
+    return sn === null ? null : { ty: tPtr({ k: 'struct', name: sn }), lit: false };
+  }
+
+  /** `f(…)` 那一格的类型（第一百四十四刀）：按名字查得着、而且**自己不是一族重载**时就是它的
+   *  返回类型。是重载的回 null —— 那要先挑一条，而挑它又要问实参的类型，绕回来了。 */
+  cheapCall(n) {
+    const cal = n.items[1];
+    if (!isList(cal) || (head(cal) !== 'name' && head(cal) !== 'field')) return null;
+    const nm0 = this.dotted(cal);
+    if (nm0 === null || this.lookupRef(nm0) !== null) return null;
+    const fn = this.resolve(nm0, (k) => this.fns.has(k));
+    if (fn === null || this.overloads.has(fn)) return null;
+    const s = this.fns.get(fn);
+    if (s === undefined || s.ret === undefined || s.ret === null || s.ret === J_VOID) return null;
+    return { ty: s.ret, lit: false };
   }
 
   /**

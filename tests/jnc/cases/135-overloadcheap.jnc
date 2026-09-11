@@ -1,0 +1,73 @@
+// 第一百四十四刀：同元重载按实参类型挑 —— "不降就问得出来"的那一格再添五种。
+//
+// 第八十刀划的界仍旧在（`expr` 是按 want 定向的、降的时候会发码，所以不能"先降一遍拿类型、
+// 再降第二遍"），这一刀动的只是**哪些实参不用降就问得准**。添的五种全是纯查表：
+//
+//   1. `new C(…)`    —— 类型就写在那儿（`new C` 给的是 `C*`，第五十二刀）
+//   2. `x.f` / `p->f` —— 字段表里查一次（属性与方法名不算：那两种右边的名字不是字段）
+//   3. `f(…)`        —— 自己不是一族重载时就是它的返回类型
+//   4. `&x`          —— 取地址不改"是什么类型"这件事
+//   5. `E.M`         —— 枚举成员，值与类型都在编译期
+//
+// 五种都是量出来的：语料里那一行拦着的实参就是它们（`new ui.Icon(iconFileName)`
+// doc_Plugin.jnc:68、`new Label(label)` ui_Layout.jnc:107、`text.m_p` log_Writer.jnc:75、
+// `std.getLastError()` 同上:101、`StdRecordCode.SyncId` 同上:136、`&syncId` 同上）。
+//
+// 挑中哪一条照 jancy 的 chooseOverload（jnc_ct_FunctionTypeOverload.cpp:44-91）：每个候选取
+// 各实参里最差的那一档，取最高分；平手就是 ambiguous，这一层那时说还不收（bad/overload-tie）。
+// 剩下的界见 bad/overload-argtype-expr.jnc。
+
+enum Code {
+	Sync = 7,
+	Retro = 9,
+}
+
+struct Blob {
+	int m_len;
+}
+
+class Base {
+	int m_id;
+
+	construct(int id) {
+		m_id = id;
+	}
+}
+
+class Derived: Base {
+	construct(int id) {
+		basetype.construct(id);
+	}
+}
+
+int one() {
+	return 1;
+}
+
+void q(int v) {
+	printf("int %d\n", v);
+}
+
+void q(Code c) {
+	printf("code %d\n", c);
+}
+
+void q(Blob* b) {
+	printf("blob %d\n", b.m_len);
+}
+
+void q(Base* b) {
+	printf("base %d\n", b.m_id);
+}
+
+int main() {
+	Blob blob;
+	blob.m_len = 3;
+
+	q(one());          // 3：一次调用，被调的不是重载 -> int
+	q(blob.m_len);     // 2：字段 -> int
+	q(Code.Sync);      // 5：枚举成员 -> Code（完全一样那一档）
+	q(&blob);          // 4：取地址 -> Blob*
+	q(new Derived(5)); // 1：new -> Derived*，只有 Base* 那一条收得下（上转那一档）
+	return 0;
+}
