@@ -1163,6 +1163,10 @@ class JncLower {
     this.structSuper = new Map();
     /** 已经合成过的实例名（按实参签名 memoise，与 jancy 的 `m_instanceMap` 同一个办法）。 */
     this.tmplInsts = new Set();
+    /* 实例名 -> 那个泛型**声明处**的那一层命名空间（第一百三十二刀）。实例名是
+       `模板名$实参键` 拼的，里头那个 `$` 不是一层命名空间 —— 查名往外退的时候要
+       整块跳过去，见 resolve。 */
+    this.instNs = new Map();
     /* 实参带 `*` 时给那一格指针类型合成的 typedef 名（第一百二十刀）。替换只在 type-spec
        那一层 —— 所以带 `*` 的实参先**起个名字**，再拿这个名字当一格普通类型名替进去。 */
     this.tmplPtrs = new Set();
@@ -1720,6 +1724,12 @@ class JncLower {
    * 从里往外找一个名字。jancy 的查名就是"从当前命名空间一层层往外退到全局"
    * （`NamespaceMgr::findItem` 那一族），所以 `namespace a` 里写 `S` 先看 `a.S`、
    * 再看全局的 `S`。`nm` 是**源码里写的**名字，可能带点（`a.S`）。
+   *
+   * 往外退那一步（第一百三十二刀）**不能只按 `$` 掐**：泛型的实例名是
+   * `Box$Node` 那样拼出来的（`模板名$实参键`，见 tinstOne），里头那个 `$` 不是一层
+   * 命名空间。照 `$` 退一层会退成 `Box`，于是在实例体里写 `Node` 找到的是
+   * `Box$Node` —— **实例它自己**。所以实例名要当**一个整体**，退的时候直接跳到那个
+   * 泛型声明处的那一层去（`instNs`）。
    */
   resolve(nm, has) {
     const k = nm.replace(/\./g, '$');
@@ -1728,6 +1738,8 @@ class JncLower {
       const full = p === '' ? k : `${p}$${k}`;
       if (has(full)) return full;
       if (p === '') break;
+      const j = this.instNs.get(p);
+      if (j !== undefined && j !== p) { p = j; continue; }
       const i = p.lastIndexOf('$');
       p = i < 0 ? '' : p.slice(0, i);
     }
@@ -3173,6 +3185,8 @@ class JncLower {
     const inst = `${full}$${keys.join('$')}`;
     if (this.tmplInsts.has(inst)) return inst;
     this.tmplInsts.add(inst);
+    // 这一格实例名往外退的时候直接跳回泛型声明处那一层（第一百三十二刀，见 resolve）
+    this.instNs.set(inst, tm.ns);
     // 参数名 -> 实参那格 type-spec
     const map = new Map();
     for (let i = 0; i < tm.params.length; i++) map.set(tm.params[i].name, specs[i]);
