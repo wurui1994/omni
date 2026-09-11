@@ -9836,6 +9836,13 @@ class JncLower {
     // bitflag 的 `&` 结果是那个枚举，直接就落在条件位置上。普通枚举也一样收 —— 它在
     // jancy 那边就是同一个 case。
     if (jncIsEnum(v.type)) return { code: `(bin "!=" ${v.code} (int 0))`, type: J_BOOL };
+    /* 字符串当条件用（第一百四十六刀）：jancy 那边是 `Cast_BoolFromString::llvmCast`
+       （jnc_ct_CastOp_Bool.cpp:96-111）—— 取字符串那格结构体的**第 3 个字段**再转 bool，
+       而那张表是 `m_p` / `!m_ptr_sz` / `m_length`（jnc_ct_TypeMgr.cpp:2031-2039），
+       也就是第 3 个是**长度**。所以 `if (s)` 问的是"长度不为零"，**不是**"m_p 是不是空"——
+       空串 `""` 在 jancy 那儿是**假**。方言的 `(slen E)` 也是按字节的长度，两边同一件事。
+       逼出它的是 `if (!key)`（ui_Dictionary.jnc:32）。 */
+    if (v.type === J_STR) return { code: `(bin "!=" (slen ${v.code}) (int 0))`, type: J_BOOL };
     return this.err(node, `${tyName(v.type)} 不能当条件用`);
   }
 
