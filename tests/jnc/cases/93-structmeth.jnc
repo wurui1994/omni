@@ -1,0 +1,63 @@
+// 第一百〇一刀：结构体里的方法。
+//
+// jancy 的 struct 也是一层命名空间、也能有方法（语料 94 对；`test/jnc/test43.jnc` 那一份的
+// 唯一拦路项就是它）。这一层落得下来是因为**结构体那一格里放的就是地址**（第十二刀）——
+// 所以 `this` 那一格直接用它，与类那条路（第五十二刀）的落法一模一样：一个自由函数、
+// `this` 当第一个形参，调用点一条指令都不用多发。
+//
+// 三处要对上：
+//   - `aggHoist` 现在也把 struct 体里的方法提到顶层（ns = 那个结构体的名字），于是"体内写"
+//     与"体外写 `int P.scaled(int k)`"落在同一格 `P$scaled` 上；
+//   - `fnSig0` 里那格 `this` 的类型是**结构体自己**（类是一条引用 tClass）；
+//   - 那格 `this` **不抄**（第十三刀的按值拷贝对它不适用）—— jancy 那边结构体方法的 this
+//     也是个指针，`c.bump(2)` 改得动 c。
+//
+// `construct` / `destruct` 在结构体里还不收（构造那一族是自己一刀）；裸写的 `get` / `set`
+// 是下标运算符那一族，照旧拦。
+//
+// 期望输出的出处：/tmp/c101.c（`cc -O0 -std=c99 -Wall`）—— C 那边就是"第一个参数是 P*"。
+
+struct P {
+	int m_x;
+	int m_y;
+
+	// 体写在结构体里
+	int sum() {
+		return m_x + m_y;
+	}
+
+	// 只写原型、体写在外面
+	int scaled(int k);
+
+	// 改得动这一个对象（this 不是拷贝）
+	void shift(int d) {
+		m_x += d;
+		m_y += d;
+	}
+}
+
+int P.scaled(int k) {
+	// 方法里叫方法：`this` 由这一层补（与裸写字段名同一条）
+	return sum() * k;
+}
+
+void viaPtr(P* p) {
+	p.shift(10);
+}
+
+int main() {
+	P p;
+	p.m_x = 3;
+	p.m_y = 4;
+	printf("%d %d\n", p.sum(), p.scaled(10));
+
+	p.shift(1);
+	printf("%d %d\n", p.m_x, p.m_y);
+
+	// `P*` 上叫方法与 `P` 上一样（jancy 那边 `p->foo()` 与 `p.foo()` 是同一件事）
+	P* q = &p;
+	printf("%d\n", q.sum());
+	viaPtr(q);
+	printf("%d %d\n", p.m_x, p.m_y);
+	return 0;
+}

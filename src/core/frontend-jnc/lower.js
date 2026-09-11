@@ -342,6 +342,14 @@ function isClassAgg(n) {
     && aggCls(isAtom(n.items[1]) ? n.items[1].value : null);
 }
 
+/** 体里那些方法要**提到顶层**的 agg 吗（第一百〇一刀把 struct 也算进来了）。
+ *  jancy 的 struct 也是一层命名空间、也能有方法（`type_struct.rst` 的 Methods 一节）。 */
+function isHoistAgg(n) {
+  if (!isList(n) || head(n) !== 'agg') return false;
+  const k = isAtom(n.items[1]) ? n.items[1].value : null;
+  return aggCls(k) || k === 'struct';
+}
+
 /**
  * 相邻字面量的拼接（第五十四刀）。jancy 的 `literal` 是 `literal_atom+`（语法那处的注释
  * 记着这条），也就是 C 的"相邻字符串字面量拼在一起"——而这件事在**编译期**做完：拼出来的
@@ -1816,7 +1824,7 @@ class JncLower {
       }
       out.push({ ns, it });
       // 类体里的方法与嵌套类型**提到顶层**（第五十二刀），见 aggHoist。
-      if (isList(it) && head(it) === 'type-decl' && isClassAgg(it.items[1])) {
+      if (isList(it) && head(it) === 'type-decl' && isHoistAgg(it.items[1])) {
         this.aggHoist(it.items[1], ns, out);
       }
     }
@@ -1846,17 +1854,20 @@ class JncLower {
       //（test42.jnc:27）与写在类外的 `int C.p.get() { … }`（test150.jnc:16）同理是一格函数，
       // 名字由 propSig 拼成 `C$p$get`。**名字得写在前面** —— 裸写的 `get` 是下标运算符
       //（见 accessorNamed）。剩下那些（`destruct`）不提，由 typeDecl 就地报。
+      /* 结构体那一侧（第一百〇一刀）只提**方法**：`construct` / `destruct` 与嵌套类型都由
+         typeDecl 就地报（那儿的话更准），提上来只会让同一件事报两遍。 */
+      const isCls = isClassAgg(agg);
       if (h === 'fn-def') {
         const sk = specialCore(m.items[2]);
-        if (sk === null || sk === 'construct' || sk === 'static construct'
-          || accessorNamed(m.items[2])) {
+        if (sk === null || accessorNamed(m.items[2])
+          || (isCls && (sk === 'construct' || sk === 'static construct'))) {
           out.push({ ns: inner, it: m });
         }
         continue;
       }
-      if (h === 'type-decl') {
+      if (h === 'type-decl' && isCls) {
         out.push({ ns: inner, it: m });
-        if (isClassAgg(m.items[1])) this.aggHoist(m.items[1], inner, out);
+        if (isHoistAgg(m.items[1])) this.aggHoist(m.items[1], inner, out);
       }
     }
   }
@@ -3219,7 +3230,20 @@ class JncLower {
       // `construct` / `static construct` 从第五十三刀起也在提上去的那一批里。剩下那些特殊
       // 成员没提，就地报。
       if (isList(m) && head(m) === 'fn-def') {
-        if (!cls) { this.nope(m, '结构体里的方法'); continue; }
+        /* 结构体里的方法（第一百〇一刀）：jancy 的 struct 也是一层命名空间、也能有方法。
+           这一层落得下来是因为**结构体那一格里放的就是地址**（第十二刀）—— 所以 `this` 就是
+           那一格值本身，与类那条路（第五十二刀）落法完全一样：一个自由函数，`this` 当第一个
+           形参。体已经由 aggHoist 提到顶层了，这儿跳过。 */
+        if (!cls) {
+          const sk0 = specialCore(m.items[2]);
+          /* `construct` / `destruct` 在结构体里还不收（构造那一族是自己一刀）。裸写的
+             `get` / `set` 是**下标运算符**那一族（见 accessorNamed）—— 名字写在前面的
+             `p.get()` 是属性的取值器，那一格照旧提上去。 */
+          if (sk0 !== null && !accessorNamed(m.items[2])) {
+            this.nope(m, `结构体里的 '${sk0}'`);
+          }
+          continue;
+        }
         /* 类体里**就带着体**的 reactor（第九十五刀）：`reactor m_r { … }`。语料里的惯用法是
            "类里声明、体写在类外"（49/49），可 test16.jnc 这种写法 jancy 也收 —— 那时这一格
            fn-def 既在类体里、又被 nsFlat 提到了顶层，先前只有顶层那一遍看见它，于是登记成了
@@ -3381,8 +3405,9 @@ class JncLower {
         }
         // 要在这儿记下来（第五十七刀）—— 体写在类外时那个词只出现在原型上。
         if (info.formals !== null) {
-          if (!cls) this.nope(d, '结构体里的方法');
-          else if (sp.virt !== null) this.methodProto(d, name, info, sp);
+          // 结构体里的方法原型（第一百〇一刀）：签名由体外那个定义给，这儿一个字都不用发。
+          if (!cls) continue;
+          if (sp.virt !== null) this.methodProto(d, name, info, sp);
           /* 原型上那几格默认值（第一百刀）：只**照着语法树记**，不走 formalList ——
              那一遍会发诊断，而这一格的形参表马上还要由体外那个定义再过一遍。 */
           if (cls) {
@@ -5116,6 +5141,20 @@ class JncLower {
       // 到这儿是同一个全名（`C$foo`）。落法是一个**自由函数**，`this` 当第一个形参。
       const cut = base.lastIndexOf('$');
       const owner = cut < 0 ? null : base.slice(0, cut);
+      /* 结构体的方法（第一百〇一刀）：落法与类的一模一样 —— 一个自由函数、`this` 当第一个
+         形参。差别只在 `this` 那一格的类型：类是一条引用（tClass），结构体那一格里放的
+         **本来就是地址**（第十二刀），所以直接用那个结构体类型。 */
+      if (owner !== null && !this.classes.has(owner) && this.structs.has(owner)) {
+        this.methods.set(info.name, owner);
+        this.methodNames.add(base.slice(cut + 1));
+        ps.unshift({ name: 'this', type: { k: 'struct', name: owner }, formals: null });
+        if (sp.virt !== null) {
+          this.nope(n, `结构体的方法 '${shown(base)}' 上写 '${sp.virt}'（虚派发要对象头那一格`
+            + '类型标签，结构体没有）');
+        }
+        this.fns.set(info.name, sigOf(ps, info.type));
+        return { info, ps, isMain: false };
+      }
       if (owner !== null && this.classes.has(owner)) {
         this.methods.set(info.name, owner);
         this.methodNames.add(base.slice(cut + 1));
@@ -5615,6 +5654,9 @@ class JncLower {
       // 先开一格自己的、把它抄进来，之后这个名字一律指那一格。改形参因此不动调用方 ——
       // 与上面"被取地址的标量形参提一份拷贝"是同一个道理，只是抄的东西大一点。
       // 数组形参走同一条路（第二十一刀）：jancy 那边它也是按值的一整块，不是 C 的 `T*`。
+      // 结构体的方法上那格 `this` **不抄**（第一百〇一刀）：它是"这一个对象"，不是一份拷贝
+      // —— jancy 那边结构体方法的 this 也是个指针（`p.foo()` 改得动 p）。
+      if (jncIsStruct(p.type) && p.name === 'this' && owner !== undefined) continue;
       if (jncIsStruct(p.type) || isArr(p.type)) {
         const v = `${p.name}$v`;
         const st = slotText(p.type);
@@ -9030,6 +9072,15 @@ class JncLower {
       if (bv === null) return null;
     }
     if (!isClass(bv.type)) {
+      /* 结构体的方法（第一百〇一刀）：结构体那一格里放的**就是地址**（第十二刀），所以
+         `this` 那一格直接用它，一条指令都不用发。`P*` 上叫方法也走这儿 —— jancy 那边
+         `p->foo()` 与 `p.foo()` 是同一件事。 */
+      const sn = jncIsStruct(bv.type) ? bv.type.name
+        : (bv.type.k === 'ptr' && jncIsStruct(bv.type.target) ? bv.type.target.name : null);
+      if (sn !== null) {
+        const sf = this.findMethod(sn, mn);
+        if (sf !== null) return { name: sf, self: bv.code };
+      }
       return this.err(n, `'${tyName(bv.type)}' 不是类，上面问不出方法 '${mn}'`);
     }
     const full = this.findMethod(bv.type.name, mn);
