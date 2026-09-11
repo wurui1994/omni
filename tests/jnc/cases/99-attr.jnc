@@ -1,0 +1,53 @@
+// 第一百〇八刀：属性 `[ … ]` —— 收下不看。
+//
+// 榜上 `顶层的 'attributed'` 25 份 / 66 处（第一百〇七刀之后那一行剩下的三种之一）。另外两处
+// 位置也拦着同一样东西：结构体 / 类体里落到 `…里除字段以外的成员`（还带着一串
+// `S 没有字段 'm_len'` 的级联），枚举成员上落到 `认不出的枚举成员`。
+//
+// 语料里 66 处全是元数据：`[ ungroup ]` 22、`[ userAction = "…" ]`、`[ displayName = "PDU" ]`、
+// `[ formatFunc = formatIpAddress ]`、`[ structType = typeof(Df1Read) ]`。
+//
+// 落法：语法上属性把一格声明裹起来（`(attributed 属性 声明)`，jnc.grammar:221 与 :354），
+// 剥掉那层壳就是原来那格声明 —— 四处走成员的地方各加一句 `unattr`。
+//
+// **为什么"收下不看"在这里不给错答案**：属性的值在 jancy 那边是给**反射**读的
+// （`decl.findAttributeValue("formatFunc")`，log_RepresentStruct.jnc:24/96）。这一层压根没有反射，
+// 那几个调用现在报的是"没有这个函数"。将来要落反射，**必须连属性的值一起落** —— 只补个空壳
+// 回 null 才是安静的错答案。这一条锁写在 lower.js 的 unattr 上面。
+//
+// 对照：同一行里 `pragma` 那 25 份**不能**这么收 —— 语料里它只有 `pragma(Alignment, 1)` 10 处与
+// `pragma(Alignment, 2)` 2 处，收下不看会把字段偏移算错，那是错答案。见 `bad/pragma.jnc`。
+//
+// 期望输出的出处：/tmp/c108.c（`cc -O0 -std=c99 -Wall`）。
+
+[ displayName = "Top" ]
+int g_n = 3;
+
+struct S {
+	[ displayName = "Length" ]
+	int m_len;
+
+	[ ungroup ]
+	int m_n;
+}
+
+enum E {
+	[ displayName = "A" ]
+	A = 1,
+	B,
+}
+
+// 属性裹着一格函数
+[ userAction = "Twice" ]
+int twice(int x) {
+	return x * 2;
+}
+
+int main() {
+	S s;
+	s.m_len = 4;
+	s.m_n = 5;
+	printf("%d %d %d %d %d\n", g_n, s.m_len, s.m_n, (int)E.A, (int)E.B);
+	printf("%d\n", twice(21));
+	return 0;
+}

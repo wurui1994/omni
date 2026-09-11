@@ -1,0 +1,21 @@
+// `pragma` **刻意仍旧拦着**（第一百〇八刀那一节的对照）。属性 `[ … ]` 那一格是纯元数据，
+// 收下不看不会算错；`pragma` 不是 —— 语料里它只有两种写法：
+//   pragma(Alignment, 1);   10 处
+//   pragma(Alignment, 2);    2 处
+// 它改的是**后面那些结构体的字段对齐**。收下不看 = 按默认对齐算偏移 = 字段的偏移与 jancy 那边
+// 不一样，读写就都错位 —— 那是安静的错答案，和第八十六刀里 `bigendian` 必须拦的理由一样。
+// 要收就得把对齐真传下去（方言的 structLayout 那一层），那是另一刀。
+pragma(Alignment, 1);
+
+struct S {
+	char m_c;
+	int m_n;
+}
+
+int main() {
+	S s;
+	s.m_c = 'a';
+	s.m_n = 5;
+	printf("%d\n", s.m_n);
+	return 0;
+}

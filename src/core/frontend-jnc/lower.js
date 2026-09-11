@@ -351,6 +351,19 @@ function isHoistAgg(n) {
 }
 
 /**
+ * 属性 `[ … ]` **收下不看**（第一百〇八刀）。语法上它把一格声明裹起来
+ * （`jnc.grammar:221` 的 `(attributed 属性 声明)`，枚举成员那一支在 `:354`），剥掉那层壳
+ * 就是原来那格声明。语料里 66 处、25 份文件，全是元数据：`[ ungroup ]`、
+ * `[ displayName = "PDU" ]`、`[ formatFunc = formatIpAddress ]`、`[ structType = typeof(X) ]`。
+ *
+ * **为什么"收下不看"在这里不会给错答案**：属性的值在 jancy 那边是给**反射**读的
+ * （`decl.findAttributeValue("formatFunc")`，log_RepresentStruct.jnc:24/96 那种）。这一层压根
+ * 没有反射 —— 那几个 `findAttributeValue` 现在报的是"没有这个函数"，将来要落反射，**必须连
+ * 属性的值一起落**，不能只补个空壳回 null（那才是安静的错答案）。这一条记在这儿当锁。
+ */
+const unattr = (n) => (isList(n) && head(n) === 'attributed' ? n.items[2] : n);
+
+/**
  * 相邻字面量的拼接（第五十四刀）。jancy 的 `literal` 是 `literal_atom+`（语法那处的注释
  * 记着这条），也就是 C 的"相邻字符串字面量拼在一起"——而这件事在**编译期**做完：拼出来的
  * 还是一格字面量（literals.rst:90 那句 "all literal kinds can be concatenated and combined.
@@ -1862,7 +1875,8 @@ class JncLower {
    * 登记。嵌套照原样接下去（`a` 里的 `b` 是 `a$b`）。
    */
   nsFlat(tree, ns, out) {
-    for (const it of this.flat(tree)) {
+    for (const it0 of this.flat(tree)) {
+      const it = unattr(it0);          // 属性收下不看（第一百〇八刀）
       if (isList(it) && (head(it) === 'import' || head(it) === 'import-as')) {
         this.impAdd(it);
         continue;
@@ -1896,7 +1910,8 @@ class JncLower {
     if (cn === null) return;                          // 名字认不出来，那一遍会报
     const k = cn.replace(/\./g, '$');
     const inner = ns === '' ? k : `${ns}$${k}`;
-    for (const m of this.flat(agg.items[4])) {
+    for (const m0 of this.flat(agg.items[4])) {
+      const m = unattr(m0);            // 属性收下不看（第一百〇八刀）
       if (!isList(m)) continue;
       const h = head(m);
       // 特殊成员里 `construct` 与 `static construct` **也提**（第五十三刀）：它们与普通方法
@@ -3246,7 +3261,8 @@ class JncLower {
       info.base = sp.type;
     }
     let next = info.bits ? 1n : 0n;
-    for (const m of this.flat(n.items[4])) {
+    for (const m0 of this.flat(n.items[4])) {
+      const m = unattr(m0);            // 属性收下不看（第一百〇八刀）
       if (!isList(m) || head(m) !== 'enum-item') { this.err(m, '认不出的枚举成员'); continue; }
       const mn = isAtom(m.items[1]) ? m.items[1].value : this.qname(m.items[1]);
       if (mn === null) { this.err(m, '认不出的枚举成员名字'); continue; }
@@ -3344,7 +3360,8 @@ class JncLower {
     // 而字段与方法原型写的是裸名字 `S`（test97.jnc:8）。结构体不动 —— 它不是一层命名空间。
     const saveNs = this.ns;
     if (cls) this.ns = name;
-    for (const m of this.flat(n.items[4])) {
+    for (const m0 of this.flat(n.items[4])) {
+      const m = unattr(m0);            // 属性收下不看（第一百〇八刀）
       if (isList(m) && head(m) === 'empty-stmt') continue;
       // 访问控制（第五十二刀）。jancy 只有 public 与 protected 两种，**默认 public**
       // （type_class.rst:23-27），两种写法（C++ 式的 `public:` 与 Java 式的前缀）都收。
