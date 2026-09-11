@@ -1,0 +1,18 @@
+// 第一百一十刀的界：**带名字**的 union 照旧不收。匿名的那一格（`cases/102-union.jnc`）落得下来
+// 是因为它的成员直接摊进外层结构体的字段表；带名字的那一格要的是"结构体也是一层命名空间"
+// （`H.U` 这个类型名要查得着），与 `结构体里的嵌套类型` 剩下那一份是同一格。
+struct H {
+	int m_code;
+
+	union U {
+		int m_a;
+		int m_b;
+	}
+}
+
+int main() {
+	H* h = new H;
+	h.m_code = 3;
+	printf("%d\n", h.m_code);
+	return 0;
+}
