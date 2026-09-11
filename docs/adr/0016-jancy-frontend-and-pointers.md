@@ -7022,6 +7022,44 @@ ioninja 那半边语料的地基，一通就是几十份文件跟着往前走一
 之后，`stdt_Array` / `List` / `Map` / `RbTree` / `BinTree` / `BoxList` / `Iterator` /
 `Operator` 这八份文件在**一起编**的口径下已经全通了。
 
+## 第一百二十七刀：跟在点后面的 `basetype` —— `std` 那一批的最后一条
+
+写在方法体里的 `basetype.m(…)` 第五十六刀就收了。语料里还有另一种写法 —— 跟在一格**值**后面：
+
+```
+Bucket.Entry* bucketEntry = p.m_bucket.basetype.remove(p.m_bucketIt);   （stdt_HashTable.jnc:155）
+```
+
+用处是"绕过派生类的遮挡、调基类那一个"（`Bucket` 与它的基类都有 `remove`）。语法上先前不收
+（`unexpected "basetype"; expected …, ID`）—— `member` 那条规则里没有它。补三条产生式
+（`basetype` / `basetype1` / `basetype2`），表从 368 条规则 / 663 状态到 371 / 666，
+**零条新冲突**（glr 20/0）。
+
+落法一句话：与写在方法体里那一种是**同一件事**，只是 `this` 换成左边那个值 —— 所以做法是把
+`baseTarget` 的"从谁的基类里找"抽成一个参数（默认还是 `this` 那个类），调用点那一支多认一种
+形状。一条继承链共用一格方言结构体（第五十六刀），"换一面"发**零条指令**，静态绑定照旧。
+
+账：pairs 7459 → 7458（−1），lowered / clean 没动 —— 逐份口径下它本来就只挡着一份文件。
+**要看的是另一张榜**：`--group src/jnc_ext/jnc_std/jnc` 从"1 条"变成 **0 条诊断** ——
+`std` 那 19 份文件在"一起编"的口径下语义上全通了。
+
+### 可这一趟量出一个**崩**（下一刀的题目）
+
+`--group` 那一格现在退出码还是 1，而诊断是 0 条 —— 因为它**崩了**：
+
+```
+RangeError: Maximum call stack size exceeded
+  at JncLower.copyVal (lower.js:1820) / copyAgg (lower.js:1844)  —— 两个来回互相叫
+```
+
+`copyVal` / `copyAgg` 是"结构体按值拷一份"那一对（第十二刀），它们顺着字段类型递归，
+而**没有环的闸门**。泛型落地之后语料里出现了让它绕回自己的形状（`stdt_RbTree.jnc:51` 那句
+`struct RbTreeNode<K, V>: BinTreeNodeBase<RbTreeNode, K, V, RbTreeColor>` 里，类型实参写的是
+泛型**自己的名字**，一个实参都没带）。
+
+**崩是最坏的一种答案** —— 比"还不收"坏得多：它不说话、还带不出位置。下一刀先给这一对加闸门、
+把它变成一句说得清的话，再看那个形状本身该怎么收。
+
 ## 后果与代价
 
 

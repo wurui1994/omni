@@ -10292,16 +10292,19 @@ class JncLower {
    * （语法树里 `(basetype 1)`），`basetype2` 起指第二格往后的那些基类。
    *
    * 回的是方言里那个函数名 —— 静态绑定，`basetype.foo()` 说的就是"调基类那一个"。
+   *
+   * `cls` 是"从谁的基类里找"。写在方法体里时它是 `this` 那个类（默认）；跟在点后面的那一格
+   * （`p.m_bucket.basetype.remove(…)`，第一百二十七刀）传的是**左边那个值**的类。
    */
-  baseTarget(n, bt, mn) {
+  baseTarget(n, bt, mn, cls = this.selfClass) {
     const idx = isAtom(bt.items[1]) ? Number(bt.items[1].value) : 1;
-    if (this.selfClass === null) return this.err(n, "'basetype' 只能写在方法体里");
-    const dirs = this.dirBases(this.selfClass);
+    if (cls === null) return this.err(n, "'basetype' 只能写在方法体里");
+    const dirs = this.dirBases(cls);
     if (dirs.length === 0) {
-      return this.err(n, `${shown(this.selfClass)} 没有基类，'basetype' 指不着谁`);
+      return this.err(n, `${shown(cls)} 没有基类，'basetype' 指不着谁`);
     }
     if (idx < 1 || idx > dirs.length) {
-      return this.err(n, `${shown(this.selfClass)} 只有 ${dirs.length} 格基类，`
+      return this.err(n, `${shown(cls)} 只有 ${dirs.length} 格基类，`
         + `'basetype${idx}' 指不着谁`);
     }
     const base = dirs[idx - 1];
@@ -10360,6 +10363,29 @@ class JncLower {
       if (b === null) return null;
       nm = b;
       self = '(var $this)';
+      statBind = true;
+    }
+    /* `x.basetype.m(…)`（第一百二十七刀）：跟在**点后面**的那一格 basetype —— 拿左边那个对象的
+       基类那一面调。语料里 `p.m_bucket.basetype.remove(…)`（stdt_HashTable.jnc:155）就是它，
+       用处是"绕过派生类的遮挡，调基类那一个"。与写在方法体里的 `basetype.m(…)` 是同一件事，
+       只是 `this` 换成了左边那个值：一条继承链共用**一格**方言结构体（第五十六刀），所以
+       "换一面"发的是**零条指令**，静态绑定这一条也照旧。 */
+    if (nm === null && mh === 'field' && isList(callee.items[1])
+      && head(callee.items[1]) === 'field' && isAtom(callee.items[1].items[2])
+      && callee.items[1].items[2].value.startsWith('basetype')) {
+      const w = callee.items[1].items[2].value;
+      const ov = this.expr(callee.items[1].items[1]);
+      if (ov === null) return null;
+      if (!isClass(ov.type)) {
+        return this.nope(n, `'${w}' 的左边不是一格类（这儿是 ${tyName(ov.type)}）`);
+      }
+      const sp2 = callee.span;
+      const at = (v) => ({ kind: 'atom', value: v, span: sp2 });
+      const bt = { kind: 'list', span: sp2, items: [at('basetype'), at(w === 'basetype' ? '1' : w.slice(8))] };
+      const b = this.baseTarget(n, bt, mn, ov.type.name);
+      if (b === null) return null;
+      nm = b;
+      self = ov.code;
       statBind = true;
     }
     if (nm === null && mn !== null && this.methodNames.has(mn)) {

@@ -641,7 +641,13 @@
     (-> ("get") $1)
     (-> ("set") $1)
     (-> ("construct") $1)
-    (-> ("destruct") $1))
+    (-> ("destruct") $1)
+    ;; `p.m_bucket.basetype.remove(…)`（第一百二十七刀，stdt_HashTable.jnc:155）：
+    ;; 一格对象的**基类那一面**。`basetype` 当**主表达式**（`basetype.construct(…)`）第
+    ;; 五十六刀就收了，这几条补的是"跟在点后面"那一格。
+    (-> ("basetype") $1)
+    (-> ("basetype1") $1)
+    (-> ("basetype2") $1))
 
   (rule expr
     (-> (expr LOGOR expr) (binary "||" $1 $3))

@@ -1,0 +1,53 @@
+// 第一百二十七刀：跟在**点后面**的 `basetype`（`x.basetype.m(…)`）。
+//
+// 写在方法体里的 `basetype.m(…)` 第五十六刀就收了（那一格 `basetype` 是主表达式，`this` 隐含）。
+// 语料里还有另一种写法 —— 跟在一格**值**后面：
+//
+//   Bucket.Entry* bucketEntry = p.m_bucket.basetype.remove(p.m_bucketIt);   （stdt_HashTable.jnc:155）
+//
+// 用处是"绕过派生类的遮挡、调基类那一个"：`Bucket` 派生自一格链表，两边都有 `remove`，
+// 这一句要的是基类那一个。语法上先前不收（`unexpected "basetype"; expected …, ID`）——
+// `member` 那条规则里没有它；补三条产生式（`basetype` / `basetype1` / `basetype2`）就通了。
+//
+// 落法一句话：与写在方法体里那一种是**同一件事**，只是 `this` 换成左边那个值。一条继承链在
+// 方言里共用**一格**结构体（第五十六刀），所以"换一面"发的是**零条指令**；静态绑定这一条也
+// 照旧（`basetype.m()` 说的就是"调基类那一个"，不查分派表）。
+//
+// 这一格是 `std` 那一批在 `--group` 口径下**最后一条**拦路项（见 ADR-0016 里那一节）。
+//
+// 尺子 `/tmp/c125.c`：C 那边用两个函数名把"基类那一个"与"派生那一个"分开摆 —— 遮挡这件事
+// 在 C 里本来就是靠名字分的，那正是这一刀要钉的语义。同一串数（7 / 100 7 / 14 107）。
+
+class B {
+	int m_v;
+
+	int val() {
+		return m_v;
+	}
+
+	int twice() {
+		return m_v * 2;
+	}
+}
+
+class D: B {
+	int val() {                          // 遮住基类那一个
+		return 100;
+	}
+
+	int both() {
+		// 体内那一种（第五十六刀）与跟在值后面那一种（这一刀）落在同一个函数上
+		return basetype.val() + this.basetype.val();
+	}
+}
+
+int main() {
+	D* d = new D;
+	d.m_v = 7;
+	printf("%d\n", d.basetype.val());            // 基类那一个：7
+
+	printf("%d %d\n", d.val(), d.basetype.val());   // 派生的 100、基类的 7
+
+	printf("%d %d\n", d.basetype.twice(), d.both() / 2 + 100);
+	return 0;
+}
