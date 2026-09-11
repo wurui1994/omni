@@ -6659,6 +6659,15 @@ class JncLower {
     if (isList(callee) && head(callee) === 'name' && callee.items[1].value === 'printf') {
       return this.printf(n, args, ind);
     }
+    /* `print(s)`（第九十八刀）：jancy 那边它是 `jnc_std` 那格宿主库里的一个函数
+       （jnc_std_StdLib.cpp:891 的 `JNC_MAP_FUNCTION("print", jnc::std::print)`），
+       语义是"把这一格字符串**原样**写出去、不添换行、也**不当格式串解释**"。方言里现成的
+       就是 `(write …)`，printf 那条路上 `$"…"` 走的也是它。
+       只在这个名字**没有别的定义**时才接 —— 语料里有人自己写 `print`（那时按自己那个算）。 */
+    if (isList(callee) && head(callee) === 'name' && callee.items[1].value === 'print'
+      && this.lookupRef('print') === null && this.resolve('print', (k) => this.fns.has(k)) === null) {
+      return this.printCall(n, args, ind);
+    }
     /* `s.m_uiReactor.start()` / `g_r.start()`（第八十五刀）：一格 reactor 上能叫的只有
        start / stop / restart 三个（语料里数过：59 / 2 / 2，别的一个都没有）。 */
     const rc = this.reactorCall(n, callee, args, pad);
@@ -6726,6 +6735,37 @@ class JncLower {
    * 收的转换是 `%d` / `%i` / `%f` / `%s` / `%c` / `%x` / `%X` / `%o` / `%%`，宽度与精度
    * 收十进制常量也收 `*` / `.*`（第二十七刀）。
    */
+  /**
+   * `print(s)`（第九十八刀）：把一格字符串**原样**写出去。
+   *
+   * jancy 那边它是 `jnc_std` 宿主库里的一个函数（jnc_std_StdLib.cpp:891），签名
+   * `void print(string_t text)` —— 不添换行、也**不**把内容当格式串再解释一遍。方言里现成的
+   * 就是 `(write …)`（printf 那条路上 `$"…"` 走的也是它），所以这一格不用长出任何新东西。
+   *
+   * 与 printf 的差别正是"不再解释一遍"：`print("100%")` 印出来就是 `100%`。
+   */
+  printCall(n, args, ind) {
+    const pad = ' '.repeat(ind);
+    if (args.length !== 1) {
+      this.err(n, `print 要 1 个实参（一格字符串），这里给了 ${args.length} 个`);
+      return null;
+    }
+    // 格式化字面量走 printf 那条现成的路：它自己把值排好，结果就是一格字符串。
+    const fl = fmtNode(args[0]);
+    if (fl !== null) {
+      const v = this.fmtLit(args[0], fl.tok, fl.args === null ? [] : this.flat(fl.args));
+      if (v === null) return null;
+      return [`${pad}(write ${v.code})`];
+    }
+    const v = this.expr(args[0], J_STR);
+    if (v === null) return null;
+    if (v.type !== J_STR && !(v.type !== undefined && v.type.k === 'string')) {
+      this.err(args[0], `print 的实参要是一格字符串，这里是 ${tyName(v.type)}`);
+      return null;
+    }
+    return [`${pad}(write ${v.code})`];
+  }
+
   printf(n, args, ind) {
     const pad = ' '.repeat(ind);
     if (args.length === 0) { this.err(n, 'printf 至少要一个格式串'); return null; }

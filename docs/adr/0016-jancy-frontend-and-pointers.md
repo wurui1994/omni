@@ -5617,6 +5617,44 @@ for (; p < end; p++, shift -= 8) result |= *(uchar_t*)p << shift;
 串，然后在某个类型检查上撞出一句看着无关的话（"初值的类型是 string"）。这种"安静的错答案"
 与第九十一刀（`size_t` 是无符号的）同一类，尺子量不出来，只有 case 里那几行能钉住。
 
+## 第九十八刀：`print(s)` —— 原样写出去的那一格
+
+榜上 `没有这个函数` 那 5 份 sole 逐份看下来：`rand`（1 份）、`jnc.collectGarbage`（1 份，GC）、
+以及 **3 份 `print`**（`test95.jnc` 与两份 `jnc_sample_0{4,5}_pass_c{,pp}`）。语料里 `print`
+用了 **36 处**。
+
+它在 jancy 那边不是关键字，是 `jnc_std` 那格宿主库里的一个普通函数：
+
+```c
+JNC_MAP_FUNCTION("print",     jnc::std::print)      // jnc_std_StdLib.cpp:891
+```
+
+签名 `void print(string_t text)`，语义是"把这一格字符串**原样**写出去" —— 不添换行、也**不**把
+内容当格式串再解释一遍。方言里现成的就是 `(write …)`（printf 那条路上 `$"…"` 走的也是它），
+所以这一格**没长出任何新东西**：`printCall` 只做三件事 —— 实参个数要是 1、格式化字面量走
+`fmtLit` 那条现成的路、别的按一格字符串降，然后发一句 `(write …)`。
+
+**它不是关键字这件事落在了那一问的位置上**：`print` 那一支排在"这个名字有没有别的定义"
+之后（`lookupRef` 与 `this.fns` 都问一遍），所以源码里自己写了 `print` 的按自己那个算 ——
+`cases/90-print-own.jnc` 反过来钉这一条。
+
+**证据**：`cases/89-print.jnc` 钉四件事：连着两句拼成一行、**裸 `%` 不再被解释一遍**
+（`print("100% sure")`，这是与 printf 最要紧的差别）、实参是一格 `string_t` 变量、
+以及格式化字面量。尺子是 `/tmp/c89.c`（C 那边就是 `fputs`）与 `/tmp/c90.c`。
+`node tests/jnc/run.js` = 187 passed, 0 failed；`link.js` 2/0。
+
+**量出来的（三个数字全动，逐个说清）**：
+
+- `真降得下来 74 → 75（+1）`：`test/jnc/test95.jnc` —— 它先前唯一那一句就是 `print`，
+  现在一条错都没有；
+- `没有还不收 169 → 167（−2）` 与 `对数 8076 → 8078（+2）`：这两个数是**同一件事** ——
+  `jnc_sample_04_pass_c` 与 `jnc_sample_05_pass_cpp` 走过 `print` 之后撞上了下一格
+  `格式化字面量里的 char*`（jancy 走 `appendFmtLiteral_p` 按 NUL 读一段内存，这一层的 `%s`
+  只认 `string`）。它们于是从"只有普通错"变成"有一格还不收"。这一格记着；
+- `没有这个函数` 290 → 285（sole 5 → 2）：剩下那两份是 `rand`（C 的 `::rand`，
+  jnc_std_StdLib.cpp:879 —— 这一层没有随机数，而且拿它做 case 也钉不住输出）与
+  `jnc.collectGarbage`（GC 那一族，disposable 那条账的同一格）。
+
 ## 后果与代价
 
 

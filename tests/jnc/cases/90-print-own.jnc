@@ -1,0 +1,21 @@
+// 第九十八刀的另一半：自己写了 `print` 的按**自己那个**算。
+//
+// `print` 在 jancy 那边是 `jnc_std` 宿主库里的一个普通函数（jnc_std_StdLib.cpp:891），
+// 不是关键字 —— 所以源码里自己定义一个同名的，那就该调自己那个。这一层接 `print` 的那一问
+// 因此排在"这个名字有没有别的定义"之后。
+//
+// 期望输出的出处：/tmp/c90.c（`cc -O0 -std=c99 -Wall`）。
+
+int g_n;
+
+void print(string_t s) {
+	g_n++;
+}
+
+int main() {
+	print("x");
+	print("y");
+	print("z");
+	printf("%d\n", g_n);
+	return 0;
+}

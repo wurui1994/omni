@@ -1,0 +1,30 @@
+// 第九十八刀：`print(s)` —— 把一格字符串**原样**写出去。
+//
+// jancy 那边它是 `jnc_std` 那格宿主库里的一个函数（jnc_std_StdLib.cpp:891 的
+// `JNC_MAP_FUNCTION("print", jnc::std::print)`），签名 `void print(string_t text)`：
+// 不添换行、也**不**把内容当格式串再解释一遍。语料里 36 处（test/jnc/test132.jnc 的
+// `print("[ ")` / `print(attr.m_name)`、test95.jnc、两份 jnc_sample_0{4,5}_pass_c{,pp}）。
+//
+// 方言里现成的就是 `(write …)`（printf 那条路上 `$"…"` 走的也是它），所以这一格没长出任何
+// 新东西。与 printf 的差别正是"不再解释一遍"：`print("100%")` 印出来就是 `100%`。
+//
+// 只在这个名字**没有别的定义**时才接 —— 自己写了 `print` 的按自己那个算
+// （`bad/print-own.jnc` 那一份反过来钉这条）。
+//
+// 期望输出的出处：/tmp/c89.c（`cc -O0 -std=c99 -Wall`）—— C 那边就是 fputs。
+
+int main() {
+	print("hello ");
+	print("world\n");
+
+	// 裸 `%` 不再被解释一遍 —— 这是与 printf 最要紧的那一处差别
+	print("100% sure\n");
+
+	string_t s = "from a var\n";
+	print(s);
+
+	// 格式化字面量自己把值排好，结果就是一格字符串（第六十四刀）
+	int n = 7;
+	print($"n = $n\n");
+	return 0;
+}
