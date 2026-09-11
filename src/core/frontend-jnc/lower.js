@@ -6667,6 +6667,21 @@ class JncLower {
     // `C$construct$static` —— 与方法同一条路（体内写的 ns 已经是那个类，体外写的
     // `C.construct()` 名字里本来就带着 `C.`），所以两种放法到这儿又是同一格。
     if (info.special !== null) {
+      /* 体外写的方法名**叫 `get` / `set`**（第一百三十六刀）：`int C0.get() { … }`。
+         语法上它与属性的取值器一模一样（`(qualified-special (name C0) (accessor get))`），
+         所以先前一律当属性办 —— 左边那个 `C0` 拿去 `this.props` 里查，查不着就报
+         "没有这个属性：'C0'"。那句话指着别处：`C0` 是个**类名**，写错的不是它。
+         判据一句：左边那个名字解得出一格属性吗？解不出、而解得出一格类 / 结构体，
+         这就是一格普通方法 —— 名字接回去（`C0.get`），special 清掉，走下面那条常路。
+         （语料里的原样是 `Value MapImpl<T>.get(Key key) const`，stdt_Map.jnc:135。） */
+      if ((info.special === 'get' || info.special === 'set')
+        && this.resolve(info.name, (k) => this.props.has(k)) === null
+        && this.resolve(info.name, (k) => this.classes.has(k) || this.structs.has(k)) !== null) {
+        info.name = `${info.name}.${info.special}`;
+        info.special = null;
+      }
+    }
+    if (info.special !== null) {
       if (info.special === 'get' || info.special === 'set') return this.propSig(n, info, ps);
       // 赋值算符（第一百三十刀）：自己一处，落法与方法同一条
       if (info.special === 'operator :=') return this.opAssignSig(n, info, ps);

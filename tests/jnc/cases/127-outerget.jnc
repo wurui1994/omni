@@ -1,0 +1,69 @@
+// 第一百三十六刀：体外写的方法名**叫 `get` / `set`**。
+//
+// 语法上它与属性的取值器一模一样 —— 都是"限定名 + 特殊名 + 一对括号"
+// （`(qualified-special (name C0) (accessor get))`）。所以先前一律当属性办：左边那个 `C0`
+// 拿去属性表里查，查不着就报"没有这个属性：'C0'"。那句话指着别处 —— `C0` 是个**类名**，
+// 写错的不是它。
+//
+// 判据一句：左边那个名字解得出一格属性吗？解不出、而解得出一格类 / 结构体，这就是一格普通
+// 方法；名字接回去（`C0.get`）、special 清掉，走普通方法那条常路。
+//
+// 这一格与第六十九刀那条注是同一族：那儿说的是"类体里**裸写**的 `int get(int i)` 是下标运算符、
+// 名字写在前面的 `p.get()` 才是属性的取值器"。这一刀补的是第三种：名字写在前面、可前面那个
+// 名字是**类**不是属性。三种形状现在各走各的路。
+//
+// 语料里的原样是 `Value MapImpl<T>.get(Key key) const`（stdt_Map.jnc:135）—— 它先前被
+// "没人实例化 MapImpl" 掩着，第一百三十五刀把泛型那条路打通之后才露出来。
+//
+// 尺子 `/tmp/c133.c`：C 里 `get` / `set` 就是普通名字，手写的正是"这两条该落成什么"。
+// 同一串数（4 / 9 / 69 70）。
+
+class C0 {
+	int m_v;
+
+	// 体里只写原型，体外补上 —— 名字恰好叫 get / set
+	int get();
+	void set(int v);
+}
+
+int C0.get() {
+	return m_v;
+}
+
+void C0.set(int v) {
+	m_v = v * 3;
+}
+
+// 判据要分得开：这一格上**两种都有** —— 一格叫 p 的属性，加一格叫 get 的方法
+class C1 {
+	int m_n;
+	int property p;
+
+	int get();
+}
+
+int C1.p.get() {
+	return m_n + 1;
+}
+
+void C1.p.set(int x) {
+	m_n = x;
+}
+
+int C1.get() {
+	return m_n;
+}
+
+int main() {
+	C0* c = new C0;
+	c.m_v = 4;
+	printf("%d\n", c.get());
+
+	c.set(3);
+	printf("%d\n", c.get());
+
+	C1* d = new C1;
+	d.p = 69;                            // 走属性的存值器
+	printf("%d %d\n", d.get(), d.p);     // 方法与属性各走各的
+	return 0;
+}
