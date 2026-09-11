@@ -5814,6 +5814,28 @@ jancy 的默认值挂在 `FunctionArg` 上（`hasInitializer`），而"类里写
 于是 typeDecl 就地那一句与提上去之后 fnSig0 那一句都发（`只收 struct 与 class` +15、
 `只能是类的成员` +6）。改成"结构体那一侧只提方法"之后那两笔归零 —— 对数因此又少了 21。
 
+## 第一百〇二刀：结构体里的 alias —— 上一刀的直接推论
+
+第一百〇一刀把"结构体里的方法"收下之后，榜上露出来 `结构体里的 alias` 6 对
+（`io_Socket.jnc` / `io_Ethernet.jnc` / `io_Arp.jnc` 那几份都是 `alias toString = getString;`
+这个形状）。第八十七刀那一格当时只在类里办，理由是那时结构体上根本没有方法可指 —— 现在有了。
+
+改的是三行：`aliasDecl` 里 `this` 那一格的类型从写死的 `tClass(cls, false)` 换成一格
+`selfTy(owner)`（类是一条引用、结构体那一格里放的本来就是地址），加上把类体那一遍里
+`if (!cls) nope('结构体里的 alias')` 撤掉。类型别名那一支一个字都不用改 —— 它本来就只往
+typedef 那张表里写。
+
+**证据**：`cases/83-alias.jnc` 里加了一格 `struct Box`（`alias tripled = val;` 与
+`alias K = Num;`）与两行输出，尺子是 `/tmp/c102.c`（一个转手的函数 + 一个 typedef）。
+`node tests/jnc/run.js` = 189 passed, 0 failed；`link.js` 2/0。
+
+**量出来的**：对数 7852 → **7846（−6）**，正是那 6 对；`真降得下来` 75 与 `没有还不收` 167
+不动 —— 那 6 份文件后面压着的是 `variant_t` 与宿主面。
+
+顺手记一条**语法上的**边界（不是这一刀新拦的）：`alias Num = int;` 这种"目标是内建类型
+关键字"的写法解析不了 —— alias 的目标那一格语法上要是个**名字**。语料里没有这种写法
+（都是 `alias State = iox.SshChannel.State;` 这种指着一个名字的），所以记在这儿就够。
+
 ## 后果与代价
 
 

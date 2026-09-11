@@ -54,6 +54,22 @@ class File {
 	}
 }
 
+/* 结构体里的 alias（第一百〇二刀）：方法既然收了（第一百〇一刀），指着方法的别名跟着就成立
+   —— `this` 那一格由 selfTy 挑（类是一条引用，结构体那一格里放的本来就是地址）。
+   类型别名那一支与类里一模一样。这两行的尺子是 /tmp/c102.c。 */
+typedef int Num;
+
+struct Box {
+	int m_n;
+
+	int val() {
+		return m_n * 3;
+	}
+
+	alias tripled = val;
+	alias K = Num;
+}
+
 int main() {
 	Hue h = Hue.Green;
 	printf("%d %d\n", (int)h, dbl(21));
@@ -61,5 +77,11 @@ int main() {
 	File* f = new File;
 	printf("%d %d\n", f.tint(), f.m_fd);
 	printf("%d %d\n", f.dispose(), f.m_fd);
+
+	Box b;
+	b.m_n = 5;
+	printf("%d %d\n", b.val(), b.tripled());
+	Box.K k = 7;
+	printf("%d\n", k);
 	return 0;
 }

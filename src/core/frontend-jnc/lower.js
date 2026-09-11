@@ -2190,6 +2190,12 @@ class JncLower {
    * 分两趟：类型那一支当场就办得了（类型名那一遍在前面），而**函数/方法**那一支要等签名
    * 那一遍过完才知道目标的签名 —— 那些先记在 aliasPend 上，由 emitAliases 收尾。
    */
+  /** 方法上那格 `this` 的类型（第一百〇一刀 / 第一百〇二刀）：类是一条引用，结构体那一格里
+   *  放的**本来就是地址**（第十二刀），所以直接用它自己。 */
+  selfTy(o) {
+    return this.classes.has(o) ? tClass(o, false) : { k: 'struct', name: o };
+  }
+
   aliasDecl(d, cls, late = false) {
     if (!isList(d) || head(d) !== 'init') {
       this.nope(d, 'alias 那一句只收 `alias 名字 = 目标;`');
@@ -2221,14 +2227,14 @@ class JncLower {
       const sig = this.fns.get(m);
       if (this.fns.has(full)) { this.err(d, `'${shown(full)}' 声明了两次`); return; }
       const ps = cls === null ? sig.params : sig.params.slice(1);
-      const decl = (cls === null ? [] : [`($this ${slotText(tClass(cls, false))})`])
+      const decl = (cls === null ? [] : [`($this ${slotText(this.selfTy(cls))})`])
         .concat(ps.map((t, i) => `($a${i} ${slotText(t)})`)).join(' ');
       const as = ps.map((t, i) => ` (var $a${i})`).join('');
       const call = `(call ${m}${cls === null ? '' : ' (var $this)'}${as})`;
       this.decls.push(`  (fn ${full} (${decl}) ${slotText(sig.ret)}\n`
         + `    ${sig.ret === J_VOID ? `(expr ${call})` : `(ret ${call})`})`);
       this.fns.set(full, {
-        params: cls === null ? [...ps] : [tClass(cls, false), ...ps], ret: sig.ret,
+        params: cls === null ? [...ps] : [this.selfTy(cls), ...ps], ret: sig.ret,
       });
       // `obj.名字()` 那一处先按名字便宜地筛一次（methodNames，第五十五刀）—— 别名也要进那张表。
       if (cls !== null) { this.methods.set(full, cls); this.methodNames.add(name); }
@@ -3320,11 +3326,11 @@ class JncLower {
       // （01_Classes.jnc:22）。它要一格模块级的槽加"从方法里查得着"，是另一刀。
       if (sp.stat) { this.nope(m, '类的静态字段'); continue; }
       for (const d0 of this.flat(m.items[2])) {
-        /* 类里的 alias（第八十七刀）：`alias dispose = close;` / `alias State = …;`。
+        /* 类与结构体里的 alias（第八十七刀；结构体那一格是第一百〇二刀 —— 方法既然收了，
+           指着方法的别名跟着就成立，`this` 那一格由 selfTy 挑）。
            排在最前 —— 它那一条也长成 `(init …)`，落到下面就会被当成"字段的默认值"。
            类型那一支当场办（类型名那一遍在前面），函数那一支记下来等签名（见 aliasDecl）。 */
         if (sp.als === true) {
-          if (!cls) { this.nope(d0, '结构体里的 alias'); continue; }
           this.aliasDecl(d0, name);
           continue;
         }
