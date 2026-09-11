@@ -137,6 +137,35 @@ static omni_str js_num_str(double v) {
   if (isinf(v)) return v > 0 ? omni_str_new("Infinity", 8) : omni_str_new("-Infinity", 9);
   if (v == 0.0) return omni_str_new("0", 1);
 
+  /* 整数的快路。**量出来的**：native 那一趟 GLR 建表（12.2s，node 只要 2.4s）里三分之一
+     的时间落在 `__dtoa` / `__vfprintf` / `strtod` / `localeconv_l` 上 —— 全是下面那个
+     "最短往返"循环：每印一个数要 2~17 次 snprintf 加同样多次 strtod，而建表时印的几乎
+     全是**小整数**（状态号、规则号、点的位置 —— `${a},${b}` 那种键）。
+     `/usr/bin/sample` 的榜首就是这几个：__dtoa 662、__vfprintf 649、to_s16 308。
+
+     为什么这条快路给出的字符与下面那一支**逐字节相同**：
+       - |v| < 2^53 的整数，那一段里相邻两个 double 的间距 <= 1，所以更短的十进制串会落到
+         另一个数上 —— 它自己的数字串就是"最短往返"的那一串；
+       - JS 对这种数印的正是那串数字（ECMA-262 Number::toString 里 `k <= n && n <= 21`
+         那一支，也就是下面第一个分支），没有小数点、没有指数。
+     所以这是一条**纯粹的加速**，不是另一套排版。-0 到不了这儿（上面那句 `v == 0.0`
+     先接了，印 "0"，与 JS 同）。 */
+  if (v == floor(v) && v > -9007199254740992.0 && v < 9007199254740992.0) {
+    char tmp[24];
+    int64_t iv = (int64_t)v;
+    bool ineg = iv < 0;
+    uint64_t u = ineg ? (uint64_t)(-(iv + 1)) + 1u : (uint64_t)iv;
+    int t = 0;
+    do { tmp[t++] = (char)('0' + (int)(u % 10u)); u /= 10u; } while (u != 0u);
+    int64_t len = (int64_t)t + (ineg ? 1 : 0);
+    char *out = omni_alloc_bytes(len + 1);
+    char *o = out;
+    if (ineg) *o++ = '-';
+    while (t > 0) *o++ = tmp[--t];
+    *o = '\0';
+    return omni_str_new(out, len);
+  }
+
   bool neg = v < 0;
   double a = neg ? -v : v;
 
