@@ -6062,44 +6062,33 @@ struct V { int m_tag; int64_t m_n; string_t m_s; }
 
 **判断：2 是正路**，而且它不是"为了 variant 特开的口子"，是 ADR-0024 那条已经定下来的模板的
 下一格应用。所以 variant_t 这一刀先压住，前置换成"string 能落进内存"。这一条按上面那条纪律
-另开一格账去量（要动的是 MIR 与四个后端，不是这一层），量完再回来落 variant。
+另开一格账去量（要动的是 MIR 与四个后端，不是这一层）。
 
-## 第一百〇五刀：默认值那条界往外挪半格 —— 在**声明那一头**折得出常量的也收
+**量完之后这一节自己要改两处（这就是"落刀前先翻一眼自己写过的账"那条纪律在自己身上生效）**：
 
-上一节的方法先用在自己身上：`这个形状的默认值` 84 份 / 87 处拆开数，只有三种源头，
-而其中 80 多份是同一行经 `-I` 重读出来的：
+- 上面说"string 是 ADR-0024 那条模板的下一格应用"—— **量下来不是**。`arr` 那条路走得通的
+  前提是它在 C 与 LLVM 两条原生腿上**本来就是一个字的指针**（`omni.h:324-327` 的
+  `typedef struct omni_arr_i64_s *`、`backend-llvm/emit.js:58` 的 `[T_ARR,'ptr']`），所以
+  `sizeOf` 从 0 改成 8 之后那两条腿一个字都没改（ADR-0024:99-106）。string **不满足**这个
+  前提：它是**两个字、16 字节的按值聚合**（`src/runtime/omni.h:33-34` 的
+  `omni_str{const char* p; int64_t len;}`、`backend-llvm/emit.js:49` 的 `[T_STR,'[2 x i64]']`）。
+  所以它落的是**第十六刀 fat 指针那一格**（"多字的值"），不是句柄那一格 —— 也就是
+  `lower.js:4496` 那句诊断自己写着的"与 `&p` 同一格"。那句话当初就量对了。
+- 另一件更要紧的：**string 当"值结构体的字段"今天就是收的** ——
+  `src/core/sexpr/lower.js:811-817` 的字段白名单里 `STRING` 在列，
+  `tests/sexpr/cases/06-structs.sx:6` 那条 `(struct Tag (name string) (n int) (ok bool))`
+  是已经在跑的用例，`09-arrfields.sx:10` 的 `(struct Bag (xs (arr int)) (tag string))` 也在。
+  卡住的**只有内存那条路**：`sizeOf(string)` 是 0 -> `structLayout` 判 null -> `(ptr S)` 不收。
+  而 jnc 这一层的类与结构体局部量一律走 `(pnew (ptr V) …)`，所以它每一次都要那条路 ——
+  上面那两个探针报的就是这个，跟"字段能不能是 string"根本是两码事。
 
-- `void addSpacing(int size = Def_Spacing);`（`test/ioninja/api/ui_ToolBar.jnc:45`）——
-  `Def_Spacing` 是 `opaque class ToolBar` 里那格**无名枚举**的成员（第九十六刀漏到类那一层）。
-  调它的插件在别的命名空间里，**按调用点查名一辈子查不着**；
-- `char sep = ','`（`test/ioninja/common/formatInteger.jnc:12`）—— 第九十七刀之后 `','`
-  已经是一格编译期整数了，只是老那条界的白名单里没写它；
-- `uint64_t timestamp = sys.getTimestamp()`（`ui_StdSessionInfoSet.jnc:70`）—— 一次宿主调用。
-
-**落法（三处，都很小）**：老那条界 `defShapeOk` **一个字不动** —— 过得了它的照旧原样搬到调用点。
-过不了的再试一次 `constInt`，而且是在**声明那一头**的作用域里试：`defNs` = 那个函数全名去掉
-最后一段（`ui$ToolBar$addSpacing` -> `ui$ToolBar`），`resolve` 从那儿往外退，正是 jancy
-`ParseContext.cpp:32-38` 那条规矩（表达式那一档只保留调用方的 Scope，命名空间换成声明处的）。
-折得动就把那一格换成**一格字面量节点**（负数照 jancy 一样把减号放在字面量之外）。
-
-这一步顺带把第七十七刀那条老隐患从**源头**去掉了：以前怕的是"默认值里的名字在调用点解，
-撞上调用方的局部量就静静取错"，现在搬过去的是**一个数**，压根没有名字要解。
-
-`constInt` 是现成的，认的正是这几种真常量：字面量、字符字面量（第九十七刀）、枚举成员、
-无名枚举漏出来的那些（第九十六刀），以及它们的一元 / 二元运算。折不动的照旧说"还不收"。
-
-**证据**：`cases/96-defconst.jnc` 七行输出对着 `/tmp/c105.c` —— 语料那个形状（跨命名空间调
-`addSpacing()`）、折出来的常量参与运算、折出来是负数、字符字面量的默认值、`'a' - 'A'`、
-以及空槽 `t.three(1, , 3)`（第八十八刀那条路也走同一处）。界还在：`bad/argdefault-shape`
-里 `int b = seed()` 仍旧拒，只是那句话跟着改了。
-`node tests/jnc/run.js` = 193 passed, 0 failed；`link.js` 2/0。
-
-**量出来的**：对数 7783 → **7702（−81）**，而且**逐组比下来只动了这一格**：
-`这个形状的默认值` 84 → **3**，别处一条没涨、也没有新的拦路项顶上来。剩下那 3 份全是
-函数调用当默认值（`sys.getTimestamp()` 两处、`test14.jnc:24` 的 `bar()`）——
-那是界内该拒的。`真降得下来` 75 与 `没有还不收` 167 不动：那 84 份后面每一份都还压着宿主面。
+于是 #38 的形状清楚了：`sizeOf(string) = 16 / alignOf = 8`，C / LLVM 两条腿的 `PLOAD`/`PSTORE`
+本来就是按类型泛型发的（`backend-c/emit.js:1715-1718`、`backend-llvm/emit.js:1768-1775`），
+真要动的是 **JS 那一族**（arena 是一块 `ArrayBuffer`，JS 字符串塞不进去）—— 那 16 字节里
+放什么由那一族自己定，先例是 fat 指针（JS 一族在 24 字节里写三个 arena 偏移）。
 
 ## 后果与代价
+
 
 
 
