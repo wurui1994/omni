@@ -1,0 +1,77 @@
+// 第一百〇七刀：`extension T: Base { … }` —— 给一格**已有的类型**添方法。
+//
+// 榜上两条一族：`顶层的 'using-extension'` 40 份、`顶层的 'extension'` 6 份（sole 1）。
+// 语法早就有（jnc.grammar:208 与 :211），拦的是 lower.js 那句 `顶层的 '…'`。语料：
+//   extension ComboBoxHistory: ComboBox {
+//       bool addEditTextToHistory();
+//       void addToHistory(string_t text, size_t limit = 10);
+//       …
+//   }
+// （test/ioninja/common/ui_History.jnc:16 起，体里全是没带体的原型、实现在宿主那边）
+//   using extension ui.ComboBoxHistory;        （40 份插件都写这一句，SshChannelSession.jnc:18）
+// 带体的形状在 test/jnc/test42.jnc:20 与 test102.jnc:24 —— 这一份钉的就是那个形状。
+//
+// 落法与第五十二刀那条一模一样：**体里的方法就是"体外写的那个目标类型的成员"**。摊成
+// "命名空间 = 目标类型"的顶层条目，名字于是拼成 `C1$bar`，`this` 由 fnSig0 按 owner 挑 ——
+// 签名那一遍与函数体那一遍一个字都不用改。这一遍排在"类型名坐下"之后（要查得着目标类型）、
+// 体与签名之前（摊出来的条目底下每一遍都要看见）。
+//
+// **偏差记在这儿**：`using extension` 这一层**收下不看** —— extension 的方法一律直接长在目标
+// 类型上，不管有没有写那一句。jancy 那边不写就查不着。这是放宽（能编的更多），不是把答案算错；
+// 代价是"同名 extension 撞车"看不见。语料里 46 份文件一共就一格 extension 被引用，撞不上。
+//
+// 期望输出的出处：/tmp/c107.c（`cc -O0 -std=c99 -Wall`）。
+
+class C1 {
+	int m_x;
+
+	construct() {
+		m_x = 5;
+	}
+
+	int val() {
+		return m_x;
+	}
+}
+
+extension C1Ext: C1 {
+	int bar() {
+		return m_x * 2;              // 裸写目标类型的字段
+	}
+
+	int add(int k) {
+		return m_x + k;
+	}
+
+	int twiceVal() {
+		return val() * 2;            // 调目标类型自己的方法
+	}
+}
+
+using extension C1Ext;               // 收下不看
+
+namespace ui {
+
+class Combo {
+	int m_n;
+}
+
+} // namespace ui
+
+// 目标类型写成限定名（这一格在别的命名空间里）
+extension ComboPlus: ui.Combo {
+	int plus(int k) {
+		return m_n + k;
+	}
+}
+
+int main() {
+	C1* c = new C1;
+	printf("%d %d %d\n", c.m_x, c.bar(), c.add(3));
+	printf("%d\n", c.twiceVal());
+
+	ui.Combo* b = new ui.Combo;
+	b.m_n = 7;
+	printf("%d\n", b.plus(4));       // 没写 using extension 也长得上（见上面那笔偏差）
+	return 0;
+}

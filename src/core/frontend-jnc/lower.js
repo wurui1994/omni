@@ -1949,11 +1949,15 @@ class JncLower {
     // 完整声明式的属性改写成简单声明式加两个函数（第七十五刀）—— 排在最前面：底下每一遍
     // 看的都是改写之后的名单，属性那一整套一个字都不用动。
     items = this.expandFullProps(items);
-    // 结构体的名字先坐下（第十七刀）：`Node* m_next` 要在自己的体里查得着 Node。
+    // 类型的名字先坐下（第十七刀）：`Node* m_next` 要在自己的体里查得着 Node。
     for (const e of items) {
       this.ns = e.ns;
       if (isList(e.it) && head(e.it) === 'type-decl') this.typeName(e.it.items[1]);
     }
+    /* `extension T: Base { … }`（第一百〇七刀）排在这儿：它要**查得着目标类型**，所以必须在
+       名字坐下之后；而它摊出来的那些条目底下每一遍都要看见，所以又必须在体、签名之前。 */
+    items = this.expandExtensions(items);
+
     // typedef 排在"结构体的名字坐下"之后、"结构体的体解出来"之前（第三十八刀）：这样别名可以
     // 引结构体的名字，结构体的字段也可以用别名。
     for (const e of items) {
@@ -2400,6 +2404,51 @@ class JncLower {
    * "implicitly makes property autoget"）、以及存值器的**重载**（`set(int)` 与 `set(double)`
    * 两个，要重载决议）。
    */
+  /**
+   * `extension T: Base { … }` 与 `using extension T;`（第一百〇七刀）。
+   *
+   * jancy 那边 extension 给一格**已有的类型**添成员（`extension ComboBoxHistory: ComboBox
+   * { … }`，ui_History.jnc:16），要写 `using extension ui.ComboBoxHistory;` 才把那些名字引进
+   * 当前作用域（语料里 40 份插件都写着这一句，SshChannelSession.jnc:18）。
+   *
+   * 落法与第五十二刀那条一模一样：**体里的方法就是"体外写的那个目标类型的成员"**。所以这儿
+   * 只把它们摊成"命名空间 = 目标类型"的顶层条目 —— 名字于是拼成 `ui$ComboBox$addToHistory`，
+   * `this` 那一格由 fnSig0 按 owner 挑，签名那一遍与函数体那一遍一个字都不用改。
+   *
+   * **记一笔偏差**：`using extension` 这一层**收下不看** —— extension 的方法一律直接长在目标
+   * 类型上，不管有没有写那一句。jancy 那边不写就查不着。这是**放宽**（能编的更多），不是把
+   * 答案算错；代价是"同名 extension 撞车"这一层看不见。语料里 46 份文件一共就一格 extension
+   * 被引用，撞不上。
+   *
+   * 目标类型要查得着：所以这一遍排在 typeName 之后（run 里那处注释）。查不着、或者体里有方法
+   * 以外的东西，当场说清。
+   */
+  expandExtensions(items) {
+    const out = [];
+    for (const e of items) {
+      if (!isList(e.it)) { out.push(e); continue; }
+      const h = head(e.it);
+      if (h === 'using-extension') continue;               // 收下不看，见上面那段
+      if (h !== 'extension') { out.push(e); continue; }
+      this.ns = e.ns;
+      const bs = this.flat(e.it.items[2]).map((b) => this.qname(b)).filter((x) => x !== null);
+      if (bs.length !== 1) {
+        this.nope(e.it, 'extension 后面那个目标类型（要正好一个）');
+        continue;
+      }
+      const tgt = this.resolve(bs[0], (k) => this.classes.has(k) || this.structs.has(k));
+      if (tgt === null) {
+        this.err(e.it, `没有这个类型：'${bs[0]}'`);
+        continue;
+      }
+      for (const m of this.flat(e.it.items[3])) {
+        if (isList(m) && head(m) === 'fn-def') { out.push({ ns: tgt, it: m }); continue; }
+        this.nope(m, 'extension 体里除带体的方法以外的成员');
+      }
+    }
+    return out;
+  }
+
   expandFullProps(items) {
     const out = [];
     for (const e of items) {
