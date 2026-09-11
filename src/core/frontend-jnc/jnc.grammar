@@ -42,7 +42,7 @@
 ;;   - `dylib`、reactor 体里的绑定语法只到形状，语义留给后续阶段
 (grammar jnc
   (tokens
-    ID INTEGER FP LITERAL FMT_LITERAL CAPTURE
+    ID INTEGER FP LITERAL CHAR FMT_LITERAL CAPTURE
     INC DEC PTR IMPLY SHL SHR LOGAND LOGOR EQ NE LE GE
     REFASSIGN ADDASSIGN SUBASSIGN MULASSIGN DIVASSIGN MODASSIGN
     SHLASSIGN SHRASSIGN ANDASSIGN XORASSIGN ORASSIGN ATASSIGN
@@ -115,7 +115,10 @@
     (token CAPTURE "$" (+ digit))
     (token ID (or alpha "_") (* (or alnum "_")))
     (string LITERAL "\"")
-    (string LITERAL "'")
+    ;; 单引号那一格是**整数**，不是串（第九十七刀）：jancy 的词法把它做成 TokenKind_Integer，
+    ;; 头一个字节最重、最多 8 字节（Lexer.cpp:186-197 的 `result |= *p << shift`）。
+    ;; 所以它得是自己一格 token —— 落成什么数由后面那一遍算。
+    (string CHAR "'")
     ;; 词法期就融成一个 token 的多词关键字（Lexer.rl:263..301）。放在 keyword 里没用 ——
     ;; 那是"一个 ID 改判"，这几条是"两个词并成一个"，所以走 punct，靠最长匹配吃掉。
     (punct "bitflag enum" "bitflag enum")
@@ -706,6 +709,8 @@
     (-> ("basetype2") (basetype 2))
     (-> (INTEGER) $1)
     (-> (FP) $1)
+    ;; `'a'` / `'\xa1\xb2\xc3\xd4'` —— 单引号那一格是个整数（第九十七刀）。
+    (-> (CHAR) (char $1))
     (-> (literal) $1)
     ;; `$0` / `$1` —— 正则 switch 里的捕获组（70_RegexSwitch.jnc:39）
     (-> (CAPTURE) (capture $1))

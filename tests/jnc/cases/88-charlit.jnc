@@ -1,0 +1,42 @@
+// 第九十七刀：`'a'` 是一个**整数**，不是一格串。
+//
+// 语料 125 处、32 份文件（`hexEncoding.jnc` 的 `' '` `'\t'` `'.'`、`escapeEncoding.jnc`
+// 的一整张转义表、`io_PcapFile.jnc:14` 的 `'\xa1\xb2\xc3\xd4'`、`log_RecordFile.jnc`
+// 的 `':gol'`）。先前这一层的词法把单引号那一格也做成了 LITERAL（跟双引号同一种），
+// 于是 `int a = 'a';` 报"初值的类型是 string，声明的是 int" —— 一句安静的错答案。
+//
+// jancy 的词法把它做成 `TokenKind_Integer`：头一个字节**最重**、最多 8 个字节，多出来的截掉
+// （jnc_ct_Lexer.cpp:186-197）：
+//
+//   uint64_t result = 0; uint_t shift = 8 * (length - 1);
+//   for (; p < end; p++, shift -= 8) result |= *(uchar_t*)p << shift;
+//
+// 所以 `'a'` 是 97、`'ab'` 是 0x6162 = 24930、`'\xa1\xb2\xc3\xd4'` 是 0xa1b2c3d4 ——
+// 那一格装不下 32 位，按"装不下就 long"的老规矩（intLit）它是 long，赋进 32 位的枚举成员时
+// 回卷成 −1582119980。
+//
+// 期望输出的出处：/tmp/c88.c（`cc -O0 -std=c99 -Wall`）—— C 的多字符字面量也是这个字节序
+// （头一个最重），所以两边逐字节一样。
+
+enum {
+	Sig = '\xa1\xb2\xc3\xd4',
+}
+
+// 编译期算得动：数组长度里用得上。
+int g_alpha['z' - 'a' + 1];
+
+int main() {
+	printf("%d %d %d\n", 'a', '\t', '\0' + 1);
+	printf("%d\n", 'ab');
+	printf("%d\n", Sig);
+	printf("%d\n", countof(g_alpha));
+
+	// 当 char 用（一个字节那一格），也能进 printf 的 %c
+	char c = 'Q';
+	printf("%c%c\n", c, 'x');
+
+	// 比较与算术都是整数那一套
+	int digit = '7' - '0';
+	printf("%d %d\n", digit, 'a' < 'b');
+	return 0;
+}

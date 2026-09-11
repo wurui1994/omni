@@ -5567,6 +5567,56 @@ exposed 的意思是成员**直接坐在外面那层命名空间里**（`Namespa
   它于是从"只有普通错"变成"有一格还不收"。这一格照旧记着，是下一刀的候选；
 - `真降得下来` 73 不动。
 
+## 第九十七刀：`'a'` 是一个**整数** —— 一句安静的错答案
+
+上一刀末尾记着的那一格：`io_PcapFile.jnc:14` 的 `'\xa1\xb2\xc3\xd4'` 算不出来。查下去发现
+不止那一格 —— 这一层的词法把**单引号**那一格也做成了 LITERAL（跟双引号同一种）：
+
+```
+(string LITERAL "\"")
+(string LITERAL "'")      // 先前
+```
+
+于是 `int a = 'a';` 报的是"初值的类型是 string，声明的是 int"。语料里字符字面量
+**125 处、32 份文件**（`hexEncoding.jnc` 的 `' '` `'\t'` `'.'`、`escapeEncoding.jnc` 那一整张
+转义表、`log_RecordFile.jnc` 的 `':gol'`、`io_DeviceMonitorNotify.jnc` 的 `'nomt'`）。
+
+jancy 的词法把它做成 `TokenKind_Integer`，头一个字节**最重**、最多 8 个字节
+（jnc_ct_Lexer.cpp:186-197）：
+
+```c
+uint64_t result = 0; uint_t shift = 8 * (length - 1);
+for (; p < end; p++, shift -= 8) result |= *(uchar_t*)p << shift;
+```
+
+落法两处：
+
+- `jnc.grammar`：单引号那一格换成自己一格 token（`(string CHAR "'")`），主表达式上加一条
+  `(-> (CHAR) (char $1))`。表跟着重生成 —— **363 rules / 654 states**（先前 362 / 653，
+  就多这一条产生式），`node tests/glr/run.js` 20/0；
+- `lower.js` 的 `charLit`：转义在词法那一遍已经解开了，这儿把码位折成字节再按 jancy 那句折成
+  整数。**怎么数字节记一笔**：`\xa1` 要的是一个字节，所以每格码位 < 256 时按 latin1 数，
+  真写了非 ASCII 字符时才按 UTF-8 数（jancy 那边源码就是字节流）。类型走 `intLit` 那条老
+  规矩（装得下 int、装不下 long）—— `0xa1b2c3d4` 正是"装不下"那一格，赋进 32 位枚举成员时
+  回卷成 −1582119980。`constInt` 也认这一格：`enum { Sig = '…' }` 与 `int a['z' - 'a' + 1]`
+  都要算得动。
+
+**自举那一格的代价**：第一版用了 `Buffer.from(s, 'latin1')`，`node tests/bootstrap/link.js`
+当场红了 —— `unresolved identifier 'Buffer'`。自举的那个 JS 子集里没有它，所以 UTF-8 那几行
+手写了一遍。这条是这一层的常规约束，记在这儿。
+
+**证据**：`cases/88-charlit.jnc` 钉六件事：`'a'` / `'\t'` / `'\0'`、多字节的 `'ab'` = 24930、
+`'\xa1\xb2\xc3\xd4'` 进枚举、编译期算得动（`countof(g_alpha)` = 26）、当 `char` 用并进
+`%c`、以及减法与比较。尺子是 `/tmp/c88.c` —— C 的多字符字面量与 jancy 同一个字节序，
+六行逐字节相同。`node tests/jnc/run.js` = 185 passed, 0 failed；`link.js` 2/0；`glr` 20/0。
+
+**量出来的**：`真降得下来 73 → 74（+1）` —— `io_PcapFile.jnc`（上一刀末尾记着的那一份）
+整份下来了；对数 8088 → **8076（−12）**；`没有还不收` 169 不动。
+
+这一刀的账要说清：它换来的不只是那 12 对。先前那 125 处**没有一处报错** —— 它们悄悄变成了
+串，然后在某个类型检查上撞出一句看着无关的话（"初值的类型是 string"）。这种"安静的错答案"
+与第九十一刀（`size_t` 是无符号的）同一类，尺子量不出来，只有 case 里那几行能钉住。
+
 ## 后果与代价
 
 

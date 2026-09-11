@@ -2898,6 +2898,47 @@ class JncLower {
     };
   }
 
+  /**
+   * `'a'` / `'\xa1\xb2\xc3\xd4'` —— 单引号那一格是个**整数**（第九十七刀）。
+   *
+   * jancy 的词法直接把它做成 `TokenKind_Integer`：头一个字节**最重**、最多 8 个字节，
+   * 多出来的截掉（jnc_ct_Lexer.cpp:186-197）：
+   *
+   *   uint64_t result = 0; uint_t shift = 8 * (length - 1);
+   *   for (; p < end; p++, shift -= 8) result |= *(uchar_t*)p << shift;
+   *
+   * 所以 `'a'` 是 97，`'ab'` 是 0x6162，`'\xa1\xb2\xc3\xd4'` 是 0xa1b2c3d4。类型走的是
+   * 与别的整数字面量同一条（装得下就 int、装不下就 long，见 intLit）—— 那句"装不下"正是
+   * `0xa1b2c3d4` 这一格：它是 long，赋进 32 位的枚举成员时按那一格回卷。
+   *
+   * 转义在词法那一遍就解开了（glr/lex.js 的 scanString），所以这儿看到的是解好的那串。
+   * 怎么数字节：`\xa1` 这种转义要的是**一个字节**（jancy 那边它就是源码里那一个字节），
+   * 所以每一格码位 < 256 时按 latin1 数；真有非 ASCII 的字符写在引号里时按 UTF-8 数
+   * （jancy 那边源码就是 UTF-8 的字节流）。
+   */
+  charLit(n) {
+    const s = isStr(n.items[1]) || isAtom(n.items[1]) ? n.items[1].value : null;
+    if (s === null) return this.err(n, '认不出的字符字面量');
+    if (s === '') return this.err(n, "空的字符字面量（`''`）");
+    const cps = [...s].map((c) => c.codePointAt(0));
+    const raw = cps.every((c) => c < 256);
+    const bytes = [];
+    for (const cp of cps) {
+      if (raw || cp < 0x80) { bytes.push(cp); continue; }
+      // UTF-8 手写一遍（这一层自举时没有 Buffer）
+      if (cp < 0x800) { bytes.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f)); continue; }
+      if (cp < 0x10000) {
+        bytes.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+        continue;
+      }
+      bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f),
+        0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    }
+    let v = 0n;
+    for (const b of bytes.slice(0, 8)) v = (v << 8n) | BigInt(b);
+    return this.intLit(n, v);
+  }
+
   enumMember(n, ob, mem) {
     // 左边可以是**限定名**（`a.Color`，第五十一刀）：那在表达式里是一串 `field`。
     if (!isList(ob) || (head(ob) !== 'name' && head(ob) !== 'field')) return undefined;
@@ -7664,6 +7705,14 @@ class JncLower {
       const m = em.code.match(/^\(int (-?\d+)\)$/);
       return m === null ? null : BigInt(m[1]);
     }
+    /* `'a'` 那一格也是编译期的整数（第九十七刀）：`enum { Sig = '\xa1\xb2\xc3\xd4' }` 与
+       `int a['z' - 'a']` 都要算得出来。 */
+    if (isList(e) && head(e) === 'char') {
+      const cv = this.charLit(e);
+      if (cv === null) return null;
+      const m = cv.code.match(/^\(int (-?\d+)\)$/);
+      return m === null ? null : BigInt(m[1]);
+    }
     return null;
   }
 
@@ -8242,6 +8291,7 @@ class JncLower {
       }
       // `this`（第五十二刀）：方法体里的第一个形参那一格，值就是对象那段内存的地址。
       case 'this': return this.load(n, this.lvalue(n));
+      case 'char': return this.charLit(n);
       case 'binary': return this.binary(n);      case 'unary': return this.unary(n, want);
       case 'indirect': return this.load(n, this.derefLv(n));
       case 'index': {
