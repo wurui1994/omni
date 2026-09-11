@@ -993,6 +993,10 @@ class JncLower {
     /* 那些 reactor 成员的**短名**：`s.m_uiReactor.start()` 这种调用要先按名字便宜地筛一次
        （与 evtNames 同一条理由）。 */
     this.rctNames = new Set();
+    /* 类体里**就带着体**的那些 reactor（第九十五刀）：`reactor m_r { … }` 写在类里。按节点记，
+       因为那一格 fn-def 同时也待在被提到顶层的那一批里（nsFlat），reactorBody 那一遍要认得
+       出"这一格已经当成员登记过了"。 */
+    this.rctInline = new Set();
     /* 那些要等签名那一遍才办得了的 alias（第八十七刀）：目标是函数 / 方法的那些。 */
     this.aliasPend = [];
     /* 函数重载（第七十九刀）。基名（第一条那个方言名）-> 那一族所有方言名，第 0 格就是基名。
@@ -1330,13 +1334,26 @@ class JncLower {
    *
    * 名字带限定的（`Cls.m_r`，语料 49/49）要在类里先声明过；不带的就是顶层那一格。
    */
+  /** 这一格 specs 上写着 `reactor` 吗（第八十五刀 / 第九十五刀两处都要问）。 */
+  rctSpecs(sp) {
+    if (!isList(sp) || head(sp) !== 'specs') return false;
+    return [...this.flat(sp.items[2]), ...this.flat(sp.items[3])]
+      .filter((x) => isAtom(x)).map((x) => x.value).includes('reactor');
+  }
+
+  /** 一格 reactor 声明符上那个**不带前缀**的名字（第九十五刀）。认不出回 null。 */
+  rctDeclName(d) {
+    const core = isList(d) ? d.items[2] : null;
+    if (!isList(core) || head(core) === 'qualified') return null;
+    return this.qname(core);
+  }
+
   reactorBody(n) {
     if (!isList(n) || head(n) !== 'fn-def') return false;
-    const sp = n.items[1];
-    if (!isList(sp) || head(sp) !== 'specs') return false;
-    const mods = [...this.flat(sp.items[2]), ...this.flat(sp.items[3])]
-      .filter((x) => isAtom(x)).map((x) => x.value);
-    if (!mods.includes('reactor')) return false;
+    if (!this.rctSpecs(n.items[1])) return false;
+    /* 类体里就带体的那一种（第九十五刀）已经在 typeDecl 那一遍登记过了（`this.rctInline`
+       是按节点记的）—— 这儿只要认下"它是一格 reactor 的体"，别再当顶层那一格登记一遍。 */
+    if (this.rctInline.has(n)) return true;
     const d = n.items[2];
     const core = isList(d) ? d.items[2] : null;
     if (!isList(core)) { this.err(n, 'reactor 的名字认不出来'); return true; }
@@ -3102,6 +3119,27 @@ class JncLower {
       // 成员没提，就地报。
       if (isList(m) && head(m) === 'fn-def') {
         if (!cls) { this.nope(m, '结构体里的方法'); continue; }
+        /* 类体里**就带着体**的 reactor（第九十五刀）：`reactor m_r { … }`。语料里的惯用法是
+           "类里声明、体写在类外"（49/49），可 test16.jnc 这种写法 jancy 也收 —— 那时这一格
+           fn-def 既在类体里、又被 nsFlat 提到了顶层，先前只有顶层那一遍看见它，于是登记成了
+           `cls: null` 的一格顶层 reactor：体里裸写的字段名从此接不上 this（报"未声明的变量"）。
+           在这儿登记才对：两格 bool 字段要赶在 classLayout 之前进 ownFields。 */
+        if (this.rctSpecs(m.items[1])) {
+          const nm = this.rctDeclName(m.items[2]);
+          if (nm === null) { this.err(m, 'reactor 的名字认不出来'); continue; }
+          const full = `${name}$${nm}`;
+          if (this.reactors.has(full)) { this.err(m, `reactor '${shown(full)}' 声明了两次`); continue; }
+          const on = `${full}$on`;
+          const bound = `${full}$bound`;
+          fields.push({ name: on, type: J_BOOL });
+          fields.push({ name: bound, type: J_BOOL });
+          this.reactors.set(full, {
+            full, cls: name, on, bound, body: m.items[3], node: m,
+          });
+          this.rctNames.add(nm);
+          this.rctInline.add(m);
+          continue;
+        }
         const sk = specialCore(m.items[2]);
         if (sk !== null && sk !== 'construct' && sk !== 'static construct'
           && !accessorNamed(m.items[2])) this.specialNope(m, sk);

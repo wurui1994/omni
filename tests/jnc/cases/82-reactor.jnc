@@ -56,6 +56,23 @@ reactor g_r {
 	printf("g_r ran (g_b=%d)\n", g_b);
 }
 
+/* 类体里**就带着体**的那一种（第九十五刀）：`reactor m_r { … }` 写在类里。语料里生产代码
+   不这么写，可 jancy 收（test/jnc/test16.jnc:18-20 就是这个形状），而先前这一层把它登记成了
+   一格**顶层** reactor —— 体里裸写的 `m_seen` 于是接不上 this，报"未声明的变量"。
+   钉的就是"体里裸写的字段名接上了 this"，外加"两格对象各有自己那一格"。 */
+class Inl {
+	int bindable m_x;
+	int m_seen;
+
+	reactor m_r {
+		m_seen = m_x * 2;
+	}
+
+	construct() {
+		m_r.start();
+	}
+}
+
 int main() {
 	Sess* s = new Sess;
 	s.wire();
@@ -83,5 +100,14 @@ int main() {
 	g_r.start();
 	g_b = 5;
 	printf("g_a=%d\n", g_a);
+
+	// 类体里带体的那一种（第九十五刀）
+	Inl* i1 = new Inl();
+	Inl* i2 = new Inl();
+	printf("i1=%d i2=%d\n", i1.m_seen, i2.m_seen);
+	i1.m_x = 4;
+	printf("i1=%d i2=%d\n", i1.m_seen, i2.m_seen);
+	i2.m_x = 10;
+	printf("i1=%d i2=%d\n", i1.m_seen, i2.m_seen);
 	return 0;
 }

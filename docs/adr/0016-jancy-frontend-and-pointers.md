@@ -5481,6 +5481,48 @@ if (cls && key === 'opaque class' && sk === 'destruct') continue;
   **27 → 13**，其中 `多继承` **16 → 0**、`未声明的变量` 3 → 0。这一组现在只剩
   `没有这个类型` 5 与属性那一族 5。
 
+## 第九十五刀：类体里就带着体的 reactor —— 一个登记登错了地方的洞
+
+顺着榜上 `未声明的变量` 那两份 sole 查出来的，是第八十五刀留下的一个**洞**，不是一格没做的
+功能。`test/jnc/test16.jnc:12-21`：
+
+```c
+class C1 {
+	int bindable m_x;
+	int bindable m_y;
+	bool m_b;
+
+	reactor m_reactor {
+		m_b = m_x != 0 && m_y != 0;      // 报：未声明的变量 'm_b'
+	}
+}
+```
+
+第八十五刀量到语料里生产代码**只用**"类里声明、体写在类外"那一种（49/49），于是那一刀
+只在类体那一遍认 `reactor m_r;`（一格 var-decl）。可 `reactor m_r { … }` 写在类里时，
+语法上它是一格 **fn-def**，而 fn-def 在 `nsFlat` 那一遍被提到了顶层 —— 于是只有
+`reactorBody` 那一遍看见它，登记成了 `cls: null` 的**顶层** reactor。后果就是那一句报错：
+体里裸写的字段名接不上 `this`（`selfField` 要 `selfClass`，那时是 null）。
+
+落法是**把登记搬回该在的地方**：类体那一遍的 fn-def 分支上问一句"specs 上写着 reactor 吗"，
+是就当成员登记（两格 bool 字段 `…$on` / `…$bound` 进 `fields` —— 必须赶在 `classLayout`
+之前，那两格是类里的字段），并把这一格 fn-def 记进 `this.rctInline`（按**节点**记）；
+`reactorBody` 那一遍见到记过的就只认"这是一格 reactor 的体"，不再当顶层那一格登记一遍。
+`emitReactors` 一个字没改 —— 它本来就按 `r.cls` 摆 `selfClass` / `this` 别名。
+
+顺手把 specs 上那一问与"声明符上不带前缀的名字"抽成 `rctSpecs` / `rctDeclName` 两格方法，
+两处（第八十五刀那一遍与这一刀）共用。
+
+**证据**：`cases/82-reactor.jnc` 加了一格 `class Inl`（`reactor m_r { m_seen = m_x * 2; }`
+写在类里）与三行输出，钉的是"体里裸写的字段名接上了 this"和"两个对象各有自己那一格订阅"；
+这三行的尺子是 `/tmp/c95.c`（`cc -O0 -std=c99 -Wall`：bindable 落成"值 + onChanged 单子"、
+一条反应一格函数、start 挂上并先跑一遍）。`node tests/jnc/run.js` = 182 passed, 0 failed。
+
+**量出来的**：`真降得下来 71 → 73（+2）` —— `test/jnc/test16.jnc` 与 `test/jnc/test23.jnc`
+（`reactor m_MyAutoEv { … }` 也写在类里），一份没退；对数 8164 → 8157（−7）；
+`未声明的变量` 289 → 287（sole 2 → 1，剩下那一份是 `test107.jnc` 的 `sys` 命名空间 ——
+宿主面）；`没有还不收` 170 不动（这两份文件本来就没有"还不收"，卡的是一句普通错）。
+
 ## 后果与代价
 
 
