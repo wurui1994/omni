@@ -6741,11 +6741,31 @@ o.m_p.twice()   o.m_p.m_k                  // 带对象的两种
   `emit sx` 或者漏掉 `-I`，报出来的是另一堵墙（`没有这个类型`），不是这一行；
 - `while read f; do node … ; done < 清单` 会**空转**：node 把清单文件的余下内容当自己的 stdin
   吃掉了。要 `node … </dev/null`；
-- 可即使照上面两条办，**单独跑一份**（`UsbMonSession.jnc` 那一份，行号 509、属性名
-  `m_currentIndex`）能复现，而**同一条循环跑 33 份**一次都没复现（stderr 收了 15053 行，
-  grep 这一行是 0）。也就是说**批量那一层还有一处没查清的差别** —— 下一趟先把这件事查清，
-  再谈分类。第一句能确定的事实只有一条：那 33 份里至少有一份的形状是
-  `UsbMonSession.jnc:509` 上的 `m_currentIndex`。
+- `execFileSync` **只在非零退出时**才把 stderr 交出来；要不管退出码都拿到，用 `spawnSync`；
+- **最后那一次的真根因，也是最蠢的一条**：清单里的路径是 `test/ioninja/…`（没有打头的斜杠），
+  而我判断"要不要加 `-I`"写的是 `f.includes('/test/ioninja/')` —— 永远是假，于是 `-I` 一次都
+  没加上，33 份全撞在第一条那堵墙上。第一条自己写下来的坑，隔了三次又踩了一遍。
+
+### 量出来了：那 144 处是**宿主面**，不是一格语言特性
+
+改对之后（`/tmp/p33.mjs`，spawnSync + 路径判断修好）：33 份里命中 **144 处**，形状高度集中：
+
+```jancy
+m_deviceProp.m_currentIndex = m_deviceCombo.m_currentIndex;     // 14 处，最多的一种
+storage.writeInt("readMode", m_readModeProp.m_value);           // 读出来当实参
+m_readModeProp.m_value = Defaults.ReadMode;
+m_adapterProp.m_currentIndex = storage.readInt("adapterIdx");
+```
+
+一眼看得出：左边全是 `<字段>.<属性>`，而那个字段的类型是 **`ui.*Property` 这一族宿主类**。
+写它走的本来是 `propSet`（第六十八刀）—— 报到"属性当一格可写的内存用"这一句上是因为
+那个宿主类这一层根本没有，于是 `memberOf` 落到了那一支。
+
+**所以这 33 份（144 处）是宿主面那一族，不是语言特性。** 第一百一十四刀那一节说
+"属性挡在前面的东西比想的多、方向反了一半"—— 这一趟把它量清了：**属性那一族里语言那一半
+（一百一十五、一百一十六两刀）已经落完，剩下的整片是宿主面**（`ui.*Property` 的构造与成员、
+`没有这个函数`、`import "std_*.jnc"`）。榜上那三格候选（泛型 16 / 宿主面 / variant 5）
+到这一趟为止只剩**两格**：泛型与宿主面。
 
 能力本身是真落了（fixture 钉着，两条腿一致），四处重复也真去掉了 —— 只是它买到的对数是 1。
 这两件事分开记。
