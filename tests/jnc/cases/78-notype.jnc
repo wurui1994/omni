@@ -1,0 +1,57 @@
+// 说明符里不写类型（第八十一刀）—— 那时它是 `void`
+//
+// 出处只能是源码：文档里一个字都没写这条（翻遍 doc/language/rst，函数的例子全写着返回类型）。
+// `Declarator::setTypeSpecifier`（jnc_ct_Decl.cpp:217-234）：
+//   没有说明符 -> `getPrimitiveType(TypeKind_Void)`；
+//   有说明符但没写类型名 -> 光写了 `unsigned` / `bigendian` 的那一格退回 `int`（C 那条隐式
+//   int 只剩这一格），别的还是 `void`。
+// 而 `virtual` / `override` / `abstract` 在 jancy 那边是**存储说明符**、不是类型说明符
+// （jnc_ct_DeclarationSpecifier.llk:99-110），所以一条声明可以只有它们 —— 语料里
+// test/ioninja/ 到处这么写（Proto_Dns.jnc:44、Decoder.jnc:25、Uart.jnc:47）。
+// 函数后缀接上去之后那个 `void` 就成了**返回类型**（jnc_ct_DeclTypeCalc.cpp:170-197 的
+// `getFunctionType`）。
+//
+// 没有函数后缀的那一种（`virtual m_x;`）在 jancy 那边报 `illegal use of type 'void'`
+// （jnc_ct_Parser.cpp:1094-1136 的 `case TypeKind_Void`）—— 见 bad/notype-field.jnc。
+//
+// 这里钉四件事：
+//   1. `virtual show()` —— 不写类型的虚方法，虚派发照旧（第五十七刀）
+//   2. `override show()` —— 覆盖那一条也不写
+//   3. `abstract step()` —— 原型也不写（它没有体）
+//   4. 不写类型的**普通**方法（`virtual` 之外还有 `static`、或者干脆只有别的修饰符）
+//      这一格与上面同一条路，所以顺带钉一句：不写类型的方法回的是 void，`return;` 收得下
+
+class B {
+	int m_n;
+
+	virtual show() {
+		printf("B %d\n", m_n);
+	}
+
+	virtual put(int v) {
+		m_n = v;
+		return;			// void，所以裸 return 收得下
+	}
+
+	abstract step();
+}
+
+class D: B {
+	override show() {
+		printf("D %d\n", m_n);
+	}
+
+	override step() {
+		m_n = m_n + 1;
+	}
+}
+
+int main() {
+	D d;
+	d.put(5);
+	B* b = d;
+	b.show();
+	b.step();
+	b.show();
+	return 0;
+}

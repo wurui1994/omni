@@ -3232,8 +3232,25 @@ class JncLower {
      * 类的字段那一遍）从 formals 上读，这儿只把"这是一格事件"传上去。 */
     if (isList(ts) && head(ts) === 'no-type') {
       if (evt) return { type: J_MC, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt };
-      this.err(n, '这条声明没有类型');
-      return null;
+      /* 说明符里一个类型都没写（第八十一刀）。语料里到处是：`override start() { … }`、
+       * `abstract reset();`、`virtual decodeName(std.StringBuilder* s) {}` ——
+       * `virtual` / `override` / `abstract` 在 jancy 那边是**存储说明符**，不是类型说明符
+       * （jnc_ct_DeclarationSpecifier.llk:99-110），所以一条声明可以只有它们。
+       *
+       * 那时的类型是 **void**，规矩明写在 `Declarator::setTypeSpecifier`
+       * （jnc_ct_Decl.cpp:217-234）：没有说明符就 `getPrimitiveType(TypeKind_Void)`；
+       * 有说明符但没类型名时，光写了 `unsigned` / `bigendian` 的那一格才退回 `int`
+       * （C 那条隐式 int 只剩这一格）。函数后缀接上去之后 `void` 就成了**返回类型**
+       * （jnc_ct_DeclTypeCalc.cpp:170-197 的 `getFunctionType`）。
+       *
+       * 文档里一个字都没写这条（翻过 doc/language/rst，例子全写着返回类型），
+       * 所以出处只能是源码。
+       *
+       * 没有函数后缀的那种（`virtual m_x;`）在 jancy 那边报的是 `illegal use of type 'void'`
+       * （jnc_ct_Parser.cpp:1094-1136 的 `case TypeKind_Void`）—— 这一层由下游那几处
+       * "字段/变量不能是 void" 接着，报的话也是同一件事。 */
+      if (uns) return { type: mkInt(32, true), thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt };
+      return { type: J_VOID, thin, stat, fnptr, virt, errc, prop, cst, agt, bnd, bdata: false, evt };
     }
     let base = null;
     if (isAtom(ts)) {

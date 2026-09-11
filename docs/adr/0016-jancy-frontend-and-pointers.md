@@ -4827,6 +4827,44 @@ ImplicitCrossConst < Implicit < Identity`。它自己的 `test/jnc/test32.jnc` �
 - (文件, 拦路项) 对：9006 -> **8803**（−203）。同元重载那 367 对从榜上消失了，剩下的是
   那两处保守里漏出来的零头。
 
+## 第八十一刀：说明符里不写类型 —— 那时它是 void
+
+尺子上 `这条声明没有类型` **121 对**。语料里 test/ioninja/ 到处这么写：
+
+```jnc
+virtual decodeName(std.StringBuilder* string) {}
+override start() { … }
+abstract reset();
+```
+
+**为什么它连得上语法**：`virtual` / `override` / `abstract` 在 jancy 那边是**存储说明符**，
+不是类型说明符（jnc_ct_DeclarationSpecifier.llk:99-110），而 `declaration_specifier_list`
+是 `declaration_specifier+` —— 一个存储说明符就够，类型那一支根本没走。
+
+**那时的类型是 `void`**，规矩明写在 `Declarator::setTypeSpecifier`（jnc_ct_Decl.cpp:217-234）：
+没有说明符就 `getPrimitiveType(TypeKind_Void)`；有说明符却没有类型名时，只有写了
+`unsigned` / `bigendian` 的那一格退回 `int`（C 那条隐式 int 在 jancy 里只剩这一格）。
+函数后缀接上去之后这个 `void` 就成了**返回类型**（jnc_ct_DeclTypeCalc.cpp:170-197 的
+`getFunctionType`）。没有函数后缀的那一种（`virtual m_x;`）在 jancy 那边报
+`illegal use of type 'void'`（jnc_ct_Parser.cpp:1094-1136 的 `case TypeKind_Void`）。
+
+**文档里一个字都没写这条** —— 翻遍 `doc/language/rst`，函数的例子全写着返回类型
+（decl_simple.rst:27 那种），`decl_advanced.rst:42` 拆解一条声明的各部分时也没说类型可以省。
+所以这一条的出处只能是源码。这也是"只借语法与形式"这条纪律的一个实例：形式在语料里，
+理由在源码里，两头都得对上才敢收。
+
+**这一层的落法**就是那两行：`no-type` 的说明符回 `J_VOID`（写了 `unsigned` 的回
+`unsigned int`），别的一个字没动 —— 函数后缀、虚派发、`return;` 全是原来那一套。
+没有函数后缀的那些照旧被下游拦住（`virtual m_x;` 报的是"字段上写不了 virtual"，
+`void m_x;` 报的是"字段只能是 …，这里是 void"）—— 都拒，只是理由比 jancy 那句更具体。
+
+**量出来的**：`tests/jnc` 167/0 -> **168/0**（`cases/78-notype.jnc` 六条腿逐字节相同：
+不写类型的 `virtual` / `override` / `abstract` 三种，虚派发照旧，`return;` 收得下）。
+
+**尺子（655 份）**：`这条声明没有类型` 这一条从榜上**消失**（121 -> 0）；对 8803 -> **8777**
+（−26 —— 那 121 走掉之后，那些文件往前走又露出来 ~95 条别的，与第七十九刀同一个现象）；
+「真降得下来」55、「没有还不收的行」143，两个都没动。
+
 ## 后果与代价
 
 
