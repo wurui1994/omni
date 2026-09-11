@@ -636,7 +636,11 @@ class ToMir {
         return f.emit(OP.PEQ, T_BOOL, a, this.expr(e.b), 0);
       }
       default:
-        throw new OmniError(`mir: 还没有处理的表达式 ${e.kind}`);
+        /* `e.kind` 是 undefined 的时候光报 "undefined" 说不清任何事（量出来过：
+           tests/mir 那条轴上 `lower/cli.js` 就只印了这一个词，查不下去）。把这个位置
+           上到底放了什么一起报出来 —— 那是唯一能把"哪一处降级漏了返回值"指出来的东西。 */
+        throw new OmniError(`mir: 还没有处理的表达式 ${e.kind === undefined
+          ? `（没有 kind 的东西：${JSON.stringify(e).slice(0, 200)}）` : e.kind}`);
     }
   }
 

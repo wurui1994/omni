@@ -4581,6 +4581,24 @@ autoget；写一格 `bindable event`，整格属性就是 bindable。samples/jnc
 `import "*.jncx"`（6 份）与别的 import；剩下的是体里还有别的成员（不带 `autoget` 的字段、
 `alias` 之类）与 2 份语法就没过的（`unexpected "*"`）。
 
+## 尺子本身进了仓库（`tests/lib/jnc-sweep.js`）
+
+从第五十几刀起，每一刀的选题都靠同一件事：662 份真实 `.jnc` 过一遍 `omni sx`，把「还不收」与
+普通错各自归一，数成 (文件, 拦路项) 对，看谁在榜首、谁是某些文件的**唯一**拦路项。可这把尺子
+一直是 `/tmp/m64r.sh` 那种一次性脚本 —— 每量一次全量重跑、跑完就扔、上一趟的数字只留在这份
+ADR 的正文里。三处都要修，修法与 ADR-0023 是同一件事：
+
+- **方子进仓库**：归一化一字不变（掐掉 `路径:行:列: error: `、脱掉 `jancy 前端第一刀还不收：`
+  记成 N、别的记成 E、理由里带引号的名字换成 `'…'`、一份文件里同一条理由只算一次；ioninja
+  那一支带 `-I test/ioninja/api`，理由是它自己的 CMakeLists.txt:815）。两刀之间的数从此可比。
+- **走运行缓存**：662 次子进程走 `RunCache('jnc-sweep')` —— 冷跑并行预热，没改的文件直接命中。
+- **落报告**：`.omni-cache/test/log/jnc-sweep.log`（全量榜 + 每份文件的拦路项）与
+  `jnc-sweep.json`（上一趟的数）。下一趟自动印出差值 —— `2746 -> 2698（−48）` 那句不再靠手抄。
+
+```
+node tests/lib/jnc-sweep.js --top 40
+```
+
 ## 后果与代价
 
 

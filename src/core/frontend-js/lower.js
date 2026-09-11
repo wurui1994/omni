@@ -3158,18 +3158,30 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     if (!args.some((a) => a.type === 'Spread')) {
       return { kind: 'ListLit', type: listType(D), items: this.seq(args, (a) => this.expr(a)) };
     }
+    /* `seq` 的约定是"一串**表达式节点**"。这儿从前往里塞的是 `{spread: 节点}` 这种包装，
+     * 而 seq 为了保住求值次序会把待定的那几格提成临时量（`out[j] = varRef(t)`）——
+     * 包装于是被当成表达式赋进临时量，`spread` 这一位就在那一步丢了。
+     *
+     * **两个展开**才露出来：第二个展开要 sink，才触发前一个的提取。
+     * `f(...a.items, ...b.map(g))` 于是降出一格没有 kind 的东西，MIR 那边报
+     * "还没有处理的表达式 undefined" —— 量出来的两处红：tests/mir 的 `lower/cli.js`
+     * 与整条自举链（`run` 那条腿更早，发出来的 JS 直接是坏的）。
+     *
+     * 落法与数组字面量（arrayLit）对齐：交给 seq 的一律是节点，哪一格是展开另查 `args[i]`。 */
+    const vals = this.seq(args, (a) => (a.type === 'Spread'
+      ? this.guarded(op('js_iter', [this.expr(a.arg)])) : this.expr(a)));
     const parts = [];
     let run = [];
     let firstIsSpread = false;
-    for (const a of this.seq(args, (a) => (a.type === 'Spread' ? { spread: this.expr(a.arg) } : this.expr(a)))) {
-      if (a && a.spread !== undefined) {
+    args.forEach((a, i) => {
+      if (a.type === 'Spread') {
         if (run.length) { parts.push(arrLit(run)); run = []; }
         if (parts.length === 0) firstIsSpread = true;
-        parts.push(this.guarded(op('js_iter', [a.spread])));
-        continue;
+        parts.push(vals[i]);
+        return;
       }
-      run.push(a);
-    }
+      run.push(vals[i]);
+    });
     if (run.length) parts.push(arrLit(run));
     /* `f(...a)` / `Array.of(...a)` 交出的实参表必须是**一份新的** list：js_iter 在 list 上
      * 是恒等，一段就交回去的话 rest 形参（或 Array.of 的结果）就是 a 自己，往上 push
