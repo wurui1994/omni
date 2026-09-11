@@ -3555,6 +3555,17 @@ class JncLower {
       // `const` 那一位要往上传（第六十八刀）：`T const property p` 是**只有取的属性**
       // （prop.rst:17："If a property has no setters then it is a const property"）。
       if (MUT_MODS.has(m)) { if (m === 'const') cst = true; continue; }
+      /* `volatile`（第八十六刀）也是**类型修饰符**（decl_advanced.rst:22 那张表里就有它），
+       * 落地是指针类型上的一位 `PtrTypeFlag_Volatile`（jnc_ct_DeclTypeCalc.cpp:282-283），
+       * 意思是"读它不许缓存"。语料里只有两处声明（`uint64_t readonly volatile
+       * m_txTotalSize;` / `m_rxTotalSize`，api/log_Log.jnc:81-82），可 log_Log.jnc 被到处
+       * import，于是它拦住的文件不少。
+       *
+       * 收下、**不看**，与 const / readonly 那一族同一条（那几个也是收下不看）。
+       * **代价明写**：这一层没有线程、方言里也没有"这一格不许缓存"那一位，所以真有别人
+       * （宿主的 C++ 那边）在改这一格时我们保证不了每次都重读 —— 那两格恰好正是宿主在写的
+       * 计数器。等真有宿主面那一刀时，这一位要跟着落到方言里去。 */
+      if (m === 'volatile') continue;
       // `property`（第六十八刀）是**类型修饰符**（Decl.cpp:35 那张表里的 TypeModifier_Property），
       // 所以它落在这张 mods 表里。它说的是"这一格不是一块内存，是一对函数（取/存）"——
       // 简单声明式（prop_simple.rst:19）就一个词，体写在别处：`T p.get() { … }` / `p.set(T x) { … }`。

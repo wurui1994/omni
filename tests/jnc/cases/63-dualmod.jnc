@@ -18,7 +18,12 @@ protected int g_prot = 11;
 // 注释就写着 "legacy code support"）。先前只收了别名那一格，于是语料里真实的写法
 // `MapEntry autoconst* readonly m_head;`（src/jnc_ext/jnc_std/jnc/std_RbTree.jnc:31）在**语法**
 // 这一层就过不去 —— 三个词都收，落地与 `const` / `readonly` 同（收下、不看）。
-int autoconst g_ac = 13;
+//
+// `volatile`（第八十六刀）不在那个互斥组里（Decl.cpp:97 那张表给它的是 0），它落地是指针类型上
+// 的一位（`PtrTypeFlag_Volatile`，DeclTypeCalc.cpp:282-283），意思是"读它不许缓存"。这一层也是
+// 收下不看 —— 没有线程、方言里也没有那一位。语料里的真实写法是
+// `uint64_t readonly volatile m_txTotalSize;`（api/log_Log.jnc:81）。
+int autoconst volatile g_ac = 13;
 int constif g_ci = 17;
 
 int derefAc(int* autoconst p) {
@@ -28,7 +33,7 @@ int derefAc(int* autoconst p) {
 // 结构体的字段、形参、返回类型上也是同一族（都走 specs 那一格）
 struct Pair {
 	int readonly m_a;
-	int cmut m_b;
+	int cmut volatile m_b;
 	public int m_c;
 }
 
@@ -37,7 +42,8 @@ int readonly addUp(int readonly x, int cmut y) {
 }
 
 // `*` 后面也是同一族（jancy 那边 `const` / `readonly` / `cmut` 落在同一个互斥组上，
-// Decl.cpp:96）。`volatile` 不在这一组里，还不收。
+// Decl.cpp:96）。`volatile` 写在 `*` 后面还不收 —— 那一格是指针类型上的位，与说明符里那一格
+// 不是同一处（见 ptrsTy 的"指针后面的修饰符"）。
 int deref(int* readonly p, int* cmut q) {
 	return *p + *q;
 }
@@ -47,7 +53,7 @@ class Box {
 	int cmut m_cm;
 	public int m_pub;
 protected:
-	int m_hidden;
+	int volatile m_hidden;
 }
 
 class Box2 {
