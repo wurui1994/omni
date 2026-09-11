@@ -274,6 +274,11 @@ const V_REAL = 2;
 const V_BOOL = 3;
 const V_STR = 4;
 const isVar = (t) => t !== null && t !== undefined && t.k === 'struct' && t.name === VARIANT;
+/* 泛型实例化套多深就算停不下来（第一百一十九刀）。语料里量到的最深是 3 层
+   （`Iterator<RbTreeNode<K,V> >` 落在 `MapImpl<…>` 的基类表里那一串），8 是它的两倍多 ——
+   宁可把闸门放宽一点：这一格挡的是**发散**（`struct L<T> { L<L<T> > m_v; }` 每层实参都长一圈、
+   名字每次都是新的，光靠"同一份实参不重复造"停不下来），不是挡人写深。 */
+const TMPL_DEPTH = 8;
 /* 一个 f64 写成方言的 `(real …)` 收得下的样子。`String(x)` 给的形状
    （`1` / `-0.5` / `1e-7` / `1e+21`）正好都在 realLit 那条正则里；`Infinity`/`NaN`
    到不了这儿（`evalCConst` 那侧已经拦掉）。整数值补一个 `.0` 只是为了读的人一眼
@@ -2744,8 +2749,13 @@ class JncLower {
       this.templates.set(full, { full, ns: e.ns, params: ps, agg: ag });
     }
     // B：工作队列。`i` 之前的都扫过了，合成出来的追加在后面，于是循环自然跑到不动点。
+    // `tdepth` 是这一条**属于第几层实例**（顶层名单是 0）—— 递归的闸门看的就是它，见 tinstOne。
+    // `done` 的那几条是 `tinstOne` 自己就地扫完了的（合成出来的那一格与它提上来的方法）：
+    // 再扫一遍不会有新结果，只会把里头那句没解开的诊断**报第二遍**。
     for (let i = 0; i < out.length; i++) {
-      out[i] = { ns: out[i].ns, it: this.tinstRewrite(out[i].it, out[i].ns, out) };
+      if (out[i].done === true) continue;
+      const d = out[i].tdepth ?? 0;
+      out[i] = { ns: out[i].ns, tdepth: d, it: this.tinstRewrite(out[i].it, out[i].ns, out, d) };
     }
     return out;
   }
@@ -2785,11 +2795,9 @@ class JncLower {
       // specs 上带修饰符（const / bigendian …）的实参先不收：那几个词的意思要连着替换一起想
       return this.nope(tn, '泛型的实参上带修饰符');
     }
-    /* 实参本身是一格实例化（`Iterator<Node<int> >`）：同一条判据的另一半。**明说一句** ——
-       不说的话它会掉到 tmplKey 那儿回 null，最后由下游报成含糊的"这种类型说明符"。 */
-    if (isList(sp.items[1]) && head(sp.items[1]) === 'tinst') {
-      return this.nope(tn, '泛型的实参本身是一格实例化（要先解里层再拼外层的名字，见 ADR-0025）');
-    }
+    /* 实参本身是一格实例化（`Iterator<Node<int> >`）也从这儿原样回去 —— 那一格 `tinst`
+       由 `tinstOne` **先解里层**（第一百一十九刀）。参数表那一侧不受影响：`tmplParams`
+       接着就要求这一格是裸名字。 */
     return sp.items[1];
   }
 
@@ -2805,15 +2813,15 @@ class JncLower {
    * 追加进 `out`。回一格新节点（树是纯的 —— read.js 出来的节点上降级过程一个字段都不写，
    * 所以抄一份是完整的替换，见 ADR-0025）。
    */
-  tinstRewrite(n, ns, out) {
+  tinstRewrite(n, ns, out, depth = 0) {
     if (!isList(n)) return n;
     if (head(n) === 'tinst') {
-      const inst = this.tinstOne(n, ns, out);
+      const inst = this.tinstOne(n, ns, out, depth);
       if (inst !== null) return { kind: 'list', span: n.span, items: [{ kind: 'atom', value: 'name', span: n.span }, { kind: 'atom', value: inst, span: n.span }] };
       // 认不出来（不是泛型、或者实参这一层不收）：原样留着，下游那句诊断会说清
       return n;
     }
-    const items = n.items.map((x) => this.tinstRewrite(x, ns, out));
+    const items = n.items.map((x) => this.tinstRewrite(x, ns, out, depth));
     /* 一格也没换的时候**回原来那颗节点** —— 不是无谓的省事：类体里那格 `reactor` / `fn-def`
        与被 aggHoist 提到顶层的那一格是**同一个对象**，reactorBody 那一遍靠这条身份认领它
        （见第八十二刀）。无条件抄一份会把那条身份切断，报出来是"reactor 'Inl.m_r' 声明了两次"
@@ -2822,8 +2830,17 @@ class JncLower {
     return { kind: 'list', span: n.span, items };
   }
 
-  /** 一格用点：解出实例名，没造过就造一格 `type-decl` 追加进 out。回实例名或 null。 */
-  tinstOne(n, ns, out) {
+  /**
+   * 一格用点：解出实例名，没造过就造一格 `type-decl` 追加进 out。回实例名或 null。
+   *
+   * `depth` 是**这一格是第几层实例**（顶层名单上的用点是 0）。实参本身是一格实例化
+   * （`Iterator<Node<int> >`，第一百一十九刀）就在这儿**先解里层**：里层解出 `Node$int`，
+   * 拿它当一格普通类型名替进去，外层的名字于是拼成 `Iterator$Node_int`。
+   *
+   * 闸门（`TMPL_DEPTH`）看的正是 `depth`：`struct L<T> { L<L<T> > m_v; }` 这种每实例化一层
+   * 实参就长一层，光靠"同一份实参不重复造"停不下来 —— 名字每次都是新的。
+   */
+  tinstOne(n, ns, out, depth = 0) {
     const base = this.qname(n.items[1]);
     if (base === null) return null;
     const save = this.ns;
@@ -2831,12 +2848,22 @@ class JncLower {
     const full = this.resolve(base, (k) => this.templates.has(k));
     this.ns = save;
     if (full === null) return null;
+    if (depth > TMPL_DEPTH) {
+      this.err(n, `泛型 '${shown(full)}' 套得太深（${TMPL_DEPTH} 层往上）—— 实例化停不下来`);
+      return null;
+    }
     const tm = this.templates.get(full);
     const specs = [];
     for (const t of this.flat(n.items[2])) {
       if (!isList(t) || head(t) !== 'targ') return null;
-      const sp = this.tmplSpec(t.items[1]);
+      let sp = this.tmplSpec(t.items[1]);
       if (sp === null) return null;
+      // 实参本身是一格实例化：先把里层造出来，再拿它的名字当一格普通类型名用
+      if (isList(sp) && head(sp) === 'tinst') {
+        const inner = this.tinstOne(sp, ns, out, depth + 1);
+        if (inner === null) return null;
+        sp = { kind: 'list', span: sp.span, items: [{ kind: 'atom', value: 'name', span: sp.span }, { kind: 'atom', value: inner, span: sp.span }] };
+      }
       specs.push(sp);
     }
     if (specs.length !== tm.params.length) {
@@ -2857,13 +2884,16 @@ class JncLower {
     ag.items[2] = { kind: 'list', span: sp0, items: [{ kind: 'atom', value: 'name', span: sp0 }, { kind: 'atom', value: inst, span: sp0 }] };
     /* 合成那一格的命名空间取**空** —— 实例名里已经把泛型的命名空间连进去了（`stdt$Array$int`），
        再套一层就成了 `stdt$stdt$Array$int`。 */
-    const decl = this.tinstRewrite({ kind: 'list', span: ag.span, items: [{ kind: 'atom', value: 'type-decl', span: ag.span }, ag] }, tm.ns, out);
-    out.push({ ns: '', it: decl });
+    const at = out.length;
+    const decl = this.tinstRewrite({ kind: 'list', span: ag.span, items: [{ kind: 'atom', value: 'type-decl', span: ag.span }, ag] }, tm.ns, out, depth + 1);
+    out.push({ ns: '', tdepth: depth + 1, it: decl });
     /* 体里的方法要**跟着提到顶层**：手写的 `struct` / `class` 是在 run() 最开头那一遍
        （nsFlat -> aggHoist）提的，而这一格是那一遍之后才合成出来的，不补这一句它体里的
        `T get() { … }` 就没人认领 —— 报出来是"没有这个函数：'b.get'"。命名空间同上取空，
        aggHoist 自己会把实例名接成 `Box$int$get`。 */
     if (isHoistAgg(decl.items[1])) this.aggHoist(decl.items[1], '', out);
+    // 这几条（合成的那一格 + 它提上来的方法）已经就地扫完了 —— 队列别再扫一遍，见 expandTemplates
+    for (let k = at; k < out.length; k++) out[k].done = true;
     return inst;
   }
 

@@ -1,0 +1,41 @@
+// 第一百一十九刀：泛型的实参**本身是一格实例化**（`Iter<Node<int,char> >`），外加一道
+// 递归的闸门。这一格原先是 `bad/generic-instarg` 钉着的界 —— 那份界随这一刀删了，写法搬到
+// 这儿接着验（与第一百一十七刀删 `bad/fnptr-field` 同一条纪律）。
+//
+// 做法只有一句：`tinstOne` 碰上实参是 `tinst` 时**先解里层**，拿里层的实例名当一格普通类型名
+// 替进去 —— 于是名字自然是 `Iter$Node_int_char`（里层名字里的 `$` 换成 `_`，免得与命名空间那一层
+// 的分隔混起来）。语料里那一串 `Iterator<RbTreeNode<K,V> >`（unit_stdt_RbTree.jnc:141）就是这个形状。
+//
+// 闸门（`TMPL_DEPTH = 8`）挡的是**发散**：`struct L<T> { L<L<T> >* m_next; }` 每实例化一层
+// 实参就长一圈，名字每次都是新的，光靠"同一份实参不重复造"停不下来。界在 `bad/generic-deep`。
+//
+// 尺子 `/tmp/c117.c`：手抄单态化之后那五个 C 结构体，同一串数（5 97 97 / 9 / 7 8）。
+
+struct Node<K, V> {
+	K m_k;
+	V m_v;
+	V get_v() { return m_v; }
+}
+
+struct Iter<T> {
+	T m_cur;
+}
+
+int main() {
+	Iter<Node<int, char> >* it = new Iter<Node<int, char> >;
+	it.m_cur.m_k = 5;
+	it.m_cur.m_v = 'a';
+	printf("%d %d %d\n", it.m_cur.m_k, it.m_cur.m_v, it.m_cur.get_v());
+
+	// 三层
+	Iter<Iter<Node<char, int> > >* i3 = new Iter<Iter<Node<char, int> > >;
+	i3.m_cur.m_cur.m_v = 9;
+	printf("%d\n", i3.m_cur.m_cur.get_v());
+
+	// 同一格实参再写一遍：memoise 住的是**同一个**实例（不是又造一份）
+	Iter<Node<int, char> >* it2 = new Iter<Node<int, char> >;
+	it2.m_cur.m_k = 7;
+	it2.m_cur.m_v = 8;
+	printf("%d %d\n", it2.m_cur.m_k, it2.m_cur.get_v());
+	return 0;
+}
