@@ -1,0 +1,39 @@
+// 第一百二十一刀：泛型的实参**上带修饰符**（`T const*`）。语料里就两处，都在 `stdt` 里
+// （`IteratorBase<T const*>`，stdt_Iterator.jnc:79；`MapIteratorBase<T.Value, T const*>`，
+// stdt_Map.jnc:57）—— 而这两处正好卡在上一刀（实参带 `*`）落地之后顶上来的那一行上。
+//
+// 做法与上一刀是同一条：带修饰符的实参也**先起个名字**（`typedef int const* jnc$tp$int_const_p;`），
+// 修饰符跟着 `specs` 整格搬进那条 typedef。要紧的一句是**修饰符得记进实例名**里：
+// `Box<int const*>` 与 `Box<int*>` 不是同一个类型，名字不分开就成了静默的错答案。
+//
+// **照实记一条**：这一层的方言其实**根本不管 const** —— `int const* p; *p = 9;` 照样跑
+// （`/tmp/gb.jnc` 单独验过，与泛型无关）。所以今天这一刀收下的是那个**形状**，const 那个词
+// 在这一层没有意义。把它记进名字仍然是对的：哪天 const 长出意义来，这两格本来就是两个类型。
+//
+// 尺子 `/tmp/c119.c`：手抄单态化之后那三个 C 结构体（C 那边 const 是真的，只能在声明处
+// 初始化 —— 尺子钉的是那几个数，不是那条写法）。同一串数：7 8 / 113。
+
+struct Box<T> {
+	T m_v;
+	T get_v() { return m_v; }
+}
+
+int main() {
+	int one = 7;
+	int two = 8;
+
+	Box<int const*>* b = new Box<int const*>;
+	b.m_v = &one;
+
+	// 少一个 const —— 这是**另一个**实例（名字里分得开）
+	Box<int*>* b2 = new Box<int*>;
+	b2.m_v = &two;
+
+	printf("%d %d\n", *b.m_v, *b2.get_v());
+
+	// 只有修饰符、不带星
+	Box<char const>* b3 = new Box<char const>;
+	b3.m_v = 113;
+	printf("%d\n", b3.get_v());
+	return 0;
+}

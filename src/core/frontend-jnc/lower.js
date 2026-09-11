@@ -2786,19 +2786,29 @@ class JncLower {
     return out.length === 0 ? this.nope(targs, '泛型的参数表是空的') : out;
   }
 
-  /** 一格 `targ` 里那格 **type-spec**（ADR-0025 定的替换层次）。`*` 那一格由 tinstOne 接。 */
-  tmplSpec(tn) {
+  /** 一格 `targ` 里那格 **type-spec**（ADR-0025 定的替换层次）。`*` 与修饰符那两格由 tinstOne 接。 */
+  tmplSpec(tn, allowMods = false) {
     if (!isList(tn) || head(tn) !== 'type-name') return this.nope(tn, '认不出的泛型实参');
     const sp = tn.items[1];
     if (!isList(sp) || head(sp) !== 'specs') return this.nope(tn, '认不出的泛型实参');
-    if (this.flat(sp.items[2]).length > 0 || this.flat(sp.items[3] ?? sp.items[2]).length > 0) {
-      // specs 上带修饰符（const / bigendian …）的实参先不收：那几个词的意思要连着替换一起想
-      return this.nope(tn, '泛型的实参上带修饰符');
+    if (!allowMods && this.tmplMods(sp).length > 0) {
+      // 参数表那一侧：`<T const>` 这种先不收 —— 参数名上挂修饰符的意思要单独想
+      return this.nope(tn, '泛型的参数上带修饰符');
     }
     /* 实参本身是一格实例化（`Iter<Node<int> >`）也从这儿原样回去 —— 那一格 `tinst`
        由 `tinstOne` **先解里层**（第一百一十九刀）。参数表那一侧不受影响：`tmplParams`
        接着就要求这一格是裸名字。 */
     return sp.items[1];
+  }
+
+  /** 一格 `specs` 上那两格修饰符表里的词（`int const` -> `['const']`）。 */
+  tmplMods(sp) {
+    const out = [];
+    for (const m of [...this.flat(sp.items[2]), ...this.flat(sp.items[3] ?? sp.items[2])]) {
+      if (isAtom(m)) out.push(m.value);
+      else if (isList(m) && isAtom(m.items[0])) out.push(m.items[0].value);
+    }
+    return out;
   }
 
   /** 一格 `(name X)`。 */
@@ -2878,7 +2888,7 @@ class JncLower {
     for (const t of this.flat(n.items[2])) {
       if (!isList(t) || head(t) !== 'targ') return null;
       const tn = t.items[1];
-      let sp = this.tmplSpec(tn);
+      let sp = this.tmplSpec(tn, true);
       if (sp === null) return null;
       let key;
       // 实参本身是一格实例化：先把里层造出来，再拿它的名字当一格普通类型名用
@@ -2891,13 +2901,17 @@ class JncLower {
         key = this.tmplKey(sp);
         if (key === null) return null;
       }
-      /* 实参带 `*`（第一百二十刀）：替换只在 type-spec 那一层 —— 所以先给那一格指针类型
-         **起个名字**（合成一格 `typedef Bucket* jnc$tp$Bucket_p;`），再拿这个名字替进去。
-         语言里"给类型起名字"本来就是 typedef 那一格，不用新造机制；合成的那一条排在名单里，
-         `run()` 的 typedef 那一遍（排在 typeName 之后、typeDecl 之前）照常收它。 */
+      /* 实参带 `*`（第一百二十刀）或者带修饰符（`T const*`，第一百二十一刀）：替换只在
+         type-spec 那一层 —— 所以先给那一格类型**起个名字**（合成一格
+         `typedef Bucket* jnc$tp$Bucket_p;` / `typedef int const* jnc$tp$int_const_p;`），
+         再拿这个名字替进去。语言里"给类型起名字"本来就是 typedef 那一格，不用新造机制；
+         合成的那一条排在名单里，`run()` 的 typedef 那一遍（排在 typeName 之后、typeDecl
+         之前）照常收它。修饰符要**记进名字**里 —— `Box<int const*>` 与 `Box<int*>` 不是
+         同一个类型，名字不分开就成了静默的错答案。 */
       const np = isList(tn) ? this.flat(tn.items[2]).length : 0;
-      if (np > 0) {
-        key = `${key}${'_p'.repeat(np)}`;
+      const mods = isList(tn) && isList(tn.items[1]) ? this.tmplMods(tn.items[1]) : [];
+      if (np > 0 || mods.length > 0) {
+        key = `${key}${mods.map((w) => `_${w}`).join('')}${'_p'.repeat(np)}`;
         const alias = `jnc$tp$${key}`;
         if (!this.tmplPtrs.has(alias)) {
           this.tmplPtrs.add(alias);
