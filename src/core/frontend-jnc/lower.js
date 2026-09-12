@@ -7348,7 +7348,7 @@ class JncLower {
     const pi = this.props.get(pn);
     const g = `${pn}$get`;
     if (!this.fns.has(g)) {
-      const hv = this.hostProp(n, pn, pi, self, 'get', null);
+      const hv = this.hostProp(n, pn, pi, self, 'get', null, subs);
       if (hv !== undefined) return hv;
       return this.nope(n, `读属性 '${shown(pn)}' —— 它的取值器没有定义`
         + '（简单声明式的体写在别处：`T p.get() { … }`，prop_simple.rst:25）');
@@ -7377,7 +7377,7 @@ class JncLower {
     }
     const s = `${pn}$set`;
     if (!this.fns.has(s)) {
-      const hv = this.hostProp(n, pn, pi, self, 'set', { node: valNode, pad });
+      const hv = this.hostProp(n, pn, pi, self, 'set', { node: valNode, pad }, subs);
       if (hv !== undefined) return hv;
       return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
         + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
@@ -7404,7 +7404,7 @@ class JncLower {
    *
    * 回 `undefined` 表示"这一格不是宿主面的"（调用方接着发它自己那句诊断）；回 null 是报过错了。
    */
-  hostProp(n, pn, pi, self, kind, val) {
+  hostProp(n, pn, pi, self, kind, val, subs = []) {
     if (pi === undefined || pi.cls === null || !this.opaques.has(pi.cls)) return undefined;
     /* 两种写法都算宿主面（第一百六十刀 + 第一百六十二刀）：
          - 完整声明式里那格**只有原型**的取/存（`property m_value { void set(variant_t); }`，
@@ -7418,15 +7418,36 @@ class JncLower {
       /* 体里明写了另一半、这一半没写：那是"这格属性只有取值器 / 只有存值器"，不是宿主面。 */
       return undefined;
     }
-    if (pi.idx.length > 0) {
-      return this.nope(n, `${kind === 'get' ? '读' : '写'}属性 '${shown(pn)}' —— 它是带下标的、`
-        + '而取/存那两格的体在宿主那边（那一格要先把下标也摆进 C_ABI 那张表）');
-    }
     const sf = this.propSelf(n, pn, pi, self);
     if (sf === null) return null;
     const sym = `${pi.cls.replace(/\$/g, '_')}_${kind}_${pn.slice(pn.lastIndexOf('$') + 1)}`;
     const words = ['ptr'];
     const parts = [sf.trim()];
+    /* 索引属性（第一百七十二刀）：那几格下标摆在 `self` 后头、值前头 —— 与这一层自己发的
+       `(call p$get self i…)` / `(call p$set self i… v)` 同一个顺序（第七十刀）。
+       下标的类型与含义都由写的人定（prop_indexed.rst:15），所以照旧逐个过 C_ABI 那张表。 */
+    if (pi.idx.length > 0) {
+      if (subs.length !== pi.idx.length) {
+        return this.err(n, `索引属性 '${shown(pn)}' 要 ${pi.idx.length} 个下标，`
+          + `这里给了 ${subs.length} 个`);
+      }
+      for (let i = 0; i < subs.length; i++) {
+        const w = this.cabiWordOfJnc(pi.idx[i], false);
+        if (w === null) {
+          return this.nope(n, `索引属性 '${shown(pn)}' 的第 ${i + 1} 个下标的类型 `
+            + `${tyName(pi.idx[i])}（落不进 C_ABI 的那几个词；体在宿主那边）`);
+        }
+        let iv = this.expr(subs[i], pi.idx[i]);
+        if (iv === null) return null;
+        if (isInt(iv.type) && isInt(pi.idx[i])) iv = intConv(iv, pi.idx[i]);
+        if (!this.assignOk(iv.type, pi.idx[i])) {
+          return this.err(subs[i], `索引属性 '${shown(pn)}' 的第 ${i + 1} 个下标要 `
+            + `${tyName(pi.idx[i])}，这里是 ${tyName(iv.type)}`);
+        }
+        words.push(w);
+        parts.push(iv.code);
+      }
+    }
     let rw = 'void';
     if (kind === 'get') {
       rw = this.cabiWordOfJnc(pi.type, true);
