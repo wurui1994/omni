@@ -8836,9 +8836,25 @@ class JncLower {
     const ns = asNs ? this.qname(it.items[2]) : null;
     const hdrNode = asNs ? it.items[3] : it.items[2];
     if (asNs && ns === null) return this.err(it, 'import … as 后面那个名字认不出来');
+    /* `.jncx`（第二百一十刀把第六十刀那条"永久边界"改成一句提醒）：那一句在 jancy 里**只**做
+       一件事 —— 把那个编译好的扩展库装进来（`addImport` 里 `isExtensionLib` 那一支走
+       `loadDynamicLib`）。**声明不在它里头**：`io_base` 那个库的源码表是**空的**
+       （`JNC_BEGIN_LIB_SOURCE_FILE_TABLE(IoLib)` 紧跟着就 `END`，jnc_io_IoLib.cpp:155-156），
+       所以写 `import "io_base.jncx"` 的文件**另外**还写着 `import "io_SocketAddress.jnc"`
+       那几句（UdpFlowMonSession.jnc:7-10 就是这个形状）—— 名字是从后面那几句来的。
+
+       于是这一句在这一层没有可发的东西：「有哪些符号」由那几句 `.jnc` import 说，「它们的体在
+       哪儿」由 C_ABI 那条约定说（只有原型的就是宿主符号，第一百八十三 / 一百九十七刀）。
+       `.jncx` 自己是**构建产物**，整棵参考树里一个都没有，名字也无从落成一句 `(lib …)` ——
+       编一个出来是发明。所以这一句照旧不发东西，但**不再拦整份文件**：先前那一格
+       `还不收` 把后面所有的诊断都盖住了，而这儿其实什么都不缺。
+
+       代价照实记：`.jncx` 的名字写错了这一层看不出来 —— 与 `(cabi …)` 那条路一样，
+       从"编译期一句诊断"变成"链接期找不着符号"（ADR-0022 的 J4b 早就接受了这一笔）。 */
     if (spec.endsWith('.jncx')) {
-      return this.nope(it, `import "${spec}"（.jncx 是编译好的扩展库、不是源码；`
-        + '这一层走的是另一条路：直接 import "libfoo.dylib"，声明照旧写在源码里）');
+      this.warn(it, `import "${spec}"：这一层不装编译好的扩展库 —— 声明从那几句 .jnc import 来、`
+        + '体按 C_ABI 那条约定去找（这一句在这儿是空跑）');
+      return null;
     }
     /* 动态库：不进那张"再解一份源码"的待办表，而是记成一句 `(lib …)`。
        三个平台的后缀都收，`.so.6` 那种带版本号的也算（Linux 上很常见）。

@@ -1,0 +1,10 @@
+// `import "…​.jncx"` 那一句在这一层是空跑（第二百一十刀），名字从**这一份**来 ——
+// 与 jancy 那边一模一样：`io_base` 那个库的源码表是空的（jnc_io_IoLib.cpp:155-156），
+// 写 `import "io_base.jncx"` 的文件另外还写着 `import "io_SocketAddress.jnc"` 那几句。
+namespace io {
+
+long twice(long x) {
+	return x * 2;
+}
+
+} // namespace io

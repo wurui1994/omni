@@ -1,8 +1,0 @@
-// `.jncx` 的 import（第六十刀）。那是**编译好的动态扩展库**，不是源码：jancy 走的是
-// loadDynamicLib（jnc_ct_ImportMgr.cpp:41-49）。这一格是**永久边界** —— 整棵参考树里
-// 一个 `.jncx` 文件都没有，它们是构建产物（C++ 写的扩展库编出来的），没有源码可降。
-import "io_base.jncx"
-
-int main() {
-    return 0;
-}

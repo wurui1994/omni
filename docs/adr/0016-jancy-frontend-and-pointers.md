@@ -10108,6 +10108,37 @@ size_t errorcode transmit(string_t text) {                  // :35 带体
   文件降不下来就一路挡着"（这回是 `std_HashTable.jnc` 那条链）；lowered `155`、clean `222` 没动。
 - 一起编那张榜：`40 -> 39`、理由 `20 -> 19`。
 
+### 第二百一十刀：`import "X.jncx"` 从"永久边界"改成一句提醒
+
+榜上 `import "io_base.jncx"` 那一行 81 处（sole 0）。第六十刀把它记成**永久边界**，理由是
+"`.jncx` 是构建产物、没有源码可降"。这一趟读 jancy 的源码时发现那条理由只对了一半：
+
+那一句在 jancy 里**只**做一件事 —— 把那个编译好的扩展库装进来（`addImport` 里
+`isExtensionLib` 那一支走 `loadDynamicLib`）。**声明不在它里头**：`io_base` 那个库的源码表是
+**空的**（`JNC_BEGIN_LIB_SOURCE_FILE_TABLE(IoLib)` 紧跟着就 `END`，jnc_io_IoLib.cpp:155-156），
+所以写 `import "io_base.jncx"` 的文件**另外**还写着 `import "io_SocketAddress.jnc"` 那几句
+（UdpFlowMonSession.jnc:7-10 就是这个形状）—— 名字是从后面那几句来的。
+
+于是这一层什么都不缺：「有哪些符号」由那几句 `.jnc` import 说，「体在哪儿」由 C_ABI 那条约定说
+（只有原型的就是宿主符号，第一百八十三 / 一百九十七刀）。`.jncx` 自己无从落成一句 `(lib …)`
+——那个名字在这棵树里根本不存在，编一个出来是发明。所以它照旧**不发东西**，但**不再拦整份
+文件**：先前那一格 `还不收` 把后面所有的诊断都盖住了。改成一句 `warning`。
+
+代价照实记：`.jncx` 的名字写错了这一层看不出来 —— 与 `(cabi …)` 那条路一样，从"编译期一句
+诊断"变成"链接期找不着符号"（ADR-0022 的 J4b 早就接受了这一笔）。
+
+判据从"墙"翻面成"用例"：退了 `bad/import-jncx`，新的正面判据是
+`tests/jnc/cases/164-importjncx.jnc` —— 两句 `.jncx`（空跑）夹着一句真的
+`import "imports/jncxdecl.jnc"`，`io.twice(21)` 印 42。`tests/jnc/run.js` 顶上那份"四种拒"的
+名单也跟着改了（那一格从"这一层不做"里退出来）。
+
+- 腿：`node tests/jnc/run.js` 291/0（新增 `cases/164-importjncx`，退了 `bad/import-jncx`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：clean `222 -> 225`（+3）、lowered `155`、`(文件, 拦路项)` 对 `4055` **没动**——
+  那 81 处 `N` 没了，同时冒出来差不多同样多的**新**对（那些文件后面的真诊断先前被这一格盖着）。
+  数字没动而账变了：这是"墙往里挪"最干净的一次 —— 总数一样，说的话全换成了真的那几件事。
+- 一起编那张榜：`39`、理由 `19` 没动（那一批 44 份里没有 `.jncx`）。
+
 
 
 ## 后果与代价
