@@ -8680,6 +8680,37 @@ string_t key = storage.readString($"%1-key-%2"(name, i));   // 只给一个
   那 91 处与同族几行一起让开。
 - leg `278 / 0`、llvm `38 / 0`。
 
+## 第一百七十刀：方法体里**裸写**的宿主面方法
+
+```jnc
+opaque class Representation {
+    void addPart(PartKind partKind, uint64_t partCode, void const* p, size_t size);
+
+    void addBreak(bool isHardBreak = false) {
+        addPart(PartKind.Break, isHardBreak, null, 0);   // ← 裸写，`this` 就是那个对象
+    }
+}
+```
+
+（log_Representation.jnc:112-137；group 榜上 19 处。）宿主面那一问（`hostFns`）先前只走
+`obj.m(…)` 那一种 —— 裸写时调用点手里的"方法名"是 null，于是落到"原型没有带体的定义"那句话上。
+可这儿的 `this` 就是那个对象：主人是当前这个类（或它的基类）时，按宿主面那条路发，`self` 就是
+`$this`。`hostMethodCall` 因此多收一格现成的 `self`（`obj.m(…)` 那一种照旧自己去求左边那个值）。
+
+### 账：group `124 -> 117`（−7）、逐份 pairs `4714 -> 4786`（**+72**）
+
+数又是一涨一跌，理由与第一百六十二刀那次一样 —— **墙往里挪了一格**：这 19 处（以及别处同形状的）
+现在真走到了宿主面，停在两道**已经记过账的**真墙上：
+
+- `'…' 的第 3 个形参的类型 variant_t（落不进 C_ABI 的那几个词）` 88 处、
+  `log.RangeProcessor* function*()` 41 处 —— C_ABI 那几个词装不下"带标签的一格值"与函数值
+  （第一百六十三刀那一节末尾记的那笔）；
+- `'…' 在 opaque class 里声明了同名的两条` 从 20 涨到 69 —— 宿主面的**重载怎么起符号名**那条约定
+  还没定（第一百六十四刀那一节记的那笔）。
+
+也就是说这 +72 不是新问题，是**把 19 处假墙换成了两道真墙上的更多格**。group 那张榜（诊断条数）
+反而降了 7，那是同一件事在另一个尺子上的样子：一份文件里少了几条认错人的话。
+
 ## 后果与代价
 
 

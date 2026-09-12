@@ -11289,15 +11289,17 @@ class JncLower {
    * 体在哪个库里由源码另说一句（`import "libfoo.dylib"`）—— 与 `(cabi …)`/`(lib …)` 的
    * 分工完全一致：这一格只说"有这么个符号、它是这么声明的"。
    */
-  hostMethodCall(n, callee, owners, mn) {
+  hostMethodCall(n, callee, owners, mn, selfVal = null) {
     const some = [...owners][0];
-    if (head(callee) !== 'field') {
+    if (selfVal === null && head(callee) !== 'field') {
       return this.err(n, `'${shown(some)}.${mn}' 要一个对象来调它`);
     }
-    const ob = callee.items[1];
-    let bv = null;
-    // `.` 的左边读出来那一格（第一百一十六刀抽成一处，属性走取值器）
-    bv = this.baseVal(ob);
+    let bv = selfVal;
+    if (bv === null) {
+      const ob = callee.items[1];
+      // `.` 的左边读出来那一格（第一百一十六刀抽成一处，属性走取值器）
+      bv = this.baseVal(ob);
+    }
     if (bv === null) return null;
     if (!isClass(bv.type)) {
       return this.err(n, `'${tyName(bv.type)}' 不是类，上面问不出方法 '${mn}'`);
@@ -12262,6 +12264,17 @@ class JncLower {
          而求值会发诊断），所以**不挑一个说**，免得像第一百四十五刀量到的那样指着别的类。 */
       const bare = mn !== null ? mn
         : (nm0 !== null && !nm0.includes('.') && this.selfClass !== null ? nm0 : null);
+      /* 方法体里**裸写**的宿主面方法（第一百七十刀）：`addPart(PartKind.Break, …)` 写在同一个
+         `opaque class` 的另一个方法里（log_Representation.jnc:136 那一族，group 榜上 19 处）。
+         上面那一问（hostFns）只走 `obj.m(…)` 那一种 —— 裸写时 `mn` 是 null，于是落到下面那句
+         "原型没有带体的定义"。可这儿的 `this` 就是那个对象：主人是当前这个类（或它的基类）时，
+         按宿主面那条路发，`self` 就是 `$this`。 */
+      const hb = bare === null ? undefined : this.hostFns.get(bare);
+      if (hb !== undefined && this.selfClass !== null
+        && (hb.has(this.selfClass) || [...hb].some((o) => this.isBase(o, this.selfClass)))) {
+        return this.hostMethodCall(n, null, hb, bare,
+          { code: '(var $this)', type: tClass(this.selfClass, false) });
+      }
       const owners = bare === null ? undefined : this.protoMethods.get(bare);
       if (owners !== undefined) {
         const who = [...owners].map((o) => `${shown(o)}.${bare}`).join(' / ');
