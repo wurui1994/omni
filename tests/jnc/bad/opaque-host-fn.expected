@@ -1,1 +1,1 @@
-'Lock.lock' 的第 1 个形参的类型 variant_t（落不进 C_ABI 的那几个词）
+'Lock.onEach' 的第 1 个形参的类型 void function*(int)（落不进 C_ABI 的那几个词）

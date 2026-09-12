@@ -7456,7 +7456,7 @@ class JncLower {
           + ' C_ABI 的那几个词（体在宿主那边）');
       }
     } else {
-      const w = this.cabiWordOfJnc(pi.type, false);
+      const w = isVar(pi.type) ? 'ptr' : this.cabiWordOfJnc(pi.type, false);
       if (w === null) {
         return this.nope(n, `写属性 '${shown(pn)}' —— 它的类型 ${tyName(pi.type)} 落不进`
           + ' C_ABI 的那几个词（体在宿主那边）');
@@ -7469,7 +7469,11 @@ class JncLower {
           + `这儿给的是 ${tyName(v.type)}`);
       }
       words.push(w);
-      parts.push(v.code);
+      if (isVar(pi.type)) {
+        const pv = this.hostVariantArg(val.node, v);
+        if (pv === null) return null;
+        parts.push(pv);
+      } else parts.push(v.code);
     }
     if (!this.cabiNames.has(sym)) {
       this.decls.push(`  (cabi ${sym} ${rw} (${words.join(' ')}))`);
@@ -11320,6 +11324,32 @@ class JncLower {
    * 剩一条就是它；剩几条按**实参类型**排（argCost），问不出实参类型的明说不收（第八十刀那条
    * "绝不猜"），同分的也明说（jancy 那边这也是 ambiguous）。
    */
+  /**
+   * 一格 `variant_t` 过宿主面（第一百七十三刀）：**过去的是一格地址**。
+   *
+   * 为什么这不是猜：jancy 的 `variant_t` 在 C 那一侧是 `struct jnc_Variant`
+   * （include/jnc_Variant.h:150-189 —— 48 字节的 union + 一格补白 + 一格 `jnc_Type*`，
+   * 64 位机上共 64 字节），而 64 字节的聚合在 SysV x86-64 与 AAPCS64 上都**按内存过**：
+   * 被调方拿到的本来就是一个地址，调用方负责那份拷贝。这一刀照这个形状发。
+   *
+   * 指向的那块按**这一层自己**那格 variant 的表示（`variantTy()`）—— 与 `Owner_method` 那条
+   * 约定同一性质：宿主本来就是照我们的约定写的（选项 A，见 ADR-0016 那一节）。
+   *
+   * "那份拷贝"要一格临时内存，而那是**一条语句** —— 用第五十八刀那条现成的落点（`ecOut`）。
+   * 惰性位置上落点是关着的（`ecLazy`），那时明说不收：那儿插一句就把求值顺序改了。
+   */
+  hostVariantArg(node, v) {
+    if (this.ecOut === null) {
+      return this.nope(node, '这个位置上把一格 variant_t 过给宿主 —— 那要先把它落进一格临时'
+        + '内存（一条语句），而这儿插不进去（见 EC_HOIST）');
+    }
+    const t = `$vt${this.tmp++}`;
+    const pt = `(ptr ${VARIANT})`;
+    this.ecOut.push(`${this.ecPad}(let ${t} ${pt} (pnew ${pt} (int 1)))`);
+    this.ecOut.push(`${this.ecPad}(pstore (var ${t}) ${v.code})`);
+    return `(var ${t})`;
+  }
+
   hostPick(n, owner, mn, sigs) {
     if (sigs.length === 1) return { sig: sigs[0], i: 0 };
     const args = this.flat(n.items[2]);
@@ -11426,7 +11456,8 @@ class JncLower {
     const words = ['ptr'];
     const parts = [bv.code];
     for (let i = 0; i < args.length; i++) {
-      const w = this.cabiWordOfJnc(sig.params[i], false);
+      /* `variant_t` 那一格过去的是地址（第一百七十三刀）；别的类型照旧问 C_ABI 那张表。 */
+      const w = isVar(sig.params[i]) ? 'ptr' : this.cabiWordOfJnc(sig.params[i], false);
       if (w === null) {
         return this.nope(n, `'${shown(owner)}.${mn}' 的第 ${i + 1} 个形参的类型 `
           + `${tyName(sig.params[i])}（落不进 C_ABI 的那几个词）`);
@@ -11439,7 +11470,11 @@ class JncLower {
           + `${tyName(sig.params[i])}，这里是 ${tyName(v.type)}`);
       }
       words.push(w);
-      parts.push(v.code);
+      if (isVar(sig.params[i])) {
+        const pv = this.hostVariantArg(args[i], v);
+        if (pv === null) return null;
+        parts.push(pv);
+      } else parts.push(v.code);
     }
     /* 一个符号只发一句声明（方言那侧重复声明是错）。 */
     if (!this.cabiNames.has(sym)) {
@@ -11469,7 +11504,7 @@ class JncLower {
     const words = ['ptr'];
     const vals = [];
     for (let i = 0; i < argNodes.length; i++) {
-      const w = this.cabiWordOfJnc(sig[i], false);
+      const w = isVar(sig[i]) ? 'ptr' : this.cabiWordOfJnc(sig[i], false);
       if (w === null) {
         return this.nope(n, `'${shown(cls)}' 的 construct 的第 ${i + 1} 个形参的类型 `
           + `${tyName(sig[i])}（落不进 C_ABI 的那几个词）`);
@@ -11482,7 +11517,11 @@ class JncLower {
           + `${tyName(sig[i])}，这里是 ${tyName(v.type)}`);
       }
       words.push(w);
-      vals.push(v);
+      if (isVar(sig[i])) {
+        const pv = this.hostVariantArg(argNodes[i], v);
+        if (pv === null) return null;
+        vals.push({ code: pv, type: tPtr(this.variantTy()) });
+      } else vals.push(v);
     }
     if (!this.cabiNames.has(sym)) {
       this.decls.push(`  (cabi ${sym} void (${words.join(' ')}))`);
