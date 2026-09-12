@@ -1096,6 +1096,11 @@ class JncLower {
     this.opaques = new Set();
     // 宿主那边的成员（第六十六刀）：`hostFns` 是方法的裸名 -> 类名，`hostCtors` 是
     // "construct 在宿主那边"的类名。两者都只在**按名字查不着**之后才问，见 callName。
+    /* 名字 -> **一组**主人（第一百六十八刀把它从"一格"改成"一组"）：同一个方法名可以在好几个
+       `opaque class` 上各声明一条（`setOptions` 在 `ui.FlagProperty` 与 `ui.EnumProperty` 上都有，
+       ui_PropertyGrid.jnc:145/334）。先前这儿只记一格 —— 后声明的盖掉前面的，于是
+       `enumProp.setOptions(…)` 会按**另一个类**那一条去查型、发的还是那个类的符号，
+       是个静默的错答案（逐份榜上 88 处）。 */
     this.hostFns = new Map();
     /* 那些方法的**签名**（`类名$方法名` -> `{owner, ret, params}`，jnc 类型）。调用点靠它
        发 `(cabi Owner_method …)` 与 `(ccall Owner_method self …)`（ADR-0022 的 J4b 最后一步）。 */
@@ -5544,7 +5549,9 @@ class JncLower {
              名字与**签名**都记下来：调用点据此发 `(ccall Owner_method self …)`。
              体外真写了定义时这一格用不上（调用那边先按名字查，查着了就不问这里）。 */
           if (cls && key === 'opaque class') {
-            this.hostFns.set(info.name, name);
+            const hf = this.hostFns.get(info.name);
+            if (hf === undefined) this.hostFns.set(info.name, new Set([name]));
+            else hf.add(name);
             const hps = this.formalList(info.formals);
             if (hps !== null) {
               const hk = `${name}$${info.name}`;
@@ -11274,7 +11281,33 @@ class JncLower {
    * 体在哪个库里由源码另说一句（`import "libfoo.dylib"`）—— 与 `(cabi …)`/`(lib …)` 的
    * 分工完全一致：这一格只说"有这么个符号、它是这么声明的"。
    */
-  hostMethodCall(n, callee, owner, mn) {
+  hostMethodCall(n, callee, owners, mn) {
+    const some = [...owners][0];
+    if (head(callee) !== 'field') {
+      return this.err(n, `'${shown(some)}.${mn}' 要一个对象来调它`);
+    }
+    const ob = callee.items[1];
+    let bv = null;
+    // `.` 的左边读出来那一格（第一百一十六刀抽成一处，属性走取值器）
+    bv = this.baseVal(ob);
+    if (bv === null) return null;
+    if (!isClass(bv.type)) {
+      return this.err(n, `'${tyName(bv.type)}' 不是类，上面问不出方法 '${mn}'`);
+    }
+    /* 主人按**对象**认（第一百六十八刀）：同一个方法名可以在好几个 `opaque class` 上各声明一条
+       （`setOptions` 在 `ui.FlagProperty` 与 `ui.EnumProperty` 上都有，ui_PropertyGrid.jnc:145/334）。
+       先前 `hostFns` 一个名字只记一格主人，后声明的盖掉前面的 —— 于是 `enumProp.setOptions(…)` 按
+       `FlagProperty` 那一条查型、发的还是 `FlagProperty_setOptions`，是个静默的错答案（逐份榜上
+       88 处报的"第 1 个实参要 ui.FlagPropertyOption*，这里是 ui.ListItem*"就是它）。
+       这儿先看对象自己那个类，再往基类走 —— 与普通方法查名同一条路。 */
+    let owner = owners.has(bv.type.name) ? bv.type.name : null;
+    if (owner === null) {
+      for (const o of owners) if (this.isBase(o, bv.type.name)) { owner = o; break; }
+    }
+    if (owner === null) {
+      return this.err(n, `'${tyName(bv.type)}' 上没有方法 '${mn}'（同名那几条声明在`
+        + `${[...owners].map((o) => ` '${shown(o)}'`).join('、')} 上）`);
+    }
     const sig = this.hostSigs.get(`${owner}$${mn}`);
     if (sig === undefined) {
       return this.nope(n, `'${shown(owner)}.${mn}'（这个方法的原型没收下来）`);
@@ -11284,17 +11317,6 @@ class JncLower {
     if (this.hostOverloaded.has(`${owner}$${mn}`)) {
       return this.nope(n, `'${shown(owner)}.${mn}' 在 opaque class 里声明了同名的两条 ——`
         + ' 宿主那边一个符号只有一份签名（C 没有重载），这一层挑不出按哪一条过');
-    }
-    if (head(callee) !== 'field') {
-      return this.err(n, `'${shown(owner)}.${mn}' 要一个对象来调它`);
-    }
-    const ob = callee.items[1];
-    let bv = null;
-    // `.` 的左边读出来那一格（第一百一十六刀抽成一处，属性走取值器）
-    bv = this.baseVal(ob);
-    if (bv === null) return null;
-    if (!isClass(bv.type)) {
-      return this.err(n, `'${tyName(bv.type)}' 不是类，上面问不出方法 '${mn}'`);
     }
     const sym = `${owner.replace(/\$/g, '_')}_${mn}`;
     const rw = this.cabiWordOfJnc(sig.ret, true);
@@ -12191,8 +12213,8 @@ class JncLower {
     /* 名字查不着，而它是某个 `opaque class` 上声明过的方法（第六十六刀 + ADR-0022 的 J4b）：
        那不是"没有这个函数"，是**实现在宿主那边** —— 发 `(ccall Owner_method self …)`。 */
     if (nm === null) {
-      const hostOwner = mn === null ? undefined : this.hostFns.get(mn);
-      if (hostOwner !== undefined) return this.hostMethodCall(n, callee, hostOwner, mn);
+      const hostOwners = mn === null ? undefined : this.hostFns.get(mn);
+      if (hostOwners !== undefined) return this.hostMethodCall(n, callee, hostOwners, mn);
     }
     /* `with "h.h"` 收进来的那些（ADR-0022 的 J4d）：调用点发 `(ccall …)` 而不是
        `(call …)` —— 实参已经是机器值，不过 marshaler。实参与返回都按**声明**检查，

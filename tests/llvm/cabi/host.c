@@ -63,6 +63,14 @@ int64_t Counter_add(void *self, int64_t d) {  int64_t *p = probe_slot(self);
   return *p;
 }
 
+/* 同名方法在**两个** opaque class 上各一条（第一百六十八刀）：`Owner.method` 对着的符号带类名，
+   所以这两条是两个符号。这一格故意与 Counter_add 算得不一样（乘 2），好让"按对象挑的是哪一条"
+   在输出上看得见 —— 先前那一层一个方法名只记一格主人，后声明的盖掉前面的。 */
+int64_t Other_add(void *self, int64_t d) {
+  (void)self;
+  return d * 2;
+}
+
 int64_t Counter_value(void *self) {
   int64_t *p = probe_slot(self);
   return p == NULL ? -1 : *p;

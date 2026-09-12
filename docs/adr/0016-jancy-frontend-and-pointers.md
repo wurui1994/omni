@@ -8625,6 +8625,34 @@ return m_operatorTable[i][j];    // 按指针种类查表：ref -> ptr
   堆上的一格（malloc）——"这一格要活过这次调用"这件事三种做法（jancy 的 GC、这一层的提格、C 的
   malloc）在可观测的东西上一样。字段那一格也钉着：`inner(p)` 回的是 `&p.m_b`，写进去在 `p` 上看得见。
 
+## 第一百六十八刀：宿主面的主人按**对象**认 —— 又一个静默的错答案
+
+`setOptions` 在 `ui.FlagProperty` 与 `ui.EnumProperty` 上**各声明一条**（ui_PropertyGrid.jnc:145 与
+:334，两个都是 `opaque class`）。而 `hostFns` 是"方法名 -> 一格主人"—— 后声明的盖掉前面的。于是
+
+```jnc
+EnumProperty* prop = new EnumProperty(name);
+prop.setOptions(optionArray, count);     // optionArray 是 EnumPropertyOption const*
+```
+
+按 **FlagProperty** 那一条去查型、发的还是 `FlagProperty_setOptions`：逐份榜上那 88 处
+`'…' 的第 1 个实参要 ui.FlagPropertyOption*，这里是 ui.ListItem*` 就是它 —— 报出来的是"你传错了
+类型"，真相是**这一层挑错了主人**。运气差一点（两条签名兼容）就不是报错、而是发错符号。
+
+改法：`hostFns` 从"一格主人"改成"一组主人"，调用点先求出 `.` 左边那个对象的类，按**它自己那个类
+再往基类走**挑主人（与普通方法查名同一条路）；一个都对不上时说"这个类上没有这个方法（同名那几条
+声明在 … 上）"。这与第一百六十四刀是同一族的第三格：**按名字记的表，一个名字只留一格，就是在给
+静默的错答案留门**（那一刀是 `hostSigs`，这一刀是 `hostFns`）。
+
+正面判据在 `tests/llvm/run.js` 第 9 节：那儿现在有**两个** opaque class 各声明一条 `add`
+（`Counter_add` 加、`Other_add` 乘 2），`o.add(21)` 印出 `other 42` —— 42 证明挑的是对象自己那一条。
+
+### 账：pairs `4877 -> 4823`（−54）
+
+- 逐份那张榜：lowered `121`、clean `192` 没动，pairs `4877 -> 4823`；那 88 处整片让开（剩下的
+  −54 是它与别的行的重叠：同一份文件里那一格先前算一条，现在别的理由还在）。
+- leg `278 passed / 0 failed`、llvm `38 passed / 0 failed`。
+
 ## 后果与代价
 
 
