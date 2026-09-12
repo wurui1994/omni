@@ -1203,6 +1203,10 @@ class JncLower {
     /* 顶层**只有原型**的函数（第一百五十一刀）：`size_t errorcode receive(void* p, size_t size,
        uint_t timeout = -1);`（ias.jnc:43）—— 那一遍（globalDecl）排在函数体那一遍之前，
        所以调用点问得着。用处与 protoMethods 一样：调它报的不该是"没有这个函数"。 */
+    /* 声明那一句自己没成（类型认不出来那一族）、于是名字**没登记上**的那几格（第二百三十五刀）：
+       后面每一处用到它都跟着报一句"未声明的变量"，那是认错人 —— 声明明明写着，是那一句先没成。
+       记在这儿，好在查名那两处说准。 */
+    this.badNames = new Set();
     this.protoFns = new Set();
     /* 顶层那些只有原型的函数的签名（第一百八十五刀）：名字 -> `{ret, params, defs}`。
        调用点据此发 `(ccall <全名把 $ 换成 _> …)` —— 与类里那些（hostSigs）同一条约定。 */
@@ -7837,7 +7841,8 @@ class JncLower {
          报的是 "argument (%d) of '%s' has no default value"），而中间那一格空着怎么说，
          第八十八刀已经给出来了 —— `f(1,,3)`。所以这儿不该拦。 */
       const fsp = this.specs(f.items[1]);
-      if (fsp === null) return null;
+      // 形参的类型认不出来时也把名字记下来（第二百三十五刀，与 localDecl 那一处同一条）
+      if (fsp === null) { this.badDeclNames(f.items[2]); return null; }
       // 形参上的 `property`（第七十刀）：那是一格**属性指针**（`int property* p`，
       // 35_PropertyPtr.jnc:97-126）—— 里头存的是"取/存两个函数 + 那个对象"，与函数指针两码事。
       // 这一层没有那一格类型，而 `property` 这个词 specs 是收下的：不在这儿拦就会被悄悄
@@ -10043,10 +10048,27 @@ class JncLower {
     return null;
   }
 
+  /** 一串（或一格）声明符上写着的那几个名字（第二百三十五刀）。**一个字都不发** ——
+   *  这一句的用处只有一个：那条声明自己已经报过错了，把名字记进 `badNames`，
+   *  好让查名那两处说"声明写着，是那一句先没成"，而不是"未声明的变量"。 */
+  badDeclNames(dclsNode) {
+    for (const d of this.flat(dclsNode)) {
+      let dcl = d;
+      const dh = isList(d) ? head(d) : null;
+      if (dh === 'init' || dh === 'ref-init') dcl = d.items[1];
+      if (!isList(dcl) || head(dcl) !== 'dcl') continue;
+      const nm = this.qname(dcl.items[2]);
+      if (nm !== null) this.badNames.add(nm);
+    }
+  }
+
   localDecl(n, ind) {
     const pad = ' '.repeat(ind);
     const sp = this.specs(n.items[1]);
-    if (sp === null) return null;
+    /* 说明符那一句就没成（第二百三十五刀）：诊断已经发过一次了，可这几个名字**一格都没登记上**,
+       于是后面每一处用到它们又各报一句"未声明的变量" —— 一件事记成好几笔。把名字记下来，
+       查名那两处据此说准。 */
+    if (sp === null) { this.badDeclNames(n.items[2]); return null; }
     // 函数体里的 `int property* p` 是一格**属性指针**（35_PropertyPtr.jnc:97-126）：里头存的
     // 是"取/存两个函数 + 那个对象"。这一层没有那一格类型，而 `property` 这个词 specs 是收下
     // 的 —— 不在这儿拦，它就会被悄悄降成一格普通指针（第七十刀）。
@@ -10439,6 +10461,16 @@ class JncLower {
         if (pq !== null) {
           return this.nope(n, `属性 '${shown(pq)}' 当一格可写的内存用 —— 读写各是一次调用，`
             + '`++`、`&` 与复合赋值这类"就地改"的写法这一层接不上');
+        }
+      /* 那格声明自己没成（第二百三十五刀）：名字**写着**，只是那一句先报了错（类型认不出来
+         那一族），于是它一格都没登记上。这儿再说"未声明的变量"就是认错人，而且把一件事记成
+         好几笔（一个名字用了几处就几笔）。指回那一句。
+         记成**普通错**而不是"还不收"：根上那一句（`没有这个类型`）本来就是普通错，这儿只是
+         它的回声 —— 记成 N 会把那几份文件从"没有还不收"那一格里挤出去（量出来 clean 239 -> 235），
+         而那不是真的多欠了什么。 */
+        if (this.badNames.has(nm)) {
+          return this.err(n, `'${nm}' 那格声明自己没成（上面那一句已经报过）—— 名字写着，`
+            + '可它一格都没登记上，所以这儿用不上它');
         }
         return this.err(n, `未声明的变量 '${nm}'`);
       }
@@ -13244,6 +13276,11 @@ class JncLower {
           // `with "h.h"` 收来的常量（第 J4d 刀）：宏与枚举常量在这儿变成一格字面量。
           const cv = this.cconstLit(n, nm);
           if (cv !== null) return cv;
+          // 同上（第二百三十五刀）：那格声明自己没成，别把一件事记成好几笔
+          if (this.badNames.has(nm)) {
+            return this.err(n, `'${nm}' 那格声明自己没成（上面那一句已经报过）—— 名字写着，`
+              + '可它一格都没登记上，所以这儿用不上它');
+          }
           return this.err(n, `未声明的变量 '${nm}'`);
         }
         // 它在方言里叫什么：见 lvalue 那一处同一句
