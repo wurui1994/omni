@@ -1119,6 +1119,13 @@ class JncLower {
        这件事（那会凭空发一格 `(ccall …)`）。这一格只用来把调用点那句话说对：
        "没有这个函数"是**认错人**（那个名字明明声明过），第九十二刀给顶层原型定的说法照抄过来。 */
     this.protoMethods = new Map();
+    /* 那些只有原型的方法**收几个实参**（第一百六十六刀）：键是 `类$方法`，值是那几条原型的
+       实参个数。第一百五十刀那句话只说得出"同名的还有只有原型的"，说不出"合得上的就是它" ——
+       有了这张表，调用点给的个数正好是其中一条时就能把话说定（那才是真拦路的东西）。
+       只记**个数**、不记类型：类型要走 formalList，那一遍会自己发诊断，而这一格只想把话说对，
+       不想因为记账多报一句。 */
+    this.protoArity = new Map();
+
     /* 那些类里 `construct` **只有原型**的（第一百四十八刀）：与 protoMethods 同一笔账，
        单独一格是因为构造走的不是按名字查那条路（`ctors` / `ctorArgs` / `ctorCall`）。 */
     this.protoCtors = new Set();
@@ -5504,6 +5511,13 @@ class JncLower {
           const ps0 = this.protoMethods.get(info.name);
           if (ps0 === undefined) this.protoMethods.set(info.name, new Set([name]));
           else ps0.add(name);
+          /* 收几个实参也记一笔（第一百六十六刀）：调用点给的个数正好是其中一条时，那句话就能从
+             "同名的还有只有原型的"改成"合得上的那一条就是它"。 */
+          const ak = `${name}$${info.name}`;
+          const av = this.protoArity.get(ak);
+          const an0 = this.flat(info.formals).length;
+          if (av === undefined) this.protoArity.set(ak, new Set([an0]));
+          else av.add(an0);
           // 结构体里的方法原型（第一百〇一刀）：签名由体外那个定义给，这儿一个字都不用发。
           if (!cls) continue;
           if (sp.virt !== null) this.methodProto(d, name, info, sp);
@@ -7948,7 +7962,7 @@ class JncLower {
     if (fits.length === 1) return fits[0];
     if (fits.length === 0) {
       // 那个类里同名的还有只有原型的几条（第一百五十刀）：数出来的个数本来就不全，别说成"对不上"
-      if (this.protoSibling(base)) return this.protoSiblingNope(n, base);
+      if (this.protoSibling(base)) return this.protoSiblingNope(n, base, given);
       const counts = cands.map((c) => shape(c).want.length);
       return this.err(n, `'${shown(base)}' 有 ${cands.length} 条重载，收的实参个数是 `
         + `${counts.join(' / ')}，这里给了 ${given} 个`);
@@ -7976,7 +7990,7 @@ class JncLower {
     }
     if (best === -1) {
       // 同上（第一百五十刀）：合得上的那一条可能就在没进候选的那几条原型里
-      if (this.protoSibling(base)) return this.protoSiblingNope(n, base);
+      if (this.protoSibling(base)) return this.protoSiblingNope(n, base, given);
       return this.err(n, `'${shown(base)}' 的 ${fits.length} 条重载没有一条收得下这几个实参`
         + `（${tys.map((t) => tyName(t.ty)).join(', ')}）`);
     }
@@ -8055,9 +8069,21 @@ class JncLower {
     return owners !== undefined && owners.has(b.slice(0, i));
   }
 
-  /** 上面那一问为真时该说的那句话（第一百五十刀）。 */
-  protoSiblingNope(node, base) {
+  /** 上面那一问为真时该说的那句话（第一百五十刀；第一百六十六刀把它说定了）。
+   *
+   *  `given` 给了、而且**正好有一条原型收这么多个**时，那就不是"可能不在表里"，是"合得上的
+   *  那一条就是它" —— 真拦路的东西是"它没有带体的定义"，与顶层那一格（第九十二刀）同一句话。 */
+  protoSiblingNope(node, base, given = null) {
     const b = /\$o[0-9]+$/.test(base) ? base.slice(0, base.lastIndexOf('$')) : base;
+    if (given !== null) {
+      const ar = this.protoArity.get(b);
+      if (ar !== undefined && ar.has(given)) {
+        /* 个数**不写进这句话**（第一百四十九刀那条口径）：写进去榜上归一那一步就按数字把这一行
+           裂成几十行（量出来是 pairs +323），那种涨数是噪音不是账。要看几个，诊断指着的源码上有。 */
+        return this.nope(node, `原型 '${shown(b)}' 没有带体的定义 —— 同名那几条里收这么多个实参`
+          + '的就是它（实现在宿主那边的走 opaque class 那条路，在别的模块里的要 import 得着）');
+      }
+    }
     return this.nope(node, `'${shown(b)}' 同名的那几条里有只有原型的 —— 只有原型的重载这一层`
       + '还没有收进候选（见 ADR-0016 第一百四十四刀那一段），所以合得上的那一条**可能就不在'
       + '这张表里**：这儿说"对不上"的那个个数与类型都是拿剩下那几条数出来的');
@@ -12215,7 +12241,7 @@ class JncLower {
     if (args === null) return null;
     if (args.length !== want.length) {
       // 同名的还有只有原型的几条（第一百五十刀）：给了几个"不对"是拿不全的那张表数出来的
-      if (this.protoSibling(nm)) return this.protoSiblingNope(n, nm);
+      if (this.protoSibling(nm)) return this.protoSiblingNope(n, nm, args0.length);
       return this.err(n, `'${nm0 === null ? shown(nm) : nm0}' 要 ${want.length} 个实参`
         + `${defs === null ? '' : `（其中 ${defs.filter((d) => d !== null).length} 个有默认值）`}`
         + `，这里给了 ${args0.length} 个`);
@@ -12231,7 +12257,7 @@ class JncLower {
            合得上的那一条可能就在没进候选的那几条里。语料里 `copy(string)`（std_String.jnc:49，
            那个类写着四条 copy）报的是"第 1 个实参要 char*"，而 `copy(string_t)` 那一条明明在。
            与第一百五十刀那三处是同一笔账，只是这一处的出错口是**实参类型**而不是个数。 */
-        if (this.protoSibling(nm)) return this.protoSiblingNope(args[i], nm);
+        if (this.protoSibling(nm)) return this.protoSiblingNope(args[i], nm, args.length);
         return this.err(args[i], `'${nm0 === null ? shown(nm) : nm0}' 的第 ${i + 1} 个实参要 ${tyName(want[i])}，`
           + `这里是 ${tyName(v.type)}`);
       }
