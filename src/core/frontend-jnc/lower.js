@@ -3307,6 +3307,29 @@ class JncLower {
       if (cls !== null) { this.methods.set(full, cls); this.methodNames.add(name); }
       return;
     }
+    /* 目标是这个类里一格**只有原型**的方法（第二百〇六刀）：体在宿主那边（第一百八十三刀），
+       所以别名**不发转手函数** —— 把同一份签名按目标的符号名再登记一格就是了。语料里的原样是
+       `alias dispose = hide;`（ui_Dialog.jnc:126 —— `hide` 是那个 `opaque class` 上只有原型的
+       一格方法）。转手函数在这儿发不出来：那要一句 `(ccall …)`，而 `(ccall …)` 只有原生腿上
+       才有（ADR-0014 的第 4 条决定），发了就把这份模块钉死在一条腿上。 */
+    if (cls !== null && !tgt.includes('.')) {
+      const hs = this.hostSigs.get(`${cls}$${tgt}`);
+      if (hs !== undefined && hs.length > 0) {
+        if (this.hostSigs.has(`${cls}$${name}`)) { this.err(d, `'${shown(full)}' 声明了两次`); return; }
+        const hf = this.hostFns.get(name);
+        if (hf === undefined) this.hostFns.set(name, new Set([cls]));
+        else hf.add(cls);
+        const base = cls.replace(/\$/g, '_');
+        this.hostSigs.set(`${cls}$${name}`, hs.map((one, i) => ({
+          ...one,
+          sym: `${base}_${tgt}${i > 0 ? `_o${i + 1}` : ''}`,
+        })));
+        /* **不**进 methodNames：那张表是"这个名字是一格带体的方法"用的（第五十五刀），
+           进了它 `d.dispose()` 会先落到 memberFn 那儿、报"Dlg 没有方法 'dispose'"——
+           量出来的。宿主面那条路按 hostFns 认名字，那一格就够。 */
+        return;
+      }
+    }
     /* 目标是一格**字段路径**（第一百〇四刀）：`alias m_head = m_list.m_head;`。逐段在字段表里
        解得开就记成一串取字段 —— `this.structs` 对类与结构体都有那张表，而类字段那一格里放的
        也是地址，所以叠 `pfield` 时不用管中间那一格是类还是结构体。 */
@@ -12271,7 +12294,10 @@ class JncLower {
     if (pick === null) return null;
     const sig = pick.sig;
     const symSuffix = pick.i === 0 ? '' : `_o${pick.i + 1}`;
-    const sym = `${owner.replace(/\$/g, '_')}_${mn}${symSuffix}`;
+    /* `sym` 写着的就用它（第二百〇六刀）：那是 `alias dispose = hide;` 那一格 —— 名字是
+       `dispose`，而库里那个符号叫 `Owner_hide`。 */
+    const sym = sig.sym === undefined || sig.sym === null
+      ? `${owner.replace(/\$/g, '_')}_${mn}${symSuffix}` : sig.sym;
     /* 回一格 `variant_t`（第一百七十四刀）：照 jancy 自己的调用约定 —— 缓冲区那格摆在最前面、
        被调的函数回 void（见 hostVretFn）。别的类型照旧问 C_ABI 那张表。 */
     const vret = isVar(sig.ret);

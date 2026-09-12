@@ -9990,6 +9990,35 @@ onevent (bindingof(g_ip4), bindingof(g_routerIp4))() {   // 41_OnEventStmt.jnc:4
   `(文件, 拦路项)` 对 `4279 -> 4277`、clean `222` 没动（那两份本来就只剩这一条 `E`）；
   一起编那张榜 `42`、理由 `22` 没动。
 
+### 第二百〇六刀：`alias` 指着一格只有原型的方法
+
+`alias '…' 的目标 '…'` 是两份文件的唯一拦路项，两份是**两件事**：
+
+- `alias dispose = hide;`（ui_Dialog.jnc:126）—— 目标是那个 `opaque class` 上一格**只有原型**的
+  方法（体在宿主那边）。这一格是真缺口。
+- `alias ModbusStreamRoles = jnc.global.ModbusStreamRoles;`（ModbusDispatchCode.jnc:42）——
+  目标在**另一个模块**（rtl 那个扩展库的 `jnc.global`）里，逐份编够不着。与第二百〇四刀那笔
+  `没有这个基类` 的账同一类，不是特性缺口。
+
+前一格的落法与别处不同：别名一向发一格**转手函数**（签名照抄，第八十七刀），可宿主面这一格
+发不出来 —— 转手函数的体要一句 `(ccall …)`，而 `(ccall …)` 只有原生腿上才有（ADR-0014 的第 4 条
+决定），发了就把这份模块钉死在一条腿上。所以改成**只登记**：同一份签名按目标的符号名再记一格
+（`hostSigs` 的条目上多一格 `sym`，`hostMethodCall` 那儿写着就用它）。于是 `d.dispose()` 发的是
+`(ccall Dlg_hide (var d))` —— 别名一格新符号都不造。
+
+**量出来的一格**：这一格**不能**进 `methodNames`。那张表是"这个名字是一格带体的方法"用的
+（第五十五刀）；进了它，`d.dispose()` 会先落到 `memberFn` 那儿、报"Dlg 没有方法 'dispose'"。
+宿主面那条路按 `hostFns` 认名字，那一格就够。
+
+判据在 `tests/llvm/run.js` 第 9 节：`class Plain` 里 `alias twice2 = twice;`，`q.twice2(21)` 印
+`ali 42`（走的是 `Plain_twice`）；`.sx` 里再钉一句**反面**的：`Plain_twice2` **不该出现**。
+
+- 腿：`node tests/jnc/run.js` 289/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `152 -> 153`（+1）、clean `222 -> 223`、`(文件, 拦路项)` 对
+  `4277 -> 4229`（**−48**）—— 这一行本身只有两处，可 `ui_Dialog.jnc` 是**很多份文件 import 的**
+  那一份，它降不下来就一路挡着。
+- 一起编那张榜：`42 -> 41`、理由 `22 -> 21`。
+
 
 
 ## 后果与代价

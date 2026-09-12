@@ -458,6 +458,10 @@ if (existsSync(sysDir)) {
       + '    long note(long n) {\n'
       + '        return n + 1;\n'
       + '    }\n'
+      /* `alias` 指着一格**只有原型**的方法（第二百〇六刀）：体在宿主那边，所以别名不发转手
+         函数 —— 同一份签名按目标的符号名再登记一格。语料里的原样是 `alias dispose = hide;`
+         （ui_Dialog.jnc:126）。 */
+      + '    alias twice2 = twice;\n'
       + '}\n\n'
       /* 基类那格 construct 在宿主（第一百九十二刀）：`basetype.construct(9)` 落成一句
          `(ccall Plain_construct $this 9)`。 */
@@ -504,12 +508,13 @@ if (existsSync(sysDir)) {
       + '    printf("dbl %d\\n", pt.m_dbl);\n'
       + '    printf("ptx %d\\n", pt.m_x);\n'
       + '    printf("dyl %d\\n", Lib.probe_dylibAdd(40, 1));\n'
+      + '    printf("ali %d\\n", q.twice2(21));\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -552,6 +557,9 @@ if (existsSync(sysDir)) {
     /* `dylib` 块里那一格（第二百〇三刀）：符号名里**没有块名**。 */
     } else if (!sx.out.includes('(cabi probe_dylibAdd i64 (i64 i64))')) {
       detail.push('    emit sx 里没有 `(cabi probe_dylibAdd i64 (i64 i64))`');
+    /* 别名那一格（第二百〇六刀）：调用点发的是**目标**那个符号，`Plain_twice2` 不该存在。 */
+    } else if (sx.out.includes('Plain_twice2')) {
+      detail.push('    emit sx 里出现了 `Plain_twice2` —— 别名该发目标那个符号（Plain_twice）');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');
