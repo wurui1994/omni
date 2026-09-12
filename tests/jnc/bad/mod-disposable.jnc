@@ -1,0 +1,29 @@
+// `disposable` 的局部量（第二百一十二刀把它从"修饰符 '…'"那一句里拆出来）。原样是
+// `disposable Resource resource1(1);`（53_Disposable.jnc:73-74，另外 test61 / 63 / 78 / 87
+// 与 io_UsbDb.jnc:126 也是这一句）。
+//
+// jancy 那儿它是一格**存储类**（StorageKind_Disposable，DeclarationSpecifier.llk:117），
+// 只能写在局部量上、而且那格类型得自己有一个 `dispose`（isDisposableType，
+// jnc_ct_Type.cpp:844-850）。见到它就给这一格开一个
+// `ScopeFlag_Disposable | ScopeFlag_FinallyAhead | ScopeFlag_Finalizable` 的作用域，
+// 出去的时候（正常走出去与抛出去都算）调它的 dispose（jnc_ct_Parser.cpp:2050-2068）。
+//
+// 时机是**确定的** —— 与 destruct 那条账（GC 在不确定的时刻调，disposable.rst:17）不是
+// 同一件事 —— 可它要的是"作用域出口"那一套钩子（正常出口 + 抛出去那条路），这一层还没有。
+// 忽略这个词，下面那句 `dispose` 就一次也不会调，印出来的是 0 而不是 1。
+class Resource {
+	int m_id;
+
+	construct(int id) {
+		m_id = id;
+	}
+
+	void dispose() {
+		printf("%d\n", m_id);
+	}
+}
+
+int main() {
+	disposable Resource r(1);
+	return 0;
+}

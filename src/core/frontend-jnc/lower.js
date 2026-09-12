@@ -6891,17 +6891,63 @@ class JncLower {
        *   - `mutable` —— 它是 `const` 那一位的反面，而默认就是可写的（MUT_MODS 那一族里
        *     `const` / `readonly` 也是收下不看的），所以写出来与不写同一件事。
        *
-       * 剩下那几个**刻意仍旧拦着**，理由各不相同，都记在 ADR-0016 那份候选清单里：
-       * `bigendian`（36 份 / 212 处，收下不看会把数读错 —— 真的错答案）、
-       * `async`（31 份，协程）、`disposable`（6 份，管的是**时机**，这一层没有 GC）、
-       * `weak`（4 份，没有 GC 就永远不会变 null，程序拿它当判据时行为不同）、
-       * `indexed`（1 份，属性带下标运算符，忽略了 `p[i]` 就接错人）。 */
+       * 剩下那几个**刻意仍旧拦着**，理由各不相同 —— 第二百一十二刀把它们从"修饰符 '…'"这一句
+       * 里拆出来，各自说自己那件事（见下面那四支）：`bigendian` 已经落成真的了（36 份 /
+       * 212 处，收下不看会把数读错），`async`（31 份，协程）、`disposable`（6 份，要作用域出口
+       * 的钩子）、`weak`（4 份，没有 GC 就永远不会变 null）、`indexed`（1 份，属性带下标形参）。 */
       if (m === 'cdecl' || m === 'stdcall' || m === 'thiscall') continue;
       if (m === 'safe' || m === 'unsafe' || m === 'mutable') continue;
       /* `bigendian`（第一百二十六刀）：这一格**不能收下不看** —— 那会把数读错，是真的错答案。
          所以它落成一位，由字段那一遍记进 `bePath`，读写各套一个字节序反转（bswapRead /
          bswapStore）。语料里 32 份文件、绝大多数是协议头上的 `bigendian uint16_t m_port;`。 */
       if (m === 'bigendian') { be = true; continue; }
+      /* 第二百一十二刀：剩下那四个词按第一百四十九刀那条法**各说各的话** —— `修饰符 '…'` 这
+       * 一行 42 份文件里其实是四件不同的事，一句话把它们盖成一件，看榜的人看不出该做哪个。
+       * 拆开之后每一行指着一件真事（数字先前记在 ADR-0016 那份候选清单里，现在写进诊断本身）。 */
+      if (m === 'weak') {
+        /* `weak Foo* p`（samples 05/21/24/36）。jancy 那儿这个词换的是**指针的种类**：
+           类指针走 ClassPtrKind_Weak、函数指针走 FunctionPtrKind_Weak、属性指针走
+           PropertyPtrKind_Weak（jnc_ct_DeclTypeCalc.cpp:667 / :676 / :688）。弱指针不算
+           一条引用，GC 把对象收了之后它自己变 null。这一层没有 GC，收下不看会让
+           `if (p)` **永远为真** —— 那四份样例印的恰好就是"收完之后它成了 null"。 */
+        this.nope(n, '`weak` 指针 —— jancy 那儿它是另一种指针（ClassPtrKind_Weak / '
+          + 'FunctionPtrKind_Weak / PropertyPtrKind_Weak，jnc_ct_DeclTypeCalc.cpp:667/676/688），'
+          + 'GC 收了对象之后它自己变 null；这一层没有 GC，收下不看会让 `if (p)` 永远为真');
+        return null;
+      }
+      if (m === 'async') {
+        /* `async void foo()`（io_FileStream.jnc:302、jnc_Promise.jnc:38 那一族，语料里最多的
+           一个词）。jancy 那儿它**换掉返回类型**：写出来的那个挪去 m_asyncReturnType，函数真正
+           回一格 `std.Promise*`（jnc_ct_TypeMgr.cpp:664-672），而体要拆成一台能在 await 处停下
+           再接着跑的状态机。这不是一格修饰符的事。 */
+        this.nope(n, '`async` 函数 —— jancy 那儿它换掉返回类型（写出来的那个挪去 '
+          + 'm_asyncReturnType，函数真正回一格 `std.Promise*`，jnc_ct_TypeMgr.cpp:664-672），'
+          + '体还要拆成一台能在 await 处停下再接着跑的状态机');
+        return null;
+      }
+      if (m === 'disposable') {
+        /* `disposable io.File f = …;`（53_Disposable.jnc:73、test61/63/78/87）。jancy 那儿它
+           **只**能写在局部量上，而且那格类型得有 `dispose`（isDisposableType，
+           jnc_ct_Type.cpp:844-850）；见到它就给这一格开一个
+           `ScopeFlag_Disposable | ScopeFlag_FinallyAhead | ScopeFlag_Finalizable` 的作用域，
+           出去的时候（正常出去与抛出去都算）调它的 dispose（jnc_ct_Parser.cpp:2050-2068）。
+           时机是**确定的** —— 与那条 destruct 的账（GC 在不确定的时刻调）不是一件事 ——
+           但要作用域出口那一套钩子，这一层还没有。 */
+        this.nope(n, '`disposable` 的局部量 —— jancy 那儿它给这一格开一个可弃作用域、'
+          + '出去的时候（正常出去与抛出去都算）调它的 `dispose`（jnc_ct_Parser.cpp:2050-2068），'
+          + '要作用域出口那一套钩子');
+        return null;
+      }
+      if (m === 'indexed') {
+        /* `int indexed property m_a(size_t i)`（35_PropertyPtr.jnc:126，语料里就这一处）。
+           jancy 那儿它让取/存那两个函数**带下标形参**（jnc_ct_DeclTypeCalc.cpp:565 与 :614），
+           于是 `p[i]` 接的是属性那两个函数、而不是一格内存。忽略这个词就会把 `p[i]` 接到
+           下标算符那条路上 —— 接错人。 */
+        this.nope(n, '`indexed` 属性 —— jancy 那儿它让取/存那两个函数带下标形参'
+          + '（jnc_ct_DeclTypeCalc.cpp:565 与 :614），于是 `p[i]` 接的是属性那两个函数、'
+          + '不是一格内存');
+        return null;
+      }
       this.nope(n, `修饰符 '${m}'`);
       return null;
 

@@ -1,0 +1,25 @@
+// `weak` 指针（第二百一十二刀把它从"修饰符 '…'"那一句里拆出来）。原样是
+// `C1 weak* wc;`（05_WeakClassPtr.jnc:35，另外 21 / 24 / 36 三份样例分别是函数指针、
+// 多播、属性指针上的同一个词）。
+//
+// jancy 那儿这个词换的是**指针的种类**：类指针走 ClassPtrKind_Weak、函数指针走
+// FunctionPtrKind_Weak、属性指针走 PropertyPtrKind_Weak
+// （jnc_ct_DeclTypeCalc.cpp:667 / :676 / :688）。弱指针不算一条引用 —— GC 把对象收了之后
+// 它自己变 null，这正是那四份样例要印的事。
+//
+// 这一层没有 GC，对象一造出来就再也不会没。所以"收下不看"不是拒得松一点，是给**错答案**：
+// 下面这个 `wc == null` 在 jancy 那儿收完之后为真，在这儿永远为假。
+class C1 {
+	int m_x;
+
+	construct(int x) {
+		m_x = x;
+	}
+}
+
+int main() {
+	C1* c = new C1(10);
+	C1 weak* wc = c;
+	printf("%d\n", wc == null);
+	return 0;
+}

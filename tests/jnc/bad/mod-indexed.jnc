@@ -1,0 +1,22 @@
+// `indexed` 属性（第二百一十二刀把它从"修饰符 '…'"那一句里拆出来）。语料里就一处：
+// `int indexed property* p5(size_t) = &(g_baz[][0]);`（35_PropertyPtr.jnc:126）。
+//
+// jancy 那儿它让属性的取/存那两个函数**带下标形参**（jnc_ct_DeclTypeCalc.cpp:565 的
+// isIndexed 与 :614 那句检查），于是 `p[i]` 接的是 `p.get(i)` / `p.set(i, v)` ——
+// 属性那两个函数，不是一格内存、也不是第一百三十八刀那个写在类上的下标算符。
+//
+// 忽略这个词就会把 `p[1]` 接到"下标一格内存"那条路上 —— 接错人。
+int indexed property g_a(int i);
+
+int g_a.get(int i) {
+	return i * 10;
+}
+
+void g_a.set(int i, int v) {
+	printf("%d\n", i + v);
+}
+
+int main() {
+	printf("%d\n", g_a[2]);
+	return 0;
+}

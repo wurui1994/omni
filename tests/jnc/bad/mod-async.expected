@@ -1,0 +1,1 @@
+`async` 函数 —— jancy 那儿它换掉返回类型（写出来的那个挪去 m_asyncReturnType，函数真正回一格 `std.Promise*`，jnc_ct_TypeMgr.cpp:664-672），体还要拆成一台能在 await 处停下再接着跑的状态机

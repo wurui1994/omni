@@ -1,0 +1,19 @@
+// `async` 函数（第二百一十二刀把它从"修饰符 '…'"那一句里拆出来）。语料里这个词最多 ——
+// 31 份文件，原样是 `async FileStreamEvents asyncWait(FileStreamEvents eventMask);`
+// （io_FileStream.jnc:302），以及 jnc_Promise.jnc:38 / jnc_Scheduler.jnc:99 那一族。
+//
+// jancy 那儿它**换掉返回类型**：写出来的那个挪去 m_asyncReturnType，函数真正回一格
+// `std.Promise*`（jnc_ct_TypeMgr.cpp:664-672；`async` 自己是一格类型修饰符
+// TypeModifier_Async -> FunctionTypeFlag_Async，jnc_ct_DeclTypeCalc.cpp:519-520）。
+// 体那一半还要拆成一台能在 await 处停下、被人 resume 之后接着跑的状态机。
+//
+// 所以这不是"一格修饰符收下不看"的事：忽略这个词会让 `foo()` 的类型从 `std.Promise*`
+// 变成 `int`，调用方那一整套 `.wait()` / `.blockingWait()` 全接错人。
+async int foo() {
+	return 42;
+}
+
+int main() {
+	printf("%d\n", 0);
+	return 0;
+}

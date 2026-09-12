@@ -10179,6 +10179,47 @@ PtrTypeFlag_Volatile) != 0)`（同文件:208）。不改类型、不改布局、
 - 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里 log_Log.jnc 的 volatile 在说明符那一侧，
   第八十六刀早收了）。
 
+### 第二百一十二刀：`修饰符 '…'` 这一行按词拆开，各说各的话
+
+榜上 `修饰符 '…'` 42 份文件。第一百〇九刀那一趟按真话拆过一遍，把"收下不看**不可能**给出错
+答案"的那几个词（调用约定三个、`safe` / `unsafe` / `mutable`）收了，第一百二十六刀把
+`bigendian` 落成真的。剩下的四个词一直共用**同一句话** —— 而它们是四件完全不同的事。
+按第一百四十九刀那条法（榜只把带引号的名字归一，所以话说准了行才会分开），这一趟给每个词
+一句自己的诊断，把 jancy 那边的落法写进话里：
+
+- `async`（31 份，io_FileStream.jnc:302 / jnc_Promise.jnc:38 / jnc_Scheduler.jnc:99 那一族）——
+  这个词**换掉返回类型**：写出来的那个挪去 `m_asyncReturnType`，函数真正回一格
+  `std.Promise*`（`jnc_ct_TypeMgr.cpp:664-672`；词本身是 `TypeModifier_Async ->
+  FunctionTypeFlag_Async`，`jnc_ct_DeclTypeCalc.cpp:519-520`），体还要拆成一台能在 await 处
+  停下再接着跑的状态机。
+- `disposable`（6 份，53_Disposable.jnc:73-74 / test61 / 63 / 78 / 87 / io_UsbDb.jnc:126）——
+  它是一格**存储类**（`StorageKind_Disposable`，`DeclarationSpecifier.llk:117`），只能写在
+  局部量上、类型得自己有 `dispose`（`isDisposableType`，`jnc_ct_Type.cpp:844-850`）；见到它就
+  给这一格开一个 `ScopeFlag_Disposable | FinallyAhead | Finalizable` 的作用域，出去的时候
+  （正常出去与抛出去都算）调 `dispose`（`jnc_ct_Parser.cpp:2050-2068）`。
+  **先前那句话记错了帐**：候选清单里写的是"管的是时机，这一层没有 GC"—— 不对，`disposable`
+  的时机是**确定的**，它跟 `destruct` 那条 GC 的账不是一件事。它要的是作用域出口那一套钩子。
+- `weak`（4 份，05 / 21 / 24 / 36 四份样例）—— 换的是**指针的种类**：`ClassPtrKind_Weak` /
+  `FunctionPtrKind_Weak` / `PropertyPtrKind_Weak`（`jnc_ct_DeclTypeCalc.cpp:667` / `:676` /
+  `:688`）。弱指针不算一条引用，GC 收了对象之后它自己变 null —— 那四份样例印的恰好就是这件事。
+  这一层没有 GC，收下不看会让 `if (p)` 永远为真，是**真的错答案**。
+- `indexed`（1 份，35_PropertyPtr.jnc:126）—— 让属性的取/存那两个函数**带下标形参**
+  （`jnc_ct_DeclTypeCalc.cpp:565` 的 isIndexed 与 `:614`），于是 `p[i]` 接的是 `p.get(i)` /
+  `p.set(i, v)`，不是一格内存、也不是第一百三十八刀那个写在类上的下标算符。
+
+四堵墙钉住四句话：`bad/mod-async.jnc`、`bad/mod-disposable.jnc`、`bad/mod-weak.jnc`、
+`bad/mod-indexed.jnc`（每一份的注里都写清"忽略这个词会得到什么错答案"）。
+
+- 腿：`node tests/jnc/run.js` 296/0（新增那四堵墙）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `4037` **没动**、lowered `155`、clean `225` 都没动 ——
+  这一刀一个字节的代码生成都没改，改的只是话。`修饰符 '…'` 42 那一行散成
+  `async` 31（sole 1）、`disposable` 6（sole 1）、`weak` 4、`indexed` 1，加起来正好 42。
+  **拆开顺手带出来一件先前看不见的事**：那一行原来记着 `sole 2`，拆开才知道是
+  "async 独占 1 份 + disposable 独占 1 份"—— 也就是说这四件事里没有哪一件是"一大批文件就差
+  它一个"，先前那句话把这个判断盖住了。
+- 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有这四个词）。
+
+
 
 
 

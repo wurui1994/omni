@@ -1,0 +1,1 @@
+`indexed` 属性 —— jancy 那儿它让取/存那两个函数带下标形参（jnc_ct_DeclTypeCalc.cpp:565 与 :614），于是 `p[i]` 接的是属性那两个函数、不是一格内存
