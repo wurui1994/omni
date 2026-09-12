@@ -1,1 +1,0 @@
-完整声明式的属性 'g_p' 体里的这一条 —— 字段要写 `autoget`、事件要写 `bindable event`（prop_full.rst:34）

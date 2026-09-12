@@ -1,0 +1,45 @@
+// 完整声明式的属性体里的**普通字段**（第一百七十九刀）。jancy 的文档写得很直白：
+//
+//     A full property declaration looks a lot like a declaration for a class. It implicitly opens
+//     a namespace and allows for overloaded setters, member fields, helper methods,
+//     constructors/destructors etc.        —— prop_full.rst:15-16（例子就是 `int m_x = 5;`）
+//
+// 先前这一层只收带 `autoget` 的字段，那是**我们自己多加的一条**。这一格与 autoget 那格存储在
+// 这一层是同一件东西（属性那层命名空间里的一格存储，名字由写的人定，取/存两个体里裸写它），
+// 差别只有一处：属性的**类型**照旧从 `get` 抄，不从这格字段抄 —— autoget 那一种才反过来
+// （它没有手写的取值器）。所以体里没有 `get` 的话这一格说不通。
+property g_p {
+	int m_v;
+
+	int get() {
+		return m_v;
+	}
+
+	void set(int x) {
+		printf("set %d\n", x);
+		m_v = x * 3;
+	}
+}
+
+class C {
+	property m_p {
+		int m_v;
+
+		int get() {
+			return m_v * 2;
+		}
+
+		void set(int x) {
+			m_v = x;
+		}
+	}
+}
+
+int main() {
+	g_p = 5;
+	printf("g %d\n", g_p);
+	C* c = new C;
+	c.m_p = 7;
+	printf("m %d\n", c.m_p);
+	return 0;
+}

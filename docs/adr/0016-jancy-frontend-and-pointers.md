@@ -9064,6 +9064,41 @@ type->createField("m_length", getPrimitiveType(TypeKind_SizeT), 0, ConstKind_Rea
 - 逐份那张榜：`(文件, 拦路项)` 对 `4485 -> 4394`（**−91**，那一行整行消失）。lowered `124`、
   clean `191` 都没动 —— 这 88 处散在很多份文件里，每份还压着别的拦路项。
 
+### 第一百七十九刀：完整声明式的属性体里的**普通字段** —— 又一条我们自己多加的规矩
+
+榜上 `完整声明式的属性（… 那对花括号开的是一层命名空间）`（70 处）背后其实是好几种形状。
+先量清 jancy 到底收什么 ——
+
+> A full property declaration looks a lot like a declaration for a class. It implicitly opens a
+> namespace and allows for overloaded setters, **member fields**, helper methods,
+> constructors/destructors etc.
+> —— prop_full.rst:15-16，紧接着的例子第一行就是 `int m_x = 5; // member field with in-place initializer`
+
+而这一层先前只收两种成员：带 `autoget` 的字段与 `bindable event` 的事件，别的一律
+"字段要写 `autoget`"。那句话**不是 jancy 的规矩，是我们自己多加的一条**。
+
+落法用现成的路：不带 `autoget` 的字段与 autoget 那格存储**在这一层是同一件东西** ——
+属性那层命名空间里的一格存储，名字由写的人定，取/存两个体里裸写它。差别只有一处：
+
+- 属性的**类型**照旧从 `get` 抄，不从这格字段抄（jancy 那边属性的类型就是取值器的返回类型；
+  `autoget` 那一种才反过来 —— 它没有手写的取值器）。所以体里没有 `get` 的话这一格说不通，
+  那一句留在原处（`fldT` 那个变量就是这条分界）。
+
+顺带一个好处：类型对不上时**指的是对的人**。`int m_v;` + `bool get()` 这一句，存储按属性的类型
+（bool）发，于是报的是 `赋值两边不同型：左是 bool，右是 int` 指着 `m_v = x ? 1 : 0` —— 而不是
+先前那种"属性 'g_p' 是 int"（那是从字段抄的类型，culprit 认错了）。
+
+判据：`cases/151-propfield.jnc`（顶层与成员各一格，存值器故意乘 3 / 取值器故意乘 2，好让
+"两个体真跑了"在输出上看得见），尺子 `/tmp/c157.c` 把那三件东西在 C 里手写出来。
+`bad/propfull-plainfield` 退役 —— 那面墙真的移了。
+
+- 腿：`node tests/jnc/run.js` 283/0。
+- 逐份那张榜：**一个数都没动**（lowered `124`、clean `191`、对 `4394`）。照实记：语料里那 70 处
+  是**别的形状**，这一刀落的这一种恰好一处都没碰上。量出来的下一格也很具体 ——
+  `samples/jnc/31_FullPropertyDecl.jnc` 现在停在第 19 行的 `int m_x = 5;`（**带就地初值**的字段，
+  语法上是 `init` 而不是 `dcl`，落到"一条声明只收一格"那句上）。那一格要把初值一路带到生成的
+  那格存储上（顶层进 globalCells、成员进 ctor），是下一刀的事。
+
 ## 后果与代价
 
 

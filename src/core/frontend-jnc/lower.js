@@ -4036,8 +4036,11 @@ class JncLower {
     }
     const g = accs.find((a) => a.kind === 'get');
     /* 类型的出处有两个：写了取值器就抄它的返回类型，没写就抄体里那格 autoget 字段
-     * （那时取值器由编译器生成 —— prop_autoget.rst:17 的两半）。两个都没有就说不通。 */
-    if (!whole && g === undefined && fld === null) {
+     * （那时取值器由编译器生成 —— prop_autoget.rst:17 的两半）。两个都没有就说不通。
+     * 不带 `autoget` 的普通字段**不算**一个出处（第一百七十九刀）：那格字段是属性自己的存储，
+     * 类型仍旧是取值器的返回类型。 */
+    const fldT = fld !== null && fld.plain !== true ? fld : null;
+    if (!whole && g === undefined && fldT === null) {
       this.nope(it, `完整声明式的属性 '${nm}' 里既没有 get 也没有 autoget 的字段 ——`
         + '属性的类型没处抄');
       return [];
@@ -4052,7 +4055,7 @@ class JncLower {
       this.mkA(sp0, 'mods'),
       ...this.flat(lst).filter((x) => !(isAtom(x) && mods0.has(x.value))));
     const src = whole ? { sp: it.items[1], ptrs: dcl.items[1] }
-      : (fld !== null ? fld
+      : (fldT !== null ? fldT
         : (g.proto === true ? { sp: g.sp, ptrs: g.ptrs }
           : { sp: g.node.items[1], ptrs: g.node.items[2].items[1] }));
     const extra = [];
@@ -4204,6 +4207,18 @@ class JncLower {
       return { kind: 'event', name, sp, ptrs: d.items[1] };
     }
     if (mods.includes('autoget')) return { kind: 'field', name, sp, ptrs: d.items[1] };
+    /* **不带 `autoget` 的普通字段**（第一百七十九刀）。jancy 收它，而且文档里写得很直白：
+       "A full property declaration looks a lot like a declaration for a class. It implicitly opens
+       a namespace and allows for overloaded setters, **member fields**, helper methods,
+       constructors/destructors etc."（prop_full.rst:15-16，例子就是 `int m_x = 5;`）。
+       所以先前那句"字段要写 `autoget`"是**我们自己多加的一条**，不是 jancy 的规矩。
+
+       落法用现成的那条路：这一格与 autoget 那格存储**在这一层是同一件东西**（属性那层命名空间里
+       的一格存储，名字由写的人定，存值器体里裸写它）。差别只有两处，都在调用方那儿处理：
+         - 属性的**类型**照旧从 `get` 抄，不从这格字段抄（jancy 那边类型是取值器的返回类型；
+           `autoget` 那一种才反过来 —— 它没有手写的取值器）；
+         - 所以体里没有 `get` 的话这一格说不通（类型没处抄），那一句在调用方。 */
+    if (mods.length === 0) return { kind: 'field', name, sp, ptrs: d.items[1], plain: true };
     this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条 —— 字段要写 \`autoget\`、事件要写`
       + ' `bindable event`（prop_full.rst:34）');
     return null;
