@@ -381,6 +381,11 @@ if (existsSync(sysDir)) {
       + 'opaque class Counter {\n'
       + '    long add(long d);\n'
       + '    long value();\n'
+      + '\n'
+      + '    long property m_scale {\n'
+      + '        long get();\n'
+      + '        void set(long v);\n'
+      + '    }\n'
       + '}\n\n'
       + 'int main() {\n'
       + '    Counter* c = new Counter;\n'
@@ -388,21 +393,27 @@ if (existsSync(sysDir)) {
       + '    c.add(22);\n'
       + '    long v = c.value();\n'
       + '    printf("count %d\\n", v);\n'
+      + '    c.m_scale = 7;\n'
+      + '    printf("scale %d\\n", c.m_scale);\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 42\\n"）`);
+    else if (r.out !== 'count 42\nscale 70\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 42\\nscale 70\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
-       后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。 */
+       后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
+       属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
     const sx = run(['emit', 'sx', src], 90000);
     if (sx.code !== 0) detail.push(`    emit sx 没过：${(sx.err ?? '').trim().split('\n')[0]}`);
     else if (!sx.out.includes('(cabi Counter_add i64 (ptr i64))')) {
       detail.push('    emit sx 里没有 `(cabi Counter_add i64 (ptr i64))`');
+    } else if (!sx.out.includes('(cabi Counter_get_m_scale i64 (ptr))')
+      || !sx.out.includes('(cabi Counter_set_m_scale void (ptr i64))')) {
+      detail.push('    emit sx 里没有属性那两句 `(cabi Counter_get_m_scale …)` / `(cabi Counter_set_m_scale …)`');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
-    else ok('opaque-host [opaque class 的方法降成 (ccall Owner_method self …)，两次调用同一个 self]');
+    else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');
   }
   rmSync(tmp, { recursive: true, force: true });
 }

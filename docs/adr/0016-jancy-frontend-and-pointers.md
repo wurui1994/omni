@@ -8357,6 +8357,89 @@ io_HidDb.jnc:35）—— 所以 `expandExtensions` 之后再跑一遍同一个�
 尺子 `/tmp/c148.c`：C 里没有多播，所以这一份把它手写成一格函数指针数组 —— `bindable alias` 落到这一份
 里就是**两格属性共用同一个数组**，`autoget alias` 是两格各自共用外层那格 int。同一串数（log 2 / 4 / 6）。
 
+## 第一百六十刀：属性体里那格取/存**只有原型** —— 体在宿主那边
+
+```jnc
+opaque class EnumProperty: Property {
+    property m_value {
+        variant_t autoget m_value;
+        void set(variant_t value);          // ← 只有原型
+        bindable alias m_onPropChanged = m_onChanged;
+    }
+}
+```
+
+（ui_PropertyGrid.jnc:78-88；逐份榜上 `完整声明式的属性 '…' 体里这一条的名字` 那 89 处全压在这
+一格上。）语法上 `void set(variant_t value);` 是一格 `var-decl`，声明符的芯是**裸写的** `get` /
+`set` —— 在类体里那是**下标算符**（第一百三十八刀），可在属性体里它就是这格属性的取/存
+（prop_full.rst:15 那对花括号开的是一层命名空间）。没有体的意思是"实现在别处"，而
+`opaque class` 里就是宿主的 C/C++（opaque.rst:15-29）。
+
+落法与方法那一格（ADR-0022 的 J4b）**同一条**：读写发 `(ccall Owner_get_prop self)` /
+`(ccall Owner_set_prop self v)`，符号名是"类名（`$` 换成 `_`）+ `_get_` / `_set_` + 属性名"。
+取/存那两格一个函数都不发（没有体）；类型从原型的说明符抄（`string_t get();` 那一种）或者从体里
+那格 autoget 字段抄，与第七十六刀那条一模一样。
+
+**判据上又踩了同一格坑**：先得把这两条算进"成员声明"（`isPropMember`）—— 漏了那一句，
+第一百五十七刀的 `whole` 会判成真，于是这两条被当成取值器体里的两格局部量（报的是"局部量上的
+形参表"）。同一个判据这一轮改了三次（第一百五十七、一百五十九、这一刀），三次都是"语法长得一样、
+意思由修饰词或者芯的形状定"。
+
+正面判据在 `tests/llvm/run.js` 第 9 节（那儿有宿主的体）：`Counter_get_m_scale` /
+`Counter_set_m_scale` 两句 `(cabi …)` 与那一趟 `scale 70`（存的时候乘 10，所以 70 证明**真走了**
+宿主那两个函数）。
+
+## 第一百六十一刀：类里那些**类型是类的值**的字段 —— 内嵌的对象
+
+```jnc
+class PluginHost {
+    ui.Menu m_menu;
+    ui.ToolBar m_toolBar;
+}
+```
+
+榜上最大的一格真特性（526 处 / 19 行）。jancy 那边它是**内嵌**的对象：`ClassType::calcLayout` 把
+这样的字段收进 `m_classFieldArray`（jnc_ct_ClassType.cpp:360-371，顺手拦住抽象的与
+`OpaqueNonCreatable` 的），再由父对象的构造顺着 `m_fieldInitializeArray` 逐格造出来
+（`MemberBlock::initializeFields`，jnc_ct_MemberBlock.cpp:141-179）；顺序是"基类构造 → 静态构造
+→ 字段 → 用户写的体"（jnc_ct_Parser.cpp:3002-3009）。
+
+这一层的类值本来就是"一格地址 + 一次 `pnew`"（局部量从第五十二刀起就这么落），所以内嵌落成
+**字段里放地址、父对象构造开头把它造出来**：一格字段三句（`pnew` / 写 `$tag` / 调它的
+`construct`），由 `embInitLines` 发在事件那几行（第八十三刀）之后、字段默认值之前 —— 与 jancy 那
+四句同一个位置。没写 construct 的类跟着要合成一个（`synthFI` 那条路，第七十八刀）。
+
+结构体那一侧 jancy 直接报错，不是"还不收"：
+
+```cpp
+// jnc_ct_StructType.cpp:303-307
+if (m_structTypeKind != StructTypeKind_IfaceStruct && field->m_type->getTypeKind() == TypeKind_Class) {
+    err::setFormatStringError("class '%s' cannot be a struct member", …);
+```
+
+那个 `IfaceStruct` 例外说的正是"类自己那格 iface 结构体"—— 也就是说内嵌是**类的**本事。这一层照它
+报（`bad/embed-in-struct.jnc`）。按值套回自己也报：内嵌要在父对象里就地造出来，套回自己没完。
+
+### 账：pairs `5564 -> 5038`（−526）、clean `194 -> 192`（**−2，记下来**）
+
+- 逐份那张榜：lowered `121`（没动）、clean `194 -> 192`、pairs `5564 -> 5038`；
+  `类型是类（…）的字段 —— 它在 jancy 那边是内嵌的对象`那 19 行整片让开。
+- **clean 掉了 2 份，是这两份**：`samples/jnc_sample_01_export_c/script.jnc` 与
+  `samples/jnc_sample_02_export_cpp/script.jnc`。理由是第一百六十刀那格判据把
+  `property g_prop { char const* get(); void set(int); void set(double); void set(char const*); }`
+  （script.jnc:29-35）认出来了 —— 那是**存值器的重载**（jancy 收：`Property::create` 里
+  `setterTypeOverload` 是一串，jnc_ct_Property.cpp:73-82），而这一层一个名字一格函数，所以现在
+  明说"里两个 set（要重载决议）"。先前这两份是"clean"是因为那几条压根没被认成取/存 —— 那是把
+  形状认错了却没出声，比现在这一句差。数掉了 2、话对了，这一笔照实记（与第一百四十九刀那条
+  "掉数不是战果"是同一件事的反面：**涨回来的那种数也不一定是战果**）。
+- 两张 group 榜：`test/ioninja/api` 与 `src/jnc_ext/jnc_std/jnc` 这一轮没测（这两刀动的是类的
+  字段与属性体，group 那一侧的墙在 import 与宿主面上）—— 没跑就不写数。
+
+尺子 `/tmp/c149.c`：C 里没有类，所以这一份把内嵌写成"父结构体里嵌一格子结构体、父的 init 头一句
+调子的 init"。三件可观测的事钉在同一串数里：内嵌那格的 construct 在父类构造的体**之前**跑
+（`mid ctor n=41`）、两个父对象各带自己那一格（`p` 与 `q`）、内嵌的对象照旧是真对象（方法调得动、
+还能再套一层）。
+
 ## 后果与代价
 
 

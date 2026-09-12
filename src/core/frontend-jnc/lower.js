@@ -1101,6 +1101,11 @@ class JncLower {
        发 `(cabi Owner_method …)` 与 `(ccall Owner_method self …)`（ADR-0022 的 J4b 最后一步）。 */
     this.hostSigs = new Map();
     this.hostCtors = new Set();
+    /* 属性全名 -> `{get, set}`：那两个取/存**只有原型、没有体**（`opaque class` 里那种，
+       ui_PropertyGrid.jnc:78-88）。体在宿主的 C/C++ 那边，所以读写落成
+       `(ccall Owner_get_prop self)` / `(ccall Owner_set_prop self v)` —— 与方法那一格
+       （ADR-0022 的 J4b）同一条路，第一百六十刀。 */
+    this.propHostAcc = new Map();
     /* 类 / 结构体体里**只有原型**的方法（第一百四十七刀）：裸名 -> 那几个主人的名字。
        与 hostFns 分开是因为**那些类没写 `opaque`** —— 不能替它们认下"实现在宿主的 C/C++ 那边"
        这件事（那会凭空发一格 `(ccall …)`）。这一格只用来把调用点那句话说对：
@@ -1174,6 +1179,14 @@ class JncLower {
      * 初值里可以引用模块级变量，而那些在签名那一遍还没登记。 */
     this.fieldInits = new Map();
     this.synthFI = new Set();
+    /* 类里那些**类型是类的值**的字段（第一百六十一刀）：`ui.Menu m_menu;` —— jancy 那边它是
+       **内嵌**的对象（`ClassType::m_classFieldArray`，jnc_ct_ClassType.cpp:360-371；父对象的
+       构造里逐格 `initialize` 出来，MemberBlock::initializeFields，jnc_ct_MemberBlock.cpp:141-179）。
+       这一层的类值本来就是"一格地址 + 一次 pnew"（局部量那一格从第五十二刀起就是这么落的），
+       所以字段照原样是一格地址，父对象的构造开头把它造出来、写 `$tag`、调它的 construct。
+       结构体那一侧 jancy 直接报错（`class '…' cannot be a struct member`，
+       jnc_ct_StructType.cpp:303-307），这一层照它报。 */
+    this.embFields = new Map();
     /* 类里的事件那几格字段（第八十三刀）。类名 -> `[{ name, type }]`。
      * 那一格在方言里是一格数组的句柄（多播的处理函数单子），所以**造对象的时候要把单子
      * 建起来**：`(pstore (pfield (var $this) m_e) (anew (arr …) (int 0)))`。
@@ -1314,7 +1327,8 @@ class JncLower {
       const bcs = this.dirBases(name)
         .map((b) => ({ cls: b, c: this.ctors.get(b) }))
         .filter((x) => x.c !== undefined);
-      const hasFI = this.fieldInits.has(name) || this.evtFields.has(name);
+      const hasFI = this.fieldInits.has(name) || this.evtFields.has(name)
+        || this.embFields.has(name);
       if (this.ctors.has(name)) {
         // 自己写了 construct：字段初值由 fnDef 插到它开头；基类那一个由
         // `basetype.construct(…)` 显式调，没写就在 fnDef 那处自动补一句（与 jancy 的
@@ -1687,6 +1701,29 @@ class JncLower {
   }
 
   /**
+   * 内嵌的类字段那几格**造出来**的语句（第一百六十一刀）：一格字段三句 ——
+   * `pnew` 出那一块、写 `$tag`（虚派发那一格标签，第五十七刀）、调它的 `construct`。
+   *
+   * 排在事件那几行（evtInitLines）之后、源码写的字段初值之前：初值里可以写 `m_menu.addItem(…)`，
+   * 那时那格对象得已经在。顺序与 jancy 一致 —— 它也是"字段逐格 initialize"排在构造体之前
+   * （jnc_ct_Parser.cpp:3002-3009 那条链）。
+   */
+  embInitLines(cls, pad) {
+    const list = this.embFields.get(cls);
+    if (list === undefined) return [];
+    const out = [];
+    for (const f of list) {
+      const ad = `(pfield (var $this) ${f.name})`;
+      out.push(`${pad}(pstore ${ad} (pnew (ptr ${clsRoot(f.cls)}) (int 1)))`);
+      const tg = this.tagStore(f.node, f.cls, `(pload ${ad})`, pad);
+      if (tg === null) continue;                    // 报过错了
+      out.push(tg);
+      if (this.ctorCall(f.node, f.cls, `(pload ${ad})`, null, pad, out) === null) continue;
+    }
+    return out;
+  }
+
+  /**
    * 一个类那几格字段默认值，降成 `construct` 开头的几条语句（第七十八刀）。
    *
    * 落法是**合成语句、走原来那条路**：`int m_x = 5;` 变成 `m_x = 5;` 这条赋值语句的 AST，
@@ -1733,6 +1770,7 @@ class JncLower {
       }
       if (this.sctors.has(cls)) for (const l of this.gateLines(cls, '    ')) pre.push(l);
       for (const l of this.evtInitLines(cls, '    ')) pre.push(l);
+      for (const l of this.embInitLines(cls, '    ')) pre.push(l);
       const saveNs = this.ns;
       const saveSelf = this.selfClass;
       const savePr = this.selfProp;
@@ -2763,7 +2801,8 @@ class JncLower {
       /* 这个类还带着字段默认值或者事件（第七十八 / 八十三刀）：那就把体交给
          emitFieldInitCtors —— 它会先发闸门那几行、再建事件的单子、再发字段初值。
          两处各发一格 `(fn C$construct …)` 就重名了。 */
-      if (this.fieldInits.has(cls) || this.evtFields.has(cls)) { this.synthFI.add(cls); continue; }
+      if (this.fieldInits.has(cls) || this.evtFields.has(cls)
+        || this.embFields.has(cls)) { this.synthFI.add(cls); continue; }
       this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n`
         + `${this.gateLines(cls, '    ').join('\n')})`);
     }
@@ -3859,14 +3898,40 @@ class JncLower {
        成员表。按 prop_full.rst:34 那句话认才对：体里的成员声明就是**带 `autoget` 的字段**与
        **带 `bindable` 的事件**，也就是说明符里必有那几个词之一。 */
     const memMods = new Set(['autoget', 'bindable', 'event', 'multicast', 'alias']);
+    /* 只有原型的取/存（第一百六十刀）也算"成员声明"：`property m_value { int get(); void set(int); }`
+       整格体不是取值器的体 —— 那两条是**声明**，体在宿主那边。漏了这一句的话 `whole` 会判成真，
+       于是这两条被当成取值器体里的两格局部量（报的是"局部量上的形参表"）。 */
+    const protoAcc = (m) => {
+      const ds0 = this.flat(m.items[2]);
+      return ds0.length === 1 && bareAccessor(ds0[0]);
+    };
     const isPropMember = (m) => isList(m) && ((head(m) === 'var-decl'
-      && [...this.flat(m.items[1].items[2]), ...this.flat(m.items[1].items[3])]
-        .some((x) => isAtom(x) && memMods.has(x.value)))
+      && ([...this.flat(m.items[1].items[2]), ...this.flat(m.items[1].items[3])]
+        .some((x) => isAtom(x) && memMods.has(x.value)) || protoAcc(m)))
       || (head(m) === 'fn-def' && isList(m.items[2]) && isList(m.items[2].items[2])
         && head(m.items[2].items[2]) === 'accessor'));
     const whole = bodyItems.length > 0 && !bodyItems.some(isPropMember);
+    const hostAcc = { get: false, set: false };
     for (const m of whole ? [] : bodyItems) {
       if (isList(m) && head(m) === 'var-decl') {
+        /* 体里那格**只有原型、没有体**的取/存（第一百六十刀）：`void set(variant_t value);`
+           / `string_t get();`（ui_PropertyGrid.jnc:80/86/91）。语法上它是一格 var-decl，
+           声明符的芯是裸写的 `get` / `set`（`bareAccessor`）—— 在类体里那是**下标算符**
+           （第一百三十八刀），可在**属性体里**它就是这格属性的取/存（prop_full.rst:15 那对
+           花括号开的是一层命名空间）。没有体的意思是"实现在别处"：`opaque class` 里就是
+           宿主的 C/C++（opaque.rst:15-29），读写于是走 `(ccall …)`。 */
+        const ds0 = this.flat(m.items[2]);
+        const d0 = ds0.length === 1 ? ds0[0] : null;
+        if (d0 !== null && bareAccessor(d0)) {
+          const k0 = specialCore(d0);
+          if (accs.some((a) => a.kind === k0) || hostAcc[k0] === true) {
+            this.nope(m, `完整声明式的属性 '${nm}' 里两个 ${k0}（要重载决议）`);
+            return [];
+          }
+          hostAcc[k0] = true;
+          accs.push({ kind: k0, node: m, proto: true, sp: m.items[1], ptrs: d0.items[1] });
+          continue;
+        }
         const r = this.fullPropMember(nm, m, sibs);
         if (r === null) return [];
         if (r.kind === 'field') {
@@ -3912,7 +3977,9 @@ class JncLower {
       this.mkA(sp0, 'mods'),
       ...this.flat(lst).filter((x) => !(isAtom(x) && mods0.has(x.value))));
     const src = whole ? { sp: it.items[1], ptrs: dcl.items[1] }
-      : (fld !== null ? fld : { sp: g.node.items[1], ptrs: g.node.items[2].items[1] });
+      : (fld !== null ? fld
+        : (g.proto === true ? { sp: g.sp, ptrs: g.ptrs }
+          : { sp: g.node.items[1], ptrs: g.node.items[2].items[1] }));
     const extra = [];
     if (fld !== null) extra.push('autoget');
     if (evt !== null) extra.push('bindable');
@@ -3947,7 +4014,11 @@ class JncLower {
         this.mkL(sp0, this.mkA(sp0, 'dcl'), dcl.items[1], qs, sfx, dcl.items[4]), body));
       return out;
     }
+    /* 只有原型的那几格记一笔（第一百六十刀）：它们**不出函数** —— 体在宿主那边，读写落成
+       `(ccall …)`（见 propGet / propSet 那两处的宿主面分支）。 */
+    if (hostAcc.get || hostAcc.set) this.propHostAcc.set(full, hostAcc);
     for (const a of accs) {
+      if (a.proto === true) continue;            // 没有体，发不出函数
       const ad = a.node.items[2];
       const qs = this.mkL(ad.span, this.mkA(ad.span, 'qualified-special'), core, ad.items[2]);
       out.push(this.mkL(a.node.span, this.mkA(a.node.span, 'fn-def'), a.node.items[1],
@@ -5456,8 +5527,38 @@ class JncLower {
         // parent block"）。这一层的类变量里放的是地址，内嵌要连"父对象造出来时把它也造
         // 出来"一起接 —— 那是另一刀。类**指针**的字段不在这条里：那一格就是一条引用
         // （`Node* m_next`），与第十七刀那条自引用的结构体指针字段同一格。
+        /* 类**值**的字段（第一百六十一刀）：jancy 那边它是**内嵌**的对象 ——
+           `ClassType::calcLayout` 把它收进 `m_classFieldArray`（jnc_ct_ClassType.cpp:360-371），
+           再由父对象的构造逐格造出来（`MemberBlock::initializeFields` 里
+           `operatorMgr.initialize(fieldValue, …)`，jnc_ct_MemberBlock.cpp:158-179）。
+           这一层的类值本来就是"一格地址 + 一次 pnew"（局部量那一格从第五十二刀起就这么落），
+           所以字段照原样一格地址，造出来那三句（pnew / `$tag` / construct）由 embInitLines
+           发在父对象构造的开头 —— 与事件那一格（第八十三刀）同一处、紧跟在它后面。
+           结构体那一侧 jancy 直接报错（`class '…' cannot be a struct member`，
+           jnc_ct_StructType.cpp:303-307），这一层照它报；类**指针**的字段不在这条里
+           （`Node* m_next` 就是一条引用）。 */
         if (isClass(info.type) && info.type.own === true) {
-          this.nope(d, `类型是类（${tyName(info.type)}）的字段 —— 它在 jancy 那边是内嵌的对象`);
+          if (!cls) {
+            this.err(d, `结构体 '${shown(name)}' 里放不下类 '${shown(info.type.name)}' 的一格值`
+              + '（jancy 那边这一句就是错：`class … cannot be a struct member`，'
+              + 'jnc_ct_StructType.cpp:303-307 —— 内嵌的对象只有类里才有）');
+            continue;
+          }
+          if (dflt !== null) {
+            this.err(d0, `'${info.name}' 是类的字段，赋不了值（type_class.rst:19 那句 `
+              + '"You cannot assign varibles or fields of class types"）');
+            continue;
+          }
+          if (info.type.name === name) {
+            this.err(d, `类 '${shown(name)}' 里的字段 '${info.name}' 按值套回了自己 ——`
+              + '内嵌的对象要在父对象里就地造出来，套回自己就没完了（要套自己得经一格指针）');
+            continue;
+          }
+          fields.push({ name: info.name, type: info.type });
+          const el = this.embFields.get(name);
+          const rec = { name: info.name, cls: info.type.name, node: d };
+          if (el === undefined) this.embFields.set(name, [rec]);
+          else el.push(rec);
           continue;
         }
         // 数组字段（第二十二刀）：那 N 格是**真的内嵌**在结构体里的 —— 方言的字段类型
@@ -7186,6 +7287,8 @@ class JncLower {
     const pi = this.props.get(pn);
     const g = `${pn}$get`;
     if (!this.fns.has(g)) {
+      const hv = this.hostProp(n, pn, pi, self, 'get', null);
+      if (hv !== undefined) return hv;
       return this.nope(n, `读属性 '${shown(pn)}' —— 它的取值器没有定义`
         + '（简单声明式的体写在别处：`T p.get() { … }`，prop_simple.rst:25）');
     }
@@ -7213,6 +7316,8 @@ class JncLower {
     }
     const s = `${pn}$set`;
     if (!this.fns.has(s)) {
+      const hv = this.hostProp(n, pn, pi, self, 'set', { node: valNode, pad });
+      if (hv !== undefined) return hv;
       return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
         + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
     }
@@ -7228,6 +7333,59 @@ class JncLower {
         + `这儿给的是 ${tyName(v.type)}`);
     }
     return [`${pad}(expr (call ${s}${sf}${ix} ${v.code}))`];
+  }
+
+  /**
+   * 宿主面的取/存（第一百六十刀）。属性体里那格取/存**只有原型、没有体**时，实现在宿主的
+   * C/C++ 那边（`opaque class`，opaque.rst:15-29）—— 与方法那一格（ADR-0022 的 J4b）同一条
+   * 路：发 `(ccall Owner_get_prop self)` / `(ccall Owner_set_prop self v)`，符号名就是
+   * "类名（`$` 换成 `_`）+ `_get_` / `_set_` + 属性名"。
+   *
+   * 回 `undefined` 表示"这一格不是宿主面的"（调用方接着发它自己那句诊断）；回 null 是报过错了。
+   */
+  hostProp(n, pn, pi, self, kind, val) {
+    const ha = this.propHostAcc.get(pn);
+    if (ha === undefined || ha[kind] !== true) return undefined;
+    if (pi === undefined || pi.cls === null || !this.opaques.has(pi.cls)) return undefined;
+    if (pi.idx.length > 0) {
+      return this.nope(n, `${kind === 'get' ? '读' : '写'}属性 '${shown(pn)}' —— 它是带下标的、`
+        + '而取/存那两格的体在宿主那边（那一格要先把下标也摆进 C_ABI 那张表）');
+    }
+    const sf = this.propSelf(n, pn, pi, self);
+    if (sf === null) return null;
+    const sym = `${pi.cls.replace(/\$/g, '_')}_${kind}_${pn.slice(pn.lastIndexOf('$') + 1)}`;
+    const words = ['ptr'];
+    const parts = [sf.trim()];
+    let rw = 'void';
+    if (kind === 'get') {
+      rw = this.cabiWordOfJnc(pi.type, true);
+      if (rw === null) {
+        return this.nope(n, `读属性 '${shown(pn)}' —— 它的类型 ${tyName(pi.type)} 落不进`
+          + ' C_ABI 的那几个词（体在宿主那边）');
+      }
+    } else {
+      const w = this.cabiWordOfJnc(pi.type, false);
+      if (w === null) {
+        return this.nope(n, `写属性 '${shown(pn)}' —— 它的类型 ${tyName(pi.type)} 落不进`
+          + ' C_ABI 的那几个词（体在宿主那边）');
+      }
+      let v = this.expr(val.node, pi.type);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(pi.type)) v = intConv(v, pi.type);
+      if (!this.assignOk(v.type, pi.type)) {
+        return this.err(n, `属性 '${shown(pn)}' 是 ${tyName(pi.type)}，`
+          + `这儿给的是 ${tyName(v.type)}`);
+      }
+      words.push(w);
+      parts.push(v.code);
+    }
+    if (!this.cabiNames.has(sym)) {
+      this.decls.push(`  (cabi ${sym} ${rw} (${words.join(' ')}))`);
+      this.cabiNames.add(sym);
+      this.cabiSigs.set(sym, { ret: rw, params: words, sym });
+    }
+    const call = `(ccall ${sym} ${parts.join(' ')})`;
+    return kind === 'get' ? { code: call, type: pi.type } : [`${val.pad}(expr ${call})`];
   }
 
   /**
@@ -8231,6 +8389,9 @@ class JncLower {
       /* 类里那几格事件的单子（第八十三刀）：排在字段初值**之前** —— 初值里可以写
          `m_e += h`，那时单子必须已经建好。 */
       for (const l of this.evtInitLines(owner, '    ')) pre.push(l);
+      /* 内嵌的类字段那几格（第一百六十一刀）：与事件那几行同一处、紧跟在它后面 —— 字段初值里
+         可以写 `m_menu.addItem(…)`，那时那格对象得已经造出来。 */
+      for (const l of this.embInitLines(owner, '    ')) pre.push(l);
       /* 字段的默认值（第七十八刀）：排在基类构造与静态构造之后、用户写的那个体之前 ——
          正是 jancy 那四句的第三句（jnc_ct_Parser.cpp:3005-3009 的 initializeFields）。
          所以 construct 里再给同一格字段赋值会**盖掉**默认值，与 jancy 一致。

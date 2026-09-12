@@ -60,3 +60,28 @@ int64_t Counter_value(void *self) {
   int64_t *p = probe_slot(self);
   return p == NULL ? -1 : *p;
 }
+
+/* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型
+   （`property m_scale { long get(); void set(long); }`，ui_PropertyGrid.jnc:78-88 那个形状）
+   时，体也在宿主这边；符号名的约定与方法同一条，只是中间多一段 `get_` / `set_`：
+   `Owner.m_p` 的取值器是 `Owner_get_m_p`、存值器是 `Owner_set_m_p`，第一个形参照旧是那个对象。
+   这一格刻意**不是**单纯的读写：存的时候乘 10，好让"真走了宿主这两个函数"在输出上看得见。 */
+static int64_t probe_scale[OMNI_PROBE_SLOTS];
+
+static int64_t *probe_scale_slot(void *self) {
+  for (int i = 0; i < OMNI_PROBE_SLOTS; i++) if (probe_keys[i] == self) return &probe_scale[i];
+  for (int i = 0; i < OMNI_PROBE_SLOTS; i++) {
+    if (probe_keys[i] == NULL) { probe_keys[i] = self; probe_scale[i] = 0; return &probe_scale[i]; }
+  }
+  return NULL;
+}
+
+int64_t Counter_get_m_scale(void *self) {
+  int64_t *p = probe_scale_slot(self);
+  return p == NULL ? -1 : *p;
+}
+
+void Counter_set_m_scale(void *self, int64_t v) {
+  int64_t *p = probe_scale_slot(self);
+  if (p != NULL) *p = v * 10;
+}

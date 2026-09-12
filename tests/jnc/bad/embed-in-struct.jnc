@@ -1,0 +1,23 @@
+// 第一百六十一刀的界：**结构体**里放不下类的一格值。
+//
+// 内嵌的对象只有类里才有 —— jancy 那边这一句直接是错，不是"还不收"：
+// `StructType::layoutField` 头一段就拦（jnc_ct_StructType.cpp:303-307）：
+//
+//     if (m_structTypeKind != StructTypeKind_IfaceStruct && field->m_type->getTypeKind() == TypeKind_Class)
+//         err::setFormatStringError("class '%s' cannot be a struct member", …);
+//
+// 那个 `IfaceStruct` 例外说的正是"类自己那格 iface 结构体"——也就是说内嵌是**类的**本事。
+// 类指针的字段照旧收（`Inner* m_p;`）：那一格是一条引用，不是一格对象。
+class Inner {
+	int m_n;
+}
+
+struct Holder {
+	Inner m_in;
+}
+
+int main() {
+	Holder h;
+	printf("%d\n", h.m_in.m_n);
+	return 0;
+}

@@ -1,0 +1,68 @@
+// 类里那些**类型是类的值**的字段（第一百六十一刀）—— jancy 那边它是**内嵌的对象**。出处：
+//   - `ClassType::calcLayout` 把这样的字段收进 `m_classFieldArray`
+//     （jnc_ct_ClassType.cpp:360-371），顺手拦住"不能实例化的类"（抽象的 / opaque 不可造的）；
+//   - 造出来的那一步在父对象的构造里：`MemberBlock::initializeFields` 顺着
+//     `m_fieldInitializeArray` 逐格 `operatorMgr.initialize(fieldValue, …)`
+//     （jnc_ct_MemberBlock.cpp:141-179），而那张表是 calcLayout 里按 `isConstructibleType`
+//     填的（同上:373-376）；
+//   - 顺序：基类构造 → 静态构造 → **字段（含内嵌的对象）** → 用户写的体
+//     （jnc_ct_Parser.cpp:3002-3009）。所以父类构造的体里读那格对象，读到的是**已经造好**的。
+//   - 结构体里放不下：那一句在 jancy 那边就是错（`class '…' cannot be a struct member`，
+//     jnc_ct_StructType.cpp:303-307）—— 这一层照它报（见 bad/embed-in-struct.jnc）。
+//
+// 这一层的类值本来就是"一格地址 + 一次 pnew"（局部量从第五十二刀起就这么落），所以内嵌落成
+// "字段里放地址、父对象构造开头把它造出来"。可观测的三件事都在这儿钉着：
+//   1. 内嵌那格的 construct 在父类构造的**体之前**跑（`outer ctor n=41` 那一行）；
+//   2. 两个父对象各带**自己**那一格（`p` 与 `q` 互不影响）；
+//   3. 内嵌的对象照旧是一格真对象：方法调得动、字段读写得了、还能再套一层（Mid 里套 Inner）。
+//
+// 期望输出的出处：/tmp/c149.c（`cc -O0 -std=c99 -Wall`）—— 独立的一份：它按"父结构体里嵌一格
+// 子结构体、父的 init 先调子的 init"手写，与这一层把内嵌落成地址还是就地布局无关。
+
+class Inner {
+	int m_n;
+
+	construct() {
+		m_n = 41;
+		printf("inner ctor\n");
+	}
+
+	void bump() {
+		m_n++;
+	}
+}
+
+class Mid {
+	Inner m_in;
+	int m_tag = 7;
+
+	construct() {
+		printf("mid ctor n=%d tag=%d\n", m_in.m_n, m_tag);
+	}
+}
+
+class Outer {
+	Mid m_mid;
+	Inner m_side;
+
+	construct() {
+		printf("outer ctor n=%d side=%d\n", m_mid.m_in.m_n, m_side.m_n);
+	}
+}
+
+int main() {
+	Outer* p = new Outer;
+	p.m_mid.m_in.bump();
+	p.m_side.bump();
+	p.m_side.bump();
+	printf("p mid=%d side=%d tag=%d\n", p.m_mid.m_in.m_n, p.m_side.m_n, p.m_mid.m_tag);
+
+	// 另一个对象带自己那几格：上面那几次 bump 一格都动不着它
+	Outer* q = new Outer;
+	printf("q mid=%d side=%d\n", q.m_mid.m_in.m_n, q.m_side.m_n);
+
+	// 没写 construct 的类里也有内嵌那一格：那时构造是合成的（第七十八刀那条路）
+	Mid m;
+	printf("m n=%d tag=%d\n", m.m_in.m_n, m.m_tag);
+	return 0;
+}
