@@ -1,0 +1,29 @@
+// `volatile` 写在 `*` 后面（第二百一十一刀）。语料里的原样是
+// `std.Error const* readonly volatile m_ioError;`（io_FileStream.jnc:172，io_base 那一族
+// 15 份文件都写这一句）。
+//
+// 说明符里那个 `volatile`（`uint64_t readonly volatile m_txTotalSize;`）第八十六刀就收下
+// 不看了 —— 这一侧是**同一个词、同一位**：两处都只往 ptrTypeFlags 上或一个
+// `PtrTypeFlag_Volatile`（jnc_ct_Type.cpp:197-198 / jnc_ct_DeclTypeCalc.cpp:282-283），
+// 而那一位在 jancy 里只决定生成的 load / store 带不带 volatile 标记
+// （jnc_ct_OperatorMgr_DataRef.cpp:94 与 :208 那两个实参），不改类型、不改布局、不改读哪
+// 一格。所以拦着它只是把同一句话说了两遍。
+//
+// 判据是手写的 C 双胞胎 /tmp/c171.c：同一段读写，带 volatile 与不带 volatile 的答案一样。
+struct Counter {
+	long m_tx;
+	long* volatile m_last;
+}
+
+int main() {
+	long slot = 7;
+	Counter c;
+	c.m_tx = 0;
+	c.m_last = &slot;
+	c.m_tx = c.m_tx + 5;
+	*c.m_last = *c.m_last * 10;
+	long* readonly volatile p = &slot;
+	*p = *p + 1;
+	printf("%d %d %d\n", c.m_tx, slot, *p);
+	return 0;
+}

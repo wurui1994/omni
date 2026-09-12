@@ -6823,6 +6823,7 @@ class JncLower {
        * import，于是它拦住的文件不少。
        *
        * 收下、**不看**，与 const / readonly 那一族同一条（那几个也是收下不看）。
+       * 写在 `*` **后面**的那一个是同一位、同一笔账（第二百一十一刀，见 ptrsTy）。
        * **代价明写**：这一层没有线程、方言里也没有"这一格不许缓存"那一位，所以真有别人
        * （宿主的 C++ 那边）在改这一格时我们保证不了每次都重读 —— 那两格恰好正是宿主在写的
        * 计数器。等真有宿主面那一刀时，这一位要跟着落到方言里去。 */
@@ -7062,8 +7063,20 @@ class JncLower {
         // 与 `Type* const` 在 jancy 那边落在同一个互斥组上（Decl.cpp:96 的
         // `TypeModifierMaskKind_Const`），这一层没有可变性检查，所以三个都是收下不看。
         // `volatile` **不在**那一组里（antiModifierTable 那一行是 0，它是自己的一位
-        // `PtrTypeFlag_Volatile`，jnc_Type.h:220）—— 留着，它是自己一刀。
+        // `PtrTypeFlag_Volatile`，jnc_Type.h:220）—— 见下面那一段。
         if (MUT_MODS.has(m)) continue;
+        /* `volatile` 写在 `*` 后面（第二百一十一刀）：`std.Error const* readonly volatile
+           m_ioError;`（io_FileStream.jnc:172，语料里 15 份文件都是这一句）。
+           这与说明符里那个 `volatile`（第八十六刀，`uint64_t readonly volatile
+           m_txTotalSize;`）是**同一个词、同一位**：两处都只是往 ptrTypeFlags 上或一个
+           `PtrTypeFlag_Volatile`（说明符那一侧 jnc_ct_Type.cpp:197-198 的
+           getPtrTypeFlagsFromModifiers，星号那一侧 jnc_ct_DeclTypeCalc.cpp:282-283），
+           而那一位在 jancy 里**只**决定生成的 load / store 带不带 volatile 标记
+           （jnc_ct_OperatorMgr_DataRef.cpp:94 与 :208 那两个实参）—— 不改类型、不改布局、
+           不改取哪一格。所以既然第八十六刀那一侧已经收下不看，这一侧拦着只是同一句话说了两遍。
+           **代价与第八十六刀同一笔**：这一层没有线程，方言里也没有"这一格不许缓存"那一位，
+           真有宿主那边在改这一格时保证不了每次重读；等宿主面那一刀落这一位时两处一起改。 */
+        if (m === 'volatile') continue;
         /* 调用约定那三个词写在 `*` **后面**（第二百〇三刀）：`char const thin* stdcall f()`
            （io_JLink.jnc:218）。星号后面那一组词本来就归声明（第七十二刀），而这三个词在
            方言的目标（arm64 与 x86-64 SysV）上与 cdecl **本来就是同一套 ABI** ——

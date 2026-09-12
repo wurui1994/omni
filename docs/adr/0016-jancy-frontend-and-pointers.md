@@ -10139,6 +10139,47 @@ size_t errorcode transmit(string_t text) {                  // :35 带体
   数字没动而账变了：这是"墙往里挪"最干净的一次 —— 总数一样，说的话全换成了真的那几件事。
 - 一起编那张榜：`39`、理由 `19` 没动（那一批 44 份里没有 `.jncx`）。
 
+### 第二百一十一刀：`volatile` 写在 `*` 后面
+
+榜上 `指针后面的修饰符 '…'` 那一行 18 份文件，词只有一个：`volatile`。原样是
+`std.Error const* readonly volatile m_ioError;`（io_FileStream.jnc:172）——
+io_base 那一族（Serial / Socket / NamedPipe / Mailslot / ChildProcess /
+HostNameResolver / FileStream）、devmon、usbmon、websocket、ssl 全写这一句。
+
+**这一格与第八十六刀是同一个词、同一位。** 说明符里那个 `volatile`
+（`uint64_t readonly volatile m_txTotalSize;`，api/log_Log.jnc:81-82）第八十六刀就收下不看
+了；写在星号后面的那一个走的是另一条读法（第七十二刀那条法：最后一个 `*` 后面的词归**这条
+声明**），可两条路最后落的是同一位 `PtrTypeFlag_Volatile` ——
+说明符那一侧是 `getPtrTypeFlagsFromModifiers`（jnc_ct_Type.cpp:197-198），
+星号那一侧是 `DeclTypeCalc` 里 `TypeModifier_Volatile -> PtrTypeFlag_Volatile`
+（jnc_ct_DeclTypeCalc.cpp:282-283）。
+
+那一位在 jancy 里**只**决定一件事：生成的 load / store 带不带 volatile 标记 ——
+`createLoad(..., (typeFlags & PtrTypeFlag_Volatile) != 0)`
+（jnc_ct_OperatorMgr_DataRef.cpp:94）与 `createStore(..., (dstType->getFlags() &
+PtrTypeFlag_Volatile) != 0)`（同文件:208）。不改类型、不改布局、不改读哪一格。
+（jancy 自己也把这一位当"保守一点"用：`createOnceFlagVariable` 里静态存储的那格 once 标志
+就直接带上它，jnc_ct_VariableMgr.cpp:416。）所以拦着星号那一侧，只是把第八十六刀那句话说了
+第二遍，而且说的是相反的话。改成一句 `if (m === 'volatile') continue;`，注里把两处指到一起。
+
+**代价与第八十六刀记同一笔**：这一层没有线程，方言里也没有"这一格不许缓存"那一位，真有宿主
+（C++ 那边）在改这一格时保证不了每次重读 —— 那几格恰好正是宿主在写的事件位与错误指针。等宿主
+面那一刀把这一位落进方言时，说明符与星号两处一起改。
+
+判据是手写的 C 双胞胎 `/tmp/c171.c`：同一段读写，带 volatile 与不带 volatile 答案一样
+（`5 71 71`）。用例 `tests/jnc/cases/165-volatileptr.jnc` 照语料的原样写
+（字段 `long* volatile m_last;` + 局部 `long* readonly volatile p`），印 `5 71 71`。
+
+- 腿：`node tests/jnc/run.js` 292/0（新增 `cases/165-volatileptr`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `4055 -> 4037`（−18），`指针后面的修饰符 '…'` **整行没了**。
+  lowered `155`、clean `225` 都**没动** —— 那 18 份文件后面还压着别的（`m_p`、`sizeof`、
+  errorcode 不写 try 那几行），这一格只是把它们各自的一条账划掉。明写在这儿：这一刀换来的是
+  −18 对，不是 +N 份。
+- 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里 log_Log.jnc 的 volatile 在说明符那一侧，
+  第八十六刀早收了）。
+
+
 
 
 ## 后果与代价
