@@ -4233,7 +4233,13 @@ class JncLower {
     if (this.propMod(n.items[1], n.items[2])) return null;
     // alias 也在前面那一遍（与 typedef 同一处，第八十七刀）——它也不是一格内存。
     if (this.hasMod(n.items[1], 'alias')) return null;
-    const sp = this.specs(n.items[1]);
+    /* 顶层这一遍也要认得函数上那几个词（第一百四十九刀）：`size_t errorcode transmit(…);`
+       （ias.jnc:30）是一条**函数原型**，`errorcode` 正写在函数上 —— 先前这儿按"不是函数位置"
+       调 specs，于是报"'errorcode' 只能写在函数上"，那是认错人（一起编那张榜上 5 处）。
+       改成收下来往上传，再在下面按**这条声明符到底有没有形参表**分开说：
+         - 有形参表 -> 它是函数，那几个词写得对（原型那一支照旧，见下面第九十二刀那一段）；
+         - 没有形参表 -> 那才是"写在一格变量上"，那时候原来那两句话都是对的。 */
+    const sp = this.specs(n.items[1], true);
     if (sp === null) return null;
     for (const d of this.flat(n.items[2])) {
       const dh = isList(d) ? head(d) : null;
@@ -4258,6 +4264,15 @@ class JncLower {
         this.globalCells.push(`    (set ${nm} (anew ${tyText(t)} (int 0)))`);
         continue;
       }
+      /* 那几个**只对函数有意思**的词写在一格变量上（第一百四十九刀把这一问从 specs 挪到这儿）：
+         没有形参表就是一格变量，那时原来那两句话是对的；有形参表的落到下面那两支上。 */
+      if (info.formals === null && !sp.fnptr) {
+        if (sp.errc) { this.err(dcl, "'errorcode' 只能写在函数上（exceptions.rst:17）"); continue; }
+        if (sp.virt !== null) {
+          this.err(dcl, `'${sp.virt}' 只能写在类的方法上（type_class.rst:178）`);
+          continue;
+        }
+      }
       /* 顶层的函数原型（第九十二刀）：`void foo(int x);` —— 声明在前、定义在后那种 C++ 式的
          写法。签名那一遍（fnSig）排在这一遍**之前**，所以"这个名字有没有带体的定义"这时候
          问得出来：
@@ -4278,6 +4293,15 @@ class JncLower {
         const same = have.params.length === ps.length
           && have.params.every((t, i) => sameTy(t, ps[i].type)) && sameTy(have.ret, info.type);
         if (!same) {
+          /* 对不上，可这个名字是**一族重载**（第一百四十九刀）：那这条原型多半配的是族里另一条，
+             拿其中一条去对本来就是错的。语料里 `size_t errorcode transmit(void const*, size_t);`
+             与 `size_t errorcode transmit(string_t) { … }`（ias.jnc:30 与 :35）就是这个形状。
+             真拦路的是第一百四十四刀记下的那条：**只有原型的重载不进候选**。 */
+          if (this.overloads.has(fn)) {
+            this.nope(dcl, `原型 '${shown(fn)}' 是同名那一族里的一条 —— 只有原型的重载这一层`
+              + '还没有收进候选（见 ADR-0016 第一百四十四刀那一段）');
+            continue;
+          }
           this.err(dcl, `原型 '${shown(fn)}' 与它那个定义的签名对不上`);
         }
         continue;
@@ -7439,9 +7463,10 @@ class JncLower {
    * —— 那是悄悄少跑一段。
    */
   protoCtorNope(node, cls) {
-    return this.nope(node, `原型 '${shown(cls)}.construct' 没有带体的定义 —— 造一格 `
-      + `${shown(cls)} 就得调它（实现在宿主那边的走 opaque class 那条路，在别的模块里的要 `
-      + 'import 得着）');
+    // 第二处**不写类名**是有意的：榜上归一那一步只把**引号里**的名字换成 '…'，写两遍就成了
+    // 一份文件一行（第一百四十九刀量到的：十来个类各自一行，全是 1 处）。
+    return this.nope(node, `原型 '${shown(cls)}.construct' 没有带体的定义 —— 造一格它就得调它`
+      + '（实现在宿主那边的走 opaque class 那条路，在别的模块里的要 import 得着）');
   }
 
   /** 那个类的 construct 只写了原型、**而且**体外也没有定义（第一百四十八刀）。
@@ -11820,7 +11845,7 @@ class JncLower {
          报出来的是"要 0 个实参，这里给了 1 个"（逐份榜上这一族十来行、每行 88 处）。
          合出来的那一格顶不了用户声明的那一个，所以问的该是"有没有**真的**那一个"。 */
       if (!this.realCtor(t.name) && this.hostCtors.has(t.name)) {
-        return this.nope(n, `new ${shown(t.name)}(…) —— 它的 construct 声明在 opaque class 里、`
+        return this.nope(n, `造一格 '${shown(t.name)}' —— 它的 construct 声明在 opaque class 里、`
           + '实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面');
       }
       // 只有原型的 construct（第一百四十八刀）：与上一条同一件事，只是那个类没写 `opaque`。
