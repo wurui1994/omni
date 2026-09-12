@@ -9285,6 +9285,31 @@ log.RecordCodeFlags.Foldable`（超过 i64 正半区的那种）都算得出。
 - **一起编那张榜 `94 -> 84`（−10）**：`原型 … 造一格它就得调它` 那一行整行消失。这两刀合起来把
   那张榜从 95 条压到 84 条，而 lowered 从 126 走到 131（这一整轮从 121 走到 131）。
 
+### 第一百八十五刀：**顶层**那些只有原型的函数
+
+同一族的最后一格。一起编那张榜上剩下的 16 条"原型没有带体的定义"全是顶层的
+（`trace` / `sendKeepAlive` / `doc.sessionDispatch` / `clearLog` / `connect`…，
+doc_PluginHost.jnc:56-58、ias.jnc:20/27 那一批），第一百五十一刀记的界就是它。
+
+符号名的规则**不用新定**：`Owner_method` 那条本来就是"全名把 `$` 换成 `_`"，顶层这一格只是
+少一格 `this` —— `hostAdd` 就叫 `hostAdd`、命名空间里的 `probe.hostMul` 叫 `probe_hostMul`。
+新增两处：`hostTopSigs`（名字 -> `{ret, params, defs}`，在原来发那句诊断的地方登记）与
+`hostTopCall`（调用点，与 `hostMethodCall` 逐条同一套检查，少一格 self）。默认值、`variant_t`
+两头（第一百七十三 / 一百七十四刀）都照旧走同一份机器。
+
+判据在 `tests/llvm/run.js` 第 9 节：`long hostAdd(long, long);` 与
+`namespace probe { long hostMul(long, long); }` 各调一次，印 `top 42 42`；`.sx` 里逐字比
+`(cabi hostAdd i64 (i64 i64))` 与 `(cabi probe_hostMul i64 (i64 i64))`（**命名空间那一格带前缀**
+是这一刀要证的第二件事）。`bad/proto-nobody` 退役。
+
+- 腿：`node tests/jnc/run.js` 282/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `131 -> 136`（+5）、clean `201 -> 206`（+5）、对 `4206 -> 4121`（−85）。
+- 一起编那张榜：`84 -> 70`（−14）、理由 `23 -> 22`。**`没有这个类型` 那一行 12 -> 14**（往上走了）
+  —— 又是墙往里挪：那 16 处过去之后，后面的类型名才被问到。
+- 三刀合起来（183 + 184 + 185）：一起编那张榜 `95 -> 70`，逐份 lowered `126 -> 136`、
+  clean `193 -> 206`、对 `4276 -> 4121`。**共同的那一条**记在这儿：
+  `opaque` 这个词管的是**布局**，不是"体在哪儿"；决定"体在宿主"的只有"这个模块里没有那个体"。
+
 
 
 ## 后果与代价

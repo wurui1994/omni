@@ -1167,6 +1167,9 @@ class JncLower {
        uint_t timeout = -1);`（ias.jnc:43）—— 那一遍（globalDecl）排在函数体那一遍之前，
        所以调用点问得着。用处与 protoMethods 一样：调它报的不该是"没有这个函数"。 */
     this.protoFns = new Set();
+    /* 顶层那些只有原型的函数的签名（第一百八十五刀）：名字 -> `{ret, params, defs}`。
+       调用点据此发 `(ccall <全名把 $ 换成 _> …)` —— 与类里那些（hostSigs）同一条约定。 */
+    this.hostTopSigs = new Map();
     this.methods = new Map();
     this.methodNames = new Set();
     this.selfClass = null;
@@ -4870,10 +4873,21 @@ class JncLower {
         const fn = this.qual(info.name);
         const have = this.fns.get(fn);
         if (have === undefined) {
-          // 调用点也要问得着这一格（第一百五十一刀）：那儿报"没有这个函数"是认错人
+          /* 顶层那格只有原型的函数（第一百五十一刀钉的界，第一百八十五刀兑掉）：与类里那些
+             （第一百八十三 / 一百八十四刀）是同一条 —— 体在宿主那边。符号名就是这条声明的
+             **全名**把 `$` 换成 `_`（`doc.sessionDispatch` -> `doc_sessionDispatch`，
+             与 `Owner_method` 那条规则是同一条：全名换字符）。签名记下来，调用点据此发
+             `(ccall …)`。 */
           this.protoFns.add(fn);
-          this.nope(dcl, `原型 '${shown(fn)}' 没有带体的定义（实现在宿主那边的走 opaque class`
-            + ' 那条路，在别的模块里的要 import 得着）');
+          const ps0 = this.formalList(info.formals);
+          if (ps0 !== null) {
+            const ds0 = ps0.map((p) => p.def ?? null);
+            this.hostTopSigs.set(fn, {
+              ret: info.type,
+              params: ps0.map((p) => p.type),
+              defs: ds0.some((d) => d !== null) ? ds0 : null,
+            });
+          }
           continue;
         }
         const ps = this.formalList(info.formals);
@@ -11683,6 +11697,65 @@ class JncLower {
     return name;
   }
 
+  /**
+   * 顶层那格只有原型的函数的调用点（第一百八十五刀）。与类里那些（hostMethodCall）逐条同一套
+   * 检查，只少一格 `this`：符号名是这条声明的**全名**把 `$` 换成 `_`（`doc.sessionDispatch`
+   * -> `doc_sessionDispatch`），实参与返回照 C_ABI 那几个词过，`variant_t` 那两头走
+   * 第一百七十三 / 一百七十四刀那两条。
+   */
+  hostTopCall(n, fn, sig) {
+    const sym = fn.replace(/\$/g, '_');
+    const vret = isVar(sig.ret);
+    const rw = vret ? 'void' : this.cabiWordOfJnc(sig.ret, true);
+    if (rw === null) {
+      return this.nope(n, `'${shown(fn)}' 的返回类型 ${tyName(sig.ret)}`
+        + '（落不进 C_ABI 的那几个词）');
+    }
+    const args0 = this.flat(n.items[2]);
+    const args = sig.defs === null ? args0 : this.withDefaults(args0, sig.params, sig.defs, null);
+    if (args === null) return null;
+    if (args.length !== sig.params.length) {
+      return this.err(n, `'${shown(fn)}' 要 ${sig.params.length} 个实参，`
+        + `这里给了 ${args0.length} 个`);
+    }
+    const words = vret ? ['ptr'] : [];
+    const parts = [];
+    const slots = [];
+    for (let i = 0; i < args.length; i++) {
+      const w = isVar(sig.params[i]) ? 'ptr' : this.cabiWordOfJnc(sig.params[i], false);
+      if (w === null) {
+        return this.nope(n, `'${shown(fn)}' 的第 ${i + 1} 个形参的类型 `
+          + `${tyName(sig.params[i])}（落不进 C_ABI 的那几个词）`);
+      }
+      let v = this.expr(args[i], sig.params[i]);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(sig.params[i])) v = intConv(v, sig.params[i]);
+      if (!this.assignOk(v.type, sig.params[i])) {
+        return this.err(args[i], `'${shown(fn)}' 的第 ${i + 1} 个实参要 `
+          + `${tyName(sig.params[i])}，这里是 ${tyName(v.type)}`);
+      }
+      words.push(w);
+      slots.push(isVar(sig.params[i]) ? `(ptr ${VARIANT})` : slotText(sig.params[i]));
+      if (isVar(sig.params[i])) {
+        const pv = this.hostVariantArg(args[i], v);
+        if (pv === null) return null;
+        parts.push(pv);
+      } else parts.push(v.code);
+    }
+    if (!this.cabiNames.has(sym)) {
+      this.decls.push(`  (cabi ${sym} ${rw} (${words.join(' ')}))`);
+      this.cabiNames.add(sym);
+      this.cabiSigs.set(sym, { ret: rw, params: words, sym });
+    }
+    if (vret) {
+      return { code: `(call ${this.hostVretFn(sym, slots)}${parts.map((p) => ` ${p}`).join('')})`, type: sig.ret };
+    }
+    return {
+      code: `(ccall ${sym}${parts.map((p) => ` ${p}`).join('')})`,
+      type: sig.ret,
+    };
+  }
+
   hostPick(n, owner, mn, sigs) {
     if (sigs.length === 1) return { sig: sigs[0], i: 0 };
     const args = this.flat(n.items[2]);
@@ -12784,12 +12857,14 @@ class JncLower {
         return this.nope(n, `原型 '${who}' 没有带体的定义（实现在宿主那边的走 opaque class`
           + ' 那条路，在别的模块里的要 import 得着）');
       }
-      /* 顶层只有原型的函数（第一百五十一刀）：`receive(p, size)`（ias.jnc:87 —— 体在宿主那边）。
-         与上面那一问同一件事，只是名字不挂在类上，所以按命名空间从里往外解一次。 */
+      /* 顶层只有原型的函数（第一百五十一刀钉的界，第一百八十五刀兑掉）：`receive(p, size)`
+         （ias.jnc:87 —— 体在宿主那边）。与类里那些同一条，只是名字不挂在类上，所以按命名空间
+         从里往外解一次。 */
       const pf = nm0 === null ? null : this.resolve(nm0, (k) => this.protoFns.has(k));
       if (pf !== null) {
-        return this.nope(n, `原型 '${shown(pf)}' 没有带体的定义（实现在宿主那边的走 opaque class`
-          + ' 那条路，在别的模块里的要 import 得着）');
+        const ts = this.hostTopSigs.get(pf);
+        if (ts !== undefined) return this.hostTopCall(n, pf, ts);
+        return this.nope(n, `原型 '${shown(pf)}' 没有带体的定义（形参表这一层没收下来）`);
       }
       /* jancy 的**全局 CRT** 那一族（第一百七十六刀）：`rand` / `isdigit` / `toupper` …
          它们不是"内建"，是 jancy 的 std 扩展库随身带的一份**源码**

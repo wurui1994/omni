@@ -405,6 +405,11 @@ if (existsSync(sysDir)) {
       + '}\n\n'
       /* 没写 `opaque` 的类里那格只有原型的方法（第一百八十三刀）：符号名的约定与 opaque
          那一支一模一样 —— `opaque` 说的是"布局不透明"，管的不是"体在哪儿"。 */
+      /* 顶层那格只有原型的函数（第一百八十五刀）：符号名就是全名把 `$` 换成 `_`。 */
+      + 'long hostAdd(long a, long b);\n\n'
+      + 'namespace probe {\n'
+      + 'long hostMul(long a, long b);\n'
+      + '}\n\n'
       + 'class Plain {\n'
       + '    construct(long seed);\n'
       + '    long twice(long x);\n'
@@ -429,12 +434,13 @@ if (existsSync(sysDir)) {
       + '    printf("rand %d\\n", rand() >= 0);\n'
       + '    Plain* q = new Plain(5);\n'
       + '    printf("plain %d %d\\n", q.twice(21), q.seeded());\n'
+      + '    printf("top %d %d\\n", hostAdd(40, 2), probe.hostMul(6, 7));\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -456,6 +462,10 @@ if (existsSync(sysDir)) {
     } else if (!sx.out.includes('(cabi Plain_twice i64 (ptr i64))')
       || !sx.out.includes('(cabi Plain_construct void (ptr i64))')) {
       detail.push('    emit sx 里没有 `(cabi Plain_twice …)` / `(cabi Plain_construct …)`');
+    /* 顶层那两格（第一百八十五刀）：命名空间里的那个名字带前缀。 */
+    } else if (!sx.out.includes('(cabi hostAdd i64 (i64 i64))')
+      || !sx.out.includes('(cabi probe_hostMul i64 (i64 i64))')) {
+      detail.push('    emit sx 里没有 `(cabi hostAdd …)` / `(cabi probe_hostMul …)`');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');

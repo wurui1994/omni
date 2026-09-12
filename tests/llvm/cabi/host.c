@@ -123,6 +123,13 @@ int64_t Plain_seeded(void *self) {
   return p == NULL ? -1 : *p;
 }
 
+/* **顶层**那格只有原型的函数（第一百八十五刀）：符号名就是那条声明的全名把 `$` 换成 `_`，
+   所以 `hostAdd` 就叫 `hostAdd`、命名空间里的 `probe.hostMul` 叫 `probe_hostMul`。
+   没有 self 那一格 —— 它不挂在任何类上。 */
+int64_t hostAdd(int64_t a, int64_t b) { return a + b; }
+
+int64_t probe_hostMul(int64_t a, int64_t b) { return a * b; }
+
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型
    （`property m_scale { long get(); void set(long); }`，ui_PropertyGrid.jnc:78-88 那个形状）
    时，体也在宿主这边；符号名的约定与方法同一条，只是中间多一段 `get_` / `set_`：
