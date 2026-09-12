@@ -3215,6 +3215,24 @@ class JncLower {
         }
         continue;
       }
+      /* 体在宿主那边的那一种（第二百三十一刀）：`int autoget property m_minValue;` 写在一格
+         成员**全都**只有声明的类里（ui_PropertyGrid.jnc:56 那一族）。jancy 的 `autoget` 只生成
+         **取值器**（`PropertyFlag_AutoSet` 只给 `bindable T x;` 那种 bindable data ——
+         jnc_ct_DeclTypeCalc.cpp:164 是唯一给它的地方），所以存值器的体一定写在别处
+         （prop_simple.rst:29）。整个模块里都没有，那就是在宿主的 C/C++ 里 —— 与只有原型的方法
+         （第一百八十三刀）同一句话。
+         这时**取值器也要走宿主**：不然读的是这一层那格生成的存储，而写去了宿主，两边各说各话
+         （jancy 那边靠 `JNC_MAP_AUTOGET_PROPERTY` 把字段的偏移登记给宿主，两边是同一块字节；
+         这一层没有那套登记，于是让宿主自己拿着那格存储 —— 就是 opaque 那笔账）。
+         所以这儿一个字都不合成，读与写都落到 hostProp 上去。
+         那格已经进了 ownFields 的存储留着不用（几个字节的空位，不是错话）。
+         `bindable` 的**不**走这条：宿主那边的存值器点不着这一层那格 `m_onChanged`，反应器绑上去
+         就永远不响 —— 那是另一笔账，下面 propSet 那句话里说清。 */
+      if (pi.bdata !== true && !this.fns.has(`${a.full}$set`)
+        && (pi.onch === null || pi.onch === undefined)
+        && this.classes.has(a.cls)) {
+        continue;
+      }
       // 成员的那一格已经跟着整条链那格结构体发出去了（propName 那一遍在 classLayout 之前往
       // ownFields 里加的），所以这儿只剩合成那两个函数。
       const self = tClass(a.cls, false);
@@ -8207,6 +8225,15 @@ class JncLower {
     if (!this.fns.has(s)) {
       const hv = this.hostProp(n, pn, pi, self, 'set', { node: valNode, pad }, subs);
       if (hv !== undefined) return hv;
+      /* `bindable` 的那一种（第二百三十一刀）：体在宿主那边这件事已经答上了（同刀），拦路的是
+         **通知**那一格 —— jancy 的存值器要点一下 `m_onChanged`（prop_bindable.rst:23-29），
+         而宿主那边的存值器点不着这一层这格单子（它只拿到一个不透明的地址）。悄悄发出去的话
+         反应器绑上来就永远不响，那是错话，所以在这儿说清是这一件事。 */
+      if (pi.onch !== null && pi.onch !== undefined) {
+        return this.nope(n, `写 bindable 属性 '${shown(pn)}' —— 它的存值器的体在宿主那边，`
+          + '而宿主点不着这一层那格 `m_onChanged`（prop_bindable.rst:23-29 要存值器点一下它，'
+          + '不然反应器绑上来永远不响）—— 要宿主能点，得先有"把那格单子递过去"那一套');
+      }
       return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
         + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
     }
@@ -8275,8 +8302,19 @@ class JncLower {
        与顶层那格只有原型的函数（第一百八十五刀）是同一句话：**实现在宿主那边**。语料里的出处
        就是 jancy 自己那两份导出样例（jnc_sample_01_export_c/script.jnc:27 与 02_export_cpp
        同处），它们要演示的正是"属性的取/存写在 C / C++ 里"。 */
-    if (pi === undefined
-      || (pi.cls !== null && this.classes.has(pi.cls) && !this.opaques.has(pi.cls))) return undefined;
+    /* 没写 `opaque` 的类也算（第二百三十一刀）：`opaque` 说的是"布局不透明"，管的不是"体在哪儿"
+       —— 方法那一侧第一百八十三刀就是这么定的，属性这一侧先前还留着第一百六十刀那条更严的口径
+       （"类那一侧照旧要 opaque"），那是欠着的，不是划出来的界。语料里拦着的就是这一族：
+       `int autoget property m_minValue;` 写在 `class IntProperty: Property { … }` 里
+       （test/ioninja/api/ui_PropertyGrid.jnc:52-59，一个体都没写）。
+       `bindable` 的照旧不走这条（见 autoProps 那一段注与 propSet 那句话）。 */
+    if (pi === undefined) return undefined;
+    /* `bindable` 的照旧拦在门外 —— 可只拦**新放进来的**这一种（没写 opaque 的类）。
+       `opaque class` 里那一族从第一百六十刀起就走这条路，那笔账（宿主点不着 `m_onChanged`）
+       是那一刀留下的，不是这一刀的；把它一并拦住会把 `ui.ComboBox` 那一族已经降得下来的
+       4 份文件推回去（量出来的：lowered 162 -> 158）。 */
+    if (pi.cls !== null && this.classes.has(pi.cls) && !this.opaques.has(pi.cls)
+      && pi.onch !== null && pi.onch !== undefined) return undefined;
     /* 两种写法都算宿主面（第一百六十刀 + 第一百六十二刀）：
          - 完整声明式里那格**只有原型**的取/存（`property m_value { void set(variant_t); }`，
            ui_PropertyGrid.jnc:80）—— `propHostAcc` 上记着；

@@ -10933,6 +10933,62 @@ Methods / Nested types 两节），方法从第一百〇一刀起、`typedef` �
   lowered `162`、clean `238` 都没动。
 - 一起编那张榜：`37`、理由 `18` 没动。
 
+### 第二百三十一刀：`opaque` 说的是布局，管不着属性的体在哪儿
+
+榜上"写属性 '…' —— 它的存值器没有定义"那一行 89 处，量出来全是同一族：
+
+```
+class IntProperty: Property {
+	construct(string_t name);
+	int bindable autoget property m_value;
+	int autoget property m_minValue;      // 榜上 35 处
+	int autoget property m_maxValue;
+	int autoget property m_spinBoxStep;
+}                        test/ioninja/api/ui_PropertyGrid.jnc:52-59
+```
+
+先读 jancy 把这件事定在哪儿：`autoget` 只生成**取值器** —— `PropertyFlag_AutoSet` 全仓库只有
+一处给它，而那一处是 `bindable T x;`（bindable data，jnc_ct_DeclTypeCalc.cpp:157-164），
+带 `property` 那一支走的是 `getPropertyFlags()`。所以 `int autoget property m_minValue;`
+的存值器**一定**写在别处（prop_simple.rst:29）。整个模块里都没有 —— 按这一层已经立过的口径
+（第一百八十三刀：只有原型的方法，体在宿主的 C/C++ 里）那就是宿主那边。
+
+那一刀当时说的话正是这一刀要用的：**`opaque` 说的是"布局不透明"，管的不是"体在哪儿"**。
+属性这一侧却还留着第一百六十刀那条更严的口径（第一百九十八刀的注里写着"类那一侧照旧要
+`opaque`"）—— 那是**欠着的**，不是划出来的界。去掉那一问就收了。
+
+还有一件事得一起改，不然是错话：`autoget` 那格生成的存储与取值器**不能再合成**。不然读的是
+这一层那格存储、写去了宿主，两边各说各话。jancy 那边靠 `JNC_MAP_AUTOGET_PROPERTY` 把字段的
+偏移登记给宿主，两边是同一块字节；这一层没有那套登记，于是让宿主自己拿着那格存储 —— 就是
+opaque 那笔账（写完再读对得上，只是字节住在谁家不同）。已经进了 ownFields 的那格存储留着不用，
+几个字节的空位，不是错话。
+
+`bindable` 的**不**收：jancy 的存值器要点一下 `m_onChanged`（prop_bindable.rst:23-29），
+而宿主只拿到一个不透明的地址，点不着这一层这格单子 —— 悄悄发出去反应器绑上来就永远不响。
+这一格换成一句**说得准**的话（"存值器的体在宿主那边，而宿主点不着 `m_onChanged`"）。
+`bad/prop-noset` 那道墙就是这一格（`int autoget bindable property m_p;`），墙还在、话换了：
+它原来的注写的是"忘了写体"，按上面 jancy 那一段那句话不准 —— 一并改过来。
+
+**量到过一次往错方向走，记在这儿**：第一版把这条 `bindable` 的闸门也压在了 `opaque class`
+那条老路上，于是 `ui.ComboBox` / `ui.ListWidget` / `ui.ToolBar` / `ui_StdEditToolBar` 这 4 份
+**已经降得下来**的文件被推回去（lowered `162 -> 158`、clean `238 -> 234`、pairs `+104`）。
+那笔"宿主点不着 `m_onChanged`"的账是第一百六十刀留下的，不是这一刀的 —— 闸门只拦**新放进来的**
+那一种（没写 `opaque` 的类）。改完 lowered / clean 一格没动。
+
+判据摆在原生腿上（C_ABI 符号只有那儿才有，ADR-0014 第 4 条决定）：`tests/llvm/run.js` §9 里
+给**没写 `opaque`** 的 `class Plain` 添了一格 `long autoget property m_gain;`，宿主那边
+`Plain_get_m_gain` / `Plain_set_m_gain`（存的时候乘 3），`m_gain = 14` 之后读回 42。
+独立的尺子是手写的 C 双胞胎 `/tmp/c187.c`（把属性摊成两个函数 + 一格存储，而那格存储在**另一个
+翻译单元**里 —— 那正是"宿主拿着"），也印 `gain 42`。
+
+- 腿：`node tests/jnc/run.js` 321/0（`bad/prop-noset` 换了话）、`node tests/llvm/run.js` 38/0
+  （§9 多一行 `gain 42`、多两句 `(cabi Plain_get_m_gain …)` / `(cabi Plain_set_m_gain …)`）。
+- 逐份那张榜：`(文件, 拦路项)` 对 `3781 -> 3744`（**−37**）。
+  "写属性 … 存值器没有定义"那一行 `89 -> 1`（剩下那 1 处是真的只差一个体），
+  新出来的"写 bindable 属性 …"那一行 47 —— 那是这一族里 `bindable` 的那一半，账说准了。
+  lowered `162`、clean `238` 都没动（这一族拦着的文件后面还压着 `没有这个类型` 那笔逐份口径）。
+- 一起编那张榜：诊断 `37 -> 36`、理由 `18 -> 17`，"写属性 … 存值器没有定义"那一行**整行没了**。
+
 
 
 

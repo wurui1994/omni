@@ -248,6 +248,31 @@ void set_g_probeProp(int64_t v) {
   probe_top_prop = v + 1;
 }
 
+/* 没写 `opaque` 的类里那格 `autoget` 属性（第二百三十一刀）。jancy 的 `autoget` 只生成
+   **取值器**，存值器的体一定写在别处（prop_simple.rst:29）—— 整个模块里都没有，那就是在这边。
+   这时**取值器也走这边**：不然读的是那一层生成的那格存储、写去了这边，两边各说各话。
+   所以那格存储由这边自己拿着（jancy 那边靠 JNC_MAP_AUTOGET_PROPERTY 把字段偏移登记过去，
+   两边是同一块字节；效果一样，只是字节住在谁家）。存的时候乘 3，好让"真走了这两个函数"看得见。 */
+static int64_t probe_gain[OMNI_PROBE_SLOTS];
+
+static int64_t *probe_gain_slot(void *self) {
+  for (int i = 0; i < OMNI_PROBE_SLOTS; i++) if (probe_keys[i] == self) return &probe_gain[i];
+  for (int i = 0; i < OMNI_PROBE_SLOTS; i++) {
+    if (probe_keys[i] == NULL) { probe_keys[i] = self; probe_gain[i] = 0; return &probe_gain[i]; }
+  }
+  return NULL;
+}
+
+int64_t Plain_get_m_gain(void *self) {
+  int64_t *p = probe_gain_slot(self);
+  return p == NULL ? -1 : *p;
+}
+
+void Plain_set_m_gain(void *self, int64_t v) {
+  int64_t *p = probe_gain_slot(self);
+  if (p != NULL) *p = v * 3;
+}
+
 /* 拿"只有原型的顶层函数"的**返回类型**去挑同元重载（第二百二十八刀）。语料里的原样是
    `write(timestamp, recordCode, std.getLastError())`（log_Writer.jnc:101）—— 那个实参就是一句
    `std.getLastError()`，而 `Error const* getLastError();`（std_Error.jnc:90）只有原型、体在

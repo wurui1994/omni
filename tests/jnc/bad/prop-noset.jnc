@@ -1,9 +1,16 @@
-// 写一格**没有存值器**的属性（ADR-0016 第六十八刀那条边界，第八十四刀挪到这儿来的）。
-// 简单声明式的属性体写在别处（`p.set(T x) { … }`，prop_simple.rst:29）—— 一个 set 都没写
-// 时 jancy 那边它就是**只读**的（prop.rst:15-17 那句 "optionally one or more setters"），
-// 而这一层的诊断落在写的那一句上：调不出一格不存在的存值器。
+// 写一格 `bindable` 的、存值器的体不在这个模块里的属性（第六十八刀那条边界，第八十四刀挪到
+// 这儿、第二百三十一刀把话说准了）。
 //
-// 这一格与 prop-const-set 不是同一条：那边声明里写了 `const`，这边是**忘了写体**。
+// jancy 的 `autoget` 只生成**取值器**（`PropertyFlag_AutoSet` 只给 `bindable T x;` 那种
+// bindable data —— jnc_ct_DeclTypeCalc.cpp:164 是唯一给它的地方），所以存值器的体一定写在别处
+// （prop_simple.rst:29）。整个模块里都没有，按这一层的口径那就是**在宿主的 C/C++ 里**
+// （与只有原型的方法同一句话，第一百八十三刀）—— 不带 `bindable` 的那一种第二百三十一刀就收了。
+//
+// 拦这一格的是**通知**：jancy 的存值器要点一下 `m_onChanged`（prop_bindable.rst:23-29），
+// 而宿主那边只拿到一个不透明的地址，点不着这一层这格单子。悄悄发出去的话反应器绑上来永远
+// 不响 —— 那是错话。
+//
+// 这一格与 prop-const-set 不是同一条：那边声明里写了 `const`（一个 set 都不许有）。
 class C {
 	int autoget bindable property m_p;
 }

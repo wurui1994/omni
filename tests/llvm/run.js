@@ -464,6 +464,11 @@ if (existsSync(sysDir)) {
          函数 —— 同一份签名按目标的符号名再登记一格。语料里的原样是 `alias dispose = hide;`
          （ui_Dialog.jnc:126）。 */
       + '    alias twice2 = twice;\n'
+      /* 没写 `opaque` 的类里那格 `autoget` 属性（第二百三十一刀）：`autoget` 只生成取值器，
+         存值器的体一定写在别处（prop_simple.rst:29）—— 模块里都没有，那就在宿主。这时取/存
+         **都**走宿主（不然读的是这一层那格生成的存储、写去了宿主，两边各说各话）。
+         宿主那边存的时候乘 3，所以 `m_gain = 14` 之后读回来是 42。 */
+      + '    long autoget property m_gain;\n'
       + '}\n\n'
       /* **顶层**那格属性（第二百二十五刀）：一个体都没写 -> 取/存都在宿主那边，
          符号名没有主人那一段（`get_g_probeProp` / `set_g_probeProp`）、也没有 self。
@@ -531,12 +536,14 @@ if (existsSync(sysDir)) {
       + '    g_probeProp = 41;\n'
       + '    printf("gp %d\\n", g_probeProp);\n'
       + '    printf("pick %d\\n", pick(hostTick()));\n'
+      + '    q.m_gain = 14;\n'
+      + '    printf("gain %d\\n", q.m_gain);\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\npick 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\npick 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\npick 42\ngain 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\npick 42\\ngain 42\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -592,6 +599,10 @@ if (existsSync(sysDir)) {
     /* 拿只有原型那一条的返回类型挑同元重载（第二百二十八刀）：那一句实参照旧是一句 `(ccall …)`。 */
     } else if (!sx.out.includes('(cabi hostTick i64 ())')) {
       detail.push('    emit sx 里没有 `(cabi hostTick i64 ())`（第二百二十八刀那一句实参）');
+    /* 没写 opaque 的类里那格 autoget 属性（第二百三十一刀）：取与存**两句**都要在宿主面上。 */
+    } else if (!sx.out.includes('(cabi Plain_get_m_gain i64 (ptr))')
+      || !sx.out.includes('(cabi Plain_set_m_gain void (ptr i64))')) {
+      detail.push('    emit sx 里没有 `(cabi Plain_get_m_gain …)` / `(cabi Plain_set_m_gain …)`（第二百三十一刀）');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');
