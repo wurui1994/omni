@@ -3747,7 +3747,23 @@ class JncLower {
     const accs = [];
     let fld = null;                    // 体里那格 autoget 字段（prop_full.rst:34）
     let evt = null;                    // 体里那格 bindable 事件（同处，34_BindableProperties.jnc:55）
-    for (const m of this.flat(body.items[1])) {
+    /* 体里**直接就是取值器的体**（第一百五十七刀）：`string_t const property m_string { return …; }`
+       （std_String.jnc:26）。jancy 的属性体里可以直接写语句 —— 那时整格体就是 get 的体，
+       `const` 说的是"没有存值器"。判据：体里一条都不是"成员声明"（`var-decl` 或者带
+       `(accessor …)` 的 `fn-def`），而体又非空。语料里 81 份文件压在这一格上。 */
+    const bodyItems = this.flat(body.items[1]);
+    /* "成员声明"怎么认（第一百五十七刀量出来的一格坑）：不能只看"是不是 `var-decl`" ——
+       取值器体里的**局部量**（`int t = m_twice;`）也是 `var-decl`，那么一句就把整格体判成了
+       成员表。按 prop_full.rst:34 那句话认才对：体里的成员声明就是**带 `autoget` 的字段**与
+       **带 `bindable` 的事件**，也就是说明符里必有那几个词之一。 */
+    const memMods = new Set(['autoget', 'bindable', 'event', 'multicast', 'alias']);
+    const isPropMember = (m) => isList(m) && ((head(m) === 'var-decl'
+      && [...this.flat(m.items[1].items[2]), ...this.flat(m.items[1].items[3])]
+        .some((x) => isAtom(x) && memMods.has(x.value)))
+      || (head(m) === 'fn-def' && isList(m.items[2]) && isList(m.items[2].items[2])
+        && head(m.items[2].items[2]) === 'accessor'));
+    const whole = bodyItems.length > 0 && !bodyItems.some(isPropMember);
+    for (const m of whole ? [] : bodyItems) {
       if (isList(m) && head(m) === 'var-decl') {
         const r = this.fullPropMember(nm, m);
         if (r === null) return [];
@@ -3779,12 +3795,22 @@ class JncLower {
     const g = accs.find((a) => a.kind === 'get');
     /* 类型的出处有两个：写了取值器就抄它的返回类型，没写就抄体里那格 autoget 字段
      * （那时取值器由编译器生成 —— prop_autoget.rst:17 的两半）。两个都没有就说不通。 */
-    if (g === undefined && fld === null) {
+    if (!whole && g === undefined && fld === null) {
       this.nope(it, `完整声明式的属性 '${nm}' 里既没有 get 也没有 autoget 的字段 ——`
         + '属性的类型没处抄');
       return [];
     }
-    const src = fld !== null ? fld : { sp: g.node.items[1], ptrs: g.node.items[2].items[1] };
+    /* 体里直接就是取值器的体那一种（第一百五十七刀）：类型抄**属性自己**那一格说明符 ——
+       `string_t const property m_string { … }` 里 `string_t` 既是属性的类型、也是 get 的返回
+       类型。`property` / `const` 两个词要从 get 那一份说明符里摘掉：留着 `property` 会让下游
+       把这个函数当成又一格属性声明，留着 `const` 是给函数写了个没意思的词。 */
+    const sp0 = body.span;
+    const mods0 = new Set(['property', 'const']);
+    const keep = (lst) => this.mkL(lst !== undefined && lst !== null ? lst.span : sp0,
+      this.mkA(sp0, 'mods'),
+      ...this.flat(lst).filter((x) => !(isAtom(x) && mods0.has(x.value))));
+    const src = whole ? { sp: it.items[1], ptrs: dcl.items[1] }
+      : (fld !== null ? fld : { sp: g.node.items[1], ptrs: g.node.items[2].items[1] });
     const extra = [];
     if (fld !== null) extra.push('autoget');
     if (evt !== null) extra.push('bindable');
@@ -3796,6 +3822,18 @@ class JncLower {
       this.propMemName.set(full, { store: fld === null ? null : fld.name, onch: evt === null ? null : evt.name });
     }
     const out = [this.propDeclOf(src.sp, src.ptrs, core, extra)];
+    if (whole) {
+      // 那一格 get：名字是 `属性名.get`（qualified-special），形参表空着，体就是属性那个体。
+      const acc = this.mkL(sp0, this.mkA(sp0, 'accessor'), this.mkA(sp0, 'get'));
+      const qs = this.mkL(sp0, this.mkA(sp0, 'qualified-special'), core, acc);
+      const sfx = this.mkL(sp0, this.mkA(sp0, 'suffixes'),
+        this.mkL(sp0, this.mkA(sp0, 'fn-suffix'), this.mkL(sp0, this.mkA(sp0, 'formals'))));
+      const gsp = this.mkL(sp0, this.mkA(sp0, 'specs'), it.items[1].items[1],
+        keep(it.items[1].items[2]), keep(it.items[1].items[3]));
+      out.push(this.mkL(sp0, this.mkA(sp0, 'fn-def'), gsp,
+        this.mkL(sp0, this.mkA(sp0, 'dcl'), dcl.items[1], qs, sfx, dcl.items[4]), body));
+      return out;
+    }
     for (const a of accs) {
       const ad = a.node.items[2];
       const qs = this.mkL(ad.span, this.mkA(ad.span, 'qualified-special'), core, ad.items[2]);

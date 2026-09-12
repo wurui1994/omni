@@ -8239,6 +8239,49 @@ jnc 腿 269 passed / 0 failed。
 （ADR-0022 的 J4b 剩下的一格 —— 给属性那两个函数也发 `(ccall Owner_get_p self)` /
 `(ccall Owner_set_p self v)`），不是撤掉一格存储。
 
+## 第一百五十七刀：属性体里**直接就是取值器的体**
+
+```jnc
+string_t const property m_string {
+    return string_t(m_p, m_length);
+}
+```
+
+（std_String.jnc:26；`bool const property m_isEmpty`（std_HashTable.jnc:86）、
+`log.Writer* const property m_logWriter`（doc_Plugin.jnc:33）同一个形状。）jancy 的属性体里可以
+直接写语句 —— 那时**整格体就是 get 的体**，`const` 说的是"没有存值器"（prop.rst:17）。
+
+改法走第七十五刀那条现成的路（完整声明式改写成"简单声明式 + 一个体外的 get"）：类型抄属性自己
+那一格说明符（`string_t` 既是属性的类型也是 get 的返回类型），`property` / `const` 两个词从 get
+那一份说明符里摘掉 —— 留着 `property` 会让下游把这个函数当成又一格属性声明。
+
+**判据上踩了一格坑，记下来**：第一遍写的是"体里一条 `var-decl` 都没有就算纯语句"，结果
+`m_desc` 那一格（体里先 `int t = m_twice;` 再 return）当场被判成成员表 —— **取值器体里的局部量
+也是 `var-decl`**。按 prop_full.rst:34 那句话认才对：体里的成员声明是**带 `autoget` 的字段**与
+**带 `bindable` 的事件**，也就是说明符里必有 `autoget` / `bindable` / `event` / `multicast` /
+`alias` 之一。这一格是"语法长得一样、意思由修饰词定"的典型，与第一百三十八刀那条裸写的
+`get` / `set` 是同一类判据。
+
+### 账：clean `192 -> 194`（+2）、pairs `5692 -> 5566`（−126）
+
+- 逐份那张榜：lowered `121`（没动）、clean `192 -> 194`、pairs `5692 -> 5566`；
+  `完整声明式的属性 '…' 体里的这一条 —— 只收带体的 get / set 与 …`（81 处）与
+  `… 里既没有 get 也没有 autoget 的字段`那两行整片让开。
+- `--group src/jnc_ext/jnc_std/jnc`：`136 -> 134`（`std.String.m_string` / `m_sz`、
+  `std.HashTable.m_isEmpty`、`std.RbTree.m_isEmpty` 那几格收了）。
+- `--group test/ioninja/api`：`156`（没动）、理由 `40 -> 39`。
+
+尺子 `/tmp/c146.c`：C 里没有属性，所以这一份把那层糖手写开成函数、读的地方写成一次调用。
+`m_desc` 那一格有意让体里先有一格局部量、中间再调一次会改状态的 `bump()` —— 42 / 64 / 22 三个数
+把"读了几次、什么时候改的"钉住。同一串数（42 / 64 / 22 / 4）。
+
+**剩下的那一半没收**：`bindable alias m_onPropChanged = m_onChanged;`（ui_PropertyGrid.jnc:81，
+逐份榜上 91 处那一行 `体里这一条的名字`）。试过一遍：按第八十七刀的口径它是"另一个名字指同一格
+事件"，落法该是把它记进第一百〇四刀那张字段路径别名表（指向 `<属性全名>$m_onChanged`）。可那一遍
+改完，`autoget` 那格字段与存值器一起从属性体里掉了出去（报的是"`autoget` 只能写在属性上"与
+"没有这个属性"）—— 说明 `fullPropMember` 回的那格 `evt` 与后面 `propDeclOf` / `bindStore` 那条链
+还有一处对不上。当场撤回，没留半落地的状态；下一刀先把那条链跑通再动。
+
 ## 后果与代价
 
 

@@ -1,0 +1,58 @@
+// 第一百五十七刀：完整声明式的属性体里**直接就是取值器的体**。
+//
+// jancy 的属性体里可以直接写语句 —— 那时整格体就是 get 的体：
+//
+//     string_t const property m_string {
+//         return string_t(m_p, m_length);
+//     }
+//
+// （std_String.jnc:26；std_HashTable.jnc:86 的 `bool const property m_isEmpty` 与
+// doc_Plugin.jnc:33 的 `log.Writer* const property m_logWriter` 同一个形状。）
+// 类型抄属性自己那一格说明符：`string_t` 既是属性的类型、也是 get 的返回类型；`const` 说的是
+// "没有存值器"（prop.rst:17），所以写它一律拒。
+//
+// 判据：体里一条都不是"成员声明"（`var-decl`，或者带 `(accessor …)` 的 `fn-def`），而体又非空。
+// 改写成"简单声明式 + 一个体外的 get"那条现成的路（第七十五刀），`property` / `const` 两个词
+// 从 get 那一份说明符里摘掉 —— 留着 `property` 会让下游把这个函数当成又一格属性声明。
+//
+// 逐份那张榜上 81 份文件压在这一格上。
+//
+// 期望输出的出处：/tmp/c146.c（`cc -O0 -std=c99 -Wall`）。
+
+class Box {
+	int m_n;
+
+	int const property m_twice {
+		return m_n * 2;
+	}
+
+	// 体里不止一句、还能调自己的方法
+	int const property m_desc {
+		int t = m_twice;
+		return t + bump();
+	}
+
+	int bump() {
+		m_n = m_n + 1;
+		return m_n;
+	}
+}
+
+int g_v;
+
+// 顶层的那一种也是同一条路
+int const property g_half {
+	return g_v / 2;
+}
+
+int main() {
+	Box b;
+	b.m_n = 21;
+	printf("%d\n", b.m_twice);
+	printf("%d\n", b.m_desc);
+	printf("%d\n", b.m_n);
+
+	g_v = 9;
+	printf("%d\n", g_half);
+	return 0;
+}
