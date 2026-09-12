@@ -1,0 +1,18 @@
+// `throw;` 没有去处（第二百一十八刀立的界）。
+//
+// jancy 那儿抛出去的那一跳只有两个去处（jnc_ct_ControlFlowMgr_Eh.cpp:103-112）：最里那一格
+// catch 作用域，或者"当前函数是 errorcode"时它自己的出错返回值。两个都没有的时候那一段
+// 是一句 ASSERT —— 也就是说这样的源码在 jancy 那边根本走不到代码生成。
+//
+// 这一层照实说清是这一种，而不是笼统的"语句 'throw'"（那句话第二百一十八刀之前一直盖着
+// 这件事）。与 errorcode 调用那一处的条件是同一句（propagate 里 `g === null &&
+// curErr === null` 那一问）。
+int plain() {
+	throw;
+	return 1;
+}
+
+int main() {
+	printf("%d\n", plain());
+	return 0;
+}

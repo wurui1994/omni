@@ -10440,6 +10440,50 @@ using 只改"裸名字往哪儿找"，找着的是同一格东西，两边都印
   （泛型的实例、函数体里的那一格 using）。
 - 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有 using）。
 
+### 第二百一十八刀：不带值的 `throw;`
+
+榜上 `语句 '…'` 19 份，按词数一遍是 `throw` 8、`dylayout` 4、`label` 2、`typedef` 2、
+`attributed` 1、`using-namespace` 1。`throw` 最多，而且语料里**全是不带值**的那一种
+（ReplayLogLayer.jnc:348/353、JLinkRttSession.jnc:483/495/504、SerialTapSession.jnc:413、
+SerialMonitor.jnc:47、log_exportToPcap.jnc:46/77、iox_FpgaUploader.jnc:423、
+io_Modbus.jnc:762/766）。
+
+jancy 的 `throwException()` 就两句（jnc_ct_ControlFlowMgr_Eh.cpp:93-112）：
+
+```cpp
+Scope* catchScope = m_module->m_namespaceMgr.findCatchScope();
+if (catchScope) escapeScope(catchScope, catchScope->getCatchBlock());
+else { ASSERT(… FunctionTypeFlag_ErrorCode); ret(returnType->getErrorCodeValue()); }
+```
+
+**这两句这一层第五十九刀就写好了** —— `escape(g)`：有 guard 就跳那圈一次性循环的 `brk`
+（`try { … }` 与 `catch:` 都落成一圈一次性循环）、没有就 `(ret curErr)`。也就是说
+`throw;` 与"errorcode 调用出错时那一跳"是**同一段代码**，这一刀只是把语句接上去：
+
+```js
+if (h === 'throw') { … return [`${pad}${this.escape(g)}`]; }
+```
+
+拦的条件也照抄 `propagate` 那一处（`g === null && this.curErr === null`）—— 那正对着 jancy
+那句 ASSERT：抛出去的那一跳两个去处都没有时，那样的源码在 jancy 那边根本走不到代码生成。
+`throw 一个值`（语料里一处都没有）另说清：它要先调 `std.setError(值)`（同文件:69-90），
+那要一格"当前的错"的槽与 std.Error 那一套。
+
+判据是手写的 C 双胞胎 `/tmp/c176.c`：`throw;` 在 errorcode 的 bool 函数里就是 `return false`，
+带 `catch:` 的那一个 `goto` 到处理段。用例 `tests/jnc/cases/170-throw.jnc` 把两条路都走一遍
+（`try { … }` 那一支与 `catch:` 那一支），印 `1 0` / `ok` / `1` / `caught` / `-1`。
+墙 `bad/throw-noguard.jnc`。
+
+- 腿：`node tests/jnc/run.js` 307/0（新增 `cases/170-throw` 与 `bad/throw-noguard`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`语句 '…'` `19 -> 11`、`(文件, 拦路项)` 对 `4004 -> 4001`（−3）。
+  **一半的账没划掉，明写**：那 8 份里 4 份走过去了，另外 4 份落到新那一行
+  （`throw;` 没有去处，sole 1）—— 它们那个函数的 `errorcode` 或外层的 `try` 在更早一步就没
+  立起来（那几份先有别的拦路项），所以这一格看见的是"没有去处"。这不是新欠的账，是先前被
+  `语句 'throw'` 那句话盖着的那一半。lowered `158`、clean `229` 都没动。
+- 一起编那张榜：`39`、理由 `19` 没动。
+
+
 
 
 

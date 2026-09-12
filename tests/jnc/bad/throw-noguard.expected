@@ -1,0 +1,1 @@
+`throw;` 写在一个自己不是 errorcode、外面也没有 `try { … }` / `catch:` 的函数里（jancy 那儿这一格是 ASSERT：抛出去的那一跳没有去处，jnc_ct_ControlFlowMgr_Eh.cpp:108-111）

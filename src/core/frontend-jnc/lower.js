@@ -9609,6 +9609,32 @@ class JncLower {
       return null;
     }
     if (h === 'return') return this.retStmt(n, ind);
+    /* `throw;`（第二百一十八刀）。语料里 8 份文件、全是**不带值**的那一种
+       （ReplayLogLayer.jnc:348、JLinkRttSession.jnc:483、io_Modbus.jnc:762 那一族）。
+       jancy 那儿 `throwException()` 就两句（jnc_ct_ControlFlowMgr_Eh.cpp:93-112）：
+       里头有 catch 作用域就跳它（`escapeScope(catchScope, …)`），没有就
+       `ret(returnType->getErrorCodeValue())` —— 而那时当前函数**必须**是 errorcode
+       （同处那句 ASSERT）。
+       这一层第五十九刀早把这两句写好了：`escape(g)` 就是它 —— 有 guard 跳那圈一次性循环的
+       `brk`、没有就 `(ret curErr)`。所以 `throw;` 与"errorcode 调用出错时那一跳"落的是
+       **同一段代码**，一个字节的新机器都不用造。
+       拦的条件也照抄 propagate 那一处：既没有 guard、这个函数自己也不是 errorcode 时说清。 */
+    if (h === 'throw') {
+      if (n.items.length > 1) {
+        /* `throw expr;`（语料里一处都没有）：jancy 那儿它先调 `std.setError(value)` 再抛
+           （jnc_ct_ControlFlowMgr_Eh.cpp:69-90）。那要一格"当前的错"的槽与 std.Error 那一套。 */
+        return this.nope(n, '`throw 一个值`—— jancy 那儿它先调 `std.setError(值)` 再抛'
+          + '（jnc_ct_ControlFlowMgr_Eh.cpp:69-90），要一格"当前的错"的槽与 std.Error 那一套；'
+          + '不带值的 `throw;` 收了');
+      }
+      const g = this.guards.length === 0 ? null : this.guards[this.guards.length - 1];
+      if (g === null && this.curErr === null) {
+        return this.nope(n, '`throw;` 写在一个自己不是 errorcode、外面也没有 `try { … }` / '
+          + '`catch:` 的函数里（jancy 那儿这一格是 ASSERT：抛出去的那一跳没有去处，'
+          + 'jnc_ct_ControlFlowMgr_Eh.cpp:108-111）');
+      }
+      return [`${pad}${this.escape(g)}`];
+    }
     if (h === 'break' || h === 'continue') {
       const lvl = isAtom(n.items[1]) ? Number(n.items[1].value) : 1;
       const st = this.loops;

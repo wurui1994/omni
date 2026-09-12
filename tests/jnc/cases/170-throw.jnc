@@ -1,0 +1,47 @@
+// 不带值的 `throw;`（第二百一十八刀）。语料里 8 份文件全是这一种
+// （ReplayLogLayer.jnc:348/353、JLinkRttSession.jnc:483/495/504、SerialTapSession.jnc:413、
+// SerialMonitor.jnc:47、log_exportToPcap.jnc:46/77、iox_FpgaUploader.jnc:423、
+// io_Modbus.jnc:762/766）。
+//
+// jancy 那儿 `throwException()` 就两句（jnc_ct_ControlFlowMgr_Eh.cpp:93-112）：
+//   - 里头有 catch 作用域 -> `escapeScope(catchScope, catchScope->getCatchBlock())`；
+//   - 没有 -> `ret(returnType->getErrorCodeValue())`，而那时当前函数**必须**是 errorcode
+//     （同处那句 ASSERT）。
+//
+// 这两句第五十九刀早就写好了 —— `escape(g)` 就是它：有 guard 就跳那圈一次性循环的 `brk`、
+// 没有就 `(ret curErr)`。所以 `throw;` 与"errorcode 调用出错时那一跳"落的是**同一段代码**，
+// 一个字节的新机器都不用造；拦的条件也照抄 propagate 那一处（见 bad/throw-noguard.jnc）。
+//
+// 判据是手写的 C 双胞胎 /tmp/c176.c：`throw;` 在 errorcode 的 bool 函数里就是 `return false`，
+// 带 `catch:` 的那一个跳到处理段。印 `1 0` / `ok` / `1` / `caught` / `-1`。
+bool errorcode check(int x) {
+	if (x < 0)
+		throw;
+
+	return true;
+}
+
+int run(int x) {
+	try {
+		check(x);
+		return 1;
+	}
+
+	return 0;
+}
+
+int guarded(int x) {
+	check(x);
+	printf("ok\n");
+	return 1;
+catch:
+	printf("caught\n");
+	return -1;
+}
+
+int main() {
+	printf("%d %d\n", run(5), run(-1));
+	printf("%d\n", guarded(5));
+	printf("%d\n", guarded(-1));
+	return 0;
+}
