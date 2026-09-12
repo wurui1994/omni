@@ -9209,6 +9209,30 @@ property g_prop {
   改写的那些词** —— 不然多跑一遍改写就会把自己的产物再认一次。这一层已经有两处改写要跑两遍
   （expandFullProps 为泛型与 extension 各一遍），所以这不是偶然。
 
+#### 顺带量清一格：`case 的标签算不出来`（53 处）**不是**常量折叠的欠账
+
+那一行看着像"编译期求值没做全"，钻下去不是。判据文件 `Df1LogRepresenter.jnc:151`：
+
+```jnc
+switch (recordCode) {
+case Df1LogRecordCode.Eot:      // <- 报"算不出来"
+```
+
+把同一句抄成一份八行的小文件（连 `import "Df1LogRecordCode.jnc"` 一起），**当场就过** ——
+`constInt` 那条 `field` 支（第三十九刀）本来就认枚举成员，连 `0x01d67c31be5b71a0 |
+log.RecordCodeFlags.Foldable`（超过 i64 正半区的那种）都算得出。
+
+真相是：**`Df1LogRepresenter.jnc` 那份文件里一句 `import "Df1LogRecordCode.jnc"` 都没有**
+（它的 import 只有 log_Representation / log_RepresentStruct / io_Df1 / crc16）。ioninja 的插件
+是按**工程的文件表**一起编的，不靠每份文件自己 import。所以那 53 处与 `写属性 … 存值器没有定义`
+那 143 处、`import "std_Buffer.jnc"` 那 91 处是**同一条账**：逐份编这条量法本身的边界，不是特性
+欠账。
+
+**这条记下来是为了不再上当**：榜上一行"看起来像特性"的，先抄成最小复现件试一次 —— 这一次省下的
+是"给 `constInt` 加一整套折叠"那一刀。（诊断本身还有个小毛病：那儿该说"`Df1LogRecordCode`
+这个名字在这份文件里没有"，说成"算不出来"是认错了人。改它会把一行拆成好几行，见第一百四十九刀
+那条律，所以单独一刀去做，连带把 `--group` 那条量法一起想清楚。）
+
 
 ## 后果与代价
 
