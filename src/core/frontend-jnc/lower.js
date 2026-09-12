@@ -7718,7 +7718,29 @@ class JncLower {
     for (const f of this.flat(node)) {
       const fh = isList(f) ? head(f) : null;
       if (fh === 'formals-varargs') return this.nope(f, '可变形参');
-      if (fh === 'formal-anon') return this.nope(f, '无名形参');
+      /* **无名形参**（第二百二十六刀）：`void foo(int);` —— jancy 收它（形参的名字只在体里
+         有用，原型上根本用不着）。语料里的出处是 jancy 自己那两份导出样例
+         （jnc_sample_01_export_c/script.jnc:19-21 的三条 `void foo(…);` 重载）。
+         树上它是 `(formal-anon specs ptrs)`：没有声明符，所以类型就是"说明符 + 那串 `*`"。
+         落法是给它编一个源码里写不出来的名字（`$a<序号>`，`$` 不在标识符里）—— 体里没法引用它，
+         而这一层往下每一处要的都只是"第 i 格形参的类型"。 */
+      if (fh === 'formal-anon') {
+        const asp = this.specs(f.items[1]);
+        if (asp === null) return null;
+        if (asp.prop) return this.nope(f, '形参上的属性（属性指针要一格"属性指针"类型）');
+        const at = this.ptrsTy(asp, f.items[2], f);
+        if (at === null) return null;
+        if (isArr(at) && at.n === null) {
+          return this.err(f, `无名形参的长度省不掉（jancy 那句 "function cannot accept `
+            + `auto-size array '${tyName(at)}' as an argument"）`);
+        }
+        if (isClass(at) && at.own === true) {
+          return this.err(f, `无名形参的类型是类（jancy 那句 "function cannot accept `
+            + `'${tyName(at)}' as an argument"）—— 类只能经引用传，写成 '${shown(at.name)}*'`);
+        }
+        ps.push({ name: `$a${ps.length}`, type: at, formals: null, bits: null, ctor: null, def: null });
+        continue;
+      }
       if (fh !== 'formal') return this.nope(f, `形参 '${fh}'`);
       const defNode = f.items[3] === undefined ? null : f.items[3];
       /* 默认值挂在**哪一格上都行**（第九十九刀）。先前这儿照 C++ 那条"只能挂末尾"拦着，
