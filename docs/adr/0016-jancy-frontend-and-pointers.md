@@ -7959,6 +7959,42 @@ lowered 一份没多，因为这 97 份文件里每一份还压着别的行 —�
 
 `bad/protoonly-call.jnc` 钉这条界（`Panel.attach` 只有原型）。
 
+## 第一百四十八刀：`construct` 只有原型 —— 顺手翻出第六十六刀漏的那一半
+
+第一百四十七刀那笔账的另一半。`class GroupProperty: Property { construct(string_t name); }`
+（ui_PropertyGrid.jnc:37-39）先前报"`ui.GroupProperty` 的 construct 要 0 个实参，这里给了 1 个"
+—— 那个 0 是**这一层自己合出来的**那格无参构造。**拿自己合的东西去顶用户声明的那一个**，
+于是话就说成了"你多给了实参"。真拦路的仍旧是：construct 在，体不在这儿。
+
+判据要两问（少一问就把 cases/50-construct、62-opaque、63-dualmod 三份拒掉 —— 第一遍就是这么
+错的，跑了一趟腿才看见）：那个类的 construct 只写了原型，**而且**体外也没有定义
+（`C.construct(…) { … }` 是第五十三刀那条正当的放法）。为此给合出来的那三处构造加了一格
+`synth` 记号，另配一个 `realCtor(cls)`：**有没有真的那一个**。
+
+### 顺手翻出的那一半：第六十六刀那条 N 被自己合的构造挡住了
+
+写完 `realCtor` 才看出来，`opaque class` 那一支（第六十六刀）问的是 `!hasCtor` ——
+而语料里 `opaque class ComboProperty: Property { construct(string_t name); }` 有基类、也有
+`autoget` 属性，这一层于是给它合了一格无参构造，`hasCtor` 成真，那条"实现在宿主那边"的 N
+**整条被跳过**，报出来的是"要 0 个实参，这里给了 1 个"。逐份榜上这一族十来行、每行 88 处，
+两年多来一直是这句错话。改成 `!this.realCtor(...)` 就对上了。
+
+这与第一百四十二刀是同一个形状：**一格自动合出来的东西冒充了用户写出来的东西**，于是诊断指错了
+人。往后添"这一层自己合的"任何东西，都要留一格记号说明它是合的 —— 不然下一处判据又会把它
+当成用户的。
+
+### 账：10 行 E 换成 N，pairs `7455 -> 7483`（+28），lowered / clean 都没动
+
+- 逐份那张榜：`ui.ComboProperty` / `EnumProperty` / `FlagProperty` … 那十来行
+  `的 construct 要 0 个实参，这里给了 1 个`（各 88 处）**整族换成**
+  `new ui.XProperty(…) —— 它的 construct 声明在 opaque class 里…`（各 88 处的 N）。
+  剩下的 `construct 要 0 个实参` 只有 1 ~ 3 处的真case（`C1`、`TestClass` …）。
+- lowered `120`（没动）、clean `192`（没动）、pairs `7455 -> 7483`（+28 —— 一句话拆成两句、
+  以及收了之后够得着的下一句）。
+- `--group test/ioninja/api`：`156 -> 157`（+1，同上）。
+
+`bad/protoonly-ctor.jnc` 钉这条界，注里写明白那两问。
+
 ## 后果与代价
 
 

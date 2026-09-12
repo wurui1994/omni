@@ -1085,6 +1085,9 @@ class JncLower {
        这件事（那会凭空发一格 `(ccall …)`）。这一格只用来把调用点那句话说对：
        "没有这个函数"是**认错人**（那个名字明明声明过），第九十二刀给顶层原型定的说法照抄过来。 */
     this.protoMethods = new Map();
+    /* 那些类里 `construct` **只有原型**的（第一百四十八刀）：与 protoMethods 同一笔账，
+       单独一格是因为构造走的不是按名字查那条路（`ctors` / `ctorArgs` / `ctorCall`）。 */
+    this.protoCtors = new Set();
     this.methods = new Map();
     this.methodNames = new Set();
     this.selfClass = null;
@@ -1306,7 +1309,7 @@ class JncLower {
       const self = tClass(name, false);
       this.fns.set(full, { params: [self], ret: J_VOID });
       this.methods.set(full, name);
-      this.ctors.set(name, { name: full, params: [] });
+      this.ctors.set(name, { name: full, params: [], synth: true });
       if (hasFI) { this.synthFI.add(name); continue; }
       const calls = bcs.map((x) => `    (expr (call ${x.c.name} (var $this)))`).join('\n');
       this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n${calls})`);
@@ -1357,7 +1360,7 @@ class JncLower {
         const self = { k: 'struct', name };
         this.fns.set(full, { params: [self], ret: J_VOID });
         this.methods.set(full, name);
-        this.ctors.set(name, { name: full, params: [] });
+        this.ctors.set(name, { name: full, params: [], synth: true });
         const calls = this.memCtorLines(name, '    ').join('\n');
         this.decls.push(`  (fn ${full} (($this ${slotText(self)})) void\n${calls})`);
         added = true;
@@ -2685,7 +2688,7 @@ class JncLower {
       const self = tClass(cls, false);
       this.fns.set(full, { params: [self], ret: J_VOID });
       this.methods.set(full, cls);
-      this.ctors.set(cls, { name: full, params: [] });
+      this.ctors.set(cls, { name: full, params: [], synth: true });
       this.synthSC.add(cls);
       /* 这个类还带着字段默认值或者事件（第七十八 / 八十三刀）：那就把体交给
          emitFieldInitCtors —— 它会先发闸门那几行、再建事件的单子、再发字段初值。
@@ -4911,6 +4914,9 @@ class JncLower {
         if (sk === 'construct' || sk === 'static construct') {
           // 同上（第六十六刀）：`opaque class` 的 construct 也在宿主那边。
           if (cls && key === 'opaque class' && sk === 'construct') this.hostCtors.add(name);
+          /* 没写 `opaque` 的类里那格只有原型的 construct（第一百四十八刀）：体外真写了定义时
+             这一格用不上（`ctors` 那时有它，下面几处先问那张表）。 */
+          else if (cls && sk === 'construct') this.protoCtors.add(name);
           continue;
         }
         /* `opaque class` 里那格**没有体**的 `destruct();`（第九十三刀）：它跟这个类里别的
@@ -7420,7 +7426,46 @@ class JncLower {
    * 构造实参那一串（第五十三刀）：`C1 a(100)` / `new C1(100)` / `C1 a construct(100)`
    * 三处共用。检查与普通调用同一条规矩（个数、整数隐式转、类型对得上）。
    */
+  /**
+   * 那个类的 `construct` **只有原型**（第一百四十八刀）。
+   *
+   * 语料里的原样：`class GroupProperty: Property { construct(string_t name); }`
+   * （ui_PropertyGrid.jnc:37-39）。先前这一层报的是"`ui.GroupProperty` 的 construct 要 0 个
+   * 实参，这里给了 1 个"（那个 0 是**这一层自己合出来的**那格无参构造）或者"没有 construct" ——
+   * 两句都是认错人：construct 在，只是体不在这儿。
+   *
+   * 与 `opaque class` 那一支（第六十六刀）同一句话、不同的口径：那边用户明写了"实现在宿主
+   * 那边"，这边没写，所以这一层不替它认下来。要紧的是**不能装作"没有构造"就把对象交出去**
+   * —— 那是悄悄少跑一段。
+   */
+  protoCtorNope(node, cls) {
+    return this.nope(node, `原型 '${shown(cls)}.construct' 没有带体的定义 —— 造一格 `
+      + `${shown(cls)} 就得调它（实现在宿主那边的走 opaque class 那条路，在别的模块里的要 `
+      + 'import 得着）');
+  }
+
+  /** 那个类的 construct 只写了原型、**而且**体外也没有定义（第一百四十八刀）。
+   *
+   *  两问都要：体外写了定义那是第五十三刀那条正当的放法（`C.construct(…) { … }`），
+   *  那时 `ctors` 里躺的是真的那一个。而这一层自己合出来的无参构造带着 `synth` 记号 ——
+   *  它**顶不了**用户声明的那一个，所以看见它照旧算"只有原型"。少了这一问就会把
+   *  cases/50-construct、62-opaque、63-dualmod 三份拒掉（第一遍就是这么错的）。 */
+  protoCtorOnly(cls) {
+    if (!this.protoCtors.has(cls)) return false;
+    const ct = this.ctors.get(cls);
+    return ct === undefined || ct.synth === true;
+  }
+
+  /** 这个类有**真的**（用户写出体的）construct 吗（第一百四十八刀）。
+   *  这一层自己合出来的那几格带着 `synth` 记号 —— 它们只把字段默认值、基类的构造与静态构造
+   *  串起来，顶不了用户声明的那一个。 */
+  realCtor(cls) {
+    const ct = this.ctors.get(cls);
+    return ct !== undefined && ct.synth !== true;
+  }
+
   ctorArgs(node, cls, argNodes0) {
+    if (this.protoCtorOnly(cls)) return this.protoCtorNope(node, cls);
     const ct = this.ctors.get(cls);
     if (ct === undefined) {
       if (argNodes0.length > 0) {
@@ -7456,6 +7501,7 @@ class JncLower {
    * 没有构造（也没有静态构造）时一个字都不发。回 null 表示报过错了。
    */
   ctorCall(node, cls, self, ctorNode, pad, out) {
+    if (this.protoCtorOnly(cls)) return this.protoCtorNope(node, cls);
     const argNodes = ctorNode === null ? [] : this.flat(ctorNode);
     if (!this.ctors.has(cls)) {
       if (argNodes.length > 0) return this.ctorArgs(node, cls, argNodes);
@@ -11766,12 +11812,19 @@ class JncLower {
       }
       const raw = { code: `(pnew (ptr ${clsRoot(t.name)}) (int 1))`, type: tClass(t.name, false) };
       const hasCtor = this.ctors.has(t.name);
-      // `opaque class` 声明了 construct、可体在宿主那边（第六十六刀）：造出来的对象不能
-      // 假装"没有构造"就交出去 —— 那是**悄悄少跑一段**。所以这儿明说。
-      if (!hasCtor && this.hostCtors.has(t.name)) {
+      /* `opaque class` 声明了 construct、可体在宿主那边（第六十六刀）：造出来的对象不能
+         假装"没有构造"就交出去 —— 那是**悄悄少跑一段**。所以这儿明说。
+         这一问先前写的是 `!hasCtor`，那是**漏的**（第一百四十八刀量出来的）：语料里的
+         `opaque class ComboProperty: Property { construct(string_t name); }` 有基类、也有
+         `autoget` 属性，于是这一层给它合了一格无参构造 —— `hasCtor` 就成了真，这条 N 被跳过，
+         报出来的是"要 0 个实参，这里给了 1 个"（逐份榜上这一族十来行、每行 88 处）。
+         合出来的那一格顶不了用户声明的那一个，所以问的该是"有没有**真的**那一个"。 */
+      if (!this.realCtor(t.name) && this.hostCtors.has(t.name)) {
         return this.nope(n, `new ${shown(t.name)}(…) —— 它的 construct 声明在 opaque class 里、`
           + '实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面');
       }
+      // 只有原型的 construct（第一百四十八刀）：与上一条同一件事，只是那个类没写 `opaque`。
+      if (this.protoCtorOnly(t.name)) return this.protoCtorNope(n, t.name);
       if (!hasCtor && argsNode !== null && this.flat(argsNode).length > 0) {
         return this.err(n, `${shown(t.name)} 没有 construct，给不了构造实参`);
       }
