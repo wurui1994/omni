@@ -7577,8 +7577,8 @@ class JncLower {
   protoSiblingNope(node, base) {
     const b = /\$o[0-9]+$/.test(base) ? base.slice(0, base.lastIndexOf('$')) : base;
     return this.nope(node, `'${shown(b)}' 同名的那几条里有只有原型的 —— 只有原型的重载这一层`
-      + '还没有收进候选（见 ADR-0016 第一百四十四刀那一段），所以这儿对不上的那几个个数'
-      + '本来就不全');
+      + '还没有收进候选（见 ADR-0016 第一百四十四刀那一段），所以合得上的那一条**可能就不在'
+      + '这张表里**：这儿说"对不上"的那个个数与类型都是拿剩下那几条数出来的');
   }
 
   ctorArgs(node, cls, argNodes0) {
@@ -11636,6 +11636,11 @@ class JncLower {
       // 实参与赋值同一条规矩：整数隐式转到形参那一格（窄了就回卷）。
       if (isInt(v.type) && isInt(want[i])) v = intConv(v, want[i]);
       if (!this.assignOk(v.type, want[i])) {
+        /* 同名的还有只有原型的几条（第一百五十三刀）：那"要什么类型"是**另一条**的形参说的 ——
+           合得上的那一条可能就在没进候选的那几条里。语料里 `copy(string)`（std_String.jnc:49，
+           那个类写着四条 copy）报的是"第 1 个实参要 char*"，而 `copy(string_t)` 那一条明明在。
+           与第一百五十刀那三处是同一笔账，只是这一处的出错口是**实参类型**而不是个数。 */
+        if (this.protoSibling(nm)) return this.protoSiblingNope(args[i], nm);
         return this.err(args[i], `'${nm0 === null ? shown(nm) : nm0}' 的第 ${i + 1} 个实参要 ${tyName(want[i])}，`
           + `这里是 ${tyName(v.type)}`);
       }

@@ -1,0 +1,30 @@
+// 第一百五十三刀的界：同名的那几条里有**只有原型**的，那句"第 N 个实参要什么类型"是**另一条**
+// 的形参说的。
+//
+// 这一份里 `Box.put` 写了两条：一条只有原型（收 string_t）、一条带体（收 int）。只有原型的那条
+// 没进候选（第一百四十四刀那条账），于是 `put("hi")` 先前报的是"'Box.put' 的第 1 个实参要 int，
+// 这里是 string" —— 听起来像"你传错了类型"，其实合得上的那一条明明在，只是这一层没收它。
+//
+// 语料里的原样：`std.String` 写着四条 `copy`（string_t / char const* / utf16_t const* /
+// utf32_t），`copy(string)`（std_String.jnc:49）先前报的是"第 1 个实参要 char*"。
+// 一起编 std 那张榜上四行这类话（各 1 处）都是它。
+//
+// 与第一百五十刀那三处是同一笔账，只是出错口在**实参类型**而不是个数。
+
+class Box {
+	void put(string_t s);
+
+	void put(int n) {
+		printf("n %d\n", n);
+	}
+
+	void go() {
+		put("hi");
+	}
+}
+
+int main() {
+	Box b;
+	b.go();
+	return 0;
+}
