@@ -13389,13 +13389,15 @@ class JncLower {
     if (op === null) return this.err(n, '认不出的二元算符');
     // jancy 自己的三条：`=~` / `!~`（正则）与 `@`（按位与的取反版）。方言里没有对应物。
     if (op === '=~' || op === '!~' || op === '@') return this.nope(n, `算符 '${op}'`);
+    /* `&&` / `||`（第二百二十二刀把它们提到这儿单独一条路）：右边是**惰性**的，而右边可能有
+       要插语句的东西（errorcode 的传播那两句）。与 `? :` 那一格是同一件事，落法也同一套 ——
+       见 logicOp。 */
+    if (op === '&&' || op === '||') return this.logicOp(n, op);
     // null 那一侧要从另一侧知道自己的类型，所以先降"不是 null"的那一边
     const lNull = isList(n.items[2]) && head(n.items[2]) === 'null';
     const rNull = isList(n.items[3]) && head(n.items[3]) === 'null';
-    // `&&` / `||` 的右边是惰性的（第五十八刀）：那儿插不进传播的语句，见 ecLazy。左边总是求值。
-    const rhs = (want) => (op === '&&' || op === '||'
-      ? this.ecLazy(() => this.expr(n.items[3], want))
-      : this.expr(n.items[3], want));
+    // `&&` / `||` 上面那条路已经接走了（第二百二十二刀），所以这儿的右边一律照常求值。
+    const rhs = (want) => this.expr(n.items[3], want);
     let a = null;
     let b = null;
     if (lNull && !rNull) {
@@ -13410,14 +13412,6 @@ class JncLower {
       b = rhs((jncIsPtr(a.type) || isClass(a.type) || isFn(a.type)) && rNull ? a.type : null);
     }
     if (a === null || b === null) return null;
-    // `&&` / `||` 两边各自真值化（jancy 与 C 同：`p && n` 是合法的）。方言的
-    // `(bin "&&" …)` 是惰性的（Logic 节点），短路语义不用这一层操心。
-    if (op === '&&' || op === '||') {
-      const ta = this.truthy(a, n.items[2]);
-      const tb = this.truthy(b, n.items[3]);
-      if (ta === null || tb === null) return null;
-      return { code: `(bin "${op}" ${ta.code} ${tb.code})`, type: J_BOOL };
-    }
     /* 相等算符（第一百四十刀）：主人的类型上写了 `operator ==` / `!=` 就调它。要排在下面
        **类那一支之前** —— 那一支上类引用的 `==` 是"比是不是同一个对象"（peq），而写了算符的
        那一格上用户的意思是"问那个算符"（std_Guid 比的是四个字段）。与第一百三十九刀
@@ -13640,27 +13634,133 @@ class JncLower {
    * 两支的类型：jancy 与 C 一样会做常用算术转换，这一层只做 int -> real 那一步
    * （方言的 `sel` 要两支同型，而它刻意不推导）。
    */
+  /**
+   * `a && b` / `a || b`（第二百二十二刀）。两边各自真值化（jancy 与 C 同：`p && n` 合法），
+   * 结果是 bool。**右边是惰性的**：方言的 `(bin "&&" …)` 本身就是惰性节点，所以只要右边不用
+   * 插语句，这儿就照旧发一句 `(bin "&&" 甲 乙)` —— 一个字都不多发。
+   *
+   * 右边要插语句时（`setDeviceVidPid(vid, pid) && openDevice()` —— 两个都是 errorcode，
+   * 传播那两句得插成语句）走与 `? :` 同一套落法：给结果开一格内存、把短路摊成一句 if，
+   * 右边那几句插在**它自己那半**里。惰性一点没丢。
+   */
+  logicOp(n, op) {
+    const a = this.expr(n.items[2], null);
+    if (a === null) return null;
+    const ta = this.truthy(a, n.items[2]);
+    if (ta === null) return null;
+    if (this.ecOut === null) {
+      // 惰性位置（第五十八刀）：这儿插不进语句，右边落进去的 errorcode 调用当场说不收。
+      const b0 = this.ecLazy(() => this.expr(n.items[3], null));
+      if (b0 === null) return null;
+      const tb0 = this.truthy(b0, n.items[3]);
+      if (tb0 === null) return null;
+      return { code: `(bin "${op}" ${ta.code} ${tb0.code})`, type: J_BOOL };
+    }
+    const savePad = this.ecPad;
+    const bpad = `${savePad}    `;
+    const saveOut = this.ecOut;
+    this.ecOut = [];
+    this.ecPad = bpad;
+    const b = this.expr(n.items[3], null);
+    const lines = this.ecOut;
+    this.ecOut = saveOut;
+    this.ecPad = savePad;
+    if (b === null) return null;
+    const tb = this.truthy(b, n.items[3]);
+    if (tb === null) return null;
+    if (lines.length === 0) {
+      return { code: `(bin "${op}" ${ta.code} ${tb.code})`, type: J_BOOL };
+    }
+    const cell = `$l${this.ecSeq++}`;
+    this.ecOut.push(`${savePad}(let ${cell} (ptr bool) (pnew (ptr bool) (int 1)))`);
+    // 短路那一半先写定：`&&` 短路成 false、`||` 短路成 true。
+    this.ecOut.push(`${savePad}(pstore (var ${cell}) (bool ${op === '&&' ? 'false' : 'true'}))`);
+    const gate = op === '&&' ? ta.code : `(un "!" ${ta.code})`;
+    this.ecOut.push(`${savePad}(if ${gate}`);
+    this.ecOut.push(`${savePad}  (do`);
+    for (const l of lines) this.ecOut.push(l);
+    this.ecOut.push(`${bpad}(pstore (var ${cell}) ${tb.code})))`);
+    return { code: `(pload (var ${cell}))`, type: J_BOOL, hoisted: true };
+  }
+
   ternary(n, want) {
     const c = this.cond(n.items[1]);
+    if (c === null) return null;
+    /* 两支里有**要插语句**的东西时（第二百二十二刀）：`return m_state ? true : open();`
+       —— `open()` 是 errorcode，传播那两句得插成语句，而这两支是**惰性**的（只算取中的那一
+       支），插到"这条语句之前"就成了"无条件先调一遍"。先前这儿把落点关掉、当场说不收
+       （榜上 `这个位置上的 errorcode 调用` 20 份里 18 份是这一种）。
+
+       落法：给结果开**一格内存**（`(pnew (ptr T) (int 1))` —— 与第九刀把局部量提进内存、
+       第二十四刀把取过地址的全局提进内存是同一件事，方言一个字没动），然后把整条 `? :` 摊成
+       一句 `(if 条件 (do 甲那几句 (pstore 格 甲)) (do 乙那几句 (pstore 格 乙)))`，
+       表达式本身回 `(pload 格)`。惰性一点没丢：每一支的语句都在**它自己那半**里。
+
+       **只有真需要时才走这条路**：两支都没插出语句就照旧发 `(sel …)`（一个字都不多发），
+       所以先前能编的程序一个字节都不变。 */
+    if (this.ecOut !== null) {
+      const savePad = this.ecPad;
+      const bpad = `${savePad}    `;
+      const arm = (node, w) => {
+        const saveOut = this.ecOut;
+        this.ecOut = [];
+        this.ecPad = bpad;
+        const v = this.expr(node, w);
+        const lines = this.ecOut;
+        this.ecOut = saveOut;
+        this.ecPad = savePad;
+        return v === null ? null : { v, lines };
+      };
+      const ra = arm(n.items[2], want);
+      if (ra === null) return null;
+      const rb = arm(n.items[3], want === null || want === undefined ? ra.v.type : want);
+      if (rb === null) return null;
+      if (ra.lines.length === 0 && rb.lines.length === 0) return this.selValue(n, c, ra.v, rb.v);
+      const t = this.selValue(n, c, ra.v, rb.v, true);
+      if (t === null) return null;
+      const cell = `$s${this.ecSeq++}`;
+      const ct = slotText(t.type);
+      this.ecOut.push(`${savePad}(let ${cell} (ptr ${ct}) (pnew (ptr ${ct}) (int 1)))`);
+      this.ecOut.push(`${savePad}(if ${c.code}`);
+      this.ecOut.push(`${savePad}  (do`);
+      for (const l of ra.lines) this.ecOut.push(l);
+      this.ecOut.push(`${bpad}(pstore (var ${cell}) ${t.a.code}))`);
+      this.ecOut.push(`${savePad}  (do`);
+      for (const l of rb.lines) this.ecOut.push(l);
+      this.ecOut.push(`${bpad}(pstore (var ${cell}) ${t.b.code})))`);
+      return { code: `(pload (var ${cell}))`, type: t.type, hoisted: true };
+    }
     // 两支是**惰性**的（第五十八刀）：只算取中的那一支，所以传播那两句插不到这条语句之前去。
     let a = this.ecLazy(() => this.expr(n.items[2], want));
     let b = this.ecLazy(() => this.expr(n.items[3],
       want === null || want === undefined ? (a === null ? null : a.type) : want));
-    if (c === null || a === null || b === null) return null;
+    if (a === null || b === null) return null;
+    return this.selValue(n, c, a, b);
+  }
+
+  /**
+   * `? :` 两支的类型对齐 + 发那一句（第二百二十二刀把它从 ternary 里抽出来 —— 那儿现在有两条
+   * 路，普通的一句 `(sel …)` 与"两支要插语句"那一格摊成的 if，两条用的是**同一套**对齐规矩）。
+   *
+   * `parts` 为真时只回对齐后的两支与结果类型（给摊成 if 的那条路用），不拼 `(sel …)`。
+   */
+  selValue(n, c, a0, b0, parts = false) {
+    let a = a0;
+    let b = b0;
     // 两支都是整数：结果是常用算术转换定出的那一格。有符号之间加宽在规范形里不发一个字，
     // 可换符号性要真的转（第三十三刀），所以这儿两支都过一遍 intConv。
     if (isInt(a.type) && isInt(b.type)) {
       const rt = common(a.type, b.type);
       const x = intConv(a, rt);
       const y = intConv(b, rt);
-      return { code: `(sel ${c.code} ${x.code} ${y.code})`, type: rt };
+      return parts ? { a: x, b: y, type: rt } : { code: `(sel ${c.code} ${x.code} ${y.code})`, type: rt };
     }
     if (isInt(a.type) && b.type === J_REAL) a = { code: realOf(a.code, a.type), type: J_REAL };
     else if (a.type === J_REAL && isInt(b.type)) b = { code: realOf(b.code, b.type), type: J_REAL };
     if (!sameTy(a.type, b.type)) {
       return this.err(n, `'? :' 两支不同型：甲是 ${tyName(a.type)}，乙是 ${tyName(b.type)}`);
     }
-    return { code: `(sel ${c.code} ${a.code} ${b.code})`, type: a.type };
+    return parts ? { a, b, type: a.type } : { code: `(sel ${c.code} ${a.code} ${b.code})`, type: a.type };
   }
 
   /**

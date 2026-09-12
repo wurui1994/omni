@@ -1,0 +1,69 @@
+// errorcode 的传播插进**惰性**那两格（第二百二十二刀）：`? :` 的两支与 `&&` / `||` 的右边。
+//
+// 语料里 20 份文件、22 处，其中 18 处是 `? :`（`return m_sessionConnectionState ? true :
+// open();`，SerialTapSession / JLinkRtt 那一族）、2 处是 `&&`
+// （`return setDeviceVidPid(vid, pid) && openDevice();`）。
+//
+// 先前这两格把传播的落点**关掉**（ecLazy）：传播那两句只插得到"这条语句之前"，插到那儿就成了
+// "无条件先调一遍"，短路语义与求值顺序一起被改掉。所以第五十八刀当场说不收。
+//
+// 这一刀的落法：给结果开**一格内存**（`(pnew (ptr T) (int 1))` —— 与第九刀把局部量提进内存、
+// 第二十四刀把取过地址的全局提进内存是同一件事，方言一个字没动），把整条式子摊成一句 if，
+// **每一支的语句插在它自己那半里**，表达式本身回 `(pload 格)`。惰性一点没丢。
+//
+// 只有真需要时才走这条路：两支都没插出语句就照旧发 `(sel …)` / `(bin "&&" …)`，
+// 所以先前能编的程序一个字节都不变。
+//
+// 判据是手写的 C 双胞胎 /tmp/c180.c（bool 的 errorcode 出错回 false，所以 `throw;` 就是
+// `return 0`、传播就是 `if (!r) return 0;`）。第 2 行印 1 而**没有** open —— 那正是短路还在。
+bool errorcode openIt(int x) {
+	if (x < 0)
+		throw;
+
+	printf("open\n");
+	return true;
+}
+
+bool errorcode setup(int x) {
+	if (x > 100)
+		throw;
+
+	printf("setup\n");
+	return true;
+}
+
+bool errorcode pick(int x, bool already) {
+	return already ? true : openIt(x);
+}
+
+bool errorcode both(int x) {
+	return setup(x) && openIt(x);
+}
+
+int show1(int x, bool already) {
+	try {
+		bool r = pick(x, already);
+		return r ? 1 : -1;
+	}
+
+	return -1;
+}
+
+int show2(int x) {
+	try {
+		bool r = both(x);
+		return r ? 1 : -1;
+	}
+
+	return -1;
+}
+
+int main() {
+	printf("%d\n", show1(1, true));
+	printf("%d\n", show1(-1, true));
+	printf("%d\n", show1(5, false));
+	printf("%d\n", show1(-1, false));
+	printf("%d\n", show2(5));
+	printf("%d\n", show2(200));
+	return 0;
+}
