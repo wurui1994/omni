@@ -1101,6 +1101,11 @@ class JncLower {
        发 `(cabi Owner_method …)` 与 `(ccall Owner_method self …)`（ADR-0022 的 J4b 最后一步）。 */
     this.hostSigs = new Map();
     this.hostCtors = new Set();
+    /* 宿主面上**同名两条原型**的那几格（第一百六十四刀）：C 那边一个符号只有一份签名，
+       所以这一层收不下第二条 —— 记在这儿，调用点明说不收（先前是后一条盖掉前一条，
+       于是调用点拿错的那一份查型，是个静默的错答案）。 */
+    this.hostOverloaded = new Set();
+
     /* 那些 `opaque class` 里 `construct` 的**形参类型**（第一百六十二刀）：`new C(…)` 据此发
        `(ccall C_construct self …)` —— 与方法（J4b）、属性的取/存（第一百六十刀）同一条约定。 */
     this.hostCtorSigs = new Map();
@@ -5520,7 +5525,13 @@ class JncLower {
             this.hostFns.set(info.name, name);
             const hps = this.formalList(info.formals);
             if (hps !== null) {
-              this.hostSigs.set(`${name}$${info.name}`, {
+              const hk = `${name}$${info.name}`;
+              /* 同名两条原型（第一百六十四刀）：宿主那边**一个符号只有一份签名**（C 没有重载），
+                 所以这一格记不下第二条 —— 先前是后一条盖掉前一条，于是调用点拿**错的那一份**
+                 去查型（`void lock(int)` / `void lock(double)` 里给 1.5 会按 int 检查）。
+                 那是个静默的错答案，所以在这儿记一笔，调用点明说不收。 */
+              if (this.hostSigs.has(hk)) this.hostOverloaded.add(hk);
+              this.hostSigs.set(hk, {
                 owner: name, ret: info.type, params: hps.map((p) => p.type),
               });
             }
@@ -11210,6 +11221,12 @@ class JncLower {
     const sig = this.hostSigs.get(`${owner}$${mn}`);
     if (sig === undefined) {
       return this.nope(n, `'${shown(owner)}.${mn}'（这个方法的原型没收下来）`);
+    }
+    /* 同名两条原型（第一百六十四刀）：宿主那边一个符号只有一份签名（C 没有重载），这一层
+       于是挑不出该按哪一条查型 —— 明说不收，而不是拿最后声明的那一条糊过去。 */
+    if (this.hostOverloaded.has(`${owner}$${mn}`)) {
+      return this.nope(n, `'${shown(owner)}.${mn}' 在 opaque class 里声明了同名的两条 ——`
+        + ' 宿主那边一个符号只有一份签名（C 没有重载），这一层挑不出按哪一条过');
     }
     if (head(callee) !== 'field') {
       return this.err(n, `'${shown(owner)}.${mn}' 要一个对象来调它`);

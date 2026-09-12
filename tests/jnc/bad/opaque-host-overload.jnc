@@ -1,0 +1,23 @@
+// 第一百六十四刀：`opaque class` 里**同名两条原型**。
+//
+// 宿主面按名字约定过去（`Owner.method` -> C 符号 `Owner_method`，ADR-0022 的 J4b），而 C 那边
+// **一个符号只有一份签名** —— 没有重载。所以这一层收不下第二条。
+//
+// 这一条是个**静默的错答案**补上的洞：先前 hostSigs 是按 `类$方法` 记的一格，第二条原型直接
+// 盖掉第一条，于是调用点拿**最后声明的那一份**去查型 —— 下面这一句 `p.lock(1.5)` 会按
+// `void lock(int)` 检查（或者反过来），过去的字宽与实际那个符号想要的对不上，而错的调用约定
+// 在运行期是读错地方，不是报错。宁可在这儿说"挑不出按哪一条过"。
+//
+// 与 `bad/opaque-host-fn.jnc`（形参类型落不进 C_ABI）是同一族的第二条界。
+opaque class Lock {
+	int m_depth;
+
+	void lock(int n);
+	void lock(double d);
+}
+
+int main() {
+	Lock* p = new Lock();
+	p.lock(1.5);
+	return 0;
+}
