@@ -10090,6 +10090,24 @@ size_t errorcode transmit(string_t text) {                  // :35 带体
 - 要真收下它，得先有一格"方言名与 C 符号分开"的写法（`(cabi 本地名 as "C符号" …)` 那种）——
   那是方言那一层的一刀，与 `main` 的退出码、`string_t.m_p`、函数值过宿主面同一类。
 
+### 第二百〇九刀：下标算符写在基类上
+
+一起编那张榜上那一条 `下标要一个指针，这里是 std.StringHashTable`。查下去：`std.StringHashTable`
+自己只有一格 construct，那对 `get` / `set`（也就是下标算符，第一百三十八刀）写在基类
+`std.HashTable` 上（std_HashTable.jnc:96-105，文档管它叫 indexer）。
+
+`opIndexOf` 只问了对象自己那一格 —— 于是 `t[key]` 落到"下标要一个指针"那句上，**指着别处**：
+那不是"要指针"，是那格算符在基类上。查名改成与方法同一条路（`baseWalk`，一条继承链从里往外走）。
+
+判据在 `tests/jnc/cases/163-opindexbase.jnc`（C 双胞胎 `/tmp/c170.c`）：一条继承链在这一层共用
+一格方言结构体，所以派生类那一格调的就是基类那两个函数 —— `k[2] = 3` 存成 `3*10+2`、`k[1]`
+读出 `32+1`。
+
+- 腿：`node tests/jnc/run.js` 291/0（新增 `cases/163-opindexbase`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `4147 -> 4055`（**−92**）—— 又是"一份被很多文件 import 的
+  文件降不下来就一路挡着"（这回是 `std_HashTable.jnc` 那条链）；lowered `155`、clean `222` 没动。
+- 一起编那张榜：`40 -> 39`、理由 `20 -> 19`。
+
 
 
 ## 后果与代价

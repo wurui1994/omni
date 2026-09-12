@@ -1,0 +1,38 @@
+// 下标算符写在**基类**上（第二百〇九刀）。语料里的原样是 `std.StringHashTable` ——
+// 它自己只有一格 construct，那对 `get` / `set`（也就是下标算符，第一百三十八刀）写在基类
+// `std.HashTable` 上（std_HashTable.jnc:96-105，文档管它叫 indexer）。
+//
+// 先前 `opIndexOf` 只问了对象自己那一格，于是 `t[key]` 落到"下标要一个指针，这里是
+// std.StringHashTable"那句上 —— 指着别处：那不是"要指针"，是那格算符在基类上。查名改成
+// 与方法同一条路（baseWalk，一条继承链从里往外走）。
+//
+// 判据是手写的 C 双胞胎 /tmp/c170.c：一条继承链在这一层共用一格结构体，所以派生类那一格
+// 调的就是基类那两个函数。`k[2] = 3` 存成 3*10+2、`k[1]` 读出 32+1。
+class Base {
+	long m_v;
+
+	construct() {
+		m_v = 0;
+	}
+
+	long get(long i) {
+		return m_v + i;
+	}
+
+	void set(long i, long v) {
+		m_v = v * 10 + i;
+	}
+}
+
+class Kid: Base {
+	construct() {
+		basetype.construct();
+	}
+}
+
+int main() {
+	Kid* k = new Kid;
+	k[2] = 3;
+	printf("%d\n", k[1]);
+	return 0;
+}

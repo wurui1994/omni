@@ -1673,7 +1673,15 @@ class JncLower {
 
   /** 下标算符那一格的账本（第一百三十八刀）：左边那格的类型上有没有它。 */
   opIndexOf(t) {    if (t === null || t === undefined || !(isClass(t) || jncIsStruct(t))) return undefined;
-    return this.opIndex.get(t.name);
+    /* 基类上写的那一格也算（第二百〇九刀）：语料里的原样是 `std.StringHashTable` ——
+       它的下标算符（那对 `get` / `set`，std_HashTable.jnc:96-105）写在基类 `std.HashTable` 上。
+       先前只问了自己那一格，于是 `t[key]` 落到"下标要一个指针"那句上 —— 指着别处。
+       与方法查名同一条路（baseWalk，一条继承链从里往外走）。 */
+    for (const cur of this.baseWalk(t.name)) {
+      const e = this.opIndex.get(cur);
+      if (e !== undefined) return e;
+    }
+    return undefined;
   }
 
   /**
