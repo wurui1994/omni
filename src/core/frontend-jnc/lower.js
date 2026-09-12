@@ -2998,9 +2998,19 @@ class JncLower {
         for (const d of this.flat(e.it.items[2])) this.aliasDecl(d, null);
       }
     }
+    /* 枚举的体排在结构体 / 类的体**之前**（第二百二十九刀）：字段的数组长度可以是一格枚举成员
+       （`ui.Action* m_actionTable[ActionId._Count]`，ioninja 那一族每份三行、榜上 47 处）。
+       那个枚举嵌在同一个类的体里，而嵌套类型是**跟在**外层那一格后面提上来的（aggHoist），
+       于是先前这一遍轮到类的字段时它的成员表还是空的 —— 报出来的"数组长度不是能在编译期算出来
+       的整数"是**认错人**：算得出来，只是问早了。jancy 那边这件事由 `ensureLayout` 按需拉起
+       （`ArrayType::calcLayout` 先 `parseConstIntegerExpression`，jnc_ct_ArrayType.cpp:175），
+       这一层没有那套按需机制，就把两遍分开排 —— 枚举成员的值算不到结构体的布局上去
+       （能进 constInt 的只有字面量、别的枚举成员与常量折叠），所以这个次序是稳的。 */
+    const isEnumDecl = (e) => isList(e.it) && head(e.it) === 'type-decl'
+      && isList(e.it.items[1]) && head(e.it.items[1]) === 'enum';
     for (const e of items) {
       this.ns = e.ns;
-      if (isList(e.it) && head(e.it) === 'type-decl') this.typeDecl(e.it.items[1]);
+      if (isEnumDecl(e)) this.typeDecl(e.it.items[1]);
     }
     /* 枚举成员的值算不出来的那几格再来几轮（第一百四十一刀）：初值引用**后面才声明的**枚举时
        上面那一遍必然算不出来（那时它的成员表还没填）。一轮解开一层，跑到不动点；一轮下来一格
@@ -3019,6 +3029,13 @@ class JncLower {
         for (const t of rest) { this.ns = t.ns; this.enumDecl(t.n); }
         this.enumRetry = false;
         break;
+      }
+    }
+    // 结构体 / 类的体（上面那段注说了为什么排在枚举之后，第二百二十九刀）
+    for (const e of items) {
+      this.ns = e.ns;
+      if (isList(e.it) && head(e.it) === 'type-decl' && !isEnumDecl(e)) {
+        this.typeDecl(e.it.items[1]);
       }
     }
     // 属性的名字先坐下（第六十八刀）：取/存两个函数的签名要抄它的类型，而那两个函数在

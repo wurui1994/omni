@@ -1,0 +1,60 @@
+// 类体里那格枚举的成员当**字段的数组长度**（第二百二十九刀）。语料里的原样是
+// `ui.Action* m_actionTable[ActionId._Count];`（test/ioninja/plugins/File/FileSession.jnc:62）
+// —— 每份 session 三行（Action / Icon / StatusPane），榜上 47 处。
+//
+// 先前报的是"数组长度不是能在编译期算出来的整数"，那是**认错人**：算得出来（枚举成员的值
+// 编译期就定了，第三十九刀那一格早收了），只是**问早了** —— 嵌套类型是跟在外层那一格后面
+// 提到顶层的（aggHoist），于是轮到类的字段时那个枚举的成员表还是空的。
+//
+// 落法：枚举的体单独排一遍，放在结构体 / 类的体之前。枚举成员的值算不到结构体的布局上去
+// （能进 constInt 的只有字面量、别的枚举成员与常量折叠），所以这个次序是稳的。
+//
+// 判据是手写的 C 双胞胎 /tmp/c185.c（C 里嵌套枚举得摊到外面、名字前面加一段）。印 `2 3 30 7`。
+class Session {
+	enum ActionId {
+		Open,
+		Clear,
+		_Count,
+	}
+
+	enum IconId {
+		Open,
+		Close,
+		Clear,
+		_Count,
+	}
+
+	int m_actionTable[ActionId._Count];
+	int m_iconTable[IconId._Count];
+
+	construct() {
+		m_actionTable[0] = 10;
+		m_actionTable[1] = 20;
+		m_iconTable[2] = 7;
+	}
+}
+
+// 结构体那一侧同一条；长度还可以是一格折出来的算式。
+struct Grid {
+	int m_cells[Session.IconId._Count * 2];
+}
+
+int main() {
+	Session* s = new Session;
+
+	int sum = 0;
+	for (int i = 0; i < Session.ActionId._Count; i++)
+		sum += s.m_actionTable[i];
+
+	Grid g;
+	g.m_cells[5] = 1;
+
+	printf(
+		"%d %d %d %d\n",
+		countof(s.m_actionTable),
+		countof(s.m_iconTable),
+		sum,
+		s.m_iconTable[2]
+	);
+	return 0;
+}

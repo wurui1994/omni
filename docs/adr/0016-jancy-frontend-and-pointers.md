@@ -10848,6 +10848,50 @@ uint64_t getPreciseTimestamp();       src/jnc_ext/jnc_sys/jnc/sys_globals.jnc:14
   lowered `162`、clean `238` 都没动：这一族拦着的文件后面还压着那两笔账。
 - 一起编那张榜：诊断 `39 -> 37`、理由 `19 -> 18`，"第 1 个实参"那一行**整行没了**。
 
+### 第二百二十九刀：类体里那格枚举的成员当字段的数组长度（问早了）
+
+榜上"数组长度不是能在编译期算出来的整数"那一行 47 处，量到的是同一个形状（ioninja 每份 session
+三行）：
+
+```
+ui.Action* m_actionTable[ActionId._Count];        test/ioninja/plugins/File/FileSession.jnc:62
+ui.Icon* m_iconTable[IconId._Count];              同上:63
+ui.StatusPane* m_statusPaneTable[StatusPaneId._Count];   同上:64
+```
+
+`ActionId` 就嵌在同一个类的体里（同文件:34-38）。枚举成员的值这一层**早就算得出来**
+（第三十九刀那一格），所以那句话是**认错人** —— 缩到最小是这样：
+
+```
+class C { enum E { A, B, _Count, } int m_tab[E._Count]; }
+  -> 枚举 'C.E' 里没有 '_Count'
+  -> 数组长度不是能在编译期算出来的整数
+```
+
+枚举名字**在**表里（`C.E` 认得），可它的成员表是空的：真拦路的是**次序**。嵌套类型是
+**跟在**外层那一格后面提到顶层的（`aggHoist`），而 `typeDecl` 那一遍按名单顺序走 —— 轮到类的
+字段时那格枚举的体还没解。jancy 那边不会撞上这件事：它按需拉布局
+（`ArrayType::calcLayout` 里先 `parseConstIntegerExpression`，jnc_ct_ArrayType.cpp:175）。
+
+落法是把那一遍拆成两趟：**枚举的体先走一趟**（连原有的那圈 `enumTodo` 重试），然后才是结构体 /
+类的体。这个次序是稳的 —— 能进 `constInt` 的只有字面量、`true`/`false`、别的枚举成员与常量折叠，
+一格都算不到结构体的布局上去，所以枚举那一趟不会反过来要类的字段。
+
+判据是手写的 C 双胞胎 `/tmp/c185.c`（C 里嵌套枚举得摊到外面、名字前面加一段），用例
+`tests/jnc/cases/178-nestedenumlen.jnc`（类里两张表、结构体里一格折出来的 `_Count * 2`），
+两边都印 `2 3 30 7`。
+
+- 腿：`node tests/jnc/run.js` 321/0（新增 `cases/178-nestedenumlen`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `3852 -> 3782`（**−70**）。
+  "数组长度不是能在编译期算出来的整数"那一行 `47 -> 2`；`未声明的变量` `193 -> 192`。
+  一行都没往错方向走。lowered `162`、clean `238` 都没动 —— 那 45 份文件后面还压着
+  `没有这个类型`（ioninja 的逐份口径）与 `string_t` 的 `m_p` 那两笔。
+  剩下那 2 处是**另外两个**形状，各记在这儿留着：
+  `char m_data[sizeof(size_t) * 6]`（jnc_StdTypedefs.jnc:42 —— `sizeof` 那笔方言级的账）与
+  `uchar_t m_padding[ReportSize - 1]`（ErgoDoxHid.jnc:66 —— 一个裸名字）。
+- 一起编那张榜：`37`、理由 `18` 没动（那个形状在 plugins/ 里，不在 api/ 那 44 份里）。
+
 
 
 
