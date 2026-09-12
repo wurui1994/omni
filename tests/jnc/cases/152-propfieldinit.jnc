@@ -1,0 +1,47 @@
+// 属性体里那格字段的**就地初值**（第一百八十刀）。jancy 的例子第一行就是它 ——
+//
+//     property g_prop {
+//         int m_x = 5; // member field with in-place initializer
+//                                              —— prop_full.rst:18
+//
+// 语法上 `int m_x = 5;` 是一格 `init`（里头包着声明符与初值），先前落到"一条声明只收一格"
+// 那句上。两种落法与"那格存储在哪儿"是一对：顶层的属性那格存储是一格模块级变量，初值排进
+// globalInit（与一格普通的 `int g = 5;` 同一条 globalValue）；成员属性那格存储是类里的字段，
+// 初值排进 fieldInits —— 也就是**字段默认值**那条现成的路（第七十八刀），所以合成的 construct
+// 由它决定要不要发（这一笔必须在 autoStore 那一步记，等到发的那一步 synthFI 早算完了）。
+property g_p {
+	int m_v = 5;
+
+	int get() {
+		return m_v;
+	}
+
+	void set(int x) {
+		m_v = x * 2;
+	}
+}
+
+class C {
+	property m_p {
+		int m_v = 7;
+
+		int get() {
+			return m_v;
+		}
+
+		void set(int x) {
+			m_v = x + 1;
+		}
+	}
+}
+
+int main() {
+	printf("g0 %d\n", g_p);
+	g_p = 3;
+	printf("g1 %d\n", g_p);
+	C* c = new C;
+	printf("m0 %d\n", c.m_p);
+	c.m_p = 9;
+	printf("m1 %d\n", c.m_p);
+	return 0;
+}

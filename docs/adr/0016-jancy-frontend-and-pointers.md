@@ -9099,6 +9099,35 @@ type->createField("m_length", getPrimitiveType(TypeKind_SizeT), 0, ConstKind_Rea
   语法上是 `init` 而不是 `dcl`，落到"一条声明只收一格"那句上）。那一格要把初值一路带到生成的
   那格存储上（顶层进 globalCells、成员进 ctor），是下一刀的事。
 
+### 第一百八十刀：属性体里那格字段的**就地初值**
+
+上一刀量出来的下一格，兑掉。jancy 的例子第一行就是它：
+
+```jnc
+property g_prop {
+	int m_x = 5; // member field with in-place initializer     —— prop_full.rst:18
+```
+
+语法上 `int m_x = 5;` 是一格 `init`（里头包着声明符与初值），先前落到"一条声明只收一格"那句上。
+两种落法与"那格存储在哪儿"是一对，**两条都用现成的路，一个字的新机器都没长**：
+
+- 顶层的属性 -> 那格存储是一格模块级变量，初值排进 `globalInit` —— 与一格普通的 `int g = 5;`
+  走同一条 `globalValue`；
+- 成员属性 -> 那格存储是类里的一格字段，初值排进 `fieldInits` —— 也就是**字段默认值**那条路
+  （第七十八刀）。这一笔必须在 `autoStore` 那一步记：合成的 construct 要不要发是 `synthFI` 算的，
+  而那一遍在发之前就跑完了。
+
+判据：`cases/152-propfieldinit.jnc`（顶层与成员各一格；`g0 5` / `m0 7` 是初值真赋上了，
+`g1 6`（3×2）/ `m1 10`（9+1）是存值器真跑了），尺子 `/tmp/c158.c`。
+
+- 腿：`node tests/jnc/run.js` 284/0。
+- 逐份那张榜：又是**一个数都没动**（lowered `124`、clean `191`、对 `4394`）。
+- 但**量出来的下一格更近了一步**：`samples/jnc/31_FullPropertyDecl.jnc` 从第 19 行推进到第 30 行 ——
+  现在停在 `完整声明式的属性 'g_prop' 里两个 set（要重载决议）`。那是 jancy 明写支持的
+  （prop_full.rst:15 的 "overloaded setters"，例子里 `set(int x)` 与 `set(double x)` 各一格），
+  而这一层的属性一个名字只记一格存值器 —— 要收它得让"写属性"这一处走重载决议
+  （与第八十刀那套 `pickOverload` 是同一套机器，只是挂在属性的 set 上）。这是下一刀。
+
 ## 后果与代价
 
 

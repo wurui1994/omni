@@ -2921,6 +2921,17 @@ class JncLower {
         } else {
           this.decls.push(`  (global ${a.name} ${slotText(a.type)})`);
         }
+        /* 那格字段的就地初值（第一百八十刀）：与一格普通的 `int g = 5;` 走同一条
+           （globalValue + globalInit）。排在这儿而不是下面 —— 下面那句 `if (pi.get) continue`
+           管的是"取值器要不要发"，与初值没关系。 */
+        if (a.init !== undefined && a.init !== null) {
+          const iv = this.globalValue(a.init, a.type);
+          if (iv !== null) {
+            this.globalInit.push(this.gLifted.has(a.name)
+              ? `    (pstore (var ${a.name}) ${iv})`
+              : `    (set ${a.name} ${iv})`);
+          }
+        }
         if (pi.get) continue;
         const rd = this.gLifted.has(a.name) ? `(pload (var ${a.name}))` : `(var ${a.name})`;
         this.decls.push(`  (fn ${g} () ${slotText(a.type)}\n    (ret ${rd}))`);
@@ -4066,7 +4077,12 @@ class JncLower {
      * 生成物的名字，于是存值器体里裸写的 `m_x` 由属性那层命名空间直接查得着。 */
     const full = this.qual(nm);
     if (fld !== null || evt !== null) {
-      this.propMemName.set(full, { store: fld === null ? null : fld.name, onch: evt === null ? null : evt.name });
+      this.propMemName.set(full, {
+        store: fld === null ? null : fld.name,
+        onch: evt === null ? null : evt.name,
+        // 那格字段的**就地初值**（第一百八十刀）：autoStore 那一步把它带到生成的那格存储上。
+        init: fld === null || fld.init === undefined ? null : fld.init,
+      });
     }
     /* 那条 alias 说的是"这一格不生成、就用外层那格成员"（第一百五十八刀）：记一笔，autoStore /
        bindStore 那两步照它走 —— 属性这一层里那个新名字（`m_onPropChanged` / `m_value`）与外层
@@ -4184,11 +4200,18 @@ class JncLower {
       }
       return { kind: 'field', name: an, target: tg, sp: t0.sp, ptrs: t0.ptrs };
     }
-    if (ds.length !== 1 || !isList(ds[0]) || head(ds[0]) !== 'dcl') {
+    if (ds.length !== 1 || !isList(ds[0]) || (head(ds[0]) !== 'dcl' && head(ds[0]) !== 'init')) {
       this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条（一条声明只收一格）`);
       return null;
     }
-    const d = ds[0];
+    /* 带**就地初值**的字段（第一百八十刀）：`int m_x = 5;` —— jancy 的例子第一行就是它
+       （prop_full.rst:18）。语法上那是一格 `init`，里头包着声明符与初值。 */
+    const ini0 = head(ds[0]) === 'init' ? ds[0] : null;
+    const d = ini0 === null ? ds[0] : ini0.items[1];
+    if (!isList(d) || head(d) !== 'dcl') {
+      this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条（一条声明只收一格）`);
+      return null;
+    }
     const name = this.qname(d.items[2]);
     if (name === null || name.includes('.')) {
       this.nope(m, `完整声明式的属性 '${nm}' 体里这一条的名字`);
@@ -4218,7 +4241,12 @@ class JncLower {
          - 属性的**类型**照旧从 `get` 抄，不从这格字段抄（jancy 那边类型是取值器的返回类型；
            `autoget` 那一种才反过来 —— 它没有手写的取值器）；
          - 所以体里没有 `get` 的话这一格说不通（类型没处抄），那一句在调用方。 */
-    if (mods.length === 0) return { kind: 'field', name, sp, ptrs: d.items[1], plain: true };
+    if (mods.length === 0) {
+      return {
+        kind: 'field', name, sp, ptrs: d.items[1], plain: true,
+        init: ini0 === null ? null : ini0.items[2],
+      };
+    }
     this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条 —— 字段要写 \`autoget\`、事件要写`
       + ' `bindable event`（prop_full.rst:34）');
     return null;
@@ -4397,15 +4425,28 @@ class JncLower {
     // （prop_autoget.rst:26）。
     const mem = this.propMemName.get(full);
     const name = `${full}$${mem !== undefined && mem.store !== null ? mem.store : 'm_value'}`;
+    /* 那格字段的**就地初值**（第一百八十刀）。两种落法与"那格存储在哪儿"是一对：
+         - 顶层的属性 -> 生成的是一格模块级变量，初值排进 `globalInit`（发的那一步在 autoProps 里，
+           与一格普通的 `int g = 5;` 走同一条 `globalValue`）；
+         - 成员属性 -> 生成的是类里的一格字段，初值排进 `fieldInits` —— 也就是**字段默认值**那条
+           现成的路（第七十八刀）：合成的 construct 由它决定要不要发，所以这一笔必须在这儿记，
+           不能等到发的那一步（那时 synthFI 早就算完了）。 */
+    const ini = mem !== undefined && mem.init !== undefined ? mem.init : null;
     if (cls === null) {
       if (this.globals.has(name)) return this.err(d, `模块级变量 '${shown(name)}' 声明了两次`);
       this.globals.set(name, t);
-      this.autoProps.push({ full, name, cls: null, type: t });
+      this.autoProps.push({ full, name, cls: null, type: t, init: ini });
       return name;
     }
     const fs = this.ownFields.get(cls);
     if (fs === undefined) return this.err(d, `'${shown(cls)}' 的字段表还没有 —— autoget 那一格加不进去`);
     fs.push({ name, type: t });
+    if (ini !== null) {
+      const list = this.fieldInits.get(cls);
+      const one = { name, expr: ini, node: ini };
+      if (list === undefined) this.fieldInits.set(cls, [one]);
+      else list.push(one);
+    }
     this.autoProps.push({ full, name, cls, type: t });
     return name;
   }
