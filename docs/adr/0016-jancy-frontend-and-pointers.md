@@ -9126,7 +9126,36 @@ property g_prop {
   现在停在 `完整声明式的属性 'g_prop' 里两个 set（要重载决议）`。那是 jancy 明写支持的
   （prop_full.rst:15 的 "overloaded setters"，例子里 `set(int x)` 与 `set(double x)` 各一格），
   而这一层的属性一个名字只记一格存值器 —— 要收它得让"写属性"这一处走重载决议
-  （与第八十刀那套 `pickOverload` 是同一套机器，只是挂在属性的 set 上）。这是下一刀。
+  （  与第八十刀那套 `pickOverload` 是同一套机器，只是挂在属性的 set 上）。这是下一刀。
+
+### 第一百八十一刀：属性的**存值器重载**
+
+上一刀量出来的下一格，兑掉。jancy 明写支持（prop_full.rst:15 的 "overloaded setters"，例子里
+`set(int x)` 与 `set(double x)` 各一格），而这一层一个属性只记一格存值器 —— 第二个 `set` 先前
+是一句"要重载决议"。
+
+落法与别处的重载**同一套**，一个字的新机器都没长：
+
+- 名字上加后缀：`p$set` / `p$set$o2` / …（与宿主面那条 `_o2` 是同一个主意，第一百七十一刀）。
+  第一格收的是**属性自己的类型**（prop.rst:16 那句），后面几格收别的 —— 记在 `pi.sets` 上。
+- 挑哪一条在**写属性**那一处按右边的类型排（`propSet` 里那段 `argCost`，与第八十刀的
+  `pickOverload` / 第一百七十一刀的 `hostPick` 逐条一样）：问不出右边的类型的**明说不收**
+  （绝不猜），同分的也明说，两格收同一个类型的在声明处就拒（那两格在任何右边上都分不出来）。
+- `get` 照旧只许一个（prop.rst:15 那句 "a single getter"）—— 而且那句诊断从"还不收"改成了
+  **普通错**：jancy 那儿它本来就是错的。
+
+两种写法都收，判据在 `cases/153-propsetovl.jnc` 里各一格：体里直接带体的那一种，与体里只有
+原型、体写在外面的那一种（`void g_q.set(bool x) { … }` —— prop_full.rst:37 那句 out-of-line）。
+尺子 `/tmp/c160.c` 把"挑哪一条"按类型写在调用点上 —— 那正是这一层做的事（编译期挑）。
+`bad/propfull-overload` 退役。
+
+- 腿：`node tests/jnc/run.js` 284/0。
+- 逐份那张榜：**三个数一起往对的方向动**——lowered `124 -> 126`（+2）、
+  clean `191 -> 193`（+2）、`(文件, 拦路项)` 对 `4394 -> 4386`（−8）。
+- 量出来的下一格：`samples/jnc/31_FullPropertyDecl.jnc` 从第 30 行推进到第 34 行 ——
+  `void update() { … }`，属性体里的**帮手方法**（prop_full.rst:15 那句 "helper methods"）。
+  那一格与这三刀是同一个家族：属性体是一层命名空间，里头能放的东西比我们收的多。
+
 
 ## 后果与代价
 

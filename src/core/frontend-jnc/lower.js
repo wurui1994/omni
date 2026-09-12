@@ -4010,7 +4010,10 @@ class JncLower {
         const d0 = ds0.length === 1 ? ds0[0] : null;
         if (d0 !== null && bareAccessor(d0)) {
           const k0 = specialCore(d0);
-          if (accs.some((a) => a.kind === k0) || hostAcc[k0] === true) {
+          /* 只有原型的第二个 `set`（第一百八十一刀）：也是**收**的 —— 体写在外面
+             （`void g_prop.set(double x) { … }`，prop_full.rst:37 那句 out-of-line）。
+             `get` 照旧只许一个。 */
+          if (k0 !== 'set' && (accs.some((a) => a.kind === k0) || hostAcc[k0] === true)) {
             this.nope(m, `完整声明式的属性 '${nm}' 里两个 ${k0}（要重载决议）`);
             return [];
           }
@@ -4039,7 +4042,10 @@ class JncLower {
           + '`autoget` 的字段 / `bindable` 的事件（prop_full.rst:34）');
         return [];
       }
-      if (accs.some((a) => a.kind === kind)) {
+      /* 存值器的重载（第一百八十一刀）：jancy 明写支持（prop_full.rst:15 的 "overloaded
+         setters"），所以体里的第二个 `set` 是**收**的 —— 挑哪一条在写属性那一处按右边的
+         类型排。`get` 照旧只许一个（prop.rst:15 那句 "a single getter"）。 */
+      if (kind !== 'set' && accs.some((a) => a.kind === kind)) {
         this.nope(m, `完整声明式的属性 '${nm}' 里两个 ${kind}（要重载决议）`);
         return [];
       }
@@ -7493,18 +7499,51 @@ class JncLower {
       return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
         + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
     }
+    /* 存值器的重载（第一百八十一刀）：按**右边的类型**挑一条，规矩与第八十刀那套 pickOverload
+       逐条一样 —— 问不出右边的类型的明说不收（绝不猜），同分的也明说。挑出第 0 格就是那个
+       不带后缀的名字。 */
+    let sN = s;
+    let want = pi.type;
+    if (pi.sets !== undefined && pi.sets.length > 1) {
+      const ct = this.cheapTy(valNode);
+      if (ct === null) {
+        return this.nope(n, `写属性 '${shown(pn)}' —— 它有 ${pi.sets.length} 格存值器，`
+          + '而右边的类型这一层还得先降一遍才知道（重载要按类型挑，见 ADR-0016 第八十刀）');
+      }
+      let best = -1;
+      let bestScore = 0;
+      let tie = false;
+      for (let i = 0; i < pi.sets.length; i++) {
+        const sc = this.argCost(ct.ty, pi.sets[i], ct.lit);
+        if (sc === 0) continue;
+        if (sc === bestScore) tie = true;
+        if (sc > bestScore) { bestScore = sc; best = i; tie = false; }
+      }
+      if (best === -1) {
+        return this.err(n, `属性 '${shown(pn)}' 那 ${pi.sets.length} 格存值器`
+          + `（${pi.sets.map(tyName).join(' / ')}）没有一格收得下 ${tyName(ct.ty)}`);
+      }
+      if (tie) {
+        return this.nope(n, `属性 '${shown(pn)}' 的那几格存值器在这一句上分不出来`
+          + `（${tyName(ct.ty)} 对两格一样合得上）`);
+      }
+      if (best > 0) {
+        sN = `${pn}$set$o${best + 1}`;
+        want = pi.sets[best];
+      }
+    }
     const sf = this.propSelf(n, pn, pi, self);
     if (sf === null) return null;
     const ix = this.propIndexArgs(n, pn, pi, subs);
     if (ix === null) return null;
-    let v = this.expr(valNode, pi.type);
+    let v = this.expr(valNode, want);
     if (v === null) return null;
-    if (isInt(v.type) && isInt(pi.type)) v = intConv(v, pi.type);
-    if (!sameTy(v.type, pi.type)) {
-      return this.err(n, `属性 '${shown(pn)}' 是 ${tyName(pi.type)}，`
+    if (isInt(v.type) && isInt(want)) v = intConv(v, want);
+    if (!sameTy(v.type, want)) {
+      return this.err(n, `属性 '${shown(pn)}' 是 ${tyName(want)}，`
         + `这儿给的是 ${tyName(v.type)}`);
     }
-    return [`${pad}(expr (call ${s}${sf}${ix} ${v.code}))`];
+    return [`${pad}(expr (call ${sN}${sf}${ix} ${v.code}))`];
   }
 
   /**
@@ -7611,9 +7650,13 @@ class JncLower {
    * 第五十二刀），于是 `obj.p` 读出来就是一句 `(call C$p$get obj)`。
    *
    * 规矩来自 prop.rst:15-17："Each property has a single getter and optionally one or more
-   * setters" —— 取值器只有一个、回属性的类型；存值器收一个实参、类型是属性的类型；
-   * 一个 setter 都没有的就是 **const 属性**。存值器的**重载** jancy 收，这一层一个名字
-   * 一格函数，所以第二个 `set` 明说不收。
+   * setters" —— 取值器只有一个、回属性的类型；一个 setter 都没有的就是 **const 属性**。
+   *
+   * 存值器的**重载**（第一百八十一刀）：jancy 明写支持（prop_full.rst:15 的 "overloaded
+   * setters"，例子里 `set(int x)` 与 `set(double x)` 各一格）。这一层的落法与别处的重载同一套：
+   * 名字上加后缀（`p$set` / `p$set$o2` / …，与宿主面那条 `_o2` 是同一个主意），挑哪一条在
+   * 写属性那一处按右边的类型排（`propSet` 里那段 argCost，与第八十刀的 pickOverload 同一套机器）。
+   * 第一格存值器收的是**属性自己的类型**（那是 prop.rst:16 那句），后面几格收别的类型。
    */
   propSig(n, info, ps) {
     if (info.name === '') return this.err(n, "'get' / 'set' 前面要写属性的名字");
@@ -7621,8 +7664,16 @@ class JncLower {
     if (pn === null) return this.err(n, `没有这个属性：'${shown(info.name)}'`);
     const pi = this.props.get(pn);
     const full = `${pn}$${info.special}`;
+    let sym = full;
+    let ovl = false;                       // 这一格是第二个及以后的存值器
     if (this.fns.has(full)) {
-      return this.nope(n, `${shown(pn)} 的第二个 '${info.special}'（属性的存值器重载要重载决议）`);
+      if (info.special !== 'set') {
+        return this.err(n, `${shown(pn)} 的第二个 'get'（属性只有一个取值器，prop.rst:15）`);
+      }
+      if (pi.sets === undefined) pi.sets = [pi.type];
+      sym = `${pn}$set$o${pi.sets.length + 1}`;
+      if (this.fns.has(sym)) return this.err(n, `${shown(pn)} 的这一格 'set' 重复了`);
+      ovl = true;
     }
     let ret = J_VOID;
     // 索引属性（第七十刀）：两个函数最前面那几个形参是**下标**，个数与类型照声明里那一串查
@@ -7655,21 +7706,29 @@ class JncLower {
         return this.err(n, k === 0 ? `'${shown(pn)}.set()' 要恰好一个形参`
           : `'${shown(pn)}.set()' 要 ${k + 1} 个形参（那 ${k} 个下标，再加要存的值）`);
       }
-      if (!sameTy(ps[k].type, pi.type)) {
+      if (!sameTy(ps[k].type, pi.type) && !ovl) {
         return this.err(n, `'${shown(pn)}.set()' 收的是 ${tyName(ps[k].type)}，`
           + `而属性 '${shown(pn)}' 是 ${tyName(pi.type)}`);
+      }
+      /* 重载那几格收别的类型（第一百八十一刀）：记进 pi.sets，写属性那一处按它排。
+         与第一格收同一个类型的明说不收 —— 那两条在任何右边上都分不出来。 */
+      if (ovl) {
+        if (pi.sets.some((t) => sameTy(t, ps[k].type))) {
+          return this.err(n, `'${shown(pn)}' 的两格 'set' 都收 ${tyName(ps[k].type)}`);
+        }
+        pi.sets.push(ps[k].type);
       }
       pi.set = true;
     }
     if (pi.cls !== null) {
       ps.unshift({ name: 'this', type: tClass(pi.cls, false), formals: null });
-      this.methods.set(full, pi.cls);
+      this.methods.set(sym, pi.cls);
     }
-    info.name = full;
+    info.name = sym;
     // 属性是一层命名空间（第七十一刀，prop_full.rst:15）：记下"这个函数属于哪格属性"，
     // 体降下来时靠它把 `this.ns` 挪进去 —— autoget 生成的 `m_value` 就那样查得着。
-    this.propOf.set(full, pn);
-    this.fns.set(full, sigOf(ps, ret));
+    this.propOf.set(sym, pn);
+    this.fns.set(sym, sigOf(ps, ret));
     return { info, ps, isMain: false };
   }
 

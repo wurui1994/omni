@@ -1,0 +1,65 @@
+// 属性的**存值器重载**（第一百八十一刀）。jancy 明写支持 ——
+//
+//     property g_prop {
+//         …
+//         set(int x) { … }
+//         set(double x); // overloaded setter
+//                                      —— prop_full.rst:15 那句 "overloaded setters" 与它的例子
+//
+// 这一层的落法与别处的重载同一套：名字上加后缀（`p$set` / `p$set$o2`，与宿主面那条 `_o2` 是
+// 同一个主意），挑哪一条在**写属性**那一处按右边的类型排（argCost，与第八十刀的 pickOverload
+// 同一套机器）—— 问不出右边的类型的明说不收，同分的也明说。第一格存值器收的是属性自己的
+// 类型（prop.rst:16），后面几格收别的。
+//
+// 两种写法都在这一份里：体里直接带体的那一种（g_p），与体里只有原型、体写在外面的那一种
+// （g_q —— prop_full.rst:37 那句 out-of-line）。
+property g_p {
+	int m_v;
+
+	int get() {
+		return m_v;
+	}
+
+	void set(int x) {
+		printf("p set int %d\n", x);
+		m_v = x;
+	}
+
+	void set(double x) {
+		printf("p set double %f\n", x);
+		m_v = (int)x;
+	}
+}
+
+property g_q {
+	int m_v;
+
+	int get() {
+		return m_v;
+	}
+
+	void set(int x);
+	void set(bool x);
+}
+
+void g_q.set(int x) {
+	printf("q set int %d\n", x);
+	m_v = x;
+}
+
+void g_q.set(bool x) {
+	printf("q set bool %d\n", x);
+	m_v = x ? 100 : 0;
+}
+
+int main() {
+	g_p = 3;
+	printf("p %d\n", g_p);
+	g_p = 2.5;
+	printf("p %d\n", g_p);
+	g_q = 7;
+	printf("q %d\n", g_q);
+	g_q = true;
+	printf("q %d\n", g_q);
+	return 0;
+}

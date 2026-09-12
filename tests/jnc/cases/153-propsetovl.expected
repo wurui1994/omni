@@ -1,0 +1,8 @@
+p set int 3
+p 3
+p set double 2.500000
+p 2
+q set int 7
+q 7
+q set bool 1
+q 100
