@@ -1,0 +1,1 @@
+pragma 'ThinPointers' —— 它把后面每一格 `*` 都当 `thin` 写（m_pointerModifiers，Declarator.llk:405）。收下不看会给错答案：thin 指针在这一层是一个字、fat 是三个字（ADR-0024），"转成 thin 要写在 `unsafe { … }` 里"那条界正是靠这个区别立的

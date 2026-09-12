@@ -1,0 +1,46 @@
+// 顶层的 `pragma(名字, 值)`（第二百一十六刀）。语料里 25 份文件、32 处，词只有三个：
+// `Alignment`（19 处，io_SocketAddress.jnc:193 那一族的协议头）、`ExposedEnums`（4，
+// 81_Enums.jnc:54）、`ThinPointers`（2，那一个照旧拦着，见 bad/pragma-thinpointers.jnc）。
+//
+// jancy 那儿一条 pragma 改的是**从这一句往后**那些声明的编译配置（PragmaConfig，
+// jnc_ct_PragmaMgr.cpp:47-90），所以它落在一遍**按声明序**走的 pragmaScan 里，排在
+// typeName 之前 —— `ExposedEnums` 管的正是"枚举的成员往哪一层登记"。
+//
+// `Alignment` 收下不看：它只动字段之间填多少字节的空（同处:69-78），而方言这一层没有字节
+// 布局（一格就是 8 个字节，字段之间本来就没有"空"这回事）。能看出对齐差别的每一条路
+// （sizeof / offsetof / string_t.m_p / 按字节走的指针）这一层本来就全是拒的，所以忽略它
+// **不可能**给出错答案。代价明写在 lower.js 那段注里：方言哪天认了字节布局，这个词要跟
+// sizeof / offsetof 一起落。
+//
+// `ExposedEnums` 是**真落的**：这一格这一层早就有 —— 无名枚举就是这么做的（第九十六刀的
+// exposedMems）。开着 pragma 时声明的带名字枚举记一笔，enumName / enumDecl 那两遍把它当
+// "无名那一种"待。`default` 是回到默认，而默认是关着的（PragmaConfig 的 m_enumFlags 一开张
+// 就是 0）—— 所以 Shade 那一格还得写全名。
+//
+// 判据是手写的 C 双胞胎 /tmp/c174.c：印 `1 2 1 2 7`。
+pragma(Alignment, 1);
+pragma(ExposedEnums, true);
+
+enum Color {
+	Red = 1,
+	Green,
+}
+
+pragma(ExposedEnums, default);
+
+enum Shade {
+	Dark = 7,
+}
+
+struct S {
+	char m_a;
+	long m_b;
+}
+
+int main() {
+	S s;
+	s.m_a = 1;
+	s.m_b = 2;
+	printf("%d %d %d %d %d\n", s.m_a, s.m_b, Red, Green, Shade.Dark);
+	return 0;
+}

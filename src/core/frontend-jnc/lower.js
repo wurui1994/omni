@@ -1042,6 +1042,9 @@ class JncLower {
     /* 无名枚举（第九十六刀）：那一格声明的节点 -> 给它编的名字（`$anon<序号>`）。按节点记 ——
        名字那一遍与体那一遍要拿到同一个。 */
     this.anonEnum = new Map();
+    /* `pragma(ExposedEnums, true)` 开着时声明的那些**带名字的**枚举（第二百一十六刀）：
+       按节点记，enumName / enumDecl 那两遍把它们当"无名那一种"待（成员漏到外面那层）。 */
+    this.exposedEnums = new Set();
     /* 无名枚举**漏到外面那层命名空间**的那些成员（第九十六刀，jancy 那边叫 exposed）：
        外面看到的那个名字 -> { en, mn }。查名时在"未声明的变量"之前多问这一张。 */
     this.exposedMems = new Map();
@@ -2897,6 +2900,9 @@ class JncLower {
        （它不产出类型），而它合成出来的那些实例底下每一遍都要看见。与 expandExtensions
        正好是一对（那一个要查得着目标类型，所以在 typeName 之后）。 */
     items = this.expandTemplates(items);
+    /* 顶层的 pragma（第二百一十六刀）排在这儿：它按**声明序**改后面那些声明的编译配置，
+       而 `ExposedEnums` 管的正是"枚举的成员往哪一层登记"—— 所以必须在 typeName 之前。 */
+    this.pragmaScan(items);
     // 类型的名字先坐下（第十七刀）：`Node* m_next` 要在自己的体里查得着 Node。
     for (const e of items) {
       this.ns = e.ns;
@@ -3197,12 +3203,97 @@ class JncLower {
 
   /* -------------------------------------------------------------- 顶层 */
 
+  /**
+   * 顶层的 `pragma(名字, 值)`（第二百一十六刀）。语料里 25 份文件、32 处，词只有三个：
+   * `Alignment`（19 处）、`ExposedEnums`（4）、`ThinPointers`（2）。
+   *
+   * jancy 那儿一条 pragma 改的是**从这一句往后**那些声明的编译配置（`PragmaConfig`，
+   * jnc_ct_PragmaMgr.cpp:47-90），所以它必须在**按声明序**走的一遍里收 —— 这一遍就是它。
+   * 排在 typeName 之前：`ExposedEnums` 管的正是枚举的名字往哪一层登记。
+   *
+   * 逐词的账：
+   *
+   *   - `Alignment`（`pragma(Alignment, 1)`，io_SocketAddress.jnc:193 那一族的协议头）——
+   *     它只动 `m_fieldAlignment`，也就是字段之间**填多少字节的空**
+   *     （jnc_ct_PragmaMgr.cpp:69-78）。方言这一层没有字节布局：一格就是 8 个字节，
+   *     字段之间本来就没有"空"这回事。所以**收下不看**，而且这不是"少做一件事"——
+   *     能看出对齐差别的每一条路（`sizeof`、`offsetof`、`string_t.m_p`、按字节走的指针）
+   *     这一层本来就全是拒的，所以忽略它**不可能**给出错答案。
+   *     **代价明写**：哪天方言认了字节布局，这个词要跟 `sizeof` / `offsetof` 一起落。
+   *   - `ExposedEnums`（`pragma(ExposedEnums, true)`，81_Enums.jnc:54）—— 它让后面那些
+   *     **带名字的**枚举也把成员漏到外面那层（`EnumTypeFlag_Exposed` ->
+   *     `exposeEnumConsts`，jnc_ct_Parser.cpp:2732-2734）。这一格这一层早就有：无名枚举
+   *     就是这么做的（第九十六刀的 `exposedMems`）。所以这个词是**真落的**：把开着 pragma
+   *     时声明的枚举节点记一笔，enumName / enumDecl 那两遍把它当"无名那一种"待。
+   *   - `ThinPointers` —— 它把后面每一格 `*` 都当 `thin` 写（`m_pointerModifiers`，
+   *     Declarator.llk:405）。收下不看**会给错答案**：thin 指针在这一层是一个字、fat 是
+   *     三个字（ADR-0024），而"转成 thin 要写在 unsafe 里"那条界（第几刀那堵
+   *     `bad/thin-outside-unsafe`）正是靠这个区别立的。所以照旧拦着，话说清。
+   *   - `Regex*` 那九个 —— 它们配的是 regex switch 那台 DFA（第二百一十四刀那两条）。
+   */
+  pragmaScan(items) {
+    const saveNs = this.ns;
+    let exposed = false;
+    for (const e of items) {
+      const it = e.it;
+      if (!isList(it)) continue;
+      if (head(it) !== 'pragma') {
+        if (exposed && head(it) === 'type-decl' && isList(it.items[1]) && head(it.items[1]) === 'enum') {
+          this.exposedEnums.add(it.items[1]);
+        }
+        continue;
+      }
+      this.ns = e.ns;
+      const args = this.flat(it.items[1]);
+      const nm = args.length > 0 && isList(args[0]) && head(args[0]) === 'name' && isAtom(args[0].items[1])
+        ? args[0].items[1].value : null;
+      if (nm === null) { this.err(it, '认不出的 pragma 名字'); continue; }
+      const v = args.length > 1 ? this.pragmaVal(args[1]) : { k: 'bool', v: true };
+      if (nm === 'Alignment') continue;                   // 收下不看，理由见上面那段注
+      if (nm === 'ExposedEnums') {
+        if (v === null) { this.err(it, `pragma 'ExposedEnums' 的值认不出来（收 true / false / default）`); continue; }
+        // `default` 那一格是"回到默认"，而 ExposedEnums 的默认是关着的
+        // （PragmaConfig 的 m_enumFlags 一开张就是 0，jnc_ct_PragmaMgr.cpp:84-85）。
+        exposed = v.k === 'default' ? false : v.v === true;
+        continue;
+      }
+      if (nm === 'ThinPointers') {
+        this.nope(it, "pragma 'ThinPointers' —— 它把后面每一格 `*` 都当 `thin` 写"
+          + '（m_pointerModifiers，Declarator.llk:405）。收下不看会给错答案：thin 指针在这一层'
+          + '是一个字、fat 是三个字（ADR-0024），"转成 thin 要写在 `unsafe { … }` 里"那条界'
+          + '正是靠这个区别立的');
+        continue;
+      }
+      if (nm.startsWith('Regex')) {
+        this.nope(it, `pragma '${nm}' —— 它配的是 regex switch 那台 DFA，而那件事还没落下来`);
+        continue;
+      }
+      this.nope(it, `pragma '${nm}'（这一层认得 Alignment 与 ExposedEnums）`);
+    }
+    this.ns = saveNs;
+  }
+
+  /** 一格 pragma 的实参：`default` / `true` / `false` / 一个整数。认不出来回 null。 */
+  pragmaVal(v) {
+    if (isAtom(v)) {
+      const n = Number(v.value);
+      return Number.isFinite(n) ? { k: 'num', v: n } : null;
+    }
+    if (!isList(v)) return null;
+    const h = head(v);
+    if (h === 'pragma-default') return { k: 'default' };
+    if (h === 'true') return { k: 'bool', v: true };
+    if (h === 'false') return { k: 'bool', v: false };
+    return null;
+  }
+
   topItem(item) {
     if (!isList(item)) return this.err(item, '认不出的顶层条目');
     const h = head(item);
     if (h === 'empty-stmt') return null;            // 光一个分号
     if (h === 'fn-def') return this.fnDef(item);
     if (h === 'typedef') return null;               // 已经在前面那一遍收过了（第三十八刀）
+    if (h === 'pragma') return null;                // pragmaScan 那一遍收过了（第二百一十六刀）
     return this.nope(item, `顶层的 '${h}'`);
   }
 
@@ -5467,7 +5558,11 @@ class JncLower {
       return this.err(n, `类型名 '${shown(name)}' 重复定义`);
     }
     this.enums.set(name, {
-      base: J_I32, members: new Map(), bits: key === 'bitflag enum', anon: this.anonEnum.has(n),
+      base: J_I32, members: new Map(), bits: key === 'bitflag enum',
+      /* 成员漏到外面那层的两种（第九十六刀 + 第二百一十六刀）：无名的那一种天生如此
+         （jancy: "unnamed enums imply 'exposed' anyway"，jnc_ct_EnumType.cpp:410），
+         带名字的那一种要 `pragma(ExposedEnums, true)` 开着才是。 */
+      anon: this.anonEnum.has(n) || this.exposedEnums.has(n),
     });
     return null;
   }

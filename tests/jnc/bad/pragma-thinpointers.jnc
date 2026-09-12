@@ -1,0 +1,17 @@
+// `pragma(ThinPointers, true)`（第二百一十六刀立的界）。语料里 2 处。
+//
+// 同一刀把 `Alignment` 收下不看了（它只动字节填空，而方言这一层没有字节布局），可这一个
+// **不能**同样处理：它把后面每一格 `*` 都当 `thin` 写（m_pointerModifiers，
+// Declarator.llk:405 那句 addPointerPrefix）。thin 指针在这一层是**一个字**、fat 是三个字
+// （ADR-0024），而"转成 thin 要写在 `unsafe { … }` 里"那条界（bad/thin-outside-unsafe.jnc）
+// 正是靠这个区别立的 —— 忽略这个词就是把一整片 unsafe 的写法悄悄放过去。
+//
+// 要收它得连"这一段声明里的指针默认是 thin"一起落，那是自己一刀。
+pragma(ThinPointers, true);
+
+int main() {
+	int x = 7;
+	int* p = &x;
+	printf("%d\n", *p);
+	return 0;
+}

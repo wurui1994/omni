@@ -10353,6 +10353,49 @@ if (sp.stat) { this.globalDecl(m); continue; }
   lowered `156`、clean `226` 都没动 —— 一份都没因此走通。
 - 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有静态字段）。
 
+### 第二百一十六刀：顶层的 pragma（顺手推翻第一百〇八刀那一节的一句话）
+
+榜上 `顶层的 '…'` 28 份文件，按词数一遍是 `pragma` 32 处 / 25 份、`using-namespace` 3。
+pragma 那一族里词只有三个：`Alignment` 19、`ExposedEnums` 4、`ThinPointers` 2。
+
+jancy 那儿一条 pragma 改的是**从这一句往后**那些声明的编译配置（`PragmaConfig::setPragma`，
+jnc_ct_PragmaMgr.cpp:47-90），所以它必须在一遍**按声明序**走的口子里收。新添的
+`pragmaScan(items)` 就是那一遍，排在 `typeName` 之前 —— `ExposedEnums` 管的正是"枚举的成员
+往哪一层登记"。
+
+- `Alignment` —— **收下不看**。**这一句推翻了 `bad/pragma.jnc` 里从第一百〇八刀起写着的
+  理由**。那份注写的是"收下不看 = 按默认对齐算偏移 = 字段的偏移与 jancy 那边不一样，读写就都
+  错位 —— 那是安静的错答案"。这句话不成立：这一层从来不算**字节偏移** —— 字段是按**名字**取的
+  （`(pfield p m_n)`），一格就是 8 个字节，字段之间根本没有"填空"这回事。pragma 改不了
+  `s.m_n` 指的是哪一格。真正能看出对齐差别的每一条路（`sizeof`、`offsetof`、
+  `string_t.m_p`、按字节走的指针）这一层**本来就全是拒的**，所以忽略它**不可能**给出错答案。
+  先前那句话把"这一层的布局与 jancy 不同"（一直如此，与 pragma 无关）说成了"pragma 造成的
+  错位"。**代价照旧明写**：方言哪天认了字节布局，这个词要跟 `sizeof` / `offsetof` 一起落。
+- `ExposedEnums` —— **真落的**。它让后面那些**带名字的**枚举也把成员漏到外面那层
+  （`EnumTypeFlag_Exposed` -> `exposeEnumConsts`，jnc_ct_Parser.cpp:2732-2734）。这一格这一层
+  早就有：无名枚举就是这么做的（第九十六刀的 `exposedMems`；jancy 自己也说
+  "unnamed enums imply 'exposed' anyway"，jnc_ct_EnumType.cpp:410）。所以落法是把开着 pragma
+  时声明的枚举节点记一笔（`exposedEnums`），`enumName` 那一遍把它的 `anon` 位打开。
+  `default` 是回到默认，而默认是**关着**的（`m_enumFlags` 一开张就是 0）。
+- `ThinPointers` —— **照旧拦着**，话说清：它把后面每一格 `*` 都当 `thin` 写
+  （`m_pointerModifiers`，Declarator.llk:405）。收下不看会给错答案 —— thin 指针在这一层是
+  一个字、fat 是三个字（ADR-0024），而"转成 thin 要写在 `unsafe { … }` 里"那条界
+  （`bad/thin-outside-unsafe`）正是靠这个区别立的。
+- `Regex*` 那九个（语料里没有）—— 配的是 regex switch 那台 DFA（第二百一十四刀那两条）。
+
+判据是手写的 C 双胞胎 `/tmp/c174.c`（同一组字段、同一组枚举常量，印 `1 2 1 2 7`）。
+用例 `tests/jnc/cases/168-pragma.jnc` 三个词一起写上，还钉住 `default` 之后 `Shade.Dark`
+**仍要写全名**这一半。墙 `bad/pragma-thinpointers.jnc`。**退了 `bad/pragma`** —— 它的前提
+（上面那段）是错的。
+
+- 腿：`node tests/jnc/run.js` 303/0（新增 `cases/168-pragma` 与 `bad/pragma-thinpointers`，
+  退了 `bad/pragma`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `156 -> 158`（+2）、clean `226 -> 229`（+3）、
+  `(文件, 拦路项)` 对 `4034 -> 4008`（−26）。`顶层的 '…'` 那一行 `28 -> 3`（剩下的是
+  `using-namespace`，自己一刀），新冒出来的 `pragma 'ThinPointers'` 只有 1 份。
+- 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有 pragma）。
+
+
 
 
 
