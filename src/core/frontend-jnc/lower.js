@@ -2101,7 +2101,15 @@ class JncLower {
     const clo = self === null
       ? `(fnref ${hn})` : `(mkclo ${this.methodThunk(hn, r.cls, sig)} (var $this))`;
     const want = ps.map((p) => p.type);
-    for (const e of this.flat(s.items[1])) {
+    /* 一对括号里的**一串**事件（第二百〇五刀）：`onevent (bindingof(g_ip4),
+       bindingof(g_routerIp4))() { … }`（41_OnEventStmt.jnc:45 —— 同一个处理函数挂到好几格事件上）。
+       语法给的是 `(events-list <expr-list>)`（jnc.grammar:601），比单个那条
+       （`(events <expr>)`）多包了一层，所以要多摊一次 —— 先前那一层没摊，于是拿整个 expr-list
+       去 mcRef，报的是"onevent 里头要是一格事件"，指着别处。 */
+    const evNode = s.items[1];
+    const evList = isList(evNode) && head(evNode) === 'events-list'
+      ? this.flat(evNode.items[1]) : this.flat(evNode);
+    for (const e of evList) {
       const mc = this.mcRef(e);
       if (mc === null) continue;
       if (mc === undefined) { this.err(e, 'onevent 里头要是一格事件（或 `bindingof(属性)`）'); continue; }

@@ -1,0 +1,29 @@
+// `onevent` 里一对括号里的**一串**事件（第二百〇五刀）：`onevent (e1, e2)() { … }` ——
+// 同一个处理函数挂到好几格事件上（41_OnEventStmt.jnc:45 那一句的形状）。
+//
+// 语法给的是 `(events-list <expr-list>)`（jnc.grammar:601），比单个那条（`(events <expr>)`）
+// 多包了一层。先前这一层没多摊那一次，于是拿整个 expr-list 去 mcRef，报的是
+// "onevent 里头要是一格事件（或 `bindingof(属性)`）"—— 指着别处：里头那两格都是好好的事件。
+//
+// 判据是手写的 C 双胞胎 /tmp/c169.c：两格事件各触发一次、其中一格再触发一次 —— 处理函数一共
+// 跑三遍。reactor 那一套的账在第八十五刀那一节（这一层绑的是静态超集、start 时绑一次）。
+long g_hits;
+
+event g_onA();
+event g_onB();
+
+reactor g_r {
+	onevent (g_onA, g_onB)() {
+		g_hits = g_hits + 1;
+		printf("hit %d\n", g_hits);
+	}
+}
+
+int main() {
+	g_r.start();
+	g_onA();
+	g_onB();
+	g_onA();
+	printf("hits %d\n", g_hits);
+	return 0;
+}

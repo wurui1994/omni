@@ -9967,6 +9967,29 @@ jancy 那边整个插件是**一个模块**（那一批文件一起编），所�
 与第一百四十九刀记下的 `case 标签算不出来`、第一百八十一刀那格 `写属性…存值器没有定义`
 是同一类账：逐份编那张榜上的 `E` 行要先问一句"这个名字在别的文件里吗"。
 
+### 第二百〇五刀：`onevent` 里一对括号里的一串事件
+
+`onevent 里头要是一格事件（或 bindingof(属性)）` 是两份文件的唯一拦路项。语料里的原样：
+
+```jnc
+onevent (bindingof(g_ip4), bindingof(g_routerIp4))() {   // 41_OnEventStmt.jnc:45
+    …
+}
+```
+
+同一个处理函数挂到**好几格**事件上。单个那种（`onevent bindingof(g_useDhcp)()`，同处:36）
+早就通了 —— 差的只是**多摊一层**：语法给的是 `(events-list <expr-list>)`（jnc.grammar:601），
+比单个那条（`(events <expr>)`）多包了一层，而那一处只摊了一次，于是拿**整个 expr-list**
+去 `mcRef`，报的是"里头要是一格事件"。那句话指着别处：里头那两格都是好好的事件。
+
+判据在 `tests/jnc/cases/162-oneventlist.jnc`（C 双胞胎 `/tmp/c169.c`）：两格事件各触发一次、
+其中一格再触发一次 —— 处理函数一共跑三遍。
+
+- 腿：`node tests/jnc/run.js` 289/0（新增 `cases/162-oneventlist`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `150 -> 152`（+2，`41_OnEventStmt.jnc` 与 `test/jnc/test03.jnc`）、
+  `(文件, 拦路项)` 对 `4279 -> 4277`、clean `222` 没动（那两份本来就只剩这一条 `E`）；
+  一起编那张榜 `42`、理由 `22` 没动。
+
 
 
 ## 后果与代价
