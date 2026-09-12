@@ -1,1 +1,1 @@
-原型 'twice' 与它那个定义的签名对不上
+原型 'twice' 与它那个定义只有返回类型不同（jancy 那句 "conflicting return types"）

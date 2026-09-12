@@ -5103,7 +5103,23 @@ class JncLower {
               + '还没有收进候选（见 ADR-0016 第一百四十四刀那一段）');
             continue;
           }
-          this.err(dcl, `原型 '${shown(fn)}' 与它那个定义的签名对不上`);
+          /* **形参不一样**就不是"签名对不上"（第二百〇八刀）：那是同名那一族里的**另一条**，
+             它的体在宿主那边。类里那一格第一百八十六刀已经收了（方言名 `Owner$m` 与 C 符号
+             `Owner_m` 是两个字符串，不撞），可**顶层**这一格撞名：体在宿主的那一条，它的方言名
+             就是那个 C 符号（`(cabi transmit …)`），而带体的那一条在方言里也叫 `transmit`。
+             一个模块里同一个名字放不下两格 —— 那是方言那一层的界，不是这份源码写错了。
+             真正"签名对不上"的只有一种：形参一模一样、只有返回类型不同（jancy 那句
+             "conflicting return types"）。 */
+          const sameArgs = have.params.length === ps.length
+            && have.params.every((t, i) => sameTy(t, ps[i].type));
+          if (!sameArgs) {
+            this.nope(dcl, `原型 '${shown(fn)}' 是同名那一族里的另一条（它的体在宿主那边），`
+              + '而顶层这一格两边在方言里会撞同一个名字 —— 体在宿主的那一条的方言名就是那个 '
+              + 'C 符号（见 ADR-0016 第二百〇八刀那一段）');
+            continue;
+          }
+          this.err(dcl, `原型 '${shown(fn)}' 与它那个定义只有返回类型不同（jancy 那句 `
+            + '"conflicting return types"）');
         }
         continue;
       }
