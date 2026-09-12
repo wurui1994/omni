@@ -10219,6 +10219,54 @@ PtrTypeFlag_Volatile) != 0)`（同文件:208）。不改类型、不改布局、
   它一个"，先前那句话把这个判断盖住了。
 - 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有这四个词）。
 
+### 第二百一十三刀：顶层带名字的 union
+
+选题是顺着榜首那一行（`没有这个类型：'…'`，258 份）往下摸出来的。把那 258 份里报出来的名字
+数了一遍：`doc.Storage` 248 处、`log.Representation` 179、`doc.PluginHost` 131、
+`log.Writer` 106、**`io.SocketAddress` 95**……前面几个都是"这一份文件自己没有一句 import、
+它本来是整批一起编的一片"（与第 119 行 `没有这个基类` 同一笔口径账，56 份文件连一句 import
+都没有）。可 `io.SocketAddress` 不是 —— io_Socket.jnc:12 明明写着
+`import "io_SocketAddress.jnc"`，那一份就在旁边。翻过去才看见原因：
+
+```
+union SocketAddress {          // io_SocketAddress.jnc:403
+```
+
+它是一格**带名字的 union**，先前落在 `'union'（只收 struct 与 class）` 那一句上。语料里这种
+声明只有 5 处（io_SocketAddress.jnc:97 / :154 / :403、SerialTapPro.jnc:64、test19.jnc:27），
+可名字被用出去 95 次。
+
+落法是把第一百一十刀（结构体里的匿名 union）那一整套借过来 —— 一个字节的新机器都不用造：
+这一层的字段表是**摊平**的，"它们共用一段字节"只体现在发给方言的那一句里（`uni` 相同的一串
+括成 `(union …)`，ADR-0027）。于是带名字的 union 就是"一格结构体，它的全部字段是同一组
+union"：`typeName` 那一遍让 `union` 也把名字坐下（进 `this.structs` / `structNodes`），
+`typeDecl` 那一遍多一支走 `unionMembers(n, false, name, 0)`、把回来的成员全打上 `uni: 'u0'`、
+再照常发 `(struct …)`。`unionMembers` 早就会接语料里那几样：`bigendian uint32_t m_i32`
+（Address_ip4）、套在里头的匿名 struct、以及那组里的位域（`uint16_t m_dataBits : 8`，
+SerialTapProBits）。
+
+jancy 那边也是同一句话：`UnionType` 从 `StructType` 派下来（jnc_ct_UnionType.h /
+jnc_ct_UnionType.cpp:22-50 的 `createFieldImpl`），差的只是 calcLayout 里每格字段的偏移都是 0。
+
+界写清两条：**union 自己带基类**不收（jancy 那句 "it's ok to inherit from structs and even
+unions"，type_class.rst:218，说的是拿 union 当基类，反过来那件事语料里一处都没有）；
+**写在结构体里**的带名字 union 照旧不收 —— 它要"结构体也是一层命名空间"，与
+`结构体里的嵌套类型` 剩下那一份同一格（`bad/union-named.jnc` 的注跟着改准了）。
+诊断里 union 从这一刀起也有自己的名字（`aggWord`，先前一律叫"结构体"）。
+
+判据是手写的 C 双胞胎 `/tmp/c172.c`（照 SerialTapPro.jnc:64 的原样：整个值一个名字、同一段
+字节的几组位另一个名字），用例 `tests/jnc/cases/166-unionnamed.jnc` 印 `8 10 3` / `14855`。
+
+- 腿：`node tests/jnc/run.js` 297/0（新增 `cases/166-unionnamed`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `155 -> 156`、clean `225 -> 226`、`(文件, 拦路项)` 对 `4037 -> 4033`（−4），
+  `'…'（只收 struct 与 class）` 那一行 7 份**整行没了**，`没有这个类型：'…'` `258 -> 253`。
+  新降下来的是 test19.jnc（它那格 union 写在命名空间里）。
+  **代价明写**：io_SocketAddress.jnc 自己还没降下来 —— 它后面还压着三件别的
+  （`union 里的成员 'm_i8'` 是**数组**成员、顶层的 `pragma`、`errorcode` 写在结构体的方法上），
+  那三件各是各的账。所以这一刀换来的是 −4 对与那 95 个名字里的一部分，不是 95 份文件。
+- 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有 union）。
+
+
 
 
 

@@ -370,6 +370,9 @@ const shown = (n) => n.replace(/\$/g, '.');
  */
 const aggCls = (k) => k === 'class' || k === 'opaque class';
 
+/** 诊断里叫它什么（第二百一十三刀起 union 也是一格带名字的类型，别都说成"结构体"）。 */
+const aggWord = (k, cls) => (cls ? '类' : k === 'union' ? '联合' : '结构体');
+
 /** `(type-decl (agg class …))` 里的那个 agg 吗（第五十二刀）。 */
 function isClassAgg(n) {
   return isList(n) && head(n) === 'agg'
@@ -5428,12 +5431,12 @@ class JncLower {
     if (head(n) !== 'agg') return null;                    // 下面那一遍报
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
     const cls0 = aggCls(key);
-    if (key !== 'struct' && !cls0) return null;
+    if (key !== 'struct' && key !== 'union' && !cls0) return null;
     const nm0 = this.qname(n.items[2]);
     if (nm0 === null) return null;
     const name = this.qual(nm0);
     if (this.structs.has(name)) {
-      return this.err(n, `${cls0 ? '类' : '结构体'} '${shown(name)}' 声明了两次`);
+      return this.err(n, `${aggWord(key, cls0)} '${shown(name)}' 声明了两次`);
     }
     this.structs.set(name, []);
     /* 结构体的基类（第一百二十五刀）要**按声明去找基类那张字段表**，而顶层的 type-decl
@@ -5611,12 +5614,42 @@ class JncLower {
     if (!isList(n) || head(n) !== 'agg') return this.nope(n, '带体的命名类型（只收 struct、class 与 enum）');
     const key = isAtom(n.items[1]) ? n.items[1].value : null;
     const cls = aggCls(key);
-    if (key !== 'struct' && !cls) return this.nope(n, `'${key}'（只收 struct 与 class）`);
+    if (key !== 'struct' && key !== 'union' && !cls) return this.nope(n, `'${key}'（只收 struct、union 与 class）`);
     const nm3 = this.qname(n.items[2]);
-    if (nm3 === null) return this.err(n, `认不出的${cls ? '类' : '结构体'}名字`);
+    if (nm3 === null) return this.err(n, `认不出的${aggWord(key, cls)}名字`);
     const name = this.qual(nm3);
     // 已经就地摊过了（第一百二十五刀：谁把它当基类，谁就先把它摊了）—— 别摊第二遍
     if (!cls && this.laidStructs.has(name)) return null;
+    /* 顶层**带名字**的 union（第二百一十三刀）。语料里只有 5 处声明
+       （io_SocketAddress.jnc:97 / :154 / :403、SerialTapPro.jnc:64、test19.jnc:27），
+       可 `io.SocketAddress` 一个名字就在 95 份文件里当类型用 —— 先前它落在
+       `'union'（只收 struct 与 class）` 那句上，于是那 95 份连带报 `没有这个类型`。
+
+       落法就是把第一百一十刀那一套**整格**借过来：这一层的字段表是摊平的，"它们共用一段
+       字节"只体现在发出去的那一句里（`uni` 相同的一串括成 `(union …)`，ADR-0027）。所以带
+       名字的 union 就是"一格结构体，它的全部字段是同一组 union" —— unionMembers 那一遍
+       连 bigendian 成员（Address_ip4 的 `bigendian uint32_t m_i32`）、套在里头的匿名 struct
+       与那组里的位域（SerialTapProBits 的 `uint16_t m_dataBits : 8`）都已经会接。
+
+       jancy 那边 `UnionType` 也是从 `StructType` 派下来的（jnc_ct_UnionType.h），差的只是
+       calcLayout 里每格字段的偏移都是 0 —— 与这儿一句话。
+
+       基类先不收：jancy 那句 "it's ok to inherit from structs and even unions"
+       （type_class.rst:218）说的是**拿 union 当基类**，"union 自己有基类"语料里一处都没有。 */
+    if (key === 'union') {
+      if (this.flat(n.items[3]).length > 0) return this.nope(n, 'union 自己带基类');
+      const uf = this.structs.get(name);
+      if (uf === undefined || uf.length > 0) return null;   // 上一遍已经报过重复了
+      const saveNs0 = this.ns;
+      this.ns = name;                                       // 体里裸写的名字从这一层查起（第一百二十四刀）
+      const ms = this.unionMembers(n, false, name, 0);
+      this.ns = saveNs0;
+      if (ms === null) return null;
+      for (const mm of ms) uf.push({ name: mm.name, type: mm.type, uni: 'u0' });
+      this.laidStructs.add(name);
+      this.decls.push(`  (struct ${name} ${unionGroups(uf).join(' ')})`);
+      return null;
+    }
     const bases = this.flat(n.items[3]);
     // 基类（第五十六刀 + 第九十四刀）。jancy 的模型是**多继承**（type_class.rst:171-174：
     // "a simple multiple inheritance model (multiple instances of shared bases -- if any)"）。

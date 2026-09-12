@@ -1,0 +1,31 @@
+// 顶层**带名字**的 union（第二百一十三刀）。语料里只有 5 处声明
+// （io_SocketAddress.jnc:97 / :154 / :403、SerialTapPro.jnc:64、test19.jnc:27），可
+// `io.SocketAddress` 这一个名字就在 95 份文件里当类型用 —— 先前它落在
+// `'union'（只收 struct 与 class）` 那一句上，那 95 份连带报"没有这个类型"。
+//
+// 落法是把第一百一十刀（结构体里的匿名 union）那一套整格借过来：这一层的字段表是**摊平**的，
+// "它们共用一段字节"只体现在发出去的那一句里（`uni` 相同的一串括成 `(union …)`，ADR-0027）。
+// 所以带名字的 union 就是"一格结构体，它的全部字段是同一组 union"。jancy 那边
+// `UnionType` 也是从 `StructType` 派下来的，差的只是每格字段的偏移都是 0。
+//
+// 形状照 SerialTapPro.jnc:64 的原样：整个值一个名字、同一段字节的几组位另一个名字
+// （第一百一十一刀的匿名 struct + 第一百一十二刀那一组里的位域，两件都已经会接）。
+// 判据是手写的 C 双胞胎 /tmp/c172.c：印 `8 10 3` 与 `14855`。
+union Bits {
+	uint16_t m_value;
+
+	struct {
+		uint16_t m_dataBits : 8;
+		uint16_t m_parity   : 4;
+		uint16_t m_stopBits : 4;
+	}
+}
+
+int main() {
+	Bits b;
+	b.m_value = 0x3a08;
+	printf("%d %d %d\n", b.m_dataBits, b.m_parity, b.m_stopBits);
+	b.m_dataBits = 7;
+	printf("%d\n", b.m_value);
+	return 0;
+}
