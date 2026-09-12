@@ -5615,7 +5615,9 @@ class JncLower {
         this.nope(m, `${cls ? '类' : '结构体'}里除字段以外的成员`);
         continue;
       }
-      const sp = this.specs(m.items[1], cls);
+      /* `errcOk` 给 true（第一百九十六刀）：`errorcode` 说的是返回值那件事，结构体的方法上
+         也写得（std_Guid.jnc:94）—— 写在**字段**上的由下面那一问拦。 */
+      const sp = this.specs(m.items[1], cls, [], true);
       if (sp === null) continue;
       // 成员属性（第六十九刀）：它**不是一格字段** —— 不在这儿把它挑出来就会被当成一格普通
       // 内存，那是"悄悄换了意思"。登记留给下面那一格（run 里属性那一遍，排在签名之前），
@@ -5800,6 +5802,12 @@ class JncLower {
         if (sp.virt !== null) {
           this.err(d, `字段 '${info.name}' 上写不了 '${sp.virt}'（type_class.rst:178：`
             + '那三个词是方法上的）');
+          continue;
+        }
+        /* `errorcode` 写在**字段**上（第一百九十六刀）：上面那一格给 specs 开了这个词，所以这一问
+           挪到这儿 —— 与顶层那一格（第一百四十九刀那条"没有形参表就是一格变量"）是同一句话。 */
+        if (sp.errc) {
+          this.err(d, "'errorcode' 只能写在函数上（exceptions.rst:17）");
           continue;
         }
         // 类**值**的字段：jancy 那边它是**内嵌**的（对象在父对象那一块里就地造出来，
@@ -6541,8 +6549,12 @@ class JncLower {
    *  所以它在这儿而不是在 `*` 那一侧。
    *
    *  `allowVirt` 只有方法那两处给 true（第五十七刀）：`virtual`/`override`/`abstract` 在
-   *  语法里也落在这张表上，可它只对方法有意思 —— 别的位置默认报错，免得那个词被悄悄丢掉。 */
-  specs(n, allowVirt = false, extra = []) {
+   *  语法里也落在这张表上，可它只对方法有意思 —— 别的位置默认报错，免得那个词被悄悄丢掉。
+   *
+   *  `errcOk` 从 `allowVirt` 上分出来（第一百九十六刀）：`errorcode` 说的是**返回值**这件事
+   *  （exceptions.rst:17），与"是不是类的方法"无关 —— 结构体的方法上照样写得（语料里的原样是
+   *  `struct Guid { bool errorcode parse(string_t string) thin; }`，std_Guid.jnc:94）。 */
+  specs(n, allowVirt = false, extra = [], errcOk = allowVirt) {
     if (!isList(n) || head(n) !== 'specs') { this.err(n, '认不出的说明符表'); return null; }
     const mods = [...this.flat(n.items[2]), ...this.flat(n.items[3])]
       .map((m) => (isAtom(m) ? m.value : '?')).concat(extra);
@@ -6565,7 +6577,7 @@ class JncLower {
       // `errorcode`（第五十八刀，exceptions.rst:17）：它说的是"这个函数的返回值就是错误码"。
       // 与 virtual 那三个同一处 —— 只有函数签名那两处认得它。
       if (m === 'errorcode') {
-        if (!allowVirt) {
+        if (!errcOk) {
           this.err(n, "'errorcode' 只能写在函数上（exceptions.rst:17）");
           return null;
         }
@@ -8079,6 +8091,10 @@ class JncLower {
             + '类型标签，结构体没有）');
         }
         this.fns.set(info.name, sigOf(ps, info.type));
+        /* `errorcode` 也要在这一支记（第一百九十六刀）：这一支先前直接 return 了，下面那句
+           errcReg 够不着 —— 那个词于是被**悄悄吞掉**，调用点一句检查都不插（量出来的：
+           `long errorcode Guid.parse(…)` 出错时上一层照旧往下走）。 */
+        if (info.sp.errc && this.errcReg(n, info.name, info.type) === null) return null;
         return { info, ps, isMain: false };
       }
       if (owner !== null && this.classes.has(owner)) {

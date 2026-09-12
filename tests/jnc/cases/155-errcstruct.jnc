@@ -1,0 +1,51 @@
+// `errorcode` 写在**结构体**的方法上（第一百九十六刀）。jancy 那儿 `errorcode` 说的是
+// "这个函数的返回值就是错误码"（exceptions.rst:17）—— 与"是不是类的方法"无关。语料里的原样是
+// `struct Guid { bool errorcode parse(string_t string) thin; }`（std_Guid.jnc:94）。
+// 先前这一层把 `errorcode` 与 `virtual` 那三个绑在同一道闸门上（成员那一遍给 specs 传的是
+// "这是个类吗"），于是结构体的方法上写它报的是"'errorcode' 只能写在函数上"—— 认错了人。
+//
+// 这一份过的那几格：体写在里头的、体写在外头的、以及不写 `try` 的往上传（`useIt`）。
+// 写在**字段**上照旧拒（那一问挪到了成员那一遍里），墙见 bad/errc-field-struct.jnc。
+//
+// 判据是手写的 C 双胞胎 /tmp/c162.c —— 那层糖手写开的样子。一句 printf 里只放一个有副作用的
+// 实参：C 里那几个实参的求值顺序是未指定的。
+struct Guid {
+	long m_v;
+
+	long errorcode parse(long n) {
+		if (n < 0)
+			return -1;
+		m_v = n * 2;
+		return m_v;
+	}
+
+	long errorcode bump(long n);
+}
+
+long errorcode Guid.bump(long n) {
+	if (n == 0)
+		return -1;
+	m_v = m_v + n;
+	return m_v;
+}
+
+long errorcode useIt(Guid* g, long n) {
+	long r = g.parse(n);
+	long s = g.bump(1);
+	return r + s;
+}
+
+int main() {
+	Guid g;
+	g.m_v = 0;
+	long r = try g.parse(7);
+	printf("%d\n", r);
+	printf("%d\n", g.m_v);
+	r = try g.parse(-1);
+	printf("%d\n", r);
+	printf("%d\n", g.m_v);
+	printf("%d\n", try useIt(&g, 5));
+	printf("%d\n", try useIt(&g, -2));
+	printf("%d\n", g.m_v);
+	return 0;
+}

@@ -9626,6 +9626,42 @@ string_t cdecl std.format(string_t fmtSpecifier, ...);       // :582
   接进来"的前提 —— 榜上 `没有这个函数：'…'` 那 230 处里，`memcpy` / `strlen` / `atoi` 那一族全在
   这一份里声明着。
 
+### 第一百九十六刀：`errorcode` 写在结构体的方法上
+
+顺着上一刀往下走：std 库另一份隐式 import 的是 `std_Error.jnc`（`JNC_LIB_IMPORT("std_Error.jnc")`，
+jnc_std_StdLib.cpp:931），它 import `std_Guid.jnc`，而那儿卡在
+
+```jnc
+struct Guid {
+    …
+    bool errorcode parse(string_t string) thin;   // :94
+}
+```
+
+报的是"`'errorcode'` 只能写在函数上（exceptions.rst:17）"—— **认错了人**：它明明写在一格函数上。
+真正的原因是这一层把 `errorcode` 与 `virtual` 那三个绑在了**同一道闸门**上（`specs` 的 `allowVirt`），
+而成员那一遍给的是"这是个类吗"。`virtual` 那三个确实只对类的方法有意思（type_class.rst:178），
+`errorcode` 不是：它说的是**返回值**这件事（exceptions.rst:17），与主人是类还是结构体无关。
+所以把那道闸门拆成两个（`allowVirt` / `errcOk`），成员那一遍给 `errcOk` 传 true；写在**字段**上的
+那一问挪到成员那一遍里自己拦（与顶层第一百四十九刀那条"没有形参表就是一格变量"是同一句话），
+墙钉在 `tests/jnc/bad/errc-field-struct.jnc`。
+
+这一刀量出来另一格**静默的错答案**（这是判据那一步换来的）：结构体的方法在 `fnSig0` 里**提前
+return** 了，够不着下面那句 `errcReg` —— 于是 `long errorcode Guid.parse(…)` 上那个词被悄悄吞掉，
+调用点一句检查都不插。头一遍跑判据时印出来的是 `21 / 11 / 12`，C 双胞胎是 `21 / -1 / 11`：
+`parse(-2)` 出错之后上一层照旧往下走了。补上那一句就对齐了。
+
+判据在 `tests/jnc/cases/155-errcstruct.jnc`（C 双胞胎 `/tmp/c162.c`，那层糖手写开的样子）：
+体写在结构体里头的、体写在外头的（`long errorcode Guid.bump(long)`）、以及不写 `try` 的往上传
+（`useIt` 里 `g.parse(n)` 出错时 `bump` 一次都不调）。一句 `printf` 里只放一个有副作用的实参 ——
+C 里那几个实参的求值顺序是未指定的（头一版双胞胎踩了这一格）。
+
+- 腿：`node tests/jnc/run.js` 283/0（新增 `cases/155-errcstruct`、`bad/errc-field-struct`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `4498 -> 4487`（−11）、lowered `143`、clean `215` 没动；
+  一起编那张榜 `62`、理由 `23` 也没动。`不写 try 调 errorcode` 那一行 `158` 没动 ——
+  新收下来的那几格 `errorcode` 都在只有原型的声明上，还没有调用点够得着。
+
 
 
 ## 后果与代价

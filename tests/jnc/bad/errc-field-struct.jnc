@@ -1,0 +1,17 @@
+// `errorcode` 写在**字段**上（第一百九十六刀钉的界）。那个词说的是"这个函数的返回值就是
+// 错误码"（exceptions.rst:17）—— 一格字段没有返回值可说。
+//
+// 这一格是那一刀的另一半：为了收下结构体的方法（`bool errorcode parse(…)`，std_Guid.jnc:94），
+// 成员那一遍给 specs 开了这个词，所以"写在字段上"这一问要在成员那一遍里自己再拦一次 ——
+// 与顶层那一格（第一百四十九刀那条"没有形参表就是一格变量"）是同一句话。正面判据在
+// cases/155-errcstruct.jnc。
+struct G {
+	int errorcode m_a;
+}
+
+int main() {
+	G g;
+	g.m_a = 1;
+	printf("%d\n", g.m_a);
+	return 0;
+}
