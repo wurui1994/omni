@@ -8653,6 +8653,33 @@ prop.setOptions(optionArray, count);     // optionArray 是 EnumPropertyOption c
   −54 是它与别的行的重叠：同一份文件里那一格先前算一条，现在别的理由还在）。
 - leg `278 passed / 0 failed`、llvm `38 passed / 0 failed`。
 
+## 第一百六十九刀：宿主面那条路上的**默认值**
+
+```jnc
+opaque class Storage {
+    string_t readString(string_t name, string_t defaultValue = null);
+}
+…
+string_t key = storage.readString($"%1-key-%2"(name, i));   // 只给一个
+```
+
+（doc_Storage.jnc:43-46 与 ui_Dictionary.jnc:31；逐份榜上 91 处报的是 `'…' 要 2 个实参，这里给了
+1 个` —— 又是一句认错人的话：形参表上第二格明明有默认值。）
+
+原因：第一百刀把原型上的默认值记进了 `protoDefs`，可宿主面那条路（`hostSigs` / `hostMethodCall`）
+是另一条 —— 它只比个数、不补默认值。改法是把默认值也记进 `hostSigs`，调用点走**与普通调用同一份**
+`withDefaults`（第一百〇五刀那条口径：默认值在**声明那一头**的作用域里折，宿主面那一头就是那个类）。
+个数不对时那句话也跟着补上"（其中 N 个有默认值）"，与普通调用那一处一字不差。
+
+正面判据在 `tests/llvm/run.js` 第 9 节：`Other.add` 的声明改成 `long add(long d = 21)`，调用点写
+`o.add()` —— 印出来还是 `other 42`（宿主那边乘 2），也就是说那个 21 是**补出来的**。
+
+### 账：pairs `4823 -> 4714`（−109）
+
+- 逐份那张榜：lowered `121`、clean `192` 没动，pairs `4823 -> 4714`；`'…' 要 2 个实参，这里给了 1 个`
+  那 91 处与同族几行一起让开。
+- leg `278 / 0`、llvm `38 / 0`。
+
 ## 后果与代价
 
 

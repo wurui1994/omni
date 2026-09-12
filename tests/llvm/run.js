@@ -379,7 +379,9 @@ if (existsSync(sysDir)) {
        根本不是一次方法调用。 */
     writeFileSync(src, `import ${JSON.stringify(libPath)};\n\n`
       + 'opaque class Other {\n'
-      + '    long add(long d);\n'
+      /* 原型上的默认值（第一百六十九刀）：下面调的是 `o.add()` —— 补出来的就是这个 21，
+         所以印出来还是 other 42（`Other_add` 乘 2）。 */
+      + '    long add(long d = 21);\n'
       + '}\n\n'
       + 'opaque class Counter {\n'
       + '    construct(long start);\n'
@@ -400,7 +402,7 @@ if (existsSync(sysDir)) {
       + '    c.m_scale = 7;\n'
       + '    printf("scale %d\\n", c.m_scale);\n'
       + '    Other* o = new Other;\n'
-      + '    printf("other %d\\n", o.add(21));\n'
+      + '    printf("other %d\\n", o.add());\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);

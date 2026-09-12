@@ -5560,8 +5560,16 @@ class JncLower {
                  去查型（`void lock(int)` / `void lock(double)` 里给 1.5 会按 int 检查）。
                  那是个静默的错答案，所以在这儿记一笔，调用点明说不收。 */
               if (this.hostSigs.has(hk)) this.hostOverloaded.add(hk);
+              /* 原型上那几格默认值也记下来（第一百六十九刀）：`string_t readString(string_t name,
+                 string_t defaultValue = null);`（doc_Storage.jnc:43-46）—— 调用点只给一个实参是对的，
+                 而先前宿主面那条路只比个数、不补默认值，于是报"要 2 个实参，这里给了 1 个"
+                 （逐份榜上 91 处）。与普通调用那一侧用的是同一份 withDefaults。 */
+              const hdefs = hps.map((p) => p.def ?? null);
               this.hostSigs.set(hk, {
-                owner: name, ret: info.type, params: hps.map((p) => p.type),
+                owner: name,
+                ret: info.type,
+                params: hps.map((p) => p.type),
+                defs: hdefs.some((d) => d !== null) ? hdefs : null,
               });
             }
           }
@@ -11324,10 +11332,15 @@ class JncLower {
       return this.nope(n, `'${shown(owner)}.${mn}' 的返回类型 ${tyName(sig.ret)}`
         + '（落不进 C_ABI 的那几个词）');
     }
-    const args = this.flat(n.items[2]);
+    const args0 = this.flat(n.items[2]);
+    /* 默认值在**声明那一头**的作用域里折（第一百〇五刀那条口径）：宿主面那一头就是那个类。 */
+    const args = sig.defs === null || sig.defs === undefined ? args0
+      : this.withDefaults(args0, sig.params, sig.defs, owner);
+    if (args === null) return null;
     if (args.length !== sig.params.length) {
-      return this.err(n, `'${shown(owner)}.${mn}' 要 ${sig.params.length} 个实参，`
-        + `这里给了 ${args.length} 个`);
+      return this.err(n, `'${shown(owner)}.${mn}' 要 ${sig.params.length} 个实参`
+        + `${sig.defs === null || sig.defs === undefined ? '' : `（其中 ${sig.defs.filter((d) => d !== null).length} 个有默认值）`}`
+        + `，这里给了 ${args0.length} 个`);
     }
     const words = ['ptr'];
     const parts = [bv.code];
