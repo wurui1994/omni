@@ -7529,8 +7529,17 @@ class JncLower {
         }
         // 枚举也进得来（第三十九刀）：它的 `tyText` 就是 `int`，一个字的标量，与 `int`
         // 的元素同一格；不同的只是名字与它带的成员表。
-        if (t.k !== 'int' && t !== J_REAL && t !== J_BOOL && !jncIsStruct(t) && !jncIsEnum(t)) {
-          return this.nope(s, `${tyName(t)} 的数组 —— 要方言能把多个字的值当元素搬（与 &p 同一格）`);
+        /* **类指针**也进得来（第二百二十三刀）：这一层的类值就是一格地址（第五十二刀），
+           一个字，与 `int` 的元素同一格 —— `(blk (ptr C) 3)` 方言本来就收。榜上这一族是
+           `ui.Action*` 42 / `ui.Icon*` 40 / `ui.StatusPane*` 34 那几行（ioninja 的工具栏、
+           图标、状态栏）。先前门上那句话（"要方言能把多个字的值当元素搬"）对 fat 数据指针、
+           string 与函数值是对的，可**对类指针不对** —— 它多拦了一种。 */
+        if (t.k !== 'int' && t !== J_REAL && t !== J_BOOL && !jncIsStruct(t) && !jncIsEnum(t)
+          && !(isClass(t) && t.own === false)) {
+          return this.nope(s, `${tyName(t)} 的数组 —— fat 数据指针是三个字、string 与函数值`
+            + '旁边还挂着表（ADR-0024 / ADR-0026），那几种要方言能把多个字的值当元素搬'
+            + '（与 &p 同一格）；一个字的那几种（整数 / 实数 / 布尔 / 枚举 / 类指针）与结构体'
+            + '都收');
         }
         const cnt = s.items[1];
         if (isList(cnt) && head(cnt) === 'none') {

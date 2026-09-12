@@ -1,0 +1,42 @@
+// **类指针**的数组（第二百二十三刀）。榜上这一族是 `ui.Action*` 42、`ui.Icon*` 40、
+// `ui.StatusPane*` 34 那几行（ioninja 那一支的工具栏、图标、状态栏都是这个形状）。
+//
+// 先前那句话是"要方言能把多个字的值当元素搬（与 &p 同一格）"—— 那对 fat 数据指针（三个字）、
+// string 与函数值是对的，可**对类指针不对**：这一层的类值就是一格地址（第五十二刀），一个字，
+// 与 `int` 的元素同一格。所以门上那一问多拦了一种。
+//
+// 落法就是把这一种放进门里：`(blk (ptr C) 3)` 方言本来就收（数组的元素只要"一个字的值"）。
+// 一个字节的新机器都没造。
+//
+// 判据是手写的 C 双胞胎 /tmp/c181.c：局部的、结构体字段里的、模块级的三处各一个，再加
+// "没赋过值的那一格是 null"（方言的内存出来就是零）。印 `30 7 1`。
+class C {
+	int m_v;
+
+	construct(int v) {
+		m_v = v;
+	}
+}
+
+struct Holder {
+	C* m_items[3];
+	int m_n;
+}
+
+C* g_table[2];
+
+int main() {
+	Holder h;
+	h.m_items[0] = new C(10);
+	h.m_items[1] = new C(20);
+	h.m_n = 2;
+
+	g_table[0] = new C(7);
+
+	int sum = 0;
+	for (int i = 0; i < h.m_n; i++)
+		sum += h.m_items[i].m_v;
+
+	printf("%d %d %d\n", sum, g_table[0].m_v, h.m_items[2] == null);
+	return 0;
+}
