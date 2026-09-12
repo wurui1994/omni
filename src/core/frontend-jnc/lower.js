@@ -12929,6 +12929,55 @@ class JncLower {
         return this.asgnExpr(n);
       case 'pre-inc': case 'post-inc': case 'pre-dec': case 'post-dec':
         return this.nope(n, `表达式里的 ${h}（方言里它是语句；单独写成一行就行）`);
+      /* 第二百一十四刀：`表达式 '…'` 这一行 35 份文件按真话拆开是四件事（与第二百一十二刀
+         同一条法）。每一支的话里写清 jancy 那边落在哪儿，好让看榜的人知道该做哪个。 */
+      case 'offsetof':
+        /* `offsetof(BacNetMsTpHdr.m_crc)`（BacNetMsTp.jnc:74 / :164、test07.jnc:25、
+           test76.jnc:26 —— 6 处 / 3 份）。jancy 那儿它回一格**编译期常量**：那格字段的
+           `getFieldOffset()`（jnc_ct_OperatorMgr.cpp:1110-1113，实参不是字段就报
+           "'offsetof' can only be applied to fields"）。可那是**字节**偏移，而方言这边一格
+           就是 8 个字节、也不认字节偏移 —— 与 `sizeof` 那一行是同一笔账（方言的布局得先认
+           整数宽度）。 */
+        return this.nope(n, 'offsetof —— jancy 那儿它回那格字段的**字节**偏移'
+          + '（编译期常量，jnc_ct_OperatorMgr.cpp:1110-1113），而方言这边一格就是 8 个字节、'
+          + '也不认字节偏移（与 sizeof 那一行同一笔账）');
+      case 'dynamic-sizeof': case 'dynamic-offsetof': case 'dynamic-countof':
+        /* `dynamic sizeof(p)` / `dynamic offsetof(p)` / `dynamic countof(p)`
+           （jnc_DynamicLayout.jnc 那一族，44 处）。这三个在 jancy 那儿**不是**编译期常量：
+           它们落成一句运行期调标准库函数（StdFunc_DynamicSizeOf / DynamicOffsetOf /
+           DynamicCountOf，jnc_ct_OperatorMgr.cpp:948-950 与 :1105-1106）。可那三个函数
+           读的东西**都只是那格 fat 指针的 validator 范围**：
+             dynamicSizeOf   = rangeEnd - p
+             dynamicOffsetOf = p - rangeBegin
+             dynamicCountOf  = dynamicSizeOf / 元素大小
+           （jnc_rtl_CoreLib.cpp:52-69，三个函数一共 20 行）。
+           方言的 fat 指针是三个字 `{addr, base, end}`（hir/types.js:87-88）—— 范围本来就在
+           那儿。缺的是**"以字节算"那一头**：方言一格就是 8 个字节，`rangeEnd - p` 这个差
+           在这儿数出来的不是 jancy 那个数。所以这三个与 `sizeof` 那一行是同一笔账
+           （见 bad/dynamic-countof.jnc，第四十五刀就是这么记的）。 */
+        return this.nope(n, `${h.replace('dynamic-', 'dynamic ')} —— jancy 那儿它是运行期调一格`
+          + '标准库函数，而那函数读的只是 fat 指针的 validator 范围'
+          + '（rangeEnd - p / p - rangeBegin / 再除元素大小，jnc_rtl_CoreLib.cpp:52-69）；'
+          + '方言的 fat 指针 {addr, base, end} 里范围本来就在，缺的是"以字节算"那一头'
+          + '（方言一格 8 字节）—— 与 sizeof 那一行同一笔账');
+      case 'dynamic-cast':
+        /* `dynamic (T*) p`（7 处）。jancy 那儿它走 `castOperator(OperatorDynamism_Dynamic, …)`
+           （Expr.llk:692）—— 拿对象自己带着的类型信息在**运行期**判一次能不能转、不能就回
+           null。这一层的对象上没有那格类型信息。 */
+        return this.nope(n, 'dynamic (T*) 的转换 —— jancy 那儿它在运行期拿对象自己带的类型信息'
+          + '判一次（Expr.llk:692 的 OperatorDynamism_Dynamic），这一层的对象上没有那格信息');
+      case 'exprs-add':
+        /* 逗号隔开的一串表达式。语料里这 3 处（test53.jnc:18、test84.jnc:5、
+           72_StreamRegexSwitch.jnc:37）全是 `switch (state, string_t(p, 1))` —— jancy 那儿
+           `switch` 的实参多于一个就是 **regex switch**（第一个实参是 `jnc.RegexState*`，
+           Stmt.llk:192-198 那条 resolver），要一台 DFA 与一整套 case 上的正则。 */
+        return this.nope(n, '逗号隔开的一串表达式（语料里全是 `switch (state, …)` —— jancy 那儿'
+          + ' switch 的实参多于一个就是 **regex switch**，第一个实参是 `jnc.RegexState*`，'
+          + 'Stmt.llk:192-198；那要一台 DFA）');
+      case 'capture':
+        /* `$0` / `$1`（70_RegexSwitch.jnc:58）：regex switch 里那台 DFA 匹配到的那一段。 */
+        return this.nope(n, '`$0` 这种捕获 —— 它是 regex switch 里那台 DFA 匹配到的那一段，'
+          + '要 regex switch 先落下来');
       default:
         return this.nope(n, `表达式 '${h}'`);
     }

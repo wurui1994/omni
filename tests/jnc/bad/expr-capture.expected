@@ -1,0 +1,1 @@
+`$0` 这种捕获 —— 它是 regex switch 里那台 DFA 匹配到的那一段，要 regex switch 先落下来

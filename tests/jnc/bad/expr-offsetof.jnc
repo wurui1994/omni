@@ -1,0 +1,19 @@
+// `offsetof(T.field)`（第二百一十四刀把它从"表达式 '…'"那一句里拆出来）。语料里 6 处 / 3 份：
+// `offsetof(BacNetMsTpHdr.m_crc) - offsetof(BacNetMsTpHdr.m_frameType)`（BacNetMsTp.jnc:74）、
+// 同处:164 的 `p - offsetof(BacNetMsTpHdr.m_crc)`、test07.jnc:25、test76.jnc:26。
+//
+// jancy 那儿它回一格**编译期常量** —— 那格字段的 `getFieldOffset()`
+// （jnc_ct_OperatorMgr.cpp:1110-1113；实参不是字段就报 "'offsetof' can only be applied to
+// fields"）。可那是**字节**偏移，而方言这边一格就是 8 个字节、也不认字节偏移。
+//
+// 与 `sizeof` 那一行是同一笔账（方言的布局得先认整数宽度）—— 这一条不是"这一层懒得做"，
+// 是"下面那一层还没有能表示它的东西"。
+struct S {
+	char m_a;
+	int m_b;
+}
+
+int main() {
+	printf("%d\n", offsetof(S.m_b));
+	return 0;
+}

@@ -1,0 +1,9 @@
+// `$0`（第二百一十四刀把它从"表达式 '…'"那一句里拆出来）。语料里 1 处：
+// `text += $0.m_length;`（70_RegexSwitch.jnc:58）。
+//
+// 它是 regex switch 里那台 DFA **匹配到的那一段**（`$0` 是整段、`$1` 起是各组）。所以它与
+// bad/expr-regexswitch.jnc 是同一件事的两半：regex switch 落下来之前，这个名字无处可指。
+int main() {
+	printf("%d\n", $0.m_length);
+	return 0;
+}

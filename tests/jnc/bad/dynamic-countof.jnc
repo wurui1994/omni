@@ -7,6 +7,10 @@
 // 方言的 fat 指针是三个字，次序 `{addr, base, end}`（hir/types.js:87-88），范围本来就在
 // 那儿 —— 所以这一格是**能**做的，缺的只是"把 (end - base) / 元素步长"这一句放进哪个方言
 // 算子。等 `sizeof` 那一刀把整数宽度的布局定下来再一起做：元素步长要它。
+//
+// 第二百一十四刀把这句话搬进了**诊断本身**（先前诊断只说"表达式 'dynamic-countof'"，理由只在
+// 这份注里）。`dynamic sizeof` 与 `dynamic offsetof` 是同一句话 —— jnc_rtl_CoreLib.cpp:52-79
+// 那三个函数一共 20 行，读的都只是 validator 的 rangeBegin / rangeEnd。
 int main() {
 	int a[3];
 	int* p = a;

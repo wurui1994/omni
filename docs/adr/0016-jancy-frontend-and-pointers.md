@@ -10266,6 +10266,58 @@ unions"，type_class.rst:218，说的是拿 union 当基类，反过来那件事
   那三件各是各的账。所以这一刀换来的是 −4 对与那 95 个名字里的一部分，不是 95 份文件。
 - 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有 union）。
 
+### 第二百一十四刀：`表达式 '…'` 这一行按真话拆开（顺手改掉一条记错的账）
+
+榜上 `表达式 '…'` 35 份文件，按节点数一遍是七种：`dynamic-sizeof` / `dynamic-offsetof` /
+`dynamic-countof`、`dynamic-cast`、`offsetof`、`exprs-add`、`capture`。与第二百一十二刀同一条
+法：一句话盖住七件事，看榜的人看不出该做哪个。逐条把 jancy 那边的落法读出来写进诊断：
+
+- **`offsetof(T.field)`**（4 份）—— jancy 那儿它回一格编译期常量：那格字段的
+  `getFieldOffset()`（`jnc_ct_OperatorMgr.cpp:1110-1113`；实参不是字段就报
+  "'offsetof' can only be applied to fields"）。那是**字节**偏移，而方言这边一格就是 8 个
+  字节、也不认字节偏移 —— 与 `sizeof` 那一行同一笔账。
+- **`dynamic sizeof` / `dynamic offsetof` / `dynamic countof`**（11 / 4 / 14 份）——
+  **这一格先前的账记错了**。第一版新话我写的是"读的是指针旁边那格 validator 上记着的
+  **动态布局**，这一层的指针旁边没有那格表"，然后 `bad/dynamic-countof` 红了 —— 那堵墙从
+  第四十五刀起就写着相反的话，而且它是对的。翻 jancy 的实现（`jnc_rtl_CoreLib.cpp:52-79`，
+  三个函数一共 20 行）：
+
+  ```
+  dynamicSizeOf   = rangeEnd - p
+  dynamicOffsetOf = p - rangeBegin
+  dynamicCountOf  = dynamicSizeOf / 元素大小
+  ```
+
+  读的**只是 validator 的两个端点**，没有任何"布局表"。方言的 fat 指针是三个字
+  `{addr, base, end}`（hir/types.js:87-88）—— 范围本来就在。缺的是"以字节算"那一头。
+  所以这三个与 `sizeof` 是同一笔账，不是"没有那格东西可读"。红的那堵墙把我拽回来了：
+  **旧墙是账本，不是障碍**。
+- **`dynamic (T*) p`**（4 份）—— `castOperator(OperatorDynamism_Dynamic, …)`（Expr.llk:692）：
+  运行期拿对象自己带的类型信息判一次、不成就回 null。这一层一条继承链共用一格结构体
+  （第五十六刀），派生与基类在表示上没有区别，"这一格到底是哪个类"运行期问不出来。
+- **`exprs-add`**（3 份：test53.jnc:18、test84.jnc:5、72_StreamRegexSwitch.jnc:37）——
+  树上是"逗号隔开的一串表达式"，可这三处全是 `switch (state, string_t(p, 1))`：jancy 那儿
+  `switch` 的实参多于一个就是 **regex switch**（第一个实参是 `jnc.RegexState*`，
+  Stmt.llk:192-198 那条 resolver 就是靠"实参多不多"把它与普通 switch 分开的）。要一台 DFA。
+- **`capture`**（2 份，70_RegexSwitch.jnc:58 的 `$0.m_length`）—— 那台 DFA 匹配到的那一段，
+  与上一条是同一件事的两半。
+
+五堵墙钉住五句话：`bad/expr-offsetof.jnc`、`bad/expr-dyncast.jnc`、
+`bad/expr-regexswitch.jnc`、`bad/expr-capture.jnc`，加上**改了 expected 的**
+`bad/dynamic-countof`（那三个 dynamic 共用一句话，它一堵就够 —— 我先写的
+`bad/expr-dynsizeof` 是重复的，退了）。
+
+- 腿：`node tests/jnc/run.js` 301/0（新增 4 堵墙、改了 `bad/dynamic-countof` 的 expected）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `156`、clean `226` 都没动（这一刀不改代码生成，只改话），
+  **而 `(文件, 拦路项)` 对 `4033 -> 4040`（+7）—— 往错方向走了**。原因写清：拆开之前一份文件
+  里三种 dynamic 算子只算**一条**账，拆开之后各算一条（14 + 11 + 4 + 4 + 4 + 3 + 2 = 42 条，
+  来自 35 份文件，正好 +7）。这是第一百四十九刀立的口径的另一面：把话说准会让"对"这个数变大，
+  因为一份文件欠的本来就是好几件事。判这一刀看的是**哪一行整行没了**（`表达式 '…'` 没了），
+  不是那个总数。
+- 一起编那张榜：`39`、理由 `19` 没动。
+
+
 
 
 

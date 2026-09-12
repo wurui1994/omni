@@ -1,0 +1,1 @@
+offsetof —— jancy 那儿它回那格字段的**字节**偏移（编译期常量，jnc_ct_OperatorMgr.cpp:1110-1113），而方言这边一格就是 8 个字节、也不认字节偏移（与 sizeof 那一行同一笔账）

@@ -1,0 +1,23 @@
+// `dynamic (T*) p`（第二百一十四刀把它从"表达式 '…'"那一句里拆出来）。语料里 7 处，
+// 出处是 13_DynamicCast.jnc 那一族与 ioninja 里"按记录码认回具体那一格"的地方。
+//
+// jancy 那儿它走 `castOperator(OperatorDynamism_Dynamic, …)`（Expr.llk:692）—— 拿对象自己
+// 带着的类型信息在**运行期**判一次能不能转、不能就回 null。
+//
+// 这一层的对象上没有那格类型信息：一条继承链共用一格结构体（第五十六刀），派生与基类在
+// 表示上没有区别，所以"这一格到底是哪个类"运行期问不出来。静态的那种转换
+// （`(D*)c` 不带 dynamic）照旧收 —— 它不需要问。
+class C {
+	int m_x;
+}
+
+class D: C {
+	int m_y;
+}
+
+int main() {
+	C* c = new D;
+	D* d = dynamic (D*)c;
+	printf("%d\n", d != null);
+	return 0;
+}

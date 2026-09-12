@@ -1,0 +1,1 @@
+dynamic (T*) 的转换 —— jancy 那儿它在运行期拿对象自己带的类型信息判一次（Expr.llk:692 的 OperatorDynamism_Dynamic），这一层的对象上没有那格信息

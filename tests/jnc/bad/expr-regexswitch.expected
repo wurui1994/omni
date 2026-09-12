@@ -1,0 +1,1 @@
+逗号隔开的一串表达式（语料里全是 `switch (state, …)` —— jancy 那儿 switch 的实参多于一个就是 **regex switch**，第一个实参是 `jnc.RegexState*`，Stmt.llk:192-198；那要一台 DFA）

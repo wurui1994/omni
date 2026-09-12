@@ -1,1 +1,1 @@
-表达式 'dynamic-countof'
+dynamic countof —— jancy 那儿它是运行期调一格标准库函数，而那函数读的只是 fat 指针的 validator 范围（rangeEnd - p / p - rangeBegin / 再除元素大小，jnc_rtl_CoreLib.cpp:52-69）；方言的 fat 指针 {addr, base, end} 里范围本来就在，缺的是"以字节算"那一头（方言一格 8 字节）—— 与 sizeof 那一行同一笔账

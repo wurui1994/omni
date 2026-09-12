@@ -1,0 +1,21 @@
+// `switch (state, string)`（第二百一十四刀把它从"表达式 '…'"那一句里拆出来）。语料里 3 处：
+// test53.jnc:18、test84.jnc:5、72_StreamRegexSwitch.jnc:37。
+//
+// 树上它是一格"逗号隔开的一串表达式"，可在 jancy 那儿这个形状有专门的意思：`switch` 的实参
+// 多于一个就是 **regex switch**（第一个实参是 `jnc.RegexState*`，Stmt.llk:192-198 那条
+// resolver 就是靠"实参多不多"分开 `regex switch` 与普通 `switch` 的）。
+//
+// 那要一整台 DFA：case 上写的是正则、匹配到的那一段用 `$0` 取（见 bad/expr-capture.jnc）。
+// 所以这一句不是"逗号算符还没接"，是 regex switch 整件事还没有。
+int main() {
+	int state = 0;
+	int packet = 1;
+
+	switch (state, packet) {
+	case 0:
+		printf("%d\n", 0);
+		break;
+	}
+
+	return 0;
+}
