@@ -379,6 +379,14 @@ function isClassAgg(n) {
     && aggCls(isAtom(n.items[1]) ? n.items[1].value : null);
 }
 
+/** 结构体体里那格**匿名 union** 吗（第二百三十刀）：它不是一格嵌套类型，是这张字段表里
+ *  几格共用一个偏移的写法（第一百一十刀），所以提不得。 */
+function isAnonUnionAgg(n) {
+  if (!isList(n) || head(n) !== 'agg') return false;
+  const k = isAtom(n.items[1]) ? n.items[1].value : null;
+  return k === 'union' && isList(n.items[2]) && head(n.items[2]) === 'anon';
+}
+
 /** 体里那些方法要**提到顶层**的 agg 吗（第一百〇一刀把 struct 也算进来了）。
  *  jancy 的 struct 也是一层命名空间、也能有方法（`type_struct.rst` 的 Methods 一节）。 */
 function isHoistAgg(n) {
@@ -2921,7 +2929,14 @@ class JncLower {
         }
         continue;
       }
-      if (h === 'type-decl' && isCls) {
+      /* 嵌套类型**结构体那一侧也提**（第二百三十刀）：jancy 的 `StructType` 与 `ClassType` 一样
+         派生自 `Namespace`（type_struct.rst 的 Methods / Nested types 那两节），方法从第一百〇一刀
+         起、typedef 从第一百二十四刀起就都提了 —— 嵌套类型是同一条，只是先前欠着。语料里的原样是
+         `struct OutputReport { enum { ReportSize = 32 } … uchar_t m_padding[ReportSize - 1]; }`
+         （test/ioninja/samples/ErgoDox/ErgoDoxHid.jnc:51-66）。
+         **匿名 union 不提**：它不是"一格嵌套类型"，是这张字段表里几格共用一个偏移的写法
+         （第一百一十刀），由结构体那一遍就地摊平。 */
+      if (h === 'type-decl' && (isCls || !isAnonUnionAgg(m.items[1]))) {
         out.push({ ns: inner, it: m });
         if (isHoistAgg(m.items[1])) this.aggHoist(m.items[1], inner, out);
       }
@@ -5942,7 +5957,7 @@ class JncLower {
           }
           continue;
         }
-        if (!cls) this.nope(m, '结构体里的嵌套类型');
+        // 别的嵌套类型（结构体那一侧也算，第二百三十刀）在 nsFlat 那一遍已经提到顶层了
         continue;
       }
       // 体内写的方法（`void foo() { … }`）在 nsFlat 那一遍已经提到顶层了，这儿跳过 ——

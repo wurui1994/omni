@@ -1,0 +1,71 @@
+// 结构体体里的**嵌套类型**（第二百三十刀）。jancy 的 `StructType` 与 `ClassType` 一样派生自
+// `Namespace`（type_struct.rst 的 Methods / Nested types 两节），方法从第一百〇一刀起、typedef
+// 从第一百二十四刀起就都提到顶层了 —— 嵌套类型是同一条，只是先前欠着（那句 `结构体里的嵌套类型`
+// 与 `bad/union-named` 那道墙都是这一刀兑掉的）。
+//
+// 语料里的原样是 `struct OutputReport { enum { ReportSize = 32 } … uchar_t m_padding[ReportSize - 1]; }`
+// （test/ioninja/samples/ErgoDox/ErgoDoxHid.jnc:51-66）—— 一格**无名**枚举，成员漏到外面那层
+// （第九十六刀），裸写着当数组长度用。
+//
+// 这一格把五种一起摆上：嵌套结构体、带名字的 union、带名字的枚举、typedef、无名枚举的成员。
+// **匿名 union 照旧不提** —— 它不是一格嵌套类型，是这张字段表里几格共用一个偏移的写法
+// （第一百一十刀），所以下面 `m_u1` / `m_u2` 还是同一块字节。
+//
+// 判据是手写的 C 双胞胎 /tmp/c186.c（C 里嵌套类型没有主人那一段，名字得自己拼）。印 `9 1 6 31 4 9`。
+struct Outer {
+	struct Inner {
+		int m_a;
+		int m_b;
+	}
+
+	union Pair {
+		int m_x;
+		int m_y;
+	}
+
+	enum Kind {
+		None,
+		Some,
+	}
+
+	enum {
+		ReportSize = 32
+	}
+
+	typedef int Num;
+
+	Inner m_in;
+	Kind m_kind;
+	Num m_n;
+	char m_pad[ReportSize - 1];
+	char m_pad2[Kind.Some + 3];
+
+	union {
+		int m_u1;
+		int m_u2;
+	};
+}
+
+int main() {
+	Outer o;
+	o.m_in.m_a = 4;
+	o.m_in.m_b = 5;
+	o.m_kind = Outer.Kind.Some;
+	o.m_n = 6;
+	o.m_u1 = 9;
+
+	// 带名字的那一格 union 是一格**类型**，自己造得出来
+	Outer.Pair p;
+	p.m_x = 77;
+
+	printf(
+		"%d %d %d %d %d %d\n",
+		o.m_in.m_a + o.m_in.m_b,
+		(int)o.m_kind,
+		o.m_n,
+		countof(o.m_pad),
+		countof(o.m_pad2),
+		o.m_u2
+	);
+	return 0;
+}

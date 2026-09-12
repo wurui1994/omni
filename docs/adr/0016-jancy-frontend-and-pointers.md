@@ -10892,6 +10892,47 @@ class C { enum E { A, B, _Count, } int m_tab[E._Count]; }
   `uchar_t m_padding[ReportSize - 1]`（ErgoDoxHid.jnc:66 —— 一个裸名字）。
 - 一起编那张榜：`37`、理由 `18` 没动（那个形状在 plugins/ 里，不在 api/ 那 44 份里）。
 
+### 第二百三十刀：结构体也是一层命名空间，嵌套类型也提
+
+上一刀留在账上的第二个形状：
+
+```
+struct OutputReport {
+	enum {
+		ReportSize = 32
+	}
+	…
+	uchar_t m_padding[ReportSize - 1];
+}                        test/ioninja/samples/ErgoDox/ErgoDoxHid.jnc:51-66
+```
+
+真拦路的不是那格长度，是它前面那句 `结构体里的嵌套类型`。而那条界从头就是**欠着的**，不是
+划出来的：jancy 的 `StructType` 与 `ClassType` 一样派生自 `Namespace`（type_struct.rst 的
+Methods / Nested types 两节），方法从第一百〇一刀起、`typedef` 从第一百二十四刀起就都提到顶层了
+（`S$m` / `S$Num`），查名的起点也早就是 `S` 这一层 —— 嵌套类型是同一条，只有它还留在原处报。
+
+落法就是把 `aggHoist` 里那一问的 `isCls` 去掉：结构体体里的 `type-decl` 也提上去，名字是
+`S$Inner`。**匿名 union 不提** —— 它不是一格嵌套类型，是这张字段表里几格共用一个偏移的写法
+（第一百一十刀），照旧由结构体那一遍就地摊平（新添的 `isAnonUnionAgg` 就是这一问）。
+带名字的 union、嵌套结构体、带名字的枚举、无名枚举（成员漏到外面那层，第九十六刀）四种于是
+一起收下了 —— 一格新机器都没造，只是把已经在那儿的路让它们也走。
+
+`bad/union-named` 那道墙（第一百一十刀立、第二百一十三刀改注）就是这一刀兑掉的：它的注上写着
+"它要的是'结构体也是一层命名空间'"，正是这一句。退役，改成用例。
+
+判据是手写的 C 双胞胎 `/tmp/c186.c`（C 里嵌套类型没有主人那一段，名字得自己拼），用例
+`tests/jnc/cases/179-structnested.jnc` 把五种摆在一起、再加"匿名 union 那两格还是同一块字节"，
+两边都印 `9 1 6 31 4 9`。
+
+- 腿：`node tests/jnc/run.js` 321/0（新增 `cases/179-structnested`，退役 `bad/union-named`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`结构体里的嵌套类型` 那一行**整行没了**（1 处）、"数组长度…"那一行 `2 -> 1`
+  （只剩 jnc_StdTypedefs.jnc:42 那格 `sizeof`）。`(文件, 拦路项)` 对 `3782 -> 3781`（**−1**）——
+  两行退了却只减一格，原因写清：ErgoDoxHid 那份先前被这两句盖着的
+  `union 里的成员 'm_padding'`（数组进不了 union，第一百一十刀那笔账）这一趟露出来了。
+  lowered `162`、clean `238` 都没动。
+- 一起编那张榜：`37`、理由 `18` 没动。
+
 
 
 
