@@ -1,0 +1,36 @@
+// 类 / 结构体上的**静态**字段带花括号初值（第二百四十一刀）。语料里的原样是
+// `static string_t const m_stateStringTable[] = { … }`（SerialSession.jnc 那一族）与
+// `static int m_table[] = { … }` —— 上一刀量出那句兜底话（`类 / 结构体里除字段以外的成员`）
+// 剩下的就是它，21 处。
+//
+// 第二百一十五刀已经把"静态字段 = 命名空间里的一格模块级变量"那条路铺好了，可它接在 `var-decl`
+// 那一支上；带花括号初值的那一种在语法上是**另一个 head**（`var-decl-curly`），于是落到了兜底
+// 话上 —— 那是**欠着的**，不是划的界。顶层那一遍现成就有 `globalDeclCurly`（第二十四刀那条路：
+// 长度从花括号里数出来、初值一格一格抄），类体这一遍 `this.ns` 已经是这个类（第一百二十四刀），
+// 交给它就完了。元素类型收不收由已经在那儿的门说（`string 的数组` 那笔 ADR-0026 的账照旧自己报）。
+//
+// 判据是手写的 C 双胞胎 /tmp/c192.c（C 里静态成员摊成一格带前缀的文件级数组 —— 这一层落的正是
+// 这个形状：名字是 `C$m_table`）。印 `42 20`。
+class C {
+	static int m_table[] = { 10, 20, 12 };
+
+	int sum() {
+		int t = 0;
+		for (int i = 0; i < countof(m_table); i++)
+			t += m_table[i];
+		return t;
+	}
+}
+
+// 结构体那一侧同一条（`m_n` 那格普通字段是必须的：静态的那一格不在结构体里，
+// 而方言那一层要求"结构体至少要有一个字段"—— 那是它自己的界，与这一刀无关）
+struct S {
+	int m_n;
+	static int m_pair[] = { 3, 4 };
+}
+
+int main() {
+	C* c = new C;
+	printf("%d %d\n", c.sum() + S.m_pair[0] + S.m_pair[1] - 7, C.m_table[1]);
+	return 0;
+}

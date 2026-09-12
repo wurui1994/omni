@@ -6152,6 +6152,21 @@ class JncLower {
          `public:` / `protected:` 那两个词收下不看，`friend` 是同一件事、同一条理由。
          语料里的原样是 `friend BinTreeBase;` / `friend BinTreeVisitRemoveImpl;`
          （src/jnc_ext/jnc_std/jnc/stdt_BinTree.jnc:22-23，另有 stdt_HashTable / stdt_RbTree）。 */
+      /* 类 / 结构体上的**静态**字段带花括号初值（第二百四十一刀）：
+         `static string_t const m_stateStringTable[] = { … }`（SerialSession.jnc 那一族）、
+         `static int m_table[] = { … }` —— 上一刀量出来那句兜底话剩下的就是它，21 处。
+         第二百一十五刀已经把"静态字段 = 命名空间里的一格模块级变量"这条路铺好了，可它接在
+         `var-decl` 那一支上，而带花括号初值的那一种在语法上是**另一个 head**（`var-decl-curly`），
+         于是落到了兜底话上 —— 那是**欠着的**，不是划的界。顶层那一遍现成就有 `globalDeclCurly`
+         （第二十四刀那条路：长度从花括号里数出来、初值一格一格抄），而类体这一遍 `this.ns`
+         已经是这个类（第一百二十四刀），交给它就是了 —— 一个字节的新机器都不用造。
+         元素类型收不收由**已经在那儿的门**说（`string 的数组` 那笔 ADR-0026 的账照旧自己报）。
+         **非静态**的那一种（`string_t m_statusTextTable[] = { … }`，量到 4 处）留着：那要在
+         构造里一格一格填，是另一笔账。 */
+      if (isList(m) && head(m) === 'var-decl-curly') {
+        const csp = this.specs(m.items[1], cls, [], true);
+        if (csp !== null && csp.stat) { this.globalDeclCurly(m); continue; }
+      }
       if (isList(m) && head(m) === 'friend') continue;
       if (!isList(m) || head(m) !== 'var-decl') {
         this.nope(m, `${cls ? '类' : '结构体'}里除字段以外的成员`);
