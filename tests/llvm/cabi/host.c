@@ -154,6 +154,14 @@ int64_t Plain_note(void *self, const char *s) {
 
 int64_t probe_hostMul(int64_t a, int64_t b) { return a * b; }
 
+/* 顶层**同名好几条**只有原型的函数（第一百九十四刀）。jancy 那边它们各是一个 C 函数
+   （`JNC_MAP_FUNCTION_Q` 后面跟 `JNC_MAP_OVERLOAD`，jnc_std_StdLib.cpp:825-826），
+   语料里的原样是 `long strtol(string_t, …)` 与 `long strtol(char const*, …)`
+   （std_globals.jnc:461/467）。符号名的约定与类里那几条原型同一条：第二条起加 `_o2`。 */
+int64_t hostSum(int64_t a, int64_t b) { return a + b; }
+
+int64_t hostSum_o2(const char *s) { return s == NULL ? -1 : (int64_t)strlen(s); }
+
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型
    （`property m_scale { long get(); void set(long); }`，ui_PropertyGrid.jnc:78-88 那个形状）
    时，体也在宿主这边；符号名的约定与方法同一条，只是中间多一段 `get_` / `set_`：

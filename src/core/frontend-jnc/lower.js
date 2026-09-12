@@ -4898,11 +4898,24 @@ class JncLower {
           const ps0 = this.formalList(info.formals);
           if (ps0 !== null) {
             const ds0 = ps0.map((p) => p.def ?? null);
-            this.hostTopSigs.set(fn, {
+            const sg0 = {
               ret: info.type,
               params: ps0.map((p) => p.type),
               defs: ds0.some((d) => d !== null) ? ds0 : null,
-            });
+            };
+            /* 同名好几条原型（第一百九十四刀）：`long strtol(string_t, size_t*, int)` 与
+               `long strtol(char const*, char const**, int)`（std_globals.jnc:461/467）——
+               jancy 那边是 `JNC_MAP_FUNCTION_Q` 后面跟一条 `JNC_MAP_OVERLOAD`
+               （jnc_std_StdLib.cpp:825-826 的 `std.setError` 就是这个形状）。先前这张表按名字
+               存**一条**，第二条把第一条盖掉了 —— 那是"悄悄按其中一条算"，调用点于是拿
+               `char const*` 那条去对一格 `string_t`，报的话指着实参。改成一格一族，
+               挑哪一条与类里那几条原型共用 `hostPickSigs`（第一百八十六刀那套）。
+               签名一模一样的当同一条（import 到两遍那种），不然会平手。 */
+            const prev0 = this.hostTopSigs.get(fn);
+            const same0 = (a, b) => a.params.length === b.params.length
+              && a.params.every((t, i) => sameTy(t, b.params[i])) && sameTy(a.ret, b.ret);
+            if (prev0 === undefined) this.hostTopSigs.set(fn, [sg0]);
+            else if (!prev0.some((s) => same0(s, sg0))) prev0.push(sg0);
           }
           continue;
         }
@@ -11761,8 +11774,11 @@ class JncLower {
    * -> `doc_sessionDispatch`），实参与返回照 C_ABI 那几个词过，`variant_t` 那两头走
    * 第一百七十三 / 一百七十四刀那两条。
    */
-  hostTopCall(n, fn, sig) {
-    const sym = fn.replace(/\$/g, '_');
+  hostTopCall(n, fn, sig, oi = 0) {
+    /* 同名那一族里第二条及以后的（第一百九十四刀）：符号名加 `_o2` / `_o3` …，与类里那几条
+       原型（第一百八十六刀）是同一条规则 —— jancy 那边它们本来也各是一个 C 函数
+       （`JNC_MAP_OVERLOAD`）。 */
+    const sym = `${fn.replace(/\$/g, '_')}${oi > 0 ? `_o${oi + 1}` : ''}`;
     const vret = isVar(sig.ret);
     const rw = vret ? 'void' : this.cabiWordOfJnc(sig.ret, true);
     if (rw === null) {
@@ -11843,6 +11859,11 @@ class JncLower {
   }
 
   hostPick(n, owner, mn, sigs) {
+    return this.hostPickSigs(n, `${shown(owner)}.${mn}`, sigs);
+  }
+
+  /** 上面那一步与顶层那几条原型（第一百九十四刀）共用的一段 —— 只差话里那个名字怎么写。 */
+  hostPickSigs(n, label, sigs) {
     if (sigs.length === 1) return { sig: sigs[0], i: 0 };
     const args = this.flat(n.items[2]);
     const given = args.length;
@@ -11855,12 +11876,12 @@ class JncLower {
     }
     if (fits.length === 1) return { sig: sigs[fits[0]], i: fits[0] };
     if (fits.length === 0) {
-      return this.err(n, `'${shown(owner)}.${mn}' 那几条原型收的实参个数是 `
+      return this.err(n, `'${label}' 那几条原型收的实参个数是 `
         + `${sigs.map((sg) => sg.params.length).join(' / ')}，这里给了 ${given} 个`);
     }
     const tys = args.map((a) => this.cheapTy(a));
     if (tys.some((t) => t === null)) {
-      return this.nope(n, `'${shown(owner)}.${mn}' 那几条同元的原型：第 `
+      return this.nope(n, `'${label}' 那几条同元的原型：第 `
         + `${tys.findIndex((t) => t === null) + 1} 个实参的类型这一层还得先降一遍才知道`
         + '（同元重载要按参数类型挑，见 ADR-0016 第八十刀）');
     }
@@ -11879,11 +11900,11 @@ class JncLower {
       if (score > bestScore) { bestScore = score; best = i; tie = false; }
     }
     if (best === -1) {
-      return this.err(n, `'${shown(owner)}.${mn}' 那 ${fits.length} 条原型没有一条收得下这几个实参`
+      return this.err(n, `'${label}' 那 ${fits.length} 条原型没有一条收得下这几个实参`
         + `（${tys.map((t) => tyName(t.ty)).join(', ')}）`);
     }
     if (tie) {
-      return this.nope(n, `'${shown(owner)}.${mn}' 那几条同元的原型在这一句上分不出来`
+      return this.nope(n, `'${label}' 那几条同元的原型在这一句上分不出来`
         + `（${tys.map((t) => tyName(t.ty)).join(', ')} 对两条一样合得上）`);
     }
     return { sig: sigs[best], i: best };
@@ -12924,7 +12945,12 @@ class JncLower {
     /* `with "h.h"` 收进来的那些（ADR-0022 的 J4d）：调用点发 `(ccall …)` 而不是
        `(call …)` —— 实参已经是机器值，不过 marshaler。实参与返回都按**声明**检查，
        签名是从头文件里收来的那一份（`cabiSigs`），不是从调用点猜的。 */
-    if (nm === null && nm0 !== null && this.cabiSigs.has(nm0)) {
+    /* 这一层自己**从原型发出去**的那些 C_ABI 符号不走这条路（第一百九十四刀）：符号名与源码里
+       那个名字一模一样（顶层不带命名空间那种），于是第一次调用登记了 `cabiSigs` 之后，第二次
+       调用就被这一格截走了 —— 那儿只比个数、不补默认值、也不认同名那一族，报的是
+       "要 3 个实参，这里给了 1 个"。判据一句：这个名字是源码里的一条原型吗？是就归下面那条路。 */
+    if (nm === null && nm0 !== null && this.cabiSigs.has(nm0)
+      && this.resolve(nm0, (k) => this.protoFns.has(k)) === null) {
       return this.ccallSite(n, nm0, this.cabiSigs.get(nm0));
     }
     /* `import "libfoo.dylib" as g`（没有 `with`）：`g.foo(…)` 的类型从调用点猜，带 warning。 */
@@ -12977,7 +13003,11 @@ class JncLower {
       const pf = nm0 === null ? null : this.resolve(nm0, (k) => this.protoFns.has(k));
       if (pf !== null) {
         const ts = this.hostTopSigs.get(pf);
-        if (ts !== undefined) return this.hostTopCall(n, pf, ts);
+        if (ts !== undefined) {
+          const tp = this.hostPickSigs(n, shown(pf), ts);
+          if (tp === null) return null;
+          return this.hostTopCall(n, pf, tp.sig, tp.i);
+        }
         return this.nope(n, `原型 '${shown(pf)}' 没有带体的定义（形参表这一层没收下来）`);
       }
       /* jancy 的**全局 CRT** 那一族（第一百七十六刀）：`rand` / `isdigit` / `toupper` …

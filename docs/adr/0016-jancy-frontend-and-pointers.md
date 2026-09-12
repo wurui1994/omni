@@ -9543,6 +9543,52 @@ size_t insertItemSetCurrent(size_t index, string_t text, variant_t data = null) 
   表达式位置上那一问。第一百四十九刀那条法（榜上看起来像特性的一行，先抄成最小复现件试一次）这回
   省下的是把体外存值器重写一遍的整个功夫。
 
+### 第一百九十四刀：顶层同名好几条只有原型的函数
+
+第一百八十九刀把 jancy 自己那几个扩展库的源码放进 `-I` 之后，`std_globals.jnc` 单编报的是
+
+```
+'strtol' 的第 1 个实参要 char*，这里是 string
+```
+
+指着 `int atoi(string_t s) { return strtol(s); }`（std_globals.jnc:445）。那儿声明了**两条** `strtol`：
+
+```jnc
+long strtol(string_t s,      size_t* length = null, int radix = 0);   // :461
+long strtol(char const* p,   char const** end = null, int radix = 0); // :467
+```
+
+两条都只有原型（体在宿主的 C++ 里）。jancy 那边它们各是一个 C 函数：`JNC_MAP_FUNCTION_Q` 后面跟一条
+`JNC_MAP_OVERLOAD`（jnc_std_StdLib.cpp:825-826 的 `std.setError` 就是这个形状）。这一层的
+`hostTopSigs`（第一百八十五刀）按名字存**一条**，第二条把第一条盖掉了 —— 那是"悄悄按其中一条算"，
+于是调用点拿 `char const*` 那条去对一格 `string_t`，报的话指着实参、不指着那张表。
+
+三处改动：
+
+1. 那张表改成一格一族（`Map<名字, 签名[]>`）。签名一模一样的当同一条 —— 不然平手。
+2. 挑哪一条与**类里那几条原型**共用一段（第一百八十六刀的 `hostPick` 抽成 `hostPickSigs`，
+   只差话里那个名字怎么写）：先按给了几个实参筛（末尾带默认值的算区间），剩下不止一条按 `argCost`
+   排 —— 与 jancy 的 `chooseOverload`（jnc_ct_FunctionTypeOverload.cpp:44-91）同一个算法。
+3. 符号名第二条起加 `_o2` / `_o3`（与第一百八十六刀那条规则一模一样）。
+
+顺手兑掉一格**第一百八十五刀留下的洞**：那条路第一次调用会把 `名字 -> C_ABI 签名` 登记进 `cabiSigs`，
+而 `with "h.h"` 那条分支（ADR-0022 的 J4d）排在原型这一问**前面**、按名字查的就是同一张表 ——
+于是同一个顶层原型**第二次**调用被那儿截走，那格只比个数、不补默认值、也不认同名那一族，
+报的是"要 3 个实参，这里给了 1 个"。判据一句：这个名字是源码里的一条原型吗？是就归原型那条路。
+（这一格是量出来的：`hostSum(40)` 单独一句好使、两句就不好使。）
+
+判据在 `tests/llvm/run.js` 第 9 节：`long hostSum(long a, long b = 3); long hostSum(string_t s);`
+—— `hostSum(40)` 印 43（挑第一条、默认值补上 3）、`hostSum(1)` 印 4（**第二次**调用还走原型那条路）、
+`hostSum("hey")` 印 3（挑第二条，发的是 `hostSum_o2`）。`.sx` 里那两句：
+`(cabi hostSum i64 (i64 i64))` 与 `(cabi hostSum_o2 i64 (ptr))`。
+
+- 腿：`node tests/jnc/run.js` 280/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `4500 -> 4499`（−1）、lowered `142`、clean `214` 都没动；
+  一起编那张榜 `62`、理由 `23` 也没动。**这一刀在那两张榜上几乎不动** —— 记成账：同名两条原型
+  同时够得着这件事，在逐份编的语料里本来就少见；它真正挡住的是 `std_globals.jnc` 那一份
+  （单编从 3 条诊断降到 2 条，剩下的是 `形参 'formals'`），而那一份是**下一步**要用的
+  （jancy 的 std 库对每个模块都隐式 import 它，jnc_std_StdLib.cpp:930-931）。
+
 
 
 ## 后果与代价

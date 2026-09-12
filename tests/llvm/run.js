@@ -413,6 +413,12 @@ if (existsSync(sysDir)) {
          那一支一模一样 —— `opaque` 说的是"布局不透明"，管的不是"体在哪儿"。 */
       /* 顶层那格只有原型的函数（第一百八十五刀）：符号名就是全名把 `$` 换成 `_`。 */
       + 'long hostAdd(long a, long b);\n\n'
+      /* 顶层同名好几条只有原型的函数（第一百九十四刀）：先前这张表按名字只存一条，
+         后一条把前一条盖掉了。挑哪一条与类里那几条原型共用同一套（第一百八十六刀）。
+         `hostSum(40)` 还要证一件事：默认值补得上 —— 第二次调用先前会被"这个名字已经是一格
+         C_ABI 符号了"那条路截走，那儿只比个数。 */
+      + 'long hostSum(long a, long b = 3);\n'
+      + 'long hostSum(string_t s);\n\n'
       + 'namespace probe {\n'
       + 'long hostMul(long a, long b);\n'
       + '}\n\n'
@@ -472,12 +478,13 @@ if (existsSync(sysDir)) {
       + '    printf("kid %d\\n", k.seeded());\n'
       + '    printf("bump %d\\n", c.bump(4));\n'
       + '    printf("scale2 %d\\n", c.m_scale);\n'
+      + '    printf("sum %d %d %d\\n", hostSum(40), hostSum(1), hostSum("hey"));\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -503,6 +510,10 @@ if (existsSync(sysDir)) {
     } else if (!sx.out.includes('(cabi hostAdd i64 (i64 i64))')
       || !sx.out.includes('(cabi probe_hostMul i64 (i64 i64))')) {
       detail.push('    emit sx 里没有 `(cabi hostAdd …)` / `(cabi probe_hostMul …)`');
+    /* 顶层同名那一族（第一百九十四刀）：第二条起加 `_o2`。 */
+    } else if (!sx.out.includes('(cabi hostSum i64 (i64 i64))')
+      || !sx.out.includes('(cabi hostSum_o2 i64 (ptr))')) {
+      detail.push('    emit sx 里没有 `(cabi hostSum i64 (i64 i64))` / `(cabi hostSum_o2 i64 (ptr))`');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');
