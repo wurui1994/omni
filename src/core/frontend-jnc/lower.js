@@ -8265,6 +8265,29 @@ class JncLower {
     }
     if (h === 'new') return this.cheapNew(n);
     if (h === 'call') return this.cheapCall(n);
+    /* 下面这三格是第二百刀添的。守的仍旧是原来那两条：**一个字都不发**、只在问得准时才回。
+       挑这三种也是量出来的 —— 榜上"同元重载 / 同元原型：第 N 个实参的类型这一层还得先降一遍
+       才知道"那一族（第一百九十九刀之后 134 + 115 + 86 + 85 处）拦着的实参就是它们：
+         `indent.append(' ', 4)`（HidUtils.jnc:19）—— 字符字面量
+         `insert(-1, string)`（std_String.jnc:96）—— 一元的负号
+         `std.setError($"attempt to access out-of-bounds offset $offset")`（同上:162）—— 格式化字面量 */
+    // 字符字面量：charLit 落成的是一格**整数**字面量（那几个字节拼成的数），所以与 `65` 同一档。
+    if (h === 'char') return { ty: J_I32, lit: true };
+    /* 格式化字面量：`$"…"` 产出的是一格**动态**的字符串（literals.rst:62）—— 类型是 string，
+       而**不算字面量那一档**（那一格只对整数之间那条有意思，见 argCost）。`concat` 是
+       "字面量后面紧跟一个 `$"…"`"那种拼接，同一件事。 */
+    if (h === 'fmt' || h === 'concat') return { ty: J_STR, lit: false };
+    /* 一元的那四个：`-` / `+` / `~` 不改类型（整数还是整数、实数还是实数），`!` 回 bool。
+       别的（`*` 解引用、`&` 取地址、`++` 那一族）各有自己的形状，照旧回 null。 */
+    if (h === 'unary' && isStr(n.items[1])) {
+      const op = n.items[1].value;
+      if (op === '!') return { ty: J_BOOL, lit: false };
+      if (op !== '-' && op !== '+' && op !== '~') return null;
+      const b = this.cheapTy(n.items[2]);
+      if (b === null || !(isInt(b.ty) || b.ty === J_REAL)) return null;
+      if (op === '~' && b.ty === J_REAL) return null;      // `~` 只对整数有意思
+      return { ty: b.ty, lit: b.lit };
+    }
     return null;
   }
 

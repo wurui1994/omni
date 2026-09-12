@@ -1,0 +1,53 @@
+// 同元重载按实参类型挑：字符字面量、一元负号、`!`、格式化字面量（第二百刀）。
+//
+// 第八十刀定的规矩没动（挑哪一条按 argCost 排，问不出实参类型的**明说不收**，绝不猜）——
+// 这一刀添的是"问得出来"的那几格。挑这三种是量出来的，榜上那一族（第一百九十九刀之后
+// 134 + 115 + 86 + 85 处）拦着的实参就是它们：
+//   `indent.append(' ', 4)`（HidUtils.jnc:19）—— 字符字面量，charLit 落成的是一格整数
+//   `insert(-1, string)`（std_String.jnc:96）—— 一元负号，不改类型
+//   `std.setError($"…$offset…")`（同上:162）—— 格式化字面量，产出的是一格**动态**的 string
+//     （literals.rst:62）
+//
+// 判据是手写的 C 双胞胎 /tmp/c165.c：C 那边没有重载，所以那几条各起一个名字 —— 挑哪一条是
+// 这一层的事，双胞胎钉住的是**算出来的数**（`' '` 就是 32）。
+long pick(long n) {
+	return n * 10;
+}
+
+long pick(string_t s) {
+	return s.m_length;
+}
+
+long pick(bool b) {
+	return b ? 1 : 0;
+}
+
+class B {
+	long m_v;
+
+	construct() {
+		m_v = 0;
+	}
+
+	long add(long n, long k) {
+		m_v = m_v + n * k;
+		return m_v;
+	}
+
+	long add(string_t s, long k) {
+		m_v = m_v + s.m_length * k;
+		return m_v;
+	}
+}
+
+int main() {
+	long x = 7;
+	printf("%d\n", pick(' '));
+	printf("%d\n", pick(-3));
+	printf("%d\n", pick($"ab$x"));
+	printf("%d\n", pick(!false));
+	B* b = new B;
+	printf("%d\n", b.add(' ', 2));
+	printf("%d\n", b.add("xy", 3));
+	return 0;
+}
