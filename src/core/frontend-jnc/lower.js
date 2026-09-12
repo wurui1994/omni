@@ -1088,6 +1088,10 @@ class JncLower {
     /* 那些类里 `construct` **只有原型**的（第一百四十八刀）：与 protoMethods 同一笔账，
        单独一格是因为构造走的不是按名字查那条路（`ctors` / `ctorArgs` / `ctorCall`）。 */
     this.protoCtors = new Set();
+    /* 顶层**只有原型**的函数（第一百五十一刀）：`size_t errorcode receive(void* p, size_t size,
+       uint_t timeout = -1);`（ias.jnc:43）—— 那一遍（globalDecl）排在函数体那一遍之前，
+       所以调用点问得着。用处与 protoMethods 一样：调它报的不该是"没有这个函数"。 */
+    this.protoFns = new Set();
     this.methods = new Map();
     this.methodNames = new Set();
     this.selfClass = null;
@@ -4284,6 +4288,8 @@ class JncLower {
         const fn = this.qual(info.name);
         const have = this.fns.get(fn);
         if (have === undefined) {
+          // 调用点也要问得着这一格（第一百五十一刀）：那儿报"没有这个函数"是认错人
+          this.protoFns.add(fn);
           this.nope(dcl, `原型 '${shown(fn)}' 没有带体的定义（实现在宿主那边的走 opaque class`
             + ' 那条路，在别的模块里的要 import 得着）');
           continue;
@@ -11500,6 +11506,13 @@ class JncLower {
       if (owners !== undefined) {
         const who = [...owners].map((o) => `${shown(o)}.${bare}`).join(' / ');
         return this.nope(n, `原型 '${who}' 没有带体的定义（实现在宿主那边的走 opaque class`
+          + ' 那条路，在别的模块里的要 import 得着）');
+      }
+      /* 顶层只有原型的函数（第一百五十一刀）：`receive(p, size)`（ias.jnc:87 —— 体在宿主那边）。
+         与上面那一问同一件事，只是名字不挂在类上，所以按命名空间从里往外解一次。 */
+      const pf = nm0 === null ? null : this.resolve(nm0, (k) => this.protoFns.has(k));
+      if (pf !== null) {
+        return this.nope(n, `原型 '${shown(pf)}' 没有带体的定义（实现在宿主那边的走 opaque class`
           + ' 那条路，在别的模块里的要 import 得着）');
       }
       return this.err(n, `没有这个函数：'${nm0}'`);
