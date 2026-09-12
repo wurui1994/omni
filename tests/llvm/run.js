@@ -469,6 +469,17 @@ if (existsSync(sysDir)) {
          符号名没有主人那一段（`get_g_probeProp` / `set_g_probeProp`）、也没有 self。
          jancy 自己那两份导出样例（jnc_sample_01_export_c/script.jnc:27）就是这个形状。 */
       + 'long property g_probeProp;\n\n'
+      /* 拿"只有原型的顶层函数"的**返回类型**去挑同元重载（第二百二十八刀）：`pick` 有两条同元、
+         只差类型，实参是一句 `hostTick()` —— 那条只有原型（体在宿主）。返回类型写在声明上，
+         与"体在哪儿"是两件事，所以这一句挑得出来：收 long 那条（41 + 1 = 42）。
+         语料里的原样是 `write(timestamp, recordCode, std.getLastError())`（log_Writer.jnc:101）。 */
+      + 'long hostTick();\n\n'
+      + 'long pick(long n) {\n'
+      + '    return n + 1;\n'
+      + '}\n\n'
+      + 'long pick(double d) {\n'
+      + '    return 100;\n'
+      + '}\n\n'
       /* 基类那格 construct 在宿主（第一百九十二刀）：`basetype.construct(9)` 落成一句
          `(ccall Plain_construct $this 9)`。 */
       + 'class Kid: Plain {\n'
@@ -519,12 +530,13 @@ if (existsSync(sysDir)) {
       + '    printf("ctor2 %d\\n", q2.seeded());\n'
       + '    g_probeProp = 41;\n'
       + '    printf("gp %d\\n", g_probeProp);\n'
+      + '    printf("pick %d\\n", pick(hostTick()));\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\npick 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\npick 42\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -577,6 +589,9 @@ if (existsSync(sysDir)) {
       detail.push('    emit sx 里没有 `(cabi get_g_probeProp i64 ())`（顶层属性的取值器，第二百二十五刀）');
     } else if (!sx.out.includes('(cabi set_g_probeProp void (i64))')) {
       detail.push('    emit sx 里没有 `(cabi set_g_probeProp void (i64))`（顶层属性的存值器，第二百二十五刀）');
+    /* 拿只有原型那一条的返回类型挑同元重载（第二百二十八刀）：那一句实参照旧是一句 `(ccall …)`。 */
+    } else if (!sx.out.includes('(cabi hostTick i64 ())')) {
+      detail.push('    emit sx 里没有 `(cabi hostTick i64 ())`（第二百二十八刀那一句实参）');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');

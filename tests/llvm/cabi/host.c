@@ -247,3 +247,13 @@ int64_t get_g_probeProp(void) {
 void set_g_probeProp(int64_t v) {
   probe_top_prop = v + 1;
 }
+
+/* 拿"只有原型的顶层函数"的**返回类型**去挑同元重载（第二百二十八刀）。语料里的原样是
+   `write(timestamp, recordCode, std.getLastError())`（log_Writer.jnc:101）—— 那个实参就是一句
+   `std.getLastError()`，而 `Error const* getLastError();`（std_Error.jnc:90）只有原型、体在
+   jancy 的 C++ 那边。返回类型写在那条声明上，与"体在哪儿"是两件事：jancy 挑重载看的是函数
+   **类型**（jnc_ct_FunctionTypeOverload.cpp:44-91 通篇只碰 `FunctionType`）。
+   回 41 是为了让"挑中的是收 long 那一条"在输出上看得见（那一条加一，回 42）。 */
+int64_t hostTick(void) {
+  return 41;
+}

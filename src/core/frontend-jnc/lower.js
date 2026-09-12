@@ -8883,14 +8883,33 @@ class JncLower {
   }
 
   /** `f(…)` 那一格的类型（第一百四十四刀）：按名字查得着、而且**自己不是一族重载**时就是它的
-   *  返回类型。是重载的回 null —— 那要先挑一条，而挑它又要问实参的类型，绕回来了。 */
+   *  返回类型。是重载的回 null —— 那要先挑一条，而挑它又要问实参的类型，绕回来了。
+   *
+   *  第二百二十八刀添了"只有原型的顶层函数"那一支。守的仍旧是这一格原来那两条（**一个字都不发**、
+   *  只在问得准时才回）：返回类型就写在那条声明上，`hostTopSigs` 那张表（第一百八十五 /
+   *  一百九十四刀）现成就有，问它与问 `fns` 一样只是查表。**有没有带体的定义与返回类型是什么
+   *  是两件事** —— jancy 挑重载看的是函数**类型**（jnc_ct_FunctionTypeOverload.cpp:44-91 通篇
+   *  只碰 `FunctionType`），体在哪儿根本不进这一步。语料里拦着榜上那一行的就是它们两个：
+   *    `std.getLastError()`（std_Error.jnc:90 `Error const* getLastError();`，量到 172 处）
+   *    `sys.getPreciseTimestamp()`（sys_globals.jnc:141 `uint64_t getPreciseTimestamp();`，84 处）
+   *  同名好几条原型（`std.setError` 那种，第一百九十四刀）照旧回 null：那要先按实参挑一条，
+   *  而挑它又要问实参的类型 —— 与上面那条重载的路一样绕回来了。 */
   cheapCall(n) {
     const cal = n.items[1];
     if (!isList(cal) || (head(cal) !== 'name' && head(cal) !== 'field')) return null;
     const nm0 = this.dotted(cal);
     if (nm0 === null || this.lookupRef(nm0) !== null) return null;
     const fn = this.resolve(nm0, (k) => this.fns.has(k));
-    if (fn === null || this.overloads.has(fn)) return null;
+    if (fn === null) {
+      const pf = this.resolve(nm0, (k) => this.protoFns.has(k));
+      if (pf === null) return null;
+      const ts = this.hostTopSigs.get(pf);
+      if (ts === undefined || ts.length !== 1) return null;
+      const rt = ts[0].ret;
+      if (rt === undefined || rt === null || rt === J_VOID) return null;
+      return { ty: rt, lit: false };
+    }
+    if (this.overloads.has(fn)) return null;
     const s = this.fns.get(fn);
     if (s === undefined || s.ret === undefined || s.ret === null || s.ret === J_VOID) return null;
     return { ty: s.ret, lit: false };

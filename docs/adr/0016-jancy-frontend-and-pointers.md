@@ -10803,6 +10803,51 @@ const property"）。这儿明明写着 `void set(int);`。
   lowered `162`、clean `238` 都没动。
 - 一起编那张榜：`39`、理由 `19` 没动。
 
+### 第二百二十八刀：只有原型的那条声明上写着返回类型
+
+榜上"同元重载：第 N 个实参的类型这一层还得先降一遍才知道"那一族（88 + 86 + 85）先量了一遍
+**到底是哪些实参**问不出来 —— 在 `pickOverload` 那句话前面临时印一行，全语料过一遍：
+
+```
+ 268  sizeof(...)                     方言级的账（一格 8 字节）
+ 175  x.f，而 x 自己就问不出来
+ 172  std.getLastError()
+ 168  text.m_p / text.m_length        方言级的账（string_t 的字节段）
+  84  sys.getPreciseTimestamp()
+  48  &x
+  13  一个不认得的名字
+```
+
+第三、第五行是同一件事，而且**不是**账：
+
+```
+Error const* getLastError();          src/jnc_ext/jnc_std/jnc/std_Error.jnc:90
+uint64_t getPreciseTimestamp();       src/jnc_ext/jnc_sys/jnc/sys_globals.jnc:141
+```
+
+两条都只有原型、体在 jancy 的 C++ 那边 —— 可**返回类型就写在那条声明上**。这一层早就把它记下来了
+（`hostTopSigs`，第一百八十五刀立、第一百九十四刀改成一格一族），问它与问 `fns` 一样只是查表，
+`cheapTy` 那两条规矩（一个字都不发、只在问得准时才回）一条都不破。先前 `cheapCall` 只问 `fns`，
+于是"体在哪儿"被当成了"类型是什么"—— **那是接错人**：jancy 挑重载看的是函数**类型**
+（`jnc_ct_FunctionTypeOverload.cpp:44-91` 通篇只碰 `FunctionType`），体在不在根本不进这一步。
+
+同名好几条原型（`std.setError` 那种，第一百九十四刀）照旧回 null：那要先按实参挑一条，而挑它
+又要问实参的类型 —— 与那条重载的路一样绕回来了。
+
+判据摆在原生腿上（C_ABI 符号只有那儿才有，ADR-0014 第 4 条决定）：`tests/llvm/run.js` §9 里
+添了 `long hostTick();`（只有原型）与同元、只差类型的 `pick(long)` / `pick(double)`，
+`pick(hostTick())` 挑收 `long` 那条、印 `pick 42`。独立的尺子是手写的 C 双胞胎 `/tmp/c184.c`
+（C 没有重载，所以两条各起一个名字、由我照 jancy 那套算该挑哪条），也印 `pick 42`。
+
+- 腿：`node tests/jnc/run.js` 320/0、`node tests/llvm/run.js` 38/0（§9 多一行 `pick 42`、
+  多一句 `(cabi hostTick i64 ())`）。
+- 逐份那张榜：`(文件, 拦路项)` 对 `3901 -> 3852`（**−49**）。
+  "第 1 个实参"那一行 `88 -> 40`；`未声明的变量` `194 -> 193`。
+  "第 2 / 第 3 个实参"那两行 `86` / `85` 没动 —— 那两处拦着的是上面那张表里第一、第四行
+  （`sizeof` 与 `m_p`），两笔方言级的账，不是这一刀能动的。
+  lowered `162`、clean `238` 都没动：这一族拦着的文件后面还压着那两笔账。
+- 一起编那张榜：诊断 `39 -> 37`、理由 `19 -> 18`，"第 1 个实参"那一行**整行没了**。
+
 
 
 
