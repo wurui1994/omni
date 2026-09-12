@@ -2326,13 +2326,21 @@ class JncLower {
    * 而"那一格"不用另起名字 —— 全局自己发成 `(ptr T)` 就是那一格（见 declareGlobal）。
    * 保守的代价也一样：同名的局部量会把全局也带上，多一次 pnew，没有可观测差别。
    */
-  collectAddrTaken(node, out) {
+  collectAddrTaken(node, out, retPtr = false) {
     if (!isList(node)) return;
     if (head(node) === 'addr') {
       const t = node.items[1];
       if (isList(t) && head(t) === 'name' && isAtom(t.items[1])) out.add(t.items[1].value);
     }
-    for (const it of node.items) this.collectAddrTaken(it, out);
+    /* 结构体左值回成指针那一格（第一百六十七刀）：`return entry;` 与 `return &entry;` 一样是
+       "地址逃出去了"，所以这一遍也得把它算进来 —— 不然那格量还躺在原地，回出去的地址指着
+       一段马上就不属于它的内存。这一问**只在返回类型是数据指针的函数里**问，而且宁可多提
+       一格（多提只是多一次 pnew，漏提是错答案）。 */
+    if (retPtr && head(node) === 'return' && isList(node.items[1])
+      && head(node.items[1]) === 'name' && isAtom(node.items[1].items[1])) {
+      out.add(node.items[1].items[1].value);
+    }
+    for (const it of node.items) this.collectAddrTaken(it, out, retPtr);
   }
 
   /** 提上去的那一格在方言里的名字。`$` 不在 jancy 的标识符里，所以撞不上用户的名字。 */
@@ -8369,7 +8377,10 @@ class JncLower {
 
     // 取地址那一遍（第九刀）：先扫一遍函数体，知道哪些名字要提到堆上，再降。
     const taken = new Set();
-    this.collectAddrTaken(n.items[3], taken);
+    /* 返回类型是**指向结构体的指针**时，`return entry;` 也算取地址（第一百六十七刀）。 */
+    this.collectAddrTaken(n.items[3], taken,
+      info.type !== null && info.type !== undefined && info.type.k === 'ptr'
+        && jncIsStruct(info.type.target));
     const saveLifted = this.lifted;
     this.lifted = taken;
     const saveAlias = this.alias;
@@ -11070,6 +11081,26 @@ class JncLower {
       const v = n.items[1];
       if (isAtom(v) && v.value === '0') return [`${pad}(ret)`];
       return this.nope(n, 'main 里 `return` 一个非 0 的值（方言的入口没有退出码）');
+    }
+    /* 结构体的**左值**回一格指向它的指针（第一百六十七刀）：
+         `DictionaryEntry* insertDictionaryHead(…) { DictionaryEntry entry; … return entry; }`
+         （test/ioninja/api/ui_Dictionary.jnc:67-79，逐份榜上 90 处）。jancy 里这不是"类型不对"——
+       一格左值在它那边的类型是 `DataRef`，而 `Cast_DataPtr::getCastOperator` 里 `TypeKind_DataRef`
+       那一支只把数组与字符串挑出去特殊办，**结构体那一支落到下面按指针种类查的那张表**
+       （jnc_ct_CastOp_DataPtr.cpp:815-823 与 856-859；`DataRef` 在它那边就是 `DataPtrType` 的一种），
+       也就是说左值直接退化成"指向它自己的指针"。地址逃出这个函数这件事由 GC 兜着 —— 这一层的
+       对应机器是第九刀那一套：被取过地址的量提到自己一段内存里（`gTaken` / `lifted`）。
+       所以这儿就是照 `&entry` 那条路发，一个字都不用新造。 */
+    if (this.retTy !== null && this.retTy !== undefined && this.retTy.k === 'ptr'
+      && jncIsStruct(this.retTy.target)) {
+      const ct0 = this.cheapTy(n.items[1]);
+      if (ct0 !== null && ct0.lit !== true && jncIsStruct(ct0.ty)
+        && sameTy(ct0.ty, this.retTy.target)) {
+        const sp0 = n.items[1].span;
+        const a0 = this.addrOf(this.mkL(sp0, this.mkA(sp0, 'addr'), n.items[1]));
+        if (a0 === null) return null;
+        return [`${pad}(ret ${a0.code})`];
+      }
     }
     let v = this.expr(n.items[1], this.retTy);
     if (v === null) return null;

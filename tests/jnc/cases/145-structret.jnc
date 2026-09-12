@@ -1,0 +1,61 @@
+// 结构体的**左值**回一格指向它的指针（第一百六十七刀）。语料里的原样：
+//
+//   DictionaryEntry* insertDictionaryHead(…) {
+//       DictionaryEntry entry;
+//       entry.m_next = dictionary;
+//       return entry;                       // ← 回的是 DictionaryEntry*
+//   }
+//
+// （test/ioninja/api/ui_Dictionary.jnc:67-79；逐份榜上这一行 90 处，而且是 **E** —— jancy 编得过、
+// 这一层报"return 的类型是 X，函数声明的是 X*"，那句话认错了人。）
+//
+// jancy 那边这不是类型不对：一格左值在它那边的类型是 `DataRef`，而
+// `Cast_DataPtr::getCastOperator` 里 `TypeKind_DataRef` 那一支只把数组与字符串挑出去特殊办，
+// 结构体那一支落到下面**按指针种类查的那张表**（jnc_ct_CastOp_DataPtr.cpp:815-823、856-859；
+// `DataRef` 在它那边本身就是 `DataPtrType` 的一种）—— 也就是说左值直接退化成"指向它自己的指针"。
+// 地址逃出这个函数由 GC 兜着；这一层的对应机器是第九刀那一套：被取过地址的量提到自己一段内存里。
+// 所以这一刀就是"照 `&entry` 那条路发"，外加让取地址那一遍也看见 `return entry;`。
+//
+// 三件可观测的事钉在下面：每次调用各得**自己**那一格（`m_v` 一路都对）、链子接得上（`m_next`）、
+// 结构体字段那一格也走同一条（`inner` 里回的是字段的地址）。
+//
+// 期望输出的出处：/tmp/c151.c（`cc -O0 -std=c99 -Wall`）—— 独立的一份：C 里回一个局部量的地址是
+// 未定义行为，所以那一份按"这一格要活过这次调用"的语义手写成堆上的一格（malloc），与这一层是
+// 提到自己一段内存里还是别的做法无关。
+
+struct Entry {
+	Entry* m_next;
+	int m_v;
+}
+
+struct Pair {
+	Entry m_a;
+	Entry m_b;
+}
+
+Entry* head(Entry* rest, int v) {
+	Entry e;
+	e.m_v = v;
+	e.m_next = rest;
+	return e;
+}
+
+// 字段那一格也是左值：回的是它的地址
+Entry* inner(Pair* p) {
+	return p.m_b;
+}
+
+int main() {
+	Entry* a = head(null, 1);
+	Entry* b = head(a, 2);
+	Entry* c = head(b, 3);
+	printf("%d %d %d\n", c.m_v, c.m_next.m_v, c.m_next.m_next.m_v);
+
+	Pair* p = new Pair;
+	p.m_a.m_v = 7;
+	p.m_b.m_v = 9;
+	Entry* q = inner(p);
+	q.m_v = 11;
+	printf("a=%d b=%d q=%d\n", p.m_a.m_v, p.m_b.m_v, q.m_v);
+	return 0;
+}

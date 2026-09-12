@@ -8580,6 +8580,51 @@ pairs 从 4958 涨到 **5281**。把数字从句子里去掉（"收这么多个�
   原型、另一处对不上），先前它们合在一行里。
 - leg `277 passed / 0 failed`（`bad/protoonly-arity`、`bad/protoonly-argtype` 两份的 expected 跟着换）。
 
+## 第一百六十七刀：结构体的**左值**回一格指向它的指针
+
+```jnc
+DictionaryEntry* insertDictionaryHead(…) {
+    DictionaryEntry entry;
+    entry.m_next = dictionary;
+    return entry;                // ← 声明回的是 DictionaryEntry*
+}
+```
+
+（ui_Dictionary.jnc:67-79；逐份榜上 90 处，而且是 **E** —— jancy 编得过、这一层报
+"return 的类型是 X，函数声明的是 X*"。那句话认错了人。）
+
+jancy 那边这不是类型不对：一格左值在它那边的类型是 `DataRef`，而
+
+```cpp
+// jnc_ct_CastOp_DataPtr.cpp:815-823 / 856-859
+case TypeKind_DataRef:
+    switch (((DataPtrType*)srcType)->getTargetType()->getTypeKind()) {
+    case TypeKind_Array:  return &m_fromArray;
+    case TypeKind_String: return &m_fromString;
+    }
+    break;                       // ← 结构体落到下面
+    …
+size_t i = ((DataPtrType*)srcType)->getPtrKind() >> PtrTypeFlag__PtrKindBit;
+return m_operatorTable[i][j];    // 按指针种类查表：ref -> ptr
+```
+
+`DataRef` 在它那边本身就是 `DataPtrType` 的一种，所以**左值直接退化成"指向它自己的指针"**。
+（顺带看清了另一条：`default:` 那一支才是"结构体**右值**转指针"，那一支要求目标指针是 `const`
+—— 因为拿到的是一份拷贝的地址。我们这一刀只收左值那一种。）
+
+地址逃出这个函数由 GC 兜着；这一层的对应机器是第九刀那一套 —— 被取过地址的量提到自己一段内存里
+（`gTaken` / `lifted`）。所以落法就是"照 `&entry` 那条路发"，外加让取地址那一遍也看见
+`return entry;`（返回类型是数据指针的函数里才问，宁可多提一格：多提只是多一次 `pnew`，漏提是
+错答案 —— 回出去的地址会指着一段马上不属于它的内存）。
+
+### 账：pairs `4967 -> 4877`（−90）
+
+- 逐份那张榜：lowered `121`、clean `192` 没动，pairs `4967 -> 4877`；
+  `return 的类型是 ui.DictionaryEntry，函数声明的是 ui.DictionaryEntry*` 那一行整片让开。
+- leg `277 -> 278`。尺子 `/tmp/c151.c`：C 里回局部量的地址是未定义行为，所以那一份按语义写成
+  堆上的一格（malloc）——"这一格要活过这次调用"这件事三种做法（jancy 的 GC、这一层的提格、C 的
+  malloc）在可观测的东西上一样。字段那一格也钉着：`inner(p)` 回的是 `&p.m_b`，写进去在 `p` 上看得见。
+
 ## 后果与代价
 
 
