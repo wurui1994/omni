@@ -8961,6 +8961,47 @@ class JncLower {
     return null;
   }
 
+  /**
+   * `cheapTy` 回 null 的那个实参**是哪一种**（第二百三十七刀）。**一个字都不发**、只看语法树 ——
+   * 用处是把"这一层还得先降一遍才知道"那句笼统话换成指名的那一句：量出来（第二百二十八刀那一遍
+   * 全语料的统计）拦着"同元重载：第 N 个实参"那一族的就是两种，而两种都是**已经记着的方言级
+   * 的账**，不是这一层欠的：
+   *   `sizeof(params)` / `countof(a)` 那一族 —— 268 + 6 + 4 处（sizeof 那笔：方言一格 8 字节）
+   *   `text.m_p` / `text.m_length` —— 168 处（string_t 的字节段那笔）
+   * 回 `'sizeof'` / `'strbytes'` / null（null 就照旧说那句笼统的）。
+   */
+  cheapWhy(e) {
+    if (!isList(e)) return null;
+    const h = head(e);
+    if (h === 'sizeof' || h === 'countof' || h === 'offsetof'
+      || h === 'dynamic-sizeof' || h === 'dynamic-countof' || h === 'dynamic-offsetof') {
+      return 'sizeof';
+    }
+    if (h === 'field' || h === 'ptr-field') {
+      const b = this.cheapTy(e.items[1]);
+      if (b !== null && !b.lit && b.ty === J_STR) return 'strbytes';
+      return null;
+    }
+    // 算式与取地址里头也算（`&params` / `p + sizeof(hdr)`）：谁先答上算谁
+    if (h === 'addr' || h === 'unary') return this.cheapWhy(e.items[e.items.length - 1]);
+    if (h === 'binary') {
+      for (let i = 2; i < e.items.length; i++) {
+        const w = this.cheapWhy(e.items[i]);
+        if (w !== null) return w;
+      }
+    }
+    return null;
+  }
+
+  /** 上面那一问答出来之后该说的那半句（第二百三十七刀）。 */
+  cheapWhyText(w) {
+    return w === 'sizeof'
+      ? '是 `sizeof` / `countof` 那一族 —— 要方言的布局先认整数宽度'
+        + '（jancy 的 int 是 4 字节，方言这边一格 8 字节），与榜上 `sizeof` 那一行同一笔账'
+      : '读的是 `string_t` 的字节段（`m_p` / `m_length`）—— 那是一格指到字节上的 '
+        + '`char const*`，而这一层的 `char*` 指的是方言的整数格，与榜上 `m_p` 那一行同一笔账';
+  }
+
   /** `E.M` 里那格枚举类型 —— enumMember 的**纯查表**那一半（第一百四十四刀）。
    *  差别只在"查不着就回 null"：那儿要报错，这儿一个字都不许发。 */
   cheapEnumMem(n) {
@@ -9107,8 +9148,16 @@ class JncLower {
     // 按类型排。先把这几个实参的类型问出来 —— 有一个问不出来就整条不猜。
     const tys = argNodes.map((a) => this.cheapTy(a));
     if (tys.some((t) => t === null)) {
+      const bi = tys.findIndex((t) => t === null);
+      /* 那个实参**是哪一种**（第二百三十七刀）：量出来拦着这一族的两种都是已经记着的方言级的账，
+         说得准就别说那句笼统的。 */
+      const why = this.cheapWhy(argNodes[bi]);
+      if (why !== null) {
+        return this.nope(n, `'${shown(base)}' 的同元重载要按参数类型挑（见 ADR-0016 第八十刀），`
+          + `而第 ${bi + 1} 个实参${this.cheapWhyText(why)}`);
+      }
       return this.nope(n, `'${shown(base)}' 的同元重载：第 `
-        + `${tys.findIndex((t) => t === null) + 1} 个实参的类型这一层还得先降一遍才知道`
+        + `${bi + 1} 个实参的类型这一层还得先降一遍才知道`
         + '（同元重载要按参数类型挑，见 ADR-0016 第八十刀）');
     }
     let best = -1;

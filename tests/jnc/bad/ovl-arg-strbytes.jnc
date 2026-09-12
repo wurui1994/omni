@@ -1,0 +1,11 @@
+// 同上一格（第二百三十七刀），另一种：那个实参读的是 `string_t` 的字节段。
+// 语料里的原样是 `write(recordCode, text.m_p, text.m_length)`（log_Writer.jnc:75）。
+void g(long a, long b) {}
+
+void g(long a, double b) {}
+
+int main() {
+	string_t t = "hi";
+	g(1, t.m_length);
+	return 0;
+}

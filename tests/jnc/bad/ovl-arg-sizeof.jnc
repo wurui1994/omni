@@ -1,0 +1,19 @@
+// 同元重载要按参数类型挑（第八十刀），而那个实参是 `sizeof`（第二百三十七刀把话说准了）。
+//
+// 先前这一格说的是"第 2 个实参的类型这一层还得先降一遍才知道"—— 笼统。全语料量过一遍
+// （第二百二十八刀那一遍）：拦着榜上那一族的实参**只有两种**，两种都是**已经记着的方言级的账**
+// ——`sizeof` / `countof` 那一族（268 + 6 + 4 处）与 `string_t` 的字节段（168 处）。
+// 语料里的原样是 `write(StdRecordCode.RetroColorize, &params, sizeof(params))`（log_Writer.jnc:120）。
+struct S {
+	int m_x;
+}
+
+void f(long a, long b) {}
+
+void f(long a, double b) {}
+
+int main() {
+	S s;
+	f(1, sizeof(s));
+	return 0;
+}
