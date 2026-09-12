@@ -76,8 +76,18 @@ function corpus(dir, out = []) {
 /* ioninja 那一支自己带一层 API（它的 CMakeLists.txt:815 就是这么编的），不给 `-I` 的话
    每一份都卡在"没有这个类型"上，量出来的榜是假的。 */
 const IONINJA_API = join(JANCY, 'test', 'ioninja', 'api');
-const argsFor = (p) => (p.includes(`${'/test/ioninja/'}`) && existsSync(IONINJA_API)
-  ? [cli, 'sx', p, '-I', IONINJA_API] : [cli, 'sx', p]);
+/* jancy 自己那几个扩展库的**源码**也要在 `-I` 里（第一百八十九刀，这是一刀**量法**）：
+   `std.Buffer` / `std.Guid` / `std.Error` / `std.StringHashTable` / `sys.getTimestamp` 这些名字
+   的定义就躺在 `src/jnc_ext/jnc_std/jnc/` 与 `jnc_sys/jnc/` 里（`std_Buffer.jnc` 那一族），
+   jancy 那边它们由扩展库随身带、并且自动 import（jnc_std_StdLib.cpp 的 SOURCE_FILE_TABLE，
+   第一百七十六刀量过那一段）。不给这两个目录的话，一整批 `import "std_Buffer.jnc"` 与
+   `没有这个类型：'std.Buffer'` 全是**量法的噪音**，不是这一层的欠账 —— 榜首那几行就成了假账。 */
+const EXT_INCS = ['jnc_std', 'jnc_sys']
+  .map((x) => join(JANCY, 'src', 'jnc_ext', x, 'jnc'))
+  .filter((d) => existsSync(d));
+const incFlags = (extra) => [...extra, ...EXT_INCS].flatMap((d) => ['-I', d]);
+const argsFor = (p) => [cli, 'sx', p,
+  ...incFlags(p.includes(`${'/test/ioninja/'}`) && existsSync(IONINJA_API) ? [IONINJA_API] : [])];
 
 /* `--group` 那一格（见上面那段注）：合成一份只有 import 的文件，一次编完整批。 */
 if (group !== null) {
@@ -94,7 +104,7 @@ if (group !== null) {
   let gErr = '';
   let gCode = 0;
   try {
-    execFileSync(process.execPath, [cli, 'sx', modPath, '-I', dir],
+    execFileSync(process.execPath, [cli, 'sx', modPath, ...incFlags([dir])],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
     gCode = e.status ?? 1;
