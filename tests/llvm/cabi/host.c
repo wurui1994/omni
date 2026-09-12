@@ -139,6 +139,14 @@ int64_t Plain_mix(void *self, int64_t a, int64_t b) {
 /* 同元、只差**类型**的那一对（第一百八十八刀）：带体的那条收整数，只有原型的这条收 string_t
    —— 字符串过 C_ABI 是那格胖指针的第 0 个字（字面量带着结尾的零，见 ADR-0022 的 J4b），
    所以这儿 strlen 得出来。回长度乘 100，好让"挑对了没有"在输出上看得见。 */
+/* 任何数据指针隐式转成 `void*`（第一百九十刀，jancy 的转换表 jnc_ct_CastOp_DataPtr.cpp:461-464）。
+   这一格收 `void const*`，调用点传进来的是一格 `int*` —— 这一层的 int 一格是 8 字节，
+   所以按 int64 读得出那个 7。 */
+int64_t Plain_blen(void *self, const void *p, int64_t n) {
+  (void)self;
+  return p == NULL ? -1 : *(const int64_t *)p + n;
+}
+
 int64_t Plain_note(void *self, const char *s) {
   (void)self;
   return s == NULL ? -1 : (int64_t)strlen(s) * 100;

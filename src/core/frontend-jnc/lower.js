@@ -6214,6 +6214,17 @@ class JncLower {
    */
   assignOk(from, to) {
     if (sameTy(from, to)) return true;
+    /* 任何数据指针**隐式**转成 `void*`（第一百九十刀）。不是我们定的，是 jancy 的转换表 ——
+         // jnc_ct_CastOp_DataPtr.cpp:461-464
+         if (dstDataType->getStdType() == StdType_AbstractData ||
+             dstDataType->getTypeKind() == TypeKind_Void && canCastToPod)
+           return constCastKind;              // <- 隐式那一档
+       `canCastToPod` 是 `isSrcPod || isDstConst || 目标是 thin 指针`，而 `char` / `int` / 结构体
+       在 jancy 那边都是 POD（类不是，可这一层的类根本不是数据指针，走不到这儿）。
+       所以这一条与 C 的那一条一样：指到什么上的指针都能当 `void*` 用。
+       逐份榜上 99 处 `'…' 的第 1 个实参要 void*，这里是 char*` 就是它 —— 那是一句 `E`
+       （我们答错了，不是"还不收"）。 */
+    if (jncIsPtr(from) && jncIsPtr(to) && to.target.k === 'void') return true;
     return isClass(from) && isClass(to) && this.isBase(to.name, from.name);
   }
 

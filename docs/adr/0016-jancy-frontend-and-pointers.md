@@ -9431,6 +9431,34 @@ doc_PluginHost.jnc:56-58、ias.jnc:20/27 那一批），第一百五十一刀记
 ① `char*` -> `void*` 的隐式转（99 处，jancy 的 `Cast_DataPtr` 那一族收它）；
 ② std 那几个类的 construct（103 处）；③ errorcode 不写 `try`（158 处）。
 
+### 第一百九十刀：任何数据指针**隐式**转成 `void*`
+
+上一刀摆出来的三格里的第一格（99 处，而且是一句 `E` —— 我们答错了，不是"还不收"）。
+判据是 jancy 的转换表本身：
+
+```cpp
+// jnc_ct_CastOp_DataPtr.cpp:461-464
+if (dstDataType->getStdType() == StdType_AbstractData ||
+    dstDataType->getTypeKind() == TypeKind_Void && canCastToPod)
+  return constCastKind;                 // <- 隐式那一档
+```
+
+`canCastToPod` 是 `isSrcPod || isDstConst || 目标是 thin 指针`；`char` / `int` / 结构体在 jancy
+那边都是 POD（类不是，可这一层的类根本不是数据指针，走不到这一支）。所以这一条与 C 的那一条
+一样：**指到什么上的指针都能当 `void*` 用**。改法一行，加在 `assignOk` 里。
+
+判据在 `tests/llvm/run.js` 第 9 节（`void*` 在方言里发不出来 —— `(ptr void)` 那一格方言不收，
+所以这一格只在**过宿主面**时成立，C_ABI 那一侧 `void*` 与别的指针同是一个 `ptr` 词）：
+`Plain` 上多一条 `long blen(void const* p, long n);`，调用点传的是一格 `int*`，宿主那边按 int64
+读出那个 7 再加 4，印 `blen 11`。
+
+- 腿：`node tests/jnc/run.js` 280/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `4724 -> 4591`（**−133**）；lowered `138`、clean `210` 没动。
+- 一起编那张榜：总数 `66` 没动、理由 `25 -> 24`。
+- **一格没跟上的地方照实记**：`void*` 只在过宿主面时成立 —— 一格 `void* p;` 的**局部量或字段**
+  这一层还发不出来（方言的 `(ptr T)` 的 T 不收 `void`）。那是方言那一侧的事，与 `m_p` 那条
+  "要一段真字节"是邻居，一起算。
+
 
 
 ## 后果与代价
