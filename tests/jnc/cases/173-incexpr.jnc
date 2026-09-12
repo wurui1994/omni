@@ -1,0 +1,27 @@
+// `++` / `--` 写在**表达式**里（第二百二十一刀）。语料里 20 份：post-inc 13、pre-inc 6、
+// post-dec 1，原样是 `m_reportFieldEncoderArray[encoderIdx++].encode(m_reportBuffer.m_p, …)`
+// 那一族。
+//
+// 方言里 `++` 是**语句**（不取值），所以这一格要的正是 EC_HOIST 那条现成的路：把值落成一格
+// 临时、自增那一句插到**这条语句之前**。次序就是这一刀的全部内容 —— 后缀先落临时再自增
+// （回旧值），前缀先自增再落临时（回新值）。插不进语句的位置照旧说清，与 errorcode 那一处、
+// 带宽度的格式化字面量那一处是同一句话（那两处也走 ecOut）。
+//
+// 判据是手写的 C 双胞胎 /tmp/c179.c。**每条语句只放一处副作用** —— C 的实参求值次序是未指定
+// 的，两个都带副作用的实参不是尺子（第一百九十六刀那一趟栽过一次）。所以这儿也写成
+// `long a = i++;` 再印，而不是 `printf("%d %d", i++, i)`。
+int main() {
+	int i = 5;
+	int a = i++;
+	printf("%d %d\n", a, i);
+
+	int j = 5;
+	int b = ++j;
+	printf("%d %d\n", b, j);
+
+	int arr[4];
+	int k = 1;
+	arr[k++] = 9;
+	printf("%d %d\n", arr[1], k);
+	return 0;
+}

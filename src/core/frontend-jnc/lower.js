@@ -13208,8 +13208,38 @@ class JncLower {
       // 赋值当表达式（第一百一十四刀）：`return m_currentIndex = insertItem(…)`。
       case 'assign':
         return this.asgnExpr(n);
-      case 'pre-inc': case 'post-inc': case 'pre-dec': case 'post-dec':
-        return this.nope(n, `表达式里的 ${h}（方言里它是语句；单独写成一行就行）`);
+      /* `x++` / `++x` 写在**表达式**里（第二百二十一刀）。语料里 20 份：post-inc 13、
+         pre-inc 6、post-dec 1，原样是 `m_reportFieldEncoderArray[encoderIdx++].encode(…)`
+         那一族。
+         方言里 `++` 是**语句**（不取值），所以这一格要的正是 EC_HOIST 那条现成的路：
+         把"旧值"（后缀）或"新值"（前缀）落成一格临时，自增那一句插到**这条语句之前**。
+         插不进语句的位置照旧说清 —— 与 errorcode 那一处、带宽度的格式化字面量那一处
+         是同一句话（那两处也走 ecOut）。
+         次序是这一格的全部内容：后缀先落临时再自增，前缀先自增再落临时。 */
+      case 'pre-inc': case 'post-inc': case 'pre-dec': case 'post-dec': {
+        if (this.ecOut === null) {
+          return this.nope(n, `这个位置上的 ${h}（要先把值落成一格局部量，而这儿插不进语句`
+            + ' —— 见 EC_HOIST）');
+        }
+        const lv0 = this.lvalue(n.items[1]);
+        if (lv0 === null) return null;
+        /* 算符重载那一族（第一百三十一刀）先不收：它们是**两个函数**，而 `postfix operator ++`
+           回的是旧值、前缀那个回的是新值（stdt_Iterator.jnc:44）—— 取值这一半要按哪个函数
+           回什么来定，与内建那三种"自己读一遍"不是一条路。 */
+        if (isClass(lv0.type) || jncIsStruct(lv0.type)) {
+          return this.nope(n, `表达式里对 ${tyName(lv0.type)} 用 ${h} —— 那一族是算符重载`
+            + '（两个函数，前缀回新值、postfix 回旧值），取值这一半要按调的是哪个函数来定');
+        }
+        const post = h === 'post-inc' || h === 'post-dec';
+        const tmp = `$x${this.ecSeq++}`;
+        const tt = slotText(lv0.type);
+        if (post) this.ecOut.push(`${this.ecPad}(let ${tmp} ${tt} ${this.read(lv0)})`);
+        const inc = this.exprStmt(n, this.ecPad.length);
+        if (inc === null) return null;
+        for (const l of inc) this.ecOut.push(l);
+        if (!post) this.ecOut.push(`${this.ecPad}(let ${tmp} ${tt} ${this.read(lv0)})`);
+        return { code: `(var ${tmp})`, type: lv0.type, hoisted: true };
+      }
       /* 第二百一十四刀：`表达式 '…'` 这一行 35 份文件按真话拆开是四件事（与第二百一十二刀
          同一条法）。每一支的话里写清 jancy 那边落在哪儿，好让看榜的人知道该做哪个。 */
       case 'offsetof':
