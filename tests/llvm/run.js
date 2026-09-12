@@ -487,6 +487,13 @@ if (existsSync(sysDir)) {
       + '}\n\n'
       /* 基类那格 construct 在宿主（第一百九十二刀）：`basetype.construct(9)` 落成一句
          `(ccall Plain_construct $this 9)`。 */
+      /* 一格**嵌进来**的类字段，而那个类的 construct 体在宿主那边（第二百三十二刀）：
+         造外层那一格时紧接着 `(ccall Plain_construct <字段的地址> 5)` —— 那个 5 是原型上的
+         默认值（第一百九十一刀）。所以 `o.m_p.seeded()` 印 5。语料里的原样是
+         `ui.ToolBar m_toolBar;`（doc_PluginHost.jnc:26）。 */
+      + 'class Owner {\n'
+      + '    Plain m_p;\n'
+      + '}\n\n'
       + 'class Kid: Plain {\n'
       + '    construct() {\n'
       + '        basetype.construct(9);\n'
@@ -538,12 +545,14 @@ if (existsSync(sysDir)) {
       + '    printf("pick %d\\n", pick(hostTick()));\n'
       + '    q.m_gain = 14;\n'
       + '    printf("gain %d\\n", q.m_gain);\n'
+      + '    Owner* ow = new Owner;\n'
+      + '    printf("emb %d\\n", ow.m_p.seeded());\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\npick 42\ngain 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\npick 42\\ngain 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\npick 42\ngain 42\nemb 5\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\npick 42\\ngain 42\\nemb 5\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */

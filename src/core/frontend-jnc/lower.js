@@ -9220,6 +9220,19 @@ class JncLower {
    * 没有构造（也没有静态构造）时一个字都不发。回 null 表示报过错了。
    */
   ctorCall(node, cls, self, ctorNode, pad, out) {
+    /* 体在宿主那边的 construct（第二百三十二刀）：`ui.ToolBar m_toolBar;` —— 一格**嵌进来**的
+       类字段（局部的类变量同理），而那个类的 construct 只有原型。`new` 那一条路第一百六十二刀
+       就落了（同一个符号、同一份声明里的签名），这一条先前还留在原处报 —— 同一件事，只是那格
+       地址是字段的地址而不是刚 `pnew` 出来的那一格。语料里的原样是 doc_PluginHost.jnc:26/28
+       （`ui.ToolBar m_toolBar;` / `ui.PropertyGrid m_propertyGrid;`），一起编那张榜上剩的
+       就是这两处。 */
+    if (!this.realCtor(cls) && this.hostCtors.has(cls)) {
+      const hc = this.hostCtorArgs(node, cls, ctorNode === null ? [] : this.flat(ctorNode));
+      if (hc === null) return null;
+      out.push(`${pad}(expr (ccall ${hc.sym} ${self}`
+        + `${hc.vals.map((v) => ` ${v.code}`).join('')}))`);
+      return out;
+    }
     if (this.protoCtorOnly(cls)) return this.protoCtorNope(node, cls);
     const argNodes = ctorNode === null ? [] : this.flat(ctorNode);
     if (!this.ctors.has(cls)) {
