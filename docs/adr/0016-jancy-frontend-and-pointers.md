@@ -9589,6 +9589,43 @@ long strtol(char const* p,   char const** end = null, int radix = 0); // :467
   （单编从 3 条诊断降到 2 条，剩下的是 `形参 'formals'`），而那一份是**下一步**要用的
   （jancy 的 std 库对每个模块都隐式 import 它，jnc_std_StdLib.cpp:930-931）。
 
+### 第一百九十五刀：只有原型的变参函数
+
+上一刀之后 `std_globals.jnc` 单编只剩两条诊断，都是同一件事：
+
+```jnc
+intptr_t cdecl printf(char const thin* fmtSpecifier, ...);   // :555
+string_t cdecl std.format(string_t fmtSpecifier, ...);       // :582
+```
+
+`...`。语法这一层早就认（`jnc.grammar:470-471` 的 `(formals-varargs …)`），是 `formalList` 一律拒 ——
+先前那句话还是"形参 'formals'"，指着形参表里第一格，**认错了人**：`formals-varargs` 把整张形参表
+包了一层，`flat` 出来的就是那张表本身。
+
+界划在"有没有体"上：
+
+- **只有原型**的收下。变参那一段照 C 的默认实参提升摆进 `(ccall …)` 里，声明发成
+  `(cabi f R (T ...))` —— 与 `with "h.h"` 收来的那些变参声明**同一个形状**（`impDecls` 那一处，
+  ADR-0022 的 J4d），下游是 `CCALL` 的 aux，一行都不用新写。bool 落在变参那一段的明说不收
+  （C 那边它会被提升成 int，这一层没有那一步）——那一句照抄 `ccallSite`。
+- **带体的**不收：体里读那一段要 `va_list` / `va_arg` 那一套，这一层一格都没有。收下它就只能把
+  那几个实参丢掉 —— 静默的错答案。墙钉在 `tests/jnc/bad/varargs-body.jnc`。
+
+顺带两处跟着改：挑重载时变参那一条按"定参给够了就算合得上"算，排分只按定参排
+（变参那一段没有形参可对）。
+
+判据在 `tests/llvm/run.js` 第 9 节：`long cdecl hostVsum(long n, ...)`（宿主那边 `va_arg` 逐个加），
+`hostVsum(3, 10, 20, 30)` 印 60、`hostVsum(0)` 印 0；`.sx` 里那一句是 `(cabi hostVsum i64 (i64 ...))`。
+
+- 腿：`node tests/jnc/run.js` 281/0（新增 `bad/varargs-body`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `142 -> 143`（+1）、clean `214 -> 215`（+1）、`(文件, 拦路项)` 对
+  `4499 -> 4498`（−1）；一起编那张榜 `62`、理由 `23` 都没动。
+- 真正的收获不在榜上：**`std_globals.jnc` 单编退出码 0 了**（第一百八十九刀把它放进 `-I` 时是 6 条
+  诊断、上一刀降到 2 条、这一刀到 0）。jancy 的 std 库对每个模块都隐式 import 这一份
+  （`JNC_LIB_IMPORT("std_globals.jnc")`，jnc_std_StdLib.cpp:930），所以它降得下来是"把那份声明
+  接进来"的前提 —— 榜上 `没有这个函数：'…'` 那 230 处里，`memcpy` / `strlen` / `atoi` 那一族全在
+  这一份里声明着。
+
 
 
 ## 后果与代价

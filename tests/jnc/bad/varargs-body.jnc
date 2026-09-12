@@ -1,0 +1,15 @@
+// 带体的**变参**函数（第一百九十五刀钉的界）。只有原型的那一种是收的 —— 变参那一段照 C 的
+// 默认实参提升摆进 `(ccall …)` 里，声明发成 `(cabi f R (T ...))`，正面判据在
+// tests/llvm/run.js 第 9 节（`long cdecl hostVsum(long n, ...)` 印 `vsum 60 0`；
+// C_ABI 符号只有原生腿上才有，ADR-0014 的第 4 条决定，所以判据不在这儿）。
+//
+// 带体的答不出来：体里要读那一段得有 `va_list` / `va_arg` 那一套（jancy 那边走的是
+// `vararg` 那一族的内建），这一层一格都没有 —— 收下它就只能把那几个实参丢掉，那是静默的错答案。
+long cdecl sum(long n, ...) {
+	return n;
+}
+
+int main() {
+	printf("%d\n", sum(1, 2, 3));
+	return 0;
+}

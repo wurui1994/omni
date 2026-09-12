@@ -4895,13 +4895,14 @@ class JncLower {
              与 `Owner_method` 那条规则是同一条：全名换字符）。签名记下来，调用点据此发
              `(ccall …)`。 */
           this.protoFns.add(fn);
-          const ps0 = this.formalList(info.formals);
+          const ps0 = this.formalList(info.formals, true);
           if (ps0 !== null) {
             const ds0 = ps0.map((p) => p.def ?? null);
             const sg0 = {
               ret: info.type,
               params: ps0.map((p) => p.type),
               defs: ds0.some((d) => d !== null) ? ds0 : null,
+              variadic: ps0.variadic === true,
             };
             /* 同名好几条原型（第一百九十四刀）：`long strtol(string_t, size_t*, int)` 与
                `long strtol(char const*, char const**, int)`（std_globals.jnc:461/467）——
@@ -4913,7 +4914,8 @@ class JncLower {
                签名一模一样的当同一条（import 到两遍那种），不然会平手。 */
             const prev0 = this.hostTopSigs.get(fn);
             const same0 = (a, b) => a.params.length === b.params.length
-              && a.params.every((t, i) => sameTy(t, b.params[i])) && sameTy(a.ret, b.ret);
+              && a.params.every((t, i) => sameTy(t, b.params[i])) && sameTy(a.ret, b.ret)
+              && (a.variadic === true) === (b.variadic === true);
             if (prev0 === undefined) this.hostTopSigs.set(fn, [sg0]);
             else if (!prev0.some((s) => same0(s, sg0))) prev0.push(sg0);
           }
@@ -7190,10 +7192,25 @@ class JncLower {
 
   /** 形参表 -> `{name, type, formals, def}` 一串（抽出来是因为方法**原型**也要问它：
    *  `abstract void foo(int x);` 永远没有体，签名只能从原型上来，第五十七刀）。
-   *  `def` 是形参的默认值那一格的**语法节点**（第七十七刀），没写就是 null。 */
-  formalList(formalsNode) {
+   *  `def` 是形参的默认值那一格的**语法节点**（第七十七刀），没写就是 null。
+   *
+   *  `vaOk` 是"这条声明收得下 `...` 吗"（第一百九十五刀）：**只有原型**的那种收得下 ——
+   *  那一段在调用点按 C 的默认实参提升摆进 `(ccall …)` 里，与 `with "h.h"` 收来的那些
+   *  变参声明是同一条路（`(cabi f R (T ...))`）。带体的收不下：体里读那一段要 `va_list`
+   *  那一套，这一层没有。收下时回的那串上挂一格 `variadic`。 */
+  formalList(formalsNode, vaOk = false) {
+    let node = formalsNode;
+    let va = false;
+    if (isList(formalsNode) && head(formalsNode) === 'formals-varargs') {
+      if (!vaOk) {
+        return this.nope(formalsNode, '可变形参（只有原型的那种收得下 —— 带体的要 `va_list` 那一套）');
+      }
+      node = formalsNode.items[1];
+      va = true;
+    }
     const ps = [];
-    for (const f of this.flat(formalsNode)) {
+    if (va) ps.variadic = true;
+    for (const f of this.flat(node)) {
       const fh = isList(f) ? head(f) : null;
       if (fh === 'formals-varargs') return this.nope(f, '可变形参');
       if (fh === 'formal-anon') return this.nope(f, '无名形参');
@@ -11788,14 +11805,42 @@ class JncLower {
     const args0 = this.flat(n.items[2]);
     const args = sig.defs === null ? args0 : this.withDefaults(args0, sig.params, sig.defs, null);
     if (args === null) return null;
-    if (args.length !== sig.params.length) {
-      return this.err(n, `'${shown(fn)}' 要 ${sig.params.length} 个实参，`
-        + `这里给了 ${args0.length} 个`);
+    const va = sig.variadic === true;
+    if (va ? args.length < sig.params.length : args.length !== sig.params.length) {
+      return this.err(n, va
+        ? `'${shown(fn)}' 至少要 ${sig.params.length} 个定参，这里给了 ${args0.length} 个`
+        : `'${shown(fn)}' 要 ${sig.params.length} 个实参，这里给了 ${args0.length} 个`);
     }
     const words = vret ? ['ptr'] : [];
     const parts = [];
     const slots = [];
     for (let i = 0; i < args.length; i++) {
+      /* 变参那一段没有声明的类型可对（第一百九十五刀）：C 的默认实参提升说了算，与
+         `ccallSite` 那一处（`with "h.h"` 收来的变参声明）逐条一样 —— bool 在 C 里会被
+         提升成 int，而这一层没有那一步，所以明说不收、让人写个 `(int)`。 */
+      if (i >= sig.params.length) {
+        let ev = this.expr(args[i], null);
+        if (ev === null) return null;
+        if (ev.type.k === 'bool') {
+          return this.err(args[i], `'${shown(fn)}' 的第 ${i + 1} 个实参落在变参那一段，`
+            + '而 bool 在 C 里会被提升成 int —— 这一层没有那一步，写 `(int)` 转一下');
+        }
+        const ew = isVar(ev.type) ? 'ptr' : this.cabiWordOfJnc(ev.type, false);
+        if (ew === null) {
+          return this.nope(args[i], `'${shown(fn)}' 的第 ${i + 1} 个实参的类型 `
+            + `${tyName(ev.type)} 落在变参那一段（落不进 C_ABI 的那几个词）`);
+        }
+        if (isVar(ev.type)) {
+          const pv = this.hostVariantArg(args[i], ev);
+          if (pv === null) return null;
+          parts.push(pv);
+          slots.push(`(ptr ${VARIANT})`);
+        } else {
+          parts.push(ev.code);
+          slots.push(slotText(ev.type));
+        }
+        continue;
+      }
       const w = isVar(sig.params[i]) ? 'ptr' : this.cabiWordOfJnc(sig.params[i], false);
       if (w === null) {
         return this.nope(n, `'${shown(fn)}' 的第 ${i + 1} 个形参的类型 `
@@ -11817,9 +11862,12 @@ class JncLower {
       } else parts.push(v.code);
     }
     if (!this.cabiNames.has(sym)) {
-      this.decls.push(`  (cabi ${sym} ${rw} (${words.join(' ')}))`);
+      /* 变参那一格写在声明里（第一百九十五刀）：`(cabi f R (T ...))` —— 与 `with "h.h"`
+         收来的那些同一个形状（见 impDecls 那一处）。 */
+      const ws0 = va ? [...words, '...'] : words;
+      this.decls.push(`  (cabi ${sym} ${rw} (${ws0.join(' ')}))`);
       this.cabiNames.add(sym);
-      this.cabiSigs.set(sym, { ret: rw, params: words, sym });
+      this.cabiSigs.set(sym, { ret: rw, params: words, variadic: va, sym });
     }
     if (vret) {
       return { code: `(call ${this.hostVretFn(sym, slots)}${parts.map((p) => ` ${p}`).join('')})`, type: sig.ret };
@@ -11872,6 +11920,11 @@ class JncLower {
       const sg = sigs[i];
       const opt = sg.defs === null || sg.defs === undefined
         ? 0 : sg.defs.filter((d) => d !== null).length;
+      // 变参那一条（第一百九十五刀）：定参之后给多少个都算合得上
+      if (sg.variadic === true) {
+        if (given >= sg.params.length) fits.push(i);
+        continue;
+      }
       if (given >= sg.params.length - opt && given <= sg.params.length) fits.push(i);
     }
     if (fits.length === 1) return { sig: sigs[fits[0]], i: fits[0] };
@@ -11891,7 +11944,8 @@ class JncLower {
     for (const i of fits) {
       const want = sigs[i].params;
       let score = 5;
-      for (let k = 0; k < tys.length; k++) {
+      // 变参那一段没有形参可对（第一百九十五刀）：只按定参排
+      for (let k = 0; k < tys.length && k < want.length; k++) {
         const one = this.argCost(tys[k].ty, want[k], tys[k].lit);
         if (one < score) score = one;
       }

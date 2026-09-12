@@ -162,6 +162,18 @@ int64_t hostSum(int64_t a, int64_t b) { return a + b; }
 
 int64_t hostSum_o2(const char *s) { return s == NULL ? -1 : (int64_t)strlen(s); }
 
+/* 只有原型的**变参**函数（第一百九十五刀）。jancy 的 std 库里的原样是
+   `intptr_t cdecl printf(char const thin* fmtSpecifier, ...)`（std_globals.jnc:555）——
+   变参那一段照 C 的默认实参提升摆进 `(ccall …)` 里，声明写成 `(cabi f R (T ...))`。 */
+int64_t hostVsum(int64_t n, ...) {
+  va_list ap;
+  int64_t s = 0;
+  va_start(ap, n);
+  for (int64_t i = 0; i < n; i++) s += va_arg(ap, int64_t);
+  va_end(ap);
+  return s;
+}
+
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型
    （`property m_scale { long get(); void set(long); }`，ui_PropertyGrid.jnc:78-88 那个形状）
    时，体也在宿主这边；符号名的约定与方法同一条，只是中间多一段 `get_` / `set_`：

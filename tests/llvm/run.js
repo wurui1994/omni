@@ -419,6 +419,9 @@ if (existsSync(sysDir)) {
          C_ABI 符号了"那条路截走，那儿只比个数。 */
       + 'long hostSum(long a, long b = 3);\n'
       + 'long hostSum(string_t s);\n\n'
+      /* 只有原型的**变参**函数（第一百九十五刀）：语料里的原样是
+         `intptr_t cdecl printf(char const thin* fmtSpecifier, ...)`（std_globals.jnc:555）。 */
+      + 'long cdecl hostVsum(long n, ...);\n\n'
       + 'namespace probe {\n'
       + 'long hostMul(long a, long b);\n'
       + '}\n\n'
@@ -479,12 +482,13 @@ if (existsSync(sysDir)) {
       + '    printf("bump %d\\n", c.bump(4));\n'
       + '    printf("scale2 %d\\n", c.m_scale);\n'
       + '    printf("sum %d %d %d\\n", hostSum(40), hostSum(1), hostSum("hey"));\n'
+      + '    printf("vsum %d %d\\n", hostVsum(3, 10, 20, 30), hostVsum(0));\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -514,6 +518,9 @@ if (existsSync(sysDir)) {
     } else if (!sx.out.includes('(cabi hostSum i64 (i64 i64))')
       || !sx.out.includes('(cabi hostSum_o2 i64 (ptr))')) {
       detail.push('    emit sx 里没有 `(cabi hostSum i64 (i64 i64))` / `(cabi hostSum_o2 i64 (ptr))`');
+    /* 变参那一格写在声明里（第一百九十五刀）。 */
+    } else if (!sx.out.includes('(cabi hostVsum i64 (i64 ...))')) {
+      detail.push('    emit sx 里没有 `(cabi hostVsum i64 (i64 ...))`');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');
