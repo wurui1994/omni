@@ -5884,12 +5884,21 @@ class JncLower {
       // `m_baseType->getTypeKind() != TypeKind_Enum` 的快速退出（jnc_ct_EnumType.cpp:106-121），
       // 而"到基枚举"是那一族里唯一的**隐式**转换（jnc_ct_CastOp_Int.cpp:307）。这一层没做，
       // 所以这里得说"还不收"而不是"你写错了"（第五十刀改的）。
+      /* 底类型是另一个枚举（第二百四十七刀落了它）：取它的**根整数**当自己的底类型，并把那个
+         枚举记成基枚举。jancy 那边 `getRootType()` 就是一路往下取到整数
+         （jnc_ct_EnumType.cpp:106-121），而"到基枚举"是那一族里唯一的**隐式**转换
+         （jnc_ct_CastOp_Int.cpp:307）—— 那一条落在 assignOk 上。
+         语料里的原样是 `enum StreamEvents: io.ReadOnlyStreamEvents { … }`（io_base 那一族）。 */
       if (jncIsEnum(sp.type)) {
-        this.nope(bn, `枚举的底类型是另一个枚举（${tyName(sp.type)}）—— 要枚举之间的基类链`);
-        return null;
+        info.base = sp.type.base;
+        info.baseEnum = sp.type.name;
+      } else {
+        if (!isInt(sp.type)) {
+          this.err(bn, `枚举的基类型要是整数，这里是 ${tyName(sp.type)}`);
+          return null;
+        }
+        info.base = sp.type;
       }
-      if (!isInt(sp.type)) { this.err(bn, `枚举的基类型要是整数，这里是 ${tyName(sp.type)}`); return null; }
-      info.base = sp.type;
     }
     let next = info.bits ? 1n : 0n;
     for (const m0 of this.flat(n.items[4])) {
@@ -6909,6 +6918,14 @@ class JncLower {
        逐份榜上 99 处 `'…' 的第 1 个实参要 void*，这里是 char*` 就是它 —— 那是一句 `E`
        （我们答错了，不是"还不收"）。 */
     if (jncIsPtr(from) && jncIsPtr(to) && to.target.k === 'void') return true;
+    /* 枚举 -> 它的**基枚举**（第二百四十七刀）：那是枚举那一族里唯一的隐式转换
+       （jnc_ct_CastOp_Int.cpp:307）。沿 `baseEnum` 那条链往上找，找着就收。 */
+    if (jncIsEnum(from) && jncIsEnum(to)) {
+      for (let cur = from.name, hop = 0; cur !== undefined && hop < 64; hop++) {
+        if (cur === to.name) return true;
+        cur = (this.enums.get(cur) ?? {}).baseEnum;
+      }
+    }
     return isClass(from) && isClass(to) && this.isBase(to.name, from.name);
   }
 

@@ -11397,6 +11397,51 @@ ioninja 那一支的 `-I` 从只有 `api` 改成 `api + common + protocols + pac
 - 三刀合起来的腿：`node tests/jnc/run.js` 330/0（新增 `cases/184-opovl`，退役
   `bad/opcompound-second`）、`node tests/llvm/run.js` 38/0。
 
+### 第二百四十五刀（一刀量法）：ioninja 那一支按目录成组编
+
+它的插件不是一份一份编的：`UdpFlowLayer.jnc` 用着 `log.Writer`，可它只 import 了 4 个文件，
+剩下的靠"api 那一批与同目录的兄弟都在同一个模块里"（CMakeLists 就是这么编的）。逐份编于是量出
+一大片 `没有这个类型：'log.Writer'` / `未声明的变量` / `没有这个基类` —— 全是**量法的噪音**。
+
+所以 `test/ioninja/**` 下按所在目录成一组（合成一份只有 import 的文件编一次），别的照旧一份一组。
+**这一刀把榜的粒度改了，历史数字不再逐行可比** —— 明说，基线重记。
+
+- `(文件, 拦路项)` 对 `3174 -> 1558`。lowered / clean 的分母跟着从 655 变成约 310 组。
+
+### 第二百四十六刀：格式化字面量里 `$( … )` 允许嵌套字符串
+
+上一刀之后榜上冒出一行 `unexpected ":"`（37 对，**其中 33 组是唯一拦路项**）。量出来全是同一句：
+
+```
+$"$(sys.formatTimestamp (timeSpan, 0, "%h:%m:%s.%l"))"      log_ThroughputCalc.jnc:110
+```
+
+而这份 grammar 头上第 32 行的注**就写着这个例子** —— 立 `FMT_LITERAL` 那条 token 时知道有这一格，
+可规则只认"转义 | 非双引号"，扫到内层那个 `"` 就把 token 收了，剩下 `%h:%m:%s.%l"))"` 落成语法
+垃圾。改法：多一支 `$(` … 按"转义 | 字符串 | 非右括号"扫到 `)`，那一支排在 `(not "\"")` 前面
+（顺序就是优先级）。
+
+- 逐份那张榜：`unexpected ":"` 那一行**整行没了**。`(文件, 拦路项)` 对 `1558 -> 3959`
+  （**+2401**）—— 那是**露账**不是回退：那 33 组先前卡在语法上，组里的真账一句都没走到。
+  clean `178 -> 145`（那 33 组现在有 N 了）。
+
+### 第二百四十七刀：枚举的底类型是另一个枚举
+
+第五十刀记的账，这一刀兑掉。jancy 那边它合法：`EnumType::isBaseType` 第一句就是
+`m_baseType->getTypeKind() != TypeKind_Enum` 的快速退出（jnc_ct_EnumType.cpp:106-121），
+而"到基枚举"是那一族里**唯一的隐式转换**（jnc_ct_CastOp_Int.cpp:307）。落法两处都最小：
+
+- 声明那一遍：底类型是枚举时取它的**根整数**当自己的底类型（jancy 的 `getRootType` 就是一路往下
+  取到整数），并把那个枚举记成 `baseEnum`；
+- `assignOk`：沿 `baseEnum` 那条链往上找，找着就收 —— 那就是上面那条隐式转换。
+
+`bad/enum-base-enum` 那道墙**整格**兑掉（它的第二半正是那条隐式转换），退役成
+`cases/185-enumbaseenum`（再加一层 `Deeper: Derived` 证链走得通），印 `0 0 0`。
+
+- 腿：`node tests/jnc/run.js` 330/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`枚举的底类型是另一个枚举（…）` 那两行**整行没了**（合 54 对）。
+  `(文件, 拦路项)` 对 `3959 -> 3738`（**−221**）、lowered `91 -> 97`（+6）、clean `145 -> 152`（+7）。
+
 
 
 
