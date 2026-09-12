@@ -1,0 +1,48 @@
+// **调用算符** `operator ()`（第二百〇二刀）：`obj(…)` 走它。语料里它全长在 `stdt` 那几个
+// 函子上 —— `struct Eq<T> { static bool operator () (T a, T b) { … } }`（stdt_Operator.jnc:19-25）、
+// `struct HashString { static size_t operator () (string_t key) }`（同上:97）；调用点是
+// `m_hash(key)`（stdt_HashTable.jnc:101）：左边是一格**值**，它的类型上有这个算符。
+//
+// 落法与前几族同一条：一个自由函数、名字拼成 `Owner$op$call`。`static` 的那一格没有 `this`
+// （第二百〇一刀），也**不求值**左边（那儿只是个类型上的名字）。形参个数与类型都由写的人定。
+// 一个类型只收一格 —— 第二个要按实参类型挑（第八十刀那套机器），明说不收。
+//
+// 先前这一层报的是笼统的一句"算符重载 'operator ()'"，而调用点报的是"没有这个函数：'m_hash'"
+// —— 后一句指着别处：`m_hash` 明明是一格字段。
+//
+// 判据是手写的 C 双胞胎 /tmp/c167.c：static 的那一格、带 `this` 的那一格、以及**字段上**
+// 直接调（`m_hash(key)`，那是语料里的原样）。
+struct Hash {
+	long m_seed;
+
+	static long operator () (long key) {
+		return key * 7;
+	}
+}
+
+struct Salt {
+	long m_seed;
+
+	long operator () (long key) {
+		return key + m_seed;
+	}
+}
+
+struct Table {
+	Hash m_hash;
+	Salt m_salt;
+
+	long idx(long key) {
+		return m_hash(key) + m_salt(key);
+	}
+}
+
+int main() {
+	Table t;
+	t.m_salt.m_seed = 100;
+	printf("%d\n", t.idx(3));
+	Salt s;
+	s.m_seed = 1;
+	printf("%d\n", s(41));
+	return 0;
+}

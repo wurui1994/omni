@@ -552,6 +552,9 @@ const OP_NAME = new Map([
   ['postfix operator --', 'dec$post'],
   ['operator *', 'mul'],
   ['operator ->', 'arrow'],
+  /* 调用算符（第二百〇二刀）：`obj(…)`。语料里它全长在 `stdt` 那几个函子上
+     （`struct Eq<T> { static bool operator () (T a, T b) }`，stdt_Operator.jnc:19-25）。 */
+  ['operator ()', 'call'],
   ['operator bool', 'bool'],
   ['operator ==', 'eq'],
   ['operator !=', 'ne'],
@@ -1206,6 +1209,9 @@ class JncLower {
     /* 下标算符（第一百三十八刀）：owner -> { get: {name, sub, val}, set: {…} }。
        类 / 结构体体里**裸写**的 `get` / `set` 就是它（`c[i]` / `c[i] = v` 走这两格）。 */
     this.opIndex = new Map();
+    /* 类型名 -> 它那格调用算符（第二百〇二刀）：`{name, stat, ret, params, defs}`。
+       `params` 里含 `this` 那一格（静态的没有）。 */
+    this.opCalls = new Map();
     /* 相等算符（第一百四十刀）：`Owner$op$eq` / `$op$ne` -> { name, param }。
        语料里的原样是 std_Guid.jnc:80/84 —— `bool operator == (Guid const* op) thin const`。 */
     this.opCmp = new Map();
@@ -1705,6 +1711,93 @@ class JncLower {
    * `==` 与 `!=` **各自登记、互不代替**：只写了 `==` 而源码写 `!=` 时不替它取反
    * （jancy 那边也是各挑各的重载；语料里 std_Guid 两个都写了）。
    */
+  /**
+   * **调用算符**的签名（第二百〇二刀）：`operator ()` —— `obj(…)` 走它。
+   *
+   * 语料里的原样是 `stdt` 那几个函子：`struct Eq<T> { static bool operator () (T a, T b) { … } }`
+   * （stdt_Operator.jnc:19-25）、`struct HashString { static size_t operator () (string_t key) }`
+   * （同上:97）。调用点是 `m_hash(key)`（stdt_HashTable.jnc:101）—— 左边是一格**值**，它的类型
+   * 上有这个算符。
+   *
+   * 落法与前几族同一条：一个自由函数、名字拼成 `Owner$op$call`。`static` 的那一格没有 `this`
+   * （第二百〇一刀）。形参个数与类型都由写的人定 —— 这一格与下标算符不同，jancy 没有限制。
+   *
+   * 一个类型只收**一格** `operator ()`：第二个要按实参类型挑，那是第八十刀那套机器，还没接。
+   */
+  opCallSig(n, info, ps) {
+    const owner = info.name === ''
+      ? (this.classes.has(this.ns) || this.structs.has(this.ns) ? this.ns : null)
+      : this.resolve(info.name, (k) => this.classes.has(k) || this.structs.has(k));
+    if (owner === null) {
+      return this.err(n, "'operator ()' 只能是类或结构体的成员（`obj(…)` 走它）");
+    }
+    const full = `${owner}$op$call`;
+    if (this.fns.has(full)) {
+      return this.nope(n, `${shown(owner)} 的第二个 'operator ()'（要按实参类型挑，见第八十刀）`);
+    }
+    info.name = full;
+    const stat = info.sp.stat === true;
+    if (!stat) {
+      ps.unshift({ name: 'this', type: this.selfTy(owner), formals: null, def: null });
+      this.methods.set(full, owner);
+    }
+    const defs = ps.map((p) => p.def ?? null);
+    this.opCalls.set(owner, {
+      name: full,
+      stat,
+      ret: info.type,
+      params: ps.map((p) => p.type),
+      defs: defs.some((d) => d !== null) ? defs : null,
+    });
+    this.fns.set(full, sigOf(ps, info.type));
+    // errorcode（第五十八刀）：这一族也可能带它，那个词不能吞
+    if (info.sp.errc && this.errcReg(n, full, info.type) === null) return null;
+    return { info, ps, isMain: false };
+  }
+
+  /** 左边那一格的类型上有没有调用算符（第二百〇二刀）。**一个字都不发** —— 与 cheapTy 同一条
+   *  规矩：问得准才回，问不出就回 undefined，调用方接着走它自己那条路。 */
+  opCallOf(callee) {
+    if (this.opCalls.size === 0) return undefined;
+    const t = this.cheapTy(callee);
+    if (t === null || t.lit) return undefined;
+    const ty = jncIsPtr(t.ty) ? t.ty.target : t.ty;
+    if (!isClass(ty) && !jncIsStruct(ty)) return undefined;
+    return this.opCalls.get(ty.name);
+  }
+
+  /** 调一次调用算符（第二百〇二刀）：`obj(…)` -> `(call Owner$op$call obj 实参…)`。
+   *  静态的那一格不传对象（也**不求值**左边 —— 那儿只是个类型上的名字，jancy 也一样）。 */
+  opCallSite(n, oc, callee) {
+    const args0 = this.flat(n.items[2]);
+    const want = oc.stat ? oc.params : oc.params.slice(1);
+    const defs = oc.defs === null ? null : (oc.stat ? oc.defs : oc.defs.slice(1));
+    const args = defs === null ? args0 : this.withDefaults(args0, want, defs, null);
+    if (args === null) return null;
+    if (args.length !== want.length) {
+      return this.err(n, `'operator ()' 要 ${want.length} 个实参，这里给了 ${args0.length} 个`);
+    }
+    const parts = [];
+    if (!oc.stat) {
+      const bv = this.baseVal(callee);
+      if (bv === null) return null;
+      parts.push(bv.code);
+    }
+    for (let i = 0; i < args.length; i++) {
+      let v = this.expr(args[i], want[i]);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(want[i])) v = intConv(v, want[i]);
+      if (!this.assignOk(v.type, want[i])) {
+        return this.err(args[i], `'operator ()' 的第 ${i + 1} 个实参要 ${tyName(want[i])}，`
+          + `这里是 ${tyName(v.type)}`);
+      }
+      parts.push(v.code);
+    }
+    const code = `(call ${oc.name}${parts.map((p) => ` ${p}`).join('')})`;
+    if (this.errFns.has(oc.name)) return this.propagate(n, code, oc.ret, shown(oc.name));
+    return { code, type: oc.ret };
+  }
+
   opCmpSig(n, info, ps) {
     const suffix = OP_NAME.get(info.special);
     const owner = info.name === ''
@@ -8016,6 +8109,8 @@ class JncLower {
       if (info.special === 'operator ==' || info.special === 'operator !=') {
         return this.opCmpSig(n, info, ps);
       }
+      // 调用算符（第二百〇二刀）：`obj(…)` 走它，形参个数由写的人定
+      if (info.special === 'operator ()') return this.opCallSig(n, info, ps);
       // 自增自减那四个（第一百三十一刀）：与赋值算符同一条路，只是不收形参
       if (isOpSpecial(info.special)) return this.opIncSig(n, info, ps);
       /* 构造的主人（第五十三刀是类；第一百二十九刀把**结构体**也算上）：先按类查，查不着再按
@@ -13183,6 +13278,11 @@ class JncLower {
          所以这儿报"没有这个函数"是认错人：那些名字在 jancy 里明明是有的。 */
       const crt = nm0 === null || nm0.includes('.') ? undefined : this.crtCall(n, nm0);
       if (crt !== undefined) return crt;
+      /* 左边是一格**值**，而它的类型上有 `operator ()`（第二百〇二刀）：那不是"没有这个函数"，
+         是调用算符。语料里的原样是 `m_hash(key)`（stdt_HashTable.jnc:101）—— `m_hash` 是一格
+         字段，类型是那个函子。排在最后：这一格问的是"名字查不着"之后的最后一种可能。 */
+      const oc0 = this.opCallOf(callee);
+      if (oc0 !== undefined) return this.opCallSite(n, oc0, callee);
       return this.err(n, `没有这个函数：'${nm0}'`);
     }
     // 方法体里裸写 `foo()` 就是 `this.foo()`（类是一层命名空间，所以 resolve 已经找着了

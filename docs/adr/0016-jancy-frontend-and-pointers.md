@@ -9862,6 +9862,40 @@ jancy 的规矩一句：`DerivableType::addMethod` 在 `StorageKind_Static` 那�
   （语料里的静态方法几乎全长在那几个函子上），而那一格还没落。这一格是先前"那个词被悄悄丢掉"
   的一处 —— 单看榜决定做什么会漏掉它。
 
+### 第二百〇二刀：调用算符 `operator ()`
+
+上一刀的下半段。语料里的原样：
+
+```jnc
+struct HashString {
+    static size_t operator () (string_t key) {   // stdt_Operator.jnc:97
+        return djb2(key.m_p, key.m_length);
+    }
+}
+```
+
+调用点是 `m_hash(key)`（stdt_HashTable.jnc:101）—— 左边是一格**值**（一格字段），它的类型上有
+这个算符。先前声明那一头报笼统的"算符重载 'operator ()'"，调用点那一头报"没有这个函数：
+'m_hash'"—— 后一句指着别处：`m_hash` 明明是一格字段。
+
+落法与前几族（`operator :=` / `++` / `==` / `[]`）同一条：一个自由函数、名字拼成
+`Owner$op$call`；`static` 的那一格没有 `this`，也**不求值**左边（那儿只是个类型上的名字，
+jancy 也一样）。形参个数与类型都由写的人定（这一格 jancy 没有限制，与下标算符不同）。
+一个类型只收**一格** —— 第二个要按实参类型挑（第八十刀那套机器），明说不收。
+
+调用点那一问排在**最后**（`没有这个函数` 那一句之前）：它问的是"名字查不着"之后的最后一种
+可能，而且走的是 `cheapTy`（**一个字都不发**，问不出就让调用方接着报它自己那句）。
+
+判据在 `tests/jnc/cases/160-opcall.jnc`（C 双胞胎 `/tmp/c167.c`）三格：`static` 的那一格、
+带 `this` 的那一格、以及**字段上**直接调（`m_hash(key)`，语料里的原样）。
+
+- 腿：`node tests/jnc/run.js` 287/0（新增 `cases/160-opcall`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：clean（没有"还不收"的文件）`215 -> 220`（**+5**）—— 正是那五份文件
+  （`stdt_Operator.jnc`、`stdt_HashTable.jnc`、`stdt_Map.jnc`、`stdt_BinTree.jnc`、
+  `stdt_RbTree.jnc`）；`(文件, 拦路项)` 对 `4282 -> 4281`。lowered `148` 没动：那几份里还剩
+  普通错（泛型那一套的别的格），"还不收"的那一条没了不等于整份文件降得下来。
+- 一起编那张榜：`42`、理由 `22` 都没动（那几份不在 ioninja 那一批里）。
+
 
 
 ## 后果与代价
