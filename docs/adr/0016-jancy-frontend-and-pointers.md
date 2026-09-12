@@ -11245,6 +11245,41 @@ size_t errorcode transmit(string_t text) {
   lowered `163`、clean `240` 都没动。逐行比过一遍：只有这两行动。
 - 一起编那张榜：`32`、理由 `14` 没动（api/ 那 44 份里没人写 `%p`）。
 
+### 第二百三十九刀：属性上那个 `errorcode`，jancy 自己就丢掉了
+
+榜上 `errorcode 写在属性上（那一位落在取/存那两个函数上，而这一层的 errorcode 是按函数名记的）`
+19 对。那句话是**猜的**，而且猜错了。翻 jancy：
+
+```
+TypeModifierMaskKind_Property =
+	TypeModifier_Property | TypeModifier_ErrorCode | TypeModifier_Const |
+	TypeModifier_ReadOnly | TypeModifier_AutoGet | TypeModifier_Bindable | …
+                                                        jnc_ct_Decl.h:75-85
+
+uint_t typeFlags = 0;
+if (m_typeModifiers & TypeModifier_Const)    typeFlags |= PropertyTypeFlag_Const;
+if (m_typeModifiers & TypeModifier_Bindable) typeFlags |= PropertyTypeFlag_Bindable;
+…
+m_typeModifiers &= ~TypeModifierMaskKind_Property;      jnc_ct_DeclTypeCalc.cpp:558-569
+```
+
+属性类型上**只有 `Const` 与 `Bindable` 两位**；`errorcode` 那一位进了 Property 那张 mask、
+然后被那一句**清掉**。而 `FunctionTypeFlag_ErrorCode` 只在 `getFunctionType` 里加
+（同文件:499-500）—— 也就是说 **jancy 自己就把属性上这一位丢掉了**，它对取/存两个函数一点影响
+都没有。
+
+所以这不是"还接不上"，是那一位在那儿**本来就没意思**：收下不看，与 `const` / `readonly` /
+`thin` 写在指针上那一条（第六十七刀）同一件事。取值器**自己**带的那一位照旧有效
+（`int errorcode get();` 走的是 `getFunctionType`）—— 这一刀只放过写在属性那条声明上的。
+
+判据是手写的 C 双胞胎 `/tmp/c190.c`（把属性摊成两个函数 + 一格存储，存的时候乘 2），
+用例 `tests/jnc/cases/181-errcprop.jnc`，两边都印 42。
+
+- 腿：`node tests/jnc/run.js` 328/0（新增 `cases/181-errcprop`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：那一行**整行没了**（19）。`(文件, 拦路项)` 对 `3758 -> 3739`（**−19**），
+  lowered `163`、clean `240` 都没动。逐行比过一遍：只有这一行动。
+- 一起编那张榜：`32`、理由 `14` 没动（那 19 处不在 api/ 那 44 份里）。
+
 
 
 

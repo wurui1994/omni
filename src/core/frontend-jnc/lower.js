@@ -4769,14 +4769,27 @@ class JncLower {
         continue;
       }
       if (dsp.stat) { this.nope(d, '`static` 写在属性上'); continue; }
-      // `errorcode` 那一位在 jancy 那边落在**取/存那两个函数**的类型上（属性也进 vtable，所以
-      // `virtual` 同理）。这一层的 errorcode 是按函数名记的一张表、虚派发是按方法名接的一格
-      // 标签，而属性那两个函数的名字是这一层自己拼的（`p$get`）—— 两条都还接不上。
-      if (dsp.errc) {
-        this.nope(d, '`errorcode` 写在属性上（那一位落在取/存那两个函数上，'
-          + '而这一层的 errorcode 是按函数名记的）');
-        continue;
-      }
+      /* `errorcode` 写在**属性那条声明**上（第二百三十九刀）：**收下不看**。
+         先前这儿写的是"那一位落在取/存那两个函数上，而这一层的 errorcode 是按函数名记的 ——
+         还接不上"，那句话**猜错了 jancy**。翻它的源码：
+
+           TypeModifierMaskKind_Property = … | TypeModifier_ErrorCode | …   // jnc_ct_Decl.h:75-85
+           …
+           uint_t typeFlags = 0;
+           if (m_typeModifiers & TypeModifier_Const)    typeFlags |= PropertyTypeFlag_Const;
+           if (m_typeModifiers & TypeModifier_Bindable) typeFlags |= PropertyTypeFlag_Bindable;
+           …
+           m_typeModifiers &= ~TypeModifierMaskKind_Property;   // jnc_ct_DeclTypeCalc.cpp:566
+                                                                // getPropertyType，558-569
+
+         也就是说：属性类型上**只有** `Const` 与 `Bindable` 两位，`errorcode` 那一位进了
+         Property 那张 mask、然后被那一句**清掉** —— 而 `FunctionTypeFlag_ErrorCode` 只在
+         `getFunctionType` 里加（同文件:499-500）。**jancy 自己就把属性上这一位丢掉了**，
+         它对取/存两个函数一点影响都没有。所以这一层收下不看，与 `const` / `readonly` / `thin`
+         写在指针上那一条（第六十七刀）是同一件事：不是"还接不上"，是那一位在那儿本来就没意思。
+
+         取值器**自己**带的那一位照旧有效（`int errorcode get();` 走的是 getFunctionType）——
+         这一刀只放过写在属性那条声明上的。 */
       if (dsp.virt !== null) { this.nope(d, `'${dsp.virt}' 写在属性上`); continue; }
       // 声明符上带形参表的是**索引属性**（第七十刀）：`int property g_p(size_t i);` ——
       // 那一串不是"函数的形参"，是**下标**（prop_indexed.rst:15：属性带数组语义，下标的类型
