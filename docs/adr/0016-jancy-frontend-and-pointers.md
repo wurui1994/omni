@@ -8132,6 +8132,28 @@ lowered 一份没多，因为这 97 份文件里每一份还压着别的行 —�
 `bad/protoonly-argtype.jnc` 钉这条界。**这一族到这儿四处出错口齐了**：个数筛不剩、按类型排不出、
 单条个数不对、单条类型不对 —— 四句先前都在替一张不全的表说话。
 
+## 第一百五十四刀：类的 `static` 局部量 —— 三句落进同一道闸门
+
+第五十三刀那时明说不收的那一格（`static Counter c;`）。jancy 那边 static 局部量的初值包在
+`once` 里、**就地**包在声明这一处（`Parser::declare` 的 onceStmt_Create / PreBody /
+initializeVariable / PostBody，jnc_ct_Parser.cpp:2452），不是挪到 module.construct。
+
+类的那一格要做三件事：造一次对象、写一次 `$tag`（第五十七刀的动态类型）、构造一次。这一刀把三句
+都放进**同一道** once 闸门 —— 与那四句 jancy 源码一句对一句。槽本身是模块级的
+（`(global 名字$sN C)`，出来是空引用），所以出了函数它还活着：第二次调进来拿到的是同一个对象。
+写了初值的照旧拒（类的变量赋不了值，第五十二刀），那与 `static` 无关。
+
+### 账：pairs `5686 -> 5680`（−6），lowered / clean 都没动
+
+- 逐份那张榜：`'…' 的 static 局部量（要一道 once 闸门…）` 那一行 6 处（`B` / `C` / `C1` /
+  `C2` / `MyScheduler` / `BoxListEntry`）**整行没了**；lowered `120`、clean `191` 都没动 ——
+  那 6 份文件身上还各压着别的行（那一行的 `sole` 本来就是 0，挑它的时候就知道不会多降一份）。
+
+尺子 `/tmp/c144.c`：C 的 `static struct Counter c;` 是**静态存储期**的对象 —— 出来就零初始化、
+没有"构造"这件事，与 jancy 那一格的意思（第一次走到这儿才造）**不是同一件事**。所以这一份把那道
+闸门手写出来（一格 static bool + 一次 malloc + 一次构造），记的是"该跑几次、什么时候跑"这个判断。
+同一串数（ctor / 101 / 102 / 103）—— `ctor` 只有一行，那正是这一刀要钉的。
+
 ## 后果与代价
 
 

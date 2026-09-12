@@ -8425,7 +8425,32 @@ class JncLower {
     // 闸门（jancy 那边正是 `once` 包着 initializeVariable）。先明说不收 —— 底下那条标量支路
     // 会把它当一格引用、只发一个空值出来，那是在骗人。类**指针**（`static C* p;`）不在这条里。
     if (isClass(t) && t.own === true) {
-      return this.nope(dcl, `${tyName(t)} 的 static 局部量（要一道 once 闸门把对象造出来再构造）`);
+      /* 类的 static 局部量（第一百五十四刀，第五十三刀那时明说不收的那一格）：那一格要
+         "造一次对象、写一次 `$tag`、构造一次"，三句都落在**同一道 once 闸门**里 —— 与 jancy
+         那边 `once` 包着 `initializeVariable`（jnc_ct_Parser.cpp:2452）一句对一句。
+         槽本身是模块级的（`(global 名字$sN C)`，出来是空引用），对象在第一次走到这儿时才造。
+         写了初值的照旧拒：那是"类的变量赋不了值"（第五十二刀），与 static 无关。 */
+      if (initNode !== null) {
+        return this.err(dcl, `'${info.name}' 是类的变量，赋不了值（type_class.rst:19 那句 `
+          + '"You cannot assign varibles or fields of class types"）');
+      }
+      const dnc = `${info.name}$s${this.tmp++}`;
+      this.decls.push(`  (global ${dnc} ${slotText(t)})`);
+      this.push(info.name, t, dnc);
+      const flagc = `${dnc}$1`;
+      this.decls.push(`  (global ${flagc} bool)`);
+      const bpadc = `${pad}    `;
+      const bodyc = [`${bpadc}(set ${dnc} (pnew (ptr ${clsRoot(t.name)}) (int 1)))`];
+      const tg = this.tagStore(dcl, t.name, `(var ${dnc})`, bpadc);
+      if (tg === null) return null;
+      bodyc.push(tg);
+      if (this.ctorCall(dcl, t.name, `(var ${dnc})`, info.ctor, bpadc, bodyc) === null) return null;
+      out.push(`${pad}(if (un "!" (var ${flagc}))`);
+      out.push(`${pad}  (do`);
+      out.push(`${bpadc}(set ${flagc} (bool true))`);
+      for (const l of bodyc) out.push(l);
+      out.push(`${pad}  ))`);
+      return out;
     }
     const dn = `${info.name}$s${this.tmp++}`;
     // 被 `&` 取过地址的标量要提到一段自己的内存里（与第二十四刀对模块级变量做的一样）

@@ -1,0 +1,39 @@
+// 第一百五十四刀：类的 `static` 局部量（第五十三刀那时明说不收的那一格）。
+//
+// jancy 那边 static 局部量的初值包在 `once` 里、**就地**包在声明这一处（`Parser::declare` 的
+// onceStmt_Create / PreBody / initializeVariable / PostBody，jnc_ct_Parser.cpp:2452），不是挪到
+// module.construct。类的那一格要做三件事：造一次对象、写一次 `$tag`（第五十七刀的动态类型）、
+// 构造一次 —— 三句都落在**同一道**闸门里，于是"第一次走到这儿才造，之后每次都跳过"。
+//
+// 槽本身是模块级的（`(global 名字$sN C)`，出来是空引用），所以从函数里出去它还活着 ——
+// 第二次调 `bump()` 拿到的是同一个对象，计数接着涨。这就是这一份要钉住的那件事。
+//
+// 写了初值的照旧拒（类的变量赋不了值，第五十二刀），与 static 无关。
+//
+// 期望输出的出处：/tmp/c144.c（`cc -O0 -std=c99 -Wall`）。
+
+class Counter {
+	int m_n;
+
+	construct() {
+		m_n = 100;
+		printf("ctor\n");
+	}
+
+	int next() {
+		m_n = m_n + 1;
+		return m_n;
+	}
+}
+
+int bump() {
+	static Counter c;
+	return c.next();
+}
+
+int main() {
+	printf("%d\n", bump());
+	printf("%d\n", bump());
+	printf("%d\n", bump());
+	return 0;
+}
