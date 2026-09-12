@@ -11339,6 +11339,64 @@ static EnumPropertyOption const m_parityTable[] = { … }
   —— 后者是逐份编那笔口径的回声（`ui.ListItem` 在那一份里是空类）。`未声明的变量` `160 -> 159`。
 - 一起编那张榜：`32`、理由 `14` 没动。
 
+### 第二百四十二刀：算符也走那套重载决议
+
+榜上 `'…' 的第二个 'operator +=' / 'operator :='`（各 31 对）。先量它到底是什么 —— 在
+`opCompoundSig` 那句话前面临时印一行，全语料过一遍：
+
+```
+31  std$StringBuilder$op$addAssign  旧=std.StringBuilder*,string  新=char const*
+31  std$StringBuilder$op$addAssign  旧=std.StringBuilder*,string  新=一格字符
+```
+
+（先前猜过一次"那是类体里的声明 + 体外定义被当成了第二条"，探针把那个猜法**否掉了**：那个形状
+缩到最小过一遍，签名那一遍顺利通过。记在这儿 —— 猜错了就写下来。）
+
+也就是**真的重载**：一格主人身上三条 `operator +=`。而"按实参类型挑"这一层早就有（第八十刀那套
+`argCost`；属性的存值器第一百八十一刀就是照它做的）。欠的只是**名字**与**那张表**：
+
+- `opCompoundSig` / `opAssignSig`：第二条起改名照第七十九刀那条（加 `$o2`），表里从"一条"改成
+  "一族"（`sets` / `names` / `rets`）。签名一样的那种才是重定义，当场报。
+- 调用点新添 `opPick`：按右边那一格的类型挑一条，三句话照抄第一百八十一刀（问不出右边的类型的
+  明说不收、一条都合不上报错、同分说分不出来）。
+
+判据是手写的 C 双胞胎 `/tmp/c193.c`（C 没有重载，两条各起一个名字、由我照 jancy 那套算该挑哪条），
+用例 `tests/jnc/cases/184-opovl.jnc`（`+=` 与 `:=` 各一族），两边都印 `107 3`。
+`bad/opcompound-second` 那道墙就是这一刀兑掉的，退役成上面那格用例。
+
+### 第二百四十三刀（一刀量法）：扩展库那一整棵源码树都进 `-I`
+
+第一百八十九刀只给了 `jnc_std` / `jnc_sys` 两个目录。可 `io.Serial` / `io.SocketAddress` /
+`io.SslSocket` 那一族的声明躺在 `src/jnc_ext/jnc_io_…/jnc/` 里，ioninja 自己那几份公共件躺在
+`test/ioninja/common`（`log_ChecksumCalc.jnc` / `ui_StdSessionInfoSet.jnc` / `ui_History.jnc`…）、
+`protocols`（`io_Modbus.jnc`）与 `packets` 里 —— 它的 CMakeLists 就是把这几摊一起编的。
+
+不给的话，`import "io_Serial.jnc"（…都找不着它）` 那一族十几行、以及随之而来的一大片
+`没有这个类型：'io.Serial'` / `没有这个函数` / `未声明的变量` 全是**量法的噪音**，不是这一层的
+欠账 —— 与第一百八十九刀那一条一字不差。所以 `EXT_INCS` 改成扫 `src/jnc_ext/*/jnc` 全部，
+ioninja 那一支的 `-I` 从只有 `api` 改成 `api + common + protocols + packets`。
+
+- 逐份那张榜：`(文件, 拦路项)` 对 `3735 -> 3368`（**−367**）、clean `241 -> 289`（**+48**）、
+  lowered `164 -> 165`。`没有这个类型` `252 -> 166`、`没有这个函数` `144 -> 83`、
+  `没有这个基类` `119 -> 75`、`未声明的变量` `159 -> 136`、`声明自己没成` `110 -> 71`，
+  import-not-found 那十几行基本清空。
+  往错方向的两笔照旧记清 —— 都是**走得更深了才露出来的**账：`import "…jncx"` `81 -> 103`、
+  `async` `31 -> 71`。
+
+### 第二百四十四刀（一刀量法）：warning 不是拦路项
+
+上一刀之后 `import "io_base.jncx"：… 这一句在这儿是空跑` 爬到了榜上第 6 名（103 对）。可它是
+一句 **warning** —— 不影响 `sx` 的退出码，而这张榜的定义是"拦着不让降的东西"（`sole` 那一列就是
+按这个说的）。全语料量过一遍：warning 只有这一种。第二百四十三刀把扩展库那棵源码树都给上之后，
+那些声明**真的**都从 `.jnc` 来了，那一句于是名副其实地空跑 —— 把它算成拦路项是**假账**。
+
+`reasonOf` 于是多认一格 `W` 并在两处统计里跳过。
+
+- 逐份那张榜：`(文件, 拦路项)` 对 `3368 -> 3174`（**−194**），lowered `165`、clean `289` 都没动。
+
+- 三刀合起来的腿：`node tests/jnc/run.js` 330/0（新增 `cases/184-opovl`，退役
+  `bad/opcompound-second`）、`node tests/llvm/run.js` 38/0。
+
 
 
 

@@ -82,12 +82,28 @@ const IONINJA_API = join(JANCY, 'test', 'ioninja', 'api');
    jancy 那边它们由扩展库随身带、并且自动 import（jnc_std_StdLib.cpp 的 SOURCE_FILE_TABLE，
    第一百七十六刀量过那一段）。不给这两个目录的话，一整批 `import "std_Buffer.jnc"` 与
    `没有这个类型：'std.Buffer'` 全是**量法的噪音**，不是这一层的欠账 —— 榜首那几行就成了假账。 */
-const EXT_INCS = ['jnc_std', 'jnc_sys']
-  .map((x) => join(JANCY, 'src', 'jnc_ext', x, 'jnc'))
+/* 第二百四十三刀（一刀量法，接第一百八十九刀那一条）：**扩展库那一整棵源码树**都进 `-I`，
+   不只 jnc_std / jnc_sys。理由与那一刀一字不差 —— `io.Serial` / `io.SocketAddress` /
+   `io.SslSocket` 那一族的声明就躺在 `src/jnc_ext/jnc_io_…/jnc/` 里（那个 `*` 这儿写不得，块注释会提前关掉），jancy 那边由扩展库随身带
+   并自动 import（每个 StdLib.cpp 的 SOURCE_FILE_TABLE）。不给的话
+   `import "io_Serial.jnc"（…都找不着它）` 与随之而来的一大片 `没有这个类型：'io.Serial'`
+   全是**量法的噪音**，不是这一层的欠账。 */
+const EXT_INCS = (() => {
+  const root = join(JANCY, 'src', 'jnc_ext');
+  if (!existsSync(root)) return [];
+  return readdirSync(root).sort()
+    .map((x) => join(root, x, 'jnc'))
+    .filter((d) => existsSync(d));
+})();
+/* ioninja 那一支自己那三个目录同理（它的 CMakeLists.txt 就是把 api + common + 各协议一起编的）：
+   `log_ChecksumCalc.jnc` / `ui_StdSessionInfoSet.jnc` 在 common/、`io_Modbus.jnc` 在 protocols/、
+   包模板在 packets/。 */
+const IONINJA_INCS = ['api', 'common', 'protocols', 'packets']
+  .map((x) => join(JANCY, 'test', 'ioninja', x))
   .filter((d) => existsSync(d));
 const incFlags = (extra) => [...extra, ...EXT_INCS].flatMap((d) => ['-I', d]);
 const argsFor = (p) => [cli, 'sx', p,
-  ...incFlags(p.includes(`${'/test/ioninja/'}`) && existsSync(IONINJA_API) ? [IONINJA_API] : [])];
+  ...incFlags(p.includes(`${'/test/ioninja/'}`) ? IONINJA_INCS : [])];
 
 /* `--group` 那一格（见上面那段注）：合成一份只有 import 的文件，一次编完整批。 */
 if (group !== null) {
@@ -114,7 +130,7 @@ if (group !== null) {
   let gn = 0;
   for (const line of gErr.split('\n')) {
     const d = reasonOf(line);
-    if (d === null) continue;
+    if (d === null || d.kind === 'W') continue;      // 第二百四十四刀：warning 不拦路
     gn += 1;
     const k = `${d.kind} ${d.why}`;
     gt.set(k, (gt.get(k) ?? 0) + 1);
@@ -168,10 +184,17 @@ if ((cache.warmed ?? 0) > 0) {
 }
 
 /** 一行诊断 -> 归一化的理由。`null` = 这一行不是诊断（是那两行代码摘录）。 */
+/* 第二百四十四刀（一刀量法）：**warning 不是拦路项**，不进榜。
+   这张榜的定义是"拦着不让降的东西"（`sole` 那一列就是按这个说的），而 warning 不影响 `sx` 的
+   退出码 —— 语料里那唯一的一种就是 `import "io_base.jncx"：… 这一句在这儿是空跑`，第二百四十三刀
+   把扩展库那棵源码树都给上之后，那些声明**真的**都从 .jnc 来了，那一句于是名副其实地"空跑"。
+   先前它被算成 E，在榜上占 103 对、还爬到了第 6 名 —— 那是**假账**。摘出来另记一格计数，
+   可见性不丢。 */
 function reasonOf(line) {
-  const m = /^.*?:\d+:\d+: (?:error|warning): (.*)$/.exec(line);
+  const m = /^.*?:\d+:\d+: (error|warning): (.*)$/.exec(line);
   if (m === null) return null;
-  const text = m[1];
+  if (m[1] === 'warning') return { kind: 'W', why: '' };
+  const text = m[2];
   const nope = text.startsWith(NOPE);
   return { kind: nope ? 'N' : 'E', why: (nope ? text.slice(NOPE.length) : text).replace(/'[^']*'/g, "'…'") };
 }
@@ -184,7 +207,7 @@ for (const p of files) {
   const errs = new Set();
   for (const line of r.err.split('\n')) {
     const d = reasonOf(line);
-    if (d === null) continue;
+    if (d === null || d.kind === 'W') continue;      // 第二百四十四刀：warning 不拦路
     (d.kind === 'N' ? nopes : errs).add(d.why);
   }
   rows.push({ file: p.slice(JANCY.length + 1), code: r.code, nopes, errs });

@@ -1,0 +1,50 @@
+// 一格主人身上**好几条**同一个算符（第二百四十二刀）。量出来语料里就是它：`std.StringBuilder`
+// 上三条 `operator +=`（收 `string` / `char const*` / 一格字符），逐份榜上 31 对；`operator :=`
+// 同族另 31 对。
+//
+// 先前一见 `fns.has(full)` 就说"第二个 … 要按实参类型挑，见第八十刀" —— 可"按实参类型挑"这一层
+// 早就有（第八十刀那套 `argCost`；属性的存值器第一百八十一刀就是照它做的）。欠的只是**名字**与
+// **那张表**：改名照第七十九刀那条（第二条起加 `$o2`），`opCompound` / `opAssign` 从"一条"
+// 改成"一族"，调用点新添 `opPick` 按右边那一格的类型挑一条（问不出来说不收、一条都合不上报错、
+// 同分说分不出来 —— 三句话照抄第一百八十一刀）。
+//
+// 判据是手写的 C 双胞胎 /tmp/c193.c（C 没有重载，两条各起一个名字，由我照 jancy 那套算该挑哪条）。
+// 印 `107 3`。
+class SB {
+	int m_n;
+
+	SB* operator += (int c) {
+		m_n += c;
+		return this;
+	}
+
+	SB* operator += (double d) {
+		m_n += 100;
+		return this;
+	}
+}
+
+struct Cell {
+	int m_v;
+
+	// `operator :=` 那一侧同一条
+	int operator := (int x) {
+		m_v = x;
+		return m_v;
+	}
+
+	int operator := (bool b) {
+		m_v = b ? 3 : 0;
+		return m_v;
+	}
+}
+
+int main() {
+	SB* s = new SB;
+	s += 7;         // 挑收 int 那条：+7
+	s += 1.5;       // 挑收 double 那条：+100
+	Cell c;
+	c = true;       // 挑收 bool 那条：3
+	printf("%d %d\n", s.m_n, c.m_v);
+	return 0;
+}

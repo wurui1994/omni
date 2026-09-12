@@ -1532,6 +1532,40 @@ class JncLower {
    * 再赋一次"。语料里 `std.String.operator += (string_t)` 干的是 `append(string)`，
    * 而那个类连 `operator +` 都没有 —— 拿"+ 再赋"去凑就是另一件事。
    */
+  /**
+   * 一族同名算符里按**右边那一格的类型**挑一条（第二百四十二刀）。规矩与属性存值器的重载
+   * （第一百八十一刀）逐条一样、话也照那三句：问不出右边的类型的明说不收（第八十刀那条
+   * "绝不猜"），一条都合不上的报错，同分的明说分不出来。
+   *
+   * @returns `{ name, param, ret }`，或 null（已经报过错）
+   */
+  opPick(n, label, rec, valNode) {
+    if (rec.sets === undefined || rec.sets.length <= 1) return rec;
+    const ct = this.cheapTy(valNode);
+    if (ct === null) {
+      return this.nope(n, `'${label}' 有 ${rec.sets.length} 条，而右边的类型这一层还得先降一遍`
+        + '才知道（要按实参类型挑，见 ADR-0016 第八十刀）');
+    }
+    let best = -1;
+    let bestScore = 0;
+    let tie = false;
+    for (let i = 0; i < rec.sets.length; i++) {
+      const sc = this.argCost(ct.ty, rec.sets[i], ct.lit);
+      if (sc === 0) continue;
+      if (sc === bestScore) tie = true;
+      if (sc > bestScore) { bestScore = sc; best = i; tie = false; }
+    }
+    if (best === -1) {
+      return this.err(n, `'${label}' 那 ${rec.sets.length} 条`
+        + `（${rec.sets.map(tyName).join(' / ')}）没有一条收得下 ${tyName(ct.ty)}`);
+    }
+    if (tie) {
+      return this.nope(n, `'${label}' 的那几条在这一句上分不出来`
+        + `（${tyName(ct.ty)} 对两条一样合得上）`);
+    }
+    return { name: rec.names[best], param: rec.sets[best], ret: rec.rets[best] };
+  }
+
   opCompoundSig(n, info, ps, op) {
     const owner = info.name === ''
       ? (this.structs.has(this.ns) ? this.ns : null)
@@ -1543,16 +1577,37 @@ class JncLower {
       return this.nope(n, `'operator ${op}' 收 ${ps.length} 个形参（这一层只收一个）`);
     }
     const full = `${owner}$op$${OP_NAME.get(`operator ${op}`)}`;
-    if (this.fns.has(full)) {
-      return this.nope(n, `${shown(owner)} 的第二个 'operator ${op}'（要按实参类型挑，`
-        + '见第八十刀）');
+    /* 一格主人身上**好几条**同一个算符（第二百四十二刀）：量出来语料里就是它 ——
+       `std.StringBuilder` 上三条 `operator +=`（收 `string` / `char const*` / 一格字符），
+       逐份榜上 31 对。先前这儿一见 `fns.has(full)` 就说"第二个…要按实参类型挑" ——
+       可"按实参类型挑"这一层早就有（第八十刀那套 `argCost`，属性的存值器第一百八十一刀就是
+       照它做的）。欠的只是**名字**与**那张表**：改名照第七十九刀那条（第二条起加 `$o2`），
+       表里从"一条"改成"一族"。签名一样的那种才是重定义，当场报。 */
+    const key = `${owner}$${op}`;
+    const prev = this.opCompound.get(key);
+    let mine = full;
+    if (prev !== undefined) {
+      if (prev.sets.some((t) => sameTy(t, ps[0].type))) {
+        return this.err(n, `${shown(owner)} 上两个 'operator ${op}' 收的实参类型一样`
+          + `（${tyName(ps[0].type)}）`);
+      }
+      mine = `${full}$o${prev.sets.length + 1}`;
     }
-    info.name = full;
+    info.name = mine;
     const self = this.classes.has(owner) ? tClass(owner, false) : { k: 'struct', name: owner };
     ps.unshift({ name: 'this', type: self, formals: null, def: null });
-    this.methods.set(full, owner);
-    this.opCompound.set(`${owner}$${op}`, { name: full, param: ps[1].type, ret: info.type });
-    this.fns.set(full, sigOf(ps, info.type));
+    this.methods.set(mine, owner);
+    if (prev === undefined) {
+      this.opCompound.set(key, {
+        name: mine, param: ps[1].type, ret: info.type,
+        sets: [ps[1].type], names: [mine], rets: [info.type],
+      });
+    } else {
+      prev.sets.push(ps[1].type);
+      prev.names.push(mine);
+      prev.rets.push(info.type);
+    }
+    this.fns.set(mine, sigOf(ps, info.type));
     return { info, ps, isMain: false };
   }
 
@@ -1567,15 +1622,31 @@ class JncLower {
       return this.nope(n, `'operator :=' 收 ${ps.length} 个形参（这一层只收一个）`);
     }
     const full = `${owner}$op$assign`;
-    if (this.fns.has(full)) {
-      return this.nope(n, `${shown(owner)} 的第二个 'operator :='（要按实参类型挑，见第八十刀）`);
+    // 好几条 `operator :=`（第二百四十二刀）：与上面那一格逐条一样
+    const prevA = this.opAssign.get(owner);
+    let mineA = full;
+    if (prevA !== undefined) {
+      if (prevA.sets.some((t) => sameTy(t, ps[0].type))) {
+        return this.err(n, `${shown(owner)} 上两个 'operator :=' 收的实参类型一样`
+          + `（${tyName(ps[0].type)}）`);
+      }
+      mineA = `${full}$o${prevA.sets.length + 1}`;
     }
-    info.name = full;
+    info.name = mineA;
     const self = this.classes.has(owner) ? tClass(owner, false) : { k: 'struct', name: owner };
     ps.unshift({ name: 'this', type: self, formals: null, def: null });
-    this.methods.set(full, owner);
-    this.opAssign.set(owner, { name: full, param: ps[1].type, ret: info.type });
-    this.fns.set(full, sigOf(ps, info.type));
+    this.methods.set(mineA, owner);
+    if (prevA === undefined) {
+      this.opAssign.set(owner, {
+        name: mineA, param: ps[1].type, ret: info.type,
+        sets: [ps[1].type], names: [mineA], rets: [info.type],
+      });
+    } else {
+      prevA.sets.push(ps[1].type);
+      prevA.names.push(mineA);
+      prevA.rets.push(info.type);
+    }
+    this.fns.set(mineA, sigOf(ps, info.type));
     return { info, ps, isMain: false };
   }
 
@@ -10954,12 +11025,15 @@ class JncLower {
       const oa = (isClass(lv.type) || jncIsStruct(lv.type))
         ? this.opAssign.get(lv.type.name) : undefined;
       if (op === '=' && oa !== undefined) {
-        let ov = this.expr(n.items[3], oa.param);
+        // 好几条 `operator :=` 时先按右边的类型挑一条（第二百四十二刀）
+        const oap = this.opPick(n, 'operator :=', oa, n.items[3]);
+        if (oap === null) return null;
+        let ov = this.expr(n.items[3], oap.param);
         if (ov === null) return null;
-        if (isInt(ov.type) && isInt(oa.param)) ov = intConv(ov, oa.param);
-        if (!sameTy(ov.type, lv.type) && this.assignOk(ov.type, oa.param)) {
+        if (isInt(ov.type) && isInt(oap.param)) ov = intConv(ov, oap.param);
+        if (!sameTy(ov.type, lv.type) && this.assignOk(ov.type, oap.param)) {
           const self = lv.kind === 'agg' ? lv.code : this.read(lv);
-          return [`${pad}(expr (call ${oa.name} ${self} ${ov.code}))`];
+          return [`${pad}(expr (call ${oap.name} ${self} ${ov.code}))`];
         }
       }
       /* 复合赋值算符（第一百五十二刀）：左边那一格的类型上写了 `operator +=` 就调它。
@@ -10968,15 +11042,18 @@ class JncLower {
       const oc = op !== null && COMPOUND_OPS.has(op) && (isClass(lv.type) || jncIsStruct(lv.type))
         ? this.opCompound.get(`${lv.type.name}$${op}`) : undefined;
       if (oc !== undefined) {
-        let ov = this.expr(n.items[3], oc.param);
+        // 好几条 `operator +=` 时先按右边的类型挑一条（第二百四十二刀）
+        const ocp = this.opPick(n, `operator ${op}`, oc, n.items[3]);
+        if (ocp === null) return null;
+        let ov = this.expr(n.items[3], ocp.param);
         if (ov === null) return null;
-        if (isInt(ov.type) && isInt(oc.param)) ov = intConv(ov, oc.param);
-        if (!this.assignOk(ov.type, oc.param)) {
-          this.err(n, `'operator ${op}' 的实参要 ${tyName(oc.param)}，这里是 ${tyName(ov.type)}`);
+        if (isInt(ov.type) && isInt(ocp.param)) ov = intConv(ov, ocp.param);
+        if (!this.assignOk(ov.type, ocp.param)) {
+          this.err(n, `'operator ${op}' 的实参要 ${tyName(ocp.param)}，这里是 ${tyName(ov.type)}`);
           return null;
         }
         const self = lv.kind === 'agg' ? lv.code : this.read(lv);
-        return [`${pad}(expr (call ${oc.name} ${self} ${ov.code}))`];
+        return [`${pad}(expr (call ${ocp.name} ${self} ${ov.code}))`];
       }
       // 类的变量赋不了值（第五十二刀）：type_class.rst:19 那句 "You cannot assign varibles
       // or fields of class types"。类**指针**照旧可以赋（那是换个引用，不是拷贝对象）。
