@@ -430,6 +430,13 @@ if (existsSync(sysDir)) {
       + '        return n + 1;\n'
       + '    }\n'
       + '}\n\n'
+      /* 基类那格 construct 在宿主（第一百九十二刀）：`basetype.construct(9)` 落成一句
+         `(ccall Plain_construct $this 9)`。 */
+      + 'class Kid: Plain {\n'
+      + '    construct() {\n'
+      + '        basetype.construct(9);\n'
+      + '    }\n'
+      + '}\n\n'
       + 'int main() {\n'
       + '    Counter* c = new Counter(100);\n'
       + '    c.add(20);\n'
@@ -455,12 +462,14 @@ if (existsSync(sysDir)) {
       + '    int* ip = new int;\n'
       + '    *ip = 7;\n'
       + '    printf("blen %d\\n", q.blen(ip, 4));\n'
+      + '    Kid* k = new Kid;\n'
+      + '    printf("kid %d\\n", k.seeded());\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */

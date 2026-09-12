@@ -1176,6 +1176,9 @@ class JncLower {
     this.hostTopSigs = new Map();
     /* 宿主面那格 construct 上的默认值（第一百九十一刀）：类名 -> 每格形参的默认值节点或 null。 */
     this.hostCtorDefs = new Map();
+    /* `basetype.construct(…)` 那一格的基类名（第一百九十二刀）：baseTarget 回哨兵时把它记在这儿，
+       调用点那一步取走就用完（同一次调用里一来一回，不跨语句）。 */
+    this.baseHostCtor = null;
     this.methods = new Map();
     this.methodNames = new Set();
     this.selfClass = null;
@@ -12779,8 +12782,17 @@ class JncLower {
     if (mn === null) return this.nope(n, "'basetype' 后面那个成员认不出来");
     if (mn === 'construct') {
       const c = this.ctors.get(base);
-      if (c === undefined) return this.err(n, `${shown(base)} 没有 construct`);
-      return c.name;
+      if (c !== undefined) return c.name;
+      /* 基类那格 construct **在宿主那边**（第一百九十二刀）：`basetype.construct(strdjb2, streq)`
+         （std_HashTable.jnc:185/191 那两处 —— 派生类的 ctor 里调基类的，而基类是个
+         `opaque class`、它的 ctor 只有原型）。这一格与第一百八十七刀同一个形状：这儿回的是
+         **一个名字**，放不下"改发 `(ccall Base_construct …)`"这件事，所以回一格哨兵、把是谁
+         记在一边，调用点那儿改道。 */
+      if (this.hostCtorSigs.has(base)) {
+        this.baseHostCtor = base;
+        return HOST_PICK;
+      }
+      return this.err(n, `${shown(base)} 没有 construct`);
     }
     const full = this.findMethod(base, mn);
     if (full === null) return this.err(n, `${shown(base)} 没有方法 '${mn}'`);
@@ -12829,6 +12841,19 @@ class JncLower {
       && head(callee.items[1]) === 'basetype') {
       const b = this.baseTarget(n, callee.items[1], mn);
       if (b === null) return null;
+      /* 基类那格 construct **在宿主那边**（第一百九十二刀）：发一句
+         `(ccall Base_construct $this 实参…)`。默认值、C_ABI 那几个词、`variant_t` 那两条都由
+         `hostCtorArgs` 一并管了 —— 与 `new C(…)` 走的是**同一份**（第一百六十二刀那一处）。 */
+      if (b === HOST_PICK) {
+        const bc = this.baseHostCtor;
+        this.baseHostCtor = null;
+        const ha = this.hostCtorArgs(n, bc, this.flat(n.items[2]));
+        if (ha === null) return null;
+        return {
+          code: `(ccall ${ha.sym} (var $this)${ha.vals.map((v) => ` ${v.code}`).join('')})`,
+          type: J_VOID,
+        };
+      }
       nm = b;
       self = '(var $this)';
       statBind = true;

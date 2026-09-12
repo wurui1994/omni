@@ -9481,6 +9481,25 @@ if (dstDataType->getStdType() == StdType_AbstractData ||
   一百八十三刀那一段把它的理由改对了：拦路的是这一层的函数值是闭包记录，方言拿不出裸代码地址）。
   也就是说：`new std.HashTable` 这一句要真编过，得先补方言那一格。
 
+### 第一百九十二刀：`basetype.construct(…)` —— 基类那格 construct 在宿主
+
+上一刀留下的那一半（`std.HashTable 没有 construct`，103 处）。语料里的原样是
+`basetype.construct(strdjb2, streq)`（std_HashTable.jnc:185/191）—— 派生类的 ctor 里调基类的，
+而基类是个 `opaque class`、它的 ctor 只有原型。这一层查的是 `ctors` 那张表，不问 `hostCtorSigs`。
+
+形状与第一百八十七刀一模一样（`baseTarget` 回的是**一个名字**，放不下"改发 `(ccall …)`"这件事），
+所以用同一格哨兵：`baseTarget` 回 `HOST_PICK`、把是谁记在 `baseHostCtor` 上，调用点那一步取走
+改道，发 `(ccall Base_construct $this 实参…)`。实参那一侧**一行都没新写**：走的是 `hostCtorArgs`
+（第一百六十二刀那一处），所以默认值（上一刀）、C_ABI 那几个词、`variant_t` 那两条全都跟着来。
+
+判据在 `tests/llvm/run.js` 第 9 节：`class Kid: Plain { construct() { basetype.construct(9); } }`
+—— `Plain` 那格 ctor 的体在宿主（`Plain_construct` 把 seed 记进宿主自己那张表），
+`new Kid` 之后 `k.seeded()` 印 `kid 9`。**基类的 ctor 真跑了**就在那个 9 上。
+
+- 腿：`node tests/jnc/run.js` 280/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `138 -> 140`（+2）、`(文件, 拦路项)` 对 `4591 -> 4505`（−86）、clean `210` 没动。
+- 一起编那张榜：`66 -> 64`、理由 `24 -> 23`。
+
 
 
 ## 后果与代价
