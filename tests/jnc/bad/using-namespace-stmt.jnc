@@ -1,0 +1,21 @@
+// 写在**函数体里**的 `using namespace X;`（第二百一十七刀立的界，test41.jnc:29）。
+//
+// 写在命名空间那一层的那一格同一刀收了（cases/169-usingnamespace.jnc）—— 那一格的作用域是
+// "这一层命名空间往后"，正好落在这一层现成的 resolve 上。可这一格不同：它的作用域是**这个
+// 块**，jancy 那儿它塞的是当前 scope 的 using 表（Function.cpp:130 那句 addUsingSet /
+// AsyncLauncherFunction.cpp:43），所以要一张跟着 `scopes` 一起进出的表。
+//
+// 收下不看会把作用域放大到整个函数（甚至整份源码），那时候一个本该报"未声明"的名字会被认出来
+// —— 拒得更松还好说，可要是**两层**都有那个名字，认出来的那一个就可能不是 jancy 认的那一个。
+// 所以照旧拦着，等那张表落下来。
+namespace ns2 {
+	int g() {
+		return 2;
+	}
+}
+
+int main() {
+	using namespace ns2;
+	printf("%d\n", g());
+	return 0;
+}

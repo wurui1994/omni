@@ -1,0 +1,35 @@
+// `using namespace X;`（第二百一十七刀）。语料里 4 份文件 6 处：
+// `using namespace stdt;`（unit_stdt_Array.jnc:5 / unit_stdt_HashTable.jnc:5 /
+// unit_stdt_RbTree.jnc:5 / unit_stdt_BoxList.jnc:5）与 test41.jnc:29/34。
+//
+// jancy 那儿它往**当前那层命名空间**的 using 表里塞一格（nspace->m_usingSet.addNamespace，
+// jnc_ct_Parser.cpp:987），查名时那条链找不着才看这张表。这一层的落法就是同一句话：记下
+// "写在哪一层、指向哪一层"，resolve 那条从里往外的链（第五十一刀）走完、基类那一层
+// （第一百三十七刀）也走完，再看这几张表。
+//
+// 次序这么定不是随手：这样 using **只会多认**名字，不会把已经认得的那些换掉 —— 也就是说
+// 它改不了任何一个原来就能编的程序的行为。
+//
+// 这一遍（usingScan）排在 typeName 之前：`using namespace stdt;` 之后那些声明里写的正是
+// `Array<int>` 这种裸名字，类型名那一遍就要认得。
+//
+// 判据是手写的 C 双胞胎 /tmp/c175.c：C 没有命名空间，所以那边把名字带上前缀写出来 ——
+// using 只改"裸名字往哪儿找"，找着的是同一格东西，印的都是 42。
+namespace ns1 {
+	int twice(int x) {
+		return x * 2;
+	}
+
+	struct Pt {
+		int m_x;
+	}
+}
+
+using namespace ns1;
+
+int main() {
+	Pt p;
+	p.m_x = 21;
+	printf("%d\n", twice(p.m_x));
+	return 0;
+}

@@ -1,0 +1,27 @@
+// 两张 using 表里都有同一个名字（第二百一十七刀的另一半）。
+//
+// jancy 那儿这是**歧义**：查名走到 using 表那一步时两层都有 `f`，报错、要写全名。
+// 这一层照实报同一件事 —— 悄悄按写在前面那一张算是骗人（而且"前面"这个次序在 jancy 那边
+// 根本不是判据）。
+//
+// 落法记在 resolve 末尾那一段：那条从里往外的链、以及基类那一层都走完之后才看 using 表，
+// 看的时候顺手数一遍"有几张表里有它"，多于一张就把这一格记下来、run 末尾报出来。
+namespace a {
+	int f(int x) {
+		return x + 1;
+	}
+}
+
+namespace b {
+	int f(int x) {
+		return x + 2;
+	}
+}
+
+using namespace a;
+using namespace b;
+
+int main() {
+	printf("%d\n", f(1));
+	return 0;
+}

@@ -10395,6 +10395,52 @@ jnc_ct_PragmaMgr.cpp:47-90），所以它必须在一遍**按声明序**走的�
   `using-namespace`，自己一刀），新冒出来的 `pragma 'ThinPointers'` 只有 1 份。
 - 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有 pragma）。
 
+### 第二百一十七刀：`using namespace X;`（写在命名空间那一层的）
+
+上一刀把 `顶层的 '…'` 那一行从 28 打到 3，剩下的就是这一格。语料里 4 份文件 6 处：
+`using namespace stdt;`（unit_stdt_Array / HashTable / RbTree / BoxList 各一处，都在第 5 行）
+与 test41.jnc:29 / :34。
+
+jancy 那儿它往**当前那层命名空间**的 using 表里塞一格
+（`nspace->m_usingSet.addNamespace`，jnc_ct_Parser.cpp:987），查名时那条链找不着才看这张表。
+这一层的落法是同一句话，落在 `resolve` 的**末尾**：
+
+1. 从里往外那条链（第五十一刀）；
+2. 体外写的方法那一格 `nsExtra`（第五十二刀）；
+3. 基类那一层（第一百三十七刀）；
+4. **using 表**（这一刀）。
+
+次序这么定不是随手：排在最后，using 就**只会多认**名字、不会把已经认得的那些换掉 ——
+也就是说它改不了任何一个原来就能编的程序的行为。
+
+新添的两格状态：`nsNames`（nsFlat 每开一层命名空间就记一格，嵌套写法 `namespace a.b` 的每一层
+都记 —— jancy 那边它们各是一格 Namespace）与 `usingNs`（`{ in, ns, node }`：写在哪一层、
+指向哪一层）。`in` 那一格管作用域：`''` 是顶层（对整份源码有效），写在 `namespace a` 里的那一张
+只对 `a` 与它下面有效。`usingScan` 这一遍排在 `typeName` 之前 —— `using namespace stdt;` 之后
+那些声明里写的正是 `Array<int>` 这种裸名字。
+
+**歧义照实报**：两张有效的 using 表里都有同一个名字时 jancy 报错（要写全名）。这一层在 resolve
+里顺手数一遍"有几张表里有它"，多于一张就记下来、`run` 末尾报出来（`bad/using-ambig.jnc`）。
+上面那一路先按第一张算过 —— 那不是"选一个"，是为了让别的诊断照常出来；报了错产物就不出去。
+
+**界写清**：写在**函数体里**的那一格（test41.jnc:29）还不收 —— 它的作用域是那个块
+（jancy 那边塞的是当前 scope 的 using 表，Function.cpp:130），要一张跟着 `scopes` 一起进出的
+表，是自己一刀。那句话也从笼统的 `语句 'using-namespace'` 改成了这件事本身
+（`bad/using-namespace-stmt.jnc`）。
+
+判据是手写的 C 双胞胎 `/tmp/c175.c`：C 没有命名空间，所以那边把名字带上前缀写出来 ——
+using 只改"裸名字往哪儿找"，找着的是同一格东西，两边都印 42。
+用例 `tests/jnc/cases/169-usingnamespace.jnc`。**退了 `bad/using-namespace`**（它的边界这一刀
+兑掉了；那份注里另外提到的 `using extension` 与 `friend` 照旧各自拦着）。
+
+- 腿：`node tests/jnc/run.js` 305/0（新增 `cases/169-usingnamespace`、`bad/using-ambig`、
+  `bad/using-namespace-stmt`，退了 `bad/using-namespace`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`顶层的 '…'` 那一行 3 份**整行没了**，`(文件, 拦路项)` 对 `4008 -> 4004`（−4）。
+  lowered `158`、clean `229` 都没动 —— 那 4 份（unit_stdt 那一族 + test41）后面还压着别的
+  （泛型的实例、函数体里的那一格 using）。
+- 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有 using）。
+
+
 
 
 

@@ -1045,6 +1045,15 @@ class JncLower {
     /* `pragma(ExposedEnums, true)` 开着时声明的那些**带名字的**枚举（第二百一十六刀）：
        按节点记，enumName / enumDecl 那两遍把它们当"无名那一种"待（成员漏到外面那层）。 */
     this.exposedEnums = new Set();
+    /* 命名空间的名字（第二百一十七刀）：`using namespace X;` 要先认出 X 是一层命名空间。
+       nsFlat 那一遍每开一层就记一格（嵌套写法的每一层都记）。 */
+    this.nsNames = new Set();
+    /* `using namespace X;` 那几张表（第二百一十七刀）：`{ in, ns, node }` ——
+       `in` 是它写在哪一层（''是顶层，顶层那一张对整份源码有效），`ns` 是它指的那一层。
+       resolve 里那条链找不着时才看这几张，所以它只会**多认**名字、不会改已经认得的那些。 */
+    this.usingNs = [];
+    // 两张 using 表里都有同一个名字（第二百一十七刀）：jancy 那边报歧义，这儿攒着 run 末尾报。
+    this.usingAmbig = new Map();
     /* 无名枚举**漏到外面那层命名空间**的那些成员（第九十六刀，jancy 那边叫 exposed）：
        外面看到的那个名字 -> { en, mn }。查名时在"未声明的变量"之前多问这一张。 */
     this.exposedMems = new Map();
@@ -2273,7 +2282,54 @@ class JncLower {
       if (has(full)) return full;
     }
     // 往外退到底还没找着，最后再顺着**基类那一层**上去找一遍（第一百三十七刀）
-    return this.baseResolve(k, has);
+    const b = this.baseResolve(k, has);
+    if (b !== null) return b;
+    /* `using namespace X;`（第二百一十七刀）。jancy 的查名次序是"当前那条链先、using 表后"
+       （Namespace::findItemTraverse -> UsingSet，jnc_ct_Parser.cpp:987 那句 addNamespace 就是
+       往那张表里塞），所以这一问排在最后 —— 它只会**多认**名字，不会把已经认得的那些换掉。
+       两张表里都有同一个名字时 jancy 报歧义：这儿先按第一张算，同时把这一格记下来，
+       run 末尾照实报（悄悄按第一张算是骗人）。 */
+    for (const u of this.usingNs) {
+      if (!(u.in === '' || this.ns === u.in || this.ns.startsWith(`${u.in}$`))) continue;
+      const full = `${u.ns}$${k}`;
+      if (!has(full)) continue;
+      for (const u2 of this.usingNs) {
+        if (u2 === u || u2.ns === u.ns) continue;
+        if (!(u2.in === '' || this.ns === u2.in || this.ns.startsWith(`${u2.in}$`))) continue;
+        if (has(`${u2.ns}$${k}`)) this.usingAmbig.set(k, u.node);
+      }
+      return full;
+    }
+    return null;
+  }
+
+  /**
+   * `using namespace X;`（第二百一十七刀）。语料里 4 份文件 6 处：
+   * `using namespace stdt;`（unit_stdt_Array.jnc:5 那一族四份）与 test41.jnc:29/34。
+   *
+   * jancy 那儿它往**当前那层命名空间**的 using 表里塞一格（`nspace->m_usingSet.addNamespace`，
+   * jnc_ct_Parser.cpp:987），查名时那条链找不着才看这张表。所以这一层的落法就是同一句话：
+   * 记下"写在哪一层（`in`）、指向哪一层（`ns`）"，resolve 那条链走完再看它们（见 resolve 末尾）。
+   *
+   * 这一遍排在 typeName 之前 —— `using namespace stdt;` 之后那些声明里写的正是 `Array<int>`
+   * 这种裸名字，类型名那一遍就要认得。
+   *
+   * **界写清**：写在**函数体里**的那一格（test41.jnc:29）还不收 —— 它的作用域是那个块，
+   * 要一张跟着 `scopes` 一起进出的表，是自己一刀（见 bad/using-namespace-stmt.jnc）。
+   */
+  usingScan(items) {
+    const save = this.ns;
+    for (const e of items) {
+      const it = e.it;
+      if (!isList(it) || head(it) !== 'using-namespace') continue;
+      this.ns = e.ns;
+      const nm = this.qname(it.items[1]);
+      if (nm === null) { this.err(it, '认不出的命名空间名字'); continue; }
+      const t = this.resolve(nm, (k) => this.nsNames.has(k));
+      if (t === null) { this.err(it, `没有这个命名空间：'${nm}'`); continue; }
+      this.usingNs.push({ in: e.ns, ns: t, node: it });
+    }
+    this.ns = save;
   }
 
   /**
@@ -2793,7 +2849,16 @@ class JncLower {
         const nm = this.qname(it.items[1]);
         if (nm === null) { this.err(it, '认不出的命名空间名字'); continue; }
         const k = nm.replace(/\./g, '$');
-        this.nsFlat(it.items[2], ns === '' ? k : `${ns}$${k}`, out);
+        const full = ns === '' ? k : `${ns}$${k}`;
+        // 名字记一格（第二百一十七刀）：`using namespace X;` 要先认出 X 是一层命名空间。
+        // 嵌套写法 `namespace a.b { … }` 的每一层都记（`a` 与 `a$b`）—— jancy 那边它们
+        // 各是一格 Namespace（openNamespace 一层一层开）。
+        let at = ns;
+        for (const part of k.split('$')) {
+          at = at === '' ? part : `${at}$${part}`;
+          this.nsNames.add(at);
+        }
+        this.nsFlat(it.items[2], full, out);
         continue;
       }
       out.push({ ns, it });
@@ -2903,6 +2968,9 @@ class JncLower {
     /* 顶层的 pragma（第二百一十六刀）排在这儿：它按**声明序**改后面那些声明的编译配置，
        而 `ExposedEnums` 管的正是"枚举的成员往哪一层登记"—— 所以必须在 typeName 之前。 */
     this.pragmaScan(items);
+    /* `using namespace X;`（第二百一十七刀）与 pragma 同一处理由排在这儿：`using namespace
+       stdt;` 之后那些声明里写的是 `Array<int>` 这种裸名字，类型名那一遍就要认得。 */
+    this.usingScan(items);
     // 类型的名字先坐下（第十七刀）：`Node* m_next` 要在自己的体里查得着 Node。
     for (const e of items) {
       this.ns = e.ns;
@@ -3174,6 +3242,13 @@ class JncLower {
     this.emitFieldInitCtors();
     /* reactor 的那几段（第八十五刀）：同一条理由 —— 反应里能引用模块级变量、属性与函数。 */
     this.emitReactors();
+    /* 两张 using 表里都有同一个名字（第二百一十七刀）：jancy 那边这是歧义，报出来。
+       上面那一路先按第一张算了 —— 那不是"选一个"，是为了让别的诊断照常出来；这一句让整份
+       源码照实报错，所以那个选择传不到产物里去。 */
+    for (const [k, node] of this.usingAmbig) {
+      this.err(node, `'${shown(k.replace(/\$/g, '.'))}' 在两层 using 的命名空间里都有 —— `
+        + 'jancy 那边这是歧义（要写全名）');
+    }
     // 没有 `main` 的那种源码（第六十五刀）。语料 662 份里 408 份是这种 —— 它们是**库模块**，
     // 本来就不该有入口（jancy 那边 `jancy foo.jnc` 找不到 main 才报错，可 `jnc_ct` 把它当
     // 模块编译是成立的）。所以"要不要入口"由**调用方**说：`omni sx` 只要一份降下来的文本，
@@ -3294,6 +3369,7 @@ class JncLower {
     if (h === 'fn-def') return this.fnDef(item);
     if (h === 'typedef') return null;               // 已经在前面那一遍收过了（第三十八刀）
     if (h === 'pragma') return null;                // pragmaScan 那一遍收过了（第二百一十六刀）
+    if (h === 'using-namespace') return null;       // usingScan 那一遍收过了（第二百一十七刀）
     return this.nope(item, `顶层的 '${h}'`);
   }
 
@@ -9647,6 +9723,16 @@ class JncLower {
         ...body,
         `${pad}  ))`,
       ];
+    }
+    /* 写在**函数体里**的 `using namespace X;`（第二百一十七刀立的界，test41.jnc:29）。
+       写在命名空间那一层的那一格同一刀收了（usingScan），可这一格的作用域是**这个块** ——
+       jancy 那儿它塞的是当前 scope 的 using 表（Function.cpp:130 那句 addUsingSet），
+       所以要一张跟着 `scopes` 一起进出的表。说清是这一种，别让它落到笼统那句话上。 */
+    if (h === 'using-namespace') {
+      this.nope(n, '写在函数体里的 `using namespace X;` —— 它的作用域是这个块，'
+        + '要一张跟着作用域一起进出的表（写在命名空间那一层的那一格收了，见 ADR-0016 '
+        + '第二百一十七刀）');
+      return null;
     }
     this.nope(n, `语句 '${h}'`);
     return null;
