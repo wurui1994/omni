@@ -118,6 +118,14 @@ void Plain_construct(void *self, int64_t seed) {
   if (p != NULL) *p = seed;
 }
 
+/* 同名**第二条** `construct`（第二百〇七刀）：jancy 明写 ctor 可以重载
+   （type_class.rst:63），语料里的原样是 `ui.ComboBox` 上那两条（ui_ComboBox.jnc:38/40）。
+   符号名第二条起加 `_o2`（与方法那一族第一百八十六刀同一条规则）。 */
+void Plain_construct_o2(void *self, int64_t a, int64_t b) {
+  int64_t *p = probe_slot(self);
+  if (p != NULL) *p = a * 10 + b;
+}
+
 int64_t Plain_seeded(void *self) {
   int64_t *p = probe_slot(self);
   return p == NULL ? -1 : *p;

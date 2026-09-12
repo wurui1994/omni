@@ -443,6 +443,8 @@ if (existsSync(sysDir)) {
       /* 宿主面那格 construct 上的**默认值**（第一百九十一刀）：下面 `new Plain` 一个实参都不给，
          补出来的就是这个 5 —— 所以 seeded() 印 5。 */
       + '    construct(long seed = 5);\n'
+      /* 同名第二条 construct（第二百〇七刀）：挑哪一条按个数与类型排，符号名加 `_o2`。 */
+      + '    construct(long a, long b);\n'
       + '    long twice(long x);\n'
       + '    long seeded();\n'
       /* 同名两条里一条带体、一条只有原型（第一百八十六刀）：一个实参的那条这一层自己发，
@@ -509,12 +511,14 @@ if (existsSync(sysDir)) {
       + '    printf("ptx %d\\n", pt.m_x);\n'
       + '    printf("dyl %d\\n", Lib.probe_dylibAdd(40, 1));\n'
       + '    printf("ali %d\\n", q.twice2(21));\n'
+      + '    Plain* q2 = new Plain(4, 2);\n'
+      + '    printf("ctor2 %d\\n", q2.seeded());\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -560,6 +564,9 @@ if (existsSync(sysDir)) {
     /* 别名那一格（第二百〇六刀）：调用点发的是**目标**那个符号，`Plain_twice2` 不该存在。 */
     } else if (sx.out.includes('Plain_twice2')) {
       detail.push('    emit sx 里出现了 `Plain_twice2` —— 别名该发目标那个符号（Plain_twice）');
+    /* 同名第二条 construct（第二百〇七刀）。 */
+    } else if (!sx.out.includes('(cabi Plain_construct_o2 void (ptr i64 i64))')) {
+      detail.push('    emit sx 里没有 `(cabi Plain_construct_o2 void (ptr i64 i64))`');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');

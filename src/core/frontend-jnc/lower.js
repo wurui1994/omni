@@ -1153,6 +1153,9 @@ class JncLower {
 
     /* 那些 `opaque class` 里 `construct` 的**形参类型**（第一百六十二刀）：`new C(…)` 据此发
        `(ccall C_construct self …)` —— 与方法（J4b）、属性的取/存（第一百六十刀）同一条约定。 */
+    /* 宿主面那几格 construct 的签名（第一百六十二刀；第二百〇七刀改成一格一族）：
+       类名 -> `[{params, defs}, …]`（默认值那一格是第一百九十一刀）。同名好几条 ctor
+       jancy 明写收（type_class.rst:63），挑哪一条与顶层那几条原型共用 hostPickSigs。 */
     this.hostCtorSigs = new Map();
     /* 属性全名 -> `{get, set}`：那两个取/存**只有原型、没有体**（`opaque class` 里那种，
        ui_PropertyGrid.jnc:78-88）。体在宿主的 C/C++ 那边，所以读写落成
@@ -1181,8 +1184,6 @@ class JncLower {
     /* 顶层那些只有原型的函数的签名（第一百八十五刀）：名字 -> `{ret, params, defs}`。
        调用点据此发 `(ccall <全名把 $ 换成 _> …)` —— 与类里那些（hostSigs）同一条约定。 */
     this.hostTopSigs = new Map();
-    /* 宿主面那格 construct 上的默认值（第一百九十一刀）：类名 -> 每格形参的默认值节点或 null。 */
-    this.hostCtorDefs = new Map();
     /* `basetype.construct(…)` 那一格的基类名（第一百九十二刀）：baseTarget 回哨兵时把它记在这儿，
        调用点那一步取走就用完（同一次调用里一来一回，不跨语句）。 */
     this.baseHostCtor = null;
@@ -5748,14 +5749,26 @@ class JncLower {
               .find((x) => isList(x) && head(x) === 'fn-suffix');
             const hps0 = sfx0 === undefined ? null : this.formalList(sfx0.items[1]);
             if (hps0 !== null) {
-              this.hostCtorSigs.set(name, hps0.map((p) => p.type));
-              /* 原型上那几格默认值也记下来（第一百九十一刀，与方法那一处第一百六十九刀同一条）：
-                 `construct(HashFunc thin* h = null, IsEqualFunc thin* e = null);`
-                 （std_HashTable.jnc:75-78）—— `new std.HashTable` 一个实参都不给是对的，
-                 而先前宿主面这一格只比个数、不补默认值，于是报"要 2 个实参，这里给了 0 个"
-                 （逐份榜上 103 处那一行的头一半）。 */
+              /* 同名好几条 `construct`（第二百〇七刀）：`ui.ComboBox` 上两条 ——
+                 `construct();` 与 `construct(ComboItem const* itemArray, size_t count);`
+                 （ui_ComboBox.jnc:38/40）。jancy 明写 ctor 可以重载（type_class.rst:63）。
+                 先前这张表按名字存**一条**，后一条把前一条盖掉了，于是 `new ComboBox` 报
+                 "要 2 个实参，这里给了 0 个"—— 那是"悄悄按其中一条算"，与第一百九十四刀
+                 顶层原型那一格是同一笔。改成一格一族，挑哪一条与那儿共用 hostPickSigs。
+                 符号名第二条起加 `_o2`（与第一百八十六刀那条规则一样）。 */
               const ds1 = hps0.map((p) => p.def ?? null);
-              if (ds1.some((d) => d !== null)) this.hostCtorDefs.set(name, ds1);
+              const one1 = {
+                params: hps0.map((p) => p.type),
+                defs: ds1.some((d) => d !== null) ? ds1 : null,
+              };
+              const prevC = this.hostCtorSigs.get(name);
+              const sameC = (a, b) => a.params.length === b.params.length
+                && a.params.every((t, i) => sameTy(t, b.params[i]));
+              if (prevC === undefined) this.hostCtorSigs.set(name, [one1]);
+              else if (!prevC.some((x) => sameC(x, one1))) prevC.push(one1);
+              /* 原型上那几格默认值也在里头（第一百九十一刀，与方法那一处第一百六十九刀同一条）：
+                 `construct(HashFunc thin* h = null, IsEqualFunc thin* e = null);`
+                 （std_HashTable.jnc:75-78）—— `new std.HashTable` 一个实参都不给是对的。 */
             }
             /* 那张"只有原型的 construct"表照旧记着（第一百四十八刀）：别处还靠它说话，
                而体外真写了定义时上面这几格用不上（`ctors` 那时有它，几处都先问那张表）。 */
@@ -12197,9 +12210,10 @@ class JncLower {
   }
 
   /** 上面那一步与顶层那几条原型（第一百九十四刀）共用的一段 —— 只差话里那个名字怎么写。 */
-  hostPickSigs(n, label, sigs) {
+  hostPickSigs(n, label, sigs, args0 = null) {
     if (sigs.length === 1) return { sig: sigs[0], i: 0 };
-    const args = this.flat(n.items[2]);
+    // 实参那一串：调用点那两处从 `n` 上摊，construct 那一处（第二百〇七刀）直接给
+    const args = args0 === null ? this.flat(n.items[2]) : args0;
     const given = args.length;
     const fits = [];
     for (let i = 0; i < sigs.length; i++) {
@@ -12359,22 +12373,27 @@ class JncLower {
    * （hostMethodCall）逐字同一套检查 —— 落不进 C_ABI 那几个词的明说不收，不猜。
    */
   hostCtorArgs(n, cls, argNodes) {
-    const sig = this.hostCtorSigs.get(cls);
-    if (sig === undefined) {
+    const sigs = this.hostCtorSigs.get(cls);
+    if (sigs === undefined || sigs.length === 0) {
       return this.nope(n, `造一格 '${shown(cls)}' —— 它那格 construct 的形参表没收下来`
         + '（体在宿主的 C/C++ 那边，opaque.rst:15-29）');
     }
+    /* 同名好几条 construct（第二百〇七刀）：挑哪一条与顶层那几条原型共用同一段
+       （先按个数筛、再按实参类型排，问不出类型的明说不收 —— 第八十刀那条）。 */
+    const pickC = this.hostPickSigs(n, `${shown(cls)}.construct`, sigs, argNodes);
+    if (pickC === null) return null;
+    const sig = pickC.sig.params;
     /* 默认值在**声明那一头**的作用域里折（第一百〇五刀那条口径）：宿主面那一头就是那个类。 */
-    const cds = this.hostCtorDefs.get(cls);
-    const argNodes2 = cds === undefined ? argNodes
+    const cds = pickC.sig.defs === undefined ? null : pickC.sig.defs;
+    const argNodes2 = cds === null ? argNodes
       : this.withDefaults(argNodes, sig, cds, cls);
     if (argNodes2 === null) return null;
     if (argNodes2.length !== sig.length) {
       return this.err(n, `'${shown(cls)}' 的 construct 要 ${sig.length} 个实参`
-        + `${cds === undefined ? '' : `（其中 ${cds.filter((d) => d !== null).length} 个有默认值）`}`
+        + `${cds === null ? '' : `（其中 ${cds.filter((d) => d !== null).length} 个有默认值）`}`
         + `，这里给了 ${argNodes.length} 个`);
     }
-    const sym = `${cls.replace(/\$/g, '_')}_construct`;
+    const sym = `${cls.replace(/\$/g, '_')}_construct${pickC.i > 0 ? `_o${pickC.i + 1}` : ''}`;
     const words = ['ptr'];
     const vals = [];
     for (let i = 0; i < argNodes2.length; i++) {

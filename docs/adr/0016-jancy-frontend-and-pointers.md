@@ -10019,6 +10019,39 @@ onevent (bindingof(g_ip4), bindingof(g_routerIp4))() {   // 41_OnEventStmt.jnc:4
   那一份，它降不下来就一路挡着。
 - 一起编那张榜：`42 -> 41`、理由 `22 -> 21`。
 
+### 第二百〇七刀：宿主面同名好几条 `construct`
+
+`'…' 的 construct 要 2 个实参，这里给了 0 个` 是两份文件的唯一拦路项，指着
+
+```jnc
+ComboBox* comboBox = new ComboBox;      // ui_ToolBar.jnc:79
+```
+
+而 `ui.ComboBox` 上声明着**两条** ctor（都只有原型、体在宿主）：
+
+```jnc
+construct();                                                  // ui_ComboBox.jnc:38
+construct(ComboItem const* itemArray, size_t count);          // 同上:40
+```
+
+jancy 明写 ctor 可以重载（type_class.rst:63 那句 "Constructors can be overloaded"）。
+这一层的 `hostCtorSigs` 按名字存**一条**，后一条把前一条盖掉了 —— 于是 `new ComboBox` 拿
+两个形参那一条去比个数。**与第一百九十四刀顶层原型那一格是同一笔账**（"悄悄按其中一条算"），
+连修法都一样：改成一格一族，挑哪一条与那儿共用 `hostPickSigs`（先按个数筛、再按实参类型排，
+问不出类型的明说不收），符号名第二条起加 `_o2`。
+
+顺手把 `hostCtorDefs` 那张表收进族里（默认值本来就是"每条 ctor 各自的"，分成两张表是第
+一百九十一刀图省事留下的）。
+
+判据在 `tests/llvm/run.js` 第 9 节：`class Plain` 上加第二条 `construct(long a, long b)`
+（宿主那边存 `a * 10 + b`），`new Plain(4, 2)` 之后 `q2.seeded()` 印 `ctor2 42`；`.sx` 里那一句是
+`(cabi Plain_construct_o2 void (ptr i64 i64))`。原来那条 `new Plain`（默认值补 5）照旧印 `plain 42 5`
+—— 一条都没挪。
+
+- 腿：`node tests/jnc/run.js` 289/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `153 -> 155`（+2）、`(文件, 拦路项)` 对 `4229 -> 4147`（**−82**）、
+  clean `223` 没动；一起编那张榜 `41 -> 40`、理由 `21 -> 20`。
+
 
 
 ## 后果与代价
