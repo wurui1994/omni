@@ -11905,6 +11905,19 @@ class JncLower {
   caseLabel(e) {
     const k = this.constInt(e);
     if (k === null) {
+      /* 榜上这一行 53 份，**全是同一种**（第二百二十四刀量的）：
+         `case EthernetTapLogRecordCode.Packet_ch1:`、`case HidDispatchCode.GetDeviceVid:`
+         这样的**限定名**，而那个枚举躺在别的模块里、逐份编的时候 import 不着。
+         枚举成员本身这一层早就认（`case Code.Ok:` 当场量过能走，constInt 里 exposedLit 与
+         枚举体那两支）；常量折叠也认（constBin）。所以"算不出来"这句话是**认错人**——
+         真话是"这个名字这一层不认得"，与 `没有这个类型` 是同一笔口径账。 */
+      const dn = isList(e) && (head(e) === 'name' || head(e) === 'field') ? this.dotted(e) : null;
+      if (dn !== null) {
+        this.nope(e, `case 的标签 '${shown(dn)}' 这一层不认得 —— 枚举成员与常量折叠都认得`
+          + '（`case E.M:` / `case 1 + 2:`），所以这一格是那个名字本身找不着'
+          + '（那个枚举在别的模块里，与 `没有这个类型` 同一笔口径账）');
+        return null;
+      }
       this.nope(e, 'case 的标签算不出来（要一个编译期整数常量）');
       return null;
     }

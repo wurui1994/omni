@@ -1,0 +1,19 @@
+// `case` 的标签是个**这一层不认得的名字**（第二百二十四刀把话改准）。榜上这一行 53 份，
+// 全是这一种：`case EthernetTapLogRecordCode.Packet_ch1:`、`case HidDispatchCode.GetDeviceVid:`
+// —— 那些枚举躺在别的模块里，逐份编的时候 import 不着。
+//
+// 先前那句话是"case 的标签算不出来（要一个编译期整数常量）"，那是**认错人**：枚举成员这一层
+// 早就认（`case Code.Ok:` 走得通，constInt 里 exposedLit 与枚举体那两支），常量折叠也认
+// （constBin，`case 1 + 2:`）。所以这一格不是"算不出来"，是**那个名字本身找不着** ——
+// 与 `没有这个类型` 是同一笔口径账（一整批文件本来是一起编的）。
+int main() {
+	int x = 2;
+
+	switch (x) {
+	case Missing.Thing:
+		printf("a\n");
+		break;
+	}
+
+	return 0;
+}
