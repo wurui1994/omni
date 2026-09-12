@@ -9156,6 +9156,25 @@ property g_prop {
   `void update() { … }`，属性体里的**帮手方法**（prop_full.rst:15 那句 "helper methods"）。
   那一格与这三刀是同一个家族：属性体是一层命名空间，里头能放的东西比我们收的多。
 
+  **但先量了一下值不值得**：帮手方法那一行在榜上只有 **2 处**，而
+  `完整声明式的属性（… 那对花括号开的是一层命名空间）` 那一行有 **70 处** —— 后者才是这一族里
+  最大的一块。顺着一份文件往下钻，那 70 处的形状钻出来了，**八行就能复现**：
+
+  ```jnc
+  class C {
+      char* m_p;
+      void const* const property m_end {   // <- 这一格没被 expandFullProps 改写
+          return m_p;
+      }
+  }
+  ```
+
+  同一个文件里紧挨着的 `bool const property m_isIncomplete { return …; }`（第一百五十七刀那种
+  "体里直接就是取值器的体"）是**收**的，`void const*` 这一格不收 —— 也就是说拦路的不是
+  "完整声明式"这件事本身，是那个类型（`void const*`：`property` 落在**星号后面**那一组词里，
+  而这一格与第七十二刀那条路又不完全同形）。判据文件：`jnc_DynamicLayout.jnc:91`。
+  这一格是下一刀的入口，比帮手方法值 35 倍。
+
 
 ## 后果与代价
 
