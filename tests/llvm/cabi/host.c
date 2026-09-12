@@ -233,3 +233,17 @@ void Counter_set_m_scale(void *self, int64_t v) {
   int64_t *p = probe_scale_slot(self);
   if (p != NULL) *p = v * 10;
 }
+
+/* **顶层**那格属性的取/存（第二百二十五刀）。`int property g_simpleProp;` 一个体都没写 ——
+   与顶层那格只有原型的函数（第一百八十五刀）同一句话：实现在宿主这边。没有主人，所以名字就是
+   `get_<名字>` / `set_<名字>`、也没有那个 self 形参（与 `Owner_get_m_p` 是同一条规则，只是
+   主人那一段空着）。存的时候加一，好让"真走了宿主这两个函数"在输出上看得见。 */
+static int64_t probe_top_prop;
+
+int64_t get_g_probeProp(void) {
+  return probe_top_prop;
+}
+
+void set_g_probeProp(int64_t v) {
+  probe_top_prop = v + 1;
+}

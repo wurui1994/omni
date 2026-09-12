@@ -8199,8 +8199,12 @@ class JncLower {
        判据写成"不是类"而不是"在 structs 表里"—— 那张表里**也有类**（classLayout 把每个类的
        方言结构体登在里头，量出来的：写成 `structs.has` 会把没写 `opaque` 的类一起放进来，
        `bad/prop-noset` 那道墙当场就倒了）。类那一侧照旧要 `opaque`（第一百六十刀那条口径）。 */
-    if (pi === undefined || pi.cls === null
-      || (this.classes.has(pi.cls) && !this.opaques.has(pi.cls))) return undefined;
+    /* 顶层那一格（第二百二十五刀）：`int property g_simpleProp;` 一个体都没写 ——
+       与顶层那格只有原型的函数（第一百八十五刀）是同一句话：**实现在宿主那边**。语料里的出处
+       就是 jancy 自己那两份导出样例（jnc_sample_01_export_c/script.jnc:27 与 02_export_cpp
+       同处），它们要演示的正是"属性的取/存写在 C / C++ 里"。 */
+    if (pi === undefined
+      || (pi.cls !== null && this.classes.has(pi.cls) && !this.opaques.has(pi.cls))) return undefined;
     /* 两种写法都算宿主面（第一百六十刀 + 第一百六十二刀）：
          - 完整声明式里那格**只有原型**的取/存（`property m_value { void set(variant_t); }`，
            ui_PropertyGrid.jnc:80）—— `propHostAcc` 上记着；
@@ -8213,12 +8217,22 @@ class JncLower {
       /* 体里明写了另一半、这一半没写：那是"这格属性只有取值器 / 只有存值器"，不是宿主面。 */
       return undefined;
     }
-    const sf = this.propSelf(n, pn, pi, self);
-    if (sf === null) return null;
-    const sym = `${pi.cls.replace(/\$/g, '_')}_${kind}_${pn.slice(pn.lastIndexOf('$') + 1)}`;
-    const words = ['ptr'];
-    const parts = [sf.trim()];
-    const slots = [slotText(tClass(pi.cls))];
+    /* 符号名与那三格实参（ADR-0022 的 J4b）：主人那一格在前、`_get_` / `_set_` 夹在中间。
+       顶层那一格没有主人，所以既没有 `self` 那个实参、名字也就是"命名空间前缀 + kind + 成员"
+       —— `g_simpleProp` -> `get_g_simpleProp`、`doc.g_prop` -> `doc_get_g_prop`
+       （与 `Owner_get_name` 是同一条规则，只是主人那一段空着）。 */
+    const own = pi.cls === null ? pn.slice(0, Math.max(0, pn.lastIndexOf('$'))) : pi.cls;
+    const sym = `${own === '' ? '' : `${own.replace(/\$/g, '_')}_`}${kind}_${pn.slice(pn.lastIndexOf('$') + 1)}`;
+    const words = [];
+    const parts = [];
+    const slots = [];
+    if (pi.cls !== null) {
+      const sf = this.propSelf(n, pn, pi, self);
+      if (sf === null) return null;
+      words.push('ptr');
+      parts.push(sf.trim());
+      slots.push(slotText(tClass(pi.cls)));
+    }
     /* 索引属性（第一百七十二刀）：那几格下标摆在 `self` 后头、值前头 —— 与这一层自己发的
        `(call p$get self i…)` / `(call p$set self i… v)` 同一个顺序（第七十刀）。
        下标的类型与含义都由写的人定（prop_indexed.rst:15），所以照旧逐个过 C_ABI 那张表。 */

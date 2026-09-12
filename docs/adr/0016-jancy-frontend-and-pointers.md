@@ -10692,6 +10692,41 @@ ADR-0024）、`string` 与函数值是对的 —— **可对类指针不对**：
   "缺一格常量折叠"，实际上一份都不缺 —— 缺的是那些模块。
 - 一起编那张榜：`39`、理由 `19` 没动。
 
+### 第二百二十五刀：顶层那格属性的取/存在宿主那边
+
+榜上 `写属性 '…' —— 它的存值器没有定义` 92 份。抽样量出来的名字里除了 `ui.StringProperty.
+m_placeholderText`（那是 import 不着的模块，口径账）还有两个**这一层自己看得全**的：
+`g_prop` 与 `g_simpleProp` —— 出处是 jancy 自己那两份导出样例
+（`samples/jnc_sample_01_export_c/script.jnc:27` 的 `int property g_simpleProp;` 与
+`02_export_cpp` 同处）。那两份要演示的正是"属性的取/存写在 C / C++ 里"。
+
+所以这一格与**顶层那格只有原型的函数**（第一百八十五刀）是同一句话：一个体都没写 ->
+实现在宿主那边。第一百六十刀 / 第一百九十三刀已经把 opaque class 上的属性落成
+`(ccall Owner_get_m_p self)` / `(ccall Owner_set_m_p self v)` 了，这一刀只是把那条路的
+"主人那一段"允许空着：
+
+- 门上那一问从"`pi.cls === null` 就不是宿主面"改成"类那一侧照旧要 `opaque`，顶层那一格直接算"；
+- 符号名照 ADR-0022 J4b 那条规则，只是主人那一段空着 ——
+  `g_simpleProp` -> `get_g_simpleProp` / `set_g_simpleProp`，
+  `doc.g_prop` -> `doc_get_g_prop` / `doc_set_g_prop`（与 `Owner_get_name` 同一条）；
+- 没有主人，所以那三格 `self`（`ptr` 那个词、实参、槽）都不摆。
+
+判据按 ADR-0014 决策 4 那条口径落在**native 腿**上（C_ABI 的符号只有那儿才连得上，所以
+`tests/jnc/cases/` 里放不了这一格）：`tests/llvm/cabi/host.c` 里新添
+`int64_t get_g_probeProp(void)` 与 `void set_g_probeProp(int64_t v)`（**存的时候加一**，
+好让"真走了宿主那两个函数"在输出上看得见），`tests/llvm/run.js` §9 的 jnc 源码里加一行
+`long property g_probeProp;`、main 里 `g_probeProp = 41;` 之后印 `gp 42` ——
+42 这个数只有"真调了那两个 C 函数"才出得来。`.sx` 上另钉两条：
+`(cabi get_g_probeProp i64 ())` 与 `(cabi set_g_probeProp void (i64))`。
+
+- 腿：`node tests/jnc/run.js` 319/0、`node tests/llvm/run.js` 38/0（§9 多印一行 `gp 42`）。
+- 逐份那张榜：`写属性 '…'` `92 -> 89`（−3），同时冒出来一行 `读属性 '…'` 1 份 ——
+  那是先前被写那一侧盖着的另一半（同一格属性只读不写的那些文件）。
+  clean `234 -> 235`（+1）、`(文件, 拦路项)` 对 `3906 -> 3902`（−4）、lowered `161` 没动。
+  **代价明写**：剩下那 89 份绝大多数是 `ui.*` 那一族 —— 那些属性的主人是 import 不着的类，
+  与 `没有这个类型` 同一笔口径账，不是这一格欠的。
+- 一起编那张榜：`39`、理由 `19` 没动。
+
 
 
 

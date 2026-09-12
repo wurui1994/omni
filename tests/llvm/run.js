@@ -465,6 +465,10 @@ if (existsSync(sysDir)) {
          （ui_Dialog.jnc:126）。 */
       + '    alias twice2 = twice;\n'
       + '}\n\n'
+      /* **顶层**那格属性（第二百二十五刀）：一个体都没写 -> 取/存都在宿主那边，
+         符号名没有主人那一段（`get_g_probeProp` / `set_g_probeProp`）、也没有 self。
+         jancy 自己那两份导出样例（jnc_sample_01_export_c/script.jnc:27）就是这个形状。 */
+      + 'long property g_probeProp;\n\n'
       /* 基类那格 construct 在宿主（第一百九十二刀）：`basetype.construct(9)` 落成一句
          `(ccall Plain_construct $this 9)`。 */
       + 'class Kid: Plain {\n'
@@ -513,12 +517,14 @@ if (existsSync(sysDir)) {
       + '    printf("ali %d\\n", q.twice2(21));\n'
       + '    Plain* q2 = new Plain(4, 2);\n'
       + '    printf("ctor2 %d\\n", q2.seeded());\n'
+      + '    g_probeProp = 41;\n'
+      + '    printf("gp %d\\n", g_probeProp);\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -567,6 +573,10 @@ if (existsSync(sysDir)) {
     /* 同名第二条 construct（第二百〇七刀）。 */
     } else if (!sx.out.includes('(cabi Plain_construct_o2 void (ptr i64 i64))')) {
       detail.push('    emit sx 里没有 `(cabi Plain_construct_o2 void (ptr i64 i64))`');
+    } else if (!sx.out.includes('(cabi get_g_probeProp i64 ())')) {
+      detail.push('    emit sx 里没有 `(cabi get_g_probeProp i64 ())`（顶层属性的取值器，第二百二十五刀）');
+    } else if (!sx.out.includes('(cabi set_g_probeProp void (i64))')) {
+      detail.push('    emit sx 里没有 `(cabi set_g_probeProp void (i64))`（顶层属性的存值器，第二百二十五刀）');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');
