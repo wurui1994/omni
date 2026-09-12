@@ -1174,6 +1174,8 @@ class JncLower {
     /* 顶层那些只有原型的函数的签名（第一百八十五刀）：名字 -> `{ret, params, defs}`。
        调用点据此发 `(ccall <全名把 $ 换成 _> …)` —— 与类里那些（hostSigs）同一条约定。 */
     this.hostTopSigs = new Map();
+    /* 宿主面那格 construct 上的默认值（第一百九十一刀）：类名 -> 每格形参的默认值节点或 null。 */
+    this.hostCtorDefs = new Map();
     this.methods = new Map();
     this.methodNames = new Set();
     this.selfClass = null;
@@ -5553,7 +5555,16 @@ class JncLower {
             const sfx0 = this.flat(m.items[2].items[3])
               .find((x) => isList(x) && head(x) === 'fn-suffix');
             const hps0 = sfx0 === undefined ? null : this.formalList(sfx0.items[1]);
-            if (hps0 !== null) this.hostCtorSigs.set(name, hps0.map((p) => p.type));
+            if (hps0 !== null) {
+              this.hostCtorSigs.set(name, hps0.map((p) => p.type));
+              /* 原型上那几格默认值也记下来（第一百九十一刀，与方法那一处第一百六十九刀同一条）：
+                 `construct(HashFunc thin* h = null, IsEqualFunc thin* e = null);`
+                 （std_HashTable.jnc:75-78）—— `new std.HashTable` 一个实参都不给是对的，
+                 而先前宿主面这一格只比个数、不补默认值，于是报"要 2 个实参，这里给了 0 个"
+                 （逐份榜上 103 处那一行的头一半）。 */
+              const ds1 = hps0.map((p) => p.def ?? null);
+              if (ds1.some((d) => d !== null)) this.hostCtorDefs.set(name, ds1);
+            }
             /* 那张"只有原型的 construct"表照旧记着（第一百四十八刀）：别处还靠它说话，
                而体外真写了定义时上面这几格用不上（`ctors` 那时有它，几处都先问那张表）。 */
             this.protoCtors.add(name);
@@ -11955,29 +11966,35 @@ class JncLower {
       return this.nope(n, `造一格 '${shown(cls)}' —— 它那格 construct 的形参表没收下来`
         + '（体在宿主的 C/C++ 那边，opaque.rst:15-29）');
     }
-    if (argNodes.length !== sig.length) {
-      return this.err(n, `'${shown(cls)}' 的 construct 要 ${sig.length} 个实参，`
-        + `这里给了 ${argNodes.length} 个`);
+    /* 默认值在**声明那一头**的作用域里折（第一百〇五刀那条口径）：宿主面那一头就是那个类。 */
+    const cds = this.hostCtorDefs.get(cls);
+    const argNodes2 = cds === undefined ? argNodes
+      : this.withDefaults(argNodes, sig, cds, cls);
+    if (argNodes2 === null) return null;
+    if (argNodes2.length !== sig.length) {
+      return this.err(n, `'${shown(cls)}' 的 construct 要 ${sig.length} 个实参`
+        + `${cds === undefined ? '' : `（其中 ${cds.filter((d) => d !== null).length} 个有默认值）`}`
+        + `，这里给了 ${argNodes.length} 个`);
     }
     const sym = `${cls.replace(/\$/g, '_')}_construct`;
     const words = ['ptr'];
     const vals = [];
-    for (let i = 0; i < argNodes.length; i++) {
+    for (let i = 0; i < argNodes2.length; i++) {
       const w = isVar(sig[i]) ? 'ptr' : this.cabiWordOfJnc(sig[i], false);
       if (w === null) {
         return this.nope(n, `'${shown(cls)}' 的 construct 的第 ${i + 1} 个形参的类型 `
           + `${tyName(sig[i])}（落不进 C_ABI 的那几个词）`);
       }
-      let v = this.expr(argNodes[i], sig[i]);
+      let v = this.expr(argNodes2[i], sig[i]);
       if (v === null) return null;
       if (isInt(v.type) && isInt(sig[i])) v = intConv(v, sig[i]);
       if (!this.assignOk(v.type, sig[i])) {
-        return this.err(argNodes[i], `'${shown(cls)}' 的 construct 的第 ${i + 1} 个实参要 `
+        return this.err(argNodes2[i], `'${shown(cls)}' 的 construct 的第 ${i + 1} 个实参要 `
           + `${tyName(sig[i])}，这里是 ${tyName(v.type)}`);
       }
       words.push(w);
       if (isVar(sig[i])) {
-        const pv = this.hostVariantArg(argNodes[i], v);
+        const pv = this.hostVariantArg(argNodes2[i], v);
         if (pv === null) return null;
         vals.push({ code: pv, type: tPtr(this.variantTy()) });
       } else vals.push(v);

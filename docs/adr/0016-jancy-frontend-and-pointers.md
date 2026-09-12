@@ -9459,6 +9459,28 @@ if (dstDataType->getStdType() == StdType_AbstractData ||
   这一层还发不出来（方言的 `(ptr T)` 的 T 不收 `void`）。那是方言那一侧的事，与 `m_p` 那条
   "要一段真字节"是邻居，一起算。
 
+### 第一百九十一刀：宿主面那格 `construct` 上的**默认值**
+
+上一刀摆出来的第二格（`std.HashTable 没有 construct`，103 处）钻下去是**两半**，这一刀兑掉小的那半。
+
+`std.HashTable` 的 ctor 是 `construct(HashFunc thin* h = null, IsEqualFunc thin* e = null);`
+（std_HashTable.jnc:75-78）—— 两格都有默认值，所以 `new std.HashTable` 一个实参都不给是对的。
+可宿主面这一格先前**只比个数、不补默认值**（方法那一侧第一百六十九刀早就补了，ctor 这一侧漏了），
+于是报"要 2 个实参，这里给了 0 个"。改法与方法那一处逐字同一套：登记时把默认值记进
+`hostCtorDefs`，调用点走同一份 `withDefaults`（默认值在**声明那一头**的作用域里折，第一百〇五刀）。
+
+判据在 `tests/llvm/run.js` 第 9 节：`Plain` 的 ctor 改成 `construct(long seed = 5);`、调用点改成
+`new Plain`（一个实参都不给），`seeded()` 印出来还是 5 —— **补出来的就是那个 5**。
+
+- 腿：`node tests/jnc/run.js` 280/0、`node tests/llvm/run.js` 38/0。
+- 两张榜**一个数都没动**。照实记：那 103 处是**另外半边** —— `basetype.construct(strdjb2, streq)`
+  （std_HashTable.jnc:185/191）那种"派生类的 ctor 里调基类的 ctor，而基类的 ctor 在宿主"。
+  这一层的基类 ctor 查的是 `ctors` 那张表，不问 `hostCtorSigs` —— 那是下一刀，一处。
+- 顺带量到的下一道墙（这一格过去之后露出来的）：`std.HashTable` 的 ctor 形参是
+  `HashFunc thin*` —— **函数值过宿主面**那条老账（`bad/opaque-host-fn.jnc`，这一轮第
+  一百八十三刀那一段把它的理由改对了：拦路的是这一层的函数值是闭包记录，方言拿不出裸代码地址）。
+  也就是说：`new std.HashTable` 这一句要真编过，得先补方言那一格。
+
 
 
 ## 后果与代价

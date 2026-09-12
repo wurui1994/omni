@@ -411,7 +411,9 @@ if (existsSync(sysDir)) {
       + 'long hostMul(long a, long b);\n'
       + '}\n\n'
       + 'class Plain {\n'
-      + '    construct(long seed);\n'
+      /* 宿主面那格 construct 上的**默认值**（第一百九十一刀）：下面 `new Plain` 一个实参都不给，
+         补出来的就是这个 5 —— 所以 seeded() 印 5。 */
+      + '    construct(long seed = 5);\n'
       + '    long twice(long x);\n'
       + '    long seeded();\n'
       /* 同名两条里一条带体、一条只有原型（第一百八十六刀）：一个实参的那条这一层自己发，
@@ -445,7 +447,7 @@ if (existsSync(sysDir)) {
          standard C function ``rand``"，所以发的是一句 `(ccall rand …)` —— 而 C_ABI 符号只有
          原生腿上才有（ADR-0014 的第 4 条决定），判据就得摆在这儿而不是 tests/jnc。 */
       + '    printf("rand %d\\n", rand() >= 0);\n'
-      + '    Plain* q = new Plain(5);\n'
+      + '    Plain* q = new Plain;\n'
       + '    printf("plain %d %d\\n", q.twice(21), q.seeded());\n'
       + '    printf("top %d %d\\n", hostAdd(40, 2), probe.hostMul(6, 7));\n'
       + '    printf("mix %d %d\\n", q.mix(3, 4), q.mix(5));\n'
