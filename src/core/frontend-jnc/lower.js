@@ -11980,6 +11980,34 @@ class JncLower {
           const mv = this.methodRef(n, n.items[2].value);
           if (mv !== undefined) return mv;
         }
+        /* `string_t` 上那两格**公开**字段（第一百七十七刀）。jancy 的字符串是一格结构体，
+           哪几格能直接读，它的源码里连注释一起写着 ——
+
+               // jnc_ct_TypeMgr.cpp:2031-2039
+               // m_p && m_length are accessible directly
+               // (e.g.: string_t s; file.write(s.m_p, s.m_length);
+               type->createField("m_p", getStdType(StdType_CharConstPtr), 0, ConstKind_ReadOnly);
+               type->createField("!m_ptr_sz", getStdType(StdType_CharConstPtr));
+               type->createField("m_length", getPrimitiveType(TypeKind_SizeT), 0, ConstKind_ReadOnly);
+
+           带 `!` 的那一格是内部的（jancy 自己的约定：`!` 开头查不着名字），所以公开的就是
+           `m_p` 与 `m_length`，两格都是**只读**的。
+             - `m_length` 这一层答得出：`(slen …)` 就是它 —— 都是"按字节的长度"（第一百四十六刀
+               那条 `if (s)` 用的也是它）。
+             - `m_p` 答不出：那是一格指到**字节**上的 `char const*`，而这一层的 `char*` 指的是
+               方言的整数格（一格 8 字节）—— 两边不是同一个东西，明说不收。 */
+        if (isAtom(n.items[2]) && (n.items[2].value === 'm_length' || n.items[2].value === 'm_p')) {
+          const ct = this.cheapTy(ob);
+          if (ct !== null && ct.ty.k === 'string') {
+            if (n.items[2].value === 'm_p') {
+              return this.nope(n, '`string_t` 的 `m_p`（那是一格指到字节上的 `char const*`，'
+                + '而这一层的 `char*` 指的是方言的整数格 —— 两边不是同一个东西）');
+            }
+            const sv = this.expr(ob, J_STR);
+            if (sv === null) return null;
+            return { code: `(slen ${sv.code})`, type: mkInt(64, true) };
+          }
+        }
         // `s.f` / `p.f` / `f().x` / `(new T { … }).x` 全落在 lvalue 那一支上：那儿算的是
         // "这个字段在哪一格内存里"，读一次就是这儿要的值（第十二刀 / 第二十五刀）。
         return this.load(n, this.lvalue(n));

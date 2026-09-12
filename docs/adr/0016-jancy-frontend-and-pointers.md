@@ -9006,6 +9006,37 @@ JNC_END_LIB_SOURCE_FILE_TABLE()
   第六十八刀就收了（`propSig` 认 `T p.get() { … }`）。那 143 处是**属性的主人在另一个模块里**
   （`import "std_Buffer.jnc"` 之类找不着），也就是 import 那条账的下游，不是一格独立的特性。
 
+### 第一百七十七刀：`string_t` 上那两格公开字段 —— 一格答得出、一格明说不收
+
+榜上 `'…' 的左边不是结构体：string`（51 处）问的是字符串上的字段。jancy 的字符串是一格结构体，
+**哪几格能直接读，它的源码里连注释一起写着**：
+
+```cpp
+// jnc_ct_TypeMgr.cpp:2031-2039
+StructType* type = createInternalStructType("jnc.string_t");
+// m_p && m_length are accessible directly (e.g.: string_t s; file.write(s.m_p, s.m_length);
+type->createField("m_p", getStdType(StdType_CharConstPtr), 0, ConstKind_ReadOnly);
+type->createField("!m_ptr_sz", getStdType(StdType_CharConstPtr));
+type->createField("m_length", getPrimitiveType(TypeKind_SizeT), 0, ConstKind_ReadOnly);
+```
+
+三格里带 `!` 的那一格是内部的（jancy 自己的约定：`!` 开头的名字查不着），公开的两格都是**只读**的。
+
+- `m_length` **答得出**：`(slen …)` 就是它 —— 两边都是"按**字节**的长度"。判据在
+  `cases/149-strlength.jnc`：`"héllo"` 是 **6** 而不是 5（那个 é 在 UTF-8 里占两个字节），
+  尺子 `/tmp/c155.c` 用的是 `strlen`。这一格与第一百四十六刀 `if (s)` 用的是同一格
+  （那一刀已经查过 jancy 的 `Cast_BoolFromString` 取的是第 3 个字段 = 长度）。
+- `m_p` **明说不收**（`bad/string-mp.jnc`）：它指到**字节**上，而这一层的 `char*` 指的是方言的
+  整数格（一格 8 字节）。糊一个地址过去就是让下游按字节读一段不是字节的内存。这一格与
+  第一百七十六刀留下的 `str*` / `mem*` 那一批是**同一条账**：这一层缺的是"一段真字节"这个说法。
+
+- 腿：`node tests/jnc/run.js` 282/0。
+- 逐份那张榜：lowered `124` 与 `(文件, 拦路项)` 对 `4485` 都没动；**clean `194 -> 191`（−3）**。
+  **这个数往反方向走了，原因照实记**：`s.m_p` 先前落在一句普通错上（`'.' 的左边不是结构体：string`
+  —— 那是 `E`，不进"还不收"那一栏），这一刀把它改成了 `N`。也就是说这三份文件**两趟都编不过**，
+  变的只是"我们承认那是欠的还是假装是用户写错了"。jancy 收 `s.m_p`，所以 `N` 才是对的分类 ——
+  这个指标掉 3 是它变诚实的代价，不是能力退了。
+
 ## 后果与代价
 
 

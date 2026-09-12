@@ -1,0 +1,24 @@
+// `string_t` 上那格公开字段 `m_length`（第一百七十七刀）。判据在 jancy 自己的源码里 ——
+// `createStringStructType` 那三行连注释一起写着哪几格能直接读：
+//
+//     // jnc_ct_TypeMgr.cpp:2031-2039
+//     // m_p && m_length are accessible directly
+//     type->createField("m_p", …CharConstPtr…, ConstKind_ReadOnly);
+//     type->createField("!m_ptr_sz", …);      // 带 `!` 的是内部字段，查不着名字
+//     type->createField("m_length", …SizeT…, ConstKind_ReadOnly);
+//
+// `m_length` 是**按字节**的长度（不是字符数），所以下面那个 "héllo" 是 6 —— 那个 é 在 UTF-8 里
+// 占两个字节。这一层答它就是 `(slen …)`，与第一百四十六刀 `if (s)` 用的是同一格。
+// `m_p` 明说不收，界钉在 bad/string-mp.jnc。
+void show(string_t s) {
+	printf("[%s] %d\n", s, s.m_length);
+}
+
+int main() {
+	string_t s = "hello";
+	show(s);
+	show("");
+	show("héllo");
+	printf("%d\n", s.m_length + 1);
+	return 0;
+}

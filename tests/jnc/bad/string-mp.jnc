@@ -1,0 +1,13 @@
+// `string_t` 的 `m_p`（第一百七十七刀钉的界）。jancy 那儿它是公开的、只读的一格
+// `char const*`（jnc_ct_TypeMgr.cpp:2031-2039，那行注释还举了例子：
+// `string_t s; file.write(s.m_p, s.m_length);`）。
+//
+// 这一层答不出它：`m_p` 指到**字节**上，而这一层的 `char*` 指的是方言的整数格（一格 8 字节）。
+// 糊一个地址过去就是让下游按字节读一段不是字节的内存 —— 静默的错答案。
+// 兄弟那一格 `m_length` 是收的，正面判据在 cases/149-strlength.jnc。
+int main() {
+	string_t s = "hello";
+	char const* p = s.m_p;
+	printf("%d\n", p[0]);
+	return 0;
+}
