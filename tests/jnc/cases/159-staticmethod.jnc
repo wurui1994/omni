@@ -1,0 +1,45 @@
+// 类 / 结构体上的**静态方法**（第二百〇一刀）。jancy 的 `DerivableType::addMethod` 在
+// `StorageKind_Static` 那一支直接 break、**不走** `convertToMemberMethod`
+// （jnc_ct_DerivableType.cpp:169-185）—— 所以静态方法就是"名字挂在这个类型上的一个自由函数"，
+// 没有 `this` 那一格（写 `const` 之类的 this 修饰符 jancy 当场报错，jnc_ct_Parser.cpp:1463-1466）。
+//
+// 先前这一层把那个词悄悄丢了：签名照旧多一格 `this`，于是 `S.twice(21)` 报的是"'S.twice' 是 S
+// 的方法，要一个对象来调它"—— 那句话指着别处（它在静态方法上不成立）。
+//
+// 语料里这一格是 `stdt` 那几个函子（`struct Eq<T> { static bool operator () (T a, T b) { … } }`，
+// stdt_Operator.jnc:19-25）的**前提**：那些结构体上只有一格 static 的 `operator ()`。
+//
+// 判据是手写的 C 双胞胎 /tmp/c166.c。三格：`S.twice(21)` 从外头调、`s.plus(1)` 的体里**裸写**
+// 那个静态的（`twice(1)`，那儿不该补 `this`）、类上那一格 `C.thrice(14)`。
+struct S {
+	long m_a;
+
+	static long twice(long x) {
+		return x * 2;
+	}
+
+	long plus(long x) {
+		return m_a + x + twice(1);
+	}
+}
+
+class C {
+	long m_b;
+
+	construct() {
+		m_b = 5;
+	}
+
+	static long thrice(long x) {
+		return x * 3;
+	}
+}
+
+int main() {
+	S s;
+	s.m_a = 10;
+	printf("%d\n", S.twice(21));
+	printf("%d\n", s.plus(1));
+	printf("%d\n", C.thrice(14));
+	return 0;
+}

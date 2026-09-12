@@ -8114,9 +8114,16 @@ class JncLower {
          形参。差别只在 `this` 那一格的类型：类是一条引用（tClass），结构体那一格里放的
          **本来就是地址**（第十二刀），所以直接用那个结构体类型。 */
       if (owner !== null && !this.classes.has(owner) && this.structs.has(owner)) {
-        this.methods.set(info.name, owner);
         this.methodNames.add(base.slice(cut + 1));
-        ps.unshift({ name: 'this', type: { k: 'struct', name: owner }, formals: null });
+        /* `static` 的那一格没有 `this`（第二百〇一刀）：jancy 的 `DerivableType::addMethod`
+           在 `StorageKind_Static` 那一支直接 break、**不走** `convertToMemberMethod`
+           （jnc_ct_DerivableType.cpp:169-185），所以它就是"名字挂在这个类型上的一个自由函数"。
+           先前这一层把那个词悄悄丢了：签名照旧多一格 `this`，于是 `S.f(…)` 报的是"要一个
+           对象来调它"—— 指着别处（那一句在**静态**方法上不成立）。 */
+        if (!sp.stat) {
+          this.methods.set(info.name, owner);
+          ps.unshift({ name: 'this', type: { k: 'struct', name: owner }, formals: null });
+        }
         if (sp.virt !== null) {
           this.nope(n, `结构体的方法 '${shown(base)}' 上写 '${sp.virt}'（虚派发要对象头那一格`
             + '类型标签，结构体没有）');
@@ -8129,9 +8136,12 @@ class JncLower {
         return { info, ps, isMain: false };
       }
       if (owner !== null && this.classes.has(owner)) {
-        this.methods.set(info.name, owner);
         this.methodNames.add(base.slice(cut + 1));
-        ps.unshift({ name: 'this', type: tClass(owner, false), formals: null });
+        // `static` 的那一格没有 `this`（第二百〇一刀，与结构体那一支同一条）
+        if (!sp.stat) {
+          this.methods.set(info.name, owner);
+          ps.unshift({ name: 'this', type: tClass(owner, false), formals: null });
+        }
         // 虚方法（第五十七刀）。`abstract` 的那一个**没有体** —— jancy 自己那句话就是
         // "'%s' is abstract and hence cannot have a body"（jnc_ct_ModuleItem.h:690）。
         if (sp.virt !== null) {

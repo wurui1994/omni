@@ -9827,6 +9827,41 @@ JNC_LIB_IMPORT("sys_globals.jnc")     // jnc_sys_SysLib.cpp:218
   **整族掉下去**了。
 - 一起编那张榜：`45 -> 42`（−3）、理由 `23 -> 22`（少的那一种正是这一行）。
 
+### 第二百〇一刀：类 / 结构体上的静态方法
+
+榜上 `算符重载 '…'` 那一行只有 7 处，可它是**五份文件的唯一拦路项**（`stdt_Operator.jnc`、
+`stdt_HashTable.jnc`、`stdt_Map.jnc`、`stdt_BinTree.jnc`、`stdt_RbTree.jnc`）。抄成最小复现件之后
+量出来：拦着的那一个是 `operator ()`，而语料里它的原样是
+
+```jnc
+struct Eq<T> {
+    static bool operator () (T a, T b) {   // stdt_Operator.jnc:19-25
+        return a == b;
+    }
+}
+```
+
+**`static`**。而这一层的静态方法根本没落地 —— 那个词被悄悄丢了：签名照旧多一格 `this`，
+于是 `S.twice(21)` 报的是"'S.twice' 是 S 的方法，要一个对象来调它"。那句话指着别处（它在
+静态方法上不成立）。所以先落这一格。
+
+jancy 的规矩一句：`DerivableType::addMethod` 在 `StorageKind_Static` 那一支直接 break、
+**不走** `convertToMemberMethod`（jnc_ct_DerivableType.cpp:169-185）—— 静态方法就是"名字挂在
+这个类型上的一个自由函数"。写 `const` 之类的 this 修饰符它当场报错（"static method cannot be
+'%s'"，jnc_ct_Parser.cpp:1463-1466）。落法照抄这一句：`fnSig0` 那两支（类与结构体）在
+`sp.stat` 时**既不 unshift `this`、也不往 `methods` 里记**（`methods` 那张表正是"调它要一个
+对象"这句话的出处）。
+
+判据在 `tests/jnc/cases/159-staticmethod.jnc`（C 双胞胎 `/tmp/c166.c`）三格：`S.twice(21)`
+从外头调、`s.plus(1)` 的**体里裸写**那个静态的（`twice(1)` —— 那儿不该补 `this`）、类上
+那一格 `C.thrice(14)`。
+
+- 腿：`node tests/jnc/run.js` 286/0（新增 `cases/159-staticmethod`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `4283 -> 4282`（−1）、别的都没动；一起编那张榜 `42`、
+  理由 `22` 也没动。**记成账**：这一刀在榜上几乎不动 —— 它是 `operator ()` 那一刀的**前提**
+  （语料里的静态方法几乎全长在那几个函子上），而那一格还没落。这一格是先前"那个词被悄悄丢掉"
+  的一处 —— 单看榜决定做什么会漏掉它。
+
 
 
 ## 后果与代价
