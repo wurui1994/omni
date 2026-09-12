@@ -1,0 +1,33 @@
+// 完整声明式的属性：`property` 那个词落在**星号后面**那一组（第一百八十二刀）。
+//
+// 语料里的原样是 `void const* const property m_end { return m_p + m_size; }`
+// （jnc_DynamicLayout.jnc:91）。这一格与紧挨着它的 `bool const property m_isIncomplete { … }`
+// 只差一个星号，可先前一个收、一个不收 —— 榜上 `完整声明式的属性（… 那对花括号开的是一层
+// 命名空间）` 那 **70 处**就是它。
+//
+// 病根不在"这个特性没做"，在**改写留下的一撮词把自己的产物又拦了一遍**：`property` 落在
+// 声明符最后那一组里（`tailMods` 认的就是它，第七十二刀），而改写属性时 `keep()` 只洗了
+// 说明符表。于是改写出来的那格 getter 上还留着 `property`，第二遍 expandFullProps
+// （第一百五十九刀）把它又认成一格完整声明式的属性，最后由 fnSig0 报"还不收"。
+// 修法与 `ptrsTy` 的 `dropTail` 同一条口径：那几个词已经被这条声明吃掉了，不该再看第二遍。
+class C {
+	int m_size;
+	int const* m_p;
+
+	int const* const property m_end {
+		return m_p;
+	}
+
+	bool const property m_isBig {
+		return m_size > 10;
+	}
+}
+
+int main() {
+	C* c = new C;
+	printf("%d %d\n", c.m_end == null, c.m_isBig);
+	c.m_p = new int;
+	c.m_size = 42;
+	printf("%d %d\n", c.m_end == null, c.m_isBig);
+	return 0;
+}

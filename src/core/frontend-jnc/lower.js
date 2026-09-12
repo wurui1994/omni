@@ -3247,6 +3247,42 @@ class JncLower {
   /** 造一格节点（第七十五刀改写属性时要）：span 借现成那一格，诊断照旧指得到源码上。 */
   mkL(span, ...items) { return { kind: 'list', items, span }; }
 
+  /**
+   * 声明符里那一串 `*` 的**最后一组**去掉几个词（第一百八十二刀）。
+   *
+   * 为什么要它：`void const* const property m_end { … }` 这一格里 `property` 落在**星号后面**
+   * 那一组（`tailMods` 认的就是它，第七十二刀），而改写属性时 `keep()` 只洗了说明符表。
+   * 不洗这一组的话，改写出来的那格 getter 的声明符上还留着 `property` —— 于是
+   *   ① 第二遍 `expandFullProps`（第一百五十九刀）把它又认成一格完整声明式的属性；
+   *   ② 最后由 `fnSig0` 报一句"完整声明式的属性（… 那对花括号开的是一层命名空间）"。
+   * 榜上那 70 处就是它（判据 `jnc_DynamicLayout.jnc:91`）—— 也就是说那一行**不是**"这个特性
+   * 没做"，是改写留下的一撮词把自己的产物又拦了一遍。
+   *
+   * 与 `ptrsTy` 的 `dropTail` 是同一条口径：最后一组的词已经被这条声明吃掉了，不该再当指针的
+   * 修饰符看第二遍。体那一格在语法里是**左递归的一串**，所以拼新的一格要回到最里头那格表头
+   * （与 `aggPropRw` 同一个坑）。
+   */
+  dropPropTail(ptrs, words) {
+    const groups = this.flat(ptrs);
+    if (groups.length === 0) return ptrs;
+    let base = ptrs;
+    while (isList(base) && head(base) !== null && head(base).endsWith('-add')) base = base.items[1];
+    const h0 = isList(base) ? base.items[0] : this.mkA(ptrs.span, 'ptrs');
+    const last = groups[groups.length - 1];
+    /* 一组里的元素**自己可能还是一格列表**（`tailMods` / `ptrsTy` 都是 flat 两层才拿到那几个词），
+       所以这儿也摊两层再筛，拼回去是"表头 + 那几个词"。 */
+    const kept = this.flat(last).flatMap((m) => this.flat(m))
+      .filter((x) => !(isAtom(x) && words.has(x.value)));
+    const nl = isList(last)
+      ? { kind: 'list', span: last.span, items: [last.items[0], ...kept] }
+      : last;
+    return {
+      kind: 'list',
+      span: ptrs.span,
+      items: [h0, ...groups.slice(0, -1), nl],
+    };
+  }
+
   mkA(span, value) { return { kind: 'atom', value, span }; }
 
   /**
@@ -4111,7 +4147,8 @@ class JncLower {
       const gsp = this.mkL(sp0, this.mkA(sp0, 'specs'), it.items[1].items[1],
         keep(it.items[1].items[2]), keep(it.items[1].items[3]));
       out.push(this.mkL(sp0, this.mkA(sp0, 'fn-def'), gsp,
-        this.mkL(sp0, this.mkA(sp0, 'dcl'), dcl.items[1], qs, sfx, dcl.items[4]), body));
+        this.mkL(sp0, this.mkA(sp0, 'dcl'), this.dropPropTail(dcl.items[1], mods0), qs, sfx, dcl.items[4]),
+        body));
       return out;
     }
     /* 只有原型的那几格记一笔（第一百六十刀）：它们**不出函数** —— 体在宿主那边，读写落成
