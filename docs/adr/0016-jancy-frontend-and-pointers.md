@@ -9699,6 +9699,56 @@ int 是 8 字节（与第一百九十刀那格 `Plain_blen` 同一条），所�
   `结构体的成员属性 'm_description'`（`string_t const property m_description thin;`，:75）与它
   引起的 `std.Error 没有字段 'm_description'`（:104）。那是**下一格**。
 
+### 第一百九十八刀：结构体的成员属性
+
+`std_Error.jnc` 剩下的那一件事：
+
+```jnc
+struct Error {
+    …
+    string_t const property m_description thin;   // :75
+}
+```
+
+先前一律拒，理由写的是"类才是一层命名空间，而取/存那两个函数要从那一层查过来"——
+那句话**第一百二十四刀起就不成立**了（结构体的名字早就是一层命名空间，方法就提在 `S$m` 上）。
+这是这一趟第三条同样的账：一条界当年立得对，后来的刀把它的前提搬走了，而那句话留在原地。
+
+登记走的是与类**一模一样**的那一份（`propPend` -> `propName`），只改了四处判据：`propName` 里
+"前一格是不是类"改成"是不是类**或结构体**"；`propSig` 里 `this` 那一格的类型改用 `selfTy`
+（结构体那一格里放的本来就是地址，第一百〇一刀）；`propMember` 收下 `S` 与 `S*` 两种左边
+（语料里的原样是 `getLastError().m_description`，std_Error.jnc:104 —— 左边是一格 `Error const*`；
+这一层两者的 `bv.code` 是同一个东西）；`hostProp` 那道 `opaque` 闸门对结构体不设
+（`opaque` 只写在类上，而结构体的成员属性一个体都没写时体就在宿主那边 ——
+`JNC_MAP_CONST_PROPERTY("m_description", Error::getDescription)`，jnc_std_Error.cpp:30）。
+
+`autoget` / `bindable` 写在结构体的属性上还不收：前者要往结构体里加一格**字段**、后者要加一格
+事件，而属性这一遍排在字段表定下来之后（`typeDecl` 已经走完）—— 插不进去。明说，不悄悄丢。
+
+**记一笔账**：hostProp 那道闸门第一版写成 `structs.has(pi.cls)`，当场把 `bad/prop-noset` 那道墙
+撞倒了 —— 那张表里**也有类**（`classLayout` 把每个类的方言结构体登在里头，lower.js:6151）。
+判据改成"不是类"才对。腿是这一格的闸门：改坏的那一版 `node tests/jnc/run.js` 两条红。
+
+判据两处：
+- 纯 jnc 那一半在 `tests/jnc/cases/156-propstruct.jnc`（C 双胞胎 `/tmp/c163.c`）——
+  体写在外头（`long R.m_area.get() { … }` / `R.m_area.set(long v) { … }`），加上结构体的方法里
+  **裸写**属性名（`quad()` 里的 `m_area`，`this` 那一格由 propSelf 补）。
+- 体在宿主那一半在 `tests/llvm/run.js` 第 9 节：`struct Pt` 上那格 `long property m_dbl`
+  （宿主那边读乘 2、存除 2），`pt.m_dbl = 84` 之后 `pt.m_dbl` 印 `dbl 84`、`pt.m_x` 印 `ptx 42`
+  —— 后一句证的是那个存值器真改了**这个结构体**里的那一格。`.sx` 里那两句：
+  `(cabi Pt_get_m_dbl i64 (ptr))` / `(cabi Pt_set_m_dbl void (ptr i64))`。
+
+- 腿：`node tests/jnc/run.js` 283/0（新增 `cases/156-propstruct`，退了 `bad/prop-struct`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `144 -> 145`（+1）、clean `216 -> 217`（+1）、`(文件, 拦路项)` 对
+  `4483 -> 4481`（−2）；一起编那张榜 `62`、理由 `23` 没动。
+- **这一段（第一百九十四到一百九十八刀）真正的收获**：`std_globals.jnc`、`std_Error.jnc`、
+  `std_Guid.jnc` 三份现在单编**全是退出码 0**。前两份正是 jancy 的 std 库对每个模块都
+  **隐式 import** 的那两份（`JNC_LIB_IMPORT`，jnc_std_StdLib.cpp:930-931），`sys_globals.jnc`
+  （sys 库那一份，jnc_sys_SysLib.cpp:218）第一百八十九刀起就是 0。榜上 `没有这个函数：'…'`
+  那 228 处里 `memcpy` / `strlen` / `atoi` / `std.setError` / `sys.getTimestamp` 那几族，
+  声明全在这三份里 —— 把"隐式 import"接上是**下一刀**。
+
 
 
 ## 后果与代价

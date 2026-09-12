@@ -1,0 +1,40 @@
+// 结构体的**成员属性**（第一百九十八刀）。jancy 那儿结构体也能有属性 —— 属性不进结构体的
+// 内存（它就是取/存两个函数），语料里的原样是 `struct Error { string_t const property
+// m_description thin; }`（std_Error.jnc:75），那一格的取值器在 C++ 那边
+// （`JNC_MAP_CONST_PROPERTY("m_description", Error::getDescription)`，jnc_std_Error.cpp:30）。
+//
+// 先前这一层一律拒，理由写的是"类才是一层命名空间，取/存那两个函数没有落脚处"——那句话
+// 第一百二十四刀起就不成立了：结构体的名字早就是一层命名空间，方法就提在 `S$m` 上。
+// 所以这一份走的是**纯 jnc** 那一半：体写在外头（`long R.m_area.get() { … }`）。体在宿主
+// 那一半的判据在 tests/llvm/run.js 第 9 节（`struct Pt` 上那格 `m_dbl`）——C_ABI 符号只有
+// 原生腿上才有（ADR-0014 的第 4 条决定）。
+//
+// 判据是手写的 C 双胞胎 /tmp/c163.c：取/存两个函数都是自由函数，第一个形参是那个结构体的地址。
+struct R {
+	long m_w;
+
+	long property m_area;
+
+	long quad() {
+		return m_area * 2;      // 方法体里裸写属性名：this 就是这个对象
+	}
+}
+
+long R.m_area.get() {
+	return m_w * 2;
+}
+
+R.m_area.set(long v) {
+	m_w = v / 2;
+}
+
+int main() {
+	R r;
+	r.m_w = 3;
+	printf("%d\n", r.m_area);
+	printf("%d\n", r.quad());
+	r.m_area = 10;
+	printf("%d\n", r.m_w);
+	printf("%d\n", r.m_area);
+	return 0;
+}

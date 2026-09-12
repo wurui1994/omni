@@ -4391,8 +4391,20 @@ class JncLower {
       // 那些取/存两个函数多一格 `this`（见 propSig），读写时那一格从对象或 `this` 来。
       const cut = full.lastIndexOf('$');
       const owner = cut < 0 ? null : full.slice(0, cut);
-      const cls = owner !== null && this.classes.has(owner) ? owner : null;
+      /* 结构体也算（第一百九十八刀）：那一格里放的本来就是地址，`this` 那一格由 selfTy 挑。 */
+      const cls = owner !== null && (this.classes.has(owner) || this.structs.has(owner))
+        ? owner : null;
       if (cls !== null) this.propNames.add(full.slice(cut + 1));
+      /* `autoget` / `bindable` 在结构体上还不收：前者要生成一格**字段**、后者要生成一格事件，
+         而这一遍排在字段表定下来之后（typeDecl 那一遍已经走完），插不进去了；事件那一格结构体
+         本来也不收（第八十三刀）。 */
+      const structOwner = cls !== null && !this.classes.has(cls);
+      if (structOwner && (dsp.agt || dsp.bnd)) {
+        this.nope(d, `结构体的成员属性 '${info.name}' 上的 `
+          + `'${dsp.agt ? 'autoget' : 'bindable'}'（那一格要往结构体里加一格字段 / 一格事件，`
+          + '而属性这一遍排在字段表定下来之后）');
+        continue;
+      }
       // `autoget`（第七十一刀）：这一格的取值器**不用写** —— 编译器生成一格存储，读属性就是
       // 读那一格（prop_autoget.rst:15-17）。简单声明式里存值器的体拿 `m_value` 称呼它
       //（同处:26）。与索引属性互斥，那是同一份文档最后一句（:47）。
@@ -5624,15 +5636,13 @@ class JncLower {
       // 这儿只把节点连当时的 ns（就是这个类）攒起来。这一问走 propMod 而不是 `sp.prop`：
       // 那个词也可能写在星号后面（第七十二刀，`Icon* property m_icon;`）。
       if (this.propMod(m.items[1], m.items[2])) {
-        // 结构体的成员属性不收：类才是一层命名空间，而取/存那两个函数要从那一层查过来
-        //（`C.p.get()` 里的 `C.` 与体内裸写 `p.get()` 是同一条路，第五十二刀）。
-        if (!cls) {
-          for (const pd of this.flat(m.items[2])) {
-            const pi = this.declarator(pd, sp, m.items[1], cls);
-            this.nope(pd, `结构体的成员属性 '${pi === null ? '?' : pi.name}'`);
-          }
-          continue;
-        }
+        /* 结构体的成员属性（第一百九十八刀）：先前这儿一律拒，理由写的是"类才是一层命名空间，
+           而取/存那两个函数要从那一层查过来"—— 那句话第一百二十四刀起就不成立了（结构体的名字
+           早就是一层命名空间，方法提在 `S$m` 上）。语料里的原样是
+           `struct Error { string_t const property m_description thin; }`（std_Error.jnc:75），
+           取值器在 jancy 的 C++ 那边（`JNC_MAP_CONST_PROPERTY("m_description",
+           Error::getDescription)`，jnc_std_Error.cpp:30）—— 与第一百九十七刀那格方法同一条路。
+           登记走的是与类一模一样的那一份（propPend -> propName），`this` 那一格由 selfTy 挑。 */
         // `virtual` / `errorcode` 写在属性上那两条不在这儿拦 —— 与顶层那一格合在 propName 里，
         // 一处一句（见那儿的注释）。
         this.propPend.push({ it: m, ns: this.ns });
@@ -7396,8 +7406,14 @@ class JncLower {
     // `.` 的左边读出来那一格（第一百一十六刀抽成一处，属性走取值器）
     bv = this.baseVal(ob);
     if (bv === null) return null;
-    if (!isClass(bv.type)) return undefined;
-    const pn = this.findProp(bv.type.name, mn);
+    /* 结构体也算（第一百九十八刀）：`S` 与 `S*` 两种写法都算 —— 这一层的结构体值那一格里
+       放的**本来就是地址**（第十二刀），所以两边的 `bv.code` 是同一个东西，`.` 的左边写哪个
+       都对得上（语料里的原样是 `getLastError().m_description`，std_Error.jnc:104 —— 左边是
+       一格 `Error const*`）。 */
+    const own = isClass(bv.type) || bv.type.k === 'struct' ? bv.type.name
+      : (jncIsPtr(bv.type) && bv.type.target.k === 'struct' ? bv.type.target.name : null);
+    if (own === null) return undefined;
+    const pn = this.findProp(own, mn);
     if (pn === null) return undefined;
     return { pn, self: bv.code };
   }
@@ -7696,7 +7712,13 @@ class JncLower {
    * 回 `undefined` 表示"这一格不是宿主面的"（调用方接着发它自己那句诊断）；回 null 是报过错了。
    */
   hostProp(n, pn, pi, self, kind, val, subs = []) {
-    if (pi === undefined || pi.cls === null || !this.opaques.has(pi.cls)) return undefined;
+    /* 结构体那一支不看 `opaque`（第一百九十八刀）：那个词只写在类上，而结构体的成员属性
+       一个体都没写时，体就在宿主那边（std_Error.jnc:75 那格 `m_description` 就是它）。
+       判据写成"不是类"而不是"在 structs 表里"—— 那张表里**也有类**（classLayout 把每个类的
+       方言结构体登在里头，量出来的：写成 `structs.has` 会把没写 `opaque` 的类一起放进来，
+       `bad/prop-noset` 那道墙当场就倒了）。类那一侧照旧要 `opaque`（第一百六十刀那条口径）。 */
+    if (pi === undefined || pi.cls === null
+      || (this.classes.has(pi.cls) && !this.opaques.has(pi.cls))) return undefined;
     /* 两种写法都算宿主面（第一百六十刀 + 第一百六十二刀）：
          - 完整声明式里那格**只有原型**的取/存（`property m_value { void set(variant_t); }`，
            ui_PropertyGrid.jnc:80）—— `propHostAcc` 上记着；
@@ -7882,7 +7904,8 @@ class JncLower {
       pi.set = true;
     }
     if (pi.cls !== null) {
-      ps.unshift({ name: 'this', type: tClass(pi.cls, false), formals: null });
+      // `this` 那一格的类型由 selfTy 挑（第一百九十八刀：结构体那一格里放的本来就是地址）
+      ps.unshift({ name: 'this', type: this.selfTy(pi.cls), formals: null });
       this.methods.set(sym, pi.cls);
     }
     info.name = sym;

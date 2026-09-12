@@ -427,6 +427,9 @@ if (existsSync(sysDir)) {
       + 'struct Pt {\n'
       + '    long m_x;\n'
       + '    long shift(long d);\n'
+      /* 结构体上那格**成员属性**（第一百九十八刀）：体在宿主那边，符号名中间多一段
+         `get_` / `set_` —— 与类那一支（第一百六十刀）同一条约定。 */
+      + '    long property m_dbl;\n'
       + '}\n\n'
       + 'namespace probe {\n'
       + 'long hostMul(long a, long b);\n'
@@ -492,12 +495,15 @@ if (existsSync(sysDir)) {
       + '    Pt pt;\n'
       + '    pt.m_x = 40;\n'
       + '    printf("pt %d\\n", pt.shift(2));\n'
+      + '    pt.m_dbl = 84;\n'
+      + '    printf("dbl %d\\n", pt.m_dbl);\n'
+      + '    printf("ptx %d\\n", pt.m_x);\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -533,6 +539,10 @@ if (existsSync(sysDir)) {
     /* 结构体那一支用的是同一条约定（第一百九十七刀）。 */
     } else if (!sx.out.includes('(cabi Pt_shift i64 (ptr i64))')) {
       detail.push('    emit sx 里没有 `(cabi Pt_shift i64 (ptr i64))`');
+    /* 结构体上那格成员属性（第一百九十八刀）：中间多一段 `get_` / `set_`。 */
+    } else if (!sx.out.includes('(cabi Pt_get_m_dbl i64 (ptr))')
+      || !sx.out.includes('(cabi Pt_set_m_dbl void (ptr i64))')) {
+      detail.push('    emit sx 里没有 `(cabi Pt_get_m_dbl …)` / `(cabi Pt_set_m_dbl …)`');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');

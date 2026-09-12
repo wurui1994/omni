@@ -184,6 +184,18 @@ int64_t Pt_shift(void *self, int64_t d) {
   return self == NULL ? -1 : *(const int64_t *)self + d;
 }
 
+/* **结构体**上那格成员属性（第一百九十八刀）。jancy 那边它也是宿主实现的：
+   `JNC_MAP_CONST_PROPERTY("m_description", Error::getDescription)` 挂在 `struct Error` 上
+   （jnc_std_Error.cpp:30）。符号名的约定与类那一支一模一样：中间多一段 `get_` / `set_`。
+   这一格刻意**不是**单纯的读写（读乘 2、存除 2），好让"真走了宿主这两个函数"在输出上看得见。 */
+int64_t Pt_get_m_dbl(void *self) {
+  return self == NULL ? -1 : *(const int64_t *)self * 2;
+}
+
+void Pt_set_m_dbl(void *self, int64_t v) {
+  if (self != NULL) *(int64_t *)self = v / 2;
+}
+
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型
    （`property m_scale { long get(); void set(long); }`，ui_PropertyGrid.jnc:78-88 那个形状）
    时，体也在宿主这边；符号名的约定与方法同一条，只是中间多一段 `get_` / `set_`：
