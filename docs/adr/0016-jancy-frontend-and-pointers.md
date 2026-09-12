@@ -9930,6 +9930,43 @@ x86-64 SysV）上与 cdecl **本来就是同一套 ABI** —— 说明符位置�
   **紧凑布局**，而方言一格 8 字节（ADR-0016 决策二）。收下它就得把布局按字节算，
   与 `sizeof` 那一行是同一格；悄悄忽略它是静默的错答案（结构体的大小会差），所以照旧拒。
 
+### 第二百〇四刀：`once` 语句
+
+`语句 'once'` 是 `samples/jnc/82_Once.jnc` 的唯一拦路项。jancy 那句话是"给这段代码生成一个
+**线程安全的**包装，保证它每次程序运行只跑一遍"（cflow_once.rst:15），两种写法都算：
+`once initialize();`（同处:20）与 `once { … }`（:30）。
+
+落法这一层**早就有**：`static` 局部量那一格（第二十六刀）与类的 static 局部量（第一百五十四刀）
+用的就是同一道闸门 —— 而那两处的出处正是 jancy 自己的 `once`（`once` 包着 `initializeVariable`，
+jnc_ct_Parser.cpp:2452）。所以这一刀是把那道闸门**按它本来的名字**摆出来：
+
+```
+(global 旗子 bool)
+(if (un "!" (var 旗子)) (do (set 旗子 (bool true)) <那一段> ))
+```
+
+"线程安全"这一格在这一层是白拿的：方言没有线程 —— 记一笔，这不是"少做了一件事"。
+`threadlocal once`（cflow_once.rst:41-46，每个线程一遍）照旧不收：那要 threadlocal 那一格存储，
+墙在 `bad/threadlocal.jnc`。
+
+判据在 `tests/jnc/cases/161-once.jnc`（C 双胞胎 `/tmp/c168.c`）：旗子是**模块级**的，所以跨调用
+留着 —— `step()` 调三遍，里头那两段（块的与单句的）各只跑一遍。
+
+- 腿：`node tests/jnc/run.js` 288/0（新增 `cases/161-once`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `149 -> 150`（+1，就是 `82_Once.jnc`）、clean `221 -> 222`、
+  `(文件, 拦路项)` 对 `4279` 没动；一起编那张榜 `42`、理由 `22` 没动。
+
+### 一笔账：`没有这个基类：'…'` 那一行是逐份编出来的假象
+
+那一行 119 处、四份文件里是唯一拦路项。抄下来查过：`log_Filter.jnc` **一条 import 都没写**，
+而它的基类 `AbstractProcessor` 声明在同一批的 `log_RangeProcessor.jnc` 里 ——
+jancy 那边整个插件是**一个模块**（那一批文件一起编），所以基类当然查得着。
+`doc_MainThreadScheduler.jnc: jnc.Scheduler` 同一类（那是 rtl 那个扩展库里的）。
+
+一起编那张榜上这一行只有 **1** 处，正是这个判断的凭据。所以这一行**不是特性缺口**，
+与第一百四十九刀记下的 `case 标签算不出来`、第一百八十一刀那格 `写属性…存值器没有定义`
+是同一类账：逐份编那张榜上的 `E` 行要先问一句"这个名字在别的文件里吗"。
+
 
 
 ## 后果与代价

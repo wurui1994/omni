@@ -9338,6 +9338,32 @@ class JncLower {
         + '专门开了一格 `finallyRouteIdx` 变量，jnc_ct_ControlFlowMgr_Eh.cpp:41-50）');
       return null;
     }
+    /* `once <语句>`（第二百〇四刀）。jancy 那句话是"给这段代码生成一个**线程安全的**包装，
+       保证它每次程序运行只跑一遍"（cflow_once.rst:15）。落法这一层早就有 —— `static` 局部量
+       那一格（第二十六刀）与类的 static 局部量（第一百五十四刀）用的就是同一道闸门，而那两处
+       的出处正是 jancy 自己的 `once`（`once` 包着 `initializeVariable`，jnc_ct_Parser.cpp:2452）：
+
+         (global 旗子 bool)
+         (if (un "!" (var 旗子)) (do (set 旗子 (bool true)) <那段> ))
+
+       "线程安全"这一格：方言没有线程，所以那句保证在这一层是白拿的 —— 不是"少做了一件事"。
+       `threadlocal once`（同处:41-46，每个线程一遍）照旧不收：那要 threadlocal 那一格存储，
+       墙钉在 bad/threadlocal.jnc。 */
+    if (h === 'once') {
+      const flag = `jnc$once$${this.tmp++}`;
+      this.decls.push(`  (global ${flag} bool)`);
+      const bpad = `${pad}    `;
+      const body = this.stmt(n.items[1], ind + 4);
+      if (body === null) return null;
+      // stmt 回的是**一串行**（block 回的是拼好的一段文本），所以这儿摊平再拼
+      return [
+        `${pad}(if (un "!" (var ${flag}))`,
+        `${pad}  (do`,
+        `${bpad}(set ${flag} (bool true))`,
+        ...body,
+        `${pad}  ))`,
+      ];
+    }
     this.nope(n, `语句 '${h}'`);
     return null;
   }
