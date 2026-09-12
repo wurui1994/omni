@@ -1,0 +1,36 @@
+// 类型是 `variant_t` 的 **autoget 属性**（第一百七十八刀）。
+//
+// autoget 的意思是"编译器生成那格存储与取值器"（prop_autoget.rst，jancy 那边是
+// `Property::createAutoGetValue` / `compileAutoGetter`），存值器由写的人给、里头写
+// `m_value = x`（生成的字段默认就叫 m_value，prop_autoget.rst:26）。
+//
+// 先前这一格明说不收，理由是"结构体那种存储读一次不是一句 `ret`"。`variant_t` 是例外：
+// **这一层的 variant 值本来就是一格地址**（第一百七十三刀量出来的那条 —— varBox 那几格出来的
+// 类型是 `jnc$variant*`），所以那格存储就是一格普通的 variant 字段，取值器回的是"那一格的地址"，
+// 仍旧是一句 `ret`。顶层那一格要真开一段内存（不然存值器里那句 `m_value = x` 当场空指针 ——
+// 这一格是量出来的）。
+variant_t autoget property g_v;
+
+void g_v.set(variant_t x) {
+	printf("set\n");
+	m_value = x;
+}
+
+class C {
+	variant_t autoget property m_p;
+}
+
+void C.m_p.set(variant_t x) {
+	m_value = x;
+}
+
+int main() {
+	g_v = 9;
+	printf("g %d\n", (int)g_v);
+	g_v = 11;
+	printf("g %d\n", (int)g_v);
+	C* c = new C;
+	c.m_p = 7;
+	printf("m %d\n", (int)c.m_p);
+	return 0;
+}

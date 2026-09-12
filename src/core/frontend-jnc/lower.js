@@ -2898,6 +2898,21 @@ class JncLower {
         }
         // 顶层的那一格就是一格模块级变量。`&` 数的是**源码里写的**名字，而源码里写的是
         // `m_value`（prop_autoget.rst:26），所以两个名字都问一遍 —— 与 declareGlobal 同。
+        /* `variant_t` 那一格要**真开一段内存**（第一百七十八刀）：它的槽类型本来就是
+           `(ptr jnc$variant)`（这一层的 variant 值是一格地址），不开一段就是个空指针，
+           存值器里那句 `m_value = x` 当场空指针。与一格普通的顶层 `variant_t g;` 走的是
+           同一条（declareGlobal 那儿也是 `(global …)` + globalCells 里一句 `pnew`）。 */
+        if (isVar(a.type)) {
+          const vt = slotText(a.type);
+          this.decls.push(`  (global ${a.name} ${vt})`);
+          this.globalCells.push(`    (set ${a.name} (pnew ${vt} (int 1)))`);
+          if (!pi.get) {
+            this.decls.push(`  (fn ${g} () ${vt}\n    (ret (var ${a.name})))`);
+            this.fns.set(g, { params: [], ret: a.type });
+            pi.get = true;
+          }
+          continue;
+        }
         if ((this.gTaken.has(a.name) || this.gTaken.has('m_value')) && this.liftable(a.type)) {
           this.gLifted.add(a.name);
           const pt = `(ptr ${tyText(a.type)})`;
@@ -2933,9 +2948,12 @@ class JncLower {
       // ownFields 里加的），所以这儿只剩合成那两个函数。
       const self = tClass(a.cls, false);
       const ad = `(pfield (var $this) ${a.name})`;
+      /* 取值器读出来的那一格：普通标量是 `(pload …)`，`variant_t` 是**那一格的地址本身**
+         （第一百七十八刀 —— 这一层的 variant 值就是一格地址，第一百七十三刀那条）。 */
+      const rdm = isVar(a.type) ? ad : `(pload ${ad})`;
       if (!pi.get) {
         this.decls.push(`  (fn ${g} (($this ${slotText(self)})) ${slotText(a.type)}\n`
-          + `    (ret (pload ${ad})))`);
+          + `    (ret ${rdm}))`);
         this.fns.set(g, { params: [self], ret: a.type });
         this.methods.set(g, a.cls);
         pi.get = true;
@@ -4352,7 +4370,11 @@ class JncLower {
     // 生成的那一格是"一格存储"，所以它落得进内存才行：结构体与数组要抄一份才能读写（那时
     // 合成的取值器不是一句 `ret`）、类**值**在 jancy 那边是内嵌的对象、函数值方言的结构体
     // 字段放不下（见 typeDecl 里字段那三条同样的话）。这几种明说不收。
-    if (jncIsStruct(t) || isArr(t) || isFn(t) || (isClass(t) && t.own === true)) {
+    /* `variant_t` 是例外（第一百七十八刀）：它虽然是一格结构体，可**这一层的 variant 值本来
+       就是一格地址**（第一百七十三刀量出来的那条 —— `varBox` 那几格出来的类型是
+       `jnc$variant*`）。所以那格存储就是一格普通的 variant 字段（`(m_value jnc$variant)`，
+       与手写的那种一模一样），读出来是"那一格的地址"，合成的取值器仍旧是一句 `ret`。 */
+    if ((jncIsStruct(t) && !isVar(t)) || isArr(t) || isFn(t) || (isClass(t) && t.own === true)) {
       return this.nope(d, `类型是 ${tyName(t)} 的 autoget 属性 —— 编译器要生成的那一格存储`
         + '得是能一句读完的一格');
     }

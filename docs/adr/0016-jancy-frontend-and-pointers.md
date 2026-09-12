@@ -9037,6 +9037,33 @@ type->createField("m_length", getPrimitiveType(TypeKind_SizeT), 0, ConstKind_Rea
   变的只是"我们承认那是欠的还是假装是用户写错了"。jancy 收 `s.m_p`，所以 `N` 才是对的分类 ——
   这个指标掉 3 是它变诚实的代价，不是能力退了。
 
+### 第一百七十八刀：类型是 `variant_t` 的 autoget 属性 —— 第一百七十三刀那条量出来的复利
+
+榜上 `类型是 variant_t 的 autoget 属性 —— 编译器要生成的那一格存储得是能一句读完的一格`
+（88 处）。那句话原本的理由是对的：autoget 要编译器生成**一格存储 + 一个取值器**
+（prop_autoget.rst；jancy 那边是 `createAutoGetValue` / `compileAutoGetter`），而结构体那种存储
+"读一次"要抄一份，合成的取值器就不是一句 `ret` 了。
+
+`variant_t` 是**例外**，而这一条是第一百七十三刀量出来的那句话的直接后果：**这一层的 variant 值
+本来就是一格地址**（`varBox` 那几格出来的类型是 `jnc$variant*`）。于是
+
+- 那格存储就是一格普通的 variant 字段 —— 与手写的 `variant_t m_v;` 发的东西一模一样
+  （`(struct C … (m_value jnc$variant))`，这一格早就能用）；
+- 取值器回的是**那一格的地址**（`(ret (pfield (var $this) …$m_value))`），仍旧是一句 `ret`。
+
+改了三处：那句拒绝上加 `&& !isVar(t)`、成员取值器的读法（`(pload ad)` -> `ad`）、顶层那一格
+**真开一段内存**。最后这一处是**量出来的**：不开就是 `(global g (ptr jnc$variant))` 一个空指针，
+存值器里那句 `m_value = x` 当场 `null pointer dereference` —— 与一格普通的顶层 `variant_t g;`
+走同一条路才对（`declareGlobal` 那儿也是 `(global …)` + globalCells 里一句 `pnew`）。
+
+判据：`cases/150-variantautoget.jnc`（顶层与成员各一格，尺子 `/tmp/c156.c` 把 autoget 那两件
+生成物在 C 里手写出来 —— 一格带标签的存储 + 一个回地址的取值器，存值器是源码里那一个）。
+"存值器真跑了"看那两句 `set`，"存进去的读得回来"看 `g 9` / `g 11` / `m 7`。
+
+- 腿：`node tests/jnc/run.js` 283/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `4485 -> 4394`（**−91**，那一行整行消失）。lowered `124`、
+  clean `191` 都没动 —— 这 88 处散在很多份文件里，每份还压着别的拦路项。
+
 ## 后果与代价
 
 
