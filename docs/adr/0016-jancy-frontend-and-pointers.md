@@ -11138,6 +11138,61 @@ string_t getDeviceInfoString(UsbDeviceParams const* params) {   test/ioninja/plu
   掉到 0 —— 那是我截榜的窗口只取了固定的行号范围，新行把它挤出了窗口，行本身还在。）
 - 一起编那张榜：`34`、理由 `16` 没动。
 
+### 第二百三十六刀：一个是定义、一个是声明，方言那一层分得开（翻第二百〇八刀的案）
+
+一起编那张榜上剩的 `'…' 要 1 个实参，这里给了 2 个`（E，2 处）指着这一句：
+
+```
+size_t errorcode transmit(
+	void const* p,
+	size_t size
+);                                       test/ioninja/api/ias.jnc:30
+
+size_t errorcode transmit(string_t text) {
+	return transmit(text.m_p, text.m_length);      同上:35-37
+}
+```
+
+顶层同名两条：一条只有原型（体在宿主），一条带体。第二百〇八刀当时写的是"顶层这一格两边在
+方言里会撞同一个名字 —— 一个模块里同一个名字放不下两格"，**那句话是认错人**：撞的是"发出去
+的那个东西"，可这两条根本不发同一样 ——
+
+```
+(cabi transmit i64 (ptr i64))            ; 体在宿主的那一条：只是一句**声明**
+(fn transmit ((text string)) int         ; 带体的那一条：一格**定义**
+  …
+  (ret (ccall transmit (var q) (int 4))))
+```
+
+一个是定义、一个是声明，方言那一层本来就分得开（`emit sx` 上两行各一句）。第一百八十六刀在
+**类**里已经把这件事做过一遍了（`Owner$m` 与 `Owner_m` 是两个字符串），顶层这一格只是当时
+没往下想。
+
+落法两处，都在已有的路上：
+
+- `fnSig` 那一遍：`!sameArgs` 时不再报，把这条原型的签名并进 `hostTopSigs`（第一百九十四刀
+  那张"一格一族"的表），符号名照第一百八十五刀那条（全名把 `$` 换成 `_`）。
+- 调用点：新添 `hostTopRetry`（与类里那一格 `protoHostRetry` 是同一条路，只差"主人"那一段），
+  接在个数对不上（第一百八十六刀那一处）与实参类型对不上（第一百八十八刀那一处）**已经现成的
+  两个重试点**上 —— 先前那两处 `self === null` 时直接回 undefined，顶层就落到了那句 err 上。
+
+判据：`tests/jnc/cases/180-topmixovl.jnc`（另一条原型在场也不妨碍带体那条，印 2；jnc 这几条腿上
+没有宿主的符号，所以只调它），原生腿 `tests/llvm/run.js` §9 加 `long mixTop(long, long);` 与
+带体的 `long mixTop(string_t)`，`mixTop(40, 2)` 走宿主（42）、`mixTop("z")` 走带体那条（7），
+印 `mixtop 42 7`，并断言 `(cabi mixTop i64 (i64 i64))`。独立的尺子是手写的 C 双胞胎
+`/tmp/c189.c`（两条各起一个名字、宿主那条摆在另一段），也印 `mixtop 42 7`。
+`bad/proto-hostovl` 那道墙就是这一刀兑掉的（它的注写的正是"撞名"），退役成上面那格用例。
+
+- 腿：`node tests/jnc/run.js` 325/0（`bad/proto-hostovl` 退役、新增 `cases/180-topmixovl`）、
+  `node tests/llvm/run.js` 38/0（§9 多一行 `mixtop 42 7`、多一句 `(cabi mixTop …)`）。
+- 逐份那张榜：**三行整行没了** —— `'…' 要 1 个实参，这里给了 2 个`（1）、
+  `'…' 要 1 个实参（其中 1 个有默认值），这里给了 2 个`（3）、第二百〇八刀那句（5）。
+  lowered `162 -> 163`（**+1**）、clean `239 -> 240`（**+1**）、
+  `(文件, 拦路项)` 对 `3741 -> 3732`（**−9**）。逐行比过一遍：一行都没往错方向走。
+- 一起编那张榜：诊断 `34 -> 32`、理由 `16 -> 14`。`string_t` 的 `m_p` 那一行 `10 -> 11`
+  （**+1**）—— 原因写清：`ias.jnc:36` 那一句先前被"要 1 个实参"盖着，这一趟走通了才露出
+  `text.m_p` 那笔方言级的账。
+
 
 
 

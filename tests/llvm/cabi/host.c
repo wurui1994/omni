@@ -282,3 +282,11 @@ void Plain_set_m_gain(void *self, int64_t v) {
 int64_t hostTick(void) {
   return 41;
 }
+
+/* 顶层同名那一族里，一条带体、另一条只有原型（第二百三十六刀）。语料里的原样是
+   `size_t errorcode transmit(void const*, size_t);` 与 `size_t errorcode transmit(string_t) { … }`
+   （ias.jnc:30 与 :35）。带体那一条在方言里发 `(fn mixTop …)`，这一条只在 `(cabi mixTop …)` 上
+   声明一句 —— 一个是定义、一个是声明，两边不撞。 */
+int64_t mixTop(int64_t a, int64_t b) {
+  return a + b;
+}

@@ -5363,9 +5363,30 @@ class JncLower {
           const sameArgs = have.params.length === ps.length
             && have.params.every((t, i) => sameTy(t, ps[i].type));
           if (!sameArgs) {
-            this.nope(dcl, `原型 '${shown(fn)}' 是同名那一族里的另一条（它的体在宿主那边），`
-              + '而顶层这一格两边在方言里会撞同一个名字 —— 体在宿主的那一条的方言名就是那个 '
-              + 'C 符号（见 ADR-0016 第二百〇八刀那一段）');
+            /* 第二百三十六刀把第二百〇八刀那句话兑掉了。那一刀说的是"顶层这一格两边在方言里会撞
+               同一个名字"—— **认错人**：撞的是"发出去的那个符号"，而这两条根本不发同一个东西。
+               带体的那一条发的是方言的 `(fn transmit …)`；体在宿主的那一条**一个函数都不发**，
+               它只是在 `(cabi transmit …)` 上声明一句、调用点发 `(ccall transmit …)`。
+               一个是定义、一个是声明，方言那一层本来就分得开（`emit sx` 上两行各一句）。
+               所以这儿要做的只是**把这条原型的签名记下来**，与第一百九十四刀那一族同一张表
+               （`hostTopSigs` 一格一族）；调用点按个数 / 类型对不上时再按那张表挑一次
+               （`hostTopRetry`，与类里那一格 `protoHostRetry` 是同一条路）。
+               语料里的原样就是 `size_t errorcode transmit(void const*, size_t);` 与
+               `size_t errorcode transmit(string_t) { … }`（ias.jnc:30 与 :35）。 */
+            const dsA = ps.map((p) => p.def ?? null);
+            const sgA = {
+              ret: info.type,
+              params: ps.map((p) => p.type),
+              defs: dsA.some((d) => d !== null) ? dsA : null,
+              variadic: false,
+              // 符号名照第一百八十五刀那条：全名把 `$` 换成 `_`（带体那条不占这个字符串）
+              sym: this.dylibNs.has(this.ns) ? info.name : fn.replace(/\$/g, '_'),
+            };
+            const prevA = this.hostTopSigs.get(fn);
+            const sameA = (a, b) => a.params.length === b.params.length
+              && a.params.every((t, i) => sameTy(t, b.params[i])) && sameTy(a.ret, b.ret);
+            if (prevA === undefined) this.hostTopSigs.set(fn, [sgA]);
+            else if (!prevA.some((x) => sameA(x, sgA))) prevA.push(sgA);
             continue;
           }
           this.err(dcl, `原型 '${shown(fn)}' 与它那个定义只有返回类型不同（jancy 那句 `
@@ -12861,6 +12882,20 @@ class JncLower {
       { code: self, type: tClass(owner, false) });
   }
 
+  /**
+   * 顶层那一格的重试（第二百三十六刀）：`nm` 这个名字**带体的那几条**都对不上，而它在宿主面
+   * 那张表（`hostTopSigs`）里还有几条时，按宿主面那条路（`hostTopCall`）再挑一次。
+   * 回 `undefined` 表示那张表里没有（调用方接着发它自己的诊断）；回 null 表示**试过了、
+   * 那一处已经报过**。与类里那一格 `protoHostRetry` 是同一条路，只差"主人"那一段。
+   */
+  hostTopRetry(n, nm) {
+    const sigs = this.hostTopSigs.get(nm);
+    if (sigs === undefined || sigs.length === 0) return undefined;
+    const tp = this.hostPickSigs(n, shown(nm), sigs);
+    if (tp === null) return null;
+    return this.hostTopCall(n, nm, tp.sig, tp.i);
+  }
+
   hostPick(n, owner, mn, sigs) {
     return this.hostPickSigs(n, `${shown(owner)}.${mn}`, sigs);
   }
@@ -14327,7 +14362,7 @@ class JncLower {
          一条收这么多个实参**（pickOverload 先按个数筛过），所以宿主面那张表里收这么多个的那一条
          必然没有对应的定义。而且这时候**一个实参都还没降**（下面那个循环才降），所以不会把谁
          降两遍。 */
-      const hr = self === null ? undefined : this.protoHostRetry(n, nm, self);
+      const hr = self === null ? this.hostTopRetry(n, nm) : this.protoHostRetry(n, nm, self);
       if (hr !== undefined) return hr;
       // 同名的还有只有原型的几条（第一百五十刀）：给了几个"不对"是拿不全的那张表数出来的
       if (this.protoSibling(nm)) return this.protoSiblingNope(n, nm, args0.length);
@@ -14356,7 +14391,7 @@ class JncLower {
         if (ecMark >= 0 && this.ecOut !== null) this.ecOut.length = ecMark;
         /* 传下去的是**这一句调用**那格节点（`hostMethodCall` 要从它身上取实参表）——
            不是 `args[i]`（那是其中一个实参，量出来过一次：那儿 `n.items[2]` 是 undefined）。 */
-        const hr1 = self === null ? undefined : this.protoHostRetry(n, nm, self);
+        const hr1 = self === null ? this.hostTopRetry(n, nm) : this.protoHostRetry(n, nm, self);
         if (hr1 !== undefined) return hr1;
         if (this.protoSibling(nm)) return this.protoSiblingNope(args[i], nm, args.length);
         return this.err(args[i], `'${nm0 === null ? shown(nm) : nm0}' 的第 ${i + 1} 个实参要 ${tyName(want[i])}，`

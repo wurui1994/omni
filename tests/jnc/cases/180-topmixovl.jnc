@@ -1,0 +1,22 @@
+// 顶层同名那一族里，一条带体、另一条只有原型（第二百〇八刀钉的界，第二百三十六刀兑掉）。
+// 语料里的原样是 `size_t errorcode transmit(void const* p, size_t size);` 与
+// `size_t errorcode transmit(string_t text) { … }`（ias.jnc:30 与 :35）—— jancy 收它：
+// 重载按形参分，只有原型的那一条体在宿主那边。
+//
+// 第二百〇八刀说的是"顶层这一格两边在方言里会撞同一个名字"—— **认错人**：撞的是"发出去的那个
+// 东西"，而这两条根本不发同一样：带体的那一条发方言的 `(fn pick …)`，体在宿主的那一条**一个
+// 函数都不发**，它只在 `(cabi pick …)` 上声明一句、调用点发 `(ccall pick …)`。一个是定义、
+// 一个是声明，方言那一层本来就分得开。
+//
+// 这一格证的是"另一条原型在场也不妨碍带体那条"（jnc 这几条腿上没有宿主的符号，所以只调它）。
+// 真走宿主那条的判据在 tests/llvm/run.js §9（`mixTop`），C_ABI 符号只有原生腿上才有。
+long pick(long a, long b);
+
+long pick(string_t s) {
+	return s.m_length;
+}
+
+int main() {
+	printf("%d\n", pick("ab"));
+	return 0;
+}

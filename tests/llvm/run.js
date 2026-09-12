@@ -479,6 +479,12 @@ if (existsSync(sysDir)) {
          与"体在哪儿"是两件事，所以这一句挑得出来：收 long 那条（41 + 1 = 42）。
          语料里的原样是 `write(timestamp, recordCode, std.getLastError())`（log_Writer.jnc:101）。 */
       + 'long hostTick();\n\n'
+      /* 顶层同名那一族里，一条带体、另一条只有原型（第二百三十六刀）：两条都在 ——
+         `mixTop(40, 2)` 走宿主（42），`mixTop("z")` 走带体那条（7）。 */
+      + 'long mixTop(long a, long b);\n\n'
+      + 'long mixTop(string_t s) {\n'
+      + '    return 7;\n'
+      + '}\n\n'
       + 'long pick(long n) {\n'
       + '    return n + 1;\n'
       + '}\n\n'
@@ -547,12 +553,13 @@ if (existsSync(sysDir)) {
       + '    printf("gain %d\\n", q.m_gain);\n'
       + '    Owner* ow = new Owner;\n'
       + '    printf("emb %d\\n", ow.m_p.seeded());\n'
+      + '    printf("mixtop %d %d\\n", mixTop(40, 2), mixTop("z"));\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\npick 42\ngain 42\nemb 5\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\npick 42\\ngain 42\\nemb 5\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\npick 42\ngain 42\nemb 5\nmixtop 42 7\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\npick 42\\ngain 42\\nemb 5\\nmixtop 42 7\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -609,6 +616,9 @@ if (existsSync(sysDir)) {
     } else if (!sx.out.includes('(cabi hostTick i64 ())')) {
       detail.push('    emit sx 里没有 `(cabi hostTick i64 ())`（第二百二十八刀那一句实参）');
     /* 没写 opaque 的类里那格 autoget 属性（第二百三十一刀）：取与存**两句**都要在宿主面上。 */
+    /* 顶层同名混合重载（第二百三十六刀）：只有原型那一条的声明在，带体那一条是 `(fn mixTop …)`。 */
+    } else if (!sx.out.includes('(cabi mixTop i64 (i64 i64))')) {
+      detail.push('    emit sx 里没有 `(cabi mixTop i64 (i64 i64))`（第二百三十六刀）');
     } else if (!sx.out.includes('(cabi Plain_get_m_gain i64 (ptr))')
       || !sx.out.includes('(cabi Plain_set_m_gain void (ptr i64))')) {
       detail.push('    emit sx 里没有 `(cabi Plain_get_m_gain …)` / `(cabi Plain_set_m_gain …)`（第二百三十一刀）');
