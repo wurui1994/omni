@@ -1,0 +1,19 @@
+// `dylayout (layout) { … }`（第二百一十九刀把它从"语句 '…'"那一句里拆出来）。语料里 4 份：
+// BacNetMsTp.jnc、BacNetMsTpLogRepresenter.jnc、io_Modbus.jnc:779、io_ModbusTemplates.jnc。
+//
+// jancy 那儿它是**动态布局**那一整套的语句形式：块里那些字段按运行期读到的字节一格一格摆
+// 出来，读的是 `jnc.DynamicLayout` 上那格 validator —— 与第二百一十四刀那三个 `dynamic …`
+// 算子同一族（那三个也只是读 validator 的两个端点）。
+//
+// 这一层的指针旁边有范围（fat 指针三个字），可"按字节一格一格摆"这件事要先有字节布局
+// （与 sizeof / offsetof 同一笔账）。
+int main() {
+	int layout = 0;
+
+	dylayout (layout) {
+		int m_a;
+	}
+
+	printf("%d\n", layout);
+	return 0;
+}

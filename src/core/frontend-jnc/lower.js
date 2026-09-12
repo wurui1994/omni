@@ -9609,6 +9609,55 @@ class JncLower {
       return null;
     }
     if (h === 'return') return this.retStmt(n, ind);
+    /* 第二百一十九刀：`语句 '…'` 剩下那 11 份按真话拆开是四件事，其中一件能落。
+
+       **能落的那一格**：写在函数体里的 `typedef`（20_FunctionPtr.jnc:37 的
+       `typedef function FpFunc(int, int, int);`、35_PropertyPtr.jnc 的
+       `typedef double property FpProp;`）。这一层顶层的 typedef 那一整套（第三十八刀，函数
+       类型那一支是第八十二刀）现成 —— 而 typedef 只是**给一格类型起个名字**，不生成任何
+       代码，所以体里那一条与写在外面那一层是同一件事，直接交给 typedefDecl。
+       **代价明写**：名字**提到了外面那层命名空间**（`qual(name)`），所以
+         - 函数外面也能用那个名字了（jancy 那儿不能）—— 拒得更松，不改能跑的程序的行为；
+         - 同一层里两个函数各写一条同名 typedef 会撞（jancy 那儿不撞）—— 那时 typedefDecl
+           会报"重复定义"，是**拒得更严**，也不会给错答案。
+       真按作用域收要一张跟着 `scopes` 一起进出的类型表，与函数体里的 `using namespace`
+       （第二百一十七刀那条界）是同一件事，等那张表一起落。 */
+    if (h === 'typedef') {
+      this.typedefDecl(n);
+      return [];
+    }
+    /* `dylayout (layout) { … }`（4 份：BacNetMsTp.jnc、BacNetMsTpLogRepresenter.jnc、
+       io_Modbus.jnc、io_ModbusTemplates.jnc）。jancy 那儿它是**动态布局**那一整套的语句形式：
+       块里那些 `dylayout` 字段按运行期读到的字节一格一格摆出来，读的是 `jnc.DynamicLayout`
+       上那格 validator（与第二百一十四刀那三个 `dynamic …` 算子是同一族）。 */
+    if (h === 'dylayout') {
+      return this.nope(n, '`dylayout (layout) { … }` —— jancy 那儿它是**动态布局**那一整套'
+        + '（块里的字段按运行期读到的字节一格一格摆，读的是 jnc.DynamicLayout 上那格 '
+        + 'validator），与 `dynamic sizeof` 那三个算子同一族（见第二百一十四刀）');
+    }
+    /* 挂在**语句**上的属性块（`[ … ] 语句`）。声明上那一格第一百〇八刀就收下不看了（属性是
+       纯元数据，jancy 那边它进的是 doxygen / 反射那张表，不改生成的代码），语句这一侧同一条 ——
+       只有一种例外：方括号里写 `Regex…` 那几个词时它**不是**元数据，是那台 DFA 的开关
+       （Stmt.llk:207 那句 `regexSwitchStmt_Create(&$stmt, &m_pragmaConfig, popAttributeBlock())`
+       —— 属性块与 pragma 配置一起递进去）。语料里那一处正是这一种
+       （70_RegexSwitch.jnc:34 的 `[ RegexAnchored ]`），而 regex switch 本来就还不收，
+       所以这儿把它单独说清、别混进"收下不看"里。 */
+    if (h === 'attributed') {
+      const names = [];
+      const walk = (a) => {
+        if (!isList(a)) return;
+        if (head(a) === 'attr' && isAtom(a.items[1])) { names.push(a.items[1].value); return; }
+        for (let i = 1; i < a.items.length; i++) walk(a.items[i]);
+      };
+      walk(n.items[1]);
+      const rx = names.find((x) => x.startsWith('Regex'));
+      if (rx !== undefined) {
+        return this.nope(n, `属性块里的 '${rx}' —— 它不是元数据，是 regex switch 那台 DFA 的开关`
+          + '（Stmt.llk:207 把属性块与 pragma 配置一起递给 regexSwitchStmt_Create），'
+          + '而 regex switch 还不收（见第二百一十四刀）');
+      }
+      return this.stmt(n.items[2], ind);
+    }
     /* `throw;`（第二百一十八刀）。语料里 8 份文件、全是**不带值**的那一种
        （ReplayLogLayer.jnc:348、JLinkRttSession.jnc:483、io_Modbus.jnc:762 那一族）。
        jancy 那儿 `throwException()` 就两句（jnc_ct_ControlFlowMgr_Eh.cpp:93-112）：
@@ -9722,6 +9771,18 @@ class JncLower {
       }
       this.nope(n, '`finally:`（不管走哪条路都要跑一遍 —— 连 `return` 也得先绕过去，jancy 为它'
         + '专门开了一格 `finallyRouteIdx` 变量，jnc_ct_ControlFlowMgr_Eh.cpp:41-50）');
+      return null;
+    }
+    /* `nestedscope:`（第二百一十九刀把它从"语句 '…'"那一句里拆出来；语料里 2 处：
+       UdpSession.jnc 与 test105.jnc）。jancy 那儿这个标签把**它后面那一段**变成一格嵌套的
+       可弃作用域 —— 也就是 `disposable` 那一套的另一半（disposable.rst:17 讲的正是
+       "要确定时机就用 `dispose` / `nestedscope`"）。要作用域出口那一套钩子，与第二百一十二刀
+       给 `disposable` 记的是同一笔账。 */
+    if (h === 'label' && (isStr(n.items[1]) || isAtom(n.items[1]))
+      && n.items[1].value === 'nestedscope') {
+      this.nope(n, '`nestedscope:` —— 它把后面那一段变成一格嵌套的可弃作用域'
+        + '（disposable.rst:17 那句"要确定时机就用 dispose / nestedscope"），'
+        + '要作用域出口那一套钩子 —— 与 `disposable` 记同一笔账（第二百一十二刀）');
       return null;
     }
     /* `once <语句>`（第二百〇四刀）。jancy 那句话是"给这段代码生成一个**线程安全的**包装，

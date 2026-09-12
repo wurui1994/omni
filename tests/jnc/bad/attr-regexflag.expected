@@ -1,0 +1,1 @@
+属性块里的 'RegexAnchored' —— 它不是元数据，是 regex switch 那台 DFA 的开关（Stmt.llk:207 把属性块与 pragma 配置一起递给 regexSwitchStmt_Create），而 regex switch 还不收（见第二百一十四刀）

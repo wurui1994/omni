@@ -1,0 +1,13 @@
+// `nestedscope:`（第二百一十九刀把它从"语句 '…'"那一句里拆出来）。语料里 2 处：
+// UdpSession.jnc 与 test105.jnc:14。
+//
+// jancy 那儿这个标签把**它后面那一段**变成一格嵌套的可弃作用域 —— 也就是 `disposable`
+// 那一套的另一半（disposable.rst:17 讲的正是"要确定时机就用 `dispose` / `nestedscope`"）。
+// 要作用域出口那一套钩子（正常出去与抛出去两条路都算），与第二百一十二刀给 `disposable`
+// 记的是同一笔账。
+int main() {
+	printf("%d\n", 1);
+nestedscope:
+	printf("%d\n", 2);
+	return 0;
+}

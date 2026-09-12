@@ -1,0 +1,29 @@
+// 写在**函数体里**的 `typedef`（第二百一十九刀）。语料里 2 份：
+// `typedef function FpFunc(int, int, int);`（20_FunctionPtr.jnc:37）与
+// `typedef double property FpProp;`（35_PropertyPtr.jnc）。
+//
+// 这一层顶层的 typedef 那一整套现成（第三十八刀；函数类型的那一支是第八十二刀 —— 那种名字
+// 一律当函数指针用，`F*`）。而 typedef 只是**给一格类型起个名字**、不生成任何代码，所以体里
+// 那一条与写在外面那一层是同一件事，直接交给 typedefDecl。
+//
+// **代价明写**：名字提到了外面那层命名空间（qual(name)），于是
+//   - 函数外面也能用那个名字了（jancy 那儿不能）—— 拒得更松，不改能跑的程序的行为；
+//   - 同一层里两个函数各写一条同名 typedef 会撞（jancy 那儿不撞）—— 那时报"重复定义"，
+//     是拒得更严，也不会给错答案。
+// 真按作用域收要一张跟着 scopes 一起进出的类型表 —— 与函数体里的 `using namespace`
+// （第二百一十七刀那条界）是同一件事，等那张表一起落。
+//
+// 判据是手写的 C 双胞胎 /tmp/c177.c：印 `7 6`。
+int add3(int a, int b, int c) {
+	return a + b + c;
+}
+
+int main() {
+	typedef int Num;
+	typedef int Adder(int a, int b, int c);
+
+	Num x = 7;
+	Adder* f = add3;
+	printf("%d %d\n", x, f(1, 2, 3));
+	return 0;
+}

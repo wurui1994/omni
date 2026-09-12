@@ -1,0 +1,1 @@
+`dylayout (layout) { … }` —— jancy 那儿它是**动态布局**那一整套（块里的字段按运行期读到的字节一格一格摆，读的是 jnc.DynamicLayout 上那格 validator），与 `dynamic sizeof` 那三个算子同一族（见第二百一十四刀）

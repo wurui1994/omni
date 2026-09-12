@@ -1,0 +1,15 @@
+// 属性块里的 regex 开关（第二百一十九刀立的界）。语料里 1 处：70_RegexSwitch.jnc:34 的
+// `[ RegexAnchored ]`。
+//
+// 挂在**语句**上的属性块同一刀收下不看了 —— 与声明上那一格（第一百〇八刀）同一条：属性是纯
+// 元数据，jancy 那边它进的是 doxygen / 反射那张表，不改生成的代码。
+//
+// 只有一种例外，就是这一格：方括号里写 `Regex…` 那几个词时它**不是**元数据，是那台 DFA 的
+// 开关 —— Stmt.llk:207 那句 `regexSwitchStmt_Create(&$stmt, &m_pragmaConfig,
+// popAttributeBlock())` 把属性块与 pragma 配置**一起**递进去。收下不看会把一个真开关丢掉，
+// 所以单独说清（regex switch 本身也还不收，见第二百一十四刀那两条）。
+int main() {
+	[ RegexAnchored ]
+	printf("%d\n", 1);
+	return 0;
+}

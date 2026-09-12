@@ -1,0 +1,1 @@
+`nestedscope:` —— 它把后面那一段变成一格嵌套的可弃作用域（disposable.rst:17 那句"要确定时机就用 dispose / nestedscope"），要作用域出口那一套钩子 —— 与 `disposable` 记同一笔账（第二百一十二刀）

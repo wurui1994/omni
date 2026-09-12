@@ -10483,6 +10483,45 @@ if (h === 'throw') { … return [`${pad}${this.escape(g)}`]; }
   `语句 'throw'` 那句话盖着的那一半。lowered `158`、clean `229` 都没动。
 - 一起编那张榜：`39`、理由 `19` 没动。
 
+### 第二百一十九刀：`语句 '…'` 这一行拆完（顺手落下里头唯一能落的那一格）
+
+上一刀把 `语句 '…'` 从 19 打到 11。剩下的按词数一遍是 `dylayout` 4、`typedef` 2、
+`label`（都是 `nestedscope:`）2、`attributed` 1。四件事，其中一件能落：
+
+- **能落的：写在函数体里的 `typedef`**（20_FunctionPtr.jnc:37 的
+  `typedef function FpFunc(int, int, int);`、35_PropertyPtr.jnc 的
+  `typedef double property FpProp;`）。typedef 只是**给一格类型起个名字**、不生成任何代码，
+  而顶层那一整套现成（第三十八刀；函数类型那一支是第八十二刀），所以体里那一条直接交给
+  `typedefDecl`。
+  **代价明写**：名字提到了外面那层命名空间（`qual(name)`）—— 函数外面也能用那个名字了
+  （jancy 那儿不能，拒得更松），同一层里两个函数各写一条同名 typedef 会撞（jancy 那儿不撞，
+  拒得更严）。两个方向都只影响"收不收"，不会给错答案。真按作用域收要一张跟着 `scopes` 一起
+  进出的类型表 —— 与函数体里的 `using namespace`（第二百一十七刀那条界）是同一件事，一起落。
+- `dylayout (layout) { … }`（4 份）—— **动态布局**那一整套的语句形式：块里那些字段按运行期读到
+  的字节一格一格摆，读的是 `jnc.DynamicLayout` 上那格 validator。与第二百一十四刀那三个
+  `dynamic …` 算子同一族，也就是同一笔"先要字节布局"的账。
+- `nestedscope:`（2 处）—— 把它后面那一段变成一格嵌套的**可弃**作用域，也就是 `disposable`
+  那一套的另一半（disposable.rst:17 那句"要确定时机就用 `dispose` / `nestedscope`"）。
+  与第二百一十二刀给 `disposable` 记的是同一笔账。
+- `attributed`（挂在**语句**上的属性块）—— **收下不看**，与声明上那一格（第一百〇八刀）同一条：
+  属性是纯元数据，jancy 那边它进的是 doxygen / 反射那张表，不改生成的代码。
+  **只有一种例外单独说清**：方括号里写 `Regex…` 那几个词时它不是元数据，是那台 DFA 的开关 ——
+  Stmt.llk:207 那句 `regexSwitchStmt_Create(&$stmt, &m_pragmaConfig, popAttributeBlock())`
+  把属性块与 pragma 配置**一起**递进去。语料里那一处（70_RegexSwitch.jnc:34 的
+  `[ RegexAnchored ]`）正是这一种。
+
+判据是手写的 C 双胞胎 `/tmp/c177.c`，用例 `tests/jnc/cases/171-bodytypedef.jnc`（普通 typedef
+与函数类型 typedef 各一条，印 `7 6`）。三堵墙：`bad/stmt-dylayout.jnc`、
+`bad/nestedscope.jnc`、`bad/attr-regexflag.jnc`。
+
+- 腿：`node tests/jnc/run.js` 311/0（新增 1 个用例 + 3 堵墙）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`语句 '…'` 那一行 11 份**整行没了**，`(文件, 拦路项)` 对 `4001 -> 4000`（−1）。
+  两个数差这么多的原因照旧：那 11 份换成的是四行真话（各 4 / 2 / 2 / 1，加起来 9），
+  另外 2 份（那两格 typedef）真的走过去了 —— 可它们后面还压着别的（属性指针那一族），
+  所以 lowered `158`、clean `229` 都没动。
+- 一起编那张榜：`39`、理由 `19` 没动。
+
+
 
 
 
