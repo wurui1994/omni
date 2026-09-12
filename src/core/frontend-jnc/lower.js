@@ -1080,6 +1080,11 @@ class JncLower {
        发 `(cabi Owner_method …)` 与 `(ccall Owner_method self …)`（ADR-0022 的 J4b 最后一步）。 */
     this.hostSigs = new Map();
     this.hostCtors = new Set();
+    /* 类 / 结构体体里**只有原型**的方法（第一百四十七刀）：裸名 -> 那几个主人的名字。
+       与 hostFns 分开是因为**那些类没写 `opaque`** —— 不能替它们认下"实现在宿主的 C/C++ 那边"
+       这件事（那会凭空发一格 `(ccall …)`）。这一格只用来把调用点那句话说对：
+       "没有这个函数"是**认错人**（那个名字明明声明过），第九十二刀给顶层原型定的说法照抄过来。 */
+    this.protoMethods = new Map();
     this.methods = new Map();
     this.methodNames = new Set();
     this.selfClass = null;
@@ -5037,6 +5042,12 @@ class JncLower {
         }
         // 要在这儿记下来（第五十七刀）—— 体写在类外时那个词只出现在原型上。
         if (info.formals !== null) {
+          /* 只有原型的方法记一格（第一百四十七刀）：**结构体那一支也记**，所以要排在下面那句
+             `if (!cls) continue` 之前。体外真写了定义时这一格用不上 —— 调用点先按名字查，
+             查着了就不问这里。 */
+          const ps0 = this.protoMethods.get(info.name);
+          if (ps0 === undefined) this.protoMethods.set(info.name, new Set([name]));
+          else ps0.add(name);
           // 结构体里的方法原型（第一百〇一刀）：签名由体外那个定义给，这儿一个字都不用发。
           if (!cls) continue;
           if (sp.virt !== null) this.methodProto(d, name, info, sp);
@@ -11382,7 +11393,21 @@ class JncLower {
         if (isFn(lv.type)) return this.callThrough(n, { code: this.read(lv), type: lv.type });
       }
     }
-    if (nm === null) return this.err(n, `没有这个函数：'${nm0}'`);
+    if (nm === null) {
+      /* 名字查不着，可它在某个类 / 结构体体里**声明过**，只是没有带体的定义（第一百四十七刀）：
+         那时"没有这个函数"是**认错人** —— 那个名字明明在。说法照抄第九十二刀给顶层原型定的
+         那一句。主人不止一个就都列出来：这一层这时还不知道左边那个值是哪个类（问它要先求值，
+         而求值会发诊断），所以**不挑一个说**，免得像第一百四十五刀量到的那样指着别的类。 */
+      const bare = mn !== null ? mn
+        : (nm0 !== null && !nm0.includes('.') && this.selfClass !== null ? nm0 : null);
+      const owners = bare === null ? undefined : this.protoMethods.get(bare);
+      if (owners !== undefined) {
+        const who = [...owners].map((o) => `${shown(o)}.${bare}`).join(' / ');
+        return this.nope(n, `原型 '${who}' 没有带体的定义（实现在宿主那边的走 opaque class`
+          + ' 那条路，在别的模块里的要 import 得着）');
+      }
+      return this.err(n, `没有这个函数：'${nm0}'`);
+    }
     // 方法体里裸写 `foo()` 就是 `this.foo()`（类是一层命名空间，所以 resolve 已经找着了
     // `C$foo`）—— 这儿把 `this` 补上。
     const owner = this.methods.get(nm);
