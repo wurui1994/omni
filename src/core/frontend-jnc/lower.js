@@ -5694,11 +5694,19 @@ class JncLower {
               this.protoDefs.set(`${name}$${info.name}#${fs2.length}`, dn2);
             }
           }
-          /* `opaque class` 里的原型（第六十六刀 + ADR-0022 的 J4b）：**没有体外那个定义** ——
-             实现在宿主的 C/C++ 里（opaque.rst:15-29 的 `io.Serial` 就是这个形状）。
-             名字与**签名**都记下来：调用点据此发 `(ccall Owner_method self …)`。
-             体外真写了定义时这一格用不上（调用那边先按名字查，查着了就不问这里）。 */
-          if (cls && key === 'opaque class') {
+          /* 类里那些**没有体**的原型（第六十六刀 + ADR-0022 的 J4b，第一百八十三刀把
+             `opaque` 那道闸门去掉）：实现在宿主的 C/C++ 里（opaque.rst:15-29 的 `io.Serial`
+             就是这个形状）。名字与**签名**都记下来：调用点据此发 `(ccall Owner_method self …)`。
+             体外真写了定义时这一格用不上（调用那边先按名字查，查着了就不问这里）。
+
+             **为什么不再看 `opaque`**（这一条翻的是先前记下的一条线）：`opaque` 在 jancy 里说的是
+             "这个类的**布局**对 jancy 不透明"（opaque.rst 整篇讲的都是字段与大小），它管的不是
+             "方法的体在哪儿"。决定"体在宿主"的只有一件事：**这个模块里没有那个体**。jancy 那边
+             `JNC_MAP_FUNCTION` 也不问类是不是 opaque —— 任何声明过的函数都能映到 C 的实现上。
+             而"没有体的函数"在 jancy 里**不是编译期错误**（量过：它没有那条检查），所以我们照着
+             同一个形状办，代价也照实记：写错名字的那种从"编译期一句诊断"变成"链接期找不着符号"
+             （与 `(cabi …)` 那条路一样，ADR-0022 的 J4b 早就接受了这一笔）。 */
+          if (cls) {
             const hf = this.hostFns.get(info.name);
             if (hf === undefined) this.hostFns.set(info.name, new Set([name]));
             else hf.add(name);

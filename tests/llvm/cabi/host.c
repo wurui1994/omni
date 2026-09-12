@@ -102,6 +102,14 @@ void Counter_last(void *ret, void *self) {
 /* 属性的取值器回 `variant_t` 也是同一条：`Owner_get_p(ret, self)`。 */
 void Counter_get_m_last(void *ret, void *self) { Counter_last(ret, self); }
 
+/* **没写 `opaque` 的类**里那格只有原型的方法（第一百八十三刀）：符号名的约定与 opaque 那一支
+   一模一样（`Owner_method`，第一个形参是那个对象）—— `opaque` 在 jancy 里说的是"布局不透明"，
+   管的不是"体在哪儿"。这一格存在的意义是把那条约定**真跑一遍**。 */
+int64_t Plain_twice(void *self, int64_t x) {
+  (void)self;
+  return x * 2;
+}
+
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型
    （`property m_scale { long get(); void set(long); }`，ui_PropertyGrid.jnc:78-88 那个形状）
    时，体也在宿主这边；符号名的约定与方法同一条，只是中间多一段 `get_` / `set_`：
