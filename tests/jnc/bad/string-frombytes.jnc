@@ -1,0 +1,12 @@
+// `string_t(指针, 长度)`（第二百三十三刀）：从**一段字节**造一格字符串。语料里这一族是
+// std_String.jnc 的 33 / 96 / 117 / 162 那几行，逐份榜上量到 128 处，先前全落在
+// "没有这个函数：'string_t'" 那一行上 —— 那是认错人（jancy 收这一句，而 `string_t` 是类型）。
+//
+// 真拦路的是 `string_t` 的 `m_p` 那笔方言级的账：那是一格指到**字节**上的 `char const*`，
+// 而这一层的 `char*` 指的是方言的整数格，两边不是同一个东西。
+int main() {
+	char const* p = "hello";
+	string_t s = string_t(p, 2);
+	printf("%s\n", s);
+	return 0;
+}

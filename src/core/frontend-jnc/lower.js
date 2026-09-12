@@ -8902,6 +8902,19 @@ class JncLower {
     return null;
   }
 
+  /** 这个名字是一格**类型**吗（第二百三十三刀）。回 `'string'` / `'其它'` / null。
+   *  只查表、一个字都不发 —— 与 `cheapTy` 那一族同一条规矩。挑的这几种就是 specs 里
+   *  认类型名的那几支（见 specTy）：整数别名、`size_t`、`string_t`、`variant_t`、
+   *  类 / 结构体 / 枚举 / typedef。 */
+  callTypeName(nm) {
+    if (nm === 'string_t') return 'string';
+    if (INT_ALIASES.has(nm) || nm === 'size_t' || nm === 'variant_t') return '其它';
+    if (this.resolve(nm, (k) => this.classes.has(k)) !== null) return '其它';
+    if (this.resolve(nm, (k) => this.structs.has(k)) !== null) return '其它';
+    if (this.resolve(nm, (k) => this.enums.has(k)) !== null) return '其它';
+    return null;
+  }
+
   /** `E.M` 里那格枚举类型 —— enumMember 的**纯查表**那一半（第一百四十四刀）。
    *  差别只在"查不着就回 null"：那儿要报错，这儿一个字都不许发。 */
   cheapEnumMem(n) {
@@ -14193,6 +14206,23 @@ class JncLower {
          字段，类型是那个函子。排在最后：这一格问的是"名字查不着"之后的最后一种可能。 */
       const oc0 = this.opCallOf(callee);
       if (oc0 !== undefined) return this.opCallSite(n, oc0, callee);
+      /* 左边是一格**类型**（第二百三十三刀）：`T(x)` 在 jancy 里是一格**构造式转换**，不是
+         "没有这个函数" —— 那是认错人，名字明明在，只是它不是函数。
+         榜上那一行的头名就是它：`string_t(p, length)`（std_String.jnc:33/96/117/162 那一族，
+         量到 128 处）—— 从**一段字节**造一格字符串，那正是 `string_t` 的 `m_p` 那笔方言级的账
+         （这一层的 `char*` 指的是方言的整数格，不是字节；见那一行的注）。所以这一格分两句说：
+         string 那一种指着那笔账，别的种指着"构造式转换"这件事本身。 */
+      const tnm = nm0 === null ? null : this.callTypeName(nm0);
+      if (tnm !== null) {
+        if (tnm === 'string') {
+          return this.nope(n, '`string_t(指针, 长度)`：从一段**字节**造一格字符串 —— 与 '
+            + '`string_t` 的 `m_p` 同一笔账（那是一格指到字节上的 `char const*`，'
+            + '而这一层的 `char*` 指的是方言的整数格 —— 两边不是同一个东西）');
+        }
+        return this.nope(n, `'${shown(nm0)}' 是一格类型，`
+          + '`类型(实参…)` 是 jancy 的**构造式转换**（要按目标类型挑一条转换，与 `(类型)值` '
+          + '那种写法同一件事）—— 这一层只收 `(类型)值` 那一种');
+      }
       return this.err(n, `没有这个函数：'${nm0}'`);
     }
     // 方法体里裸写 `foo()` 就是 `this.foo()`（类是一层命名空间，所以 resolve 已经找着了

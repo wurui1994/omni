@@ -11023,6 +11023,48 @@ class Host { W m_w; }              -> 原型 'W.construct' 没有带体的定义
   clean `238 -> 239`（+1）、lowered `162` 没动，一行都没往错方向走。
 - 一起编那张榜：诊断 `36 -> 34`、理由 `17 -> 16`，那一行也**整行没了**。
 
+### 第二百三十三刀：`类型(实参…)` 不是"没有这个函数"
+
+榜上 `没有这个函数：'…'`（164 处，E）那一行先量了一遍名字，头名是这个：
+
+```
+ 128  string_t
+  67  m_logWriter.write            （逐份口径：那个类在没 import 的文件里）
+  48  m_stdSessionInfoSet.endSession
+  …
+```
+
+`string_t` 那 128 处的原样是：
+
+```
+return string_t(m_p, m_length);            src/jnc_ext/jnc_std/jnc/std_String.jnc:33
+return insert(offset, string_t(p, length));                            同上:96
+return copy(string_t(p, length));                                      同上:117
+```
+
+**这是认错人**，而且是记成 E（"写错了"）的那一种 —— jancy 收这一句：`T(实参…)` 在它那儿是一格
+**构造式转换**，与 `(T)值` 是同一件事，只是可以不止一个实参。名字明明在，只是它不是函数。
+
+真拦路的东西两句话分开说：
+
+- `string_t(指针, 长度)` —— 从**一段字节**造一格字符串，那正是 `string_t` 的 `m_p` 那笔
+  方言级的账（这一层的 `char*` 指的是方言的整数格，不是字节）。墙：`bad/string-frombytes`。
+- 别的类型 —— 这一层只收 `(T)值` 那一种写法，所以明说是"构造式转换"这件事没收。
+  语料里一处都没有（量到 0），可这一格不写就还是那句认错人的话，所以给它一道墙钉住：
+  `bad/call-typename`（`S(1)`）。
+
+新添的 `callTypeName` 只查表、一个字都不发 —— 与 `cheapTy` 那一族同一条规矩；认的那几种就是
+`specTy` 里认类型名的那几支（整数别名、`size_t`、`string_t`、`variant_t`、类 / 结构体 / 枚举）。
+
+- 腿：`node tests/jnc/run.js` 323/0（新增 `bad/call-typename`、`bad/string-frombytes`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`没有这个函数：'…'` `164 -> 144`，新出来的
+  "`string_t(指针, 长度)`…"那一行 33。`(文件, 拦路项)` 对 `3650 -> 3663`（**+13**，往错方向）——
+  原因照旧写清，与第二百一十四刀那一次同一种：**一行裂成两行**（同一份文件两行都算），
+  而且那 128 处里有 95 处是与别的名字挤在同一格 `没有这个函数` 里的，裂出来才各归各账。
+  lowered `162`、clean `239` 都没动。
+- 一起编那张榜：`34`、理由 `16` 没动（`string_t(…)` 那一族在 jnc_std 里，不在 api/ 那 44 份里）。
+
 
 
 
