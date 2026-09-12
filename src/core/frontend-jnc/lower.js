@@ -1106,10 +1106,6 @@ class JncLower {
        发 `(cabi Owner_method …)` 与 `(ccall Owner_method self …)`（ADR-0022 的 J4b 最后一步）。 */
     this.hostSigs = new Map();
     this.hostCtors = new Set();
-    /* 宿主面上**同名两条原型**的那几格（第一百六十四刀）：C 那边一个符号只有一份签名，
-       所以这一层收不下第二条 —— 记在这儿，调用点明说不收（先前是后一条盖掉前一条，
-       于是调用点拿错的那一份查型，是个静默的错答案）。 */
-    this.hostOverloaded = new Set();
 
     /* 那些 `opaque class` 里 `construct` 的**形参类型**（第一百六十二刀）：`new C(…)` 据此发
        `(ccall C_construct self …)` —— 与方法（J4b）、属性的取/存（第一百六十刀）同一条约定。 */
@@ -5559,18 +5555,24 @@ class JncLower {
                  所以这一格记不下第二条 —— 先前是后一条盖掉前一条，于是调用点拿**错的那一份**
                  去查型（`void lock(int)` / `void lock(double)` 里给 1.5 会按 int 检查）。
                  那是个静默的错答案，所以在这儿记一笔，调用点明说不收。 */
-              if (this.hostSigs.has(hk)) this.hostOverloaded.add(hk);
+              const prev = this.hostSigs.get(hk);
               /* 原型上那几格默认值也记下来（第一百六十九刀）：`string_t readString(string_t name,
                  string_t defaultValue = null);`（doc_Storage.jnc:43-46）—— 调用点只给一个实参是对的，
                  而先前宿主面那条路只比个数、不补默认值，于是报"要 2 个实参，这里给了 1 个"
                  （逐份榜上 91 处）。与普通调用那一侧用的是同一份 withDefaults。 */
               const hdefs = hps.map((p) => p.def ?? null);
-              this.hostSigs.set(hk, {
+              /* 同名那几条按**声明顺序**排成一串（第一百七十一刀）：符号名头一条仍叫
+                 `Owner_method`、之后的叫 `Owner_method_o2` / `_o3`…（`$` 不是可移植的 C 标识符
+                 字符，所以用 `_o`）。这是**我们自己的约定** —— jancy 那边没有可照抄的推导规则：
+                 它的重载是宿主一条条 `JNC_MAP_OVERLOAD` 登记、名字由写绑定的人定。 */
+              const one = {
                 owner: name,
                 ret: info.type,
                 params: hps.map((p) => p.type),
                 defs: hdefs.some((d) => d !== null) ? hdefs : null,
-              });
+              };
+              if (prev === undefined) this.hostSigs.set(hk, [one]);
+              else prev.push(one);
             }
           }
           continue;
@@ -11289,6 +11291,61 @@ class JncLower {
    * 体在哪个库里由源码另说一句（`import "libfoo.dylib"`）—— 与 `(cabi …)`/`(lib …)` 的
    * 分工完全一致：这一格只说"有这么个符号、它是这么声明的"。
    */
+  /**
+   * 宿主面同名那几条里挑一条（第一百七十一刀）。回 `{sig, i}`（`i` 是声明顺序，符号名靠它加
+   * `_o2` / `_o3`…），说不通时发诊断回 null。
+   *
+   * 规矩与普通重载那一处（pickOverload）逐条一样：先按**个数**筛（默认值算可省的那几格），
+   * 剩一条就是它；剩几条按**实参类型**排（argCost），问不出实参类型的明说不收（第八十刀那条
+   * "绝不猜"），同分的也明说（jancy 那边这也是 ambiguous）。
+   */
+  hostPick(n, owner, mn, sigs) {
+    if (sigs.length === 1) return { sig: sigs[0], i: 0 };
+    const args = this.flat(n.items[2]);
+    const given = args.length;
+    const fits = [];
+    for (let i = 0; i < sigs.length; i++) {
+      const sg = sigs[i];
+      const opt = sg.defs === null || sg.defs === undefined
+        ? 0 : sg.defs.filter((d) => d !== null).length;
+      if (given >= sg.params.length - opt && given <= sg.params.length) fits.push(i);
+    }
+    if (fits.length === 1) return { sig: sigs[fits[0]], i: fits[0] };
+    if (fits.length === 0) {
+      return this.err(n, `'${shown(owner)}.${mn}' 那几条原型收的实参个数是 `
+        + `${sigs.map((sg) => sg.params.length).join(' / ')}，这里给了 ${given} 个`);
+    }
+    const tys = args.map((a) => this.cheapTy(a));
+    if (tys.some((t) => t === null)) {
+      return this.nope(n, `'${shown(owner)}.${mn}' 那几条同元的原型：第 `
+        + `${tys.findIndex((t) => t === null) + 1} 个实参的类型这一层还得先降一遍才知道`
+        + '（同元重载要按参数类型挑，见 ADR-0016 第八十刀）');
+    }
+    let best = -1;
+    let bestScore = 0;
+    let tie = false;
+    for (const i of fits) {
+      const want = sigs[i].params;
+      let score = 5;
+      for (let k = 0; k < tys.length; k++) {
+        const one = this.argCost(tys[k].ty, want[k], tys[k].lit);
+        if (one < score) score = one;
+      }
+      if (score === 0) continue;
+      if (score === bestScore) tie = true;
+      if (score > bestScore) { bestScore = score; best = i; tie = false; }
+    }
+    if (best === -1) {
+      return this.err(n, `'${shown(owner)}.${mn}' 那 ${fits.length} 条原型没有一条收得下这几个实参`
+        + `（${tys.map((t) => tyName(t.ty)).join(', ')}）`);
+    }
+    if (tie) {
+      return this.nope(n, `'${shown(owner)}.${mn}' 那几条同元的原型在这一句上分不出来`
+        + `（${tys.map((t) => tyName(t.ty)).join(', ')} 对两条一样合得上）`);
+    }
+    return { sig: sigs[best], i: best };
+  }
+
   hostMethodCall(n, callee, owners, mn, selfVal = null) {
     const some = [...owners][0];
     if (selfVal === null && head(callee) !== 'field') {
@@ -11318,17 +11375,18 @@ class JncLower {
       return this.err(n, `'${tyName(bv.type)}' 上没有方法 '${mn}'（同名那几条声明在`
         + `${[...owners].map((o) => ` '${shown(o)}'`).join('、')} 上）`);
     }
-    const sig = this.hostSigs.get(`${owner}$${mn}`);
-    if (sig === undefined) {
+    const sigs = this.hostSigs.get(`${owner}$${mn}`);
+    if (sigs === undefined || sigs.length === 0) {
       return this.nope(n, `'${shown(owner)}.${mn}'（这个方法的原型没收下来）`);
     }
-    /* 同名两条原型（第一百六十四刀）：宿主那边一个符号只有一份签名（C 没有重载），这一层
-       于是挑不出该按哪一条查型 —— 明说不收，而不是拿最后声明的那一条糊过去。 */
-    if (this.hostOverloaded.has(`${owner}$${mn}`)) {
-      return this.nope(n, `'${shown(owner)}.${mn}' 在 opaque class 里声明了同名的两条 ——`
-        + ' 宿主那边一个符号只有一份签名（C 没有重载），这一层挑不出按哪一条过');
-    }
-    const sym = `${owner.replace(/\$/g, '_')}_${mn}`;
+    /* 同名那几条（第一百七十一刀，把第一百六十四刀那条"挑不出"换成真的挑）：先按个数筛、
+       再按实参类型排，规矩与普通重载那一处（pickOverload）逐条一样 —— 问不出实参类型的
+       明说不收（第八十刀那条：绝不猜）。 */
+    const pick = this.hostPick(n, owner, mn, sigs);
+    if (pick === null) return null;
+    const sig = pick.sig;
+    const symSuffix = pick.i === 0 ? '' : `_o${pick.i + 1}`;
+    const sym = `${owner.replace(/\$/g, '_')}_${mn}${symSuffix}`;
     const rw = this.cabiWordOfJnc(sig.ret, true);
     if (rw === null) {
       return this.nope(n, `'${shown(owner)}.${mn}' 的返回类型 ${tyName(sig.ret)}`

@@ -1,23 +1,21 @@
-// 第一百六十四刀：`opaque class` 里**同名两条原型**。
+// 宿主面同名那几条**能挑了**（第一百七十一刀）：按个数筛、按实参类型排，符号名头一条仍叫
+// `Owner_method`、之后的叫 `Owner_method_o2` / `_o3`…（那是我们自己的约定 —— jancy 那边重载
+// 是宿主一条条 `JNC_MAP_OVERLOAD` 登记、名字由写绑定的人定，没有可照抄的推导规则）。
 //
-// 宿主面按名字约定过去（`Owner.method` -> C 符号 `Owner_method`，ADR-0022 的 J4b），而 C 那边
-// **一个符号只有一份签名** —— 没有重载。所以这一层收不下第二条。
-//
-// 这一条是个**静默的错答案**补上的洞：先前 hostSigs 是按 `类$方法` 记的一格，第二条原型直接
-// 盖掉第一条，于是调用点拿**最后声明的那一份**去查型 —— 下面这一句 `p.lock(1.5)` 会按
-// `void lock(int)` 检查（或者反过来），过去的字宽与实际那个符号想要的对不上，而错的调用约定
-// 在运行期是读错地方，不是报错。宁可在这儿说"挑不出按哪一条过"。
-//
-// 与 `bad/opaque-host-fn.jnc`（形参类型落不进 C_ABI）是同一族的第二条界。
+// 这一条留下来钉的是**同元分不出来**那一格：`1` 是整数字面量，而 jancy 对常量的 int -> int
+// 加宽算 `Identity`（jnc_ct_CastOp_Int.h:23-111），所以 `lock(int)` 与 `lock(long)` 两条一样
+// 合得上 —— 那在它那边也是 "ambiguous call to overloaded function"。这一层于是不给答案。
+// （第一百五十五刀那次量出来的同一格：`construct(int)` / `construct(double)` 不是平手，因为
+// int -> real 严格更差；要造平手得两条都是整数。）
 opaque class Lock {
 	int m_depth;
 
 	void lock(int n);
-	void lock(double d);
+	void lock(long n);
 }
 
 int main() {
 	Lock* p = new Lock();
-	p.lock(1.5);
+	p.lock(1);
 	return 0;
 }
