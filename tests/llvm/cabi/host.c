@@ -136,6 +136,14 @@ int64_t Plain_mix(void *self, int64_t a, int64_t b) {
   return a * 10 + b;
 }
 
+/* 同元、只差**类型**的那一对（第一百八十八刀）：带体的那条收整数，只有原型的这条收 string_t
+   —— 字符串过 C_ABI 是那格胖指针的第 0 个字（字面量带着结尾的零，见 ADR-0022 的 J4b），
+   所以这儿 strlen 得出来。回长度乘 100，好让"挑对了没有"在输出上看得见。 */
+int64_t Plain_note(void *self, const char *s) {
+  (void)self;
+  return s == NULL ? -1 : (int64_t)strlen(s) * 100;
+}
+
 int64_t probe_hostMul(int64_t a, int64_t b) { return a * b; }
 
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型

@@ -420,6 +420,11 @@ if (existsSync(sysDir)) {
       + '    long mix(long a) {\n'
       + '        return a + 100;\n'
       + '    }\n'
+      /* 同元、只差类型的那一对（第一百八十八刀）：收 string_t 的那条只有原型、体在宿主。 */
+      + '    long note(string_t s);\n'
+      + '    long note(long n) {\n'
+      + '        return n + 1;\n'
+      + '    }\n'
       + '}\n\n'
       + 'int main() {\n'
       + '    Counter* c = new Counter(100);\n'
@@ -442,12 +447,13 @@ if (existsSync(sysDir)) {
       + '    printf("plain %d %d\\n", q.twice(21), q.seeded());\n'
       + '    printf("top %d %d\\n", hostAdd(40, 2), probe.hostMul(6, 7));\n'
       + '    printf("mix %d %d\\n", q.mix(3, 4), q.mix(5));\n'
+      + '    printf("note %d %d\\n", q.note("hi"), q.note(7));\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */

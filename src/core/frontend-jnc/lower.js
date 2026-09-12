@@ -12963,6 +12963,10 @@ class JncLower {
         + `，这里给了 ${args0.length} 个`);
     }
     const parts = self === null ? [] : [self];
+    /* 这一轮降实参之前先记一格水位（第一百八十八刀）：下面那一处要是改挑宿主面那条，就得把
+       这几个实参**降出来的传播语句**（第五十八刀那条落点）退回去，不然它们会被发两遍。
+       `decls` 那一侧不用退 —— 那儿的东西都按名字去重（`varBox` 那一族）。 */
+    const ecMark = this.ecOut === null ? -1 : this.ecOut.length;
     for (let i = 0; i < args.length; i++) {
       let v = this.expr(args[i], want[i]);
       if (v === null) return null;
@@ -12973,6 +12977,14 @@ class JncLower {
            合得上的那一条可能就在没进候选的那几条里。语料里 `copy(string)`（std_String.jnc:49，
            那个类写着四条 copy）报的是"第 1 个实参要 char*"，而 `copy(string_t)` 那一条明明在。
            与第一百五十刀那三处是同一笔账，只是这一处的出错口是**实参类型**而不是个数。 */
+        /* 合得上的那一条可能在**宿主面**那张表里（第一百八十八刀）：走到这儿说明带体的那几条
+           里挑出来的最合的那一条也收不下这个实参（pickOverload 先按类型排过），所以不会把
+           "该调的定义"换成 ccall。退回那格水位再试。 */
+        if (ecMark >= 0 && this.ecOut !== null) this.ecOut.length = ecMark;
+        /* 传下去的是**这一句调用**那格节点（`hostMethodCall` 要从它身上取实参表）——
+           不是 `args[i]`（那是其中一个实参，量出来过一次：那儿 `n.items[2]` 是 undefined）。 */
+        const hr1 = self === null ? undefined : this.protoHostRetry(n, nm, self);
+        if (hr1 !== undefined) return hr1;
         if (this.protoSibling(nm)) return this.protoSiblingNope(args[i], nm, args.length);
         return this.err(args[i], `'${nm0 === null ? shown(nm) : nm0}' 的第 ${i + 1} 个实参要 ${tyName(want[i])}，`
           + `这里是 ${tyName(v.type)}`);
