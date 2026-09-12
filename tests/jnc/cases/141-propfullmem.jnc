@@ -1,0 +1,55 @@
+// 类体里的**完整声明式**属性（第一百五十八刀）。出处：
+//   - `property NAME { … }` 那对花括号开的是一层命名空间（prop_full.rst:15），写在类体里
+//     与写在顶层是同一件事 —— 语料里的主流写法正是写在类里的：
+//     `opaque class EnumProperty: Property { property m_value { variant_t autoget m_value; … } }`
+//     （test/ioninja/api/ui_PropertyGrid.jnc:77-88）。
+//   - 第七十五刀把这一格改写成"简单声明式 + 两个体外的函数"，可那一遍只换了**提上来那一批**
+//     （aggHoist 抄出去的那一份）；类自己那格体没动，而字段表、属性表与 propPend 都是 typeDecl
+//     顺着体走出来的 —— 于是体里那格 `autoget` 字段被当成类的一格普通字段（报"`autoget` 只能
+//     写在属性上"），存值器又找不着属性（报"没有这个属性"）。这一刀把体里那一格也换掉。
+//   - 顺手补上第七十五刀那一格坑：`property` 这个词要**摊平了再拼**进说明符 —— 那串词在语法里
+//     是左递归的一串，照原样往后接的话 flat 只认得出头两条。写 `autoget int m_x;`（词在类型
+//     前面）碰不着，`int autoget m_value;`（ui_PropertyGrid.jnc:79 那种写法）才踩得着。
+//
+// 两格都在这儿：`m_v` 是 autoget 的（取值器由编译器生成、存值器手写），`m_twice` 两个函数
+// 都手写。存值器体里裸写的 `m_value` 是**对象里的一格字段**（换名的活儿在 selfField）。
+//
+// 期望输出的出处：/tmp/c147.c（`cc -O0 -std=c99 -Wall`）—— 独立的一份：它按"读写属性各是
+// 一次调用"手写成 C 的两个函数，与这一层怎么改写那格属性没有一点关系。
+
+class Box {
+	int m_sets;
+
+	int property m_v {
+		int autoget m_value;
+
+		void set(int x) {
+			m_sets++;
+			m_value = x;
+		}
+	}
+
+	int property m_twice {
+		int get() {
+			return 2 * m_v;
+		}
+
+		void set(int x) {
+			m_v = x / 2;
+		}
+	}
+
+	construct() {
+		m_sets = 0;
+	}
+}
+
+int main() {
+	Box b;
+	b.m_v = 5;
+	printf("v=%d twice=%d sets=%d\n", b.m_v, b.m_twice, b.m_sets);
+
+	b.m_twice = 14;
+	printf("v=%d twice=%d sets=%d\n", b.m_v, b.m_twice, b.m_sets);
+	return 0;
+}

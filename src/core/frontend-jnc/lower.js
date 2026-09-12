@@ -1082,6 +1082,10 @@ class JncLower {
        `{store, onch}`。改写出来的简单声明式记不住它们（写的人叫它 `m_x` / `m_e`，而默认是
        `m_value` / `m_onChanged`），所以在改写那一遍记一笔，autoStore / bindStore 照它拼。 */
     this.propMemName = new Map();
+    /* 属性的全名 -> `{onch}`：那格 onChanged **不生成**、就用外层已经有的那格成员
+       （`bindable alias 新名字 = m_onChanged;`，第一百五十八刀）。出处见 fullPropMember 里
+       那段注（jnc_ct_Parser.cpp:1354 那句 `prop->setOnChanged(alias)`）。 */
+    this.propAlias = new Map();
     // 取/存那两个函数的名字 -> 属性的全名（第七十一刀）。函数体降下来时靠它把 `this.ns`
     // 再往里挪一层：属性在 jancy 那边**本来就是一层命名空间**（prop_full.rst:15）。
     this.propOf = new Map();
@@ -2652,6 +2656,13 @@ class JncLower {
     /* `extension T: Base { … }`（第一百〇七刀）排在这儿：它要**查得着目标类型**，所以必须在
        名字坐下之后；而它摊出来的那些条目底下每一遍都要看见，所以又必须在体、签名之前。 */
     items = this.expandExtensions(items);
+    /* 完整声明式的属性**再来一遍**（第一百五十九刀）：泛型摊出来的那些实例（expandTemplates）
+       与 `extension T: Base { … }` 摊出来的那些成员（就上面这一句）里也有属性，而它们是在上面
+       那一遍之后才出现的 —— 语料里最常见的一格是
+       `extension HidUsagePageEnumStrings: HidUsagePage { string_t const property m_enumString { return …; } }`
+       （src/jnc_ext/jnc_io_hid/jnc/io_HidDb.jnc:35）。改写过的那些落不到这一遍上：取/存两个
+       函数的名字是 `qualified-special`，`fullProp` 头一句 `qname(core)` 就回 null。 */
+    items = this.expandFullProps(items);
 
     // typedef 排在"结构体的名字坐下"之后、"结构体的体解出来"之前（第三十八刀）：这样别名可以
     // 引结构体的名字，结构体的字段也可以用别名。
@@ -2779,6 +2790,16 @@ class JncLower {
       if (pi === undefined) continue;              // 属性那一格登记时就报过错了
       const g = `${a.full}$get`;
       if (a.cls === null) {
+        /* `autoget alias` 那一种（第一百五十八刀）：那格存储是外层已经声明过的一格 ——
+           这儿一个字都不发，只往下走去合成取值器。 */
+        if (a.alias === true) {
+          if (pi.get) continue;
+          const rd0 = this.gLifted.has(a.name) ? `(pload (var ${a.name}))` : `(var ${a.name})`;
+          this.decls.push(`  (fn ${g} () ${slotText(a.type)}\n    (ret ${rd0}))`);
+          this.fns.set(g, { params: [], ret: a.type });
+          pi.get = true;
+          continue;
+        }
         // 顶层的那一格就是一格模块级变量。`&` 数的是**源码里写的**名字，而源码里写的是
         // `m_value`（prop_autoget.rst:26），所以两个名字都问一遍 —— 与 declareGlobal 同。
         if ((this.gTaken.has(a.name) || this.gTaken.has('m_value')) && this.liftable(a.type)) {
@@ -3708,31 +3729,112 @@ class JncLower {
     return { kind: 'list', span: n.span, items: n.items.map((x) => this.tmplSubst(x, map)) };
   }
 
+  /**
+   * 完整声明式的属性改写（第七十五刀）。**两处都要换**（第一百五十八刀）：
+   *
+   * 写在**类体里**的那一格（`opaque class EnumProperty { property m_value { … } }`，
+   * ui_PropertyGrid.jnc:78）在第五十二刀那一遍已经被 aggHoist 抄进了"提上来"这一批，可类
+   * 自己那格体**没动** —— 而字段表、属性表、`propPend` 都是 typeDecl 顺着体走出来的。只换
+   * 提上来那一批的话，类体里剩下的还是原来那格带体的属性，于是体里那格 `autoget` 字段被当成
+   * 类的一格普通字段（报"`autoget` 只能写在属性上"），存值器又找不着属性（报"没有这个属性"）。
+   *
+   * 所以这一遍分三步：先把每一条改写好记成一张表；再顺着 type-decl 把类体里那一格换成改写出
+   * 来的**那条简单声明式**（属性表由 typeDecl 那一遍从体里认）；最后按这张表出新的名单 ——
+   * 类里那一格只留**取/存两个函数**（那一条声明已经在体里了，两处都留会报"声明了两次"）。
+   */
   expandFullProps(items) {
-    const out = [];
+    /* 兄弟成员那张表（第一百五十八刀）：`autoget alias m_value = m_classValue;` 要从**目标那格
+       成员**抄类型（jancy 那边是 `setAutoGetValue(alias)` 到 `Property::finalize` 里
+       `alias->getTargetItem()` 再 `item->getItemType()`，jnc_ct_Property.cpp:484-491、170），
+       而这一遍排在最前面、类型一个都还没解出来 —— 所以抄的是**那格声明的说明符**。 */
+    const sibs = new Map();
     for (const e of items) {
       const it = e.it;
-      if (!isList(it) || head(it) !== 'fn-def') { out.push(e); continue; }
+      if (!isList(it) || head(it) !== 'type-decl') continue;
+      const agg = it.items[1];
+      if (!isList(agg) || !isList(agg.items[4])) continue;
+      const ms = this.flat(agg.items[4]).map((x) => unattr(x));
+      for (const m of ms) sibs.set(m, ms);
+    }
+    const rw = new Map();                 // 原来那格 fn-def -> 改写出来的那几条
+    for (const e of items) {
+      const it = e.it;
+      if (!isList(it) || head(it) !== 'fn-def') continue;
       const dcl = it.items[2];
-      if (!this.propMod(it.items[1]) && !this.tailMods(dcl).includes('property')) {
-        out.push(e);
-        continue;
-      }
+      if (!this.propMod(it.items[1]) && !this.tailMods(dcl).includes('property')) continue;
       // `this.qual()` 要当时那一层命名空间（体内那两格的名字要按全名记账）
       const saveNs = this.ns;
       this.ns = e.ns;
-      const ex = this.fullProp(it);
+      const ex = this.fullProp(it, sibs.get(it) ?? items.map((x) => x.it));
       this.ns = saveNs;
       // 说不通的照原样留着：`fnSig0` 那条诊断照旧发，理由不会因为这一刀变模糊。
-      if (ex === null) { out.push(e); continue; }
-      for (const x of ex) out.push({ it: x, ns: e.ns });
+      if (ex !== null) rw.set(it, ex);
+    }
+    if (rw.size === 0) return items;
+    /* 类体里那一格就地换掉。**倒着走**：嵌套的类型自己那一格 type-deel 在名单里排在外面
+       那一格后头，倒着走于是外面那格拿得到已经换好的那一份。 */
+    const nodeMap = new Map();            // 原来那格 type-decl -> 换好的那一格
+    const inCls = new Set();              // 是类体里那一格（提上来这一批里只留两个函数）
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const it = items[i].it;
+      if (!isList(it) || head(it) !== 'type-decl') continue;
+      const nn = this.aggPropRw(it, rw, nodeMap, inCls);
+      if (nn !== it) nodeMap.set(it, nn);
+    }
+    const out = [];
+    for (const e of items) {
+      const it = e.it;
+      const nn = nodeMap.get(it);
+      if (nn !== undefined) { out.push({ ...e, it: nn }); continue; }
+      const ex = rw.get(it);
+      if (ex === undefined) { out.push(e); continue; }
+      for (const x of ex) {
+        if (inCls.has(it) && isList(x) && head(x) === 'var-decl') continue;
+        out.push({ it: x, ns: e.ns });
+      }
     }
     return out;
   }
 
+  /**
+   * 一格 type-decl 里那些完整声明式的属性就地换掉（第一百五十八刀）。原来那格**不动**（提
+   * 上来那一批里还引着它、`rw` 那张表的键也是它），回的是一格新的 type-decl；一格都没换的
+   * 回原来那格。
+   */
+  aggPropRw(td, rw, nodeMap, inCls) {
+    const agg = td.items[1];
+    if (!isList(agg) || !isList(agg.items[4])) return td;
+    const ms = [];
+    let hit = false;
+    for (const m0 of this.flat(agg.items[4])) {
+      const m = unattr(m0);
+      const ex = rw.get(m);
+      if (ex !== undefined) {
+        hit = true;
+        inCls.add(m);
+        // 类体里留下的是**那条声明**（简单声明式的属性）；取/存两个函数走提上来那一批。
+        for (const x of ex) if (isList(x) && head(x) === 'var-decl') ms.push(x);
+        continue;
+      }
+      const nn = nodeMap.get(m);
+      if (nn !== undefined) { hit = true; ms.push(nn); continue; }
+      ms.push(m0);
+    }
+    if (!hit) return td;
+    /* 体那一格在语法里是**左递归的一串**（`… -add` 那种，见 flat）：拼新的一格得回到最里头
+       那一格的表头，不然 flat 只认得出头两条。 */
+    const mems = agg.items[4];
+    let base = mems;
+    while (isList(base) && head(base) !== null && head(base).endsWith('-add')) base = base.items[1];
+    const h0 = isList(base) ? base.items[0] : this.mkA(mems.span, 'members');
+    const nb = { kind: 'list', span: mems.span, items: [h0, ...ms] };
+    const na = { kind: 'list', span: agg.span, items: agg.items.map((x, i) => (i === 4 ? nb : x)) };
+    return { kind: 'list', span: td.span, items: td.items.map((x, i) => (i === 1 ? na : x)) };
+  }
+
   /** 一格完整声明式的属性 -> 三条（声明 + 取 + 存）。**报过错的回空表**（那一条就此丢掉，
    *  免得 fnSig0 再报一遍同一件事）；压根不是这个形状的回 null（照原样留着）。 */
-  fullProp(it) {
+  fullProp(it, sibs = []) {
     const dcl = it.items[2];
     const body = it.items[3];
     if (!isList(dcl) || head(dcl) !== 'dcl') return null;
@@ -3765,7 +3867,7 @@ class JncLower {
     const whole = bodyItems.length > 0 && !bodyItems.some(isPropMember);
     for (const m of whole ? [] : bodyItems) {
       if (isList(m) && head(m) === 'var-decl') {
-        const r = this.fullPropMember(nm, m);
+        const r = this.fullPropMember(nm, m, sibs);
         if (r === null) return [];
         if (r.kind === 'field') {
           if (fld !== null) { this.nope(m, `完整声明式的属性 '${nm}' 里两格字段`); return []; }
@@ -3821,6 +3923,17 @@ class JncLower {
     if (fld !== null || evt !== null) {
       this.propMemName.set(full, { store: fld === null ? null : fld.name, onch: evt === null ? null : evt.name });
     }
+    /* 那条 alias 说的是"这一格不生成、就用外层那格成员"（第一百五十八刀）：记一笔，autoStore /
+       bindStore 那两步照它走 —— 属性这一层里那个新名字（`m_onPropChanged` / `m_value`）与外层
+       那格是同一格，所以 propMemName 上记的仍是这个新名字（存值器体里裸写它，靠 ren 那张表
+       换过去）。 */
+    if ((evt !== null && evt.target !== undefined)
+      || (fld !== null && fld.target !== undefined)) {
+      this.propAlias.set(full, {
+        store: fld !== null && fld.target !== undefined ? fld.target : null,
+        onch: evt !== null && evt.target !== undefined ? evt.target : null,
+      });
+    }
     const out = [this.propDeclOf(src.sp, src.ptrs, core, extra)];
     if (whole) {
       // 那一格 get：名字是 `属性名.get`（qualified-special），形参表空着，体就是属性那个体。
@@ -3855,11 +3968,73 @@ class JncLower {
    *
    * 回 `{kind, name, sp, ptrs}`；说不通时**自己报**并回 null。
    */
-  fullPropMember(nm, m) {
+  /**
+   * 同一层里名字叫 `nm` 的那格**声明**（第一百五十八刀）：回 `{sp, ptrs}` —— 说明符与那一串
+   * `*`，也就是"这格的类型是怎么写的"。`autoget alias` 抄的就是它（jancy 那边抄的是解出来的
+   * 类型，这一遍排在类型之前，所以抄的是写法；两者在同一层里是一回事）。
+   */
+  sibDecl(sibs, nm) {
+    for (const m of sibs) {
+      if (!isList(m) || head(m) !== 'var-decl') continue;
+      if (this.hasMod(m.items[1], 'alias')) continue;
+      for (const d0 of this.flat(m.items[2])) {
+        const d = isList(d0) && head(d0) === 'init' ? d0.items[1] : d0;
+        if (!isList(d) || head(d) !== 'dcl') continue;
+        if (this.qname(d.items[2]) !== nm) continue;
+        if (this.flat(d.items[3]).length > 0) return null;   // 带形参表/下标的不是一格字段
+        return { sp: m.items[1], ptrs: d.items[1] };
+      }
+    }
+    return null;
+  }
+
+  fullPropMember(nm, m, sibs = []) {
     const sp = m.items[1];
     const mods = [...this.flat(sp.items[2]), ...this.flat(sp.items[3])]
       .filter((x) => isAtom(x)).map((x) => x.value);
     const ds = this.flat(m.items[2]);
+    /* `bindable alias m_onPropChanged = m_onChanged;`（ui_PropertyGrid.jnc:81 那三处）与
+       `autoget alias m_value = m_classValue;`（test/jnc/test89.jnc:14-15）。**方向与头一遍
+       猜的正相反**：出处是 `Parser::declareAlias`（jnc_ct_Parser.cpp:1346-1365）——
+
+           Alias* alias = createAlias(name, &declarator->m_initializer);
+           if (nspace->getNamespaceKind() == NamespaceKind_Property) {
+             if (ptrTypeFlags & PtrTypeFlag_Bindable) prop->setOnChanged(alias);
+             else if (ptrTypeFlags & PtrTypeFlag_AutoGet) prop->setAutoGetValue(alias);
+           }
+
+       等号**右边**那格才是真东西（外层命名空间里已经有的那格成员），左边只是属性这一层里给它
+       起的另一个名字。所以 `bindable`/`autoget` 这两个词在这儿的意思是"这格属性的事件/存储
+       **不生成**，就用它"（`Property::finalize` 里 `alias->getTargetItem()` 再 setOnChanged /
+       setAutoGetValue 一遍，jnc_ct_Property.cpp:484-500）。`alias doesn't need a type`
+       （jnc_ct_Parser.cpp:1341）—— 所以类型要从目标那格成员抄（同处 170：`item->getItemType()`）。 */
+    if (mods.includes('alias')) {
+      const ini = ds.length === 1 && isList(ds[0]) && head(ds[0]) === 'init' ? ds[0] : null;
+      const an = ini === null ? null : this.qname(ini.items[1].items[2]);
+      const tg = ini === null ? null : this.qname(ini.items[2]);
+      const bnd = mods.includes('bindable');
+      const agt = mods.includes('autoget');
+      if (an === null || tg === null) {
+        this.nope(m, `完整声明式的属性 '${nm}' 里那条 alias 的写法（只收`
+          + ' `bindable alias 新名字 = 外层那格事件;` 与 `autoget alias 新名字 = 外层那格字段;`）');
+        return null;
+      }
+      if (!bnd && !agt) {
+        this.nope(m, `完整声明式的属性 '${nm}' 里那条 alias 上既没有 'bindable' 也没有`
+          + " 'autoget'（属性体里的 alias 只有这两种意思，jnc_ct_Parser.cpp:1354-1361）");
+        return null;
+      }
+      if (bnd) return { kind: 'event', name: an, target: tg, sp, ptrs: ini.items[1].items[1] };
+      /* autoget 那一种：类型抄目标那格声明的**说明符**。目标要在同一层里找得着 —— 找不着的
+         明说不收，而不是猜一个类型（那会是个静默的错答案）。 */
+      const t0 = this.sibDecl(sibs, tg);
+      if (t0 === null) {
+        this.nope(m, `完整声明式的属性 '${nm}' 里那条 autoget alias 指着的 '${tg}' ——`
+          + ' 这一层只收指着同一层里一格写明了类型的字段的那一种');
+        return null;
+      }
+      return { kind: 'field', name: an, target: tg, sp: t0.sp, ptrs: t0.ptrs };
+    }
     if (ds.length !== 1 || !isList(ds[0]) || head(ds[0]) !== 'dcl') {
       this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条（一条声明只收一格）`);
       return null;
@@ -3897,15 +4072,19 @@ class JncLower {
     const sp = this.mkL(gsp.span, ...gsp.items);
     const ptrs = this.mkL(gptrs.span, ...gptrs.items);
     const words = ['property', ...extra];
+    /* 那几个词要**摊平了再拼**（第一百五十八刀量出来的一格坑）：说明符里那串词在语法里是
+       左递归的一串（`(mods-add (mods) autoget)`，见 flat），照原样往 items 后面接的话
+       flat 只认得出头两条 —— 接上去的 `property` 就这么没了。写 `autoget int m_x;`（词在
+       类型前面）时那一格是空的 `(mods)`，所以第七十五刀起这一格一直是对的；`int autoget m_x;`
+       （ui_PropertyGrid.jnc:79 那种，词在类型后面）才踩得着。 */
+    const flatMods = (lst, extras) => this.mkL(lst.span, this.mkA(lst.span, 'mods'),
+      ...this.flat(lst), ...extras.map((w) => this.mkA(lst.span, w)));
     if (ptrs.items.length === 1) {
-      const post = sp.items[3];
-      sp.items[3] = this.mkL(post.span, ...post.items,
-        ...words.map((w) => this.mkA(post.span, w)));
+      sp.items[3] = flatMods(sp.items[3], words);
     } else {
       const last = ptrs.items[ptrs.items.length - 1];
-      const ms = last.items[1];
       ptrs.items[ptrs.items.length - 1] = this.mkL(last.span, last.items[0],
-        this.mkL(ms.span, ...ms.items, ...words.map((w) => this.mkA(ms.span, w))));
+        flatMods(last.items[1], words));
     }
     const d = this.mkL(core.span, this.mkA(core.span, 'dcl'), ptrs, core,
       this.mkL(core.span, this.mkA(core.span, 'suffixes')),
@@ -3997,6 +4176,45 @@ class JncLower {
    *     整条链那格结构体一起发出去。
    */
   autoStore(d, full, cls, t, idx) {
+    /* `autoget alias 新名字 = 外层那格字段;`（第一百五十八刀）：那时**一格都不生成** ——
+       属性的存储就是外层已经有的那格成员（jnc_ct_Property.cpp:167-194 那一支：目标是 Alias 时
+       先放过，`finalize` 里再拿 `getTargetItem()` 重来一遍，取值器照旧是编译器生成的
+       AutoGetter，只是读的是那一格）。所以这儿只回那格的名字，字段表不动。 */
+    const al = this.propAlias.get(full);
+    if (al !== undefined && al.store !== null && al.store !== undefined) {
+      if (idx.length > 0) {
+        return this.err(d, `'${shown(full)}' 上 autoget 与下标不能一起写`
+          + '（prop_autoget.rst:47 那句 mutually exclusive）');
+      }
+      if (cls === null) {
+        const gt = this.globals.get(al.store);
+        if (gt === undefined) {
+          return this.nope(d, `'${shown(full)}' 那条 autoget alias 指着的 '${al.store}' ——`
+            + ' 这一层只收指着同一层里一格已经声明过的变量的那一种');
+        }
+        if (!sameTy(gt, t)) {
+          return this.err(d, `'${shown(full)}' 那条 autoget alias 指着的 '${al.store}' 是`
+            + ` ${tyName(gt)}，属性说的是 ${tyName(t)}`);
+        }
+        return al.store;
+      }
+      const fs0 = this.ownFields.get(cls);
+      const f0 = fs0 === undefined ? undefined : fs0.find((f) => f.name === al.store);
+      if (f0 === undefined) {
+        return this.nope(d, `'${shown(full)}' 那条 autoget alias 指着的 '${al.store}' ——`
+          + ` 这一层只收指着 '${shown(cls)}' 自己那张字段表里一格字段的那一种`);
+      }
+      if (!sameTy(f0.type, t)) {
+        return this.err(d, `'${shown(full)}' 那条 autoget alias 指着的 '${al.store}' 是`
+            + ` ${tyName(f0.type)}，属性说的是 ${tyName(t)}`);
+      }
+      /* 取值器照旧是编译器生成的那一格（jancy 那边 `setAutoGetValue` 里 createFunction<AutoGetter>，
+         jnc_ct_Property.cpp:187）—— 只是读的是外层那格成员，所以这一条也要进 autoProps；
+         `alias: true` 是给发那一步看的：那一格存储**已经有人声明了**，不能再发一遍。 */
+      this.autoProps.push({ full, name: al.store, cls, type: t, alias: true });
+      return al.store;
+    }
+
     // 「Autoget and indexed property modifiers are mutually exclusive」（prop_autoget.rst:47）。
     if (idx.length > 0) {
       return this.err(d, `'${shown(full)}' 上 autoget 与下标不能一起写`
@@ -4045,6 +4263,28 @@ class JncLower {
    *     路走通了 —— 建单子那几行由 evtInitLines 发在构造的开头，所以这儿只要把字段加进去。
    */
   bindStore(d, full, cls) {
+    /* `bindable alias 新名字 = 外层那格事件;`（第一百五十八刀）：那时**一格都不生成** ——
+       属性的 onChanged 就是外层已经有的那格成员（jnc_ct_Parser.cpp:1354 `setOnChanged(alias)`）。
+       所以这儿只把那格的名字回上去，字段表与 bindProps 都不动（那格事件自己那份建单子的活儿
+       早由类体/模块那一遍发过了）。 */
+    const al = this.propAlias.get(full);
+    if (al !== undefined && al.onch !== null) {
+      if (cls === null) {
+        const gt = this.globals.get(al.onch);
+        if (gt === undefined || gt.k !== 'mc') {
+          return this.nope(d, `'${shown(full)}' 那条 alias 指着的 '${al.onch}' ——`
+            + ' 这一层只收指着同一层里一格已经声明过的事件的那一种');
+        }
+        return al.onch;
+      }
+      const fs0 = this.ownFields.get(cls);
+      const f0 = fs0 === undefined ? undefined : fs0.find((f) => f.name === al.onch);
+      if (f0 === undefined || f0.type.k !== 'mc') {
+        return this.nope(d, `'${shown(full)}' 那条 alias 指着的 '${al.onch}' ——`
+          + ` 这一层只收指着 '${shown(cls)}' 自己那张字段表里一格事件的那一种`);
+      }
+      return al.onch;
+    }
     // 完整声明式里那格事件的名字是写的人定的（第七十六刀，jancy 那边记在
     // `PropertyType::m_bindableEventName` 上）；简单声明式里它就叫 `m_onChanged`。
     const mem = this.propMemName.get(full);

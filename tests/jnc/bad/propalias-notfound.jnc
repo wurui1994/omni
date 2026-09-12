@@ -1,0 +1,28 @@
+// 第一百五十九刀的界：属性体里那条 alias 指着的东西**不在外层**。
+//
+// `bindable alias 新名字 = 目标;` 的意思是"这格属性的事件就是外层那格成员"
+// （`Parser::declareAlias` 里 `prop->setOnChanged(alias)`，jnc_ct_Parser.cpp:1354；
+// 目标要等 `Property::finalize` 里 `alias->getTargetItem()` 才解，jnc_ct_Property.cpp:493-500）。
+// 这一层没有"等一等再解"的那一步 —— 属性那一遍要当场把那格事件的名字定下来，所以只收
+// 目标是**同一个类自己那张字段表里一格事件**的那一种。这一份里目标压根没声明。
+//
+// 不收要说的是"这一层只认得哪一种"，不是"你写错了"：目标名字照原样带出来。
+
+class C {
+	int property m_v {
+		int autoget m_value;
+
+		void set(int x) {
+			m_value = x;
+		}
+
+		bindable alias m_onPropChanged = m_onSomethingElse;
+	}
+}
+
+int main() {
+	C c;
+	c.m_v = 7;
+	printf("%d\n", c.m_v);
+	return 0;
+}

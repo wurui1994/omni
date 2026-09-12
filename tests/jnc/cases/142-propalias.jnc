@@ -1,0 +1,71 @@
+// 属性体里那条 `alias`（第一百五十九刀）—— **等号右边那格才是真东西**。出处是
+// `Parser::declareAlias`（jnc_ct_Parser.cpp:1346-1365）：属性那一层里声明的 alias，
+// 带 `bindable` 就 `prop->setOnChanged(alias)`、带 `autoget` 就 `prop->setAutoGetValue(alias)`；
+// 而 `Property::finalize`（同文件族 jnc_ct_Property.cpp:484-500）再拿 `alias->getTargetItem()`
+// 重来一遍。所以这两句的意思是"这格属性的存储/事件**不生成**，就用外层已经有的那格成员"，
+// 左边那个名字只是属性这一层里给它起的**另一个名字**（`alias doesn't need a type`，
+// jnc_ct_Parser.cpp:1341 —— 类型从目标那格抄，同处 170 那句 `item->getItemType()`）。
+//
+// 语料里两种写法都有：
+//   - `bindable alias m_onPropChanged = m_onChanged;`（test/ioninja/api/ui_PropertyGrid.jnc:81、
+//     87、92 —— 三格属性共用类里那一格 `event m_onChanged();`，见同文件:95）；
+//   - `autoget alias m_value = m_classValue;`（test/jnc/test89.jnc:14-15，这一份就是它的原型）。
+//
+// 两格属性共用同一格事件这件事在这儿看得见：`bindingof(c.m_a)` 与 `bindingof(c.m_b)` 是同一格
+// 单子，所以往其中一格上订阅，另一格变的时候也叫得到。
+//
+// 期望输出的出处：/tmp/c148.c（`cc -O0 -std=c99 -Wall`）—— 独立的一份：它把"共用一格单子"
+// 手写成 C 里一格函数指针数组，与这一层怎么改写属性没关系。
+
+int g_log;
+
+void onChanged() {
+	g_log++;
+	printf("changed %d\n", g_log);
+}
+
+class C {
+	property m_a {
+		autoget alias m_value = m_av;
+		bindable alias m_onChanged = m_onAny;
+
+		void set(int x) {
+			m_av = x;
+			m_onAny();
+		}
+	}
+
+	property m_b {
+		autoget alias m_value = m_bv;
+		bindable alias m_onChanged = m_onAny;
+
+		void set(int x) {
+			m_bv = x;
+			m_onAny();
+		}
+	}
+
+	int m_av;
+	int m_bv;
+	event m_onAny();
+}
+
+int main() {
+	C c;
+
+	// 订阅**一格**，两格属性变都叫得到：两格共用类里那一格 `m_onAny`
+	bindingof(c.m_a) += onChanged;
+	c.m_a = 5;
+	c.m_b = 7;
+	printf("a=%d b=%d raw=%d,%d log=%d\n", c.m_a, c.m_b, c.m_av, c.m_bv, g_log);
+
+	// 另一格属性那一侧订阅的还是同一格，所以这一下起两遍
+	bindingof(c.m_b) += onChanged;
+	c.m_a = 9;
+	printf("a=%d b=%d log=%d\n", c.m_a, c.m_b, g_log);
+
+	// 裸写那格事件也是同一格（类里那格字段）
+	c.m_onAny();
+	printf("log=%d\n", g_log);
+	return 0;
+}

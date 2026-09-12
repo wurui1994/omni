@@ -8282,6 +8282,81 @@ string_t const property m_string {
 "没有这个属性"）—— 说明 `fullPropMember` 回的那格 `evt` 与后面 `propDeclOf` / `bindStore` 那条链
 还有一处对不上。当场撤回，没留半落地的状态；下一刀先把那条链跑通再动。
 
+## 第一百五十八刀：**类体里**的完整声明式属性 —— 改写要换两处
+
+第七十五刀把 `property p { … }` 改写成"简单声明式 + 两个体外的函数"，可那一遍只换了 aggHoist
+**提上来那一批**；类自己那格体一个字没动。而字段表、属性表与 `propPend` 都是 typeDecl 顺着体走出来的
+—— 于是类体里剩下的还是原来那格带体的属性，体里那格 `autoget` 字段被当成类的一格普通字段（报
+"`autoget` 只能写在属性上"），存值器又找不着属性（报"没有这个属性"）。语料里主流写法正是写在类里的
+（`opaque class EnumProperty { property m_value { … } }`，ui_PropertyGrid.jnc:77-88），所以这一格
+一直是**顶层能编、成员编不了**。
+
+改法：`expandFullProps` 分三步 —— 先把每一条改写好记成一张 `原来那格 -> 改写出来的那几条`表；再顺着
+`type-decl` 把类体里那一格换成**那条简单声明式**（`aggPropRw`，倒着走名单，于是嵌套的类型拿得到已经
+换好的那一份）；最后出新名单时，类里那一格只留**取/存两个函数** —— 那条声明已经在体里了，两处都留会
+报"属性声明了两次"。
+
+**顺手补上第七十五刀留下的一格坑**：`property` 这个词要**摊平了再拼**进说明符。说明符里那串词在语法里
+是左递归的一串（`(mods-add (mods) autoget)`，见 `flat`），照原样往 items 后面接的话 `flat` 只认得出
+头两条 —— 接上去的 `property` 就这么没了。写 `autoget int m_x;`（词在类型前面）时那一格是空的
+`(mods)`，所以这条路从第七十五刀起一直是对的；`int autoget m_value;`（ui_PropertyGrid.jnc:79 那种写法，
+词在类型后面）才踩得着。这一格是"同一件事两种写法，只有一种走过"的典型 —— 榜上量不出来，因为它把
+类成员那一整格挡在更早的一句诊断后面。
+
+尺子 `/tmp/c147.c`：C 里没有属性，所以这一份把两格属性手写成两对 get/set 函数，`m_twice` 那一格特意
+调另一格属性（读一次、写一次），`sets` 那个数把"存值器进了几次"钉住。同一串数（`v=5 twice=10 sets=1`
+/ `v=7 twice=14 sets=2`）。
+
+## 第一百五十九刀：属性体里那条 `alias` —— 等号右边那格才是真东西
+
+第一百五十七刀末尾记的那笔账（`bindable alias m_onPropChanged = m_onChanged;` 试过一遍、撤回）是**猜
+反了方向**。这一趟直接读源码：
+
+```cpp
+// jnc_ct_Parser.cpp:1346-1365
+Alias* alias = m_module->m_namespaceMgr.createAlias(name, &declarator->m_initializer);
+if (nspace->getNamespaceKind() == NamespaceKind_Property) {
+    if (ptrTypeFlags & PtrTypeFlag_Bindable) result = prop->setOnChanged(alias);
+    else if (ptrTypeFlags & PtrTypeFlag_AutoGet) result = prop->setAutoGetValue(alias);
+}
+```
+
+也就是说：等号**右边**那格才是真东西（外层命名空间里已经有的那格成员），左边只是属性这一层里给它起的
+**另一个名字**。`bindable` / `autoget` 在这儿的意思于是不是"生成一格"，而是"这格属性的事件 / 存储
+**不生成**，就用它"—— 目标要等 `Property::finalize` 里 `alias->getTargetItem()` 才解
+（jnc_ct_Property.cpp:484-500），而 `alias doesn't need a type`（jnc_ct_Parser.cpp:1341），所以类型是
+从目标那格抄的（同文件族:170 那句 `item->getItemType()`）。头一遍那个"落成第一百〇四刀的字段路径别名、
+指向生成的 `<属性全名>$m_onChanged`"正好把方向弄反了 —— 它多生成了一格，而 jancy 是少生成一格。
+
+落法：一张 `属性全名 -> {store, onch}` 的表（`propAlias`），`autoStore` / `bindStore` 头一句先问它 ——
+有就把外层那格成员的名字回上去，字段表与 `bindProps` 都不动（那格事件自己那份建单子的活儿早由类体
+那一遍发过了）；`autoget` 那一种照旧要合成取值器（jancy 那边也是 `createFunction<AutoGetter>`），所以
+仍进 `autoProps`，只多带一个 `alias: true` 说"存储已经有人声明了、别再发一遍"。类型这一遍排在类型解出来
+之前，所以抄的是目标那格**声明的说明符**（`sibDecl`）——同一层里，抄写法与抄类型是一回事。
+
+两种写法都收了：`bindable alias`（ui_PropertyGrid.jnc:81/87/92 —— 三格属性共用类里那一格
+`event m_onChanged();`）与 `autoget alias`（test/jnc/test89.jnc:14-15）。**共用**这件事在尺子里看得见：
+往一格属性的 `bindingof` 上订阅，另一格属性变的时候也叫得到。
+
+**还有一遍要跑**：泛型摊出来的实例与 `extension T: Base { … }` 摊出来的成员里也有属性，而它们是
+`expandFullProps` 那一遍之后才出现的（`string_t const property m_enumString { return …; }`，
+io_HidDb.jnc:35）—— 所以 `expandExtensions` 之后再跑一遍同一个改写。改写过的落不到第二遍上：取/存
+两个函数的名字是 `qualified-special`，`fullProp` 头一句 `qname(core)` 就回 null。
+
+### 账：pairs `5566 -> 5564`（−2）、leg `270 -> 273`
+
+- 逐份那张榜：lowered `121`（没动）、clean `194`（没动）、pairs `5566 -> 5564`；
+  `完整声明式的属性 '…' 体里这一条的名字` `91 -> 89`、
+  `完整声明式的属性（… 那对花括号开的是一层命名空间）` `72 -> 70`。
+- 两张 group 榜都没动（`test/ioninja/api` 156 / 理由 39；`src/jnc_ext/jnc_std/jnc` 134 / 理由 12）。
+- **这两刀在榜上几乎不动数，账要照实记**：ui_PropertyGrid 那三格属性的**存值器只有原型**
+  （`void set(variant_t value);`，:80/86/91）—— 那是宿主面那条链（ADR-0022 的 J4b），属性这一族
+  剩下的 89 处全压在它上面。类体里那一格与那条 alias 是它的**前置**：两条都通了，那 89 处才只剩
+  "体在宿主那边"这一件事。
+
+尺子 `/tmp/c148.c`：C 里没有多播，所以这一份把它手写成一格函数指针数组 —— `bindable alias` 落到这一份
+里就是**两格属性共用同一个数组**，`autoget alias` 是两格各自共用外层那格 int。同一串数（log 2 / 4 / 6）。
+
 ## 后果与代价
 
 
