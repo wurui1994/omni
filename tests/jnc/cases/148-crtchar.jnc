@@ -1,0 +1,29 @@
+// jancy 的全局 CRT 里**字符那一族**与 `rand`（第一百七十六刀）。
+//
+// 出处：这些名字不是内建，是 jancy 的 std 扩展库随身带的一份源码 `std_globals.jnc`
+// （`JNC_LIB_SOURCE_FILE` + `JNC_LIB_IMPORT`，jnc_std_StdLib.cpp:906-931）—— 每个模块都
+// 隐式 import 了它。
+//
+// `rand` 不在这一份里：它发的是一句 `(ccall rand …)`，而 C_ABI 符号只有原生腿上才有
+// （ADR-0014 的第 4 条决定），这一轴要 `run-jit == run`。它的判据在 tests/llvm/run.js 第 9 节。
+//
+// 字符那一族**不叫** C 库的同名函数：jancy 接的是它自己的 Unicode 版（`enc::isSpace` 那一族），
+// 与 C 的 locale 单字节表在 ≥128 的码点上答得不一样。这一层按 ASCII 自己判，那条分岔记在
+// ADR-0016 第一百七十六刀那一节里；这一份用例只走 ASCII，所以与手写的 C 尺子逐字节相同。
+void show(int c) {
+	printf("%d %d%d%d%d%d%d%d%d %d %d\n", c,
+		isdigit(c), isupper(c), islower(c), isalpha(c),
+		isalnum(c), isprint(c), isspace(c), ispunct(c),
+		toupper(c), tolower(c));
+}
+
+int main() {
+	show(65);
+	show(122);
+	show(55);
+	show(32);
+	show(46);
+	show(9);
+	show(127);
+	return 0;
+}

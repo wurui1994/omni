@@ -909,6 +909,33 @@ const EC_HOIST = new Set(['var-decl', 'var-decl-curly', 'expr-stmt', 'return', '
  *
  *  名字里带 Text 不是啰嗦：`interp/builtin.js` 里有个同名的 `zeroOf` 造的是**运行期的值**，
  *  而自举那一遍要求模块级的名字全局唯一，两个 `zeroOf` 撞在一起会让 `tests/mir` 整条轴红。 */
+/**
+ * jancy 全局 CRT 里**字符那一族**的判据（第一百七十六刀）。一格名字对一格方言表达式，
+ * 形参叫 `c`。范围全按 **ASCII** 写死 —— 为什么不叫 C 库的同名函数、以及这条与 jancy 的
+ * Unicode 版在 ≥128 上的分岔，见 `crtCall` 的注释与 ADR-0016 第一百七十六刀那一节。
+ */
+const CRT_RANGE = (lo, hi) => `(bin "&&" (bin ">=" (var c) (int ${lo})) (bin "<=" (var c) (int ${hi})))`;
+const CRT_DIGIT = CRT_RANGE(48, 57);
+const CRT_UPPER = CRT_RANGE(65, 90);
+const CRT_LOWER = CRT_RANGE(97, 122);
+const CRT_ALPHA = `(bin "||" ${CRT_UPPER} ${CRT_LOWER})`;
+const CRT_ALNUM = `(bin "||" ${CRT_ALPHA} ${CRT_DIGIT})`;
+const CRT_PRINT = CRT_RANGE(32, 126);
+const CRT_CHAR = new Map([
+  ['isdigit', { ret: J_BOOL, body: CRT_DIGIT }],
+  ['isupper', { ret: J_BOOL, body: CRT_UPPER }],
+  ['islower', { ret: J_BOOL, body: CRT_LOWER }],
+  ['isalpha', { ret: J_BOOL, body: CRT_ALPHA }],
+  ['isalnum', { ret: J_BOOL, body: CRT_ALNUM }],
+  ['isprint', { ret: J_BOOL, body: CRT_PRINT }],
+  // 空白那几格照 C 的定义：空格与 \t \n \v \f \r（9..13）。
+  ['isspace', { ret: J_BOOL, body: `(bin "||" (bin "==" (var c) (int 32)) ${CRT_RANGE(9, 13)})` }],
+  // 标点 = 印得出来、又不是字母数字、又不是空格（C 的定义就是这么写的）。
+  ['ispunct', { ret: J_BOOL, body: `(bin "&&" ${CRT_PRINT} (un "!" (bin "||" ${CRT_ALNUM} (bin "==" (var c) (int 32)))))` }],
+  ['toupper', { ret: mkInt(32, true), body: `(sel ${CRT_LOWER} (bin "-" (var c) (int 32)) (var c))` }],
+  ['tolower', { ret: mkInt(32, true), body: `(sel ${CRT_UPPER} (bin "+" (var c) (int 32)) (var c))` }],
+]);
+
 function zeroText(t) {
   if (t.k === 'int') return '(int 0)';
   if (t.k === 'real') return '(real 0.0)';
@@ -11408,6 +11435,69 @@ class JncLower {
     return name;
   }
 
+  /**
+   * jancy 的**全局 CRT** 那一族（第一百七十六刀）。
+   *
+   * 出处：jancy 的 std 扩展库随身带一份**源码** `std_globals.jnc`，并且**自动 import** ——
+   *
+   *     // jnc_std_StdLib.cpp:906-931
+   *     JNC_LIB_SOURCE_FILE("std_globals.jnc", g_std_globalsSrc)
+   *     …
+   *     JNC_LIB_IMPORT("std_globals.jnc")
+   *
+   * 里头那些没有体的声明由 `JNC_MAP_FUNCTION` 接到 C/C++ 的实现上（同文件:834-895）。所以
+   * 「每个模块都看得见 `rand` / `isdigit` / `toupper`」不是内建，是那一份隐式的 import。
+   *
+   * 这一刀落**字符那一族与 `rand`**（都不碰指针，所以没有胖指针 / GC 那些分岔）：
+   *
+   *   - `rand()`：jancy 的文档写着 "Maps directly to standard C function ``rand``"
+   *     （std_globals.jnc:387-391），扩展库那一行也是 `JNC_MAP_FUNCTION("rand", ::rand)` ——
+   *     所以这儿发的就是一句 `(ccall rand i32 ())`，一等的照抄。
+   *   - 八个 `isXXX(utf32_t) -> bool` 与 `toupper` / `tolower`：**不发 `(ccall …)`**。
+   *     jancy 那边接的是它自己的 Unicode 函数（`enc::isSpace` / `enc::toUpper` 那一族），
+   *     而 C 库的 `isspace` / `toupper` 是按 locale 的单字节表 —— 名字一样、答案在 ≥128 的码点上
+   *     不一样。所以这一层自己发一格按 **ASCII** 判的助手，并且把这条分岔记成账
+   *     （ADR-0016 第一百七十六刀）：ASCII 那一段两边逐个相同，≥128 的码点上这一层一律答 false /
+   *     原样返回，而 jancy 会按 Unicode 表答。语料里这一族全部用在 ASCII 上。
+   *
+   * 回 `undefined` 表示"这个名字不在这一族里"（调用方接着报"没有这个函数"）。
+   */
+  crtCall(n, nm) {
+    const spec = CRT_CHAR.get(nm);
+    if (spec === undefined && nm !== 'rand') return undefined;
+    const args = this.flat(n.items[2]);
+    if (nm === 'rand') {
+      if (args.length !== 0) {
+        return this.err(n, `'rand' 不带实参，这里给了 ${args.length} 个`);
+      }
+      if (!this.cabiNames.has('rand')) {
+        this.decls.push('  (cabi rand i32 ())');
+        this.cabiNames.add('rand');
+        this.cabiSigs.set('rand', { ret: 'i32', params: [], sym: 'rand' });
+      }
+      return { code: '(ccall rand)', type: J_I32 };
+    }
+    if (args.length !== 1) {
+      return this.err(n, `'${nm}' 收 1 个实参，这里给了 ${args.length} 个`);
+    }
+    let v = this.expr(args[0], J_U32);
+    if (v === null) return null;
+    if (jncIsEnum(v.type)) v = { code: v.code, type: v.type.base };
+    if (!isInt(v.type)) {
+      return this.err(n, `'${nm}' 的实参要一格整数（码点），这里是 ${tyName(v.type)}`);
+    }
+    return { code: `(call ${this.crtCharFn(nm, spec)} ${intConv(v, J_U32).code})`, type: spec.ret };
+  }
+
+  /** 上面那一族各发一格助手函数，一个名字一格。判据全在 ASCII 表上，见 crtCall 的注释。 */
+  crtCharFn(nm, spec) {
+    const name = `jnc$crt$${nm}`;
+    if (this.varFns.has(name)) return name;
+    this.varFns.add(name);
+    this.decls.push(`  (fn ${name} ((c int)) ${slotText(spec.ret)}\n    (ret ${spec.body}))`);
+    return name;
+  }
+
   hostPick(n, owner, mn, sigs) {
     if (sigs.length === 1) return { sig: sigs[0], i: 0 };
     const args = this.flat(n.items[2]);
@@ -12488,6 +12578,13 @@ class JncLower {
         return this.nope(n, `原型 '${shown(pf)}' 没有带体的定义（实现在宿主那边的走 opaque class`
           + ' 那条路，在别的模块里的要 import 得着）');
       }
+      /* jancy 的**全局 CRT** 那一族（第一百七十六刀）：`rand` / `isdigit` / `toupper` …
+         它们不是"内建"，是 jancy 的 std 扩展库随身带的一份**源码**
+         （`JNC_LIB_SOURCE_FILE("std_globals.jnc", …)` + `JNC_LIB_IMPORT("std_globals.jnc")`，
+         jnc_std_StdLib.cpp:906-931）—— 也就是每个模块都**隐式 import** 了那一份声明。
+         所以这儿报"没有这个函数"是认错人：那些名字在 jancy 里明明是有的。 */
+      const crt = nm0 === null || nm0.includes('.') ? undefined : this.crtCall(n, nm0);
+      if (crt !== undefined) return crt;
       return this.err(n, `没有这个函数：'${nm0}'`);
     }
     // 方法体里裸写 `foo()` 就是 `this.foo()`（类是一层命名空间，所以 resolve 已经找着了

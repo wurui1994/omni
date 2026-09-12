@@ -416,12 +416,16 @@ if (existsSync(sysDir)) {
       + '    c.tag(7);\n'
       + '    printf("last %d\\n", (long)c.last());\n'
       + '    printf("mlast %d\\n", (long)c.m_last);\n'
+      /* jancy 的全局 CRT（第一百七十六刀）：`rand` 那一格文档写的是 "Maps directly to
+         standard C function ``rand``"，所以发的是一句 `(ccall rand …)` —— 而 C_ABI 符号只有
+         原生腿上才有（ADR-0014 的第 4 条决定），判据就得摆在这儿而不是 tests/jnc。 */
+      + '    printf("rand %d\\n", rand() >= 0);\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -436,6 +440,9 @@ if (existsSync(sysDir)) {
     } else if (!sx.out.includes('(cabi Counter_last void (ptr ptr))')
       || !sx.out.includes('(cabi Counter_get_m_last void (ptr ptr))')) {
       detail.push('    emit sx 里没有回 variant 那两句 `(cabi Counter_last void (ptr ptr))` / `(cabi Counter_get_m_last void (ptr ptr))`');
+    /* 全局 CRT 那一族（第一百七十六刀）：`rand` 就是 C 的那一个。 */
+    } else if (!sx.out.includes('(cabi rand i32 ())')) {
+      detail.push('    emit sx 里没有 `(cabi rand i32 ())`');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');

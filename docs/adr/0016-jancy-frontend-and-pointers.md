@@ -8950,6 +8950,62 @@ jancy 的比较把两边一起转成 `intptr_t`（`getPtrCmpOperatorOperandType`
   146 那一份里"不写初值"这一格在 C 尺子上写成了 `= NULL`：jancy 的局部量是零初始化的、C 的不是，
   这条差别记在两份源码的注释里 —— 要量的是"空的函数值按真值用"这件事本身。
 
+### 第一百七十六刀：jancy 的**全局 CRT** —— 那不是内建，是一份隐式 import 的源码
+
+榜上 `没有这个函数：'…'` 那 219 处里，一大块是 `rand` / `isdigit` / `toupper` / `strlen` / `memcpy`
+这一族。**先量清"它们是什么"再动手**：
+
+```cpp
+// jnc_std_StdLib.cpp:906-931
+JNC_BEGIN_LIB_SOURCE_FILE_TABLE(jnc_StdLib)
+	JNC_LIB_SOURCE_FILE("std_globals.jnc", g_std_globalsSrc)
+	…
+	JNC_LIB_IMPORT("std_globals.jnc")
+JNC_END_LIB_SOURCE_FILE_TABLE()
+```
+
+也就是说：它们**不是编译器内建**，是 std 扩展库随身带的一份 `.jnc` 源码，而且每个模块都
+**自动 import** 了它。那一份里有一半是**真的 jancy 代码**（`streq` / `atoi` / `strdjb2` 的体就写在
+里头），另一半只有声明、由 `JNC_MAP_FUNCTION` 接到 C/C++ 的实现上（同文件:834-895）。这一条
+把这一族的性质定死了：**照那份声明办**，不是我们自己发明一套库。
+
+这一刀落**不碰指针**的那一批（10 个字符函数 + `rand`），碰指针的那一批（`str*` / `mem*` /
+`strtol` 那一族 / `print` / `gets`）留在后面 —— 它们各自有胖指针、NUL 结尾、GC 分配这几件事要先
+量清（`strdup` / `strcat` / `memcat` / `memdup` 在 jancy 里是**新分配一块**回来，不是 C 的那个语义；
+`gets` 在现代 libc 里已经没有了）。
+
+**两种落法，分界是"C 的同名函数答得一样吗"：**
+
+- `rand()` -> 一句 `(ccall rand i32 ())`。判据是 jancy 自己说的：文档写着 "Maps directly to
+  standard C function ``rand``"（std_globals.jnc:387-391），扩展库那一行也是
+  `JNC_MAP_FUNCTION("rand", ::rand)`。所以这不是"我们决定接到 libc"，是照抄。
+- 八个 `isXXX(utf32_t) -> bool` 与 `toupper` / `tolower` -> **自己发一格助手**，按 ASCII 判。
+  为什么不叫 C 的同名函数：jancy 接的是它自己的 **Unicode** 实现（`enc::isSpace` / `enc::toUpper`
+  那一族，jnc_std_StdLib.cpp:834-841 与 :890-891），而 C 库那几个是按 locale 的单字节表 ——
+  名字一样、**答案在 ≥128 的码点上不一样**。糊过去就是个静默的错答案。
+  **这条分岔照实记**：ASCII 那一段（0..127）两边逐个相同；≥128 的码点上这一层一律答 `false` /
+  原样返回，而 jancy 会按 Unicode 表答（比如 U+00E9 在 jancy 是字母、在这一层不是）。语料里
+  这一族全部用在 ASCII 上，所以今天量不出差别 —— 但它是**欠的**，不是"对的"。
+
+判据分两处摆，分界是"C_ABI 符号只有原生腿上才有"（ADR-0014 的第 4 条决定）：
+
+- 字符那一族在 `tests/jnc/cases/148-crtchar.jnc`，期望值出自 `/tmp/c154.c` —— 那份尺子直接用
+  C 库的 `<ctype.h>`，也就是**独立**的第三方答案（C 的 `isXXX` 回非零而不是 1，所以那儿加了 `!!`）。
+  七个码点 × 十个函数一次比完。
+- `rand` 在 `tests/llvm/run.js` 第 9 节（那条腿是 JIT，libc 就在进程里）：`rand() >= 0` 印
+  `rand 1`，`.sx` 里逐字比 `(cabi rand i32 ())`。**这一格是量出来的**：先前把 `rand` 写进
+  `tests/jnc/cases` 里，`run` 那条腿当场说
+  `C ABI symbol 'rand' is only available in a native build` —— 腿是最后一道闸门。
+
+- 腿：`node tests/jnc/run.js` 280/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：**lowered `121 -> 124`（+3）** —— 这个数一整轮都没动过，这一刀第一次推动它
+  （`samples/jnc/30_SimplePropertyDecl.jnc` 那一族：属性的体写在类外这件事第六十八刀早就收了，
+  唯一拦着的就是 `rand`）。clean `194` 没动，`(文件, 拦路项)` 对 `4491 -> 4485`。
+- 顺带量清一件事、把一条旧猜法划掉：`写属性 … 存值器没有定义`（96 处）与
+  `读属性 … 取值器没有定义`（47 处）**不是**"属性的体写在类外"那个特性没做 —— 那一格
+  第六十八刀就收了（`propSig` 认 `T p.get() { … }`）。那 143 处是**属性的主人在另一个模块里**
+  （`import "std_Buffer.jnc"` 之类找不着），也就是 import 那条账的下游，不是一格独立的特性。
+
 ## 后果与代价
 
 
