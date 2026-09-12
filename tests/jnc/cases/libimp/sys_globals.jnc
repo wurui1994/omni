@@ -1,0 +1,8 @@
+// sys 扩展库那一份的替身（jnc_sys_SysLib.cpp:218 的 `JNC_LIB_IMPORT("sys_globals.jnc")`）。
+namespace sys {
+
+long libTick(long n) {
+	return n + 100;
+}
+
+} // namespace sys

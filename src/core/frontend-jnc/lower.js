@@ -269,6 +269,10 @@ const MC_FIRE = 'jnc$mc_fire';
  * 所以"没装东西"不用额外一位。
  */
 const VARIANT = 'jnc$variant';
+
+/* 扩展库对每个模块都隐式 import 的那几份声明（第一百九十九刀，见 libImports）：
+   std 库两份（jnc_std_StdLib.cpp:930-931）、sys 库一份（jnc_sys_SysLib.cpp:218）。 */
+const LIB_IMPORTS = ['std_globals.jnc', 'std_Error.jnc', 'sys_globals.jnc'];
 const V_NULL = 0;
 const V_INT = 1;
 const V_REAL = 2;
@@ -2745,6 +2749,9 @@ class JncLower {
    */
   run(tree) {
     let items = this.nsFlat(tree, '', []);
+    // 扩展库那几份**隐式 import**（第一百九十九刀）：排在自己写的那些 import 前头，
+    // 因为 jancy 那边它们是"模块一开张就在"的（见 libImports）。
+    this.libImports(tree);
     // 被 import 的文件在这儿续到同一份名单后面（第六十刀）—— 一定要**在下面那些遍之前**：
     // 它们的类型名、签名、模块级变量与这个文件的是平权的一堆，不是"外面的库"。
     this.impDrain(items);
@@ -8715,6 +8722,30 @@ class JncLower {
    * 开始解（`parseLazyImport` 里那句 `openNamespaceIf(getGlobalNamespace())`，
    * jnc_ct_ImportMgr.cpp:162），所以写在 `namespace a { import "x.jnc"; }` 里也一样。
    */
+  /**
+   * 扩展库那几份**隐式 import**（第一百九十九刀）。jancy 的扩展库除了那张源码表
+   * （`JNC_LIB_SOURCE_FILE`）还有一张**导入表**：`JNC_LIB_IMPORT("std_globals.jnc")` 与
+   * `JNC_LIB_IMPORT("std_Error.jnc")`（jnc_std_StdLib.cpp:930-931）、
+   * `JNC_LIB_IMPORT("sys_globals.jnc")`（jnc_sys_SysLib.cpp:218）—— 那几份声明对**每个模块**
+   * 都是"一开张就在"的，谁都不用写那条 import。`memcpy` / `strlen` / `atoi` / `std.setError` /
+   * `sys.getTimestamp` 那几族全在里头（榜上 `没有这个函数：'…'` 那一行的大半）。
+   *
+   * 这一层没有"装扩展库"那一步（扩展库走的是 `import "libfoo.dylib"`，声明照旧写在源码里），
+   * 所以判据只有一条：**那几份声明找得着吗**。找得着（第一百八十九刀把 jancy 自己那几个扩展库的
+   * `jnc` 目录放进了 `-I`）就照 jancy 那样隐式 import；找不着就什么都不做 —— tests/jnc 底下那些
+   * 用例的 `-I` 里没有它们，所以那一侧一个字都不变。
+   *
+   * 自己就是那几份之一时不会重复摊：`impSeen` 一开始就装着这个 unit（impDrain 按路径查重）。
+   */
+  libImports(node) {
+    if (this.impFind === null || this.impParse === null) return;
+    for (const spec of LIB_IMPORTS) {
+      const p = this.impFind(spec, this.unit);
+      if (p === null || this.impSeen.has(p)) continue;
+      this.impQ.push({ node, spec, from: this.unit });
+    }
+  }
+
   impDrain(items) {
     while (this.impQ.length !== 0) {
       const batch = this.impQ;

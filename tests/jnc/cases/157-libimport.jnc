@@ -1,0 +1,19 @@
+// 扩展库那几份**隐式 import**（第一百九十九刀）。jancy 的扩展库除了那张源码表
+// （`JNC_LIB_SOURCE_FILE`）还有一张**导入表**：`JNC_LIB_IMPORT("std_globals.jnc")` 与
+// `JNC_LIB_IMPORT("std_Error.jnc")`（jnc_std_StdLib.cpp:930-931）、
+// `JNC_LIB_IMPORT("sys_globals.jnc")`（jnc_sys_SysLib.cpp:218）—— 那几份声明对每个模块
+// 都是"一开张就在"的，谁都不用写那条 import。
+//
+// 这一份里**一条 import 都没写**，却调得着 `libTwice` / `std.libTriple` / `sys.libTick`：
+// 它们在 `cases/libimp/std_globals.jnc` 与 `cases/libimp/sys_globals.jnc` 里，那个目录由
+// `.args` 里的 `-I` 给。判据只有一条：那几个名字的文件找得着吗 —— 找不着就什么都不做
+// （这儿 `std_Error.jnc` 就没有，所以那一格是空跑；别的用例的 `-I` 里三份都没有，
+// 于是整个 tests/jnc 那一侧一个字都不变）。
+//
+// C 双胞胎 /tmp/c164.c。
+int main() {
+	printf("%d\n", libTwice(21));
+	printf("%d\n", std.libTriple(14));
+	printf("%d\n", sys.libTick(42));
+	return 0;
+}

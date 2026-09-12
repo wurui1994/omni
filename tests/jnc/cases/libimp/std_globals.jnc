@@ -1,0 +1,15 @@
+// jancy 的 std 扩展库随身带的那一份声明的**替身**（第一百九十九刀的判据）。
+// 真的那一份在 jancy 源码树里（src/jnc_ext/jnc_std/jnc/std_globals.jnc），由
+// `JNC_LIB_SOURCE_FILE` + `JNC_LIB_IMPORT` 挂在库上 —— 每个模块都隐式 import 它。
+// 这一层的判据只有一条：那个名字的文件在 `-I` 里找得着吗。所以这儿摆一份同名的、带体的。
+long libTwice(long x) {
+	return x * 2;
+}
+
+namespace std {
+
+long libTriple(long x) {
+	return x * 3;
+}
+
+} // namespace std
