@@ -1,0 +1,19 @@
+// 两个函数值互相比（第一百七十五刀钉的界）。跟 `null` 比是**收**的（那一格在
+// `cases/146-fnnull.jnc` 上），这儿拦的是"两个真函数值比相等"——
+//
+// jancy 的比较把两边一起转成 `intptr_t`（`getPtrCmpOperatorOperandType`，
+// jnc_ct_BinOp_Cmp.cpp:22-29；`TypeKindFlag_Ptr` 把函数指针也算进去），而"函数指针转整数"
+// 取的是**函数地址那一半**、闭包那一半不参与。这一层的函数值是一条闭包记录，方言的
+// `(bin "==" f g)` 比的是"是不是同一条记录"。于是"同一个方法绑在两个不同对象上"这一句
+// 两边答得不一样 —— 按方言那条糊过去就是个静默的错答案，所以明说不收。
+void tick(int n) {
+	printf("%d\n", n);
+}
+
+int main() {
+	void function* f(int) = tick;
+	void function* g(int) = tick;
+	if (f == g)
+		printf("same\n");
+	return 0;
+}

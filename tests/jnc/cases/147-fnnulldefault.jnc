@@ -1,0 +1,19 @@
+// `null` 当一格函数值的**默认实参**（第一百四十三刀量出来的形状，第一百七十五刀兑掉）。
+// 语料里的原样（ioninja 那 44 份里）：`void function* onTriggered() = null`（ui_Action.jnc:39）
+// 与 `cb == null`。这一份先前是 `bad/null-fnvalue`，钉的理由是"方言里还没有空的那一格"——
+// 方言那一侧后来长出来了（`(null (fnty …))`，第三十三刀），所以那笔账过期了，这一格改成正面判据。
+void hi() {
+	printf("hi\n");
+}
+
+void def(void function* cb() = null) {
+	printf("%d\n", cb == null);
+	if (cb)
+		cb();
+}
+
+int main() {
+	def();
+	def(hi);
+	return 0;
+}

@@ -1,0 +1,7 @@
+f null
+eq null
+tick 1
+ne null
+tock 2
+g null
+done

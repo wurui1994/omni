@@ -138,9 +138,10 @@
 //     收下了）、`get` / `set`、构造的重载、内嵌的类字段与静态字段。
 //   - 函数指针（`R function* p(形参)`）第五十五刀收了 —— 落到方言的函数值那一格
 //     （`(fnty …)` / `(fnref …)` / `(mkclo …)` / `(callfn …)`），`c.foo` 捕的就是那个对象。
-//     剩下的四条：没写初值的那一格（方言的函数值没有空值，跟着 `if (p)` 也立不住）、
-//     函数指针的**字段**（方言的结构体字段放不下函数值 —— 第五十七刀的虚派发因此换成了
-//     一格整数标签）、`function**` 与它的数组、`~()` 的部分应用。
+//     剩下的三条：函数指针的**字段**（方言的结构体字段放不下函数值 —— 第五十七刀的虚派发因此
+//     换成了一格整数标签）、`function**` 与它的数组、`~()` 的部分应用。
+//     空的那一格（`= null` / 不写初值 / `if (p)` / `p == null`）第一百七十五刀收了：方言那一侧
+//     `(null (fnty …))` 后来长出来了，先前那句"方言的函数值没有空值"是过期的账。
 //   - 异常里 `errorcode` 那一半是第五十八刀（自动传播 + `try`：见 propagate 与 jncErrText），
 //     `try { … }` 与 `catch:` 是第五十九刀（出错那一跳落成一圈一次性循环的 `brk`：见 escape
 //     与 catchBlock）；剩下的是 `finally:`（要一张路由表，连 `return` 也得先绕过去）、`throw`，
@@ -916,6 +917,11 @@ function zeroText(t) {
   if (t.k === 'ptr' || t.k === 'tptr') return `(pnull ${tyText(t)})`;
   // 类指针的零值是空引用（第五十二刀）：`C* p;` 那一格出来是 null，要 `new C` 才有对象。
   if (t.k === 'class') return `(pnull (ptr ${clsRoot(t.name)}))`;
+  /* 函数值的零值就是**空的那一格**（第一百七十五刀）：`(null (fnty …))`。jancy 那边
+     `void function* p;` 出来的也是零、调它是运行期的 "null function pointer" 错 ——
+     方言那一侧 `NullFn` 与它逐条对得上（`callfn` 到空值上是运行期错，
+     tests/llvm/three-way/21_null_fn_call.omni 那一份量的就是它）。 */
+  if (t.k === 'fnptr') return `(null ${tyText(t)})`;
   return null;
 }
 
@@ -8945,13 +8951,6 @@ class JncLower {
       }
       let code = null;
       if (initNode === null) {
-        // 函数指针不写初值（第五十五刀）：方言的函数值那一格**没有空值** —— `(let …)` 要一个
-        // 初值，而"空的函数指针"发不出来（连 `if (p)` 也就跟着立不住）。jancy 那边它是零，
-        // 调它是运行期的 "null function pointer" 错，要接得连那一格空值一起接。
-        if (isFn(info.type)) {
-          this.nope(dcl, `${tyName(info.type)} 的局部量不写初值（方言的函数值那一格没有空值）`);
-          return this.declBail(info);
-        }
         code = zeroText(info.type);
         if (code === null) {
           // 走到这儿只剩 void 与 string 那几种不该出现在局部量上的类型（结构体与数组
@@ -10646,6 +10645,18 @@ class JncLower {
        空串 `""` 在 jancy 那儿是**假**。方言的 `(slen E)` 也是按字节的长度，两边同一件事。
        逼出它的是 `if (!key)`（ui_Dictionary.jnc:32）。 */
     if (v.type === J_STR) return { code: `(bin "!=" (slen ${v.code}) (int 0))`, type: J_BOOL };
+    /* 函数值当条件用（第一百七十五刀）。jancy 那边这一格是**照表走的**：
+         // jnc_ct_CastOp_Bool.cpp:183-187
+         case TypeKind_DataPtr: case TypeKind_ClassPtr:
+         case TypeKind_FunctionPtr: case TypeKind_PropertyPtr:
+           return &m_fromPtr;
+       而 `Cast_BoolFromPtr::llvmCast` 是"取那格胖指针的第 0 个字段（函数地址）跟零比"
+       （同文件:116-127）—— 也就是 `if (fp)` 问的是**函数地址那一半在不在**，与闭包那一半无关。
+       这一层的函数值是一条闭包记录，"没有"那一格就是 `(null (fnty …))`，所以同一件事写成
+       "跟空的那一格比"。逼出它的是 `if (m_onTriggered)` 那一族（语料里 83 处）。 */
+    if (isFn(v.type)) {
+      return { code: `(bin "!=" ${v.code} (null ${tyText(v.type)}))`, type: J_BOOL };
+    }
     return this.err(node, `${tyName(v.type)} 不能当条件用`);
   }
 
@@ -11726,14 +11737,13 @@ class JncLower {
           this.variantTy();
           return { code: `(call ${this.varBox('0', V_NULL, null, null)})`, type: this.variantTy() };
         }
-        /* 函数值那一格（第一百四十三刀）：左边**说得出**它要什么（一格 `(fnty …)`），所以
-           "问不出来"那句话在这儿是**认错人**。真拦路的是方言这一侧：函数值只能从一个真函数
-           做出来（`(fnref NAME)`，tests/sexpr/cases/15-fnvalues.sx:28），还没有"空的那一格"。
-           要收它得先给方言加一格空函数值 —— 那会渗到 MIR 与四个后端，是 ADR-0028 那一栏的事。
+        /* 函数值那一格（第一百四十三刀量出来、第一百七十五刀兑掉）：方言这一侧**已经有**
+           "空的那一格" —— `(null (fnty …))`（sexpr/lower.js:2418-2437，方言那边的第三十三刀），
+           OIR 的 `NullFn` 六条腿都认（JS `null`、C `NULL`、LLVM `null`、两个解释器的 `null`、
+           MIR 的 `K.nul`）。上一版那句"还没有空的那一格"写在方言长出这一格之前，是**过期的账**。
            语料里的形状：`void function* onTriggered() = null`（ui_Action.jnc:39）。 */
         if (want !== null && want !== undefined && isFn(want)) {
-          return this.nope(n, `null 当一格函数值（${tyName(want)}）—— 方言里的函数值只能从一个`
-            + '真函数做出来（`(fnref …)`），还没有"空的那一格"');
+          return { code: `(null ${tyText(want)})`, type: want };
         }
         /* `null` 当一格 `string_t`（第一百六十五刀）：语料里的原样是
            `storage.writeString($"%1-key-%2"(name, i), null);`（ui_Dictionary.jnc:64 —— 那一格形参
@@ -12211,6 +12221,23 @@ class JncLower {
     if (jncIsStruct(a.type)) {
       return this.nope(n, `'${op}' 的两边是 ${tyName(a.type)}（结构体之间没有算符；`
         + `${isVar(a.type) ? 'variant_t 上 jancy 那边是按两边的标签在运行期选一条算，那要一整张分派表' : '要就得自己写一个方法'}）`);
+    }
+    /* 函数值上的比较（第一百七十五刀）。收的是**跟 null 比**这一格，两个函数值互相比明说不收 ——
+       这不是偷懒，是两边语义**真的不一样**：jancy 的比较把两边一起转成 `intptr_t`
+       （`getPtrCmpOperatorOperandType`，jnc_ct_BinOp_Cmp.cpp:22-29，`TypeKindFlag_Ptr` 把函数指针
+       也算进去），而"函数指针转整数"取的是**函数地址那一半**，闭包那一半不参与；这一层的函数值
+       是一条闭包记录，`(bin "==" f g)` 比的是"是不是同一条记录"。于是"同一个方法绑在两个不同对象
+       上"这一句：jancy 说相等，这一层说不相等。跟 null 比不受这条影响（空就是空），所以那一格收。
+       比大小两边都没有（jancy 那边指针比大小也只在 `psub` 的意义上成立，这一层第 33 刀记过）。 */
+    if (isFn(a.type)) {
+      if (op !== '==' && op !== '!=') {
+        return this.nope(n, `函数值之间的 '${op}'（只有 '==' / '!=' 成立）`);
+      }
+      if (!lNull && !rNull) {
+        return this.nope(n, `两个函数值之间的 '${op}'（jancy 那边比的是函数地址那一半、`
+          + '闭包那一半不参与，而这一层的函数值是一条闭包记录 —— 两边答得不一样，'
+          + '所以这一格明说不收；跟 `null` 比是收的）');
+      }
     }
     return { code: `(bin "${op}" ${a.code} ${b.code})`, type: cmp ? J_BOOL : a.type };
   }

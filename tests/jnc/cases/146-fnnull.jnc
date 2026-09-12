@@ -1,0 +1,43 @@
+// 函数值那一格的**空**（第一百七十五刀）。jancy 的写法与判据：
+//   - `void function* onTriggered() = null`（ui_Action.jnc:39）—— 空的函数值是**赋得出来**的；
+//   - `if (fp)` 走 `Cast_BoolFromPtr`（jnc_ct_CastOp_Bool.cpp:183-187 那张表里 FunctionPtr
+//     与 DataPtr / ClassPtr 同一支），也就是"跟零比"；
+//   - `fp == null` / `fp != null` 同一件事。
+// 方言这一侧本来就有这一格：`(null (fnty …))`（第三十三刀），六条腿都认。
+void tick(int n) {
+	printf("tick %d\n", n);
+}
+
+void tock(int n) {
+	printf("tock %d\n", n);
+}
+
+int main() {
+	void function* f(int) = null;
+	if (f)
+		printf("f set\n");
+	else
+		printf("f null\n");
+	if (f == null)
+		printf("eq null\n");
+	f = tick;
+	if (f)
+		f(1);
+	if (f != null)
+		printf("ne null\n");
+	if (!f)
+		printf("not reached\n");
+	f = tock;
+	f(2);
+	f = null;
+	if (f)
+		printf("not reached\n");
+	// 不写初值那一格：jancy 那边局部量是**零初始化**的，函数值的零就是空的那一格
+	// （方言这边 zeroText 发的是 `(null (fnty …))`）。C 的局部量不是这样，所以那份尺子里
+	// 这一格写成 `= NULL`。
+	void function* g(int);
+	if (!g)
+		printf("g null\n");
+	printf("done\n");
+	return 0;
+}

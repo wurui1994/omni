@@ -8892,6 +8892,64 @@ if (returnType->getFlags() & TypeFlag_StructRet) {
   也就是说这一格与 `main` 的退出码同一性质：**方言那一层缺一格**，不是 jnc 前端一刀能补的。
   这一笔先记在这儿，下一刀去改那份 fixture 的说法（今天那份注释说的理由是错的）。
 
+### 第一百七十五刀：函数值的**空**那一格 —— 一笔过期的账
+
+榜上这两行加起来 152 处，都是同一件事：
+
+```
+83  E void function*() 不能当条件用
+69  N null 当一格函数值（void function*()）—— 方言里的函数值只能从一个真函数做出来（`(fnref …)`），还没有"空的那一格"
+```
+
+第一行是 **`E`** —— 也就是我们发的是"普通错"，而 jancy **收**这一句。错在哪儿，jancy 的表里写着：
+
+```cpp
+// jnc_ct_CastOp_Bool.cpp:183-187
+case TypeKind_DataPtr:
+case TypeKind_ClassPtr:
+case TypeKind_FunctionPtr:
+case TypeKind_PropertyPtr:
+	return &m_fromPtr;
+```
+
+`Cast_BoolFromPtr::llvmCast`（同文件:116-127）是"取那格胖指针的第 0 个字段、跟零比"。也就是
+`if (fp)` 问的是**函数地址那一半在不在**。这一层早就把 DataPtr / ClassPtr / 枚举 / 字符串各自那一支
+照抄了（第四十七 / 五十二 / 一百四十六刀），漏的就是 FunctionPtr 这一格。
+
+第二行那句"方言里……还没有空的那一格"是**过期的账**：方言那一侧后来长出来了 ——
+
+```js
+// src/core/sexpr/lower.js:2418-2437（方言那边的第三十三刀）
+if (h === 'null') { … return { kind: t.k === 'fn' ? 'NullFn' : 'NullRef', type: t }; }
+```
+
+`(null (fnty …))` 六条腿都认（JS 的 `null`、C 的 `NULL`、LLVM 的 `null`、两个解释器的 `null`、
+MIR 的 `K.nul`），`tests/llvm/three-way/21_null_fn_call.omni` 量的正是"调空函数值是运行期错"。
+落地前先拿一份手写的 `.sx` 在 `run` 与 `run-jit` 两条腿上各验过一遍（赋空、`== null`、`!= null`、
+赋真函数再调），两条腿都对 —— **不是照着注释猜方言收什么**。
+
+改了四处，都很小：`zeroText` 多一行（`fnptr` 的零值是 `(null …)`）、局部量那一处删掉专门的拒绝、
+`null` 那一格 case 回 `(null …)`、`truthy` 多一支。
+
+**同一刀里钉了一条新界**：两个**真**函数值互相比明说不收（`bad/fnval-eq.jnc`）。这不是偷懒 ——
+jancy 的比较把两边一起转成 `intptr_t`（`getPtrCmpOperatorOperandType`，jnc_ct_BinOp_Cmp.cpp:22-29；
+`TypeKindFlag_Ptr` 把函数指针也算进去），取的是函数地址那一半、闭包那一半不参与；而这一层的函数值
+是一条闭包记录，`(bin "==" f g)` 比的是"是不是同一条记录"。于是"同一个方法绑在两个不同对象上"
+这一句两边答得不一样 —— 糊过去就是个静默的错答案。跟 `null` 比不受这条影响（空就是空），所以收。
+
+- 腿：`node tests/jnc/run.js` 279/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`(文件, 拦路项)` 对 `4650 -> 4491`（−159）。lowered `121`、clean `194` 都**没动** ——
+  这 152 处散在很多份文件里、每份还有别的拦路项，所以一份也没因此变干净。上面那两行整行消失。
+- **中间量出来一格顺手补掉**：那两行一让开，`… 的局部量不写初值（方言的函数值那一格没有空值）`
+  这一行浮出来（4 处，而且**把类型名拼进了消息里** —— 又是第一百四十九刀那条律：消息里留可变文本
+  就会把一行拆成好几行）。同一笔账（"方言没有空值"），所以同一刀里一起兑：`zeroText` 那一行管的
+  就是它，对数从 4495 再掉到 4491。
+- **两份 fixture 退役**（墙真的移了，不是绕开）：`bad/null-fnvalue`（`= null` 的默认实参 + `cb == null`）
+  升成 `cases/147-fnnulldefault.jnc`、`bad/fnptr-nozero`（不写初值）并进 `cases/146-fnnull.jnc`。
+  两份 case 的期望值都出自手写的 C 尺子（`/tmp/c152.c`、`/tmp/c153.c`，`cc -O0 -std=c99 -Wall`）。
+  146 那一份里"不写初值"这一格在 C 尺子上写成了 `= NULL`：jancy 的局部量是零初始化的、C 的不是，
+  这条差别记在两份源码的注释里 —— 要量的是"空的函数值按真值用"这件事本身。
+
 ## 后果与代价
 
 
