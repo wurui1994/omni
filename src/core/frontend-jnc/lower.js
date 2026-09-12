@@ -7132,15 +7132,25 @@ class JncLower {
         return this.nope(n, `结构体里的 'static construct'（那一格要一道 once 闸门，是另一笔账）`);
       }
       const full = stat ? `${owner}$construct$static` : `${owner}$construct`;
-      // 构造的**重载** jancy 是收的（形参不同的好几个 `construct`），这一层一个名字一格函数。
+      /* 构造的**重载**（第一百五十五刀）：jancy 收形参不同的好几个 `construct`
+         （type_class.rst:63 那句 "Constructors can be overloaded, the rest of construction
+         methods must have no arguments"）。这一层走方法那条现成的路 —— 第七十九刀的
+         `overloadName` 把第二条起改名成 `…$o1`，调用点（ctorArgs）照第八十刀的 `pickOverload`
+         按实参挑。`static construct` 不进这一族：它不带形参，一个类上只有一格。 */
+      let dname = full;
       if (this.fns.has(full)) {
-        return this.nope(n, `${shown(owner)} 的第二个 '${info.special}'（构造的重载要重载决议）`);
+        if (stat) {
+          return this.err(n, `${shown(owner)} 的第二个 'static construct'（它不带形参，`
+            + '一个类上只有一格）');
+        }
+        const alt = this.overloadName(n, full, ps, info.sp);
+        if (alt === null) return null;
+        dname = alt;
       }
-      info.name = full;
+      info.name = dname;
       if (stat) {
-        // 静态构造不带 `this`，也**不带形参**：jancy 那句话把两件事一起说了 —— "Constructors
-        // can be overloaded, the rest of construction methods must have no arguments"
-        //（type_class.rst:63）。它是**类那一格上**的一次性初始化，不属于哪个对象。
+        // 静态构造不带 `this`，也**不带形参**：jancy 那句话把两件事一起说了（同一处 type_class.rst:63）。
+        // 它是**类那一格上**的一次性初始化，不属于哪个对象。
         if (ps.length > 0) return this.err(n, "'static construct' 不带形参");
         this.sctors.set(owner, full);
       } else {
@@ -7150,14 +7160,18 @@ class JncLower {
           formals: null,
           def: null,
         });
-        this.methods.set(full, owner);
-        this.ctors.set(owner, {
-          name: full,
-          params: ps.slice(1).map((p) => p.type),
-          defs: sigOf(ps.slice(1), J_VOID).defs,
-        });
+        this.methods.set(dname, owner);
+        /* `ctors` 里记的一直是**这一族的基名**（`C$construct`）：调用点先看 `overloads` 有没有
+           这个基名，有就按实参挑一条，所以第二条起不改这一格。 */
+        if (dname === full) {
+          this.ctors.set(owner, {
+            name: full,
+            params: ps.slice(1).map((p) => p.type),
+            defs: sigOf(ps.slice(1), J_VOID).defs,
+          });
+        }
       }
-      this.fns.set(full, sigOf(ps, J_VOID));
+      this.fns.set(dname, sigOf(ps, J_VOID));
       return { info, ps, isMain: false };
     }
     // `int main()` 是入口：降成方言的 `(main …)`。jancy 的 main 回 int，而方言的入口
@@ -7590,9 +7604,24 @@ class JncLower {
       }
       return null;                     // 没有构造：什么都不用调
     }
-    const want = ct.params;
+    /* 这一族有重载（第一百五十五刀）：先按实参挑一条，再照下面那一遍逐个检查。
+       `hasSelf` 给 true —— 那几条签名里第 0 格是 `this`，挑的时候不能把它算进实参。
+       `ctors` 里记的一直是基名那一条，所以挑中之后要把 params / defs 换成**挑中那一条**的。 */
+    let pick = ct;
+    const cbase = `${cls}$construct`;
+    if (this.overloads.has(cbase)) {
+      const chosen = this.pickOverload(node, cbase, argNodes0, true);
+      if (chosen === null) return null;
+      const cs = this.fns.get(chosen);
+      pick = {
+        name: chosen,
+        params: cs.params.slice(1),
+        defs: cs.defs === undefined || cs.defs === null ? null : cs.defs.slice(1),
+      };
+    }
+    const want = pick.params;
     const argNodes = this.withDefaults(argNodes0, want,
-      ct.defs === undefined ? null : ct.defs, cls);
+      pick.defs === undefined ? null : pick.defs, cls);
     if (argNodes === null) return null;
     if (argNodes.length !== want.length) {
       return this.err(node, `${shown(cls)} 的 construct 要 ${want.length} 个实参，`
@@ -7609,7 +7638,7 @@ class JncLower {
       }
       vals.push(v);
     }
-    return { name: ct.name, vals };
+    return { name: pick.name, vals };
   }
 
   /**

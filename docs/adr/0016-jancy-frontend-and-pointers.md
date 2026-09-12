@@ -8154,6 +8154,42 @@ initializeVariable / PostBody，jnc_ct_Parser.cpp:2452），不是挪到 module.
 闸门手写出来（一格 static bool + 一次 malloc + 一次构造），记的是"该跑几次、什么时候跑"这个判断。
 同一串数（ctor / 101 / 102 / 103）—— `ctor` 只有一行，那正是这一刀要钉的。
 
+## 第一百五十五刀：构造的**重载** —— lowered 这一栏这一轮第一次动
+
+第五十三刀那时明说不收的那一格。jancy 收形参不同的好几个 `construct`（type_class.rst:63 那句
+"Constructors can be overloaded, the rest of construction methods must have no arguments"）。
+
+改法是**不新造机器**，走方法那条现成的路：第二条起交给第七十九刀的 `overloadName` 改名成
+`C$construct$o1`（那儿顺手管着"定义了两次"与"虚方法上的重载"两条界），调用点 `ctorArgs` 交给
+第八十刀的 `pickOverload` 按实参挑（先按个数筛、再按类型排）。三处调用点（`C a;` / `C a(5)` /
+`new C(7, 8)`）共用那一份挑选，因为它们本来就都过 `ctorArgs`。
+
+两处小口径写明白：
+
+- `ctors` 里记的一直是**这一族的基名**（`C$construct`），第二条起不改那一格 —— 调用点先问
+  `overloads` 有没有这个基名，有就挑，挑中之后 params / defs 换成挑中那一条的；
+- `static construct` **不进**这一族（它不带形参，一个类上只有一格 —— 同一句 jancy 文档的后半句）。
+
+`bad/ctor-overload`（第五十三刀那条界）**收了，所以划掉**。剩下的界另起
+`bad/ctor-overload-tie.jnc`：`construct(int)` 与 `construct(long)` 喂一格字面量 —— 两条同分，
+jancy 那边这也是 ambiguous。**第一遍我拿 `construct(int)` / `construct(double)` 当界写那一份，
+跑出来一条诊断都没有** —— int -> real 是 ImplicitCrossFamily、严格差于 Implicit，所以那一对本来
+就分得开。那一遍白写，可它正说明一件事：**写"界"的那一份也得先跑一遍**，不然钉住的可能是一件
+根本不存在的事。
+
+### 账：lowered `120 -> 121`（**+1**）、clean `191 -> 192`、pairs `5680 -> 5579`（−101）
+
+- 逐份那张榜：`'…' 的第二个 'construct'（构造的重载要重载决议）` 那一族**整行没了**
+  （`C1` / `TestClass` / `TestStruct` / `BoxListEntry.int` / `std.Guid` / `ui.Action` …）。
+  **lowered 加了一份** —— 这一轮（第一百四十三刀起）lowered 第一次动。
+- `--group test/ioninja/api`：`157 -> 156`、理由 `40 -> 39`（`ui.Action 的第二个 construct` 那两条
+  收了）。`--group src/jnc_ext/jnc_std/jnc`：`136`（没动）、理由 `13 -> 12`（`std.Guid` 那一条收了，
+  可那一份文件里还压着别的行）。
+
+尺子 `/tmp/c145.c`：C 里没有构造也没有重载（`Point b(5)` 根本不是 C），所以这一份是"照 jancy 的
+挑法自己算一遍、再手写出挑中的那一个" —— 三条按个数就分得开，于是三句各落在哪一条一眼算得出。
+同一串数（ctor0 / ctor1 / ctor2 / 0 0 / 5 0 / 7 8）。
+
 ## 后果与代价
 
 

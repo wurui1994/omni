@@ -1,0 +1,29 @@
+// 第一百五十五刀收了构造的重载之后，剩下的那条界：**同元**的两条 construct 分不出来。
+//
+// 按个数分得开的那一半收了（cases/139-ctoroverload）。按类型排的那一半照第八十刀那条界走 ——
+// 而这一份里两条都在**整数那一族**（int / long），实参又是一格**字面量**：jancy 对常量的
+// int -> int 加宽算 `Identity`（jnc_ct_CastOp_Int.h:23-111），于是 `C a(5)` 在它那边也是
+// "ambiguous call to overloaded function"。两条同分，这一层照样不猜。
+//
+// 也就是说这一份钉的不是"这一层比 jancy 弱"，而是"这一层与 jancy 在同一处说不出答案"。
+// 分得开的那一种**是收的**：`construct(int)` 与 `construct(double)` 喂 `5` 挑 int 那一条 ——
+// int -> real 是 ImplicitCrossFamily，严格差于 Implicit，与 jancy 同。（第一遍我拿那一对当界
+// 写了这一份，跑出来一条诊断都没有 —— 那正说明它不是界。）
+
+class C {
+	int m_x;
+
+	construct(int x) {
+		m_x = x;
+	}
+
+	construct(long x) {
+		m_x = (int)x;
+	}
+}
+
+int main() {
+	C a(5);
+	printf("%d\n", a.m_x);
+	return 0;
+}

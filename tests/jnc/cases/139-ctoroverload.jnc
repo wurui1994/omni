@@ -1,0 +1,54 @@
+// 第一百五十五刀：构造的**重载**（第五十三刀那时明说不收的那一格）。
+//
+// jancy 收形参不同的好几个 `construct`（type_class.rst:63 那句 "Constructors can be overloaded,
+// the rest of construction methods must have no arguments"）。这一层走的是**方法那条现成的路**：
+// 第七十九刀的 overloadName 把第二条起改名成 `C$construct$o1`，调用点照第八十刀的 pickOverload
+// 按实参挑（先按个数筛、再按类型排）。
+//
+// 三处调用点共用那一份挑选：`Point a;`（0 个）、`Point b(5)`（1 个）、`new Point(7, 8)`（2 个）。
+// `static construct` 不进这一族 —— 它不带形参，一个类上只有一格（同一处那句话的后半句）。
+//
+// 同元的那一半照旧按第八十刀那条界走（要按实参类型挑；`bad/ctor-tie` 那种同分的当场拒）。
+//
+// 期望输出的出处：/tmp/c145.c（`cc -O0 -std=c99 -Wall`）。
+
+class Point {
+	int m_x;
+	int m_y;
+
+	construct() {
+		m_x = 0;
+		m_y = 0;
+		printf("ctor0\n");
+	}
+
+	construct(int x) {
+		m_x = x;
+		m_y = 0;
+		printf("ctor1\n");
+	}
+
+	construct(
+		int x,
+		int y
+	) {
+		m_x = x;
+		m_y = y;
+		printf("ctor2\n");
+	}
+
+	void show() {
+		printf("%d %d\n", m_x, m_y);
+	}
+}
+
+int main() {
+	Point a;
+	Point b(5);
+	Point* c = new Point(7, 8);
+
+	a.show();
+	b.show();
+	c.show();
+	return 0;
+}
