@@ -424,6 +424,11 @@ if (existsSync(sysDir)) {
       + 'long cdecl hostVsum(long n, ...);\n\n'
       /* **结构体**上那格只有原型的方法（第一百九十七刀）：符号名的约定与类那一支一模一样，
          第一个形参是那个对象 —— 结构体那一格里放的本来就是地址。 */
+      /* `dylib X { … }`（第二百〇三刀）：块里全是只有原型的函数，符号名是**成员名**本身
+         （不带块名），调用点写 `X.f(…)`。 */
+      + 'dylib Lib {\n'
+      + '    long stdcall probe_dylibAdd(long a, long b);\n'
+      + '}\n\n'
       + 'struct Pt {\n'
       + '    long m_x;\n'
       + '    long shift(long d);\n'
@@ -498,12 +503,13 @@ if (existsSync(sysDir)) {
       + '    pt.m_dbl = 84;\n'
       + '    printf("dbl %d\\n", pt.m_dbl);\n'
       + '    printf("ptx %d\\n", pt.m_x);\n'
+      + '    printf("dyl %d\\n", Lib.probe_dylibAdd(40, 1));\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -543,6 +549,9 @@ if (existsSync(sysDir)) {
     } else if (!sx.out.includes('(cabi Pt_get_m_dbl i64 (ptr))')
       || !sx.out.includes('(cabi Pt_set_m_dbl void (ptr i64))')) {
       detail.push('    emit sx 里没有 `(cabi Pt_get_m_dbl …)` / `(cabi Pt_set_m_dbl …)`');
+    /* `dylib` 块里那一格（第二百〇三刀）：符号名里**没有块名**。 */
+    } else if (!sx.out.includes('(cabi probe_dylibAdd i64 (i64 i64))')) {
+      detail.push('    emit sx 里没有 `(cabi probe_dylibAdd i64 (i64 i64))`');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');

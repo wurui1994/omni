@@ -1212,6 +1212,9 @@ class JncLower {
     /* 类型名 -> 它那格调用算符（第二百〇二刀）：`{name, stat, ret, params, defs}`。
        `params` 里含 `this` 那一格（静态的没有）。 */
     this.opCalls = new Map();
+    /* `dylib X { … }` 摊平之后那一层命名空间的全名（第二百〇三刀）：里头那些原型的 C 符号名
+       是**成员名**本身，不是"全名把 `$` 换成 `_`"。 */
+    this.dylibNs = new Set();
     /* 相等算符（第一百四十刀）：`Owner$op$eq` / `$op$ne` -> { name, param }。
        语料里的原样是 std_Guid.jnc:80/84 —— `bool operator == (Guid const* op) thin const`。 */
     this.opCmp = new Map();
@@ -2742,6 +2745,25 @@ class JncLower {
       const it = unattr(it0);          // 属性收下不看（第一百〇八刀）
       if (isList(it) && (head(it) === 'import' || head(it) === 'import-as')) {
         this.impAdd(it);
+        continue;
+      }
+      /* `dylib X { … }`（第二百〇三刀）：jancy 里它是"一个动态库里那些函数的声明表"——
+         块里全是**只有原型**的函数，体在那个库里，调用点写 `X.f(…)`（那个名字只是一层
+         命名空间）。语料里的原样是 `dylib JLinkLib { int stdcall JLINK_GetSN(); … }`
+         （io_JLink.jnc:208）。
+         这一层的落法：与 `namespace` 一样摊平，于是块里那些原型走的正是第一百八十五刀
+         那条路（只有原型的顶层函数 -> `(cabi …)` + `(ccall …)`）。**只差符号名**：
+         jancy 是按**成员名**去那个库里查符号的（`JLINK_GetSN`，不带块名），所以那一格
+         记成 `sym`，不走"全名把 `$` 换成 `_`"那条默认规则。
+         `stdcall` 那个词照旧忽略 —— 方言的目标是 arm64 与 x86-64，那上面它与 cdecl
+         本来就是同一套 ABI（见 specs 那一处的注）。 */
+      if (isList(it) && head(it) === 'dylib') {
+        const dn = this.qname(it.items[1]);
+        if (dn === null) { this.err(it, '认不出的 dylib 名字'); continue; }
+        const dk = dn.replace(/\./g, '$');
+        const dfull = ns === '' ? dk : `${ns}$${dk}`;
+        this.dylibNs.add(dfull);
+        this.nsFlat(it.items[2], dfull, out);
         continue;
       }
       if (isList(it) && head(it) === 'namespace') {
@@ -5015,6 +5037,8 @@ class JncLower {
               params: ps0.map((p) => p.type),
               defs: ds0.some((d) => d !== null) ? ds0 : null,
               variadic: ps0.variadic === true,
+              // `dylib X { … }` 里那些（第二百〇三刀）：符号名是成员名本身
+              sym: this.dylibNs.has(this.ns) ? info.name : null,
             };
             /* 同名好几条原型（第一百九十四刀）：`long strtol(string_t, size_t*, int)` 与
                `long strtol(char const*, char const**, int)`（std_globals.jnc:461/467）——
@@ -6972,6 +6996,11 @@ class JncLower {
         // `volatile` **不在**那一组里（antiModifierTable 那一行是 0，它是自己的一位
         // `PtrTypeFlag_Volatile`，jnc_Type.h:220）—— 留着，它是自己一刀。
         if (MUT_MODS.has(m)) continue;
+        /* 调用约定那三个词写在 `*` **后面**（第二百〇三刀）：`char const thin* stdcall f()`
+           （io_JLink.jnc:218）。星号后面那一组词本来就归声明（第七十二刀），而这三个词在
+           方言的目标（arm64 与 x86-64 SysV）上与 cdecl **本来就是同一套 ABI** ——
+           与 specs 那一处（`cdecl` / `stdcall` / `thiscall` 那一段注）是同一句话，所以收下不看。 */
+        if (m === 'cdecl' || m === 'stdcall' || m === 'thiscall') continue;
         this.nope(node, `指针后面的修饰符 '${m}'`);
         return null;
       }
@@ -11994,7 +12023,8 @@ class JncLower {
     /* 同名那一族里第二条及以后的（第一百九十四刀）：符号名加 `_o2` / `_o3` …，与类里那几条
        原型（第一百八十六刀）是同一条规则 —— jancy 那边它们本来也各是一个 C 函数
        （`JNC_MAP_OVERLOAD`）。 */
-    const sym = `${fn.replace(/\$/g, '_')}${oi > 0 ? `_o${oi + 1}` : ''}`;
+    const sym = `${sig.sym === undefined || sig.sym === null ? fn.replace(/\$/g, '_') : sig.sym}`
+      + `${oi > 0 ? `_o${oi + 1}` : ''}`;
     const vret = isVar(sig.ret);
     const rw = vret ? 'void' : this.cabiWordOfJnc(sig.ret, true);
     if (rw === null) {

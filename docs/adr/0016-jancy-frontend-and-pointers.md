@@ -9896,6 +9896,40 @@ jancy 也一样）。形参个数与类型都由写的人定（这一格 jancy �
   普通错（泛型那一套的别的格），"还不收"的那一条没了不等于整份文件降得下来。
 - 一起编那张榜：`42`、理由 `22` 都没动（那几份不在 ioninja 那一批里）。
 
+### 第二百〇三刀：`dylib X { … }` 与写在星号后面的调用约定
+
+`顶层的 'dylib'` 是三份文件里的一处（`io_JLink.jnc:208`）。jancy 里 `dylib` 块是"一个动态库里
+那些函数的声明表"——块里全是**只有原型**的函数，体在那个库里，调用点写 `X.f(…)`（那个名字只是
+一层命名空间）：
+
+```jnc
+dylib JLinkLib {
+    int stdcall JLINK_GetSN();                      // io_JLink.jnc:209
+    char const thin* stdcall JLINK_Open();          // 同上:218
+}
+```
+
+落法：与 `namespace` 一样在 `nsFlat` 里摊平，于是块里那些原型走的正是第一百八十五刀那条路
+（只有原型的顶层函数 -> `(cabi …)` + `(ccall …)`）。**只差符号名**：jancy 是按**成员名**去那个
+库里查符号的（`JLINK_GetSN`，不带块名），所以那一格记成 `sym`，不走"全名把 `$` 换成 `_`"那条
+默认规则。
+
+改完还差一格：`char const thin* stdcall JLINK_Open()` 报"指针后面的修饰符 'stdcall'"。星号后面
+那一组词本来就归声明（第七十二刀），而 `cdecl` / `stdcall` / `thiscall` 在方言的目标（arm64 与
+x86-64 SysV）上与 cdecl **本来就是同一套 ABI** —— 说明符位置上这一层早就是"收下不看"
+（`specs` 那一段注），星号后面同一句话。两处口径这才对齐。
+
+判据在 `tests/llvm/run.js` 第 9 节：`dylib Lib { long stdcall probe_dylibAdd(long, long); }`，
+`Lib.probe_dylibAdd(40, 1)` 印 `dyl 42`；`.sx` 里那一句是 `(cabi probe_dylibAdd i64 (i64 i64))`
+—— 符号名里**没有块名**，这一句正是那条约定的判据。
+
+- 腿：`node tests/jnc/run.js` 287/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `148 -> 149`（+1，就是 `io_JLink.jnc`）、clean `220 -> 221`、
+  `(文件, 拦路项)` 对 `4281 -> 4279`；一起编那张榜 `42`、理由 `22` 没动。
+- 剩下那两份 `顶层的 '…'` 是 `pragma(Alignment, 1)`（BacNetApdu.jnc:6、Osdp.jnc）—— 那是
+  **紧凑布局**，而方言一格 8 字节（ADR-0016 决策二）。收下它就得把布局按字节算，
+  与 `sizeof` 那一行是同一格；悄悄忽略它是静默的错答案（结构体的大小会差），所以照旧拒。
+
 
 
 ## 后果与代价

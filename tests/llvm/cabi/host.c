@@ -184,6 +184,11 @@ int64_t Pt_shift(void *self, int64_t d) {
   return self == NULL ? -1 : *(const int64_t *)self + d;
 }
 
+/* `dylib X { … }` 块里那些（第二百〇三刀）。jancy 里那是"一个动态库里那些函数的声明表"，
+   按**成员名**去库里查符号 —— 所以这一格的 C 名字里**没有块名**（`Lib` 那个词只是一层
+   命名空间）。语料里的原样是 io_JLink.jnc:208 那一大块。 */
+int64_t probe_dylibAdd(int64_t a, int64_t b) { return a + b + 1; }
+
 /* **结构体**上那格成员属性（第一百九十八刀）。jancy 那边它也是宿主实现的：
    `JNC_MAP_CONST_PROPERTY("m_description", Error::getDescription)` 挂在 `struct Error` 上
    （jnc_std_Error.cpp:30）。符号名的约定与类那一支一模一样：中间多一段 `get_` / `set_`。
