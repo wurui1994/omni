@@ -4481,7 +4481,25 @@ class JncLower {
         onch: evt !== null && evt.target !== undefined ? evt.target : null,
       });
     }
-    const out = [this.propDeclOf(src.sp, src.ptrs, core, extra)];
+    /* 取值器的返回类型上那个 `const` **不是**属性的 `const`（第二百二十七刀）。原样：
+         property g_prop { char const* get(); void set(int); }
+       （jnc_sample_01_export_c/script.jnc:29-33）—— 那个 `const` 说的是"指到的字节不许改"，
+       而属性能不能写按 jancy 的规矩只看一件事：**有没有存值器**（prop.rst:17 那句
+       "If a property has no setters then it is a const property"）。这儿的类型是从取值器那份
+       说明符抄来的（上面 `src` 那三支），`const` 就跟着抄进了改写出来的简单声明式，于是
+       `pi.cst` 为真、写它当场被拒 —— 那是**拒错了**，jancy 收这一句。
+       所以：体里有存值器（自己写的或者只有原型的那种）时，把抄过来那份说明符上的 `const`
+       摘掉。`whole` 那一支不摘 —— 那儿 `src.sp` 是**属性自己**那份说明符
+       （`string_t const property m_string { … }`），那个 `const` 正是"没有存值器"的意思。 */
+    const hasSet = accs.some((a) => a.kind === 'set') || hostAcc.set === true;
+    const dropConst = (sp) => (isList(sp) && head(sp) === 'specs'
+      ? this.mkL(sp.span, this.mkA(sp.span, 'specs'), sp.items[1],
+        this.mkL(sp.span, this.mkA(sp.span, 'mods'),
+          ...this.flat(sp.items[2]).filter((x) => !(isAtom(x) && x.value === 'const'))),
+        this.mkL(sp.span, this.mkA(sp.span, 'mods'),
+          ...this.flat(sp.items[3]).filter((x) => !(isAtom(x) && x.value === 'const'))))
+      : sp);
+    const out = [this.propDeclOf(!whole && hasSet ? dropConst(src.sp) : src.sp, src.ptrs, core, extra)];
     if (whole) {
       // 那一格 get：名字是 `属性名.get`（qualified-special），形参表空着，体就是属性那个体。
       const acc = this.mkL(sp0, this.mkA(sp0, 'accessor'), this.mkA(sp0, 'get'));

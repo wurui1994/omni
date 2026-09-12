@@ -10762,6 +10762,47 @@ void foo(char const*);
   `(文件, 拦路项)` 对 `3902 -> 3899`（−3）。
 - 一起编那张榜：`39`、理由 `19` 没动。
 
+### 第二百二十七刀：取值器返回类型上那个 `const` 不是属性的 `const`（拒错了）
+
+还是那份导出样例。上一刀之后它露出这两条：
+
+```
+script.jnc:102:2: error: 'g_prop' 是 const 属性（声明里写了 const，prop.rst:17），写不了
+script.jnc:103:2: error: 同上
+```
+
+翻回声明（同文件:29-33）：
+
+```
+property g_prop {
+	char const* get();
+	void set(int);
+}
+```
+
+那个 `const` 是**取值器返回类型**上的（"指到的字节不许改"），而属性能不能写按 jancy 的规矩
+只看一件事：**有没有存值器**（prop.rst:17 那句 "If a property has no setters then it is a
+const property"）。这儿明明写着 `void set(int);`。
+
+**这是拒错了**（jancy 收这两句）。原因在改写那一步：完整声明式的属性把类型从取值器那份说明符
+抄过来（`src` 那三支），`const` 就跟着抄进了改写出来的简单声明式，于是 `pi.cst` 为真。
+改法：体里有存值器（自己写的、或者只有原型的那种）时，把抄过来那份说明符上的 `const` 摘掉。
+`whole` 那一支（体里直接就是取值器的体，`string_t const property m_string { … }`）**不摘** ——
+那儿 `src.sp` 是属性自己那份说明符，那个 `const` 正是"没有存值器"的意思，`bad/prop-noset.jnc`
+那道墙钉的就是它（它照旧绿）。
+
+判据是手写的 C 双胞胎 `/tmp/c183.c`（把属性摊成"两个函数 + 一格存储"—— 这一层的落法就是这样），
+用例 `tests/jnc/cases/177-propgetconst.jnc`，两边都印 42。
+
+- 腿：`node tests/jnc/run.js` 320/0（新增 `cases/177-propgetconst`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`'…' 声明里写了 const，那是**只有取**的属性（prop.rst:17），不能有 set` 那一行
+  2 份**整行没了**（那正是拒错的那一句）。`(文件, 拦路项)` 对 `3899 -> 3901`（**+2**，
+  往错方向）—— 原因照旧写清：那 2 份文件后面还压着别的（`char const*` 与 `string` 那条
+  方言级的账、`TestStruct` 没有 construct），先前被这一句盖着。
+  lowered `162`、clean `238` 都没动。
+- 一起编那张榜：`39`、理由 `19` 没动。
+
 
 
 
