@@ -128,6 +128,14 @@ int64_t Plain_seeded(void *self) {
    没有 self 那一格 —— 它不挂在任何类上。 */
 int64_t hostAdd(int64_t a, int64_t b) { return a + b; }
 
+/* 同名两条里**一条带体、一条只有原型**（第一百八十六刀）：带体的那一条由这一层自己发，
+   只有原型的这一条在宿主 —— 于是"挑哪一条"这件事跨着两边。这一格算得与带体那条明显不一样
+   （a*10+b），好让"挑对了没有"在输出上看得见。 */
+int64_t Plain_mix(void *self, int64_t a, int64_t b) {
+  (void)self;
+  return a * 10 + b;
+}
+
 int64_t probe_hostMul(int64_t a, int64_t b) { return a * b; }
 
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型

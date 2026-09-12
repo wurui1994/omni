@@ -11756,6 +11756,26 @@ class JncLower {
     };
   }
 
+  /**
+   * 上面那一格的重试（第一百八十六刀）：`nm` 这个名字在**宿主面**那张表里也有几条时，按宿主面
+   * 那条路（hostMethodCall）再挑一次。回 `undefined` 表示"那张表里没有"（调用方接着发它自己的
+   * 诊断）；回 null 表示**试过了、那一处已经报过**（调用方就别再报第二句）。
+   *
+   * `self` 是**已经求过值**的那一格（调用方那儿算出来的），所以这儿把它照原样包成一格值传下去
+   * —— 不再走 `baseVal`，免得把左边那个表达式求两遍（`f().m(x)` 那种）。`hostMethodCall` 只拿
+   * `bv.type` 挑主人，所以类型写成那个主人的类就是对的。
+   */
+  protoHostRetry(n, nm, self) {
+    const b = /\$o[0-9]+$/.test(nm) ? nm.slice(0, nm.lastIndexOf('$')) : nm;
+    const i = b.lastIndexOf('$');
+    if (i < 0) return undefined;
+    const sigs = this.hostSigs.get(b);
+    if (sigs === undefined || sigs.length === 0) return undefined;
+    const owner = b.slice(0, i);
+    return this.hostMethodCall(n, null, new Set([owner]), b.slice(i + 1),
+      { code: self, type: tClass(owner, false) });
+  }
+
   hostPick(n, owner, mn, sigs) {
     if (sigs.length === 1) return { sig: sigs[0], i: 0 };
     const args = this.flat(n.items[2]);
@@ -12904,6 +12924,16 @@ class JncLower {
     const args = this.withDefaults(args0, want, defs, cut < 0 ? '' : nm.slice(0, cut));
     if (args === null) return null;
     if (args.length !== want.length) {
+      /* 同名的还有只有原型的几条（第一百五十刀记的账，第一百八十六刀兑掉）：那几条的**体在宿主
+         那边**（第一百八十三刀），所以"合得上的那一条"不是"不在表里"，是在**宿主面**那张表里。
+         这儿按那张表再挑一次。
+
+         为什么这一格是安全的（不会把该调的定义换成 ccall）：走到这儿说明**带体的那几条里没有
+         一条收这么多个实参**（pickOverload 先按个数筛过），所以宿主面那张表里收这么多个的那一条
+         必然没有对应的定义。而且这时候**一个实参都还没降**（下面那个循环才降），所以不会把谁
+         降两遍。 */
+      const hr = self === null ? undefined : this.protoHostRetry(n, nm, self);
+      if (hr !== undefined) return hr;
       // 同名的还有只有原型的几条（第一百五十刀）：给了几个"不对"是拿不全的那张表数出来的
       if (this.protoSibling(nm)) return this.protoSiblingNope(n, nm, args0.length);
       return this.err(n, `'${nm0 === null ? shown(nm) : nm0}' 要 ${want.length} 个实参`
