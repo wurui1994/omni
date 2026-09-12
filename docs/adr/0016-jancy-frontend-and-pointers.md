@@ -11442,6 +11442,55 @@ $"$(sys.formatTimestamp (timeSpan, 0, "%h:%m:%s.%l"))"      log_ThroughputCalc.j
 - 逐份那张榜：`枚举的底类型是另一个枚举（…）` 那两行**整行没了**（合 54 对）。
   `(文件, 拦路项)` 对 `3959 -> 3738`（**−221**）、lowered `91 -> 97`（+6）、clean `145 -> 152`（+7）。
 
+### 第二百四十八刀：`return <一格 void 调用>;` —— 那不是 main 的退出码
+
+榜上 `main 里 return 一个非 0 的值` 71 对、4 组唯一拦路项。挑它本是想去兑"退出码"那一格
+（`backend-llvm/emit.js:820` 那句注写着 `omni_host_exit_code` 的槽是现成的），可先去看语料里
+**到底是什么**，一眼就发现认错了人 —— 报出这句话的那些组里压根没有 `main`：
+
+```
+void writeBool(string_t name, bool value) {
+    return writeInt(name, value);      // writeInt 自己回 void
+}                                      // test/ioninja/api/doc_Storage.jnc:30
+```
+
+祸根是 `retTy === J_VOID` 一格分不出两回事：main 的返回类型被按成了 `J_VOID`
+（`isMain ? J_VOID : info.type`），于是真 void 函数里的 `return <表达式>` 落进了给 main
+写的那句话里。第一百二十一刀那份例子头上早记过同一个洞（"认错了人，量出来的一个洞"）。
+
+jancy 那边这条**合法**，而且走的正是"光一个 `return`"那条路：一格 void 调用的 `Value`
+是**空的**（`Value::setVoid` 把 `m_valueKind` 按成 `ValueKind_Void = 0`，
+jnc_ct_Module.h:972-976；`operator bool` 就是 `!isEmpty()`，jnc_ct_Value.h:170-180），
+于是 `ControlFlowMgr::ret` 里 `if (!value)` 那一支为真（jnc_ct_ControlFlowMgr.cpp:470-488）
+—— 底下那次调用照旧发出去，只是没有值往回带。落法因此是"按语句降那条调用，再发一句 `(ret)`"，
+一个字都不用新造：
+
+```js
+const ct = this.cheapTy(v);
+if (this.inMain !== true) {
+  if (ct !== null) { this.err(n, `这个函数回 void，'return' 后面却跟了一格 ${tyName(ct.ty)} 的值…`); return null; }
+  const ls = this.exprStmt(v, ind);
+  if (ls === null) return null;
+  return [...ls, `${pad}(ret)`];
+}
+return this.nope(n, 'main 里 `return` 一个非 0 的值（方言的入口没有退出码）');
+```
+
+两处分寸：
+
+- 新开一格 `this.inMain`（`fnDef` 里与 `retTy` 一起存/复原）—— 不加它就分不出上面那两回事；
+- **只在不是 main 时**走这条。main 里 `return f()` 万一 f 回整数，扔掉它就是把退出码静悄悄
+  丢了 —— 那一格这一层确实还没有，宁可当场说不收。判"有没有值"用 `cheapTy`：问得出类型的
+  就是**带值**的 return，jancy 那边报 "void function 'X' returning 'Y' value"
+  （同一处 490-497 行），这儿照它报（新墙 `bad/ret-void-value`）。
+
+- 新例子 `cases/186-retvoidcall`（顶层与类里各一条，印 `g_n 6` / `b 7`；孪生 `/tmp/c194.c` ——
+  C 那边 `return <void 表达式>` 是约束违反 6.8.6.4，所以孪生照**语义**写成"先调、再 return"）。
+- 腿：`node tests/jnc/run.js` 332/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：那一行 `71 对 / sole 4` 收成 `17 对 / sole 3` —— 少掉的 54 对是**认错人的假账**，
+  剩下的 17 才是真 main 的退出码。`(文件, 拦路项)` 对 `3738 -> 3685`（−53）；
+  lowered 97、clean 152 都没动（那 54 对所在的组还有别的拦路项）。
+
 
 
 

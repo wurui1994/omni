@@ -1,0 +1,41 @@
+// `return <一格 void 调用>;`（第二百四十八刀）
+//
+// jancy 那边这条合法：一格 void 调用的 Value 是**空的**（Value::setVoid 把 m_valueKind
+// 按成 ValueKind_Void = 0），于是 ControlFlowMgr::ret 里 `if (!value)` 那一支为真
+// （jnc_ct_ControlFlowMgr.cpp:470-488）—— 底下那次调用照旧跑，只是没有值往回带。
+// 语料里的形状是 test/ioninja/api/doc_Storage.jnc:30 那个 `void writeBool(…)`。
+
+int g_n;
+
+void bump(int d) {
+	g_n += d;
+}
+
+void addTwice(int d) {
+	// 两句：先一句普通的语句调用，再一句 `return <void 调用>` —— 两次都要真的跑
+	bump(d);
+	return bump(d);
+}
+
+class Box {
+	int m_v;
+
+	void setRaw(int v) {
+		m_v = v;
+	}
+
+	// 类里同一条形状（doc_Storage.jnc:30 那个就在类里）
+	void put(int v) {
+		return setRaw(v);
+	}
+}
+
+int main() {
+	addTwice(3);
+	printf("g_n %d\n", g_n);
+
+	Box b;
+	b.put(7);
+	printf("b %d\n", b.m_v);
+	return 0;
+}

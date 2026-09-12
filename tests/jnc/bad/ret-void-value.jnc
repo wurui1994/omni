@@ -1,0 +1,17 @@
+// `void` 函数里 `return` 一格**带值**的表达式（第二百四十八刀的另一半）。
+// jancy 那边这条是错的：ControlFlowMgr::ret 里 returnType 是 void 而 value 非空那一支报
+// "void function 'X' returning 'Y' value"（jnc_ct_ControlFlowMgr.cpp:490-497）。
+//
+// 与它相对的那一半（`return <一格 void 调用>`）是**合法**的，收在 cases/186-retvoidcall.jnc ——
+// 差别就在那一格 Value 空不空（Value::setVoid 把 m_valueKind 按成 ValueKind_Void = 0）。
+//
+// 先前这句话被报成"main 里 return 一个非 0 的值"—— 认错了人（这儿压根不是 main）。
+
+void f() {
+	return 42;
+}
+
+int main() {
+	f();
+	return 0;
+}

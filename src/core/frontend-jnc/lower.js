@@ -1037,6 +1037,11 @@ class JncLower {
     this.unsafe = false;       // 在 (unsafe …) 里面
     this.mainBody = null;      // `int main()` 的体（降成方言的 `(main …)`）
     this.retTy = J_VOID;       // 当前函数的返回类型
+    /* 正在降的是不是 `int main()`（第二百四十八刀）。`retTy === J_VOID` 一格分不出
+       "真 void 函数"与"main"两回事 —— main 的返回类型被按成 J_VOID 了（见 fnDef 里
+       `isMain ? J_VOID : info.type` 那一句），于是 `return writeInt(…)`（一格 void 调用）
+       先前被报成"main 里 return 一个非 0 的值"，认错了人。 */
+    this.inMain = false;
     // 循环栈（第四十一刀）。每进一层"可跳的东西"压一格：真循环是 `sw: false`，switch 摊出来
     // 的那圈合成循环是 `sw: true`。`break N` 数**全部**（jancy 把 switch 也算一层，
     // cflow_switch.rst:37），`continue N` 只数真循环 —— 与 C 一致。`step` 记着这一层是不是
@@ -9830,9 +9835,12 @@ class JncLower {
       for (const l of this.memCtorLines(owner, '    ')) pre.push(l);
     }
     const save = this.retTy;
+    const saveMain = this.inMain;
     this.retTy = isMain ? J_VOID : info.type;
+    this.inMain = isMain === true;
     let body = this.block(n.items[3], 4);
     this.retTy = save;
+    this.inMain = saveMain;
     this.scopes = [];
     this.lifted = saveLifted;
     this.alias = saveAlias;
@@ -12625,6 +12633,35 @@ class JncLower {
     if (this.retTy === J_VOID) {
       const v = n.items[1];
       if (isAtom(v) && v.value === '0') return [`${pad}(ret)`];
+      /* `return <一格 void 调用>;`（第二百四十八刀）—— 这**不是** main 的退出码那回事。
+         语料里的形状（test/ioninja/api/doc_Storage.jnc:30，逐份榜上 71 处、4 组是唯一拦路项）：
+
+           void writeBool(string_t name, bool value) {
+             return writeInt(name, value);      // writeInt 自己回 void
+           }
+
+         jancy 那边这条**合法**，而且走的正是"光一个 return"那条路：一格 void 调用的
+         `Value` 是空的（`Value::setVoid` 把 m_valueKind 按成 `ValueKind_Void = 0`，
+         jnc_ct_Module.h:972-976 与 jnc_ct_Value.h:170-180 的 `operator bool` / `isEmpty`），
+         于是 `ControlFlowMgr::ret` 里 `if (!value)` 那一支为真
+         （jnc_ct_ControlFlowMgr.cpp:470-488）—— 底下那次调用照旧发出去，只是没有值往回带。
+         所以这儿就是"按语句降那条调用，再发一句 `(ret)`"，一个字都不用新造。
+
+         只在**不是 main** 时走这条：main 里 `return f()` 万一 f 回的是整数，扔掉它就是把
+         退出码静悄悄丢了 —— 那一格这一层确实还没有，宁可当场说不收。判"有没有值"用
+         `cheapTy`：问得出类型的（字面量、回值的函数……）就是**带值**的 return，
+         jancy 那边报 "void function 'X' returning 'Y' value"，这儿照它报。 */
+      const ct = this.cheapTy(v);
+      if (this.inMain !== true) {
+        if (ct !== null) {
+          this.err(n, `这个函数回 void，'return' 后面却跟了一格 ${tyName(ct.ty)} 的值`
+            + `（jancy 那边同：ControlFlowMgr::ret 里那句 "void function returning ... value"）`);
+          return null;
+        }
+        const ls = this.exprStmt(v, ind);
+        if (ls === null) return null;
+        return [...ls, `${pad}(ret)`];
+      }
       return this.nope(n, 'main 里 `return` 一个非 0 的值（方言的入口没有退出码）');
     }
     /* 结构体的**左值**回一格指向它的指针（第一百六十七刀）：
