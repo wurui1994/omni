@@ -402,6 +402,12 @@ if (existsSync(sysDir)) {
       + '        long get();\n'
       + '        void set(long v);\n'
       + '    }\n'
+      /* 表达式里给宿主面那格属性赋值（第一百九十三刀）：整条表达式的值是**存进去的那个值**
+         （第一百一十五刀定的那一条）—— 所以 `bump(4)` 回 4，而宿主那边存的时候乘了 10，
+         紧跟着读 `m_scale` 就是 40。语料里的原样是 ui_ComboBox.jnc:74。 */
+      + '    long bump(long d) {\n'
+      + '        return m_scale = d;\n'
+      + '    }\n'
       + '}\n\n'
       /* 没写 `opaque` 的类里那格只有原型的方法（第一百八十三刀）：符号名的约定与 opaque
          那一支一模一样 —— `opaque` 说的是"布局不透明"，管的不是"体在哪儿"。 */
@@ -464,12 +470,14 @@ if (existsSync(sysDir)) {
       + '    printf("blen %d\\n", q.blen(ip, 4));\n'
       + '    Kid* k = new Kid;\n'
       + '    printf("kid %d\\n", k.seeded());\n'
+      + '    printf("bump %d\\n", c.bump(4));\n'
+      + '    printf("scale2 %d\\n", c.m_scale);\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */

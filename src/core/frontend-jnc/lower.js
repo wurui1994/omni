@@ -4774,13 +4774,20 @@ class JncLower {
       return this.err(n, `'${shown(pn)}' 是 const 属性（声明里写了 const，prop.rst:17），写不了`);
     }
     const s = `${pn}$set`;
-    if (!this.fns.has(s)) {
-      return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
-        + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
-    }
     // 索引属性还不收：那几格下标也要进包装函数的形参表，而个数是按属性变的。
     if (pi.idx.length > 0) {
       return this.nope(n, `表达式里给索引属性 '${shown(pn)}' 赋值`);
+    }
+    /* 存值器在宿主那边（第一百九十三刀）：`opaque class` 里那格属性一个体都没写，
+       读写落成 `(ccall Owner_set_p self v)`（第一百六十刀）。这一处要的是**表达式**，
+       所以让 hostProp 包一层 —— 与下面那格 psetFn 一模一样的形状，只是里头是 ccall。
+       语料里的原样是 `return m_currentIndex = insertItem(index, text, data)`
+       （ui_ComboBox.jnc:74，那格属性是 `size_t bindable autoget property`）。 */
+    if (!this.fns.has(s)) {
+      const hv = this.hostProp(n, pn, pi, self, 'set', { node: n.items[3], pad: '', expr: true });
+      if (hv !== undefined) return hv;
+      return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
+        + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
     }
     const sf = this.propSelf(n, pn, pi, self);
     if (sf === null) return null;
@@ -7715,6 +7722,7 @@ class JncLower {
           + `这儿给的是 ${tyName(v.type)}`);
       }
       words.push(w);
+      slots.push(isVar(pi.type) ? `(ptr ${VARIANT})` : slotText(pi.type));
       if (isVar(pi.type)) {
         const pv = this.hostVariantArg(val.node, v);
         if (pv === null) return null;
@@ -7731,7 +7739,26 @@ class JncLower {
       return { code: `(call ${this.hostVretFn(sym, slots)} ${parts.join(' ')})`, type: pi.type };
     }
     const call = `(ccall ${sym} ${parts.join(' ')})`;
+    /* 表达式里的那一句（第一百九十三刀）：整条表达式的值是**存进去的那个值**（第一百一十五刀
+       定的那一条），而 ccall 回的是 void —— 所以包一层，与 psetFn 同一个形状。 */
+    if (kind === 'set' && val.expr === true) {
+      return { code: `(call ${this.hpsetFn(sym, slots)} ${parts.join(' ')})`, type: pi.type };
+    }
     return kind === 'get' ? { code: call, type: pi.type } : [`${val.pad}(expr ${call})`];
+  }
+
+  /** 上面那一格包装函数，一个宿主面存值器一格。回的是收进来的最后那一格 —— 存进去的值。 */
+  hpsetFn(sym, slots) {
+    const name = `jnc$hpset$${sym}`;
+    if (this.varFns.has(name)) return name;
+    const ps = slots.map((s, i) => `(a${i} ${s})`).join(' ');
+    const as = slots.map((s, i) => `(var a${i})`).join(' ');
+    const last = slots.length - 1;
+    this.decls.push(`  (fn ${name} (${ps}) ${slots[last]}\n`
+      + `    (expr (ccall ${sym} ${as}))\n`
+      + `    (ret (var a${last})))`);
+    this.varFns.add(name);
+    return name;
   }
 
   /**

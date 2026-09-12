@@ -9500,6 +9500,49 @@ if (dstDataType->getStdType() == StdType_AbstractData ||
 - 逐份那张榜：lowered `138 -> 140`（+2）、`(文件, 拦路项)` 对 `4591 -> 4505`（−86）、clean `210` 没动。
 - 一起编那张榜：`66 -> 64`、理由 `24 -> 23`。
 
+### 第一百九十三刀：表达式里给宿主面那格属性赋值
+
+榜上 `写属性 '…' —— 它的存值器没有定义` 那一行 97 处、其中两份文件它是**唯一**拦路项
+（`test/ioninja/api/ui_ComboBox.jnc`、`ui_ListWidget.jnc`）。抄成最小复现件之后量出来：那一行**不是**
+"体外的存值器还没收"（那一格第六十八刀就通了，`int g_p.get() { … }` / `g_p.set(int x) { … }` 都降得下来），
+真拦路的是**赋值当表达式**那一处 —— `asgnProp`（第一百一十五刀）里少了宿主面那条分支。语料里的原样是
+
+```jnc
+size_t insertItemSetCurrent(size_t index, string_t text, variant_t data = null) {
+    return m_currentIndex = insertItem(index, text, data);   // ui_ComboBox.jnc:74
+}
+```
+
+`m_currentIndex` 是 `size_t bindable autoget property`、类是 `opaque class` —— 存值器的体在宿主
+（opaque.rst:15-29）。语句位置上的 `p = v` 早就会改发 `(ccall Owner_set_p self v)` 了（第一百六十刀的
+`hostProp`），**表达式位置**上没有：那两处各问一次 `fns.has(p$set)`，只有前一处接着问了宿主面。
+
+落法与 `psetFn`（第一百一十五刀那格包装函数）一模一样，只是里头那句是 `ccall`：
+
+```
+(fn jnc$hpset$Combo_set_m_currentIndex ((a0 (ptr Combo)) (a1 int)) int
+  (expr (ccall Combo_set_m_currentIndex (var a0) (var a1)))
+  (ret (var a1)))
+```
+
+"整条表达式的值是**存进去的那个值**"这一条照抄第一百一十五刀（不回头再调取值器 —— 那会把有副作用的
+取值器多调一次）。`hostProp` 那一侧只多两笔：值那一格的 slot 记进 `slots`（`variant_t` 记的是
+`(ptr jnc$variant)`，与第一百七十四刀同一个表示），以及 `val.expr === true` 时回一格表达式而不是一句语句。
+索引属性照旧不收（那几格下标要进包装函数的形参表，个数按属性变），那一问挪到了宿主面这一问**前面**。
+
+判据在 `tests/llvm/run.js` 第 9 节：`Counter` 上加一格带体的方法 `long bump(long d) { return m_scale = d; }`
+—— 宿主那边 `Counter_set_m_scale` 存的时候**乘 10**，所以 `bump(4)` 印 `bump 4`（表达式的值是存进去的
+那个 4）、紧跟着读 `c.m_scale` 印 `scale2 40`（宿主那个存值器真跑了）。两行分开印是故意的：
+一句 `printf` 两个实参的求值顺序做不了判据。
+
+- 腿：`node tests/jnc/run.js` 280/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `140 -> 142`（+2）、clean `210 -> 214`（+4）、`(文件, 拦路项)` 对 `4505 -> 4500`（−5）；
+  那一行本身 `97 -> 92`、sole `2 -> 0`。
+- 一起编那张榜：`64 -> 62`、理由 `23` 没动。
+- 记一笔账：那一行的话**指着别处** —— "存值器没有定义"让人去找体外的 `p.set(T x) { … }`，而真缺的是
+  表达式位置上那一问。第一百四十九刀那条法（榜上看起来像特性的一行，先抄成最小复现件试一次）这回
+  省下的是把体外存值器重写一遍的整个功夫。
+
 
 
 ## 后果与代价
