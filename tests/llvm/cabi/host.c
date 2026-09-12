@@ -87,6 +87,21 @@ int64_t Counter_value(void *self) {
   return p == NULL ? -1 : *p;
 }
 
+/* `variant_t` **从宿主面回来**（第一百七十四刀）：照 jancy 自己的调用约定，按内存回的那一格
+   变成**最前面一个**指针形参、函数自己回 `void`（jnc_ct_CdeclCallConv_arm.cpp:71-80 那一段
+   `j = 1` 说的就是"缓冲区那格摆在对象那格之前"）。所以这一格的 C 声明是
+   `void Counter_last(jnc_Variant *ret, void *self)` —— 那块内存由**调用方**备好，宿主只往里写。
+   写的形状与 Counter_tag 读的那一格是同一张表：头两个字是标签与整数那一格。 */
+void Counter_last(void *ret, void *self) {
+  int64_t *p = (int64_t *)ret;
+  int64_t *q = probe_slot(self);
+  p[0] = 1; /* V_INT */
+  p[1] = q == NULL ? -1 : *q;
+}
+
+/* 属性的取值器回 `variant_t` 也是同一条：`Owner_get_p(ret, self)`。 */
+void Counter_get_m_last(void *ret, void *self) { Counter_last(ret, self); }
+
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型
    （`property m_scale { long get(); void set(long); }`，ui_PropertyGrid.jnc:78-88 那个形状）
    时，体也在宿主这边；符号名的约定与方法同一条，只是中间多一段 `get_` / `set_`：

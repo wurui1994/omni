@@ -7423,6 +7423,7 @@ class JncLower {
     const sym = `${pi.cls.replace(/\$/g, '_')}_${kind}_${pn.slice(pn.lastIndexOf('$') + 1)}`;
     const words = ['ptr'];
     const parts = [sf.trim()];
+    const slots = [slotText(tClass(pi.cls))];
     /* 索引属性（第一百七十二刀）：那几格下标摆在 `self` 后头、值前头 —— 与这一层自己发的
        `(call p$get self i…)` / `(call p$set self i… v)` 同一个顺序（第七十刀）。
        下标的类型与含义都由写的人定（prop_indexed.rst:15），所以照旧逐个过 C_ABI 那张表。 */
@@ -7445,12 +7446,16 @@ class JncLower {
             + `${tyName(pi.idx[i])}，这里是 ${tyName(iv.type)}`);
         }
         words.push(w);
+        slots.push(slotText(pi.idx[i]));
         parts.push(iv.code);
       }
     }
     let rw = 'void';
+    /* 读出来是一格 `variant_t`（第一百七十四刀）：缓冲区那格摆在最前面、被调的函数回 void ——
+       与方法那一处（hostMethodCall）同一条，判据同一段 jancy 的调用约定（见 hostVretFn）。 */
+    const vret = kind === 'get' && isVar(pi.type);
     if (kind === 'get') {
-      rw = this.cabiWordOfJnc(pi.type, true);
+      rw = vret ? 'void' : this.cabiWordOfJnc(pi.type, true);
       if (rw === null) {
         return this.nope(n, `读属性 '${shown(pn)}' —— 它的类型 ${tyName(pi.type)} 落不进`
           + ' C_ABI 的那几个词（体在宿主那边）');
@@ -7476,9 +7481,13 @@ class JncLower {
       } else parts.push(v.code);
     }
     if (!this.cabiNames.has(sym)) {
-      this.decls.push(`  (cabi ${sym} ${rw} (${words.join(' ')}))`);
+      const ws = vret ? ['ptr', ...words] : words;
+      this.decls.push(`  (cabi ${sym} ${rw} (${ws.join(' ')}))`);
       this.cabiNames.add(sym);
-      this.cabiSigs.set(sym, { ret: rw, params: words, sym });
+      this.cabiSigs.set(sym, { ret: rw, params: ws, sym });
+    }
+    if (vret) {
+      return { code: `(call ${this.hostVretFn(sym, slots)} ${parts.join(' ')})`, type: pi.type };
     }
     const call = `(ccall ${sym} ${parts.join(' ')})`;
     return kind === 'get' ? { code: call, type: pi.type } : [`${val.pad}(expr ${call})`];
@@ -11349,6 +11358,45 @@ class JncLower {
     return v.code;
   }
 
+  /**
+   * 一格 `variant_t` **从宿主面回来**（第一百七十四刀）：按内存回的那一格变成**最前面一个**
+   * 指针形参、被调的那个函数自己回 `void`。
+   *
+   * 这条也不是我们定的约定，是 jancy 自己的调用约定里那一段 ——
+   *
+   *     // jnc_ct_CdeclCallConv_arm.cpp:71-80
+   *     if (returnType->getFlags() & TypeFlag_StructRet) {
+   *       if (returnType->getSize() > m_retCoerceSizeLimit) { // return in memory
+   *         argCount++;
+   *         typeRwi[0] = returnType->getDataPtrType(DataPtrKind_Thin)->getLlvmType();
+   *         j = 1;
+   *         returnType = m_module->m_typeMgr.getPrimitiveType(TypeKind_Void);
+   *
+   * `variant_t` 正是"按内存回"的那一档（`TypeFlag_StructRet` 在那张 `StructFlags` 里，
+   * jnc_ct_TypeMgr.cpp:1716-1721；arm 那一支的 `m_retCoerceSizeLimit` 是 0，64 字节铁定超），
+   * 而 `j = 1` 那一句说的就是**缓冲区那格摆在对象那格之前**。于是 `Owner.m` 在 C 那边是
+   * `void Owner_m(jnc_Variant* ret, void* self, …)`。
+   *
+   * "先要一格缓冲区、再调、再把那格地址当值用"是**三句话**，而 `expr` 这一层回的是一格值 ——
+   * 用 variantTy 那一族现成的办法：**一个符号发一格包装函数**（`jnc$vret$<符号>`）。好处与
+   * `varBox` 那几格一样：调用点仍旧只是一格 `(call …)`，所以惰性位置（`&&` 的右边、`? :` 的
+   * 两支）上照样过得去，不占第五十八刀那条语句落点。
+   */
+  hostVretFn(sym, slots) {
+    const name = `jnc$vret$${sym}`;
+    if (this.varFns.has(name)) return name;
+    this.variantTy();
+    const vt = `(ptr ${VARIANT})`;
+    const ps = slots.map((s, i) => `(a${i} ${s})`).join(' ');
+    const as = slots.map((s, i) => ` (var a${i})`).join('');
+    this.decls.push(`  (fn ${name} (${ps}) ${vt}\n`
+      + `    (let v ${vt} (pnew ${vt} (int 1)))\n`
+      + `    (expr (ccall ${sym} (var v)${as}))\n`
+      + '    (ret (var v)))');
+    this.varFns.add(name);
+    return name;
+  }
+
   hostPick(n, owner, mn, sigs) {
     if (sigs.length === 1) return { sig: sigs[0], i: 0 };
     const args = this.flat(n.items[2]);
@@ -11437,7 +11485,10 @@ class JncLower {
     const sig = pick.sig;
     const symSuffix = pick.i === 0 ? '' : `_o${pick.i + 1}`;
     const sym = `${owner.replace(/\$/g, '_')}_${mn}${symSuffix}`;
-    const rw = this.cabiWordOfJnc(sig.ret, true);
+    /* 回一格 `variant_t`（第一百七十四刀）：照 jancy 自己的调用约定 —— 缓冲区那格摆在最前面、
+       被调的函数回 void（见 hostVretFn）。别的类型照旧问 C_ABI 那张表。 */
+    const vret = isVar(sig.ret);
+    const rw = vret ? 'void' : this.cabiWordOfJnc(sig.ret, true);
     if (rw === null) {
       return this.nope(n, `'${shown(owner)}.${mn}' 的返回类型 ${tyName(sig.ret)}`
         + '（落不进 C_ABI 的那几个词）');
@@ -11452,8 +11503,9 @@ class JncLower {
         + `${sig.defs === null || sig.defs === undefined ? '' : `（其中 ${sig.defs.filter((d) => d !== null).length} 个有默认值）`}`
         + `，这里给了 ${args0.length} 个`);
     }
-    const words = ['ptr'];
+    const words = vret ? ['ptr', 'ptr'] : ['ptr'];
     const parts = [bv.code];
+    const slots = [slotText(bv.type)];
     for (let i = 0; i < args.length; i++) {
       /* `variant_t` 那一格过去的是地址（第一百七十三刀）；别的类型照旧问 C_ABI 那张表。 */
       const w = isVar(sig.params[i]) ? 'ptr' : this.cabiWordOfJnc(sig.params[i], false);
@@ -11469,6 +11521,7 @@ class JncLower {
           + `${tyName(sig.params[i])}，这里是 ${tyName(v.type)}`);
       }
       words.push(w);
+      slots.push(isVar(sig.params[i]) ? `(ptr ${VARIANT})` : slotText(sig.params[i]));
       if (isVar(sig.params[i])) {
         const pv = this.hostVariantArg(args[i], v);
         if (pv === null) return null;
@@ -11480,6 +11533,9 @@ class JncLower {
       this.decls.push(`  (cabi ${sym} ${rw} (${words.join(' ')}))`);
       this.cabiNames.add(sym);
       this.cabiSigs.set(sym, { ret: rw, params: words, sym });
+    }
+    if (vret) {
+      return { code: `(call ${this.hostVretFn(sym, slots)} ${parts.join(' ')})`, type: sig.ret };
     }
     return { code: `(ccall ${sym} ${parts.join(' ')})`, type: sig.ret };
   }

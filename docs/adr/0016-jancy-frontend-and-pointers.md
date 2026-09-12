@@ -8834,6 +8834,64 @@ x86-64 与 AAPCS64 上都按内存过，被调方拿到的本来就是地址）�
   发了什么。（方言的 `int` 在原生腿上是 i64，与 ADR-0026:20 那个
   `struct V { int m_tag; int64_t m_n; string_t m_s; }` 是同一个形状。）
 
+### 第一百七十四刀：`variant_t` **从宿主面回来** —— 缓冲区那格摆在最前面
+
+上一刀末尾记的那两格欠账，这一刀兑掉第一格：`读属性 … variant_t`（20 处）。
+
+**约定不是我们定的，是抄 jancy 自己的调用约定。** 上一刀说过 64 字节的聚合"按内存过"，那句话对
+**返回**这一头的意思在 jancy 的代码里是写出来的 ——
+
+```cpp
+// jnc_ct_CdeclCallConv_arm.cpp:71-80
+if (returnType->getFlags() & TypeFlag_StructRet) {
+  if (returnType->getSize() > m_retCoerceSizeLimit) { // return in memory
+    argCount++;
+    typeRwi[0] = returnType->getDataPtrType(DataPtrKind_Thin)->getLlvmType();
+    j = 1;
+    returnType = m_module->m_typeMgr.getPrimitiveType(TypeKind_Void);
+```
+
+三件事一句不差：① 多出一个形参；② 它的类型是"指向那个返回类型的 thin 指针"；③ `j = 1` ——
+**它摆在原来那些形参之前**，而 `this` 在 jancy 那边就是 `argArray[0]` 里的一格普通形参，所以缓冲区
+那格排在**对象那格之前**；④ 函数自己回 `void`。`variant_t` 落在这一档是因为它带
+`TypeFlag_StructRet`（jnc_ct_TypeMgr.cpp:1716-1721 那张 `StructFlags` 是所有"按结构体回"的原始类型
+共用的），而 arm 那一支的 `m_retCoerceSizeLimit` 是 0（构造函数里就是 0），64 字节铁定超。
+
+于是 `Owner.m` 在 C 那边是 `void Owner_m(jnc_Variant* ret, void* self, …)`，属性的取值器同一条：
+`void Owner_get_p(jnc_Variant* ret, void* self, 下标…)`。
+
+**落点上的一格选择：一个符号发一格包装函数。** "先要一格缓冲、再调、再把那格地址当值用"是三句话，
+而 `expr` 这一层回的是一格值。上一刀犯过的错是往第五十八刀那条语句落点（`ecOut`）上想 —— 那会让
+惰性位置（`&&` 的右边、`? :` 的两支）上白白说不收。这一刀用 `variantTy` 那一族现成的办法：
+`hostVretFn` 按符号发一格 `jnc$vret$<符号>`，里头三句，调用点仍旧只是一格 `(call …)`。
+`varBox` / `varUnbox` / `psetFn` 都是这个办法，不是新机器。
+
+改的三处：`hostVretFn` 新增；`hostMethodCall` 与 `hostProp` 各多一格 `vret` 分支（`rw` 变 `void`、
+形参词表前面插一格 `ptr`、调用点换成那格包装函数），顺带各多记一串 `slots`（包装函数的形参得写方言
+类型，与 C_ABI 那几个词不是同一张表）。
+
+**判据到运行期。** `tests/llvm/cabi/host.c` 里
+`void Counter_last(void* ret, void* self)` 往调用方给的那块内存写 `p[0] = 1`（`V_INT`）、
+`p[1] = 当前值`，`Counter_get_m_last` 转手同一格；`tests/llvm/run.js` 第 9 节的 jnc 源里
+`variant_t last();` 与 `variant_t property m_last { variant_t get(); }` 各调一次，印出
+`last 142` / `mlast 142` —— 那个 142 是宿主那张表里的数经**我们**的拆箱（标签对得上才不 `fail`）
+读回来的，所以"缓冲区谁给的、写在哪一格、标签对不对"三件事一次证齐。`.sx` 那一层也逐字比：
+`(cabi Counter_last void (ptr ptr))` 与 `(cabi Counter_get_m_last void (ptr ptr))` —— 回 `void`、
+两格 `ptr`（缓冲 + 对象）。
+
+- 腿：`node tests/jnc/run.js` 278/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `121`、clean `194` 都没动；`(文件, 拦路项)` 对 `4655 -> 4650`。
+  `读属性 … 它的类型 variant_t 落不进 C_ABI 的那几个词` **整行没了**（20 处、分布在 5 份文件里 ——
+  所以对数只掉 5，那 5 份里还有别的拦路项）。一整批当一个模块那一格（`test/ioninja/api`）
+  没动（100 条 / 28 种）：那 44 份里没有回 `variant_t` 的宿主成员。
+- **还欠的那一格照实记**：函数值过宿主面（41 处）。这一刀之后 `bad/opaque-host-fn.jnc` 那条界的理由
+  要改口径 —— 拦路的**不是** jancy 的 `function*` 胖不胖（它有 `FunctionPtrKind_Thin` 那一档，
+  `type->m_size = ptrKind == FunctionPtrKind_Thin ? sizeof(void*) : sizeof(FunctionPtr)`，
+  jnc_ct_TypeMgr.cpp:1378，那一档就是**一个字**），而是**这一层自己**的函数值是一条闭包记录
+  （`(fnref F)` 发的是一格薄适配器闭包，sexpr/lower.js:1749-1791），根本拿不出一格裸代码地址来。
+  也就是说这一格与 `main` 的退出码同一性质：**方言那一层缺一格**，不是 jnc 前端一刀能补的。
+  这一笔先记在这儿，下一刀去改那份 fixture 的说法（今天那份注释说的理由是错的）。
+
 ## 后果与代价
 
 
