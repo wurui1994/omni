@@ -11280,6 +11280,32 @@ m_typeModifiers &= ~TypeModifierMaskKind_Property;      jnc_ct_DeclTypeCalc.cpp:
   lowered `163`、clean `240` 都没动。逐行比过一遍：只有这一行动。
 - 一起编那张榜：`32`、理由 `14` 没动（那 19 处不在 api/ 那 44 份里）。
 
+### 第二百四十刀：`friend` 只管"谁看得见"，这一层不做可见性检查
+
+榜上 `类 / 结构体里除字段以外的成员` 那句**兜底话**先量了一遍：它拦的是什么，加一行临时的印看全语料
+——只有两种：
+
+```
+ 21  var-decl-curly     类 / 结构体里带**花括号初值**的字段
+  2  friend             `friend BinTreeBase;`（stdt_BinTree.jnc:22-23，另有 HashTable / RbTree）
+```
+
+`friend` 这一格：jancy 那边它只往那一格 `m_friendSet` 里添个名字（`Parser::addFriends`，
+jnc_ct_Parser.cpp:997-1010），而那张表只有一个用处 —— `FriendSet::isFriend`
+（jnc_ct_Template.h:150）在**访问检查**那一步问它。这一层**不做可见性检查**（第五十二刀立的
+口径：那是"拒得更严"，不影响能跑的程序的行为），`public:` / `protected:` 那两个词一直是收下不看
+的 —— `friend` 是同一件事、同一条理由，于是也收下不看。
+
+判据是手写的 C 双胞胎 `/tmp/c191.c`（C 里没有可见性，两边都是直接读那格字段 —— 要证的正是
+"一个字节的机器都不该多造"），用例 `tests/jnc/cases/182-friend.jnc`，两边都印 `42 21`。
+
+- 腿：`node tests/jnc/run.js` 329/0（新增 `cases/182-friend`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`结构体里除字段以外的成员` 那一行**整行没了**（2）。
+  `(文件, 拦路项)` 对 `3739 -> 3737`（**−2**），lowered `163`、clean `240` 都没动。
+  逐行比过一遍：只有这一行动。那一句兜底话剩下的是**带花括号初值的字段**那 21 处 —— 留着，
+  它是一格真特性（下一刀）。
+- 一起编那张榜：`32`、理由 `14` 没动（`friend` 那两处在 jnc_std 里）。
+
 
 
 

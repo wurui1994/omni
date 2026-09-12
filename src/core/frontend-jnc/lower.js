@@ -6145,6 +6145,14 @@ class JncLower {
          记的是这个类，类型名那一遍会办。这儿跳过就好 —— **结构体那一侧从第一百二十四刀起
          也一样**（结构体的名字早就是一层命名空间了，方法就提在 `S$m` 上）。 */
       if (isList(m) && head(m) === 'typedef') continue;
+      /* `friend X;`（第二百四十刀）：**收下不看**。jancy 那边它只往那一格 `m_friendSet` 里
+         添个名字（`Parser::addFriends`，jnc_ct_Parser.cpp:997-1010），而那张表只有一个用处 ——
+         `FriendSet::isFriend`（jnc_ct_Template.h:150）在**访问检查**那一步问它。这一层**不做
+         可见性检查**（第五十二刀立的口径：那是"拒得更严"，不影响能跑的程序的行为），所以
+         `public:` / `protected:` 那两个词收下不看，`friend` 是同一件事、同一条理由。
+         语料里的原样是 `friend BinTreeBase;` / `friend BinTreeVisitRemoveImpl;`
+         （src/jnc_ext/jnc_std/jnc/stdt_BinTree.jnc:22-23，另有 stdt_HashTable / stdt_RbTree）。 */
+      if (isList(m) && head(m) === 'friend') continue;
       if (!isList(m) || head(m) !== 'var-decl') {
         this.nope(m, `${cls ? '类' : '结构体'}里除字段以外的成员`);
         continue;
