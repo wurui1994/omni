@@ -11468,6 +11468,16 @@ class JncLower {
           return this.nope(n, `null 当一格函数值（${tyName(want)}）—— 方言里的函数值只能从一个`
             + '真函数做出来（`(fnref …)`），还没有"空的那一格"');
         }
+        /* `null` 当一格 `string_t`（第一百六十五刀）：语料里的原样是
+           `storage.writeString($"%1-key-%2"(name, i), null);`（ui_Dictionary.jnc:64 —— 那一格形参
+           声明的就是 `string_t`）。jancy 的 `string_t` 是一格带指针的结构（`jnc_String`），null
+           进去就是"指针那格是空的那一种字符串"。这一层不用另造一格：**字符串槽的零值本来就是
+           `(str "")`**（见 jncZeroText —— `string_t s;` 那一格出来的就是它），而这一层可观测的三件事
+           （长度、当条件用、印出来）在"空的"与"零长"上一模一样（第一百四十六刀那条 `slen != 0`）。
+           所以这儿回同一格零值，不是替 jancy 猜一个新语义。 */
+        if (want !== null && want !== undefined && want.k === 'string') {
+          return { code: '(str "")', type: J_STR };
+        }
         if (want === null || want === undefined || !jncIsPtr(want)) {
           return this.err(n, 'null 得从左边知道自己是哪种指针（这里问不出来）');
         }
