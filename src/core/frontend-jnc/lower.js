@@ -11339,15 +11339,14 @@ class JncLower {
    * 惰性位置上落点是关着的（`ecLazy`），那时明说不收：那儿插一句就把求值顺序改了。
    */
   hostVariantArg(node, v) {
-    if (this.ecOut === null) {
-      return this.nope(node, '这个位置上把一格 variant_t 过给宿主 —— 那要先把它落进一格临时'
-        + '内存（一条语句），而这儿插不进去（见 EC_HOIST）');
-    }
-    const t = `$vt${this.tmp++}`;
-    const pt = `(ptr ${VARIANT})`;
-    this.ecOut.push(`${this.ecPad}(let ${t} ${pt} (pnew ${pt} (int 1)))`);
-    this.ecOut.push(`${this.ecPad}(pstore (var ${t}) ${v.code})`);
-    return `(var ${t})`;
+    /* **量出来一格、把上一句话改对**：这一层的 variant 值本来就是**一格地址** ——
+       `varBox` 那几格出来的类型是 `jnc$variant*`（结构体值在这一层一律按地址拿，与形参、
+       返回、赋值那几处同一条）。所以这儿一句都不用发：把那个地址原样过去就是了。
+       先前这一版按"落进一格临时内存再取地址"写，方言当场拦住了
+       （`这个指针指向 jnc$variant，写进去的是 jnc$variant*`）—— 腿是最后一道闸门，
+       这一笔记在 ADR-0016 第一百七十三刀那一节里。
+       附带的好处：不用 `ecOut`，所以惰性位置（`&&` 的右边、`? :` 的两支）上照样过得去。 */
+    return v.code;
   }
 
   hostPick(n, owner, mn, sigs) {

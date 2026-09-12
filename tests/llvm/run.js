@@ -388,6 +388,8 @@ if (existsSync(sysDir)) {
       + '    long add(long d);\n'
       + '    long value();\n'
       + '\n'
+      + '    void tag(variant_t v);\n'
+      + '\n'
       + '    long property m_scale {\n'
       + '        long get();\n'
       + '        void set(long v);\n'
@@ -403,12 +405,13 @@ if (existsSync(sysDir)) {
       + '    printf("scale %d\\n", c.m_scale);\n'
       + '    Other* o = new Other;\n'
       + '    printf("other %d\\n", o.add());\n'
+      + '    c.tag(7);\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */

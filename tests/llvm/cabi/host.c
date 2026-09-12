@@ -66,6 +66,17 @@ int64_t Counter_add(void *self, int64_t d) {  int64_t *p = probe_slot(self);
 /* 同名方法在**两个** opaque class 上各一条（第一百六十八刀）：`Owner.method` 对着的符号带类名，
    所以这两条是两个符号。这一格故意与 Counter_add 算得不一样（乘 2），好让"按对象挑的是哪一条"
    在输出上看得见 —— 先前那一层一个方法名只记一格主人，后声明的盖掉前面的。 */
+/* `variant_t` 过来的是**一格地址**（第一百七十三刀）：指向这一层那格 variant 的表示 ——
+   `(struct jnc$variant ($t int) ($n int) ($r real) ($s string))`，方言的 `int` 在原生腿上是 i64
+   （ADR-0026:20 那个 `struct V { int m_tag; int64_t m_n; string_t m_s; }` 就是这个形状）。
+   所以头两个字就是"标签"与"整数那一格"（标签 1 = 整数，见 lower.js 的 V_INT）。
+   这一格存在的意义是**证明宿主真读得对**：光看 .sx 里发的 `(ccall … (var $vt1))` 证不了这件事。 */
+void Counter_tag(void *self, const void *v) {
+  const int64_t *p = (const int64_t *)v;
+  (void)self;
+  printf("tag %lld %lld\n", (long long)p[0], (long long)p[1]);
+}
+
 int64_t Other_add(void *self, int64_t d) {
   (void)self;
   return d * 2;
