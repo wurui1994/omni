@@ -10521,6 +10521,42 @@ if (h === 'throw') { … return [`${pad}${this.escape(g)}`]; }
   所以 lowered `158`、clean `229` 都没动。
 - 一起编那张榜：`39`、理由 `19` 没动。
 
+### 第二百二十刀：`不是直接调一个名字的调用` 按被调那一格的形状拆开
+
+榜上这一行 31 份。按被调那一格的形状数一遍（临时在诊断里带上节点名量的）：
+`field/typeof-expr` 13、`field/index` 6、`field/call` 5、`binary`（`@`）4、`field/cast` 2、
+`cond/name` 2、`concat/concat` 2。四件事：
+
+- **能落的：被调是一格 `? :`**（`y = (x ? c.foo : c.bar)();`，test41.jnc 那一族）。与
+  `f(…)(…)`（第五十五刀那一支）同一条理由 —— 三元式写在**被调位置**上没有别的意思可撞，
+  只可能是"算出一格函数指针再调它"。所以 `fnCallee` 里多一支：直接求值，是函数指针就走
+  `(callfn …)`；算出来不是函数指针**就地说清**（不落到笼统那句话上，也不会重复报）。
+  方法引用那一格（`c.one`）第五十五刀早落好了，`this` 已经绑在那格函数指针里。
+- `typeof(…)` 上叫方法（11 份）—— jancy 的 `typeof` 回一格**运行期的类型对象**
+  （`jnc.Type*`，反射那一套），`getValueName` / `getDataPtrType` / `getTargetValueString`
+  都是它的方法。这一层的类型是编译期的东西，运行期一个字节都不留。
+- `(f @ scheduler)(…)`（4 份，`(close @ m_pluginHost.m_mainThreadScheduler)()`）——
+  `@` 语法上是一格二元算符（jnc.grammar 的 `(-> (expr "@" expr) (binary "@" $1 $3))`），
+  可意思是**换个地方跑**：把这次调用交给那格 `jnc.Scheduler`。要一格运行期的调度器
+  （与 `threadlocal` 那条界同一个理由）。
+- 在一格**算出来的值**上叫方法、而那个方法名这一层一个类上都没见过（9 份，
+  `m_abr[0].close()`、`((io.EthernetAddress const*)p).getString()`）——
+  **这不是"调用的形状不收"**：左边是算出来的值那件事第五十二刀起就收（`pick(a,b,1).val()`
+  当场量过）。真正的原因是那些类躺在别的模块里、逐份编时 import 不着 ——
+  与 `没有这个类型` 是同一笔**口径**账。左边是名字时上面那条路早把话说准了
+  （"X 没有方法 'm'"），这一格补的是"左边是一格算出来的值"那一半。
+
+判据是手写的 C 双胞胎 `/tmp/c178.c`，用例 `tests/jnc/cases/172-condcallee.jnc`（印 `11 12`）。
+三堵墙：`bad/call-typeof.jnc`、`bad/call-scheduler.jnc`、`bad/call-unknownmethod.jnc`。
+
+- 腿：`node tests/jnc/run.js` 315/0（新增 1 个用例 + 3 堵墙）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `158 -> 159`（+1）、clean `229 -> 230`（+1）、
+  `(文件, 拦路项)` 对 `4000 -> 4001`（**+1，往错方向**）—— 原因与第二百一十四刀一样：
+  31 份那一行散成 11 + 9 + 4 + 8 = 32 行，一份文件里两种形状各算一条了。
+  **剩下的 8 份还挂在笼统那句话上，明写**：它们是 `concat/concat`（被调那一格是拼起来的
+  字面量）与那些**连方法名都读不出来**的形状（`mn === null`）—— 那两种下一刀再拆。
+- 一起编那张榜：`39`、理由 `19` 没动。
+
 
 
 

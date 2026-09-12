@@ -1,0 +1,19 @@
+// `(f @ scheduler)(…)`（第二百二十刀把它从"不是直接调一个名字的调用"那一句里拆出来）。
+// 语料里 4 份，原样是 `(close @ m_pluginHost.m_mainThreadScheduler)();`。
+//
+// jancy 的 `f @ scheduler` 不是"算出一格函数指针"—— 它是**换个地方跑**：把这次调用交给那格
+// scheduler（`jnc.Scheduler`，ioninja 那边最常见的是主线程调度器）。语法上 `@` 是一格左结合
+// 的二元算符（jnc.grammar 的 `(-> (expr "@" expr) (binary "@" $1 $3))`），可它的意思是
+// "在别处、可能在别的时刻跑这一句"。
+//
+// 那要一格运行期的调度器 —— 这一层从下到上一个线程、一格事件循环都没有（与 `threadlocal`
+// 那条界同一个理由）。
+int twice(int x) {
+	return x * 2;
+}
+
+int main() {
+	int sched = 0;
+	printf("%d\n", (twice @ sched)(21));
+	return 0;
+}

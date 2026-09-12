@@ -1,0 +1,1 @@
+在 `typeof(…)` 上叫方法 —— jancy 的 typeof 回一格运行期的**类型对象**（`jnc.Type*`，反射那一套），`getValueName` 那些是它的方法；这一层没有反射那张表

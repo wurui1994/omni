@@ -1,0 +1,16 @@
+// 在 `typeof(…)` 上叫方法（第二百二十刀把它从"不是直接调一个名字的调用"那一句里拆出来）。
+// 语料里 13 份 —— NetSnifferLog 那一族按枚举把协议码翻成名字：
+// `return typeof(ArpOpcode).getValueName(hdr.m_opcode);`
+//
+// jancy 的 `typeof` 回的是一格**运行期的类型对象**（`jnc.Type*`，反射那一套），
+// `getValueName` / `getDataPtrType` / `getTargetValueString` 都是它的方法。这一层没有反射
+// 那张表 —— 类型在这儿是编译期的东西，运行期一个字节都不留。
+enum Code {
+	Ok = 1,
+	Bad = 2,
+}
+
+int main() {
+	printf("%s\n", typeof(Code).getValueName(1));
+	return 0;
+}

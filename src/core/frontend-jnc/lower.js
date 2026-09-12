@@ -13763,7 +13763,38 @@ class JncLower {
       nm = m.name;
       self = m.self;
     }
-    if (nm === null && nm0 === null) return this.nope(n, '不是直接调一个名字的调用');
+    /* 第二百二十刀：`不是直接调一个名字的调用` 这一行 31 份按被调那一格的形状拆开是四件事。 */
+    if (nm === null && nm0 === null) {
+      const ih = isList(callee) && isList(callee.items[1]) ? head(callee.items[1]) : null;
+      /* `typeof(EnumType).getValueName(…)`（13 份，NetSnifferLog 那一族按枚举把码翻成名字）：
+         jancy 的 `typeof` 回一格**运行期的类型对象**（`jnc.Type*`，反射那一套），上面那些
+         `getValueName` / `getDataPtrType` 是它的方法。这一层没有反射那张表。 */
+      if (ih === 'typeof-expr') {
+        return this.nope(n, '在 `typeof(…)` 上叫方法 —— jancy 的 typeof 回一格运行期的**类型'
+          + '对象**（`jnc.Type*`，反射那一套），`getValueName` 那些是它的方法；这一层没有'
+          + '反射那张表');
+      }
+      /* `(bar @ scheduler)(100)`（4 份）：jancy 的 `f @ scheduler` 是**换个地方跑**——
+         把这次调用交给那格 scheduler（`jnc.Scheduler`，io_base 那一族的主线程调度器）。
+         那要一格运行期的调度器。 */
+      if (isList(callee) && head(callee) === 'binary'
+        && (isAtom(callee.items[1]) || isStr(callee.items[1]))
+        && callee.items[1].value === '@') {
+        return this.nope(n, '`f @ scheduler` 这种调用 —— jancy 那儿它把这次调用交给那格'
+          + ' scheduler 去跑（jnc.Scheduler），要一格运行期的调度器');
+      }
+      /* 剩下的都长一个样：`左边那一格.方法(…)`，而**那个方法名这一层一个类上都没见过**
+         （`m_abr[0].close()`、`m_type.getDataPtrType(…).getTargetValueString(…)`、
+         `((io.EthernetAddress const*)p).getString()`）—— 那些类在别的模块里。所以这不是
+         "调用的形状不收"，是与 `没有这个类型` 同一笔**口径**账（逐份编，import 不着的那些）。
+         左边是名字的时候上面那条路已经把话说准了（"X 没有方法 'm'"），这儿补的是"左边是一格
+         算出来的值"那一半。 */
+      if (mn !== null) {
+        return this.nope(n, `在一格算出来的值上叫方法 '${mn}' —— 这个名字这一层一个类上都没`
+          + '见过（那个类在别的模块里，与 `没有这个类型` 同一笔口径账）');
+      }
+      return this.nope(n, '不是直接调一个名字的调用');
+    }
     /* 名字查不着，而它是某个 `opaque class` 上声明过的方法（第六十六刀 + ADR-0022 的 J4b）：
        那不是"没有这个函数"，是**实现在宿主那边** —— 发 `(ccall Owner_method self …)`。 */
     if (nm === null) {
@@ -14072,6 +14103,18 @@ class JncLower {
       const v = this.expr(callee, null);
       if (v === null) return null;
       return isFn(v.type) ? v : undefined;
+    }
+    /* 被调是一格 `? :`（第二百二十刀）：`y = (x ? c.foo : c.bar)();`（test41.jnc 那一族，
+       语料里 2 份）。与上面 `call` 那一支同一条理由 —— **没有别的意思可撞**（三元式写在被调
+       位置上只可能是"算出一格函数指针再调它"），所以直接求值。算出来不是函数指针就地说清，
+       别落到下面那句笼统的话上。 */
+    if (head(callee) === 'cond') {
+      const v = this.expr(callee, null);
+      if (v === null) return null;
+      if (!isFn(v.type)) {
+        return this.nope(callee, `被调的那一格 \`? :\` 算出来是 ${tyName(v.type)}，不是函数指针`);
+      }
+      return v;
     }
     if (head(callee) !== 'name' || !isAtom(callee.items[1])) return undefined;
     const r = this.lookupRef(callee.items[1].value);

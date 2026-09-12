@@ -1,0 +1,26 @@
+// 在一格**算出来的值**上叫方法，而那个方法名这一层一个类上都没见过（第二百二十刀把它从
+// "不是直接调一个名字的调用"那一句里拆出来）。语料里 13 份，原样是
+// `m_abr[0].close();`、`m_type.getDataPtrType(…).getTargetValueString(…)`、
+// `((io.EthernetAddress const*)p).getString();`
+//
+// 这**不是**"调用的形状不收"—— 左边是一格算出来的值那件事第五十二刀起就收（用例
+// cases/172-condcallee.jnc 旁边那一条 `pick(a, b, 1).val()` 也是）。真正的原因是**那个方法名
+// 这一层一个类上都没见过**：那些类躺在别的模块里（io.File、jnc.Type 那些），逐份编的时候
+// import 不着。所以它与 `没有这个类型` 是同一笔**口径**账。
+//
+// 左边是名字的时候上面那条路早就把话说准了（"X 没有方法 'm'"），这一格补的是"左边是一格算出来
+// 的值"那一半。
+struct S {
+	int m_v;
+}
+
+S* make() {
+	S* s = new S;
+	s.m_v = 1;
+	return s;
+}
+
+int main() {
+	printf("%d\n", make().nosuchMethod());
+	return 0;
+}
