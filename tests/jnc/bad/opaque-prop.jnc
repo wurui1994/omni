@@ -1,0 +1,24 @@
+// 第一百五十六刀的界：`opaque class` 上那格属性 —— 取值器与存值器都在宿主那边。
+//
+// `opaque` 说的是"这个类的布局在宿主的 C/C++ 那边"（opaque.rst:15-29），所以 `autoget` 那格
+// 存储也在那边。先前这一层替它合成了一格 `…$m_value` 字段、让取值器去读那一格 ——
+// **读出来的是我们自己那一格，不是宿主的状态**。那是悄悄给一个错答案，比"还不收"坏得多：
+// 写那一侧当时还报着"存值器没有定义"，读那一侧却"过"了，于是一半写宿主、一半读自己。
+//
+// 这一刀把那一格撤了，两侧都指着宿主面。真要收得给属性那两个函数也发
+// `(ccall Owner_get_p self)` / `(ccall Owner_set_p self v)` —— 与第六十六刀 construct 那一支
+// 同一条路，是 ADR-0022 J4b 剩下的一格。
+//
+// 语料里的原样：`opaque class Action { bool autoget property m_isCheckable; }`
+// （ui_Action.jnc:27）—— ui 那一族几乎每个类都是这个形状。逐份那张榜上写那一侧 103 处、
+// 读那一侧 58 处，而那 58 处**先前是不报的**。
+
+opaque class Widget {
+	bool autoget property m_isVisible;
+}
+
+int main() {
+	Widget* w;
+	printf("%d\n", w.m_isVisible);
+	return 0;
+}

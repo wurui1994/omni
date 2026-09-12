@@ -1097,6 +1097,9 @@ class JncLower {
        发 `(cabi Owner_method …)` 与 `(ccall Owner_method self …)`（ADR-0022 的 J4b 最后一步）。 */
     this.hostSigs = new Map();
     this.hostCtors = new Set();
+    /* `opaque class` 上那些属性的全名（第一百五十六刀）：取/存两个函数都在宿主那边 ——
+       这一层一格存储都不替它合成（合了就是拿自己那一格冒充宿主的状态）。 */
+    this.hostProps = new Set();
     /* 类 / 结构体体里**只有原型**的方法（第一百四十七刀）：裸名 -> 那几个主人的名字。
        与 hostFns 分开是因为**那些类没写 `opaque`** —— 不能替它们认下"实现在宿主的 C/C++ 那边"
        这件事（那会凭空发一格 `(ccall …)`）。这一格只用来把调用点那句话说对：
@@ -3935,8 +3938,14 @@ class JncLower {
       // `autoget`（第七十一刀）：这一格的取值器**不用写** —— 编译器生成一格存储，读属性就是
       // 读那一格（prop_autoget.rst:15-17）。简单声明式里存值器的体拿 `m_value` 称呼它
       //（同处:26）。与索引属性互斥，那是同一份文档最后一句（:47）。
-      const store = dsp.agt ? this.autoStore(d, full, cls, info.type, idx) : null;
-      if (dsp.agt && store === null) continue;
+      /* 主人是 `opaque class`（第一百五十六刀）：那个类的**布局是宿主的** —— 替它合成一格
+         `…$m_value` 存储、再让取值器去读它，读出来的是**我们自己**那一格、不是宿主的状态，
+         那是悄悄给一个错答案（与第六十六刀"不能装作没有构造就把对象交出去"是同一句话）。
+         所以这儿一格都不合成，只记进 hostProps —— 读写两侧各报一句指着宿主面的话。 */
+      const hostProp = cls !== null && this.opaques.has(cls);
+      if (hostProp) this.hostProps.add(full);
+      const store = dsp.agt && !hostProp ? this.autoStore(d, full, cls, info.type, idx) : null;
+      if (dsp.agt && !hostProp && store === null) continue;
       // `bindable`（第七十三刀）：编译器生成一格事件，名字是 `m_onChanged`。
       const onch = dsp.bnd ? this.bindStore(d, full, cls) : null;
       if (dsp.bnd && onch === null) continue;
@@ -4236,6 +4245,7 @@ class JncLower {
     }
     const s = `${pn}$set`;
     if (!this.fns.has(s)) {
+      if (this.hostProps.has(pn)) return this.hostPropNope(n, pn, '写');
       return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
         + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
     }
@@ -6901,6 +6911,25 @@ class JncLower {
   }
 
   /**
+   * `opaque class` 上那格属性的读写（第一百五十六刀）。
+   *
+   * 语料里的原样：`opaque class Action { bool autoget property m_isCheckable; }`
+   * （ui_Action.jnc:27）—— ui 那一族几乎每个类都是这个形状。`opaque` 说的是"这个类的布局在
+   * 宿主的 C/C++ 那边"（opaque.rst:15-29），所以那格 `autoget` 的存储也在那边。
+   *
+   * 先前这一层替它合成了一格 `…$m_value` 字段、取值器去读那一格：**读出来的是我们自己那一格、
+   * 不是宿主的状态**。那是悄悄给一个错答案 —— 比"还不收"坏得多。所以这一刀把那一格撤了，
+   * 两侧都指着宿主面（与第六十六刀 construct 那一支同一句话、同一条路：真要收得给属性那两个
+   * 函数也发 `(ccall Owner_get_p self)` / `(ccall Owner_set_p self v)`，那是 ADR-0022 J4b
+   * 剩下的一格）。
+   */
+  hostPropNope(node, pn, which) {
+    return this.nope(node, `${which}属性 '${shown(pn)}' —— 它的主人是 opaque class，`
+      + '取值器与存值器都在宿主的 C/C++ 那边（opaque.rst:15-29）；这一层不替它合成存储'
+      + ' —— 合了就是拿自己那一格冒充宿主的状态');
+  }
+
+  /**
    * 读一格属性（第六十八刀）：就是调取值器。属性在源码里长得像变量，所以这一问挂在
    * "名字查不着变量"之后 —— 见 `case 'name'`。成员属性多传一格对象（第六十九刀）。
    */
@@ -6908,6 +6937,7 @@ class JncLower {
     const pi = this.props.get(pn);
     const g = `${pn}$get`;
     if (!this.fns.has(g)) {
+      if (this.hostProps.has(pn)) return this.hostPropNope(n, pn, '读');
       return this.nope(n, `读属性 '${shown(pn)}' —— 它的取值器没有定义`
         + '（简单声明式的体写在别处：`T p.get() { … }`，prop_simple.rst:25）');
     }
@@ -6935,6 +6965,7 @@ class JncLower {
     }
     const s = `${pn}$set`;
     if (!this.fns.has(s)) {
+      if (this.hostProps.has(pn)) return this.hostPropNope(n, pn, '写');
       return this.nope(n, `写属性 '${shown(pn)}' —— 它的存值器没有定义`
         + '（简单声明式的体写在别处：`p.set(T x) { … }`，prop_simple.rst:29）');
     }
