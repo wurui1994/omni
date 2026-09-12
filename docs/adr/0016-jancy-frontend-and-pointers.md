@@ -9662,6 +9662,43 @@ C 里那几个实参的求值顺序是未指定的（头一版双胞胎踩了这
   一起编那张榜 `62`、理由 `23` 也没动。`不写 try 调 errorcode` 那一行 `158` 没动 ——
   新收下来的那几格 `errorcode` 都在只有原型的声明上，还没有调用点够得着。
 
+### 第一百九十七刀：结构体上那格只有原型的方法也归宿主面
+
+`std_Guid.jnc` 剩下的两条：
+
+```
+没有这个函数：'parse'
+原型 'std.Guid.isEqual' 没有带体的定义（实现在宿主那边的走 opaque class 那条路…）
+```
+
+`struct Guid` 的三个方法（`isEqual` / `getString` / `parse`）在源码里只有原型 —— 体在 jancy 的 C++ 那边：
+`JNC_BEGIN_TYPE_FUNCTION_MAP(Guid)` 里三条 `JNC_MAP_FUNCTION`（jnc_std_Guid.cpp:28-31）。
+这一层的宿主面登记（`hostFns` / `hostSigs`）先前压在 `if (cls)` 里头，结构体那一支在它**前面**就
+`continue` 了 —— 于是那句话说的是"实现在宿主那边的走 opaque class 那条路"，而**这就是那条路**，
+只是它当时不收结构体。
+
+这是第一百八十三刀那条线的第二段：那一刀去掉的是 `opaque` 那道闸门（`opaque` 说的是**布局**
+不透明，opaque.rst 整篇讲的都是字段与大小，它管的不是"体在哪儿"）；这一刀去掉的是"得是个类"
+那道 —— jancy 的 `JNC_BEGIN_TYPE_FUNCTION_MAP` 对类与结构体是**同一个宏**。决定"体在宿主"的
+只有一件事：这个模块里没有那个体。
+
+三处：登记那一段挪到 `if (!cls) continue` 之前；`hostMethodCall` 收下 `k === 'struct'` 的 self
+（结构体那一格里放的**本来就是地址**，第十二刀 —— 所以过 C_ABI 时与类那一格一样是 `ptr`；
+结构体没有基类链，所以主人那一步只按它自己那个名字认）；方法体里**裸写**的那一支（第一百七十刀）
+`this` 的类型改用 `selfTy`（结构体的 `construct` 里 `parse(string)` 就是这个形状，std_Guid.jnc:77）。
+
+判据在 `tests/llvm/run.js` 第 9 节：`struct Pt { long m_x; long shift(long d); }`，`pt.m_x = 40`
+之后 `pt.shift(2)` 印 `pt 42`。宿主那边 `Pt_shift` 读的是 `*(const int64_t *)self` —— 这一层一格
+int 是 8 字节（与第一百九十刀那格 `Plain_blen` 同一条），所以这一句要证的正是"self 真指着那个
+结构体"，而不只是"符号名对了"。`.sx` 里那一句是 `(cabi Pt_shift i64 (ptr i64))`。
+
+- 腿：`node tests/jnc/run.js` 283/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `143 -> 144`（+1）、clean `215 -> 216`（+1）、`(文件, 拦路项)` 对
+  `4487 -> 4483`（−4）；一起编那张榜 `62`、理由 `23` 没动。
+- `std_Guid.jnc` 那两条没了；`std_Error.jnc` 单编从 7 条降到 2 条，剩下的是同一件事的两半：
+  `结构体的成员属性 'm_description'`（`string_t const property m_description thin;`，:75）与它
+  引起的 `std.Error 没有字段 'm_description'`（:104）。那是**下一格**。
+
 
 
 ## 后果与代价

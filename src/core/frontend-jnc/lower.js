@@ -5740,6 +5740,50 @@ class JncLower {
           const an0 = this.flat(info.formals).length;
           if (av === undefined) this.protoArity.set(ak, new Set([an0]));
           else av.add(an0);
+          /* 那些**没有体**的原型（第六十六刀 + ADR-0022 的 J4b；第一百八十三刀去掉 `opaque`
+             那道闸门，第一百九十七刀去掉"得是个类"那道）：实现在宿主的 C/C++ 里。名字与**签名**
+             都记下来：调用点据此发 `(ccall Owner_method self …)`。体外真写了定义时这一格用不上
+             （调用那边先按名字查，查着了就不问这里）。
+
+             **为什么结构体也算**：jancy 那边 `JNC_MAP_FUNCTION` 挂在 `JNC_BEGIN_TYPE_FUNCTION_MAP`
+             上，那个宏对类与结构体是同一个（`struct Guid` 的三个方法就是这么映过去的 ——
+             jnc_std_Guid.cpp:28-31 的 `isEqual` / `getString` / `parse`）。决定"体在宿主"的只有
+             一件事：这个模块里没有那个体。`this` 那一格的类型由 selfTy 挑（结构体那一格里放的
+             本来就是地址，第一百〇一刀）。
+
+             **为什么不再看 `opaque`**（第一百八十三刀翻的那条线）：`opaque` 在 jancy 里说的是
+             "这个类的**布局**对 jancy 不透明"（opaque.rst 整篇讲的都是字段与大小），它管的不是
+             "方法的体在哪儿"。而"没有体的函数"在 jancy 里**不是编译期错误**（量过：它没有那条
+             检查），所以我们照着同一个形状办，代价也照实记：写错名字的那种从"编译期一句诊断"
+             变成"链接期找不着符号"（与 `(cabi …)` 那条路一样，ADR-0022 的 J4b 早就接受了这一笔）。 */
+          {
+            const hf = this.hostFns.get(info.name);
+            if (hf === undefined) this.hostFns.set(info.name, new Set([name]));
+            else hf.add(name);
+            const hps = this.formalList(info.formals);
+            if (hps !== null) {
+              const hk = `${name}$${info.name}`;
+              /* 同名两条原型（第一百六十四刀 -> 第一百七十一刀）：按**声明顺序**排成一串，
+                 符号名头一条仍叫 `Owner_method`、之后的叫 `Owner_method_o2` / `_o3`…
+                 （`$` 不是可移植的 C 标识符字符）。这是**我们自己的约定** —— jancy 那边没有
+                 可照抄的推导规则：它的重载是宿主一条条 `JNC_MAP_OVERLOAD` 登记、名字由写
+                 绑定的人定。 */
+              const prev = this.hostSigs.get(hk);
+              /* 原型上那几格默认值也记下来（第一百六十九刀）：`string_t readString(string_t name,
+                 string_t defaultValue = null);`（doc_Storage.jnc:43-46）—— 调用点只给一个实参是
+                 对的，而先前宿主面那条路只比个数、不补默认值，于是报"要 2 个实参，这里给了 1 个"
+                 （逐份榜上 91 处）。与普通调用那一侧用的是同一份 withDefaults。 */
+              const hdefs = hps.map((p) => p.def ?? null);
+              const one = {
+                owner: name,
+                ret: info.type,
+                params: hps.map((p) => p.type),
+                defs: hdefs.some((d) => d !== null) ? hdefs : null,
+              };
+              if (prev === undefined) this.hostSigs.set(hk, [one]);
+              else prev.push(one);
+            }
+          }
           // 结构体里的方法原型（第一百〇一刀）：签名由体外那个定义给，这儿一个字都不用发。
           if (!cls) continue;
           if (sp.virt !== null) this.methodProto(d, name, info, sp);
@@ -5751,49 +5795,6 @@ class JncLower {
               && f.items[3] !== undefined ? f.items[3] : null));
             if (dn2.some((x) => x !== null)) {
               this.protoDefs.set(`${name}$${info.name}#${fs2.length}`, dn2);
-            }
-          }
-          /* 类里那些**没有体**的原型（第六十六刀 + ADR-0022 的 J4b，第一百八十三刀把
-             `opaque` 那道闸门去掉）：实现在宿主的 C/C++ 里（opaque.rst:15-29 的 `io.Serial`
-             就是这个形状）。名字与**签名**都记下来：调用点据此发 `(ccall Owner_method self …)`。
-             体外真写了定义时这一格用不上（调用那边先按名字查，查着了就不问这里）。
-
-             **为什么不再看 `opaque`**（这一条翻的是先前记下的一条线）：`opaque` 在 jancy 里说的是
-             "这个类的**布局**对 jancy 不透明"（opaque.rst 整篇讲的都是字段与大小），它管的不是
-             "方法的体在哪儿"。决定"体在宿主"的只有一件事：**这个模块里没有那个体**。jancy 那边
-             `JNC_MAP_FUNCTION` 也不问类是不是 opaque —— 任何声明过的函数都能映到 C 的实现上。
-             而"没有体的函数"在 jancy 里**不是编译期错误**（量过：它没有那条检查），所以我们照着
-             同一个形状办，代价也照实记：写错名字的那种从"编译期一句诊断"变成"链接期找不着符号"
-             （与 `(cabi …)` 那条路一样，ADR-0022 的 J4b 早就接受了这一笔）。 */
-          if (cls) {
-            const hf = this.hostFns.get(info.name);
-            if (hf === undefined) this.hostFns.set(info.name, new Set([name]));
-            else hf.add(name);
-            const hps = this.formalList(info.formals);
-            if (hps !== null) {
-              const hk = `${name}$${info.name}`;
-              /* 同名两条原型（第一百六十四刀）：宿主那边**一个符号只有一份签名**（C 没有重载），
-                 所以这一格记不下第二条 —— 先前是后一条盖掉前一条，于是调用点拿**错的那一份**
-                 去查型（`void lock(int)` / `void lock(double)` 里给 1.5 会按 int 检查）。
-                 那是个静默的错答案，所以在这儿记一笔，调用点明说不收。 */
-              const prev = this.hostSigs.get(hk);
-              /* 原型上那几格默认值也记下来（第一百六十九刀）：`string_t readString(string_t name,
-                 string_t defaultValue = null);`（doc_Storage.jnc:43-46）—— 调用点只给一个实参是对的，
-                 而先前宿主面那条路只比个数、不补默认值，于是报"要 2 个实参，这里给了 1 个"
-                 （逐份榜上 91 处）。与普通调用那一侧用的是同一份 withDefaults。 */
-              const hdefs = hps.map((p) => p.def ?? null);
-              /* 同名那几条按**声明顺序**排成一串（第一百七十一刀）：符号名头一条仍叫
-                 `Owner_method`、之后的叫 `Owner_method_o2` / `_o3`…（`$` 不是可移植的 C 标识符
-                 字符，所以用 `_o`）。这是**我们自己的约定** —— jancy 那边没有可照抄的推导规则：
-                 它的重载是宿主一条条 `JNC_MAP_OVERLOAD` 登记、名字由写绑定的人定。 */
-              const one = {
-                owner: name,
-                ret: info.type,
-                params: hps.map((p) => p.type),
-                defs: hdefs.some((d) => d !== null) ? hdefs : null,
-              };
-              if (prev === undefined) this.hostSigs.set(hk, [one]);
-              else prev.push(one);
             }
           }
           continue;
@@ -11992,7 +11993,11 @@ class JncLower {
       bv = this.baseVal(ob);
     }
     if (bv === null) return null;
-    if (!isClass(bv.type)) {
+    /* 结构体也算（第一百九十七刀）：`struct Guid` 的三个方法在 jancy 那边就是宿主实现的
+       （jnc_std_Guid.cpp:28-31）。它那一格里放的**本来就是地址**（第十二刀），所以 self 过
+       C_ABI 时与类那一格一样是 `ptr`。结构体没有基类链，所以主人那一步只按它自己那个名字认。 */
+    const structSelf = bv.type.k === 'struct';
+    if (!isClass(bv.type) && !structSelf) {
       return this.err(n, `'${tyName(bv.type)}' 不是类，上面问不出方法 '${mn}'`);
     }
     /* 主人按**对象**认（第一百六十八刀）：同一个方法名可以在好几个 `opaque class` 上各声明一条
@@ -12002,7 +12007,7 @@ class JncLower {
        88 处报的"第 1 个实参要 ui.FlagPropertyOption*，这里是 ui.ListItem*"就是它）。
        这儿先看对象自己那个类，再往基类走 —— 与普通方法查名同一条路。 */
     let owner = owners.has(bv.type.name) ? bv.type.name : null;
-    if (owner === null) {
+    if (owner === null && !structSelf) {
       for (const o of owners) if (this.isBase(o, bv.type.name)) { owner = o; break; }
     }
     if (owner === null) {
@@ -13056,10 +13061,14 @@ class JncLower {
          "原型没有带体的定义"。可这儿的 `this` 就是那个对象：主人是当前这个类（或它的基类）时，
          按宿主面那条路发，`self` 就是 `$this`。 */
       const hb = bare === null ? undefined : this.hostFns.get(bare);
+      /* 结构体的方法体里裸写的也算（第一百九十七刀）：`struct Guid` 的 `construct` 里
+         `parse(string)` 就是这个形状（std_Guid.jnc:77）。结构体没有基类链，所以只问自己那一格。 */
       if (hb !== undefined && this.selfClass !== null
-        && (hb.has(this.selfClass) || [...hb].some((o) => this.isBase(o, this.selfClass)))) {
+        && (hb.has(this.selfClass)
+          || (this.classes.has(this.selfClass)
+            && [...hb].some((o) => this.isBase(o, this.selfClass))))) {
         return this.hostMethodCall(n, null, hb, bare,
-          { code: '(var $this)', type: tClass(this.selfClass, false) });
+          { code: '(var $this)', type: this.selfTy(this.selfClass) });
       }
       const owners = bare === null ? undefined : this.protoMethods.get(bare);
       if (owners !== undefined) {

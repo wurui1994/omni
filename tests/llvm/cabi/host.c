@@ -174,6 +174,16 @@ int64_t hostVsum(int64_t n, ...) {
   return s;
 }
 
+/* **结构体**上那格只有原型的方法（第一百九十七刀）。jancy 那边 `JNC_MAP_FUNCTION` 挂在
+   `JNC_BEGIN_TYPE_FUNCTION_MAP` 上，那个宏对类与结构体是同一个（`struct Guid` 的三个方法
+   就是这么映的，jnc_std_Guid.cpp:28-31）。符号名的约定照旧 `Owner_method`，第一个形参是
+   那个对象 —— 结构体那一格里放的本来就是地址。这一层一格 int 是 8 字节（与第一百九十刀
+   那格 `Plain_blen` 同一条），所以第 0 个字段按 int64 读得出来：这一句要证的正是
+   "self 真指着那个结构体"。 */
+int64_t Pt_shift(void *self, int64_t d) {
+  return self == NULL ? -1 : *(const int64_t *)self + d;
+}
+
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型
    （`property m_scale { long get(); void set(long); }`，ui_PropertyGrid.jnc:78-88 那个形状）
    时，体也在宿主这边；符号名的约定与方法同一条，只是中间多一段 `get_` / `set_`：
