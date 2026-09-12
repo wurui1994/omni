@@ -1101,6 +1101,9 @@ class JncLower {
        发 `(cabi Owner_method …)` 与 `(ccall Owner_method self …)`（ADR-0022 的 J4b 最后一步）。 */
     this.hostSigs = new Map();
     this.hostCtors = new Set();
+    /* 那些 `opaque class` 里 `construct` 的**形参类型**（第一百六十二刀）：`new C(…)` 据此发
+       `(ccall C_construct self …)` —— 与方法（J4b）、属性的取/存（第一百六十刀）同一条约定。 */
+    this.hostCtorSigs = new Map();
     /* 属性全名 -> `{get, set}`：那两个取/存**只有原型、没有体**（`opaque class` 里那种，
        ui_PropertyGrid.jnc:78-88）。体在宿主的 C/C++ 那边，所以读写落成
        `(ccall Owner_get_prop self)` / `(ccall Owner_set_prop self v)` —— 与方法那一格
@@ -5347,7 +5350,15 @@ class JncLower {
         const sk = specialCore(m.items[2]);
         if (sk === 'construct' || sk === 'static construct') {
           // 同上（第六十六刀）：`opaque class` 的 construct 也在宿主那边。
-          if (cls && key === 'opaque class' && sk === 'construct') this.hostCtors.add(name);
+          if (cls && key === 'opaque class' && sk === 'construct') {
+            this.hostCtors.add(name);
+            /* 形参类型也记下来（第一百六十二刀）：`new C(…)` 据此发 `(ccall C_construct …)`。
+               形参表在声明符的后缀里（`(fn-suffix (formals …))`），与 hostSigs 那一格同一遍。 */
+            const sfx0 = this.flat(m.items[2].items[3])
+              .find((x) => isList(x) && head(x) === 'fn-suffix');
+            const hps0 = sfx0 === undefined ? null : this.formalList(sfx0.items[1]);
+            if (hps0 !== null) this.hostCtorSigs.set(name, hps0.map((p) => p.type));
+          }
           /* 没写 `opaque` 的类里那格只有原型的 construct（第一百四十八刀）：体外真写了定义时
              这一格用不上（`ctors` 那时有它，下面几处先问那张表）。 */
           else if (cls && sk === 'construct') this.protoCtors.add(name);
@@ -7344,9 +7355,19 @@ class JncLower {
    * 回 `undefined` 表示"这一格不是宿主面的"（调用方接着发它自己那句诊断）；回 null 是报过错了。
    */
   hostProp(n, pn, pi, self, kind, val) {
-    const ha = this.propHostAcc.get(pn);
-    if (ha === undefined || ha[kind] !== true) return undefined;
     if (pi === undefined || pi.cls === null || !this.opaques.has(pi.cls)) return undefined;
+    /* 两种写法都算宿主面（第一百六十刀 + 第一百六十二刀）：
+         - 完整声明式里那格**只有原型**的取/存（`property m_value { void set(variant_t); }`，
+           ui_PropertyGrid.jnc:80）—— `propHostAcc` 上记着；
+         - 简单声明式**一个体都没写**（`string_t const property m_name;`，同文件:22）——
+           `opaque class` 里那就是"体在宿主那边"，与方法那一格（第六十六刀）一模一样：
+           那个类的成员**全都**在宿主的 C/C++ 里（opaque.rst:15-29）。
+       这一格进得来说明取/存那个函数确实没有定义（调用方那两处先问的就是 `fns`）。 */
+    const ha = this.propHostAcc.get(pn);
+    if (ha !== undefined && ha[kind] !== true && (ha.get || ha.set)) {
+      /* 体里明写了另一半、这一半没写：那是"这格属性只有取值器 / 只有存值器"，不是宿主面。 */
+      return undefined;
+    }
     if (pi.idx.length > 0) {
       return this.nope(n, `${kind === 'get' ? '读' : '写'}属性 '${shown(pn)}' —— 它是带下标的、`
         + '而取/存那两格的体在宿主那边（那一格要先把下标也摆进 C_ABI 那张表）');
@@ -11157,6 +11178,15 @@ class JncLower {
     if (t.k === 'bool') return 'bool';
     if (t.k === 'real') return 'f64';
     if (t.k === 'int') return t.w <= 32 ? 'i32' : 'i64';
+    /* 枚举**就是它的底整数**（第一百六十三刀，翻第一百三十九刀那条"不猜"的案）：这不是猜，
+       是 jancy 的代码生成本身 ——
+
+           // jnc_ct_EnumType.h:182-183
+           prepareLlvmType() { m_llvmType = m_baseType->getLlvmType(); }
+
+       也就是说枚举在**调用约定这一层根本不存在**：过去的就是那格整数。所以宿主面上按底整数
+       过是照抄，不是"悄悄按底整数传过去"。 */
+    if (jncIsEnum(t)) return this.cabiWordOfJnc(t.base, isRet);
     if (t.k === 'ptr' || t.k === 'tptr' || t.k === 'class' || t.k === 'string' || t.k === 'arr') {
       return 'ptr';
     }
@@ -11230,8 +11260,49 @@ class JncLower {
     return { code: `(ccall ${sym} ${parts.join(' ')})`, type: sig.ret };
   }
 
-  ccallSite(n, nm, sig) {
-    const args = this.flat(n.items[2]);
+  /**
+   * 宿主面 construct 的实参（第一百六十二刀）。回 `{sym, vals}`：符号名与已经查过型的那几格
+   * 实参；说不通时发诊断回 null。签名是**声明**里那一份（`hostCtorSigs`），与方法那一格
+   * （hostMethodCall）逐字同一套检查 —— 落不进 C_ABI 那几个词的明说不收，不猜。
+   */
+  hostCtorArgs(n, cls, argNodes) {
+    const sig = this.hostCtorSigs.get(cls);
+    if (sig === undefined) {
+      return this.nope(n, `造一格 '${shown(cls)}' —— 它那格 construct 的形参表没收下来`
+        + '（体在宿主的 C/C++ 那边，opaque.rst:15-29）');
+    }
+    if (argNodes.length !== sig.length) {
+      return this.err(n, `'${shown(cls)}' 的 construct 要 ${sig.length} 个实参，`
+        + `这里给了 ${argNodes.length} 个`);
+    }
+    const sym = `${cls.replace(/\$/g, '_')}_construct`;
+    const words = ['ptr'];
+    const vals = [];
+    for (let i = 0; i < argNodes.length; i++) {
+      const w = this.cabiWordOfJnc(sig[i], false);
+      if (w === null) {
+        return this.nope(n, `'${shown(cls)}' 的 construct 的第 ${i + 1} 个形参的类型 `
+          + `${tyName(sig[i])}（落不进 C_ABI 的那几个词）`);
+      }
+      let v = this.expr(argNodes[i], sig[i]);
+      if (v === null) return null;
+      if (isInt(v.type) && isInt(sig[i])) v = intConv(v, sig[i]);
+      if (!this.assignOk(v.type, sig[i])) {
+        return this.err(argNodes[i], `'${shown(cls)}' 的 construct 的第 ${i + 1} 个实参要 `
+          + `${tyName(sig[i])}，这里是 ${tyName(v.type)}`);
+      }
+      words.push(w);
+      vals.push(v);
+    }
+    if (!this.cabiNames.has(sym)) {
+      this.decls.push(`  (cabi ${sym} void (${words.join(' ')}))`);
+      this.cabiNames.add(sym);
+      this.cabiSigs.set(sym, { ret: 'void', params: words, sym });
+    }
+    return { sym, vals };
+  }
+
+  ccallSite(n, nm, sig) {    const args = this.flat(n.items[2]);
     const va = sig.variadic === true;
     if (va ? args.length < sig.params.length : args.length !== sig.params.length) {
       return this.err(n, va
@@ -12460,8 +12531,25 @@ class JncLower {
          报出来的是"要 0 个实参，这里给了 1 个"（逐份榜上这一族十来行、每行 88 处）。
          合出来的那一格顶不了用户声明的那一个，所以问的该是"有没有**真的**那一个"。 */
       if (!this.realCtor(t.name) && this.hostCtors.has(t.name)) {
-        return this.nope(n, `造一格 '${shown(t.name)}' —— 它的 construct 声明在 opaque class 里、`
-          + '实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面');
+        /* 宿主面的 construct（第一百六十二刀）：与方法（ADR-0022 的 J4b）、属性的取/存
+           （第一百六十刀）同一条约定 —— 造完那一格、写完 `$tag`，紧接着
+           `(ccall C_construct self …)`。签名是**声明**里那一份（hostCtorSigs），不是从调用点猜的。 */
+        const hc = this.hostCtorArgs(n, t.name, argsNode === null ? [] : this.flat(argsNode));
+        if (hc === null) return null;
+        const st0 = slotText(t);
+        const ps0 = hc.vals.map((v, i) => `($i${i} ${slotText(v.type)})`).join(' ');
+        const tg0 = this.tagStore(n, t.name, '(var $p)', '      ');
+        if (tg0 === null) return null;
+        const fn0 = `$newh${this.tmp++}`;
+        this.decls.push(`  (fn ${fn0} (${ps0}) ${st0}\n    (do\n`
+          + `      (let $p ${st0} ${raw.code})\n${tg0}\n`
+          + `      (expr (ccall ${hc.sym} (var $p)`
+          + `${hc.vals.map((v, i) => ` (var $i${i})`).join('')}))\n`
+          + `      (ret (var $p))))`);
+        return {
+          code: `(call ${fn0}${hc.vals.map((v) => ` ${v.code}`).join('')})`,
+          type: raw.type,
+        };
       }
       // 只有原型的 construct（第一百四十八刀）：与上一条同一件事，只是那个类没写 `opaque`。
       if (this.protoCtorOnly(t.name)) return this.protoCtorNope(n, t.name);

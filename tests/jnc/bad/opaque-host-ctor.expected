@@ -1,1 +1,1 @@
-造一格 'Lock' —— 它的 construct 声明在 opaque class 里、实现在宿主的 C/C++ 那边（opaque.rst:15-29），这一层还没有宿主面
+'Lock' 的 construct 的第 1 个形参的类型 Cfg（落不进 C_ABI 的那几个词）

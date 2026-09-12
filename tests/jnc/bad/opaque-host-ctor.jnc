@@ -1,16 +1,24 @@
-// `opaque class` 上声明的 construct，体也在宿主那边（ADR-0016 第六十六刀）。
-// 这一条不能"当没有构造"悄悄放过去：那样交出来的对象是一格全零的内存，而 jancy 那边
-// 宿主的构造是真跑了的（opaque.rst:69 那句 "only if their declaration includes
-// **operator new**" 说的就是这一格由宿主提供）。少跑一段比报错难查得多。
+// `opaque class` 上声明的 construct **现在能降了**（第一百六十二刀）：`new Lock(…)` 是"造一格、
+// 写 `$tag`、再 `(ccall Lock_construct self …)`"，与方法（ADR-0022 的 J4b）、属性的取/存
+// （第一百六十刀）同一条约定。正面判据在 `tests/llvm/run.js` 第 9 节（那儿有宿主的体）。
 //
-// 体外真写了 `Lock.construct() { … }` 的时候这一条不响 —— 那就有实现了，见 cases/62-opaque.jnc。
+// 这一条留下来钉的是**边界**：形参要落进 C_ABI 那几个词。**枚举现在能过了**（第一百六十三刀）——
+// jancy 的枚举在代码生成这一层就是它的底整数（jnc_ct_EnumType.h:182-183）。落不进的是按值过去的
+// **结构体**：那一格在 C 的调用约定里按大小拆寄存器/进栈（arm64 与 x86-64 还不一样），要先把
+// 那套规则量出来才能发 —— 按一格指针糊过去是**猜**，而猜错的调用约定比报一句错难查得多。
+struct Cfg {
+	int m_a;
+	int m_b;
+}
+
 opaque class Lock {
 	int m_depth;
 
-	construct();
+	construct(Cfg cfg);
 }
 
 int main() {
-	Lock* p = new Lock();
+	Cfg c;
+	Lock* p = new Lock(c);
 	return 0;
 }

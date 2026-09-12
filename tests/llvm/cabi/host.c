@@ -49,8 +49,15 @@ static int64_t *probe_slot(void *self) {
   return NULL;
 }
 
-int64_t Counter_add(void *self, int64_t d) {
+/* 宿主面的 construct（第一百六十二刀）：`new Counter(start)` 落成"造一格 + 写 $tag +
+   `(ccall Counter_construct self start)`"，符号名的约定与方法同一条。这一格把初值**记进**
+   宿主自己那张表，所以后面 add 出来的数带着它 —— 那正是"construct 真跑了"的判据。 */
+void Counter_construct(void *self, int64_t start) {
   int64_t *p = probe_slot(self);
+  if (p != NULL) *p = start;
+}
+
+int64_t Counter_add(void *self, int64_t d) {  int64_t *p = probe_slot(self);
   if (p == NULL) return -1;
   *p += d;
   return *p;

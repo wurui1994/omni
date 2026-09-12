@@ -1,19 +1,24 @@
-// `opaque class` 上的方法**现在能降了**（ADR-0022 的 J4b 最后一步）：`p.lock()` 是一次对
+// `opaque class` 上的方法**能降**（ADR-0022 的 J4b 最后一步）：`p.lock(…)` 是一次对
 // `Lock_lock(self, …)` 的真调用，正面判据在 `tests/llvm/run.js` 第 9 节（那儿有宿主的体）。
 //
-// 这一条留下来钉的是**边界**：签名要落进 C_ABI 那几个词。枚举落不进 —— 它在这一侧是一格
-// 有自己规范形的类型（第三十九刀），而那一端只有 i32/i64/f64/bool/ptr/void 可写。
-// 悄悄按底整数传过去是**猜**，而猜错的调用约定比报一句错难查得多。
-enum Mode { fast, slow }
-
+// 这一条留下来钉的是**边界**：签名要落进 C_ABI 那几个词。**枚举现在能过了**（第一百六十三刀
+// 翻了这一份先前钉的那条案）—— jancy 的枚举在代码生成这一层就是它的底整数：
+//
+//     // jnc_ct_EnumType.h:182-183
+//     prepareLlvmType() { m_llvmType = m_baseType->getLlvmType(); }
+//
+// 所以按底整数过是**照抄**，不是猜。落不进的是 `variant_t` 这一种：它在 jancy 那边是带标签的
+// 一格值（数据加类型指针，variant.rst），过 C_ABI 得先定"那两格怎么摆、算几个字"——
+// 那是 ADR-0026 那一族的账，要先在四条腿上量。按一格整数糊过去才是猜，而猜错的调用约定比报
+// 一句错难查得多。
 opaque class Lock {
 	int m_depth;
 
-	void lock(Mode m);
+	void lock(variant_t tag);
 }
 
 int main() {
 	Lock* p = new Lock();
-	p.lock(Mode.fast);
+	p.lock(7);
 	return 0;
 }
