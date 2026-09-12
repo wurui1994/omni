@@ -327,6 +327,10 @@ const tFn = (params, ret, thin = false) => ({ k: 'fnptr', params, ret, thin });
  * ptrsTy 里碰到第一个 `*` 就变成 fnptr，一个 `*` 都不带的用法当场拒。 */
 const tFnTy = (params, ret) => ({ k: 'fnty0', params, ret });
 const isFn = (t) => t.k === 'fnptr';
+/* `pickOverload` 的一格哨兵（第一百八十七刀）：**带体的那几条都不合，可宿主面那张表里有**。
+ * 回一个名字（字符串）那一格里放不下这个意思，所以给它一个不可能与真名字撞的值。
+ * 只有把 `hostOk` 开着的调用方才拿得到它 —— 拿到就去 `protoHostRetry` 那儿再挑一次。 */
+const HOST_PICK = '\u0000host';
 
 const isInt = (t) => t.k === 'int';
 const isArr = (t) => t.k === 'arr';
@@ -8234,7 +8238,7 @@ class JncLower {
    *
    * @returns 挑中的方言名，或 null（已经报过错）
    */
-  pickOverload(n, base, argNodes, hasSelf) {
+  pickOverload(n, base, argNodes, hasSelf, hostOk = false) {
     const cands = this.overloads.get(base);
     if (cands === undefined) return base;
     const given = argNodes.length;
@@ -8253,6 +8257,7 @@ class JncLower {
     if (fits.length === 1) return fits[0];
     if (fits.length === 0) {
       // 那个类里同名的还有只有原型的几条（第一百五十刀）：数出来的个数本来就不全，别说成"对不上"
+      if (hostOk && this.hostSibling(base)) return HOST_PICK;
       if (this.protoSibling(base)) return this.protoSiblingNope(n, base, given);
       const counts = cands.map((c) => shape(c).want.length);
       return this.err(n, `'${shown(base)}' 有 ${cands.length} 条重载，收的实参个数是 `
@@ -8281,6 +8286,7 @@ class JncLower {
     }
     if (best === -1) {
       // 同上（第一百五十刀）：合得上的那一条可能就在没进候选的那几条原型里
+      if (hostOk && this.hostSibling(base)) return HOST_PICK;
       if (this.protoSibling(base)) return this.protoSiblingNope(n, base, given);
       return this.err(n, `'${shown(base)}' 的 ${fits.length} 条重载没有一条收得下这几个实参`
         + `（${tys.map((t) => tyName(t.ty)).join(', ')}）`);
@@ -11756,6 +11762,14 @@ class JncLower {
     };
   }
 
+  /** 宿主面那张表里有没有这个名字（第一百八十七刀）：`base` 是方言里那个名字（重载改名过的
+   *  末尾带 `$oN`），而 `hostSigs` 的键是"主人$方法名"。 */
+  hostSibling(base) {
+    const b = /\$o[0-9]+$/.test(base) ? base.slice(0, base.lastIndexOf('$')) : base;
+    const sigs = this.hostSigs.get(b);
+    return sigs !== undefined && sigs.length > 0;
+  }
+
   /**
    * 上面那一格的重试（第一百八十六刀）：`nm` 这个名字在**宿主面**那张表里也有几条时，按宿主面
    * 那条路（hostMethodCall）再挑一次。回 `undefined` 表示"那张表里没有"（调用方接着发它自己的
@@ -12911,7 +12925,15 @@ class JncLower {
        才定下来（方法体里裸写 `foo()` 那条也补好了 `this`），而方法的元数要减掉 this 那一格。
        挑完再往下走 —— 下面那一整段（默认值、个数、类型）一个字都不用改。 */
     if (this.overloads.has(nm)) {
-      const pick = this.pickOverload(n, nm, args0, self !== null);
+      /* `hostOk` 那一格（第一百八十七刀）：带体的那几条都不合、而宿主面那张表里有同名的时，
+         `pickOverload` **安静地**回一格哨兵（不发诊断），这儿改挑宿主面那条。这时候一个实参
+         都还没降（`pickOverload` 只用 cheapTy 问类型、不降），所以不会把谁降两遍。 */
+      const pick = this.pickOverload(n, nm, args0, self !== null, self !== null);
+      if (pick === HOST_PICK) {
+        const hr0 = this.protoHostRetry(n, nm, self);
+        if (hr0 !== undefined) return hr0;
+        return this.protoSiblingNope(n, nm, args0.length);
+      }
       if (pick === null) return null;
       nm = pick;
     }
