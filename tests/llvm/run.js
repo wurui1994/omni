@@ -406,7 +406,9 @@ if (existsSync(sysDir)) {
       /* 没写 `opaque` 的类里那格只有原型的方法（第一百八十三刀）：符号名的约定与 opaque
          那一支一模一样 —— `opaque` 说的是"布局不透明"，管的不是"体在哪儿"。 */
       + 'class Plain {\n'
+      + '    construct(long seed);\n'
       + '    long twice(long x);\n'
+      + '    long seeded();\n'
       + '}\n\n'
       + 'int main() {\n'
       + '    Counter* c = new Counter(100);\n'
@@ -425,14 +427,14 @@ if (existsSync(sysDir)) {
          standard C function ``rand``"，所以发的是一句 `(ccall rand …)` —— 而 C_ABI 符号只有
          原生腿上才有（ADR-0014 的第 4 条决定），判据就得摆在这儿而不是 tests/jnc。 */
       + '    printf("rand %d\\n", rand() >= 0);\n'
-      + '    Plain* q = new Plain;\n'
-      + '    printf("plain %d\\n", q.twice(21));\n'
+      + '    Plain* q = new Plain(5);\n'
+      + '    printf("plain %d %d\\n", q.twice(21), q.seeded());\n'
       + '    return 0;\n'
       + '}\n');
     const r = run(['run-jit', src], 90000);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
-    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42\\n"）`);
+    else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
@@ -451,8 +453,9 @@ if (existsSync(sysDir)) {
     } else if (!sx.out.includes('(cabi rand i32 ())')) {
       detail.push('    emit sx 里没有 `(cabi rand i32 ())`');
     /* 没写 opaque 的那一格用的是同一条约定（第一百八十三刀）。 */
-    } else if (!sx.out.includes('(cabi Plain_twice i64 (ptr i64))')) {
-      detail.push('    emit sx 里没有 `(cabi Plain_twice i64 (ptr i64))`');
+    } else if (!sx.out.includes('(cabi Plain_twice i64 (ptr i64))')
+      || !sx.out.includes('(cabi Plain_construct void (ptr i64))')) {
+      detail.push('    emit sx 里没有 `(cabi Plain_twice …)` / `(cabi Plain_construct …)`');
     }
     if (detail.length > 0) bad('opaque-host', detail.join('\n'));
     else ok('opaque-host [opaque class 的方法与属性都降成 (ccall Owner_… self …)，两次调用同一个 self]');

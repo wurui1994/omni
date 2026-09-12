@@ -9268,6 +9268,23 @@ log.RecordCodeFlags.Foldable`（超过 i64 正半区的那种）都算得出。
   没写 `opaque` 的类里那格只有原型的 `construct`（`hostCtors` / `hostCtorSigs` 那道闸门同一条
   理由，第 5528 行）。
 
+### 第一百八十四刀：那格只有原型的 `construct` 也一样
+
+上一刀说的下一格，同一条理由、同一处形状：`opaque` 说的是布局、不是"体在哪儿"。改法也是一行 ——
+`hostCtors` / `hostCtorSigs` 那一格的条件从 `cls && key === 'opaque class' && sk === 'construct'`
+变成 `cls && sk === 'construct'`。`protoCtors` 那张表照旧记着（第一百四十八刀 —— 别处还靠它说话）。
+
+判据接在上一刀那格 `Plain` 上（`tests/llvm/run.js` 第 9 节）：`construct(long seed);` +
+`long seeded();`，宿主那边 `Plain_construct` 把 seed 记进自己那张表、`Plain_seeded` 读回来，
+`new Plain(5)` 之后 `q.twice(21)` 与 `q.seeded()` 印 `plain 42 5` —— **construct 真跑了**这件事
+就在那个 5 上。`.sx` 里逐字比 `(cabi Plain_construct void (ptr i64))`。
+`bad/protoonly-ctor` 退役。
+
+- 腿：`node tests/jnc/run.js` 283/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：lowered `128 -> 131`（+3）、clean `198 -> 201`（+3）、对 `4228 -> 4206`（−22）。
+- **一起编那张榜 `94 -> 84`（−10）**：`原型 … 造一格它就得调它` 那一行整行消失。这两刀合起来把
+  那张榜从 95 条压到 84 条，而 lowered 从 126 走到 131（这一整轮从 121 走到 131）。
+
 
 
 ## 后果与代价

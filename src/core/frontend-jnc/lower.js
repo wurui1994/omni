@@ -5524,8 +5524,11 @@ class JncLower {
       if (isList(m) && head(m) === 'fn-proto') {
         const sk = specialCore(m.items[2]);
         if (sk === 'construct' || sk === 'static construct') {
-          // 同上（第六十六刀）：`opaque class` 的 construct 也在宿主那边。
-          if (cls && key === 'opaque class' && sk === 'construct') {
+          /* 只有原型的 `construct`（第六十六刀；第一百八十三刀把 `opaque` 那道闸门去掉、
+             第一百八十四刀这一格跟上）：体在宿主那边，`new C(…)` 落成
+             "造一格 + 写 $tag + `(ccall C_construct self …)`"。理由与方法那一格逐条一样 ——
+             `opaque` 说的是布局、不是"体在哪儿"，而"没有体"在 jancy 里不是编译期错误。 */
+          if (cls && sk === 'construct') {
             this.hostCtors.add(name);
             /* 形参类型也记下来（第一百六十二刀）：`new C(…)` 据此发 `(ccall C_construct …)`。
                形参表在声明符的后缀里（`(fn-suffix (formals …))`），与 hostSigs 那一格同一遍。 */
@@ -5533,10 +5536,10 @@ class JncLower {
               .find((x) => isList(x) && head(x) === 'fn-suffix');
             const hps0 = sfx0 === undefined ? null : this.formalList(sfx0.items[1]);
             if (hps0 !== null) this.hostCtorSigs.set(name, hps0.map((p) => p.type));
+            /* 那张"只有原型的 construct"表照旧记着（第一百四十八刀）：别处还靠它说话，
+               而体外真写了定义时上面这几格用不上（`ctors` 那时有它，几处都先问那张表）。 */
+            this.protoCtors.add(name);
           }
-          /* 没写 `opaque` 的类里那格只有原型的 construct（第一百四十八刀）：体外真写了定义时
-             这一格用不上（`ctors` 那时有它，下面几处先问那张表）。 */
-          else if (cls && sk === 'construct') this.protoCtors.add(name);
           continue;
         }
         /* `opaque class` 里那格**没有体**的 `destruct();`（第九十三刀）：它跟这个类里别的

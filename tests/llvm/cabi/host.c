@@ -110,6 +110,19 @@ int64_t Plain_twice(void *self, int64_t x) {
   return x * 2;
 }
 
+/* 同一条约定也管那格只有原型的 `construct`（第一百八十四刀）：`new Plain(7)` 落成
+   "造一格 + `(ccall Plain_construct self 7)`"。这一格把初值记进宿主自己那张表，
+   于是后面 twice 出来的数带着它 —— 那正是"construct 真跑了"的判据。 */
+void Plain_construct(void *self, int64_t seed) {
+  int64_t *p = probe_slot(self);
+  if (p != NULL) *p = seed;
+}
+
+int64_t Plain_seeded(void *self) {
+  int64_t *p = probe_slot(self);
+  return p == NULL ? -1 : *p;
+}
+
 /* `opaque class` 上那格**属性**的取/存（第一百六十刀）。jancy 里属性体内只写原型
    （`property m_scale { long get(); void set(long); }`，ui_PropertyGrid.jnc:78-88 那个形状）
    时，体也在宿主这边；符号名的约定与方法同一条，只是中间多一段 `get_` / `set_`：
