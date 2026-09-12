@@ -174,6 +174,35 @@ if (group !== null) {
 }
 
 const files = corpus(JANCY).filter((p) => only === null || p.includes(only));
+/* 第二百四十五刀（一刀量法）：ioninja 那一支**按目录成组**编。
+   它的插件不是一份一份编的 —— `UdpFlowLayer.jnc` 用着 `log.Writer`，可它只 import 了 4 个文件，
+   剩下的靠"api 那一批与同目录的兄弟都在同一个模块里"（CMakeLists.txt 就是这么编的）。逐份编于是
+   量出一大片 `没有这个类型：'log.Writer'` / `未声明的变量` / `没有这个基类` —— 全是**量法的噪音**。
+   所以：`test/ioninja/**` 下按所在目录成一组（合成一份只有 import 的文件编一次），别的照旧一份
+   一组。这一刀把榜的粒度改了，历史数字不再逐行可比 —— 明说，基线重记。 */
+const groups = (() => {
+  const single = [];
+  const dirs = new Map();
+  for (const f of files) {
+    if (f.includes(`${'/test/ioninja/'}`)) {
+      const d = dirname(f);
+      if (!dirs.has(d)) dirs.set(d, []);
+      dirs.get(d).push(f);
+    } else single.push({ key: f.slice(JANCY.length + 1), files: [f], dir: dirname(f) });
+  }
+  const multi = [...dirs.entries()]
+    .map(([d, fs]) => ({ key: `${d.slice(JANCY.length + 1)}/`, files: fs.sort(), dir: d }));
+  return [...single, ...multi].sort((a, b) => (a.key < b.key ? -1 : 1));
+})();
+const WRAP_DIR = join(process.env.OMNI_CACHE_DIR || join(root, '.omni-cache'), 'test', 'wrap');
+mkdirSync(WRAP_DIR, { recursive: true });
+/** 一组的编译实参：一份文件就是它自己，多份就合成一份只有 import 的文件。 */
+function argsForGroup(g) {
+  if (g.files.length === 1) return argsFor(g.files[0]);
+  const wrap = join(WRAP_DIR, `${g.key.replace(/[^A-Za-z0-9]/g, '_')}.jnc`);
+  writeFileSync(wrap, `${g.files.map((f) => `import ${JSON.stringify(f.slice(g.dir.length + 1))}`).join('\n')}\n`);
+  return [cli, 'sx', wrap, ...incFlags([g.dir, ...IONINJA_INCS])];
+}
 process.stdout.write(`语料 ${files.length} 份（${JANCY}）\n`);
 
 const cache = new RunCache('jnc-sweep');
@@ -201,8 +230,9 @@ function reasonOf(line) {
 
 // ---------------------------------------------------------------- 扫一遍，记账
 const rows = [];        // 每份文件一条：{ file, code, nopes: Set, errs: Set }
-for (const p of files) {
-  const r = cache.run(argsFor(p), { cwd: root });
+for (const g of groups) {
+  const p = g.files[0];
+  const r = cache.run(argsForGroup(g), { cwd: root });
   const nopes = new Set();
   const errs = new Set();
   for (const line of r.err.split('\n')) {
@@ -210,7 +240,7 @@ for (const p of files) {
     if (d === null || d.kind === 'W') continue;      // 第二百四十四刀：warning 不拦路
     (d.kind === 'N' ? nopes : errs).add(d.why);
   }
-  rows.push({ file: p.slice(JANCY.length + 1), code: r.code, nopes, errs });
+  rows.push({ file: g.key, code: r.code, nopes, errs });
 }
 
 const lowered = rows.filter((x) => x.code === 0).length;

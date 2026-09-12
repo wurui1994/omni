@@ -111,7 +111,22 @@
     ;; `$"色 $i = $name\n"` —— 格式化字面量。**内部不在这里解析**：jancy 自己也是先整块存下
     ;; token 串（`expression_pass1`），等第二遍再展开。所以它在这份语法里就是一个原子字面量，
     ;; `$(...)` 里的表达式留给后续阶段。`$0` 那种正则捕获是另一条（CAPTURE）。
-    (token FMT_LITERAL "$" "\"" (* (or (seq "\\" any) (not "\""))) "\"")
+    ;; `$( … )` 里头**允许嵌套字符串**（第二百四十六刀）：语料里的原样是
+    ;;   `$"$(sys.formatTimestamp (timeSpan, 0, "%h:%m:%s.%l"))"`
+    ;;   （test/ioninja/common/log_ThroughputCalc.jnc:110，这份文件头上第 32 行的注就写着它）
+    ;; 先前这条 token 只认"转义 | 非双引号"，扫到内层那个 `"` 就把 token 收了，剩下
+    ;; `%h:%m:%s.%l"))"` 落成语法垃圾 —— 榜上 `unexpected ":"` 那一行 37 对、其中 **33 组**
+    ;; 就差这一个。所以多加一支：`$(` 之后按"字符串 | 非右括号"扫到 `)`。
+    ;; 那一支要排在 `(not "\"")` **前面** —— 顺序就是优先级。
+    (token FMT_LITERAL "$" "\""
+      (* (or (seq "\\" any)
+             (seq "$" "("
+                  (* (or (seq "\\" any)
+                         (seq "\"" (* (or (seq "\\" any) (not "\""))) "\"")
+                         (not ")")))
+                  ")")
+             (not "\"")))
+      "\"")
     (token CAPTURE "$" (+ digit))
     (token ID (or alpha "_") (* (or alnum "_")))
     (string LITERAL "\"")
