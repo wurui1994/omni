@@ -1,0 +1,60 @@
+// 第一百五十二刀：复合赋值算符 `operator +=` 那一族。
+//
+// jancy 那边它们是**各自独立**的算符，不是"先 `+` 再赋一次"—— 语料里
+// `std.String.operator += (string_t)`（std_String.jnc:60）干的是 `append(string)`，而那个类
+// 连 `operator +` 都没有。所以这一族与 `operator +` 分得开，与 `operator :=`（第一百三十刀）
+// 反而是同一个形状：一个自由函数、`this` 当第一个形参、名字拼成 `Owner$op$addAssign`。
+//
+// 判据照抄 `operator :=` 那三条（理由同）：只能是类或结构体的成员、只收一个形参、一格主人身上
+// 一个算符只收一条（多条要按实参类型挑，与第八十刀同一笔账 —— 语料里 std_String 那三条正是这个
+// 形状，第二、三条明说不收）。
+//
+// 十个算符一并列上（`+= -= *= /= %= &= |= ^= <<= >>=`）：判据完全一样，少列一个那一格就会报
+// "算符重载 '…'"这句笼统的话。
+//
+// 期望输出的出处：/tmp/c143.c（`cc -O0 -std=c99 -Wall`）。
+
+struct Acc {
+	int m_sum;
+	int m_hits;
+
+	int operator += (int v) {
+		m_sum = m_sum + v;
+		m_hits = m_hits + 1;
+		return m_sum;
+	}
+
+	int operator *= (int v) {
+		m_sum = m_sum * v;
+		return m_sum;
+	}
+}
+
+class Bag {
+	int m_n;
+
+	int operator -= (int v) {
+		m_n = m_n - v;
+		return m_n;
+	}
+}
+
+int main() {
+	Acc a;
+	a.m_sum = 1;
+	a += 4;
+	a += 5;
+	a *= 2;
+	printf("%d %d\n", a.m_sum, a.m_hits);
+
+	Bag b;
+	b.m_n = 30;
+	b -= 7;
+	printf("%d\n", b.m_n);
+
+	// 复合赋值在整数上照旧是老路（这一格没被算符那一支抢走）
+	int i = 3;
+	i += 4;
+	printf("%d\n", i);
+	return 0;
+}

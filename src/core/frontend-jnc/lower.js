@@ -546,7 +546,24 @@ const OP_NAME = new Map([
   ['operator bool', 'bool'],
   ['operator ==', 'eq'],
   ['operator !=', 'ne'],
+  /* 复合赋值那一族（第一百五十二刀）。jancy 那边它们是**各自独立**的算符（不是"`+` 再赋一次"）
+     —— `std.StringBuilder` 的 `operator += (string_t)` 就是"往后接一段"，与 `operator +` 无关。
+     语料里出现的只有 `+=`（std_String.jnc:60-70 三条），其余几个一并列上是因为判据完全一样，
+     少列一个就会在那一格上报"算符重载 '…'"这句笼统的话。 */
+  ['operator +=', 'addAssign'],
+  ['operator -=', 'subAssign'],
+  ['operator *=', 'mulAssign'],
+  ['operator /=', 'divAssign'],
+  ['operator %=', 'modAssign'],
+  ['operator &=', 'andAssign'],
+  ['operator |=', 'orAssign'],
+  ['operator ^=', 'xorAssign'],
+  ['operator <<=', 'shlAssign'],
+  ['operator >>=', 'shrAssign'],
 ]);
+
+/** 复合赋值算符：源码里那个算符（`+=`）-> OP_NAME 里的键（第一百五十二刀）。 */
+const COMPOUND_OPS = new Set(['+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=']);
 
 /** 这个声明符是**属性的**取/存吗（第六十九刀）：`m_v.get()` 名字写在前面（语法上那是
  *  `qualified-special`），而类体里裸写的 `int get(int i)` / `void set(int i, int v)` 是
@@ -1103,6 +1120,9 @@ class JncLower {
     this.ctors = new Map();
     /** 赋值算符（第一百三十刀）：主人 -> `{name, param, ret}`。赋值那一处按左边的类型来这儿找。 */
     this.opAssign = new Map();
+    /* 复合赋值算符（第一百五十二刀）：`主人$算符` -> `{name, param, ret}`。与 opAssign 分开一格
+       是因为一格主人身上这十个算符各自都能有一条，键里得带上是哪一个。 */
+    this.opCompound = new Map();
     /* 自增自减那一族的算符重载（第一百三十一刀）：拼好的名字进这一格。只用记"在不在" ——
        调用点（`it++;` 那条语句）自己按主人的类型把名字拼回来。 */
     this.opIncDec = new Set();
@@ -1381,6 +1401,41 @@ class JncLower {
    * 只收**一个**形参、一格 owner 上只收**一个** `operator :=`：jancy 那边多个是按实参类型挑
    * （重载决议），那与第八十刀的同元重载是同一笔账 —— 明说不收第二个，不猜。
    */
+  /**
+   * 复合赋值算符的签名（第一百五十二刀）：`operator += (string_t s)` 那一族。
+   *
+   * 落法与 `operator :=`（第一百三十刀）一模一样 —— 一个自由函数、`this` 当第一个形参，名字拼成
+   * `Owner$op$addAssign`。判据也照抄那一处的三条，理由同：只收一个形参、一格主人身上一个算符
+   * 只收一条（多条要按实参类型挑，那与第八十刀是同一笔账），只能是类或结构体的成员。
+   *
+   * 与 `operator +` 分得开这一点是**语义**上的：jancy 那边复合赋值是各自独立的算符，不是"先 `+`
+   * 再赋一次"。语料里 `std.String.operator += (string_t)` 干的是 `append(string)`，
+   * 而那个类连 `operator +` 都没有 —— 拿"+ 再赋"去凑就是另一件事。
+   */
+  opCompoundSig(n, info, ps, op) {
+    const owner = info.name === ''
+      ? (this.structs.has(this.ns) ? this.ns : null)
+      : this.resolve(info.name, (k) => this.structs.has(k));
+    if (owner === null) {
+      return this.err(n, `'operator ${op}' 只能是类或结构体的成员（写在体里）`);
+    }
+    if (ps.length !== 1) {
+      return this.nope(n, `'operator ${op}' 收 ${ps.length} 个形参（这一层只收一个）`);
+    }
+    const full = `${owner}$op$${OP_NAME.get(`operator ${op}`)}`;
+    if (this.fns.has(full)) {
+      return this.nope(n, `${shown(owner)} 的第二个 'operator ${op}'（要按实参类型挑，`
+        + '见第八十刀）');
+    }
+    info.name = full;
+    const self = this.classes.has(owner) ? tClass(owner, false) : { k: 'struct', name: owner };
+    ps.unshift({ name: 'this', type: self, formals: null, def: null });
+    this.methods.set(full, owner);
+    this.opCompound.set(`${owner}$${op}`, { name: full, param: ps[1].type, ret: info.type });
+    this.fns.set(full, sigOf(ps, info.type));
+    return { info, ps, isMain: false };
+  }
+
   opAssignSig(n, info, ps) {
     const owner = info.name === ''
       ? (this.structs.has(this.ns) ? this.ns : null)
@@ -7049,6 +7104,12 @@ class JncLower {
       if (info.special === 'get' || info.special === 'set') return this.propSig(n, info, ps);
       // 赋值算符（第一百三十刀）：自己一处，落法与方法同一条
       if (info.special === 'operator :=') return this.opAssignSig(n, info, ps);
+      /* 复合赋值那一族（第一百五十二刀）：`operator += (string_t)`。判据与上面那一条同一份，
+         只是名字与表里的键带上是哪一个算符。 */
+      if (info.special.startsWith('operator ')
+        && COMPOUND_OPS.has(info.special.slice('operator '.length))) {
+        return this.opCompoundSig(n, info, ps, info.special.slice('operator '.length));
+      }
       // 相等算符（第一百四十刀）：一个形参、回 bool，调用点在二元比较那一处
       if (info.special === 'operator ==' || info.special === 'operator !=') {
         return this.opCmpSig(n, info, ps);
@@ -8927,6 +8988,22 @@ class JncLower {
           const self = lv.kind === 'agg' ? lv.code : this.read(lv);
           return [`${pad}(expr (call ${oa.name} ${self} ${ov.code}))`];
         }
+      }
+      /* 复合赋值算符（第一百五十二刀）：左边那一格的类型上写了 `operator +=` 就调它。
+         位置与上面那一条一样要排在"类的变量赋不了值"与整数那条路**之前** —— 它盖掉的正是那儿
+         （第一遍放在了后面，`b -= 7` 于是撞上那句话，跑了一趟腿才看见）。 */
+      const oc = op !== null && COMPOUND_OPS.has(op) && (isClass(lv.type) || jncIsStruct(lv.type))
+        ? this.opCompound.get(`${lv.type.name}$${op}`) : undefined;
+      if (oc !== undefined) {
+        let ov = this.expr(n.items[3], oc.param);
+        if (ov === null) return null;
+        if (isInt(ov.type) && isInt(oc.param)) ov = intConv(ov, oc.param);
+        if (!this.assignOk(ov.type, oc.param)) {
+          this.err(n, `'operator ${op}' 的实参要 ${tyName(oc.param)}，这里是 ${tyName(ov.type)}`);
+          return null;
+        }
+        const self = lv.kind === 'agg' ? lv.code : this.read(lv);
+        return [`${pad}(expr (call ${oc.name} ${self} ${ov.code}))`];
       }
       // 类的变量赋不了值（第五十二刀）：type_class.rst:19 那句 "You cannot assign varibles
       // or fields of class types"。类**指针**照旧可以赋（那是换个引用，不是拷贝对象）。
