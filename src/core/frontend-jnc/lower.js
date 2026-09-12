@@ -7398,6 +7398,8 @@ class JncLower {
     });
     if (fits.length === 1) return fits[0];
     if (fits.length === 0) {
+      // 那个类里同名的还有只有原型的几条（第一百五十刀）：数出来的个数本来就不全，别说成"对不上"
+      if (this.protoSibling(base)) return this.protoSiblingNope(n, base);
       const counts = cands.map((c) => shape(c).want.length);
       return this.err(n, `'${shown(base)}' 有 ${cands.length} 条重载，收的实参个数是 `
         + `${counts.join(' / ')}，这里给了 ${given} 个`);
@@ -7424,6 +7426,8 @@ class JncLower {
       if (score > bestScore) { bestScore = score; best = c; tie = false; }
     }
     if (best === -1) {
+      // 同上（第一百五十刀）：合得上的那一条可能就在没进候选的那几条原型里
+      if (this.protoSibling(base)) return this.protoSiblingNope(n, base);
       return this.err(n, `'${shown(base)}' 的 ${fits.length} 条重载没有一条收得下这几个实参`
         + `（${tys.map((t) => tyName(t.ty)).join(', ')}）`);
     }
@@ -7487,6 +7491,27 @@ class JncLower {
   realCtor(cls) {
     const ct = this.ctors.get(cls);
     return ct !== undefined && ct.synth !== true;
+  }
+
+  /** 这个名字在**同一个主人**身上还有只有原型的那几条吗（第一百五十刀）。
+   *
+   *  `base` 是方言里那个名字（`ui$FormLayout$addRow`，重载改名过的那种末尾还带 `$oN`）：
+   *  末段是方法名、前缀是主人。用处是把"实参个数不对"这类话拦下来 —— 那个类里同名的还有几条
+   *  只有原型的，它们没进候选（第一百四十四刀那条账），所以数出来的那几个个数本来就不全。 */
+  protoSibling(base) {
+    const b = /\$o[0-9]+$/.test(base) ? base.slice(0, base.lastIndexOf('$')) : base;
+    const i = b.lastIndexOf('$');
+    if (i < 0) return false;
+    const owners = this.protoMethods.get(b.slice(i + 1));
+    return owners !== undefined && owners.has(b.slice(0, i));
+  }
+
+  /** 上面那一问为真时该说的那句话（第一百五十刀）。 */
+  protoSiblingNope(node, base) {
+    const b = /\$o[0-9]+$/.test(base) ? base.slice(0, base.lastIndexOf('$')) : base;
+    return this.nope(node, `'${shown(b)}' 同名的那几条里有只有原型的 —— 只有原型的重载这一层`
+      + '还没有收进候选（见 ADR-0016 第一百四十四刀那一段），所以这儿对不上的那几个个数'
+      + '本来就不全');
   }
 
   ctorArgs(node, cls, argNodes0) {
@@ -11508,6 +11533,8 @@ class JncLower {
     const args = this.withDefaults(args0, want, defs, cut < 0 ? '' : nm.slice(0, cut));
     if (args === null) return null;
     if (args.length !== want.length) {
+      // 同名的还有只有原型的几条（第一百五十刀）：给了几个"不对"是拿不全的那张表数出来的
+      if (this.protoSibling(nm)) return this.protoSiblingNope(n, nm);
       return this.err(n, `'${nm0 === null ? shown(nm) : nm0}' 要 ${want.length} 个实参`
         + `${defs === null ? '' : `（其中 ${defs.filter((d) => d !== null).length} 个有默认值）`}`
         + `，这里给了 ${args0.length} 个`);
