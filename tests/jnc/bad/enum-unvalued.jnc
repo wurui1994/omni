@@ -1,0 +1,16 @@
+// 一格枚举成员**声明在**、可它的值算不出来（第二百三十四刀）。语料里的原样是
+// `ReadMode = SerialReadMode.WaitFirstChar`（SerialSession.jnc:26）—— 引的是另一个模块里的
+// 枚举，逐份编那笔口径账。第一百四十一刀那圈重试跑到底之后那一句会报出来
+// （`枚举成员的值算不出来`），而那格成员**没进**成员表。
+//
+// 先前后面用到它时报的是"枚举 'Defaults' 里没有 'ReadMode'"—— 那是认错人（名字明明在），
+// 而且把一件事记成两笔账。这一格钉的就是改过来那句话。
+enum Defaults {
+	ReadMode = SomeOtherEnum.Missing,
+	Interval = 10,
+}
+
+int main() {
+	printf("%d\n", (int)Defaults.ReadMode);
+	return 0;
+}

@@ -11065,6 +11065,34 @@ return copy(string_t(p, length));                                      同上:11
   lowered `162`、clean `239` 都没动。
 - 一起编那张榜：`34`、理由 `16` 没动（`string_t(…)` 那一族在 jnc_std 里，不在 api/ 那 44 份里）。
 
+### 第二百三十四刀：成员的名字在，只是它的值算不出来
+
+榜上 `枚举 '…' 里没有 '…'`（11 处，E）那一行量了一遍，全是同一族：
+
+```
+enum Defaults {
+	ReadMode         = SerialReadMode.WaitFirstChar,     test/ioninja/plugins/Serial/SerialSession.jnc:26
+	ReadInterval     = 10,
+	…
+}
+```
+
+`SerialReadMode` 在另一个模块里（逐份编那笔口径账），所以那格初值算不出来 —— 第一百四十一刀那圈
+重试跑到底之后报的是 `枚举成员的值算不出来`，而那格成员**没进成员表**（那儿是 `continue`）。
+于是后面每一处 `Defaults.ReadMode` 又报一句"枚举 'Defaults' 里没有 'ReadMode'" —— **认错人**
+（名字明明写着），而且把**一件事记成两笔账**。
+
+落法：那一格 `continue` 之前把名字记进枚举自己的一张 `unvalued`，`enumMember` 那两处查名不着时
+先问它一句，问着了就指回那一句真话（"声明是在的，可它的值这一层算不出来"）。E 也改成 N ——
+不是用户写错了，是这一层算不出来。墙：`bad/enum-unvalued`。
+
+- 腿：`node tests/jnc/run.js` 324/0（新增 `bad/enum-unvalued`）、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`枚举 '…' 里没有 '…'` `11 -> 1`（剩下那 1 处是真的没有那个成员），
+  新出来的那一行 10。`(文件, 拦路项)` 对 `3663` 没动（10 + 1 = 11，一格不多一格不少 ——
+  这一刀换的是**账记在哪一行**，不是拦路项的个数）。lowered `162`、clean `239` 都没动。
+  逐行比过一遍：只有这两行动，别的一行都没动。
+- 一起编那张榜：`34`、理由 `16` 没动。
+
 
 
 

@@ -5616,6 +5616,14 @@ class JncLower {
          排在后面、成员表还没填 —— 报出来就是"枚举 B 里没有 P"，一句指着别处的话。
          回 undefined 让 constInt 算不出来，由 enumDecl 那儿记进重试名单。 */
       if (this.constEnum !== null && !this.enumRetry) return undefined;
+      /* 名字**在**，只是它的值这一层算不出来（第二百三十四刀）：
+         `ReadMode = SerialReadMode.WaitFirstChar`（SerialSession.jnc:26 —— 引的是另一个模块里
+         的枚举，逐份口径那笔账）。那一句已经报过一次了（`枚举成员的值算不出来`），这儿再说
+         "里没有它"是**认错人**，而且把一件事记成两笔。所以指回那一句。 */
+      if (mn !== null && info.unvalued !== undefined && info.unvalued.has(mn)) {
+        return this.nope(n, `枚举 '${shown(en)}' 的 '${mn}' 声明是在的，可它的值这一层算不出来`
+          + '（上面那一句已经报过）—— 名字在、值不在，所以这儿用不上它');
+      }
       return this.err(n, `枚举 '${shown(en)}' 里没有 '${mn}'`);
     }
     return {
@@ -5651,6 +5659,14 @@ class JncLower {
     if (info === undefined) return undefined;
     const mn = isAtom(mem) ? mem.value : this.qname(mem);
     if (mn === null || !info.members.has(mn)) {
+      /* 名字**在**，只是它的值这一层算不出来（第二百三十四刀）：`ReadMode = SerialReadMode.WaitFirstChar`
+         那一族（SerialSession.jnc:26 —— 引的是另一个模块里的枚举，逐份口径那笔账）。那一句
+         已经报过一次了（`枚举成员的值算不出来`），这儿再说"里没有它"就是**认错人**、而且是
+         把一件事记成两笔。所以指回那一句。 */
+      if (mn !== null && info.unvalued !== undefined && info.unvalued.has(mn)) {
+        return this.nope(n, `枚举 '${r.type.name}' 的 '${mn}' 声明是在的，可它的值这一层`
+          + '算不出来（上面那一句已经报过）—— 名字在、值不在，所以这儿用不上它');
+      }
       return this.err(n, `枚举 '${r.type.name}' 里没有 '${mn}'`);
     }
     const v = this.expr(ob, null);
@@ -5703,6 +5719,9 @@ class JncLower {
     }
     this.enums.set(name, {
       base: J_I32, members: new Map(), bits: key === 'bitflag enum',
+      /* 值算不出来、于是没进 `members` 的那几格成员（第二百三十四刀）：名字**declared 过**，
+         所以后面用到它时那句"枚举里没有它"是认错人。记在这儿，好在那一处说准。 */
+      unvalued: new Set(),
       /* 成员漏到外面那层的两种（第九十六刀 + 第二百一十六刀）：无名的那一种天生如此
          （jancy: "unnamed enums imply 'exposed' anyway"，jnc_ct_EnumType.cpp:410），
          带名字的那一种要 `pragma(ExposedEnums, true)` 开着才是。 */
@@ -5799,6 +5818,7 @@ class JncLower {
             return null;
           }
           this.nope(m.items[2], '枚举成员的值算不出来（要一个编译期整数常量）');
+          info.unvalued.add(mn);          // 第二百三十四刀：名字在，只是没值
           continue;
         }
         next = k;
