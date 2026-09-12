@@ -5873,9 +5873,22 @@ class JncLower {
         this.propPend.push({ it: m, ns: this.ns });
         continue;
       }
-      // `static int m_table[10];` —— 静态字段是**类那一格上的**变量，不在对象里
-      // （01_Classes.jnc:22）。它要一格模块级的槽加"从方法里查得着"，是另一刀。
-      if (sp.stat) { this.nope(m, '类的静态字段'); continue; }
+      /* 类 / 结构体上的**静态字段**（第二百一十五刀）：`static int m_table[10];`
+         （01_Classes.jnc:22）、`static int m_staticField = 2;`（03_Storage.jnc）、
+         `static char const DefaultCipherSet[] = "ALL";`（ui_SslPropertySet.jnc）那一族，
+         语料里 21 份文件。
+
+         jancy 那儿它是**类那一格上的**变量、不在对象里（decl_storage.rst 讲的
+         StorageKind_Static；`this` 用不着它）。而这一层早就有一格现成的东西正好是这个意思：
+         **命名空间里的模块级变量**（第五十一刀）—— 名字带上前缀 `Owner$m_x`，那个带前缀的
+         名字同时就是方言里那一格的名字。类体这一遍 `this.ns` 已经是这个类了（上面那句
+         `this.ns = name`，第一百二十四刀），所以整条声明直接交给 globalDecl：
+           - 前缀、查重、`(global …)`、取过地址就改形状那几件事全是它那一套（declareGlobal）；
+           - 初值也是它那一套（globalCells 里一句 pnew、globalInit 里那几句抄）；
+           - 方法体里裸写 `m_x` 走 lookupRef -> resolve（从里往外找 `Owner$m_x`），
+             外面写 `Owner.m_x` 走的是同一个名字。
+         一个字节的新机器都不用造。 */
+      if (sp.stat) { this.globalDecl(m); continue; }
       for (const d0 of this.flat(m.items[2])) {
         /* 类与结构体里的 alias（第八十七刀；结构体那一格是第一百〇二刀 —— 方法既然收了，
            指着方法的别名跟着就成立，`this` 那一格由 selfTy 挑）。

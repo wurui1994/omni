@@ -1,0 +1,47 @@
+// 类 / 结构体上的**静态字段**（第二百一十五刀）。语料里 21 份文件，原样是
+// `static int m_table[10];`（01_Classes.jnc:22）、`static int m_staticField = 2;`
+// （03_Storage.jnc）、`static char const DefaultCipherSet[] = "ALL";`（ui_SslPropertySet.jnc）
+// 那一族。
+//
+// jancy 那儿它是**类那一格上的**变量、不在对象里（decl_storage.rst 的 StorageKind_Static）。
+// 而这一层早就有一格现成的东西正好是这个意思：命名空间里的模块级变量（第五十一刀）——
+// 名字带上前缀 `Owner$m_x`，那个带前缀的名字同时就是方言里那一格的名字。类体这一遍
+// `this.ns` 已经是这个类了（第一百二十四刀），所以整条声明直接交给 globalDecl：前缀、查重、
+// `(global …)`、初值、取过地址就改形状那几件事全是它那一套，一个字节的新机器都不用造。
+//
+// 判据是手写的 C 双胞胎 /tmp/c173.c：两次构造各给静态那一格加一，所以两个对象读到的是同一个
+// 数（12），各自的 m_x 不同 —— 印 `12 13 14`。
+class C {
+	static int m_count = 10;
+	int m_x;
+
+	construct(int x) {
+		m_x = x;
+		m_count = m_count + 1;
+	}
+
+	int total() {
+		return m_x + m_count;
+	}
+}
+
+struct S {
+	static int m_table[3];
+	int m_v;
+
+	int pick(int i) {
+		return m_table[i] + m_v;
+	}
+}
+
+int main() {
+	C* a = new C(1);
+	C* b = new C(2);
+	printf("%d %d %d\n", C.m_count, a.total(), b.total());
+
+	S.m_table[1] = 7;
+	S s;
+	s.m_v = 100;
+	printf("%d %d\n", s.pick(1), S.m_table[1]);
+	return 0;
+}

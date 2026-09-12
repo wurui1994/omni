@@ -10317,6 +10317,43 @@ unions"，type_class.rst:218，说的是拿 union 当基类，反过来那件事
   不是那个总数。
 - 一起编那张榜：`39`、理由 `19` 没动。
 
+### 第二百一十五刀：类 / 结构体上的静态字段
+
+榜上 `类的静态字段` 21 份文件。语料里的原样：`static int m_table[10];`
+（01_Classes.jnc:22）、`static int m_staticField = 2;`（03_Storage.jnc）、
+`static char const DefaultCipherSet[] = "ALL";`（ui_SslPropertySet.jnc）、
+`static JLinkRttSession* m_singleton;`（JLinkRttSession.jnc）、
+`static const std.Guid m_logGuid = "…";`（ModbusLayer.jnc 那一族）。
+
+jancy 那儿它是**类那一格上的**变量、不在对象里（`StorageKind_Static`，decl_storage.rst）。
+这一层早就有一格现成的东西正好是这个意思 —— **命名空间里的模块级变量**（第五十一刀）：
+名字带上前缀 `Owner$m_x`，而那个带前缀的名字**同时**就是方言里那一格的名字。类体这一遍
+`this.ns` 已经是这个类了（第一百二十四刀那一句 `this.ns = name`），所以整条声明直接交给
+`globalDecl` 就完了：
+
+```js
+if (sp.stat) { this.globalDecl(m); continue; }
+```
+
+前缀、查重、`(global …)`、"取过地址就改形状"（declareGlobal 第二十四刀那一套）、
+初值（globalCells 里一句 pnew + globalInit 里那几句抄）全是它现成的；方法体里裸写 `m_x` 走
+`lookupRef` -> `resolve`（从里往外找 `Owner$m_x`，第五十一刀），外面写 `Owner.m_x` 找的是
+同一个名字。**一个字节的新机器都没造** —— 这一刀的全部内容就是"认出这两件事本来是同一件"。
+
+判据是手写的 C 双胞胎 `/tmp/c173.c`：两次构造各给静态那一格加一，于是两个对象读到的是同一个
+数（12）、各自的 `m_x` 不同。用例 `tests/jnc/cases/167-staticfield.jnc` 把类与结构体两边都写上
+（结构体那一格是静态数组，照 `static int m_table[10]` 的原样），印 `12 13 14` / `107 7`。
+
+- 腿：`node tests/jnc/run.js` 302/0（新增 `cases/167-staticfield`）、
+  `node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`类的静态字段` 那一行 21 份**整行没了**，`(文件, 拦路项)` 对 `4040 -> 4034`
+  （−6）。**这两个数不一样，明写原因**：那 21 份里的大多数后面还压着别的，先前被这一格盖着 ——
+  21 条划掉、约 15 条真的冒出来（03_Storage.jnc 露出来的是 `threadlocal` 与 `destruct`，
+  01_Classes.jnc 露出来的是 `destruct` 与 `operator +=`）。
+  lowered `156`、clean `226` 都没动 —— 一份都没因此走通。
+- 一起编那张榜：`39`、理由 `19` 没动（api 那 44 份里没有静态字段）。
+
+
 
 
 
