@@ -16,7 +16,15 @@
 //     缺的那一格是**底宽表**（uint8_t→8、uint16_t→16、uint32_t→32、char→8…），
 //     `resolveType` 现在把整数一律解成 `int`，宽度信息没留 —— 那是下一刀。
 //   - union 里套**匿名 struct** 的命名（`H$u1$s0`，103-unionstruct.jnc）。
-//   - 属性 / 事件那几族带出来的隐藏字段。
+//   - **属性那一族**（108-propdot.jnc）：`Inner* property m_p;` 旧降级**不发**这一格字段
+//     （属性没有自己的存储），我们现在把它当了数据字段。**查到一半的账**：
+//     `readSpecs` 在这一句上读出来的修饰词是**空的**（尺子印过：specs 的三格是
+//     `name | mods | mods`，两格 mods 都是空基例），所以 `property` 那个词压根没进
+//     说明符表 —— 下一刀先查它去了哪条产生式，再决定是补 `types.js` 的形状判定
+//     还是补节点表。**不猜、不先绕过去**。
+//   - **函数字段**（109-fnfield.jnc）：`int function* m_op(int, int)` 要发
+//     `(m_op (fnty (int int) int))`。`resolveType` 现在把 fn 那一族整格记账了 ——
+//     缺的是"从 fn-suffix 的形参表解出参数类型"这一步。
 
 import { resolveType, baseIntBits, bitfieldBits } from './resolve-type.js';
 import { emitType } from './emit-type.js';
