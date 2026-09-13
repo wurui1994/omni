@@ -128,9 +128,18 @@ function classify(err, code) {
   let syn = false;
   let nope = null;
   let plain = null;
+  let spanless = false;
   for (const l of lines) {
-    const m = /^.*?:\d+:\d+: (error|warning): (.*)$/.exec(l);
-    if (m === null) continue;
+    /* 两种形状都收：带位置的 `文件:行:列: error: …`，与**不带位置**的 `omni: error: …`。
+       后者本身是一格账（ADR-0029 的 R5：诊断该有位置）—— 先前这一份只认前者，于是那 11 格
+       落成了"退出码 1，没有诊断"，把"没位置"说成了"没诊断"。 */
+    let m = /^.*?:\d+:\d+: (error|warning): (.*)$/.exec(l);
+    if (m === null) {
+      const m2 = /^omni: (error|warning): (.*)$/.exec(l);
+      if (m2 === null) continue;
+      m = m2;
+      spanless = true;
+    }
     if (m[1] === 'warning') continue;
     const why = m[2].replace(/'[^']*'/g, "'…'");
     if (/^(unexpected|语法|认不出的)/.test(why) || /unexpected/.test(why)) { syn = true; continue; }
@@ -141,8 +150,9 @@ function classify(err, code) {
     if (plain === null) plain = why;
   }
   if (syn && nope === null && plain === null) return { k: 'syn', why: '语法不认' };
-  if (nope !== null) return { k: 'N', why: nope };
-  if (plain !== null) return { k: 'E', why: plain };
+  const tag = spanless ? '（**没位置**）' : '';
+  if (nope !== null) return { k: 'N', why: nope + tag };
+  if (plain !== null) return { k: 'E', why: plain + tag };
   /* **炸**（一条诊断都没有、栈爬出来了）：那是这一层自己的 bug，不是语言的边界。
      这一类语料榜量不到（榜只看诊断行），而它恰恰是最该先修的一类 —— 见 ADR-0029。 */
   const st = /^\s*(TypeError|RangeError|ReferenceError|AssertionError|Error): (.*)$/m.exec(err);
