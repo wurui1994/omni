@@ -15,17 +15,19 @@ export default feature({
   accounts: {
     'M-001': {
       text: '结构体里的 `static construct` / `destruct`',
-      match: '结构体里的',
+      say: "结构体里的 '{what}'{note}",
       why: 'static construct 要一道 once 闸门；destruct 要作用域出口那一套钩子',
     },
     'M-002': {
       text: '`destruct` —— jancy 那边它是 GC 在**不确定的时刻**调的',
+      say: "'{what}' —— jancy 那边它是 GC 在**不确定的时刻**调的（disposable.rst:17），"
+        + '要确定时机得先有 dispose/nestedscope 那一套',
       match: '不确定的时刻',
       why: 'disposable.rst:17；要确定时机得先有 dispose / nestedscope 那一套',
     },
     'M-003': {
       text: '算符重载 `operator +` 那一族',
-      match: '算符重载',
+      say: "算符重载 '{what}'",
       why: '第 130~139 刀收了一部分，这一格是剩下的',
     },
     'M-004': {

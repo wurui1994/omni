@@ -198,6 +198,14 @@
 // （第六刀）在这里第一次真正被用到 —— 掩到 `promo(位宽)` 位再交给 `sbase`。
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { OmniError } from '../source/diag.js';
+import { compose, say } from '../frontend-engine/positions.js';
+import { JNC_FEATURES } from '../../lang/jnc/features/index.js';
+
+/* 位置规格（ADR-0029 的 L2）。这一份**只**读它，用来把"不收"那些话从手写的字符串换成
+   账号 + 模板：`this.acct(n, 'M-003', { what: sk })` 与 `features/members.js` 里那一条
+   `say` 是同一句话，于是"话说错了"（第 248/251/253 刀那一类）在加载期就炸，
+   而不是等 `--check` 撞出来。降级的行为一格没动 —— 换的是话从哪儿来。 */
+const JNC_SPEC = compose(JNC_FEATURES);
 
 const JNC_NOPE = 'jancy 前端第一刀还不收';
 
@@ -2515,6 +2523,11 @@ class JncLower {
 
   nope(node, what) {
     return this.err(node, `${JNC_NOPE}：${what}`);
+  }
+
+  /** 一条**按账号发的**"还不收"：话由 `features/*.js` 里那条 `say` 模板渲染（ADR-0029 R5）。 */
+  acct(node, id, vars = {}) {
+    return this.nope(node, say(JNC_SPEC, id, vars));
   }
 
   /** 一条**警告**（不停下）。`import … with "h"` 里跳过的那些声明走这条，见 `impWith`。 */
@@ -6089,10 +6102,7 @@ class JncLower {
    *   - `get` / `set`：属性那一整套（`property` / `bindable` / `autoget`），另一刀。
    */
   specialNope(n, sk) {
-    if (sk === 'destruct') {
-      return this.nope(n, "'destruct' —— jancy 那边它是 GC 在**不确定的时刻**调的"
-        + '（disposable.rst:17），要确定时机得先有 dispose/nestedscope 那一套');
-    }
+    if (sk === 'destruct') return this.acct(n, 'M-002', { what: sk });
     return this.nope(n, `'${sk}'（要属性那一套：property / bindable / autoget）`);
   }
 
@@ -6350,7 +6360,7 @@ class JncLower {
           if (sk0 !== null && sk0 !== 'construct' && !isOpSpecial(sk0)
             && !bareAccessor(m.items[2])
             && !accessorNamed(m.items[2])) {
-            this.nope(m, `结构体里的 '${sk0}'`);
+            this.acct(m, 'M-001', { what: sk0, note: '' });
           }
           continue;
         }
@@ -7862,7 +7872,7 @@ class JncLower {
          stdt_Iterator.jnc:36-54 四个都写着）。剩下那几个（`*` / `->` / `()` / `bool`）要在
          **求值**那条路上认（那一格取的是值，不是语句），是自己一刀 —— 明说，不混进来。 */
       const isOp = isOpSpecial(sk);
-      if (isOp && !OP_NAME.has(sk)) return this.nope(d.items[2], `算符重载 '${sk}'`);
+      if (isOp && !OP_NAME.has(sk)) return this.acct(d.items[2], 'M-003', { what: sk });
       if (!acc && !isOp && sk !== 'construct' && sk !== 'static construct') {
         return this.specialNope(d.items[2], sk);
       }
@@ -8976,7 +8986,7 @@ class JncLower {
       }
       const stat = info.special === 'static construct';
       if (stat && ownStruct) {
-        return this.nope(n, `结构体里的 'static construct'（那一格要一道 once 闸门，是另一笔账）`);
+        return this.acct(n, 'M-001', { what: 'static construct', note: '（那一格要一道 once 闸门，是另一笔账）' });
       }
       const full = stat ? `${owner}$construct$static` : `${owner}$construct`;
       /* 构造的**重载**（第一百五十五刀）：jancy 收形参不同的好几个 `construct`

@@ -101,6 +101,35 @@ export function lookup(spec, sort, kind) {
   return spec.cells.get(key(sort, kind)) ?? spec.wild.get(kind);
 }
 
+/**
+ * 把一个账号**渲染成一句诊断**（ADR-0029 的 R5：诊断由规则生成，不是手写在降级器里）。
+ * 账号给一格 `say` 模板，里头的 `{名字}` 由 `vars` 填。缺一个或多一个都当场炸 ——
+ * 手写字符串最爱出的错就是"话与账漂开"，模板 + 严格填空把那类错挪到了加载期。
+ */
+export function say(spec, id, vars = {}) {
+  const acc = spec.accounts.get(id);
+  if (acc === undefined) throw new Error(`账号 ${id} 没人定义`);
+  if (typeof acc.say !== 'string') throw new Error(`账号 ${id} 没给 say 模板`);
+  const need = new Set([...acc.say.matchAll(/\{(\w+)\}/g)].map((m) => m[1]));
+  for (const k of Object.keys(vars)) {
+    if (!need.has(k)) throw new Error(`账号 ${id} 的 say 里没有 {${k}} 这一格`);
+  }
+  return acc.say.replace(/\{(\w+)\}/g, (_, k) => {
+    if (!(k in vars)) throw new Error(`账号 ${id} 的 say 缺了 {${k}}`);
+    return String(vars[k]);
+  });
+}
+
+/** `say` 模板里第一个 `{` 之前那截字面 —— 拿它当对账的特征，于是特征不用再手写一遍。 */
+function matchOf(acc) {
+  if (acc.match !== undefined) return acc.match;
+  if (typeof acc.say === 'string') {
+    const lit = acc.say.split('{')[0].replace(/[`*]/g, '');
+    if (lit.length >= 4) return lit;
+  }
+  return acc.text.replace(/[`*]/g, '').slice(0, 8);
+}
+
 /** 表里还没定的格（`todo`）与压根没声明的格 —— 这两栏就是"我们不知道什么"的清单。 */
 export function gaps(spec, sortList, kindList) {
   const todo = [];
@@ -139,7 +168,7 @@ export function diff(spec, measured) {
     if (c.verdict !== 'refuse' && c.verdict !== 'error') continue;
     const acc = spec.accounts.get(c.account);
     if (acc === undefined) continue;
-    const pat = acc.match ?? acc.text.replace(/[`*]/g, '').slice(0, 8);
+    const pat = matchOf(acc);
     const said = (m.why ?? '').replace(/[`*]/g, '');
     const hit = pat instanceof RegExp ? pat.test(said) : said.includes(pat);
     if (!hit) {
