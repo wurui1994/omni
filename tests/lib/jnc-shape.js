@@ -11,13 +11,16 @@
 //
 // 用法：node tests/lib/jnc-shape.js [文件数，默认 80] [--all]
 
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { jncLang } from '../../src/lang/jnc/nodes.js';
 
-const CORPUS = '/Users/wurui/Documents/Lang/reference/jancy';
+/* 语料：外面那份 jancy 有就用它（大、真实），没有就退到仓库自带的用例 ——
+   这样这把尺子在任何一份 checkout 上都跑得起来，能当闸门用。 */
+const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy';
+const CORPUS = existsSync(EXTERNAL) ? EXTERNAL : 'tests/jnc/cases';
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 80);
 const all = argv.includes('--all');

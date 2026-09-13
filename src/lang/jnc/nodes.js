@@ -46,7 +46,8 @@ export const JNC_SHAPES = [
   { name: 'ctor', of: 'suffix', holes: { args: 'exp?' } },
   { name: 'formals', of: 'formal', holes: { first: 'formal?' } },
   { name: 'formals-add', of: 'formal', holes: { list: 'formal', one: 'formal' } },
-  { name: 'formal', of: 'formal', holes: { specs: 'spec', dcl: 'dcl' } },
+  // 第三格是默认值那一格（`void f(int x = 1)`）—— 仓库自带语料里量到的，外面那份没有
+  { name: 'formal', of: 'formal', holes: { specs: 'spec', dcl: 'dcl', init: 'exp?' } },
   { name: 'formal-anon', of: 'formal', holes: { specs: 'spec', ptrs: 'spec' } },
   // 语句与表达式里最常见的那几格（公共库已有 block/if/while/return/break/assign/call/index）
   { name: 'compound', of: 'stat', holes: { body: 'block' } },
