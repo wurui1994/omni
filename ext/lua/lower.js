@@ -22,7 +22,7 @@ export const ACCOUNTS = {
   'L-004': { say: '多返回值还没有：核心方言的 `ret` 只带一格' },
   'L-005': { say: '闭包捕获还没有：函数体里用了不属于它的局部量' },
   'L-006': { say: '`..` 还没有：字符串拼接要先有字符串运算' },
-  'L-007': { say: '`and`/`or` 还没有：它们带短路，且 Lua 的真值观是"只有 nil/false 假"' },
+  'L-007': { say: '`and`/`or` 的两边要都是布尔：Lua 的 `a and b` 交出来的是**值**不是真假' },
   'L-008': { say: '`for … in` 还没有：它要迭代器协议（三件套）' },
   'L-009': { say: '`goto`/标签还没有：核心方言里没有任意跳转' },
   'L-010': { say: '方法调用（`o:m()`）还没有：它要表 + 隐形 self' },
@@ -30,7 +30,7 @@ export const ACCOUNTS = {
   'L-012': { say: '类型混着用：这一格里同一个名字既是数又是别的' },
   'L-013': { say: '`nil` 还没有：核心方言里没有"空"这一格' },
   'L-014': { say: '`#`/`not` 还没有：它们的语义要真值观与表' },
-  'L-015': { say: '`for` 的步长要是字面量：正负决定比较方向（`<=` 还是 `>=`）' },
+  'L-015': { say: '`for` 的步长这一格还降不了' },
   'L-017': { say: '条件位置里这个值要真跑起来才知道真假（带调用的非布尔条件）' },
   'L-016': { say: '`%` 的两边不能有调用：它降下来要把两边各用两次（Lua 的 `%` 是向下取整的模）' },
 };
@@ -120,7 +120,15 @@ const EXP = {
   },
   binop: (n, cx) => {
     if (n.op === '..') no('L-006', n);
-    if (n.op === 'and' || n.op === 'or') no('L-007', n);
+    // `and`/`or`：两边都是布尔时就是核心方言的 `&&`/`||`（**量过短路**：右边带调用时
+    // 不会跑，见 tests 里那个 boom 探针）。Lua 的 `a and b` 一般交出来的是**值**
+    // （`x and 1` 给的是 1 不是真假），那种还降不了 —— 记 L-007。
+    if (n.op === 'and' || n.op === 'or') {
+      const la = exp(n.a, cx);
+      const lb = exp(n.b, cx);
+      if (la.type !== 'bool' || lb.type !== 'bool') no('L-007', n);
+      return { sx: `(bin "${n.op === 'and' ? '&&' : '||'}" ${la.sx} ${lb.sx})`, type: 'bool' };
+    }
     const kind = BIN[n.op];
     if (kind === undefined) no('L-012', n);
     const a = exp(n.a, cx);
@@ -162,6 +170,19 @@ function cond(n, cx) {
   if (v.type === 'bool') return v.sx;
   if (hasCall(n)) no('L-017', n);
   return '(bool true)';
+}
+
+/**
+ * 条件在**语句位置**上还可以再进一步：把它先算进一格临时量，再按真值观定真假。
+ * 只在"这一格一轮只算一次"的地方这么干（`if`、`repeat…until`）；`while` 的条件每轮都要
+ * 重算，那格仍旧记账（L-017）。答 `{pre, sx}`。
+ */
+function condStat(n, cx) {
+  const v = exp(n, cx);
+  if (v.type === 'bool') return { pre: [], sx: v.sx };
+  if (!hasCall(n)) return { pre: [], sx: '(bool true)' };
+  const t = cx.fresh('__c');
+  return { pre: [`(let ${t} ${v.type} ${v.sx})`], sx: '(bool true)' };
 }
 
 function exp(n, cx) {
@@ -221,14 +242,15 @@ const STAT = {
       if (i >= (n.elifCond ?? []).length) {
         return n.else === undefined ? null : `(do ${inner(n.else, cx).join(' ')})`;
       }
-      const c = { sx: cond(n.elifCond[i], cx) };
+      const c = condStat(n.elifCond[i], cx);
       const rest = chain(i + 1);
       const t = `(do ${inner(n.elifBody[i], cx).join(' ')})`;
-      return `(do (if ${c.sx} ${t}${rest === null ? '' : ` ${rest}`}))`;
+      return `(do ${c.pre.join(' ')} (if ${c.sx} ${t}${rest === null ? '' : ` ${rest}`}))`;
     };
-    const c = { sx: cond(n.cond, cx) };
+    const c = condStat(n.cond, cx);
     const els = chain(0);
-    return [`(if ${c.sx} (do ${inner(n.then, cx).join(' ')})${els === null ? '' : ` ${els}`})`];
+    return [...c.pre,
+      `(if ${c.sx} (do ${inner(n.then, cx).join(' ')})${els === null ? '' : ` ${els}`})`];
   },
   while: (n, cx) => {
     return [`(while ${cond(n.cond, cx)} (do ${inner(n.body, cx).join(' ')}))`];
@@ -238,24 +260,33 @@ const STAT = {
     // —— 这么写也顺手保住了那条例外：`C` 看得见 `B` 里的局部量（同一个 `(do)`）。
     cx.push();
     const b = block(n.body.stats, cx);
-    const c = cond(n.cond, cx);
+    const c = condStat(n.cond, cx);
     cx.pop();
-    return [`(while (bool true) (do ${b.join(' ')} (if ${c} (do (brk)))))`];
+    return [`(while (bool true) (do ${b.join(' ')} ${c.pre.join(' ')} (if ${c.sx} (do (brk)))))`];
   },
   'for-num': (n, cx) => {
     const from = exp(n.from, cx);
     const to = exp(n.to, cx);
     if (from.type !== 'real' || to.type !== 'real') no('L-012', n);
+    // 步长的**正负决定比较方向**。字面量步长静态就知道方向；不是字面量的就把方向也算进
+    // 循环条件里（`(st>0 and i<=lim) or (st<0 and i>=lim)`）—— 这一格现在两种都收，
+    // 因为 `and`/`or` 那一刀落了，L-015 也就还上了。
     let stepSx = '(real 1.0)';
     let down = false;
+    let dyn = false;
     if (n.step !== undefined) {
-      // 步长的正负决定比较方向，所以第一刀只收字面量步长（别的记账）。
       const lit = n.step.kind === 'number' ? Number(n.step.value)
         : (n.step.kind === 'prefix' && n.step.op === '-' && n.step.a.kind === 'number'
           ? -Number(n.step.a.value) : null);
-      if (lit === null) no('L-015', n);
-      down = lit < 0;
-      stepSx = realOf(String(lit));
+      if (lit === null) {
+        const st2 = exp(n.step, cx);
+        if (st2.type !== 'real') no('L-012', n);
+        stepSx = st2.sx;
+        dyn = true;
+      } else {
+        down = lit < 0;
+        stepSx = realOf(String(lit));
+      }
     }
     const lim = cx.fresh('__to');
     const st = cx.fresh('__st');
@@ -264,12 +295,17 @@ const STAT = {
     cx.declare(v, 'real');
     const b = block(n.body.stats, cx);
     cx.pop();
+    const up = `(bin "<=" (var ${v}) (var ${lim}))`;
+    const dn = `(bin ">=" (var ${v}) (var ${lim}))`;
+    const test = dyn
+      ? `(bin "||" (bin "&&" (bin ">" (var ${st}) (real 0.0)) ${up})`
+        + ` (bin "&&" (bin "<" (var ${st}) (real 0.0)) ${dn}))`
+      : (down ? dn : up);
     return [
       `(let ${lim} real ${to.sx})`,
       `(let ${st} real ${stepSx})`,
       `(let ${v} real ${from.sx})`,
-      `(while (bin "${down ? '>=' : '<='}" (var ${v}) (var ${lim}))`
-      + ` (do ${b.join(' ')} (set ${v} (bin "+" (var ${v}) (var ${st})))))`,
+      `(while ${test} (do ${b.join(' ')} (set ${v} (bin "+" (var ${v}) (var ${st})))))`,
     ];
   },
   'local-function': (n, cx) => {
