@@ -107,6 +107,13 @@ export function globalLines(m, env, ctx = { ns: null }) {
     return { lines, why: null };
   }
 
+  /* **顶层的事件**（`event g_onA();`）是一格模块级的多播：`(arr (fnty (…) void))`
+     （162-oneventlist.jnc）。它就是一格数据，只是类型在事件那一条路上解。 */
+  if (m.shape === 'event') {
+    const r = resolveType(m.type, env);
+    if (r.type === null) return { lines: [], why: `事件：${r.why}` };
+    return { lines: [`(global ${full} ${emitType(r.type, 'value', tc)})`], why: null };
+  }
   if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') {
     return { lines: [], why: `不是数据那一族（${m.shape}）` };
   }

@@ -143,7 +143,20 @@ for (const f of files) {
   const dig = (n, ns) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
-    if (h === 'agg' || h === 'fn-def') return;                       // 类里的是字段、体里的是局部
+    if (h === 'agg') return;                                         // 类里的是字段，另一条路收
+    if (h === 'fn-def' || h === 'fn-proto') {
+      /* **顶层的完整声明式属性与 reactor 在树上是 `fn-def`**（体就是属性体 / 反应体）——
+         它们发的是生成的存储（`$m_value` / `$on` / `$bound`）与体里那几格字段
+         （151-propfield.jnc 的 `g_p$m_v`、162-oneventlist.jnc 的 `g_r$on`）。
+         真的函数就到此为止：体里的是局部量，那是语句那条腿的事。 */
+      const fn = named(n);
+      const ft = fn === null ? null : readDeclType(fn.specs, fn.dcl);
+      if (ft !== null && ft.name !== null
+        && (ft.shape === 'prop' || ft.type?.mods?.includes('reactor') || ft.mods.includes('reactor'))) {
+        tops.push({ m: { ...ft, at: n, type: ft, name: ft.name }, ns });
+      }
+      return;
+    }
     if (h === 'namespace') {
       const nn = named(n);
       const seg = nn === null ? null : nameText(nn.name);
@@ -168,6 +181,16 @@ for (const f of files) {
     for (const it of n.items) dig(it, ns);
   };
   for (const t of trees) dig(t, null);
+  /* **类里的 `static` 字段不进对象**（第一百六十七刀）：它就是一格模块级的量，
+     名字是 `<聚合体>$<字段名>`（167-staticfield.jnc 的 `C$m_count` / `S$m_table`）。 */
+  for (const rec of env.values()) {
+    if (rec.agg === undefined) continue;
+    for (const m of rec.agg.members) {
+      if (m.name === null || !(m.storage ?? []).includes('static')) continue;
+      if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') continue;
+      tops.push({ m: { ...m, type: m.type, name: m.name }, ns: rec.name });
+    }
+  }
 
   /* **取过地址就提一格**（第二十四刀）：整份源码里 `&名字` 数一遍，发 `(global …)` 之前就要
      答完（`&g` 写在函数体里，可它决定的是模块级那一格的类型）。 */
