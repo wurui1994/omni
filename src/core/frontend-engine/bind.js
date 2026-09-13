@@ -33,7 +33,7 @@ function newScope(parent, why) {
  *   uses    每个 `name` 节点查到了哪儿：`{node, name, scope, found, where}`
  *           `found` ∈ 'local' | 'ENV'；`where` 是命中的作用域 id（ENV 时为 null）
  */
-export function bind(ast, lang) {
+export function bind(ast, lang, opts = {}) {
   const scopes = [];
   const decls = [];
   const uses = [];
@@ -41,6 +41,15 @@ export function bind(ast, lang) {
   const gotos = [];
   const root = newScope(null, 'chunk');
   scopes.push(root);
+  /* **前奏那一层**：不用声明就在那儿的名字（内建类型、标准库的全局）。给了就挂在根外面 ——
+     于是它们查得着，又不会跟文件里的同名声明抢（文件里那一层先答）。 */
+  if (opts.prelude !== undefined && opts.prelude.length > 0) {
+    const pre = newScope(null, 'prelude');
+    pre.labels = new Set();
+    for (const nm of opts.prelude) pre.names.set(nm, { name: nm, scope: pre.id, node: null });
+    scopes.push(pre);
+    root.parent = pre;
+  }
 
   const chain = (from) => lexChain(
     from,

@@ -16,6 +16,7 @@ import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { normalize } from '../../src/lang/jnc/normalize.js';
 import { jncSemLang } from '../../src/lang/jnc/scope.js';
+import { JNC_BUILTINS } from '../../src/lang/jnc/builtins.js';
 import { bind } from '../../src/core/frontend-engine/bind.js';
 
 const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy';
@@ -60,7 +61,7 @@ for (const f of files) {
   const rel = f.slice(CORPUS.length + 1);
   let out;
   try {
-    out = bind({ stats: normalize(tree) }, jncSemLang);
+    out = bind({ stats: normalize(tree) }, jncSemLang, { prelude: JNC_BUILTINS });
   } catch (err) {
     boom.push([rel, err.message]);
     continue;
