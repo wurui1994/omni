@@ -28,7 +28,7 @@ import { headOf, named } from '../../src/lang/jnc/adapt.js';
 import { readAgg } from '../../src/lang/jnc/agg.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import { nameText, allInChain, readDcl } from '../../src/lang/jnc/declare.js';
-import { readFormals, fnName } from '../../src/lang/jnc/emit-fn.js';
+import { readFormals, fnName, needsCtor } from '../../src/lang/jnc/emit-fn.js';
 
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 400);
@@ -250,6 +250,9 @@ for (const f of files) {
     else if (rec !== undefined && (rec.kind === 'struct' || rec.kind === 'union')) fam = 's';
     if (st.h === 'new-array') { note('`new T[n]` 那一族'); continue; }
     if (fam === null) { note(`认不出 new 的类型（${tn ?? '?'}）`); continue; }
+    /* **结构体没有构造就不发壳**（`new Entry` 直接就是一句 `(pnew (ptr Entry) 1)`，
+       124-errcptr.jnc 旧降级一格 `$news` 都没有）—— 不占号。带构造的才发（120-structctor.jnc）。 */
+    if (fam === 's' && !needsCtor(rec.agg, env)) { note('结构体没有构造（不发壳）'); continue; }
     const idx = next[fam];
     next[fam] += 1;                                                  // 带实参的也占一个号
     const name = `$new${fam}${idx}`;
