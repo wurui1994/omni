@@ -68,7 +68,10 @@ export function bind(ast, lang) {
   const open = (parent, why) => newScopeAt(parent, why);
 
   const bindNames = (names, scope, node) => {
-    for (const nm of names ?? []) {
+    /* 那一格里怎么读出名字：语言不说就当它本来是一串名字（读表那条腿的形参表就是）；
+       说了就照它读（拼法在 `.grammar` 里的语言那一格是棵子树）。 */
+    const list = lang.namesOf === undefined ? names : lang.namesOf(names);
+    for (const nm of list ?? []) {
       if (nm === '...') continue;                    // 变长参数不是个名字，别占格
       scope.names.set(nm, { name: nm, scope: scope.id, node });
       decls.push({ name: nm, scope: scope.id, node });
@@ -112,7 +115,10 @@ export function bind(ast, lang) {
     }
     if (ctxRule.provides !== undefined) {
       const p = typeof ctxRule.provides === 'function' ? ctxRule.provides(node) : ctxRule.provides;
-      if (p !== null && p !== undefined) ctx = new Set([...ctx, p]);
+      /* 一格可以提供**好几种**上下文（`for` 既是"能 break 的地方"又是"能 continue 的地方"）。
+         写一个还是写一串都收 —— 这是默认值，不是特例。 */
+      if (Array.isArray(p)) ctx = new Set([...ctx, ...p]);
+      else if (p !== null && p !== undefined) ctx = new Set([...ctx, p]);
     }
     const down = { ...opts, ctx };
     let cur = scope;
