@@ -16,6 +16,7 @@ import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf, named } from '../../src/lang/jnc/adapt.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
+import { collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
 import { structLine } from '../../src/lang/jnc/emit-agg.js';
@@ -146,6 +147,8 @@ for (const f of files) {
     for (const it of n.items) scan(it, inner);
   };
   scan(tree, null);
+  /* 枚举项当常量（数组长度那一族要它）：环境里先塞一遍。 */
+  collectEnumConsts(tree, env);
 
   for (const a of aggs) {
     const nm = a.emitName ?? nameText(a.name);

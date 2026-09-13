@@ -9,6 +9,8 @@
 //
 // 解不出来的**不猜**：答 `null`，调用方记账。那是这一层唯一诚实的答法。
 
+import { evalConst } from './const-eval.js';
+
 /** 关键字基类型 → 类型对象（出处：`frontend-jnc/lower.js` 的 tyText 与四种位宽都发 int）。 */
 export const WORD_TYPES = {
   int: { k: 'int' }, char: { k: 'int' }, short: { k: 'int' }, long: { k: 'int' },
@@ -84,7 +86,7 @@ export function resolveType(t, env = new Map(), depth = 0) {
   /* 多维数组按**源码次序**读长度（`int m_grid[2][3]` 是 [2,3]），从里往外套：
      元素是 `(blk int 3)`、整格是 `(blk (blk int 3) 2)`。先前每一维都取"第一格后缀"的长度，
      于是两维都成了 3 —— 尺子一次就抓出来。 */
-  const dims = arrayDims(t);
+  const dims = arrayDims(t, env);
   if (dims === null) return { type: null, why: '数组长度不是字面量' };
   for (let i = dims.length - 1; i >= 0; i -= 1) el = { k: 'arr', el, n: dims[i] };
   return { type: el, why: null };
@@ -170,15 +172,16 @@ export function bitfieldBits(t) {
 }
 
 /** 数组每一维的长度，**按源码次序**（`int m_grid[2][3]` 答 `[2, 3]`）。有一维不是字面量答 null。 */
-function arrayDims(t) {
+function arrayDims(t, env) {
   const dcl = t.raw?.dcl;
   if (dcl === null || dcl === undefined || !Array.isArray(dcl.items)) return [];
   const out = [];
   for (const s of suffixChain(dcl.items[3])) {
     if (s?.items?.[0]?.value !== 'array-suffix') continue;
-    const v = s.items[1];
-    const n = v === null || v === undefined ? NaN : Number(v.value);
-    if (!Number.isInteger(n) || n < 0) return null;
+    /* 长度不一定是字面量：`m_pad[ReportSize - 1]` / `m_actionTable[ActionId._Count]` 那一族
+       要算一格常量表达式（`const-eval.js`，枚举项从环境来）。算不出来才记账。 */
+    const n = evalConst(s.items[1], env);
+    if (n === null || !Number.isInteger(n) || n < 0) return null;
     out.push(n);
   }
   return out;
