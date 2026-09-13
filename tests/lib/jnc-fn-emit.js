@@ -28,6 +28,7 @@ import {
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
+import { LIB_IMPORTS } from '../../src/lang/jnc/modules.js';
 
 const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy/samples/jnc';
 const argv = process.argv.slice(2);
@@ -140,6 +141,7 @@ const uncoveredAt = [];
  */
 const ELSEWHERE = new Map([
   ['new 那一格的构造壳（$newoN）', 'jnc-new-emit'],
+  ['结构体的构造壳（$newsN）', 'jnc-new-emit'],
   ['花括号初值的壳（$newcN）', 'jnc-new-emit'],
   ['字符助手（jnc$crt$…）', 'jnc-crt-emit'],
 ]);
@@ -147,6 +149,7 @@ const ELSEWHERE = new Map([
 /** 一个符号名归哪一族（按尾巴认，认不出就说"别的"）。 */
 function familyOf(nm) {
   if (/^\$newo\d+$/.test(nm)) return 'new 那一格的构造壳（$newoN）';
+  if (/^\$news\d+$/.test(nm)) return '结构体的构造壳（$newsN）';
   if (/^\$newc\d+$/.test(nm)) return '花括号初值的壳（$newcN）';
   if (/^jnc\$crt\$/.test(nm)) return '字符助手（jnc$crt$…）';
   if (nm.startsWith('jnc$')) return '运行期助手（jnc$…）';
@@ -317,6 +320,20 @@ for (const f of files) {
     collectEnumConsts(t2, env);
   }
   scan(tree, null, false, undefined);
+  /* **库那几份声明是隐式 import 的**（`LIB_IMPORTS`）：jancy 那边它们"模块一开张就在"，
+     所以旧降级把它们与入口那份一起发 —— `libimp/sys_globals.jnc` 那份输出里
+     `libTwice` / `std$libTriple` 就是这么来的（它们长在另一份库文件里，没人写 import）。
+     判据只有一条：那个名字的文件在搜索路径（这儿是入口那个目录）里找得着吗。
+     次序照旧降级：**入口先、库后**。 */
+  for (const b of LIB_IMPORTS) {
+    const abs = join(f.slice(0, f.lastIndexOf('/')), b);
+    if (seenImp.has(abs) || !existsSync(abs)) continue;
+    seenImp.add(abs);
+    let t3 = null;
+    try { t3 = jncParse(tb, abs, new Diagnostics()); } catch { continue; }
+    scan(t3, null, false, undefined);
+    collectEnumConsts(t3, env);
+  }
   /* **泛型**：一格用点造一格实例（`generic.js`）—— 方法跟着叫 `Box$int$get_v`
      （110-generic.jnc 的真输出）。实例是替换好的普通 `agg`，所以照旧读；合成实参那几条
      typedef 与泛型 typedef 造出来的那几条也进 env。 */

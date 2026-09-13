@@ -138,6 +138,17 @@ export function moduleNames(entry, { index, parse, cache = new Map(), archiveIdx
 export const readSrc = (p) => readFileSync(p, 'utf8');
 
 /**
+ * 扩展库对**每个模块**都隐式 import 的那几份声明：
+ * `JNC_LIB_IMPORT("std_globals.jnc")` / `("std_Error.jnc")`（jnc_std_StdLib.cpp:930-931）、
+ * `JNC_LIB_IMPORT("sys_globals.jnc")`（jnc_sys_SysLib.cpp:218）。
+ *
+ * 判据只有一条：**那个名字的文件在搜索路径里找得着吗** —— 找着了就当一份普通 import 收
+ * （所以 `libimp/` 里摆的那两份替身照样算），找不着就当没有（库没挂上）。
+ * jancy 那边它们是"模块一开张就在"的，所以名字不用写 import 也看得见。
+ */
+export const LIB_IMPORTS = ['std_globals.jnc', 'std_Error.jnc', 'sys_globals.jnc'];
+
+/**
  * **整个模块的语句拼成一串**（入口 + 传递地 import 进来的那些文件）。
  * 为什么要它：jancy 一次编译一个模块，类与基类可能在不同文件里 —— 只有一起绑，
  * 基类那一层才真的存在，`inherit:` 才接得上，继承来的成员（`m_pluginHost` 那一族）才查得着。
