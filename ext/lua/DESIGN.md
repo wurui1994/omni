@@ -23,6 +23,8 @@ Lua 是验这套设计最好的语言：语法极小（一页 EBNF）、语义�
 - `luajit`（`|x| -> e`）：生成 451 格，**分歧 0** —— 增量表被外部尺子验过
 - `gsl-shell`（`|x| e`）：生成 412 格分歧 0，另有 39 格**没外部尺子**（记在 `noOracle` 上）；
   语料收 **112/112**，写回幂等 112/112
+- `gsl-formula`（公式子语言，**另一门语言、同一套驱动器**）：语料 80 条 + 生成 96 条，
+  拿 `expr-parse.lua` 自己当尺子，**树对得上 176/176**，写回幂等 176/176
 
 ---
 
@@ -43,6 +45,8 @@ ext/lua/
 ext/gsl-shell/
   DESIGN.md        增量的设计（公式子语言在字符串里，短函数在语法里）
   lang.js          增量表：`|x| e`
+  formula.js       公式子语言：自己的记号表/算符表/8 个节点 + 嵌套语言表
+  tests/formula.js 尺子：拿 gsl-shell 自己的 expr-parse.lua 对账
 ext/luajit/
   lang.js          增量表：`|x| -> e`（本机这支 luajit 讲的方言）
 ```
@@ -180,5 +184,8 @@ repeat           ['open', 'inline:body', 'cond']   // until 看得见 body 的 l
    `repeat…until`（`inline:body`）与方法的隐形 `self`（`selfIn`）。目标 ≤ 5。
 2. **加一门方言 = 加一张增量表**：`luajit` 与 `gsl-shell` 各一张（各 ~20 行），
    `ext/lua` 与驱动器都没改。其中 `luajit` 那张被**外部尺子**验过（451 格分歧 0）。
+   再进一步：**加一门与 Lua 无关的语言**（公式子语言）也只是加表 —— 记号表、算符表、
+   节点表各一份，驱动器为此长的是四格**数据**（`lang.tokens`/`start`/`str`/`ident`
+   与算符表上的 `onlyAt`），不是分支。
 3. **两条腿**：解析/写回这条腿齐了（语料 112/112 幂等）；降级那条腿（第 6 节）还没做。
 4. **例子全生成**：`ext/lua/tests` 里没有手写的用例清单 —— 只有生成器与两把尺子。
