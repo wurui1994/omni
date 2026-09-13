@@ -176,7 +176,8 @@ function ownFields(agg, env, ctx = { owner: '', extra: [] }) {
       return;
     }
     /* 函数指针字段也是一格数据（`(m_op (fnty (int int) int))`，109-fnfield.jnc）。 */
-    if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') return;
+    /* 事件字段也进字段表（多播那一格：`(arr (fnty () void))`，142-propalias.jnc）。 */
+    if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr' && m.shape !== 'event') return;
     if (m.name === null) { out.push(null); return; }
     flush();
     const r = resolveType(m.type, env);

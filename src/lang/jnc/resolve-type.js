@@ -55,6 +55,13 @@ export function resolveType(t, env = new Map()) {
     if (fn === null) return { type: null, why: '函数指针的形参/返回还解不出来' };
     return { type: fn, why: null };
   }
+  if (t.shape === 'event') {
+    /* 事件那一格在方言里是**元素是函数值的数组**（多播，第七十三刀）：
+       `event m_onAny()` → `(arr (fnty () void))`（142-propalias.jnc）。 */
+    const fn = fnParts(t, env);
+    if (fn === null) return { type: null, why: '事件的形参还解不出来' };
+    return { type: { k: 'mc', params: fn.params }, why: null };
+  }
   if (t.shape === 'fn') return { type: null, why: '函数那一族（fn）' };
   if (t.shape === 'prop' || t.shape === 'event') return { type: null, why: `属性/事件（${t.shape}）` };
   if (t.shape === 'bitfield') return { type: null, why: '位域' };
