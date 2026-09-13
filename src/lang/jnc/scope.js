@@ -120,7 +120,11 @@ export function jncParamsOf(v) {
   'fn-proto': { steps: ['specs', 'bind:dcl', 'in-owner:dcl'] },
   // 函数：名字在外层，形参与体在新开的那一层（形参长在 `dcl` 的后缀里）
   // 体外定义（`void C.f() {}`）先 `in-owner:dcl` 挪进那个类，`open` 于是挂在类那一层底下
-  'fn-def': { steps: ['specs', 'bind:dcl', 'in-owner:dcl', 'open', 'dcl', 'body'] },
+  /* 函数体**不另开一层**（`inline:body`）：形参与体里的声明同在函数那一层。
+     这不只是省一层 —— `in-owner:` 认回来的就是 `scopeOf` 记的那一层，体另开一层的话
+     那一层里空无一物，于是 `property g_prop { int m_x = 5; }` 的成员在
+     `void g_prop.set(int x) { m_x = x; }` 里就查不着（量出来 18 处）。 */
+  'fn-def': { steps: ['specs', 'bind:dcl', 'in-owner:dcl', 'open', 'dcl', 'inline:body'] },
   // 声明符：**不走名字那一格**（那是定义，不是引用）
   dcl: { steps: ['ptrs', 'suffixes', 'ctor'] },
   formal: { steps: ['specs', 'dcl', 'init', 'bind:dcl'] },

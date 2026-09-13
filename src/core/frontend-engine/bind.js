@@ -253,9 +253,20 @@ export function bind(ast, lang, opts = {}) {
         if (opts.extra !== undefined) bindNames(opts.extra, cur, node);
         continue;
       }
-      if (step.startsWith('inline:')) {              // 让 block 的语句长在**这一层**
+      if (step.startsWith('inline:')) {              // 让那一格的内容长在**这一层**
+        /* 那一格可能是一串语句（读表那条腿的 block 就一格 `stats`），也可能是个**块节点**
+           （jancy 的函数体是 `compound`）。都收：是节点就按它的洞走，但**不让它自己开一层**。
+           为什么要这一格：函数体不另开一层，`scopeOf` 记下的那一层里才真有体里的声明 ——
+           `in-owner:` 把体外定义接回来时找的就是它（属性的成员就靠这个查得着）。 */
         const b = node[step.slice(7)];
-        walkHole(b?.stats, cur, down);
+        if (Array.isArray(b)) walkHole(b, cur, down);
+        else if (b !== null && b !== undefined && typeof b === 'object') {
+          const spec = lang.NODE.get(b.kind);
+          const holes = spec === undefined
+            ? Object.keys(b).filter((k) => k !== 'kind' && k !== 'line')
+            : holesInOrder(spec);
+          for (const h of holes) walkHole(b[h], cur, down);
+        }
         continue;
       }
       const child = node[step];
