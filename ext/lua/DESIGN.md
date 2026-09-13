@@ -11,10 +11,18 @@
 
 - **每个节点一条规则**（它自己的形状、它对作用域做什么、它对值的个数做什么、它怎么降）
 - **组合只有几条规则**（谁能填谁的洞、优先级/结合性、多值怎么截、作用域怎么套）
-- 解析器、检查器、降级器都是**读表的驱动器**，不是手写的分支树
+- 解析器、写回器、检查器都是**读表的驱动器**，不是手写的分支树
+- **例子由规则生成，期望由规则算出，尺子是真的 `luajit`** —— 没有手写的用例清单
 
-Lua 是验这套设计最好的语言：语法极小（一页 EBNF）、语义里恰好有**两条出名的组合规则**
-（多值调整、`repeat…until` 的作用域），足够把"组合自动化"这件事验真，又不至于被特性数量埋掉。
+Lua 是验这套设计最好的语言：语法极小（一页 EBNF）、语义里恰好有两条出名的组合规则
+（多值调整、`repeat…until` 的作用域），而且**本机就有 `luajit` 当外部尺子**。
+
+已经量到的（`node ext/lua/tests/gen.js [--luajit|--gsl]`、`node ext/lua/tests/sweep.js …`）：
+
+- `lua`：生成 412 格，**分歧 0**；语料（gsl-shell 的 112 个 .lua）收 90，写回幂等 90/90
+- `luajit`（`|x| -> e`）：生成 451 格，**分歧 0** —— 增量表被外部尺子验过
+- `gsl-shell`（`|x| e`）：生成 412 格分歧 0，另有 39 格**没外部尺子**（记在 `noOracle` 上）；
+  语料收 **112/112**，写回幂等 112/112
 
 ---
 
@@ -23,151 +31,154 @@ Lua 是验这套设计最好的语言：语法极小（一页 EBNF）、语义�
 ```
 ext/lua/
   DESIGN.md        这一份
-  tokens.js        词法：每类记号一条规则
-  nodes.js         语法节点表：形状 + 洞的类别 + 优先级/结合性
-  scope.js         作用域规则：每个节点对绑定做什么（LEX 边怎么长）
-  values.js        值规则：每个节点的**元数契约**（单值 / 多值 / 截断 / 展开）
-  lower.js         降级：每个节点一小步重写，落到 src/core 的 sexpr
-  tests/           例子由规则生成（见第 7 节），不手写清单
+  tokens.js        词法：每类记号一条规则（关键字是词、长括号一条规则、算符档次一张表）
+  nodes.js         语法节点表：`syn`（形状）+ 洞的类别 + 归属
+  lang.js          语言 = 表 + 派生索引；`extend(base, delta)` 加增量
+  parse.js         解析驱动器（五台机器，见第 3 节末）
+  render.js        写回源码 —— 读**同一张** `syn`
+  scope.js         作用域配方（每节点一条）+ 上下文规则 CTX
+  values.js        元数契约（多值/截断/展开）
+  tests/sweep.js   语料尺子：把 gsl-shell 的 .lua 全读一遍（收不收 + 写回幂等）
+  tests/gen.js     生成尺子：例子由规则生成，三问对着 luajit 量
 ext/gsl-shell/
-  DESIGN.md        Lua 之上的扩展（公式子语言 `y ~ x1 + x2 | e : cond`）
-  nodes.js         只写**增量**：新节点 + 新洞 + 新组合规则
+  DESIGN.md        增量的设计（公式子语言在字符串里，短函数在语法里）
+  lang.js          增量表：`|x| e`
+ext/luajit/
+  lang.js          增量表：`|x| -> e`（本机这支 luajit 讲的方言）
 ```
 
-`ext/` 与 `src/` 平级，可以用 `src/core` 的现成件：
+`ext/` 与 `src/` 平级，用得上 `src/core` 的现成件：
 
-- `src/core/frontend-engine/scopes.js` —— `lookupEntry`（查名：候选作用域各自答，次序与歧义在引擎里）
-- `src/core/frontend-engine/positions.js` —— 位置代数 + 一致性对账（`compose` / `diff`）
-- `src/core/frontend-engine/casts.js` —— 转换关系那张有序表（Lua 用得上：数字/字符串互转）
-- `src/core/frontend-engine/overload.js` —— 挑一条（Lua 没有重载，但元方法分派用得上同一把 `pick`）
+- `src/core/frontend-engine/scopes.js` —— `lookupEntry` / `lexChain`（查名：候选作用域各自答）
+- `src/core/frontend-engine/positions.js` —— 位置代数与一致性对账（jnc 那把尺子在用）
+- `src/core/frontend-engine/casts.js` / `overload.js` —— 转换关系表、"挑一条"（降级那一步要）
 - `src/core/sexpr` / `hir` / `mir` —— 后端那一摊照旧
-
----
 
 ## 2. 词法：每类记号一条规则（`tokens.js`）
 
-```js
-{ name: 'Name',    re: /[A-Za-z_]\w*/,        kind: 'word' }
-{ name: 'Number',  re: /0[xX][0-9a-fA-F]*|…/, kind: 'lit' }
-{ name: 'String',  quote: ['"', "'"], long: '[[', kind: 'lit' }
-{ name: '..',      kind: 'op', prec: 9, assoc: 'right' }
-…
-```
+要点三条：
 
-要点只有两条：
-
-1. **关键字是词，不是特例**：`and` / `or` / `not` 在表里与 `+` 同一档（带 `prec`），
-   于是"关键字算符"不需要在语法里另开一支。
+1. **关键字是词，不是特例**：`and` / `or` / `not` 在 `LUA_OPS` 里与 `+` 同一档（带 `prec`），
+   于是"关键字算符"不必在语法里另开一支。
 2. **长括号（`[[…]]`、`--[==[…]==]`）是记号层的一条规则**，不是解析器里的分支。
+3. **算符查询必须问 `kind`**：`{['+'] = 2}` 里那个 `'+'` 是字符串，不是加号。先前只比 `value`，
+   语料里 20 个文件因此不认 —— 这一笔记在 `tokens.js` 的 `opOf` 上。
+
+数字后缀（`1i` 虚数、`LL`/`ULL`…）是 **LuaJIT 带 FFI 的数字文法**
+（`luajit2/src/lj_strscan.c:421-425`），所以它在**基语言**里，不在方言增量里。
+这一格先前记错了账，读源码后撤回。
 
 ## 3. 语法：节点表（`nodes.js`）
 
-每个节点写四样：`shape`（洞的名字与**类别**）、`prec`/`assoc`（只有算符要）、`stat`/`exp` 归属、
-`text`（怎么写出来 —— 例子生成器要用它）。
+每个节点写三样：`of`（属于哪类洞）、`syn`（具体语法）、算符那两格（`prec` 在 tokens.js）。
 
-洞的**类别**是这套设计的关键，它把 Lua 那几条"哪儿能放什么"的规矩变成数据：
+`syn` 的词汇只有六种项：**字面记号** / `h(洞)` / `l(列表洞)` / `nm(名字表)` / `w(裸名字)` /
+`opt(…)` `rep(…)`（可选组、重复组）。设计稿原本还有一栏 `text`（怎么写出来），实现时删了 ——
+它与 `syn` 重复，`render.js` 读同一张表就能写回源码。**一份数据两个方向用**：
+解析器读它认，写回器读它写；两份手写的表迟早对不上（jancy 那边 38 条账号措辞对不上就是这么来的）。
 
-| 类别 | 谁属于它 | 谁要它 |
-|---|---|---|
-| `exp` | 所有表达式 | 二元算符两边、`if` 的条件、`return` 的表… |
-| `prefixexp` | `Name` / `(exp)` / `index` / `call` | `index` 的左边、`call` 的被调 |
-| `var` | `Name` / `index` | 赋值的左边、`for` 的循环变量 |
-| `funcbody` | 形参表 + 块 | `function` / `local function` / 方法 |
-| `block` | 一串 `stat` + 可选 `laststat` | 所有带体的节点 |
-| `field` | `[exp]=exp` / `Name=exp` / `exp` | 表构造 |
+洞的**类别**是这套设计的关键，它把 Lua"哪儿能放什么"的规矩变成数据（7 类）：
 
-Lua 的语法里**只有这六类洞**。"`f().x = 1` 合法、`(f()).x = 1` 合法、`f() = 1` 不合法"
-这三句话不用写三条检查 —— 它们是"赋值左边要 `var` 类，而 `call` 不属于 `var` 类"这**一条**规则
-的自动结论。这就是"处理好每个节点，组合自动正确"。
+- `exp` 所有表达式 —— 二元算符两边、条件、列表…
+- `prefixexp` `name`/`(exp)`/`index`/`call`/`method-call` —— `index` 的左边、被调
+- `var` `name`/`index` —— 赋值左边
+- `funcbody` 形参表 + 块；`block` 一串语句；`field` 表构造那三种格；`stat` 语句
+- 上位关系只有一条链：`var ⊂ prefixexp ⊂ exp`（`SUBCLASS`），窄的申报一次，宽的自动成立
 
-节点清单（Lua 5.1 / LuaJIT 2 的全部，共 22 个）：
+于是"`f().x = 1` 合法、`(f()).x = 1` 合法、`f() = 1` 不合法"这三句话不用写三条检查 ——
+它们是"赋值左边要 `var` 类，而 `call` 不属于 `var` 类"这**一条**规则的自动结论。
 
-- 语句：`local` `assign` `call-stat` `do` `while` `repeat` `if` `for-num` `for-in`
-  `function` `local-function` `return` `break` `goto`+`label`（5.2/LuaJIT 扩展）
-- 表达式：`nil` `true` `false` `number` `string` `vararg`（`...`）`function-exp`
-  `prefix`（`-` `not` `#`）`binop` `index` `call` `method-call` `table` `paren`
+节点共 **35 个**（Lua 5.1 + LuaJIT 的 `goto`/`label`）：值 7、表达式 8、表构造的格 3、
+容器 2（`funcbody`/`block`）、语句 15。两处值得单说：
 
-## 4. 作用域：每个节点对绑定做什么（`scope.js`）
+- `a.b` 与 `a["b"]` 是**同一个节点**（`index`），点写法只是它的另一张 `syn`（`synDot`）
+- `function a.b.c:m()` 的函数名**不是**任意 `var`（`function a[1]()` 不合法），它就是
+  "名字用点连起来的一串" —— 写成一个 `sep:'.'` 的名字表，不新开洞类、不写解析器特例
 
-一条规则的形状：`{ opens?: 'block'|'function', binds?: (node) => names, visibleFrom?: … }`
+解析驱动器（`parse.js`）只有五台机器：`matchSyn`（照 `syn` 对）、`hole`（按洞的类别去要）、
+`exp`（优先级爬升，档次问 tokens.js）、`suffixed`（后缀链）、`stat`（有序选择 + 回溯，
+报"走得最远"的那个错）。加一个节点 = 往 `nodes.js` 加一行，这儿一个字不改。
 
-Lua 的全部作用域规矩就五条，写成节点上的属性之后再没有别的地方要管它：
+## 4. 作用域与位置：每个节点一条配方（`scope.js`）
 
-1. `block` 开一层；`funcbody` 开一层并把形参（含 `...`）绑进去。
-2. `local a = e`：**`e` 在绑定之前算**（所以 `local x = x` 里右边的 `x` 是外层那个）。
-   写成规则：`binds: after`。
-3. `local function f`：**先绑名字再算体**（递归要它）。写成 `binds: before`。
-4. `for` 两种：循环变量绑在**体那一层**，每轮一格新绑定。
-5. `repeat body until cond`：**`cond` 看得见 body 里的 local** —— Lua 里唯一的"块作用域漏一格"。
-   写成 `until: 'inside'`。
-
-查名直接用 `src/core/frontend-engine/scopes.js` 的 `lookupEntry`：候选作用域序列 =
-本层 → 外层… → `_ENV`/全局。**全局访问在 Lua 里就是 `_ENV.x`**（5.2 的说法），
-所以"找不着"不是错，是一次表查 —— 这条也写在规则里（`fallback: 'ENV'`），
-而不是散在降级器里。
-
-## 5. 值：元数契约（`values.js`）—— Lua 最需要"自动组合"的地方
-
-Lua 的多值规则是**组合规则**的教科书例子。四条：
-
-1. **产生多值的只有三种节点**：`call` / `method-call` / `vararg`。
-2. 这三种在**表达式列表的最后一格**才展开；不在最后就截成一格。
-3. `paren` 强制截成一格（`(f())` 只有一格）。
-4. 需要固定元数的洞（二元算符两边、`if` 条件、`index` 的下标…）一律截成一格。
-
-写成每个节点的一格属性：
+配方（`steps`）只有四种词：`open`（开一层）/ `bind:<洞>`（把名字绑进当前层）/
+`<洞名>`（走那一格）/ `inline:<洞>`（走 block 但不让它自己开层）。Lua 的五条规矩各占一行：
 
 ```js
-call:      { yields: 'multi' }
-vararg:    { yields: 'multi' }
-paren:     { yields: 1, truncates: true }
-binop:     { holes: { a: { arity: 1 }, b: { arity: 1 } }, yields: 1 }
-explist:   { spread: 'last' }     // 只有最后一格展开
+local            ['init', 'bind:names']            // 右边先算：`local x = x` 右边是外层那个
+'local-function' ['bind:names', 'body']            // 先绑名再算体（递归要它）
+funcbody         ['open', 'bind:names', 'body']    // 形参绑在函数那一层
+'for-num'        ['from','to','step','open','bind:names','body']   // 循环变量只在体里
+repeat           ['open', 'inline:body', 'cond']   // until 看得见 body 的 local ← 唯一的例外
 ```
 
-于是 `f(g(), h())`、`{ g(), h() }`、`return g(), h()`、`local a, b = g()` 这些"看着不同的
-组合"全落在同一条 `spread: 'last'` 上 —— 不用为每一处写一遍。**这正是"组合的结果不该手写"
-的意思**。
+没写配方的节点：按 `syn` 的次序走它的洞 —— 不是特例，是默认值。
+查名用 `lookupEntry` + `lexChain`；"找不着"不是错，是一次全局表查（`_ENV.x`）。
 
-## 6. 降级：每个节点一小步（`lower.js`）
+另有一张 **CTX**（第二类"位置"约束，全是数据）：
 
-每个节点一个 `lower(node, ctx)`，只管自己那一步，孩子由驱动器先降好（后序）。方言那边缺的
-两样先记账（与 ADR-0016 的记账口径一致）：
+- `provides` / `blocks` / `needs`：`break` 要 `loop`；函数体挡住 `loop` 与 `vararg`；
+  `...` 要 `vararg`（主 chunk 自带）
+- `declares` / `needsLabel`：标签是**第二个名字空间**，`goto` 后判（可以往前跳），
+  可见范围到函数边界为止
 
-- **表（table）**：Lua 的表既是数组又是哈希，落到方言要一格自己的对象表示 —— 第一刀先只收
-  "数组部分 + 字符串键"，别的记成账。
-- **元表（metatable）**：`__index` / `__add` 那一套是**分派表**，用 `overload.js` 的 `pick`
-  同一把机器（Lua 的分派规则比重载简单：先左后右，各问一次）。
+这三条都是**尺子逼出来的**：先前 `break`（循环外）、`goto L`（没标签）、`|| -> ...`
+我全收，luajit 三次都说不行。补的是规则，不是期望。
 
-## 7. 例子不手写：由规则生成
+## 5. 值：元数契约（`values.js`）
 
-`tests/` 里**不放**手写的用例清单。生成器读节点表，按"每个节点 × 每类洞的每种合法填法"
-生成最小程序，再按三问对账（与 jancy 那把尺子同一套，`src/core/frontend-engine/positions.js`）：
+四条规则，写下来只用一张三行的表加两条**普适**规则：
 
-1. **收不收**（语法/语义）；
-2. **名字落在哪**（`scope.js` 的规则说的 vs 真跑出来的）；
-3. **值有几格**（`values.js` 的契约说的 vs 真跑出来的）。
+1. 产生多值的只有 `call` / `method-call` / `vararg` ← 表
+2. 表达式**列表**里只有最后一格展开 ← 普适（洞是不是列表，`syn` 里已经有了）
+3. `paren` 强行截成一格 ← 表（Lua 里唯一"括号有语义"的地方）
+4. 非列表的 `exp` 洞一律截成一格 ← 普适
 
-与 jancy 那边的区别：jancy 那张表的每一格是我**填**的；这儿每一格是**算**的 ——
-规则给出预期，跑出来对不上就是一条测试失败。**边缘情形**（比如 `repeat…until` 那一格）
-在规则里写成一条例外，例外的**数量**就是这套设计的成绩单。
+于是 `f(g(), h())`、`{g(), h()}`、`return g(), h()`、`local a,b = g()` 落在**同一条**规则上。
 
-## 8. 与 gsl-shell 的接缝
+## 6. 降级：每个节点一小步（`lower.js`，未落地）
 
-`ext/gsl-shell` 只写**增量**（见那一份的 DESIGN）：
+每个节点一个小步，孩子由驱动器先降好（后序）。两样先记账：**表**（数组 + 哈希，
+第一刀先只收数组部分与字符串键）、**元表**（`__index`/`__add` 那套分派表，用
+`overload.js` 的 `pick` 同一把机器）。这一节是下一步要做的事。
 
-- 记号层：加 `~` `|` `%`（公式里的 enum 前缀）三个记号的规则；
-- 节点层：加 `formula`（`y ~ xs | enums : conds`）、`enum-ref`、`formula-call`；
-- 洞的类别：加一类 `formula-exp`（公式里的表达式：只认 `ident` / `number` / `literal` /
-  `call` / 前缀 `-` / 中缀算符 —— 出处 `expr-parse.lua:19-96`）；
-- 组合规则：`formula` 只出现在**字符串参数位置**（gsl-shell 的公式是写在字符串里的 DSL，
-  由 `gdt` 那一族函数解析），所以它与 Lua 的节点表**不冲突** —— 这正是"扩展语法"该有的接法：
-  加节点、加洞的类别，不改 Lua 那 22 个节点的任何一条规则。
+## 7. 例子不手写：由规则生成，三问都有外部尺子（`tests/gen.js`）
+
+生成器读节点表，按"每个节点 × 每个洞 × 那类洞的每个成员"造最小程序（`MINI` 是**每类洞的
+填法字典**，不是用例清单），然后：
+
+- **甲 收不收**：我的解析 + 位置检查 vs `luajit` 的 `loadstring`
+- **乙 名字落在哪**：我的作用域 vs `luajit -bl` 字节码里的 `GGET` ——
+  看得见就是局部槽，看不见就编成全局表查。附带一问"**漏不漏**"（探针放在节点**后面**）
+- **丙 值有几格**：我的契约 vs 跑出来 `select('#', …)`
+
+与 jancy 那张表的区别：那儿每一格是我**填**的，这儿每一格是**算**的；对不上就是一条失败，
+要么改规则，要么记一笔账 —— **不许改期望**。
+
+没量到的两处（记账）：`local a,b = …` 与 `for … in …` 这两种容器的元数没直接观测
+（规则与已量的三种同一条 `spread:'last'`）；gsl-shell 的 `|x| e` 本机没尺子（见下一节）。
+
+## 8. 与方言的接缝（`extend`）
+
+一门方言 = 一张增量表：`extend(luaLang, {punct, nodes, …})`。规矩三条（照
+`src/core/frontend-engine/feature.js`）：可以**加**；要**改**基语言的节点必须写
+`replaces: true`；洞类的上位关系冲突当场炸。
+
+- `ext/luajit/lang.js`：`|x| -> e`（本机那支 luajit 就这么写；出处见文件头）
+- `ext/gsl-shell/lang.js`：`|x| e`（`GSH_SHORT_FSYNTAX`，`lj_parse.c:1905,2086`）
+
+两支方言差一个记号 —— 这件事是找尺子时发现的：本机 `luajit` 不认 `|x| x`，只认
+`|x| -> x`。于是 gsl-shell 那张表在 `noOracle` 上记了一笔账，改由语料尺子担着（112/112）。
+
+**驱动器一个字没改**：`lambda` 的 `syn` 以 `|` 起头、`of: 'exp'`，`lang.js` 的
+`SIMPLE`/`expLead` 索引自动收它；它的作用域与元数也不必新写（与 `funcbody` 同形）。
 
 ## 9. 判据（这份设计成不成，用什么衡量）
 
-1. **规则条数 vs 组合数**：Lua 那 22 个节点 + 6 类洞 + 4 条元数规则 + 5 条作用域规则，
-   要能覆盖生成器枚举出的**全部**组合；例外清单越短越好（目标：≤ 5 条，`repeat…until` 是其中一条）。
-2. **加一门语言 = 加一张增量表**：gsl-shell 的接入不改 Lua 的任何一条规则（只加）。
-3. **两条腿**：`run`（解释）与 `run-jit`/`emit` 至少一条编译腿，同一份源码同一结果。
-4. **例子全生成**：`ext/lua/tests` 里没有手写的用例清单。
+1. **规则条数 vs 组合数**：35 节点 + 7 类洞 + 1 条上位链 + 5 条作用域配方 + 3 条上下文规则
+   + 4 条元数规则，覆盖生成器枚举出的全部组合。例外清单目前 **2 条**：
+   `repeat…until`（`inline:body`）与方法的隐形 `self`（`selfIn`）。目标 ≤ 5。
+2. **加一门方言 = 加一张增量表**：`luajit` 与 `gsl-shell` 各一张（各 ~20 行），
+   `ext/lua` 与驱动器都没改。其中 `luajit` 那张被**外部尺子**验过（451 格分歧 0）。
+3. **两条腿**：解析/写回这条腿齐了（语料 112/112 幂等）；降级那条腿（第 6 节）还没做。
+4. **例子全生成**：`ext/lua/tests` 里没有手写的用例清单 —— 只有生成器与两把尺子。
