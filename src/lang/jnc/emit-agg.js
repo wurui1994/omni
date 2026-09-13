@@ -1,30 +1,29 @@
 // src/lang/jnc/emit-agg.js —— 一格聚合体发成方言的 `(struct …)`：**三条规则**
 //
-// 规则不是我想的，是尺子从旧降级的真输出里逼出来的（`tests/lib/jnc-struct-emit.js` 整行那一栏）：
-//   1. **类多头一格 `$tag int`** —— 类那一族在方言里带一格标签（继承链共用一格结构体，
-//      第五十二/五十六刀）。`(struct Node ($tag int) (m_v int) …)`。
-//   2. **基类的字段在前** —— `struct Point3D: Point2D { int m_z; }` 发的是
-//      `(struct Point3D (m_x int) (m_y int) (m_z int))`：基类那几格先躺着。
-//   3. 自己的字段按**源码次序**，只收数据那两族（data / array）。
+// 已经搬进这一份的规则（全是尺子从旧降级真输出里逼出来的，`tests/lib/jnc-struct-emit.js`）：
+//   1. **类多头一格 `$tag int`**（第五十二/五十六刀）；
+//   2. **基类的字段在前**（`struct Point3D: Point2D {…}` → `(m_x)(m_y)(m_z)`，递归摊平）；
+//   3. 自己的字段按**源码次序**，收 data / array / fnptr 三族；
+//   4. **匿名 union** 摊平再括回 `(union …)`（第一百一十刀）；
+//   5. **位域**按底宽挤成 `$bN`（104-bitfield.jnc：4+4 进一格 uint8、5+5 挤不进、24+8 进一格 uint32）；
+//   6. union 里套**匿名 struct** 各自发一行，名字 `<东家>$u<union 的成员序号>$s<第几个匿名 struct>`
+//      （103-unionstruct.jnc；`$s` 数的是匿名 struct 的个数 —— 104 的 `Ctl` 把这一格钉死）。
 //
-// 还没搬的（记账，`structLine` 答 null 或者少几格）：
-//   - **位域**摊成 `$bN`。规则已经从旧降级的真输出反出来了（104-bitfield.jnc）：
-//     连着的位域按"同一个底宽 + 累计位数不超过那个宽"合成一格，格名是 `$b<这一格的序号>`。
-//     源码 `m_a:4 m_b:4 / int m_x / m_c:5 m_d:5 m_e:5(uint16) m_s:4(char) m_off:24 m_cnt:8(uint32)`
-//     发的是 `($b0 int) (m_x int) ($b2 int) ($b3 int) ($b4 int) ($b5 int) ($b6 int)` ——
-//     4+4 挤进一格 uint8，5+5 挤不进（10 > 8）所以各一格，24+8 正好挤进一格 uint32。
-//     缺的那一格是**底宽表**（uint8_t→8、uint16_t→16、uint32_t→32、char→8…），
-//     `resolveType` 现在把整数一律解成 `int`，宽度信息没留 —— 那是下一刀。
-//   - union 里套**匿名 struct** 的命名（`H$u1$s0`，103-unionstruct.jnc）。
-//   - **属性那一族**（108-propdot.jnc）：`Inner* property m_p;` 旧降级**不发**这一格字段
-//     （属性没有自己的存储），我们现在把它当了数据字段。**查到一半的账**：
-//     `readSpecs` 在这一句上读出来的修饰词是**空的**（尺子印过：specs 的三格是
-//     `name | mods | mods`，两格 mods 都是空基例），所以 `property` 那个词压根没进
-//     说明符表 —— 下一刀先查它去了哪条产生式，再决定是补 `types.js` 的形状判定
-//     还是补节点表。**不猜、不先绕过去**。
-//   - **函数字段**（109-fnfield.jnc）：`int function* m_op(int, int)` 要发
-//     `(m_op (fnty (int int) int))`。`resolveType` 现在把 fn 那一族整格记账了 ——
-//     缺的是"从 fn-suffix 的形参表解出参数类型"这一步。
+// **类那一族的大规则（刚从尺子上看清，还没实现）**：旧降级**一整条继承链只发一格结构体**
+// （第五十六刀的 `clsRoot`）—— 派生类不另发，它们的字段**并进根那一格**，按声明次序排在后面。
+// 128-basetypedef.jnc 是最干净的一例：`class B0 {}` 加四个派生类，旧降级发的是
+//   `(struct B0 ($tag int) (m_v int) (m_p B0$Pair) (m_mid int) (m_c int))`
+// —— 那四格分别长在 D0/D1/D2/D3 上。129-baseparam.jnc 同理。这也解释了尺子那一栏
+// "旧降级没发这个聚合体：34 个" —— 那 34 个就是派生类。
+// 所以"一格聚合体发一行"对 struct 成立、对 class **不成立**：下一刀要按**链的根**分组，
+// 根那一行把整条链的字段并起来（现在的 `baseFields` 是反着做的 —— 从派生类往上抄基类字段，
+// 那是 struct 的规矩）。
+//
+// 另外三族（尺子每次都印，出处在括号里）：
+//   - 属性的**隐藏存储字段** `<东家>$<属性名>$<字段名>`（141-propfullmem / 150-variantautoget /
+//     151-propfield / 152-propfieldinit）；
+//   - **事件字段**发 `(arr (fnty () void))`（142-propalias 的 `m_onAny`，多播那一格）；
+//   - **带名字的 union** 也进字段表（166-unionnamed）。
 
 import { resolveType, baseIntBits, bitfieldBits } from './resolve-type.js';
 import { emitType } from './emit-type.js';
