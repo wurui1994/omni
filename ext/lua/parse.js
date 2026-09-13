@@ -1,0 +1,312 @@
+// ext/lua/parse.js —— 解析器 = **读节点表的驱动器**（不是手写的分支树）
+//
+// 全部"这儿能写什么"的知识都在 nodes.js 的 `syn` 与洞的类别里。这一份只有**五台机器**：
+//
+//   1. matchSyn   照一个节点的 `syn` 逐项对：字面记号 / 叶子 / 名字表 / 可选组 / 重复组 / 洞
+//   2. parseHole  按洞的**类别**去要东西（`exp` 爬优先级、`var`/`prefixexp` 走后缀链…）
+//   3. parseExp   优先级爬升，档次直接问 tokens.js（`binop`/`unop`/`UNARY_PREC`）
+//   4. suffixed   `name`/`(exp)` 起头，然后 `.k` `[k]` `:m()` `(args)` 的后缀循环
+//   5. choose     有序选择 + 回溯：同一个引导记号下的候选按表序试，报"走得最远"的那个错
+//
+// 于是加一个节点 = 往 nodes.js 加一行；这儿一个字都不用改。gsl-shell 的公式子语言
+// （`ext/gsl-shell`）就是靠这条性质只写增量。
+
+import { lex, binop, unop, LexError } from './tokens.js';
+import { luaLang } from './lang.js';
+
+export class ParseError extends Error {
+  constructor(msg, tok) {
+    super(`${tok?.line ?? '?'} 行：${msg}`);
+    this.name = 'ParseError';
+    this.line = tok?.line;
+    this.at = tok;
+  }
+}
+
+/** 块的结束记号（谁都不吃它们，由外层的 `syn` 吃）。 */
+const BLOCK_END = new Set(['end', 'else', 'elseif', 'until']);
+
+class P {
+  constructor(src, lang) {
+    this.lang = lang;
+    this.toks = lex(src, lang);
+    this.i = 0;
+  }
+
+  peek(k = 0) { return this.toks[Math.min(this.i + k, this.toks.length - 1)]; }
+
+  get cur() { return this.peek(); }
+
+  /** 记号与字面量对不对得上。关键字/算符看 `value`，叶子看 `kind`。 */
+  is(lit) {
+    const t = this.cur;
+    return t.value === lit && t.kind !== 'string' && t.kind !== 'number' && t.kind !== 'name';
+  }
+
+  take(lit) {
+    if (!this.is(lit)) throw new ParseError(`要一个 '${lit}'，看到的是 '${this.cur.value}'`, this.cur);
+    return this.toks[this.i++];
+  }
+
+  name() {
+    if (this.cur.kind !== 'name') throw new ParseError(`要一个名字，看到的是 '${this.cur.value}'`, this.cur);
+    return this.toks[this.i++].value;
+  }
+
+  // ── 1. matchSyn ──────────────────────────────────────────────────────────
+  /** 照 `n.syn` 对一遍，答一个节点对象。`syn` 变了这儿自动跟着变。 */
+  matchSyn(n, syn = n.syn) {
+    const out = { kind: n.name, line: this.cur.line };
+    for (const it of syn) {
+      if (typeof it === 'string') { this.take(it); continue; }
+      if (it.opt !== undefined) {
+        if (this.optStarts(it.opt)) this.matchInto(out, it.opt);
+        continue;
+      }
+      if (it.rep !== undefined) {
+        while (this.optStarts(it.rep)) {
+          const frame = {};
+          this.matchInto(frame, it.rep);
+          for (const [k, v] of Object.entries(frame)) {
+            if (out[k] === undefined) out[k] = [];
+            out[k].push(v);
+          }
+        }
+        continue;
+      }
+      this.matchItem(out, it);
+    }
+    return out;
+  }
+
+  matchInto(out, items) {
+    for (const it of items) {
+      if (typeof it === 'string') { this.take(it); continue; }
+      if (it.opt !== undefined) { if (this.optStarts(it.opt)) this.matchInto(out, it.opt); continue; }
+      this.matchItem(out, it);
+    }
+  }
+
+  matchItem(out, it) {
+    if (it.t !== undefined) {
+      if (this.cur.kind !== it.t) throw new ParseError(`要一个 ${it.t}`, this.cur);
+      out[it.as] = this.toks[this.i++].value;
+      return;
+    }
+    if (it.w !== undefined) { out[it.w] = this.name(); return; }
+    if (it.n !== undefined) { out[it.n] = this.nameList(it); return; }
+    if (it.b !== undefined) { out[it.b] = this.block().stats; return; }
+    if (it.h !== undefined) { out[it.h] = this.hole(it); return; }
+    if (it.l !== undefined) { out[it.l] = this.holeList(it); return; }
+    throw new Error(`syn 里不认得的项：${JSON.stringify(it)}`);
+  }
+
+  /** 可选组/重复组要不要取：看组里第一项能不能起头。 */
+  optStarts(items) {
+    const first = items[0];
+    if (typeof first === 'string') return this.is(first);
+    if (first.l !== undefined || first.h !== undefined) return this.startsExp();
+    if (first.w !== undefined || first.n !== undefined) return this.cur.kind === 'name';
+    return false;
+  }
+
+  /**
+   * 现在这个记号能不能起一个表达式。**这一格也是算出来的**：`lang.expLead` 由
+   * "简单值"节点的 `syn` 第一项派生（见 lang.js 的 derive）。先前这儿硬写着
+   * `['nil','true','false','...','(','{','function']` —— 那是把语言塞进驱动器，
+   * gsl-shell 加个 `|x| e` 就得来改它。
+   */
+  startsExp() {
+    const t = this.cur;
+    if (this.lang.expLeadKinds.has(t.kind)) return true;
+    if (unop(t, this.lang) !== undefined) return true;
+    return t.kind !== 'string' && t.kind !== 'number' && this.lang.expLead.has(t.value);
+  }
+
+  nameList(it) {
+    const sep = it.sep ?? ',';
+    const out = [];
+    for (;;) {
+      if (it.vararg === true && this.is('...')) { this.take('...'); out.push('...'); break; }
+      if (out.length > 0 || (it.min ?? 1) > 0 || this.cur.kind === 'name') out.push(this.name());
+      if (!this.is(sep)) break;
+      this.take(sep);
+    }
+    if (it.max !== undefined && out.length > it.max) {
+      throw new ParseError(`这儿只能有 ${it.max} 个名字`, this.cur);
+    }
+    return out;
+  }
+
+  /** 这个洞现在能不能起头（`min:0` 的列表与尾随分隔符都问它）。 */
+  startsHole(it) {
+    if (it.cls === 'field') return this.startsExp() || this.is('[');
+    if (it.cls === 'block' || it.cls === 'funcbody') return true;
+    return this.startsExp();
+  }
+
+  holeList(it) {
+    const seps = [it.sep ?? ',', ...(it.alt ?? [])];
+    const out = [];
+    if ((it.min ?? 1) === 0 && !this.startsHole(it)) return out;
+    out.push(this.hole(it));
+    for (;;) {
+      const s = seps.find((x) => this.is(x));
+      if (s === undefined) break;
+      this.take(s);
+      if (it.trail === true && !this.startsHole(it)) break;   // 允许尾随一个分隔符
+      out.push(this.hole(it));
+    }
+    return out;
+  }
+
+  // ── 2. parseHole：按洞的类别去要东西 ─────────────────────────────────────
+  hole(it) {
+    const cls = it.cls;
+    if (cls === 'block') return this.block();
+    if (cls === 'funcbody') return this.matchSyn(this.lang.NODE.get('funcbody'));
+    if (cls === 'field') return this.field();
+    if (cls === 'exp') return this.exp(0);
+    // `var` / `prefixexp`：先按后缀链解析，再用**洞的类别**判它能不能填。
+    const tok = this.cur;
+    const e = this.suffixed();
+    if (!this.lang.fits(e.kind, cls)) {
+      throw new ParseError(`'${e.kind}' 填不进 ${cls} 类的洞（${cls} 类只收 ${this.lang.membersOf(cls).join(' / ')}）`, tok);
+    }
+    if (it.only !== undefined && !it.only.includes(e.kind)) {
+      throw new ParseError(`这个位置只收 ${it.only.join(' / ')}，不是 '${e.kind}'`, tok);
+    }
+    return e;
+  }
+
+  field() {
+    if (this.is('[')) return this.matchSyn(this.lang.NODE.get('field-index'));
+    if (this.cur.kind === 'name' && this.peek(1).value === '=' && this.peek(1).kind === 'punct') {
+      return this.matchSyn(this.lang.NODE.get('field-name'));
+    }
+    return this.matchSyn(this.lang.NODE.get('field-item'));
+  }
+
+  // ── 3. parseExp：优先级爬升（档次全问 tokens.js）─────────────────────────
+  exp(limit) {
+    let left;
+    const u = unop(this.cur, this.lang);
+    if (u !== undefined) {
+      const op = this.toks[this.i++].value;
+      left = { kind: 'prefix', op, a: this.exp(this.lang.unaryPrec) };
+    } else {
+      left = this.simple();
+    }
+    for (;;) {
+      const b = binop(this.cur, this.lang);
+      if (b === undefined || b.prec <= limit) break;
+      const op = this.toks[this.i++].value;
+      // 右结合就把自己的档次减一（`a..b..c` = `a..(b..c)`，`a^b^c` = `a^(b^c)`）
+      const right = this.exp(b.assoc === 'right' ? b.prec - 1 : b.prec);
+      left = { kind: 'binop', op, a: left, b: right };
+    }
+    return left;
+  }
+
+  simple() {
+    for (const n of this.lang.SIMPLE) {
+      const first = n.syn[0];
+      if (typeof first === 'string' ? this.is(first) : this.cur.kind === first.t) {
+        return this.matchSyn(n);
+      }
+    }
+    return this.suffixed();
+  }
+
+  // ── 4. suffixed：`name` / `(exp)` 起头，后缀循环 ─────────────────────────
+  suffixed() {
+    let e;
+    if (this.is('(')) e = this.matchSyn(this.lang.NODE.get('paren'));
+    else if (this.cur.kind === 'name') e = { kind: 'name', value: this.name(), line: this.cur.line };
+    else throw new ParseError(`这儿要一个表达式，看到的是 '${this.cur.value}'`, this.cur);
+    for (;;) {
+      if (this.is('.')) { this.take('.'); e = { kind: 'index', obj: e, key: this.name(), dot: true }; continue; }
+      if (this.is('[')) {
+        this.take('[');
+        const key = this.exp(0);
+        this.take(']');
+        e = { kind: 'index', obj: e, key, dot: false };
+        continue;
+      }
+      if (this.is(':')) {
+        this.take(':');
+        const method = this.name();
+        e = { kind: 'method-call', obj: e, method, args: this.callArgs() };
+        continue;
+      }
+      if (this.is('(') || this.is('{') || this.cur.kind === 'string') {
+        e = { kind: 'call', fn: e, args: this.callArgs() };
+        continue;
+      }
+      return e;
+    }
+  }
+
+  /**
+   * 调用实参。`f"s"` / `f{…}` 是 Lua 的糖，落成同一个 `call` 节点（只记 `sugar`，
+   * `render` 一律写成括号形式 —— 语义一样，来回不必逐字相同）。
+   */
+  callArgs() {
+    if (this.cur.kind === 'string') return [this.matchSyn(this.lang.NODE.get('string'))];
+    if (this.is('{')) return [this.matchSyn(this.lang.NODE.get('table'))];
+    this.take('(');
+    const args = this.holeList({ cls: 'exp', min: 0 });
+    this.take(')');
+    return args;
+  }
+
+  // ── 5. choose：有序选择 + 回溯，报"走得最远"的那个错 ─────────────────────
+  block() {
+    const stats = [];
+    for (;;) {
+      if (this.cur.kind === 'eof' || BLOCK_END.has(this.cur.value)) break;
+      if (this.is(';')) { this.take(';'); continue; }
+      const st = this.stat();
+      stats.push(st);
+      if (this.is(';')) this.take(';');
+      if (this.lang.NODE.get(st.kind).last === true) break;     // `return` / `break` 之后不能再有语句
+    }
+    return { kind: 'block', stats };
+  }
+
+  stat() {
+    const start = this.i;
+    const cands = [...(this.lang.LEAD.get(this.cur.value) ?? []), ...this.lang.FALLBACK];
+    let far = null;
+    for (const n of cands) {
+      try {
+        const got = this.matchSyn(n);
+        if (this.statBoundary()) return got;
+        far = far ?? { err: new ParseError(`'${this.cur.value}' 在这儿多出来了`, this.cur), at: this.i };
+      } catch (err) {
+        if (!(err instanceof ParseError)) throw err;
+        // `>=`：走得一样远时**取后来的**。候选按表序排（`local-function` 在 `local` 前），
+        // 而后来的那个通常是更一般的形状，它的抱怨也更贴题（`local 1 = 2` 该说"要一个名字"，
+        // 不该说"要一个 function"）。
+        if (far === null || this.i >= far.at) far = { err, at: this.i };
+      }
+      this.i = start;
+    }
+    throw far?.err ?? new ParseError(`不认得的语句开头 '${this.cur.value}'`, this.cur);
+  }
+
+  /** 一条语句该在哪儿收：块尾、`;`、或者下一个记号能起一条语句。 */
+  statBoundary() {
+    const t = this.cur;
+    if (t.kind === 'eof' || BLOCK_END.has(t.value) || t.value === ';') return true;
+    return this.lang.LEAD.has(t.value) || t.kind === 'name' || t.value === '(';
+  }
+}
+
+/** 解析一段源码，答一个 `block` 节点（chunk）。`lang` 换一门语言就换一门语言。 */
+export function parse(src, lang = luaLang) {
+  const p = new P(src, lang);
+  const b = p.block();
+  if (p.cur.kind !== 'eof') throw new ParseError(`到这儿该结束了，却还有 '${p.cur.value}'`, p.cur);
+  return b;
+}
