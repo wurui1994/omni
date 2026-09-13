@@ -1,0 +1,43 @@
+// 内嵌的类字段自己带实参的构造：`m_classField.construct(x)`（第二百五十九刀）。
+//
+// jancy 的规矩写在语料的注里（samples/jnc/03_Storage.jnc:47-49）：
+//   "if a member field requires construction this must be done in the beginning of the
+//    constructor (much like with base type constructors)"
+//
+// 所以这一格与基类那一格（第五十六 / 九十四刀的 basetype.construct）逐字同一条路：
+// 体里显式写了的，自动补的那一句就让开；造对象与写 `$tag` 照旧（那两件事没人替代）。
+
+class Inner {
+	int m_v;
+
+	construct(int v) {
+		printf("Inner.construct %d\n", v);
+		m_v = v;
+	}
+}
+
+class Plain {
+	int m_p;
+
+	construct() {
+		printf("Plain.construct\n");
+		m_p = 7;
+	}
+}
+
+class Outer {
+	Inner m_in;      // 它的 construct 要实参 —— 得自己在开头构造
+	Plain m_pl;      // 不带实参的那一格照旧自动补
+	int m_n;
+
+	construct(int x) {
+		m_in.construct(x);
+		m_n = x * 2;
+	}
+}
+
+int main() {
+	Outer o(5);
+	printf("%d %d %d\n", o.m_in.m_v, o.m_pl.m_p, o.m_n);
+	return 0;
+}

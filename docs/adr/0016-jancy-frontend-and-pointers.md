@@ -11777,6 +11777,37 @@ jancy 那边靠**生成 thunk** 办（同一处文档那句 "the compiler will g
 - 逐份那张榜：`'…' 上写了 function 却没有 '*'` 那一行**整行没了**；
   `没有这个函数` `78 -> 77`、`没有这个类型` `75 -> 74`、`(文件, 拦路项)` 对 `3469 -> 3467`。
 
+### 第二百五十九刀：内嵌的类字段自己带实参的构造（`m_field.construct(x)`）
+
+榜上 `没有这个函数：'m_classField.construct'`（samples/jnc/03_Storage.jnc:51），旁边还跟着
+`iox.HostNameResolver 的 construct 要 1 个实参，这里给了 0 个`（12 对）与 `iox.SshChannel` 那条
+（5 对）—— 那两条正是"自动补那一句"补不出来时报的。
+
+jancy 的规矩就写在语料的注里（同一份文件 47-49 行）：
+
+> if a member field requires construction this must be done in the beginning of the
+> constructor (much like with base type constructors)
+
+也就是说这一格与**基类**那一格是同一条路，而基类那一条这一层早就有（第五十六 / 九十四刀的
+`baseCtorCalls`：体里显式调过的那几格不再自动补）。所以落法照抄：
+
+- 新 `memCtorCalls(体)`：扫出体里显式写了 `m_x.construct(…)` 的那几格字段名（与 `baseCtorCalls`
+  逐行同形）；
+- `embInitLines` 多收一格 `skip`：那几格**造对象与写 `$tag` 照旧**（没人替代），只把自动补的
+  那一句 construct 让开；
+- `callStmt` 里认这一句：左边那一格的类型是类、而那个类有 construct 时，拿它当 self 调
+  —— 走的是 `new C(…)` 那条现成的 `ctorArgs` / `ctorCall`。
+
+次序照 jancy：不带实参的那几格在 `initializeFields` 那一步（用户写的体之前）就构造完，
+带实参的那一格在体里它写的位置上构造 —— 例子里印出来的正是 `Plain.construct` 在
+`Inner.construct 5` 之前。
+
+- 新例子 `cases/195-embctor`（带实参的一格 + 不带实参的一格，钉住次序；孪生 `/tmp/c203.c`）。
+- 腿：`node tests/jnc/run.js` 342/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：**两行整行没了**（`iox.HostNameResolver 的 construct 要 1 个实参` 12 对、
+  `iox.SshChannel` 那条 5 对）；`没有这个函数` `77 -> 72`、
+  `(文件, 拦路项)` 对 `3467 -> 3431`（−36）；lowered 59、clean 90 没动。
+
 
 
 

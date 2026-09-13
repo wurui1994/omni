@@ -521,6 +521,25 @@ function baseCtorCalls(n, out = new Set()) {
   return out;
 }
 
+/** 体里显式写了 `m_字段.construct(…)` 的那几格字段名（第二百五十九刀）。
+ *  与上面那一格（基类的 `basetype.construct(…)`）逐字同一条路 —— jancy 那句注写在语料里：
+ *  "if a member field requires construction this must be done in the beginning of the
+ *  constructor (much like with base type constructors)"（samples/jnc/03_Storage.jnc:47-49）。
+ *  显式写了的那几格，自动补的那一句就不发了。 */
+function memCtorCalls(n, out = new Set()) {
+  if (!isList(n)) return out;
+  if (head(n) === 'call') {
+    const c = n.items[1];
+    if (isList(c) && head(c) === 'field' && isList(c.items[1]) && head(c.items[1]) === 'name'
+      && isAtom(c.items[1].items[1])
+      && (isAtom(c.items[2]) || isStr(c.items[2])) && c.items[2].value === 'construct') {
+      out.add(c.items[1].items[1].value);
+    }
+  }
+  for (const it of n.items) memCtorCalls(it, out);
+  return out;
+}
+
 /** 声明符的核心是个**特殊成员**吗（第五十二刀）：`construct` / `destruct` /
  *  `static construct` / 属性的 `get` `set`。是就回那个关键字，不是回 null。
  *  这几种在语法里是自己一格（`special` / `accessor`，jnc.grammar 的 special 规则）。
@@ -2000,7 +2019,7 @@ class JncLower {
    * 那时那格对象得已经在。顺序与 jancy 一致 —— 它也是"字段逐格 initialize"排在构造体之前
    * （jnc_ct_Parser.cpp:3002-3009 那条链）。
    */
-  embInitLines(cls, pad) {
+  embInitLines(cls, pad, skip = null) {
     const list = this.embFields.get(cls);
     if (list === undefined) return [];
     const out = [];
@@ -2010,6 +2029,11 @@ class JncLower {
       const tg = this.tagStore(f.node, f.cls, `(pload ${ad})`, pad);
       if (tg === null) continue;                    // 报过错了
       out.push(tg);
+      /* 体里已经显式写了 `m_x.construct(…)`（第二百五十九刀）：造对象与写 `$tag` 照旧
+         （那两件事没人替代），**只**把自动补的那一句 construct 让给它 —— 与基类那一格
+         （baseCtorCalls）逐字同一条路。jancy 那边"要实参的字段必须在构造开头自己构造"
+         正是这么说的（samples/jnc/03_Storage.jnc:47-49）。 */
+      if (skip !== null && skip.has(f.name)) continue;
       if (this.ctorCall(f.node, f.cls, `(pload ${ad})`, null, pad, out) === null) continue;
     }
     return out;
@@ -9963,7 +9987,7 @@ class JncLower {
       for (const l of this.evtInitLines(owner, '    ')) pre.push(l);
       /* 内嵌的类字段那几格（第一百六十一刀）：与事件那几行同一处、紧跟在它后面 —— 字段初值里
          可以写 `m_menu.addItem(…)`，那时那格对象得已经造出来。 */
-      for (const l of this.embInitLines(owner, '    ')) pre.push(l);
+      for (const l of this.embInitLines(owner, '    ', memCtorCalls(n.items[3]))) pre.push(l);
       /* 字段的默认值（第七十八刀）：排在基类构造与静态构造之后、用户写的那个体之前 ——
          正是 jancy 那四句的第三句（jnc_ct_Parser.cpp:3005-3009 的 initializeFields）。
          所以 construct 里再给同一格字段赋值会**盖掉**默认值，与 jancy 一致。
@@ -11498,6 +11522,24 @@ class JncLower {
       }
       return [`${pad}(expr (call ${this.mcFire(mc.type)} ${mc.code}`
         + `${vs.map((v) => ` ${v.code}`).join('')}))`];
+    }
+    /* `m_classField.construct(x)`（第二百五十九刀）：内嵌的类字段自己带实参的构造。
+       jancy 的规矩写在语料的注里 —— "if a member field requires construction this must be done
+       in the beginning of the constructor (much like with base type constructors)"
+       （samples/jnc/03_Storage.jnc:47-49）。落法就是"拿那一格对象当 self 调它的 construct"，
+       与 `new C(…)` 那条路同一个 `ctorArgs` / `ctorCall`；自动补的那一句由 embInitLines
+       按 memCtorCalls 让开。 */
+    if (isList(callee) && head(callee) === 'field'
+      && (isAtom(callee.items[2]) || isStr(callee.items[2]))
+      && callee.items[2].value === 'construct') {
+      const bt = this.cheapTy(callee.items[1]);
+      if (bt !== null && isClass(bt.ty) && this.ctors.has(bt.ty.name)) {
+        const sv = this.expr(callee.items[1], null);
+        if (sv === null) return null;
+        const out2 = [];
+        if (this.ctorCall(n, bt.ty.name, sv.code, n.items[2], pad, out2) === null) return null;
+        return out2;
+      }
     }
     const v = this.expr(n, null);
     if (v === null) return null;
