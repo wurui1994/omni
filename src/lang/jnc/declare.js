@@ -84,6 +84,9 @@ export function readDcl(node) {
        与尺子都按它对账），特名单独一格照实带出来 —— 发函数头那一层要它（旧降级发的是
        `<东家>$construct`，86-multibase.jnc 的真输出）。 */
     special: specialText(nm.name),
+    /* **算符**那一族的名字也不是 `name`：`(operator "++")` / `(postfix-operator "++")`
+       （节点表 :141-142）。照实带出来（源码里那个算符 + 前/后置），拼成什么名字是发那一层的事。 */
+    operator: operatorOf(nm.name),
     ptrs: ptrs.length,
     /* **跟在 `*` 后面的修饰词**也要读出来（`ptr-group -> "*" mods`）：
        `Inner* property m_p;` 里的 `property` 就落在这儿，不在说明符表里 ——
@@ -101,6 +104,16 @@ function specialText(node) {
   const nm = named(node);
   const t = nm === null ? undefined : nm.text;
   return t !== null && t !== undefined && t.value !== undefined ? String(t.value) : null;
+}
+
+/** 算符名：`(operator "++")` / `(postfix-operator "++")` → `{ op, postfix }`；不是算符答 null。 */
+function operatorOf(node) {
+  const h = headOf(node);
+  if (h !== 'operator' && h !== 'postfix-operator') return null;
+  const nm = named(node);
+  const t = nm === null ? undefined : nm.op;
+  const op = t !== null && t !== undefined && t.value !== undefined ? String(t.value) : null;
+  return op === null ? null : { op, postfix: h === 'postfix-operator' };
 }
 
 /** 一格 `ptr` 节点里那串修饰词（`(ptr mods)`）。 */

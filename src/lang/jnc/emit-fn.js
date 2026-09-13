@@ -24,6 +24,20 @@ import { headOf, named } from './adapt.js';
 const VOID_NAMES = new Set(['construct', 'destruct', 'staticconstruct', 'operator new']);
 
 /**
+ * **算符重载的符号名**：源码里那个算符 → `op$<名字>`（旧降级 lower.js:672-700 的 OP_NAME，
+ * 真输出 122-opincdec.jnc 的 `It$op$inc` / `It$op$dec` / `It$op$inc$post`）。
+ * 后置那两格自己带 `$post`（表里分开列，不在发的时候拼 —— 拼就成了隐式规则）。
+ */
+export const OP_NAMES = {
+  ':=': 'assign', '++': 'inc', '--': 'dec', '*': 'mul', '->': 'arrow', '()': 'call',
+  bool: 'bool', '==': 'eq', '!=': 'ne',
+  '+=': 'addAssign', '-=': 'subAssign', '*=': 'mulAssign', '/=': 'divAssign',
+  '%=': 'modAssign', '&=': 'andAssign', '|=': 'orAssign', '^=': 'xorAssign',
+  '<<=': 'shlAssign', '>>=': 'shrAssign',
+};
+const OP_POSTFIX = { '++': 'inc$post', '--': 'dec$post' };
+
+/**
  * 一格 `fn-suffix` 里的形参表：`[{ name, type }]`。
  * 变参与"没名字的形参"照实回（`name: null` / `varargs: true`），由发的那一层决定收不收。
  */
@@ -68,12 +82,18 @@ function fnSuffixOf(t) {
   return s === undefined ? null : s.node;
 }
 
-/** 这一格函数的名字：普通名字，或**特名**（`construct` / `destruct` / `operator …`）。 */
+/** 这一格函数的名字：普通名字、**特名**（`construct` / `destruct`）或**算符**（`op$inc`）。 */
 export function fnName(m) {
   if (m === null || m === undefined) return null;
   if (m.name !== null && m.name !== undefined) return m.name;
   const dc = readDcl(m.type?.raw?.dcl);
-  return dc === null ? null : dc.special;
+  if (dc === null) return null;
+  if (dc.special !== null) return dc.special;
+  if (dc.operator !== null) {
+    const w = dc.operator.postfix ? OP_POSTFIX[dc.operator.op] : OP_NAMES[dc.operator.op];
+    return w === undefined ? null : `op$${w}`;
+  }
+  return null;
 }
 
 /**
