@@ -15,25 +15,38 @@ export default feature({
   accounts: {
     'M-001': {
       text: '结构体里的 `static construct` / `destruct`',
+      match: '结构体里的',
       why: 'static construct 要一道 once 闸门；destruct 要作用域出口那一套钩子',
     },
     'M-002': {
       text: '`destruct` —— jancy 那边它是 GC 在**不确定的时刻**调的',
+      match: '不确定的时刻',
       why: 'disposable.rst:17；要确定时机得先有 dispose / nestedscope 那一套',
     },
-    'M-003': { text: '算符重载 `operator +` 那一族', why: '第 130~139 刀收了一部分，这一格是剩下的' },
+    'M-003': {
+      text: '算符重载 `operator +` 那一族',
+      match: '算符重载',
+      why: '第 130~139 刀收了一部分，这一格是剩下的',
+    },
     'M-004': {
       text: '`construct` 只能是类或结构体的成员（写在体里，或写成 `C.construct()`）',
+      match: '只能是类或结构体的成员（写在体里，或写成',
       why: '这一句是**对的**（jancy 同），不是欠账 —— error 那一栏也有正确答案',
     },
-    'M-005': { text: '`operator :=` 只能是类或结构体的成员（写在体里）', why: '同 M-004' },
+    'M-005': {
+      text: '`operator :=` 只能是类或结构体的成员（写在体里）',
+      match: '只能是类或结构体的成员（写在体里）',
+      why: '同 M-004',
+    },
     'S-002': {
       text: '语句 `…`（函数体里的成员声明落到这句兜底上）',
+      match: /^语句 /,
       why: '**话不够准**：体里写 construct / operator / reactor / 带体方法时，该按要素说清'
         + '（"函数体里写不了这一种成员"），而不是报一句"认不出的语句"',
     },
     'S-003': {
       text: '函数体里的 `名字(…)`：要么是一格函数原型，要么是"局部量后面挂构造实参"',
+      match: '函数体里的这一条',
       why: '这两种在语法上撞在一起（第二百六十二刀把话改成同时说两种读法）：函数体里写原型要一层'
         + '"块作用域也是命名空间"；`T v(a, b)` 那一种只有类与结构体的变量收得下',
     },

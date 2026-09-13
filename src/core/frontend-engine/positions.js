@@ -75,6 +75,13 @@ export function compose(features) {
   }
   for (const id of accounts.keys()) {
     if (!/^[A-Z]-\d{3}$/.test(id)) throw new Error(`账号 '${id}' 的号不合式（要 X-000 那样）`);
+    /* `match` 是拿去比**实际发出的那句话**的（见 diff），而那句话在比之前会去掉 `` ` `` 与 `*`。
+       若特征里带着这两个记号，它就永远对不上 —— 那是一格"永远命中不了的规格"，
+       比没规格更坏（对账会把它算成分歧，人会以为是实现漂了）。所以当场炸。 */
+    const m = accounts.get(id).match;
+    if (typeof m === 'string' && /[`*]/.test(m)) {
+      throw new Error(`账号 ${id} 的 match 里带了 \` 或 *，那永远对不上（比的时候已经去掉了）`);
+    }
   }
   /* 引用到的账号必须**有人定义**（规矩 3 的另一半）：一个账号只在一个特性里定义、别处引用它，
      于是"这句话到底什么意思、出处在哪"只有一处答案。 */
@@ -123,7 +130,23 @@ export function diff(spec, measured) {
     if (c === undefined) { out.push({ sort, kind, want: '（表里没有）', got, why: m.why }); continue; }
     if (c.verdict === 'todo') continue;                 // 还没定的格不算分歧，算清单
     if (got === 'crash') { out.push({ sort, kind, want: c.verdict, got, why: m.why }); continue; }
-    if (c.verdict !== got) out.push({ sort, kind, want: c.verdict, got, why: m.why });
+    if (c.verdict !== got) { out.push({ sort, kind, want: c.verdict, got, why: m.why }); continue; }
+    /* 结论对上了，还要问一句**理由对不对**（ADR-0029 的 R5）：拒绝那两类要能在实际发出的
+       那句话里认出**声明的那个账号**。这一步抓的是"结论对、话说错"——第 248/251/253 刀
+       那三条"认错人"就是这一类，而先前只比结论是抓不住它们的。
+       账号可以给一格 `match`（子串或正则源）说明它在措辞里长什么样；不给就拿 `text` 的
+       前 8 个字当特征（够区分这 25 个账号，又不至于把整句话钉死 —— 措辞还要改）。 */
+    if (c.verdict !== 'refuse' && c.verdict !== 'error') continue;
+    const acc = spec.accounts.get(c.account);
+    if (acc === undefined) continue;
+    const pat = acc.match ?? acc.text.replace(/[`*]/g, '').slice(0, 8);
+    const said = (m.why ?? '').replace(/[`*]/g, '');
+    const hit = pat instanceof RegExp ? pat.test(said) : said.includes(pat);
+    if (!hit) {
+      out.push({
+        sort, kind, want: `${c.verdict}/${c.account}`, got: `${got}/别的理由`, why: m.why,
+      });
+    }
   }
   return out;
 }

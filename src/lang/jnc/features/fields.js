@@ -24,6 +24,7 @@ export default feature({
     },
     'F-003': {
       text: '结构体里放不下类的一格值',
+      match: '里放不下类',
       why: 'jancy 自己也报错：`class … cannot be a struct member`（jnc_ct_StructType.cpp:303-307）'
         + ' —— 内嵌的对象只有类里才有。这一格的 `error` 是**对的**，不是欠账',
     },
