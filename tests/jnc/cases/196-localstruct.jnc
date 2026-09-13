@@ -1,0 +1,33 @@
+// 写在**函数体里**的 `struct`（第二百六十刀）—— 与第二百五十刀（体里的 enum）同一个洞的另一半。
+//
+// 名字那一遍（typeName）只走顶层与类体，所以 `struct Color { … }` 写在 main 里时
+// `this.structs` 里压根没有它，后面 `static Color colorTable[] = { … }` 报的是
+// "没有这个类型：'Color'"。语料里的原样是 samples/jnc/61_FormattingLiterals.jnc:20-24。
+//
+// 代价与体里的 typedef / enum 逐字一样（第二百一十九 / 二百五十刀）：名字提到了外面那层
+// 命名空间 —— 函数外面也用得上它（jancy 那儿不能，拒得更松），同一层里两个函数各写一条
+// 同名的会撞（拒得更严）。两头都不给错答案。
+
+int main() {
+	struct Color {
+		int m_id;
+		int m_value;
+	}
+
+	// 静态数组按花括号初值填（那一格的类型正是体里这格结构体）
+	static Color colorTable[] = {
+		{ 1, 0x000000 },
+		{ 2, 0x800000 },
+		{ 3, 0x008000 },
+	}
+
+	for (size_t i = 0; i < countof(colorTable); i++)
+		printf("%d %x\n", colorTable[i].m_id, colorTable[i].m_value);
+
+	// 普通的局部量也用得上它
+	Color c;
+	c.m_id = 9;
+	c.m_value = 0xff;
+	printf("%d %x\n", c.m_id, c.m_value);
+	return 0;
+}

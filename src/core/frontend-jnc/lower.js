@@ -6118,6 +6118,16 @@ class JncLower {
       }
       return this.enumDecl(t);
     }
+    /* 体里的 `struct` / `class`（第二百六十刀）：同一个洞的另一半 —— 名字那一遍（typeName）
+       只走顶层与类体，所以 `struct Color { … }` 写在 main 里时 `this.structs` 里压根没有它，
+       后面 `static Color colorTable[] = { … }` 报的是"没有这个类型：'Color'"（榜上 74 对里
+       的一批）。语料里的原样是 samples/jnc/61_FormattingLiterals.jnc:20-24。
+       代价与体里的 typedef / enum 逐字一样（第二百一十九 / 二百五十刀）：名字提到了外面那层。 */
+    if (isList(t) && head(t) === 'agg') {
+      const nm0 = this.qname(t.items[2]);
+      const full0 = nm0 === null ? null : this.qual(nm0);
+      if (full0 !== null && !this.structs.has(full0)) this.typeName(t);
+    }
     return this.typeDecl(t);
   }
 

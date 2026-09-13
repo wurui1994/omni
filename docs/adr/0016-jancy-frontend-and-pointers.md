@@ -11808,6 +11808,29 @@ jancy 的规矩就写在语料的注里（同一份文件 47-49 行）：
   `iox.SshChannel` 那条 5 对）；`没有这个函数` `77 -> 72`、
   `(文件, 拦路项)` 对 `3467 -> 3431`（−36）；lowered 59、clean 90 没动。
 
+### 第二百六十刀：写在函数体里的 `struct`
+
+第二百五十刀补的是体里的 `enum`，这一刀是同一个洞的另一半：名字那一遍（`typeName`）只走顶层
+与类体，所以
+
+```
+int main() {
+    struct Color { char const* m_name; uint_t m_value; }      // 61_FormattingLiterals.jnc:20-24
+    static Color colorTable[] = { { "black", 0x000000 }, … };
+```
+
+里那格 `Color` 压根没进 `this.structs`，后面报的是"没有这个类型：'Color'"（榜上 74 对里的一批）。
+
+落法与体里的 enum 一句对一句：`localTypeDecl` 碰上 `agg` 且那个名字还没登记时先叫一遍
+`typeName`，再走 `typeDecl`。代价也逐字一样（第二百一十九 / 二百五十刀）：名字提到了外面那层
+命名空间 —— 函数外面也用得上（拒得更松），同一层里两个函数各写一条同名的会撞（拒得更严）。
+
+- 新例子 `cases/196-localstruct`（体里声明 + `static` 数组按花括号初值填 + 普通局部量；
+  孪生 `/tmp/c204.c` —— C 里同一条写法本来就合法）。
+- 腿：`node tests/jnc/run.js` 343/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`没有这个类型` `74 -> 72`、`(文件, 拦路项)` 对 `3431 -> 3430`（−1）——
+  同第二百五十六刀那条口径：那几组里还有别的账，成组编之后一组只算一对。
+
 
 
 
