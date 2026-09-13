@@ -378,6 +378,21 @@ export function fnOwnerSegs(m) {
  * 用法：一份模块开一个，按**声明次序**每格函数问一次（拼不出来的那几格也要问 —— 旧降级
  * 那边它们照样占一个号）。
  */
+/**
+ * 重载的后缀。旧降级有**两套**号（都在真输出里）：
+ *   - 普通函数/方法从 1 起：`q` / `q$o1` / `q$o2` / `q$o3`（135-overloadcheap.jnc）；
+ *   - **取/存与算符**从 2 起：`g_p$set` / `g_p$set$o2`（153-propsetovl.jnc），
+ *     `SB$op$addAssign` / `SB$op$addAssign$o2`（184-opovl.jnc）、`Cell$op$assign$o2`、
+ *     190-opassigndecl.jnc 同 —— 与宿主面那条 `_o2` 是同一套（第一百八十一刀那句）。
+ * 拼名字的两处（`fnHead` 与尺子算键）都走这一格，免得两边各写一遍。
+ */
+export function overloadSuffix(base, dup) {
+  if (dup === 0) return '';
+  const leaf = base.includes('$') ? base.slice(base.lastIndexOf('$') + 1) : base;
+  const acc = leaf === 'get' || leaf === 'set' || base.includes('op$');
+  return `$o${acc ? dup + 1 : dup}`;
+}
+
 export function overloadIndex() {
   const seen = new Map();
   return (sym) => {
@@ -434,8 +449,7 @@ export function fnHead(m, env, ctx = { owner: null, self: null }) {
   const ret = retText(m, base, env, tc);
   if (ret === null) return { head: null, why: '返回类型解不出来' };
   const sym = ctx.owner === null ? base : `${ctx.owner}$${base}`;
-  const dup = ctx.dup ?? 0;
-  const name = dup > 0 ? `${sym}$o${dup}` : sym;
+  const name = `${sym}${overloadSuffix(base, ctx.dup ?? 0)}`;
   return { head: `(fn ${name} (${parts.join(' ')}) ${ret}`, why: null };
 }
 

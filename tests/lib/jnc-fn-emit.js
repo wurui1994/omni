@@ -23,7 +23,7 @@ import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import {
   fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
   isBindableData, dataAccessorHeads, isAutogetProp, autogetGetterHead,
-  isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead,
+  isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead, overloadSuffix,
 } from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
@@ -457,7 +457,7 @@ for (const f of files) {
     const sym = base === null ? null : (c.ctx.owner === null ? base : `${c.ctx.owner}$${base}`);
     const dup = sym === null ? 0 : nextDup(sym);
     const built = fnHead(c.m, env, { ...c.ctx, dup, clsRoot });
-    const key = sym === null ? '?' : (dup > 0 ? `${sym}$o${dup}` : sym);
+    const key = sym === null ? '?' : `${sym}${overloadSuffix(base, dup)}`;
     if (key !== '?') mineNames.add(key);
     const want = oracle.get(key);
     if (built.head === null) {
