@@ -602,3 +602,23 @@ Phase 3 要"位置矩阵生成名字登记那一遍"。第一步不是改前端�
 转换关系则是每个前端都有一份，这一步收了 GLSL 那一份。
 
 - 腿：`node tests/glsl/run.js` 17/17 组绿。
+
+### 10.13 作用域图也被第二门语言用上了（`lookupEntry`）
+
+紧接着把 GLSL 的查名也接进来。这一步**逼着引擎变得更一般**，而这正是要的结果：
+
+两门语言"一层作用域长什么样"差得很远 —— jancy 的一层是**名字前缀**（`a$b$S`，问法是
+"拼出来的全名在不在那张表里"），GLSL 的一层是**一张 Map**（块作用域一层层往里，外面还有
+const / global / uniform / in / out / 内建那几档，而且这几档的存法还不一样：有的表里直接
+放类型，有的放 `{ty}`）。差的只是"怎么问一层"。
+
+所以 `scopes.js` 拆成两层：`lookupEntry(name, {path, ambigOn, onAmbig})` 是通用的 ——
+每一步自带 `get(name)`，次序与歧义规则留在引擎里；`lookupName`（jancy 那种前缀式）成了它的
+一个特例（`join` + `has` 包一层）。GLSL 那七条 `if` 变成一张 `scopePath()`：七步、
+每步带自己的归一，`label` 就是回给调用点的 `kind`。
+
+- 腿：`node tests/glsl/run.js` 17/17 组绿；`NOCACHE=1` 的 jnc 554 次全真跑 345/0；
+  矩阵 360/360 分歧 0。
+- 记一笔账：GLSL 的 `scopePath()` 里那七档目前还没有 `ambigOn` —— GLSL 不报歧义
+  （同名的内建与全局撞了它按次序办）。要不要报是**规格问题**，等 GLSL 也立起自己的
+  positions/accounts 时一并定。

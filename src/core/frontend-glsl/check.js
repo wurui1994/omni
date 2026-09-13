@@ -26,6 +26,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { castRow } from '../frontend-engine/casts.js';
+import { lookupEntry } from '../frontend-engine/scopes.js';
 
 /* ------------------------------------------------------------------ 类型 */
 
@@ -550,19 +551,32 @@ class GlslChecker {
     top.set(name, ty);
   }
 
+  /**
+   * 这门语言的**候选作用域序列**（ADR-0029 的 L3）。次序照 GLSL：块作用域一层层往里
+   * （里面的先），外面依次是 const / global / uniform / in / out / 内建那几档。
+   * 每一步自带 `get` —— 因为这几档的存法不一样（有的表里直接放类型，有的放 `{ty}`），
+   * 归一这件事就写在这张表上，而不是七条 `if` 里。`label` 就是回给调用点的 `kind`。
+   */
+  * scopePath() {
+    for (let i = this.scopes.length - 1; i >= 0; i--) {
+      const m = this.scopes[i];
+      yield { label: 'local', ns: m, get: (n) => (m.has(n) ? { ty: m.get(n) } : undefined) };
+    }
+    const bare = (label, m) => ({ label, ns: m, get: (n) => (m.has(n) ? { ty: m.get(n) } : undefined) });
+    const wrapped = (label, m) => ({ label, ns: m, get: (n) => (m.has(n) ? { ty: m.get(n).ty } : undefined) });
+    yield wrapped('const', this.consts);
+    yield wrapped('global', this.globals);
+    yield bare('uniform', this.uniforms);
+    yield wrapped('in', this.ins);
+    yield wrapped('out', this.outs);
+    yield bare('builtin-in', this.builtinIn);
+    yield bare('builtin-out', this.builtinOut);
+  }
+
   /** 名字 -> `{ty, kind}`。找不到就骂 —— GLSL 没有隐式声明。 */
   lookup(name, node) {
-    for (let i = this.scopes.length - 1; i >= 0; i--) {
-      const t = this.scopes[i].get(name);
-      if (t !== undefined) return { ty: t, kind: 'local' };
-    }
-    if (this.consts.has(name)) return { ty: this.consts.get(name).ty, kind: 'const' };
-    if (this.globals.has(name)) return { ty: this.globals.get(name).ty, kind: 'global' };
-    if (this.uniforms.has(name)) return { ty: this.uniforms.get(name), kind: 'uniform' };
-    if (this.ins.has(name)) return { ty: this.ins.get(name).ty, kind: 'in' };
-    if (this.outs.has(name)) return { ty: this.outs.get(name).ty, kind: 'out' };
-    if (this.builtinIn.has(name)) return { ty: this.builtinIn.get(name), kind: 'builtin-in' };
-    if (this.builtinOut.has(name)) return { ty: this.builtinOut.get(name), kind: 'builtin-out' };
+    const hit = lookupEntry(name, { path: this.scopePath() });
+    if (hit !== null) return { ty: hit.entry.ty, kind: hit.label };
     /* 另一档的内建变量：单独一句话，比「没见过这个名字」有用得多。 */
     const other = this.stage === 'vert' ? GLSL_FRAG_IN : GLSL_VERT_IN;
     const other2 = this.stage === 'vert' ? GLSL_FRAG_OUT : GLSL_VERT_OUT;

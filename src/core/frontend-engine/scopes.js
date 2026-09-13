@@ -22,7 +22,43 @@ export const INH = 'INH';   // 基类那一层
 export const IMP = 'IMP';   // `using namespace X;` 塞进来的那一层
 
 /**
+ * 一次查名的**通用**形状：候选作用域各自回答"这个名字在你这儿是什么"。
+ *
+ * 为什么要这一层：两门语言"作用域长什么样"差得很远 —— jancy 的一层是**名字前缀**
+ * （`a$b$S`，所以问法是"拼出来的全名在不在那张表里"），GLSL 的一层是**一张 Map**
+ * （块作用域一层层往里，外面还有 const / global / uniform / in / out / 内建那几档）。
+ * 差的只是"怎么问一层"，而"顺着次序问下去、第一个答上的赢、同类里撞了第二个才算歧义"
+ * 是同一句话。所以让每一步自己带 `get`，次序与歧义规则留在这儿。
+ *
+ * @param {string} name
+ * @param {object} q
+ *   - path: Iterable<{label, get(name) -> entry|undefined, ns?, at?}>
+ *   - ambigOn / onAmbig: 同 `lookupName`
+ * @returns {{label, entry, step}|null} 命中的那一层、它给的东西
+ */
+export function lookupEntry(name, { path, ambigOn = [], onAmbig = null }) {
+  let hit = null;
+  const same = (a, b) => (a.ns !== undefined || b.ns !== undefined ? a.ns === b.ns : a === b);
+  for (const st of path) {
+    const entry = st.get(name);
+    if (entry === undefined) continue;
+    if (hit === null) {
+      hit = { label: st.label, entry, step: st };
+      if (!ambigOn.includes(st.label)) return hit;
+      continue;
+    }
+    if (st.label === hit.step.label && !same(st, hit.step) && onAmbig !== null) {
+      onAmbig(name, hit.step, st);
+    }
+  }
+  return hit;
+}
+
+/**
  * 一次查名：顺着 `path` 走，**第一格命中的赢**。
+ *
+ * 这一层是给"作用域 = 名字前缀"那种语言的（jancy）：`join(ns, name)` 拼出全名、
+ * `has(full)` 问在不在。它就是 `lookupEntry` 的一个特例。
  *
  * @param {string} name 源码里写的那个名字（已经归一成语言自己的键）
  * @param {object} q
@@ -36,22 +72,13 @@ export const IMP = 'IMP';   // `using namespace X;` 塞进来的那一层
 export function lookupName(name, {
   path, has, join, ambigOn = [], onAmbig = null,
 }) {
-  let hit = null;
-  for (const st of path) {
-    const full = join(st.ns, name);
-    if (!has(full)) continue;
-    if (hit === null) {
-      hit = { full, st };
-      /* 不查歧义的那几类：命中就走 —— 这一条正是"链上找着就赢"。 */
-      if (!ambigOn.includes(st.label)) return full;
-      continue;
+  const steps = (function* wrap() {
+    for (const st of path) {
+      yield { ...st, get: (nm) => { const f = join(st.ns, nm); return has(f) ? f : undefined; } };
     }
-    /* 已经有主了：只有**同一类**边上的另一层才算撞（不同类之间是次序，不是歧义）。 */
-    if (st.label === hit.st.label && st.ns !== hit.st.ns && onAmbig !== null) {
-      onAmbig(name, hit.st, st);
-    }
-  }
-  return hit === null ? null : hit.full;
+  }());
+  const hit = lookupEntry(name, { path: steps, ambigOn, onAmbig });
+  return hit === null ? null : hit.entry;
 }
 
 /**
