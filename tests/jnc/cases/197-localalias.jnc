@@ -1,0 +1,31 @@
+// 函数体里的 `alias x = y;`（第二百六十二刀）。
+//
+// 这一刀是**读表挑出来的**，不是撞语料：位置矩阵（docs/design/jnc-positions.md）里
+// `fn-body × alias-method` 那一格是 `E`（账号 A-001）——"这一层认为你写错了"，
+// 而报的是"初值的类型是 int function*() ，声明的是 void"：把 alias 当成了带初值的量。
+//
+// 落法与体里的 typedef / enum / struct（第 219/250/260 刀）一句对一句：交给现成的 aliasDecl。
+// 体是在**所有签名登记完之后**才降的，所以目标当场查得着（顶层那一遍要排队是因为它在签名之前）。
+// 代价同那三刀：名字提到外面那层命名空间（矩阵里记成 T-005）。
+
+struct Point {
+	int m_x;
+	int m_y;
+}
+
+int add(int a, int b) {
+	return a + b;
+}
+
+int main() {
+	alias plus = add;
+	printf("%d %d\n", add(1, 2), plus(3, 4));
+
+	// 类型的别名在体里也是同一条路（第二百一十九刀那格 typedef 的邻居）。
+	// 目标得是一个**名字**：`alias Num = int;` 语法就不认（内建类型不是名字）。
+	alias P = Point;
+	P p;
+	p.m_x = 7;
+	printf("%d\n", p.m_x);
+	return 0;
+}

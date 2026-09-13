@@ -10185,6 +10185,17 @@ class JncLower {
       const b = this.block(n, ind + 2);
       return b === null ? null : [`${pad}(do`, b, `${pad})`];
     }
+    /* 函数体里的 `alias x = y;`（第二百六十二刀，位置矩阵 A-001 那一格挑出来的）。
+       先前它落到 localDecl 上、被当成"一格带初值的量"，报的是"初值的类型是 int function*() ，
+       声明的是 void" —— 认错了人（第二百五十四刀刚在 union 体里修过同一族）。
+       落法与体里的 typedef / enum / struct（第 219/250/260 刀）一句对一句：交给现成的
+       `aliasDecl`，名字提到外面那层命名空间（同一笔代价，T-005）。 */
+    if (h === 'var-decl' && this.hasMod(n.items[1], 'alias')) {
+      /* `late = true`：体是在**所有签名都登记完**之后才降的，所以目标当场就查得着 ——
+         顶层那一遍要排队（aliasPend）是因为它跑在签名之前。 */
+      for (const d of this.flat(n.items[2])) this.aliasDecl(d, null, true);
+      return [];
+    }
     if (h === 'var-decl') return this.localDecl(n, ind);
     if (h === 'var-decl-curly') return this.localDeclCurly(n, ind);
     if (h === 'expr-stmt') return this.exprStmt(n.items[1], ind);
@@ -10450,7 +10461,11 @@ class JncLower {
 
   localDecl(n, ind) {
     const pad = ' '.repeat(ind);
-    const sp = this.specs(n.items[1]);
+    /* `errorcode` 这个词在这儿**收下**（第二百六十二刀，矩阵 M-006 那一格）：函数体里写
+       `bool errorcode f(int);` 时真身是"体里写了个函数原型"，与 errorcode 这个词无关 ——
+       先前 specs 那一句先炸出"'errorcode' 只能写在函数上"，把话说到了别处。
+       收下之后由下面那条"声明符上带括号"的话接（它才是这一格真正的账）。 */
+    const sp = this.specs(n.items[1], false, [], true);
     /* 说明符那一句就没成（第二百三十五刀）：诊断已经发过一次了，可这几个名字**一格都没登记上**,
        于是后面每一处用到它们又各报一句"未声明的变量" —— 一件事记成好几笔。把名字记下来，
        查名那两处据此说准。 */
@@ -10475,7 +10490,9 @@ class JncLower {
         const ca = (isClass(info.type) && info.type.own === true) || jncIsStruct(info.type)
           ? this.ctorArgsOf(info.formals) : null;
         if (ca === null) {
-          this.nope(dcl, '局部量上的形参表（`T v(a, b)` 那种构造实参只有类与结构体的变量收得下）');
+          this.nope(dcl, `函数体里的这一条 '${info.name}(…)'：要么是一格**函数原型**`
+            + '（jancy 的函数体里写不了原型 —— 那要一层"块作用域也是命名空间"），'
+            + '要么是"局部量后面挂构造实参"（`T v(a, b)`，那一种只有类与结构体的变量收得下）');
           return null;
         }
         info.ctor = ca;

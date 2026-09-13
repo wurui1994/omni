@@ -27,19 +27,15 @@ export default feature({
       why: '这一句是**对的**（jancy 同），不是欠账 —— error 那一栏也有正确答案',
     },
     'M-005': { text: '`operator :=` 只能是类或结构体的成员（写在体里）', why: '同 M-004' },
-    'M-006': {
-      text: '`errorcode` 只能写在函数上（exceptions.rst:17）',
-      why: '**认错人**（矩阵 E 那一栏挑出来的）：函数体里写 `bool errorcode f(int);` 时，'
-        + '真身是"函数体里的原型"，与 errorcode 这个词无关。下一刀改这句话',
-    },
     'S-002': {
       text: '语句 `…`（函数体里的成员声明落到这句兜底上）',
       why: '**话不够准**：体里写 construct / operator / reactor / 带体方法时，该按要素说清'
         + '（"函数体里写不了这一种成员"），而不是报一句"认不出的语句"',
     },
     'S-003': {
-      text: '局部量上的形参表（`T v(a, b)` 那种构造实参只有类与结构体的变量收得下）',
-      why: '函数体里的**原型**（`int f();`）与"带构造实参的局部量"在语法上撞在一起，这句话说的是后者',
+      text: '函数体里的 `名字(…)`：要么是一格函数原型，要么是"局部量后面挂构造实参"',
+      why: '这两种在语法上撞在一起（第二百六十二刀把话改成同时说两种读法）：函数体里写原型要一层'
+        + '"块作用域也是命名空间"；`T v(a, b)` 那一种只有类与结构体的变量收得下',
     },
   },
   positions: [
@@ -57,7 +53,7 @@ export default feature({
     { kind: 'method-proto', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     // errorcode 的原型：同上；函数体里那一格是**认错人**
     { kind: 'method-errorcode', sorts: [...TYPES, 'union-body'], verdict: 'ok' },
-    { kind: 'method-errorcode', sorts: ['fn-body'], verdict: 'error', account: 'M-006' },
+    { kind: 'method-errorcode', sorts: ['fn-body'], verdict: 'refuse', account: 'S-003' },
     { kind: 'method-errorcode', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
     { kind: 'method-errorcode', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     // construct（无参 / 带参）：类与结构体的体里收，顶层要写成 `C.construct()`

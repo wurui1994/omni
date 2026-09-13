@@ -34,11 +34,6 @@ export default feature({
       why: '属性体里的 alias 只有这两种意思（jnc_ct_Parser.cpp:1354-1361）',
     },
     'P-007': { text: '这种类型说明符', why: '见 fields（R5：这句话没位置）' },
-    'A-001': {
-      text: '函数体里的 `alias x = f;` 被当成了变量声明',
-      why: '**认错人**（矩阵 E 那一栏挑出来的）：报的是"初值的类型是 … 声明的是 void"，'
-        + '而真身是"函数体里的 alias"。第 254 刀刚在 union 体里修过同一族 —— 下一刀是这格',
-    },
   },
   positions: [
     // 简单声明式（autoget / bindable autoget）：类那一族与 union 收，结构体那一格欠着
@@ -81,7 +76,9 @@ export default feature({
       sorts: ['module', 'namespace', 'class-body', 'struct-body', 'union-body', 'opaque-class-body'],
       verdict: 'ok',
     },
-    { kind: 'alias-method', sorts: ['fn-body'], verdict: 'error', account: 'A-001' },
+    /* 函数体里的 alias：第二百六十二刀落了（矩阵 A-001 那一格挑出来的第一刀）。
+       代价与体里的 typedef / enum / struct 同一笔（T-005：名字提到外面那层）。 */
+    { kind: 'alias-method', sorts: ['fn-body'], verdict: 'ok', note: 'T-005 的代价' },
     { kind: 'alias-method', sorts: ['property-body'], verdict: 'refuse', account: 'P-006' },
     { kind: 'alias-method', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
