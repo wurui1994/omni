@@ -1,6 +1,6 @@
-// ext/mini/lower.js —— mini 的降级：每个节点一小步，落到核心方言
+// ext/tiny/lower.js —— tiny 的降级：每个节点一小步，落到核心方言
 //
-// 与 `ext/lua/lower.js` 是同一个形状（每节点一小步 + 记账），但短得多 —— 因为 mini 的
+// 与 `ext/lua/lower.js` 是同一个形状（每节点一小步 + 记账），但短得多 —— 因为 tiny 的
 // 语义就是核心方言的语义（数是 real、比较出 bool），没有 Lua 那些要还的账。
 
 const T = { real: 'real', bool: 'bool', string: 'string' };
@@ -10,8 +10,8 @@ const BIN = {
   '&&': T.bool, '||': T.bool,
 };
 
-class MiniError extends Error {}
-const no = (why) => { throw new MiniError(why); };
+class TinyError extends Error {}
+const no = (why) => { throw new TinyError(why); };
 
 const real = (t) => `(real ${Number.isInteger(Number(t)) ? `${Number(t)}.0` : String(Number(t))})`;
 
@@ -84,10 +84,10 @@ function stats(xs, sc) {
   return out;
 }
 
-/** 一份 mini -> 核心方言的文本。 */
-export function lowerMini(ast) {
+/** 一份 tiny -> 核心方言的文本。 */
+export function lowerTiny(ast) {
   const body = stats(ast.stats, new Map());
   return `(module\n  (main\n${body.map((x) => `    ${x}`).join('\n')}))\n`;
 }
 
-export { MiniError };
+export { TinyError };

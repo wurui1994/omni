@@ -1,6 +1,6 @@
-// ext/mini/lang.js —— **一门语言只写增量**：C 系的 mini，靠公共节点库拼出来
+// ext/tiny/lang.js —— **一门语言只写增量**：C 系的 tiny，靠公共节点库拼出来
 //
-// 这一格是给"公共规则到底省不省"当证据的（ADR-0030 第 2/3 节）：mini 的整门语言
+// 这一格是给"公共规则到底省不省"当证据的（ADR-0030 第 2/3 节）：tiny 的整门语言
 // = 一张 6 行的记号表 + 一张 12 行的算符表 + **两个**自己的节点（`let` / `print`）。
 // 表达式那七格、`block`/`assign`/`call-stat`/`if`/`while`/`return`/`break` 全是公共库
 // 原样拿来的 —— 一格 `replaces` 都不用写，因为公共库给的默认拼法本来就是 C 系的。
@@ -12,11 +12,11 @@ import {
 } from '../../src/core/frontend-engine/lexrules.js';
 import { h, nm } from '../../src/core/frontend-engine/syntax.js';
 
-const MINI_NAME = /[A-Za-z_]\w*/y;
-const MINI_NUM = /\d+\.?\d*(?:[eE][-+]?\d+)?/y;
+const TINY_NAME = /[A-Za-z_]\w*/y;
+const TINY_NUM = /\d+\.?\d*(?:[eE][-+]?\d+)?/y;
 
 /** 记号表六行：空白、行注释、字符串、数、名字、符号。 */
-export const MINI_TOKENS = [
+export const TINY_TOKENS = [
   reRule('space', /[ \t\r\n]+/y, { skip: true }),
   reRule('comment', /\/\/[^\n]*/y, { skip: true }),
   {
@@ -27,13 +27,13 @@ export const MINI_TOKENS = [
       return q === null ? null : { value: q.text, end: q.end };
     },
   },
-  numberRule(MINI_NUM),
-  nameRule(MINI_NAME),
+  numberRule(TINY_NUM),
+  nameRule(TINY_NAME),
   symbolRule(),
 ];
 
 /** 算符表：档次照 C（`||` 最低、一元最高）。 */
-export const MINI_OPS = [
+export const TINY_OPS = [
   { name: '||', prec: 1, assoc: 'left' },
   { name: '&&', prec: 2, assoc: 'left' },
   { name: '==', prec: 3, assoc: 'left' },
@@ -49,14 +49,14 @@ export const MINI_OPS = [
   { name: '!', unary: true },
 ];
 
-export const miniLang = extend(commonLang, {
+export const tinyLang = extend(commonLang, {
   name: 'mini',
   doc: 'C 系的小语言：let / print / if / while / 赋值 / 算术（公共节点库的第一个消费方）',
   keywords: ['let', 'print', 'if', 'else', 'while', 'return', 'break', 'true', 'false'],
-  ops: MINI_OPS,
+  ops: TINY_OPS,
   punct: ['{', '}', '(', ')', '[', ']', ';', ',', '=', '.', '<=', '>=', '==', '!=', '&&', '||'],
   unaryPrec: 7,
-  tokens: MINI_TOKENS,
+  tokens: TINY_TOKENS,
   blockEnd: ['}'],
   nodes: [
     { name: 'let', of: 'stat', syn: ['let', nm('names', { max: 1 }), '=', h('init'), ';'] },

@@ -31,8 +31,31 @@ export const opt = (...items) => ({ opt: items });
 export const rep = (...items) => ({ rep: items });
 
 
+/* 表是**不变的数据**，所以"这个节点有哪些洞"、"这个组的第一格叫什么"算一次就够 ——
+   缓存挂在数据自己身上（WeakMap，不改表的形状）。ADR-0030 第 1 节的优化之一。 */
+const HOLES = new WeakMap();
+const FIRSTKEY = new WeakMap();
+
+/** 一个可选组/重复组里第一个"带值的洞"的名字 —— 取不取、重几次都问它。 */
+export function firstKeyOf(items) {
+  const hit = FIRSTKEY.get(items);
+  if (hit !== undefined) return hit === null ? undefined : hit;
+  let out;
+  for (const it of items) {
+    if (typeof it === 'string') continue;
+    for (const k of ['h', 'l', 'n', 'w']) if (it[k] !== undefined) { out = it[k]; break; }
+    if (out !== undefined) break;
+    if (it.opt !== undefined) { out = firstKeyOf(it.opt); if (out !== undefined) break; }
+    if (it.rep !== undefined) { out = firstKeyOf(it.rep); if (out !== undefined) break; }
+  }
+  FIRSTKEY.set(items, out === undefined ? null : out);
+  return out;
+}
+
 /** 扁平地看一个节点的洞（含可选组/重复组里的）。 */
 export function holesOf(node) {
+  const hit = HOLES.get(node);
+  if (hit !== undefined) return hit;
   const out = [];
   const walk = (items, inOpt, inRep) => {
     for (const it of items) {
@@ -44,6 +67,7 @@ export function holesOf(node) {
     }
   };
   walk(node.syn, false, false);
+  HOLES.set(node, out);
   return out;
 }
 

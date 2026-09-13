@@ -51,6 +51,24 @@ function derive(lang) {
 
   // 什么记号能起一个表达式 —— 由"简单值"节点的 `syn` 第一项派生。加个 `|x| e` 只要加节点，
   // 这一格自己跟着长（先前这串常量硬写在 parse.js 里）。
+  /* 语句的候选表：**按引导记号预先拼好**（含兜底那几个）。先前是每条语句都
+     `[...(LEAD.get(v) ?? []), ...FALLBACK]` 现拼一个数组 —— 一份 794KB 的语料就是几万次
+     多余的分配。ADR-0030 第 1 节的优化之一。 */
+  lang.statCands = new Map();
+  for (const [lit, list] of lang.LEAD) lang.statCands.set(lit, [...list, ...lang.FALLBACK]);
+  lang.statFallback = [...lang.FALLBACK];
+
+  /* 简单表达式也按引导记号分好：字面记号一张、叶子类别一张。 */
+  lang.simpleByLit = new Map();
+  lang.simpleByKind = new Map();
+  for (const n of lang.SIMPLE) {
+    const f = n.syn[0];
+    const push = (m, k) => { if (!m.has(k)) m.set(k, []); m.get(k).push(n); };
+    if (typeof f === 'string') push(lang.simpleByLit, f);
+    else if (f.t !== undefined) push(lang.simpleByKind, f.t);
+    else if (f.w !== undefined || f.n !== undefined) push(lang.simpleByKind, 'name');
+  }
+
   lang.expLead = new Set(['(']);          // `(exp)` 与后缀链的起点
   lang.expLeadKinds = new Set(['name']);
   for (const n of lang.SIMPLE) {

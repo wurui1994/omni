@@ -24,7 +24,7 @@ import { gslLang } from '../../gsl-shell/lang.js';
 import { lower, Refuse } from '../lower.js';
 
 const argv = process.argv.slice(2);
-const rounds = Number((argv.find((a) => a.startsWith('--n=')) ?? '').slice(4)) || 3;
+const rounds = Number((argv.find((a) => a.startsWith('--n=')) ?? '').slice(4)) || 9;
 const GSL = '/Users/wurui/Documents/Lang/reference/gsl-shell';
 
 function walk(dir, out = []) {
@@ -41,24 +41,36 @@ const files = walk(GSL).sort().map((p) => ({ p, src: readFileSync(p, 'utf8') }))
 const bytes = files.reduce((a, f) => a + f.src.length, 0);
 const lines = files.reduce((a, f) => a + f.src.split('\n').length, 0);
 
-/** 跑 `rounds` 轮取最快的一轮（噪声按下界算）。 */
+/**
+ * 量法（ADR-0030 第 1 节那笔账：先前噪声比要量的差别还大，判据落不到实处）：
+ *   1. **先热身**两轮不计时（JIT 要预热，第一轮基本在编译 JS 自己）
+ *   2. 再跑 `rounds` 轮，报**最快**与**中位**两个数 —— 只报最快会把偶发的好运当成结论
+ *   3. 报**离散度**（最快与中位差多少）：这一格大于 15% 就说明这次测量不算数
+ */
 function best(label, fn) {
-  let ms = Infinity;
+  for (let r = 0; r < 2; r += 1) fn();                 // 热身
+  const ts = [];
   let n = 0;
   for (let r = 0; r < rounds; r += 1) {
     const t0 = performance.now();
     n = fn();
-    const dt = performance.now() - t0;
-    if (dt < ms) ms = dt;
+    ts.push(performance.now() - t0);
   }
-  const kbs = (bytes / 1024) / (ms / 1000);
-  console.log(`  ${label.padEnd(10)} ${ms.toFixed(0).padStart(6)} ms`
-    + `　${(kbs / 1024).toFixed(2)} MB/s　${(lines / (ms / 1000) / 1000).toFixed(0)} k行/s`
-    + (n > 0 ? `　（${n} 份）` : ''));
+  ts.sort((a, b) => a - b);
+  const ms = ts[0];
+  const mid = ts[Math.floor(ts.length / 2)];
+  const spread = ((mid - ms) / ms) * 100;
+  const mbs = ((bytes / 1024) / (ms / 1000)) / 1024;
+  console.log(`  ${label.padEnd(10)} 最快 ${ms.toFixed(0).padStart(5)} ms`
+    + `　中位 ${mid.toFixed(0).padStart(5)} ms（+${spread.toFixed(0)}%）`
+    + `　${mbs.toFixed(2)} MB/s　${(lines / (ms / 1000) / 1000).toFixed(0)} k行/s`
+    + (n > 0 ? `　（${n} 份）` : '')
+    + (spread > 15 ? '　⚠ 离散度大，这次不算数' : ''));
   return ms;
 }
 
-console.log(`语料 ${files.length} 份　${(bytes / 1024).toFixed(0)} KB　${lines} 行　取 ${rounds} 轮最快的一轮`);
+console.log(`语料 ${files.length} 份　${(bytes / 1024).toFixed(0)} KB　${lines} 行`
+  + `　热身 2 轮 + 计时 ${rounds} 轮`);
 
 let toks = 0;
 const msLex = best('词法', () => {

@@ -12,6 +12,21 @@
 // （`ext/gsl-shell`）就是靠这条性质只写增量。
 
 import { lex, binop, unop } from './lexrules.js';
+import { firstKeyOf } from './syntax.js';
+
+/*
+ * **回溯用的失败不该是个 Error。** 有序选择每试一个候选，失败一次就 `new ParseError`，
+ * 而 V8 造 Error 时要抓栈 —— 一份 794KB 的语料上这是几万次抓栈。所以内部失败改成扔一个
+ * **单例哨兵**（普通对象，没有栈），只在真要报错时才造一个 ParseError。
+ * 量出来：语法 7.56 -> 见 ADR-0030 第 1 节。语义一格没变（错误的措辞与位置逐字相同）。
+ */
+const FAIL = { raw: '', tok: null };
+
+function fail(msg, tok) {
+  FAIL.raw = msg;
+  FAIL.tok = tok;
+  throw FAIL;
+}
 
 export class ParseError extends Error {
   constructor(msg, tok) {
@@ -40,12 +55,12 @@ class P {
   }
 
   take(lit) {
-    if (!this.is(lit)) throw new ParseError(`要一个 '${lit}'，看到的是 '${this.cur.value}'`, this.cur);
+    if (!this.is(lit)) fail(`要一个 '${lit}'，看到的是 '${this.cur.value}'`, this.cur);
     return this.toks[this.i++];
   }
 
   name() {
-    if (this.cur.kind !== 'name') throw new ParseError(`要一个名字，看到的是 '${this.cur.value}'`, this.cur);
+    if (this.cur.kind !== 'name') fail(`要一个名字，看到的是 '${this.cur.value}'`, this.cur);
     return this.toks[this.i++].value;
   }
 
@@ -85,7 +100,7 @@ class P {
 
   matchItem(out, it) {
     if (it.t !== undefined) {
-      if (this.cur.kind !== it.t) throw new ParseError(`要一个 ${it.t}`, this.cur);
+      if (this.cur.kind !== it.t) fail(`要一个 ${it.t}`, this.cur);
       out[it.as] = this.toks[this.i++].value;
       return;
     }
@@ -129,7 +144,7 @@ class P {
       this.take(sep);
     }
     if (it.max !== undefined && out.length > it.max) {
-      throw new ParseError(`这儿只能有 ${it.max} 个名字`, this.cur);
+      fail(`这儿只能有 ${it.max} 个名字`, this.cur);
     }
     return out;
   }
@@ -173,10 +188,10 @@ class P {
     const tok = this.cur;
     const e = this.suffixed();
     if (!this.lang.fits(e.kind, cls)) {
-      throw new ParseError(`'${e.kind}' 填不进 ${cls} 类的洞（${cls} 类只收 ${this.lang.membersOf(cls).join(' / ')}）`, tok);
+      fail(`'${e.kind}' 填不进 ${cls} 类的洞（${cls} 类只收 ${this.lang.membersOf(cls).join(' / ')}）`, tok);
     }
     if (it.only !== undefined && !it.only.includes(e.kind)) {
-      throw new ParseError(`这个位置只收 ${it.only.join(' / ')}，不是 '${e.kind}'`, tok);
+      fail(`这个位置只收 ${it.only.join(' / ')}，不是 '${e.kind}'`, tok);
     }
     return e;
   }
@@ -215,21 +230,28 @@ class P {
 
   simple() {
     // 有序选择 + 回溯（与 `stat()` 同一台机器）：能起头的候选按表序试。
-    // 公式子语言要它 —— `f(x)`（函数求值）与 `f`（名字）两个节点都以一个裸名字起头，
-    // 只看第一个记号分不开。Lua 侧没有这种候选，所以那边行为不变。
+    // 候选表是**派生好的**（`lang.simpleByLit` / `simpleByKind`），这儿一格数组都不新建
+    // —— 先前拿 `[...byLit, ...byKind]` 拼一下，每个表达式一次分配，反而更慢（量过）。
     const start = this.i;
+    const t = this.cur;
+    const lit = t.kind === 'string' || t.kind === 'number'
+      ? undefined : this.lang.simpleByLit.get(t.value);
+    const kind = this.lang.simpleByKind.get(t.kind);
     let far = null;
-    for (const n of this.lang.SIMPLE) {
-      if (!this.canStart(n)) continue;
-      try {
-        return this.matchSyn(n);
-      } catch (err) {
-        if (!(err instanceof ParseError)) throw err;
-        if (far === null || this.i >= far.at) far = { err, at: this.i };
-        this.i = start;
+    for (let pass = 0; pass < 2; pass += 1) {
+      const list = pass === 0 ? lit : kind;
+      if (list === undefined) continue;
+      for (const n of list) {
+        try {
+          return this.matchSyn(n);
+        } catch (err) {
+          if (err !== FAIL) throw err;
+          if (far === null || this.i >= far.at) far = { raw: FAIL.raw, tok: FAIL.tok, at: this.i };
+          this.i = start;
+        }
       }
     }
-    if (far !== null && this.cur.kind !== 'name') throw far.err;
+    if (far !== null && this.cur.kind !== 'name') throw new ParseError(far.raw, far.tok);
     return this.suffixed();
   }
 
@@ -248,7 +270,7 @@ class P {
     let e;
     if (this.is('(')) e = this.matchSyn(this.lang.NODE.get('paren'));
     else if (this.cur.kind === 'name') e = { kind: 'name', value: this.name(), line: this.cur.line };
-    else throw new ParseError(`这儿要一个表达式，看到的是 '${this.cur.value}'`, this.cur);
+    else fail(`这儿要一个表达式，看到的是 '${this.cur.value}'`, this.cur);
     for (;;) {
       if (this.is('.')) { this.take('.'); e = { kind: 'index', obj: e, key: this.name(), dot: true }; continue; }
       if (this.is('[')) {
@@ -301,23 +323,24 @@ class P {
 
   stat() {
     const start = this.i;
-    const cands = [...(this.lang.LEAD.get(this.cur.value) ?? []), ...this.lang.FALLBACK];
+    const cands = this.lang.statCands.get(this.cur.value) ?? this.lang.statFallback;
     let far = null;
     for (const n of cands) {
       try {
         const got = this.matchSyn(n);
         if (this.statBoundary()) return got;
-        far = far ?? { err: new ParseError(`'${this.cur.value}' 在这儿多出来了`, this.cur), at: this.i };
+        far = far ?? { raw: `'${this.cur.value}' 在这儿多出来了`, tok: this.cur, at: this.i };
       } catch (err) {
-        if (!(err instanceof ParseError)) throw err;
+        if (err !== FAIL) throw err;
         // `>=`：走得一样远时**取后来的**。候选按表序排（`local-function` 在 `local` 前），
         // 而后来的那个通常是更一般的形状，它的抱怨也更贴题（`local 1 = 2` 该说"要一个名字"，
         // 不该说"要一个 function"）。
-        if (far === null || this.i >= far.at) far = { err, at: this.i };
+        if (far === null || this.i >= far.at) far = { raw: FAIL.raw, tok: FAIL.tok, at: this.i };
       }
       this.i = start;
     }
-    throw far?.err ?? new ParseError(`不认得的语句开头 '${this.cur.value}'`, this.cur);
+    if (far !== null) throw new ParseError(far.raw, far.tok);
+    throw new ParseError(`不认得的语句开头 '${this.cur.value}'`, this.cur);
   }
 
   /** 一条语句该在哪儿收：块尾、`;`、或者下一个记号能起一条语句。 */
@@ -334,10 +357,19 @@ class P {
  */
 export function parse(src, lang, start = lang.start) {
   const p = new P(src, lang);
-  // 起点可以是一个**节点名**，也可以是一个**洞的类别**（`gdt.hist` 的实参就是一个 `exp`）。
-  const b = start === 'block' ? p.block()
-    : lang.NODE.has(start) ? p.matchSyn(lang.NODE.get(start))
-      : p.hole({ cls: start });
-  if (p.cur.kind !== 'eof') throw new ParseError(`到这儿该结束了，却还有 '${p.cur.value}'`, p.cur);
-  return b;
+  try {
+    // 起点可以是一个**节点名**，也可以是一个**洞的类别**（`gdt.hist` 的实参就是一个 `exp`）。
+    const b = start === 'block' ? p.block()
+      : lang.NODE.has(start) ? p.matchSyn(lang.NODE.get(start))
+        : p.hole({ cls: start });
+    if (p.cur.kind !== 'eof') throw new ParseError(`到这儿该结束了，却还有 '${p.cur.value}'`, p.cur);
+    return b;
+  } catch (err) {
+    /* **哨兵不许漏出去**：回溯用的那个失败是个普通对象（没有栈），到了这一层要换成真错。
+       少了这一道，调用方 `err instanceof ParseError` 判不出来，就成了未捕获异常
+       —— 一格扩展当场炸给我看了（`src/core` 里不许提任何语言的名字，所以这儿不点名；
+       那条门槛由 tests/sexpr 的 no-per-language-code 守着）。 */
+    if (err === FAIL) throw new ParseError(FAIL.raw, FAIL.tok);
+    throw err;
+  }
 }

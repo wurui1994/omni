@@ -7,6 +7,8 @@
 // 排版故意松：记号之间一律留空格（除了 `,` `)` `]` 前与 `(` `[` 后）。松排版顺手躲开一个坑：
 // `- -x` 挤成 `--x` 就变成注释了。
 
+import { firstKeyOf } from './syntax.js';
+
 const NO_SP_BEFORE = new Set([',', ')', ']', ';']);
 const NO_SP_AFTER = new Set(['(', '[']);
 
@@ -24,16 +26,8 @@ function glue(toks) {
 
 const pad = (text) => (text === '' ? '' : text.split('\n').map((x) => `  ${x}`).join('\n'));
 
-/** 组里第一个"带值的洞"的名字 —— 可选组取不取、重复组重几次，都问它。 */
-function firstKey(items) {
-  for (const it of items) {
-    if (typeof it === 'string') continue;
-    for (const k of ['h', 'l', 'n', 'w']) if (it[k] !== undefined) return it[k];
-    if (it.opt !== undefined) { const k = firstKey(it.opt); if (k !== undefined) return k; }
-    if (it.rep !== undefined) { const k = firstKey(it.rep); if (k !== undefined) return k; }
-  }
-  return undefined;
-}
+/* 组里第一个"带值的洞"的名字 —— 与解析器共用那一份（算过就缓存）。 */
+const firstKey = firstKeyOf;
 
 const has = (v) => v !== undefined && v !== null && !(Array.isArray(v) && v.length === 0);
 
