@@ -55,8 +55,11 @@ export function structLine(agg, env, allAggs = null) {
   parts.push(...bases);
   const extra = [];
   const fails = [];
+  /* 生成物分两桶：**reactor 那几格在属性那几格之前**（82-reactor.jnc 的真输出里
+     `m_state` 声明在 `m_uiReactor` 前头，可 `$on`/`$bound` 反倒排在 `$m_value` 前）。 */
+  const tailR = [];
   const tail = [];
-  const own = ownFields(agg, env, { owner: name, extra, fails, tail });
+  const own = ownFields(agg, env, { owner: name, extra, fails, tail, tailR });
   if (own === null) {
     return { line: null, lines: [], why: `有字段还解不出来（${fails.join('；') || '?'}）` };
   }
@@ -65,9 +68,9 @@ export function structLine(agg, env, allAggs = null) {
     for (const d of allAggs) {
       if (d === agg) continue;
       if (d.word !== 'class' && d.word !== 'opaque class') continue;
-      if (chainRoot(d, env) !== agg) continue;
+      if (!inChainOf(d, agg, env)) continue;
       const dn = d.emitName ?? nameText(d.name);
-      const f = ownFields(d, env, { owner: dn ?? name, extra, fails, tail });
+      const f = ownFields(d, env, { owner: dn ?? name, extra, fails, tail, tailR });
       if (f === null) {
         return { line: null, lines: [], why: `派生类里有字段还解不出来（${fails.join('；') || '?'}）` };
       }
@@ -75,6 +78,7 @@ export function structLine(agg, env, allAggs = null) {
     }
   }
   if (parts.length === 0) return { line: null, lines: [], why: '一格字段都没有' };
+  parts.push(...tailR);                                             // reactor 生成的那几格
   parts.push(...tail);                                              // 属性生成的那几格排最后
   /* **union 自己那一行**：它的字段共用一段字节，所以整串括成一格 `(union …)`
      （166-unionnamed.jnc / 191-unionmeth.jnc / 192-unionalias.jnc / 179 的 `Outer$Pair`）。 */
@@ -128,6 +132,27 @@ export function chainRoot(agg, env) {
   }
 }
 
+/**
+ * `d` 是不是挂在 `root` 这条链上 —— **任一**基类通到根就算（多继承那一族：86-multibase.jnc
+ * 里第二个基类的字段旧降级也并进了根）。`chainRoot` 只顺第一个基类走，那是"根是谁"的问题；
+ * 这一问是"归不归这个根"，两问不是一回事。
+ */
+function inChainOf(d, root, env) {
+  const seen = new Set();
+  const walk = (a) => {
+    if (a === root) return true;
+    if (seen.has(a)) return false;
+    seen.add(a);
+    for (const b of basePaths(a)) {
+      const rec = env.get(b);
+      if (rec === undefined || rec.agg === undefined || rec.kind !== 'class') continue;
+      if (walk(rec.agg)) return true;
+    }
+    return false;
+  };
+  return d !== root && walk(d);
+}
+
 /** 基类表里每一格的**最后一段名字**（`io.Base` 取 `Base`；空基类表答空）。 */
 function basePaths(agg) {
   const bases = agg.bases;
@@ -153,7 +178,7 @@ function lastIdent(n) {
 }
 
 /** 自己那几格数据字段。`ctx` 带着东家的名字与"顺带要发的那几行"。 */
-function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [] }) {
+function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [], tailR: [] }) {
   const out = [];
   /* 位域挤格子的状态：`bits` 是底宽、`used` 是已经占掉的位数。碰上非位域就**收口**。 */
   let pack = null;
@@ -214,6 +239,12 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [] }
          这两格**排在自己那些真字段之后**（旧降级的次序：67-propauto.jnc 的
          `(m_hits int) (Cell$m_v$m_value int)`）—— 所以塞进 `ctx.tail`，最后再接上。 */
       const gen = m.type === null ? [] : m.type.mods;
+      /* **reactor** 那一格生成两格 bool（`$on` / `$bound`，82-reactor.jnc 的真输出）。 */
+      if (gen.includes('reactor')) {
+        ctx.tailR?.push(`(${ctx.owner}$${m.name}$on bool)`);
+        ctx.tailR?.push(`(${ctx.owner}$${m.name}$bound bool)`);
+        return;
+      }
       if (gen.includes('autoget') || gen.includes('bindable')) {
         const ar = resolveType({ ...m.type, shape: 'data' }, env);
         if (ar.type === null) { ctx.fails?.push(`${m.name}$m_value: ${ar.why}`); out.push(null); return; }
@@ -243,6 +274,28 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [] }
       return;
     }
     /* 函数指针字段也是一格数据（`(m_op (fnty (int int) int))`，109-fnfield.jnc）。 */
+    /* reactor 那一格无论有没有体，都生成 `$on` / `$bound` 两格（82-reactor.jnc）。 */
+    if (m.type !== null && m.type.mods.includes('reactor') && m.name !== null) {
+      ctx.tailR?.push(`(${ctx.owner}$${m.name}$on bool)`);
+      ctx.tailR?.push(`(${ctx.owner}$${m.name}$bound bool)`);
+      return;
+    }
+    /* **bindable data**：光写 `bindable` / `autoget`、不写 `property`，那也是一格
+       "整个由编译器实现的属性"（samples/jnc/34_BindableProperties.jnc:87-90 那句
+       "bindable data is a wholly compiler-implemented property"）—— 所以它**不是**一格叫
+       `m_state` 的字段，而是生成 `<东家>$<名字>$m_value`（+ bindable 多一格 `$m_onChanged`），
+       并且排在自己那些真字段之后（81-propbindmem.jnc / 82-reactor.jnc 的真输出）。 */
+    if (m.type !== null && m.name !== null
+      && (m.type.mods.includes('bindable') || m.type.mods.includes('autoget'))
+      && (m.shape === 'data' || m.shape === 'array' || m.shape === 'fnptr')) {
+      const br = resolveType(m.type, env);
+      if (br.type === null) { ctx.fails?.push(`${m.name}$m_value: ${br.why}`); out.push(null); return; }
+      ctx.tail?.push(`(${ctx.owner}$${m.name}$m_value ${emitType(br.type, 'field')})`);
+      if (m.type.mods.includes('bindable')) {
+        ctx.tail?.push(`(${ctx.owner}$${m.name}$m_onChanged (arr (fnty () void)))`);
+      }
+      return;
+    }
     /* `static` 那一格是**模块级存储**，不躺在对象里（167-staticfield.jnc / 193-staticctorns.jnc
        旧降级都不发）。 */
     if (m.storage.includes('static')) return;
