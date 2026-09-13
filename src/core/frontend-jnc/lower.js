@@ -201,6 +201,7 @@ import { OmniError } from '../source/diag.js';
 import { compose, say } from '../frontend-engine/positions.js';
 import { lookupName, lexChain, EXT, INH, IMP } from '../frontend-engine/scopes.js';
 import { pick, worst } from '../frontend-engine/overload.js';
+import { castRow } from '../frontend-engine/casts.js';
 import { JNC_FEATURES } from '../../lang/jnc/features/index.js';
 
 /* 位置规格（ADR-0029 的 L2）。这一份**只**读它，用来把"不收"那些话从手写的字符串换成
@@ -223,6 +224,59 @@ const NAME_KINDS = Object.fromEntries([...JNC_SPEC.nameKinds].map(([kd, d]) => [
     ? (L, k) => L[d.store].has(k)
     : (L, k) => L[d.store].has(k) && d.keep(L[d.store].get(k)),
 ]));
+
+/* 类型之间那点关系（ADR-0029 的 L4）。**一张有序的表，第一行命中的赢**，两列结论：
+   `assign` = 隐式装得进吗（`assignOk`），`cost` = 重载决议里的那一档（`argCost`）。
+
+   档次照 jancy 的 `CastKind`（jnc_ct_CastOp.h:26-35）**相对次序**排，只是粗一些 ——
+   这一层可行的隐式转换本来就少（量过：`double d = 1;` 收，`int i = 2.5;` 拒）：
+   4 完全一样（Identity）／3 int 之间与类的上转（Implicit）／1 跨族（ImplicitCrossFamily，
+   严格差于 Implicit）／0 合不上。次序与 jancy 一致这一点是关键：**给出答案时**与 jancy
+   挑的是同一条，分不出来就说还不收、不猜。
+
+   两列在有些行上**故意不一样**，先前那是两串 `if` 的差、读不出来，现在是表里同一行的两格：
+   `int8 -> int32` 装不进（`assign: false`），可调用那一处给 3 分 —— jancy 的整数隐式转换
+   正是在**调用**那一处才允许的。 */
+const JNC_CASTS = [
+  {
+    why: 'int 之间：两个方向 jancy 都是 Implicit；字面量不给满分（见 cheapTy 那段）',
+    when: (f, t) => isInt(f) && isInt(t),
+    assign: (f, t) => sameTy(f, t),
+    cost: (lit, f, t) => (lit ? 3 : (sameTy(f, t) ? 4 : 3)),
+  },
+  { why: '完全一样（Identity）', when: (f, t) => sameTy(f, t), assign: true, cost: 4 },
+  {
+    /* 任何数据指针**隐式**转成 `void*`（第一百九十刀）。不是我们定的，是 jancy 的转换表 ——
+         // jnc_ct_CastOp_DataPtr.cpp:461-464
+         if (dstDataType->getStdType() == StdType_AbstractData ||
+             dstDataType->getTypeKind() == TypeKind_Void && canCastToPod)
+           return constCastKind;              // <- 隐式那一档
+       `canCastToPod` 是 `isSrcPod || isDstConst || 目标是 thin 指针`，而 `char` / `int` /
+       结构体在 jancy 那边都是 POD。所以这一条与 C 的那一条一样：指到什么上的指针都能当
+       `void*` 用。逐份榜上 99 处 `'…' 的第 1 个实参要 void*，这里是 char*` 就是它。 */
+    why: '数据指针 -> void*（jnc_ct_CastOp_DataPtr.cpp:461-464）',
+    when: (f, t) => jncIsPtr(f) && jncIsPtr(t) && t.target.k === 'void',
+    assign: true,
+    cost: 0,
+  },
+  {
+    why: '类的**上转**：派生类的引用装进基类那一格（第五十六刀）—— 这一层发零条指令，'
+      + '一条继承链共用一格方言结构体。反过来要下转，那得对象头里那格类型信息，还不收',
+    when: (f, t, L) => isClass(f) && isClass(t) && L.isBase(t.name, f.name),
+    assign: true,
+    cost: 3,
+  },
+  {
+    why: '枚举 -> 它的**基枚举**（第二百四十七刀）：枚举那一族里唯一的隐式转换'
+      + '（jnc_ct_CastOp_Int.cpp:307）',
+    when: (f, t, L) => jncIsEnum(f) && jncIsEnum(t) && L.enumChain(f.name, t.name),
+    assign: true,
+    cost: 0,
+  },
+  { why: 'int -> real（ImplicitCrossFamily）', when: (f, t) => t === J_REAL && isInt(f), assign: false, cost: 1 },
+  { why: 'bool -> int（跨族）', when: (f, t) => isInt(t) && f === J_BOOL, assign: false, cost: 1 },
+  { why: '枚举 -> int（跨族）', when: (f, t) => isInt(t) && jncIsEnum(f), assign: false, cost: 1 },
+];
 
 const JNC_NOPE = 'jancy 前端第一刀还不收';
 
@@ -7100,27 +7154,18 @@ class JncLower {
    * 那一格类型信息，与虚派发是同一格，所以还不收（照旧报"类型不对"）。
    */
   assignOk(from, to) {
-    if (sameTy(from, to)) return true;
-    /* 任何数据指针**隐式**转成 `void*`（第一百九十刀）。不是我们定的，是 jancy 的转换表 ——
-         // jnc_ct_CastOp_DataPtr.cpp:461-464
-         if (dstDataType->getStdType() == StdType_AbstractData ||
-             dstDataType->getTypeKind() == TypeKind_Void && canCastToPod)
-           return constCastKind;              // <- 隐式那一档
-       `canCastToPod` 是 `isSrcPod || isDstConst || 目标是 thin 指针`，而 `char` / `int` / 结构体
-       在 jancy 那边都是 POD（类不是，可这一层的类根本不是数据指针，走不到这儿）。
-       所以这一条与 C 的那一条一样：指到什么上的指针都能当 `void*` 用。
-       逐份榜上 99 处 `'…' 的第 1 个实参要 void*，这里是 char*` 就是它 —— 那是一句 `E`
-       （我们答错了，不是"还不收"）。 */
-    if (jncIsPtr(from) && jncIsPtr(to) && to.target.k === 'void') return true;
-    /* 枚举 -> 它的**基枚举**（第二百四十七刀）：那是枚举那一族里唯一的隐式转换
-       （jnc_ct_CastOp_Int.cpp:307）。沿 `baseEnum` 那条链往上找，找着就收。 */
-    if (jncIsEnum(from) && jncIsEnum(to)) {
-      for (let cur = from.name, hop = 0; cur !== undefined && hop < 64; hop++) {
-        if (cur === to.name) return true;
-        cur = (this.enums.get(cur) ?? {}).baseEnum;
-      }
+    const r = castRow(JNC_CASTS, from, to, this);
+    if (r === null) return false;
+    return typeof r.assign === 'function' ? r.assign(from, to, this) : r.assign;
+  }
+
+  /** 沿 `baseEnum` 那条链往上找（第二百四十七刀）：`from` 的祖先里有 `to` 吗。 */
+  enumChain(from, to) {
+    for (let cur = from, hop = 0; cur !== undefined && hop < 64; hop++) {
+      if (cur === to) return true;
+      cur = (this.enums.get(cur) ?? {}).baseEnum;
     }
-    return isClass(from) && isClass(to) && this.isBase(to.name, from.name);
+    return false;
   }
 
   /* ------------------------------------------------ 虚派发（第五十七刀） */
@@ -9406,26 +9451,13 @@ class JncLower {
   }
 
   /**
-   * 一格实参配一格形参有多合得上（第八十刀）。档次照 jancy 的 `CastKind`
-   * （jnc_ct_CastOp.h:26-35）**相对次序**排，只是粗一些 —— 这一层可行的隐式转换本来就少
-   * （量过：`double d = 1;` 收，`int i = 2.5;` 拒）：
-   *
-   *   4 完全一样（Identity）
-   *   3 int 之间（两个方向 jancy 都是 Implicit）、类的上转
-   *   1 int -> real（ImplicitCrossFamily，严格差于 Implicit）、bool -> int、枚举 -> int
-   *   0 合不上
-   *
-   * 字面量不给 4（见 cheapTy 那段）。次序与 jancy 一致这一点是关键：我们**给出答案时**
-   * 与 jancy 挑的是同一条；分不出来时说还不收，而不是猜。
+   * 一格实参配一格形参有多合得上（第八十刀）：读 `JNC_CASTS` 那张表的 `cost` 那一列
+   * （档次与出处见那张表的注）。
    */
   argCost(from, to, lit) {
-    if (isInt(from) && isInt(to)) return lit ? 3 : (sameTy(from, to) ? 4 : 3);
-    if (sameTy(from, to)) return 4;
-    if (isClass(from) && isClass(to) && this.isBase(to.name, from.name)) return 3;
-    if (to === J_REAL && isInt(from)) return 1;
-    if (isInt(to) && from === J_BOOL) return 1;
-    if (isInt(to) && jncIsEnum(from)) return 1;
-    return 0;
+    const r = castRow(JNC_CASTS, from, to, this);
+    if (r === null) return 0;
+    return typeof r.cost === 'function' ? r.cost(lit, from, to) : r.cost;
   }
 
   /**
