@@ -143,6 +143,8 @@ export function expandTemplates(tree, templates) {
      typedef，与旧降级 lower.js:4522-4534 同一条），名字里把修饰符与 `*` 都记上
      （`Box<int const*>` → `int_const_p`）。这张表答给调用方，进 env 就能解出来。 */
   const typedefs = new Map();
+  /* 泛型 typedef 实例化出来的那几条（`Pair$int` → 一条 typedef 的树）。 */
+  const tdefs = new Map();
   /** 一格实参 → `{ spec, key }`（`spec` 是替进去的那格 type-spec）。 */
   const argSpec = (a, depth) => {
     let sp = a.spec;
@@ -203,10 +205,19 @@ export function expandTemplates(tree, templates) {
       return null;
     }
     const inst = `${tm.base}$${keys.join('$')}`;
-    if (insts.has(inst)) return inst;
-    insts.set(inst, null);                                           // 先占位（防自套死循环）
+    if (insts.has(inst) || tdefs.has(inst)) return inst;
     const map = new Map();
     tm.params.forEach((p, i) => map.set(p.name, specs[i]));
+    /* **泛型 typedef**：合成出来的是一条 typedef（没有体、不进结构体那张表），它指的那格
+       `Impl<int,int>` 由队列接着造（115-generictdef.jnc）。 */
+    if (tm.kind === 'typedef') {
+      tdefs.set(inst, null);                                         // 先占位（防自套）
+      const td = renameDeclTinst(substitute(tm.node, map), tm.base, inst);
+      tdefs.set(inst, td);
+      walk(td, depth + 1);
+      return inst;
+    }
+    insts.set(inst, null);                                           // 先占位（防自套死循环）
     const ag = substitute(tm.node, map);
     /* 名字那一格换成实例名（`(tinst …)` → `(name Box$int)`）。 */
     const nm = named(ag);
@@ -226,7 +237,7 @@ export function expandTemplates(tree, templates) {
     for (const it of n.items) walk(it, depth);
   };
   walk(tree, 0);
-  return { insts, typedefs, fails };
+  return { insts, typedefs, tdefs, fails };
 }
 
 /** 这份文件里的模板表（`base -> {base, params, node}`）。 */
@@ -234,12 +245,59 @@ export function templateTable(tree) {
   const out = new Map();
   const walk = (n) => {
     if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
-    if (headOf(n) === 'agg') {
+    const h = headOf(n);
+    if (h === 'agg') {
       const tm = templateOf(n);
+      if (tm !== null && !out.has(tm.base)) out.set(tm.base, tm);
+    } else if (h === 'typedef') {
+      const tm = typedefTemplateOf(n);
       if (tm !== null && !out.has(tm.base)) out.set(tm.base, tm);
     }
     for (const it of n.items) walk(it);
   };
   walk(tree);
   return out;
+}
+
+/**
+ * **泛型 typedef**（`typedef Impl<T, T> Pair<T>;`，第一百二十三刀）：声明的那个名字是
+ * `tinst`。实例化出来的是**一条 typedef**（没有体），而它指的那格 `Impl<int,int>` 由队列
+ * 接着造 —— 所以 115-generictdef.jnc 里旧降级发的结构体是 `Impl$int$int` 那几格，
+ * `Pair$int` 自己只是个别名。
+ */
+export function typedefTemplateOf(node) {
+  if (headOf(node) !== 'typedef') return null;
+  const nm = named(node);
+  if (nm === null) return null;
+  for (const d of allInChain(nm.dcls, 'dcls-add', 'dcls')) {
+    const dc = named(d);
+    if (dc === null || headOf(dc.name) !== 'tinst') continue;
+    const tn = named(dc.name);
+    if (tn === null) continue;
+    const base = nameText(tn.name);
+    if (base === null) continue;
+    const params = [];
+    let ok = true;
+    for (const t of allInChain(tn.targs, 'targs-add', 'targs')) {
+      const p = paramOf(t);
+      if (p === null) { ok = false; break; }
+      params.push(p);
+    }
+    if (!ok || params.length === 0) continue;
+    return { base, params, node, kind: 'typedef' };
+  }
+  return null;
+}
+
+/** 把树里**声明那一格** `tinst`（名字是 `base` 的那一个）换成实例名。 */
+function renameDeclTinst(n, base, inst) {
+  if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return n;
+  if (headOf(n) === 'tinst') {
+    const tn = named(n);
+    if (tn !== null && nameText(tn.name) === base) return nameNode(inst, n);
+    return n;
+  }
+  const items = n.items.map((x) => renameDeclTinst(x, base, inst));
+  if (items.every((x, i) => x === n.items[i])) return n;
+  return { ...n, items };
 }

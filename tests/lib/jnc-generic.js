@@ -57,6 +57,16 @@ for (const f of files) {
       if (m[1].startsWith(`${base}$`)) { oracle.add(m[1]); break; }
     }
   }
+  /* 一格实例也可能**不发结构体**：类那一族一整条继承链只发一格，派生的那格实例并进了根
+     （129-baseparam.jnc 的 `ImplC$BaseC` 并进 `struct BaseC`，只在 `ImplC$BaseC$val`
+     这个函数名里露头）。所以再收一遍**所有**以模板名打头的标识符，拿来认这一类实例。 */
+  const seen = new Set();
+  for (const m of out.matchAll(/[A-Za-z_$][\w$]*/g)) {
+    for (const base of templates.keys()) {
+      if (m[0].startsWith(`${base}$`)) { seen.add(m[0]); break; }
+    }
+  }
+  const madeBy = (nm) => oracle.has(nm) || [...seen].some((s) => s.startsWith(`${nm}$`));
   const r = expandTemplates(tree, templates);
   for (const [w, n] of r.fails) fails.set(w, (fails.get(w) ?? 0) + n);
   const mine = new Set([...r.insts.keys()]);
@@ -66,7 +76,8 @@ for (const f of files) {
     else if (missing.length < 20) missing.push(`${f.split('/').pop()}　${nm}`);
   }
   for (const nm of mine) {
-    if (!oracle.has(nm) && extra.length < 20) extra.push(`${f.split('/').pop()}　${nm}`);
+    if (!madeBy(nm) && extra.length < 20) extra.push(`${f.split('/').pop()}　${nm}`);
+    else if (!oracle.has(nm)) { want += 1; got += 1; }               // 并进根那一族（不发结构体）
   }
 }
 
