@@ -192,7 +192,7 @@ function fieldName(s) {
 }
 
 /** 基类表里每一格的**最后一段名字**（`io.Base` 取 `Base`；空基类表答空）。 */
-function basePaths(agg) {
+export function basePaths(agg) {
   const bases = agg.bases;
   if (bases === null || bases === undefined) return [];
   if (headOf(bases) === 'bases') return [];                         // `(bases)`：没有基类

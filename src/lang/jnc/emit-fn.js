@@ -19,6 +19,7 @@ import { emitType } from './emit-type.js';
 import { readDeclType, readAnonType } from './types.js';
 import { nameText, allInChain, readDcl } from './declare.js';
 import { headOf, named } from './adapt.js';
+import { basePaths } from './emit-agg.js';
 
 /** 构造/析构那两格没有写类型 —— 回的是 void（jancy 的 construct 不写返回类型）。 */
 const VOID_NAMES = new Set(['construct', 'destruct', 'construct$static', 'operator new']);
@@ -244,6 +245,94 @@ export function dispatchHead(m, env, ctx = { root: null, self: null }) {
   if (ret === null) return { heads: [], why: '返回类型解不出来' };
   const sym = `${ctx.root}$$vd$${base}`;
   return { heads: [{ name: sym, head: `(fn ${sym} (${parts.join(' ')}) ${ret}` }], why: null };
+}
+
+
+/**
+ * **编译器生成的构造**：一格聚合体没有写 `construct`、可它需要初始化时，旧降级发一格
+ * `(fn <东家>$construct (($this <自己>)) void`（lower.js:2188 与 :10119-10135 那几段 pre-lines）。
+ * 需要初始化的判据是那几段各自要发的行：
+ *   1. 字段带**默认值**（75-fielddefault.jnc）；
+ *   2. 有**事件**成员（要在构造开头建单子，80-class-event.jnc）；
+ *   3. 有 `bindable` / `autoget` 那一族（生成的存储同上要建单子，142-propalias / 152-propfieldinit）；
+ *   4. 有 `static construct`（50-construct.jnc 的 `Reg`、193-staticctorns.jnc 的 `C`）；
+ *   5. **基类**有（或同样生成）构造（53-inherit.jnc 的 `Sparrow`、65-propmem.jnc 的 `Derived`）；
+ *   6. 有**成员**的类型是本文件里带（或生成）构造的聚合体（120-structctor.jnc 的 `Wrap`）。
+ * 5/6 会往下追（带环的守卫），追不到的按"不需要"算 —— 那一格的账在尺子的两栏里看得见。
+ */
+export function needsCtor(agg, env, seen = new Set()) {
+  if (agg === null || agg === undefined || seen.has(agg)) return false;
+  seen.add(agg);
+  if (hasWrittenCtor(agg)) return true;
+  for (const m of agg.members) {
+    if (m.shape === 'event') return true;
+    /* `bindable` 要在构造开头建那格多播的单子（第八十三刀）；`autoget` **不要** ——
+       它只是一格存储，没有单子（67-propauto.jnc 的 `Cell` 旧降级就不发构造，
+       那是"新腿发了、旧降级没这个名字"那一栏抓出来的）。 */
+    if (m.type !== null && m.type !== undefined && m.type.mods.includes('bindable')) return true;
+    if (hasInitValue(m)) return true;
+    /* 成员的类型是本文件里那格聚合体 —— 它带构造，外面这一格也要发一格。 */
+    if (m.shape === 'data' && m.type !== null && m.type.ptrs === 0) {
+      const nm = m.type.base.kind === 'named' ? memberTypeName(m) : null;
+      const rec = nm === null ? undefined : env.get(nm);
+      if (rec !== undefined && rec.agg !== undefined && needsCtor(rec.agg, env, seen)) return true;
+    }
+  }
+  for (const b of basePaths(agg)) {
+    const rec = env.get(b);
+    if (rec !== undefined && rec.agg !== undefined && needsCtor(rec.agg, env, seen)) return true;
+  }
+  return false;
+}
+
+/** 这一格聚合体自己写了 `construct` / `static construct` 吗。 */
+export function hasWrittenCtor(agg) {
+  if (agg === null || agg === undefined) return false;
+  return agg.members.some((m) => {
+    if (m.shape !== 'fn') return false;
+    const n = fnName(m);
+    return n === 'construct' || n === 'construct$static';
+  });
+}
+
+/**
+ * 这一格成员声明带初值吗（`int m_x = 3;` / `Inner m_in(1)`）。
+ * 只看**声明符自己那一层**：`alias` / `typedef` / `static` 那几族不算（前两族没有存储，
+ * 第三族是模块级的），方法那一族更不能算 —— 它的体里满是局部量的 `init`
+ * （先前整棵子树乱走，122-opincdec.jnc 的 `It` 就是这么被误判成"要构造"的）。
+ */
+function hasInitValue(m) {
+  if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') return false;
+  if (m.storage.includes('alias') || m.storage.includes('typedef')
+    || m.storage.includes('static')) return false;
+  const dc = readDcl(m.type?.raw?.dcl);
+  if (dc !== null && dc.ctor) return true;                           // `Inner m_in(1)`
+  const nm = named(m.at);
+  if (nm === null || headOf(m.at) !== 'var-decl') return false;
+  for (const d of allInChain(nm.dcls, 'dcls-add', 'dcls')) {
+    const h = headOf(d);
+    if (h !== 'init' && h !== 'ref-init') continue;
+    /* 这一条 `init` 是**这格成员自己**的吗（同一条声明里可以并列好几格）。 */
+    const dn = named(d);
+    if (dn !== null && dn.dcl === m.type?.raw?.dcl) return true;
+  }
+  return false;
+}
+
+/** 一格数据成员的类型名（`Inner m_in;` → `Inner`）。 */
+function memberTypeName(m) {
+  const specs = m.type?.raw?.specs;
+  if (specs === null || specs === undefined || !Array.isArray(specs.items)) return null;
+  const t = specs.items[1];
+  if (t === null || t === undefined) return null;
+  if (!Array.isArray(t.items)) return t.value === undefined ? null : String(t.value);
+  return nameText(t);
+}
+
+/** 生成的那一格构造的头（形参只有 `$this`，回 void）。 */
+export function ctorHead(name, self) {
+  const ps = self === null || self === undefined ? '' : `($this ${self})`;
+  return { name: `${name}$construct`, head: `(fn ${name}$construct (${ps}) void` };
 }
 
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */

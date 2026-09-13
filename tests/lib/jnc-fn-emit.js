@@ -23,7 +23,7 @@ import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import {
   fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
   isBindableData, dataAccessorHeads, isAutogetProp, autogetGetterHead,
-  isVirtual, dispatchHead,
+  isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead,
 } from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
@@ -292,6 +292,7 @@ for (const f of files) {
   const getCases = [];                              // 只生成取值器的那几格（autoget 属性）
   const vdCases = [];                               // 虚派发那几格（$$vd$）
   const vdSeen = new Set();
+  const ctorCases = [];                             // 编译器生成的构造（没写、可要初始化）
   for (const m of vars) {
     if (isBindableData(m)) accCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
     else if (isAutogetProp(m)) getCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
@@ -299,6 +300,11 @@ for (const f of files) {
   for (const a of aggs) {
     const own = a.emitName ?? nameText(a.name);
     if (own === null) continue;
+    /* **没写 construct、可要初始化**的那一格由编译器生成（75-fielddefault / 80-class-event /
+       53-inherit / 120-structctor 那几族）。 */
+    if (!hasWrittenCtor(a) && needsCtor(a, env)) {
+      ctorCases.push({ agg: a, name: own, self: selfOf(a) });
+    }
     for (const m of a.members) {
       /* **bindable data** 生成两格取/存（82-reactor.jnc 的 `Sess$m_state$get` / `$set`）。 */
       if (isBindableData(m)) {
@@ -373,6 +379,17 @@ for (const f of files) {
   const nextDup = overloadIndex();
   const mineNames = new Set();                        // 新腿**试过**的那几个名字（算覆盖率用）
   /* **生成的取/存**先对（它们不占重载号 —— 旧降级那边是另一遍发出来的）。 */
+  for (const c of ctorCases) {
+    const h = ctorHead(c.name, c.self);
+    mineNames.add(h.name);
+    const wantC = oracle.get(h.name);
+    if (wantC === undefined) { noFn += 1; noFnAt.push(`${f.split('/').pop()}　${h.name}`); continue; }
+    cmp += 1;
+    if (h.head === wantC) same += 1;
+    else if (diff.length < 20) {
+      diff.push(`${f.split('/').pop()}\n      旧 ${wantC}\n      新 ${h.head}`);
+    }
+  }
   for (const c of accCases.concat(getCases, vdCases)) {
     const r = c.ctx.root !== undefined
       ? dispatchHead(c.m, env, c.ctx)
