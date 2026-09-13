@@ -43,9 +43,10 @@ export const STD_INT_TYPEDEFS = new Set([
  * 答 `{ type, why }`：解出来 `type` 是类型对象、`why` 为 null；解不出来 `type` 为 null、
  * `why` 说卡在哪一格（记账用）。
  */
-export function resolveType(t, env = new Map()) {
+export function resolveType(t, env = new Map(), depth = 0) {
   if (t === null || t === undefined) return { type: null, why: '没有类型' };
-  const base = baseOf(t, env);
+  if (depth > 8) return { type: null, why: 'typedef 绕回来了（深度上限）' };
+  const base = baseOf(t, env, depth);
   if (base === null) return { type: null, why: `认不出基类型 '${t.base.text || '(空)'}'` };
   if (t.shape === 'fnptr') {
     /* 函数指针（`int function* m_op(int, int)` → `(fnty (int int) int)`）：
@@ -84,7 +85,7 @@ export function resolveType(t, env = new Map()) {
 }
 
 /** 基类型那一格。 */
-function baseOf(t, env) {
+function baseOf(t, env, depth = 0) {
   const text = t.base.text;
   if (t.base.kind === 'word' || WORD_TYPES[text] !== undefined) {
     return WORD_TYPES[text] ?? null;
@@ -102,7 +103,14 @@ function baseOf(t, env) {
     if (e.kind === 'struct' || e.kind === 'union') return { k: 'struct', name: emitName };
     if (e.kind === 'class') return { k: 'class', name: emitName };
     if (e.kind === 'enum') return { k: 'enum', name: emitName };
-    return null;                                     // typedef 那一族要再走一跳，先不猜
+    /* **typedef 再走一跳**：`typedef int X; X m_v;` 里 `X` 的目标类型就是它的写法，
+       接着解一遍（带深度上限防环）。少这一跳，typedef / alias 那一摊十几个聚合体
+       全拼不出来（尺子的"拼不出来的那几处"里几乎全是它）。 */
+    if (e.kind === 'typedef' && e.type !== undefined) {
+      const r = resolveType(e.type, env, depth + 1);
+      return r.type;
+    }
+    return null;
   }
   return null;
 }

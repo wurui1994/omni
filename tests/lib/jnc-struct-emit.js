@@ -14,12 +14,13 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
-import { headOf } from '../../src/lang/jnc/adapt.js';
+import { headOf, named } from '../../src/lang/jnc/adapt.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
 import { structLine } from '../../src/lang/jnc/emit-agg.js';
-import { nameText } from '../../src/lang/jnc/declare.js';
+import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
+import { readDeclType } from '../../src/lang/jnc/types.js';
 
 const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy/samples/jnc';
 const argv = process.argv.slice(2);
@@ -125,6 +126,16 @@ for (const f of files) {
             name: emitName,
             agg: a,
           });
+        }
+      }
+    } else if (h === 'typedef') {
+      /* **typedef 也进环境**（名字 → 目标类型的写法）：`typedef int X;` 之后 `X m_v;`
+         要靠它再走一跳。嵌套在类里的 typedef 也收（名字在那一层可见）。 */
+      const tn = named(n);
+      if (tn !== null) {
+        for (const d of allInChain(tn.dcls, 'dcls-add', 'dcls')) {
+          const t = readDeclType(tn.specs, d);
+          if (t !== null && t.name !== null) env.set(t.name, { kind: 'typedef', type: t });
         }
       }
     } else if (h === 'enum') {
