@@ -3944,6 +3944,15 @@ class JncLower {
       const sp = this.specs(m.items[1], cls, [], true);
       if (sp === null) return null;
       for (const d of this.flat(m.items[2])) {
+        /* union 的体里也写得下 `alias`（第二百五十四刀）：`alias toString = getString;`
+           （io_SocketAddress.jnc:472 —— 让 `io.SocketAddress` 成为一格 "stringable" 类型）。
+           与类 / 结构体那一遍同一句（第八十七 / 一百〇二刀的 aliasDecl），排在字段之前 ——
+           它那一条也长成 `(init …)`，落到下面会被当成"字段的默认值"。
+           上一刀（union 的方法）之前这一句被前面的错盖着，露出来才看见。 */
+        if (sp.als === true) {
+          this.aliasDecl(d, owner);
+          continue;
+        }
         const info = this.declarator(d, sp, m.items[1], cls, bs !== null);
         if (info === null) return null;
         /* 声明符上带括号的是**方法原型**，不是字段（第二百五十三刀）：先前它悄悄进了字段表

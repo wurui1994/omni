@@ -183,8 +183,16 @@ const files = corpus(JANCY).filter((p) => only === null || p.includes(only));
 const groups = (() => {
   const single = [];
   const dirs = new Map();
+  /* 第二百五十五刀（一刀量法）：**扩展库那几棵树也按目录成组**。理由与 ioninja 那一支逐字
+     一样，而这一支更硬 —— `src/jnc_ext/<lib>/jnc/` 下那一批在 jancy 那边**就是一个模块**
+     （库的源码表把它们一起列进去、`.jncx` 把它们打成一个包），所以那些文件里**一句 import 都
+     没有**也照样互相看得见：`jnc_Alias.jnc` 的基类 `ModuleItem` 写在 `jnc_ModuleItem.jnc` 里
+     （21 份里只有 1 份写着 import），`sys_globals.jnc` 那一批同样（7 份 0 句 import）。
+     逐份编于是量出一大片 `没有这个基类` / `没有这个类型` —— 全是**量法的噪音**，与语料本身
+     无关。这一刀把它们并成一组，噪音一次性清掉；粒度又变了一次，明说、基线重记。 */
+  const extLib = (f) => /\/src\/jnc_ext\/[^/]+\/jnc\//.test(f);
   for (const f of files) {
-    if (f.includes(`${'/test/ioninja/'}`)) {
+    if (f.includes(`${'/test/ioninja/'}`) || extLib(f)) {
       const d = dirname(f);
       if (!dirs.has(d)) dirs.set(d, []);
       dirs.get(d).push(f);

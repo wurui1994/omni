@@ -1,0 +1,27 @@
+// union 的体里也写得下 `alias`（第二百五十四刀）。
+//
+// 语料里的原样是 io_SocketAddress.jnc:472：
+//
+//   union SocketAddress { … string_t getString() thin const; alias toString = getString; }
+//
+// 那一句让 `io.SocketAddress` 成为一格 "stringable" 类型。类与结构体那两格早就收了
+// （第八十七 / 一百〇二刀），union 这一格是上一刀（union 的方法）之后才露出来的。
+
+union U {
+	int m_i;
+	bool m_b;
+
+	int doubled() thin const;
+	alias twice = doubled;
+}
+
+int U.doubled() thin const {
+	return m_i * 2;
+}
+
+int main() {
+	U u;
+	u.m_i = 5;
+	printf("%d %d\n", u.doubled(), u.twice());
+	return 0;
+}

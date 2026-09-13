@@ -11656,6 +11656,56 @@ jancy 那边 `UnionType` 就是从 `StructType` 派下来的（jnc_ct_UnionType.
   `'…' 上没有方法 '…'（同名那几条声明在 …）` 21 + 2 对（那正是"方法被当成字段"之后的下游）。
   `(文件, 拦路项)` 对 `3645 -> 3626`（−19）；lowered 97、clean 152 没动。
 
+### 第二百五十四刀：union 的体里也写得下 `alias`
+
+上一刀把 union 的方法收下之后，榜上冒出一行 `认不出的声明符`（39 对）—— 露出来的正是紧跟着
+那几条方法的一句：
+
+```
+string_t getString() thin const;
+alias toString = getString;                  // io_SocketAddress.jnc:472
+```
+
+那一句让 `io.SocketAddress` 成为一格 "stringable" 类型。类与结构体那两格早就收了
+（第八十七 / 一百〇二刀的 `aliasDecl`），union 这一格欠着 —— `unionMembers` 里没有那一支，
+于是 `alias toString = getString` 落到字段那条路上、`declarator` 认不出来。
+
+落法一句：`sp.als === true` 时交给 `aliasDecl(d, owner)`，排在字段之前（它那一条也长成
+`(init …)`，落到下面会被当成"字段的默认值"）。
+
+- 新例子 `cases/192-unionalias`（孪生 `/tmp/c200.c` —— C 那边就是"第二个名字指着同一个函数"）。
+- 腿：`node tests/jnc/run.js` 339/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：**两行整行没了** —— `认不出的声明符` 39 对，与
+  `union 里两组都有 '…' —— 那两个名字在外层撞车了` 15 对（那 15 对也是同一个祸根：
+  `alias` 那一条先前被当成字段，于是与它指着的那个名字"撞车"）。
+  `(文件, 拦路项)` 对 `3626 -> 3572`（−54）；lowered 97、clean 152 没动。
+
+### 第二百五十五刀（一刀量法）：扩展库那几棵树也按目录成组
+
+`没有这个基类：'…'` 73 对里翻出来的是**量法的噪音**：
+
+```
+opaque class Alias:                          // jnc_Alias.jnc:19-22，整份文件一句 import 都没有
+    ModuleItem,                              // 那三个写在 jnc_ModuleItem.jnc 里
+    ModuleItemDecl,
+    ModuleItemInitializer {
+```
+
+`src/jnc_ext/<lib>/jnc/` 下那一批在 jancy 那边**就是一个模块**（库的源码表把它们一起列进去、
+`.jncx` 把它们打成一个包），所以互相看得见不靠 import：`jnc_rtl_intro` 21 份里只有 1 份写着
+import，`jnc_sys` 7 份一句都没有。逐份编于是量出一大片 `没有这个基类` / `没有这个类型` ——
+与语料本身无关。
+
+改法与第二百四十五刀（ioninja 按目录成组）逐字一样：`src/jnc_ext/*/jnc/` 也按目录成一组
+（合成一份只有 import 的文件编一次）。
+
+**这一刀又把榜的粒度改了，历史数字不再逐行可比** —— 明说，基线重记。
+
+- lowered `97 -> 59`、clean `152 -> 90`：分母从"约 310 组"变成"约 220 组"（13 棵扩展库树
+  各并成一组，替掉先前那 100 多份单文件）。
+- `(文件, 拦路项)` 对 `3572 -> 3489`（−83）。榜上跟着落的：`没有这个类型` `96 -> 75`、
+  `没有这个基类` 那一行（73 对）**整行没了**、`没有这个函数` `82 -> 78`。
+
 
 
 
