@@ -208,6 +208,27 @@ import { JNC_FEATURES } from '../../lang/jnc/features/index.js';
    而不是等 `--check` 撞出来。降级的行为一格没动 —— 换的是话从哪儿来。 */
 const JNC_SPEC = compose(JNC_FEATURES);
 
+/* 这门语言有哪几**类名字**（ADR-0029 的 R2/R3）。先前每个查名点都自带一个临时闭包
+   （`(k) => this.classes.has(k) || this.structs.has(k)`，全文 54 处），于是"这一问要的是
+   哪一类名字"藏在闭包里、数不出来也拼不起来。摊成一张表之后：查名点写 `this.find(nm,
+   ['class', 'struct'])`，"这门语言有哪些名字类"是一张能读的清单，而底下那十几张 Map
+   往后要并成一张带 label 的表时，改的是这一张、不是那 54 处。 */
+const NAME_KINDS = {
+  class: (L, k) => L.classes.has(k),
+  struct: (L, k) => L.structs.has(k),
+  enum: (L, k) => L.enums.has(k),
+  alias: (L, k) => L.aliases.has(k),
+  ns: (L, k) => L.nsNames.has(k),
+  global: (L, k) => L.globals.has(k),
+  fn: (L, k) => L.fns.has(k),
+  method: (L, k) => L.methods.has(k),
+  'proto-fn': (L, k) => L.protoFns.has(k),
+  template: (L, k) => L.templates.has(k),
+  prop: (L, k) => L.props.has(k),
+  exposed: (L, k) => L.exposedMems.has(k),
+  'reactor-top': (L, k) => L.reactors.has(k) && L.reactors.get(k).cls === null,
+};
+
 const JNC_NOPE = 'jancy 前端第一刀还不收';
 
 /**
@@ -1621,7 +1642,7 @@ class JncLower {
   opCompoundSig(n, info, ps, op) {
     const owner = info.name === ''
       ? (this.structs.has(this.ns) ? this.ns : null)
-      : this.resolve(info.name, (k) => this.structs.has(k));
+      : this.find(info.name, ['struct']);
     if (owner === null) {
       return this.err(n, `'operator ${op}' 只能是类或结构体的成员（写在体里）`);
     }
@@ -1666,7 +1687,7 @@ class JncLower {
   opAssignSig(n, info, ps) {
     const owner = info.name === ''
       ? (this.structs.has(this.ns) ? this.ns : null)
-      : this.resolve(info.name, (k) => this.structs.has(k));
+      : this.find(info.name, ['struct']);
     if (owner === null) {
       return this.acctErr(n, 'M-005');
     }
@@ -1721,7 +1742,7 @@ class JncLower {
     const suffix = OP_NAME.get(info.special);
     const owner = info.name === ''
       ? (this.structs.has(this.ns) ? this.ns : null)
-      : this.resolve(info.name, (k) => this.structs.has(k));
+      : this.find(info.name, ['struct']);
     if (owner === null) {
       return this.err(n, `'${info.special}' 只能是类或结构体的成员（写在体里）`);
     }
@@ -1889,7 +1910,7 @@ class JncLower {
   opCallSig(n, info, ps) {
     const owner = info.name === ''
       ? (this.classes.has(this.ns) || this.structs.has(this.ns) ? this.ns : null)
-      : this.resolve(info.name, (k) => this.classes.has(k) || this.structs.has(k));
+      : this.find(info.name, ['class', 'struct']);
     if (owner === null) {
       return this.err(n, "'operator ()' 只能是类或结构体的成员（`obj(…)` 走它）");
     }
@@ -1964,7 +1985,7 @@ class JncLower {
     const suffix = OP_NAME.get(info.special);
     const owner = info.name === ''
       ? (this.structs.has(this.ns) ? this.ns : null)
-      : this.resolve(info.name, (k) => this.structs.has(k));
+      : this.find(info.name, ['struct']);
     if (owner === null) {
       return this.err(n, `'${info.special}' 只能是类或结构体的成员（写在体里）`);
     }
@@ -2402,6 +2423,15 @@ class JncLower {
    * `Box$Node` —— **实例它自己**。所以实例名要当**一个整体**，退的时候直接跳到那个
    * 泛型声明处的那一层去（`instNs`）。
    */
+  /**
+   * 查一个名字，只说**要哪几类**（见 NAME_KINDS）。`not` 里那几类要排掉 ——
+   * 语料里真有这种问法：`fn` 但不是 `method`（自由函数）、`struct` 但不是 `class`。
+   */
+  find(nm, kinds, not = []) {
+    return this.resolve(nm, (k) => kinds.some((kd) => NAME_KINDS[kd](this, k))
+      && !not.some((kd) => NAME_KINDS[kd](this, k)));
+  }
+
   resolve(nm, has) {
     const k = nm.replace(/\./g, '$');
     const got = lookupName(k, {
@@ -2479,7 +2509,7 @@ class JncLower {
           const saveIn = this.inBase;
           this.ns = e.ns;
           this.inBase = true;
-          const b = this.resolve(bn, (x) => this.classes.has(x) || this.structs.has(x));
+          const b = this.find(bn, ['class', 'struct']);
           this.ns = saveNs;
           this.inBase = saveIn;
           if (b === null) continue;
@@ -2539,7 +2569,7 @@ class JncLower {
       this.ns = e.ns;
       const nm = this.qname(it.items[1]);
       if (nm === null) { this.err(it, '认不出的命名空间名字'); continue; }
-      const t = this.resolve(nm, (k) => this.nsNames.has(k));
+      const t = this.find(nm, ['ns']);
       if (t === null) { this.err(it, `没有这个命名空间：'${nm}'`); continue; }
       this.usingNs.push({ in: e.ns, ns: t, node: it });
     }
@@ -2574,7 +2604,7 @@ class JncLower {
           const saveIn = this.inBase;
           this.ns = e.ns;
           this.inBase = true;
-          const b = this.resolve(bn, (x) => this.classes.has(x) || this.structs.has(x));
+          const b = this.find(bn, ['class', 'struct']);
           this.ns = saveNs;
           this.inBase = saveIn;
           if (b === null) continue;
@@ -2678,7 +2708,7 @@ class JncLower {
       if (e !== undefined) return { type: e.t, global: e.s, dname: e.d };
     }
     // 模块级那一格从里往外找（第五十一刀）：`namespace a` 里写 `g` 先看 `a.g`。
-    const gk = this.resolve(name, (k) => this.globals.has(k));
+    const gk = this.find(name, ['global']);
     if (gk === null) return null;
     return { type: this.globals.get(gk), global: true, dname: gk };
   }
@@ -3753,7 +3783,7 @@ class JncLower {
     /* 目标是一格函数或方法：发一格**转手的**，签名照抄 —— 比"调用点查一张别名表"简单，
        而且虚方法、重载、当函数值用那几处一处都不用改。 */
     const m = cls === null
-      ? this.resolve(tgt, (k) => this.fns.has(k) && !this.methods.has(k))
+      ? this.find(tgt, ['fn'], ['method'])
       : this.findMethod(cls, tgt);
     if (m !== null) {
       const sig = this.fns.get(m);
@@ -3828,16 +3858,16 @@ class JncLower {
 
   /** 一个写出来的名字指的是哪一格类型（第八十七刀抽出来的，与 specs 里那一串同一条）。 */
   typeOfName(nm) {
-    const c = this.resolve(nm, (k) => this.classes.has(k));
+    const c = this.find(nm, ['class']);
     if (c !== null) return tClass(c, true);
-    const s = this.resolve(nm, (k) => this.structs.has(k));
+    const s = this.find(nm, ['struct']);
     if (s !== null) return { k: 'struct', name: s };
-    const e = this.resolve(nm, (k) => this.enums.has(k));
+    const e = this.find(nm, ['enum']);
     if (e !== null) {
       const en = this.enums.get(e);
       return { k: 'enum', name: e, base: en.base, bits: en.bits === true };
     }
-    const a = this.resolve(nm, (k) => this.aliases.has(k));
+    const a = this.find(nm, ['alias']);
     if (a !== null) return this.aliases.get(a);
     return null;
   }
@@ -3965,7 +3995,7 @@ class JncLower {
         this.nope(e.it, 'extension 后面那个目标类型（要正好一个）');
         continue;
       }
-      const tgt = this.resolve(bs[0], (k) => this.classes.has(k) || this.structs.has(k));
+      const tgt = this.find(bs[0], ['class', 'struct']);
       if (tgt === null) {
         this.err(e.it, `没有这个类型：'${bs[0]}'`);
         continue;
@@ -4384,7 +4414,7 @@ class JncLower {
     if (base === null) return null;
     const save = this.ns;
     this.ns = ns;
-    const full = this.resolve(base, (k) => this.templates.has(k));
+    const full = this.find(base, ['template']);
     this.ns = save;
     if (full === null) return null;
     if (depth > TMPL_DEPTH) {
@@ -4498,7 +4528,7 @@ class JncLower {
         const q = this.qname(sp);
         const save2 = this.ns;
         this.ns = ns;
-        const isT = q !== null && this.resolve(q, (k) => this.templates.has(k)) !== null;
+        const isT = q !== null && this.find(q, ['template']) !== null;
         this.ns = save2;
         if (isT) {
           return this.nope(tn, `泛型的实参 '${q}' 是一格泛型自己的名字、一个实参都没带`
@@ -5848,7 +5878,7 @@ class JncLower {
    */
   /** 无名枚举漏到外面那层的一格成员（第九十六刀）：裸名字查得着就回那一格字面量。 */
   exposedLit(nm) {
-    const k = this.resolve(nm, (x) => this.exposedMems.has(x));
+    const k = this.find(nm, ['exposed']);
     if (k === null) return null;
     const { en, mn } = this.exposedMems.get(k);
     const info = this.enums.get(en);
@@ -5905,11 +5935,11 @@ class JncLower {
     if (!isList(ob) || (head(ob) !== 'name' && head(ob) !== 'field')) return undefined;
     const en0 = this.dotted(ob);
     if (en0 === null) return undefined;
-    let en = this.resolve(en0, (k) => this.enums.has(k));
+    let en = this.find(en0, ['enum']);
     /* 名字是一格 alias / typedef 起的（第八十七刀）：`alias Hue = Color;` 之后 `Hue.Green`
        与 `Color.Green` 是同一格。别名表里存的是解出来的那一格类型，所以问它的 name。 */
     if (en === null) {
-      const a = this.resolve(en0, (k) => this.aliases.has(k));
+      const a = this.find(en0, ['alias']);
       const t = a === null ? null : this.aliases.get(a);
       if (t !== null && t !== undefined && t.k === 'enum' && this.enums.has(t.name)) en = t.name;
     }
@@ -6352,9 +6382,9 @@ class JncLower {
     for (let i = 0; cls && i < bases.length; i++) {
       const bn = this.qname(bases[i]);
       if (bn === null) { this.nope(bases[i], '认不出的基类名字'); continue; }
-      const b = this.resolve(bn, (k) => this.classes.has(k));
+      const b = this.find(bn, ['class']);
       if (b === null) {
-        if (this.resolve(bn, (k) => this.structs.has(k)) !== null) {
+        if (this.find(bn, ['struct']) !== null) {
           this.nope(bases[i], `拿结构体 '${bn}' 当基类（jancy 收它，type_class.rst:218）`);
           continue;
         }
@@ -6878,9 +6908,9 @@ class JncLower {
     for (const b0 of bases) {
       const bn = this.qname(b0);
       if (bn === null) { this.nope(b0, '认不出的基类名字'); return null; }
-      const b = this.resolve(bn, (k) => this.structs.has(k) && !this.classes.has(k));
+      const b = this.find(bn, ['struct'], ['class']);
       if (b === null) {
-        if (this.resolve(bn, (k) => this.classes.has(k)) !== null) {
+        if (this.find(bn, ['class']) !== null) {
           return this.nope(b0, `结构体 '${shown(name)}' 拿类 '${bn}' 当基类`
             + '（类是引用语义、还带一格动态标签，摊进结构体里要先定"那个标签归谁"）');
         }
@@ -7715,23 +7745,23 @@ class JncLower {
       // 命名类型从里往外找（第五十一刀）：`namespace a` 里写 `S` 先看 `a.S`、再看全局的。
       // 类要排在结构体前面（第五十二刀）：两者的字段表在同一张 `this.structs` 里，
       // 分得清的是 `this.classes`。
-      else if (this.resolve(nm, (k) => this.classes.has(k)) !== null) {
+      else if (this.find(nm, ['class']) !== null) {
         if (uns) { this.err(ts, `'${nm}' 是类，上面写不了 unsigned`); return null; }
-        base = tClass(this.resolve(nm, (k) => this.classes.has(k)), true);
+        base = tClass(this.find(nm, ['class']), true);
       }
-      else if (this.resolve(nm, (k) => this.structs.has(k)) !== null) {
-        base = { k: 'struct', name: this.resolve(nm, (k) => this.structs.has(k)) };
+      else if (this.find(nm, ['struct']) !== null) {
+        base = { k: 'struct', name: this.find(nm, ['struct']) };
       }
-      else if (this.resolve(nm, (k) => this.enums.has(k)) !== null) {
-        const en = this.resolve(nm, (k) => this.enums.has(k));
+      else if (this.find(nm, ['enum']) !== null) {
+        const en = this.find(nm, ['enum']);
         if (uns) { this.err(ts, `'${nm}' 是枚举，上面写不了 unsigned`); return null; }
         base = { k: 'enum', name: en, base: this.enums.get(en).base, bits: this.enums.get(en).bits === true };
       }
-      else if (this.resolve(nm, (k) => this.aliases.has(k)) !== null) {
+      else if (this.find(nm, ['alias']) !== null) {
         // typedef 起的名字（第三十八刀）。别名里可能已经带着指针或数组那几层，所以直接拿
         // 解出来的那一格当 base —— 声明符后面再补的层照常叠上去（`pint* q` 是 `int**`）。
         if (uns) { this.err(ts, `'${nm}' 是 typedef 起的名字，上面写不了 unsigned`); return null; }
-        base = this.aliases.get(this.resolve(nm, (k) => this.aliases.has(k)));
+        base = this.aliases.get(this.find(nm, ['alias']));
       }
       else { this.err(ts, `没有这个类型：'${nm}'`); return null; }
     }
@@ -8184,7 +8214,7 @@ class JncLower {
     if (ch !== 'qualified' && ch !== 'qualified-special') return null;
     const left = this.qname(core.items[1]);
     if (left === null) return null;
-    return this.resolve(left, (k) => this.classes.has(k));
+    return this.find(left, ['class']);
   }
 
   /** 形参表 -> `{name, type, formals, def}` 一串（抽出来是因为方法**原型**也要问它：
@@ -8362,7 +8392,7 @@ class JncLower {
     if (h === 'field') {
       const base = n.items[1];
       if (!isList(base) || head(base) !== 'name' || !isAtom(base.items[1])) return false;
-      return this.resolve(base.items[1].value, (k) => this.enums.has(k)) !== null;
+      return this.find(base.items[1].value, ['enum']) !== null;
     }
     // 一元 / 二元：第一格是运算符（一份字符串），后面才是操作数
     if (h === 'unary' || h === 'binary') return n.items.slice(2).every((x) => this.defShapeOk(x));
@@ -8386,7 +8416,7 @@ class JncLower {
    *  `C$m_a` 这一格 resolve 就找着了），查不着再沿**基类链**找一格 —— resolve 不走继承链，
    *  与 callName 里裸写方法名那一条（findMethod）是同一个形状。 */
   propBare(nm) {
-    const q = this.resolve(nm, (k) => this.props.has(k));
+    const q = this.find(nm, ['prop']);
     if (q !== null) return q;
     if (this.selfClass === null || nm.includes('.')) return null;
     return this.findProp(this.selfClass, nm);
@@ -8874,7 +8904,7 @@ class JncLower {
    */
   propSig(n, info, ps) {
     if (info.name === '') return this.err(n, "'get' / 'set' 前面要写属性的名字");
-    const pn = this.resolve(info.name, (k) => this.props.has(k));
+    const pn = this.find(info.name, ['prop']);
     if (pn === null) return this.err(n, `没有这个属性：'${shown(info.name)}'`);
     const pi = this.props.get(pn);
     const full = `${pn}$${info.special}`;
@@ -9015,8 +9045,8 @@ class JncLower {
          这就是一格普通方法 —— 名字接回去（`C0.get`），special 清掉，走下面那条常路。
          （语料里的原样是 `Value MapImpl<T>.get(Key key) const`，stdt_Map.jnc:135。） */
       if ((info.special === 'get' || info.special === 'set')
-        && this.resolve(info.name, (k) => this.props.has(k)) === null
-        && this.resolve(info.name, (k) => this.classes.has(k) || this.structs.has(k)) !== null) {
+        && this.find(info.name, ['prop']) === null
+        && this.find(info.name, ['class', 'struct']) !== null) {
         info.name = `${info.name}.${info.special}`;
         info.special = null;
       }
@@ -9049,7 +9079,7 @@ class JncLower {
          放的本来就是地址，所以直接用那个结构体类型，与第一百〇一刀的方法一模一样）。 */
       const owner = info.name === ''
         ? (this.structs.has(this.ns) ? this.ns : null)
-        : this.resolve(info.name, (k) => this.structs.has(k));
+        : this.find(info.name, ['struct']);
       const ownStruct = owner !== null && !this.classes.has(owner);
       if (owner === null) {
         return this.acctErr(n, 'M-004', { what: info.special, owner: info.name === '' ? 'C' : shown(info.name) });
@@ -9334,9 +9364,9 @@ class JncLower {
   callTypeName(nm) {
     if (nm === 'string_t') return 'string';
     if (INT_ALIASES.has(nm) || nm === 'size_t' || nm === 'variant_t') return '其它';
-    if (this.resolve(nm, (k) => this.classes.has(k)) !== null) return '其它';
-    if (this.resolve(nm, (k) => this.structs.has(k)) !== null) return '其它';
-    if (this.resolve(nm, (k) => this.enums.has(k)) !== null) return '其它';
+    if (this.find(nm, ['class']) !== null) return '其它';
+    if (this.find(nm, ['struct']) !== null) return '其它';
+    if (this.find(nm, ['enum']) !== null) return '其它';
     return null;
   }
 
@@ -9388,7 +9418,7 @@ class JncLower {
     if (!isList(ob) || (head(ob) !== 'name' && head(ob) !== 'field')) return null;
     const en0 = this.dotted(ob);
     if (en0 === null || this.lookupRef(en0) !== null) return null;
-    const en = this.resolve(en0, (k) => this.enums.has(k));
+    const en = this.find(en0, ['enum']);
     if (en === null) return null;
     const info = this.enums.get(en);
     const mn = isAtom(n.items[2]) ? n.items[2].value : null;
@@ -9424,10 +9454,10 @@ class JncLower {
     if (this.flat(sp.items[2]).length > 0 || this.flat(sp.items[3]).length > 0) return null;
     const nm = this.qname(sp.items[1]);
     if (nm === null) return null;
-    const cn = this.resolve(nm, (k) => this.classes.has(k));
+    const cn = this.find(nm, ['class']);
     // 类那一支：`new C` 给的就是 `C*`，也就是这一层的类类型自己（第五十二刀，见 newPtr）。
     if (cn !== null) return { ty: tClass(cn, false), lit: false };
-    const sn = this.resolve(nm, (k) => this.structs.has(k));
+    const sn = this.find(nm, ['struct']);
     return sn === null ? null : { ty: tPtr({ k: 'struct', name: sn }), lit: false };
   }
 
@@ -9448,9 +9478,9 @@ class JncLower {
     if (!isList(cal) || (head(cal) !== 'name' && head(cal) !== 'field')) return null;
     const nm0 = this.dotted(cal);
     if (nm0 === null || this.lookupRef(nm0) !== null) return null;
-    const fn = this.resolve(nm0, (k) => this.fns.has(k));
+    const fn = this.find(nm0, ['fn']);
     if (fn === null) {
-      const pf = this.resolve(nm0, (k) => this.protoFns.has(k));
+      const pf = this.find(nm0, ['proto-fn']);
       if (pf === null) return null;
       const ts = this.hostTopSigs.get(pf);
       if (ts === undefined || ts.length !== 1) return null;
@@ -10925,7 +10955,7 @@ class JncLower {
     // "取字段"之前问一次：整体摊得动、而且摊出来的名字查得着，那就是它。
     if (h === 'field') {
       const q = this.dotted(n);
-      if (q !== null && this.resolve(q, (k) => this.globals.has(k)) !== null) {
+      if (q !== null && this.find(q, ['global']) !== null) {
         return this.nameLv(n, q);
       }
     }
@@ -11546,7 +11576,7 @@ class JncLower {
     if (head(ob) === 'name' && isAtom(ob.items[1])) {
       const nm = ob.items[1].value;
       // 顶层那一格（`g_r.start()`）：按命名空间从里往外查。
-      const top = this.resolve(nm, (k) => this.reactors.has(k) && this.reactors.get(k).cls === null);
+      const top = this.find(nm, ['reactor-top']);
       if (top !== null) return this.rctFire(n, this.reactors.get(top), meth, '', args, pad);
       // 方法体里裸写成员名（`m_uiReactor.start()`）：与裸写字段名同一条，`this` 由这儿补。
       if (this.rctNames.has(nm) && this.selfClass !== null) {
@@ -11607,7 +11637,7 @@ class JncLower {
        就是 `(write …)`，printf 那条路上 `$"…"` 走的也是它。
        只在这个名字**没有别的定义**时才接 —— 语料里有人自己写 `print`（那时按自己那个算）。 */
     if (isList(callee) && head(callee) === 'name' && callee.items[1].value === 'print'
-      && this.lookupRef('print') === null && this.resolve('print', (k) => this.fns.has(k)) === null) {
+      && this.lookupRef('print') === null && this.find('print', ['fn']) === null) {
       return this.printCall(n, args, ind);
     }
     /* `s.m_uiReactor.start()` / `g_r.start()`（第八十五刀）：一格 reactor 上能叫的只有
@@ -13857,7 +13887,7 @@ class JncLower {
         if (r === null) {
           // 方法体里裸写的字段名（第五十二刀）：与写法可写的那一侧同一份（见 nameLv）。
           if (this.selfField(nm) !== null) return this.load(n, this.nameLv(n, nm));
-          const fq = this.resolve(nm, (k) => this.fns.has(k));
+          const fq = this.find(nm, ['fn']);
           // 函数名当值用（第五十五刀）：那就是一格函数指针。方法要一个对象才拼得出那一格
           // （闭包里捕的是它），方法体里裸写的名字捕的是 `this` —— 与 `foo()` 补 this 同一条。
           // 重载过的名字**取不出一格函数值**（第七十九刀）：一族里挑哪一条由那一格函数指针的
@@ -14682,7 +14712,7 @@ class JncLower {
     const nm0 = isList(callee) && (head(callee) === 'name' || head(callee) === 'field')
       ? this.dotted(callee) : null;
     if (nm0 === 'printf') return this.nope(n, '把 printf 的返回值当值用');
-    let nm = nm0 === null ? null : this.resolve(nm0, (k) => this.fns.has(k));
+    let nm = nm0 === null ? null : this.find(nm0, ['fn']);
     // 方法体里裸写基类的方法（第五十六刀）：类是一层命名空间，可**基类不是这一层的外层** ——
     // resolve 走的是命名空间的前缀，走不到基类那条链上，所以这儿沿链再问一遍。
     if (nm === null && nm0 !== null && !nm0.includes('.') && this.selfClass !== null) {
@@ -14803,7 +14833,7 @@ class JncLower {
        调用就被这一格截走了 —— 那儿只比个数、不补默认值、也不认同名那一族，报的是
        "要 3 个实参，这里给了 1 个"。判据一句：这个名字是源码里的一条原型吗？是就归下面那条路。 */
     if (nm === null && nm0 !== null && this.cabiSigs.has(nm0)
-      && this.resolve(nm0, (k) => this.protoFns.has(k)) === null) {
+      && this.find(nm0, ['proto-fn']) === null) {
       return this.ccallSite(n, nm0, this.cabiSigs.get(nm0));
     }
     /* `import "libfoo.dylib" as g`（没有 `with`）：`g.foo(…)` 的类型从调用点猜，带 warning。 */
@@ -14857,7 +14887,7 @@ class JncLower {
       /* 顶层只有原型的函数（第一百五十一刀钉的界，第一百八十五刀兑掉）：`receive(p, size)`
          （ias.jnc:87 —— 体在宿主那边）。与类里那些同一条，只是名字不挂在类上，所以按命名空间
          从里往外解一次。 */
-      const pf = nm0 === null ? null : this.resolve(nm0, (k) => this.protoFns.has(k));
+      const pf = nm0 === null ? null : this.find(nm0, ['proto-fn']);
       if (pf !== null) {
         const ts = this.hostTopSigs.get(pf);
         if (ts !== undefined) {
