@@ -74,7 +74,11 @@ export function structLine(agg, env, allAggs = null) {
     }
   }
   if (parts.length === 0) return { line: null, lines: [], why: '一格字段都没有' };
-  const line = `(struct ${name} ${parts.join(' ')})`;
+  /* **union 自己那一行**：它的字段共用一段字节，所以整串括成一格 `(union …)`
+     （166-unionnamed.jnc / 191-unionmeth.jnc / 192-unionalias.jnc / 179 的 `Outer$Pair`）。 */
+  const body = agg.word === 'union' && parts.length > 0
+    ? `(union ${parts.join(' ')})` : parts.join(' ');
+  const line = `(struct ${name} ${body})`;
   return { line, lines: [...extra, line], why: null };
 }
 
@@ -215,6 +219,9 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [] }) {
       return;
     }
     /* 函数指针字段也是一格数据（`(m_op (fnty (int int) int))`，109-fnfield.jnc）。 */
+    /* `static` 那一格是**模块级存储**，不躺在对象里（167-staticfield.jnc / 193-staticctorns.jnc
+       旧降级都不发）。 */
+    if (m.storage.includes('static')) return;
     /* `alias` / `typedef` 那两族**不是字段**（它们只是给已有的东西起个名字，没有自己的存储）
        —— 83-alias.jnc / 95-aliaspath.jnc / 199-aliasfield.jnc 那几处旧降级都不发。 */
     if (m.storage.includes('alias') || m.storage.includes('typedef')) return;
