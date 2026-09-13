@@ -71,14 +71,18 @@ function formalList(formals) {
     if (fn === null) continue;
     if (h === 'formal') {
       const t = readDeclType(fn.specs, fn.dcl);
-      out.push({ name: t === null ? nameText(named(fn.dcl)?.name) : t.name, type: t, varargs: false });
+      /* 形参那一格的**节点**也带上 —— 默认实参（`int b = 2`）在它的 `init` 洞里，
+         调用方要拿它定型（74-argdefault.jnc 那一格先前永远解不出来，就是因为没带）。 */
+      out.push({
+        name: t === null ? nameText(named(fn.dcl)?.name) : t.name, type: t, varargs: false, at: f,
+      });
       continue;
     }
     if (h === 'formal-anon') {
       /* 只写类型不写名字（`int ignore(int, int b)`）：名字由这一层补 `$a<第几格>`
          （旧降级的真输出 `(fn ignore (($a0 int) (b int)) int`，176-anonformal.jnc）。
          这一格没有 `dcl`，类型从"说明符 + `*`"读（`readAnonType`）。 */
-      out.push({ name: null, type: readAnonType(fn.specs, fn.ptrs), varargs: false });
+      out.push({ name: null, type: readAnonType(fn.specs, fn.ptrs), varargs: false, at: f });
       continue;
     }
   }
