@@ -7,7 +7,16 @@
 //      `(struct Point3D (m_x int) (m_y int) (m_z int))`：基类那几格先躺着。
 //   3. 自己的字段按**源码次序**，只收数据那两族（data / array）。
 //
-// 还没搬的（记账，`structLine` 答 null）：union 分组、位域、属性/事件那几族带出来的隐藏字段。
+// 还没搬的（记账，`structLine` 答 null 或者少几格）：
+//   - **位域**摊成 `$bN`。规则已经从旧降级的真输出反出来了（104-bitfield.jnc）：
+//     连着的位域按"同一个底宽 + 累计位数不超过那个宽"合成一格，格名是 `$b<这一格的序号>`。
+//     源码 `m_a:4 m_b:4 / int m_x / m_c:5 m_d:5 m_e:5(uint16) m_s:4(char) m_off:24 m_cnt:8(uint32)`
+//     发的是 `($b0 int) (m_x int) ($b2 int) ($b3 int) ($b4 int) ($b5 int) ($b6 int)` ——
+//     4+4 挤进一格 uint8，5+5 挤不进（10 > 8）所以各一格，24+8 正好挤进一格 uint32。
+//     缺的那一格是**底宽表**（uint8_t→8、uint16_t→16、uint32_t→32、char→8…），
+//     `resolveType` 现在把整数一律解成 `int`，宽度信息没留 —— 那是下一刀。
+//   - union 里套**匿名 struct** 的命名（`H$u1$s0`，103-unionstruct.jnc）。
+//   - 属性 / 事件那几族带出来的隐藏字段。
 
 import { resolveType } from './resolve-type.js';
 import { emitType } from './emit-type.js';
