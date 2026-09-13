@@ -120,7 +120,10 @@ export function fnName(m) {
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */
 function leafName(leaf) {
   if (leaf.kind === 'special') return SPECIAL_NAMES[leaf.text] ?? null;
-  if (leaf.kind === 'name' || leaf.kind === 'accessor') return leaf.text;
+  /* 点串的尾巴是 `static construct` 时，语法上它是**一个记号**（不是 `special` 节点）——
+     所以普通名字这一支也要过那张表（193-staticctorns.jnc 的 `void C.static construct()`）。 */
+  if (leaf.kind === 'name') return SPECIAL_NAMES[leaf.text] ?? leaf.text;
+  if (leaf.kind === 'accessor') return leaf.text;
   const w = leaf.postfix ? OP_POSTFIX[leaf.op] : OP_NAMES[leaf.op];
   return w === undefined ? null : `op$${w}`;
 }
@@ -200,7 +203,10 @@ export function fnHead(m, env, ctx = { owner: null, self: null }) {
  * `Node* mk()` 回的是 `(ptr Node)` —— 类自己吞掉那一个 `*`，49-class.jnc）。
  */
 function retText(m, base, env, tc) {
-  if (VOID_NAMES.has(base)) return 'void';
+  /* 判据看的是**尾巴那一段**：体外定义的名字是点串（`Counter.construct` → `Counter$construct`），
+     整串比会漏掉（50-construct.jnc 的 `Counter$construct$o1` 先前就落在这儿）。 */
+  const leaf = base.includes('$') ? base.slice(base.lastIndexOf('$') + 1) : base;
+  if (VOID_NAMES.has(base) || VOID_NAMES.has(leaf) || base.endsWith('$construct$static')) return 'void';
   const r = resolveType({ ...m.type, shape: 'data' }, env);
   if (r.type === null) return null;
   return emitType(r.type, 'slot', tc);
