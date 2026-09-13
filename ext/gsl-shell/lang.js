@@ -30,6 +30,10 @@ export const GSL_NODES = [
     // 作用域与值规则因此**不必新写**：`scope.js` 认的是"开一层并绑形参"，
     // `values.js` 认的是"体那一格是 return 的值" —— 两条都已经在 `funcbody` 上。
     sugarOf: 'function-exp',
+    // **本机量不了这一格**：这台 luajit 讲的是另一种方言（`|x| -> e`，见 ../luajit/lang.js），
+    // gsl-shell 自带的那支才是 `|x| e`，而它只有源码没编。所以 gen.js 的外部尺子跳过它，
+    // 由语料尺子担着（`node ext/lua/tests/sweep.js --gsl` → 112/112）。这是一笔记明的账。
+    noOracle: '本机 luajit 是 `|x| -> e` 那一支，量不了 `|x| e`',
   },
 ];
 

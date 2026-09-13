@@ -16,9 +16,11 @@ import { parse, ParseError } from '../parse.js';
 import { render } from '../render.js';
 import { luaLang } from '../lang.js';
 import { gslLang } from '../../gsl-shell/lang.js';
+import { luajitLang } from '../../luajit/lang.js';
 
-/** 用哪门语言量：`--gsl` 换成 gsl-shell（Lua + 增量表），默认 Lua 本身。 */
-const lang = process.argv.includes('--gsl') ? gslLang : luaLang;
+/** 用哪门语言量：`--gsl` / `--luajit` 换方言（Lua + 增量表），默认 Lua 本身。 */
+const lang = process.argv.includes('--gsl') ? gslLang
+  : process.argv.includes('--luajit') ? luajitLang : luaLang;
 
 const argv = process.argv.slice(2);
 const root = argv.find((a) => !a.startsWith('-'))
