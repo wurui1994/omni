@@ -840,3 +840,52 @@ F-007（`weak` 指针：要 GC）、S-008（`async`：要状态机，榜上 57 �
 
 - 矩阵：594 格 **分歧 0、todo 0、缺声明 0**；新增 42 次降级对照（多 10 秒）。
 - 腿：`NOCACHE=1` 的 jnc 561 次全真跑 350/0。
+
+## 11. 换一种做法：**词汇表照抄、要素乘出来、例子自动生成**
+
+到第 10.22 节，尺子已经从 40 列宽到 66 列，可**加宽的方式本身是错的**：一次六列，每一列的
+源码由我手写、结论由我手填。那还是"照例子办"—— 只是例子多了些。列数是我数出来的，
+而我数出来的永远漏。
+
+所以这一节换法，三步：
+
+**(1) 把 jancy 的词汇表照抄一遍**（`src/lang/jnc/syntax.js`）。出处是 jancy 自己的 `.llk`：
+
+- `jnc_ct_Decl.llk:25-113` —— **位置只有三种**：`global_declaration` / `member_block_declaration`
+  / `local_declaration`，另有四族（`using` / `pragma` / 命名类型 / 属性块）三种都收。
+  我们那九个 sort 全落在这三种之一（`SORT_CONTEXT`）：module / namespace → global；
+  六种体（class / struct / union / opaque / extension / **property 模板**）→ member；
+  fn-body → local。**属性模板的体在 jancy 那儿就是一格 member_block**
+  （DeclarationSpecifier.llk:237-252）。
+- `jnc_ct_DeclarationSpecifier.llk` —— 四张词表，一个不少：storage **10** 个
+  （typedef / alias / static / threadlocal / abstract / virtual / override / mutable /
+  disposable / dynamicfield）、access **2** 个、type-specifier **13** 个、
+  type-modifier **27** 个（unsigned / bigendian / const / maybeconst / autoconst / readonly /
+  volatile / weak / thin / safe / unsafe / cdecl / stdcall / thiscall / jnccall / array /
+  function / property / bindable / autoget / indexed / multicast / event / autoevent /
+  reactor / errorcode / async）。
+- `jnc_ct_Declarator.llk` / `jnc_ct_NamedTypeSpecifier.llk` —— 声明符的形状与带体的命名类型。
+
+于是**这门语言到底有哪些词**第一次成了一张能查的表，而不是我记得的那些。
+
+**(2) 要素表不再手写，是乘出来的**（`src/lang/jnc/elements.js`）：修饰符 × 声明符形状
+（按 `MODS[m].on` 与 `DECLARATORS[d].kind` 配对）+ 存储 × 形状 + 命名类型 + 特殊成员 +
+三种上下文各自独有的那几族 = **301 格要素**。每一格带着它由哪几个词拼成（`words`）。
+漏没漏由**乘法**说。
+
+**(3) 例子自动生成**：每种声明符形状带一个 `render(name, type)`，每种命名类型 / 特殊成员带一个
+`render()` —— 探针要的源码从这儿来，不再有一份手写的 `KINDS`。第二把尺子
+（`tests/lib/jnc-gen.js`）就是拿它跑的；两把尺子共用一份探针件（`tests/lib/jnc-probe.js`：
+位置的垫、分类器、跑一格）—— 抄两份就会各自漂，这套 ADR 已经为这件事记过好几笔账。
+
+两把尺子的分工写清楚：
+
+- `jnc-matrix.js`（66 列，手命名）—— **可执行的规格**：每一格都在 `features/*.js` 里声明过，
+  `--check` 要求 `分歧 0`。
+- `jnc-gen.js`（301 列，乘出来）—— **发现器**：只量、不要求先声明；它的产出是
+  `docs/design/jnc-elements.md` 与一张按格数排的理由榜。收敛的方向是：榜上每一句话要么变成
+  一格账号（进 features），要么变成一刀。
+
+第一次单跑 `fn-body` 那一列（301 格、40 秒）就撞出三句先前**从没见过**的话：
+`多播的处理函数只能回 void`（16 格）、`修饰符 '…'`（14 格，一句太笼统的兜底）、
+`thin 用在不是指针的类型上`（4 格）—— 手命名那 66 列里一格都没碰到它们。
