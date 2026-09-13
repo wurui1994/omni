@@ -65,15 +65,6 @@ export default feature({
       say: 'extension 体里除带体的方法以外的成员',
       why: 'jancy 的 extension 只加方法（第 107 刀）',
     },
-    'G-001': {
-      text: '泛型实例当**表达式**用（`Boxy<int>(4)`）—— 语法这一层还没收',
-      why: '语料里 unit_stdt_BoxList.jnc:42 那一句 `BoxIterator<int>(list.m_head)` 就是它，'
-        + '而且是那份文件**唯一**的拦路项。声明位置上的 `Boxy<int> b;` 早就收了'
-        + '（`qname "<" targs ">"` 那一条接在 qname 上），差的只是表达式那一处 —— '
-        + '`a<b>(c)` 与"两次比较"在语法上撞车，要么让 GLR 两条都走、降级那层按"这个名字是不是'
-        + '泛型"分，要么在词法上先认出 `名字<` 这个形状。**这一格是 `syntax-todo`：'
-        + '这门语言写得出来，是我们的语法还没收**（与 `syntax` 那种"语言里本来写不出来"分开）',
-    },
     'T-005': {
       text: '（代价，不是拒绝）体里声明的类型，名字提到外面那层命名空间',
       why: '第 219/250/260 刀那三格共同的代价：函数外面也用得上它（拒得更松）、'
@@ -81,13 +72,6 @@ export default feature({
     },
   },
   positions: [
-    /* 泛型实例当表达式用：整行都是**我们的语法洞**（不是语言的规格）—— 见 G-001。 */
-    {
-      kind: 'template-ctor-expr',
-      sorts: '*',
-      verdict: 'syntax-todo',
-      account: 'G-001',
-    },
     ...NAMED.flatMap((kind) => [
       { kind, sorts: ['module'], verdict: 'ok', register: REG[kind] },
       { kind, sorts: KEEPS, verdict: 'ok', escapes: false, register: REG[kind] },

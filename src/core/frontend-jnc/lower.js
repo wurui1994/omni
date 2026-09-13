@@ -10596,6 +10596,22 @@ class JncLower {
         info.ctor = ca;
         info.formals = null;
       }
+      /* `T v = T(实参…);` —— 与 `T v(实参…)` 是**同一件事**（jancy 的构造式转换在这一种形状上
+         就是就地构造）。语料里 unit_stdt_BoxList.jnc:42 那一句
+         `BoxIterator<int> it = BoxIterator<int>(list.m_head)` 就是它（G-001 那一格的下半截：
+         语法那一半这一刀先落了，`qname "<" targs ">"` 接到 expr 上）。
+         判据是**同一个类型**：右边那个名字解出来正是左边声明的那一格类型。不同类型的
+         `T(x)` 还是那笔账（构造式转换要按目标类型挑一条转换，见 callExpr 末尾那一句）。 */
+      if (initNode !== null && info.ctor === null
+        && isList(initNode) && head(initNode) === 'call'
+        && ((isClass(info.type) && info.type.own === true) || jncIsStruct(info.type))) {
+        const cn = this.dotted(initNode.items[1]);
+        const tn = cn === null ? null : this.find(cn, ['class', 'struct']);
+        if (tn !== null && tn === info.type.name) {
+          info.ctor = initNode.items[2];
+          initNode = null;
+        }
+      }
       // 声明符尾巴上的构造实参只有类与**结构体**的变量收得下（第五十三刀 + 第一百二十九刀）：
       // 别的类型那一格 jancy 也没有构造可调 —— 不明说就会被悄悄丢掉。
       if (info.ctor !== null && !(isClass(info.type) && info.type.own === true)

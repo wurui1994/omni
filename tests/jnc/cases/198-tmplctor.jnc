@@ -1,0 +1,42 @@
+// 第二百六十三刀：泛型实例当**表达式**用（`Boxy<int>(4)`），以及 `T v = T(实参…)`。
+//
+// 语料里的原样是 unit_stdt_BoxList.jnc:42：
+//   for (BoxIterator<int> it = BoxIterator<int>(list.m_head); it; ++it)
+// 而那一句先前是**语法就不认**（`unexpected "int"`），并且是那份文件唯一的拦路项。
+//
+// 两半：
+//   语法 —— `qname "<" targs ">" "(" opt-args ")"` 整条一起收（接在 expr 上）。不能只收
+//           `qname "<" targs ">"` 那半截：那样 `Pair<char, int>* q = …;` 在语句那一层同时读得通
+//           expr-stmt 与 var-decl，GLR 照实报歧义（量出来 13 个例子当场红）。带上后面那对括号，
+//           形状就只剩这一种，声明那一条碰不着它。
+//   意思 —— `T v = T(实参…)`（**两边同型**）就是"就地构造"，与 `T v(实参…)`（第一百〇三 /
+//           一百二十九刀）是同一件事，所以直接走现成的 ctorCall。两边**不同型**的 `T(x)` 还是
+//           那笔账（构造式转换要按目标类型挑一条转换，账号 F-006）。
+//
+// 期望输出的出处：/tmp/c206.c（`cc -O0 -std=c99 -Wall`）。
+
+struct Boxy<T> {
+	T m_v;
+
+	construct(T v) {
+		m_v = v;
+	}
+
+	// 方法名不能叫 `get`：那是**下标算符**那一族（第一百三十八刀），会被当成 `p[i]` 的取值器。
+	T val() {
+		return m_v;
+	}
+}
+
+int main() {
+	Boxy<int> a = Boxy<int>(4);
+	Boxy<int> b(7);                  // 老写法：同一件事
+	printf("%d %d\n", a.val(), b.val());
+
+	// 循环头里那一格（语料里的原样就在 for 的初值上）
+	int sum = 0;
+	for (Boxy<int> it = Boxy<int>(1); it.m_v < 4; it.m_v++)
+		sum += it.m_v;
+	printf("%d\n", sum);
+	return 0;
+}

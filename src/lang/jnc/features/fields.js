@@ -38,6 +38,15 @@ export default feature({
       match: '的长度得写出来',
       why: '同 F-004，位置不同：字段那一格的长度是**布局**的一部分，没有初值可数',
     },
+    'F-006': {
+      text: '字段 / 全局的初值里写**构造式转换**（`T(实参…)`，两边不是同一个类型）',
+      say: "'{name}' 是一格类型，`类型(实参…)` 是 jancy 的**构造式转换**"
+        + '（要按目标类型挑一条转换，与 `(类型)值` 那种写法同一件事）—— 这一层只收 `(类型)值` 那一种',
+      match: '构造式转换',
+      why: '`T v = T(实参…)`（两边同型）那一种已经落了 —— 它就是就地构造（见 localDecl 那一段）。'
+        + '剩下的是**真的转换**：`string_t(p, len)` 那一族（榜上量到 128 处）要按目标类型挑一条'
+        + '转换，那与 `(类型)值` 是同一件事的另一半',
+    },
     'F-003': {
       text: '结构体里放不下类的一格值',
       say: "结构体 '{owner}' 里放不下类 '{cls}' 的一格值（jancy 那边这一句就是错："
@@ -52,6 +61,19 @@ export default feature({
     /* 后加的两列（矩阵是机械枚举，所以"表里少一种"本身就是账）：
        thin 指针字段 —— 与别的指针字段同一列；不写长度的数组字段 —— 两句**对的**错
        （F-004 / F-005，看位置分）。 */
+    /* 泛型实例当表达式用（G-001 那一刀之后）：语法收了，于是这一列量出来分了家 ——
+       函数体里那一格**收了**（`T v = T(实参…)` 就是就地构造），别的位置各落在自己那笔账上。 */
+    { kind: 'template-ctor-expr', sorts: ['fn-body'], verdict: 'ok' },
+    {
+      kind: 'template-ctor-expr',
+      sorts: ['module', 'namespace', 'class-body', 'opaque-class-body'],
+      verdict: 'refuse',
+      account: 'F-006',
+    },
+    { kind: 'template-ctor-expr', sorts: ['struct-body'], verdict: 'refuse', account: 'S-001' },
+    { kind: 'template-ctor-expr', sorts: ['union-body'], verdict: 'syntax' },
+    { kind: 'template-ctor-expr', sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
+    { kind: 'template-ctor-expr', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     { kind: 'field-thin-ptr', sorts: PLAIN, verdict: 'ok' },
     { kind: 'field-thin-ptr', sorts: ['union-body'], verdict: 'refuse', account: 'F-002' },
     { kind: 'field-thin-ptr', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },

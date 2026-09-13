@@ -748,6 +748,16 @@
     (-> (expr "." member) (field $1 $3))
     (-> (expr PTR member) (ptr-field $1 $3))
     (-> ("(" expr ")") (prec EXP_IN_PARENS) $2)
+    ;; 泛型实例当**表达式**用（账号 G-001）：`BoxIterator<int>(list.m_head)`
+    ;; （unit_stdt_BoxList.jnc:42，那份文件唯一的拦路项）。声明位置上的 `Boxy<int> b;` 早收了 ——
+    ;; 那一条接在 qname 上（见上面 named-type 那处），这儿是同一形状接在 expr 上。
+    ;; `a < b > (c)` 那两次比较与它撞车：GLR 两条都走，`(prefer 1)` 说这一条赢 ——
+    ;; 代价明写下来：真想写"两次比较"得加括号。jancy 那边靠 findType 分，我们这一层分不了。
+    ;; **整条一起收**（而不是让 `qname "<" targs ">"` 自己成一格 expr）：那样写会与声明撞车 ——
+    ;; `Pair<char, int>* q = …;` 在语句那一层同时读得通 expr-stmt 与 var-decl，GLR 照实报歧义
+    ;; （量出来 13 个例子当场红）。带上后面那对括号，形状就只剩"泛型实例后面跟一对括号"这一种，
+    ;; 声明那一条碰不着它。
+    (-> (qname "<" targs ">" "(" opt-args ")") (call (tinst $1 $3) $6))
     (-> (ID) (name $1))
     (-> ("this") (this))
     (-> ("basetype") (basetype 1))
