@@ -17,6 +17,7 @@ import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { normalize } from '../../src/lang/jnc/normalize.js';
 import { jncSemLang } from '../../src/lang/jnc/scope.js';
 import { JNC_BUILTINS } from '../../src/lang/jnc/builtins.js';
+import { moduleIndex, moduleNames } from '../../src/lang/jnc/modules.js';
 import { bind } from '../../src/core/frontend-engine/bind.js';
 
 const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy';
@@ -41,6 +42,14 @@ function walk(dir, out = []) {
 initJnc({ log: () => {} });
 const tb = jncFrontEnd();
 const files = walk(CORPUS).sort().slice(0, limit);
+/* 导入这一族在**外面**解（`modules.js`）：名字从前奏那一层进来，核心一行不用改。
+   `--no-import` 可以关掉它 —— 上一版的数就是那么量的，两边一比才看得出这一刀值多少。 */
+const noImport = argv.includes('--no-import');
+const index = noImport ? new Map() : moduleIndex([CORPUS]);
+const modCache = new Map();
+const parseFile = (p) => jncParse(tb, p, new Diagnostics());
+let archives = 0;
+let missing = 0;
 
 let ran = 0;
 let scopes = 0;
@@ -61,7 +70,14 @@ for (const f of files) {
   const rel = f.slice(CORPUS.length + 1);
   let out;
   try {
-    out = bind({ stats: normalize(tree) }, jncSemLang, { prelude: JNC_BUILTINS });
+    let prelude = JNC_BUILTINS;
+    if (!noImport) {
+      const mod = moduleNames(f, { index, parse: parseFile, cache: modCache });
+      archives += mod.archives.length;
+      missing += mod.missing.length;
+      prelude = [...JNC_BUILTINS, ...mod.names];
+    }
+    out = bind({ stats: normalize(tree) }, jncSemLang, { prelude });
   } catch (err) {
     boom.push([rel, err.message]);
     continue;
@@ -98,6 +114,10 @@ console.log(`甲 上下文报错 ${[...ctxErrs.values()].reduce((a, b) => a + b.
   + `　乙 查名 ${uses} 处：表里查着 ${local}`
   + `（${(local / Math.max(uses, 1) * 100).toFixed(1)}%）、还答不上 ${env}`
   + `　丙 炸掉的文件 ${boom.length}`);
+if (!noImport) {
+  console.log(`导入：搜索路径里 ${index.size} 个名字　打不开的归档 ${archives} 处（.jncx，记账）`
+    + `　找不着的 ${missing} 处`);
+}
 
 if (ctxErrs.size > 0) {
   console.log('\n上下文报错（表里少一格 provides）：');
