@@ -220,6 +220,31 @@ for (const f of files) {
           });
         }
       }
+      /* **函数体里的 `alias x = y;`**（第二百六十二刀，197-localalias.jnc）与顶层那一条同一条路：
+         旧降级把它抬成一格顶层的转手函数（`(fn plus (($a0 int) ($a1 int)) int`）。 */
+      {
+        const body = named(n)?.body;
+        const dig = (x) => {
+          if (x === null || x === undefined || typeof x !== 'object' || !Array.isArray(x.items)) return;
+          if (headOf(x) === 'var-decl') {
+            const vn2 = named(x);
+            const sp2 = vn2 === null ? null : readSpecs(vn2.specs);
+            if (sp2 !== null && sp2.words.includes('alias')) {
+              for (const d of allInChain(vn2.dcls, 'dcls-add', 'dcls')) {
+                if (headOf(d) !== 'init') continue;
+                const dn2 = named(d);
+                if (dn2 === null) continue;
+                const who2 = nameText(named(dn2.dcl)?.name);
+                const to2 = lastName(dn2.value);
+                if (who2 !== null && to2 !== null) aliasTops.push({ name: who2, to: to2, ns: owner });
+              }
+            }
+            return;
+          }
+          for (const it of x.items) dig(it);
+        };
+        dig(body);
+      }
       return;                                        // 体里的东西不再往下扫（局部类先不管）
     } else if (h === 'var-decl') {
       const vn = named(n);
