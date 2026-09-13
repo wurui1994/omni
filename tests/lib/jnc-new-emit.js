@@ -29,6 +29,9 @@ import { readAgg } from '../../src/lang/jnc/agg.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import { nameText, allInChain, readDcl } from '../../src/lang/jnc/declare.js';
 import { readFormals, fnName, needsCtor } from '../../src/lang/jnc/emit-fn.js';
+import { typeOfExpr } from '../../src/lang/jnc/expr-type.js';
+import { emitType } from '../../src/lang/jnc/emit-type.js';
+import { readDeclType } from '../../src/lang/jnc/types.js';
 
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 400);
@@ -129,19 +132,16 @@ function ctorFormals(agg) {
  * `$newc0 (($i0 int) ($i1 int) ($i2 int) ($i3 int))`）。这一刀只认整数字面量，
  * 别的（变量、表达式）答 null，整格记账。
  */
-function curlyLitTypes(n) {
+function curlyLitTypes(n, names, env) {
   const init = named(n)?.init;
   if (init === null || init === undefined) return null;
   const out = [];
   let bad = false;
   const dig = (x) => {
     if (bad || x === null || x === undefined || typeof x !== 'object') return;
-    if (!Array.isArray(x.items)) {                                   // 一格记号
-      const t = litArgType(x);
-      if (t === null) { bad = true; return; }
-      out.push(t);
-      return;
-    }
+    const ty = typeOfExpr(x, names, env);                            // 认得出来的就按它定型
+    if (ty !== null) { out.push(emitType(ty, 'slot')); return; }
+    if (!Array.isArray(x.items)) { bad = true; return; }
     const h = headOf(x);
     if (h === 'curly' || h === 'items' || h === 'items-add') { for (const it of x.items.slice(1)) dig(it); return; }
     /* `m_y = 2000` 那种：只看**右边**那一格。 */
@@ -154,6 +154,41 @@ function curlyLitTypes(n) {
   };
   dig(init);
   return bad ? null : out;
+}
+
+/**
+ * 一格函数体里**看得见的名字**（形参 + 体里的局部量）→ 声明的类型记录。
+ * 这是"哪些名字可见"那一层的**够用版**（真正那一层是 bind.js 的作用域图）——
+ * 尺子只用它来给 `typeOfExpr` 递一张表；规则那一侧（expr-type.js）不查名。
+ */
+function localNames(fnNode) {
+  const out = new Map();
+  const nm = named(fnNode);
+  if (nm === null) return out;
+  const dc = readDcl(nm.dcl);
+  const sf = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
+  if (sf !== undefined) {
+    for (const fp of readFormals(sf.node) ?? []) {
+      if (fp.name !== null && fp.type !== null) out.set(fp.name, fp.type);
+    }
+  }
+  const dig = (x) => {
+    if (x === null || x === undefined || typeof x !== 'object' || !Array.isArray(x.items)) return;
+    if (headOf(x) === 'var-decl') {
+      const vn = named(x);
+      if (vn !== null) {
+        for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
+          const dd = headOf(d) === 'init' ? named(d)?.dcl : d;
+          const t = readDeclType(vn.specs, dd);
+          if (t !== null && t.name !== null) out.set(t.name, t);
+        }
+      }
+      return;
+    }
+    for (const it of x.items) dig(it);
+  };
+  dig(nm.body);
+  return out;
 }
 
 /** 一格 `new` 的实参表（读不出来答 null）。 */
@@ -230,13 +265,15 @@ for (const f of files) {
 
   /* `new` 那几处**按源码次序**（同一族一个计数器）。 */
   const sites = [];
-  const scanNew = (n) => {
+  const scanNew = (n, names) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
-    if (h === 'new' || h === 'new-array' || h === 'new-curly') sites.push({ h, node: n });
-    for (const it of n.items) scanNew(it);
+    let ns = names;
+    if (h === 'fn-def') ns = localNames(n);                          // 进一格函数：换一张名字表
+    if (h === 'new' || h === 'new-array' || h === 'new-curly') sites.push({ h, node: n, names: ns });
+    for (const it of n.items) scanNew(it, ns);
   };
-  for (const t of trees) scanNew(t);
+  for (const t of trees) scanNew(t, new Map());
 
   const note = (w) => skip.set(w, (skip.get(w) ?? 0) + 1);
   const next = { o: 0, s: 0, c: 0 };
@@ -257,7 +294,7 @@ for (const f of files) {
     next[fam] += 1;                                                  // 带实参的也占一个号
     const name = `$new${fam}${idx}`;
     if (fam === 'c') {
-      const ts = curlyLitTypes(st.node);
+      const ts = curlyLitTypes(st.node, st.names, env);
       if (ts === null || ts.length === 0) { note('花括号初值里那几格要定型'); continue; }
       const rc = rec === undefined ? null : (rec.kind === 'class'
         ? classRoot(rec.agg, aggs, env) : rec.agg);
@@ -275,7 +312,10 @@ for (const f of files) {
     let ps = '';
     if (hasArgs(st.node)) {
       const as = argList(st.node);
-      const tys = as.map((x) => litArgType(x));
+      const tys = as.map((x) => {
+        const t = typeOfExpr(x, st.names, env);
+        return t === null ? null : emitType(t, 'slot');
+      });
       if (as.length === 0 || tys.some((t) => t === null)) {
         note('带实参的 new（实参要定型）');
         continue;
