@@ -23,6 +23,7 @@ import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import {
   fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
   isBindableData, dataAccessorHeads, isAutogetProp, autogetGetterHead,
+  isVirtual, dispatchHead,
 } from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
@@ -289,6 +290,8 @@ for (const f of files) {
   const cases = [];
   const accCases = [];                              // 生成取/存的那几格（bindable data）
   const getCases = [];                              // 只生成取值器的那几格（autoget 属性）
+  const vdCases = [];                               // 虚派发那几格（$$vd$）
+  const vdSeen = new Set();
   for (const m of vars) {
     if (isBindableData(m)) accCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
     else if (isAutogetProp(m)) getCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
@@ -329,6 +332,16 @@ for (const f of files) {
           continue;
         }
       }
+      /* **虚方法**多发一格虚派发函数（一整条链上同名的只一格 —— 按"链的根 + 方法名"去重）。 */
+      if (m.shape === 'fn' && isVirtual(m)) {
+        const rootA = (a.word === 'class' || a.word === 'opaque class') ? classRoot(a, aggs, env) : a;
+        const rootN = rootA.emitName ?? nameText(rootA.name);
+        const dk = `${rootN}$$vd$${m.name}`;
+        if (rootN !== null && !vdSeen.has(dk)) {
+          vdSeen.add(dk);
+          vdCases.push({ m, ctx: { root: rootN, self: selfOf(a), clsRoot } });
+        }
+      }
       if (m.shape !== 'fn') continue;
       /* **只有原型的那一格不算一个函数**：它的体或写在类外（那儿另有一格，名字一样）、
          或在宿主那边（旧降级压根不发）。先前两处各算一格，重载号于是多走一位 ——
@@ -360,9 +373,11 @@ for (const f of files) {
   const nextDup = overloadIndex();
   const mineNames = new Set();                        // 新腿**试过**的那几个名字（算覆盖率用）
   /* **生成的取/存**先对（它们不占重载号 —— 旧降级那边是另一遍发出来的）。 */
-  for (const c of accCases.concat(getCases)) {
-    const r = c.m.shape === 'prop'
-      ? autogetGetterHead(c.m, env, c.ctx) : dataAccessorHeads(c.m, env, c.ctx);
+  for (const c of accCases.concat(getCases, vdCases)) {
+    const r = c.ctx.root !== undefined
+      ? dispatchHead(c.m, env, c.ctx)
+      : (c.m.shape === 'prop'
+        ? autogetGetterHead(c.m, env, c.ctx) : dataAccessorHeads(c.m, env, c.ctx));
     if (r.heads.length === 0) {
       skip.set(`生成的取/存：${r.why}`, (skip.get(`生成的取/存：${r.why}`) ?? 0) + 1);
       continue;

@@ -211,6 +211,41 @@ export function isAutogetProp(m) {
   return m.shape === 'prop' && m.type.mods.includes('autoget');
 }
 
+/** 这一格方法是不是**虚**的（虚派发表按它发；一整条链上同名的只发一格）。 */
+export function isVirtual(m) {
+  if (m === null || m === undefined) return false;
+  return ['virtual', 'abstract', 'override'].some((w) => m.storage.includes(w));
+}
+
+/**
+ * **虚派发函数**：一整条继承链上同名的虚方法共用一格 `<链的根>$$vd$<方法名>`
+ * （第五十七刀：对象里一格 int 标签 + 一串 if）。形参名一律 `$aN`（`$a0` 是 self），
+ * 类型在**存储位置**，返回同普通函数。出处是旧降级的真输出（54-virtual.jnc）：
+ *   `(fn Shape$$vd$area (($a0 (ptr Shape))) int`、`(fn Iface$$vd$val (($a0 (ptr Iface))) int`
+ * 与 lower.js:7432 / 7453 那两行。
+ */
+export function dispatchHead(m, env, ctx = { root: null, self: null }) {
+  const base = fnName(m);
+  if (base === null) return { heads: [], why: '没有名字' };
+  if (ctx.self === null || ctx.self === undefined) return { heads: [], why: '东家那一格解不出来' };
+  const sfx = fnSuffixOf(m.type);
+  const fs = sfx === null ? null : readFormals(sfx);
+  if (fs === null) return { heads: [], why: '认不出形参表' };
+  if (fs.some((f) => f.varargs)) return { heads: [], why: '变参那一族（…）' };
+  const tc = { clsRoot: ctx.clsRoot ?? ((n) => n) };
+  const parts = [`($a0 ${ctx.self})`];
+  for (const [i, f] of fs.entries()) {
+    if (f.type === null) return { heads: [], why: '形参的类型读不出来' };
+    const r = resolveType(f.type, env);
+    if (r.type === null) return { heads: [], why: `形参：${r.why}` };
+    parts.push(`($a${i + 1} ${emitType(r.type, 'slot', tc)})`);
+  }
+  const ret = retText(m, base, env, tc);
+  if (ret === null) return { heads: [], why: '返回类型解不出来' };
+  const sym = `${ctx.root}$$vd$${base}`;
+  return { heads: [{ name: sym, head: `(fn ${sym} (${parts.join(' ')}) ${ret}` }], why: null };
+}
+
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */
 function leafName(leaf) {
   if (leaf.kind === 'special') return SPECIAL_NAMES[leaf.text] ?? null;
