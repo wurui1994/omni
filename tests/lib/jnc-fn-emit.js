@@ -20,7 +20,9 @@ import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
-import { fnHead, fnName, fnOwnerSegs, overloadIndex } from '../../src/lang/jnc/emit-fn.js';
+import {
+  fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
+} from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
@@ -287,6 +289,19 @@ for (const f of files) {
      所以先问号、再拼头。 */
   const nextDup = overloadIndex();
   for (const c of cases) {
+    /* **reactor** 那一格发的是 `$start` / `$stop` 两格（82-reactor.jnc）—— 各自与旧降级对。 */
+    if (isReactor(c.m)) {
+      for (const h of reactorHeads(c.m, c.ctx).heads) {
+        const wantR = oracle.get(h.name);
+        if (wantR === undefined) { noFn += 1; continue; }
+        cmp += 1;
+        if (h.head === wantR) same += 1;
+        else if (diff.length < 20) {
+          diff.push(`${f.split('/').pop()}\n      旧 ${wantR}\n      新 ${h.head}`);
+        }
+      }
+      continue;
+    }
     const base = fnName(c.m);
     const sym = base === null ? null : (c.ctx.owner === null ? base : `${c.ctx.owner}$${base}`);
     const dup = sym === null ? 0 : nextDup(sym);

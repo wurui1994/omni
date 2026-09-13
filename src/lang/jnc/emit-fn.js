@@ -118,6 +118,33 @@ export function fnName(m) {
   return null;
 }
 
+/**
+ * **reactor 那一族**发的是两格函数：`<东家>$<名字>$start` 与 `$stop`，形参只有 `$this`
+ * （顶层那一格连 `$this` 都没有），回 void。出处是旧降级的真输出（82-reactor.jnc）：
+ *   `(fn Sess$m_uiReactor$start (($this (ptr Sess))) void` / `$stop`
+ *   `(fn g_r$start () void` / `$stop`
+ * 体里那几格（一条语句一格 `$r<N>`、onevent 一格 `$e<N>`）是另一刀。
+ */
+export function reactorHeads(m, ctx = { owner: null, self: null }) {
+  const base = fnName(m);
+  if (base === null) return { heads: [], why: '没有名字' };
+  const sym = ctx.owner === null || ctx.owner === undefined ? base : `${ctx.owner}$${base}`;
+  const ps = ctx.self === null || ctx.self === undefined ? '' : `($this ${ctx.self})`;
+  return {
+    heads: [
+      { name: `${sym}$start`, head: `(fn ${sym}$start (${ps}) void` },
+      { name: `${sym}$stop`, head: `(fn ${sym}$stop (${ps}) void` },
+    ],
+    why: null,
+  };
+}
+
+/** 这一格是不是 reactor（发的是上面那两格，不是一格普通函数）。 */
+export function isReactor(m) {
+  return m !== null && m !== undefined && m.type !== null && m.type !== undefined
+    && m.type.mods.includes('reactor');
+}
+
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */
 function leafName(leaf) {
   if (leaf.kind === 'special') return SPECIAL_NAMES[leaf.text] ?? null;
