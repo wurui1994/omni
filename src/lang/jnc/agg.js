@@ -76,7 +76,16 @@ function memberOf(it, access) {
     }
     return out;
   }
-  if (h === 'type-decl') return [{ name: null, type: null, shape: 'nested-type', access, storage: [], at: it }];
+  if (h === 'type-decl') {
+    /* 嵌套类型自己不是一格数据成员，但**匿名 union** 的成员要摊进外面这个结构体
+       （第一百一十刀）。所以把里头读出来的那一格带上（`nested`），摊不摊由发的那一层定。 */
+    const inner = nm.agg;
+    const ih = headOf(inner);
+    const nested = ih === 'agg' ? readAgg(inner) : (ih === 'enum' ? readEnum(inner) : null);
+    return [{
+      name: null, type: null, shape: 'nested-type', access, storage: [], at: it, nested,
+    }];
+  }
   if (h === 'friend') return [{ name: null, type: null, shape: 'friend', access, storage: [], at: it }];
   return [];                                                       // 别的（空语句那类）不算成员
 }

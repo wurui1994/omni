@@ -80,6 +80,17 @@ function lastIdent(n) {
 function ownFields(agg, env) {
   const out = [];
   for (const m of agg.members) {
+    /* **匿名 union**：成员摊进外面这个结构体，发的时候括回成 `(union …)`（第一百一十刀）。
+       带名字的嵌套类型不摊 —— 它是另一格类型，字段表里没有它。 */
+    if (m.shape === 'nested-type') {
+      const n = m.nested;
+      if (n === null || n === undefined || n.word !== 'union') continue;
+      if (nameText(n.name) !== null) continue;                      // 有名字的 union 不摊
+      const inner = ownFields(n, env);
+      if (inner === null) return null;
+      if (inner.length > 0) out.push(`(union ${inner.join(' ')})`);
+      continue;
+    }
     if (m.shape !== 'data' && m.shape !== 'array') continue;
     if (m.name === null) return null;
     const r = resolveType(m.type, env);
