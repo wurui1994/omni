@@ -19,7 +19,8 @@ import { join } from 'node:path';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { readSpecs } from '../../src/lang/jnc/specs.js';
-import { headOf } from '../../src/lang/jnc/adapt.js';
+import { headOf, named } from '../../src/lang/jnc/adapt.js';
+import { readDcl, chainOf } from '../../src/lang/jnc/declare.js';
 import { MODS, STORAGE, ACCESS } from '../../src/lang/jnc/syntax.js';
 import { JNC_CTX_OPENS, JNC_MEMBER_BY_NAME } from '../../src/lang/jnc/nodes.js';
 
@@ -73,18 +74,31 @@ function lineOf(n) {
 
 let FILE = '?';
 
+/** 一个声明语句（`fn-def` / `fn-proto` / `var-decl`）里的声明符，按洞名读，不按位置。 */
+function dclsOf(n) {
+  const nm = named(n);
+  if (nm === null) return [];
+  if (nm.dcl !== undefined) {
+    const d = readDcl(nm.dcl);
+    return d === null ? [] : [d];
+  }
+  if (nm.dcls === undefined) return [];
+  const list = headOf(nm.dcls) === 'dcls'
+    ? [named(nm.dcls)?.first]                                  // 单个：`dcls` 裹一格
+    : chainOf(nm.dcls, 'dcls-add');                            // 多个：左递归链
+  return list.map((d) => readDcl(d)).filter((d) => d !== null);
+}
+
 function visit(n, ctx) {
   if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
   const h = headOf(n);
   let inner = ctx;
-  const opens = JNC_CTX_OPENS[h];
-  if (opens !== undefined && opens !== null) inner = opens;
-  /* 体外成员定义（`void C.f() override {}`）：树上长在顶层，语义上是成员 —— 认它的**限定名**。
-     这一格是这把尺子量出来的：先前有 1 处 `global × override`，不是词汇表标错，是我
-     判上下文时漏了这条。 */
+  /* 体外成员定义（`override C3.baz(int x, int y) {…}`）：树上长在顶层，语义上是成员
+     —— 认它声明符的**限定名**。这里必须走读取器（`named` + `readDcl`）拿 `nameNode` 的头名：
+     先前是拿 `JSON.stringify(n).slice(0, 4000)` 找 `"qualified"`，记号带着 span 一格就好几十字节，
+     4000 字砍在名字前头，于是 02_Inheritance.jnc:130 那一处漏判成 global —— 那就是最后一格账。 */
   if (h === 'fn-def' || h === 'var-decl' || h === 'fn-proto') {
-    const txt = JSON.stringify(n).slice(0, 4000);
-    if (JNC_MEMBER_BY_NAME.some((q) => txt.includes(`"${q}"`))) inner = 'member';
+    if (dclsOf(n).some((d) => JNC_MEMBER_BY_NAME.includes(headOf(d.nameNode)))) inner = 'member';
   }
   if (h === 'specs') {
     const got = readSpecs(n);
@@ -96,7 +110,18 @@ function visit(n, ctx) {
       }
     }
   }
-  for (const it of n.items) visit(it, inner);
+  /* **按洞往下走**：哪一格开哪种上下文由 `JNC_CTX_OPENS` 说（键是 `节点.洞`）。
+     命名不了的节点（表里还没有）退回按位置遍历，ctx 沿用当前的。 */
+  const nm = named(n);
+  if (nm === null) {
+    for (const it of n.items) visit(it, inner);
+    return;
+  }
+  for (const k of Object.keys(nm)) {
+    if (k === 'kind' || k === 'raw') continue;
+    const opens = JNC_CTX_OPENS[`${h}.${k}`];
+    visit(nm[k], opens === undefined ? inner : opens);
+  }
 }
 
 for (const f of files) {
@@ -130,10 +155,11 @@ if (unknown.length > 0) {
   console.log('\n不在词汇表里的（归 jnc-specs 那把尺子管）：'
     + unknown.sort((a, b) => b[2] - a[2]).slice(0, 8).map(([c, w, n]) => ` ${w}×${n}`).join(''));
 }
-/* 明账（**已定位**）：剩的 1 格 `global × override` 在 `samples/jnc/02_Inheritance.jnc`，
-   源码是 `class C1: I1 { override void foo() {…} }` —— 词写在**类体里**，是成员。
-   所以这一格确定是**这把尺子的上下文判定还差一条**（`agg` 那条链上某一格没把 ctx 传下去），
-   不是词汇表标错。补法：把"谁开哪种上下文"从"走树时看头名"改成**按洞**说
-   （`agg.body` 这一格开 member），那要等 `JNC_CTX_OPENS` 从"节点级"细到"洞级"。
-   在补上之前它就是一笔记明的账 —— 不改期望、不假装绿。 */
-process.exitCode = bad.length <= 1 ? 0 : 1;
+/* 那笔账**结了**（200 份语料 58 格全对得上）。结账的经过值得留一句：
+   最后一格 `global × override` 不是词汇表标错，也不是 `agg` 那条链没传 ctx ——
+   是 `samples/jnc/02_Inheritance.jnc:130` 的**体外成员实现** `override C3.baz(…) {…}`，
+   它树上真在顶层，得认声明符的限定名。判定本来就写了，只是用
+   `JSON.stringify(n).slice(0, 4000)` 找 `"qualified"` —— 记号带 span，4000 字砍在名字前头。
+   换成走读取器（`named` + `readDcl` 拿 `nameNode` 的头名）就对上了。
+   **教训与"问错坐标系"是同一条**：尺子自己也要按规则读树，别用字符串瞟。 */
+process.exitCode = bad.length === 0 ? 0 : 1;

@@ -33,6 +33,11 @@ export function named(n, lang = jncLang) {
   const need = names.filter((k) => !String(spec.holes[k]).includes('?'));
   const kids = n.items.slice(1);
   if (kids.length < need.length || kids.length > names.length) return null;   // 形状对不上就不认
+  /* 洞名不许叫 `kind` / `raw` —— 那两格是这一层自己用的（`kind` 存节点种类、`raw` 存原树）。
+     撞了就当场炸：表里起错名字该在头一次跑到时就看见，不该悄悄把节点种类盖掉。 */
+  for (const k of names) {
+    if (k === 'kind' || k === 'raw') throw new Error(`节点 ${head} 的洞不能叫 '${k}'（这一层占着）`);
+  }
   const out = { kind: head, raw: n };
   let at = 0;
   const extra = kids.length - need.length;                 // 可缺的洞里有几格真的在

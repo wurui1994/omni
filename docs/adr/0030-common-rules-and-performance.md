@@ -194,6 +194,23 @@
 （`(-> ("import" LITERAL) (import $2))` 里那个 `import`），所以 GLR 出来的树本来就是
 "带名字的节点"，与读表那条腿的节点表是同一种东西 —— 桥不用造，名字就是桥。
 
+**第三、四把尺子：把同一件事算两遍**（`jnc-declare.js` / `jnc-specs.js`）。新读取器只按洞名读，
+老一遍按位置读，对不上就是表错：声明符 1473/1473、说明符 1570/1570，**分歧 0**。
+说明符那一遍还顺手把词汇表与语料对了一次账，抓出两个真错（`dynamicfield` 这个拼法
+在 jancy 里不存在，真词是 `dyfield`；`cmut`/`constif` 是 `autoconst` 的旧写法）。
+
+**第五把尺子：词能出现在哪儿**（`jnc-word-ctx.js`）。词汇表给每个词标了 `ctx`
+（global / member / local），语料里真出现的 (上下文, 词) 是事实 —— 全语料 660 份
+**70 格全对得上、分歧 0**。这把尺子自己错过两次，两次都是同一个毛病：
+第一版拿裸词去查 594 格**要素**矩阵（问错了坐标系）；改对以后又拿
+`JSON.stringify(节点).slice(0, 4000)` 找 `"qualified"` 来认体外成员实现 ——
+记号带着 span，4000 字砍在名字前头，于是 `02_Inheritance.jnc:130` 的
+`override C3.baz(…) {…}` 漏判成 global，那就是当时挂着的唯一一格账。
+换成走读取器（`named` + `readDcl` 拿 `nameNode` 的头名）才对上。
+**尺子也得按规则读树，别拿字符串瞟。** 最后一格真错是词汇表：`dyfield` 我只标了 member，
+可 `dylayout (…) { dyfield Hdr hdr; }` 长在函数体里（Stmt.llk:436-442 收
+`local_declaration_list`），语料 87 处都在 local。
+
 
 
 - `src/core/frontend-jnc/lower.js` → **`lower_legacy.js`**（15.5k 行，一个字不改，

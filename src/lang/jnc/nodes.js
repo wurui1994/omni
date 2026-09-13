@@ -69,7 +69,10 @@ export const JNC_SHAPES = [
   { name: 'items', of: 'item', holes: { first: 'item?' } },
   { name: 'items-add', of: 'item', holes: { list: 'item', one: 'item' } },
   { name: 'type-decl', of: 'item', holes: { agg: 'item' } },
-  { name: 'agg', of: 'item', holes: { kind: 'exp', name: 'exp', bases: 'spec', body: 'block' } },
+  /* 洞名不能叫 `kind` —— `named()` 用 `kind` 这一格存"这是哪个节点"，撞名会把节点种类盖掉。
+     `bases` 可缺：`class C {}`（没基类）语料里就有，先前写成必填，于是那种 agg 命名不了、
+     上下文跟着掉回 global —— 那 1 格 `global × override` 就是这么来的。 */
+  { name: 'agg', of: 'item', holes: { word: 'exp', name: 'exp', bases: 'spec?', body: 'block' } },
   { name: 'special', of: 'exp', holes: { text: 'exp' } },
   { name: 'no-type', of: 'spec', holes: {} },
   { name: 'accessor', of: 'exp', holes: { text: 'exp' } },
@@ -77,7 +80,7 @@ export const JNC_SHAPES = [
   { name: 'exprs-add', of: 'exp', holes: { list: 'exp', one: 'exp' } },
   { name: 'case', of: 'stat', holes: { value: 'exp' } },
   // 第三批（形状照 `node tests/lib/jnc-shape.js` 量出来的填）
-  { name: 'enum', of: 'item', holes: { kind: 'exp', name: 'exp', base: 'spec', body: 'item' } },
+  { name: 'enum', of: 'item', holes: { word: 'exp', name: 'exp', base: 'spec?', body: 'item' } },
   { name: 'enums', of: 'item', holes: { first: 'item' } },
   { name: 'enums-add', of: 'item', holes: { list: 'item', one: 'item' } },
   { name: 'enum-item', of: 'item', holes: { name: 'exp', value: 'exp?' } },
@@ -98,14 +101,19 @@ export const JNC_SHAPES = [
  * 体外成员（`void C.f() override {}`）在树上长在顶层，但语义上是**成员**：
  * 它的声明符名字是个限定名（`qualified`），所以那一格也在这张表里（`byName`）。
  */
+/*
+ * **洞级**，不是节点级（这一格是尺子逼出来的）：`agg` 那个节点里只有 `body` 那一格是成员位置，
+ * `name` 与 `bases` 两格仍是外面那层。先前按"节点头名"一刀切，于是
+ * `class C1: I1 { override void foo() {…} }` 里的 `override` 被算成了 global —— 差一格。
+ * 键写成 `节点.洞`。
+ */
 export const JNC_CTX_OPENS = {
-  agg: 'member',
-  enum: 'member',
-  extension: 'member',
-  dylib: 'member',
-  'property-template': 'member',
-  compound: 'local',
-  'fn-def': null,          // 函数定义本身不开层：它的 `compound` 才开 local
+  'agg.body': 'member',
+  'enum.body': 'member',
+  'extension.body': 'member',
+  'dylib.body': 'member',
+  'property-template.body': 'member',
+  'compound.body': 'local',
 };
 
 /** 声明符的名字是限定名（`a.b`）时，这条声明算**成员**（体外成员定义）。 */

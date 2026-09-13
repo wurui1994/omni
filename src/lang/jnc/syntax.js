@@ -70,8 +70,11 @@ export const STORAGE = {
   disposable: { text: 'disposable', ctx: ['local'] },
   /* 真词是 `dyfield` —— 我先前抄成了 `dynamicfield`，而那个拼法在 jancy 里**根本不存在**
      （出处：jnc_ct_Lexer.rl:206 `'dyfield' { createToken(TokenKind_DynamicField); }`）。
-     这一笔是说明符尺子（tests/lib/jnc-specs.js）在 400 份语料上抓出来的：25 处表外的词。 */
-  dyfield: { text: 'dyfield', ctx: ['member'] },
+     这一笔是说明符尺子（tests/lib/jnc-specs.js）在 400 份语料上抓出来的：25 处表外的词。
+     上下文也标窄过：先写成只许 `member`，但 `dylayout (…) { dyfield Hdr hdr; }` 长在**函数体里**
+     （Stmt.llk:436-442 `dynamic_group_stmt` 收的是 `local_declaration_list`）——
+     全语料 660 份里 87 处都在 local，头一处 test/ioninja/packets/default.jnc:125。 */
+  dyfield: { text: 'dyfield', ctx: ['member', 'local'] },
 };
 
 /** 访问说明符（DeclarationSpecifier.llk:143-152）。 */
