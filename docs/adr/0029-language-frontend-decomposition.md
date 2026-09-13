@@ -497,3 +497,26 @@ S-002、S-003 这 8 个账补上 `match`。补完 `分歧 0`（`对上了 358 / 
 于是"C++ 的查名与 jancy 差在哪"第一次有了能写下来的答案：差在 `path` 的次序与 `ambigOn`
 那两格数据，不在另写一个四十行的函数。这是 R2（binding-as-data）落的第一步；下一步是把
 `this.ns` 那一串 save/restore 换成图上的节点，再把十几张 Map 收成一张带 label 的表。
+
+### 10.8 名字类也变成**特性拼出来的**数据
+
+紧接着的一步：54 个查名点先前各自带一个临时闭包（`(k) => this.classes.has(k) ||
+this.structs.has(k)`），"这一问要的是哪一类名字"藏在闭包里 —— 数不出来、拼不起来，
+更没法让特性各自贡献。两步走完：
+
+1. 全部改成 `this.find(nm, kinds, not)`，`kinds` 是名字类的清单；`not` 是语料里真有的
+   问法（`fn` 但不是 `method`、`struct` 但不是 `class`）。`this.resolve` 只剩 `find`
+   一个调用者。
+2. 那张表不再写在 `lower.js` 里，而是**各特性的 `binding.names` 并起来的**：
+   named-types 带 struct / class / enum / alias / template / ns / exposed，
+   members 带 fn / method / proto-fn，props 带 prop / reactor-top，fields 带 global。
+   `compose` 并表时一个名字类只许一个特性定义（撞了当场炸）。`reactor-top` 那一类还带一格
+   `keep`（`cls === null`）—— 过滤是**名字类自己的**事，不是调用点的后处理，否则走作用域链
+   的时候就挑不掉类里那些。
+
+结果："这门语言有哪些名字类"是那几份 features 的并集（13 类），C++ 是另一份并集，而查名点
+写的 `find(nm, ['class', 'struct'])` 两边通用。底下那十几张 Map 往后并成一张带 label 的表时，
+改的是 `binding.names` 里的 `store` 那一格 —— 54 个查名点一个字都不用动。
+
+- 腿：`NOCACHE=1` 的 jnc 554 次全真跑 345/0（`OMNI_SCOPE_DIFF=1` 同过）、llvm 38/0；
+  矩阵 360/360 分歧 0；榜 `3430` 未动。

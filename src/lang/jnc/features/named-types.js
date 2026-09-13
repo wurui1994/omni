@@ -14,6 +14,20 @@ const NAMED = ['struct', 'union-named', 'class', 'enum', 'enum-anon', 'enum-bitf
 export default feature({
   name: 'named-types',
   doc: '带体的命名类型：struct / class / 带名字的 union / enum（含无名与 bitflag）/ typedef 那一族',
+  /* 这个特性带进来的**名字类**（ADR-0029 R2）：查名点写 `find(nm, ['class', 'struct'])`
+     时问的就是这几类。`store` 是它现在存在降级器的哪张表上 —— 那十几张 Map 往后并成一张
+     带 label 的表时，改这一行就够（查名点一个字都不用动）。 */
+  binding: {
+    names: {
+      struct: { store: 'structs', doc: '结构体名 -> 字段表' },
+      class: { store: 'classes', doc: '类名' },
+      enum: { store: 'enums', doc: '枚举名 -> { base, members }' },
+      alias: { store: 'aliases', doc: 'typedef 起的类型名 -> 解出来的那一格' },
+      template: { store: 'templates', doc: '泛型声明名' },
+      ns: { store: 'nsNames', doc: '命名空间名（`using namespace X;` 要先认出 X）' },
+      exposed: { store: 'exposedMems', doc: '无名枚举漏到外面那层的成员名' },
+    },
+  },
   accounts: {
     'T-001': {
       text: '结构体里除字段以外的成员',

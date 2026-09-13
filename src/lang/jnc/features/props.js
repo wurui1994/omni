@@ -11,6 +11,14 @@ export default feature({
   name: 'props',
   doc: '简单声明式属性 / 完整声明式属性 / bindable / 事件 / reactor / alias',
   requires: ['fields', 'members'],
+  binding: {
+    names: {
+      prop: { store: 'props', doc: '属性名' },
+      /* `keep` 是这一类自己的过滤：顶层那些 reactor（`cls === null`）—— 查名要在
+         **走作用域链的时候**就把类里那些挑掉，所以它是名字类的一部分，不是调用点的后处理。 */
+      'reactor-top': { store: 'reactors', keep: (v) => v.cls === null, doc: '顶层的 reactor' },
+    },
+  },
   accounts: {
     'P-001': {
       text: '结构体的成员属性上的 `autoget` / `bindable`',

@@ -4,7 +4,8 @@
 //
 //   positions   位置 × 要素 矩阵里的若干格（这一格允许吗、谁登记名字、落到哪个容器）
 //   accounts    这个特性自己的账（拒绝的理由 → 出处 + "要落它得先有什么"）
-//   binding     每种要素的登记规则（Phase 2 接 scope graph 时填）
+//   binding     这个特性带进来的**名字类**（`binding.names`）：查名时问的"要哪一类"
+//               就是它们（见 positions.js 的 compose 与 jnc 的 NAME_KINDS）
 //   types       类型词汇与转换偏序表里的若干行（Phase 2 之后）
 //   lower       小步重写（P01…P10 里的若干步，Phase 4）
 //

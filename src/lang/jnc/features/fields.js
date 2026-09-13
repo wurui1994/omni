@@ -13,6 +13,7 @@ const PLAIN = ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class
 export default feature({
   name: 'fields',
   doc: '一格字段：整数 / 字符串 / 数组 / static / const / bigendian / 类的指针与值',
+  binding: { names: { global: { store: 'globals', doc: '模块级变量名 -> 类型' } } },
   accounts: {
     'F-001': {
       text: '这个位置上的位域（`: 位数` 只在结构体的字段上）',

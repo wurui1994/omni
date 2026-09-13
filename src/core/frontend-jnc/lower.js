@@ -210,24 +210,18 @@ const JNC_SPEC = compose(JNC_FEATURES);
 
 /* 这门语言有哪几**类名字**（ADR-0029 的 R2/R3）。先前每个查名点都自带一个临时闭包
    （`(k) => this.classes.has(k) || this.structs.has(k)`，全文 54 处），于是"这一问要的是
-   哪一类名字"藏在闭包里、数不出来也拼不起来。摊成一张表之后：查名点写 `this.find(nm,
-   ['class', 'struct'])`，"这门语言有哪些名字类"是一张能读的清单，而底下那十几张 Map
-   往后要并成一张带 label 的表时，改的是这一张、不是那 54 处。 */
-const NAME_KINDS = {
-  class: (L, k) => L.classes.has(k),
-  struct: (L, k) => L.structs.has(k),
-  enum: (L, k) => L.enums.has(k),
-  alias: (L, k) => L.aliases.has(k),
-  ns: (L, k) => L.nsNames.has(k),
-  global: (L, k) => L.globals.has(k),
-  fn: (L, k) => L.fns.has(k),
-  method: (L, k) => L.methods.has(k),
-  'proto-fn': (L, k) => L.protoFns.has(k),
-  template: (L, k) => L.templates.has(k),
-  prop: (L, k) => L.props.has(k),
-  exposed: (L, k) => L.exposedMems.has(k),
-  'reactor-top': (L, k) => L.reactors.has(k) && L.reactors.get(k).cls === null,
-};
+   哪一类名字"藏在闭包里、数不出来也拼不起来。
+
+   现在它是**特性拼出来的**：每个特性在 `binding.names` 里写自己带进来的那几类（存哪张表、
+   要不要过滤），`compose` 并成一张 `spec.nameKinds`，这儿只把它翻成谓词。于是
+   "这门语言有哪些名字类" = 那几份 features 的并集，"C++ 有哪几类" 是另一份并集 ——
+   而查名点写的 `find(nm, ['class', 'struct'])` 两边通用。 */
+const NAME_KINDS = Object.fromEntries([...JNC_SPEC.nameKinds].map(([kd, d]) => [
+  kd,
+  d.keep === undefined
+    ? (L, k) => L[d.store].has(k)
+    : (L, k) => L[d.store].has(k) && d.keep(L[d.store].get(k)),
+]));
 
 const JNC_NOPE = 'jancy 前端第一刀还不收';
 
@@ -2428,6 +2422,11 @@ class JncLower {
    * 语料里真有这种问法：`fn` 但不是 `method`（自由函数）、`struct` 但不是 `class`。
    */
   find(nm, kinds, not = []) {
+    for (const kd of [...kinds, ...not]) {
+      /* 名字类是**特性拼出来的**（`binding.names`），所以写错一个类名就是"这门语言里没有
+         这一类名字" —— 当场炸，别悄悄当查不着（那会变成一句莫名其妙的"未声明"）。 */
+      if (NAME_KINDS[kd] === undefined) throw new OmniError(`没有 '${kd}' 这一类名字`);
+    }
     return this.resolve(nm, (k) => kinds.some((kd) => NAME_KINDS[kd](this, k))
       && !not.some((kd) => NAME_KINDS[kd](this, k)));
   }

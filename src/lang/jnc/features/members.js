@@ -12,6 +12,15 @@ export default feature({
   name: 'members',
   doc: '带体的方法 / 只有原型的方法（宿主面）/ static 方法 / errorcode 方法 / construct / destruct / 算符',
   requires: ['named-types'],
+  /* 名字类（见 named-types 那份的注）：函数那一族。`method` 与 `proto-fn` 分开是因为
+     语料里真有"要自由函数、不要方法"那种问法（find(nm, ['fn'], ['method'])）。 */
+  binding: {
+    names: {
+      fn: { store: 'fns', doc: '函数全名 -> 签名' },
+      method: { store: 'methods', doc: '其中属于某个类 / 结构体的那些' },
+      'proto-fn': { store: 'protoFns', doc: '只有原型的那些（宿主面，ADR-0022 J4b）' },
+    },
+  },
   accounts: {
     'M-001': {
       text: '结构体里的 `static construct` / `destruct`',

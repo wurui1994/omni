@@ -103,7 +103,19 @@ export function compose(features) {
       throw new Error(`账号 ${c.account} 被 '${c.kind}' 当结论引着，可它没有 say（发不出话）`);
     }
   }
-  return { cells, wild, accounts, features: [...names], sorts, kinds };
+  /* 名字类（`binding.names`）：查名时问的"要哪一类"就是它们。一个名字类只许一个特性定义 ——
+     否则"这一类名字是谁带进来的、存哪儿"又变成两处答案（规矩 3 的第三半）。 */
+  const nameKinds = new Map();
+  for (const f of features) {
+    for (const [kd, d] of Object.entries(f.binding.names ?? {})) {
+      const had = nameKinds.get(kd);
+      if (had !== undefined) {
+        throw new Error(`名字类 '${kd}' 被两个特性定义：'${had.from}' 与 '${f.name}'`);
+      }
+      nameKinds.set(kd, { ...d, from: f.name });
+    }
+  }
+  return { cells, wild, accounts, nameKinds, features: [...names], sorts, kinds };
 }
 
 /** 按 `(sort, kind)` 查一格：先看具体、再落通配；都没有回 `undefined`（= 表里没这一格）。 */
