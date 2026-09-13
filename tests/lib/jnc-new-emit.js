@@ -21,7 +21,8 @@ import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf, named } from '../../src/lang/jnc/adapt.js';
 import { readAgg } from '../../src/lang/jnc/agg.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
-import { nameText } from '../../src/lang/jnc/declare.js';
+import { nameText, allInChain, readDcl } from '../../src/lang/jnc/declare.js';
+import { readFormals, fnName } from '../../src/lang/jnc/emit-fn.js';
 
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 400);
@@ -87,6 +88,40 @@ function hasArgs(n) {
   const h = headOf(a);
   if (h === 'args') return named(a)?.first !== undefined;             // `(args 第一格)`
   return h !== null;
+}
+
+/**
+ * 一格实参**是不是整数字面量**，是就答 `int`（旧降级传的是实参那一格的类型：
+ * `new C3(5)` → `($i0 int)`，86-multibase.jnc / 135-overloadcheap.jnc）。
+ * 别的（变量、字符串、表达式）先答 null —— 那要表达式定型，是下一刀。
+ */
+function litArgType(a) {
+  if (a === null || a === undefined || typeof a !== 'object') return null;
+  if (Array.isArray(a.items)) return null;
+  const v = a.value;
+  if (typeof v === 'number') return 'int';
+  if (typeof v === 'string' && /^-?\d+$/.test(v)) return 'int';
+  return null;
+}
+
+/**
+ * 目标那一格**写出来的构造**的形参表（没有就答 null）。**默认实参**要它：
+ * `construct(int a, int b = 2)` 碰上 `new Box(1)` 时旧降级把默认值补上、壳里是**两格**
+ * （74-argdefault.jnc 的 `(fn $newo0 (($i0 int) ($i1 int)) (ptr Box)`）。
+ */
+function ctorFormals(agg) {
+  const c = agg.members.find((m) => m.shape === 'fn' && fnName(m) === 'construct');
+  if (c === undefined) return null;
+  const dc = readDcl(c.type?.raw?.dcl);
+  const sf = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
+  return sf === undefined ? null : readFormals(sf.node);
+}
+
+/** 一格 `new` 的实参表（读不出来答 null）。 */
+function argList(n) {
+  const a = named(n)?.args;
+  if (a === null || a === undefined) return [];
+  return allInChain(a, 'args-add', 'args');
 }
 
 initJnc({ log: () => {} });
@@ -179,10 +214,33 @@ for (const f of files) {
     next[fam] += 1;                                                  // 带实参的也占一个号
     const name = `$new${fam}${idx}`;
     if (fam === 'c') { note('花括号初值那一族（要定型）'); continue; }
-    if (hasArgs(st.node)) { note('带实参的 new（要定型）'); continue; }
+    /* 实参那几格：整数字面量拼得出来（`($i0 int)`），别的要表达式定型 —— 记账。 */
+    let ps = '';
+    if (hasArgs(st.node)) {
+      const as = argList(st.node);
+      const tys = as.map((x) => litArgType(x));
+      if (as.length === 0 || tys.some((t) => t === null)) {
+        note('带实参的 new（实参要定型）');
+        continue;
+      }
+      /* **默认实参**：构造的形参比写出来的实参多时，多出来的那几格由旧降级补上 ——
+         默认值是整数字面量的那几格拼得出来，别的记账。 */
+      const cf = ctorFormals(rec.agg);
+      if (cf !== null && cf.length > tys.length) {
+        let ok = true;
+        for (let k = tys.length; k < cf.length; k += 1) {
+          const d = named(cf[k]?.at)?.init ?? undefined;
+          const t = d === undefined ? null : litArgType(d);
+          if (t === null) { ok = false; break; }
+          tys.push(t);
+        }
+        if (!ok) { note('默认实参那一格要定型'); continue; }
+      }
+      ps = tys.map((t, k) => `($i${k} ${t})`).join(' ');
+    }
     const root = rec.kind === 'class' ? classRoot(rec.agg, aggs, env) : rec.agg;
     const rn = root.emitName ?? nameText(root.name);
-    const head = `(fn ${name} () (ptr ${rn})`;
+    const head = `(fn ${name} (${ps}) (ptr ${rn})`;
     const want = oracle.get(name);
     if (want === undefined) { noShell += 1; continue; }
     cmp += 1;
