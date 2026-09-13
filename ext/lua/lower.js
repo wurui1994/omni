@@ -73,6 +73,8 @@ class Cx {
     this.scopes = [new Map()];      // 名字 → 类型（'real'|'string'|'bool'）
     this.fns = new Map();           // 函数名 → {params:[名字], ret:类型|'void'}
     this.top = [];                  // 提到模块层的 (fn …)
+    this.globals = new Map();       // 被函数体用到的**顶层** local → 提成模块级变量
+    this.promote = new Set();       // 哪些顶层 local 该提（预扫一遍算出来）
     this.tmp = 0;
   }
 
@@ -201,6 +203,7 @@ const STAT = {
   do: (n, cx) => [`(do ${inner(n.body, cx).join(' ')})`],
   local: (n, cx) => {
     const init = n.init ?? [];
+    const asGlobal = cx.scopes.length === 1;    // 只有顶层那一层能提成模块级变量
     // 多个名字：Lua 先把右边**全部**算完再绑（`local` 的配方是 `['init','bind:names']`），
     // 而新名字右边压根看不见，所以一格一格降就够 —— 不用临时量。
     if (n.names.length > init.length) no('L-013', n);          // 少的那些是 nil
@@ -210,7 +213,12 @@ const STAT = {
     for (const [i, name2] of n.names.entries()) {
       const v = exp(init[i], cx);
       cx.declare(name2, v.type);
-      out.push(`(let ${name2} ${v.type} ${v.sx})`);
+      if (asGlobal && cx.promote.has(name2)) {
+        cx.globals.set(name2, v.type);
+        out.push(`(set ${name2} ${v.sx})`);     // 声明搬到模块层，这儿只赋值
+      } else {
+        out.push(`(let ${name2} ${v.type} ${v.sx})`);
+      }
     }
     // 多出来的右边照样要算（副作用），但值丢掉；纯的就直接不管。
     for (const e of init.slice(n.names.length)) {
@@ -340,6 +348,10 @@ const STAT = {
     const inner2 = new Cx();
     inner2.fns = cx.fns;
     inner2.top = cx.top;
+    inner2.globals = cx.globals;
+    inner2.promote = cx.promote;
+    // 提上去的那些在函数里照样是 `(var name)`（模块级变量跨函数共享，量过：见 g.sx 那个探针）
+    for (const [g, t] of cx.globals) inner2.declare(g, t);
     for (const p of params) inner2.declare(p, 'real');
     const body = block(n.body.body.stats, inner2);
     const ret = retTypeOf(n.body.body.stats, cx, params);
@@ -354,6 +366,8 @@ const STAT = {
 function retTypeOf(stats, cx, params) {
   const probe = new Cx();
   probe.fns = cx.fns;
+  probe.globals = cx.globals;
+  for (const [g, t] of cx.globals) probe.declare(g, t);
   for (const p of params) probe.declare(p, 'real');
   let t = null;
   const walk = (xs) => {
@@ -372,6 +386,47 @@ function retTypeOf(stats, cx, params) {
   };
   walk(stats);
   return t === null ? 'void' : t;
+}
+
+/**
+ * 预扫一遍：**哪些顶层 local 被函数体用到了**。用到了就把它提成模块级变量
+ * （核心方言的 `(global NAME TYPE)`），于是"函数看得见外面那一格"这件事不必等真闭包。
+ *
+ * 一条要紧的规矩：只算**声明在函数之前**的那些。Lua 里
+ * `local function f() return x end local x = 1` 的 `x` 是全局（`_ENV.x`），不是后面那个 local
+ * —— 顺序不看，就把语义悄悄改了。
+ */
+function capturedTops(stats) {
+  const declaredAt = new Map();                 // 顶层 local 名 → 它在第几条语句
+  for (const [i, st] of (stats ?? []).entries()) {
+    for (const nm2 of st.kind === 'local' || st.kind === 'local-function' ? (st.names ?? []) : []) {
+      if (!declaredAt.has(nm2)) declaredAt.set(nm2, i);
+    }
+  }
+  const cap = new Set();
+  const namesIn = (node, out = []) => {
+    if (node === null || typeof node !== 'object') return out;
+    if (Array.isArray(node)) { for (const x of node) namesIn(x, out); return out; }
+    if (node.kind === 'name') out.push(node.value);
+    for (const v of Object.values(node)) namesIn(v, out);
+    return out;
+  };
+  const fnsIn = (node, out = []) => {
+    if (node === null || typeof node !== 'object') return out;
+    if (Array.isArray(node)) { for (const x of node) fnsIn(x, out); return out; }
+    if (node.kind === 'funcbody' || node.kind === 'lambda') out.push(node);
+    for (const v of Object.values(node)) fnsIn(v, out);
+    return out;
+  };
+  for (const [i, st] of (stats ?? []).entries()) {
+    for (const fn of fnsIn(st)) {
+      for (const nm2 of namesIn(fn)) {
+        const at = declaredAt.get(nm2);
+        if (at !== undefined && at < i) cap.add(nm2);
+      }
+    }
+  }
+  return cap;
 }
 
 /** 一个 block 洞：开一层作用域再降（作用域规矩与 scope.js 的配方同源）。 */
@@ -398,9 +453,12 @@ function block(stats, cx) {
  */
 export function lower(ast, lang) {
   const cx = new Cx();
+  cx.promote = capturedTops(ast.stats);
   const body = block(ast.stats, cx);
+  const decls = [...cx.globals].map(([n, t]) => `(global ${n} ${t})`);
+  const head = [...decls, ...cx.top].map((x) => `  ${x}`).join('\n');
   return {
-    text: `(module\n${cx.top.map((x) => `  ${x}`).join('\n')}\n  (main\n${body.map((x) => `    ${x}`).join('\n')}))\n`,
+    text: `(module\n${head}\n  (main\n${body.map((x) => `    ${x}`).join('\n')}))\n`,
   };
 }
 
