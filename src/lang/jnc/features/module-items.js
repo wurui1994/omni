@@ -15,15 +15,12 @@ export default feature({
       text: '写在函数体里的 `using namespace X;`',
       why: '它的作用域是这个块，要一张跟着作用域一起进出的表（第 217 刀那条界；Phase 2 的 scope graph 一并解决）',
     },
-    'S-005': {
-      text: '（量法）`import "…"` 那一格量不出来',
-      why: '探针没给 `-I`，所以那一句报"找不着"——**这不是语言的账**，是矩阵这把尺子自己的边界。'
-        + '真要量它得给探针一格 imports/ 目录（与 tests/jnc/cases/imports 同一套）',
-    },
+    /* S-005 退役：那不是语言的账，是**尺子自己的洞**（探针没给 `-I`）。补上探针自合成的
+       imports/ 与 `-I` 之后这两格量出来是 ok —— 账本上不该留一条"我量不了"当结论。 */
   },
   positions: [
-    // import：模块与命名空间那一层是常态（这儿是**量法**的边界，见 S-005）
-    { kind: 'import', sorts: ['module', 'namespace'], verdict: 'todo', note: 'S-005：探针没给 -I' },
+    // import：模块与命名空间那一层是常态
+    { kind: 'import', sorts: ['module', 'namespace'], verdict: 'ok' },
     { kind: 'import', sorts: INNER, verdict: 'refuse', account: 'T-002' },
     { kind: 'import', sorts: ['struct-body'], verdict: 'refuse', account: 'T-001' },
     { kind: 'import', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },

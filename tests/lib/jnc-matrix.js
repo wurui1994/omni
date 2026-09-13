@@ -80,7 +80,7 @@ const KINDS = [
   ['event', 'event m_onDone();', 'x'],
   ['reactor', 'reactor m_r { }', 'x'],
   ['local-var', 'int v = 1;', 'v'],
-  ['import', 'import "imports/lib60.jnc"', 'x'],
+  ['import', 'import "imports/probeimp.jnc"', 'x'],
   ['pragma', 'pragma(ExposedEnums, true);', 'x'],
   ['using-namespace', 'using namespace probeNs;', 'x'],
   ['extension', 'extension ExtProbe: Helper { int extra() { return 3; } }', 'x'],
@@ -177,7 +177,7 @@ function runOne(sort, kind, src) {
   const p = join(OUT_DIR, `${sort}__${kind}.jnc`);
   writeFileSync(p, src);
   try {
-    execFileSync(process.execPath, [cli, 'sx', p], {
+    execFileSync(process.execPath, [cli, 'sx', p, '-I', OUT_DIR], {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], cwd: root,
     });
     return classify('', 0);
@@ -189,6 +189,11 @@ function runOne(sort, kind, src) {
 /* ---------------------------------------------------------------- 主流程 */
 rmSync(OUT_DIR, { recursive: true, force: true });
 mkdirSync(OUT_DIR, { recursive: true });
+/* 被引的那一份也由探针自己合成，并把 `-I OUT_DIR` 一起给上 —— 先前 `import` 那一格
+   两个位置都只能记成 `todo`（"探针没给 -I"），那是**尺子的洞**，不是语言的边界。
+   探针要自足：它量的每一格都不许依赖仓库里别处的文件。 */
+mkdirSync(join(OUT_DIR, 'imports'), { recursive: true });
+writeFileSync(join(OUT_DIR, 'imports', 'probeimp.jnc'), 'int probeImported() {\n\treturn 7;\n}\n');
 
 const sorts = SORTS.filter(([s]) => only === null || s === only);
 const cells = new Map();          // `${sort}|${kind}` -> {k, why}
