@@ -147,7 +147,9 @@ function curlyLitTypes(n, names, env, badAt = []) {
     if (headOf(x) === 'named-item') { dig(named(x)?.value); return; }
     if (!['curly', 'items', 'items-add', 'assign', 'init', 'field-init'].includes(headOf(x))) {
       bad = true;
-      badAt.push(headOf(x) ?? '?');                                  // 定不出型的**节点头**记下来
+      /* 定不出型的**节点头**记下来；是个名字就把名字也带上（照着补，不凭猜）。 */
+      const bh = headOf(x) ?? '?';
+      badAt.push(bh === 'name' ? `name(${String(named(x)?.text?.value ?? '?')})` : bh);
       return;
     }
     const h = headOf(x);
@@ -182,6 +184,15 @@ function localNames(fnNode) {
   }
   const dig = (x) => {
     if (x === null || x === undefined || typeof x !== 'object' || !Array.isArray(x.items)) return;
+    /* **带花括号初值的局部量**是另一格节点（`var-decl-curly`，节点表 :120，一格 `dcl`，
+       不是 `dcl*` 那条链）—— 不读它，`Inner o = { 5, 6 };` 的 `o` 就定不出型
+       （24-new-curly.jnc 第 62 行；这一格是尺子把名字印出来之后照着补的）。 */
+    if (headOf(x) === 'var-decl-curly') {
+      const vn = named(x);
+      const t = vn === null ? null : readDeclType(vn.specs, vn.dcl);
+      if (t !== null && t.name !== null) out.set(t.name, t);
+      return;
+    }
     if (headOf(x) === 'var-decl') {
       const vn = named(x);
       if (vn !== null) {
