@@ -353,6 +353,38 @@ export function ctorHead(name, self) {
   return { name: `${name}$construct`, head: `(fn ${name}$construct (${ps}) void` };
 }
 
+
+/**
+ * **方法/函数的别名**（`alias dispose = close;`，第八十七刀）：旧降级发一格**转手函数**，
+ * 签名照抄目标那一格，形参名换成 `$aN`（lower.js:3765-3766）。真输出（83-alias.jnc）：
+ *   `(fn dbl (($a0 int)) int`（顶层的函数别名）
+ *   `(fn File$dispose (($this (ptr File))) int`、`(fn Box$tripled (($this (ptr Box))) int`
+ * `tgt` 是**目标那一格成员**（这一层不查名 —— 谁是目标由调用方按成员表定）。
+ */
+export function aliasHead(name, tgt, env, ctx = { owner: null, self: null }) {
+  if (name === null || name === undefined) return { heads: [], why: '没有名字' };
+  if (tgt === null || tgt === undefined || tgt.type === null) return { heads: [], why: '认不出目标' };
+  const sfx = fnSuffixOf(tgt.type);
+  const fs = sfx === null ? null : readFormals(sfx);
+  if (fs === null) return { heads: [], why: '目标的形参表读不出来' };
+  if (fs.some((f) => f.varargs)) return { heads: [], why: '变参那一族（…）' };
+  const tc = { clsRoot: ctx.clsRoot ?? ((n) => n) };
+  const parts = [];
+  if (ctx.self !== null && ctx.self !== undefined && !tgt.storage.includes('static')) {
+    parts.push(`($this ${ctx.self})`);
+  }
+  for (const [i, f] of fs.entries()) {
+    if (f.type === null) return { heads: [], why: '目标形参的类型读不出来' };
+    const r = resolveType(f.type, env);
+    if (r.type === null) return { heads: [], why: `目标形参：${r.why}` };
+    parts.push(`($a${i} ${emitType(r.type, 'slot', tc)})`);
+  }
+  const ret = retText(tgt, fnName(tgt) ?? name, env, tc);
+  if (ret === null) return { heads: [], why: '目标的返回类型解不出来' };
+  const sym = ctx.owner === null || ctx.owner === undefined ? name : `${ctx.owner}$${name}`;
+  return { heads: [{ name: sym, head: `(fn ${sym} (${parts.join(' ')}) ${ret}` }], why: null };
+}
+
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */
 function leafName(leaf) {
   if (leaf.kind === 'special') return SPECIAL_NAMES[leaf.text] ?? null;

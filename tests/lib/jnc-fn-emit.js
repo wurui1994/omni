@@ -23,7 +23,7 @@ import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import {
   fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
   isBindableData, dataAccessorHeads, isAutogetProp, autogetGetterHead,
-  isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead, overloadSuffix,
+  isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead, overloadSuffix, aliasHead,
 } from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
@@ -55,6 +55,21 @@ function lastName(n) {
   for (let i = n.items.length - 1; i >= 1; i -= 1) {
     const s = lastName(n.items[i]);
     if (s !== null) return s;
+  }
+  return null;
+}
+
+/** 一格 `alias` 声明指向的名字（`alias dispose = close;` → `close`）。 */
+function aliasTargetName(at, dclNode) {
+  const nm = named(at);
+  if (nm === null || headOf(at) !== 'var-decl') return null;
+  for (const d of allInChain(nm.dcls, 'dcls-add', 'dcls')) {
+    if (headOf(d) !== 'init') continue;
+    const dn = named(d);
+    if (dn === null) continue;
+    if (dclNode !== undefined && dn.dcl !== dclNode) continue;
+    const t = lastName(dn.value);
+    if (t !== null) return t;
   }
   return null;
 }
@@ -128,6 +143,7 @@ for (const f of files) {
   const aggs = [];
   const tops = [];                                   // 顶层的函数（fn-def / fn-proto）
   const vars = [];                                   // 顶层的数据声明（bindable 那一族要它）
+  const aliasTops = [];                              // 顶层的别名（`alias dbl = twice;`）
   const scan = (n, owner, inAgg, extSelf) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
@@ -210,7 +226,10 @@ for (const f of files) {
           if (dn === null) continue;
           const who = nameText(named(dn.dcl)?.name);
           const to = lastName(dn.value);
-          if (who !== null && to !== null) env.set(who, { kind: 'alias', to });
+          if (who !== null && to !== null) {
+            env.set(who, { kind: 'alias', to });
+            aliasTops.push({ name: who, to, ns: owner });
+          }
         }
       }
     } else if (h === 'typedef') {
@@ -319,6 +338,7 @@ for (const f of files) {
   const vdCases = [];                               // 虚派发那几格（$$vd$）
   const vdSeen = new Set();
   const ctorCases = [];                             // 编译器生成的构造（没写、可要初始化）
+  const aliasCases = [];                            // 方法/函数的别名（发一格转手函数）
   for (const m of vars) {
     if (isBindableData(m)) accCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
     else if (isAutogetProp(m)) getCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
@@ -363,6 +383,16 @@ for (const f of files) {
         }
         if (headOf(body) === 'compound') {
           getCases.push({ m, ctx: { owner: own, self: selfOf(a), clsRoot } });
+          continue;
+        }
+      }
+      /* **方法的别名**（`alias dispose = close;`）发一格转手函数，签名照抄目标那一格。 */
+      if (m.storage.includes('alias') && m.name !== null) {
+        const to = aliasTargetName(m.at, m.type?.raw?.dcl);
+        const tgt = to === null ? undefined
+          : a.members.find((x) => x.shape === 'fn' && fnName(x) === to);
+        if (tgt !== undefined) {
+          aliasCases.push({ name: m.name, tgt, ctx: { owner: own, self: selfOf(a), clsRoot } });
           continue;
         }
       }
@@ -423,11 +453,35 @@ for (const f of files) {
     cases.push({ m: mm, ctx: { owner: m.ns ?? null, self } });
   }
 
+  for (const al of aliasTops) {
+    const tgt = tops.find((x) => x.shape === 'fn' && x.name === al.to);
+    if (tgt !== undefined) {
+      aliasCases.push({ name: al.name, tgt: { ...tgt, storage: tgt.storage ?? [] }, ctx: { owner: al.ns ?? null, self: null, clsRoot } });
+    }
+  }
+
   /* **重载的号**按声明次序发（`q` / `q$o1` / …）—— 拼不出来的那几格照样占一个号，
      所以先问号、再拼头。 */
   const nextDup = overloadIndex();
   const mineNames = new Set();                        // 新腿**试过**的那几个名字（算覆盖率用）
   /* **生成的取/存**先对（它们不占重载号 —— 旧降级那边是另一遍发出来的）。 */
+  for (const c of aliasCases) {
+    const r = aliasHead(c.name, c.tgt, env, c.ctx);
+    if (r.heads.length === 0) {
+      skip.set(`别名的转手：${r.why}`, (skip.get(`别名的转手：${r.why}`) ?? 0) + 1);
+      continue;
+    }
+    for (const h of r.heads) {
+      mineNames.add(h.name);
+      const wantL = oracle.get(h.name);
+      if (wantL === undefined) { noFn += 1; noFnAt.push(`${f.split('/').pop()}　${h.name}`); continue; }
+      cmp += 1;
+      if (h.head === wantL) same += 1;
+      else if (diff.length < 20) {
+        diff.push(`${f.split('/').pop()}\n      旧 ${wantL}\n      新 ${h.head}`);
+      }
+    }
+  }
   for (const c of ctorCases) {
     const h = ctorHead(c.name, c.self);
     mineNames.add(h.name);
