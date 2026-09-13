@@ -162,7 +162,14 @@ export function fnHead(m, env, ctx = { owner: null, self: null }) {
   const base = fnName(m);
   if (base === null) return { head: null, why: '没有名字' };
   const sfx = fnSuffixOf(m.type);
-  if (sfx === null) return { head: null, why: '认不出形参表（没有 fn-suffix）' };
+  if (sfx === null) {
+    /* **reactor 不是一格普通函数**：旧降级给它发的是 `<名字>$start` / `$stop` 那两格
+       （82-reactor.jnc / 162-oneventlist.jnc）—— 另一族，不在这一刀里。 */
+    if (m.type.mods.includes('reactor')) {
+      return { head: null, why: '反应器那一族（另发 $start / $stop）' };
+    }
+    return { head: null, why: '认不出形参表（没有 fn-suffix）' };
+  }
   const fs = readFormals(sfx);
   if (fs === null) return { head: null, why: '形参表读不出来' };
   if (fs.some((f) => f.varargs)) return { head: null, why: '变参那一族（…）' };
@@ -207,11 +214,11 @@ function retText(m, base, env, tc) {
      整串比会漏掉（50-construct.jnc 的 `Counter$construct$o1` 先前就落在这儿）。 */
   const leaf = base.includes('$') ? base.slice(base.lastIndexOf('$') + 1) : base;
   if (VOID_NAMES.has(base) || VOID_NAMES.has(leaf) || base.endsWith('$construct$static')) return 'void';
-  /* **存值器不写类型**（`set(int x)` / `void m_v.set(int)` 里那个 void 也常常省掉）：
-     基类型是 `no-type` 时回的就是 void —— 旧降级发的是 `(fn g_p$set ((x int)) void`
-     （64-prop.jnc / 67-propauto.jnc / 156-propstruct.jnc）。与事件那一条同一个道理：
-     没写的东西别拿去查表。 */
-  if (leaf === 'set' && m.type.base.kind === 'none') return 'void';
+  /* **压根没写返回类型**就是 void（jancy 收这种写法：`show() { … }`、`set(int x)`）——
+     旧降级发的正是 `(fn B$show (($this (ptr B))) void`（78-notype.jnc）与
+     `(fn g_p$set ((x int)) void`（64-prop.jnc / 67-propauto.jnc / 156-propstruct.jnc）。
+     与事件那一条同一个道理：**没写的东西别拿去查表**（那儿查出来的是 `no-type`）。 */
+  if (m.type.base.kind === 'none') return 'void';
   const r = resolveType({ ...m.type, shape: 'data' }, env);
   if (r.type === null) return null;
   return emitType(r.type, 'slot', tc);
