@@ -75,12 +75,27 @@ export function allInChain(node, addHead, baseHead) {
 export function readDcl(node) {
   const nm = named(node);
   if (nm === null || nm.kind !== 'dcl') return null;
+  const ptrs = chainOf(nm.ptrs, 'ptrs-add');
   return {
     name: nameText(nm.name),
     nameNode: nm.name,
-    ptrs: chainOf(nm.ptrs, 'ptrs-add').length,
+    ptrs: ptrs.length,
+    /* **跟在 `*` 后面的修饰词**也要读出来（`ptr-group -> "*" mods`）：
+       `Inner* property m_p;` 里的 `property` 就落在这儿，不在说明符表里 ——
+       那是尺子逼出来的（108-propdot.jnc：不读它就把一格属性当了数据字段）。 */
+    ptrMods: ptrs.flatMap((p) => modsOfPtr(p)),
     suffixes: chainOf(nm.suffixes, 'suffixes-add').map((s) => ({ kind: headOf(s), node: s })),
     ctor: headOf(nm.ctor) === 'ctor',
     raw: node,
   };
+}
+
+/** 一格 `ptr` 节点里那串修饰词（`(ptr mods)`）。 */
+function modsOfPtr(p) {
+  if (headOf(p) !== 'ptr') return [];
+  const nm = named(p);
+  if (nm === null) return [];
+  return chainOf(nm.mods, 'mods-add')
+    .map((m) => (m === null || m === undefined ? null : (m.value === undefined ? null : String(m.value))))
+    .filter((w) => w !== null);
 }

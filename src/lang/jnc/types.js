@@ -40,13 +40,16 @@ export function readDeclType(specsNode, dclNode) {
     const sh = SUFFIX_SHAPE[s];
     if (sh !== undefined) { shape = sh; break; }
   }
-  for (const w of sp.words) {
+  /* 形状还要看**跟在 `*` 后面**的那几个词（`Inner* property m_p;` 的 `property` 落在
+     `ptr-group -> "*" mods` 里，不在说明符表里）—— 尺子逼出来的：不读它就把一格属性
+     当了数据字段（108-propdot.jnc）。 */
+  for (const w of [...sp.words, ...dc.ptrMods]) {
     const sh = SHAPE_WORDS[w];
     if (sh !== undefined) { shape = sh === 'fnptr' && shape === 'fn' ? 'fnptr' : sh; }
   }
   return {
     base: { kind: baseKind, text: baseText(sp.type, head) },
-    mods: sp.words,
+    mods: [...sp.words, ...dc.ptrMods],
     ptrs: dc.ptrs,
     suffixes,
     shape,
