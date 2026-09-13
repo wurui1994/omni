@@ -47,7 +47,15 @@ export function resolveType(t, env = new Map()) {
   if (t === null || t === undefined) return { type: null, why: '没有类型' };
   const base = baseOf(t, env);
   if (base === null) return { type: null, why: `认不出基类型 '${t.base.text || '(空)'}'` };
-  if (t.shape === 'fnptr' || t.shape === 'fn') return { type: null, why: `函数那一族（${t.shape}）` };
+  if (t.shape === 'fnptr') {
+    /* 函数指针（`int function* m_op(int, int)` → `(fnty (int int) int)`）：
+       返回类型是基类型加上**除掉函数指针自己那一个 `*`** 的层数，形参从 fn-suffix 的
+       形参表里一格一格解。解不动一格就整格记账（不猜）。 */
+    const fn = fnParts(t, env);
+    if (fn === null) return { type: null, why: '函数指针的形参/返回还解不出来' };
+    return { type: fn, why: null };
+  }
+  if (t.shape === 'fn') return { type: null, why: '函数那一族（fn）' };
   if (t.shape === 'prop' || t.shape === 'event') return { type: null, why: `属性/事件（${t.shape}）` };
   if (t.shape === 'bitfield') return { type: null, why: '位域' };
 
@@ -110,8 +118,7 @@ function firstIdent(n) {
   return null;
 }
 
-/** 基类型是整数那一族时的**底宽**（位）；不是整数或认不出答 null。 */
-export function baseIntBits(t) {
+/** 基类型是整数那一族时的**底宽**（位）；不是整数或认不出答 null。 */export function baseIntBits(t) {
   if (t === null || t === undefined) return null;
   const w = t.base.kind === 'word' ? t.base.text : nameText(t);
   if (w === null || w === undefined) return null;
@@ -145,8 +152,83 @@ function arrayDims(t) {
   return out;
 }
 
-/** 后缀链上的每一格，**按源码次序**（左递归链倒着塞）。这一层按位置走，省一次循环依赖。 */
-function suffixChain(chain) {
+/**
+ * 函数指针那一格：`{ k:'fnptr', params, ret }`。
+ * 返回类型 = 基类型 + （`*` 层数 − 1）（那一个 `*` 是函数指针自己的）；
+ * 形参从 fn-suffix 的形参表一格一格解（无名形参就是"说明符 + `*`"那种形状）。
+ */
+function fnParts(t, env) {
+  const base = baseOf(t, env);
+  if (base === null) return null;
+  let ret = base;
+  for (let i = 0; i < Math.max(t.ptrs - 1, 0); i += 1) ret = { k: 'ptr', target: ret };
+  const fnSuffix = suffixChain(t.raw?.dcl?.items?.[3]).find((s) => s?.items?.[0]?.value === 'fn-suffix');
+  if (fnSuffix === undefined) return null;
+  const params = [];
+  for (const f of formalList(fnSuffix.items[1])) {
+    const p = formalType(f, env);
+    if (p === null) return null;
+    params.push(p);
+  }
+  return { k: 'fnptr', params, ret };
+}
+
+/** 形参表里的每一格（`formals` / `formals-add` / `formals-varargs`，按源码次序）。 */
+function formalList(node) {
+  const out = [];
+  let cur = node;
+  while (cur !== null && cur !== undefined && Array.isArray(cur.items)) {
+    const h = cur.items[0]?.value;
+    if (h === 'formals-add') { out.unshift(cur.items[2]); cur = cur.items[1]; continue; }
+    if (h === 'formals') { if (cur.items.length > 1) out.unshift(cur.items[1]); break; }
+    if (h === 'formals-varargs') { cur = cur.items[1]; continue; }
+    break;
+  }
+  return out;
+}
+
+/** 一格形参的类型（`formal specs dcl` / `formal-anon specs ptrs`）。 */
+function formalType(f, env) {
+  const h = f?.items?.[0]?.value;
+  if (h === 'formal') {
+    const t = { base: null };
+    void t;
+    const syn = { specs: f.items[1], dcl: f.items[2] };
+    return resolveSyn(syn, env);
+  }
+  if (h === 'formal-anon') {
+    return resolveSyn({ specs: f.items[1], ptrs: f.items[2] }, env);
+  }
+  return null;
+}
+
+/** 拿一格"说明符 + 声明符/`*` 串"当类型解（形参那一族用）。 */
+function resolveSyn(syn, env) {
+  const specsHead = syn.specs?.items?.[1];
+  const kindOf = specsHead === null || specsHead === undefined ? 'none'
+    : (typeof specsHead.value === 'string' && !Array.isArray(specsHead.items) ? 'word' : 'named');
+  const text = kindOf === 'word' ? String(specsHead.value) : (specsHead?.items?.[0]?.value ?? '');
+  let ptrs = 0;
+  if (syn.dcl !== undefined) {
+    let cur = syn.dcl.items?.[1];
+    while (cur !== null && cur !== undefined && cur.items?.[0]?.value === 'ptrs-add') { ptrs += 1; cur = cur.items[1]; }
+  } else {
+    let cur = syn.ptrs;
+    while (cur !== null && cur !== undefined && cur.items?.[0]?.value === 'ptrs-add') { ptrs += 1; cur = cur.items[1]; }
+  }
+  const t = {
+    base: { kind: kindOf, text },
+    mods: [],
+    ptrs,
+    suffixes: [],
+    shape: 'data',
+    raw: { specs: syn.specs, dcl: syn.dcl },
+  };
+  const r = resolveType(t, env);
+  return r.type;
+}
+
+/** 后缀链上的每一格，**按源码次序**（左递归链倒着塞）。这一层按位置走，省一次循环依赖。 */function suffixChain(chain) {
   const out = [];
   let cur = chain;
   while (cur !== null && cur !== undefined && Array.isArray(cur.items)) {

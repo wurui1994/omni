@@ -128,7 +128,8 @@ function ownFields(agg, env, ctx = { owner: '', extra: [] }) {
       pack.used += n;
       return;
     }
-    if (m.shape !== 'data' && m.shape !== 'array') return;
+    /* 函数指针字段也是一格数据（`(m_op (fnty (int int) int))`，109-fnfield.jnc）。 */
+    if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') return;
     if (m.name === null) { out.push(null); return; }
     flush();
     const r = resolveType(m.type, env);
@@ -167,7 +168,7 @@ function unionFields(uni, env, ctx, unionAt) {
       }
       return;                                                       // 别的嵌套类型不摊
     }
-    if (m.shape !== 'data' && m.shape !== 'array') return;
+    if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') return;
     if (m.name === null) { bad = true; return; }
     const r = resolveType(m.type, env);
     if (r.type === null) { bad = true; return; }
