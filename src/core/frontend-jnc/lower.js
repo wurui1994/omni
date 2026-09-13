@@ -200,6 +200,7 @@ import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { OmniError } from '../source/diag.js';
 import { compose, say } from '../frontend-engine/positions.js';
 import { lookupName, lexChain, EXT, INH, IMP } from '../frontend-engine/scopes.js';
+import { pick, worst } from '../frontend-engine/overload.js';
 import { JNC_FEATURES } from '../../lang/jnc/features/index.js';
 
 /* 位置规格（ADR-0029 的 L2）。这一份**只**读它，用来把"不收"那些话从手写的字符串换成
@@ -1613,16 +1614,8 @@ class JncLower {
       return this.nope(n, `'${label}' 有 ${rec.sets.length} 条，而右边的类型这一层还得先降一遍`
         + '才知道（要按实参类型挑，见 ADR-0016 第八十刀）');
     }
-    let best = -1;
-    let bestScore = 0;
-    let tie = false;
-    for (let i = 0; i < rec.sets.length; i++) {
-      const sc = this.argCost(ct.ty, rec.sets[i], ct.lit);
-      if (sc === 0) continue;
-      if (sc === bestScore) tie = true;
-      if (sc > bestScore) { bestScore = sc; best = i; tie = false; }
-    }
-    if (best === -1) {
+    const { best, tie } = pick(rec.sets.keys(), (i) => this.argCost(ct.ty, rec.sets[i], ct.lit));
+    if (best === null) {
       return this.err(n, `'${label}' 那 ${rec.sets.length} 条`
         + `（${rec.sets.map(tyName).join(' / ')}）没有一条收得下 ${tyName(ct.ty)}`);
     }
@@ -8629,16 +8622,8 @@ class JncLower {
         return this.nope(n, `写属性 '${shown(pn)}' —— 它有 ${pi.sets.length} 格存值器，`
           + '而右边的类型这一层还得先降一遍才知道（重载要按类型挑，见 ADR-0016 第八十刀）');
       }
-      let best = -1;
-      let bestScore = 0;
-      let tie = false;
-      for (let i = 0; i < pi.sets.length; i++) {
-        const sc = this.argCost(ct.ty, pi.sets[i], ct.lit);
-        if (sc === 0) continue;
-        if (sc === bestScore) tie = true;
-        if (sc > bestScore) { bestScore = sc; best = i; tie = false; }
-      }
-      if (best === -1) {
+      const { best, tie } = pick(pi.sets.keys(), (i) => this.argCost(ct.ty, pi.sets[i], ct.lit));
+      if (best === null) {
         return this.err(n, `属性 '${shown(pn)}' 那 ${pi.sets.length} 格存值器`
           + `（${pi.sets.map(tyName).join(' / ')}）没有一格收得下 ${tyName(ct.ty)}`);
       }
@@ -9495,21 +9480,14 @@ class JncLower {
         + `${bi + 1} 个实参的类型这一层还得先降一遍才知道`
         + '（同元重载要按参数类型挑，见 ADR-0016 第八十刀）');
     }
-    let best = -1;
-    let bestScore = 0;
-    let tie = false;
-    for (const c of fits) {
+    /* 打分那一步是**这门语言的**（`argCost` 照 jancy 的 CastKind 排），"怎么挑"是引擎的：
+       各实参里最差的一档当这一条的分、取最高分、并列即歧义（见 frontend-engine/overload.js）。
+       先前这套循环在这一份里抄了四遍 —— 抄多了不是行数问题，是四份会各自漂。 */
+    const { best, tie } = pick(fits, (c) => {
       const { want } = shape(c);
-      let score = 5;
-      for (let i = 0; i < tys.length; i++) {
-        const one = this.argCost(tys[i].ty, want[i], tys[i].lit);
-        if (one < score) score = one;
-      }
-      if (score === 0) continue;                       // 这一条根本合不上
-      if (score === bestScore) tie = true;
-      if (score > bestScore) { bestScore = score; best = c; tie = false; }
-    }
-    if (best === -1) {
+      return worst(tys.length, (i) => this.argCost(tys[i].ty, want[i], tys[i].lit));
+    });
+    if (best === null) {
       // 同上（第一百五十刀）：合得上的那一条可能就在没进候选的那几条原型里
       if (hostOk && this.hostSibling(base)) return HOST_PICK;
       if (this.protoSibling(base)) return this.protoSiblingNope(n, base, given);
@@ -13453,22 +13431,13 @@ class JncLower {
         + `${tys.findIndex((t) => t === null) + 1} 个实参的类型这一层还得先降一遍才知道`
         + '（同元重载要按参数类型挑，见 ADR-0016 第八十刀）');
     }
-    let best = -1;
-    let bestScore = 0;
-    let tie = false;
-    for (const i of fits) {
+    const { best, tie } = pick(fits, (i) => {
       const want = sigs[i].params;
-      let score = 5;
       // 变参那一段没有形参可对（第一百九十五刀）：只按定参排
-      for (let k = 0; k < tys.length && k < want.length; k++) {
-        const one = this.argCost(tys[k].ty, want[k], tys[k].lit);
-        if (one < score) score = one;
-      }
-      if (score === 0) continue;
-      if (score === bestScore) tie = true;
-      if (score > bestScore) { bestScore = score; best = i; tie = false; }
-    }
-    if (best === -1) {
+      return worst(Math.min(tys.length, want.length),
+        (k) => this.argCost(tys[k].ty, want[k], tys[k].lit));
+    });
+    if (best === null) {
       return this.err(n, `'${label}' 那 ${fits.length} 条原型没有一条收得下这几个实参`
         + `（${tys.map((t) => tyName(t.ty)).join(', ')}）`);
     }
