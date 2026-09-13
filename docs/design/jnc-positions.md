@@ -8,7 +8,7 @@
 - `N…` 前端自己说的边界（"还不收"）
 - `E…` 普通错 —— **这一栏是下一刀的料**：话对不对、认不认错人，都在这儿看
 
-位置 9 × 要素 60 = 540 格：✓ 253、N 238、E 26、· 23、炸 0
+位置 9 × 要素 60 = 540 格：✓ 253、N 232、E 32、· 23、炸 0
 
 | 要素 | module | namespace | class-body | struct-body | union-body | opaque-class-body | fn-body | property-body | extension-body |
 |---|---|---|---|---|---|---|---|---|---|
@@ -71,7 +71,7 @@
 | event-args | ✓ | ✓ | ✓ | N19 | ✓ | ✓ | N26 | N32 | N33 |
 | alias-field-path | N11 | N11 | ✓ | ✓ | N11 | ✓ | N11 | N31 | N33 |
 | class-multi-base | ✓ | ✓ | ✓ | ✓ | N24 | ✓ | ✓ | N30 | N33 |
-| disposable-class | N12 | N12 | N12 | N12 | N24 | N12 | N25 | N30 | N12 |
+| disposable-class | E12 | E12 | E12 | E12 | N24 | E12 | N25 | N30 | E12 |
 
 ## 名字落在哪（`escapes`）
 
@@ -115,7 +115,7 @@
 9. '…' 的长度得从花括号初值数出来
 10. '…' 是一格类型，`类型(实参…)` 是 jancy 的**构造式转换**（要按目标类型挑一条转换，与 `(类型)值` 那种写法同一件事）—— 这一层只收 `(类型)值` 那一种
 11. alias '…' 的目标 '…'（收的是一格类型名、一格函数、这个类里的一格方法、或者这个类 / 结构体里逐段解得开的一串字段）
-12. `disposable` 的局部量 —— jancy 那儿它给这一格开一个可弃作用域、出去的时候（正常出去与抛出去都算）调它的 `dispose`（jnc_ct_Parser.cpp:2050-2068），要作用域出口那一套钩子
+12. `disposable` 只能写在**局部量**上（jancy 那边这个词只在那一档收，jnc_ct_Parser.cpp:2050-2068 —— 类自己的"可弃"是靠有一格 `dispose` 方法，disposable.rst 那句 "usually aliased to close/disconnect/…"）
 13. 类里除字段以外的成员
 14. 覆盖不了 '…'：基类里没有方法 '…'（jancy 那句 "cannot override '…': method not found"）（**没位置**）
 15. 字段 '…' 的长度得写出来

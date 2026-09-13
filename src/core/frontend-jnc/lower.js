@@ -7500,7 +7500,12 @@ class JncLower {
    *  `errcOk` 从 `allowVirt` 上分出来（第一百九十六刀）：`errorcode` 说的是**返回值**这件事
    *  （exceptions.rst:17），与"是不是类的方法"无关 —— 结构体的方法上照样写得（语料里的原样是
    *  `struct Guid { bool errorcode parse(string_t string) thin; }`，std_Guid.jnc:94）。 */
-  specs(n, allowVirt = false, extra = [], errcOk = allowVirt) {
+  /**
+   * `localOk`（这一刀）：这一处是不是**局部量**那一档。`disposable` 只有那一档收得下
+   * （jancy 的 Parser 里它只在局部量上收，jnc_ct_Parser.cpp:2050-2068），写在别处是**真的错**，
+   * 不是"我们还不收" —— 先前两种混着报同一句话（矩阵 `disposable-class` 那一列量出来的认错人）。
+   */
+  specs(n, allowVirt = false, extra = [], errcOk = allowVirt, localOk = false) {
     if (!isList(n) || head(n) !== 'specs') { this.err(n, '认不出的说明符表'); return null; }
     const mods = [...this.flat(n.items[2]), ...this.flat(n.items[3])]
       .map((m) => (isAtom(m) ? m.value : '?')).concat(extra);
@@ -7676,6 +7681,15 @@ class JncLower {
            出去的时候（正常出去与抛出去都算）调它的 dispose（jnc_ct_Parser.cpp:2050-2068）。
            时机是**确定的** —— 与那条 destruct 的账（GC 在不确定的时刻调）不是一件事 ——
            但要作用域出口那一套钩子，这一层还没有。 */
+        if (!localOk) {
+          /* 写在**别处**（类声明、字段、模块级的量…）：那是真的错 —— jancy 那边这个词只在
+             局部量上收。先前这儿与局部量那一档共用一句话，于是 `disposable class C { … }`
+             报的是"disposable 的**局部量**…"（认错人）。 */
+          this.err(n, '`disposable` 只能写在**局部量**上（jancy 那边这个词只在那一档收，'
+            + 'jnc_ct_Parser.cpp:2050-2068 —— 类自己的"可弃"是靠有一格 `dispose` 方法，'
+            + 'disposable.rst 那句 "usually aliased to close/disconnect/…"）');
+          return null;
+        }
         this.nope(n, '`disposable` 的局部量 —— jancy 那儿它给这一格开一个可弃作用域、'
           + '出去的时候（正常出去与抛出去都算）调它的 `dispose`（jnc_ct_Parser.cpp:2050-2068），'
           + '要作用域出口那一套钩子');
@@ -10564,7 +10578,7 @@ class JncLower {
        method-abstract` 那一格量出来是 E/M-007）。真身与 `errorcode`（第二百六十二刀）一样：
        函数体里写了个原型。所以收下这几个词往下走，让底下"声明符上带括号"那一句同时说两种
        读法（S-003）；写在**没有形参表**的量上时照旧报 M-007，见下面那一问。 */
-    const sp = this.specs(n.items[1], true, [], true);
+    const sp = this.specs(n.items[1], true, [], true, true);
     /* 说明符那一句就没成（第二百三十五刀）：诊断已经发过一次了，可这几个名字**一格都没登记上**,
        于是后面每一处用到它们又各报一句"未声明的变量" —— 一件事记成好几笔。把名字记下来，
        查名那两处据此说准。 */

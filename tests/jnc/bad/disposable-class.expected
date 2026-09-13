@@ -1,0 +1,1 @@
+`disposable` 只能写在**局部量**上（jancy 那边这个词只在那一档收，jnc_ct_Parser.cpp:2050-2068 —— 类自己的"可弃"是靠有一格 `dispose` 方法，disposable.rst 那句 "usually aliased to close/disconnect/…"）

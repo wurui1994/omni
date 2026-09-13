@@ -15,15 +15,24 @@ export default feature({
       say: '结构体字段的默认值',
       why: '那一格在 jancy 那边是构造里重放的，而结构体没有构造那条路',
     },
+    'S-007': {
+      text: '`disposable` 写在**别处**（类声明、字段、模块级的量…）',
+      say: '`disposable` 只能写在**局部量**上（jancy 那边这个词只在那一档收，'
+        + 'jnc_ct_Parser.cpp:2050-2068 —— 类自己的"可弃"是靠有一格 `dispose` 方法，'
+        + 'disposable.rst 那句 "usually aliased to close/disconnect/…"）',
+      match: '只能写在',
+      why: '这一句是**对的**（jancy 同），不是欠账 —— 先前它与局部量那一档共用一句话，'
+        + '于是 `disposable class C { … }` 报的是"disposable 的**局部量**…"（认错人）',
+    },
     'S-006': {
       text: '`disposable`（jancy 那儿它给那一格开一个可弃作用域，出去时调 `dispose`）',
       say: '`disposable` 的局部量 —— jancy 那儿它给这一格开一个可弃作用域、出去的时候'
         + '（正常出去与抛出去都算）调它的 `dispose`（jnc_ct_Parser.cpp:2050-2068），'
         + '要作用域出口那一套钩子',
       match: 'disposable',
-      why: '与 destruct（M-002）同一笔账：要作用域出口那一套钩子。**这一句现在认错人**：'
-        + '`disposable class C { … }`（一格类声明）也落在它上面，可那不是局部量 —— '
-        + '矩阵 `disposable-class` 那一列一量出来就摆在这儿（下一刀的料）',
+      why: '与 destruct（M-002）同一笔账：要作用域出口那一套钩子。'
+        + '先前 `disposable class C { … }`（一格类声明）也落在这句话上（认错人）——'
+        + '那笔账这一刀结了：写在别处的现在报 S-007',
     },
     'S-004': {
       text: '写在函数体里的 `using namespace X;`',
@@ -82,13 +91,13 @@ export default feature({
     { kind: 'dylib', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     /* `disposable class C { … }`：整行还不收，而且那句话**认错人**（说的是"局部量"）——
        见 S-006 的 why。 */
+    /* 这一刀之后：写在类声明上是**真的错**（S-007，jancy 同），与局部量那一档（S-006）分开。 */
     {
       kind: 'disposable-class',
       sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body',
         'extension-body'],
-      verdict: 'refuse',
-      account: 'S-006',
-      note: '认错人：这是一格**类声明**，不是局部量',
+      verdict: 'error',
+      account: 'S-007',
     },
     { kind: 'disposable-class', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'disposable-class', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },

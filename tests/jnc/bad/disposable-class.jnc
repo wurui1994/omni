@@ -1,0 +1,14 @@
+// 第二百六十五刀：`disposable` 写在**别处**（这一份写在类声明上）。
+//
+// 先前它与"局部量上的 disposable"（那是一笔真账：要作用域出口那一套钩子）共用一句话，于是
+// `disposable class C { … }` 报的是"disposable 的**局部量** …" —— 认错人。jancy 那边这个词只在
+// 局部量那一档收（jnc_ct_Parser.cpp:2050-2068），类自己的"可弃"是靠有一格 `dispose` 方法
+// （disposable.rst 那句 "usually aliased to close/disconnect/…"）。所以这一格是**真的错**，
+// 不是"还不收" —— 矩阵 `disposable-class` 那一列量出来的。
+disposable class D {
+	int m_v;
+}
+
+int main() {
+	return 0;
+}
