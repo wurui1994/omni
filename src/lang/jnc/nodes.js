@@ -92,6 +92,25 @@ export const JNC_SHAPES = [
   { name: 'import', of: 'item', holes: { path: 'exp' } },
 ];
 
+/**
+ * **哪些节点开哪种声明上下文**（三格：global / member / local，见 syntax.js 的 CONTEXTS）。
+ * 这是一张表，不是走树时的 if —— 谁开一层由数据说。
+ * 体外成员（`void C.f() override {}`）在树上长在顶层，但语义上是**成员**：
+ * 它的声明符名字是个限定名（`qualified`），所以那一格也在这张表里（`byName`）。
+ */
+export const JNC_CTX_OPENS = {
+  agg: 'member',
+  enum: 'member',
+  extension: 'member',
+  dylib: 'member',
+  'property-template': 'member',
+  compound: 'local',
+  'fn-def': null,          // 函数定义本身不开层：它的 `compound` 才开 local
+};
+
+/** 声明符的名字是限定名（`a.b`）时，这条声明算**成员**（体外成员定义）。 */
+export const JNC_MEMBER_BY_NAME = ['qualified', 'qualified-special'];
+
 /** jancy 这门语言（第一族）。拼法在 `.grammar`，所以 `parser: 'glr'`。 */
 export const jncLang = extend(commonShapeLang, {
   name: 'jnc',
