@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { jncLang } from '../../src/lang/jnc/nodes.js';
+import { named } from '../../src/lang/jnc/adapt.js';
 
 /* 语料：外面那份 jancy 有就用它（大、真实），没有就退到仓库自带的用例 ——
    这样这把尺子在任何一份 checkout 上都跑得起来，能当闸门用。 */
@@ -47,10 +48,16 @@ const headOf = (n) => {
 
 /** 每个头名：见过哪些 arity、每个位置上的子项头名分布。 */
 const shape = new Map();
+/* 顺带直接量一遍 `named()`：形状对得上是"每个名字的 arity 都落在区间里"，
+   而下游真正用的是 `named()` 认不认这**一个**节点 —— 两者该同时是满分，分头量才看得出。 */
+let nodes = 0;
+let nameable = 0;
 
 function visit(n) {
   if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
   const name = headOf(n);
+  nodes += 1;
+  if (named(n) !== null) nameable += 1;
   if (typeof name === 'string') {
     let rec = shape.get(name);
     if (rec === undefined) {
@@ -111,6 +118,8 @@ for (const [name, rec] of [...shape].sort((a, b) => {
 const cnt = (rec) => [...rec.arity.values()].reduce((x, y) => x + y, 0);
 console.log(`语料 ${files.length} 份（解析成 ${ok}）　树里 ${shape.size} 个名字`);
 console.log(`形状对得上 ${good.length}　对不上 ${bad.length}　树里有表里没声明 ${missing.length}`);
+console.log(`named() 认得 ${nameable}/${nodes} 个节点`
+  + `（${(nameable / Math.max(nodes, 1) * 100).toFixed(1)}%）`);
 
 if (bad.length > 0) {
   console.log('\n对不上（照实测的形状修表）：');
