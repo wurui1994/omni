@@ -124,6 +124,7 @@ const pile = (k, x) => {
 let same = 0;
 let owed = 0;
 let bad = 0;
+let skip = 0;
 
 for (const [i, c] of cases.entries()) {
   if (c.src === undefined) c.src = render(program(c.node), lang);
@@ -132,9 +133,15 @@ for (const [i, c] of cases.entries()) {
   writeFileSync(luaPath, `${c.src}\n`);
   let want;
   try {
-    want = execFileSync('luajit', [luaPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    // 生成的组合里有**不会停**的（`while twice(6) do … end` —— 数永远为真，Lua 自己也不停），
+    // 所以两条腿都得带表：超时就算"这个例子问不了"，跳过。先前没带表，靠输出撑爆缓冲
+    // 才碰巧跳过去 —— 那是运气，不是规矩。
+    want = execFileSync('luajit', [luaPath], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, maxBuffer: 1 << 20,
+    });
   } catch {
-    continue;                                   // luajit 都不收，那是"甲"那一问的事
+    skip += 1;
+    continue;                                   // luajit 都跑不动/停不下来，那是"甲"那一问的事
   }
   let sx;
   try {
@@ -148,7 +155,9 @@ for (const [i, c] of cases.entries()) {
   writeFileSync(sxPath, sx);
   let got;
   try {
-    got = execFileSync('node', ['src/core/cli.js', 'run', sxPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    got = execFileSync('node', ['src/core/cli.js', 'run', sxPath], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000, maxBuffer: 1 << 20,
+    });
   } catch (err) {
     bad += 1;
     pile('核心方言不收我降出来的东西', `${c.what}｜${String(err.stdout ?? err.message).trim().split('\n')[0]}`);
@@ -160,7 +169,7 @@ for (const [i, c] of cases.entries()) {
 }
 
 console.log(`两条腿（luajit vs omni run）：例子 ${cases.length} 个`);
-console.log(`一致 ${same}　记账 ${owed}　分歧 ${bad}`);
+console.log(`一致 ${same}　记账 ${owed}　分歧 ${bad}　跳过 ${skip}（luajit 自己跑不动或停不下来）`);
 for (const [k, v] of [...piles].sort((a, b) => b[1].length - a[1].length)) {
   console.log(`  ${String(v.length).padStart(4)}  ${k}`);
   for (const x of v.slice(0, show ? v.length : 2)) console.log(`        ${x}`);
