@@ -46,7 +46,10 @@ export const STD_INT_TYPEDEFS = new Set([
 export function resolveType(t, env = new Map(), depth = 0) {
   if (t === null || t === undefined) return { type: null, why: '没有类型' };
   if (depth > 8) return { type: null, why: 'typedef 绕回来了（深度上限）' };
-  const base = baseOf(t, env, depth);
+  /* 事件那一格**没有基类型**（`event m_onClick(int code);` 压根没写类型，回的永远是 void），
+     所以别拿它去查基类型 —— 先前查了，`no-type` 就把整格挡在这一行（尺子上是
+     `m_onClick: 认不出基类型 'no-type'`），下面那条事件规则压根走不到。 */
+  const base = t.shape === 'event' ? { k: 'void' } : baseOf(t, env, depth);
   if (base === null) return { type: null, why: `认不出基类型 '${t.base.text || '(空)'}'` };
   if (t.shape === 'fnptr') {
     /* 函数指针（`int function* m_op(int, int)` → `(fnty (int int) int)`）：

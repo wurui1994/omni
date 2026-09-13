@@ -54,8 +54,11 @@ export function structLine(agg, env, allAggs = null) {
   if (bases === null) return { line: null, lines: [], why: '基类那一格还解不出来' };
   parts.push(...bases);
   const extra = [];
-  const own = ownFields(agg, env, { owner: name, extra });
-  if (own === null) return { line: null, lines: [], why: '有字段还解不出来' };
+  const fails = [];
+  const own = ownFields(agg, env, { owner: name, extra, fails });
+  if (own === null) {
+    return { line: null, lines: [], why: `有字段还解不出来（${fails.join('；') || '?'}）` };
+  }
   parts.push(...own);
   if (isClass && allAggs !== null) {
     for (const d of allAggs) {
@@ -63,8 +66,10 @@ export function structLine(agg, env, allAggs = null) {
       if (d.word !== 'class' && d.word !== 'opaque class') continue;
       if (chainRoot(d, env) !== agg) continue;
       const dn = d.emitName ?? nameText(d.name);
-      const f = ownFields(d, env, { owner: dn ?? name, extra });
-      if (f === null) return { line: null, lines: [], why: '派生类里有字段还解不出来' };
+      const f = ownFields(d, env, { owner: dn ?? name, extra, fails });
+      if (f === null) {
+        return { line: null, lines: [], why: `派生类里有字段还解不出来（${fails.join('；') || '?'}）` };
+      }
       parts.push(...f);
     }
   }
@@ -129,7 +134,7 @@ function lastIdent(n) {
 }
 
 /** 自己那几格数据字段。`ctx` 带着东家的名字与"顺带要发的那几行"。 */
-function ownFields(agg, env, ctx = { owner: '', extra: [] }) {
+function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [] }) {
   const out = [];
   /* 位域挤格子的状态：`bits` 是底宽、`used` 是已经占掉的位数。碰上非位域就**收口**。 */
   let pack = null;
@@ -154,7 +159,11 @@ function ownFields(agg, env, ctx = { owner: '', extra: [] }) {
          格名是 `$b<这一格的序号>`（规则从旧降级的真输出反出来，104-bitfield.jnc）。 */
       const bits = baseIntBits(m.type);
       const n = bitfieldBits(m.type);
-      if (bits === null || n === null) { out.push(null); return; }  // 认不出底宽/位数：不猜
+      if (bits === null || n === null) {                            // 认不出底宽/位数：不猜
+        ctx.fails?.push(`${m.name ?? '?'}: 位域的底宽/位数认不出`);
+        out.push(null);
+        return;
+      }
       if (pack !== null && (pack.bits !== bits || pack.used + n > bits)) flush();
       if (pack === null) pack = { bits, used: 0 };
       pack.used += n;
@@ -170,7 +179,7 @@ function ownFields(agg, env, ctx = { owner: '', extra: [] }) {
         if (im.shape !== 'data' && im.shape !== 'array' && im.shape !== 'fnptr') continue;
         if (im.name === null) { out.push(null); continue; }
         const ir = resolveType(im.type, env);
-        if (ir.type === null) { out.push(null); continue; }
+        if (ir.type === null) { ctx.fails?.push(`${m.name}.${im.name}: ${ir.why}`); out.push(null); continue; }
         out.push(`(${ctx.owner}$${m.name}$${im.name} ${emitType(ir.type, 'field')})`);
       }
       return;
@@ -181,10 +190,10 @@ function ownFields(agg, env, ctx = { owner: '', extra: [] }) {
     if (m.storage.includes('alias') || m.storage.includes('typedef')) return;
     /* 事件字段也进字段表（多播那一格：`(arr (fnty () void))`，142-propalias.jnc）。 */
     if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr' && m.shape !== 'event') return;
-    if (m.name === null) { out.push(null); return; }
+    if (m.name === null) { ctx.fails?.push('一格没有名字的成员'); out.push(null); return; }
     flush();
     const r = resolveType(m.type, env);
-    if (r.type === null) { out.push(null); return; }
+    if (r.type === null) { ctx.fails?.push(`${m.name}: ${r.why}`); out.push(null); return; }
     out.push(`(${m.name} ${emitType(r.type, 'field')})`);
   });
   flush();
@@ -220,9 +229,9 @@ function unionFields(uni, env, ctx, unionAt) {
       return;                                                       // 别的嵌套类型不摊
     }
     if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') return;
-    if (m.name === null) { bad = true; return; }
+    if (m.name === null) { ctx.fails?.push('union 里一格没有名字的成员'); bad = true; return; }
     const r = resolveType(m.type, env);
-    if (r.type === null) { bad = true; return; }
+    if (r.type === null) { ctx.fails?.push(`${m.name}: ${r.why}`); bad = true; return; }
     out.push(`(${m.name} ${emitType(r.type, 'field')})`);
   });
   return bad ? null : out;
