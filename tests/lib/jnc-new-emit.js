@@ -327,9 +327,9 @@ for (const f of files) {
         let ok = true;
         for (let k = tys.length; k < cf.length; k += 1) {
           const d = named(cf[k]?.at)?.init ?? undefined;
-          const t = d === undefined ? null : litArgType(d);
-          if (t === null) { ok = false; break; }
-          tys.push(t);
+          const dt = d === undefined ? null : typeOfExpr(d, st.names, env);
+          if (dt === null) { ok = false; break; }
+          tys.push(emitType(dt, 'slot'));
         }
         if (!ok) { note('默认实参那一格要定型'); continue; }
       }
