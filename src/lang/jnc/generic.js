@@ -223,7 +223,16 @@ export function expandTemplates(tree, templates) {
     const nm = named(ag);
     const items = [...ag.items];
     items[ag.items.indexOf(nm.name)] = nameNode(inst, nm.name);
-    const done = { ...ag, items };
+    let done = { ...ag, items };
+    /* **实例体里的 typedef 要各自改名**：`struct Box<P> { typedef P Entry; Entry val(); }`
+       造出两格实例，两格里的 `Entry` 是**两个类型**（`Box$Node` 的是 `Node`、`Box$int` 的是
+       `int`）。名字不分开，按裸名索引的那张表就只留得下一格 —— 那是静默的错答案。
+       改成 `<实例名>$<原名>`，体里引它的地方一并换（`substitute` 换的就是 `(name X)`）。 */
+    const ren = new Map();
+    for (const tdName of bodyTypedefNames(done)) {
+      ren.set(tdName, nameNode(`${inst}$${tdName}`, nm.name));
+    }
+    if (ren.size > 0) done = substitute(done, ren);
     insts.set(inst, rewrite(done, depth + 1));                       // 体里的用点换成实例名
     return inst;
   };
@@ -253,6 +262,28 @@ export function expandTemplates(tree, templates) {
   walk(tree, 0);
   /* 原来那棵树上的用点也换成实例名答回去 —— 顶层写 `Box<int> m_b;` 的那一格要它。 */
   return { insts, typedefs, tdefs, fails, tree: rewrite(tree, 0) };
+}
+
+/** 一格聚合体体里那几条 `typedef` 起的名字（实例化时要各自改名，见 instOne）。 */
+function bodyTypedefNames(aggNode) {
+  const out = [];
+  const walk = (n) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    if (headOf(n) === 'typedef') {
+      const tn = named(n);
+      if (tn !== null) {
+        for (const d of allInChain(tn.dcls, 'dcls-add', 'dcls')) {
+          const dc = named(d);
+          const t = dc === null ? null : nameText(dc.name);
+          if (t !== null) out.push(t);
+        }
+      }
+      return;
+    }
+    for (const it of n.items) walk(it);
+  };
+  walk(aggNode);
+  return out;
 }
 
 /** 这份文件里的模板表（`base -> {base, params, node}`）。 */

@@ -190,6 +190,22 @@ for (const f of files) {
       if (a === null) continue;
       a.emitName = inm;
       aggs.push(a);
+      /* 实例体里那几条 typedef 已经各自改过名（`Box$Node$Entry`）—— 一并进 env。 */
+      const tds = [];
+      const dig = (x) => {
+        if (x === null || typeof x !== 'object' || !Array.isArray(x.items)) return;
+        if (headOf(x) === 'typedef') { tds.push(x); return; }
+        for (const it of x.items) dig(it);
+      };
+      dig(node);
+      for (const td of tds) {
+        const tnm = named(td);
+        if (tnm === null) continue;
+        for (const d of allInChain(tnm.dcls, 'dcls-add', 'dcls')) {
+          const t = readDeclType(tnm.specs, d);
+          if (t !== null && t.name !== null) env.set(t.name, { kind: 'typedef', type: t });
+        }
+      }
       env.set(inm, {
         kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
         name: inm,
