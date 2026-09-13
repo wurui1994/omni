@@ -77,7 +77,8 @@ export function resolveType(t, env = new Map(), depth = 0) {
      类那一族**吞掉一个 `*`**：jancy 里"是指针的就得看着像指针"，一格类变量写成 `C*`，
      而它在方言里本来就是 `(ptr 根)`（第五十二刀）。少这一条，`Node* m_next` 会多一层。 */
   let el = base;
-  const stars = base.k === 'class' ? Math.max(t.ptrs - 1, 0) : t.ptrs;
+  /* 类与**函数类型**那两族吞掉一个 `*`（`C* p` / `Fn* m_f` 里那一个星号是它们自己的形状）。 */
+  const stars = base.k === 'class' || base.k === 'fnptr' ? Math.max(t.ptrs - 1, 0) : t.ptrs;
   for (let i = 0; i < stars; i += 1) el = { k: 'ptr', target: el };
 
   /* 多维数组按**源码次序**读长度（`int m_grid[2][3]` 是 [2,3]），从里往外套：
@@ -116,6 +117,13 @@ function baseOf(t, env, depth = 0) {
        接着解一遍（带深度上限防环）。少这一跳，typedef / alias 那一摊十几个聚合体
        全拼不出来（尺子的"拼不出来的那几处"里几乎全是它）。 */
     if (e.kind === 'typedef' && e.type !== undefined) {
+      /* **函数类型的 typedef**（`typedef Num Fn(int a, int b);`）：它本身是一格函数类型，
+         字段写 `Fn* m_f;` 发的是 `(fnty (int int) int)`（116-structtypedef.jnc）——
+         那一个 `*` 是函数指针自己的，所以下面 `stars` 那儿要吞掉一个。 */
+      if (e.type.shape === 'fn') {
+        const inner = fnParts({ ...e.type, ptrs: e.type.ptrs + 1, shape: 'fnptr' }, env);
+        return inner;
+      }
       const r = resolveType(e.type, env, depth + 1);
       return r.type;
     }
