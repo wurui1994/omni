@@ -290,7 +290,15 @@ for (const f of files) {
   const digGlobals = (n, inFn) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
-    if (h === 'fn-def' || h === 'agg') return;                       // 体里的是局部、类里的是字段
+    if (h === 'agg') return;                                         // 类里的是字段，不是全局
+    /* **顶层的函数**也进名字表 —— 项里调函数那一格要它（`new Point { 1, twice(k), … }`，
+       24-new-curly.jnc:44）。体里的是局部量，另一条路（`localNames`）收。 */
+    if (h === 'fn-def' || h === 'fn-proto') {
+      const fnm = named(n);
+      const ft = fnm === null ? null : readDeclType(fnm.specs, fnm.dcl);
+      if (ft !== null && ft.name !== null && ft.shape === 'fn') globals.set(ft.name, ft);
+      return;
+    }
     if (h === 'var-decl') {
       const vn = named(n);
       if (vn !== null) {

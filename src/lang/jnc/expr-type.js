@@ -8,7 +8,8 @@
 // 认不出来的照实答 `null`，绝不猜（猜出来的类型会变成静默的错答案）。
 //
 // 现在收的：整数/实数/布尔/字符串字面量、名字、括号、算术与比较那几个二元算符、
-// 一元 `-` / `+` / `~` / `!`。别的（成员访问、调用、下标、cast、new…）答 null，记账。
+// 一元 `-` / `+` / `~` / `!`、成员访问（`p.m_x`）、裸名字函数的调用（回它的返回类型）。
+// 别的（下标、cast、new、函数指针的调用…）答 null，记账。
 
 import { headOf, named } from './adapt.js';
 import { resolveType } from './resolve-type.js';
@@ -75,6 +76,18 @@ export function typeOfExpr(n, names = new Map(), env = new Map()) {
     const mm = rec.agg.members.find((x) => x.name === fname);
     if (mm === undefined || mm.type === null) return null;
     return resolveType(mm.type, env).type;
+  }
+  /* **调用**（`(call fn args)`，公共节点表 common-nodes.js:42）：被调那一格是个裸名字、
+     且名字表里那条记录是**函数**（shape === 'fn'）时，这一格的类型就是它的**返回类型** ——
+     与 `retText` 同一条路：把 `fn` 这个形状摘掉再解一遍（`*` 与 `[N]` 本来就长在返回类型上）。
+     压根没写返回类型的（void）与别的被调形状（函数指针、成员函数、算符…）照旧答 null，记账。 */
+  if (h === 'call') {
+    const f = nm?.fn;
+    if (f === null || f === undefined || !Array.isArray(f.items) || headOf(f) !== 'name') return null;
+    const t = names.get(String(named(f)?.text?.value ?? ''));
+    if (t === undefined || t.shape !== 'fn') return null;
+    if (t.base.kind === 'none') return null;                         // void：没有值，不该当实参
+    return resolveType({ ...t, shape: 'data' }, env).type;
   }
   if (h === 'binary') {
     const op = nm === null ? null : String(nm.op?.value ?? '');
