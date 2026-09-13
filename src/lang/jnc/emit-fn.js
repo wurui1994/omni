@@ -92,7 +92,7 @@ function fnSuffixOf(t) {
 }
 
 /** 这一格函数的名字：普通名字、**特名**（`construct` / `destruct`）或**算符**（`op$inc`）。 */
-export function fnName(m) {
+export function fnName(m, inProp = false) {
   if (m === null || m === undefined) return null;
   if (m.name !== null && m.name !== undefined) return m.name;
   const dc = readDcl(m.type?.raw?.dcl);
@@ -104,10 +104,12 @@ export function fnName(m) {
   }
   /* 属性的取/存：`<属性名>$get` / `$set`（旧降级 107-psetexpr.jnc 的 `C$m_val$get`）。 */
   if (dc.accessor !== null) return `${dc.accessor.path}$${dc.accessor.which}`;
-  /* **裸写**的 `get` / `set`：带着体的那一种是下标算符 `op$index$get` / `$set`
-     （130-opindex.jnc 的 `Box$op$index$get`）；只有原型的那一种体写在别处
-     （127-outerget.jnc），这一格不发 —— 那一族要等"体外定义"那一刀。 */
+  /* **裸写**的 `get` / `set`：在**属性体里**它就是这格属性的取/存（prop_full.rst:15 那对花括号
+     开的是一层命名空间）；在类体里带着体的那一种才是下标算符 `op$index$get` / `$set`
+     （130-opindex.jnc 的 `Box$op$index$get`）；只有原型的那一种体写在别处（127-outerget.jnc），
+     这一格不发。三种形状同名，靠"在哪儿 + 有没有体"分开。 */
   if (dc.bareAccessor !== null) {
+    if (inProp) return dc.bareAccessor;
     return headOf(m.at) === 'fn-def' ? `op$index$${dc.bareAccessor}` : null;
   }
   /* **体外定义**：点串名字整串用 `$` 接起来（`C1.p.get` → `C1$p$get`，127-outerget.jnc）。 */
@@ -251,7 +253,7 @@ export function overloadIndex() {
  */
 export function fnHead(m, env, ctx = { owner: null, self: null }) {
   if (m === null || m === undefined || m.type === null) return { head: null, why: '没有类型' };
-  const base = fnName(m);
+  const base = fnName(m, ctx.inProp === true);
   if (base === null) return { head: null, why: '没有名字' };
   const sfx = fnSuffixOf(m.type);
   if (sfx === null) {

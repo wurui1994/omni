@@ -16,7 +16,7 @@ import { execFileSync } from 'node:child_process';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf, named } from '../../src/lang/jnc/adapt.js';
-import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
+import { readAgg, readEnum, readBodyMembers } from '../../src/lang/jnc/agg.js';
 import { collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
@@ -82,6 +82,7 @@ const skipAt = [];
 let noFn = 0;
 /** 覆盖率那一栏：旧降级发了、新腿连试都没试的那几格。 */
 let uncovered = 0;
+const noFnAt = [];
 const families = new Map();
 const uncoveredAt = [];
 
@@ -306,6 +307,28 @@ for (const f of files) {
         getCases.push({ m, ctx: { owner: own, self: selfOf(a), clsRoot } });
         continue;
       }
+      /* **完整声明式的属性**：取/存写在属性体里（`property m_v { int get(){…} void set(int x){…} }`）
+         —— 那对花括号开的是一层命名空间（prop_full.rst:15），所以东家是 `<东家>$<属性名>`。
+         体里一格函数都没有、可有语句的那一种是**简写取值器**（140-propgetbody.jnc），
+         按 autoget 那一族发一格 `$get`。 */
+      if (m.shape === 'prop' && m.name !== null) {
+        const body = named(m.at)?.body;
+        const inner = headOf(body) === 'compound' ? readBodyMembers(body) : [];
+        const accs = inner.filter((x) => x.shape === 'fn');
+        if (accs.length > 0) {
+          for (const im of accs) {
+            cases.push({
+              m: im,
+              ctx: { owner: `${own}$${m.name}`, self: selfOf(a), clsRoot, inProp: true },
+            });
+          }
+          continue;
+        }
+        if (headOf(body) === 'compound') {
+          getCases.push({ m, ctx: { owner: own, self: selfOf(a), clsRoot } });
+          continue;
+        }
+      }
       if (m.shape !== 'fn') continue;
       /* **只有原型的那一格不算一个函数**：它的体或写在类外（那儿另有一格，名字一样）、
          或在宿主那边（旧降级压根不发）。先前两处各算一格，重载号于是多走一位 ——
@@ -347,7 +370,7 @@ for (const f of files) {
     for (const h of r.heads) {
       mineNames.add(h.name);
       const wantA = oracle.get(h.name);
-      if (wantA === undefined) { noFn += 1; continue; }
+      if (wantA === undefined) { noFn += 1; noFnAt.push(`${f.split('/').pop()}　${h.name}`); continue; }
       cmp += 1;
       if (h.head === wantA) same += 1;
       else if (diff.length < 20) {
@@ -361,7 +384,7 @@ for (const f of files) {
       for (const h of reactorHeads(c.m, c.ctx).heads) {
         mineNames.add(h.name);
         const wantR = oracle.get(h.name);
-        if (wantR === undefined) { noFn += 1; continue; }
+        if (wantR === undefined) { noFn += 1; noFnAt.push(`${f.split('/').pop()}　${h.name}`); continue; }
         cmp += 1;
         if (h.head === wantR) same += 1;
         else if (diff.length < 20) {
@@ -370,7 +393,9 @@ for (const f of files) {
       }
       continue;
     }
-    const base = fnName(c.m);
+    /* 名字要与 `fnHead` 用同一条口径 —— 属性体里那格裸写的 `get`/`set` 是取/存，不是下标算符
+       （先前尺子这一侧漏传 `inProp`，键算成了 `…$op$index$set`）。 */
+    const base = fnName(c.m, c.ctx.inProp === true);
     const sym = base === null ? null : (c.ctx.owner === null ? base : `${c.ctx.owner}$${base}`);
     const dup = sym === null ? 0 : nextDup(sym);
     const built = fnHead(c.m, env, { ...c.ctx, dup, clsRoot });
@@ -382,7 +407,11 @@ for (const f of files) {
       if (skipAt.length < 20) skipAt.push(`${f.split('/').pop()}　${key}　${built.why}`);
       continue;
     }
-    if (want === undefined) { noFn += 1; continue; }  // 旧降级没发这一格（原型、宿主面那几族）
+    if (want === undefined) {                         // 旧降级没发这一格（原型、宿主面那几族）
+      noFn += 1;
+      noFnAt.push(`${f.split('/').pop()}　${key}`);
+      continue;
+    }
     cmp += 1;
     if (built.head === want) same += 1;
     else if (diff.length < 20) {
@@ -396,7 +425,7 @@ for (const f of files) {
     uncovered += 1;
     const fam = familyOf(nm);
     families.set(fam, (families.get(fam) ?? 0) + 1);
-    if (uncoveredAt.length < 20) uncoveredAt.push(`${f.split('/').pop()}　${nm}`);
+    if (uncoveredAt.length < (all ? 400 : 20)) uncoveredAt.push(`${f.split('/').pop()}　${nm}`);
   }
 }
 
@@ -410,6 +439,14 @@ if (uncovered > 0) {
 if (skip.size > 0) {
   console.log(`拼不出来（记账，不算对）：${[...skip].sort((a, b) => b[1] - a[1])
     .map(([w, n]) => `${w}×${n}`).join('  ')}`);
+}
+if (all && noFnAt.length > 0) {
+  console.log('\n新腿发了、旧降级没有这个名字的（要么名字错了、要么本来就不该发）：');
+  for (const d of noFnAt.slice(0, 40)) console.log(`  ${d}`);
+}
+if (all && uncoveredAt.length > 0) {
+  console.log('\n还没试的那几格（照着去补下一族）：');
+  for (const d of uncoveredAt) console.log(`  ${d}`);
 }
 if (all && skipAt.length > 0) {
   console.log('\n拼不出来的那几处：');
