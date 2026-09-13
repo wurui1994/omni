@@ -91,6 +91,7 @@ let lineTry = 0;
 let lineSame = 0;
 const lineDiff = [];
 const lineSkip = new Map();
+const skipAt = [];
 
 for (const f of files) {
   let out = '';
@@ -169,6 +170,7 @@ for (const f of files) {
       else if (lineDiff.length < 10) lineDiff.push(`${f.split('/').pop()}\n      旧 ${rec.line}\n      新 ${built.line}`);
     } else {
       lineSkip.set(built.why, (lineSkip.get(built.why) ?? 0) + 1);
+      if (skipAt.length < 20) skipAt.push(`${f.split('/').pop()}　${nm}　${built.why}`);
     }
   }
 }
@@ -183,6 +185,10 @@ console.log(`整行（emit-agg.js 拼得出来的那些）：试 ${lineTry} 行�
 if (lineSkip.size > 0) {
   console.log(`  拼不出来（记账）：${[...lineSkip].sort((a, b) => b[1] - a[1])
     .map(([w, n]) => `${w}×${n}`).join('  ')}`);
+}
+if (all && skipAt.length > 0) {
+  console.log('\n拼不出来的那几处（照着去补表）：');
+  for (const d of skipAt) console.log(`  ${d}`);
 }
 if (lineDiff.length > 0) {
   console.log('\n整行对不上：');
