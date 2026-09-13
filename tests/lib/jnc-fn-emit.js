@@ -349,7 +349,9 @@ for (const f of files) {
       if (m.shape === 'prop' && m.name !== null) {
         const body = named(m.at)?.body;
         const inner = headOf(body) === 'compound' ? readBodyMembers(body) : [];
-        const accs = inner.filter((x) => x.shape === 'fn');
+        /* 只有原型的那一格不算一个函数（体写在属性外面，与它是同一个）——
+           不滤掉就会多走号（153-propsetovl.jnc 的 `g_q$set$o3` / `$o4`）。 */
+        const accs = inner.filter((x) => x.shape === 'fn' && headOf(x.at) === 'fn-def');
         if (accs.length > 0) {
           for (const im of accs) {
             cases.push({
@@ -383,6 +385,27 @@ for (const f of files) {
     }
   }
   for (const m of tops) {
+    /* **顶层的完整声明式属性**（`property g_p { int get(){…} void set(int x){…} }`，
+       72-propfull.jnc）在树上是一格没有 `fn-suffix` 的 `fn-def`、体就是属性体 ——
+       取/存于是叫 `g_p$get` / `g_p$set`（顶层那一格没有 `$this`）。 */
+    if (m.shape === 'prop' && m.name !== null) {
+      const body = named(m.at)?.body;
+      const inner = headOf(body) === 'compound' ? readBodyMembers(body) : [];
+      /* 只有原型的那一格不算一个函数（体写在属性外面，与它是同一个）——
+         不滤掉就会多走号（153-propsetovl.jnc 的 `g_q$set$o3` / `$o4`）。 */
+      const accs = inner.filter((x) => x.shape === 'fn' && headOf(x.at) === 'fn-def');
+      const own = m.ns === null || m.ns === undefined ? m.name : `${m.ns}$${m.name}`;
+      if (accs.length > 0) {
+        for (const im of accs) {
+          cases.push({ m: im, ctx: { owner: own, self: null, clsRoot, inProp: true } });
+        }
+        continue;
+      }
+      if (headOf(body) === 'compound') {
+        getCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
+        continue;
+      }
+    }
     if (m.shape !== 'fn') continue;
     if (m.name === 'main') continue;                  // 旧降级不发它（体被抬走了）
     const mm = { ...m, storage: m.storage ?? [] };
