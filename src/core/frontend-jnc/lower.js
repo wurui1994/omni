@@ -199,6 +199,7 @@
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { OmniError } from '../source/diag.js';
 import { compose, say } from '../frontend-engine/positions.js';
+import { lookupName, lexChain, EXT, INH, IMP } from '../frontend-engine/scopes.js';
 import { JNC_FEATURES } from '../../lang/jnc/features/index.js';
 
 /* 位置规格（ADR-0029 的 L2）。这一份**只**读它，用来把"不收"那些话从手写的字符串换成
@@ -2403,6 +2404,91 @@ class JncLower {
    */
   resolve(nm, has) {
     const k = nm.replace(/\./g, '$');
+    const got = lookupName(k, {
+      path: this.scopePath(),
+      has,
+      join: (ns, key) => (ns === '' ? key : `${ns}$${key}`),
+      ambigOn: [IMP],
+      onAmbig: (key, first, other) => this.usingAmbig.set(key, (first.at ?? other.at)),
+    });
+    /* 两条路并排跑（ADR-0029 Phase 2 的迁移法）：`OMNI_SCOPE_DIFF=1` 时把老那条字符串手术
+       也跑一遍，答案不一样就当场炸。腿与榜都在这道闸门下跑过一遍，才敢把新路当正路。 */
+    if (process.env.OMNI_SCOPE_DIFF === '1') {
+      const ref = this.resolveRef(k, has);
+      if (ref !== got) {
+        throw new OmniError(`查名两条路不一样：'${k}' 在 '${this.ns}' 里，新 ${got}、老 ${ref}`);
+      }
+    }
+    return got;
+  }
+
+  /**
+   * 这门语言的**候选作用域序列**（L3 的数据面）。次序照 jancy：
+   *
+   *   1. `LEX` 自己那条链，一层层往外退到全局。往外退那一步不能只按 `$` 掐 ——
+   *      泛型的实例名是 `Box$Node` 那样拼出来的（`模板名$实参键`，见 tinstOne），里头那个
+   *      `$` 不是一层命名空间；照 `$` 退会退成 `Box`，于是在实例体里写 `Node` 找到的是
+   *      **实例它自己**。所以实例名当一个整体，直接跳到泛型声明处那一层（`instNs`，第 132 刀）。
+   *   2. `EXT` 体外写的方法（第 52 刀）：它的**签名**也在那个类那一层里查 —— `S1 C.foo()`
+   *      里的 S1 就是 `C.S1`（test97.jnc:15）。只在 fnSig 那一遍非 null，不影响登记用的 `qual`。
+   *   3. `INH` 基类那一层（第 137 刀）：自己那几层先查完才轮到它；多格基类按**声明顺序** BFS
+   *      （与第 94 刀 mixins 同一条口径）。基类名解成全名要在这时候做（aggHoist 那一遍类还没
+   *      登记上），所以这儿回头调 `resolve` —— `inBase` 是那道闸门，免得绕回来。
+   *   4. `IMP` `using namespace X;`（第 217 刀）：排在最后，只会**多认**名字。两张表里都有
+   *      同一个名字时 jancy 报歧义 —— 那一格由 `ambigOn: [IMP]` 交给引擎认（见 scopes.js）。
+   */
+  * scopePath() {
+    yield* lexChain(this.ns, (p) => {
+      if (p === '') return null;
+      const j = this.instNs.get(p);
+      if (j !== undefined && j !== p) return j;
+      const i = p.lastIndexOf('$');
+      return i < 0 ? '' : p.slice(0, i);
+    });
+    if (this.nsExtra !== null) yield { label: EXT, ns: this.nsExtra };
+    yield* this.basePath();
+    for (const u of this.usingNs) {
+      if (!(u.in === '' || this.ns === u.in || this.ns.startsWith(`${u.in}$`))) continue;
+      yield { label: IMP, ns: u.ns, at: u.node };
+    }
+  }
+
+  /** `INH` 那一段：每一层上按声明顺序 BFS 走基类（见 scopePath 第 3 条）。 */
+  * basePath() {
+    if (this.inBase || this.aggBases.size === 0) return;
+    for (const st of lexChain(this.ns, (p) => {
+      if (p === '') return null;
+      const j = this.instNs.get(p);
+      if (j !== undefined && j !== p) return j;
+      const i = p.lastIndexOf('$');
+      return i < 0 ? '' : p.slice(0, i);
+    })) {
+      const q = [st.ns];
+      const seen = new Set();
+      while (q.length > 0) {
+        const cur = q.shift();
+        if (seen.has(cur)) continue;                 // 环（第 128 刀那道闸门管的是布局）
+        seen.add(cur);
+        const e = this.aggBases.get(cur);
+        if (e === undefined) continue;
+        for (const bn of e.names) {
+          const saveNs = this.ns;
+          const saveIn = this.inBase;
+          this.ns = e.ns;
+          this.inBase = true;
+          const b = this.resolve(bn, (x) => this.classes.has(x) || this.structs.has(x));
+          this.ns = saveNs;
+          this.inBase = saveIn;
+          if (b === null) continue;
+          yield { label: INH, ns: b };
+          q.push(b);
+        }
+      }
+    }
+  }
+
+  /** 老那条路，只在 `OMNI_SCOPE_DIFF=1` 下当**对照**跑（见 resolve）。 */
+  resolveRef(k, has) {
     let p = this.ns;
     for (;;) {
       const full = p === '' ? k : `${p}$${k}`;
@@ -2413,30 +2499,16 @@ class JncLower {
       const i = p.lastIndexOf('$');
       p = i < 0 ? '' : p.slice(0, i);
     }
-    // 体外写的方法（第五十二刀）：它的**签名**也在那个类那一层里查 —— `S1 C.foo()` 里的
-    // S1 就是 `C.S1`（test97.jnc:15）。这一格只在 fnSig 那一遍非 null，而且**只管查名**，
-    // 不影响登记用的 `qual`（那一处要的是源码里写的 `C.foo`，不能再叠一次前缀）。
     if (this.nsExtra !== null) {
       const full = `${this.nsExtra}$${k}`;
       if (has(full)) return full;
     }
-    // 往外退到底还没找着，最后再顺着**基类那一层**上去找一遍（第一百三十七刀）
     const b = this.baseResolve(k, has);
     if (b !== null) return b;
-    /* `using namespace X;`（第二百一十七刀）。jancy 的查名次序是"当前那条链先、using 表后"
-       （Namespace::findItemTraverse -> UsingSet，jnc_ct_Parser.cpp:987 那句 addNamespace 就是
-       往那张表里塞），所以这一问排在最后 —— 它只会**多认**名字，不会把已经认得的那些换掉。
-       两张表里都有同一个名字时 jancy 报歧义：这儿先按第一张算，同时把这一格记下来，
-       run 末尾照实报（悄悄按第一张算是骗人）。 */
     for (const u of this.usingNs) {
       if (!(u.in === '' || this.ns === u.in || this.ns.startsWith(`${u.in}$`))) continue;
       const full = `${u.ns}$${k}`;
       if (!has(full)) continue;
-      for (const u2 of this.usingNs) {
-        if (u2 === u || u2.ns === u.ns) continue;
-        if (!(u2.in === '' || this.ns === u2.in || this.ns.startsWith(`${u2.in}$`))) continue;
-        if (has(`${u2.ns}$${k}`)) this.usingAmbig.set(k, u.node);
-      }
       return full;
     }
     return null;
