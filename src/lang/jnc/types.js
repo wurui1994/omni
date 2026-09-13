@@ -21,8 +21,15 @@ export const BASE_KINDS = {
 /** 后缀链决定的形状（前面的后缀先算 —— `int f()[2]` 那种语料里没有，记在账上）。 */
 export const SUFFIX_SHAPE = { 'fn-suffix': 'fn', 'array-suffix': 'array', bitfield: 'bitfield' };
 
-/** 这几个修饰词把形状改掉（jancy 的 DeclTypeCalc 就按它们分派）。 */
-export const SHAPE_WORDS = { property: 'prop', event: 'event', reactor: 'fn', function: 'fnptr' };
+/** 这几个修饰词把形状改掉（jancy 的 DeclTypeCalc 就按它们分派）。
+ *  `multicast` 与 `event` **落地是同一件事** —— 差别只在"能不能从外面叫"
+ *  （`MulticastMethodFlag_InaccessibleViaEventPtr`，jnc_ct_TypeMgr.cpp:940-975），
+ *  而这一层没有可见性检查（与第五十二刀同一笔账）。不写 `multicast` 这一格，
+ *  `multicast g_onPair(int a, int b);` 就定不出型（71-event.jnc 的 `jnc$mc_fire$int$int`
+ *  是尺子上量出来的那一格）。 */
+export const SHAPE_WORDS = {
+  property: 'prop', event: 'event', multicast: 'event', reactor: 'fn', function: 'fnptr',
+};
 
 /**
  * 读一格声明的类型。`specsNode` 与 `dclNode` 都是 GLR 的树（还没规整那一种）。

@@ -1,18 +1,19 @@
-// tests/lib/jnc-crt-emit.js —— **运行期助手**那条腿的第一把尺子：字符那一族（`jnc$crt$…`）
+// tests/lib/jnc-runtime-emit.js —— **运行期助手**那条腿的尺子（整格函数：头 + 体）
 //
 // 这一族是新降级第一处**连体一起发**的东西：源码里没有它的体，体就是规则本身
-// （`src/lang/jnc/runtime-crt.js` 那张表）。所以量的不是"头对不对"，是**整格函数**对不对。
+// （`src/lang/jnc/runtime.js` 那两张表）。所以量的不是"头对不对"，是**整格函数**对不对。
+// 现在量两族：
+//   - 字符那一族 `jnc$crt$…`（旧降级 lower.js:13385 crtCharFn，被调到就发一格、不重复）
+//   - 通知那一格 `jnc$mc_fire[$签名]`（lower.js:5279 mcFire，一种签名一格）
 //
 // 尺子：拿旧降级的真输出当外部尺（`node src/cli.js emit sx 文件.jnc`）。
-// 旧降级"这一格名字被调了就发一格壳"（lower.js:13385 crtCharFn，一个名字一格、不重复），
-// 所以新腿要做的是同一件事：扫出**被调到的**那几个名字，一格发一格。
 //
 // 三栏账（与别的尺子一样）：
 //   1. 拼不出来的（记账，不算对）
 //   2. **新腿发了、旧降级没有这个名字的**（防着凭空多发）
 //   3. 旧降级发了、新腿还没试的（覆盖）
 //
-// 用法：node tests/lib/jnc-crt-emit.js [文件数，默认 400] [--all]
+// 用法：node tests/lib/jnc-runtime-emit.js [文件数，默认 400] [--all]
 
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -20,7 +21,10 @@ import { execFileSync } from 'node:child_process';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf, named } from '../../src/lang/jnc/adapt.js';
-import { crtCharShell, isCrtChar } from '../../src/lang/jnc/runtime-crt.js';
+import { allInChain } from '../../src/lang/jnc/declare.js';
+import { readDeclType } from '../../src/lang/jnc/types.js';
+import { resolveType } from '../../src/lang/jnc/resolve-type.js';
+import { crtCharShell, isCrtChar, mcFireShell, mcFireName } from '../../src/lang/jnc/runtime.js';
 
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 400);
@@ -70,6 +74,72 @@ function crtCallsIn(tree) {
   return out;
 }
 
+/**
+ * 旧降级输出里那几格 `jnc$mc_fire…` 助手（**整格**，五行：头 + 四行体）。
+ */
+function mcShellsOf(text) {
+  const out = new Map();
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = /^ {2}\(fn (jnc\$mc_fire[\w$]*) /.exec(lines[i]);
+    if (m === null) continue;
+    out.set(m[1], lines.slice(i, i + 5).join('\n'));
+  }
+  return out;
+}
+
+/**
+ * 顶层（含名字空间里）那几格**事件**声明 → 方言那一侧的多播类型。
+ * `event g_onTick();` / `multicast g_onPair(int a, int b);` 都落在说明符表里
+ * （`SHAPE_WORDS` 把它们的形状改成 `event`），`resolveType` 答的是 `{ k:'mc', params }`。
+ * 类里那几格成员事件先不收（那要 `this` 那一层）—— 记账。
+ */
+function topEvents(tree) {
+  const out = new Map();
+  const dig = (n) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    const h = headOf(n);
+    if (h === 'fn-def' || h === 'agg') return;
+    if (h === 'var-decl') {
+      const vn = named(n);
+      if (vn !== null) {
+        for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
+          const dd = headOf(d) === 'init' ? named(d)?.dcl : d;
+          const t = readDeclType(vn.specs, dd);
+          if (t === null || t.name === null || t.shape !== 'event') continue;
+          const r = resolveType(t, new Map());
+          if (r.type !== null && r.type.k === 'mc') out.set(t.name, r.type);
+        }
+      }
+      return;
+    }
+    for (const it of n.items) dig(it);
+  };
+  dig(tree);
+  return out;
+}
+
+/** 一份树里**叫出去**的那几格事件（`g_onTick();`）→ 助手名字 -> 多播类型，按第一次出现的次序。 */
+function mcFiresIn(tree, events) {
+  const out = new Map();
+  const dig = (n) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    if (headOf(n) === 'call') {
+      const fn = named(n)?.fn;
+      if (fn !== null && fn !== undefined && Array.isArray(fn.items) && headOf(fn) === 'name') {
+        const mc = events.get(String(named(fn)?.text?.value ?? ''));
+        if (mc !== undefined) {
+          const nm = mcFireName(mc);
+          if (!out.has(nm)) out.set(nm, mc);
+        }
+      }
+    }
+    for (const it of n.items) dig(it);
+  };
+  dig(tree);
+  return out;
+}
+
 initJnc({ log: () => {} });
 const tb = jncFrontEnd();
 const files = walkDir('tests/jnc/cases').sort().slice(0, limit);
@@ -89,10 +159,12 @@ for (const f of files) {
     out = execFileSync('node', ['src/cli.js', 'emit', 'sx', f], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   } catch { continue; }
   const oracle = crtShellsOf(out);
+  const mcOracle = mcShellsOf(out);
   let tree = null;
   try { tree = jncParse(tb, f, new Diagnostics()); } catch { continue; }
   const used = crtCallsIn(tree);
-  if (oracle.size === 0 && used.length === 0) continue;
+  const fires = mcFiresIn(tree, topEvents(tree));
+  if (oracle.size === 0 && used.length === 0 && mcOracle.size === 0 && fires.size === 0) continue;
   filesOk += 1;
   const short = f.split('/').pop();
   for (const nm of used) {
@@ -106,9 +178,20 @@ for (const f of files) {
   for (const nm of oracle.keys()) {
     if (!used.includes(nm)) { missed += 1; missedAt.push(`${short}　jnc$crt$${nm}`); }
   }
+  for (const [nm, mc] of fires) {
+    const mine = mcFireShell(mc);
+    const want = mcOracle.get(nm);
+    if (want === undefined) { extra += 1; extraAt.push(`${short}　${nm}`); continue; }
+    cmp += 1;
+    if (mine === want) same += 1;
+    else if (diff.length < 20) diff.push(`${short}　${nm}\n      旧 ${want}\n      新 ${mine}`);
+  }
+  for (const nm of mcOracle.keys()) {
+    if (!fires.has(nm)) { missed += 1; missedAt.push(`${short}　${nm}`); }
+  }
 }
 
-console.log(`带字符助手的语料 ${filesOk} 份　对比整格函数 ${cmp} 格`
+console.log(`带运行期助手的语料 ${filesOk} 份　对比整格函数 ${cmp} 格`
   + `　一模一样 ${same}（${(same / Math.max(cmp, 1) * 100).toFixed(1)}%）　不一致 ${cmp - same}`);
 if (extra > 0) {
   console.log(`新腿发了、旧降级没有这个名字的：${extra} 格　→ ${extraAt.slice(0, 8).join('  ')}`);
@@ -120,4 +203,6 @@ if (diff.length > 0) {
   console.log('\n对不上：');
   for (const d of (all ? diff : diff.slice(0, 5))) console.log(`  ${d}`);
 }
-process.exitCode = cmp > 0 && same === cmp && extra === 0 && missed === 0 ? 0 : 1;
+/* 覆盖那一栏（旧降级发了、新腿还没试的）**不判红** —— 与别的尺子同一条口径：
+   它说的是"还没做到哪儿"，不是"做错了"。判红看的是对不上与凭空多发。 */
+process.exitCode = cmp > 0 && same === cmp && extra === 0 ? 0 : 1;
