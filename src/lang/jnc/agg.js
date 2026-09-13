@@ -122,3 +122,65 @@ function one(t, specs, access, kindHint, at) {
     at,
   };
 }
+
+/**
+ * 读一个 `enum`（`enum` / `bitflag enum`）：项名 + 有没有写死的值。
+ * 与 `readAgg` 同一条路子 —— 项那一串是 `enums` / `enums-add` 左递归链，
+ * 项自己可能裹着属性块（`[ displayName = … ] Item = 1`，io_Df1.jnc:63）。
+ */
+export function readEnum(node) {
+  const nm = named(node);
+  if (nm === null || nm.kind !== 'enum') return null;
+  const items = [];
+  /* 走**整条链**：`enums-add` 那几格 + 基例 `(enums 第一项)` 那一格。
+     先前写成 `chainOf(...).concat(enumFirst(body))` —— 链在的时候 `enumFirst` 拿到的是
+     `enums-add` 而不是基例，于是**第一项永远丢**。尺子上是 584 个枚举差 1 项，
+     一次就抓出来了（与 `allDcls` 那儿同一个坑）。 */
+  for (const it of allInChain(nm.body, 'enums-add', 'enums')) {
+    const item = unwrapAttrs(it);
+    const im = named(item);
+    if (im === null || im.kind !== 'enum-item') continue;
+    items.push({ name: wordOf(im.name), value: im.value ?? null, at: item });
+  }
+  return {
+    word: wordOf(nm.word), name: nm.name, base: nm.base ?? null, items, raw: node,
+  };
+}
+
+/** `(enums X)` 那一格的第一项（空的 `(enums)` 没有洞）。 */
+function enumFirst(body) {
+  if (headOf(body) !== 'enums') return [];
+  const nm = named(body);
+  return nm === null || nm.first === undefined ? [] : [nm.first];
+}
+
+/**
+ * 一条左递归链上的**全部**项：`add` 那几格 + 基例里那一格（`(enums 第一项)` / `(dcls 第一项)`）。
+ * `allDcls` 与这一份是同一件事的两个实例 —— 链的形状是 GLR 给的，谁走都得走全。
+ */
+function allInChain(node, addHead, baseHead) {
+  const out = [];
+  let cur = node;
+  while (cur !== null && cur !== undefined) {
+    const h = headOf(cur);
+    if (h === addHead) {
+      const nm = named(cur);
+      if (nm === null) break;
+      out.unshift(nm.one);
+      cur = nm.list;
+      continue;
+    }
+    if (h === baseHead) {
+      const nm = named(cur);
+      if (nm !== null && nm.first !== undefined) out.unshift(nm.first);
+      break;
+    }
+    break;
+  }
+  return out;
+}
+
+/** `attributed` 是壳（枚举项也能带属性块）。 */
+function unwrapAttrs(it) {
+  return headOf(it) === 'attributed' ? (named(it)?.decl ?? it) : it;
+}

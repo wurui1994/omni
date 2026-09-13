@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf } from '../../src/lang/jnc/adapt.js';
-import { readAgg } from '../../src/lang/jnc/agg.js';
+import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 
 const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy';
 const CORPUS = existsSync(EXTERNAL) ? EXTERNAL : 'tests/jnc/cases';
@@ -70,6 +70,10 @@ const files = walk(CORPUS).sort().slice(0, limit);
 let aggs = 0;
 let readOk = 0;
 let bad = 0;
+let enums = 0;
+let enumOk = 0;
+let enumItems = 0;
+let enumBad = 0;
 const shapes = new Map();
 const access = new Map();
 const words = new Map();
@@ -101,6 +105,25 @@ function visit(n, file) {
       }
     }
   }
+  if (headOf(n) === 'enum') {
+    enums += 1;
+    const e = readEnum(n);
+    if (e !== null) {
+      enumOk += 1;
+      enumItems += e.items.length;
+      /* 第二遍：按位置数项数（体是最后一格；空体是 `(enums)`，链是 `enums-add`）。 */
+      const body = n.items[n.items.length - 1];
+      const hd = headOf(body);
+      const want = hd === 'enums-add' ? chainPos(body, 'enums-add').length + 1
+        : (hd === 'enums' ? (body.items.length - 1) : 0);
+      if (want !== e.items.length) {
+        enumBad += 1;
+        if (badWhy.length < 12) {
+          badWhy.push(`${file}　枚举：读取器 ${e.items.length} 项、位置法 ${want} 项`);
+        }
+      }
+    }
+  }
   for (const it of n.items) visit(it, file);
 }
 
@@ -113,8 +136,10 @@ console.log(`语料 ${files.length} 份　聚合体 ${aggs} 个　读出 ${readO
 console.log(`种类：${[...words].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}×${n}`).join('  ')}`);
 console.log(`成员形状：${[...shapes].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}×${n}`).join('  ')}`);
 console.log(`访问：${[...access].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}×${n}`).join('  ')}`);
+console.log(`枚举 ${enums} 个　读出 ${enumOk}（${(enumOk / Math.max(enums, 1) * 100).toFixed(1)}%）`
+  + `　项 ${enumItems} 格　项数两遍对不上 ${enumBad}`);
 if (badWhy.length > 0) {
   console.log('\n对不上（读取器漏了一族，照实测的补）：');
   for (const w of (all ? badWhy : badWhy.slice(0, 8))) console.log(`  ${w}`);
 }
-process.exitCode = bad === 0 && readOk === aggs ? 0 : 1;
+process.exitCode = bad === 0 && readOk === aggs && enumBad === 0 && enumOk === enums ? 0 : 1;
