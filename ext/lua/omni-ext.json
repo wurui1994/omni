@@ -1,0 +1,11 @@
+{
+  "name": "lua",
+  "version": "0.1.0",
+  "doc": "Lua 5.1 / LuaJIT 2 的规则化前端（节点表 + 洞的类别 + 读表的驱动器）。见 DESIGN.md",
+  "entry": "omni-lang.js",
+  "register": "registerLuaExt",
+  "provides": {
+    "exts": [".lua"],
+    "caps": ["lua.toSx"]
+  }
+}

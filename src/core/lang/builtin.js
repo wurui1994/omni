@@ -22,6 +22,8 @@
 // readModule 决定的：我们自己的 JS 前端不认 `require`/`import()`，所以这一份不能被它编。
 
 import { createRequire } from 'node:module';
+import { declareExts } from '../ext.js';
+import { join } from '../host/path.js';
 
 const require_ = createRequire(import.meta.url);
 
@@ -98,4 +100,11 @@ export function registerBuiltins(api) {
       from: b.mod,
     }, () => require_(b.mod)[b.reg](api));
   }
+  /* 再扫一遍**扩展**（ADR-0030 第 4 节）：别人写的语言不进上面那张表 —— 它们各自一个目录、
+     各自一份 `omni-ext.json` 自述，核心只按约定找、按约定装。装法在这儿注入（这条腿用
+     `require`），所以"怎么装"不是 `ext.js` 的知识；`ext.js` 只管"约定与声明"。
+
+     内建先声明、扩展后声明：同一个后缀两边都认时，**内建赢**（先声明先命中）。这条要写下来，
+     因为它决定了别人能不能悄悄顶掉我们的语言 —— 不能。 */
+  declareExts((dir, entry) => require_(join(dir, entry)), api);
 }
