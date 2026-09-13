@@ -17,6 +17,7 @@ import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf, named } from '../../src/lang/jnc/adapt.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
+import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
 import { structLine } from '../../src/lang/jnc/emit-agg.js';
@@ -30,6 +31,17 @@ const argv = process.argv.slice(2);
 const CORPUS = argv.includes('--cases') || !existsSync(EXTERNAL) ? 'tests/jnc/cases' : EXTERNAL;
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 40);
 const all = argv.includes('--all');
+
+/** 一格表达式里最后那一段名字（`iox.SshChannel.State` 取 `State`）。 */
+function lastName(n) {
+  if (n === null || n === undefined || typeof n !== 'object') return null;
+  if (!Array.isArray(n.items)) return typeof n.value === 'string' ? n.value : null;
+  for (let i = n.items.length - 1; i >= 1; i -= 1) {
+    const s = lastName(n.items[i]);
+    if (s !== null) return s;
+  }
+  return null;
+}
 
 function walk(dir, out = []) {
   let names = [];
@@ -127,6 +139,21 @@ for (const f of files) {
             name: emitName,
             agg: a,
           });
+        }
+      }
+    } else if (h === 'var-decl') {
+      /* **alias 类型别名**（`alias State = Other;`）：环境里记"它指向哪个名字"。
+         判据用现成的说明符表（storage 里有 alias），目标名从初始化式那一格读。 */
+      const vn = named(n);
+      const sp = vn === null ? null : readSpecs(vn.specs);
+      if (sp !== null && sp.words.includes('alias')) {
+        for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
+          if (headOf(d) !== 'init') continue;
+          const dn = named(d);
+          if (dn === null) continue;
+          const who = nameText(named(dn.dcl)?.name);
+          const to = lastName(dn.value);
+          if (who !== null && to !== null) env.set(who, { kind: 'alias', to });
         }
       }
     } else if (h === 'typedef') {

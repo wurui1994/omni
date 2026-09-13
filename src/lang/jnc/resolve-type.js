@@ -118,6 +118,13 @@ function baseOf(t, env, depth = 0) {
     /* **typedef 再走一跳**：`typedef int X; X m_v;` 里 `X` 的目标类型就是它的写法，
        接着解一遍（带深度上限防环）。少这一跳，typedef / alias 那一摊十几个聚合体
        全拼不出来（尺子的"拼不出来的那几处"里几乎全是它）。 */
+    /* **alias 类型别名**（`alias State = iox.SshChannel.State;`，第八十七刀）：环境里记的是
+       "它指向哪个名字"，顺着再查一跳（与 typedef 同族，jancy 里两者都是存储类）。 */
+    if (e.kind === 'alias' && typeof e.to === 'string') {
+      const inner = env.get(e.to);
+      if (inner === undefined || depth > 8) return null;
+      return aliasBase(inner, e.to, env, depth);
+    }
     if (e.kind === 'typedef' && e.type !== undefined) {
       /* **函数类型的 typedef**（`typedef Num Fn(int a, int b);`）：它本身是一格函数类型，
          字段写 `Fn* m_f;` 发的是 `(fnty (int int) int)`（116-structtypedef.jnc）——
@@ -148,6 +155,22 @@ function firstIdent(n) {
   for (const it of n.items.slice(1)) {
     const s = firstIdent(it);
     if (s !== null) return s;
+  }
+  return null;
+}
+
+/** alias 指向的那一格（名字已经查着了，直接按它的种类答）。 */
+function aliasBase(e, name, env, depth) {
+  if (e.kind === 'struct' || e.kind === 'union') return { k: 'struct', name: e.name ?? name };
+  if (e.kind === 'class') return { k: 'class', name: e.name ?? name };
+  if (e.kind === 'enum') return { k: 'enum', name: e.name ?? name };
+  if (e.kind === 'typedef' && e.type !== undefined) {
+    const r = resolveType(e.type, env, depth + 1);
+    return r.type;
+  }
+  if (e.kind === 'alias' && typeof e.to === 'string') {
+    const nxt = env.get(e.to);
+    return nxt === undefined || depth > 8 ? null : aliasBase(nxt, e.to, env, depth + 1);
   }
   return null;
 }
