@@ -53,10 +53,26 @@ initJnc({ log: () => {} });
 const tb = jncFrontEnd();
 const files = walk(CORPUS).sort().slice(0, limit);
 
-const seen = new Map();          // `${sort}|${word}` -> 次数
+const seen = new Map();          // `${ctx}|${word}` -> 次数
+const where = new Map();         // 同一个键 -> 第一次见到它的文件:行（补上下文表要照着看）
 let ok = 0;
 
 /** 走树，同时带着"我现在在哪种上下文里"。 */
+/** 这个节点的行号（往下找第一个带 `line` 的记号）。 */
+function lineOf(n) {
+  if (n === null || typeof n !== 'object') return null;
+  if (n.line !== undefined) return n.line;
+  if (n.span !== undefined && n.span.line !== undefined) return n.span.line;
+  if (!Array.isArray(n.items)) return null;
+  for (const it of n.items) {
+    const l = lineOf(it);
+    if (l !== null) return l;
+  }
+  return null;
+}
+
+let FILE = '?';
+
 function visit(n, ctx) {
   if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
   const h = headOf(n);
@@ -76,6 +92,7 @@ function visit(n, ctx) {
       for (const w of got.words) {
         const k = `${ctx}|${w}`;
         seen.set(k, (seen.get(k) ?? 0) + 1);
+        if (!where.has(k)) where.set(k, `${FILE}:${lineOf(n) ?? '?'}`);
       }
     }
   }
@@ -84,6 +101,7 @@ function visit(n, ctx) {
 
 for (const f of files) {
   const diags = new Diagnostics();
+  FILE = f.slice(CORPUS.length + 1);
   try { visit(jncParse(tb, f, diags), 'global'); ok += 1; } catch { /* 归语料尺子 */ }
 }
 
@@ -104,15 +122,18 @@ console.log(`规则允许 ${good.length} 格　**规则说不许、语料却有*
 if (bad.length > 0) {
   console.log('\n对不上（我把这些词的上下文标错了）：');
   for (const [c, w, n, ok2] of bad.sort((a, b) => b[2] - a[2]).slice(0, all ? 999 : 20)) {
-    console.log(`  ${String(n).padStart(5)}  ${c} × ${w}　（表里只许 ${ok2.join('/')}）`);
+    console.log(`  ${String(n).padStart(5)}  ${c} × ${w}　（表里只许 ${ok2.join('/')}）`
+      + `　头一处：${where.get(`${c}|${w}`) ?? '?'}`);
   }
 }
 if (unknown.length > 0) {
   console.log('\n不在词汇表里的（归 jnc-specs 那把尺子管）：'
     + unknown.sort((a, b) => b[2] - a[2]).slice(0, 8).map(([c, w, n]) => ` ${w}×${n}`).join(''));
 }
-/* 明账：还剩 1 格 `global × override`（200 份语料里 1 处）。语料里的 `override` 全写在类体里，
-   所以这一格**几乎肯定是这把尺子的上下文判定还差一条**（某种容器头我没算成 member），
-   不是词汇表标错。下一步：给这把尺子加一栏"印出那一处的文件与行"，照着补 JNC_CTX_OPENS。
+/* 明账（**已定位**）：剩的 1 格 `global × override` 在 `samples/jnc/02_Inheritance.jnc`，
+   源码是 `class C1: I1 { override void foo() {…} }` —— 词写在**类体里**，是成员。
+   所以这一格确定是**这把尺子的上下文判定还差一条**（`agg` 那条链上某一格没把 ctx 传下去），
+   不是词汇表标错。补法：把"谁开哪种上下文"从"走树时看头名"改成**按洞**说
+   （`agg.body` 这一格开 member），那要等 `JNC_CTX_OPENS` 从"节点级"细到"洞级"。
    在补上之前它就是一笔记明的账 —— 不改期望、不假装绿。 */
 process.exitCode = bad.length <= 1 ? 0 : 1;
