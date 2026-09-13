@@ -28,7 +28,8 @@
 import { resolveType, baseIntBits, bitfieldBits } from './resolve-type.js';
 import { emitType } from './emit-type.js';
 import { nameText, allInChain } from './declare.js';
-import { headOf } from './adapt.js';
+import { headOf, named } from './adapt.js';
+import { readBodyMembers } from './agg.js';
 
 /** 类那一族头上那一格。 */
 export const CLASS_TAG = '($tag int)';
@@ -157,6 +158,21 @@ function ownFields(agg, env, ctx = { owner: '', extra: [] }) {
       if (pack !== null && (pack.bits !== bits || pack.used + n > bits)) flush();
       if (pack === null) pack = { bits, used: 0 };
       pack.used += n;
+      return;
+    }
+    /* **完整属性声明里的字段**是属性自己的存储，名字带上东家与属性名：
+       `class C { property m_p { int m_v; … } }` 发 `(C$m_p$m_v int)`（151-propfield.jnc）。 */
+    if (m.shape === 'prop') {
+      const body = named(m.at)?.body;
+      if (body === undefined || headOf(body) !== 'compound' || m.name === null) return;
+      flush();
+      for (const im of readBodyMembers(body)) {
+        if (im.shape !== 'data' && im.shape !== 'array' && im.shape !== 'fnptr') continue;
+        if (im.name === null) { out.push(null); continue; }
+        const ir = resolveType(im.type, env);
+        if (ir.type === null) { out.push(null); continue; }
+        out.push(`(${ctx.owner}$${m.name}$${im.name} ${emitType(ir.type, 'field')})`);
+      }
       return;
     }
     /* 函数指针字段也是一格数据（`(m_op (fnty (int int) int))`，109-fnfield.jnc）。 */

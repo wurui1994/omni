@@ -57,6 +57,23 @@ export function readAgg(node) {
   };
 }
 
+/**
+ * 一格**体**（`compound` 的那一串声明）读成成员表。完整属性声明用它：
+ * `property m_p { int m_v; int get() {…} }` 里那格 `m_v` 是属性自己的存储
+ * （旧降级把它发成 `<东家>$<属性名>$<字段名>`，151-propfield.jnc）。
+ */
+export function readBodyMembers(compound, access = ACCESS_DEFAULT) {
+  const nm = named(compound);
+  if (nm === null || nm.kind !== 'compound') return [];
+  const out = [];
+  let acc = access;
+  for (const it of bodyItems(nm.body)) {
+    if (headOf(it) === 'access') { acc = wordOf(it) ?? acc; continue; }
+    for (const m of memberOf(it, acc)) out.push(m);
+  }
+  return out;
+}
+
 /** 一条体内声明读成零到多格成员。 */
 function memberOf(it, access) {
   const h = headOf(it);
