@@ -87,6 +87,11 @@ export function readDcl(node) {
     /* **算符**那一族的名字也不是 `name`：`(operator "++")` / `(postfix-operator "++")`
        （节点表 :141-142）。照实带出来（源码里那个算符 + 前/后置），拼成什么名字是发那一层的事。 */
     operator: operatorOf(nm.name),
+    /* **属性的取/存**（`int m_val.get()` / `void m_val.set(int x)`）：名字写成
+       `(qualified-special (name m_val) (accessor "get"))`（节点表 :89 与 :141 那一族）。
+       照实读成两格 —— 拼成 `<属性名>$get` 是发那一层的事（旧降级的真输出是
+       `C$m_val$get` / `C$m_val$set`，107-psetexpr.jnc）。 */
+    accessor: accessorOf(nm.name),
     ptrs: ptrs.length,
     /* **跟在 `*` 后面的修饰词**也要读出来（`ptr-group -> "*" mods`）：
        `Inner* property m_p;` 里的 `property` 就落在这儿，不在说明符表里 ——
@@ -114,6 +119,18 @@ function operatorOf(node) {
   const t = nm === null ? undefined : nm.op;
   const op = t !== null && t !== undefined && t.value !== undefined ? String(t.value) : null;
   return op === null ? null : { op, postfix: h === 'postfix-operator' };
+}
+
+/** 属性的取/存：`(qualified-special (name m_val) (accessor "get"))` → `{ path, which }`。 */
+function accessorOf(node) {
+  if (headOf(node) !== 'qualified-special') return null;
+  const nm = named(node);
+  if (nm === null) return null;
+  const path = nameText(nm.left);
+  const r = named(nm.right);
+  const t = r === null ? undefined : r.text;
+  const which = t !== null && t !== undefined && t.value !== undefined ? String(t.value) : null;
+  return path === null || which === null ? null : { path, which };
 }
 
 /** 一格 `ptr` 节点里那串修饰词（`(ptr mods)`）。 */

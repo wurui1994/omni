@@ -93,6 +93,8 @@ export function fnName(m) {
     const w = dc.operator.postfix ? OP_POSTFIX[dc.operator.op] : OP_NAMES[dc.operator.op];
     return w === undefined ? null : `op$${w}`;
   }
+  /* 属性的取/存：`<属性名>$get` / `$set`（旧降级 107-psetexpr.jnc 的 `C$m_val$get`）。 */
+  if (dc.accessor !== null) return `${dc.accessor.path}$${dc.accessor.which}`;
   return null;
 }
 
