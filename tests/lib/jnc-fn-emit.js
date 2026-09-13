@@ -79,6 +79,23 @@ const diff = [];
 const skip = new Map();
 const skipAt = [];
 let noFn = 0;
+/** 覆盖率那一栏：旧降级发了、新腿连试都没试的那几格。 */
+let uncovered = 0;
+const families = new Map();
+const uncoveredAt = [];
+
+/** 一个符号名归哪一族（按尾巴认，认不出就说"别的"）。 */
+function familyOf(nm) {
+  if (/^\$newo\d+$/.test(nm)) return 'new 那一格的构造壳（$newoN）';
+  if (/^\$newc\d+$/.test(nm)) return '花括号初值的壳（$newcN）';
+  if (nm.startsWith('jnc$')) return '运行期助手（jnc$…）';
+  if (/\$r\d+$/.test(nm)) return 'reactor 的反应体（$rN）';
+  if (/\$e\d+$/.test(nm)) return 'reactor 的 onevent（$eN）';
+  if (/\$\$vd\$/.test(nm)) return '虚派发表（$$vd$）';
+  if (nm.endsWith('$get') || nm.endsWith('$set')) return '编译器生成的取/存（bindable data 那一族）';
+  if (nm.endsWith('$construct')) return '编译器生成的构造';
+  return '别的';
+}
 
 for (const f of files) {
   let out = '';
@@ -288,10 +305,12 @@ for (const f of files) {
   /* **重载的号**按声明次序发（`q` / `q$o1` / …）—— 拼不出来的那几格照样占一个号，
      所以先问号、再拼头。 */
   const nextDup = overloadIndex();
+  const mineNames = new Set();                        // 新腿**试过**的那几个名字（算覆盖率用）
   for (const c of cases) {
     /* **reactor** 那一格发的是 `$start` / `$stop` 两格（82-reactor.jnc）—— 各自与旧降级对。 */
     if (isReactor(c.m)) {
       for (const h of reactorHeads(c.m, c.ctx).heads) {
+        mineNames.add(h.name);
         const wantR = oracle.get(h.name);
         if (wantR === undefined) { noFn += 1; continue; }
         cmp += 1;
@@ -307,6 +326,7 @@ for (const f of files) {
     const dup = sym === null ? 0 : nextDup(sym);
     const built = fnHead(c.m, env, { ...c.ctx, dup, clsRoot });
     const key = sym === null ? '?' : (dup > 0 ? `${sym}$o${dup}` : sym);
+    if (key !== '?') mineNames.add(key);
     const want = oracle.get(key);
     if (built.head === null) {
       skip.set(built.why, (skip.get(built.why) ?? 0) + 1);
@@ -320,11 +340,24 @@ for (const f of files) {
       diff.push(`${f.split('/').pop()}\n      旧 ${want}\n      新 ${built.head}`);
     }
   }
+  /* **覆盖率**：旧降级发了、新腿连试都没试的那几格 —— 按名字的样子归族记账。
+     这一栏是"还差哪几族"的实账（不归到 100% 那个数里去，那个数只说试过的对不对）。 */
+  for (const nm of oracle.keys()) {
+    if (mineNames.has(nm)) continue;
+    uncovered += 1;
+    const fam = familyOf(nm);
+    families.set(fam, (families.get(fam) ?? 0) + 1);
+    if (uncoveredAt.length < 20) uncoveredAt.push(`${f.split('/').pop()}　${nm}`);
+  }
 }
 
 console.log(`语料 ${filesOk}/${files.length} 份　对比函数头 ${cmp} 行`
   + `　一模一样 ${same}（${(same / Math.max(cmp, 1) * 100).toFixed(1)}%）　不一致 ${cmp - same}`);
 if (noFn > 0) console.log(`旧降级没发这一格函数：${noFn} 个（只有原型、宿主面、被分派吃掉那几族）`);
+if (uncovered > 0) {
+  console.log(`旧降级发了、新腿还没试的：${uncovered} 格　→ ${[...families]
+    .sort((a, b) => b[1] - a[1]).map(([w, n]) => `${w}×${n}`).join('  ')}`);
+}
 if (skip.size > 0) {
   console.log(`拼不出来（记账，不算对）：${[...skip].sort((a, b) => b[1] - a[1])
     .map(([w, n]) => `${w}×${n}`).join('  ')}`);
