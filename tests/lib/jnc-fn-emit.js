@@ -134,10 +134,21 @@ const noFnAt = [];
 const families = new Map();
 const uncoveredAt = [];
 
+/**
+ * 这几族**另一把尺子已经量过了**（这把尺子只量"从声明拼出来的函数头"）。
+ * 不分出来的话覆盖率那一栏会把已经量了的也算成"还没试"，账就虚了。
+ */
+const ELSEWHERE = new Map([
+  ['new 那一格的构造壳（$newoN）', 'jnc-new-emit'],
+  ['花括号初值的壳（$newcN）', 'jnc-new-emit'],
+  ['字符助手（jnc$crt$…）', 'jnc-crt-emit'],
+]);
+
 /** 一个符号名归哪一族（按尾巴认，认不出就说"别的"）。 */
 function familyOf(nm) {
   if (/^\$newo\d+$/.test(nm)) return 'new 那一格的构造壳（$newoN）';
   if (/^\$newc\d+$/.test(nm)) return '花括号初值的壳（$newcN）';
+  if (/^jnc\$crt\$/.test(nm)) return '字符助手（jnc$crt$…）';
   if (nm.startsWith('jnc$')) return '运行期助手（jnc$…）';
   if (/\$r\d+$/.test(nm)) return 'reactor 的反应体（$rN）';
   if (/\$e\d+$/.test(nm)) return 'reactor 的 onevent（$eN）';
@@ -654,8 +665,17 @@ console.log(`语料 ${filesOk}/${files.length} 份　对比函数头 ${cmp} 行`
   + `　一模一样 ${same}（${(same / Math.max(cmp, 1) * 100).toFixed(1)}%）　不一致 ${cmp - same}`);
 if (noFn > 0) console.log(`旧降级没发这一格函数：${noFn} 个（只有原型、宿主面、被分派吃掉那几族）`);
 if (uncovered > 0) {
-  console.log(`旧降级发了、新腿还没试的：${uncovered} 格　→ ${[...families]
-    .sort((a, b) => b[1] - a[1]).map(([w, n]) => `${w}×${n}`).join('  ')}`);
+  /* 分两行印：另一把尺子已经量了的、与真正还没试的（账不虚）。 */
+  const done = [...families].filter(([w]) => ELSEWHERE.has(w));
+  const todo = [...families].filter(([w]) => !ELSEWHERE.has(w));
+  if (done.length > 0) {
+    console.log(`另一把尺子已经量了：${done.sort((a, b) => b[1] - a[1])
+      .map(([w, n]) => `${w}×${n}（${ELSEWHERE.get(w)}）`).join('  ')}`);
+  }
+  if (todo.length > 0) {
+    console.log(`旧降级发了、新腿还没试的：${todo.reduce((s, [, n]) => s + n, 0)} 格　→ ${todo
+      .sort((a, b) => b[1] - a[1]).map(([w, n]) => `${w}×${n}`).join('  ')}`);
+  }
 }
 if (skip.size > 0) {
   console.log(`拼不出来（记账，不算对）：${[...skip].sort((a, b) => b[1] - a[1])
