@@ -191,7 +191,10 @@ class P {
   exp(limit) {
     let left;
     const u = unop(this.cur, this.lang);
-    if (u !== undefined) {
+    // `onlyAt` 是算符表上的一格：这个前缀算符只许出现在某一档。gsl-shell 的公式子语言
+    // 要它 —— 那儿的一元 `-` 只在最外层（`expr-parse.lua:79` 的 `prio == 0`），
+    // 所以 `a * -b` 在公式里是错的、在 Lua 里是对的。差别写在数据上，不写在驱动器里。
+    if (u !== undefined && (u.onlyAt === undefined || u.onlyAt === limit)) {
       const op = this.toks[this.i++].value;
       left = { kind: 'prefix', op, a: this.exp(this.lang.unaryPrec) };
     } else {
@@ -209,13 +212,33 @@ class P {
   }
 
   simple() {
+    // 有序选择 + 回溯（与 `stat()` 同一台机器）：能起头的候选按表序试。
+    // 公式子语言要它 —— `f(x)`（函数求值）与 `f`（名字）两个节点都以一个裸名字起头，
+    // 只看第一个记号分不开。Lua 侧没有这种候选，所以那边行为不变。
+    const start = this.i;
+    let far = null;
     for (const n of this.lang.SIMPLE) {
-      const first = n.syn[0];
-      if (typeof first === 'string' ? this.is(first) : this.cur.kind === first.t) {
+      if (!this.canStart(n)) continue;
+      try {
         return this.matchSyn(n);
+      } catch (err) {
+        if (!(err instanceof ParseError)) throw err;
+        if (far === null || this.i >= far.at) far = { err, at: this.i };
+        this.i = start;
       }
     }
+    if (far !== null && this.cur.kind !== 'name') throw far.err;
     return this.suffixed();
+  }
+
+  /** 这个节点的 `syn` 能不能在当前位置起头（第一项：字面记号 / 叶子 / 裸名字 / 洞）。 */
+  canStart(n) {
+    const f = n.syn[0];
+    if (typeof f === 'string') return this.is(f);
+    if (f.t !== undefined) return this.cur.kind === f.t;
+    if (f.w !== undefined || f.n !== undefined) return this.cur.kind === 'name';
+    if (f.h !== undefined || f.l !== undefined) return this.startsExp();
+    return false;
   }
 
   // ── 4. suffixed：`name` / `(exp)` 起头，后缀循环 ─────────────────────────
@@ -303,10 +326,16 @@ class P {
   }
 }
 
-/** 解析一段源码，答一个 `block` 节点（chunk）。`lang` 换一门语言就换一门语言。 */
-export function parse(src, lang = luaLang) {
+/**
+ * 解析一段源码。起点由 `lang.start` 说（Lua 是 `block`，公式子语言是 `schema`）——
+ * 于是"从哪儿开始认"也是数据，不是驱动器里写死的。
+ */
+export function parse(src, lang = luaLang, start = lang.start) {
   const p = new P(src, lang);
-  const b = p.block();
+  // 起点可以是一个**节点名**，也可以是一个**洞的类别**（`gdt.hist` 的实参就是一个 `exp`）。
+  const b = start === 'block' ? p.block()
+    : lang.NODE.has(start) ? p.matchSyn(lang.NODE.get(start))
+      : p.hole({ cls: start });
   if (p.cur.kind !== 'eof') throw new ParseError(`到这儿该结束了，却还有 '${p.cur.value}'`, p.cur);
   return b;
 }

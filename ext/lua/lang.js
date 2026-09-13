@@ -13,7 +13,9 @@
 //   2. 要**改**基语言的某个节点，必须写 `replaces: true`（不写就当冲突，当场炸）；
 //   3. 洞的上位关系（`subclass`）冲突也当场炸。
 
-import { LUA_KEYWORDS, LUA_OPS, LUA_PUNCT, LUA_UNARY_PREC } from './tokens.js';
+import {
+  LUA_KEYWORDS, LUA_OPS, LUA_PUNCT, LUA_UNARY_PREC, LUA_TOKENS,
+} from './tokens.js';
 import { LUA_NODES, LUA_CLASSES, LUA_SUBCLASS } from './nodes.js';
 
 /** 扁平地看一个节点的洞（含可选组/重复组里的）。 */
@@ -102,11 +104,12 @@ function check(lang) {
 /** 立一门语言。 */
 export function defineLang({
   name, keywords = [], ops = [], punct = [], unaryPrec, classes = [], subclass = {},
-  nodes = [], numSuffix, doc = '',
+  nodes = [], numSuffix, doc = '', tokens = LUA_TOKENS, start = 'block', str, ident,
 }) {
   return check(derive({
     name, doc, keywords: [...keywords], ops: [...ops], punct: [...punct], unaryPrec,
     classes: [...classes], subclass: { ...subclass }, nodes: [...nodes], numSuffix,
+    tokens, start, str, ident,
   }));
 }
 
@@ -149,6 +152,10 @@ export function extend(base, delta) {
     subclass,
     nodes,
     numSuffix: delta.numSuffix ?? base.numSuffix,
+    tokens: delta.tokens ?? base.tokens,
+    start: delta.start ?? base.start,
+    str: delta.str ?? base.str,
+    ident: delta.ident ?? base.ident,
   });
 }
 

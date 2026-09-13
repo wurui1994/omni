@@ -63,6 +63,12 @@ export function luaStr(s) {
   return `${out}"`;
 }
 
+/**
+ * 名字怎么写回去也是**语言**的事：Lua 直接写，gsl-shell 的公式里带空格的名字要写成 `[…]`
+ * （出处 `expr-print.lua:11` 的 `is_ident_simple`）。默认原样写。
+ */
+const ident = (s, lang) => (lang.ident === undefined ? String(s) : lang.ident(String(s)));
+
 function emit(items, node, repIdx, lang) {
   const out = [];
   const sub = (x) => render(x, lang);
@@ -79,11 +85,14 @@ function emit(items, node, repIdx, lang) {
     }
     if (it.t !== undefined) {
       const v = node[it.as];
-      out.push(it.t === 'string' ? luaStr(v) : String(v));
+      // 字符串怎么写回去是**语言**的事：Lua 用双引号加转义，gsl-shell 的公式用单引号。
+      if (it.t === 'string') out.push((lang.str ?? luaStr)(v));
+      else if (it.t === 'name') out.push(ident(v, lang));
+      else out.push(String(v));
       continue;
     }
     if (it.o !== undefined) { out.push(node[it.o]); continue; }
-    if (it.w !== undefined) { out.push(node[it.w]); continue; }
+    if (it.w !== undefined) { out.push(ident(node[it.w], lang)); continue; }
     if (it.n !== undefined) { out.push((node[it.n] ?? []).join(it.sep === '.' ? '.' : ', ')); continue; }
     if (it.b !== undefined) { out.push(pad((node[it.b] ?? []).map(sub).join('\n'))); continue; }
     if (it.l !== undefined) {
