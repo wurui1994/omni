@@ -31,7 +31,7 @@
     "test:sexpr": "node tests/sexpr/run.js",
     "test:asy": "node tests/asy/run.js",
     "test:jnc": "node tests/jnc/run.js",
-    "check:jnc-rules": "node tests/lib/jnc-shape.js 400 && node tests/lib/jnc-normalize.js 400 && node tests/lib/jnc-declare.js && node tests/lib/jnc-specs.js && node tests/lib/jnc-types.js 400 && node tests/lib/jnc-agg.js 400 && node tests/lib/jnc-emit-type.js && node tests/lib/jnc-word-ctx.js 400 && node tests/lib/jnc-scope.js 400 && node tests/lib/jnc-matrix.js --check && echo \"check:jnc-rules ok（形状/规整/声明符/说明符/类型/词的上下文/作用域/位置矩阵）\"",
+    "check:jnc-rules": "node tests/lib/jnc-shape.js 400 && node tests/lib/jnc-normalize.js 400 && node tests/lib/jnc-declare.js && node tests/lib/jnc-specs.js && node tests/lib/jnc-types.js 400 && node tests/lib/jnc-agg.js 400 && node tests/lib/jnc-emit-type.js && node tests/lib/jnc-struct-emit.js 400 --cases && node tests/lib/jnc-word-ctx.js 400 && node tests/lib/jnc-scope.js 400 && node tests/lib/jnc-matrix.js --check && echo \"check:jnc-rules ok（形状/规整/声明符/说明符/类型/词的上下文/作用域/位置矩阵）\"",
     "test:js262": "node tests/js262/run.js",
     "test:jit": "node tests/jit/run.js",
     "test:gpu": "node tests/gpu/run.js",

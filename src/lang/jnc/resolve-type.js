@@ -1,0 +1,123 @@
+// src/lang/jnc/resolve-type.js —— 把**写法**上的类型（syntactic）解成**类型对象**
+//
+// `types.js` 读出来的是写法：基类型那一格的文本 + 修饰词 + `*` 层数 + 后缀链。
+// 要发给方言还差一步：那个名字到底是结构体、类还是枚举？`int` 在方言里是几号？
+// 这一份就干这一步，靠两张表 + 一份环境（名字 → 那是什么）：
+//
+//   WORD_TYPES   关键字 → 方言那一侧的种类（`int`/`char`/`short`… 在这一层都是 int）
+//   env          名字 → { kind: 'struct' | 'class' | 'enum' | 'typedef', name, to? }
+//
+// 解不出来的**不猜**：答 `null`，调用方记账。那是这一层唯一诚实的答法。
+
+/** 关键字基类型 → 类型对象（出处：`frontend-jnc/lower.js` 的 tyText 与四种位宽都发 int）。 */
+export const WORD_TYPES = {
+  int: { k: 'int' }, char: { k: 'int' }, short: { k: 'int' }, long: { k: 'int' },
+  intptr: { k: 'int' }, bool: { k: 'bool' }, float: { k: 'real' }, double: { k: 'real' },
+  void: { k: 'void' },
+};
+
+/** 标准 typedef 里"整数那一族"（`size_t` / `uint8_t` …）—— 方言里都是 int。 */
+export const STD_INT_TYPEDEFS = new Set([
+  'uint_t', 'intptr_t', 'uintptr_t', 'size_t', 'int8_t', 'utf8_t', 'uint8_t', 'uchar_t',
+  'byte_t', 'int16_t', 'utf16_t', 'uint16_t', 'ushort_t', 'word_t', 'int32_t', 'utf32_t',
+  'uint32_t', 'dword_t', 'int64_t', 'uint64_t', 'ulong_t', 'qword_t',
+]);
+
+/**
+ * 解一格类型。`t` 是 `readDeclType` 的结果，`env` 是"名字 → 那是什么"。
+ * 答 `{ type, why }`：解出来 `type` 是类型对象、`why` 为 null；解不出来 `type` 为 null、
+ * `why` 说卡在哪一格（记账用）。
+ */
+export function resolveType(t, env = new Map()) {
+  if (t === null || t === undefined) return { type: null, why: '没有类型' };
+  const base = baseOf(t, env);
+  if (base === null) return { type: null, why: `认不出基类型 '${t.base.text || '(空)'}'` };
+  if (t.shape === 'fnptr' || t.shape === 'fn') return { type: null, why: `函数那一族（${t.shape}）` };
+  if (t.shape === 'prop' || t.shape === 'event') return { type: null, why: `属性/事件（${t.shape}）` };
+  if (t.shape === 'bitfield') return { type: null, why: '位域' };
+
+  /* **`*` 先套、数组后套** —— 声明符的读法就是这个次序：`C* m_items[3]` 是"C* 的数组"，
+     不是"数组的指针"。先前反着写，尺子上就是 `(ptr (blk (ptr C) 3))` 对 `(blk (ptr C) 3)`。
+     类那一族**吞掉一个 `*`**：jancy 里"是指针的就得看着像指针"，一格类变量写成 `C*`，
+     而它在方言里本来就是 `(ptr 根)`（第五十二刀）。少这一条，`Node* m_next` 会多一层。 */
+  let el = base;
+  const stars = base.k === 'class' ? Math.max(t.ptrs - 1, 0) : t.ptrs;
+  for (let i = 0; i < stars; i += 1) el = { k: 'ptr', target: el };
+
+  /* 多维数组按**源码次序**读长度（`int m_grid[2][3]` 是 [2,3]），从里往外套：
+     元素是 `(blk int 3)`、整格是 `(blk (blk int 3) 2)`。先前每一维都取"第一格后缀"的长度，
+     于是两维都成了 3 —— 尺子一次就抓出来。 */
+  const dims = arrayDims(t);
+  if (dims === null) return { type: null, why: '数组长度不是字面量' };
+  for (let i = dims.length - 1; i >= 0; i -= 1) el = { k: 'arr', el, n: dims[i] };
+  return { type: el, why: null };
+}
+
+/** 基类型那一格。 */
+function baseOf(t, env) {
+  const text = t.base.text;
+  if (t.base.kind === 'word' || WORD_TYPES[text] !== undefined) {
+    return WORD_TYPES[text] ?? null;
+  }
+  if (t.base.kind === 'named' || t.base.kind === 'generic') {
+    const name = nameText(t);
+    if (name === null) return null;
+    if (STD_INT_TYPEDEFS.has(name)) return { k: 'int' };
+    if (name === 'string_t') return { k: 'string' };
+    const e = env.get(name);
+    if (e === undefined) return null;
+    /* 用**环境里记的名字**，不是源码里那个 —— 嵌套类型在方言那一侧叫 `Outer$Inner`。
+       先前这儿写的是源码名，尺子上就是 `Outer.m_in：旧 Outer$Inner / 新 Inner`。 */
+    const emitName = e.name ?? name;
+    if (e.kind === 'struct' || e.kind === 'union') return { k: 'struct', name: emitName };
+    if (e.kind === 'class') return { k: 'class', name: emitName };
+    if (e.kind === 'enum') return { k: 'enum', name: emitName };
+    return null;                                     // typedef 那一族要再走一跳，先不猜
+  }
+  return null;
+}
+
+/** 基类型是个名字时，那个名字的文本（`readDeclType` 只留了头名，名字在原树上）。 */
+function nameText(t) {
+  const specs = t.raw?.specs;
+  if (specs === null || specs === undefined || !Array.isArray(specs.items)) return null;
+  return firstIdent(specs.items[1]);                 // `(specs 类型 前 后)` 的第一格
+}
+
+/** 往下找第一个标识符记号。 */
+function firstIdent(n) {
+  if (n === null || n === undefined || typeof n !== 'object') return null;
+  if (!Array.isArray(n.items)) return typeof n.value === 'string' ? n.value : null;
+  for (const it of n.items.slice(1)) {
+    const s = firstIdent(it);
+    if (s !== null) return s;
+  }
+  return null;
+}
+
+/** 数组每一维的长度，**按源码次序**（`int m_grid[2][3]` 答 `[2, 3]`）。有一维不是字面量答 null。 */
+function arrayDims(t) {
+  const dcl = t.raw?.dcl;
+  if (dcl === null || dcl === undefined || !Array.isArray(dcl.items)) return [];
+  const out = [];
+  for (const s of suffixChain(dcl.items[3])) {
+    if (s?.items?.[0]?.value !== 'array-suffix') continue;
+    const v = s.items[1];
+    const n = v === null || v === undefined ? NaN : Number(v.value);
+    if (!Number.isInteger(n) || n < 0) return null;
+    out.push(n);
+  }
+  return out;
+}
+
+/** 后缀链上的每一格，**按源码次序**（左递归链倒着塞）。这一层按位置走，省一次循环依赖。 */
+function suffixChain(chain) {
+  const out = [];
+  let cur = chain;
+  while (cur !== null && cur !== undefined && Array.isArray(cur.items)) {
+    if (cur.items[0]?.value !== 'suffixes-add') break;
+    out.unshift(cur.items[2]);
+    cur = cur.items[1];
+  }
+  return out;
+}
