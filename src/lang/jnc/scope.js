@@ -36,6 +36,10 @@ export function jncNamesOf(v) {
 
 /** 作用域配方。键是节点名，`steps` 是上面那四个词。 */
 export const JNC_SCOPE = {
+  /* **文件顶层的名字不看先后**（`'@root'` 这一格是核心给的：洞就是 ast 自己那几格）。
+     jancy 的编译是两趟 —— declare 一趟把名字全登记上，compile 一趟才看体
+     （jnc_ct_Module 的 DeclarePass / CompilePass）。所以 `g_f()` 写在 `g_f` 声明之前是对的。 */
+  '@root': { steps: ['hoist:stats', 'stats'] },
   // 声明：名字进当前这层
   'var-decl': { steps: ['specs', 'dcls', 'bind:dcls'] },
   'var-decl-curly': { steps: ['specs', 'dcl', 'value', 'bind:dcl'] },
@@ -47,14 +51,18 @@ export const JNC_SCOPE = {
   dcl: { steps: ['ptrs', 'suffixes', 'ctor'] },
   formal: { steps: ['specs', 'dcl', 'init', 'bind:dcl'] },
   'formal-anon': { steps: ['specs', 'ptrs'] },
-  // 类型与命名空间：自己是一层
-  agg: { steps: ['bind:name', 'bases', 'open', 'body'] },
-  enum: { steps: ['bind:name', 'base', 'open', 'body'] },
+  // 类型与命名空间：自己是一层，**成员也不看先后**（同上：declare 一趟、compile 一趟）
+  agg: { steps: ['bind:name', 'bases', 'open', 'hoist:body', 'body'] },
+  enum: { steps: ['bind:name', 'base', 'open', 'hoist:body', 'body'] },
   'enum-item': { steps: ['value', 'bind:name'] },
-  namespace: { steps: ['bind:name', 'open', 'body'] },
-  dylib: { steps: ['bind:name', 'open', 'body'] },
-  extension: { steps: ['bases', 'open', 'body'] },
-  'property-template': { steps: ['open', 'body'] },
+  namespace: { steps: ['bind:name', 'open', 'hoist:body', 'body'] },
+  dylib: { steps: ['bind:name', 'open', 'hoist:body', 'body'] },
+  extension: { steps: ['bases', 'open', 'hoist:body', 'body'] },
+  'property-template': { steps: ['open', 'hoist:body', 'body'] },
+  /* 两格**透明壳**：收名字的时候得穿过去。`type-decl` 裹着 `agg`（`class C {}` 那一条声明），
+     `attributed` 裹着一条声明（`[ displayName = … ] int m_x;`）—— 壳自己不带名字。 */
+  'type-decl': { steps: ['agg'], through: ['agg'] },
+  attributed: { steps: ['attrs', 'decl'], through: ['decl'] },
   // 语句里开层的那几格
   compound: { steps: ['open', 'body'] },
   for: { steps: ['open', 'init', 'cond', 'step', 'body'] },

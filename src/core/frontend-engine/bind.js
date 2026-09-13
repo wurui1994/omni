@@ -73,8 +73,31 @@ export function bind(ast, lang) {
     const list = lang.namesOf === undefined ? names : lang.namesOf(names);
     for (const nm of list ?? []) {
       if (nm === '...') continue;                    // 变长参数不是个名字，别占格
+      /* 同一格声明绑第二遍不再记一笔账：**先收齐再查**的作用域（`hoist:`）会先绑一次，
+         走到那条声明时又绑一次 —— 那是一件事，不是两个名字。 */
+      const had = scope.names.get(nm);
       scope.names.set(nm, { name: nm, scope: scope.id, node });
+      if (had !== undefined && had.node === node) continue;
       decls.push({ name: nm, scope: scope.id, node });
+    }
+  };
+
+  /**
+   * **先收齐再查**：一串声明里每一条声明的名字先全绑进这层，再走它们的体。
+   * 类的成员、命名空间与文件顶层的名字都不看先后（jancy 的 declare/compile 两趟）。
+   * 怎么知道"这一条声明哪一格是名字"？—— 就看它自己的配方里那几个 `bind:` 步。
+   * 配方写了 `through`（一串洞名）的节点是**透明壳**（属性块裹着一条声明那种），穿过去接着收。
+   */
+  const hoistList = (list, scope) => {
+    if (!Array.isArray(list)) return;
+    for (const it of list) {
+      if (it === null || it === undefined || typeof it !== 'object' || Array.isArray(it)) continue;
+      const r = (lang.scope ?? {})[it.kind];
+      if (r === undefined) continue;
+      for (const st of r.steps ?? []) {
+        if (typeof st === 'string' && st.startsWith('bind:')) bindNames(it[st.slice(5)], scope, it);
+      }
+      for (const h of r.through ?? []) hoistList([it[h]], scope);
     }
   };
 
@@ -129,6 +152,10 @@ export function bind(ast, lang) {
     }
     for (const step of rule.steps) {
       if (step === 'open') { cur = open(cur, node.kind); continue; }
+      if (step.startsWith('hoist:')) {                // 先收齐这一串声明的名字，再走它们的体
+        hoistList(node[step.slice(6)], cur);
+        continue;
+      }
       if (step.startsWith('bind:')) {
         bindNames(node[step.slice(5)], cur, node);
         if (opts.extra !== undefined) bindNames(opts.extra, cur, node);
@@ -147,7 +174,18 @@ export function bind(ast, lang) {
 
   // chunk 本身是个 block；它的那层已经是 root，所以直接走语句（别再开一层）。
   // 主 chunk 本身是变长参数的函数（Lua 5.1 手册 §2.5.9），所以根上下文带 vararg。
-  walkHole(ast.stats, root, { ctx: new Set(['vararg']) });
+  /* **根那一层也可以有配方**（键写 `'@root'`，洞就是 ast 自己那几格）：文件顶层的名字
+     不看先后的语言（jancy、C++ 的命名空间）在这儿写一句 `hoist:stats` 就够了。
+     不写配方还是老样子 —— 直接走语句。 */
+  const rootRule = (lang.scope ?? {})['@root'];
+  const rootOpts = { ctx: new Set(['vararg']) };
+  if (rootRule === undefined) walkHole(ast.stats, root, rootOpts);
+  else {
+    for (const step of rootRule.steps) {
+      if (step.startsWith('hoist:')) { hoistList(ast[step.slice(6)], root); continue; }
+      walkHole(ast[step], root, rootOpts);
+    }
+  }
 
   // 标签是**后判**的：`goto` 可以往前跳（Lua 5.2 §3.3.4），所以走完再解。
   // 可见范围：从自己那层往外，到函数边界（`funcbody` / `lambda` 那层）为止。
