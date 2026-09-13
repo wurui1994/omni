@@ -21,6 +21,7 @@ import { collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import { fnHead, fnName, fnOwnerSegs, overloadIndex } from '../../src/lang/jnc/emit-fn.js';
+import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
 
@@ -105,12 +106,15 @@ for (const f of files) {
       const a = readAgg(n);
       if (a !== null) {
         aggs.push(a);
+        /* 体里那几格是**成员**，不是顶层函数 —— 这一格与"名字读不读出来"无关：泛型的名字是
+           `tinst`（读不出普通名字），先前于是把 `Box<T>` 体里的方法当成了顶层函数，报出来是
+           一串"返回类型解不出来"（那儿的 `T` 本来就没绑上）。 */
+        agg = true;
         const nm = nameText(a.name);
         if (nm !== null) {
           const emitName = owner === null ? nm : `${owner}$${nm}`;
           a.emitName = emitName;
           inner = emitName;
-          agg = true;
           env.set(nm, {
             kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
             name: emitName,
@@ -164,6 +168,35 @@ for (const f of files) {
     for (const it of n.items) scan(it, inner, agg);
   };
   scan(tree, null, false);
+  /* **泛型**：一格用点造一格实例（`generic.js`）—— 方法跟着叫 `Box$int$get_v`
+     （110-generic.jnc 的真输出）。实例是替换好的普通 `agg`，所以照旧读；合成实参那几条
+     typedef 与泛型 typedef 造出来的那几条也进 env。 */
+  const templates = templateTable(tree);
+  if (templates.size > 0) {
+    const g = expandTemplates(tree, templates);
+    for (const [tn, e] of g.typedefs) env.set(tn, { kind: 'typedef', type: synthType(e) });
+    for (const td of g.tdefs.values()) {
+      if (td === null) continue;
+      const tnm = named(td);
+      if (tnm === null) continue;
+      for (const d of allInChain(tnm.dcls, 'dcls-add', 'dcls')) {
+        const t = readDeclType(tnm.specs, d);
+        if (t !== null && t.name !== null) env.set(t.name, { kind: 'typedef', type: t });
+      }
+    }
+    for (const [inm, node] of g.insts) {
+      if (node === null) continue;
+      const a = readAgg(node);
+      if (a === null) continue;
+      a.emitName = inm;
+      aggs.push(a);
+      env.set(inm, {
+        kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
+        name: inm,
+        agg: a,
+      });
+    }
+  }
   collectEnumConsts(tree, env);
 
   /** 一格聚合体的 `$this` 怎么写（类 → `(ptr 连通块的根)`，结构体/union → `(ptr S)`）。 */
