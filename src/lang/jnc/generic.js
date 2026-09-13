@@ -322,7 +322,12 @@ export function templateTable(tree) {
     const h = headOf(n);
     if (h === 'fn-def' || h === 'fn-proto') {
       const nm = named(n);
-      const base = nm === null ? null : tinstBaseIn(nm.dcl);
+      /* 只看声明符的**名字**那一格：`H<K,E>` 出现在**形参**里的那种（`int getk(H<K,E> h)`，
+         114-genericdef.jnc）是一格普通顶层函数，不是体外成员 —— 先前整个声明符乱找，
+         于是它被当成体外成员、跟着每格实例各抄了一份（那是"新腿发了、旧降级没这个名字"
+         那一栏抓出来的 `getk$o1` / `getk$o2`）。 */
+      const dcl = named(nm === null ? null : nm.dcl);
+      const base = dcl === null ? null : tinstBaseIn(dcl.name);
       const tm = base === null ? undefined : out.get(base);
       if (tm !== undefined) {
         if (tm.outer === undefined) tm.outer = [];
