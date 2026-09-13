@@ -117,6 +117,39 @@ function ctorFormals(agg) {
   return sf === undefined ? null : readFormals(sf.node);
 }
 
+/**
+ * 花括号初值里那几格**值**（`new Point { m_y = 2000 }` → 一格 `2000`）。
+ * 嵌套的花括号也摊平（`{ x, x + 1, { x + 2, x + 3 } }` 是四格 —— 24-new-curly.jnc 的
+ * `$newc0 (($i0 int) ($i1 int) ($i2 int) ($i3 int))`）。这一刀只认整数字面量，
+ * 别的（变量、表达式）答 null，整格记账。
+ */
+function curlyLitTypes(n) {
+  const init = named(n)?.init;
+  if (init === null || init === undefined) return null;
+  const out = [];
+  let bad = false;
+  const dig = (x) => {
+    if (bad || x === null || x === undefined || typeof x !== 'object') return;
+    if (!Array.isArray(x.items)) {                                   // 一格记号
+      const t = litArgType(x);
+      if (t === null) { bad = true; return; }
+      out.push(t);
+      return;
+    }
+    const h = headOf(x);
+    if (h === 'curly' || h === 'items' || h === 'items-add') { for (const it of x.items.slice(1)) dig(it); return; }
+    /* `m_y = 2000` 那种：只看**右边**那一格。 */
+    if (h === 'assign' || h === 'init' || h === 'field-init') {
+      const nm = named(x);
+      dig(nm?.value ?? x.items[x.items.length - 1]);
+      return;
+    }
+    bad = true;                                                      // 别的形状先不猜
+  };
+  dig(init);
+  return bad ? null : out;
+}
+
 /** 一格 `new` 的实参表（读不出来答 null）。 */
 function argList(n) {
   const a = named(n)?.args;
@@ -213,7 +246,21 @@ for (const f of files) {
     const idx = next[fam];
     next[fam] += 1;                                                  // 带实参的也占一个号
     const name = `$new${fam}${idx}`;
-    if (fam === 'c') { note('花括号初值那一族（要定型）'); continue; }
+    if (fam === 'c') {
+      const ts = curlyLitTypes(st.node);
+      if (ts === null || ts.length === 0) { note('花括号初值里那几格要定型'); continue; }
+      const rc = rec === undefined ? null : (rec.kind === 'class'
+        ? classRoot(rec.agg, aggs, env) : rec.agg);
+      const rcn = rc === null ? null : (rc.emitName ?? nameText(rc.name));
+      if (rcn === null) { note(`认不出花括号初值的类型（${tn ?? '?'}）`); continue; }
+      const hd = `(fn ${name} (${ts.map((t, k) => `($i${k} ${t})`).join(' ')}) (ptr ${rcn})`;
+      const w = oracle.get(name);
+      if (w === undefined) { noShell += 1; continue; }
+      cmp += 1;
+      if (hd === w) same += 1;
+      else if (diff.length < 20) diff.push(`${f.split('/').pop()}\n      旧 ${w}\n      新 ${hd}`);
+      continue;
+    }
     /* 实参那几格：整数字面量拼得出来（`($i0 int)`），别的要表达式定型 —— 记账。 */
     let ps = '';
     if (hasArgs(st.node)) {
