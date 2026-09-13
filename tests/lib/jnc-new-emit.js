@@ -11,6 +11,12 @@
 // 这一刀只对**不带实参**的那几格（形参表是空的，类型不用定型就能拼出整行）；带实参的照样
 // **占一个号**（不占号后面全错），但只记账不比。带 `[n]` 的 `new T[n]` 也先记账。
 //
+// **两格悬案（如实记账）**：124-errcptr.jnc 的 `$news0` 与 95-aliaspath.jnc 的 `$newo0` —— 这两处
+// 新腿排出来的号旧降级那边没有（它给的是 `$newo1`），也就是**旧降级还从别处排了一个号**。
+// 试过一刀：把泛型实例体里的 `new` 也排进来（实例合成在前）—— 量出来**一格没动**，
+// 所以那不是因。下一个怀疑对象是**内嵌对象**那一族（第一百六十一刀的 embInitLines 在构造里
+// 发 `(pnew …)`），那要等"生成的构造的体"那一刀才看得清。
+//
 // 用法：node tests/lib/jnc-new-emit.js [文件数，默认 400] [--all]
 
 import { readdirSync, statSync, existsSync } from 'node:fs';
@@ -167,6 +173,7 @@ let same = 0;
 const diff = [];
 const skip = new Map();
 let noShell = 0;
+const noShellAt = [];
 
 for (const f of files) {
   let out = '';
@@ -255,7 +262,7 @@ for (const f of files) {
       if (rcn === null) { note(`认不出花括号初值的类型（${tn ?? '?'}）`); continue; }
       const hd = `(fn ${name} (${ts.map((t, k) => `($i${k} ${t})`).join(' ')}) (ptr ${rcn})`;
       const w = oracle.get(name);
-      if (w === undefined) { noShell += 1; continue; }
+      if (w === undefined) { noShell += 1; noShellAt.push(`${f.split('/').pop()}　${name}`); continue; }
       cmp += 1;
       if (hd === w) same += 1;
       else if (diff.length < 20) diff.push(`${f.split('/').pop()}\n      旧 ${w}\n      新 ${hd}`);
@@ -289,7 +296,7 @@ for (const f of files) {
     const rn = root.emitName ?? nameText(root.name);
     const head = `(fn ${name} (${ps}) (ptr ${rn})`;
     const want = oracle.get(name);
-    if (want === undefined) { noShell += 1; continue; }
+    if (want === undefined) { noShell += 1; noShellAt.push(`${f.split('/').pop()}　${name}`); continue; }
     cmp += 1;
     if (head === want) same += 1;
     else if (diff.length < 20) diff.push(`${f.split('/').pop()}\n      旧 ${want}\n      新 ${head}`);
@@ -298,7 +305,9 @@ for (const f of files) {
 
 console.log(`带 new 壳的语料 ${filesOk} 份　对比 ${cmp} 行`
   + `　一模一样 ${same}（${(same / Math.max(cmp, 1) * 100).toFixed(1)}%）　不一致 ${cmp - same}`);
-if (noShell > 0) console.log(`旧降级没发这一格壳：${noShell} 个`);
+if (noShell > 0) {
+  console.log(`旧降级没发这一格壳：${noShell} 个　→ ${noShellAt.slice(0, 8).join('  ')}`);
+}
 if (skip.size > 0) {
   console.log(`还没做（记账，不算对）：${[...skip].sort((a, b) => b[1] - a[1])
     .map(([w, n]) => `${w}×${n}`).join('  ')}`);
