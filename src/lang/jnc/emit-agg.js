@@ -38,18 +38,35 @@ export const CLASS_TAG = '($tag int)';
  * 有一格字段解不出来、或者碰上还没搬的那几族，答 `{ line: null, why }`。
  * `lines` 里还带上**顺带发出来的那几行**（union 里套的匿名 struct 各自一行，先发）。
  */
-export function structLine(agg, env) {
+export function structLine(agg, env, allAggs = null) {
   const name = agg.emitName ?? nameText(agg.name);
   if (name === null) return { line: null, lines: [], why: '无名聚合体' };
+  const isClass = agg.word === 'class' || agg.word === 'opaque class';
+  /* **类那一族：一条继承链只发一格**（第五十六刀的 clsRoot）。派生类不发；根那一行把
+     整条链的字段并起来（按声明次序）。struct 那一族照旧一格一行、基类字段在前。 */
+  if (isClass && allAggs !== null) {
+    if (chainRoot(agg, env) !== agg) return { line: null, lines: [], why: '派生类不另发（并进链的根）' };
+  }
   const parts = [];
-  if (agg.word === 'class' || agg.word === 'opaque class') parts.push(CLASS_TAG);
-  const bases = baseFields(agg, env);
+  if (isClass) parts.push(CLASS_TAG);
+  const bases = isClass && allAggs !== null ? [] : baseFields(agg, env);
   if (bases === null) return { line: null, lines: [], why: '基类那一格还解不出来' };
   parts.push(...bases);
   const extra = [];
   const own = ownFields(agg, env, { owner: name, extra });
   if (own === null) return { line: null, lines: [], why: '有字段还解不出来' };
   parts.push(...own);
+  if (isClass && allAggs !== null) {
+    for (const d of allAggs) {
+      if (d === agg) continue;
+      if (d.word !== 'class' && d.word !== 'opaque class') continue;
+      if (chainRoot(d, env) !== agg) continue;
+      const dn = d.emitName ?? nameText(d.name);
+      const f = ownFields(d, env, { owner: dn ?? name, extra });
+      if (f === null) return { line: null, lines: [], why: '派生类里有字段还解不出来' };
+      parts.push(...f);
+    }
+  }
   if (parts.length === 0) return { line: null, lines: [], why: '一格字段都没有' };
   const line = `(struct ${name} ${parts.join(' ')})`;
   return { line, lines: [...extra, line], why: null };
@@ -69,6 +86,21 @@ function baseFields(agg, env) {
     out.push(...own);
   }
   return out;
+}
+
+/** 顺着 class 基类往上走到**链的根**（防环）。 */
+export function chainRoot(agg, env) {
+  let cur = agg;
+  const seen = new Set();
+  for (;;) {
+    if (seen.has(cur)) return cur;
+    seen.add(cur);
+    const up = basePaths(cur)
+      .map((b) => env.get(b))
+      .filter((r) => r !== undefined && r.agg !== undefined && r.kind === 'class');
+    if (up.length === 0) return cur;
+    cur = up[0].agg;
+  }
 }
 
 /** 基类表里每一格的**最后一段名字**（`io.Base` 取 `Base`；空基类表答空）。 */

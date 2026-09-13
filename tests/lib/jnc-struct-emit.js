@@ -162,7 +162,7 @@ for (const f of files) {
     }
     /* **整行**由 `emit-agg.js` 那三条规则拼（类的 `$tag`、基类字段前置、自己的按次序）。
        拼不出来的（union 分组、属性/事件带出来的隐藏字段那几族）不算试过 —— 记账。 */
-    const built = structLine(a, env);
+    const built = structLine(a, env, aggs);
     if (built.line !== null) {
       lineTry += 1;
       if (built.line === rec.line) lineSame += 1;
