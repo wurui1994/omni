@@ -89,3 +89,60 @@ export function mcFireShell(mc) {
     + `      (expr (callfn (aget (var m) (var i))${args}))\n`
     + '      (set i (bin "+" (var i) (int 1))))))';
 }
+
+/* ─── `variant_t` 那一族（第一百一十三刀）─────────────────────────────────────
+   一格 variant 在方言里是**四格的结构体**：标签 + 三格载荷（整数/实数/字符串）。
+   装箱与拆箱做成**函数**而不是就地几句 —— 表达式那一层回的是一格值，没有能挂语句的
+   地方（`(call jnc$var$i x)` 就地成立）。标签的数是 jancy 那边的次序：
+   0 空、1 整数、2 实数、3 布尔、4 字符串。 */
+
+/** 那格结构体自己（第一次用到才发）。 */
+export const VARIANT = 'jnc$variant';
+
+export function variantStruct() {
+  return `  (struct ${VARIANT} ($t int) ($n int) ($r real) ($s string))`;
+}
+
+/** 装箱：种 -> `{ tag, fld, ty }`。`fld === null` 的那一格（空）不带实参。 */
+export const VAR_BOX = new Map([
+  ['0', { tag: 0, fld: null, ty: null }],
+  ['i', { tag: 1, fld: '$n', ty: 'int' }],
+  ['r', { tag: 2, fld: '$r', ty: 'real' }],
+  ['b', { tag: 3, fld: '$n', ty: 'int' }],
+  ['s', { tag: 4, fld: '$s', ty: 'string' }],
+]);
+
+/** 拆箱：种 -> `{ tag, fld, ty, what }`（`what` 进那句失败的话）。 */
+export const VAR_UNBOX = new Map([
+  ['i', { tag: 1, fld: '$n', ty: 'int', what: '一格整数' }],
+  ['r', { tag: 2, fld: '$r', ty: 'real', what: '一个实数' }],
+  ['b', { tag: 3, fld: '$n', ty: 'int', what: '一格布尔' }],
+  ['s', { tag: 4, fld: '$s', ty: 'string', what: '一格字符串' }],
+]);
+
+/** 整格装箱助手（`jnc$var$<种>`）。种不在表里答 `null`。 */
+export function varBoxShell(kind) {
+  const spec = VAR_BOX.get(kind);
+  if (spec === undefined) return null;
+  const vt = `(ptr ${VARIANT})`;
+  const set = spec.fld === null ? '' : `\n    (pstore (pfield (var v) ${spec.fld}) (var x))`;
+  return `  (fn jnc$var$${kind} (${spec.fld === null ? '' : `(x ${spec.ty})`}) ${vt}\n`
+    + `    (let v ${vt} (pnew ${vt} (int 1)))\n`
+    + `    (pstore (pfield (var v) $t) (int ${spec.tag}))${set}\n`
+    + '    (ret (var v)))';
+}
+
+/**
+ * 整格拆箱助手（`jnc$var$to$<种>`）。标签对不上就 `(fail …)` —— 与 assert 落到同一格。
+ * jancy 那边拆箱失败也是**运行期**的事（`CastOp_Variant`），所以这一层不在编译期拒：
+ * 拒了就把"转手一格 variant"这个压倒性的用法一起拒掉了。
+ */
+export function varUnboxShell(kind) {
+  const spec = VAR_UNBOX.get(kind);
+  if (spec === undefined) return null;
+  const vt = `(ptr ${VARIANT})`;
+  return `  (fn jnc$var$to$${kind} ((v ${vt})) ${spec.ty}\n`
+    + `    (if (bin "!=" (pload (pfield (var v) $t)) (int ${spec.tag})) (do\n`
+    + `      (fail (str ${JSON.stringify(`variant_t 里装的不是${spec.what}`)}))))\n`
+    + `    (ret (pload (pfield (var v) ${spec.fld}))))`;
+}
