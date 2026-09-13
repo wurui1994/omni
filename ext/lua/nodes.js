@@ -1,18 +1,16 @@
-// ext/lua/nodes.js —— 语法：**节点表**。洞的类别是数据，成员关系与"怎么写出来"都是算出来的
+// ext/lua/nodes.js —— Lua 的**节点表**（`syn` 的词汇与驱动器都在 src/core/frontend-engine）
 //
-// 每个节点写三样（DESIGN.md 第 3 节，实现时把第四样去掉了 —— 见下）：
-//
-//   of    它**属于**哪一类洞（一个名字；上位类由 SUBCLASS 自动推）
-//   syn   它的**具体语法**：一串"字面记号 / 洞 / 名字表 / 可选组 / 重复组"
-//   prec  只有算符要（档次在 tokens.js 的 OPS 里，这儿不抄第二遍）
-//
-// 设计稿里本来还有一栏 `text`（怎么写出来，例子生成器要用）。写到这儿发现那是**重复的**：
-// `syn` 已经把次序与字面量说全了，`render()` 读同一张表就能写回源码。于是删掉 `text` ——
-// 一份数据两个方向用（parse.js 读它认，render() 读它写），**这才是"规则化"该有的样子**；
-// 两份手写的表迟早对不上（jancy 那边 38 条账号的措辞对不上就是这么来的，见 ADR-0029 10.14）。
-//
-// 关键的一句：**"哪儿能放什么"全在洞的类别里**。`f().x = 1` 合法、`f() = 1` 不合法，
-// 不是两条检查，是"赋值左边是 `var` 类的洞、而 `call` 不属于 `var` 类"这一条规则的自动结论。
+// 每个节点写三样：`of`（属于哪类洞）、`syn`（具体语法）、算符那两格（`prec` 在 tokens.js）。
+// 洞的**类别**是这套设计的关键：它把"哪儿能放什么"变成数据 —— `f().x = 1` 合法、
+// `f() = 1` 不合法，是"赋值左边要 `var` 类、而 `call` 不属于 `var` 类"这一条规则的自动结论。
+
+import {
+  h, l, nm, w, opt, rep,
+} from '../../src/core/frontend-engine/syntax.js';
+
+export {
+  h, l, nm, w, opt, rep,
+};
 
 /**
  * 洞的类别的**上位关系**：`var` 是 `prefixexp` 的一种，`prefixexp` 是 `exp` 的一种。
@@ -22,22 +20,6 @@ export const LUA_SUBCLASS = { var: 'prefixexp', prefixexp: 'exp' };
 
 /** 全部洞的类别。 */
 export const LUA_CLASSES = ['exp', 'prefixexp', 'var', 'funcbody', 'block', 'field', 'stat'];
-
-// ── `syn` 里的词汇（构造器，读起来短一点）────────────────────────────────────
-/** 一个洞：`h('cond')` 默认 `exp` 类。 */
-export const h = (name, cls = 'exp', extra = {}) => ({ h: name, cls, ...extra });
-/** 一串同类的洞，逗号分隔（`min:0` 允许空）。 */
-export const l = (name, cls = 'exp', extra = {}) => ({
-  l: name, cls, sep: ',', min: 1, ...extra,
-});
-/** 一串**名字**（绑定用；`vararg:true` 时末尾可以是 `...`）。 */
-export const nm = (name, extra = {}) => ({ n: name, sep: ',', min: 1, ...extra });
-/** 一个**裸名字**（不是绑定，也不是表达式：`a.b` 的 `b`、`goto l` 的 `l`）。 */
-export const w = (name) => ({ w: name });
-/** 可选组：下一个记号对得上组里第一项就取。 */
-export const opt = (...items) => ({ opt: items });
-/** 重复组（0 次或多次）：组里的洞各自收成数组。 */
-export const rep = (...items) => ({ rep: items });
 
 const S = (name, o) => ({ name, ...o });
 

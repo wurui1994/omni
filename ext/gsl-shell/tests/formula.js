@@ -17,11 +17,11 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { parse, ParseError } from '../../lua/parse.js';
-import { render } from '../../lua/render.js';
-import { LexError } from '../../lua/tokens.js';
+import { parse, ParseError } from '../../../src/core/frontend-engine/parse-driver.js';
+import { render } from '../../../src/core/frontend-engine/render.js';
+import { LexError } from '../../../src/core/frontend-engine/lexrules.js';
 import { formulaLang } from '../formula.js';
-import { holesOf } from '../../lua/lang.js';
+import { holesOf } from '../../../src/core/frontend-engine/language.js';
 
 const GSL = '/Users/wurui/Documents/Lang/reference/gsl-shell';
 const show = process.argv.includes('--show');

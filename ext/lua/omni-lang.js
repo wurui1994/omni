@@ -19,7 +19,7 @@ import { Diagnostics, SourceFile, OmniError } from '../../src/core/source/diag.j
 import { readText } from '../../src/core/host/native.js';
 import { basename } from '../../src/core/host/path.js';
 import { lowerCoreSexpr } from '../../src/core/sexpr/lower.js';
-import { parse, ParseError } from './parse.js';
+import { parse, ParseError } from '../../src/core/frontend-engine/parse-driver.js';
 import { LexError } from './tokens.js';
 import { luaLang } from './lang.js';
 import { lower, Refuse, ACCOUNTS } from './lower.js';

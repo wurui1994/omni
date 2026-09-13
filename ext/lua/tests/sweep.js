@@ -12,8 +12,8 @@
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { parse, ParseError } from '../parse.js';
-import { render } from '../render.js';
+import { parse, ParseError } from '../../../src/core/frontend-engine/parse-driver.js';
+import { render } from '../../../src/core/frontend-engine/render.js';
 import { luaLang } from '../lang.js';
 import { gslLang } from '../../gsl-shell/lang.js';
 import { luajitLang } from '../../luajit/lang.js';

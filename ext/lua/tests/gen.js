@@ -13,13 +13,13 @@
 // 用法：node ext/lua/tests/gen.js [--gsl] [--show 打印前几个例子]
 
 import { execFileSync } from 'node:child_process';
-import { parse, ParseError } from '../parse.js';
-import { render } from '../render.js';
+import { parse, ParseError } from '../../../src/core/frontend-engine/parse-driver.js';
+import { render } from '../../../src/core/frontend-engine/render.js';
 import { luaLang } from '../lang.js';
 import { gslLang } from '../../gsl-shell/lang.js';
 import { luajitLang } from '../../luajit/lang.js';
-import { holesOf } from '../lang.js';
-import { bind, SCOPE } from '../scope.js';
+import { holesOf } from '../../../src/core/frontend-engine/language.js';
+import { bind, LUA_SCOPE as SCOPE } from '../scope.js';
 import { listShape } from '../values.js';
 
 const lang = process.argv.includes('--gsl') ? gslLang
@@ -319,7 +319,7 @@ function suiteArity() {
       for (const last of [true, false]) {
         const items = last ? [m.node] : [m.node, num(9)];
         const text = items.map((x) => render(x, lang)).join(', ');
-        const shape = listShape(items);
+        const shape = listShape(items, lang);
         const want = shape.fixed + (shape.spread ? m.n : 0);
         cases.push({
           what: `${bn} ← ${mn}${last ? '（最后一格）' : '（不在最后）'}`,

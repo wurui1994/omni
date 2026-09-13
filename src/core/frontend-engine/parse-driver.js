@@ -1,4 +1,4 @@
-// ext/lua/parse.js —— 解析器 = **读节点表的驱动器**（不是手写的分支树）
+// src/core/frontend-engine/parse-driver.js —— 解析器 = **读节点表的驱动器**（不是手写的分支树）
 //
 // 全部"这儿能写什么"的知识都在 nodes.js 的 `syn` 与洞的类别里。这一份只有**五台机器**：
 //
@@ -11,8 +11,7 @@
 // 于是加一个节点 = 往 nodes.js 加一行；这儿一个字都不用改。gsl-shell 的公式子语言
 // （`ext/gsl-shell`）就是靠这条性质只写增量。
 
-import { lex, binop, unop, LexError } from './tokens.js';
-import { luaLang } from './lang.js';
+import { lex, binop, unop } from './lexrules.js';
 
 export class ParseError extends Error {
   constructor(msg, tok) {
@@ -330,7 +329,7 @@ class P {
  * 解析一段源码。起点由 `lang.start` 说（Lua 是 `block`，公式子语言是 `schema`）——
  * 于是"从哪儿开始认"也是数据，不是驱动器里写死的。
  */
-export function parse(src, lang = luaLang, start = lang.start) {
+export function parse(src, lang, start = lang.start) {
   const p = new P(src, lang);
   // 起点可以是一个**节点名**，也可以是一个**洞的类别**（`gdt.hist` 的实参就是一个 `exp`）。
   const b = start === 'block' ? p.block()

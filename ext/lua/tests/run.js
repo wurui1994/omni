@@ -14,10 +14,10 @@ import {
   mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { parse } from '../parse.js';
-import { render } from '../render.js';
+import { parse } from '../../../src/core/frontend-engine/parse-driver.js';
+import { render } from '../../../src/core/frontend-engine/render.js';
 import { luaLang } from '../lang.js';
-import { holesOf } from '../lang.js';
+import { holesOf } from '../../../src/core/frontend-engine/language.js';
 import { lower, ACCOUNTS, Refuse } from '../lower.js';
 
 const show = process.argv.includes('--show');

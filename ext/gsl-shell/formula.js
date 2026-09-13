@@ -21,13 +21,13 @@
 //   expr-lexer.lua:11,16    算符档次表，`max_oper_prio = 4`
 //   expr-lexer.lua:96-128   词法：`'…'` 字面量、`%b[]` 标识符、名字含 `.`/`$`、数字
 
-import { defineLang } from '../lua/lang.js';
+import { defineLang } from '../../src/core/frontend-engine/language.js';
 import {
   h, l, nm, w, opt,
-} from '../lua/nodes.js';
+} from '../../src/core/frontend-engine/syntax.js';
 import {
   reRule, nameRule, numberRule, symbolRule, LexError,
-} from '../lua/tokens.js';
+} from '../../src/core/frontend-engine/lexrules.js';
 
 // ── 词法表 ──────────────────────────────────────────────────────────────────
 const F_NAME = /[A-Za-z_][A-Za-z0-9_.$]*/y;            // 名字里有 `.` 和 `$`（:118）
