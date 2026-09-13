@@ -29,20 +29,23 @@ export const CLASS_TAG = '($tag int)';
 /**
  * 拼一行 `(struct 名字 …)`。`env` 是 `名字 -> { kind, name, agg }`。
  * 有一格字段解不出来、或者碰上还没搬的那几族，答 `{ line: null, why }`。
+ * `lines` 里还带上**顺带发出来的那几行**（union 里套的匿名 struct 各自一行，先发）。
  */
 export function structLine(agg, env) {
   const name = agg.emitName ?? nameText(agg.name);
-  if (name === null) return { line: null, why: '无名聚合体' };
+  if (name === null) return { line: null, lines: [], why: '无名聚合体' };
   const parts = [];
   if (agg.word === 'class' || agg.word === 'opaque class') parts.push(CLASS_TAG);
   const bases = baseFields(agg, env);
-  if (bases === null) return { line: null, why: '基类那一格还解不出来' };
+  if (bases === null) return { line: null, lines: [], why: '基类那一格还解不出来' };
   parts.push(...bases);
-  const own = ownFields(agg, env);
-  if (own === null) return { line: null, why: '有字段还解不出来' };
+  const extra = [];
+  const own = ownFields(agg, env, { owner: name, extra });
+  if (own === null) return { line: null, lines: [], why: '有字段还解不出来' };
   parts.push(...own);
-  if (parts.length === 0) return { line: null, why: '一格字段都没有' };
-  return { line: `(struct ${name} ${parts.join(' ')})`, why: null };
+  if (parts.length === 0) return { line: null, lines: [], why: '一格字段都没有' };
+  const line = `(struct ${name} ${parts.join(' ')})`;
+  return { line, lines: [...extra, line], why: null };
 }
 
 /** 基类（可能是一串、可能套几层）的字段，按继承次序摊平。 */
@@ -85,45 +88,82 @@ function lastIdent(n) {
   return null;
 }
 
-/** 自己那几格数据字段。 */
-function ownFields(agg, env) {
+/** 自己那几格数据字段。`ctx` 带着东家的名字与"顺带要发的那几行"。 */
+function ownFields(agg, env, ctx = { owner: '', extra: [] }) {
   const out = [];
   /* 位域挤格子的状态：`bits` 是底宽、`used` 是已经占掉的位数。碰上非位域就**收口**。 */
   let pack = null;
   const flush = () => {
     if (pack !== null) { out.push(`($b${out.length} int)`); pack = null; }
   };
-  for (const m of agg.members) {
+  agg.members.forEach((m, i) => {
     /* **匿名 union**：成员摊进外面这个结构体，发的时候括回成 `(union …)`（第一百一十刀）。
        带名字的嵌套类型不摊 —— 它是另一格类型，字段表里没有它。 */
     if (m.shape === 'nested-type') {
       const n = m.nested;
-      if (n === null || n === undefined || n.word !== 'union') continue;
-      if (nameText(n.name) !== null) continue;                      // 有名字的 union 不摊
+      if (n === null || n === undefined || n.word !== 'union') return;
+      if (nameText(n.name) !== null) return;                        // 有名字的 union 不摊
       flush();
-      const inner = ownFields(n, env);
-      if (inner === null) return null;
+      const inner = unionFields(n, env, ctx, i);
+      if (inner === null) { out.push(null); return; }               // 里头有解不出来的：整格作废
       if (inner.length > 0) out.push(`(union ${inner.join(' ')})`);
-      continue;
+      return;
     }
     if (m.shape === 'bitfield') {
       /* **连着的位域挤成一格**：同一个底宽、累计位数不超过那个宽就接着挤，否则另起一格。
          格名是 `$b<这一格的序号>`（规则从旧降级的真输出反出来，104-bitfield.jnc）。 */
       const bits = baseIntBits(m.type);
       const n = bitfieldBits(m.type);
-      if (bits === null || n === null) return null;                 // 认不出底宽/位数：不猜
+      if (bits === null || n === null) { out.push(null); return; }  // 认不出底宽/位数：不猜
       if (pack !== null && (pack.bits !== bits || pack.used + n > bits)) flush();
       if (pack === null) pack = { bits, used: 0 };
       pack.used += n;
-      continue;
+      return;
     }
-    if (m.shape !== 'data' && m.shape !== 'array') continue;
-    if (m.name === null) return null;
+    if (m.shape !== 'data' && m.shape !== 'array') return;
+    if (m.name === null) { out.push(null); return; }
     flush();
     const r = resolveType(m.type, env);
-    if (r.type === null) return null;
+    if (r.type === null) { out.push(null); return; }
     out.push(`(${m.name} ${emitType(r.type, 'field')})`);
-  }
+  });
   flush();
-  return out;
+  return out.some((x) => x === null) ? null : out;
+}
+
+/**
+ * 匿名 union 里那几格。里头再套**匿名 struct** 时按旧降级的命名各自发一行：
+ * `<东家>$u<union 的成员序号>$s<struct 在 union 里的序号>`，字段名是 `$s<同一个序号>`
+ * （出处：103-unionstruct.jnc 的真输出 `(union ($s0 H$u1$s0) ($s1 H$u1$s1))`）。
+ */
+function unionFields(uni, env, ctx, unionAt) {
+  const out = [];
+  let bad = false;
+  /* `$s` 那个序号数的是**匿名 struct 的个数**，不是成员的位置 —— `Ctl` 里 union 的第 0 格是
+     `m_value`、第 1 格才是匿名 struct，而旧降级发的是 `$s0`（104-bitfield.jnc）。
+     `H` 那处两格都是匿名 struct，两种数法看不出差别，是 `Ctl` 这一格把它钉死的。 */
+  let sn = 0;
+  uni.members.forEach((m) => {
+    if (m.shape === 'nested-type') {
+      const inner = m.nested;
+      if (inner === null || inner === undefined) return;
+      if (inner.word === 'struct' && nameText(inner.name) === null) {
+        const j = sn;
+        sn += 1;
+        const nm = `${ctx.owner}$u${unionAt}$s${j}`;
+        const fields = ownFields(inner, env, { owner: nm, extra: ctx.extra });
+        if (fields === null) { bad = true; return; }
+        ctx.extra.push(`(struct ${nm} ${fields.join(' ')})`);
+        out.push(`($s${j} ${nm})`);
+        return;
+      }
+      return;                                                       // 别的嵌套类型不摊
+    }
+    if (m.shape !== 'data' && m.shape !== 'array') return;
+    if (m.name === null) { bad = true; return; }
+    const r = resolveType(m.type, env);
+    if (r.type === null) { bad = true; return; }
+    out.push(`(${m.name} ${emitType(r.type, 'field')})`);
+  });
+  return bad ? null : out;
 }
