@@ -11491,6 +11491,100 @@ return this.nope(n, 'main 里 `return` 一个非 0 的值（方言的入口没�
   剩下的 17 才是真 main 的退出码。`(文件, 拦路项)` 对 `3738 -> 3685`（−53）；
   lowered 97、clean 152 都没动（那 54 对所在的组还有别的拦路项）。
 
+### 第二百四十九刀：相邻的几段 `$"…"` 是**一格**格式化字面量
+
+榜上 `不是直接调一个名字的调用` 剩的 16 对，量出来全是同一句（log_MonitorRepresenter.jnc:28、
+:58 那两处，五段拼一句）：
+
+```
+representation.addHyperText(
+    $"%1\n"
+    $"\e[90mFile name:\t%2%3\n"
+    …
+    $"\e[90mPID:\t\e[34m%6"(messageText, …));
+```
+
+那不是"调用的形状不收"，是**几段字面量拼在一起**：jancy 的 `literal` 是 `literal_atom+`，
+几段的文本进的是同一个 `Literal` 缓冲、`m_fmtIndex` 也只有一格（Parser.cpp:3496），所以
+第二段里的 `%2` 指的是**实参表**的第 2 个。而这一层先前只认单段的 `(fmt …)`：
+`fmtNode` 头一句就是 `head(n) === 'fmt'`，`(concat (fmt …) (fmt …))` 落不进去。
+
+改的是两处，机器一格都不用新造（`fmtLit` 本来就收实参表）：
+
+- 新的 `fmtToks(n)` 把 concat 链上的 token **按序**收成一串（里头混了普通字面量的回 null）；
+  `fmtNode` 与 `expr0` 的 concat 支各问它一次；
+- `fmtLit` 收下一串 token：文本首尾相接成一串扫，`seq` 与实参表共用一格。
+  `$( … )` 那几段还要指得着原文，所以记下每段在合起来那串里的起点、按偏移倒查（`siteAt`）——
+  一格注入不会跨段（每段自己是一个 token）。
+
+混着拼（`"a" $"b%1\n"(42)`）**照旧不收**，可话说准了：先前它也落在
+`不是直接调一个名字的调用` 上，现在是一句指着第五十四刀那笔账的话（新墙 `bad/lit-mixfmt`）。
+
+- 新例子 `cases/187-fmtconcat`（三段共用实参表、光写 spec 跨段接着数、`$id` 内嵌与 `%N`
+  混着、一段带表一段纯文本；孪生 `/tmp/c195.c`）。
+- 腿：`node tests/jnc/run.js` 334/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`不是直接调一个名字的调用` 那一行**整行没了**。
+  `(文件, 拦路项)` 对 `3685 -> 3670`（−15）；lowered 97、clean 152 没动。
+
+### 第二百五十刀：写在函数体里的 `enum`（先前**悄悄掉了**）
+
+榜上 `未声明的变量 '…'` 88 对里翻出来的一格（formatInteger.jnc:31 的 `GB`）：
+
+```
+string_t formatFileSize(uint64_t size) {
+    enum { KB = 1024, MB = 1024 * KB, GB = 1024 * MB, };
+    return size >= GB ? … ;
+}
+```
+
+这一条**一句诊断都不发**：顶层那一遍 `enumName`（第十七刀那一格"名字先坐下"）只走顶层与
+类体，体里这一格的名字压根没登记；于是 `enumDecl` 的第一句 `this.enums.get(name)` 是
+undefined 就 `return null` —— 成员表空着，用到成员时才报"未声明的变量"，认错了人。
+（`stmt0` 里 `type-decl` 那一支本来就把它交给 `typeDecl` 了，所以看着像"接了"。）
+
+落法是补那一坐：新 `localTypeDecl` 在体里碰上 enum 时先叫一遍 `enumName`，再 `enumDecl`。
+一处分寸：`enumName` 成不成都回 `null`（它自己报错），所以判成没成看的是**表里有没有**，
+不是它的返回值 —— 第一版按返回值判，于是每一格都当成失败，量出来"名字在、成员空"。
+
+代价与第二百一十九刀（体里的 `typedef`）逐字一样：名字提到了**外面那层命名空间**，于是
+函数外面也用得上它（jancy 那儿不能，拒得更松），同一层里两个函数各写一条同名的会撞
+（jancy 那儿不撞，拒得更严）。两头都不给错答案；真按作用域收要一张跟着 `scopes` 进出的
+类型表，与体里的 `using namespace`（第二百一十七刀）等同一张表一起落。
+
+- 新例子 `cases/188-localenum`（无名的当常量表 + 带名字的也在体里声明；孪生 `/tmp/c196.c`——
+  C 里同一条写法本来就合法）。
+- 腿：`node tests/jnc/run.js` 335/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`没有这个类型：'…'` `98 -> 96`；`(文件, 拦路项)` 对 `3670 -> 3677`（**+7**）——
+  那是**露账**不是回退（那几格枚举先前把整条 `return` 卡住，后面的账一句都没走到）。
+  lowered 97、clean 152 没动。
+
+### 第二百五十一刀：花括号初值里那格结构体在别的文件里 —— 就地先摊
+
+榜上 `第 1 项越过了 ui$ListItem 的 0 个字段`（7 组）。那句话**认错了人**：`ui.ListItem`
+明明写着两个字段（ui_ListItem.jnc:13-16）。真身是**次序**：`import` 摊出来的顶层条目续在
+这一份的后面（impDrain），于是这一份里的
+
+```
+static ui.EnumPropertyOption accessModeTable[] = {   // FileSession.jnc:141
+    { "Read/Write", Access.ReadWrite }, …
+}                                                    // EnumPropertyOption 是 ui.ListItem 的别名
+```
+
+比那格结构体的**体**先降 —— `this.structs.get('ui$ListItem')` 那时是一张空表，于是"第 1 项
+越过了 0 个字段"。五行就能钉住（`/tmp/probe-li.jnc`：一句 import 加一格 static 数组）。
+
+落法就是第一百二十五刀那条"谁把它当基类，谁就先把它摊了"（`structLay` / `structNodes`）：
+`curlyMember` 碰上空表就地先摊那格结构体，再数字段。不直接叫 `structLay` 是因为它那两句拒话
+（位域 / 匿名 union）是替**基类**那条路写的 —— 这条路上位域上面已经拦过、匿名 union 另有
+自己的 `aliasPath`。`layingStructs` 那道闸照旧要（字段默认值里写自己的花括号初值会绕回来）。
+
+- 新例子 `cases/189-importcurly` + `cases/imports/item189.jnc`（走 typedef 的 static 数组，
+  再加一格顶层的；孪生 `/tmp/c197.c` 只钉那三行文本 —— "体比用它的地方后降"是这一层的账，
+  C 那边没有这回事）。
+- 腿：`node tests/jnc/run.js` 336/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：那一行**整行没了**（7 对）。`(文件, 拦路项)` 对 `3677 -> 3685`（**+8**）——
+  又是**露账**（那几组先前卡在这一句上，后面的账没走到）。lowered 97、clean 152 没动。
+
 
 
 

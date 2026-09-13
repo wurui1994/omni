@@ -1,0 +1,13 @@
+// 被 189-importcurly.jnc import 的那一份（第二百五十一刀）。
+// 关键是这格结构体**在另一份文件里**：import 摊出来的条目续在主文件的后面，
+// 于是主文件里那格 `static Item t[] = {{…}}` 比这儿的体先降。
+namespace ui {
+
+struct Item {
+	string_t m_text;
+	int m_value;
+}
+
+typedef Item Opt;
+
+}

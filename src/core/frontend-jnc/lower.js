@@ -478,11 +478,27 @@ function fmtSplitSite(s, open) {
   return null;
 }
 
-/** 这段树是一格格式化字面量吗（`(fmt …)`，或者它带上了实参表的 `(call (fmt …) …)`）。 */
+/** 这段树是一格格式化字面量吗（`(fmt …)`，或者它带上了实参表的 `(call (fmt …) …)`）。
+ *
+ *  相邻的几段拼在一起也算**一格**（第二百四十九刀）：jancy 的 `literal` 是 `literal_atom+`，
+ *  几段的文本进的是**同一个** `Literal` 缓冲（`m_fmtIndex` 也是同一格），所以
+ *  `$"%1\n" $"…%2…"(a, b)` 里的 `%2` 指的是实参表的第 2 个 —— 不是第二段自己的第 1 个。
+ *  回的 `toks` 按源码顺序；里头混了普通字面量的**不算**（那一格另有边界，见 litWhy）。
+ */
+function fmtToks(n, out = []) {
+  if (isList(n) && head(n) === 'fmt') { out.push(n.items[1]); return out; }
+  if (isList(n) && head(n) === 'concat') {
+    return fmtToks(n.items[1], out) === null ? null : fmtToks(n.items[2], out);
+  }
+  return null;
+}
+
 function fmtNode(n) {
-  if (isList(n) && head(n) === 'fmt') return { tok: n.items[1], args: null };
-  if (isList(n) && head(n) === 'call' && isList(n.items[1]) && head(n.items[1]) === 'fmt') {
-    return { tok: n.items[1].items[1], args: n.items[2] };
+  const t0 = fmtToks(n);
+  if (t0 !== null) return { tok: t0, args: null };
+  if (isList(n) && head(n) === 'call') {
+    const t1 = fmtToks(n.items[1]);
+    if (t1 !== null) return { tok: t1, args: n.items[2] };
   }
   return null;
 }
@@ -2815,8 +2831,28 @@ class JncLower {
         return this.nope(node, `${shown(type.name)} 里有位域，它的花括号初值 ——`
           + '（这一遍是按第几格字段数的，而位域不占自己的格子）');
       }
-      const fs = this.structs.get(type.name);
-      if (fs === undefined) return this.err(node, `内部错误：没有结构体 '${type.name}'`);
+      const fs0 = this.structs.get(type.name);
+      if (fs0 === undefined) return this.err(node, `内部错误：没有结构体 '${type.name}'`);
+      /* 那格结构体的字段表还是空的（第二百五十一刀）：它在**别的文件**里声明，而 import 摊出来的
+         条目续在这一份的**后面**（impDrain），于是这一份里的 `static ui.ListItem t[] = {{…}}`
+         比它的体先降 —— 数出来是"0 个字段"，报的那句话（`第 1 项越过了 ui$ListItem 的 0 个
+         字段`，逐份榜上 7 组）是**认错了人**：字段明明写着两个。
+         就地先摊，与第一百二十五刀那条"谁把它当基类，谁就先把它摊了"（structLay）同一个机器；
+         这儿不走 structLay 是因为它那两句拒话是替**基类**那条路写的（位域 / 匿名 union 在这
+         条路上另有自己的话，上面那一句已经拦过位域）。`layingStructs` 那道闸照旧要 ——
+         字段的默认值里写自己的花括号初值就会绕回来。 */
+      let fs = fs0;
+      if (fs.length === 0 && !this.laidStructs.has(type.name)
+        && this.structNodes.has(type.name) && !this.layingStructs.has(type.name)) {
+        const ent = this.structNodes.get(type.name);
+        this.layingStructs.add(type.name);
+        const saveNs2 = this.ns;
+        this.ns = ent.ns;
+        this.typeDecl(ent.node);
+        this.ns = saveNs2;
+        this.layingStructs.delete(type.name);
+        fs = this.structs.get(type.name) ?? fs;
+      }
       const f = name === null ? fs[idx] : fs.find((x) => x.name === name);
       if (f === undefined) {
         return name === null
@@ -5989,6 +6025,39 @@ class JncLower {
         + '（disposable.rst:17），要确定时机得先有 dispose/nestedscope 那一套');
     }
     return this.nope(n, `'${sk}'（要属性那一套：property / bindable / autoget）`);
+  }
+
+  /**
+   * 写在**函数体里**的一格带体类型声明（第二百五十刀）。
+   *
+   * 语料里的形状是"体里一格无名 enum 当常量表"（formatInteger.jnc:24-28 的 KB/MB/GB，
+   * 逐份榜上那句 `未声明的变量 'GB'` 就是它）：
+   *
+   *   string_t formatFileSize(uint64_t size) {
+   *       enum { KB = 1024, MB = 1024 * KB, GB = 1024 * MB, };
+   *       return size >= GB ? … ;
+   *   }
+   *
+   * 先前这一条**悄悄掉了**：顶层那一遍 `enumName` 只走到顶层与类体，体里这一格的名字压根
+   * 没坐下，于是 `enumDecl` 第一句 `this.enums.get(name)` 是 undefined 就 `return null`
+   * —— 一句诊断都不发，用到成员时才报"未声明的变量"，认错了人。所以这儿先补那一坐。
+   *
+   * 代价与第二百一十九刀（体里的 `typedef`）逐字一样：名字提到了**外面那层命名空间**
+   * （`qual`），于是函数外面也能用它（jancy 那儿不能，拒得更松），同一层里两个函数各写一条
+   * 同名的会撞（jancy 那儿不撞，拒得更严）。两头都不给错答案。真按作用域收要一张跟着
+   * `scopes` 一起进出的类型表 —— 与体里的 `using namespace` 是同一件事，等那张表一起落。
+   */
+  localTypeDecl(t) {
+    if (isList(t) && head(t) === 'enum') {
+      /* 名字先坐下 —— `enumName` 报错时自己会说（它成不成都回 null，所以看的是**表里有没有**）。 */
+      const nm = this.enumSelfName(t);
+      if (nm !== null && !this.enums.has(nm)) {
+        this.enumName(t);
+        if (!this.enums.has(nm)) return null;
+      }
+      return this.enumDecl(t);
+    }
+    return this.typeDecl(t);
   }
 
   typeDecl(n) {
@@ -9996,7 +10065,7 @@ class JncLower {
     if (!isList(n)) { this.err(n, '认不出的语句'); return null; }
     const h = head(n);
     if (h === 'empty-stmt') return [];
-    if (h === 'type-decl') { this.typeDecl(n.items[1]); return []; }
+    if (h === 'type-decl') { this.localTypeDecl(n.items[1]); return []; }
     if (h === 'compound') {
       const b = this.block(n, ind + 2);
       return b === null ? null : [`${pad}(do`, b, `${pad})`];
@@ -11804,10 +11873,27 @@ class JncLower {
    */
   fmtLit(node, tok, argNodes) {
     if (this.parseExpr === null) return this.nope(node, '格式化字面量 `$"…"`（这一趟没有再解析一遍的入口）');
-    const raw = String(tok.value);
-    const inner = raw.slice(2, raw.length - 1);
-    const base = tok.span.start + 2;   // inner[0] 在文件里的偏移
-    const file = tok.span.file;
+    /* 相邻的几段 `$"…"` 拼在一起是**一格**（第二百四十九刀）：文本首尾相接成一串扫，
+       实参表与 `%N` 的序号（`seq`）都是**共用**的一格 —— jancy 那边几段进的是同一个
+       `Literal` 缓冲、`m_fmtIndex` 也只有一格（Parser.cpp:3496）。
+       `$( … )` 那几段还要指得着**原文**的位置，所以记下每一段在合起来那串里的起点，
+       按偏移倒查是哪一段（`siteAt`）—— 一格注入不会跨段（每段自己是一个 token）。 */
+    const toks = Array.isArray(tok) ? tok : [tok];
+    const parts = toks.map((tk) => {
+      const raw = String(tk.value);
+      return { s: raw.slice(2, raw.length - 1), base: tk.span.start + 2, file: tk.span.file };
+    });
+    const starts = [];
+    {
+      let acc = 0;
+      for (const p of parts) { starts.push(acc); acc += p.s.length; }
+    }
+    const inner = parts.map((p) => p.s).join('');
+    const siteAt = (off) => {
+      let k = parts.length - 1;
+      while (k > 0 && off < starts[k]) k--;
+      return { file: parts[k].file, base: parts[k].base - starts[k] };
+    };
     const argVals = argNodes.map(() => null);
     const used = argNodes.map(() => false);
     // 实参按需降级（用两次的 `%(1;x)` 只算一次），并记下谁被用过
@@ -11862,7 +11948,8 @@ class JncLower {
     };
     // `$(…)` / `$id` 里那一段源码 -> 一格值。位置按原文算，所以里头报错指的是真地方。
     const inlineVal = (src, off) => {
-      const t = this.parseExpr(file, src, base + off);
+      const a = siteAt(off);
+      const t = this.parseExpr(a.file, src, a.base + off);
       if (t === null) { this.err(node, `格式化字面量里这一段解析不了：'${src}'`); return null; }
       return this.expr(t, null);
     };
@@ -13462,6 +13549,11 @@ class JncLower {
     // 相邻字面量的拼接（第五十四刀）：`"a" "b"` 在**编译期**折成一格字面量，
     // 与 C 一样（jancy 的 `literal` 就是 `literal_atom+`，见 jnc.grammar 那处注释）。
     if (isList(n) && head(n) === 'concat') {
+      /* 几段**都是** `$"…"` 的（第二百四十九刀）：那是一格格式化字面量，不是"折不动的拼接"。
+         语料里的原样是 `representation.addHyperText($"%1\n" $"…%2…"(a, b, …))`
+         （log_MonitorRepresenter.jnc:28）—— 五段拼一句、序号在段之间接着数。 */
+      const ft = fmtToks(n);
+      if (ft !== null) return this.fmtLit(n, ft, []);
       const s = litFold(n);
       if (s === null) return this.nope(n, `字面量拼接里的${this.litWhy(n)}`);
       return { code: `(str ${JSON.stringify(s)})`, type: J_STR };
@@ -14436,6 +14528,14 @@ class JncLower {
       if (mn !== null) {
         return this.nope(n, `在一格算出来的值上叫方法 '${mn}' —— 这个名字这一层一个类上都没`
           + '见过（那个类在别的模块里，与 `没有这个类型` 同一笔口径账）');
+      }
+      /* 普通字面量与 `$"…"` **混着**拼、后面还带实参表（第二百四十九刀的边界）：
+         几段都是 `$"…"` 的那一种收了（fmtNode 认得），混着的这一种要先把两种段的转义与
+         `%` 口径并成一张表 —— 与第五十四刀那条"混着拼还不收"记同一笔账。 */
+      if (isList(callee) && head(callee) === 'concat') {
+        return this.nope(n, '普通字面量与 `$"…"` 混着拼、后面还带实参表 —— 几段都是 `$"…"` 的'
+          + '那一种收了（第二百四十九刀），混着的这一种要先把两种段的转义与 `%` 口径并成一张表'
+          + '（与第五十四刀"混着拼"同一笔账）');
       }
       return this.nope(n, '不是直接调一个名字的调用');
     }

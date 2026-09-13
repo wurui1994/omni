@@ -1,0 +1,29 @@
+// 花括号初值里那格结构体在**别的文件**里（第二百五十一刀）。
+//
+// import 摊出来的顶层条目续在这一份的**后面**（impDrain），于是这一份里的
+// `static ui.Opt m_table[] = {{…}}` 比 imports/item189.jnc 里那格结构体的体先降 ——
+// 先前数出来是"0 个字段"，报的是 `第 1 项越过了 ui$Item 的 0 个字段`（榜上 7 组），
+// 而字段明明写着两个：认错了人。改法是就地先摊那格结构体，与第一百二十五刀
+// （"谁把它当基类，谁就先把它摊了"）同一个机器。
+import "imports/item189.jnc"
+
+class Box {
+	// 走 typedef（语料里的原样是 `static ui.EnumPropertyOption accessModeTable[] = {…}`，
+	// FileSession.jnc:141，而 EnumPropertyOption 是 ui.ListItem 的别名）
+	static ui.Opt m_table[] = {
+		{ "read",  1 },
+		{ "write", 2 },
+	}
+
+	int m_n;
+}
+
+// 顶层那一格也来一条（不经类）
+ui.Item g_one = { "solo", 7 };
+
+int main() {
+	printf("%s %d\n", Box.m_table[0].m_text, Box.m_table[0].m_value);
+	printf("%s %d\n", Box.m_table[1].m_text, Box.m_table[1].m_value);
+	printf("%s %d\n", g_one.m_text, g_one.m_value);
+	return 0;
+}

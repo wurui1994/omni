@@ -1,0 +1,35 @@
+// 写在**函数体里**的 enum（第二百五十刀）。语料里的形状是"体里一格无名 enum 当常量表"
+// （test/ioninja/common/formatInteger.jnc:24-28 的 KB/MB/GB，榜上那句 `未声明的变量 'GB'`）。
+//
+// 先前这一条悄悄掉了：顶层那一遍只给顶层与类体里的枚举把名字坐下，体里这一格压根没登记，
+// enumDecl 第一句就 return null —— 一句诊断都不发，用到成员时才报"未声明的变量"。
+
+string_t sizeText(uint64_t size) {
+	enum {
+		KB = 1024,
+		MB = 1024 * KB,
+		GB = 1024 * MB,
+	};
+
+	return
+		size >= GB ? $"$(size / GB) GB" :
+		size >= MB ? $"$(size / MB) MB" :
+		size >= KB ? $"$(size / KB) KB" :
+		$"$size B";
+}
+
+int main() {
+	// 无名的那一种：成员漏到外面那层（jancy: "unnamed enums imply 'exposed' anyway"）
+	printf("%s\n", sizeText(500));
+	printf("%s\n", sizeText(2048));
+	printf("%s\n", sizeText(5 * 1024 * 1024));
+
+	// 带名字的那一种也在体里声明：只能写 `Color.Green`
+	enum Color {
+		Red,
+		Green = 5,
+	};
+
+	printf("%d %d\n", (int)Color.Red, (int)Color.Green);
+	return 0;
+}
