@@ -6260,7 +6260,7 @@ class JncLower {
     if (h === 'agg') {
       const k = isAtom(t.items[1]) ? t.items[1].value : null;
       if (k === 'union') return anon(2) ? 'union-anon' : 'union-named';
-      if (k === 'struct') return 'struct';
+      if (k === 'struct') return anon(2) ? 'struct-anon' : 'struct';
       if (k === 'class' || k === 'opaque class') return 'class';
       return null;
     }

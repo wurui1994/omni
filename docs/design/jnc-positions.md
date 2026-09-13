@@ -8,7 +8,7 @@
 - `N…` 前端自己说的边界（"还不收"）
 - `E…` 普通错 —— **这一栏是下一刀的料**：话对不对、认不认错人，都在这儿看
 
-位置 9 × 要素 40 = 360 格：✓ 187、N 158、E 9、· 6、炸 0
+位置 9 × 要素 41 = 369 格：✓ 188、N 160、E 9、· 12、炸 0
 
 | 要素 | module | namespace | class-body | struct-body | union-body | opaque-class-body | fn-body | property-body | extension-body |
 |---|---|---|---|---|---|---|---|---|---|
@@ -24,6 +24,7 @@
 | struct | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
 | union-named | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
 | union-anon | · | · | · | ✓ | N16 | · | · | N22 | N24 |
+| struct-anon | · | · | · | · | ✓ | · | · | N22 | N24 |
 | class | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
 | enum | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
 | enum-anon | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |

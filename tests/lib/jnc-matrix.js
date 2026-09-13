@@ -62,6 +62,7 @@ const KINDS = [
   ['struct', 'struct Nested { int m_n; }', 'x', 'Nested v;'],
   ['union-named', 'union Uni { int m_a; bool m_b; }', 'x', 'Uni v;'],
   ['union-anon', 'union { int m_ua; bool m_ub; }', 'x'],
+  ['struct-anon', 'struct { int m_sa; bool m_sb; }', 'x'],
   ['class', 'class Inner { int m_v; }', 'x', 'Inner* v;'],
   ['enum', 'enum Color { Red, Green }', 'x', 'Color v = Color.Red;'],
   ['enum-anon', 'enum { KB = 1024, MB = 2048 }', 'x', 'int v = KB;'],

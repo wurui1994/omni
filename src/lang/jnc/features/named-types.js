@@ -98,5 +98,16 @@ export default feature({
     { kind: 'union-anon', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'union-anon', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
     { kind: 'union-anon', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* 匿名 struct 是匿名 union 的**镜像**（第一百一十一刀）：只在 union 的体里写得出来 ——
+       C 的老写法，一格 union 里几组字段轮流用同一段字节。别的位置也是**语法就不认**。
+       这一列是矩阵后来才加上的：先前这张表里没有它，于是"这门语言有几种要素"少数了一格。 */
+    { kind: 'struct-anon', sorts: ['union-body'], verdict: 'ok' },
+    {
+      kind: 'struct-anon',
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body', 'fn-body'],
+      verdict: 'syntax',
+    },
+    { kind: 'struct-anon', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    { kind: 'struct-anon', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });
