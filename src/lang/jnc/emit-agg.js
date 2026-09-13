@@ -94,6 +94,19 @@ function baseFields(agg, env) {
   return out;
 }
 
+/** 这一格体里有没有**语句**（有就说明它是取值器的体，不是成员表）。 */
+function hasStatements(compound) {
+  const DECLS = new Set(['var-decl', 'fn-def', 'fn-proto', 'typedef', 'type-decl',
+    'attributed', 'access', 'friend', 'var-decl-curly', 'empty-stmt']);
+  const nm = named(compound);
+  if (nm === null) return false;
+  for (const it of allInChain(nm.body, 'unit-add', 'unit')) {
+    const h = headOf(it);
+    if (h !== null && !DECLS.has(h)) return true;
+  }
+  return false;
+}
+
 /** 顺着 class 基类往上走到**链的根**（防环）。 */
 export function chainRoot(agg, env) {
   let cur = agg;
@@ -172,8 +185,22 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [] }) {
     /* **完整属性声明里的字段**是属性自己的存储，名字带上东家与属性名：
        `class C { property m_p { int m_v; … } }` 发 `(C$m_p$m_v int)`（151-propfield.jnc）。 */
     if (m.shape === 'prop') {
+      if (m.name === null) return;
+      /* **autoget 属性**：编译器生成那格存储，名字就叫 `m_value`（prop_autoget.rst:26），
+         发成 `<东家>$<属性名>$m_value`，类型是属性自己的类型（150-variantautoget.jnc）。 */
+      if (m.type !== null && m.type.mods.includes('autoget')) {
+        const ar = resolveType({ ...m.type, shape: 'data' }, env);
+        if (ar.type === null) { ctx.fails?.push(`${m.name}$m_value: ${ar.why}`); out.push(null); return; }
+        flush();
+        out.push(`(${ctx.owner}$${m.name}$m_value ${emitType(ar.type, 'field')})`);
+        return;
+      }
       const body = named(m.at)?.body;
-      if (body === undefined || headOf(body) !== 'compound' || m.name === null) return;
+      if (body === undefined || headOf(body) !== 'compound') return;
+      /* **简写取值器**（`int const property m_desc { int t = …; return …; }`）：属性体就是
+         取值器的体，里头的局部量不是字段（140-propgetbody.jnc 那一处我们先前多发了
+         `Box$m_desc$t`）。判据：体里出现**语句**就当取值器体。 */
+      if (readBodyMembers(body).length === 0 || hasStatements(body)) return;
       flush();
       for (const im of readBodyMembers(body)) {
         /* 属性体里的 `alias` / `typedef` 同样**不是字段**（`autoget alias m_value = m_av;`
