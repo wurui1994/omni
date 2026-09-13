@@ -212,6 +212,24 @@ for (const f of files) {
         agg: a,
       });
     }
+    /* **体外写的那几格成员**跟着实例替换出来一份（`Value MapImpl<T>.get(…)` →
+       `MapImpl$int$get`）—— 当顶层那一批处理。 */
+    for (const os of g.outers.values()) {
+      for (const o of os) {
+        const on = named(o);
+        const t = on === null ? null : readDeclType(on.specs, on.dcl);
+        const sp = on === null ? null : readSpecs(on.specs);
+        if (t === null) continue;
+        tops.push({
+          name: t.name,
+          type: t,
+          shape: t.shape,
+          storage: sp === null ? [] : sp.words,
+          at: o,
+          ns: null,
+        });
+      }
+    }
   }
   collectEnumConsts(tree, env);
 

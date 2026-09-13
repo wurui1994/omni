@@ -146,6 +146,8 @@ export function expandTemplates(tree, templates) {
   const typedefs = new Map();
   /* 泛型 typedef 实例化出来的那几条（`Pair$int` → 一条 typedef 的树）。 */
   const tdefs = new Map();
+  /* 体外写的那几格成员，按实例分（`实例名 -> [替换好的 fn-def…]`）。 */
+  const outers = new Map();
   /** 一格实参 → `{ spec, key }`（`spec` 是替进去的那格 type-spec）。 */
   const argSpec = (a, depth) => {
     let sp = a.spec;
@@ -234,6 +236,16 @@ export function expandTemplates(tree, templates) {
     }
     if (ren.size > 0) done = substitute(done, ren);
     insts.set(inst, rewrite(done, depth + 1));                       // 体里的用点换成实例名
+    /* 体外写的那几格成员跟着这一格实例替换出来一份（`tm.outer`）。 */
+    if (tm.outer !== undefined) {
+      const os = [];
+      for (const o of tm.outer) {
+        let one = substitute(o, map);
+        if (ren.size > 0) one = substitute(one, ren);
+        os.push(rewrite(one, depth + 1));
+      }
+      outers.set(inst, os);
+    }
     return inst;
   };
   /**
@@ -261,7 +273,7 @@ export function expandTemplates(tree, templates) {
   };
   walk(tree, 0);
   /* 原来那棵树上的用点也换成实例名答回去 —— 顶层写 `Box<int> m_b;` 的那一格要它。 */
-  return { insts, typedefs, tdefs, fails, tree: rewrite(tree, 0) };
+  return { insts, typedefs, tdefs, outers, fails, tree: rewrite(tree, 0) };
 }
 
 /** 一格聚合体体里那几条 `typedef` 起的名字（实例化时要各自改名，见 instOne）。 */
@@ -302,7 +314,41 @@ export function templateTable(tree) {
     for (const it of n.items) walk(it);
   };
   walk(tree);
+  /* **体外写的成员**（`Value MapImpl<T>.get(Key key) const`，stdt_Map.jnc:135）跟着实例一起
+     替换出来一份（旧降级 lower.js:4479-4481 的 `tm.outer`）—— 它与体内写的是同一件事
+     （type_class.rst:41-59），只是写在类外。判据：顶层那一格函数的名字里带着**这个模板**的用点。 */
+  const outerWalk = (n) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    const h = headOf(n);
+    if (h === 'fn-def' || h === 'fn-proto') {
+      const nm = named(n);
+      const base = nm === null ? null : tinstBaseIn(nm.dcl);
+      const tm = base === null ? undefined : out.get(base);
+      if (tm !== undefined) {
+        if (tm.outer === undefined) tm.outer = [];
+        tm.outer.push(n);
+      }
+      return;
+    }
+    if (h === 'agg') return;                                         // 体里的是成员，不是体外
+    for (const it of n.items) outerWalk(it);
+  };
+  outerWalk(tree);
   return out;
+}
+
+/** 一格声明符的名字里那个 `tinst` 的模板名（`MapImpl<T>.get` → `MapImpl`）；没有答 null。 */
+function tinstBaseIn(n) {
+  if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return null;
+  if (headOf(n) === 'tinst') {
+    const tn = named(n);
+    return tn === null ? null : nameText(tn.name);
+  }
+  for (const it of n.items) {
+    const r = tinstBaseIn(it);
+    if (r !== null) return r;
+  }
+  return null;
 }
 
 /**
