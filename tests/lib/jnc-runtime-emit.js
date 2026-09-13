@@ -2,9 +2,14 @@
 //
 // 这一族是新降级第一处**连体一起发**的东西：源码里没有它的体，体就是规则本身
 // （`src/lang/jnc/runtime.js` 那两张表）。所以量的不是"头对不对"，是**整格函数**对不对。
-// 现在量两族：
+// 现在量四族：
 //   - 字符那一族 `jnc$crt$…`（旧降级 lower.js:13385 crtCharFn，被调到就发一格、不重复）
 //   - 通知那一格 `jnc$mc_fire[$签名]`（lower.js:5279 mcFire，一种签名一格）
+//   - `variant_t` 那一族 `jnc$var$…` / `jnc$var$to$…`（lower.js:5319/5337）
+//   - 表达式里的赋值 `jnc$asgn$<类型>` 与属性赋值 `jnc$pset$<属性>`（lower.js:5444/5505）
+//
+// 后两族**只按名字对壳的文字**：哪几格该发（触发点）还没做 —— 那要赋值/强转那一层。
+// 所以尺子上单独一栏印，不混进"名字与文字都由新腿定"的那几格里。
 //
 // 尺子：拿旧降级的真输出当外部尺（`node src/cli.js emit sx 文件.jnc`）。
 //
@@ -21,12 +26,16 @@ import { execFileSync } from 'node:child_process';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf, named } from '../../src/lang/jnc/adapt.js';
-import { allInChain } from '../../src/lang/jnc/declare.js';
+import { readAgg } from '../../src/lang/jnc/agg.js';
+import { classRoot } from '../../src/lang/jnc/emit-agg.js';
+import { emitType } from '../../src/lang/jnc/emit-type.js';
+import { allInChain, nameText } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import {
   crtCharShell, isCrtChar, mcFireShell, mcFireName,
   varBoxShell, varUnboxShell, variantStruct, VARIANT,
+  asgnShell, psetShell, psetName,
 } from '../../src/lang/jnc/runtime.js';
 
 const argv = process.argv.slice(2);
@@ -139,6 +148,72 @@ function mcFiresIn(tree, events) {
   return out;
 }
 
+/**
+ * 一份树里那几格**属性**：全名（`C$m_val` / `g_p`）→ `{ ty, self }`。
+ * `ty` 是值那一格的存储位置文本（属性的形状是 `prop`，先摘成 `data` 再解 —— 与 `retText`
+ * 同一条路），`self` 是 `$this` 那一格（顶层的属性没有，给 null）。
+ * 没写类型的那种（完整声明式属性，类型长在取值器上）先不收 —— 记账。
+ */
+function propsIn(trees) {
+  const env = new Map();
+  const aggs = [];
+  const scan = (n, owner) => {
+    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    let inner = owner;
+    if (headOf(n) === 'agg') {
+      const a = readAgg(n);
+      if (a !== null && a.name !== null) {
+        a.emitName = owner === null || owner === undefined
+          ? nameText(a.name) : `${owner}$${nameText(a.name)}`;
+        inner = a.emitName;
+        aggs.push(a);
+        env.set(a.emitName, {
+          kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
+          name: a.emitName,
+          agg: a,
+        });
+      }
+    }
+    for (const it of n.items) scan(it, inner);
+  };
+  for (const t of trees) scan(t, null);
+
+  const out = new Map();
+  const tc = { clsRoot: (nm) => nm };
+  for (const a of aggs) {
+    const root = a.word === 'struct' || a.word === 'union' ? a : classRoot(a, aggs, env);
+    const self = `(ptr ${root.emitName ?? nameText(root.name)})`;
+    for (const m of a.members) {
+      if (m.shape !== 'prop' || m.name === null || m.type.base.kind === 'none') continue;
+      const r = resolveType({ ...m.type, shape: 'data' }, env);
+      if (r.type === null) continue;
+      out.set(`${a.emitName}$${m.name}`, { ty: emitType(r.type, 'slot', tc), self });
+    }
+  }
+  /* 顶层那几格属性（`int property g_p;`）—— 没有 `$this`。 */
+  const digTop = (n) => {
+    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    const h = headOf(n);
+    if (h === 'fn-def' || h === 'agg') return;
+    if (h === 'var-decl') {
+      const vn = named(n);
+      if (vn !== null) {
+        for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
+          const dd = headOf(d) === 'init' ? named(d)?.dcl : d;
+          const t = readDeclType(vn.specs, dd);
+          if (t === null || t.name === null || t.shape !== 'prop' || t.base.kind === 'none') continue;
+          const r = resolveType({ ...t, shape: 'data' }, env);
+          if (r.type !== null) out.set(t.name, { ty: emitType(r.type, 'slot', tc), self: null });
+        }
+      }
+      return;
+    }
+    for (const it of n.items) digTop(it);
+  };
+  for (const t of trees) digTop(t);
+  return out;
+}
+
 initJnc({ log: () => {} });
 const tb = jncFrontEnd();
 const files = walkDir('tests/jnc/cases').sort().slice(0, limit);
@@ -164,12 +239,14 @@ for (const f of files) {
   const oracle = shellsOf(out, /^ {2}\(fn jnc\$crt\$(\w+) /);
   const mcOracle = mcShellsOf(out);
   const varOracle = shellsOf(out, /^ {2}\(fn (jnc\$var\$[\w$]+) /);
+  const asgnOracle = shellsOf(out, /^ {2}\(fn jnc\$asgn\$([\w$]+) /);
+  const psetOracle = shellsOf(out, /^ {2}\(fn (jnc\$pset\$[\w$]+) /);
   let tree = null;
   try { tree = jncParse(tb, f, new Diagnostics()); } catch { continue; }
   const used = crtCallsIn(tree);
   const fires = mcFiresIn(tree, topEvents(tree));
   if (oracle.size === 0 && used.length === 0 && mcOracle.size === 0 && fires.size === 0
-    && varOracle.size === 0) continue;
+    && varOracle.size === 0 && asgnOracle.size === 0 && psetOracle.size === 0) continue;
   filesOk += 1;
   const short = f.split('/').pop();
   for (const nm of used) {
@@ -205,6 +282,31 @@ for (const f of files) {
     if (mine === want) byNameSame += 1;
     else if (diff.length < 20) diff.push(`${short}　${nm}\n      旧 ${want}\n      新 ${mine}`);
   }
+  /* **表达式里的赋值**：名字里那一段是类型的方言文本（非字母数字换成 `_`）。是**一个词**的
+     那几格（`int` / `real` / `bool` / `string`）反着读得回来；带 `_` 的（`ptr_C` 那种）
+     反不回来 —— 记账，等触发点那一刀从表达式的类型直接给。 */
+  for (const [key, want] of asgnOracle) {
+    const mine = /^(int|real|bool|string)$/.test(key) ? asgnShell(key) : null;
+    if (mine === null) { varMissed += 1; varMissedAt.push(`${short}　jnc$asgn$${key}`); continue; }
+    byName += 1;
+    if (mine === want) byNameSame += 1;
+    else if (diff.length < 20) diff.push(`${short}　jnc$asgn$${key}\n      旧 ${want}\n      新 ${mine}`);
+  }
+  /* **属性赋值**：名字从旧降级那儿拿（触发点还没做），**壳的文字由声明拼** ——
+     属性那张表是从聚合体/顶层的声明读出来的。 */
+  if (psetOracle.size > 0) {
+    const props = propsIn([tree]);
+    for (const [nm, want] of psetOracle) {
+      let mine = null;
+      for (const [pn, pi] of props) {
+        if (psetName(pn) === nm) { mine = psetShell(pn, pi.ty, pi.self); break; }
+      }
+      if (mine === null) { varMissed += 1; varMissedAt.push(`${short}　${nm}`); continue; }
+      byName += 1;
+      if (mine === want) byNameSame += 1;
+      else if (diff.length < 20) diff.push(`${short}　${nm}\n      旧 ${want}\n      新 ${mine}`);
+    }
+  }
   /* 那格结构体自己（`(struct jnc$variant …)`）—— 一格，也按名字对。 */
   const vs = out.split('\n').find((l) => l.startsWith(`  (struct ${VARIANT} `));
   if (vs !== undefined) {
@@ -217,11 +319,11 @@ for (const f of files) {
 console.log(`带运行期助手的语料 ${filesOk} 份　对比整格函数 ${cmp} 格`
   + `　一模一样 ${same}（${(same / Math.max(cmp, 1) * 100).toFixed(1)}%）　不一致 ${cmp - same}`);
 if (byName > 0) {
-  console.log(`只按名字对的（触发点还没做，variant 那一族）：${byName} 格`
+  console.log(`只按名字对的（触发点还没做：variant / 赋值 / 属性赋值）：${byName} 格`
     + `　一模一样 ${byNameSame}（${(byNameSame / byName * 100).toFixed(1)}%）　不一致 ${byName - byNameSame}`);
 }
 if (varMissed > 0) {
-  console.log(`variant 那一族表里没有的：${varMissed} 格　→ ${varMissedAt.slice(0, 8).join('  ')}`);
+  console.log(`名字反不回来、拼不出壳的：${varMissed} 格　→ ${varMissedAt.slice(0, 8).join('  ')}`);
 }
 if (extra > 0) {
   console.log(`新腿发了、旧降级没有这个名字的：${extra} 格　→ ${extraAt.slice(0, 8).join('  ')}`);

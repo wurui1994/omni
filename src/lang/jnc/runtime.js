@@ -146,3 +146,44 @@ export function varUnboxShell(kind) {
     + `      (fail (str ${JSON.stringify(`variant_t 里装的不是${spec.what}`)}))))\n`
     + `    (ret (pload (pfield (var v) ${spec.fld}))))`;
 }
+
+/* ─── 表达式里的赋值（第一百一十四 / 一百一十五刀）───────────────────────────
+   `a = b` 在 jancy 里是**一格表达式**（值是存进去的那个值），而方言的 `(pstore …)`
+   是一句。所以包一格助手：`(call jnc$asgn$<类型> 地址 值)` 就地成立，表达式那一层
+   不必能挂语句。给属性赋值同一个办法，只是包的是存值器（它回 void）。 */
+
+/** 赋值助手的名字：类型的方言文本，非字母数字换成 `_`（`(ptr C)` → `ptr_C`）。 */
+export function asgnName(tyText) {
+  return `jnc$asgn$${String(tyText).replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '')}`;
+}
+
+/**
+ * 整格赋值助手（三行）。`tyText` 是那一格的**方言类型文本**（`int` 那一格四种位宽共用 ——
+ * 存进去的位一样）。整条表达式的值是**存进去的那个值**。
+ */
+export function asgnShell(tyText) {
+  if (tyText === null || tyText === undefined || tyText === '') return null;
+  return `  (fn ${asgnName(tyText)} ((p (ptr ${tyText})) (x ${tyText})) ${tyText}\n`
+    + '    (pstore (var p) (var x))\n'
+    + '    (ret (var x)))';
+}
+
+/** 属性赋值助手的名字：属性的全名，非字母数字换成 `_`（`C$m_val` → `C_m_val`）。 */
+export function psetName(prop) {
+  return `jnc$pset$${String(prop).replace(/[^A-Za-z0-9]+/g, '_')}`;
+}
+
+/**
+ * 整格属性赋值助手（三行）。`prop` 是属性的全名（`C$m_val` / `g_p`），`ty` 是值那一格的
+ * **存储位置**文本，`self` 是 `$this` 那一格的存储位置文本（顶层的属性没有，给 `null`）。
+ *
+ * "整条表达式的值是存进去的那个值"这一条要紧：取值器可以有副作用，回头再读一次就是错答案。
+ */
+export function psetShell(prop, ty, self = null) {
+  if (prop === null || prop === undefined || ty === null || ty === undefined) return null;
+  const ps = self === null ? `(x ${ty})` : `($s ${self}) (x ${ty})`;
+  const as = self === null ? ' (var x)' : ' (var $s) (var x)';
+  return `  (fn ${psetName(prop)} (${ps}) ${ty}\n`
+    + `    (expr (call ${prop}$set${as}))\n`
+    + '    (ret (var x)))';
+}
