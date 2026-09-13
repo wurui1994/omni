@@ -11747,6 +11747,36 @@ C1.static construct() {
 - `(文件, 拦路项)` 对 `3488 -> 3469`（−19）、`未声明的变量` `81 -> 80`；
   lowered 59、clean 90 没动。
 
+### 第二百五十八刀：`typedef function F(形参);` —— 给函数类型起名字
+
+第八十二刀收的是**带返回类型**那一种（`typedef string_t FormatFunc(void const* p);`），而写着
+`function` 这个词、`*` 一个都不带的那一种当场报"写了 function 却没有 `*`"：
+
+```
+typedef function FpFunc(double, double);         // samples/jnc/20_FunctionPtr.jnc:61
+FpFunc thin* f2 = (FpFunc thin*) bar;            // 星是**用的时候**才加的
+```
+
+那不是写错了。jancy 那边这条 typedef 起的是一格 `TypeKind_Function`（声明符上的函数后缀由
+`DeclTypeCalc::getFunctionType` 接），而函数类型的**变量**不成立、能用的只有 `F*`
+（同文件的 `getFunctionPtrType`）—— 这一层现成的那一格就叫 `fnty0`（第八十二刀立的）。
+
+落法：`fnPtrDcl` 里把"没有星就报错"那一句去掉，形参表照旧解完，回一格
+`stars.length === 0 ? tFnTy(params, sp.type) : tFn(params, sp.type, sp.thin)`。于是
+typedef 那一处照旧存下它、`*` 由 `ptrsTy` 加，而**别的**位置（局部量 / 字段 / 形参）由
+`declarator` 出口那一句拦住（"一格函数类型的变量"—— jancy 那边也不成立）。
+
+顺带露出来一格真账：`(FpFunc thin*) bar` 这一句现在报的是
+`把 real function*(real, real) 转成 void function thin*(real, real)` —— 返回类型不一样，
+jancy 那边靠**生成 thunk** 办（同一处文档那句 "the compiler will generate thunks when needed"），
+这一层还没有那一格。话比先前准了。
+
+- 新例子 `cases/194-fntypedef`（`function` 那一种 + 带返回类型那一种，各配 `*` 与 `thin*`；
+  孪生 `/tmp/c202.c`）。
+- 腿：`node tests/jnc/run.js` 341/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`'…' 上写了 function 却没有 '*'` 那一行**整行没了**；
+  `没有这个函数` `78 -> 77`、`没有这个类型` `75 -> 74`、`(文件, 拦路项)` 对 `3469 -> 3467`。
+
 
 
 

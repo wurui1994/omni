@@ -1,0 +1,39 @@
+// `typedef function F(形参);` —— 给**函数类型**起名字（第二百五十八刀）。
+//
+// 第八十二刀收的是带返回类型那一种（`typedef string_t FormatFunc(void const* p);`），
+// 而写着 `function` 这个词、`*` 一个都不带的那一种先前当场报"写了 function 却没有 '*'"。
+// 那不是写错了：jancy 的这条 typedef 起的是一格 TypeKind_Function（DeclTypeCalc 的
+// getFunctionType），星是**用的时候**才加的 —— 语料里的原样：
+//
+//   typedef function FpFunc(double, double);          // samples/jnc/20_FunctionPtr.jnc:61
+//   FpFunc thin* f2 = (FpFunc thin*) bar;
+//
+// 这一层现成的那一格就叫 `fnty0`：typedef 存下它，`*` 由 ptrsTy 加，而"一格函数类型的变量"
+// 照旧拦着（jancy 那边也不成立）。
+
+void show(int a, int b) {
+	printf("show %d %d\n", a, b);
+}
+
+int twice(int x) {
+	return x * 2;
+}
+
+// 写着 function、不带返回类型（回 void）
+typedef function VoidFn(int, int);
+
+// 带返回类型的那一种（第八十二刀）照旧
+typedef int IntFn(int);
+
+int main() {
+	VoidFn* f = show;
+	f(1, 2);
+
+	// 同一个名字加 thin 星
+	VoidFn thin* g = show;
+	g(3, 4);
+
+	IntFn* h = twice;
+	printf("%d\n", h(21));
+	return 0;
+}

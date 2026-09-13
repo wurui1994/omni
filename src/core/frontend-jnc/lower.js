@@ -7975,10 +7975,14 @@ class JncLower {
         return this.nope(d, `函数指针后面的修饰符 '${m}'`);
       }
     }
-    if (stars.length === 0) {
-      return this.err(d, `'${name}' 上写了 function 却没有 '*'（jancy 的函数指针写成 `
-        + "'R function* p(…)'）");
-    }
+    /* `*` 一个都没有（第二百五十八刀）：那**不是**写错了，是在给**函数类型**起名字 ——
+       语料里的原样是 `typedef function FpFunc(double, double);`（samples/jnc/20_FunctionPtr.jnc:61），
+       用的时候才加星（`FpFunc thin* f2 = (FpFunc thin*) bar;`）。jancy 那边这条 typedef 起的是
+       一格 `TypeKind_Function`（DeclTypeCalc 的 getFunctionType），而函数类型的**变量**不成立、
+       能用的只有 `F*`（同文件的 getFunctionPtrType）—— 这一层现成的那一格就叫 `fnty0`
+       （第八十二刀给 `typedef string_t FormatFunc(void const*);` 立的）。所以这儿不再当场报错，
+       而是把形参表照旧解完、回一格 `fnty0`：typedef 那一处存下它，`*` 由 ptrsTy 加，
+       而**别的**位置（局部量 / 字段 / 形参）由 declarator 出口那一句拦（"一格函数类型的变量"）。 */
     // `function**` 是"指向函数指针的指针"（同一处文档里那个 `f5` 数组用的就是它）——
     // 那要方言能对函数值那一格取地址，与"函数指针的数组"是同一件事。
     if (stars.length > 1) return this.nope(d, '指向函数指针的指针（`function**`）');
@@ -8018,7 +8022,13 @@ class JncLower {
       params.push(ft);
     }
     return {
-      name, type: tFn(params, sp.type, sp.thin), formals: null, ctor, special: null, sp, bits: null,
+      name,
+      type: stars.length === 0 ? tFnTy(params, sp.type) : tFn(params, sp.type, sp.thin),
+      formals: null,
+      ctor,
+      special: null,
+      sp,
+      bits: null,
     };
   }
 
