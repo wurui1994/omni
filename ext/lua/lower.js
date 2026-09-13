@@ -200,20 +200,43 @@ const STAT = {
   break: () => ['(brk)'],
   do: (n, cx) => [`(do ${inner(n.body, cx).join(' ')})`],
   local: (n, cx) => {
-    if (n.names.length !== 1) no('L-004', n);
-    if ((n.init ?? []).length !== 1) no('L-004', n);
-    const v = exp(n.init[0], cx);
-    cx.declare(n.names[0], v.type);
-    return [`(let ${n.names[0]} ${v.type} ${v.sx})`];
+    const init = n.init ?? [];
+    // 多个名字：Lua 先把右边**全部**算完再绑（`local` 的配方是 `['init','bind:names']`），
+    // 而新名字右边压根看不见，所以一格一格降就够 —— 不用临时量。
+    if (n.names.length > init.length) no('L-013', n);          // 少的那些是 nil
+    // 右边有调用**不要紧**：名字与值一样多的时候，每一格都被截成一格（values.js 的规则 4），
+    // 不牵涉展开。先前这儿一刀切成 L-004，把"单名字 + 调用"这种最常见的也拒了。
+    const out = [];
+    for (const [i, name2] of n.names.entries()) {
+      const v = exp(init[i], cx);
+      cx.declare(name2, v.type);
+      out.push(`(let ${name2} ${v.type} ${v.sx})`);
+    }
+    // 多出来的右边照样要算（副作用），但值丢掉；纯的就直接不管。
+    for (const e of init.slice(n.names.length)) {
+      if (hasCall(e)) no('L-004', n);
+      exp(e, cx);
+    }
+    return out;
   },
   assign: (n, cx) => {
-    if (n.targets.length !== 1 || n.values.length !== 1) no('L-004', n);
-    if (n.targets[0].kind !== 'name') no('L-001', n);
-    const t = cx.typeOf(n.targets[0].value);
-    if (t === undefined) no('L-003', n);
-    const v = exp(n.values[0], cx);
-    if (v.type !== t) no('L-012', n);
-    return [`(set ${n.targets[0].value} ${v.sx})`];
+    if (n.targets.some((t) => t.kind !== 'name')) no('L-001', n);
+    if (n.targets.length !== n.values.length) no('L-004', n);
+    if (n.values.some((e) => e.kind === 'call' && n.values.length > 1)) no('L-004', n);
+    const ts = n.targets.map((t) => {
+      const ty = cx.typeOf(t.value);
+      if (ty === undefined) no('L-003', t);
+      return { name: t.value, type: ty };
+    });
+    const vs = n.values.map((e) => exp(e, cx));
+    for (const [i, v] of vs.entries()) if (v.type !== ts[i].type) no('L-012', n);
+    if (ts.length === 1) return [`(set ${ts[0].name} ${vs[0].sx})`];
+    // 多个目标：右边**全部先算**（`a, b = b, a` 要它），所以先落进临时量再一起写回。
+    const tmps = ts.map(() => cx.fresh('__a'));
+    return [
+      ...vs.map((v, i) => `(let ${tmps[i]} ${ts[i].type} ${v.sx})`),
+      ...ts.map((t, i) => `(set ${t.name} (var ${tmps[i]}))`),
+    ];
   },
   'call-stat': (n, cx) => {
     const c = n.call;
