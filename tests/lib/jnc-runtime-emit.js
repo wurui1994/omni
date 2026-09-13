@@ -97,49 +97,94 @@ function mcShellsOf(text) {
 }
 
 /**
- * 顶层（含名字空间里）那几格**事件**声明 → 方言那一侧的多播类型。
- * `event g_onTick();` / `multicast g_onPair(int a, int b);` 都落在说明符表里
- * （`SHAPE_WORDS` 把它们的形状改成 `event`），`resolveType` 答的是 `{ k:'mc', params }`。
- * 类里那几格成员事件先不收（那要 `this` 那一层）—— 记账。
+ * 一份树里那几格**事件**（写出来的与生成的）：
+ *   - `events`：名字 → 方言那一侧的多播类型。`event g_onTick();` / `multicast g_onPair(…)`
+ *     都落在说明符表里（`SHAPE_WORDS` 把形状改成 `event`）。类里那几格成员事件也收 ——
+ *     壳的文字只看**签名**，不看那个对象是谁，所以这一格不用 `this` 那一层。
+ *   - `always`：**一定会被叫**的那几格。`bindable` 数据字段是"整格由编译器生成的属性"，
+ *     生成的存值器就是 `if (m_value != x) { m_value = x; m_onChanged(); }`
+ *     （`Property::compileAutoSetter`，jnc_ct_Property.cpp:788-822）—— 那一句就是一次通知，
+ *     签名是空的。所以只要有一格 bindable 数据，`jnc$mc_fire` 就一定发。
  */
-function topEvents(tree) {
-  const out = new Map();
+function eventsIn(trees) {
+  const events = new Map();
+  const always = [];
+  const env = new Map();
+  const MC0 = { k: 'mc', params: [] };
+  const bindable = (t) => t !== null && t !== undefined && t.mods.includes('bindable');
+  /** 光写 `bindable`（没写 `property`）的那种：取/存两格都是生成的，通知也是生成的。 */
+  const bindableData = (t) => bindable(t) && !t.mods.includes('property');
+  /* **生成的那格事件叫 `m_onChanged`**（prop_bindable.rst:23-29）。写了 `bindable` 就有它；
+     `bindable property` 的通知是**手写**的（34_BindableProperties.jnc:15-17
+     "The firing of the bindable event must be done manually"）—— 体里裸写 `m_onChanged()`
+     就是叫它，而源码里压根没有这个名字的声明，所以要由这一条规则放进名字表。 */
   const dig = (n) => {
     if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
-    if (h === 'fn-def' || h === 'agg') return;
+    if (h === 'agg') {
+      const a = readAgg(n);
+      for (const m of a === null ? [] : a.members) {
+        if (m.name === null) continue;
+        if (m.shape === 'event') {
+          const r = resolveType(m.type, env);
+          if (r.type !== null && r.type.k === 'mc') events.set(m.name, r.type);
+        } else if (bindable(m.type)) {
+          events.set('m_onChanged', MC0);
+          if (bindableData(m.type)) always.push(MC0);
+        }
+      }
+      for (const it of n.items) dig(it);                             // 类里还可能嵌类
+      return;
+    }
     if (h === 'var-decl') {
       const vn = named(n);
       if (vn !== null) {
         for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
           const dd = headOf(d) === 'init' ? named(d)?.dcl : d;
           const t = readDeclType(vn.specs, dd);
-          if (t === null || t.name === null || t.shape !== 'event') continue;
-          const r = resolveType(t, new Map());
-          if (r.type !== null && r.type.k === 'mc') out.set(t.name, r.type);
+          if (t === null || t.name === null) continue;
+          if (t.shape === 'event') {
+            const r = resolveType(t, env);
+            if (r.type !== null && r.type.k === 'mc') events.set(t.name, r.type);
+          } else if (bindable(t)) {
+            events.set('m_onChanged', MC0);
+            if (bindableData(t)) always.push(MC0);
+          }
         }
       }
       return;
     }
     for (const it of n.items) dig(it);
   };
-  dig(tree);
-  return out;
+  for (const t of trees) dig(t);
+  return { events, always };
 }
 
-/** 一份树里**叫出去**的那几格事件（`g_onTick();`）→ 助手名字 -> 多播类型，按第一次出现的次序。 */
-function mcFiresIn(tree, events) {
+/**
+ * 一份树里**叫出去**的那几格事件 → 助手名字 -> 多播类型，按第一次出现的次序。
+ * 被调是**裸名字**（`g_onTick()`）或**取字段**（`c.m_onDone()`）都算 —— 壳只看签名。
+ */
+function mcFiresIn(tree, evs) {
   const out = new Map();
+  const add = (mc) => {
+    const nm = mcFireName(mc);
+    if (!out.has(nm)) out.set(nm, mc);
+  };
+  for (const mc of evs.always) add(mc);
   const dig = (n) => {
     if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
     if (headOf(n) === 'call') {
       const fn = named(n)?.fn;
-      if (fn !== null && fn !== undefined && Array.isArray(fn.items) && headOf(fn) === 'name') {
-        const mc = events.get(String(named(fn)?.text?.value ?? ''));
-        if (mc !== undefined) {
-          const nm = mcFireName(mc);
-          if (!out.has(nm)) out.set(nm, mc);
+      if (fn !== null && fn !== undefined && Array.isArray(fn.items)) {
+        let key = null;
+        if (headOf(fn) === 'name') key = String(named(fn)?.text?.value ?? '');
+        else if (headOf(fn) === 'field') {
+          const fnm = named(fn)?.name;
+          key = fnm === null || fnm === undefined ? null
+            : (Array.isArray(fnm.items) ? String(named(fnm)?.text?.value ?? '') : String(fnm.value ?? ''));
         }
+        const mc = key === null || key === '' ? undefined : evs.events.get(key);
+        if (mc !== undefined) add(mc);
       }
     }
     for (const it of n.items) dig(it);
@@ -244,7 +289,7 @@ for (const f of files) {
   let tree = null;
   try { tree = jncParse(tb, f, new Diagnostics()); } catch { continue; }
   const used = crtCallsIn(tree);
-  const fires = mcFiresIn(tree, topEvents(tree));
+  const fires = mcFiresIn(tree, eventsIn([tree]));
   if (oracle.size === 0 && used.length === 0 && mcOracle.size === 0 && fires.size === 0
     && varOracle.size === 0 && asgnOracle.size === 0 && psetOracle.size === 0) continue;
   filesOk += 1;

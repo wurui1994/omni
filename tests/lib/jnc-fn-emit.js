@@ -143,7 +143,9 @@ const ELSEWHERE = new Map([
   ['new 那一格的构造壳（$newoN）', 'jnc-new-emit'],
   ['结构体的构造壳（$newsN）', 'jnc-new-emit'],
   ['花括号初值的壳（$newcN）', 'jnc-new-emit'],
-  ['字符助手（jnc$crt$…）', 'jnc-crt-emit'],
+  ['字符助手（jnc$crt$…）', 'jnc-runtime-emit'],
+  ['通知那一格（jnc$mc_fire…）', 'jnc-runtime-emit'],
+  ['variant / 赋值 / 属性赋值那几族', 'jnc-runtime-emit：只按名字对壳的文字'],
 ]);
 
 /** 一个符号名归哪一族（按尾巴认，认不出就说"别的"）。 */
@@ -152,6 +154,8 @@ function familyOf(nm) {
   if (/^\$news\d+$/.test(nm)) return '结构体的构造壳（$newsN）';
   if (/^\$newc\d+$/.test(nm)) return '花括号初值的壳（$newcN）';
   if (/^jnc\$crt\$/.test(nm)) return '字符助手（jnc$crt$…）';
+  if (/^jnc\$mc_fire/.test(nm)) return '通知那一格（jnc$mc_fire…）';
+  if (/^jnc\$(var|asgn|pset)\$/.test(nm)) return 'variant / 赋值 / 属性赋值那几族';
   if (nm.startsWith('jnc$')) return '运行期助手（jnc$…）';
   if (/\$r\d+$/.test(nm)) return 'reactor 的反应体（$rN）';
   if (/\$e\d+$/.test(nm)) return 'reactor 的 onevent（$eN）';
