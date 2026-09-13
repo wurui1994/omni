@@ -128,8 +128,31 @@ function operatorOf(node) {
   if (h !== 'operator' && h !== 'postfix-operator') return null;
   const nm = named(node);
   const t = nm === null ? undefined : nm.op;
-  const op = t !== null && t !== undefined && t.value !== undefined ? String(t.value) : null;
+  const op = opText(t);
   return op === null ? null : { op, postfix: h === 'postfix-operator' };
+}
+
+/**
+ * 算符那一格的字面。三种形状（都在节点表里）：
+ *   - 光一个记号：`(operator "++")`；
+ *   - **调用算符**：`(operator (call-op))` → `()`（160-opcall.jnc 的 `Hash$op$call`）；
+ *   - **转换算符**：`(operator (cast-op specs ptrs))` → 那个类型的词，语料里只有
+ *     `operator bool`（131-opbool.jnc 的 `It$op$bool`）。带 `*` 的转换算符旧降级也不收，
+ *     所以这儿只认"光一个关键字"的那种，别的照实答 null（记账，不猜）。
+ */
+function opText(t) {
+  if (t === null || t === undefined || typeof t !== 'object') return null;
+  if (!Array.isArray(t.items)) return t.value === undefined ? null : String(t.value);
+  const h = headOf(t);
+  if (h === 'call-op') return '()';
+  if (h !== 'cast-op') return null;
+  const nm = named(t);
+  if (nm === null) return null;
+  if (chainOf(nm.ptrs, 'ptrs-add').length > 0) return null;          // `operator int*` 那一族
+  const sp = named(nm.specs);
+  const w = sp === null ? undefined : sp.type;
+  return w !== null && w !== undefined && w.value !== undefined && !Array.isArray(w.items)
+    ? String(w.value) : null;
 }
 
 /** 属性的取/存：`(qualified-special (name m_val) (accessor "get"))` → `{ path, which }`。 */

@@ -21,7 +21,15 @@ import { nameText, allInChain, readDcl } from './declare.js';
 import { headOf, named } from './adapt.js';
 
 /** 构造/析构那两格没有写类型 —— 回的是 void（jancy 的 construct 不写返回类型）。 */
-const VOID_NAMES = new Set(['construct', 'destruct', 'staticconstruct', 'operator new']);
+const VOID_NAMES = new Set(['construct', 'destruct', 'construct$static', 'operator new']);
+
+/**
+ * **特名**在方言里叫什么：`construct` / `destruct` 照抄，`static construct` 发的是
+ * `construct$static`（旧降级的真输出 193-staticctorns.jnc 的 `(fn C$construct$static () void`）。
+ */
+const SPECIAL_NAMES = {
+  construct: 'construct', destruct: 'destruct', 'static construct': 'construct$static',
+};
 
 /**
  * **算符重载的符号名**：源码里那个算符 → `op$<名字>`（旧降级 lower.js:672-700 的 OP_NAME，
@@ -88,7 +96,7 @@ export function fnName(m) {
   if (m.name !== null && m.name !== undefined) return m.name;
   const dc = readDcl(m.type?.raw?.dcl);
   if (dc === null) return null;
-  if (dc.special !== null) return dc.special;
+  if (dc.special !== null) return SPECIAL_NAMES[dc.special] ?? null;
   if (dc.operator !== null) {
     const w = dc.operator.postfix ? OP_POSTFIX[dc.operator.op] : OP_NAMES[dc.operator.op];
     return w === undefined ? null : `op$${w}`;
@@ -111,7 +119,8 @@ export function fnName(m) {
 
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */
 function leafName(leaf) {
-  if (leaf.kind === 'name' || leaf.kind === 'accessor' || leaf.kind === 'special') return leaf.text;
+  if (leaf.kind === 'special') return SPECIAL_NAMES[leaf.text] ?? null;
+  if (leaf.kind === 'name' || leaf.kind === 'accessor') return leaf.text;
   const w = leaf.postfix ? OP_POSTFIX[leaf.op] : OP_NAMES[leaf.op];
   return w === undefined ? null : `op$${w}`;
 }
@@ -155,7 +164,9 @@ export function fnHead(m, env, ctx = { owner: null, self: null }) {
   if (fs === null) return { head: null, why: '形参表读不出来' };
   if (fs.some((f) => f.varargs)) return { head: null, why: '变参那一族（…）' };
   const parts = [];
-  const isStatic = m.storage.includes('static');
+  /* `static construct` 那一格也不在对象上（旧降级发的是 `(fn C$construct$static () void`）。 */
+  const isStatic = m.storage.includes('static')
+    || base === 'construct$static' || base.endsWith('$construct$static');
   /* `$this` 那一格看的是"有没有东家"，不是"写在类体里还是类外" —— 体外定义
      （`int C0.get(){…}`）一样带（127-outerget.jnc 的 `(fn C0$get (($this (ptr C0))) int`）。
      `ctx.self` 为空就是"没有东家"（顶层函数、命名空间里的函数、`static` 那一格）。 */
