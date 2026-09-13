@@ -215,10 +215,34 @@ export function autogetGetterHead(m, env, ctx = { owner: null, self: null }) {
   return { heads: [{ name: `${sym}$get`, head: `(fn ${sym}$get (${ps}) ${ty}` }], why: null };
 }
 
-/** 这一格属性声明会不会**生成取值器**（`autoget` 那一族）。 */
+/**
+ * 这一格属性声明会不会**生成取值器**（`autoget` 那一族）。
+ *
+ * 判据只看**属性头上写了 `autoget`** 这一件事。试过把"体里有一格 `autoget` 字段"也算进来
+ * （jancy 那句"声明一格带 autoget 的字段就让整格属性成为 autoget"）—— 尺子上**红了 5 格**：
+ * 141-propfullmem.jnc 的 `Box$m_v$set` 与 142-propalias.jnc 的 `C$m_a/b$get/$set` 本来是
+ * 从**体里写出来的那几格取/存**发的，被这一条抢过去就只剩一格生成的取值器了。
+ * 所以那件事不是"换一条路发"，只是"取值器的类型从哪儿来"——那一格记在 `autogetFieldOf`。
+ */
 export function isAutogetProp(m) {
   if (m === null || m === undefined || m.type === null || m.type === undefined) return false;
   return m.shape === 'prop' && m.type.mods.includes('autoget');
+}
+
+/**
+ * 完整声明式属性的体里那格 **`autoget` 字段**。jancy 的判据是"声明一格带 `autoget` 的字段
+ * 就让**整格属性**成为 autoget"（samples/jnc/34_BindableProperties.jnc:48-50 那两行注），
+ * 而那格字段的类型就是生成的取值器回的类型 —— 属性头上压根没写类型
+ * （旧降级的真输出：`(fn g_prop$get () int`，那个 `int` 来自 `autoget int m_x;`）。
+ * 同一条还管 `bindable event m_e();`：带 `bindable` 的事件让整格属性成为 bindable。
+ */
+export function autogetFieldOf(m) {
+  if (m === null || m === undefined || m.shape !== 'prop') return null;
+  const body = named(m.at)?.body;
+  if (headOf(body) !== 'compound') return null;
+  const f = readBodyMembers(body).find((x) => (x.shape === 'data' || x.shape === 'array')
+    && x.type !== null && x.type !== undefined && x.type.mods.includes('autoget'));
+  return f ?? null;
 }
 
 /** 这一格方法是不是**虚**的（虚派发表按它发；一整条链上同名的只发一格）。 */

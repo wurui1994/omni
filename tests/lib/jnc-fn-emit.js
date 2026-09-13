@@ -24,6 +24,7 @@ import {
   fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
   isBindableData, dataAccessorHeads, isAutogetProp, autogetGetterHead,
   isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead, overloadSuffix, aliasHead, setterParamType, reactorBodyHeads,
+  autogetFieldOf,
 } from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
@@ -546,7 +547,17 @@ for (const f of files) {
         continue;
       }
       if (headOf(body) === 'compound') {
-        getCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
+        /* 属性头上没写类型时，类型来自体里那格 **`autoget` 字段**（"声明一格带 autoget 的
+           字段就让整格属性成为 autoget"）—— 34_BindableProperties.jnc 的
+           `(fn g_prop$get () int` 那个 `int` 就是 `autoget int m_x;` 的。 */
+        const af = m.type.base.kind === 'none' ? autogetFieldOf(m) : null;
+        getCases.push({
+          m,
+          ctx: {
+            owner: m.ns ?? null, self: null, clsRoot,
+            typeOf: af === null ? undefined : { ...af.type, shape: 'data' },
+          },
+        });
         continue;
       }
     }
