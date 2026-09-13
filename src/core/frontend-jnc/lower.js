@@ -2437,14 +2437,23 @@ class JncLower {
    *   4. `IMP` `using namespace X;`（第 217 刀）：排在最后，只会**多认**名字。两张表里都有
    *      同一个名字时 jancy 报歧义 —— 那一格由 `ambigOn: [IMP]` 交给引擎认（见 scopes.js）。
    */
+  /**
+   * 往外退一层（`LEX` 边）。回 `null` 表示到顶了。
+   *
+   * 不能只按 `$` 掐：泛型的实例名是 `Box$Node` 那样拼出来的（`模板名$实参键`，见 tinstOne），
+   * 里头那个 `$` 不是一层命名空间 —— 照 `$` 退会退成 `Box`，于是在实例体里写 `Node` 找到的是
+   * **实例它自己**。所以实例名当一个整体，直接跳到泛型声明处那一层（`instNs`，第 132 刀）。
+   */
+  nsOut(p) {
+    if (p === '') return null;
+    const j = this.instNs.get(p);
+    if (j !== undefined && j !== p) return j;
+    const i = p.lastIndexOf('$');
+    return i < 0 ? '' : p.slice(0, i);
+  }
+
   * scopePath() {
-    yield* lexChain(this.ns, (p) => {
-      if (p === '') return null;
-      const j = this.instNs.get(p);
-      if (j !== undefined && j !== p) return j;
-      const i = p.lastIndexOf('$');
-      return i < 0 ? '' : p.slice(0, i);
-    });
+    yield* lexChain(this.ns, (p) => this.nsOut(p));
     if (this.nsExtra !== null) yield { label: EXT, ns: this.nsExtra };
     yield* this.basePath();
     for (const u of this.usingNs) {
@@ -2456,13 +2465,7 @@ class JncLower {
   /** `INH` 那一段：每一层上按声明顺序 BFS 走基类（见 scopePath 第 3 条）。 */
   * basePath() {
     if (this.inBase || this.aggBases.size === 0) return;
-    for (const st of lexChain(this.ns, (p) => {
-      if (p === '') return null;
-      const j = this.instNs.get(p);
-      if (j !== undefined && j !== p) return j;
-      const i = p.lastIndexOf('$');
-      return i < 0 ? '' : p.slice(0, i);
-    })) {
+    for (const st of lexChain(this.ns, (p) => this.nsOut(p))) {
       const q = [st.ns];
       const seen = new Set();
       while (q.length > 0) {
