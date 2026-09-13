@@ -8,51 +8,57 @@
 - `N…` 前端自己说的边界（"还不收"）
 - `E…` 普通错 —— **这一栏是下一刀的料**：话对不对、认不认错人，都在这儿看
 
-位置 9 × 要素 41 = 369 格：✓ 188、N 160、E 9、· 12、炸 0
+位置 9 × 要素 47 = 423 格：✓ 214、N 183、E 14、· 12、炸 0
 
 | 要素 | module | namespace | class-body | struct-body | union-body | opaque-class-body | fn-body | property-body | extension-body |
 |---|---|---|---|---|---|---|---|---|---|
-| field-int | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N7 | N24 |
-| field-string | ✓ | ✓ | ✓ | ✓ | N15 | ✓ | ✓ | N7 | N24 |
-| field-array | ✓ | ✓ | ✓ | ✓ | N15 | ✓ | ✓ | N7 | N24 |
-| field-static | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N21 | N24 |
-| field-const | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N21 | N24 |
-| field-bitfield | N1 | N1 | N1 | ✓ | N1 | N1 | N1 | N7 | N24 |
-| field-bigendian | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N21 | N24 |
-| field-class-value | ✓ | ✓ | ✓ | E9 | N15 | ✓ | ✓ | N7 | N24 |
-| field-class-ptr | ✓ | ✓ | ✓ | ✓ | N15 | ✓ | ✓ | N7 | N24 |
-| struct | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
-| union-named | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
-| union-anon | · | · | · | ✓ | N16 | · | · | N22 | N24 |
-| struct-anon | · | · | · | · | ✓ | · | · | N22 | N24 |
-| class | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
-| enum | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
-| enum-anon | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
-| enum-bitflag | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
-| typedef | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
-| typedef-fn | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
-| typedef-fnptr | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | ✓ | N22 | N24 |
-| alias-method | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N23 | N24 |
-| method-body | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | N17 | N22 | ✓ |
-| method-proto | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N18 | N7 | N24 |
-| method-static | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | N17 | N22 | ✓ |
-| method-errorcode | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N18 | N21 | N24 |
-| construct | E3 | E3 | ✓ | ✓ | N16 | ✓ | N17 | N22 | ✓ |
-| construct-args | E3 | E3 | ✓ | ✓ | N16 | ✓ | N17 | N22 | ✓ |
-| static-construct | E3 | E3 | ✓ | N10 | N16 | ✓ | N17 | N22 | ✓ |
-| destruct | N4 | N4 | N4 | N10 | N16 | N4 | N17 | N22 | N4 |
-| operator-add | N5 | N5 | N5 | N5 | N16 | N5 | N17 | N22 | N5 |
-| operator-assign | E6 | E6 | ✓ | ✓ | N16 | ✓ | N17 | N22 | ✓ |
-| property-simple | ✓ | ✓ | ✓ | N11 | ✓ | ✓ | N19 | N7 | N24 |
-| property-full | N7 | N7 | N7 | N7 | N16 | N7 | N17 | N22 | N7 |
-| property-bindable | ✓ | ✓ | ✓ | N11 | ✓ | ✓ | N19 | N7 | N24 |
-| event | ✓ | ✓ | ✓ | N12 | ✓ | ✓ | N18 | N7 | N24 |
-| reactor | ✓ | ✓ | ✓ | ✓ | N16 | ✓ | N17 | N22 | ✓ |
-| local-var | ✓ | ✓ | ✓ | N13 | · | ✓ | ✓ | N7 | N24 |
-| import | ✓ | ✓ | N8 | N14 | N16 | N8 | N17 | N22 | N24 |
-| pragma | ✓ | ✓ | N8 | N14 | N16 | N8 | N17 | N22 | N24 |
-| using-namespace | ✓ | ✓ | N8 | N14 | N16 | N8 | N20 | N22 | N24 |
-| extension | ✓ | ✓ | N8 | N14 | N16 | N8 | N17 | N22 | N24 |
+| field-int | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N7 | N26 |
+| field-string | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | N7 | N26 |
+| field-array | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | N7 | N26 |
+| field-static | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N23 | N26 |
+| field-const | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N23 | N26 |
+| field-bitfield | N1 | N1 | N1 | ✓ | N1 | N1 | N1 | N7 | N26 |
+| field-bigendian | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N23 | N26 |
+| field-class-value | ✓ | ✓ | ✓ | E10 | N17 | ✓ | ✓ | N7 | N26 |
+| field-class-ptr | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | N7 | N26 |
+| struct | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| union-named | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| union-anon | · | · | · | ✓ | N18 | · | · | N24 | N26 |
+| struct-anon | · | · | · | · | ✓ | · | · | N24 | N26 |
+| class | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| enum | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| enum-anon | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| enum-bitflag | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| typedef | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| typedef-fn | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| typedef-fnptr | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| alias-method | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N25 | N26 |
+| method-body | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | N19 | N24 | ✓ |
+| method-proto | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N20 | N7 | N26 |
+| method-static | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | N19 | N24 | ✓ |
+| method-errorcode | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N20 | N23 | N26 |
+| construct | E3 | E3 | ✓ | ✓ | N18 | ✓ | N19 | N24 | ✓ |
+| construct-args | E3 | E3 | ✓ | ✓ | N18 | ✓ | N19 | N24 | ✓ |
+| static-construct | E3 | E3 | ✓ | N11 | N18 | ✓ | N19 | N24 | ✓ |
+| destruct | N4 | N4 | N4 | N11 | N18 | N4 | N19 | N24 | N4 |
+| operator-add | N5 | N5 | N5 | N5 | N18 | N5 | N19 | N24 | N5 |
+| operator-assign | E6 | E6 | ✓ | ✓ | N18 | ✓ | N19 | N24 | ✓ |
+| property-simple | ✓ | ✓ | ✓ | N12 | ✓ | ✓ | N21 | N7 | N26 |
+| property-full | N7 | N7 | N7 | N7 | N18 | N7 | N19 | N24 | N7 |
+| property-bindable | ✓ | ✓ | ✓ | N12 | ✓ | ✓ | N21 | N7 | N26 |
+| event | ✓ | ✓ | ✓ | N13 | ✓ | ✓ | N20 | N7 | N26 |
+| reactor | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | N19 | N24 | ✓ |
+| local-var | ✓ | ✓ | ✓ | N14 | · | ✓ | ✓ | N7 | N26 |
+| import | ✓ | ✓ | N9 | N15 | N18 | N9 | N19 | N24 | N26 |
+| pragma | ✓ | ✓ | N9 | N15 | N18 | N9 | N19 | N24 | N26 |
+| using-namespace | ✓ | ✓ | N9 | N15 | N18 | N9 | N22 | N24 | N26 |
+| extension | ✓ | ✓ | N9 | N15 | N18 | N9 | N19 | N24 | N26 |
+| namespace | ✓ | ✓ | N9 | N15 | N18 | N9 | N19 | N24 | N26 |
+| class-opaque | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
+| method-virtual | E8 | E8 | ✓ | N16 | N18 | ✓ | N19 | N24 | ✓ |
+| method-abstract | ✓ | ✓ | ✓ | E8 | E8 | ✓ | E8 | N23 | N26 |
+| field-fnptr | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | N23 | N26 |
+| field-multicast | ✓ | ✓ | ✓ | N13 | ✓ | ✓ | N20 | N7 | N26 |
 
 ## 名字落在哪（`escapes`）
 
@@ -92,23 +98,25 @@
 5. 算符重载 '…'
 6. '…' 只能是类或结构体的成员（写在体里）
 7. 这种类型说明符（**没位置**）
-8. 类里除字段以外的成员
-9. 结构体 '…' 里放不下类 '…' 的一格值（jancy 那边这一句就是错：`class … cannot be a struct member`，jnc_ct_StructType.cpp:303-307 —— 内嵌的对象只有类里才有）
-10. 结构体里的 '…'
-11. 结构体的成员属性 '…' 上的 '…'（那一格要往结构体里加一格字段 / 一格事件，而属性这一遍排在字段表定下来之后）
-12. 结构体里的事件 '…'（那一格要在造出来的时候把单子建起来，而这一层的结构体没有构造那条路）
-13. 结构体字段的默认值
-14. 结构体里除字段以外的成员
-15. union 里的成员 '…'（只收整数 / 实数 / 布尔 / 枚举 / 另一个结构体 —— 指针、string 与数组那几种旁边还挂着表，重叠之后说不清归谁）
-16. union 体里除字段与匿名 struct 以外的成员
-17. 语句 '…'
-18. 函数体里的这一条 '…'：要么是一格**函数原型**（jancy 的函数体里写不了原型 —— 那要一层"块作用域也是命名空间"），要么是"局部量后面挂构造实参"（`T v(a, b)`，那一种只有类与结构体的变量收得下）
-19. 函数体里的属性声明（属性指针要一格"属性指针"类型）
-20. 写在函数体里的 `using namespace X;` —— 它的作用域是这个块，要一张跟着作用域一起进出的表（写在命名空间那一层的那一格收了，见 ADR-0016 第二百一十七刀）
-21. 完整声明式的属性 '…' 体里的这一条 —— 字段要写 `autoget`、事件要写 `bindable event`（prop_full.rst:34）
-22. 完整声明式的属性 '…' 体里的这一条 —— 只收带体的 get / set 与`autoget` 的字段 / `bindable` 的事件（prop_full.rst:34）
-23. 完整声明式的属性 '…' 里那条 alias 上既没有 '…' 也没有 '…'（属性体里的 alias 只有这两种意思，jnc_ct_Parser.cpp:1354-1361）
-24. extension 体里除带体的方法以外的成员
+8. '…' 只能写在类的方法上（type_class.rst:178）
+9. 类里除字段以外的成员
+10. 结构体 '…' 里放不下类 '…' 的一格值（jancy 那边这一句就是错：`class … cannot be a struct member`，jnc_ct_StructType.cpp:303-307 —— 内嵌的对象只有类里才有）
+11. 结构体里的 '…'
+12. 结构体的成员属性 '…' 上的 '…'（那一格要往结构体里加一格字段 / 一格事件，而属性这一遍排在字段表定下来之后）
+13. 结构体里的事件 '…'（那一格要在造出来的时候把单子建起来，而这一层的结构体没有构造那条路）
+14. 结构体字段的默认值
+15. 结构体里除字段以外的成员
+16. 结构体的方法 '…' 上写 '…'（虚派发要对象头那一格类型标签，结构体没有）
+17. union 里的成员 '…'（只收整数 / 实数 / 布尔 / 枚举 / 另一个结构体 —— 指针、string 与数组那几种旁边还挂着表，重叠之后说不清归谁）
+18. union 体里除字段与匿名 struct 以外的成员
+19. 语句 '…'
+20. 函数体里的这一条 '…'：要么是一格**函数原型**（jancy 的函数体里写不了原型 —— 那要一层"块作用域也是命名空间"），要么是"局部量后面挂构造实参"（`T v(a, b)`，那一种只有类与结构体的变量收得下）
+21. 函数体里的属性声明（属性指针要一格"属性指针"类型）
+22. 写在函数体里的 `using namespace X;` —— 它的作用域是这个块，要一张跟着作用域一起进出的表（写在命名空间那一层的那一格收了，见 ADR-0016 第二百一十七刀）
+23. 完整声明式的属性 '…' 体里的这一条 —— 字段要写 `autoget`、事件要写 `bindable event`（prop_full.rst:34）
+24. 完整声明式的属性 '…' 体里的这一条 —— 只收带体的 get / set 与`autoget` 的字段 / `bindable` 的事件（prop_full.rst:34）
+25. 完整声明式的属性 '…' 里那条 alias 上既没有 '…' 也没有 '…'（属性体里的 alias 只有这两种意思，jnc_ct_Parser.cpp:1354-1361）
+26. extension 体里除带体的方法以外的成员
 
 ## 怎么读它
 

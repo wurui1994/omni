@@ -105,5 +105,16 @@ export default feature({
     { kind: 'alias-method', sorts: ['fn-body'], verdict: 'ok', escapes: true, note: 'T-005 的代价' },
     { kind: 'alias-method', sorts: ['property-body'], verdict: 'refuse', account: 'P-006' },
     { kind: 'alias-method', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* `multicast`（矩阵后加的一列）：它是事件那一族的另一张脸，所以结构体那一格与 event
+       同一笔账（P-002），函数体里那一格落在 S-003 上。 */
+    {
+      kind: 'field-multicast',
+      sorts: [...CLASSY, 'union-body'],
+      verdict: 'ok',
+    },
+    { kind: 'field-multicast', sorts: ['struct-body'], verdict: 'refuse', account: 'P-002' },
+    { kind: 'field-multicast', sorts: ['fn-body'], verdict: 'refuse', account: 'S-003' },
+    { kind: 'field-multicast', sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
+    { kind: 'field-multicast', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

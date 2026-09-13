@@ -75,5 +75,11 @@ export default feature({
     { kind: 'field-class-value', sorts: ['union-body'], verdict: 'refuse', account: 'F-002' },
     { kind: 'field-class-value', sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
     { kind: 'field-class-value', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* 函数指针字段（矩阵后加的一列）：`int function* m_fnp(int);` —— 除 union（表示宽度那笔账）
+       与属性 / extension 体之外都收。 */
+    { kind: 'field-fnptr', sorts: PLAIN, verdict: 'ok' },
+    { kind: 'field-fnptr', sorts: ['union-body'], verdict: 'refuse', account: 'F-002' },
+    { kind: 'field-fnptr', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
+    { kind: 'field-fnptr', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

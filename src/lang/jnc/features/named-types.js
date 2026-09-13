@@ -109,5 +109,23 @@ export default feature({
     },
     { kind: 'struct-anon', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
     { kind: 'struct-anon', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* 嵌套的 `namespace`（矩阵后加的一列）：模块与命名空间那两层收，别处各按自己那一族的话拒。 */
+    { kind: 'namespace', sorts: ['module', 'namespace'], verdict: 'ok' },
+    { kind: 'namespace', sorts: ['class-body', 'opaque-class-body'], verdict: 'refuse', account: 'T-002' },
+    { kind: 'namespace', sorts: ['struct-body'], verdict: 'refuse', account: 'T-001' },
+    { kind: 'namespace', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'namespace', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
+    { kind: 'namespace', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    { kind: 'namespace', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* `opaque class`（同上）：与普通 class 那一列一样，函数体里那一格也收（T-005 的代价）。 */
+    {
+      kind: 'class-opaque',
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body', 'fn-body'],
+      verdict: 'ok',
+      register: REG.class,
+    },
+    { kind: 'class-opaque', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'class-opaque', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    { kind: 'class-opaque', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

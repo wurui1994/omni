@@ -51,6 +51,18 @@ export default feature({
       match: '只能是类或结构体的成员（写在体里）',
       why: '同 M-004',
     },
+    'M-007': {
+      text: '`virtual` / `abstract` 只能写在**类**的方法上（type_class.rst:178）',
+      say: "'{what}' 只能写在类的方法上（type_class.rst:178）",
+      match: '只能写在类的方法上',
+      why: '这一句是**对的**（jancy 同）：虚派发要对象头那一格类型标签，只有类有',
+    },
+    'M-008': {
+      text: '结构体的方法上写 `virtual` 那一族',
+      say: "结构体的方法 '{name}' 上写 '{mod}'（虚派发要对象头那一格类型标签，结构体没有）",
+      match: '结构体的方法',
+      why: '同 M-007，只是位置不同（这一格话说得更准：点名了是结构体）',
+    },
     'S-002': {
       text: '语句 `…`（函数体里的成员声明落到这句兜底上）',
       say: "语句 '{h}'",
@@ -126,5 +138,48 @@ export default feature({
     { kind: 'operator-assign', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'operator-assign', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
     { kind: 'operator-assign', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    /* `virtual` 的方法（矩阵后加的一列）：类那一族与 extension 收；顶层那两格是**对的错**
+       （M-007，jancy 同）；结构体那一格话说得更准（M-008）。 */
+    {
+      kind: 'method-virtual',
+      sorts: ['class-body', 'opaque-class-body', 'extension-body'],
+      verdict: 'ok',
+    },
+    { kind: 'method-virtual', sorts: ['module', 'namespace'], verdict: 'error', account: 'M-007' },
+    { kind: 'method-virtual', sorts: ['struct-body'], verdict: 'refuse', account: 'M-008' },
+    { kind: 'method-virtual', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'method-virtual', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
+    { kind: 'method-virtual', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    /* `abstract` 的原型（同上）。两格账记在这儿：
+       ① 顶层那两格**我们收了**，而 jancy 那边 abstract 只能在类里（type_class.rst:178）——
+          这是一格**疑似洞**（量出来是 ✓，规格里照实记 ok + note，别假装它是对的）；
+       ② 函数体里那一格报的是 M-007（"只能写在类的方法上"），可真身是"函数体里写了个原型"
+          （S-003）—— **认错人**，下一刀的料。 */
+    {
+      kind: 'method-abstract',
+      sorts: ['class-body', 'opaque-class-body'],
+      verdict: 'ok',
+    },
+    {
+      kind: 'method-abstract',
+      sorts: ['module', 'namespace'],
+      verdict: 'ok',
+      note: '疑似洞：jancy 那边 abstract 只能在类里（type_class.rst:178），这一格我们收了',
+    },
+    {
+      kind: 'method-abstract',
+      sorts: ['struct-body', 'union-body'],
+      verdict: 'error',
+      account: 'M-007',
+    },
+    {
+      kind: 'method-abstract',
+      sorts: ['fn-body'],
+      verdict: 'error',
+      account: 'M-007',
+      note: '认错人：真身是"函数体里写了个原型"（S-003）',
+    },
+    { kind: 'method-abstract', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
+    { kind: 'method-abstract', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

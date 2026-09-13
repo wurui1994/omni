@@ -91,6 +91,13 @@ const KINDS = [
   ['pragma', 'pragma(ExposedEnums, true);', 'x'],
   ['using-namespace', 'using namespace probeNs;', 'x'],
   ['extension', 'extension ExtProbe: Helper { int extra() { return 3; } }', 'x'],
+  /* 后来补的几种要素（矩阵是**机械枚举**，所以"表里少一种"本身就是一笔账）： */
+  ['namespace', 'namespace probeInner { int probeInnerFn() { return 0; } }', 'x'],
+  ['class-opaque', 'opaque class ProbeOpq { int m_ov; }', 'x'],
+  ['method-virtual', 'virtual int probeV() { return 1; }', 'x'],
+  ['method-abstract', 'abstract int probeA();', 'x'],
+  ['field-fnptr', 'int function* m_fnp(int);', 'x'],
+  ['field-multicast', 'multicast m_mc();', 'x'],
 ];
 
 /* ---------------------------------------------------------------- 位置表
