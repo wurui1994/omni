@@ -240,6 +240,10 @@ for (const f of files) {
     if (own === null) continue;
     for (const m of a.members) {
       if (m.shape !== 'fn') continue;
+      /* **只有原型的那一格不算一个函数**：它的体或写在类外（那儿另有一格，名字一样）、
+         或在宿主那边（旧降级压根不发）。先前两处各算一格，重载号于是多走一位 ——
+         50-construct.jnc 的 `Counter$construct$o1` 就是这么来的。 */
+      if (headOf(m.at) !== 'fn-def') continue;
       cases.push({ m, ctx: { owner: own, self: selfOf(a) } });
     }
   }
