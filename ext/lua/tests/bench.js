@@ -26,6 +26,8 @@ import { lower, Refuse } from '../lower.js';
 const argv = process.argv.slice(2);
 const rounds = Number((argv.find((a) => a.startsWith('--n=')) ?? '').slice(4)) || 9;
 const GSL = '/Users/wurui/Documents/Lang/reference/gsl-shell';
+/** `--ab=DIR`：与另一份代码（git worktree 或拷贝）同进程配对比。 */
+const abDir = (argv.find((a) => a.startsWith('--ab=')) ?? '').slice(5) || undefined;
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -119,6 +121,42 @@ best('降级', () => {
   }
   console.log(`  luajit -b  ${ms.toFixed(0).padStart(6)} ms`
     + `　${(((bytes / 1024) / (ms / 1000)) / 1024).toFixed(2)} MB/s（含生成字节码，含进程启动）`);
+}
+
+// ── 同一个进程里 A/B（ADR-0030 第 1 节那笔明账）─────────────────────────────────
+// 跨轮噪声 ±10%，所以 10% 级别的差别只能**同进程配对比**。办法：把另一份代码
+// （一个 git worktree 或任何一份拷贝）也 import 进来，两边**交替**跑，报每轮的比值中位数。
+// 交替 + 配对能把机器漂移约掉 —— 这比"各跑一轮再比两个数"结实得多。
+if (abDir !== undefined) {
+  const other = await import(join(process.cwd(), abDir, 'src/core/frontend-engine/parse-driver.js'));
+  const otherLang = await import(join(process.cwd(), abDir, 'ext/lua/lang.js'));
+  const otherGsl = await import(join(process.cwd(), abDir, 'ext/gsl-shell/lang.js'));
+  const runA = () => { for (const f of files) { try { parse(f.src, gslLang); } catch { /* 不认的跳过 */ } } };
+  const runB = () => {
+    for (const f of files) {
+      try { other.parse(f.src, otherGsl.gslLang ?? otherLang.luaLang); } catch { /* 同上 */ }
+    }
+  };
+  runA(); runB(); runA(); runB();                       // 两边都热身
+  const ratios = [];
+  const as = [];
+  const bs = [];
+  for (let r = 0; r < rounds; r += 1) {
+    const t0 = performance.now();
+    runA();
+    const a = performance.now() - t0;
+    const t1 = performance.now();
+    runB();
+    const b = performance.now() - t1;
+    as.push(a);
+    bs.push(b);
+    ratios.push(b / a);                                 // >1 说明**这一份更快**
+  }
+  const mid = (xs) => [...xs].sort((x, y) => x - y)[Math.floor(xs.length / 2)];
+  console.log(`\n  同进程 A/B（这一份 vs ${abDir}）：`
+    + `本份中位 ${mid(as).toFixed(0)} ms　对照中位 ${mid(bs).toFixed(0)} ms`
+    + `　配对比值中位 ${mid(ratios).toFixed(2)}×`
+    + `${mid(ratios) > 1.1 ? '（这一份更快）' : mid(ratios) < 0.9 ? '（这一份更慢）' : '（在噪声里，等于没动）'}`);
 }
 
 // fib.lua 那条端到端：两条腿各跑一次。
