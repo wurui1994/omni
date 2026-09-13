@@ -95,6 +95,12 @@ export function fnName(m) {
   }
   /* 属性的取/存：`<属性名>$get` / `$set`（旧降级 107-psetexpr.jnc 的 `C$m_val$get`）。 */
   if (dc.accessor !== null) return `${dc.accessor.path}$${dc.accessor.which}`;
+  /* **裸写**的 `get` / `set`：带着体的那一种是下标算符 `op$index$get` / `$set`
+     （130-opindex.jnc 的 `Box$op$index$get`）；只有原型的那一种体写在别处
+     （127-outerget.jnc），这一格不发 —— 那一族要等"体外定义"那一刀。 */
+  if (dc.bareAccessor !== null) {
+    return headOf(m.at) === 'fn-def' ? `op$index$${dc.bareAccessor}` : null;
+  }
   return null;
 }
 

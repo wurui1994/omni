@@ -92,6 +92,12 @@ export function readDcl(node) {
        照实读成两格 —— 拼成 `<属性名>$get` 是发那一层的事（旧降级的真输出是
        `C$m_val$get` / `C$m_val$set`，107-psetexpr.jnc）。 */
     accessor: accessorOf(nm.name),
+    /* **裸写**的 `get` / `set`（名字前面什么都没写）：`(accessor "get")`。类体里带着体的
+       那一种是**下标算符**（jancy 的 `c[10] = 100` 走 set，test90.jnc:12-24；旧降级发
+       `Owner$op$index$get`，130-opindex.jnc）；只有原型的那一种是"体写在别处"
+       （127-outerget.jnc 的 `int get();` + `int C0.get(){…}`）。两者形状同、意思不同，
+       所以这一层只照实说"它是裸写的取/存"，判在发那一层。 */
+    bareAccessor: bareAccessorOf(nm.name),
     ptrs: ptrs.length,
     /* **跟在 `*` 后面的修饰词**也要读出来（`ptr-group -> "*" mods`）：
        `Inner* property m_p;` 里的 `property` 就落在这儿，不在说明符表里 ——
@@ -131,6 +137,14 @@ function accessorOf(node) {
   const t = r === null ? undefined : r.text;
   const which = t !== null && t !== undefined && t.value !== undefined ? String(t.value) : null;
   return path === null || which === null ? null : { path, which };
+}
+
+/** 裸写的取/存：`(accessor "get")` → `'get'`；不是就 null。 */
+function bareAccessorOf(node) {
+  if (headOf(node) !== 'accessor') return null;
+  const nm = named(node);
+  const t = nm === null ? undefined : nm.text;
+  return t !== null && t !== undefined && t.value !== undefined ? String(t.value) : null;
 }
 
 /** 一格 `ptr` 节点里那串修饰词（`(ptr mods)`）。 */
