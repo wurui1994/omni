@@ -176,6 +176,9 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [] }) {
       if (body === undefined || headOf(body) !== 'compound' || m.name === null) return;
       flush();
       for (const im of readBodyMembers(body)) {
+        /* 属性体里的 `alias` / `typedef` 同样**不是字段**（`autoget alias m_value = m_av;`
+           只是把属性的存储指到外面那格 `m_av` 上 —— 142-propalias.jnc）。 */
+        if (im.storage.includes('alias') || im.storage.includes('typedef')) continue;
         if (im.shape !== 'data' && im.shape !== 'array' && im.shape !== 'fnptr') continue;
         if (im.name === null) { out.push(null); continue; }
         const ir = resolveType(im.type, env);
