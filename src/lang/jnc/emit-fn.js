@@ -19,6 +19,7 @@ import { emitType } from './emit-type.js';
 import { readDeclType, readAnonType } from './types.js';
 import { nameText, allInChain, readDcl } from './declare.js';
 import { headOf, named } from './adapt.js';
+import { readBodyMembers } from './agg.js';
 import { basePaths } from './emit-agg.js';
 
 /** 构造/析构那两格没有写类型 —— 回的是 void（jancy 的 construct 不写返回类型）。 */
@@ -263,7 +264,7 @@ export function dispatchHead(m, env, ctx = { root: null, self: null }) {
 export function needsCtor(agg, env, seen = new Set()) {
   if (agg === null || agg === undefined || seen.has(agg)) return false;
   seen.add(agg);
-  if (hasWrittenCtor(agg)) return true;
+  if (hasWrittenCtor(agg) || hasStaticCtor(agg)) return true;
   for (const m of agg.members) {
     if (m.shape === 'event') return true;
     /* `bindable` 要在构造开头建那格多播的单子（第八十三刀）；`autoget` **不要** ——
@@ -271,6 +272,17 @@ export function needsCtor(agg, env, seen = new Set()) {
        那是"新腿发了、旧降级没这个名字"那一栏抓出来的）。 */
     if (m.type !== null && m.type !== undefined && m.type.mods.includes('bindable')) return true;
     if (hasInitValue(m)) return true;
+    /* **属性体里那格字段带初值**（`property m_p { int m_v = 7; … }`，152-propfieldinit.jnc）
+       —— 那一格存储也要在构造里写上默认值。 */
+    if (m.shape === 'prop') {
+      const body = named(m.at)?.body;
+      const inner = headOf(body) === 'compound' ? readBodyMembers(body) : [];
+      /* 只有**成员表**那种体才算（体里有取/存那两格）—— 简写取值器的体里也有带初值的
+         局部量（140-propgetbody.jnc 的 `Box`，那是"新腿发了、旧降级没这个名字"抓出来的）。 */
+      if (inner.some((im) => im.shape === 'fn') && inner.some((im) => hasInitValue(im))) {
+        return true;
+      }
+    }
     /* 成员的类型是本文件里那格聚合体 —— 它带构造，外面这一格也要发一格。 */
     if (m.shape === 'data' && m.type !== null && m.type.ptrs === 0) {
       const nm = m.type.base.kind === 'named' ? memberTypeName(m) : null;
@@ -288,11 +300,17 @@ export function needsCtor(agg, env, seen = new Set()) {
 /** 这一格聚合体自己写了 `construct` / `static construct` 吗。 */
 export function hasWrittenCtor(agg) {
   if (agg === null || agg === undefined) return false;
-  return agg.members.some((m) => {
-    if (m.shape !== 'fn') return false;
-    const n = fnName(m);
-    return n === 'construct' || n === 'construct$static';
-  });
+  return agg.members.some((m) => m.shape === 'fn' && fnName(m) === 'construct');
+}
+
+/**
+ * 这一格聚合体有 `static construct` 吗。**它不算"写过构造"**：静态构造要在实例构造里带一句
+ * "跑没跑过"的守卫，所以旧降级照样生成一格实例构造（50-construct.jnc 的 `Reg`、
+ * 193-staticctorns.jnc 的 `C` —— 这两格是"还没试的"那一栏抓出来的）。
+ */
+export function hasStaticCtor(agg) {
+  if (agg === null || agg === undefined) return false;
+  return agg.members.some((m) => m.shape === 'fn' && fnName(m) === 'construct$static');
 }
 
 /**
