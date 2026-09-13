@@ -25,6 +25,7 @@
  */
 
 import { OmniError } from '../source/diag.js';
+import { castRow } from '../frontend-engine/casts.js';
 
 /* ------------------------------------------------------------------ 类型 */
 
@@ -434,6 +435,24 @@ const GLSL_ASSIGN_OPS = {
   'shl-assign': '<<', 'shr-assign': '>>',
 };
 
+
+/* GLSL 330 的**全部**隐式转换（规范 4.1.10）：就这两行。表的形状与 jancy 那张
+   （`JNC_CASTS`）一模一样，求解器是同一个（`frontend-engine/casts.js` 的 `castRow`）——
+   这就是"加一门语言 = 加一张表"那句话的第一次兑现：GLSL 与 jancy 的差别在**表的内容**，
+   不在两段各写一遍的 `if`。
+
+   `cost` 这一列 GLSL 用不着（它的内建重载按精确匹配挑，不排偏序），所以不写 —— 表的列是
+   **可选**的，一门语言只填它用得上的那几列。别的一律不转：悄悄转的话
+   `float f = someVec3;` 这种错会变成"取第一格"。 */
+const GLSL_CASTS = [
+  { why: 'int -> float（规范 4.1.10）', when: (f, t) => t.k === 'float' && f.k === 'int', assign: true },
+  {
+    why: 'ivecN -> vecN（同一条，逐格）',
+    when: (f, t) => t.k === 'vec' && t.base === 'float'
+      && f.k === 'vec' && f.base === 'int' && f.n === t.n,
+    assign: true,
+  },
+];
 
 class GlslChecker {
   /**
@@ -962,17 +981,13 @@ class GlslChecker {
   /* ---------------------------------------------------------- 表达式 */
 
   /**
-   * `from` 的类型能不能当 `want` 用。GLSL 330 只有**一条**隐式转换：`int` -> `float`
-   * （规范 4.1.10；`ivecN` -> `vecN` 也在里头）。别的一律不转 —— 不转就骂，
-   * 悄悄转的话 `float f = someVec3;` 这种错会变成「取第一格」。
+   * `from` 的类型能不能当 `want` 用 —— 读 `GLSL_CASTS` 那张表（ADR-0029 的 L4）。
+   * 完全一样那一格不进表：它**不发** `convert`，原样回去。
    */
   coerce(e, want, at) {
     if (glslSame(e.ty, want)) return e;
-    if (want.k === 'float' && e.ty.k === 'int') return { k: 'convert', ty: want, of: e };
-    if (want.k === 'vec' && want.base === 'float'
-      && e.ty.k === 'vec' && e.ty.base === 'int' && e.ty.n === want.n) {
-      return { k: 'convert', ty: want, of: e };
-    }
+    const r = castRow(GLSL_CASTS, e.ty, want, this);
+    if (r !== null && r.assign) return { k: 'convert', ty: want, of: e };
     throw this.err(at, `要一个 ${glslTyText(want)}，给的是 ${glslTyText(e.ty)}`);
   }
 
