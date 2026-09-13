@@ -31,7 +31,7 @@ import { nameText, allInChain, readDcl } from '../../src/lang/jnc/declare.js';
 import { readFormals, fnName, needsCtor } from '../../src/lang/jnc/emit-fn.js';
 import { typeOfExpr } from '../../src/lang/jnc/expr-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
-import { readDeclType } from '../../src/lang/jnc/types.js';
+import { readDeclType, readAnonType } from '../../src/lang/jnc/types.js';
 
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 400);
@@ -342,7 +342,20 @@ for (const f of files) {
     else if (rec !== undefined && rec.kind === 'class') fam = 'o';
     else if (rec !== undefined && (rec.kind === 'struct' || rec.kind === 'union')) fam = 's';
     if (st.h === 'new-array') { note('`new T[n]` 那一族'); continue; }
-    if (fam === null) { note(`认不出 new 的类型（${tn ?? '?'}）`); continue; }
+    if (fam === null) {
+      /* **`new` 一格内建词类型**（`c.m_p = new int;`，154-proptailptr.jnc:29）**不发壳、也不占号**
+         —— 旧降级就地发一句 `(pnew (ptr int) (int 1))`。判据在类型那一层：说明符的头是个词
+         （`base.kind === 'word'`，`BASE_KINDS` 里没有它），不是名字/聚合体/枚举。
+         这与"结构体没有构造"同一类：**对的行为**，不是还没做。
+         `type` 那一格是 `(type-name specs ptrs)`（节点表 :92）—— 不剥这一层，
+         `readAnonType` 收到的就不是说明符，答的是 null（按表读树，别按记忆猜洞名）。 */
+      const tnode = named(st.node)?.type;
+      const tnm = headOf(tnode) === 'type-name' ? named(tnode) : null;
+      const at = tnm === null ? null : readAnonType(tnm.specs, tnm.ptrs);
+      if (at !== null && at.base.kind === 'word') { note('内建词类型的 new（不发壳）'); continue; }
+      note(`认不出 new 的类型（${tn ?? '?'}）`);
+      continue;
+    }
     /* **结构体没有构造就不发壳**（`new Entry` 直接就是一句 `(pnew (ptr Entry) 1)`，
        124-errcptr.jnc 旧降级一格 `$news` 都没有）—— 不占号。带构造的才发（120-structctor.jnc）。 */
     if (fam === 's' && !needsCtor(rec.agg, env)) { note('结构体没有构造（不发壳）'); continue; }
