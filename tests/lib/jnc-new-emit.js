@@ -273,16 +273,38 @@ for (const f of files) {
   for (const t of trees) scanAggs(t, null);
 
   /* `new` 那几处**按源码次序**（同一族一个计数器）。 */
+  /* **顶层的全局**也要进名字表（`localNames` 只收形参与局部量）—— 花括号初值里那格
+     定不出型的 `name` 就是它（尺子印出来的节点头指着这儿）。 */
+  const globals = new Map();
+  const digGlobals = (n, inFn) => {
+    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    const h = headOf(n);
+    if (h === 'fn-def' || h === 'agg') return;                       // 体里的是局部、类里的是字段
+    if (h === 'var-decl') {
+      const vn = named(n);
+      if (vn !== null) {
+        for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
+          const dd = headOf(d) === 'init' ? named(d)?.dcl : d;
+          const t = readDeclType(vn.specs, dd);
+          if (t !== null && t.name !== null) globals.set(t.name, t);
+        }
+      }
+      return;
+    }
+    for (const it of n.items) digGlobals(it, inFn);
+  };
+  for (const t of trees) digGlobals(t, false);
+
   const sites = [];
   const scanNew = (n, names) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
     let ns = names;
-    if (h === 'fn-def') ns = localNames(n);                          // 进一格函数：换一张名字表
+    if (h === 'fn-def') ns = new Map([...globals, ...localNames(n)]); // 进一格函数：全局作底
     if (h === 'new' || h === 'new-array' || h === 'new-curly') sites.push({ h, node: n, names: ns });
     for (const it of n.items) scanNew(it, ns);
   };
-  for (const t of trees) scanNew(t, new Map());
+  for (const t of trees) scanNew(t, new Map(globals));
 
   const note = (w) => skip.set(w, (skip.get(w) ?? 0) + 1);
   const next = { o: 0, s: 0, c: 0 };
