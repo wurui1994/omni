@@ -84,7 +84,11 @@ export const JNC_SCOPE = {
   agg: { steps: ['bind:name', 'bases', 'open', 'inherit:bases', 'hoist:body', 'body'] },
   enum: { steps: ['bind:name', 'base', 'open', 'hoist:body', 'body'] },
   'enum-item': { steps: ['value', 'bind:name'] },
-  namespace: { steps: ['bind:name', 'open', 'hoist:body', 'body'] },
+  /* 命名空间是**合并**的：同一个 `namespace io { … }` 在一份文件里写两遍、或者在同一个模块的
+     两份文件里各写一段，都是同一层（jancy 的 NamespaceMgr 按名字找那一格，找不着才新建）。
+     所以这儿用 `open-shared:`，不是 `open` —— 少这一格，`io_HostNameResolver.jnc` 里裸写的
+     `SocketAddress`（声明在同命名空间的 io_SocketAddress.jnc 里）就查不着。 */
+  namespace: { steps: ['bind:name', 'open-shared:name', 'hoist:body', 'body'] },
   dylib: { steps: ['bind:name', 'open', 'hoist:body', 'body'] },
   extension: { steps: ['bases', 'open', 'hoist:body', 'body'] },
   'property-template': { steps: ['open', 'hoist:body', 'body'] },

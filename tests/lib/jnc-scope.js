@@ -17,7 +17,7 @@ import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { normalize } from '../../src/lang/jnc/normalize.js';
 import { jncSemLang } from '../../src/lang/jnc/scope.js';
 import { JNC_BUILTINS } from '../../src/lang/jnc/builtins.js';
-import { moduleIndex, moduleNames } from '../../src/lang/jnc/modules.js';
+import { moduleIndex, moduleNames, archiveIndex, moduleStats } from '../../src/lang/jnc/modules.js';
 import { bind } from '../../src/core/frontend-engine/bind.js';
 
 const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy';
@@ -45,7 +45,11 @@ const files = walk(CORPUS).sort().slice(0, limit);
 /* 导入这一族在**外面**解（`modules.js`）：名字从前奏那一层进来，核心一行不用改。
    `--no-import` 可以关掉它 —— 上一版的数就是那么量的，两边一比才看得出这一刀值多少。 */
 const noImport = argv.includes('--no-import');
+/* `--module`：整模块一起绑（贵，但那才是 jancy 的真语义）。默认还是按文件绑 + 前奏。 */
+const wholeModule = argv.includes('--module');
 const index = noImport ? new Map() : moduleIndex([CORPUS]);
+const archIdx = noImport ? new Map() : archiveIndex([CORPUS]);
+const statsCache = new Map();
 const modCache = new Map();
 const parseFile = (p) => jncParse(tb, p, new Diagnostics());
 let archives = 0;
@@ -69,19 +73,49 @@ for (const f of files) {
   try { tree = jncParse(tb, f, new Diagnostics()); } catch { continue; }
   const rel = f.slice(CORPUS.length + 1);
   let out;
+  let onlyEntry = null;                 // 整模块一起绑时：只数入口这份文件里的查名
   try {
-    let prelude = JNC_BUILTINS;
-    if (!noImport) {
-      const mod = moduleNames(f, { index, parse: parseFile, cache: modCache });
+    if (wholeModule) {
+      /* **整个模块一起绑**（jancy 就是一次编译一个模块）：类与基类可能在不同文件里，
+         只有一起绑，基类那一层才真的存在、`inherit:` 才接得上、继承来的成员才查得着。
+         拿名字当前奏补不了这一格 —— 那只补"顶层有哪些名字"。 */
+      const mod = moduleStats(f, {
+        index, parse: parseFile, archiveIdx: archIdx, cache: statsCache,
+      });
       archives += mod.archives.length;
-      missing += mod.missing.length;
-      prelude = [...JNC_BUILTINS, ...mod.names];
+      const entryStats = statsCache.get(f);
+      onlyEntry = new Set();
+      const mark = (v) => {
+        if (v === null || v === undefined) return;
+        if (Array.isArray(v)) { for (const x of v) mark(x); return; }
+        if (typeof v !== 'object') return;
+        if (v.kind === 'name') { onlyEntry.add(v); return; }
+        for (const k of Object.keys(v)) {
+          /* `value` 只在叶子上是文本；`cast.value` / `init.value` 是**真的洞**。
+             这个坑我在 jnc-normalize 那把尺子上已经踩过一次 —— 别再一刀切跳过它。 */
+          if (k === 'kind' || k === 'line' || (k === 'value' && v.kind === 'tok')) continue;
+          mark(v[k]);
+        }
+      };
+      mark(entryStats);
+      out = bind({ stats: mod.stats }, jncSemLang, { prelude: JNC_BUILTINS });
+    } else {
+      let prelude = JNC_BUILTINS;
+      if (!noImport) {
+        const mod = moduleNames(f, {
+          index, parse: parseFile, cache: modCache, archiveIdx: archIdx,
+        });
+        archives += mod.archives.length;
+        missing += mod.missing.length;
+        prelude = [...JNC_BUILTINS, ...mod.names];
+      }
+      out = bind({ stats: normalize(tree) }, jncSemLang, { prelude });
     }
-    out = bind({ stats: normalize(tree) }, jncSemLang, { prelude });
   } catch (err) {
     boom.push([rel, err.message]);
     continue;
   }
+  if (onlyEntry !== null) out = { ...out, uses: out.uses.filter((u) => onlyEntry.has(u.node)) };
   ran += 1;
   scopes += out.scopes.length;
   decls += out.decls.length;

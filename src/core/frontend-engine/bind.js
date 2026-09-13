@@ -85,6 +85,8 @@ export function bind(ast, lang, opts = {}) {
   };
   /** 哪个节点开出了哪一层 —— `in-owner:` 要靠它把体外定义接回那个类。 */
   const scopeOf = new Map();
+  /** 同名要合并的那些层（命名空间）：键是"哪一层里 + 什么种类 + 什么名字"。 */
+  const shared = new Map();
   root.labels = new Set();
 
   const open = (parent, why) => newScopeAt(parent, why);
@@ -174,6 +176,18 @@ export function bind(ast, lang, opts = {}) {
     }
     for (const step of rule.steps) {
       if (step === 'open') { cur = open(cur, node.kind); scopeOf.set(node, cur); continue; }
+      if (step.startsWith('open-shared:')) {
+        /* **同名的那一层合并**：命名空间写两遍（同一份文件里、或者同一个模块的两份文件里）
+           是同一层。键是"哪一层里 + 什么种类 + 什么名字"。 */
+        const nm = (lang.namesOf === undefined
+          ? node[step.slice(12)] : lang.namesOf(node[step.slice(12)]))?.[0];
+        const key = `${cur.id}|${node.kind}|${nm ?? ''}`;
+        let s = shared.get(key);
+        if (s === undefined) { s = open(cur, node.kind); shared.set(key, s); }
+        cur = s;
+        scopeOf.set(node, cur);
+        continue;
+      }
       /* **体外定义接回那个类**（`void C.f() {}` / `C.construct() {}`）：那一格的"东家"是谁由
          `lang.ownerOf` 说（语言自己读，核心不认识限定名这回事）。查着了就把后面几步挪进
          那一层 —— 于是 `open` 开出来的函数层挂在类那一层底下，体里裸写的成员名查得着。
