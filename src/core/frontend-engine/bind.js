@@ -103,10 +103,15 @@ export function bind(ast, lang, opts = {}) {
     return s;
   };
 
-  const bindNames = (names, scope, node) => {
+  const bindNames = (names, scope, node, reader) => {
     /* 那一格里怎么读出名字：语言不说就当它本来是一串名字（读表那条腿的形参表就是）；
-       说了就照它读（拼法在 `.grammar` 里的语言那一格是棵子树）。 */
-    const list = lang.namesOf === undefined ? names : lang.namesOf(names);
+       说了就照它读（拼法在 `.grammar` 里的语言那一格是棵子树）。
+       配方还可以**点名用哪个读法**（`bind:name@params`）—— 同一格子树，问的问题不一样：
+       `class Array<T>` 的 `name` 那一格既能读出类名（`namesOf`），也能读出模板参数
+       （`readers.params`）。 */
+    const read = reader === undefined
+      ? lang.namesOf : (lang.readers ?? {})[reader];
+    const list = read === undefined ? names : read(names);
     for (const nm of list ?? []) {
       if (nm === '...') continue;                    // 变长参数不是个名字，别占格
       /* 同一格声明绑第二遍不再记一笔账：**先收齐再查**的作用域（`hoist:`）会先绑一次，
@@ -131,7 +136,12 @@ export function bind(ast, lang, opts = {}) {
       const r = (lang.scope ?? {})[it.kind];
       if (r === undefined) continue;
       for (const st of r.steps ?? []) {
-        if (typeof st === 'string' && st.startsWith('bind:')) bindNames(it[st.slice(5)], scope, it);
+        if (typeof st === 'string' && st.startsWith('bind:')) {
+          const spec = st.slice(5);
+          const at = spec.indexOf('@');
+          bindNames(it[at < 0 ? spec : spec.slice(0, at)], scope, it,
+            at < 0 ? undefined : spec.slice(at + 1));
+        }
       }
       for (const h of r.through ?? []) hoistList([it[h]], scope);
     }
@@ -235,7 +245,11 @@ export function bind(ast, lang, opts = {}) {
         continue;
       }
       if (step.startsWith('bind:')) {
-        bindNames(node[step.slice(5)], cur, node);
+        const spec = step.slice(5);
+        const at = spec.indexOf('@');
+        const hole = at < 0 ? spec : spec.slice(0, at);
+        const reader = at < 0 ? undefined : spec.slice(at + 1);
+        bindNames(node[hole], cur, node, reader);
         if (opts.extra !== undefined) bindNames(opts.extra, cur, node);
         continue;
       }

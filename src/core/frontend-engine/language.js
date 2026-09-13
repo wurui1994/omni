@@ -112,6 +112,7 @@ export function defineLang({
   name, keywords = [], ops = [], punct = [], unaryPrec, classes = [], subclass = {},
   nodes = [], numSuffix, doc = '', tokens = null, start = 'block', str, ident,
   scope = {}, ctx = {}, yields = {}, blockEnd = [], parser = 'syn', namesOf, ownerOf, pathOf,
+  readers,
 }) {
   /* 记号规则表**没有默认值**：那是语言自己的事（先前这儿默认成了 Lua 那张表 ——
      一份 SDK 不该知道有 Lua 这门语言）。 */
@@ -130,6 +131,8 @@ export function defineLang({
     /* `pathOf`：那一格里的名字是**一条路径**（`doc.Session`）时怎么读成一串段。
        不给就退回 `namesOf`（一段）—— 又是默认值。 */
     pathOf,
+    /* `readers`：配方点名要的那几个读法（`bind:name@params`）。同一格子树问不同的问题。 */
+    readers,
     scope: { ...scope }, ctx: { ...ctx }, yields: { ...yields }, blockEnd: [...blockEnd],
     parser,
   }));
@@ -181,6 +184,7 @@ export function extend(base, delta) {
     namesOf: delta.namesOf ?? base.namesOf,
     ownerOf: delta.ownerOf ?? base.ownerOf,
     pathOf: delta.pathOf ?? base.pathOf,
+    readers: { ...(base.readers ?? {}), ...(delta.readers ?? {}) },
     /* 语义那三张表按**格**合并：方言加一格就写一格（`lambda` 的配方就是这么加的）。 */
     scope: { ...base.scope, ...(delta.scope ?? {}) },
     ctx: { ...base.ctx, ...(delta.ctx ?? {}) },

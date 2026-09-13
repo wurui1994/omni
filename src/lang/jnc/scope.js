@@ -88,6 +88,26 @@ export function jncPathOf(v) {
   return list.map((x) => one(x)).filter((p) => p !== null);
 }
 
+/**
+ * **泛型参数**（`class Array<T>` 里的 T）：类头那一格是 `tinst`，参数写在实参位置上，
+ * 每个都是"光一个裸名字的类型名"（`targ → type-name → specs.type`）。声明与用同一条产生式，
+ * 分开它们靠位置 —— 这儿就是那个位置。配方点名要它：`bind:name@params`。
+ * 量出来 `T` 那一族在整模块那一路有 217 处查不着，就是缺这一格。
+ */
+export function jncParamsOf(v) {
+  if (v === null || v === undefined || typeof v !== 'object' || v.kind !== 'tinst') return [];
+  const list = Array.isArray(v.targs) ? v.targs : [];
+  const out = [];
+  for (const t of list) {
+    const ty = t === null || t === undefined ? null : t.type;
+    const specs = ty === null || ty === undefined ? null : ty.specs;
+    const head = specs === null || specs === undefined ? null : specs.type;
+    if (head !== null && head !== undefined && head.kind === 'name'
+      && typeof head.value === 'string') out.push(head.value);
+  }
+  return out;
+}
+
 /** 作用域配方。键是节点名，`steps` 是上面那四个词。 */export const JNC_SCOPE = {
   /* **文件顶层的名字不看先后**（`'@root'` 这一格是核心给的：洞就是 ast 自己那几格）。
      jancy 的编译是两趟 —— declare 一趟把名字全登记上，compile 一趟才看体
@@ -106,7 +126,9 @@ export function jncPathOf(v) {
   formal: { steps: ['specs', 'dcl', 'init', 'bind:dcl'] },
   'formal-anon': { steps: ['specs', 'ptrs'] },
   // 类型与命名空间：自己是一层，**成员也不看先后**（同上：declare 一趟、compile 一趟）
-  agg: { steps: ['bind:name', 'bases', 'open', 'inherit:bases', 'hoist:body', 'body'] },
+  agg: {
+    steps: ['bind:name', 'bases', 'open', 'bind:name@params', 'inherit:bases', 'hoist:body', 'body'],
+  },
   enum: { steps: ['bind:name', 'base', 'open', 'hoist:body', 'body'] },
   'enum-item': { steps: ['value', 'bind:name'] },
   /* 命名空间是**合并**的：同一个 `namespace io { … }` 在一份文件里写两遍、或者在同一个模块的
@@ -165,4 +187,5 @@ export const jncSemLang = extend(jncLang, {
   namesOf: jncNamesOf,
   ownerOf: jncOwnerOf,
   pathOf: jncPathOf,
+  readers: { params: jncParamsOf },
 });
