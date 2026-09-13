@@ -30,8 +30,36 @@ export function jncNamesOf(v) {
     case 'dcl': return jncNamesOf(v.name);
     case 'init': case 'ref-init': return jncNamesOf(v.dcl);
     case 'dcls': return jncNamesOf(v.first);
+    /* 泛型的头（`class Array<T> {}`）：那一格是 `tinst`，名字在它里头。少这一条，`Array`
+       压根没绑上，于是体外定义 `void Array<T>.clear()` 也认不回来 —— 尺子上是 41 处
+       `m_count` 查不着（stdt_Array.jnc）。先前我只补了 `ownerOf` 那一头，**量出来一格没动**：
+       东家查不着的原因在这一头。 */
+    case 'tinst': return jncNamesOf(v.name);
     default: return [];                       // 限定名、特殊名（construct/算符）都不新增名字
   }
+}
+
+/**
+ * **这条声明是给谁写的**（核心的 `ownerOf` 钩子）：`void C.f() {}` / `C1.construct() {}`
+ * 那种体外定义的东家是限定名最左那一格。不是体外定义就答 `null`。
+ * 量出来这一格值不少：`io_UartSignalDecoder.jnc` 那种"类体只放字段、方法全写在体外"的写法，
+ * 里头 `m_state` / `State` 全靠它才查得着（否则那些名字在词法链上压根不在类那一层）。
+ */
+export function jncOwnerOf(v) {
+  if (v === null || v === undefined || typeof v !== 'object') return null;
+  if (v.kind === 'dcl') return jncOwnerOf(v.name);
+  if (v.kind === 'init' || v.kind === 'ref-init') return jncOwnerOf(v.dcl);
+  if (v.kind === 'dcls') return jncOwnerOf(v.first);
+  if (v.kind === 'qualified' || v.kind === 'qualified-special') {
+    let left = v.left;
+    while (left !== null && left !== undefined && typeof left === 'object'
+      && (left.kind === 'qualified' || left.kind === 'qualified-special')) left = left.left;
+    /* 泛型的体外定义（`Array<T>.set(…) {}`，stdt_Array.jnc 那一族）：东家是那个**泛型的名字**
+       ——`tinst` 裹着它。少这一格的时候尺子报出 41 处 `m_count` 查不着，全在 stdt_*.jnc。 */
+    if (left !== null && left !== undefined && left.kind === 'tinst') left = left.name;
+    return left !== null && left !== undefined && left.kind === 'name' ? left.value : null;
+  }
+  return null;
 }
 
 /** 作用域配方。键是节点名，`steps` 是上面那四个词。 */
@@ -44,9 +72,10 @@ export const JNC_SCOPE = {
   'var-decl': { steps: ['specs', 'dcls', 'bind:dcls'] },
   'var-decl-curly': { steps: ['specs', 'dcl', 'value', 'bind:dcl'] },
   typedef: { steps: ['specs', 'bind:dcls'] },
-  'fn-proto': { steps: ['specs', 'bind:dcl'] },
+  'fn-proto': { steps: ['specs', 'bind:dcl', 'in-owner:dcl'] },
   // 函数：名字在外层，形参与体在新开的那一层（形参长在 `dcl` 的后缀里）
-  'fn-def': { steps: ['specs', 'bind:dcl', 'open', 'dcl', 'body'] },
+  // 体外定义（`void C.f() {}`）先 `in-owner:dcl` 挪进那个类，`open` 于是挂在类那一层底下
+  'fn-def': { steps: ['specs', 'bind:dcl', 'in-owner:dcl', 'open', 'dcl', 'body'] },
   // 声明符：**不走名字那一格**（那是定义，不是引用）
   dcl: { steps: ['ptrs', 'suffixes', 'ctor'] },
   formal: { steps: ['specs', 'dcl', 'init', 'bind:dcl'] },
@@ -100,4 +129,5 @@ export const jncSemLang = extend(jncLang, {
   scope: JNC_SCOPE,
   ctx: JNC_CTX,
   namesOf: jncNamesOf,
+  ownerOf: jncOwnerOf,
 });

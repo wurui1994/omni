@@ -63,6 +63,8 @@ export function bind(ast, lang) {
     scopes.push(s);
     return s;
   };
+  /** 哪个节点开出了哪一层 —— `in-owner:` 要靠它把体外定义接回那个类。 */
+  const scopeOf = new Map();
   root.labels = new Set();
 
   const open = (parent, why) => newScopeAt(parent, why);
@@ -151,7 +153,20 @@ export function bind(ast, lang) {
       return;
     }
     for (const step of rule.steps) {
-      if (step === 'open') { cur = open(cur, node.kind); continue; }
+      if (step === 'open') { cur = open(cur, node.kind); scopeOf.set(node, cur); continue; }
+      /* **体外定义接回那个类**（`void C.f() {}` / `C.construct() {}`）：那一格的"东家"是谁由
+         `lang.ownerOf` 说（语言自己读，核心不认识限定名这回事）。查着了就把后面几步挪进
+         那一层 —— 于是 `open` 开出来的函数层挂在类那一层底下，体里裸写的成员名查得着。
+         查不着（东家在别的文件、或者写在这条声明后面）就原地不动 —— 那是一笔账，不是错。 */
+      if (step.startsWith('in-owner:')) {
+        const owner = lang.ownerOf === undefined ? null : lang.ownerOf(node[step.slice(9)]);
+        if (owner !== null && owner !== undefined) {
+          const hit = lookup(owner, cur);
+          const s = hit === null ? undefined : scopeOf.get(hit.entry.node);
+          if (s !== undefined) cur = s;
+        }
+        continue;
+      }
       if (step.startsWith('hoist:')) {                // 先收齐这一串声明的名字，再走它们的体
         hoistList(node[step.slice(6)], cur);
         continue;

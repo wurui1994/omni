@@ -111,7 +111,7 @@ function check(lang) {
 export function defineLang({
   name, keywords = [], ops = [], punct = [], unaryPrec, classes = [], subclass = {},
   nodes = [], numSuffix, doc = '', tokens = null, start = 'block', str, ident,
-  scope = {}, ctx = {}, yields = {}, blockEnd = [], parser = 'syn', namesOf,
+  scope = {}, ctx = {}, yields = {}, blockEnd = [], parser = 'syn', namesOf, ownerOf,
 }) {
   /* 记号规则表**没有默认值**：那是语言自己的事（先前这儿默认成了 Lua 那张表 ——
      一份 SDK 不该知道有 Lua 这门语言）。 */
@@ -124,6 +124,9 @@ export function defineLang({
        （读表那条腿的形参表就是字符串数组）。拼法在 `.grammar` 里的语言那一格是棵子树
        （jancy 的 `dcl`），于是它自己给一个读法 —— 这是默认值，不是特例。 */
     namesOf,
+    /* `ownerOf`：**这条声明是给谁写的**（`void C.f() {}` 的东家是 `C`）。核心不认识
+       "限定名"这回事，语言自己读 —— `in-owner:` 那一步靠它把体外定义接回那一层。 */
+    ownerOf,
     scope: { ...scope }, ctx: { ...ctx }, yields: { ...yields }, blockEnd: [...blockEnd],
     parser,
   }));
@@ -173,6 +176,7 @@ export function extend(base, delta) {
     str: delta.str ?? base.str,
     ident: delta.ident ?? base.ident,
     namesOf: delta.namesOf ?? base.namesOf,
+    ownerOf: delta.ownerOf ?? base.ownerOf,
     /* 语义那三张表按**格**合并：方言加一格就写一格（`lambda` 的配方就是这么加的）。 */
     scope: { ...base.scope, ...(delta.scope ?? {}) },
     ctx: { ...base.ctx, ...(delta.ctx ?? {}) },
