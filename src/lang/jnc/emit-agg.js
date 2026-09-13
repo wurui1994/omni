@@ -18,7 +18,7 @@
 //   - union 里套**匿名 struct** 的命名（`H$u1$s0`，103-unionstruct.jnc）。
 //   - 属性 / 事件那几族带出来的隐藏字段。
 
-import { resolveType } from './resolve-type.js';
+import { resolveType, baseIntBits, bitfieldBits } from './resolve-type.js';
 import { emitType } from './emit-type.js';
 import { nameText, allInChain } from './declare.js';
 import { headOf } from './adapt.js';
@@ -88,6 +88,11 @@ function lastIdent(n) {
 /** 自己那几格数据字段。 */
 function ownFields(agg, env) {
   const out = [];
+  /* 位域挤格子的状态：`bits` 是底宽、`used` 是已经占掉的位数。碰上非位域就**收口**。 */
+  let pack = null;
+  const flush = () => {
+    if (pack !== null) { out.push(`($b${out.length} int)`); pack = null; }
+  };
   for (const m of agg.members) {
     /* **匿名 union**：成员摊进外面这个结构体，发的时候括回成 `(union …)`（第一百一十刀）。
        带名字的嵌套类型不摊 —— 它是另一格类型，字段表里没有它。 */
@@ -95,16 +100,30 @@ function ownFields(agg, env) {
       const n = m.nested;
       if (n === null || n === undefined || n.word !== 'union') continue;
       if (nameText(n.name) !== null) continue;                      // 有名字的 union 不摊
+      flush();
       const inner = ownFields(n, env);
       if (inner === null) return null;
       if (inner.length > 0) out.push(`(union ${inner.join(' ')})`);
       continue;
     }
+    if (m.shape === 'bitfield') {
+      /* **连着的位域挤成一格**：同一个底宽、累计位数不超过那个宽就接着挤，否则另起一格。
+         格名是 `$b<这一格的序号>`（规则从旧降级的真输出反出来，104-bitfield.jnc）。 */
+      const bits = baseIntBits(m.type);
+      const n = bitfieldBits(m.type);
+      if (bits === null || n === null) return null;                 // 认不出底宽/位数：不猜
+      if (pack !== null && (pack.bits !== bits || pack.used + n > bits)) flush();
+      if (pack === null) pack = { bits, used: 0 };
+      pack.used += n;
+      continue;
+    }
     if (m.shape !== 'data' && m.shape !== 'array') continue;
     if (m.name === null) return null;
+    flush();
     const r = resolveType(m.type, env);
     if (r.type === null) return null;
     out.push(`(${m.name} ${emitType(r.type, 'field')})`);
   }
+  flush();
   return out;
 }

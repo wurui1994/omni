@@ -16,6 +16,21 @@ export const WORD_TYPES = {
   void: { k: 'void' },
 };
 
+/**
+ * 整数那一族的**底宽**（位）。方言里它们一律是 `int`，宽度只在两处要用：
+ * 位域怎么挤成一格（见 `emit-agg.js` 那条规则）、以后的截断规则。
+ * 出处：jancy 的 `setupStdTypedef`（`jnc_ct_TypeMgr.cpp:1759-1782`）与那几个关键字的 TypeKind。
+ */
+export const INT_BITS = {
+  char: 8, short: 16, int: 32, long: 64, intptr: 64,
+  int8_t: 8, uint8_t: 8, utf8_t: 8, uchar_t: 8, byte_t: 8,
+  int16_t: 16, uint16_t: 16, utf16_t: 16, ushort_t: 16, word_t: 16,
+  int32_t: 32, uint32_t: 32, utf32_t: 32, dword_t: 32, uint_t: 32,
+  int64_t: 64, uint64_t: 64, ulong_t: 64, qword_t: 64,
+  size_t: 64, intptr_t: 64, uintptr_t: 64,
+};
+
+
 /** 标准 typedef 里"整数那一族"（`size_t` / `uint8_t` …）—— 方言里都是 int。 */
 export const STD_INT_TYPEDEFS = new Set([
   'uint_t', 'intptr_t', 'uintptr_t', 'size_t', 'int8_t', 'utf8_t', 'uint8_t', 'uchar_t',
@@ -91,6 +106,26 @@ function firstIdent(n) {
   for (const it of n.items.slice(1)) {
     const s = firstIdent(it);
     if (s !== null) return s;
+  }
+  return null;
+}
+
+/** 基类型是整数那一族时的**底宽**（位）；不是整数或认不出答 null。 */
+export function baseIntBits(t) {
+  if (t === null || t === undefined) return null;
+  const w = t.base.kind === 'word' ? t.base.text : nameText(t);
+  if (w === null || w === undefined) return null;
+  return INT_BITS[w] ?? null;
+}
+
+/** 位域那一格占几位（`uint8_t m_a : 4` 答 4）；不是位域答 null。 */
+export function bitfieldBits(t) {
+  const dcl = t?.raw?.dcl;
+  if (dcl === null || dcl === undefined || !Array.isArray(dcl.items)) return null;
+  for (const s of suffixChain(dcl.items[3])) {
+    if (s?.items?.[0]?.value !== 'bitfield') continue;
+    const n = Number(s.items[1]?.value);
+    return Number.isInteger(n) && n > 0 ? n : null;
   }
   return null;
 }
