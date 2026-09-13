@@ -157,6 +157,7 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [] }
   const out = [];
   /* 位域挤格子的状态：`bits` 是底宽、`used` 是已经占掉的位数。碰上非位域就**收口**。 */
   let pack = null;
+  let anonStructs = 0;                                             // union 体里第几个匿名 struct
   const flush = () => {
     if (pack !== null) { out.push(`($b${out.length} int)`); pack = null; }
   };
@@ -165,6 +166,20 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [] }
        带名字的嵌套类型不摊 —— 它是另一格类型，字段表里没有它。 */
     if (m.shape === 'nested-type') {
       const n = m.nested;
+      /* **union 自己体里的匿名 struct**：旧降级发的是 `($s0 <东家>$u0$s0)` 加单独一行
+         （166-unionnamed.jnc 的 `(union (m_value int) ($s0 Bits$u0$s0))`）。
+         `u0` 那一格是"这个 union 自己"，所以序号固定 0。 */
+      if (agg.word === 'union' && n !== null && n !== undefined
+        && n.word === 'struct' && nameText(n.name) === null) {
+        const j = anonStructs;
+        anonStructs += 1;
+        const nm2 = `${ctx.owner}$u0$s${j}`;
+        const f = ownFields(n, env, { ...ctx, owner: nm2 });
+        if (f === null) { out.push(null); return; }
+        ctx.extra?.push(`(struct ${nm2} ${f.join(' ')})`);
+        out.push(`($s${j} ${nm2})`);
+        return;
+      }
       if (n === null || n === undefined || n.word !== 'union') return;
       if (nameText(n.name) !== null) return;                        // 有名字的 union 不摊
       flush();
