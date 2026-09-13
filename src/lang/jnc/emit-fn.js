@@ -157,11 +157,10 @@ export function fnHead(m, env, ctx = { owner: null, self: null }) {
   const parts = [];
   const isStatic = m.storage.includes('static');
   /* `$this` 那一格看的是"有没有东家"，不是"写在类体里还是类外" —— 体外定义
-     （`int C0.get(){…}`）一样带（127-outerget.jnc 的 `(fn C0$get (($this (ptr C0))) int`）。 */
+     （`int C0.get(){…}`）一样带（127-outerget.jnc 的 `(fn C0$get (($this (ptr C0))) int`）。
+     `ctx.self` 为空就是"没有东家"（顶层函数、命名空间里的函数、`static` 那一格）。 */
   if (ctx.self !== null && ctx.self !== undefined && !isStatic) {
     parts.push(`($this ${ctx.self})`);
-  } else if (ctx.owner !== null && ctx.owner !== undefined && !isStatic) {
-    return { head: null, why: '东家那一格解不出来' };
   }
   /* 类那一族在方言里写的是**连通块的根**（`(ptr 根)`，第五十六刀的 clsRoot）——
      53-inherit.jnc 的 `pick(int, Dog*, Puppy*)` 旧降级发的是三格 `(ptr Animal)`。

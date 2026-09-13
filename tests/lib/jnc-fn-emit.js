@@ -89,11 +89,19 @@ for (const f of files) {
   const env = new Map();
   const aggs = [];
   const tops = [];                                   // 顶层的函数（fn-def / fn-proto）
-  const scan = (n, owner) => {
+  const scan = (n, owner, inAgg) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
     let inner = owner;
-    if (h === 'agg') {
+    let agg = inAgg;
+    if (h === 'namespace') {
+      /* **命名空间只是名字的前缀**（第五十一刀）：`namespace a { int bump(){} }` 旧降级发的是
+         `(fn a$bump …)`，套起来的是 `a$b$deep`（48-namespace.jnc 的真输出）。 */
+      const nn = named(n);
+      const nm = nn === null ? null : nameText(nn.name);
+      if (nm !== null) inner = owner === null ? nm : `${owner}$${nm}`;
+      agg = false;
+    } else if (h === 'agg') {
       const a = readAgg(n);
       if (a !== null) {
         aggs.push(a);
@@ -102,6 +110,7 @@ for (const f of files) {
           const emitName = owner === null ? nm : `${owner}$${nm}`;
           a.emitName = emitName;
           inner = emitName;
+          agg = true;
           env.set(nm, {
             kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
             name: emitName,
@@ -110,13 +119,18 @@ for (const f of files) {
         }
       }
     } else if (h === 'fn-def' || h === 'fn-proto') {
-      if (owner === null) {
+      if (!inAgg) {
         const nm = named(n);
         const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
         const sp = nm === null ? null : readSpecs(nm.specs);
         if (t !== null) {
           tops.push({
-            name: t.name, type: t, shape: t.shape, storage: sp === null ? [] : sp.words, at: n,
+            name: t.name,
+            type: t,
+            shape: t.shape,
+            storage: sp === null ? [] : sp.words,
+            at: n,
+            ns: owner,                                   // 命名空间那一段前缀（没有就 null）
           });
         }
       }
@@ -147,9 +161,9 @@ for (const f of files) {
       const nm = e === null ? null : nameText(e.name);
       if (nm !== null) env.set(nm, { kind: 'enum', name: nm });
     }
-    for (const it of n.items) scan(it, inner);
+    for (const it of n.items) scan(it, inner, agg);
   };
-  scan(tree, null);
+  scan(tree, null, false);
   collectEnumConsts(tree, env);
 
   /** 一格聚合体的 `$this` 怎么写（类 → `(ptr 连通块的根)`，结构体/union → `(ptr S)`）。 */
@@ -184,11 +198,18 @@ for (const f of files) {
     if (m.shape !== 'fn') continue;
     if (m.name === 'main') continue;                  // 旧降级不发它（体被抬走了）
     const mm = { ...m, storage: m.storage ?? [] };
-    /* **体外定义**（`int C0.get(){…}`）：名字是点串，东家是头一段 —— `$this` 要它。 */
+    /* **体外定义**（`int C0.get(){…}`）：名字是点串，东家是点串里**最后一格能解成聚合体**的
+       那一段 —— `C1.p.get` 的 `p` 是属性、东家是 `C1`；`a.Cls.f` 的东家是 `Cls`。 */
     const segs = m.name === null ? fnOwnerSegs(mm) : null;
-    const host = segs === null || segs.length === 0 ? undefined : env.get(segs[0]);
-    const self = host !== undefined && host.agg !== undefined ? selfOf(host.agg) : null;
-    cases.push({ m: mm, ctx: { owner: null, self } });
+    let host;
+    for (let i = (segs === null ? -1 : segs.length - 1); i >= 0; i -= 1) {
+      const rec = env.get(segs[i]);
+      if (rec !== undefined && rec.agg !== undefined) { host = rec; break; }
+    }
+    const self = host !== undefined ? selfOf(host.agg) : null;
+    /* 点串的头一段不是聚合体时（`g_p.get()` 那种**顶层属性**的取/存）本来就没有 `$this`
+       —— 旧降级发的是 `(fn g_p$get () int`（107-psetexpr.jnc）。 */
+    cases.push({ m: mm, ctx: { owner: m.ns ?? null, self } });
   }
 
   /* **重载的号**按声明次序发（`q` / `q$o1` / …）—— 拼不出来的那几格照样占一个号，
