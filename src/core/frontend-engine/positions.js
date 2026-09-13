@@ -181,7 +181,10 @@ export function diff(spec, measured) {
     if (c === undefined) { out.push({ sort, kind, want: '（表里没有）', got, why: m.why }); continue; }
     if (c.verdict === 'todo') continue;                 // 还没定的格不算分歧，算清单
     if (got === 'crash') { out.push({ sort, kind, want: c.verdict, got, why: m.why }); continue; }
-    if (c.verdict !== got) { out.push({ sort, kind, want: c.verdict, got, why: m.why }); continue; }
+    /* `syntax-todo` 与 `syntax` 量出来是同一种（语法不认）—— 差别在**账**：前者是我们的洞、
+       后者是这门语言的规格。所以对账时把它们看成一回事。 */
+    const same = c.verdict === got || (c.verdict === 'syntax-todo' && got === 'syntax');
+    if (!same) { out.push({ sort, kind, want: c.verdict, got, why: m.why }); continue; }
     /* 结论对上了，还要问一句**理由对不对**（ADR-0029 的 R5）：拒绝那两类要能在实际发出的
        那句话里认出**声明的那个账号**。这一步抓的是"结论对、话说错"——第 248/251/253 刀
        那三条"认错人"就是这一类，而先前只比结论是抓不住它们的。

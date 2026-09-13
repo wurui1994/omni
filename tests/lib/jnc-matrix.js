@@ -104,6 +104,10 @@ const KINDS = [
   ['dylib', 'dylib ProbeLib { int probeDl(int); }', 'x'],
   ['field-thin-ptr', 'int thin* m_tp;', 'x'],
   ['field-array-dyn', 'int m_ad[];', 'x'],
+  /* 泛型实例当**表达式**用（`Boxy<int>(4)`）：语料里 unit_stdt_BoxList.jnc:42 那一句
+     （`BoxIterator<int>(list.m_head)`）就是它，而且是那份文件**唯一**的拦路项。
+     声明位置上的 `Boxy<int> b;` 早就收了 —— 差的只是表达式那一处。 */
+  ['template-ctor-expr', 'Boxy<int> m_bx = Boxy<int>(4);', 'x'],
 ];
 
 /* ---------------------------------------------------------------- 位置表
@@ -112,6 +116,14 @@ const KINDS = [
  * 那几个名字本身不是被量的东西，缺了它们每一格都会多一条"没有这个类型"的噪音。 */
 const PRE = `class Helper {
 	int m_hv;
+}
+
+struct Boxy<T> {
+	T m_v;
+
+	construct(T v) {
+		m_v = v;
+	}
 }
 
 int probeFn(int a) {

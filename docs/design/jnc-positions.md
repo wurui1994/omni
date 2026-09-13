@@ -8,7 +8,7 @@
 - `N…` 前端自己说的边界（"还不收"）
 - `E…` 普通错 —— **这一栏是下一刀的料**：话对不对、认不认错人，都在这儿看
 
-位置 9 × 要素 53 = 477 格：✓ 232、N 207、E 26、· 12、炸 0
+位置 9 × 要素 54 = 486 格：✓ 232、N 207、E 26、· 21、炸 0
 
 | 要素 | module | namespace | class-body | struct-body | union-body | opaque-class-body | fn-body | property-body | extension-body |
 |---|---|---|---|---|---|---|---|---|---|
@@ -65,6 +65,7 @@
 | dylib | ✓ | ✓ | N10 | N18 | N21 | N10 | N22 | N27 | N29 |
 | field-thin-ptr | ✓ | ✓ | ✓ | ✓ | N20 | ✓ | ✓ | N26 | N29 |
 | field-array-dyn | E9 | E9 | E12 | E12 | N20 | E12 | E9 | N7 | N29 |
+| template-ctor-expr | · | · | · | · | · | · | · | · | · |
 
 ## 名字落在哪（`escapes`）
 

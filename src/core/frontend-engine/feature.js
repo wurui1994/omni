@@ -21,8 +21,16 @@
 //   3. **依赖显式**：特性可以 `requires` 另一个特性（`property-full` 要 `properties`），
 //      缺了就抛错 —— 于是"这门语言由哪些特性拼成"是一张能读的清单，不是隐式的调用图。
 
-/** 一格结论的四种取值。`todo` 是**合法**的：它说"这一格还没定"，会被一致性检查列成清单。 */
-export const VERDICTS = new Set(['ok', 'refuse', 'error', 'syntax', 'todo']);
+/**
+ * 一格结论的取值。两个要说明的：
+ *
+ *   `todo`         这一格**还没定**（合法：一致性检查会把它列成清单）
+ *   `syntax-todo`  语法就不认，**而且那是我们的洞** —— 这门语言里写得出来，是我们的语法还没收。
+ *                  与 `syntax`（"这门语言里本来就写不出来"，那是规格）分开，因为先前两种混在
+ *                  一栏里，害得"我以为语言不支持"被当成了规格（见 ADR-0029 第 10.16 节那三次
+ *                  探针 bug）。`syntax-todo` 必须带账号 —— 它是一笔账。
+ */
+export const VERDICTS = new Set(['ok', 'refuse', 'error', 'syntax', 'syntax-todo', 'todo']);
 
 /**
  * 一条位置声明：
@@ -36,7 +44,8 @@ function normRows(name, rows) {
     if (!VERDICTS.has(r.verdict)) {
       throw new Error(`特性 ${name}：'${r.kind}' 的结论 '${r.verdict}' 不是那五种之一`);
     }
-    if ((r.verdict === 'refuse' || r.verdict === 'error') && r.account === undefined) {
+    if ((r.verdict === 'refuse' || r.verdict === 'error' || r.verdict === 'syntax-todo')
+      && r.account === undefined) {
       throw new Error(`特性 ${name}：'${r.kind}' 拒了却没给账号（account）`);
     }
     const sorts = r.sorts === '*' ? '*' : [...r.sorts];
