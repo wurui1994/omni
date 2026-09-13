@@ -23,7 +23,7 @@ import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import {
   fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
   isBindableData, dataAccessorHeads, isAutogetProp, autogetGetterHead,
-  isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead, overloadSuffix, aliasHead, setterParamType,
+  isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead, overloadSuffix, aliasHead, setterParamType, reactorBodyHeads,
 } from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
@@ -573,7 +573,11 @@ for (const f of files) {
   for (const c of cases) {
     /* **reactor** 那一格发的是 `$start` / `$stop` 两格（82-reactor.jnc）—— 各自与旧降级对。 */
     if (isReactor(c.m)) {
-      for (const h of reactorHeads(c.m, c.ctx).heads) {
+      const sym0 = fnName(c.m) === null ? null
+        : (c.ctx.owner === null || c.ctx.owner === undefined
+          ? fnName(c.m) : `${c.ctx.owner}$${fnName(c.m)}`);
+      const bodyHeads = sym0 === null ? [] : reactorBodyHeads(c.m, sym0, c.ctx.self).heads;
+      for (const h of reactorHeads(c.m, c.ctx).heads.concat(bodyHeads)) {
         mineNames.add(h.name);
         const wantR = oracle.get(h.name);
         if (wantR === undefined) { noFn += 1; noFnAt.push(`${f.split('/').pop()}　${h.name}`); continue; }

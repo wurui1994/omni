@@ -398,6 +398,30 @@ export function setterParamType(setter) {
   return fs[0].type;
 }
 
+
+/**
+ * **reactor 的体**：一条语句一格函数（第八十五刀"一条语句一格反应"）。序号在**整个体上**
+ * 数一遍：`onevent` 那一条落成 `$e<i>`、别的落成 `$r<i>`。真输出（82-reactor.jnc）：
+ *   `(fn Sess$m_uiReactor$r0 (($this (ptr Sess))) void`（体的第 0 条是赋值）
+ *   `(fn Sess$m_uiReactor$e1 (($this (ptr Sess))) void`（第 1 条是 onevent）
+ *   `(fn g_r$r0 () void` / `(fn g_r$r1 () void`（顶层那一格没有 `$this`）
+ */
+export function reactorBodyHeads(m, sym, self) {
+  const body = named(m?.at)?.body;
+  if (headOf(body) !== 'compound') return { heads: [], why: '这一格 reactor 没有体' };
+  const nm = named(body);
+  const ps = self === null || self === undefined ? '' : `($this ${self})`;
+  const heads = [];
+  let i = 0;
+  for (const st of allInChain(nm.body, 'unit-add', 'unit')) {
+    const tag = headOf(st) === 'onevent' ? 'e' : 'r';
+    const name = `${sym}$${tag}${i}`;
+    heads.push({ name, head: `(fn ${name} (${ps}) void` });
+    i += 1;
+  }
+  return { heads, why: null };
+}
+
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */
 function leafName(leaf) {
   if (leaf.kind === 'special') return SPECIAL_NAMES[leaf.text] ?? null;
