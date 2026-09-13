@@ -22,9 +22,6 @@ export class ParseError extends Error {
   }
 }
 
-/** 块的结束记号（谁都不吃它们，由外层的 `syn` 吃）。 */
-const BLOCK_END = new Set(['end', 'else', 'elseif', 'until']);
-
 class P {
   constructor(src, lang) {
     this.lang = lang;
@@ -162,7 +159,13 @@ class P {
   // ── 2. parseHole：按洞的类别去要东西 ─────────────────────────────────────
   hole(it) {
     const cls = it.cls;
-    if (cls === 'block') return this.block();
+    if (cls === 'block') {
+      /* 块洞：`block` 节点的 `syn` 若只是"一串语句"（Lua：`do`/`end` 由外层的 syn 吃），
+         就直接收语句；带括号的（C 系的 `{ … }`）照它自己的 `syn` 走。 */
+      const bn = this.lang.NODE.get('block');
+      const bare = bn !== undefined && bn.syn.length === 1 && bn.syn[0].b !== undefined;
+      return bare ? this.block() : this.matchSyn(bn);
+    }
     if (cls === 'funcbody') return this.matchSyn(this.lang.NODE.get('funcbody'));
     if (cls === 'field') return this.field();
     if (cls === 'exp') return this.exp(0);
@@ -286,7 +289,7 @@ class P {
   block() {
     const stats = [];
     for (;;) {
-      if (this.cur.kind === 'eof' || BLOCK_END.has(this.cur.value)) break;
+      if (this.cur.kind === 'eof' || this.lang.blockEndSet.has(this.cur.value)) break;
       if (this.is(';')) { this.take(';'); continue; }
       const st = this.stat();
       stats.push(st);
@@ -320,7 +323,7 @@ class P {
   /** 一条语句该在哪儿收：块尾、`;`、或者下一个记号能起一条语句。 */
   statBoundary() {
     const t = this.cur;
-    if (t.kind === 'eof' || BLOCK_END.has(t.value) || t.value === ';') return true;
+    if (t.kind === 'eof' || this.lang.blockEndSet.has(t.value) || t.value === ';') return true;
     return this.lang.LEAD.has(t.value) || t.kind === 'name' || t.value === '(';
   }
 }

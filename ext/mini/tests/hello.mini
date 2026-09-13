@@ -1,0 +1,9 @@
+// mini 的样子：公共节点库拼出来的一门语言
+let x = 1;
+x = x + 2 * 3;
+print x;
+if (x > 5) { print 1; } else { print 0; }
+let s = "hi";
+print s;
+let n = 3;
+while (n > 0) { print n; n = n - 1; }

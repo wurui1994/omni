@@ -1,0 +1,8 @@
+{
+  "name": "mini",
+  "version": "0.1.0",
+  "doc": "C 系的小语言：公共节点库的第一个消费方（原样用 15 格、改 0 格、只加 let/print 两格）",
+  "entry": "omni-lang.js",
+  "register": "registerMiniExt",
+  "provides": { "exts": [".mini"], "caps": ["mini.toSx"] }
+}

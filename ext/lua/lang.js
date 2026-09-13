@@ -25,6 +25,7 @@ export const luaLang = defineLang({
   subclass: LUA_SUBCLASS,
   nodes: LUA_NODES,
   tokens: LUA_TOKENS,
+  blockEnd: ['end', 'else', 'elseif', 'until'],
   scope: LUA_SCOPE,
   ctx: LUA_CTX,
   yields: LUA_YIELDS,

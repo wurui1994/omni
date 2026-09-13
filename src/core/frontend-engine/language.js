@@ -15,6 +15,9 @@ function derive(lang) {
   lang.OP = new Map(lang.ops.map((o) => [o.name, o]));
   lang.opNames = new Set(lang.ops.map((o) => o.name));
   lang.keywordSet = new Set(lang.keywords);
+  /* 语句串到哪儿收：Lua 是 `end`/`else`/`elseif`/`until`，C 系是 `}` —— 一格数据，
+     不是驱动器里写死的一张表（先前就是写死的，于是别的语言的块压根收不住）。 */
+  lang.blockEndSet = new Set(lang.blockEnd);
   // 标点与符号算符按长度倒排 —— 最长匹配靠这一格，不靠扫描器里的分支。
   lang.symbols = [...new Set([...lang.punct, ...lang.ops.filter((o) => o.word !== true).map((o) => o.name)])]
     .sort((a, b) => b.length - a.length);
@@ -81,7 +84,7 @@ function check(lang) {
 export function defineLang({
   name, keywords = [], ops = [], punct = [], unaryPrec, classes = [], subclass = {},
   nodes = [], numSuffix, doc = '', tokens = null, start = 'block', str, ident,
-  scope = {}, ctx = {}, yields = {},
+  scope = {}, ctx = {}, yields = {}, blockEnd = [],
 }) {
   /* 记号规则表**没有默认值**：那是语言自己的事（先前这儿默认成了 Lua 那张表 ——
      一份 SDK 不该知道有 Lua 这门语言）。 */
@@ -90,7 +93,7 @@ export function defineLang({
     name, doc, keywords: [...keywords], ops: [...ops], punct: [...punct], unaryPrec,
     classes: [...classes], subclass: { ...subclass }, nodes: [...nodes], numSuffix,
     tokens, start, str, ident,
-    scope: { ...scope }, ctx: { ...ctx }, yields: { ...yields },
+    scope: { ...scope }, ctx: { ...ctx }, yields: { ...yields }, blockEnd: [...blockEnd],
   }));
 }
 
@@ -141,6 +144,7 @@ export function extend(base, delta) {
     scope: { ...base.scope, ...(delta.scope ?? {}) },
     ctx: { ...base.ctx, ...(delta.ctx ?? {}) },
     yields: { ...base.yields, ...(delta.yields ?? {}) },
+    blockEnd: [...new Set([...base.blockEnd, ...(delta.blockEnd ?? [])])],
   });
 }
 
