@@ -11732,6 +11732,21 @@ C1.static construct() {
 - 逐份那张榜：`未声明的变量` `82 -> 81`、`(文件, 拦路项)` 对 `3489 -> 3488`（−1）——
   少得可以：那几组里**还有别的**未声明的名字（成组编之后一组只算一对），照实记。
 
+### 第二百五十七刀（一刀量法）：ioninja 的 `-I` 里加上 `plugins`
+
+榜上一串 `import "SocketLog/SocketLogRecordCode.jnc"（… 都找不着它）`（14 + 6 + 6 + 5 + 4 +
+4 + 3 + 3 …）。那些路径是相对**插件根目录**算的（`test/ioninja/plugins/`，CMakeLists.txt 就是
+这么给的），而 `IONINJA_INCS` 那张表里只有 `api` / `common` / `protocols` / `packets` 四个。
+
+跟着这条来的还有一批：`没有这个类型` 与
+`'log.Writer.write' 的同元重载：第 1 个实参的类型这一层还得先降一遍才知道`
+（iox_FpgaUploader.jnc:133 那处的实参正是 `FpgaUploaderLogRecordCode.FirmwareUploadCancelled`
+—— 那个枚举就在找不着的那份文件里）。全是**量法的噪音**。
+
+- 那一族 `import "…"（找不着它）` 的行**整行没了**（十几行，合 50 多对）。
+- `(文件, 拦路项)` 对 `3488 -> 3469`（−19）、`未声明的变量` `81 -> 80`；
+  lowered 59、clean 90 没动。
+
 
 
 

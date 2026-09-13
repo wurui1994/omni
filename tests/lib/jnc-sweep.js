@@ -98,7 +98,13 @@ const EXT_INCS = (() => {
 /* ioninja 那一支自己那三个目录同理（它的 CMakeLists.txt 就是把 api + common + 各协议一起编的）：
    `log_ChecksumCalc.jnc` / `ui_StdSessionInfoSet.jnc` 在 common/、`io_Modbus.jnc` 在 protocols/、
    包模板在 packets/。 */
-const IONINJA_INCS = ['api', 'common', 'protocols', 'packets']
+/* 第二百五十七刀（一刀量法）：`plugins` 也进这张表。那些插件里写着
+   `import "SocketLog/SocketLogRecordCode.jnc"` —— 路径是相对**插件根目录**算的
+   （CMakeLists.txt 就是这么给的），而先前这张表里只有 4 个目录，于是榜上一串
+   `import "…"（… 都找不着它）`（14 + 6 + 6 + 5 + 4 + 4 + 3 + 3 …），以及跟着它来的
+   `没有这个类型` / `同元重载：第 N 个实参的类型这一层还得先降一遍才知道`（那几处的实参
+   正是那些找不着的枚举成员）—— 全是**量法的噪音**。 */
+const IONINJA_INCS = ['api', 'common', 'protocols', 'packets', 'plugins']
   .map((x) => join(JANCY, 'test', 'ioninja', x))
   .filter((d) => existsSync(d));
 const incFlags = (extra) => [...extra, ...EXT_INCS].flatMap((d) => ['-I', d]);
