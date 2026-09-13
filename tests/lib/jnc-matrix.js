@@ -53,10 +53,10 @@ const KINDS = [
   ['field-int', 'int m_i;', 'x'],
   ['field-string', 'string_t m_s;', 'x'],
   ['field-array', 'int m_a[4];', 'x'],
-  ['field-static', 'static int m_st;', 'x'],
-  ['field-const', 'int const m_c;', 'x'],
+  ['field-static', 'static int m_st;', 'x', undefined, 'int m_st;'],
+  ['field-const', 'int const m_c;', 'x', undefined, 'int m_c;'],
   ['field-bitfield', 'int m_b : 3;', 'x'],
-  ['field-bigendian', 'bigendian uint16_t m_be;', 'x'],
+  ['field-bigendian', 'bigendian uint16_t m_be;', 'x', undefined, 'uint16_t m_be;'],
   ['field-class-value', 'Helper m_h;', 'x'],
   ['field-class-ptr', 'Helper* m_hp;', 'x'],
   ['struct', 'struct Nested { int m_n; }', 'x', 'Nested v;'],
@@ -81,9 +81,9 @@ const KINDS = [
   ['destruct', 'destruct() { }', 'x'],
   ['operator-add', 'int operator + (int v) { return v; }', 'x'],
   ['operator-assign', 'int operator := (int v) { return v; }', 'x'],
-  ['property-simple', 'int autoget property m_p;', 'x'],
+  ['property-simple', 'int autoget property m_p;', 'x', undefined, 'int m_p;'],
   ['property-full', 'int property m_fp { get { return 1; } set(int v) { } }', 'x'],
-  ['property-bindable', 'int bindable autoget property m_bp;', 'x'],
+  ['property-bindable', 'int bindable autoget property m_bp;', 'x', undefined, 'int m_bp;'],
   ['event', 'event m_onDone();', 'x'],
   ['reactor', 'reactor m_r { }', 'x'],
   ['local-var', 'int v = 1;', 'v'],
@@ -102,7 +102,7 @@ const KINDS = [
   ['enum-typed', 'enum Small: uint16_t { S1, S2 }', 'x'],
   ['property-indexed', 'int property m_ip(int i);', 'x'],
   ['dylib', 'dylib ProbeLib { int probeDl(int); }', 'x'],
-  ['field-thin-ptr', 'int thin* m_tp;', 'x'],
+  ['field-thin-ptr', 'int thin* m_tp;', 'x', undefined, 'int* m_tp;'],
   ['field-array-dyn', 'int m_ad[];', 'x'],
   /* 泛型实例当**表达式**用（`Boxy<int>(4)`）：语料里 unit_stdt_BoxList.jnc:42 那一句
      （`BoxIterator<int>(list.m_head)`）就是它，而且是那份文件**唯一**的拦路项。
@@ -116,11 +116,11 @@ const KINDS = [
   ['class-multi-base', 'class MultiC: Helper, Helper2 { int m_mv; }', 'x'],
   ['disposable-class', 'disposable class DispC { int m_dv; }', 'x'],
   /* 第四轮： */
-  ['method-const', 'int probeCn() const { return 8; }', 'x'],
+  ['method-const', 'int probeCn() const { return 8; }', 'x', undefined, 'int probeCn() { return 8; }'],
   ['property-static', 'static int autoget property m_sp;', 'x'],
   ['field-weak-ptr', 'Helper weak* m_wp;', 'x'],
   ['fn-async', 'async int probeAs() { return 1; }', 'x'],
-  ['fn-unsafe', 'unsafe int probeUs() { return 2; }', 'x'],
+  ['fn-unsafe', 'unsafe int probeUs() { return 2; }', 'x', undefined, 'int probeUs() { return 2; }'],
   ['attribute-decl', '[probeAttr = 1] int m_at;', 'x'],
 ];
 
@@ -223,6 +223,22 @@ function classify(err, code) {
   return code === 0 ? { k: 'ok', why: '' } : { k: 'E', why: `退出码 ${code}，没有诊断` };
 }
 
+/**
+ * 把那一格降出来的 `.sx` 拿回来（跑得过才有；跑不过回 null）。
+ * 第三问要用它：**修饰词有没有被悄悄丢掉**（ADR-0029 第 10.21 节那条界）。
+ */
+function sxOf(sort, kind, src) {
+  const p = join(OUT_DIR, `${sort}__${kind}.jnc`);
+  writeFileSync(p, src);
+  try {
+    return execFileSync(process.execPath, [cli, 'sx', p, '-I', OUT_DIR], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], cwd: root,
+    });
+  } catch {
+    return null;
+  }
+}
+
 function runOne(sort, kind, src) {
   const p = join(OUT_DIR, `${sort}__${kind}.jnc`);
   writeFileSync(p, src);
@@ -248,6 +264,10 @@ writeFileSync(join(OUT_DIR, 'imports', 'probeimp.jnc'), 'int probeImported() {\n
 const sorts = SORTS.filter(([s]) => only === null || s === only);
 const cells = new Map();          // `${sort}|${kind}` -> {k, why, esc?}
 const escOf = new Map(KINDS.filter((r) => r[3] !== undefined).map((r) => [r[0], r[3]]));
+/* 第五格（可选）是**"把修饰词去掉"的那一句**：降出来的 sx 与原样一模一样，就说明那几个词
+   在这一层被悄悄丢掉了（第二百六十六刀就是这么冒出来的：union 里的 `static` / `property`）。
+   有些词丢了是**对的**（比如 `const` 只在编译期管事），所以这一列的期望写在规格里（`trace`）。 */
+const bareOf = new Map(KINDS.filter((r) => r[4] !== undefined).map((r) => [r[0], r[4]]));
 const tally = { ok: 0, N: 0, E: 0, syn: 0, crash: 0 };
 const t0 = Date.now();
 for (const [sort, wrap] of sorts) {
@@ -256,6 +276,13 @@ for (const [sort, wrap] of sorts) {
     /* 这一格收得下，再问一句**名字落在哪**：把"在模块顶层用一下它"那句接在后面再编一遍。
        编得过 = 漏到了模块顶层。这是 Phase 3 要的那一列（谁登记、登记到哪层）的第一半，
        而且是**量出来的**，不是我说的。 */
+    /* 第三问：修饰词留下痕迹了吗（见 bareOf 那段注）。 */
+    const bare = bareOf.get(kind);
+    if (r.k === 'ok' && bare !== undefined) {
+      const a = sxOf(sort, `${kind}__with`, wrap(elem));
+      const b = sxOf(sort, `${kind}__bare`, wrap(bare));
+      if (a !== null && b !== null) r.trace = a !== b;
+    }
     const out = escOf.get(kind);
     if (r.k === 'ok' && out !== undefined) {
       const useFn = `int probeEscUse() {\n\t${out}\n\treturn 0;\n}\n`;
@@ -272,6 +299,9 @@ const kept = [...cells].filter(([, r]) => r.esc === false).map(([k]) => k);
 const secs = ((Date.now() - t0) / 1000).toFixed(1);
 process.stdout.write(`\n位置 ${sorts.length} × 要素 ${KINDS.length} = ${cells.size} 格`
   + `　ok ${tally.ok}、N ${tally.N}、E ${tally.E}、syn ${tally.syn}、炸 ${tally.crash}　${secs}s\n`);
+const noTrace = [...cells].filter(([, r]) => r.trace === false).map(([k]) => k);
+process.stdout.write(`修饰词**没留下痕迹**的：${noTrace.length} 格`
+  + `${noTrace.length > 0 ? `　→ ${noTrace.join('、')}` : ''}\n`);
 process.stdout.write(`名字漏到写它那层**外面**的：${escaped.length} 格（留在原处的 ${kept.length} 格）`
   + `${escaped.length > 0 ? `　→ ${escaped.join('、')}` : ''}\n`);
 
@@ -305,6 +335,12 @@ md.push(`位置 ${sorts.length} × 要素 ${KINDS.length} = ${cells.size} 格：
 md.push(`| ${head.join(' | ')} |`);
 md.push(`|${head.map(() => '---').join('|')}|`);
 for (const r of rows) md.push(`| ${r.join(' | ')} |`);
+md.push('', '## 修饰词留痕了吗（`trace`）', '',
+  '带修饰词的那几种要素还有第三问：**把那几个词去掉再降一遍，两份 sx 一样吗**。一样就说明',
+  '这一层把它们丢了。丢了不一定是错（`const` / `unsafe` 只在编译期管事），所以期望写在规格里 ——',
+  '这一问是"`ok` 只说明没诊断、不说明降对了"那条界的补救（ADR-0029 第 10.21 节）。', '');
+md.push(`没留下痕迹的：${noTrace.length} 格。`, '');
+for (const k of noTrace) md.push(`- \`${k}\` —— 那几个词降出来没留痕`);
 md.push('', '## 名字落在哪（`escapes`）', '',
   '带体的那几种要素还有第二问：**声明出来的名字，在写它的那层作用域外面认不认得**。',
   '量法是把"用一下那个名字"塞进后面一个函数体里再编一遍 —— 编得过就是漏出去了。',

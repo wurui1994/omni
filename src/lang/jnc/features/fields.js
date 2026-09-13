@@ -99,7 +99,7 @@ export default feature({
     { kind: 'field-static-init', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'field-static-init', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
     { kind: 'field-static-init', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
-    { kind: 'field-thin-ptr', sorts: PLAIN, verdict: 'ok' },
+    { kind: 'field-thin-ptr', sorts: PLAIN, verdict: 'ok', trace: true },
     { kind: 'field-thin-ptr', sorts: ['union-body'], verdict: 'refuse', account: 'F-002' },
     { kind: 'field-thin-ptr', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
     { kind: 'field-thin-ptr', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
@@ -121,11 +121,32 @@ export default feature({
     // 普通字段：除 union（表示宽度）与属性体 / extension 体（那两处各有自己的规矩）之外都收
     /* `static` 的那一格从 ALL 里拿出来单说：union 里它先前也是**悄悄降错**（`static` 被丢掉，
        降成一格进重叠区的普通字段 —— 而静态成员根本不在那段存储里）。 */
-    { kind: 'field-static', sorts: ALL.filter((x) => x !== 'union-body'), verdict: 'ok' },
+    /* `trace`（第三问，见 positions.js 的 diff）：模块 / 命名空间那两层上 `static` 与不写它
+       降出来一样（两种都是一格全局）—— **丢了是对的**；类 / 结构体 / opaque / 函数体里那几格
+       留了痕（静态成员不在实例里）。 */
+    {
+      kind: 'field-static',
+      sorts: ['module', 'namespace'],
+      verdict: 'ok',
+      trace: false,
+    },
+    {
+      kind: 'field-static',
+      sorts: ALL.filter((x) => x !== 'union-body' && x !== 'module' && x !== 'namespace'),
+      verdict: 'ok',
+      trace: true,
+    },
     { kind: 'field-static', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'field-static', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     { kind: 'field-static', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
-    ...['field-int', 'field-const', 'field-bigendian'].flatMap((kind) => [
+    /* `const` 只在编译期管事、`bigendian` 的痕迹在**访问点**上（探针只声明不读它）——
+       两个都**不留痕**，而且那是对的。 */
+    ...['field-const', 'field-bigendian'].flatMap((kind) => [
+      { kind, sorts: ALL, verdict: 'ok', trace: false },
+      { kind, sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+      { kind, sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
+    ]),
+    ...['field-int'].flatMap((kind) => [
       { kind, sorts: ALL, verdict: 'ok' },
       { kind, sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
       {

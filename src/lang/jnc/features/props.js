@@ -83,7 +83,9 @@ export default feature({
   positions: [
     // 简单声明式（autoget / bindable autoget）：类那一族与 union 收，结构体那一格欠着
     ...['property-simple', 'property-bindable'].flatMap((kind) => [
-      { kind, sorts: CLASSY, verdict: 'ok' },
+      /* 留痕（第三问）：`autoget property` 降出来多一格取值器函数 —— 与 union 那一格
+         （先前悄悄丢词）正好是一对照。 */
+      { kind, sorts: CLASSY, verdict: 'ok', trace: true },
       /* union 那一格先前记的是 `ok` —— 那是**悄悄降错**：量出来"一条诊断都没有"，可
          `autoget` / `property` 两个词在 union 那一遍里被丢了，降出来是一格普通字段。
          这一刀之后照实拒（T-003）。**账记在这儿**：矩阵的 `ok` 只说明"没诊断"，

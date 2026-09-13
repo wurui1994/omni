@@ -79,6 +79,43 @@
 | fn-unsafe | ✓ | ✓ | ✓ | ✓ | N27 | ✓ | N28 | N33 | ✓ |
 | attribute-decl | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N33 | N37 |
 
+## 修饰词留痕了吗（`trace`）
+
+带修饰词的那几种要素还有第三问：**把那几个词去掉再降一遍，两份 sx 一样吗**。一样就说明
+这一层把它们丢了。丢了不一定是错（`const` / `unsafe` 只在编译期管事），所以期望写在规格里 ——
+这一问是"`ok` 只说明没诊断、不说明降对了"那条界的补救（ADR-0029 第 10.21 节）。
+
+没留下痕迹的：28 格。
+
+- `module|field-static` —— 那几个词降出来没留痕
+- `module|field-const` —— 那几个词降出来没留痕
+- `module|field-bigendian` —— 那几个词降出来没留痕
+- `module|method-const` —— 那几个词降出来没留痕
+- `module|fn-unsafe` —— 那几个词降出来没留痕
+- `namespace|field-static` —— 那几个词降出来没留痕
+- `namespace|field-const` —— 那几个词降出来没留痕
+- `namespace|field-bigendian` —— 那几个词降出来没留痕
+- `namespace|method-const` —— 那几个词降出来没留痕
+- `namespace|fn-unsafe` —— 那几个词降出来没留痕
+- `class-body|field-const` —— 那几个词降出来没留痕
+- `class-body|field-bigendian` —— 那几个词降出来没留痕
+- `class-body|method-const` —— 那几个词降出来没留痕
+- `class-body|fn-unsafe` —— 那几个词降出来没留痕
+- `struct-body|field-const` —— 那几个词降出来没留痕
+- `struct-body|field-bigendian` —— 那几个词降出来没留痕
+- `struct-body|method-const` —— 那几个词降出来没留痕
+- `struct-body|fn-unsafe` —— 那几个词降出来没留痕
+- `union-body|field-const` —— 那几个词降出来没留痕
+- `union-body|field-bigendian` —— 那几个词降出来没留痕
+- `opaque-class-body|field-const` —— 那几个词降出来没留痕
+- `opaque-class-body|field-bigendian` —— 那几个词降出来没留痕
+- `opaque-class-body|method-const` —— 那几个词降出来没留痕
+- `opaque-class-body|fn-unsafe` —— 那几个词降出来没留痕
+- `fn-body|field-const` —— 那几个词降出来没留痕
+- `fn-body|field-bigendian` —— 那几个词降出来没留痕
+- `extension-body|method-const` —— 那几个词降出来没留痕
+- `extension-body|fn-unsafe` —— 那几个词降出来没留痕
+
 ## 名字落在哪（`escapes`）
 
 带体的那几种要素还有第二问：**声明出来的名字，在写它的那层作用域外面认不认得**。

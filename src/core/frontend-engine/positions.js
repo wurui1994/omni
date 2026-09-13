@@ -203,6 +203,19 @@ export function diff(spec, measured) {
       });
       continue;
     }
+    /* 第三问：**修饰词留下痕迹了吗**（`trace`）。量法是把那几个词去掉再降一遍，两份 sx
+       一模一样就说明这一层把它们丢了（jnc-matrix 的第五格）。丢了不一定是错 —— `const` /
+       `unsafe` 那几个只在编译期管事 —— 所以期望写在规格里；**改了就是一条测试失败**。
+       这一问是第 10.21 节那条界的补救：`ok` 只说明"没诊断"，不说明"降对了"。 */
+    if (c.trace !== undefined && m.trace !== undefined && c.trace !== m.trace) {
+      out.push({
+        sort,
+        kind,
+        want: `${got}/修饰词${c.trace ? '留痕' : '不留痕'}`,
+        got: `${got}/修饰词${m.trace ? '留痕了' : '没留痕'}`,
+      });
+      continue;
+    }
     if (c.verdict !== 'refuse' && c.verdict !== 'error') continue;
     const acc = spec.accounts.get(c.account);
     if (acc === undefined) continue;

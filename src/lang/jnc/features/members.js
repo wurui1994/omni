@@ -215,6 +215,9 @@ export default feature({
         sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body',
           'extension-body'],
         verdict: 'ok',
+        /* 这两个词只在**编译期**管事（`const` 说的是"这个方法不改 this"、`unsafe` 关的是
+           指针检查），降出来与不写它一模一样 —— 不留痕是对的（第三问，见 positions.js）。 */
+        trace: false,
       },
       { kind, sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
       { kind, sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
