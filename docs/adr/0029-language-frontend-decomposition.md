@@ -650,3 +650,28 @@ const / global / uniform / in / out / 内建那几档，而且这几档的存法
 - 还欠 Phase 3 的后半截：模块 / 命名空间 / 类体那三处登记遍（`nsFlat` 那一族）也照这个样子
   读表 —— 它们比 `fn-body` 那一列宽（还要管 fn-def / var-decl / 属性那几族），所以要先把
   `typeKindOf` 扩成完整的 `kindOf`。
+
+### 10.15 尺子宽了六列，当场量出两笔账；其中一笔当刀落了
+
+矩阵是**机械枚举**，所以"表里少一种要素"本身就是一笔账。这一轮补了 7 列（41 → 47 要素、
+423 格）：匿名 struct、嵌套 `namespace`、`opaque class`、`virtual` 方法、`abstract` 原型、
+函数指针字段、`multicast`。一量就出结果：
+
+- 两个**新账号**：M-007（`virtual` / `abstract` 只能写在类的方法上 —— 这一句是**对的**，
+  jancy 同：虚派发要对象头那格类型标签）、M-008（结构体的方法上写 `virtual`，话说得更准）。
+- 一格**疑似洞**：`abstract int f();` 写在**模块顶层**我们收了，而 jancy 只允许在类里
+  （type_class.rst:178）。规格里照实记 `ok` + note，不假装它对。
+- 一格**认错人**，当刀落了：`fn-body × method-abstract` 先前报 M-007（"只能写在类的方法上"），
+  真身与 `bool errorcode f(int);`（第二百六十二刀）一样 —— **函数体里写了个原型**。
+  改法与那一刀逐字同：`localDecl` 里 `specs` 收下 `virtual` / `abstract` 往下走
+  （`allowVirt: true`），落到"声明符上带括号"那句同时说两种读法（S-003）；写在**没有形参表**
+  的局部量上时（`virtual int v = 1;`）照旧报 M-007 —— 那时那句话是对的。
+  新墙 `bad/local-abstract-proto`（jnc 腿 345 → 346）。
+- 又抓出一格**探针自己的 bug**：`int function* m_fnp;` 少了形参表，量出来那句 E 是**对的**
+  诊断（补成 `int function* m_fnp(int);` 之后七格全绿）—— 与 bitflag 那次同一类。
+
+这一节想说的就一句话：**刀是读表挑出来的**。语料榜量"语料里真写了什么"，矩阵量"规格里可能
+写什么"——这一刀语料里没人写（榜 `3430` 一个数没动），可它是一句认错人的话，而认错人的话
+会把后面每一笔账都记歪。
+
+- 腿：`NOCACHE=1` 的 jnc 555 次全真跑 346/0；矩阵 423/423 分歧 0、todo 0、缺声明 0（26 个账号）。

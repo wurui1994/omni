@@ -8,7 +8,7 @@
 - `N…` 前端自己说的边界（"还不收"）
 - `E…` 普通错 —— **这一栏是下一刀的料**：话对不对、认不认错人，都在这儿看
 
-位置 9 × 要素 47 = 423 格：✓ 214、N 183、E 14、· 12、炸 0
+位置 9 × 要素 47 = 423 格：✓ 214、N 184、E 13、· 12、炸 0
 
 | 要素 | module | namespace | class-body | struct-body | union-body | opaque-class-body | fn-body | property-body | extension-body |
 |---|---|---|---|---|---|---|---|---|---|
@@ -56,7 +56,7 @@
 | namespace | ✓ | ✓ | N9 | N15 | N18 | N9 | N19 | N24 | N26 |
 | class-opaque | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N24 | N26 |
 | method-virtual | E8 | E8 | ✓ | N16 | N18 | ✓ | N19 | N24 | ✓ |
-| method-abstract | ✓ | ✓ | ✓ | E8 | E8 | ✓ | E8 | N23 | N26 |
+| method-abstract | ✓ | ✓ | ✓ | E8 | E8 | ✓ | N20 | N23 | N26 |
 | field-fnptr | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | N23 | N26 |
 | field-multicast | ✓ | ✓ | ✓ | N13 | ✓ | ✓ | N20 | N7 | N26 |
 

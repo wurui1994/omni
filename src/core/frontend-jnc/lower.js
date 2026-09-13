@@ -10550,7 +10550,12 @@ class JncLower {
        `bool errorcode f(int);` 时真身是"体里写了个函数原型"，与 errorcode 这个词无关 ——
        先前 specs 那一句先炸出"'errorcode' 只能写在函数上"，把话说到了别处。
        收下之后由下面那条"声明符上带括号"的话接（它才是这一格真正的账）。 */
-    const sp = this.specs(n.items[1], false, [], true);
+    /* `allowVirt` 给 true（这一刀）：`abstract int f();` 写在函数体里时，先前 specs 拿
+       "'abstract' 只能写在类的方法上"把它挡掉了 —— 那是**认错人**（矩阵 `fn-body ×
+       method-abstract` 那一格量出来是 E/M-007）。真身与 `errorcode`（第二百六十二刀）一样：
+       函数体里写了个原型。所以收下这几个词往下走，让底下"声明符上带括号"那一句同时说两种
+       读法（S-003）；写在**没有形参表**的量上时照旧报 M-007，见下面那一问。 */
+    const sp = this.specs(n.items[1], true, [], true);
     /* 说明符那一句就没成（第二百三十五刀）：诊断已经发过一次了，可这几个名字**一格都没登记上**,
        于是后面每一处用到它们又各报一句"未声明的变量" —— 一件事记成好几笔。把名字记下来，
        查名那两处据此说准。 */
@@ -10568,6 +10573,11 @@ class JncLower {
       else if (dh === 'ref-init') { this.nope(d, '引用初始化（`:=`）'); return null; }
       const info = this.declarator(dcl, sp);
       if (info === null) return null;
+      /* 那几个**只对函数有意思**的词写在一格局部量上：没有形参表就是一格变量，那时
+         "只能写在类的方法上"这句话是对的（与模块级那一处同一条口径，第一百四十九刀）。 */
+      if (info.formals === null && !sp.fnptr && sp.virt !== null) {
+        return this.acctErr(dcl, 'M-007', { what: sp.virt });
+      }
       if (info.formals !== null) {
         /* `A a(x, y);`（第一百〇三刀）：那对括号里是**构造实参**，不是形参表 —— 判据与
            "怎么当实参用"都在 ctorArgsOf 那儿。凑齐了就走第五十三刀那条现成的路。 */

@@ -172,13 +172,9 @@ export default feature({
       verdict: 'error',
       account: 'M-007',
     },
-    {
-      kind: 'method-abstract',
-      sorts: ['fn-body'],
-      verdict: 'error',
-      account: 'M-007',
-      note: '认错人：真身是"函数体里写了个原型"（S-003）',
-    },
+    /* 这一格先前报的是 M-007（"只能写在类的方法上"）—— 认错人，真身是"函数体里写了个原型"。
+       这一刀是**读表挑出来的**：矩阵新加那一列一量出来就摆在 E 那一栏里。 */
+    { kind: 'method-abstract', sorts: ['fn-body'], verdict: 'refuse', account: 'S-003' },
     { kind: 'method-abstract', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
     { kind: 'method-abstract', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
