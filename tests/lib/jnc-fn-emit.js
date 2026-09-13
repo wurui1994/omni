@@ -59,6 +59,23 @@ function lastName(n) {
   return null;
 }
 
+/** 一份文件里 `import "x.jnc";` 那几条的路径（原树上按节点名走）。 */
+function importPaths(tree) {
+  const out = [];
+  const walk = (n) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    if (headOf(n) === 'import') {
+      const nm = named(n);
+      const p = nm === null ? undefined : nm.path;
+      if (p !== null && p !== undefined && typeof p.value === 'string') out.push(p.value);
+      return;
+    }
+    for (const it of n.items) walk(it);
+  };
+  walk(tree);
+  return out;
+}
+
 /** 一格 `alias` 声明指向的名字（`alias dispose = close;` → `close`）。 */
 function aliasTargetName(at, dclNode) {
   const nm = named(at);
@@ -247,6 +264,22 @@ for (const f of files) {
     }
     for (const it of n.items) scan(it, inner, agg, ext);
   };
+  /* **import 进来的那几份也要扫**：旧降级把它们与入口那份一起发（`(fn lib_sum …)` 等都在
+     同一份输出里，57-import.jnc / dep60.jnc / 164-importjncx.jnc）。按 import 次序**先扫它们**
+     —— 与旧降级 declare 那一遍同一个次序（重载的号跟着它走）。打不开的照实跳过（记账）。 */
+  const seenImp = new Set([f]);
+  const impQueue = importPaths(tree).slice();
+  while (impQueue.length > 0) {
+    const rel = impQueue.shift();
+    const abs = join(f.slice(0, f.lastIndexOf('/')), rel);
+    if (seenImp.has(abs) || !existsSync(abs)) continue;
+    seenImp.add(abs);
+    let t2 = null;
+    try { t2 = jncParse(tb, abs, new Diagnostics()); } catch { continue; }
+    for (const r2 of importPaths(t2)) impQueue.push(r2);
+    scan(t2, null, false, undefined);
+    collectEnumConsts(t2, env);
+  }
   scan(tree, null, false, undefined);
   /* **泛型**：一格用点造一格实例（`generic.js`）—— 方法跟着叫 `Box$int$get_v`
      （110-generic.jnc 的真输出）。实例是替换好的普通 `agg`，所以照旧读；合成实参那几条
