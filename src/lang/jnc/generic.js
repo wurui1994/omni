@@ -33,37 +33,52 @@ export function templateOf(aggNode) {
   if (base === null) return null;
   const params = [];
   for (const t of allInChain(tn.targs, 'targs-add', 'targs')) {
-    const p = paramName(t);
+    const p = paramOf(t);
     if (p === null) return null;                                     // 认不出的参数表：整格不收
     params.push(p);
   }
   return params.length === 0 ? null : { base, params, node: aggNode };
 }
 
-/** 声明处一格 `targ` 里的参数名（`(targ (type-name (specs (name T) …) (ptrs)))`）。 */
-function paramName(targ) {
-  const sp = specOf(targ);
-  return sp === null ? null : (headOf(sp) === 'name' ? nameText(sp) : null);
-}
-
-/** 一格 `targ` 里那格 **type-spec**（替换与拼名字都只看它 —— ADR-0025）。 */
-function specOf(targ) {
+/**
+ * 声明处一格 `targ`：`{ name, deflt }`。`deflt` 是**默认实参**那格 type-name
+ * （`struct Slot<T, Base = int>` 的 `int`，114-genericdef.jnc；节点表 :106 的 `deflt` 洞）。
+ */
+function paramOf(targ) {
   if (headOf(targ) !== 'targ') return null;
   const t = named(targ);
-  const tn = t === null ? null : t.type;
+  if (t === null) return null;
+  const a = argOfTypeName(t.type);
+  if (a === null || a.mods.length > 0 || a.ptrs > 0) return null;
+  const nm = headOf(a.spec) === 'name' ? nameText(a.spec) : null;
+  return nm === null ? null : { name: nm, deflt: t.deflt ?? null };
+}
+
+/**
+ * 一格实参（`targ` 里的 type-name，或默认实参那格 type-name）读成三样：
+ * `{ spec, mods, ptrs }` —— 替换只看 `spec`（ADR-0025），`mods` / `ptrs` 要**记进名字**
+ * （`Box<int const*>` 与 `Box<int*>` 不是同一格类型）。
+ */
+function argOfTypeName(tn) {
   if (headOf(tn) !== 'type-name') return null;
   const nm = named(tn);
   if (nm === null) return null;
-  /* 带 `*` 的实参这一层不收（旧降级要先合成一条 typedef）—— 照实答 null。 */
-  if (ptrCount(nm.ptrs) > 0) return null;
   const sp = named(nm.specs);
   if (sp === null || sp.type === undefined) return null;
-  /* **带修饰符**的实参同上（`Box<char const>` 与 `Box<char>` 不是同一格类型，名字也不一样
-     —— 113-genericmod.jnc 的真输出是 `Box$char_const`）。修饰符丢掉会造出一格**名字撞车**
-     的实例，那是静默的错答案，所以照实答 null。 */
   const words = readSpecs(nm.specs);
-  if (words === null || words.words.length > 0) return null;
-  return sp.type;
+  return {
+    spec: sp.type,
+    mods: words === null ? [] : words.words,
+    ptrs: ptrCount(nm.ptrs),
+    specs: nm.specs,
+  };
+}
+
+/** 一格 `targ` 里的实参。 */
+function argOf(targ) {
+  if (headOf(targ) !== 'targ') return null;
+  const t = named(targ);
+  return t === null ? null : argOfTypeName(t.type);
 }
 
 function ptrCount(ptrs) {
@@ -123,7 +138,31 @@ export function expandTemplates(tree, templates) {
      `Box<T>`）不是一格用点 —— 那儿的 `T` 还是个参数。所有模板的参数名先收成一张表，
      实参撞上它就不是用点（旧降级那边这两处压根走不到 tinstOne）。 */
   const paramNames = new Set();
-  for (const tm of templates.values()) for (const p of tm.params) paramNames.add(p);
+  for (const tm of templates.values()) for (const p of tm.params) paramNames.add(p.name);
+  /* 带 `*` / 带修饰符的实参：替换只在 type-spec 那一层，所以给它**起个名字**（合成一条
+     typedef，与旧降级 lower.js:4522-4534 同一条），名字里把修饰符与 `*` 都记上
+     （`Box<int const*>` → `int_const_p`）。这张表答给调用方，进 env 就能解出来。 */
+  const typedefs = new Map();
+  /** 一格实参 → `{ spec, key }`（`spec` 是替进去的那格 type-spec）。 */
+  const argSpec = (a, depth) => {
+    let sp = a.spec;
+    let key;
+    if (headOf(sp) === 'tinst') {                                    // 实参本身是一格实例化
+      const inner = instOne(sp, depth + 1);
+      if (inner === null) return null;
+      key = inner.replace(/\$/g, '_');
+      sp = nameNode(inner, sp);
+    } else {
+      key = keyOf(sp);
+      if (key === null) { note('认不出实参那一格'); return null; }
+      if (a.mods.length === 0 && a.ptrs === 0 && paramNames.has(key)) return null;
+    }
+    if (a.mods.length === 0 && a.ptrs === 0) return { spec: sp, key };
+    const full = [key, ...a.mods, ...Array(a.ptrs).fill('p')].join('_');
+    const syn = `jnc$tp$${full}`;
+    typedefs.set(syn, { base: sp, mods: a.mods, ptrs: a.ptrs, specs: a.specs });
+    return { spec: nameNode(syn, sp), key: full };
+  };
   /** 一格用点：答实例名，造不出来答 null。 */
   const instOne = (tinstNode, depth) => {
     const tn = named(tinstNode);
@@ -135,31 +174,39 @@ export function expandTemplates(tree, templates) {
     const specs = [];
     const keys = [];
     for (const targ of allInChain(tn.targs, 'targs-add', 'targs')) {
-      let sp = specOf(targ);
-      if (sp === null) { note('实参带 `*` 或修饰符（要先合成一条 typedef）'); return null; }
-      let key;
-      if (headOf(sp) === 'tinst') {                                  // 实参本身是一格实例化
-        const inner = instOne(sp, depth + 1);
-        if (inner === null) return null;
-        key = inner.replace(/\$/g, '_');
-        sp = nameNode(inner, sp);
-      } else {
-        key = keyOf(sp);
-        if (key === null) { note('认不出实参那一格'); return null; }
-        if (paramNames.has(key)) return null;                        // 没绑上的参数：不是用点
+      const a = argOf(targ);
+      if (a === null) { note('认不出实参那一格'); return null; }
+      const r = argSpec(a, depth);
+      if (r === null) return null;
+      specs.push(r.spec);
+      keys.push(r.key);
+    }
+    /* **默认实参**（`struct Slot<T, Base = int>`，114-genericdef.jnc）：给的不够就拿声明处那几格
+       补上，补的时候要用**已经绑好的**那几格替一遍（默认值本身可能引前面的参数）。 */
+    if (specs.length < tm.params.length) {
+      const bound = new Map();
+      tm.params.forEach((p, i) => { if (i < specs.length) bound.set(p.name, specs[i]); });
+      for (let i = specs.length; i < tm.params.length; i += 1) {
+        const d = tm.params[i].deflt;
+        if (d === null || d === undefined) { note('实参给少了、又没有默认实参'); return null; }
+        const a = argOfTypeName(substitute(d, bound));
+        if (a === null) { note('认不出默认实参那一格'); return null; }
+        const r = argSpec(a, depth);
+        if (r === null) return null;
+        specs.push(r.spec);
+        keys.push(r.key);
+        bound.set(tm.params[i].name, r.spec);
       }
-      specs.push(sp);
-      keys.push(key);
     }
     if (specs.length !== tm.params.length) {
-      note('实参个数与参数表不一样（默认实参那一族）');
+      note('实参比参数表还多');
       return null;
     }
     const inst = `${tm.base}$${keys.join('$')}`;
     if (insts.has(inst)) return inst;
     insts.set(inst, null);                                           // 先占位（防自套死循环）
     const map = new Map();
-    tm.params.forEach((p, i) => map.set(p, specs[i]));
+    tm.params.forEach((p, i) => map.set(p.name, specs[i]));
     const ag = substitute(tm.node, map);
     /* 名字那一格换成实例名（`(tinst …)` → `(name Box$int)`）。 */
     const nm = named(ag);
@@ -179,7 +226,7 @@ export function expandTemplates(tree, templates) {
     for (const it of n.items) walk(it, depth);
   };
   walk(tree, 0);
-  return { insts, fails };
+  return { insts, typedefs, fails };
 }
 
 /** 这份文件里的模板表（`base -> {base, params, node}`）。 */
