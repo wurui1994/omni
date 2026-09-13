@@ -43,10 +43,18 @@ export function structLine(agg, env, allAggs = null) {
   const name = agg.emitName ?? nameText(agg.name);
   if (name === null) return { line: null, lines: [], why: '无名聚合体' };
   const isClass = agg.word === 'class' || agg.word === 'opaque class';
-  /* **类那一族：一条继承链只发一格**（第五十六刀的 clsRoot）。派生类不发；根那一行把
-     整条链的字段并起来（按声明次序）。struct 那一族照旧一格一行、基类字段在前。 */
+  /* **类那一族：一整个"由继承连起来的连通块"只发一格**（第五十六刀的 clsRoot）。判据是
+     并查集，不是"顺着第一个基类往上走"：86-multibase.jnc 的 `class C3: I1, I2` 把 I1 与 I2
+     连成一块，第二格基类自己带的 `m_b` 旧降级也并进了 I1 那一行。归并的口径与旧降级同
+     （lower.js:7058-7079 的 par/find，与 :7118-7132 的 merged）：
+       - 第一格基类：孩子的根指向基类的根（单继承时与"一路往上"一模一样）；
+       - 第二格起：那一格的根指向孩子的根（所以 I2 归到 I1）；
+       - 字段按**类的声明次序**并，撞名字**头一格胜出**（128-basetypedef.jnc 里两个派生类
+         各有一格 `m_v`，旧降级只留一格）。 */
   if (isClass && allAggs !== null) {
-    if (chainRoot(agg, env) !== agg) return { line: null, lines: [], why: '派生类不另发（并进链的根）' };
+    if (classRoot(agg, allAggs, env) !== agg) {
+      return { line: null, lines: [], why: '派生类不另发（并进链的根）' };
+    }
   }
   const parts = [];
   if (isClass) parts.push(CLASS_TAG);
@@ -59,23 +67,32 @@ export function structLine(agg, env, allAggs = null) {
      `m_state` 声明在 `m_uiReactor` 前头，可 `$on`/`$bound` 反倒排在 `$m_value` 前）。 */
   const tailR = [];
   const tail = [];
-  const own = ownFields(agg, env, { owner: name, extra, fails, tail, tailR });
-  if (own === null) {
-    return { line: null, lines: [], why: `有字段还解不出来（${fails.join('；') || '?'}）` };
-  }
-  parts.push(...own);
   if (isClass && allAggs !== null) {
+    /* 连通块里每个类各出一份自己的字段，**按声明次序**（根不一定写在最前面）。 */
+    const seen = new Set();
     for (const d of allAggs) {
-      if (d === agg) continue;
       if (d.word !== 'class' && d.word !== 'opaque class') continue;
-      if (!inChainOf(d, agg, env)) continue;
+      if (classRoot(d, allAggs, env) !== agg) continue;
       const dn = d.emitName ?? nameText(d.name);
       const f = ownFields(d, env, { owner: dn ?? name, extra, fails, tail, tailR });
       if (f === null) {
-        return { line: null, lines: [], why: `派生类里有字段还解不出来（${fails.join('；') || '?'}）` };
+        return { line: null, lines: [], why: `有字段还解不出来（${fails.join('；') || '?'}）` };
       }
-      parts.push(...f);
+      for (const one of f) {
+        const fn = fieldName(one);
+        if (fn !== null) {
+          if (seen.has(fn)) continue;                                 // 撞名：头一格胜出
+          seen.add(fn);
+        }
+        parts.push(one);
+      }
     }
+  } else {
+    const own = ownFields(agg, env, { owner: name, extra, fails, tail, tailR });
+    if (own === null) {
+      return { line: null, lines: [], why: `有字段还解不出来（${fails.join('；') || '?'}）` };
+    }
+    parts.push(...own);
   }
   if (parts.length === 0) return { line: null, lines: [], why: '一格字段都没有' };
   parts.push(...tailR);                                             // reactor 生成的那几格
@@ -117,40 +134,61 @@ function hasStatements(compound) {
   return false;
 }
 
-/** 顺着 class 基类往上走到**链的根**（防环）。 */
-export function chainRoot(agg, env) {
-  let cur = agg;
-  const seen = new Set();
-  for (;;) {
-    if (seen.has(cur)) return cur;
-    seen.add(cur);
-    const up = basePaths(cur)
-      .map((b) => env.get(b))
-      .filter((r) => r !== undefined && r.agg !== undefined && r.kind === 'class');
-    if (up.length === 0) return cur;
-    cur = up[0].agg;
-  }
+/**
+ * 一整个"由继承连起来的连通块"归到哪一格（旧降级 lower.js:7058-7079 的并查集）：
+ *   - 第一格基类：孩子的根指向**基类**的根 —— 单继承时就是"顺着 bases 一路往上"；
+ *   - 第二格起（多继承）：那一格的根指向**孩子**的根 —— 所以第二格基类归到第一格那边。
+ * 这两条不一样，所以不能只顺第一个基类走：`class C3: I1, I2` 里 I2 与 I1 是同一块。
+ * 一次算一整份 allAggs（结果挂在 allAggs 上缓存，`structLine` 每格聚合体都要问一遍）。
+ */
+const ROOTS = new WeakMap();
+export function classRoot(agg, allAggs, env) {
+  let m = ROOTS.get(allAggs);
+  if (m === undefined) { m = buildRoots(allAggs, env); ROOTS.set(allAggs, m); }
+  return m.get(agg) ?? agg;
 }
 
-/**
- * `d` 是不是挂在 `root` 这条链上 —— **任一**基类通到根就算（多继承那一族：86-multibase.jnc
- * 里第二个基类的字段旧降级也并进了根）。`chainRoot` 只顺第一个基类走，那是"根是谁"的问题；
- * 这一问是"归不归这个根"，两问不是一回事。
- */
-function inChainOf(d, root, env) {
-  const seen = new Set();
-  const walk = (a) => {
-    if (a === root) return true;
-    if (seen.has(a)) return false;
-    seen.add(a);
-    for (const b of basePaths(a)) {
-      const rec = env.get(b);
-      if (rec === undefined || rec.agg === undefined || rec.kind !== 'class') continue;
-      if (walk(rec.agg)) return true;
+function buildRoots(allAggs, env) {
+  const isCls = (a) => a !== undefined && (a.word === 'class' || a.word === 'opaque class');
+  const par = new Map();
+  const find = (a) => {
+    let r = a;
+    const seen = new Set();
+    while (par.get(r) !== undefined && par.get(r) !== r) {
+      if (seen.has(r)) return r;                                     // 防环
+      seen.add(r);
+      r = par.get(r);
     }
-    return false;
+    return r;
   };
-  return d !== root && walk(d);
+  const aggOf = (nm) => {
+    const rec = env.get(nm);
+    return rec !== undefined && rec.agg !== undefined && rec.kind === 'class' ? rec.agg : undefined;
+  };
+  for (const c of allAggs) {
+    if (!isCls(c)) continue;
+    const bs = basePaths(c).map(aggOf).filter(isCls);
+    if (bs.length > 0) {
+      const rc = find(c);
+      const rb = find(bs[0]);
+      if (rc !== rb) par.set(rc, rb);
+    }
+    for (const mx of bs.slice(1)) {                                  // 第二格起：归到孩子这边
+      const rm = find(mx);
+      const rc = find(c);
+      if (rm !== rc) par.set(rm, rc);
+    }
+  }
+  const out = new Map();
+  for (const c of allAggs) if (isCls(c)) out.set(c, find(c));
+  return out;
+}
+
+/** 一格字段串 `(名字 类型)` 的名字（`(union …)` 那种没有名字，答 null）。 */
+function fieldName(s) {
+  const m = /^\(([A-Za-z_$][\w$]*) /.exec(s);
+  if (m === null) return null;
+  return m[1] === 'union' ? null : m[1];
 }
 
 /** 基类表里每一格的**最后一段名字**（`io.Base` 取 `Base`；空基类表答空）。 */
