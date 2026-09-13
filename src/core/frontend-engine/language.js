@@ -34,7 +34,11 @@ function derive(lang) {
   };
   lang.membersOf = (cls) => lang.nodes.filter((n) => lang.fits(n.name, cls)).map((n) => n.name);
 
-  const stats = lang.nodes.filter((n) => n.of === 'stat');
+  /* **没有 `syn` 的节点也算节点。** GLR 那条腿的拼法在 `.grammar` 里，节点表只给形状
+     （名字 + 洞 + 洞的类别），语义那几张表照样按名字挂。所以派生"引导记号"这些索引时
+     只看有拼法的那些 —— 这一格就是"GLR 与读表的驱动器相容"的落点（ADR-0030 第 5 节）。 */
+  const spelled = lang.nodes.filter((n) => Array.isArray(n.syn) && n.syn.length > 0);
+  const stats = spelled.filter((n) => n.of === 'stat');
   lang.LEAD = new Map();
   for (const n of stats) {
     if (typeof n.syn[0] !== 'string') continue;
@@ -44,6 +48,7 @@ function derive(lang) {
   lang.FALLBACK = stats.filter((n) => typeof n.syn[0] !== 'string');
   // 表达式里的"简单值"：`syn` 以字面记号或叶子起头的那些（`name`/`paren` 走后缀链，除外）。
   lang.SIMPLE = lang.membersOf('exp').filter((nm) => {
+    if (!lang.NODE.get(nm).syn) return false;
     const n = lang.NODE.get(nm);
     if (n.suffix === true || n.unary === true || n.binary === true) return false;
     return nm !== 'name' && nm !== 'paren';
@@ -83,7 +88,11 @@ function check(lang) {
   const cls = new Set(lang.classes);
   for (const n of lang.nodes) {
     if (!cls.has(n.of)) throw new Error(`${lang.name}：节点 ${n.name} 的 of='${n.of}' 不是已知洞类`);
-    if (!Array.isArray(n.syn) || n.syn.length === 0) throw new Error(`${lang.name}：节点 ${n.name} 少 syn`);
+    if (!Array.isArray(n.syn) || n.syn.length === 0) {
+      /* 没拼法：GLR 腿（或纯形状的底座）合法；读表那条腿上就是漏了一张表。 */
+      if (lang.parser === 'syn') throw new Error(`${lang.name}：节点 ${n.name} 少 syn（读表那条腿要拼法）`);
+      continue;
+    }
     for (const h of holesOf(n)) {
       if (!cls.has(h.cls)) throw new Error(`${lang.name}：${n.name} 的洞 ${h.name} 类别 '${h.cls}' 不认得`);
       if (lang.membersOf(h.cls).length === 0) throw new Error(`${lang.name}：${n.name} 的洞 ${h.name}：'${h.cls}' 类没成员`);
@@ -102,7 +111,7 @@ function check(lang) {
 export function defineLang({
   name, keywords = [], ops = [], punct = [], unaryPrec, classes = [], subclass = {},
   nodes = [], numSuffix, doc = '', tokens = null, start = 'block', str, ident,
-  scope = {}, ctx = {}, yields = {}, blockEnd = [],
+  scope = {}, ctx = {}, yields = {}, blockEnd = [], parser = 'syn',
 }) {
   /* 记号规则表**没有默认值**：那是语言自己的事（先前这儿默认成了 Lua 那张表 ——
      一份 SDK 不该知道有 Lua 这门语言）。 */
@@ -112,6 +121,7 @@ export function defineLang({
     classes: [...classes], subclass: { ...subclass }, nodes: [...nodes], numSuffix,
     tokens, start, str, ident,
     scope: { ...scope }, ctx: { ...ctx }, yields: { ...yields }, blockEnd: [...blockEnd],
+    parser,
   }));
 }
 
@@ -163,6 +173,7 @@ export function extend(base, delta) {
     ctx: { ...base.ctx, ...(delta.ctx ?? {}) },
     yields: { ...base.yields, ...(delta.yields ?? {}) },
     blockEnd: [...new Set([...base.blockEnd, ...(delta.blockEnd ?? [])])],
+    parser: delta.parser ?? base.parser,
   });
 }
 

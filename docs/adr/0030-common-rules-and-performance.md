@@ -135,6 +135,29 @@
 `^` 左结合、Lua 的 `=` 是赋值、公式里的 `=` 是比较 —— 公共库给默认，语言用 `replaces` 改；
 改了几格就是这门语言"离公共有多远"的一个可读数字。
 
+## 5. GLR 与规则化相容（本轮定形）
+
+**GLR 没有被弃用 —— 它本身就是规则化的一种**：一门语言的拼法写在 `.grammar` 里，
+建表、消歧、解析都是读表。它仍然是常见语言的默认选择（jancy、asy、C 都走它）。
+所以公共规则层必须能同时承载两种"拼法的写法"：
+
+| | 拼法在哪 | 谁认它 | 例子 |
+|---|---|---|---|
+| `parser: 'syn'` | 节点表的 `syn` | `parse-driver.js`（五台机器） | Lua、gsl-shell、tiny |
+| `parser: 'glr'` | `.grammar` 文件 | GLR（建表 + 驱动） | jancy、asy、C |
+
+相容的接口是**节点的名字与洞**（不是拼法）：
+
+- `COMMON_SHAPES`（15 格）只说名字 + 洞 + 洞的类别 + 几格标记，**不带任何关键字**；
+- 拼法是可换的一层：`SPELL_C`（花括号/分号）、`SPELL_WORDY`（`then`/`do`/`end`），
+  或者**不写** —— `defineLang({parser:'glr'})` 允许节点没有 `syn`
+  （`language.js` 的 `check` 只在 `parser:'syn'` 时要求拼法）；
+- 语义那三张表（作用域配方 `scope` / 元数 `yields` / 降级的小步）全**按节点名字**挂 ——
+  于是 GLR 那条腿与读表那条腿共用同一套语义机制，差的只是"谁把源码变成节点"。
+
+这就把第 2 节那句"公共不是求交集，是给一份默认值"落实成了三张底座：
+`commonLang`（C 系拼法）、`commonWordyLang`（词语系拼法）、`commonShapeLang`（只有形状，GLR 用）。
+
 ## 3. jancy 按规则化重写（待做）
 
 - `src/core/frontend-jnc/lower.js` → **`lower_legacy.js`**（15.5k 行，一个字不改，
