@@ -59,9 +59,11 @@ export function resolveType(t, env = new Map(), depth = 0) {
   if (t.shape === 'event') {
     /* 事件那一格在方言里是**元素是函数值的数组**（多播，第七十三刀）：
        `event m_onAny()` → `(arr (fnty () void))`（142-propalias.jnc）。 */
-    const fn = fnParts(t, env);
-    if (fn === null) return { type: null, why: '事件的形参还解不出来' };
-    return { type: { k: 'mc', params: fn.params }, why: null };
+    /* 事件**不看基类型**（`event m_onClick(int code);` 压根没写类型，回的永远是 void）——
+       只要形参。先前套用函数指针那条路，于是 `no-type` 把整格挡下了（80-class-event.jnc）。 */
+    const ps = eventParams(t, env);
+    if (ps === null) return { type: null, why: '事件的形参还解不出来' };
+    return { type: { k: 'mc', params: ps }, why: null };
   }
   if (t.shape === 'fn') return { type: null, why: '函数那一族（fn）' };
   if (t.shape === 'prop' || t.shape === 'event') return { type: null, why: `属性/事件（${t.shape}）` };
@@ -190,6 +192,19 @@ function fnParts(t, env) {
     params.push(p);
   }
   return { k: 'fnptr', params, ret };
+}
+
+/** 事件那一格的形参（不看基类型）。 */
+function eventParams(t, env) {
+  const fnSuffix = suffixChain(t.raw?.dcl?.items?.[3]).find((s) => s?.items?.[0]?.value === 'fn-suffix');
+  if (fnSuffix === undefined) return null;
+  const out = [];
+  for (const f of formalList(fnSuffix.items[1])) {
+    const p = formalType(f, env);
+    if (p === null) return null;
+    out.push(p);
+  }
+  return out;
 }
 
 /** 形参表里的每一格（`formals` / `formals-add` / `formals-varargs`，按源码次序）。 */
