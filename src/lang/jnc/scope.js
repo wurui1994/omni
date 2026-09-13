@@ -62,8 +62,33 @@ export function jncOwnerOf(v) {
   return null;
 }
 
-/** 作用域配方。键是节点名，`steps` 是上面那四个词。 */
-export const JNC_SCOPE = {
+/**
+ * **基类的名字读成一条路径**（核心的 `pathOf` 钩子）：`class S: doc.Session` 那一格是
+ * `qualified`，得读成 `['doc', 'Session']` 才找得着那一层。
+ * 量出来这一格很值：`m_pluginHost`（1012 处）那一族全是"基类在命名空间里"。
+ * 泛型的头（`Iterator<T>`）取它的名字那一段；读不出来的那一格就空着（记账，不猜）。
+ */
+export function jncPathOf(v) {
+  const one = (x) => {
+    if (x === null || x === undefined || typeof x !== 'object') return null;
+    if (x.kind === 'name') return x.value === null || x.value === undefined ? null : [x.value];
+    if (x.kind === 'tinst') return one(x.name);
+    if (x.kind === 'qualified' || x.kind === 'qualified-special') {
+      const left = one(x.left);
+      const right = x.right;
+      const seg = right !== null && right !== undefined && typeof right.value === 'string'
+        ? right.value : null;
+      if (left === null || seg === null) return null;
+      return [...left, seg];
+    }
+    return null;
+  };
+  if (v === null || v === undefined) return [];
+  const list = Array.isArray(v) ? v : [v];
+  return list.map((x) => one(x)).filter((p) => p !== null);
+}
+
+/** 作用域配方。键是节点名，`steps` 是上面那四个词。 */export const JNC_SCOPE = {
   /* **文件顶层的名字不看先后**（`'@root'` 这一格是核心给的：洞就是 ast 自己那几格）。
      jancy 的编译是两趟 —— declare 一趟把名字全登记上，compile 一趟才看体
      （jnc_ct_Module 的 DeclarePass / CompilePass）。所以 `g_f()` 写在 `g_f` 声明之前是对的。 */
@@ -134,4 +159,5 @@ export const jncSemLang = extend(jncLang, {
   ctx: JNC_CTX,
   namesOf: jncNamesOf,
   ownerOf: jncOwnerOf,
+  pathOf: jncPathOf,
 });

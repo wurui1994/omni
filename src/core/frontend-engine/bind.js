@@ -91,6 +91,18 @@ export function bind(ast, lang, opts = {}) {
 
   const open = (parent, why) => newScopeAt(parent, why);
 
+  /** 顺着一条路径找那一层（`['doc','Session']`）：头一段按词法链查，后面几段进上一段那一层。 */
+  const scopeByPath = (path, from) => {
+    if (path === null || path === undefined || path.length === 0) return undefined;
+    const hit = lookup(path[0], from);
+    let s = hit === null ? undefined : scopeOf.get(hit.entry.node);
+    for (let i = 1; i < path.length && s !== undefined; i += 1) {
+      const inner = s.names.get(path[i]);
+      s = inner === undefined ? undefined : scopeOf.get(inner.node);
+    }
+    return s;
+  };
+
   const bindNames = (names, scope, node) => {
     /* 那一格里怎么读出名字：语言不说就当它本来是一串名字（读表那条腿的形参表就是）；
        说了就照它读（拼法在 `.grammar` 里的语言那一格是棵子树）。 */
@@ -202,13 +214,18 @@ export function bind(ast, lang, opts = {}) {
         continue;
       }
       if (step.startsWith('inherit:')) {
-        /* **这一层还往那几层查**（基类）：把那一格里的名字查出来，取它们开出的那一层，
-           挂在 `cur.bases` 上。查不着（基类在别的文件）就少挂一层 —— 记账，不报错。 */
-        const list = lang.namesOf === undefined
-          ? node[step.slice(8)] : lang.namesOf(node[step.slice(8)]);
-        for (const nm of list ?? []) {
-          const hit = lookup(nm, cur);
-          const s = hit === null ? undefined : scopeOf.get(hit.entry.node);
+        /* **这一层还往那几层查**（基类）：把那一格里的名字查出来、取它们开出的那一层，
+           挂在 `cur.bases` 上。查不着（基类在别的文件、或者这一遍只绑了一份文件）就少挂一层
+           —— 记账，不报错。
+           基类的名字可能是**一条路径**（`class S: doc.Session`）：语言给 `pathOf` 就按段走，
+           不给就退回 `namesOf`（一段）。少了这一格，语料里"基类在命名空间里"那一大族
+           （`m_pluginHost` 那 1012 处）就永远接不上。 */
+        const raw = node[step.slice(8)];
+        const paths = lang.pathOf === undefined
+          ? (lang.namesOf === undefined ? raw : lang.namesOf(raw))?.map((n) => [n]) ?? []
+          : lang.pathOf(raw);
+        for (const path of paths) {
+          const s = scopeByPath(path, cur);
           if (s !== undefined && s !== cur) (cur.bases ??= []).push(s);
         }
         continue;
