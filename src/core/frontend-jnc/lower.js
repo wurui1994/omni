@@ -1274,6 +1274,9 @@ class JncLower {
     this.enumTodo = [];
     this.enumRetry = false;
     this.sctors = new Map();
+    /* 反过来那一格（第二百五十六刀）：方言名 -> 主人。`static construct` 不进 `methods`
+       （它不带 `this`），可它的体照样在**类那一层命名空间**里 —— 静态字段要按裸名字查得着。 */
+    this.sctorOf = new Map();
     this.gates = new Map();     // 类名 -> 那道"静态构造跑过了"的模块级 bool
     // 方法名 -> 它那段闭包 thunk（第五十五刀）。`c.foo` 当值用时捕的是对象，一个方法一段。
     this.clos = new Map();
@@ -8945,6 +8948,7 @@ class JncLower {
         // 它是**类那一格上**的一次性初始化，不属于哪个对象。
         if (ps.length > 0) return this.err(n, "'static construct' 不带形参");
         this.sctors.set(owner, full);
+        this.sctorOf.set(full, owner);
       } else {
         ps.unshift({
           name: 'this',
@@ -9824,7 +9828,21 @@ class JncLower {
     this.guards = [];
     const owner = this.methods.get(info.name);
     if (owner !== undefined) { this.ns = owner; this.selfClass = owner; }
-    else this.selfClass = null;
+    else {
+      /* `static construct` 的体（第二百五十六刀）：它不在 `methods` 里（没有 `this`），
+         可它照样是**类那一层**的成员 —— 语料里的原样是
+
+           C1.static construct() { for (int i = 0; i < countof(m_table); i++) m_table[i] = i; }
+                                                          // samples/jnc/01_Classes.jnc:60-66
+
+         `m_table` 是一格 static 字段（方言里就是模块级的 `C1$m_table`），按裸名字查得着靠的
+         正是"体里查名从这个类这一层起"。先前只有 `methods` 那一支挪 `ns`，于是这一格报
+         "未声明的变量 'm_table'"（榜上 82 对里的一批）。
+         只挪 `ns`、**不给** `selfClass`：静态构造没有 `this`，给了它裸字段名会去查 `$this`。 */
+      const so = this.sctorOf.get(info.name);
+      if (so !== undefined) this.ns = so;
+      this.selfClass = null;
+    }
     // 属性的取/存那两个函数（第七十一刀）：`this.ns` 再往里挪一层，摆到**属性**那一格上 ——
     // 属性在 jancy 那边本来就是一层命名空间（prop_full.rst:15）。顶层 autoget 生成的那格存储
     // 在方言里叫 `g_p$m_value`，于是体里写的 `m_value` 由 resolve 从 `g_p` 退出去时接着；

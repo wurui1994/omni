@@ -11706,6 +11706,32 @@ import，`jnc_sys` 7 份一句都没有。逐份编于是量出一大片 `没有
 - `(文件, 拦路项)` 对 `3572 -> 3489`（−83）。榜上跟着落的：`没有这个类型` `96 -> 75`、
   `没有这个基类` 那一行（73 对）**整行没了**、`没有这个函数` `82 -> 78`。
 
+### 第二百五十六刀：`static construct` 的体也在类那一层命名空间里
+
+榜上 `未声明的变量 '…'` 82 对里翻出来的一格（samples/jnc/01_Classes.jnc:60-66）：
+
+```
+C1.static construct() {
+    for (int i = 0; i < countof(m_table); i++)
+        m_table[i] = i;                      // m_table 是一格 static 字段
+}
+```
+
+`m_table` 在方言里就是模块级的 `C1$m_table`，按裸名字查得着靠的是"体里查名从这个类这一层起"
+（第五十二刀）。而 `fnDef` 里挪 `this.ns` 的只有 `this.methods` 那一支 —— `static construct`
+**不进**那张表（它不带 `this`），于是那一句报"未声明的变量"。体在类外的**普通**方法早就认得
+（那一支在 `methods` 里），所以这是欠着的一格，不是设计。
+
+落法两行：登记 `static construct` 时反着记一格 `sctorOf`（方言名 -> 主人），`fnDef` 里
+`methods` 那一支落空时问它一句。分寸是**只挪 `ns`、不给 `selfClass`** —— 静态构造没有 `this`，
+给了它裸字段名会去查 `$this`。
+
+- 新例子 `cases/193-staticctorns`（static 数组 + static 标量，静态构造里填、类外的普通方法里读；
+  孪生 `/tmp/c201.c`）。
+- 腿：`node tests/jnc/run.js` 340/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：`未声明的变量` `82 -> 81`、`(文件, 拦路项)` 对 `3489 -> 3488`（−1）——
+  少得可以：那几组里**还有别的**未声明的名字（成组编之后一组只算一对），照实记。
+
 
 
 

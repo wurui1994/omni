@@ -1,0 +1,45 @@
+// `static construct` 的体也在**类那一层命名空间**里（第二百五十六刀）。
+//
+// 语料里的原样（samples/jnc/01_Classes.jnc:60-66）：
+//
+//   C1.static construct() {
+//       for (int i = 0; i < countof(m_table); i++)
+//           m_table[i] = i;
+//   }
+//
+// `m_table` 是一格 static 字段（方言里就是模块级的 `C1$m_table`）。先前只有进了 `methods`
+// 的那一支（普通方法）把 `this.ns` 挪到类上，而 `static construct` 不进那张表（它没有 `this`）
+// —— 于是这一句报"未声明的变量 'm_table'"。只挪 `ns`、不给 `this`：静态构造本来就没有。
+
+class C {
+	static int m_table[4];
+	static int m_n;
+	int m_x;
+
+	static construct();
+	int sum();
+}
+
+C.static construct() {
+	for (int i = 0; i < countof(m_table); i++)
+		m_table[i] = i;
+
+	m_n = 1;
+}
+
+int C.sum() {
+	// 体在类外的**普通**方法早就认得静态字段（那一支进了 methods）
+	int s = m_n;
+	for (int i = 0; i < countof(m_table); i++)
+		s += m_table[i];
+
+	return s + m_x;
+}
+
+int main() {
+	C c;
+	c.m_x = 100;
+	printf("%d\n", c.sum());
+	printf("%d %d\n", C.m_n, C.m_table[3]);
+	return 0;
+}
