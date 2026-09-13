@@ -11585,6 +11585,38 @@ static ui.EnumPropertyOption accessModeTable[] = {   // FileSession.jnc:141
 - 逐份那张榜：那一行**整行没了**（7 对）。`(文件, 拦路项)` 对 `3677 -> 3685`（**+8**）——
   又是**露账**（那几组先前卡在这一句上，后面的账没走到）。lowered 97、clean 152 没动。
 
+### 第二百五十二刀：类的变量写了初值、而类上有 `operator :=`
+
+榜上 `'…' 是类的变量，赋不了值（type_class.rst:19 …）` 40 对。这句话在**没有 `operator :=`**
+时是对的，可语料里那 40 处压根不是那件事：
+
+```
+std.StringBuilder string = $"$value";      // formatInteger.jnc:14
+```
+
+而 `std.StringBuilder` 上写着三条 `size_t errorcode operator := (…)`（std_String.jnc:48/52/56，
+第一条收 `string_t`）。jancy 那边声明处的初值走 `initializeVariable`，落到与 `s = "abc"`
+**同一条**算符路上 —— 也就是说这是"造一格对象、再拿初值调那个算符"，不是赋值。
+
+落法：局部与模块级两处各加一格判断，挑哪一条重载用的是赋值那一处现成的 `opPick`
+（第一百五十一 / 二百四十二刀），次序照 jancy —— **先 ctor，再算符**：
+
+```js
+const oaD = initNode === null ? undefined : this.opAssign.get(info.type.name);
+if (initNode !== null && oaD === undefined) { …照旧拒… }
+…造对象、写 $tag、ctorCall…
+if (oaD !== undefined) { const oapD = this.opPick(dcl, 'operator :=', oaD, initNode); … }
+```
+
+没落的一格明写：`static` 的局部类变量（第一百五十四刀那道 once 闸门里）写了初值照旧拒 ——
+那一句要落进闸门里头，是单独一笔。
+
+- 新例子 `cases/190-opassigndecl`（模块级 + 局部 + 两条重载按类型挑 + 赋值那一处照旧；
+  `m_ctor` 那一格钉住"构造先跑、算符后跑"；孪生 `/tmp/c198.c`）。
+- 腿：`node tests/jnc/run.js` 337/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：那一行**整行没了**（40 对）。`(文件, 拦路项)` 对 `3685 -> 3645`（**−40**）；
+  lowered 97、clean 152 没动。
+
 
 
 

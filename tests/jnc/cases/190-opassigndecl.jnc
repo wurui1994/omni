@@ -1,0 +1,43 @@
+// 类的变量写了初值、而那格类上写着 `operator :=`（第二百五十二刀）。
+//
+// 这**不是** type_class.rst:19 说的"给类的变量赋值"，是"造一格对象、再拿初值调那个算符"。
+// 语料里最常见的一格是 `std.StringBuilder string = $"$value";`（formatInteger.jnc:14），
+// 而 std.StringBuilder 上写着三条 `size_t errorcode operator := (…)`（std_String.jnc:48/52/56）。
+//
+// 挑哪一条与赋值那一处（第一百五十一 / 二百四十二刀的 opPick）是同一格机器。
+
+class SB {
+	int m_n;
+	int m_ctor;
+
+	construct() {
+		m_ctor = 1;   // 构造先跑，算符后跑
+	}
+
+	int operator := (int v) {
+		m_n = v;
+		return v;
+	}
+
+	int operator := (string_t s) {
+		m_n = 100;
+		return 0;
+	}
+}
+
+// 模块级那一格（jancy 那边它是静态分配的，构造与算符都排在 globalInit 那一段）
+SB g_a = 5;
+
+int main() {
+	printf("g %d %d\n", g_a.m_n, g_a.m_ctor);
+
+	SB a = 7;                       // 挑收 int 那一条
+	printf("a %d %d\n", a.m_n, a.m_ctor);
+
+	SB b = "x";                     // 挑收 string 那一条
+	printf("b %d %d\n", b.m_n, b.m_ctor);
+
+	a = 9;                          // 赋值那一处照旧走同一条算符
+	printf("a %d\n", a.m_n);
+	return 0;
+}

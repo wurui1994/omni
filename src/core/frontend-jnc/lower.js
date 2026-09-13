@@ -5550,7 +5550,8 @@ class JncLower {
           this.nope(dcl, `对模块级的类变量取地址（&${shown(info.name)}）—— 那要一格 \`C**\``);
           continue;
         }
-        if (initNode !== null) {
+        const oaG = initNode === null ? undefined : this.opAssign.get(info.type.name);
+        if (initNode !== null && oaG === undefined) {
           this.err(initNode, `'${shown(info.name)}' 是类的变量，赋不了值（type_class.rst:19 那句 `
             + '"You cannot assign varibles or fields of class types"）');
           continue;
@@ -5571,6 +5572,18 @@ class JncLower {
         this.unsafe = false;
         const ok = this.ctorCall(dcl, info.type.name, `(var ${info.name})`, info.ctor, '    ',
           this.globalInit);
+        /* 模块级那一格的 `operator :=`（第二百五十二刀）：与局部量那一处同一格机器，只是
+           初值在**模块作用域**里求（上面那三格 save 正是为它与 ctor 一起摆好的），
+           而那一句排在 ctor 之后 —— 先有对象、再往里写。 */
+        if (ok !== null && oaG !== undefined) {
+          const oapG = this.opPick(dcl, 'operator :=', oaG, initNode);
+          if (oapG !== null) {
+            const gv = this.globalValue(initNode, oapG.param);
+            if (gv !== null) {
+              this.globalInit.push(`    (expr (call ${oapG.name} (var ${info.name}) ${gv}))`);
+            }
+          }
+        }
         this.scopes = saveScopes;
         this.lifted = saveLifted;
         this.unsafe = saveUnsafe;
@@ -10411,7 +10424,18 @@ class JncLower {
       // 的 Construction 一节）。写了 `*` 的那一种（`C* p;`）不造对象，落到下面的标量那一条
       // （零值是空引用），所以这儿只管 own 那一种。
       if (isClass(info.type) && info.type.own === true) {
-        if (initNode !== null) {
+        /* 写了初值、而那格类上写着 `operator :=`（第二百五十二刀）：这**不是**"给类的变量赋值"，
+           是"造一格对象、再拿初值调那个算符" —— 语料里最常见的一格是
+
+             std.StringBuilder string = $"$value";     // formatInteger.jnc:14
+
+           而 `std.StringBuilder` 上写着三条 `size_t errorcode operator := (…)`
+           （std_String.jnc:48/52/56，第一条收 string_t）。jancy 那边声明处的初值走的正是
+           `initializeVariable`，落到与 `s = "abc"` 同一条算符路上 —— 所以这儿与赋值那一处
+           （第一百五十一 / 二百四十二刀的 opPick）用**同一格**机器，不另造。
+           没写 `operator :=` 的照旧拒（那才是 type_class.rst:19 说的那件事）。 */
+        const oaD = initNode === null ? undefined : this.opAssign.get(info.type.name);
+        if (initNode !== null && oaD === undefined) {
           this.err(initNode, `'${info.name}' 是类的变量，赋不了值（type_class.rst:19 那句 `
             + '"You cannot assign varibles or fields of class types"）—— 要一份拷贝得自己写 clone');
           return this.declBail(info);
@@ -10431,6 +10455,19 @@ class JncLower {
         // 都在 ctorCall 里；两样都没有时一个字都不发。
         if (this.ctorCall(dcl, info.type.name, `(var ${info.name})`, info.ctor, pad, out) === null) {
           return null;
+        }
+        // 构造完了再调 `operator :=`（第二百五十二刀）：次序照 jancy —— 先有对象，再往里写
+        if (oaD !== undefined) {
+          const oapD = this.opPick(dcl, 'operator :=', oaD, initNode);
+          if (oapD === null) return this.declBail(info);
+          let ovD = this.expr(initNode, oapD.param);
+          if (ovD === null) return this.declBail(info);
+          if (isInt(ovD.type) && isInt(oapD.param)) ovD = intConv(ovD, oapD.param);
+          if (!this.assignOk(ovD.type, oapD.param)) {
+            this.err(initNode, `'operator :=' 的实参要 ${tyName(oapD.param)}，这里是 ${tyName(ovD.type)}`);
+            return this.declBail(info);
+          }
+          out.push(`${pad}(expr (call ${oapD.name} (var ${info.name}) ${ovD.code}))`);
         }
         continue;
       }
