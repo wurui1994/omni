@@ -44,6 +44,23 @@ function lastName(n) {
   return null;
 }
 
+/** 一份文件里 `import "x.jnc";` 那几条的路径（原树上按节点名走）。 */
+function importPaths(tree) {
+  const out = [];
+  const dig = (n) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    if (headOf(n) === 'import') {
+      const nm = named(n);
+      const p = nm === null ? undefined : nm.path;
+      if (p !== null && p !== undefined && typeof p.value === 'string') out.push(p.value);
+      return;
+    }
+    for (const it of n.items) dig(it);
+  };
+  dig(tree);
+  return out;
+}
+
 function walk(dir, out = []) {
   let names = [];
   try { names = readdirSync(dir); } catch { return out; }
@@ -174,6 +191,21 @@ for (const f of files) {
     }
     for (const it of n.items) scan(it, inner);
   };
+  /* **import 进来的那几份也要扫**：旧降级把它们的结构体与入口那份发在同一份 .sx 里
+     （57-import.jnc / dep60.jnc / 164-importjncx.jnc）。按 import 次序先扫它们。 */
+  const seenImp = new Set([f]);
+  const impQueue = importPaths(tree).slice();
+  while (impQueue.length > 0) {
+    const rel = impQueue.shift();
+    const abs = join(f.slice(0, f.lastIndexOf('/')), rel);
+    if (seenImp.has(abs) || !existsSync(abs)) continue;
+    seenImp.add(abs);
+    let t2 = null;
+    try { t2 = jncParse(tb, abs, new Diagnostics()); } catch { continue; }
+    for (const r2 of importPaths(t2)) impQueue.push(r2);
+    scan(t2, null);
+    collectEnumConsts(t2, env);
+  }
   scan(tree, null);
   /* **泛型**：一格用点造一格实例（`generic.js`）。实例是替换好的普通 `agg`，所以读法照旧 ——
      名字用实例名（`Box$int`），合成实参那几条 typedef（`jnc$tp$int_p`）与泛型 typedef 造出来的
