@@ -9,7 +9,13 @@
 
 import { named, headOf } from './adapt.js';
 
-/** 左递归的列表：`X`（空基例）与 `X-add`（两格：list / one）走成一串。 */
+/**
+ * 左递归的列表：`X`（空基例）与 `X-add`（两格：list / one）走成一串。
+ * **只对"空基例"那一族**（`mods` / `ptrs` / `suffixes` / `unit` —— 树里 0 格子项）。
+ * 基例自己带一项的那一族（`dcls` / `enums` / `args` / `formals` / `items` / `exprs` /
+ * `attrs` / `targs` / `qnames`，形状是 `(X 第一项)`）要用 `allInChain` —— 拿这一份走会
+ * **把第一项丢掉**。这不是假想的坑：`readEnum` 头一版就是这么写的，584 个枚举各差一项。
+ */
 export function chainOf(node, addHead) {
   const out = [];
   let cur = node;
@@ -27,8 +33,36 @@ export function chainOf(node, addHead) {
   return out;
 }
 
-/** 一个 `name` 节点的字面文本（`name` 裹着一格记号）。 */
-export function nameText(node) {
+/**
+ * 走**整条**左递归链：`add` 那几格 + 基例里带的那一格。
+ * 基例形状是 `(X 第一项)` 的那一族（`dcls` / `enums` / `args` / `formals` / `items` /
+ * `exprs` / `attrs` / `targs` / `qnames`）都用它。空基例那一族用 `chainOf` 就够
+ * （它们的基例里没有洞，走过去也拿不出东西）。
+ */
+export function allInChain(node, addHead, baseHead) {
+  const out = [];
+  let cur = node;
+  while (cur !== null && cur !== undefined) {
+    const h = headOf(cur);
+    if (h === addHead) {
+      const nm = named(cur);
+      if (nm === null) break;
+      out.unshift(nm.one);
+      cur = nm.list;
+      continue;
+    }
+    if (h === baseHead) {
+      const nm = named(cur);
+      if (nm !== null && nm.first !== undefined) out.unshift(nm.first);
+      break;
+    }
+    out.unshift(cur);                              // 光一个（没裹基例壳的那种写法）
+    break;
+  }
+  return out;
+}
+
+/** 一个 `name` 节点的字面文本（`name` 裹着一格记号）。 */export function nameText(node) {
   if (headOf(node) !== 'name') return null;
   const nm = named(node);
   const t = nm === null ? undefined : nm.text;

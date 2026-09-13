@@ -18,7 +18,7 @@ import { headOf, named } from './adapt.js';
 import { readDeclType } from './types.js';
 import { readSpecs, wordOf } from './specs.js';
 import { STORAGE } from './syntax.js';
-import { chainOf } from './declare.js';
+import { chainOf, allInChain } from './declare.js';
 
 /** 访问标签（`public:` / `protected:`）。默认 public —— jancy 只有这两格。 */
 const ACCESS_DEFAULT = 'public';
@@ -69,7 +69,7 @@ function memberOf(it, access) {
   }
   if (h === 'var-decl' || h === 'typedef') {
     const out = [];
-    for (const d of allDcls(nm.dcls)) {
+    for (const d of allInChain(nm.dcls, 'dcls-add', 'dcls')) {
       const dcl = unwrap(d);
       if (headOf(dcl) !== 'dcl') continue;
       out.push(one(readDeclType(nm.specs, dcl), nm.specs, access, h === 'typedef' ? 'typedef' : 'data', it));
@@ -79,30 +79,6 @@ function memberOf(it, access) {
   if (h === 'type-decl') return [{ name: null, type: null, shape: 'nested-type', access, storage: [], at: it }];
   if (h === 'friend') return [{ name: null, type: null, shape: 'friend', access, storage: [], at: it }];
   return [];                                                       // 别的（空语句那类）不算成员
-}
-
-/** `dcls` / `dcls-add` 那一串里的**全部**声明符（`int a, b, c;` 三格都要）。 */
-function allDcls(node) {
-  const out = [];
-  let cur = node;
-  while (cur !== null && cur !== undefined) {
-    const h = headOf(cur);
-    if (h === 'dcls-add') {
-      const n = named(cur);
-      if (n === null) break;
-      out.unshift(n.one);
-      cur = n.list;
-      continue;
-    }
-    if (h === 'dcls') {
-      const n = named(cur);
-      if (n !== null && n.first !== undefined) out.unshift(n.first);
-      break;
-    }
-    out.unshift(cur);                                              // 光一个 dcl / init
-    break;
-  }
-  return out;
 }
 
 /** `init` / `ref-init` 裹着的声明符。 */
@@ -145,39 +121,6 @@ export function readEnum(node) {
   return {
     word: wordOf(nm.word), name: nm.name, base: nm.base ?? null, items, raw: node,
   };
-}
-
-/** `(enums X)` 那一格的第一项（空的 `(enums)` 没有洞）。 */
-function enumFirst(body) {
-  if (headOf(body) !== 'enums') return [];
-  const nm = named(body);
-  return nm === null || nm.first === undefined ? [] : [nm.first];
-}
-
-/**
- * 一条左递归链上的**全部**项：`add` 那几格 + 基例里那一格（`(enums 第一项)` / `(dcls 第一项)`）。
- * `allDcls` 与这一份是同一件事的两个实例 —— 链的形状是 GLR 给的，谁走都得走全。
- */
-function allInChain(node, addHead, baseHead) {
-  const out = [];
-  let cur = node;
-  while (cur !== null && cur !== undefined) {
-    const h = headOf(cur);
-    if (h === addHead) {
-      const nm = named(cur);
-      if (nm === null) break;
-      out.unshift(nm.one);
-      cur = nm.list;
-      continue;
-    }
-    if (h === baseHead) {
-      const nm = named(cur);
-      if (nm !== null && nm.first !== undefined) out.unshift(nm.first);
-      break;
-    }
-    break;
-  }
-  return out;
 }
 
 /** `attributed` 是壳（枚举项也能带属性块）。 */
