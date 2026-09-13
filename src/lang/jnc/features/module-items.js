@@ -62,5 +62,13 @@ export default feature({
     { kind: 'local-var', sorts: ['union-body'], verdict: 'syntax' },
     { kind: 'local-var', sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
     { kind: 'local-var', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* `dylib X { … }`（第二百〇三刀）：与 pragma / extension 同一列 —— 模块与命名空间那两层收。 */
+    { kind: 'dylib', sorts: ['module', 'namespace'], verdict: 'ok' },
+    { kind: 'dylib', sorts: INNER, verdict: 'refuse', account: 'T-002' },
+    { kind: 'dylib', sorts: ['struct-body'], verdict: 'refuse', account: 'T-001' },
+    { kind: 'dylib', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'dylib', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
+    { kind: 'dylib', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    { kind: 'dylib', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

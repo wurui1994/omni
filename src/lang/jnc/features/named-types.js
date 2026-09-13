@@ -127,5 +127,16 @@ export default feature({
     { kind: 'class-opaque', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'class-opaque', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
     { kind: 'class-opaque', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* 带基类型的枚举（`enum E: uint16_t { … }`，语料里 io_* 那几份日志码就是这么写的）：
+       与普通 enum 那一列一样 —— 这一列是矩阵后加的，加之前"表里有没有它"没人问过。 */
+    {
+      kind: 'enum-typed',
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body', 'fn-body'],
+      verdict: 'ok',
+      register: REG.enum,
+    },
+    { kind: 'enum-typed', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'enum-typed', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    { kind: 'enum-typed', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

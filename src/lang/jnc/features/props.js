@@ -116,5 +116,15 @@ export default feature({
     { kind: 'field-multicast', sorts: ['fn-body'], verdict: 'refuse', account: 'S-003' },
     { kind: 'field-multicast', sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
     { kind: 'field-multicast', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* 索引属性（`int property p(int i);`，prop_indexed.rst:15 / 第七十刀）：那一串不是形参、
+       是下标。量出来除函数体（属性指针那笔账）与属性体 / extension 体之外都收。 */
+    {
+      kind: 'property-indexed',
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'union-body', 'opaque-class-body'],
+      verdict: 'ok',
+    },
+    { kind: 'property-indexed', sorts: ['fn-body'], verdict: 'refuse', account: 'P-003' },
+    { kind: 'property-indexed', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
+    { kind: 'property-indexed', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

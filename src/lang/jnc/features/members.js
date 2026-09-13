@@ -63,6 +63,14 @@ export default feature({
       match: '结构体的方法',
       why: '同 M-007，只是位置不同（这一格话说得更准：点名了是结构体）',
     },
+    'M-009': {
+      text: '`override` 的方法在基类里找不着可覆盖的那一条',
+      say: "覆盖不了 '{name}'：基类里没有方法 '{base}'（jancy 那句 "
+        + '"cannot override \'…\': method not found"）',
+      match: '覆盖不了',
+      why: '这一句是**对的**（jancy 同）。欠的是**位置**：它现在发的是一条没位置的诊断'
+        + '（矩阵那三格都带着"没位置"的记号）—— R5 说诊断该有位置，那是另一刀',
+    },
     'S-002': {
       text: '语句 `…`（函数体里的成员声明落到这句兜底上）',
       say: "语句 '{h}'",
@@ -173,5 +181,24 @@ export default feature({
     { kind: 'method-abstract', sorts: ['fn-body'], verdict: 'refuse', account: 'S-003' },
     { kind: 'method-abstract', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
     { kind: 'method-abstract', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* `override` 的方法（矩阵后加的一列）：顶层那两格与 virtual 同一句（M-007）；类那一族
+       与 extension 里量出来是 M-009（基类里没有可覆盖的那一条 —— 探针的那几个类没有基类，
+       所以这是**对的**答案）。 */
+    {
+      kind: 'method-override',
+      sorts: ['module', 'namespace'],
+      verdict: 'error',
+      account: 'M-007',
+    },
+    {
+      kind: 'method-override',
+      sorts: ['class-body', 'opaque-class-body', 'extension-body'],
+      verdict: 'error',
+      account: 'M-009',
+    },
+    { kind: 'method-override', sorts: ['struct-body'], verdict: 'refuse', account: 'M-008' },
+    { kind: 'method-override', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'method-override', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
+    { kind: 'method-override', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
   ],
 });

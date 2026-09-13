@@ -98,6 +98,12 @@ const KINDS = [
   ['method-abstract', 'abstract int probeA();', 'x'],
   ['field-fnptr', 'int function* m_fnp(int);', 'x'],
   ['field-multicast', 'multicast m_mc();', 'x'],
+  ['method-override', 'override int probeOvr() { return 4; }', 'x'],
+  ['enum-typed', 'enum Small: uint16_t { S1, S2 }', 'x'],
+  ['property-indexed', 'int property m_ip(int i);', 'x'],
+  ['dylib', 'dylib ProbeLib { int probeDl(int); }', 'x'],
+  ['field-thin-ptr', 'int thin* m_tp;', 'x'],
+  ['field-array-dyn', 'int m_ad[];', 'x'],
 ];
 
 /* ---------------------------------------------------------------- 位置表

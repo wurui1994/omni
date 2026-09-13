@@ -26,6 +26,18 @@ export default feature({
         + '指针、string 与数组那几种旁边还挂着表，重叠之后说不清归谁）',
       why: '指针、string 与数组那几种旁边还挂着表（ADR-0024/0026），重叠之后说不清归谁',
     },
+    'F-004': {
+      text: '不写长度、也没有花括号初值的数组（`int a[];`）',
+      say: "'{name}' 的长度得从花括号初值数出来",
+      match: '的长度得从花括号初值数出来',
+      why: '这一句是**对的**（与 C 同）：`int a[]` 只有跟着 `= { … }` 时长度才数得出来',
+    },
+    'F-005': {
+      text: '类 / 结构体的字段上不写长度的数组',
+      say: "字段 '{name}' 的长度得写出来",
+      match: '的长度得写出来',
+      why: '同 F-004，位置不同：字段那一格的长度是**布局**的一部分，没有初值可数',
+    },
     'F-003': {
       text: '结构体里放不下类的一格值',
       say: "结构体 '{owner}' 里放不下类 '{cls}' 的一格值（jancy 那边这一句就是错："
@@ -37,6 +49,28 @@ export default feature({
     },
   },
   positions: [
+    /* 后加的两列（矩阵是机械枚举，所以"表里少一种"本身就是账）：
+       thin 指针字段 —— 与别的指针字段同一列；不写长度的数组字段 —— 两句**对的**错
+       （F-004 / F-005，看位置分）。 */
+    { kind: 'field-thin-ptr', sorts: PLAIN, verdict: 'ok' },
+    { kind: 'field-thin-ptr', sorts: ['union-body'], verdict: 'refuse', account: 'F-002' },
+    { kind: 'field-thin-ptr', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
+    { kind: 'field-thin-ptr', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    {
+      kind: 'field-array-dyn',
+      sorts: ['module', 'namespace', 'fn-body'],
+      verdict: 'error',
+      account: 'F-004',
+    },
+    {
+      kind: 'field-array-dyn',
+      sorts: ['class-body', 'struct-body', 'opaque-class-body'],
+      verdict: 'error',
+      account: 'F-005',
+    },
+    { kind: 'field-array-dyn', sorts: ['union-body'], verdict: 'refuse', account: 'F-002' },
+    { kind: 'field-array-dyn', sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
+    { kind: 'field-array-dyn', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     // 普通字段：除 union（表示宽度）与属性体 / extension 体（那两处各有自己的规矩）之外都收
     ...['field-int', 'field-static', 'field-const', 'field-bigendian'].flatMap((kind) => [
       { kind, sorts: ALL, verdict: 'ok' },
