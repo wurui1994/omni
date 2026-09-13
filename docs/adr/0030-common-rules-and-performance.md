@@ -47,7 +47,12 @@
 判据：`parse` 从 6.95 MB/s 提到 **≥ 20 MB/s**（与我们自己的词法同一档），
 且四把尺子的结论**一格不变**（这四条都不改语言的规则，只改怎么执行它）。
 
-## 2. 跨语言公共规则层（待做）
+搬进 SDK 前后又量了两轮：`parse` 6.1~7.2 MB/s、`lex` 18.5~26 MB/s、`render` 15~26 MB/s ——
+**噪声比跨模块调用的代价大**，所以"搬出去会不会变慢"这一问的答案是：量不出来。
+往后做那四条优化时，得先把量法收紧（同一进程内多轮、丢掉最差的、分别计时），
+不然 20 MB/s 那个判据落不到实处。
+
+## 2. 跨语言公共规则层（**已落地**：机制归 SDK，表归扩展）
 
 现在 `ext/lua` 里有两类东西混在一起：
 
@@ -55,16 +60,19 @@
   `extend`、`parse.js` 的五台机器、`render.js`、`tokens.js` 的规则驱动扫描器
 - **某门语言的表**：Lua 的关键字/算符/35 个节点、gsl-shell 的增量、公式子语言的三张表
 
-搬法（一步一格，每步都过四把尺子）：
+搬完了（四把尺子一格没变，行数正好一半一半：机制 1085 行 / 表 1118 行）。
+契约那一份写给外人看：`docs/EXTENSIONS.md`。落点：
 
 - `src/core/frontend-engine/syntax.js` ← `syn` 词汇 + 洞的类别代数（`SUBCLASS`/`fits`/`membersOf`）
 - `src/core/frontend-engine/lexrules.js` ← 记号规则驱动器 + 通用规则件（`reRule`/`nameRule`/…）
 - `src/core/frontend-engine/parse-driver.js` ← 五台机器（`matchSyn`/`hole`/`exp`/`suffixed`/`choose`）
 - `src/core/frontend-engine/render.js` ← 写回器
-- `src/core/frontend-engine/common-nodes.js` ← **公共节点库**：`number` `string` `name`
-  `binop` `prefix` `paren` `call` `index` `block` `if` `while` `return` `break` `assign`…
-  每一格都是"大部分语言长一个样"的那种，语言用 `extend(commonLang, delta)` 取用，
-  要改就写 `replaces: true`（这条规矩已经在 `extend` 里，gsl/luajit 各验过一次）
+- `src/core/frontend-engine/bind.js` ← 作用域配方 + 上下文规则的走一遍（读 `lang.scope`/`lang.ctx`）
+- `src/core/frontend-engine/arity.js` ← 元数契约（读 `lang.yields`）
+- **还没做**：`common-nodes.js` 那格**公共节点库**（`number` `string` `name` `binop` `prefix`
+  `paren` `call` `index` `block` `if` `while` `return` `break` `assign`…）。现在 Lua 与公式子语言
+  各写了一遍这些节点 —— 该抽成一份默认表，语言用 `extend(commonLang, delta)` 取用。
+  这是第 2 节剩下的那一格，也是"细粒度组合"真正开始的地方。
 
 一句要写在前面的话：**公共不是"求交集"，是"给一份默认值"**。Lua 的 `^` 右结合、公式子语言的
 `^` 左结合、Lua 的 `=` 是赋值、公式里的 `=` 是比较 —— 公共库给默认，语言用 `replaces` 改；
