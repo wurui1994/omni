@@ -7,7 +7,7 @@
 //
 // 只回结构，不回"方言里怎么写" —— 降级那一层才管发什么。规范写法（`text`）只用来对账。
 
-import { readDcl } from './declare.js';
+import { readDcl, chainOf } from './declare.js';
 import { readSpecs, wordOf } from './specs.js';
 import { headOf } from './adapt.js';
 
@@ -69,6 +69,27 @@ function baseText(node, head) {
 /** 这一格是不是"光一个关键字"（`int` / `void` / `char`…）。 */
 function isWord(head) {
   return head === null || head === undefined ? false : !(head in BASE_KINDS);
+}
+
+/**
+ * **没有声明符**的那一格类型：`void f(int, int b)` 里第一个形参（`formal-anon` 的洞是
+ * 说明符 + `*`，压根没有 `dcl`），还有泛型合成实参那一条。读法与 `readDeclType` 同，
+ * 只是名字与后缀都空着。
+ */
+export function readAnonType(specsNode, ptrsNode) {
+  const sp = readSpecs(specsNode);
+  if (sp === null) return null;
+  const head = sp.typeHead;
+  const baseKind = head === null ? 'none' : (BASE_KINDS[head] ?? (isWord(head) ? 'word' : 'other'));
+  return {
+    base: { kind: baseKind, text: baseText(sp.type, head) },
+    mods: [...sp.words],
+    ptrs: chainOf(ptrsNode, 'ptrs-add').length,
+    suffixes: [],
+    shape: 'data',
+    name: null,
+    raw: { specs: specsNode, dcl: null },
+  };
 }
 
 /** 规范写法（只为对账：修饰词按出现次序、`*` 按层数、后缀按链的次序）。 */

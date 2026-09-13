@@ -16,7 +16,7 @@
 
 import { resolveType } from './resolve-type.js';
 import { emitType } from './emit-type.js';
-import { readDeclType } from './types.js';
+import { readDeclType, readAnonType } from './types.js';
 import { nameText, allInChain, readDcl } from './declare.js';
 import { headOf, named } from './adapt.js';
 
@@ -73,9 +73,10 @@ function formalList(formals) {
       continue;
     }
     if (h === 'formal-anon') {
-      /* 只写类型不写名字（`void f(int);`）—— 名字这一格是 null，类型照读
-         （`formal-anon` 的洞是 specs + ptrs，没有 dcl）。 */
-      out.push({ name: null, type: readDeclType(fn.specs, null), varargs: false });
+      /* 只写类型不写名字（`int ignore(int, int b)`）：名字由这一层补 `$a<第几格>`
+         （旧降级的真输出 `(fn ignore (($a0 int) (b int)) int`，176-anonformal.jnc）。
+         这一格没有 `dcl`，类型从"说明符 + `*`"读（`readAnonType`）。 */
+      out.push({ name: null, type: readAnonType(fn.specs, fn.ptrs), varargs: false });
       continue;
     }
   }
@@ -187,12 +188,13 @@ export function fnHead(m, env, ctx = { owner: null, self: null }) {
      53-inherit.jnc 的 `pick(int, Dog*, Puppy*)` 旧降级发的是三格 `(ptr Animal)`。
      所以形参与返回都得带着这张"谁的根是谁"的表发。 */
   const tc = { clsRoot: ctx.clsRoot ?? ((n) => n) };
-  for (const f of fs) {
+  for (const [i, f] of fs.entries()) {
     if (f.type === null) return { head: null, why: '形参的类型读不出来' };
-    if (f.name === null) return { head: null, why: '形参没有名字（记账）' };
     const r = resolveType(f.type, env);
-    if (r.type === null) return { head: null, why: `形参 ${f.name}：${r.why}` };
-    parts.push(`(${f.name === 'this' ? '$this' : f.name} ${emitType(r.type, 'slot', tc)})`);
+    if (r.type === null) return { head: null, why: `形参 ${f.name ?? `$a${i}`}：${r.why}` };
+    /* 没写名字的形参由这一层补 `$a<第几格>`（176-anonformal.jnc 的 `$a0`）。 */
+    const pn = f.name === null ? `$a${i}` : (f.name === 'this' ? '$this' : f.name);
+    parts.push(`(${pn} ${emitType(r.type, 'slot', tc)})`);
   }
   const ret = retText(m, base, env, tc);
   if (ret === null) return { head: null, why: '返回类型解不出来' };
