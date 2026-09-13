@@ -22,7 +22,7 @@ import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import {
   fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
-  isBindableData, dataAccessorHeads,
+  isBindableData, dataAccessorHeads, isAutogetProp, autogetGetterHead,
 } from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
@@ -287,8 +287,10 @@ for (const f of files) {
 
   const cases = [];
   const accCases = [];                              // 生成取/存的那几格（bindable data）
+  const getCases = [];                              // 只生成取值器的那几格（autoget 属性）
   for (const m of vars) {
     if (isBindableData(m)) accCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
+    else if (isAutogetProp(m)) getCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
   }
   for (const a of aggs) {
     const own = a.emitName ?? nameText(a.name);
@@ -297,6 +299,11 @@ for (const f of files) {
       /* **bindable data** 生成两格取/存（82-reactor.jnc 的 `Sess$m_state$get` / `$set`）。 */
       if (isBindableData(m)) {
         accCases.push({ m, ctx: { owner: own, self: selfOf(a), clsRoot } });
+        continue;
+      }
+      /* **autoget 属性**只生成取值器（存值器是写出来的那一格，67-propauto.jnc）。 */
+      if (isAutogetProp(m)) {
+        getCases.push({ m, ctx: { owner: own, self: selfOf(a), clsRoot } });
         continue;
       }
       if (m.shape !== 'fn') continue;
@@ -330,8 +337,9 @@ for (const f of files) {
   const nextDup = overloadIndex();
   const mineNames = new Set();                        // 新腿**试过**的那几个名字（算覆盖率用）
   /* **生成的取/存**先对（它们不占重载号 —— 旧降级那边是另一遍发出来的）。 */
-  for (const c of accCases) {
-    const r = dataAccessorHeads(c.m, env, c.ctx);
+  for (const c of accCases.concat(getCases)) {
+    const r = c.m.shape === 'prop'
+      ? autogetGetterHead(c.m, env, c.ctx) : dataAccessorHeads(c.m, env, c.ctx);
     if (r.heads.length === 0) {
       skip.set(`生成的取/存：${r.why}`, (skip.get(`生成的取/存：${r.why}`) ?? 0) + 1);
       continue;

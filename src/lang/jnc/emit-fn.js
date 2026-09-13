@@ -184,6 +184,31 @@ export function isBindableData(m) {
   return m.type.mods.includes('bindable') && !m.type.mods.includes('property');
 }
 
+/**
+ * **autoget 属性生成的取值器**：`int autoget property g_clamp;` 的取值器不用写，编译器生成
+ * 一格（prop_autoget.rst:15-17）。存值器照旧是**写出来的**那一格（`void g_clamp.set(int x)`），
+ * 所以这儿只发 `$get`。出处是旧降级的真输出（67-propauto.jnc）：
+ *   `(fn g_clamp$get () int`、`(fn Cell$m_v$get (($this (ptr Cell))) int`
+ */
+export function autogetGetterHead(m, env, ctx = { owner: null, self: null }) {
+  if (m === null || m === undefined || m.type === null || m.name === null) {
+    return { heads: [], why: '没有名字' };
+  }
+  const r = resolveType({ ...m.type, shape: 'data' }, env);
+  if (r.type === null) return { heads: [], why: `类型解不出来（${r.why}）` };
+  const tc = { clsRoot: ctx.clsRoot ?? ((n) => n) };
+  const ty = emitType(r.type, 'slot', tc);
+  const sym = ctx.owner === null || ctx.owner === undefined ? m.name : `${ctx.owner}$${m.name}`;
+  const ps = ctx.self === null || ctx.self === undefined ? '' : `($this ${ctx.self})`;
+  return { heads: [{ name: `${sym}$get`, head: `(fn ${sym}$get (${ps}) ${ty}` }], why: null };
+}
+
+/** 这一格属性声明会不会**生成取值器**（`autoget` 那一族）。 */
+export function isAutogetProp(m) {
+  if (m === null || m === undefined || m.type === null || m.type === undefined) return false;
+  return m.shape === 'prop' && m.type.mods.includes('autoget');
+}
+
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */
 function leafName(leaf) {
   if (leaf.kind === 'special') return SPECIAL_NAMES[leaf.text] ?? null;
