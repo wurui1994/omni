@@ -121,6 +121,11 @@ export function jncPathOf(v) {
      `attributed` 裹着一条声明（`[ displayName = … ] int m_x;`）—— 壳自己不带名字。 */
   'type-decl': { steps: ['agg'], through: ['agg'] },
   attributed: { steps: ['attrs', 'decl'], through: ['decl'] },
+  /* `using namespace std;` —— **这一层从此还往 std 那一层查**。这正是 `inherit:` 那个词
+     （"一层还能接着几层"），基类与 using 是同一件事，不该有两套机制。
+     少这一格，`test/jnc/unit_stdt_*.jnc` 里裸写的 `Array` / `HashTable` 全查不着。 */
+  'using-namespace': { steps: ['inherit:name'] },
+  'using-extension': { steps: ['inherit:name'] },
   // 语句里开层的那几格
   compound: { steps: ['open', 'body'] },
   for: { steps: ['open', 'init', 'cond', 'step', 'body'] },
