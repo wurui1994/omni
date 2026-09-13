@@ -145,6 +145,45 @@ export function isReactor(m) {
     && m.type.mods.includes('reactor');
 }
 
+/**
+ * **bindable data 生成的取/存**：`int bindable m_state;` 不写 `property`，可它在 jancy 那边是
+ * "整个由编译器实现的属性"（samples/jnc/34_BindableProperties.jnc:87-90），所以编译器发两格
+ * 函数。出处是旧降级的真输出（82-reactor.jnc）：
+ *   `(fn Sess$m_state$get (($this (ptr Sess))) int`
+ *   `(fn Sess$m_state$set (($this (ptr Sess)) (x int)) void`
+ *   `(fn g_b$get () int` / `(fn g_b$set ((x int)) void`（顶层那一格没有 `$this`）
+ * 形参名就叫 `x`（lower.js:3448 / 3495）。存的那一格回 void，取的那一格回它自己的类型
+ * （**存储位置**）。
+ */
+export function dataAccessorHeads(m, env, ctx = { owner: null, self: null }) {
+  if (m === null || m === undefined || m.type === null || m.name === null) {
+    return { heads: [], why: '没有名字' };
+  }
+  const r = resolveType({ ...m.type, shape: 'data' }, env);
+  if (r.type === null) return { heads: [], why: `类型解不出来（${r.why}）` };
+  const tc = { clsRoot: ctx.clsRoot ?? ((n) => n) };
+  const ty = emitType(r.type, 'slot', tc);
+  const sym = ctx.owner === null || ctx.owner === undefined
+    ? m.name : `${ctx.owner}$${m.name}`;
+  const self = ctx.self === null || ctx.self === undefined ? null : `($this ${ctx.self})`;
+  const g = self === null ? '' : self;
+  const s = self === null ? `(x ${ty})` : `${self} (x ${ty})`;
+  return {
+    heads: [
+      { name: `${sym}$get`, head: `(fn ${sym}$get (${g}) ${ty}` },
+      { name: `${sym}$set`, head: `(fn ${sym}$set (${s}) void` },
+    ],
+    why: null,
+  };
+}
+
+/** 这一格数据声明会不会**生成**取/存（`bindable` 那一族；写了 `property` 的是另一条路）。 */
+export function isBindableData(m) {
+  if (m === null || m === undefined || m.type === null || m.type === undefined) return false;
+  if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') return false;
+  return m.type.mods.includes('bindable') && !m.type.mods.includes('property');
+}
+
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */
 function leafName(leaf) {
   if (leaf.kind === 'special') return SPECIAL_NAMES[leaf.text] ?? null;

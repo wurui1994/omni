@@ -22,6 +22,7 @@ import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import {
   fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
+  isBindableData, dataAccessorHeads,
 } from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
@@ -109,6 +110,7 @@ for (const f of files) {
   const env = new Map();
   const aggs = [];
   const tops = [];                                   // 顶层的函数（fn-def / fn-proto）
+  const vars = [];                                   // 顶层的数据声明（bindable 那一族要它）
   const scan = (n, owner, inAgg) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
@@ -161,6 +163,18 @@ for (const f of files) {
     } else if (h === 'var-decl') {
       const vn = named(n);
       const sp = vn === null ? null : readSpecs(vn.specs);
+      /* **顶层的 bindable data**（`int bindable g_b;`）也生成两格取/存 —— 收下来当一格用点。 */
+      if (!inAgg && vn !== null) {
+        for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
+          const dcl = headOf(d) === 'init' ? named(d)?.dcl : d;
+          const t = readDeclType(vn.specs, dcl);
+          if (t !== null && t.name !== null) {
+            vars.push({
+              name: t.name, type: t, shape: t.shape, storage: sp === null ? [] : sp.words, at: n, ns: owner,
+            });
+          }
+        }
+      }
       if (sp !== null && sp.words.includes('alias')) {
         for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
           if (headOf(d) !== 'init') continue;
@@ -272,10 +286,19 @@ for (const f of files) {
   const clsRoot = (n) => roots.get(n) ?? n;
 
   const cases = [];
+  const accCases = [];                              // 生成取/存的那几格（bindable data）
+  for (const m of vars) {
+    if (isBindableData(m)) accCases.push({ m, ctx: { owner: m.ns ?? null, self: null, clsRoot } });
+  }
   for (const a of aggs) {
     const own = a.emitName ?? nameText(a.name);
     if (own === null) continue;
     for (const m of a.members) {
+      /* **bindable data** 生成两格取/存（82-reactor.jnc 的 `Sess$m_state$get` / `$set`）。 */
+      if (isBindableData(m)) {
+        accCases.push({ m, ctx: { owner: own, self: selfOf(a), clsRoot } });
+        continue;
+      }
       if (m.shape !== 'fn') continue;
       /* **只有原型的那一格不算一个函数**：它的体或写在类外（那儿另有一格，名字一样）、
          或在宿主那边（旧降级压根不发）。先前两处各算一格，重载号于是多走一位 ——
@@ -306,6 +329,24 @@ for (const f of files) {
      所以先问号、再拼头。 */
   const nextDup = overloadIndex();
   const mineNames = new Set();                        // 新腿**试过**的那几个名字（算覆盖率用）
+  /* **生成的取/存**先对（它们不占重载号 —— 旧降级那边是另一遍发出来的）。 */
+  for (const c of accCases) {
+    const r = dataAccessorHeads(c.m, env, c.ctx);
+    if (r.heads.length === 0) {
+      skip.set(`生成的取/存：${r.why}`, (skip.get(`生成的取/存：${r.why}`) ?? 0) + 1);
+      continue;
+    }
+    for (const h of r.heads) {
+      mineNames.add(h.name);
+      const wantA = oracle.get(h.name);
+      if (wantA === undefined) { noFn += 1; continue; }
+      cmp += 1;
+      if (h.head === wantA) same += 1;
+      else if (diff.length < 20) {
+        diff.push(`${f.split('/').pop()}\n      旧 ${wantA}\n      新 ${h.head}`);
+      }
+    }
+  }
   for (const c of cases) {
     /* **reactor** 那一格发的是 `$start` / `$stop` 两格（82-reactor.jnc）—— 各自与旧降级对。 */
     if (isReactor(c.m)) {
