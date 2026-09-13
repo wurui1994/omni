@@ -198,7 +198,11 @@ export function autogetGetterHead(m, env, ctx = { owner: null, self: null }) {
   if (m === null || m === undefined || m.type === null || m.name === null) {
     return { heads: [], why: '没有名字' };
   }
-  const r = resolveType({ ...m.type, shape: 'data' }, env);
+  /* 完整声明式的属性**压根不写类型**（类型是取值器的返回类型）—— 只写了存值器时，
+     类型就是**存值器那个形参**的类型（141-propfullmem.jnc / 142-propalias.jnc），
+     由调用方按成员表挑出来递进来（`ctx.typeOf`）。 */
+  const src = ctx.typeOf ?? { ...m.type, shape: 'data' };
+  const r = resolveType(src, env);
   if (r.type === null) return { heads: [], why: `类型解不出来（${r.why}）` };
   const tc = { clsRoot: ctx.clsRoot ?? ((n) => n) };
   const ty = emitType(r.type, 'slot', tc);
@@ -383,6 +387,15 @@ export function aliasHead(name, tgt, env, ctx = { owner: null, self: null }) {
   if (ret === null) return { heads: [], why: '目标的返回类型解不出来' };
   const sym = ctx.owner === null || ctx.owner === undefined ? name : `${ctx.owner}$${name}`;
   return { heads: [{ name: sym, head: `(fn ${sym} (${parts.join(' ')}) ${ret}` }], why: null };
+}
+
+
+/** 一格存值器的**头一个形参**的类型（完整声明式属性没写类型时，取值器回的就是它）。 */
+export function setterParamType(setter) {
+  const sfx = fnSuffixOf(setter?.type);
+  const fs = sfx === null ? null : readFormals(sfx);
+  if (fs === null || fs.length === 0) return null;
+  return fs[0].type;
 }
 
 /** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */

@@ -23,7 +23,7 @@ import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import {
   fnHead, fnName, fnOwnerSegs, overloadIndex, isReactor, reactorHeads,
   isBindableData, dataAccessorHeads, isAutogetProp, autogetGetterHead,
-  isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead, overloadSuffix, aliasHead,
+  isVirtual, dispatchHead, needsCtor, hasWrittenCtor, ctorHead, overloadSuffix, aliasHead, setterParamType,
 } from '../../src/lang/jnc/emit-fn.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
@@ -412,6 +412,19 @@ for (const f of files) {
               ctx: { owner: `${own}$${m.name}`, self: selfOf(a), clsRoot, inProp: true },
             });
           }
+          /* 体里**只写了存值器**（`autoget` 那一族的完整声明式）→ 取值器由编译器生成
+             （141-propfullmem.jnc 的 `Box$m_v$get`、142-propalias.jnc 的 `C$m_a$get`）。 */
+          if (!accs.some((x) => fnName(x, true) === 'get')) {
+            const st = accs.find((x) => fnName(x, true) === 'set');
+            getCases.push({
+              m,
+              ctx: {
+                owner: own, self: selfOf(a), clsRoot,
+                typeOf: m.type.base.kind === 'none' && st !== undefined
+                  ? setterParamType(st) : undefined,
+              },
+            });
+          }
           continue;
         }
         if (headOf(body) === 'compound') {
@@ -461,6 +474,17 @@ for (const f of files) {
       if (accs.length > 0) {
         for (const im of accs) {
           cases.push({ m: im, ctx: { owner: own, self: null, clsRoot, inProp: true } });
+        }
+        if (!accs.some((x) => fnName(x, true) === 'get')) {         // 同上：只写了存值器
+          const st = accs.find((x) => fnName(x, true) === 'set');
+          getCases.push({
+            m,
+            ctx: {
+              owner: m.ns ?? null, self: null, clsRoot,
+              typeOf: m.type.base.kind === 'none' && st !== undefined
+                ? setterParamType(st) : undefined,
+            },
+          });
         }
         continue;
       }
