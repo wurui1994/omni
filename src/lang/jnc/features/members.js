@@ -160,15 +160,11 @@ export default feature({
       sorts: ['class-body', 'opaque-class-body'],
       verdict: 'ok',
     },
+    /* 顶层那两格先前**收了**（一格洞：jancy 只允许类里写这三个词），这一刀补上 —— 与结构体 /
+       union 那两格同一句话、同一个账号。 */
     {
       kind: 'method-abstract',
-      sorts: ['module', 'namespace'],
-      verdict: 'ok',
-      note: '疑似洞：jancy 那边 abstract 只能在类里（type_class.rst:178），这一格我们收了',
-    },
-    {
-      kind: 'method-abstract',
-      sorts: ['struct-body', 'union-body'],
+      sorts: ['module', 'namespace', 'struct-body', 'union-body'],
       verdict: 'error',
       account: 'M-007',
     },

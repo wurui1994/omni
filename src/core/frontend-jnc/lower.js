@@ -5573,6 +5573,11 @@ class JncLower {
              这一层接不上，说清是这一种，而不是笼统的"只收带体的定义"。
          签名对不上时当场报 —— 悄悄按其中一份算是骗人。 */
       if (info.formals !== null) {
+        /* 顶层的原型上写 `virtual` / `abstract`（矩阵 `module|namespace × method-abstract`
+           那一格量出来是 **✓** —— 那是一格洞：jancy 那边这三个词只能写在**类**的方法上
+           （type_class.rst:178），我们却悄悄收了一条永远调不着的声明）。这一句把它补上，
+           与带体的那一处（fnSig0）同一句话、同一个账号。 */
+        if (sp.virt !== null) { this.acctErr(dcl, 'M-007', { what: sp.virt }); continue; }
         const fn = this.qual(info.name);
         const have = this.fns.get(fn);
         if (have === undefined) {
