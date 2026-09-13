@@ -81,7 +81,7 @@ export const JNC_SCOPE = {
   formal: { steps: ['specs', 'dcl', 'init', 'bind:dcl'] },
   'formal-anon': { steps: ['specs', 'ptrs'] },
   // 类型与命名空间：自己是一层，**成员也不看先后**（同上：declare 一趟、compile 一趟）
-  agg: { steps: ['bind:name', 'bases', 'open', 'hoist:body', 'body'] },
+  agg: { steps: ['bind:name', 'bases', 'open', 'inherit:bases', 'hoist:body', 'body'] },
   enum: { steps: ['bind:name', 'base', 'open', 'hoist:body', 'body'] },
   'enum-item': { steps: ['value', 'bind:name'] },
   namespace: { steps: ['bind:name', 'open', 'hoist:body', 'body'] },

@@ -49,9 +49,20 @@ export function bind(ast, lang) {
   );
 
   const lookup = (name, scope) => {
+    /* 一层里可能还**接着几层**（基类那一族：`class C: A, B` 查不着就往 A、B 里查）。
+       接的是哪几层由 `inherit:` 那一步填在 `s.bases` 里 —— 这一层只管照着走，
+       顺带防环（`class A: A` 那种写错的写法不该把驱动器转死）。 */
+    const withBases = (s, out = []) => {
+      if (out.includes(s)) return out;
+      out.push(s);
+      for (const b of s.bases ?? []) withBases(b, out);
+      return out;
+    };
     const path = (function* steps() {
       for (const st of chain(scope)) {
-        yield { label: st.label, ns: st.ns, get: (nm) => st.ns.names.get(nm) };
+        for (const ns of withBases(st.ns)) {
+          yield { label: st.label, ns, get: (nm) => ns.names.get(nm) };
+        }
       }
     }());
     return lookupEntry(name, { path });
@@ -164,6 +175,18 @@ export function bind(ast, lang) {
           const hit = lookup(owner, cur);
           const s = hit === null ? undefined : scopeOf.get(hit.entry.node);
           if (s !== undefined) cur = s;
+        }
+        continue;
+      }
+      if (step.startsWith('inherit:')) {
+        /* **这一层还往那几层查**（基类）：把那一格里的名字查出来，取它们开出的那一层，
+           挂在 `cur.bases` 上。查不着（基类在别的文件）就少挂一层 —— 记账，不报错。 */
+        const list = lang.namesOf === undefined
+          ? node[step.slice(8)] : lang.namesOf(node[step.slice(8)]);
+        for (const nm of list ?? []) {
+          const hit = lookup(nm, cur);
+          const s = hit === null ? undefined : scopeOf.get(hit.entry.node);
+          if (s !== undefined && s !== cur) (cur.bases ??= []).push(s);
         }
         continue;
       }
