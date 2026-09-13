@@ -20,7 +20,7 @@ import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
-import { fnHead, fnName, overloadIndex } from '../../src/lang/jnc/emit-fn.js';
+import { fnHead, fnName, fnOwnerSegs, overloadIndex } from '../../src/lang/jnc/emit-fn.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
 
@@ -181,9 +181,14 @@ for (const f of files) {
     }
   }
   for (const m of tops) {
-    if (m.shape !== 'fn' || m.name === null) continue;
+    if (m.shape !== 'fn') continue;
     if (m.name === 'main') continue;                  // 旧降级不发它（体被抬走了）
-    cases.push({ m: { ...m, storage: m.storage ?? [] }, ctx: { owner: null, self: null } });
+    const mm = { ...m, storage: m.storage ?? [] };
+    /* **体外定义**（`int C0.get(){…}`）：名字是点串，东家是头一段 —— `$this` 要它。 */
+    const segs = m.name === null ? fnOwnerSegs(mm) : null;
+    const host = segs === null || segs.length === 0 ? undefined : env.get(segs[0]);
+    const self = host !== undefined && host.agg !== undefined ? selfOf(host.agg) : null;
+    cases.push({ m: mm, ctx: { owner: null, self } });
   }
 
   /* **重载的号**按声明次序发（`q` / `q$o1` / …）—— 拼不出来的那几格照样占一个号，

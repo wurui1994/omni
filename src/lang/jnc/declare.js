@@ -98,6 +98,11 @@ export function readDcl(node) {
        （127-outerget.jnc 的 `int get();` + `int C0.get(){…}`）。两者形状同、意思不同，
        所以这一层只照实说"它是裸写的取/存"，判在发那一层。 */
     bareAccessor: bareAccessorOf(nm.name),
+    /* **体外定义**那一族的名字是点串：`int C0.get(){…}` / `void C.f(){…}` /
+       `int C1.p.get(){…}` —— 树上是 `qualified` / `qualified-special` 套起来的
+       （节点表 :88-89）。照实读成"前面几段 + 尾巴那一格"，拼成 `C1$p$get` 是发那一层的事
+       （旧降级的真输出：127-outerget.jnc 的 `C0$get` / `C1$p$get` / `C1$get`）。 */
+    path: pathOf(nm.name),
     ptrs: ptrs.length,
     /* **跟在 `*` 后面的修饰词**也要读出来（`ptr-group -> "*" mods`）：
        `Inner* property m_p;` 里的 `property` 就落在这儿，不在说明符表里 ——
@@ -145,6 +150,53 @@ function bareAccessorOf(node) {
   const nm = named(node);
   const t = nm === null ? undefined : nm.text;
   return t !== null && t !== undefined && t.value !== undefined ? String(t.value) : null;
+}
+
+/** 一格记号的字面（`(qualified 左 右)` 的右边是**裸记号**，不是 `name` 节点）。 */
+function tokText(t) {
+  if (t === null || t === undefined || typeof t !== 'object') return null;
+  return t.value === undefined ? null : String(t.value);
+}
+
+/**
+ * 点串名字：`{ segs: ['C1','p'], leaf: {…} }`。前面几段都是普通名字，尾巴那一格可能是
+ * 普通名字、取/存、特名或算符 —— 四种照实分开说（拼名字是发那一层的事）。
+ */
+function pathOf(node) {
+  const h = headOf(node);
+  if (h !== 'qualified' && h !== 'qualified-special') return null;
+  const nm = named(node);
+  if (nm === null) return null;
+  const segs = [];
+  const walkLeft = (x) => {
+    const lh = headOf(x);
+    if (lh === 'qualified') {
+      const n2 = named(x);
+      if (n2 === null) { segs.push(null); return; }
+      walkLeft(n2.left);
+      segs.push(tokText(n2.right));
+      return;
+    }
+    segs.push(lh === 'name' ? nameText(x) : null);
+  };
+  walkLeft(nm.left);
+  const r = nm.right;
+  const rh = headOf(r);
+  let leaf = null;
+  if (h === 'qualified') {
+    const t = tokText(r);
+    leaf = t === null ? null : { kind: 'name', text: t };
+  } else if (rh === 'accessor') {
+    const t = bareAccessorOf(r);
+    leaf = t === null ? null : { kind: 'accessor', text: t };
+  } else if (rh === 'special') {
+    const t = specialText(r);
+    leaf = t === null ? null : { kind: 'special', text: t };
+  } else {
+    const op = operatorOf(r);
+    leaf = op === null ? null : { kind: 'operator', ...op };
+  }
+  return segs.some((s) => s === null) || leaf === null ? null : { segs, leaf };
 }
 
 /** 一格 `ptr` 节点里那串修饰词（`(ptr mods)`）。 */

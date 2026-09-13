@@ -101,7 +101,27 @@ export function fnName(m) {
   if (dc.bareAccessor !== null) {
     return headOf(m.at) === 'fn-def' ? `op$index$${dc.bareAccessor}` : null;
   }
+  /* **体外定义**：点串名字整串用 `$` 接起来（`C1.p.get` → `C1$p$get`，127-outerget.jnc）。 */
+  if (dc.path !== null) {
+    const leaf = leafName(dc.path.leaf);
+    return leaf === null ? null : [...dc.path.segs, leaf].join('$');
+  }
   return null;
+}
+
+/** 点串尾巴那一格的名字（四种：普通名字 / 取存 / 特名 / 算符）。 */
+function leafName(leaf) {
+  if (leaf.kind === 'name' || leaf.kind === 'accessor' || leaf.kind === 'special') return leaf.text;
+  const w = leaf.postfix ? OP_POSTFIX[leaf.op] : OP_NAMES[leaf.op];
+  return w === undefined ? null : `op$${w}`;
+}
+
+/** 体外定义的**东家**那几段（`int C1.p.get()` → `['C1','p']`）；不是体外定义答 null。 */
+export function fnOwnerSegs(m) {
+  const dc = readDcl(m?.type?.raw?.dcl);
+  if (dc === null) return null;
+  if (dc.accessor !== null) return [dc.accessor.path];
+  return dc.path === null ? null : dc.path.segs;
 }
 
 /**
@@ -136,9 +156,12 @@ export function fnHead(m, env, ctx = { owner: null, self: null }) {
   if (fs.some((f) => f.varargs)) return { head: null, why: '变参那一族（…）' };
   const parts = [];
   const isStatic = m.storage.includes('static');
-  if (ctx.owner !== null && !isStatic) {
-    if (ctx.self === null) return { head: null, why: '东家那一格解不出来' };
+  /* `$this` 那一格看的是"有没有东家"，不是"写在类体里还是类外" —— 体外定义
+     （`int C0.get(){…}`）一样带（127-outerget.jnc 的 `(fn C0$get (($this (ptr C0))) int`）。 */
+  if (ctx.self !== null && ctx.self !== undefined && !isStatic) {
     parts.push(`($this ${ctx.self})`);
+  } else if (ctx.owner !== null && ctx.owner !== undefined && !isStatic) {
+    return { head: null, why: '东家那一格解不出来' };
   }
   /* 类那一族在方言里写的是**连通块的根**（`(ptr 根)`，第五十六刀的 clsRoot）——
      53-inherit.jnc 的 `pick(int, Dog*, Puppy*)` 旧降级发的是三格 `(ptr Animal)`。
