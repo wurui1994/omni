@@ -326,7 +326,13 @@ for (const f of files) {
   for (const t of trees) scanNew(t, new Map(globals));
 
   const note = (w) => skip.set(w, (skip.get(w) ?? 0) + 1);
-  const next = { o: 0, s: 0, c: 0 };
+  /* **临时号是一个共用的计数器**（旧降级 `lower.js:15405` 就一个 `this.tmp++`）——
+     `$newo` / `$news` / `$newc` 与整格拷贝的 `$s<N>`、`$c<N>`、`$f<N>`、`$sv/$sk`、
+     `jnc$once$<N>` 统统从这一个号里取，按降级次序发。先前这儿摆了三个分族的计数器，
+     在这份语料上两种模型量出来一样（都是 87 行），但真的规则是共用那一个。
+     还差的是**别的取号处**：95-aliaspath.jnc 里 `Node n = m_head;` 那格整格拷贝先占了
+     `$s0`，所以那一格 `new Map` 旧降级叫 `$newo1` —— 等语句那条腿把取号处补齐再算。 */
+  let tmp = 0;
   for (const st of sites) {
     const tn = newTypeName(st.node);
     const rec = tn === null ? undefined : env.get(tn);
@@ -340,8 +346,8 @@ for (const f of files) {
     /* **结构体没有构造就不发壳**（`new Entry` 直接就是一句 `(pnew (ptr Entry) 1)`，
        124-errcptr.jnc 旧降级一格 `$news` 都没有）—— 不占号。带构造的才发（120-structctor.jnc）。 */
     if (fam === 's' && !needsCtor(rec.agg, env)) { note('结构体没有构造（不发壳）'); continue; }
-    const idx = next[fam];
-    next[fam] += 1;                                                  // 带实参的也占一个号
+    const idx = tmp;
+    tmp += 1;                                                  // 带实参的也占一个号
     const name = `$new${fam}${idx}`;
     if (fam === 'c') {
       const ts = curlyLitTypes(st.node, st.names, env, badHeads);
