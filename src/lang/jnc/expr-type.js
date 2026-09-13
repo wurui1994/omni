@@ -55,6 +55,27 @@ export function typeOfExpr(n, names = new Map(), env = new Map()) {
     if (op === '!') return { k: 'bool' };
     return in0;                                                      // `-` / `+` / `~` 不改种类
   }
+  /* **成员访问**（`(field obj name)`，节点表 :58）：先给对象定型，是结构体/类就在它的成员表里
+     查那个名字（`p.m_x` 里 p 是指针，先剥一层）。这一层照旧不查名 —— 聚合体那张表由调用方给。 */
+  if (h === 'field') {
+    const ot = typeOfExpr(nm?.obj, names, env);
+    if (ot === null) return null;
+    const base = ot.k === 'ptr' || ot.k === 'tptr' ? ot.target : ot;
+    if (base === null || base === undefined) return null;
+    if (base.k !== 'struct' && base.k !== 'class') return null;
+    let rec;
+    for (const r of env.values()) {
+      if (r !== null && r !== undefined && r.agg !== undefined && r.name === base.name) { rec = r; break; }
+    }
+    if (rec === undefined) return null;
+    const fn = nm === null ? null : nm.name;
+    const fname = fn === null || fn === undefined ? null
+      : (Array.isArray(fn.items) ? String(named(fn)?.text?.value ?? '') : String(fn.value ?? ''));
+    if (fname === null || fname === '') return null;
+    const mm = rec.agg.members.find((x) => x.name === fname);
+    if (mm === undefined || mm.type === null) return null;
+    return resolveType(mm.type, env).type;
+  }
   if (h === 'binary') {
     const op = nm === null ? null : String(nm.op?.value ?? '');
     const a = typeOfExpr(nm?.a, names, env);
