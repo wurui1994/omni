@@ -176,6 +176,9 @@ function ownFields(agg, env, ctx = { owner: '', extra: [] }) {
       return;
     }
     /* 函数指针字段也是一格数据（`(m_op (fnty (int int) int))`，109-fnfield.jnc）。 */
+    /* `alias` / `typedef` 那两族**不是字段**（它们只是给已有的东西起个名字，没有自己的存储）
+       —— 83-alias.jnc / 95-aliaspath.jnc / 199-aliasfield.jnc 那几处旧降级都不发。 */
+    if (m.storage.includes('alias') || m.storage.includes('typedef')) return;
     /* 事件字段也进字段表（多播那一格：`(arr (fnty () void))`，142-propalias.jnc）。 */
     if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr' && m.shape !== 'event') return;
     if (m.name === null) { out.push(null); return; }
