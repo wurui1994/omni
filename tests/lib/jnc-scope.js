@@ -8,7 +8,7 @@
 //       内建的那些（`printf` / `jnc.*`）—— 那几族要等成员表与导入表，**现在记成明账**。
 //   丙  **崩没崩**：驱动器碰到表里没有的节点会当场炸，炸了就是节点表还差一格。
 //
-// 用法：node tests/lib/jnc-scope.js [文件数，默认 80] [--all]
+// 用法：node tests/lib/jnc-scope.js [文件数，默认 80] [--all] [--per-file] [--no-import]
 
 import { readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -45,8 +45,10 @@ const files = walk(CORPUS).sort().slice(0, limit);
 /* 导入这一族在**外面**解（`modules.js`）：名字从前奏那一层进来，核心一行不用改。
    `--no-import` 可以关掉它 —— 上一版的数就是那么量的，两边一比才看得出这一刀值多少。 */
 const noImport = argv.includes('--no-import');
-/* `--module`：整模块一起绑（贵，但那才是 jancy 的真语义）。默认还是按文件绑 + 前奏。 */
-const wholeModule = argv.includes('--module');
+/* **默认整模块一起绑** —— 那才是 jancy 的真语义（一次编译一个模块），而且量出来只要 5s。
+   `--per-file` 回到"按文件绑 + 名字当前奏"那一路（上一版的数就是那么量的，两路一比才看得出
+   每一刀值多少）。 */
+const wholeModule = !argv.includes('--per-file');
 const index = noImport ? new Map() : moduleIndex([CORPUS]);
 const archIdx = noImport ? new Map() : archiveIndex([CORPUS]);
 const statsCache = new Map();
