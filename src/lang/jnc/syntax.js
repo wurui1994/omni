@@ -68,7 +68,10 @@ export const STORAGE = {
   override: { text: 'override', ctx: ['member'] },
   mutable: { text: 'mutable', ctx: ['global', 'member', 'local'] },
   disposable: { text: 'disposable', ctx: ['local'] },
-  dynamicfield: { text: 'dynamicfield', ctx: ['member'] },
+  /* 真词是 `dyfield` —— 我先前抄成了 `dynamicfield`，而那个拼法在 jancy 里**根本不存在**
+     （出处：jnc_ct_Lexer.rl:206 `'dyfield' { createToken(TokenKind_DynamicField); }`）。
+     这一笔是说明符尺子（tests/lib/jnc-specs.js）在 400 份语料上抓出来的：25 处表外的词。 */
+  dyfield: { text: 'dyfield', ctx: ['member'] },
 };
 
 /** 访问说明符（DeclarationSpecifier.llk:143-152）。 */
@@ -105,6 +108,11 @@ export const MODS = {
   const: { text: 'const', on: 'any' },
   maybeconst: { text: 'maybeconst', on: 'any' },
   autoconst: { text: 'autoconst', on: 'any' },
+  /* `cmut` 与 `constif` 是 `autoconst` 的**旧写法**，同一个记号
+     （jnc_ct_Lexer.rl:216-218：`'cmut' | 'constif' | 'autoconst'` 三者共用一个动作）。
+     语料里还有 1 处 `cmut` —— 词汇表得认它，不然那一格就成了"表外的词"。 */
+  cmut: { text: 'cmut', on: 'any', sameAs: 'autoconst' },
+  constif: { text: 'constif', on: 'any', sameAs: 'autoconst' },
   readonly: { text: 'readonly', on: 'any' },
   volatile: { text: 'volatile', on: 'data' },
   weak: { text: 'weak', on: 'data' },
