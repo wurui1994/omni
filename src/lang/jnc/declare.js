@@ -79,6 +79,11 @@ export function readDcl(node) {
   return {
     name: nameText(nm.name),
     nameNode: nm.name,
+    /* **特名**那一族：`construct` / `destruct` / `operator +` 那几个不是 `name` 节点，
+       而是 `(special "construct")`（node 表 :77）。名字那一格照旧只认 `name`（别的读取器
+       与尺子都按它对账），特名单独一格照实带出来 —— 发函数头那一层要它（旧降级发的是
+       `<东家>$construct`，86-multibase.jnc 的真输出）。 */
+    special: specialText(nm.name),
     ptrs: ptrs.length,
     /* **跟在 `*` 后面的修饰词**也要读出来（`ptr-group -> "*" mods`）：
        `Inner* property m_p;` 里的 `property` 就落在这儿，不在说明符表里 ——
@@ -88,6 +93,14 @@ export function readDcl(node) {
     ctor: headOf(nm.ctor) === 'ctor',
     raw: node,
   };
+}
+
+/** 特名（`(special "construct")`）的那个词；不是特名答 null。 */
+function specialText(node) {
+  if (headOf(node) !== 'special') return null;
+  const nm = named(node);
+  const t = nm === null ? undefined : nm.text;
+  return t !== null && t !== undefined && t.value !== undefined ? String(t.value) : null;
 }
 
 /** 一格 `ptr` 节点里那串修饰词（`(ptr mods)`）。 */
