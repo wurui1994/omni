@@ -160,6 +160,9 @@ export function bind(ast, lang) {
 
 /** 节点的洞名，按 `syn` 次序（含可选组/重复组与名字表/块）。 */
 function holesInOrder(n) {
+  /* 没有 `syn` 的语言（拼法在 `.grammar` 里的那条腿）按**洞的声明次序**走 ——
+     这不是特例，是默认值：表里洞的次序本来就是产生式里子项的次序。 */
+  if (n.syn === undefined) return Object.keys(n.holes ?? {});
   const out = [];
   const walkItems = (items) => {
     for (const it of items) {

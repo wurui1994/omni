@@ -204,6 +204,10 @@ export const JNC_SHAPES = [
   { name: 'skip-item', of: 'item', holes: {} },
   { name: 'named-item', of: 'item', holes: { name: 'exp', value: 'exp' } },
   { name: 'indexed-item', of: 'item', holes: { index: 'exp', value: 'exp' } },
+  /* 规整之后的**记号**那一格（`normalize.js`）：关键字、字面量、算符都归它。
+     树里没有这个头名（GLR 那边记号就是记号），表里有它是为了让通用驱动器
+     碰到叶子时按"没有洞的节点"走，而不是当特例。 */
+  { name: 'tok', of: 'exp', holes: {} },
 ];
 
 /**
