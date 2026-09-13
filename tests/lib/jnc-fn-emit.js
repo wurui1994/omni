@@ -59,6 +59,21 @@ function lastName(n) {
   return null;
 }
 
+/** 一格限定名的**全路径**（`ui.Combo` → `ui$Combo`；`extension` 的目标类型要它）。 */
+function dottedPath(n) {
+  const segs = [];
+  const walk = (x) => {
+    if (x === null || x === undefined || typeof x !== 'object') return;
+    if (!Array.isArray(x.items)) {
+      if (typeof x.value === 'string' && /^[A-Za-z_]\w*$/.test(x.value)) segs.push(x.value);
+      return;
+    }
+    for (const it of x.items.slice(1)) walk(it);
+  };
+  walk(n);
+  return segs.length === 0 ? null : segs.join('$');
+}
+
 /** 旧降级输出里每一行函数头：名字 -> `(fn 名字 (形参) 返回`。 */
 function headsOf(text) {
   const out = new Map();
@@ -113,18 +128,28 @@ for (const f of files) {
   const aggs = [];
   const tops = [];                                   // 顶层的函数（fn-def / fn-proto）
   const vars = [];                                   // 顶层的数据声明（bindable 那一族要它）
-  const scan = (n, owner, inAgg) => {
+  const scan = (n, owner, inAgg, extSelf) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
     let inner = owner;
     let agg = inAgg;
-    if (h === 'namespace') {
+    let ext = extSelf;
+    if (h === 'extension') {
+      /* **extension**（`extension Ext: C1 { … }`，第一百〇七刀）：体里的方法就是"目标类型的
+         成员" —— 东家是**目标类型**（点串换成 `$`），`$this` 也是它
+         （98-extension.jnc 的真输出 `(fn C1$bar (($this (ptr C1))) int`、
+         `(fn ui$Combo$plus (($this (ptr ui$Combo)) (k int)) int`）。 */
+      const en = named(n);
+      const tgt = en === null ? null : dottedPath(en.bases);
+      if (tgt !== null) { inner = tgt; ext = `(ptr ${tgt})`; agg = false; }
+    } else if (h === 'namespace') {
       /* **命名空间只是名字的前缀**（第五十一刀）：`namespace a { int bump(){} }` 旧降级发的是
          `(fn a$bump …)`，套起来的是 `a$b$deep`（48-namespace.jnc 的真输出）。 */
       const nn = named(n);
       const nm = nn === null ? null : nameText(nn.name);
       if (nm !== null) inner = owner === null ? nm : `${owner}$${nm}`;
       agg = false;
+      ext = undefined;
     } else if (h === 'agg') {
       const a = readAgg(n);
       if (a !== null) {
@@ -158,6 +183,7 @@ for (const f of files) {
             storage: sp === null ? [] : sp.words,
             at: n,
             ns: owner,                                   // 命名空间那一段前缀（没有就 null）
+            extSelf,                                     // extension 体里那一格的 `$this`
           });
         }
       }
@@ -200,9 +226,9 @@ for (const f of files) {
       const nm = e === null ? null : nameText(e.name);
       if (nm !== null) env.set(nm, { kind: 'enum', name: nm });
     }
-    for (const it of n.items) scan(it, inner, agg);
+    for (const it of n.items) scan(it, inner, agg, ext);
   };
-  scan(tree, null, false);
+  scan(tree, null, false, undefined);
   /* **泛型**：一格用点造一格实例（`generic.js`）—— 方法跟着叫 `Box$int$get_v`
      （110-generic.jnc 的真输出）。实例是替换好的普通 `agg`，所以照旧读；合成实参那几条
      typedef 与泛型 typedef 造出来的那几条也进 env。 */
@@ -368,7 +394,7 @@ for (const f of files) {
       const rec = env.get(segs[i]);
       if (rec !== undefined && rec.agg !== undefined) { host = rec; break; }
     }
-    const self = host !== undefined ? selfOf(host.agg) : null;
+    const self = host !== undefined ? selfOf(host.agg) : (m.extSelf ?? null);
     /* 点串的头一段不是聚合体时（`g_p.get()` 那种**顶层属性**的取/存）本来就没有 `$this`
        —— 旧降级发的是 `(fn g_p$get () int`（107-psetexpr.jnc）。 */
     cases.push({ m: mm, ctx: { owner: m.ns ?? null, self } });
