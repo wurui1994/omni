@@ -43,6 +43,12 @@ const check = argv.includes('--check');
  * 每种要素给一段**最小**源码。`use` 是"用一下它"的那一句（免得被当成死代码而绕过检查）；
  * `needsField` 说的是"这一格要素自己不是字段"，那种位置（struct / union）要另配一格字段
  * 才满足方言"至少一个字段"那条界 —— 那是方言的账，不该混进这张表。 */
+/* 第四格（可选）是**"名字漏没漏出来"的探针**：一句"用一下那个声明出来的名字"的话，
+   探针把它塞进**后面一个函数体**里再编一遍。编得过 = 这一格的名字在写它的那层作用域**外面**
+   也认得。第 219/250/260 刀那笔代价（T-005："体里声明的类型，名字提到外面那层"）先前只是
+   一句话，这一格把它量出来。
+   为什么是"后面一个函数"而不是模块顶层：登记发生在**降那个体的时候**，模块级那些声明的类型
+   在那之前就解完了 —— 拿模块顶层去问，量到的是**遍的次序**，不是作用域。 */
 const KINDS = [
   ['field-int', 'int m_i;', 'x'],
   ['field-string', 'string_t m_s;', 'x'],
@@ -53,17 +59,17 @@ const KINDS = [
   ['field-bigendian', 'bigendian uint16_t m_be;', 'x'],
   ['field-class-value', 'Helper m_h;', 'x'],
   ['field-class-ptr', 'Helper* m_hp;', 'x'],
-  ['struct', 'struct Nested { int m_n; }', 'x'],
-  ['union-named', 'union Uni { int m_a; bool m_b; }', 'x'],
+  ['struct', 'struct Nested { int m_n; }', 'x', 'Nested v;'],
+  ['union-named', 'union Uni { int m_a; bool m_b; }', 'x', 'Uni v;'],
   ['union-anon', 'union { int m_ua; bool m_ub; }', 'x'],
-  ['class', 'class Inner { int m_v; }', 'x'],
-  ['enum', 'enum Color { Red, Green }', 'x'],
-  ['enum-anon', 'enum { KB = 1024, MB = 2048 }', 'x'],
-  ['enum-bitflag', 'bitflag enum Flags { A, B }', 'x'],
-  ['typedef', 'typedef int Num;', 'x'],
-  ['typedef-fn', 'typedef function VoidFn(int);', 'x'],
-  ['typedef-fnptr', 'typedef int IntFn(int);', 'x'],
-  ['alias-method', 'alias twice = probeSelf;', 'x'],
+  ['class', 'class Inner { int m_v; }', 'x', 'Inner* v;'],
+  ['enum', 'enum Color { Red, Green }', 'x', 'Color v = Color.Red;'],
+  ['enum-anon', 'enum { KB = 1024, MB = 2048 }', 'x', 'int v = KB;'],
+  ['enum-bitflag', 'bitflag enum Flags { A, B }', 'x', 'Flags v = Flags.A;'],
+  ['typedef', 'typedef int Num;', 'x', 'Num v = 1;'],
+  ['typedef-fn', 'typedef function VoidFn(int);', 'x', 'VoidFn* v;'],
+  ['typedef-fnptr', 'typedef int IntFn(int);', 'x', 'IntFn* v;'],
+  ['alias-method', 'alias twice = probeSelf;', 'x', 'twice();'],
   ['method-body', 'int probeM() { return 1; }', 'x'],
   ['method-proto', 'int probeP();', 'x'],
   ['method-static', 'static int probeS() { return 2; }', 'x'],
@@ -196,20 +202,34 @@ mkdirSync(join(OUT_DIR, 'imports'), { recursive: true });
 writeFileSync(join(OUT_DIR, 'imports', 'probeimp.jnc'), 'int probeImported() {\n\treturn 7;\n}\n');
 
 const sorts = SORTS.filter(([s]) => only === null || s === only);
-const cells = new Map();          // `${sort}|${kind}` -> {k, why}
+const cells = new Map();          // `${sort}|${kind}` -> {k, why, esc?}
+const escOf = new Map(KINDS.filter((r) => r[3] !== undefined).map((r) => [r[0], r[3]]));
 const tally = { ok: 0, N: 0, E: 0, syn: 0, crash: 0 };
 const t0 = Date.now();
 for (const [sort, wrap] of sorts) {
   for (const [kind, elem] of KINDS) {
     const r = runOne(sort, kind, wrap(elem));
+    /* 这一格收得下，再问一句**名字落在哪**：把"在模块顶层用一下它"那句接在后面再编一遍。
+       编得过 = 漏到了模块顶层。这是 Phase 3 要的那一列（谁登记、登记到哪层）的第一半，
+       而且是**量出来的**，不是我说的。 */
+    const out = escOf.get(kind);
+    if (r.k === 'ok' && out !== undefined) {
+      const useFn = `int probeEscUse() {\n\t${out}\n\treturn 0;\n}\n`;
+      r.esc = runOne(sort, `${kind}__esc`, `${wrap(elem)}\n${useFn}`).k === 'ok';
+    }
     cells.set(`${sort}|${kind}`, r);
     tally[r.k] += 1;
   }
   process.stdout.write(`  ${sort.padEnd(18)} ${KINDS.length} 格\n`);
 }
+/* 漏出去的那些格单独报一行 —— 它是 T-005 那笔代价的**清单**。 */
+const escaped = [...cells].filter(([, r]) => r.esc === true).map(([k]) => k);
+const kept = [...cells].filter(([, r]) => r.esc === false).map(([k]) => k);
 const secs = ((Date.now() - t0) / 1000).toFixed(1);
 process.stdout.write(`\n位置 ${sorts.length} × 要素 ${KINDS.length} = ${cells.size} 格`
   + `　ok ${tally.ok}、N ${tally.N}、E ${tally.E}、syn ${tally.syn}、炸 ${tally.crash}　${secs}s\n`);
+process.stdout.write(`名字漏到写它那层**外面**的：${escaped.length} 格（留在原处的 ${kept.length} 格）`
+  + `${escaped.length > 0 ? `　→ ${escaped.join('、')}` : ''}\n`);
 
 /* 理由编号：同一句话在整张表里只写一遍，格子里放号。这一格就是 ADR-0029 说的"账号"的雏形
    —— 先按出现顺序编，等 Phase 1 把 accounts.md 立起来之后换成稳定号。 */
@@ -241,6 +261,12 @@ md.push(`位置 ${sorts.length} × 要素 ${KINDS.length} = ${cells.size} 格：
 md.push(`| ${head.join(' | ')} |`);
 md.push(`|${head.map(() => '---').join('|')}|`);
 for (const r of rows) md.push(`| ${r.join(' | ')} |`);
+md.push('', '## 名字落在哪（`escapes`）', '',
+  '带体的那几种要素还有第二问：**声明出来的名字，在写它的那层作用域外面认不认得**。',
+  '量法是把"用一下那个名字"塞进后面一个函数体里再编一遍 —— 编得过就是漏出去了。',
+  '这一列就是 ADR-0016 第 219/250/260 刀那笔代价（T-005）的清单。', '');
+md.push(`漏到外面那层：${escaped.length} 格；留在原处：${kept.length} 格。`, '');
+for (const k of escaped) md.push(`- \`${k}\` —— 漏到外面那层`);
 md.push('', '## 理由表', '');
 whyList.forEach((w, i) => md.push(`${i + 1}. ${w}`));
 md.push('', '## 怎么读它', '',

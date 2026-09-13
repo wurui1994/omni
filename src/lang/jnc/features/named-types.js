@@ -8,6 +8,11 @@ import { feature } from '../../../core/frontend-engine/feature.js';
 
 /** 这几种要素在这些位置上一律收：名字提到"外面那层命名空间"（代价见 T-005）。 */
 const OK = ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body', 'fn-body'];
+/* 名字**留在写它那层**的那几个位置（`escapes: false`）与**漏到外面那层**的那一个
+   （`fn-body`，就是 T-005 那笔代价）。这一列由 `tests/lib/jnc-matrix.js` 真量：
+   把"用一下那个名字"塞进后面一个函数体里再编一遍，编得过就是漏了。
+   `module` 那一格不声明 —— 它外面没有别的层，问不出这件事。 */
+const KEEPS = ['namespace', 'class-body', 'struct-body', 'opaque-class-body'];
 const NAMED = ['struct', 'union-named', 'class', 'enum', 'enum-anon', 'enum-bitflag',
   'typedef', 'typedef-fn', 'typedef-fnptr'];
 
@@ -53,7 +58,9 @@ export default feature({
   },
   positions: [
     ...NAMED.flatMap((kind) => [
-      { kind, sorts: OK, verdict: 'ok', note: kind === 'typedef' ? 'T-005 的代价' : '' },
+      { kind, sorts: ['module'], verdict: 'ok' },
+      { kind, sorts: KEEPS, verdict: 'ok', escapes: false },
+      { kind, sorts: ['fn-body'], verdict: 'ok', escapes: true, note: 'T-005 的代价' },
       { kind, sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
       { kind, sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
       { kind, sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },

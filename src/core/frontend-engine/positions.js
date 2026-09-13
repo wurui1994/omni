@@ -187,6 +187,19 @@ export function diff(spec, measured) {
        那三条"认错人"就是这一类，而先前只比结论是抓不住它们的。
        账号可以给一格 `match`（子串或正则源）说明它在措辞里长什么样；不给就拿 `text` 的
        前 8 个字当特征（够区分这 25 个账号，又不至于把整句话钉死 —— 措辞还要改）。 */
+    /* `ok` 那一栏也有要对的账：**名字落在哪**（`escapes`）。这一列由探针真量出来
+       （jnc-matrix 那份 KINDS 的第四格：把"用一下那个名字"塞进后面一个函数体里再编一遍），
+       所以"写在体里的类型名会漏到外面那层"这笔代价（T-005）从此是一条能失败的测试，
+       不是文档里的一句话。 */
+    if (c.escapes !== undefined && m.esc !== undefined && c.escapes !== m.esc) {
+      out.push({
+        sort,
+        kind,
+        want: `${got}/名字${c.escapes ? '漏到外面那层' : '留在原处'}`,
+        got: `${got}/名字${m.esc ? '漏出去了' : '留在原处'}`,
+      });
+      continue;
+    }
     if (c.verdict !== 'refuse' && c.verdict !== 'error') continue;
     const acc = spec.accounts.get(c.account);
     if (acc === undefined) continue;

@@ -53,6 +53,35 @@
 | using-namespace | ✓ | ✓ | N8 | N14 | N16 | N8 | N20 | N22 | N24 |
 | extension | ✓ | ✓ | N8 | N14 | N16 | N8 | N17 | N22 | N24 |
 
+## 名字落在哪（`escapes`）
+
+带体的那几种要素还有第二问：**声明出来的名字，在写它的那层作用域外面认不认得**。
+量法是把"用一下那个名字"塞进后面一个函数体里再编一遍 —— 编得过就是漏出去了。
+这一列就是 ADR-0016 第 219/250/260 刀那笔代价（T-005）的清单。
+
+漏到外面那层：20 格；留在原处：41 格。
+
+- `module|struct` —— 漏到外面那层
+- `module|union-named` —— 漏到外面那层
+- `module|class` —— 漏到外面那层
+- `module|enum` —— 漏到外面那层
+- `module|enum-anon` —— 漏到外面那层
+- `module|enum-bitflag` —— 漏到外面那层
+- `module|typedef` —— 漏到外面那层
+- `module|typedef-fn` —— 漏到外面那层
+- `module|typedef-fnptr` —— 漏到外面那层
+- `module|alias-method` —— 漏到外面那层
+- `fn-body|struct` —— 漏到外面那层
+- `fn-body|union-named` —— 漏到外面那层
+- `fn-body|class` —— 漏到外面那层
+- `fn-body|enum` —— 漏到外面那层
+- `fn-body|enum-anon` —— 漏到外面那层
+- `fn-body|enum-bitflag` —— 漏到外面那层
+- `fn-body|typedef` —— 漏到外面那层
+- `fn-body|typedef-fn` —— 漏到外面那层
+- `fn-body|typedef-fnptr` —— 漏到外面那层
+- `fn-body|alias-method` —— 漏到外面那层
+
 ## 理由表
 
 1. 这个位置上的位域（`: 位数` 只在结构体的字段上）

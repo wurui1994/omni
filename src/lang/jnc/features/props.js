@@ -93,14 +93,16 @@ export default feature({
     { kind: 'reactor', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
     { kind: 'reactor', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
     // alias（第 87/102/254 刀）：顶层、类、结构体、union 都收；函数体里那一格认错人
+    { kind: 'alias-method', sorts: ['module'], verdict: 'ok' },
     {
       kind: 'alias-method',
-      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'union-body', 'opaque-class-body'],
+      sorts: ['namespace', 'class-body', 'struct-body', 'union-body', 'opaque-class-body'],
       verdict: 'ok',
+      escapes: false,
     },
     /* 函数体里的 alias：第二百六十二刀落了（矩阵 A-001 那一格挑出来的第一刀）。
        代价与体里的 typedef / enum / struct 同一笔（T-005：名字提到外面那层）。 */
-    { kind: 'alias-method', sorts: ['fn-body'], verdict: 'ok', note: 'T-005 的代价' },
+    { kind: 'alias-method', sorts: ['fn-body'], verdict: 'ok', escapes: true, note: 'T-005 的代价' },
     { kind: 'alias-method', sorts: ['property-body'], verdict: 'refuse', account: 'P-006' },
     { kind: 'alias-method', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
