@@ -8,50 +8,50 @@
 - `N…` 前端自己说的边界（"还不收"）
 - `E…` 普通错 —— **这一栏是下一刀的料**：话对不对、认不认错人，都在这儿看
 
-位置 9 × 要素 40 = 360 格：✓ 180、N 146、E 19、· 6、炸 9
+位置 9 × 要素 40 = 360 格：✓ 180、N 146、E 28、· 6、炸 0
 
 | 要素 | module | namespace | class-body | struct-body | union-body | opaque-class-body | fn-body | property-body | extension-body |
 |---|---|---|---|---|---|---|---|---|---|
-| field-int | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | **炸25** | N30 |
-| field-string | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | **炸25** | N30 |
-| field-array | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | **炸25** | N30 |
-| field-static | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N26 | N30 |
-| field-const | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N26 | N30 |
-| field-bitfield | N1 | N1 | N1 | ✓ | N1 | N1 | N1 | **炸25** | N30 |
-| field-bigendian | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N26 | N30 |
-| field-class-value | ✓ | ✓ | ✓ | E11 | N17 | ✓ | ✓ | **炸25** | N30 |
-| field-class-ptr | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | **炸25** | N30 |
-| struct | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N30 |
-| union-named | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N30 |
-| union-anon | · | · | · | ✓ | N18 | · | · | N27 | N30 |
-| class | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N30 |
-| enum | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N30 |
-| enum-anon | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N30 |
-| enum-bitflag | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N30 |
-| typedef | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N30 |
-| typedef-fn | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N30 |
-| typedef-fnptr | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N30 |
-| alias-method | ✓ | ✓ | N9 | N9 | N9 | N9 | E19 | N28 | N30 |
+| field-int | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | E25 | N29 |
+| field-string | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | E25 | N29 |
+| field-array | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | E25 | N29 |
+| field-static | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N26 | N29 |
+| field-const | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N26 | N29 |
+| field-bitfield | N1 | N1 | N1 | ✓ | N1 | N1 | N1 | E25 | N29 |
+| field-bigendian | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N26 | N29 |
+| field-class-value | ✓ | ✓ | ✓ | E11 | N17 | ✓ | ✓ | E25 | N29 |
+| field-class-ptr | ✓ | ✓ | ✓ | ✓ | N17 | ✓ | ✓ | E25 | N29 |
+| struct | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N29 |
+| union-named | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N29 |
+| union-anon | · | · | · | ✓ | N18 | · | · | N27 | N29 |
+| class | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N29 |
+| enum | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N29 |
+| enum-anon | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N29 |
+| enum-bitflag | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N29 |
+| typedef | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N29 |
+| typedef-fn | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N29 |
+| typedef-fnptr | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | ✓ | N27 | N29 |
+| alias-method | ✓ | ✓ | N9 | N9 | N9 | N9 | E19 | N28 | N29 |
 | method-body | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | N20 | N27 | ✓ |
-| method-proto | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N21 | **炸25** | N30 |
+| method-proto | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N21 | E25 | N29 |
 | method-static | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | N20 | N27 | ✓ |
-| method-errorcode | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | E22 | N26 | N30 |
+| method-errorcode | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | E22 | N26 | N29 |
 | construct | E3 | E3 | ✓ | ✓ | N18 | ✓ | N20 | N27 | ✓ |
 | construct-args | E3 | E3 | ✓ | ✓ | N18 | ✓ | N20 | N27 | ✓ |
 | static-construct | E3 | E3 | ✓ | N12 | N18 | ✓ | N20 | N27 | ✓ |
 | destruct | N4 | N4 | N4 | N12 | N18 | N4 | N20 | N27 | N4 |
 | operator-add | N5 | N5 | N5 | N5 | N18 | N5 | N20 | N27 | N5 |
 | operator-assign | E6 | E6 | ✓ | ✓ | N18 | ✓ | N20 | N27 | ✓ |
-| property-simple | ✓ | ✓ | ✓ | N13 | ✓ | ✓ | N23 | E29 | N30 |
+| property-simple | ✓ | ✓ | ✓ | N13 | ✓ | ✓ | N23 | E25 | N29 |
 | property-full | E7 | E7 | E7 | E7 | N18 | E7 | N20 | N27 | E7 |
-| property-bindable | ✓ | ✓ | ✓ | N13 | ✓ | ✓ | N23 | E29 | N30 |
-| event | ✓ | ✓ | ✓ | N14 | ✓ | ✓ | N21 | **炸25** | N30 |
+| property-bindable | ✓ | ✓ | ✓ | N13 | ✓ | ✓ | N23 | E25 | N29 |
+| event | ✓ | ✓ | ✓ | N14 | ✓ | ✓ | N21 | E25 | N29 |
 | reactor | ✓ | ✓ | ✓ | ✓ | N18 | ✓ | N20 | N27 | ✓ |
-| local-var | ✓ | ✓ | ✓ | N15 | · | ✓ | ✓ | **炸25** | N30 |
-| import | N8 | N8 | N10 | N16 | N18 | N10 | N20 | N27 | N30 |
-| pragma | ✓ | ✓ | N10 | N16 | N18 | N10 | N20 | N27 | N30 |
-| using-namespace | ✓ | ✓ | N10 | N16 | N18 | N10 | N24 | N27 | N30 |
-| extension | ✓ | ✓ | N10 | N16 | N18 | N10 | N20 | N27 | N30 |
+| local-var | ✓ | ✓ | ✓ | N15 | · | ✓ | ✓ | E25 | N29 |
+| import | N8 | N8 | N10 | N16 | N18 | N10 | N20 | N27 | N29 |
+| pragma | ✓ | ✓ | N10 | N16 | N18 | N10 | N20 | N27 | N29 |
+| using-namespace | ✓ | ✓ | N10 | N16 | N18 | N10 | N24 | N27 | N29 |
+| extension | ✓ | ✓ | N10 | N16 | N18 | N10 | N20 | N27 | N29 |
 
 ## 理由表
 
@@ -79,12 +79,11 @@
 22. '…' 只能写在函数上（exceptions.rst:17）
 23. 函数体里的属性声明（属性指针要一格"属性指针"类型）
 24. 写在函数体里的 `using namespace X;` —— 它的作用域是这个块，要一张跟着作用域一起进出的表（写在命名空间那一层的那一格收了，见 ADR-0016 第二百一十七刀）
-25. TypeError: Cannot read properties of undefined (reading 'span')
+25. 退出码 1，没有诊断
 26. 完整声明式的属性 '…' 体里的这一条 —— 字段要写 `autoget`、事件要写 `bindable event`（prop_full.rst:34）
 27. 完整声明式的属性 '…' 体里的这一条 —— 只收带体的 get / set 与`autoget` 的字段 / `bindable` 的事件（prop_full.rst:34）
 28. 完整声明式的属性 '…' 里那条 alias 上既没有 '…' 也没有 '…'（属性体里的 alias 只有这两种意思，jnc_ct_Parser.cpp:1354-1361）
-29. 退出码 1，没有诊断
-30. extension 体里除带体的方法以外的成员
+29. extension 体里除带体的方法以外的成员
 
 ## 怎么读它
 

@@ -4885,8 +4885,16 @@ class JncLower {
        flat 只认得出头两条 —— 接上去的 `property` 就这么没了。写 `autoget int m_x;`（词在
        类型前面）时那一格是空的 `(mods)`，所以第七十五刀起这一格一直是对的；`int autoget m_x;`
        （ui_PropertyGrid.jnc:79 那种，词在类型后面）才踩得着。 */
-    const flatMods = (lst, extras) => this.mkL(lst.span, this.mkA(lst.span, 'mods'),
-      ...this.flat(lst), ...extras.map((w) => this.mkA(lst.span, w)));
+    /* `lst` 可以是**空的**（第二百六十一刀，ADR-0029 的矩阵撞出来的）：说明符那一格的两组
+       修饰符在语法里是可选的，`int m_i;` 那种一个词都没写时 `(specs …)` 只有三项，
+       `items[3]` 压根不在。先前这儿直接读 `lst.span`，于是整个前端**抛 TypeError**
+       （一条诊断都没有）—— 位置矩阵上那 9 格 `炸` 全是这一处。
+       兜法与上面 `keep()` 那一处逐字一样：没有就在 core 的位置上合成一格空 `(mods)`。 */
+    const flatMods = (lst, extras) => {
+      const at = lst !== undefined && lst !== null ? lst.span : core.span;
+      return this.mkL(at, this.mkA(at, 'mods'),
+        ...this.flat(lst), ...extras.map((w) => this.mkA(at, w)));
+    };
     if (ptrs.items.length === 1) {
       sp.items[3] = flatMods(sp.items[3], words);
     } else {
