@@ -21,6 +21,7 @@ import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
 import { structLine } from '../../src/lang/jnc/emit-agg.js';
+import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
 
@@ -174,6 +175,35 @@ for (const f of files) {
     for (const it of n.items) scan(it, inner);
   };
   scan(tree, null);
+  /* **泛型**：一格用点造一格实例（`generic.js`）。实例是替换好的普通 `agg`，所以读法照旧 ——
+     名字用实例名（`Box$int`），合成实参那几条 typedef（`jnc$tp$int_p`）与泛型 typedef 造出来的
+     那几条（`Pair$int`）也一起进 env，不然实例体里那格字段解不出来。 */
+  const templates = templateTable(tree);
+  if (templates.size > 0) {
+    const g = expandTemplates(tree, templates);
+    for (const [tn, e] of g.typedefs) env.set(tn, { kind: 'typedef', type: synthType(e) });
+    for (const td of g.tdefs.values()) {
+      if (td === null) continue;
+      const tnm = named(td);
+      if (tnm === null) continue;
+      for (const d of allInChain(tnm.dcls, 'dcls-add', 'dcls')) {
+        const t = readDeclType(tnm.specs, d);
+        if (t !== null && t.name !== null) env.set(t.name, { kind: 'typedef', type: t });
+      }
+    }
+    for (const [inm, node] of g.insts) {
+      if (node === null) continue;
+      const a = readAgg(node);
+      if (a === null) continue;
+      a.emitName = inm;
+      aggs.push(a);
+      env.set(inm, {
+        kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
+        name: inm,
+        agg: a,
+      });
+    }
+  }
   /* 枚举项当常量（数组长度那一族要它）：环境里先塞一遍。 */
   collectEnumConsts(tree, env);
 

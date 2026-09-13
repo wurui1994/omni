@@ -18,6 +18,7 @@
 import { headOf, named } from './adapt.js';
 import { nameText, allInChain } from './declare.js';
 import { readSpecs } from './specs.js';
+import { BASE_KINDS } from './types.js';
 
 /** 实例化套多深就算停不下来（旧降级的 TMPL_DEPTH 同一条闸门）。 */
 const MAX_DEPTH = 8;
@@ -213,8 +214,7 @@ export function expandTemplates(tree, templates) {
     if (tm.kind === 'typedef') {
       tdefs.set(inst, null);                                         // 先占位（防自套）
       const td = renameDeclTinst(substitute(tm.node, map), tm.base, inst);
-      tdefs.set(inst, td);
-      walk(td, depth + 1);
+      tdefs.set(inst, rewrite(td, depth + 1));
       return inst;
     }
     insts.set(inst, null);                                           // 先占位（防自套死循环）
@@ -224,9 +224,23 @@ export function expandTemplates(tree, templates) {
     const items = [...ag.items];
     items[ag.items.indexOf(nm.name)] = nameNode(inst, nm.name);
     const done = { ...ag, items };
-    insts.set(inst, done);
-    walk(done, depth + 1);                                           // 实例体里还带用点就接着造
+    insts.set(inst, rewrite(done, depth + 1));                       // 体里的用点换成实例名
     return inst;
+  };
+  /**
+   * 把树里每一格**用点**换成实例名（`(tinst Box (targ int))` → `(name Box$int)`，与旧降级
+   * tinstRewrite 同一条）。不换的话实例体里那格字段的基类型还是 `tinst`，解不出来 ——
+   * 尺子上就是 `m_bk: 认不出基类型 'tinst'`。
+   */
+  const rewrite = (n, depth) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return n;
+    if (headOf(n) === 'tinst') {
+      const inst = instOne(n, depth);
+      return inst === null ? n : nameNode(inst, n);
+    }
+    const items = n.items.map((x) => rewrite(x, depth));
+    if (items.every((x, i) => x === n.items[i])) return n;
+    return { ...n, items };
   };
   const walk = (n, depth) => {
     if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
@@ -237,7 +251,8 @@ export function expandTemplates(tree, templates) {
     for (const it of n.items) walk(it, depth);
   };
   walk(tree, 0);
-  return { insts, typedefs, tdefs, fails };
+  /* 原来那棵树上的用点也换成实例名答回去 —— 顶层写 `Box<int> m_b;` 的那一格要它。 */
+  return { insts, typedefs, tdefs, fails, tree: rewrite(tree, 0) };
 }
 
 /** 这份文件里的模板表（`base -> {base, params, node}`）。 */
@@ -300,4 +315,26 @@ function renameDeclTinst(n, base, inst) {
   const items = n.items.map((x) => renameDeclTinst(x, base, inst));
   if (items.every((x, i) => x === n.items[i])) return n;
   return { ...n, items };
+}
+
+/**
+ * 合成实参那条 typedef 的**类型记录**：`expandTemplates` 的 `typedefs` 一格 →
+ * 一格与 `readDeclType` 同形状的东西，进 env 就解得出来。`*` 与修饰符长在这一格上，
+ * 基类型照抄实参写的那个 spec 节点（`resolveType` 从 `raw.specs` 上读名字）。
+ */
+export function synthType(e) {
+  const sp = readSpecs(e.specs);
+  const head = sp === null ? null : sp.typeHead;
+  return {
+    base: {
+      kind: head === null ? 'none' : (BASE_KINDS[head] ?? 'word'),
+      text: head === null ? '' : String(head),
+    },
+    mods: e.mods,
+    ptrs: e.ptrs,
+    suffixes: [],
+    shape: 'data',
+    name: null,
+    raw: { specs: e.specs, dcl: null },
+  };
 }
