@@ -93,6 +93,16 @@ export function compose(features) {
       }
     }
   }
+  /* 被 `refuse` / `error` 那两栏引到的账号必须**能渲染成一句话**（`say`）：那一栏的诊断
+     就是它渲染出来的（R5）。只当"代价"记着的账（比如 T-005：名字提到外面那层）不发话，
+     也就不用 `say` —— 所以这道检查只看被那两栏引到的。 */
+  for (const c of [...cells.values(), ...wild.values()]) {
+    if (c.verdict !== 'refuse' && c.verdict !== 'error') continue;
+    const acc = accounts.get(c.account);
+    if (typeof acc.say !== 'string') {
+      throw new Error(`账号 ${c.account} 被 '${c.kind}' 当结论引着，可它没有 say（发不出话）`);
+    }
+  }
   return { cells, wild, accounts, features: [...names], sorts, kinds };
 }
 

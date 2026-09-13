@@ -1667,7 +1667,7 @@ class JncLower {
       ? (this.structs.has(this.ns) ? this.ns : null)
       : this.resolve(info.name, (k) => this.structs.has(k));
     if (owner === null) {
-      return this.err(n, "'operator :=' 只能是类或结构体的成员（写在体里）");
+      return this.acctErr(n, 'M-005');
     }
     if (ps.length !== 1) {
       return this.nope(n, `'operator :=' 收 ${ps.length} 个形参（这一层只收一个）`);
@@ -2528,6 +2528,11 @@ class JncLower {
   /** 一条**按账号发的**"还不收"：话由 `features/*.js` 里那条 `say` 模板渲染（ADR-0029 R5）。 */
   acct(node, id, vars = {}) {
     return this.nope(node, say(JNC_SPEC, id, vars));
+  }
+
+  /** 同上，但这一条是**普通错**（`error` 那一栏：不是欠账，是这门语言里本来就写不得）。 */
+  acctErr(node, id, vars = {}) {
+    return this.err(node, say(JNC_SPEC, id, vars));
   }
 
   /** 一条**警告**（不停下）。`import … with "h"` 里跳过的那些声明走这条，见 `impWith`。 */
@@ -3892,7 +3897,7 @@ class JncLower {
       }
       for (const m of this.flat(e.it.items[3])) {
         if (isList(m) && head(m) === 'fn-def') { out.push({ ns: tgt, it: m }); continue; }
-        this.nope(m, 'extension 体里除带体的方法以外的成员');
+        this.acct(m, 'T-004');
       }
     }
     return out;
@@ -3927,7 +3932,7 @@ class JncLower {
           ? inner.items[1].value : null;
         const ianon = ik !== null && isList(inner.items[2]) && head(inner.items[2]) === 'anon';
         if (ik !== 'struct' || !ianon) {
-          this.nope(m, 'union 体里除字段与匿名 struct 以外的成员');
+          this.acct(m, 'T-003');
           return null;
         }
         const ibs = { last: null };                 // 里头那一组自己的位域分组（第一百一十二刀）
@@ -3973,7 +3978,7 @@ class JncLower {
         continue;
       }
       if (!isList(m) || head(m) !== 'var-decl') {
-        this.nope(m, 'union 体里除字段与匿名 struct 以外的成员');
+        this.acct(m, 'T-003');
         return null;
       }
       /* 带名字的 union 的体里也有**方法**（第二百五十三刀）：`io.SocketAddress` 的
@@ -4022,8 +4027,7 @@ class JncLower {
           continue;
         }
         if (!(isInt(t) || t === J_REAL || t === J_BOOL || jncIsEnum(t) || jncIsStruct(t))) {
-          this.nope(d, `union 里的成员 '${info.name}'（只收整数 / 实数 / 布尔 / 枚举 /`
-            + ' 另一个结构体 —— 指针、string 与数组那几种旁边还挂着表，重叠之后说不清归谁）');
+          this.acct(d, 'F-002', { name: info.name });
           return null;
         }
         if (bs !== null) bs.last = null;      // 普通字段隔在中间就断开上一组位域
@@ -4645,8 +4649,7 @@ class JncLower {
       const av = isList(mc) && head(mc) === 'accessor' ? mc.items[1] : null;
       const kind = av !== null && (isAtom(av) || isStr(av)) ? av.value : null;
       if (kind === null) {
-        this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条 —— 只收带体的 get / set 与`
-          + '`autoget` 的字段 / `bindable` 的事件（prop_full.rst:34）');
+        this.acct(m, 'P-005', { name: nm });
         return [];
       }
       /* 存值器的重载（第一百八十一刀）：jancy 明写支持（prop_full.rst:15 的 "overloaded
@@ -4817,8 +4820,7 @@ class JncLower {
         return null;
       }
       if (!bnd && !agt) {
-        this.nope(m, `完整声明式的属性 '${nm}' 里那条 alias 上既没有 'bindable' 也没有`
-          + " 'autoget'（属性体里的 alias 只有这两种意思，jnc_ct_Parser.cpp:1354-1361）");
+        this.acct(m, 'P-006', { name: nm });
         return null;
       }
       if (bnd) return { kind: 'event', name: an, target: tg, sp, ptrs: ini.items[1].items[1] };
@@ -4879,8 +4881,7 @@ class JncLower {
         init: ini0 === null ? null : ini0.items[2],
       };
     }
-    this.nope(m, `完整声明式的属性 '${nm}' 体里的这一条 —— 字段要写 \`autoget\`、事件要写`
-      + ' `bindable event`（prop_full.rst:34）');
+    this.acct(m, 'P-004', { name: nm });
     return null;
   }
 
@@ -4998,9 +4999,7 @@ class JncLower {
          本来也不收（第八十三刀）。 */
       const structOwner = cls !== null && !this.classes.has(cls);
       if (structOwner && (dsp.agt || dsp.bnd)) {
-        this.nope(d, `结构体的成员属性 '${info.name}' 上的 `
-          + `'${dsp.agt ? 'autoget' : 'bindable'}'（那一格要往结构体里加一格字段 / 一格事件，`
-          + '而属性这一遍排在字段表定下来之后）');
+        this.acct(d, 'P-001', { name: info.name, mod: dsp.agt ? 'autoget' : 'bindable' });
         continue;
       }
       // `autoget`（第七十一刀）：这一格的取值器**不用写** —— 编译器生成一格存储，读属性就是
@@ -6476,7 +6475,7 @@ class JncLower {
       }
       if (isList(m) && head(m) === 'friend') continue;
       if (!isList(m) || head(m) !== 'var-decl') {
-        this.nope(m, `${cls ? '类' : '结构体'}里除字段以外的成员`);
+        this.acct(m, cls ? 'T-002' : 'T-001');
         continue;
       }
       /* `errcOk` 给 true（第一百九十六刀）：`errorcode` 说的是返回值那件事，结构体的方法上
@@ -6535,7 +6534,7 @@ class JncLower {
         let d = d0;
         let dflt = null;
         if (isList(d0) && head(d0) === 'init') {
-          if (!cls) { this.nope(d0, '结构体字段的默认值'); continue; }
+          if (!cls) { this.acct(d0, 'S-001'); continue; }
           d = d0.items[1];
           dflt = d0.items[2];
         }
@@ -6560,8 +6559,7 @@ class JncLower {
          * 那条路（与字段的默认值同一条理由，见 bad/fielddefault-struct.jnc）。 */
         if (sp.evt === true) {
           if (!cls) {
-            this.nope(d, `结构体里的事件 '${info.name}'（那一格要在造出来的时候把单子建起来，`
-              + '而这一层的结构体没有构造那条路）');
+            this.acct(d, 'P-002', { name: info.name });
             continue;
           }
           const eps = info.formals === null ? [] : this.formalList(info.formals);
@@ -6650,9 +6648,7 @@ class JncLower {
            （`Node* m_next` 就是一条引用）。 */
         if (isClass(info.type) && info.type.own === true) {
           if (!cls) {
-            this.err(d, `结构体 '${shown(name)}' 里放不下类 '${shown(info.type.name)}' 的一格值`
-              + '（jancy 那边这一句就是错：`class … cannot be a struct member`，'
-              + 'jnc_ct_StructType.cpp:303-307 —— 内嵌的对象只有类里才有）');
+            this.acctErr(d, 'F-003', { owner: shown(name), cls: shown(info.type.name) });
             continue;
           }
           if (dflt !== null) {
@@ -7623,7 +7619,7 @@ class JncLower {
       if (uns && !isInt(base)) { this.err(ts, `'${s}' 上写不了 unsigned`); return null; }
     } else {
       const nm = this.qname(ts);
-      if (nm === null) { this.nope(ts, '这种类型说明符'); return null; }
+      if (nm === null) { this.acct(ts, 'P-007'); return null; }
       // 那一串别名照 type_primitive.rst:25-40 抄。写了别名再写 `unsigned` 是重复，
       // 但不冲突（`uint8_t` 本来就是无符号），所以照收。
       const alias = INT_ALIASES.get(nm);
@@ -7983,7 +7979,7 @@ class JncLower {
          位域要么 jancy 自己也不给写，要么这一刀没落（类的那一格见 ADR-0016 那一节）。 */
       if (sh === 'bitfield') {
         if (!allowBits) {
-          return this.nope(s, '这个位置上的位域（`: 位数` 只在结构体的字段上）');
+          return this.acct(s, 'F-001');
         }
         if (bits !== null) return this.err(s, '一格字段上写了两个 `: 位数`');
         const kb = this.constInt(s.items[1]);
@@ -8981,8 +8977,7 @@ class JncLower {
         : this.resolve(info.name, (k) => this.structs.has(k));
       const ownStruct = owner !== null && !this.classes.has(owner);
       if (owner === null) {
-        return this.err(n, `'${info.special}' 只能是类或结构体的成员（写在体里，或写成 `
-          + `'${info.name === '' ? 'C' : shown(info.name)}.construct()'）`);
+        return this.acctErr(n, 'M-004', { what: info.special, owner: info.name === '' ? 'C' : shown(info.name) });
       }
       const stat = info.special === 'static construct';
       if (stat && ownStruct) {
@@ -10426,12 +10421,10 @@ class JncLower {
        jancy 那儿它塞的是当前 scope 的 using 表（Function.cpp:130 那句 addUsingSet），
        所以要一张跟着 `scopes` 一起进出的表。说清是这一种，别让它落到笼统那句话上。 */
     if (h === 'using-namespace') {
-      this.nope(n, '写在函数体里的 `using namespace X;` —— 它的作用域是这个块，'
-        + '要一张跟着作用域一起进出的表（写在命名空间那一层的那一格收了，见 ADR-0016 '
-        + '第二百一十七刀）');
+      this.acct(n, 'S-004');
       return null;
     }
-    this.nope(n, `语句 '${h}'`);
+    this.acct(n, 'S-002', { h });
     return null;
   }
 
@@ -10483,7 +10476,7 @@ class JncLower {
     // 函数体里的 `int property* p` 是一格**属性指针**（35_PropertyPtr.jnc:97-126）：里头存的
     // 是"取/存两个函数 + 那个对象"。这一层没有那一格类型，而 `property` 这个词 specs 是收下
     // 的 —— 不在这儿拦，它就会被悄悄降成一格普通指针（第七十刀）。
-    if (sp.prop) return this.nope(n, '函数体里的属性声明（属性指针要一格"属性指针"类型）');
+    if (sp.prop) return this.acct(n, 'P-003');
     const out = [];
     for (const d of this.flat(n.items[2])) {
       const dh = isList(d) ? head(d) : null;
@@ -10500,9 +10493,7 @@ class JncLower {
         const ca = (isClass(info.type) && info.type.own === true) || jncIsStruct(info.type)
           ? this.ctorArgsOf(info.formals) : null;
         if (ca === null) {
-          this.nope(dcl, `函数体里的这一条 '${info.name}(…)'：要么是一格**函数原型**`
-            + '（jancy 的函数体里写不了原型 —— 那要一层"块作用域也是命名空间"），'
-            + '要么是"局部量后面挂构造实参"（`T v(a, b)`，那一种只有类与结构体的变量收得下）');
+          this.acct(dcl, 'S-003', { name: info.name });
           return null;
         }
         info.ctor = ca;

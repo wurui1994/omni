@@ -10,9 +10,15 @@ export default feature({
   name: 'module-items',
   doc: 'import / pragma / using namespace / extension / 局部量',
   accounts: {
-    'S-001': { text: '结构体字段的默认值', why: '那一格在 jancy 那边是构造里重放的，而结构体没有构造那条路' },
+    'S-001': {
+      text: '结构体字段的默认值',
+      say: '结构体字段的默认值',
+      why: '那一格在 jancy 那边是构造里重放的，而结构体没有构造那条路',
+    },
     'S-004': {
       text: '写在函数体里的 `using namespace X;`',
+      say: '写在函数体里的 `using namespace X;` —— 它的作用域是这个块，要一张跟着作用域一起'
+        + '进出的表（写在命名空间那一层的那一格收了，见 ADR-0016 第二百一十七刀）',
       why: '它的作用域是这个块，要一张跟着作用域一起进出的表（第 217 刀那条界；Phase 2 的 scope graph 一并解决）',
     },
     /* S-005 退役：那不是语言的账，是**尺子自己的洞**（探针没给 `-I`）。补上探针自合成的

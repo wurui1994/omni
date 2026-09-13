@@ -17,14 +17,20 @@ export default feature({
   accounts: {
     'T-001': {
       text: '结构体里除字段以外的成员',
+      say: '结构体里除字段以外的成员',
       why: '结构体这一层还不是"一层命名空间"的全部 —— import / pragma / using / extension 那几种要它',
     },
-    'T-002': { text: '类里除字段以外的成员', why: '同 T-001，位置不同' },
+    'T-002': { text: '类里除字段以外的成员', say: '类里除字段以外的成员', why: '同 T-001，位置不同' },
     'T-003': {
       text: 'union 体里除字段与匿名 struct 以外的成员',
+      say: 'union 体里除字段与匿名 struct 以外的成员',
       why: '第 253/254 刀从这一列里挖出了方法与 alias 两格；剩下的还在这句话下面',
     },
-    'T-004': { text: 'extension 体里除带体的方法以外的成员', why: 'jancy 的 extension 只加方法（第 107 刀）' },
+    'T-004': {
+      text: 'extension 体里除带体的方法以外的成员',
+      say: 'extension 体里除带体的方法以外的成员',
+      why: 'jancy 的 extension 只加方法（第 107 刀）',
+    },
     'T-005': {
       text: '（代价，不是拒绝）体里声明的类型，名字提到外面那层命名空间',
       why: '第 219/250/260 刀那三格共同的代价：函数外面也用得上它（拒得更松）、'

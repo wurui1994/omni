@@ -16,14 +16,20 @@ export default feature({
   accounts: {
     'F-001': {
       text: '这个位置上的位域（`: 位数` 只在结构体的字段上）',
+      say: '这个位置上的位域（`: 位数` 只在结构体的字段上）',
       why: '位域是"几位挤在一格存储里"，而那格存储要按结构体的布局定下来（ADR-0016 第 112 刀）',
     },
     'F-002': {
       text: 'union 里的成员（只收整数 / 实数 / 布尔 / 枚举 / 另一个结构体）',
+      say: "union 里的成员 '{name}'（只收整数 / 实数 / 布尔 / 枚举 / 另一个结构体 —— "
+        + '指针、string 与数组那几种旁边还挂着表，重叠之后说不清归谁）',
       why: '指针、string 与数组那几种旁边还挂着表（ADR-0024/0026），重叠之后说不清归谁',
     },
     'F-003': {
       text: '结构体里放不下类的一格值',
+      say: "结构体 '{owner}' 里放不下类 '{cls}' 的一格值（jancy 那边这一句就是错："
+        + '`class … cannot be a struct member`，jnc_ct_StructType.cpp:303-307 —— '
+        + '内嵌的对象只有类里才有）',
       match: '里放不下类',
       why: 'jancy 自己也报错：`class … cannot be a struct member`（jnc_ct_StructType.cpp:303-307）'
         + ' —— 内嵌的对象只有类里才有。这一格的 `error` 是**对的**，不是欠账',

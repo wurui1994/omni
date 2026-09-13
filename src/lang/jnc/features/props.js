@@ -14,26 +14,40 @@ export default feature({
   accounts: {
     'P-001': {
       text: '结构体的成员属性上的 `autoget` / `bindable`',
+      say: "结构体的成员属性 '{name}' 上的 '{mod}'（那一格要往结构体里加一格字段 / 一格事件，"
+        + '而属性这一遍排在字段表定下来之后）',
       why: '那一格要往结构体里加一格字段 / 一格事件，而属性这一遍排在字段表定下来之后',
     },
     'P-002': {
       text: '结构体里的事件',
+      say: "结构体里的事件 '{name}'（那一格要在造出来的时候把单子建起来，"
+        + '而这一层的结构体没有构造那条路）',
       why: '那一格要在造出来的时候把单子建起来，而这一层的结构体没有构造那条路',
     },
-    'P-003': { text: '函数体里的属性声明', why: '属性指针要一格"属性指针"类型（方言里还没有）' },
+    'P-003': {
+      text: '函数体里的属性声明',
+      say: '函数体里的属性声明（属性指针要一格"属性指针"类型）',
+      why: '属性指针要一格"属性指针"类型（方言里还没有）',
+    },
     'P-004': {
       text: '完整声明式的属性体里的这一条 —— 字段要写 `autoget`、事件要写 `bindable event`',
+      say: "完整声明式的属性 '{name}' 体里的这一条 —— 字段要写 `autoget`、事件要写"
+        + ' `bindable event`（prop_full.rst:34）',
       why: 'prop_full.rst:34',
     },
     'P-005': {
       text: '完整声明式的属性体里的这一条 —— 只收带体的 get / set 与 `autoget` 的字段 / `bindable` 的事件',
+      say: "完整声明式的属性 '{name}' 体里的这一条 —— 只收带体的 get / set 与"
+        + '`autoget` 的字段 / `bindable` 的事件（prop_full.rst:34）',
       why: 'prop_full.rst:34',
     },
     'P-006': {
       text: '完整声明式的属性里那条 alias 上既没有 get 也没有 set',
+      say: "完整声明式的属性 '{name}' 里那条 alias 上既没有 'bindable' 也没有"
+        + " 'autoget'（属性体里的 alias 只有这两种意思，jnc_ct_Parser.cpp:1354-1361）",
       why: '属性体里的 alias 只有这两种意思（jnc_ct_Parser.cpp:1354-1361）',
     },
-    'P-007': { text: '这种类型说明符', why: '见 fields（R5：这句话没位置）' },
+    'P-007': { text: '这种类型说明符', say: '这种类型说明符', why: '见 fields（R5：这句话没位置）' },
   },
   positions: [
     // 简单声明式（autoget / bindable autoget）：类那一族与 union 收，结构体那一格欠着
