@@ -158,7 +158,28 @@
 这就把第 2 节那句"公共不是求交集，是给一份默认值"落实成了三张底座：
 `commonLang`（C 系拼法）、`commonWordyLang`（词语系拼法）、`commonShapeLang`（只有形状，GLR 用）。
 
-## 3. jancy 按规则化重写（待做）
+## 3. jancy 按规则化重写（清单已量出来）
+
+**第一步不是写代码，是量清单。** `node tests/lib/jnc-heads.js [文件数]` 把语料解析一遍，
+数树里出现过哪些节点名、各多少次 —— 40 份 `.jnc` 就有 **112 个不同的节点名、10,141 个节点**。
+按出现次数排下来，头一批是：
+
+```
+1442 name    974 mods     958 unit-add   501 specs    499 ptrs     454 dcl
+ 454 suffixes 415 no-ctor  412 expr-stmt  345 args     327 call     249 unit
+ 201 args-add 194 dcls     192 var-decl   191 suffixes-add 175 formals 172 fn-suffix
+ 171 compound 143 fn-def   122 field      116 mods-add  110 assign   104 formal
+```
+
+这张表同时是**进度尺**：新节点表（`src/lang/jnc/nodes.js`）覆盖了几格，就是走了多远。
+顺序也定了 —— **按出现次数推**，先把 `name` / `mods` / `specs` / `dcl` / `suffixes` 那一族
+（声明的骨架，占了一半以上的节点）搬成表，再往语句与表达式走。
+
+顺带印证了第 5 节那句话：jancy 走 GLR，而**语法文件里每条产生式的动作头就是节点名**
+（`(-> ("import" LITERAL) (import $2))` 里那个 `import`），所以 GLR 出来的树本来就是
+"带名字的节点"，与读表那条腿的节点表是同一种东西 —— 桥不用造，名字就是桥。
+
+
 
 - `src/core/frontend-jnc/lower.js` → **`lower_legacy.js`**（15.5k 行，一个字不改，
   留着当回退与"对照的尺子"）
