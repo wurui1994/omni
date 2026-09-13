@@ -103,8 +103,16 @@ export const SPELL_WORDY = {
 };
 
 const shapeOnly = (s) => {
+  /* `holes` 要留下 —— 它是**形状**（洞的名字与类别），不是拼法。先前这儿把它丢了，
+     于是 GLR 那条腿拿到的公共节点是"空壳"，形状尺子也就无从对账。 */
   const node = {
-    name: s.name, of: s.of, unary: s.unary, binary: s.binary, suffix: s.suffix, last: s.last,
+    name: s.name,
+    of: s.of,
+    holes: s.holes ?? {},
+    unary: s.unary,
+    binary: s.binary,
+    suffix: s.suffix,
+    last: s.last,
   };
   for (const k of ['unary', 'binary', 'suffix', 'last']) if (node[k] === undefined) delete node[k];
   return node;

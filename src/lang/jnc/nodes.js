@@ -19,38 +19,62 @@ export const JNC_CLASSES = ['dcl', 'spec', 'suffix', 'formal', 'item'];
  */
 export const JNC_SHAPES = [
   // 单元与声明的骨架
-  { name: 'unit', of: 'block', holes: { items: 'item*?' } },
-  { name: 'unit-add', of: 'item', holes: { unit: 'block', decl: 'item' } },
+  // GLR 的列表是**左递归**：一个空基例（`unit`、`mods`、`ptrs`…）加一格 `-add` 递归。
+  // 这一形状是量出来的（`node tests/lib/jnc-shape.js`）—— 先前我按"一格列表洞"写，全错。
+  { name: 'unit', of: 'block', holes: {} },
+  { name: 'unit-add', of: 'item', holes: { list: 'block', one: 'item' } },
   { name: 'var-decl', of: 'stat', holes: { specs: 'spec', dcls: 'dcl*' } },
   { name: 'fn-def', of: 'item', holes: { specs: 'spec', dcl: 'dcl', body: 'block?' } },
-  { name: 'dcl', of: 'dcl', holes: { ptrs: 'spec?', name: 'exp', suffixes: 'suffix*?' } },
-  { name: 'dcls', of: 'dcl', holes: { items: 'dcl*' } },
+  { name: 'dcl', of: 'dcl', holes: { ptrs: 'spec', name: 'exp', suffixes: 'suffix', ctor: 'suffix?' } },
+  { name: 'dcls', of: 'dcl', holes: { first: 'dcl' } },
   { name: 'dcls-add', of: 'dcl', holes: { list: 'dcl', one: 'dcl' } },
   { name: 'init', of: 'dcl', holes: { dcl: 'dcl', value: 'exp' } },
   // 修饰词与类型说明那一串
-  { name: 'mods', of: 'spec', holes: { items: 'spec*?' } },
+  { name: 'mods', of: 'spec', holes: {} },
   { name: 'mods-add', of: 'spec', holes: { list: 'spec', one: 'spec' } },
-  { name: 'specs', of: 'spec', holes: { mods: 'spec?', type: 'spec?' } },
-  { name: 'ptrs', of: 'spec', holes: { items: 'spec*?' } },
-  { name: 'ptr', of: 'spec', holes: {} },
-  { name: 'basetype', of: 'spec', holes: {} },
+  // `specs` 有几条产生式（树里见过 0/2/3 格）：类型那一格 + 前后两串修饰词
+  { name: 'specs', of: 'spec', holes: { type: 'spec?', pre: 'spec?', post: 'spec?' } },
+  { name: 'ptrs', of: 'spec', holes: {} },
+  { name: 'ptr', of: 'spec', holes: { mods: 'spec' } },
+  { name: 'basetype', of: 'spec', holes: { type: 'spec' } },
   // 声明子的后缀（函数的形参表、数组的下标）
-  { name: 'suffixes', of: 'suffix', holes: { items: 'suffix*?' } },
+  { name: 'suffixes', of: 'suffix', holes: {} },
   { name: 'suffixes-add', of: 'suffix', holes: { list: 'suffix', one: 'suffix' } },
-  { name: 'fn-suffix', of: 'suffix', holes: { formals: 'formal*?' } },
+  { name: 'fn-suffix', of: 'suffix', holes: { formals: 'formal' } },
   { name: 'array-suffix', of: 'suffix', holes: { size: 'exp?' } },
   { name: 'no-ctor', of: 'suffix', holes: {} },
-  { name: 'ctor', of: 'suffix', holes: { args: 'exp*?' } },
-  { name: 'formals', of: 'formal', holes: { items: 'formal*?' } },
+  { name: 'ctor', of: 'suffix', holes: { args: 'exp?' } },
+  { name: 'formals', of: 'formal', holes: { first: 'formal?' } },
   { name: 'formals-add', of: 'formal', holes: { list: 'formal', one: 'formal' } },
   { name: 'formal', of: 'formal', holes: { specs: 'spec', dcl: 'dcl' } },
-  { name: 'formal-anon', of: 'formal', holes: { specs: 'spec' } },
+  { name: 'formal-anon', of: 'formal', holes: { specs: 'spec', ptrs: 'spec' } },
   // 语句与表达式里最常见的那几格（公共库已有 block/if/while/return/break/assign/call/index）
   { name: 'compound', of: 'stat', holes: { body: 'block' } },
   { name: 'expr-stmt', of: 'stat', holes: { expr: 'exp' } },
-  { name: 'args', of: 'exp', holes: { items: 'exp*?' } },
+  { name: 'args', of: 'exp', holes: { first: 'exp?' } },
   { name: 'args-add', of: 'exp', holes: { list: 'exp', one: 'exp' } },
   { name: 'field', of: 'var', holes: { obj: 'prefixexp', name: 'exp' } },
+  // 下一批（形状都是量出来的，`node tests/lib/jnc-shape.js` 那三栏说的）
+  { name: 'name', of: 'var', holes: { text: 'exp' }, replaces: true },
+  { name: 'ptrs-add', of: 'spec', holes: { list: 'spec', one: 'spec' } },
+  // jancy 的赋值**带算符**（`+=` 那一族），所以比公共库那一格多一位 —— 记一笔 replaces
+  { name: 'assign', of: 'stat', holes: { op: 'exp', a: 'exp', b: 'exp' }, replaces: true },
+  { name: 'binary', of: 'exp', holes: { op: 'exp', a: 'exp', b: 'exp' } },
+  { name: 'return', of: 'stat', holes: { value: 'exp?' }, replaces: true, last: true },
+  // jancy 的 `break`/`continue` 带层数（`break 2`），所以比公共库那一格多一位
+  { name: 'break', of: 'stat', holes: { level: 'exp' }, replaces: true, last: true },
+  { name: 'continue', of: 'stat', holes: { level: 'exp' }, last: true },
+  // 再下一批（形状同样是量出来的）
+  { name: 'items', of: 'item', holes: { first: 'item?' } },
+  { name: 'items-add', of: 'item', holes: { list: 'item', one: 'item' } },
+  { name: 'type-decl', of: 'item', holes: { agg: 'item' } },
+  { name: 'agg', of: 'item', holes: { kind: 'exp', name: 'exp', bases: 'spec', body: 'block' } },
+  { name: 'special', of: 'exp', holes: { text: 'exp' } },
+  { name: 'no-type', of: 'spec', holes: {} },
+  { name: 'accessor', of: 'exp', holes: { text: 'exp' } },
+  { name: 'exprs', of: 'exp', holes: { first: 'exp?' } },
+  { name: 'exprs-add', of: 'exp', holes: { list: 'exp', one: 'exp' } },
+  { name: 'case', of: 'stat', holes: { value: 'exp' } },
 ];
 
 /** jancy 这门语言（第一族）。拼法在 `.grammar`，所以 `parser: 'glr'`。 */
@@ -59,8 +83,12 @@ export const jncLang = extend(commonShapeLang, {
   doc: 'jancy：GLR 认拼法，这张表只给形状（ADR-0030 第 3/5 节，第一族：声明的骨架）',
   classes: JNC_CLASSES,
   nodes: JNC_SHAPES.map((s) => {
-    const node = { name: s.name, of: s.of };
-    if (s.holes !== undefined) node.holes = s.holes;
+    /* 形状表里那几格标记要**带过去**（`replaces` 尤其 —— 它是"我改了公共库这一格"的凭据，
+       丢了它 `extend` 会当撞名炸掉）。 */
+    const node = { name: s.name, of: s.of, holes: s.holes ?? {} };
+    for (const k of ['replaces', 'last', 'unary', 'binary', 'suffix']) {
+      if (s[k] !== undefined) node[k] = s[k];
+    }
     return node;
   }),
   parser: 'glr',
