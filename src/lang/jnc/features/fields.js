@@ -74,6 +74,12 @@ export default feature({
     { kind: 'template-ctor-expr', sorts: ['union-body'], verdict: 'syntax' },
     { kind: 'template-ctor-expr', sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
     { kind: 'template-ctor-expr', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* 带初值的 static 字段（矩阵后加的一列）：与别的字段同一列；union 里**语法就不认**
+       （那一格要 `(union …)` 的成员形状）。 */
+    { kind: 'field-static-init', sorts: PLAIN, verdict: 'ok' },
+    { kind: 'field-static-init', sorts: ['union-body'], verdict: 'syntax' },
+    { kind: 'field-static-init', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
+    { kind: 'field-static-init', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     { kind: 'field-thin-ptr', sorts: PLAIN, verdict: 'ok' },
     { kind: 'field-thin-ptr', sorts: ['union-body'], verdict: 'refuse', account: 'F-002' },
     { kind: 'field-thin-ptr', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },

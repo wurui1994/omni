@@ -108,6 +108,13 @@ const KINDS = [
      （`BoxIterator<int>(list.m_head)`）就是它，而且是那份文件**唯一**的拦路项。
      声明位置上的 `Boxy<int> b;` 早就收了 —— 差的只是表达式那一处。 */
   ['template-ctor-expr', 'Boxy<int> m_bx = Boxy<int>(4);', 'x'],
+  /* 又一轮（尺子越宽，"我们不知道什么"就越少）： */
+  ['friend', 'friend class Helper;', 'x'],
+  ['field-static-init', 'static int m_si = 3;', 'x'],
+  ['event-args', 'event m_onArg(int v);', 'x'],
+  ['alias-field-path', 'alias m_pa = m_pad;', 'x'],
+  ['class-multi-base', 'class MultiC: Helper, Helper2 { int m_mv; }', 'x'],
+  ['disposable-class', 'disposable class DispC { int m_dv; }', 'x'],
 ];
 
 /* ---------------------------------------------------------------- 位置表
@@ -116,6 +123,10 @@ const KINDS = [
  * 那几个名字本身不是被量的东西，缺了它们每一格都会多一条"没有这个类型"的噪音。 */
 const PRE = `class Helper {
 	int m_hv;
+}
+
+class Helper2 {
+	int m_h2v;
 }
 
 struct Boxy<T> {

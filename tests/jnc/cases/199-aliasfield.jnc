@@ -1,0 +1,35 @@
+// 第二百六十四刀：**一段**的字段路径别名（`alias m_pa = m_pad;`）。
+//
+// 第一百〇四刀落的是"逐段解得开的一串字段"（`alias m_head = m_list.m_head;`），可那处判据上
+// 挂了一道 `目标里得有点号` 的闸门 —— 于是只有一段的那种（指本类型自己的一格字段）落在了
+// "alias 的目标 …" 那句话上。矩阵新加的 `alias-field-path` 那一列一量出来，九格全在那句话上，
+// 才看出这道闸门是多余的：那句话里"逐段解得开"本来就包含只有一段的情形。
+//
+// 次序没变：类型名、函数、这个类里的方法、宿主面的原型都排在前面 —— 同名的方法照旧赢，
+// 这一条只是它们都不认时的最后一问。
+//
+// 期望输出的出处：/tmp/c207.c（`cc -O0 -std=c99 -Wall`）。
+
+struct Inner {
+	int m_deep;
+}
+
+class Holder {
+	int m_pad;
+	Inner m_in;
+
+	alias m_alias = m_pad;          // 一段（这一刀）
+	alias m_deep2 = m_in.m_deep;    // 两段（第一百〇四刀）
+
+	int sum() {
+		return m_alias + m_deep2;
+	}
+}
+
+int main() {
+	Holder* h = new Holder;
+	h.m_alias = 4;                  // 写进去的其实是 m_pad
+	h.m_deep2 = 7;
+	printf("%d %d %d\n", h.m_pad, h.m_in.m_deep, h.sum());
+	return 0;
+}

@@ -15,6 +15,16 @@ export default feature({
       say: '结构体字段的默认值',
       why: '那一格在 jancy 那边是构造里重放的，而结构体没有构造那条路',
     },
+    'S-006': {
+      text: '`disposable`（jancy 那儿它给那一格开一个可弃作用域，出去时调 `dispose`）',
+      say: '`disposable` 的局部量 —— jancy 那儿它给这一格开一个可弃作用域、出去的时候'
+        + '（正常出去与抛出去都算）调它的 `dispose`（jnc_ct_Parser.cpp:2050-2068），'
+        + '要作用域出口那一套钩子',
+      match: 'disposable',
+      why: '与 destruct（M-002）同一笔账：要作用域出口那一套钩子。**这一句现在认错人**：'
+        + '`disposable class C { … }`（一格类声明）也落在它上面，可那不是局部量 —— '
+        + '矩阵 `disposable-class` 那一列一量出来就摆在这儿（下一刀的料）',
+    },
     'S-004': {
       text: '写在函数体里的 `using namespace X;`',
       say: '写在函数体里的 `using namespace X;` —— 它的作用域是这个块，要一张跟着作用域一起'
@@ -70,5 +80,18 @@ export default feature({
     { kind: 'dylib', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
     { kind: 'dylib', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
     { kind: 'dylib', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* `disposable class C { … }`：整行还不收，而且那句话**认错人**（说的是"局部量"）——
+       见 S-006 的 why。 */
+    {
+      kind: 'disposable-class',
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body',
+        'extension-body'],
+      verdict: 'refuse',
+      account: 'S-006',
+      note: '认错人：这是一格**类声明**，不是局部量',
+    },
+    { kind: 'disposable-class', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'disposable-class', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
+    { kind: 'disposable-class', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
   ],
 });

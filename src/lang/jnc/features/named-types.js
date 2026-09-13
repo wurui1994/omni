@@ -65,6 +65,13 @@ export default feature({
       say: 'extension 体里除带体的方法以外的成员',
       why: 'jancy 的 extension 只加方法（第 107 刀）',
     },
+    'G-002': {
+      text: '`friend class X;` 这种写法（语法这一层不认）',
+      why: '语料 655 份里一处没有（只在注释里提过 aliens / friends 那一套），所以这一格没有'
+        + '语料作证；jancy 那边 friend 是"命名空间访问权限"那一摊的一部分（第二百四十一刀碰过'
+        + '它的另一面：静态花括号）。**确切写法没查清**，所以这一格记成我们的洞（syntax-todo）'
+        + '而不是"这门语言写不出来"—— 别把没查清当规格',
+    },
     'T-005': {
       text: '（代价，不是拒绝）体里声明的类型，名字提到外面那层命名空间',
       why: '第 219/250/260 刀那三格共同的代价：函数外面也用得上它（拒得更松）、'
@@ -138,5 +145,17 @@ export default feature({
     { kind: 'enum-typed', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'enum-typed', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
     { kind: 'enum-typed', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* `friend class X;`：整行语法不认，而且是**我们的洞**（见 G-002）。 */
+    { kind: 'friend', sorts: '*', verdict: 'syntax-todo', account: 'G-002' },
+    /* 多基类的类（`class C: A, B { … }`，第一百二十五刀那一套布局）：与普通 class 同一列。 */
+    {
+      kind: 'class-multi-base',
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body', 'fn-body'],
+      verdict: 'ok',
+      register: REG.class,
+    },
+    { kind: 'class-multi-base', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'class-multi-base', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    { kind: 'class-multi-base', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

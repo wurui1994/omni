@@ -3801,7 +3801,11 @@ class JncLower {
     /* 目标是一格**字段路径**（第一百〇四刀）：`alias m_head = m_list.m_head;`。逐段在字段表里
        解得开就记成一串取字段 —— `this.structs` 对类与结构体都有那张表，而类字段那一格里放的
        也是地址，所以叠 `pfield` 时不用管中间那一格是类还是结构体。 */
-    if (cls !== null && tgt.includes('.')) {
+    /* 一段的也算（这一刀）：`alias m_pa = m_pad;` —— 那句话里"逐段解得开的一串字段"本来就该
+       包含**只有一段**的情况，先前那道 `tgt.includes('.')` 把它挡在门外了（矩阵新加的
+       `alias-field-path` 那一列一量出来，九格全落在这句话上）。名字与方法那两条分支排在前面，
+       所以"同名的方法"照旧赢 —— 这一条只是它们都不认时的最后一问。 */
+    if (cls !== null) {
       const path = [];
       let ty = { k: 'struct', name: cls };
       let ok = true;

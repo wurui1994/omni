@@ -55,6 +55,21 @@ export default feature({
         + " 'autoget'（属性体里的 alias 只有这两种意思，jnc_ct_Parser.cpp:1354-1361）",
       why: '属性体里的 alias 只有这两种意思（jnc_ct_Parser.cpp:1354-1361）',
     },
+    'P-008': {
+      text: '完整声明式的属性里那格事件带着实参（属性的那一格是 `multicast ()`）',
+      say: "完整声明式的属性 '{prop}' 里的事件 '{name}' 带着实参（属性的那一格是 `multicast ()`）",
+      match: '带着实参',
+      why: 'prop_full.rst 那一节里属性自带的那格事件是无参的 `multicast ()` —— 带参的事件是'
+        + '**另一格**成员，写在属性体里就说不清它是哪一个',
+    },
+    'P-009': {
+      text: 'alias 的目标（这个位置上解不开）',
+      say: "alias '{name}' 的目标 '{tgt}'（收的是一格类型名、一格函数、这个类里的一格方法、"
+        + '或者这个类 / 结构体里逐段解得开的一串字段）',
+      match: '的目标',
+      why: '这一句多半是**对的**：模块 / 命名空间 / 函数体里压根没有"这个类的字段"可指。'
+        + '类 / 结构体 / opaque 类那三格从这一刀起收了一段的路径（`alias m_pa = m_pad;`）',
+    },
     'P-007': { text: '这种类型说明符', say: '这种类型说明符', why: '见 fields（R5：这句话没位置）' },
   },
   positions: [
@@ -126,5 +141,27 @@ export default feature({
     { kind: 'property-indexed', sorts: ['fn-body'], verdict: 'refuse', account: 'P-003' },
     { kind: 'property-indexed', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
     { kind: 'property-indexed', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* 带实参的事件（矩阵后加的一列）：类那一族与 union 收；结构体那一格与 event 同一笔账；
+       属性体里那一格是 P-008（属性自带的事件是无参的）。 */
+    { kind: 'event-args', sorts: [...CLASSY, 'union-body'], verdict: 'ok' },
+    { kind: 'event-args', sorts: ['struct-body'], verdict: 'refuse', account: 'P-002' },
+    { kind: 'event-args', sorts: ['fn-body'], verdict: 'refuse', account: 'S-003' },
+    { kind: 'event-args', sorts: ['property-body'], verdict: 'refuse', account: 'P-008' },
+    { kind: 'event-args', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* 一段的字段路径别名（`alias m_pa = m_pad;`）：这一刀之后类 / 结构体 / opaque 类那三格收了；
+       别的位置没有"这个类的字段"可指，落在 P-009 上（那一句是对的）。 */
+    {
+      kind: 'alias-field-path',
+      sorts: ['class-body', 'struct-body', 'opaque-class-body'],
+      verdict: 'ok',
+    },
+    {
+      kind: 'alias-field-path',
+      sorts: ['module', 'namespace', 'union-body', 'fn-body'],
+      verdict: 'refuse',
+      account: 'P-009',
+    },
+    { kind: 'alias-field-path', sorts: ['property-body'], verdict: 'refuse', account: 'P-006' },
+    { kind: 'alias-field-path', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });
