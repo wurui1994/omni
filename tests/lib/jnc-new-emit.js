@@ -132,7 +132,7 @@ function ctorFormals(agg) {
  * `$newc0 (($i0 int) ($i1 int) ($i2 int) ($i3 int))`）。这一刀只认整数字面量，
  * 别的（变量、表达式）答 null，整格记账。
  */
-function curlyLitTypes(n, names, env) {
+function curlyLitTypes(n, names, env, badAt = []) {
   const init = named(n)?.init;
   if (init === null || init === undefined) return null;
   const out = [];
@@ -141,7 +141,15 @@ function curlyLitTypes(n, names, env) {
     if (bad || x === null || x === undefined || typeof x !== 'object') return;
     const ty = typeOfExpr(x, names, env);                            // 认得出来的就按它定型
     if (ty !== null) { out.push(emitType(ty, 'slot')); return; }
-    if (!Array.isArray(x.items)) { bad = true; return; }
+    if (!Array.isArray(x.items)) { bad = true; badAt.push('记号'); return; }
+    /* `m_y = 2000` 那种**带名字的项**是 `(named-item name value)`（节点表 :205）——
+       只看它的值那一格（这一格是尺子印出"定不出型的节点头"之后照着补的）。 */
+    if (headOf(x) === 'named-item') { dig(named(x)?.value); return; }
+    if (!['curly', 'items', 'items-add', 'assign', 'init', 'field-init'].includes(headOf(x))) {
+      bad = true;
+      badAt.push(headOf(x) ?? '?');                                  // 定不出型的**节点头**记下来
+      return;
+    }
     const h = headOf(x);
     if (h === 'curly' || h === 'items' || h === 'items-add') { for (const it of x.items.slice(1)) dig(it); return; }
     /* `m_y = 2000` 那种：只看**右边**那一格。 */
@@ -208,6 +216,7 @@ let same = 0;
 const diff = [];
 const skip = new Map();
 let noShell = 0;
+const badHeads = [];
 const noShellAt = [];
 
 for (const f of files) {
@@ -294,7 +303,7 @@ for (const f of files) {
     next[fam] += 1;                                                  // 带实参的也占一个号
     const name = `$new${fam}${idx}`;
     if (fam === 'c') {
-      const ts = curlyLitTypes(st.node, st.names, env);
+      const ts = curlyLitTypes(st.node, st.names, env, badHeads);
       if (ts === null || ts.length === 0) { note('花括号初值里那几格要定型'); continue; }
       const rc = rec === undefined ? null : (rec.kind === 'class'
         ? classRoot(rec.agg, aggs, env) : rec.agg);
@@ -348,6 +357,12 @@ for (const f of files) {
 
 console.log(`带 new 壳的语料 ${filesOk} 份　对比 ${cmp} 行`
   + `　一模一样 ${same}（${(same / Math.max(cmp, 1) * 100).toFixed(1)}%）　不一致 ${cmp - same}`);
+if (badHeads.length > 0) {
+  const c = new Map();
+  for (const h of badHeads) c.set(h, (c.get(h) ?? 0) + 1);
+  console.log(`定不出型的那几格（按节点头）：${[...c].sort((a, b) => b[1] - a[1])
+    .map(([h, n]) => `${h}×${n}`).join('  ')}`);
+}
 if (noShell > 0) {
   console.log(`旧降级没发这一格壳：${noShell} 个　→ ${noShellAt.slice(0, 8).join('  ')}`);
 }
