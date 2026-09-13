@@ -17,6 +17,7 @@ import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
+import { jncLang } from '../../src/lang/jnc/nodes.js';
 
 const CORPUS = '/Users/wurui/Documents/Lang/reference/jancy';
 const argv = process.argv.slice(2);
@@ -70,10 +71,17 @@ for (const f of files) {
 }
 
 const rows = [...tally].sort((a, b) => b[1] - a[1]);
+/* **进度**：新节点表（src/lang/jnc/nodes.js）覆盖了几格、覆盖了多少节点。 */
+const covered = new Set(jncLang.nodes.map((n) => n.name));
+const hit = rows.filter(([n]) => covered.has(n));
+const hitNodes = hit.reduce((a, [, n]) => a + n, 0);
+const allNodes = [...tally.values()].reduce((a, b) => a + b, 0);
 console.log(`语料 ${files.length} 份（解析成 ${ok}、跳过 ${bad}）　树里不同的节点名 ${rows.length} 个`
   + `　节点总数 ${[...tally.values()].reduce((a, b) => a + b, 0)}`);
-console.log('\n按出现次数排（重写就按这个顺序推）：');
+console.log(`新节点表覆盖 ${hit.length}/${rows.length} 个名字`
+  + `　${hitNodes}/${allNodes} 个节点（${((hitNodes / allNodes) * 100).toFixed(1)}%）`);
+console.log('\n按出现次数排（`+` = 新表已覆盖）：');
 for (const [name, n] of all ? rows : rows.slice(0, 60)) {
-  console.log(`  ${String(n).padStart(6)}  ${name}`);
+  console.log(`  ${covered.has(name) ? '+' : ' '} ${String(n).padStart(6)}  ${name}`);
 }
 if (!all && rows.length > 60) console.log(`  …… 还有 ${rows.length - 60} 个（--all 全印）`);
