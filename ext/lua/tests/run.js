@@ -10,7 +10,9 @@
 // 用法：node ext/lua/tests/run.js [--show]
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { parse } from '../parse.js';
 import { render } from '../render.js';
@@ -104,6 +106,16 @@ for (const n of lang.nodes) {
   }
 }
 
+// 语料：`tests/corpus/*.lua`。这不是"手写的期望清单" —— 期望由 luajit 给，
+// 这儿只放**写得像真程序**的例子（生成器造不出来的那种：几件事凑在一起）。
+const CORPUS = 'ext/lua/tests/corpus';
+if (existsSync(CORPUS)) {
+  for (const f of readdirSync(CORPUS).sort()) {
+    if (!f.endsWith('.lua')) continue;
+    cases.push({ what: `语料 ${f}`, src: readFileSync(join(CORPUS, f), 'utf8') });
+  }
+}
+
 const piles = new Map();
 const pile = (k, x) => {
   if (!piles.has(k)) piles.set(k, []);
@@ -114,7 +126,7 @@ let owed = 0;
 let bad = 0;
 
 for (const [i, c] of cases.entries()) {
-  c.src = render(program(c.node), lang);
+  if (c.src === undefined) c.src = render(program(c.node), lang);
   const luaPath = join(WORK, `c${i}.lua`);
   const sxPath = join(WORK, `c${i}.sx`);
   writeFileSync(luaPath, `${c.src}\n`);

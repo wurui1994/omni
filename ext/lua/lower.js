@@ -21,7 +21,7 @@ export const ACCOUNTS = {
   'L-003': { say: '全局名字还没有：Lua 里那是一次 `_ENV` 表查（只有 `print` 特例）' },
   'L-004': { say: '多返回值还没有：核心方言的 `ret` 只带一格' },
   'L-005': { say: '闭包捕获还没有：函数体里用了不属于它的局部量' },
-  'L-006': { say: '`..` 还没有：字符串拼接要先有字符串运算' },
+  'L-006': { say: '`..` 的两边要是数或字符串（真假值拼不了 —— Lua 自己也会当场出错）' },
   'L-007': { say: '`and`/`or` 的两边要都是布尔：Lua 的 `a and b` 交出来的是**值**不是真假' },
   'L-008': { say: '`for … in` 还没有：它要迭代器协议（三件套）' },
   'L-009': { say: '`goto`/标签还没有：核心方言里没有任意跳转' },
@@ -121,7 +121,18 @@ const EXP = {
     return { sx: `(un "-" ${a.sx})`, type: 'real' };
   },
   binop: (n, cx) => {
-    if (n.op === '..') no('L-006', n);
+    // `..`：两边落成字符串再用核心方言的 `+`（量过：`(bin "+" str str)` 就是拼接）。
+    // 数要按 **Lua 的 `%.14g`** 变成字符串 —— 那正是 `(tostr E (int 14))`（量过一模一样）。
+    if (n.op === '..') {
+      const la = exp(n.a, cx);
+      const lb = exp(n.b, cx);
+      const asStr = (v, at) => {
+        if (v.type === 'string') return v.sx;
+        if (v.type === 'real') return `(tostr ${v.sx} (int 14))`;
+        return no('L-006', at);
+      };
+      return { sx: `(bin "+" ${asStr(la, n.a)} ${asStr(lb, n.b)})`, type: 'string' };
+    }
     // `and`/`or`：两边都是布尔时就是核心方言的 `&&`/`||`（**量过短路**：右边带调用时
     // 不会跑，见 tests 里那个 boom 探针）。Lua 的 `a and b` 一般交出来的是**值**
     // （`x and 1` 给的是 1 不是真假），那种还降不了 —— 记 L-007。
@@ -252,7 +263,11 @@ const STAT = {
     if (c.kind === 'call' && c.fn.kind === 'name' && c.fn.value === 'print'
       && cx.typeOf('print') === undefined) {
       if (c.args.length !== 1) no('L-004', n);
-      return [`(print ${exp(c.args[0], cx).sx})`];
+      const v = exp(c.args[0], cx);
+      // **数要按 Lua 的位数印**：核心方言的 `print` 对 real 走 `%g`（6 位），Lua 是 `%.14g`。
+      // 先前没管这一格 —— `print(1/3)` 会印成 `0.333333`，而 luajit 印 `0.33333333333333`。
+      // 生成的例子里全是小整数，所以尺子没抓到；这一笔是照着"两边格式化规则"读出来的。
+      return [`(print ${v.type === 'real' ? `(tostr ${v.sx} (int 14))` : v.sx})`];
     }
     if (c.kind !== 'call' || c.fn.kind !== 'name') no('L-010', n);
     const f = cx.fns.get(c.fn.value);
