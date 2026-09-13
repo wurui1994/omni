@@ -1,0 +1,49 @@
+// 带名字的 union 的体里也有**方法**（第二百五十三刀）。
+//
+// jancy 那边 `UnionType` 就是从 `StructType` 派下来的，所以"union 能有方法"与结构体是同一件事。
+// 语料里的原样是 `io.SocketAddress`（io_SocketAddress.jnc:440-465）：
+//
+//   union SocketAddress {
+//       struct { AddressFamily m_family; bigendian uint16_t m_port; }
+//       SocketAddress_ip4 m_ip4;
+//       bool isEqual(SocketAddress const* addr) thin const;
+//       bool errorcode parse(string_t string) thin;
+//       string_t getString() thin const;
+//   }
+//
+// 先前这几条**悄悄进了字段表**（`isEqual` 成了一格 bool 字段 —— 静默的错布局），而带
+// `errorcode` 的那一条撞上"'errorcode' 只能写在函数上"（榜上 39 组）。
+
+union U {
+	struct {
+		int m_lo;
+		int m_hi;
+	}
+
+	int m_i;
+
+	// 只写原型、体在外面（jancy 两种放法都收）
+	int doubled() thin const;
+	bool errorcode isSmall(int limit) thin const;
+}
+
+int U.doubled() thin const {
+	return m_i * 2;
+}
+
+bool U.isSmall(int limit) thin const {
+	return m_i < limit;
+}
+
+int main() {
+	U u;
+	u.m_i = 21;
+	printf("%d\n", u.doubled());
+
+	// 同一段字节按另一组名字读（union 本来的意思）
+	printf("%d %d\n", u.m_lo, u.m_hi);
+
+	bool s = try u.isSmall(100);
+	printf("%d\n", s);
+	return 0;
+}

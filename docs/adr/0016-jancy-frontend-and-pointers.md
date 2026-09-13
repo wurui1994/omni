@@ -11617,6 +11617,45 @@ if (oaD !== undefined) { const oapD = this.opPick(dcl, 'operator :=', oaD, initN
 - 逐份那张榜：那一行**整行没了**（40 对）。`(文件, 拦路项)` 对 `3685 -> 3645`（**−40**）；
   lowered 97、clean 152 没动。
 
+### 第二百五十三刀：带名字的 union 的体里也有方法
+
+榜上 `'errorcode' 只能写在函数上（exceptions.rst:17）` 39 组。量出来那句话认错了人 ——
+写着 `errorcode` 的**是**一个函数，只是它写在一格 union 的体里：
+
+```
+union SocketAddress {                        // io_SocketAddress.jnc:403-465
+    struct { AddressFamily m_family; bigendian uint16_t m_port; }
+    SocketAddress_ip4 m_ip4;
+    bool isEqual(SocketAddress const* addr) thin const;
+    bool errorcode parse(string_t string) thin;
+    string_t getString() thin const;
+}
+```
+
+第二百一十三刀把带名字的 union 收下时只接了**字段**（`unionMembers`），于是那三条方法
+**悄悄进了字段表**（`isEqual` 成了一格 bool 字段 —— 静默的错布局；`getString` 那条撞上
+"union 里的成员"那句 nope），而带 `errorcode` 的那条撞上 `specs` 里 `errcOk` 为假。
+
+jancy 那边 `UnionType` 就是从 `StructType` 派下来的（jnc_ct_UnionType.h），"union 能有方法"
+与结构体是同一件事 —— 那三条的体在宿主（jnc_io_SocketAddress.cpp 的
+`JNC_BEGIN_TYPE_FUNCTION_MAP`）。所以落法是把结构体那一遍的两件事借过来：
+
+- `specs` 那一句开着 `errorcode`（`this.specs(m.items[1], cls, [], true)`，与结构体 / 类那一遍
+  逐字一样）；
+- 声明符上带括号的（`info.formals !== null`）**不是字段**：交给从结构体那一遍抽出来的
+  `protoRegister`（protoMethods / protoArity / hostFns / hostSigs 那一套，宿主面发
+  `(ccall SocketAddress_isEqual self …)`），然后 `continue`。
+
+抽 `protoRegister` 这一步是**纯搬家**：搬完先单独跑一遍腿（337/0，与搬家前逐条相同）再往下接。
+
+- 新例子 `cases/191-unionmeth`（union 里两组名字读同一段字节 + 只写原型体在外面 + 一条
+  `errorcode` 的走 `try`；孪生 `/tmp/c199.c` —— C 那边 union 没有方法，照语义写成自由函数，
+  并且要先 `memset` 抹一遍：方言里一格新开的内存是零，C 那边是未定的）。
+- 腿：`node tests/jnc/run.js` 338/0、`node tests/llvm/run.js` 38/0。
+- 逐份那张榜：**三行整行没了** —— `'errorcode' 只能写在函数上` 39 对，加上
+  `'…' 上没有方法 '…'（同名那几条声明在 …）` 21 + 2 对（那正是"方法被当成字段"之后的下游）。
+  `(文件, 拦路项)` 对 `3645 -> 3626`（−19）；lowered 97、clean 152 没动。
+
 
 
 
