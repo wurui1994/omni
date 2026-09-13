@@ -95,6 +95,10 @@ function baseOf(t, env, depth = 0) {
     if (name === null) return null;
     if (STD_INT_TYPEDEFS.has(name)) return { k: 'int' };
     if (name === 'string_t') return { k: 'string' };
+    /* `variant_t` 在方言里是一格**固定形状的结构体** `jnc$variant`
+       （`($t int) ($n int) ($r real) ($s string)`，第一百一十三刀）—— 出处是旧降级的真输出
+       （105-variant.jnc）。字段位置写它的名字，与别的结构体同一条规矩。 */
+    if (name === 'variant_t') return { k: 'struct', name: 'jnc$variant' };
     const e = env.get(name);
     if (e === undefined) return null;
     /* 用**环境里记的名字**，不是源码里那个 —— 嵌套类型在方言那一侧叫 `Outer$Inner`。
