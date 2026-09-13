@@ -47,6 +47,14 @@ export default feature({
         + '剩下的是**真的转换**：`string_t(p, len)` 那一族（榜上量到 128 处）要按目标类型挑一条'
         + '转换，那与 `(类型)值` 是同一件事的另一半',
     },
+    'F-007': {
+      text: '`weak` 指针',
+      say: '`weak` 指针 —— jancy 那儿它是另一种指针（ClassPtrKind_Weak / FunctionPtrKind_Weak /'
+        + ' PropertyPtrKind_Weak，jnc_ct_DeclTypeCalc.cpp:667/676/688），GC 收了对象之后它自己'
+        + '变 null；这一层没有 GC，收下不看会让 `if (p)` 永远为真',
+      match: 'weak',
+      why: '要 GC 才有"自己变 null"这件事 —— 与 destruct（M-002）同一族的账',
+    },
     'F-003': {
       text: '结构体里放不下类的一格值',
       say: "结构体 '{owner}' 里放不下类 '{cls}' 的一格值（jancy 那边这一句就是错："
@@ -76,8 +84,19 @@ export default feature({
     { kind: 'template-ctor-expr', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     /* 带初值的 static 字段（矩阵后加的一列）：与别的字段同一列；union 里**语法就不认**
        （那一格要 `(union …)` 的成员形状）。 */
+    /* weak 指针字段（矩阵后加的一列）：整行还不收（F-007，要 GC）。 */
+    {
+      kind: 'field-weak-ptr',
+      sorts: [...ALL, 'opaque-class-body'].filter((x, i, a) => a.indexOf(x) === i),
+      verdict: 'refuse',
+      account: 'F-007',
+    },
+    { kind: 'field-weak-ptr', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
+    { kind: 'field-weak-ptr', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     { kind: 'field-static-init', sorts: PLAIN, verdict: 'ok' },
-    { kind: 'field-static-init', sorts: ['union-body'], verdict: 'syntax' },
+    /* union 里的 `static` 字段：语法那一层也有话说（成员上写不了初值），可这一刀之后
+       降级那一遍先拒（T-003）—— 两条诊断都在，分类器取的是后者。 */
+    { kind: 'field-static-init', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'field-static-init', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
     { kind: 'field-static-init', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     { kind: 'field-thin-ptr', sorts: PLAIN, verdict: 'ok' },
@@ -100,7 +119,13 @@ export default feature({
     { kind: 'field-array-dyn', sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
     { kind: 'field-array-dyn', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     // 普通字段：除 union（表示宽度）与属性体 / extension 体（那两处各有自己的规矩）之外都收
-    ...['field-int', 'field-static', 'field-const', 'field-bigendian'].flatMap((kind) => [
+    /* `static` 的那一格从 ALL 里拿出来单说：union 里它先前也是**悄悄降错**（`static` 被丢掉，
+       降成一格进重叠区的普通字段 —— 而静态成员根本不在那段存储里）。 */
+    { kind: 'field-static', sorts: ALL.filter((x) => x !== 'union-body'), verdict: 'ok' },
+    { kind: 'field-static', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'field-static', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    { kind: 'field-static', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
+    ...['field-int', 'field-const', 'field-bigendian'].flatMap((kind) => [
       { kind, sorts: ALL, verdict: 'ok' },
       { kind, sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
       {

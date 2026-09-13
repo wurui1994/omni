@@ -71,6 +71,14 @@ export default feature({
       why: '这一句是**对的**（jancy 同）。欠的是**位置**：它现在发的是一条没位置的诊断'
         + '（矩阵那三格都带着"没位置"的记号）—— R5 说诊断该有位置，那是另一刀',
     },
+    'S-008': {
+      text: '`async` 函数',
+      say: '`async` 函数 —— jancy 那儿它换掉返回类型（写出来的那个挪去 m_asyncReturnType，'
+        + '函数真正回一格 `std.Promise*`，jnc_ct_TypeMgr.cpp:664-672），体还要拆成一台能在 '
+        + 'await 处停下再接着跑的状态机',
+      match: 'async',
+      why: '榜上 57 份文件（sole 3）—— 要一台状态机，是独立的一大刀',
+    },
     'S-002': {
       text: '语句 `…`（函数体里的成员声明落到这句兜底上）',
       say: "语句 '{h}'",
@@ -200,5 +208,27 @@ export default feature({
     { kind: 'method-override', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'method-override', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
     { kind: 'method-override', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    /* 后加的三列：`const` 方法与 `unsafe` 函数**已经收了**（尺子宽了才知道），`async` 整行还不收。 */
+    ...['method-const', 'fn-unsafe'].flatMap((kind) => [
+      {
+        kind,
+        sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body',
+          'extension-body'],
+        verdict: 'ok',
+      },
+      { kind, sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+      { kind, sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
+      { kind, sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    ]),
+    {
+      kind: 'fn-async',
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body',
+        'extension-body'],
+      verdict: 'refuse',
+      account: 'S-008',
+    },
+    { kind: 'fn-async', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'fn-async', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
+    { kind: 'fn-async', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
   ],
 });

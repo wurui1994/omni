@@ -4080,6 +4080,12 @@ class JncLower {
           this.aliasDecl(d, owner);
           continue;
         }
+        /* union 的体里那一条**不是普通字段**（这一刀）：`static` 与 `property` 那两个词先前
+           在这一遍里被**悄悄丢掉**了 —— `static int autoget property m_sp;` 降出来是一格
+           普通字段 `(m_sp int)`（矩阵 `property-static × union-body` 量出来是 ✓，而别的位置
+           都拒；那一格 ✓ 才是错的）。悄悄丢词比报错坏得多：union 的重叠语义在那一格上
+           整个说不通。落在与别的成员同一句话上（T-003：union 体里除字段与匿名 struct 以外的）。 */
+        if (sp.prop === true || sp.stat === true) { this.acct(d, 'T-003'); return null; }
         const info = this.declarator(d, sp, m.items[1], cls, bs !== null);
         if (info === null) return null;
         /* 声明符上带括号的是**方法原型**，不是字段（第二百五十三刀）：先前它悄悄进了字段表

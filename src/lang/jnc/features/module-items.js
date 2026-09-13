@@ -102,5 +102,14 @@ export default feature({
     { kind: 'disposable-class', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'disposable-class', sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
     { kind: 'disposable-class', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    /* 属性表（`[attr = 1] int m_at;`，第九十九刀）：除属性体与 extension 体之外都收。 */
+    {
+      kind: 'attribute-decl',
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'union-body',
+        'opaque-class-body', 'fn-body'],
+      verdict: 'ok',
+    },
+    { kind: 'attribute-decl', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
+    { kind: 'attribute-decl', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

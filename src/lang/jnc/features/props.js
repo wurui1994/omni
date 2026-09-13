@@ -70,12 +70,25 @@ export default feature({
       why: '这一句多半是**对的**：模块 / 命名空间 / 函数体里压根没有"这个类的字段"可指。'
         + '类 / 结构体 / opaque 类那三格从这一刀起收了一段的路径（`alias m_pa = m_pad;`）',
     },
+    'P-010': {
+      text: '`static` 写在属性上',
+      say: '`static` 写在属性上',
+      match: '写在属性上',
+      why: 'jancy 的静态属性那一格取/存两个函数上没有 this，而这一层属性那一套（第 64~76 刀）'
+        + '是按"成员 + this"落的 —— 静态那一档要另一条路。'
+        + '**顺带一笔 R5 的账**：属性体里那一格发的是一条**没位置**的诊断',
+    },
     'P-007': { text: '这种类型说明符', say: '这种类型说明符', why: '见 fields（R5：这句话没位置）' },
   },
   positions: [
     // 简单声明式（autoget / bindable autoget）：类那一族与 union 收，结构体那一格欠着
     ...['property-simple', 'property-bindable'].flatMap((kind) => [
-      { kind, sorts: [...CLASSY, 'union-body'], verdict: 'ok' },
+      { kind, sorts: CLASSY, verdict: 'ok' },
+      /* union 那一格先前记的是 `ok` —— 那是**悄悄降错**：量出来"一条诊断都没有"，可
+         `autoget` / `property` 两个词在 union 那一遍里被丢了，降出来是一格普通字段。
+         这一刀之后照实拒（T-003）。**账记在这儿**：矩阵的 `ok` 只说明"没诊断"，
+         不说明"降对了"—— 见 ADR-0029 第 10.21 节。 */
+      { kind, sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
       { kind, sorts: ['struct-body'], verdict: 'refuse', account: 'P-001' },
       { kind, sorts: ['fn-body'], verdict: 'refuse', account: 'P-003' },
       { kind, sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
@@ -135,9 +148,10 @@ export default feature({
        是下标。量出来除函数体（属性指针那笔账）与属性体 / extension 体之外都收。 */
     {
       kind: 'property-indexed',
-      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'union-body', 'opaque-class-body'],
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body'],
       verdict: 'ok',
     },
+    { kind: 'property-indexed', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'property-indexed', sorts: ['fn-body'], verdict: 'refuse', account: 'P-003' },
     { kind: 'property-indexed', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
     { kind: 'property-indexed', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
@@ -163,5 +177,17 @@ export default feature({
     },
     { kind: 'alias-field-path', sorts: ['property-body'], verdict: 'refuse', account: 'P-006' },
     { kind: 'alias-field-path', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
+    /* 静态属性（矩阵后加的一列）：整行还不收（P-010）。union 里那一格是**这一刀**修的 ——
+       先前 `static` 与 `property` 两个词在 union 那一遍里被悄悄丢掉，降出来是一格普通字段。 */
+    {
+      kind: 'property-static',
+      sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body',
+        'property-body'],
+      verdict: 'refuse',
+      account: 'P-010',
+    },
+    { kind: 'property-static', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
+    { kind: 'property-static', sorts: ['fn-body'], verdict: 'refuse', account: 'P-003' },
+    { kind: 'property-static', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
   ],
 });

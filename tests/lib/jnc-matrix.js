@@ -115,6 +115,13 @@ const KINDS = [
   ['alias-field-path', 'alias m_pa = m_pad;', 'x'],
   ['class-multi-base', 'class MultiC: Helper, Helper2 { int m_mv; }', 'x'],
   ['disposable-class', 'disposable class DispC { int m_dv; }', 'x'],
+  /* 第四轮： */
+  ['method-const', 'int probeCn() const { return 8; }', 'x'],
+  ['property-static', 'static int autoget property m_sp;', 'x'],
+  ['field-weak-ptr', 'Helper weak* m_wp;', 'x'],
+  ['fn-async', 'async int probeAs() { return 1; }', 'x'],
+  ['fn-unsafe', 'unsafe int probeUs() { return 2; }', 'x'],
+  ['attribute-decl', '[probeAttr = 1] int m_at;', 'x'],
 ];
 
 /* ---------------------------------------------------------------- 位置表

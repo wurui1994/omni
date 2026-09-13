@@ -1,0 +1,19 @@
+// 第二百六十六刀：union 的体里那一条**不是普通字段**（`static` / `property` 不许被悄悄丢掉）。
+//
+// 先前 `static int autoget property m_sp;` 写在 union 里降出来是一格普通字段 `(m_sp int)` ——
+// `static`、`autoget`、`property` 三个词全丢了，一条诊断也没有。矩阵那一格量出来是 ✓，而别的
+// 位置都拒 —— 那一格 ✓ 才是错的（**"没诊断"不等于"降对了"**，ADR-0029 第 10.21 节）。
+//
+// union 的重叠语义在这几个词上整个说不通：静态成员根本不在那段存储里，属性也不是一格存储。
+// 所以照实拒，与 union 体里别的非字段成员同一句话。
+union U {
+	int m_a;
+	bool m_b;
+	static int autoget property m_sp;
+}
+
+int main() {
+	U u;
+	u.m_a = 3;
+	return 0;
+}
