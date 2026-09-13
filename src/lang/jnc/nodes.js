@@ -76,6 +76,20 @@ export const JNC_SHAPES = [
   { name: 'exprs', of: 'exp', holes: { first: 'exp?' } },
   { name: 'exprs-add', of: 'exp', holes: { list: 'exp', one: 'exp' } },
   { name: 'case', of: 'stat', holes: { value: 'exp' } },
+  // 第三批（形状照 `node tests/lib/jnc-shape.js` 量出来的填）
+  { name: 'enum', of: 'item', holes: { kind: 'exp', name: 'exp', base: 'spec', body: 'item' } },
+  { name: 'enums', of: 'item', holes: { first: 'item' } },
+  { name: 'enums-add', of: 'item', holes: { list: 'item', one: 'item' } },
+  { name: 'enum-item', of: 'item', holes: { name: 'exp', value: 'exp?' } },
+  { name: 'qualified', of: 'var', holes: { left: 'exp', right: 'exp' } },
+  { name: 'qualified-special', of: 'var', holes: { left: 'exp', right: 'exp' } },
+  { name: 'concat', of: 'exp', holes: { a: 'exp', b: 'exp' } },
+  { name: 'unary', of: 'exp', holes: { op: 'exp', a: 'exp' }, unary: true },
+  { name: 'type-name', of: 'spec', holes: { specs: 'spec', ptrs: 'spec' } },
+  { name: 'bases', of: 'spec', holes: {} },
+  { name: 'fn-proto', of: 'item', holes: { specs: 'spec', dcl: 'dcl' } },
+  { name: 'for', of: 'stat', holes: { init: 'stat', cond: 'exp', step: 'exp', body: 'block' } },
+  { name: 'import', of: 'item', holes: { path: 'exp' } },
 ];
 
 /** jancy 这门语言（第一族）。拼法在 `.grammar`，所以 `parser: 'glr'`。 */
