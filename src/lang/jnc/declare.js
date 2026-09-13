@@ -160,6 +160,9 @@ function accessorOf(node) {
   if (headOf(node) !== 'qualified-special') return null;
   const nm = named(node);
   if (nm === null) return null;
+  /* 右边那一格**只认 `accessor`**：`qualified-special` 的右边也可能是 `special`
+     （`void C.static construct()`），照收就会拼出带空格的名字 `C$static construct`。 */
+  if (headOf(nm.right) !== 'accessor') return null;
   const path = nameText(nm.left);
   const r = named(nm.right);
   const t = r === null ? undefined : r.text;

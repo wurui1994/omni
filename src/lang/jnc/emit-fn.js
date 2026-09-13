@@ -207,6 +207,11 @@ function retText(m, base, env, tc) {
      整串比会漏掉（50-construct.jnc 的 `Counter$construct$o1` 先前就落在这儿）。 */
   const leaf = base.includes('$') ? base.slice(base.lastIndexOf('$') + 1) : base;
   if (VOID_NAMES.has(base) || VOID_NAMES.has(leaf) || base.endsWith('$construct$static')) return 'void';
+  /* **存值器不写类型**（`set(int x)` / `void m_v.set(int)` 里那个 void 也常常省掉）：
+     基类型是 `no-type` 时回的就是 void —— 旧降级发的是 `(fn g_p$set ((x int)) void`
+     （64-prop.jnc / 67-propauto.jnc / 156-propstruct.jnc）。与事件那一条同一个道理：
+     没写的东西别拿去查表。 */
+  if (leaf === 'set' && m.type.base.kind === 'none') return 'void';
   const r = resolveType({ ...m.type, shape: 'data' }, env);
   if (r.type === null) return null;
   return emitType(r.type, 'slot', tc);
