@@ -18,6 +18,7 @@ import { headOf } from '../../src/lang/jnc/adapt.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
+import { structLine } from '../../src/lang/jnc/emit-agg.js';
 import { nameText } from '../../src/lang/jnc/declare.js';
 
 const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy/samples/jnc';
@@ -41,7 +42,7 @@ function walk(dir, out = []) {
   return out;
 }
 
-/** 从旧降级的输出里抠出 `(struct S (f 类型) …)`：`S` -> Map(字段名 -> 类型文本)。 */
+/** 从旧降级的输出里抠出 `(struct S (f 类型) …)`：`S` -> { fields, line }。 */
 function structsOf(text) {
   const out = new Map();
   for (const m of text.matchAll(/\(struct ([A-Za-z_$][\w$]*)\s([^\n]*)\)/g)) {
@@ -57,7 +58,7 @@ function structsOf(text) {
       if (sp > 0) fields.set(inner.slice(0, sp), inner.slice(sp + 1).trim());
       s = s.slice(end);
     }
-    out.set(m[1], fields);
+    out.set(m[1], { fields, line: m[0] });
   }
   return out;
 }
@@ -85,6 +86,11 @@ let same = 0;
 const diff = [];
 const unresolved = new Map();
 let noStruct = 0;
+/** 整行对比：这个聚合体的**全部字段**都解得出来时，把一整行拼出来与旧降级对。 */
+let lineTry = 0;
+let lineSame = 0;
+const lineDiff = [];
+const lineSkip = new Map();
 
 for (const f of files) {
   let out = '';
@@ -116,6 +122,7 @@ for (const f of files) {
           env.set(nm, {
             kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
             name: emitName,
+            agg: a,
           });
         }
       }
@@ -131,22 +138,37 @@ for (const f of files) {
   for (const a of aggs) {
     const nm = a.emitName ?? nameText(a.name);
     if (nm === null) continue;
-    const fields = oracle.get(nm);
-    if (fields === undefined) { noStruct += 1; continue; }         // 旧降级没发这一格（类的根名不同等）
+    const rec = oracle.get(nm);
+    if (rec === undefined) { noStruct += 1; continue; }             // 旧降级没发这一格
+    const fields = rec.fields;
+    const parts = [];
+    let whole = true;                                              // 这一格的字段是不是全解得出来
     for (const m of a.members) {
-      if (m.shape !== 'data' && m.shape !== 'array') continue;
-      if (m.name === null) continue;
+      if (m.shape !== 'data' && m.shape !== 'array') { whole = false; continue; }
+      if (m.name === null) { whole = false; continue; }
       const want = fields.get(m.name);
-      if (want === undefined) continue;                            // 旧降级没发这一格字段
       const r = resolveType(m.type, env);
       if (r.type === null) {
         unresolved.set(r.why, (unresolved.get(r.why) ?? 0) + 1);
+        whole = false;
         continue;
       }
-      cmp += 1;
       const got = emitType(r.type, 'field');
+      parts.push(`(${m.name} ${got})`);
+      if (want === undefined) { whole = false; continue; }          // 旧降级没发这一格字段
+      cmp += 1;
       if (got === want) same += 1;
       else if (diff.length < 20) diff.push(`${f.split('/').pop()}　${nm}.${m.name}：旧 ${want} / 新 ${got}`);
+    }
+    /* **整行**由 `emit-agg.js` 那三条规则拼（类的 `$tag`、基类字段前置、自己的按次序）。
+       拼不出来的（union 分组、属性/事件带出来的隐藏字段那几族）不算试过 —— 记账。 */
+    const built = structLine(a, env);
+    if (built.line !== null) {
+      lineTry += 1;
+      if (built.line === rec.line) lineSame += 1;
+      else if (lineDiff.length < 10) lineDiff.push(`${f.split('/').pop()}\n      旧 ${rec.line}\n      新 ${built.line}`);
+    } else {
+      lineSkip.set(built.why, (lineSkip.get(built.why) ?? 0) + 1);
     }
   }
 }
@@ -156,6 +178,16 @@ console.log(`语料 ${filesOk}/${files.length} 份（旧降级发得出来的）
 console.log(`解不出来（记账，不算对）：${[...unresolved].sort((a, b) => b[1] - a[1])
   .map(([w, n]) => `${w}×${n}`).join('  ') || '无'}`);
 if (noStruct > 0) console.log(`旧降级没发这个聚合体：${noStruct} 个（类的根名与嵌套那一族）`);
+console.log(`整行（emit-agg.js 拼得出来的那些）：试 ${lineTry} 行　一模一样 ${lineSame}`
+  + `（${(lineSame / Math.max(lineTry, 1) * 100).toFixed(1)}%）`);
+if (lineSkip.size > 0) {
+  console.log(`  拼不出来（记账）：${[...lineSkip].sort((a, b) => b[1] - a[1])
+    .map(([w, n]) => `${w}×${n}`).join('  ')}`);
+}
+if (lineDiff.length > 0) {
+  console.log('\n整行对不上：');
+  for (const d of (all ? lineDiff : lineDiff.slice(0, 5))) console.log(`  ${d}`);
+}
 if (diff.length > 0) {
   console.log('\n不一致（新腿的表还差一条）：');
   for (const d of (all ? diff : diff.slice(0, 10))) console.log(`  ${d}`);
