@@ -20,6 +20,8 @@
 //   syn   语法就不认（那一格在这门语言里压根写不出来 —— 这是**规格**，不是洞）
 
 import { execFileSync } from 'node:child_process';
+import { compose, diff, gaps, lookup } from '../../src/core/frontend-engine/positions.js';
+import { JNC_FEATURES, JNC_SORTS } from '../../src/lang/jnc/features/index.js';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +35,9 @@ const DOC = join(root, 'docs', 'design', 'jnc-positions.md');
 const argv = process.argv.slice(2);
 const only = argv.includes('--sort') ? argv[argv.indexOf('--sort') + 1] : null;
 const keep = argv.includes('--keep');
+/* `--check`：把量出来的每一格与**声明的规格**（src/lang/jnc/features/）对账。
+   这一格是 ADR-0029 那条"表要是可执行的规格"的落点：漂了就是一条测试失败。 */
+const check = argv.includes('--check');
 
 /* ---------------------------------------------------------------- 要素表
  * 每种要素给一段**最小**源码。`use` 是"用一下它"的那一句（免得被当成死代码而绕过检查）；
@@ -58,7 +63,7 @@ const KINDS = [
   ['typedef', 'typedef int Num;', 'x'],
   ['typedef-fn', 'typedef function VoidFn(int);', 'x'],
   ['typedef-fnptr', 'typedef int IntFn(int);', 'x'],
-  ['alias-method', 'alias twice = probeFn;', 'x'],
+  ['alias-method', 'alias twice = probeSelf;', 'x'],
   ['method-body', 'int probeM() { return 1; }', 'x'],
   ['method-proto', 'int probeP();', 'x'],
   ['method-static', 'static int probeS() { return 2; }', 'x'],
@@ -70,7 +75,7 @@ const KINDS = [
   ['operator-add', 'int operator + (int v) { return v; }', 'x'],
   ['operator-assign', 'int operator := (int v) { return v; }', 'x'],
   ['property-simple', 'int autoget property m_p;', 'x'],
-  ['property-full', 'int property m_fp { get { return 1; } set { } }', 'x'],
+  ['property-full', 'int property m_fp { get { return 1; } set(int v) { } }', 'x'],
   ['property-bindable', 'int bindable autoget property m_bp;', 'x'],
   ['event', 'event m_onDone();', 'x'],
   ['reactor', 'reactor m_r { }', 'x'],
@@ -93,6 +98,10 @@ int probeFn(int a) {
 	return a;
 }
 
+int probeSelf() {
+	return 0;
+}
+
 namespace probeNs {
 	int probeNsFn() {
 		return 0;
@@ -102,6 +111,10 @@ namespace probeNs {
 `;
 
 const MAIN = `
+int ProbeU.probeSelf() {
+	return 0;
+}
+
 int main() {
 	printf("probe\\n");
 	return 0;
@@ -111,13 +124,13 @@ int main() {
 const SORTS = [
   ['module', (e) => `${PRE}${e}\n${MAIN}`],
   ['namespace', (e) => `${PRE}namespace probeOuter {\n${e}\n}\n${MAIN}`],
-  ['class-body', (e) => `${PRE}class ProbeC {\n\tint m_pad;\n${e}\n}\n${MAIN}`],
-  ['struct-body', (e) => `${PRE}struct ProbeS {\n\tint m_pad;\n${e}\n}\n${MAIN}`],
-  ['union-body', (e) => `${PRE}union ProbeU {\n\tint m_ua;\n\tbool m_ub;\n${e}\n}\n${MAIN}`],
-  ['opaque-class-body', (e) => `${PRE}opaque class ProbeO {\n\tint m_pad;\n${e}\n}\n${MAIN}`],
+  ['class-body', (e) => `${PRE}class ProbeC {\n\tint m_pad;\n\tint probeSelf() { return 0; }\n${e}\n}\n${MAIN}`],
+  ['struct-body', (e) => `${PRE}struct ProbeS {\n\tint m_pad;\n\tint probeSelf() { return 0; }\n${e}\n}\n${MAIN}`],
+  ['union-body', (e) => `${PRE}union ProbeU {\n\tint m_ua;\n\tbool m_ub;\n\tint probeSelf();\n${e}\n}\n${MAIN}`],
+  ['opaque-class-body', (e) => `${PRE}opaque class ProbeO {\n\tint m_pad;\n\tint probeSelf() { return 0; }\n${e}\n}\n${MAIN}`],
   ['fn-body', (e) => `${PRE}int probeHost() {\n${e}\n\treturn 0;\n}\n${MAIN}`],
   ['property-body', (e) => `${PRE}int property g_pp {\n\tget {\n\t\treturn 1;\n\t}\n${e}\n}\n${MAIN}`],
-  ['extension-body', (e) => `${PRE}extension ProbeExt: Helper {\n${e}\n}\n${MAIN}`],
+  ['extension-body', (e) => `${PRE}extension ProbeExt: Helper {\n\tint probeSelf() { return 0; }\n${e}\n}\n${MAIN}`],
 ];
 
 /* ---------------------------------------------------------------- 跑一格
@@ -235,6 +248,35 @@ md.push('', '## 怎么读它', '',
 mkdirSync(dirname(DOC), { recursive: true });
 writeFileSync(DOC, `${md.join('\n')}\n`);
 process.stdout.write(`表：${DOC}\n`);
+
+if (check) {
+  const spec = compose(JNC_FEATURES);
+  const sortList = sorts.map(([s]) => s);
+  const kindList = KINDS.map(([k]) => k);
+  const bad = diff(spec, cells);
+  const { todo, undeclared } = gaps(spec, sortList, kindList);
+  process.stdout.write(`\n规格：${spec.features.length} 个特性、`
+    + `${spec.accounts.size} 个账号、声明了 ${spec.cells.size} 格\n`);
+  if (todo.length > 0) {
+    process.stdout.write(`还没定（todo）${todo.length} 格：\n`);
+    for (const [s, k, note] of todo) process.stdout.write(`  ${s} × ${k}　${note}\n`);
+  }
+  if (undeclared.length > 0) {
+    process.stdout.write(`**表里压根没有** ${undeclared.length} 格：\n`);
+    for (const [s, k] of undeclared) process.stdout.write(`  ${s} × ${k}\n`);
+  }
+  if (bad.length > 0) {
+    process.stdout.write(`\n**分歧** ${bad.length} 格（规格说的 vs 量出来的）：\n`);
+    for (const d of bad) {
+      process.stdout.write(`  ${d.sort} × ${d.kind}　规格 ${d.want}、量出来 ${d.got}`
+        + `${d.why ? `　（${d.why.slice(0, 60)}）` : ''}\n`);
+    }
+  }
+  const okCells = cells.size - bad.length - todo.length - undeclared.length;
+  process.stdout.write(`\n对上了 ${okCells} / ${cells.size} 格`
+    + `　分歧 ${bad.length}、todo ${todo.length}、缺声明 ${undeclared.length}\n`);
+  if (bad.length > 0 || undeclared.length > 0) process.exitCode = 1;
+}
 if (!keep) rmSync(OUT_DIR, { recursive: true, force: true });
 else process.stdout.write(`合成的源码留在：${OUT_DIR}\n`);
 

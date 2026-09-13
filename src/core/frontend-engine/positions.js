@@ -1,0 +1,131 @@
+// src/core/frontend-engine/positions.js —— 位置代数：组合 + 查询 + 一致性检查（ADR-0029 的 L2）
+//
+// 这一份是**求解器**，里头没有任何一门语言的常量。语言给的是 `feature.positions` 那些行，
+// 这儿负责：把它们并成一张表（冲突当场炸）、按 `(sort, kind)` 查、以及与**量出来的实际行为**
+// 对账（`diff`）。
+//
+// 为什么"对账"是这套设计的关键：表若只是文档，它一定会与代码漂开。让 `tests/lib/jnc-matrix.js`
+// 把每一格**真跑一遍**、再与表比，表就变成**可执行的规格**：任何漂移是一条测试失败，
+// 而不是一次"撞出来的发现"（ADR-0029 第 1 节那三类账全是这么来的）。
+
+import { VERDICTS } from './feature.js';
+
+/** 一格的键。 */
+const key = (sort, kind) => `${sort}|${kind}`;
+
+/**
+ * 把一串特性并成一张位置表。
+ * @returns {{cells: Map, accounts: Map, features: string[], sorts: Set, kinds: Set}}
+ */
+export function compose(features) {
+  const names = new Set();
+  for (const f of features) {
+    if (names.has(f.name)) throw new Error(`特性 '${f.name}' 装了两遍`);
+    names.add(f.name);
+  }
+  for (const f of features) {
+    for (const r of f.requires) {
+      if (!names.has(r)) throw new Error(`特性 '${f.name}' 要 '${r}'，可它没装`);
+    }
+  }
+  const accounts = new Map();
+  for (const f of features) {
+    for (const [id, a] of Object.entries(f.accounts)) {
+      const had = accounts.get(id);
+      if (had !== undefined && had.text !== a.text) {
+        throw new Error(`账号 ${id} 被两个特性定成了两句话：'${had.from}' 与 '${f.name}'`);
+      }
+      accounts.set(id, { ...a, from: f.name });
+    }
+  }
+  /* 两遍：先收通配（`sorts: '*'`），再收具体的 —— 具体的覆盖通配（规矩 1），
+     具体的撞具体的就炸（规矩 2）。 */
+  const cells = new Map();
+  const wild = new Map();
+  const kinds = new Set();
+  const sorts = new Set();
+  for (const f of features) {
+    for (const r of f.positions) {
+      kinds.add(r.kind);
+      if (r.sorts === '*') {
+        const had = wild.get(r.kind);
+        if (had !== undefined && had.verdict !== r.verdict) {
+          throw new Error(`'${r.kind}' 的通配结论撞了：'${had.from}' 说 ${had.verdict}、`
+            + `'${r.from}' 说 ${r.verdict}`);
+        }
+        wild.set(r.kind, r);
+      }
+    }
+  }
+  for (const f of features) {
+    for (const r of f.positions) {
+      if (r.sorts === '*') continue;
+      for (const s of r.sorts) {
+        sorts.add(s);
+        const k = key(s, r.kind);
+        const had = cells.get(k);
+        if (had !== undefined && (had.verdict !== r.verdict || had.account !== r.account)) {
+          throw new Error(`格子 (${s}, ${r.kind}) 撞了：'${had.from}' 说 ${had.verdict}`
+            + `${had.account ? `/${had.account}` : ''}、`
+            + `'${r.from}' 说 ${r.verdict}${r.account ? `/${r.account}` : ''}`);
+        }
+        cells.set(k, r);
+      }
+    }
+  }
+  for (const id of accounts.keys()) {
+    if (!/^[A-Z]-\d{3}$/.test(id)) throw new Error(`账号 '${id}' 的号不合式（要 X-000 那样）`);
+  }
+  /* 引用到的账号必须**有人定义**（规矩 3 的另一半）：一个账号只在一个特性里定义、别处引用它，
+     于是"这句话到底什么意思、出处在哪"只有一处答案。 */
+  for (const f of features) {
+    for (const r of f.positions) {
+      if (r.account === undefined) continue;
+      if (!accounts.has(r.account)) {
+        throw new Error(`特性 '${f.name}' 的 '${r.kind}' 引了账号 ${r.account}，可没人定义它`);
+      }
+    }
+  }
+  return { cells, wild, accounts, features: [...names], sorts, kinds };
+}
+
+/** 按 `(sort, kind)` 查一格：先看具体、再落通配；都没有回 `undefined`（= 表里没这一格）。 */
+export function lookup(spec, sort, kind) {
+  return spec.cells.get(key(sort, kind)) ?? spec.wild.get(kind);
+}
+
+/** 表里还没定的格（`todo`）与压根没声明的格 —— 这两栏就是"我们不知道什么"的清单。 */
+export function gaps(spec, sortList, kindList) {
+  const todo = [];
+  const undeclared = [];
+  for (const s of sortList) {
+    for (const k of kindList) {
+      const c = lookup(spec, s, k);
+      if (c === undefined) undeclared.push([s, k]);
+      else if (c.verdict === 'todo') todo.push([s, k, c.note ?? '']);
+    }
+  }
+  return { todo, undeclared };
+}
+
+/**
+ * 与**量出来的**实际行为对账。
+ * `measured` 是 `Map('sort|kind' -> {k})`，`k` 取 `ok|N|E|syn|crash`（jnc-matrix 的分类）。
+ * 回一串分歧；空数组 = 表与实现一致。
+ */
+export function diff(spec, measured) {
+  const MAP = { ok: 'ok', N: 'refuse', E: 'error', syn: 'syntax', crash: 'crash' };
+  const out = [];
+  for (const [k, m] of measured) {
+    const [sort, kind] = k.split('|');
+    const c = lookup(spec, sort, kind);
+    const got = MAP[m.k] ?? m.k;
+    if (c === undefined) { out.push({ sort, kind, want: '（表里没有）', got, why: m.why }); continue; }
+    if (c.verdict === 'todo') continue;                 // 还没定的格不算分歧，算清单
+    if (got === 'crash') { out.push({ sort, kind, want: c.verdict, got, why: m.why }); continue; }
+    if (c.verdict !== got) out.push({ sort, kind, want: c.verdict, got, why: m.why });
+  }
+  return out;
+}
+
+export { VERDICTS };
