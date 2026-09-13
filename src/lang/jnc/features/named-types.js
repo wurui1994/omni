@@ -15,6 +15,21 @@ const OK = ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-bo
 const KEEPS = ['namespace', 'class-body', 'struct-body', 'opaque-class-body'];
 const NAMED = ['struct', 'union-named', 'class', 'enum', 'enum-anon', 'enum-bitflag',
   'typedef', 'typedef-fn', 'typedef-fnptr'];
+/* 名字**由谁登记**（ADR-0029 Phase 3 的那一列）：`name` 是"名字先坐下"那一遍要调的，
+   `body` 是解体那一遍。枚举与聚合各有一种机制，typedef 那一族只有体那一遍。
+   `localTypeDecl` 读的就是这一列 —— 于是"函数体里能写哪几种类型声明"是这张表说的，
+   不是那个函数里的一串 `if`（第 219 / 250 / 260 刀那三格就是一格一格补出来的）。 */
+const REG = {
+  enum: { name: 'enumName', body: 'enumDecl' },
+  'enum-anon': { name: 'enumName', body: 'enumDecl' },
+  'enum-bitflag': { name: 'enumName', body: 'enumDecl' },
+  struct: { name: 'typeName', body: 'typeDecl' },
+  'union-named': { name: 'typeName', body: 'typeDecl' },
+  class: { name: 'typeName', body: 'typeDecl' },
+  typedef: { body: 'typeDecl' },
+  'typedef-fn': { body: 'typeDecl' },
+  'typedef-fnptr': { body: 'typeDecl' },
+};
 
 export default feature({
   name: 'named-types',
@@ -58,9 +73,16 @@ export default feature({
   },
   positions: [
     ...NAMED.flatMap((kind) => [
-      { kind, sorts: ['module'], verdict: 'ok' },
-      { kind, sorts: KEEPS, verdict: 'ok', escapes: false },
-      { kind, sorts: ['fn-body'], verdict: 'ok', escapes: true, note: 'T-005 的代价' },
+      { kind, sorts: ['module'], verdict: 'ok', register: REG[kind] },
+      { kind, sorts: KEEPS, verdict: 'ok', escapes: false, register: REG[kind] },
+      {
+        kind,
+        sorts: ['fn-body'],
+        verdict: 'ok',
+        escapes: true,
+        register: REG[kind],
+        note: 'T-005 的代价',
+      },
       { kind, sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
       { kind, sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
       { kind, sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },

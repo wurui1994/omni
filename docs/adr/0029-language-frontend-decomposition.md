@@ -622,3 +622,31 @@ const / global / uniform / in / out / 内建那几档，而且这几档的存法
 - 记一笔账：GLSL 的 `scopePath()` 里那七档目前还没有 `ambigOn` —— GLSL 不报歧义
   （同名的内建与全局撞了它按次序办）。要不要报是**规格问题**，等 GLSL 也立起自己的
   positions/accounts 时一并定。
+
+### 10.14 Phase 3 落了第一遍：**函数体里的类型声明这一遍是读表走的**
+
+`localTypeDecl` 先前是一串按 AST 形状分的 `if`（enum 一支、agg 一支、剩下算 typedef），
+于是第 219 / 250 / 260 刀那三格（体里的 typedef / enum / struct）是**一格一格补出来的** ——
+补到第三次才看出它们是同一列上的三格。
+
+改成两步：
+
+1. `typeKindOf(t)`：AST 形状 → **矩阵里的要素名**（枚举三种 / 聚合三种 / 其余算 typedef
+   那一族）。这就是 L1 那一层"这是什么"的第一块。
+2. 查 `fn-body` 那一列：不收就按**表里的账**拒（不在这儿另写一句话）；收就照那一格的
+   `register` 列走 —— `{name: 'enumName', body: 'enumDecl'}` /
+   `{name: 'typeName', body: 'typeDecl'}` / `{body: 'typeDecl'}`。
+   "选哪一种登记机制"从此是表说的，不是形状说的；这个函数里只剩那两种机制的**做法**。
+
+意思是：往后补第四格（比如体里的 `bitflag enum`、体里的 `union`）不用改这个函数，
+改 `features/named-types.js` 那张表就行 —— 而矩阵 `--check` 会立刻告诉你补没补上。
+
+**顺手撞出一个 liveness 证明**（也是一次操作失误的收获）：我把 `named-types.js` 那次
+**还没提交**的改动用 `git checkout` 冲掉了一次，`register` 那一列随之消失 —— 立刻有三条
+诊断冒出来（`'c' 那格声明自己没成…`），fixture 196-localstruct 当场红。说明这一遍**真的**在
+读表，不是摆设。（教训也记下来：没提交的文件别 `git checkout`。）
+
+- 腿：`NOCACHE=1` 的 jnc 554 次全真跑 345/0；矩阵 360/360 分歧 0；榜 `3430` 未动。
+- 还欠 Phase 3 的后半截：模块 / 命名空间 / 类体那三处登记遍（`nsFlat` 那一族）也照这个样子
+  读表 —— 它们比 `fn-body` 那一列宽（还要管 fn-def / var-decl / 属性那几族），所以要先把
+  `typeKindOf` 扩成完整的 `kindOf`。

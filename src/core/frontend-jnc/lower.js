@@ -198,7 +198,7 @@
 // （第六刀）在这里第一次真正被用到 —— 掩到 `promo(位宽)` 位再交给 `sbase`。
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { OmniError } from '../source/diag.js';
-import { compose, say } from '../frontend-engine/positions.js';
+import { compose, say, lookup } from '../frontend-engine/positions.js';
 import { lookupName, lexChain, EXT, INH, IMP } from '../frontend-engine/scopes.js';
 import { pick, worst } from '../frontend-engine/overload.js';
 import { castRow } from '../frontend-engine/casts.js';
@@ -6204,26 +6204,67 @@ class JncLower {
    * `scopes` 一起进出的类型表 —— 与体里的 `using namespace` 是同一件事，等那张表一起落。
    */
   localTypeDecl(t) {
-    if (isList(t) && head(t) === 'enum') {
-      /* 名字先坐下 —— `enumName` 报错时自己会说（它成不成都回 null，所以看的是**表里有没有**）。 */
+    /* **这一遍是读表走的**（ADR-0029 Phase 3）：先认出这是哪种要素（`typeKindOf`），再问
+       位置矩阵 `fn-body` 那一列这一格收不收、名字该由谁登记（`register`）。
+
+       先前这儿是一串按 AST 形状分的 `if`，于是第 219 / 250 / 260 刀那三格（体里的 typedef /
+       enum / struct）是**一格一格补出来的** —— 补到第三次才看出它们是同一列上的三格。
+       现在"哪几种要素能写在函数体里"是 `features/named-types.js` 那张表说的，这儿只有两样
+       登记机制（先坐名字的那两种），补第四格不用改这个函数。 */
+    const kd = this.typeKindOf(t);
+    const c = kd === null ? undefined : lookup(JNC_SPEC, 'fn-body', kd);
+    if (c !== undefined && c.verdict !== 'ok' && c.account !== undefined) {
+      const acc = JNC_SPEC.accounts.get(c.account);
+      /* 要填空的账这儿没法渲染（那得知道填什么），退回老路 —— 它自己会说话。 */
+      if (typeof acc.say === 'string' && !/\{\w+\}/.test(acc.say)) {
+        return c.verdict === 'error' ? this.acctErr(t, c.account) : this.acct(t, c.account);
+      }
+    }
+    const reg = c === undefined ? undefined : c.register;
+    /* 名字先坐下。两种机制（枚举一种、聚合一种）——**选哪一种是表说的**，不是形状说的。
+       两处都幂等：登记过了就别再登一遍（`enumName` 报错时自己会说，它成不成都回 null，
+       所以看的是**表里有没有**）。 */
+    if (reg !== undefined && reg.name === 'enumName') {
       const nm = this.enumSelfName(t);
       if (nm !== null && !this.enums.has(nm)) {
         this.enumName(t);
         if (!this.enums.has(nm)) return null;
       }
-      return this.enumDecl(t);
-    }
-    /* 体里的 `struct` / `class`（第二百六十刀）：同一个洞的另一半 —— 名字那一遍（typeName）
-       只走顶层与类体，所以 `struct Color { … }` 写在 main 里时 `this.structs` 里压根没有它，
-       后面 `static Color colorTable[] = { … }` 报的是"没有这个类型：'Color'"（榜上 74 对里
-       的一批）。语料里的原样是 samples/jnc/61_FormattingLiterals.jnc:20-24。
-       代价与体里的 typedef / enum 逐字一样（第二百一十九 / 二百五十刀）：名字提到了外面那层。 */
-    if (isList(t) && head(t) === 'agg') {
+    } else if (reg !== undefined && reg.name === 'typeName') {
+      /* 体里的 `struct` / `class`（第二百六十刀）：名字那一遍（typeName）只走顶层与类体，
+         所以 `struct Color { … }` 写在 main 里时 `this.structs` 里压根没有它，后面
+         `static Color colorTable[] = { … }` 报的是"没有这个类型：'Color'"（榜上 74 对里的
+         一批）。语料里的原样是 samples/jnc/61_FormattingLiterals.jnc:20-24。 */
       const nm0 = this.qname(t.items[2]);
       const full0 = nm0 === null ? null : this.qual(nm0);
       if (full0 !== null && !this.structs.has(full0)) this.typeName(t);
     }
-    return this.typeDecl(t);
+    return this[reg !== undefined && reg.body !== undefined ? reg.body : 'typeDecl'](t);
+  }
+
+  /**
+   * 一格带体的类型声明是**哪种要素**（矩阵里的 kind）—— ADR-0029 L1 那一层的"这是什么"。
+   *
+   * 只认 `type-decl` 里头那一族：枚举三种、聚合三种、剩下的算 typedef 那一族
+   * （`typedef int Num;` / 函数 / 函数指针 —— 它们在矩阵里每一列的结论都一样，所以不细分）。
+   */
+  typeKindOf(t) {
+    if (!isList(t)) return null;
+    const h = head(t);
+    const anon = (i) => isList(t.items[i]) && head(t.items[i]) === 'anon';
+    if (h === 'enum') {
+      const key = isAtom(t.items[1]) ? t.items[1].value : null;
+      if (key === 'bitflag enum') return 'enum-bitflag';
+      return anon(2) ? 'enum-anon' : 'enum';
+    }
+    if (h === 'agg') {
+      const k = isAtom(t.items[1]) ? t.items[1].value : null;
+      if (k === 'union') return anon(2) ? 'union-anon' : 'union-named';
+      if (k === 'struct') return 'struct';
+      if (k === 'class' || k === 'opaque class') return 'class';
+      return null;
+    }
+    return 'typedef';
   }
 
   /**
