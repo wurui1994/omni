@@ -12,19 +12,26 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 export const root = join(here, '..', '..');
 export const cli = join(root, 'src', 'core', 'cli.js');
-export const OUT_DIR = join(process.env.OMNI_CACHE_DIR || join(root, '.omni-cache'), 'test', 'matrix');
+const CACHE = process.env.OMNI_CACHE_DIR || join(root, '.omni-cache');
 
-/** 每一趟开头把工作目录清出来，并把被 import 的那一份也合成好（探针要自足）。 */
-export function prepare() {
-  rmSync(OUT_DIR, { recursive: true, force: true });
-  mkdirSync(OUT_DIR, { recursive: true });
-  mkdirSync(join(OUT_DIR, 'imports'), { recursive: true });
-  writeFileSync(join(OUT_DIR, 'imports', 'probeimp.jnc'), 'int probeImported() {\n\treturn 7;\n}\n');
+/* **两把尺子各用一格自己的目录**：先前共用一格 `test/matrix`，两趟同时跑时后收工的那一趟
+   把目录删了，另一趟当场 ENOENT（量出来的 —— 这一条也是账）。 */
+let outDir = join(CACHE, 'test', 'matrix');
+
+export const outPath = () => outDir;
+
+/** 每一趟开头：挑一格自己的目录、清出来，并把被 import 的那一份也合成好（探针要自足）。 */
+export function prepare(sub = 'matrix') {
+  outDir = join(CACHE, 'test', sub);
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  mkdirSync(join(outDir, 'imports'), { recursive: true });
+  writeFileSync(join(outDir, 'imports', 'probeimp.jnc'), 'int probeImported() {\n\treturn 7;\n}\n');
 }
 
 export function cleanup(keep) {
-  if (!keep) rmSync(OUT_DIR, { recursive: true, force: true });
-  return OUT_DIR;
+  if (!keep) rmSync(outDir, { recursive: true, force: true });
+  return outDir;
 }
 
 /* ---------------------------------------------------------------- 位置表
@@ -131,10 +138,10 @@ export function classify(err, code) {
  * 第三问要用它：**修饰词有没有被悄悄丢掉**（ADR-0029 第 10.21 节那条界）。
  */
 export function sxOf(sort, kind, src) {
-  const p = join(OUT_DIR, `${sort}__${kind}.jnc`);
+  const p = join(outDir, `${sort}__${kind}.jnc`);
   writeFileSync(p, src);
   try {
-    return execFileSync(process.execPath, [cli, 'sx', p, '-I', OUT_DIR], {
+    return execFileSync(process.execPath, [cli, 'sx', p, '-I', outDir], {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], cwd: root,
     });
   } catch {
@@ -143,10 +150,10 @@ export function sxOf(sort, kind, src) {
 }
 
 export function runOne(sort, kind, src) {
-  const p = join(OUT_DIR, `${sort}__${kind}.jnc`);
+  const p = join(outDir, `${sort}__${kind}.jnc`);
   writeFileSync(p, src);
   try {
-    execFileSync(process.execPath, [cli, 'sx', p, '-I', OUT_DIR], {
+    execFileSync(process.execPath, [cli, 'sx', p, '-I', outDir], {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], cwd: root,
     });
     return classify('', 0);

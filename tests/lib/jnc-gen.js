@@ -32,7 +32,7 @@ const keep = argv.includes('--keep');
 const els = elements().filter((e) => onlyGroup === null || e.group === onlyGroup);
 const sorts = SORTS.filter(([s]) => onlySort === null || s === onlySort);
 
-prepare();
+prepare('gen');
 const cells = new Map();
 const tally = { ok: 0, N: 0, E: 0, syn: 0, crash: 0 };
 const t0 = Date.now();

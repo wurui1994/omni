@@ -121,7 +121,7 @@ const KINDS = [
 ];
 
 /* ---------------------------------------------------------------- 主流程 */
-prepare();
+prepare('matrix');
 
 const sorts = SORTS.filter(([s]) => only === null || s === only);
 const cells = new Map();          // `${sort}|${kind}` -> {k, why, esc?}
