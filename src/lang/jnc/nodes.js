@@ -1,11 +1,12 @@
-// src/lang/jnc/nodes.js —— jancy 的**节点表**（第一族：声明的骨架）
+// src/lang/jnc/nodes.js —— jancy 的**节点表**（全表：语料里的 148 个名字全在这儿）
 //
 // 走 GLR，所以这张表**只有形状**（名字 + 洞 + 洞的类别），拼法在 `frontend-jnc/jnc.grammar` 里
 // —— 语法文件里每条产生式的动作头就是这儿的节点名（`(-> ("import" LITERAL) (import $2))`
 // 里那个 `import`），**名字就是桥**（ADR-0030 第 5 节）。
 //
-// 顺序按量出来的清单推（`node tests/lib/jnc-heads.js`：40 份语料 112 个名字 / 10141 个节点）。
-// 这一刀收头一族 —— 声明的骨架，占了一半以上的节点数。
+// 顺序按量出来的清单推（`node tests/lib/jnc-heads.js`）—— 先声明的骨架（占一半以上节点），
+// 再语句与表达式，最后一批把尾巴上那 70 多个低频名字一次填掉。
+// 现在的数：**660 份语料、148 个名字、476786 个节点，覆盖 100%，形状分歧 0**。
 
 import { extend } from '../../core/frontend-engine/language.js';
 import { commonShapeLang } from '../../core/frontend-engine/common-nodes.js';
@@ -92,7 +93,117 @@ export const JNC_SHAPES = [
   { name: 'bases', of: 'spec', holes: {} },
   { name: 'fn-proto', of: 'item', holes: { specs: 'spec', dcl: 'dcl' } },
   { name: 'for', of: 'stat', holes: { init: 'stat', cond: 'exp', step: 'exp', body: 'block' } },
-  { name: 'import', of: 'item', holes: { path: 'exp' } },
+  /* `import "x.jnc"` 一格；`import "libfoo.dylib" with "foo.h"` 两格（第二格是那个头文件）。 */
+  { name: 'import', of: 'item', holes: { path: 'exp', header: 'exp?' } },
+  // ---- 第四批：清单尾巴上那 70 多个低频名字 -------------------------------------
+  // 形状全是从 `.grammar` 的动作头**数出来**的（`(-> (qname "<" targs ">") (tinst $1 $3))`
+  // 就是两格洞），填完再由形状尺子回量 —— 猜的部分交给尺子，不交给运气。
+  // 泛型那一族（jnc.grammar:389-399，ADR-0025 的 S1）
+  { name: 'tinst', of: 'spec', holes: { name: 'exp', targs: 'spec' } },
+  { name: 'targs', of: 'spec', holes: { first: 'spec' } },
+  { name: 'targs-add', of: 'spec', holes: { list: 'spec', one: 'spec' } },
+  // 第二格是默认类型（`class RbTree<K, V, C = stdt.Lt<K> >`）
+  { name: 'targ', of: 'spec', holes: { type: 'spec', deflt: 'spec?' } },
+  // 限定名表（基类表就是它：`class C: A, B`）
+  { name: 'qnames', of: 'spec', holes: { first: 'exp' } },
+  { name: 'qnames-add', of: 'spec', holes: { list: 'spec', one: 'exp' } },
+  { name: 'no-base', of: 'spec', holes: {} },
+  // 声明那一摊剩下的几格
+  { name: 'namespace', of: 'item', holes: { name: 'exp', body: 'block' } },
+  { name: 'extension', of: 'item', holes: { name: 'exp', bases: 'spec', body: 'block' } },
+  { name: 'dylib', of: 'item', holes: { name: 'exp', body: 'block' } },
+  { name: 'using-namespace', of: 'item', holes: { name: 'exp' } },
+  { name: 'using-extension', of: 'item', holes: { name: 'exp' } },
+  { name: 'friend', of: 'item', holes: { name: 'exp' } },
+  { name: 'access', of: 'item', holes: { word: 'exp' } },
+  { name: 'typedef', of: 'item', holes: { specs: 'spec', dcls: 'dcl' } },
+  { name: 'var-decl-curly', of: 'stat', holes: { specs: 'spec', dcl: 'dcl', value: 'exp' } },
+  { name: 'ref-init', of: 'dcl', holes: { dcl: 'dcl', value: 'exp' } },
+  { name: 'pragma', of: 'item', holes: { args: 'exp' } },
+  { name: 'pragma-default', of: 'exp', holes: {} },
+  // 属性块（`[ displayName = "Name" ]`）挂在后面那条声明上
+  { name: 'attrs', of: 'item', holes: { first: 'item' } },
+  { name: 'attrs-add', of: 'item', holes: { list: 'item', one: 'item' } },
+  { name: 'attr', of: 'item', holes: { name: 'exp', value: 'exp?' } },
+  { name: 'attr-ref', of: 'item', holes: { name: 'exp' } },
+  { name: 'attributed', of: 'item', holes: { attrs: 'item', decl: 'item' } },
+  // 类型说明那一摊
+  { name: 'abstract-class', of: 'spec', holes: {} },
+  { name: 'property-template', of: 'spec', holes: { body: 'block' } },
+  { name: 'typeof', of: 'spec', holes: { arg: 'spec' } },
+  { name: 'fn-type', of: 'spec', holes: { specs: 'spec', ptrs: 'spec', formals: 'formal' } },
+  { name: 'anon', of: 'exp', holes: {} },
+  // 声明符的后缀里还差两格
+  { name: 'post-modifier', of: 'suffix', holes: { word: 'exp' } },
+  { name: 'bitfield', of: 'suffix', holes: { bits: 'exp' } },
+  { name: 'formals-varargs', of: 'formal', holes: { formals: 'formal' } },
+  // 特殊名（`operator +`、`operator ()`、`operator int*`）
+  { name: 'operator', of: 'exp', holes: { op: 'exp' } },
+  { name: 'postfix-operator', of: 'exp', holes: { op: 'exp' } },
+  { name: 'call-op', of: 'exp', holes: {} },
+  { name: 'index-op', of: 'exp', holes: {} },
+  { name: 'cast-op', of: 'exp', holes: { specs: 'spec', ptrs: 'spec' } },
+  // 语句那一摊剩下的
+  { name: 'empty-stmt', of: 'stat', holes: {} },
+  { name: 'switch', of: 'stat', holes: { value: 'exp', body: 'block' } },
+  { name: 'default', of: 'stat', holes: {} },
+  // `catch:` / `finally:` / `nestedscope:` —— 三个都是"一格词的标签"（jnc.grammar:594-596）
+  { name: 'label', of: 'stat', holes: { word: 'exp' } },
+  { name: 'try', of: 'stat', holes: { body: 'block' } },
+  { name: 'unsafe', of: 'stat', holes: { body: 'block' } },
+  { name: 'once', of: 'stat', holes: { body: 'stat' } },
+  { name: 'throw', of: 'stat', holes: { value: 'exp?' }, last: true },
+  { name: 'do', of: 'stat', holes: { body: 'block', cond: 'exp' } },
+  // 第二格是 `assert(x, "话")` 里那句话
+  { name: 'assert', of: 'stat', holes: { cond: 'exp', msg: 'exp?' } },
+  { name: 'none', of: 'exp', holes: {} },
+  // 动态布局那一族（`dylayout (layout) { dyfield Hdr hdr; }`，jnc.grammar:605-609）
+  { name: 'dylayout', of: 'stat', holes: { layout: 'exp', body: 'block' } },
+  { name: 'dyfield', of: 'stat', holes: { name: 'exp', body: 'block' } },
+  { name: 'onevent', of: 'item', holes: { event: 'exp', formals: 'formal', body: 'block' } },
+  { name: 'events', of: 'exp', holes: { first: 'exp' } },
+  { name: 'events-list', of: 'exp', holes: { list: 'exp' } },
+  // 表达式那一摊剩下的
+  { name: 'cond', of: 'exp', holes: { cond: 'exp', a: 'exp', b: 'exp' } },
+  { name: 'addr', of: 'exp', holes: { a: 'exp' }, unary: true },
+  { name: 'indirect', of: 'exp', holes: { a: 'exp' }, unary: true },
+  { name: 'pre-inc', of: 'exp', holes: { a: 'exp' }, unary: true },
+  { name: 'pre-dec', of: 'exp', holes: { a: 'exp' }, unary: true },
+  { name: 'post-inc', of: 'exp', holes: { a: 'exp' }, suffix: true },
+  { name: 'post-dec', of: 'exp', holes: { a: 'exp' }, suffix: true },
+  { name: 'await', of: 'exp', holes: { a: 'exp' }, unary: true },
+  { name: 'try-expr', of: 'exp', holes: { a: 'exp' }, unary: true },
+  { name: 'new', of: 'exp', holes: { type: 'spec', args: 'exp?' } },
+  { name: 'new-array', of: 'exp', holes: { type: 'spec', size: 'exp' } },
+  { name: 'new-curly', of: 'exp', holes: { type: 'spec', init: 'exp' } },
+  { name: 'cast', of: 'exp', holes: { type: 'spec', value: 'exp' } },
+  { name: 'dynamic-cast', of: 'exp', holes: { type: 'spec', value: 'exp' } },
+  { name: 'call-operator-new', of: 'exp', holes: { fn: 'exp', args: 'exp' } },
+  { name: 'ptr-field', of: 'var', holes: { obj: 'prefixexp', name: 'exp' } },
+  { name: 'this', of: 'exp', holes: {} },
+  { name: 'true', of: 'exp', holes: {} },
+  { name: 'false', of: 'exp', holes: {} },
+  { name: 'null', of: 'exp', holes: {} },
+  { name: 'char', of: 'exp', holes: { text: 'exp' } },
+  { name: 'fmt', of: 'exp', holes: { text: 'exp' } },
+  { name: 'capture', of: 'exp', holes: { text: 'exp' } },
+  { name: 'unbound', of: 'exp', holes: {} },
+  // `sizeof` 那一族：括号里既能是类型也能是表达式（`type-or-expr`），所以洞类写 `spec`
+  { name: 'sizeof', of: 'exp', holes: { arg: 'spec' } },
+  { name: 'countof', of: 'exp', holes: { arg: 'spec' } },
+  { name: 'typeof-expr', of: 'exp', holes: { arg: 'spec' } },
+  { name: 'declof', of: 'exp', holes: { arg: 'spec' } },
+  { name: 'offsetof', of: 'exp', holes: { arg: 'exp' } },
+  { name: 'bindingof', of: 'exp', holes: { arg: 'exp' } },
+  { name: 'dynamic-sizeof', of: 'exp', holes: { arg: 'exp' } },
+  { name: 'dynamic-countof', of: 'exp', holes: { arg: 'exp' } },
+  { name: 'dynamic-typeof', of: 'exp', holes: { arg: 'exp' } },
+  { name: 'dynamic-offsetof', of: 'exp', holes: { arg: 'exp' } },
+  // 花括号初始化（`{ 1, 2, [3] = 4, m_y = 5 }`，空位是一格 `skip-item`）
+  { name: 'curly', of: 'exp', holes: { items: 'item' } },
+  { name: 'skip-item', of: 'item', holes: {} },
+  { name: 'named-item', of: 'item', holes: { name: 'exp', value: 'exp' } },
+  { name: 'indexed-item', of: 'item', holes: { index: 'exp', value: 'exp' } },
 ];
 
 /**
