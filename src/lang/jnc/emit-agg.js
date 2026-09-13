@@ -55,7 +55,8 @@ export function structLine(agg, env, allAggs = null) {
   parts.push(...bases);
   const extra = [];
   const fails = [];
-  const own = ownFields(agg, env, { owner: name, extra, fails });
+  const tail = [];
+  const own = ownFields(agg, env, { owner: name, extra, fails, tail });
   if (own === null) {
     return { line: null, lines: [], why: `有字段还解不出来（${fails.join('；') || '?'}）` };
   }
@@ -66,7 +67,7 @@ export function structLine(agg, env, allAggs = null) {
       if (d.word !== 'class' && d.word !== 'opaque class') continue;
       if (chainRoot(d, env) !== agg) continue;
       const dn = d.emitName ?? nameText(d.name);
-      const f = ownFields(d, env, { owner: dn ?? name, extra, fails });
+      const f = ownFields(d, env, { owner: dn ?? name, extra, fails, tail });
       if (f === null) {
         return { line: null, lines: [], why: `派生类里有字段还解不出来（${fails.join('；') || '?'}）` };
       }
@@ -74,6 +75,7 @@ export function structLine(agg, env, allAggs = null) {
     }
   }
   if (parts.length === 0) return { line: null, lines: [], why: '一格字段都没有' };
+  parts.push(...tail);                                              // 属性生成的那几格排最后
   /* **union 自己那一行**：它的字段共用一段字节，所以整串括成一格 `(union …)`
      （166-unionnamed.jnc / 191-unionmeth.jnc / 192-unionalias.jnc / 179 的 `Outer$Pair`）。 */
   const body = agg.word === 'union' && parts.length > 0
@@ -151,7 +153,7 @@ function lastIdent(n) {
 }
 
 /** 自己那几格数据字段。`ctx` 带着东家的名字与"顺带要发的那几行"。 */
-function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [] }) {
+function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [] }) {
   const out = [];
   /* 位域挤格子的状态：`bits` 是底宽、`used` 是已经占掉的位数。碰上非位域就**收口**。 */
   let pack = null;
@@ -192,11 +194,18 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [] }) {
       if (m.name === null) return;
       /* **autoget 属性**：编译器生成那格存储，名字就叫 `m_value`（prop_autoget.rst:26），
          发成 `<东家>$<属性名>$m_value`，类型是属性自己的类型（150-variantautoget.jnc）。 */
-      if (m.type !== null && m.type.mods.includes('autoget')) {
+      /* `autoget` / `bindable` 的属性由编译器生成存储：`m_value`（prop_autoget.rst:26），
+         `bindable` 还多一格事件 `m_onChanged`（81-propbindmem.jnc）。
+         这两格**排在自己那些真字段之后**（旧降级的次序：67-propauto.jnc 的
+         `(m_hits int) (Cell$m_v$m_value int)`）—— 所以塞进 `ctx.tail`，最后再接上。 */
+      const gen = m.type === null ? [] : m.type.mods;
+      if (gen.includes('autoget') || gen.includes('bindable')) {
         const ar = resolveType({ ...m.type, shape: 'data' }, env);
         if (ar.type === null) { ctx.fails?.push(`${m.name}$m_value: ${ar.why}`); out.push(null); return; }
-        flush();
-        out.push(`(${ctx.owner}$${m.name}$m_value ${emitType(ar.type, 'field')})`);
+        ctx.tail?.push(`(${ctx.owner}$${m.name}$m_value ${emitType(ar.type, 'field')})`);
+        if (gen.includes('bindable')) {
+          ctx.tail?.push(`(${ctx.owner}$${m.name}$m_onChanged (arr (fnty () void)))`);
+        }
         return;
       }
       const body = named(m.at)?.body;
