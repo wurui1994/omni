@@ -125,7 +125,7 @@ export function emitStmt(n, ctx) {
   }
 
   if (h === 'expr-stmt') return ctx.exprStmt(nm.expr ?? n.items[1], ctx.ind);
-  if (h === 'var-decl' || h === 'var-decl-curly') return ctx.localDecl(n, ctx.ind);
+  if (h === 'var-decl' || h === 'var-decl-curly') return ctx.localDecl(n, ctx.ind, ctx);
 
   if (h === 'switch') {
     const c = ctx.cond(nm.cond ?? nm.expr);

@@ -8,7 +8,7 @@
 // `fieldOf` / `elemOf` / `callOf`。给不出来时驱动**记账走开**，不猜。
 
 import { headOf, named } from './adapt.js';
-import { allInChain } from './declare.js';
+import { allInChain, chainOf } from './declare.js';
 import { emitStmt } from './emit-stmt.js';
 import { emitExpr } from './emit-expr.js';
 import { catchAt, catchBlockLines } from './stmt-table.js';
@@ -51,7 +51,7 @@ export function makeCtx(env) {
     const pad = ' '.repeat(ind);
     const h = headOf(node);
     if (h === 'assign') {
-      const ls = env.assign?.(node, ind);
+      const ls = env.assign?.(node, ind, ctx);
       if (ls === null || ls === undefined) { env.acct('赋值这一格还拼不出来'); return null; }
       return ls;
     }
@@ -65,7 +65,9 @@ export function makeCtx(env) {
    */
   ctx.block = (node, ind) => {
     if (headOf(node) !== 'compound') { env.acct('这里要一个 { … } 块'); return null; }
-    const list = allInChain(named(node)?.body, 'stats-add', 'stats');
+    /* 语句链是**空基例**那一族（`unit` 一格子项都没有 + `unit-add {list, one}`，节点表 :25-26）
+       —— 空基例要用 `chainOf`，拿 `allInChain` 走会把整条链当成一条语句（declare.js 那条注）。 */
+    const list = chainOf(named(node)?.body, 'unit-add');
     const isCatch = (s) => headOf(s) === 'label'
       && String(named(s)?.text?.value ?? named(s)?.name?.value ?? '') === 'catch';
     const at = catchAt(list, isCatch);
@@ -105,7 +107,7 @@ export function makeCtx(env) {
     const nm = named(n) ?? {};
     const initLines = [];
     if (headOf(nm.init) === 'var-decl' || headOf(nm.init) === 'var-decl-curly') {
-      const ls = env.localDecl?.(nm.init, ind + 2);
+      const ls = env.localDecl?.(nm.init, ind + 2, ctx);
       if (ls === null || ls === undefined) return null;
       initLines.push(...ls);
     } else if (nm.init !== undefined && nm.init !== null && headOf(nm.init) !== 'none') {
@@ -145,7 +147,7 @@ export function makeCtx(env) {
    */
   ctx.switchPlan = (n, ind) => {
     const nm = named(n) ?? {};
-    const list = allInChain(named(nm.body)?.body, 'stats-add', 'stats');
+    const list = chainOf(named(nm.body)?.body, 'unit-add');
     const groups = [];
     const cases = [];
     let cur = null;
