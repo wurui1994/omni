@@ -258,6 +258,19 @@ export function scanAggs(tree, env) {
         statics.set(emitName, st);
         props.set(emitName, ps);
 
+        /**
+         * **类体里的 `typedef`**（第一百〇六刀）：它与嵌套类型走**同一条路** —— 提到顶层那一批里
+         * （jancy 的 aggHoist），名字前头挂着这个类。所以这儿把它记进类型环境：键是它自己那一段
+         * （`Num`），点串写法（`C.Num`）由 `baseOf` 那一头按末段查。
+         * **同名的不盖**（先声明的那一格胜出）：两个类里同名的 typedef 指到两格不同类型时
+         * 按名字查是猜，宁可让后来那一格报"认不出基类型"。
+         */
+        for (const m of a.members) {
+          if (m.shape !== 'typedef' || m.name === null || m.type === null) continue;
+          if (env.has(m.name)) continue;
+          env.set(m.name, { kind: 'typedef', type: m.type, name: `${emitName}$${m.name}` });
+        }
+
         /* **方法那一族**（`<东家>$<方法名>`，第五十二刀）：一格一格记下签名与那个节点。
            体写在类里的（`fn-def`）由这一层发；只写原型的（`fn-proto`）体在外面，那一格
            由顶层那条路发 —— 两处登记的是**同一个名字**，所以调用那一层只查一张表。 */
