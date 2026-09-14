@@ -11,7 +11,7 @@
 
 import { headOf, named } from './adapt.js';
 import {
-  CONV_CHAIN, NULL_BY_WANT, intLitRadix, isRealLit, intLitKind, truthyCode, castValue,
+  CONV_CHAIN, NULL_BY_WANT, intLitRadix, isRealLit, intLitKind, truthyCode, castValue, ptrBinary,
 } from './expr-table.js';
 import { intBinary, intUnary, intConvCode } from './int-table.js';
 
@@ -183,6 +183,16 @@ export function emitExpr0(n, want, ctx) {
         y = { code: `(sel ${y.code} (int 1) (int 0))`, type: { k: 'int', w: 32, u: false } };
       }
     }
+    /* **指针与类引用那一族**（跟 `null` 比走 `pisnull`、互比走 `peq`、算术走 `padd`/`psub`）：
+       要排在整数那一支之前 —— `p + 1` 是指针算术，不是加法。 */
+    if (ctx.isPtr?.(x.type) === true || ctx.isPtr?.(y.type) === true
+      || ctx.isClass?.(x.type) === true || ctx.isClass?.(y.type) === true) {
+      const r = ptrBinary({
+        op, a: x, b: y, aNull, bNull, c: ctx,
+      });
+      if (r === null) { ctx.acct(`指针/类引用上的 '${op}' 还没接`); return null; }
+      return r;
+    }
     if (ctx.isInt?.(x.type) === true && ctx.isInt?.(y.type) === true) {
       const r = intBinary(op, x, y, cmp);
       return { code: r.code, type: cmp ? ctx.T.bool : r.type };
@@ -208,6 +218,14 @@ export function emitExpr0(n, want, ctx) {
   if (h === 'index') {
     const r = ctx.elemOf?.(n, want);
     if (r === null || r === undefined) { ctx.acct('下标这一格还拼不出来'); return null; }
+    return r;
+  }
+  /* **取地址**（第九 / 二十四刀）：`&x` 里那一格 x 早就被提到一段自己的内存上了，所以这一句
+     发的**就是那一格单元**（一个字都不算）。结构体与数组的名字里放的本来就是地址，同理。
+     由调用方给（它知道谁提过、单元叫什么）。 */
+  if (h === 'addr') {
+    const r = ctx.addrOf?.(nm.a, want);
+    if (r === null || r === undefined) { ctx.acct('取地址这一格还拼不出来'); return null; }
     return r;
   }
   if (h === 'indirect') {

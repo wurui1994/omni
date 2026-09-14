@@ -27,14 +27,46 @@ const MC0 = { k: 'mc', params: [] };
  */
 const LIFTABLE = new Set(['int', 'real', 'bool', 'ptr', 'tptr', 'enum', 'class']);
 
-/** 整份源码里 `&名字` 取过的那些名字。属性生成的存储要多问一句 `m_value` —— 源码里写的是它。 */
-export function addrTaken(trees, out = new Set()) {
+/**
+ * **提得动吗**（第九刀与第二十四刀共用这一条）：被 `&` 取过地址的名字要提到一段自己的内存上，
+ * 提得动的只有上面那几种。结构体与数组**不在里头** —— 它们那一格里放的**本来就是**地址
+ * （`&s` 一个字都不发）；别的（string / 函数值 / 多播）提不动。
+ */
+export function liftable(ty) {
+  return ty !== null && ty !== undefined && LIFTABLE.has(ty.k);
+}
+
+/** 提上去那一格的类型：一格**指到它**的指针（局部量的单元与模块级那一格同一个写法）。 */
+export function liftedType(ty, tc) {
+  return lifted(ty, tc);
+}
+
+/** 提上去那一格的名字（`cellName`）：`名字$c`（`$` 不在 jancy 的标识符里，撞不上用户的名字）。 */
+export function cellName(name) {
+  return `${name}$c`;
+}
+
+/**
+ * 整份源码里 `&名字` 取过的那些名字。属性生成的存储要多问一句 `m_value` —— 源码里写的是它。
+ *
+ * `retPtr` 为真时**多算一条**（第一百六十七刀）：`return entry;` 与 `return &entry;` 一样是
+ * "地址逃出去了"，所以返回类型是**数据指针**的函数里，那一格也要提。只在那种函数上问，
+ * 而且宁可多提一格 —— 多提只是多一次 `pnew`，漏提是**错答案**。
+ */
+export function addrTaken(trees, out = new Set(), retPtr = false) {
   const dig = (n) => {
     if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
     if (headOf(n) === 'addr') {
       const a = named(n)?.a;
       if (a !== null && a !== undefined && Array.isArray(a.items) && headOf(a) === 'name') {
         const t = named(a)?.text;
+        if (t !== null && t !== undefined && typeof t.value === 'string') out.add(t.value);
+      }
+    }
+    if (retPtr === true && headOf(n) === 'return') {
+      const v = named(n)?.value;
+      if (v !== null && v !== undefined && Array.isArray(v.items) && headOf(v) === 'name') {
+        const t = named(v)?.text;
         if (t !== null && t !== undefined && typeof t.value === 'string') out.add(t.value);
       }
     }

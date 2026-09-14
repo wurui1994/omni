@@ -21,7 +21,8 @@ import { nameText, allInChain, readDcl } from '../../src/lang/jnc/declare.js';
 import { readDeclType, readAnonType } from '../../src/lang/jnc/types.js';
 import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
-import { addrTaken } from '../../src/lang/jnc/emit-global.js';
+import { classRoot } from '../../src/lang/jnc/emit-agg.js';
+import { addrTaken, liftable, liftedType, cellName } from '../../src/lang/jnc/emit-global.js';
 import { evalConst, collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
@@ -112,6 +113,7 @@ function topAggs(tree, env) {
   const ctors = new Set();                                           // 有 construct 的那几格
   const vars = new Map();                                            // 模块级那几格量（名字 → 声明类型）
   const bindable = new Set();                                        // 里头带取/存两格的那几个
+  const aggs = [];                                                   // 收齐了好算继承链的根
   const scan = (n, owner, inAgg) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
@@ -129,6 +131,8 @@ function topAggs(tree, env) {
       if (a !== null && nm !== null) {
         const emitName = owner === null ? nm : `${owner}$${nm}`;
         inner = emitName;
+        a.emitName = emitName;
+        aggs.push(a);
         env.set(nm, {
           kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
           name: emitName,
@@ -178,14 +182,25 @@ function topAggs(tree, env) {
     for (const it of n.items) scan(it, inner, agg);
   };
   scan(tree, null, false);
+  /* **一整条继承链共用一格结构体**（第五十六刀的 `clsRoot`）：类那一族在方言里写的是
+     连通块的**根**。字段表按各自的名字收，写类型时换成根 —— 两件事分开。 */
+  const roots = new Map();
+  for (const a of aggs) {
+    if (a.word !== 'class' && a.word !== 'opaque class') continue;
+    const r = classRoot(a, aggs, env);
+    if (a.emitName !== null && r.emitName !== undefined) roots.set(a.emitName, r.emitName);
+  }
   return {
-    fields, ctors, vars, bindable,
+    fields, ctors, vars, bindable, roots,
   };
 }
 
 function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
   ecBox = { n: 0 }, tmpBox = { n: 0 }, globals = new Map(), gLifted = new Set(),
-  gBindable = new Set()) {
+  gBindable = new Set(), roots = new Map()) {
+  /* **类那一族在方言里写的是继承链的根**（第五十六刀）—— 发类型时都要带上这一格。 */
+  const clsRoot = (cn) => roots.get(cn) ?? cn;
+  const tyc = { clsRoot };
   const names = new Map();
   /** 名字在方言那一侧叫什么（`this` → `$this`、按值传的结构体形参 → 它那份拷贝 `名字$v`）。 */
   const alias = new Map();
@@ -206,6 +221,20 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     }
     return out;
   };
+  /**
+   * **被 `&` 取过地址的名字提到堆上**（第九刀）：那一格是 `(pnew (ptr T) (int 1))`，读写全走
+   * 它（于是 `*p` 与它是同一个字），`&x` 就是那一格单元本身。形参提的是**它的一份拷贝**
+   * （C 的语义：形参就是个局部量，改它不影响调用方）。结构体与数组不在这条里 —— 它们那一格里
+   * 放的**本来就是**地址（`&s` 一个字都不发，第十二 / 二十刀）。
+   */
+  const taken = addrTaken(fnNode, new Set(), (() => {
+    /* **返回类型是数据指针**时 `return entry;` 也算"地址逃出去了"（第一百六十七刀）。 */
+    const t0 = nm === null ? null : readDeclType(nm.specs, nm.dcl);
+    if (t0 === null || t0.base.kind === 'none') return false;
+    const r0 = resolveType({ ...t0, shape: 'data' }, env);
+    return r0.type !== null && (r0.type.k === 'ptr' || r0.type.k === 'tptr');
+  })());
+  const lifts = new Set();
   for (const f of (sf === undefined ? [] : readFormals(sf.node) ?? [])) {
     if (f.name !== null && f.type !== null) names.set(f.name, f.type);
     /**
@@ -217,7 +246,7 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       const rf = resolveType(f.type, env);
       if (rf.type !== null && (rf.type.k === 'struct' || rf.type.k === 'arr')) {
         const v = `${f.name}$v`;
-        const st = emitType(rf.type, 'slot');
+        const st = emitType(rf.type, 'slot', tyc);
         const ls = copyValLines({
           dst: `(var ${v})`, src: `(var ${f.name})`, type: rf.type, pad: '    ', fieldsOf,
         });
@@ -225,6 +254,16 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
         else {
           pre.push(`    (let ${v} ${st} (pnew ${st} (int 1)))`, ...ls);
           alias.set(f.name, v);
+        }
+      } else if (rf.type !== null && taken.has(f.name)) {
+        /* 被取过地址的**标量形参**：提它的一份拷贝（两句），往后读写都走那一格。 */
+        if (!liftable(rf.type)) acct(`对 ${rf.type.k} 的形参取地址（提不动）还没接`);
+        else {
+          const c = cellName(f.name);
+          const pt = liftedType(rf.type, tyc);
+          pre.push(`    (let ${c} ${pt} (pnew ${pt} (int 1)))`,
+            `    (pstore (var ${c}) (var ${f.name}))`);
+          lifts.add(f.name);
         }
       }
     }
@@ -266,7 +305,7 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
   const curErr = (() => {
     const sp = nm === null ? null : readSpecs(nm.specs);
     if (sp === null || !sp.words.includes('errorcode')) return null;
-    return errValue(retTy, { tyText: (x) => emitType(x, 'value') });
+    return errValue(retTy, { tyText: (x) => emitType(x, 'value', tyc) });
   })();
   /** `.` 的左边落在哪个聚合体上（`structBehind`）：结构体自己、类那一格（里放的**就是**
       对象那段内存的地址）、以及"指到结构体的指针"—— 三者的 code 都是那段内存的地址，
@@ -323,15 +362,19 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       const ty = withBits(r.type, t);
       /* **方言那一侧的名字**可能与源码里的不同（按值传的结构体形参指的是它那份拷贝）。 */
       const dname = alias.get(key) ?? key;
-      /* **结构体与数组是 `agg`**（那一格里放的就是地址，第十二 / 二十一刀）；模块级**提过**的
-         那一格自己就是 `(ptr T)`（第二十四刀）所以是 `ptr`；别的是 `var`。 */
+      /* **结构体与数组是 `agg`**（那一格里放的就是地址，第十二 / 二十一刀）；**提过**的那几格是
+         `ptr`（局部的用它的单元 `名字$c`，模块级那一格**自己**就是 `(ptr T)`，第九 / 二十四刀）；
+         别的是 `var`。 */
+      const isLift = !isG && lifts.has(key);
       const shape = lvalueShape({
         isStruct: ty.k === 'struct',
         isArr: ty.k === 'arr',
         isGlobal: isG,
         gLifted: isG && gLifted.has(key),
+        lifted: isLift,
       });
-      return { shape, code: shape === 'var' ? dname : `(var ${dname})`, type: ty };
+      const code = shape === 'var' ? dname : `(var ${isLift ? cellName(dname) : dname})`;
+      return { shape, code, type: ty };
     }
     /* `*p`（`ptrLv`）：p 是一格指针值，那一格的位置**就是**它；目标是结构体/数组时是 `agg`。 */
     if (h === 'indirect') {
@@ -387,6 +430,14 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     const lv = lvOf(node);
     return lv === null ? null : { code: readLv(lv), type: lv.type };
   };
+  /** 提一格局部量到堆上那两句（第九刀）：单元 + 把初值写进去。提不动就记账。 */
+  const liftLines = (name, ty, valCode, pad) => {
+    if (!liftable(ty)) { acct(`对 ${ty.k} 的局部量取地址（提不动）还没接`); return null; }
+    lifts.add(name);
+    const c = cellName(name);
+    const pt = liftedType(ty, tyc);
+    return [`${pad}(let ${c} ${pt} (pnew ${pt} (int 1)))`, `${pad}(pstore (var ${c}) ${valCode})`];
+  };
   return {
     T,
     acct,
@@ -432,7 +483,10 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     },
     /** **同型**：这一层按"发出来的文字"比 —— 方言那一侧同一格类型就是同一段文字。 */
     sameTy: (a, b) => a !== null && a !== undefined && b !== null && b !== undefined
-      && emitType(a, 'value') === emitType(b, 'value'),
+      && emitType(a, 'value', tyc) === emitType(b, 'value', tyc),
+    /* `null` 那六格（`NULL_BY_WANT`）与零值那张表都要"类型怎么写"与"类的根是谁"。 */
+    tyText: (t) => emitType(t, 'value', tyc),
+    clsRoot,
     intConvCode,
     realOf: (code, t) => realOf(code, t?.w ?? 32, t?.u === true),
     /** 整数转到另一格（同宽同符号一个字都不发）—— `CONV_CHAIN` 的枚举那一条要它。 */
@@ -445,6 +499,16 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     /** 裸名字：只认形参与局部量（真正的九步要作用域图 —— 记账）。 */
     /** 裸名字：与**可写位置**那一层同一份（`nameLoad` 的四格就是形状那三条）。 */
     lookup: (node) => valOfLv(node),
+    /**
+     * `&x`（第九 / 二十四刀）：**一个字都不算** —— 提过的那一格给它的单元、结构体与数组给
+     * 那一格里放着的地址。没提过的（`var` 形状）取不着地址，明说记账。
+     */
+    addrOf: (node) => {
+      const lv = lvOf(node);
+      if (lv === null) return null;
+      if (lv.shape === 'var') { acct('对没提到堆上的那一格取地址（`&` 那一族还没接全）'); return null; }
+      return { code: lv.code, type: { k: 'ptr', target: lv.type } };
+    },
     /** 一格局部量声明：`int x = 5;` → `(let x int (int 5))`。 */
     localDecl: (node, ind, ctx) => {
       const pad = ' '.repeat(ind);
@@ -463,7 +527,7 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
         const r = resolveType(t, env);
         if (r.type === null) { acct(`局部量 '${t.name}'：${r.why}`); return null; }
         names.set(t.name, t);
-        const ty = emitType(r.type, 'slot');
+        const ty = emitType(r.type, 'slot', tyc);
         const declTy = withBits(r.type, t);
         /**
          * **`static` 的局部量**（第二十六刀）：两件事各有出处。
@@ -506,8 +570,14 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
             out.push(`${pad}(let ${t.name} ${ty} (pnew ${ty} (int 1)))`);
             continue;
           }
-          const z = zeroText(r.type, { tyText: (x) => emitType(x, 'value') });
+          const z = zeroText(r.type, { tyText: (x) => emitType(x, 'value', tyc) });
           if (z === null) { acct(`没写初值的 '${t.name}'：这一格的零值还给不出来`); return null; }
+          if (taken.has(t.name)) {
+            const ls = liftLines(t.name, r.type, z, pad);
+            if (ls === null) return null;
+            out.push(...ls);
+            continue;
+          }
           out.push(`${pad}(let ${t.name} ${ty} ${z})`);
           continue;
         }
@@ -518,6 +588,14 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
         }
         const v = ctx.expr(named(d)?.value, declTy);
         if (v === null) return null;
+        /* **被 `&` 取过地址的**（第九刀）：提到一段自己的内存上，初值用 `pstore` 写进去。
+           先降初值再进作用域 —— `int x = x;` 里右边那个 x 指的是外层那个（C 的规矩，jancy 同）。 */
+        if (taken.has(t.name)) {
+          const ls = liftLines(t.name, r.type, v, pad);
+          if (ls === null) return null;
+          out.push(...ls);
+          continue;
+        }
         out.push(`${pad}(let ${t.name} ${ty} ${v})`);
       }
       return out;
@@ -626,12 +704,12 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
         if (ctxRef.ecOut === null || ctxRef.ecOut === undefined) {
           acct('这个位置上的 errorcode 调用（传播那两句插不进语句 —— 惰性位置/循环条件）'); return null;
         }
-        const test = errTest(`(var $e${ecBox.n})`, rt, { tyText: (x) => emitType(x, 'value') });
+        const test = errTest(`(var $e${ecBox.n})`, rt, { tyText: (x) => emitType(x, 'value', tyc) });
         if (test === null) { acct(`${rt.k} 定不出出错值的比法`); return null; }
         const v = `$e${ecBox.n}`;
         ecBox.n += 1;
         const jump = escapeText({ guard: g, loopsLen: (ctxRef.loops ?? []).length, curErr });
-        ctxRef.ecOut.push(`${ctxRef.ecPad}(let ${v} ${emitType(rt, 'slot')} ${code})`);
+        ctxRef.ecOut.push(`${ctxRef.ecPad}(let ${v} ${emitType(rt, 'slot', tyc)} ${code})`);
         ctxRef.ecOut.push(`${ctxRef.ecPad}(if ${test} (do ${jump}))`);
         return { code: `(var ${v})`, type: rt, hoisted: true };
       }
@@ -707,7 +785,7 @@ for (const f of files) {
   const short = f.split('/').pop();
   const env = new Map();
   const {
-    fields: aggFields, ctors: aggCtors, vars: globals, bindable: gBindable,
+    fields: aggFields, ctors: aggCtors, vars: globals, bindable: gBindable, roots,
   } = topAggs(tree, env);
   /* 枚举项的值先算出来塞进环境 —— `case Color.Red:` 那一格要它（`constInt`）。 */
   collectEnumConsts(tree, env);
@@ -755,7 +833,7 @@ for (const f of files) {
       if (want !== undefined) {
         const why = [];
         const e = makeEnv(n, env, (w) => { why.push(w); }, fns, aggFields, aggCtors, ecBox, tmpBox,
-          globals, gLifted, gBindable);
+          globals, gLifted, gBindable, roots);
         e.onCtx = (c2) => { ctxRef = c2; };
         const got = emitBody(nm.body, e, 4);
         if (got === null || why.length > 0) {

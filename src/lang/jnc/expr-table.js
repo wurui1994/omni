@@ -264,6 +264,48 @@ export function castValue(v, to, c) {
 }
 
 /**
+ * **指针与类引用上的那几个算子**（lower.js:14334-14392）。次序就是规则，答 null 表示这一格
+ * 不收（调用方记账）：
+ *   - `== / !=`：**跟 `null` 比走 `pisnull`**（一条指令），两个同型指针互比走 `peq`；
+ *     `!=` 就是在外面套一层 `(un "!" …)`。类引用**只有这两个算子**（jancy 的类指针没有算术、
+ *     没有大小比较 —— 有效性就是一次空检查，type_ptr_class.rst）；
+ *   - `p - q` → `(psub …)`（按元素的有符号差，64 位整数）；
+ *   - `p ± i` / `i + p` → `(padd …)`（C 的规矩，jancy 同；`i - p` 不成立）；
+ *   - **比大小**（第四十六刀）→ `(bin op (psub p q) (int 0))`：方言刻意不给指针 `<`，
+ *     那种比较只在同一块内有意义，而"是不是同一块"要用 `psub`（跨块它当场报运行期错，
+ *     比 C 那边的未定义行为强）。
+ */
+export function ptrBinary({
+  op, a, b, aNull, bNull, c,
+}) {
+  const isP = (t) => c.isPtr(t) || c.isClass(t);
+  if (op === '==' || op === '!=') {
+    let t = null;
+    if (aNull !== bNull) t = `(pisnull ${aNull ? b.code : a.code})`;
+    else if (!isP(a.type) || !isP(b.type)) return null;
+    else if (c.sameTy(a.type, b.type) !== true) return null;
+    else t = `(peq ${a.code} ${b.code})`;
+    return { code: op === '==' ? t : `(un "!" ${t})`, type: c.T.bool };
+  }
+  if (c.isClass(a.type) || c.isClass(b.type)) return null;             // 类引用只有那两个
+  if (op === '-' && c.isPtr(a.type) && c.isPtr(b.type)) {
+    if (c.sameTy(a.type, b.type) !== true) return null;
+    return { code: `(psub ${a.code} ${b.code})`, type: { k: 'int', w: 64, u: false } };
+  }
+  if ((op === '+' || op === '-') && c.isPtr(a.type) && c.isInt(b.type)) {
+    return { code: `(padd ${a.code} ${op === '+' ? b.code : `(un "-" ${b.code})`})`, type: a.type };
+  }
+  if (op === '+' && c.isInt(a.type) && c.isPtr(b.type)) {
+    return { code: `(padd ${b.code} ${a.code})`, type: b.type };
+  }
+  if (['<', '<=', '>', '>='].includes(op) && c.isPtr(a.type) && c.isPtr(b.type)) {
+    if (c.sameTy(a.type, b.type) !== true) return null;
+    return { code: `(bin ${JSON.stringify(op)} (psub ${a.code} ${b.code}) (int 0))`, type: c.T.bool };
+  }
+  return null;
+}
+
+/**
  * **一格类型的零值**（lower.js:1075-1089 的 `zeroText`）。没写初值的局部量、模块级那一格、
  * 花括号初值里没填到的那几格，用的都是它 —— jancy 保证"任何用户代码碰到之前每一格都是零"
  * （type_ptr_data.rst）。
