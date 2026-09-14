@@ -913,38 +913,18 @@ export function makeFnEnv(o) {
       }
       /**
        * **带花括号初值的局部量**（`int a[3] = { 1, 2, 3 };`）：那是**另一个节点**
-       * （`var-decl-curly`：一格 `dcl` + 一格 `value`，不是 `dcl*` 那条链）。落法是
-       * "开一格自己的内存 + 按格子写"（`curlyLines`）—— 与模块级那一格同一条路。
-       * 长度写空的（`int a[] = {1,2,3}`）从花括号里数（`arrayFromCurly`）。
+       * （`var-decl-curly`：一格 `dcl` + 一格 `value`，不是 `dcl*` 那条链）—— 可它与
+       * "`init` 右边是一对花括号"是**同一件事**，所以两种形状在这儿收成同一条路：
+       * 声明子那一串取哪一格、花括号那一格从哪儿读，各按节点形状问一次，往下就只有一份规则。
        */
-      if (h0 === 'var-decl-curly') {
-        const t = readDeclType(vn.specs, vn.dcl);
-        if (t === null || t.name === null) { acct('局部量的名字读不出来'); return null; }
-        const sp1 = readSpecs(vn.specs);
-        if (sp1 !== null && sp1.words.includes('static')) {
-          acct(`'${t.name}' 是 static 又写了花括号初值（那一格要模块级槽 + once）还没接`); return null;
-        }
-        const rc = resolveType(t, env).type
-          ?? arrayFromCurly({ name: t.name, type: t, at: node }, env);
-        if (rc === null) { acct(`局部量 '${t.name}'：花括号那一格的类型认不出来`); return null; }
-        if (rc.k !== 'arr' && rc.k !== 'struct') {
-          acct(`局部量 '${t.name}' 的花括号初值落在 ${rc.k} 上（那不是一整块）还没接`); return null;
-        }
-        if (taken.has(t.name)) {
-          acct(`局部量 '${t.name}' 被取过地址又写了花括号初值 —— 那两件事的次序还没量`); return null;
-        }
-        names.set(t.name, t);
-        const ty0 = emitType(rc, 'slot', tyc);
-        const ls = curlyLines(`(var ${t.name})`, rc, vn.value, pad);
-        if (ls === null) return null;                      // 账已经记过
-        return [`${pad}(let ${t.name} ${ty0} (pnew ${ty0} (int 1)))`, ...ls];
-      }
+      const isCurlyNode = h0 === 'var-decl-curly';
       /* `static` 的局部量是**另一条路**（第二十六刀）：一格模块级的槽 `名字$sN` + 一道
-         只跑一次的闸门 `名字$sN$1`。声明这一层发不出它 —— 记账走开，不猜。 */
+         只跑一次的闸门 `名字$sN$1`。 */
       const sp0 = readSpecs(vn.specs);
       const isStatic = sp0 !== null && sp0.words.includes('static');
       const out = [];
-      for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
+      const dcls = isCurlyNode ? [vn.dcl] : allInChain(vn.dcls, 'dcls-add', 'dcls');
+      for (const d of dcls) {
         const isInit = headOf(d) === 'init';
         const dd = isInit ? named(d)?.dcl : d;
         const t = readDeclType(vn.specs, dd);
@@ -954,7 +934,8 @@ export function makeFnEnv(o) {
          * "开一格自己的内存 + 按格子写"（`curlyLines`）。长度写空的从花括号里数
          * （`arrayFromCurly` —— 与模块级那一格用的是同一份）。
          */
-        const cv = isInit && headOf(named(d)?.value) === 'curly' ? named(d).value : null;
+        const cv = isCurlyNode ? (vn.value ?? null)
+          : (isInit && headOf(named(d)?.value) === 'curly' ? named(d).value : null);
         let r = resolveType(t, env);
         if (r.type === null && cv !== null) {
           const inferred = arrayFromCurly({ name: t.name, type: t, at: node }, env, cv);
@@ -964,8 +945,28 @@ export function makeFnEnv(o) {
         names.set(t.name, t);
         if (cv !== null) {
           forced.set(t.name, r.type);
+          /**
+           * **`static` + 花括号**（`static int a[3] = { 1, 2 };`）：存储是一格模块级的槽
+           * `名字$sN`，类型带上 `(ptr (blk …))`（与模块级那一格同一条 ——  `staticLocalLines`
+           * 那一头已经发了 `(global a$s3 (ptr (blk int 3)))`），初值在**一道闸门**里
+           * （`once`：`(if (un "!" 闸门$1) (do (set 闸门$1 true) 初值…))`），按格子写。
+           */
           if (isStatic) {
-            acct(`'${t.name}' 是 static 又写了花括号初值（那一格要模块级槽 + once）还没接`); return null;
+            const dn = `${t.name}$s${tmpBox.n}`;
+            tmpBox.n += 1;
+            alias.set(t.name, dn);
+            slots.push({ name: dn, ty: emitType(r.type, 'slot', tyc) });
+            slots.push({ name: `${dn}$1`, ty: 'bool' });
+            const ls1 = curlyLines(`(var ${dn})`, r.type, cv, `${pad}    `);
+            if (ls1 === null) return null;                 // 账已经记过
+            out.push([
+              `${pad}(if (un "!" (var ${dn}$1))`,
+              `${pad}  (do`,
+              `${pad}    (set ${dn}$1 (bool true))`,
+              ...ls1,
+              `${pad}  ))`,
+            ].join('\n'));
+            continue;
           }
           if (r.type.k !== 'arr' && r.type.k !== 'struct') {
             acct(`局部量 '${t.name}' 的花括号初值落在 ${r.type.k} 上（那不是一整块）还没接`); return null;
@@ -1098,8 +1099,20 @@ export function makeFnEnv(o) {
       const pad = ' '.repeat(ind);
       const an = named(node) ?? {};
       const op = String(an.op?.value ?? '=');
+      /**
+       * **右边是一对花括号**（`a = { 1, 2 };`，25-static-local.jnc 的 `arrset`）：按格子写 ——
+       * 没写到的那几格**保留原值**（那是赋值，不是重新初始化；`curlyLines` 只发写到的那几格，
+       * 正好是这一条）。左边得是一整块（`agg` 形状）。
+       */
       if (headOf(an.b) === 'curly' || headOf(an.b) === 'curly-init') {
-        acct('右边是一对花括号（按格子写、空项保留原值）还没接'); return null;
+        if (op !== '=') { acct(`复合赋值 '${op}' 的右边是一对花括号`); return null; }
+        const lv0 = lvOf(an.a);
+        if (lv0 === null) return null;                     // 账已经记过
+        if (lv0.shape !== 'agg') {
+          acct(`右边是一对花括号，可左边那一格是 ${lv0.shape}（不是一整块）`); return null;
+        }
+        const ls0 = curlyLines(lv0.code, lv0.type, an.b, pad);
+        return ls0 === null ? null : ls0;
       }
       const lv = lvOf(an.a);
       if (lv === null) return null;
