@@ -63,7 +63,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
   const {
     fields: aggFields, ctors: aggCtors, vars: globals, gEmit, gProps, methods, fieldInits,
     bindable: gBindable, roots, aggs, statics: aggStatics, props: aggProps, bases: aggBases,
-    overloads,
+    overloads, fieldPaths: aggPaths,
   } = scanAggs(tree, env);
   const fns = scanFns(tree, env);
   const gLifted = addrTaken(tree);
@@ -103,6 +103,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
         acct: (w) => acct(`模块级的初值：${w}`),
         fns,
         aggFields,
+        aggPaths,
         aggCtors,
         ecBox,
         helperBox,
@@ -132,7 +133,9 @@ export function lowerJncRules(tree, diags, opts = {}) {
       && (roots.get(a.emitName) ?? a.emitName) !== a.emitName) continue;
     const line = structLine(a, env, aggs);
     if (line === null || line.line === null) { acct(`聚合体 '${a.emitName}' 还发不出来`); continue; }
-    decls.push(`  ${line.line}`);
+    /* `lines` 是**整批**（union 里套的匿名 struct 排在前头、自己那一行在最后）——
+       前头那几行是这一行里字段的类型，方言那一侧要求先声明（103-unionstruct.jnc）。 */
+    for (const l of line.lines ?? [line.line]) decls.push(`  ${l}`);
   }
 
   /* ------------------------------------- 1b. 静态字段（类那一层上的"模块级量"） */
@@ -341,6 +344,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
       acct: (w) => acct(`${shown}：${w}`),
       fns,
       aggFields,
+      aggPaths,
       aggCtors,
       methods,
       tags,
@@ -403,6 +407,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
       acct: (w) => acct(`'${cls}' 的字段初值：${w}`),
       fns,
       aggFields,
+      aggPaths,
       aggCtors,
       methods,
       tags,

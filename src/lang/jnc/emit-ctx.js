@@ -48,7 +48,7 @@ export function makeFnEnv(o) {
     gBindable = new Set(), roots = new Map(), gEmit = new Map(),
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
     gProps = new Map(), propScope = null, aggStatics = new Map(), aggProps = new Map(),
-    aggBases = new Map(), helperBox = new Set(),
+    aggBases = new Map(), helperBox = new Set(), aggPaths = new Map(),
   } = o;
   let ctxRef = null;
   /**
@@ -496,6 +496,20 @@ export function makeFnEnv(o) {
     if (fs === undefined) { acct(`'${aggName}' 的字段表还没有（跨文件/宿主面/泛型）`); return null; }
     const ft = fs.get(fname);
     if (ft === undefined) {
+      /**
+       * **union 里套的匿名 struct 那几格**（第一百〇四刀的"字段路径"）：`h.m_a` 在方言那一侧
+       * 是一串取字段 `(pfield (pfield 基 $s0) m_a)` —— 一格名字对着一条**路**，不是一格名字。
+       * 这一问排在静态字段/属性那几族之前：它是**真字段**，只是路长了一节。
+       */
+      const p = aggPaths.get(aggName)?.get(fname);
+      if (p !== undefined) {
+        const rp = resolveType(p.type, env);
+        if (rp.type === null) { acct(`字段 '${fname}'：${rp.why}`); return null; }
+        const typ = withBits(rp.type, p.type);
+        let code = baseCode;
+        for (const s of p.steps) code = `(pfield ${code} ${s})`;
+        return { shape: memberShape(typ.k === 'struct', typ.k === 'arr'), code, type: typ };
+      }
       /* 普通字段里查不着 —— 静态字段与属性那几族在这一问里（`MEMBER_ORDER` 第 4 条）。 */
       const other = memberOther(baseCode, aggName, fname);
       if (other !== undefined) return other;

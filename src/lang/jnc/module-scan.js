@@ -116,6 +116,8 @@ export function memberInit(m) {
  */
 export function scanAggs(tree, env) {
   const fields = new Map();
+  /** union 里套的匿名 struct 那几格：东家 → 名字 → `{ steps, type }`（一串取字段）。 */
+  const fieldPaths = new Map();
   const ctors = new Set();                                           // 有 construct 的那几格
   const vars = new Map();                                            // 模块级那几格量（名字 → 声明类型）
   const gEmit = new Map();                                           // 名字 → 方言那一侧的名字（带命名空间前缀）
@@ -248,6 +250,46 @@ export function scanAggs(tree, env) {
           }
         };
         flat(a);
+
+        /**
+         * **union 里套的匿名 struct**（第一百〇四刀那张"字段路径"表）：那一格在方言那一侧是
+         * 一格真字段 `$s<第几个匿名 struct>`（类型是合成出来的 `<东家>$u<N>$s<M>`），所以
+         * 源码里裸写 `h.m_a` 落出来是**一串**取字段 `(pfield (pfield 基 $s0) m_a)`。
+         * 普通字段表收不下它（那张表一格名字对一格类型），所以另记一张"名字 → 路径"。
+         *
+         * 两种落处，路径的形状**一模一样**（差别只在合成那格 struct 叫什么，而路径不看名字）：
+         *   - 匿名 union 摊进外面这个结构体（`struct H { union { struct {…} struct {…} } }`）；
+         *   - union 自己体里就写着匿名 struct（`union Bits { int m_value; struct {…} }`）。
+         * 嵌套只做一层 —— 再往里套的那一族留着记账（与旧降级同一条界）。
+         */
+        const ps0 = new Map();
+        const pathsIn = (uni) => {
+          let j = 0;
+          for (const im of uni.members) {
+            if (im.shape !== 'nested-type') continue;
+            const s = im.nested;
+            if (s === null || s === undefined || s.word !== 'struct') continue;
+            if (nameText(s.name) !== null) continue;                 // 带名字的是另一格类型
+            const slot = `$s${j}`;
+            j += 1;
+            for (const f of s.members) {
+              if (f.name === null || f.type === null) continue;
+              if (f.shape !== 'data' && f.shape !== 'array' && f.shape !== 'fnptr') continue;
+              if ((f.type.mods ?? []).includes('bigendian')) continue;   // 那一族要反字节序，不收
+              if (fs.has(f.name) || ps0.has(f.name)) continue;           // 撞名的不猜（先来的胜）
+              ps0.set(f.name, { steps: [slot, f.name], type: f.type });
+            }
+          }
+        };
+        if (a.word === 'union') pathsIn(a);
+        for (const m of a.members) {
+          if (m.shape !== 'nested-type') continue;
+          const n2 = m.nested;
+          if (n2 === null || n2 === undefined || n2.word !== 'union') continue;
+          if (nameText(n2.name) !== null) continue;                  // 带名字的 union 不摊
+          pathsIn(n2);
+        }
+        if (ps0.size > 0) fieldPaths.set(emitName, ps0);
 
         /* **静态字段与成员属性各收一张表**（次序即规则：这两族在上面那张字段表里刻意
            不收 —— 一个不进对象、一个不是内存，被"普通字段"那一支接走就是静静地错）。 */
@@ -489,6 +531,7 @@ export function scanAggs(tree, env) {
   }
   return {
     fields,
+    fieldPaths,
     ctors,
     vars,
     gEmit,
