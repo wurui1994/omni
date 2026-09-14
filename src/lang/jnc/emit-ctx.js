@@ -274,6 +274,87 @@ export function makeFnEnv(o) {
     if (b === undefined) { acct(`'${self.agg}' 没有第 ${i} 格基类，可这儿写了 basetype`); return null; }
     return b;
   };
+  /**
+   * **一格查着了的变量落成什么形状**（`lvalueShape` 那三条）。两处用它：裸名字那一路、
+   * 以及 `a.g`（命名空间里的模块级量，第五十一刀）—— 同一格量，不该有两个答案。
+   */
+  const varPlace = (key, t, isG) => {
+    const r = resolveType(t, env);
+    if (r.type === null) { acct(`'${key}'：${r.why}`); return null; }
+    const ty = withBits(r.type, t);
+    /* **方言那一侧的名字**可能与源码里的不同（按值传的结构体形参指的是它那份拷贝；
+       命名空间里那一格模块级量叫 `ns$名字`）。 */
+    const dname = alias.get(key) ?? (isG ? (gEmit.get(key) ?? key) : key);
+    /* **结构体与数组是 `agg`**（那一格里放的就是地址，第十二 / 二十一刀）；**提过**的那几格是
+       `ptr`（局部的用它的单元 `名字$c`，模块级那一格**自己**就是 `(ptr T)`，第九 / 二十四刀）；
+       别的是 `var`。 */
+    const isLift = !isG && lifts.has(key);
+    const shape = lvalueShape({
+      isStruct: ty.k === 'struct',
+      isArr: ty.k === 'arr',
+      isGlobal: isG,
+      gLifted: isG && gLifted.has(key),
+      lifted: isLift,
+    });
+    const code = shape === 'var' ? dname : `(var ${isLift ? cellName(dname) : dname})`;
+    return { shape, code, type: ty };
+  };
+  /**
+   * 一串**点**摊成方言那一侧的名字（`a.g` → `a$g`）。摊不动（里头不是纯名字）答 null。
+   */
+  const dottedFlat = (node) => {
+    const h = headOf(node);
+    if (h === 'name') return String(named(node)?.text?.value ?? '') || null;
+    if (h !== 'field') return null;
+    const f = named(node) ?? {};
+    const left = dottedFlat(f.obj);
+    const seg = String(f.name?.value ?? '');
+    if (left === null || seg === '') return null;
+    return `${left}$${seg}`;
+  };
+  /**
+   * **一对花括号的初值**（`{ 10, 20, 30 }`）：按格子写。数组逐格、结构体逐字段；写少了的
+   * 那几格保持零（那段内存是 pnew 出来的、本来就是零 —— C 与 jancy 都是这条）。
+   * 嵌套的花括号跟着往里走。拼不出来答 null（账在这一层记）。
+   */
+  const curlyLines = (dst, type, node, pad) => {
+    const items = allInChain(named(node)?.items, 'items-add', 'items');
+    const one = (at, ty, it) => {
+      if (it === null || it === undefined) { acct('花括号里有一格空项（保持原值那一族）还没接'); return null; }
+      if (headOf(it) === 'curly') return curlyLines(at, ty, it, pad);
+      const v = emitExpr(it, ty, ctxRef);
+      if (v === null) return null;                          // 账已经记过
+      return [`${pad}(pstore ${at} ${v.code})`];
+    };
+    const out = [];
+    if (type?.k === 'arr') {
+      if (items.length > type.n) {
+        acct(`花括号里给了 ${items.length} 格，可那一格数组只有 ${type.n} 格`); return null;
+      }
+      const b0 = `(pelem ${dst})`;
+      for (const [i, it] of items.entries()) {
+        const ls = one(i === 0 ? b0 : `(padd ${b0} (int ${i}))`, type.el, it);
+        if (ls === null) return null;
+        out.push(...ls);
+      }
+      return out;
+    }
+    if (type?.k === 'struct') {
+      const fs = fieldsOf(type.name);
+      if (fs === null) { acct(`花括号：'${type.name}' 的字段表还没有`); return null; }
+      if (items.length > fs.length) {
+        acct(`花括号里给了 ${items.length} 格，可 '${type.name}' 只有 ${fs.length} 格字段`); return null;
+      }
+      for (const [i, it] of items.entries()) {
+        const ls = one(`(pfield ${dst} ${fs[i].name})`, fs[i].type, it);
+        if (ls === null) return null;
+        out.push(...ls);
+      }
+      return out;
+    }
+    acct(`花括号初值落在 ${type?.k ?? '?'} 上（那不是一整块）`);
+    return null;
+  };
   /** 一格可写位置读出来那一段文字（`SHAPE_ACCESS`）。属性那一格的 `args` 是 `this` 那一半。 */
   const readLv = (lv) => SHAPE_ACCESS[lv.shape].read(lv.code, lv.args);
   /**
@@ -453,25 +534,7 @@ export function makeFnEnv(o) {
       if (isG && gBindable.has(key)) {
         acct(`模块级的 bindable data '${key}'（读写各是一次调用）还没接`); return null;
       }
-      const r = resolveType(t, env);
-      if (r.type === null) { acct(`'${key}'：${r.why}`); return null; }
-      const ty = withBits(r.type, t);
-      /* **方言那一侧的名字**可能与源码里的不同（按值传的结构体形参指的是它那份拷贝；
-         命名空间里那一格模块级量叫 `ns$名字`）。 */
-      const dname = alias.get(key) ?? (isG ? (gEmit.get(key) ?? key) : key);
-      /* **结构体与数组是 `agg`**（那一格里放的就是地址，第十二 / 二十一刀）；**提过**的那几格是
-         `ptr`（局部的用它的单元 `名字$c`，模块级那一格**自己**就是 `(ptr T)`，第九 / 二十四刀）；
-         别的是 `var`。 */
-      const isLift = !isG && lifts.has(key);
-      const shape = lvalueShape({
-        isStruct: ty.k === 'struct',
-        isArr: ty.k === 'arr',
-        isGlobal: isG,
-        gLifted: isG && gLifted.has(key),
-        lifted: isLift,
-      });
-      const code = shape === 'var' ? dname : `(var ${isLift ? cellName(dname) : dname})`;
-      return { shape, code, type: ty };
+      return varPlace(key, t, isG);
     }
     /* `*p`（`ptrLv`）：p 是一格指针值，那一格的位置**就是**它；目标是结构体/数组时是 `agg`。 */
     if (h === 'indirect') {
@@ -512,6 +575,23 @@ export function makeFnEnv(o) {
           const other = memberOther(null, te.name, fname);
           if (other !== undefined) return other;
           acct(`'${tn}' 上查不着静态成员 '${fname}'（静态方法/嵌套类型那几族另算）`); return null;
+        }
+      }
+      /**
+       * **`a.g` 是命名空间里的那一格模块级量**（第五十一刀）：它在表达式里长得像一串取字段，
+       * 所以这一问必须排在"取字段"**之前**。判据是"整串摊得动、摊出来的名字正好是某一格模块级量
+       * 在方言那一侧的名字"（`ns$g`）—— 摊不动或对不上就往下走，不猜。
+       */
+      if (h === 'field') {
+        const flat = dottedFlat(node);
+        if (flat !== null && flat.includes('$')) {
+          for (const [k, t] of globals) {
+            if ((gEmit.get(k) ?? k) !== flat) continue;
+            if (gBindable.has(k)) {
+              acct(`模块级的 bindable data '${k}'（读写各是一次调用）还没接`); return null;
+            }
+            return varPlace(k, t, true);
+          }
         }
       }
       let baseCode = null;
@@ -645,6 +725,14 @@ export function makeFnEnv(o) {
       }
       return { code: `(int ${lv.type.n})`, type: { k: 'int', w: 64, u: true } };
     },
+    /**
+     * **一对花括号的初值**（`{ 10, 20, 30 }`，第十九 / 二十一刀那两格的初始化那一半）：
+     * **按格子写** —— 数组逐格 `(pstore (padd (pelem 目标) (int i)) 值)`、结构体逐字段
+     * `(pstore (pfield 目标 名字) 值)`。写少了的那几格**保持零**（那段内存是 pnew 出来的，
+     * 本来就是零 —— C 与 jancy 都是这条）；嵌套的花括号跟着往里走。
+     * 给多了、或落在"不是一整块"的类型上：当场记账（不猜）。
+     */
+    curlyLines: (dst, type, node, pad) => curlyLines(dst, type, node, pad),
     newSlot: (prefix, ty) => {
       const nm2 = `${prefix}${tmpBox.n}`;
       tmpBox.n += 1;
@@ -1000,17 +1088,40 @@ export function makeFnEnv(o) {
       } else if (asName === null && (headOf(fn) === 'field' || headOf(fn) === 'ptr-field')) {
         const fn2 = named(fn) ?? {};
         const mname = String(fn2.name?.value ?? '');
-        const ob = objBase(fn2.obj);
-        if (ob === null) return null;
-        const agg = aggBehind(ob.type);
-        if (agg === null) { acct(`叫方法时 '.' 的左边不是结构体/类（${ob.type?.k ?? '?'}）`); return null; }
-        const mi = methods.get(`${agg}$${mname}`);
-        if (mi === undefined) {
-          acct(`'${agg}' 上查不着方法 '${mname}'（属性/事件/虚派发那几族另算）`); return null;
+        /**
+         * **左边是类型名**（`S.make()`）：那是**静态方法**（decl_storage.rst 的
+         * StorageKind_Static）—— 它没有 `this`，所以这一问要排在"求左边那一格"之前
+         * （求它只会报"查不着"）。同名的局部量/模块级量遮住类型名。
+         */
+        if (headOf(fn2.obj) === 'name') {
+          const tn = String(named(fn2.obj)?.text?.value ?? '');
+          const te = names.has(tn) || globals.has(tn) ? undefined : env.get(tn);
+          if (te !== undefined && ['class', 'struct', 'union'].includes(te.kind)) {
+            const mi2 = methods.get(`${te.name}$${mname}`);
+            if (mi2 === undefined) {
+              acct(`'${tn}' 上查不着静态方法 '${mname}'`); return null;
+            }
+            if (mi2.stat !== true) {
+              acct(`'${tn}.${mname}(…)' 那一格不是静态方法（要一格对象）`); return null;
+            }
+            sig = mi2;
+            selfArg = null;
+            key = `${te.name}$${mname}`;
+          }
         }
-        sig = mi;
-        selfArg = mi.stat === true ? null : ob.code;
-        key = `${agg}$${mname}`;
+        if (sig === null) {
+          const ob = objBase(fn2.obj);
+          if (ob === null) return null;
+          const agg = aggBehind(ob.type);
+          if (agg === null) { acct(`叫方法时 '.' 的左边不是结构体/类（${ob.type?.k ?? '?'}）`); return null; }
+          const mi = methods.get(`${agg}$${mname}`);
+          if (mi === undefined) {
+            acct(`'${agg}' 上查不着方法 '${mname}'（属性/事件/虚派发那几族另算）`); return null;
+          }
+          sig = mi;
+          selfArg = mi.stat === true ? null : ob.code;
+          key = `${agg}$${mname}`;
+        }
       } else if (asName !== null && !names.has(asName) && !globals.has(asName)
         && self !== null && methods.has(`${self.agg}$${asName}`)) {
         sig = methods.get(`${self.agg}$${asName}`);

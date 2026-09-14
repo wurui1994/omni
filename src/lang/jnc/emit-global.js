@@ -82,7 +82,7 @@ export function addrTaken(trees, out = new Set(), retPtr = false) {
  * 长度是常量表达式的那种（`int g_alpha['z' - 'a' + 1];`）不在这儿，那要常量折叠，记账。
  * 数不出来答 `null`。
  */
-function arrayFromCurly(m, env) {
+export function arrayFromCurly(m, env) {
   if (headOf(m.at) !== 'var-decl-curly') return null;
   /* `t.suffixes` 是一串**词**（`types.js` 里 `dc.suffixes.map((s) => s.kind)`），不是对象。 */
   const sfx = (m.type.suffixes ?? []).filter((x) => x === 'array-suffix');

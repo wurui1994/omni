@@ -187,6 +187,34 @@ export function lowerJncRules(tree, diags, opts = {}) {
       const m = {
         name: t.name, type: t, shape: t.shape, storage, at: it,
       };
+      /* **带花括号初值的那一格**（`int table[3] = { 10, 20, 30 };`）：初值躺在 `var-decl-curly`
+         的 `value` 洞里，不是一格 `init` 节点 —— 底下"写了初值"那一支照不到它，所以这一格
+         自己走一条：先摆一句 pnew，再**按格子写**（`curlyLines`）。
+         长度写空的（`int a[] = {1,2,3}`）从花括号里数（`arrayFromCurly`，与 `(global …)`
+         那一行用的是同一份）。 */
+      if (h === 'var-decl-curly') {
+        const g2 = globalLines(m, env, { ns, clsRoot, taken: gLifted });
+        for (const l of g2.lines) decls.push(`  ${l}`);
+        if (g2.why !== null) {
+          if (!g2.why.includes('对的行为')) acct(`模块级 '${t.name}'：${g2.why}`);
+          continue;
+        }
+        const rc = resolveType(t, env).type ?? arrayFromCurly(m, env);
+        if (rc === null) { acct(`模块级 '${t.name}'：花括号那一格的类型认不出来`); continue; }
+        if (rc.k !== 'arr' && rc.k !== 'struct') {
+          acct(`模块级 '${t.name}' 的花括号初值落在 ${rc.k} 上（那不是一整块）还没接`); continue;
+        }
+        if (gLifted.has(t.name)) {
+          acct(`模块级 '${t.name}' 被取过地址又写了花括号初值 —— 那两件事的次序还没量`); continue;
+        }
+        const full = ns === null ? t.name : `${ns}$${t.name}`;
+        cells.push(`    (set ${full} (pnew ${emitType(rc, 'slot', tyc)} (int 1)))`);
+        const mi2 = modInit();
+        const ls = mi2.e.curlyLines(`(var ${full})`, rc, vn.value, '    ');
+        if (ls === null) continue;                         // 账已经记过
+        inits.push(...ls);
+        continue;
+      }
       const g = globalLines(m, env, { ns, clsRoot, taken: gLifted });
       for (const l of g.lines) decls.push(`  ${l}`);
       /**

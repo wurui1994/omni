@@ -290,15 +290,21 @@ export function scanAggs(tree, env) {
           bits: String(e.word ?? '').includes('bitflag'),
         });
       }
-    } else if (h === 'var-decl' && !inAgg) {
+    } else if ((h === 'var-decl' || h === 'var-decl-curly') && !inAgg) {
       /* **模块级那几格量**（`int calls = 0;`）：裸名字查名的第一步就要看得见它们
          （`NAME_LOOKUP_ORDER` 的 `var` 那一格里"模块级"也算）。`static` 的照收 ——
-         它在方言那一侧的名字与普通的一样（模块级本来就只有一格）。 */
+         它在方言那一侧的名字与普通的一样（模块级本来就只有一格）。
+
+         **带花括号初值的那一格是另一个节点**（`var-decl-curly`：一格 `dcl`，不是 `dcl*` 那条链）
+         —— 少收它，`int table[3] = { 10, 20, 30 };` 这个名字压根不在表里，于是函数体里
+         裸写 `table` 报的是"查不着"（11-globals.jnc 量出来的）。 */
       const vn = named(n);
       if (vn !== null) {
         const sp = readSpecs(vn.specs);
         const bind = sp !== null && (sp.words.includes('bindable') || sp.words.includes('property'));
-        for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
+        const dcls = h === 'var-decl-curly'
+          ? [vn.dcl] : allInChain(vn.dcls, 'dcls-add', 'dcls');
+        for (const d of dcls) {
           const dcl = headOf(d) === 'init' ? named(d)?.dcl : d;
           const t = readDeclType(vn.specs, dcl);
           if (t !== null && t.name !== null) {
