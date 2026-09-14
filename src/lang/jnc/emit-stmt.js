@@ -102,7 +102,9 @@ export function emitStmt(n, ctx) {
     });
     if (r.kind === 'ret') return [`${pad}(ret)`];
     if (r.kind === 'ret-value') {
-      const code = ctx.expr(v);
+      /* **返回类型就是那一格的 `want`**：回卷、装箱、int→real 那几条都挂在"落进一格"那一层，
+         所以这儿必须把它传下去（少这一格，`return x + y` 就少了那次回卷）。 */
+      const code = ctx.expr(v, ctx.retType ?? null);
       return code === null ? null : [`${pad}(ret ${code})`];
     }
     if (r.kind === 'expr-then-ret') {

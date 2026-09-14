@@ -28,7 +28,16 @@ export function emitExpr(n, want, ctx) {
        命中一条就够 —— 与旧降级那串 `if` 一一对应（那儿也是退化在最前、别的顺次问）。 */
     if (rule.name !== 'array-decay') break;
   }
-  return cur;
+  /* **回卷发生在"落进一格"的时候**，不是在算符上（尺子当场量出来的：`return x + y` 回卷了，
+     可 `n % 2 == 0` 里那个 `%` 没有 —— 前者要落回 32 位的返回类型，后者只是比较的操作数）。
+     所以这一句挂在**要一个具体类型**的这一层：`want` 是窄整数时掩一次。 */
+  /* 落进一格：`wide` 的那一格在这儿掩（`want` 说不出类型时就按它自己的位宽掩）。 */
+  if (cur.wide === true) {
+    const w = ctx.wrap?.(cur.code, want ?? cur.type, cur.type);
+    return { code: w ?? cur.code, type: cur.type };
+  }
+  const wrapped = ctx.wrap?.(cur.code, want, cur.type);
+  return wrapped === undefined || wrapped === null ? cur : { code: wrapped, type: cur.type };
 }
 
 /** 按节点头降（不过转换链）。 */
@@ -89,17 +98,23 @@ export function emitExpr0(n, want, ctx) {
     const a = emitExpr(nm.a, ctx.wantOf?.(n, 'a') ?? null, ctx);
     if (a === null) return null;
     const op = String(nm.op?.value ?? '');
-    return { code: `(un ${JSON.stringify(op)} ${a.code})`, type: ctx.typeOfUnary?.(op, a.type) ?? a.type };
+    const t = ctx.typeOfUnary?.(op, a.type) ?? a.type;
+    return { code: `(un ${JSON.stringify(op)} ${a.code})`, type: t };
   }
   if (h === 'binary') {
     const a = emitExpr(nm.a, ctx.wantOf?.(n, 'a') ?? null, ctx);
     const b = emitExpr(nm.b, ctx.wantOf?.(n, 'b') ?? null, ctx);
     if (a === null || b === null) return null;
     const op = String(nm.op?.value ?? '');
-    return {
-      code: `(bin ${JSON.stringify(op)} ${a.code} ${b.code})`,
-      type: ctx.typeOfBinary?.(op, a.type, b.type) ?? a.type,
-    };
+    const t = ctx.typeOfBinary?.(op, a.type, b.type) ?? a.type;
+    /* **"还没掩的那一格"**（`wide`）：会溢出的算符（`+ - * <<`）出来的值超出了那一格的位宽，
+       到了**要它落进一格**的地方才掩 —— 落进返回类型、落进一格变量、或**再喂给一次算术**
+       （算术要求两边同型）。缩小的那几个（`/ % & | ^ >>`）与比较不产生 wide：
+       `n % 2 == 0` 里那个 `%` 一个字都不掩，而 `a + b + c` 里内层那个 `a+b` 掩一次。 */
+    const ac = a.wide === true ? (ctx.wrap?.(a.code, a.type, a.type) ?? a.code) : a.code;
+    const bc = b.wide === true ? (ctx.wrap?.(b.code, b.type, b.type) ?? b.code) : b.code;
+    const code = `(bin ${JSON.stringify(ctx.opOf?.(op, t) ?? op)} ${ac} ${bc})`;
+    return { code, type: t, wide: ctx.overflows?.(op) === true };
   }
 
   /* 取字段与下标：地址那一层由调用方给（`ctx.fieldOf` / `ctx.elemOf`）—— 那两格要知道

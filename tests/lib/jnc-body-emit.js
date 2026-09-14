@@ -23,6 +23,8 @@ import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
 import { readFormals } from '../../src/lang/jnc/emit-fn.js';
 import { emitBody } from '../../src/lang/jnc/emit-body.js';
+import { INT_BITS } from '../../src/lang/jnc/resolve-type.js';
+import { wrapTo, uOp } from '../../src/lang/jnc/int-table.js';
 
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 400);
@@ -46,6 +48,8 @@ function bodiesOf(text) {
     if (m === null) continue;
     const body = [];
     for (let j = i + 1; j < lines.length && /^ {4}/.test(lines[j]); j += 1) body.push(lines[j]);
+    /* 体的**最后一行**末尾那个 `)` 是函数那一格的收尾，不属于体 —— 去掉它再比。 */
+    if (body.length > 0) body[body.length - 1] = body[body.length - 1].replace(/\)$/, '');
     out.set(m[1], body.join('\n'));
   }
   return out;
@@ -60,17 +64,59 @@ function makeEnv(fnNode, env, acct) {
   for (const f of (sf === undefined ? [] : readFormals(sf.node) ?? [])) {
     if (f.name !== null && f.type !== null) names.set(f.name, f.type);
   }
+  /* 返回类型：`(ret 值)` 那一格的 `want`。 */
+  let retT = null;
+  {
+    const t0 = nm === null ? null : readDeclType(nm.specs, nm.dcl);
+    if (t0 !== null && t0.base.kind !== 'none') {
+      const r0 = resolveType({ ...t0, shape: 'data' }, env);
+      if (r0.type !== null && r0.type.k !== 'void') retT = r0.type;
+    }
+  }
   let n = 0;
   const T = {
     int: { k: 'int' }, i32: { k: 'int' }, i64: { k: 'int' }, u64: { k: 'int' },
     real: { k: 'real' }, bool: { k: 'bool' }, string: { k: 'string' },
   };
+  /** 整数那一格要带**位宽与符号性**：方言只有一格 int，回卷全靠这两样。 */
+  const withBits = (ty, decl) => {
+    if (ty === null || ty === undefined || ty.k !== 'int') return ty;
+    const word = decl?.base?.text ?? 'int';
+    const u = /^u/.test(word) || (decl?.mods ?? []).includes('unsigned');
+    return { ...ty, w: INT_BITS[word] ?? 32, u };
+  };
+  const CMP = new Set(['==', '!=', '<', '<=', '>', '>=', '&&', '||']);
   return {
     T,
     acct,
+    /** 比较回 bool；算术回**宽的那一格**（符号性跟着宽的那一边）。 */
+    typeOfBinary: (op, a, b) => {
+      if (CMP.has(op)) return { k: 'bool' };
+      if (a?.k === 'real' || b?.k === 'real') return { k: 'real' };
+      if (a?.k !== 'int' || b?.k !== 'int') return a;
+      return (a.w ?? 32) >= (b.w ?? 32) ? a : b;
+    },
+    typeOfUnary: (op, a) => (op === '!' ? { k: 'bool' } : a),
+    /** **会溢出的那几个**（结果要就地回卷）：加减乘与左移。 */
+    overflows: (op) => ['+', '-', '*', '<<'].includes(op),
+    /** 无符号且 64 位那几格换 u 版算子（第六十一刀）。 */
+    opOf: (op, t) => (t?.k === 'int' ? uOp(op, t.w ?? 32, t.u === true) : op),
+    /** **算完回卷**：只有整数要（比较回的是 bool，不掩）。 */
+    /** **落进一格**时才回卷：`want` 是窄整数、值也是整数那一格。 */
+    wrap: (code, want, have) => {
+      if (want === null || want === undefined || want.k !== 'int') return code;
+      if (have === null || have === undefined || have.k !== 'int') return code;
+      /* **编译期常量不用回卷**：字面量那一格早就落在规范形里了（旧降级的 `intLit` 干的），
+         所以 `return 1` 是 `(ret (int 1))` 而不是掩一圈（135-overloadcheap.jnc 量出来的）。 */
+      if (/^\(int -?\d+\)$/.test(code)) return code;
+      if ((want.w ?? 32) >= 64) return code;
+      return wrapTo(code, want.w ?? 32, want.u === true);
+    },
     tmp: (p) => `${p}${n++}`,
     loops: [],
-    retVoid: false,
+    retVoid: retT === null,
+    retType: retT === null || retT.k !== 'int' ? retT
+      : { ...retT, w: INT_BITS[nm === null ? 'int' : (readDeclType(nm.specs, nm.dcl)?.base?.text ?? 'int')] ?? 32, u: false },
     inMain: false,
     /* 判据那几格（表里要问的谓词）。 */
     isInt: (t) => t !== null && t !== undefined && t.k === 'int',
@@ -94,7 +140,7 @@ function makeEnv(fnNode, env, acct) {
       if (t === undefined) { acct(`裸名字 '${key}' 还查不着（要作用域图）`); return null; }
       const r = resolveType(t, env);
       if (r.type === null) { acct(`'${key}' 的类型解不出来`); return null; }
-      return { code: `(var ${key})`, type: r.type };
+      return { code: `(var ${key})`, type: withBits(r.type, t) };
     },
     /** 一格局部量声明：`int x = 5;` → `(let x int (int 5))`。 */
     localDecl: (node, ind, ctx) => {
@@ -111,8 +157,9 @@ function makeEnv(fnNode, env, acct) {
         if (r.type === null) { acct(`局部量 '${t.name}'：${r.why}`); return null; }
         names.set(t.name, t);
         const ty = emitType(r.type, 'slot');
+        const declTy = withBits(r.type, t);
         if (!isInit) { acct(`没写初值的局部量 '${t.name}'（零值那一格还没接）`); return null; }
-        const v = ctx.expr(named(d)?.value, r.type);
+        const v = ctx.expr(named(d)?.value, declTy);
         if (v === null) return null;
         out.push(`${pad}(let ${t.name} ${ty} ${v})`);
       }
