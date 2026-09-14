@@ -127,6 +127,34 @@ native 语言，就得把它们**共识里已有的东西**先摆齐；简化是
 `node tests/lib/jnc-rules-sweep.js`（今天 52/199 降得下来、行为 52/52 对 `.expected`）
 **不许变差**；每落一格，记下"前端因此删掉了多少行手写细节"—— 那是这一整份 ADR 唯一的成绩单。
 
+### 8.1 第一格（整数带宽度）怎么落：证据、文件、闸门
+
+**证据（这一条决定了它排第一）**：宽度这件事**两个前端各写了一遍**——
+- jancy：`src/lang/jnc/int-table.js` 整份（`wrapTo` / `uOp` / `arithType` / `commonInt` /
+  `intConvCode`）+ 每处发码点的 `withBits`；
+- C：`src/core/frontend-c/ctype.js` 的 `VT_*` 位与 `cconst.js` 的 `BigInt.asIntN(64, …)`。
+
+而**核心 IR 自己没有宽度**：`src/core/hir/types.js:4` 就一行 `export const INT = { k: 'int' }`。
+所以这不是"某门语言的账"，是核心欠的账 —— 也是为什么两边都在掩。
+
+**要动的文件（按依赖序）**：
+1. `src/core/hir/types.js`：`int` 长出 `w`（8/16/32/64）与 `u`（有无符号），**缺省 64 位有符号**
+   —— 于是今天所有的 IR 一个字都不用改；
+2. `src/core/hir/check.js`：算子两边的宽度要一致（不一致是**错**，不是隐式转换）；
+3. `src/core/sexpr/lower.js`：类型名收 `i8 i16 i32 i64 u8 u16 u32 u64`（`int` 是 `i64` 的别名）；
+   字面量 `(int N)` 按落点定宽，转换写成显式算子（`trunc` / `sext` / `zext`）；
+4. 六条腿：`backend-c`（原生类型直接对上）、`backend-js`（`|0` / `>>>0` / `BigInt.asIntN`）、
+   `interp`、`mir`、`llvm`、`jit`。
+5. 前端跟着删：`int-table.js` 那五个函数与 `withBits` 一路的参数。
+
+**闸门（每一步都要过）**：
+- 后端**还没接**某个宽度时，`hir/check.js` 当场报"这条腿还不认 i8"——
+  **绝不允许悄悄按 64 位跑**（那正是这一轮最坏的一类错：静静地印错数）；
+- `tests/jnc`（六条腿逐字节相同 + `.expected`）与 `tests/c`、`tests/asy` 全绿；
+- `jnc-rules-sweep.js` 的两个数不许变差；
+- 落完之后 `src/lang/jnc/` 的行数**要减**（成绩单：删掉的手写细节行数）。
+
+
 ## 9. 不做什么
 
 - 不为了"看起来规则化"把手写细节塞进一张更大的表：那只是把问题挪了地方（这一轮的教训）；
