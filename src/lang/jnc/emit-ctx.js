@@ -106,8 +106,12 @@ export function makeFnEnv(o) {
     const root = clsRoot(cls);
     const tag = tags.get(cls);
     if (tag === undefined) { acct(`'${cls}' 没有动态类型标签（类体没解出来）`); return null; }
-    if (fieldInits.has(cls)) { acct(`造 '${cls}'：它的字段写了初值（要合成/插进 construct）还没接`); return null; }
     const ctor = methods.get(`${cls}$construct`);
+    /* **字段写了初值那几格是构造干的活**（第七十八刀）：所以构造非在不可 —— 合成那一步没成时
+       这儿明说不收，绝不交出一段没初始化过的内存。 */
+    if (fieldInits.has(cls) && ctor === undefined) {
+      acct(`造 '${cls}'：它的字段写了初值，可它没有构造（合成那一步没成）`); return null;
+    }
     /**
      * **`new C(1)` 那几格实参**：`new` 是一格表达式而造一格对象是三句，所以三句抬成了
      * 一格 helper —— 实参于是变成**helper 的形参**（`$i0`、`$i1`…），在调 `construct`
@@ -611,6 +615,12 @@ export function makeFnEnv(o) {
     slots,
     /** 抬出去的那几格函数（造对象那三句）—— 模块那一层照单发。 */
     helpers,
+    /**
+     * **造一格类的对象**（pnew + 写 `$tag` + 构造，抬成一格 helper）。模块那一层要它是为了
+     * **内嵌的对象字段**（第一百六十一刀）：那一格在父对象的构造开头造出来，与局部量
+     * `Inner in;` 走的是同一条路 —— 不该有两份实现。
+     */
+    newObj,
     newSlot: (prefix, ty) => {
       const nm2 = `${prefix}${tmpBox.n}`;
       tmpBox.n += 1;

@@ -20,10 +20,10 @@ import { readSpecs } from './specs.js';
 import { resolveType } from './resolve-type.js';
 import { emitType } from './emit-type.js';
 import { collectEnumConsts } from './const-eval.js';
-import { scanAggs, scanFns } from './module-scan.js';
+import { scanAggs, scanFns, memberInit } from './module-scan.js';
 import { structLine } from './emit-agg.js';
 import { globalLines, addrTaken, liftable, liftedType } from './emit-global.js';
-import { fnHead, readFormals, fnName, needsCtor } from './emit-fn.js';
+import { fnHead, readFormals, fnName, needsCtor, hasStaticCtor } from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
 import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
@@ -241,8 +241,10 @@ export function lowerJncRules(tree, diags, opts = {}) {
    * "东家是谁"与"`this` 那一格怎么写"，所以不该有三份实现。
    *
    * `owner` 是方言那一侧的前缀（命名空间或东家），`selfInfo` 为 null 就是没有 `this`。
+   * `head0` 是**插在体之前**的那几行（字段初值那一族：jancy 把它们放在基类构造之后、
+   * 用户的体之前，jnc_ct_Parser.cpp:3005-3009）。
    */
-  const emitFn = (node, shown, owner, selfInfo, ns, propScope = null) => {
+  const emitFn = (node, shown, owner, selfInfo, ns, propScope = null, head0 = []) => {
     const nm = named(node);
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
     if (t === null) { acct(`函数 '${shown}' 的类型读不出来`); return; }
@@ -292,7 +294,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
       if (accts.length === n0) acct(`函数 '${shown}' 的体答了 null 却没记账（这一层的 bug）`);
       return;
     }
-    const whole = e.pre.length === 0 ? body : [...e.pre, body].join('\n');
+    const whole = [...e.pre, ...head0, body].join('\n');
     /* 体那一层要的**模块级槽**（`once` 的旗子、`static` 局部量那一格与它的闸门）：
        发在函数**前面** —— 方言那一侧先声明后用。 */
     for (const s of e.slots) decls.push(`  (global ${s.name} ${s.ty})`);
@@ -303,29 +305,137 @@ export function lowerJncRules(tree, diags, opts = {}) {
   };
 
   /**
-   * **合成出来的构造**（第七十八 / 九十四刀）：一格类自己没写 `construct`，可**基类有**——
-   * jancy 那儿编译器给它生成一格，里头逐格调基类那一个（65-propmem.jnc 的
-   * `(fn Derived$construct (($this (ptr Box))) void (expr (call Box$construct (var $this))))`）。
+   * **字段的默认值**（第七十八刀）：jancy 那儿它们不是"预构造"—— 初值挂在字段上，由
+   * `MemberBlock::initializeFields`（jnc_ct_MemberBlock.cpp:141-182）在**构造里**重放，
+   * 次序是"基类构造 → 静态构造 → 字段初值 → 用户的体"（jnc_ct_Parser.cpp:3005-3009）。
    *
-   * 这一层只收"**因为基类**才要构造"那一种。别的理由（字段写了初值、事件、`bindable`、
-   * `static construct`、成员自己带构造）各是自己一刀 —— 那几格记账，绝不发一格空构造
-   * 冒充"造好了"。
+   * 所以这一层答的就是那几行 `(pstore (pfield (var $this) f) 值)` —— 两处用它：合成出来的
+   * 构造、以及**插在人写的 `construct` 开头**。初值是一整条表达式（能引用模块级量、别的字段、
+   * 同类的方法），所以借的是**函数体那一层**的探子（`self` 指着这个类）。
+   *
+   * 按**声明序**发（`m_y = m_x + 1` 看得见 `m_x` 的初值 —— 次序即规则）。拼不出来答 null。
+   */
+  const fieldInitLines = (a, pad) => {
+    const cls = a.emitName;
+    const kind = a.word === 'class' || a.word === 'opaque class' ? 'class' : 'struct';
+    const e = makeFnEnv({
+      fnNode: null,
+      env,
+      acct: (w) => acct(`'${cls}' 的字段初值：${w}`),
+      fns,
+      aggFields,
+      aggCtors,
+      methods,
+      tags,
+      fieldInits,
+      self: { agg: cls, kind, emit: kind === 'class' ? clsRoot(cls) : cls },
+      ecBox,
+      tmpBox,
+      globals,
+      gLifted,
+      gBindable,
+      gEmit,
+      gProps,
+      roots,
+      aggStatics,
+      aggProps,
+      aggBases,
+    });
+    const ctx = makeCtx(e);
+    const out = [];
+    for (const m of a.members) {
+      if (m.name === null || m.type === null) continue;
+      if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') continue;
+      if (m.storage.includes('static') || m.storage.includes('alias')) continue;
+      const init = memberInit(m);
+      const r = resolveType(m.type, env);
+      if (r.type === null) { acct(`'${cls}.${m.name}' 的初值：${r.why}`); return null; }
+      /**
+       * **内嵌的对象字段**（第一百六十一刀）：字段的类型是**类**时那一格是一格真对象 ——
+       * 在父对象的构造里造出来（`ClassType::calcLayout` 的 `m_classFieldArray`，
+       * jnc_ct_ClassType.cpp:360-376）。这一层的类值本来就是"一格地址 + 一次 pnew"，
+       * 所以它就是"把 `newObj` 那一格的结果写进这个字段"——与局部量 `Inner in;` 同一条路。
+       */
+      if (r.type.k === 'class') {
+        if (init !== null) {
+          acct(`'${cls}.${m.name}' 是内嵌的对象却写了初值（那一族还没接）`); return null;
+        }
+        const o = e.newObj(r.type.name);
+        if (o === null) return null;                       // 账已经记过
+        out.push(`${pad}(pstore (pfield (var $this) ${m.name}) ${o.code})`);
+        continue;
+      }
+      /* **内嵌的结构体**：它就地布局，所以要构造的话就是"拿它那一格的地址调它的构造"。
+         没有构造的那种不用发字（那段内存本来是零）。 */
+      if (r.type.k === 'struct') {
+        if (init !== null) {
+          acct(`'${cls}.${m.name}' 写了初值的结构体字段（要逐字段抄一份）还没接`); return null;
+        }
+        const sn = r.type.name;
+        const wants = aggCtors.has(sn) || synth.has(sn);
+        if (!wants) continue;
+        if (!methods.has(`${sn}$construct`)) {
+          acct(`'${cls}.${m.name}'：内嵌的 '${sn}' 要构造，可那一格还没发出来`); return null;
+        }
+        if ((methods.get(`${sn}$construct`).params ?? []).length > 0) {
+          acct(`'${cls}.${m.name}'：内嵌的 '${sn}' 的构造要实参 —— 补不出来`); return null;
+        }
+        out.push(`${pad}(expr (call ${sn}$construct (pfield (var $this) ${m.name})))`);
+        continue;
+      }
+      if (init === null) continue;
+      if (init.curly === true) {
+        acct(`'${cls}.${m.name}' 的花括号初值（要逐格抄一份）还没接`); return null;
+      }
+      if (r.type.k === 'arr') {
+        acct(`'${cls}.${m.name}' 写了初值的数组字段（要逐格抄一份）还没接`); return null;
+      }
+      const v = ctx.expr(init.value, e.withBits(r.type, m.type));
+      if (v === null) return null;                         // 账已经记过
+      out.push(`${pad}(pstore (pfield (var $this) ${m.name}) ${v})`);
+    }
+    /* 初值里要的那几格模块级槽与抬出去的 helper（`new` 那三句）—— 与函数体那条同一条路。 */
+    for (const s of e.slots) decls.push(`  (global ${s.name} ${s.ty})`);
+    for (const hh of e.helpers) decls.push(hh);
+    if (e.pre.length > 0) { acct(`'${cls}' 的字段初值要体首那几行（按值传那一族）还没接`); return null; }
+    return out;
+  };
+
+  /**
+   * **合成出来的构造**（第七十八 / 九十四刀）：一格类自己没写 `construct`，可**基类有**、
+   * 或者**字段写了初值** —— jancy 那儿编译器给它生成一格
+   * （jnc_ct_DerivableType.cpp:465-472 / 909-927），里头先逐格调基类那一个、再放字段初值。
+   *
+   * 别的理由（事件、`bindable` / `autoget`、`static construct`、成员自己带构造）各是自己
+   * 一刀 —— 那几格记账，绝不发一格漏了半截的构造冒充"造好了"。
    *
    * 收敛着来（基类先于派生类定下来），因为"基类有没有构造"本身也可能是合成出来的。
    */
-  const synth = new Map();                               // 类 → 要逐格调的那几格基类
+  const synth = new Map();                               // 类 → { bases, agg }
   {
     const hasCtorOf = (cn) => methods.has(`${cn}$construct`) || synth.has(cn);
     const pending = aggs.filter((a) => a.word === 'class' || a.word === 'opaque class');
+    /* **这几族这一层还接不上**：有它们在就不合成（否则发出来的构造漏了半截）。 */
+    const otherReason = (a) => hasStaticCtor(a)
+      || a.members.some((m) => m.shape === 'event' || m.shape === 'prop' || m.shape === 'reactor')
+      || a.members.some((m) => ['bindable', 'autoget'].some((w) => (m.type?.mods ?? []).includes(w)));
+    /* **内嵌的对象字段**（类的字段、或带构造的结构体字段）也要一格构造 —— 它是合成的理由之一。 */
+    const hasEmbedded = (a) => a.members.some((m) => {
+      if (m.shape !== 'data' || m.type === null || m.type.ptrs !== 0) return false;
+      const r = resolveType(m.type, env);
+      if (r.type === null) return false;
+      if (r.type.k === 'class') return true;
+      return r.type.k === 'struct' && aggCtors.has(r.type.name ?? '');
+    });
     for (let pass = 0; pass < pending.length + 1; pass += 1) {
       let grew = false;
       for (const a of pending) {
         const cls = a.emitName;
         if (cls === null || synth.has(cls) || methods.has(`${cls}$construct`)) continue;
-        if (!needsCtor(a, env)) continue;
+        if (!needsCtor(a, env) || otherReason(a)) continue;
         const bs = (aggBases.get(cls) ?? []).filter((b) => hasCtorOf(b));
-        if (bs.length === 0) continue;                   // 还定不下来（或不是基类那个理由）
-        synth.set(cls, bs);
+        if (bs.length === 0 && !fieldInits.has(cls) && !hasEmbedded(a)) continue;
+        synth.set(cls, { bases: bs, agg: a });
         grew = true;
       }
       if (!grew) break;
@@ -334,13 +444,18 @@ export function lowerJncRules(tree, diags, opts = {}) {
       const cls = a.emitName;
       if (cls === null || synth.has(cls) || methods.has(`${cls}$construct`)) continue;
       if (needsCtor(a, env)) {
-        acct(`合成 '${cls}' 的构造（字段初值 / 事件 / bindable / static construct 那几族）还没接`);
+        acct(`合成 '${cls}' 的构造（事件 / bindable / static construct / 成员自己带构造那几族）还没接`);
       }
     }
-    for (const [cls, bs] of synth) {
+    for (const [cls, s] of synth) {
       const selfTy = `(ptr ${clsRoot(cls)})`;
-      const body = bs.map((b) => `    (expr (call ${b}$construct (var $this)))`).join('\n');
-      decls.push(`  (fn ${cls}$construct (($this ${selfTy})) void\n${body})`);
+      const fi = fieldInitLines(s.agg, '    ');
+      if (fi === null) continue;                           // 账已经记过
+      const lines = [
+        ...s.bases.map((b) => `    (expr (call ${b}$construct (var $this)))`),
+        ...fi,
+      ];
+      decls.push(`  (fn ${cls}$construct (($this ${selfTy})) void\n${lines.join('\n')})`);
       /* 造对象与 `basetype.construct(…)` 两处查的是同一张方法表 —— 合成的这一格也得在里头。 */
       methods.set(`${cls}$construct`, {
         params: [],
@@ -361,12 +476,52 @@ export function lowerJncRules(tree, diags, opts = {}) {
   /* **方法那一族**（体写在类里的那几格）：一格一格发 `(fn <东家>$<方法名> (($this …) …) …)`。 */
   for (const key of overloads) {
     acct(`方法 '${key}' 有重载（按实参挑哪一格）还没接`);
-  }  for (const [key, mi] of methods) {
+  }
+  /**
+   * 人写的 `construct` 里有没有**显式**调基类的构造（`basetype.construct(…)`）。没有的话
+   * 编译器补一句（53-inherit.jnc 那格 `Cow`：基类那一个不带实参，所以自动补）——
+   * 补的那一句要排在字段初值与体之前（jnc_ct_Parser.cpp:3005-3009）。
+   */
+  const callsBaseCtor = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return false;
+    if (Array.isArray(node)) return node.some((x) => callsBaseCtor(x));
+    if (headOf(node) === 'field') {
+      const f = named(node);
+      if (String(f?.name?.value ?? '') === 'construct' && headOf(f?.obj) === 'basetype') return true;
+    }
+    return Array.isArray(node.items) ? node.items.some((x) => callsBaseCtor(x)) : false;
+  };
+  for (const [key, mi] of methods) {
     if (mi.hasBody !== true) continue;                   // 只写原型的，体在类外（下面那条路发）
     const a = aggs.find((x) => x.emitName === mi.owner);
     const kind = a !== undefined && (a.word === 'class' || a.word === 'opaque class') ? 'class' : 'struct';
     const ownerEmit = kind === 'class' ? clsRoot(mi.owner) : mi.owner;
-    emitFn(mi.node, key, mi.owner, mi.stat === true ? null : { agg: mi.owner, kind, emit: ownerEmit }, null);
+    /* **构造那一格前头还有两截**：基类的构造（没显式调就补）+ 字段初值。 */
+    const head0 = [];
+    if (mi.name === 'construct') {
+      const bs = (aggBases.get(mi.owner) ?? []).filter((b) => methods.has(`${b}$construct`));
+      if (bs.length > 0 && !callsBaseCtor(named(mi.node)?.body)) {
+        const bad = bs.find((b) => ((methods.get(`${b}$construct`).params) ?? []).length > 0);
+        if (bad !== undefined) {
+          acct(`'${key}' 没显式调基类 '${bad}' 的构造，而那一格要实参 —— 补不出来`); continue;
+        }
+        head0.push(...bs.map((b) => `    (expr (call ${b}$construct (var $this)))`));
+      }
+      if (fieldInits.has(mi.owner) || a !== undefined) {
+        const fi = a === undefined ? [] : fieldInitLines(a, '    ');
+        if (fi === null) continue;                       // 账已经记过
+        head0.push(...fi);
+      }
+    }
+    emitFn(
+      mi.node,
+      key,
+      mi.owner,
+      mi.stat === true ? null : { agg: mi.owner, kind, emit: ownerEmit },
+      null,
+      null,
+      head0,
+    );
   }
 
   /* 再发**顶层那几格函数**（体写在类外的方法也在这儿 —— 它的名字是点串）。 */

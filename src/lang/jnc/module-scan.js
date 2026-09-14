@@ -95,7 +95,7 @@ export function scanFns(tree, env) {
  * 一格成员写的**初值**那一整条表达式（`static int m_count = 10;` 里右边那一格）。
  * 花括号那一族（`static int m_table[] = { … }`）另算 —— 记一格 `curly` 让上层明说不收。
  */
-function memberInit(m) {
+export function memberInit(m) {
   const nm = named(m.at);
   if (nm === null || nm === undefined) return null;
   if (headOf(m.at) === 'var-decl-curly') return { curly: true, value: nm.value ?? null };
