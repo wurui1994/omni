@@ -89,6 +89,32 @@ export function staticCtorFlag(agg) {
   return `(global ${agg}$construct$static$1 bool)`;
 }
 
+/**
+ * **函数里的 `static`**（第二十六刀）：那一格是**模块级**的内存
+ * （decl_storage.rst："allocated at the program start"），名字是**源码里那个名字** +
+ * `$s<临时号>`（`n$s0` / `v$s1` / `c$s2`，25-static-local.jnc）——不带函数名前缀。
+ *
+ * 写了初值的那一格还多发一格 **`$1` 闸门**（bool）：jancy 就地把初值包在 `once` 里
+ * （`jnc_ct_Parser.cpp:2452` 那四句），所以"初值只跑一次"。初值空着就不包，也就不发闸门
+ * （同处 2454 行的 `m_initializer.isEmpty()`）。
+ *
+ * `idx` 是共用的临时号（与 `$newoN` 那一族同一个计数器）。
+ */
+export function staticLocalLines(m, env, ctx = { idx: 0, hasInit: false }) {
+  if (m === null || m === undefined || m.name === null) return { lines: [], why: '没有名字' };
+  const r = resolveType(m.type, env);
+  if (r.type === null) return { lines: [], why: r.why };
+  const tc = { clsRoot: ctx.clsRoot ?? ((n) => n) };
+  const base = `${m.name}$s${ctx.idx}`;
+  /* **取过地址就提一格**：静态局部量与模块级变量同一条（第二十六刀那份语料里
+     `&c` 就是量这一格的 —— 旧降级发的是 `(global c$s2 (ptr int))`）。 */
+  const taken = ctx.taken ?? new Set();
+  const box = taken.has(m.name) && LIFTABLE.has(r.type.k);
+  const lines = [`(global ${base} ${box ? lifted(r.type, tc) : emitType(r.type, 'slot', tc)})`];
+  if (ctx.hasInit) lines.push(`(global ${base}$1 bool)`);
+  return { lines, why: null };
+}
+
 /** 带上命名空间前缀的全名。 */
 function fullName(name, ns) {
   return ns === null || ns === undefined || ns === '' ? name : `${ns}$${name}`;

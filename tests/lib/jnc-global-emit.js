@@ -22,7 +22,8 @@ import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
-import { globalLines, addrTaken, staticCtorFlag } from '../../src/lang/jnc/emit-global.js';
+import { globalLines, addrTaken, staticCtorFlag, staticLocalLines } from '../../src/lang/jnc/emit-global.js';
+import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { hasStaticCtor } from '../../src/lang/jnc/emit-fn.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import { LIB_IMPORTS } from '../../src/lang/jnc/modules.js';
@@ -238,7 +239,57 @@ for (const f of files) {
     const root = classRoot(rec.agg, aggList, env);
     return root.emitName ?? nm;
   };
+  /* **函数里的 `static`**：那几格是模块级的内存，名字 `<源码里的名字>$s<临时号>`
+     （写了初值的还多一格 `$1` 闸门）。号取的是**共用的临时号**（与 `$newoN` 同一个计数器）——
+     这一份文件里按源码次序数；文件里还有别的取号处时会对不上，那一格记账。 */
+  const statics = [];
+  const digStatic = (n) => {
+    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    const h = headOf(n);
+    if (h === 'var-decl' || h === 'var-decl-curly') {
+      const vn = named(n);
+      const sp = vn === null ? null : readSpecs(vn.specs);
+      if (sp !== null && sp.words.includes('static')) {
+        const dcls = h === 'var-decl'
+          ? allInChain(vn.dcls, 'dcls-add', 'dcls') : [vn.dcl];
+        for (const d of dcls) {
+          const hasInit = headOf(d) === 'init' || h === 'var-decl-curly';
+          const dd = headOf(d) === 'init' ? named(d)?.dcl : d;
+          const t = readDeclType(vn.specs, dd);
+          if (t !== null && t.name !== null) statics.push({ m: { ...t, at: n, type: t, name: t.name }, hasInit });
+        }
+      }
+      return;
+    }
+    for (const it of n.items) digStatic(it);
+  };
+  const digFns = (n) => {
+    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    if (headOf(n) === 'fn-def') { digStatic(named(n)?.body); return; }
+    for (const it of n.items) digFns(it);
+  };
+  for (const t of trees) digFns(t);
+
   const mine = new Set();
+  let tmp = 0;
+  for (const { m, hasInit } of statics) {
+    const r = staticLocalLines(m, env, { idx: tmp, hasInit, clsRoot: rootOf, taken });
+    tmp += 1;
+    if (r.lines.length === 0) {
+      skip.set(r.why, (skip.get(r.why) ?? 0) + 1);
+      skipAt.push(`${short}　${m.name}　${r.why}`);
+      continue;
+    }
+    for (const line of r.lines) {
+      const nm = /^\(global (\S+) /.exec(line)?.[1] ?? '?';
+      mine.add(nm);
+      const want = oracle.get(nm);
+      if (want === undefined) { extra += 1; extraAt.push(`${short}　${nm}`); continue; }
+      cmp += 1;
+      if (line === want) same += 1;
+      else if (diff.length < 20) diff.push(`${short}\n      旧 ${want}\n      新 ${line}`);
+    }
+  }
   for (const line of flags) {
     const nm = /^\(global (\S+) /.exec(line)?.[1] ?? '?';
     mine.add(nm);
