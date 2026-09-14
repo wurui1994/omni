@@ -130,16 +130,19 @@ export function makeFnEnv(o) {
      * **construct 的默认实参**（第一百七十五刀）：形参写了初值（`construct(int step = 1)`）
      * 而调用方给的实参不够时按默认的补 —— 与普通函数那一条是同一件事。
      */
-    const args = argNodes ?? [];
+    /* **空槽**（`new C(1, , 3)`，第八十八刀）：那一格与"末尾少给"是同一件事 —— 记成 null，
+       下面按默认值补。 */
+    const args = (argNodes ?? []).map((a) => (headOf(a) === 'unbound' ? null : a));
     const ps = ctor?.params ?? [];
     const defs = ctor?.defaults ?? [];
     if (args.length > ps.length) {
       acct(`造 '${cls}'：给了 ${args.length} 个实参，可 construct 只收 ${ps.length} 个`); return null;
     }
-    if (args.length < ps.length) {
-      /* 差的那几格有默认值吗 —— 有就按默认的补，没有才报。 */
+    {
+      /* 空着的那几格（末尾少给的、写成空槽的）有默认值吗 —— 有就按默认的补，没有才报。 */
       let bad = false;
-      for (let i = args.length; i < ps.length; i += 1) {
+      for (let i = 0; i < ps.length; i += 1) {
+        if (i < args.length && args[i] !== null) continue;
         if (defs[i] === null || defs[i] === undefined) {
           acct(`造 '${cls}'：construct 要 ${ps.length} 个实参，给了 ${args.length}（第 ${i + 1} 格没有默认值）`);
           bad = true; break;
@@ -152,8 +155,8 @@ export function makeFnEnv(o) {
     for (let i = 0; i < ps.length; i += 1) {
       const rp = resolveType(ps[i], env);
       if (rp.type === null) { acct(`造 '${cls}'：construct 的第 ${i + 1} 格形参：${rp.why}`); return null; }
-      /* 给少了的那几格按**默认实参**补（上头已经查过它们都有默认值）。 */
-      const a = i < args.length ? args[i] : defs[i];
+      /* 空着的那几格按**默认实参**补（上头已经查过它们都有默认值）。 */
+      const a = i < args.length && args[i] !== null ? args[i] : defs[i];
       const v = emitExpr(a, withBits(rp.type, ps[i]), ctxRef);
       if (v === null) return null;                         // 账已经记过
       vals.push(v.code);
@@ -1338,7 +1341,12 @@ export function makeFnEnv(o) {
          —— `null` 正要从那儿知道自己是哪种指针。 */
       const nArgs = Math.max(args.length, sig.params.length);
       for (let i = 0; i < nArgs; i += 1) {
-        const a2 = args[i];
+        /**
+         * **空槽**（`f(1, , 3)`，第八十八刀）：树上是一格 `(unbound)`，意思与"末尾少给"
+         * 一模一样 —— 这一格用那个形参的默认值。所以两种写法在这儿收成同一条：
+         * 把它换成默认值那个**语法节点**，往下就只有一份规则（同一份类型、同一句诊断）。
+         */
+        const a2 = args[i] === undefined || headOf(args[i]) === 'unbound' ? undefined : args[i];
         const pt = sig.params[i] ?? null;
         const pr = pt === null ? null : resolveType(pt, env);
         const w = pr === null || pr.type === null ? null : withBits(pr.type, pt);
