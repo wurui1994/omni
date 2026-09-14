@@ -47,6 +47,7 @@ export function makeCtx(env) {
   const ctx = {
     ...env,
     loops: env.loops ?? [],
+    guards: env.guards ?? [],
     ind: 0,
   };
 
@@ -82,6 +83,20 @@ export function makeCtx(env) {
     ctx.ecOut = null;
     const r = run();
     ctx.ecOut = save;
+    return r;
+  };
+
+  /**
+   * **一格守护作用域**（第五十九刀）：`try { … }` 与 `catch:` 前面那一段都是它。里头的
+   * errorcode 调用出错时**跳这一圈的出口**（`escapeText` 按"到栈顶的距离"算层号），
+   * 而不是回调用方。`flag` 不是 null 时还要先记一笔"出过错"（`catch:` 用它挑处理段）。
+   */
+  ctx.guard = (flag, run) => {
+    ctx.loops.push({ kind: 'oneshot', step: false });
+    ctx.guards.push({ flag, loopIdx: ctx.loops.length - 1 });
+    const r = run();
+    ctx.guards.pop();
+    ctx.loops.pop();
     return r;
   };
 
@@ -174,19 +189,28 @@ export function makeCtx(env) {
     /* 语句链是**空基例**那一族（`unit` 一格子项都没有 + `unit-add {list, one}`，节点表 :25-26）
        —— 空基例要用 `chainOf`，拿 `allInChain` 走会把整条链当成一条语句（declare.js 那条注）。 */
     const list = chainOf(named(node)?.body, 'unit-add');
-    const isCatch = (s) => headOf(s) === 'label'
-      && String(named(s)?.text?.value ?? named(s)?.name?.value ?? '') === 'catch';
+    /* **`catch:` 那一格的标签文本在 `word` 洞里**（节点表 :151 `{ label: { word } }`）——
+       先前照 `text` / `name` 读，两样都是 undefined，于是 `catch:` 一格都没认出来、
+       整条落到"表里没有这一格语句：label"上（**按表读树**，又是同一处）。 */
+    const labelOf = (s) => String(named(s)?.word?.value ?? '');
+    const isCatch = (s) => headOf(s) === 'label' && labelOf(s) === 'catch';
     const at = catchAt(list, isCatch);
     if (at >= 0) {
       const flag = env.tmp('$c');
-      ctx.loops.push({ kind: 'oneshot', step: false });
-      const guarded = [];
-      for (const s of list.slice(0, at)) {
-        const ls = ctx.stmt(s, ind + 4);
-        if (ls === null) { ctx.loops.pop(); return null; }
-        guarded.push(...ls);
-      }
-      ctx.loops.pop();
+      /* 前一段是**守护起来的**（`ctx.guard`）：里头的 errorcode 调用出错时先记一笔
+         `(set $cN 真)` 再跳这一圈的出口，处理那一段靠那个标志挑。 */
+      let bad = false;
+      const guarded = ctx.guard(flag, () => {
+        const acc = [];
+        for (const s of list.slice(0, at)) {
+          const ls = ctx.stmt(s, ind + 4);
+          if (ls === null) { bad = true; return acc; }
+          acc.push(...ls);
+        }
+        return acc;
+      });
+      if (bad) return null;
+      /* 处理那一段在**守护之外**（jancy 同：catch 作用域里再抛是往外一层找）。 */
       const handler = [];
       for (const s of list.slice(at + 1)) {
         const ls = ctx.stmt(s, ind + 4);

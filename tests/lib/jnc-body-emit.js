@@ -595,8 +595,12 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
        *     —— 这一层没有运行期展开，所以也是明说不收。
        */
       if (sig.ec === true) {
-        if (curErr === null) {
-          acct('不写 `try` 调 errorcode，而这个函数自己不是 errorcode（jancy 那儿走运行期的 dynamic throw）'); return null;
+        /* 往哪儿跳看**最里那一格守护**（`try { … }` / `catch:`）：有它就跳它的出口，
+           没有才回调用方。jancy 是同一条（`throwException` 先问 `findCatchScope()`）。 */
+        const gs = ctxRef.guards ?? [];
+        const g = gs.length === 0 ? null : gs[gs.length - 1];
+        if (g === null && curErr === null) {
+          acct('不写 `try` 调 errorcode，而这个函数自己不是 errorcode、外面也没有 try/catch（jancy 那儿走运行期的 dynamic throw）'); return null;
         }
         if (ctxRef.ecOut === null || ctxRef.ecOut === undefined) {
           acct('这个位置上的 errorcode 调用（传播那两句插不进语句 —— 惰性位置/循环条件）'); return null;
@@ -605,8 +609,9 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
         if (test === null) { acct(`${rt.k} 定不出出错值的比法`); return null; }
         const v = `$e${ecBox.n}`;
         ecBox.n += 1;
+        const jump = escapeText({ guard: g, loopsLen: (ctxRef.loops ?? []).length, curErr });
         ctxRef.ecOut.push(`${ctxRef.ecPad}(let ${v} ${emitType(rt, 'slot')} ${code})`);
-        ctxRef.ecOut.push(`${ctxRef.ecPad}(if ${test} (do ${escapeText({ guard: null, loopsLen: 0, curErr })}))`);
+        ctxRef.ecOut.push(`${ctxRef.ecPad}(if ${test} (do ${jump}))`);
         return { code: `(var ${v})`, type: rt, hoisted: true };
       }
       return { code, type: rt };

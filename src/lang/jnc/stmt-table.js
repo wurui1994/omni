@@ -50,7 +50,10 @@ export function stmtLines(head, n, ctx) {
      （exceptions.rst:53-57）。方言里"跳到一格作用域的出口"就是那圈**一次性循环**的 `brk`
      —— 与带步进的 `for` 套的那一圈是同一个东西，所以方言不用长新形式。 */
   if (head === 'try') {
-    const b = ctx.block(ctx.hole(n, 'body'), ctx.ind + 4);
+    /* 块里的 errorcode 调用**跳这一圈的出口**（`guard` 的 flag 是 null：不用记"出过错"）
+       —— 所以要在降体之前把这一格守护推上去（`ctx.guard`）。 */
+    const run = () => ctx.block(ctx.hole(n, 'body'), ctx.ind + 4);
+    const b = ctx.guard === undefined ? run() : ctx.guard(null, run);
     return b === null ? null : [
       `${pad}(while (bool true)`,
       `${pad}  (do`,

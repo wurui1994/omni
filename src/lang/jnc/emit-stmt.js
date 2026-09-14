@@ -48,6 +48,10 @@ export function emitStmt(n, ctx) {
       hole: (x, name) => named(x)?.[name],
       once: () => ctx.tmp('jnc$once$'),
       escape: ctx.escape,
+      /* `try { … }` 那一格要**先把守护推上去**再降体（errorcode 出错时跳这一圈的出口）。
+         少了这一格，落在嵌套 `try` 里的调用会去认外层 `catch:` 的标志 —— 56-catch.jnc
+         的 `both` 就是量出它的那一格。 */
+      guard: ctx.guard,
     });
   }
   if (NOT_YET.has(h)) { ctx.acct(NOT_YET.get(h)); return null; }
