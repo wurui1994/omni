@@ -1176,6 +1176,31 @@ export function makeFnEnv(o) {
          * 不在这把尺子量的范围里。
          */
         if (isStatic) {
+          /**
+           * **`static` 的类变量**（`static Counter c;`，第一百五十四刀）：存储是一格模块级的槽
+           * `名字$sN`（类型就是 `(ptr 根)`），而"造那一格对象"包在**那道只跑一次的闸门**里
+           * —— 与普通局部量 `Counter c;` 走同一条 `newObj`（pnew + 写 `$tag` + 构造）。
+           * 写了初值的照旧拒（类的变量赋不了值，第五十二刀）。
+           */
+          if (r.type.k === 'class' && (t.ptrs ?? 0) === 0 && !isInit) {
+            const dn0 = `${t.name}$s${tmpBox.n}`;
+            tmpBox.n += 1;
+            alias.set(t.name, dn0);
+            slots.push({ name: dn0, ty: emitType(r.type, 'value', tyc) });
+            slots.push({ name: `${dn0}$1`, ty: 'bool' });
+            const ct1 = named(t.raw?.dcl)?.ctor;
+            const cargs1 = headOf(ct1) === 'ctor'
+              ? allInChain(named(ct1)?.args, 'args-add', 'args') : [];
+            const o1 = newObj(r.type.name, cargs1);
+            if (o1 === null) return null;                    // 账已经记过
+            out.push([
+              `${pad}(if (un "!" (var ${dn0}$1))`,
+              `${pad}  (do`,
+              `${pad}    (set ${dn0}$1 (bool true))`,
+              `${pad}    (set ${dn0} ${o1.code})))`,
+            ].join('\n'));
+            continue;
+          }
           if (r.type.k === 'struct' || r.type.k === 'arr' || r.type.k === 'class') {
             acct(`'${t.name}' 是 static 的聚合体/类（那一格要 pnew + 构造，还没接）`); return null;
           }
