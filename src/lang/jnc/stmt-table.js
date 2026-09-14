@@ -318,3 +318,67 @@ export function returnKind({
   }
   return { kind: 'expr-then-ret' };                                  // 一格 void 调用
 }
+
+/* ─── 块与 `catch:`（lower.js:10163-10243）─────────────────────────────────────
+   `catch:` 语法上是个标签，可它管的是"这个作用域出错时跳哪儿" —— 它把块的语句序列**切成
+   两段**，所以它不是一条能单独降的语句，得由块这一层拦下来。 */
+
+/** 块里有没有 `catch:`：有就答它的下标（语句序列要切两段），没有答 -1。 */
+export function catchAt(stats, isCatchLabel) {
+  return stats.findIndex((s) => isCatchLabel(s));
+}
+
+/**
+ * 带 `catch:` 的一个块（第五十九刀）。前一段是**守着的**那些语句，后一段是处理：
+ *
+ *   (let $cN bool (bool false))
+ *   (while (bool true)          ;; 一次性：出错就 brk 出来
+ *     (do
+ *       …前一段…                 ;; errorcode 出错 → (do (set $cN true) (brk N))
+ *       (brk)))                 ;; 正常走到底也出来，只是标志还是 false
+ *   (if (var $cN)
+ *     (do …后一段…))
+ *
+ * **那格标志是必需的**：正常走到底与出错走出来是**同一个** `brk`。jancy 那边不用标志，因为
+ * 它有两个块可跳（正常流跳 `catch_follow`、出错跳 `m_catchBlock`，Eh.cpp:330-345）；方言里
+ * 一圈循环只有一个出口，所以差别记在一格 bool 上。
+ *
+ * 两段各是**自己的作用域**，与 jancy 同（`catchLabel` 先 `closeScope()` 再
+ * `openScope(pos, ScopeFlag_Catch)`）：前一段声明的名字在处理里看不见 —— 方言这边它自然成立，
+ * 前一段的 `(let …)` 在那圈循环的 `(do …)` 里。
+ *
+ * 处理那一段在**守护之外**：里头的 errorcode 调用照旧往调用方传（jancy 同 —— `findCatchScope`
+ * 从当前作用域往上走）。
+ *
+ * jancy 还多一条这一层不用管的：函数作用域上 `catch:` 之前那段**必须 return**
+ * （`checkReturn()`，Eh.cpp:311-314）。真 return 了，下面那句 `(brk)` 就是不可达的死代码；
+ * 没 return（void 函数）也对 —— 标志是 false，处理那段跳过去。
+ */
+export function catchBlockLines(flag, guarded, handler, pad) {
+  return [
+    `${pad}(let ${flag} bool (bool false))`,
+    `${pad}(while (bool true)`,
+    `${pad}  (do`,
+    ...guarded,
+    `${pad}    (brk)`,
+    `${pad}  )`,
+    `${pad})`,
+    `${pad}(if (var ${flag})`,
+    `${pad}  (do`,
+    ...handler,
+    `${pad}  )`,
+    `${pad})`,
+  ];
+}
+
+/**
+ * **errorcode 的传播插在哪儿**（第五十八刀）。jancy 那边 `checkErrorCode` 是在那次调用之后
+ * **当场**分块的（jnc_ct_OperatorMgr_Call.cpp:591-592）；这一层没有块、只有"一条语句"这个
+ * 粒度 —— 于是把那次调用抬成一格临时、把"比一下就 return"插在**这条语句之前**。
+ *
+ * 这么做要求那次调用在这条语句里**只求一遍值**，所以只有这几种语句开这个落点。
+ * **循环那三种不开**：它们的条件每一圈都要重求，抬到外面就是错的（落进去的 errorcode 调用
+ * 会在调用那一处明说不收）。同一个道理，`&&` / `||` 的右边与 `? :` 的两支是**惰性位置**，
+ * 那儿也把落点关掉。
+ */
+export const EC_HOIST = new Set(['var-decl', 'var-decl-curly', 'expr-stmt', 'return', 'if', 'switch', 'assert']);
