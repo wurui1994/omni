@@ -156,6 +156,10 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    * 解不出来的那几笔照实记账（不猜）。
    */
   const templates = templateTable(tree);
+  /* **体外写的那几格泛型成员**（`T Box<T>.fetch() {…}`）：`expandTemplates` 会跟着每格实例
+     各替换出来一份，所以**原来那几条不发码** —— 按节点认（下面那一遍靠它跳过去）。 */
+  const tmplOuters = new Set();
+  for (const tm of templates.values()) for (const o of (tm.outer ?? [])) tmplOuters.add(o);
   if (templates.size > 0) {
     const ex = expandTemplates(tree, templates);
     for (const [w, n] of ex.fails) acct(`泛型：${w}（${n} 处）`);
@@ -1244,6 +1248,16 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     const h = headOf(it);
     if (h !== 'fn-def' && h !== 'fn-proto') continue;
     if (h === 'fn-proto') continue;                      // 原型不发码
+    /**
+     * **泛型的成员写在体外**（`T Box<T>.fetch() { … }`，第二百二十二刀，126-genericouter.jnc）：
+     * jancy 里"体内写"与"体外写"是同一件事、任选其一（type_class.rst:41-59）。那几条条目已经
+     * **跟着每格实例各替换出来一份**了（`expandTemplates` 的 `outers`，名字落成 `Box$int$fetch`
+     * —— 与从体里提上来的那一批一模一样），所以**原来那一条不发码**：它里头那个 `T` 谁也没绑过。
+     *
+     * 少这一句，那一条会照字面降下去，报的是"顶层函数的名字读不出来"（东家是一格 `tinst`，
+     * 不是名字）—— 账记在这儿，因在别处。
+     */
+    if (tmplOuters.has(it)) continue;
     const nm = named(it);
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
     if (t === null) { acct('顶层函数的类型读不出来'); continue; }
