@@ -582,6 +582,32 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       if (v === null) return null;                         // 账已经记过
       out.push(`${pad}(pstore (pfield (var $this) ${m.name}) ${v})`);
     }
+    /**
+     * **完整声明式属性体里那几格字段写了初值**（`property m_p { int m_v = 7; … }`，
+     * 152-propfieldinit.jnc）：那几格存储就是**这个类的字段**（名字带上属性那一段，
+     * `C$m_p$m_v`）—— 所以初值那一句与普通字段一模一样，只是名字长一节。
+     * 花括号/聚合体那几族照旧明说不收（与普通字段同一条界）。
+     */
+    for (const m of a.members) {
+      if (m.shape !== 'prop' || m.name === null) continue;
+      const body = named(m.at)?.body;
+      if (headOf(body) !== 'compound') continue;
+      for (const im of readBodyMembers(body)) {
+        if (im.name === null || im.type === null) continue;
+        if (im.shape !== 'data' && im.shape !== 'array' && im.shape !== 'fnptr') continue;
+        const ini = memberInit(im);
+        if (ini === null) continue;
+        const rr = resolveType(im.type, env);
+        if (rr.type === null) { acct(`'${cls}.${m.name}.${im.name}' 的初值：${rr.why}`); return null; }
+        if (ini.curly === true || ['arr', 'struct', 'class'].includes(rr.type.k)) {
+          acct(`'${cls}.${m.name}.${im.name}' 的初值落在 ${rr.type.k} 上（要逐格抄一份）还没接`);
+          return null;
+        }
+        const v2 = ctx.expr(ini.value, e.withBits(rr.type, im.type));
+        if (v2 === null) return null;                        // 账已经记过
+        out.push(`${pad}(pstore (pfield (var $this) ${cls}$${m.name}$${im.name}) ${v2})`);
+      }
+    }
     /* 初值里要的那几格模块级槽与抬出去的 helper（`new` 那三句）—— 与函数体那条同一条路。 */
     for (const s of e.slots) decls.push(`  (global ${s.name} ${s.ty})`);
     for (const hh of e.helpers) decls.push(hh);
@@ -603,9 +629,12 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   {
     const hasCtorOf = (cn) => methods.has(`${cn}$construct`) || synth.has(cn);
     const pending = aggs.filter((a) => a.word === 'class' || a.word === 'opaque class');
-    /* **这几族这一层还接不上**：有它们在就不合成（否则发出来的构造漏了半截）。 */
+    /* **这几族这一层还接不上**：有它们在就不合成（否则发出来的构造漏了半截）。
+       **属性自己不算一格理由**：写出来的那对取/存是两格函数、体里那几格字段就是普通字段
+       （初值那几句由 `fieldInitLines` 发，152-propfieldinit.jnc）—— 真要另一套的是
+       `autoget` / `bindable` 生成的那一格（下面那条）与事件、反应器。 */
     const otherReason = (a) => hasStaticCtor(a)
-      || a.members.some((m) => m.shape === 'event' || m.shape === 'prop' || m.shape === 'reactor')
+      || a.members.some((m) => m.shape === 'event' || m.shape === 'reactor')
       || a.members.some((m) => ['bindable', 'autoget'].some((w) => (m.type?.mods ?? []).includes(w)));
     /* **内嵌的对象字段**（类的字段、或带构造的结构体字段）也要一格构造 —— 它是合成的理由之一。 */
     const hasEmbedded = (a) => a.members.some((m) => {
@@ -785,6 +814,32 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     );
     for (const l of gp.lines) decls.push(`  ${l}`);
     if (gp.why !== null && !gp.why.includes('对的行为')) acct(`属性 '${t0.name}'：${gp.why}`);
+    /**
+     * **体里那几格字段写了初值**（`property g_p { int m_v = 5; … }`，152-propfieldinit.jnc）：
+     * 顶层这一格存储就是一格**模块级的量**（`g_p$m_v`），所以初值那一句与模块级那一圈
+     * 一模一样 —— 进 `inits`。取过地址的那一格（`(ptr T)`）另算，明说不收。
+     */
+    const body0 = named(it)?.body;
+    if (headOf(body0) === 'compound') {
+      const full0 = ns === null ? t0.name : `${ns}$${t0.name}`;
+      for (const im of readBodyMembers(body0)) {
+        if (im.name === null || im.type === null) continue;
+        if (im.shape !== 'data' && im.shape !== 'array' && im.shape !== 'fnptr') continue;
+        const ini = memberInit(im);
+        if (ini === null) continue;
+        const rr = resolveType(im.type, env);
+        if (rr.type === null) { acct(`属性 '${t0.name}.${im.name}' 的初值：${rr.why}`); continue; }
+        if (ini.curly === true || ['arr', 'struct', 'class'].includes(rr.type.k)
+          || gLifted.has(im.name)) {
+          acct(`属性 '${t0.name}.${im.name}' 的初值落在 ${rr.type.k} 上（或那一格被取过地址）还没接`);
+          continue;
+        }
+        const mi0 = modInit();
+        const v0 = mi0.ctx.expr(ini.value, mi0.e.withBits(rr.type, im.type));
+        if (v0 === null) continue;                           // 账已经记过
+        inits.push(`    ${SHAPE_ACCESS.var.write(`${full0}$${im.name}`, v0)}`);
+      }
+    }
     if (emitPropBody(it, pr?.emit ?? t0.name, null, ns, store1) === true) propDone.add(it);
   }
   /* 顶层那几格属性的 `autoget` 取值器（两种写法都在这张表里：`int autoget property g;` 与

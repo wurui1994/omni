@@ -325,6 +325,10 @@ export function scanAggs(tree, env) {
                   propStore.set(im.name, im.type);
                   const ims = [...(im.storage ?? []), ...(im.type.mods ?? [])];
                   if (ims.includes('autoget') || ims.includes('bindable')) auto = im.type;
+                  /* **体里那格字段写了初值**（`property m_p { int m_v = 7; … }`）：它就是这个类的
+                     一格字段（`C$m_p$m_v`），所以"这一格里有初值"要记上 —— 合成构造那一步
+                     靠它才知道该发（152-propfieldinit.jnc）。 */
+                  if (memberInit(im) !== null) fieldInits.add(emitName);
                 }
               }
             }
