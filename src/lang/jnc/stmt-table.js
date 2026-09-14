@@ -118,3 +118,68 @@ export function jumpLevel(kind, lvl, loops) {
 export function jumpText(op, level) {
   return `(${op}${level === 1 ? '' : ` ${level}`})`;
 }
+
+/* ─── 三种循环的模板（lower.js:12888-12997）───────────────────────────────────
+   这三格是"方言里没有的形状怎么用有的形状拼出来"，每格的坑都写在注里。 */
+
+/** `while (C) BODY` —— 方言直接有这一格。 */
+export function whileLines(condText, body, pad) {
+  return [`${pad}(while ${condText}`, body, `${pad})`];
+}
+
+/**
+ * `do BODY while (C);` —— 方言里**没有**后置判断的循环，所以借一格标志：
+ *
+ *   (let $doN bool (bool true))
+ *   (while (bin "||" (var $doN) C)
+ *     (do (set $doN (bool false)) BODY))
+ *
+ * `||` **短路**，所以第一圈不算 C（要紧：C 里可能有第一圈还没成立的东西）；第二圈起判断
+ * 落在循环头，也就是第一圈的体之后 —— 与 do-while 的语义一致。
+ *
+ * 标志清零放在体的**开头**而不是末尾：放末尾时体里的 `continue` 会把它跳过去，于是变成
+ * 死循环。放开头就没有这个坑（`break` 照旧从 `while` 里出去）。
+ */
+export function doWhileLines(flag, condText, body, pad) {
+  return [
+    `${pad}(let ${flag} bool (bool true))`,
+    `${pad}(while (bin "||" (var ${flag}) ${condText})`,
+    `${pad}  (do`,
+    `${pad}    (set ${flag} (bool false))`,
+    body,
+    `${pad}  )`,
+    `${pad})`,
+  ];
+}
+
+/**
+ * `for (INIT; C; STEP) BODY` → `(do INIT (while C (do BODY STEP)))`。
+ *
+ * 三格都可以空：没有 C 时是 `(bool true)`。INIT 里的声明要能被 C / STEP / BODY 看见，
+ * 所以整条包在一个 `(do …)` 里 —— 那个 do 自带一层作用域。
+ *
+ * **带步进又有 `continue` 指着这一层时给体套一圈一次性循环**（第四十二刀）：`continue`
+ * 变成那圈的 `(brk)`，落点正好在步进之前。不套的话方言的 `cont` 跳到循环头，会漏掉一次步进。
+ */
+export function forLines({
+  initLines, condText, stepLines, body, oneshot, pad,
+}) {
+  const out = [`${pad}(do`, ...initLines];
+  out.push(`${pad}  (while ${condText === null ? '(bool true)' : condText}`);
+  out.push(`${pad}    (do`);
+  if (oneshot === true) {
+    out.push(`${pad}      (while (bool true)`);
+    out.push(`${pad}        (do`);
+    out.push(body);
+    out.push(`${pad}          (brk)`);
+    out.push(`${pad}        )`);
+    out.push(`${pad}      )`);
+  } else {
+    out.push(body);
+  }
+  out.push(...stepLines);
+  out.push(`${pad}    )`);
+  out.push(`${pad}  )`);
+  out.push(`${pad})`);
+  return out;
+}
