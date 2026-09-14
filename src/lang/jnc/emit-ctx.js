@@ -405,6 +405,11 @@ export function makeFnEnv(o) {
     if (lv.shape === 'prop' && lv.hasSet === false) {
       acct(`属性 '${lv.propName ?? '?'}' 没有存值器（const 属性 —— 写不下去）`); return null;
     }
+    /* 存值器写着 `errorcode` 的那一格（`operator []` 那一族）：写这一句要顺带把错往上传，
+       而这儿只发一整句 —— 明说不收（吞掉那个词就等于调用点再也不检查错误码了）。 */
+    if (lv.ecSet === true) {
+      acct(`'${lv.propName ?? '?'}' 的存值器是 errorcode（传播那两句插不进这一句写）还没接`); return null;
+    }
     return SHAPE_ACCESS[lv.shape].write(lv.code, v, lv.args);
   };
   /**
@@ -724,6 +729,44 @@ export function makeFnEnv(o) {
     if (h === 'index') {
       const a = emitExpr(nm2.obj, null, ctxRef);
       if (a === null) return null;
+      /**
+       * **`operator [] ` 那一族**（第一百三十一刀，130-opindex.jnc）：左边是结构体/类时
+       * 下标不是 `*(a + i)` —— 它是**一对取/存**（`<东家>$op$index$get` / `$set`），
+       * 与属性那一格**同一种形状**（`prop`）：读一次调用、写另一次调用。差别只在
+       * "self 那一串多带一格下标" —— `args` 本来就是一串，所以一份模板管两族。
+       * 这一问排在"退化成指针"**之前**：左边是聚合体时压根没有 `(padd …)` 这条路。
+       */
+      const iagg = aggBehind(a.type);
+      /* 取/存两格都走 `findMethod` —— 于是**基类上写的那一对**也查得着（163-opindexbase.jnc），
+         与查普通方法同一条路（虚方法/撞车两样照旧明说不收）。 */
+      const igf = iagg === null ? null : findMethod(iagg, 'op$index$get');
+      const ig = igf === null ? undefined : igf.sig;
+      if (ig !== undefined) {
+        const kp = (ig.params ?? [])[0] ?? null;
+        const kr = kp === null ? null : resolveType(kp, env);
+        const kw = kr === null || kr.type === null ? { k: 'int', w: 64, u: false } : withBits(kr.type, kp);
+        const iv = emitExpr(nm2.key, kw, ctxRef);
+        if (iv === null) return null;
+        if (ig.ret === null || ig.ret === undefined) {
+          acct(`'${iagg}' 的 operator [] 取值器没有返回类型`); return null;
+        }
+        const isf = findMethod(iagg, 'op$index$set');
+        const is = isf === null ? undefined : isf.sig;
+        return {
+          shape: 'prop',
+          /* 名字用**查着那一格的东家**（基类上写的就发基类那个名字）。 */
+          code: igf.key.slice(0, igf.key.length - '$get'.length),
+          args: [a.code, iv.code],
+          hasSet: is !== undefined,
+          /* **存值器写着 `errorcode`**（`bool errorcode set(int i, char c)`，130-opindex.jnc）：
+             那一句写要**顺带把错往上传**（第五十八刀），而这一层的写是一整句、插不进那两句
+             —— 所以往这一格上记一面旗子，写那一侧照它明说不收（吞掉那个词就等于调用点
+             再也不检查错误码了）。读那一侧不受影响。 */
+          ecSet: is !== undefined && is.ec === true,
+          propName: `${iagg}.operator []`,
+          type: withBits(ig.ret, ig.retDecl),
+        };
+      }
       if (a.type?.k !== 'ptr' && a.type?.k !== 'tptr') { acct('下标的左边不是指针/数组'); return null; }
       const i = emitExpr(nm2.key, { k: 'int', w: 64, u: false }, ctxRef);
       if (i === null) return null;
