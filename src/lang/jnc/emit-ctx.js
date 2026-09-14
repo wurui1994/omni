@@ -59,6 +59,13 @@ export function makeFnEnv(o) {
    */
   let acctN = 0;
   const acct = (why) => { acctN += 1; acct0(why); };
+  /**
+   * **`try <表达式>` 把往上传关掉那一格**（第五十九刀，exceptions.rst:60）：`try` 底下调
+   * errorcode **什么都不插** —— 算出来的值（可能正是那个出错值）原样交出去，由写的人自己比。
+   * 旧降级发的就是一句光的调用（124-errcptr.jnc 的 `(let a (ptr Entry) (call make (int 3)))`）。
+   * 记成一格计数（不是布尔）：`try try f()` 与嵌在实参里的那几层都不会互相抹掉。
+   */
+  const ecOff = { n: 0 };
   /* **类那一族在方言里写的是继承链的根**（第五十六刀）—— 发类型时都要带上这一格。 */
   const clsRoot = (cn) => roots.get(cn) ?? cn;
   const tyc = { clsRoot };
@@ -780,6 +787,14 @@ export function makeFnEnv(o) {
     acct,
     /** 记账过几笔（外面那几层拿它判"里头记过没有"，别拿转手账盖住真原因）。 */
     acctSeen: () => acctN,
+    /**
+     * **`try <表达式>` 那一格**：里头调 errorcode 时**不插传播那两句**（`try` 就是这个意思）。
+     * 表达式那一层只知道"有这么个词"，往上传是这一层的事 —— 所以口子开在这儿。
+     */
+    noEc: (f) => {
+      ecOff.n += 1;
+      try { return f(); } finally { ecOff.n -= 1; }
+    },
     pre,
     /**
      * **这一格函数要的模块级槽**（`{ name, ty }`）：`once` 的那面旗子、`static` 局部量那一格
@@ -1409,7 +1424,7 @@ export function makeFnEnv(o) {
        *   - 这个函数自己不是 errorcode、外面也没有 try 时，jancy 走运行期的 dynamic throw
        *     —— 这一层没有运行期展开，所以也是明说不收。
        */
-      if (sig.ec === true) {
+      if (sig.ec === true && ecOff.n === 0) {
         /* 往哪儿跳看**最里那一格守护**（`try { … }` / `catch:`）：有它就跳它的出口，
            没有才回调用方。jancy 是同一条（`throwException` 先问 `findCatchScope()`）。 */
         const gs = ctxRef.guards ?? [];

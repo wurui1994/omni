@@ -333,6 +333,19 @@ export function emitExpr0(n, want, ctx) {
     return r;
   }
 
+  /**
+   * **`try <表达式>`**（第五十九刀，exceptions.rst:60）：`try` 把那一格的**往上传关掉** ——
+   * 算出来的值（可能正是那个出错值）原样交出去，由写的人自己比（`z == null`）。
+   * 旧降级发的就是一句光的调用（124-errcptr.jnc 的 `(let a (ptr Entry) (call make (int 3)))`）。
+   */
+  if (h === 'try-expr') {
+    const n0 = ctx.acctSeen?.() ?? 0;
+    if (ctx.noEc === undefined) { ctx.acct('`try <表达式>` 这一格还没接'); return null; }
+    const r = ctx.noEc(() => emitExpr(nm.a, want, ctx));
+    if (r === null || r === undefined) return soft(ctx, n0, '`try` 底下那一格还拼不出来');
+    return r;
+  }
+
   ctx.acct(`表里没有这一格表达式：${h}`);
   return null;
 }
