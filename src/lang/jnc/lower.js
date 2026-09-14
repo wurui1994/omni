@@ -28,7 +28,9 @@ import { VARIANT, variantStruct } from './runtime.js';
 import {
   globalLines, addrTaken, liftable, liftedType, arrayFromCurly, staticCtorFlag,
 } from './emit-global.js';
-import { fnHead, readFormals, fnName, needsCtor, hasStaticCtor } from './emit-fn.js';
+import {
+  fnHead, readFormals, fnName, needsCtor, hasStaticCtor, overloadSuffix,
+} from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
 import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
@@ -865,6 +867,33 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     const t0 = nm0 === null ? null : readDeclType(nm0.specs, nm0.dcl);
     return (t0?.mods ?? []).includes('bindable');
   };
+  /**
+   * 一格函数声明的**实参签名**那一串（方言那一侧的形参类型文字）。jancy 判两条同名声明是不是
+   * 同一格看的正是这一串（`FunctionType::getArgSignature`）—— 属性那对花括号里**只写了原型**
+   * 的取/存与写在体外的那几个体，就靠它认亲（第二百四十二刀）。读不出来答 null（不猜）。
+   */
+  const argSigOf = (node, t0 = null) => {
+    const s = sigOf(named(node), env, 'x', t0);
+    if (s === null) return null;
+    const out = [];
+    for (const p of s.params) {
+      if (p === null) return null;
+      const r = resolveType(p, env);
+      if (r.type === null) return null;
+      out.push(emitType(r.type, 'slot', tyc));
+    }
+    return out.join(',');
+  };
+  /** 体写在别处的那几格取/存：点串名字 → 那几个 `fn-def` 条目（按源码次序）。 */
+  const outerDefs = (dotted) => items.filter(({ it }) => {
+    if (headOf(it) !== 'fn-def') return false;
+    const nm0 = named(it);
+    const t1 = nm0 === null ? null : readDeclType(nm0.specs, nm0.dcl);
+    if (t1 === null || t1.name !== null) return false;
+    return fnName({ name: null, type: t1, at: it }) === dotted;
+  }).map(({ it }) => it);
+  /** 体写在体外的那一格取/存是同名那一族里的第几号（认亲认出来的号，见 `emitPropBody`）。 */
+  const outerDup = new Map();
   const emitPropBody = (node, emitName, selfInfo, ns, store, field = false) => {
     const body = named(node)?.body;
     if (headOf(body) !== 'compound') return false;
@@ -913,11 +942,20 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         [], true, 0, `(fn ${key} (${selfPart}) ${emitType(r0.type, 'value', tyc)}`);
       return true;
     }
+    /**
+     * **存值器重载**（第二百四十二刀，153-propsetovl.jnc）：prop_full.rst:15 那句
+     * "overloaded setters" —— 一格属性可以有好几格存值器（`set(int x)` / `set(double x)`）。
+     * 落法与别处的重载同一套：名字上加号（`g_p$set` / `g_p$set$o2` —— 号由 `overloadSuffix`
+     * 拼，取/存那一族从 2 起），族记进 `ovl`，**写属性**那一处按右边那一格的类型挑一条
+     * （`pickOvl`，与算符重载同一格机器）。少了这个号，两个体在方言那侧撞同一个名字。
+     */
+    const dups = new Map();
+    const famOf = new Map();
     for (const { im, leaf } of accs) {
-      const key = `${emitName}$${leaf}`;
-      if (headOf(im.at) !== 'fn-def') {
-        acct(`属性 '${emitName}' 的 ${leaf} 只有原型（体写在别处）还没接`); continue;
-      }
+      const dup = dups.get(leaf) ?? 0;
+      dups.set(leaf, dup + 1);
+      const base = `${emitName}$${leaf}`;
+      const key = `${base}${overloadSuffix(leaf, dup)}`;
       /* 先登记签名：**别处的体**（别的方法、main）读这格属性时查的就是这张表。 */
       const sig = sigOf(named(im.at), env, key, im.type);
       if (sig === null) { acct(`属性 '${emitName}' 的 ${leaf} 的签名读不出来`); continue; }
@@ -928,11 +966,31 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         acct(`属性 '${emitName}' 的 ${leaf} 收 ${sig.params.length} 个形参（带下标的属性那一族）还没接`);
         continue;
       }
+      /**
+       * **体写在别处**（`void g_q.set(int x) { … }`，prop_full.rst:37 那句 out-of-line）：
+       * 这儿只登记签名，码由下面那一遍顶层函数发（与 127-outerget.jnc 同一条路）。要紧的是
+       * **认亲**：按实参签名把体与原型对上，把号记给那一格体 —— 光按次序配对，源码里两处的
+       * 次序一反就静静地把 `set(bool)` 的体发成了 `set(int)` 那个名字。
+       */
+      if (headOf(im.at) !== 'fn-def') {
+        const asig = argSigOf(im.at, im.type);
+        const hit = asig === null ? undefined
+          : outerDefs(base).find((c) => !outerDup.has(c) && argSigOf(c) === asig);
+        if (hit === undefined) {
+          acct(`属性 '${emitName}' 的 ${leaf} 只有原型，体在别处找不着（签名对不上）`); continue;
+        }
+        outerDup.set(hit, dup);
+      }
+      famOf.set(base, [...(famOf.get(base) ?? []), { key, asig: null }]);
       methods.set(key, {
-        ...sig, owner: emitName, name: leaf, node: im.at, hasBody: false,
+        ...sig, owner: emitName, name: leaf, node: im.at, hasBody: false, dup,
       });
-      emitFn(im.at, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map(), field, mc: mcOf(node) }, [], true);
+      if (headOf(im.at) !== 'fn-def') continue;
+      emitFn(im.at, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map(), field, mc: mcOf(node) }, [], true, dup);
     }
+    /* 同一格取/存有两条以上才记进族表：`pickOvl` 见着一条的族直接照原样答，记进来只是白占。 */
+    for (const [base, fam] of famOf) if (fam.length > 1) ovl.set(base, fam);
+
     return true;
   };
 
@@ -1295,7 +1353,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
           const pname = dotted.slice(0, dotted.lastIndexOf('$'));
           const pr0 = gProps.get(pname);
           const store0 = pr0?.store ?? new Map();
-          emitFn(it, dotted, null, null, ns, { emit: pname, store: store0, mc: (gProps.get(pname)?.type?.mods ?? []).includes('bindable') });
+          /* **存值器有好几格**（第二百四十二刀）：号是上头认亲那一步定的（`outerDup`）——
+             两头拼名字走的是同一格 `overloadSuffix`，所以体与那格原型落在同一个名字上。 */
+          emitFn(it, dotted, null, null, ns, { emit: pname, store: store0, mc: (gProps.get(pname)?.type?.mods ?? []).includes('bindable') }, [], false, outerDup.get(it) ?? 0);
           continue;
         }
         acct(`'${dotted}' 的东家查不着（不是这份源码里的聚合体）`);
@@ -1326,7 +1386,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
           ps = { emit: pr2.emit ?? pemit, store, field: true, mc: mods2.includes('bindable') };
         }
       }
-      emitFn(it, dotted, null, selfInfo, ns, ps, [], false, dupOf(it) ?? 0);
+      emitFn(it, dotted, null, selfInfo, ns, ps, [], false, outerDup.get(it) ?? dupOf(it) ?? 0);
       continue;
     }
     /* **重载**（同名的第二格函数，第五十八刀）：号在扫那一遍就排好了（`f` / `f$o1`）——

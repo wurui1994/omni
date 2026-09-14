@@ -663,10 +663,15 @@ export function makeFnEnv(o) {
       if (test === null) { acct(`${rt0.k} 定不出出错值的比法`); return null; }
       ecBox.n += 1;
       const jump = escapeText({ guard: g, loopsLen: (ctxRef.loops ?? []).length, curErr });
-      const call = `(call ${lv.code}$set${[...lv.args, v].map((x) => ` ${x}`).join('')})`;
+      const call = `(call ${lv.setKey ?? `${lv.code}$set`}${[...lv.args, v].map((x) => ` ${x}`).join('')})`;
       ctxRef.ecOut.push(`${ctxRef.ecPad}(let ${v0} ${emitType(rt0, 'slot', tyc)} ${call})`);
       ctxRef.ecOut.push(`${ctxRef.ecPad}(if ${test} (do ${jump}))`);
       return `(expr (var ${v0}))`;
+    }
+    /* **挑中的那一格存值器**（第二百四十二刀）：重载那一族的名字带号（`g_p$set$o2`）——
+       `SHAPE_ACCESS` 那格模板只会拼 `<属性>$set`，所以挑出来的名字要在这儿落下去。 */
+    if (lv.shape === 'prop' && (lv.setKey ?? null) !== null) {
+      return `(expr (call ${lv.setKey}${[...lv.args, v].map((x) => ` ${x}`).join('')}))`;
     }
     return SHAPE_ACCESS[lv.shape].write(lv.code, v, lv.args);
   };
@@ -2191,8 +2196,33 @@ export function makeFnEnv(o) {
         const ls0 = curlyLines(lv0.code, lv0.type, an.b, pad);
         return ls0 === null ? null : ls0;
       }
-      const lv = lvOf(an.a);
-      if (lv === null) return null;
+      const lv1 = lvOf(an.a);
+      if (lv1 === null) return null;
+      /**
+       * **存值器有好几格**（第二百四十二刀，153-propsetovl.jnc）：`g_p = 3` 与 `g_p = 2.5`
+       * 叫的不是同一格存值器（prop_full.rst:15 那句 overloaded setters）—— 按**右边那一格的
+       * 类型**挑一条，与算符重载、构造、普通调用走的是同一格 `pickOvl`（挑不出来它自己记账）。
+       * 挑中的名字放回位置上（`setKey`），右边按**那一条的形参**降（`lv.type`）。
+       * 没有重载的那一族一步也不多走（族里只有一条时压根不进这一支）。
+       */
+      let lv = lv1;
+      if (lv1.shape === 'prop' && lv1.hasSet === true && op === '=') {
+        const sk0 = `${lv1.code}$set`;
+        const s0 = sigAt(sk0);
+        if (s0 !== undefined && (ovl.get(sk0) ?? []).length > 1) {
+          const p1 = pickOvl(sk0, s0, [an.b]);
+          if (p1 === null) return null;                    // 账已经记过
+          const pt0 = (p1.sig.params ?? [])[0] ?? null;
+          const pr0 = pt0 === null ? null : resolveType(pt0, env);
+          const w0 = pr0 === null || pr0.type === null ? null : withBits(pr0.type, pt0);
+          if (w0 === null) {
+            acct(`属性 '${lv1.propName ?? '?'}' 挑中的那一格存值器的形参类型解不出来`); return null;
+          }
+          lv = {
+            ...lv1, type: w0, setKey: p1.key, ecSet: p1.sig.ec === true, ecRet: p1.sig.ret ?? null,
+          };
+        }
+      }
       /**
        * **往一格事件（多播）上写**（第一百一十七刀，69-propbind.jnc）：那一格不是普通的量 ——
        *   `bindingof(p) += f;` 是**加一格听众**（`(apush 那一格 (fnref f))`，加进来的次序
