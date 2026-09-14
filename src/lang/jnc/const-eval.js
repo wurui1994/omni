@@ -184,11 +184,23 @@ function wrapVal(v, w, u) {
 
 /** 顺手：把一棵树里所有 `enum` 的项都塞进环境（尺子与降级都要先做这一步）。 */
 export function collectEnumConsts(tree, env) {
+  const nodes = [];
   const visit = (n) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
-    if (headOf(n) === 'enum') enumConsts(n, env);
+    if (headOf(n) === 'enum') nodes.push(n);
     for (const it of n.items) visit(it);
   };
   visit(tree);
+  /**
+   * **顶层没有"先声明后使用"这条**（133-enumfwd.jnc：`enum A { X = B.P, … }` 里 `B` 写在
+   * 后面）—— jancy 是按需算这几格常量的，这一层按表算，所以**扫到不再长出新的为止**：
+   * 一遍里算不出来的那几格断链（`broke`），下一遍它依赖的那一格已经在环境里了。
+   * 互相引用成环的那几格就停在那儿没有值 —— 下游照实说查不着，不猜。
+   */
+  for (let i = 0; i <= nodes.length; i += 1) {
+    const before = env.size;
+    for (const n of nodes) enumConsts(n, env);
+    if (env.size === before) break;
+  }
   void allInChain;
 }
