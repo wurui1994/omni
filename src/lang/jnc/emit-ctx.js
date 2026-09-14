@@ -778,10 +778,27 @@ export function makeFnEnv(o) {
           out.push(`${pad}(let ${t.name} ${ty} ${z})`);
           continue;
         }
-        /* **写了初值的结构体/数组**是"抄一份"（`aggSource` + `copyAgg` / `copyArr`）：源头要
-           先钉在一格临时量上（`(let $sN …)`），再逐字段搬。另一族 —— 记账走开。 */
+        /**
+         * **写了初值的结构体/数组是"抄一份"**（第十二 / 二十一刀）：jancy 里聚合体是**值**
+         * 语义 —— `Point q = p;` 之后改 q 不动 p。方言里一格 `pstore` 搬不动一整块，所以
+         * 逐字段 / 逐格搬（`copyVal`，`member-table.js` 里那一份）。
+         *
+         * 源头先钉在一格临时量上（`$sN`）：那一串可能是一次调用（`f()`），逐字段搬会把它
+         * **重求好几遍**。
+         */
         if (r.type.k === 'struct' || r.type.k === 'arr') {
-          acct(`'${t.name}' 写了初值的结构体/数组要逐字段抄一份（还没接）`); return null;
+          const src = ctx.expr(named(d)?.value, declTy);
+          if (src === null) return null;
+          const s = `$s${tmpBox.n}`;
+          tmpBox.n += 1;
+          const ls = copyValLines({
+            dst: `(var ${t.name})`, src: `(var ${s})`, type: r.type, pad, fieldsOf,
+          });
+          if (ls === null) { acct(`'${t.name}' 抄一份抄不出来（字段表/环那两格）`); return null; }
+          out.push(`${pad}(let ${s} ${ty} ${src})`);
+          out.push(`${pad}(let ${t.name} ${ty} (pnew ${ty} (int 1)))`);
+          out.push(...ls);
+          continue;
         }
         const v = ctx.expr(named(d)?.value, declTy);
         if (v === null) return null;
@@ -816,8 +833,49 @@ export function makeFnEnv(o) {
       }
       const lv = lvOf(an.a);
       if (lv === null) return null;
-      /* `agg` 的写**不是一句**：结构体逐字段、数组逐格抄一份（`copyVal`）—— 另一族，记账。 */
-      if (lv.shape === 'agg') { acct('往结构体/数组里赋值要逐字段抄一份（还没接）'); return null; }
+      /**
+       * **往结构体/数组里赋值是"抄一份"**（第十二 / 二十一刀）：`(pstore)` 搬不动一整块，
+       * 逐字段 / 逐格搬（`copyVal`）。源头先钉在一格临时量上 —— 右边可能是一次调用。
+       * 复合赋值落在整块上是算符重载那一族，另算。
+       */
+      /**
+       * **`operator :=`**（第一百三十刀）与**抄一份**（第十二 / 二十一刀）这两族要一起判 ——
+       * 都盯着"左边是一整块聚合体"这一格，而右边只该求**一次**：
+       *   1. 写了赋值算符、右边**不同型** → 那一句是**一次调用**（同型是拷贝，不是转换）；
+       *   2. 左边是结构体/数组（形状 `agg`）→ 逐字段 / 逐格搬（`copyVal`），
+       *      源头先钉在一格临时量上（右边可能是一次调用，逐字段搬会重求好几遍）；
+       *   3. 别的（类的变量那一格形状是 `var`，里头放的**是地址**）→ 与普通写同一条。
+       */
+      const aggName = lv.type?.k === 'struct' || lv.type?.k === 'class' ? lv.type.name : null;
+      const oa = aggName === null ? undefined : methods.get(`${aggName}$op$assign`);
+      if (lv.shape === 'agg' || (oa !== undefined && op === '=')) {
+        if (op !== '=') {
+          acct(`复合赋值 '${op}' 落在结构体/数组上（算符重载那一族）还没接`); return null;
+        }
+        let want = lv.type;
+        if (oa !== undefined) {
+          const pt = (oa.params ?? [])[0] ?? null;
+          const pr = pt === null ? null : resolveType(pt, env);
+          want = pr === null || pr.type === null ? null : withBits(pr.type, pt);
+        }
+        const src = emitExpr(an.b, want, ctx);
+        if (src === null) return null;
+        const sameType = src.type?.k === lv.type?.k && (src.type?.name ?? null) === (lv.type?.name ?? null);
+        if (oa !== undefined && !sameType) {
+          return [`${pad}(expr (call ${aggName}$op$assign ${readLv(lv)} ${src.code}))`];
+        }
+        if (lv.shape === 'agg') {
+          const s = `$s${tmpBox.n}`;
+          tmpBox.n += 1;
+          const ls = copyValLines({
+            dst: lv.code, src: `(var ${s})`, type: lv.type, pad, fieldsOf,
+          });
+          if (ls === null) { acct('抄一份抄不出来（字段表/环那两格）'); return null; }
+          return [`${pad}(let ${s} ${emitType(lv.type, 'slot', tyc)} ${src.code})`, ...ls];
+        }
+        const w0 = writeLv(lv, src.code);
+        return w0 === null ? null : [`${pad}${w0}`];
+      }
       /* **复合赋值**（`lv op= v`）：右边按 lv 那一格降，中间那一格由 `compoundValue` 定
          （常用算术转换、回卷只发一次、`%` 例外、指针上是指针算术）。 */
       if (op !== '=') {
