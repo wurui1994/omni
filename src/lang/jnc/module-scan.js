@@ -543,6 +543,11 @@ export function scanAggs(tree, env, ovl = new Map()) {
              （`m.name` 是 null），而它们正是方法那一族里最要紧的几个。 */
           const mname = fnName({ name: m.name, type: m.type, at: m.at });
           if (mname === null) continue;
+          /* **"这一格有构造吗"要从这儿记**（第二百一十六刀）：`construct` 压根没有普通名字
+             （名字是 `fnName` 从特名那一支认出来的），所以上头那条按 `m.name === 'construct'`
+             记的从来没命中过 —— `aggCtors` 一直是空的。用它的三处（内嵌字段要不要构造、
+             局部量 `S s;` 要不要紧跟一句、`new S(…)`）于是全落在"还没接"上。 */
+          if (mname === 'construct') ctors.add(emitName);
           const base = `${emitName}$${mname}`;
           /* **重载**（同一格东家上同名的两格方法）：普通名字那几族按声明次序换名
              （`C$put` / `C$put$o1`，第五十八刀）；`construct` / 取存 / 算符那几族的调用点

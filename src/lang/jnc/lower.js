@@ -776,7 +776,13 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   const synth = new Map();                               // 类 → { bases, agg }
   {
     const hasCtorOf = (cn) => methods.has(`${cn}$construct`) || synth.has(cn);
-    const pending = aggs.filter((a) => a.word === 'class' || a.word === 'opaque class');
+    /* **结构体那一侧也要合成**（第二百一十六刀，120-structctor.jnc 的 `Wrap`）：里头内嵌一格
+       带构造的结构体，而它自己一个 `construct` 都没写 —— 不合成的话那一格停在零值上，
+       而源码明明写着 `Inner.construct`。判据与类那一侧逐条同一份，只差 `this` 那一格的类型
+       （结构体就是它自己，不过 `clsRoot`、也没有 `$tag`）。union 不在里头（几格挤在同一段
+       内存上，"逐格构造"这句话在那儿没有意义）。 */
+    const pending = aggs.filter((a) => a.word === 'class' || a.word === 'opaque class'
+      || a.word === 'struct');
     /* **这几族这一层还接不上**：有它们在就不合成（否则发出来的构造漏了半截）。
        **属性自己不算一格理由**：写出来的那对取/存是两格函数、体里那几格字段就是普通字段
        （初值那几句由 `fieldInitLines` 发，152-propfieldinit.jnc）—— 真要另一套的是
@@ -815,7 +821,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       }
     }
     for (const [cls, s] of synth) {
-      const selfTy = `(ptr ${clsRoot(cls)})`;
+      const selfTy = s.agg.word === 'struct' ? `(ptr ${cls})` : `(ptr ${clsRoot(cls)})`;
       const fi = fieldInitLines(s.agg, '    ');
       if (fi === null) continue;                           // 账已经记过
       const lines = [

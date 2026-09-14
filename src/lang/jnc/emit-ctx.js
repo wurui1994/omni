@@ -223,9 +223,13 @@ export function makeFnEnv(o) {
    *   - 字段写了初值的（那几句要插到 construct 开头，第七十八刀）；
    *   - construct 要实参的（实参得当helper 的形参传进去 —— 另一刀）。
    */
-  const newObj = (cls, argNodes = [], noCtor = false) => {
-    const root = clsRoot(cls);
-    const tag = tags.get(cls);
+  const newObj = (cls, argNodes = [], noCtor = false, asStruct = false) => {
+    /* **结构体那一侧没有动态类型标签**（第二百一十六刀）：整条链共用一格 struct 那件事是
+       类才有的（`$tag` 是给虚派发与 `new` 出来那一格认身份用的），结构体就是一段内存。
+       所以这一路的名字不过 `clsRoot`、也不写 `$tag`，别的（挑重载、按默认实参补、把实参
+       变成 helper 的形参）与类那一路**一个字不差**。 */
+    const root = asStruct ? cls : clsRoot(cls);
+    const tag = asStruct ? 0 : tags.get(cls);
     if (tag === undefined) { acct(`'${cls}' 没有动态类型标签（类体没解出来）`); return null; }
     const ctorBase = `${cls}$construct`;
     let ctorKey = ctorBase;
@@ -286,14 +290,14 @@ export function makeFnEnv(o) {
       formals.push(`($i${i} ${emitType(rp.type, 'slot', tyc)})`);
     }
     const ty = `(ptr ${root})`;
-    const fn = `$newo${tmpBox.n}`;
+    const fn = `$new${asStruct ? 's' : 'o'}${tmpBox.n}`;
     tmpBox.n += 1;
     const lines = [
       `  (fn ${fn} (${formals.join(' ')}) ${ty}`,
       '    (do',
       `      (let $p ${ty} (pnew ${ty} (int 1)))`,
-      `      (pstore (pfield (var $p) $tag) (int ${tag}))`,
     ];
+    if (!asStruct) lines.push(`      (pstore (pfield (var $p) $tag) (int ${tag}))`);
     if (ctor !== undefined) {
       const pass = formals.map((_, i) => ` (var $i${i})`).join('');
       lines.push(`      (expr (call ${ctor.emit ?? ctorKey} (var $p)${pass}))`);
@@ -301,7 +305,10 @@ export function makeFnEnv(o) {
     lines.push('      (ret (var $p))))');
     helpers.push(lines.join('\n'));
     const pass2 = vals.map((v) => ` ${v}`).join('');
-    return { code: `(call ${fn}${pass2})`, type: { k: 'class', name: cls } };
+    return {
+      code: `(call ${fn}${pass2})`,
+      type: asStruct ? { k: 'ptr', target: { k: 'struct', name: cls } } : { k: 'class', name: cls },
+    };
   };
   for (const f of (sf === undefined ? [] : readFormals(sf.node) ?? [])) {
     if (f.name !== null && f.type !== null) names.set(f.name, f.type);
@@ -1854,8 +1861,22 @@ export function makeFnEnv(o) {
              `zeroText`。有 `construct` 的结构体还要紧跟一句构造 —— 那一族记账走开。 */
           if (r.type.k === 'struct' || r.type.k === 'arr') {
             const root = r.type.k === 'struct' ? r.type.name : null;
-            if (root !== null && aggCtors.has(root)) {
-              acct(`'${t.name}' 是有 construct 的结构体（造完那一句还没接）`); return null;
+            /**
+             * **有 construct 的结构体**（第二百一十六刀，120-structctor.jnc）：`S s;` /
+             * `S s(a, b)` 是"开一段内存、再调它的构造"两句。结构体那一格的名字里放的**本来
+             * 就是地址**（第十二刀），所以 `this` 直接传那一格，不用先提到堆上 —— 与类那一路
+             * 共用同一格 `newObj`（`asStruct`：不过 `clsRoot`、不写 `$tag`），于是挑重载、
+             * 按默认实参补那两条一个字都不用重写。
+             * 声明符尾巴上那对括号就是构造实参（`construct(int x, int y = 9) thin`）。
+             */
+            if (root !== null && (aggCtors.has(root) || methods.has(`${root}$construct`))) {
+              const ct2 = named(t.raw?.dcl)?.ctor;
+              const cargs2 = headOf(ct2) === 'ctor'
+                ? allInChain(named(ct2)?.args, 'args-add', 'args') : [];
+              const o4 = newObj(root, cargs2, false, true);
+              if (o4 === null) return null;                  // 账已经记过
+              out.push(`${pad}(let ${t.name} ${ty} ${o4.code})`);
+              continue;
             }
             out.push(`${pad}(let ${t.name} ${ty} (pnew ${ty} (int 1)))`);
             continue;
@@ -2556,8 +2577,14 @@ export function makeFnEnv(o) {
         /* 带实参的那一格照样走 `newObj` —— 实参变成 helper 的形参（`$i0`…）。 */
         return newObj(to.name, allInChain(nm2.args, 'args-add', 'args'));
       }
-      if (to.k === 'struct' && aggCtors.has(to.name)) {
-        acct(`new ${to.name}（那一格有 construct，造完还要调它）还没接`); return null;
+      if (to.k === 'struct' && (aggCtors.has(to.name) || methods.has(`${to.name}$construct`))) {
+        /* **有 construct 的结构体也走同一条路**（第二百一十六刀，120-structctor.jnc）：造一格、
+           调构造 —— 两句，而 `new` 是一格表达式，所以照旧抬成一个函数（`$newsN`）。
+           `new S[n]` 那一格明说不收（n 格要每格都调一遍，得一个循环）。 */
+        if (headOf(node) === 'new-array') {
+          acct(`new ${to.name}[n]（每格都要调一遍构造 —— 要一个循环）还没接`); return null;
+        }
+        return newObj(to.name, allInChain(nm2.args, 'args-add', 'args'), false, true);
       }
       if (headOf(node) === 'new' && nm2.args !== undefined && nm2.args !== null) {
         acct('new T(…) 带构造实参那一族还没接'); return null;
