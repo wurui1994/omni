@@ -243,10 +243,14 @@ for (const f of files) {
      （写了初值的还多一格 `$1` 闸门）。号取的是**共用的临时号**（与 `$newoN` 同一个计数器）——
      这一份文件里按源码次序数；文件里还有别的取号处时会对不上，那一格记账。 */
   const statics = [];
-  const digStatic = (n) => {
+  const dig2 = (n, inFn) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
-    if (h === 'var-decl' || h === 'var-decl-curly') {
+    if (h === 'fn-def') { dig2(named(n)?.body, true); return; }
+    /* **`once` 语句**也从这个计数器取号：一处一格 `(global jnc$once$N bool)`
+       （161-once.jnc）。与静态量按**源码次序**混在一起数 —— 共用那一个临时号。 */
+    if (h === 'once') { statics.push({ kind: 'once' }); for (const it of n.items) dig2(it, inFn); return; }
+    if (inFn && (h === 'var-decl' || h === 'var-decl-curly')) {
       const vn = named(n);
       const sp = vn === null ? null : readSpecs(vn.specs);
       if (sp !== null && sp.words.includes('static')) {
@@ -256,23 +260,33 @@ for (const f of files) {
           const hasInit = headOf(d) === 'init' || h === 'var-decl-curly';
           const dd = headOf(d) === 'init' ? named(d)?.dcl : d;
           const t = readDeclType(vn.specs, dd);
-          if (t !== null && t.name !== null) statics.push({ m: { ...t, at: n, type: t, name: t.name }, hasInit });
+          if (t !== null && t.name !== null) {
+            statics.push({ kind: 'static', m: { ...t, at: n, type: t, name: t.name }, hasInit });
+          }
         }
       }
       return;
     }
-    for (const it of n.items) digStatic(it);
+    for (const it of n.items) dig2(it, inFn);
   };
-  const digFns = (n) => {
-    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
-    if (headOf(n) === 'fn-def') { digStatic(named(n)?.body); return; }
-    for (const it of n.items) digFns(it);
-  };
-  for (const t of trees) digFns(t);
+  for (const t of trees) dig2(t, false);
 
   const mine = new Set();
   let tmp = 0;
-  for (const { m, hasInit } of statics) {
+  for (const one of statics) {
+    if (one.kind === 'once') {
+      const nm = `jnc$once$${tmp}`;
+      tmp += 1;
+      mine.add(nm);
+      const line = `(global ${nm} bool)`;
+      const want = oracle.get(nm);
+      if (want === undefined) { extra += 1; extraAt.push(`${short}　${nm}`); continue; }
+      cmp += 1;
+      if (line === want) same += 1;
+      else if (diff.length < 20) diff.push(`${short}\n      旧 ${want}\n      新 ${line}`);
+      continue;
+    }
+    const { m, hasInit } = one;
     const r = staticLocalLines(m, env, { idx: tmp, hasInit, clsRoot: rootOf, taken });
     tmp += 1;
     if (r.lines.length === 0) {
