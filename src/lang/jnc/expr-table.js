@@ -123,3 +123,79 @@ export function intLitKind(v) {
   if (v > 0x7fffffffffffffffn) return { kind: 'u64', value: BigInt.asIntN(64, v) };
   return { kind: v > 0x7fffffffn ? 'i64' : 'i32', value: v };
 }
+
+/* ─── `null` 按**左边要什么**定型（lower.js:13870-13905）──────────────────────
+   `null` 自己没有类型。左边知道要什么时就用它；不知道时（`x == null` 里 x 是整数）
+   **当场说清**，不随便挑一个。六格按次序问，`emit` 答方言那一段文字。 */
+export const NULL_BY_WANT = [
+  {
+    /* 类引用也是一种"指针"（第五十二刀）：`C* p = null` 与 `p == null` 都要它，
+       而类那一格在方言里是 `(ptr 连通分量的根)`。 */
+    name: 'class',
+    when: (want, c) => c.isClass(want),
+    emit: (want, c) => `(pnull (ptr ${c.clsRoot(want.name)}))`,
+  },
+  {
+    /* `variant_t data = null`（第一百一十三刀，语料 8 处）：一格**空**的 variant，标签 0。
+       这一条得在这儿而不是在装箱那两条里 —— `null` 走不到"值是什么类型"那一步。 */
+    name: 'variant',
+    when: (want, c) => c.isVar(want),
+    emit: (want, c) => `(call ${c.varBoxName('0')})`,
+  },
+  {
+    /* 函数值那一格：方言这一侧**已经有**"空的那一格"`(null (fnty …))`
+       （第三十三刀，OIR 的 `NullFn` 六条腿都认）。语料里的形状：
+       `void function* onTriggered() = null`（ui_Action.jnc:39）。 */
+    name: 'fn',
+    when: (want, c) => c.isFn(want),
+    emit: (want, c) => `(null ${c.tyText(want)})`,
+  },
+  {
+    /* `null` 当一格 `string_t`（第一百六十五刀）：**字符串槽的零值本来就是 `(str "")`**，
+       而这一层可观测的三件事（长度、当条件、印出来）在"空的"与"零长"上一模一样。
+       所以回同一格零值，不是替 jancy 猜一个新语义。 */
+    name: 'string',
+    when: (want) => want !== null && want !== undefined && want.k === 'string',
+    emit: () => '(str "")',
+  },
+  {
+    name: 'ptr',
+    when: (want, c) => c.isPtr(want),
+    emit: (want, c) => `(pnull ${c.tyText(want)})`,
+  },
+  {
+    name: 'unknown',
+    when: () => true,
+    emit: () => null,                    // 问不出来 —— 调用方报"null 得从左边知道自己是哪种指针"
+  },
+];
+
+/* ─── **裸名字**的查名次序（lower.js:13907-13945）─────────────────────────────
+   源码里一格裸名字可能是九种东西。次序**就是规则**：先查得着的变量，再往下问。
+   每格给一个探子（`probe`），第一个答得出来的就是它。全没答出来才报"未声明"。
+   这正是作用域图那一层的入口 —— 表在这儿，图在 `bind.js`。 */
+export const NAME_LOOKUP_ORDER = [
+  { name: 'var', why: '查得着的变量（局部、形参、模块级）' },
+  { name: 'self-field', why: '方法体里裸写的字段名（第五十二刀，与可写那一侧同一份）' },
+  { name: 'fn-value', why: '函数名当值用 = 一格函数指针（第五十五刀）；**重载过的取不出**（第七十九刀）' },
+  { name: 'prop-bare', why: '方法体里裸写的属性名（第六十九刀）—— 读它就是调取值器，连基类链一起找' },
+  { name: 'alias-path', why: '裸写一格字段路径别名（第一百〇四刀）' },
+  { name: 'bitfield', why: '裸写一格位域（第一百一十二刀）' },
+  { name: 'enum-exposed', why: '无名枚举漏出来的成员（第九十六刀）：`enum { A = 1 }` 之后裸写 `A`' },
+  { name: 'c-const', why: '`with "h.h"` 收来的宏与枚举常量（第 J4d 刀）' },
+  { name: 'bad-decl', why: '那格声明自己没成（第二百三十五刀）—— 别把一件事记成好几笔' },
+];
+
+/**
+ * **查着变量之后怎么取值**（lower.js:13947-13963）。四条，按次序：
+ *   1. 结构体与数组那一格里放的**就是地址**（第十二刀 / 第二十刀）—— `(var 名字)`，不走提格那条路；
+ *   2. 模块级**提过**的（第二十四刀）：那一格自己就是 `(ptr T)`，所以 `(pload (var 名字))`；
+ *   3. 局部**提过**的（第九刀）：要 `pload` 它的那格单元（`cellName`）；
+ *   4. 别的：`(var 名字)`。
+ */
+export function nameLoad(dname, t, c) {
+  if (c.isStruct(t) || c.isArr(t)) return `(var ${dname})`;
+  if (c.isGlobal === true) return c.gLifted ? `(pload (var ${dname}))` : `(var ${dname})`;
+  if (c.lifted === true) return `(pload (var ${c.cellName}))`;
+  return `(var ${dname})`;
+}
