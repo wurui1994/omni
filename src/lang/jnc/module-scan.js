@@ -263,6 +263,7 @@ export function scanAggs(tree, env) {
             storage: m.storage,
             at: m.at,
             init: memberInit(m),
+            curlyValue: headOf(m.at) === 'var-decl-curly' ? named(m.at)?.value ?? null : null,
           });
         }
         statics.set(emitName, st);

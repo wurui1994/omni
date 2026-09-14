@@ -23,7 +23,9 @@ import { collectEnumConsts } from './const-eval.js';
 import { scanAggs, scanFns, memberInit, sigOf } from './module-scan.js';
 import { readBodyMembers } from './agg.js';
 import { structLine } from './emit-agg.js';
-import { globalLines, addrTaken, liftable, liftedType } from './emit-global.js';
+import {
+  globalLines, addrTaken, liftable, liftedType, arrayFromCurly,
+} from './emit-global.js';
 import { fnHead, readFormals, fnName, needsCtor, hasStaticCtor } from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
@@ -149,7 +151,17 @@ export function lowerJncRules(tree, diags, opts = {}) {
         if (!g.why.includes('对的行为')) acct(`静态字段 '${st.emit}'：${g.why}`);
         continue;
       }
-      const r = resolveType(st.type, env);
+      /* 长度写空的（`static int m_table[] = { 10, 20, 12 };`）从花括号里数 —— 与模块级、
+         局部那两处用的是同一份 `arrayFromCurly`（183-staticcurly.jnc）。 */
+      const cvs = st.init !== null && st.init.curly === true ? st.init.value
+        : (st.curlyValue ?? null);
+      let r = resolveType(st.type, env);
+      if (r.type === null && cvs !== null) {
+        const inferred = arrayFromCurly({ name: st.name, type: st.type, at: st.at }, env, cvs);
+        if (inferred !== null) r = { type: inferred, why: null };
+      }
+      /* 直接用 `var-decl-curly` 那一格的也走花括号那条路。 */
+      const hasCurly = cvs !== null;
       if (r.type === null) { acct(`静态字段 '${st.emit}'：${r.why}`); continue; }
       if (gLifted.has(st.name) && liftable(r.type)) {
         acct(`静态字段 '${st.emit}' 被取过地址（要提成一格 (ptr T)）还没接`); continue;
@@ -157,9 +169,17 @@ export function lowerJncRules(tree, diags, opts = {}) {
       if (r.type.k === 'struct' || r.type.k === 'arr') {
         cells.push(`    (set ${st.emit} (pnew ${emitType(r.type, 'slot', tyc)} (int 1)))`);
       }
-      if (st.init === null) continue;
-      if (st.init.curly === true) {
-        acct(`静态字段 '${st.emit}' 的花括号初值（要逐格抄一份）还没接`); continue;
+      if (st.init === null && !hasCurly) continue;
+      /* **花括号初值按格子写**（模块级那一层的探子发，排在 pnew 之后）。 */
+      if (hasCurly) {
+        if (r.type.k !== 'arr' && r.type.k !== 'struct') {
+          acct(`静态字段 '${st.emit}' 的花括号初值落在 ${r.type.k} 上（那不是一整块）还没接`); continue;
+        }
+        const mi2 = modInit();
+        const ls2 = mi2.e.curlyLines(`(var ${st.emit})`, r.type, cvs, '    ');
+        if (ls2 === null) continue;                          // 账已经记过
+        inits.push(...ls2);
+        continue;
       }
       if (r.type.k === 'struct' || r.type.k === 'arr' || r.type.k === 'class') {
         acct(`静态字段 '${st.emit}' 写了初值的聚合体（要逐字段抄一份）还没接`); continue;
