@@ -230,7 +230,22 @@ export function lowerJncRules(tree, diags, opts = {}) {
       }
       /* **属性那一格不是一格内存**（读写各是一次调用）：存储那几行上面已经发了，
          底下 pnew / 初值那一套是给"一格量"用的，属性走不到那儿。 */
-      if (t.shape === 'prop' || t.shape === 'event') continue;
+      if (t.shape === 'prop' || t.shape === 'event') {
+        /* **`autoget` / `bindable` 生成的那格存储**（`<属性>$m_value`）：被取过地址时它是一格
+           `(ptr T)`（第二十四刀）—— 那就要一句 pnew，不然取值器 `pload` 的是一条空指针
+           （67-propauto.jnc 量出来就是"null pointer dereference"）。 */
+        const pmods = t.mods ?? [];
+        if (pmods.includes('autoget') || pmods.includes('bindable')) {
+          const rp = resolveType({ ...t, shape: 'data' }, env);
+          const boxed = (gLifted.has(t.name) || gLifted.has('m_value'))
+            && rp.type !== null && liftable(rp.type);
+          if (boxed) {
+            const store = `${ns === null ? t.name : `${ns}$${t.name}`}$m_value`;
+            cells.push(`    (set ${store} (pnew ${liftedType(rp.type, tyc)} (int 1)))`);
+          }
+        }
+        continue;
+      }
       /* 要一段自己的内存的那几格（结构体 / 数组 / 提过的标量）：一句 pnew 排在初值之前。 */
       const r = resolveType(t, env);
       if (r.type === null) { acct(`模块级 '${t.name}'：${r.why}`); continue; }
@@ -510,7 +525,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
    *
    * 发得出来答 true；那对花括号里没有取/存（简写取值器、`autoget` / `bindable` 那几族）答 false。
    */
-  const emitPropBody = (node, emitName, selfInfo, ns, store) => {
+  const emitPropBody = (node, emitName, selfInfo, ns, store, field = false) => {
     const body = named(node)?.body;
     if (headOf(body) !== 'compound') return false;
     /* 名字走 `fnName` 的**属性体那一档**（`inProp`）：那对花括号里裸写的 `get` / `set` 就是
@@ -538,8 +553,50 @@ export function lowerJncRules(tree, diags, opts = {}) {
       methods.set(key, {
         ...sig, owner: emitName, name: leaf, node: im.at, hasBody: false,
       });
-      emitFn(im.at, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map() }, [], true);
+      emitFn(im.at, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map(), field }, [], true);
     }
+    return true;
+  };
+
+  /**
+   * **`autoget` 的取值器是生成出来的**（prop_autoget.rst:15-17："取值器不用写，编译器给一格
+   * 存储 `m_value`；写了取值器就用写的那个"）。所以这一层只做一件事：**没写取值器**的那一格
+   * 生成一格 `(fn <属性>$get … (ret <读那格存储>))`。
+   *
+   * 存储在哪儿由"是不是成员"定：模块级那一格是一格量（取过地址的提成 `(ptr T)`，第二十四刀 ——
+   * 那时候读要 `pload`），成员那一格是**字段**（`<东家>$<属性>$m_value`）。
+   * 聚合体/变体那几格明说不收（读法不是一句 `var`）。
+   */
+  const genAutoget = (nameSrc, emitName, type, selfInfo) => {
+    const mods = type?.mods ?? [];
+    if (!mods.includes('autoget')) return false;
+    if (methods.has(`${emitName}$get`) || fns.has(`${emitName}$get`)) return false;
+    const r = resolveType({ ...type, shape: 'data' }, env);
+    if (r.type === null) { acct(`属性 '${emitName}' 生成的取值器：${r.why}`); return false; }
+    const ty = r.type;
+    if (!['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr'].includes(ty.k)) {
+      acct(`属性 '${emitName}' 生成的取值器落在 ${ty.k} 上（读法不是一句 var）还没接`); return false;
+    }
+    const storage = `${emitName}$m_value`;
+    const boxed = (gLifted.has(nameSrc) || gLifted.has('m_value')) && liftable(ty);
+    const read = selfInfo === null
+      ? (boxed ? `(pload (var ${storage}))` : `(var ${storage})`)
+      : `(pload (pfield (var $this) ${storage}))`;
+    const selfPart = selfInfo === null ? '' : `($this (ptr ${clsRoot(selfInfo.agg)}))`;
+    decls.push(`  (fn ${emitName}$get (${selfPart}) ${emitType(ty, 'value', tyc)}\n    (ret ${read}))`);
+    methods.set(`${emitName}$get`, {
+      params: [],
+      defaults: [],
+      ret: ty,
+      retDecl: type,
+      emit: `${emitName}$get`,
+      ec: false,
+      stat: false,
+      owner: emitName,
+      name: 'get',
+      node: null,
+      hasBody: false,
+    });
     return true;
   };
 
@@ -554,7 +611,9 @@ export function lowerJncRules(tree, diags, opts = {}) {
       const store = new Map();
       const mods = m.type?.mods ?? [];
       if (mods.includes('autoget') || mods.includes('bindable')) store.set('m_value', m.type);
-      if (emitPropBody(m.at, emitName, self0, null, store) === true) propDone.add(m.at);
+      if (emitPropBody(m.at, emitName, self0, null, store, true) === true) propDone.add(m.at);
+      /* 那对花括号里没写取值器（或压根没有花括号）时，`autoget` 那一格自己生成一个。 */
+      genAutoget(m.name, emitName, m.type, self0);
     }
   }
   for (const { it, ns } of items) {
@@ -566,6 +625,9 @@ export function lowerJncRules(tree, diags, opts = {}) {
     const pr = gProps.get(t0.name);
     if (emitPropBody(it, pr?.emit ?? t0.name, null, ns, pr?.store) === true) propDone.add(it);
   }
+  /* 顶层那几格属性的 `autoget` 取值器（两种写法都在这张表里：`int autoget property g;` 与
+     `property g { … }`）—— 写了取值器的那一格由上面那两条路发，这儿只补没写的。 */
+  for (const [nameSrc, pr] of gProps) genAutoget(nameSrc, pr.emit, pr.type, null);
 
   /* **方法那一族**（体写在类里的那几格）：一格一格发 `(fn <东家>$<方法名> (($this …) …) …)`。 */
   for (const key of overloads) {
@@ -607,13 +669,29 @@ export function lowerJncRules(tree, diags, opts = {}) {
         head0.push(...fi);
       }
     }
+    /**
+     * **写在类体里的成员属性取/存**（`void m_v.set(int x) {…}`，67-propauto.jnc）：方法表里它
+     * 的名字是 `m_v$set` —— 那一格里裸写的 `m_value` 是这格属性**生成的存储**，而成员属性的
+     * 存储是**一格字段**（`Cell$m_v$m_value`）。所以要把属性那一层当作用域递进去（带 `field`）。
+     */
+    let ps = null;
+    if (mi.name.endsWith('$get') || mi.name.endsWith('$set')) {
+      const pname = mi.name.slice(0, mi.name.lastIndexOf('$'));
+      const pr2 = aggProps.get(mi.owner)?.get(pname);
+      if (pr2 !== undefined) {
+        const store = new Map();
+        const mods2 = pr2.type?.mods ?? [];
+        if (mods2.includes('autoget') || mods2.includes('bindable')) store.set('m_value', pr2.type);
+        ps = { emit: pr2.emit, store, field: true };
+      }
+    }
     emitFn(
       mi.node,
       key,
       mi.owner,
       mi.stat === true ? null : { agg: mi.owner, kind, emit: ownerEmit },
       null,
-      null,
+      ps,
       head0,
     );
   }
@@ -667,7 +745,27 @@ export function lowerJncRules(tree, diags, opts = {}) {
       const a = aggs.find((x) => x.emitName === ownerName);
       const kind = a.word === 'class' || a.word === 'opaque class' ? 'class' : 'struct';
       const st = methods.get(dotted)?.stat === true;
-      emitFn(it, dotted, null, st ? null : { agg: ownerName, kind, emit: kind === 'class' ? clsRoot(ownerName) : ownerName }, ns);
+      const selfInfo = st ? null
+        : { agg: ownerName, kind, emit: kind === 'class' ? clsRoot(ownerName) : ownerName };
+      /**
+       * **体外写的成员属性取/存**（`void Cell.m_v.set(int x) {…}`，67-propauto.jnc）：那一格
+       * 里裸写的 `m_value` 是这格属性**生成的存储**，而成员属性的存储是**一格字段**
+       * （`Cell$m_v$m_value`）—— 所以 propScope 要带上 `field`。
+       */
+      const leaf2 = dotted.slice(dotted.lastIndexOf('$') + 1);
+      let ps = null;
+      if (leaf2 === 'get' || leaf2 === 'set') {
+        const pemit = dotted.slice(0, dotted.lastIndexOf('$'));
+        const pname = pemit.slice(ownerName.length + 1);
+        const pr2 = aggProps.get(ownerName)?.get(pname);
+        if (pr2 !== undefined) {
+          const store = new Map();
+          const mods2 = pr2.type?.mods ?? [];
+          if (mods2.includes('autoget') || mods2.includes('bindable')) store.set('m_value', pr2.type);
+          ps = { emit: pemit, store, field: true };
+        }
+      }
+      emitFn(it, dotted, null, selfInfo, ns, ps);
       continue;
     }
     const k = nth.get(t.name) ?? 0;

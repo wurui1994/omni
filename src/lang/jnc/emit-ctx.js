@@ -441,6 +441,18 @@ export function makeFnEnv(o) {
     }
     return undefined;
   };
+  /**
+   * **一格方法在哪儿**（`findMethod`）：今天**只看自己那一格**。
+   *
+   * 沿基类链往上找那一半**明说还不接**：量过 —— 基类上的同名方法有三种不同的落法
+   * （体在基类里发一格 `B$step`、只有原型而体写在别处、以及**虚方法**要走派发表 `$$vd$`），
+   * 光按名字往上找会把后两种静静地调错（78-notype.jnc 报"未声明的函数 B$step"、
+   * 86-multibase.jnc 印出来的数变了）。所以这一层照旧答"查不着"，把账留着。
+   */
+  const findMethod = (aggName, mname) => {
+    const hit = methods.get(`${aggName}$${mname}`);
+    return hit === undefined ? null : { sig: hit, key: `${aggName}$${mname}` };
+  };
   /** 一格字段的位置（`memberOf`）：`(pfield 基 名)`；字段自己是结构体/数组时它又是一格 `agg`。 */
   const memberAt = (baseCode, aggName, fname) => {
     const fs = aggFields.get(aggName);
@@ -508,6 +520,18 @@ export function makeFnEnv(o) {
           if (r2.type === null) { acct(`属性的存储 '${key}'：${r2.why}`); return null; }
           const nm3 = `${propScope.emit}$${key}`;
           const ty2 = withBits(r2.type, t2);
+          /**
+           * **成员属性那一格存储是一格字段**（`Cell$m_v$m_value`，67-propauto.jnc 的
+           * `(pload (pfield (var $this) Cell$m_v$m_value))`）—— 与模块级那一格是两种住处，
+           * 所以形状也是两种：字段是 `ptr`（读写走 pload / pstore），模块级那一格按量算。
+           */
+          if (propScope.field === true) {
+            return {
+              shape: memberShape(ty2.k === 'struct', ty2.k === 'arr'),
+              code: `(pfield (var $this) ${nm3})`,
+              type: ty2,
+            };
+          }
           /* **被 `&` 取过地址的那一格是模块级的 `(ptr T)` 自己**（第二十四刀）：读写走
              `pload` / `pstore`，`&m_value` 就是那一格。`&` 数的是**源码里写的**名字，
              而源码里写的正是 `m_value`（prop_autoget.rst:26）。 */
@@ -1123,19 +1147,20 @@ export function makeFnEnv(o) {
           if (ob === null) return null;
           const agg = aggBehind(ob.type);
           if (agg === null) { acct(`叫方法时 '.' 的左边不是结构体/类（${ob.type?.k ?? '?'}）`); return null; }
-          const mi = methods.get(`${agg}$${mname}`);
-          if (mi === undefined) {
+          const found = findMethod(agg, mname);
+          if (found === null) {
             acct(`'${agg}' 上查不着方法 '${mname}'（属性/事件/虚派发那几族另算）`); return null;
           }
-          sig = mi;
-          selfArg = mi.stat === true ? null : ob.code;
-          key = `${agg}$${mname}`;
+          sig = found.sig;
+          selfArg = sig.stat === true ? null : ob.code;
+          key = found.key;
         }
       } else if (asName !== null && !names.has(asName) && !globals.has(asName)
-        && self !== null && methods.has(`${self.agg}$${asName}`)) {
-        sig = methods.get(`${self.agg}$${asName}`);
+        && self !== null && findMethod(self.agg, asName) !== null) {
+        const found = findMethod(self.agg, asName);
+        sig = found.sig;
         selfArg = sig.stat === true ? null : '(var $this)';
-        key = `${self.agg}$${asName}`;
+        key = found.key;
       }
       if (sig === null) {
         /**

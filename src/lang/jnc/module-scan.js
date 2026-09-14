@@ -327,7 +327,10 @@ export function scanAggs(tree, env) {
           const dcl = headOf(d) === 'init' ? named(d)?.dcl : d;
           const t = readDeclType(vn.specs, dcl);
           if (t !== null && t.name !== null) {
-            vars.set(t.name, t);
+            /* **属性不是一格量**（第六十九刀）：它没有内存，读写各是一次调用 —— 收进
+               `vars` 的话查名那一层会当普通量算，报的是"属性/事件（prop）"这种认错人的账。
+               它那一格在下面的 `gProps` 里。 */
+            if (t.shape !== 'prop') vars.set(t.name, t);
             /* 方言那一侧的名字带**命名空间前缀**（`ns.g` 是 `ns$g`）—— 读写那两处都要它。 */
             if (owner !== null) gEmit.set(t.name, `${owner}$${t.name}`);
             /* **写出来的属性**（`int property g_p { get; set; }`）：读它是 `(call g_p$get)`、
@@ -346,7 +349,10 @@ export function scanAggs(tree, env) {
               });
             }
 
-            if (bind) bindable.add(t.name);
+            /* **`bindable` 的数据**（`bindable int g_d;`）：那一格的取/存是**生成**出来的。
+               写了 `property` 的那几格不算 —— 它们在上面那张属性表里（先前这儿把
+               `int autoget property g;` 也记成了"bindable data"，于是读它报的是那一族的账）。 */
+            if (bind && t.shape !== 'prop') bindable.add(t.name);
           }
         }
       }
