@@ -2424,6 +2424,32 @@ export function makeFnEnv(o) {
       let selfArg = null;
       let key = asName;
       /**
+       * **`T(实参…)` 就是就地构造**（第二百四十三刀，198-tmplctor.jnc）：
+       * `Boxy<int> a = Boxy<int>(4);` 与 `Boxy<int> a(4);`（第一百〇三 / 一百二十九刀）在 jancy
+       * 里是同一件事，所以走的是同一格 `newObj`（挑重载、按默认实参补、空槽那三条一个字都不用
+       * 重写）。泛型实例那一格名字在这一层早换成了实例名（`Boxy$int`，`tinstRewrite`），所以判据
+       * 只剩"这个名字是一格结构体/类，而没被同名的量/函数遮住"。
+       *
+       * 语料里的原样是 unit_stdt_BoxList.jnc:42 那句
+       * `for (BoxIterator<int> it = BoxIterator<int>(list.m_head); …)`。
+       *
+       * **只收两边同型**那一种：`T(x)` 落在别的类型上是**构造式转换**那一族（要按目标类型挑一条
+       * 转换，账号 F-006）—— 那时候明说不收。少了这一句，转换会静静地变成"造一格 T 当 U 使"。
+       */
+      if (asName !== null && !names.has(asName) && !globals.has(asName) && !fns.has(asName)) {
+        const te0 = env.get(asName);
+        if (te0 !== undefined && (te0.kind === 'struct' || te0.kind === 'class')) {
+          const same = want !== null && want !== undefined
+            && want.k === (te0.kind === 'class' ? 'class' : 'struct') && want.name === asName;
+          if (!same) {
+            acct(`'${asName}(…)' 落在 ${want?.k ?? '?'} 上（构造式转换那一族：按目标类型挑一条转换）还没接`);
+            return null;
+          }
+          const o0 = newObj(asName, args, false, te0.kind === 'struct');
+          return o0 === null ? null : { code: o0.code, type: want };
+        }
+      }
+      /**
        * **`basetype.foo(…)` / `basetype.construct(…)` 是静态绑定**（第五十六刀，
        * `CALL_ORDER` 的第 6 条）：说的就是"调基类那一个"，不过虚派发。这一问要排在方法调用
        * **之前** —— `basetype` 不是一格值，求它只会报"表里没有这一格表达式"。
