@@ -996,6 +996,29 @@ export function makeFnEnv(o) {
    * `{ shape: 'var'|'ptr'|'agg', code, type }`。读写都从它出发（`SHAPE_ACCESS`）。
    * 拼不出来答 null（账已经记过）—— 命名空间里那一格、属性、位域那几族都在这一层之外。
    */
+  /**
+   * **取值那两个算符**（`operator *` / `operator ->`，第二百零六刀）：语料里这一族的声明在
+   * stdt_Iterator.jnc:28-34（一格迭代器包着一格指针，两个算符都回那格指针），用它的地方在
+   * stdt_HashTable.jnc:107 `T* p = *it;` 与 stdt_Map.jnc:142/150 `return it->m_value;` /
+   * `it->m_value = value;` —— **读写两侧都有**，所以这一手落在位置那一层（`lvOf`），两侧共用。
+   *
+   * 落法一句话：`*it` 就是 `it.operator*()`，`it->m_x` 就是 `(it.operator->()).m_x` ——
+   * 算符回的是一格指针，剩下那一步照旧是这一层原来那条指针取字段的路。回的不是指针就不收
+   * （宁可记账，也不静静地把一格结构体当地址用）。没写那个算符的原样交回去（不猜）。
+   */
+  const derefOvl = (v, w) => {
+    const agg = v === null || v === undefined ? null
+      : ((v.type?.k === 'struct' || v.type?.k === 'class') ? v.type.name : null);
+    if (agg === null) return v;
+    const f = findMethod(agg, `op$${w}`);
+    if (f === null || f === undefined) return v;
+    if ((f.sig.params ?? []).length !== 0) return v;
+    const rt = f.sig.ret ?? null;
+    if (rt === null || (rt.k !== 'ptr' && rt.k !== 'tptr')) {
+      acct(`算符 '${agg} ${w === 'mul' ? '*' : '->'}' 回的不是一格指针`); return null;
+    }
+    return { code: `(call ${f.key} ${v.code})`, type: rt };
+  };
   const lvOf = (node) => {
     const h = headOf(node);
     const nm2 = named(node) ?? {};
@@ -1122,7 +1145,9 @@ export function makeFnEnv(o) {
     }
     /* `*p`（`ptrLv`）：p 是一格指针值，那一格的位置**就是**它；目标是结构体/数组时是 `agg`。 */
     if (h === 'indirect') {
-      const p = emitExpr(nm2.a, null, ctxRef);
+      const p0 = emitExpr(nm2.a, null, ctxRef);
+      if (p0 === null) return null;
+      const p = derefOvl(p0, 'mul');
       if (p === null) return null;
       if (p.type?.k !== 'ptr' && p.type?.k !== 'tptr') { acct("'*' 的左边不是指针"); return null; }
       const tt = p.type.target;
@@ -1228,7 +1253,12 @@ export function makeFnEnv(o) {
       /* `p->f` 与"左边不是可写形状"（`f().x`）都是**求一次值**；别的先求它的位置再读一次
          —— 那一格读出来的就是基地址。 */
       if (h === 'ptr-field' || !LV_SHAPES.has(headOf(ob))) {
-        const v = emitExpr(ob, null, ctxRef);
+        const v0 = emitExpr(ob, null, ctxRef);
+        if (v0 === null) return null;
+        /* **`operator ->`**（第二百零六刀）：`->` 的左边是结构体/类而它写了那个算符时，
+           `it->m_x` 就是 `(it.operator->()).m_x` —— 换出来的是一格指针，剩下那一步照旧。
+           `.` 不走这条（jancy 的 `.` 不替你调转换算符），所以只在 `ptr-field` 这一格问。 */
+        const v = h === 'ptr-field' ? derefOvl(v0, 'arrow') : v0;
         if (v === null) return null;
         baseCode = v.code;
         bt = v.type;
