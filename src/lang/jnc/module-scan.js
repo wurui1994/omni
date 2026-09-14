@@ -15,7 +15,7 @@ import { readAgg, readEnum, readBodyMembers } from './agg.js';
 import { enumBase } from './const-eval.js';
 import { resolveType } from './resolve-type.js';
 import { readFormals, fnName } from './emit-fn.js';
-import { classRoot, basePaths } from './emit-agg.js';
+import { classRoot, basePaths, lastIdent } from './emit-agg.js';
 /**
  * 一格函数/方法的**签名**（形参、默认实参、返回、`errorcode`、方言那一侧的名字）。
  * 顶层那条路与类里那条路共用它 —— 调用那一层问的是同一件事，不该有两份答案。
@@ -379,6 +379,42 @@ export function scanAggs(tree, env) {
           });
         }
 
+      }
+    } else if (h === 'extension') {
+      /**
+       * **`extension T: Base { … }`**（第一百〇七刀）：给一格**已有的类型**添方法。
+       * 落法一句话 —— 那几格方法**直接长在目标类型上**（`extension C1Ext: C1` 里的 `bar`
+       * 落成 `C1$bar`，`this` 是 `(ptr C1)`），与写在类体里的一模一样。所以这儿走的是
+       * 与类体那一遍**同一段登记**：方法表、重载账、`hasBody` 三样都同一个口径。
+       *
+       * `using extension …` 这一层**收下不看**（偏差记在 98-extension.jnc 顶上那段）：
+       * extension 的方法一律直接长在目标类型上，不看引没引。
+       * 字段不收 —— jancy 的 extension 加不了字段（那会改布局）。
+       */
+      const xn = named(n);
+      const tgt = lastIdent(xn?.bases);
+      const te = tgt === null ? undefined : env.get(tgt);
+      const ownerT = te === undefined ? null : (te.name ?? tgt);
+      if (ownerT !== null) {
+        /* extension 的体是**顶层那样的一条链**（节点表 :228 记的洞类是 `member`，形状与
+           `unit` 那条一样）—— 所以按 `unit-add` 摊平，一格一格看。 */
+        for (const it of allInChain(xn.body, 'unit-add', 'unit')) {
+          const it0 = headOf(it) === 'attributed' ? (named(it)?.decl ?? it) : it;
+          const mh = headOf(it0);
+          if (mh !== 'fn-def' && mh !== 'fn-proto') continue;
+          const fm = named(it0);
+          const t = fm === null ? null : readDeclType(fm.specs, fm.dcl);
+          if (t === null || t.shape === 'prop' || t.shape === 'event') continue;
+          const mname = fnName({ name: t.name, type: t, at: it0 });
+          if (mname === null) continue;
+          const key = `${ownerT}$${mname}`;
+          const sig = sigOf(fm, env, key, t);
+          if (sig === null) continue;
+          if (methods.has(key)) overloads.add(key);
+          methods.set(key, {
+            ...sig, owner: ownerT, name: mname, node: it0, hasBody: mh === 'fn-def',
+          });
+        }
       }
     } else if (h === 'typedef') {
       const tn = named(n);

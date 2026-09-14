@@ -205,7 +205,7 @@ export function basePaths(agg) {
 }
 
 /** 一格限定名的最后一段标识符（原树上按位置找 —— 这一层不借规整器）。 */
-function lastIdent(n) {
+export function lastIdent(n) {
   if (n === null || n === undefined || typeof n !== 'object') return null;
   if (!Array.isArray(n.items)) return typeof n.value === 'string' ? n.value : null;
   for (let i = n.items.length - 1; i >= 1; i -= 1) {

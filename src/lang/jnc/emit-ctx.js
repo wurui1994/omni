@@ -1364,6 +1364,32 @@ export function makeFnEnv(o) {
           }
         }
         /**
+         * **跟在点后面的 `basetype`**（`d.basetype.val()`，119-basetypedot.jnc）：
+         * 一整条继承链共用一格方言结构体（第五十六刀），所以"换到基类那一面"**发零条指令**
+         * —— 左边那一格原样求值，只是调的函数换成基类那一个。而且它是**静态绑定**
+         * （`basetype.m()` 说的就是"调基类那一个"，不查分派表）——所以这儿直接按名字取，
+         * 不走 `findMethod` 那条（那条会因为"虚方法"而明说不收）。
+         */
+        const obh = headOf(fn2.obj);
+        const obName = obh === 'field' ? String(named(fn2.obj)?.name?.value ?? '') : '';
+        if (sig === null && /^basetype[12]?$/.test(obName)) {
+          const inner = named(fn2.obj).obj;
+          const ob0 = objBase(inner);
+          if (ob0 === null) return null;                   // 账已经记过
+          const agg0 = aggBehind(ob0.type);
+          if (agg0 === null) { acct(`'.basetype' 的左边不是结构体/类（${ob0.type?.k ?? '?'}）`); return null; }
+          const i0 = obName === 'basetype2' ? 2 : 1;
+          const b0 = (aggBases.get(agg0) ?? [])[i0 - 1];
+          if (b0 === undefined) { acct(`'${agg0}' 没有第 ${i0} 格基类，可这儿写了 basetype`); return null; }
+          const mi3 = methods.get(`${b0}$${mname}`) ?? fns.get(`${b0}$${mname}`);
+          if (mi3 === undefined) {
+            acct(`基类 '${b0}' 上查不着 '${mname}'（合成出来的构造那一族另算）`); return null;
+          }
+          sig = mi3;
+          selfArg = mi3.stat === true ? null : ob0.code;
+          key = `${b0}$${mname}`;
+        }
+        /**
          * **命名空间里的函数**（`a.inner()` / `a.b.deep()`，48-namespace.jnc）：命名空间只是个
          * 前缀（第五十一刀）—— 整串摊得动、摊出来正好是函数表里那一格（`a$inner` / `a$b$deep`）
          * 就是它。这一问也排在"求左边那一格"之前：`a` 不是一格值，求它只会报"查不着"。
