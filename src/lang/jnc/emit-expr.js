@@ -247,6 +247,13 @@ export function emitExpr0(n, want, ctx) {
     if (r === null) { ctx.acct(`把 ${v.type?.k ?? '?'} 转成 ${to.k} 还没接`); return null; }
     return r;
   }
+  /* **`new T` / `new T[n]`**（第五十二 / 一百二十九刀）：出来的是一格**指针**。造出来那一段
+     内存怎么算由调用方那一层给（它知道类的根、有没有 construct、`$tag` 写什么）。 */
+  if (h === 'new' || h === 'new-array') {
+    const r = ctx.newOf?.(n, want);
+    if (r === null || r === undefined) { ctx.acct(`\`${h}\` 这一格还拼不出来`); return null; }
+    return r;
+  }
   /* 调用：谁被调（普通函数 / 方法 / 函数指针 / 算符 / CRT 助手）差别全在被调那一侧，
      所以整格交给调用方那张表（`ctx.callOf`）。 */
   if (h === 'call') {

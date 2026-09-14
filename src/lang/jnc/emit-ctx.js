@@ -850,7 +850,35 @@ export function makeFnEnv(o) {
       if (bad || r === null) return null;
       return r.lines;
     },
+    /**
+     * **`new T` / `new T[n]`**（第五十二 / 一百二十九刀）：`(pnew (ptr T) 个数)`，出来的是
+     * 一格指针。类那一族与"有 construct 的结构体"另算 —— 那两种是**三句**（造一格、写 `$tag`、
+     * 调构造），而 `new` 是一格表达式，得抬成一个函数；这一层还没接，明说。
+     */
+    newOf: (node, want) => {
+      const nm2 = named(node) ?? {};
+      const to = ctxRef.typeNameOf(nm2.type);
+      if (to === null) return null;
+      if (to.k === 'void') { acct('new void'); return null; }
+      if (to.k === 'class') { acct(`new ${to.name}（类那一族要写 $tag + 构造）还没接`); return null; }
+      if (to.k === 'struct' && aggCtors.has(to.name)) {
+        acct(`new ${to.name}（那一格有 construct，造完还要调它）还没接`); return null;
+      }
+      if (headOf(node) === 'new' && nm2.args !== undefined && nm2.args !== null) {
+        acct('new T(…) 带构造实参那一族还没接'); return null;
+      }
+      let count = '(int 1)';
+      if (headOf(node) === 'new-array') {
+        const c = emitExpr(nm2.size, { k: 'int', w: 64, u: false }, ctxRef);
+        if (c === null) return null;
+        if (c.type?.k !== 'int') { acct('new T[n] 的 n 要整数'); return null; }
+        count = c.code;
+      }
+      const pt = { k: 'ptr', target: to };
+      return { code: `(pnew ${emitType(pt, 'value', tyc)} ${count})`, type: pt };
+    },
     /* 取字段与下标都从**可写位置**那一层出发，读一次（结构体/数组那一格读出来的就是地址）。 */
+
     fieldOf: (node) => {
       /* **枚举项那一路**（`Color.Red`）排在最前：它是一格编译期常量，不是谁的字段。 */
       const cf = constOrFn(node);
