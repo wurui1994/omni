@@ -783,22 +783,21 @@ const realOf = (code, t) => `(${t.u && t.w >= 64 ? 'torealu' : 'toreal'} ${code}
 
 
 /**
- * 回卷到 w 位。**有符号**是 `(x & M) ^ S - S`（掩到 w 位、再把最高位当符号位摊开）；
- * **无符号**就只有掩那一步（第三十三刀）—— 也就是那一刀记下的"回卷变成 `x & M`
- * （不摊符号位）"。
+ * 回卷到 w 位。方言里各是**一格算子**（ADR-0031 §8.2）：无符号那一面是 `(trunc N E)`
+ * （掩到 w 位）、有符号那一面是 `(sext N E)`（掩完再把最高位当符号位摊开）。
+ *
+ * 先前这儿拿三个算子拼 —— `(bin "-" (bin "^" (bin "&" E M) S) S)` —— 意图看不出来，
+ * 后端也挑不了更好的落法（C 那侧本来是一次强制转换、LLVM 那侧本来就有 trunc/sext 指令）。
  *
  * 64 位有符号就是方言的 int 本身，一个字都不用发。64 位**无符号**也是那一格 ——
  * 位一模一样，只是读法不同（第六十一刀）：所以这儿照样不发字，而"读法不同"那一半由
  * 算子承担（`u/` `u%` `u>>` 与四个 `u<` 类比较，见 uOp）。
  *
- * 两条腿上都成立：JS 那侧 int 是 BigInt（`-1n & 255n === 255n`），C 那侧是补码的
- * `int64_t`（`(-1LL) & 255 == 255`）—— 同一串算符给同一个数。
+ * 规则化那一侧是同一份（`src/lang/common/int.js` 的 `wrapTo`）—— 两条降级路子说同一门方言。
  */
 function wrapTo(code, w, u = false) {
   if (w >= 64) return code;
-  const s = 1n << BigInt(w - 1);
-  if (u) return `(bin "&" ${code} (int ${s * 2n - 1n}))`;
-  return `(bin "-" (bin "^" (bin "&" ${code} (int ${s * 2n - 1n})) (int ${s})) (int ${s}))`;
+  return `(${u ? 'trunc' : 'sext'} (int ${w}) ${code})`;
 }
 
 /**
@@ -11225,8 +11224,9 @@ class JncLower {
    * 两处细节要紧：
    *   - 右移要**逻辑**移。存储那一格记成无符号（见 bitSlot），所以 64 位那一格上 uOp 会挑
    *     `u>>`；窄的那几格里存的值本来就非负（写那一侧掩过），有符号右移也是同一个数。
-   *   - 补符号位用 `(x ^ s) - s`（s 是 `1 << (cnt-1)`）—— 与 wrapTo 里那一句是同一个恒等式，
-   *     jancy 那边写成 `value |= ~((signBit & value) - 1)`，两者逐位相同。
+   *   - 移完之后"取低 cnt 位、按声明的符号性读"就是方言的 `(trunc cnt …)` / `(sext cnt …)`
+   *     一格算子（ADR-0031 §8.2）—— 也就是 wrapTo 那一格。jancy 那边写成
+   *     `value &= mask; value |= ~((signBit & value) - 1)`，两者逐位相同。
    *     `cnt === bw` 时整格就是它，那一步就是"按声明的符号性读这一格"，走 intConv。
    */
   bitsRead(lv) {
@@ -11234,12 +11234,7 @@ class JncLower {
     const raw = `(pload ${lv.code})`;
     if (lv.cnt >= lv.bw) return intConv({ code: raw, type: st }, lv.type).code;
     const sh = lv.off === 0 ? raw : `(bin "${uOp('>>', st)}" ${raw} (int ${lv.off}))`;
-    let code = `(bin "&" ${sh} (int ${(1n << BigInt(lv.cnt)) - 1n}))`;
-    if (!lv.type.u) {
-      const s = 1n << BigInt(lv.cnt - 1);
-      code = `(bin "-" (bin "^" ${code} (int ${s})) (int ${s}))`;
-    }
-    return code;
+    return wrapTo(sh, lv.cnt, lv.type.u);
   }
 
   /**

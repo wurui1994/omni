@@ -183,6 +183,17 @@ native 语言，就得把它们**共识里已有的东西**先摆齐；简化是
 （a）`.sx` 读得懂了，（b）后端能挑最好的落法（C 直接强转、LLVM 直接 trunc/sext），
 （c）等类型真的带上宽度时，这三格算子**原地就是那时要的东西**，不用再改一遍。
 
+**落完之后量到的（两条降级路子都换过来了）**：
+
+- 方言与六条腿：三格算子读得进（`sexpr/lower.js`），落得下（C 的 `omni_int_trunc` /
+  `omni_int_sext`、JS 前奏里保持数种类的两格辅助、解释器、MIR→LLVM/JIT）；
+- 规则化那一侧 `src/lang/common/int.js` 的 `wrapTo` 从五行塌成一行；
+- **旧降级那一侧也换了**（`src/core/frontend-jnc/lower.js:797`）。顺带塌掉的是位域读那一格
+  `bitsRead`：先前"掩到 cnt 位 + `(x ^ s) - s` 补符号位"是自己又写了一遍同一条算法，
+  现在就是一句 `wrapTo(sh, lv.cnt, lv.type.u)`。
+- 成绩单：199 份语料默认路发出来的 `.sx` **470047 → 426722 字节（−43325，−9.2%）**；
+  `tests/jnc` 六条腿 `350 passed, 0 failed`；`jnc-rules-sweep.js` 两个数没变（降得下来 52 / 账 71）。
+
 
 
 ## 9. 不做什么
