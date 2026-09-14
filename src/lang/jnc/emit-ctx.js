@@ -1809,6 +1809,35 @@ export function makeFnEnv(o) {
        */
       const aggName = lv.type?.k === 'struct' || lv.type?.k === 'class' ? lv.type.name : null;
       const oa = aggName === null ? undefined : methods.get(`${aggName}$op$assign`);
+      /**
+       * **复合赋值算符那一族**（`operator +=` …，第二百零四刀）。jancy 那边它们是**各自独立**
+       * 的算符，不是"先 `+` 再赋一次" —— `std.String.operator += (string_t)`（std_String.jnc:60）
+       * 干的是 `append(string)`，而那个类连 `operator +` 都没有。所以这一族与 `operator +`
+       * 分得开，与 `operator :=` 反而是同一个形状：一格自由函数、`this` 当第一个形参
+       * （`Acc$op$addAssign`，137-opcompound.jnc 的真输出）。
+       *
+       * 这一问要排在上头那两支（`operator :=` / 抄一份）**之前**：那一支只认 `op === '='`，
+       * 而结构体上的 `a += 4` 掉进去只会报"复合赋值落在结构体上还没接"；类那一格的形状是 `var`
+       * （里头放的是地址），压根不进那一支，会静静地掉到整数那条复合赋值上去。
+       *
+       * 十个算符（`+= -= *= /= %= &= |= ^= <<= >>=`）判据完全一样 —— 表在 `OP_NAMES` 里。
+       * 东家沿基类链找（与查普通方法同一条路）；不是一个形参的照旧记账，不猜。
+       */
+      if (op !== '=' && aggName !== null) {
+        const w = OP_NAMES[op];
+        const oc = w === undefined ? null : findMethod(aggName, `op$${w}`);
+        if (oc !== null && oc !== undefined) {
+          if ((oc.sig.params ?? []).length !== 1) {
+            acct(`算符 '${aggName} ${op}' 不是一个形参（挑哪一格还没接）`); return null;
+          }
+          const pt = (oc.sig.params ?? [])[0] ?? null;
+          const pr = pt === null ? null : resolveType(pt, env);
+          const w2 = pr === null || pr.type === null ? null : withBits(pr.type, pt);
+          const sv = emitExpr(an.b, w2, ctx);
+          if (sv === null) return null;
+          return [`${pad}(expr (call ${oc.key} ${readLv(lv)} ${sv.code}))`];
+        }
+      }
       if (lv.shape === 'agg' || (oa !== undefined && op === '=')) {
         if (op !== '=') {
           acct(`复合赋值 '${op}' 落在结构体/数组上（算符重载那一族）还没接`); return null;
