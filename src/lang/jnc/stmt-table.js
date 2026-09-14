@@ -183,3 +183,101 @@ export function forLines({
   out.push(`${pad})`);
   return out;
 }
+
+/* ─── `if` / `assert` / `switch` 三格模板（lower.js:12544-12680）───────────────── */
+
+/** `if (C) T [else E]` —— 方言直接有这一格。 */
+export function ifLines(condText, thenBody, elseBody, pad) {
+  if (elseBody === null || elseBody === undefined) return [`${pad}(if ${condText}`, thenBody, `${pad})`];
+  return [`${pad}(if ${condText}`, thenBody, elseBody, `${pad})`];
+}
+
+/**
+ * **一个结点在源码里的原样文本**：换行连同紧跟其后的那串空白收成一个空格 —— 与 jancy 的
+ * `Token::getText(list)` 同一条（axl_lex_RagelLexer.h:52-84：没有换行就**直接切一段源码**，
+ * 有换行则把 `\n` 及其后的连续空白换成单个空格）。所以"条件的文本"不是重排出来的，
+ * 是照 jancy 的做法从源码里切的 —— 一个字节都不用猜。
+ */
+export function srcTextOf(span) {
+  if (span === null || span === undefined) return null;
+  const f = span.file;
+  if (f === null || f === undefined || typeof f.text !== 'string') return null;
+  return f.text.slice(span.start, span.end).replace(/\n[ \t\r\n\f\v]*/g, ' ');
+}
+
+/**
+ * `assert(C)` / `assert(C, "话")`（第四十九刀）。jancy 摊成两块：真跳 `assert_continue`、
+ * 假跳 `assert_fail`，后者调 `assertionFailure(文件, 行, 条件文本, 话)`
+ * （jnc_ct_Parser.cpp:3798-3825），印的是 `"%s(%d): assertion failure: %s"`，带话的再追
+ * `" (%s)"`，然后 `dynamicThrow()`（jnc_rtl_CoreLib.cpp:534-541）。行号是**条件第一个 token
+ * 那一行**（1 起）。
+ *
+ * 方言不用新形式：`(fail E)` 就是"印一句、退 70"，五条腿都有。于是落成
+ * `(if (un "!" C) (do (fail (str 那句话))))` —— 与 jancy 的两块一一对上，只是"抛"换成"停"
+ * （这一层还没有异常，`try`/`throw` 都在边界上）。
+ *
+ * 两处明写的差别：
+ *   - 第二个实参在 jancy 的产生式里**写死是字面量**（Stmt.llk:415），所以收表达式会让
+ *     "运行期才知道那句话"变成能写的东西，而 jancy 写不出来；相邻字面量拼接照收；
+ *   - jancy 的 assert 由 `-a`/`--assert` 点亮（没开就**整条丢掉**、条件都不求值），
+ *     这一层没有开关机构，选的是**一直开着** —— 反过来那头是"断言失败静静地过"，
+ *     而这条线靠"跑起来对不对"往前走，那种沉默最不能要。
+ */
+export function assertLines(condText, path, line, text, msg, pad) {
+  const extra = msg === null || msg === undefined ? '' : ` (${msg})`;
+  const words = `${path}(${line}): assertion failure: ${text}${extra}`;
+  return [
+    `${pad}(if (un "!" ${condText})`,
+    `${pad}  (do`,
+    `${pad}    (fail (str ${JSON.stringify(words)}))))`,
+  ];
+}
+
+/**
+ * `switch` —— 方言里没有它，所以摊成「**派发下标 + 一串守卫**」（第三十六刀）：
+ *
+ *   (let $svN int COND)
+ *   (let $skN int (int 组的个数))            ;; 一个都不中时指向"组的个数"，于是哪一组都不跑
+ *   (if (bin "==" (var $svN) (int k)) (set $skN (int 组号)))   ;; 每个 case 一条
+ *   (while (bool true)
+ *     (do
+ *       (if (bin "<=" (var $skN) (int 0)) (do 第0组))
+ *       (if (bin "<=" (var $skN) (int 1)) (do 第1组))
+ *       …
+ *       (brk)))
+ *
+ * 三件事靠这个形状同时成立：
+ *   1. **贯穿**：case 的值互不相同，所以派发那几条 `if` 次序无关；守卫是 `<=`，从第 j 组进去
+ *      就接着跑 j+1、j+2 …… —— 正是 C 与 jancy 的贯穿（cflow_switch.rst:29）；
+ *   2. **break 跳出整个 switch**：那圈 `while` 只跑一遍（体的末尾就是 `(brk)`），所以里面的
+ *      `(brk)` 落到 switch 之外；
+ *   3. **每组一层作用域**：jancy 给每个 case 块隐式开一层（cflow_switch.rst:15），所以
+ *      `case 0: int i = 10;` 与 `case 1: int i = 20;` 不冲突 —— 每组包一个 `(do …)`。
+ *
+ * 那圈 `while` 是**合成的**：`break` 数它（jancy 也把 switch 算一层，cflow_switch.rst:37）、
+ * `continue` 不数它 —— switch 里的 `continue` 落成 `(cont 2)`，跳过这一圈回到外面那个真循环。
+ */
+export function switchLines({
+  sv, sk, condText, cases, groups, pad,
+}) {
+  const out = [
+    `${pad}(let ${sv} int ${condText})`,
+    `${pad}(let ${sk} int (int ${groups.length}))`,
+  ];
+  for (const { value, group } of cases) {
+    out.push(`${pad}(if (bin "==" (var ${sv}) (int ${value})) (set ${sk} (int ${group})))`);
+  }
+  out.push(`${pad}(while (bool true)`);
+  out.push(`${pad}  (do`);
+  for (const [i, body] of groups.entries()) {
+    out.push(`${pad}    (if (bin "<=" (var ${sk}) (int ${i}))`);
+    out.push(`${pad}      (do`);
+    out.push(body);
+    out.push(`${pad}      )`);
+    out.push(`${pad}    )`);
+  }
+  out.push(`${pad}    (brk)`);
+  out.push(`${pad}  )`);
+  out.push(`${pad})`);
+  return out;
+}
