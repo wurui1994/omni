@@ -11,7 +11,7 @@ import { headOf, named } from './adapt.js';
 import { nameText, allInChain, readDcl } from './declare.js';
 import { readDeclType } from './types.js';
 import { readSpecs } from './specs.js';
-import { readAgg, readEnum } from './agg.js';
+import { readAgg, readEnum, readBodyMembers } from './agg.js';
 import { enumBase } from './const-eval.js';
 import { resolveType } from './resolve-type.js';
 import { readFormals, fnName } from './emit-fn.js';
@@ -158,11 +158,20 @@ export function scanAggs(tree, env) {
        * 一格函数声明 —— 可它是一格**属性**：读它是 `(call g_p$get)`、写它是 `(call g_p$set …)`。
        * 简单声明式那一种（`int property g_p;`）在下面 `var-decl` 那一支收，两种收进**同一张表**。
        */
-      if (!inAgg) {
+      if (!inAgg && !inFn) {
         const fm = named(n);
         const ft = fm === null ? null : readDeclType(fm.specs, fm.dcl);
         if (ft !== null && ft.shape === 'prop' && ft.name !== null) {
+          /* **完整声明式属性里的字段**也收进 store —— 与成员属性同一条。 */
           const store = new Map();
+          const body1 = named(n)?.body;
+          if (headOf(body1) === 'compound') {
+            for (const im of readBodyMembers(body1)) {
+              if (im.shape === 'data' && im.name !== null && im.type !== null) {
+                store.set(im.name, im.type);
+              }
+            }
+          }
           const mods = ft.mods ?? [];
           if (mods.includes('autoget') || mods.includes('bindable')) store.set('m_value', ft);
           gProps.set(ft.name, {
@@ -247,8 +256,23 @@ export function scanAggs(tree, env) {
         for (const m of a.members) {
           if (m.name === null || m.type === null) continue;
           if (m.shape === 'prop') {
+            /* **完整声明式属性里的字段**是属性自己的存储（`property m_p { int m_v; … }`，
+               prop_full.rst:15）：取/存的体里裸写 `m_v` 查的就是 `propScope.store`。所以这儿
+               把那些字段收进 `store` —— 与 `autoget` 生成的 `m_value` 进的是同一张表。 */
+            const propStore = new Map();
+            const body1 = named(m.at)?.body;
+            if (headOf(body1) === 'compound') {
+              for (const im of readBodyMembers(body1)) {
+                if (im.shape === 'data' && im.name !== null && im.type !== null) {
+                  propStore.set(im.name, im.type);
+                }
+              }
+            }
+            const mods2 = m.type?.mods ?? [];
+            if (mods2.includes('autoget') || mods2.includes('bindable')) propStore.set('m_value', m.type);
             ps.set(m.name, {
               name: m.name, owner: emitName, emit: `${emitName}$${m.name}`, type: m.type, at: m.at,
+              store: propStore,
             });
             continue;
           }

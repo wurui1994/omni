@@ -633,9 +633,9 @@ export function lowerJncRules(tree, diags, opts = {}) {
       if (m.shape !== 'prop' || m.name === null) continue;
       const emitName = `${a.emitName}$${m.name}`;
       const self0 = { agg: a.emitName, kind, emit: kind === 'class' ? clsRoot(a.emitName) : a.emitName };
-      const store = new Map();
-      const mods = m.type?.mods ?? [];
-      if (mods.includes('autoget') || mods.includes('bindable')) store.set('m_value', m.type);
+      /* 扫那一遍已经把体里的字段收进 `aggProps[…].store` 了 —— 这儿直接用它。 */
+      const pr1 = aggProps.get(a.emitName)?.get(m.name);
+      const store = pr1?.store ?? new Map();
       if (emitPropBody(m.at, emitName, self0, null, store, true) === true) propDone.add(m.at);
       /* 那对花括号里没写取值器（或压根没有花括号）时，`autoget` 那一格自己生成一个。 */
       genAutoget(m.name, emitName, m.type, self0);
@@ -648,7 +648,20 @@ export function lowerJncRules(tree, diags, opts = {}) {
     const t0 = nm0 === null ? null : readDeclType(nm0.specs, nm0.dcl);
     if (t0 === null || t0.shape !== 'prop' || t0.name === null) continue;
     const pr = gProps.get(t0.name);
-    if (emitPropBody(it, pr?.emit ?? t0.name, null, ns, pr?.store) === true) propDone.add(it);
+    const store1 = pr?.store ?? new Map();
+    /**
+     * **完整声明式属性那几格存储**（`property g_p { int m_v; … }` → `(global g_p$m_v int)`）：
+     * 它在树上是一格 fn-def，所以模块级那一圈（只看 `var-decl`）压根照不到它 —— 存储那几行
+     * 得在这儿发。少这一步，取/存的体里发的 `(var g_p$m_v)` 谁也没声明过（151-propfield.jnc）。
+     */
+    const gp = globalLines(
+      { name: t0.name, type: t0, shape: t0.shape, storage: [], at: it },
+      env,
+      { ns, clsRoot, taken: gLifted },
+    );
+    for (const l of gp.lines) decls.push(`  ${l}`);
+    if (gp.why !== null && !gp.why.includes('对的行为')) acct(`属性 '${t0.name}'：${gp.why}`);
+    if (emitPropBody(it, pr?.emit ?? t0.name, null, ns, store1) === true) propDone.add(it);
   }
   /* 顶层那几格属性的 `autoget` 取值器（两种写法都在这张表里：`int autoget property g;` 与
      `property g { … }`）—— 写了取值器的那一格由上面那两条路发，这儿只补没写的。 */
@@ -758,10 +771,13 @@ export function lowerJncRules(tree, diags, opts = {}) {
            `g_p$get` / `g_p$set`（没有 `$this`）—— 名字由 `fnHead` 从点串拼出来。 */
         const leaf = dotted.slice(dotted.lastIndexOf('$') + 1);
         if (leaf === 'get' || leaf === 'set') {
-          /* 取/存那两个体里裸写的 `m_value` 指的是这格属性**生成的存储** —— 把属性那一格
-             当一层作用域递进去（`propScope`）。 */
+          /* 取/存那两个体里裸写的 `m_value` / `m_v` 指的是这格属性**的存储** —— 把属性那一格
+             当一层作用域递进去（`propScope`）。**模块级属性的字段存储**也在这张表里
+             （`gProps[属性名].store`）—— 151-propfield.jnc 的 `g_p$m_v` 就是这一格。 */
           const pname = dotted.slice(0, dotted.lastIndexOf('$'));
-          emitFn(it, dotted, null, null, ns, gProps.get(pname) ?? null);
+          const pr0 = gProps.get(pname);
+          const store0 = pr0?.store ?? new Map();
+          emitFn(it, dotted, null, null, ns, { emit: pname, store: store0 });
           continue;
         }
         acct(`'${dotted}' 的东家查不着（不是这份源码里的聚合体）`);
@@ -783,12 +799,10 @@ export function lowerJncRules(tree, diags, opts = {}) {
         const pemit = dotted.slice(0, dotted.lastIndexOf('$'));
         const pname = pemit.slice(ownerName.length + 1);
         const pr2 = aggProps.get(ownerName)?.get(pname);
-        if (pr2 !== undefined) {
-          const store = new Map();
-          const mods2 = pr2.type?.mods ?? [];
-          if (mods2.includes('autoget') || mods2.includes('bindable')) store.set('m_value', pr2.type);
-          ps = { emit: pemit, store, field: true };
-        }
+        const store = pr2 !== undefined ? (pr2.store ?? new Map()) : new Map();
+      const mods2 = pr2?.type?.mods ?? [];
+      if (mods2.includes('autoget') || mods2.includes('bindable')) store.set('m_value', pr2.type);
+      ps = { emit: pr2?.emit ?? emitName, store, field: true };
       }
       emitFn(it, dotted, null, selfInfo, ns, ps);
       continue;
