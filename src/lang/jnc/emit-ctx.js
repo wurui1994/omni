@@ -49,7 +49,7 @@ export function makeFnEnv(o) {
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
     gProps = new Map(), propScope = null, aggStatics = new Map(), aggProps = new Map(),
     aggBases = new Map(), helperBox = new Set(), aggPaths = new Map(), aggAliases = new Map(),
-    gAlias = new Map(),
+    gAlias = new Map(), vdispatch = new Map(),
   } = o;
   let ctxRef = null;
   /**
@@ -545,9 +545,14 @@ export function makeFnEnv(o) {
    * 看不见 —— 那一族在"跨文件/宿主面"那笔账里。
    */
   const callable = (aggName, mname, found) => {
-    if (found.sig.virt === true && overriddenBelow(aggName, mname)) return null;
-    if (found.sig.hasBody !== true && !fns.has(found.key)) return null;
-    return found;
+    const needsVd = (found.sig.virt === true && overriddenBelow(aggName, mname))
+      || (found.sig.hasBody !== true && !fns.has(found.key));
+    if (!needsVd) return found;
+    /* **真要派发的那一格走分派函数**（`B$$vd$show`，第五十七刀）：签名听**声明那一格**的
+       （形参、返回都一样），只是被调的名字换成那一个 —— 发码那一头读的是 `sig.emit`，
+       所以要连它一起换（不然发出来还是 `(call B$step …)`）。表里没有那一格才记账。 */
+    const vd = vdispatch.get(`${aggName}$${mname}`);
+    return vd === undefined ? null : { sig: { ...found.sig, emit: vd }, key: vd };
   };
   /** `sub` 的基类链里有 `base` 吗（含多层、多基类）。 */
   const derivesFrom = (sub, base) => {

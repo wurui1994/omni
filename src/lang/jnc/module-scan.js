@@ -47,6 +47,9 @@ export function sigOf(nm, env, emit, t0 = null) {
     /* **虚方法那一族**（`virtual` / `override` / `abstract`）：调它要走派发表（`$$vd$`），
        不是一句 `(call B$step …)` —— 沿基类链找方法的那一处靠这一格明说不收（54-virtual.jnc）。 */
     virt: words.includes('virtual') || words.includes('override') || words.includes('abstract'),
+    /* **声明**一格虚槽的是 `virtual` / `abstract`（`override` 是**接**上头那一格）——
+       分派函数的东家就是声明它的那个类（`B$$vd$show`，78-notype.jnc 的真输出）。 */
+    declVirt: words.includes('virtual') || words.includes('abstract'),
   };
 }
 

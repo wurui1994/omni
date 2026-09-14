@@ -179,6 +179,12 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   const ecBox = { n: 0 };
   /** 一份模块只发一次的那几格助手（`jnc$asgn$T` 那一族）—— 键就是它的名字。 */
   const helperBox = new Set();
+  /**
+   * **虚派发那张表**：`<接收方的静态类型>$<方法名>` → 分派函数的名字（`B$$vd$show`）。
+   * 早声明是因为体那一层的探子（`makeFnEnv`）要收着它 —— 真填在下面"虚派发"那一段
+   * （那时方法表已经齐了，合成出来的构造也在里头）。
+   */
+  const vdispatch = new Map();
 
   /**
    * **模块级那一层的初值**（jancy 的 `module.construct`）：`int counter = 3;` 里右边那一格
@@ -200,6 +206,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         aggPaths,
         aggAliases,
         gAlias,
+        vdispatch,
         aggCtors,
         ecBox,
         helperBox,
@@ -449,6 +456,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       aggPaths,
       aggAliases,
       gAlias,
+      vdispatch,
       aggCtors,
       methods,
       tags,
@@ -514,6 +522,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       aggPaths,
       aggAliases,
       gAlias,
+      vdispatch,
       aggCtors,
       methods,
       tags,
@@ -802,6 +811,101 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     return true;
   };
 
+  /**
+   * **虚派发：一格虚方法落成一个分派函数**（第五十七刀，78-notype.jnc / 54-virtual.jnc 的真输出）。
+   *
+   *   (fn B$$vd$show (($a0 (ptr B))) void
+   *     (do
+   *       (if (bin "==" (pload (pfield (var $a0) $tag)) (int 2))
+   *         (do (expr (call D$show (var $a0))) (ret)))
+   *       (expr (call B$show (var $a0)))))
+   *
+   * 三条都是从那份真输出上读下来的：
+   *   - 分派函数的东家是**声明**那一格虚槽的类（`virtual` / `abstract`；`override` 是接上头那一格）；
+   *   - 按 `$tag` 一格一格比，撞上哪个派生类就调它的实现（`(ret)` 收尾），都不是就落到
+   *     基类自己那一格；基类是 `abstract`（没有体）时最后那一格用**最后一个**派生类兜底
+   *     （标签把每一种都盖住了，所以那一句永远走得到）；
+   *   - 调用点按**接收方的静态类型**查这张表 —— 链上任一格查的都是同一个分派函数。
+   *
+   * 一句都发不出来的（形参/返回解不出来、一个实现都没有）**明说不收**：`vdispatch` 里没有
+   * 那一格，查方法那一头照旧记账。
+   */
+  {
+    const below = (base) => aggs.filter((x) => {
+      if (x.emitName === base) return false;
+      const seen3 = new Set();
+      const q3 = [...(aggBases.get(x.emitName) ?? [])];
+      while (q3.length > 0) {
+        const b = q3.shift();
+        if (b === base) return true;
+        if (seen3.has(b)) continue;
+        seen3.add(b);
+        q3.push(...(aggBases.get(b) ?? []));
+      }
+      return false;
+    }).map((x) => x.emitName);
+    for (const [key, mi] of [...methods]) {
+      if (mi.declVirt !== true || mi.owner === undefined) continue;
+      const cls = mi.owner;
+      const vd = `${cls}$$vd$${mi.name}`;
+      if (vdispatch.get(`${cls}$${mi.name}`) === vd) continue;   // 一格只发一次
+      /* 形参那一串（`$a0` 是 `this`）与返回类型都听**声明那一格**的。 */
+      const ps = [];
+      let bad2 = false;
+      for (const p of mi.params ?? []) {
+        const rp = p === null ? null : resolveType(p, env);
+        if (rp === null || rp.type === null) { bad2 = true; break; }
+        ps.push(emitType(rp.type, 'slot', tyc));
+      }
+      if (bad2) { acct(`虚方法 '${key}' 的分派：形参解不出来`); continue; }
+      const rt = mi.ret === null || mi.ret === undefined ? null : mi.ret;
+      const args = ps.map((x, i) => ` (var $a${i + 1})`).join('');
+      /* 分支体那一格是**一串语句**（`(do …)`）—— 发码那一头 `if` 的两边读的是体，
+         直接给一句 `(ret …)` 会当场翻（第五十七刀，54-virtual.jnc 上量出来的）。 */
+      const one = (fn) => (rt === null
+        ? `(do (expr (call ${fn} (var $a0)${args})) (ret))`
+        : `(do (ret (call ${fn} (var $a0)${args})))`);
+      const has = (x) => methods.get(`${x}$${mi.name}`)?.hasBody === true || fns.has(`${x}$${mi.name}`);
+      /* 一格派生类**自己没写**这个方法时，它跑的是**上头最近那一格**写的那个实现
+         （54-virtual.jnc：`Cube` 没写 `area`，标签 3 那一格调的是 `Square$area`）。 */
+      const eff = (x) => {
+        const seen4 = new Set();
+        const q4 = [x];
+        while (q4.length > 0) {
+          const y = q4.shift();
+          if (seen4.has(y)) continue;
+          seen4.add(y);
+          if (has(y)) return y;
+          q4.push(...(aggBases.get(y) ?? []));
+        }
+        return null;
+      };
+      const selfHas = mi.hasBody === true || fns.has(key);
+      const subs = below(cls).map((x) => [x, eff(x)]).filter(([, e]) => e !== null);
+      if (!selfHas && subs.length === 0) {
+        acct(`虚方法 '${key}' 一个实现都没有（分派发不出来）`); continue;
+      }
+      const lines = [];
+      const tail = selfHas ? cls : subs[subs.length - 1][1];
+      for (const [x, e] of subs) {
+        if (e === tail) continue;
+        lines.push(`      (if (bin "==" (pload (pfield (var $a0) $tag)) (int ${tags.get(x) ?? 0}))`);
+        lines.push(`        ${one(`${e}$${mi.name}`)})`);
+      }
+      lines.push(`      ${rt === null ? `(expr (call ${tail}$${mi.name} (var $a0)${args}))` : `(ret (call ${tail}$${mi.name} (var $a0)${args}))`}`);
+      const formals = [`($a0 (ptr ${clsRoot(cls)}))`, ...ps.map((t2, i) => `($a${i + 1} ${t2})`)];
+      decls.push([
+        `  (fn ${vd} (${formals.join(' ')}) ${rt === null ? 'void' : emitType(rt, 'value', tyc)}`,
+        '    (do',
+        ...lines,
+        '    ))',
+      ].join('\n'));
+      /* 链上每一格（声明它的那个类与它所有派生类）查的都是**同一个**分派函数。 */
+      vdispatch.set(`${cls}$${mi.name}`, vd);
+      for (const x of below(cls)) vdispatch.set(`${x}$${mi.name}`, vd);
+    }
+  }
+
   /* **属性那一族先发**（在方法与顶层函数之前）：别处的体读它时要查得着那两格签名。 */
   const propDone = new Set();
   for (const a of aggs) {
@@ -1022,10 +1126,14 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         const pemit = dotted.slice(0, dotted.lastIndexOf('$'));
         const pname = pemit.slice(ownerName.length + 1);
         const pr2 = aggProps.get(ownerName)?.get(pname);
-        const store = pr2 !== undefined ? (pr2.store ?? new Map()) : new Map();
-      const mods2 = pr2?.type?.mods ?? [];
-      if (mods2.includes('autoget') || mods2.includes('bindable')) store.set('m_value', pr2.type);
-      ps = { emit: pr2?.emit ?? emitName, store, field: true };
+        /* 前面那一段解得出一格**属性**才是取/存；解不出（`int C0.get() {…}` —— 前面那段就是
+           类名）就是一格**名字恰好叫 get / set 的普通方法**（第一百三十六刀，127-outerget.jnc）。 */
+        if (pr2 !== undefined) {
+          const store = pr2.store ?? new Map();
+          const mods2 = pr2.type?.mods ?? [];
+          if (mods2.includes('autoget') || mods2.includes('bindable')) store.set('m_value', pr2.type);
+          ps = { emit: pr2.emit ?? pemit, store, field: true };
+        }
       }
       emitFn(it, dotted, null, selfInfo, ns, ps);
       continue;
