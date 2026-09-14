@@ -1395,6 +1395,16 @@ export function makeFnEnv(o) {
       if (key === 'true' || key === 'false') return null;
       if (names.has(key) || globals.has(key)) return null;
     }
+    /* **左边是一格量的那种点串不是"枚举项"**（`flags.ReadOnly`，第二百一十四刀）：那是
+       "从一格值上问成员"，不是编译期常量。少这一条，`flags.ReadOnly` 会静静地折成那个项
+       自己的值（44-bitflag.jnc 印出来是 1，该是 0）。 */
+    if (h === 'field' || h === 'ptr-field') {
+      const ob0 = named(node)?.obj;
+      if (headOf(ob0) === 'name') {
+        const left0 = String(named(ob0)?.text?.value ?? '');
+        if (names.has(left0) || globals.has(left0)) return null;
+      }
+    }
     const cv = evalConst(node, env);
     if (cv !== null && cv !== undefined) {
       /* **枚举项带的是那个枚举的类型**（不是裸整数）：`%d` 那一格要按它的底类型读
@@ -2081,11 +2091,22 @@ export function makeFnEnv(o) {
            而 `compoundValue` 的整数那一支只认整数。这一步与二元算子那儿同一条规则。 */
         const vv2 = vv.type?.k === 'bool' && lv.type?.k === 'int'
           ? { code: `(sel ${vv.code} (int 1) (int 0))`, type: { k: 'int', w: 32, u: false } } : vv;
+        /**
+         * **枚举上的复合赋值**（`flags |= OpenFlags.Async;`，第二百一十三刀，44-bitflag.jnc）：
+         * 枚举在方言里**就是它的基整数**（第三十九刀），所以这一句就是那格基整数上的
+         * `|` / `&` / `^` —— 两边都先落到基整数上，算完原样写回去（那一格的存储没变）。
+         * 少了这一步，整条报"复合赋值落在 enum 上还没接"，而 `bitflag` 那一族的语料里
+         * 这个写法是常态。
+         */
+        const based = (t) => (t?.k === 'enum'
+          ? (t.base ?? { k: 'int', w: 32, u: false }) : t);
+        const lt = based(lv.type);
+        const vv3 = vv2.type?.k === 'enum' ? { code: vv2.code, type: based(vv2.type) } : vv2;
         const code = compoundValue({
           bin: op.slice(0, -1),
           cur: readLv(lv),
-          lvType: lv.type,
-          v: vv2,
+          lvType: lt,
+          v: vv3,
           isInt: (t) => t !== null && t !== undefined && t.k === 'int',
           isPtr: (t) => t !== null && t !== undefined && (t.k === 'ptr' || t.k === 'tptr'),
         });
@@ -2570,6 +2591,35 @@ export function makeFnEnv(o) {
             return null;
           }
           return r;
+        }
+      }
+      /**
+       * **从一格值上问枚举成员**（`flags.ReadOnly` / `st.Done`，第二百一十四刀，44-bitflag.jnc）：
+       * `bitflag` 那一族问的是"这几位在不在"，所以发 `&` —— 答的还是那个枚举（`%x` 印出来
+       * 是那几位）；普通枚举问的是"是不是它"，发 `==`，答的是 bool。
+       *
+       * 判据只认**左边是一格量**（局部量或模块级量）这一种写法：`C.m_count` 那种左边是**类名**
+       * 的点串压根不该求值（求它只会报"'C' 查不着"），而 `Color.Red` 那种左边是**枚举名**的
+       * 已经在 `constOrFn` 那儿折成常量了。字段上的枚举（`s.m_flags.ReadOnly`）语料里没有，
+       * 另算。
+       */
+      const ob1 = nm2.obj;
+      const key1 = headOf(ob1) === 'name' ? String(named(ob1)?.text?.value ?? '') : null;
+      if (key1 !== null && (names.has(key1) || globals.has(key1))) {
+        const be = lvOf(ob1);
+        if (be !== null && be.type?.k === 'enum') {
+          const it0 = env.get(fname);
+          const own = it0 !== undefined && typeof it0.enum === 'string'
+            ? env.get(it0.enum) : undefined;
+          if (it0 !== undefined && it0.kind === 'const' && own !== undefined
+            && (own.name ?? it0.enum) === be.type.name) {
+            const lit = `(int ${BigInt.asIntN(64, it0.value)})`;
+            const cur = readLv(be);
+            return be.type.bits === true
+              ? { code: `(bin "&" ${cur} ${lit})`, type: be.type }
+              : { code: `(bin "==" ${cur} ${lit})`, type: T.bool };
+          }
+          acct(`枚举 '${be.type.name}' 上查不着成员 '${fname}'`); return null;
         }
       }
       return valOfLv(node);
