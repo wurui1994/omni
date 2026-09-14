@@ -313,11 +313,18 @@ export function scanAggs(tree, env) {
                prop_full.rst:15）：取/存的体里裸写 `m_v` 查的就是 `propScope.store`。所以这儿
                把那些字段收进 `store` —— 与 `autoget` 生成的 `m_value` 进的是同一张表。 */
             const propStore = new Map();
+            /* **`autoget` 那个词写在体里那一格存储上**（`int property m_v { int autoget m_value; … }`，
+               141-propfullmem.jnc）：那格属性的取值器照旧是**生成**出来的 —— 与写在属性上
+               （`int autoget property m_v;`）同一件事，差别只在"类型听谁的"。所以把那一格的
+               类型记下来（`auto`），发的那一层照它生成。 */
+            let auto = null;
             const body1 = named(m.at)?.body;
             if (headOf(body1) === 'compound') {
               for (const im of readBodyMembers(body1)) {
                 if (im.shape === 'data' && im.name !== null && im.type !== null) {
                   propStore.set(im.name, im.type);
+                  const ims = [...(im.storage ?? []), ...(im.type.mods ?? [])];
+                  if (ims.includes('autoget') || ims.includes('bindable')) auto = im.type;
                 }
               }
             }
@@ -326,6 +333,7 @@ export function scanAggs(tree, env) {
             ps.set(m.name, {
               name: m.name, owner: emitName, emit: `${emitName}$${m.name}`, type: m.type, at: m.at,
               store: propStore,
+              auto,
             });
             continue;
           }

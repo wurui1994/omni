@@ -711,11 +711,15 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    * 那时候读要 `pload`），成员那一格是**字段**（`<东家>$<属性>$m_value`）。
    * 聚合体/变体那几格明说不收（读法不是一句 `var`）。
    */
-  const genAutoget = (nameSrc, emitName, type, selfInfo) => {
+  const genAutoget = (nameSrc, emitName, type, selfInfo, autoType = null) => {
     const mods = type?.mods ?? [];
-    if (!mods.includes('autoget')) return false;
+    /* **`autoget` 那个词写在体里那一格存储上**（`int property m_v { int autoget m_value; … }`，
+       141-propfullmem.jnc）：与写在属性上（`int autoget property m_v;`）是同一件事 ——
+       差别只在"类型听谁的"。所以这一层收两种写法，往下一个字都不变。 */
+    if (autoType === null && !mods.includes('autoget')) return false;
     if (methods.has(`${emitName}$get`) || fns.has(`${emitName}$get`)) return false;
-    const r = resolveType({ ...type, shape: 'data' }, env);
+    const src = autoType ?? type;
+    const r = resolveType({ ...src, shape: 'data' }, env);
     if (r.type === null) { acct(`属性 '${emitName}' 生成的取值器：${r.why}`); return false; }
     const ty = r.type;
     if (!['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr'].includes(ty.k)) {
@@ -732,7 +736,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       params: [],
       defaults: [],
       ret: ty,
-      retDecl: type,
+      retDecl: src,
       emit: `${emitName}$get`,
       ec: false,
       stat: false,
@@ -756,8 +760,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       const pr1 = aggProps.get(a.emitName)?.get(m.name);
       const store = pr1?.store ?? new Map();
       if (emitPropBody(m.at, emitName, self0, null, store, true) === true) propDone.add(m.at);
-      /* 那对花括号里没写取值器（或压根没有花括号）时，`autoget` 那一格自己生成一个。 */
-      genAutoget(m.name, emitName, m.type, self0);
+      /* 那对花括号里没写取值器（或压根没有花括号）时，`autoget` 那一格自己生成一个
+         —— `autoget` 写在属性上、还是写在体里那格存储上，两种写法都在这儿收（`pr1.auto`）。 */
+      genAutoget(m.name, emitName, m.type, self0, pr1?.auto ?? null);
     }
   }
   for (const { it, ns } of items) {
