@@ -59,7 +59,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
   collectEnumConsts(tree, env);
   const {
     fields: aggFields, ctors: aggCtors, vars: globals, gEmit, gProps, methods, fieldInits,
-    bindable: gBindable, roots, aggs,
+    bindable: gBindable, roots, aggs, statics: aggStatics, props: aggProps,
   } = scanAggs(tree, env);
   const fns = scanFns(tree, env);
   const gLifted = addrTaken(tree);
@@ -109,6 +109,8 @@ export function lowerJncRules(tree, diags, opts = {}) {
         tags,
         fieldInits,
         roots,
+        aggStatics,
+        aggProps,
       });
       modEnv = { e, ctx: makeCtx(e) };
     }
@@ -123,6 +125,44 @@ export function lowerJncRules(tree, diags, opts = {}) {
     const line = structLine(a, env, aggs);
     if (line === null || line.line === null) { acct(`聚合体 '${a.emitName}' 还发不出来`); continue; }
     decls.push(`  ${line.line}`);
+  }
+
+  /* ------------------------------------- 1b. 静态字段（类那一层上的"模块级量"） */
+  /**
+   * **`static int m_count;` 不在对象里**（第二百一十五刀）：它就是一格模块级的量，名字带上
+   * 东家那一段前缀。所以这儿走的是与命名空间里那一格量**同一条路** —— `globalLines` 发
+   * `(global C$m_count int)`、要内存的摆一句 pnew、写了初值的进 `inits`。一个字节的新机器都没造。
+   */
+  for (const [owner, tbl] of aggStatics) {
+    for (const st of tbl.values()) {
+      /* 合过的表里有基类那几格（派生类里也看得见它们）—— 发的时候只发自己那几格。 */
+      if (st.owner !== owner) continue;
+      const g = globalLines(st, env, { ns: owner, clsRoot, taken: gLifted });
+      for (const l of g.lines) decls.push(`  ${l}`);
+      if (g.why !== null) {
+        if (!g.why.includes('对的行为')) acct(`静态字段 '${st.emit}'：${g.why}`);
+        continue;
+      }
+      const r = resolveType(st.type, env);
+      if (r.type === null) { acct(`静态字段 '${st.emit}'：${r.why}`); continue; }
+      if (gLifted.has(st.name) && liftable(r.type)) {
+        acct(`静态字段 '${st.emit}' 被取过地址（要提成一格 (ptr T)）还没接`); continue;
+      }
+      if (r.type.k === 'struct' || r.type.k === 'arr') {
+        cells.push(`    (set ${st.emit} (pnew ${emitType(r.type, 'slot', tyc)} (int 1)))`);
+      }
+      if (st.init === null) continue;
+      if (st.init.curly === true) {
+        acct(`静态字段 '${st.emit}' 的花括号初值（要逐格抄一份）还没接`); continue;
+      }
+      if (r.type.k === 'struct' || r.type.k === 'arr' || r.type.k === 'class') {
+        acct(`静态字段 '${st.emit}' 写了初值的聚合体（要逐字段抄一份）还没接`); continue;
+      }
+      const mi = modInit();
+      const v = mi.ctx.expr(st.init.value, mi.e.withBits(r.type, st.type));
+      if (v === null) continue;                            // 账已经记过
+      inits.push(`    ${SHAPE_ACCESS.var.write(st.emit, v)}`);
+    }
   }
 
   /* ---------------------------------------------------------- 2. 顶层条目 */
@@ -233,6 +273,8 @@ export function lowerJncRules(tree, diags, opts = {}) {
       gProps,
       propScope,
       roots,
+      aggStatics,
+      aggProps,
     });
     /* **`int main()` 落成方言的入口 `(main …)`，那一格不回值**：所以体那一层看见的是
        "回 void 的函数"，`return 0;` 就是一句 `(ret)`（`returnKind` 里 `inMain` 那一条），

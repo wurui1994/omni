@@ -88,10 +88,14 @@ export const SHAPE_ACCESS = {
    * 把"调一次函数"悄悄换成"读一格变量"。写出来的是一整条语句（`(expr (call …))`），
    * 因为方言里调用当语句要裹 `expr`。
    *
+   * `self` 是**成员属性**那一半（第六十九刀）：类的属性与方法一样，取/存两个函数第一个实参
+   * 是 `this`（`(call Box$m_value$get (var $this))`）。模块级那一格没有它，所以是空的 ——
+   * 一格模板管两族，不是两份实现。
+   *
    * 方言长出"取/存成对的位置"之后这一格就该退役（ADR-0031 §5 的第四条）。
    */
   prop: {
-    read: (x) => sx.call(`${x}$get`),
-    write: (x, v) => sx.exprStmt(sx.call(`${x}$set`, [v])),
+    read: (x, self = []) => sx.call(`${x}$get`, self),
+    write: (x, v, self = []) => sx.exprStmt(sx.call(`${x}$set`, [...self, v])),
   },
 };

@@ -47,7 +47,7 @@ export function makeFnEnv(o) {
     ecBox = { n: 0 }, tmpBox = { n: 0 }, globals = new Map(), gLifted = new Set(),
     gBindable = new Set(), roots = new Map(), gEmit = new Map(),
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
-    gProps = new Map(), propScope = null,
+    gProps = new Map(), propScope = null, aggStatics = new Map(), aggProps = new Map(),
   } = o;
   let ctxRef = null;
   /* **类那一族在方言里写的是继承链的根**（第五十六刀）—— 发类型时都要带上这一格。 */
@@ -101,29 +101,54 @@ export function makeFnEnv(o) {
    *   - 字段写了初值的（那几句要插到 construct 开头，第七十八刀）；
    *   - construct 要实参的（实参得当helper 的形参传进去 —— 另一刀）。
    */
-  const newObj = (cls) => {
+  const newObj = (cls, argNodes = []) => {
     const root = clsRoot(cls);
     const tag = tags.get(cls);
     if (tag === undefined) { acct(`'${cls}' 没有动态类型标签（类体没解出来）`); return null; }
     if (root !== cls) { acct(`造 '${cls}'：它有基类（基类的构造要逐格调）还没接`); return null; }
     if (fieldInits.has(cls)) { acct(`造 '${cls}'：它的字段写了初值（要合成/插进 construct）还没接`); return null; }
     const ctor = methods.get(`${cls}$construct`);
-    if (ctor !== undefined && ctor.params.length > 0) {
-      acct(`造 '${cls}'：construct 要 ${ctor.params.length} 个实参（还没接）`); return null;
+    /**
+     * **`new C(1)` 那几格实参**：`new` 是一格表达式而造一格对象是三句，所以三句抬成了
+     * 一格 helper —— 实参于是变成**helper 的形参**（`$i0`、`$i1`…），在调 `construct`
+     * 那一句里原样递下去。这是旧降级的真输出（167-staticfield.jnc 的 `$newo0`）。
+     */
+    const args = argNodes ?? [];
+    const ps = ctor?.params ?? [];
+    if (args.length > 0 && ctor === undefined) {
+      acct(`造 '${cls}'：给了 ${args.length} 个实参，可它没有 construct`); return null;
+    }
+    if (args.length !== ps.length) {
+      acct(`造 '${cls}'：construct 要 ${ps.length} 个实参，给了 ${args.length}（默认实参那一族还没接）`);
+      return null;
+    }
+    const vals = [];
+    const formals = [];
+    for (const [i, a] of args.entries()) {
+      const rp = resolveType(ps[i], env);
+      if (rp.type === null) { acct(`造 '${cls}'：construct 的第 ${i + 1} 格形参：${rp.why}`); return null; }
+      const v = emitExpr(a, withBits(rp.type, ps[i]), ctxRef);
+      if (v === null) return null;                         // 账已经记过
+      vals.push(v.code);
+      formals.push(`($i${i} ${emitType(rp.type, 'slot', tyc)})`);
     }
     const ty = `(ptr ${root})`;
     const fn = `$newo${tmpBox.n}`;
     tmpBox.n += 1;
     const lines = [
-      `  (fn ${fn} () ${ty}`,
+      `  (fn ${fn} (${formals.join(' ')}) ${ty}`,
       '    (do',
       `      (let $p ${ty} (pnew ${ty} (int 1)))`,
       `      (pstore (pfield (var $p) $tag) (int ${tag}))`,
     ];
-    if (ctor !== undefined) lines.push(`      (expr (call ${cls}$construct (var $p)))`);
+    if (ctor !== undefined) {
+      const pass = formals.map((_, i) => ` (var $i${i})`).join('');
+      lines.push(`      (expr (call ${cls}$construct (var $p)${pass}))`);
+    }
     lines.push('      (ret (var $p))))');
     helpers.push(lines.join('\n'));
-    return { code: `(call ${fn})`, type: { k: 'class', name: cls } };
+    const pass2 = vals.map((v) => ` ${v}`).join('');
+    return { code: `(call ${fn}${pass2})`, type: { k: 'class', name: cls } };
   };
   for (const f of (sf === undefined ? [] : readFormals(sf.node) ?? [])) {
     if (f.name !== null && f.type !== null) names.set(f.name, f.type);
@@ -223,14 +248,90 @@ export function makeFnEnv(o) {
   /** 方法体里 `this` 那一格的类型（类是一条引用，结构体是"那段内存的地址"）。 */
   const selfType = () => (self === null ? null
     : (self.kind === 'class' ? { k: 'class', name: self.agg } : { k: 'struct', name: self.agg }));
-  /** 一格可写位置读出来那一段文字（`SHAPE_ACCESS`）。 */
-  const readLv = (lv) => SHAPE_ACCESS[lv.shape].read(lv.code);
+  /** 一格可写位置读出来那一段文字（`SHAPE_ACCESS`）。属性那一格的 `args` 是 `this` 那一半。 */
+  const readLv = (lv) => SHAPE_ACCESS[lv.shape].read(lv.code, lv.args);
+  /**
+   * 一格可写位置**写进去**那一句（`SHAPE_ACCESS`）。写不下来答 null（账在这一层记）——
+   * 三处（赋值、复合赋值、`++`）问的是同一件事，所以只有一份。
+   */
+  const writeLv = (lv, v) => {
+    if (lv.shape === 'agg') { acct('往结构体/数组里赋值要逐字段抄一份（还没接）'); return null; }
+    if (lv.shape === 'prop' && lv.hasSet === false) {
+      acct(`属性 '${lv.propName ?? '?'}' 没有存值器（const 属性 —— 写不下去）`); return null;
+    }
+    return SHAPE_ACCESS[lv.shape].write(lv.code, v, lv.args);
+  };
+  /**
+   * **静态字段那一格的位置**（第二百一十五刀）：它不在对象里 —— 就是"类那一层上的模块级量"，
+   * 方言那一侧的名字是 `东家$名字`。所以形状按模块级那一套算（`lvalueShape` 的 isGlobal）。
+   */
+  const staticPlace = (st) => {
+    const r = resolveType(st.type, env);
+    if (r.type === null) { acct(`静态字段 '${st.name}'：${r.why}`); return null; }
+    const ty = withBits(r.type, st.type);
+    /* 取过地址的那一格要提成 `(ptr T)`（模块级那一半是第二十四刀）—— 还没接，明说。 */
+    if (gLifted.has(st.name)) {
+      acct(`静态字段 '${st.name}' 被取过地址（要提成一格 (ptr T)）还没接`); return null;
+    }
+    const shape = lvalueShape({
+      isStruct: ty.k === 'struct', isArr: ty.k === 'arr', isGlobal: true, gLifted: false, lifted: false,
+    });
+    return { shape, code: shape === 'var' ? st.emit : `(var ${st.emit})`, type: ty };
+  };
+  /**
+   * **成员属性那一格的位置**（第六十九刀）：读是 `(call 东家$属性$get $this)`、写是
+   * `(call 东家$属性$set $this 值)`。`self` 是那一格对象的地址（`x.p` 里是 x，裸写时是 `$this`）。
+   *
+   * **取值器真发出来了才认**：完整声明式（`property { … }`）与 `autoget` / `bindable`
+   * 那几族的取/存是**生成**出来的，这一层还没发 —— 那时候答 null（记账），绝不发一句
+   * 调用去叫一个不存在的函数。
+   */
+  const propPlace = (pr, selfCode) => {
+    const hasFn = (n) => methods.has(n) || fns.has(n);
+    if (!hasFn(`${pr.emit}$get`)) {
+      acct(`属性 '${pr.name}' 的取值器还没发出来（完整声明式 / autoget / bindable 那几族另算）`);
+      return null;
+    }
+    if (selfCode === null || selfCode === undefined) {
+      acct(`属性 '${pr.name}' 要一格对象（静态属性那一族还没接）`); return null;
+    }
+    const r = resolveType({ ...pr.type, shape: 'data' }, env);
+    if (r.type === null) { acct(`属性 '${pr.name}'：${r.why}`); return null; }
+    return {
+      shape: 'prop',
+      code: pr.emit,
+      args: [selfCode],
+      hasSet: hasFn(`${pr.emit}$set`),
+      propName: pr.name,
+      type: withBits(r.type, pr.type),
+    };
+  };
+  /**
+   * **不是普通字段的那几族成员**（`MEMBER_ORDER` / `NAME_LVALUE_ORDER` 里那几条）：今天收
+   * 静态字段与成员属性。裸写的名字（方法体里）、`x.m`、`类名.m` 三处问的是**同一份** ——
+   * 一格成员是什么，不该有三个答案。
+   *
+   * 答 `undefined` 是"不是这几族"（调用方接着往下问），答 `null` 是"是这一族可拼不出来"
+   * （账已经记过）。
+   */
+  const memberOther = (selfCode, aggName, key) => {
+    const st = aggStatics.get(aggName)?.get(key);
+    if (st !== undefined) return staticPlace(st);
+    const pr = aggProps.get(aggName)?.get(key);
+    if (pr !== undefined) return propPlace(pr, selfCode);
+    return undefined;
+  };
   /** 一格字段的位置（`memberOf`）：`(pfield 基 名)`；字段自己是结构体/数组时它又是一格 `agg`。 */
   const memberAt = (baseCode, aggName, fname) => {
     const fs = aggFields.get(aggName);
     if (fs === undefined) { acct(`'${aggName}' 的字段表还没有（跨文件/宿主面/泛型）`); return null; }
     const ft = fs.get(fname);
-    if (ft === undefined) { acct(`'${aggName}' 上查不着字段 '${fname}'（位域/别名/属性/基类那几族另算）`); return null; }
+    if (ft === undefined) {
+      /* 普通字段里查不着 —— 静态字段与属性那几族在这一问里（`MEMBER_ORDER` 第 4 条）。 */
+      const other = memberOther(baseCode, aggName, fname);
+      if (other !== undefined) return other;
+      acct(`'${aggName}' 上查不着字段 '${fname}'（位域/别名/属性/基类那几族另算）`); return null;
+    }
     const r = resolveType(ft, env);
     if (r.type === null) { acct(`字段 '${fname}'：${r.why}`); return null; }
     const ty = withBits(r.type, ft);
@@ -310,9 +411,14 @@ export function makeFnEnv(o) {
           return { shape: 'prop', code: pr.emit, type: withBits(r0.type, pr.type) };
         }
         /* **方法体里裸写的字段**（`NAME_LVALUE_ORDER` 的第二格）：`m_x` 就是 `this.m_x`。
-           排在"查不着"之前 —— 它是一格真字段，报"未声明"是认错人。 */
-        if (self !== null && (aggFields.get(self.agg)?.has(key) ?? false)) {
-          return memberAt('(var $this)', self.agg, key);
+           排在"查不着"之前 —— 它是一格真字段，报"未声明"是认错人。
+           静态字段与成员属性紧跟在它后面（`memberOther`，与 `x.m` 问的是同一份）。 */
+        if (self !== null) {
+          if (aggFields.get(self.agg)?.has(key) ?? false) {
+            return memberAt('(var $this)', self.agg, key);
+          }
+          const other = memberOther('(var $this)', self.agg, key);
+          if (other !== undefined) return other;
         }
         acct(`'${key}' 查不着（要作用域图）`); return null;
       }
@@ -368,6 +474,20 @@ export function makeFnEnv(o) {
       const fname = String(nm2.name?.value ?? '');
       if (fname === '') { acct('取字段的名字读不出来（点串/泛型那几族另算）'); return null; }
       const ob = nm2.obj;
+      /**
+       * **左边是类型名**（`C.m_count`、`S.m_table[1]`）：那是**静态成员**（第二百一十五刀）
+       * —— 它不在对象里，所以这一问要排在"求左边那一格"**之前**（求它只会报"查不着"）。
+       * 同名的局部量/模块级量遮住类型名（查名的次序即规则）。
+       */
+      if (h === 'field' && headOf(ob) === 'name') {
+        const tn = String(named(ob)?.text?.value ?? '');
+        const te = names.has(tn) || globals.has(tn) ? undefined : env.get(tn);
+        if (te !== undefined && (te.kind === 'class' || te.kind === 'struct' || te.kind === 'union')) {
+          const other = memberOther(null, te.name, fname);
+          if (other !== undefined) return other;
+          acct(`'${tn}' 上查不着静态成员 '${fname}'（静态方法/嵌套类型那几族另算）`); return null;
+        }
+      }
       let baseCode = null;
       let bt = null;
       /* `p->f` 与"左边不是可写形状"（`f().x`）都是**求一次值**；别的先求它的位置再读一次
@@ -705,11 +825,13 @@ export function makeFnEnv(o) {
           isPtr: (t) => t !== null && t !== undefined && (t.k === 'ptr' || t.k === 'tptr'),
         });
         if (code === null) { acct(`复合赋值 '${op}' 落在 ${lv.type?.k ?? '?'} 上还没接`); return null; }
-        return [`${pad}${SHAPE_ACCESS[lv.shape].write(lv.code, code)}`];
+        const w1 = writeLv(lv, code);
+        return w1 === null ? null : [`${pad}${w1}`];
       }
       const v = ctx.expr(an.b, lv.type);
       if (v === null) return null;
-      return [`${pad}${SHAPE_ACCESS[lv.shape].write(lv.code, v)}`];
+      const w2 = writeLv(lv, v);
+      return w2 === null ? null : [`${pad}${w2}`];
     },
     /**
      * `x++` 当一条语句（lower.js:11529-11568）：读一次、加一、写回。三族各有写法 ——
@@ -731,7 +853,8 @@ export function makeFnEnv(o) {
         code = `(bin ${JSON.stringify(one)} ${cur} (real 1.0))`;
       } else { acct(`'++' 落在 ${ty?.k ?? '?'} 上还没接（算符重载那一族另算）`); return null; }
       if (lv.shape === 'agg') { acct("'++' 落在结构体/数组上（算符重载那一族）还没接"); return null; }
-      return [`${pad}${SHAPE_ACCESS[lv.shape].write(lv.code, code)}`];
+      const w = writeLv(lv, code);
+      return w === null ? null : [`${pad}${w}`];
     },
     /** 调用：被调是**裸名字**且查得着顶层那几格函数时 → `(call 名字 实参…)`。 */
     callOf: (node, want, ctx) => {
@@ -941,11 +1064,8 @@ export function makeFnEnv(o) {
       if (to.k === 'void') { acct('new void'); return null; }
       if (to.k === 'class') {
         if (headOf(node) === 'new-array') { acct(`不能造类的数组（'${to.name}'）`); return null; }
-        if (nm2.args !== undefined && nm2.args !== null
-          && allInChain(nm2.args, 'args-add', 'args').length > 0) {
-          acct(`new ${to.name}(…) 带构造实参那一族还没接`); return null;
-        }
-        return newObj(to.name);
+        /* 带实参的那一格照样走 `newObj` —— 实参变成 helper 的形参（`$i0`…）。 */
+        return newObj(to.name, allInChain(nm2.args, 'args-add', 'args'));
       }
       if (to.k === 'struct' && aggCtors.has(to.name)) {
         acct(`new ${to.name}（那一格有 construct，造完还要调它）还没接`); return null;

@@ -92,6 +92,23 @@ export function scanFns(tree, env) {
 }
 
 /**
+ * 一格成员写的**初值**那一整条表达式（`static int m_count = 10;` 里右边那一格）。
+ * 花括号那一族（`static int m_table[] = { … }`）另算 —— 记一格 `curly` 让上层明说不收。
+ */
+function memberInit(m) {
+  const nm = named(m.at);
+  if (nm === null || nm === undefined) return null;
+  if (headOf(m.at) === 'var-decl-curly') return { curly: true, value: nm.value ?? null };
+  for (const d of allInChain(nm.dcls, 'dcls-add', 'dcls')) {
+    if (headOf(d) !== 'init') continue;
+    const dd = named(d);
+    const t = readDeclType(nm.specs, dd?.dcl);
+    if (t !== null && t.name === m.name) return { curly: false, value: dd?.value ?? null };
+  }
+  return null;
+}
+
+/**
  * 顶层那几格**聚合体**：一边把名字记进 `env`（`resolveType` 要它才认得 `Inner`），
  * 一边攒一张**字段表**（`emitName` → 名字 → 那一格的声明类型）—— 取字段与"往字段里写"
  * 两侧都从它出发。位域、别名路径、属性那几族**不收**（`member-table.js` 的七格里那几条
@@ -107,6 +124,19 @@ export function scanAggs(tree, env) {
   const fieldInits = new Set();                                      // 里头有"写了初值的字段"的那几格
   const bindable = new Set();                                        // 里头带取/存两格的那几个
   const aggs = [];                                                   // 收齐了好算继承链的根
+  /**
+   * **静态字段**（第二百一十五刀）：`static int m_count;` 不在对象里 —— 它是"类那一层上的
+   * 模块级量"，方言那一侧的名字就是 `东家$名字`。所以这一格与命名空间里的模块级量
+   * （第五十一刀）是**同一件事**，发它、读它、写它三处全走那一套，不另造机器。
+   * 键是东家，值是"名字 → 那一格"。
+   */
+  const statics = new Map();
+  /**
+   * **成员属性**（第六十九刀）：`int property m_value;` 不是一格内存 —— 读它是
+   * `(call 东家$属性$get $this)`、写它是 `(call 东家$属性$set $this 值)`。取/存那两个体
+   * 在方法表（写在类里）或顶层函数表（写在类外）里已经有了，所以这一格只记"它是属性"。
+   */
+  const props = new Map();
   const scan = (n, owner, inAgg) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
@@ -178,6 +208,34 @@ export function scanAggs(tree, env) {
           }
         };
         flat(a);
+
+        /* **静态字段与成员属性各收一张表**（次序即规则：这两族在上面那张字段表里刻意
+           不收 —— 一个不进对象、一个不是内存，被"普通字段"那一支接走就是静静地错）。 */
+        const st = new Map();
+        const ps = new Map();
+        for (const m of a.members) {
+          if (m.name === null || m.type === null) continue;
+          if (m.shape === 'prop') {
+            ps.set(m.name, {
+              name: m.name, owner: emitName, emit: `${emitName}$${m.name}`, type: m.type, at: m.at,
+            });
+            continue;
+          }
+          if (!m.storage.includes('static')) continue;
+          if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') continue;
+          st.set(m.name, {
+            name: m.name,
+            owner: emitName,
+            emit: `${emitName}$${m.name}`,
+            type: m.type,
+            shape: m.shape,
+            storage: m.storage,
+            at: m.at,
+            init: memberInit(m),
+          });
+        }
+        statics.set(emitName, st);
+        props.set(emitName, ps);
 
         /* **方法那一族**（`<东家>$<方法名>`，第五十二刀）：一格一格记下签名与那个节点。
            体写在类里的（`fn-def`）由这一层发；只写原型的（`fn-proto`）体在外面，那一格
@@ -290,6 +348,30 @@ export function scanAggs(tree, env) {
   };
   for (const a of aggs) fields.set(a.emitName, mergedFields(a));
 
+  /* **静态字段与成员属性沿基类链也看得见**（与字段那一条同一条：一整条继承链共用一格结构体，
+     `Derived` 里裸写基类的属性 `m_value` 就该找得着 —— 65-propmem.jnc 的 `Derived$mine`）。
+     自己那一格盖住同名的基类那一格（次序即规则）。 */
+  const mergedOf = (table) => {
+    const walk = (a, seen = new Set()) => {
+      const own = table.get(a.emitName) ?? new Map();
+      if (seen.has(a.emitName)) return own;
+      seen.add(a.emitName);
+      const out = new Map();
+      for (const b of basePaths(a)) {
+        const ba = byName.get(b);
+        if (ba === undefined) continue;
+        for (const [k, v] of walk(ba, seen)) out.set(k, v);
+      }
+      for (const [k, v] of own) out.set(k, v);
+      return out;
+    };
+    const next = new Map();
+    for (const a of aggs) next.set(a.emitName, walk(a));
+    return next;
+  };
+  const staticsAll = mergedOf(statics);
+  const propsAll = mergedOf(props);
+
   /* **一整条继承链共用一格结构体**（第五十六刀的 `clsRoot`）：类那一族在方言里写的是
      连通块的**根**。字段表按各自的名字收，写类型时换成根 —— 两件事分开。 */
   const roots = new Map();
@@ -299,6 +381,17 @@ export function scanAggs(tree, env) {
     if (a.emitName !== null && r.emitName !== undefined) roots.set(a.emitName, r.emitName);
   }
   return {
-    fields, ctors, vars, gEmit, gProps, methods, fieldInits, bindable, roots, aggs,
+    fields,
+    ctors,
+    vars,
+    gEmit,
+    gProps,
+    methods,
+    fieldInits,
+    bindable,
+    roots,
+    aggs,
+    statics: staticsAll,
+    props: propsAll,
   };
 }
