@@ -1037,6 +1037,13 @@ export function makeFnEnv(o) {
     if (ft === undefined) return false;
     return resolveType(ft, env).type?.k === 'fnptr';
   };
+  /** 这格字段的类型上写着 `operator ()` 吗（`m_hash(key)`，第二百四十五刀）。 */
+  const opCallField = (aggName, key) => {
+    const ft = aggFields.get(aggName)?.get(key);
+    if (ft === undefined) return false;
+    const a2 = aggBehind(resolveType(ft, env).type);
+    return a2 !== null && findMethod(a2, 'op$call') !== null;
+  };
   /**
    * **方法当值用**（`c.bump`，第五十五刀）：jancy 的函数指针是**胖的** —— 里头捕着那个对象。
    * 方言那一侧是"一格闭包壳 + 一次 mkclo"：
@@ -1179,6 +1186,46 @@ export function makeFnEnv(o) {
       acct(`算符 '${agg} ${w === 'mul' ? '*' : '->'}' 回的不是一格指针`); return null;
     }
     return { code: `(call ${f.key} ${v.code})`, type: rt };
+  };
+  /**
+   * **调用算符 `operator ()`**（第二百四十五刀，160-opcall.jnc）：`obj(…)` 走它。语料里它全长在
+   * `stdt` 那几个函子上 —— `struct Eq<T> { static bool operator () (T a, T b) }`
+   * （stdt_Operator.jnc:19-25）、`struct HashString { static size_t operator () (string_t key) }`
+   * （同上:97）；调用点是 `m_hash(key)`（stdt_HashTable.jnc:101）。
+   *
+   * 落法与前几族一个样：那是一格自由函数 `<东家>$op$call`。`static` 的那一格没有 `this`
+   * （第二百〇一刀），带 `this` 的那一格把左边那个对象当第一个实参递进去。
+   * 被调那一格不是聚合体、或者它身上没写这个算符时答 `undefined`（调用方接着说自己那句话）。
+   * 一格类型上**两条以上**的调用算符要按实参类型挑（第八十刀那套机器），明说不收。
+   */
+  const opCallOf = (fv, argNodes) => {
+    const agg = aggBehind(fv?.type);
+    if (agg === null) return undefined;
+    const f = findMethod(agg, 'op$call');
+    if (f === null || f === undefined) return undefined;
+    if ((ovl.get(f.key) ?? []).length > 1) {
+      acct(`'${agg}' 上不止一格 operator ()（按实参类型挑哪一条）还没接`); return null;
+    }
+    if (f.sig.ec === true) {
+      acct(`'${agg}' 的 operator () 写着 errorcode（传播那两句）还没接`); return null;
+    }
+    const ps = f.sig.params ?? [];
+    if (argNodes.length !== ps.length) {
+      acct(`'${agg}' 的 operator () 收 ${ps.length} 个实参，这里给了 ${argNodes.length}`); return null;
+    }
+    const vals = [];
+    for (const [i, a] of argNodes.entries()) {
+      const rp = ps[i] === null ? null : resolveType(ps[i], env);
+      const w = rp === null || rp.type === null ? null : withBits(rp.type, ps[i]);
+      const v = emitExpr(a, w, ctxRef);
+      if (v === null) return null;                         // 账已经记过
+      vals.push(v.code);
+    }
+    const self0 = f.sig.stat === true ? [] : [fv.code];
+    return {
+      code: `(call ${f.key}${[...self0, ...vals].map((x) => ` ${x}`).join('')})`,
+      type: f.sig.ret ?? { k: 'void' },
+    };
   };
   /**
    * **拿一格初值调 `operator :=`**（第二百零九刀）：`SB a = 7;` 这一句在 jancy 那边**不是**
@@ -2571,6 +2618,10 @@ export function makeFnEnv(o) {
           /* **方法体里裸写一格装着函数指针的字段**（`m_op(…)`，109-fnfield.jnc）：与
              `s.m_op(…)` 是同一件事 —— 读出那一格、按函数值调。 */
           || (self !== null && fnptrField(self.agg, asName))
+          /* **方法体里裸写一格身上写着 `operator ()` 的字段**（`m_hash(key)`，第二百四十五刀，
+             stdt_HashTable.jnc:101 的原样）：与 `t.m_hash(key)` 是同一件事 —— 求出那一格，
+             再按它类型上那个算符调。少这一条，报的是"调的那个 'm_hash' 查不着"，指着别处。 */
+          || (self !== null && opCallField(self.agg, asName))
           /* **取/存体里裸写那格生成的事件**（`m_onChanged();`，第一百一十七刀）：它不是
              函数表里的名字，是这格属性的生成物 —— 求它得出一格多播，叫它就是通知所有听众。 */
           || (propScope !== null && propScope.mc === true && asName === 'm_onChanged');
@@ -2600,6 +2651,11 @@ export function makeFnEnv(o) {
             };
           }
           if (fv.type?.k !== 'fnptr') {
+            /* **调用算符**（第二百四十五刀）：被调那一格是聚合体、而它身上写着 `operator ()`
+               时这一句就是那格算符的调用（`opCallOf` 里挑不出来/多条各自记账）。 */
+            const oc0 = opCallOf(fv, args);
+            if (oc0 === null) return null;                  // 账已经记过
+            if (oc0 !== undefined) return oc0;
             acct(`被调那一格是 ${fv.type?.k ?? '?'}，不是函数值（算符重载那一族另算）`); return null;
           }
           const parts0 = [];
