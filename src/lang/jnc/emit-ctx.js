@@ -1513,6 +1513,56 @@ export function makeFnEnv(o) {
       if (op !== '=') { acct(`复合赋值 '${op}' 当表达式用还没接`); return null; }
       const lv = lvOf(an.a);
       if (lv === null) return null;                        // 账已经记过
+      /**
+       * **左边那一格是属性**（第一百一十五刀，107-psetexpr.jnc）：`return m_currentIndex =
+       * insertItem(…);`（ui_ComboBox.jnc:74）里那个名字不是字段，是一格**属性** —— 于是
+       * "写进去再答那个值"包的不是 `pstore`，是那次**存值器调用**：
+       *
+       *   (fn jnc$pset$C_m_val (($s (ptr C)) (x int)) int
+       *     (expr (call C$m_val$set (var $s) (var x)))
+       *     (ret (var x)))
+       *
+       * **整条表达式的值是"存进去的那个值"**，不是回头再调一次取值器 —— 这一条与普通赋值
+       * 一字不差（jancy 那边 `m_p = v` 的值就是 v），而且它要紧：取值器可以有副作用，
+       * 多调一次就是错答案（107-psetexpr.jnc 的存值器故意把值乘 2 / 加 100 来量它）。
+       *
+       * 成员那一格前面多一格 `this`（模块级那一格没有）；**索引属性明说不收** —— 那几格下标
+       * 也要进包装函数的形参表，个数按属性变。
+       */
+      if (lv.shape === 'prop') {
+        if (lv.hasSet !== true) {
+          acct(`属性 '${lv.propName ?? '?'}' 没有存值器（当表达式用也写不下去）`); return null;
+        }
+        if (lv.args.length - (lv.selfN ?? 0) > 0) {
+          acct(`索引属性 '${lv.propName ?? '?'}' 当表达式用（下标要进包装函数的形参表）还没接`);
+          return null;
+        }
+        const ty0 = lv.type;
+        if (!['int', 'real', 'bool', 'string'].includes(ty0?.k)) {
+          acct(`属性当表达式用落在 ${ty0?.k ?? '?'} 上还没接`); return null;
+        }
+        const v0 = emitExpr(an.b, ty0, ctxRef);
+        if (v0 === null) return null;                      // 账已经记过
+        const tw0 = emitType(ty0, 'value', tyc);
+        const nmp = `jnc$pset$${lv.code.replace(/\$/g, '_')}`;
+        if (!helperBox.has(nmp)) {
+          const owner = (methods.get(`${lv.code}$set`) ?? fns.get(`${lv.code}$set`))?.owner ?? null;
+          const withSelf = (lv.selfN ?? 0) > 0;
+          if (withSelf && owner === null) {
+            acct(`属性 '${lv.propName ?? '?'}' 的存值器上查不着东家`); return null;
+          }
+          helperBox.add(nmp);
+          const formals = withSelf
+            ? `(($s (ptr ${clsRoot(owner)})) (x ${tw0}))` : `((x ${tw0}))`;
+          const pass = withSelf ? '(var $s) (var x)' : '(var x)';
+          helpers.push([
+            `  (fn ${nmp} ${formals} ${tw0}`,
+            `    (expr (call ${lv.code}$set ${pass}))`,
+            '    (ret (var x)))',
+          ].join('\n'));
+        }
+        return { code: `(call ${nmp} ${[...lv.args, v0.code].join(' ')})`, type: ty0 };
+      }
       if (lv.shape !== 'ptr') {
         acct(`赋值当表达式用：左边那一格是 ${lv.shape}（要一格有地址的位置）还没接`); return null;
       }
