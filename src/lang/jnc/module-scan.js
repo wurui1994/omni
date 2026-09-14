@@ -14,7 +14,7 @@ import { readSpecs } from './specs.js';
 import { readAgg, readEnum, readBodyMembers } from './agg.js';
 import { enumBase } from './const-eval.js';
 import { resolveType } from './resolve-type.js';
-import { emitType } from './emit-type.js';
+import { tyKey } from './emit-type.js';
 import { readFormals, fnName, overloadSuffix } from './emit-fn.js';
 import { classRoot, basePaths, lastIdent } from './emit-agg.js';
 /**
@@ -82,7 +82,7 @@ function argSig(params, env) {
     if (p === null || p === undefined) return null;
     const r = resolveType(p, env);
     if (r === null || r.type === null) return null;
-    out.push(emitType(r.type, 'slot'));
+    out.push(tyKey(r.type));
   }
   return out.join(',');
 }

@@ -69,3 +69,19 @@ export function emitType(t, pos = 'value', ctx = DEFAULT_CTX) {
   const cell = row[pos] ?? row.value;
   return cell(t, ctx);
 }
+
+/**
+ * **这一格类型在 jancy 那一侧的身份**（第五十八刀）。与 `emitType` 是两件事：那一格答的是
+ * "方言里怎么写"，而方言里 `enum Code` 与 `int` 写出来是**同一个字**、一条继承链上的几格类
+ * 写出来是**同一个根** —— 拿它比"两条重载的实参签名是否一样"就会把 `q(int)` 与 `q(Code)`
+ * 并成一格（135-overloadcheap.jnc 量的正是这一格）。所以身份要按类型记录自己的种类与名字算。
+ */
+export function tyKey(t) {
+  if (t === null || t === undefined) return '?';
+  if (t.k === 'int') return `int${t.w ?? 32}${t.u === true ? 'u' : ''}`;
+  if (t.k === 'ptr' || t.k === 'tptr') return `ptr(${tyKey(t.target)})`;
+  if (t.k === 'arr') return `arr(${tyKey(t.el)},${t.n})`;
+  if (t.k === 'fnptr') return `fn(${(t.params ?? []).map(tyKey).join(',')})${tyKey(t.ret)}`;
+  if (t.k === 'struct' || t.k === 'class' || t.k === 'enum') return `${t.k}:${t.name}`;
+  return String(t.k);
+}

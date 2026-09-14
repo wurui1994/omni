@@ -13,7 +13,7 @@ import { nameText, allInChain, readDcl } from './declare.js';
 import { readDeclType, readAnonType } from './types.js';
 import { readSpecs } from './specs.js';
 import { resolveType, INT_BITS } from './resolve-type.js';
-import { emitType } from './emit-type.js';
+import { emitType, tyKey } from './emit-type.js';
 import { readFormals, OP_NAMES } from './emit-fn.js';
 import { emitExpr, strLitFold } from './emit-expr.js';
 import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
@@ -28,6 +28,9 @@ import {
   addrTaken, liftable, liftedType, cellName, arrayFromCurly,
 } from './emit-global.js';
 import { evalConst } from './const-eval.js';
+/* "一族候选里挑一条"这一句是**引擎**的（各实参里最差的一档当分、取最高分、并列即歧义）——
+   打分才是这门语言的（`argCost`）。抄两份的坏处不是行数，是两份会各自漂。 */
+import { pick, worst } from '../../core/frontend-engine/overload.js';
 
 /**
  * 一格函数体要的那一整套探子。`o` 里：
@@ -555,20 +558,145 @@ export function makeFnEnv(o) {
     return vd === undefined ? null : { sig: { ...found.sig, emit: vd }, key: vd };
   };
   /**
-   * **同名那一族里挑一格**（第五十八刀 A，76-overload.jnc）。
+   * **不发一个字就问得出来的那几种类型**（第五十八刀 B，135-overloadcheap.jnc 顶上那段）。
    *
-   * 这一层先只做**按实参个数**分得开的那一半：一格候选收得下的个数是
-   * `[形参数 - 有默认值的格数, 形参数]`，落在里头的才算合得上。只有一条合得上就是它；
-   * 一条都合不上、或**同元有两条**（那要按各实参的转换代价排，jancy 的
-   * `chooseOverload` 是"各实参里最差的一档当分、取最高分、并列即歧义"）—— 明说不收，不猜。
+   * 同元重载要按各实参的类型挑，而"降一遍再看类型"在这一处使不得 —— 降会造临时、会插语句、
+   * 会把 errorcode 那两句提上来，而这一步只是**问**。所以这一格只回**纯查表**问得准的那几种，
+   * 别的答 null（挑那一层照实说不收）。整数**字面量**另标一格 `lit`：jancy 对常量的
+   * int → int 加宽算 `Identity`，于是 `p(int)` / `p(long)` 喂 `1` 在它那儿就是 ambiguous ——
+   * 这一层因此一律不给字面量"完全一样"那一档（见 `argCost`）。
+   */
+  const cheapTy = (n) => {
+    if (n === null || n === undefined || typeof n !== 'object') return null;
+    if (!Array.isArray(n.items)) {
+      if (n.kind === 'string') return { ty: T.string, lit: true };
+      const s = String(n.value ?? '');
+      if (/^(0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|[0-9]+)$/.test(s)) return { ty: T.int, lit: true };
+      if (/^[0-9]+(\.[0-9]*([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)$/.test(s)) return { ty: T.real, lit: true };
+      return null;
+    }
+    const h = headOf(n);
+    const nm2 = named(n) ?? {};
+    if (h === 'paren') return cheapTy(nm2.inner);
+    if (h === 'true' || h === 'false') return { ty: T.bool, lit: true };
+    /* `'a'` 是一个**整数**字面量（第九十七刀）—— 与 `65` 同一档。 */
+    if (h === 'char') return { ty: T.int, lit: true };
+    /* `$"…"` 出来的是一格**动态**的串（literals.rst:62）：类型是 string，可不算字面量那一档
+       （那一格只对整数之间那条有意思）。贴着写的拼接同一件事。 */
+    if (h === 'fmt' || h === 'concat') return { ty: T.string, lit: false };
+    if (h === 'unary') {
+      const op = String(nm2.op?.value ?? '');
+      if (op === '!') return { ty: T.bool, lit: false };
+      if (op !== '-' && op !== '+' && op !== '~') return null;
+      const b = cheapTy(nm2.a);
+      if (b === null || !(b.ty.k === 'int' || b.ty.k === 'real')) return null;
+      if (op === '~' && b.ty.k === 'real') return null;
+      return b;
+    }
+    /* `&x`：取地址不改"那一格是什么类型"这件事 —— 出来的是 `T*`。 */
+    if (h === 'addr') {
+      const b = cheapTy(nm2.a);
+      return b === null || b.lit ? null : { ty: { k: 'ptr', target: b.ty }, lit: false };
+    }
+    if (h === 'new') {
+      const t0 = readAnonType(named(nm2.type)?.specs, named(nm2.type)?.ptrs);
+      if (t0 === null || headOf(nm2.type) !== 'type-name') return null;
+      const r0 = resolveType(t0, env);
+      if (r0.type === null || r0.type.k === 'void') return null;
+      return { ty: { k: 'ptr', target: r0.type }, lit: false };
+    }
+    return cheapTy2(n, h, nm2);
+  };
+  /** `cheapTy` 的后一半：名字、取字段、调用那三格（要查那几张表）。 */
+  const cheapTy2 = (n, h, nm2) => {
+    if (h === 'name' || h === 'field' || h === 'ptr-field') {
+      /* 枚举项（`Code.Sync`）与折叠过的 `const`：`constOrFn` 只查表、不发一个字。 */
+      const cv = constOrFn(n);
+      if (cv !== null && cv !== undefined && cv.type !== undefined) return { ty: cv.type, lit: false };
+    }
+    if (h === 'name') {
+      const key = String(nm2.text?.value ?? '');
+      const t = names.get(key) ?? globals.get(key);
+      if (t !== undefined) {
+        const r = resolveType(t, env);
+        return r.type === null ? null : { ty: withBits(r.type, t), lit: false };
+      }
+      /* 方法体里**裸写**的字段（`m_len` 就是 `this.m_len`）。 */
+      const ft = self === null ? undefined : aggFields.get(self.agg)?.get(key);
+      if (ft === undefined) return null;
+      const r2 = resolveType(ft, env);
+      return r2.type === null ? null : { ty: withBits(r2.type, ft), lit: false };
+    }
+    if (h === 'field' || h === 'ptr-field') {
+      const ob = cheapTy(nm2.obj);
+      if (ob === null) return null;
+      const b = ob.ty.k === 'ptr' ? ob.ty.target : ob.ty;
+      const agg = b !== null && b !== undefined && (b.k === 'struct' || b.k === 'class') ? b.name : null;
+      const fname = String(nm2.name?.value ?? '');
+      const ft = agg === null ? undefined : aggFields.get(agg)?.get(fname);
+      if (ft === undefined) return null;
+      const r = resolveType(ft, env);
+      return r.type === null ? null : { ty: withBits(r.type, ft), lit: false };
+    }
+    /* 调用：被调是个裸名字、又**不是重载**（那要先挑一格）时，这一格的类型就是它的返回类型。 */
+    if (h === 'call') {
+      const f = nm2.fn;
+      if (f === null || f === undefined || !Array.isArray(f.items) || headOf(f) !== 'name') return null;
+      const key = String(named(f)?.text?.value ?? '');
+      if (names.has(key) || globals.has(key) || (ovl.get(key)?.length ?? 0) > 1) return null;
+      const s = fns.get(key);
+      if (s === undefined || s.ret === null || s.ret === undefined) return null;
+      return { ty: withBits(s.ret, s.retDecl), lit: false };
+    }
+    return null;
+  };
+  /**
+   * **一格实参配一格形参有多合得上**（第五十八刀 B）：照 jancy 的 CastKind 排的一张表，
+   * 0 = 合不上（引擎那一层 `pick` 见 0 就跳过这一条）。行与旧降级的 `JNC_CASTS` 同一份：
+   *   - int 之间：两个方向 jancy 都是 Implicit —— 字面量一律 3（不给"完全一样"那一档，
+   *     不然 `p(int)` / `p(long)` 喂 `1` 会各得一分而分不出来，jancy 那边也正是 ambiguous）；
+   *   - 完全一样 4；类的**上转** 3（一条链共用一格方言结构体，发零条指令）；
+   *   - `int -> real` / `bool -> int` / `枚举 -> int` 各 1（跨族）；
+   *   - `T* -> void*` 与 `枚举 -> 基枚举`：jancy 收，可这一层给 0 —— 与旧降级同一格数。
+   */
+  const sameTy2 = (a, b) => a !== null && a !== undefined && b !== null && b !== undefined
+    && tyKey(a) === tyKey(b);
+  const argCost = (from, to, lit) => {
+    if (from === null || from === undefined || to === null || to === undefined) return 0;
+    if (from.k === 'int' && to.k === 'int') return lit === true ? 3 : (sameTy2(from, to) ? 4 : 3);
+    /* **类那一族先归一**：`D* dp` 解出来是 `class:D`（类自己吞掉那一个 `*`），而 `new D` 那一格
+       问出来的是 `ptr(class:D)` —— 两种写法说的是同一件事，所以比之前先把那层壳摘掉。 */
+    const cls = (t) => (t.k === 'class' ? t
+      : (t.k === 'ptr' && t.target?.k === 'class' ? t.target : null));
+    const fc = cls(from);
+    const tc2 = cls(to);
+    if (fc !== null && tc2 !== null) {
+      if (fc.name === tc2.name) return 4;
+      return derivesFrom(fc.name, tc2.name) ? 3 : 0;     // 上转收，下转要类型信息（不收）
+    }
+    if (sameTy2(from, to)) return 4;
+    if (to.k === 'real' && from.k === 'int') return 1;
+    if (to.k === 'int' && from.k === 'bool') return 1;
+    if (to.k === 'int' && from.k === 'enum') return 1;
+    return 0;
+  };
+  /**
+   * **同名那一族里挑一格**（第五十八刀，76-overload.jnc / 77-overload-types.jnc）。两步：
    *
+   *   1. 按**给了几个实参**筛：一格候选收得下的个数是 `[形参数 - 有默认值的格数, 形参数]`；
+   *   2. 剩下不止一条时按**实参的类型**排（`cheapTy` / `argCost`）：每条候选取各实参里
+   *      **最差**的那一档当它的分、取最高分、并列即歧义 —— "怎么挑"这一句是引擎的
+   *      （`frontend-engine/overload.js`），打分才是这门语言的。
+   *
+   * 哪个实参的类型问不出来、或者平手，**明说不收**，不猜。
    * 挑这一步排在**求实参**之前：形参的类型要拿去降实参（`null` 从那儿知道自己是哪种指针）。
    */
   const sigAt = (k) => methods.get(k) ?? fns.get(k);
   const pickOvl = (key0, sig0, args) => {
     const fam = ovl.get(key0);
     if (fam === undefined || fam.length < 2) return { sig: sig0, key: key0 };
-    const given = args.filter((a) => headOf(a) !== 'unbound').length;
+    const real = args.filter((a) => headOf(a) !== 'unbound');
+    const given = real.length;
     const fits = [];
     for (const e of fam) {
       const s = sigAt(e.key);
@@ -582,10 +710,33 @@ export function makeFnEnv(o) {
       acct(`'${key0}' 有 ${fam.length} 条重载，没有一条收 ${given} 个实参`);
       return null;
     }
-    acct(`'${key0}' 的同元重载要按实参的类型挑（还没接）`);
-    return null;
+    const tys = real.map((a) => cheapTy(a));
+    const bad = tys.findIndex((t) => t === null);
+    if (bad >= 0) {
+      acct(`'${key0}' 的同元重载：第 ${bad + 1} 个实参的类型这一层还得先降一遍才知道`);
+      return null;
+    }
+    const { best, tie } = pick(fits, (c) => worst(
+      tys.length,
+      (i) => {
+        const pt = (c.sig.params ?? [])[i] ?? null;
+        const pr = pt === null ? null : resolveType(pt, env);
+        const want = pr === null || pr.type === null ? null : withBits(pr.type, pt);
+        return argCost(tys[i].ty, want, tys[i].lit);
+      },
+    ));
+    if (best === null) {
+      acct(`'${key0}' 的 ${fits.length} 条重载没有一条收得下这几个实参`);
+      return null;
+    }
+    if (tie) {
+      acct(`'${key0}' 的同元重载在这一句上分不出来（两条一样合得上 —— jancy 那边这也是歧义）`);
+      return null;
+    }
+    return best;
   };
-  /** `sub` 的基类链里有 `base` 吗（含多层、多基类）。 */  const derivesFrom = (sub, base) => {
+  /** `sub` 的基类链里有 `base` 吗（含多层、多基类）。 */
+  const derivesFrom = (sub, base) => {
     const seen2 = new Set();
     const q2 = [...(aggBases.get(sub) ?? [])];
     while (q2.length > 0) {
