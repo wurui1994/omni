@@ -207,6 +207,8 @@ export function makeFnEnv(o) {
     return r0.type !== null && (r0.type.k === 'ptr' || r0.type.k === 'tptr');
   })());
   const lifts = new Set();
+  /** **`static` 的局部量里被 `&` 取过地址的那几格**（第二百二十三刀）：槽自己发成 `(ptr T)`。 */
+  const staticLift = new Set();
   /** 长度从花括号里数出来的那几格（名字 → 定下来的类型）—— 查名那一层用它，不再解一遍声明。 */
   const forced = new Map();
   /** 体这一层要的模块级槽（`once` 的旗子、`static` 局部量那一格）—— 模块那一层照单发。 */
@@ -471,12 +473,16 @@ export function makeFnEnv(o) {
        `ptr`（局部的用它的单元 `名字$c`，模块级那一格**自己**就是 `(ptr T)`，第九 / 二十四刀）；
        别的是 `var`。 */
     const isLift = !isG && lifts.has(key);
+    /* **`static` 的局部量被 `&` 取过地址**（第二百二十三刀，25-static-local.jnc 的
+       `static int c = 7; return &c;`）：那一格的存储本来就是模块级的一格槽，所以提法与模块级
+       那一半（第二十四刀）**一模一样** —— 槽自己发成 `(ptr T)`，不另开单元。 */
+    const sLift = !isG && staticLift.has(key);
     const shape = lvalueShape({
       isStruct: ty.k === 'struct',
       isArr: ty.k === 'arr',
       isGlobal: isG,
       gLifted: isG && gLifted.has(key),
-      lifted: isLift,
+      lifted: isLift || sLift,
     });
     const code = shape === 'var' ? dname : `(var ${isLift ? cellName(dname) : dname})`;
     return { shape, code, type: ty };
@@ -1992,20 +1998,28 @@ export function makeFnEnv(o) {
           tmpBox.n += 1;
           alias.set(t.name, dn);
           /* 那一格与它的闸门都是**模块级**的（"程序启动时分配、一直待到程序结束"，
-             decl_storage.rst）—— 记进 `slots`，模块那一层发 `(global …)`。 */
-          slots.push({ name: dn, ty: emitType(r.type, 'slot', tyc) });
+             decl_storage.rst）—— 记进 `slots`，模块那一层发 `(global …)`。
+             **被 `&` 取过地址的那一格提成 `(ptr T)`**（第二百二十三刀）：与模块级那一半
+             （第二十四刀）逐字同一条 —— 槽自己就是那格单元，不另开一格。 */
+          const sbox = taken.has(t.name) && liftable(r.type);
+          if (sbox) staticLift.add(t.name);
+          slots.push({ name: dn, ty: sbox ? liftedType(r.type, tyc) : emitType(r.type, 'slot', tyc) });
           slots.push({ name: `${dn}$1`, ty: 'bool' });
-          if (!isInit) continue;
-          const v0 = ctx.expr(named(d)?.value, declTy);
-          if (v0 === null) return null;
+          if (!isInit && !sbox) continue;
+          const v0 = isInit ? ctx.expr(named(d)?.value, declTy) : null;
+          if (isInit && v0 === null) return null;
           const bpad = `${pad}    `;
-          out.push(
+          const gate = [
             `${pad}(if (un "!" (var ${dn}$1))`,
             `${pad}  (do`,
             `${bpad}(set ${dn}$1 (bool true))`,
-            `${bpad}(set ${dn} ${v0})`,
-            `${pad}  ))`,
-          );
+          ];
+          /* 提过的那一格要先开出那格单元（与静态数组那一支同一句 pnew）—— 开在闸门里：
+             只开一次，紧挨着写初值。 */
+          if (sbox) gate.push(`${bpad}(set ${dn} (pnew ${liftedType(r.type, tyc)} (int 1)))`);
+          if (isInit) gate.push(`${bpad}${sbox ? `(pstore (var ${dn}) ${v0})` : `(set ${dn} ${v0})`}`);
+          gate.push(`${pad}  ))`);
+          out.push(...gate);
           continue;
         }
         if (!isInit) {
