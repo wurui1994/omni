@@ -10,6 +10,7 @@
 // **不猜**：表里没有的头一律记账走开，这是与别的读取器同一条规矩。
 
 import { headOf, named } from './adapt.js';
+import { allInChain } from './declare.js';
 import {
   NO_CODE, NOT_YET, stmtLines, jumpLevel, jumpText,
   whileLines, doWhileLines, forLines, ifLines, switchLines, assertLines, srcTextOf,
@@ -134,14 +135,26 @@ export function emitStmt(n, ctx) {
   if (h === 'var-decl' || h === 'var-decl-curly') return ctx.localDecl(n, ctx.ind, ctx);
 
   if (h === 'switch') {
-    const c = ctx.cond(nm.cond ?? nm.expr);
+    /* **`switch` 的洞名是 `value`**（节点表 :148），不是 `cond` —— 先前照 `cond ?? expr` 读，
+       两样都是 undefined，于是整条落到"空的表达式"上（35-switch / 38-enum / 39-breakn /
+       40-forcont 那四格账全是它）。**按表读树**。
+       括号里是**逗号串**时那是**正则 switch**（Stmt.llk:192-195 的 resolver 就按这个分）
+       —— 另一族，记账走开。 */
+    const es = allInChain(nm.value, 'exprs-add', 'exprs');
+    if (es.length !== 1) { ctx.acct('正则 switch（括号里是逗号串）'); return null; }
+    /* **switch 的那一格值不真值化**（它要的是整数，不是 bool）：枚举落到基整数上，
+       而枚举在方言里本来就发成 int，所以文字一个字都不用改。先前走了 `ctx.cond`，
+       于是 `switch (x)` 出来是 `(bin "!=" (var x) (int 0))`。 */
+    const c = ctx.expr(es[0]);
     if (c === null) return null;
-    const sv = ctx.tmp('$sv');
-    const sk = ctx.tmp('$sk');
+    /* **`$svN` 与 `$skN` 共用同一个号**（旧降级那儿是 `$sv${tmp}` / `$sk${tmp}` 再 `tmp++`）。 */
+    const nth = ctx.tmp('');
+    const sv = `$sv${nth}`;
+    const sk = `$sk${nth}`;
     const plan = ctx.switchPlan?.(n, ctx.ind + 6);
     if (plan === null || plan === undefined) { ctx.acct('switch 的分组还拼不出来'); return null; }
     return switchLines({
-      sv, sk, condText: c, cases: plan.cases, groups: plan.groups, pad,
+      sv, sk, condText: c, cases: plan.cases, groups: plan.groups, def: plan.def, pad,
     });
   }
 

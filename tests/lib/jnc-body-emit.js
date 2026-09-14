@@ -22,6 +22,7 @@ import { readDeclType, readAnonType } from '../../src/lang/jnc/types.js';
 import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { addrTaken } from '../../src/lang/jnc/emit-global.js';
+import { evalConst, collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
 import { compoundValue, errTest, errValue, escapeText } from '../../src/lang/jnc/stmt-table.js';
@@ -38,6 +39,8 @@ import { zeroText } from '../../src/lang/jnc/expr-table.js';
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 400);
 const all = argv.includes('--all');
+/** `--why`：把**每一格账**印成 `文件 函数 → 为什么`（找下一刀该补哪儿时用）。 */
+const why0 = argv.includes('--why');
 
 function walkDir(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -434,7 +437,11 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     realOf: (code, t) => realOf(code, t?.w ?? 32, t?.u === true),
     /** 整数转到另一格（同宽同符号一个字都不发）—— `CONV_CHAIN` 的枚举那一条要它。 */
     intConv: (v, to) => ({ code: intConvCode(v.code, v.type, to), type: to }),
-    constInt: () => null,
+    /** `case` 的值要**编译期算出来**（枚举成员也在里头 —— `collectEnumConsts` 已经进 env）。 */
+    constInt: (node) => {
+      const v = evalConst(node, env);
+      return v === null || v === undefined ? null : v;
+    },
     /** 裸名字：只认形参与局部量（真正的九步要作用域图 —— 记账）。 */
     /** 裸名字：与**可写位置**那一层同一份（`nameLoad` 的四格就是形状那三条）。 */
     lookup: (node) => valOfLv(node),
@@ -702,6 +709,8 @@ for (const f of files) {
   const {
     fields: aggFields, ctors: aggCtors, vars: globals, bindable: gBindable,
   } = topAggs(tree, env);
+  /* 枚举项的值先算出来塞进环境 —— `case Color.Red:` 那一格要它（`constInt`）。 */
+  collectEnumConsts(tree, env);
   /* **被 `&` 取过地址的模块级标量**在方言那一侧是 `(ptr T)`（第二十四刀）—— 读写要 pload/pstore。 */
   const gLifted = addrTaken(tree);
   const fns = topFns(tree, env);
@@ -752,6 +761,7 @@ for (const f of files) {
         if (got === null || why.length > 0) {
           const w = why[0] ?? '体拼不出来';
           skip.set(w, (skip.get(w) ?? 0) + 1);
+          if (why0) console.log(`  账　${short}　${name}　→ ${w}`);
         } else {
           /* 体首那几行（按值传的结构体形参抄一份）排在体的前面。 */
           const whole = e.pre.length === 0 ? got : [...e.pre, got].join('\n');

@@ -277,9 +277,13 @@ export function makeCtx(env) {
    */
   ctx.switchPlan = (n, ind) => {
     const nm = named(n) ?? {};
-    const list = chainOf(named(nm.body)?.body, 'unit-add');
+    /* **`switch` 的 `body` 洞里躺的就是那条语句链**（`unit-add`），不是一格 `compound`
+       —— 先前多剥了一层（`named(nm.body)?.body`），于是一组都数不出来：`$sk` 的缺省值
+       成了 0、派发那几句一条都没发（35-switch.jnc 量出来的）。 */
+    const list = chainOf(nm.body, 'unit-add');
     const groups = [];
     const cases = [];
+    let def = null;
     let cur = null;
     ctx.loops.push({ kind: 'switch', step: false });
     for (const s of list) {
@@ -291,14 +295,12 @@ export function makeCtx(env) {
           const k = env.constInt?.(named(s)?.value);
           if (k === null || k === undefined) { ctx.loops.pop(); env.acct('case 的值算不出来'); return null; }
           cases.push({ value: k, group: groups.length - 1 });
+        } else {
+          /* **`default:` 记的是它那一组的号**：一个都不中时 `$sk` 指它。两个 default 是错。 */
+          if (def !== null) { ctx.loops.pop(); env.acct('switch 里有两个 default'); return null; }
+          def = groups.length - 1;
         }
-        const inner = named(s)?.body;
-        if (inner !== undefined && inner !== null) {
-          const ls = ctx.stmt(inner, ind);
-          if (ls === null) { ctx.loops.pop(); return null; }
-          cur.push(...ls);
-        }
-        continue;
+        continue;                                  // `case` / `default` 自己没有体（都是扁平的标记）
       }
       if (cur === null) { cur = []; groups.push(cur); }
       const ls = ctx.stmt(s, ind);
@@ -306,7 +308,11 @@ export function makeCtx(env) {
       cur.push(...ls);
     }
     ctx.loops.pop();
-    return { cases, groups: groups.map((g) => g.join('\n')) };
+    return {
+      cases,
+      def: def === null ? groups.length : def,
+      groups: groups.map((g) => (g.length === 0 ? null : g.join('\n'))),
+    };
   };
 
   /* 把拼齐的 `ctx` 交回给调用方 —— 注入那几格（`callOf` 那些）也要用它的 `expr`。 */

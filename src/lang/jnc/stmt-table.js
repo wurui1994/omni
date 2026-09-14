@@ -269,18 +269,23 @@ export function assertLines(condText, path, line, text, msg, pad) {
  * `continue` 不数它 —— switch 里的 `continue` 落成 `(cont 2)`，跳过这一圈回到外面那个真循环。
  */
 export function switchLines({
-  sv, sk, condText, cases, groups, pad,
+  sv, sk, condText, cases, groups, def, pad,
 }) {
   const out = [
     `${pad}(let ${sv} int ${condText})`,
-    `${pad}(let ${sk} int (int ${groups.length}))`,
+    /* **一个都不中时指向哪一组**：写了 `default:` 就是**那一组的号**，没写才是"组的个数"
+       （于是哪一组都不跑）。先前一律写组的个数，35-switch.jnc 那格量出来就是它。 */
+    `${pad}(let ${sk} int (int ${def ?? groups.length}))`,
   ];
   for (const { value, group } of cases) {
-    out.push(`${pad}(if (bin "==" (var ${sv}) (int ${value})) (set ${sk} (int ${group})))`);
+    /* 派发那一句的体也套一圈 `(do …)`（旧降级走的是 `body()`，单条也套）。 */
+    out.push(`${pad}(if (bin "==" (var ${sv}) (int ${value})) (do (set ${sk} (int ${group}))))`);
   }
   out.push(`${pad}(while (bool true)`);
   out.push(`${pad}  (do`);
   for (const [i, body] of groups.entries()) {
+    /* **一句都没有的那一组不发**（`case 1: case 2: …` 里前一格就是空的）。 */
+    if (body === null || body === '') continue;
     out.push(`${pad}    (if (bin "<=" (var ${sk}) (int ${i}))`);
     out.push(`${pad}      (do`);
     out.push(body);
