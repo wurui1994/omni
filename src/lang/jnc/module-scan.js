@@ -340,7 +340,17 @@ export function scanAggs(tree, env) {
       if (tn !== null) {
         for (const d of allInChain(tn.dcls, 'dcls-add', 'dcls')) {
           const t = readDeclType(tn.specs, d);
-          if (t !== null && t.name !== null) env.set(t.name, { kind: 'typedef', type: t });
+          /* **方言那一侧的名字带着主人那几段前缀**（类体里的 `typedef int Num;` 是 `Stat$Num`、
+             命名空间里的是 `ns$T`）—— 与聚合体、枚举那两支同一条口径。少这一格，点串写法
+             （`Stat.Num k;`）在 `baseOf` 那头核对不上（查着的名字是 `Num`、要的是 `Stat$Num`），
+             报的是"认不出基类型 'qualified'"（97-classtypedef.jnc）。
+             这一支**在类体那一遍之后**才走到（递归在后头），所以它写的名字得自己带前缀，
+             不然刚记好的 `Stat$Num` 又被盖成了 `Num`。 */
+          if (t !== null && t.name !== null) {
+            env.set(t.name, {
+              kind: 'typedef', type: t, name: owner === null ? t.name : `${owner}$${t.name}`,
+            });
+          }
         }
       }
     } else if (h === 'enum') {
