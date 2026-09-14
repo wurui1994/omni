@@ -44,7 +44,7 @@ export function emitStmt(n, ctx) {
       pad,
       ind: ctx.ind,
       block: ctx.block,
-      stmt: (x, i) => emitStmt(x, { ...ctx, ind: i }),
+      stmt: (x, i) => (ctx.stmt === undefined ? emitStmt(x, { ...ctx, ind: i }) : ctx.stmt(x, i)),
       hole: (x, name) => named(x)?.[name],
       once: () => ctx.tmp('jnc$once$'),
       escape: ctx.escape,

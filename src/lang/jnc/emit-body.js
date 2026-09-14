@@ -12,7 +12,9 @@ import { allInChain, chainOf } from './declare.js';
 import { emitStmt } from './emit-stmt.js';
 import { emitExpr } from './emit-expr.js';
 import { truthyCode } from './expr-table.js';
-import { catchAt, catchBlockLines, CONT_LOOP_HEADS } from './stmt-table.js';
+import {
+  catchAt, catchBlockLines, CONT_LOOP_HEADS, EC_HOIST,
+} from './stmt-table.js';
 
 /**
  * 一格函数体（`compound`）→ 一段文字。`env` 里要给：
@@ -46,6 +48,41 @@ export function makeCtx(env) {
     ...env,
     loops: env.loops ?? [],
     ind: 0,
+  };
+
+  /**
+   * 一条语句 —— **errorcode 的传播落点就开在这儿**（第五十八刀）。`EC_HOIST` 那几族开一格
+   * 落点：降完把收上来的那两句（`(let $eN …)` 与 `(if 出错 跳)`）摆在**这条语句之前**。
+   * 别的族把落点**关掉**（`ecOut === null`）—— 关掉就是"这儿插不进语句"，落进去的
+   * errorcode 调用当场记账不收，而不是悄悄发一段跑法不一样的代码。
+   *
+   * 循环那三种不开：条件每一圈都要重求，抬到外面就是错的。
+   */
+  ctx.stmt = (node, ind) => {
+    const h = headOf(node);
+    const saveOut = ctx.ecOut;
+    const savePad = ctx.ecPad;
+    ctx.ecOut = h !== null && EC_HOIST.has(h) ? [] : null;
+    ctx.ecPad = ' '.repeat(ind);
+    const r = emitStmt(node, { ...ctx, ind });
+    const pre = ctx.ecOut;
+    ctx.ecOut = saveOut;
+    ctx.ecPad = savePad;
+    if (r === null) return null;
+    return pre === null || pre.length === 0 ? r : [...pre, ...r];
+  };
+
+  /**
+   * 在**惰性位置**上降一格东西（第五十八刀）：`&&` / `||` 的右边、`? :` 的两支 —— 那儿求不求值
+   * 要看别人。传播那两句只插得到"这条语句之前"，插到那儿就成了"无条件先调一遍"，求值顺序与
+   * 短路语义一起被改掉。所以这些位置把落点**关掉**。
+   */
+  ctx.lazy = (run) => {
+    const save = ctx.ecOut;
+    ctx.ecOut = null;
+    const r = run();
+    ctx.ecOut = save;
+    return r;
   };
 
   /**
@@ -99,8 +136,13 @@ export function makeCtx(env) {
       if (ls === null || ls === undefined) { env.acct('赋值这一格还拼不出来'); return null; }
       return ls;
     }
-    const code = ctx.expr(node);
-    return code === null ? null : [`${pad}(expr ${code})`];
+    const v = emitExpr(node, null, ctx);
+    if (v === null) return null;
+    /* **抬走了的那一格**（errorcode 的传播、惰性那两格单元…）：值已经落在临时量上、传播那两句
+       也已经排在这条语句之前了，所以这条语句本身**一个字都不发**（lower.js:11721）。
+       先前照旧发一句 `(expr (var $e0))` —— 55-errorcode.jnc 的 `viaStmt` 就是量出它的那一格。 */
+    if (v.hoisted === true) return [];
+    return [`${pad}(expr ${v.code})`];
   };
 
   /**
@@ -126,7 +168,7 @@ export function makeCtx(env) {
     /* **体可以只是一条语句**（`if (x) return;`、`while (c) i++;`）——旧降级那儿走的是
        `body()` 而不是 `block()`：一条语句就降那一条，不用套 `(do …)`。 */
     if (headOf(node) !== 'compound') {
-      const ls = emitStmt(node, { ...ctx, ind });
+      const ls = ctx.stmt(node, ind);
       return ls === null ? null : ls.join('\n');
     }
     /* 语句链是**空基例**那一族（`unit` 一格子项都没有 + `unit-add {list, one}`，节点表 :25-26）
@@ -140,14 +182,14 @@ export function makeCtx(env) {
       ctx.loops.push({ kind: 'oneshot', step: false });
       const guarded = [];
       for (const s of list.slice(0, at)) {
-        const ls = emitStmt(s, { ...ctx, ind: ind + 4 });
+        const ls = ctx.stmt(s, ind + 4);
         if (ls === null) { ctx.loops.pop(); return null; }
         guarded.push(...ls);
       }
       ctx.loops.pop();
       const handler = [];
       for (const s of list.slice(at + 1)) {
-        const ls = emitStmt(s, { ...ctx, ind: ind + 4 });
+        const ls = ctx.stmt(s, ind + 4);
         if (ls === null) return null;
         handler.push(...ls);
       }
@@ -155,7 +197,7 @@ export function makeCtx(env) {
     }
     const out = [];
     for (const s of list) {
-      const ls = emitStmt(s, { ...ctx, ind });
+      const ls = ctx.stmt(s, ind);
       if (ls === null) return null;
       out.push(...ls);
     }
@@ -228,14 +270,14 @@ export function makeCtx(env) {
         }
         const inner = named(s)?.body;
         if (inner !== undefined && inner !== null) {
-          const ls = emitStmt(inner, { ...ctx, ind });
+          const ls = ctx.stmt(inner, ind);
           if (ls === null) { ctx.loops.pop(); return null; }
           cur.push(...ls);
         }
         continue;
       }
       if (cur === null) { cur = []; groups.push(cur); }
-      const ls = emitStmt(s, { ...ctx, ind });
+      const ls = ctx.stmt(s, ind);
       if (ls === null) { ctx.loops.pop(); return null; }
       cur.push(...ls);
     }

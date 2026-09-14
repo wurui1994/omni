@@ -33,7 +33,7 @@ export function emitExpr(n, want, ctx) {
      回卷**不在这儿** —— 它发生在算子那一处（`intBinary` / `intUnary`）。先前这一层把
      "掩一次"挂在这里（`wide`），于是 `f(x)` 与 `return x` 多掩一圈、`x / 2` 少掩一圈。 */
   if (ctx.isInt?.(want) === true && ctx.isInt?.(cur.type) === true) {
-    return { code: intConvCode(cur.code, cur.type, want), type: want };
+    return { code: intConvCode(cur.code, cur.type, want), type: want, hoisted: cur.hoisted };
   }
   return cur;
 }
@@ -83,14 +83,18 @@ export function emitExpr0(n, want, ctx) {
   }
   if (h === 'paren') return emitExpr0(nm.inner, want, ctx);
   /* **三目**：方言里就是 `(sel 条件 真 假)`。两支都按 `want` 降（于是回卷、装箱那几条各自落位）。
-     两支是**惰性**位置 —— errorcode 的落点在那儿要关掉（见 `EC_HOIST` 那条注）。 */
+     两支是**惰性**位置 —— errorcode 的落点在那儿要关掉（`ctx.lazy`，见 `EC_HOIST` 那条注）。 */
   if (h === 'cond') {
     const c = ctx.cond?.(nm.cond) ?? null;
     if (c === null) return null;
-    const a2 = emitExpr(nm.then ?? nm.a, want, ctx);
-    const b2 = emitExpr(nm.else ?? nm.b, want, ctx);
-    if (a2 === null || b2 === null) return null;
-    return { code: `(sel ${c} ${a2.code} ${b2.code})`, type: a2.type };
+    const run = () => {
+      const x = emitExpr(nm.then ?? nm.a, want, ctx);
+      const y = emitExpr(nm.else ?? nm.b, want, ctx);
+      return x === null || y === null ? null : { x, y };
+    };
+    const two = ctx.lazy === undefined ? run() : ctx.lazy(run);
+    if (two === null) return null;
+    return { code: `(sel ${c} ${two.x.code} ${two.y.code})`, type: two.x.type };
   }
 
   /* **裸名字**：九步查名（`NAME_LOOKUP_ORDER`）由注入的探子走完 —— 那是作用域图那一层。 */
@@ -128,10 +132,12 @@ export function emitExpr0(n, want, ctx) {
   if (h === 'binary') {
     const op = String(nm.op?.value ?? '');
     const CMP = ['==', '!=', '<', '<=', '>', '>='];
-    /* **`&&` / `||`**：两边各自真值化，结果是 bool（右边惰性 —— 方言的 `bin` 本来就是惰性节点）。 */
+    /* **`&&` / `||`**：两边各自真值化，结果是 bool（右边惰性 —— 方言的 `bin` 本来就是惰性节点）。
+       **右边是惰性位置**：errorcode 的落点在那儿要关掉（`ctx.lazy`），不然传播那两句就成了
+       "无条件先调一遍"，短路语义与求值顺序一起被改掉。 */
     if (op === '&&' || op === '||') {
       const c1 = ctx.cond?.(nm.a);
-      const c2 = ctx.cond?.(nm.b);
+      const c2 = ctx.lazy === undefined ? ctx.cond?.(nm.b) : ctx.lazy(() => ctx.cond?.(nm.b));
       if (c1 === null || c1 === undefined || c2 === null || c2 === undefined) return null;
       return { code: `(bin ${JSON.stringify(op)} ${c1} ${c2})`, type: ctx.T.bool };
     }

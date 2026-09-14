@@ -407,6 +407,54 @@ export const EC_HOIST = new Set(['var-decl', 'var-decl-curly', 'expr-stmt', 'ret
  */
 export const CONT_LOOP_HEADS = new Set(['while', 'do', 'for']);
 
+/**
+ * **`errorcode` 那一格的出错值**（第五十八刀，exceptions.rst:17："Intuitive defaults are
+ * assumed: `false` for bools, `-1` for integers and `null` for pointers"）。无符号整数上的
+ * -1 就是那一格全 1（这一层的整数一律以回卷后的样子存着，所以直接写那个数）。
+ * 别的类型（void / real / 结构体 / 数组 / 函数指针）jancy 没给默认值 —— 答 null。
+ * 枚举走整数那一条：jancy 那张表里它带 Integer 位（jnc_Type.cpp:107-111）。
+ */
+export function errValue(t, c = {}) {
+  if (t === null || t === undefined) return null;
+  if (t.k === 'bool') return '(bool false)';
+  if (t.k === 'int') return `(int ${t.u === true ? (1n << BigInt(t.w ?? 32)) - 1n : -1n})`;
+  if (t.k === 'ptr' || t.k === 'tptr') return c.tyText === undefined ? null : `(pnull ${c.tyText(t)})`;
+  if (t.k === 'class') return c.clsRoot === undefined ? null : `(pnull (ptr ${c.clsRoot(t.name)}))`;
+  if (t.k === 'enum' && t.base !== undefined && t.base !== null) return errValue(t.base, c);
+  if (t.k === 'string') return '(str "")';
+  return null;
+}
+
+/** **"这一格是出错值吗"那一句**（lower.js:1115-1120）：bool 取反、指针问空、别的跟出错值比。 */
+export function errTest(code, t, c = {}) {
+  if (t === null || t === undefined) return null;
+  if (t.k === 'bool') return `(un "!" ${code})`;
+  if (t.k === 'ptr' || t.k === 'tptr' || t.k === 'class') return `(pisnull ${code})`;
+  const ev = errValue(t, c);
+  return ev === null ? null : `(bin "==" ${code} ${ev})`;
+}
+
+/**
+ * **jancy 认哪些类型当错误码**：`isErrorCodeType`（jnc_ct_Type.h:635-639）问的是那张
+ * flagTable 里的 `ErrorCode` 位 —— bool、int8..int64（有无符号都算）、枚举、变体、字符串，
+ * 以及数据 / 类 / 函数 / 属性指针。`float` / `double` **当不了**错误码（写上 `errorcode`
+ * 在 jancy 那边是一条硬错，jnc_ct_FunctionType.cpp:180-181）。
+ */
+export const ERR_CODE_KINDS = new Set(['bool', 'int', 'enum', 'string', 'ptr', 'tptr', 'class', 'fnptr']);
+
+/**
+ * **出错的那一跳**（第五十九刀，lower.js:5089-5094）：跳到最里那一格 `try` / `catch` 作用域的
+ * 出口，没有就回调用方。方言里"跳到一格作用域的出口"就是那圈一次性循环的 `brk` ——
+ * 层号按"到栈顶的距离"算，所以中间隔着几层真循环都不用这一处操心。
+ */
+export function escapeText({ guard, loopsLen, curErr }) {
+  if (guard === null || guard === undefined) return `(ret ${curErr})`;
+  const lvl = loopsLen - guard.loopIdx;
+  const brk = `(brk${lvl === 1 ? '' : ` ${lvl}`})`;
+  return guard.flag === null || guard.flag === undefined
+    ? brk : `(do (set ${guard.flag} (bool true)) ${brk})`;
+}
+
 export const ASSIGN_ORDER = [
   { name: 'curly', why: '右边是一对花括号 → 按格子写，空项保留原值（只有 `=` 能这么写）' },
   { name: 'prop-set', why: '左边是属性 → 调存值器（要排在求左值之前）' },

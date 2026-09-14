@@ -23,7 +23,7 @@ import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
-import { compoundValue } from '../../src/lang/jnc/stmt-table.js';
+import { compoundValue, errTest, errValue, escapeText } from '../../src/lang/jnc/stmt-table.js';
 import { lvalueShape, SHAPE_ACCESS } from '../../src/lang/jnc/lvalue-table.js';
 import { memberShape } from '../../src/lang/jnc/member-table.js';
 import { readFormals } from '../../src/lang/jnc/emit-fn.js';
@@ -154,7 +154,8 @@ function topAggs(tree, env) {
   return { fields, ctors };
 }
 
-function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set()) {
+function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
+  ecBox = { n: 0 }) {
   const names = new Map();
   const nm = named(fnNode);
   const dc = nm === null ? null : readDcl(nm.dcl);
@@ -180,6 +181,11 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     }
   }
   let n = 0;
+  /* **errorcode 的临时格子另有一个计数器**（`ecSeq`，与 `$do`/`$sv` 那个 `tmp` 分开），而且它是
+     **一份模块一个**、跨函数连着数的（55-errorcode.jnc 里 `$e0`…`$e8` 一路排下去）——
+     所以由调用方按文件传进来。`$e` / `$l` / `$s` / `$x` 四族共用它，这一把只接 `$e`。
+     **有账的那几格函数会让号跟着差**（旧降级把它们也降了、号照样往前走），那是这把尺子
+     现在的界限：真正对不齐时账上会看见，不猜。 */
   const T = {
     int: { k: 'int' }, i32: { k: 'int' }, i64: { k: 'int' }, u64: { k: 'int' },
     real: { k: 'real' }, bool: { k: 'bool' }, string: { k: 'string' },
@@ -196,6 +202,14 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     return { ...ty, w: INT_BITS[word] ?? 32, u };
   };
   const CMP = new Set(['==', '!=', '<', '<=', '>', '>=', '&&', '||']);
+  /* 这个函数**自己的出错值**（不是 errorcode 的函数为 null）：调 errorcode 的那一处
+     "出错就往外跳"跳的就是 `(ret 这一格)`。 */
+  const retTy = nm === null ? retT : withBits(retT, readDeclType(nm.specs, nm.dcl));
+  const curErr = (() => {
+    const sp = nm === null ? null : readSpecs(nm.specs);
+    if (sp === null || !sp.words.includes('errorcode')) return null;
+    return errValue(retTy, { tyText: (x) => emitType(x, 'value') });
+  })();
   /** `.` 的左边落在哪个聚合体上（`structBehind`）：结构体自己、类那一格（里放的**就是**
       对象那段内存的地址）、以及"指到结构体的指针"—— 三者的 code 都是那段内存的地址，
       所以 `s.f` 与 `p->f` 落在同一句 `pfield` 上（第二十五刀：`.` 与 `->` 是同一个算符）。 */
@@ -318,7 +332,7 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     /* 返回类型那一格也要带**位宽与符号性**（`withBits`）：`size_t f()` 里 `return i * 3`
        落进去是"转到无符号那一格"= `& 掩码`，不是有符号那一套摊符号位。先前这儿写死
        `u: false`，于是 32-unsigned.jnc 的 `half` 与 55-errorcode.jnc 的 `usize` 各多一圈。 */
-    retType: nm === null ? retT : withBits(retT, readDeclType(nm.specs, nm.dcl)),
+    retType: retTy,
     inMain: false,
     /* 判据那几格（表里要问的谓词）。 */
     isInt: (t) => t !== null && t !== undefined && t.k === 'int',
@@ -468,9 +482,6 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       if (key === 'printf') { acct('printf 那一族（格式化）还没接'); return null; }
       const sig = fns.get(key);
       if (sig === undefined) { acct(`调的那个 '${key}' 查不着（跨文件/宿主面）`); return null; }
-      /* `errorcode` 的那几格（第五十八刀）：调它时"出错就跳"要提到语句那一层
-         （`(let $eN …)` + `(if (un "!" …) …)`），整格是另一族 —— 记账走开。 */
-      if (sig.ec === true) { acct('调 errorcode 那一族（出错就跳要提到语句层）还没接'); return null; }
       const args = allInChain(nm2.args, 'args-add', 'args');
       const parts = [];
       for (const [i, a2] of args.entries()) {
@@ -481,10 +492,33 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
         if (v === null) return null;
         parts.push(v);
       }
-      return {
-        code: `(call ${key}${parts.map((x) => ` ${x}`).join('')})`,
-        type: sig.ret === null ? { k: 'void' } : withBits(sig.ret, sig.retDecl),
-      };
+      const code = `(call ${key}${parts.map((x) => ` ${x}`).join('')})`;
+      const rt = sig.ret === null ? { k: 'void' } : withBits(sig.ret, sig.retDecl);
+      /**
+       * **`errorcode` 的传播**（第五十八刀，lower.js:15065-15084）：抬一格临时、比一下，
+       * 出错就往外跳。往哪儿跳看 `guards` —— 里头有 `try { … }` / `catch:` 就跳它的出口，
+       * 没有才回调用方（`(ret 出错值)`）。三处说清：
+       *   - `try` 底下什么都不插（调用回的**正是**那个出错值）—— `try` 那一族还没接，记账；
+       *   - 插不进语句的位置（惰性位置、循环条件）**明说不收**，不悄悄把错吞掉；
+       *   - 这个函数自己不是 errorcode、外面也没有 try 时，jancy 走运行期的 dynamic throw
+       *     —— 这一层没有运行期展开，所以也是明说不收。
+       */
+      if (sig.ec === true) {
+        if (curErr === null) {
+          acct('不写 `try` 调 errorcode，而这个函数自己不是 errorcode（jancy 那儿走运行期的 dynamic throw）'); return null;
+        }
+        if (ctxRef.ecOut === null || ctxRef.ecOut === undefined) {
+          acct('这个位置上的 errorcode 调用（传播那两句插不进语句 —— 惰性位置/循环条件）'); return null;
+        }
+        const test = errTest(`(var $e${ecBox.n})`, rt, { tyText: (x) => emitType(x, 'value') });
+        if (test === null) { acct(`${rt.k} 定不出出错值的比法`); return null; }
+        const v = `$e${ecBox.n}`;
+        ecBox.n += 1;
+        ctxRef.ecOut.push(`${ctxRef.ecPad}(let ${v} ${emitType(rt, 'slot')} ${code})`);
+        ctxRef.ecOut.push(`${ctxRef.ecPad}(if ${test} (do ${escapeText({ guard: null, loopsLen: 0, curErr })}))`);
+        return { code: `(var ${v})`, type: rt, hoisted: true };
+      }
+      return { code, type: rt };
     },
     /** `printf("%d %d\n", a, b)` → 按 `\n` 切段，每段一条 `(print …)`；`%d` 那一格是 `(tostr 值)`。 */
     printf: (node, ind, ctx) => {
@@ -558,6 +592,8 @@ for (const f of files) {
      所以先数一遍：一个名字出现不止一次就整族记账走开（135-overloadcheap.jnc、
      158-overloadlit.jnc 量出来的三格假不一致就是它）。 */
   const seen = new Map();
+  /* 传播那些临时格子的号是**一份模块一个**、跨函数连着数的 —— 所以这一格按文件开。 */
+  const ecBox = { n: 0 };
   {
     const cnt = (n) => {
       if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
@@ -588,7 +624,7 @@ for (const f of files) {
       }
       if (want !== undefined) {
         const why = [];
-        const e = makeEnv(n, env, (w) => { why.push(w); }, fns, aggFields, aggCtors);
+        const e = makeEnv(n, env, (w) => { why.push(w); }, fns, aggFields, aggCtors, ecBox);
         e.onCtx = (c2) => { ctxRef = c2; };
         const got = emitBody(nm.body, e, 4);
         if (got === null || why.length > 0) {
