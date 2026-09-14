@@ -67,7 +67,7 @@ export function sigOf(nm, env, emit, t0 = null) {
  * 那几族照旧记在 `overloads` 里，发的那一层明说不收。
  */
 function plainName(leaf) {
-  if (leaf === 'get' || leaf === 'set' || leaf === 'construct' || leaf === 'destruct') return false;
+  if (leaf === 'get' || leaf === 'set' || leaf === 'destruct') return false;
   return !leaf.includes('op$') && !leaf.startsWith('construct$');
 }
 

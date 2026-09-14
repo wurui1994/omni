@@ -127,7 +127,17 @@ export function makeFnEnv(o) {
     const root = clsRoot(cls);
     const tag = tags.get(cls);
     if (tag === undefined) { acct(`'${cls}' 没有动态类型标签（类体没解出来）`); return null; }
-    const ctor = methods.get(`${cls}$construct`);
+    const ctorBase = `${cls}$construct`;
+    let ctorKey = ctorBase;
+    let ctor = methods.get(ctorBase);
+    /* **构造也能重载**（`construct()` / `construct(int)` / `construct(int,int)`，139-ctoroverload.jnc）：
+       同名那一族按实参挑一格 —— 与普通调用走的是同一格 `pickOvl`。挑不出来它自己记账。 */
+    if (ctor !== undefined) {
+      const p0 = pickOvl(ctorBase, ctor, argNodes ?? []);
+      if (p0 === null) return null;
+      ctor = p0.sig;
+      ctorKey = p0.key;
+    }
     /* **字段写了初值那几格是构造干的活**（第七十八刀）：所以构造非在不可 —— 合成那一步没成时
        这儿明说不收，绝不交出一段没初始化过的内存。 */
     if (fieldInits.has(cls) && ctor === undefined) {
@@ -184,7 +194,7 @@ export function makeFnEnv(o) {
     ];
     if (ctor !== undefined) {
       const pass = formals.map((_, i) => ` (var $i${i})`).join('');
-      lines.push(`      (expr (call ${cls}$construct (var $p)${pass}))`);
+      lines.push(`      (expr (call ${ctor.emit ?? ctorKey} (var $p)${pass}))`);
     }
     lines.push('      (ret (var $p))))');
     helpers.push(lines.join('\n'));
