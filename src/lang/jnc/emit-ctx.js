@@ -2351,6 +2351,37 @@ export function makeFnEnv(o) {
       }
       return false;
     },
+    /**
+     * **相等算符那一对**（第二百零二刀）：`operator ==` / `operator !=`（语料的原样在
+     * std_Guid.jnc:80/84 —— 一个形参、回 bool，形参是**指向同一格结构体的指针**）。
+     * `x == y` 落成一句 `(call Guid$op$eq (var x) (var y))`（旧降级 132-opcmp.jnc 的真输出）。
+     *
+     * 三条界，各有理由：
+     *   - 东家从**左边**那一格的类型上问（jancy 那边这一格是左边那个类型的成员）；沿基类链
+     *     找它走的是与查普通方法同一条路（`findMethod`），于是基类上写的那一对也查得着；
+     *   - `==` 与 `!=` **各自登记、互不代替** —— 只写了 `==` 而源码写 `!=` 时不替它取反
+     *     （jancy 也是各挑各的重载）；
+     *   - 这一层结构体那一格里放的**就是地址**（第十二刀），所以那格值的 code 拿去当指针传
+     *     本来就是对的 —— 不用再取一次地址。
+     *
+     * 收不下的照旧答 null（调用方记账），不静静地落到"指针互比"那一支上去比地址。
+     */
+    opBin: (op, a, b) => {
+      const w = OP_NAMES[op];
+      if (w === undefined || !['==', '!='].includes(op)) return null;
+      const agg = aggBehind(a?.type);
+      if (agg === null) return null;
+      const f = findMethod(agg, `op$${w}`);
+      if (f === null || f === undefined) return null;
+      const sig = f.sig;
+      if ((sig.params ?? []).length !== 1) {
+        acct(`算符 '${agg} ${op}' 不是一个形参（挑哪一格还没接）`); return null;
+      }
+      if (sig.ret === null || sig.ret === undefined) {
+        acct(`算符 '${agg} ${op}' 没有返回类型`); return null;
+      }
+      return { code: `(call ${f.key} ${a.code} ${b.code})`, type: sig.ret };
+    },
     /* 驱动把它那一格 `ctx` 交回来（`expr` / `ecOut` / `guards` 都在它上头）。 */
 
     onCtx: (c2) => { ctxRef = c2; },
