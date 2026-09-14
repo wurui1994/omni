@@ -21,6 +21,7 @@ import { nameText, allInChain, readDcl } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
 import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
+import { addrTaken } from '../../src/lang/jnc/emit-global.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
 import { compoundValue, errTest, errValue, escapeText } from '../../src/lang/jnc/stmt-table.js';
@@ -106,14 +107,20 @@ function topFns(tree, env) {
 function topAggs(tree, env) {
   const fields = new Map();
   const ctors = new Set();                                           // 有 construct 的那几格
-  const scan = (n, owner) => {
+  const vars = new Map();                                            // 模块级那几格量（名字 → 声明类型）
+  const bindable = new Set();                                        // 里头带取/存两格的那几个
+  const scan = (n, owner, inAgg) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
     let inner = owner;
+    let agg = inAgg;
+    /* 函数体里的东西不往下扫（局部量由体那一层管，局部类先不管）。 */
+    if (h === 'fn-def' || h === 'fn-proto') return;
     if (h === 'namespace') {
       const nm = nameText(named(n)?.name);
       if (nm !== null) inner = owner === null ? nm : `${owner}$${nm}`;
     } else if (h === 'agg') {
+      agg = true;
       const a = readAgg(n);
       const nm = a === null ? null : nameText(a.name);
       if (a !== null && nm !== null) {
@@ -147,15 +154,35 @@ function topAggs(tree, env) {
       const e = readEnum(n);
       const nm = e === null ? null : nameText(e.name);
       if (nm !== null) env.set(nm, { kind: 'enum', name: nm });
+    } else if (h === 'var-decl' && !inAgg) {
+      /* **模块级那几格量**（`int calls = 0;`）：裸名字查名的第一步就要看得见它们
+         （`NAME_LOOKUP_ORDER` 的 `var` 那一格里"模块级"也算）。`static` 的照收 ——
+         它在方言那一侧的名字与普通的一样（模块级本来就只有一格）。 */
+      const vn = named(n);
+      if (vn !== null) {
+        const sp = readSpecs(vn.specs);
+        const bind = sp !== null && (sp.words.includes('bindable') || sp.words.includes('property'));
+        for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
+          const dcl = headOf(d) === 'init' ? named(d)?.dcl : d;
+          const t = readDeclType(vn.specs, dcl);
+          if (t !== null && t.name !== null) {
+            vars.set(t.name, t);
+            if (bind) bindable.add(t.name);
+          }
+        }
+      }
     }
-    for (const it of n.items) scan(it, inner);
+    for (const it of n.items) scan(it, inner, agg);
   };
-  scan(tree, null);
-  return { fields, ctors };
+  scan(tree, null, false);
+  return {
+    fields, ctors, vars, bindable,
+  };
 }
 
 function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
-  ecBox = { n: 0 }) {
+  ecBox = { n: 0 }, tmpBox = { n: 0 }, globals = new Map(), gLifted = new Set(),
+  gBindable = new Set()) {
   const names = new Map();
   /** 名字在方言那一侧叫什么（`this` → `$this`、按值传的结构体形参 → 它那份拷贝 `名字$v`）。 */
   const alias = new Map();
@@ -279,16 +306,28 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     if (h === 'paren') return lvOf(nm2.inner);
     if (h === 'name') {
       const key = String(nm2.text?.value ?? '');
-      const t = names.get(key);
+      /* **局部与形参遮住模块级那一格**（查名的第一步就是"查得着的变量"，次序即规则）。 */
+      const t = names.get(key) ?? globals.get(key);
+      const isG = !names.has(key) && globals.has(key);
       if (t === undefined) { acct(`'${key}' 查不着（要作用域图）`); return null; }
+      /* **模块级的 `bindable` data**（第七十刀）：那一格生成取/存两个函数，读它是
+         `(call 名字$get)`、写它是 `(call 名字$set …)` —— 属性那一族，另算。 */
+      if (isG && gBindable.has(key)) {
+        acct(`模块级的 bindable data '${key}'（读写各是一次调用）还没接`); return null;
+      }
       const r = resolveType(t, env);
       if (r.type === null) { acct(`'${key}'：${r.why}`); return null; }
       const ty = withBits(r.type, t);
       /* **方言那一侧的名字**可能与源码里的不同（按值传的结构体形参指的是它那份拷贝）。 */
       const dname = alias.get(key) ?? key;
-      /* **结构体与数组是 `agg`**（那一格里放的就是地址，第十二 / 二十一刀）；别的是 `var`。
-         "提到堆上"那一族（第九 / 二十四刀）要 `&x` 的账，这一层还没有 —— 走到它就记账。 */
-      const shape = lvalueShape({ isStruct: ty.k === 'struct', isArr: ty.k === 'arr' });
+      /* **结构体与数组是 `agg`**（那一格里放的就是地址，第十二 / 二十一刀）；模块级**提过**的
+         那一格自己就是 `(ptr T)`（第二十四刀）所以是 `ptr`；别的是 `var`。 */
+      const shape = lvalueShape({
+        isStruct: ty.k === 'struct',
+        isArr: ty.k === 'arr',
+        isGlobal: isG,
+        gLifted: isG && gLifted.has(key),
+      });
       return { shape, code: shape === 'var' ? dname : `(var ${dname})`, type: ty };
     }
     /* `*p`（`ptrLv`）：p 是一格指针值，那一格的位置**就是**它；目标是结构体/数组时是 `agg`。 */
@@ -357,7 +396,7 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       return (a.w ?? 32) >= (b.w ?? 32) ? a : b;
     },
     typeOfUnary: (op, a) => (op === '!' ? { k: 'bool' } : a),
-    tmp: (p) => `${p}${n++}`,
+    tmp: (p) => `${p}${tmpBox.n++}`,
     loops: [],
     retVoid: retT === null,
     /* 返回类型那一格也要带**位宽与符号性**（`withBits`）：`size_t f()` 里 `return i * 3`
@@ -393,9 +432,7 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       /* `static` 的局部量是**另一条路**（第二十六刀）：一格模块级的槽 `名字$sN` + 一道
          只跑一次的闸门 `名字$sN$1`。声明这一层发不出它 —— 记账走开，不猜。 */
       const sp0 = readSpecs(vn.specs);
-      if (sp0 !== null && sp0.words.includes('static')) {
-        acct('`static` 的局部量（模块级那一格 + 只跑一次的闸门）还没接'); return null;
-      }
+      const isStatic = sp0 !== null && sp0.words.includes('static');
       const out = [];
       for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
         const isInit = headOf(d) === 'init';
@@ -407,6 +444,35 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
         names.set(t.name, t);
         const ty = emitType(r.type, 'slot');
         const declTy = withBits(r.type, t);
+        /**
+         * **`static` 的局部量**（第二十六刀）：两件事各有出处。
+         *   **存储**是"程序启动时分配、一直待到程序结束"（decl_storage.rst）—— 也就是一格
+         *   模块级的槽 `名字$sN`（号从共用的那个计数器来，`$` 不在 jancy 的标识符里所以撞不上）；
+         *   **初值只跑一次** —— jancy 把它包在 `once` 里，这一层落成一道模块级的布尔闸门
+         *   `名字$sN$1`：`(if (un "!" 闸门) (do (set 闸门 真) 初值…))`。
+         * 没写初值的一个字都不发（那一格本来就是零）。`(global …)` 那两行在模块那一层，
+         * 不在这把尺子量的范围里。
+         */
+        if (isStatic) {
+          if (r.type.k === 'struct' || r.type.k === 'arr' || r.type.k === 'class') {
+            acct(`'${t.name}' 是 static 的聚合体/类（那一格要 pnew + 构造，还没接）`); return null;
+          }
+          const dn = `${t.name}$s${tmpBox.n}`;
+          tmpBox.n += 1;
+          alias.set(t.name, dn);
+          if (!isInit) continue;
+          const v0 = ctx.expr(named(d)?.value, declTy);
+          if (v0 === null) return null;
+          const bpad = `${pad}    `;
+          out.push(
+            `${pad}(if (un "!" (var ${dn}$1))`,
+            `${pad}  (do`,
+            `${bpad}(set ${dn}$1 (bool true))`,
+            `${bpad}(set ${dn} ${v0})`,
+            `${pad}  ))`,
+          );
+          continue;
+        }
         if (!isInit) {
           /* **没写初值**那一格（`LOCAL_DECL_ORDER` 的数组/结构体两条 + 标量的零值）：
              结构体与数组各是一段自己的 `(pnew … (int 1))` 内存（第十二 / 十刀），标量按
@@ -595,6 +661,10 @@ let ctxRef = null;
 let filesOk = 0;
 let cmp = 0;
 let same = 0;
+let drift = 0;
+const driftAt = [];
+/** 把临时格子的号抹平（`$e10` / `$s6` / `$do1` …）—— 只用来分辨"只差号"这一种。 */
+const numsOff = (s) => s.replace(/\$(e|s|l|c|x|do|sv|sk|once\$)\d+/g, '$$$1N');
 const diff = [];
 const skip = new Map();
 
@@ -610,13 +680,20 @@ for (const f of files) {
   filesOk += 1;
   const short = f.split('/').pop();
   const env = new Map();
-  const { fields: aggFields, ctors: aggCtors } = topAggs(tree, env);
+  const {
+    fields: aggFields, ctors: aggCtors, vars: globals, bindable: gBindable,
+  } = topAggs(tree, env);
+  /* **被 `&` 取过地址的模块级标量**在方言那一侧是 `(ptr T)`（第二十四刀）—— 读写要 pload/pstore。 */
+  const gLifted = addrTaken(tree);
   const fns = topFns(tree, env);
   /* **重载过的名字要整族躲开**（第七十九刀）：旧降级给第二格起改名（`q$2` 那一套），
      而尺子这边是按名字取旧输出的一格 —— 拿三个不同的体去对同一格是**错的比法**。
      所以先数一遍：一个名字出现不止一次就整族记账走开（135-overloadcheap.jnc、
      158-overloadlit.jnc 量出来的三格假不一致就是它）。 */
   const seen = new Map();
+  /* **共用的那个临时号**（`this.tmp`）：`$do` / `$sv` / `$sk` / `$c` / `static` 的 `名字$sN`
+     都从它取号，而它是**一份模块一个**（跨函数连着数）—— 所以也按文件开。 */
+  const tmpBox = { n: 0 };
   /* 传播那些临时格子的号是**一份模块一个**、跨函数连着数的 —— 所以这一格按文件开。 */
   const ecBox = { n: 0 };
   {
@@ -649,7 +726,8 @@ for (const f of files) {
       }
       if (want !== undefined) {
         const why = [];
-        const e = makeEnv(n, env, (w) => { why.push(w); }, fns, aggFields, aggCtors, ecBox);
+        const e = makeEnv(n, env, (w) => { why.push(w); }, fns, aggFields, aggCtors, ecBox, tmpBox,
+          globals, gLifted, gBindable);
         e.onCtx = (c2) => { ctxRef = c2; };
         const got = emitBody(nm.body, e, 4);
         if (got === null || why.length > 0) {
@@ -660,7 +738,13 @@ for (const f of files) {
           const whole = e.pre.length === 0 ? got : [...e.pre, got].join('\n');
           cmp += 1;
           if (whole === want) same += 1;
-          else if (diff.length < 20) diff.push(`${short}　${name}\n      旧 ${want}\n      新 ${whole}`);
+          else if (numsOff(whole) === numsOff(want)) {
+            /* **只差临时格子的号**：那两个计数器是一份模块一个、跨函数连着数的，而这把尺子
+               遇到有账的函数就走开、号不跟着走 —— 所以后面那几格的号会整体偏小。
+               这是"前面有一格没接"的后果，与规则无关，单独记一栏（不算对，也不算规则错）。 */
+            drift += 1;
+            if (driftAt.length < 10) driftAt.push(`${short}　${name}`);
+          } else if (diff.length < 20) diff.push(`${short}　${name}\n      旧 ${want}\n      新 ${whole}`);
         }
       }
       return;                                                        // 体里不再往下找函数
@@ -671,7 +755,9 @@ for (const f of files) {
 }
 
 console.log(`语料 ${filesOk} 份　对比函数体 ${cmp} 格`
-  + `　一模一样 ${same}（${(same / Math.max(cmp, 1) * 100).toFixed(1)}%）　不一致 ${cmp - same}`);
+  + `　一模一样 ${same}（${(same / Math.max(cmp, 1) * 100).toFixed(1)}%）`
+  + `　只差临时号 ${drift}　不一致 ${cmp - same - drift}`);
+if (drift > 0) console.log(`只差临时号（前面有一格没接、号没跟着走）：${driftAt.join('　')}`);
 if (skip.size > 0) {
   const top = [...skip].sort((a, b) => b[1] - a[1]).slice(0, 8);
   console.log(`还没接（记账，不算对）：${[...skip].reduce((s, [, n]) => s + n, 0)} 格　→ `

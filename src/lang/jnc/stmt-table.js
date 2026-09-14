@@ -72,8 +72,9 @@ export function stmtLines(head, n, ctx) {
       `${pad}  (do`,
       `${pad}    (set ${flag} (bool true))`,
       ...body,
-      `${pad}  )`,
-      `${pad})`,
+      /* 收尾那两个括号在**同一行**（`(do` 与 `(if` 一起关，lower.js:10527）——
+         `static` 局部量那道闸门也是同一个形状。摆成两行就是 161-once.jnc 那格不一致。 */
+      `${pad}  ))`,
     ];
   }
   /* **`throw;`** 与"errorcode 调用出错时那一跳"落的是同一段代码（第五十九刀的 `escape`）：
