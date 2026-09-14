@@ -24,7 +24,7 @@ import { scanAggs, scanFns, memberInit, sigOf } from './module-scan.js';
 import { readBodyMembers } from './agg.js';
 import { structLine } from './emit-agg.js';
 import {
-  globalLines, addrTaken, liftable, liftedType, arrayFromCurly,
+  globalLines, addrTaken, liftable, liftedType, arrayFromCurly, staticCtorFlag,
 } from './emit-global.js';
 import { fnHead, readFormals, fnName, needsCtor, hasStaticCtor } from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
@@ -381,15 +381,18 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         cells.push(`    (set ${full} (pnew ${st} (int 1)))`);
       } else if (r.type.k === 'class' && (t.ptrs ?? 0) === 0) {
         /**
-         * **模块级的类变量**（`Counter g_c;`，49-class.jnc）：jancy 里这是"程序一起来就造好的
-         * 一格对象"（`module.construct` 的 pnew + 写 `$tag`），与局部量 `Counter c;` 的那一格
-         * **同一条路**（pnew + tag + 构造）。少这一步，`g_c.reset(7)` 跑的时候里头是零 ——
-         * 指针越界。
+         * **模块级的类变量**（`Counter g_c;` / `Point g_p(3, 4);`，49-class.jnc / 50-construct.jnc）：
+         * jancy 里这是"程序一起来就造好的一格对象"（`module.construct`），与局部量
+         * `Counter c;` **同一条路** —— pnew + 写 `$tag` + 构造。所以直接借 `newObj`
+         * （它会按默认实参补、会明说不收），声明符尾巴上那对括号就是构造实参。
+         * 少这一步，`g_p.area()` 拿到的是一段全零的内存（量出来那一行是 `0 0`，该是 `12 42`）。
          */
-        const tag = tags.get(r.type.name) ?? 0;
-        const root = clsRoot(r.type.name);
-        cells.push(`    (set ${full} (pnew (ptr ${root}) (int 1)))`);
-        cells.push(`    (pstore (pfield (var ${full}) $tag) (int ${tag}))`);
+        const ct0 = named(t.raw?.dcl)?.ctor;
+        const cargs0 = headOf(ct0) === 'ctor'
+          ? allInChain(named(ct0)?.args, 'args-add', 'args') : [];
+        const o0 = modInit().e.newObj(r.type.name, cargs0);
+        if (o0 === null) continue;                           // 账已经记过
+        cells.push(`    (set ${full} ${o0.code})`);
       } else if (box) {
         const pt = liftedType(r.type, tyc);
         cells.push(`    (set ${full} (pnew ${pt} (int 1)))`);
@@ -625,6 +628,25 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    *
    * 收敛着来（基类先于派生类定下来），因为"基类有没有构造"本身也可能是合成出来的。
    */
+  /**
+   * **`static construct` 落成一道只跑一次的闸门**（第一百三十三 / 二百五十六刀）：
+   * jancy 的静态构造在"第一次用到这个类"时跑一遍，这一层把那件事钉在**实例构造的开头**
+   * —— 一格模块级 bool 当旗子（`<类>$construct$static$1`），没举起来就举起来、再调一次
+   * `<类>$construct$static`（193-staticctorns.jnc / 50-construct.jnc 的真输出）。
+   *
+   * 两处共用它：合成出来的构造、以及人写的构造（那时插在体的最前头）。
+   */
+  const staticGate = (a, cls, pad) => {
+    if (!hasStaticCtor(a)) return [];
+    const flag = `${cls}$construct$static$1`;
+    decls.push(`  ${staticCtorFlag(cls)}`);
+    return [
+      `${pad}(if (un "!" (var ${flag}))`,
+      `${pad}  (do`,
+      `${pad}    (set ${flag} (bool true))`,
+      `${pad}    (expr (call ${cls}$construct$static))))`,
+    ];
+  };
   const synth = new Map();                               // 类 → { bases, agg }
   {
     const hasCtorOf = (cn) => methods.has(`${cn}$construct`) || synth.has(cn);
@@ -632,9 +654,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     /* **这几族这一层还接不上**：有它们在就不合成（否则发出来的构造漏了半截）。
        **属性自己不算一格理由**：写出来的那对取/存是两格函数、体里那几格字段就是普通字段
        （初值那几句由 `fieldInitLines` 发，152-propfieldinit.jnc）—— 真要另一套的是
-       `autoget` / `bindable` 生成的那一格（下面那条）与事件、反应器。 */
-    const otherReason = (a) => hasStaticCtor(a)
-      || a.members.some((m) => m.shape === 'event' || m.shape === 'reactor')
+       `autoget` / `bindable` 生成的那一格（下面那条）与事件、反应器。
+       **`static construct` 也不算**：它落成"一道只跑一次的闸门 + 一次调用"（`staticGate`）。 */
+    const otherReason = (a) => a.members.some((m) => m.shape === 'event' || m.shape === 'reactor')
       || a.members.some((m) => ['bindable', 'autoget'].some((w) => (m.type?.mods ?? []).includes(w)));
     /* **内嵌的对象字段**（类的字段、或带构造的结构体字段）也要一格构造 —— 它是合成的理由之一。 */
     const hasEmbedded = (a) => a.members.some((m) => {
@@ -651,7 +673,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         if (cls === null || synth.has(cls) || methods.has(`${cls}$construct`)) continue;
         if (!needsCtor(a, env) || otherReason(a)) continue;
         const bs = (aggBases.get(cls) ?? []).filter((b) => hasCtorOf(b));
-        if (bs.length === 0 && !fieldInits.has(cls) && !hasEmbedded(a)) continue;
+        /* 合成的**理由**有四样：基类要构造、字段带初值、内嵌的对象、以及**有静态构造**
+           （那一格实例构造里就只有那道闸门，193-staticctorns.jnc）。 */
+        if (bs.length === 0 && !fieldInits.has(cls) && !hasEmbedded(a) && !hasStaticCtor(a)) continue;
         synth.set(cls, { bases: bs, agg: a });
         grew = true;
       }
@@ -669,6 +693,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       const fi = fieldInitLines(s.agg, '    ');
       if (fi === null) continue;                           // 账已经记过
       const lines = [
+        ...staticGate(s.agg, cls, '    '),
         ...s.bases.map((b) => `    (expr (call ${b}$construct (var $this)))`),
         ...fi,
       ];
@@ -884,9 +909,11 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     const a = aggs.find((x) => x.emitName === mi.owner);
     const kind = a !== undefined && (a.word === 'class' || a.word === 'opaque class') ? 'class' : 'struct';
     const ownerEmit = kind === 'class' ? clsRoot(mi.owner) : mi.owner;
-    /* **构造那一格前头还有两截**：基类的构造（没显式调的那几格补上）+ 字段初值。 */
+    /* **构造那一格前头还有三截**：静态构造那道闸门 + 基类的构造（没显式调的那几格补上）
+       + 字段初值。 */
     const head0 = [];
     if (mi.name === 'construct') {
+      if (a !== undefined) head0.push(...staticGate(a, mi.owner, '    '));
       const done = explicitBases(named(mi.node)?.body);
       const bs = (aggBases.get(mi.owner) ?? []).filter((b, i) => methods.has(`${b}$construct`)
         && !done.has(i + 1) && !done.has(b) && !done.has(b.slice(b.lastIndexOf('$') + 1)));
@@ -1021,6 +1048,16 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   if (mainBody === null && opts.needEntry === true) {
     diags.error(null, 'jancy 的入口是 `int main()`，这份源码里没有');
     return '';
+  }
+
+  /**
+   * **模块级那一层初值要的东西**（`$newoN` 那几格助手、`once` 的槽）：与函数体那条同一条路
+   * —— 体那一层记下来、模块那一层照单发。这一遍要排在**所有** `modInit()` 用完之后
+   * （少了它，`Point g_p(3, 4);` 发出来的 `(call $newo0)` 谁也没声明过）。
+   */
+  if (modEnv !== null) {
+    for (const s of modEnv.e.slots) decls.push(`  (global ${s.name} ${s.ty})`);
+    for (const hh of modEnv.e.helpers) decls.push(hh);
   }
 
   const prologue = [...cells, ...inits].join('\n');
