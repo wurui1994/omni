@@ -175,6 +175,19 @@ function baseOf(t, env, depth = 0) {
         const inner = fnParts({ ...e.type, ptrs: e.type.ptrs + 1, shape: 'fnptr' }, env);
         return inner;
       }
+      /**
+       * **`typedef function F(形参);`**（第二百一十五刀，194-fntypedef.jnc）：写着 `function`
+       * 而**一个 `*` 都不带**的那一种起的是一格**函数类型** —— jancy 的 `DeclTypeCalc` 那儿
+       * 它是 TypeKind_Function，星是**用的时候**才加的（`FpFunc thin* f2 = …`，
+       * samples/jnc/20_FunctionPtr.jnc:61）。所以它与上头那一种（带返回类型的
+       * `typedef Num Fn(int, int);`）落的是**同一格** `fnty`，只差返回类型：压根没写就是 void。
+       */
+      if (e.type.shape === 'fnptr' && (e.type.ptrs ?? 0) === 0
+        && (e.type.mods ?? []).includes('function') && e.type.base?.kind === 'none') {
+        return fnParts({
+          ...e.type, ptrs: 1, base: { kind: 'word', text: 'void' },
+        }, env);
+      }
       const r = resolveType(e.type, env, depth + 1);
       return r.type;
     }
