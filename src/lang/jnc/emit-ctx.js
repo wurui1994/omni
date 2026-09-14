@@ -631,6 +631,20 @@ export function makeFnEnv(o) {
      * `Inner in;` 走的是同一条路 —— 不该有两份实现。
      */
     newObj,
+    /**
+     * **`countof(x)`**：定长数组有多少格 —— 一格**编译期常量**（jancy 的 countof 就是那一格
+     * 类型上的数；跑起来数的那种是 `dynamic countof`，另一族）。所以这一层要的是那一格的
+     * **类型**，不是它的值：走可写位置那一层拿类型，一个字都不发。
+     * 类型给 `size_t`（jancy 那儿 countof 回的就是它）。
+     */
+    countOf: (node) => {
+      const lv = lvOf(node);
+      if (lv === null) return null;                      // 账已经记过
+      if (lv.type?.k !== 'arr') {
+        acct(`countof 的里头不是定长数组（${lv.type?.k ?? '?'}）`); return null;
+      }
+      return { code: `(int ${lv.type.n})`, type: { k: 'int', w: 64, u: true } };
+    },
     newSlot: (prefix, ty) => {
       const nm2 = `${prefix}${tmpBox.n}`;
       tmpBox.n += 1;

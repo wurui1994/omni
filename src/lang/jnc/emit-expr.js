@@ -83,6 +83,25 @@ export function emitExpr0(n, want, ctx) {
 
   if (h === 'true') return { code: '(bool true)', type: ctx.T.bool };
   if (h === 'false') return { code: '(bool false)', type: ctx.T.bool };
+  /**
+   * **`'a'` 是一个整数，不是一格串**（第九十七刀）：jancy 的词法把单引号那一格做成整数记号，
+   * 头一个字节**最重**、最多 8 个（jnc_ct_Lexer.cpp:186-197 的
+   * `result |= *p << shift; shift -= 8`）。所以 `'a'` 是 97、`'ab'` 是 0x6162。
+   * 类型按"装不下 32 位就 long"（`intLitKind` —— 与整数字面量同一条）。
+   */
+  if (h === 'char') {
+    const s = String(nm.text?.value ?? '');
+    const bytes = [...s].map((c) => c.codePointAt(0));
+    if (bytes.some((b) => b > 0xff)) {
+      ctx.acct(`字符字面量 '${s}' 里有多字节的字符（源码那一侧按字节数，这一层还没接）`); return null;
+    }
+    if (bytes.length > 8) { ctx.acct(`字符字面量 '${s}' 超过 8 个字节`); return null; }
+    let v = 0n;
+    for (const b of bytes) v = (v << 8n) | BigInt(b);
+    const k = intLitKind(v);
+    if (k.kind === null) { ctx.acct(`字符字面量：${k.why}`); return null; }
+    return { code: `(int ${k.value})`, type: ctx.T[k.kind] };
+  }
   /* **`null` 按左边要什么定型**（六格按次序，最后一格是"问不出来"）。 */
   if (h === 'null') {
     for (const rule of NULL_BY_WANT) {
@@ -294,6 +313,14 @@ export function emitExpr0(n, want, ctx) {
     const n0 = ctx.acctSeen?.() ?? 0;
     const r = ctx.callOf?.(n, want);
     if (r === null || r === undefined) return soft(ctx, n0, '调用这一格还拼不出来');
+    return r;
+  }
+
+  /* **`countof(x)`**（定长数组有多少格）：一格编译期常量，由调用方那一层答（它知道类型）。 */
+  if (h === 'countof') {
+    const n0 = ctx.acctSeen?.() ?? 0;
+    const r = ctx.countOf?.(nm.arg);
+    if (r === null || r === undefined) return soft(ctx, n0, 'countof 这一格还拼不出来');
     return r;
   }
 

@@ -117,7 +117,7 @@ function baseOf(t, env, depth = 0) {
     if (w0 !== null && w0.k === 'int') return intOf(text, t.mods ?? []);
     return w0;
   }
-  if (t.base.kind === 'named' || t.base.kind === 'generic') {
+  if (t.base.kind === 'named' || t.base.kind === 'generic' || t.base.kind === 'qualified') {
     const name = nameText(t);
     if (name === null) return null;
     if (STD_INT_TYPEDEFS.has(name)) return intOf(name, t.mods ?? []);
@@ -126,7 +126,19 @@ function baseOf(t, env, depth = 0) {
        （`($t int) ($n int) ($r real) ($s string)`，第一百一十三刀）—— 出处是旧降级的真输出
        （105-variant.jnc）。字段位置写它的名字，与别的结构体同一条规矩。 */
     if (name === 'variant_t') return { k: 'struct', name: 'jnc$variant' };
-    const e = env.get(name);
+    let e = env.get(name);
+    /**
+     * **点串写的类型名**（`Outer.Pair`、`ns.T`、`C.T`）：环境按**末段**记名字（那一段才是
+     * 它自己的名字），而方言那一侧的名字带着主人那几段前缀。所以拿末段去查，再**核对**
+     * 查着那一格的方言名字是不是正好以这条点串结尾 —— 对不上就是**另一个同名的类型**，
+     * 那时候答 null（宁可记账，不猜）。
+     */
+    if (e === undefined && name.includes('$')) {
+      const leaf = name.slice(name.lastIndexOf('$') + 1);
+      const cand = env.get(leaf);
+      const emit = cand === undefined ? null : (cand.name ?? leaf);
+      if (emit !== null && (emit === name || emit.endsWith(`$${name}`))) e = cand;
+    }
     if (e === undefined) return null;
     /* 用**环境里记的名字**，不是源码里那个 —— 嵌套类型在方言那一侧叫 `Outer$Inner`。
        先前这儿写的是源码名，尺子上就是 `Outer.m_in：旧 Outer$Inner / 新 Inner`。 */
