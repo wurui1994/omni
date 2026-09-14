@@ -581,6 +581,29 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   };
 
   /**
+   * **这一格类有没有"零实参就能调"的构造**（第二百一十二刀）：形参全带默认值也算。同名那一族
+   * （`construct()` / `construct(int)`）里有一条算得上就答 false —— 自动补那一次调它。
+   * 一条都没有（而构造确实在）才答 true：那时候这一格由**写的人**在自己的构造里调
+   * （type_class.rst 那句 "if a member field requires construction this must be done in the
+   * beginning of the constructor"）。压根没有构造的答 false —— 那一路没什么可调的，
+   * 而"字段写了初值却没有构造"那条界照旧由 `newObj` 自己守。
+   */
+  const ctorNeedsArgs = (cn) => {
+    const base = `${cn}$construct`;
+    const fam = ovl.get(base) ?? [{ key: base }];
+    let had = false;
+    for (const one of fam) {
+      const s = methods.get(one.key);
+      if (s === undefined) continue;
+      had = true;
+      const ps = s.params ?? [];
+      const ds = s.defaults ?? [];
+      if (ps.every((_, i) => ds[i] !== null && ds[i] !== undefined)) return false;
+    }
+    return had;
+  };
+
+  /**
    * **字段的默认值**（第七十八刀）：jancy 那儿它们不是"预构造"—— 初值挂在字段上，由
    * `MemberBlock::initializeFields`（jnc_ct_MemberBlock.cpp:141-182）在**构造里**重放，
    * 次序是"基类构造 → 静态构造 → 字段初值 → 用户的体"（jnc_ct_Parser.cpp:3005-3009）。
@@ -643,7 +666,18 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         if (init !== null) {
           acct(`'${cls}.${m.name}' 是内嵌的对象却写了初值（那一族还没接）`); return null;
         }
-        const o = e.newObj(r.type.name);
+        /**
+         * **它的构造要实参的那一格不在这儿自动构造**（第二百一十二刀，195-embctor.jnc）：
+         * type_class.rst 那句话说得明白 —— "if a member field requires construction this must
+         * be done in the beginning of the constructor (much like with base type constructors)"。
+         * 所以这一层只把那段内存开出来（pnew + 写 `$tag`），那次 `m_in.construct(x)` 由**写的人**
+         * 在自己的构造里调（与 `basetype.construct(…)` 逐字同一条路）。
+         *
+         * 判据是"这一格有没有一条零实参就能调的构造"（形参全带默认值也算）：有就照旧自动补，
+         * 没有才交给写的人。猜着补一格实参是发明。
+         */
+        const needs = ctorNeedsArgs(r.type.name);
+        const o = e.newObj(r.type.name, [], needs);
         if (o === null) return null;                       // 账已经记过
         out.push(`${pad}(pstore (pfield (var $this) ${m.name}) ${o.code})`);
         continue;

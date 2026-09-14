@@ -223,13 +223,13 @@ export function makeFnEnv(o) {
    *   - 字段写了初值的（那几句要插到 construct 开头，第七十八刀）；
    *   - construct 要实参的（实参得当helper 的形参传进去 —— 另一刀）。
    */
-  const newObj = (cls, argNodes = []) => {
+  const newObj = (cls, argNodes = [], noCtor = false) => {
     const root = clsRoot(cls);
     const tag = tags.get(cls);
     if (tag === undefined) { acct(`'${cls}' 没有动态类型标签（类体没解出来）`); return null; }
     const ctorBase = `${cls}$construct`;
     let ctorKey = ctorBase;
-    let ctor = methods.get(ctorBase);
+    let ctor = noCtor ? undefined : methods.get(ctorBase);
     /* **构造也能重载**（`construct()` / `construct(int)` / `construct(int,int)`，139-ctoroverload.jnc）：
        同名那一族按实参挑一格 —— 与普通调用走的是同一格 `pickOvl`。挑不出来它自己记账。 */
     if (ctor !== undefined) {
@@ -239,8 +239,10 @@ export function makeFnEnv(o) {
       ctorKey = p0.key;
     }
     /* **字段写了初值那几格是构造干的活**（第七十八刀）：所以构造非在不可 —— 合成那一步没成时
-       这儿明说不收，绝不交出一段没初始化过的内存。 */
-    if (fieldInits.has(cls) && ctor === undefined) {
+       这儿明说不收，绝不交出一段没初始化过的内存。
+       `noCtor` 那一路不在这条里：那一格的构造由**写的人**在外头调（第二百一十二刀），
+       字段初值也跟着那一次跑。 */
+    if (fieldInits.has(cls) && ctor === undefined && !noCtor) {
       acct(`造 '${cls}'：它的字段写了初值，可它没有构造（合成那一步没成）`); return null;
     }
     /**
