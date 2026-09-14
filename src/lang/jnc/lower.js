@@ -688,29 +688,46 @@ export function lowerJncRules(tree, diags, opts = {}) {
     acct(`方法 '${key}' 有重载（按实参挑哪一格）还没接`);
   }
   /**
-   * 人写的 `construct` 里有没有**显式**调基类的构造（`basetype.construct(…)`）。没有的话
-   * 编译器补一句（53-inherit.jnc 那格 `Cow`：基类那一个不带实参，所以自动补）——
-   * 补的那一句要排在字段初值与体之前（jnc_ct_Parser.cpp:3005-3009）。
+   * 人写的 `construct` 里**显式**调了哪几格基类的构造（`basetype.construct(…)` /
+   * `basetype2.construct(…)`）。答的是一格集合：**没在里头的那几格由编译器补一句**
+   * （53-inherit.jnc 那格 `Cow`、86-multibase.jnc 那格 `C3` 只显式调了第一格）——
+   * 补的那几句排在字段初值与体之前（jnc_ct_Parser.cpp:3005-3009）。
+   *
+   * 先前这儿是一格布尔（"有没有调过基类构造"），于是多基类时**只要调了一格，另一格就漏了**
+   * —— 86-multibase.jnc 的 `c.m_b` 印出来是 0（该是 20）。按格记才对得上。
    */
-  const callsBaseCtor = (node) => {
-    if (node === null || node === undefined || typeof node !== 'object') return false;
-    if (Array.isArray(node)) return node.some((x) => callsBaseCtor(x));
+  const explicitBases = (node, out = new Set()) => {
+    if (node === null || node === undefined || typeof node !== 'object') return out;
+    if (Array.isArray(node)) { for (const x of node) explicitBases(x, out); return out; }
     if (headOf(node) === 'field') {
       const f = named(node);
-      if (String(f?.name?.value ?? '') === 'construct' && headOf(f?.obj) === 'basetype') return true;
+      if (String(f?.name?.value ?? '') === 'construct') {
+        const ob = f?.obj;
+        /* `basetype` 与 `basetype1` 是同一格（type_class.rst:226）。 */
+        if (headOf(ob) === 'basetype') {
+          const n0 = Number.parseInt(String(named(ob)?.type?.value ?? '1'), 10);
+          out.add(Number.isFinite(n0) && n0 >= 1 ? n0 : 1);
+        } else if (headOf(ob) === 'name') {
+          /* 写基类的**名字**也算显式调（`I1.construct(a)`）。 */
+          out.add(String(named(ob)?.text?.value ?? ''));
+        }
+      }
     }
-    return Array.isArray(node.items) ? node.items.some((x) => callsBaseCtor(x)) : false;
+    if (Array.isArray(node.items)) for (const x of node.items) explicitBases(x, out);
+    return out;
   };
   for (const [key, mi] of methods) {
     if (mi.hasBody !== true) continue;                   // 只写原型的，体在类外（下面那条路发）
     const a = aggs.find((x) => x.emitName === mi.owner);
     const kind = a !== undefined && (a.word === 'class' || a.word === 'opaque class') ? 'class' : 'struct';
     const ownerEmit = kind === 'class' ? clsRoot(mi.owner) : mi.owner;
-    /* **构造那一格前头还有两截**：基类的构造（没显式调就补）+ 字段初值。 */
+    /* **构造那一格前头还有两截**：基类的构造（没显式调的那几格补上）+ 字段初值。 */
     const head0 = [];
     if (mi.name === 'construct') {
-      const bs = (aggBases.get(mi.owner) ?? []).filter((b) => methods.has(`${b}$construct`));
-      if (bs.length > 0 && !callsBaseCtor(named(mi.node)?.body)) {
+      const done = explicitBases(named(mi.node)?.body);
+      const bs = (aggBases.get(mi.owner) ?? []).filter((b, i) => methods.has(`${b}$construct`)
+        && !done.has(i + 1) && !done.has(b) && !done.has(b.slice(b.lastIndexOf('$') + 1)));
+      if (bs.length > 0) {
         const bad = bs.find((b) => ((methods.get(`${b}$construct`).params) ?? []).length > 0);
         if (bad !== undefined) {
           acct(`'${key}' 没显式调基类 '${bad}' 的构造，而那一格要实参 —— 补不出来`); continue;

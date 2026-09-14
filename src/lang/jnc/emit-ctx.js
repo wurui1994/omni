@@ -495,7 +495,44 @@ export function makeFnEnv(o) {
        登记在**函数**那张表里，而方言那一侧的名字与体里写的一模一样（`Counter$reset`）——
        所以这儿顺手问一次那张表。基类那一问（`basecall`）先前就是这么办的，两处同一条。 */
     const out = fns.get(key);
-    return out === undefined ? null : { sig: out, key };
+    if (out !== undefined) return { sig: out, key };
+    /**
+     * **沿基类链往上找**（78-notype.jnc / 86-multibase.jnc / 62-opaque.jnc）：类那一族
+     * **一整条继承链只发一格 struct**（第五十六刀），所以基类的方法拿派生类那一格 `this`
+     * 调是对的 —— 名字与 `$this` 的类型两头都对得上。
+     *
+     * 三样明说不收，各有出处：
+     *   - **虚方法**（`virtual` / `override` / `abstract`）：那要走派发表 `$$vd$`，
+     *     一句 `(call B$step …)` 会把派发静静地绕过去（54-virtual.jnc）；
+     *   - 链上**同名撞车**（两格基类各有一格同名方法）：按名字挑是猜；
+     *   - 查不着的照旧答 null（调用方记账）。
+     * 走法是按声明次序的广度优先（与并字段那一处同一口径：第一格基类先）。
+     */
+    const seen = new Set([aggName]);
+    const queue = [...(aggBases.get(aggName) ?? [])];
+    const hits = [];
+    while (queue.length > 0) {
+      const b = queue.shift();
+      if (seen.has(b)) continue;
+      seen.add(b);
+      const k2 = `${b}$${mname}`;
+      const h2 = methods.get(k2) ?? fns.get(k2);
+      if (h2 !== undefined) hits.push({ sig: h2, key: k2 });
+      else queue.push(...(aggBases.get(b) ?? []));
+    }
+    if (hits.length !== 1) return null;                    // 一格都没有，或撞车了（不猜）
+    if (hits[0].sig.virt === true) return null;            // 虚方法要走派发表
+    return hits[0];
+  };
+  /**
+   * **这个名字在那格聚合体上是"装着函数指针的字段"吗**（`Fn* m_op;`）。
+   * jancy 里方法与字段在同一个命名空间，所以两处查名都要问它一句：查不着方法时那一格还
+   * 可能是"读出这个字段、按函数值调"（`s.m_op(…)` 与方法体里裸写 `m_op(…)` 是同一件事）。
+   */
+  const fnptrField = (aggName, key) => {
+    const ft = aggFields.get(aggName)?.get(key);
+    if (ft === undefined) return false;
+    return resolveType(ft, env).type?.k === 'fnptr';
   };
   /** 一格字段的位置（`memberOf`）：`(pfield 基 名)`；字段自己是结构体/数组时它又是一格 `agg`。 */
   const memberAt = (baseCode, aggName, fname) => {
@@ -1339,9 +1376,7 @@ export function makeFnEnv(o) {
              * "读出那个字段、按函数值调"。判据是它的类型解出来正好是 `fnptr` —— 是就
              * **不在这儿定**，落到下面"从一格函数指针上调"那条（`(callfn …)`，第五十五刀）。
              */
-            const ft0 = aggFields.get(agg)?.get(mname);
-            const fr0 = ft0 === undefined ? null : resolveType(ft0, env);
-            if (fr0 === null || fr0.type?.k !== 'fnptr') {
+            if (!fnptrField(agg, mname)) {
               acct(`'${agg}' 上查不着方法 '${mname}'（属性/事件/虚派发那几族另算）`); return null;
             }
           } else {
@@ -1364,7 +1399,10 @@ export function makeFnEnv(o) {
          * （lower.js:14730 那条注解就是这一句）。被调不是裸名字（`(*p)(…)`、`a[i](…)`）时
          * 也走这条：那时它只能是一格函数值。
          */
-        const viaVal = asName === null || names.has(asName) || globals.has(asName);
+        const viaVal = asName === null || names.has(asName) || globals.has(asName)
+          /* **方法体里裸写一格装着函数指针的字段**（`m_op(…)`，109-fnfield.jnc）：与
+             `s.m_op(…)` 是同一件事 —— 读出那一格、按函数值调。 */
+          || (self !== null && fnptrField(self.agg, asName));
         if (viaVal) {
           const fv = emitExpr(fn, null, ctxRef);
           if (fv === null) return null;

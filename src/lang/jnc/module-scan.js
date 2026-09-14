@@ -44,6 +44,9 @@ export function sigOf(nm, env, emit, t0 = null) {
     /* `errorcode` 那一族（第五十八刀）：调它的那一处要把"出错就跳"提上来（`EC_HOIST`）。 */
     ec: words.includes('errorcode'),
     stat: words.includes('static'),
+    /* **虚方法那一族**（`virtual` / `override` / `abstract`）：调它要走派发表（`$$vd$`），
+       不是一句 `(call B$step …)` —— 沿基类链找方法的那一处靠这一格明说不收（54-virtual.jnc）。 */
+    virt: words.includes('virtual') || words.includes('override') || words.includes('abstract'),
   };
 }
 
