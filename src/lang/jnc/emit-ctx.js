@@ -635,10 +635,38 @@ export function makeFnEnv(o) {
     if (lv.shape === 'prop' && lv.hasSet === false) {
       acct(`属性 '${lv.propName ?? '?'}' 没有存值器（const 属性 —— 写不下去）`); return null;
     }
-    /* 存值器写着 `errorcode` 的那一格（`operator []` 那一族）：写这一句要顺带把错往上传，
-       而这儿只发一整句 —— 明说不收（吞掉那个词就等于调用点再也不检查错误码了）。 */
+    /**
+     * **存值器写着 `errorcode`**（`bool errorcode set(int i, char c)`，第二百二十四刀，
+     * 130-opindex.jnc）：`b[i] = c;` 这一句要**顺带把错往上传**（第五十八刀）—— 与调一格
+     * errorcode 函数落的是同一段（`ecOut` 那两句 + 这一句自己），只是被调的那一格是存值器：
+     *
+     *   (let $e0 bool (call Buf$op$index$set (var b) (var i) (var c)))
+     *   (if (un "!" (var $e0)) (do (ret (int -1))))
+     *   (expr (var $e0))
+     *
+     * 吞掉那个词就等于调用点再也不检查错误码了，所以插不进语句的位置（惰性位置/循环条件）
+     * 与"外面既不是 errorcode 也没有 try/catch"两样照旧明说不收。
+     */
     if (lv.ecSet === true) {
-      acct(`'${lv.propName ?? '?'}' 的存值器是 errorcode（传播那两句插不进这一句写）还没接`); return null;
+      if (ctxRef.ecOut === null || ctxRef.ecOut === undefined) {
+        acct(`'${lv.propName ?? '?'}' 的存值器是 errorcode（传播那两句插不进这一句写）还没接`); return null;
+      }
+      const gs = ctxRef.guards ?? [];
+      const g = gs.length === 0 ? null : gs[gs.length - 1];
+      if (g === null && curErr === null) {
+        acct('写一格 errorcode 的存值器，而这个函数自己不是 errorcode、外面也没有 try/catch（jancy 那儿走运行期的 dynamic throw）'); return null;
+      }
+      const rt0 = lv.ecRet ?? null;
+      if (rt0 === null) { acct(`'${lv.propName ?? '?'}' 的存值器没有返回类型（errorcode 那一格要它）`); return null; }
+      const v0 = `$e${ecBox.n}`;
+      const test = errTest(`(var ${v0})`, rt0, { tyText: (x) => emitType(x, 'value', tyc) });
+      if (test === null) { acct(`${rt0.k} 定不出出错值的比法`); return null; }
+      ecBox.n += 1;
+      const jump = escapeText({ guard: g, loopsLen: (ctxRef.loops ?? []).length, curErr });
+      const call = `(call ${lv.code}$set${[...lv.args, v].map((x) => ` ${x}`).join('')})`;
+      ctxRef.ecOut.push(`${ctxRef.ecPad}(let ${v0} ${emitType(rt0, 'slot', tyc)} ${call})`);
+      ctxRef.ecOut.push(`${ctxRef.ecPad}(if ${test} (do ${jump}))`);
+      return `(expr (var ${v0}))`;
     }
     return SHAPE_ACCESS[lv.shape].write(lv.code, v, lv.args);
   };
@@ -1424,6 +1452,8 @@ export function makeFnEnv(o) {
              —— 所以往这一格上记一面旗子，写那一侧照它明说不收（吞掉那个词就等于调用点
              再也不检查错误码了）。读那一侧不受影响。 */
           ecSet: is !== undefined && is.ec === true,
+          /* 存值器回的那一格类型（出错值怎么比要它） */
+          ecRet: is === undefined ? null : (is.ret ?? null),
           propName: `${iagg}.operator []`,
           type: withBits(ig.ret, ig.retDecl),
         };
