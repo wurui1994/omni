@@ -15,7 +15,7 @@ import { readAgg, readEnum } from './agg.js';
 import { enumBase } from './const-eval.js';
 import { resolveType } from './resolve-type.js';
 import { readFormals, fnName } from './emit-fn.js';
-import { classRoot } from './emit-agg.js';
+import { classRoot, basePaths } from './emit-agg.js';
 /**
  * 一格函数/方法的**签名**（形参、默认实参、返回、`errorcode`、方言那一侧的名字）。
  * 顶层那条路与类里那条路共用它 —— 调用那一层问的是同一件事，不该有两份答案。
@@ -205,6 +205,31 @@ export function scanAggs(tree, env) {
     for (const it of n.items) scan(it, inner, agg);
   };
   scan(tree, null, false);
+  /**
+   * **基类那几格字段也算这一格自己的**（第五十六刀：一整条继承链共用一格结构体）。所以
+   * 派生类的字段表要把基类的并进来 —— 不并的话方法体里裸写 `m_legs`（写在基类里的那一格）
+   * 就查不着，而它明明就在同一段内存里。自己那几格**盖住**同名的基类字段（次序即规则）。
+   */
+  const byName = new Map();
+  for (const a of aggs) {
+    const n2 = nameText(a.name);
+    if (n2 !== null) byName.set(n2, a);
+  }
+  const mergedFields = (a, seen = new Set()) => {
+    const own = fields.get(a.emitName) ?? new Map();
+    if (seen.has(a.emitName)) return own;
+    seen.add(a.emitName);
+    const out = new Map();
+    for (const b of basePaths(a)) {
+      const ba = byName.get(b);
+      if (ba === undefined) continue;
+      for (const [k, v] of mergedFields(ba, seen)) out.set(k, v);
+    }
+    for (const [k, v] of own) out.set(k, v);
+    return out;
+  };
+  for (const a of aggs) fields.set(a.emitName, mergedFields(a));
+
   /* **一整条继承链共用一格结构体**（第五十六刀的 `clsRoot`）：类那一族在方言里写的是
      连通块的**根**。字段表按各自的名字收，写类型时换成根 —— 两件事分开。 */
   const roots = new Map();
