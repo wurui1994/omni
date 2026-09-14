@@ -1603,6 +1603,63 @@ export function makeFnEnv(o) {
     return [`${pad}(let ${c} ${pt} (pnew ${pt} (int 1)))`, `${pad}(pstore (var ${c}) ${valCode})`];
   };
   /**
+   * **errorcode 的传播插进惰性那两格**（第二百四十六刀，174-eclazy.jnc）：`? :` 的两支与
+   * `&&` / `||` 的右边。语料里 20 份文件、22 处（18 处是 `? :` —— `return
+   * m_sessionConnectionState ? true : open();`，2 处是 `&&`）。
+   *
+   * 那两格是**惰性**的：求不求值要看别人，而传播那两句只插得到"这条语句之前" —— 插到那儿
+   * 就成了"无条件先调一遍"，短路语义与求值顺序一起被改掉。所以第五十八刀当场说不收。
+   *
+   * 这一刀的落法：给结果开**一格内存**（与第九刀提局部量、第二十四刀提取过地址的全局是同一
+   * 件事 —— `liftable` / `liftedType` 原样用，方言一个字没动），把整条式子摊成一句 `if`，
+   * **每一支的语句插在它自己那半里**，表达式本身回 `(pload 那一格)`。惰性一点没丢。
+   *
+   * 只有真需要时才走这条路：`lazyOne` 收上来的那一摊是空的就照旧发 `(sel …)` /
+   * `(bin "&&" …)` —— 先前能编的程序一个字节都不变。
+   */
+  const lazyOne = (run) => {
+    const save = ctxRef.ecOut;
+    ctxRef.ecOut = [];
+    const v = run();
+    const lines = ctxRef.ecOut;
+    ctxRef.ecOut = save;
+    return { v, lines };
+  };
+  /** 摊出来那一格内存（开不出来时它自己记账：外面插不进语句、或者这个类型提不动）。 */
+  const lazyCell = (ty, what) => {
+    if (ctxRef.ecOut === null || ctxRef.ecOut === undefined) {
+      acct(`${what}里有 errorcode 调用，而这个位置插不进语句（循环条件那一族）还没接`); return null;
+    }
+    if (!liftable(ty)) {
+      acct(`${what}里有 errorcode 调用，而整条是 ${ty?.k ?? '?'}（那一格提不进内存）还没接`); return null;
+    }
+    tmpBox.n += 1;
+    return { name: `$lz${tmpBox.n}`, pt: liftedType(ty, tyc), pad: ctxRef.ecPad ?? '    ' };
+  };
+  const lazySel = (condText, x, y, lx, ly) => {
+    const c0 = lazyCell(x.type, '`? :` 的支');
+    if (c0 === null) return null;                          // 账已经记过
+    const { name, pt, pad } = c0;
+    ctxRef.ecOut.push(`${pad}(let ${name} ${pt} (pnew ${pt} (int 1)))`);
+    ctxRef.ecOut.push(`${pad}(if ${condText}`);
+    ctxRef.ecOut.push(`${pad}  (do`, ...lx, `${pad}    (pstore (var ${name}) ${x.code})`, `${pad}  )`);
+    ctxRef.ecOut.push(`${pad}  (do`, ...ly, `${pad}    (pstore (var ${name}) ${y.code})`, `${pad}  )`);
+    ctxRef.ecOut.push(`${pad})`);
+    return { code: `(pload (var ${name}))`, type: x.type };
+  };
+  const lazyShort = (op, c1, c2, lines) => {
+    const c0 = lazyCell(T.bool, `\`${op}\` 的右边`);
+    if (c0 === null) return null;                          // 账已经记过
+    const { name, pt, pad } = c0;
+    /* 短路那一头的答案是定的（`&&` 短路答假、`||` 短路答真）—— 先写它，右边真求了再盖掉。 */
+    ctxRef.ecOut.push(`${pad}(let ${name} ${pt} (pnew ${pt} (int 1)))`);
+    ctxRef.ecOut.push(`${pad}(pstore (var ${name}) (bool ${op === '&&' ? 'false' : 'true'}))`);
+    ctxRef.ecOut.push(`${pad}(if ${op === '&&' ? c1 : `(un "!" ${c1})`}`);
+    ctxRef.ecOut.push(`${pad}  (do`, ...lines, `${pad}    (pstore (var ${name}) ${c2})`, `${pad}  )`);
+    ctxRef.ecOut.push(`${pad})`);
+    return { code: `(pload (var ${name}))`, type: T.bool };
+  };
+  /**
    * 名字（或点串）**不是一格内存**的那两路 —— 查名要先问它们，因为它们根本没有位置：
    *
    *   1. **编译期常量**：枚举项（`Color.Red` 与裸 `Red` 两个键都在 env 里）、折叠过的
@@ -3078,6 +3135,11 @@ export function makeFnEnv(o) {
       if ((f.sig.params ?? []).length !== 0) return null;
       return f.key;
     },
+    /* **惰性那两格上的 errorcode 传播**（第二百四十六刀）：摊成一句 `if` + 一格内存。
+       三格一起递出去 —— 收上来那一摊是空的时候表那一层照旧发 `(sel …)` / `(bin …)`。 */
+    lazyOne,
+    lazySel,
+    lazyShort,
     /* 驱动把它那一格 `ctx` 交回来（`expr` / `ecOut` / `guards` 都在它上头）。 */
 
     onCtx: (c2) => { ctxRef = c2; },

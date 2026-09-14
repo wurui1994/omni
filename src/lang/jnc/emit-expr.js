@@ -140,30 +140,45 @@ export function emitExpr0(n, want, ctx) {
   }
   if (h === 'paren') return emitExpr0(nm.inner, want, ctx);
   /* **三目**：方言里就是 `(sel 条件 真 假)`。两支都按 `want` 降（于是回卷、装箱那几条各自落位）。
-     两支是**惰性**位置 —— errorcode 的落点在那儿要关掉（`ctx.lazy`，见 `EC_HOIST` 那条注）。 */
+     两支是**惰性**位置 —— errorcode 的传播在那儿要摊成一句 `if`（`lazyOne` / `lazySel`，
+     第二百四十六刀）；两支都没插出语句时照旧一句 `(sel …)`。 */
   if (h === 'cond') {
     const c = ctx.cond?.(nm.cond) ?? null;
     if (c === null) return null;
-    const run = () => {
-      const x = emitExpr(nm.then ?? nm.a, want, ctx);
-      const y = emitExpr(nm.else ?? nm.b, want, ctx);
-      return x === null || y === null ? null : { x, y };
-    };
-    const two = ctx.lazy === undefined ? run() : ctx.lazy(run);
-    if (two === null) return null;
+    const runX = () => emitExpr(nm.then ?? nm.a, want, ctx);
+    const runY = () => emitExpr(nm.else ?? nm.b, want, ctx);
+    let rx;
+    let ry;
+    if (ctx.lazyOne !== undefined) {
+      rx = ctx.lazyOne(runX);
+      ry = ctx.lazyOne(runY);
+    } else {
+      const run = () => ({ x: runX(), y: runY() });
+      const two0 = ctx.lazy === undefined ? run() : ctx.lazy(run);
+      rx = { v: two0?.x ?? null, lines: [] };
+      ry = { v: two0?.y ?? null, lines: [] };
+    }
+    if (rx.v === null || ry.v === null) return null;
     /**
      * **两支一个整数一个实数**（`n > 2 ? 1 : 2.5`，04-truthy-sel.jnc:55）：整条的类型是
      * **实数**（C 的常用算术转换，jancy 同）—— 所以整数那一支要加宽。少了这一步，整条按
      * 第一支定成 int，`%f` 那一格于是拿到一格整数（先前报的"%f 碰上这一格类型（int）"就是它），
      * 而真跑起来 `(sel …)` 两支类型不一样也不成。
      */
-    let { x, y } = two;
+    let x = rx.v;
+    let y = ry.v;
     if (ctx.isInt?.(x.type) === true && ctx.isReal?.(y.type) === true) {
       x = { code: ctx.realOf(x.code, x.type), type: y.type };
     } else if (ctx.isReal?.(x.type) === true && ctx.isInt?.(y.type) === true) {
       y = { code: ctx.realOf(y.code, y.type), type: x.type };
     }
-    return { code: `(sel ${c} ${x.code} ${y.code})`, type: x.type };
+    if (rx.lines.length === 0 && ry.lines.length === 0) {
+      return { code: `(sel ${c} ${x.code} ${y.code})`, type: x.type };
+    }
+    if (ctx.lazySel === undefined) {
+      ctx.acct('`? :` 的支里有 errorcode 调用（摊成一句 if 那一格没递进来）'); return null;
+    }
+    return ctx.lazySel(c, x, y, rx.lines, ry.lines);
   }
 
   /* **裸名字**：九步查名（`NAME_LOOKUP_ORDER`）由注入的探子走完 —— 那是作用域图那一层。
@@ -205,11 +220,24 @@ export function emitExpr0(n, want, ctx) {
     /* **`&&` / `||`**：两边各自真值化，结果是 bool（右边惰性 —— 方言的 `bin` 本来就是惰性节点）。
        **右边是惰性位置**：errorcode 的落点在那儿要关掉（`ctx.lazy`），不然传播那两句就成了
        "无条件先调一遍"，短路语义与求值顺序一起被改掉。 */
+    /* **`&&` / `||`**：两边各自真值化，结果是 bool（右边惰性 —— 方言的 `bin` 本来就是惰性节点）。
+       **右边是惰性位置**：errorcode 的传播在那儿要摊成一句 `if`（`lazyShort`，第二百四十六刀）——
+       照旧插到"这条语句之前"就成了"无条件先调一遍"，短路语义与求值顺序一起被改掉。
+       右边没插出语句时照旧一句 `(bin …)`。 */
     if (op === '&&' || op === '||') {
       const c1 = ctx.cond?.(nm.a);
-      const c2 = ctx.lazy === undefined ? ctx.cond?.(nm.b) : ctx.lazy(() => ctx.cond?.(nm.b));
-      if (c1 === null || c1 === undefined || c2 === null || c2 === undefined) return null;
-      return { code: `(bin ${JSON.stringify(op)} ${c1} ${c2})`, type: ctx.T.bool };
+      if (c1 === null || c1 === undefined) return null;
+      const runB = () => ctx.cond?.(nm.b);
+      const r2 = ctx.lazyOne !== undefined ? ctx.lazyOne(runB)
+        : { v: ctx.lazy === undefined ? runB() : ctx.lazy(runB), lines: [] };
+      if (r2.v === null || r2.v === undefined) return null;
+      if (r2.lines.length === 0) {
+        return { code: `(bin ${JSON.stringify(op)} ${c1} ${r2.v})`, type: ctx.T.bool };
+      }
+      if (ctx.lazyShort === undefined) {
+        ctx.acct(`\`${op}\` 的右边有 errorcode 调用（摊成一句 if 那一格没递进来）`); return null;
+      }
+      return ctx.lazyShort(op, c1, r2.v, r2.lines);
     }
     /* **`x == null` 里 `null` 的类型从另一边来**：`null` 自己没有类型（见 `NULL_BY_WANT`），
        所以两边有一边是它时，先降另一边、拿那一边的类型当 `want`。 */
