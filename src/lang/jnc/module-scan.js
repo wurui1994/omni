@@ -72,6 +72,20 @@ function plainName(leaf) {
 }
 
 /**
+ * **算符重载那一族也进这张族表**（第二百零七刀，184-opovl.jnc / 190-opassigndecl.jnc）：
+ * 量出来语料里就是它 —— `std.StringBuilder` 上三条 `operator +=`（收 `string` /
+ * `char const*` / 一格字符），逐份榜上 31 对；`operator :=` 同族另 31 对。
+ *
+ * "按实参类型挑"这一层早就有（第五十八刀那套 `pickOvl` / `argCost`），欠的只是**名字**与
+ * **那张表**：改名照 `overloadSuffix` 那条（算符从第二条起加 `$o2`），族记进 `ovl`，
+ * 调用点问一次 `pickOvl`。所以这一格与普通名字同收；`construct$static` / 取存 / `destruct`
+ * 那几族的调用点各走各的路、还没有"挑一格"这一步，照旧记在 `overloads` 里明说不收。
+ */
+function ovlName(leaf) {
+  return plainName(leaf) || leaf.includes('op$');
+}
+
+/**
  * **实参那一串的签名**（`getArgSignature` 那一句）：解得出来就是一串方言类型，
  * 有一格解不出来就答 null（那时宁可把两条当**两格**看 —— 挑那一层会照实说"分不出来"，
  * 而合成一格是**静静地调错**）。
@@ -535,9 +549,9 @@ export function scanAggs(tree, env, ovl = new Map()) {
              各走各的路、还没有"挑一格"这一步 —— 照旧记账，发的那一层明说不收。 */
           const sig0 = sigOf(named(m.at), env, base, m.type);
           if (sig0 === null) continue;
-          const one = plainName(mname)
+          const one = ovlName(mname)
             ? ovlAdd(ovl, base, mname, sig0.params, env) : { key: base, dup: 0 };
-          if (!plainName(mname) && methods.has(base)) overloads.add(base);
+          if (!ovlName(mname) && methods.has(base)) overloads.add(base);
           const key = one.key;
           const sig = key === base ? sig0 : sigOf(named(m.at), env, key, m.type);
           if (sig === null) continue;
@@ -610,9 +624,9 @@ export function scanAggs(tree, env, ovl = new Map()) {
           const base = `${ownerT}$${mname}`;
           const sig0 = sigOf(fm, env, base, t);
           if (sig0 === null) continue;
-          const one = plainName(mname)
+          const one = ovlName(mname)
             ? ovlAdd(ovl, base, mname, sig0.params, env) : { key: base, dup: 0 };
-          if (!plainName(mname) && methods.has(base)) overloads.add(base);
+          if (!ovlName(mname) && methods.has(base)) overloads.add(base);
           const sig = one.key === base ? sig0 : sigOf(fm, env, one.key, t);
           if (sig === null) continue;
           methods.set(one.key, {

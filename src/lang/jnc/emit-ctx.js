@@ -1855,8 +1855,12 @@ export function makeFnEnv(o) {
        */
       if (op !== '=' && aggName !== null) {
         const w = OP_NAMES[op];
-        const oc = w === undefined ? null : findMethod(aggName, `op$${w}`);
-        if (oc !== null && oc !== undefined) {
+        const oc0 = w === undefined ? null : findMethod(aggName, `op$${w}`);
+        if (oc0 !== null && oc0 !== undefined) {
+          /* **一格主人身上好几条同一个算符**（第二百零七刀）：按右边那一格的类型挑一条 ——
+             与普通调用、构造那两族走的是同一格 `pickOvl`（挑不出来它自己记账）。 */
+          const oc = pickOvl(oc0.key, oc0.sig, [an.b]);
+          if (oc === null) return null;
           if ((oc.sig.params ?? []).length !== 1) {
             acct(`算符 '${aggName} ${op}' 不是一个形参（挑哪一格还没接）`); return null;
           }
@@ -1873,8 +1877,14 @@ export function makeFnEnv(o) {
           acct(`复合赋值 '${op}' 落在结构体/数组上（算符重载那一族）还没接`); return null;
         }
         let want = lv.type;
+        let oaKey = `${aggName}$op$assign`;
         if (oa !== undefined) {
-          const pt = (oa.params ?? [])[0] ?? null;
+          /* **`operator :=` 也能有好几条**（第二百零七刀，184-opovl.jnc 的 `Cell`）：
+             按右边那一格的类型挑一条，与复合赋值那一支同一格 `pickOvl`。 */
+          const op1 = pickOvl(oaKey, oa, [an.b]);
+          if (op1 === null) return null;
+          oaKey = op1.key;
+          const pt = (op1.sig.params ?? [])[0] ?? null;
           const pr = pt === null ? null : resolveType(pt, env);
           want = pr === null || pr.type === null ? null : withBits(pr.type, pt);
         }
@@ -1882,7 +1892,7 @@ export function makeFnEnv(o) {
         if (src === null) return null;
         const sameType = src.type?.k === lv.type?.k && (src.type?.name ?? null) === (lv.type?.name ?? null);
         if (oa !== undefined && !sameType) {
-          return [`${pad}(expr (call ${aggName}$op$assign ${readLv(lv)} ${src.code}))`];
+          return [`${pad}(expr (call ${oaKey} ${readLv(lv)} ${src.code}))`];
         }
         if (lv.shape === 'agg') {
           const s = `$s${tmpBox.n}`;
