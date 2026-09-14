@@ -2382,6 +2382,25 @@ export function makeFnEnv(o) {
       }
       return { code: `(call ${f.key} ${a.code} ${b.code})`, type: sig.ret };
     },
+    /**
+     * **转换算符 `operator bool`**（第二百零三刀）：语料里这一族只有 `bool` 一种，用法是
+     * `it ? it->m_value : undefinedValue`（stdt_Map.jnc:117）—— 那个 `it` 就是"当条件用"。
+     * 所以调用点只有一处：真值化（`truthyCode`）。它一处管齐 `if` / `while` / `? :` /
+     * `&&` / `||` / `!` —— 那几处的条件全从那一句过。
+     *
+     * 这儿只答**那个函数的名字**，插调用是真值化那张表的事（次序在那儿写着：这一问排在
+     * 类那一支之前 —— 类引用当条件用是"跟零比"，而写了算符的那一格上用户问的是那个算符。
+     * 排错了是静默的错：一个非 null、可算符说 false 的对象会被当成真，131-opbool.jnc 的
+     * C1 那一格摆着量这件事）。
+     */
+    opBool: (t) => {
+      const agg = aggBehind(t);
+      if (agg === null) return null;
+      const f = findMethod(agg, 'op$bool');
+      if (f === null || f === undefined) return null;
+      if ((f.sig.params ?? []).length !== 0) return null;
+      return f.key;
+    },
     /* 驱动把它那一格 `ctx` 交回来（`expr` / `ecOut` / `guards` 都在它上头）。 */
 
     onCtx: (c2) => { ctxRef = c2; },
