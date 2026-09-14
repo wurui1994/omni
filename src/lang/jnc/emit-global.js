@@ -82,8 +82,8 @@ export function addrTaken(trees, out = new Set(), retPtr = false) {
  * 长度是常量表达式的那种（`int g_alpha['z' - 'a' + 1];`）不在这儿，那要常量折叠，记账。
  * 数不出来答 `null`。
  */
-export function arrayFromCurly(m, env) {
-  if (headOf(m.at) !== 'var-decl-curly') return null;
+export function arrayFromCurly(m, env, initNode = null) {
+  if (initNode === null && headOf(m.at) !== 'var-decl-curly') return null;
   /* `t.suffixes` 是一串**词**（`types.js` 里 `dc.suffixes.map((s) => s.kind)`），不是对象。 */
   const sfx = (m.type.suffixes ?? []).filter((x) => x === 'array-suffix');
   if (sfx.length !== 1) return null;
@@ -91,7 +91,7 @@ export function arrayFromCurly(m, env) {
      （`resolveType` 的 `arrayDims`），光把 `suffixes` 清空不管用。 */
   const el = resolveType({ ...m.type, suffixes: [], raw: { specs: m.type.raw?.specs, dcl: null } }, env);
   if (el.type === null) return null;
-  const init = named(m.at)?.value;
+  const init = initNode ?? named(m.at)?.value;
   if (headOf(init) !== 'curly') return null;
   const items = named(init)?.items;
   const n = items === null || items === undefined || !Array.isArray(items.items)

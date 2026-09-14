@@ -25,7 +25,7 @@ import { wrapTo, realOf, intConvCode } from './int-table.js';
 import { fmtRun, specPiece, specDress } from '../common/fmt.js';
 import { zeroText } from './expr-table.js';
 import {
-  addrTaken, liftable, liftedType, cellName,
+  addrTaken, liftable, liftedType, cellName, arrayFromCurly,
 } from './emit-global.js';
 import { evalConst } from './const-eval.js';
 
@@ -96,6 +96,8 @@ export function makeFnEnv(o) {
     return r0.type !== null && (r0.type.k === 'ptr' || r0.type.k === 'tptr');
   })());
   const lifts = new Set();
+  /** 长度从花括号里数出来的那几格（名字 → 定下来的类型）—— 查名那一层用它，不再解一遍声明。 */
+  const forced = new Map();
   /** 体这一层要的模块级槽（`once` 的旗子、`static` 局部量那一格）—— 模块那一层照单发。 */
   const slots = [];
   /** 体这一层**抬出去的那几格函数**（造对象那三句 —— `new` 是一格表达式，装不下三句）。 */
@@ -279,7 +281,9 @@ export function makeFnEnv(o) {
    * 以及 `a.g`（命名空间里的模块级量，第五十一刀）—— 同一格量，不该有两个答案。
    */
   const varPlace = (key, t, isG) => {
-    const r = resolveType(t, env);
+    /* **长度是从花括号里数出来的那一格**（`int b[] = { 7, 8 };`）：声明上压根没有长度，
+       所以查名这一层要用**定下来的那一格类型**，不能再解一遍声明（解出来是"长度不是字面量"）。 */
+    const r = forced.has(key) ? { type: forced.get(key), why: null } : resolveType(t, env);
     if (r.type === null) { acct(`'${key}'：${r.why}`); return null; }
     const ty = withBits(r.type, t);
     /* **方言那一侧的名字**可能与源码里的不同（按值传的结构体形参指的是它那份拷贝；
@@ -850,7 +854,38 @@ export function makeFnEnv(o) {
     localDecl: (node, ind, ctx) => {
       const pad = ' '.repeat(ind);
       const vn = named(node);
-      if (vn === null || headOf(node) !== 'var-decl') { acct('这一格局部量声明还拼不出来'); return null; }
+      const h0 = headOf(node);
+      if (vn === null || (h0 !== 'var-decl' && h0 !== 'var-decl-curly')) {
+        acct(`这一格局部量声明还拼不出来（${h0 ?? '?'}）`); return null;
+      }
+      /**
+       * **带花括号初值的局部量**（`int a[3] = { 1, 2, 3 };`）：那是**另一个节点**
+       * （`var-decl-curly`：一格 `dcl` + 一格 `value`，不是 `dcl*` 那条链）。落法是
+       * "开一格自己的内存 + 按格子写"（`curlyLines`）—— 与模块级那一格同一条路。
+       * 长度写空的（`int a[] = {1,2,3}`）从花括号里数（`arrayFromCurly`）。
+       */
+      if (h0 === 'var-decl-curly') {
+        const t = readDeclType(vn.specs, vn.dcl);
+        if (t === null || t.name === null) { acct('局部量的名字读不出来'); return null; }
+        const sp1 = readSpecs(vn.specs);
+        if (sp1 !== null && sp1.words.includes('static')) {
+          acct(`'${t.name}' 是 static 又写了花括号初值（那一格要模块级槽 + once）还没接`); return null;
+        }
+        const rc = resolveType(t, env).type
+          ?? arrayFromCurly({ name: t.name, type: t, at: node }, env);
+        if (rc === null) { acct(`局部量 '${t.name}'：花括号那一格的类型认不出来`); return null; }
+        if (rc.k !== 'arr' && rc.k !== 'struct') {
+          acct(`局部量 '${t.name}' 的花括号初值落在 ${rc.k} 上（那不是一整块）还没接`); return null;
+        }
+        if (taken.has(t.name)) {
+          acct(`局部量 '${t.name}' 被取过地址又写了花括号初值 —— 那两件事的次序还没量`); return null;
+        }
+        names.set(t.name, t);
+        const ty0 = emitType(rc, 'slot', tyc);
+        const ls = curlyLines(`(var ${t.name})`, rc, vn.value, pad);
+        if (ls === null) return null;                      // 账已经记过
+        return [`${pad}(let ${t.name} ${ty0} (pnew ${ty0} (int 1)))`, ...ls];
+      }
       /* `static` 的局部量是**另一条路**（第二十六刀）：一格模块级的槽 `名字$sN` + 一道
          只跑一次的闸门 `名字$sN$1`。声明这一层发不出它 —— 记账走开，不猜。 */
       const sp0 = readSpecs(vn.specs);
@@ -861,9 +896,36 @@ export function makeFnEnv(o) {
         const dd = isInit ? named(d)?.dcl : d;
         const t = readDeclType(vn.specs, dd);
         if (t === null || t.name === null) { acct('局部量的名字读不出来'); return null; }
-        const r = resolveType(t, env);
+        /**
+         * **右边是一对花括号**（`int d[4] = { 5, 6 };` / `int b[] = { 7, 8 };`）：那一格是
+         * "开一格自己的内存 + 按格子写"（`curlyLines`）。长度写空的从花括号里数
+         * （`arrayFromCurly` —— 与模块级那一格用的是同一份）。
+         */
+        const cv = isInit && headOf(named(d)?.value) === 'curly' ? named(d).value : null;
+        let r = resolveType(t, env);
+        if (r.type === null && cv !== null) {
+          const inferred = arrayFromCurly({ name: t.name, type: t, at: node }, env, cv);
+          if (inferred !== null) r = { type: inferred, why: null };
+        }
         if (r.type === null) { acct(`局部量 '${t.name}'：${r.why}`); return null; }
         names.set(t.name, t);
+        if (cv !== null) {
+          forced.set(t.name, r.type);
+          if (isStatic) {
+            acct(`'${t.name}' 是 static 又写了花括号初值（那一格要模块级槽 + once）还没接`); return null;
+          }
+          if (r.type.k !== 'arr' && r.type.k !== 'struct') {
+            acct(`局部量 '${t.name}' 的花括号初值落在 ${r.type.k} 上（那不是一整块）还没接`); return null;
+          }
+          if (taken.has(t.name)) {
+            acct(`局部量 '${t.name}' 被取过地址又写了花括号初值 —— 那两件事的次序还没量`); return null;
+          }
+          const ty1 = emitType(r.type, 'slot', tyc);
+          const ls1 = curlyLines(`(var ${t.name})`, r.type, cv, pad);
+          if (ls1 === null) return null;                   // 账已经记过
+          out.push(`${pad}(let ${t.name} ${ty1} (pnew ${ty1} (int 1)))`, ...ls1);
+          continue;
+        }
         const ty = emitType(r.type, 'slot', tyc);
         const declTy = withBits(r.type, t);
         /**
