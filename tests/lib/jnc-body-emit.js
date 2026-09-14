@@ -25,6 +25,7 @@ import { readFormals } from '../../src/lang/jnc/emit-fn.js';
 import { emitBody } from '../../src/lang/jnc/emit-body.js';
 import { INT_BITS } from '../../src/lang/jnc/resolve-type.js';
 import { wrapTo, uOp } from '../../src/lang/jnc/int-table.js';
+import { fmtRun } from '../../src/lang/jnc/fmt-table.js';
 
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 400);
@@ -252,6 +253,37 @@ function makeEnv(fnNode, env, acct, fns = new Map()) {
         code: `(call ${key}${parts.map((x) => ` ${x}`).join('')})`,
         type: sig.ret === null ? { k: 'void' } : withBits(sig.ret, sig.retDecl),
       };
+    },
+    /** `printf("%d %d\n", a, b)` → 按 `\n` 切段，每段一条 `(print …)`；`%d` 那一格是 `(tostr 值)`。 */
+    printf: (node, ind, ctx) => {
+      const args = allInChain(named(node)?.args, 'args-add', 'args');
+      if (args.length === 0) { acct('printf 一个实参都没有'); return null; }
+      /* 字符串字面量在树上是一格**节点**（公共节点表 `{ name:'string', leaf:'string' }`），
+         不是裸记号 —— 按表读树。 */
+      const f0raw = args[0];
+      const f0 = headOf(f0raw) === 'string' ? named(f0raw)?.text ?? f0raw.items?.[1] : f0raw;
+      if (f0 === undefined || Array.isArray(f0?.items) || typeof f0?.value !== 'string'
+        || !f0.value.startsWith('"')) {
+        acct('printf 的格式串不是一格字面量（拼接/格式化字面量那两族另算）'); return null;
+      }
+      let fmt = null;
+      try { fmt = JSON.parse(f0.value); } catch { fmt = null; }
+      if (fmt === null) { acct('printf 的格式串读不出来'); return null; }
+      const vals = args.slice(1);
+      let bad = false;
+      const r = fmtRun(fmt, 'stmt', (spec, i) => {
+        if (spec.width !== null || spec.prec !== null || spec.flags.left || spec.flags.zero
+          || spec.flags.plus || spec.flags.space || spec.flags.alt) {
+          acct(`带宽度/精度/标志的 %${spec.conv} 还没接`); bad = true; return null;
+        }
+        const v = vals[i];
+        if (v === undefined) { acct('printf 的实参比转换说明少'); bad = true; return null; }
+        const code = ctx.expr(v, null);
+        if (code === null) { bad = true; return null; }
+        return `(tostr ${code})`;
+      }, ' '.repeat(ind));
+      if (bad || r === null) return null;
+      return r.lines;
     },
     fieldOf: () => { acct('取字段还没接'); return null; },
     elemOf: () => { acct('下标还没接'); return null; },

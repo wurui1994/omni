@@ -59,6 +59,17 @@ export function makeCtx(env) {
       if (ls === null || ls === undefined) { env.acct(`\`${h}\` 这一格还拼不出来`); return null; }
       return ls;
     }
+    /* **`printf(…)` 发的是几行语句**（按 `\n` 切段，每段一条 `print`）—— 不是一格值，
+       所以它在这一层就要认出来，不能等到"降一格表达式"那儿。 */
+    if (h === 'call') {
+      const fn = named(node)?.fn;
+      const key = headOf(fn) === 'name' ? String(named(fn)?.text?.value ?? '') : null;
+      if (key === 'printf') {
+        const ls = env.printf?.(node, ind, ctx);
+        if (ls === null || ls === undefined) { env.acct('printf 那一族还拼不出来'); return null; }
+        return ls;
+      }
+    }
     if (h === 'assign') {
       const ls = env.assign?.(node, ind, ctx);
       if (ls === null || ls === undefined) { env.acct('赋值这一格还拼不出来'); return null; }
