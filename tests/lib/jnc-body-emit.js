@@ -792,44 +792,29 @@ for (const f of files) {
   /* **被 `&` 取过地址的模块级标量**在方言那一侧是 `(ptr T)`（第二十四刀）—— 读写要 pload/pstore。 */
   const gLifted = addrTaken(tree);
   const fns = topFns(tree, env);
-  /* **重载过的名字要整族躲开**（第七十九刀）：旧降级给第二格起改名（`q$2` 那一套），
-     而尺子这边是按名字取旧输出的一格 —— 拿三个不同的体去对同一格是**错的比法**。
-     所以先数一遍：一个名字出现不止一次就整族记账走开（135-overloadcheap.jnc、
-     158-overloadlit.jnc 量出来的三格假不一致就是它）。 */
-  const seen = new Map();
+  /* **重载过的名字在方言那一侧带号**（第七十九刀）：头一格照原名，第二格起是 `名字$oN`
+     （135-overloadcheap.jnc 的真输出：`q` / `q$o1` / `q$o2` / `q$o3`）。所以按**出现次序**
+     数一遍就能对上号 —— 先前整族记账走开（12 格），那是尺子自己不会比，不是规则没接。 */
+  const nth = new Map();
   /* **共用的那个临时号**（`this.tmp`）：`$do` / `$sv` / `$sk` / `$c` / `static` 的 `名字$sN`
      都从它取号，而它是**一份模块一个**（跨函数连着数）—— 所以也按文件开。 */
   const tmpBox = { n: 0 };
   /* 传播那些临时格子的号是**一份模块一个**、跨函数连着数的 —— 所以这一格按文件开。 */
   const ecBox = { n: 0 };
-  {
-    const cnt = (n) => {
-      if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
-      const h = headOf(n);
-      if (h === 'agg') return;
-      if (h === 'fn-def' || h === 'fn-proto') {
-        const d0 = readDcl(named(n)?.dcl);
-        if (d0 !== null && d0.name !== null) seen.set(d0.name, (seen.get(d0.name) ?? 0) + 1);
-        return;
-      }
-      for (const it of n.items) cnt(it);
-    };
-    cnt(tree);
-  }
 
   const dig = (n) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     if (headOf(n) === 'agg') return;                                 // 方法那一族要 `this`，还没接
-    if (headOf(n) === 'fn-def') {
+    if (headOf(n) === 'fn-def' || headOf(n) === 'fn-proto') {
       const nm = named(n);
       const dc = nm === null ? null : readDcl(nm.dcl);
       const name = dc === null ? null : dc.name;
-      const want = name === null ? undefined : oracle.get(name);
-      if (want !== undefined && (seen.get(name) ?? 0) > 1) {
-        const w = `'${name}' 重载过（旧降级给第二格起改了名，按名字取的比法不成立）`;
-        skip.set(w, (skip.get(w) ?? 0) + 1);
-        return;
-      }
+      /* 原型也占一个号（旧降级那边它与定义是同一族的重载）—— 数了就往下走。 */
+      const k = name === null ? 0 : (nth.get(name) ?? 0);
+      if (name !== null) nth.set(name, k + 1);
+      if (headOf(n) === 'fn-proto') return;
+      const key = name === null ? null : (k === 0 ? name : `${name}$o${k}`);
+      const want = key === null ? undefined : oracle.get(key);
       if (want !== undefined) {
         const why = [];
         const e = makeEnv(n, env, (w) => { why.push(w); }, fns, aggFields, aggCtors, ecBox, tmpBox,
