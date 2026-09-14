@@ -16,7 +16,7 @@ import {
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Diagnostics } from '../../src/core/source/diag.js';
-import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
+import { initJnc, jncFrontEnd, jncParse, jncParseExpr } from '../../src/core/lang/jnc.js';
 import { lowerJncRules } from '../../src/lang/jnc/lower.js';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -85,7 +85,13 @@ for (const f of files) {
   try {
     const tree = jncParse(tb, p, d);
     out = lowerJncRules(tree, d, {
-      path: p, needEntry: true, find, parse: (q) => jncParse(tb, q, d),
+      path: p,
+      needEntry: true,
+      find,
+      parse: (q) => jncParse(tb, q, d),
+      /* 格式化字面量里 `$(…)` 那一段要**再解析一遍**（第二百刀）—— 与真驱动递的是同一个入口，
+         少了它这把尺子量的就不是真跑的那件事。 */
+      parseExpr: (file, src, offset) => jncParseExpr(tb, file, src, offset, d),
     });
   } catch (e) {
     note(`崩：${String(e && e.message ? e.message : e).split('\n')[0].slice(0, 120)}`, f);

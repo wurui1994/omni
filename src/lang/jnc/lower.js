@@ -79,6 +79,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   let tree = tree0;
   const find = opts.find ?? null;
   const parse = opts.parse ?? null;
+  /* **格式化字面量里那一段要再解析一遍**（第二百刀）：词法把整个 `$"…"` 当一个记号，
+     `$(x + 1)` 里头那条表达式于是要按位置重解一次。没递这个入口的那一趟明说不收。 */
+  const parseExpr = opts.parseExpr ?? null;
   if (find !== null && parse !== null) {
     const seen = new Set();
     const brought = [];
@@ -213,6 +216,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         gAlias,
         vdispatch,
         ovl,
+        parseExpr,
         aggCtors,
         ecBox,
         helperBox,
@@ -489,6 +493,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       gAlias,
       vdispatch,
       ovl,
+      parseExpr,
       aggCtors,
       methods,
       tags,
@@ -556,6 +561,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       gAlias,
       vdispatch,
       ovl,
+      parseExpr,
       aggCtors,
       methods,
       tags,

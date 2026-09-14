@@ -54,7 +54,7 @@ export function makeFnEnv(o) {
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
     gProps = new Map(), propScope = null, aggStatics = new Map(), aggProps = new Map(),
     aggBases = new Map(), helperBox = new Set(), aggPaths = new Map(), aggAliases = new Map(),
-    gAlias = new Map(), vdispatch = new Map(), ovl = new Map(),
+    gAlias = new Map(), vdispatch = new Map(), ovl = new Map(), parseExpr = null,
   } = o;
   let ctxRef = null;
   /**
@@ -84,8 +84,7 @@ export function makeFnEnv(o) {
   const dc = nm === null ? null : readDcl(nm.dcl);
   const sf = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
   /** 一格聚合体的字段表（名字 + **解出来**的类型）—— "抄一份"那一层要它。 */
-  /* ─── `variant_t` 那一族（第一百一十三刀）：那格结构体是**合成**出来的（源码里没有它的
-     声明），所以"它有哪几格字段"与"装/拆的壳"都由这一层给，家在 `runtime.js` 那一份。 */
+  /* ─── `variant_t` 那一族（第一百一十三刀）：那格结构体是**合成**出来的（源码里没有它的     声明），所以"它有哪几格字段"与"装/拆的壳"都由这一层给，家在 `runtime.js` 那一份。 */
   const VAR_TY = { k: 'struct', name: VARIANT };
   /** 一格值装进 variant 时落哪一种（`null` = 这一层还不收）。 */
   const varKind = (t) => {
@@ -100,6 +99,85 @@ export function makeFnEnv(o) {
   const varShellOnce = (name, text) => {
     if (!helperBox.has(name) && text !== null) { helperBox.add(name); helpers.push(text); }
     return name;
+  };
+  /**
+   * **格式化字面量 `$"…"`**（第二百刀，literals.rst:62）：它产出的是**一格字符串的值**
+   * （不是一次输出），所以整条落成一串 `(bin "+" …)`。词法把整个字面量当**一个记号**，
+   * 里头 `$名字` / `$(表达式)` 那几段于是要按位置**再解析一遍**（`parseExpr`）。
+   *
+   * 一格注入怎么变成串按它的类型走（与 printf 那张表同一口径）：串原样、整数 `tostr`、
+   * 实数 `sfix … 6`（C 的 `%f` 默认六位）、布尔按 1/0。
+   *
+   * `%…` 那两族（`%1` 按序号引实参、`%05d` 光写 spec）与 `$(…; spec)`（宽度/精度）
+   * **明说不收** —— 那要把 printf 那套 spec 机器接上来，是另一刀。
+   */
+  const fmtOf = (node) => {
+    const tok = named(node)?.text;
+    const raw = String(tok?.value ?? '');
+    if (!raw.startsWith('$"') || !raw.endsWith('"') || raw.length < 3) {
+      acct('格式化字面量的记号读不出来'); return null;
+    }
+    if (parseExpr === null) {
+      acct('格式化字面量 `$"…"`（这一趟没有再解析一遍的入口）'); return null;
+    }
+    const file = tok?.span?.file ?? null;
+    const base = (tok?.span?.start ?? 0) + 2;
+    const inner = raw.slice(2, -1);
+    const parts = [];
+    let lit = '';
+    const flushLit = () => { if (lit !== '') { parts.push(`(str "${lit}")`); lit = ''; } };
+    const strOf = (v) => {
+      const k = v.type?.k;
+      if (k === 'string') return v.code;
+      if (k === 'int' || k === 'enum') return `(tostr ${v.code})`;
+      if (k === 'real') return `(sfix ${v.code} (int 6))`;
+      if (k === 'bool') return `(tostr (sel ${v.code} (int 1) (int 0)))`;
+      return null;
+    };
+    const inject = (src, off) => {
+      const t = parseExpr(file, src, base + off);
+      if (t === null) { acct(`格式化字面量里 '${src}' 解不出来`); return false; }
+      const v = emitExpr(t, null, ctxRef);
+      if (v === null) return false;                       // 账已经记过
+      const s = strOf(v);
+      if (s === null) { acct(`格式化字面量里那一格是 ${v.type?.k ?? '?'}（还没接）`); return false; }
+      flushLit();
+      parts.push(s);
+      return true;
+    };
+    let i = 0;
+    while (i < inner.length) {
+      const c = inner[i];
+      if (c === '\\' && i + 1 < inner.length) { lit += inner.slice(i, i + 2); i += 2; continue; }
+      if (c === '%') {
+        acct('格式化字面量里的 `%…`（按序号引实参 / 光写 spec）还没接'); return null;
+      }
+      if (c !== '$') { lit += c; i += 1; continue; }
+      if (inner[i + 1] === '$') { lit += '$'; i += 2; continue; }
+      if (inner[i + 1] === '(') {
+        let depth = 0;
+        let j = i + 1;
+        for (; j < inner.length; j += 1) {
+          if (inner[j] === '(') depth += 1;
+          else if (inner[j] === ')') { depth -= 1; if (depth === 0) break; }
+        }
+        if (depth !== 0) { acct('格式化字面量里 `$(` 没配上 `)`'); return null; }
+        const body = inner.slice(i + 2, j);
+        if (body.includes(';')) {
+          acct('格式化字面量里 `$(…; spec)`（宽度/精度）还没接'); return null;
+        }
+        if (!inject(body, i + 2)) return null;
+        i = j + 1;
+        continue;
+      }
+      const m = /^[A-Za-z_][\w$]*(\.[A-Za-z_][\w$]*)*/.exec(inner.slice(i + 1));
+      if (m === null) { acct('格式化字面量里 `$` 后面不是名字也不是 `(`'); return null; }
+      if (!inject(m[0], i + 1)) return null;
+      i += 1 + m[0].length;
+    }
+    flushLit();
+    if (parts.length === 0) return { code: '(str "")', type: T.string };
+    return { code: parts.reduce((a, b) => `(bin "+" ${a} ${b})`), type: T.string };
   };
   const fieldsOf = (aggName) => {
     /* variant 那四格字段由这一层给 —— "按值抄一份"走的就是它们（105-variant.jnc 的
@@ -1333,6 +1411,8 @@ export function makeFnEnv(o) {
      *       取布尔那一格回整数，比一下 0。
      */
     varBoxName: (kind) => varShellOnce(`jnc$var$${kind}`, varBoxShell(kind)),
+    /* 格式化字面量那一格（第二百刀）：整条落成一串 `(bin "+" …)`，答的是一格字符串的值。 */
+    fmtOf,
     boxVar: (v) => {
       const k = varKind(v.type);
       if (k === null) { acct(`往 variant_t 里装一格 ${v.type?.k ?? '?'} 还没接`); return null; }

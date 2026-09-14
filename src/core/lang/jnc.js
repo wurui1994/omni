@@ -146,7 +146,13 @@ export function jncText(path, dirs = [], needEntry = true) {
     /* `find` / `parse` 递进去：import 那一族在**规则化那条路**里也是"把那份文件的顶层条目
        并进这一个模块"（第六十刀）—— 找法与旧那条路共用同一个闭包，不另写一套。 */
     const t2 = lowerJncRules(tree, diags, {
-      path, needEntry, find, parse: (p) => jncParse(tb, p, diags),
+      path,
+      needEntry,
+      find,
+      parse: (p) => jncParse(tb, p, diags),
+      /* **格式化字面量 `$"…$(x)…"`**（第二百刀）：`$(…)` 里头是一整条表达式 —— 词法那一层
+         把整个字面量当一个记号，所以那一段要**再解析一遍**。入口与旧那条路共用同一个。 */
+      parseExpr: (file, src, offset) => jncParseExpr(tb, file, src, offset, diags),
     });
     const w2 = diags.warnings();
     if (w2 !== '') stderr(w2);

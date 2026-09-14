@@ -366,10 +366,17 @@ export function emitExpr0(n, want, ctx) {
 
   /* **贴着写的几格串字面量**（`"hello" ", " "world"`）：折成一格串再发。折不动的
      （里头有一格不是串字面量）是"运行期拼接"那一族，还没接 —— 记账。 */
-  if (h === 'concat') {
-    const s = strLitFold(n);
+  if (h === 'concat') {    const s = strLitFold(n);
     if (s === null) { ctx.acct('串拼接：里头不是清一色的串字面量（那一族还没接）'); return null; }
     return { code: `(str ${JSON.stringify(s)})`, type: ctx.T.string };
+  }
+  /* **格式化字面量**（`$"n = $n"`，第二百刀）：产出的是**一格字符串的值**（literals.rst:62）——
+     里头 `$名字` / `$(表达式)` 要按位置再解析一遍，所以整格交给调用方那一层（`ctx.fmtOf`）。 */
+  if (h === 'fmt') {
+    const n0 = ctx.acctSeen?.() ?? 0;
+    const r = ctx.fmtOf?.(n);
+    if (r === null || r === undefined) return soft(ctx, n0, '格式化字面量这一格还拼不出来');
+    return r;
   }
 
   ctx.acct(`表里没有这一格表达式：${h}`);
