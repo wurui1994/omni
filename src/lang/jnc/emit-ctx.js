@@ -481,8 +481,14 @@ export function makeFnEnv(o) {
    * 86-multibase.jnc 印出来的数变了）。所以这一层照旧答"查不着"，把账留着。
    */
   const findMethod = (aggName, mname) => {
-    const hit = methods.get(`${aggName}$${mname}`);
-    return hit === undefined ? null : { sig: hit, key: `${aggName}$${mname}` };
+    const key = `${aggName}$${mname}`;
+    const hit = methods.get(key);
+    if (hit !== undefined) return { sig: hit, key };
+    /* **体外写的方法**（`void Counter.reset(int step) { … }`，49-class.jnc）：它的名字是点串，
+       登记在**函数**那张表里，而方言那一侧的名字与体里写的一模一样（`Counter$reset`）——
+       所以这儿顺手问一次那张表。基类那一问（`basecall`）先前就是这么办的，两处同一条。 */
+    const out = fns.get(key);
+    return out === undefined ? null : { sig: out, key };
   };
   /** 一格字段的位置（`memberOf`）：`(pfield 基 名)`；字段自己是结构体/数组时它又是一格 `agg`。 */
   const memberAt = (baseCode, aggName, fname) => {
@@ -1048,8 +1054,11 @@ export function makeFnEnv(o) {
           /* **一格类的局部量**（`Outer o;`）：jancy 那儿它是**自动造出来的对象**
              （类变量在作用域里就构造好），不是一条空引用 —— 所以走造对象那条路
              （`newObj`：pnew + 写 `$tag` + 构造）。先前这儿按 `zeroText` 发 `(pnull …)`，
-             跑起来是"指针越界"（195-embctor.jnc 量出来的）。 */
-          if (r.type.k === 'class') {
+             跑起来是"指针越界"（195-embctor.jnc 量出来的）。
+             **写了 `*` 的那一种不造**（`Node* z;`）：那一格是一条空引用（49-class.jnc 的
+             `if (z == null)` 就是量它）—— 类那一族在解类型时吞掉一个 `*`，所以这儿得回头
+             问一句"源码里写了几个星"。 */
+          if (r.type.k === 'class' && (t.ptrs ?? 0) === 0) {
             const o2 = newObj(r.type.name);
             if (o2 === null) return null;
             out.push(`${pad}(let ${t.name} ${ty} ${o2.code})`);
@@ -1295,11 +1304,22 @@ export function makeFnEnv(o) {
           if (agg === null) { acct(`叫方法时 '.' 的左边不是结构体/类（${ob.type?.k ?? '?'}）`); return null; }
           const found = findMethod(agg, mname);
           if (found === null) {
-            acct(`'${agg}' 上查不着方法 '${mname}'（属性/事件/虚派发那几族另算）`); return null;
+            /**
+             * **字段里装着一格函数指针**（`Fn* m_f;` 之后 `s.m_f(3, 4)`，116-structtypedef.jnc）：
+             * jancy 里方法与字段在**同一个命名空间**里，所以查不着方法时这一格还可能是
+             * "读出那个字段、按函数值调"。判据是它的类型解出来正好是 `fnptr` —— 是就
+             * **不在这儿定**，落到下面"从一格函数指针上调"那条（`(callfn …)`，第五十五刀）。
+             */
+            const ft0 = aggFields.get(agg)?.get(mname);
+            const fr0 = ft0 === undefined ? null : resolveType(ft0, env);
+            if (fr0 === null || fr0.type?.k !== 'fnptr') {
+              acct(`'${agg}' 上查不着方法 '${mname}'（属性/事件/虚派发那几族另算）`); return null;
+            }
+          } else {
+            sig = found.sig;
+            selfArg = found.sig.stat === true ? null : ob.code;
+            key = found.key;
           }
-          sig = found.sig;
-          selfArg = sig.stat === true ? null : ob.code;
-          key = found.key;
         }
       } else if (asName !== null && !names.has(asName) && !globals.has(asName)
         && self !== null && findMethod(self.agg, asName) !== null) {

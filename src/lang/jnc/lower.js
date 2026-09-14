@@ -277,6 +277,17 @@ export function lowerJncRules(tree, diags, opts = {}) {
       if (r.type.k === 'struct' || r.type.k === 'arr') {
         const st = emitType(r.type, 'slot', tyc);
         cells.push(`    (set ${full} (pnew ${st} (int 1)))`);
+      } else if (r.type.k === 'class' && (t.ptrs ?? 0) === 0) {
+        /**
+         * **模块级的类变量**（`Counter g_c;`，49-class.jnc）：jancy 里这是"程序一起来就造好的
+         * 一格对象"（`module.construct` 的 pnew + 写 `$tag`），与局部量 `Counter c;` 的那一格
+         * **同一条路**（pnew + tag + 构造）。少这一步，`g_c.reset(7)` 跑的时候里头是零 ——
+         * 指针越界。
+         */
+        const tag = tags.get(r.type.name) ?? 0;
+        const root = clsRoot(r.type.name);
+        cells.push(`    (set ${full} (pnew (ptr ${root}) (int 1)))`);
+        cells.push(`    (pstore (pfield (var ${full}) $tag) (int ${tag}))`);
       } else if (box) {
         const pt = liftedType(r.type, tyc);
         cells.push(`    (set ${full} (pnew ${pt} (int 1)))`);
