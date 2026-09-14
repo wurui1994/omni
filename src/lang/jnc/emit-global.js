@@ -80,6 +80,15 @@ function chainCount(node) {
   return n;
 }
 
+/**
+ * **`static construct` 那格一次性标志**：静态构造只跑一遍，标志就是那一格
+ * （`(global C$construct$static$1 bool)`，50-construct.jnc / 193-staticctorns.jnc）。
+ * `agg` 是聚合体的全名。
+ */
+export function staticCtorFlag(agg) {
+  return `(global ${agg}$construct$static$1 bool)`;
+}
+
 /** 带上命名空间前缀的全名。 */
 function fullName(name, ns) {
   return ns === null || ns === undefined || ns === '' ? name : `${ns}$${name}`;
@@ -132,6 +141,14 @@ export function globalLines(m, env, ctx = { ns: null }) {
     if (headOf(body) === 'compound') {
       for (const im of readBodyMembers(body)) {
         if (im.name === null) continue;
+        /* 体里那格**事件**（`bindable event m_e();`，73-propfullauto.jnc）：名字是写的人定的，
+           发的是 `<属性名>$<那个名字>`，类型是多播。 */
+        if (im.shape === 'event') {
+          const er = resolveType(im.type, env);
+          if (er.type === null) return { lines: [], why: `体里的事件 ${im.name}：${er.why}` };
+          lines.push(`(global ${full}$${im.name} ${emitType(er.type, 'value', tc)})`);
+          continue;
+        }
         if (im.shape !== 'data' && im.shape !== 'array' && im.shape !== 'fnptr') continue;
         const ir = resolveType(im.type, env);
         if (ir.type === null) return { lines: [], why: `体里的字段 ${im.name}：${ir.why}` };

@@ -22,7 +22,8 @@ import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
-import { globalLines, addrTaken } from '../../src/lang/jnc/emit-global.js';
+import { globalLines, addrTaken, staticCtorFlag } from '../../src/lang/jnc/emit-global.js';
+import { hasStaticCtor } from '../../src/lang/jnc/emit-fn.js';
 import { classRoot } from '../../src/lang/jnc/emit-agg.js';
 import { LIB_IMPORTS } from '../../src/lang/jnc/modules.js';
 
@@ -194,8 +195,11 @@ for (const f of files) {
   for (const t of trees) dig(t, null);
   /* **类里的 `static` 字段不进对象**（第一百六十七刀）：它就是一格模块级的量，
      名字是 `<聚合体>$<字段名>`（167-staticfield.jnc 的 `C$m_count` / `S$m_table`）。 */
+  const flags = [];
   for (const rec of env.values()) {
     if (rec.agg === undefined) continue;
+    /* **写了 `static construct` 就多一格一次性标志**（静态构造只跑一遍）。 */
+    if (hasStaticCtor(rec.agg)) flags.push(staticCtorFlag(rec.name));
     for (const m of rec.agg.members) {
       if (m.name === null || !(m.storage ?? []).includes('static')) continue;
       if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') continue;
@@ -214,6 +218,15 @@ for (const f of files) {
     return root.emitName ?? nm;
   };
   const mine = new Set();
+  for (const line of flags) {
+    const nm = /^\(global (\S+) /.exec(line)?.[1] ?? '?';
+    mine.add(nm);
+    const want = oracle.get(nm);
+    if (want === undefined) { extra += 1; extraAt.push(`${short}　${nm}`); continue; }
+    cmp += 1;
+    if (line === want) same += 1;
+    else if (diff.length < 20) diff.push(`${short}\n      旧 ${want}\n      新 ${line}`);
+  }
   for (const { m, ns } of tops) {
     const r = globalLines(m, env, { ns, taken, clsRoot: rootOf });
     if (r.lines.length === 0) {
