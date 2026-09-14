@@ -923,7 +923,13 @@ export function makeFnEnv(o) {
            排在"查不着"之前 —— 它是一格真字段，报"未声明"是认错人。
            静态字段与成员属性紧跟在它后面（`memberOther`，与 `x.m` 问的是同一份）。 */
         if (self !== null) {
-          if (aggFields.get(self.agg)?.has(key) ?? false) {
+          /* **别名与字段路径也算"这一格是字段"**（95-aliaspath.jnc / 199-aliasfield.jnc）：
+             `alias m_len = m_list.m_len;` 之后体里裸写的 `m_len` 就是那条路 —— 判据要与
+             `x.m` 那一处（`memberAt` 里的三问：真字段 / 解一跳 / 一条路）问的是同一份，
+             不然同一个名字点着写查得着、裸写查不着。 */
+          if ((aggFields.get(self.agg)?.has(key) ?? false)
+            || (aggAliases.get(self.agg)?.has(key) ?? false)
+            || (aggPaths.get(self.agg)?.has(key) ?? false)) {
             return memberAt('(var $this)', self.agg, key);
           }
           const other = memberOther('(var $this)', self.agg, key);

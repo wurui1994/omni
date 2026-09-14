@@ -183,6 +183,31 @@ export function memberInit(m) {
 }
 
 /**
+ * 别名右边那**一条路**（`alias m_head = m_list.m_head;` → `['m_list','m_head']`）。
+ * 只认"名字 + 一串取字段"这一种形状，别的答 null（下游照实说查不着，不猜）。
+ */
+export function aliasPath(m) {
+  const ini = memberInit(m);
+  if (ini === null || ini.curly === true) return null;
+  const walk = (n) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return null;
+    const h = headOf(n);
+    if (h === 'paren') return walk(named(n)?.inner);
+    if (h === 'name') {
+      const s = String(named(n)?.text?.value ?? '');
+      return s === '' ? null : [s];
+    }
+    if (h === 'field' || h === 'ptr-field') {
+      const o = walk(named(n)?.obj);
+      const leaf = String(named(n)?.name?.value ?? '');
+      return o === null || leaf === '' ? null : [...o, leaf];
+    }
+    return null;
+  };
+  return walk(ini.value);
+}
+
+/**
  * 顶层那几格**聚合体**：一边把名字记进 `env`（`resolveType` 要它才认得 `Inner`），
  * 一边攒一张**字段表**（`emitName` → 名字 → 那一格的声明类型）—— 取字段与"往字段里写"
  * 两侧都从它出发。位域、别名路径、属性那几族**不收**（`member-table.js` 的七格里那几条
@@ -325,6 +350,10 @@ export function scanAggs(tree, env, ovl = new Map()) {
             if (m.name === null || m.type === null || fs.has(m.name)) continue;
             if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') continue;
             if (m.storage.includes('static')) continue;
+            /* **`alias` 不是一格字段**（与上头那一遍同一条界）：这一遍先前少了这一句，于是
+               `alias m_alias = m_pad;` 又被塞回字段表里，报的是"字段 'm_alias'：认不出基类型
+               'no-type'"（199-aliasfield.jnc / 95-aliaspath.jnc 量的正是这一格）。 */
+            if (m.storage.includes('alias')) continue;
             /* **bigendian 的字段不收**（第一百二十六刀）：它是一格真字段，可读写各要一次
                字节序反转 —— 当普通字段收进来就把那一步**静静地**丢了（118-bigendian.jnc）。 */
             if ((m.type.mods ?? []).includes('bigendian')) continue;
@@ -371,8 +400,34 @@ export function scanAggs(tree, env, ovl = new Map()) {
           if (nameText(n2.name) !== null) continue;                  // 带名字的 union 不摊
           pathsIn(n2);
         }
+        /**
+         * **类里的字段路径别名**（`alias m_head = m_list.m_head;`，95-aliaspath.jnc /
+         * 199-aliasfield.jnc）：右边是**一条路**、不是一个名字 —— 与匿名 struct 那一族落成的
+         * 是同一种东西（一格名字对一串 `(pfield (pfield … m_list) m_head)`），所以进同一张表。
+         * 只指一个名字的那种（`alias m_alias = m_pad;`）照旧走"解一跳"那张表（`aggAliases`）。
+         * 中途哪一格解不出聚合体（跨文件、还没扫到）就不记 —— 下游照实说查不着，不猜。
+         */
+        for (const m of a.members) {
+          if (m.name === null || !m.storage.includes('alias')) continue;
+          const path = aliasPath(m);
+          if (path === null || path.length < 2) continue;
+          const steps = [];
+          let cur = fs;
+          let ty = null;
+          for (const [i, seg] of path.entries()) {
+            const t0 = cur === undefined ? undefined : cur.get(seg);
+            if (t0 === undefined) { ty = null; break; }
+            steps.push(seg);
+            ty = t0;
+            if (i === path.length - 1) break;
+            const r0 = resolveType(t0, env);
+            const bn = r0.type !== null && (r0.type.k === 'struct' || r0.type.k === 'class')
+              ? r0.type.name : null;
+            cur = bn === null ? undefined : fields.get(bn);
+          }
+          if (ty !== null && steps.length === path.length && !fs.has(m.name)) ps0.set(m.name, { steps, type: ty });
+        }
         if (ps0.size > 0) fieldPaths.set(emitName, ps0);
-
         /* **静态字段与成员属性各收一张表**（次序即规则：这两族在上面那张字段表里刻意
            不收 —— 一个不进对象、一个不是内存，被"普通字段"那一支接走就是静静地错）。 */
         const st = new Map();
@@ -491,6 +546,11 @@ export function scanAggs(tree, env, ovl = new Map()) {
         const al = new Map();
         for (const m of a.members) {
           if (m.name === null || !m.storage.includes('alias')) continue;
+          /* **右边是一条路的那几格不在这儿**（`alias m_head = m_list.m_head;`）：它落成的是
+             一串取字段，已经进了上头那张路径表。按末段记一跳会指到一个**不存在**的字段上
+             （199-aliasfield.jnc 的 `m_deep2` 先前就被记成了"指着 m_deep"）。 */
+          const p = aliasPath(m);
+          if (p !== null && p.length > 1) continue;
           const ini = memberInit(m);
           const tgt = ini === null || ini.curly === true ? null : lastIdent(ini.value);
           if (tgt !== null && tgt !== m.name) al.set(m.name, tgt);
