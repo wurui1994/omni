@@ -496,7 +496,7 @@ export function makeFnEnv(o) {
   const findMethod = (aggName, mname) => {
     const key = `${aggName}$${mname}`;
     const hit = methods.get(key);
-    if (hit !== undefined) return { sig: hit, key };
+    if (hit !== undefined) return callable(aggName, mname, { sig: hit, key });
     /* **体里的 `alias`**（`alias twice = doubled;`，192-unionalias.jnc）：先解一跳再照旧查
        —— 它没有存储、没有类型，只是"这个名字指着谁"。 */
     const al = aggAliases.get(aggName)?.get(mname);
@@ -531,8 +531,44 @@ export function makeFnEnv(o) {
       else queue.push(...(aggBases.get(b) ?? []));
     }
     if (hits.length !== 1) return null;                    // 一格都没有，或撞车了（不猜）
-    if (hits[0].sig.virt === true) return null;            // 虚方法要走派发表
-    return hits[0];
+    return callable(aggName, mname, hits[0]);
+  };
+  /**
+   * **查着的那一格能不能"一句直调"**（两条界，`null` = 非走派发表不可）：
+   *   1. **虚方法而底下真有人覆盖它**：那时派发表里那一格不是常量（78-notype.jnc 的
+   *      `B* b = d; b.show();` 该印 D 那一行）。没人覆盖的话表里永远指着同一个函数 ——
+   *      一句 `(call B$put …)` 与查表跑出来的是同一件事，那一格照旧直调；
+   *   2. **只写了原型、体不在这份模块里**（`abstract` / 接口那一族）：一句 `(call B$step …)`
+   *      指着的是谁也没发过的函数（量出来就是"未声明的函数 'B$step'"）。体写在类外的那种
+   *      **算有体** —— 它登记在函数表里。
+   * 判据里"底下"指的是**接收方那个静态类型**的派生类：能装进它的只有它们。跨文件的派生类
+   * 看不见 —— 那一族在"跨文件/宿主面"那笔账里。
+   */
+  const callable = (aggName, mname, found) => {
+    if (found.sig.virt === true && overriddenBelow(aggName, mname)) return null;
+    if (found.sig.hasBody !== true && !fns.has(found.key)) return null;
+    return found;
+  };
+  /** `sub` 的基类链里有 `base` 吗（含多层、多基类）。 */
+  const derivesFrom = (sub, base) => {
+    const seen2 = new Set();
+    const q2 = [...(aggBases.get(sub) ?? [])];
+    while (q2.length > 0) {
+      const b = q2.shift();
+      if (b === base) return true;
+      if (seen2.has(b)) continue;
+      seen2.add(b);
+      q2.push(...(aggBases.get(b) ?? []));
+    }
+    return false;
+  };
+  /** 这个模块里有没有 `agg` 的派生类覆盖了同名的方法（虚派发那一问的判据）。 */
+  const overriddenBelow = (agg, mname) => {
+    for (const mi of methods.values()) {
+      if (mi.name !== mname || mi.owner === undefined || mi.owner === agg) continue;
+      if (derivesFrom(mi.owner, agg)) return true;
+    }
+    return false;
   };
   /**
    * **这个名字在那格聚合体上是"装着函数指针的字段"吗**（`Fn* m_op;`）。
