@@ -14,7 +14,8 @@ import { readSpecs } from './specs.js';
 import { readAgg, readEnum, readBodyMembers } from './agg.js';
 import { enumBase } from './const-eval.js';
 import { resolveType } from './resolve-type.js';
-import { readFormals, fnName } from './emit-fn.js';
+import { emitType } from './emit-type.js';
+import { readFormals, fnName, overloadSuffix } from './emit-fn.js';
 import { classRoot, basePaths, lastIdent } from './emit-agg.js';
 /**
  * 一格函数/方法的**签名**（形参、默认实参、返回、`errorcode`、方言那一侧的名字）。
@@ -54,8 +55,60 @@ export function sigOf(nm, env, emit, t0 = null) {
 }
 
 /** 最小的那份探子：形参与局部量的类型表。 */
+/**
+ * **同名的那一族里第几格**（第五十八刀 A，76-overload.jnc 的 `f` / `f$o1` / `f$o2`）。
+ *
+ * jancy 判两条同名声明合不合法只看**实参那一串的签名**（`FunctionType::getArgSignature`），
+ * 所以同名的几格在方言那一侧要各有一个名字 —— 号按**声明次序**排，拼法由
+ * `overloadSuffix` 那一格说（取/存与算符那两族从 2 起，普通名字从 1 起）。
+ *
+ * 只有**普通名字**那几族收：`construct` / `destruct` / 取存 / 算符重载的调用点各走各的路
+ * （造对象、属性、算符），那几处还没有"挑一格"这一步 —— 收进来就等于让它们静静地调第一格。
+ * 那几族照旧记在 `overloads` 里，发的那一层明说不收。
+ */
+function plainName(leaf) {
+  if (leaf === 'get' || leaf === 'set' || leaf === 'construct' || leaf === 'destruct') return false;
+  return !leaf.includes('op$') && !leaf.startsWith('construct$');
+}
+
+/**
+ * **实参那一串的签名**（`getArgSignature` 那一句）：解得出来就是一串方言类型，
+ * 有一格解不出来就答 null（那时宁可把两条当**两格**看 —— 挑那一层会照实说"分不出来"，
+ * 而合成一格是**静静地调错**）。
+ */
+function argSig(params, env) {
+  const out = [];
+  for (const p of params ?? []) {
+    if (p === null || p === undefined) return null;
+    const r = resolveType(p, env);
+    if (r === null || r.type === null) return null;
+    out.push(emitType(r.type, 'slot'));
+  }
+  return out.join(',');
+}
+
+/**
+ * 往"同名那一族"里添一格：回 { key, dup }。族里那几格记的是 `{ key, asig }`。
+ *
+ * **实参签名一样的两条不是重载，是同一格**（jancy 判重定义就看这一句）—— 类体里那句原型
+ * 与体外那个定义、`int f();` 与后面 `int f(){…}` 都走这一条，不然会凭空多出一格 `$o1`。
+ */
+function ovlAdd(fam, base, leaf, params, env) {
+  const had = fam.get(base);
+  const mine = argSig(params, env);
+  if (had === undefined) { fam.set(base, [{ key: base, asig: mine }]); return { key: base, dup: 0 }; }
+  if (mine !== null) {
+    const i = had.findIndex((e) => e.asig === mine);
+    if (i >= 0) return { key: had[i].key, dup: i };
+  }
+  const dup = had.length;
+  const key = `${base}${overloadSuffix(leaf, dup)}`;
+  fam.set(base, [...had, { key, asig: mine }]);
+  return { key, dup };
+}
+
 /** 顶层那几格函数的签名（名字 → { params, ret }）—— 调用那一族要它。 */
-export function scanFns(tree, env) {
+export function scanFns(tree, env, ovl = new Map()) {
   const out = new Map();
   const dig = (n, ns) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
@@ -73,19 +126,34 @@ export function scanFns(tree, env) {
       const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
       if (t !== null && t.shape === 'fn') {
         if (t.name !== null) {
-          const emit = ns === null ? t.name : `${ns}$${t.name}`;
-          const sig = sigOf(nm, env, emit);
+          const base = ns === null ? t.name : `${ns}$${t.name}`;
+          /* **重载**：同名的第二格起换个方言名（`f$o1`）。号按声明次序，与发码那一头
+             （`fnHead` 的 `ctx.dup`）走的是同一格 `overloadSuffix`。 */
+          const sig0 = sigOf(nm, env, base);
+          const one = plainName(t.name) && sig0 !== null
+            ? ovlAdd(ovl, base, t.name, sig0.params, env) : { key: base, dup: 0 };
+          const sig = one.key === base ? sig0 : sigOf(nm, env, one.key);
           if (sig !== null) {
-            out.set(t.name, sig);
-            if (ns !== null) out.set(emit, sig);
+            out.set(one.key, { ...sig, dup: one.dup, node: n });
+            /* 不带前缀的那个名字指着**头一格**（命名空间里裸写的调用查的是它）。 */
+            if (ns !== null && one.dup === 0) out.set(t.name, { ...sig, dup: 0, node: n });
+            if (ns !== null && plainName(t.name)) {
+              const fam = ovl.get(base);
+              if (fam !== undefined) ovl.set(t.name, fam);
+            }
           }
         } else {
           /* **体外定义的方法**（`int P.scaled(int k) { … }`）：名字是点串，在方言那一侧
              整串用 `$` 接起来（`fnName`）。它按东家那一格登记 —— 调用那一层查的就是它。 */
           const dotted = fnName({ name: null, type: t, at: n });
           if (dotted !== null) {
-            const sig = sigOf(nm, env, ns === null ? dotted : `${ns}$${dotted}`);
-            if (sig !== null) out.set(ns === null ? dotted : `${ns}$${dotted}`, sig);
+            const base = ns === null ? dotted : `${ns}$${dotted}`;
+            const leaf = base.slice(base.lastIndexOf('$') + 1);
+            const sig0 = sigOf(nm, env, base);
+            const one = plainName(leaf) && sig0 !== null
+              ? ovlAdd(ovl, base, leaf, sig0.params, env) : { key: base, dup: 0 };
+            const sig = one.key === base ? sig0 : sigOf(nm, env, one.key);
+            if (sig !== null) out.set(one.key, { ...sig, dup: one.dup, node: n });
           }
         }
       }
@@ -120,7 +188,7 @@ export function memberInit(m) {
  * 两侧都从它出发。位域、别名路径、属性那几族**不收**（`member-table.js` 的七格里那几条
  * 各有自己的一套，收进来就等于拿普通字段那一支把它们悄悄接走了）。
  */
-export function scanAggs(tree, env) {
+export function scanAggs(tree, env, ovl = new Map()) {
   const fields = new Map();
   /** union 里套的匿名 struct 那几格：东家 → 名字 → `{ steps, type }`（一串取字段）。 */
   const fieldPaths = new Map();
@@ -390,15 +458,27 @@ export function scanAggs(tree, env) {
              （`m.name` 是 null），而它们正是方法那一族里最要紧的几个。 */
           const mname = fnName({ name: m.name, type: m.type, at: m.at });
           if (mname === null) continue;
-          const key = `${emitName}$${mname}`;
-          const sig = sigOf(named(m.at), env, key, m.type);
+          const base = `${emitName}$${mname}`;
+          /* **重载**（同一格东家上同名的两格方法）：普通名字那几族按声明次序换名
+             （`C$put` / `C$put$o1`，第五十八刀）；`construct` / 取存 / 算符那几族的调用点
+             各走各的路、还没有"挑一格"这一步 —— 照旧记账，发的那一层明说不收。 */
+          const sig0 = sigOf(named(m.at), env, base, m.type);
+          if (sig0 === null) continue;
+          const one = plainName(mname)
+            ? ovlAdd(ovl, base, mname, sig0.params, env) : { key: base, dup: 0 };
+          if (!plainName(mname) && methods.has(base)) overloads.add(base);
+          const key = one.key;
+          const sig = key === base ? sig0 : sigOf(named(m.at), env, key, m.type);
           if (sig === null) continue;
-          /* **重载**（同一格东家上同名的两格方法）：按实参挑哪一格是一整族规则
-             （`frontend-engine/overload.js` 那一套）。这一层还没接 —— 这张表按名字存，
-             第二格会**把第一格盖掉**，所以在这儿记下来，发的那一层照它明说不收。 */
-          if (methods.has(key)) overloads.add(key);
           methods.set(key, {
-            ...sig, owner: emitName, name: mname, node: m.at, hasBody: mh === 'fn-def',
+            ...sig,
+            dup: one.dup,
+            owner: emitName,
+            name: mname,
+            node: m.at,
+            /* 原型 + 体外那个定义是**同一格**（签名一样）：`hasBody` 要**攒**着看 ——
+               后来那一格是原型不能把先前记下的"有体"抹掉。 */
+            hasBody: mh === 'fn-def' || methods.get(key)?.hasBody === true,
           });
         }
 
@@ -451,12 +531,21 @@ export function scanAggs(tree, env) {
           if (t === null || t.shape === 'prop' || t.shape === 'event') continue;
           const mname = fnName({ name: t.name, type: t, at: it0 });
           if (mname === null) continue;
-          const key = `${ownerT}$${mname}`;
-          const sig = sigOf(fm, env, key, t);
+          const base = `${ownerT}$${mname}`;
+          const sig0 = sigOf(fm, env, base, t);
+          if (sig0 === null) continue;
+          const one = plainName(mname)
+            ? ovlAdd(ovl, base, mname, sig0.params, env) : { key: base, dup: 0 };
+          if (!plainName(mname) && methods.has(base)) overloads.add(base);
+          const sig = one.key === base ? sig0 : sigOf(fm, env, one.key, t);
           if (sig === null) continue;
-          if (methods.has(key)) overloads.add(key);
-          methods.set(key, {
-            ...sig, owner: ownerT, name: mname, node: it0, hasBody: mh === 'fn-def',
+          methods.set(one.key, {
+            ...sig,
+            dup: one.dup,
+            owner: ownerT,
+            name: mname,
+            node: it0,
+            hasBody: mh === 'fn-def' || methods.get(one.key)?.hasBody === true,
           });
         }
       }
@@ -692,5 +781,6 @@ export function scanAggs(tree, env) {
     props: propsAll,
     bases,
     overloads,
+    ovl,
   };
 }

@@ -49,7 +49,7 @@ export function makeFnEnv(o) {
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
     gProps = new Map(), propScope = null, aggStatics = new Map(), aggProps = new Map(),
     aggBases = new Map(), helperBox = new Set(), aggPaths = new Map(), aggAliases = new Map(),
-    gAlias = new Map(), vdispatch = new Map(),
+    gAlias = new Map(), vdispatch = new Map(), ovl = new Map(),
   } = o;
   let ctxRef = null;
   /**
@@ -554,8 +554,38 @@ export function makeFnEnv(o) {
     const vd = vdispatch.get(`${aggName}$${mname}`);
     return vd === undefined ? null : { sig: { ...found.sig, emit: vd }, key: vd };
   };
-  /** `sub` 的基类链里有 `base` 吗（含多层、多基类）。 */
-  const derivesFrom = (sub, base) => {
+  /**
+   * **同名那一族里挑一格**（第五十八刀 A，76-overload.jnc）。
+   *
+   * 这一层先只做**按实参个数**分得开的那一半：一格候选收得下的个数是
+   * `[形参数 - 有默认值的格数, 形参数]`，落在里头的才算合得上。只有一条合得上就是它；
+   * 一条都合不上、或**同元有两条**（那要按各实参的转换代价排，jancy 的
+   * `chooseOverload` 是"各实参里最差的一档当分、取最高分、并列即歧义"）—— 明说不收，不猜。
+   *
+   * 挑这一步排在**求实参**之前：形参的类型要拿去降实参（`null` 从那儿知道自己是哪种指针）。
+   */
+  const sigAt = (k) => methods.get(k) ?? fns.get(k);
+  const pickOvl = (key0, sig0, args) => {
+    const fam = ovl.get(key0);
+    if (fam === undefined || fam.length < 2) return { sig: sig0, key: key0 };
+    const given = args.filter((a) => headOf(a) !== 'unbound').length;
+    const fits = [];
+    for (const e of fam) {
+      const s = sigAt(e.key);
+      if (s === undefined) continue;
+      const want = (s.params ?? []).length;
+      const opt = (s.defaults ?? []).filter((d) => d !== null).length;
+      if (given >= want - opt && given <= want) fits.push({ sig: s, key: e.key });
+    }
+    if (fits.length === 1) return fits[0];
+    if (fits.length === 0) {
+      acct(`'${key0}' 有 ${fam.length} 条重载，没有一条收 ${given} 个实参`);
+      return null;
+    }
+    acct(`'${key0}' 的同元重载要按实参的类型挑（还没接）`);
+    return null;
+  };
+  /** `sub` 的基类链里有 `base` 吗（含多层、多基类）。 */  const derivesFrom = (sub, base) => {
     const seen2 = new Set();
     const q2 = [...(aggBases.get(sub) ?? [])];
     while (q2.length > 0) {
@@ -1635,6 +1665,14 @@ export function makeFnEnv(o) {
         if (sig === undefined) { acct(`调的那个 '${key}' 查不着（跨文件/宿主面）`); return null; }
       }
       const parts = [];
+      /* **同名那一族先挑一格**（第五十八刀）：上头那几条路查出来的是**基名**那一格签名，
+         而同名的还有几格 —— 按实参个数挑，挑不出来明说不收（`pickOvl` 里记账）。 */
+      {
+        const p0 = pickOvl(key, sig, args);
+        if (p0 === null) return null;
+        sig = p0.sig;
+        key = p0.key;
+      }
       /* **实参给少了就按默认实参补**（第一百七十五刀）：`void def(void function* cb() = null)`
          的 `def()` 落出来是 `(call def (null (fnty () void)))`。补的那一格按形参的类型降
          —— `null` 正要从那儿知道自己是哪种指针。 */

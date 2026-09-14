@@ -154,12 +154,15 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   }
 
   collectEnumConsts(tree, env);
+  /* **同名那一族**（第五十八刀）：基名 → 一串 `{ key, asig }`。两遍扫（聚合体那遍与顶层那遍）
+     记在**同一张**表里 —— 类体里那句原型与体外那个定义是同一格，签名一样就不该多出一号。 */
+  const ovl = new Map();
   const {
     fields: aggFields, ctors: aggCtors, vars: globals, gEmit, gProps, methods, fieldInits,
     bindable: gBindable, roots, aggs, statics: aggStatics, props: aggProps, bases: aggBases,
     overloads, fieldPaths: aggPaths, aggAliases, gAlias,
-  } = scanAggs(tree, env);
-  const fns = scanFns(tree, env);
+  } = scanAggs(tree, env, ovl);
+  const fns = scanFns(tree, env, ovl);
   const gLifted = addrTaken(tree);
   const clsRoot = (n) => roots.get(n) ?? n;
   const tyc = { clsRoot };
@@ -207,6 +210,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         aggAliases,
         gAlias,
         vdispatch,
+        ovl,
         aggCtors,
         ecBox,
         helperBox,
@@ -434,7 +438,8 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    * `head0` 是**插在体之前**的那几行（字段初值那一族：jancy 把它们放在基类构造之后、
    * 用户的体之前，jnc_ct_Parser.cpp:3005-3009）。`inProp` 告诉 `fnHead` 这是属性体里的函数。
    */
-  const emitFn = (node, shown, owner, selfInfo, ns, propScope = null, head0 = [], inProp = false) => {
+  const emitFn = (node, shown, owner, selfInfo, ns, propScope = null, head0 = [], inProp = false,
+    dup = 0) => {
     const nm = named(node);
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
     if (t === null) { acct(`函数 '${shown}' 的类型读不出来`); return; }
@@ -445,7 +450,11 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     const selfTy = selfInfo === null ? null
       : emitType(selfInfo.kind === 'class' ? { k: 'class', name: selfInfo.agg }
         : { k: 'struct', name: selfInfo.agg }, 'slot', tyc);
-    const hd = fnHead(m, env, { owner, self: selfTy, clsRoot, inProp });
+    /* **重载那一格的号**（第五十八刀）：名字由 `overloadSuffix` 拼（`f$o1`）—— 扫那一遍
+       记的号（`dup`）与这儿发的名字走的是同一格函数，两头才对得上。 */
+    const hd = fnHead(m, env, {
+      owner, self: selfTy, clsRoot, inProp, dup,
+    });
     if (hd === null || hd.head === null) { acct(`函数 '${shown}' 的头还发不出来（${hd?.why ?? '?'}）`); return; }
     const e = makeFnEnv({
       fnNode: node,
@@ -457,6 +466,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       aggAliases,
       gAlias,
       vdispatch,
+      ovl,
       aggCtors,
       methods,
       tags,
@@ -523,6 +533,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       aggAliases,
       gAlias,
       vdispatch,
+      ovl,
       aggCtors,
       methods,
       tags,
@@ -1058,11 +1069,18 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       null,
       ps,
       head0,
+      false,
+      mi.dup ?? 0,
     );
   }
 
   /* 再发**顶层那几格函数**（体写在类外的方法也在这儿 —— 它的名字是点串）。 */
-  const nth = new Map();
+  /* **这一格是同名那一族里的第几号**（第五十八刀）：扫那一遍按声明次序排好了号，这儿按
+     **那个语法节点**认回来 —— 两头拼名字用的是同一格 `overloadSuffix`。查不着答 null。 */
+  const dupOf = (node) => {
+    for (const s of fns.values()) if (s.node === node) return s.dup ?? 0;
+    return null;
+  };
   for (const { it, ns } of items) {
     const h = headOf(it);
     if (h !== 'fn-def' && h !== 'fn-proto') continue;
@@ -1135,16 +1153,15 @@ export function lowerJncRules(tree0, diags, opts = {}) {
           ps = { emit: pr2.emit ?? pemit, store, field: true };
         }
       }
-      emitFn(it, dotted, null, selfInfo, ns, ps);
+      emitFn(it, dotted, null, selfInfo, ns, ps, [], false, dupOf(it) ?? 0);
       continue;
     }
-    const k = nth.get(t.name) ?? 0;
-    nth.set(t.name, k + 1);
-    /* **重载**（同名的第二格函数）：按实参挑哪一格是一整族规则（`frontend-engine/overload.js`
-       那一套：完全一样 / 上转 / 数值转换各一档）。这一层还没接 —— 照发下去方言那侧会撞名
-       （`'q' 重复定义`），而调用那一处查的是**最后**登记的那一格签名，也就是**静静地调错**。 */
-    if (k > 0) { acct(`函数 '${t.name}' 有重载（按实参挑哪一格）还没接`); continue; }
-    emitFn(it, t.name, ns, null, ns);
+    /* **重载**（同名的第二格函数，第五十八刀）：号在扫那一遍就排好了（`f` / `f$o1`）——
+       这儿只把它取出来交给 `fnHead`。取不出来（那一格压根没进函数表）照旧记账：
+       照发下去方言那侧会撞名，而调用那一处查的是最后登记的那一格，也就是**静静地调错**。 */
+    const dup0 = dupOf(it);
+    if (dup0 === null) { acct(`函数 '${t.name}' 有重载（按实参挑哪一格）还没接`); continue; }
+    emitFn(it, t.name, ns, null, ns, null, [], false, dup0);
   }
 
   /* 账先报、入口后查（次序要紧）：`main` 的体拼不出来时 `mainBody` 也是空的，先查入口就把
