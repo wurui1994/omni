@@ -14,8 +14,39 @@ import { readSpecs } from './specs.js';
 import { readAgg, readEnum } from './agg.js';
 import { enumBase } from './const-eval.js';
 import { resolveType } from './resolve-type.js';
-import { readFormals } from './emit-fn.js';
+import { readFormals, fnName } from './emit-fn.js';
 import { classRoot } from './emit-agg.js';
+/**
+ * 一格函数/方法的**签名**（形参、默认实参、返回、`errorcode`、方言那一侧的名字）。
+ * 顶层那条路与类里那条路共用它 —— 调用那一层问的是同一件事，不该有两份答案。
+ */
+export function sigOf(nm, env, emit, t0 = null) {
+  const t = t0 ?? (nm === null || nm === undefined ? null : readDeclType(nm.specs, nm.dcl));
+  if (t === null) return null;
+  /* 声明符与说明符都从**类型自己**带的原树上取（`t.raw`）：类里只写原型的那一格
+     （`int scaled(int k);`）是一格 `var-decl`，它的洞叫 `dcls` 而不是 `dcl` —— 照 `nm.dcl`
+     读就永远是 undefined，那一格方法于是查不着（93-structmeth.jnc 的 `P$scaled`）。 */
+  const dc = readDcl(t.raw?.dcl ?? nm?.dcl);
+  const sf = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
+  const fs = sf === undefined ? [] : (readFormals(sf.node) ?? []);
+  const rr = t.base.kind === 'none' ? null : resolveType({ ...t, shape: 'data' }, env);
+  const sp = readSpecs(t.raw?.specs ?? nm?.specs);
+  const words = sp === null ? [] : sp.words;
+  return {
+    params: fs.map((f) => (f.type === null ? null : f.type)),
+    /* **默认实参**（第一百七十五刀）：`void def(void function* cb() = null)` 里那一格
+       躺在 `formal` 的 `init` 洞里（节点表 :51）。调用时实参给少了就按它补。 */
+    defaults: fs.map((f) => named(f.at)?.init ?? null),
+    ret: rr === null || rr.type === null || rr.type.k === 'void' ? null : rr.type,
+    retDecl: t,
+    /* 方言那一侧的名字（命名空间前缀 / 东家前缀都在里头）。 */
+    emit,
+    /* `errorcode` 那一族（第五十八刀）：调它的那一处要把"出错就跳"提上来（`EC_HOIST`）。 */
+    ec: words.includes('errorcode'),
+    stat: words.includes('static'),
+  };
+}
+
 /** 最小的那份探子：形参与局部量的类型表。 */
 /** 顶层那几格函数的签名（名字 → { params, ret }）—— 调用那一族要它。 */
 export function scanFns(tree, env) {
@@ -34,28 +65,23 @@ export function scanFns(tree, env) {
     if (h === 'fn-def' || h === 'fn-proto') {
       const nm = named(n);
       const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
-      if (t !== null && t.name !== null && t.shape === 'fn') {
-        const dc = readDcl(nm.dcl);
-        const sf = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
-        const fs = sf === undefined ? [] : (readFormals(sf.node) ?? []);
-        const rr = t.base.kind === 'none' ? null : resolveType({ ...t, shape: 'data' }, env);
-        const sp = readSpecs(nm.specs);
-        const sig = {
-          params: fs.map((f) => (f.type === null ? null : f.type)),
-          /* **默认实参**（第一百七十五刀）：`void def(void function* cb() = null)` 里那一格
-             躺在 `formal` 的 `init` 洞里（节点表 :51）。调用时实参给少了就按它补 ——
-             少这一格，`def()` 落出来的是"少一个实参"。 */
-          defaults: fs.map((f) => named(f.at)?.init ?? null),
-          ret: rr === null || rr.type === null || rr.type.k === 'void' ? null : rr.type,
-          retDecl: t,
-          /* 方言那一侧的名字（带命名空间前缀）。 */
-          emit: ns === null ? t.name : `${ns}$${t.name}`,
-          /* `errorcode` 那一族（第五十八刀）：调它的那一处要把"出错就跳"提上来
-             （`EC_HOIST`），所以调用那一格得知道被调是不是它。 */
-          ec: sp !== null && sp.words.includes('errorcode'),
-        };
-        out.set(t.name, sig);
-        if (ns !== null) out.set(`${ns}$${t.name}`, sig);
+      if (t !== null && t.shape === 'fn') {
+        if (t.name !== null) {
+          const emit = ns === null ? t.name : `${ns}$${t.name}`;
+          const sig = sigOf(nm, env, emit);
+          if (sig !== null) {
+            out.set(t.name, sig);
+            if (ns !== null) out.set(emit, sig);
+          }
+        } else {
+          /* **体外定义的方法**（`int P.scaled(int k) { … }`）：名字是点串，在方言那一侧
+             整串用 `$` 接起来（`fnName`）。它按东家那一格登记 —— 调用那一层查的就是它。 */
+          const dotted = fnName({ name: null, type: t, at: n });
+          if (dotted !== null) {
+            const sig = sigOf(nm, env, ns === null ? dotted : `${ns}$${dotted}`);
+            if (sig !== null) out.set(ns === null ? dotted : `${ns}$${dotted}`, sig);
+          }
+        }
       }
       return;
     }
@@ -76,6 +102,7 @@ export function scanAggs(tree, env) {
   const ctors = new Set();                                           // 有 construct 的那几格
   const vars = new Map();                                            // 模块级那几格量（名字 → 声明类型）
   const gEmit = new Map();                                           // 名字 → 方言那一侧的名字（带命名空间前缀）
+  const methods = new Map();                                         // `东家$方法名` → 签名 + 那个节点
   const bindable = new Set();                                        // 里头带取/存两格的那几个
   const aggs = [];                                                   // 收齐了好算继承链的根
   const scan = (n, owner, inAgg) => {
@@ -112,6 +139,26 @@ export function scanAggs(tree, env) {
           fs.set(m.name, m.type);
         }
         fields.set(emitName, fs);
+        /* **方法那一族**（`<东家>$<方法名>`，第五十二刀）：一格一格记下签名与那个节点。
+           体写在类里的（`fn-def`）由这一层发；只写原型的（`fn-proto`）体在外面，那一格
+           由顶层那条路发 —— 两处登记的是**同一个名字**，所以调用那一层只查一张表。 */
+        for (const m of a.members) {
+          const mh = headOf(m.at);
+          /* 三种写法都是方法：带体的（`fn-def`）、类里只写原型的（那一格落成 `var-decl`，
+             `m.shape === 'fn'`）、以及独立的原型节点（`fn-proto`）。 */
+          if (mh !== 'fn-def' && mh !== 'fn-proto' && m.shape !== 'fn') continue;
+          /* 名字走 `fnName`：`construct` / `destruct` / 算符重载那几格**没有普通名字**
+             （`m.name` 是 null），而它们正是方法那一族里最要紧的几个。 */
+          const mname = fnName({ name: m.name, type: m.type, at: m.at });
+          if (mname === null) continue;
+          const key = `${emitName}$${mname}`;
+          const sig = sigOf(named(m.at), env, key, m.type);
+          if (sig === null) continue;
+          methods.set(key, {
+            ...sig, owner: emitName, name: mname, node: m.at, hasBody: mh === 'fn-def',
+          });
+        }
+
       }
     } else if (h === 'typedef') {
       const tn = named(n);
@@ -167,6 +214,6 @@ export function scanAggs(tree, env) {
     if (a.emitName !== null && r.emitName !== undefined) roots.set(a.emitName, r.emitName);
   }
   return {
-    fields, ctors, vars, gEmit, bindable, roots, aggs,
+    fields, ctors, vars, gEmit, methods, bindable, roots, aggs,
   };
 }

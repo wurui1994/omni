@@ -23,7 +23,7 @@ import { collectEnumConsts } from './const-eval.js';
 import { scanAggs, scanFns } from './module-scan.js';
 import { structLine } from './emit-agg.js';
 import { globalLines, addrTaken, liftable, liftedType } from './emit-global.js';
-import { fnHead, readFormals } from './emit-fn.js';
+import { fnHead, readFormals, fnName } from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
 import { lvalueShape, SHAPE_ACCESS } from './lvalue-table.js';
@@ -58,7 +58,8 @@ export function lowerJncRules(tree, diags, opts = {}) {
 
   collectEnumConsts(tree, env);
   const {
-    fields: aggFields, ctors: aggCtors, vars: globals, gEmit, bindable: gBindable, roots, aggs,
+    fields: aggFields, ctors: aggCtors, vars: globals, gEmit, methods,
+    bindable: gBindable, roots, aggs,
   } = scanAggs(tree, env);
   const fns = scanFns(tree, env);
   const gLifted = addrTaken(tree);
@@ -96,6 +97,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
         gLifted,
         gBindable,
         gEmit,
+        methods,
         roots,
       });
       modEnv = { e, ctx: makeCtx(e) };
@@ -169,30 +171,35 @@ export function lowerJncRules(tree, diags, opts = {}) {
     }
   }
 
-  /* 再发**函数**（顶层那几格；方法那一族还没接）。 */
-  const nth = new Map();
-  for (const { it, ns } of items) {
-    const h = headOf(it);
-    if (h !== 'fn-def' && h !== 'fn-proto') continue;
-    const nm = named(it);
+  /**
+   * 发**一格函数或方法**的整段（头 + 体 + 它要的模块级槽）。三处共用它：顶层函数、
+   * 体写在类里的方法、体写在类外的方法（`int P.scaled(int k){…}`）—— 三者只差
+   * "东家是谁"与"`this` 那一格怎么写"，所以不该有三份实现。
+   *
+   * `owner` 是方言那一侧的前缀（命名空间或东家），`selfInfo` 为 null 就是没有 `this`。
+   */
+  const emitFn = (node, shown, owner, selfInfo, ns) => {
+    const nm = named(node);
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
-    if (t === null || t.name === null) { acct('顶层函数的名字读不出来'); continue; }
-    const k = nth.get(t.name) ?? 0;
-    nth.set(t.name, k + 1);
-    if (h === 'fn-proto') continue;                    // 原型不发码
+    if (t === null) { acct(`函数 '${shown}' 的类型读不出来`); return; }
     const sp = readSpecs(nm.specs);
     const m = {
-      name: t.name, type: t, shape: t.shape, storage: sp === null ? [] : sp.words, at: it, ns,
+      name: t.name, type: t, shape: t.shape, storage: sp === null ? [] : sp.words, at: node, ns,
     };
-    const hd = fnHead(m, env, { owner: ns, self: null, clsRoot });
-    if (hd === null || hd.head === null) { acct(`函数 '${t.name}' 的头还发不出来`); continue; }
+    const selfTy = selfInfo === null ? null
+      : emitType(selfInfo.kind === 'class' ? { k: 'class', name: selfInfo.agg }
+        : { k: 'struct', name: selfInfo.agg }, 'slot', tyc);
+    const hd = fnHead(m, env, { owner, self: selfTy, clsRoot });
+    if (hd === null || hd.head === null) { acct(`函数 '${shown}' 的头还发不出来（${hd?.why ?? '?'}）`); return; }
     const e = makeFnEnv({
-      fnNode: it,
+      fnNode: node,
       env,
-      acct: (w) => acct(`${t.name}：${w}`),
+      acct: (w) => acct(`${shown}：${w}`),
       fns,
       aggFields,
       aggCtors,
+      methods,
+      self: selfInfo,
       ecBox,
       tmpBox,
       globals,
@@ -204,23 +211,57 @@ export function lowerJncRules(tree, diags, opts = {}) {
     /* **`int main()` 落成方言的入口 `(main …)`，那一格不回值**：所以体那一层看见的是
        "回 void 的函数"，`return 0;` 就是一句 `(ret)`（`returnKind` 里 `inMain` 那一条），
        回非 0 的那一格明说不收（方言的入口没有退出码）。 */
-    const isMain = t.name === 'main' && ns === null;
+    const isMain = t.name === 'main' && ns === null && selfInfo === null;
     if (isMain) { e.retVoid = true; e.inMain = true; e.retType = null; }
     /* **答 null 必须留下一笔账**：不然这一格函数就静静地不见了 —— `(fn check …)` 没发出来，
-       而调它的那几处照旧发 `(call check …)`（170-throw.jnc 就是这么坏的）。所以这儿数一下
-       账本，一笔都没添就自己记一条"这一层的 bug"。 */
+       而调它的那几处照旧发 `(call check …)`（170-throw.jnc 就是这么坏的）。 */
     const n0 = accts.length;
     const body = emitBody(nm.body, e, 4);
     if (body === null) {
-      if (accts.length === n0) acct(`函数 '${t.name}' 的体答了 null 却没记账（这一层的 bug）`);
-      continue;
+      if (accts.length === n0) acct(`函数 '${shown}' 的体答了 null 却没记账（这一层的 bug）`);
+      return;
     }
     const whole = e.pre.length === 0 ? body : [...e.pre, body].join('\n');
     /* 体那一层要的**模块级槽**（`once` 的旗子、`static` 局部量那一格与它的闸门）：
        发在函数**前面** —— 方言那一侧先声明后用。 */
     for (const s of e.slots) decls.push(`  (global ${s.name} ${s.ty})`);
-    if (isMain) { mainBody = whole; continue; }
+    if (isMain) { mainBody = whole; return; }
     decls.push(`  ${hd.head}\n${whole})`);
+  };
+
+  /* **方法那一族**（体写在类里的那几格）：一格一格发 `(fn <东家>$<方法名> (($this …) …) …)`。 */
+  for (const [key, mi] of methods) {
+    if (mi.hasBody !== true) continue;                   // 只写原型的，体在类外（下面那条路发）
+    const a = aggs.find((x) => x.emitName === mi.owner);
+    const kind = a !== undefined && (a.word === 'class' || a.word === 'opaque class') ? 'class' : 'struct';
+    const ownerEmit = kind === 'class' ? clsRoot(mi.owner) : mi.owner;
+    emitFn(mi.node, key, mi.owner, mi.stat === true ? null : { agg: mi.owner, kind, emit: ownerEmit }, null);
+  }
+
+  /* 再发**顶层那几格函数**（体写在类外的方法也在这儿 —— 它的名字是点串）。 */
+  const nth = new Map();
+  for (const { it, ns } of items) {
+    const h = headOf(it);
+    if (h !== 'fn-def' && h !== 'fn-proto') continue;
+    if (h === 'fn-proto') continue;                      // 原型不发码
+    const nm = named(it);
+    const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
+    if (t === null) { acct('顶层函数的类型读不出来'); continue; }
+    if (t.name === null) {
+      /* **体写在类外**（`int P.scaled(int k) { … }`）：名字是点串，东家是它前面那一段。 */
+      const dotted = fnName({ name: null, type: t, at: it });
+      if (dotted === null || !dotted.includes('$')) { acct('顶层函数的名字读不出来'); continue; }
+      const ownerName = dotted.slice(0, dotted.lastIndexOf('$'));
+      const a = aggs.find((x) => x.emitName === ownerName);
+      if (a === undefined) { acct(`'${dotted}' 的东家 '${ownerName}' 查不着`); continue; }
+      const kind = a.word === 'class' || a.word === 'opaque class' ? 'class' : 'struct';
+      const st = methods.get(dotted)?.stat === true;
+      emitFn(it, dotted, null, st ? null : { agg: ownerName, kind, emit: kind === 'class' ? clsRoot(ownerName) : ownerName }, ns);
+      continue;
+    }
+    const k = nth.get(t.name) ?? 0;
+    nth.set(t.name, k + 1);
+    emitFn(it, t.name, ns, null, ns);
   }
 
   /* 账先报、入口后查（次序要紧）：`main` 的体拼不出来时 `mainBody` 也是空的，先查入口就把

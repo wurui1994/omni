@@ -100,8 +100,9 @@ export function emitExpr0(n, want, ctx) {
     return { code: `(sel ${c} ${two.x.code} ${two.y.code})`, type: two.x.type };
   }
 
-  /* **裸名字**：九步查名（`NAME_LOOKUP_ORDER`）由注入的探子走完 —— 那是作用域图那一层。 */
-  if (h === 'name') {
+  /* **裸名字**：九步查名（`NAME_LOOKUP_ORDER`）由注入的探子走完 —— 那是作用域图那一层。
+     `this` 走的是同一格探子（它在方法体里就是第一个形参 `$this`，第五十二刀）。 */
+  if (h === 'name' || h === 'this') {
     const r = ctx.lookup(n, want);
     if (r === null) return null;                                     // 探子自己记过账
     return r;

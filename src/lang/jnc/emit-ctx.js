@@ -46,6 +46,7 @@ export function makeFnEnv(o) {
     fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
     ecBox = { n: 0 }, tmpBox = { n: 0 }, globals = new Map(), gLifted = new Set(),
     gBindable = new Set(), roots = new Map(), gEmit = new Map(),
+    methods = new Map(), self = null,
   } = o;
   let ctxRef = null;
   /* **类那一族在方言里写的是继承链的根**（第五十六刀）—— 发类型时都要带上这一格。 */
@@ -182,6 +183,9 @@ export function makeFnEnv(o) {
   };
   /** 这几种形状**本身可写**（`LV_SHAPES`）；别的当右值求一次值。 */
   const LV_SHAPES = new Set(['name', 'field', 'index', 'ptr-field', 'indirect']);
+  /** 方法体里 `this` 那一格的类型（类是一条引用，结构体是"那段内存的地址"）。 */
+  const selfType = () => (self === null ? null
+    : (self.kind === 'class' ? { k: 'class', name: self.agg } : { k: 'struct', name: self.agg }));
   /** 一格可写位置读出来那一段文字（`SHAPE_ACCESS`）。 */
   const readLv = (lv) => SHAPE_ACCESS[lv.shape].read(lv.code);
   /** 一格字段的位置（`memberOf`）：`(pfield 基 名)`；字段自己是结构体/数组时它又是一格 `agg`。 */
@@ -200,7 +204,19 @@ export function makeFnEnv(o) {
     };
   };
   /**
-   * 一格**可写位置**（`lvalue`，`LVALUE_ORDER` 那四格 + `lvalue0` 那几族）：
+   * `.` 左边那一格**当基地址**读出来（取字段与叫方法共用一份）：`p->f` 与"左边不是可写形状"
+   * （`f().x`）都是**求一次值**；别的先求它的位置再读一次 —— 那一格读出来的就是基地址。
+   */
+  const objBase = (ob) => {
+    if (headOf(ob) === 'ptr-field' || !LV_SHAPES.has(headOf(ob))) {
+      const v = emitExpr(ob, null, ctxRef);
+      return v === null ? null : { code: v.code, type: v.type };
+    }
+    const o = lvOf(ob);
+    return o === null ? null : { code: readLv(o), type: o.type };
+  };
+  /**
+
    * `{ shape: 'var'|'ptr'|'agg', code, type }`。读写都从它出发（`SHAPE_ACCESS`）。
    * 拼不出来答 null（账已经记过）—— 命名空间里那一格、属性、位域那几族都在这一层之外。
    */
@@ -208,12 +224,28 @@ export function makeFnEnv(o) {
     const h = headOf(node);
     const nm2 = named(node) ?? {};
     if (h === 'paren') return lvOf(nm2.inner);
+    /**
+     * **`this`**（第五十二刀）：方法体里它就是第一个形参那一格，方言那一侧叫 `$this`，
+     * 里头放的是**那个对象那段内存的地址**。所以它与"结构体的名字"同一种形状（`agg`）——
+     * `this.m_x` 与裸写 `m_x` 落在同一句 `(pfield (var $this) m_x)` 上。
+     */
+    if (h === 'this') {
+      if (self === null) { acct('`this` 不在方法体里'); return null; }
+      return { shape: 'agg', code: '(var $this)', type: selfType() };
+    }
     if (h === 'name') {
       const key = String(nm2.text?.value ?? '');
       /* **局部与形参遮住模块级那一格**（查名的第一步就是"查得着的变量"，次序即规则）。 */
       const t = names.get(key) ?? globals.get(key);
       const isG = !names.has(key) && globals.has(key);
-      if (t === undefined) { acct(`'${key}' 查不着（要作用域图）`); return null; }
+      if (t === undefined) {
+        /* **方法体里裸写的字段**（`NAME_LVALUE_ORDER` 的第二格）：`m_x` 就是 `this.m_x`。
+           排在"查不着"之前 —— 它是一格真字段，报"未声明"是认错人。 */
+        if (self !== null && (aggFields.get(self.agg)?.has(key) ?? false)) {
+          return memberAt('(var $this)', self.agg, key);
+        }
+        acct(`'${key}' 查不着（要作用域图）`); return null;
+      }
       /* **模块级的 `bindable` data**（第七十刀）：那一格生成取/存两个函数，读它是
          `(call 名字$get)`、写它是 `(call 名字$set …)` —— 属性那一族，另算。 */
       if (isG && gBindable.has(key)) {
@@ -514,7 +546,15 @@ export function makeFnEnv(o) {
             out.push(`${pad}(let ${t.name} ${ty} (pnew ${ty} (int 1)))`);
             continue;
           }
-          const z = zeroText(r.type, { tyText: (x) => emitType(x, 'value', tyc) });
+          /* **一格类的局部量**（`Outer o;`）：jancy 那儿它是**自动造出来的对象**
+             （类变量在作用域里就构造好），不是一条空引用。这一层还没接那一步 ——
+             `zeroText` 给的是 `(pnull …)`，那会**静静地**跑出"指针越界"（195-embctor.jnc）。
+             所以在这儿明说，绝不发那一行。 */
+          if (r.type.k === 'class') {
+            acct(`'${t.name}' 是一格类的局部量（要造出对象 + 构造）还没接`); return null;
+          }
+          const z = zeroText(r.type, { tyText: (x) => emitType(x, 'value', tyc), clsRoot });
+
           if (z === null) { acct(`没写初值的 '${t.name}'：这一格的零值还给不出来`); return null; }
           if (taken.has(t.name)) {
             const ls = liftLines(t.name, r.type, z, pad);
@@ -619,33 +659,65 @@ export function makeFnEnv(o) {
       const nm2 = named(node) ?? {};
       const fn = nm2.fn;
       const args = allInChain(nm2.args, 'args-add', 'args');
-      /**
-       * **从一格函数指针上调**（第五十五刀）：方言的 `(callfn E 实参…)`，签名就在那一格
-       * 的类型里。这一问排在"按名字找函数"**之前** —— 同名的局部量遮住模块级那个函数
-       * （lower.js:14730 那条注解就是这一句）。被调不是裸名字（`(*p)(…)`、`a[i](…)`）时
-       * 也走这条：那时它只能是一格函数值。
-       */
       const asName = headOf(fn) === 'name' ? String(named(fn)?.text?.value ?? '') : null;
-      const viaVal = asName === null || names.has(asName) || globals.has(asName);
-      if (viaVal) {
-        const fv = emitExpr(fn, null, ctxRef);
-        if (fv === null) return null;
-        if (fv.type?.k !== 'fnptr') {
-          acct(`被调那一格是 ${fv.type?.k ?? '?'}，不是函数值（算符重载那一族另算）`); return null;
+      /**
+       * **方法那一族**（第五十二刀）：`p.sum()`、`q.sum()`（`P*` 上与 `P` 上一样，第二十五刀）、
+       * 以及方法体里**裸叫方法**（`sum()` 就是 `this.sum()`）。方言那一侧它是一格普通函数
+       * `<东家>$<方法名>`，`this` 由这一层补成**第一个实参**。
+       *
+       * 这一问排在"函数指针"与"按名字找函数"**之前** —— 它是一格真方法，落到那两条上报的是
+       * "被调认不出来"，那是认错人。
+       */
+      let sig = null;
+      let selfArg = null;
+      let key = asName;
+      if (asName === null && (headOf(fn) === 'field' || headOf(fn) === 'ptr-field')) {
+        const fn2 = named(fn) ?? {};
+        const mname = String(fn2.name?.value ?? '');
+        const ob = objBase(fn2.obj);
+        if (ob === null) return null;
+        const agg = aggBehind(ob.type);
+        if (agg === null) { acct(`叫方法时 '.' 的左边不是结构体/类（${ob.type?.k ?? '?'}）`); return null; }
+        const mi = methods.get(`${agg}$${mname}`);
+        if (mi === undefined) {
+          acct(`'${agg}' 上查不着方法 '${mname}'（属性/事件/虚派发那几族另算）`); return null;
         }
-        const parts = [];
-        for (const [i, a2] of args.entries()) {
-          const v = ctxRef.expr(a2, fv.type.params[i] ?? null);
-          if (v === null) return null;
-          parts.push(v);
-        }
-        const rt = fv.type.ret ?? { k: 'void' };
-        return { code: `(callfn ${fv.code}${parts.map((x) => ` ${x}`).join('')})`, type: rt };
+        sig = mi;
+        selfArg = mi.stat === true ? null : ob.code;
+        key = `${agg}$${mname}`;
+      } else if (asName !== null && !names.has(asName) && !globals.has(asName)
+        && self !== null && methods.has(`${self.agg}$${asName}`)) {
+        sig = methods.get(`${self.agg}$${asName}`);
+        selfArg = sig.stat === true ? null : '(var $this)';
+        key = `${self.agg}$${asName}`;
       }
-      const key = asName;
-      if (key === 'printf') { acct('printf 那一族（格式化）还没接'); return null; }
-      const sig = fns.get(key);
-      if (sig === undefined) { acct(`调的那个 '${key}' 查不着（跨文件/宿主面）`); return null; }
+      if (sig === null) {
+        /**
+         * **从一格函数指针上调**（第五十五刀）：方言的 `(callfn E 实参…)`，签名就在那一格
+         * 的类型里。这一问排在"按名字找函数"**之前** —— 同名的局部量遮住模块级那个函数
+         * （lower.js:14730 那条注解就是这一句）。被调不是裸名字（`(*p)(…)`、`a[i](…)`）时
+         * 也走这条：那时它只能是一格函数值。
+         */
+        const viaVal = asName === null || names.has(asName) || globals.has(asName);
+        if (viaVal) {
+          const fv = emitExpr(fn, null, ctxRef);
+          if (fv === null) return null;
+          if (fv.type?.k !== 'fnptr') {
+            acct(`被调那一格是 ${fv.type?.k ?? '?'}，不是函数值（算符重载那一族另算）`); return null;
+          }
+          const parts0 = [];
+          for (const [i, a2] of args.entries()) {
+            const v = ctxRef.expr(a2, fv.type.params[i] ?? null);
+            if (v === null) return null;
+            parts0.push(v);
+          }
+          const rt0 = fv.type.ret ?? { k: 'void' };
+          return { code: `(callfn ${fv.code}${parts0.map((x) => ` ${x}`).join('')})`, type: rt0 };
+        }
+        if (key === 'printf') { acct('printf 那一族（格式化）还没接'); return null; }
+        sig = fns.get(key);
+        if (sig === undefined) { acct(`调的那个 '${key}' 查不着（跨文件/宿主面）`); return null; }
+      }
       const parts = [];
       /* **实参给少了就按默认实参补**（第一百七十五刀）：`void def(void function* cb() = null)`
          的 `def()` 落出来是 `(call def (null (fnty () void)))`。补的那一格按形参的类型降
@@ -668,7 +740,9 @@ export function makeFnEnv(o) {
         if (v === null) return null;
         parts.push(v);
       }
-      const code = `(call ${sig.emit ?? key}${parts.map((x) => ` ${x}`).join('')})`;
+      const code = `(call ${sig.emit ?? key}${selfArg === null ? '' : ` ${selfArg}`}`
+        + `${parts.map((x) => ` ${x}`).join('')})`;
+
       const rt = sig.ret === null ? { k: 'void' } : withBits(sig.ret, sig.retDecl);
       /**
        * **`errorcode` 的传播**（第五十八刀，lower.js:15065-15084）：抬一格临时、比一下，
