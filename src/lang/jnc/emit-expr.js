@@ -25,6 +25,24 @@ function soft(ctx, n0, why) {
   return null;
 }
 
+/**
+ * **贴着写的几格串字面量是一格串**（`"hello" ", " "world"`，第五十四刀）：jancy 的词法把它们
+ * 并成一格（与 C 同）—— 树上是 `(concat a b)` 套起来的。所以这是一次**编译期折叠**：
+ * 折得动答那一整串正文，里头有一格不是串字面量答 null。
+ * printf 的格式串与 `string_t s = …` 两处问的是同一件事，所以只有这一份。
+ */
+export function strLitFold(n) {
+  if (n === null || n === undefined || typeof n !== 'object') return null;
+  if (!Array.isArray(n.items)) {
+    return n.kind === 'string' && typeof n.value === 'string' ? n.value : null;
+  }
+  if (headOf(n) !== 'concat') return null;
+  const nm = named(n);
+  const a = strLitFold(nm?.a);
+  const b = strLitFold(nm?.b);
+  return a === null || b === null ? null : a + b;
+}
+
 /** 一格表达式 → `{ code, type }`（过转换链）。拼不出来答 null。 */
 export function emitExpr(n, want, ctx) {
   const v = emitExpr0(n, want, ctx);
@@ -344,6 +362,14 @@ export function emitExpr0(n, want, ctx) {
     const r = ctx.noEc(() => emitExpr(nm.a, want, ctx));
     if (r === null || r === undefined) return soft(ctx, n0, '`try` 底下那一格还拼不出来');
     return r;
+  }
+
+  /* **贴着写的几格串字面量**（`"hello" ", " "world"`）：折成一格串再发。折不动的
+     （里头有一格不是串字面量）是"运行期拼接"那一族，还没接 —— 记账。 */
+  if (h === 'concat') {
+    const s = strLitFold(n);
+    if (s === null) { ctx.acct('串拼接：里头不是清一色的串字面量（那一族还没接）'); return null; }
+    return { code: `(str ${JSON.stringify(s)})`, type: ctx.T.string };
   }
 
   ctx.acct(`表里没有这一格表达式：${h}`);
