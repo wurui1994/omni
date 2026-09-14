@@ -25,7 +25,7 @@ import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
 import { compoundValue, errTest, errValue, escapeText } from '../../src/lang/jnc/stmt-table.js';
 import { lvalueShape, SHAPE_ACCESS } from '../../src/lang/jnc/lvalue-table.js';
-import { memberShape } from '../../src/lang/jnc/member-table.js';
+import { memberShape, copyValLines } from '../../src/lang/jnc/member-table.js';
 import { readFormals } from '../../src/lang/jnc/emit-fn.js';
 import { emitBody } from '../../src/lang/jnc/emit-body.js';
 import { emitExpr } from '../../src/lang/jnc/emit-expr.js';
@@ -157,17 +157,45 @@ function topAggs(tree, env) {
 function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
   ecBox = { n: 0 }) {
   const names = new Map();
+  /** 名字在方言那一侧叫什么（`this` → `$this`、按值传的结构体形参 → 它那份拷贝 `名字$v`）。 */
+  const alias = new Map();
+  /** 体首那几行（按值传的结构体/数组形参在这儿抄一份）。 */
+  const pre = [];
   const nm = named(fnNode);
   const dc = nm === null ? null : readDcl(nm.dcl);
   const sf = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
+  /** 一格聚合体的字段表（名字 + **解出来**的类型）—— "抄一份"那一层要它。 */
+  const fieldsOf = (aggName) => {
+    const fs = aggFields.get(aggName);
+    if (fs === undefined) return null;
+    const out = [];
+    for (const [fn2, ft] of fs) {
+      const r = resolveType(ft, env);
+      if (r.type === null) return null;
+      out.push({ name: fn2, type: r.type });
+    }
+    return out;
+  };
   for (const f of (sf === undefined ? [] : readFormals(sf.node) ?? [])) {
     if (f.name !== null && f.type !== null) names.set(f.name, f.type);
-    /* **按值传结构体**（第十三刀）：被调那一侧在体首**抄一份**（`(let v$v …)` + 逐字段
-       `pstore`），往后体里读写的都是那一份。整格是另一族 —— 记账走开，不猜。 */
-    if (f.type !== null) {
+    /**
+     * **按值传结构体与数组**（第十三 / 二十一刀）：进来的是调用方那一段的**地址**，所以函数
+     * 开头先开一格自己的、把它抄进来（`名字$v`），之后这个名字一律指那一格 —— 改形参因此
+     * 不动调用方。数组走同一条路（jancy 那边它也是按值的一整块，不是 C 的 `T*`）。
+     */
+    if (f.name !== null && f.type !== null) {
       const rf = resolveType(f.type, env);
       if (rf.type !== null && (rf.type.k === 'struct' || rf.type.k === 'arr')) {
-        acct('按值传结构体/数组的形参要在体首抄一份（还没接）');
+        const v = `${f.name}$v`;
+        const st = emitType(rf.type, 'slot');
+        const ls = copyValLines({
+          dst: `(var ${v})`, src: `(var ${f.name})`, type: rf.type, pad: '    ', fieldsOf,
+        });
+        if (ls === null) acct(`按值传的形参 '${f.name}' 抄不出来（字段表/环那两格）`);
+        else {
+          pre.push(`    (let ${v} ${st} (pnew ${st} (int 1)))`, ...ls);
+          alias.set(f.name, v);
+        }
       }
     }
   }
@@ -256,10 +284,12 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       const r = resolveType(t, env);
       if (r.type === null) { acct(`'${key}'：${r.why}`); return null; }
       const ty = withBits(r.type, t);
+      /* **方言那一侧的名字**可能与源码里的不同（按值传的结构体形参指的是它那份拷贝）。 */
+      const dname = alias.get(key) ?? key;
       /* **结构体与数组是 `agg`**（那一格里放的就是地址，第十二 / 二十一刀）；别的是 `var`。
          "提到堆上"那一族（第九 / 二十四刀）要 `&x` 的账，这一层还没有 —— 走到它就记账。 */
       const shape = lvalueShape({ isStruct: ty.k === 'struct', isArr: ty.k === 'arr' });
-      return { shape, code: shape === 'var' ? key : `(var ${key})`, type: ty };
+      return { shape, code: shape === 'var' ? dname : `(var ${dname})`, type: ty };
     }
     /* `*p`（`ptrLv`）：p 是一格指针值，那一格的位置**就是**它；目标是结构体/数组时是 `agg`。 */
     if (h === 'indirect') {
@@ -318,6 +348,7 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
   return {
     T,
     acct,
+    pre,
     /** 比较回 bool；算术回**宽的那一格**（符号性跟着宽的那一边）。 */
     typeOfBinary: (op, a, b) => {
       if (CMP.has(op)) return { k: 'bool' };
@@ -352,14 +383,8 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     intConv: (v, to) => ({ code: intConvCode(v.code, v.type, to), type: to }),
     constInt: () => null,
     /** 裸名字：只认形参与局部量（真正的九步要作用域图 —— 记账）。 */
-    lookup: (node) => {
-      const key = String(named(node)?.text?.value ?? '');
-      const t = names.get(key);
-      if (t === undefined) { acct(`裸名字 '${key}' 还查不着（要作用域图）`); return null; }
-      const r = resolveType(t, env);
-      if (r.type === null) { acct(`'${key}' 的类型解不出来`); return null; }
-      return { code: `(var ${key})`, type: withBits(r.type, t) };
-    },
+    /** 裸名字：与**可写位置**那一层同一份（`nameLoad` 的四格就是形状那三条）。 */
+    lookup: (node) => valOfLv(node),
     /** 一格局部量声明：`int x = 5;` → `(let x int (int 5))`。 */
     localDecl: (node, ind, ctx) => {
       const pad = ' '.repeat(ind);
@@ -631,9 +656,11 @@ for (const f of files) {
           const w = why[0] ?? '体拼不出来';
           skip.set(w, (skip.get(w) ?? 0) + 1);
         } else {
+          /* 体首那几行（按值传的结构体形参抄一份）排在体的前面。 */
+          const whole = e.pre.length === 0 ? got : [...e.pre, got].join('\n');
           cmp += 1;
-          if (got === want) same += 1;
-          else if (diff.length < 20) diff.push(`${short}　${name}\n      旧 ${want}\n      新 ${got}`);
+          if (whole === want) same += 1;
+          else if (diff.length < 20) diff.push(`${short}　${name}\n      旧 ${want}\n      新 ${whole}`);
         }
       }
       return;                                                        // 体里不再往下找函数

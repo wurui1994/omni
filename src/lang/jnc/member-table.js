@@ -53,6 +53,67 @@ export function pathCode(baseCode, path) {
 export const STORE_BY_SHAPE = ['bits', 'be', 'var', 'ptr'];
 
 /**
+ * **抄一格**（第十三 / 二十一刀，lower.js:2841-2881 的 `copyVal` / `copyArr` / `copyAgg`）：
+ * 结构体逐字段、数组逐格、别的就是一句 `(pstore 目标 (pload 源))`。
+ *
+ * 为什么不用一条"整块搬"的方言形式：那要 `pload` / `pstore` 能搬多个字，而这一层能自己把它
+ * 拆开 —— 与回卷、真值化同一类，jancy 侧的一次隐式动作在这一层显式写出来。
+ *
+ * 数组这一支**也是值语义**的：jancy 的 `createFormalArg` 不做 C 那种"形参退化成 `T*`"，
+ * 形参的类型就还是 `T[N]`，同型数组之间是抄一份。
+ *
+ * `seen` 是**环的闸门**（第一百二十八刀）：一格结构体按值套到自己里头本来就不是一个有大小的
+ * 类型，少这个 Set 就是**爆栈**（泛型落地之后语料里真出现过那个形状）。崩是最坏的一种答案。
+ *
+ * `fieldsOf(名字)` 由调用方给（那是字段表那一层）。拼不出来答 null。
+ */
+export function copyValLines({
+  dst, src, type, pad, fieldsOf, seen = new Set(),
+}) {
+  if (type === null || type === undefined) return null;
+  if (type.k === 'struct') {
+    const fs = fieldsOf(type.name);
+    if (fs === undefined || fs === null) return null;
+    if (seen.has(type.name)) return null;                            // 按值套到自己里头
+    const inner = new Set(seen);
+    inner.add(type.name);
+    const out = [];
+    for (const f of fs) {
+      const ls = copyValLines({
+        dst: `(pfield ${dst} ${f.name})`,
+        src: `(pfield ${src} ${f.name})`,
+        type: f.type,
+        pad,
+        fieldsOf,
+        seen: inner,
+      });
+      if (ls === null) return null;
+      out.push(...ls);
+    }
+    return out;
+  }
+  if (type.k === 'arr') {
+    const d0 = `(pelem ${dst})`;
+    const s0 = `(pelem ${src})`;
+    const out = [];
+    for (let i = 0; i < type.n; i += 1) {
+      const ls = copyValLines({
+        dst: i === 0 ? d0 : `(padd ${d0} (int ${i}))`,
+        src: i === 0 ? s0 : `(padd ${s0} (int ${i}))`,
+        type: type.el,
+        pad,
+        fieldsOf,
+        seen,
+      });
+      if (ls === null) return null;
+      out.push(...ls);
+    }
+    return out;
+  }
+  return [`${pad}(pstore ${dst} (pload ${src}))`];
+}
+
+/**
  * **位域读出来那一句**（第一百一十二刀）。照 jancy 的 `extractBitField`
  * （jnc_ct_OperatorMgr_DataRef.cpp:272-314）一步不差：
  *
