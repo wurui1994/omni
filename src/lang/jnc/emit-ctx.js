@@ -594,6 +594,9 @@ export function makeFnEnv(o) {
       shape: 'prop',
       code: pr.emit,
       args: selfCode === null || selfCode === undefined ? [] : [selfCode],
+      /* `args` 里头几格是 `this`（成员属性那一半）—— **索引属性**（第七十刀）要按这一格
+         数"下标已经填了几个"，所以记下来。 */
+      selfN: selfCode === null || selfCode === undefined ? 0 : 1,
       hasSet: hasFn(`${pr.emit}$set`),
       propName: pr.name,
       type: ty,
@@ -1203,6 +1206,40 @@ export function makeFnEnv(o) {
     /* `a[i]`（`subLv`）：jancy 的下标就是 `*(a + i)`，范围检查在解引用那一步。
        左边先退化（数组是**一整块**，退化是一句 `(pelem …)`），下标要 64 位整数。 */
     if (h === 'index') {
+      /**
+       * **索引属性**（第七十刀，prop_indexed.rst:15，66-propidx.jnc）：`int property g_slot(int i);`
+       * 声明的那一串不是"函数的形参"，是**下标** —— 取/存那两个函数各在最前面多这一串，所以
+       * 读 `p[i]` 是 `(call g_slot$get i)`、写 `p[i] = v` 是 `(expr (call g_slot$set i v))`，
+       * 成员那一格前面还有 `this`（第六十九刀）。
+       *
+       * 落法一句话：左边那一格是**属性**（`prop` 形状）时，下标就是往它那一串 `args` 里
+       * 再添一格 —— 与 `operator []` 用的是同一份模板。下标还没填满就照旧是 `prop`
+       * （多下标那一族：`g_grid[1][1]` 是两层 `index`，一层填一格）。
+       *
+       * 这一问排在"求左边那一格值"**之前**：属性求值是一次 `$get` 调用，而这儿那次调用的
+       * 实参还没凑齐 —— 先求它只会拿到一格实参给少了的调用（先前报的"下标的左边不是
+       * 指针/数组"就是它）。
+       */
+      if (LV_SHAPES.has(headOf(nm2.obj))) {
+        const o0 = lvOf(nm2.obj);
+        if (o0 !== null && o0.shape === 'prop') {
+          const gs = methods.get(`${o0.code}$get`) ?? fns.get(`${o0.code}$get`);
+          const need = (gs?.params ?? []).length;
+          const at = o0.args.length - (o0.selfN ?? 0);
+          /* **下标已经填满（或那格属性压根没有下标）的往下走**：那时 `p[0]` 说的是"读出来
+             那一格值再下标"（`int* autoget property g_buf;` 的 `g_buf[0]`，68-propptr.jnc）
+             —— 与索引属性是两件事，判据就是"取值器还差不差实参"。 */
+          if (at < need) {
+            const pt = (gs.params ?? [])[at] ?? null;
+            const pr2 = pt === null ? null : resolveType(pt, env);
+            const want = pr2 === null || pr2.type === null
+              ? { k: 'int', w: 32, u: false } : withBits(pr2.type, pt);
+            const iv = emitExpr(nm2.key, want, ctxRef);
+            if (iv === null) return null;
+            return { ...o0, args: [...o0.args, iv.code] };
+          }
+        }
+      }
       const a = emitExpr(nm2.obj, null, ctxRef);
       if (a === null) return null;
       /**
