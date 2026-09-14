@@ -84,6 +84,15 @@ export function emitExpr0(n, want, ctx) {
     return { code: `(int ${k.value})`, type: ctx.T[k.kind] };
   }
   if (h === 'paren') return emitExpr0(nm.inner, want, ctx);
+  /* **三目**：方言里就是 `(sel 条件 真 假)`。两支都按 `want` 降（于是回卷、装箱那几条各自落位）。
+     两支是**惰性**位置 —— errorcode 的落点在那儿要关掉（见 `EC_HOIST` 那条注）。 */
+  if (h === 'cond') {
+    const c = ctx.condOf?.(nm.cond) ?? ctx.expr?.(nm.cond);
+    const a2 = emitExpr(nm.then ?? nm.a, want, ctx);
+    const b2 = emitExpr(nm.else ?? nm.b, want, ctx);
+    if (c === null || c === undefined || a2 === null || b2 === null) return null;
+    return { code: `(sel ${c} ${a2.code} ${b2.code})`, type: a2.type };
+  }
 
   /* **裸名字**：九步查名（`NAME_LOOKUP_ORDER`）由注入的探子走完 —— 那是作用域图那一层。 */
   if (h === 'name') {
