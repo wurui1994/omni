@@ -44,6 +44,13 @@ export function emitExpr0(n, want, ctx) {
   /* 光一个记号：数或串。 */
   if (!Array.isArray(n.items)) {
     const s = String(n.value ?? '');
+    /**
+     * **字符串那一格记号的 `value` 是解好转义的正文**（`{ kind:'string', value:'abc',
+     * raw:'"abc"' }` —— printf 那一层早就量过这件事）。所以判据是 `kind`，不是"开头有没有
+     * 引号"：照引号判的话 `"abc"` 落到最后一行去了，报的是"认不出的字面量 'abc'"。
+     * 发出去要**重新编码**（`JSON.stringify`）—— 方言那一侧收的是带引号的字面量。
+     */
+    if (n.kind === 'string') return { code: `(str ${JSON.stringify(s)})`, type: ctx.T.string };
     if (typeof n.value === 'string' && n.value.startsWith('"')) {
       return { code: `(str ${n.value})`, type: ctx.T.string };
     }
