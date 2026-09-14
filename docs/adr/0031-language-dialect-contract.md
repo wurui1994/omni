@@ -154,6 +154,36 @@ native 语言，就得把它们**共识里已有的东西**先摆齐；简化是
 - `jnc-rules-sweep.js` 的两个数不许变差；
 - 落完之后 `src/lang/jnc/` 的行数**要减**（成绩单：删掉的手写细节行数）。
 
+### 8.2 先落半格：`trunc` / `sext` / `zext` 三个算子（踏脚石，已量好代价）
+
+整数带宽度那一格要动 `INT` 的 238 处引用（`grep -rn "INT" src/core/`），是一场独立战役。
+**先落它的半格**：把"掩回去"从**三个算子拼出来**变成**一个算子**——
+
+```
+今天：(bin "-" (bin "^" (bin "&" v (int 255)) (int 128)) (int 128))     ; 有符号回卷到 8 位
+今天：(bin "&" v (int 255))                                             ; 无符号回卷到 8 位
+之后：(sext 8 v)        / (trunc 8 v) 与 (zext 8 v)
+```
+
+语义写死（不留解释空间）：`(trunc N v)` = `asUintN(N, v)`；`(sext N v)` = `asIntN(N, v)`；
+`(zext N v)` = 与 `trunc` 同值，分开写是为了**读的人知道意图**（LLVM 的分法）。
+
+**要动的文件（量过：OIR 的算子只有四处消费方）**：
+1. `src/core/sexpr/lower.js`：读这三格 + 建 OIR 节点；
+2. `src/core/backend-c/emit.js`：C 那侧就是一次强制转换（`(int8_t)` / `(uint8_t)`）；
+3. `src/core/backend-js/emit.js`：`BigInt.asIntN(N, x)` / `asUintN`；
+4. `src/core/interp/builtin.js`：同上；
+5. `src/core/mir/from_oir.js`：MIR 一格截断/扩展指令（LLVM 与 JIT 顺着 MIR 走）；
+6. `src/lang/common/int.js`：`wrapTo` 从五行塌成一行。
+
+**闸门**：`tests/jnc` 六条腿（`OMNI_LEGS=all`）逐字节相同 + `.expected`；
+`jnc-rules-sweep.js` 的两个数不许变差；发出来的 `.sx` 文本**要变短**（那是这一格的成绩单）。
+
+**为什么值得先做**：它把"回卷"从"三个算子的拼装"变成"一格意图明确的算子"，于是
+（a）`.sx` 读得懂了，（b）后端能挑最好的落法（C 直接强转、LLVM 直接 trunc/sext），
+（c）等类型真的带上宽度时，这三格算子**原地就是那时要的东西**，不用再改一遍。
+
+
 
 ## 9. 不做什么
 
