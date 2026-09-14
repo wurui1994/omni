@@ -111,8 +111,24 @@ export function emitExpr0(n, want, ctx) {
     return { code: `(un ${JSON.stringify(op)} ${a.code})`, type: t };
   }
   if (h === 'binary') {
-    const a = emitExpr(nm.a, ctx.wantOf?.(n, 'a') ?? null, ctx);
-    const b = emitExpr(nm.b, ctx.wantOf?.(n, 'b') ?? null, ctx);
+    /* **`x == null` 里 `null` 的类型从另一边来**：`null` 自己没有类型（见 `NULL_BY_WANT`），
+       所以两边有一边是它时，先降另一边、拿那一边的类型当 `want`。 */
+    const aNull = headOf(nm.a) === 'null';
+    const bNull = headOf(nm.b) === 'null';
+    let a = null;
+    let b = null;
+    if (bNull && !aNull) {
+      a = emitExpr(nm.a, ctx.wantOf?.(n, 'a') ?? null, ctx);
+      if (a === null) return null;
+      b = emitExpr(nm.b, a.type, ctx);
+    } else if (aNull && !bNull) {
+      b = emitExpr(nm.b, ctx.wantOf?.(n, 'b') ?? null, ctx);
+      if (b === null) return null;
+      a = emitExpr(nm.a, b.type, ctx);
+    } else {
+      a = emitExpr(nm.a, ctx.wantOf?.(n, 'a') ?? null, ctx);
+      b = emitExpr(nm.b, ctx.wantOf?.(n, 'b') ?? null, ctx);
+    }
     if (a === null || b === null) return null;
     const op = String(nm.op?.value ?? '');
     const t = ctx.typeOfBinary?.(op, a.type, b.type) ?? a.type;
