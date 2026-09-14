@@ -539,6 +539,41 @@ export function makeFnEnv(o) {
     if (ft === undefined) return false;
     return resolveType(ft, env).type?.k === 'fnptr';
   };
+  /**
+   * **方法当值用**（`c.bump`，第五十五刀）：jancy 的函数指针是**胖的** —— 里头捕着那个对象。
+   * 方言那一侧是"一格闭包壳 + 一次 mkclo"：
+   *   壳 `(cfn <方法>$clo (($self (ptr 根))) (形参…) 返回 (ret (call <方法> (cap $self) 形参…)))`，
+   *   一份模块只发一格（`helperBox` 去重）；用点是 `(mkclo <方法>$clo <那个对象>)`。
+   * 形状按 `agg` 记：**只读、code 就是值**（与结构体那一格同一条读法，写那一侧本来就没有）。
+   * 静态方法没有 `this`，那一族另算（照旧答 undefined，调用方接着往下问）。
+   */
+  const methodValue = (baseCode, aggName, mname) => {
+    const found = findMethod(aggName, mname);
+    if (found === null || found.sig.stat === true) return undefined;
+    const ps = [];
+    for (const p of found.sig.params ?? []) {
+      const rp = p === null ? null : resolveType(p, env);
+      if (rp === null || rp.type === null) return undefined;
+      ps.push(withBits(rp.type, p));
+    }
+    const rt = found.sig.ret === null ? { k: 'void' } : withBits(found.sig.ret, found.sig.retDecl);
+    const clo = `${found.key}$clo`;
+    if (!helperBox.has(clo)) {
+      helperBox.add(clo);
+      const formals = ps.map((t2, i) => `($a${i} ${emitType(t2, 'slot', tyc)})`).join(' ');
+      const args = ps.map((x, i) => ` (var $a${i})`).join('');
+      const inner = `(call ${found.key} (cap $self)${args})`;
+      helpers.push([
+        `  (cfn ${clo} (($self (ptr ${clsRoot(aggName)}))) (${formals}) ${emitType(rt, 'value', tyc)}`,
+        `    ${rt.k === 'void' ? `(expr ${inner})` : `(ret ${inner})`})`,
+      ].join('\n'));
+    }
+    return {
+      shape: 'agg',
+      code: `(mkclo ${clo} ${baseCode})`,
+      type: { k: 'fnptr', params: ps, ret: rt },
+    };
+  };
   /** 一格字段的位置（`memberOf`）：`(pfield 基 名)`；字段自己是结构体/数组时它又是一格 `agg`。 */
   const memberAt = (baseCode, aggName, fname) => {
     const fs = aggFields.get(aggName);
@@ -565,6 +600,10 @@ export function makeFnEnv(o) {
       /* 普通字段里查不着 —— 静态字段与属性那几族在这一问里（`MEMBER_ORDER` 第 4 条）。 */
       const other = memberOther(baseCode, aggName, fname);
       if (other !== undefined) return other;
+      /* **方法当值用**（`c.bump`）：方法与字段在同一个命名空间，所以这一问排在最后一格 ——
+         前面那几族（真字段、字段路径、静态字段、属性）都不是，才轮到"那是一格方法"。 */
+      const mv = methodValue(baseCode, aggName, fname);
+      if (mv !== undefined) return mv;
       acct(`'${aggName}' 上查不着字段 '${fname}'（位域/别名/属性/基类那几族另算）`); return null;
     }
     const r = resolveType(ft, env);
@@ -1137,7 +1176,13 @@ export function makeFnEnv(o) {
              `if (z == null)` 就是量它）—— 类那一族在解类型时吞掉一个 `*`，所以这儿得回头
              问一句"源码里写了几个星"。 */
           if (r.type.k === 'class' && (t.ptrs ?? 0) === 0) {
-            const o2 = newObj(r.type.name);
+            /* **声明符尾巴上那对括号是构造实参**（`Counter c(100);`，第一百〇三刀）——
+               只有类与结构体收得下。args 躺在 `(ctor (args …))` 上，与 `new C(…)` 那一格
+               走的是**同一条** `newObj`（那一头已经会按默认实参补、会明说不收）。 */
+            const ct = named(t.raw?.dcl)?.ctor;
+            const cargs = headOf(ct) === 'ctor'
+              ? allInChain(named(ct)?.args, 'args-add', 'args') : [];
+            const o2 = newObj(r.type.name, cargs);
             if (o2 === null) return null;
             out.push(`${pad}(let ${t.name} ${ty} ${o2.code})`);
             continue;
