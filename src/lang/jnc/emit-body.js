@@ -128,10 +128,13 @@ export function makeCtx(env) {
     const h = headOf(node);
     /* **`x++` / `++x` / `x--` / `--x` 当一条语句**：就是"读一次、加一、写回" ——
        前缀与后缀在**语句位置上没差别**（那点差别只在"整条表达式的值"上，而语句不要值）。
-       写回时那一格要回卷（落进一格），所以走的是 `wide` 那条路。 */
+       写回时那一格要回卷（落进一格），所以走的是 `wide` 那条路。
+
+       这话对内建那三种（指针 / 整数 / real）成立，对**算符重载不成立**：前缀与后缀是
+       两个函数（`It$op$inc` / `It$op$inc$post`，第二百零五刀）。所以后缀那一格照实带下去。 */
     if (['post-inc', 'pre-inc', 'post-dec', 'pre-dec'].includes(h)) {
       const one = h.endsWith('dec') ? '-' : '+';
-      const ls = env.incDec?.(named(node)?.a, one, ind, ctx);
+      const ls = env.incDec?.(named(node)?.a, one, ind, ctx, h.startsWith('post'));
       if (ls === null || ls === undefined) { env.acct(`\`${h}\` 这一格还拼不出来`); return null; }
       return ls;
     }

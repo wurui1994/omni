@@ -1900,12 +1900,34 @@ export function makeFnEnv(o) {
      * 整数按**它自己那一格**回卷（`char c = 127; c++` 是 -128）、指针是 `(padd … ±1)`、
      * 实数是 `(bin "+" … (real 1.0))`。
      */
-    incDec: (target, one, ind, ctx) => {
+    incDec: (target, one, ind, ctx, post = false) => {
       const pad = ' '.repeat(ind);
       const lv = lvOf(target);
       if (lv === null) return null;
       const cur = readLv(lv);
       const ty = lv.type;
+      /**
+       * **自增自减那一族的算符重载**（第二百零五刀）：`operator ++` / `operator --`，以及它们的
+       * **后缀**变体（语料里这一族只有一处，可那一处四个全写着，stdt_Iterator.jnc:36-54）。
+       * 落法与 `operator :=` 一样：一格自由函数、`this` 当第一个形参
+       * （`It$op$inc` / `$op$dec` / `$op$inc$post`，122-opincdec.jnc 的真输出）。
+       *
+       * 前缀与后缀是**两个函数**，所以后缀那一格**先找 `$post` 那个名字**，没写才落回前缀
+       * （jancy 同 —— postfix 是可选的，122-opincdec.jnc 里 `a--` 与 `c++` 量的正是这一格）。
+       * 这一问要排在内建那三支之前：结构体/类落到那三支上会报"落在 struct 上还没接"。
+       */
+      const agg = ty?.k === 'struct' || ty?.k === 'class' ? ty.name : null;
+      if (agg !== null) {
+        const w0 = one === '+' ? 'inc' : 'dec';
+        const f = (post ? findMethod(agg, `op$${w0}$post`) : null) ?? findMethod(agg, `op$${w0}`);
+        if (f === null || f === undefined) {
+          acct(`'${one === '+' ? '++' : '--'}' 落在 '${agg}' 上查不着那个算符`); return null;
+        }
+        if ((f.sig.params ?? []).length !== 0) {
+          acct(`算符 '${agg} ${one === '+' ? '++' : '--'}' 不是零个形参`); return null;
+        }
+        return [`${pad}(expr (call ${f.key} ${cur}))`];
+      }
       let code = null;
       if (ty?.k === 'int') {
         code = wrapTo(`(bin ${JSON.stringify(one)} ${cur} (int 1))`, ty.w ?? 32, ty.u === true);
