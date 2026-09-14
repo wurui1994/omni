@@ -278,16 +278,19 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     for (const st of tbl.values()) {
       /* 合过的表里有基类那几格（派生类里也看得见它们）—— 发的时候只发自己那几格。 */
       if (st.owner !== owner) continue;
-      const g = globalLines(st, env, { ns: owner, clsRoot, taken: gLifted });
+      /* 长度写空的（`static int m_table[] = { 10, 20, 12 };`）从花括号里数 —— 与模块级、
+         局部那两处用的是同一份 `arrayFromCurly`（183-staticcurly.jnc）。这一格要**先算出来**：
+         发 `(global …)` 那一行本身就要那个长度，少了它整格连声明都发不出来。 */
+      const cvs = st.init !== null && st.init.curly === true ? st.init.value
+        : (st.curlyValue ?? null);
+      const g = globalLines(st, env, {
+        ns: owner, clsRoot, taken: gLifted, curly: cvs,
+      });
       for (const l of g.lines) decls.push(`  ${l}`);
       if (g.why !== null) {
         if (!g.why.includes('对的行为')) acct(`静态字段 '${st.emit}'：${g.why}`);
         continue;
       }
-      /* 长度写空的（`static int m_table[] = { 10, 20, 12 };`）从花括号里数 —— 与模块级、
-         局部那两处用的是同一份 `arrayFromCurly`（183-staticcurly.jnc）。 */
-      const cvs = st.init !== null && st.init.curly === true ? st.init.value
-        : (st.curlyValue ?? null);
       let r = resolveType(st.type, env);
       if (r.type === null && cvs !== null) {
         const inferred = arrayFromCurly({ name: st.name, type: st.type, at: st.at }, env, cvs);

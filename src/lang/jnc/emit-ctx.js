@@ -546,6 +546,14 @@ export function makeFnEnv(o) {
    */
   const staticPlace = (st) => {
     const r = resolveType(st.type, env);
+    /* **长度写空的那一格**（`static int m_table[] = { 10, 20, 12 };`，183-staticcurly.jnc）：
+       长度从花括号初值里数（`arrayFromCurly`，与模块级、局部那两处同一份）。那一格花括号在
+       扫聚合体那一遍就记下来了（`curlyValue`）—— 少了这一问，`m_table[i]` 与 `countof(m_table)`
+       在体里永远报"数组长度不是字面量"。 */
+    if (r.type === null && (st.curlyValue ?? null) !== null) {
+      const inferred = arrayFromCurly({ name: st.name, type: st.type, at: st.at }, env, st.curlyValue);
+      if (inferred !== null) r.type = inferred;
+    }
     if (r.type === null) { acct(`静态字段 '${st.name}'：${r.why}`); return null; }
     const ty = withBits(r.type, st.type);
     /* 取过地址的那一格要提成 `(ptr T)`（模块级那一半是第二十四刀）—— 还没接，明说。 */

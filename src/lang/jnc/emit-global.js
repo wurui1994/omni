@@ -253,7 +253,11 @@ export function globalLines(m, env, ctx = { ns: null }) {
   }
 
   let rt = resolveType(m.type, env).type;
-  if (rt === null) rt = arrayFromCurly(m, env);                      // 长度从花括号初值里数
+  /* 长度从花括号初值里数。**类体里那格静态字段**（`static int m_table[] = { … }`，
+     183-staticcurly.jnc）的初值不在 `m.at` 上（那一遍是照聚合体的成员表扫的），
+     所以由调用方把那一格花括号递进来（`ctx.curly`）—— 少了它，这一格永远报
+     "数组长度不是字面量"，而它明明数得出来。 */
+  if (rt === null) rt = arrayFromCurly(m, env, ctx.curly ?? null);
   if (rt === null) return { lines: [], why: resolveType(m.type, env).why };
   const r = { type: rt };
   const box = taken.has(m.name) && LIFTABLE.has(r.type.k);
