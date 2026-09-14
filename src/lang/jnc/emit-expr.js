@@ -346,6 +346,14 @@ export function emitExpr0(n, want, ctx) {
     if (r === null || r === undefined) return soft(ctx, n0, `\`${h}\` 这一格还拼不出来`);
     return r;
   }
+  /* **`++` / `--` 写在表达式里**（第二百二十一刀）：方言里它是**语句**，所以那一句要提到
+     这条语句之前、值落成一格临时（`incDecOf`）。次序（后缀回旧值、前缀回新值）在那一头。 */
+  if (['post-inc', 'pre-inc', 'post-dec', 'pre-dec'].includes(h)) {
+    const n0 = ctx.acctSeen?.() ?? 0;
+    const r = ctx.incDecOf?.(n);
+    if (r === null || r === undefined) return soft(ctx, n0, `\`${h}\` 当表达式用还拼不出来`);
+    return r;
+  }
   /* 调用：谁被调（普通函数 / 方法 / 函数指针 / 算符 / CRT 助手）差别全在被调那一侧，
      所以整格交给调用方那张表（`ctx.callOf`）。 */
   if (h === 'call') {

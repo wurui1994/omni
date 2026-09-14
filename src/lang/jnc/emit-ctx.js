@@ -1165,6 +1165,52 @@ export function makeFnEnv(o) {
     if (v === null) return null;
     return [`${pad}(expr (call ${one.key} ${dst} ${v.code}))`];
   };
+  /**
+   * **自增自减那一句**（`x++` / `++x` / `x--` / `--x`）：读一次、加一、写回。三族各有写法 ——
+   * 整数按**它自己那一格**回卷（`char c = 127; c++` 是 -128）、指针是 `(padd … ±1)`、
+   * 实数是 `(bin "+" … (real 1.0))`；结构体/类上写了算符的走那个算符（第二百零五刀）。
+   *
+   * 两处共用它：当**一条语句**用（`incDec`）与写在**表达式**里（`incDecOf`，第二百二十一刀）。
+   */
+  const incDecStmt = (target, one, pad, post) => {
+    const lv = lvOf(target);
+    if (lv === null) return null;
+    const cur = readLv(lv);
+    const ty = lv.type;
+    /**
+     * **自增自减那一族的算符重载**（第二百零五刀）：`operator ++` / `operator --`，以及它们的
+     * **后缀**变体（语料里这一族只有一处，可那一处四个全写着，stdt_Iterator.jnc:36-54）。
+     * 落法与 `operator :=` 一样：一格自由函数、`this` 当第一个形参
+     * （`It$op$inc` / `$op$dec` / `$op$inc$post`，122-opincdec.jnc 的真输出）。
+     *
+     * 前缀与后缀是**两个函数**，所以后缀那一格**先找 `$post` 那个名字**，没写才落回前缀
+     * （jancy 同 —— postfix 是可选的，122-opincdec.jnc 里 `a--` 与 `c++` 量的正是这一格）。
+     * 这一问要排在内建那三支之前：结构体/类落到那三支上会报"落在 struct 上还没接"。
+     */
+    const agg = ty?.k === 'struct' || ty?.k === 'class' ? ty.name : null;
+    if (agg !== null) {
+      const w0 = one === '+' ? 'inc' : 'dec';
+      const f = (post ? findMethod(agg, `op$${w0}$post`) : null) ?? findMethod(agg, `op$${w0}`);
+      if (f === null || f === undefined) {
+        acct(`'${one === '+' ? '++' : '--'}' 落在 '${agg}' 上查不着那个算符`); return null;
+      }
+      if ((f.sig.params ?? []).length !== 0) {
+        acct(`算符 '${agg} ${one === '+' ? '++' : '--'}' 不是零个形参`); return null;
+      }
+      return { lines: [`${pad}(expr (call ${f.key} ${cur}))`], lv, cur };
+    }
+    let code = null;
+    if (ty?.k === 'int') {
+      code = wrapTo(`(bin ${JSON.stringify(one)} ${cur} (int 1))`, ty.w ?? 32, ty.u === true);
+    } else if (ty?.k === 'ptr' || ty?.k === 'tptr') {
+      code = `(padd ${cur} (int ${one === '+' ? '1' : '-1'}))`;
+    } else if (ty?.k === 'real') {
+      code = `(bin ${JSON.stringify(one)} ${cur} (real 1.0))`;
+    } else { acct(`'++' 落在 ${ty?.k ?? '?'} 上还没接（算符重载那一族另算）`); return null; }
+    if (lv.shape === 'agg') { acct("'++' 落在结构体/数组上（算符重载那一族）还没接"); return null; }
+    const w = writeLv(lv, code);
+    return w === null ? null : { lines: [`${pad}${w}`], lv, cur };
+  };
   const lvOf = (node) => {
     const h = headOf(node);
     const nm2 = named(node) ?? {};
@@ -2253,44 +2299,38 @@ export function makeFnEnv(o) {
      * 实数是 `(bin "+" … (real 1.0))`。
      */
     incDec: (target, one, ind, ctx, post = false) => {
-      const pad = ' '.repeat(ind);
-      const lv = lvOf(target);
-      if (lv === null) return null;
-      const cur = readLv(lv);
-      const ty = lv.type;
-      /**
-       * **自增自减那一族的算符重载**（第二百零五刀）：`operator ++` / `operator --`，以及它们的
-       * **后缀**变体（语料里这一族只有一处，可那一处四个全写着，stdt_Iterator.jnc:36-54）。
-       * 落法与 `operator :=` 一样：一格自由函数、`this` 当第一个形参
-       * （`It$op$inc` / `$op$dec` / `$op$inc$post`，122-opincdec.jnc 的真输出）。
-       *
-       * 前缀与后缀是**两个函数**，所以后缀那一格**先找 `$post` 那个名字**，没写才落回前缀
-       * （jancy 同 —— postfix 是可选的，122-opincdec.jnc 里 `a--` 与 `c++` 量的正是这一格）。
-       * 这一问要排在内建那三支之前：结构体/类落到那三支上会报"落在 struct 上还没接"。
-       */
-      const agg = ty?.k === 'struct' || ty?.k === 'class' ? ty.name : null;
-      if (agg !== null) {
-        const w0 = one === '+' ? 'inc' : 'dec';
-        const f = (post ? findMethod(agg, `op$${w0}$post`) : null) ?? findMethod(agg, `op$${w0}`);
-        if (f === null || f === undefined) {
-          acct(`'${one === '+' ? '++' : '--'}' 落在 '${agg}' 上查不着那个算符`); return null;
-        }
-        if ((f.sig.params ?? []).length !== 0) {
-          acct(`算符 '${agg} ${one === '+' ? '++' : '--'}' 不是零个形参`); return null;
-        }
-        return [`${pad}(expr (call ${f.key} ${cur}))`];
+      const r0 = incDecStmt(target, one, ' '.repeat(ind), post);
+      return r0 === null ? null : r0.lines;
+    },
+    /**
+     * **`++` / `--` 写在表达式里**（第二百二十一刀，173-incexpr.jnc）：语料里 20 份，原样是
+     * `m_reportFieldEncoderArray[encoderIdx++].encode(…)` 那一族。方言里 `++` 是**语句**
+     * （不取值），所以这一格走的正是 `EC_HOIST` 那条现成的路：把值落成一格临时、自增那一句
+     * 插到**这条语句之前**。
+     *
+     * 次序就是这一刀的全部内容：**后缀先落临时再自增**（回旧值），**前缀先自增再落临时**
+     * （回新值）。插不进语句的位置照旧说清 —— 与 errorcode 那一处、带宽度的格式化字面量
+     * 那一处是同一句话（那两处也走 `ecOut`）。
+     */
+    incDecOf: (node) => {
+      const h = headOf(node);
+      const one = h.endsWith('dec') ? '-' : '+';
+      const post = h.startsWith('post');
+      if (ctxRef.ecOut === null || ctxRef.ecOut === undefined) {
+        acct(`这个位置上的 \`${h}\`（自增那一句插不进语句 —— 惰性位置/循环条件）`); return null;
       }
-      let code = null;
-      if (ty?.k === 'int') {
-        code = wrapTo(`(bin ${JSON.stringify(one)} ${cur} (int 1))`, ty.w ?? 32, ty.u === true);
-      } else if (ty?.k === 'ptr' || ty?.k === 'tptr') {
-        code = `(padd ${cur} (int ${one === '+' ? '1' : '-1'}))`;
-      } else if (ty?.k === 'real') {
-        code = `(bin ${JSON.stringify(one)} ${cur} (real 1.0))`;
-      } else { acct(`'++' 落在 ${ty?.k ?? '?'} 上还没接（算符重载那一族另算）`); return null; }
-      if (lv.shape === 'agg') { acct("'++' 落在结构体/数组上（算符重载那一族）还没接"); return null; }
-      const w = writeLv(lv, code);
-      return w === null ? null : [`${pad}${w}`];
+      const pad = ctxRef.ecPad ?? '    ';
+      const r0 = incDecStmt(named(node)?.a, one, pad, post);
+      if (r0 === null) return null;                          // 账已经记过
+      const ty = r0.lv.type;
+      const v = `$x${tmpBox.n}`;
+      tmpBox.n += 1;
+      const keep = `${pad}(let ${v} ${emitType(ty, 'slot', tyc)} ${r0.cur})`;
+      /* 后缀回**旧**值：先钉住再自增。前缀回**新**值：先自增，那一格的读法（`r0.cur`）在
+         写回之后再读一遍就是新值。 */
+      if (post) ctxRef.ecOut.push(keep, ...r0.lines);
+      else ctxRef.ecOut.push(...r0.lines, `${pad}(let ${v} ${emitType(ty, 'slot', tyc)} ${r0.cur})`);
+      return { code: `(var ${v})`, type: ty, hoisted: true };
     },
     /** 调用：被调是**裸名字**且查得着顶层那几格函数时 → `(call 名字 实参…)`。 */
     callOf: (node, want, ctx) => {
