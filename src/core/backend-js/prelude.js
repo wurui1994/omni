@@ -657,6 +657,26 @@ function $str_repeat(s, n) { return Number(n) <= 0 ? "" : s.repeat(Number(n)); }
 // BigInt.toString(radix) 给的就是 0-9a-z，与 omni_str_base 的那张表同一套。
 function $str_base(v, b) { return $U(v).toString(Number(b)); }
 
+// (trunc N E) / (zext N E) / (sext N E)（ADR-0031 §8.2）：把一格整数截到 N 位。
+// **64 位是恒等** —— 方言的 int 就是 64 位有符号那一格，无符号的读法由算子承担，
+// 所以这儿绝不能答一个装不进 int64 的数（那会在别的腿上对不上）。
+//
+// **答的那一格必须与进来的那一格同种**（Number 进 Number 出、BigInt 进 BigInt 出）：
+// 这条腿上 int 有两种表示，而 1n === 1 是假的 —— 一律答 BigInt 的话，switch 的派发
+// （那一句是恒等比较）就永远不中，35-switch / 39-breakn / 40-forcont 三份当场量出来了。
+function $int_trunc(v, n) {
+  var b = Number(n);
+  if (b >= 64) return v;
+  if (typeof v === 'bigint') return BigInt.asUintN(b, v);
+  return Number(BigInt.asUintN(b, BigInt(v)));
+}
+function $int_sext(v, n) {
+  var b = Number(n);
+  if (b >= 64) return v;
+  if (typeof v === 'bigint') return BigInt.asIntN(b, v);
+  return Number(BigInt.asIntN(b, BigInt(v)));
+}
+
 // (supper S) —— **只动 ASCII 的 a-z**。刻意不用 toUpperCase()：那是 Unicode 的
 // （德文 sharp s 会变成两个字符），而 C 那侧的 toupper 还看 locale，两条路对不上。
 function $str_upper(s) {

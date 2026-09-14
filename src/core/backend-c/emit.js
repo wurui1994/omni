@@ -1981,6 +1981,9 @@ class CEmitter {
       case 'str_repeat': return `omni_str_repeat(${a[0]}, ${a[1]})`;
       // `(sbase E 进制)` / `(supper S)`（ADR-0016 第七刀）
       case 'str_base': return `omni_str_base(${a[0]}, ${a[1]})`;
+      // `(trunc N E)` / `(zext N E)` / `(sext N E)`（ADR-0031 §8.2）：截到 N 位，64 位是恒等
+      case 'int_trunc': return `omni_int_trunc(${a[0]}, ${a[1]})`;
+      case 'int_sext': return `omni_int_sext(${a[0]}, ${a[1]})`;
       case 'str_upper': return `omni_str_upper(${a[0]})`;
       // `(sfix E N)`（ADR-0016 第八刀）—— C 的 %.Nf 本身就是那个出处
       case 'str_fixed': return `omni_str_fixed(${a[0]}, ${a[1]})`;

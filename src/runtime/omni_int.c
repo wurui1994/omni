@@ -12,3 +12,26 @@ int64_t omni_trunc(double v) {
   }
   return (int64_t)t;
 }
+
+/* 把一格整数截到 n 位（ADR-0031 §8.2）。先前这两件事是前端拿三个算子拼出来的
+   （`(bin "-" (bin "^" (bin "&" v M) S) S)` 就是"截到 8 位有符号"）—— 拼出来的东西读的人
+   看不出意图，后端也挑不了更好的落法。现在方言里各是一格算子。
+
+   **n >= 64 是恒等**：方言的 int 就是 64 位有符号那一格，无符号的读法由算子承担
+   （u/ u% u>> 与四个无符号比较），所以这儿绝不能答一个装不进 int64_t 的数。
+   n 在方言那一层查过（1..64 的字面量），这儿不再判。
+
+   写法刻意是"掩 + 摊符号位"而不是 `(int8_t)` 那种强制转换：n 是任意位宽（1..64），
+   而且这一串与前端先前发的那一串**逐位相同** —— 换过来时六条腿的输出一个字节都不该变。 */
+int64_t omni_int_trunc(int64_t v, int64_t n) {
+  if (n >= 64) return v;
+  uint64_t m = (uint64_t)1 << (uint64_t)n;
+  return (int64_t)((uint64_t)v & (m - 1));
+}
+
+int64_t omni_int_sext(int64_t v, int64_t n) {
+  if (n >= 64) return v;
+  uint64_t s = (uint64_t)1 << (uint64_t)(n - 1);
+  uint64_t m = s * 2 - 1;
+  return (int64_t)((((uint64_t)v & m) ^ s) - s);
+}

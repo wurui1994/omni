@@ -36,6 +36,9 @@ export const SX_ARITY = {
   sfix: 2, ssci: 2, sgen: 2, sgenk: 2, sbase: 2,
   /* 整数与实数之间（**无符号 64 位要走 `torealu`**：那一格的位当有符号读是负数） */
   toreal: 1, torealu: 1, toint: 1,
+  /* 截到 N 位（ADR-0031 §8.2）：`(trunc N E)` = asUintN、`(sext N E)` = asIntN、
+     `(zext N E)` 与 trunc 同值（分开写只为让读的人看出意图）。N 是 1..64 的字面量。 */
+  trunc: 2, sext: 2, zext: 2,
   /* 类型 */
   ptr: 1, tptr: 1, blk: 2, arr: 1, fnty: 2,
 };

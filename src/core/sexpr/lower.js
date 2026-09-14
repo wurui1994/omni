@@ -2024,6 +2024,40 @@ class CoreLowerer {
       }
       return { kind: 'Builtin', name: 'str_base', args: [v, b], argType: INT, type: STRING };
     }
+    // `(trunc N E)` / `(zext N E)` / `(sext N E)` —— **把一格整数截到 N 位**（ADR-0031 §8.2）。
+    //
+    // 为什么方言要长这三格：前端本来是拿三个算子拼出来的 ——
+    // `(bin "-" (bin "^" (bin "&" v (int 255)) (int 128)) (int 128))` 就是"截到 8 位有符号"。
+    // 那串东西读的人看不出意图，后端也挑不了更好的落法（C 那侧本来就是一次强制转换、
+    // LLVM 那侧本来就有 trunc/sext 指令）。语义写死、不留解释空间：
+    //   `(trunc N E)` = `asUintN(N, E)`；`(sext N E)` = `asIntN(N, E)`；
+    //   `(zext N E)` 与 `trunc` **同值** —— 分开写只为让读的人看出意图（LLVM 的分法）。
+    //
+    // **N >= 64 是恒等**：方言的 int 就是 64 位有符号那一格，无符号的读法由算子承担
+    // （`u/` `u%` `u>>` 与四个无符号比较，第六十一刀），所以这一格不该答一个装不进 int 的数。
+    //
+    // N **要写成字面量**（与 `(sbase E 进制)` 同一条理由：位宽在编译期永远是已知的，收运行期
+    // 值就得多一条"位宽不在 1..64"的运行期错误路径，四条腿各一份消息）。
+    if (h === 'trunc' || h === 'sext' || h === 'zext') {
+      if (!isList(n.items[1]) || head(n.items[1]) !== 'int') {
+        return this.err(n, `(${h} N E) 的 N 要写成字面量 (int N)`);
+      }
+      const w = this.intLit(n.items[1]);
+      if (w === null) return null;
+      if (w.value < 1n || w.value > 64n) {
+        return this.err(n, `(${h} N E) 的 N 要在 1..64 之间，这里是 ${w.value}`);
+      }
+      const v = this.expr(n.items[2]);
+      if (v === null) return null;
+      if (v.type !== INT) return this.err(n, `(${h} N E) 的 E 要是 int，这里是 ${coreTypeText(v.type)}`);
+      return {
+        kind: 'Builtin',
+        name: h === 'sext' ? 'int_sext' : 'int_trunc',
+        args: [v, w],
+        argType: INT,
+        type: INT,
+      };
+    }
     // `(supper S)` —— **只把 ASCII 的 a-z 换成大写**，别的字节一个不动。
     //
     // 刻意不是"Unicode 的 toUpperCase"：JS 那侧 `"ß".toUpperCase()` 是 `"SS"`（长度都变了），

@@ -1079,6 +1079,11 @@ export function applyBuiltin(I, e, a) {
     // `(sbase E 进制)` —— **E 的位当无符号 64 位读**（C 的 `%x` 的规矩），数字小写。
     // BigInt.toString(radix) 给的就是 `0-9a-z`，与 omni_str_base 的那张表同一套。
     case 'str_base': return (a[0] < 0n ? a[0] + (1n << 64n) : a[0]).toString(Number(a[1]));
+    /* `(trunc N E)` / `(zext N E)` / `(sext N E)`（ADR-0031 §8.2）：把一格整数截到 N 位。
+       **64 位是恒等** —— 方言的 int 就是 64 位有符号那一格，无符号的读法由算子承担
+       （`u/` `u%` `u>>` 与四个无符号比较），所以这儿绝不能答一个装不进 int64 的数。 */
+    case 'int_trunc': return Number(a[1]) >= 64 ? a[0] : BigInt.asUintN(Number(a[1]), a[0]);
+    case 'int_sext': return Number(a[1]) >= 64 ? a[0] : BigInt.asIntN(Number(a[1]), a[0]);
     // `(supper S)` —— **只动 ASCII 的 a-z**。不用 toUpperCase()：那是 Unicode 的
     // （"ß" 会变成两个字符），C 那侧的 toupper 还看 locale，两条路对不上。
     case 'str_upper': return asciiUpper(a[0]);

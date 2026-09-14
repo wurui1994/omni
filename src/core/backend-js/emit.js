@@ -734,6 +734,9 @@ class JsEmitter {
       case 'str_repeat': return `$str_repeat(${a[0]}, ${a[1]})`;
       // `(sbase E 进制)` / `(supper S)`（ADR-0016 第七刀，jancy 的 `%x` / `%X` / `%o` 要）
       case 'str_base': return `$str_base(${a[0]}, ${a[1]})`;
+      // `(trunc N E)` / `(zext N E)` / `(sext N E)`（ADR-0031 §8.2）：截到 N 位，64 位是恒等
+      case 'int_trunc': return `$int_trunc(${a[0]}, ${a[1]})`;
+      case 'int_sext': return `$int_sext(${a[0]}, ${a[1]})`;
       case 'str_upper': return `$str_upper(${a[0]})`;
       // `(sfix E N)`（ADR-0016 第八刀）—— C 的 %.Nf，就近取偶
       case 'str_fixed': return `$str_fixed(${a[0]}, ${a[1]})`;

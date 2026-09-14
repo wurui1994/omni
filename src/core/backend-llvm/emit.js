@@ -186,6 +186,10 @@ const RT_OPS = new Map([
   ['str_repeat.string', { sym: 'omni_str_repeat', ret: '[2 x i64]', params: ['[2 x i64]', 'i64'] }],
   // 这两条是 ADR-0016 第七刀补的（jancy 的 %x / %X / %o）。
   ['str_base.int', { sym: 'omni_str_base', ret: '[2 x i64]', params: ['i64', 'i64'] }],
+  /* 截到 N 位那两格（ADR-0031 §8.2）。先走运行期的两个函数 —— LLVM 那侧本来有 trunc/sext
+     指令，可位宽是运行期实参（虽然发出来永远是常量），换成原生指令是下一刀的事。 */
+  ['int_trunc.int', { sym: 'omni_int_trunc', ret: 'i64', params: ['i64', 'i64'] }],
+  ['int_sext.int', { sym: 'omni_int_sext', ret: 'i64', params: ['i64', 'i64'] }],
   ['str_upper.string', { sym: 'omni_str_upper', ret: '[2 x i64]', params: ['[2 x i64]'] }],
   // 第八刀：C 的 %.Nf（就近取偶）。第三十刀：C 的 %.Ne。
   ['str_fixed.real', { sym: 'omni_str_fixed', ret: '[2 x i64]', params: ['double', 'i64'] }],

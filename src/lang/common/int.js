@@ -24,13 +24,17 @@
 
 import * as sx from './sx.js';
 
-/** 回卷到 w 位（`u` 是无符号）。64 位及以上原样答回。 */
+/**
+ * 回卷到 w 位（`u` 是无符号）。64 位及以上原样答回。
+ *
+ * **方言里各是一格算子**（ADR-0031 §8.2）：`(trunc N E)` 是无符号那一面、`(sext N E)` 是
+ * 有符号那一面。先前这儿拿三个算子拼 —— `(bin "-" (bin "^" (bin "&" v M) S) S)` ——
+ * 那串东西读的人看不出意图，后端也挑不了更好的落法（C 那侧本来就是一次强制转换、
+ * LLVM 那侧本来就有 trunc/sext 指令）。三条腿量过：换过来之后印出来的数一个都没变。
+ */
 export function wrapTo(code, w, u = false) {
   if (w >= 64) return code;
-  const s = 1n << BigInt(w - 1);
-  const m = s * 2n - 1n;
-  if (u === true) return sx.bin('&', code, sx.int(m));
-  return sx.bin('-', sx.bin('^', sx.bin('&', code, sx.int(m)), sx.int(s)), sx.int(s));
+  return sx.op(u === true ? 'trunc' : 'sext', sx.int(w), code);
 }
 
 /**

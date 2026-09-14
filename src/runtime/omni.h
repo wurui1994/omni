@@ -431,6 +431,12 @@ omni_str omni_str_repeat(omni_str s, int64_t n);
 /* 按进制印一个整数（ADR-0016 第七刀，jancy 的 %x / %o 要它）。**v 的位当无符号 64 位
    读**（C 的 %x 的规矩），数字小写。进制在方言那一层查过（2..36 的字面量）。 */
 omni_str omni_str_base(int64_t v, int64_t base);
+/* 把一格整数截到 n 位（ADR-0031 §8.2）：`omni_int_trunc` 是无符号那一面（`asUintN`）、
+   `omni_int_sext` 是有符号那一面（`asIntN`）。**n >= 64 是恒等** —— 方言的 int 就是 64 位
+   有符号那一格，无符号的读法由算子承担（u/ u% u>> 与四个无符号比较），所以这儿绝不能
+   答一个装不进 int64_t 的数（那会让六条腿对不上）。n 在方言那一层查过（1..64 的字面量）。 */
+int64_t omni_int_trunc(int64_t v, int64_t n);
+int64_t omni_int_sext(int64_t v, int64_t n);
 /* 只把 ASCII 的 a-z 换成大写（%X 要它）。不是 toupper（看 locale）、也不是 JS 的
    toUpperCase（Unicode 的，长度会变）—— ASCII-only 才让四条腿是同一个函数。 */
 omni_str omni_str_upper(omni_str s);
