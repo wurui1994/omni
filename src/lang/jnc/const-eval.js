@@ -24,6 +24,17 @@ export function evalConst(node, env, depth = 0) {
   }
   const h = headOf(node);
   const nm = named(node);
+  if (h === 'char') {
+    /* **`'a'` 是一个整数**（第九十七刀）。jancy 的词法把它做成 `TokenKind_Integer`：
+       头一个字节**最重**、最多 8 个字节，多出来的截掉（jnc_ct_Lexer.cpp:186-197）——
+       所以 `'a'` 是 97、`'ab'` 是 0x6162。少这一条，`int g_alpha['z' - 'a' + 1];`
+       的长度就算不出来（88-charlit.jnc）。 */
+    const txt = nm === null || nm.tok === undefined || nm.tok === null
+      ? String(node.items?.[1]?.value ?? '') : String(nm.tok.value ?? '');
+    const bytes = [...txt].slice(-8).map((c) => c.charCodeAt(0) & 0xff);
+    if (bytes.length === 0) return 0;                          // `'\0'` 那一格
+    return bytes.reduce((acc, b) => acc * 256 + b, 0);
+  }
   if (h === 'name') return lookupConst(nameText(node) ?? '', env);
   if (h === 'qualified' && nm !== null) {
     /* `Kind.Some` / `ActionId._Count`：先试"枚举名.项"，再退回光一个项名
