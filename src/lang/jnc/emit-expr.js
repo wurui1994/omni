@@ -340,7 +340,7 @@ export function emitExpr0(n, want, ctx) {
   }
   /* **`new T` / `new T[n]`**（第五十二 / 一百二十九刀）：出来的是一格**指针**。造出来那一段
      内存怎么算由调用方那一层给（它知道类的根、有没有 construct、`$tag` 写什么）。 */
-  if (h === 'new' || h === 'new-array') {
+  if (h === 'new' || h === 'new-array' || h === 'new-curly') {
     const n0 = ctx.acctSeen?.() ?? 0;
     const r = ctx.newOf?.(n, want);
     if (r === null || r === undefined) return soft(ctx, n0, `\`${h}\` 这一格还拼不出来`);

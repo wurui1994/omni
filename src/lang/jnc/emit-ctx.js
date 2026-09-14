@@ -499,7 +499,7 @@ export function makeFnEnv(o) {
    * 那几格保持零（那段内存是 pnew 出来的、本来就是零 —— C 与 jancy 都是这条）。
    * 嵌套的花括号跟着往里走。拼不出来答 null（账在这一层记）。
    */
-  const curlyLines = (dst, type, node, pad) => {
+  const curlyLines = (dst, type, node, pad, mkVal = null) => {
     const all = allInChain(named(node)?.items, 'items-add', 'items');
     /* **末尾那个逗号不算一格**（`{ 1, 2, }`）：链上会多出一格**空占位**（一格没有内容的
        list）—— 数长度那一头（`arrayFromCurly` 的 `chainCount`）数的就是"真有值的项数"，
@@ -514,8 +514,8 @@ export function makeFnEnv(o) {
     const items = all.slice(0, last + 1);
     const one = (at, ty, it) => {
       if (it === null || it === undefined) { acct('花括号里有一格空项（保持原值那一族）还没接'); return null; }
-      if (headOf(it) === 'curly') return curlyLines(at, ty, it, pad);
-      const v = emitExpr(it, ty, ctxRef);
+      if (headOf(it) === 'curly') return curlyLines(at, ty, it, pad, mkVal);
+      const v = mkVal !== null ? mkVal(it, ty) : emitExpr(it, ty, ctxRef);
       if (v === null) return null;                          // 账已经记过
       /**
        * **一整块当花括号里的一项**（`int rows[2][3] = { a, b };`，第二百零八刀）：那一格格子
@@ -524,6 +524,15 @@ export function makeFnEnv(o) {
        * 源头先钉在一格临时量上：它可能是一次调用，逐格搬会重求好几遍。
        */
       if (ty?.k === 'struct' || ty?.k === 'arr') {
+        /* `mkVal` 那一路（`new T { … }`，第二百一十九刀）源头**已经是一格形参**了 ——
+           形参读几遍都一样，不用再钉一次。 */
+        if (mkVal !== null) {
+          const ls2 = copyValLines({
+            dst: at, src: v.code, type: ty, pad, fieldsOf,
+          });
+          if (ls2 === null) { acct('花括号里那一整块抄不出来（字段表/环那两格）'); return null; }
+          return ls2;
+        }
         const s = `$s${tmpBox.n}`;
         tmpBox.n += 1;
         const ls = copyValLines({
@@ -2670,6 +2679,49 @@ export function makeFnEnv(o) {
       const to = ctxRef.typeNameOf(nm2.type);
       if (to === null) return null;
       if (to.k === 'void') { acct('new void'); return null; }
+      /**
+       * **`new T { … }`**（第二百一十九刀，decl_curly.rst 最后那一格：
+       * `Point* point2 = new Point { m_y = 2000 }`，24-new-curly.jnc）。
+       *
+       * 花括号初值是**几条语句**，而表达式降级只交出一段文字。"在表达式里开一条语句通道"
+       * 那个办法在**惰性**位置上立不住（`while` 的条件每一圈都要重算，提到前面去就只算了
+       * 一次）。所以走的是另一条：把那几条语句**抬成一个函数**，项的值当实参在调用方求 ——
+       * `new T { … }` 于是就是一句 `(call $newcN …)`。方言一个字都不用改。
+       *
+       * 那几项的值是**调用方**求的（形参 `$i0`…），所以求值次序与写的次序一样、每一圈都重求；
+       * 一整块的那一项照旧"逐字段抄一份"，只是源头已经是一格形参、不用再钉一次。
+       */
+      if (headOf(node) === 'new-curly') {
+        if (to.k !== 'struct' && to.k !== 'arr') {
+          acct(`new ${to.k} { … }（那不是一整块）还没接`); return null;
+        }
+        const formals = [];
+        const vals = [];
+        const mkVal = (it, ty) => {
+          const v = emitExpr(it, ty, ctxRef);
+          if (v === null) return null;                      // 账已经记过
+          const i0 = formals.length;
+          formals.push(`($i${i0} ${emitType(ty, 'slot', tyc)})`);
+          vals.push(v.code);
+          return { code: `(var $i${i0})`, type: ty };
+        };
+        const body = curlyLines('(var $p)', to, nm2.init, '      ', mkVal);
+        if (body === null) return null;                     // 账已经记过
+        const ty0 = emitType(to, 'slot', tyc);
+        const fn0 = `$newc${tmpBox.n}`;
+        tmpBox.n += 1;
+        helpers.push([
+          `  (fn ${fn0} (${formals.join(' ')}) ${ty0}`,
+          '    (do',
+          `      (let $p ${ty0} (pnew ${ty0} (int 1)))`,
+          ...body,
+          '      (ret (var $p))))',
+        ].join('\n'));
+        return {
+          code: `(call ${fn0}${vals.map((v) => ` ${v}`).join('')})`,
+          type: { k: 'ptr', target: to },
+        };
+      }
       if (to.k === 'class') {
         if (headOf(node) === 'new-array') { acct(`不能造类的数组（'${to.name}'）`); return null; }
         /* 带实参的那一格照样走 `newObj` —— 实参变成 helper 的形参（`$i0`…）。 */
