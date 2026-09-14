@@ -10,8 +10,10 @@
 //   node tests/lib/jnc-rules-sweep.js --files    # 再印每一堆底下是哪些语料
 //   node tests/lib/jnc-rules-sweep.js 07 12      # 只看名字里带这些片段的
 
-import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import {
+  join, isAbsolute, resolve, dirname,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
@@ -49,13 +51,42 @@ const note = (why, f) => {
 
 let ok = 0;
 const okFiles = [];
+/**
+ * **import 那一族按真驱动那条路找**（第六十 / 六十二刀）：先看写这条 import 的文件自己的
+ * 目录，再按 `-I` 的次序。`-I` 从 `<语料>.args` 里读 —— 那正是 `tests/jnc/run.js` 递给
+ * CLI 的同一份，所以这把尺子量的与真跑的是同一件事（少了它，59-incdir.jnc 在尺子上
+ * 报的是"import 找不着"，而真跑是对的）。
+ */
+const dirsOf = (f) => {
+  let txt = '';
+  try { txt = readFileSync(join(CASES, `${f.replace(/\.jnc$/, '')}.args`), 'utf8'); } catch { return []; }
+  const out = [];
+  const parts = txt.trim().split(/\s+/);
+  for (let i = 0; i < parts.length; i += 1) {
+    if (parts[i] === '-I' && parts[i + 1] !== undefined) out.push(join(CASES, '..', parts[i + 1]));
+  }
+  return out;
+};
 for (const f of files) {
   const p = join(CASES, f);
   const d = new Diagnostics();
+  const dirs = dirsOf(f);
+  const find = (spec, from) => {
+    if (isAbsolute(spec)) return existsSync(spec) ? resolve(spec) : null;
+    const here = join(dirname(from), spec);
+    if (existsSync(here)) return resolve(here);
+    for (const dir of dirs) {
+      const q = join(dir, spec);
+      if (existsSync(q)) return resolve(q);
+    }
+    return null;
+  };
   let out = null;
   try {
     const tree = jncParse(tb, p, d);
-    out = lowerJncRules(tree, d, { path: p, needEntry: true });
+    out = lowerJncRules(tree, d, {
+      path: p, needEntry: true, find, parse: (q) => jncParse(tb, q, d),
+    });
   } catch (e) {
     note(`崩：${String(e && e.message ? e.message : e).split('\n')[0].slice(0, 120)}`, f);
     continue;

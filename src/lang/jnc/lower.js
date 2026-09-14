@@ -61,6 +61,72 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   const acct = (why) => { if (!accts.includes(why)) accts.push(why); };
 
   /**
+   * **`import "x.jnc"` 不是 #include，也不是"取一个模块对象"**（第六十刀）：它是"把那份文件的
+   * 顶层条目也算进**这一个**模块里" —— 没有作用域、没有可见性、没有顺序。所以落法就是
+   * **把那棵树的顶层条目并进来**，往下每一层都当它们是本文件写的（`modules.js` 顶上那段）。
+   *
+   * 三条与 jancy 一样（`jnc_ct_ImportMgr.cpp`）：
+   *   - 找法先看 import 那份文件自己的目录，再按 `-I` 的次序（`find` 是外面递进来的，
+   *     与旧那条路共用一份）；
+   *   - 查重认**resolve 过的那一格**，所以 `./a.jnc` 与 `a.jnc` 是同一份（第二遍是句空话）；
+   *   - 名字是**传递**的：并进来的那棵树里的 import 接着并。
+   * 并进来的排在**最前头**：它们是本文件字段/形参的类型，方言那一侧要求先声明。
+   *
+   * `.jncx`（zip）与动态库那两族**明说不收**（这一层不解压、不读符号表）。
+   */
+  let tree = tree0;
+  const find = opts.find ?? null;
+  const parse = opts.parse ?? null;
+  if (find !== null && parse !== null) {
+    const seen = new Set();
+    const brought = [];
+    const litOf = (n) => {
+      if (n === null || n === undefined || typeof n !== 'object') return null;
+      if (!Array.isArray(n.items)) {
+        /* 串那一格记号是 `{ kind: 'string', value: 已经脱过引号的文本 }`（词法那一层脱的）。 */
+        if (n.kind === 'string' && typeof n.value === 'string') return n.value;
+        return typeof n.value === 'string' && n.value.startsWith('"') ? n.value.slice(1, -1) : null;
+      }
+      for (const it of n.items.slice(1)) {
+        const s = litOf(it);
+        if (s !== null) return s;
+      }
+      return null;
+    };
+    const digImports = (n, from) => {
+      if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
+      if (headOf(n) === 'import') {
+        const im = named(n);
+        const spec = litOf(im?.path);
+        if (im?.header !== null && im?.header !== undefined) {
+          acct('`import "…" with "…"`（宿主的头文件）还没接'); return;
+        }
+        if (spec === null) { acct('import 的路径不是一格字面量'); return; }
+        if (!spec.endsWith('.jnc')) {
+          acct(`import '${spec}'：不是一份 .jnc（.jncx 与动态库那两族另算）`); return;
+        }
+        const p = find(spec, from);
+        if (p === null) { acct(`import '${spec}' 找不着`); return; }
+        if (seen.has(p)) return;                         // 第二遍是句空话
+        seen.add(p);
+        const t2 = parse(p);
+        if (t2 === null || t2 === undefined) { acct(`import '${spec}' 解不开`); return; }
+        brought.push(...chainOf(t2, 'unit-add'));
+        digImports(t2, p);                               // 名字是传递的
+        return;
+      }
+      for (const it of n.items) digImports(it, from);
+    };
+    digImports(tree, opts.path ?? '.');
+    if (brought.length > 0) {
+      tree = [...brought, ...chainOf(tree, 'unit-add')].reduce(
+        (acc, one) => ({ items: [{ value: 'unit-add' }, acc, one] }),
+        { items: [{ value: 'unit' }] },
+      );
+    }
+  }
+
+  /**
    * **泛型 = 单态化**（第一百一十七刀，`generic.js`）：一格用点造一格实例。这一步排在**最前面**
    * —— 替换完那棵树上就只剩普通的 `agg` / `typedef` / `fn-def`，往下每一层（探子、字段表、
    * 发声明、发体）**一个字都不用改**。造出来的那几格插在**最前头**：它们是别人字段的类型，
@@ -69,7 +135,6 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    * 合成实参那几条 typedef（`Box<int const*>` 的 `jnc$tp$int_const_p`）直接进类型环境。
    * 解不出来的那几笔照实记账（不猜）。
    */
-  let tree = tree0;
   const templates = templateTable(tree);
   if (templates.size > 0) {
     const ex = expandTemplates(tree, templates);

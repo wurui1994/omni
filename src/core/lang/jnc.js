@@ -143,7 +143,11 @@ export function jncText(path, dirs = [], needEntry = true) {
   /* **规则化的那条降级**（`src/lang/jnc/lower.js`，ADR-0030 §3）：`JNC_RULES=1` 时走它。
      两条并存是刻意的 —— 旧的留着当回退，新的按表走，两边跑的是同一份语料。 */
   if (JNC_RULES()) {
-    const t2 = lowerJncRules(tree, diags, { path, needEntry });
+    /* `find` / `parse` 递进去：import 那一族在**规则化那条路**里也是"把那份文件的顶层条目
+       并进这一个模块"（第六十刀）—— 找法与旧那条路共用同一个闭包，不另写一套。 */
+    const t2 = lowerJncRules(tree, diags, {
+      path, needEntry, find, parse: (p) => jncParse(tb, p, diags),
+    });
     const w2 = diags.warnings();
     if (w2 !== '') stderr(w2);
     diags.throwIfErrors();
