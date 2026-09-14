@@ -126,4 +126,33 @@ export const SHAPE_ACCESS = {
       return sx.pstore(x, `(bin "|" (bin "^" ${cell} (bin "&" ${cell} (int ${at}))) ${put})`);
     },
   },
+  /**
+   * **要反字节序的字段**（第一百二十六刀，118-bigendian.jnc）：`bigendian uint16_t m_port;`
+   * 在内存里就是一格普通整数，只是**读出来与写进去各要把字节倒一遍**。所以它是第六种形状：
+   * 位置的文字与普通字段一模一样（`(pfield … m_port)`），读写各多裹一层 `swap`。
+   *
+   *   16 位：`(bin "|" (bin "<<" (bin "&" x (int 255)) (int 8)) (bin "&" (bin ">>" x (int 8)) (int 255)))`
+   *   32 位：四段同理（第 i 个字节挪到第 字节数-1-i 个位置上）
+   *
+   * 倒字节这件事**是自逆的**（倒两遍还是原样），所以读写用的是同一格 `swap` —— 一处家。
+   * 倒完按声明那格类型的宽度收口（无符号 `trunc`、有符号 `sext`），与旧降级的真输出同。
+   */
+  be: {
+    read: (x, a = { w: 16, u: true }) => beSwap(sx.pload(x), a),
+    write: (x, v, a = { w: 16, u: true }) => sx.pstore(x, beSwap(v, a)),
+  },
 };
+
+/** 把 `code` 那一格整数的字节倒一遍（`w` 位、按声明的符号性收口）。 */
+function beSwap(code, a) {
+  const bytes = Math.max(1, Math.floor((a.w ?? 16) / 8));
+  let acc = null;
+  for (let i = 0; i < bytes; i += 1) {
+    const down = i === 0 ? code : `(bin ">>" ${code} (int ${i * 8}))`;
+    const masked = `(bin "&" ${down} (int 255))`;
+    const up = bytes - 1 - i;
+    const term = up === 0 ? masked : `(bin "<<" ${masked} (int ${up * 8}))`;
+    acc = acc === null ? term : `(bin "|" ${acc} ${term})`;
+  }
+  return `(${a.u === true ? 'trunc' : 'sext'} (int ${a.w ?? 16}) ${acc})`;
+}

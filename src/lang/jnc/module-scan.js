@@ -307,6 +307,8 @@ export function scanAggs(tree, env, ovl = new Map()) {
           agg: a,
         });
         const fs = new Map();
+        /* 要反字节序那几格（`bigendian`）：名字 → 一条路 + "要反"。与位域同一张表。 */
+        const be0 = new Map();
         for (const m of a.members) {
           if (m.name === null || m.type === null) continue;
           if (m.shape === 'bitfield' || m.shape === 'prop' || m.shape === 'event') continue;
@@ -325,6 +327,10 @@ export function scanAggs(tree, env, ovl = new Map()) {
             || allInChain(named(m.at)?.dcls, 'dcls-add', 'dcls').some((d) => headOf(d) === 'init')) {
             fieldInits.add(emitName);
           }
+          /* **bigendian 的字段读写各要一次字节序反转**（第一百二十六刀，118-bigendian.jnc）：
+             它是一格真字段，可当普通字段收进这张表就把那一步**静静地**丢了。所以它进的是
+             下面那张"路径"表（`be`：一条路 + "要反字节序"），读写两侧照它算。 */
+          if ((m.type.mods ?? []).includes('bigendian')) { be0.set(m.name, { steps: [m.name], type: m.type, be: true }); continue; }
           fs.set(m.name, m.type);
         }
         fields.set(emitName, fs);
@@ -354,9 +360,13 @@ export function scanAggs(tree, env, ovl = new Map()) {
                `alias m_alias = m_pad;` 又被塞回字段表里，报的是"字段 'm_alias'：认不出基类型
                'no-type'"（199-aliasfield.jnc / 95-aliaspath.jnc 量的正是这一格）。 */
             if (m.storage.includes('alias')) continue;
-            /* **bigendian 的字段不收**（第一百二十六刀）：它是一格真字段，可读写各要一次
-               字节序反转 —— 当普通字段收进来就把那一步**静静地**丢了（118-bigendian.jnc）。 */
-            if ((m.type.mods ?? []).includes('bigendian')) continue;
+            /* **bigendian 的字段**（第一百二十六刀）：它是一格真字段（匿名 union 摊平之后
+               名字直接长在外面那格结构体上），可读写各要一次字节序反转 —— 所以进的是路径表
+               那一格 `be`，当普通字段收进来就把那一步静静地丢了（118-bigendian.jnc 的 `Ov`）。 */
+            if ((m.type.mods ?? []).includes('bigendian')) {
+              if (!be0.has(m.name)) be0.set(m.name, { steps: [m.name], type: m.type, be: true });
+              continue;
+            }
             fs.set(m.name, m.type);
           }
         };
@@ -386,9 +396,10 @@ export function scanAggs(tree, env, ovl = new Map()) {
             for (const f of s.members) {
               if (f.name === null || f.type === null) continue;
               if (f.shape !== 'data' && f.shape !== 'array' && f.shape !== 'fnptr') continue;
-              if ((f.type.mods ?? []).includes('bigendian')) continue;   // 那一族要反字节序，不收
               if (fs.has(f.name) || ps0.has(f.name)) continue;           // 撞名的不猜（先来的胜）
-              ps0.set(f.name, { steps: [slot, f.name], type: f.type });
+              /* 要反字节序那一格也是一条路 —— 只是路的尽头还要反一次（第一百二十六刀）。 */
+              const be = (f.type.mods ?? []).includes('bigendian');
+              ps0.set(f.name, { steps: [slot, f.name], type: f.type, ...(be ? { be: true } : {}) });
             }
           }
         };
@@ -400,6 +411,8 @@ export function scanAggs(tree, env, ovl = new Map()) {
           if (nameText(n2.name) !== null) continue;                  // 带名字的 union 不摊
           pathsIn(n2);
         }
+        /* 要反字节序那几格（上头两遍攒的）与字段路径进**同一张**表：读写那一处一问就查得着。 */
+        for (const [k, v] of be0) if (!ps0.has(k)) ps0.set(k, v);
         /**
          * **类里的字段路径别名**（`alias m_head = m_list.m_head;`，95-aliaspath.jnc /
          * 199-aliasfield.jnc）：右边是**一条路**、不是一个名字 —— 与匿名 struct 那一族落成的

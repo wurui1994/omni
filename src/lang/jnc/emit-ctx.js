@@ -849,6 +849,16 @@ export function makeFnEnv(o) {
             type: { k: 'int', w: p.cnt, u },
           };
         }
+        /**
+         * **要反字节序那一格**（第一百二十六刀）：位置的文字与普通字段一模一样，只是读出来
+         * 与写进去各要把字节倒一遍（`SHAPE_ACCESS.be`）—— 当普通字段接走就把那一步静静地丢了。
+         */
+        if (p.be === true) {
+          if (typ.k !== 'int') { acct(`bigendian 字段 '${fname}' 不是整数（${typ.k}）`); return null; }
+          return {
+            shape: 'be', code, args: { w: typ.w ?? 32, u: typ.u === true }, type: typ,
+          };
+        }
         return { shape: memberShape(typ.k === 'struct', typ.k === 'arr'), code, type: typ };
       }
       /* 普通字段里查不着 —— 静态字段与属性那几族在这一问里（`MEMBER_ORDER` 第 4 条）。 */
