@@ -854,7 +854,10 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     const r = resolveType({ ...src, shape: 'data' }, env);
     if (r.type === null) { acct(`属性 '${emitName}' 生成的取值器：${r.why}`); return false; }
     const ty = r.type;
-    if (!['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr'].includes(ty.k)) {
+    /* 类那一格**读法与指针一样**（那一格里放的就是对象那段内存的地址）—— 所以它照收
+       （68-propptr.jnc 的 `Icon* autoget property m_icon`）。聚合体/数组那两格不收：
+       那一格里放的**是**那段内存，读出来是地址、写要抄一份 —— 生成不出"一句 var"。 */
+    if (!['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr', 'class'].includes(ty.k)) {
       acct(`属性 '${emitName}' 生成的取值器落在 ${ty.k} 上（读法不是一句 var）还没接`); return false;
     }
     const storage = `${emitName}$m_value`;
