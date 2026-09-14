@@ -382,3 +382,19 @@ export function catchBlockLines(flag, guarded, handler, pad) {
  * 那儿也把落点关掉。
  */
 export const EC_HOIST = new Set(['var-decl', 'var-decl-curly', 'expr-stmt', 'return', 'if', 'switch', 'assert']);
+
+/**
+ * **赋值语句的分派次序**（lower.js:11339-11365 起那一段）。次序就是规则，第一格命中就是它：
+ *
+ *   1. **右边是一对花括号**：这不是一次赋值，而是**按格子写进去** —— 空项那几格**保留原值**
+ *      （第十四刀；84_CurlyInitializers.jnc:61 那行之后 `m_x` 还是 10）。所以只有 `=` 能这么写，
+ *      复合赋值（`+=` 那些）的右边不许是花括号；
+ *   2. **左边是属性**：那不是往一格内存里写，是**调存值器**（第六十八刀）。这一问要排在
+ *      "求左值"**之前** —— 属性没有"可写的那一格"，求左值会去查变量、查不着就报未声明；
+ *   3. 别的：求左值再写（复合赋值先读一遍、算完再写回）。
+ */
+export const ASSIGN_ORDER = [
+  { name: 'curly', why: '右边是一对花括号 → 按格子写，空项保留原值（只有 `=` 能这么写）' },
+  { name: 'prop-set', why: '左边是属性 → 调存值器（要排在求左值之前）' },
+  { name: 'lvalue', why: '别的：求左值再写' },
+];
