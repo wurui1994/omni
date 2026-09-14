@@ -199,3 +199,54 @@ export function nameLoad(dname, t, c) {
   if (c.lifted === true) return `(pload (var ${c.cellName}))`;
   return `(var ${dname})`;
 }
+
+/**
+ * **真值化**（lower.js:12494-12538 的 `truthy`）。jancy 把整数、实数、指针、枚举、字符串与
+ * 函数值都当条件用（C 的规矩，它没改）；方言的条件只收 bool，所以这一层把那次隐式转换
+ * **显式写出来**。次序就是规则：
+ *   1. 本来就是 bool → 原样；
+ *   2. **写了 `operator bool` 的类/结构体调那个算符** —— 要排在类那一支之前：那一支是
+ *      "跟零比"（一次空检查），而写了转换算符的那一格上用户问的是那个算符。排错了是静默的错；
+ *   3. 整数 / 实数 → 跟零比；
+ *   4. 指针与类引用 → 一次空检查（`Cast_Bool` 里 ClassPtr 与 DataPtr 同一支）；
+ *   5. 枚举 → 跟零比（`case TypeKind_Enum` 走 `m_fromZeroCmp`）；
+ *   6. **字符串问的是"长度不为零"**（第一百四十六刀）：`Cast_BoolFromString` 取的是那格
+ *      结构体的第 3 个字段 = 长度，所以空串是**假**，不是"m_p 是不是空"；
+ *   7. 函数值 → 跟"空的那一格"比（取胖指针第 0 个字段，与闭包那一半无关）。
+ * 都不是就答 null —— 调用方报"这一格不能当条件用"。
+ */
+export function truthyCode(code, t, c) {
+  if (c.isBool(t)) return code;
+  if (c.isClass(t) || c.isStruct(t)) {
+    const ob = c.opBool?.(t);
+    if (ob !== null && ob !== undefined) return `(call ${ob} ${code})`;
+  }
+  if (c.isInt(t)) return `(bin "!=" ${code} (int 0))`;
+  if (c.isReal(t)) return `(bin "!=" ${code} (real 0.0))`;
+  if (c.isPtr(t) || c.isClass(t)) return `(un "!" (pisnull ${code}))`;
+  if (c.isEnum(t)) return `(bin "!=" ${code} (int 0))`;
+  if (t !== null && t !== undefined && t.k === 'string') return `(bin "!=" (slen ${code}) (int 0))`;
+  if (c.isFn(t)) return c.tyText === undefined ? null : `(bin "!=" ${code} (null ${c.tyText(t)}))`;
+  return null;
+}
+
+/**
+ * **一格类型的零值**（lower.js:1075-1089 的 `zeroText`）。没写初值的局部量、模块级那一格、
+ * 花括号初值里没填到的那几格，用的都是它 —— jancy 保证"任何用户代码碰到之前每一格都是零"
+ * （type_ptr_data.rst）。
+ *
+ * 结构体与数组**不在这张表里**：那两族各是一段自己的 `(pnew … (int 1))` 内存（第十二 / 十刀），
+ * 零由那段内存本身给，不是一格值。所以这儿答 null 就是"该走另一条路"，不是"不知道"。
+ * 类那一格的零值是**空引用**（第五十二刀）：`C* p;` 出来是 null，要 `new C` 才有对象。
+ */
+export function zeroText(t, c = {}) {
+  if (t === null || t === undefined) return null;
+  if (t.k === 'int' || t.k === 'enum') return '(int 0)';
+  if (t.k === 'real') return '(real 0.0)';
+  if (t.k === 'bool') return '(bool false)';
+  if (t.k === 'string') return '(str "")';
+  if (t.k === 'ptr' || t.k === 'tptr') return c.tyText === undefined ? null : `(pnull ${c.tyText(t)})`;
+  if (t.k === 'class') return c.clsRoot === undefined ? null : `(pnull (ptr ${c.clsRoot(t.name)}))`;
+  if (t.k === 'fnptr') return c.tyText === undefined ? null : `(null ${c.tyText(t)})`;
+  return null;
+}

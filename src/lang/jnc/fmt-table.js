@@ -10,6 +10,8 @@
 //   - `'str'` ：一个都不切（换行就是串里的一个字符），整条拼成**一格字符串的代码**。
 //     格式化字面量 `$"…"` 走这条 —— 它产出的是一格值（literals.rst:62），不是一次输出。
 
+import { intConvCode } from './int-table.js';
+
 /** 段里那几块（字符串常量与 `(tostr …)`）拼起来：**左结合**的 `(bin "+" …)`。 */
 export function joinPieces(pieces) {
   if (pieces.length === 0) return null;
@@ -57,6 +59,46 @@ export function readSpec(fmt, at) {
   return {
     flags, width, prec, conv, end: j,
   };
+}
+
+/**
+ * **一格转换说明发出来的那一块**（lower.js:11975-12080 那张表）。`v` 是 `{ code, type }`，
+ * `c` 给谓词与整数转换（`isInt` / `isBool` / `isReal` / `intConv(code, from, to)`）。
+ * 认不出的答 `null` —— 调用方记账。**宽度与精度那一层不在这儿**（padTo 是另一张表）。
+ *
+ * 几处不是"随手选的写法"：
+ *   - `%c` 是一个码位 → 一个字符（`(chr E)`）；
+ *   - `%d` 碰上 bool 要 `sel` 成 1 / 0，**不能** `(tostr b)`（那印 true / false）；
+ *   - `%d` 碰上**无符号**那一格是"按有符号读"（第三十三刀）：`printf("%d", (unsigned)…)`
+ *     在 C 里印负数，所以先转到同宽的有符号格；
+ *   - `%x/%X/%o/%u` 把实参当 **unsigned** 读，位数是**默认实参提升之后**那一格 ——
+ *     `printf("%x", (char)-56)` 印 `ffffffc8` 而不是 `c8`；
+ *   - `%f` 是 C 的 `%.6f`（默认精度 6，第八刀）—— `(tostr …)` 是 `%.6g`，两者不一样；
+ *   - `%s` 碰上**字符串本来就是一格字符串**，不套 `tostr`（第一百四十六刀那一族）。
+ */
+export function specPiece(spec, v, c) {
+  const promo = (w) => ((w ?? 32) < 32 ? 32 : (w ?? 32));
+  const t = v.type;
+  const conv = spec.conv;
+  if (conv === 'c') return c.isInt(t) ? `(chr ${v.code})` : null;
+  if (conv === 'd' || conv === 'i') {
+    if (c.isBool(t)) return `(tostr (sel ${v.code} (int 1) (int 0)))`;
+    if (!c.isInt(t)) return null;
+    return `(tostr ${intConvCode(v.code, t, { k: 'int', w: promo(t.w), u: false })})`;
+  }
+  if (conv === 'x' || conv === 'X' || conv === 'o' || conv === 'u') {
+    let code = null;
+    let w = 32;
+    if (c.isBool(t)) code = `(sel ${v.code} (int 1) (int 0))`;
+    else if (c.isInt(t)) { code = v.code; w = promo(t.w); } else return null;
+    if (w < 64) code = `(bin "&" ${code} (int ${(1n << BigInt(w)) - 1n}))`;
+    const base = conv === 'o' ? 8 : (conv === 'u' ? 10 : 16);
+    const piece = `(sbase ${code} (int ${base}))`;
+    return conv === 'X' ? `(supper ${piece})` : piece;
+  }
+  if (conv === 'f') return c.isReal(t) ? `(sfix ${v.code} (int 6))` : null;
+  if (conv === 's') return t !== null && t !== undefined && t.k === 'string' ? v.code : `(tostr ${v.code})`;
+  return null;
 }
 
 /**

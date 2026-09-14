@@ -11,8 +11,9 @@
 
 import { headOf, named } from './adapt.js';
 import {
-  CONV_CHAIN, NULL_BY_WANT, intLitRadix, isRealLit, intLitKind,
+  CONV_CHAIN, NULL_BY_WANT, intLitRadix, isRealLit, intLitKind, truthyCode,
 } from './expr-table.js';
+import { intBinary, intUnary, intConvCode } from './int-table.js';
 
 /** 一格表达式 → `{ code, type }`（过转换链）。拼不出来答 null。 */
 export function emitExpr(n, want, ctx) {
@@ -28,16 +29,13 @@ export function emitExpr(n, want, ctx) {
        命中一条就够 —— 与旧降级那串 `if` 一一对应（那儿也是退化在最前、别的顺次问）。 */
     if (rule.name !== 'array-decay') break;
   }
-  /* **回卷发生在"落进一格"的时候**，不是在算符上（尺子当场量出来的：`return x + y` 回卷了，
-     可 `n % 2 == 0` 里那个 `%` 没有 —— 前者要落回 32 位的返回类型，后者只是比较的操作数）。
-     所以这一句挂在**要一个具体类型**的这一层：`want` 是窄整数时掩一次。 */
-  /* 落进一格：`wide` 的那一格在这儿掩（`want` 说不出类型时就按它自己的位宽掩）。 */
-  if (cur.wide === true) {
-    const w = ctx.wrap?.(cur.code, want ?? cur.type, cur.type);
-    return { code: w ?? cur.code, type: cur.type };
+  /* **落进一格**只做"整数转到那一格"这一件事（`intConv`：同宽同符号一个字都不发）。
+     回卷**不在这儿** —— 它发生在算子那一处（`intBinary` / `intUnary`）。先前这一层把
+     "掩一次"挂在这里（`wide`），于是 `f(x)` 与 `return x` 多掩一圈、`x / 2` 少掩一圈。 */
+  if (ctx.isInt?.(want) === true && ctx.isInt?.(cur.type) === true) {
+    return { code: intConvCode(cur.code, cur.type, want), type: want };
   }
-  const wrapped = ctx.wrap?.(cur.code, want, cur.type);
-  return wrapped === undefined || wrapped === null ? cur : { code: wrapped, type: cur.type };
+  return cur;
 }
 
 /** 按节点头降（不过转换链）。 */
@@ -87,10 +85,11 @@ export function emitExpr0(n, want, ctx) {
   /* **三目**：方言里就是 `(sel 条件 真 假)`。两支都按 `want` 降（于是回卷、装箱那几条各自落位）。
      两支是**惰性**位置 —— errorcode 的落点在那儿要关掉（见 `EC_HOIST` 那条注）。 */
   if (h === 'cond') {
-    const c = ctx.condOf?.(nm.cond) ?? ctx.expr?.(nm.cond);
+    const c = ctx.cond?.(nm.cond) ?? null;
+    if (c === null) return null;
     const a2 = emitExpr(nm.then ?? nm.a, want, ctx);
     const b2 = emitExpr(nm.else ?? nm.b, want, ctx);
-    if (c === null || c === undefined || a2 === null || b2 === null) return null;
+    if (a2 === null || b2 === null) return null;
     return { code: `(sel ${c} ${a2.code} ${b2.code})`, type: a2.type };
   }
 
@@ -101,16 +100,41 @@ export function emitExpr0(n, want, ctx) {
     return r;
   }
 
-  /* 一元与二元：方言里就是 `(un "op" a)` 与 `(bin "op" a b)`。两边要什么由调用方定型
-     （`ctx.wantOf` 答"这一格算符两边该要什么"），定不出来就照原样降。 */
+  /* 一元与二元：方言里就是 `(un "op" a)` 与 `(bin "op" a b)`。整数那一族的三步（提升、
+     两边转到同一格、算完掩）由 `int-table.js` 那两格纯函数办 —— 那是规则，不是这层的活。 */
   if (h === 'unary') {
+    const op = String(nm.op?.value ?? '');
+    /* `!x` 先**真值化**再取反（`!p` / `!n` 在 jancy 与 C 里都成立）。 */
+    if (op === '!') {
+      const a0 = emitExpr(nm.a, ctx.T?.bool ?? null, ctx);
+      if (a0 === null) return null;
+      const t0 = truthyCode(a0.code, a0.type, ctx);
+      if (t0 === null) { ctx.acct("'!' 的操作数当条件用还拼不出来"); return null; }
+      return { code: `(un "!" ${t0})`, type: ctx.T.bool };
+    }
     const a = emitExpr(nm.a, ctx.wantOf?.(n, 'a') ?? null, ctx);
     if (a === null) return null;
-    const op = String(nm.op?.value ?? '');
-    const t = ctx.typeOfUnary?.(op, a.type) ?? a.type;
-    return { code: `(un ${JSON.stringify(op)} ${a.code})`, type: t };
+    /* 枚举落到基整数上再算（第四十七刀）—— `!` 不走这儿（上面那一支管）。 */
+    const a1 = ctx.isEnum?.(a.type) === true && a.type.base !== undefined
+      ? { code: a.code, type: a.type.base } : a;
+    if (ctx.isInt?.(a1.type) === true) {
+      const r = intUnary(op, a1);
+      if (r === null) { ctx.acct(`一元 '${op}' 还没接`); return null; }
+      return r;
+    }
+    const t = ctx.typeOfUnary?.(op, a1.type) ?? a1.type;
+    return { code: `(un ${JSON.stringify(op)} ${a1.code})`, type: t };
   }
   if (h === 'binary') {
+    const op = String(nm.op?.value ?? '');
+    const CMP = ['==', '!=', '<', '<=', '>', '>='];
+    /* **`&&` / `||`**：两边各自真值化，结果是 bool（右边惰性 —— 方言的 `bin` 本来就是惰性节点）。 */
+    if (op === '&&' || op === '||') {
+      const c1 = ctx.cond?.(nm.a);
+      const c2 = ctx.cond?.(nm.b);
+      if (c1 === null || c1 === undefined || c2 === null || c2 === undefined) return null;
+      return { code: `(bin ${JSON.stringify(op)} ${c1} ${c2})`, type: ctx.T.bool };
+    }
     /* **`x == null` 里 `null` 的类型从另一边来**：`null` 自己没有类型（见 `NULL_BY_WANT`），
        所以两边有一边是它时，先降另一边、拿那一边的类型当 `want`。 */
     const aNull = headOf(nm.a) === 'null';
@@ -130,16 +154,41 @@ export function emitExpr0(n, want, ctx) {
       b = emitExpr(nm.b, ctx.wantOf?.(n, 'b') ?? null, ctx);
     }
     if (a === null || b === null) return null;
-    const op = String(nm.op?.value ?? '');
-    const t = ctx.typeOfBinary?.(op, a.type, b.type) ?? a.type;
-    /* **"还没掩的那一格"**（`wide`）：会溢出的算符（`+ - * <<`）出来的值超出了那一格的位宽，
-       到了**要它落进一格**的地方才掩 —— 落进返回类型、落进一格变量、或**再喂给一次算术**
-       （算术要求两边同型）。缩小的那几个（`/ % & | ^ >>`）与比较不产生 wide：
-       `n % 2 == 0` 里那个 `%` 一个字都不掩，而 `a + b + c` 里内层那个 `a+b` 掩一次。 */
-    const ac = a.wide === true ? (ctx.wrap?.(a.code, a.type, a.type) ?? a.code) : a.code;
-    const bc = b.wide === true ? (ctx.wrap?.(b.code, b.type, b.type) ?? b.code) : b.code;
-    const code = `(bin ${JSON.stringify(ctx.opOf?.(op, t) ?? op)} ${ac} ${bc})`;
-    return { code, type: t, wide: ctx.overflows?.(op) === true };
+    const cmp = CMP.includes(op);
+    /* 枚举与整数混算：先落到基整数上（枚举 → 整数是隐式的）。两个同型枚举比就地比。 */
+    let x = a;
+    let y = b;
+    if (ctx.isEnum?.(x.type) === true || ctx.isEnum?.(y.type) === true) {
+      if (ctx.isEnum(x.type) && ctx.isEnum(y.type) && x.type.name === y.type.name && cmp) {
+        return { code: `(bin ${JSON.stringify(op)} ${x.code} ${y.code})`, type: ctx.T.bool };
+      }
+      if (ctx.isEnum(x.type) && x.type.base !== undefined) x = { code: x.code, type: x.type.base };
+      if (ctx.isEnum(y.type) && y.type.base !== undefined) y = { code: y.code, type: y.type.base };
+    }
+    /* **bool 参与整数运算**（第三十七刀）：提升表里 bool 落到 i32，所以 `(a > 0) + 1`
+       是 int 上的加法。两个 bool 比相等是例外（方言的 bool 比较本来就精确）。 */
+    const bothBoolEq = ctx.isBool?.(x.type) === true && ctx.isBool?.(y.type) === true
+      && (op === '==' || op === '!=');
+    if (!bothBoolEq) {
+      if (ctx.isBool?.(x.type) === true && (ctx.isInt?.(y.type) === true || ctx.isBool?.(y.type) === true)) {
+        x = { code: `(sel ${x.code} (int 1) (int 0))`, type: { k: 'int', w: 32, u: false } };
+      }
+      if (ctx.isBool?.(y.type) === true && ctx.isInt?.(x.type) === true) {
+        y = { code: `(sel ${y.code} (int 1) (int 0))`, type: { k: 'int', w: 32, u: false } };
+      }
+    }
+    if (ctx.isInt?.(x.type) === true && ctx.isInt?.(y.type) === true) {
+      const r = intBinary(op, x, y, cmp);
+      return { code: r.code, type: cmp ? ctx.T.bool : r.type };
+    }
+    /* 一边整数一边实数：加宽整数那一边。 */
+    if (ctx.isInt?.(x.type) === true && ctx.isReal?.(y.type) === true) {
+      x = { code: ctx.realOf(x.code, x.type), type: y.type };
+    } else if (ctx.isReal?.(x.type) === true && ctx.isInt?.(y.type) === true) {
+      y = { code: ctx.realOf(y.code, y.type), type: x.type };
+    }
+    const t = ctx.typeOfBinary?.(op, x.type, y.type) ?? x.type;
+    return { code: `(bin ${JSON.stringify(op)} ${x.code} ${y.code})`, type: t };
   }
 
   /* 取字段与下标：地址那一层由调用方给（`ctx.fieldOf` / `ctx.elemOf`）—— 那两格要知道

@@ -54,9 +54,9 @@ export function emitStmt(n, ctx) {
 
   if (h === 'if') {
     const c = ctx.cond(nm.cond);
-    const t = ctx.block(nm.then, ctx.ind + 2);
+    const t = ctx.body(nm.then, ctx.ind + 2);
     if (c === null || t === null) return null;
-    const e = nm.else === undefined || nm.else === null ? null : ctx.block(nm.else, ctx.ind + 2);
+    const e = nm.else === undefined || nm.else === null ? null : ctx.body(nm.else, ctx.ind + 2);
     return ifLines(c, t, e, pad);
   }
 
@@ -64,7 +64,7 @@ export function emitStmt(n, ctx) {
     const c = ctx.cond(nm.cond);
     if (c === null) return null;
     ctx.loops.push({ kind: 'loop', step: false });
-    const b = ctx.block(nm.body, ctx.ind + 2);
+    const b = ctx.body(nm.body, ctx.ind + 2);
     ctx.loops.pop();
     return b === null ? null : whileLines(c, b, pad);
   }
@@ -72,7 +72,7 @@ export function emitStmt(n, ctx) {
   if (h === 'do') {
     const flag = ctx.tmp('$do');
     ctx.loops.push({ kind: 'loop', step: false });
-    const b = ctx.block(nm.body, ctx.ind + 4);
+    const b = ctx.body(nm.body, ctx.ind + 4);
     const c = ctx.cond(nm.cond);
     ctx.loops.pop();
     return b === null || c === null ? null : doWhileLines(flag, c, b, pad);

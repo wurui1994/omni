@@ -54,3 +54,87 @@ export function uOp(op, w, u) {
 export function realOf(code, w, u) {
   return `(${u === true && w >= 64 ? 'torealu' : 'toreal'} ${code})`;
 }
+
+/* ─── 常用算术转换与"哪几个算子会溢出"（lower.js:753-775 / 14440-14459）───────────
+   **回卷发生在算子那一处**，不是"落进一格"的时候 —— 尺子上一次量清楚的：
+     `x / 2`（无符号）出来是 `(bin "&" (bin "/" …) (int 4294967295))`，而
+     `f(x)` 里那个 `x` 一个字都不掩、`return x` 也不掩。
+   先前这一层记成"落进一格才掩"（`wide`），于是 `/` 少掩一次、传参与返回多掩一次
+   —— 十来格函数体全卡在这上面。三条规则各归各位：
+     1. **提升**：窄于 32 位的先提到 i32（`arithType`）；
+     2. **两边转到同一格**（`commonInt`）再算，转的那一步是 `intConvCode`；
+     3. **`+ - * / <<` 算完就掩**（`OVERFLOWS`）；`% & | ^ >>` 与比较一个字都不发。 */
+
+/** 整型提升：窄于 32 位的提到 i32（`arith`）。 */
+export function arithType(t) {
+  if (t === null || t === undefined || t.k !== 'int') return t;
+  return (t.w ?? 32) < 32 ? { ...t, w: 32, u: false } : t;
+}
+
+/**
+ * 两格整数一起算时结果是哪一格。jancy 取 **TypeKind 大的那个**再过一遍提升那张表
+ * （`jnc_ct_UnOp_Arithmetic.h:38`），而 TypeKind 的次序正好是"先比位宽、同宽时无符号大"。
+ */
+export function commonInt(a, b) {
+  const idx = (t) => (t.w ?? 32) * 2 + (t.u === true ? 1 : 0);
+  return arithType(idx(a) >= idx(b) ? a : b);
+}
+
+/**
+ * **一格整数转到另一格**（`intConv`）。四种情形只有最后一种发字：
+ *   同宽同符号 → 原样；加宽到有符号 → 原样（规范形在更宽的格里是同一个数）；
+ *   从无符号加宽 → 原样；**别的（变窄或换符号性）→ 掩到目标那一格**。
+ */
+export function intConvCode(code, from, to) {
+  if (from === null || from === undefined || to === null || to === undefined) return code;
+  const fw = from.w ?? 32;
+  const tw = to.w ?? 32;
+  if (fw === tw && (from.u === true) === (to.u === true)) return code;
+  if (tw > fw && to.u !== true) return code;
+  if (tw > fw && from.u === true) return code;
+  return wrapTo(code, tw, to.u === true);
+}
+
+/** **会溢出的那几个**（算完就掩）。`%  & | ^ >>` 在规范形上天然还在范围里。 */
+export const OVERFLOWS = new Set(['+', '-', '*', '/', '<<']);
+
+/**
+ * **两边都是整数的那一格二元**（lower.js:14440-14459）。三步：
+ *   1. 结果那一格：移位**只看左边**（右边不参与常用算术转换，C 的规矩），别的取 `commonInt`；
+ *   2. 两边**真的转**过去（`intConvCode`）—— 有了无符号之后"不转也对"不成立：
+ *      `int i = -1; unsigned u = 1; i < u` 在 C 与 jancy 里都是**假**；
+ *   3. 64 位无符号那一格换 u 版算子；`+ - * / <<` 算完掩一次，比较回 bool（不掩）。
+ */
+export function intBinary(op, a, b, cmp) {
+  const shift = op === '<<' || op === '>>';
+  const rt = shift ? arithType(a.type) : commonInt(a.type, b.type);
+  const x = intConvCode(a.code, a.type, rt);
+  const y = shift ? intConvCode(b.code, b.type, arithType(b.type)) : intConvCode(b.code, b.type, rt);
+  const o = uOp(op, rt.w ?? 32, rt.u === true);
+  const code = `(bin ${JSON.stringify(o)} ${x} ${y})`;
+  if (cmp === true) return { code, type: null };
+  return {
+    code: OVERFLOWS.has(op) ? wrapTo(code, rt.w ?? 32, rt.u === true) : code,
+    type: rt,
+  };
+}
+
+/**
+ * **一元算符上的整数规则**（lower.js:14505-14535）。`+` 是恒等（带提升，一个字不发）；
+ * `-` 按**提升后**那一格回卷（`char c = -128; -c` 是 128，无符号上 `-x` 也是回卷出来的）；
+ * `~` 借 `x ^ -1`（方言的 `un` 只有 `-` 与 `!`）—— 有符号不用掩、无符号要掩。
+ * 认不出的答 null。
+ */
+export function intUnary(op, a) {
+  const rt = arithType(a.type);
+  if (op === '+') return { code: a.code, type: rt };
+  if (op === '-') {
+    return { code: wrapTo(`(un "-" ${a.code})`, rt.w ?? 32, rt.u === true), type: rt };
+  }
+  if (op === '~') {
+    const code = `(bin "^" ${a.code} (int -1))`;
+    return { code: rt.u === true ? wrapTo(code, rt.w ?? 32, true) : code, type: rt };
+  }
+  return null;
+}
+

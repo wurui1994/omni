@@ -11,6 +11,7 @@ import { headOf, named } from './adapt.js';
 import { allInChain, chainOf } from './declare.js';
 import { emitStmt } from './emit-stmt.js';
 import { emitExpr } from './emit-expr.js';
+import { truthyCode } from './expr-table.js';
 import { catchAt, catchBlockLines } from './stmt-table.js';
 
 /**
@@ -31,10 +32,17 @@ export function makeCtx(env) {
     ind: 0,
   };
 
-  /** 一格条件：方言那一侧就是一段文字（`bool` 那一格由调用方定型）。 */
+  /**
+   * 一格条件。方言的条件只收 bool，而 jancy 把整数、实数、指针、枚举、字符串与函数值
+   * 都当条件用 —— 那次隐式转换在这儿**显式写出来**（`truthyCode`，次序就是规则）。
+   * 先前这一层只把值降出来就交上去，于是 `if (s)`（字符串）与 `x ? …` 里那一格都少了这一步。
+   */
   ctx.cond = (node) => {
     const v = emitExpr(node, env.T?.bool ?? null, ctx);
-    return v === null ? null : v.code;
+    if (v === null) return null;
+    const code = truthyCode(v.code, v.type, ctx);
+    if (code === null) { env.acct('这一格当条件用还拼不出来（真值化那一步）'); return null; }
+    return code;
   };
 
   /** 一格表达式 → 文字（要什么类型由调用方给，默认不指定）。 */
@@ -77,6 +85,21 @@ export function makeCtx(env) {
     }
     const code = ctx.expr(node);
     return code === null ? null : [`${pad}(expr ${code})`];
+  };
+
+  /**
+   * **控制语句的体**（`if` / `while` / `do` / `for` 那四格的体）。旧降级的 `body()`
+   * （lower.js:12474-12485）**单条与块都套一圈 `(do …)`** —— 省一处形状判断，也让那一圈
+   * 自带的作用域把体里的声明关住。所以这一层与 `block` 分家：`block` 是"一串语句"
+   * （函数体、switch 的一组），`body` 是"控制语句下面那一格"。
+   *
+   * 先前这两件事共用 `block`，于是 `if (n <= 1) return 1;` 少了那一圈 `(do …)`
+   * —— 尺子上一次量出五格（02-control.jnc 的 `fact`、15-forward.jnc 那两格…）。
+   */
+  ctx.body = (node, ind) => {
+    const pad = ' '.repeat(ind);
+    const inner = ctx.block(node, ind + 2);
+    return inner === null ? null : `${pad}(do\n${inner}\n${pad})`;
   };
 
   /**
@@ -158,7 +181,7 @@ export function makeCtx(env) {
     const oneshot = stepLines.length > 0 && (env.contTargets?.(nm.body) === true);
     ctx.loops.push({ kind: 'loop', step: stepLines.length > 0 });
     if (oneshot) ctx.loops.push({ kind: 'oneshot', step: false });
-    const body = ctx.block(nm.body, ind + (oneshot ? 8 : 4));
+    const body = ctx.body(nm.body, ind + (oneshot ? 8 : 4));
     if (oneshot) ctx.loops.pop();
     ctx.loops.pop();
     if (body === null) return null;
