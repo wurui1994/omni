@@ -8,6 +8,8 @@
 //
 // 次序在这一层就是规则本身：谁遮住谁、谁要排在谁前面，每条都带出处。
 
+import * as sx from '../common/sx.js';
+
 /**
  * **`lvalue` 的分派次序**（lower.js:10977-10994）。
  *   1. `name` → 走名字那一套；
@@ -64,10 +66,16 @@ export function lvalueShape({
   return lifted === true ? 'ptr' : 'var';
 }
 
-/** 那格可写位置在方言里怎么写（形状 → 读/写两段文字的模板）。 */
+/**
+ * 那格可写位置在方言里怎么写（形状 → 读/写两段文字的模板）。
+ *
+ * 每一格都过**契约**（`src/lang/common/sx.js`，ADR-0031 §6）：元数与形状当场校验，
+ * 不再拼字符串 —— "忘了裹 `(expr …)`""`(pfield)` 与 `(pload (pfield))` 混了"这一类错
+ * 在发码那一刻就炸。
+ */
 export const SHAPE_ACCESS = {
-  var: { read: (x) => `(var ${x})`, write: (x, v) => `(set ${x} ${v})` },
-  ptr: { read: (x) => `(pload ${x})`, write: (x, v) => `(pstore ${x} ${v})` },
+  var: { read: (x) => sx.varOf(x), write: (x, v) => sx.set(x, v) },
+  ptr: { read: (x) => sx.pload(x), write: (x, v) => sx.pstore(x, v) },
   /* `agg` 的写不是一句 —— 结构体逐字段、数组逐格抄一份（`copyVal`，第十二刀与第二十一刀）。 */
   agg: { read: (x) => x, write: null },
   /**
@@ -75,6 +83,11 @@ export const SHAPE_ACCESS = {
    * （`prop.rst` 里那对 `get` / `set`）。所以它是第四种形状 —— 混进 `var` 那一格就等于
    * 把"调一次函数"悄悄换成"读一格变量"。写出来的是一整条语句（`(expr (call …))`），
    * 因为方言里调用当语句要裹 `expr`。
+   *
+   * 方言长出"取/存成对的位置"之后这一格就该退役（ADR-0031 §5 的第四条）。
    */
-  prop: { read: (x) => `(call ${x}$get)`, write: (x, v) => `(expr (call ${x}$set ${v}))` },
+  prop: {
+    read: (x) => sx.call(`${x}$get`),
+    write: (x, v) => sx.exprStmt(sx.call(`${x}$set`, [v])),
+  },
 };
