@@ -58,13 +58,20 @@ export function lowerJncRules(tree, diags, opts = {}) {
 
   collectEnumConsts(tree, env);
   const {
-    fields: aggFields, ctors: aggCtors, vars: globals, gEmit, methods,
+    fields: aggFields, ctors: aggCtors, vars: globals, gEmit, methods, fieldInits,
     bindable: gBindable, roots, aggs,
   } = scanAggs(tree, env);
   const fns = scanFns(tree, env);
   const gLifted = addrTaken(tree);
   const clsRoot = (n) => roots.get(n) ?? n;
   const tyc = { clsRoot };
+  /* **动态类型的标签**（第五十七刀）：一格类一个号，**从 1 起**（0 是"这一格没写过"，
+     撞不上任何一个类）。造对象时写死它，虚派发那一段按它分派 —— 两处认的是同一张表。 */
+  const tags = new Map();
+  for (const a of aggs) {
+    if (a.word !== 'class' && a.word !== 'opaque class') continue;
+    if (a.emitName !== null) tags.set(a.emitName, tags.size + 1);
+  }
 
   const decls = [];
   const cells = [];                                    // 模块级那几格量的 pnew
@@ -98,6 +105,8 @@ export function lowerJncRules(tree, diags, opts = {}) {
         gBindable,
         gEmit,
         methods,
+        tags,
+        fieldInits,
         roots,
       });
       modEnv = { e, ctx: makeCtx(e) };
@@ -199,6 +208,8 @@ export function lowerJncRules(tree, diags, opts = {}) {
       aggFields,
       aggCtors,
       methods,
+      tags,
+      fieldInits,
       self: selfInfo,
       ecBox,
       tmpBox,
@@ -225,6 +236,8 @@ export function lowerJncRules(tree, diags, opts = {}) {
     /* 体那一层要的**模块级槽**（`once` 的旗子、`static` 局部量那一格与它的闸门）：
        发在函数**前面** —— 方言那一侧先声明后用。 */
     for (const s of e.slots) decls.push(`  (global ${s.name} ${s.ty})`);
+    /* 抬出去的那几格（造对象那三句）—— 与槽同一条：发在用它的那格函数前面。 */
+    for (const hh of e.helpers) decls.push(hh);
     if (isMain) { mainBody = whole; return; }
     decls.push(`  ${hd.head}\n${whole})`);
   };

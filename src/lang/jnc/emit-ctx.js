@@ -14,7 +14,7 @@ import { readDeclType, readAnonType } from './types.js';
 import { readSpecs } from './specs.js';
 import { resolveType, INT_BITS } from './resolve-type.js';
 import { emitType } from './emit-type.js';
-import { readFormals } from './emit-fn.js';
+import { readFormals, OP_NAMES } from './emit-fn.js';
 import { emitExpr } from './emit-expr.js';
 import { lvalueShape, SHAPE_ACCESS } from './lvalue-table.js';
 import {
@@ -46,7 +46,7 @@ export function makeFnEnv(o) {
     fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
     ecBox = { n: 0 }, tmpBox = { n: 0 }, globals = new Map(), gLifted = new Set(),
     gBindable = new Set(), roots = new Map(), gEmit = new Map(),
-    methods = new Map(), self = null,
+    methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
   } = o;
   let ctxRef = null;
   /* **类那一族在方言里写的是继承链的根**（第五十六刀）—— 发类型时都要带上这一格。 */
@@ -88,6 +88,42 @@ export function makeFnEnv(o) {
   const lifts = new Set();
   /** 体这一层要的模块级槽（`once` 的旗子、`static` 局部量那一格）—— 模块那一层照单发。 */
   const slots = [];
+  /** 体这一层**抬出去的那几格函数**（造对象那三句 —— `new` 是一格表达式，装不下三句）。 */
+  const helpers = [];
+  /**
+   * **造一格类的对象**（第五十二 / 五十七刀）：`(pnew (ptr 根) (int 1))` + 写死 `$tag` +
+   * （有的话）调 construct —— **三句**，而 `new C` / `C c;` 都是一格表达式/一格初值，
+   * 所以照旧降那条路把这三句抬成一个函数。
+   *
+   * 拦住的那几格都明说（绝不悄悄交出一段没构造好的内存）：
+   *   - 有基类的（基类的构造要逐格调，第九十四刀）；
+   *   - 字段写了初值的（那几句要插到 construct 开头，第七十八刀）；
+   *   - construct 要实参的（实参得当helper 的形参传进去 —— 另一刀）。
+   */
+  const newObj = (cls) => {
+    const root = clsRoot(cls);
+    const tag = tags.get(cls);
+    if (tag === undefined) { acct(`'${cls}' 没有动态类型标签（类体没解出来）`); return null; }
+    if (root !== cls) { acct(`造 '${cls}'：它有基类（基类的构造要逐格调）还没接`); return null; }
+    if (fieldInits.has(cls)) { acct(`造 '${cls}'：它的字段写了初值（要合成/插进 construct）还没接`); return null; }
+    const ctor = methods.get(`${cls}$construct`);
+    if (ctor !== undefined && ctor.params.length > 0) {
+      acct(`造 '${cls}'：construct 要 ${ctor.params.length} 个实参（还没接）`); return null;
+    }
+    const ty = `(ptr ${root})`;
+    const fn = `$newo${tmpBox.n}`;
+    tmpBox.n += 1;
+    const lines = [
+      `  (fn ${fn} () ${ty}`,
+      '    (do',
+      `      (let $p ${ty} (pnew ${ty} (int 1)))`,
+      `      (pstore (pfield (var $p) $tag) (int ${tag}))`,
+    ];
+    if (ctor !== undefined) lines.push(`      (expr (call ${cls}$construct (var $p)))`);
+    lines.push('      (ret (var $p))))');
+    helpers.push(lines.join('\n'));
+    return { code: `(call ${fn})`, type: { k: 'class', name: cls } };
+  };
   for (const f of (sf === undefined ? [] : readFormals(sf.node) ?? [])) {
     if (f.name !== null && f.type !== null) names.set(f.name, f.type);
     /**
@@ -405,6 +441,8 @@ export function makeFnEnv(o) {
      * 模块那一层照单发。少这个口子，`once` 发出来的 `jnc$once$0` 谁也没声明过（161-once.jnc）。
      */
     slots,
+    /** 抬出去的那几格函数（造对象那三句）—— 模块那一层照单发。 */
+    helpers,
     newSlot: (prefix, ty) => {
       const nm2 = `${prefix}${tmpBox.n}`;
       tmpBox.n += 1;
@@ -547,11 +585,14 @@ export function makeFnEnv(o) {
             continue;
           }
           /* **一格类的局部量**（`Outer o;`）：jancy 那儿它是**自动造出来的对象**
-             （类变量在作用域里就构造好），不是一条空引用。这一层还没接那一步 ——
-             `zeroText` 给的是 `(pnull …)`，那会**静静地**跑出"指针越界"（195-embctor.jnc）。
-             所以在这儿明说，绝不发那一行。 */
+             （类变量在作用域里就构造好），不是一条空引用 —— 所以走造对象那条路
+             （`newObj`：pnew + 写 `$tag` + 构造）。先前这儿按 `zeroText` 发 `(pnull …)`，
+             跑起来是"指针越界"（195-embctor.jnc 量出来的）。 */
           if (r.type.k === 'class') {
-            acct(`'${t.name}' 是一格类的局部量（要造出对象 + 构造）还没接`); return null;
+            const o2 = newObj(r.type.name);
+            if (o2 === null) return null;
+            out.push(`${pad}(let ${t.name} ${ty} ${o2.code})`);
+            continue;
           }
           const z = zeroText(r.type, { tyText: (x) => emitType(x, 'value', tyc), clsRoot });
 
@@ -860,7 +901,14 @@ export function makeFnEnv(o) {
       const to = ctxRef.typeNameOf(nm2.type);
       if (to === null) return null;
       if (to.k === 'void') { acct('new void'); return null; }
-      if (to.k === 'class') { acct(`new ${to.name}（类那一族要写 $tag + 构造）还没接`); return null; }
+      if (to.k === 'class') {
+        if (headOf(node) === 'new-array') { acct(`不能造类的数组（'${to.name}'）`); return null; }
+        if (nm2.args !== undefined && nm2.args !== null
+          && allInChain(nm2.args, 'args-add', 'args').length > 0) {
+          acct(`new ${to.name}(…) 带构造实参那一族还没接`); return null;
+        }
+        return newObj(to.name);
+      }
       if (to.k === 'struct' && aggCtors.has(to.name)) {
         acct(`new ${to.name}（那一格有 construct，造完还要调它）还没接`); return null;
       }
@@ -917,7 +965,22 @@ export function makeFnEnv(o) {
       }
       return escapeText({ guard: g, loopsLen: (ctxRef.loops ?? []).length, curErr });
     },
+    /**
+     * 这一格算子在那两边的类型上**是不是算符重载**（`operator ==` 那几格，第一百二十二刀）。
+     * 表在 `OP_NAMES`（源码里的算子 → `op$<名字>`），东家从类型上问 —— 答真的话调用方明说
+     * 不收，而不是落到"指针互比"那一支上去比地址。
+     */
+    opFor: (op, a, b) => {
+      const w = OP_NAMES[op];
+      if (w === undefined) return false;
+      for (const ty of [a, b]) {
+        const agg = aggBehind(ty);
+        if (agg !== null && methods.has(`${agg}$op$${w}`)) return true;
+      }
+      return false;
+    },
     /* 驱动把它那一格 `ctx` 交回来（`expr` / `ecOut` / `guards` 都在它上头）。 */
+
     onCtx: (c2) => { ctxRef = c2; },
   };
 }

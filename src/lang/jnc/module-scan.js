@@ -103,6 +103,7 @@ export function scanAggs(tree, env) {
   const vars = new Map();                                            // 模块级那几格量（名字 → 声明类型）
   const gEmit = new Map();                                           // 名字 → 方言那一侧的名字（带命名空间前缀）
   const methods = new Map();                                         // `东家$方法名` → 签名 + 那个节点
+  const fieldInits = new Set();                                      // 里头有"写了初值的字段"的那几格
   const bindable = new Set();                                        // 里头带取/存两格的那几个
   const aggs = [];                                                   // 收齐了好算继承链的根
   const scan = (n, owner, inAgg) => {
@@ -136,6 +137,14 @@ export function scanAggs(tree, env) {
           if (m.shape === 'typedef' || m.shape === 'nested-type' || m.shape === 'friend') continue;
           if (m.shape === 'fn') { if (m.name === 'construct') ctors.add(emitName); continue; }
           if (m.storage.includes('static')) continue;                // 不进对象（落成模块级那一格）
+          /* **字段写了初值**（`int m_x = 5;` / `Point m_p = { 1, 2 };`）：jancy 把这几句插到
+             `construct` 开头，没写 `construct` 的还要**合成**一格（第七十八刀）。这一层还没接
+             那一步，所以先记下"这一格有初值"—— 造对象的那一处要靠它明说不收，不然交出去的是
+             一段全零的内存。 */
+          if (headOf(m.at) === 'var-decl-curly'
+            || allInChain(named(m.at)?.dcls, 'dcls-add', 'dcls').some((d) => headOf(d) === 'init')) {
+            fieldInits.add(emitName);
+          }
           fs.set(m.name, m.type);
         }
         fields.set(emitName, fs);
@@ -239,6 +248,6 @@ export function scanAggs(tree, env) {
     if (a.emitName !== null && r.emitName !== undefined) roots.set(a.emitName, r.emitName);
   }
   return {
-    fields, ctors, vars, gEmit, methods, bindable, roots, aggs,
+    fields, ctors, vars, gEmit, methods, fieldInits, bindable, roots, aggs,
   };
 }

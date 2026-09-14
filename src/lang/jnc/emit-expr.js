@@ -187,6 +187,18 @@ export function emitExpr0(n, want, ctx) {
         y = { code: `(sel ${y.code} (int 1) (int 0))`, type: { k: 'int', w: 32, u: false } };
       }
     }
+    /**
+     * **算符重载那一族**（第一百二十二 / 一百三十二刀）：结构体与类上写了 `operator ==` /
+     * `operator !=` 那几格时，`x == y` 该落成 `(call S$op$eq …)`。这一层还没接 —— 落到底下
+     * "指针互比"那一支上会**静静地比地址**（132-opcmp.jnc 印出来是 `0 1` 而不是 `1 0`）。
+     * 所以在这儿明说。结构体上的二元算子同理：那一格没有重载就压根不该收。
+     */
+    if (ctx.opFor?.(op, x.type, y.type) === true) {
+      ctx.acct(`'${op}' 落在 ${x.type?.k ?? '?'} 上是算符重载（还没接）`); return null;
+    }
+    if (ctx.isStruct?.(x.type) === true || ctx.isStruct?.(y.type) === true) {
+      ctx.acct(`'${op}' 的一边是结构体（算符重载那一族）还没接`); return null;
+    }
     /* **指针与类引用那一族**（跟 `null` 比走 `pisnull`、互比走 `peq`、算术走 `padd`/`psub`）：
        要排在整数那一支之前 —— `p + 1` 是指针算术，不是加法。 */
     if (ctx.isPtr?.(x.type) === true || ctx.isPtr?.(y.type) === true
