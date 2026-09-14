@@ -22,7 +22,7 @@ import { emitType } from './emit-type.js';
 import { collectEnumConsts } from './const-eval.js';
 import { scanAggs, scanFns, memberInit, sigOf } from './module-scan.js';
 import { readBodyMembers } from './agg.js';
-import { structLine } from './emit-agg.js';
+import { structLine, hasStatements as hasStmts } from './emit-agg.js';
 import {
   globalLines, addrTaken, liftable, liftedType, arrayFromCurly, staticCtorFlag,
 } from './emit-global.js';
@@ -456,7 +456,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    * 用户的体之前，jnc_ct_Parser.cpp:3005-3009）。`inProp` 告诉 `fnHead` 这是属性体里的函数。
    */
   const emitFn = (node, shown, owner, selfInfo, ns, propScope = null, head0 = [], inProp = false,
-    dup = 0) => {
+    dup = 0, headAs = null) => {
     const nm = named(node);
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
     if (t === null) { acct(`函数 '${shown}' 的类型读不出来`); return; }
@@ -469,7 +469,10 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         : { k: 'struct', name: selfInfo.agg }, 'slot', tyc);
     /* **重载那一格的号**（第五十八刀）：名字由 `overloadSuffix` 拼（`f$o1`）—— 扫那一遍
        记的号（`dup`）与这儿发的名字走的是同一格函数，两头才对得上。 */
-    const hd = fnHead(m, env, {
+    /* **头由调用方给**那一格（`headAs`）：属性的**简写取值器**（第一百三十九刀）那对花括号
+       就是取值器的体，可声明符上压根没有形参表 —— 送去 `fnHead` 只会报"认不出形参表"。
+       名字、形参（只有 `$this`）与返回类型都由那一处按属性自己那格类型拼好递进来。 */
+    const hd = headAs !== null ? { head: headAs, why: null } : fnHead(m, env, {
       owner, self: selfTy, clsRoot, inProp, dup,
     });
     if (hd === null || hd.head === null) { acct(`函数 '${shown}' 的头还发不出来（${hd?.why ?? '?'}）`); return; }
@@ -769,7 +772,45 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     const accs = readBodyMembers(body)
       .map((im) => ({ im, leaf: leafOf(im) }))
       .filter((x) => x.im.shape === 'fn' && (x.leaf === 'get' || x.leaf === 'set'));
-    if (accs.length === 0) return false;
+    if (accs.length === 0) {
+      /**
+       * **简写取值器**（第一百三十九刀，154-proptailptr.jnc / 140-propgetbody.jnc）：那对花括号
+       * 里**就是取值器的体**（`int const property m_twice { return m_n * 2; }`）—— 不是取/存
+       * 两个体，也不是 `autoget` 那一族。落出来就是一格 `(fn <属性>$get (($this …)) T …)`，
+       * 与人写全了 `get() {…}` 那一种**发的是同一个东西**（旧降级的真输出同）。
+       * 判据：那对花括号里没有取/存两格声明，而里头有语句。
+       */
+      if (!hasStmts(body)) return false;
+      const key = `${emitName}$get`;
+      if (methods.has(key) || fns.has(key)) return false;
+      const nm0 = named(node);
+      const t0 = nm0 === null ? null : readDeclType(nm0.specs, nm0.dcl);
+      const r0 = t0 === null ? null : resolveType({ ...t0, shape: 'data' }, env);
+      if (r0 === null || r0.type === null) {
+        acct(`属性 '${emitName}' 的简写取值器：${r0?.why ?? '类型读不出来'}`); return false;
+      }
+      const selfPart = selfInfo === null ? ''
+        : `($this ${emitType(selfInfo.kind === 'class' ? { k: 'class', name: selfInfo.agg }
+          : { k: 'struct', name: selfInfo.agg }, 'slot', tyc)})`;
+      methods.set(key, {
+        params: [],
+        defaults: [],
+        ret: r0.type.k === 'void' ? null : r0.type,
+        retDecl: t0,
+        emit: key,
+        ec: false,
+        stat: selfInfo === null,
+        virt: false,
+        declVirt: false,
+        owner: emitName,
+        name: 'get',
+        node,
+        hasBody: false,
+      });
+      emitFn(node, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map(), field },
+        [], true, 0, `(fn ${key} (${selfPart}) ${emitType(r0.type, 'value', tyc)}`);
+      return true;
+    }
     for (const { im, leaf } of accs) {
       const key = `${emitName}$${leaf}`;
       if (headOf(im.at) !== 'fn-def') {

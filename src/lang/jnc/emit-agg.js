@@ -126,7 +126,7 @@ function baseFields(agg, env) {
 }
 
 /** 这一格体里有没有**语句**（有就说明它是取值器的体，不是成员表）。 */
-function hasStatements(compound) {
+export function hasStatements(compound) {
   const DECLS = new Set(['var-decl', 'fn-def', 'fn-proto', 'typedef', 'type-decl',
     'attributed', 'access', 'friend', 'var-decl-curly', 'empty-stmt']);
   const nm = named(compound);

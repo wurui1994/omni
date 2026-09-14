@@ -16,7 +16,7 @@ import { enumBase } from './const-eval.js';
 import { resolveType } from './resolve-type.js';
 import { tyKey } from './emit-type.js';
 import { readFormals, fnName, overloadSuffix } from './emit-fn.js';
-import { classRoot, basePaths, lastIdent } from './emit-agg.js';
+import { classRoot, basePaths, lastIdent, hasStatements } from './emit-agg.js';
 /**
  * 一格函数/方法的**签名**（形参、默认实参、返回、`errorcode`、方言那一侧的名字）。
  * 顶层那条路与类里那条路共用它 —— 调用那一层问的是同一件事，不该有两份答案。
@@ -458,7 +458,10 @@ export function scanAggs(tree, env, ovl = new Map()) {
                类型记下来（`auto`），发的那一层照它生成。 */
             let auto = null;
             const body1 = named(m.at)?.body;
-            if (headOf(body1) === 'compound') {
+            /* **简写取值器那对花括号里是语句、不是成员表**（第一百三十九刀，140-propgetbody.jnc
+               里 `int t = m_twice;` 是取值器体里的**局部量**）—— 照成员表读就等于给这个类
+               凭空添了一格"写了初值的字段"，于是造对象那一处报"字段写了初值可它没有构造"。 */
+            if (headOf(body1) === 'compound' && !hasStatements(body1)) {
               for (const im of readBodyMembers(body1)) {
                 if (im.shape === 'data' && im.name !== null && im.type !== null) {
                   propStore.set(im.name, im.type);
