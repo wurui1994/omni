@@ -15,6 +15,16 @@ import {
 } from './expr-table.js';
 import { intBinary, intUnary, intConvCode } from './int-table.js';
 
+/**
+ * **转手账的兜底**：里头那一层已经记过账（`acctSeen` 数变了）就不再补一条 —— 先前一律补，
+ * 于是尺子上最大的几堆全是"这一格还拼不出来"这种转手账，**真原因被自己盖住了**。
+ * 里头**没**记那才是这一层的 bug，那时候才说话。
+ */
+function soft(ctx, n0, why) {
+  if ((ctx.acctSeen?.() ?? 0) === n0) ctx.acct(`${why}（里头没记账 —— 这一层的 bug）`);
+  return null;
+}
+
 /** 一格表达式 → `{ code, type }`（过转换链）。拼不出来答 null。 */
 export function emitExpr(n, want, ctx) {
   const v = emitExpr0(n, want, ctx);
@@ -234,26 +244,30 @@ export function emitExpr0(n, want, ctx) {
      —— 那几格要知道"这一格是类还是结构体、放的是地址还是内嵌"，属于类型那条腿。
      `p->f` 与 `s.f` 落在**同一格**（第二十五刀：`.` 与 `->` 在 jancy 里是同一个算符）。 */
   if (h === 'field' || h === 'ptr-field') {
+    const n0 = ctx.acctSeen?.() ?? 0;
     const r = ctx.fieldOf?.(n, want);
-    if (r === null || r === undefined) { ctx.acct('取字段这一格还拼不出来'); return null; }
+    if (r === null || r === undefined) return soft(ctx, n0, '取字段这一格还拼不出来');
     return r;
   }
   if (h === 'index') {
+    const n0 = ctx.acctSeen?.() ?? 0;
     const r = ctx.elemOf?.(n, want);
-    if (r === null || r === undefined) { ctx.acct('下标这一格还拼不出来'); return null; }
+    if (r === null || r === undefined) return soft(ctx, n0, '下标这一格还拼不出来');
     return r;
   }
   /* **取地址**（第九 / 二十四刀）：`&x` 里那一格 x 早就被提到一段自己的内存上了，所以这一句
      发的**就是那一格单元**（一个字都不算）。结构体与数组的名字里放的本来就是地址，同理。
      由调用方给（它知道谁提过、单元叫什么）。 */
   if (h === 'addr') {
+    const n0 = ctx.acctSeen?.() ?? 0;
     const r = ctx.addrOf?.(nm.a, want);
-    if (r === null || r === undefined) { ctx.acct('取地址这一格还拼不出来'); return null; }
+    if (r === null || r === undefined) return soft(ctx, n0, '取地址这一格还拼不出来');
     return r;
   }
   if (h === 'indirect') {
+    const n0 = ctx.acctSeen?.() ?? 0;
     const r = ctx.derefOf?.(n, want);
-    if (r === null || r === undefined) { ctx.acct('解引用这一格还拼不出来'); return null; }
+    if (r === null || r === undefined) return soft(ctx, n0, '解引用这一格还拼不出来');
     return r;
   }
   /* **强制转换**：目标类型由调用方解（那是类型那条腿），转法照 `castValue` 那张表。 */
@@ -269,15 +283,17 @@ export function emitExpr0(n, want, ctx) {
   /* **`new T` / `new T[n]`**（第五十二 / 一百二十九刀）：出来的是一格**指针**。造出来那一段
      内存怎么算由调用方那一层给（它知道类的根、有没有 construct、`$tag` 写什么）。 */
   if (h === 'new' || h === 'new-array') {
+    const n0 = ctx.acctSeen?.() ?? 0;
     const r = ctx.newOf?.(n, want);
-    if (r === null || r === undefined) { ctx.acct(`\`${h}\` 这一格还拼不出来`); return null; }
+    if (r === null || r === undefined) return soft(ctx, n0, `\`${h}\` 这一格还拼不出来`);
     return r;
   }
   /* 调用：谁被调（普通函数 / 方法 / 函数指针 / 算符 / CRT 助手）差别全在被调那一侧，
      所以整格交给调用方那张表（`ctx.callOf`）。 */
   if (h === 'call') {
+    const n0 = ctx.acctSeen?.() ?? 0;
     const r = ctx.callOf?.(n, want);
-    if (r === null || r === undefined) { ctx.acct('调用这一格还拼不出来'); return null; }
+    if (r === null || r === undefined) return soft(ctx, n0, '调用这一格还拼不出来');
     return r;
   }
 

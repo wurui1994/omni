@@ -141,14 +141,23 @@ export function makeCtx(env) {
       const fn = named(node)?.fn;
       const key = headOf(fn) === 'name' ? String(named(fn)?.text?.value ?? '') : null;
       if (key === 'printf') {
+        const n0 = env.acctSeen?.() ?? 0;
         const ls = env.printf?.(node, ind, ctx);
-        if (ls === null || ls === undefined) { env.acct('printf 那一族还拼不出来'); return null; }
+        if (ls === null || ls === undefined) {
+          /* **别拿转手账盖住真原因**：里头记过了就不再补一条（`acctSeen`）。 */
+          if ((env.acctSeen?.() ?? 0) === n0) env.acct('printf 那一族还拼不出来（里头没记账 —— 这一层的 bug）');
+          return null;
+        }
         return ls;
       }
     }
     if (h === 'assign') {
+      const n0 = env.acctSeen?.() ?? 0;
       const ls = env.assign?.(node, ind, ctx);
-      if (ls === null || ls === undefined) { env.acct('赋值这一格还拼不出来'); return null; }
+      if (ls === null || ls === undefined) {
+        if ((env.acctSeen?.() ?? 0) === n0) env.acct('赋值这一格还拼不出来（里头没记账 —— 这一层的 bug）');
+        return null;
+      }
       return ls;
     }
     const v = emitExpr(node, null, ctx);

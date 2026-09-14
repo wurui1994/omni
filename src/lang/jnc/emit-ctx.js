@@ -43,7 +43,7 @@ import { evalConst } from './const-eval.js';
  */
 export function makeFnEnv(o) {
   const {
-    fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
+    fnNode, env, acct: acct0, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
     ecBox = { n: 0 }, tmpBox = { n: 0 }, globals = new Map(), gLifted = new Set(),
     gBindable = new Set(), roots = new Map(), gEmit = new Map(),
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
@@ -51,6 +51,14 @@ export function makeFnEnv(o) {
     aggBases = new Map(),
   } = o;
   let ctxRef = null;
+  /**
+   * **记账过几笔**（`acctSeen`）：外面那几层（`emit-body` 的 printf / 赋值 / 调用三格）先前
+   * 一律补一条"这一格还拼不出来"，于是**真正的原因被自己的转手账盖住** —— 尺子上最大的三堆
+   * 全是这种转手账。所以这一层数一数：里头记过了就不再补，里头没记那才是**这一层的 bug**
+   * （与 `lower.js` 里 `emitBody` 那个兜底同一条）。
+   */
+  let acctN = 0;
+  const acct = (why) => { acctN += 1; acct0(why); };
   /* **类那一族在方言里写的是继承链的根**（第五十六刀）—— 发类型时都要带上这一格。 */
   const clsRoot = (cn) => roots.get(cn) ?? cn;
   const tyc = { clsRoot };
@@ -606,6 +614,8 @@ export function makeFnEnv(o) {
   return {
     T,
     acct,
+    /** 记账过几笔（外面那几层拿它判"里头记过没有"，别拿转手账盖住真原因）。 */
+    acctSeen: () => acctN,
     pre,
     /**
      * **这一格函数要的模块级槽**（`{ name, ty }`）：`once` 的那面旗子、`static` 局部量那一格
