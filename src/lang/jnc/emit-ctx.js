@@ -23,7 +23,7 @@ import {
 import { compoundValue, errTest, errValue, escapeText } from './stmt-table.js';
 import { wrapTo, realOf, intConvCode } from './int-table.js';
 import { fmtRun, specPiece, specDress } from '../common/fmt.js';
-import { zeroText } from './expr-table.js';
+import { zeroText, CRT_CHAR } from './expr-table.js';
 import {
   addrTaken, liftable, liftedType, cellName, arrayFromCurly,
 } from './emit-global.js';
@@ -1855,6 +1855,33 @@ export function makeFnEnv(o) {
         if (sig === undefined) {
           const to = gAlias.get(key);
           if (to !== undefined) { sig = fns.get(to); if (sig !== undefined) key = to; }
+        }
+        /**
+         * **CRT 的那几格字符判据**（第一百七十六刀，148-crtchar.jnc）：`isdigit` / `toupper` 那
+         * 十个名字来自宿主的 C 运行时，而方言里没有宿主 —— 所以各落成一格**自己发的函数**
+         * `jnc$crt$<名字>`（一份模块只发一次，`helperBox` 去重），体是表里那一句纯表达式。
+         * 这一问排在"查不着（跨文件/宿主面）"之前，也排在**查名之后** —— 源码里自己写了
+         * 同名函数的那一格先赢（那时上头 `fns.get` 已经查着了）。
+         */
+        if (sig === undefined) {
+          const crt = CRT_CHAR.get(key);
+          if (crt !== undefined) {
+            if (args.length !== 1) {
+              acct(`'${key}' 收 1 个实参，这里给了 ${args.length}`); return null;
+            }
+            const v0 = emitExpr(args[0], { k: 'int', w: 32, u: false }, ctxRef);
+            if (v0 === null) return null;
+            if (v0.type?.k !== 'int') { acct(`'${key}' 的实参要一格整数（这里是 ${v0.type?.k ?? '?'}）`); return null; }
+            const nm5 = `jnc$crt$${key}`;
+            if (!helperBox.has(nm5)) {
+              helperBox.add(nm5);
+              helpers.push([
+                `  (fn ${nm5} ((c int)) ${emitType(crt.type, 'value', tyc)}`,
+                `    (ret ${crt.body}))`,
+              ].join('\n'));
+            }
+            return { code: `(call ${nm5} ${v0.code})`, type: crt.type };
+          }
         }
         if (sig === undefined) { acct(`调的那个 '${key}' 查不着（跨文件/宿主面）`); return null; }
       }

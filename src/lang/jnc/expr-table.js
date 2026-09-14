@@ -325,3 +325,38 @@ export function zeroText(t, c = {}) {
   if (t.k === 'fnptr') return c.tyText === undefined ? null : `(null ${c.tyText(t)})`;
   return null;
 }
+
+/**
+ * **CRT 的那几格字符判据**（第一百七十六刀，148-crtchar.jnc 的真输出）。
+ *
+ * jancy 的这几个名字来自宿主的 C 运行时（`isdigit` / `toupper` …），而方言里没有宿主 ——
+ * 所以每一个落成**一格自己发的函数** `jnc$crt$<名字>`：体是一句纯表达式，形参永远是
+ * 一格 `(c int)`。定义照 C 的 "C locale"（`<ctype.h>`）：
+ *   - 数字 48..57、大写 65..90、小写 97..122、印得出来 32..126；
+ *   - 空白是空格与 `\t\n\v\f\r`（9..13）；
+ *   - 标点 = 印得出来、又不是字母数字、又不是空格（C 的定义原样）；
+ *   - `toupper` / `tolower` 只动那一段字母，别的原样回（≥128 那一段不猜 —— Unicode 版
+ *     在那儿与 C locale 分岔，收下就是静静地答错）。
+ * 表里的 `body` 是**方言的文字**（形参叫 `c`），`ret` 是那格返回类型的文字与类型记录。
+ */
+const RANGE = (lo, hi) => `(bin "&&" (bin ">=" (var c) (int ${lo})) (bin "<=" (var c) (int ${hi})))`;
+const DIGIT = RANGE(48, 57);
+const UPPER = RANGE(65, 90);
+const LOWER = RANGE(97, 122);
+const ALPHA = `(bin "||" ${UPPER} ${LOWER})`;
+const ALNUM = `(bin "||" ${ALPHA} ${DIGIT})`;
+const PRINT = RANGE(32, 126);
+const B = { k: 'bool' };
+const U32 = { k: 'int', w: 32, u: true };
+export const CRT_CHAR = new Map([
+  ['isdigit', { type: B, body: DIGIT }],
+  ['isupper', { type: B, body: UPPER }],
+  ['islower', { type: B, body: LOWER }],
+  ['isalpha', { type: B, body: ALPHA }],
+  ['isalnum', { type: B, body: ALNUM }],
+  ['isprint', { type: B, body: PRINT }],
+  ['isspace', { type: B, body: `(bin "||" (bin "==" (var c) (int 32)) ${RANGE(9, 13)})` }],
+  ['ispunct', { type: B, body: `(bin "&&" ${PRINT} (un "!" (bin "||" ${ALNUM} (bin "==" (var c) (int 32)))))` }],
+  ['toupper', { type: U32, body: `(sel ${LOWER} (bin "-" (var c) (int 32)) (var c))` }],
+  ['tolower', { type: U32, body: `(sel ${UPPER} (bin "+" (var c) (int 32)) (var c))` }],
+]);
