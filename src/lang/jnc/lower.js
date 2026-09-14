@@ -248,12 +248,25 @@ export function lowerJncRules(tree, diags, opts = {}) {
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
     if (t === null) { acct('顶层函数的类型读不出来'); continue; }
     if (t.name === null) {
-      /* **体写在类外**（`int P.scaled(int k) { … }`）：名字是点串，东家是它前面那一段。 */
+      /* **体写在类外**（`int P.scaled(int k) { … }`）：名字是点串，东家是它前面那一段。
+         哪一段是东家**要按聚合体表认**，不能"在最后一个 `$` 上切"：`Reg$construct$static`
+         那样切出来的是 `Reg$construct`（50-construct.jnc 量的正是这一格）。所以从长到短试。 */
       const dotted = fnName({ name: null, type: t, at: it });
       if (dotted === null || !dotted.includes('$')) { acct('顶层函数的名字读不出来'); continue; }
-      const ownerName = dotted.slice(0, dotted.lastIndexOf('$'));
+      let ownerName = null;
+      for (let i = dotted.lastIndexOf('$'); i > 0; i = dotted.lastIndexOf('$', i - 1)) {
+        const pre = dotted.slice(0, i);
+        if (aggs.some((x) => x.emitName === pre)) { ownerName = pre; break; }
+      }
+      if (ownerName === null) {
+        /* 东家不是一格聚合体：那是**属性的取/存**（`int g_p.get() {…}` —— 属性那对花括号开的是
+           一层命名空间，第六十九刀）那一族，另算。 */
+        const leaf = dotted.slice(dotted.lastIndexOf('$') + 1);
+        if (leaf === 'get' || leaf === 'set') acct(`'${dotted}'：属性的取/存那一族还没接`);
+        else acct(`'${dotted}' 的东家查不着（不是这份源码里的聚合体）`);
+        continue;
+      }
       const a = aggs.find((x) => x.emitName === ownerName);
-      if (a === undefined) { acct(`'${dotted}' 的东家 '${ownerName}' 查不着`); continue; }
       const kind = a.word === 'class' || a.word === 'opaque class' ? 'class' : 'struct';
       const st = methods.get(dotted)?.stat === true;
       emitFn(it, dotted, null, st ? null : { agg: ownerName, kind, emit: kind === 'class' ? clsRoot(ownerName) : ownerName }, ns);
