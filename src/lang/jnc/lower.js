@@ -92,7 +92,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   const {
     fields: aggFields, ctors: aggCtors, vars: globals, gEmit, gProps, methods, fieldInits,
     bindable: gBindable, roots, aggs, statics: aggStatics, props: aggProps, bases: aggBases,
-    overloads, fieldPaths: aggPaths,
+    overloads, fieldPaths: aggPaths, aggAliases, gAlias,
   } = scanAggs(tree, env);
   const fns = scanFns(tree, env);
   const gLifted = addrTaken(tree);
@@ -133,6 +133,8 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         fns,
         aggFields,
         aggPaths,
+        aggAliases,
+        gAlias,
         aggCtors,
         ecBox,
         helperBox,
@@ -234,6 +236,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     if (vn === null) continue;
     const sp = readSpecs(vn.specs);
     const storage = sp === null ? [] : sp.words;
+    /* **`alias` 不是一格量**（`alias Hue = Color;` / `alias dbl = twice;`，第八十七刀）：
+       它没有存储 —— "这个名字指着谁"在探子那一遍就登记好了，这儿一个字都不发。 */
+    if (storage.includes('alias')) continue;
     const dcls = h === 'var-decl-curly' ? [vn.dcl] : allInChain(vn.dcls, 'dcls-add', 'dcls');
     for (const d of dcls) {
       const isInit = headOf(d) === 'init';
@@ -374,6 +379,8 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       fns,
       aggFields,
       aggPaths,
+      aggAliases,
+      gAlias,
       aggCtors,
       methods,
       tags,
@@ -437,6 +444,8 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       fns,
       aggFields,
       aggPaths,
+      aggAliases,
+      gAlias,
       aggCtors,
       methods,
       tags,

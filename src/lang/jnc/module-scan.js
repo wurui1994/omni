@@ -121,6 +121,10 @@ export function scanAggs(tree, env) {
   const fields = new Map();
   /** union 里套的匿名 struct 那几格：东家 → 名字 → `{ steps, type }`（一串取字段）。 */
   const fieldPaths = new Map();
+  /** 体里的 `alias`：东家 → 名字 → 目标那一段（查方法/查字段先解一跳）。 */
+  const aggAliases = new Map();
+  /** 顶层与函数体里的 `alias`：名字 → 目标那一段（"值那一面"—— 查函数那一处先解一跳）。 */
+  const gAlias = new Map();
   const ctors = new Set();                                           // 有 construct 的那几格
   const vars = new Map();                                            // 模块级那几格量（名字 → 声明类型）
   const gEmit = new Map();                                           // 名字 → 方言那一侧的名字（带命名空间前缀）
@@ -212,6 +216,10 @@ export function scanAggs(tree, env) {
           if (m.shape === 'bitfield' || m.shape === 'prop' || m.shape === 'event') continue;
           if (m.shape === 'typedef' || m.shape === 'nested-type' || m.shape === 'friend') continue;
           if (m.shape === 'fn') { if (m.name === 'construct') ctors.add(emitName); continue; }
+          /* **`alias twice = doubled;` 不是一格字段**（第二百五十四刀）：它压根没有类型
+             （写的是"这个名字指着谁"），收进字段表就等于拿一格 no-type 的字段把它接走了
+             （192-unionalias.jnc）。它那一格在下面 `al` 那张表里。 */
+          if (m.storage.includes('alias')) continue;
           if (m.storage.includes('static')) continue;                // 不进对象（落成模块级那一格）
           /* **字段写了初值**（`int m_x = 5;` / `Point m_p = { 1, 2 };`）：jancy 把这几句插到
              `construct` 开头，没写 `construct` 的还要**合成**一格（第七十八刀）。这一层还没接
@@ -379,6 +387,27 @@ export function scanAggs(tree, env) {
           });
         }
 
+        /**
+         * **体里的 `alias`**（`alias twice = doubled;`，第二百五十四刀）：它是"这个名字指着谁"
+         * —— 没有存储、没有类型。所以记一张"名字 → 目标那一段"，查方法/查字段两处**先解一跳**
+         * 再照旧查（`u.twice()` 落出来就是 `(call U$doubled …)`）。
+         * 目标只认**一个名字**（点串取末段）；认不出来的不记（宁可让下游报"查不着"）。
+         */
+        const al = new Map();
+        for (const m of a.members) {
+          if (m.name === null || !m.storage.includes('alias')) continue;
+          const ini = memberInit(m);
+          const tgt = ini === null || ini.curly === true ? null : lastIdent(ini.value);
+          if (tgt !== null && tgt !== m.name) al.set(m.name, tgt);
+          /* **指着一格类型的那种**（`alias Shade = Color;` / `alias K = Num;`，83-alias.jnc）：
+             它与体里的 typedef 同一条 —— 提到类型环境里，名字带上东家那一段前缀（点串写法
+             `Box.K k;` 在 `baseOf` 那头要拿它核对）。指着方法/字段的那几格记在这儿也无妨：
+             只有写在**类型位置**上才会去解它，那时解不出来照旧记账。 */
+          if (tgt !== null && tgt !== m.name && !env.has(m.name)) {
+            env.set(m.name, { kind: 'alias', to: tgt, name: `${emitName}$${m.name}` });
+          }
+        }
+        if (al.size > 0) aggAliases.set(emitName, al);
       }
     } else if (h === 'extension') {
       /**
@@ -451,6 +480,28 @@ export function scanAggs(tree, env) {
           bits: String(e.word ?? '').includes('bitflag'),
         });
       }
+    } else if (h === 'var-decl' && !inAgg
+      && (readSpecs(named(n)?.specs)?.words ?? []).includes('alias')) {
+      /**
+       * **`alias plus = add;` / `alias P = Point;`**（第八十七 / 二百六十二刀）：它不是一格量
+       * —— 没有存储、没有类型，只是"这个名字指着谁"。所以进的是两张别名表：类型环境那一格
+       * （`resolveType` 的 `alias` 那一支顺着它再查一跳）与"值那一面"（查函数那一处先解一跳）。
+       * 收进 `vars` 就等于拿一格 no-type 的量把它接走了。
+       *
+       * **写在函数体里的也在这儿收**（`fn-body × alias`，197-localalias.jnc）：与体里的
+       * typedef / enum / struct 同一条 —— jancy 把它们提到那一层的命名空间里。
+       * 代价同那三刀：名字提到外面那层（矩阵里记成 T-005）。
+       */
+      const vn0 = named(n);
+      for (const d of allInChain(vn0.dcls, 'dcls-add', 'dcls')) {
+        const dc = headOf(d) === 'init' ? named(d)?.dcl : d;
+        const t0 = readDeclType(vn0.specs, dc);
+        const tgt = headOf(d) === 'init' ? lastIdent(named(d)?.value) : null;
+        if (t0 === null || t0.name === null || tgt === null || tgt === t0.name) continue;
+        env.set(t0.name, { kind: 'alias', to: tgt });
+        gAlias.set(t0.name, tgt);
+      }
+      return;
     } else if ((h === 'var-decl' || h === 'var-decl-curly') && !inAgg && !inFn) {
       /* **模块级那几格量**（`int calls = 0;`）：裸名字查名的第一步就要看得见它们
          （`NAME_LOOKUP_ORDER` 的 `var` 那一格里"模块级"也算）。`static` 的照收 ——
@@ -611,6 +662,8 @@ export function scanAggs(tree, env) {
   return {
     fields,
     fieldPaths,
+    aggAliases,
+    gAlias,
     ctors,
     vars,
     gEmit,

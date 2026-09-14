@@ -48,7 +48,8 @@ export function makeFnEnv(o) {
     gBindable = new Set(), roots = new Map(), gEmit = new Map(),
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
     gProps = new Map(), propScope = null, aggStatics = new Map(), aggProps = new Map(),
-    aggBases = new Map(), helperBox = new Set(), aggPaths = new Map(),
+    aggBases = new Map(), helperBox = new Set(), aggPaths = new Map(), aggAliases = new Map(),
+    gAlias = new Map(),
   } = o;
   let ctxRef = null;
   /**
@@ -491,6 +492,10 @@ export function makeFnEnv(o) {
     const key = `${aggName}$${mname}`;
     const hit = methods.get(key);
     if (hit !== undefined) return { sig: hit, key };
+    /* **体里的 `alias`**（`alias twice = doubled;`，192-unionalias.jnc）：先解一跳再照旧查
+       —— 它没有存储、没有类型，只是"这个名字指着谁"。 */
+    const al = aggAliases.get(aggName)?.get(mname);
+    if (al !== undefined) return findMethod(aggName, al);
     /* **体外写的方法**（`void Counter.reset(int step) { … }`，49-class.jnc）：它的名字是点串，
        登记在**函数**那张表里，而方言那一侧的名字与体里写的一模一样（`Counter$reset`）——
        所以这儿顺手问一次那张表。基类那一问（`basecall`）先前就是这么办的，两处同一条。 */
@@ -540,6 +545,9 @@ export function makeFnEnv(o) {
     if (fs === undefined) { acct(`'${aggName}' 的字段表还没有（跨文件/宿主面/泛型）`); return null; }
     const ft = fs.get(fname);
     if (ft === undefined) {
+      /* **体里的 `alias`**（`alias x = m_v;`）：先解一跳再照旧查（与查方法那一处同一条）。 */
+      const al2 = aggAliases.get(aggName)?.get(fname);
+      if (al2 !== undefined) return memberAt(baseCode, aggName, al2);
       /**
        * **union 里套的匿名 struct 那几格**（第一百〇四刀的"字段路径"）：`h.m_a` 在方言那一侧
        * 是一串取字段 `(pfield (pfield 基 $s0) m_a)` —— 一格名字对着一条**路**，不是一格名字。
@@ -1008,6 +1016,10 @@ export function makeFnEnv(o) {
          只跑一次的闸门 `名字$sN$1`。 */
       const sp0 = readSpecs(vn.specs);
       const isStatic = sp0 !== null && sp0.words.includes('static');
+      /* **体里的 `alias`**（`alias plus = add;` / `alias P = Point;`，第二百六十二刀）：
+         它一个字都不发 —— "这个名字指着谁"在探子那一遍（`module-scan`）就登记好了，
+         与体里的 typedef / enum / struct 同一条。 */
+      if (sp0 !== null && sp0.words.includes('alias')) return [];
       const out = [];
       const dcls = isCurlyNode ? [vn.dcl] : allInChain(vn.dcls, 'dcls-add', 'dcls');
       for (const d of dcls) {
@@ -1460,6 +1472,12 @@ export function makeFnEnv(o) {
         }
         if (key === 'printf') { acct('printf 那一族（格式化）还没接'); return null; }
         sig = fns.get(key);
+        /* **`alias plus = add;`**（197-localalias.jnc）：先解一跳再照旧查函数表 ——
+           别名没有存储，它就是"这个名字指着谁"。 */
+        if (sig === undefined) {
+          const to = gAlias.get(key);
+          if (to !== undefined) { sig = fns.get(to); if (sig !== undefined) key = to; }
+        }
         if (sig === undefined) { acct(`调的那个 '${key}' 查不着（跨文件/宿主面）`); return null; }
       }
       const parts = [];
