@@ -99,8 +99,22 @@ export function mcFireShell(mc) {
 /** 那格结构体自己（第一次用到才发）。 */
 export const VARIANT = 'jnc$variant';
 
+/**
+ * 那四格字段（**名字与类型**）—— 与下面那行 `(struct …)` 是同一份数据：
+ * 发结构体与"按值抄一份"（`copyValLines` 要一张字段表）读的都是它。抄两份就会漂，
+ * 而漂的后果是：抄的时候少搬一格，于是拷贝出来的 variant 里有一格是别人的旧值。
+ */
+export const VARIANT_FIELDS = [
+  { name: '$t', type: { k: 'int', w: 32, u: false } },
+  { name: '$n', type: { k: 'int', w: 64, u: false } },
+  { name: '$r', type: { k: 'real' } },
+  { name: '$s', type: { k: 'string' } },
+];
+
 export function variantStruct() {
-  return `  (struct ${VARIANT} ($t int) ($n int) ($r real) ($s string))`;
+  const fs = VARIANT_FIELDS
+    .map((f) => `(${f.name} ${emitType(f.type, 'field')})`).join(' ');
+  return `  (struct ${VARIANT} ${fs})`;
 }
 
 /** 装箱：种 -> `{ tag, fld, ty }`。`fld === null` 的那一格（空）不带实参。 */

@@ -24,6 +24,8 @@ import { compoundValue, errTest, errValue, escapeText } from './stmt-table.js';
 import { wrapTo, realOf, intConvCode } from './int-table.js';
 import { fmtRun, specPiece, specDress } from '../common/fmt.js';
 import { zeroText, CRT_CHAR } from './expr-table.js';
+/* `variant_t` 那格结构体是合成出来的：名字与那四格字段的家在 runtime 那一份。 */
+import { VARIANT, VARIANT_FIELDS, varBoxShell, varUnboxShell } from './runtime.js';
 import {
   addrTaken, liftable, liftedType, cellName, arrayFromCurly,
 } from './emit-global.js';
@@ -82,7 +84,27 @@ export function makeFnEnv(o) {
   const dc = nm === null ? null : readDcl(nm.dcl);
   const sf = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
   /** 一格聚合体的字段表（名字 + **解出来**的类型）—— "抄一份"那一层要它。 */
+  /* ─── `variant_t` 那一族（第一百一十三刀）：那格结构体是**合成**出来的（源码里没有它的
+     声明），所以"它有哪几格字段"与"装/拆的壳"都由这一层给，家在 `runtime.js` 那一份。 */
+  const VAR_TY = { k: 'struct', name: VARIANT };
+  /** 一格值装进 variant 时落哪一种（`null` = 这一层还不收）。 */
+  const varKind = (t) => {
+    if (t === null || t === undefined) return null;
+    if (t.k === 'int' || t.k === 'enum') return 'i';
+    if (t.k === 'real') return 'r';
+    if (t.k === 'bool') return 'b';
+    if (t.k === 'string') return 's';
+    return null;
+  };
+  /** 壳一份模块只发一次；答的是那个名字（拼调用点用）。 */
+  const varShellOnce = (name, text) => {
+    if (!helperBox.has(name) && text !== null) { helperBox.add(name); helpers.push(text); }
+    return name;
+  };
   const fieldsOf = (aggName) => {
+    /* variant 那四格字段由这一层给 —— "按值抄一份"走的就是它们（105-variant.jnc 的
+       `Entry p2 = p1` 与 `dispatch(variant_t in, …)` 那格按值形参）。 */
+    if (aggName === VARIANT) return VARIANT_FIELDS;
     const fs = aggFields.get(aggName);
     if (fs === undefined) return null;
     const out = [];
@@ -1294,12 +1316,37 @@ export function makeFnEnv(o) {
     isReal: (t) => t !== null && t !== undefined && t.k === 'real',
     isBool: (t) => t !== null && t !== undefined && t.k === 'bool',
     isArr: (t) => t !== null && t !== undefined && t.k === 'arr',
-    isVar: () => false,
+    isVar: (t) => t !== null && t !== undefined && t.k === 'struct' && t.name === VARIANT,
     isEnum: (t) => t !== null && t !== undefined && t.k === 'enum',
     isClass: (t) => t !== null && t !== undefined && t.k === 'class',
     isStruct: (t) => t !== null && t !== undefined && t.k === 'struct',
     isFn: (t) => t !== null && t !== undefined && t.k === 'fnptr',
     isPtr: (t) => t !== null && t !== undefined && (t.k === 'ptr' || t.k === 'tptr'),
+    /**
+     * **`variant_t` 的装箱与拆箱**（第一百一十三刀，105-variant.jnc 的真输出）：一格 variant
+     * 是四格的结构体（标签 + 三格载荷），装/拆各是**一次调用** —— 表达式那一层回的是一格值，
+     * 没有能挂语句的地方，所以那几句包成助手（`runtime.js` 里那两格壳，一份模块只发一次）。
+     *   装：int/enum → `$i`、real → `$r`、bool → `$b`（载荷是整数，所以先 `(sel v 1 0)`）、
+     *       string → `$s`；别的种明说不收。
+     *   拆：标签对不上是**运行期**的事（jancy 那边也是），所以壳里是 `(fail …)`；
+     *       取整数那一格回的是 64 位载荷，按左边要的宽度收口（`intConvCode`），
+     *       取布尔那一格回整数，比一下 0。
+     */
+    varBoxName: (kind) => varShellOnce(`jnc$var$${kind}`, varBoxShell(kind)),
+    boxVar: (v) => {
+      const k = varKind(v.type);
+      if (k === null) { acct(`往 variant_t 里装一格 ${v.type?.k ?? '?'} 还没接`); return null; }
+      const arg = k === 'b' ? `(sel ${v.code} (int 1) (int 0))` : v.code;
+      return { code: `(call ${varShellOnce(`jnc$var$${k}`, varBoxShell(k))} ${arg})`, type: VAR_TY };
+    },
+    unboxVar: (v, want) => {
+      const k = varKind(want);
+      if (k === null) { acct(`从 variant_t 里取一格 ${want?.k ?? '?'} 还没接`); return null; }
+      const call = `(call ${varShellOnce(`jnc$var$to$${k}`, varUnboxShell(k))} ${v.code})`;
+      if (k === 'b') return { code: `(bin "!=" ${call} (int 0))`, type: { k: 'bool' } };
+      if (k === 'i') return { code: intConvCode(call, { k: 'int', w: 64, u: false }, want), type: want };
+      return { code: call, type: want };
+    },
     decay: (v) => (v.type?.k === 'arr'
       ? { code: `(pelem ${v.code})`, type: { k: 'ptr', target: v.type.el } } : v),
     /** `(T)x` 里那格 `(type-name specs ptrs)` 解成类型（`readAnonType` 收的是这两格洞）。 */

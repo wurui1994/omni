@@ -23,6 +23,8 @@ import { collectEnumConsts } from './const-eval.js';
 import { scanAggs, scanFns, memberInit, sigOf } from './module-scan.js';
 import { readBodyMembers } from './agg.js';
 import { structLine, hasStatements as hasStmts } from './emit-agg.js';
+/* `variant_t` 那格结构体是合成出来的（用到才发、发在最前头）—— 名字与那一行的家在 runtime。 */
+import { VARIANT, variantStruct } from './runtime.js';
 import {
   globalLines, addrTaken, liftable, liftedType, arrayFromCurly, staticCtorFlag,
 } from './emit-global.js';
@@ -1249,5 +1251,15 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   const prologue = [...cells, ...inits].join('\n');
   const body = mainBody === null ? prologue
     : (prologue === '' ? mainBody : `${prologue}\n${mainBody}`);
+  /**
+   * **`variant_t` 那格结构体用到才发、且发在最前头**（第一百一十三刀）：它是**合成**出来的
+   * （源码里没有它的声明），而用它的地方有三处 —— 字段的类型、形参/返回的类型、装拆的壳。
+   * 那三处哪一处先出现都可能，所以判据只有一句：**整份模块里提到了它就发**。方言那一侧
+   * 要求先声明后用，所以插在所有条目之前。
+   */
+  const all = [...decls, body].join('\n');
+  if (all.includes(VARIANT) && !all.includes(`(struct ${VARIANT} `)) {
+    decls.unshift(variantStruct());
+  }
   return `${['(module', ...decls, `  (main\n${body})`, ')'].join('\n')}\n`;
 }
