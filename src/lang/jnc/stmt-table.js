@@ -14,6 +14,10 @@
 //   10447 assert / 10448 unsafe / 10462 try / 10481 catch/finally / 10497 nestedscope
 //   10515 once / 10349 dylayout
 
+import {
+  wrapTo, uOp, arithType, commonInt, intConvCode,
+} from './int-table.js';
+
 /** 不发一个字的那几族（声明与元数据）。 */
 export const NO_CODE = new Set(['empty-stmt', 'type-decl', 'typedef']);
 
@@ -396,11 +400,52 @@ export const EC_HOIST = new Set(['var-decl', 'var-decl-curly', 'expr-stmt', 'ret
  *      "求左值"**之前** —— 属性没有"可写的那一格"，求左值会去查变量、查不着就报未声明；
  *   3. 别的：求左值再写（复合赋值先读一遍、算完再写回）。
  */
+/**
+ * **数 `continue N` 往外几层时算哪几族**（第四十二刀，lower.js:13000-13019）：**只数真循环**
+ * （`while` / `do` / `for`）—— `switch` 那圈合成的 `while` 不算（`break` 数它、`continue` 不数）。
+ * "体里有没有一条 `continue` 正好指着我这一层"用的就是这张表。
+ */
+export const CONT_LOOP_HEADS = new Set(['while', 'do', 'for']);
+
 export const ASSIGN_ORDER = [
   { name: 'curly', why: '右边是一对花括号 → 按格子写，空项保留原值（只有 `=` 能这么写）' },
   { name: 'prop-set', why: '左边是属性 → 调存值器（要排在求左值之前）' },
   { name: 'lvalue', why: '别的：求左值再写' },
 ];
+
+/**
+ * **复合赋值算出来那一格值**（lower.js:11470-11527）。`lv op= v` 就是 `lv = (T)(lv op v)`，
+ * 三族各有规矩：
+ *   - **指针上的 `+= -=` 是指针算术**（不是加法）：`(padd 读 ±v)`；
+ *   - **整数**：中间那一格照常用算术转换来、**要真的转**（第三十三刀 ——
+ *     `int i = -7; i /= (unsigned)2;` 在 C 与 jancy 里是无符号除法，省掉中间那一次就成了 -3）；
+ *     移位的中间那一格**只看左边**。回卷只发**一次**（收窄那一次自己就掩了低位），`%` 例外
+ *     —— 余数天然在范围里，只有回到 lv 那一格要换符号性时才动；
+ *   - 别的（实数）：`(bin op 读 值)`。
+ * `cur` 是"读一次 lv"那段文字；答 null 表示这一格不收（调用方记账）。
+ */
+export function compoundValue({
+  bin, cur, lvType, v, isInt, isPtr,
+}) {
+  if (!['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>'].includes(bin)) return null;
+  if (isPtr(lvType) === true) {
+    if (bin !== '+' && bin !== '-') return null;
+    return `(padd ${cur} ${bin === '+' ? v.code : `(un "-" ${v.code})`})`;
+  }
+  if (isInt(lvType) === true && isInt(v.type) === true) {
+    const shift = bin === '<<' || bin === '>>';
+    const rt = shift ? arithType(lvType) : commonInt(lvType, v.type);
+    const x = intConvCode(cur, lvType, rt);
+    const y = shift
+      ? intConvCode(v.code, v.type, arithType(v.type)) : intConvCode(v.code, v.type, rt);
+    let code = `(bin ${JSON.stringify(uOp(bin, rt.w ?? 32, rt.u === true))} ${x} ${y})`;
+    const same = (rt.w ?? 32) === (lvType.w ?? 32) && (rt.u === true) === (lvType.u === true);
+    if (!same || bin !== '%') code = wrapTo(code, lvType.w ?? 32, lvType.u === true);
+    return code;
+  }
+  if (['&', '|', '^', '<<', '>>'].includes(bin)) return null;   // 位运算只在整数上有定义
+  return `(bin ${JSON.stringify(bin)} ${cur} ${v.code})`;
+}
 
 /**
  * **局部量声明的分派次序**（lower.js:10576-10670 那一段）。每一格都是"先认清它到底是什么"，

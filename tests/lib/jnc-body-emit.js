@@ -23,6 +23,9 @@ import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
+import { compoundValue } from '../../src/lang/jnc/stmt-table.js';
+import { lvalueShape, SHAPE_ACCESS } from '../../src/lang/jnc/lvalue-table.js';
+import { memberShape } from '../../src/lang/jnc/member-table.js';
 import { readFormals } from '../../src/lang/jnc/emit-fn.js';
 import { emitBody } from '../../src/lang/jnc/emit-body.js';
 import { emitExpr } from '../../src/lang/jnc/emit-expr.js';
@@ -193,9 +196,10 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     return { ...ty, w: INT_BITS[word] ?? 32, u };
   };
   const CMP = new Set(['==', '!=', '<', '<=', '>', '>=', '&&', '||']);
-  /** 一格类型上挂不挂字段：结构体/类**是**它自己；`S*` 那一格里放的就是它的地址。
-      **只剥一层星号** —— `S** pp` 要先读一次，那是另一族（记账走开）。 */
-  const aggNameOf = (ty) => {
+  /** `.` 的左边落在哪个聚合体上（`structBehind`）：结构体自己、类那一格（里放的**就是**
+      对象那段内存的地址）、以及"指到结构体的指针"—— 三者的 code 都是那段内存的地址，
+      所以 `s.f` 与 `p->f` 落在同一句 `pfield` 上（第二十五刀：`.` 与 `->` 是同一个算符）。 */
+  const aggBehind = (ty) => {
     if (ty === null || ty === undefined) return null;
     if (ty.k === 'struct' || ty.k === 'class') return ty.name ?? null;
     if (ty.k === 'ptr' && (ty.target?.k === 'struct' || ty.target?.k === 'class')) {
@@ -203,47 +207,99 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     }
     return null;
   };
-  /** 字段挂着的那个**东家的地址**。 */
-  const baseAddr = (obj) => {
-    const h = headOf(obj);
-    if (h === 'paren') return baseAddr(named(obj)?.inner);
-    if (h === 'name') {
-      /* 结构体的名字里放的**就是那段内存的地址**（第十二刀），`S* p` 那一格里放的也是地址
-         —— 两者同一个字 `(var x)`，所以这儿不分家。 */
-      const key = String(named(obj)?.text?.value ?? '');
-      const t = names.get(key);
-      if (t === undefined) { acct(`取字段的东家 '${key}' 查不着（要作用域图）`); return null; }
-      const r = resolveType(t, env);
-      const agg = aggNameOf(r.type);
-      if (agg === null) { acct('取字段的东家不是结构体/类（变体/属性/命名空间那几族另算）'); return null; }
-      return { code: `(var ${key})`, agg };
-    }
-    if (h === 'field') {
-      const f = fieldAt(obj);
-      if (f === null) return null;
-      const agg = aggNameOf(f.type);
-      if (agg === null) { acct('取字段的东家不是结构体/类'); return null; }
-      /* 内嵌的结构体字段那一格**就是地址**（`agg`，`member-table.js` 的 memberShape）；
-         是指针的要先读出来。 */
-      return { code: f.type.k === 'ptr' ? `(pload ${f.addr})` : f.addr, agg };
-    }
-    acct('取字段的东家还拼不出来（下标/调用/解引用那几族）');
-    return null;
-  };
-  /** 一格 `obj.m` 的**地址**（`(pfield 基 名字)`）+ 那一格的类型。 */
-  const fieldAt = (node) => {
-    const fn2 = named(node) ?? {};
-    const fname = String(fn2.name?.value ?? '');
-    if (fname === '') { acct('取字段的名字读不出来（点串/泛型那几族另算）'); return null; }
-    const b = baseAddr(fn2.obj);
-    if (b === null) return null;
-    const fs = aggFields.get(b.agg);
-    if (fs === undefined) { acct(`'${b.agg}' 的字段表还没有（跨文件/宿主面/泛型）`); return null; }
+  /** 这几种形状**本身可写**（`LV_SHAPES`）；别的当右值求一次值。 */
+  const LV_SHAPES = new Set(['name', 'field', 'index', 'ptr-field', 'indirect']);
+  /** 一格可写位置读出来那一段文字（`SHAPE_ACCESS`）。 */
+  const readLv = (lv) => SHAPE_ACCESS[lv.shape].read(lv.code);
+  /** 一格字段的位置（`memberOf`）：`(pfield 基 名)`；字段自己是结构体/数组时它又是一格 `agg`。 */
+  const memberAt = (baseCode, aggName, fname) => {
+    const fs = aggFields.get(aggName);
+    if (fs === undefined) { acct(`'${aggName}' 的字段表还没有（跨文件/宿主面/泛型）`); return null; }
     const ft = fs.get(fname);
-    if (ft === undefined) { acct(`'${b.agg}' 上查不着字段 '${fname}'（位域/别名/属性/基类那几族另算）`); return null; }
+    if (ft === undefined) { acct(`'${aggName}' 上查不着字段 '${fname}'（位域/别名/属性/基类那几族另算）`); return null; }
     const r = resolveType(ft, env);
     if (r.type === null) { acct(`字段 '${fname}'：${r.why}`); return null; }
-    return { addr: `(pfield ${b.code} ${fname})`, type: withBits(r.type, ft), decl: ft };
+    const ty = withBits(r.type, ft);
+    return {
+      shape: memberShape(ty.k === 'struct', ty.k === 'arr'),
+      code: `(pfield ${baseCode} ${fname})`,
+      type: ty,
+    };
+  };
+  /**
+   * 一格**可写位置**（`lvalue`，`LVALUE_ORDER` 那四格 + `lvalue0` 那几族）：
+   * `{ shape: 'var'|'ptr'|'agg', code, type }`。读写都从它出发（`SHAPE_ACCESS`）。
+   * 拼不出来答 null（账已经记过）—— 命名空间里那一格、属性、位域那几族都在这一层之外。
+   */
+  const lvOf = (node) => {
+    const h = headOf(node);
+    const nm2 = named(node) ?? {};
+    if (h === 'paren') return lvOf(nm2.inner);
+    if (h === 'name') {
+      const key = String(nm2.text?.value ?? '');
+      const t = names.get(key);
+      if (t === undefined) { acct(`'${key}' 查不着（要作用域图）`); return null; }
+      const r = resolveType(t, env);
+      if (r.type === null) { acct(`'${key}'：${r.why}`); return null; }
+      const ty = withBits(r.type, t);
+      /* **结构体与数组是 `agg`**（那一格里放的就是地址，第十二 / 二十一刀）；别的是 `var`。
+         "提到堆上"那一族（第九 / 二十四刀）要 `&x` 的账，这一层还没有 —— 走到它就记账。 */
+      const shape = lvalueShape({ isStruct: ty.k === 'struct', isArr: ty.k === 'arr' });
+      return { shape, code: shape === 'var' ? key : `(var ${key})`, type: ty };
+    }
+    /* `*p`（`ptrLv`）：p 是一格指针值，那一格的位置**就是**它；目标是结构体/数组时是 `agg`。 */
+    if (h === 'indirect') {
+      const p = emitExpr(nm2.a, null, ctxRef);
+      if (p === null) return null;
+      if (p.type?.k !== 'ptr' && p.type?.k !== 'tptr') { acct("'*' 的左边不是指针"); return null; }
+      const tt = p.type.target;
+      return { shape: memberShape(tt?.k === 'struct', tt?.k === 'arr'), code: p.code, type: tt };
+    }
+    /* `a[i]`（`subLv`）：jancy 的下标就是 `*(a + i)`，范围检查在解引用那一步。
+       左边先退化（数组是**一整块**，退化是一句 `(pelem …)`），下标要 64 位整数。 */
+    if (h === 'index') {
+      const a = emitExpr(nm2.obj, null, ctxRef);
+      if (a === null) return null;
+      if (a.type?.k !== 'ptr' && a.type?.k !== 'tptr') { acct('下标的左边不是指针/数组'); return null; }
+      const i = emitExpr(nm2.key, { k: 'int', w: 64, u: false }, ctxRef);
+      if (i === null) return null;
+      const tt = a.type.target;
+      return {
+        shape: memberShape(tt?.k === 'struct', tt?.k === 'arr'),
+        code: `(padd ${a.code} ${i.code})`,
+        type: tt,
+      };
+    }
+    if (h === 'field' || h === 'ptr-field') {
+      const fname = String(nm2.name?.value ?? '');
+      if (fname === '') { acct('取字段的名字读不出来（点串/泛型那几族另算）'); return null; }
+      const ob = nm2.obj;
+      let baseCode = null;
+      let bt = null;
+      /* `p->f` 与"左边不是可写形状"（`f().x`）都是**求一次值**；别的先求它的位置再读一次
+         —— 那一格读出来的就是基地址。 */
+      if (h === 'ptr-field' || !LV_SHAPES.has(headOf(ob))) {
+        const v = emitExpr(ob, null, ctxRef);
+        if (v === null) return null;
+        baseCode = v.code;
+        bt = v.type;
+      } else {
+        const o = lvOf(ob);
+        if (o === null) return null;
+        baseCode = readLv(o);
+        bt = o.type;
+      }
+      const agg = aggBehind(bt);
+      if (agg === null) { acct(`'.' 的左边不是结构体/类（${bt?.k ?? '?'}）`); return null; }
+      return memberAt(baseCode, agg, fname);
+    }
+    acct(`可写位置这一格还拼不出来：${h}`);
+    return null;
+  };
+  /** 一格可写位置**当值用**：读它一次。 */
+  const valOfLv = (node) => {
+    const lv = lvOf(node);
+    return lv === null ? null : { code: readLv(lv), type: lv.type };
   };
   return {
     T,
@@ -275,7 +331,8 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     isStruct: (t) => t !== null && t !== undefined && t.k === 'struct',
     isFn: (t) => t !== null && t !== undefined && t.k === 'fnptr',
     isPtr: (t) => t !== null && t !== undefined && (t.k === 'ptr' || t.k === 'tptr'),
-    decay: (v) => v,
+    decay: (v) => (v.type?.k === 'arr'
+      ? { code: `(pelem ${v.code})`, type: { k: 'ptr', target: v.type.el } } : v),
     realOf: (code, t) => realOf(code, t?.w ?? 32, t?.u === true),
     /** 整数转到另一格（同宽同符号一个字都不发）—— `CONV_CHAIN` 的枚举那一条要它。 */
     intConv: (v, to) => ({ code: intConvCode(v.code, v.type, to), type: to }),
@@ -328,60 +385,79 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
           out.push(`${pad}(let ${t.name} ${ty} ${z})`);
           continue;
         }
+        /* **写了初值的结构体/数组**是"抄一份"（`aggSource` + `copyAgg` / `copyArr`）：源头要
+           先钉在一格临时量上（`(let $sN …)`），再逐字段搬。另一族 —— 记账走开。 */
+        if (r.type.k === 'struct' || r.type.k === 'arr') {
+          acct(`'${t.name}' 写了初值的结构体/数组要逐字段抄一份（还没接）`); return null;
+        }
         const v = ctx.expr(named(d)?.value, declTy);
         if (v === null) return null;
         out.push(`${pad}(let ${t.name} ${ty} ${v})`);
       }
       return out;
     },
-    /** 赋值：左边是一格名字，或**一格字段**（`(pstore (pfield 基 名) 值)`）。 */
+    /**
+     * 赋值（`ASSIGN_ORDER`）：左边整格交给**可写位置**那一层（`lvOf`），写法照形状走
+     * （`SHAPE_ACCESS`）。右边是一对花括号（按格子写，空项保留原值）与左边是属性
+     * （调存值器）那两族排在前面，这儿都记账走开。
+     *
+     * **jnc 的 `assign` 换过洞名**（节点表 :63 那条 `replaces: true`）：holes 是
+     * `{ op, a, b }`，不是公共库那格 `{ targets, values }`。先前照公共库读，`targets`
+     * 永远是 undefined —— 于是"赋值的左边还拼不出来"那 30 格账全是这一个读错造成的
+     * （**按表读树**，又栽在同一处）。
+     */
     assign: (node, ind, ctx) => {
       const pad = ' '.repeat(ind);
-      const an = named(node);
-      const tg = an?.targets;
-      const first = headOf(tg) === 'targets' ? named(tg)?.first : tg;
-      const vals = an?.values;
-      const v0 = headOf(vals) === 'values' ? named(vals)?.first : vals;
-      if (headOf(first) === 'field') {
-        const f = fieldAt(first);
-        if (f === null) return null;
-        /* 往结构体/数组字段里赋值是**逐字段抄一份**（copyAgg / copyArr）—— 另一族，记账。 */
-        if (f.type.k === 'struct' || f.type.k === 'arr') {
-          acct('往结构体/数组字段里赋值要逐字段抄一份（还没接）'); return null;
-        }
-        const v2 = ctx.expr(v0, f.type);
-        if (v2 === null) return null;
-        return [`${pad}(pstore ${f.addr} ${v2})`];
+      const an = named(node) ?? {};
+      const op = String(an.op?.value ?? '=');
+      if (headOf(an.b) === 'curly' || headOf(an.b) === 'curly-init') {
+        acct('右边是一对花括号（按格子写、空项保留原值）还没接'); return null;
       }
-      if (headOf(first) !== 'name') { acct('赋值的左边还拼不出来（要可写位置那一层）'); return null; }
-      const key = String(named(first)?.text?.value ?? '');
-      const t = names.get(key);
-      if (t === undefined) { acct(`赋值的左边 '${key}' 查不着`); return null; }
-      const r = resolveType(t, env);
-      const v = ctx.expr(v0, r.type);
+      const lv = lvOf(an.a);
+      if (lv === null) return null;
+      /* `agg` 的写**不是一句**：结构体逐字段、数组逐格抄一份（`copyVal`）—— 另一族，记账。 */
+      if (lv.shape === 'agg') { acct('往结构体/数组里赋值要逐字段抄一份（还没接）'); return null; }
+      /* **复合赋值**（`lv op= v`）：右边按 lv 那一格降，中间那一格由 `compoundValue` 定
+         （常用算术转换、回卷只发一次、`%` 例外、指针上是指针算术）。 */
+      if (op !== '=') {
+        const vv = emitExpr(an.b, lv.type, ctx);
+        if (vv === null) return null;
+        const code = compoundValue({
+          bin: op.slice(0, -1),
+          cur: readLv(lv),
+          lvType: lv.type,
+          v: vv,
+          isInt: (t) => t !== null && t !== undefined && t.k === 'int',
+          isPtr: (t) => t !== null && t !== undefined && (t.k === 'ptr' || t.k === 'tptr'),
+        });
+        if (code === null) { acct(`复合赋值 '${op}' 落在 ${lv.type?.k ?? '?'} 上还没接`); return null; }
+        return [`${pad}${SHAPE_ACCESS[lv.shape].write(lv.code, code)}`];
+      }
+      const v = ctx.expr(an.b, lv.type);
       if (v === null) return null;
-      return [`${pad}(set ${key} ${v})`];
+      return [`${pad}${SHAPE_ACCESS[lv.shape].write(lv.code, v)}`];
     },
-    /** `x++` 当一条语句：`(set x (回卷 (bin "+" (var x) (int 1))))`；字段那一格走取/存。 */
+    /**
+     * `x++` 当一条语句（lower.js:11529-11568）：读一次、加一、写回。三族各有写法 ——
+     * 整数按**它自己那一格**回卷（`char c = 127; c++` 是 -128）、指针是 `(padd … ±1)`、
+     * 实数是 `(bin "+" … (real 1.0))`。
+     */
     incDec: (target, one, ind, ctx) => {
       const pad = ' '.repeat(ind);
-      if (headOf(target) === 'field') {
-        const f = fieldAt(target);
-        if (f === null) return null;
-        const raw2 = `(bin ${JSON.stringify(one)} (pload ${f.addr}) (int 1))`;
-        const c2 = f.type.k === 'int' ? wrapTo(raw2, f.type.w ?? 32, f.type.u === true) : raw2;
-        return [`${pad}(pstore ${f.addr} ${c2})`];
-      }
-      if (headOf(target) !== 'name') { acct('`++` 的左边还拼不出来（要可写位置那一层）'); return null; }
-      const key = String(named(target)?.text?.value ?? '');
-      const t = names.get(key);
-      if (t === undefined) { acct(`'${key}' 查不着`); return null; }
-      const r = resolveType(t, env);
-      if (r.type === null) { acct(`'${key}' 的类型解不出来`); return null; }
-      const ty = withBits(r.type, t);
-      const raw = `(bin ${JSON.stringify(one)} (var ${key}) (int 1))`;
-      const code = ty.k === 'int' ? wrapTo(raw, ty.w ?? 32, ty.u === true) : raw;
-      return [`${pad}(set ${key} ${code})`];
+      const lv = lvOf(target);
+      if (lv === null) return null;
+      const cur = readLv(lv);
+      const ty = lv.type;
+      let code = null;
+      if (ty?.k === 'int') {
+        code = wrapTo(`(bin ${JSON.stringify(one)} ${cur} (int 1))`, ty.w ?? 32, ty.u === true);
+      } else if (ty?.k === 'ptr' || ty?.k === 'tptr') {
+        code = `(padd ${cur} (int ${one === '+' ? '1' : '-1'}))`;
+      } else if (ty?.k === 'real') {
+        code = `(bin ${JSON.stringify(one)} ${cur} (real 1.0))`;
+      } else { acct(`'++' 落在 ${ty?.k ?? '?'} 上还没接（算符重载那一族另算）`); return null; }
+      if (lv.shape === 'agg') { acct("'++' 落在结构体/数组上（算符重载那一族）还没接"); return null; }
+      return [`${pad}${SHAPE_ACCESS[lv.shape].write(lv.code, code)}`];
     },
     /** 调用：被调是**裸名字**且查得着顶层那几格函数时 → `(call 名字 实参…)`。 */
     callOf: (node, want, ctx) => {
@@ -445,15 +521,10 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       if (bad || r === null) return null;
       return r.lines;
     },
-    fieldOf: (node) => {
-      const f = fieldAt(node);
-      if (f === null) return null;
-      /* 结构体与数组那一格里放的**就是地址**（`agg`）—— 读它就是那个地址，不 `pload`。 */
-      if (f.type.k === 'struct' || f.type.k === 'arr') return { code: f.addr, type: f.type };
-      return { code: `(pload ${f.addr})`, type: f.type };
-    },
-    elemOf: () => { acct('下标还没接'); return null; },
-    contTargets: () => false,
+    /* 取字段与下标都从**可写位置**那一层出发，读一次（结构体/数组那一格读出来的就是地址）。 */
+    fieldOf: (node) => valOfLv(node),
+    elemOf: (node) => valOfLv(node),
+    derefOf: (node) => valOfLv(node),
   };
 }
 

@@ -12,7 +12,7 @@ import { allInChain, chainOf } from './declare.js';
 import { emitStmt } from './emit-stmt.js';
 import { emitExpr } from './emit-expr.js';
 import { truthyCode } from './expr-table.js';
-import { catchAt, catchBlockLines } from './stmt-table.js';
+import { catchAt, catchBlockLines, CONT_LOOP_HEADS } from './stmt-table.js';
 
 /**
  * 一格函数体（`compound`）→ 一段文字。`env` 里要给：
@@ -22,6 +22,22 @@ import { catchAt, catchBlockLines } from './stmt-table.js';
 export function emitBody(bodyNode, env, ind = 4) {
   const ctx = makeCtx(env);
   return ctx.block(bodyNode, ind);
+}
+
+/**
+ * 体里有没有一条 `continue` 正好指着**这一层**（第四十二刀）。数的规矩与 `continue N`
+ * 一致：**只数真循环**（`CONT_LOOP_HEADS`）—— switch 那圈合成的 while 不算。
+ */
+function contTargets(n, d) {
+  if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return false;
+  const h = headOf(n);
+  if (h === 'continue') {
+    const lv = Number(named(n)?.level?.value ?? 1) || 1;
+    return lv === d + 1;
+  }
+  const inner = CONT_LOOP_HEADS.has(h) ? d + 1 : d;
+  for (const it of n.items) if (contTargets(it, inner)) return true;
+  return false;
 }
 
 /** 把那几格注入拼齐，答一个能递给 `emitStmt` 的 `ctx`。 */
@@ -178,7 +194,7 @@ export function makeCtx(env) {
       condText = ctx.cond(nm.cond);
       if (condText === null) return null;
     }
-    const oneshot = stepLines.length > 0 && (env.contTargets?.(nm.body) === true);
+    const oneshot = stepLines.length > 0 && contTargets(nm.body, 0);
     ctx.loops.push({ kind: 'loop', step: stepLines.length > 0 });
     if (oneshot) ctx.loops.push({ kind: 'oneshot', step: false });
     const body = ctx.body(nm.body, ind + (oneshot ? 8 : 4));

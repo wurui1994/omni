@@ -191,9 +191,10 @@ export function emitExpr0(n, want, ctx) {
     return { code: `(bin ${JSON.stringify(op)} ${x.code} ${y.code})`, type: t };
   }
 
-  /* 取字段与下标：地址那一层由调用方给（`ctx.fieldOf` / `ctx.elemOf`）—— 那两格要知道
-     "这一格是类还是结构体、放的是地址还是内嵌"，属于类型那条腿。 */
-  if (h === 'field') {
+  /* 取字段、下标与解引用：地址那一层由调用方给（`ctx.fieldOf` / `ctx.elemOf` / `ctx.derefOf`）
+     —— 那几格要知道"这一格是类还是结构体、放的是地址还是内嵌"，属于类型那条腿。
+     `p->f` 与 `s.f` 落在**同一格**（第二十五刀：`.` 与 `->` 在 jancy 里是同一个算符）。 */
+  if (h === 'field' || h === 'ptr-field') {
     const r = ctx.fieldOf?.(n, want);
     if (r === null || r === undefined) { ctx.acct('取字段这一格还拼不出来'); return null; }
     return r;
@@ -201,6 +202,11 @@ export function emitExpr0(n, want, ctx) {
   if (h === 'index') {
     const r = ctx.elemOf?.(n, want);
     if (r === null || r === undefined) { ctx.acct('下标这一格还拼不出来'); return null; }
+    return r;
+  }
+  if (h === 'indirect') {
+    const r = ctx.derefOf?.(n, want);
+    if (r === null || r === undefined) { ctx.acct('解引用这一格还拼不出来'); return null; }
     return r;
   }
   /* 调用：谁被调（普通函数 / 方法 / 函数指针 / 算符 / CRT 助手）差别全在被调那一侧，
