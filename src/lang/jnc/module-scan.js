@@ -462,6 +462,43 @@ export function scanAggs(tree, env) {
     }
     for (const it of n.items) scan(it, inner, agg, fn0);
   };
+  /**
+   * **名字先过一遍**（次序无关）：jancy 的顶层没有"先声明后使用"这条 —— 一格结构体的方法
+   * 返回类型写在它前头声明的那个类型上，照样成立。而这一层的细活儿（方法签名、静态字段、
+   * 枚举底类型）**当场就要解类型**，所以名字得在那之前全登记好。
+   *
+   * 泛型接上之后这一格是硬要求：造出来的实例插在顶层链最前头（它们是别人字段的类型，
+   * 方言要求先声明），于是 `Box$Node` 排在 `struct Node` **前面** —— 少了这一遍，
+   * `Box$Node` 里那格 `Entry val()` 的返回类型报的是"认不出基类型 'name'"，
+   * 落出来是 void（123-genericname.jnc 的 `b.val().m_x`）。
+   *
+   * 只登记"这个名字是什么"，一格类型都不解 —— 解类型的活儿照旧在下面那一遍。
+   */
+  const names0 = (n, owner) => {
+    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    const h = headOf(n);
+    let inner = owner;
+    if (h === 'namespace') {
+      const nm = nameText(named(n)?.name);
+      if (nm !== null) inner = owner === null ? nm : `${owner}$${nm}`;
+    } else if (h === 'agg') {
+      const a = readAgg(n);
+      const nm = a === null ? null : nameText(a.name);
+      if (a !== null && nm !== null) {
+        const emitName = owner === null ? nm : `${owner}$${nm}`;
+        inner = emitName;
+        if (!env.has(nm)) {
+          env.set(nm, {
+            kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
+            name: emitName,
+            agg: a,
+          });
+        }
+      }
+    }
+    for (const it of n.items) names0(it, inner);
+  };
+  names0(tree, null);
   scan(tree, null, false, false);
   /**
    * **基类那几格字段也算这一格自己的**（第五十六刀：一整条继承链共用一格结构体）。所以
