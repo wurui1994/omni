@@ -23,7 +23,7 @@ import { collectEnumConsts } from './const-eval.js';
 import { scanAggs, scanFns } from './module-scan.js';
 import { structLine } from './emit-agg.js';
 import { globalLines, addrTaken, liftable, liftedType } from './emit-global.js';
-import { fnHead, readFormals, fnName } from './emit-fn.js';
+import { fnHead, readFormals, fnName, needsCtor } from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
 import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
@@ -59,7 +59,8 @@ export function lowerJncRules(tree, diags, opts = {}) {
   collectEnumConsts(tree, env);
   const {
     fields: aggFields, ctors: aggCtors, vars: globals, gEmit, gProps, methods, fieldInits,
-    bindable: gBindable, roots, aggs, statics: aggStatics, props: aggProps,
+    bindable: gBindable, roots, aggs, statics: aggStatics, props: aggProps, bases: aggBases,
+    overloads,
   } = scanAggs(tree, env);
   const fns = scanFns(tree, env);
   const gLifted = addrTaken(tree);
@@ -111,6 +112,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
         roots,
         aggStatics,
         aggProps,
+        aggBases,
       });
       modEnv = { e, ctx: makeCtx(e) };
     }
@@ -275,6 +277,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
       roots,
       aggStatics,
       aggProps,
+      aggBases,
     });
     /* **`int main()` 落成方言的入口 `(main …)`，那一格不回值**：所以体那一层看见的是
        "回 void 的函数"，`return 0;` 就是一句 `(ret)`（`returnKind` 里 `inMain` 那一条），
@@ -299,8 +302,66 @@ export function lowerJncRules(tree, diags, opts = {}) {
     decls.push(`  ${hd.head}\n${whole})`);
   };
 
+  /**
+   * **合成出来的构造**（第七十八 / 九十四刀）：一格类自己没写 `construct`，可**基类有**——
+   * jancy 那儿编译器给它生成一格，里头逐格调基类那一个（65-propmem.jnc 的
+   * `(fn Derived$construct (($this (ptr Box))) void (expr (call Box$construct (var $this))))`）。
+   *
+   * 这一层只收"**因为基类**才要构造"那一种。别的理由（字段写了初值、事件、`bindable`、
+   * `static construct`、成员自己带构造）各是自己一刀 —— 那几格记账，绝不发一格空构造
+   * 冒充"造好了"。
+   *
+   * 收敛着来（基类先于派生类定下来），因为"基类有没有构造"本身也可能是合成出来的。
+   */
+  const synth = new Map();                               // 类 → 要逐格调的那几格基类
+  {
+    const hasCtorOf = (cn) => methods.has(`${cn}$construct`) || synth.has(cn);
+    const pending = aggs.filter((a) => a.word === 'class' || a.word === 'opaque class');
+    for (let pass = 0; pass < pending.length + 1; pass += 1) {
+      let grew = false;
+      for (const a of pending) {
+        const cls = a.emitName;
+        if (cls === null || synth.has(cls) || methods.has(`${cls}$construct`)) continue;
+        if (!needsCtor(a, env)) continue;
+        const bs = (aggBases.get(cls) ?? []).filter((b) => hasCtorOf(b));
+        if (bs.length === 0) continue;                   // 还定不下来（或不是基类那个理由）
+        synth.set(cls, bs);
+        grew = true;
+      }
+      if (!grew) break;
+    }
+    for (const a of pending) {
+      const cls = a.emitName;
+      if (cls === null || synth.has(cls) || methods.has(`${cls}$construct`)) continue;
+      if (needsCtor(a, env)) {
+        acct(`合成 '${cls}' 的构造（字段初值 / 事件 / bindable / static construct 那几族）还没接`);
+      }
+    }
+    for (const [cls, bs] of synth) {
+      const selfTy = `(ptr ${clsRoot(cls)})`;
+      const body = bs.map((b) => `    (expr (call ${b}$construct (var $this)))`).join('\n');
+      decls.push(`  (fn ${cls}$construct (($this ${selfTy})) void\n${body})`);
+      /* 造对象与 `basetype.construct(…)` 两处查的是同一张方法表 —— 合成的这一格也得在里头。 */
+      methods.set(`${cls}$construct`, {
+        params: [],
+        defaults: [],
+        ret: null,
+        retDecl: null,
+        emit: `${cls}$construct`,
+        ec: false,
+        stat: false,
+        owner: cls,
+        name: 'construct',
+        node: null,
+        hasBody: false,
+      });
+    }
+  }
+
   /* **方法那一族**（体写在类里的那几格）：一格一格发 `(fn <东家>$<方法名> (($this …) …) …)`。 */
-  for (const [key, mi] of methods) {
+  for (const key of overloads) {
+    acct(`方法 '${key}' 有重载（按实参挑哪一格）还没接`);
+  }  for (const [key, mi] of methods) {
     if (mi.hasBody !== true) continue;                   // 只写原型的，体在类外（下面那条路发）
     const a = aggs.find((x) => x.emitName === mi.owner);
     const kind = a !== undefined && (a.word === 'class' || a.word === 'opaque class') ? 'class' : 'struct';
@@ -358,6 +419,10 @@ export function lowerJncRules(tree, diags, opts = {}) {
     }
     const k = nth.get(t.name) ?? 0;
     nth.set(t.name, k + 1);
+    /* **重载**（同名的第二格函数）：按实参挑哪一格是一整族规则（`frontend-engine/overload.js`
+       那一套：完全一样 / 上转 / 数值转换各一档）。这一层还没接 —— 照发下去方言那侧会撞名
+       （`'q' 重复定义`），而调用那一处查的是**最后**登记的那一格签名，也就是**静静地调错**。 */
+    if (k > 0) { acct(`函数 '${t.name}' 有重载（按实参挑哪一格）还没接`); continue; }
     emitFn(it, t.name, ns, null, ns);
   }
 

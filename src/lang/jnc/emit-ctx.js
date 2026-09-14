@@ -48,6 +48,7 @@ export function makeFnEnv(o) {
     gBindable = new Set(), roots = new Map(), gEmit = new Map(),
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
     gProps = new Map(), propScope = null, aggStatics = new Map(), aggProps = new Map(),
+    aggBases = new Map(),
   } = o;
   let ctxRef = null;
   /* **类那一族在方言里写的是继承链的根**（第五十六刀）—— 发类型时都要带上这一格。 */
@@ -105,7 +106,6 @@ export function makeFnEnv(o) {
     const root = clsRoot(cls);
     const tag = tags.get(cls);
     if (tag === undefined) { acct(`'${cls}' 没有动态类型标签（类体没解出来）`); return null; }
-    if (root !== cls) { acct(`造 '${cls}'：它有基类（基类的构造要逐格调）还没接`); return null; }
     if (fieldInits.has(cls)) { acct(`造 '${cls}'：它的字段写了初值（要合成/插进 construct）还没接`); return null; }
     const ctor = methods.get(`${cls}$construct`);
     /**
@@ -248,6 +248,20 @@ export function makeFnEnv(o) {
   /** 方法体里 `this` 那一格的类型（类是一条引用，结构体是"那段内存的地址"）。 */
   const selfType = () => (self === null ? null
     : (self.kind === 'class' ? { k: 'class', name: self.agg } : { k: 'struct', name: self.agg }));
+  /**
+   * **`basetype` / `basetype1` / `basetype2` 说的是哪一格基类**（type_class.rst:226：前两个
+   * 是同一格）。这一层只答"哪个类"—— 而**一整条继承链共用一格方言结构体**（第五十六刀），
+   * 所以换到基类那一面**发零条指令**：`$this` 原样递下去，只是调的函数换成基类那一个。
+   */
+  const baseAt = (idxNode) => {
+    if (self === null) { acct('`basetype` 不在方法体里'); return null; }
+    const n0 = Number.parseInt(String(idxNode?.value ?? '1'), 10);
+    const i = Number.isFinite(n0) && n0 >= 1 ? n0 : 1;
+    const list = aggBases.get(self.agg) ?? [];
+    const b = list[i - 1];
+    if (b === undefined) { acct(`'${self.agg}' 没有第 ${i} 格基类，可这儿写了 basetype`); return null; }
+    return b;
+  };
   /** 一格可写位置读出来那一段文字（`SHAPE_ACCESS`）。属性那一格的 `args` 是 `this` 那一半。 */
   const readLv = (lv) => SHAPE_ACCESS[lv.shape].read(lv.code, lv.args);
   /**
@@ -873,7 +887,25 @@ export function makeFnEnv(o) {
       let sig = null;
       let selfArg = null;
       let key = asName;
-      if (asName === null && (headOf(fn) === 'field' || headOf(fn) === 'ptr-field')) {
+      /**
+       * **`basetype.foo(…)` / `basetype.construct(…)` 是静态绑定**（第五十六刀，
+       * `CALL_ORDER` 的第 6 条）：说的就是"调基类那一个"，不过虚派发。这一问要排在方法调用
+       * **之前** —— `basetype` 不是一格值，求它只会报"表里没有这一格表达式"。
+       * 换到基类那一面发**零条指令**（整条链共用一格结构体），所以 `$this` 原样递下去。
+       */
+      if (asName === null && headOf(fn) === 'field' && headOf(named(fn)?.obj) === 'basetype') {
+        const fn2 = named(fn) ?? {};
+        const mname = String(fn2.name?.value ?? '');
+        const b = baseAt(named(fn2.obj)?.type);
+        if (b === null) return null;                       // 账已经记过
+        const mi = methods.get(`${b}$${mname}`) ?? fns.get(`${b}$${mname}`);
+        if (mi === undefined) {
+          acct(`基类 '${b}' 上查不着 '${mname}'（合成出来的构造那一族另算）`); return null;
+        }
+        sig = mi;
+        selfArg = mi.stat === true ? null : '(var $this)';
+        key = `${b}$${mname}`;
+      } else if (asName === null && (headOf(fn) === 'field' || headOf(fn) === 'ptr-field')) {
         const fn2 = named(fn) ?? {};
         const mname = String(fn2.name?.value ?? '');
         const ob = objBase(fn2.obj);

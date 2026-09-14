@@ -137,6 +137,8 @@ export function scanAggs(tree, env) {
    * 在方法表（写在类里）或顶层函数表（写在类外）里已经有了，所以这一格只记"它是属性"。
    */
   const props = new Map();
+  /** 同名撞车的那几格方法（重载）—— 这张表按名字存，所以撞了要记下来，发的那一层明说不收。 */
+  const overloads = new Set();
   const scan = (n, owner, inAgg) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
@@ -256,6 +258,10 @@ export function scanAggs(tree, env) {
           const key = `${emitName}$${mname}`;
           const sig = sigOf(named(m.at), env, key, m.type);
           if (sig === null) continue;
+          /* **重载**（同一格东家上同名的两格方法）：按实参挑哪一格是一整族规则
+             （`frontend-engine/overload.js` 那一套）。这一层还没接 —— 这张表按名字存，
+             第二格会**把第一格盖掉**，所以在这儿记下来，发的那一层照它明说不收。 */
+          if (methods.has(key)) overloads.add(key);
           methods.set(key, {
             ...sig, owner: emitName, name: mname, node: m.at, hasBody: mh === 'fn-def',
           });
@@ -372,6 +378,18 @@ export function scanAggs(tree, env) {
   const staticsAll = mergedOf(statics);
   const propsAll = mergedOf(props);
 
+  /* **每一格的直接基类**（方言那一侧的名字，按声明次序）：`basetype` / `basetype1` 是第一格、
+     `basetype2` 是第二格（type_class.rst:226）—— `basetype.construct(…)` 那一族要它。 */
+  const bases = new Map();
+  for (const a of aggs) {
+    const list = [];
+    for (const b of basePaths(a)) {
+      const ba = byName.get(b);
+      if (ba !== undefined && ba.emitName !== null && ba.emitName !== undefined) list.push(ba.emitName);
+    }
+    bases.set(a.emitName, list);
+  }
+
   /* **一整条继承链共用一格结构体**（第五十六刀的 `clsRoot`）：类那一族在方言里写的是
      连通块的**根**。字段表按各自的名字收，写类型时换成根 —— 两件事分开。 */
   const roots = new Map();
@@ -393,5 +411,7 @@ export function scanAggs(tree, env) {
     aggs,
     statics: staticsAll,
     props: propsAll,
+    bases,
+    overloads,
   };
 }
