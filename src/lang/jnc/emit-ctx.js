@@ -223,6 +223,38 @@ export function makeFnEnv(o) {
    *   - 字段写了初值的（那几句要插到 construct 开头，第七十八刀）；
    *   - construct 要实参的（实参得当helper 的形参传进去 —— 另一刀）。
    */
+  /**
+   * **`A a(x, y);` 尾巴上那对括号是构造实参**（第一百〇三刀，94-localctor.jnc）：语料 69 对
+   * （`ui.Action action(icon, text);`，test/ioninja/api/doc_Plugin.jnc:80）。语法上它与"带形参表
+   * 的声明符"长得一模一样（C++ 那个 most vexing parse），所以树上归约出来的是一格 `fn`。
+   *
+   * 判据（与旧降级的 `ctorArgsOf` 逐条同一份）：每一格都得是**无名形参**、`*` 一个都没有、
+   * 修饰词一个都没写、而那一格 type-spec 归约出来的正是一格 `(name <ID>)` —— 那个节点在
+   * 表达式那一侧本来就是"一个名字"，原样拿来当实参。有一格对不上就不是它（`int` 那种内建
+   * 类型关键字、限定名、带 `*` 的都对不上），照旧当形参表看、照旧记账。
+   */
+  const ctorArgsOf = (t) => {
+    const dc = readDcl(t.raw?.dcl);
+    const sf0 = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
+    if (sf0 === undefined) return null;
+    const fs0 = readFormals(sf0.node);
+    if (fs0 === null || fs0.length === 0) return null;
+    const nonEmpty = (x) => Array.isArray(x?.items) && x.items.length > 1;
+    const out = [];
+    for (const f of fs0) {
+      if (f.varargs === true || f.name !== null) return null;
+      if (headOf(f.at) !== 'formal-anon') return null;
+      const fn2 = named(f.at) ?? {};
+      if (nonEmpty(fn2.ptrs)) return null;
+      const spn = fn2.specs;
+      if (!Array.isArray(spn?.items) || headOf(spn) !== 'specs') return null;
+      if (nonEmpty(spn.items[2]) || nonEmpty(spn.items[3])) return null;
+      const ts = spn.items[1];
+      if (headOf(ts) !== 'name') return null;
+      out.push(ts);
+    }
+    return out;
+  };
   const newObj = (cls, argNodes = [], noCtor = false, asStruct = false) => {
     /* **结构体那一侧没有动态类型标签**（第二百一十六刀）：整条链共用一格 struct 那件事是
        类才有的（`$tag` 是给虚派发与 `new` 出来那一格认身份用的），结构体就是一段内存。
@@ -1747,6 +1779,25 @@ export function makeFnEnv(o) {
          */
         const cv = isCurlyNode ? (vn.value ?? null)
           : (isInit && headOf(named(d)?.value) === 'curly' ? named(d).value : null);
+        /**
+         * **`A a(x, y);`**（第一百〇三刀）：尾巴上那对括号在树上是**形参表**，可它是构造实参。
+         * 判据在 `ctorArgsOf`；凑齐了就走造对象那条现成的路（类与结构体各一支，与 `new A(…)`
+         * 是**同一个**构造）。判不出来的照旧往下走，报的还是"函数那一族（fn）"。
+         */
+        if (t.shape === 'fn' && (t.ptrs ?? 0) === 0 && !isInit && !isStatic) {
+          const ca = ctorArgsOf(t);
+          const rb = ca === null ? null : resolveType({ ...t, shape: 'data', suffixes: [] }, env);
+          const bt2 = rb === null || rb.type === null ? null : rb.type;
+          if (bt2 !== null && (bt2.k === 'class' || bt2.k === 'struct')) {
+            const o5 = newObj(bt2.name, ca, false, bt2.k === 'struct');
+            if (o5 === null) return null;                  // 账已经记过
+            /* 名字进局部表时**换成数据那一格**：树上它是 `fn`，可这一格量的类型就是那格类
+               / 结构体本身（不换的话 `a.m_v` 那一处再解一遍又解成"函数那一族"）。 */
+            names.set(t.name, { ...t, shape: 'data', suffixes: [] });
+            out.push(`${pad}(let ${t.name} ${emitType(bt2, 'slot', tyc)} ${o5.code})`);
+            continue;
+          }
+        }
         let r = resolveType(t, env);
         if (r.type === null && cv !== null) {
           const inferred = arrayFromCurly({ name: t.name, type: t, at: node }, env, cv);
