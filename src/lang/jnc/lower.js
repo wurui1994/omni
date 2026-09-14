@@ -100,6 +100,17 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       }
       return null;
     };
+    /** 把 `spec` 那份文件的顶层条目并进来（找不着/解不开各记一笔）。第二遍是句空话。 */
+    const bringOne = (spec, from, why) => {
+      const p = find(spec, from);
+      if (p === null) { if (why !== null) acct(why); return; }
+      if (seen.has(p)) return;                             // 第二遍是句空话
+      seen.add(p);
+      const t2 = parse(p);
+      if (t2 === null || t2 === undefined) { acct(`import '${spec}' 解不开`); return; }
+      brought.push(...chainOf(t2, 'unit-add'));
+      digImports(t2, p);                                   // 名字是传递的
+    };
     const digImports = (n, from) => {
       if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
       if (headOf(n) === 'import') {
@@ -127,18 +138,27 @@ export function lowerJncRules(tree0, diags, opts = {}) {
             + '体按 C_ABI 那条约定去找（这一句在这儿是空跑）');
           return;
         }
-        const p = find(spec, from);
-        if (p === null) { acct(`import '${spec}' 找不着`); return; }
-        if (seen.has(p)) return;                         // 第二遍是句空话
-        seen.add(p);
-        const t2 = parse(p);
-        if (t2 === null || t2 === undefined) { acct(`import '${spec}' 解不开`); return; }
-        brought.push(...chainOf(t2, 'unit-add'));
-        digImports(t2, p);                               // 名字是传递的
+        bringOne(spec, from, `import '${spec}' 找不着`);
         return;
       }
       for (const it of n.items) digImports(it, from);
     };
+    /**
+     * **扩展库那几份隐式 import**（第一百九十九刀，157-libimport.jnc）：jancy 的扩展库除了那张
+     * 源码表（`JNC_LIB_SOURCE_FILE`）还有一张**导入表** —— `JNC_LIB_IMPORT("std_globals.jnc")` /
+     * `("std_Error.jnc")`（jnc_std_StdLib.cpp:930-931）、`("sys_globals.jnc")`
+     * （jnc_sys_SysLib.cpp:218）。那几份声明对**每个模块**都是"一开张就在"的，谁都不用写
+     * 那条 import（`memcpy` / `strlen` / `std.setError` / `sys.getTimestamp` 那几族全在里头）。
+     *
+     * 这一层没有"装扩展库"那一步，所以判据只有一条：**那几份声明找得着吗**（`-I` 里）。
+     * 找不着就什么都不做 —— 于是别的用例一个字都不变（那一句 `why` 递 null，不记账）。
+     * 自己就是那几份之一时不摊自己（按文件名认，免得把这一份的条目摊两遍）。
+     */
+    const selfName = String(opts.path ?? '').split('/').pop();
+    for (const spec of ['std_globals.jnc', 'std_Error.jnc', 'sys_globals.jnc']) {
+      if (spec === selfName) continue;
+      bringOne(spec, opts.path ?? '.', null);
+    }
     digImports(tree, opts.path ?? '.');
     if (brought.length > 0) {
       tree = [...brought, ...chainOf(tree, 'unit-add')].reduce(
