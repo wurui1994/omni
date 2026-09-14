@@ -98,4 +98,32 @@ export const SHAPE_ACCESS = {
     read: (x, self = []) => sx.call(`${x}$get`, self),
     write: (x, v, self = []) => sx.exprStmt(sx.call(`${x}$set`, [...self, v])),
   },
+  /**
+   * **位域**（第一百一十二刀，104-bitfield.jnc / 166-unionnamed.jnc）：它不是一格自己的内存 ——
+   * 几格挤在同一格存储里（`$b<N>`），所以读是"移下来再截宽"、写是**读改写**：
+   *
+   *   读：`(trunc (int 位数) (bin ">>" (pload 存储) (int 偏移)))`（有符号那一格用 `sext`）
+   *   写：`(pstore 存储 (bin "|" (bin "^" (pload 存储) (bin "&" (pload 存储) 那几位的掩码))
+   *                            (bin "<<" (bin "&" 值 低位掩码) (int 偏移))))`
+   *
+   * 两条都是从旧降级的真输出上读下来的。偏移为 0 那一格不发移位（旧降级同）。
+   * `x` 是那格存储的**地址**（`(pfield … $b0)`），所以读要 `pload`、写是 `pstore`。
+   * `args` 带的是 `{ off, cnt, u }` —— 位置的**文字**只有存储那一格，哪几位是位置的一部分。
+   */
+  bits: {
+    read: (x, a = { off: 0, cnt: 32, u: true }) => {
+      const cell = sx.pload(x);
+      const raw = a.off === 0 ? cell : `(bin ">>" ${cell} (int ${a.off}))`;
+      return `(${a.u === true ? 'trunc' : 'sext'} (int ${a.cnt}) ${raw})`;
+    },
+    write: (x, v, a = { off: 0, cnt: 32, u: true }) => {
+      const cell = sx.pload(x);
+      const low = (1n << BigInt(a.cnt)) - 1n;
+      const at = low << BigInt(a.off);
+      const put = a.off === 0
+        ? `(bin "&" ${v} (int ${low}))`
+        : `(bin "<<" (bin "&" ${v} (int ${low})) (int ${a.off}))`;
+      return sx.pstore(x, `(bin "|" (bin "^" ${cell} (bin "&" ${cell} (int ${at}))) ${put})`);
+    },
+  },
 };

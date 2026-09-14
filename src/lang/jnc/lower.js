@@ -238,8 +238,25 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     /* 类那一族**一整条继承链只发一格**（第五十六刀）：不是根的不发。 */
     if ((a.word === 'class' || a.word === 'opaque class')
       && (roots.get(a.emitName) ?? a.emitName) !== a.emitName) continue;
-    const line = structLine(a, env, aggs);
+    const bitsOne = new Map();
+    const line = structLine(a, env, aggs, bitsOne);
     if (line === null || line.line === null) { acct(`聚合体 '${a.emitName}' 还发不出来`); continue; }
+    /**
+     * **位域落在哪一格存储上，发结构体那一遍已经算过了**（第一百一十二刀）—— 读写两侧照它算，
+     * 布局这件事于是只有一处家。收进的是"字段路径"那张表（位域也是**一条路**加上"哪几位"），
+     * 所以取字段那一处照旧一问就查得着。
+     * 类那一族一整条链只发一格结构体，可源码里写的是**派生类**的名字 —— 所以链上每一格都记。
+     */
+    if (bitsOne.size > 0) {
+      const chain = new Set([a.emitName, ...aggs
+        .filter((x) => (roots.get(x.emitName) ?? x.emitName) === a.emitName)
+        .map((x) => x.emitName)]);
+      for (const nm of chain) {
+        const t = aggPaths.get(nm) ?? new Map();
+        for (const [k, v] of bitsOne) if (!t.has(k)) t.set(k, v);
+        aggPaths.set(nm, t);
+      }
+    }
     /* `lines` 是**整批**（union 里套的匿名 struct 排在前头、自己那一行在最后）——
        前头那几行是这一行里字段的类型，方言那一侧要求先声明（103-unionstruct.jnc）。 */
     for (const l of line.lines ?? [line.line]) decls.push(`  ${l}`);

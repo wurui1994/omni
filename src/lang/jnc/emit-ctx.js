@@ -827,11 +827,28 @@ export function makeFnEnv(o) {
        */
       const p = aggPaths.get(aggName)?.get(fname);
       if (p !== undefined) {
-        const rp = resolveType(p.type, env);
+        /* 位域那一格的声明类型自己是 `bitfield` 形状（`resolveType` 对它答"位域"）——
+           问的是"**底**那格类型有多宽、带不带符号"，所以先把那个形状摘掉再解。 */
+        const rp = resolveType(p.bits === true ? { ...p.type, shape: 'data' } : p.type, env);
         if (rp.type === null) { acct(`字段 '${fname}'：${rp.why}`); return null; }
         const typ = withBits(rp.type, p.type);
         let code = baseCode;
         for (const s of p.steps) code = `(pfield ${code} ${s})`;
+        /**
+         * **位域那一格**（第一百一十二刀）：路的尽头是那格**存储**（`$b0`），而"哪几位"是这格
+         * 位置的一部分 —— 读要移下来再截宽、写是读改写（`SHAPE_ACCESS.bits`）。
+         * 读出来那一格的宽度**就是位数**（符号性听声明的那一格），所以窄格的回卷照旧走整数那张表。
+         */
+        if (p.bits === true) {
+          if (typ.k !== 'int') { acct(`位域 '${fname}' 的声明类型不是整数（${typ.k}）`); return null; }
+          const u = typ.u === true;
+          return {
+            shape: 'bits',
+            code,
+            args: { off: p.off, cnt: p.cnt, u },
+            type: { k: 'int', w: p.cnt, u },
+          };
+        }
         return { shape: memberShape(typ.k === 'struct', typ.k === 'arr'), code, type: typ };
       }
       /* 普通字段里查不着 —— 静态字段与属性那几族在这一问里（`MEMBER_ORDER` 第 4 条）。 */

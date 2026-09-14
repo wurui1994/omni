@@ -39,7 +39,7 @@ export const CLASS_TAG = '($tag int)';
  * 有一格字段解不出来、或者碰上还没搬的那几族，答 `{ line: null, why }`。
  * `lines` 里还带上**顺带发出来的那几行**（union 里套的匿名 struct 各自一行，先发）。
  */
-export function structLine(agg, env, allAggs = null) {
+export function structLine(agg, env, allAggs = null, bits = null) {
   const name = agg.emitName ?? nameText(agg.name);
   if (name === null) return { line: null, lines: [], why: '无名聚合体' };
   const isClass = agg.word === 'class' || agg.word === 'opaque class';
@@ -74,7 +74,9 @@ export function structLine(agg, env, allAggs = null) {
       if (d.word !== 'class' && d.word !== 'opaque class') continue;
       if (classRoot(d, allAggs, env) !== agg) continue;
       const dn = d.emitName ?? nameText(d.name);
-      const f = ownFields(d, env, { owner: dn ?? name, extra, fails, tail, tailR });
+      const f = ownFields(d, env, {
+        owner: dn ?? name, extra, fails, tail, tailR, bits,
+      });
       if (f === null) {
         return { line: null, lines: [], why: `有字段还解不出来（${fails.join('；') || '?'}）` };
       }
@@ -88,7 +90,9 @@ export function structLine(agg, env, allAggs = null) {
       }
     }
   } else {
-    const own = ownFields(agg, env, { owner: name, extra, fails, tail, tailR });
+    const own = ownFields(agg, env, {
+      owner: name, extra, fails, tail, tailR, bits,
+    });
     if (own === null) {
       return { line: null, lines: [], why: `有字段还解不出来（${fails.join('；') || '?'}）` };
     }
@@ -221,8 +225,25 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [], 
   /* 位域挤格子的状态：`bits` 是底宽、`used` 是已经占掉的位数。碰上非位域就**收口**。 */
   let pack = null;
   let anonStructs = 0;                                             // union 体里第几个匿名 struct
+  /**
+   * **这一格里那几格位域落在哪儿**（第一百一十二刀）：收口那一刻才知道存储格叫什么
+   * （`$b<它落在第几格>`），所以先攒着、收口时一起记进 `ctx.bits`。
+   * 记的是"名字 → 到那格存储的路 + 哪几位 + 声明的那格类型"—— 读写两侧照它算，
+   * 布局这件事于是只有一处家（发结构体与读写位域用的是同一遍）。
+   */
+  let pend = [];
   const flush = () => {
-    if (pack !== null) { out.push(`($b${out.length} int)`); pack = null; }
+    if (pack !== null) {
+      const slot = `$b${out.length}`;
+      out.push(`(${slot} int)`);
+      for (const p of pend) {
+        ctx.bits?.set(p.name, {
+          steps: [...(ctx.prefix ?? []), slot], off: p.off, cnt: p.cnt, type: p.type, bits: true,
+        });
+      }
+      pend = [];
+      pack = null;
+    }
   };
   agg.members.forEach((m, i) => {
     /* **匿名 union**：成员摊进外面这个结构体，发的时候括回成 `(union …)`（第一百一十刀）。
@@ -237,7 +258,9 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [], 
         const j = anonStructs;
         anonStructs += 1;
         const nm2 = `${ctx.owner}$u0$s${j}`;
-        const f = ownFields(n, env, { ...ctx, owner: nm2 });
+        const f = ownFields(n, env, {
+          ...ctx, owner: nm2, prefix: [...(ctx.prefix ?? []), `$s${j}`],
+        });
         if (f === null) { out.push(null); return; }
         ctx.extra?.push(`(struct ${nm2} ${f.join(' ')})`);
         out.push(`($s${j} ${nm2})`);
@@ -263,6 +286,7 @@ function ownFields(agg, env, ctx = { owner: '', extra: [], fails: [], tail: [], 
       }
       if (pack !== null && (pack.bits !== bits || pack.used + n > bits)) flush();
       if (pack === null) pack = { bits, used: 0 };
+      if (m.name !== null) pend.push({ name: m.name, off: pack.used, cnt: n, type: m.type });
       pack.used += n;
       return;
     }
@@ -372,7 +396,12 @@ function unionFields(uni, env, ctx, unionAt) {
         const j = sn;
         sn += 1;
         const nm = `${ctx.owner}$u${unionAt}$s${j}`;
-        const fields = ownFields(inner, env, { owner: nm, extra: ctx.extra });
+        const fields = ownFields(inner, env, {
+          owner: nm,
+          extra: ctx.extra,
+          bits: ctx.bits,
+          prefix: [...(ctx.prefix ?? []), `$s${j}`],
+        });
         if (fields === null) { bad = true; return; }
         ctx.extra.push(`(struct ${nm} ${fields.join(' ')})`);
         out.push(`($s${j} ${nm})`);
