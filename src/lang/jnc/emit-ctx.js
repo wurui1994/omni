@@ -1034,6 +1034,30 @@ export function makeFnEnv(o) {
     }
     return { code: `(call ${f.key} ${v.code})`, type: rt };
   };
+  /**
+   * **拿一格初值调 `operator :=`**（第二百零九刀）：`SB a = 7;` 这一句在 jancy 那边**不是**
+   * type_class.rst:19 说的"给类的变量赋值" —— 是"造一格对象、再拿初值调那个算符"。语料里最常见
+   * 的一格是 `std.StringBuilder string = $"$value";`（formatInteger.jnc:14），而
+   * std.StringBuilder 上写着三条 `size_t errorcode operator := (…)`（std_String.jnc:48/52/56）。
+   *
+   * 挑哪一条与赋值那一处是同一格机器（`pickOvl`）。没写那个算符就答 null（调用方记账）——
+   * 局部量与模块级那两处共用这一份，免得两边各写一遍。
+   */
+  const opAssignLines = (dst, type, valueNode, pad) => {
+    const agg = type?.k === 'class' || type?.k === 'struct' ? type.name : null;
+    if (agg === null) return null;
+    const base = `${agg}$op$assign`;
+    const oa0 = methods.get(base);
+    if (oa0 === undefined) return null;
+    const one = pickOvl(base, oa0, [valueNode]);
+    if (one === null) return null;                            // 账已经记过
+    const pt = (one.sig.params ?? [])[0] ?? null;
+    const pr = pt === null ? null : resolveType(pt, env);
+    const want = pr === null || pr.type === null ? null : withBits(pr.type, pt);
+    const v = emitExpr(valueNode, want, ctxRef);
+    if (v === null) return null;
+    return [`${pad}(expr (call ${one.key} ${dst} ${v.code}))`];
+  };
   const lvOf = (node) => {
     const h = headOf(node);
     const nm2 = named(node) ?? {};
@@ -1423,6 +1447,8 @@ export function makeFnEnv(o) {
     copyLines: (dst, src, type, pad) => copyValLines({
       dst, src, type, pad, fieldsOf,
     }),
+    /** **拿一格初值调 `operator :=`**（第二百零九刀）：模块级那一格类变量写了初值时要它。 */
+    opAssignLines: (dst, type, valueNode, pad) => opAssignLines(dst, type, valueNode, pad),
     /**
      * **赋值当表达式用**（第一百二十七 / 一百二十八刀的那一族：`return m_i = v + 1;`、
      * 链式 `a = b = c`、`int r = *p = 5;`）。方言里赋值是**一条语句**，答不出值 ——
@@ -1756,6 +1782,23 @@ export function makeFnEnv(o) {
             continue;
           }
           out.push(`${pad}(let ${t.name} ${ty} ${z})`);
+          continue;
+        }
+        /**
+         * **写了初值的类变量**（`SB a = 7;`，第二百零九刀）：造一格对象、再拿初值调
+         * `operator :=` —— 构造先跑、算符后跑（190-opassigndecl.jnc 的 `m_ctor` 量的正是这个
+         * 次序）。这一问要排在底下"求一格值再 let"之前：那一条会把 `(int 7)` 静静地当成
+         * 一格 `SB*` 装进去。没写那个算符的照旧往下走（那才是"给类的变量赋值"那一族）。
+         */
+        if (r.type.k === 'class' && (t.ptrs ?? 0) === 0
+          && methods.has(`${r.type.name}$op$assign`)) {
+          const o3 = newObj(r.type.name);
+          if (o3 === null) return null;                       // 账已经记过
+          const ls3 = opAssignLines(`(var ${t.name})`, r.type, named(d)?.value, pad);
+          if (ls3 === null) {
+            acct(`'${t.name}' 的初值调不动 '${r.type.name}' 的 operator :=`); return null;
+          }
+          out.push(`${pad}(let ${t.name} ${ty} ${o3.code})`, ...ls3);
           continue;
         }
         /**

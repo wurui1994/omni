@@ -452,7 +452,16 @@ export function lowerJncRules(tree0, diags, opts = {}) {
           continue;
         }
         if (r.type.k === 'class') {
-          acct(`模块级 '${t.name}' 写了初值的聚合体（要逐字段抄一份）还没接`); continue;
+          /* **模块级那一格类变量写了初值**（`SB g_a = 5;`，第二百零九刀）：上头那一支已经把
+             对象造好了（pnew + `$tag` + 构造），这儿只补"拿初值调 `operator :=`"那一句 ——
+             与局部量那一处共用同一份（`opAssignLines`）。没写那个算符的照旧记账不收。 */
+          const mi1 = modInit();
+          const ls1 = mi1.e.opAssignLines(`(var ${full})`, r.type, named(d)?.value, '    ');
+          if (ls1 === null) {
+            acct(`模块级 '${t.name}' 写了初值的类变量（要 operator :=）还没接`); continue;
+          }
+          inits.push(...ls1);
+          continue;
         }
         const mi = modInit();
         const v = mi.ctx.expr(named(d)?.value, mi.e.withBits(r.type, t));
