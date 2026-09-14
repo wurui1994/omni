@@ -30,6 +30,7 @@ import { fnHead, readFormals, fnName, needsCtor, hasStaticCtor } from './emit-fn
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
 import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
+import { templateTable, expandTemplates, synthType } from './generic.js';
 import { zeroText } from './expr-table.js';
 
 /** 顶层那一串条目（`unit` / `unit-add` 空基例链），带上命名空间前缀。 */
@@ -54,10 +55,38 @@ function topItems(tree, out = [], ns = null) {
  * 一份语法树 → 一份方言文本。`opts.needEntry` 为真时没有 `main` 就报错（跑要入口，`sx` 不要）。
  * 降不动答 `''` 并往 `diags` 里记 —— 与旧降级同一条口径。
  */
-export function lowerJncRules(tree, diags, opts = {}) {
+export function lowerJncRules(tree0, diags, opts = {}) {
   const env = new Map();
   const accts = [];
   const acct = (why) => { if (!accts.includes(why)) accts.push(why); };
+
+  /**
+   * **泛型 = 单态化**（第一百一十七刀，`generic.js`）：一格用点造一格实例。这一步排在**最前面**
+   * —— 替换完那棵树上就只剩普通的 `agg` / `typedef` / `fn-def`，往下每一层（探子、字段表、
+   * 发声明、发体）**一个字都不用改**。造出来的那几格插在**最前头**：它们是别人字段的类型，
+   * 方言那一侧要求先声明。
+   *
+   * 合成实参那几条 typedef（`Box<int const*>` 的 `jnc$tp$int_const_p`）直接进类型环境。
+   * 解不出来的那几笔照实记账（不猜）。
+   */
+  let tree = tree0;
+  const templates = templateTable(tree);
+  if (templates.size > 0) {
+    const ex = expandTemplates(tree, templates);
+    for (const [w, n] of ex.fails) acct(`泛型：${w}（${n} 处）`);
+    for (const [syn, e] of ex.typedefs) {
+      env.set(syn, { kind: 'typedef', type: synthType(e), name: syn });
+    }
+    const head = [];
+    for (const td of ex.tdefs.values()) if (td !== null && td !== undefined) head.push(td);
+    for (const ag of ex.insts.values()) if (ag !== null && ag !== undefined) head.push(ag);
+    for (const os of ex.outers.values()) head.push(...os);
+    /* 顶层那条链是左递归的空基例（`(unit)` + `unit-add`）—— 照它的形状重搭一条。 */
+    tree = [...head, ...chainOf(ex.tree, 'unit-add')].reduce(
+      (acc, one) => ({ items: [{ value: 'unit-add' }, acc, one] }),
+      { items: [{ value: 'unit' }] },
+    );
+  }
 
   collectEnumConsts(tree, env);
   const {
