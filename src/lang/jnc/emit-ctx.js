@@ -48,7 +48,7 @@ export function makeFnEnv(o) {
     gBindable = new Set(), roots = new Map(), gEmit = new Map(),
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
     gProps = new Map(), propScope = null, aggStatics = new Map(), aggProps = new Map(),
-    aggBases = new Map(),
+    aggBases = new Map(), helperBox = new Set(),
   } = o;
   let ctxRef = null;
   /**
@@ -783,6 +783,46 @@ export function makeFnEnv(o) {
      * 给多了、或落在"不是一整块"的类型上：当场记账（不猜）。
      */
     curlyLines: (dst, type, node, pad) => curlyLines(dst, type, node, pad),
+    /**
+     * **赋值当表达式用**（第一百二十七 / 一百二十八刀的那一族：`return m_i = v + 1;`、
+     * 链式 `a = b = c`、`int r = *p = 5;`）。方言里赋值是**一条语句**，答不出值 ——
+     * 所以旧降级抬出一格助手函数：
+     *
+     *   `(fn jnc$asgn$int ((p (ptr int)) (x int)) int (pstore (var p) (var x)) (ret (var x)))`
+     *
+     * 于是"写进去再答那个值"就是**一次调用**（106-asgnexpr.jnc 的真输出）。一格类型一份助手，
+     * 一份模块只发一次（`helperBox`）。
+     *
+     * 左边得是一格**有地址**的位置（`ptr` 形状）：普通的名字那一格没有地址，旧降级那时候把它
+     * 提到堆上 —— 那是"提"那一族的事，这儿明说不收。
+     */
+    asgnExpr: (node, want) => {
+      const an = named(node) ?? {};
+      const op = String(an.op?.value ?? '=');
+      if (op !== '=') { acct(`复合赋值 '${op}' 当表达式用还没接`); return null; }
+      const lv = lvOf(an.a);
+      if (lv === null) return null;                        // 账已经记过
+      if (lv.shape !== 'ptr') {
+        acct(`赋值当表达式用：左边那一格是 ${lv.shape}（要一格有地址的位置）还没接`); return null;
+      }
+      const ty = lv.type;
+      if (!['int', 'real', 'bool', 'string'].includes(ty?.k)) {
+        acct(`赋值当表达式用落在 ${ty?.k ?? '?'} 上还没接`); return null;
+      }
+      const v = emitExpr(an.b, ty, ctxRef);
+      if (v === null) return null;                         // 账已经记过
+      const tw = emitType(ty, 'value', tyc);
+      const nm4 = `jnc$asgn$${tw.replace(/[^A-Za-z0-9]/g, '')}`;
+      if (!helperBox.has(nm4)) {
+        helperBox.add(nm4);
+        helpers.push([
+          `  (fn ${nm4} ((p (ptr ${tw})) (x ${tw})) ${tw}`,
+          '    (pstore (var p) (var x))',
+          '    (ret (var x)))',
+        ].join('\n'));
+      }
+      return { code: `(call ${nm4} ${lv.code} ${v.code})`, type: ty };
+    },
     newSlot: (prefix, ty) => {
       const nm2 = `${prefix}${tmpBox.n}`;
       tmpBox.n += 1;

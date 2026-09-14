@@ -324,6 +324,15 @@ export function emitExpr0(n, want, ctx) {
     return r;
   }
 
+  /* **赋值当表达式用**（`return m_i = v + 1;`、链式 `a = b = c`）：方言里赋值是一条语句，
+     所以那一格落成"写进去再答那个值"的一次调用 —— 由调用方那一层给（它知道地址与助手）。 */
+  if (h === 'assign') {
+    const n0 = ctx.acctSeen?.() ?? 0;
+    const r = ctx.asgnExpr?.(n, want);
+    if (r === null || r === undefined) return soft(ctx, n0, '赋值当表达式用还拼不出来');
+    return r;
+  }
+
   ctx.acct(`表里没有这一格表达式：${h}`);
   return null;
 }

@@ -81,6 +81,8 @@ export function lowerJncRules(tree, diags, opts = {}) {
   let mainBody = null;
   const tmpBox = { n: 0 };
   const ecBox = { n: 0 };
+  /** 一份模块只发一次的那几格助手（`jnc$asgn$T` 那一族）—— 键就是它的名字。 */
+  const helperBox = new Set();
 
   /**
    * **模块级那一层的初值**（jancy 的 `module.construct`）：`int counter = 3;` 里右边那一格
@@ -101,6 +103,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
         aggFields,
         aggCtors,
         ecBox,
+        helperBox,
         tmpBox,
         globals,
         gLifted,
@@ -313,6 +316,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
       fieldInits,
       self: selfInfo,
       ecBox,
+      helperBox,
       tmpBox,
       globals,
       gLifted,
@@ -374,6 +378,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
       fieldInits,
       self: { agg: cls, kind, emit: kind === 'class' ? clsRoot(cls) : cls },
       ecBox,
+      helperBox,
       tmpBox,
       globals,
       gLifted,
