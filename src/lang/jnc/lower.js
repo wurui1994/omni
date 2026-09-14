@@ -26,7 +26,7 @@ import { globalLines, addrTaken, liftable, liftedType } from './emit-global.js';
 import { fnHead, readFormals, fnName } from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
-import { lvalueShape, SHAPE_ACCESS } from './lvalue-table.js';
+import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
 import { zeroText } from './expr-table.js';
 
 /** 顶层那一串条目（`unit` / `unit-add` 空基例链），带上命名空间前缀。 */

@@ -1,4 +1,8 @@
-// src/lang/jnc/fmt-table.js —— **格式串**那一族（`printf` 与 `$"…"` 共用一张表）
+// src/lang/common/fmt.js —— **格式串**那一族（C 的 printf 语义，`printf` 与 `$"…"` 共用一张表）
+//
+// 家在公共这一层（ADR-0031 轴 B）：`%08.3f` 该长什么样是**C 的规矩**，不是 jancy 的 ——
+// C 前端那一侧要印格式串时读的该是同一份。方言长出"格式化"那一格之后（ADR-0031 §3 第五条），
+// 这一整份塌成一次调用。
 //
 // 从旧降级 `fmtRun`（`frontend-jnc/lower.js:11847-11930`）读出来。分出来的理由是
 // **"算法只该有一处家"**：`printf("%08.3f", x)` 与 `$"%08.3f"(x)` 该长什么样必须一个字不差
@@ -10,7 +14,7 @@
 //   - `'str'` ：一个都不切（换行就是串里的一个字符），整条拼成**一格字符串的代码**。
 //     格式化字面量 `$"…"` 走这条 —— 它产出的是一格值（literals.rst:62），不是一次输出。
 
-import { intConvCode } from './int-table.js';
+import { intConvCode } from './int.js';
 
 /** 段里那几块（字符串常量与 `(tostr …)`）拼起来：**左结合**的 `(bin "+" …)`。 */
 export function joinPieces(pieces) {

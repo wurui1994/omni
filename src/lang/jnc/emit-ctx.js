@@ -16,13 +16,13 @@ import { resolveType, INT_BITS } from './resolve-type.js';
 import { emitType } from './emit-type.js';
 import { readFormals, OP_NAMES } from './emit-fn.js';
 import { emitExpr } from './emit-expr.js';
-import { lvalueShape, SHAPE_ACCESS } from './lvalue-table.js';
+import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
 import {
   memberShape, copyValLines, STR_MEMBERS, strMember,
 } from './member-table.js';
 import { compoundValue, errTest, errValue, escapeText } from './stmt-table.js';
 import { wrapTo, realOf, intConvCode } from './int-table.js';
-import { fmtRun, specPiece, specDress } from './fmt-table.js';
+import { fmtRun, specPiece, specDress } from '../common/fmt.js';
 import { zeroText } from './expr-table.js';
 import {
   addrTaken, liftable, liftedType, cellName,

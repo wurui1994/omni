@@ -1,4 +1,8 @@
-// src/lang/jnc/lvalue-table.js —— **可写位置**那一层的表（读写都从它出发）
+// src/lang/common/place.js —— **可写位置**（place）那一层的表：读写都从它出发
+//
+// 家在公共这一层（ADR-0031 轴 B）："位置与值分开、读一条边写一条边"是 C 系语言的共性
+// （C 的 lvalue、Rust 的 place、LLVM 的 load/store）。方言把 place 变成一格真概念之后
+// （ADR-0031 §5 最后一条），这四种形状就退化成"读/写"两个算子。
 //
 // 从旧降级 `lvalue` / `nameLv`（`frontend-jnc/lower.js:10977-11059`）整块读出来。
 // 一格可写位置有三种**形状**，读写照形状走，所以这一层答的是形状而不是文字：
@@ -8,7 +12,7 @@
 //
 // 次序在这一层就是规则本身：谁遮住谁、谁要排在谁前面，每条都带出处。
 
-import * as sx from '../common/sx.js';
+import * as sx from './sx.js';
 
 /**
  * **`lvalue` 的分派次序**（lower.js:10977-10994）。

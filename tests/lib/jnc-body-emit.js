@@ -27,14 +27,14 @@ import { evalConst, collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { resolveType } from '../../src/lang/jnc/resolve-type.js';
 import { emitType } from '../../src/lang/jnc/emit-type.js';
 import { compoundValue, errTest, errValue, escapeText } from '../../src/lang/jnc/stmt-table.js';
-import { lvalueShape, SHAPE_ACCESS } from '../../src/lang/jnc/lvalue-table.js';
+import { lvalueShape, SHAPE_ACCESS } from '../../src/lang/common/place.js';
 import { memberShape, copyValLines, STR_MEMBERS, strMember } from '../../src/lang/jnc/member-table.js';
 import { readFormals } from '../../src/lang/jnc/emit-fn.js';
 import { emitBody } from '../../src/lang/jnc/emit-body.js';
 import { emitExpr } from '../../src/lang/jnc/emit-expr.js';
 import { INT_BITS } from '../../src/lang/jnc/resolve-type.js';
 import { wrapTo, realOf, intConvCode } from '../../src/lang/jnc/int-table.js';
-import { fmtRun, specPiece } from '../../src/lang/jnc/fmt-table.js';
+import { fmtRun, specPiece } from '../../src/lang/common/fmt.js';
 import { zeroText } from '../../src/lang/jnc/expr-table.js';
 
 const argv = process.argv.slice(2);
