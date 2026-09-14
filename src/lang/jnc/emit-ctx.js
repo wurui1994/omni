@@ -535,28 +535,74 @@ export function makeFnEnv(o) {
       return [`${pad}(pstore ${at} ${v.code})`];
     };
     const out = [];
+    /**
+     * **点名那一项与空位那一项**（第二百一十七刀，14-curly.jnc / 23-addr-global.jnc）：
+     * jancy 的花括号初值收 C99 那两种写法 —— `{ 1, m_z = 3 }` / `{ [1] = 20, [3] = 40 }`
+     * 点着名字（或下标）写，`{ , 20, , 40 }` 空着一位。
+     *
+     * 规矩与 C99 一样，一句话：**位置是一格游标**。挨着写的那几项落在游标上、游标往后走一格；
+     * 点名那一项**把游标挪到它点的那一格**，写完接着往后走（所以 `{ 1, m_z = 3 }` 里
+     * 那个 `1` 落在第一格）；空位只把游标往后拨、一个字都不发（那一格保持零 ——
+     * jancy 的 `skipCurlyInitializerItem` 与第十四刀那条同一件事）。
+     *
+     * 点名点不着（既不是这格结构体的字段、也不是一格能算出来的下标）就记账 —— 不猜。
+     */
+    const nameOf = (it) => {
+      const n0 = named(it)?.name;
+      if (n0 === null || n0 === undefined) return null;
+      /* 点名那一格在树上是**一个记号**（`{ m_z = 3 }` 的 `m_z` 是 atom，不是 `(name …)`）——
+         按表读树：这一格的洞里躺的就是那个标识符本身。 */
+      if (!Array.isArray(n0.items)) return typeof n0.value === 'string' ? n0.value : null;
+      if (headOf(n0) === 'name') return String(named(n0)?.text?.value ?? '');
+      return null;
+    };
     if (type?.k === 'arr') {
-      if (items.length > type.n) {
-        acct(`花括号里给了 ${items.length} 格，可那一格数组只有 ${type.n} 格`); return null;
-      }
       const b0 = `(pelem ${dst})`;
-      for (const [i, it] of items.entries()) {
-        const ls = one(i === 0 ? b0 : `(padd ${b0} (int ${i}))`, type.el, it);
+      let at = 0;
+      for (const it of items) {
+        if (headOf(it) === 'skip-item') { at += 1; continue; }
+        let one0 = it;
+        if (headOf(it) === 'named-item') {
+          const k0 = evalConst(named(it)?.name, env);
+          if (k0 === null || k0 === undefined) {
+            acct('花括号里点名那一项的下标算不出来'); return null;
+          }
+          at = Number(k0);
+          one0 = named(it)?.value;
+        }
+        if (at >= type.n) {
+          acct(`花括号写到第 ${at + 1} 格，可那一格数组只有 ${type.n} 格`); return null;
+        }
+        const ls = one(at === 0 ? b0 : `(padd ${b0} (int ${at}))`, type.el, one0);
         if (ls === null) return null;
         out.push(...ls);
+        at += 1;
       }
       return out;
     }
     if (type?.k === 'struct') {
       const fs = fieldsOf(type.name);
       if (fs === null) { acct(`花括号：'${type.name}' 的字段表还没有`); return null; }
-      if (items.length > fs.length) {
-        acct(`花括号里给了 ${items.length} 格，可 '${type.name}' 只有 ${fs.length} 格字段`); return null;
-      }
-      for (const [i, it] of items.entries()) {
-        const ls = one(`(pfield ${dst} ${fs[i].name})`, fs[i].type, it);
+      let at = 0;
+      for (const it of items) {
+        if (headOf(it) === 'skip-item') { at += 1; continue; }
+        let one0 = it;
+        if (headOf(it) === 'named-item') {
+          const fn0 = nameOf(it);
+          const ix = fn0 === null ? -1 : fs.findIndex((f) => f.name === fn0);
+          if (ix < 0) {
+            acct(`花括号里点着 '${fn0 ?? '?'}'，可 '${type.name}' 上没有这格字段`); return null;
+          }
+          at = ix;
+          one0 = named(it)?.value;
+        }
+        if (at >= fs.length) {
+          acct(`花括号写到第 ${at + 1} 格，可 '${type.name}' 只有 ${fs.length} 格字段`); return null;
+        }
+        const ls = one(`(pfield ${dst} ${fs[at].name})`, fs[at].type, one0);
         if (ls === null) return null;
         out.push(...ls);
+        at += 1;
       }
       return out;
     }
@@ -1837,9 +1883,10 @@ export function makeFnEnv(o) {
           if (r.type.k !== 'arr' && r.type.k !== 'struct') {
             acct(`局部量 '${t.name}' 的花括号初值落在 ${r.type.k} 上（那不是一整块）还没接`); return null;
           }
-          if (taken.has(t.name)) {
-            acct(`局部量 '${t.name}' 被取过地址又写了花括号初值 —— 那两件事的次序还没量`); return null;
-          }
+          /* **写了花括号初值又被 `&` 取过地址不是两件难事**（第二百一十八刀，14-curly.jnc 的
+             `Point* pp = &a;`）：走到这儿的只有结构体与数组，而它们那一格里放的**本来就是
+             地址**（第十二 / 二十一刀）—— `&a` 一个字都不发，压根没有"提到堆上"这一步，
+             所以也谈不上次序。先前这儿拦着，那是把"提不动"当成了"还没接"。 */
           const ty1 = emitType(r.type, 'slot', tyc);
           const ls1 = curlyLines(`(var ${t.name})`, r.type, cv, pad);
           if (ls1 === null) return null;                   // 账已经记过

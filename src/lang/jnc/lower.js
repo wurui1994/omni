@@ -382,9 +382,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         if (rc.k !== 'arr' && rc.k !== 'struct') {
           acct(`模块级 '${t.name}' 的花括号初值落在 ${rc.k} 上（那不是一整块）还没接`); continue;
         }
-        if (gLifted.has(t.name)) {
-          acct(`模块级 '${t.name}' 被取过地址又写了花括号初值 —— 那两件事的次序还没量`); continue;
-        }
+        /* **写了花括号初值又被 `&` 取过地址不是两件难事**（第二百一十八刀，23-addr-global.jnc）：
+           走到这儿的只有结构体与数组，而它们那一格里放的**本来就是地址**（第十二 / 二十一刀）
+           —— `&t` 一个字都不发，压根没有"提到堆上"那一步。局部量那一处同一条。 */
         const full = ns === null ? t.name : `${ns}$${t.name}`;
         cells.push(`    (set ${full} (pnew ${emitType(rc, 'slot', tyc)} (int 1)))`);
         const mi2 = modInit();
