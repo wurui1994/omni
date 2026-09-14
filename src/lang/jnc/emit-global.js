@@ -12,6 +12,7 @@
 //   - 完整声明式属性**体里**那几格字段落成 `<属性名>$<字段名>`。
 
 import { headOf, named } from './adapt.js';
+import { allInChain } from './declare.js';
 import { readBodyMembers } from './agg.js';
 import { resolveType } from './resolve-type.js';
 import { emitType } from './emit-type.js';
@@ -67,17 +68,17 @@ function arrayFromCurly(m, env) {
   return { k: 'arr', el: el.type, n };
 }
 
-/** `items` / `items-add` 那条链上有几格（左递归的链：基例一格 + 每个 add 一格）。 */
+/**
+ * `items` 那条链上**真有值**的项数。链是"基例带一项"那一族（`(items 第一项)` + `items-add`），
+ * 所以要用 `allInChain` 摊平；摊出来的那几格里**没有头名的**（尾巴上那个逗号留下的空位）
+ * 不算一项 —— 189-importcurly.jnc 与 196-localstruct.jnc 都是 `{ …, …, }` 这么写的。
+ */
 function chainCount(node) {
-  let n = 0;
-  let cur = node;
-  while (cur !== null && cur !== undefined && Array.isArray(cur.items)) {
-    const h = headOf(cur);
-    if (h === 'items-add') { n += 1; cur = named(cur)?.list; continue; }
-    if (h === 'items') { n += named(cur)?.first === undefined ? 0 : 1; break; }
-    break;
-  }
-  return n;
+  return allInChain(node, 'items-add', 'items').filter((x) => {
+    if (x === null || x === undefined) return false;                 // 尾巴上那个逗号留下的空位
+    if (!Array.isArray(x.items)) return true;                        // 一格记号（`{ 1, 2, 3 }`）
+    return x.items.length > 1;                                       // 空占位的 list 不算一项
+  }).length;
 }
 
 /**
@@ -94,24 +95,27 @@ export function staticCtorFlag(agg) {
  * （decl_storage.rst："allocated at the program start"），名字是**源码里那个名字** +
  * `$s<临时号>`（`n$s0` / `v$s1` / `c$s2`，25-static-local.jnc）——不带函数名前缀。
  *
- * 写了初值的那一格还多发一格 **`$1` 闸门**（bool）：jancy 就地把初值包在 `once` 里
- * （`jnc_ct_Parser.cpp:2452` 那四句），所以"初值只跑一次"。初值空着就不包，也就不发闸门
- * （同处 2454 行的 `m_initializer.isEmpty()`）。
+ * 闸门的判据是**"这一格要不要初始化一次"**：写了初值，或类型是类（一定要 new 一格）、
+ * 或带构造的结构体。jancy 就地把初值包在 `once` 里（jnc_ct_Parser.cpp:2452），
+ * 初值空着又不用构造就不包、也就没有闸门（同处 2454）。
+ * `static Counter c;` 一个字的初值都没写，可旧降级照样发 `c$s0$1`（138-staticclass.jnc）。
  *
- * `idx` 是共用的临时号（与 `$newoN` 那一族同一个计数器）。
+ * `idx` 是共用的临时号（与 `$newoN`、`jnc$once$N` 同一个计数器）。
  */
 export function staticLocalLines(m, env, ctx = { idx: 0, hasInit: false }) {
   if (m === null || m === undefined || m.name === null) return { lines: [], why: '没有名字' };
-  const r = resolveType(m.type, env);
-  if (r.type === null) return { lines: [], why: r.why };
+  let rt = resolveType(m.type, env).type;
+  if (rt === null) rt = arrayFromCurly(m, env);                      // 长度从花括号初值里数
+  if (rt === null) return { lines: [], why: resolveType(m.type, env).why };
   const tc = { clsRoot: ctx.clsRoot ?? ((n) => n) };
   const base = `${m.name}$s${ctx.idx}`;
-  /* **取过地址就提一格**：静态局部量与模块级变量同一条（第二十六刀那份语料里
-     `&c` 就是量这一格的 —— 旧降级发的是 `(global c$s2 (ptr int))`）。 */
+  /* **取过地址就提一格**：静态局部量与模块级变量同一条（`&c` 让 `c$s2` 成了 `(ptr int)`）。 */
   const taken = ctx.taken ?? new Set();
-  const box = taken.has(m.name) && LIFTABLE.has(r.type.k);
-  const lines = [`(global ${base} ${box ? lifted(r.type, tc) : emitType(r.type, 'slot', tc)})`];
-  if (ctx.hasInit) lines.push(`(global ${base}$1 bool)`);
+  const box = taken.has(m.name) && LIFTABLE.has(rt.k);
+  const lines = [`(global ${base} ${box ? lifted(rt, tc) : emitType(rt, 'slot', tc)})`];
+  const needsOnce = ctx.hasInit || rt.k === 'class'
+    || (rt.k === 'struct' && (ctx.hasCtor ?? false));
+  if (needsOnce) lines.push(`(global ${base}$1 bool)`);
   return { lines, why: null };
 }
 

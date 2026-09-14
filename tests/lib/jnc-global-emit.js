@@ -141,6 +141,7 @@ for (const f of files) {
         if (t === null || t.name === null) continue;
         const full = owner === null || owner === undefined ? t.name : `${owner}$${t.name}`;
         env.set(full, { kind: 'typedef', name: full, type: t });
+        if (!env.has(t.name)) env.set(t.name, { kind: 'typedef', name: full, type: t });
       }
       return;
     }
@@ -150,11 +151,16 @@ for (const f of files) {
         a.emitName = owner === null || owner === undefined
           ? nameText(a.name) : `${owner}$${nameText(a.name)}`;
         inner = a.emitName;
-        env.set(a.emitName, {
+        /* **两个键都放**：全名（`ui$Item`）与短名（`Item`）—— 同一个名字空间里短名就看得见，
+           而 typedef 那一跳里记的正是短名（`typedef Item Opt;`）。值都用全名当 emit 名。 */
+        const rec0 = {
           kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
           name: a.emitName,
           agg: a,
-        });
+        };
+        env.set(a.emitName, rec0);
+        const short0 = nameText(a.name);
+        if (short0 !== null && !env.has(short0)) env.set(short0, rec0);
       }
     }
     /* **枚举那一格也要进环境**：`Lines g_lines = 0;` 里的 `Lines` 是一格枚举类型
@@ -166,6 +172,7 @@ for (const f of files) {
       if (en !== null) {
         const full = owner === null || owner === undefined ? en : `${owner}$${en}`;
         env.set(full, { kind: 'enum', name: full });
+        if (!env.has(en)) env.set(en, { kind: 'enum', name: full });
       }
     }
     for (const it of n.items) scanAggs(it, inner);
@@ -287,7 +294,7 @@ for (const f of files) {
       continue;
     }
     const { m, hasInit } = one;
-    const r = staticLocalLines(m, env, { idx: tmp, hasInit, clsRoot: rootOf, taken });
+    const r = staticLocalLines(m, env, { idx: tmp, hasInit, clsRoot: rootOf, taken, hasCtor: true });
     tmp += 1;
     if (r.lines.length === 0) {
       skip.set(r.why, (skip.get(r.why) ?? 0) + 1);
