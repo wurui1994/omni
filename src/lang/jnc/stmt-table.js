@@ -281,3 +281,40 @@ export function switchLines({
   out.push(`${pad})`);
   return out;
 }
+
+/**
+ * `return` 那一族（lower.js:13021-13070）。按次序问，答 `{ kind, lines?, why? }`：
+ *
+ *   1. **光一个 `return`**：函数回 void 就是 `(ret)`；不回 void 就报"光一个 return 不够"；
+ *   2. 函数回 void、**在 main 里**、后面是字面的 `0`：`int main()` 降成方言的 `(main …)`，
+ *      那个入口不回值，所以 `return 0` 就是 `(ret)`。**只放过字面 0** —— `return 1` 是
+ *      "非零退出码"，这一层还没有那一格，当场说清；
+ *   3. 函数回 void、**不在 main 里**、后面是**一格 void 调用**（第二百四十八刀，语料 71 处）：
+ *      jancy 那边这条合法，走的正是"光一个 return"那条路 —— 一格 void 调用的 `Value` 是空的
+ *      （`Value::setVoid`），于是 `ControlFlowMgr::ret` 里 `if (!value)` 为真
+ *      （jnc_ct_ControlFlowMgr.cpp:470-488）：底下那次调用照旧发出去，只是没有值往回带。
+ *      所以落法是"按语句降那条调用，再发一句 `(ret)`"，一个字都不用新造；
+ *   4. 函数回 void、后面跟的**问得出类型**（字面量、回值的函数…）：报错，照 jancy 那句
+ *      "void function 'X' returning 'Y' value"；
+ *   5. 有返回类型又带值：`(ret 值)`。
+ */
+export function returnKind({
+  hasValue, retVoid, inMain, isLiteralZero, valueTypeName,
+}) {
+  if (!hasValue) {
+    return retVoid ? { kind: 'ret' } : { kind: 'error', why: '这个函数回值，光一个 return 不够' };
+  }
+  if (!retVoid) return { kind: 'ret-value' };
+  if (inMain === true) {
+    if (isLiteralZero === true) return { kind: 'ret' };
+    return { kind: 'not-yet', why: 'main 里 `return` 一个非 0 的值（方言的入口没有退出码）' };
+  }
+  if (valueTypeName !== null && valueTypeName !== undefined) {
+    return {
+      kind: 'error',
+      why: `这个函数回 void，'return' 后面却跟了一格 ${valueTypeName} 的值`
+        + '（jancy 那边同：ControlFlowMgr::ret 里那句 "void function returning ... value"）',
+    };
+  }
+  return { kind: 'expr-then-ret' };                                  // 一格 void 调用
+}
