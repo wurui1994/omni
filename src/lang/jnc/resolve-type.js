@@ -9,6 +9,7 @@
 //
 // 解不出来的**不猜**：答 `null`，调用方记账。那是这一层唯一诚实的答法。
 
+import { headOf, named } from './adapt.js';
 import { evalConst } from './const-eval.js';
 
 /** 关键字基类型 → 类型对象（出处：`frontend-jnc/lower.js` 的 tyText 与四种位宽都发 int）。 */
@@ -141,11 +142,36 @@ function baseOf(t, env, depth = 0) {
   return null;
 }
 
-/** 基类型是个名字时，那个名字的文本（`readDeclType` 只留了头名，名字在原树上）。 */
+/**
+ * 基类型是个名字时，那个名字的文本（`readDeclType` 只留了头名，名字在原树上）。
+ *
+ * **点串要整串读**：`ui.Item` 在方言那一侧叫 `ui$Item`（名字空间只是前缀，与聚合体、
+ * 函数那两条腿同一条口径）。先前这儿只取**头一段**（`ui`），于是 `ui.Item g_one = {…};`
+ * 报的是"认不出基类型 'qualified'"（189-importcurly.jnc）。
+ */
 function nameText(t) {
   const specs = t.raw?.specs;
   if (specs === null || specs === undefined || !Array.isArray(specs.items)) return null;
-  return firstIdent(specs.items[1]);                 // `(specs 类型 前 后)` 的第一格
+  const head = specs.items[1];                       // `(specs 类型 前 后)` 的第一格
+  const h = headOf(head);
+  if (h === 'qualified' || h === 'qualified-special') {
+    const segs = dottedIdents(head);
+    return segs.length === 0 ? null : segs.join('$');
+  }
+  return firstIdent(head);
+}
+
+/** 点串上那几段（`ui.Item` → ['ui','Item']；`a.b.C` → ['a','b','C']）。 */
+function dottedIdents(n) {
+  if (n === null || n === undefined || typeof n !== 'object') return [];
+  if (!Array.isArray(n.items)) return typeof n.value === 'string' ? [n.value] : [];
+  const h = headOf(n);
+  if (h === 'qualified' || h === 'qualified-special') {
+    const nm = named(n);
+    return [...dottedIdents(nm?.left), ...dottedIdents(nm?.right)];
+  }
+  const one = firstIdent(n);
+  return one === null ? [] : [one];
 }
 
 /** 往下找第一个标识符记号。 */

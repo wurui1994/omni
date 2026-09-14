@@ -122,6 +122,27 @@ for (const f of files) {
   const scanAggs = (n, owner) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     let inner = owner;
+    /* **名字空间也是前缀**：`namespace ui { struct Item … }` 在方言那一侧叫 `ui$Item`
+       （189-importcurly.jnc 的 `ui.Item g_one` 要照这个键去查）。 */
+    if (headOf(n) === 'namespace') {
+      const nn = named(n);
+      const seg = nn === null ? null : nameText(nn.name);
+      const pre = seg === null ? owner : (owner === null || owner === undefined ? seg : `${owner}$${seg}`);
+      for (const it of n.items) scanAggs(it, pre);
+      return;
+    }
+    /* **typedef 也进环境**（`typedef Item Opt;` → `ui$Opt` 再跳一次到 `ui$Item`）。 */
+    if (headOf(n) === 'typedef') {
+      const tn = named(n);
+      for (const d of allInChain(tn?.dcls, 'dcls-add', 'dcls')) {
+        const dd = headOf(d) === 'init' ? named(d)?.dcl : d;
+        const t = readDeclType(tn?.specs, dd);
+        if (t === null || t.name === null) continue;
+        const full = owner === null || owner === undefined ? t.name : `${owner}$${t.name}`;
+        env.set(full, { kind: 'typedef', name: full, type: t });
+      }
+      return;
+    }
     if (headOf(n) === 'agg') {
       const a = readAgg(n);
       if (a !== null && a.name !== null) {

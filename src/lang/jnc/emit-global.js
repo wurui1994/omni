@@ -170,8 +170,10 @@ export function globalLines(m, env, ctx = { ns: null }) {
     if (r.type === null) return { lines: [], why: `事件：${r.why}` };
     return { lines: [`(global ${full} ${emitType(r.type, 'value', tc)})`], why: null };
   }
+  /* 函数那一族（前向声明 `int isOdd(int);` 在树上也是 `var-decl`，形状是 `fn`）**本来就不发**
+     `(global …)` —— 那是函数那条腿的事。别的形状（typedef / 位域…）同理。 */
   if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') {
-    return { lines: [], why: `不是数据那一族（${m.shape}）` };
+    return { lines: [], why: `不是数据那一族（${m.shape}）（对的行为）` };
   }
 
   /* **bindable 数据**：整格是生成的属性 —— 自己那一格不发，发的是存储与事件。 */
