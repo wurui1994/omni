@@ -1363,6 +1363,20 @@ export function makeFnEnv(o) {
             key = `${te.name}$${mname}`;
           }
         }
+        /**
+         * **命名空间里的函数**（`a.inner()` / `a.b.deep()`，48-namespace.jnc）：命名空间只是个
+         * 前缀（第五十一刀）—— 整串摊得动、摊出来正好是函数表里那一格（`a$inner` / `a$b$deep`）
+         * 就是它。这一问也排在"求左边那一格"之前：`a` 不是一格值，求它只会报"查不着"。
+         * 判据里那句"头一段不是查得着的变量"是**遮蔽**那条规矩：同名的局部量/模块级量先赢。
+         */
+        if (sig === null) {
+          const flat = dottedFlat(fn);
+          const head0 = flat === null ? '' : flat.slice(0, flat.indexOf('$'));
+          if (flat !== null && flat.includes('$') && !names.has(head0) && !globals.has(head0)) {
+            const f2 = fns.get(flat);
+            if (f2 !== undefined) { sig = f2; selfArg = null; key = flat; }
+          }
+        }
         if (sig === null) {
           const ob = objBase(fn2.obj);
           if (ob === null) return null;

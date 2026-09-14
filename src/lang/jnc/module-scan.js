@@ -407,7 +407,10 @@ export function scanAggs(tree, env) {
         const b = enumBase(e.base);
         env.set(nm, {
           kind: 'enum',
-          name: nm,
+          /* 名字带上主人那几段前缀（与聚合体、typedef 同一条口径）：点串写法 `a.Kind kk;`
+             在 `baseOf` 那头要拿它核对（48-namespace.jnc）。方言那一侧枚举就是 int，
+             所以这一格只用来查名与对账。 */
+          name: owner === null ? nm : `${owner}$${nm}`,
           base: { k: 'int', w: b.w, u: b.u },
           bits: String(e.word ?? '').includes('bitflag'),
         });
