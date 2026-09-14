@@ -47,7 +47,10 @@ export function emitStmt(n, ctx) {
       block: ctx.block,
       stmt: (x, i) => (ctx.stmt === undefined ? emitStmt(x, { ...ctx, ind: i }) : ctx.stmt(x, i)),
       hole: (x, name) => named(x)?.[name],
-      once: () => ctx.tmp('jnc$once$'),
+      /* `once` 的那面旗子是**模块级**的（跨调用留着，cflow_once.rst:15）：所以要走
+         `newSlot` 让模块那一层把 `(global jnc$once$N bool)` 发出来 —— 光取个名字不够。 */
+      once: () => (ctx.newSlot === undefined ? ctx.tmp('jnc$once$') : ctx.newSlot('jnc$once$', 'bool')),
+
       escape: ctx.escape,
       /* `try { … }` 那一格要**先把守护推上去**再降体（errorcode 出错时跳这一圈的出口）。
          少了这一格，落在嵌套 `try` 里的调用会去认外层 `catch:` 的标志 —— 56-catch.jnc

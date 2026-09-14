@@ -49,7 +49,10 @@ export function emitExpr0(n, want, ctx) {
     }
     const r = intLitRadix(s);
     if (r !== null && r.radix !== null) {
-      const k = intLitKind(BigInt(parseInt(r.digits, r.radix).toString()));
+      /* **按基数直接进 BigInt**：`parseInt` 是双精度 —— `9007199254740993`（2^53+1）那一格
+         过它就少 1（41-printf-len.jnc 量的正是这个数）。 */
+      const pre = { 16: '0x', 2: '0b', 8: '0o', 10: '' }[r.radix] ?? '';
+      const k = intLitKind(BigInt(`${pre}${r.digits}`));
       if (k.kind === null) { ctx.acct(`整数字面量：${k.why}`); return null; }
       return { code: `(int ${k.value})`, type: ctx.T[k.kind] };
     }
@@ -76,9 +79,9 @@ export function emitExpr0(n, want, ctx) {
   /* `'a'` 是一个整数（第九十七刀）：头一个字节最重、最多 8 个字节。 */
   if (h === 'char') {
     const txt = String(nm.tok?.value ?? '');
-    const bytes = [...txt].slice(-8).map((c) => c.charCodeAt(0) & 0xff);
-    const v = bytes.reduce((acc, b) => acc * 256 + b, 0);
-    const k = intLitKind(BigInt(v));
+    const bytes = [...txt].slice(-8).map((c) => BigInt(c.charCodeAt(0) & 0xff));
+    const v = bytes.reduce((acc, b) => acc * 256n + b, 0n);
+    const k = intLitKind(v);
     return { code: `(int ${k.value})`, type: ctx.T[k.kind] };
   }
   if (h === 'paren') return emitExpr0(nm.inner, want, ctx);

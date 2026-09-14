@@ -93,16 +93,34 @@ export function resolveType(t, env = new Map(), depth = 0) {
   return { type: el, why: null };
 }
 
+/**
+ * 整数那一格**带上位宽与符号性**。方言里它们一律写 `int`，可"落进一格"要回卷、`%d` 要按
+ * 几位读 —— 那两件事只看这两样。名字定符号性的规矩与 jancy 的 `setupStdTypedef` 同一份：
+ * `uint*` / `u*_t` / `byte_t` / `word_t` / `dword_t` / `qword_t` / `size_t`，外加写出来的
+ * `unsigned`。
+ *
+ * 出处在这一层而不是在"读声明"那一层：`typedef char sbyte_t;` 之后写着的词是 `sbyte_t`，
+ * 宽度只有**解过 typedef** 才知道（37-typedef.jnc 的 `d = 200` 就是量这一格）。
+ */
+function intOf(word, mods = []) {
+  const u = /^(uint|uchar|ushort|ulong)/.test(word)
+    || ['byte_t', 'word_t', 'dword_t', 'qword_t', 'size_t'].includes(word)
+    || mods.includes('unsigned');
+  return { k: 'int', w: INT_BITS[word] ?? 32, u };
+}
+
 /** 基类型那一格。 */
 function baseOf(t, env, depth = 0) {
   const text = t.base.text;
   if (t.base.kind === 'word' || WORD_TYPES[text] !== undefined) {
-    return WORD_TYPES[text] ?? null;
+    const w0 = WORD_TYPES[text] ?? null;
+    if (w0 !== null && w0.k === 'int') return intOf(text, t.mods ?? []);
+    return w0;
   }
   if (t.base.kind === 'named' || t.base.kind === 'generic') {
     const name = nameText(t);
     if (name === null) return null;
-    if (STD_INT_TYPEDEFS.has(name)) return { k: 'int' };
+    if (STD_INT_TYPEDEFS.has(name)) return intOf(name, t.mods ?? []);
     if (name === 'string_t') return { k: 'string' };
     /* `variant_t` 在方言里是一格**固定形状的结构体** `jnc$variant`
        （`($t int) ($n int) ($r real) ($s string)`，第一百一十三刀）—— 出处是旧降级的真输出
@@ -115,7 +133,18 @@ function baseOf(t, env, depth = 0) {
     const emitName = e.name ?? name;
     if (e.kind === 'struct' || e.kind === 'union') return { k: 'struct', name: emitName };
     if (e.kind === 'class') return { k: 'class', name: emitName };
-    if (e.kind === 'enum') return { k: 'enum', name: emitName };
+    if (e.kind === 'enum') {
+      /* 枚举那一格**带着它的底类型**（`base`）与 bitflag 位：`enum-to-int` 那条隐式转换
+         （第三十九刀）与 `%d` 那一格都要读它 —— 少了它，`printf("%d", Color.Red)` 拿到的是
+         一格没有类型的值。 */
+      return {
+        k: 'enum',
+        name: emitName,
+        base: e.base ?? { k: 'int', w: 32, u: false },
+        bits: e.bits === true,
+      };
+    }
+
     /* **typedef 再走一跳**：`typedef int X; X m_v;` 里 `X` 的目标类型就是它的写法，
        接着解一遍（带深度上限防环）。少这一跳，typedef / alias 那一摊十几个聚合体
        全拼不出来（尺子的"拼不出来的那几处"里几乎全是它）。 */
@@ -189,7 +218,15 @@ function firstIdent(n) {
 function aliasBase(e, name, env, depth) {
   if (e.kind === 'struct' || e.kind === 'union') return { k: 'struct', name: e.name ?? name };
   if (e.kind === 'class') return { k: 'class', name: e.name ?? name };
-  if (e.kind === 'enum') return { k: 'enum', name: e.name ?? name };
+  if (e.kind === 'enum') {
+    return {
+      k: 'enum',
+      name: e.name ?? name,
+      base: e.base ?? { k: 'int', w: 32, u: false },
+      bits: e.bits === true,
+    };
+  }
+
   if (e.kind === 'typedef' && e.type !== undefined) {
     const r = resolveType(e.type, env, depth + 1);
     return r.type;
@@ -230,8 +267,9 @@ function arrayDims(t, env) {
     /* 长度不一定是字面量：`m_pad[ReportSize - 1]` / `m_actionTable[ActionId._Count]` 那一族
        要算一格常量表达式（`const-eval.js`，枚举项从环境来）。算不出来才记账。 */
     const n = evalConst(s.items[1], env);
-    if (n === null || !Number.isInteger(n) || n < 0) return null;
-    out.push(n);
+    /* 长度是 **BigInt**（常量那一层统一用它）——这儿要的是一格普通的数。 */
+    if (n === null || n < 0n) return null;
+    out.push(Number(n));
   }
   return out;
 }

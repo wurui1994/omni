@@ -6,12 +6,13 @@
 
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
 import { join, dirname, resolve, isAbsolute } from '../host/path.js';
-import { readText, exists, installDir, stderr } from '../host/native.js';
+import { readText, exists, installDir, stderr, env } from '../host/native.js';
 import { dataPath, dataTried } from '../host/data.js';
 import { loadGrammarTable } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { lowerJnc } from '../frontend-jnc/lower.js';
+import { lowerJncRules } from '../../lang/jnc/lower.js';
 import { lowerCoreSexpr } from '../sexpr/lower.js';
 /* `import … with "h.h"` 要 C 前端那一格（`c.declsOf`）。走 `cap()` 而不是直接 import：
    两门语言各是一个插件，jancy 不该在装载期就把 C 前端拖进来 —— 只有真写了 `with` 的
@@ -21,6 +22,13 @@ import { cap } from '../plugin.js';
 
 /* 核心交过来的宿主服务。 */
 let JNC_API = null;
+
+/* 走哪条降级：`JNC_RULES=1` 时走按表那条（`src/lang/jnc/lower.js`）。读的是宿主的
+   `env`，不是 `process.env` —— 这一层不许认死 node（ADR-0011 决策 2）。每趟现读，
+   于是同一个进程里也能改（语料尺子两条腿轮着跑就靠这一格）。 */
+function JNC_RULES() {
+  return env('JNC_RULES') === '1';
+}
 
 export function initJnc(api) {
   JNC_API = api;
@@ -132,6 +140,15 @@ export function jncText(path, dirs = [], needEntry = true) {
     }
     return null;
   };
+  /* **规则化的那条降级**（`src/lang/jnc/lower.js`，ADR-0030 §3）：`JNC_RULES=1` 时走它。
+     两条并存是刻意的 —— 旧的留着当回退，新的按表走，两边跑的是同一份语料。 */
+  if (JNC_RULES()) {
+    const t2 = lowerJncRules(tree, diags, { path, needEntry });
+    const w2 = diags.warnings();
+    if (w2 !== '') stderr(w2);
+    diags.throwIfErrors();
+    return t2;
+  }
   const text = lowerJnc(tree, diags, {
     path,
     unit: resolve(path),

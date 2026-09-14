@@ -1,203 +1,53 @@
-// tests/lib/jnc-body-emit.js —— **第七条腿**：函数体逐行对（尺子 = 旧降级的真输出）
+// src/lang/jnc/emit-ctx.js —— **函数体那一层的探子**（把表接成能跑的一条腿）
 //
-// 前六条腿量的是"头"与"顶层那几行"；这一把量的是**体里那几句**。做法照旧：
-// `node src/cli.js emit sx x.jnc` 出来的 `(fn 名字 …` 下面那几行就是外部尺，新腿用
-// `emit-body.js`（照 stmt/expr 两张表走）降同一份体，**逐字比**。
+// `emit-body.js` / `emit-stmt.js` / `emit-expr.js` 三个驱动只认"形状 → 文字"，凡是要
+// **知道名字与类型**的地方都由这一份回答：裸名字查名、可写位置、取字段、下标、调用、
+// 局部量声明、赋值、`++`、printf、取地址。也就是 ADR-0029 说的"作用域图 + 类型表"那一层，
+// 只是这一层是**按文件的一遍扫**（`module-scan.js`）而不是一整张图。
 //
-// 探子（`lookup` / `fieldOf` / `elemOf` / `callOf` / `localDecl` / `assign`）先给**最小的一份**：
-// 形参与局部量、整数/实数/布尔/字符串字面量、一元二元、`(let …)` / `(set …)`。别的一律
-// **记账走开**（那是"还没做"，不是"做错了"）—— 所以这一把尺子头一版只会量出很少几格，
-// 那正是它该说的话。
-//
-// 用法：node tests/lib/jnc-body-emit.js [文件数，默认 400] [--all]
+// 一份规则只有一处家：这一份先前长在尺子里（tests/lib/jnc-body-emit.js），现在搬进 src/，
+// 尺子与真降级**用同一份**。答不出来的一律 `acct(为什么)` 并回 null —— 绝不猜。
 
-import { readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { Diagnostics } from '../../src/core/source/diag.js';
-import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
-import { headOf, named } from '../../src/lang/jnc/adapt.js';
-import { nameText, allInChain, readDcl } from '../../src/lang/jnc/declare.js';
-import { readDeclType, readAnonType } from '../../src/lang/jnc/types.js';
-import { readSpecs } from '../../src/lang/jnc/specs.js';
-import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
-import { classRoot } from '../../src/lang/jnc/emit-agg.js';
-import { addrTaken, liftable, liftedType, cellName } from '../../src/lang/jnc/emit-global.js';
-import { evalConst, collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
-import { resolveType } from '../../src/lang/jnc/resolve-type.js';
-import { emitType } from '../../src/lang/jnc/emit-type.js';
-import { compoundValue, errTest, errValue, escapeText } from '../../src/lang/jnc/stmt-table.js';
-import { lvalueShape, SHAPE_ACCESS } from '../../src/lang/jnc/lvalue-table.js';
-import { memberShape, copyValLines, STR_MEMBERS, strMember } from '../../src/lang/jnc/member-table.js';
-import { readFormals } from '../../src/lang/jnc/emit-fn.js';
-import { emitBody } from '../../src/lang/jnc/emit-body.js';
-import { emitExpr } from '../../src/lang/jnc/emit-expr.js';
-import { INT_BITS } from '../../src/lang/jnc/resolve-type.js';
-import { wrapTo, realOf, intConvCode } from '../../src/lang/jnc/int-table.js';
-import { fmtRun, specPiece } from '../../src/lang/jnc/fmt-table.js';
-import { zeroText } from '../../src/lang/jnc/expr-table.js';
-
-const argv = process.argv.slice(2);
-const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 400);
-const all = argv.includes('--all');
-/** `--why`：把**每一格账**印成 `文件 函数 → 为什么`（找下一刀该补哪儿时用）。 */
-const why0 = argv.includes('--why');
-
-function walkDir(dir, out = []) {
-  for (const e of readdirSync(dir)) {
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walkDir(p, out);
-    else if (e.endsWith('.jnc')) out.push(p);
-  }
-  return out;
-}
-
-/** 旧降级输出里每一格函数的**体**：名字 -> 那几行（缩进 4 起，直到不再缩进更深）。 */
-function bodiesOf(text) {
-  const out = new Map();
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length; i += 1) {
-    const m = /^ {2}\(fn (\S+) /.exec(lines[i]);
-    if (m === null) continue;
-    const body = [];
-    for (let j = i + 1; j < lines.length && /^ {4}/.test(lines[j]); j += 1) body.push(lines[j]);
-    /* 体的**最后一行**末尾那个 `)` 是函数那一格的收尾，不属于体 —— 去掉它再比。 */
-    if (body.length > 0) body[body.length - 1] = body[body.length - 1].replace(/\)$/, '');
-    out.set(m[1], body.join('\n'));
-  }
-  return out;
-}
-
-/** 最小的那份探子：形参与局部量的类型表。 */
-/** 顶层那几格函数的签名（名字 → { params, ret }）—— 调用那一族要它。 */
-function topFns(tree, env) {
-  const out = new Map();
-  const dig = (n) => {
-    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
-    const h = headOf(n);
-    if (h === 'agg') return;
-    if (h === 'fn-def' || h === 'fn-proto') {
-      const nm = named(n);
-      const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
-      if (t !== null && t.name !== null && t.shape === 'fn') {
-        const dc = readDcl(nm.dcl);
-        const sf = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
-        const fs = sf === undefined ? [] : (readFormals(sf.node) ?? []);
-        const rr = t.base.kind === 'none' ? null : resolveType({ ...t, shape: 'data' }, env);
-        const sp = readSpecs(nm.specs);
-        out.set(t.name, {
-          params: fs.map((f) => (f.type === null ? null : f.type)),
-          ret: rr === null || rr.type === null || rr.type.k === 'void' ? null : rr.type,
-          retDecl: t,
-          /* `errorcode` 那一族（第五十八刀）：调它的那一处要把"出错就跳"提上来
-             （`EC_HOIST`），所以调用那一格得知道被调是不是它。 */
-          ec: sp !== null && sp.words.includes('errorcode'),
-        });
-      }
-      return;
-    }
-    for (const it of n.items) dig(it);
-  };
-  dig(tree);
-  return out;
-}
+import { headOf, named } from './adapt.js';
+import { nameText, allInChain, readDcl } from './declare.js';
+import { readDeclType, readAnonType } from './types.js';
+import { readSpecs } from './specs.js';
+import { resolveType, INT_BITS } from './resolve-type.js';
+import { emitType } from './emit-type.js';
+import { readFormals } from './emit-fn.js';
+import { emitExpr } from './emit-expr.js';
+import { lvalueShape, SHAPE_ACCESS } from './lvalue-table.js';
+import {
+  memberShape, copyValLines, STR_MEMBERS, strMember,
+} from './member-table.js';
+import { compoundValue, errTest, errValue, escapeText } from './stmt-table.js';
+import { wrapTo, realOf, intConvCode } from './int-table.js';
+import { fmtRun, specPiece, specDress } from './fmt-table.js';
+import { zeroText } from './expr-table.js';
+import {
+  addrTaken, liftable, liftedType, cellName,
+} from './emit-global.js';
+import { evalConst } from './const-eval.js';
 
 /**
- * 顶层那几格**聚合体**：一边把名字记进 `env`（`resolveType` 要它才认得 `Inner`），
- * 一边攒一张**字段表**（`emitName` → 名字 → 那一格的声明类型）—— 取字段与"往字段里写"
- * 两侧都从它出发。位域、别名路径、属性那几族**不收**（`member-table.js` 的七格里那几条
- * 各有自己的一套，收进来就等于拿普通字段那一支把它们悄悄接走了）。
+ * 一格函数体要的那一整套探子。`o` 里：
+ *   fnNode                      这一格函数的节点（形参、返回类型、体都从它读）
+ *   env                         类型环境（名字 → struct/class/enum/typedef/const）
+ *   acct(why)                   记账
+ *   fns                         顶层函数签名表（名字 → { params, ret, retDecl, ec }）
+ *   aggFields / aggCtors        聚合体的字段表 / 有 construct 的那几格
+ *   globals / gLifted / gBindable   模块级那几格量
+ *   roots                       类的继承链根（第五十六刀）
+ *   ecBox / tmpBox              两个**一份模块一个**的计数器
+ *   ctxRef()                    拿驱动那一格 ctx（`expr` / `ecOut` / `guards` 都在它上头）
  */
-function topAggs(tree, env) {
-  const fields = new Map();
-  const ctors = new Set();                                           // 有 construct 的那几格
-  const vars = new Map();                                            // 模块级那几格量（名字 → 声明类型）
-  const bindable = new Set();                                        // 里头带取/存两格的那几个
-  const aggs = [];                                                   // 收齐了好算继承链的根
-  const scan = (n, owner, inAgg) => {
-    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
-    const h = headOf(n);
-    let inner = owner;
-    let agg = inAgg;
-    /* 函数体里的东西不往下扫（局部量由体那一层管，局部类先不管）。 */
-    if (h === 'fn-def' || h === 'fn-proto') return;
-    if (h === 'namespace') {
-      const nm = nameText(named(n)?.name);
-      if (nm !== null) inner = owner === null ? nm : `${owner}$${nm}`;
-    } else if (h === 'agg') {
-      agg = true;
-      const a = readAgg(n);
-      const nm = a === null ? null : nameText(a.name);
-      if (a !== null && nm !== null) {
-        const emitName = owner === null ? nm : `${owner}$${nm}`;
-        inner = emitName;
-        a.emitName = emitName;
-        aggs.push(a);
-        env.set(nm, {
-          kind: a.word === 'union' ? 'union' : (a.word === 'struct' ? 'struct' : 'class'),
-          name: emitName,
-          agg: a,
-        });
-        const fs = new Map();
-        for (const m of a.members) {
-          if (m.name === null || m.type === null) continue;
-          if (m.shape === 'bitfield' || m.shape === 'prop' || m.shape === 'event') continue;
-          if (m.shape === 'typedef' || m.shape === 'nested-type' || m.shape === 'friend') continue;
-          if (m.shape === 'fn') { if (m.name === 'construct') ctors.add(emitName); continue; }
-          if (m.storage.includes('static')) continue;                // 不进对象（落成模块级那一格）
-          fs.set(m.name, m.type);
-        }
-        fields.set(emitName, fs);
-      }
-    } else if (h === 'typedef') {
-      const tn = named(n);
-      if (tn !== null) {
-        for (const d of allInChain(tn.dcls, 'dcls-add', 'dcls')) {
-          const t = readDeclType(tn.specs, d);
-          if (t !== null && t.name !== null) env.set(t.name, { kind: 'typedef', type: t });
-        }
-      }
-    } else if (h === 'enum') {
-      const e = readEnum(n);
-      const nm = e === null ? null : nameText(e.name);
-      if (nm !== null) env.set(nm, { kind: 'enum', name: nm });
-    } else if (h === 'var-decl' && !inAgg) {
-      /* **模块级那几格量**（`int calls = 0;`）：裸名字查名的第一步就要看得见它们
-         （`NAME_LOOKUP_ORDER` 的 `var` 那一格里"模块级"也算）。`static` 的照收 ——
-         它在方言那一侧的名字与普通的一样（模块级本来就只有一格）。 */
-      const vn = named(n);
-      if (vn !== null) {
-        const sp = readSpecs(vn.specs);
-        const bind = sp !== null && (sp.words.includes('bindable') || sp.words.includes('property'));
-        for (const d of allInChain(vn.dcls, 'dcls-add', 'dcls')) {
-          const dcl = headOf(d) === 'init' ? named(d)?.dcl : d;
-          const t = readDeclType(vn.specs, dcl);
-          if (t !== null && t.name !== null) {
-            vars.set(t.name, t);
-            if (bind) bindable.add(t.name);
-          }
-        }
-      }
-    }
-    for (const it of n.items) scan(it, inner, agg);
-  };
-  scan(tree, null, false);
-  /* **一整条继承链共用一格结构体**（第五十六刀的 `clsRoot`）：类那一族在方言里写的是
-     连通块的**根**。字段表按各自的名字收，写类型时换成根 —— 两件事分开。 */
-  const roots = new Map();
-  for (const a of aggs) {
-    if (a.word !== 'class' && a.word !== 'opaque class') continue;
-    const r = classRoot(a, aggs, env);
-    if (a.emitName !== null && r.emitName !== undefined) roots.set(a.emitName, r.emitName);
-  }
-  return {
-    fields, ctors, vars, bindable, roots,
-  };
-}
-
-function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
-  ecBox = { n: 0 }, tmpBox = { n: 0 }, globals = new Map(), gLifted = new Set(),
-  gBindable = new Set(), roots = new Map()) {
+export function makeFnEnv(o) {
+  const {
+    fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggCtors = new Set(),
+    ecBox = { n: 0 }, tmpBox = { n: 0 }, globals = new Map(), gLifted = new Set(),
+    gBindable = new Set(), roots = new Map(), gEmit = new Map(),
+  } = o;
+  let ctxRef = null;
   /* **类那一族在方言里写的是继承链的根**（第五十六刀）—— 发类型时都要带上这一格。 */
   const clsRoot = (cn) => roots.get(cn) ?? cn;
   const tyc = { clsRoot };
@@ -235,6 +85,8 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     return r0.type !== null && (r0.type.k === 'ptr' || r0.type.k === 'tptr');
   })());
   const lifts = new Set();
+  /** 体这一层要的模块级槽（`once` 的旗子、`static` 局部量那一格）—— 模块那一层照单发。 */
+  const slots = [];
   for (const f of (sf === undefined ? [] : readFormals(sf.node) ?? [])) {
     if (f.name !== null && f.type !== null) names.set(f.name, f.type);
     /**
@@ -283,8 +135,14 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
      所以由调用方按文件传进来。`$e` / `$l` / `$s` / `$x` 四族共用它，这一把只接 `$e`。
      **有账的那几格函数会让号跟着差**（旧降级把它们也降了、号照样往前走），那是这把尺子
      现在的界限：真正对不齐时账上会看见，不猜。 */
+  /* 整数那几格**各带自己的位宽与符号性**：方言只有一格 int，回卷与"落进一格"全靠这两样。
+     先前这四格都是光一个 `{ k:'int' }`（没有 `w` / `u`），于是 `int i = 3000000000;`
+     那一次"落进 32 位"一个字都不发 —— 印出来是 3000000000，而 C 与 jancy 是 -1294967296。 */
   const T = {
-    int: { k: 'int' }, i32: { k: 'int' }, i64: { k: 'int' }, u64: { k: 'int' },
+    int: { k: 'int', w: 32, u: false },
+    i32: { k: 'int', w: 32, u: false },
+    i64: { k: 'int', w: 64, u: false },
+    u64: { k: 'int', w: 64, u: true },
     real: { k: 'real' }, bool: { k: 'bool' }, string: { k: 'string' },
   };
   /** 整数那一格要带**位宽与符号性**：方言只有一格 int，回卷全靠这两样。 */
@@ -293,10 +151,14 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     const word = decl?.base?.text ?? 'int';
     /* **无符号那一族的名字**（jancy 的 `setupStdTypedef`）：`uint*` / `u*_t` / `byte_t` /
        `word_t` / `dword_t` / `qword_t`，外加写出来的 `unsigned`。 */
-    const u = /^(uint|uchar|ushort|ulong|utf)/.test(word)
+    const u = /^(uint|uchar|ushort|ulong)/.test(word)
       || ['byte_t', 'word_t', 'dword_t', 'qword_t', 'size_t'].includes(word)
       || (decl?.mods ?? []).includes('unsigned');
-    return { ...ty, w: INT_BITS[word] ?? 32, u };
+    /* **写着的词不在表里就听解出来那一格的**（`typedef char sbyte_t;` 之后写的是 `sbyte_t`，
+       宽度只有解过 typedef 才知道）—— 那一格由 `resolveType` 带上来。先前这儿一律按写着的
+       词查表、查不着就当 32 位有符号，于是所有 typedef 过的整数都丢了宽度与符号性。 */
+    const known = INT_BITS[word] !== undefined;
+    return { ...ty, w: known ? INT_BITS[word] : (ty.w ?? 32), u: u || ty.u === true };
   };
   const CMP = new Set(['==', '!=', '<', '<=', '>', '>=', '&&', '||']);
   /* 这个函数**自己的出错值**（不是 errorcode 的函数为 null）：调 errorcode 的那一处
@@ -360,8 +222,9 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       const r = resolveType(t, env);
       if (r.type === null) { acct(`'${key}'：${r.why}`); return null; }
       const ty = withBits(r.type, t);
-      /* **方言那一侧的名字**可能与源码里的不同（按值传的结构体形参指的是它那份拷贝）。 */
-      const dname = alias.get(key) ?? key;
+      /* **方言那一侧的名字**可能与源码里的不同（按值传的结构体形参指的是它那份拷贝；
+         命名空间里那一格模块级量叫 `ns$名字`）。 */
+      const dname = alias.get(key) ?? (isG ? (gEmit.get(key) ?? key) : key);
       /* **结构体与数组是 `agg`**（那一格里放的就是地址，第十二 / 二十一刀）；**提过**的那几格是
          `ptr`（局部的用它的单元 `名字$c`，模块级那一格**自己**就是 `(ptr T)`，第九 / 二十四刀）；
          别的是 `var`。 */
@@ -438,10 +301,87 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     const pt = liftedType(ty, tyc);
     return [`${pad}(let ${c} ${pt} (pnew ${pt} (int 1)))`, `${pad}(pstore (var ${c}) ${valCode})`];
   };
+  /**
+   * 名字（或点串）**不是一格内存**的那两路 —— 查名要先问它们，因为它们根本没有位置：
+   *
+   *   1. **编译期常量**：枚举项（`Color.Red` 与裸 `Red` 两个键都在 env 里）、折叠过的
+   *      `const`。发出来就是一格字面量。枚举在方言里**就是它的基整数**（第三十九刀），
+   *      所以类型给 int —— 位宽按 32 记（`enum E: uint8` 那几格的窄回卷是这一层的界限）。
+   *   2. **函数名当值**：`= add` 是 `(fnref add)`（lower.js:15216-15233）。方言的函数值
+   *      自带闭包那一半，普通函数那一半是空的。
+   *
+   * 都不是就答 null（调用方接着按"一格内存"那条走）。
+   */
+  const constOrFn = (node) => {
+    const h = headOf(node);
+    if (h !== 'name' && h !== 'field' && h !== 'ptr-field') return null;
+    /* 局部量遮住同名的常量/函数（作用域的次序即规则）。`true` / `false` 不走这一路
+       —— 它们是 bool 那一格的字面量（常量层把它们当 1 / 0 只为了算枚举项的值）。 */
+    if (h === 'name') {
+      const key = String(named(node)?.text?.value ?? '');
+      if (key === 'true' || key === 'false') return null;
+      if (names.has(key) || globals.has(key)) return null;
+    }
+    const cv = evalConst(node, env);
+    if (cv !== null && cv !== undefined) {
+      /* **枚举项带的是那个枚举的类型**（不是裸整数）：`%d` 那一格要按它的底类型读
+         （`Top = 0x8000000000000000` 存进 uint64 那一格，`%lld` 印出来是负数），
+         比较与 `|` 那几族也要问 bitflag 位。查不着是哪个枚举的（折叠过的 `const`）才给 int。 */
+      const ent = h === 'name'
+        ? env.get(String(named(node)?.text?.value ?? ''))
+        : (() => {
+          const nm2 = named(node) ?? {};
+          const left = String(named(nm2.obj)?.text?.value ?? '');
+          const right = String(nm2.name?.value ?? '');
+          return env.get(`${left}.${right}`) ?? env.get(right);
+        })();
+      const ee = ent !== undefined && typeof ent.enum === 'string' ? env.get(ent.enum) : undefined;
+      const ty = ee !== undefined && ee.kind === 'enum'
+        ? {
+          k: 'enum',
+          name: ee.name ?? ent.enum,
+          base: ee.base ?? { k: 'int', w: 32, u: false },
+          bits: ee.bits === true,
+        }
+        : { k: 'int', w: 32, u: false };
+      /* 发出来的那格字面量按**64 位的位型**写（`BigInt.asIntN`）：方言的 int 是一格有符号的
+         64 位机器字，而 `Top = 0x8000000000000000` 存的就是最高位 —— 照原数写出去越界，
+         印出来也就少了那个负号（134-bitflagtop.jnc 量的正是这一格）。 */
+      return { code: `(int ${BigInt.asIntN(64, cv)})`, type: ty };
+
+    }
+    if (h !== 'name') return null;
+    const key = String(named(node)?.text?.value ?? '');
+    const sig = fns.get(key);
+    if (sig === undefined) return null;
+    const ps = [];
+    for (const p of sig.params) {
+      const r = resolveType(p, env);
+      if (r.type === null) { acct(`'${key}' 当值用：形参 ${r.why}`); return null; }
+      ps.push(withBits(r.type, p));
+    }
+    const rt = sig.ret === null ? { k: 'void' } : withBits(sig.ret, sig.retDecl);
+    return { code: `(fnref ${sig.emit ?? key})`, type: { k: 'fnptr', params: ps, ret: rt } };
+  };
   return {
     T,
     acct,
     pre,
+    /**
+     * **这一格函数要的模块级槽**（`{ name, ty }`）：`once` 的那面旗子、`static` 局部量那一格
+     * 与它的闸门。它们在方言里是 `(global …)`，可**要它们的是体那一层** —— 所以体这儿记下来、
+     * 模块那一层照单发。少这个口子，`once` 发出来的 `jnc$once$0` 谁也没声明过（161-once.jnc）。
+     */
+    slots,
+    newSlot: (prefix, ty) => {
+      const nm2 = `${prefix}${tmpBox.n}`;
+      tmpBox.n += 1;
+      slots.push({ name: nm2, ty });
+      return nm2;
+    },
+    /* 整数那一格的**位宽与符号性**（`withBits`）：模块级那一层降初值时也要它 —— 那一格
+       `want` 少了位宽，回卷就少一圈。 */
+    withBits,
     /** 比较回 bool；算术回**宽的那一格**（符号性跟着宽的那一边）。 */
     typeOfBinary: (op, a, b) => {
       if (CMP.has(op)) return { k: 'bool' };
@@ -496,9 +436,9 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       const v = evalConst(node, env);
       return v === null || v === undefined ? null : v;
     },
-    /** 裸名字：只认形参与局部量（真正的九步要作用域图 —— 记账）。 */
-    /** 裸名字：与**可写位置**那一层同一份（`nameLoad` 的四格就是形状那三条）。 */
-    lookup: (node) => valOfLv(node),
+    /** 裸名字：与**可写位置**那一层同一份（`nameLoad` 的四格就是形状那三条），
+        常量与函数名那两路排在它前面（它们没有位置）。 */
+    lookup: (node) => constOrFn(node) ?? valOfLv(node),
     /**
      * `&x`（第九 / 二十四刀）：**一个字都不算** —— 提过的那一格给它的单元、结构体与数组给
      * 那一格里放着的地址。没提过的（`var` 形状）取不着地址，明说记账。
@@ -545,6 +485,10 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
           const dn = `${t.name}$s${tmpBox.n}`;
           tmpBox.n += 1;
           alias.set(t.name, dn);
+          /* 那一格与它的闸门都是**模块级**的（"程序启动时分配、一直待到程序结束"，
+             decl_storage.rst）—— 记进 `slots`，模块那一层发 `(global …)`。 */
+          slots.push({ name: dn, ty: emitType(r.type, 'slot', tyc) });
+          slots.push({ name: `${dn}$1`, ty: 'bool' });
           if (!isInit) continue;
           const v0 = ctx.expr(named(d)?.value, declTy);
           if (v0 === null) return null;
@@ -624,13 +568,20 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       /* **复合赋值**（`lv op= v`）：右边按 lv 那一格降，中间那一格由 `compoundValue` 定
          （常用算术转换、回卷只发一次、`%` 例外、指针上是指针算术）。 */
       if (op !== '=') {
-        const vv = emitExpr(an.b, lv.type, ctx);
+        /* 右边**不按左边那一格降**：`int k = -7; k /= (unsigned)2;` 在 C 里是**无符号除法**
+           （常用算术转换把两边一起提到无符号那一格），先把右边转成 int32 就把那一步吃掉了
+           —— 32-unsigned.jnc 的 `g=` 那行量的正是它。中间那一格由 `compoundValue` 定。 */
+        const vv = emitExpr(an.b, null, ctx);
         if (vv === null) return null;
+        /* **bool 参与整数运算就是 1 / 0**（第三十七刀）：`n += (i % 2 == 0);` 里右边是 bool，
+           而 `compoundValue` 的整数那一支只认整数。这一步与二元算子那儿同一条规则。 */
+        const vv2 = vv.type?.k === 'bool' && lv.type?.k === 'int'
+          ? { code: `(sel ${vv.code} (int 1) (int 0))`, type: { k: 'int', w: 32, u: false } } : vv;
         const code = compoundValue({
           bin: op.slice(0, -1),
           cur: readLv(lv),
           lvType: lv.type,
-          v: vv,
+          v: vv2,
           isInt: (t) => t !== null && t !== undefined && t.k === 'int',
           isPtr: (t) => t !== null && t !== undefined && (t.k === 'ptr' || t.k === 'tptr'),
         });
@@ -667,22 +618,57 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     callOf: (node, want, ctx) => {
       const nm2 = named(node) ?? {};
       const fn = nm2.fn;
-      if (headOf(fn) !== 'name') { acct('被调那一格还认不出来（方法/函数指针/算符）'); return null; }
-      const key = String(named(fn)?.text?.value ?? '');
+      const args = allInChain(nm2.args, 'args-add', 'args');
+      /**
+       * **从一格函数指针上调**（第五十五刀）：方言的 `(callfn E 实参…)`，签名就在那一格
+       * 的类型里。这一问排在"按名字找函数"**之前** —— 同名的局部量遮住模块级那个函数
+       * （lower.js:14730 那条注解就是这一句）。被调不是裸名字（`(*p)(…)`、`a[i](…)`）时
+       * 也走这条：那时它只能是一格函数值。
+       */
+      const asName = headOf(fn) === 'name' ? String(named(fn)?.text?.value ?? '') : null;
+      const viaVal = asName === null || names.has(asName) || globals.has(asName);
+      if (viaVal) {
+        const fv = emitExpr(fn, null, ctxRef);
+        if (fv === null) return null;
+        if (fv.type?.k !== 'fnptr') {
+          acct(`被调那一格是 ${fv.type?.k ?? '?'}，不是函数值（算符重载那一族另算）`); return null;
+        }
+        const parts = [];
+        for (const [i, a2] of args.entries()) {
+          const v = ctxRef.expr(a2, fv.type.params[i] ?? null);
+          if (v === null) return null;
+          parts.push(v);
+        }
+        const rt = fv.type.ret ?? { k: 'void' };
+        return { code: `(callfn ${fv.code}${parts.map((x) => ` ${x}`).join('')})`, type: rt };
+      }
+      const key = asName;
       if (key === 'printf') { acct('printf 那一族（格式化）还没接'); return null; }
       const sig = fns.get(key);
       if (sig === undefined) { acct(`调的那个 '${key}' 查不着（跨文件/宿主面）`); return null; }
-      const args = allInChain(nm2.args, 'args-add', 'args');
       const parts = [];
-      for (const [i, a2] of args.entries()) {
+      /* **实参给少了就按默认实参补**（第一百七十五刀）：`void def(void function* cb() = null)`
+         的 `def()` 落出来是 `(call def (null (fnty () void)))`。补的那一格按形参的类型降
+         —— `null` 正要从那儿知道自己是哪种指针。 */
+      const nArgs = Math.max(args.length, sig.params.length);
+      for (let i = 0; i < nArgs; i += 1) {
+        const a2 = args[i];
         const pt = sig.params[i] ?? null;
         const pr = pt === null ? null : resolveType(pt, env);
         const w = pr === null || pr.type === null ? null : withBits(pr.type, pt);
+        if (a2 === undefined) {
+          const d = (sig.defaults ?? [])[i] ?? null;
+          if (d === null) { acct(`调 '${key}' 少了第 ${i + 1} 格实参，而那一格没有默认值`); return null; }
+          const v0 = ctxRef.expr(d, w);
+          if (v0 === null) return null;
+          parts.push(v0);
+          continue;
+        }
         const v = ctxRef.expr(a2, w);
         if (v === null) return null;
         parts.push(v);
       }
-      const code = `(call ${key}${parts.map((x) => ` ${x}`).join('')})`;
+      const code = `(call ${sig.emit ?? key}${parts.map((x) => ` ${x}`).join('')})`;
       const rt = sig.ret === null ? { k: 'void' } : withBits(sig.ret, sig.retDecl);
       /**
        * **`errorcode` 的传播**（第五十八刀，lower.js:15065-15084）：抬一格临时、比一下，
@@ -731,27 +717,70 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
       const fmt = f0.value;
       const vals = args.slice(1);
       let bad = false;
-      const r = fmtRun(fmt, 'stmt', (spec, i) => {
-        if (spec.width !== null || spec.prec !== null || spec.flags.left || spec.flags.zero
-          || spec.flags.plus || spec.flags.space || spec.flags.alt) {
-          acct(`带宽度/精度/标志的 %${spec.conv} 还没接`); bad = true; return null;
+      const r = fmtRun(fmt, 'stmt', (spec, i0, push) => {
+        const pad = ' '.repeat(ind);
+        /* 要读好几次的那几段先落成局部量（`$fN`，与旧降级同一族名字）—— `%5d` 里的
+           `(call f x)` 不落的话补零那一支会把它算四遍。 */
+        const spill = (code, ty) => {
+          const t = `$f${tmpBox.n}`;
+          tmpBox.n += 1;
+          push(`${pad}(let ${t} ${ty} ${code})`);
+          return `(var ${t})`;
+        };
+        /* `*` / `.*` 的实参按 C 的次序取：宽度、精度、值（第二十七刀）。两者都要读好几次，
+           所以也先落成局部量。 */
+        let i = i0;
+        const starArg = (what) => {
+          const a0 = vals[i];
+          if (a0 === undefined) { acct(`printf 的 '*'（${what}）没有对应的实参`); bad = true; return null; }
+          const v0 = emitExpr(a0, { k: 'int', w: 32, u: false }, ctx);
+          if (v0 === null) { bad = true; return null; }
+          if (v0.type?.k !== 'int') { acct(`printf 的 '*'（${what}）要整数`); bad = true; return null; }
+          i += 1;
+          return spill(v0.code, 'int');
+        };
+        let wCode = null;
+        if (spec.width === '*') { wCode = starArg('宽度'); if (wCode === null) return null; } else if (spec.width !== null
+          && (spec.width > 1 || (spec.width === 1 && spec.prec !== null))) {
+          /* 宽度 1 平时不用补（一段文本至少一个字符），可精度**能把它变成空串**
+             （`%.0d` 印 0 是零个字符），那时宽度 1 也要补一格空格。 */
+          wCode = `(int ${spec.width})`;
+        }
+        let pCode = null;
+        if (spec.prec === '*') { pCode = starArg('精度'); if (pCode === null) return null; } else if (spec.prec !== null) {
+          if (spec.prec > 30) { acct('printf 的精度最多 30 位'); bad = true; return null; }
+          pCode = `(int ${spec.prec})`;
         }
         const v = vals[i];
         if (v === undefined) { acct('printf 的实参比转换说明少'); bad = true; return null; }
         /* 那一块长什么样按**转换字符**走（`specPiece`）—— `%d` 是 `(tostr …)`、`%f` 是
            `(sfix … 6)`、`%x` 是 `(sbase … 16)`、`%s` 碰上字符串**一个字都不套**。
-           先前这儿一律 `(tostr …)`，于是 `printf("%s", s)` 多套一层、`%f` 印成了 `%.6g`。 */
-        const vv = emitExpr(v, null, ctx);
-        if (vv === null) { bad = true; return null; }
-        const piece = specPiece(spec, vv, ctx);
-        if (piece === null) { acct(`%${spec.conv} 碰上这一格类型还没接`); bad = true; return null; }
-        return piece;
+           枚举在这儿就落到基整数上（第三十九刀）：printf 是变参，那一次转换是隐式的。 */
+        const vv0 = emitExpr(v, null, ctx);
+        if (vv0 === null) { bad = true; return null; }
+        const vv = vv0.type?.k === 'enum' ? { code: vv0.code, type: vv0.type.base } : vv0;
+        const piece = specPiece(spec, vv, ctx, pCode);
+        if (piece === null) { acct(`%${spec.conv} 碰上这一格类型（${vv.type?.k ?? '?'}）还没接`); bad = true; return null; }
+        /* 长度修饰只对整数与 `%lf` 那几格有意义（第四十四刀）；别的组合各是一条边界。 */
+        const mod = spec.mod ?? '';
+        if (mod !== '' && !['hh', 'h', 'l', 'll'].includes(mod)) {
+          acct(`printf 的长度修饰 '%${mod}${spec.conv}'`); bad = true; return null;
+        }
+        /* 标志、精度、宽度那一层（`specDress`）—— 三处 C 的未定义行为在那儿明说不收。 */
+        const d = specDress({
+          spec, piece, wCode, pCode, spill,
+        });
+        if (d.nope !== undefined) { acct(d.nope); bad = true; return null; }
+        return d.code;
       }, ' '.repeat(ind));
       if (bad || r === null) return null;
       return r.lines;
     },
     /* 取字段与下标都从**可写位置**那一层出发，读一次（结构体/数组那一格读出来的就是地址）。 */
     fieldOf: (node) => {
+      /* **枚举项那一路**（`Color.Red`）排在最前：它是一格编译期常量，不是谁的字段。 */
+      const cf = constOrFn(node);
+      if (cf !== null) return cf;
       /* **`string_t` 的那两格字段**（第一百四十四刀）：`m_length` 就是 `(slen …)`，
          `m_p` 明说不收。它不是一格内存，所以走在"可写位置"那一层之前。 */
       const nm2 = named(node) ?? {};
@@ -771,109 +800,22 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     },
     elemOf: (node) => valOfLv(node),
     derefOf: (node) => valOfLv(node),
-  };
-}
-
-initJnc({ log: () => {} });
-const tb = jncFrontEnd();
-const files = walkDir('tests/jnc/cases').sort().slice(0, limit);
-
-let ctxRef = null;
-let filesOk = 0;
-let cmp = 0;
-let same = 0;
-let drift = 0;
-const driftAt = [];
-/** 把临时格子的号抹平（`$e10` / `$s6` / `$do1` …）—— 只用来分辨"只差号"这一种。 */
-const numsOff = (s) => s.replace(/\$(e|s|l|c|x|do|sv|sk|once\$)\d+/g, '$$$1N');
-const diff = [];
-const skip = new Map();
-
-for (const f of files) {
-  let out = '';
-  try {
-    out = execFileSync('node', ['src/cli.js', 'emit', 'sx', f], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch { continue; }
-  let tree = null;
-  try { tree = jncParse(tb, f, new Diagnostics()); } catch { continue; }
-  const oracle = bodiesOf(out);
-  if (oracle.size === 0) continue;
-  filesOk += 1;
-  const short = f.split('/').pop();
-  const env = new Map();
-  const {
-    fields: aggFields, ctors: aggCtors, vars: globals, bindable: gBindable, roots,
-  } = topAggs(tree, env);
-  /* 枚举项的值先算出来塞进环境 —— `case Color.Red:` 那一格要它（`constInt`）。 */
-  collectEnumConsts(tree, env);
-  /* **被 `&` 取过地址的模块级标量**在方言那一侧是 `(ptr T)`（第二十四刀）—— 读写要 pload/pstore。 */
-  const gLifted = addrTaken(tree);
-  const fns = topFns(tree, env);
-  /* **重载过的名字在方言那一侧带号**（第七十九刀）：头一格照原名，第二格起是 `名字$oN`
-     （135-overloadcheap.jnc 的真输出：`q` / `q$o1` / `q$o2` / `q$o3`）。所以按**出现次序**
-     数一遍就能对上号 —— 先前整族记账走开（12 格），那是尺子自己不会比，不是规则没接。 */
-  const nth = new Map();
-  /* **共用的那个临时号**（`this.tmp`）：`$do` / `$sv` / `$sk` / `$c` / `static` 的 `名字$sN`
-     都从它取号，而它是**一份模块一个**（跨函数连着数）—— 所以也按文件开。 */
-  const tmpBox = { n: 0 };
-  /* 传播那些临时格子的号是**一份模块一个**、跨函数连着数的 —— 所以这一格按文件开。 */
-  const ecBox = { n: 0 };
-
-  const dig = (n) => {
-    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
-    if (headOf(n) === 'agg') return;                                 // 方法那一族要 `this`，还没接
-    if (headOf(n) === 'fn-def' || headOf(n) === 'fn-proto') {
-      const nm = named(n);
-      const dc = nm === null ? null : readDcl(nm.dcl);
-      const name = dc === null ? null : dc.name;
-      /* 原型也占一个号（旧降级那边它与定义是同一族的重载）—— 数了就往下走。 */
-      const k = name === null ? 0 : (nth.get(name) ?? 0);
-      if (name !== null) nth.set(name, k + 1);
-      if (headOf(n) === 'fn-proto') return;
-      const key = name === null ? null : (k === 0 ? name : `${name}$o${k}`);
-      const want = key === null ? undefined : oracle.get(key);
-      if (want !== undefined) {
-        const why = [];
-        const e = makeEnv(n, env, (w) => { why.push(w); }, fns, aggFields, aggCtors, ecBox, tmpBox,
-          globals, gLifted, gBindable, roots);
-        e.onCtx = (c2) => { ctxRef = c2; };
-        const got = emitBody(nm.body, e, 4);
-        if (got === null || why.length > 0) {
-          const w = why[0] ?? '体拼不出来';
-          skip.set(w, (skip.get(w) ?? 0) + 1);
-          if (why0) console.log(`  账　${short}　${name}　→ ${w}`);
-        } else {
-          /* 体首那几行（按值传的结构体形参抄一份）排在体的前面。 */
-          const whole = e.pre.length === 0 ? got : [...e.pre, got].join('\n');
-          cmp += 1;
-          if (whole === want) same += 1;
-          else if (numsOff(whole) === numsOff(want)) {
-            /* **只差临时格子的号**：那两个计数器是一份模块一个、跨函数连着数的，而这把尺子
-               遇到有账的函数就走开、号不跟着走 —— 所以后面那几格的号会整体偏小。
-               这是"前面有一格没接"的后果，与规则无关，单独记一栏（不算对，也不算规则错）。 */
-            drift += 1;
-            if (driftAt.length < 10) driftAt.push(`${short}　${name}`);
-          } else if (diff.length < 20) diff.push(`${short}　${name}\n      旧 ${want}\n      新 ${whole}`);
-        }
+    /**
+     * **`throw;` 那一跳**（第五十九刀）：与"errorcode 调用出错时那一跳"落的是**同一段代码**
+     * （`escapeText`）—— 有守护就跳那圈一次性循环的 `brk`、没有就 `(ret 当前的错值)`。
+     * 先前这一格压根没接上（`ctx.escape` 是 undefined），于是 `throw;` 静静地答 null，
+     * 整格函数被跳过、连账都没有一笔（170-throw.jnc 里 `check` 就这么消失了）。
+     */
+    escape: () => {
+      const gs = ctxRef.guards ?? [];
+      const g = gs.length === 0 ? null : gs[gs.length - 1];
+      if (g === null && curErr === null) {
+        acct('`throw` 落在既不是 errorcode、外面也没有 try/catch 的地方（jancy 那儿走运行期的 dynamic throw）');
+        return null;
       }
-      return;                                                        // 体里不再往下找函数
-    }
-    for (const it of n.items) dig(it);
+      return escapeText({ guard: g, loopsLen: (ctxRef.loops ?? []).length, curErr });
+    },
+    /* 驱动把它那一格 `ctx` 交回来（`expr` / `ecOut` / `guards` 都在它上头）。 */
+    onCtx: (c2) => { ctxRef = c2; },
   };
-  dig(tree);
 }
-
-console.log(`语料 ${filesOk} 份　对比函数体 ${cmp} 格`
-  + `　一模一样 ${same}（${(same / Math.max(cmp, 1) * 100).toFixed(1)}%）`
-  + `　只差临时号 ${drift}　不一致 ${cmp - same - drift}`);
-if (drift > 0) console.log(`只差临时号（前面有一格没接、号没跟着走）：${driftAt.join('　')}`);
-if (skip.size > 0) {
-  const top = [...skip].sort((a, b) => b[1] - a[1]).slice(0, 8);
-  console.log(`还没接（记账，不算对）：${[...skip].reduce((s, [, n]) => s + n, 0)} 格　→ `
-    + top.map(([w, n]) => `${w}×${n}`).join('  '));
-}
-if (diff.length > 0) {
-  console.log('\n对不上：');
-  for (const d of (all ? diff : diff.slice(0, 5))) console.log(`  ${d}`);
-}
-process.exitCode = cmp > 0 && same === cmp ? 0 : 1;

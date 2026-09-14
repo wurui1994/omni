@@ -39,6 +39,21 @@ export function memberShape(isStruct, isArr) {
   return isStruct === true || isArr === true ? 'agg' : 'ptr';
 }
 
+/**
+ * **`string_t` 上那两格字段**（第一百四十四刀）。jancy 那格结构体上公开的就是两个、都只读
+ * （`jnc_ct_TypeMgr.cpp:2031-2039` 里 `m_p` / `!m_ptr_sz` / `m_length`，带 `!` 的是内部的）：
+ *   - `m_length` 这一层答得出：`(slen …)` 就是它 —— 都是"按字节的长度"（`if (s)` 用的也是它）；
+ *   - `m_p` **明说不收**：那是一格指到**字节**上的 `char const*`，而这一层的 `char*` 指的是
+ *     方言的整数格（一格 8 字节）—— 两边不是同一个东西。
+ * 答 null 就是"这一格明说不收"（调用方记账）。
+ */
+export const STR_MEMBERS = new Set(['m_length', 'm_p']);
+
+export function strMember(name, code) {
+  if (name === 'm_length') return { code: `(slen ${code})`, type: { k: 'int', w: 64, u: true } };
+  return null;
+}
+
 /** 别名那一串路叠出来的地址：`(pfield (pfield 基 a) b)`。 */
 export function pathCode(baseCode, path) {
   let code = baseCode;
