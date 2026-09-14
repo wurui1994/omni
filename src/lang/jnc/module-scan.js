@@ -623,6 +623,14 @@ export function scanAggs(tree, env, ovl = new Map()) {
         for (const d of dcls) {
           const dcl = headOf(d) === 'init' ? named(d)?.dcl : d;
           const t = readDeclType(vn.specs, dcl);
+          /**
+           * **顶层的函数原型不是一格量**（`int later(int x);`，15-forward.jnc / 180-topmixovl.jnc）：
+           * 它在树上与模块级那几格量长在同一个节点里（声明符尾巴上多一对括号），可它说的是
+           * "有这么个函数"。收进 `vars` 的话查名那一层会当普通量算 —— 调用点于是走"从一格
+           * 函数值上调"那条，报的是"'later'：函数那一族（fn）"这种认错人的账。
+           * 它那一格在函数表里（`scanFns` 收 `fn-proto` 与这种两样）。
+           */
+          if (t !== null && t.shape === 'fn') continue;
           if (t !== null && t.name !== null) {
             /* **属性不是一格量**（第六十九刀）：它没有内存，读写各是一次调用 —— 收进
                `vars` 的话查名那一层会当普通量算，报的是"属性/事件（prop）"这种认错人的账。
