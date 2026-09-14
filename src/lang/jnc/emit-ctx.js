@@ -1214,6 +1214,13 @@ export function makeFnEnv(o) {
             }
             return varPlace(k, t, true);
           }
+          /* **命名空间里的那一格属性**（`cfg.level`，64-prop.jnc）：与上头那一条同一个判据 ——
+             整串摊出来正好是某格属性在方言那一侧的名字（`cfg$level`）。它不是一格内存，
+             读写各是一次调用，所以答的是 `prop` 形状（与裸写 `g_p` 走的是同一格）。 */
+          for (const [k, pr] of gProps) {
+            if ((pr.emit ?? k) !== flat) continue;
+            return propPlace({ ...pr, name: k }, null);
+          }
         }
       }
       let baseCode = null;
