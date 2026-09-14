@@ -188,5 +188,7 @@ export function makeCtx(env) {
     return { cases, groups: groups.map((g) => g.join('\n')) };
   };
 
+  /* 把拼齐的 `ctx` 交回给调用方 —— 注入那几格（`callOf` 那些）也要用它的 `expr`。 */
+  env.onCtx?.(ctx);
   return ctx;
 }

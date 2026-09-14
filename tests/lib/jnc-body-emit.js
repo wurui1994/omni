@@ -56,7 +56,36 @@ function bodiesOf(text) {
 }
 
 /** 最小的那份探子：形参与局部量的类型表。 */
-function makeEnv(fnNode, env, acct) {
+/** 顶层那几格函数的签名（名字 → { params, ret }）—— 调用那一族要它。 */
+function topFns(tree, env) {
+  const out = new Map();
+  const dig = (n) => {
+    if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    const h = headOf(n);
+    if (h === 'agg') return;
+    if (h === 'fn-def' || h === 'fn-proto') {
+      const nm = named(n);
+      const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
+      if (t !== null && t.name !== null && t.shape === 'fn') {
+        const dc = readDcl(nm.dcl);
+        const sf = dc === null ? undefined : dc.suffixes.find((x) => x.kind === 'fn-suffix');
+        const fs = sf === undefined ? [] : (readFormals(sf.node) ?? []);
+        const rr = t.base.kind === 'none' ? null : resolveType({ ...t, shape: 'data' }, env);
+        out.set(t.name, {
+          params: fs.map((f) => (f.type === null ? null : f.type)),
+          ret: rr === null || rr.type === null || rr.type.k === 'void' ? null : rr.type,
+          retDecl: t,
+        });
+      }
+      return;
+    }
+    for (const it of n.items) dig(it);
+  };
+  dig(tree);
+  return out;
+}
+
+function makeEnv(fnNode, env, acct, fns = new Map()) {
   const names = new Map();
   const nm = named(fnNode);
   const dc = nm === null ? null : readDcl(nm.dcl);
@@ -200,9 +229,32 @@ function makeEnv(fnNode, env, acct) {
       const code = ty.k === 'int' ? wrapTo(raw, ty.w ?? 32, ty.u === true) : raw;
       return [`${pad}(set ${key} ${code})`];
     },
+    /** 调用：被调是**裸名字**且查得着顶层那几格函数时 → `(call 名字 实参…)`。 */
+    callOf: (node, want, ctx) => {
+      const nm2 = named(node) ?? {};
+      const fn = nm2.fn;
+      if (headOf(fn) !== 'name') { acct('被调那一格还认不出来（方法/函数指针/算符）'); return null; }
+      const key = String(named(fn)?.text?.value ?? '');
+      if (key === 'printf') { acct('printf 那一族（格式化）还没接'); return null; }
+      const sig = fns.get(key);
+      if (sig === undefined) { acct(`调的那个 '${key}' 查不着（跨文件/宿主面）`); return null; }
+      const args = allInChain(nm2.args, 'args-add', 'args');
+      const parts = [];
+      for (const [i, a2] of args.entries()) {
+        const pt = sig.params[i] ?? null;
+        const pr = pt === null ? null : resolveType(pt, env);
+        const w = pr === null || pr.type === null ? null : withBits(pr.type, pt);
+        const v = ctxRef.expr(a2, w);
+        if (v === null) return null;
+        parts.push(v);
+      }
+      return {
+        code: `(call ${key}${parts.map((x) => ` ${x}`).join('')})`,
+        type: sig.ret === null ? { k: 'void' } : withBits(sig.ret, sig.retDecl),
+      };
+    },
     fieldOf: () => { acct('取字段还没接'); return null; },
     elemOf: () => { acct('下标还没接'); return null; },
-    callOf: () => { acct('调用还没接'); return null; },
     contTargets: () => false,
   };
 }
@@ -211,6 +263,7 @@ initJnc({ log: () => {} });
 const tb = jncFrontEnd();
 const files = walkDir('tests/jnc/cases').sort().slice(0, limit);
 
+let ctxRef = null;
 let filesOk = 0;
 let cmp = 0;
 let same = 0;
@@ -229,6 +282,7 @@ for (const f of files) {
   filesOk += 1;
   const short = f.split('/').pop();
   const env = new Map();
+  const fns = topFns(tree, env);
 
   const dig = (n) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
@@ -240,7 +294,8 @@ for (const f of files) {
       const want = name === null ? undefined : oracle.get(name);
       if (want !== undefined) {
         const why = [];
-        const e = makeEnv(n, env, (w) => { why.push(w); });
+        const e = makeEnv(n, env, (w) => { why.push(w); }, fns);
+        e.onCtx = (c2) => { ctxRef = c2; };
         const got = emitBody(nm.body, e, 4);
         if (got === null || why.length > 0) {
           const w = why[0] ?? '体拼不出来';
