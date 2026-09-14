@@ -476,6 +476,21 @@ export function makeFnEnv(o) {
       if (headOf(it) === 'curly') return curlyLines(at, ty, it, pad);
       const v = emitExpr(it, ty, ctxRef);
       if (v === null) return null;                          // 账已经记过
+      /**
+       * **一整块当花括号里的一项**（`int rows[2][3] = { a, b };`，第二百零八刀）：那一格格子
+       * 本身是结构体/数组时，`(pstore 格子 值)` 搬不动一整块 —— 要"逐字段 / 逐格搬"
+       * （jancy 那边 `assignCurlyInitializerItem` 也走 `storeDataRef` → `Cast_Array`）。
+       * 源头先钉在一格临时量上：它可能是一次调用，逐格搬会重求好几遍。
+       */
+      if (ty?.k === 'struct' || ty?.k === 'arr') {
+        const s = `$s${tmpBox.n}`;
+        tmpBox.n += 1;
+        const ls = copyValLines({
+          dst: at, src: `(var ${s})`, type: ty, pad, fieldsOf,
+        });
+        if (ls === null) { acct('花括号里那一整块抄不出来（字段表/环那两格）'); return null; }
+        return [`${pad}(let ${s} ${emitType(ty, 'slot', tyc)} ${v.code})`, ...ls];
+      }
       return [`${pad}(pstore ${at} ${v.code})`];
     };
     const out = [];
@@ -1400,6 +1415,14 @@ export function makeFnEnv(o) {
      * 给多了、或落在"不是一整块"的类型上：当场记账（不猜）。
      */
     curlyLines: (dst, type, node, pad) => curlyLines(dst, type, node, pad),
+    /**
+     * **按值抄一份那几行**（`copyValLines` 加上这一层的字段表）：模块级那一格聚合体写了初值
+     * （`int h[3] = g;`，第二百零八刀）要它 —— 与局部量、按值传形参走的是同一份模板。
+     * 抄不出来（字段表缺一格、或类型成环）答 null，调用方记账。
+     */
+    copyLines: (dst, src, type, pad) => copyValLines({
+      dst, src, type, pad, fieldsOf,
+    }),
     /**
      * **赋值当表达式用**（第一百二十七 / 一百二十八刀的那一族：`return m_i = v + 1;`、
      * 链式 `a = b = c`、`int r = *p = 5;`）。方言里赋值是**一条语句**，答不出值 ——

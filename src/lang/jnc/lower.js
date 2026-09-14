@@ -432,9 +432,26 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         cells.push(`    (set ${full} (pnew ${pt} (int 1)))`);
       }
       if (isInit) {
-        /* 初值那一句由**函数体那一层**降（它认表达式）—— 借模块级那一格探子。
-           结构体与数组要"逐字段抄一份"（`copyVal`），那一族另算。 */
-        if (r.type.k === 'struct' || r.type.k === 'arr' || r.type.k === 'class') {
+        /* 初值那一句由**函数体那一层**降（它认表达式）—— 借模块级那一格探子。 */
+        /**
+         * **模块级那一格聚合体写了初值**（`int h[3] = g;`，第二百零八刀）：结构体与数组是
+         * **按值的一整块**（第十二 / 二十一刀），所以这一句不是一次 `pstore` —— 是"逐字段 /
+         * 逐格搬"（`copyLines`，与局部量 `int b[3] = a;`、按值传形参共用同一份模板）。
+         * 那一格的内存上头已经 pnew 出来了，这儿只把源头搬进去。
+         * 类那一族另算（写了初值的类变量要"先造对象、再拿初值调 `operator :=`"）。
+         */
+        if (r.type.k === 'struct' || r.type.k === 'arr') {
+          const mi0 = modInit();
+          const sv = mi0.ctx.expr(named(d)?.value, r.type);
+          if (sv === null) continue;                    // 账已经记过
+          const ls0 = mi0.e.copyLines(`(var ${full})`, sv, r.type, '    ');
+          if (ls0 === null) {
+            acct(`模块级 '${t.name}' 的初值抄不出来（字段表/环那两格）`); continue;
+          }
+          inits.push(...ls0);
+          continue;
+        }
+        if (r.type.k === 'class') {
           acct(`模块级 '${t.name}' 写了初值的聚合体（要逐字段抄一份）还没接`); continue;
         }
         const mi = modInit();
