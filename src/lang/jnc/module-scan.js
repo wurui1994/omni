@@ -157,6 +157,10 @@ export function scanAggs(tree, env) {
           /* 三种写法都是方法：带体的（`fn-def`）、类里只写原型的（那一格落成 `var-decl`，
              `m.shape === 'fn'`）、以及独立的原型节点（`fn-proto`）。 */
           if (mh !== 'fn-def' && mh !== 'fn-proto' && m.shape !== 'fn') continue;
+          /* **完整声明式的属性**（`int property m_p { get() {…} … }`）在树上也是一格函数声明，
+             可那对花括号里是取/存两个体 —— 不是方法。整族另算，别混进方法表。 */
+          if (m.shape === 'prop' || m.shape === 'event' || m.shape === 'reactor') continue;
+
           /* 名字走 `fnName`：`construct` / `destruct` / 算符重载那几格**没有普通名字**
              （`m.name` 是 null），而它们正是方法那一族里最要紧的几个。 */
           const mname = fnName({ name: m.name, type: m.type, at: m.at });

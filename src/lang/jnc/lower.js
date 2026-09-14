@@ -275,6 +275,13 @@ export function lowerJncRules(tree, diags, opts = {}) {
     const nm = named(it);
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
     if (t === null) { acct('顶层函数的类型读不出来'); continue; }
+    /* **完整声明式的属性**（`int property g_p { get() {…} set(int x) {…} }`，prop_full.rst:15）：
+       它在树上长得像一格函数声明，可那对花括号里是**取/存两个体**，不是一格函数体。
+       整族另算 —— 送去发"函数的头"只会报"认不出形参表"，那是认错人。 */
+    if (t.shape === 'prop') {
+      acct(`'${t.name ?? '?'}'：完整声明式的属性（那对花括号里是取/存两个体）还没接`); continue;
+    }
+
     if (t.name === null) {
       /* **体写在类外**（`int P.scaled(int k) { … }`）：名字是点串，东家是它前面那一段。
          哪一段是东家**要按聚合体表认**，不能"在最后一个 `$` 上切"：`Reg$construct$static`
