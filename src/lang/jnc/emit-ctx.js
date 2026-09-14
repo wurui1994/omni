@@ -25,7 +25,7 @@ import { wrapTo, realOf, intConvCode } from './int-table.js';
 import { fmtRun, specPiece, specDress } from '../common/fmt.js';
 import { zeroText, CRT_CHAR } from './expr-table.js';
 /* `variant_t` 那格结构体是合成出来的：名字与那四格字段的家在 runtime 那一份。 */
-import { VARIANT, VARIANT_FIELDS, varBoxShell, varUnboxShell } from './runtime.js';
+import { VARIANT, VARIANT_FIELDS, varBoxShell, varUnboxShell, mcFireName, mcFireShell } from './runtime.js';
 import {
   addrTaken, liftable, liftedType, cellName, arrayFromCurly,
 } from './emit-global.js';
@@ -1009,6 +1009,33 @@ export function makeFnEnv(o) {
       if (self === null) { acct('`this` 不在方法体里'); return null; }
       return { shape: 'agg', code: '(var $this)', type: selfType() };
     }
+    /**
+     * **`bindingof(p)`**（第一百一十七刀，prop_bindable.rst:23-29）：`bindable` 的属性除了那格
+     * 存储还生成**一格事件** `<属性>$m_onChanged`，而 `bindingof(p)` 说的就是那一格 ——
+     * 它是一格**可写位置**（`+= f` 加听众、`= null` 清空），所以在这一层答，不在表达式那一层。
+     * 只认"里头是一格属性的名字"这一种形状；别的（不是属性、不是 bindable）照实说不收。
+     */
+    if (h === 'bindingof') {
+      const inner = nm2.arg;
+      const key0 = headOf(inner) === 'name' ? String(named(inner)?.text?.value ?? '') : null;
+      if (key0 === null) { acct('bindingof 里头不是一格名字'); return null; }
+      const ty0 = { k: 'mc', params: [] };
+      const gp = gProps.get(key0);
+      if (gp !== undefined) {
+        if (!(gp.type?.mods ?? []).includes('bindable')) {
+          acct(`bindingof('${key0}')：那格属性不是 bindable（没有生成的事件）`); return null;
+        }
+        return { shape: 'var', code: `${gp.emit}$m_onChanged`, type: ty0 };
+      }
+      const mp = self === null ? undefined : aggProps.get(self.agg)?.get(key0);
+      if (mp !== undefined) {
+        if (!(mp.type?.mods ?? []).includes('bindable')) {
+          acct(`bindingof('${key0}')：那格属性不是 bindable（没有生成的事件）`); return null;
+        }
+        return { shape: 'ptr', code: `(pfield (var $this) ${mp.emit}$m_onChanged)`, type: ty0 };
+      }
+      acct(`bindingof('${key0}')：查不着那格属性`); return null;
+    }
     if (h === 'name') {
       const key = String(nm2.text?.value ?? '');
       /* **局部与形参遮住模块级那一格**（查名的第一步就是"查得着的变量"，次序即规则）。 */
@@ -1020,6 +1047,18 @@ export function makeFnEnv(o) {
          * 开的是一层命名空间（prop_full.rst:15），里头裸写的 `m_value` 指的是这格属性生成的
          * 存储 —— 在方言那一侧它叫 `g_p$m_value`。这一问排在"查不着"之前。
          */
+        /**
+         * **`bindable` 生成的那格事件**（第一百一十七刀）：取/存体里裸写的 `m_onChanged` 指的是
+         * `<属性>$m_onChanged` —— 它与 `m_value` 是同一层作用域里的两格生成物，只是类型是
+         * 多播（叫它就是"通知所有听众"）。成员属性那一格是**字段**，模块级那一格是一格量。
+         */
+        if (propScope !== null && propScope.mc === true && key === 'm_onChanged') {
+          const ty3 = { k: 'mc', params: [] };
+          const nm4 = `${propScope.emit}$m_onChanged`;
+          return propScope.field === true
+            ? { shape: 'ptr', code: `(pfield (var $this) ${nm4})`, type: ty3 }
+            : { shape: 'var', code: nm4, type: ty3 };
+        }
         if (propScope !== null && propScope.store.has(key)) {
           const t2 = propScope.store.get(key);
           const r2 = resolveType({ ...t2, shape: 'data' }, env);
@@ -1727,6 +1766,28 @@ export function makeFnEnv(o) {
       const lv = lvOf(an.a);
       if (lv === null) return null;
       /**
+       * **往一格事件（多播）上写**（第一百一十七刀，69-propbind.jnc）：那一格不是普通的量 ——
+       *   `bindingof(p) += f;` 是**加一格听众**（`(apush 那一格 (fnref f))`，加进来的次序
+       *     就是叫的次序）；
+       *   `bindingof(p) = null;` 是**清空**（`(set 那一格 (anew … (int 0)))`）。
+       * 别的算符（`-=` 那一族要"减一格听众"，得先有个句柄）明说不收。
+       */
+      if (lv.type?.k === 'mc') {
+        if (op === '+=') {
+          const v0 = emitExpr(an.b, { k: 'fnptr', params: lv.type.params ?? [], ret: null }, ctxRef);
+          if (v0 === null) return null;                      // 账已经记过
+          if (v0.type?.k !== 'fnptr') {
+            acct(`往事件上加的那一格是 ${v0.type?.k ?? '?'}，不是函数值`); return null;
+          }
+          return [`${pad}(apush ${readLv(lv)} ${v0.code})`];
+        }
+        if (op === '=' && headOf(an.b) === 'null') {
+          const w0 = writeLv(lv, `(anew ${emitType(lv.type, 'value', tyc)} (int 0))`);
+          return w0 === null ? null : [`${pad}${w0}`];
+        }
+        acct(`往事件上 '${op}' 那一格还没接（加听众是 \`+=\`、清空是 \`= null\`）`); return null;
+      }
+      /**
        * **往结构体/数组里赋值是"抄一份"**（第十二 / 二十一刀）：`(pstore)` 搬不动一整块，
        * 逐字段 / 逐格搬（`copyVal`）。源头先钉在一格临时量上 —— 右边可能是一次调用。
        * 复合赋值落在整块上是算符重载那一族，另算。
@@ -1959,10 +2020,35 @@ export function makeFnEnv(o) {
         const viaVal = asName === null || names.has(asName) || globals.has(asName)
           /* **方法体里裸写一格装着函数指针的字段**（`m_op(…)`，109-fnfield.jnc）：与
              `s.m_op(…)` 是同一件事 —— 读出那一格、按函数值调。 */
-          || (self !== null && fnptrField(self.agg, asName));
+          || (self !== null && fnptrField(self.agg, asName))
+          /* **取/存体里裸写那格生成的事件**（`m_onChanged();`，第一百一十七刀）：它不是
+             函数表里的名字，是这格属性的生成物 —— 求它得出一格多播，叫它就是通知所有听众。 */
+          || (propScope !== null && propScope.mc === true && asName === 'm_onChanged');
         if (viaVal) {
           const fv = emitExpr(fn, null, ctxRef);
           if (fv === null) return null;
+          /**
+           * **叫一格事件就是"通知所有听众"**（第一百一十七刀，69-propbind.jnc 的 `m_onChanged()`）：
+           * 多播那一格不是一格函数值 —— 它是一串，所以落成一次**通知助手**的调用
+           * （`jnc$mc_fire`，一份模块只发一次；次序就是加进来的次序）。
+           */
+          if (fv.type?.k === 'mc') {
+            const ps0 = fv.type.params ?? [];
+            if (args.length !== ps0.length) {
+              acct(`叫那格事件给了 ${args.length} 个实参，可它收 ${ps0.length} 个`); return null;
+            }
+            const vs = [];
+            for (const [i, a3] of args.entries()) {
+              const v3 = emitExpr(a3, ps0[i] ?? null, ctxRef);
+              if (v3 === null) return null;
+              vs.push(v3.code);
+            }
+            const fire = varShellOnce(mcFireName(fv.type), mcFireShell(fv.type));
+            return {
+              code: `(call ${fire} ${fv.code}${vs.map((x) => ` ${x}`).join('')})`,
+              type: { k: 'void' },
+            };
+          }
           if (fv.type?.k !== 'fnptr') {
             acct(`被调那一格是 ${fv.type?.k ?? '?'}，不是函数值（算符重载那一族另算）`); return null;
           }

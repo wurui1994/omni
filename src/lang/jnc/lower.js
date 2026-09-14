@@ -771,6 +771,12 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    *
    * 发得出来答 true；那对花括号里没有取/存（简写取值器、`autoget` / `bindable` 那几族）答 false。
    */
+  /** 这一格属性写了 `bindable` 吗（写了就多生成一格事件 `<属性>$m_onChanged`，第一百一十七刀）。 */
+  const mcOf = (node) => {
+    const nm0 = named(node);
+    const t0 = nm0 === null ? null : readDeclType(nm0.specs, nm0.dcl);
+    return (t0?.mods ?? []).includes('bindable');
+  };
   const emitPropBody = (node, emitName, selfInfo, ns, store, field = false) => {
     const body = named(node)?.body;
     if (headOf(body) !== 'compound') return false;
@@ -815,7 +821,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         node,
         hasBody: false,
       });
-      emitFn(node, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map(), field },
+      emitFn(node, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map(), field, mc: mcOf(node) },
         [], true, 0, `(fn ${key} (${selfPart}) ${emitType(r0.type, 'value', tyc)}`);
       return true;
     }
@@ -837,7 +843,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       methods.set(key, {
         ...sig, owner: emitName, name: leaf, node: im.at, hasBody: false,
       });
-      emitFn(im.at, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map(), field }, [], true);
+      emitFn(im.at, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map(), field, mc: mcOf(node) }, [], true);
     }
     return true;
   };
@@ -1127,7 +1133,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         const store = new Map();
         const mods2 = pr2.type?.mods ?? [];
         if (mods2.includes('autoget') || mods2.includes('bindable')) store.set('m_value', pr2.type);
-        ps = { emit: pr2.emit, store, field: true };
+        ps = { emit: pr2.emit, store, field: true, mc: mods2.includes('bindable') };
       }
     }
     emitFn(
@@ -1191,7 +1197,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
           const pname = dotted.slice(0, dotted.lastIndexOf('$'));
           const pr0 = gProps.get(pname);
           const store0 = pr0?.store ?? new Map();
-          emitFn(it, dotted, null, null, ns, { emit: pname, store: store0 });
+          emitFn(it, dotted, null, null, ns, { emit: pname, store: store0, mc: (gProps.get(pname)?.type?.mods ?? []).includes('bindable') });
           continue;
         }
         acct(`'${dotted}' 的东家查不着（不是这份源码里的聚合体）`);
@@ -1219,7 +1225,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
           const store = pr2.store ?? new Map();
           const mods2 = pr2.type?.mods ?? [];
           if (mods2.includes('autoget') || mods2.includes('bindable')) store.set('m_value', pr2.type);
-          ps = { emit: pr2.emit ?? pemit, store, field: true };
+          ps = { emit: pr2.emit ?? pemit, store, field: true, mc: mods2.includes('bindable') };
         }
       }
       emitFn(it, dotted, null, selfInfo, ns, ps, [], false, dupOf(it) ?? 0);
