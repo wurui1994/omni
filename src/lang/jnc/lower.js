@@ -58,7 +58,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
 
   collectEnumConsts(tree, env);
   const {
-    fields: aggFields, ctors: aggCtors, vars: globals, gEmit, methods, fieldInits,
+    fields: aggFields, ctors: aggCtors, vars: globals, gEmit, gProps, methods, fieldInits,
     bindable: gBindable, roots, aggs,
   } = scanAggs(tree, env);
   const fns = scanFns(tree, env);
@@ -104,6 +104,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
         gLifted,
         gBindable,
         gEmit,
+        gProps,
         methods,
         tags,
         fieldInits,
@@ -145,8 +146,20 @@ export function lowerJncRules(tree, diags, opts = {}) {
         name: t.name, type: t, shape: t.shape, storage, at: it,
       };
       const g = globalLines(m, env, { ns, clsRoot, taken: gLifted });
-      if (g.why !== null) { acct(`模块级 '${t.name}'：${g.why}`); continue; }
       for (const l of g.lines) decls.push(`  ${l}`);
+      /**
+       * `why` 里有两种不同的东西，混在一起记账就把"做对了"记成了"还没做"：
+       *   - **"（对的行为）"那几条**：这一格本来就不发存储（不带 `autoget`/`bindable` 的属性、
+       *     函数的前向声明…）—— 不是缺口，往下也不用摆 pnew 与初值；
+       *   - 别的：真的拼不出来，记账。
+       */
+      if (g.why !== null) {
+        if (!g.why.includes('对的行为')) acct(`模块级 '${t.name}'：${g.why}`);
+        continue;
+      }
+      /* **属性那一格不是一格内存**（读写各是一次调用）：存储那几行上面已经发了，
+         底下 pnew / 初值那一套是给"一格量"用的，属性走不到那儿。 */
+      if (t.shape === 'prop' || t.shape === 'event') continue;
       /* 要一段自己的内存的那几格（结构体 / 数组 / 提过的标量）：一句 pnew 排在初值之前。 */
       const r = resolveType(t, env);
       if (r.type === null) { acct(`模块级 '${t.name}'：${r.why}`); continue; }
@@ -187,7 +200,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
    *
    * `owner` 是方言那一侧的前缀（命名空间或东家），`selfInfo` 为 null 就是没有 `this`。
    */
-  const emitFn = (node, shown, owner, selfInfo, ns) => {
+  const emitFn = (node, shown, owner, selfInfo, ns, propScope = null) => {
     const nm = named(node);
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
     if (t === null) { acct(`函数 '${shown}' 的类型读不出来`); return; }
@@ -217,6 +230,8 @@ export function lowerJncRules(tree, diags, opts = {}) {
       gLifted,
       gBindable,
       gEmit,
+      gProps,
+      propScope,
       roots,
     });
     /* **`int main()` 落成方言的入口 `(main …)`，那一格不回值**：所以体那一层看见的是
@@ -272,11 +287,18 @@ export function lowerJncRules(tree, diags, opts = {}) {
         if (aggs.some((x) => x.emitName === pre)) { ownerName = pre; break; }
       }
       if (ownerName === null) {
-        /* 东家不是一格聚合体：那是**属性的取/存**（`int g_p.get() {…}` —— 属性那对花括号开的是
-           一层命名空间，第六十九刀）那一族，另算。 */
+        /* 东家不是一格聚合体：那是**模块级属性的取/存**（`int g_p.get() {…}` —— 属性那对
+           花括号开的是一层命名空间，第六十九刀）。它在方言里就是一格普通函数
+           `g_p$get` / `g_p$set`（没有 `$this`）—— 名字由 `fnHead` 从点串拼出来。 */
         const leaf = dotted.slice(dotted.lastIndexOf('$') + 1);
-        if (leaf === 'get' || leaf === 'set') acct(`'${dotted}'：属性的取/存那一族还没接`);
-        else acct(`'${dotted}' 的东家查不着（不是这份源码里的聚合体）`);
+        if (leaf === 'get' || leaf === 'set') {
+          /* 取/存那两个体里裸写的 `m_value` 指的是这格属性**生成的存储** —— 把属性那一格
+             当一层作用域递进去（`propScope`）。 */
+          const pname = dotted.slice(0, dotted.lastIndexOf('$'));
+          emitFn(it, dotted, null, null, ns, gProps.get(pname) ?? null);
+          continue;
+        }
+        acct(`'${dotted}' 的东家查不着（不是这份源码里的聚合体）`);
         continue;
       }
       const a = aggs.find((x) => x.emitName === ownerName);

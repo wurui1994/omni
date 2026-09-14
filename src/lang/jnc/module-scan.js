@@ -103,6 +103,7 @@ export function scanAggs(tree, env) {
   const vars = new Map();                                            // 模块级那几格量（名字 → 声明类型）
   const gEmit = new Map();                                           // 名字 → 方言那一侧的名字（带命名空间前缀）
   const methods = new Map();                                         // `东家$方法名` → 签名 + 那个节点
+  const gProps = new Map();                                          // 模块级那几格**写出来的属性**（读写各是一次调用）
   const fieldInits = new Set();                                      // 里头有"写了初值的字段"的那几格
   const bindable = new Set();                                        // 里头带取/存两格的那几个
   const aggs = [];                                                   // 收齐了好算继承链的根
@@ -206,6 +207,22 @@ export function scanAggs(tree, env) {
             vars.set(t.name, t);
             /* 方言那一侧的名字带**命名空间前缀**（`ns.g` 是 `ns$g`）—— 读写那两处都要它。 */
             if (owner !== null) gEmit.set(t.name, `${owner}$${t.name}`);
+            /* **写出来的属性**（`int property g_p { get; set; }`）：读它是 `(call g_p$get)`、
+               写它是 `(call g_p$set …)`（第六十九刀）—— 它不是一格内存，所以单独记一张表。
+               `bindable` 的**数据**（`bindable int g_d;`）不算：那一格的取/存是**生成**出来的
+               （还没接），与"取/存是人写的"这一族两码事。 */
+            if (t.shape === 'prop') {
+              /* **`autoget` / `bindable` 的属性有一格生成的存储**（`<属性名>$m_value`，
+                 prop_autoget.rst:26）：取/存那两个体里裸写的就是 `m_value` —— 它在方言那一侧是
+                 一格模块级的量，所以连类型一起记下来（不记，取值器里那一句就报"查不着"）。 */
+              const store = new Map();
+              const mods = t.mods ?? [];
+              if (mods.includes('autoget') || mods.includes('bindable')) store.set('m_value', t);
+              gProps.set(t.name, {
+                emit: owner === null ? t.name : `${owner}$${t.name}`, type: t, store,
+              });
+            }
+
             if (bind) bindable.add(t.name);
           }
         }
@@ -248,6 +265,6 @@ export function scanAggs(tree, env) {
     if (a.emitName !== null && r.emitName !== undefined) roots.set(a.emitName, r.emitName);
   }
   return {
-    fields, ctors, vars, gEmit, methods, fieldInits, bindable, roots, aggs,
+    fields, ctors, vars, gEmit, gProps, methods, fieldInits, bindable, roots, aggs,
   };
 }

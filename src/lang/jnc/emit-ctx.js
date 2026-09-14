@@ -47,6 +47,7 @@ export function makeFnEnv(o) {
     ecBox = { n: 0 }, tmpBox = { n: 0 }, globals = new Map(), gLifted = new Set(),
     gBindable = new Set(), roots = new Map(), gEmit = new Map(),
     methods = new Map(), self = null, tags = new Map(), fieldInits = new Set(),
+    gProps = new Map(), propScope = null,
   } = o;
   let ctxRef = null;
   /* **类那一族在方言里写的是继承链的根**（第五十六刀）—— 发类型时都要带上这一格。 */
@@ -275,6 +276,39 @@ export function makeFnEnv(o) {
       const t = names.get(key) ?? globals.get(key);
       const isG = !names.has(key) && globals.has(key);
       if (t === undefined) {
+        /**
+         * **属性的取/存体里那一层**（`int g_p.get() { return m_value; }`）：属性那对花括号
+         * 开的是一层命名空间（prop_full.rst:15），里头裸写的 `m_value` 指的是这格属性生成的
+         * 存储 —— 在方言那一侧它叫 `g_p$m_value`。这一问排在"查不着"之前。
+         */
+        if (propScope !== null && propScope.store.has(key)) {
+          const t2 = propScope.store.get(key);
+          const r2 = resolveType({ ...t2, shape: 'data' }, env);
+          if (r2.type === null) { acct(`属性的存储 '${key}'：${r2.why}`); return null; }
+          const nm3 = `${propScope.emit}$${key}`;
+          const ty2 = withBits(r2.type, t2);
+          /* **被 `&` 取过地址的那一格是模块级的 `(ptr T)` 自己**（第二十四刀）：读写走
+             `pload` / `pstore`，`&m_value` 就是那一格。`&` 数的是**源码里写的**名字，
+             而源码里写的正是 `m_value`（prop_autoget.rst:26）。 */
+          const box2 = gLifted.has(key) && liftable(ty2);
+          const shape2 = lvalueShape({
+            isStruct: ty2.k === 'struct',
+            isArr: ty2.k === 'arr',
+            isGlobal: true,
+            gLifted: box2,
+            lifted: false,
+          });
+          return { shape: shape2, code: shape2 === 'var' ? nm3 : `(var ${nm3})`, type: ty2 };
+        }
+        /* **写出来的属性**（第六十九刀）：它不是一格内存 —— 读是 `(call g_p$get)`、写是
+           `(call g_p$set …)`。这一问排在"查不着"之前：报"未声明"是**认错人**（名字在，
+           只是它那一格要走取/存两个函数）。 */
+        const pr = gProps.get(key);
+        if (pr !== undefined) {
+          const r0 = resolveType({ ...pr.type, shape: 'data' }, env);
+          if (r0.type === null) { acct(`属性 '${key}'：${r0.why}`); return null; }
+          return { shape: 'prop', code: pr.emit, type: withBits(r0.type, pr.type) };
+        }
         /* **方法体里裸写的字段**（`NAME_LVALUE_ORDER` 的第二格）：`m_x` 就是 `this.m_x`。
            排在"查不着"之前 —— 它是一格真字段，报"未声明"是认错人。 */
         if (self !== null && (aggFields.get(self.agg)?.has(key) ?? false)) {
@@ -517,6 +551,10 @@ export function makeFnEnv(o) {
       const lv = lvOf(node);
       if (lv === null) return null;
       if (lv.shape === 'var') { acct('对没提到堆上的那一格取地址（`&` 那一族还没接全）'); return null; }
+      /* **属性不是一格内存**（第六十九刀）：`&g_p` 在 jancy 里是"属性指针"（取/存两个函数 +
+         那个对象），与一格普通指针两码事 —— 这一层没有那格类型，明说。 */
+      if (lv.shape === 'prop') { acct('对属性取地址（那是一格属性指针，不是普通指针）还没接'); return null; }
+
       return { code: lv.code, type: { k: 'ptr', target: lv.type } };
     },
     /** 一格局部量声明：`int x = 5;` → `(let x int (int 5))`。 */

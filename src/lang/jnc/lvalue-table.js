@@ -70,4 +70,11 @@ export const SHAPE_ACCESS = {
   ptr: { read: (x) => `(pload ${x})`, write: (x, v) => `(pstore ${x} ${v})` },
   /* `agg` 的写不是一句 —— 结构体逐字段、数组逐格抄一份（`copyVal`，第十二刀与第二十一刀）。 */
   agg: { read: (x) => x, write: null },
+  /**
+   * **属性不是一格内存**（第六十九刀）：读它是**一次调用**、写它是**另一次调用**
+   * （`prop.rst` 里那对 `get` / `set`）。所以它是第四种形状 —— 混进 `var` 那一格就等于
+   * 把"调一次函数"悄悄换成"读一格变量"。写出来的是一整条语句（`(expr (call …))`），
+   * 因为方言里调用当语句要裹 `expr`。
+   */
+  prop: { read: (x) => `(call ${x}$get)`, write: (x, v) => `(expr (call ${x}$set ${v}))` },
 };
