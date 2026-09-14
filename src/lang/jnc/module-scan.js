@@ -791,6 +791,40 @@ export function scanAggs(tree, env, ovl = new Map()) {
     for (const it of n.items) names0(it, inner);
   };
   names0(tree, null);
+  /**
+   * **类体里的 typedef 先过一遍**（第二百一十一刀，129-baseparam.jnc）：那几格 typedef 提到顶层
+   * 是一次**声明**，而查它的地方（另一格聚合体里某个方法的返回类型）可能排在它**前面** ——
+   * 泛型那一族尤其如此：造出来的实例插在顶层链**最前头**（第一百一十刀），于是
+   * `struct ImplS<B>: B { Entry val() {…} }` 那一格的 `Entry` 要在 `BaseS` 登记它之前就解。
+   *
+   * 少这一遍，`val` 的返回类型解不出来、整格当 void 记 —— `%d` 那一处报的
+   * "碰上这一格类型（void）"就是它（而那不是"欠着的一族"，只是次序）。
+   *
+   * 这一遍只登记、一个字都不发；口径与下头那一遍同一条（**同名的不盖**，先声明的胜出），
+   * 走的次序也一样，所以撞名时的赢家不变。
+   */
+  const preTypedefs = (n, owner) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    const h = headOf(n);
+    let inner = owner;
+    if (h === 'namespace') {
+      const nm0 = nameText(named(n)?.name);
+      if (nm0 !== null) inner = owner === null ? nm0 : `${owner}$${nm0}`;
+    } else if (h === 'agg') {
+      const a0 = readAgg(n);
+      const nm0 = a0 === null ? null : nameText(a0.name);
+      if (a0 !== null && nm0 !== null) {
+        inner = owner === null ? nm0 : `${owner}$${nm0}`;
+        for (const m of a0.members) {
+          if (m.shape !== 'typedef' || m.name === null || m.type === null) continue;
+          if (env.has(m.name)) continue;
+          env.set(m.name, { kind: 'typedef', type: m.type, name: `${inner}$${m.name}` });
+        }
+      }
+    }
+    for (const it of n.items) preTypedefs(it, inner);
+  };
+  preTypedefs(tree, null);
   scan(tree, null, false, false);
   /**
    * **基类那几格字段也算这一格自己的**（第五十六刀：一整条继承链共用一格结构体）。所以
