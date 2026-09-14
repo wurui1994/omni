@@ -258,17 +258,16 @@ function makeEnv(fnNode, env, acct, fns = new Map()) {
     printf: (node, ind, ctx) => {
       const args = allInChain(named(node)?.args, 'args-add', 'args');
       if (args.length === 0) { acct('printf 一个实参都没有'); return null; }
-      /* 字符串字面量在树上是一格**节点**（公共节点表 `{ name:'string', leaf:'string' }`），
-         不是裸记号 —— 按表读树。 */
-      const f0raw = args[0];
-      const f0 = headOf(f0raw) === 'string' ? named(f0raw)?.text ?? f0raw.items?.[1] : f0raw;
-      if (f0 === undefined || Array.isArray(f0?.items) || typeof f0?.value !== 'string'
-        || !f0.value.startsWith('"')) {
+      /* 格式串那一格是一格**记号**，而且**转义已经解好了**：
+         `{ kind:'string', value:'%d\n', raw:'%d\\n' }`（印出来才知道的 —— 先前既按裸引号
+         判、又想 JSON.parse 一遍，两样都错）。所以直接用 `value`。
+         拼接（`"a" "b"`）与格式化字面量（`$"…"`）是另两族，它们是 list，记账。 */
+      const f0 = args[0];
+      if (f0 === undefined || Array.isArray(f0?.items) || f0.kind !== 'string'
+        || typeof f0.value !== 'string') {
         acct('printf 的格式串不是一格字面量（拼接/格式化字面量那两族另算）'); return null;
       }
-      let fmt = null;
-      try { fmt = JSON.parse(f0.value); } catch { fmt = null; }
-      if (fmt === null) { acct('printf 的格式串读不出来'); return null; }
+      const fmt = f0.value;
       const vals = args.slice(1);
       let bad = false;
       const r = fmtRun(fmt, 'stmt', (spec, i) => {
