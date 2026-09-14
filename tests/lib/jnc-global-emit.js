@@ -18,7 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf, named } from '../../src/lang/jnc/adapt.js';
-import { readAgg } from '../../src/lang/jnc/agg.js';
+import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { collectEnumConsts } from '../../src/lang/jnc/const-eval.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
@@ -134,6 +134,17 @@ for (const f of files) {
         });
       }
     }
+    /* **枚举那一格也要进环境**：`Lines g_lines = 0;` 里的 `Lines` 是一格枚举类型
+       （47-enumcast.jnc）—— 不登记就是"认不出基类型 'name'"。项那一层由
+       `collectEnumConsts` 另收（那是常量，不是类型）。 */
+    if (headOf(n) === 'enum') {
+      const e = readEnum(n);
+      const en = e === null ? null : nameText(e.name);
+      if (en !== null) {
+        const full = owner === null || owner === undefined ? en : `${owner}$${en}`;
+        env.set(full, { kind: 'enum', name: full });
+      }
+    }
     for (const it of n.items) scanAggs(it, inner);
   };
   for (const t of trees) { scanAggs(t, null); collectEnumConsts(t, env); }
@@ -238,8 +249,15 @@ if (uncovered > 0) {
   console.log(`旧降级发了、新腿还没试的：${uncovered} 格　→ ${[...families]
     .sort((a, b) => b[1] - a[1]).map(([w, n]) => `${w}×${n}`).join('  ')}`);
 }
-if (skip.size > 0) {
-  console.log(`拼不出来（记账，不算对）：${[...skip].sort((a, b) => b[1] - a[1])
+/* 两栏分开印：**对的行为**（本来就不该发）与**拼不出来**（还没做）。混在一栏账就虚了。 */
+const okNone = [...skip].filter(([w]) => String(w).includes('对的行为'));
+const cantDo = [...skip].filter(([w]) => !String(w).includes('对的行为'));
+if (okNone.length > 0) {
+  console.log(`本来就不发（对的行为）：${okNone.sort((a, b) => b[1] - a[1])
+    .map(([w, n]) => `${w}×${n}`).join('  ')}`);
+}
+if (cantDo.length > 0) {
+  console.log(`拼不出来（记账，不算对）：${cantDo.sort((a, b) => b[1] - a[1])
     .map(([w, n]) => `${w}×${n}`).join('  ')}`);
 }
 if (all && uncoveredAt.length > 0) {

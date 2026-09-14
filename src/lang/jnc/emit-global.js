@@ -140,7 +140,9 @@ export function globalLines(m, env, ctx = { ns: null }) {
           + `${ibox ? lifted(ir.type, tc) : emitType(ir.type, 'slot', tc)})`);
       }
     }
-    if (lines.length === 0) return { lines: [], why: '这格属性不生成存储' };
+    /* 不带 `autoget`/`bindable`、体里也没有字段的那种属性**本来就不发存储**（取/存两格
+       都是写出来的函数，那是函数那条腿的事）—— 这是**对的行为**，不是还没做。 */
+    if (lines.length === 0) return { lines: [], why: '这格属性不生成存储（对的行为）' };
     return { lines, why: null };
   }
 
