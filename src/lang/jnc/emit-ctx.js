@@ -2082,6 +2082,22 @@ export function makeFnEnv(o) {
       }
       return { code, type: rt };
     },
+    /**
+     * **`print(x)`：一次输出，不添换行**（第六十四刀，`(write 值)`）。`printf` 那一格要解格式，
+     * 这一格**不解** —— 那正是两者最要紧的差别（`print("100% sure")` 里的 `%` 就是个字符）。
+     * 源码里自己写了一格 `print` 的那一格先赢：答 `undefined`，调用方照常路走。
+     */
+    printOut: (node, ind) => {
+      if (fns.has('print') || names.has('print') || globals.has('print')) return undefined;
+      const args = allInChain(named(node)?.args, 'args-add', 'args');
+      if (args.length !== 1) { acct(`print 收 1 个实参，这里给了 ${args.length}`); return null; }
+      const v = emitExpr(args[0], T.string, ctxRef);
+      if (v === null) return null;                          // 账已经记过
+      if (v.type?.k !== 'string') {
+        acct(`print 的实参要一格字符串（这里是 ${v.type?.k ?? '?'}）`); return null;
+      }
+      return [`${' '.repeat(ind)}(write ${v.code})`];
+    },
     /** `printf("%d %d\n", a, b)` → 按 `\n` 切段，每段一条 `(print …)`；`%d` 那一格是 `(tostr 值)`。 */
     printf: (node, ind, ctx) => {
       const args = allInChain(named(node)?.args, 'args-add', 'args');

@@ -150,6 +150,21 @@ export function makeCtx(env) {
         }
         return ls;
       }
+      /**
+       * **`print(x)` 也是一句语句**（`(write 值)`，不添换行 —— 第六十四刀）：所以它与 printf
+       * 同一层认出来，等到"降一格表达式"那儿就晚了（那一层回的是值）。
+       * 源码里**自己写了**一格 `print` 的那一格先赢：那时这个钩子答 `undefined`，
+       * 往下照常路走（90-print-own.jnc 量的正是这一格）。
+       */
+      if (key === 'print') {
+        const n0 = env.acctSeen?.() ?? 0;
+        const ls = env.printOut?.(node, ind, ctx);
+        if (ls === null) {
+          if ((env.acctSeen?.() ?? 0) === n0) env.acct('print 那一族还拼不出来（里头没记账 —— 这一层的 bug）');
+          return null;
+        }
+        if (ls !== undefined) return ls;
+      }
     }
     if (h === 'assign') {
       const n0 = env.acctSeen?.() ?? 0;
