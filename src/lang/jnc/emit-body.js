@@ -84,7 +84,12 @@ export function makeCtx(env) {
    * 由块这一层拦下来 —— 它不是一条能单独降的语句。
    */
   ctx.block = (node, ind) => {
-    if (headOf(node) !== 'compound') { env.acct('这里要一个 { … } 块'); return null; }
+    /* **体可以只是一条语句**（`if (x) return;`、`while (c) i++;`）——旧降级那儿走的是
+       `body()` 而不是 `block()`：一条语句就降那一条，不用套 `(do …)`。 */
+    if (headOf(node) !== 'compound') {
+      const ls = emitStmt(node, { ...ctx, ind });
+      return ls === null ? null : ls.join('\n');
+    }
     /* 语句链是**空基例**那一族（`unit` 一格子项都没有 + `unit-add {list, one}`，节点表 :25-26）
        —— 空基例要用 `chainOf`，拿 `allInChain` 走会把整条链当成一条语句（declare.js 那条注）。 */
     const list = chainOf(named(node)?.body, 'unit-add');

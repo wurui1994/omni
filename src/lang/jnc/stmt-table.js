@@ -74,7 +74,10 @@ export function stmtLines(head, n, ctx) {
   }
   /* **`throw;`** 与"errorcode 调用出错时那一跳"落的是同一段代码（第五十九刀的 `escape`）：
      有 guard 就跳那圈一次性循环的 `brk`、没有就 `(ret 当前的错)`。 */
-  if (head === 'throw') return [`${pad}${ctx.escape()}`];
+  if (head === 'throw') {
+    const e = ctx.escape?.();
+    return e === null || e === undefined ? null : [`${pad}${e}`];
+  }
   return null;
 }
 

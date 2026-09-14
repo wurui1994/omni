@@ -133,14 +133,14 @@ export const NULL_BY_WANT = [
        而类那一格在方言里是 `(ptr 连通分量的根)`。 */
     name: 'class',
     when: (want, c) => c.isClass(want),
-    emit: (want, c) => `(pnull (ptr ${c.clsRoot(want.name)}))`,
+    emit: (want, c) => (c.clsRoot === undefined ? null : `(pnull (ptr ${c.clsRoot(want.name)}))`),
   },
   {
     /* `variant_t data = null`（第一百一十三刀，语料 8 处）：一格**空**的 variant，标签 0。
        这一条得在这儿而不是在装箱那两条里 —— `null` 走不到"值是什么类型"那一步。 */
     name: 'variant',
     when: (want, c) => c.isVar(want),
-    emit: (want, c) => `(call ${c.varBoxName('0')})`,
+    emit: (want, c) => (c.varBoxName === undefined ? null : `(call ${c.varBoxName('0')})`),
   },
   {
     /* 函数值那一格：方言这一侧**已经有**"空的那一格"`(null (fnty …))`
@@ -148,7 +148,7 @@ export const NULL_BY_WANT = [
        `void function* onTriggered() = null`（ui_Action.jnc:39）。 */
     name: 'fn',
     when: (want, c) => c.isFn(want),
-    emit: (want, c) => `(null ${c.tyText(want)})`,
+    emit: (want, c) => (c.tyText === undefined ? null : `(null ${c.tyText(want)})`),
   },
   {
     /* `null` 当一格 `string_t`（第一百六十五刀）：**字符串槽的零值本来就是 `(str "")`**，
@@ -161,7 +161,7 @@ export const NULL_BY_WANT = [
   {
     name: 'ptr',
     when: (want, c) => c.isPtr(want),
-    emit: (want, c) => `(pnull ${c.tyText(want)})`,
+    emit: (want, c) => (c.tyText === undefined ? null : `(pnull ${c.tyText(want)})`),
   },
   {
     name: 'unknown',
