@@ -84,6 +84,14 @@ function memberOf(it, access) {
     const t = readDeclType(nm.specs, nm.dcl);
     return [one(t, nm.specs, access, h === 'fn-def' ? 'body' : 'proto', it)];
   }
+  /* **带花括号初值的那一格是另一个节点**（`var-decl-curly`，节点表 :120：一格 `dcl`，
+     不是 `dcl*` 那条链）。不读它，`static int m_table[] = { 10, 20, 12 };` 这一格成员就丢了
+     （183-staticcurly.jnc 的 `C$m_table`：`static` 不进对象，落成一格模块级的量）。 */
+  if (h === 'var-decl-curly') {
+    const dcl = unwrap(nm.dcl);
+    if (headOf(dcl) !== 'dcl') return [];
+    return [one(readDeclType(nm.specs, dcl), nm.specs, access, 'data', it)];
+  }
   if (h === 'var-decl' || h === 'typedef') {
     const out = [];
     for (const d of allInChain(nm.dcls, 'dcls-add', 'dcls')) {

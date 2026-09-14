@@ -52,6 +52,11 @@ function countPos(it) {
   if (h === 'attributed') return countPos(it.items[2]);
   if (h === 'fn-def' || h === 'fn-proto') return 1;
   if (h === 'type-decl' || h === 'friend') return 1;
+  /* **带花括号初值的那一格也是一格成员**（`var-decl-curly`，节点表 :120 —— 一格 `dcl`，
+     不是 `dcl*` 那条链）。旧降级的真输出作证：`static int m_table[] = { 10, 20, 12 };`
+     发的是 `(global C$m_table (ptr (blk int 3)))`（183-staticcurly.jnc）。
+     两遍算的两边先前都漏了这一族，所以都补上。 */
+  if (h === 'var-decl-curly') return 1;
   if (h === 'var-decl' || h === 'typedef') {
     const dcls = it.items[2];
     if (dcls === null || dcls === undefined || !Array.isArray(dcls.items)) return 0;

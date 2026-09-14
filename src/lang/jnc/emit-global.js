@@ -43,6 +43,43 @@ export function addrTaken(trees, out = new Set()) {
   return out;
 }
 
+/**
+ * **长度没写、从花括号初值里数出来**的那一格数组（`static int m_table[] = { 10, 20, 12 };`
+ * 发的是 `(ptr (blk int 3))`，183-staticcurly.jnc）。只对 `var-decl-curly` 那一格用 ——
+ * 长度是常量表达式的那种（`int g_alpha['z' - 'a' + 1];`）不在这儿，那要常量折叠，记账。
+ * 数不出来答 `null`。
+ */
+function arrayFromCurly(m, env) {
+  if (headOf(m.at) !== 'var-decl-curly') return null;
+  /* `t.suffixes` 是一串**词**（`types.js` 里 `dc.suffixes.map((s) => s.kind)`），不是对象。 */
+  const sfx = (m.type.suffixes ?? []).filter((x) => x === 'array-suffix');
+  if (sfx.length !== 1) return null;
+  /* 元素那一格：把**声明符**摘掉再解一遍 —— 长度是从 `raw.dcl` 上的后缀链读的
+     （`resolveType` 的 `arrayDims`），光把 `suffixes` 清空不管用。 */
+  const el = resolveType({ ...m.type, suffixes: [], raw: { specs: m.type.raw?.specs, dcl: null } }, env);
+  if (el.type === null) return null;
+  const init = named(m.at)?.value;
+  if (headOf(init) !== 'curly') return null;
+  const items = named(init)?.items;
+  const n = items === null || items === undefined || !Array.isArray(items.items)
+    ? 0 : chainCount(items);
+  if (n === 0) return null;
+  return { k: 'arr', el: el.type, n };
+}
+
+/** `items` / `items-add` 那条链上有几格（左递归的链：基例一格 + 每个 add 一格）。 */
+function chainCount(node) {
+  let n = 0;
+  let cur = node;
+  while (cur !== null && cur !== undefined && Array.isArray(cur.items)) {
+    const h = headOf(cur);
+    if (h === 'items-add') { n += 1; cur = named(cur)?.list; continue; }
+    if (h === 'items') { n += named(cur)?.first === undefined ? 0 : 1; break; }
+    break;
+  }
+  return n;
+}
+
 /** 带上命名空间前缀的全名。 */
 function fullName(name, ns) {
   return ns === null || ns === undefined || ns === '' ? name : `${ns}$${name}`;
@@ -132,8 +169,10 @@ export function globalLines(m, env, ctx = { ns: null }) {
     };
   }
 
-  const r = resolveType(m.type, env);
-  if (r.type === null) return { lines: [], why: r.why };
+  let rt = resolveType(m.type, env).type;
+  if (rt === null) rt = arrayFromCurly(m, env);                      // 长度从花括号初值里数
+  if (rt === null) return { lines: [], why: resolveType(m.type, env).why };
+  const r = { type: rt };
   const box = taken.has(m.name) && LIFTABLE.has(r.type.k);
   return {
     lines: [`(global ${full} ${box ? lifted(r.type, tc) : emitType(r.type, 'slot', tc)})`],
