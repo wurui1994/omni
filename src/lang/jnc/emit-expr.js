@@ -11,7 +11,7 @@
 
 import { headOf, named } from './adapt.js';
 import {
-  CONV_CHAIN, NULL_BY_WANT, intLitRadix, isRealLit, intLitKind, truthyCode,
+  CONV_CHAIN, NULL_BY_WANT, intLitRadix, isRealLit, intLitKind, truthyCode, castValue,
 } from './expr-table.js';
 import { intBinary, intUnary, intConvCode } from './int-table.js';
 
@@ -213,6 +213,16 @@ export function emitExpr0(n, want, ctx) {
   if (h === 'indirect') {
     const r = ctx.derefOf?.(n, want);
     if (r === null || r === undefined) { ctx.acct('解引用这一格还拼不出来'); return null; }
+    return r;
+  }
+  /* **强制转换**：目标类型由调用方解（那是类型那条腿），转法照 `castValue` 那张表。 */
+  if (h === 'cast') {
+    const to = ctx.typeNameOf?.(nm.type) ?? null;
+    if (to === null) { ctx.acct('强制转换的目标类型还解不出来'); return null; }
+    const v = emitExpr(nm.value, to, ctx);
+    if (v === null) return null;
+    const r = castValue(v, to, ctx);
+    if (r === null) { ctx.acct(`把 ${v.type?.k ?? '?'} 转成 ${to.k} 还没接`); return null; }
     return r;
   }
   /* 调用：谁被调（普通函数 / 方法 / 函数指针 / 算符 / CRT 助手）差别全在被调那一侧，

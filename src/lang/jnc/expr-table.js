@@ -231,6 +231,39 @@ export function truthyCode(code, t, c) {
 }
 
 /**
+ * **强制转换**（lower.js:15450-15489 的 `cast`）。次序就是规则，答 null 表示这一格不收
+ * （调用方记账）。`v` 是**已经按目标类型降过一遍**的值（`want` 传的就是目标）。
+ *   1. 本来就同型 → 原样（一个字都不发）；
+ *   2. 整数 → 整数：`intConv`（同宽同符号不发字）；
+ *   3. 整数 → 实数：`toreal`（64 位无符号走 `torealu`）；
+ *   4. 实数 → 整数：**先向零截断**成 64 位（方言的 `toint`）再回卷到目标那一格；
+ *   5. **`(E)i` 是显式的**（第五十刀）：jancy 的 `Cast_Enum::getCastKind` 给的就是
+ *      `CastKind_Explicit`，转法照它 —— 先落到枚举的基整数上再原样拷过去。源不止整数，
+ *      实数与 bool 都收（`(Color)3.9` / `(Color)true` 照 jancy 也能写）；
+ *   6. 转成 thin 指针要写在 `unsafe { … }` 里（它把范围丢掉了）—— 这一格由调用方判。
+ */
+export function castValue(v, to, c) {
+  if (to === null || to === undefined) return null;
+  if (c.sameTy(v.type, to) === true) return v;
+  const i64 = { k: 'int', w: 64, u: false };
+  if (c.isInt(to) && c.isInt(v.type)) return { code: c.intConvCode(v.code, v.type, to), type: to };
+  if (c.isReal(to) && c.isInt(v.type)) return { code: c.realOf(v.code, v.type), type: to };
+  if (c.isInt(to) && c.isReal(v.type)) {
+    return { code: c.intConvCode(`(toint ${v.code})`, i64, to), type: to };
+  }
+  if (c.isEnum(to) && to.base !== undefined && to.base !== null) {
+    let src = v;
+    if (c.isEnum(src.type)) src = { code: src.code, type: src.type.base };
+    else if (c.isBool(src.type)) src = { code: `(sel ${src.code} (int 1) (int 0))`, type: i64 };
+    else if (c.isReal(src.type)) src = { code: `(toint ${src.code})`, type: i64 };
+    if (c.isInt(src.type)) {
+      return { code: c.intConvCode(src.code, src.type, to.base), type: to };
+    }
+  }
+  return null;
+}
+
+/**
  * **一格类型的零值**（lower.js:1075-1089 的 `zeroText`）。没写初值的局部量、模块级那一格、
  * 花括号初值里没填到的那几格，用的都是它 —— jancy 保证"任何用户代码碰到之前每一格都是零"
  * （type_ptr_data.rst）。

@@ -18,7 +18,7 @@ import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf, named } from '../../src/lang/jnc/adapt.js';
 import { nameText, allInChain, readDcl } from '../../src/lang/jnc/declare.js';
-import { readDeclType } from '../../src/lang/jnc/types.js';
+import { readDeclType, readAnonType } from '../../src/lang/jnc/types.js';
 import { readSpecs } from '../../src/lang/jnc/specs.js';
 import { readAgg, readEnum } from '../../src/lang/jnc/agg.js';
 import { addrTaken } from '../../src/lang/jnc/emit-global.js';
@@ -417,6 +417,20 @@ function makeEnv(fnNode, env, acct, fns = new Map(), aggFields = new Map(), aggC
     isPtr: (t) => t !== null && t !== undefined && (t.k === 'ptr' || t.k === 'tptr'),
     decay: (v) => (v.type?.k === 'arr'
       ? { code: `(pelem ${v.code})`, type: { k: 'ptr', target: v.type.el } } : v),
+    /** `(T)x` 里那格 `(type-name specs ptrs)` 解成类型（`readAnonType` 收的是这两格洞）。 */
+    typeNameOf: (node) => {
+      if (headOf(node) !== 'type-name') { acct('强制转换的目标不是一格 type-name'); return null; }
+      const nm2 = named(node) ?? {};
+      const t0 = readAnonType(nm2.specs, nm2.ptrs);
+      if (t0 === null) { acct('强制转换的目标读不出来'); return null; }
+      const r0 = resolveType(t0, env);
+      if (r0.type === null) { acct(`强制转换的目标：${r0.why}`); return null; }
+      return withBits(r0.type, t0);
+    },
+    /** **同型**：这一层按"发出来的文字"比 —— 方言那一侧同一格类型就是同一段文字。 */
+    sameTy: (a, b) => a !== null && a !== undefined && b !== null && b !== undefined
+      && emitType(a, 'value') === emitType(b, 'value'),
+    intConvCode,
     realOf: (code, t) => realOf(code, t?.w ?? 32, t?.u === true),
     /** 整数转到另一格（同宽同符号一个字都不发）—— `CONV_CHAIN` 的枚举那一条要它。 */
     intConv: (v, to) => ({ code: intConvCode(v.code, v.type, to), type: to }),
