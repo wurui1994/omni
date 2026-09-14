@@ -50,6 +50,15 @@ export function makeCtx(env) {
   ctx.exprStmt = (node, ind) => {
     const pad = ' '.repeat(ind);
     const h = headOf(node);
+    /* **`x++` / `++x` / `x--` / `--x` 当一条语句**：就是"读一次、加一、写回" ——
+       前缀与后缀在**语句位置上没差别**（那点差别只在"整条表达式的值"上，而语句不要值）。
+       写回时那一格要回卷（落进一格），所以走的是 `wide` 那条路。 */
+    if (['post-inc', 'pre-inc', 'post-dec', 'pre-dec'].includes(h)) {
+      const one = h.endsWith('dec') ? '-' : '+';
+      const ls = env.incDec?.(named(node)?.a, one, ind, ctx);
+      if (ls === null || ls === undefined) { env.acct(`\`${h}\` 这一格还拼不出来`); return null; }
+      return ls;
+    }
     if (h === 'assign') {
       const ls = env.assign?.(node, ind, ctx);
       if (ls === null || ls === undefined) { env.acct('赋值这一格还拼不出来'); return null; }

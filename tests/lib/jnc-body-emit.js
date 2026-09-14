@@ -82,7 +82,11 @@ function makeEnv(fnNode, env, acct) {
   const withBits = (ty, decl) => {
     if (ty === null || ty === undefined || ty.k !== 'int') return ty;
     const word = decl?.base?.text ?? 'int';
-    const u = /^u/.test(word) || (decl?.mods ?? []).includes('unsigned');
+    /* **无符号那一族的名字**（jancy 的 `setupStdTypedef`）：`uint*` / `u*_t` / `byte_t` /
+       `word_t` / `dword_t` / `qword_t`，外加写出来的 `unsigned`。 */
+    const u = /^(uint|uchar|ushort|ulong|utf)/.test(word)
+      || ['byte_t', 'word_t', 'dword_t', 'qword_t', 'size_t'].includes(word)
+      || (decl?.mods ?? []).includes('unsigned');
     return { ...ty, w: INT_BITS[word] ?? 32, u };
   };
   const CMP = new Set(['==', '!=', '<', '<=', '>', '>=', '&&', '||']);
@@ -181,6 +185,20 @@ function makeEnv(fnNode, env, acct) {
       const v = ctx.expr(v0, r.type);
       if (v === null) return null;
       return [`${pad}(set ${key} ${v})`];
+    },
+    /** `x++` 当一条语句：`(set x (回卷 (bin "+" (var x) (int 1))))`。 */
+    incDec: (target, one, ind, ctx) => {
+      const pad = ' '.repeat(ind);
+      if (headOf(target) !== 'name') { acct('`++` 的左边还拼不出来（要可写位置那一层）'); return null; }
+      const key = String(named(target)?.text?.value ?? '');
+      const t = names.get(key);
+      if (t === undefined) { acct(`'${key}' 查不着`); return null; }
+      const r = resolveType(t, env);
+      if (r.type === null) { acct(`'${key}' 的类型解不出来`); return null; }
+      const ty = withBits(r.type, t);
+      const raw = `(bin ${JSON.stringify(one)} (var ${key}) (int 1))`;
+      const code = ty.k === 'int' ? wrapTo(raw, ty.w ?? 32, ty.u === true) : raw;
+      return [`${pad}(set ${key} ${code})`];
     },
     fieldOf: () => { acct('取字段还没接'); return null; },
     elemOf: () => { acct('下标还没接'); return null; },
