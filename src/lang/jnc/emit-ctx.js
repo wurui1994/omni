@@ -335,7 +335,18 @@ export function makeFnEnv(o) {
    * 嵌套的花括号跟着往里走。拼不出来答 null（账在这一层记）。
    */
   const curlyLines = (dst, type, node, pad) => {
-    const items = allInChain(named(node)?.items, 'items-add', 'items');
+    const all = allInChain(named(node)?.items, 'items-add', 'items');
+    /* **末尾那个逗号不算一格**（`{ 1, 2, }`）：链上会多出一格**空占位**（一格没有内容的
+       list）—— 数长度那一头（`arrayFromCurly` 的 `chainCount`）数的就是"真有值的项数"，
+       两边得一样。中间那种空项（`{ 1, , 3 }` —— 保留原值）另算，走到就记账。 */
+    const has = (x) => {
+      if (x === null || x === undefined) return false;
+      if (!Array.isArray(x.items)) return true;                        // 一格记号
+      return x.items.length > 1;                                      // 空占位的 list 不算
+    };
+    let last = -1;
+    for (const [i, it] of all.entries()) if (has(it)) last = i;
+    const items = all.slice(0, last + 1);
     const one = (at, ty, it) => {
       if (it === null || it === undefined) { acct('花括号里有一格空项（保持原值那一族）还没接'); return null; }
       if (headOf(it) === 'curly') return curlyLines(at, ty, it, pad);
@@ -959,10 +970,14 @@ export function makeFnEnv(o) {
             slots.push({ name: `${dn}$1`, ty: 'bool' });
             const ls1 = curlyLines(`(var ${dn})`, r.type, cv, `${pad}    `);
             if (ls1 === null) return null;                 // 账已经记过
+            /* **那一格内存要先开出来**（`(pnew …)`）：块里装的是结构体时它不是自动开的
+               —— 少这一句，往 `(pfield (pelem …) m_id)` 里写就是空指针
+               （196-localstruct.jnc 量出来的）。开在闸门里：只开一次，紧挨着填。 */
             out.push([
               `${pad}(if (un "!" (var ${dn}$1))`,
               `${pad}  (do`,
               `${pad}    (set ${dn}$1 (bool true))`,
+              `${pad}    (set ${dn} (pnew ${emitType(r.type, 'slot', tyc)} (int 1)))`,
               ...ls1,
               `${pad}  ))`,
             ].join('\n'));

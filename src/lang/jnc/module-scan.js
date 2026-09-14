@@ -139,12 +139,19 @@ export function scanAggs(tree, env) {
   const props = new Map();
   /** 同名撞车的那几格方法（重载）—— 这张表按名字存，所以撞了要记下来，发的那一层明说不收。 */
   const overloads = new Set();
-  const scan = (n, owner, inAgg) => {
+  const scan = (n, owner, inAgg, inFn = false) => {
     if (n === null || typeof n !== 'object' || !Array.isArray(n.items)) return;
     const h = headOf(n);
     let inner = owner;
     let agg = inAgg;
-    /* 函数体里的东西不往下扫（局部量由体那一层管，局部类先不管）。 */
+    let fn0 = inFn;
+    /**
+     * 函数体那一段：**局部量不收**（那是体那一层的事），可**体里声明的类型要收** ——
+     * 写在函数体里的 `typedef` / `enum` / `struct`（第二百一十九 / 二百五十 / 二百六十刀）
+     * 与写在顶层是同一件事：jancy 把它们提到那一层的命名空间里，方言那一侧就是一格
+     * 普通的 `(struct Color …)`（196-localstruct.jnc 的真输出，名字不带函数名前缀）。
+     * 所以这儿**往下走**，只把"是不是在函数体里"记成一格状态（`inFn`）。
+     */
     if (h === 'fn-def' || h === 'fn-proto') {
       /**
        * **完整声明式的属性**（`property g_p { int get() {…} … }`，prop_full.rst:15）在树上是
@@ -163,6 +170,9 @@ export function scanAggs(tree, env) {
           });
         }
       }
+      /* 体里的类型声明照收，别的（形参、局部量、语句）不看 —— 所以只往**体**那一格里走。 */
+      const body0 = named(n)?.body;
+      if (body0 !== null && body0 !== undefined) scan(body0, owner, false, true);
       return;
     }
     if (h === 'namespace') {
@@ -322,7 +332,7 @@ export function scanAggs(tree, env) {
           bits: String(e.word ?? '').includes('bitflag'),
         });
       }
-    } else if ((h === 'var-decl' || h === 'var-decl-curly') && !inAgg) {
+    } else if ((h === 'var-decl' || h === 'var-decl-curly') && !inAgg && !inFn) {
       /* **模块级那几格量**（`int calls = 0;`）：裸名字查名的第一步就要看得见它们
          （`NAME_LOOKUP_ORDER` 的 `var` 那一格里"模块级"也算）。`static` 的照收 ——
          它在方言那一侧的名字与普通的一样（模块级本来就只有一格）。
@@ -370,9 +380,9 @@ export function scanAggs(tree, env) {
         }
       }
     }
-    for (const it of n.items) scan(it, inner, agg);
+    for (const it of n.items) scan(it, inner, agg, fn0);
   };
-  scan(tree, null, false);
+  scan(tree, null, false, false);
   /**
    * **基类那几格字段也算这一格自己的**（第五十六刀：一整条继承链共用一格结构体）。所以
    * 派生类的字段表要把基类的并进来 —— 不并的话方法体里裸写 `m_legs`（写在基类里的那一格）
