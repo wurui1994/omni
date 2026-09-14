@@ -151,7 +151,19 @@ export function emitExpr0(n, want, ctx) {
     };
     const two = ctx.lazy === undefined ? run() : ctx.lazy(run);
     if (two === null) return null;
-    return { code: `(sel ${c} ${two.x.code} ${two.y.code})`, type: two.x.type };
+    /**
+     * **两支一个整数一个实数**（`n > 2 ? 1 : 2.5`，04-truthy-sel.jnc:55）：整条的类型是
+     * **实数**（C 的常用算术转换，jancy 同）—— 所以整数那一支要加宽。少了这一步，整条按
+     * 第一支定成 int，`%f` 那一格于是拿到一格整数（先前报的"%f 碰上这一格类型（int）"就是它），
+     * 而真跑起来 `(sel …)` 两支类型不一样也不成。
+     */
+    let { x, y } = two;
+    if (ctx.isInt?.(x.type) === true && ctx.isReal?.(y.type) === true) {
+      x = { code: ctx.realOf(x.code, x.type), type: y.type };
+    } else if (ctx.isReal?.(x.type) === true && ctx.isInt?.(y.type) === true) {
+      y = { code: ctx.realOf(y.code, y.type), type: x.type };
+    }
+    return { code: `(sel ${c} ${x.code} ${y.code})`, type: x.type };
   }
 
   /* **裸名字**：九步查名（`NAME_LOOKUP_ORDER`）由注入的探子走完 —— 那是作用域图那一层。
