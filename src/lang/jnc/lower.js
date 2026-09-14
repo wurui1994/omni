@@ -20,7 +20,8 @@ import { readSpecs } from './specs.js';
 import { resolveType } from './resolve-type.js';
 import { emitType } from './emit-type.js';
 import { collectEnumConsts } from './const-eval.js';
-import { scanAggs, scanFns, memberInit } from './module-scan.js';
+import { scanAggs, scanFns, memberInit, sigOf } from './module-scan.js';
+import { readBodyMembers } from './agg.js';
 import { structLine } from './emit-agg.js';
 import { globalLines, addrTaken, liftable, liftedType } from './emit-global.js';
 import { fnHead, readFormals, fnName, needsCtor, hasStaticCtor } from './emit-fn.js';
@@ -270,9 +271,9 @@ export function lowerJncRules(tree, diags, opts = {}) {
    *
    * `owner` 是方言那一侧的前缀（命名空间或东家），`selfInfo` 为 null 就是没有 `this`。
    * `head0` 是**插在体之前**的那几行（字段初值那一族：jancy 把它们放在基类构造之后、
-   * 用户的体之前，jnc_ct_Parser.cpp:3005-3009）。
+   * 用户的体之前，jnc_ct_Parser.cpp:3005-3009）。`inProp` 告诉 `fnHead` 这是属性体里的函数。
    */
-  const emitFn = (node, shown, owner, selfInfo, ns, propScope = null, head0 = []) => {
+  const emitFn = (node, shown, owner, selfInfo, ns, propScope = null, head0 = [], inProp = false) => {
     const nm = named(node);
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
     if (t === null) { acct(`函数 '${shown}' 的类型读不出来`); return; }
@@ -283,7 +284,7 @@ export function lowerJncRules(tree, diags, opts = {}) {
     const selfTy = selfInfo === null ? null
       : emitType(selfInfo.kind === 'class' ? { k: 'class', name: selfInfo.agg }
         : { k: 'struct', name: selfInfo.agg }, 'slot', tyc);
-    const hd = fnHead(m, env, { owner, self: selfTy, clsRoot });
+    const hd = fnHead(m, env, { owner, self: selfTy, clsRoot, inProp });
     if (hd === null || hd.head === null) { acct(`函数 '${shown}' 的头还发不出来（${hd?.why ?? '?'}）`); return; }
     const e = makeFnEnv({
       fnNode: node,
@@ -501,6 +502,71 @@ export function lowerJncRules(tree, diags, opts = {}) {
     }
   }
 
+  /**
+   * **完整声明式属性的取/存两个体**（`property g_p { int get() {…} void set(int x) {…} }`，
+   * prop_full.rst:15）：那对花括号里是**两格函数**，在方言里就是 `<属性名>$get` /
+   * `<属性名>$set`（成员属性头上多一格 `$this`）。那对花括号还开了一层作用域 ——
+   * 里头裸写 `m_value` 指的是这格属性生成的存储，所以把它当 `propScope` 递进去。
+   *
+   * 发得出来答 true；那对花括号里没有取/存（简写取值器、`autoget` / `bindable` 那几族）答 false。
+   */
+  const emitPropBody = (node, emitName, selfInfo, ns, store) => {
+    const body = named(node)?.body;
+    if (headOf(body) !== 'compound') return false;
+    /* 名字走 `fnName` 的**属性体那一档**（`inProp`）：那对花括号里裸写的 `get` / `set` 就是
+       这格属性的取/存（prop_full.rst:15）；同样的写法在类体里是下标算符，靠这一格分开。 */
+    const leafOf = (im) => fnName({ name: im.name, type: im.type, at: im.at }, true);
+    const accs = readBodyMembers(body)
+      .map((im) => ({ im, leaf: leafOf(im) }))
+      .filter((x) => x.im.shape === 'fn' && (x.leaf === 'get' || x.leaf === 'set'));
+    if (accs.length === 0) return false;
+    for (const { im, leaf } of accs) {
+      const key = `${emitName}$${leaf}`;
+      if (headOf(im.at) !== 'fn-def') {
+        acct(`属性 '${emitName}' 的 ${leaf} 只有原型（体写在别处）还没接`); continue;
+      }
+      /* 先登记签名：**别处的体**（别的方法、main）读这格属性时查的就是这张表。 */
+      const sig = sigOf(named(im.at), env, key, im.type);
+      if (sig === null) { acct(`属性 '${emitName}' 的 ${leaf} 的签名读不出来`); continue; }
+      /* **带下标的属性**（`get(size_t i)` / `set(size_t i, T v)`，66-propidx.jnc）另一族 ——
+         那一格读写要多带一个下标实参，还没接。 */
+      const want = leaf === 'get' ? 0 : 1;
+      if (sig.params.length !== want) {
+        acct(`属性 '${emitName}' 的 ${leaf} 收 ${sig.params.length} 个形参（带下标的属性那一族）还没接`);
+        continue;
+      }
+      methods.set(key, {
+        ...sig, owner: emitName, name: leaf, node: im.at, hasBody: false,
+      });
+      emitFn(im.at, key, emitName, selfInfo, ns, { emit: emitName, store: store ?? new Map() }, [], true);
+    }
+    return true;
+  };
+
+  /* **属性那一族先发**（在方法与顶层函数之前）：别处的体读它时要查得着那两格签名。 */
+  const propDone = new Set();
+  for (const a of aggs) {
+    const kind = a.word === 'class' || a.word === 'opaque class' ? 'class' : 'struct';
+    for (const m of a.members) {
+      if (m.shape !== 'prop' || m.name === null) continue;
+      const emitName = `${a.emitName}$${m.name}`;
+      const self0 = { agg: a.emitName, kind, emit: kind === 'class' ? clsRoot(a.emitName) : a.emitName };
+      const store = new Map();
+      const mods = m.type?.mods ?? [];
+      if (mods.includes('autoget') || mods.includes('bindable')) store.set('m_value', m.type);
+      if (emitPropBody(m.at, emitName, self0, null, store) === true) propDone.add(m.at);
+    }
+  }
+  for (const { it, ns } of items) {
+    const h = headOf(it);
+    if (h !== 'fn-def' && h !== 'fn-proto') continue;
+    const nm0 = named(it);
+    const t0 = nm0 === null ? null : readDeclType(nm0.specs, nm0.dcl);
+    if (t0 === null || t0.shape !== 'prop' || t0.name === null) continue;
+    const pr = gProps.get(t0.name);
+    if (emitPropBody(it, pr?.emit ?? t0.name, null, ns, pr?.store) === true) propDone.add(it);
+  }
+
   /* **方法那一族**（体写在类里的那几格）：一格一格发 `(fn <东家>$<方法名> (($this …) …) …)`。 */
   for (const key of overloads) {
     acct(`方法 '${key}' 有重载（按实参挑哪一格）还没接`);
@@ -565,7 +631,11 @@ export function lowerJncRules(tree, diags, opts = {}) {
        它在树上长得像一格函数声明，可那对花括号里是**取/存两个体**，不是一格函数体。
        整族另算 —— 送去发"函数的头"只会报"认不出形参表"，那是认错人。 */
     if (t.shape === 'prop') {
-      acct(`'${t.name ?? '?'}'：完整声明式的属性（那对花括号里是取/存两个体）还没接`); continue;
+      /* 那对花括号里是取/存两个体的那一种上面已经发了（`emitPropBody`）；剩下的是简写取值器、
+         `autoget` / `bindable` / 反应器那几族 —— 各是自己一刀。 */
+      if (propDone.has(it)) continue;
+      acct(`'${t.name ?? '?'}'：属性那对花括号里不是取/存两个体（简写 / autoget / bindable）还没接`);
+      continue;
     }
 
     if (t.name === null) {

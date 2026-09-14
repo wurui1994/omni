@@ -395,22 +395,28 @@ export function makeFnEnv(o) {
    */
   const propPlace = (pr, selfCode) => {
     const hasFn = (n) => methods.has(n) || fns.has(n);
-    if (!hasFn(`${pr.emit}$get`)) {
-      acct(`属性 '${pr.name}' 的取值器还没发出来（完整声明式 / autoget / bindable 那几族另算）`);
+    const g = `${pr.emit}$get`;
+    if (!hasFn(g)) {
+      acct(`属性 '${pr.name}' 的取值器还没发出来（autoget / bindable / 反应器那几族另算）`);
       return null;
     }
-    if (selfCode === null || selfCode === undefined) {
-      acct(`属性 '${pr.name}' 要一格对象（静态属性那一族还没接）`); return null;
-    }
+    /**
+     * **属性那一格的类型**：写在声明上的优先（`int property m_value;`）；写不出来的那种
+     * （`property m_doubled { int get() {…} }` —— 类型在**取值器**上，prop_full.rst:15）
+     * 就听取值器回的那一格。两条都不成才记账。
+     */
+    const mg = methods.get(g) ?? fns.get(g);
     const r = resolveType({ ...pr.type, shape: 'data' }, env);
-    if (r.type === null) { acct(`属性 '${pr.name}'：${r.why}`); return null; }
+    let ty = r.type === null ? null : withBits(r.type, pr.type);
+    if (ty === null && mg.ret !== null && mg.ret !== undefined) ty = withBits(mg.ret, mg.retDecl);
+    if (ty === null) { acct(`属性 '${pr.name}'：${r.why}`); return null; }
     return {
       shape: 'prop',
       code: pr.emit,
-      args: [selfCode],
+      args: selfCode === null || selfCode === undefined ? [] : [selfCode],
       hasSet: hasFn(`${pr.emit}$set`),
       propName: pr.name,
-      type: withBits(r.type, pr.type),
+      type: ty,
     };
   };
   /**
@@ -425,7 +431,14 @@ export function makeFnEnv(o) {
     const st = aggStatics.get(aggName)?.get(key);
     if (st !== undefined) return staticPlace(st);
     const pr = aggProps.get(aggName)?.get(key);
-    if (pr !== undefined) return propPlace(pr, selfCode);
+    if (pr !== undefined) {
+      /* 成员属性要一格对象（取/存那两个函数第一个实参是 `this`）—— `类名.属性` 那种写法
+         是静态属性那一族，还没接。 */
+      if (selfCode === null || selfCode === undefined) {
+        acct(`属性 '${pr.name}' 要一格对象（静态属性那一族还没接）`); return null;
+      }
+      return propPlace(pr, selfCode);
+    }
     return undefined;
   };
   /** 一格字段的位置（`memberOf`）：`(pfield 基 名)`；字段自己是结构体/数组时它又是一格 `agg`。 */
@@ -512,11 +525,7 @@ export function makeFnEnv(o) {
            `(call g_p$set …)`。这一问排在"查不着"之前：报"未声明"是**认错人**（名字在，
            只是它那一格要走取/存两个函数）。 */
         const pr = gProps.get(key);
-        if (pr !== undefined) {
-          const r0 = resolveType({ ...pr.type, shape: 'data' }, env);
-          if (r0.type === null) { acct(`属性 '${key}'：${r0.why}`); return null; }
-          return { shape: 'prop', code: pr.emit, type: withBits(r0.type, pr.type) };
-        }
+        if (pr !== undefined) return propPlace({ ...pr, name: key }, null);
         /* **方法体里裸写的字段**（`NAME_LVALUE_ORDER` 的第二格）：`m_x` 就是 `this.m_x`。
            排在"查不着"之前 —— 它是一格真字段，报"未声明"是认错人。
            静态字段与成员属性紧跟在它后面（`memberOther`，与 `x.m` 问的是同一份）。 */

@@ -145,7 +145,26 @@ export function scanAggs(tree, env) {
     let inner = owner;
     let agg = inAgg;
     /* 函数体里的东西不往下扫（局部量由体那一层管，局部类先不管）。 */
-    if (h === 'fn-def' || h === 'fn-proto') return;
+    if (h === 'fn-def' || h === 'fn-proto') {
+      /**
+       * **完整声明式的属性**（`property g_p { int get() {…} … }`，prop_full.rst:15）在树上是
+       * 一格函数声明 —— 可它是一格**属性**：读它是 `(call g_p$get)`、写它是 `(call g_p$set …)`。
+       * 简单声明式那一种（`int property g_p;`）在下面 `var-decl` 那一支收，两种收进**同一张表**。
+       */
+      if (!inAgg) {
+        const fm = named(n);
+        const ft = fm === null ? null : readDeclType(fm.specs, fm.dcl);
+        if (ft !== null && ft.shape === 'prop' && ft.name !== null) {
+          const store = new Map();
+          const mods = ft.mods ?? [];
+          if (mods.includes('autoget') || mods.includes('bindable')) store.set('m_value', ft);
+          gProps.set(ft.name, {
+            emit: owner === null ? ft.name : `${owner}$${ft.name}`, type: ft, store,
+          });
+        }
+      }
+      return;
+    }
     if (h === 'namespace') {
       const nm = nameText(named(n)?.name);
       if (nm !== null) inner = owner === null ? nm : `${owner}$${nm}`;
