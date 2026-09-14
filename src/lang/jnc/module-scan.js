@@ -149,6 +149,36 @@ export function scanAggs(tree, env) {
           fs.set(m.name, m.type);
         }
         fields.set(emitName, fs);
+        /**
+         * **匿名 union 的成员摊进外面这一格**（第一百一十刀）：方言那一侧发的就是
+         * `(union (m_a int) (m_b int))` —— 那几格字段**直接**长在外面这个结构体上，所以
+         * 字段表也得摊。里头再套匿名 union 同理。
+         *
+         * 套的是**匿名 struct** 那一格不摊（166-unionnamed.jnc 发的是 `($s0 Bits$u0$s0)`）：
+         * 读它是一条**路径** `(pfield (pfield … $s0) m_x)`，那是"字段路径"另一族。
+         */
+        const flat = (a2, seen = new Set()) => {
+          for (const m of a2.members) {
+            if (m.shape === 'nested-type') {
+              const n2 = m.nested;
+              if (n2 !== null && n2 !== undefined && n2.word === 'union'
+                && nameText(n2.name) === null && !seen.has(n2)) {
+                seen.add(n2);
+                flat(n2, seen);
+              }
+              continue;
+            }
+            if (m.name === null || m.type === null || fs.has(m.name)) continue;
+            if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') continue;
+            if (m.storage.includes('static')) continue;
+            /* **bigendian 的字段不收**（第一百二十六刀）：它是一格真字段，可读写各要一次
+               字节序反转 —— 当普通字段收进来就把那一步**静静地**丢了（118-bigendian.jnc）。 */
+            if ((m.type.mods ?? []).includes('bigendian')) continue;
+            fs.set(m.name, m.type);
+          }
+        };
+        flat(a);
+
         /* **方法那一族**（`<东家>$<方法名>`，第五十二刀）：一格一格记下签名与那个节点。
            体写在类里的（`fn-def`）由这一层发；只写原型的（`fn-proto`）体在外面，那一格
            由顶层那条路发 —— 两处登记的是**同一个名字**，所以调用那一层只查一张表。 */
