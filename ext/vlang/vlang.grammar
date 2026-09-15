@@ -107,9 +107,10 @@
       "false" "fn" "for" "go" "goto" "if" "import" "in" "interface" "is" "isreftype"
       "lock" "match" "module" "mut" "none" "or" "pub" "return" "rlock" "select"
       "shared" "sizeof" "spawn" "struct" "true" "type" "typeof" "union"
-      "unsafe" "__global")
+      "unsafe" "__global" "static" "volatile" "implements")
 
-    (op "@[" "#[" "<<=" ">>=" ">>>=" "..." "&&" "||" "<<" ">>>" ">>" "++" "--" "==" "!=" "<="
+    ;; `<-` 是通道收取符（`code := <-ch`）。少了它就被切成 `<` 加 `-`，107 份文件卡在这儿。
+    (op "@[" "#[" "<<=" ">>=" ">>>=" "..." "&&" "||" "<-" "<<" ">>>" ">>" "++" "--" "==" "!=" "<="
         ">=" ":=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "&&=" "||=" ".."
         "+" "-" "*" "/" "%" "&" "|" "^" "<" ">" "=" "!" "?" "~"
         "(" ")" "[" "]" "{" "}" "," ";" "." ":"))
@@ -299,6 +300,8 @@
 
   (rule struct-decl
     (-> ("struct" type-name "{" fields "}") (struct $2 $*4))
+    ;; `struct FileReader implements tar.Reader { … }` —— V 2024 年加的显式接口声明
+    (-> ("struct" type-name "implements" types "{" fields "}") (struct $2 (implements $*4) $*6))
     (-> ("union" type-name "{" fields "}") (union $2 $*4)))
 
   ;; 字段区里可以插 `pub:` / `mut:` / `pub mut:` 这种**段标记**
@@ -446,7 +449,13 @@
 
   (rule lhs
     (-> (expr) $1)
-    (-> ("mut" expr) (mut $2)))
+    (-> ("mut" expr) (mut $2))
+    ;; `mut static ptimers := …`、`mut volatile sum := …` —— `static` / `volatile` 是
+    ;; 局部变量的存储类修饰词，跟在 `mut` 后面
+    (-> ("mut" "static" expr) (mut static $3))
+    (-> ("mut" "volatile" expr) (mut volatile $3))
+    (-> ("static" expr) (static $2))
+    (-> ("volatile" expr) (volatile $2)))
 
   (rule assign-op
     (-> ("=") $1) (-> ("+=") $1) (-> ("-=") $1) (-> ("*=") $1) (-> ("/=") $1)
@@ -879,7 +888,7 @@
     (-> (nb-lit) $1)))
 ;; ---- 量到的与还欠的 --------------------------------------------------------------
 ;;
-;; 954 状态 / 473 条产生式 / 850 处冲突，vlang 那棵树 6183 份 .v 过 **3702**（60%）。
+;; 967 状态 / 478 条产生式 / 850 处冲突，vlang 那棵树 6183 份 .v 过 **3831**（62%）。
 ;; 这一趟从 496（8%）走上来，一刀一刀都是量出来的 —— 判据只有语料这一个（文件头不足 1）。
 ;;
 ;; 这一趟的账（每一步都跑一遍分类器：把失败按错误话归类计数，改最大那一类，再量）：
@@ -907,6 +916,10 @@
 ;;                 往 Option 上的转换；文件级属性 `@[has_globals]` 写在 `module` 上面；
 ;;                 `sizeof`/`typeof`/`isreftype` 从一元算符那一级搬到操作数那一级
 ;;                 （`typeof(x).name` 要能接后缀）；`chan T{cap: 2}`。
+;;
+;;   3702 -> 3831  词法层加 `interp-string`（见 lex.js）：插值里又有引号那一族，
+;;                 290 份。外加 `<-`（通道收取符，少了它被切成 `<` 加 `-`，107 份）、
+;;                 `mut static` / `mut volatile`、`struct X implements Y {`。
 ;;
 ;; 反过来被量否掉的（记下来免得再试）：CDIRECTIVE 的 `not-after` 名单里**不能有 `}`** ——
 ;; `}` 换一行接着写 `#flag -luser32` 是常见排版，加进去就把那一族挡死（净 -1，量过）。
