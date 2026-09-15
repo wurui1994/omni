@@ -412,6 +412,12 @@
     (-> (IDENT OP9 pragma) (n $1 export $3)))
 
 
+  ;; pragma 里那个 `cast(` 的左括号：`cast` 是关键字，所以它后面那个括号**不是** LP
+  ;; （LP 只在 IDENT / `)` / `]` 一类记号后面紧贴时才发）。两种都收。
+  (rule clp
+    (-> ("(") $1)
+    (-> (LP) $1))
+
   (rule pragma
     (-> ("{." pragma-items ".}") (pragma $*2))
     (-> ("{." pragma-items "}") (pragma $*2)))
@@ -429,7 +435,7 @@
     ;; `{.pragma: myAttr.}`。头一条 IDENT 是命令名，后面那一串是它的实参。
     (-> (IDENT pragma-args) (cmd $1 $*2))
     ;; `{.cast(noSideEffect).}` —— `cast` 在 pragma 里当函数用（它是关键字，走不到 primary）
-    (-> ("cast" LP expr ")") (cast $3)))
+    (-> ("cast" clp pragma-items ")") (cast $*3)))
 
   (rule pragma-args
     (-> (pragma-arg) ($1)))
@@ -439,7 +445,7 @@
     (-> (primary ":" expr) (kv $1 $3))
     (-> (primary "=" expr) (kv $1 $3))
     ;; `{.cast(noSideEffect).}` —— `cast` 在 pragma 里当函数用（它是关键字，走不到 primary）
-    (-> ("cast" LP expr ")") (cast $3)))
+    (-> ("cast" clp pragma-items ")") (cast $*3)))
 
 
   ;; ---- 例程（proc / func / method / iterator / template / macro / converter）
@@ -866,6 +872,12 @@
     (-> ("addr" unary) (addr $2))
     (-> ("static" unary) (static $2))
     (-> (OP2 unary) (un $1 $2))
+    ;; Nim 的规矩是**任何算符都能当前缀**。这儿只开这几类：`!$`（OP5，`result = !$result`
+    ;; 在标准库里 8 处）与 `..^1`（OP6，切片的开区间写法）。
+    ;; 不开 OP9（`*` `/`）—— 那几个开出来会与二元乘除在"命令式调用的实参"上打架，
+    ;; 而受限链 `np-*` 只挡得住实参那一侧的第一格。
+    (-> (OP5 unary) (un $1 $2))
+    (-> (OP6 unary) (un $1 $2))
     (-> (OP7 unary) (un $1 $2))
     (-> (OP8 unary) (un $1 $2))
     (-> (OP10 unary) (un $1 $2)))
@@ -931,6 +943,13 @@
     (-> ("nil") (nil))
     (-> (IDENT) (name $1))
     (-> ("(" expr ")") (paren $2))
+    ;; 括号里裹一个**类型前缀**：`(ref IOError)(msg: msg)`、`sink (ref T)`、`(var T)`。
+    ;; 这几个词是关键字，走不到 `expr`，所以在这儿单开一格 —— 与 `call-arg` 上那个
+    ;; 类型前缀的洞是同一个理由（9 份文件卡在这儿）。
+    (-> ("(" "ref" type-desc ")") (paren (ref $3)))
+    (-> ("(" "ptr" type-desc ")") (paren (ptr $3)))
+    (-> ("(" "var" type-desc ")") (paren (var $3)))
+    (-> ("(" "out" type-desc ")") (paren (out $3)))
     ;; 元组字面量要**两个以上**元素或者一个尾随逗号 —— 不然 `(a)` 同时是括号与单元素
     ;; 元组，同一棵输入两个解（这一条值 13 份文件）。
     ;; 元素走 `call-arg`：具名元组 `(key: "key1", val: 1)` 靠它那格 `expr ":" expr`。
@@ -958,9 +977,9 @@
 
 ;; ## 量到的（`node bench/grammars.js nim`，语料 = Nim/lib 下 316 份 .nim）
 ;;
-;;   882 状态 / 435 产生式 / 102 终结符 / 539 处冲突留给驱动器
-;;   冷建表 ~290ms、热装表 ~22ms（内容寻址缓存）
-;;   **153 / 316 过**（48%），855031 记号、4.5MB，解析 ~3.8s（1.2 MB/s、23 万记号/s）
+;;   912 状态 / 443 产生式 / 102 终结符 / 551 处冲突留给驱动器
+;;   冷建表 ~350ms、热装表 ~25ms（内容寻址缓存）
+;;   **166 / 316 过**（53%），855031 记号、4.5MB，解析 ~4.2s（1.1 MB/s、20 万记号/s）
 ;;
 ;; 还欠一半。欠在哪儿是**数出来的**，不是猜的 —— 每一刀都先把 316 份的报错按信息归类，
 ;; 最大那一类先修，再量。头一版只过 3 份，这一路的账：
@@ -987,16 +1006,24 @@
 ;;         + 具名元组 + `var x = collect:` 尾块
 ;;   153 → 尾随逗号 + `for (a, b) in …` + `{.cast(noSideEffect).}` + **空体**（体里只有
 ;;         `## …` 的例程，我们把注释当空白跳掉，于是看见的是 `= NL`）+ pragma 写在下一行
+;;   166 → pragma 里那个 `cast(` 的左括号**不是 LP**（`cast` 是关键字，LP 只在 IDENT /
+;;         `)` / `]` 一类记号后面紧贴时才发），而且它的实参是 pragma 项不是表达式
+;;         （`cast(raises: [IOError])`）；括号里裹类型前缀（`(ref IOError)(msg: msg)`、
+;;         `sink (ref T)`）；前缀算符补 OP5 / OP6（`!$result` 8 处、`..^1`）
 ;;
 ;; 这条账里有两条**一般**的教训，不是 Nim 独有的：
 ;;   1. "too many concurrent parses" 从来不是"驱动器不够强"，是**语法里有真歧义**。
 ;;      57 份那一批全是两条产生式推出同一棵树（`(a)`、`(a, b)`）。写清楚就没了。
 ;;   2. 两种写法只差空白时（`f(x)` / `f (x)`、`re"x"` / `echo "x"`），要在**词法层**分开。
 ;;      语法层分不了 —— 它看不见空白。
+;;      **反过来也要记住**：`tight-after` 那格记号（LP / LB / LC）只在**特定前一个记号**
+;;      后面才发，所以凡是"关键字后面紧跟括号"的地方（`cast(`、`proc(`）都得单独收一条
+;;      "紧贴不紧贴都行"的规则。这一条在这份文件里踩过两次。
 ;;
-;; 剩下 163 份的失败，按类：
-;;   * 27 份 `optInd` 的剩余形状：返回类型写在下一行（`proc f(…):\n    seq[S] {.inline.} =`）。
-;;     这一族要么一处处枚举，要么等驱动器里那格**列号谓词**。
+;; 剩下 150 份的失败，按类：
+;;   * 28 份 `optInd` 的剩余形状：返回类型或实参写在下一行
+;;     （`proc f(…):\n    seq[S] {.inline.} =`、`esc(outHtml,\n    module & ": ")`）。
+;;     这一族要么一处处枚举，要么等驱动器里那格**列号谓词** —— 那是真正的机制欠账。
 ;;   * 11 份命令式调用嵌在运算符里（`n * await asyncFact(n-1)`）—— Nim 靠空白，我们靠
 ;;     受限链，这一处受限链挡过了头。
 ;;   * 剩下的是零散形状（`{: }` 空表构造、`parseEnum[:OutputLevel]` 的空泛型、
