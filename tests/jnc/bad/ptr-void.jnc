@@ -1,21 +1,15 @@
-// `void*` —— **没有元素类型的字节指针**。jancy 那儿它是一格普通的数据指针（`void const* p`），
-// 真语料里校验和 / 序列化那一族的形参都这么写（`test/ioninja/common/crc16.jnc:44` 那一行
-// `int crc16_ansi(void const* p, size_t size, …)`）。
+// `void*` 上**读不了、下标不了、也不能做算术**（第二百六十一刀）—— jancy 自己就报错
+// （"pointer to void"）：它没有元素类型，"一格跨多远"这句话在它身上没有意义。
 //
-// 这一层还不收：方言的 `(ptr T)` 里 T 只能是 int / real / bool / 结构体 / 另一个指针 /
-// `(blk T N)`，收 void 要先有一格"按字节走"的指针类型 —— 那与"整数带宽度"是同一程
-// （ADR-0031 §8.1）。指针换指针本身已经接上了，正面判据在 cases/201-ptrcast.jnc。
-//
-// 拦在**这一层**（不是漏到方言那一侧）：漏过去报的是 `.sx` 里那句 "(ptr T) 的 T 只能是 …"，
-// 指着一份虚拟的中间文件，而写的人手里只有 `.jnc`。
-int sum(void const* p, size_t n) {
-	uint8_t const* b = (uint8_t const*)p;
-	return b[0];
+// 那一族本身已经接上了（正面判据在 cases/203-voidptr.jnc）：接过来、传出去、`(T*)p`
+// 换成一格有类型的指针，三样都行。这儿拦的是**第四样**。
+int first(void const* p) {
+	return *p;
 }
 
 int main() {
-	int* p = new int;
-	*p = 7;
-	printf("%d\n", sum(p, 4));
+	int* q = new int;
+	*q = 7;
+	printf("%d\n", first(q));
 	return 0;
 }

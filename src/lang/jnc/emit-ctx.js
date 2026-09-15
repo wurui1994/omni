@@ -1713,6 +1713,12 @@ export function makeFnEnv(o) {
       const p = derefOvl(p0, 'mul');
       if (p === null) return null;
       if (p.type?.k !== 'ptr' && p.type?.k !== 'tptr') { acct("'*' 的左边不是指针"); return null; }
+      /* `void*` **解不了引用**（第二百六十一刀）：它没有元素类型 —— jancy 自己就报错
+         （"pointer to void"）。要读先 `(T*)p` 换成一格有类型的指针。 */
+      if (p.type.vd === true) {
+        acct('`*p`：p 是 `void*`（没有元素类型）—— 先 `(T*)p` 换成一格有类型的指针');
+        return null;
+      }
       const tt = p.type.target;
       return { shape: memberShape(tt?.k === 'struct', tt?.k === 'arr'), code: p.code, type: tt };
     }
@@ -1755,6 +1761,12 @@ export function makeFnEnv(o) {
       }
       const a = emitExpr(nm2.obj, null, ctxRef);
       if (a === null) return null;
+      /* `void*` **下标也不行**（第二百六十一刀）：`p[i]` 就是 `*(p + i)`，而它没有元素类型
+         —— 一格跨多远都说不出来。jancy 自己也报错。 */
+      if (a.type?.vd === true) {
+        acct('`p[i]`：p 是 `void*`（没有元素类型）—— 先 `(T*)p` 换成一格有类型的指针');
+        return null;
+      }
       /**
        * **`operator [] ` 那一族**（第一百三十一刀，130-opindex.jnc）：左边是结构体/类时
        * 下标不是 `*(a + i)` —— 它是**一对取/存**（`<东家>$op$index$get` / `$set`），

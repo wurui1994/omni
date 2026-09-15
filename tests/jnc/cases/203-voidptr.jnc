@@ -1,0 +1,61 @@
+// `void*` —— **一格地址，没有元素类型**（第二百六十一刀，decl_type_ptr_data / `Cast_DataPtr`）。
+//
+// 真语料里它是校验和 / 序列化那一族的形参（662 份上 204 处，最典型的一行是
+// `test/ioninja/common/crc16.jnc:44`：`int crc16_ansi(void const* p, size_t size, …)`）。
+//
+// 能对它做的事**只有三样**，这一格三样各钉一次：
+//   1. **接过来**（形参、局部量、字段）；
+//   2. **传出去** —— 任何指针 → `void*` 是**隐式**的（jancy 的 `Cast_DataPtr` 给的就是
+//      `CastKind_Implicit`：地址与范围都还在，丢的只是元素类型），所以调用点一句强制转换都不写；
+//   3. **`(T*)p` 换回一格有类型的指针** —— 那一步是显式的（`pcast`，第二百五十九刀）。
+//
+// 第四样（`*p` / `p[i]` / `p + 1`）jancy 自己就报错，墙在 bad/ptr-void.jnc。
+//
+// 落法：方言那一侧发 `(ptr int)`（一格地址就是一格地址），而元素类型在这一层留成 `void`
+// —— 于是真去读写它的那几条路自己走不通，不是悄悄读一格出来。
+
+struct Hdr {
+	int m_a;
+	int m_b;
+}
+
+// 收 `void*`，换回来再读（真语料那几个校验和函数的骨架）。
+int sumTwo(void const* p) {
+	Hdr const* h = (Hdr const*)p;
+	return h.m_a + h.m_b;
+}
+
+// 一格 `void*` 的字段：存着"这块是谁"，用的时候各自换回去。
+//
+// 方法名故意不叫 `set` —— 裸写的 `get` / `set` 在 jancy 里是**下标算符那一对**
+// （`Owner$op$index$get` / `$set`，第一百三十一刀），不是普通方法。
+class Slot {
+	void const* m_data;
+
+	void hold(void const* p) {
+		m_data = p;
+	}
+
+	int read() {
+		Hdr const* h = (Hdr const*)m_data;
+		return h.m_a * 10 + h.m_b;
+	}
+}
+
+int main() {
+	Hdr* h = new Hdr;
+	h.m_a = 3;
+	h.m_b = 4;
+
+	// 隐式：`Hdr*` 直接当 `void const*` 传
+	printf("%d\n", sumTwo(h));
+
+	Slot s;
+	s.hold(h);
+	printf("%d\n", s.read());
+
+	// 跟 null 比是有意义的（那问的是地址）
+	void const* z = null;
+	printf("%d %d\n", z == null, s.m_data == null);
+	return 0;
+}

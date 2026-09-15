@@ -53,6 +53,21 @@ export const CONV_CHAIN = [
     emit: (v, want, c) => c.unboxVar(v, want),
   },
   {
+    name: 'ptr-to-void',
+    /**
+     * **任何指针 → `void*` 是隐式的**（第二百六十一刀）：jancy 那儿 `Cast_DataPtr` 给的是
+     * `CastKind_Implicit`（元素类型丢掉不会丢信息 —— 地址与范围都还在），所以语料里
+     * `crc16(hdr, sizeof(hdr))` 那种一句强制转换都不写。反过来（`void*` → `T*`）**要显式**，
+     * 那一格走 `castValue` 的指针换指针分支。
+     *
+     * 排在数组退化之后：`crc16(buf, …)` 里 `buf` 是数组，先退化成指针再丢元素类型。
+     */
+    why: '指针丢掉元素类型（装进一格 void*）',
+    when: (v, want, c) => want !== null && want !== undefined && want.vd === true
+      && c.isPtr(v.type) && v.type.vd !== true,
+    emit: (v, want) => ({ code: `(pcast ${v.code} (ptr int))`, type: want }),
+  },
+  {
     name: 'bool-to-int',
     /* bool → 整数（第三十七刀）：1 位那一格用**零扩展**（`m_ext_u`，
        jnc_ct_CastOp_Int.cpp:354），而扩展这一族的 getCastKind 就是 `CastKind_Implicit`
@@ -290,6 +305,11 @@ export function ptrBinary({
   op, a, b, aNull, bNull, c,
 }) {
   const isP = (t) => c.isPtr(t) || c.isClass(t);
+  /**
+   * **`void*` 上没有算术**（第二百六十一刀）：加减都要"一格跨多远"，而它没有元素类型 ——
+   * jancy 自己就报错。只有跟 `null` 比是有意义的（那问的是地址），所以那一条放过去。
+   */
+  if ((a.type?.vd === true || b.type?.vd === true) && op !== '==' && op !== '!=') return null;
   if (op === '==' || op === '!=') {
     let t = null;
     if (aNull !== bNull) t = `(pisnull ${aNull ? b.code : a.code})`;

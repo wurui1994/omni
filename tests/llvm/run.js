@@ -48,13 +48,24 @@ const bad = (label, detail) => {
 
 /* `ms` 与输出上限都有默认值：产物一旦跑起来就可能不肯停（曾经一个 setjmp 的 -O2 版本
    往 /tmp 里写了 51GB）。所以这一层永远带着时限和 8MB 的上限，谁都不必自己记得加。 */
-function run(args, ms = 60000) {
+function run(args, ms = 60000, env = undefined) {
   /* 走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：轴级指纹要"这一趟装了哪些模块"这一份，
      不然改任何一门语言的前端都会把这条轴带着重跑。时限交给 RunCache（超时不入册），
      上限它给到 64MB；clang 与编出来的产物照旧原样跑（下面那些 spawnSync）。 */
-  const r = cache.run([cli, ...args], { timeout: ms });
+  const r = cache.run([cli, ...args], { timeout: ms, env });
   return { out: r.out, err: r.err, code: r.status };
 }
+
+/**
+ * **宿主面那一族还只在旧降级里**（第二百六十一刀）：`JNC_RULES=0` 把 jnc 那条降级切回旧的。
+ *
+ * 这一条轴上的两处 `.jnc` 都是**宿主面**（ADR-0022 的 J4d）：`import "libglfw.dylib" with
+ * "glfw3.h"`（声明从 C 头文件里收）与 `opaque class` 的方法降成 `(ccall Owner_… self …)`。
+ * 默认那一格第二百五十八刀翻到了规则那条路，而那条路上这一族还没接 —— 于是这两处照旧走
+ * 旧那条。**这不是"关掉检查"**：它是一笔写在这儿的债，接上那一族就把这个参数删掉
+ * （规则那一侧报的话是"`import "…" with "…"`（宿主的头文件）还没接"）。
+ */
+const OLD_JNC = { JNC_RULES: '0' };
 
 /** 缓存里那个 omni-jit 宿主（第 5 节的 JIT 那一路要它）。没编过就回 null，那一路按 skip 处理。 */
 function findJitHost() {
@@ -330,7 +341,8 @@ if (existsSync(sysDir)) {
       continue;
     }
     for (const leg of ['run-jit', 'run-llvm', 'run-c']) {
-      const r = run([leg, src, ...args], 180000);
+      /* `.jnc` 那一份走旧降级（宿主面那一族，见 `OLD_JNC` 那一段）。 */
+      const r = run([leg, src, ...args], 180000, name.endsWith('.jnc') ? OLD_JNC : undefined);
       const m = /^framebuffer: ([1-9][0-9]*) ([1-9][0-9]*)\nframes: 120\n$/.exec(r.out ?? '');
       const detail = [];
       if (r.code !== 0) {
@@ -556,14 +568,14 @@ if (existsSync(sysDir)) {
       + '    printf("mixtop %d %d\\n", mixTop(40, 2), mixTop("z"));\n'
       + '    return 0;\n'
       + '}\n');
-    const r = run(['run-jit', src], 90000);
+    const r = run(['run-jit', src], 90000, OLD_JNC);
     const detail = [];
     if (r.code !== 0) detail.push(`    run-jit exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
     else if (r.out !== 'count 142\nscale 70\nother 42\ntag 1 7\nlast 142\nmlast 142\nrand 1\nplain 42 5\ntop 42 42\nmix 34 105\nnote 200 8\nblen 11\nkid 9\nbump 4\nscale2 40\nsum 43 4 3\nvsum 60 0\npt 42\ndbl 84\nptx 42\ndyl 42\nali 42\nctor2 42\ngp 42\npick 42\ngain 42\nemb 5\nmixtop 42 7\n') detail.push(`    输出不对：${JSON.stringify(r.out)}（要 "count 142\\nscale 70\\nother 42\\ntag 1 7\\nlast 142\\nmlast 142\\nrand 1\\nplain 42 5\\ntop 42 42\\nmix 34 105\\nnote 200 8\\nblen 11\\nkid 9\\nbump 4\\nscale2 40\\nsum 43 4 3\\nvsum 60 0\\npt 42\\ndbl 84\\nptx 42\\ndyl 42\\nali 42\\nctor2 42\\ngp 42\\npick 42\\ngain 42\\nemb 5\\nmixtop 42 7\\n"）`);
     /* 生成的 `.sx` 里那两句声明也要看一眼：符号名是 `Counter_add`（`_` 不是 `$`——
        后者不是可移植的 C 标识符字符），第一个形参是 `ptr`（那个对象）。
        属性那两格同一条约定，中间多一段 `get_` / `set_`（第一百六十刀）。 */
-    const sx = run(['emit', 'sx', src], 90000);
+    const sx = run(['emit', 'sx', src], 90000, OLD_JNC);
     if (sx.code !== 0) detail.push(`    emit sx 没过：${(sx.err ?? '').trim().split('\n')[0]}`);
     else if (!sx.out.includes('(cabi Counter_add i64 (ptr i64))')) {
       detail.push('    emit sx 里没有 `(cabi Counter_add i64 (ptr i64))`');

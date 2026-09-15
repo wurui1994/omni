@@ -34,7 +34,11 @@ export const TY_TABLE = {
   class: { value: (t, ctx) => `(ptr ${ctx.clsRoot(t.name)})`, slot: null, field: null },
   // `T(*)[N]`（第二十刀）：指向一整块与那块自己在方言里是同一个写法
   ptr: {
-    value: (t) => (t.target.k === 'arr' ? `(ptr ${blkText(t.target)})` : `(ptr ${emitType(t.target, 'value')})`),
+    /* `void*`（`vd`）在方言那一侧就是**一格地址** —— 发 `(ptr int)`：一格地址就是一格地址，
+       换眼镜（`pcast`）是恒等的。元素类型在这一层留成 `void`，所以真去读写它的那几条路
+       自己走不通（第二百六十一刀）。 */
+    value: (t) => (t.vd === true ? '(ptr int)'
+      : (t.target.k === 'arr' ? `(ptr ${blkText(t.target)})` : `(ptr ${emitType(t.target, 'value')})`)),
     slot: null,
     field: null,
   },

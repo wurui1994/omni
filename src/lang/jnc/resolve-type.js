@@ -83,16 +83,21 @@ export function resolveType(t, env = new Map(), depth = 0) {
   /* 类与**函数类型**那两族吞掉一个 `*`（`C* p` / `Fn* m_f` 里那一个星号是它们自己的形状）。 */
   const stars = base.k === 'class' || base.k === 'fnptr' ? Math.max(t.ptrs - 1, 0) : t.ptrs;
   /**
-   * **`void*` 是另一族**（第二百五十九刀）：jancy 那儿它是"没有元素类型的数据指针"
-   * （`void const* p`，真语料里校验和/序列化那一族的形参都这么写）。方言的 `(ptr T)` 里
-   * T 还不收 void —— 收它要先有一格"按字节走"的指针类型（与整数带宽度那一格同一程，
-   * 见 ADR-0031 §8.1）。
+   * **`void*` 是"一格地址，没有元素类型"**（第二百六十一刀）：jancy 那儿它是一格普通的
+   * 数据指针（`void const* p`），真语料里校验和 / 序列化那一族的形参都这么写
+   * （`crc16.jnc:44` 的 `int crc16_ansi(void const* p, size_t size, …)`，662 份上 204 处）。
+   * 能对它做的事**只有三样**：接过来、传出去、`(T*)p` 换成一格有类型的指针 ——
+   * 解引用 / 下标 / 指针算术 jancy 自己就报错（"pointer to void"）。
    *
-   * 在**这一层**记账而不是让它漏到方言那一侧：漏过去报的是 `.sx` 里那句
-   * "(ptr T) 的 T 只能是 …"，指着一份虚拟的中间文件，而写的人手里只有 `.jnc`。
+   * 落法：方言那一侧发 `(ptr int)`（一格地址就是一格地址，`pcast` 换眼镜是恒等的），
+   * 而**元素类型留成 `void`** —— 于是真去读写它的那几条路自己就走不通（不是悄悄读一格出来）。
+   * `void**` 那一族照旧不收（那要"指向一格没有类型的地址"，语料里也没有）。
    */
-  if (base.k === 'void' && stars > 0) {
-    return { type: null, why: '`void*`（没有元素类型的字节指针）—— 方言的 `(ptr T)` 里 T 还不收 void' };
+  if (base.k === 'void' && t.ptrs === 1) {
+    return { type: { k: 'ptr', target: { k: 'void' }, vd: true }, why: null };
+  }
+  if (base.k === 'void' && stars > 1) {
+    return { type: null, why: '`void**`（指向一格没有元素类型的地址）—— 语料里没有，明说不收' };
   }
   for (let i = 0; i < stars; i += 1) el = { k: 'ptr', target: el };
 
