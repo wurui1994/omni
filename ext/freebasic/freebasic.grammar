@@ -35,7 +35,12 @@
     ;; `/' … '/` 是可嵌套的块注释；`'` 到行尾是行注释
     (block-comment "/'" "'/" nest)
     (comment "'" (* (not "\n")))
-    (token NL (+ (seq (? "\r") "\n" (* (set " \t\r")))))
+    ;; 换行是语句终结符。一格 NL 记号吃掉**连着的**空行 —— 而且把"整行都是注释"的那些行
+    ;; 也一并吃掉。为什么要吃：注释被 skip 掉之后，它前后那两个换行就成了两格 NL 记号，
+    ;; 于是 `select case x` 与第一个 `case` 之间凭空多出一格 NL，语法要么在每个块头后面
+    ;; 都写"若干个 NL"，要么在这儿一次解决。选后者 —— 空行与纯注释行**不产生语句**，
+    ;; 这是词法层的事实，不该让语法去记（92 份文件卡在这儿）。
+    (token NL (+ (seq (? "\r") "\n" (* (or (set " \t\r") (seq "'" (* (not "\n"))))))))
 
     ;; ---- 字面量
     (token STRING (? (set "$!")) "\"" (* (or (not "\"\n") "\"\"")) "\"")
@@ -63,10 +68,10 @@
       "ubyte" "uinteger" "ulong" "ulongint" "union" "unsigned" "ushort" "using"
       "var" "varptr" "wend" "while" "with" "xor" "zstring" "wstring" "byte"
       "boolean" "wchar" "delete" "abstract" "virtual" "alias" "explicit"
-      "thread" "local" "naked" "cdecl")
+      "thread" "local" "naked" "cdecl" "open")
 
     ;; ---- 运算符与标点。`\` 是整除，`^` 是幂，`@` 是取地址，`&` 是串接。
-    (op "<=" ">=" "<>" "->" "&=" "+=" "-=" "*=" "/=" "\\=" "^=" "##" "..."
+    (op "<=" ">=" "<>" "=>" "->" "&=" "+=" "-=" "*=" "/=" "\\=" "^=" "##" "..."
         "(" ")" "[" "]" "{" "}" "," ":" ";" "." "=" "+" "-" "*" "/" "\\" "^" "@"
         "<" ">" "&" "#" "?" "!" "$"))
 
@@ -100,7 +105,15 @@
 
   ;; ---- 预处理指令（`#include once "x.bi"`、`#if`、`#define`）。它们自成一行。
   (rule pp
-    (-> ("#" NAME pp-rest NL) (pp $2 $*3)))
+    (-> ("#" pp-head pp-rest NL) (pp $2 $*3)))
+
+  ;; 指令名**不都是 NAME**：`#if` / `#else` / `#endif` / `#print` 那几个词在词法层就是
+  ;; 关键字（记号类型是那个词本身），所以要单列。95 份文件卡在这一条（`#IF 0` 一族）。
+  (rule pp-head
+    (-> (NAME) $1)
+    (-> ("if") $1) (-> ("else") $1) (-> ("elseif") $1) (-> ("end") $1)
+    (-> ("print") $1) (-> ("error") $1) (-> ("const") $1) (-> ("static") $1)
+    (-> ("dim") $1))
 
   (rule pp-rest
     (-> () ())
@@ -117,6 +130,7 @@
     (-> ("<=") $1) (-> (">=") $1) (-> ("<>") $1) (-> ("##") $1) (-> ("$") $1)
     (-> ("!") $1) (-> ("?") $1) (-> (";") $1) (-> ("{") $1) (-> ("}") $1)
     (-> ("defined") $1) (-> ("not") $1) (-> ("and") $1) (-> ("or") $1)
+    (-> ("...") $1) (-> ("=>") $1)
     (-> ("if") $1) (-> ("else") $1) (-> ("end") $1) (-> ("then") $1)
     (-> ("const") $1) (-> ("as") $1) (-> ("ptr") $1) (-> ("integer") $1)
     (-> ("string") $1) (-> ("sub") $1) (-> ("function") $1) (-> ("type") $1)
@@ -144,6 +158,16 @@
     (-> ("return" expr) (return $2))
     (-> ("goto" NAME) (goto $2))
     (-> ("goto" INT) (goto $2))
+    ;; `Using FB` —— 把一个命名空间的名字拉进当前作用域（39 份卡在这一条）。
+    ;; 注意与 `print ... using fmt` 里那个 `using` 是同一个词、不同的位置。
+    (-> ("using" dotted) (using-ns $2))
+    ;; 文件 I/O 的 `Open`：`open "test.dat" for binary as #f`、`open pipe cmd for input as #1`。
+    ;; 它不是普通的命令式调用 —— `for` 与 `as` 在中间，命令式实参表读不了（70 份）。
+    ;; 尾巴按**无序的部件表**收（access / lock / encoding / len = n），不枚举顺序：
+    ;; 那是"哪几个部件合法"的问题，是语义层的事（sig-parts / head-parts 同一格手法）。
+    (-> ("open" expr "for" NAME open-tail) (open $2 (mode $4) $*5))
+    (-> ("open" NAME expr "for" NAME open-tail) (open (kind $2) $3 (mode $5) $*6))
+    (-> ("open" expr open-tail) (open $2 $*3))
     (-> ("exit" exit-kws) (exit $*2))
     (-> ("continue" exit-kws) (continue $*2))
     (-> ("end") (end))
@@ -159,13 +183,34 @@
     ;; 标签：`mylabel:` —— 由 `simples` 那条 `:` 收尾，所以这儿只要名字
     (-> (NAME ":") (label $1)))
 
+  ;; 复合赋值。三件事一起收在这儿：
+  ;;   - 粘着写的 `+=` 一族（词法层已经并成一格记号）；
+  ;;   - **中间有空格的** `yrot + = 1.0f` —— 语料里真这么写，两格记号；
+  ;;   - 词式的 `or=` / `and=` / `xor=` / `mod=` 一族 —— 前一半是关键字，也是两格记号。
+  ;; 36 份文件卡在后两种。
   (rule augop
     (-> ("+=") $1) (-> ("-=") $1) (-> ("*=") $1) (-> ("/=") $1)
-    (-> ("\\=") $1) (-> ("^=") $1) (-> ("&=") $1))
+    (-> ("\\=") $1) (-> ("^=") $1) (-> ("&=") $1)
+    (-> ("+" "=") $1) (-> ("-" "=") $1) (-> ("*" "=") $1) (-> ("/" "=") $1)
+    (-> ("\\" "=") $1) (-> ("^" "=") $1) (-> ("&" "=") $1)
+    (-> ("and" "=") $1) (-> ("or" "=") $1) (-> ("xor" "=") $1)
+    (-> ("eqv" "=") $1) (-> ("imp" "=") $1) (-> ("mod" "=") $1)
+    (-> ("shl" "=") $1) (-> ("shr" "=") $1))
 
   (rule exit-kws
     (-> (exit-kw) ($1))
     (-> (exit-kws "," exit-kw) ($*1 $3)))
+
+  (rule open-tail
+    (-> (open-part) ($1))
+    (-> (open-tail open-part) ($*1 $2)))
+
+  (rule open-part
+    (-> ("as" "#" expr) (as $3))
+    (-> ("as" expr) (as $2))
+    (-> (NAME NAME) (opt $1 $2))
+    (-> (NAME STRING) (opt $1 $2))
+    (-> (NAME "=" expr) (opt $1 $3)))
 
   (rule exit-kw
     (-> ("sub") $1) (-> ("function") $1) (-> ("for") $1) (-> ("while") $1)
@@ -198,9 +243,13 @@
   ;; 文件直接报歧义，另有一百多份在这上面炸开。
   ;; 这是第三次用同一手了（awk 的连接、nim 的命令式调用、这儿），所以它算个套路：
   ;; **两种读法只差"第一个记号是什么"时，复制一条链把那一格挡掉。**
+  ;; 第一格实参**可以是文件号**：`put #f, , outarray()`、`get #1, , b`、`input #1, s`。
+  ;; 注意"只有一格实参时不许省"那条限制照旧管着（下面 c-orelse 那一支）。
   (rule cmd-args
     (-> (c-orelse) ($1))
-    (-> (cmd-arg "," cmd-rest) ($1 $*3)))
+    (-> ("#" c-orelse) ((chan $2)))
+    (-> (cmd-arg "," cmd-rest) ($1 $*3))
+    (-> ("#" c-orelse "," cmd-rest) ((chan $2) $*4)))
 
   (rule cmd-rest
     (-> (cmd-arg) ($1))
@@ -270,7 +319,10 @@
     (-> (var-name) (v $1))
     (-> (var-name "as" type) (v $1 $3))
     (-> (var-name "=" init) (v $1 (init $3)))
-    (-> (var-name "as" type "=" init) (v $1 $3 (init $5))))
+    (-> (var-name "as" type "=" init) (v $1 $3 (init $5)))
+    ;; `=>` 是数组初始化器那一格的老写法（`Dim x(20) As Zstring Ptr => { … }`，34 份）
+    (-> (var-name "=>" init) (v $1 (init $3)))
+    (-> (var-name "as" type "=>" init) (v $1 $3 (init $5))))
 
   ;; 名字后面可以跟数组界（`a(0 to 9)`、`b()`、`c(any)`）
   (rule var-name
@@ -285,6 +337,8 @@
   (rule bound
     (-> (expr) $1)
     (-> (expr "to" expr) (range $1 $3))
+    ;; `dim as integer a(0 to ...) = { 0, 1, 2 }` —— 上界由初始化器数出来
+    (-> (expr "to" "...") (range $1 (ellipsis)))
     (-> ("any") (any)))
 
   ;; 初始化器可以是花括号表（`{ 1, 2, { 3 } }`），也可以是**圆括号表**
@@ -292,6 +346,8 @@
   ;; 一个元素的 `(x)` 已经是括号表达式了，两边都收就是两个解。
   (rule init
     (-> (expr) $1)
+    ;; `dim as integer a(0 to 9) = any` —— "不要初始化"的显式写法（81 份卡在这儿）
+    (-> ("any") (any))
     (-> ("{" "}") (braces))
     (-> ("{" init-list "}") (braces $*2))
     (-> ("(" init "," init-list ")") (parens $2 $*4)))
@@ -453,6 +509,9 @@
     (-> (pmods var-name "as" type) (p $2 (mods $*1) $4))
     (-> (pmods var-name "as" type "=" init) (p $2 (mods $*1) $4 (default $6)))
     (-> (pmods var-name "=" init) (p $2 (mods $*1) (default $4)))
+    ;; 只写类型不写名字：`declare sub f(byval as uinteger, byval as double)`。
+    ;; 声明里（以及函数指针类型里）这么写是合法的，42 份文件卡在这一条。
+    (-> (pmods "as" type) (p (mods $*1) $3))
     (-> ("...") (varargs)))
 
   (rule pmods
@@ -504,6 +563,8 @@
 
   (rule member
     (-> (term) ())
+    ;; `#ifdef` 一族也出现在 `type … end type` 里面（按平台开关字段）
+    (-> (pp) $1)
     (-> (var-items term) (f $*1))
     (-> ("as" type var-items term) (f $2 $*3))
     (-> (access ":" term) (access $1))
@@ -770,8 +831,8 @@
 
 ;; ## 量到的（`node bench/grammars.js freebasic`，语料 = fbc/examples + fbc/src 下 1722 份 .bas）
 ;;
-;;   896 状态 / 555 产生式 / 156 终结符 / 239 处冲突留给驱动器
-;;   **694 / 1722 过（40%）**
+;;   969 状态 / 601 产生式 / 159 终结符 / 274 处冲突留给驱动器
+;;   **858 / 1722 过（50%）**
 ;;
 ;; 一路的账（每一刀都先按报错归类，最大那一类先修，再量）：
 ;;   264 → 头一版（`fold-case` 关键字刚补上，语法本身还很粗）
@@ -786,16 +847,30 @@
 ;;   679 → `else` 后面不写可选 NEWLINE（`stmts` 已经收了，两边都写就是两个解，70 份）
 ;;         + 圆括号初始化表（`= (0, 0, 93, 72)`）+ 图形语句的坐标对（`(0,0)-(w,h)`）
 ;;   694 → `private sub f(…)` + `open … for … as #f` + `case v : stmt` 的行尾 NEWLINE
+;;   793 → `#` 后面的指令名**不都是 NAME**：`#IF` / `#ELSE` / `#ENDIF` 那几个词在词法层
+;;         就是关键字，得单列一条 pp-head（95 份）；`= Any`（"不要初始化"的显式写法，81 份）；
+;;         只写类型不写名字的形参 `declare sub f(byval as uinteger)`（42 份）；
+;;         `Using FB`（把命名空间拉进作用域，39 份）
+;;   818 → **纯注释行并进 NL 记号**：注释被 skip 掉之后它前后那两个换行成了两格 NL，
+;;         于是 `select case x` 与第一个 `case` 之间凭空多出一格。这是词法层的事实
+;;         （空行与纯注释行不产生语句），不该让语法在每个块头后面都写"若干个 NL"（92 份）。
+;;         + `=>` 初始化器（34 份）+ `a(0 to ...)`（上界由初始化器数出来）
+;;   836 → 复合赋值的另两种写法：中间带空格的 `yrot + = 1.0f`，与词式的 `or=` / `xor=` /
+;;         `and=`（前一半是关键字，都是两格记号，36 份）+ `Open … For … As #n` 单开一条规则
+;;         （尾巴按无序部件表收，不枚举顺序）
+;;   858 → 命令式调用的第一格实参可以是文件号（`put #f, , arr()`、`input #1, s`）；
+;;         `#ifdef` 一族也出现在 `type … end type` 里面
 ;;
 ;; 中间试错一次也记下来：给例程头加一条 `attr -> NAME`（为了收 `Declare Function f WXCALL ()`
-;; 里那个宏，61 份）之后，例程头立刻两个解，473 掉到 412。退回来了。
+;; 里那个宏，61 份）之后，例程头立刻两个解，473 掉到 412。退回来了 —— 现在还剩 35 份卡在
+;; 这一条，要收它得先想清楚"名字后面那个裸名字"怎么与命令式调用分开，不是再试一次。
 ;;
-;; 还欠 1028 份。这一门是这几门里最难收的，原因不在语法规模，在于**BASIC 有一大批
-;; 自带词序的语句**（`open … for … access … as #n`、`line … , (x,y)-(x,y), c, bf`、
-;; `print #f, using "…";`、`get`/`put`/`draw`/`screen`/`window`/`view`/`palette`/`input`…）。
-;; 每一条都是一小套自己的语法，不能靠通用的"命令式调用"收。收全它们不难，就是**量大**，
-;; 一条条按语料里的实际写法补 —— 下一刀该补哪一条也是量出来的（`--fail` 里最大那一类）。
+;; 还欠 864 份。这一门是这几门里最难收的，原因不在语法规模，在于**BASIC 有一大批
+;; 自带词序的语句**（`line … , (x,y)-(x,y), c, bf`、`print #f, using "…";`、
+;; `get`/`put`/`draw`/`screen`/`window`/`view`/`palette`/`input`…）。
+;; 每一条都是一小套自己的语法，不能靠通用的"命令式调用"收。收全它们不难，就是**量大**。
 ;;
-;; 已知的另一族：`regs.x.ax = &H03` 这种在 `union` 里嵌 `union` 的类型上炸开（89 份报
-;; "too many concurrent parses"），那是 `member` 那一格里 `dim`/`static`/`const`/裸字段
-;; 四条路重叠，得像 nim 的 `type`/`var` 段那样分开。
+;; 现在最大的一类是 **154 份 "too many concurrent parses"**（`regs.x.ax = &H03` 那一族，
+;; 在 `union` 里嵌 `union` 的类型上炸开）：`member` 那一格里 `dim`/`static`/`const`/裸字段
+;; 四条路重叠。下一刀该按"哪条产生式参与冲突最多"排一遍，而不是继续从失败清单猜 ——
+;; 274 处冲突里绝大部分应该都聚在这儿。
