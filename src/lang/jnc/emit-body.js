@@ -13,7 +13,7 @@ import { emitStmt } from './emit-stmt.js';
 import { emitExpr } from './emit-expr.js';
 import { truthyCode } from './expr-table.js';
 import {
-  catchAt, catchBlockLines, CONT_LOOP_HEADS, EC_HOIST,
+  catchAt, catchBlockLines, CONT_LOOP_HEADS, EC_HOIST, ifLines,
 } from './stmt-table.js';
 
 /**
@@ -177,6 +177,31 @@ export function makeCtx(env) {
         return null;
       }
       return ls;
+    }
+    /**
+     * **`c ? f() : g();` 当一条语句**（第二百四十七刀，55-errorcode.jnc:194 的
+     * `q > 0 ? printf("pos\n") : printf("neg\n");`）：语句**不要值**，所以整条就是一句 `if`，
+     * 两支各按**语句**降 —— 旧降级的真输出正是 `(if … (do (print …)) (do (print …)))`。
+     *
+     * 这一问要排在"求一格值"之前：`printf` / `print` 那两族在方言里压根不是值（发的是几行
+     * `print`），落到求值那一层报的是"printf 那一族（格式化）还没接"。
+     * 每一支的传播那几句插在**它自己那半里**（`lazyOne`，第二百四十六刀那格机器）。
+     */
+    if (h === 'cond') {
+      const nm0 = named(node) ?? {};
+      const c = ctx.cond(nm0.cond);
+      if (c === null) return null;
+      const half = (n2) => {
+        const r = ctx.lazyOne === undefined
+          ? { v: ctx.exprStmt(n2, ind + 4), lines: [] }
+          : ctx.lazyOne(() => ctx.exprStmt(n2, ind + 4));
+        return r.v === null || r.v === undefined ? null : [...r.lines, ...r.v];
+      };
+      const t = half(nm0.then ?? nm0.a);
+      const e = t === null ? null : half(nm0.else ?? nm0.b);
+      if (t === null || e === null) return null;
+      const blk = (ls) => `${pad}  (do\n${ls.join('\n')}\n${pad}  )`;
+      return ifLines(c, blk(t), blk(e), pad);
     }
     const v = emitExpr(node, null, ctx);
     if (v === null) return null;
