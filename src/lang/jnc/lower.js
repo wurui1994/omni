@@ -442,9 +442,14 @@ export function lowerJncRules(tree0, diags, opts = {}) {
           const rp = resolveType({ ...t, shape: 'data' }, env);
           const boxed = (gLifted.has(t.name) || gLifted.has('m_value'))
             && rp.type !== null && liftable(rp.type);
+          const store = `${ns === null ? t.name : `${ns}$${t.name}`}$m_value`;
           if (boxed) {
-            const store = `${ns === null ? t.name : `${ns}$${t.name}`}$m_value`;
             cells.push(`    (set ${store} (pnew ${liftedType(rp.type, tyc)} (int 1)))`);
+          } else if (rp.type !== null && (rp.type.k === 'struct' || rp.type.k === 'arr')) {
+            /* **存储是一整块**（`variant_t autoget property g_v;`，第二百五十刀）：那一格量里
+               放的是**地址** —— 要真开一段内存，不然存值器里那句 `m_value = x` 当场空指针
+               （150-variantautoget.jnc 量出来的就是这一格）。 */
+            cells.push(`    (set ${store} (pnew ${emitType(rp.type, 'slot', tyc)} (int 1)))`);
           }
         }
         continue;
@@ -1135,16 +1140,28 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     /* 类那一格**读法与指针一样**（那一格里放的就是对象那段内存的地址）—— 所以它照收
        （68-propptr.jnc 的 `Icon* autoget property m_icon`）。聚合体/数组那两格不收：
        那一格里放的**是**那段内存，读出来是地址、写要抄一份 —— 生成不出"一句 var"。 */
-    if (!['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr', 'class'].includes(ty.k)) {
+    /**
+     * **`variant_t` 是那一条的例外**（第二百五十刀，150-variantautoget.jnc）：这一层的 variant
+     * 值**本来就是一格地址**（第一百七十三刀量出来的那条 —— `varBox` 那几格出来的类型是
+     * `jnc$variant*`），所以那格存储就是一格普通的 variant 字段/量，取值器回的是"那一格的
+     * 地址"，仍旧是**一句 `ret`**。别的结构体照旧不收（读出来是地址、写要抄一份）。
+     */
+    const isVar = ty.k === 'struct' && ty.name === VARIANT;
+    if (!isVar
+      && !['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr', 'class'].includes(ty.k)) {
       acct(`属性 '${emitName}' 生成的取值器落在 ${ty.k} 上（读法不是一句 var）还没接`); return false;
     }
     const storage = `${emitName}$m_value`;
     const boxed = (gLifted.has(nameSrc) || gLifted.has('m_value')) && liftable(ty);
     const read = selfInfo === null
       ? (boxed ? `(pload (var ${storage}))` : `(var ${storage})`)
-      : `(pload (pfield (var $this) ${storage}))`;
+      /* 一整块那一格（variant）**不 pload**：那个字段自己就是那段内存，它的地址就是值。 */
+      : (isVar ? `(pfield (var $this) ${storage})` : `(pload (pfield (var $this) ${storage}))`);
     const selfPart = selfInfo === null ? '' : `($this (ptr ${clsRoot(selfInfo.agg)}))`;
-    decls.push(`  (fn ${emitName}$get (${selfPart}) ${emitType(ty, 'value', tyc)}\n    (ret ${read}))`);
+    /* 一整块那一格（variant）回的是**那段内存的地址** —— 头上写的就是存储位置那个类型
+       （`(ptr jnc$variant)`，与结构体当返回值那一族同一条，145-structret.jnc）。 */
+    const retText = emitType(ty, isVar ? 'slot' : 'value', tyc);
+    decls.push(`  (fn ${emitName}$get (${selfPart}) ${retText}\n    (ret ${read}))`);
     methods.set(`${emitName}$get`, {
       params: [],
       defaults: [],
