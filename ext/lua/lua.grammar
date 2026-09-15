@@ -1,4 +1,4 @@
-;; ext/lua/lua.grammar —— Lua 的完整语法（GLR 那条路）；收 5.1 到 5.4 的并集
+;; ext/lua/lua.grammar —— Lua 的完整语法（GLR 那条路）；收 5.1 到 **5.5** 的并集
 ;;
 ;; 为什么有这一份：这一格扩展本来有自己那套「节点表 + 洞的类别 + 读表的驱动器」
 ;; （tokens.js / nodes.js / lang.js，见 DESIGN.md）。那一条**不弃用** —— 它是这门语言
@@ -14,18 +14,34 @@
 ;;   - `exp binop exp` 那一大坨不展开成 14 层，用优先级声明消歧（与 Lua 自己
 ;;     lparser.c 里那张 priority[] 表逐格对上，见下面 (prec …) 那一段的注释）。
 ;;
-;; **收的是 5.1…5.4 的并集**，不是某一版：扩展这一门的自述写着 "Lua 5.1 / LuaJIT 2"，
-;; 而机器上的参考树（reference/lua）是 5.4 —— 一份语法要能吃下两边的语料，
-;; 就得把 5.2 的 goto/标签与空语句、5.3 的位运算与 `//`、5.4 的 `<const>` / `<close>`
-;; 都收进来。**一门语言的解析器认得比它该认的多**，代价落在下游（降级那一层拒掉
-;; 这一版没有的写法，且报得出是哪一版才有）；反过来"少认"的代价是语料根本进不来。
+;; **收的是 5.1…5.5 的并集**，不是某一版：扩展这一门的自述写着 "Lua 5.1 / LuaJIT 2"，
+;; 而机器上的参考树（reference/lua）已经是 **5.5** —— 一份语法要能吃下两边的语料，
+;; 就得把 5.2 的 goto/标签与空语句、5.3 的位运算与 `//`、5.4 的 `<const>` / `<close>`、
+;; 5.5 的 `global` 声明与具名可变参 `...t` 都收进来。**一门语言的解析器认得比它该认的多**，
+;; 代价落在下游（降级那一层拒掉这一版没有的写法，且报得出是哪一版才有）；
+;; 反过来"少认"的代价是语料根本进不来。
 ;;
-;; 明说的三处不足（不猜，写在这儿）：
-;;   1. **长括号只收 0 级**：`[[…]]` 与 `--[[…]]` 收，`[==[…]==]` 不收 ——
-;;      lex.js 那套模式语言没有"数出 N 个等号再要求同样多的等号"这种东西（它不回溯）。
+;; 明说的不足（不猜，写在这儿）：
+;;   1. **长括号收到三级**：`[[…]]`、`--[=[…]=]`、`--[==[…]==]`、`--[===[…]===]`。
+;;      再深的不收 —— lex.js 那套模式语言没有"数出 N 个等号再要求同样多的等号"这种东西
+;;      （它不回溯），只能一级一条写。语料里最深是一级。
 ;;   2. 串里的 `\z`（吃掉后面的空白）不收 —— 那是**值**那一层的转义表，lex.js 的
 ;;      `(string …)` 用的是通用那张。
 ;;   3. 长串开头那个换行 Lua 会吃掉 —— 同上，值那一层的事，这里的记号文本照原样留着。
+;;
+;; ## 量到的（`node bench/grammars.js lua`）
+;;
+;;   229 状态 / 113 产生式 / **2 处冲突**，67 份 .lua 过 **52（78%）**
+;;
+;;   34 → 52 这一段全是 **Lua 5.5**（参考树换版本之后语料变了，语法没跟上）：
+;;     `global <const> *` / `global a, b` / `global T<const>` / `global a = 10` /
+;;     `global function f()`、属性写在名字前面的 `local <close>var`、
+;;     具名可变参 `local function f(a, ...t)`、以及长注释的级别（`--[=[`）。
+;;
+;; 剩下 15 份里 **10 份不是 Lua**：参考树里那份 luajit 是个**改过的分支**，
+;; 用 `!=` 代替 `~=`、还加了 C 风的三目 `c ? a : b`（dis_arm.lua、bcsave.lua 等）。
+;; 那两样不在任何一版 Lua 手册里，所以这一份**不收** —— 收了它就不叫 Lua 语法了。
+;; 这 10 份记在这儿当"预期失败"，不算欠账。真欠的是剩下 5 份的零散形状。
 
 (grammar lua
   (tokens NAME NUMBER STRING
@@ -65,7 +81,13 @@
     ;; 所以一条会吃到行尾的 `--` 会把长注释的头一行咬掉。写成"`--` 后面那一个字符
     ;; 不是 `[`"（以及"是 `[` 但下一个不是 `[`"）两条，就把那一格让给块注释。
     (comment "--" (not "[") (* (not "\n")))
-    (comment "--" "[" (not "[") (* (not "\n")))
+    (comment "--" "[" (not "[=") (* (not "\n")))
+    ;; 长注释的**级别**：`--[[`、`--[=[`、`--[==[` …。Lua 允许任意多个 `=`，我们收到三级
+    ;; （语料里最深是一级）。级别的用处正是"里头能放 `]]`"，all.lua 那份长注释里就有
+    ;; `[[spanning several [lines]]]`，一级注释才括得住它。
+    (block-comment "--[===[" "]===]")
+    (block-comment "--[==[" "]==]")
+    (block-comment "--[=[" "]=]")
     (block-comment "--[[" "]]")
 
     ;; 数：十六进制（含 5.2 起的十六进制浮点 `0x1p-4`）在前
@@ -82,7 +104,11 @@
     (token NAME (or alpha "_") (* (or alnum "_")))
     (keyword NAME
       "and" "break" "do" "else" "elseif" "end" "false" "for" "function" "goto" "if" "in"
-      "local" "nil" "not" "or" "repeat" "return" "then" "true" "until" "while")
+      "local" "nil" "not" "or" "repeat" "return" "then" "true" "until" "while"
+      ;; Lua **5.5** 新加的保留词（参考树里那份 lua 就是 5.5）。加进来的代价是 `global`
+      ;; 不能再当普通名字用了 —— 5.5 本身就是这么定的，而且量过：这批语料里 `global`
+      ;; 出现在别处全是串与注释里面。
+      "global")
 
     ;; 算符：长的自然赢（最长匹配），不用另排一层
     (op "..." ".." "==" "~=" "<=" ">=" "<<" ">>" "//" "::"
@@ -130,7 +156,26 @@
     (-> ("function" funcname funcbody) (fndef $2 $3))
     (-> ("local" "function" NAME funcbody) (localfn $3 $4))
     (-> ("local" attnamelist) (local (names $*2)))
-    (-> ("local" attnamelist "=" explist) (local (names $*2) (values $*4))))
+    (-> ("local" attnamelist "=" explist) (local (names $*2) (values $*4)))
+    ;; **Lua 5.5 的 `global` 声明**（参考树里那份 lua 就是 5.5，testes/ 下 20 份用它）：
+    ;;     global <const> *              -- 所有全局都是常量
+    ;;     global _soft, _port, _nomsg   -- 声明这几个名字是全局
+    ;;     global <const> coroutine, string, os
+    ;; `global` 不是关键字（它是普通名字，能当变量用），所以这儿写的是 NAME 那一格 ——
+    ;; 判据是"行首那个名字后面跟着 `<` 或者一串名字"。这也是它与命令式调用分得开的原因。
+    ;; `global function fat(x) … end` —— 与 `local function` 对称
+    (-> ("global" "function" NAME funcbody) (globalfn $3 $4))
+    (-> ("global" gattrib "*") (global-all $2))
+    (-> ("global" attnamelist) (global (names $*2)))
+    ;; `global a = 10` —— 声明的同时赋值（与 `local x = 1` 一样）
+    (-> ("global" attnamelist "=" explist) (global (names $*2) (values $*4))))
+
+  ;; `global <const> *` 里那一格属性（写在**表前面**，管所有名字）。
+  ;; 写在**每个名字后面**的那一种（`global T<const>`、`global assert<const>, load`）
+  ;; 走的是 `attnamelist` —— 与 `local x <const>` 同一格规则。
+  (rule gattrib
+    (-> () ())
+    (-> ("<" NAME ">") ($2)))
 
   ;; 5.4 的属性：`local x <const>, y <close>`。属性名就是个普通名字（`const` / `close`
   ;; 不是关键字），认哪几个是**降级那一层**的事 —— 语法只管"这儿能挂一个 `<名字>`"。
@@ -140,7 +185,9 @@
 
   (rule attname
     (-> (NAME) $1)
-    (-> (NAME "<" NAME ">") (att $1 $3)))
+    (-> (NAME "<" NAME ">") (att $1 $3))
+    ;; 5.5 也允许属性写在**名字前面**：`local <close>var = …`
+    (-> ("<" NAME ">" NAME) (att $4 $2)))
 
   (rule elseifs
     (-> () ())
@@ -196,10 +243,14 @@
     (-> ("(" ")" block "end") (body (params) $3))
     (-> ("(" parlist ")" block "end") (body (params $*2) $4)))
 
+  ;; 形参表。`...t` 是 **5.5** 的具名可变参（`local function f (a, ...t)` —— 把余下的
+;; 实参收成一张表 `t`），语料里 5 份用它。
   (rule parlist
     (-> (namelist) $1)
     (-> (namelist "," "...") ($*1 (vararg)))
-    (-> ("...") ((vararg))))
+    (-> ("...") ((vararg)))
+    (-> (namelist "," "..." NAME) ($*1 (vararg $4)))
+    (-> ("..." NAME) ((vararg $2))))
 
   (rule tablecons
     (-> ("{" "}") (table))
