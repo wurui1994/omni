@@ -24,8 +24,9 @@ import { structLine } from '../../src/lang/jnc/emit-agg.js';
 import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/generic.js';
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
+import { refDir } from './refsrc.js';
 
-const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy/samples/jnc';
+const EXTERNAL = join(refDir('jancy', 'JANCY'), 'samples', 'jnc');
 const argv = process.argv.slice(2);
 /* 语料两处：`samples/jnc`（写法花样多）与 `tests/jnc/cases`（旧降级一定发得出来）。
    `--cases` 切到后者 —— 对比的格数多得多，闸门用它。 */

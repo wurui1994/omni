@@ -24,6 +24,7 @@ import { readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { refDir } from '../lib/refsrc.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -31,7 +32,7 @@ const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const TCC = join(TCC_DIR, 'tcc');
 const CLI = join(root, 'src', 'core', 'cli.js');
 /* 源码树的位置与 ADR-0017 里记的一致；`TINYCC_SRC` 可以指到别处。 */
-const SRC = process.env.TINYCC_SRC ?? '/Users/wurui/Documents/Lang/reference/tinycc';
+const SRC = refDir('tinycc', 'TINYCC_SRC');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 let pass = 0;

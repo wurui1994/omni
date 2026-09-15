@@ -30,8 +30,9 @@ import { templateTable, expandTemplates, synthType } from '../../src/lang/jnc/ge
 import { nameText, allInChain } from '../../src/lang/jnc/declare.js';
 import { readDeclType } from '../../src/lang/jnc/types.js';
 import { LIB_IMPORTS } from '../../src/lang/jnc/modules.js';
+import { refDir } from './refsrc.js';
 
-const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy/samples/jnc';
+const EXTERNAL = join(refDir('jancy', 'JANCY'), 'samples', 'jnc');
 const argv = process.argv.slice(2);
 const CORPUS = argv.includes('--cases') || !existsSync(EXTERNAL) ? 'tests/jnc/cases' : EXTERNAL;
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 40);

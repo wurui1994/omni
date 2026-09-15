@@ -8,10 +8,11 @@
 //      因为解析器与写回器读的是同一张表，对不上就一定是表错了。
 //
 // 用法：node ext/lua/tests/sweep.js [语料目录] [--fail 只印失败]
-// 默认语料：/Users/wurui/Documents/Lang/reference/gsl-shell
+// 默认语料：`$GSL_SRC`，或 `~/Documents/Lang/reference/gsl-shell`（见 tests/lib/refsrc.js）
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { refDir } from '../../../tests/lib/refsrc.js';
 import { parse, ParseError } from '../../../src/core/frontend-engine/parse-driver.js';
 import { render } from '../../../src/core/frontend-engine/render.js';
 import { luaLang } from '../lang.js';
@@ -24,7 +25,7 @@ const lang = process.argv.includes('--gsl') ? gslLang
 
 const argv = process.argv.slice(2);
 const root = argv.find((a) => !a.startsWith('-'))
-  ?? '/Users/wurui/Documents/Lang/reference/gsl-shell';
+  ?? refDir('gsl-shell', 'GSL_SRC');
 const onlyFail = argv.includes('--fail');
 
 function walk(dir, out = []) {

@@ -18,10 +18,11 @@ import { join } from 'node:path';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { jncLang } from '../../src/lang/jnc/nodes.js';
+import { refDir } from './refsrc.js';
 
 /* 语料：外面那份 jancy 有就用它（大、真实），没有就退到仓库自带的用例 ——
    这样这把尺子在任何一份 checkout 上都跑得起来，能当闸门用。 */
-const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy';
+const EXTERNAL = refDir('jancy', 'JANCY');
 const CORPUS = existsSync(EXTERNAL) ? EXTERNAL : 'tests/jnc/cases';
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 80);

@@ -12,8 +12,9 @@ import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { readDcl } from '../../src/lang/jnc/declare.js';
 import { headOf } from '../../src/lang/jnc/adapt.js';
+import { refDir } from './refsrc.js';
 
-const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy';
+const EXTERNAL = refDir('jancy', 'JANCY');
 const CORPUS = existsSync(EXTERNAL) ? EXTERNAL : 'tests/jnc/cases';
 const limit = Number(process.argv.slice(2).find((a) => /^\d+$/.test(a)) ?? 80);
 

@@ -31,13 +31,14 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { refDir } from '../lib/refsrc.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const TCC = join(TCC_DIR, 'tcc');
 const CLI = join(root, 'src', 'core', 'cli.js');
-const SRC = process.env.TINYCC_SRC ?? '/Users/wurui/Documents/Lang/reference/tinycc';
+const SRC = refDir('tinycc', 'TINYCC_SRC');
 const OUT = join(tmpdir(), 'omni-selfobj');
 
 /* arm64-osx 的那一套目标文件（Makefile:201-240 的 `CORE_FILES` + arm64 三件 + tccmacho）。

@@ -33,13 +33,14 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { TCC_TARGETS, unitsOf } from './tcc-targets.js';
+import { refDir } from '../lib/refsrc.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const TCC_DIR = join(root, '.omni-cache', 'tcc-build');
 const CROSS = join(root, '.omni-cache', 'tcc-cross');
 const CLI = join(root, 'src', 'core', 'cli.js');
-const SRC = process.env.TINYCC_SRC ?? '/Users/wurui/Documents/Lang/reference/tinycc';
+const SRC = refDir('tinycc', 'TINYCC_SRC');
 const OUT = join(tmpdir(), 'omni-selfcross');
 const filters = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 

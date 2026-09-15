@@ -22,8 +22,9 @@ import { render } from '../../../src/core/frontend-engine/render.js';
 import { LexError } from '../../../src/core/frontend-engine/lexrules.js';
 import { formulaLang } from '../formula.js';
 import { holesOf } from '../../../src/core/frontend-engine/language.js';
+import { refDir } from '../../../tests/lib/refsrc.js';
 
-const GSL = '/Users/wurui/Documents/Lang/reference/gsl-shell';
+const GSL = refDir('gsl-shell', 'GSL_SRC');
 const show = process.argv.includes('--show');
 const lang = formulaLang;
 

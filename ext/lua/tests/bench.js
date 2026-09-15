@@ -22,10 +22,11 @@ import { render } from '../../../src/core/frontend-engine/render.js';
 import { luaLang } from '../lang.js';
 import { gslLang } from '../../gsl-shell/lang.js';
 import { lower, Refuse } from '../lower.js';
+import { refDir } from '../../../tests/lib/refsrc.js';
 
 const argv = process.argv.slice(2);
 const rounds = Number((argv.find((a) => a.startsWith('--n=')) ?? '').slice(4)) || 9;
-const GSL = '/Users/wurui/Documents/Lang/reference/gsl-shell';
+const GSL = refDir('gsl-shell', 'GSL_SRC');
 /** `--ab=DIR`：与另一份代码（git worktree 或拷贝）同进程配对比。 */
 const abDir = (argv.find((a) => a.startsWith('--ab=')) ?? '').slice(5) || undefined;
 

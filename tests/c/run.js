@@ -3,7 +3,8 @@
 //
 // 这一条与别的套件不同：**它有一个真的 oracle**。同一份 `.c` 交给我们和 tcc，两边比。
 // asy 那条线靠的是本机的 `asy`，这里靠的是本机编出来的 tcc
-// （`.omni-cache/tcc-build/tcc`，源码树在 /Users/wurui/Documents/Lang/reference/tinycc）。
+// （`.omni-cache/tcc-build/tcc`，源码树按 `$TINYCC_SRC` /
+//   `~/Documents/Lang/reference/tinycc` 找，见 tests/lib/refsrc.js）。
 //
 // 七组：
 //   1. `cpp/`     —— 预处理输出与 tcc 逐字节相同。**没有 .expected 文件**：

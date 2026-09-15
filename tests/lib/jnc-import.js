@@ -15,8 +15,9 @@
 
 import { readdirSync, statSync, existsSync, readFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
+import { refDir } from './refsrc.js';
 
-const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy';
+const EXTERNAL = refDir('jancy', 'JANCY');
 const CORPUS = existsSync(EXTERNAL) ? EXTERNAL : 'tests/jnc/cases';
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 100000);

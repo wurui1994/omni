@@ -19,8 +19,9 @@ import { jncSemLang } from '../../src/lang/jnc/scope.js';
 import { JNC_BUILTINS } from '../../src/lang/jnc/builtins.js';
 import { moduleIndex, moduleNames, archiveIndex, moduleStats } from '../../src/lang/jnc/modules.js';
 import { bind } from '../../src/core/frontend-engine/bind.js';
+import { refDir } from './refsrc.js';
 
-const EXTERNAL = '/Users/wurui/Documents/Lang/reference/jancy';
+const EXTERNAL = refDir('jancy', 'JANCY');
 const CORPUS = existsSync(EXTERNAL) ? EXTERNAL : 'tests/jnc/cases';
 const argv = process.argv.slice(2);
 const limit = Number(argv.find((a) => /^\d+$/.test(a)) ?? 80);

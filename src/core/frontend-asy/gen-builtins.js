@@ -9,15 +9,17 @@
 //
 //   node src/core/frontend-asy/gen-builtins.js [asymptote 源码目录] > builtins.tab
 //
-// 默认源码目录：$ASY_SRC，或 /Users/wurui/Documents/Lang/reference/asymptote。
+// 默认源码目录：`$ASY_SRC`，或 `~/Documents/Lang/reference/asymptote`（按家目录拼）。
 // 「实现在哪」那一列是**我们的**策略（这个文件里的 POLICY），不是从 asy 抄的：
 //   rmath = 核心方言白名单（转手宿主的数学库：C 走 libm、JS 走 Math.*）
 //   nope  = 还没做（报错里说清是哪一个）
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 
+/* 缺省路径按家目录拼 —— 仓库里不留任何人的家目录（`$ASY_SRC` / 命令行第一个实参先赢）。 */
 const src = process.argv[2] ?? process.env.ASY_SRC
-  ?? '/Users/wurui/Documents/Lang/reference/asymptote';
+  ?? join(homedir(), 'Documents', 'Lang', 'reference', 'asymptote');
 
 const POLICY = new Map([
   ['sqrt', ['rmath', 'sqrt']],
