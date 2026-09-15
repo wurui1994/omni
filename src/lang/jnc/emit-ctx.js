@@ -10,7 +10,7 @@
 
 import { headOf, named } from './adapt.js';
 import { nameText, allInChain, readDcl } from './declare.js';
-import { readDeclType, readAnonType } from './types.js';
+import { readDeclType, readAnonType, hasStatic } from './types.js';
 import { readSpecs } from './specs.js';
 import { resolveType, INT_BITS } from './resolve-type.js';
 import { emitType, tyKey } from './emit-type.js';
@@ -2267,9 +2267,10 @@ export function makeFnEnv(o) {
        */
       const isCurlyNode = h0 === 'var-decl-curly';
       /* `static` 的局部量是**另一条路**（第二十六刀）：一格模块级的槽 `名字$sN` + 一道
-         只跑一次的闸门 `名字$sN$1`。 */
+         只跑一次的闸门 `名字$sN$1`。`threadlocal` 落在同一条上（第二百五十八刀 ——
+         单线程下"每个线程一份"就是"一份"，decl_storage.rst:15）。 */
       const sp0 = readSpecs(vn.specs);
-      const isStatic = sp0 !== null && sp0.words.includes('static');
+      const isStatic = sp0 !== null && hasStatic(sp0.words);
       /* **体里的 `alias`**（`alias plus = add;` / `alias P = Point;`，第二百六十二刀）：
          它一个字都不发 —— "这个名字指着谁"在探子那一遍（`module-scan`）就登记好了，
          与体里的 typedef / enum / struct 同一条。 */

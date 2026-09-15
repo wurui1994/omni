@@ -32,48 +32,70 @@ export const SHAPE_WORDS = {
 };
 
 /**
- * **丢一个词就静默给错答案**的那几个修饰词（第二百五十七刀）。
+ * **丢一个词就静默给错答案**的那几个修饰词（第二百五十七刀；第二百五十八刀把 `threadlocal`
+ * 从这张表里**接掉了** —— 它现在是真接上的一族，见 `STATIC_WORDS`）。
  *
  * 这一层的规矩是"降不下来就说出来"，而修饰词这一族先前是**读到才算**：表里没有的词
- * 一句话不说地丢掉，于是 `threadlocal int n;` 降成一格普通局部量、`async int foo()`
- * 的返回类型从 `std.Promise*` 变成 `int`、`C1 weak* wc` 永远不为 null、
- * `disposable R r(1);` 的 `dispose` 一次也不调 —— 四条都**给了答案，而答案是错的**
- * （量出来的：tests/jnc/bad 那四份在规则那条路上原本"居然通过了"）。
+ * 一句话不说地丢掉，于是 `async int foo()` 的返回类型从 `std.Promise*` 变成 `int`、
+ * `C1 weak* wc` 永远不为 null、`disposable R r(1);` 的 `dispose` 一次也不调 ——
+ * 都**给了答案，而答案是错的**。
  *
- * 所以这张表记的不是"还没接"，是"这个词不许悄悄丢"。话与旧降级那一侧逐字同一句
- * （`src/core/frontend-jnc/lower.js:7629` 那一段），因为墙是同一道。
- *
- * `disposable` 分两句：写在**局部量**上是"还没接那一套作用域出口的钩子"，
- * 写在别处（类声明 / 字段 / 模块级的量）是**位置就不对** —— 两句混着说会认错人
- * （旧降级那一侧同一条，lower.js:7691-7698）。
+ * `kind` 分两种账（第二百五十八刀）：`acct` 是"我们还没接这一族"，`bad` 是"这句源码本身
+ * 就不对"（jancy 自己也报错）。`disposable` 正是这样分开的：写在**局部量**上是前者
+ * （还没接那一套作用域出口的钩子），写在别处是后者（位置就不对）。
  */
 export const MOD_NOPE = {
-  threadlocal: { any: '`threadlocal`（要线程本地存储）' },
   async: {
+    kind: 'acct',
     any: '`async` 函数 —— jancy 那儿它换掉返回类型（写出来的那个挪去 m_asyncReturnType，'
       + '函数真正回一格 `std.Promise*`，jnc_ct_TypeMgr.cpp:664-672），体还要拆成一台'
       + '能在 await 处停下再接着跑的状态机',
   },
   weak: {
+    kind: 'acct',
     any: '`weak` 指针 —— jancy 那儿它是另一种指针（ClassPtrKind_Weak / FunctionPtrKind_Weak / '
       + 'PropertyPtrKind_Weak，jnc_ct_DeclTypeCalc.cpp:667/676/688），GC 收了对象之后它自己变 null；'
       + '这一层没有 GC，收下不看会让 `if (p)` 永远为真',
   },
   disposable: {
+    kind: 'acct',
     local: '`disposable` 的局部量 —— jancy 那儿它给这一格开一个可弃作用域、出去的时候'
       + '（正常出去与抛出去都算）调它的 `dispose`（jnc_ct_Parser.cpp:2050-2068），'
       + '要作用域出口那一套钩子',
+    otherKind: 'bad',
     other: '`disposable` 只能写在**局部量**上（jancy 那边这个词只在那一档收，'
       + 'jnc_ct_Parser.cpp:2050-2068 —— 类自己的"可弃"是靠有一格 `dispose` 方法，'
       + 'disposable.rst 那句 "usually aliased to close/disconnect/…"）',
   },
 };
 
-/** 一个修饰词在这一处该说哪一句；不该拦答 null。`local` 是"这一格在函数体里"。 */
+/**
+ * **一格存储说明符说的是"同一格内存"**（decl_storage.rst:15）。`static` 是"程序一开头就
+ * 分好、到结束都在"；`threadlocal` 是"每个线程各有一份"—— 而这一层**从下到上只有一个线程**
+ * （四条腿没有一条能开线程），所以"每个线程一份"就是"一份"，两个词落地是同一件事。
+ *
+ * 这不是"收下不看"：`threadlocal` 与 `static` 的差别只在**多线程**时看得见，而这一层观测
+ * 不到那个差别（观测得到的那一天要连 `threadlocal once` 一起接，cflow_once.rst:41-46）。
+ * jancy 给它记的那两条限制照落（decl_storage.rst:15 那句 "cannot have initializers" /
+ * "cannot be aggregate"）—— 那两条是**源码的错**，不是我们没接。
+ */
+export const STATIC_WORDS = ['static', 'threadlocal'];
+
+/** 这一串修饰词里有没有"同一格内存"那个意思（`static` / `threadlocal`）。 */
+export function hasStatic(words) {
+  return (words ?? []).some((w) => STATIC_WORDS.includes(w));
+}
+
+/**
+ * 一个修饰词在这一处该说哪一句；不该拦答 null。`local` 是"这一格在函数体里"。
+ * 答的是 `{ say, kind }` —— `kind` 决定它进哪一本账（`acct` 还是 `bad`）。
+ */
 export function modNope(word, local) {
   const e = MOD_NOPE[word];
   if (e === undefined) return null;
-  return e.any ?? (local ? e.local : e.other);
+  if (e.any !== undefined) return { say: e.any, kind: e.kind ?? 'acct' };
+  if (local) return { say: e.local, kind: e.kind ?? 'acct' };
+  return { say: e.other, kind: e.otherKind ?? e.kind ?? 'acct' };
 }
 
 /**

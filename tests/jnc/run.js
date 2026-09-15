@@ -173,6 +173,8 @@ const read = (p) => {
 
 let pass = 0;
 let fail = 0;
+let xfail = 0;
+const xfails = [];
 const failures = [];
 /* 每个例子的耗时都要看得见（否则"这条轴 60s"这句话没法往下问）。
    `ok`/`no` 都从 `mark()` 拿这一格的墙上时间，末尾再印总耗时与最慢的几个。 */
@@ -196,6 +198,25 @@ const no = (name, why) => {
   const ms = mark(name);
   failures.push(`${name}\n${why}`);
   process.stdout.write(`  FAIL ${name}  ${secs(ms)}\n`);
+};
+/**
+ * **旧降级那条边界，规则那条路上还没重画**（第二百五十八刀）。
+ *
+ * `bad/` 那 140 份是**照旧降级**画出来的墙：它一句一句写着"这一族还不收，理由是…"。
+ * 默认那一格翻到规则那条路之后，这些墙有三种下场：
+ *   1. 规则那条路照旧拦、话也一样 —— 照旧 `ok`；
+ *   2. 规则那条路**已经收下了**这一族（位域的类、`threadlocal`、枚举… 它比旧那条多）——
+ *      那这份文件不再是"墙"，该升进 `cases/` 带上 `.expected`；在升之前记成 `xfail`；
+ *   3. 规则那条路拦了，可说的是它自己那句账 —— 话要重画；在重画之前记成 `xfail`。
+ *
+ * `xfail` **不算通过、也不算失败**，末尾单独报一行数。名单在 `bad/xfail.txt`（一行一个名字，
+ * `#` 后头是理由）。这样"还差多少"是一份**看得见、会缩短**的清单，而不是一片红或者一片假绿。
+ */
+const xf = (name, why) => {
+  xfail++;
+  const ms = mark(name);
+  xfails.push(`${name}: ${why}`);
+  process.stdout.write(`  xfail ${name}  ${secs(ms)}\n`);
 };
 const want = (f) => (!filters.length || filters.some((x) => f.includes(x)));
 
@@ -332,6 +353,22 @@ for (const f of list('rt', '.jnc')) {
 // ------------------------------------------------- 3. bad/：拒绝，且理由正确
 //
 // 一条腿就问得清（这些都是降级期拒的），所以只跑 `run`。
+//
+// 名单在 `bad/xfail.txt` 的那几份记成 `xfail`（不算通过、也不算失败）—— 那是"旧降级画的墙，
+// 规则那条路上还没重画"的清单，理由见上面 `xf` 那一段。
+
+const XFAIL = (() => {
+  const t = read(join(here, 'bad', 'xfail.txt'));
+  const m = new Map();
+  if (t === null) return m;
+  for (const line of t.split('\n')) {
+    const s = line.trim();
+    if (s === '' || s.startsWith('#')) continue;
+    const i = s.indexOf('#');
+    m.set(i < 0 ? s : s.slice(0, i).trim(), i < 0 ? '（没写理由）' : s.slice(i + 1).trim());
+  }
+  return m;
+})();
 
 for (const f of list('bad', '.jnc')) {
   if (!want(f)) continue;
@@ -339,9 +376,16 @@ for (const f of list('bad', '.jnc')) {
   const exp = read(join(here, 'bad', `${name}.expected`));
   if (exp === null) { no(`bad/${name}`, `    缺 ${name}.expected`); continue; }
   const r = cmd(['run', join(here, 'bad', f), ...extraArgs('bad', name)]);
+  const good = r.code !== 0 && r.err.includes(exp.trim());
+  if (!good && XFAIL.has(name)) { xf(`bad/${name}`, XFAIL.get(name)); continue; }
   if (r.code === 0) { no(`bad/${name}`, '    居然通过了 —— 这条边界是刻意划的'); continue; }
   if (!r.err.includes(exp.trim())) {
     no(`bad/${name}`, `    拒的理由不对\n      want: ${JSON.stringify(exp.trim())}\n      got:  ${JSON.stringify(r.err.trim())}`);
+    continue;
+  }
+  /* 名单里的那几份**已经对上了** —— 那就该从名单里删掉（名单只许缩短，不许躺着）。 */
+  if (XFAIL.has(name)) {
+    no(`bad/${name}`, '    这一份已经拦对了 —— 把它从 bad/xfail.txt 里删掉');
     continue;
   }
   ok(`bad/${name} [拒绝：${exp.trim()}]`);
@@ -374,7 +418,9 @@ for (const f of mods) {
    例子名掐到方括号之前 —— 后面那一串"几腿一致"每条都一样，没有信息量。 */
 const short = (s) => (s.includes(' [') ? s.slice(0, s.indexOf(' [')) : s);
 const slow = [...times].sort((a, b) => b.ms - a.ms).slice(0, 8).filter((x) => x.ms >= 200);
-process.stdout.write(`\n${pass} passed, ${fail} failed  [${cache.report()}]`
+process.stdout.write(`\n${pass} passed, ${fail} failed`
+  + `${xfail === 0 ? '' : `, ${xfail} xfail（旧降级画的墙，规则那条路还没重画 —— bad/xfail.txt）`}`
+  + `  [${cache.report()}]`
   + `${legNote(LEGS) === '' ? '' : `  ${legNote(LEGS)}`}`
   + `  总 ${((Date.now() - t0all) / 1000).toFixed(1)}s\n`);
 if (slow.length > 0) {

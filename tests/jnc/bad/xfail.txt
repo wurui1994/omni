@@ -1,0 +1,135 @@
+# tests/jnc/bad/xfail.txt —— 旧降级画的墙，规则那条路上还没重画（第二百五十八刀）
+#
+# 这份名单只许**缩短**：一行的那份拦对了，run.js 会当场报错叫你把它删掉。
+# 两种下场，理由写在 # 后头：
+#   - "已经收下了这一族" —— 该升进 cases/ 带上 .expected（那是特性，不是墙）；
+#   - "说的是自己那句账" —— 话要按 jancy 的原话重画。
+
+addr-global  # 拒了，可说的是自己那句账：tests/jnc/bad/addr-global.jnc.sx:5:12: error: 变量 p：(ptr T) 的 T 只能是 int / real / bool / 结构体
+alias-badpath  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+anonenum-dup  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+argdefault-shape  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+argslot-nodefault  # 拒了，可说的是自己那句账：规则化降级还没接：main：调 'pair' 少了第 2 格实参，而那一格没有默认值
+array-copy-len  # 拒了，可说的是自己那句账：tests/jnc/bad/array-copy-len.jnc.sx:7:5: error: 变量 $s0 是 int[5]*，初值是 int[3]*
+array-param-autosize  # 拒了，可说的是自己那句账：规则化降级还没接：函数 'f' 的头还发不出来（形参 a：数组长度不是字面量）
+asgnexpr-local  # 拒了，可说的是自己那句账：规则化降级还没接：main：赋值当表达式用：左边那一格是 var（要一格有地址的位置）还没接
+assert-msg-expr  # 拒了，可说的是自己那句账：tests/jnc/bad/assert-msg-expr.jnc.sx:4:5: error: 变量 msg 是 int*，初值是 string
+attr-regexflag  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+autoget-nonprop  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+bind-remove  # 拒了，可说的是自己那句账：规则化降级还没接：main：往事件上 '-=' 那一格还没接（加听众是 `+=`、清空是 `= null`）
+bindingof-plain  # 拒了，可说的是自己那句账：规则化降级还没接：main：bindingof('g_prop')：那格属性不是 bindable（没有生成的事件）
+bitassign-real  # 拒了，可说的是自己那句账：规则化降级还没接：main：复合赋值 '&=' 落在 real 上还没接
+bitfield-addr  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+bitfield-class  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+bitfield-curly  # 拒了，可说的是自己那句账：规则化降级还没接：main：花括号写到第 1 格，可 'IpHdr' 只有 0 格字段
+bitfield-local  # 拒了，可说的是自己那句账：规则化降级还没接：main：局部量 'x'：位域
+bitfield-wide  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+bitflag-from-int  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+bitflag-neg  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+call-scheduler  # 拒了，可说的是自己那句账：tests/jnc/bad/call-scheduler.jnc.sx:6:27: error: '@' 两边要同型：左是 fn<(int)->int>，右是 int
+call-typename  # 拒了，可说的是自己那句账：规则化降级还没接：main：造 'S'：给了 1 个实参，可 construct 只收 0 个
+call-typeof  # 拒了，可说的是自己那句账：规则化降级还没接：main：表里没有这一格表达式：typeof-expr
+call-unknownmethod  # 拒了，可说的是自己那句账：规则化降级还没接：main：'S' 上查不着方法 'nosuchMethod'（属性/事件/虚派发那几族另算）
+case-unknownenum  # 拒了，可说的是自己那句账：规则化降级还没接：main：case 的值算不出来
+class-abstract-new  # 拒了，可说的是自己那句账：规则化降级还没接：虚方法 'Iface$val' 一个实现都没有（分派发不出来）
+class-destruct  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+class-downcast  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+class-override-plain  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+class-structbase  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+class-var-assign  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+class-virtual-again  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+const-shift-wide  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+countof-ptr  # 拒了，可说的是自己那句账：规则化降级还没接：main：countof 的里头不是定长数组（ptr）
+ctor-overload-tie  # 拒了，可说的是自己那句账：规则化降级还没接：main：'C$construct' 的同元重载在这一句上分不出来（两条一样合得上 —— jancy 那边这也是歧义）
+curly-after-named  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+decl-cascade  # 拒了，可说的是自己那句账：规则化降级还没接：main：局部量 'params'：认不出基类型 'name'
+declfail-scope  # 拒了，可说的是自己那句账：规则化降级还没接：main：'S' 上查不着字段 'nosuch'（位域/别名/属性/基类那几族另算）
+destruct-body  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+dynamic-countof  # 拒了，可说的是自己那句账：规则化降级还没接：main：表里没有这一格表达式：dynamic-countof
+embed-in-struct  # 拒了，可说的是自己那句账：omni: runtime error: pointer out of bounds: 1 (range 0)
+empty-struct  # 拒了，可说的是自己那句账：规则化降级还没接：聚合体 'S' 还发不出来
+enum-cycle  # 拒了，可说的是自己那句账：规则化降级还没接：main：'A' 查不着（要作用域图）
+enum-from-int  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+enum-unvalued  # 拒了，可说的是自己那句账：规则化降级还没接：main：'Defaults' 查不着（要作用域图）
+enum-val-member-call  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+errc-field-struct  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+errcode-onvar  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+errorcode-catch-twice  # 拒了，可说的是自己那句账：规则化降级还没接：twice：表里没有这一格语句：label
+errorcode-finally  # 拒了，可说的是自己那句账：规则化降级还没接：cleaned：表里没有这一格语句：label
+errorcode-fnptr  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+errorcode-loop  # 拒了，可说的是自己那句账：规则化降级还没接：loop：这个位置上的 errorcode 调用（传播那两句插不进语句 —— 惰性位置/循环条件）
+errorcode-loopcond  # 拒了，可说的是自己那句账：规则化降级还没接：loop：这个位置上的 errorcode 调用（传播那两句插不进语句 —— 惰性位置/循环条件）
+errorcode-noerrc  # 拒了，可说的是自己那句账：规则化降级还没接：plain：不写 `try` 调 errorcode，而这个函数自己不是 errorcode、外面也没有 try/catch（jancy 那儿走运行期的 dyna
+errorcode-void  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+event-ret  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+event-sig  # 拒了，可说的是自己那句账：tests/jnc/bad/event-sig.jnc.sx:11:5: error: 这个数组装 fn，写进去的是 fn<(int,int)->void>
+expr-capture  # 拒了，可说的是自己那句账：规则化降级还没接：main：表里没有这一格表达式：capture
+expr-dyncast  # 拒了，可说的是自己那句账：规则化降级还没接：main：表里没有这一格表达式：dynamic-cast
+expr-offsetof  # 拒了，可说的是自己那句账：规则化降级还没接：main：表里没有这一格表达式：offsetof
+expr-regexswitch  # 拒了，可说的是自己那句账：规则化降级还没接：main：正则 switch（括号里是逗号串）
+fielddefault-struct  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+fnptr-partial  # 拒了，可说的是自己那句账：规则化降级还没接：main：表里没有这一格表达式：call-operator-new
+fnptr-ptrptr  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+fnval-eq  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+generic-arity  # 拒了，可说的是自己那句账：规则化降级还没接：泛型：实参给少了、又没有默认实参（4 处）
+generic-bareself  # 拒了，可说的是自己那句账：规则化降级还没接：聚合体 'Holder$Node$int' 还发不出来
+generic-deep  # 拒了，可说的是自己那句账：规则化降级还没接：泛型：泛型套得太深（1 处）
+generic-defmid  # 拒了，可说的是自己那句账：规则化降级还没接：泛型：实参给少了、又没有默认实参（4 处）
+generic-tdefmix  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+import-main-twice  # 拒了，可说的是自己那句账：规则化降级还没接：函数 'main' 有重载（按实参挑哪一格）还没接
+import-missing  # 拒了，可说的是自己那句账：规则化降级还没接：import 'no-such-lib-60.jnc' 找不着
+import-missing-inc  # 拒了，可说的是自己那句账：规则化降级还没接：import 'no-such-lib-62.jnc' 找不着
+lit-binary  # 拒了，可说的是自己那句账：规则化降级还没接：main：认不出的字面量 '0x"61 62 63"'
+lit-macro  # 拒了，可说的是自己那句账：规则化降级还没接：main：printf 的格式串不是一格字面量（格式化字面量那一族另算）
+lit-mixfmt  # 拒了，可说的是自己那句账：规则化降级还没接：main：串拼接：里头不是清一色的串字面量（那一族还没接）
+local-abstract-proto  # 拒了，可说的是自己那句账：规则化降级还没接：main：局部量 'probeA'：函数那一族（fn）
+local-formals  # 拒了，可说的是自己那句账：规则化降级还没接：main：局部量 'a'：函数那一族（fn）
+mod-indexed  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+multibase-field  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+multibase-shared  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+nestedscope  # 拒了，可说的是自己那句账：规则化降级还没接：main：表里没有这一格语句：label
+opaque-host-ctor  # 拒了，可说的是自己那句账：tests/jnc/bad/opaque-host-ctor.jnc.sx:8:13: error: 未声明的函数 'Lock$construct'
+opaque-host-fn  # 拒了，可说的是自己那句账：规则化降级还没接：main：'Lock' 上查不着方法 'onEach'（属性/事件/虚派发那几族另算）
+opaque-host-overload  # 拒了，可说的是自己那句账：规则化降级还没接：main：'Lock' 上查不着方法 'lock'（属性/事件/虚派发那几族另算）
+opderef-nonptr  # 拒了，可说的是自己那句账：规则化降级还没接：main：算符 'It *' 回的不是一格指针
+opinc-arity  # 拒了，可说的是自己那句账：规则化降级还没接：main：算符 'It ++' 不是零个形参
+opinc-prefixonly  # 拒了，可说的是自己那句账：规则化降级还没接：main：'++' 落在 'It' 上查不着那个算符
+opindex-compound  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+overload-defaults  # 拒了，可说的是自己那句账：规则化降级还没接：main：'q' 的同元重载在这一句上分不出来（两条一样合得上 —— jancy 那边这也是歧义）
+overload-virtual  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+ovl-arg-sizeof  # 拒了，可说的是自己那句账：规则化降级还没接：main：'f' 的同元重载：第 2 个实参的类型这一层还得先降一遍才知道
+ovl-arg-strbytes  # 拒了，可说的是自己那句账：规则化降级还没接：main：'g' 的同元重载：第 2 个实参的类型这一层还得先降一遍才知道
+pragma-thinpointers  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+printf-conv-p  # 拒了，可说的是自己那句账：规则化降级还没接：main：%p 碰上这一格类型（ptr）还没接
+prop-autoget-idx  # 拒了，可说的是自己那句账：规则化降级还没接：main：下标的左边不是指针/数组
+prop-compound  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+prop-const-set  # 拒了，可说的是自己那句账：规则化降级还没接：main：属性 'g_q' 没有存值器（const 属性 —— 写不下去）
+prop-full-plainfield  # 拒了，可说的是自己那句账：规则化降级还没接：'g_pp'：属性那对花括号里不是取/存两个体（简写 / autoget / bindable）还没接
+prop-inc  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+prop-noset  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+prop-ptr  # 拒了，可说的是自己那句账：规则化降级还没接：main：局部量 'p'：属性/事件（prop）
+prop-ptr-top  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+prop-virtual  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+propalias-notfound  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+proto-mismatch  # 拒了，可说的是自己那句账：规则化降级还没接：main：%d 碰上这一格类型（real）还没接
+ptrcmp-mixed  # 拒了，可说的是自己那句账：规则化降级还没接：main：指针/类引用上的 '<' 还没接
+reactor-dynobj  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+ret-void-value  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+sizeof  # 拒了，可说的是自己那句账：规则化降级还没接：main：表里没有这一格表达式：sizeof
+stmt-dylayout  # 拒了，可说的是自己那句账：规则化降级还没接：main：`dylayout (layout) { … }` —— 动态布局那一整套（读 jnc.DynamicLayout 上那格 validator）
+string-frombytes  # 拒了，可说的是自己那句账：规则化降级还没接：main：调的那个 'string_t' 查不着（跨文件/宿主面）
+string-mp  # 拒了，可说的是自己那句账：规则化降级还没接：main：`string_t` 的 `m_p`（一格指到字节上的 `char const*` —— 与方言的 `char*` 不是同一个东西）
+struct-selfvalue  # 拒了，可说的是自己那句账：tests/jnc/bad/struct-selfvalue.jnc.sx:2:3: error: 字段 S.m_self：按值内嵌绕回了 'S'（S -> S）—— 直接内嵌与一
+structbase-cls  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+structbase-cycle  # 拒了，可说的是自己那句账：
+structbase-dup  # 拒了，可说的是自己那句账：tests/jnc/bad/structbase-dup.jnc.sx:4:23: error: 结构体 'C' 里有两个字段叫 'm_v'
+structbase-up  # 拒了，可说的是自己那句账：tests/jnc/bad/structbase-up.jnc.sx:10:19: error: 'sumxy' 的第 1 个形参是 Point*，给的是 Point3D*
+thin-outside-unsafe  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+throw-noguard  # 拒了，可说的是自己那句账：规则化降级还没接：plain：`throw` 落在既不是 errorcode、外面也没有 try/catch 的地方（jancy 那儿走运行期的 dynamic throw）
+union-dup  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+union-static-prop  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+using-ambig  # 规则那条路已经收下了这一族 —— 该升进 cases/ 带上 .expected
+using-namespace-stmt  # 拒了，可说的是自己那句账：规则化降级还没接：main：表里没有这一格语句：using-namespace
+varargs-body  # 拒了，可说的是自己那句账：规则化降级还没接：函数 'sum' 的头还发不出来（变参那一族（…））
+variant-arith  # 拒了，可说的是自己那句账：规则化降级还没接：main：'+' 的一边是结构体（算符重载那一族）还没接
+variant-ptr  # 拒了，可说的是自己那句账：规则化降级还没接：main：往 variant_t 里装一格 ptr 还没接

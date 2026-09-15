@@ -1,0 +1,10 @@
+// `threadlocal` 的量**不许写初值**（decl_storage.rst:15 那句 "thread variables cannot have
+// initializers"）。这一条是**源码的错**，不是"我们还没接" —— 那一族第二百五十八刀已经接上了
+// （正面判据在 cases/200-threadlocal.jnc），所以这儿拦的是 jancy 自己也拦的那一句。
+//
+// 文档给的理由是"省掉线程启动时那笔开销"（初值要在每个线程起来的时候各跑一遍）。
+int main() {
+	threadlocal int n = 5;
+	printf("%d\n", n);
+	return 0;
+}

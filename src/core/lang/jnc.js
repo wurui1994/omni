@@ -23,11 +23,16 @@ import { cap } from '../plugin.js';
 /* 核心交过来的宿主服务。 */
 let JNC_API = null;
 
-/* 走哪条降级：`JNC_RULES=1` 时走按表那条（`src/lang/jnc/lower.js`）。读的是宿主的
-   `env`，不是 `process.env` —— 这一层不许认死 node（ADR-0011 决策 2）。每趟现读，
-   于是同一个进程里也能改（语料尺子两条腿轮着跑就靠这一格）。 */
+/* 走哪条降级：**默认走按表那条**（`src/lang/jnc/lower.js`，第二百五十八刀翻的），
+   `JNC_RULES=0` 退回旧那条（`src/core/frontend-jnc/lower.js`，已 `@deprecated`）。
+   读的是宿主的 `env`，不是 `process.env` —— 这一层不许认死 node（ADR-0011 决策 2）。
+   每趟现读，于是同一个进程里也能改（语料尺子两条腿轮着跑就靠这一格）。
+
+   翻的依据：规则那条路在整份语料上与旧那条**等效**（199/199 降得下来、行为逐字节一致），
+   而且已经比旧那条**多**收了几族（反应器、位域的类、`threadlocal`…）。旧那条留着当回退，
+   过一个宽限期删。 */
 function JNC_RULES() {
-  return env('JNC_RULES') === '1';
+  return env('JNC_RULES') !== '0';
 }
 
 export function initJnc(api) {

@@ -1,0 +1,40 @@
+// `threadlocal`（decl_storage.rst:15 那第三种存储类）—— 第二百五十八刀接上的一族。
+//
+// jancy 的原话：`static` 是"程序一开头就分好、到结束都在"，`threadlocal` 是"**每个线程各有
+// 一份**"。而这一层从下到上**只有一个线程**（四条腿没有一条能开线程），所以"每个线程一份"
+// 就是"一份" —— 两个词落地是同一件事（`src/lang/jnc/types.js` 的 `STATIC_WORDS`）。
+// 这不是"收下不看"：两者的差别只在多线程时看得见，而这一层观测不到那个差别。
+//
+// 文档给它记的那两条限制照落（那是**源码的错**，不是我们没接）：
+//   - "thread variables cannot have initializers" —— 写了初值当场报错；
+//   - "thread variables cannot be aggregate" —— 数组那一种当场报错。
+// 两条的墙在 bad/threadlocal-init.jnc 与 bad/threadlocal-array.jnc。
+//
+// `threadlocal once`（cflow_once.rst:41-46，每个线程跑一遍）照旧不收 —— 墙在 bad/ 那边，
+// 理由同：观测不到那个差别之前，那一格与普通 `once` 分不开。
+
+int next() {
+	threadlocal int n;
+	n++;
+	return n;
+}
+
+// 类里那格也一样（decl_storage.rst:32 说成员字段上这两个词的意思与上面一模一样）。
+class Counter {
+	threadlocal int m_hits;
+
+	int bump() {
+		m_hits++;
+		return m_hits;
+	}
+}
+
+int main() {
+	printf("%d %d %d\n", next(), next(), next());
+
+	Counter c1;
+	Counter c2;
+	// 一格存储，不跟着对象走 —— 两个对象加出来的是同一格数。
+	printf("%d %d\n", c1.bump(), c2.bump());
+	return 0;
+}

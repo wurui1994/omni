@@ -16,6 +16,7 @@ import {
   whileLines, doWhileLines, forLines, ifLines, switchLines, assertLines, srcTextOf,
   returnKind,
 } from './stmt-table.js';
+import { strLitFold } from './emit-expr.js';
 
 /**
  * 一条语句 → 几行。`ctx`：
@@ -130,7 +131,12 @@ export function emitStmt(n, ctx) {
     const text = srcTextOf(span);
     if (text === null) { ctx.acct('assert 的条件取不到源码文本'); return null; }
     const where = span.file.lineCol(span.start);
-    const msg = nm.words === undefined || nm.words === null ? null : ctx.litFold?.(nm.words) ?? null;
+    /* 洞的名字是 `msg`（节点表 :158），话要**折成一格串字面量**（`strLitFold`）——
+       先前这儿读的是 `nm.words`、折的是一个压根不存在的 `ctx.litFold`，于是
+       `assert(x == 4, "x should be four")` 后面那句话一声不响地丢了（rt/assert-fail.jnc
+       量出来的：jancy 的 `assertionFailure` 带话时要追一个 ` (%s)`，
+       jnc_ct_Parser.cpp:3798-3825）。 */
+    const msg = strLitFold(nm.msg ?? null);
     return assertLines(c, span.file.path, where.line, text, msg, pad);
   }
 

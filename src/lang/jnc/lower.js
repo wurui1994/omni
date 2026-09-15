@@ -29,7 +29,7 @@ import {
   globalLines, addrTaken, liftable, liftedType, arrayFromCurly, staticCtorFlag,
 } from './emit-global.js';
 import {
-  fnHead, readFormals, fnName, needsCtor, hasStaticCtor, overloadSuffix,
+  fnHead, readFormals, fnName, needsCtor, hasStaticCtor, hasWrittenCtor, overloadSuffix,
 } from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
@@ -67,24 +67,49 @@ function topItems(tree, out = [], ns = null) {
  * 词的来源两处：说明符那一串（`specs` 的前后两串）与**跟在 `*` 后面**的那一串（`ptr`），
  * 因为 `function weak* p` 那种写法词落在后面（type_ptr_function.rst 的 "function weak*"）。
  */
-function gateMods(node, local, acct) {
+function gateMods(node, local, acct, bad) {
   if (node === null || node === undefined || typeof node !== 'object') return;
   const h = headOf(node);
+  const say = (w) => {
+    const r = modNope(w, local);
+    if (r === null) return;
+    (r.kind === 'bad' ? bad : acct)(r.say);
+  };
   if (h === 'specs') {
-    for (const w of (readSpecs(node)?.words ?? [])) {
-      const say = modNope(w, local);
-      if (say !== null) acct(say);
-    }
+    for (const w of (readSpecs(node)?.words ?? [])) say(w);
   } else if (h === 'ptr') {
-    for (const w of modWords(named(node)?.mods)) {
-      const say = modNope(w, local);
-      if (say !== null) acct(say);
+    for (const w of modWords(named(node)?.mods)) say(w);
+  } else if (h === 'var-decl' || h === 'var-decl-curly') {
+    /**
+     * **`threadlocal` 那两条限制**（第二百五十八刀，decl_storage.rst:15）：
+     * "thread variables cannot have initializers" 与 "cannot be aggregate"。
+     * 两条都是**源码的错**（jancy 自己报），所以进 `bad` 那本账。
+     *
+     * 这儿只查得出**写法**那一半：带初值（`init` 那格洞 / `var-decl-curly` 整族）与
+     * 带 `[n]` 后缀的数组。"那个名字其实是个 struct/class"要解类型才知道，解类型在下一层
+     * （这一遍没有 env）—— 那一半记在这儿：单线程下它落成一格 `static` 是**对的**，
+     * 所以放过去只是比 jancy 宽，不会给错答案。
+     */
+    const nm0 = named(node);
+    if ((readSpecs(nm0?.specs)?.words ?? []).includes('threadlocal')) {
+      const dcls = h === 'var-decl-curly' ? [nm0?.dcl] : allInChain(nm0?.dcls, 'dcls-add', 'dcls');
+      if (h === 'var-decl-curly' || dcls.some((d) => headOf(d) === 'init')) {
+        bad('`threadlocal` 的量不许写初值（decl_storage.rst:15 那句 '
+          + '"thread variables cannot have initializers"）');
+      }
+      if (dcls.some((d) => (readDcl(headOf(d) === 'init' ? named(d)?.dcl : d)?.suffixes ?? [])
+        .some((s) => s.kind === 'array-suffix'))) {
+        bad('`threadlocal` 的量不许是聚合体（decl_storage.rst:15 那句 '
+          + '"thread variables cannot be aggregate"）—— 这一格是数组');
+      }
     }
   }
   if (!Array.isArray(node.items)) return;
   /* 函数体那一格里头才算"局部"。体是 `fn-def` 的 `body` 洞（节点表 :28）。 */
   const body = h === 'fn-def' ? (named(node)?.body ?? null) : null;
-  for (const c of node.items.slice(1)) gateMods(c, local || (body !== null && c === body), acct);
+  for (const c of node.items.slice(1)) {
+    gateMods(c, local || (body !== null && c === body), acct, bad);
+  }
 }
 
 /**
@@ -95,6 +120,15 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   const env = new Map();
   const accts = [];
   const acct = (why) => { if (!accts.includes(why)) accts.push(why); };
+  /**
+   * **两条账不是一回事**（第二百五十八刀）：
+   *   - `acct(…)` 是"**我们**还没接这一族" —— 报出来是 `规则化降级还没接：…`；
+   *   - `bad(…)` 是"**这句源码本身是错的**"（jancy 自己也报错）—— 原话报出去，不加前缀。
+   * 先前只有前一条，于是 `threadlocal int n = 1;`（jancy 那儿是 "thread variables cannot
+   * have initializers"）只能说成"还没接"，把"谁错了"说反了。
+   */
+  const bads = [];
+  const bad = (msg) => { if (!bads.includes(msg)) bads.push(msg); };
 
   /**
    * **`import "x.jnc"` 不是 #include，也不是"取一个模块对象"**（第六十刀）：它是"把那份文件的
@@ -231,7 +265,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     );
   }
 
-  gateMods(tree, false, acct);
+  gateMods(tree, false, acct, bad);
   collectEnumConsts(tree, env);
   /* **同名那一族**（第五十八刀）：基名 → 一串 `{ key, asig }`。两遍扫（聚合体那遍与顶层那遍）
      记在**同一张**表里 —— 类体里那句原型与体外那个定义是同一格，签名一样就不该多出一号。 */
@@ -936,7 +970,17 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   };
   const synth = new Map();                               // 类 → { bases, agg }
   {
-    const hasCtorOf = (cn) => methods.has(`${cn}$construct`) || synth.has(cn);
+    /**
+     * 基类那一格构造**叫得着吗**。要的是"这个模块里真有那个函数"，所以只认**带体的**那一格
+     * （`hasBody`）与这一遍合成出来的那一格。
+     *
+     * 只写了原型的那一种（`opaque class Lock { construct(); }`，mods/lib2.jnc）是
+     * **实现在宿主**的（abi.rst:60-70 那一套 JNC_BEGIN_CLASS 把它映到 C++ 的函数地址上），
+     * 这一层没有宿主面 —— 当它"有"就会发出一句 `(call sys$Lock$construct …)`，而那个名字
+     * 一个字都没发出去，方言当场报"未声明的函数"。真去 `new` 它那条边界另记
+     * （bad/opaque-host-ctor.jnc）。
+     */
+    const hasCtorOf = (cn) => methods.get(`${cn}$construct`)?.hasBody === true || synth.has(cn);
     /* **结构体那一侧也要合成**（第二百一十六刀，120-structctor.jnc 的 `Wrap`）：里头内嵌一格
        带构造的结构体，而它自己一个 `construct` 都没写 —— 不合成的话那一格停在零值上，
        而源码明明写着 `Inner.construct`。判据与类那一侧逐条同一份，只差 `this` 那一格的类型
@@ -981,10 +1025,24 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       }
       if (!grew) break;
     }
+    /**
+     * 这一格"要构造"的**唯一**由头是"基类那格构造在宿主那边"吗（mods/lib2.jnc 的
+     * `class RecursiveLock: Lock`）。是的话这一层什么都不发 —— 发不出来，也没什么可发：
+     * 那格构造的体在宿主里（abi.rst:60-70），而这份模块里谁也造不出这个对象
+     * （真去造那条边界在 bad/opaque-host-ctor.jnc）。所以它不是一笔账。
+     */
+    const hostBaseCtorOnly = (a) => {
+      const bs = aggBases.get(a.emitName) ?? [];
+      const hostBase = bs.some((b) => methods.has(`${b}$construct`)
+        && methods.get(`${b}$construct`).hasBody !== true);
+      if (!hostBase || bs.some(hasCtorOf)) return false;
+      return !hasWrittenCtor(a) && !hasStaticCtor(a) && !fieldInits.has(a.emitName)
+        && !hasEmbedded(a) && !hasMc(a) && !otherReason(a);
+    };
     for (const a of pending) {
       const cls = a.emitName;
       if (cls === null || synth.has(cls) || methods.has(`${cls}$construct`)) continue;
-      if (needsCtor(a, env)) {
+      if (needsCtor(a, env) && !hostBaseCtorOnly(a)) {
         acct(`合成 '${cls}' 的构造（事件 / bindable / static construct / 成员自己带构造那几族）还没接`);
       }
     }
@@ -1828,8 +1886,12 @@ export function lowerJncRules(tree0, diags, opts = {}) {
 
 
   /* 账先报、入口后查（次序要紧）：`main` 的体拼不出来时 `mainBody` 也是空的，先查入口就把
-     真正拦住的那几笔账盖成了"这份源码里没有 main"—— 那是假话。 */
-  if (accts.length > 0) {
+     真正拦住的那几笔账盖成了"这份源码里没有 main"—— 那是假话。
+
+     `bads`（源码本身错了）排在 `accts` 前头：一句真错常常连带出好几笔"还没接"，
+     先说错的那一句才不至于让人去接一族根本不该接的东西。 */
+  if (bads.length > 0 || accts.length > 0) {
+    for (const m of bads) diags.error(null, m);
     for (const w of accts) diags.error(null, `规则化降级还没接：${w}`);
     return '';
   }

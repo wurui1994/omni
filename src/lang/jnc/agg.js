@@ -23,9 +23,18 @@ import { chainOf, allInChain } from './declare.js';
 /** 访问标签（`public:` / `protected:`）。默认 public —— jancy 只有这两格。 */
 const ACCESS_DEFAULT = 'public';
 
-/** 一格成员声明里的存储词（挑出说明符里属于存储那一族的）。 */
+/**
+ * 一格成员声明里的存储词（挑出说明符里属于存储那一族的）。
+ *
+ * **`threadlocal` 在这儿就归成 `static`**（第二百五十八刀，decl_storage.rst:15）：两个词说的
+ * 都是"同一格内存"，差别只在"每个线程各有一份" —— 而这一层从下到上只有一个线程，
+ * 于是"每个线程一份"就是"一份"。归在读的这一处，往下十来个 `storage.includes('static')`
+ * 的落点一个字都不用改（也就漏不了）。
+ */
 function storageOf(words) {
-  return words.filter((w) => STORAGE[w] !== undefined);
+  return words
+    .filter((w) => STORAGE[w] !== undefined)
+    .map((w) => (w === 'threadlocal' ? 'static' : w));
 }
 
 /** `unit` / `unit-add` 那一串（体里的每一条声明），按位置走。 */

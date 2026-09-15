@@ -1,0 +1,12 @@
+// `threadlocal` 的量**不许是聚合体**（decl_storage.rst:15 那句 "thread variables cannot be
+// aggregate (e.g. class, struct, array etc)"）。同上：这是**源码的错**，那一族本身已经接上了
+// （cases/200-threadlocal.jnc）。
+//
+// 这一层查得出的是**写法**那一半（`[n]` 后缀的数组）：那个名字其实是 struct / class 的那一种
+// 要先解类型，而单线程下它落成一格 `static` 是对的 —— 放过去只是比 jancy 宽，不会给错答案
+// （记在 lower.js 的 `gateMods` 那一段）。
+int main() {
+	threadlocal int a[4];
+	printf("%d\n", a[0]);
+	return 0;
+}
