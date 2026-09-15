@@ -15,8 +15,8 @@
 
 import { headOf, named } from './adapt.js';
 import { chainOf, allInChain, readDcl } from './declare.js';
-import { readDeclType } from './types.js';
-import { readSpecs } from './specs.js';
+import { readDeclType, modNope } from './types.js';
+import { readSpecs, modWords } from './specs.js';
 import { resolveType } from './resolve-type.js';
 import { emitType } from './emit-type.js';
 import { collectEnumConsts } from './const-eval.js';
@@ -53,6 +53,38 @@ function topItems(tree, out = [], ns = null) {
     out.push({ it, ns });
   }
   return out;
+}
+
+/**
+ * **修饰词那道闸门**（第二百五十七刀）：整棵树走一遍，把 `MOD_NOPE` 里那几个词拦下来。
+ *
+ * 为什么是一遍**独立**的走：修饰词先前是"读到才算"—— 表里没有的词一句话不说地丢掉，
+ * 而那几个词丢掉之后**答案是错的**（`threadlocal` 变普通局部量、`async` 的返回类型变 int、
+ * `weak` 永远不为 null、`disposable` 的 `dispose` 一次不调）。逐格补拦要在十几处发码点
+ * 各加一句，漏一处就又静默了；走一遍树是**一处**，而且漏不了。
+ *
+ * `local` 是"这一格在函数体里"——`disposable` 的两句话按它分（写在别处是位置就不对）。
+ * 词的来源两处：说明符那一串（`specs` 的前后两串）与**跟在 `*` 后面**的那一串（`ptr`），
+ * 因为 `function weak* p` 那种写法词落在后面（type_ptr_function.rst 的 "function weak*"）。
+ */
+function gateMods(node, local, acct) {
+  if (node === null || node === undefined || typeof node !== 'object') return;
+  const h = headOf(node);
+  if (h === 'specs') {
+    for (const w of (readSpecs(node)?.words ?? [])) {
+      const say = modNope(w, local);
+      if (say !== null) acct(say);
+    }
+  } else if (h === 'ptr') {
+    for (const w of modWords(named(node)?.mods)) {
+      const say = modNope(w, local);
+      if (say !== null) acct(say);
+    }
+  }
+  if (!Array.isArray(node.items)) return;
+  /* 函数体那一格里头才算"局部"。体是 `fn-def` 的 `body` 洞（节点表 :28）。 */
+  const body = h === 'fn-def' ? (named(node)?.body ?? null) : null;
+  for (const c of node.items.slice(1)) gateMods(c, local || (body !== null && c === body), acct);
 }
 
 /**
@@ -199,6 +231,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     );
   }
 
+  gateMods(tree, false, acct);
   collectEnumConsts(tree, env);
   /* **同名那一族**（第五十八刀）：基名 → 一串 `{ key, asig }`。两遍扫（聚合体那遍与顶层那遍）
      记在**同一张**表里 —— 类体里那句原型与体外那个定义是同一格，签名一样就不该多出一号。 */

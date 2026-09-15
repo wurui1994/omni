@@ -32,6 +32,51 @@ export const SHAPE_WORDS = {
 };
 
 /**
+ * **丢一个词就静默给错答案**的那几个修饰词（第二百五十七刀）。
+ *
+ * 这一层的规矩是"降不下来就说出来"，而修饰词这一族先前是**读到才算**：表里没有的词
+ * 一句话不说地丢掉，于是 `threadlocal int n;` 降成一格普通局部量、`async int foo()`
+ * 的返回类型从 `std.Promise*` 变成 `int`、`C1 weak* wc` 永远不为 null、
+ * `disposable R r(1);` 的 `dispose` 一次也不调 —— 四条都**给了答案，而答案是错的**
+ * （量出来的：tests/jnc/bad 那四份在规则那条路上原本"居然通过了"）。
+ *
+ * 所以这张表记的不是"还没接"，是"这个词不许悄悄丢"。话与旧降级那一侧逐字同一句
+ * （`src/core/frontend-jnc/lower.js:7629` 那一段），因为墙是同一道。
+ *
+ * `disposable` 分两句：写在**局部量**上是"还没接那一套作用域出口的钩子"，
+ * 写在别处（类声明 / 字段 / 模块级的量）是**位置就不对** —— 两句混着说会认错人
+ * （旧降级那一侧同一条，lower.js:7691-7698）。
+ */
+export const MOD_NOPE = {
+  threadlocal: { any: '`threadlocal`（要线程本地存储）' },
+  async: {
+    any: '`async` 函数 —— jancy 那儿它换掉返回类型（写出来的那个挪去 m_asyncReturnType，'
+      + '函数真正回一格 `std.Promise*`，jnc_ct_TypeMgr.cpp:664-672），体还要拆成一台'
+      + '能在 await 处停下再接着跑的状态机',
+  },
+  weak: {
+    any: '`weak` 指针 —— jancy 那儿它是另一种指针（ClassPtrKind_Weak / FunctionPtrKind_Weak / '
+      + 'PropertyPtrKind_Weak，jnc_ct_DeclTypeCalc.cpp:667/676/688），GC 收了对象之后它自己变 null；'
+      + '这一层没有 GC，收下不看会让 `if (p)` 永远为真',
+  },
+  disposable: {
+    local: '`disposable` 的局部量 —— jancy 那儿它给这一格开一个可弃作用域、出去的时候'
+      + '（正常出去与抛出去都算）调它的 `dispose`（jnc_ct_Parser.cpp:2050-2068），'
+      + '要作用域出口那一套钩子',
+    other: '`disposable` 只能写在**局部量**上（jancy 那边这个词只在那一档收，'
+      + 'jnc_ct_Parser.cpp:2050-2068 —— 类自己的"可弃"是靠有一格 `dispose` 方法，'
+      + 'disposable.rst 那句 "usually aliased to close/disconnect/…"）',
+  },
+};
+
+/** 一个修饰词在这一处该说哪一句；不该拦答 null。`local` 是"这一格在函数体里"。 */
+export function modNope(word, local) {
+  const e = MOD_NOPE[word];
+  if (e === undefined) return null;
+  return e.any ?? (local ? e.local : e.other);
+}
+
+/**
  * 读一格声明的类型。`specsNode` 与 `dclNode` 都是 GLR 的树（还没规整那一种）。
  * 读不了答 `null`（调用方照旧走老路）。
  */
