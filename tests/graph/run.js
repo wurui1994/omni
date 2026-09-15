@@ -103,6 +103,11 @@ const CASES = [
   // ---- 第七个家族：**四条腿都跑得动的那个子集**（只有整数 / 函数 / if / while）----
   { name: 'lua+intmath', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/intmath.lua', toGraph: luaToGraph, expect: INTMATH },
   { name: 'go+intmath', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/intmath.go', toGraph: goToGraph, expect: INTMATH },
+  { name: 'vlang+intmath', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/intmath.v', toGraph: vlangToGraph, expect: INTMATH },
+  { name: 'nim+intmath', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/intmath.nim', toGraph: nimToGraph, expect: INTMATH },
+  { name: 'mojo+intmath', grammar: 'ext/mojo/mojo.grammar', file: 'ext/mojo/examples/intmath.mojo', toGraph: mojoToGraph, expect: INTMATH },
+  { name: 'awk+intmath', grammar: 'ext/awk/awk.grammar', file: 'ext/awk/examples/intmath.awk', toGraph: awkToGraph, expect: INTMATH },
+  { name: 'freebasic+intmath', grammar: 'ext/freebasic/freebasic.grammar', file: 'ext/freebasic/examples/intmath.bas', toGraph: fbToGraph, expect: INTMATH },
 ];
 
 /**
