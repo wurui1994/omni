@@ -21,6 +21,7 @@ import { hash16 } from '../host/hash.js';
 import { readSexpr } from '../sexpr/read.js';
 import { Diagnostics, SourceFile } from '../source/diag.js';
 import { readGrammar } from './grammar.js';
+import { isYaccPath, yaccToGrammarText } from './yacc.js';
 import { buildTable, tableText, tableFromText, TABLE_FORMAT } from './table.js';
 
 /**
@@ -29,12 +30,17 @@ import { buildTable, tableText, tableFromText, TABLE_FORMAT } from './table.js';
  * `hit` 是「这一趟有没有省掉构表」—— 门里拿它断言「第二趟必须命中」，不然缓存写坏了
  * 也看不出来（只会觉得慢）。
  *
+ * `.y`（bison/yacc）先转成我们那份 `(grammar …)` 文本再往下走（glr/yacc.js）：于是
+ * 缓存的键仍然是**转出来的**那段文本 —— `.y` 改一个字符键就变，而转换器改了口径
+ * （`TABLE_FORMAT` 不动的那种改法）也不会读到旧表，因为文本本身就变了。
+ *
  * 写盘是「先写临时文件再 rename」：几条腿并行跑时不会读到半截文件。
  */
 export function loadGrammarTable(path) {
   const diags = new Diagnostics();
-  const text = readText(path);
-  const g = readGrammar(readSexpr(new SourceFile(path, text), diags), diags);
+  const text = grammarTextOf(path, diags);
+  diags.throwIfErrors();
+  const g = readGrammar(readSexpr(new SourceFile(sourceLabel(path), text), diags), diags);
   diags.throwIfErrors();
   const dir = join(cacheRoot(), 'glr', hash16(`${TABLE_FORMAT}|${text}`));
   const cpath = join(dir, 'table.txt');
@@ -49,4 +55,22 @@ export function loadGrammarTable(path) {
   writeText(tmp, tableText(tb));
   rename(tmp, cpath);
   return { g, tb, hit: false, cachePath: cpath };
+}
+
+/**
+ * 一条路径 -> `(grammar …)` 的**文本**。`.y` 走转换器，别的照原样读。
+ *
+ * 单独摆出来是给 `omni glr y` 用的：那条命令印的就是这段文本，于是「印出来的」与
+ * 「建表用的」是同一份代码，不是同一份约定。
+ */
+export function grammarTextOf(path, diags) {
+  const raw = readText(path);
+  if (!isYaccPath(path)) return raw;
+  const text = yaccToGrammarText(new SourceFile(path, raw), diags);
+  return text === null ? '' : text;
+}
+
+/** 转出来的那份文本报错时印什么路径 —— 别让 caret 指着 `.y` 的行号却是转换后的正文。 */
+function sourceLabel(path) {
+  return isYaccPath(path) ? `${path} (转成 .grammar 之后)` : path;
 }

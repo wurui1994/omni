@@ -14,6 +14,9 @@
 //      前三条测的是机制，这一条测的是覆盖 —— 自己挑的片段挑不到的地方就是漏的地方。
 //   5. **缓存与构表等价**：构表是这条路上唯一的慢步（asy 那份 780ms），结果按语法文本
 //      内容寻址缓存在 tmp 里。跑两遍，第二遍必须命中缓存，且两遍的表逐字节相同。
+//   6. **别人写好的 .y 直接收**：bison/yacc 的 `.y`（含我们早期那份把词法也写在里头的混合
+//      方言）转成同一份 `(grammar …)` 文本再往下走。判据见第 5 节 —— 转出来的文本进快照，
+//      表走同一格缓存，有词法段的当场跑 `.cases`，折不动的模式必须当场报错。
 //
 // 每条都走 CLI（`omni glr-table` / `omni glr`），不是直接调库函数：这样同一条命令
 // 自举链里能让原生编译器再跑一遍，封闭 ABI 违规才有地方被抓住。
@@ -161,11 +164,23 @@ for (const file of grammars) {
     no(`cases/${name}`, `    missing cases/${name}.cases`);
     continue;
   }
-  const gpath = gpathOf(file);
+  const res = caseFailures(name, gpathOf(file), text);
+  if (res.bad.length === 0) ok(`cases/${name} [${res.counts}]`);
+  else no(`cases/${name}`, res.bad.join('\n'));
+}
+
+/**
+ * 一份 `.cases` 跑一遍，答 `{bad, counts}`（`bad` 空 = 全过）。
+ *
+ * 摆成函数是因为第 5 节（`.y`）要的是**同一件事**：同一份语料判据，喂进去的语法一份是
+ * `.grammar`、一份是 `.y`。判据只该有一处说法，不然两边会慢慢走散。
+ *
+ * 该过的那些**一条命令批着跑**：真实语言的表有几百个状态，建一次一两秒，逐条 spawn
+ * 的话这一条轴要跑几分钟。该拒的那几条数量少，还是逐条跑 —— 要的就是那句错误文本。
+ */
+function caseFailures(name, gpath, text) {
   const bad = [];
   const lines = text.split('\n');
-  // 该过的那些**一条命令批着跑**：真实语言的表有几百个状态，建一次一两秒，逐条 spawn
-  // 的话这一条轴要跑几分钟。该拒的那几条数量少，还是逐条跑 —— 要的就是那句错误文本。
   const okCases = [];
   let errCases = 0;
   for (let li = 0; li < lines.length; li++) {
@@ -201,8 +216,7 @@ for (const file of grammars) {
       }
     }
   }
-  if (bad.length === 0) ok(`cases/${name} [${okCases.length} accepted, ${errCases} rejected]`);
-  else no(`cases/${name}`, bad.join('\n'));
+  return { bad, counts: `${okCases.length} accepted, ${errCases} rejected` };
 }
 
 /** 批跑的输出按 `;; ==== 路径` 切开。只有一条输入时 CLI 不印那行，所以单独处理。 */
@@ -286,6 +300,73 @@ if (grammars.includes('asy.grammar')) {
       ok(`corpus/asy [${mods.length}/${mods.length} modules, one tree each] ${from}`);
     }
   }
+}
+
+// ------------------------------------------------- 5. `.y`（bison/yacc）转进来
+//
+// 「加一门语言 = 一份语法 + 一份映射标注」这句话要站得住，第一步是**别要求先手抄一遍语法**：
+// 参考树里躺着的是别人写好的 .y（asymptote 的 parser.y、bison 自带那一批），还有我们早期
+// 半成品定下的混合 .y（词法也写在同一份文件里）。glr/yacc.js 把它们转成我们那份
+// `(grammar …)` 文本，再走**同一条**路（readGrammar -> buildTable）。
+//
+// 三条判据，一条比一条硬：
+//   a. **转出来的文本对上快照**。这一条不是懒：`.y` 那一层的错（优先级级序、`%prec`、
+//      别名、正则折成词法项）在表上表现成"某个输入的分析结果变了"，那种症状没有根因。
+//      文本钉住了，根因就在这一份 diff 里。
+//   b. **表建得出来，而且第二遍命中缓存**。缓存键是**转出来的**那段文本 —— 这一条盯的是
+//      `.y` 与 `.grammar` 走的是同一格缓存，不是另开一条路。
+//   c. **有词法段的那份当场能吃源文本**（跑 `.cases`，与第 2 节同一个函数）；没有词法段的
+//      那份（真 bison 的词法在 `.l` 里）要**明说**这件事 —— 那不是失败，那是它该有的样子。
+//
+// 还有一份 ybad.y：正则里写了 `{n,m}`。它必须当场报"不支持"，不许折成一个近似的模式。
+
+const Y_DIR = join(here, 'y');
+const yFiles = readdirSync(Y_DIR).filter((f) => f.endsWith('.y')).sort()
+  .filter((f) => !filters.length || filters.some((x) => f.includes(x)));
+
+for (const file of yFiles) {
+  const name = basename(file, '.y');
+  const ypath = join(Y_DIR, file);
+  /* 快照里不许留绝对路径（转出来的头部注释与诊断都带着它） */
+  const unpath = (s) => s.split(ypath).join(`y/${file}`);
+
+  // ---- a) 转出来的文本（或那句诊断）
+  const cv = run(['glr', 'y', ypath]);
+  const body = `exit=${cv.code}\n${unpath(cv.code === 0 ? cv.out : cv.err)}`;
+  const snap = join(here, 'snapshots', `${name}.grammar`);
+  const want = read(snap);
+  if (update || want === null) {
+    writeFileSync(snap, body);
+    ok(`y/${name} [snapshot ${want === null ? 'created' : 'updated'}] ${body.split('\n').length - 1} lines`);
+  } else if (body !== want) {
+    no(`y/${name}`, `    转出来的语法变了；确实是有意改的话用 UPDATE=1 重写\n${firstDiff(want, body)}`);
+  } else {
+    ok(`y/${name} [== snapshots/${name}.grammar]`);
+  }
+  if (cv.code !== 0) continue;   // ybad.y 那一份到这儿就完了
+
+  // ---- b) 表建得出来，第二遍走缓存且逐字节相同
+  const a = runRaw(['glr', 'table', ypath, '--brief', '--verbose']);
+  const b = runRaw(['glr', 'table', ypath, '--brief', '--verbose']);
+  if (a.code !== 0 || b.code !== 0) no(`y-table/${name}`, `    glr table exit=${a.code}/${b.code}\n${a.err}${b.err}`);
+  else if (!b.err.includes('cache hit')) no(`y-table/${name}`, `    第二遍没有命中缓存 —— .y 那条路没有用上同一格缓存\n${b.err}`);
+  else if (a.out !== b.out) no(`y-table/${name}`, `    缓存读回来的表与构出来的不同\n${firstDiff(a.out, b.out)}`);
+  else ok(`y-table/${name} [${/(\d+) states/.exec(a.err) === null ? '?' : /(\d+) states/.exec(a.err)[1]} states，缓存命中且逐字节相同]`);
+
+  // ---- c) 有 .cases 就跑；没有就必须说清"这份语法没有词法段"
+  const cases = read(join(Y_DIR, `${name}.cases`));
+  if (cases === null) {
+    const one = join(dir, `${name}.in`);
+    writeFileSync(one, '\n');
+    const r = run(['glr', ypath, one]);
+    if (r.code === 0) no(`y-cases/${name}`, '    这份 .y 没有词法段，却把源文本吃下去了');
+    else if (!r.err.includes('has no (lex ...) form')) no(`y-cases/${name}`, `    拒得对，但理由不对\n      got: ${r.err.trim()}`);
+    else ok(`y-cases/${name} [没有词法段，说清了]`);
+    continue;
+  }
+  const res = caseFailures(`y-${name}`, ypath, cases);
+  if (res.bad.length === 0) ok(`y-cases/${name} [${res.counts}]`);
+  else no(`y-cases/${name}`, res.bad.join('\n'));
 }
 
 const rep = cache.report();

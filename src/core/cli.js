@@ -3362,6 +3362,12 @@ function main(argv) {
       stdout(cap('glr.run')(path, files.slice(1), rest.includes('--count')));
       return 0;
     }
+    // `.y`（bison/yacc）转成我们那份 `(grammar …)` 文本。`glr table` / `glr parse` 自己也
+    // 认 `.y`（glr/load.js 那一格转），这条只是把中间那份文本摊出来给人看。
+    case 'glr-y': {
+      stdout(cap('glr.y')(path));
+      return 0;
+    }
     default:
       throw new OmniError(`unknown command '${cmd}'\n${renderHelp(ROOT, [])}`);
   }

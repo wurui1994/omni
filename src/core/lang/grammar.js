@@ -11,7 +11,7 @@
 import { OmniError, Diagnostics, SourceFile } from '../source/diag.js';
 import { readText, exists } from '../host/native.js';
 import { dumpTable } from '../glr/table.js';
-import { loadGrammarTable } from '../glr/load.js';
+import { loadGrammarTable, grammarTextOf } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { printSexpr } from '../sexpr/print.js';
@@ -83,8 +83,23 @@ export function glrRunText(path, srcs, countOnly, log) {
   return out;
 }
 
+/**
+ * `omni glr y <FILE.y>`：把 bison/yacc 的 `.y` 转成 `(grammar …)` 印出来。
+ *
+ * 这条命令印的与建表读的是**同一段文本**（都从 `grammarTextOf` 来），所以它不是一个
+ * 「另写一份的调试打印」：转换器错了，这条命令的输出与那份表会一起变，快照当场变红。
+ */
+export function glrYaccText(path) {
+  if (!exists(path)) throw new OmniError(`no such file: ${path}`);
+  const diags = new Diagnostics();
+  const text = grammarTextOf(path, diags);
+  diags.throwIfErrors();
+  return text;
+}
+
 /** @param api `{ registerCap, log }` */
 export function registerGrammarLang(api) {
   api.registerCap('glr.table', (path, brief) => glrTableText(path, brief, api.log));
   api.registerCap('glr.run', (path, srcs, countOnly) => glrRunText(path, srcs, countOnly, api.log));
+  api.registerCap('glr.y', (path) => glrYaccText(path));
 }

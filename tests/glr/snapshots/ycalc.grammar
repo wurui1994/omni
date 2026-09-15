@@ -1,0 +1,26 @@
+exit=0
+;; 这份 (grammar …) 是从 y/ycalc.y 转出来的（omni glr y）—— 要改的是那份 .y，不是这儿。
+;; 动作只留名字：一条产生式一个节点，子节点按 RHS 位置排（见 glr/yacc.js 头部）。
+(grammar ycalc
+  (tokens NUM ID MINUS EOL "\n" "+" "*" "/" NEG "^" "(" ")")
+  (prec left MINUS "+")
+  (prec left "*" "/")
+  (prec nonassoc NEG)
+  (prec right "^")
+  (start input)
+  (rule input
+    (-> () (input))
+    (-> (input line) (input $1 $2)))
+  (rule line
+    (-> (EOL) (line $1))
+    (-> (exp EOL) (line $1 $2)))
+  (rule exp
+    (-> (NUM) (exp $1))
+    (-> (ID) (exp $1))
+    (-> (exp "+" exp) (exp $1 $2 $3))
+    (-> (exp MINUS exp) (exp $1 $2 $3))
+    (-> (exp "*" exp) (exp $1 $2 $3))
+    (-> (exp "/" exp) (prefer 2) (exp $1 $2 $3))
+    (-> (MINUS exp) (prec NEG) (exp $1 $2))
+    (-> (exp "^" exp) (exp $1 $2 $3))
+    (-> ("(" exp ")") (exp $1 $2 $3))))

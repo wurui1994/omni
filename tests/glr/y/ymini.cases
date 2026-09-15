@@ -1,0 +1,25 @@
+;; tests/glr/y/ymini.cases —— 一行一条：输入 ==> 树（或 !!> 该报的那句话）
+;;
+;; 树是转出来的语法给的**具体语法树**：一条产生式一个节点，标签就是 `{ … }` 里那个名字，
+;; 子节点按 RHS 位置排（记号自己也算一格）。所以这几行同时钉住三件事：
+;;   1. 混合方言那一段词法折得对（数、串、关键字、算符、三种要跳过的东西）；
+;;   2. 优先级与结合性照 bison 的口径落进了表（乘先于加、`^` 右结合、`%prec NEG` 最紧）；
+;;   3. 空产生式（`stmts : /* empty */`）还在。
+
+;; 空文件：只剩那条空产生式
+ ==> (prog (none))
+
+;; 乘先于加
+print 1 + 2 * 3; ==> (prog (more (none) (print print (bin (num 1) + (bin (num 2) * (num 3))) ;)))
+
+;; `^` 右结合，而 `%prec NEG` 比 `^` 还紧 —— 所以是 `(-2) ^ (3 ^ 4)`
+let x = -2 ^ 3 ^ 4; ==> (prog (more (none) (let let x = (bin (neg - (num 2)) ^ (bin (num 3) ^ (num 4))) ;)))
+
+;; 括号、串、`<=` 与 `<` 同级（左结合），行注释与块注释都跳掉
+print (x <= 1) < "s"; /* c */ ==> (prog (more (none) (print print (bin (paren ( (bin (var x) <= (num 1)) )) < (str "s")) ;)))
+
+;; 两句连着：`stmts` 是左递归，所以外层是第二句
+let a = 1; print a; ==> (prog (more (more (none) (let let a = (num 1) ;)) (print print (var a) ;)))
+
+;; `let` 后面必须是名字 —— 这条撞的是表，不是词法
+let 1 = 2; !!> unexpected NUM

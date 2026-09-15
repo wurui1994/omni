@@ -1,0 +1,52 @@
+exit=0
+;; 这份 (grammar …) 是从 y/ymini.y 转出来的（omni glr y）—— 要改的是那份 .y，不是这儿。
+;; 动作只留名字：一条产生式一个节点，子节点按 RHS 位置排（见 glr/yacc.js 头部）。
+(grammar ymini
+  (tokens NUM STR LET PRINT ID LE PLUS MINUS STAR SLASH CARET ASSIGN LT LPAREN RPAREN SEMI NEG)
+  (prec left LT LE)
+  (prec left PLUS MINUS)
+  (prec left STAR SLASH)
+  (prec right CARET)
+  (prec right NEG)
+  (start prog)
+  (lex
+    (skip (+ space))    ;; WS
+    (skip "//" (* (not "\n")))    ;; COMMENT
+    (block-comment "/*" "*/")    ;; BLOCK
+    (token NUM (+ digit) (? "." (+ digit)))
+    (token STR "\"" (* (or (not "\"\\") (seq "\\" any))) "\"")
+    (punct LET "let")
+    (punct PRINT "print")
+    (token ID (or alpha "_") (* (or alnum "_")))
+    (punct LE "<=")
+    (punct PLUS "+")
+    (punct MINUS "-")
+    (punct STAR "*")
+    (punct SLASH "/")
+    (punct CARET "^")
+    (punct ASSIGN "=")
+    (punct LT "<")
+    (punct LPAREN "(")
+    (punct RPAREN ")")
+    (punct SEMI ";"))
+  (rule prog
+    (-> (stmts) (prog $1)))
+  (rule stmts
+    (-> (stmts stmt) (more $1 $2))
+    (-> () (none)))
+  (rule stmt
+    (-> (LET ID ASSIGN expr SEMI) (let $1 $2 $3 $4 $5))
+    (-> (PRINT expr SEMI) (print $1 $2 $3)))
+  (rule expr
+    (-> (expr PLUS expr) (bin $1 $2 $3))
+    (-> (expr MINUS expr) (bin $1 $2 $3))
+    (-> (expr STAR expr) (bin $1 $2 $3))
+    (-> (expr SLASH expr) (bin $1 $2 $3))
+    (-> (expr CARET expr) (bin $1 $2 $3))
+    (-> (expr LT expr) (bin $1 $2 $3))
+    (-> (expr LE expr) (bin $1 $2 $3))
+    (-> (MINUS expr) (prec NEG) (neg $1 $2))
+    (-> (LPAREN expr RPAREN) (paren $1 $2 $3))
+    (-> (NUM) (num $1))
+    (-> (STR) (str $1))
+    (-> (ID) (var $1))))

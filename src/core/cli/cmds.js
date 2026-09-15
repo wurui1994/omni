@@ -274,6 +274,12 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
           brief: '解析并印 s-expr（多个输入只建一次表）',
           flags: [{ name: '--count', arity: 0, brief: '每个输入印一行摘要' }],
         },
+        {
+          name: 'y', key: 'glr-y', usage: 'FILE.y',
+          /* `table` / `parse` 两条自己也认 `.y`（load.js 那一格转）。这条是把**转出来的
+           * 那份文本**印出来 —— 语法哪里读歪了，看这一份比看表快。 */
+          brief: '把 bison/yacc 的 .y 转成 .grammar 印出来', flags: [],
+        },
       ],
     },
     {
