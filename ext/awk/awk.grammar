@@ -1,7 +1,7 @@
 ;; ext/awk/awk.grammar —— POSIX awk（+ gawk 常用的那几格扩展）
 ;;
-;; **状态：702 份 .awk 过 305，剩 61 处冲突。** 还没收工，但已经能用来读真 awk 了。
-;; 一路量下来那条曲线、以及还欠的两类，记在文件末尾"还欠什么"。
+;; **状态：702 份 .awk 过 625（89%），剩 75 处冲突。**
+;; 一路量下来那条曲线、以及还欠的那几类，记在文件末尾"还欠什么"。
 ;;
 ;; 语法照 **POSIX.1 那份公开的 awk 语法**写（IEEE Std 1003.1 的 "Grammar" 一节）。
 ;; 刻意**不从 gawk 的 awkgram.y 派生** —— 那份是 GPLv3，而这个仓库是 MIT；
@@ -23,16 +23,20 @@
 ;; 明说的三处不足（不猜）：
 ;;   1. `print a > b` 一律当**重定向**（awk 的规矩），`print (a > b)` 要自己加括号 ——
 ;;      与真 awk 一致；那条产生式上挂了 `(prefer 2)` 定胜负，见 print 那一段。
-;;   2. `func_name (` 与 `name (` 不分：POSIX 靠词法器"名字后面紧跟左括号"发一个
-;;      FUNC_NAME。我们不分，于是 `f (x)` 既可能是调用也可能是"f 接一个括号表达式"
-;;      —— 后者交给 GLR 分叉，真歧义会报出来。
-;;   3. gawk 的 `@include` / `@load` / 具名参数 / `|&` 协程不收。
+;;   2. 正则里的**计数区间** `{n,m}` 不收（我们的词法 DSL 里没有这一格），
+;;      所以 test/dfamb1.awk 那几份读不了 —— 那是词法 DSL 的边界，不是这份语法的。
+;;   3. 空语句（`{ ; }`）与 `for (print 9; 0;)` 这种把语句塞进 for 头的写法不收。
+;;
+;; 已经收了的（早先这儿写着"不收"，现在收了，留着这句是为了别再照旧版看）：
+;;   `f(x)` 与 `f (x)` 靠词法层的 `tight-after` 分开（LP 记号）；gawk 的 `@include` /
+;;   `@load` / `@namespace` / 间接调用 `@f()` / 强类型正则 `@/re/` / `|&` 协程 /
+;;   `switch` / `awk::name` / 数组的数组 `a[i][j]` 都收。
 ;;
 ;; 与 gawk 那份 .y 的对照（同一台机器）：那份 352 状态 / 203 条产生式 / 58 处冲突；
 ;; 这一份见 DESIGN 那一行。两份都能建表，判据是**同一批 .awk 语料**谁认得多。
 
 (grammar awk
-  (tokens NAME NUMBER STRING ERE FUNC_NAME BUILTIN GETLINE NL)
+  (tokens NAME NUMBER STRING ERE FUNC_NAME BUILTIN GETLINE NL LP)
 
   ;; **没有 (prec …) 声明** —— 优先级与结合性全在下面那串级联里（一级一个非终结符）。
   ;;
@@ -54,7 +58,11 @@
     ;; `function f(a)` 后面那个换行不收尾，`x = f(a)` 后面那个收尾 —— 两处上一个记号都是
     ;; `)`。所以这一格不能交给 auto-semi（那是 go 的形状），只能照 POSIX 那样在语法里
     ;; 一处一处说"这儿允许换行"（下面的 opt-nl）。
-    (token NL (+ (or "\n" (seq (set " \t\r") "\n"))))
+    ;;
+    ;; 一格 NL 吃掉**连着的空行与纯注释行**。为什么要吃注释行：注释被 skip 掉之后，它前后
+    ;; 那两个换行就成了两格 NL 记号，于是语法里每个"允许一个换行"的地方都得改成"允许若干
+    ;; 个"。空行与纯注释行不产生语句，这是词法层的事实，不该让语法去记（88 份卡在这儿）。
+    (token NL (+ (seq "\n" (* (set " \t\r")) (? (seq "#" (* (not "\n")))))))
 
     (token NUMBER (+ digit) (? "." (* digit)) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
     (token NUMBER "." (+ digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
@@ -67,7 +75,9 @@
     (token ERE (not-after NAME NUMBER STRING ERE ")" "]" "$" "++" "--")
       "/" (+ (or (not "/[\\\n") (seq "\\" any) (seq "[" (* (or (not "]\\") (seq "\\" any))) "]"))) "/")
 
-    (token NAME (or alpha "_") (* (or alnum "_")))
+    ;; 名字里可以带**命名空间**：gawk 的 `awk::INPLACE_SUFFIX`、`foo75::bar`。
+    ;; `::` 收进 NAME 记号里，不当算符 —— 它两边不许有空白，是名字的一部分（14 份）。
+    (token NAME (or alpha "_") (* (or alnum "_")) (? (seq "::" (or alpha "_") (* (or alnum "_")))))
     (keyword NAME GETLINE "getline")
     (keyword NAME BUILTIN
       "length" "substr" "index" "split" "sub" "gsub" "gensub" "match" "sprintf"
@@ -77,11 +87,24 @@
     (keyword NAME
       "BEGIN" "END" "function" "func" "if" "else" "while" "for" "do"
       "break" "continue" "next" "nextfile" "exit" "return" "delete" "in"
-      "print" "printf")
+      "print" "printf" "switch" "case" "default")
+
+    ;; **调用的左括号**。awk 的规矩是"名字后面**紧跟**左括号才是调用"（POSIX 那份语法
+    ;; 靠词法器发一个 FUNC_NAME 说的正是这件事）：`f(x)` 是调用，`f (x)` 是 `f` 与
+    ;; `(x)` 的**连接**。不分开的代价量过：102 份文件报"一个说 cat、一个说 call"的真歧义
+    ;; —— 那不是驱动器弱，是同一串输入真有两种读法，只有中间那格空白能分。
+    ;; 空白的事归词法层（这是第三门用 `tight-after` 的语言）。
+    (token LP (tight-after NAME BUILTIN GETLINE) "(")
 
     (op "**=" "^=" "+=" "-=" "*=" "/=" "%=" "==" "!=" "<=" ">=" "&&" "||" "++" "--"
-        ">>" "!~" "**" "~" "=" "<" ">" "!" "?" ":" ";" "," "|"
+        ">>" "!~" "**" "|&" "~" "=" "<" ">" "!" "?" ":" ";" "," "|" "@"
         "{" "}" "(" ")" "[" "]" "$" "+" "-" "*" "/" "%" "^"))
+
+  ;; 「左括号，紧跟不紧跟都行」—— 函数**定义**与内建函数两处用它：
+  ;; `function f (a)` 与 `length ($0)` 在 awk 里都合法，只有**用户函数调用**要求紧跟。
+  (rule lp
+    (-> ("(") $1)
+    (-> (LP) $1))
 
   ;; ---- 程序 ------------------------------------------------------------------
   ;;
@@ -136,12 +159,27 @@
     (-> (pattern action) (rule $1 $2))
     (-> (pattern) (rule $1))
     (-> (action) (rule (always) $1))
-    (-> ("function" NAME "(" params ")" opt-nl action) (fn $2 (params $*4) $7))
-    (-> ("func" NAME "(" params ")" opt-nl action) (fn $2 (params $*4) $7)))
-
+    (-> ("function" NAME lp params ")" opt-nl action) (fn $2 (params $*4) $7))
+    (-> ("func" NAME lp params ")" opt-nl action) (fn $2 (params $*4) $7))
+    ;; gawk 的 `@` 指令：`@include "x.awk"` / `@load "inplace"` / `@namespace "passwd"`。
+    ;; 指令名是普通名字（`include` / `load` / `namespace` 都不是关键字），载荷是一个串。
+    (-> ("@" NAME STRING) (directive $2 $3)))
   (rule pattern
     (-> (expr) (when $1))
     (-> (expr "," opt-nl expr) (range $1 $4)))
+
+  ;; switch 的分支表。分支体可以是空的（往下落），所以 `stmts` 那一格能空。
+  (rule sw-cases
+    (-> () ())
+    (-> (sw-cases sw-case) ($*1 $2)))
+
+  (rule sw-case
+    (-> ("case" sw-val ":" opt-terms stmts opt-terms) (case $2 (body $*5)))
+    (-> ("default" ":" opt-terms stmts opt-terms) (default (body $*4))))
+
+  (rule sw-val
+    (-> (expr) $1)
+    (-> (ERE) (re $1)))
 
   (rule params
     (-> () ())
@@ -162,6 +200,9 @@
   (rule stmt
     (-> (simple) $1)
     (-> (action) $1)
+    ;; gawk 的 `switch`。分支的值可以是常量、也可以是正则字面量（那是它的花样：
+    ;; `case /re/:` 拿 `$0` 去匹配）。分支体是一串语句，走同一个 `stmts`。
+    (-> ("switch" "(" expr ")" opt-nl "{" opt-terms sw-cases "}") (switch $3 (cases $*8)))
     (-> ("if" "(" expr ")" opt-nl stmt) (if $3 $6))
     (-> ("if" "(" expr ")" opt-nl stmt terms "else" opt-nl stmt) (if $3 $6 (else $10)))
     (-> ("if" "(" expr ")" opt-nl stmt "else" opt-nl stmt) (if $3 $6 (else $9)))
@@ -190,7 +231,7 @@
 
   (rule simple
     (-> (expr) (expr $1))
-    (-> ("delete" NAME "[" exprs "]") (delete $2 (subscript $*4)))
+    (-> ("delete" NAME subs) (delete $2 $*3))
     (-> ("delete" NAME) (delete $2))
     (-> (print) $1))
 
@@ -200,6 +241,13 @@
     (-> ("print") (print))
     (-> ("print" exprs) (print $*2))
     (-> ("printf" exprs) (printf $*2))
+    ;; **带括号的实参表**：`printf("%s\n", a, b)`。这不是"一个括号表达式"——
+    ;; 括号里有逗号，而表达式里没有逗号。所以要单开一条（51 份卡在这儿）。
+    ;; 括号里也允许换行（`opt-nl`），语料里 printf 的实参常常折行。
+    (-> ("printf" "(" exprs ")") (printf $*3))
+    (-> ("print" "(" exprs ")") (print $*3))
+    (-> ("printf" "(" exprs ")" redirect) (printf $*3 $5))
+    (-> ("print" "(" exprs ")" redirect) (print $*3 $5))
     (-> ("print" redirect) (print $2))
     (-> ("print" exprs redirect) (prefer 2) (print $*2 $3))
     (-> ("printf" exprs redirect) (prefer 2) (printf $*2 $3)))
@@ -207,7 +255,9 @@
   (rule redirect
     (-> (">" expr) (to $2))
     (-> (">>" expr) (append $2))
-    (-> ("|" expr) (pipe-to $2)))
+    (-> ("|" expr) (pipe-to $2))
+    ;; gawk 的**双向管道**（协程）：`print "x" |& NetService`
+    (-> ("|&" expr) (copipe-to $2)))
 
   ;; ---- 表达式：照 POSIX 那张级联表，一级一个非终结符 ------------------------------
   ;;
@@ -248,8 +298,14 @@
 
   (rule lvalue
     (-> (NAME) (name $1))
-    (-> (NAME "[" exprs "]") (index $1 (subscript $*3)))
+    (-> (NAME subs) (index $1 $*2))
     (-> ("$" prim) (field $2)))
+
+  ;; 下标可以**连着写**：gawk 的"数组的数组"（`data[key][$1] = $1`，20 份卡在这儿）。
+  ;; POSIX awk 只有 `a[i, j]`（那是把下标用 SUBSEP 拼成一个串），两种都收。
+  (rule subs
+    (-> ("[" exprs "]") ((subscript $*2)))
+    (-> (subs "[" exprs "]") ($*1 (subscript $*3))))
 
   (rule ternary
     (-> (orx) $1)
@@ -283,7 +339,9 @@
     (-> (cat "!=" cat) (bin "!=" $1 $3))
     ;; `cmd | getline [var]` —— 管道只在 getline 左边出现，所以摆在这一级就够
     (-> (cmp "|" GETLINE) (getline (cmd $1)))
-    (-> (cmp "|" GETLINE lvalue) (getline (cmd $1) (into $4))))
+    (-> (cmp "|" GETLINE lvalue) (getline (cmd $1) (into $4)))
+    (-> (cmp "|&" GETLINE) (getline (copro $1)))
+    (-> (cmp "|&" GETLINE lvalue) (getline (copro $1) (into $4))))
 
   ;; 连接：左结合，**右边那格不许以一元号起头**
   (rule cat
@@ -337,13 +395,18 @@
     (-> (STRING) (str $1))
     (-> (ERE) (re $1))
     (-> (NAME) (name $1))
-    (-> (NAME "[" exprs "]") (index $1 (subscript $*3)))
+    (-> (NAME subs) (index $1 $*2))
     (-> ("$" prim) (field $2))
     (-> ("(" expr ")") (paren $2))
     ;; `(i, j) in arr` —— 多下标的成员测试
     (-> ("(" exprs "," opt-nl expr ")" "in" NAME) (in-multi (key $*2 $5) $8))
-    (-> (NAME "(" args ")") (call $1 (args $*3)))
-    (-> (BUILTIN "(" args ")") (call $1 (args $*3)))
+    (-> (NAME LP args ")") (call $1 (args $*3)))
+    ;; gawk 的**间接调用**：`@the_function(a, b)` —— 函数名从一个变量里来。
+    ;; 这儿的 `(` 也要求紧跟（与直接调用同一条口径）。
+    ;; gawk 的**强类型正则常量**：`x = @/[a-z]/` —— 把一个正则当值传（12 份）。
+    (-> ("@" ERE) (rec $2))
+    (-> ("@" NAME LP args ")") (icall $2 (args $*4)))
+    (-> (BUILTIN lp args ")") (call $1 (args $*3)))
     (-> (BUILTIN) (call $1 (args)))
     ;; getline 的四种"不带管道"形状。带 `<` 那两条 `(prefer 2)`：`getline < "f"` 里那个
     ;; `<` 是重定向不是比较，两支都能归约时重定向赢（与真 awk 一致）。
@@ -358,7 +421,7 @@
 
 ;; ---- 还欠什么（量出来的，不是待办清单） ------------------------------------------
 ;;
-;; 301 状态 / 144 条产生式 / **61 处冲突**，702 份 .awk 过 **305**。一路量下来六刀：
+;; 346 状态 / 165 条产生式 / 75 处冲突，702 份 .awk 过 **625（89%）**。一路量下来八刀：
 ;;
 ;;   33/702  608 冲突  起点：`expr -> expr expr` 一条规则管连接 + 一整套优先级声明
 ;;   31/702  574       建表器升到 LALR(1)（同一刀对 asy 是 46 -> 0，对 awk 只值 34 处）
@@ -366,15 +429,28 @@
 ;;  100/702  159       BEGIN/END 必须带动作；项之间必须有收尾
 ;;  239/702   61       项与语句的表改成**右递归**（"不带收尾"只许出现在最后一格）
 ;;  305/702   61       开头允许连着几个 NL（一行注释出一个 NL，文件头两行注释就卡住了）
+;;  454/702   ~        **两格词法层的刀，一起值 149 份**：
+;;                     - `(token LP (tight-after NAME BUILTIN GETLINE) "(")` —— 名字后面
+;;                       **紧跟**左括号才是调用。这正是 POSIX 那份语法里 FUNC_NAME 的意思。
+;;                       102 份文件报的"一个说 cat、一个说 call"当场归零 —— 那不是驱动器弱，
+;;                       是同一串输入真有两种读法，只有中间那格空白能分。
+;;                     - NL 记号吃掉**纯注释行**：注释被 skip 掉之后它前后那两个换行成了
+;;                       两格 NL，语法里每个"允许一个换行"的地方都要改成"允许若干个"（88 份）。
+;;  591/702   ~       `printf("…", a, b)` 带括号的实参表（括号里有逗号，不是括号表达式）；
+;;                    gawk 的 `@load`/`@include`/`@namespace`、间接调用 `@f(…)`、
+;;                    双向管道 `|&`、数组的数组 `a[i][j]`
+;;  625/702  75       gawk 的 `switch`、命名空间名字 `awk::X`（`::` 收进 NAME 记号）、
+;;                    强类型正则常量 `@/re/`
 ;;
-;; 这条曲线里最要紧的一句：**降冲突的不是建表器，是把歧义从"靠优先级压"改成"写进语法"**。
-;; LALR 那一刀值 34 处，级联 + 右递归两刀值 513 处。优先级声明与级联**不该混用** ——
-;; 混了就是两套消歧规则互相拆台（`print "x" > "f"` 里那个 `>` 就是这么被砍掉一支的）。
-;; 这一条对后面 go / vlang / nim / c++ 比 LALR 本身更要紧。
+;; 这条曲线里最要紧的两句：
+;;   1. **降冲突的不是建表器，是把歧义从"靠优先级压"改成"写进语法"**。LALR 那一刀值
+;;      34 处，级联 + 右递归两刀值 513 处。优先级声明与级联**不该混用** —— 混了就是两套
+;;      消歧规则互相拆台（`print "x" > "f"` 里那个 `>` 就是这么被砍掉一支的）。
+;;   2. **只有空白能分的事，一定在词法层**。`f(x)` vs `f (x)` 是这一门最大的一笔账
+;;      （102 份），而它在语法层无解 —— 语法看不见空白。`tight-after` 这一格现在
+;;      nim / vlang / awk 三门都在用。
 ;;
-;; 剩下那 397 个是两类，都还没查：
-;;   1. `(bin …)` vs `(cat …)` 的真歧义 —— 连接与二元 `+ -` 在某些形状上仍有两种读法
-;;      （lib/bits2str.awk、lib/cliff_rand.awk）。
-;;   2. `cat` vs `call` —— `f (x)` 是调用还是"f 连接一个括号表达式"。真 awk 靠词法器分：
-;;      名字后**紧跟**左括号才发 FUNC_NAME。我们的词法器现在看不见"中间有没有空白"，
-;;      所以要么给它加一格（`(not-after …)` 那套机制的近亲），要么认这笔账。
+;; 剩下 77 份，最大的一类只有 6 份，而且**有一批是 gawk 自己的错误用例**
+;; （badassign1.awk 的 `$i++ = 3`、membug1.awk 的 `one != one = $1`、noeffect.awk）——
+;; 那些本来就不该过。真欠的是：空语句（`{ ; }`）、`for (print 9; 0;)` 这种把语句塞进
+;; for 头的写法、以及正则里带 `{n,m}` 区间的那几份（我们的词法 DSL 不收计数区间）。
