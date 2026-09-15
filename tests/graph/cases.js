@@ -34,6 +34,8 @@ export const RECORD = ['1', '5', '6'];
 export const INDEX = ['10', '30', '45'];
 export const LOOPEXIT = ['12', '6', '8'];
 export const INTMATH = ['15', '120'];
+/** conv：表示转换那一格 —— 目标是附属，写法是语言的事（`int` / `f64` / `CInt` / `Int`） */
+export const CONV = ['2', '3.5'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -76,6 +78,8 @@ export const CASES = [
   ...fam('loopexit', LOOPEXIT, ['go', 'lua', 'vlang', 'nim', 'mojo']),
   // 第七个家族：**四条腿都跑得动的那个子集**（只有整数 / 函数 / if / while）
   ...fam('intmath', INTMATH, ALL),
+  // 第八个家族：表示转换（五门语言的转换在树上**都是调用的形状** —— 靠名字表分开）
+  ...fam('conv', CONV, ['go', 'vlang', 'nim', 'mojo', 'freebasic']),
 ];
 
 /**

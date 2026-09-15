@@ -16,7 +16,7 @@
 
 import { NODES, declOf } from './nodes.js';
 import {
-  evalGraph, showValue, truthy, pick, field, setField, index, setIndex,
+  evalGraph, showValue, truthy, pick, field, setField, index, setIndex, convert,
 } from './eval.js';
 import { toSx } from './graph.js';
 import { PRIMS } from './prims.js';
@@ -161,6 +161,7 @@ function jsExpr(x) {
       return `([${items.map(jsExpr).join(', ')}])`;
     }
     case 'index-get': return `__index(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.index)})`;
+    case 'conv': return `__conv(${jsExpr(x.ins.value)}, ${JSON.stringify(x.attrs.to)})`;
     default: return `(() => { ${jsStmt(x)} })()`;
   }
 }
@@ -243,7 +244,7 @@ function jsStmt(x) {
 
 function jsLower(g) {
   const body = withExits(asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n'));
-  const source = '(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex) => {'
+  const source = '(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex, __conv) => {'
     + `\n${body}\n}`;
   return {
     text: source,
@@ -251,7 +252,8 @@ function jsLower(g) {
       const out = [];
       // eslint-disable-next-line no-new-func
       const f = new Function(`return ${source};`)();
-      f(out, showValue, truthy, pick, field, setField, index, setIndex);
+      f(out, showValue, truthy, pick, field, setField, index, setIndex,
+        (v, to) => convert(v, to, { show: showValue }));
       return { value: null, out };
     },
   };

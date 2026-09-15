@@ -15,12 +15,18 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
-  ops, binOf, retOf, branchOf, loopExit,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 
 const OPS = ops();
+/** 转换名 -> `conv` 的目标。go 的定宽整数与浮点各自那几格都往这四格收。 */
+const CONV = convs({
+  int8: 'int', int16: 'int', int32: 'int', int64: 'int',
+  uint: 'int', uint8: 'int', uint16: 'int', uint32: 'int', uint64: 'int',
+  float32: 'float', float64: 'float', string: 'str',
+});
 /** `fmt.Println` / `println` / `print` 都落 `prim print`（**print 不是节点**）。 */
 const PRINTS = new Set(['Println', 'Printf', 'Print', 'println', 'print']);
 
@@ -149,6 +155,10 @@ function toNode(x) {
       }
       const callee = tag(fn) === 'name' ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
+      // 转换（`int(x)` / `float64(x)`）在树上与调用**同形** —— 靠一张名字表分开
+      if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
+        return convOf(CONV.get(callee), argNodes[0]);
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     // 顶层的这几样在这一批里没有对应物（包、导入、类型声明）—— 丢掉，不猜。

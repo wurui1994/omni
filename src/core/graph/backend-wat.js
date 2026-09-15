@@ -51,6 +51,7 @@ const CAN = new Map([
   ['list-new', true], ['index-get', true], ['index-set', true],
   ['values', 'wasm 没有多值出端口的表示（要先定 carry 那一问的答案）'],
   ['pick', 'wasm 没有多值出端口的表示'],
+  ['conv', 'wasm 这一批只有 i64：`float` 那一格要 f64 与"两种数值类型"的算术'],
   ['scope-exit', 'wasm 没有 unwind：出口动作要先把 region 的出口显式化'],
   ['loop-exit', 'OIR 还没有带标签的 break（br 跳外层 block 当场报）—— 墙在 OIR 不在 wasm'],
 ]);

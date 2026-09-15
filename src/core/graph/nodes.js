@@ -6,7 +6,7 @@
 //
 // 之后按批往上加，每一批都要有一个新的例子家族做判据（`tests/graph/run.js`）：
 // 第二批多值（+2）、第三批 scope-exit（+1）、第四批记录（+3）、第五批列表与下标（+3）、
-// 第六批循环的早退（+1）—— 现在 **21 格**。
+// 第六批循环的早退（+1）、第七批表示转换（+1）—— 现在 **22 格**。
 //
 // ## 先说清哪几样**不给节点**（这是这一份最要紧的内容，四条全有出处）
 //
@@ -220,6 +220,17 @@ export const NODES = new Map([
   N('loop-exit', 'stat', [], {
     attrs: ['kind'], effects: ['may-early-exit'], outs: [],
     doc: 'break / continue（go/V/nim/mojo/awk）/ lua 只有 break / fb 的 Exit Do',
+  }),
+  // ---- 表示（1 格）：**目标类型是一格附属，不是端口** ------------------------
+  //
+  // go 的 12 格 `Op`（OCONV / OCONVIFACE / OCONVNOP …）塌成这一格。四门语言量过一遍：
+  // **转换在树上都是"调用"的形状**（`int(x)` / `CInt(x)` / `Int(x)`），
+  // 分开"调用"与"转换"靠的是一张**名字表**，而那张表是**语言的事**（`convs()` 在 fromtree）。
+  // 于是节点这一层只留一格附属 `to`（`int` / `float` / `str` / `bool`）——
+  // 具体是 `float64` 还是 `f64` 是那门语言的写法，不进图（与算符名同一条纪律）。
+  N('conv', 'expr', [{ name: 'value', sem: SEM.value }], {
+    attrs: ['to'],
+    doc: 'go 的 conv 一族 / V 的 `f64(x)` / nim 的 `int(x)` / freebasic 的 `CInt` 一族 / mojo 的 `Int(x)`',
   }),
 ]);
 

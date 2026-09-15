@@ -14,11 +14,16 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
-  ops, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 
 const OPS = ops({ '//': '/' });
+/** mojo 的转换名是**大写开头**的类型名（`Int` / `Float64` / `String`）。 */
+const CONV = convs({
+  Int: 'int', Int8: 'int', Int32: 'int', Int64: 'int',
+  Float32: 'float', Float64: 'float', String: 'str', Bool: 'bool',
+});
 const PRINTS = new Set(['print', 'println']);
 
 const many = (xs) => xs.map(toNode).flat();
@@ -122,6 +127,9 @@ function toNode(x) {
       const argNodes = args === undefined ? [] : many(kids(args));
       const callee = tag(fn) === 'n' ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
+      if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
+        return convOf(CONV.get(callee), argNodes[0]);   // `Int(x)` / `Float64(x)`
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     case 'import': case 'from-import': case 'struct': case 'trait': case 'alias': return [];

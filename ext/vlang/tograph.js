@@ -13,11 +13,16 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   tag, kids, leaf, part, threePart, elseOf,
-  ops, binOf, retOf, branchOf, loopExit, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 
 const OPS = ops();
+const CONV = convs({
+  i8: 'int', i16: 'int', i32: 'int', i64: 'int',
+  u8: 'int', u16: 'int', u32: 'int', u64: 'int',
+  f32: 'float', f64: 'float', string: 'str',
+});
 const PRINTS = new Set(['println', 'print', 'eprintln', 'dump']);
 
 const many = (xs) => xs.map(toNode).flat();
@@ -121,6 +126,9 @@ function toNode(x) {
       const argNodes = args === undefined ? [] : many(kids(args));
       const callee = tag(fn) === 'name' ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
+      if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
+        return convOf(CONV.get(callee), argNodes[0]);   // `int(x)` / `f64(x)`
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     case 'module': case 'import': case 'struct': case 'enum': case 'type-decl': return [];

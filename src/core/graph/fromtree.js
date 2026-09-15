@@ -74,6 +74,22 @@ export const OPS_COMMON = new Map([
 /** 一门语言的算符表 = 公共表 + 它自己那几格（`ops({ '~=': '!=', '..': 'concat' })`）。 */
 export const ops = (delta = {}) => new Map([...OPS_COMMON, ...Object.entries(delta)]);
 
+/**
+ * **转换名的公共表**：左边是各门语言写的名字，右边是 `conv` 那格附属 `to` 的四种取值。
+ * 量过一遍才这么写的：go / V / nim / mojo / freebasic 的转换在树上**全是"调用"的形状**
+ * （`int(x)` / `f64(x)` / `CInt(x)` / `Int(x)`）—— 所以"这是调用还是转换"只能靠一张
+ * **名字表**分，而那张表是**语言的事**。公共的只有 `int` / `float` / `str` / `bool` 四格。
+ */
+export const CONV_COMMON = new Map([
+  ['int', 'int'], ['float', 'float'], ['str', 'str'], ['bool', 'bool'],
+]);
+
+/** 一门语言的转换表 = 公共表 + 它自己那几格（`convs({ f64: 'float', i64: 'int' })`）。 */
+export const convs = (delta = {}) => new Map([...CONV_COMMON, ...Object.entries(delta)]);
+
+/** `conv` 那一格：目标是附属，值是端口。 */
+export const convOf = (to, value) => node('conv', { value }, { to });
+
 // ---- 固定搭法（**不是节点** —— 是节点的组合，只写一遍）--------------------------
 
 /**

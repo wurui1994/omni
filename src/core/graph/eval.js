@@ -164,6 +164,24 @@ export const setIndex = (obj, i, value) => {
   return null;
 };
 
+/**
+ * **表示转换**（`conv` 那一格）。目标只有四种：整数 / 实数 / 串 / 真假 ——
+ * 具体是 `float64` 还是 `f64` 是那门语言的写法，映射那一侧的名字表管，这儿不认。
+ * 两个后端共用（js 后端里那句 `__conv`）。
+ *
+ * `int` 是**截断**（向零）。这一条要明写：FB 的 `CInt` 是四舍五入、Scheme 的 `exact`
+ * 是取有理数 —— 谁要别的答案，由那门语言的映射自己再套一格（与真值观同一条纪律）。
+ */
+export const convert = (v, to, io) => {
+  switch (to) {
+    case 'int': return Math.trunc(Number(v));
+    case 'float': return Number(v);
+    case 'str': return (io?.show ?? showValue)(v);
+    case 'bool': return truthy(v);
+    default: throw new Error(`conv: 还没接这个目标：${to}`);
+  }
+};
+
 /** 一格 thunk（`lazy` / `body` 端口交出来的东西）。调度器用它切段与延后求值。 */
 const thunk = (x, env, io) => () => run(x, env, io);
 
@@ -259,11 +277,12 @@ function run(n, env, io) {
       (n.attrs.names ?? []).forEach((k, i) => { rec[k] = vals[i] ?? null; });
       return rec;
     }
-    case 'field-get': return field(arg('obj'), n.attrs.field);
-    case 'field-set': return setField(arg('obj'), n.attrs.field, arg('value'));
+    case 'field-get': return field(arg('obj'), n.attrs.field);    case 'field-set': return setField(arg('obj'), n.attrs.field, arg('value'));
     case 'list-new': return arg('items') ?? [];
     case 'index-get': return index(arg('obj'), arg('index'));
     case 'index-set': return setIndex(arg('obj'), arg('index'), arg('value'));
+    // 表示转换：目标在附属 `to` 上。**四家的写法不同，落的是同一格**
+    case 'conv': return convert(arg('value'), n.attrs.to, io);
     case 'ret': throw new Return(arg('value') ?? null);
     case 'loop-exit': throw new LoopExit(n.attrs.kind ?? 'break');
     case 'call': {

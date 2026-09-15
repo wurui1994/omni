@@ -14,12 +14,17 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
-  ops, binOf, retOf, branchOf, loopExit, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
 
 const OPS = ops({ div: '/', mod: '%', '&': 'concat' });
+const CONV = convs({
+  int8: 'int', int16: 'int', int32: 'int', int64: 'int',
+  uint: 'int', uint8: 'int', uint32: 'int', uint64: 'int',
+  float32: 'float', float64: 'float', '$': 'str',
+});
 const PRINTS = new Set(['echo', 'write', 'stdout']);
 
 const many = (xs) => xs.map(toNode).flat();
@@ -148,6 +153,10 @@ function toNode(x) {
       const argNodes = many(argKids);
       const callee = (tag(fn) === 'name' || tag(fn) === 'n') ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
+      // `int(x)` / `float(x)` 在树上与调用同形 —— 与对象构造那笔账同一笔，这一批按名字表判
+      if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
+        return convOf(CONV.get(callee), argNodes[0]);
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     case 'import': case 'include': case 'type-section': case 'pragma': return [];

@@ -15,11 +15,16 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, unquote, head,
-  counted, ops, binOf, retOf, branchOf,
+  counted, ops, convs, convOf, binOf, retOf, branchOf,
 } from '../../src/core/graph/fromtree.js';
 
 
 const OPS = ops({ mod: '%', '=': '=', '<>': '!=', '&': 'concat' });
+/** 转换名（全小写着查）。`CInt` 是四舍五入、图上那格是截断 —— 差别记在文件尾。 */
+const CONV = convs({
+  cint: 'int', clng: 'int', clngint: 'int', cbyte: 'int', cshort: 'int',
+  cdbl: 'float', csng: 'float', str: 'str', cbool: 'bool',
+});
 
 const many = (xs) => xs.map(toNode).flat();
 const nameOf = (x) => (tag(x) === 'n' ? leaf(kids(x)[0]) : leaf(x));
@@ -126,6 +131,11 @@ function toNode(x) {
     case 'call': {
       const [fn, args] = kids(x);
       const argNodes = args === undefined ? [] : many(kids(args));
+      // FB 的转换是**一族有名字的函数**（`CInt` / `CDbl` / `Str`）—— 关键字不分大小写
+      const callee = tag(fn) === 'n' ? String(leaf(kids(fn)[0])).toLowerCase() : null;
+      if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
+        return convOf(CONV.get(callee), argNodes[0]);
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     // 命令式调用（`f a, b`）：这一批只在"名字 + 实参"这一种形状上接
@@ -151,3 +161,5 @@ export function fbToGraph(tree) {
 //   2. `Type` / `Union` / 属性（`Property Get/Set`）/ `Gosub` 都不在这一批。
 //   3. 定宽整数与四种字符串表示丢掉了 —— 它们是**方言必须有"按宽度读写"**那笔账
 //      （SPEC §五第 1 项），要用起来是契约 `carry` 那一问的事。
+//   4. `CInt` 是**四舍五入**（到偶数），图上 `conv to=int` 是**截断** —— `examples/conv.bas`
+//      刻意用 7/3（两家都给 2）绕开那个差。真要对上，得由 FB 的映射自己再套一格 round。
