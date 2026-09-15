@@ -222,6 +222,7 @@ function condOk(cond, prevType) {
  *   keywords : Map<tokenType, Set<text>>
  *   stops    : 扫到就收工的那几段文本（`#!eof` 一族）
  *   autoSemi : `{type, text, after:Set}` 或 null —— 跨过换行时补的那一格（go 的 ASI）
+ *   indent   : `{nl, indent, dedent, brackets}` 或 null —— 缩进即块结构那一族（python / nim）
  */
 export function readLexSpec(node, diags) {
   const skips = [];
@@ -230,6 +231,7 @@ export function readLexSpec(node, diags) {
   const keywords = new Map();
   const stops = [];
   let autoSemi = null;
+  let indent = null;
   if (head(node) !== 'lex') {
     diags.error(node === null || node === undefined ? null : node.span, 'a lexer spec must be a (lex ...) form');
     return null;
@@ -267,6 +269,33 @@ export function readLexSpec(node, diags) {
       const nest = isAtom(it.items[3]) && it.items[3].value === 'nest';
       if (it.items.length > 3 && !nest) diags.error(it.span, "the only flag after (block-comment OPEN CLOSE) is 'nest'");
       blocks.push({ open: open.value, close: close.value, nest });
+      continue;
+    }
+    if (h === 'indent') {
+      /* `(indent NEWLINE INDENT DEDENT (brackets "()" "[]" "{}"))`
+       *
+       * python / nim / mojo 那一族：**行的缩进就是块结构**。词法器为此要一格栈（缩进列宽）
+       * 与一格计数（括号深度）—— 括号里面的换行是续行，不出记号（隐式行连接）。
+       * 这是这套词法器里唯一有"栈"的一格，所以它是显式声明的，不许悄悄开着。
+       *
+       * `brackets` 每一项是**两个字符**：开括号与闭括号。深度是按记号文本数的，
+       * 所以串里的括号不算（那时已经被 `(string …)` 收成一个记号了）。 */
+      const nm = [];
+      let brackets = [];
+      for (const x of it.items.slice(1)) {
+        if (isAtom(x)) { nm.push(x.value); continue; }
+        if (head(x) === 'brackets') {
+          for (const b of x.items.slice(1)) {
+            if (isStr(b) && b.value.length === 2) brackets.push({ open: b.value.slice(0, 1), close: b.value.slice(1, 2) });
+            else diags.error(b === null || b === undefined ? x.span : b.span, 'each (brackets …) entry is a two-character "开闭" pair');
+          }
+          continue;
+        }
+        diags.error(x === null || x === undefined ? it.span : x.span, 'unknown item in (indent …)');
+      }
+      if (nm.length !== 3) { diags.error(it.span, '(indent NEWLINE INDENT DEDENT [(brackets …)]) needs exactly three token names'); continue; }
+      if (indent !== null) diags.error(it.span, 'a lexer spec may have at most one (indent …) form');
+      indent = { nl: nm[0], indent: nm[1], dedent: nm[2], brackets };
       continue;
     }
     if (h === 'auto-semi') {
@@ -361,7 +390,7 @@ export function readLexSpec(node, diags) {
     diags.error(node.span, 'a lexer spec needs at least one (token ...), (string ...) or (op ...)');
     return null;
   }
-  return { skips, blocks, rules, keywords, stops, autoSemi };
+  return { skips, blocks, rules, keywords, stops, autoSemi, indent };
 }
 
 // ---- 扫描 ------------------------------------------------------------------
@@ -442,9 +471,18 @@ export function lexText(spec, file, diags) {
   let prevType = null;
   /** 上一个记号的结束位置 —— 自动分号要知道"这中间有没有跨过换行" */
   let prevEnd = 0;
+  /** 缩进栈与括号深度：只有 `(indent …)` 那一族用得到 */
+  const cols = [0];
+  let depth = 0;
 
-  for (;;) {
-    // ---- 1) 跳空白、注释。跳一次可能让另一条又能跳，所以要转到不动点。
+  const push = (type, text, at, end) => {
+    const span = mkSpan(file, at, end);
+    toks.push({ type, node: { kind: 'atom', value: text, span }, span });
+    prevType = type;
+  };
+
+  /** 跳空白、注释。跳一次可能让另一条又能跳，所以要转到不动点。 */
+  const skipTrivia = () => {
     for (;;) {
       const before = i;
       for (const terms of spec.skips) {
@@ -454,19 +492,77 @@ export function lexText(spec, file, diags) {
       for (const b of spec.blocks) {
         if (!src.startsWith(b.open, i)) continue;
         const start = i;
-        let depth = 1;
+        let d = 1;
         i += b.open.length;
-        while (i < src.length && depth > 0) {
-          if (b.nest && src.startsWith(b.open, i)) { depth++; i += b.open.length; continue; }
-          if (src.startsWith(b.close, i)) { depth--; i += b.close.length; continue; }
+        while (i < src.length && d > 0) {
+          if (b.nest && src.startsWith(b.open, i)) { d++; i += b.open.length; continue; }
+          if (src.startsWith(b.close, i)) { d--; i += b.close.length; continue; }
           i++;
         }
-        if (depth > 0) {
+        if (d > 0) {
           diags.error(mkSpan(file, start, src.length), 'unterminated block comment');
           failed = true;
         }
       }
-      if (i === before) break;
+      if (i === before) return;
+    }
+  };
+
+  for (;;) {
+    // ---- 1) 空白与注释
+    skipTrivia();
+
+    // ---- 1a') 缩进（python / nim / mojo 那一族）。**只在括号外面算** ——
+    //          括号里面换行是"续行"，那是这几门语言共同的规矩（隐式行连接）。
+    //          空行与纯注释行不出记号：量完缩进再跳一遍 trivia，又停在换行上就说明这一行是空的。
+    if (spec.indent !== null && depth > 0) {
+      /* 括号里面：换行是**续行**，一个记号都不发 —— 吃掉它与后面那截缩进就行。
+         这一格与 depth === 0 那一格是同一件事的两面，所以摆在一起。 */
+      for (;;) {
+        const before = i;
+        while (i < src.length) {
+          const c = src.charCodeAt(i);
+          if (c !== 10 && c !== 13 && c !== 32 && c !== 9) break;
+          i++;
+        }
+        skipTrivia();
+        if (i === before) break;
+      }
+    }
+    if (spec.indent !== null && depth === 0) {
+      let sawNL = false;
+      let col = 0;
+      for (;;) {
+        if (i >= src.length) break;
+        const c = src.charCodeAt(i);
+        if (c !== 10 && c !== 13) break;
+        if (c === 13) i++;
+        if (i < src.length && src.charCodeAt(i) === 10) i++;
+        sawNL = true;
+        col = 0;
+        while (i < src.length) {
+          const d = src.charCodeAt(i);
+          if (d === 32) { col++; i++; continue; }
+          if (d === 9) { col += 8 - (col % 8); i++; continue; }
+          break;
+        }
+        skipTrivia();
+      }
+      if (sawNL && i < src.length) {
+        push(spec.indent.nl, '\n', i, i);
+        if (col > cols[cols.length - 1]) {
+          cols.push(col);
+          push(spec.indent.indent, '', i, i);
+        } else {
+          /* 不要求精确对上某一层：一路弹到 <= col 为止。对不上的那种缩进
+             （`a` 4 格、`b` 2 格）在这儿只是少发一格 DEDENT，语法那边会报 —— 那句话
+             比"缩进对不上"具体（它会说这儿缺什么）。 */
+          while (cols.length > 1 && col < cols[cols.length - 1]) {
+            cols.pop();
+            push(spec.indent.dedent, '', i, i);
+          }
+        }
+      }
     }
 
     // ---- 1a) 自动分号（go 的 ASI）。**在跳过之后判**：跳掉的注释里那些换行也算跨过了。
@@ -550,6 +646,24 @@ export function lexText(spec, file, diags) {
     }
     toks.push({ type, node: { kind: 'atom', value: text, span }, span });
     prevType = type;
+    /* 括号深度按**记号文本**数：串里的括号早就被收成一个记号了，不会算进来。 */
+    if (spec.indent !== null) {
+      for (const b of spec.indent.brackets) {
+        if (text === b.open) { depth++; break; }
+        if (text === b.close) { if (depth > 0) depth--; break; }
+      }
+    }
+  }
+
+  /* 文件尾：补一格 NEWLINE（如果最后一条语句还没收尾）再把缩进栈弹空。
+     不补的话最后一个块收不了尾 —— 与 go 的 ASI 在文件尾补一格是同一件事。 */
+  if (spec.indent !== null && toks.length > 0) {
+    const end = src.length;
+    if (prevType !== spec.indent.nl && prevType !== spec.indent.dedent) push(spec.indent.nl, '\n', end, end);
+    while (cols.length > 1) {
+      cols.pop();
+      push(spec.indent.dedent, '', end, end);
+    }
   }
 
   return failed ? null : toks;

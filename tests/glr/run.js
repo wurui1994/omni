@@ -370,6 +370,38 @@ for (const file of yFiles) {
   else no(`y-cases/${name}`, res.bad.join('\n'));
 }
 
+// ------------------------------------------------- 6. 缩进即块结构（词法器那一格 indent）
+//
+// `.cases` 那套是**一行一条**的，而缩进这件事天生跨行 —— 所以这一节的语料是真文件
+// （`tests/glr/indent/*.in`），判据是树的快照。
+//
+// 四件事要证（语法文件头也写着）：缩进变深/变浅出 INDENT / DEDENT；**空行与纯注释行
+// 不出记号**；**括号里面的换行是续行**（不出记号）；文件尾把缩进栈弹空。
+// 前三件在 01-blocks.in 与 02-continuation.in 里各占一段。
+
+const IND_DIR = join(here, 'indent');
+if (!filters.length || filters.some((x) => 'indent'.includes(x))) {
+  const gpath = join(IND_DIR, 'indent.grammar');
+  for (const f of readdirSync(IND_DIR).filter((x) => x.endsWith('.in')).sort()) {
+    const name = basename(f, '.in');
+    const r = run(['glr', gpath, join(IND_DIR, f)]);
+    if (r.code !== 0) {
+      no(`indent/${name}`, `    glr parse exit=${r.code}\n${r.err}`);
+      continue;
+    }
+    const snap = join(here, 'snapshots', `indent-${name}.tree`);
+    const want = read(snap);
+    if (update || want === null) {
+      writeFileSync(snap, r.out);
+      ok(`indent/${name} [snapshot ${want === null ? 'created' : 'updated'}]`);
+    } else if (norm(r.out) !== norm(want)) {
+      no(`indent/${name}`, `    树变了；确实是有意改的话用 UPDATE=1 重写\n      want: ${norm(want)}\n      got:  ${norm(r.out)}`);
+    } else {
+      ok(`indent/${name} [== snapshots/indent-${name}.tree]`);
+    }
+  }
+}
+
 const rep = cache.report();
 process.stdout.write(`\n${pass} passed, ${fail} failed${rep === '' ? '' : `  （${rep}）`}\n`);
 

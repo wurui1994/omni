@@ -1,0 +1,10 @@
+(prog
+  (set x (num 1))
+  (def
+    f
+    (params a b)
+    (block
+      (set y (add (name a) (name b)))
+      (if (name y) (block (set z (num 2))))
+      (set y (name z))))
+  (set x (call f (args (num 1) (num 2)))))

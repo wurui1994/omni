@@ -185,6 +185,12 @@ export function readGrammar(nodes, diags) {
       if (lexSpec.autoSemi !== null && !terms.has(lexSpec.autoSemi.type)) {
         err(top, `(auto-semi ...) inserts ${lexSpec.autoSemi.type}, which is not a terminal of this grammar`);
       }
+      /* 缩进那三格同理：它们是词法器发的记号，语法接不住就当场报。 */
+      if (lexSpec.indent !== null) {
+        for (const t of [lexSpec.indent.nl, lexSpec.indent.indent, lexSpec.indent.dedent]) {
+          if (!terms.has(t)) err(top, `(indent ...) emits ${t}, which is not a terminal of this grammar`);
+        }
+      }
     }
   }
   return { name, terms, nonterms, rules, start, prec, lex: lexSpec };
