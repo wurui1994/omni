@@ -141,8 +141,14 @@
     (-> ("type" type-spec) (typedecl $2))
     (-> ("type" "(" type-specs ")") (typedecl $*3)))
 
+  ;; `type Hash [HashSize]byte` 与 `type Pair[T any] struct{…}` 在读到 `[` 时分不开：
+  ;; 前者是**定长数组类型**，后者是**类型参数表**。两棵树都合法，所以这是真歧义 ——
+  ;; Go 自己的分析器也是靠一条启发式判的（parser.go 的 typeDecl）。我们不猜"哪个更像"，
+  ;; 而是**声明一个偏好**：数组那一支 `(prefer 1)`。偏好只在两棵树都成立时定胜负，
+  ;; 别的地方驱动器照旧不猜（见 driver.js 头上那段）。20 份文件报的正是这一句歧义，
+  ;; 而语料里 `type X [N]T` 比 `type X[T any] …` 常见得多。
   (rule type-spec
-    (-> (IDENT type) (tspec $1 $2))
+    (-> (IDENT type) (prefer 1) (tspec $1 $2))
     (-> (IDENT "=" type) (talias $1 $3))
     (-> (IDENT type-params type) (tspec $1 (tparams $*2) $3)))
 
@@ -170,8 +176,13 @@
     (-> ("(" params ")") (recv $*2)))
 
   ;; 泛型的类型参数表：`[T any]` / `[K comparable, V any]`
+  ;; 类型参数表**不许是空的**。`params` 那一格能推出空串，于是 `type readBuf []byte` 里
+  ;; 那个 `[]` 既是"空的类型参数表"、又是切片类型的头 —— 同一串输入两棵树，143 份文件
+  ;; 报的正是 "一个说 tspec、一个说 tspec"（两棵树同形，只差怎么分组）。
+  ;; Go 的规范里类型参数表本来就至少一格，所以这不是取巧，是照规范收紧。
   (rule type-params
-    (-> ("[" params "]") $2))
+    (-> ("[" param-list "]") $2)
+    (-> ("[" param-list "," "]") $2))
 
   (rule signature
     (-> ("(" params ")") (sig (in $*2)))
@@ -194,7 +205,18 @@
     (-> (type) (p $1))
     (-> (IDENT type) (p $2 (name $1)))
     (-> ("..." type) (p $2 variadic))
-    (-> (IDENT "..." type) (p $3 (name $1) variadic)))
+    (-> (IDENT "..." type) (p $3 (name $1) variadic))
+    ;; **类型参数的约束**（1.18）：`[T ~int]`、`[S ~[]T]`、`[T int | string]`。
+    ;; 形参表这一格与类型参数表共用（Go 自己的分析器也是），所以约束要收在这儿。
+    ;; 只加"带 `~`"与"带 `|`"这两种形状 —— 光一个 `type` 的那一支上面已经有了，
+    ;; 再从 `type-term` / `type-set` 走一遍就是同一棵树两条路（量过：那样净掉 5 份）。
+    (-> (IDENT "~" type) (p (approx $3) (name $1)))
+    (-> (IDENT cunion) (p $2 (name $1))))
+
+  ;; 至少带一个 `|` 的类型集 —— 见 param 那段注释里"为什么不直接用 type-set"
+  (rule cunion
+    (-> (type-term "|" type-term) (union $1 $3))
+    (-> (cunion "|" type-term) (union $1 $3)))
 
   ;; ---- 类型 ------------------------------------------------------------------
 
@@ -339,19 +361,23 @@
     (-> ("switch" h-simple ";" "{" cases "}") (switch (init $2) $*5))
     (-> ("switch" h-simple ";" h-expr "{" cases "}") (switch (init $2) (tag $4) $*6))
     ;; 类型 switch：`x.(type)` 只在这儿合法，所以单列
-    (-> ("switch" h-primary "." "(" "type" ")" "{" cases "}") (tswitch (subject $2) $*8))
-    (-> ("switch" IDENT ":=" h-primary "." "(" "type" ")" "{" cases "}") (tswitch (bind $2) (subject $4) $*10))
-    (-> ("switch" h-simple ";" h-primary "." "(" "type" ")" "{" cases "}") (tswitch (init $2) (subject $4) $*10))
-    (-> ("switch" h-simple ";" IDENT ":=" h-primary "." "(" "type" ")" "{" cases "}") (tswitch (init $2) (bind $4) (subject $6) $*12)))
+    (-> ("switch" h-primary "." "(" "type" ")" "{" tcases "}") (tswitch (subject $2) $*8))
+    (-> ("switch" IDENT ":=" h-primary "." "(" "type" ")" "{" tcases "}") (tswitch (bind $2) (subject $4) $*10))
+    (-> ("switch" h-simple ";" h-primary "." "(" "type" ")" "{" tcases "}") (tswitch (init $2) (subject $4) $*10))
+    (-> ("switch" h-simple ";" IDENT ":=" h-primary "." "(" "type" ")" "{" tcases "}") (tswitch (init $2) (bind $4) (subject $6) $*12)))
 
   (rule cases
     (-> () ())
     (-> (cases case) ($*1 $2))
     (-> (cases ";") $1))
 
-  ;; `case` 后面既可能是表达式表（普通 switch）也可能是类型表（类型 switch）——
-  ;; 两者在语法上分不开（`case int:` 里 `int` 既是标识符也是类型名），所以收成一条
-  ;; `case-items`，谁是类型留给语义层。
+  ;; 普通 switch 的 `case` 后面是**表达式表**。类型 switch 那一路走下面的 `tcases`。
+  ;;
+  ;; 头一版把两者收成同一条 `case-item`（"谁是类型留给语义层"），代价量过：`case *T:`
+  ;; 同时是"指针类型"与"对 T 取值"，`case []T:` 同时是切片类型与……于是 58 份文件报
+  ;; "一个说 deref、一个说 ptr" 的真歧义，而 400 多份长文件的并行栈也是这么攒起来的。
+  ;; 分开两条非终结符就没了 —— **语法位置本来就分得开**（`switch x.(type)` 与 `switch x`
+  ;; 是两条不同的产生式），不必也不该把这件事推给语义层。
   (rule case
     (-> ("case" case-items ":" stmts) (case (items $*2) (body $*4)))
     (-> ("default" ":" stmts) (default (body $*3))))
@@ -361,15 +387,22 @@
     (-> (case-items "," case-item) ($*1 $3)))
 
   (rule case-item
-    (-> (expr) $1)
-    (-> ("*" type) (ptr $2))
-    (-> ("[" "]" type) (slice $3))
-    (-> ("map" "[" type "]" type) (map $3 $5))
-    (-> ("chan" type) (chan $2))
-    (-> ("<-" "chan" type) (chan-recv $3))
-    (-> ("func" signature) (fntype $2))
-    (-> (interface-type) $1)
-    (-> (struct-type) $1))
+    (-> (expr) $1))
+
+  ;; ---- 类型 switch 的分支：`case` 后面是**类型表** -----------------------------------
+
+  (rule tcases
+    (-> () ())
+    (-> (tcases tcase) ($*1 $2))
+    (-> (tcases ";") $1))
+
+  (rule tcase
+    (-> ("case" tcase-items ":" stmts) (case (items $*2) (body $*4)))
+    (-> ("default" ":" stmts) (default (body $*3))))
+
+  (rule tcase-items
+    (-> (type) ($1))
+    (-> (tcase-items "," type) ($*1 $3)))
 
   (rule select-stmt
     (-> ("select" "{" comms "}") (select $*3)))
@@ -452,6 +485,9 @@
     (-> (primary "." IDENT) (sel $1 $3))
     (-> (primary "." "(" type ")") (assert $1 $4))
     (-> (primary "[" expr "]") (index $1 $3))
+    ;; 泛型实例化的实参也可以是"一看就不是表达式"的类型：`TypeFor[func(string)]()`、
+    ;; `TypeAssert[[]bool](v)`、`New[[200]byte](a)`（23 份）。判据同 nx-type 那一段。
+    (-> (primary "[" nx-type "]") (tinst $1 $3))
     (-> (primary "[" exprs "," expr "]") (index $1 $*3 $5))
     (-> (primary "[" opt-expr ":" opt-expr "]") (slice3 $1 $3 $5))
     (-> (primary "[" opt-expr ":" expr ":" expr "]") (slice4 $1 $3 $5 $7))
@@ -490,18 +526,35 @@
     (-> (arg-list "...") ($*1 (spread)))
     (-> (arg-list "..." ",") ($*1 (spread))))
 
-  ;; 实参既可能是表达式也可能是类型（`make([]int, 3)`、`new(T)`），所以两种都收
   (rule arg-list
     (-> (arg) ($1))
     (-> (arg-list "," arg) ($*1 $3)))
 
+  ;; 实参既可能是表达式也可能是类型（`make([]int, 3)`、`new([N]T)`），所以两种都收
   (rule arg
     (-> (expr) $1)
+    (-> (nx-type) $1))
+
+  ;; 「一看就不是表达式」的类型（nx = not-expression）。判据是**起头那个记号**：
+  ;; `[`（切片/数组）、`map`、`chan`、`<-chan`、`func(…)`、`struct{…}`、`interface{…}`。
+  ;; 它有两处用：实参位置（`new([1024*1000]int)`）与**括号里**
+  ;; （`(*[10]byte)(unsafe.Pointer(p))`、`(*[]*Block)(…)` —— 166 份文件卡在这一格）。
+  ;;
+  ;; `*T` 那一支只递归到 nx-type：`*x` 是取值表达式，`*[10]byte` 不是 —— 星号后面那格
+  ;; 不是表达式，整体也就不是。这一条是这里能不引入歧义的关键（`case *T:` 那 58 份
+  ;; 报的正是"一个说 deref、一个说 ptr"，教训就在上面 case 那一段）。
+  (rule nx-type
     (-> ("[" "]" type) (slice $3))
+    (-> ("[" expr "]" type) (array $2 $4))
+    (-> ("[" "..." "]" type) (array-auto $4))
     (-> ("map" "[" type "]" type) (map $3 $5))
     (-> ("chan" type) (chan $2))
+    (-> ("chan" "<-" type) (chan-send $3))
     (-> ("<-" "chan" type) (chan-recv $3))
-    (-> ("func" signature) (fntype $2)))
+    (-> ("func" signature) (fntype $2))
+    (-> (struct-type) $1)
+    (-> (interface-type) $1)
+    (-> ("*" nx-type) (ptr $2)))
 
   (rule operand
     (-> (INT) (num $1))
@@ -511,6 +564,10 @@
     (-> (STRING) (str $1))
     (-> (IDENT) (name $1))
     (-> ("(" expr ")") (paren $2))
+    ;; 括号里裹一个"一看就不是表达式"的类型：`(*[10]byte)(unsafe.Pointer(p))`、
+    ;; `(*[]*Block)(…)`。转换的语法就是"类型加一对括号"，而这一族类型走不到 `expr`
+    ;; （见 nx-type 那一段）。166 份文件卡在这一格。
+    (-> ("(" nx-type ")") (paren $2))
     (-> (func-lit) $1)
     (-> (composite) $1)
     (-> (conv-type "(" expr opt-comma ")") (conv $1 $3)))
@@ -605,6 +662,7 @@
     (-> (h-primary "." IDENT) (sel $1 $3))
     (-> (h-primary "." "(" type ")") (assert $1 $4))
     (-> (h-primary "[" expr "]") (index $1 $3))
+    (-> (h-primary "[" nx-type "]") (tinst $1 $3))
     (-> (h-primary "[" exprs "," expr "]") (index $1 $*3 $5))
     (-> (h-primary "[" opt-expr ":" opt-expr "]") (slice3 $1 $3 $5))
     (-> (h-primary "[" opt-expr ":" expr ":" expr "]") (slice4 $1 $3 $5 $7))
@@ -618,6 +676,7 @@
     (-> (STRING) (str $1))
     (-> (IDENT) (name $1))
     (-> ("(" expr ")") (paren $2))
+    (-> ("(" nx-type ")") (paren $2))
     (-> (func-lit) $1)
     (-> (conv-type "(" expr opt-comma ")") (conv $1 $3))
     ;; 只收"不以裸名字起头"的那几种复合字面量
@@ -625,7 +684,7 @@
 
 ;; ---- 量到的与还欠的 --------------------------------------------------------------
 ;;
-;; 662 状态 / 339 条产生式 / **48 处冲突**，Go 标准库 8243 份 .go 过 **7187**（87%）。
+;; 712 状态 / 354 条产生式 / **61 处冲突**，Go 标准库 8243 份 .go 过 **7992**（97%）。
 ;; 89.2 MB 语料 / 1741 万记号 / 2174 万节点，约 0.9 MB/s、18 万记号/s。
 ;;
 ;; 一路量下来四刀（每刀都是从语料里挖出来的，不是想出来的）：
@@ -638,13 +697,38 @@
 ;;   7187       48       声明表全改成**右递归**（decls / specs / val-specs / type-specs /
 ;;                       fields / ifitems）。左递归写法允许"两项挨着不带分号"，于是
 ;;                       `sparseHoles []sparseEntry` 既能读成一个字段也能读成两个 ——
-;;                       这一刀一次值 2571 份文件，是全场最大的一刀
+;;                       这一刀一次值 2571 份文件
+;;   7325       ~        **类型参数表不许是空的**。`params` 能推出空串，于是
+;;                       `type readBuf []byte` 里那个 `[]` 既是"空的类型参数表"又是切片
+;;                       类型的头 —— 143 份报 "一个说 tspec、一个说 tspec"。照规范收紧。
+;;   7412       ~        类型参数的**约束**：`[T ~int]` / `[S ~[]T]` / `[T int | string]`。
+;;                       只加"带 `~`"与"带 `|`"两种形状 —— 直接让 param 走 type-set 的话
+;;                       光一个类型那一支会有两条路，净掉 5 份（量过，退回来了）。
+;;   7803       ~        **类型 switch 的分支单开一条非终结符**（tcases）。头一版把
+;;                       表达式分支与类型分支收成同一条 `case-item`（"谁是类型留给语义层"），
+;;                       代价是 `case *T:` 同时是"指针类型"与"取值" —— 58 份报真歧义，
+;;                       400 多份长文件的并行栈也是这么攒的。语法位置本来就分得开
+;;                       （`switch x.(type)` 与 `switch x` 是两条产生式），不该推给语义层。
+;;                       这一刀值 391 份。
+;;   7971       ~        **nx-type**（"一看就不是表达式"的类型）：`[N]T` / `[]T` / `map[K]V` /
+;;                       `chan T` / `func(…)` / `struct{…}` / `interface{…}`，外加
+;;                       `*nx-type`（`*x` 是取值，`*[10]byte` 不是）。三处用它：
+;;                       实参（`new([1024*1000]int)`）、括号里（`(*[10]byte)(unsafe.Pointer(p))`）、
+;;                       泛型实参（`TypeFor[func(string)]()`）。值 189 份。
+;;   7994       61       `type Hash [HashSize]byte` 与 `type Pair[T any] …` 是**真歧义**
+;;                       （Go 自己也靠启发式判）。给数组那一支一个 `(prefer 1)` 定胜负。
 ;;
 ;; 与 awk 那边同一条结论：**降歧义的是把规矩写进语法的形状**（右递归、`h-` 链、
-;; 不收写不成表达式的类型），不是优先级也不是建表器。
+;; 把"位置本来就分得开"的两件事写成两条非终结符），不是优先级也不是建表器。
+;; 这一趟又添一条：**"留给语义层"不是免费的** —— 语法位置能分开的事推给语义层，
+;; 代价是每处都分叉一次，长文件里攒成 "too many concurrent parses"。
 ;;
-;; 还欠 1056 份，两类：
-;;   1. `(tspec …)` 的真歧义 —— 结构体/接口体里某些形状仍有两读（archive/tar/common.go）。
-;;   2. 长文件上的 `too many concurrent parses` —— 48 处冲突单独看都不致命，但在几千行的
-;;      文件里分叉会攒起来（archive/tar/format.go）。这两类都要再挖一层：先把冲突清单
-;;      按"哪一条产生式参与得最多"排一遍，那才是下一刀该动的地方。
+;; 还欠 251 份，三类，其中两类**本来就不该过**：
+;;   1. 128 份 `too many concurrent parses`，集中在机器生成的巨型文件
+;;      （rewriteAMD64.go 有 11 万行、opGen.go、simdAMD64intrinsics.go）。61 处冲突
+;;      单独看都不致命，但那种规模的文件里分叉会攒起来。下一刀该把冲突清单按
+;;      "哪一条产生式参与得最多"排一遍。
+;;   2. 26 份是 Go 自己的**错误用例**：`internal/syntax/testdata/` 与 `types2/testdata/`
+;;      下那些带 `// ERROR …` 标记的文件（`_ []int = {1,2,3}`、`func T[P]m()`）——
+;;      它们是故意写错的，过了才不对。
+;;   3. 剩下是零散形状（`+0x1p-1022` 这种带正号的十六进制浮点等）。
