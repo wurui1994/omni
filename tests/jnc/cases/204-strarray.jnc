@@ -37,5 +37,15 @@ int main() {
 
 	// 静态字段那两格
 	printf("%d %d %d %d\n", C.m_tag[0], C.m_tag[2], C.m_tag[3], C.m_pad[1]);
+
+	// **十六进制字面量**（第二百六十四刀，samples/jnc/60_HexLiterals.jnc / test58 / test109）：
+	// 写出来的那几个字节，**没有零尾**（空白随便写）。
+	char h[] = 0x"03 9d";
+	printf("%d %d\n", h[0], h[1]);
+
+	// 拼在一起：串的字节 + 十六进制的字节；**一旦拼上十六进制字面量就没有零尾**
+	// （60_HexLiterals:51 那句 `"non-zero-terminated" 0x""` 就是靠这条去掉零尾的）。
+	char m[] = "ab" 0x"ff";
+	printf("%d %d %d\n", m[0], m[1], m[2]);
 	return 0;
 }

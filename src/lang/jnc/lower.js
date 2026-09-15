@@ -33,7 +33,7 @@ import {
 } from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
-import { strLitFold } from './emit-expr.js';
+import { bytesLitFold } from './emit-expr.js';
 import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
 import { templateTable, expandTemplates, synthType } from './generic.js';
 import { zeroText } from './expr-table.js';
@@ -401,7 +401,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       /* **右边是一格串字面量**（`static char m_tag[] = "abc"`，第二百六十三刀）：与花括号
          同一族（jancy 的 `Cast_Array`）—— 长度写空的从那串字数出来，逐格抄进去。 */
       const svs = cvs === null && st.init !== null && st.init.curly !== true
-        ? strLitFold(st.init.value ?? null) : null;
+        ? bytesLitFold(st.init.value ?? null) : null;
       const g = globalLines(st, env, {
         ns: owner, clsRoot, taken: gLifted, curly: cvs, str: svs,
       });
@@ -419,7 +419,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         const el = resolveType(
           { ...st.type, suffixes: [], raw: { specs: st.type.raw?.specs, dcl: null } }, env,
         );
-        if (el.type !== null) r = { type: { k: 'arr', el: el.type, n: [...svs].length + 1 }, why: null };
+        if (el.type !== null) {
+          r = { type: { k: 'arr', el: el.type, n: svs.bytes.length + (svs.zt ? 1 : 0) }, why: null };
+        }
       }
       /* 直接用 `var-decl-curly` 那一格的也走花括号那条路。 */
       const hasCurly = cvs !== null;

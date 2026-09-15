@@ -15,7 +15,7 @@ import { readSpecs } from './specs.js';
 import { resolveType, INT_BITS } from './resolve-type.js';
 import { emitType, tyKey } from './emit-type.js';
 import { readFormals, OP_NAMES } from './emit-fn.js';
-import { emitExpr, strLitFold } from './emit-expr.js';
+import { emitExpr, strLitFold, bytesLitFold } from './emit-expr.js';
 import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
 import {
   memberShape, copyValLines, STR_MEMBERS, strMember,
@@ -660,29 +660,25 @@ export function makeFnEnv(o) {
     return `${left}$${seg}`;
   };
   /**
-   * **串字面量给 char 数组当初值**（`char a[] = "abc"` / `char d[8] = "ab"`，第二百六十二刀，
-   * jancy 那儿是 `Cast_Array`：串字面量是一段**带零尾**的字节，逐格抄进去）。
+   * **字面量抄进一格数组**（`char a[] = "abc"` / `char b[] = 0x"03 9d"`，第二百六十二~二百
+   * 六十四刀，jancy 那儿是 `Cast_Array`：字面量是一段字节，逐格抄进去）。
    *
-   * 这一层一格窄整数占**一格**（`char[4]` 是 `(blk int 4)`），所以"逐字节"就是"逐格"。
-   * 多出来的那几格不用管：那段内存是 `pnew` 出来的、本来就是零 —— 零尾也就自带了
-   * （与花括号写少了那几格同一条）。
-   *
-   * 只收 ASCII：jancy 的串是 UTF-8 的字节，非 ASCII 的一个字符要占好几格 —— 那要"按字节"
-   * 而不是"按格"，等方言的整数带上宽度那一程（ADR-0031 §8.1）。所以见到就记账，不猜。
+   * `lit` 是折好的那一段（`bytesLitFold`）：`bytes` 是那几个字节，`zt` 说它自带没自带零尾
+   * （串字面量有、十六进制字面量没有）。这一层一格窄整数占**一格**（`char[4]` 是
+   * `(blk int 4)`），所以"逐字节"就是"逐格"；零尾那一格不用写 —— 那段内存是 `pnew` 出来的、
+   * 本来就是零（与花括号写少了那几格同一条）。
    */
-  const strArrayLines = (dst, type, text, pad) => {
-    const codes = [...text].map((ch) => ch.codePointAt(0) ?? 0);
-    if (codes.some((c) => c > 127)) {
-      acct('串字面量给数组当初值：里头有非 ASCII（要按字节抄，等整数带上宽度那一程）');
-      return null;
-    }
-    /* 放不下（连零尾都放不下）是**源码的错** —— jancy 那儿同（"array is too small"）。 */
-    if (type.n < codes.length + 1) {
-      acct(`串字面量有 ${codes.length} 个字符（还要一格零尾），可那一格数组只有 ${type.n} 格`);
+  const strArrayLines = (dst, type, lit, pad) => {
+    const { bytes, zt } = lit;
+    /* 放不下（连零尾那一格都放不下）是**源码的错** —— jancy 那儿同。 */
+    const need = bytes.length + (zt ? 1 : 0);
+    if (type.n < need) {
+      acct(`字面量要 ${need} 格（${bytes.length} 个字节${zt ? ' + 一格零尾' : ''}），`
+        + `可那一格数组只有 ${type.n} 格`);
       return null;
     }
     const b0 = `(pelem ${dst})`;
-    return codes.map((c, i) => `${pad}(pstore (padd ${b0} (int ${i})) (int ${c}))`);
+    return bytes.map((c, i) => `${pad}(pstore (padd ${b0} (int ${i})) (int ${c}))`);
   };
   /**
    * **一对花括号的初值**（`{ 10, 20, 30 }`）：按格子写。数组逐格、结构体逐字段；写少了的
@@ -877,10 +873,12 @@ export function makeFnEnv(o) {
        一格零尾。少了这一问，`m_tag[i]` 在体里也永远报"数组长度不是字面量"。 */
     if (r.type === null && (st.type.suffixes ?? []).includes('array-suffix')
       && st.init !== null && st.init !== undefined && st.init.curly !== true) {
-      const s0 = strLitFold(st.init.value ?? null);
+      const s0 = bytesLitFold(st.init.value ?? null);
       const el = s0 === null ? null
         : resolveType({ ...st.type, suffixes: [], raw: { specs: st.type.raw?.specs, dcl: null } }, env);
-      if (el !== null && el.type !== null) r.type = { k: 'arr', el: el.type, n: [...s0].length + 1 };
+      if (el !== null && el.type !== null) {
+        r.type = { k: 'arr', el: el.type, n: s0.bytes.length + (s0.zt ? 1 : 0) };
+      }
     }
     if (r.type === null) { acct(`静态字段 '${st.name}'：${r.why}`); return null; }
     const ty = withBits(r.type, st.type);
@@ -2365,7 +2363,7 @@ export function makeFnEnv(o) {
          * （jancy 的 `Cast_Array`）—— 逐格抄进去，长度写空的就从那串字数（字符数 + 一格零尾）。
          * 折不出一格串的（运行期拼出来的那种）照旧往下走，报的还是原来那句。
          */
-        const sv = cv !== null || !isInit ? null : strLitFold(named(d)?.value ?? null);
+        const sv = cv !== null || !isInit ? null : bytesLitFold(named(d)?.value ?? null);
         /**
          * **`A a(x, y);`**（第一百〇三刀）：尾巴上那对括号在树上是**形参表**，可它是构造实参。
          * 判据在 `ctorArgsOf`；凑齐了就走造对象那条现成的路（类与结构体各一支，与 `new A(…)`
@@ -2394,7 +2392,9 @@ export function makeFnEnv(o) {
            元素那一格照 `arrayFromCurly` 那条路解（把声明符摘掉再解一遍）。 */
         if (r.type === null && sv !== null && (t.suffixes ?? []).includes('array-suffix')) {
           const el = resolveType({ ...t, suffixes: [], raw: { specs: t.raw?.specs, dcl: null } }, env);
-          if (el.type !== null) r = { type: { k: 'arr', el: el.type, n: [...sv].length + 1 }, why: null };
+          if (el.type !== null) {
+            r = { type: { k: 'arr', el: el.type, n: sv.bytes.length + (sv.zt ? 1 : 0) }, why: null };
+          }
         }
         if (r.type === null) { acct(`局部量 '${t.name}'：${r.why}`); return null; }
         names.set(t.name, t);

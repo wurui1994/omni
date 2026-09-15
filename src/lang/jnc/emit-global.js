@@ -261,11 +261,11 @@ export function globalLines(m, env, ctx = { ns: null }) {
   /* **串字面量给数组当初值**（`static char m_tag[] = "abc"`，第二百六十三刀）：长度写空的
      从那串字数出来（字符数 + 一格零尾）。那串字由调用方折好递进来（`ctx.str`）—— 与花括号
      那一格同一条门：发 `(global …)` 这一行本身就要那个长度。 */
-  if (rt === null && typeof ctx.str === 'string') {
+  if (rt === null && ctx.str !== null && ctx.str !== undefined) {
     const el = resolveType({ ...m.type, suffixes: [], raw: { specs: m.type.raw?.specs, dcl: null } }, env);
     const sfx = (m.type.suffixes ?? []).filter((x) => x === 'array-suffix');
     if (el.type !== null && sfx.length === 1) {
-      rt = { k: 'arr', el: el.type, n: [...ctx.str].length + 1 };
+      rt = { k: 'arr', el: el.type, n: ctx.str.bytes.length + (ctx.str.zt ? 1 : 0) };
     }
   }
   if (rt === null) return { lines: [], why: resolveType(m.type, env).why };

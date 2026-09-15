@@ -43,6 +43,45 @@ export function strLitFold(n) {
   return a === null || b === null ? null : a + b;
 }
 
+/**
+ * **一格字面量摊成一串字节**（第二百六十四刀）：给"串字面量当数组初值"那一族用
+ * （`char a[] = "abc"` / `char b[] = 0x"03 9d"` / `char c[] = "abc" 0x"00"`）。
+ *
+ * 两种字面量，jancy 的词法把它们摊在同一段字节上（`Lexer.rl` 的 `literal` / `hexLiteral`）：
+ *   - **串字面量**：正文那几个字节，**自带一格零尾**；
+ *   - **十六进制字面量** `0x"03 9d"`：写出来的那几个字节，**没有零尾**（空白随便写、随便断行）。
+ *
+ * 贴着写的几格并成一格（与 `strLitFold` 同一条）—— 零尾**只有整串都是串字面量时才有**：
+ * `"non-zero-terminated" 0x""` 这一句（samples/jnc/60_HexLiterals.jnc:51）就是靠拼一格
+ * 空的十六进制字面量把零尾去掉的，那正是它存在的理由。
+ *
+ * 答 `{ bytes, zt }`；折不动（里头有一格不是字面量）答 null。非 ASCII 的串这一层还不收 ——
+ * 那要"一个字符占好几格"，等方言的整数带上宽度（ADR-0031 §8.1）；答 null，调用方记账。
+ */
+export function bytesLitFold(n) {
+  if (n === null || n === undefined || typeof n !== 'object') return null;
+  if (!Array.isArray(n.items)) {
+    if (n.kind === 'string' && typeof n.value === 'string') {
+      const codes = [...n.value].map((ch) => ch.codePointAt(0) ?? 0);
+      return codes.some((c) => c > 127) ? null : { bytes: codes, zt: true };
+    }
+    /* 十六进制字面量在树上是**一个记号**，正文就是源码里那一串（`0x"03 9d"`）。 */
+    const txt = typeof n.value === 'string' ? n.value : null;
+    if (txt === null || !/^0x"[\s\dA-Fa-f]*"$/.test(txt)) return null;
+    const hex = txt.slice(3, -1).replace(/\s+/g, '');
+    if (hex.length % 2 !== 0) return null;                  // 半个字节：不猜
+    const bytes = [];
+    for (let i = 0; i < hex.length; i += 2) bytes.push(Number.parseInt(hex.slice(i, i + 2), 16));
+    return { bytes, zt: false };
+  }
+  if (headOf(n) !== 'concat') return null;
+  const nm = named(n);
+  const a = bytesLitFold(nm?.a);
+  const b = bytesLitFold(nm?.b);
+  if (a === null || b === null) return null;
+  return { bytes: [...a.bytes, ...b.bytes], zt: a.zt && b.zt };
+}
+
 /** 一格表达式 → `{ code, type }`（过转换链）。拼不出来答 null。 */
 export function emitExpr(n, want, ctx) {
   const v = emitExpr0(n, want, ctx);
