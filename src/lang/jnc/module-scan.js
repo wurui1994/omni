@@ -283,18 +283,45 @@ export function scanAggs(tree, env, ovl = new Map()) {
         if (ft !== null && ft.shape === 'prop' && ft.name !== null) {
           /* **完整声明式属性里的字段**也收进 store —— 与成员属性同一条。 */
           const store = new Map();
+          /**
+           * **体里那两格带修饰词的成员**（第二百五十一刀，73-propfullauto.jnc）：
+           *   - `autoget int m_x;` —— prop_full.rst:34 那句"体里那格带 `autoget` 的字段让**整格
+           *     属性** autoget"。取值器于是是生成的，而那格存储的**名字是写的人定的**（默认
+           *     才叫 `m_value`，prop_autoget.rst:26）；
+           *   - `bindable event m_e();` —— 同理让整格属性 bindable，`bindingof(属性)` 说的就是
+           *     它（默认名才是 `m_onChanged`，prop_bindable.rst:23-29）。
+           * 所以两个名字都记下来（`autoName` / `mc`）—— 拿默认名去发就是发一个不存在的全局。
+           */
+          let auto0 = null;
+          let autoName0 = null;
+          let mcName0 = null;
           const body1 = named(n)?.body;
           if (headOf(body1) === 'compound') {
             for (const im of readBodyMembers(body1)) {
-              if (im.shape === 'data' && im.name !== null && im.type !== null) {
+              if (im.name === null || im.type === null) continue;
+              const iws = [...(im.storage ?? []), ...(im.type.mods ?? [])];
+              if (im.shape === 'event') {
                 store.set(im.name, im.type);
+                if (iws.includes('bindable')) mcName0 = im.name;
+                continue;
+              }
+              if (im.shape !== 'data') continue;
+              store.set(im.name, im.type);
+              if (iws.includes('autoget') || iws.includes('bindable')) {
+                auto0 = im.type; autoName0 = im.name;
               }
             }
           }
           const mods = ft.mods ?? [];
           if (mods.includes('autoget') || mods.includes('bindable')) store.set('m_value', ft);
+          if (mods.includes('bindable') && mcName0 === null) mcName0 = 'm_onChanged';
           gProps.set(ft.name, {
-            emit: owner === null ? ft.name : `${owner}$${ft.name}`, type: ft, store,
+            emit: owner === null ? ft.name : `${owner}$${ft.name}`,
+            type: ft,
+            store,
+            auto: auto0,
+            autoName: autoName0,
+            mc: mcName0,
           });
         }
       }
@@ -484,16 +511,28 @@ export function scanAggs(tree, env, ovl = new Map()) {
                （`int autoget property m_v;`）同一件事，差别只在"类型听谁的"。所以把那一格的
                类型记下来（`auto`），发的那一层照它生成。 */
             let auto = null;
+            let autoName = null;
+            let mcName = null;
             const body1 = named(m.at)?.body;
             /* **简写取值器那对花括号里是语句、不是成员表**（第一百三十九刀，140-propgetbody.jnc
                里 `int t = m_twice;` 是取值器体里的**局部量**）—— 照成员表读就等于给这个类
                凭空添了一格"写了初值的字段"，于是造对象那一处报"字段写了初值可它没有构造"。 */
             if (headOf(body1) === 'compound' && !hasStatements(body1)) {
               for (const im of readBodyMembers(body1)) {
-                if (im.shape === 'data' && im.name !== null && im.type !== null) {
+                if (im.name === null || im.type === null) continue;
+                const ims = [...(im.storage ?? []), ...(im.type.mods ?? [])];
+                /* 体里那格**事件**（`bindable event m_e();`，第二百五十一刀）：名字是写的人定的
+                   —— 存值器体里裸写它就是"通知"，`bindingof(属性)` 说的也是它。 */
+                if (im.shape === 'event') {
                   propStore.set(im.name, im.type);
-                  const ims = [...(im.storage ?? []), ...(im.type.mods ?? [])];
-                  if (ims.includes('autoget') || ims.includes('bindable')) auto = im.type;
+                  if (ims.includes('bindable')) mcName = im.name;
+                  continue;
+                }
+                if (im.shape === 'data') {
+                  propStore.set(im.name, im.type);
+                  if (ims.includes('autoget') || ims.includes('bindable')) {
+                    auto = im.type; autoName = im.name;
+                  }
                   /* **体里那格字段写了初值**（`property m_p { int m_v = 7; … }`）：它就是这个类的
                      一格字段（`C$m_p$m_v`），所以"这一格里有初值"要记上 —— 合成构造那一步
                      靠它才知道该发（152-propfieldinit.jnc）。 */
@@ -503,10 +542,13 @@ export function scanAggs(tree, env, ovl = new Map()) {
             }
             const mods2 = m.type?.mods ?? [];
             if (mods2.includes('autoget') || mods2.includes('bindable')) propStore.set('m_value', m.type);
+            if (mods2.includes('bindable') && mcName === null) mcName = 'm_onChanged';
             ps.set(m.name, {
               name: m.name, owner: emitName, emit: `${emitName}$${m.name}`, type: m.type, at: m.at,
               store: propStore,
               auto,
+              autoName,
+              mc: mcName,
             });
             continue;
           }

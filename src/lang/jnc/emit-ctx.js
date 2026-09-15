@@ -708,6 +708,14 @@ export function makeFnEnv(o) {
    * 那几族的取/存是**生成**出来的，这一层还没发 —— 那时候答 null（记账），绝不发一句
    * 调用去叫一个不存在的函数。
    */
+  /**
+   * **一格属性生成的事件叫什么**（第二百五十一刀，73-propfullauto.jnc）：默认名是
+   * `m_onChanged`（prop_bindable.rst:23-29），可体里写了 `bindable event m_e();` 时就是 `m_e`
+   * —— 名字由写的人定，扫那一遍记在 `mc` 上（prop_full.rst:34 那句"体里那格带修饰词的成员
+   * 让整格属性也带上它"）。两样都没有就是"这一格不是 bindable"，答 null。
+   */
+  const mcNameOf = (pr) => (pr?.mc
+    ?? ((pr?.type?.mods ?? []).includes('bindable') ? 'm_onChanged' : null));
   const propPlace = (pr, selfCode) => {
     const hasFn = (n) => methods.has(n) || fns.has(n);
     const g = `${pr.emit}$get`;
@@ -1335,26 +1343,29 @@ export function makeFnEnv(o) {
         }
         const pr0 = aggProps.get(agg0)?.get(pn);
         if (pr0 === undefined) { acct(`bindingof('${pn}')：'${agg0}' 上查不着那格属性`); return null; }
-        if (!(pr0.type?.mods ?? []).includes('bindable')) {
+        const mn0 = mcNameOf(pr0);
+        if (mn0 === null) {
           acct(`bindingof('${pn}')：那格属性不是 bindable（没有生成的事件）`); return null;
         }
-        return { shape: 'ptr', code: `(pfield ${ob.code} ${pr0.emit}$m_onChanged)`, type: ty0 };
+        return { shape: 'ptr', code: `(pfield ${ob.code} ${pr0.emit}$${mn0})`, type: ty0 };
       }
       const key0 = headOf(inner) === 'name' ? String(named(inner)?.text?.value ?? '') : null;
       if (key0 === null) { acct('bindingof 里头不是一格名字'); return null; }
       const gp = gProps.get(key0);
       if (gp !== undefined) {
-        if (!(gp.type?.mods ?? []).includes('bindable')) {
+        const mn = mcNameOf(gp);
+        if (mn === null) {
           acct(`bindingof('${key0}')：那格属性不是 bindable（没有生成的事件）`); return null;
         }
-        return { shape: 'var', code: `${gp.emit}$m_onChanged`, type: ty0 };
+        return { shape: 'var', code: `${gp.emit}$${mn}`, type: ty0 };
       }
       const mp = self === null ? undefined : aggProps.get(self.agg)?.get(key0);
       if (mp !== undefined) {
-        if (!(mp.type?.mods ?? []).includes('bindable')) {
+        const mn = mcNameOf(mp);
+        if (mn === null) {
           acct(`bindingof('${key0}')：那格属性不是 bindable（没有生成的事件）`); return null;
         }
-        return { shape: 'ptr', code: `(pfield (var $this) ${mp.emit}$m_onChanged)`, type: ty0 };
+        return { shape: 'ptr', code: `(pfield (var $this) ${mp.emit}$${mn})`, type: ty0 };
       }
       acct(`bindingof('${key0}')：查不着那格属性`); return null;
     }
@@ -1383,7 +1394,10 @@ export function makeFnEnv(o) {
         }
         if (propScope !== null && propScope.store.has(key)) {
           const t2 = propScope.store.get(key);
-          const r2 = resolveType({ ...t2, shape: 'data' }, env);
+          /* **体里那格事件**（`bindable event m_e();`，第二百五十一刀）：它那一格的类型在
+             **事件**那条路上解（写的人压根没写基类型）—— 按 `data` 解只会报"认不出基类型
+             'no-type'"，那是认错人。别的（字段）照旧按数据解。 */
+          const r2 = resolveType(t2.shape === 'event' ? t2 : { ...t2, shape: 'data' }, env);
           if (r2.type === null) { acct(`属性的存储 '${key}'：${r2.why}`); return null; }
           const nm3 = `${propScope.emit}$${key}`;
           const ty2 = withBits(r2.type, t2);
@@ -2701,8 +2715,12 @@ export function makeFnEnv(o) {
              再按它类型上那个算符调。少这一条，报的是"调的那个 'm_hash' 查不着"，指着别处。 */
           || (self !== null && opCallField(self.agg, asName))
           /* **取/存体里裸写那格生成的事件**（`m_onChanged();`，第一百一十七刀）：它不是
-             函数表里的名字，是这格属性的生成物 —— 求它得出一格多播，叫它就是通知所有听众。 */
-          || (propScope !== null && propScope.mc === true && asName === 'm_onChanged');
+             函数表里的名字，是这格属性的生成物 —— 求它得出一格多播，叫它就是通知所有听众。
+             **名字由写的人定**那一种同理（`bindable event m_e();` 之后的 `m_e();`，
+             第二百五十一刀）：判据是"属性那一层里有这个名字，而它解出来是一格多播"。 */
+          || (propScope !== null && propScope.mc === true && asName === 'm_onChanged')
+          || (propScope !== null && (propScope.store?.has(asName) ?? false)
+            && resolveType(propScope.store.get(asName), env).type?.k === 'mc');
         if (viaVal) {
           const fv = emitExpr(fn, null, ctxRef);
           if (fv === null) return null;

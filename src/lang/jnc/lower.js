@@ -1126,7 +1126,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    * 那时候读要 `pload`），成员那一格是**字段**（`<东家>$<属性>$m_value`）。
    * 聚合体/变体那几格明说不收（读法不是一句 `var`）。
    */
-  const genAutoget = (nameSrc, emitName, type, selfInfo, autoType = null) => {
+  const genAutoget = (nameSrc, emitName, type, selfInfo, autoType = null, autoName = null) => {
     const mods = type?.mods ?? [];
     /* **`autoget` 那个词写在体里那一格存储上**（`int property m_v { int autoget m_value; … }`，
        141-propfullmem.jnc）：与写在属性上（`int autoget property m_v;`）是同一件事 ——
@@ -1151,8 +1151,10 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       && !['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr', 'class'].includes(ty.k)) {
       acct(`属性 '${emitName}' 生成的取值器落在 ${ty.k} 上（读法不是一句 var）还没接`); return false;
     }
-    const storage = `${emitName}$m_value`;
-    const boxed = (gLifted.has(nameSrc) || gLifted.has('m_value')) && liftable(ty);
+    /* 那格存储的**名字**由写的人定（`autoget int m_x;`，第二百五十一刀）—— 默认才是
+       `m_value`（prop_autoget.rst:26）。拿默认名去发就是发一个谁也没声明过的全局。 */
+    const storage = `${emitName}$${autoName ?? 'm_value'}`;
+    const boxed = (gLifted.has(nameSrc) || gLifted.has(autoName ?? 'm_value')) && liftable(ty);
     const read = selfInfo === null
       ? (boxed ? `(pload (var ${storage}))` : `(var ${storage})`)
       /* 一整块那一格（variant）**不 pload**：那个字段自己就是那段内存，它的地址就是值。 */
@@ -1292,7 +1294,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       if (!dataProp && emitPropBody(m.at, emitName, self0, null, store, true) === true) propDone.add(m.at);
       /* 那对花括号里没写取值器（或压根没有花括号）时，`autoget` 那一格自己生成一个
          —— `autoget` 写在属性上、还是写在体里那格存储上，两种写法都在这儿收（`pr1.auto`）。 */
-      genAutoget(m.name, emitName, m.type, self0, pr1?.auto ?? null);
+      genAutoget(m.name, emitName, m.type, self0, pr1?.auto ?? null, pr1?.autoName ?? null);
       /* `bindable` 那一格的存值器同理是生成的（同值不通知）—— 人写了的不动。 */
       genAutoset(emitName, m.type, self0);
     }
@@ -1348,7 +1350,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   /* 顶层那几格属性的 `autoget` 取值器（两种写法都在这张表里：`int autoget property g;` 与
      `property g { … }`）—— 写了取值器的那一格由上面那两条路发，这儿只补没写的。 */
   for (const [nameSrc, pr] of gProps) {
-    genAutoget(nameSrc, pr.emit, pr.type, null, pr.auto ?? null);
+    genAutoget(nameSrc, pr.emit, pr.type, null, pr.auto ?? null, pr.autoName ?? null);
     /* `bindable` 那一格的存值器同理是生成的（同值不通知，第二百四十九刀）—— 人写了的不动。 */
     genAutoset(pr.emit, pr.type, null, nameSrc);
   }
