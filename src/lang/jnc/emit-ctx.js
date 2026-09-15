@@ -57,6 +57,7 @@ export function makeFnEnv(o) {
     gProps = new Map(), propScope = null, aggStatics = new Map(), aggProps = new Map(),
     aggBases = new Map(), helperBox = new Set(), aggPaths = new Map(), aggAliases = new Map(),
     gAlias = new Map(), vdispatch = new Map(), ovl = new Map(), parseExpr = null,
+    reactors = new Map(),
   } = o;
   let ctxRef = null;
   /**
@@ -1331,6 +1332,68 @@ export function makeFnEnv(o) {
     }
     const o = lvOf(ob);
     return o === null ? null : { code: readLv(o), type: o.type };
+  };
+  /**
+   * **反应里读到一格 bindable 属性就绑上去**（第二百五十六刀；jancy 那边是读的时候顺手绑的，
+   * jnc_ct_OperatorMgr.cpp:1441-1457 → addReactorBinding）：答那格事件的**读法**（`apush` 的
+   * 第一个实参）。不是 bindable 属性答 null —— **不记账**：反应里读普通东西是常态。
+   */
+  const bindRead = (node) => {
+    const h0 = headOf(node);
+    if (h0 === 'name') {
+      const k = String(named(node)?.text?.value ?? '');
+      if (names.has(k)) return null;
+      const gp = gProps.get(k);
+      if (gp !== undefined) {
+        const p = mcPathOf(gp);
+        return p === null ? null : `(var ${p})`;
+      }
+      const mp = self === null ? undefined : aggProps.get(self.agg)?.get(k);
+      if (mp === undefined) return null;
+      const p2 = mcPathOf(mp);
+      return p2 === null ? null : `(pload (pfield (var $this) ${p2}))`;
+    }
+    if (h0 !== 'field' && h0 !== 'ptr-field') return null;
+    const f0 = named(node) ?? {};
+    const pn = String(f0.name?.value ?? '');
+    /* 先按名字便宜地筛一次（哪格聚合体上真有这么一格 bindable 属性）—— 别的点串
+       （命名空间、普通字段）在这儿一个字都不该发，也不该去求左边那一段。 */
+    const any = [...aggProps.values()].some((m0) => {
+      const pr = m0.get(pn);
+      return pr !== undefined && mcPathOf(pr) !== null;
+    });
+    if (!any) return null;
+    const ob0 = objBase(f0.obj);
+    if (ob0 === null) return null;                           // 账已经记过
+    const agg0 = aggBehind(ob0.type);
+    const pr0 = agg0 === null ? undefined : aggProps.get(agg0)?.get(pn);
+    if (pr0 === undefined) { acct(`反应里读的 '${pn}' 认不出是哪一格属性`); return null; }
+    const p3 = mcPathOf(pr0);
+    return p3 === null ? null : `(pload (pfield ${ob0.code} ${p3}))`;
+  };
+  /**
+   * `.start()` 左边那一格是**一格反应器**吗（第二百五十六刀）—— 答 `{ key, self }`，不是答 null。
+   * 三种形状：方法体里裸写（补 `this`）、`x.m_r`、顶层那一格。
+   */
+  const rctAt = (ob) => {
+    if (reactors.size === 0) return null;
+    if (headOf(ob) === 'name') {
+      const k = String(named(ob)?.text?.value ?? '');
+      if (names.has(k)) return null;
+      if (self !== null && reactors.has(`${self.agg}$${k}`)) {
+        return { key: `${self.agg}$${k}`, self: '(var $this)' };
+      }
+      return reactors.has(k) ? { key: k, self: null } : null;
+    }
+    if (headOf(ob) !== 'field' && headOf(ob) !== 'ptr-field') return null;
+    const f1 = named(ob) ?? {};
+    const pn = String(f1.name?.value ?? '');
+    if (![...reactors.keys()].some((x) => x.endsWith(`$${pn}`))) return null;
+    const o1 = objBase(f1.obj);
+    if (o1 === null) return null;                            // 账已经记过
+    const agg1 = aggBehind(o1.type);
+    if (agg1 === null || !reactors.has(`${agg1}$${pn}`)) return null;
+    return { key: `${agg1}$${pn}`, self: o1.code };
   };
   /**
 
@@ -2720,6 +2783,24 @@ export function makeFnEnv(o) {
          实参表（`%N` 引的就是它）—— 所以这一问排在最前头。相邻的几段算一格（`fmtTokens`）。 */
       if (fmtTokens(fn) !== null) return fmtOf(fn, args);
       /**
+       * **反应器上能叫的只有三个**（第二百五十六刀）：`start` / `stop` / `restart` —— 语料里数过，
+       * 59 / 2 / 2 处，别的 0。这一问排在方法那一族**之前**：反应器不是一格对象、也不是一格
+       * 函数值，落到那两条上报的是"叫方法时 '.' 的左边不是结构体/类"，指着别处。
+       */
+      if (asName === null && (headOf(fn) === 'field' || headOf(fn) === 'ptr-field')) {
+        const f4 = named(fn) ?? {};
+        const m4 = String(f4.name?.value ?? '');
+        const rk = rctAt(f4.obj);
+        if (rk !== null) {
+          if (!['start', 'stop', 'restart'].includes(m4)) {
+            acct(`反应器上叫 '${m4}'（能叫的只有 start / stop / restart）还没接`); return null;
+          }
+          if (args.length !== 0) { acct(`反应器的 '${m4}' 不收实参`); return null; }
+          const sa = rk.self === null ? '' : ` ${rk.self}`;
+          return { code: `(call ${rk.key}$${m4}${sa})`, type: { k: 'void' } };
+        }
+      }
+      /**
        * **方法那一族**（第五十二刀）：`p.sum()`、`q.sum()`（`P*` 上与 `P` 上一样，第二十五刀）、
        * 以及方法体里**裸叫方法**（`sum()` 就是 `this.sum()`）。方言那一侧它是一格普通函数
        * `<东家>$<方法名>`，`this` 由这一层补成**第一个实参**。
@@ -3375,6 +3456,8 @@ export function makeFnEnv(o) {
     lazyOne,
     lazySel,
     lazyShort,
+    /* **反应里读到的那格 bindable 属性**（第二百五十六刀）：`emitReactors` 那一遍按它收依赖。 */
+    bindRead,
     /* 驱动把它那一格 `ctx` 交回来（`expr` / `ecOut` / `guards` 都在它上头）。 */
 
     onCtx: (c2) => { ctxRef = c2; },

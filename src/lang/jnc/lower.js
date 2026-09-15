@@ -229,6 +229,11 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   /** 一份模块只发一次的那几格助手（`jnc$asgn$T` 那一族）—— 键就是它的名字。 */
   const helperBox = new Set();
   /**
+   * **反应器那张表**（真填在下面"反应器"那一段）。早声明的道理与 `vdispatch` 同一条：
+   * 模块级初值那格探子（`modInit`）也要收着它，而它跑在那一段之前。
+   */
+  const rct = new Map();
+  /**
    * **虚派发那张表**：`<接收方的静态类型>$<方法名>` → 分派函数的名字（`B$$vd$show`）。
    * 早声明是因为体那一层的探子（`makeFnEnv`）要收着它 —— 真填在下面"虚派发"那一段
    * （那时方法表已经齐了，合成出来的构造也在里头）。
@@ -274,6 +279,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         aggStatics,
         aggProps,
         aggBases,
+        reactors: rct,
       });
       modEnv = { e, ctx: makeCtx(e) };
     }
@@ -370,6 +376,47 @@ export function lowerJncRules(tree0, diags, opts = {}) {
 
   /* ---------------------------------------------------------- 2. 顶层条目 */
   const items = topItems(tree, [], null);
+
+  /**
+   * **那几格反应器**（第二百五十六刀，82-reactor.jnc / 162-oneventlist.jnc）：表先建起来 ——
+   * 别处的体里 `m_uiReactor.start()` 查的就是它（`emit-ctx` 那一头按这张表认 start/stop/restart）。
+   * 码由下面 `emitReactors` 那一遍发（要等函数、属性、事件全登记完）。
+   *
+   * 四种写法一张表（语料里生产代码只用第一种，49 处）：
+   *   - 类里声明、体写在类外：`reactor m_uiReactor;` + `reactor Sess.m_uiReactor { … }`；
+   *   - 类里就带着体：`reactor m_r { … }`（第九十五刀，test/jnc/test16.jnc:18-20）；
+   *   - 顶层带体：`reactor g_r { … }`（samples/jnc/40_Reactors.jnc:81）；
+   *   - 声明了却没有体 —— 那是一句错（下面那一遍报）。
+   */
+  for (const a of aggs) {
+    const kind0 = a.word === 'class' || a.word === 'opaque class' ? 'class' : 'struct';
+    for (const m of a.members) {
+      if (m.name === null || !(m.type?.mods ?? []).includes('reactor')) continue;
+      const b0 = named(m.at)?.body;
+      rct.set(`${a.emitName}$${m.name}`, {
+        cls: a.emitName, kind: kind0, node: m.at, body: headOf(b0) === 'compound' ? b0 : null,
+      });
+    }
+  }
+  for (const { it, ns } of items) {
+    if (headOf(it) !== 'fn-def' && headOf(it) !== 'fn-proto') continue;
+    const nm0 = named(it);
+    const t0 = nm0 === null ? null : readDeclType(nm0.specs, nm0.dcl);
+    if (t0 === null || !(t0.mods ?? []).includes('reactor')) continue;
+    const b0 = nm0?.body;
+    const body0 = headOf(b0) === 'compound' ? b0 : null;
+    if (t0.name !== null) {
+      rct.set(ns === null ? t0.name : `${ns}$${t0.name}`, {
+        cls: null, kind: null, node: it, body: body0, ns,
+      });
+      continue;
+    }
+    /* 体写在类外（`reactor Sess.m_uiReactor { … }`）：名字是点串，前一段是东家。 */
+    const dotted = fnName({ name: null, type: t0, at: it });
+    const e0 = dotted === null ? undefined : rct.get(dotted);
+    if (e0 === undefined) { acct(`反应器 '${dotted ?? '?'}' 的东家查不着`); continue; }
+    e0.body = body0;
+  }
 
   /* 先发**模块级那几格量**（`(global …)` 要排在函数之前：初值里能调函数，可声明得先在）。 */
   for (const { it, ns } of items) {
@@ -607,6 +654,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       aggStatics,
       aggProps,
       aggBases,
+      reactors: rct,
     });
     /* **`int main()` 落成方言的入口 `(main …)`，那一格不回值**：所以体那一层看见的是
        "回 void 的函数"，`return 0;` 就是一句 `(ret)`（`returnKind` 里 `inMain` 那一条），
@@ -697,6 +745,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       aggStatics,
       aggProps,
       aggBases,
+      reactors: rct,
     });
     const ctx = makeCtx(e);
     const out = [];
@@ -1490,6 +1539,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     const nm = named(it);
     const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
     if (t === null) { acct('顶层函数的类型读不出来'); continue; }
+    /* **反应器另发**（第二百五十六刀）：`reactor g_r { … }` 与 `reactor Cls.m_r { … }` 落出来的
+       是 `$start` / `$stop` 加一串反应（`emitReactors` 那一遍），不是一格普通函数。 */
+    if ((t.mods ?? []).includes('reactor')) continue;
     /* **完整声明式的属性**（`int property g_p { get() {…} set(int x) {…} }`，prop_full.rst:15）：
        它在树上长得像一格函数声明，可那对花括号里是**取/存两个体**，不是一格函数体。
        整族另算 —— 送去发"函数的头"只会报"认不出形参表"，那是认错人。 */
@@ -1567,6 +1619,180 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     if (dup0 === null) { acct(`函数 '${t.name}' 有重载（按实参挑哪一格）还没接`); continue; }
     emitFn(it, t.name, ns, null, ns, null, [], false, dup0);
   }
+
+  /**
+   * **反应器**（第二百五十六刀，82-reactor.jnc / 162-oneventlist.jnc）。语义的出处是 jancy 的
+   * 源码：**一条语句一格"反应"**（`reactive_expression` 每条进一次 `enterReactiveExpression`，
+   * jnc_ct_Expr.llk:179-185 / jnc_ct_Module.h:885-896），而依赖是**读到 bindable 属性时顺手绑上
+   * 的**（jnc_ct_OperatorMgr.cpp:1441-1457 → addReactorBinding）。
+   *
+   * 落三样（与旧降级的真输出逐字同）：
+   *   - 两格 bool：`$on`（跑没跑）与 `$bound`（订阅挂没挂）—— 成员那两格是**对象里的字段**
+   *     （发结构体那一层早就发了），顶层那两格是模块级量（这儿发）；
+   *   - **一条语句一格** `<全名>$r<第几条>`，体外面套一道 `(if 跑没跑 …)` 的闸门；`onevent`
+   *     那一条落成 `$e<第几条>`（它订阅的是**写出来的**那几格事件，所以不收依赖）；
+   *   - `$start`（第一次把订阅挂上 —— **静态超集、start 那一刻绑一次**，再把所有反应跑一遍）、
+   *     `$stop`（只关那格 bool）、`$restart`（stop 再 start —— 依赖是静态的，重绑是空操作）。
+   *
+   * 排在最后一遍：反应里能引用模块级量、属性、事件与别的函数，那些到这一步才全登记完。
+   * **记账**（ADR-0016 第八十五刀那一节）：jancy 每跑一遍重收依赖、`stop` 是真摘掉订阅；
+   * 这一层是静态超集加一道闸门 —— 多跑、不漏跑，摘不掉。
+   */
+  /** 这条语句里**读**到了哪几格东西（写的那一边不算，可下标/实参里照旧算读）。 */
+  const rctReads = (n, out, read = true) => {
+    if (n === null || n === undefined || typeof n !== 'object' || !Array.isArray(n.items)) return;
+    const h = headOf(n);
+    if (h === 'assign') {
+      const a0 = named(n) ?? {};
+      rctReads(a0.a, out, false);
+      rctReads(a0.b, out, true);
+      return;
+    }
+    if (read && (h === 'name' || h === 'field' || h === 'ptr-field')) out.push(n);
+    const deeper = read || ['index', 'call', 'args', 'args-add'].includes(h);
+    for (const it of n.items.slice(1)) rctReads(it, out, deeper);
+  };
+  const rctEnv = (selfInfo) => {
+    const e = makeFnEnv({
+      fnNode: null,
+      env,
+      acct: (w) => acct(`反应器：${w}`),
+      fns,
+      aggFields,
+      aggPaths,
+      aggAliases,
+      gAlias,
+      vdispatch,
+      ovl,
+      parseExpr,
+      aggCtors,
+      methods,
+      tags,
+      fieldInits,
+      self: selfInfo,
+      ecBox,
+      helperBox,
+      tmpBox,
+      globals,
+      gLifted,
+      gBindable,
+      gEmit,
+      gProps,
+      roots,
+      aggStatics,
+      aggProps,
+      aggBases,
+      reactors: rct,
+    });
+    return { e, ctx: makeCtx(e) };
+  };
+  for (const [full, r] of rct) {
+    if (r.body === null) {
+      acct(`反应器 '${full}' 声明了却没有体（体写在类外：\`reactor 类名.名字 { … }\`）`); continue;
+    }
+    const selfInfo = r.cls === null ? null
+      : { agg: r.cls, kind: r.kind, emit: r.kind === 'class' ? clsRoot(r.cls) : r.cls };
+    const selfTy = selfInfo === null ? null
+      : emitType(r.kind === 'class' ? { k: 'class', name: r.cls } : { k: 'struct', name: r.cls },
+        'slot', tyc);
+    const selfDecl = selfInfo === null ? '' : `($this ${selfTy})`;
+    const selfArg = selfInfo === null ? '' : ' (var $this)';
+    const rd = (n) => (selfInfo === null ? `(var ${n})` : `(pload (pfield (var $this) ${n}))`);
+    const wr = (n, v) => (selfInfo === null
+      ? `(set ${n} (bool ${v}))` : `(pstore (pfield (var $this) ${n}) (bool ${v}))`);
+    /* 顶层那两格 bool 是模块级量（成员那两格是字段，发结构体那一层早就发了）。 */
+    if (selfInfo === null) {
+      decls.push(`  (global ${full}$on bool)`);
+      decls.push(`  (global ${full}$bound bool)`);
+    }
+    /* 挂订阅那几句（只在第一次 start 时跑）与"把反应跑一遍"那几句。 */
+    const binds = [];
+    const runs = [];
+    let k = 0;
+    for (const s of chainOf(named(r.body)?.body, 'unit-add')) {
+      const isEv = headOf(s) === 'onevent';
+      const one = `${full}$${isEv ? 'e' : 'r'}${k}`;
+      k += 1;
+      const { e, ctx } = rctEnv(selfInfo);
+      /* 一格反应就是一格函数；成员那一格还要一格**闭包壳**（`apush` 收的是函数值）。 */
+      const clo = () => {
+        if (selfInfo === null) return `(fnref ${one})`;
+        decls.push(`  (cfn ${one}$clo (($self ${selfTy})) () void\n    (expr (call ${one} (cap $self))))`);
+        return `(mkclo ${one}$clo (var $this))`;
+      };
+      const wrap = (lines) => `  (fn ${one} (${selfDecl}) void\n    (if ${rd(`${full}$on`)}\n      (do\n${lines})))`;
+      const spill = () => {
+        for (const s0 of e.slots) decls.push(`  (global ${s0.name} ${s0.ty})`);
+        for (const hh of e.helpers) decls.push(hh);
+      };
+      if (!isEv) {
+        const lines = ctx.stmt(s, 8);
+        if (lines === null) continue;                        // 账已经记过
+        decls.push(wrap(lines.join('\n')));
+        spill();
+        const c0 = clo();
+        /* **依赖 = 静态超集**：这条语句里读到的每一格 bindable 属性都绑上（重复的只绑一次）。 */
+        const reads = [];
+        rctReads(s, reads);
+        const seen0 = new Set();
+        for (const p of reads) {
+          const b = e.bindRead(p);
+          if (b === null || b === undefined || seen0.has(b)) continue;
+          seen0.add(b);
+          binds.push(`        (apush ${b} ${c0})`);
+        }
+        runs.push(`    (expr (call ${one}${selfArg}))`);
+        continue;
+      }
+      /**
+       * **`onevent`**（samples/jnc/41_OnEventStmt.jnc:35-59）：它订阅的是**写出来的**那几格事件
+       * —— 一格、或者一对括号里的**一串**（`(events-list …)`，162-oneventlist.jnc 的
+       * `onevent (g_onA, g_onB)()`），也收 `bindingof(属性)`。闸门同反应：stop 之后不干活。
+       * 带形参的那一族还没接（语料里两处都是空形参表）。
+       */
+      const on0 = named(s) ?? {};
+      const nf = (n2) => {
+        if (n2 === null || n2 === undefined || typeof n2 !== 'object' || !Array.isArray(n2.items)) return 0;
+        return (headOf(n2) === 'formal' ? 1 : 0)
+          + n2.items.slice(1).reduce((acc, x) => acc + nf(x), 0);
+      };
+      if (nf(on0.formals) > 0) { acct('反应器的 onevent 带形参还没接'); continue; }
+      const bodyTxt = ctx.block(on0.body, 8);
+      if (bodyTxt === null) continue;                        // 账已经记过
+      decls.push(wrap(bodyTxt));
+      spill();
+      const c1 = clo();
+      const evs = headOf(on0.event) === 'events-list'
+        ? allInChain(named(on0.event)?.list, 'exprs-add', 'exprs')
+        : [named(on0.event)?.first];
+      for (const ev of evs) {
+        const code = headOf(ev) === 'bindingof' ? e.bindRead(named(ev)?.arg) : ctx.expr(ev);
+        if (code === null || code === undefined) {
+          acct('onevent 里头要是一格事件（或 `bindingof(属性)`）'); break;
+        }
+        binds.push(`        (apush ${code} ${c1})`);
+      }
+    }
+    /* 绑定只挂一次（`$bound`），而"跑一遍"每次 start 都做 —— `restart` 于是就是 stop 再 start。 */
+    decls.push([
+      `  (fn ${full}$start (${selfDecl}) void`,
+      `    (if (un "!" ${rd(`${full}$bound`)})`,
+      '      (do',
+      `        ${wr(`${full}$bound`, 'true')}`,
+      ...binds,
+      '      ))',
+      `    ${wr(`${full}$on`, 'true')}`,
+      ...runs,
+      ')',
+    ].join('\n'));
+    decls.push(`  (fn ${full}$stop (${selfDecl}) void\n    ${wr(`${full}$on`, 'false')})`);
+    decls.push([
+      `  (fn ${full}$restart (${selfDecl}) void`,
+      `    (expr (call ${full}$stop${selfArg}))`,
+      `    (expr (call ${full}$start${selfArg})))`,
+    ].join('\n'));
+  }
+
 
   /* 账先报、入口后查（次序要紧）：`main` 的体拼不出来时 `mainBody` 也是空的，先查入口就把
      真正拦住的那几笔账盖成了"这份源码里没有 main"—— 那是假话。 */

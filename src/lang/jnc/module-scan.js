@@ -138,7 +138,10 @@ export function scanFns(tree, env, ovl = new Map()) {
     if (h === 'fn-def' || h === 'fn-proto') {
       const nm = named(n);
       const t = nm === null ? null : readDeclType(nm.specs, nm.dcl);
-      if (t !== null && t.shape === 'fn') {
+      /* **顶层的 reactor 不是一格普通函数**（第二百五十六刀）：`reactor g_r { … }` 落出来的是
+         `g_r$start` / `g_r$stop` 加一串反应 —— 收进函数表，调用点查着的是一格签名读不出来的
+         "函数"，报的是"反应器那一族（另发 $start / $stop）"。它那一格在 `emitReactors` 里。 */
+      if (t !== null && t.shape === 'fn' && !(t.mods ?? []).includes('reactor')) {
         if (t.name !== null) {
           const base = ns === null ? t.name : `${ns}$${t.name}`;
           /* **重载**：同名的第二格起换个方言名（`f$o1`）。号按声明次序，与发码那一头
@@ -650,6 +653,11 @@ export function scanAggs(tree, env, ovl = new Map()) {
           /* **完整声明式的属性**（`int property m_p { get() {…} … }`）在树上也是一格函数声明，
              可那对花括号里是取/存两个体 —— 不是方法。整族另算，别混进方法表。 */
           if (m.shape === 'prop' || m.shape === 'event' || m.shape === 'reactor') continue;
+          /* **reactor 也不是方法**（第二百五十六刀）：`reactor m_uiReactor;` 在树上是一格函数
+             声明（`reactor` 那个词落在类型的 mods 里，types.js:31 把它归到 `fn`），可它落出来的
+             是 `$start` / `$stop` 两格加一串反应 —— 收进方法表，`m_uiReactor.start()` 那一句就把
+             它当一格**函数值**，报的是"叫方法时 '.' 的左边不是结构体/类（fnptr）"，指着别处。 */
+          if ((m.type?.mods ?? []).includes('reactor')) continue;
 
           /* 名字走 `fnName`：`construct` / `destruct` / 算符重载那几格**没有普通名字**
              （`m.name` 是 null），而它们正是方法那一族里最要紧的几个。 */
