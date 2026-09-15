@@ -15,6 +15,7 @@
 //
 //   整数（i64）· 函数 + 调用 + return · if（语句位置与**值位置**都行）· while（含 post 步进）
 //   · 打印整数 · **记录与列表**（线性内存 + 一格 bump 分配器）· **多值**（同上）
+//   · **切片**（运行期大小的分配 + 一圈拷贝循环）
 //
 // ## 布局（没有类型的那一层怎么排内存）
 //
@@ -53,7 +54,7 @@ const CAN = new Map([
   ['list-new', true], ['index-get', true], ['index-set', true],
   ['values', true], ['pick', true],
   ['conv', 'wasm 这一批只有 i64：`float` 那一格要 f64 与"两种数值类型"的算术'],
-  ['slice', 'wasm 那边要一格新分配 + 一圈拷贝循环 —— 分配器有了，拷贝那一格还没写'],
+  ['slice', true],
   ['scope-exit', 'wasm 没有 unwind：出口动作要先把 region 的出口显式化'],
   ['loop-exit', 'OIR 还没有带标签的 break（br 跳外层 block 当场报）—— 墙在 OIR 不在 wasm'],
 ]);
@@ -159,12 +160,17 @@ function emitOnce(graph, retOf, multiOf) {
   /** 地址：值一律 i64，取内存要 i32 —— 这一格转换就是"wasm 有内存没有指针"的样子。 */
   const addr = (e) => `(i32.wrap_i64 ${e})`;
 
-  /** 一格 bump 分配：`$hp` 往前推 n 字节，返回装着地址的那格临时量。 */
+  /**
+   * 一格 bump 分配：`$hp` 往前推 n 字节，返回装着地址的那格临时量。
+   * `bytes` 给数字就是编译期大小，给字符串就是一格 **i32 表达式**（运行期大小 ——
+   * 切片要的就是这一格：长度是算出来的）。
+   */
   function alloc(bytes, sc, pre) {
     needMem = true;
     const a = tmp(sc);
+    const n = typeof bytes === 'number' ? `(i32.const ${bytes})` : bytes;
     pre.push(`(local.set ${a} (i64.extend_i32_u (global.get $hp)))`);
-    pre.push(`(global.set $hp (i32.add (global.get $hp) (i32.const ${bytes})))`);
+    pre.push(`(global.set $hp (i32.add (global.get $hp) ${n}))`);
     return a;
   }
 
@@ -274,6 +280,37 @@ function emitOnce(graph, retOf, multiOf) {
         guard(o, i, pre);
         return `(i64.load (i32.add ${addr(`(local.get ${o})`)}`
           + ` (i32.add (i32.const 8) ${addr(`(i64.mul (local.get ${i}) (i64.const 8))`)})))`;
+      }
+      // ---- 切片：**运行期大小的分配 + 一圈拷贝循环** ------------------------------
+      //
+      // 三样都是量过才敢写的：`$hp` 推的字节数可以是算出来的（不必编译期常量）、
+      // `br` 跳**最内层**的 loop 是允许的（跳外层才报）、长度存在偏移 0 好让边界检查有得读。
+      case 'slice': {
+        needMem = true;
+        const o = tmp(sc); pre.push(`(local.set ${o} ${expr(x.ins.obj, sc, pre)})`);
+        const srcLen = `(i64.load ${addr(`(local.get ${o})`)})`;
+        const f = tmp(sc);
+        pre.push(`(local.set ${f} ${x.ins.from === undefined ? '(i64.const 0)' : expr(x.ins.from, sc, pre)})`);
+        const t = tmp(sc);
+        pre.push(`(local.set ${t} ${x.ins.to === undefined ? srcLen : expr(x.ins.to, sc, pre)})`);
+        // 范围检查：0 <= from <= to <= 源长度（越界落 unreachable，与 interp 那侧报错对应）
+        pre.push(`(if (i64.lt_s (local.get ${f}) (i64.const 0)) (then (unreachable)))`);
+        pre.push(`(if (i64.gt_s (local.get ${t}) ${srcLen}) (then (unreachable)))`);
+        pre.push(`(if (i64.gt_s (local.get ${f}) (local.get ${t})) (then (unreachable)))`);
+        const n = tmp(sc);
+        pre.push(`(local.set ${n} (i64.sub (local.get ${t}) (local.get ${f})))`);
+        const a = alloc(`${addr(`(i64.mul (i64.add (local.get ${n}) (i64.const 1)) (i64.const 8))`)}`, sc, pre);
+        pre.push(`(i64.store ${addr(`(local.get ${a})`)} (local.get ${n}))`);
+        const i = tmp(sc);
+        const lab = `$C${++loopSeq}`;
+        pre.push(`(local.set ${i} (i64.const 0))`);
+        pre.push(`(loop ${lab} (if (i64.lt_s (local.get ${i}) (local.get ${n})) (then`
+          + ` (i64.store (i32.add ${addr(`(local.get ${a})`)}`
+          + ` ${addr(`(i64.mul (i64.add (local.get ${i}) (i64.const 1)) (i64.const 8))`)})`
+          + ` (i64.load (i32.add ${addr(`(local.get ${o})`)}`
+          + ` ${addr(`(i64.mul (i64.add (i64.add (local.get ${f}) (local.get ${i})) (i64.const 1)) (i64.const 8))`)})))`
+          + ` (local.set ${i} (i64.add (local.get ${i}) (i64.const 1))) (br ${lab}))))`);
+        return `(local.get ${a})`;
       }
       // ---- 多值：**`carry` 那一问的答案就是"线性内存里的一块"** ------------------
       //
