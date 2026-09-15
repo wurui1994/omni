@@ -51,6 +51,8 @@ const BASICS = ['15', '120', '7', 'ok'];
 const MULTI = ['3', '7', '1 2'];
 /** defer：scope-exit 那一格 —— 逆序 + 早退也跑（八个提供者共用同一格节点） */
 const DEFER = ['in', 'b', 'a', 'out'];
+/** record：record-new / field-get / field-set 那三格 —— **与类型无关**（lua 的表没有类型） */
+const RECORD = ['1', '5', '6'];
 
 const CASES = [
   { name: 'chez', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/basics.ss', toGraph: chezToGraph, expect: BASICS },
@@ -70,6 +72,11 @@ const CASES = [
   { name: 'sbcl+defer', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/defer.lisp', toGraph: sbclToGraph, expect: DEFER },
   { name: 'vlang+defer', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/defer.v', toGraph: vlangToGraph, expect: DEFER },
   { name: 'nim+defer', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/defer.nim', toGraph: nimToGraph, expect: DEFER },
+  // ---- 第四个家族：记录（四门语言四种字面量记号，落同一格 record-new）----
+  { name: 'go+record', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/record.go', toGraph: goToGraph, expect: RECORD },
+  { name: 'lua+record', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/record.lua', toGraph: luaToGraph, expect: RECORD },
+  { name: 'vlang+record', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/record.v', toGraph: vlangToGraph, expect: RECORD },
+  { name: 'nim+record', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/record.nim', toGraph: nimToGraph, expect: RECORD },
 ];
 
 const argv = process.argv.slice(2);
@@ -95,7 +102,7 @@ let fail = 0;
 if (showGaps) {
   for (const b of backends()) {
     const g = gaps(b.name);
-    process.stdout.write(`${b.name}: ${g.length === 0 ? '没有缺口（13 格全接得住）' : `${g.length} 格接不住`}\n`);
+    process.stdout.write(`${b.name}: ${g.length === 0 ? '没有缺口（全接得住）' : `${g.length} 格接不住`}\n`);
     for (const x of g) process.stdout.write(`    ${x.op} —— ${x.why}\n`);
   }
   process.stdout.write('\n');

@@ -14,7 +14,9 @@
 import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
-import { counted, destructure, ops } from '../../src/core/graph/fromtree.js';
+import {
+  counted, destructure, ops, recordNew, fieldGet, fieldSet,
+} from '../../src/core/graph/fromtree.js';
 
 const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
 const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
@@ -65,6 +67,15 @@ function toNode(x) {
     case 'false': return node('const', {}, { value: false });
     case 'name': return node('ref', {}, { name: atomText(kids(x)[0]) });
     case 'paren': return toNode(kids(x)[0]);
+    // `p.x` -> field-get（与 go/V 的 `(sel …)`、nim 的 `(dot …)` 同一格节点）
+    case 'dot': return fieldGet(toNode(kids(x)[0]), atomText(kids(x)[1]));
+    // `{ x = 1, y = 2 }` -> record-new。**lua 的表没有类型**，落的却是同一格 ——
+    // 这正是"record 不要求任何类型存在"那句话的证据（附录 A）。
+    case 'table': return recordNew(kids(x).map((e) => {
+      if (tag(e) !== 'named') throw new Error('lua->graph: 这一批只接 `{ k = v }` 那种表');
+      const [k, v] = kids(e);
+      return [atomText(k), toNode(v)];
+    }));
 
     // ---- 算子 --------------------------------------------------------------
     case 'bin': {
@@ -107,9 +118,12 @@ function toNode(x) {
     case 'assign': {
       const targets = partOf(x, 'targets');
       const values = partOf(x, 'values');
-      return targets.map((t, i) => node('set', {
-        value: values[i] === undefined ? lit(null) : toNode(values[i]),
-      }, { name: nameOf(t) }));
+      return targets.map((t, i) => {
+        const v = values[i] === undefined ? lit(null) : toNode(values[i]);
+        // 左边是一格字段（`p.y = 5`）⇒ field-set；`set` 只认名字
+        if (tag(t) === 'dot') return fieldSet(toNode(kids(t)[0]), atomText(kids(t)[1]), v);
+        return node('set', { value: v }, { name: nameOf(t) });
+      });
     }
     case 'if': {
       const [cond, blk, elifs, els] = kids(x);
@@ -178,7 +192,8 @@ export function luaToGraph(tree) {
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
-//   1. 表（table）、metatable、多返回值、`...`、`goto` 都不在这一批 ——
-//      `ext/lua/SPEC.md` §五那张顺序表说了它们各自排在哪一步。
+//   1. 表只接 `{ k = v }` 那一种（落 record-new）；数组部分、`t[k]`、metatable、
+//      `...`、`goto` 都不在这一批 —— 下标那一格是 `index-get`，不是 `field-get`
+//      （字段名编译期已知、下标运行期算，两者的 lower 不同）。
 //   2. 全局名字当普通名字收（真语义是 `_ENV` 表查）。
 //   3. `for … in`（迭代器三件套）没接：它要 `indirect-call` + 协议，排在 `loop` 之后。

@@ -93,6 +93,10 @@ export function showValue(v) {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(v);
   if (v instanceof Closure) return `<fn ${v.name ?? '?'}>`;
+  // 一格记录（`record-new` 出来的普通对象）。印法两个后端共用这一句
+  if (typeof v === 'object') {
+    return `{${Object.entries(v).map(([k, x]) => `${k} = ${showValue(x)}`).join(', ')}}`;
+  }
   return String(v);
 }
 
@@ -104,6 +108,30 @@ export const pick = (v, i) => {
   if (v instanceof Values) return v.list[i] ?? null;
   if (v !== null && typeof v === 'object' && Array.isArray(v.__vals)) return v.__vals[i] ?? null;
   return i === 0 ? v : null;
+};
+
+/**
+ * **一格记录就是一格普通 JS 对象** —— 两个后端**表示相同**（不是"各自落一种再对齐"）：
+ * interp 建的是 `{x: 1}`，js 后端落出来的也是 `({x: 1})`。所以取字段这一句
+ * 与 `pick` 一样只写一遍，js 后端里那句 `__field(...)` 走的是这一个函数。
+ *
+ * 字段不存在时的答案是**语言的事**（lua 给 nil、go 编译期就报）—— 图这一层给最保守的：
+ * 没有这一格就当场报，不静默出 undefined。
+ */
+export const field = (obj, name) => {
+  if (obj === null || obj === undefined || typeof obj !== 'object') {
+    throw new Error(`field-get: 不是一格记录（.${name}）`);
+  }
+  if (!(name in obj)) throw new Error(`field-get: 没有这一格字段：.${name}`);
+  return obj[name];
+};
+
+export const setField = (obj, name, value) => {
+  if (obj === null || obj === undefined || typeof obj !== 'object') {
+    throw new Error(`field-set: 不是一格记录（.${name}）`);
+  }
+  obj[name] = value;
+  return null;
 };
 
 /** 一格 thunk（`lazy` / `body` 端口交出来的东西）。调度器用它切段与延后求值。 */
@@ -184,6 +212,15 @@ function run(n, env, io) {
     case 'func': return new Closure(n.attrs.params ?? [], n.ins.body, env, n.attrs.name);
     case 'values': return new Values(arg('args') ?? []);
     case 'pick': return pick(arg('from'), Number(n.attrs.index ?? 0));
+    case 'record-new': {
+      // 字段名是**附属**（`names`），值是入端口 —— 名字表与值表按位置对上
+      const vals = arg('fields') ?? [];
+      const rec = {};
+      (n.attrs.names ?? []).forEach((k, i) => { rec[k] = vals[i] ?? null; });
+      return rec;
+    }
+    case 'field-get': return field(arg('obj'), n.attrs.field);
+    case 'field-set': return setField(arg('obj'), n.attrs.field, arg('value'));
     case 'ret': throw new Return(arg('value') ?? null);
     case 'call': {
       const fn = arg('fn');

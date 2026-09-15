@@ -485,16 +485,32 @@ V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
 ```
  9 机器  bind / func / branch / prim / ref / call / const   （九门语言全有）
  8 机器  loop / set          7 机器  region / ret
- 4 机器  scope-exit  go nim sbcl vlang
+ 4 机器  scope-exit                       go nim sbcl vlang
+ 4 机器  record-new / field-get / field-set  go lua nim vlang
  2 能力  values / pick       go lua
 ```
 
 `scope-exit` 补上了 nim 与 V 的 `defer`（各多一个 `examples/defer.*`，与 go/CL 共用
 同一份期望输出 `in / b / a / out`），四个提供者，够 G5 的"机器"线。
 
-下一批：`record` 那一族（`record-new` / `field-get` / `field-set`），
-以及 `scope-exit` 还欠的四个提供者（lua 的 `<close>`、mojo 的 `with`、
-freebasic 的 `Scope`、cpp 的 RAII）。
+**第四批：记录（`record-new` / `field-get` / `field-set`）已落地** —— 14 → 17 格。
+判据是第四个例子家族（`ext/{go,lua,vlang,nim}/examples/record.*`，期望输出 `1 / 5 / 6`），
+四门语言的四种记号落**同一格** `record-new`：go 的 `(kv …)`、lua 的 `(named …)`、
+V 的 `(f …)`、nim 的 `T(x: 1)`；取字段那一格收下两种标签（`sel` 与 `dot`）。
+
+这一批最要紧的一条是**类型不参与**：lua 的 `{x = 1}` 没有类型、go 的 `Point{x: 1}` 有，
+落到的是同一格节点，类型名根本不进图 —— 附录 A 那句"删光所有类型，`record` 还是一格
+有 0 个字段的存储"第一次有了可跑的证据。
+
+两格没有合并的理由也写在声明里：`field-get`（字段名编译期已知，lower 成偏移量）与
+`index-get`（下标运行期算，lower 要边界检查）**不是一格**。
+
+新记的一笔账：nim 的 `T(x: 1)`（对象构造）与 `f(x = 1)`（命名实参）在树上是同一格 `kv`，
+这一批按"实参全是 kv"判 —— 分开它们要驱动器能回问"这名字登记成类型了吗"，
+**与 cpp 那笔账是同一笔**（A.5 第 3 笔）。一笔账现在有两个欠款人，优先级因此上调。
+
+下一批：`scope-exit` 还欠的四个提供者（lua 的 `<close>`、mojo 的 `with`、
+freebasic 的 `Scope`、cpp 的 RAII），以及 `index-get` / `index-set` 那一族。
 
 ### A.7 附属节点（不逐个列，按挂点分七类）
 

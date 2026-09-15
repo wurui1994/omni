@@ -17,7 +17,7 @@ import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
   ops,
-  destructure,
+  destructure, recordNew, fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -51,6 +51,18 @@ function toNode(x) {
       return node('ref', {}, { name: n });
     }
     case 'paren': return toNode(kids(x)[0]);
+    // `p.x` -> field-get（与 lua/nim 的 `(dot …)`、V 的 `(sel …)` 同一格节点）
+    case 'sel': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
+    // `Point{x: 1, y: 2}` -> record-new。**类型名不进图**（type 是端口的 sort）
+    case 'lit': {
+      const elems = kids(x).slice(1);
+      const pairs = elems.map((e) => {
+        if (tag(e) !== 'kv') throw new Error('go->graph: 这一批只接带字段名的复合字面量');
+        const [k, v] = kids(e);
+        return [nameOf(k), toNode(v)];
+      });
+      return recordNew(pairs);
+    }
 
     // ---- 算子 --------------------------------------------------------------
     case 'bin': {
@@ -86,6 +98,8 @@ function toNode(x) {
       }
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
+        // 左边是一格字段（`p.y = 5`）⇒ field-set；`set` 只认名字
+        if (tag(t) === 'sel') return fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v);
         return isDef
           ? node('bind', { init: v }, { name: nameOf(t) })
           : node('set', { value: v }, { name: nameOf(t) });
@@ -143,8 +157,10 @@ function toNode(x) {
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
       return node('call', { fn: toNode(fn), args: argNodes });
     }
-    // 顶层的这几样在这一批里没有对应物（包、导入、类型声明）—— 丢掉，不猜
-    case 'import': case 'type-decl': case 'const-decl': case 'var-decl': return [];
+    // 顶层的这几样在这一批里没有对应物（包、导入、类型声明）—— 丢掉，不猜。
+    // `typedecl` 那格：**struct 的字段表不进图**（record-new 的字段名从字面量那儿来），
+    // 树上的标签是 `typedecl` 不是 `type-decl` —— 原来写错了一格，record 那份例子量出来的。
+    case 'import': case 'typedecl': case 'const-decl': case 'var-decl': return [];
     default:
       throw new Error(`go->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
   }
@@ -162,4 +178,5 @@ export function goToGraph(tree) {
 //   1. 类型全丢（见文件头）；`var` / `const` 顶层声明也丢 —— 例子里不用它们。
 //   2. 多返回值、`x, ok = m[k]`、defer、goroutine、channel 都不在这一批
 //      （`ext/go/SPEC.md` §五那张顺序表说了它们各排在哪一步）。
-//   3. 选择器（`a.b`）没有节点：`record` 那一格排在 `multi-value` / `scope-exit` 之后。
+//   3. 选择器（`a.b`）落 `field-get`（第四批），但**只当它是取字段** ——
+//      `fmt.Println` 那种"包名点方法"仍在 `call` 那一格特判，因为它不是取字段。

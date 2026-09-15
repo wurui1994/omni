@@ -15,7 +15,7 @@
 //      判据在 `tests/graph/run.js`（语言 × 后端的矩阵，加一门语言或一个后端自动多几格）。
 
 import { NODES, declOf } from './nodes.js';
-import { evalGraph, showValue, truthy, pick } from './eval.js';
+import { evalGraph, showValue, truthy, pick, field, setField } from './eval.js';
 import { toSx } from './graph.js';
 import { PRIMS } from './prims.js';
 
@@ -125,6 +125,13 @@ function jsExpr(x) {
       return `({ __vals: [${args.map(jsExpr).join(', ')}] })`;
     }
     case 'pick': return `__pick(${jsExpr(x.ins.from)}, ${Number(x.attrs.index ?? 0)})`;
+    // 记录：**表示与 interp 相同**（一格普通对象）—— 取字段共用 eval 里那一句 `field`
+    case 'record-new': {
+      const vals = (Array.isArray(x.ins.fields) ? x.ins.fields : [x.ins.fields]).filter((y) => y !== undefined);
+      const names = x.attrs.names ?? [];
+      return `({ ${names.map((k, i) => `${JSON.stringify(k)}: ${jsExpr(vals[i])}`).join(', ')} })`;
+    }
+    case 'field-get': return `__field(${jsExpr(x.ins.obj)}, ${JSON.stringify(x.attrs.field)})`;
     default: return `(() => { ${jsStmt(x)} })()`;
   }
 }
@@ -166,6 +173,7 @@ function jsStmt(x) {
   switch (x.op) {
     case 'bind': return `let ${jsName(x.attrs.name)} = ${jsExpr(x.ins.init)};`;
     case 'set': return `${jsName(x.attrs.name)} = ${jsExpr(x.ins.value)};`;
+    case 'field-set': return `__setField(${jsExpr(x.ins.obj)}, ${JSON.stringify(x.attrs.field)}, ${jsExpr(x.ins.value)});`;
     case 'ret': return `return ${x.ins.value === undefined ? 'null' : jsExpr(x.ins.value)};`;
     case 'loop': return `while (__truthy(${jsExpr(x.ins.cond)})) { ${asStmts(x.ins.body).map(jsStmt).join(' ')} }`;
     case 'region': return `{ ${withExits(asStmts(x.ins.body).map(jsStmt).join(' '))} }`;
@@ -182,14 +190,14 @@ function jsStmt(x) {
 
 function jsLower(g) {
   const body = withExits(asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n'));
-  const source = `(__out, __show, __truthy, __pick) => {\n${body}\n}`;
+  const source = `(__out, __show, __truthy, __pick, __field, __setField) => {\n${body}\n}`;
   return {
     text: source,
     run: () => {
       const out = [];
       // eslint-disable-next-line no-new-func
       const f = new Function(`return ${source};`)();
-      f(out, showValue, truthy, pick);
+      f(out, showValue, truthy, pick, field, setField);
       return { value: null, out };
     },
   };

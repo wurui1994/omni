@@ -15,7 +15,7 @@ import {
 import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
-  ops,
+  ops, recordNew, fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
@@ -44,6 +44,8 @@ function toNode(x) {
       return node('ref', {}, { name: n });
     }
     case 'paren': return toNode(kids(x)[0]);
+    // `p.x` -> field-get（与 lua 的 `(dot …)`、go/V 的 `(sel …)` 同一格节点）
+    case 'dot': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
     case 'line': case 'body': case 'impl': return many(kids(x));
     case 'expr': return toNode(kids(x)[0]);
     // `defer { … }` / `defer: …` -> scope-exit（与 go 的 defer、CL 的 unwind-protect
@@ -74,10 +76,19 @@ function toNode(x) {
     }
     case 'assign': {
       const [op, lhs, rhs] = kids(x);
+      const o = leaf(op) === '=' ? null : OPS.get(String(leaf(op)).replace('=', ''));
+      if (leaf(op) !== '=' && o === undefined) {
+        throw new Error(`nim->graph: 这个复合赋值还没接：${leaf(op)}`);
+      }
+      // 左边是一格字段（`p.y = 5`）⇒ field-set；`set` 只认名字
+      if (tag(lhs) === 'dot') {
+        const obj = () => toNode(kids(lhs)[0]);
+        const f = leaf(kids(lhs)[1]);
+        const v = o === null ? toNode(rhs) : bin(o, fieldGet(obj(), f), toNode(rhs));
+        return fieldSet(obj(), f, v);
+      }
       const name = nameOf(lhs);
-      if (leaf(op) === '=') return node('set', { value: toNode(rhs) }, { name });
-      const o = OPS.get(String(leaf(op)).replace('=', ''));
-      if (o === undefined) throw new Error(`nim->graph: 这个复合赋值还没接：${leaf(op)}`);
+      if (o === null) return node('set', { value: toNode(rhs) }, { name });
       return node('set', {
         value: bin(o, node('ref', {}, { name }), toNode(rhs)),
       }, { name });
@@ -121,7 +132,15 @@ function toNode(x) {
     // 命令式调用与括号调用是**同一格节点**（语法两条产生式，图上一格）
     case 'call': case 'command': {
       const [fn, args] = kids(x);
-      const argNodes = args === undefined ? [] : many(kids(args));
+      const argKids = args === undefined ? [] : kids(args);
+      // `Point(x: 1, y: 2)` -> record-new。**判据是"实参全是 kv"** —— nim 的对象构造
+      // 与命名实参在树上是同一格（`kv` 那两条产生式把 `:` 与 `=` 折成一格），
+      // 分开它们要驱动器能回问一句"这个名字登记成类型了吗" —— 与 cpp 那笔账是同一笔
+      // （`docs/design/node-graph-contract.md` 附录 A.5 第 3 笔）。这一批用形状判，记在账上。
+      if (argKids.length > 0 && argKids.every((a) => tag(a) === 'kv')) {
+        return recordNew(argKids.map((a) => [nameOf(kids(a)[0]), toNode(kids(a)[1])]));
+      }
+      const argNodes = many(argKids);
       const callee = (tag(fn) === 'name' || tag(fn) === 'n') ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
       return node('call', { fn: toNode(fn), args: argNodes });
@@ -143,3 +162,6 @@ export function nimToGraph(tree) {
 //      `ext/nim/SPEC.md` §五第 1 项：效应六格的边界是那一门第一件要做的事）。
 //   2. `result` 隐式变量、`discard`、模板/宏、迭代器都不在这一批。
 //   3. `var` / `sink` / `lent` 形参丢掉 —— 它们是 `lifetime` 那一栏。
+//   4. **对象构造与命名实参分不开**：`T(x: 1)` 与 `f(x = 1)` 在树上是同一格 `kv`，
+//      这一批按"实参全是 kv"判成 record-new。要分开得驱动器能回问"这名字是类型吗" ——
+//      与 cpp 那笔账同一笔（设计文档附录 A.5 第 3 笔）。

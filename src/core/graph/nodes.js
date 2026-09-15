@@ -4,6 +4,9 @@
 // （`docs/design/node-graph-contract.md` 附录 A.6：骨架 26 格）。这一份先落**第一批**：
 // 够跑通一门语言"含全部基础要素的完整例子"的最小集，13 格。
 //
+// 之后按批往上加，每一批都要有一个新的例子家族做判据（`tests/graph/run.js`）：
+// 第二批多值（+2）、第三批 scope-exit（+1）、第四批记录（+3）—— 现在 **17 格**。
+//
 // ## 先说清哪几样**不给节点**（这是这一份最要紧的内容，四条全有出处）
 //
 //   * **type 不是节点。** 它是端口的 `sort`（一栏声明），不是图上的一个格子。
@@ -136,6 +139,30 @@ export const NODES = new Map([
   N('pick', 'expr', [{ name: 'from', sem: SEM.value, multi: true }], {
     attrs: ['index'],
     doc: '多出端口的第 k 格。`x, y := f()` 那一侧就是一串它',
+  }),
+
+  // ---- 记录（3 格）：**一格存储 + 按名字取/放**（附录 A.1：九门语言都有）--------
+  //
+  // 这三格与"类型"没有关系，这是它们最要紧的一条性质（附录 A 第 69 行那句话）：
+  // lua 的 `{x = 1}` 没有类型、go 的 `Point{x: 1}` 有 —— **落到的是同一格节点**，
+  // 类型名不进图（要用起来是 `carry` 那一问的事）。字段名是**附属**，不是端口名。
+  //
+  // 为什么不合成一格"按键取值"（index-get）：字段名在**编译期已知**、下标是运行期算的，
+  // 两者的 `lower` 不同（前者是偏移量，后者要边界检查）。合成一格会把这个差别丢掉。
+  N('record-new', 'expr', [{ name: 'fields', sem: SEM.value, rest: true }], {
+    attrs: ['names'], effects: ['allocates'], lifetime: 'owns',
+    doc: 'go `T{…}` / lua `{x=1}` / V `T{…}` / nim `T(x: 1)` / CL defstruct',
+  }),
+  N('field-get', 'expr', [{ name: 'obj', sem: SEM.value }], {
+    attrs: ['field'], effects: ['reads'], lifetime: 'borrows(obj)',
+    doc: 'go/V 的 `(sel …)` / lua/nim 的 `(dot …)` —— 九门全有',
+  }),
+  N('field-set', 'stat', [
+    { name: 'obj', sem: SEM.value },
+    { name: 'value', sem: SEM.value },
+  ], {
+    attrs: ['field'], effects: ['writes'], outs: [],
+    doc: '`p.y = 5` —— 左边是字段的赋值落这格，不落 set（set 只认名字）',
   }),
 ]);
 

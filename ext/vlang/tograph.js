@@ -14,7 +14,7 @@ import {
 import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
-  ops,
+  ops, recordNew, fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -50,6 +50,13 @@ function toNode(x) {
     }
     case 'paren': return toNode(kids(x)[0]);
     case 'mut': return toNode(kids(x)[0]);
+    // `p.x` -> field-get；`Point{ x: 1 }` -> record-new（**类型名不进图**）。
+    // V 的字段表标签是 `f`，go 的是 `kv`，lua 的是 `named` —— 三种记号一格节点。
+    case 'sel': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
+    case 'lit': return recordNew(kids(x).slice(1).map((e) => {
+      if (tag(e) !== 'f') throw new Error('v->graph: 这一批只接带字段名的结构字面量');
+      return [leaf(kids(e)[0]), toNode(kids(e)[1])];
+    }));
 
     case 'bin': {
       const [op, a, b] = kids(x);
@@ -75,6 +82,8 @@ function toNode(x) {
       const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
+        // 左边是一格字段（`p.y = 5`）⇒ field-set；`set` 只认名字
+        if (tag(t) === 'sel') return fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v);
         return isDef
           ? node('bind', { init: v }, { name: nameOf(t) })
           : node('set', { value: v }, { name: nameOf(t) });
@@ -137,4 +146,5 @@ export function vlangToGraph(tree) {
 //   1. option/result（`?T` / `!T` / `or {}` / `!` 传播）不在这一批 —— 它是
 //      **错误出端口 + 切段**，排在 `multi-value` 那一步（`ext/vlang/SPEC.md` §五第 1 项）。
 //   2. `mut` 只拆不检查（它是一格不产生代码的检查特性）。
-//   3. struct / sumtype / match / spawn / chan 都不在这一批。
+//   3. struct **声明**丢掉（字段名从字面量那儿来 —— record-new 不要求类型存在）；
+//      sumtype / match / spawn / chan 都不在这一批。

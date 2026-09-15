@@ -135,6 +135,20 @@ export const elseOf = (x) => (x === undefined || x === null ? undefined
  * @param {any} value 右边那**一格**（多值的生产者，通常是一格 call）
  * @param {{declare?: boolean, tmp?: string}} opts declare = 是声明（bind）还是赋值（set）
  */
+/**
+ * **记录那三格的搭法**（go / lua / V / nim 四门共用）。字段名是**附属**不是端口 ——
+ * 所以建节点这一句四门语言完全相同，各语言只剩"我的树里哪个标签是字段访问"要自己说。
+ *
+ * @param {Array<[string, any]>} pairs 字段名 × 已经出好的值节点
+ */
+export const recordNew = (pairs) => node(
+  'record-new',
+  { fields: pairs.map(([, v]) => v) },
+  { names: pairs.map(([k]) => k) },
+);
+export const fieldGet = (obj, name) => node('field-get', { obj }, { field: name });
+export const fieldSet = (obj, name, value) => node('field-set', { obj, value }, { field: name });
+
 export function destructure(names, value, { declare = true, tmp = '__mv' } = {}) {
   const holder = `${tmp}${names.join('$')}`;
   const out = [node('bind', { init: value }, { name: holder, keepMulti: true })];
