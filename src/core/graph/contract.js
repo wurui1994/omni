@@ -20,6 +20,9 @@ import {
 } from './eval.js';
 import { toSx } from './graph.js';
 import { PRIMS } from './prims.js';
+import { emitWat, watCan, runWat, Gap } from './backend-wat.js';
+
+export { Gap };
 
 /** 已登记的后端。**核心不认识任何一个后端的细节**，只按这五问要答案。 */
 const BACKENDS = new Map();
@@ -88,8 +91,26 @@ registerBackend({
   lower: (g) => jsLower(g),
 });
 
-// **内建的 js 落法不在这儿** —— 它写在 `prims.js` 每一行的 `js` 那一格上。
-// 原来这儿有一张 16 行的 `JS_PRIM` 模板表，与 eval 里那张 switch 是同一份知识抄两遍：
+// ---- 后端四：`wat` —— **wasm 这条腿，第一个真有缺口的后端** -----------------------
+//
+// 它的价值不在"多一条腿"，在让 `gaps()` 第一次真的有内容：前三个后端都住在 JS 宿主里，
+// 什么都接得住。判据也不同：出来的文本交给**另一个前端**（frontend-wat）读、
+// 用 MIR 的解释器真跑 —— 正确性由一条互不相干的已有实现来证。
+registerBackend({
+  name: 'wat',
+  can: watCan,
+  carry: (sort) => (sort === 'expr' ? 'i64 值（这一批只有整数）' : '一条 wasm 指令'),
+  effect: (e) => (e === 'may-early-exit'
+    ? 'return 有、带标签的 break 没有（墙在 OIR）'
+    : 'wasm 的次序天然是栈序'),
+  region: () => '函数级的局部量 + 结构化控制流（wasm 没有独立的域）',
+  lower: (g) => {
+    const text = emitWat(g);
+    return { text, run: () => runWat(text) };
+  },
+});
+
+// **内建的 js 落法不在这儿** —— 它写在 `prims.js` 每一行的 `js` 那一格上。// 原来这儿有一张 16 行的 `JS_PRIM` 模板表，与 eval 里那张 switch 是同一份知识抄两遍：
 // 加一格内建要改两处。现在改一行。
 
 /** 名字要能当 JS 标识符用（Scheme 的 `max2`、`string-append` 那种带横杠的名字）。 */

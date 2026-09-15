@@ -299,6 +299,20 @@ G4 判据。
 第一次真的有内容** —— 那是 §6 第 2 条纪律（"接不住是构建期错误，清单是算出来的待办"）
 第一次被检验。
 
+**（后续）wasm 后端已经落地** —— `src/core/graph/backend-wat.js`，第四条腿。
+它的判据不是自己说的：出来的 WAT 文本交给**另一个前端**（`frontend-wat`）读、
+用 `interpretMir` 真跑，输出与 interp / js 两条腿逐行相同。量出来的现状：
+
+- 新加一个例子家族 `intmath`（`ext/{lua,go}/examples/intmath.*`，期望 `15 / 120`）——
+  刻意"贫瘠"：只有整数、函数、调用、语句位置的 `if`、`while`、打印一格整数。
+  它是**四个后端第一次全绿**的那一格。
+- `gaps('wat')` 现在真的印出 **10 格**：`scope-exit` / `values` / `pick` /
+  `record-new` / `field-get` / `field-set` / `list-new` / `index-get` / `index-set` /
+  `loop-exit`，每格一句人话（不是"暂不支持"）。
+- 矩阵里因此第一次有了 **skip** 这一档：33 格跳过，**每一格都带理由**
+  （"字符串要线性内存里的布局" / "嵌套的函数（闭包）还没接" / "墙在 OIR 不在 wasm"）。
+  跳过不是失败 —— 那正是 §6 第 2 条要的样子：待办是算出来的，不是文档里许的愿。
+
 ## 11. 落地顺序（每步一个可量产出）
 
 1. **十份 `ext/<lang>/SPEC.md`**（格式见 `docs/EXTENSIONS.md` §八）。

@@ -1,0 +1,316 @@
+// src/core/graph/backend-wat.js —— **第四个后端：wasm（WAT 文本）**
+//
+// `docs/design/node-graph-contract.md` §9 那段"先量后写"的下一步。这一份的价值不在
+// "多一条腿"，在**让缺口清单第一次真的有内容**：前三个后端（interp / sx / js）都住在
+// JS 宿主里，什么都接得住，于是 `gaps()` 一直是空转的。wasm 不一样 —— 它没有字符串、
+// 没有 GC、控制流是结构化的，接不住的东西当场说出名字。
+//
+// ## 判据（这一份不许自说自话）
+//
+// 出来的 WAT 文本交给**另一个前端**（`src/core/frontend-wat/lower.js`，WAT -> OIR）读，
+// 再用 `interpretMir` 真跑一遍，输出与 interp / js 两条腿逐行相同。
+// 也就是说：这一格的正确性由一条**互不相干的**已有实现来证，不是由我自己证。
+//
+// ## 能接的子集（量出来的，见设计文档 §9 那三条）
+//
+//   整数（i64）· 函数 + 调用 + return · 语句位置的 if · while（含 post 步进）· 打印整数
+//
+// ## 接不住的，有名有姓
+//
+//   * 字符串与记录 / 列表 —— 要线性内存里的布局，这一批没做。
+//   * 表达式位置的 `if`（`branch` 出值）—— OIR 那侧 block 不带 result。
+//   * `loop-exit`（break / continue）—— **墙在 OIR**：`br` 跳外层 block 报
+//     "OIR has no labeled break"。这一条是量出来的，不是猜的。
+//   * 闭包（`func` 当值用）· 多值（`values` / `pick`）· `scope-exit`。
+
+import { NODES } from './nodes.js';
+// 判据那一侧：出来的文本交给**另一个前端**读、用 MIR 的解释器真跑
+// （所以这一格的正确性不由我自己证 —— 见文件头"判据"那一段）。
+import { lowerWat } from '../frontend-wat/lower.js';
+import { Diagnostics, SourceFile } from '../source/diag.js';
+import { interpretMir } from '../mir/interp.js';
+
+/** 能接住的节点：**白名单**（不在名单里的一律给一句人话，那句话就是账）。 */
+const CAN = new Map([
+  ['const', true], ['ref', true], ['bind', true], ['set', true],
+  ['call', true], ['prim', true], ['branch', true], ['loop', true],
+  ['region', true], ['func', true], ['ret', true],
+  ['values', 'wasm 没有多值出端口的表示（要先定 carry 那一问的答案）'],
+  ['pick', 'wasm 没有多值出端口的表示'],
+  ['record-new', 'wasm 只有线性内存，记录要先定布局（field 的偏移量）'],
+  ['field-get', 'wasm 只有线性内存，记录要先定布局'],
+  ['field-set', 'wasm 只有线性内存，记录要先定布局'],
+  ['list-new', 'wasm 只有线性内存，列表要先定布局与长度的存法'],
+  ['index-get', 'wasm 只有线性内存，列表要先定布局'],
+  ['index-set', 'wasm 只有线性内存，列表要先定布局'],
+  ['scope-exit', 'wasm 没有 unwind：出口动作要先把 region 的出口显式化'],
+  ['loop-exit', 'OIR 还没有带标签的 break（br 跳外层 block 当场报）—— 墙在 OIR 不在 wasm'],
+]);
+
+export function watCan(op) {
+  const ans = CAN.get(op);
+  if (ans === undefined) return NODES.has(op) ? `wat 后端还没接：${op}` : `no such node: ${op}`;
+  return ans;
+}
+
+/** 一格算符 -> wasm 指令。比较那一族出 i32（只许在条件位置用），别的出 i64。 */
+const ARITH = new Map([
+  ['+', 'i64.add'], ['-', 'i64.sub'], ['*', 'i64.mul'],
+  ['/', 'i64.div_s'], ['%', 'i64.rem_s'],
+]);
+const CMP = new Map([
+  ['<', 'i64.lt_s'], ['>', 'i64.gt_s'], ['<=', 'i64.le_s'], ['>=', 'i64.ge_s'],
+  ['=', 'i64.eq'], ['!=', 'i64.ne'],
+]);
+
+/** wasm 的名字：`$` + 安全化（`max2` / `string-append` 那种带横杠的名字要转）。 */
+const wname = (n) => `$${String(n).replace(/[^A-Za-z0-9_]/g, '_')}`;
+
+class Gap extends Error {}
+
+/** 缺口那句话：白名单里写好的理由优先（`can` 与 `lower` 说的是同一句）。 */
+const why = (op, where) => {
+  const ans = CAN.get(op);
+  return new Gap(typeof ans === 'string' ? ans : `${where}上还接不住 ${op}`);
+};
+
+/** 一格函数的作用域：名字 -> wasm 局部量名。嵌套 region 里同名的量各占一格。 */
+class Scope {
+  constructor(fn, parent = null) { this.fn = fn; this.parent = parent; this.names = new Map(); }
+
+  declare(name) {
+    let id = wname(name);
+    while (this.fn.taken.has(id)) id = `${id}_`;
+    this.fn.taken.add(id);
+    this.fn.locals.push(id);
+    this.names.set(name, id);
+    return id;
+  }
+
+  lookup(name) {
+    for (let s = this; s !== null; s = s.parent) if (s.names.has(name)) return s.names.get(name);
+    return null;
+  }
+}
+
+const asList = (x) => (x === undefined || x === null ? [] : (Array.isArray(x) ? x : [x]));
+
+/**
+ * 一份 WAT 模块。`funcs` 是"顶层 bind 了一格 func"的那些，别的顶层语句进 `$__entry`。
+ * 每个函数自己带一份 `locals`（wasm 的局部量是函数级的，所以 region 只影响名字查找）。
+ */
+class Mod {
+  constructor() { this.fns = new Map(); this.out = []; }
+
+  /** 建一格函数：`taken` 防重名、`locals` 收局部量、`ret` 记它到底出不出值。 */
+  fn(name, params) {
+    const f = { name, params, locals: [], taken: new Set(params.map(wname)), body: [], ret: false };
+    this.fns.set(name, f);
+    return f;
+  }
+}
+
+/** 顶层 bind 的那些函数名（`call` 要认得它们 —— 别的名字当局部量）。 */
+function topFuncs(items) {
+  const names = new Map();
+  for (const it of items) {
+    if (it !== null && it !== undefined && it.op === 'bind' && it.ins?.init?.op === 'func') {
+      names.set(it.attrs.name, wname(`f_${it.attrs.name}`));
+    }
+  }
+  return names;
+}
+
+/**
+ * 出一份 WAT。**跑两遍**：第一遍只为把"哪个函数出值"数出来（语句位置的调用要不要
+ * `drop` 取决于它），第二遍拿着那张表出正式的文本。图都很小，两遍比猜便宜。
+ */
+function emitOnce(graph, retOf) {
+  const items = asList(graph.kind === 'graph' ? graph.body : graph);
+  const mod = new Mod();
+  const fns = topFuncs(items);
+  let loopSeq = 0;
+
+  const isTrue = (x) => x !== null && x !== undefined
+    && ((x.lit === true) || (x.op === 'const' && x.attrs.value === true));
+
+  /** 条件位置：出 i32。比较那一族直接出，别的与 0 比。 */
+  function cond(x, sc) {
+    if (isTrue(x)) return '(i32.const 1)';
+    if (x !== null && x !== undefined && x.op === 'prim' && CMP.has(x.attrs.name)) {
+      const [a, b] = asList(x.ins.args);
+      return `(${CMP.get(x.attrs.name)} ${expr(a, sc)} ${expr(b, sc)})`;
+    }
+    return `(i64.ne ${expr(x, sc)} (i64.const 0))`;
+  }
+
+  /** 值位置：出 i64。**只有整数**（字符串 / 记录 / 列表在 `can` 那儿就挡住了）。 */
+  function expr(x, sc) {
+    if (x === null || x === undefined) return '(i64.const 0)';
+    if (x.lit !== undefined) return litOf(x.lit);
+    switch (x.op) {
+      case 'const': return litOf(x.attrs.value);
+      case 'ref': {
+        const id = sc.lookup(x.attrs.name);
+        if (id === null) {
+          if (fns.has(x.attrs.name)) throw new Gap('函数当值用（闭包）还没接');
+          throw new Gap(`没绑过的名字：${x.attrs.name}`);
+        }
+        return `(local.get ${id})`;
+      }
+      case 'prim': {
+        const args = asList(x.ins.args);
+        const op = ARITH.get(x.attrs.name);
+        if (op !== undefined) return `(${op} ${expr(args[0], sc)} ${expr(args[1], sc)})`;
+        if (CMP.has(x.attrs.name)) {
+          // 比较出 i32，要当值用得补一格符号扩展
+          return `(i64.extend_i32_s ${cond(x, sc)})`;
+        }
+        throw new Gap(`这格内建还没接：${x.attrs.name}`);
+      }
+      case 'call': return callOf(x, sc);
+      default: throw why(x.op, '值位置');
+    }
+  }
+
+  function litOf(v) {
+    if (typeof v === 'number' && Number.isInteger(v)) return `(i64.const ${v})`;
+    if (v === true) return '(i64.const 1)';
+    if (v === false || v === null || v === undefined) return '(i64.const 0)';
+    if (typeof v === 'string') throw new Gap('字符串要线性内存里的布局');
+    throw new Gap(`这格字面量还没接：${JSON.stringify(v)}`);
+  }
+
+  function callOf(x, sc) {
+    const fn = x.ins.fn;
+    const name = fn !== null && fn !== undefined && fn.op === 'ref' ? fn.attrs.name : null;
+    if (name === null || !fns.has(name)) throw new Gap('间接调用（函数当值）还没接');
+    const args = asList(x.ins.args).map((a) => expr(a, sc));
+    return `(call ${fns.get(name)}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
+  }
+
+  function stmts(xs, sc, f) { return asList(xs).flatMap((y) => stmt(y, sc, f)); }
+
+  function stmt(x, sc, f) {
+    if (x === null || x === undefined) return [];
+    if (Array.isArray(x)) return stmts(x, sc, f);
+    if (x.lit !== undefined) return [];
+    switch (x.op) {
+      case 'bind': {
+        if (x.ins.init?.op === 'func') throw new Gap('嵌套的函数（闭包）还没接');
+        const id = sc.declare(x.attrs.name);
+        return [`(local.set ${id} ${expr(x.ins.init, sc)})`];
+      }
+      case 'set': {
+        const id = sc.lookup(x.attrs.name);
+        if (id === null) throw new Gap(`赋值到没绑过的名字：${x.attrs.name}`);
+        return [`(local.set ${id} ${expr(x.ins.value, sc)})`];
+      }
+      case 'region': return stmts(x.ins.body, new Scope(f, sc), f);
+      case 'branch': {
+        if (x.ins.else === undefined) {
+          return [`(if ${cond(x.ins.cond, sc)} (then ${stmts(x.ins.then, new Scope(f, sc), f).join(' ')}))`];
+        }
+        return [`(if ${cond(x.ins.cond, sc)}`
+          + ` (then ${stmts(x.ins.then, new Scope(f, sc), f).join(' ')})`
+          + ` (else ${stmts(x.ins.else, new Scope(f, sc), f).join(' ')}))`];
+      }
+      case 'loop': {
+        // while 的形状：`(loop $L (if cond (then 体 步进 (br $L))))`
+        // —— **量过的那一条**：`br` 只能跳最内层，所以 while 只能长这个样子。
+        const lab = `$L${++loopSeq}`;
+        const inner = new Scope(f, sc);
+        const body = stmts(x.ins.body, inner, f).join(' ');
+        const post = stmts(x.ins.post, inner, f).join(' ');
+        return [`(loop ${lab} (if ${cond(x.ins.cond, sc)} (then ${body} ${post} (br ${lab}))))`];
+      }
+      case 'ret': {
+        if (x.ins.value === undefined) return ['(return)'];
+        f.ret = true;
+        return [`(return ${expr(x.ins.value, sc)})`];
+      }
+      case 'prim': {
+        if (x.attrs.name !== 'print') return [`(drop ${expr(x, sc)})`];
+        const args = asList(x.ins.args);
+        if (args.length !== 1) throw new Gap('打印只接一格实参（多格要先有字符串拼接）');
+        return [`(call $print ${expr(args[0], sc)})`];
+      }
+      case 'call': {
+        const fn = x.ins.fn;
+        const name = fn?.op === 'ref' ? fn.attrs.name : null;
+        const call = callOf(x, sc);
+        return [retOf.get(name) === true ? `(drop ${call})` : call];
+      }
+      default: throw why(x.op, '语句位置');
+    }
+  }
+
+  // ---- 走一遍顶层：函数各成一格 wat func，别的语句进 `$__entry` --------------
+  const entry = mod.fn('$__entry', []);
+  const entryScope = new Scope(entry);
+  for (const it of items) {
+    if (it?.op === 'bind' && it.ins?.init?.op === 'func') {
+      const fnode = it.ins.init;
+      const params = (fnode.attrs.params ?? []).map((p) => String(p));
+      const f = mod.fn(fns.get(it.attrs.name), params);
+      const sc = new Scope(f);
+      params.forEach((p) => sc.names.set(p, wname(p)));
+      f.body = stmts(fnode.ins.body, sc, f);
+      continue;
+    }
+    entry.body.push(...stmt(it, entryScope, entry));
+  }
+
+  const lines = ['(module', '  (import "omni" "print_i64" (func $print (param i64)))'];
+  for (const f of mod.fns.values()) {
+    const ps = f.params.map((p) => `(param ${wname(p)} i64)`).join(' ');
+    const res = f.ret ? ' (result i64)' : '';
+    const locals = f.locals.map((l) => `(local ${l} i64)`).join(' ');
+    lines.push(`  (func ${f.name}${ps === '' ? '' : ` ${ps}`}${res}`);
+    if (locals !== '') lines.push(`    ${locals}`);
+    for (const s of f.body) lines.push(`    ${s}`);
+    // 出值的函数要有一条兜底的返回值（wasm 要求每条路径都留下一格结果）
+    if (f.ret) lines.push('    (i64.const 0)');
+    lines.push('  )');
+  }
+  lines.push('  (export "main" (func $__entry))', ')');
+  return { text: lines.join('\n'), rets: new Map([...mod.fns.values()].map((f) => [f.name, f.ret])) };
+}
+
+/**
+ * 图 -> WAT 文本。接不住的形状抛 `Gap`（上层把它变成"这一格跳过，理由如下"）。
+ */
+export function emitWat(graph) {
+  const first = emitOnce(graph, new Map());
+  // 第二遍：拿着"哪个函数出值"那张表重出一次（语句位置的调用要不要 drop 靠它）
+  const byName = new Map();
+  const items = asList(graph.kind === 'graph' ? graph.body : graph);
+  for (const [src, wat] of topFuncs(items)) byName.set(src, first.rets.get(wat) === true);
+  return emitOnce(graph, byName).text;
+}
+
+export { Gap };
+
+/**
+ * **真跑一遍**：出来的 WAT 交给另一个前端读（`frontend-wat`，WAT -> OIR），
+ * 再用 MIR 的解释器跑。输出是靠接管 `process.stdout.write` 收的 ——
+ * 那条打印路径（OIR 的 print 内建）本来就是写给宿主 stdout 的，不改它。
+ */
+export function runWat(text) {
+  const diags = new Diagnostics();
+  const oir = lowerWat(new SourceFile('graph.wat', text), diags);
+  if (oir === null || diags.hasErrors()) {
+    throw new Error(`wat 前端不收：${diags.items.map((d) => d.msg).join('; ')}`);
+  }
+  const out = [];
+  const real = process.stdout.write.bind(process.stdout);
+  let buf = '';
+  process.stdout.write = (s) => { buf += String(s); return true; };
+  try {
+    interpretMir(oir);
+  } finally {
+    process.stdout.write = real;
+  }
+  for (const line of buf.split('\n')) if (line !== '') out.push(line);
+  return { value: null, out };
+}

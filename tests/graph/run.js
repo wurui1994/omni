@@ -28,7 +28,7 @@ import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { readText } from '../../src/core/host/native.js';
 import { toSx } from '../../src/core/graph/graph.js';
 import { node, lit, program, bin } from '../../src/core/graph/graph.js';
-import { backends, gaps } from '../../src/core/graph/contract.js';
+import { backends, gaps, Gap } from '../../src/core/graph/contract.js';
 import { chezToGraph } from '../../ext/chez/tograph.js';
 import { luaToGraph } from '../../ext/lua/tograph.js';
 import { goToGraph } from '../../ext/go/tograph.js';
@@ -58,6 +58,8 @@ const RECORD = ['1', '5', '6'];
 const INDEX = ['10', '30', '45'];
 /** loopexit：break / continue 那一格 —— 函数边界**之外**的第一格 may-early-exit */
 const LOOPEXIT = ['12', '6', '8'];
+/** intmath：**四个后端都跑得动的子集** —— 只有整数 / 函数 / 语句位置的 if / while */
+const INTMATH = ['15', '120'];
 
 const CASES = [
   { name: 'chez', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/basics.ss', toGraph: chezToGraph, expect: BASICS },
@@ -98,6 +100,9 @@ const CASES = [
   { name: 'vlang+loopexit', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/loopexit.v', toGraph: vlangToGraph, expect: LOOPEXIT },
   { name: 'nim+loopexit', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/loopexit.nim', toGraph: nimToGraph, expect: LOOPEXIT },
   { name: 'mojo+loopexit', grammar: 'ext/mojo/mojo.grammar', file: 'ext/mojo/examples/loopexit.mojo', toGraph: mojoToGraph, expect: LOOPEXIT },
+  // ---- 第七个家族：**四条腿都跑得动的那个子集**（只有整数 / 函数 / if / while）----
+  { name: 'lua+intmath', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/intmath.lua', toGraph: luaToGraph, expect: INTMATH },
+  { name: 'go+intmath', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/intmath.go', toGraph: goToGraph, expect: INTMATH },
 ];
 
 /**
@@ -165,6 +170,7 @@ const only = argv.filter((a) => !a.startsWith('-'));
 
 let pass = 0;
 let fail = 0;
+let skipped = 0;
 
 if (showGaps) {
   for (const b of backends()) {
@@ -182,18 +188,25 @@ if (showGaps) {
 function check(name, g, expect) {
   for (const b of backends()) {
     const label = `${name} × ${b.name}`;
+    let art = null;
+    try {
+      art = b.lower(g);
+    } catch (err) {
+      // **缺口不是失败**：后端说不出口的形状要有名有姓地跳过（§6 第 2 条纪律）
+      if (err instanceof Gap) {
+        process.stdout.write(`  skip ${label}：${err.message}\n`); skipped++;
+      } else { process.stdout.write(`  FAIL ${label}: ${err.message}\n`); fail++; }
+      continue;
+    }
     if (b.runnable === false) {
       // 只序列化的后端（sx）只对"出得来、且不空"负责 —— 它不承诺跑
-      try {
-        const art = b.lower(g);
-        if (typeof art.text === 'string' && art.text.length > 0) {
-          process.stdout.write(`  ok   ${label} [序列化 ${art.text.split('\n').length} 行]\n`); pass++;
-        } else { process.stdout.write(`  FAIL ${label}: 序列化出来是空的\n`); fail++; }
-      } catch (err) { process.stdout.write(`  FAIL ${label}: ${err.message}\n`); fail++; }
+      if (typeof art.text === 'string' && art.text.length > 0) {
+        process.stdout.write(`  ok   ${label} [序列化 ${art.text.split('\n').length} 行]\n`); pass++;
+      } else { process.stdout.write(`  FAIL ${label}: 序列化出来是空的\n`); fail++; }
       continue;
     }
     try {
-      const { out } = b.lower(g).run();
+      const { out } = art.run();
       const got = out.join(' / ');
       const want = expect.join(' / ');
       if (got === want) { process.stdout.write(`  ok   ${label} [${got}]\n`); pass++; } else {
@@ -251,6 +264,6 @@ if (showMachines) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed`
+process.stdout.write(`\n${pass} passed, ${fail} failed, ${skipped} skipped（缺口，有名有姓）`
   + `（语言例子 ${CASES.length} + 手搭图 ${HAND.length}，× 后端 ${backends().length}）\n`);
 if (fail > 0) process.exit(1);
