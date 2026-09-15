@@ -12,6 +12,7 @@
 //   node tests/graph/run.js            全跑
 //   node tests/graph/run.js --sx chez  顺带把那门语言的图印成 sx（人看的）
 //   node tests/graph/run.js --gaps     印每个后端接不住的节点清单
+//   node tests/graph/run.js --machines 印每格节点的**提供者名单**（G5 那条判据）
 //
 // **十门语言里缺 cpp，理由量过**：拿同样这份例子（`int sumto(int n) { … }`，7 行）
 // 去过 `ext/cpp/cpp.grammar`，报的是 "too many concurrent parses" —— 连这么短的程序
@@ -67,11 +68,25 @@ const CASES = [
   // ---- 第三个家族：作用域出口（go 的 defer 与 CL 的 unwind-protect 同一格节点）----
   { name: 'go+defer', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/defer.go', toGraph: goToGraph, expect: DEFER },
   { name: 'sbcl+defer', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/defer.lisp', toGraph: sbclToGraph, expect: DEFER },
+  { name: 'vlang+defer', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/defer.v', toGraph: vlangToGraph, expect: DEFER },
+  { name: 'nim+defer', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/defer.nim', toGraph: nimToGraph, expect: DEFER },
 ];
 
 const argv = process.argv.slice(2);
 const showSx = argv.includes('--sx');
 const showGaps = argv.includes('--gaps');
+const showMachines = argv.includes('--machines');
+/** 每格节点用了它的语言名单 —— **数出来的**，不是手写的（ADR-0033 §3.7 的 G5）。 */
+const providers = new Map();
+function countOps(x, lang) {
+  if (x === null || x === undefined) return;
+  if (Array.isArray(x)) { x.forEach((y) => countOps(y, lang)); return; }
+  if (x.kind === 'graph') { countOps(x.body, lang); return; }
+  if (x.op === undefined) return;
+  if (!providers.has(x.op)) providers.set(x.op, new Set());
+  providers.get(x.op).add(lang);
+  Object.values(x.ins).forEach((y) => countOps(y, lang));
+}
 const only = argv.filter((a) => !a.startsWith('-'));
 
 let pass = 0;
@@ -98,6 +113,7 @@ for (const c of CASES) {
     const tree = glrParse(tb, toks, diags);
     if (tree === null || diags.hasErrors()) throw new Error(`语法炸了：${diags.items[0]?.msg}`);
     g = c.toGraph(tree);
+    countOps(g, c.name.split('+')[0]);
     if (showSx) process.stdout.write(`\n---- ${c.name} ----\n${toSx(g)}\n`);
   } catch (err) {
     process.stdout.write(`  FAIL graph/${c.name}（树 -> 图）: ${err.message}\n`);
@@ -129,6 +145,16 @@ for (const c of CASES) {
       process.stdout.write(`  FAIL ${label}: ${err.message}\n`);
       fail++;
     }
+  }
+}
+
+if (showMachines) {
+  // G5：一格节点的提供者名单。**只有一家的不算机器**（ADR-0033 §3.7 / §5 同一条纪律）。
+  process.stdout.write('\n每格节点的提供者名单（数出来的）：\n');
+  const rows = [...providers.entries()].sort((a, b) => b[1].size - a[1].size);
+  for (const [op, langs] of rows) {
+    const mark = langs.size >= 4 ? '机器' : (langs.size >= 2 ? '能力' : '一家');
+    process.stdout.write(`  ${String(langs.size).padStart(2)} ${mark}  ${op.padEnd(11)}${[...langs].sort().join(' ')}\n`);
   }
 }
 

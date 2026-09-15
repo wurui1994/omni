@@ -110,6 +110,9 @@ function toNode(x) {
       return node('ret', vals.length === 0 ? {} : { value: toNode(vals[0]) });
     }
     case 'expr': return toNode(kids(x)[0]);
+    // `defer { … }` / `defer: …` -> scope-exit（与 go 的 defer、CL 的 unwind-protect
+    // **同一格节点**：逆序、早退也跑，八家共用那一格）
+    case 'defer': return node('scope-exit', { action: many(kids(x)) });
     case 'call': {
       const [fn, args] = kids(x);
       const argNodes = args === undefined ? [] : many(kids(args));

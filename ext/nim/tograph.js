@@ -46,6 +46,9 @@ function toNode(x) {
     case 'paren': return toNode(kids(x)[0]);
     case 'line': case 'body': case 'impl': return many(kids(x));
     case 'expr': return toNode(kids(x)[0]);
+    // `defer { … }` / `defer: …` -> scope-exit（与 go 的 defer、CL 的 unwind-protect
+    // **同一格节点**：逆序、早退也跑，八家共用那一格）
+    case 'defer': return node('scope-exit', { action: many(kids(x)) });
 
     case 'bin': {
       const [op, a, b] = kids(x);

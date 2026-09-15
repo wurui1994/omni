@@ -479,9 +479,22 @@ V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
 两个后端各自的落法：interp 用 `Env.exits` + `finally`，js 用每层 region 一格 `const __ex`
 + `try/finally`（"最近的那一格 region"靠 JS 的块作用域天然给）。
 
+**G5 那条"提供者名单"现在真的印出来了** —— `node tests/graph/run.js --machines`
+不是手写的表，是把每门语言建出来的图走一遍、按 `op` 数提供者：
+
+```
+ 9 机器  bind / func / branch / prim / ref / call / const   （九门语言全有）
+ 8 机器  loop / set          7 机器  region / ret
+ 4 机器  scope-exit  go nim sbcl vlang
+ 2 能力  values / pick       go lua
+```
+
+`scope-exit` 补上了 nim 与 V 的 `defer`（各多一个 `examples/defer.*`，与 go/CL 共用
+同一份期望输出 `in / b / a / out`），四个提供者，够 G5 的"机器"线。
+
 下一批：`record` 那一族（`record-new` / `field-get` / `field-set`），
-以及把 `scope-exit` 的另外六个提供者（nim/V 的 defer、lua 的 `<close>`、mojo 的 `with`、
-freebasic 的 `Scope`、cpp 的 RAII）接上 —— G5 那条"提供者名单"要真的印出来才算数。
+以及 `scope-exit` 还欠的四个提供者（lua 的 `<close>`、mojo 的 `with`、
+freebasic 的 `Scope`、cpp 的 RAII）。
 
 ### A.7 附属节点（不逐个列，按挂点分七类）
 
