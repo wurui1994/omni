@@ -1,0 +1,303 @@
+;; ext/awk/awk.grammar —— POSIX awk（+ gawk 常用的那几格扩展）
+;;
+;; **状态：这一份还不能用（702 份语料只过 33）。原因不在这份文件里，见文件末尾"卡在哪儿"。**
+;;
+;; 语法照 **POSIX.1 那份公开的 awk 语法**写（IEEE Std 1003.1 的 "Grammar" 一节）。
+;; 刻意**不从 gawk 的 awkgram.y 派生** —— 那份是 GPLv3，而这个仓库是 MIT；
+;; 要读那份文件我们有 `omni glr table awkgram.y`（ADR-0034 的导入器）当场就能建表，
+;; 不必也不该把派生物落进仓库。
+;;
+;; 这一份与 POSIX 那份 .y 的**一处形式差别**，也是它短了一半的原因：
+;;
+;;   **换行在 awk 里就是分号** —— 交给词法层那一格 `auto-semi`（glr/lex.js）。
+;;   POSIX 那份语法里 `newline_opt` / `opt_newlines` / `terminator` 出现二十多次，
+;;   全是"换行在这儿算不算收尾"这**同一件事**的手工版；把它挪到词法层，语法里就只剩
+;;   一个 `";"`。词法层那条 `after` 名单说的正是 awk 的规矩：换行在**能收尾的记号**
+;;   之后才算分号（`{`、`&&`、`||`、`,`、`do`、`else` 后面的换行不算）。
+;;
+;; 第二处要紧的决定：**正则字面量与除号**。`/re/` 和 `a / b` 在字符层一模一样，awk
+;; 自己的词法器靠"上一个记号是不是操作数"分开它们。我们用同一条口径 ——
+;; `(token ERE (not-after …) "/" … "/")`：前面刚出现过操作数时这条规则不参赛。
+;;
+;; 明说的三处不足（不猜）：
+;;   1. `print a > b` 一律当**重定向**（awk 的规矩），`print (a > b)` 要自己加括号 ——
+;;      与真 awk 一致；那条产生式上挂了 `(prefer 2)` 定胜负，见 print 那一段。
+;;   2. `func_name (` 与 `name (` 不分：POSIX 靠词法器"名字后面紧跟左括号"发一个
+;;      FUNC_NAME。我们不分，于是 `f (x)` 既可能是调用也可能是"f 接一个括号表达式"
+;;      —— 后者交给 GLR 分叉，真歧义会报出来。
+;;   3. gawk 的 `@include` / `@load` / 具名参数 / `|&` 协程不收。
+;;
+;; 与 gawk 那份 .y 的对照（同一台机器）：那份 352 状态 / 203 条产生式 / 58 处冲突；
+;; 这一份见 DESIGN 那一行。两份都能建表，判据是**同一批 .awk 语料**谁认得多。
+
+(grammar awk
+  (tokens NAME NUMBER STRING ERE FUNC_NAME BUILTIN GETLINE NL
+    ;; 只用来标 %prec 的伪终结符
+    CONCAT UNARY POSTFIX)
+
+  ;; 优先级从低到高，照 POSIX 那张表：
+  ;;   赋值（右）/ ?: （右）/ || / && / in / ~ !~ / 比较（不结合）/ **连接** /
+  ;;   + - / * / % / 一元 + - ! / ^（右）/ ++ -- / $
+  (prec right "=" "+=" "-=" "*=" "/=" "%=" "^=")
+  (prec right "?" ":")
+  (prec left "||")
+  (prec left "&&")
+  (prec left "in")
+  (prec left "~" "!~")
+  (prec nonassoc "<" "<=" ">" ">=" "!=" "==")
+  (prec left CONCAT NAME NUMBER STRING ERE BUILTIN GETLINE)
+  (prec left "+" "-")
+  (prec left "*" "/" "%")
+  (prec right UNARY "!")
+  (prec right "^")
+  (prec left POSTFIX "++" "--")
+  (prec left "$")
+
+  (start program)
+
+  (lex
+    ;; 空白**不含换行** —— 换行是记号（见下面 NL 那条）
+    (skip (+ (set " \t\r")))
+    ;; 续行：反斜杠 + 换行，整个吞掉（于是那处换行根本不出记号）
+    (skip "\\" (? "\r") "\n")
+    (comment "#" (* (not "\n")))
+    ;; 换行是**真记号**（NL）。awk 里换行算不算收尾要看**语法位置**，不是看上一个记号：
+    ;; `function f(a)` 后面那个换行不收尾，`x = f(a)` 后面那个收尾 —— 两处上一个记号都是
+    ;; `)`。所以这一格不能交给 auto-semi（那是 go 的形状），只能照 POSIX 那样在语法里
+    ;; 一处一处说"这儿允许换行"（下面的 opt-nl）。
+    (token NL (+ (or "\n" (seq (set " \t\r") "\n"))))
+
+    (token NUMBER (+ digit) (? "." (* digit)) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    (token NUMBER "." (+ digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    (token NUMBER "0" (or "x" "X") (+ hex))
+    (string STRING "\"")
+
+    ;; 正则字面量。**前面刚出现过操作数就不参赛** —— 那时那个 `/` 是除号。
+    ;; 里头 `\/` 是转义掉的斜杠，`[...]` 里的斜杠也不算收尾（awk 的规矩），
+    ;; 所以字符类单列一支。
+    (token ERE (not-after NAME NUMBER STRING ERE ")" "]" "$" "++" "--")
+      "/" (+ (or (not "/[\\\n") (seq "\\" any) (seq "[" (* (or (not "]\\") (seq "\\" any))) "]"))) "/")
+
+    (token NAME (or alpha "_") (* (or alnum "_")))
+    (keyword NAME GETLINE "getline")
+    (keyword NAME BUILTIN
+      "length" "substr" "index" "split" "sub" "gsub" "gensub" "match" "sprintf"
+      "sin" "cos" "atan2" "exp" "log" "sqrt" "int" "rand" "srand"
+      "tolower" "toupper" "system" "close" "fflush" "systime" "strftime" "mktime"
+      "toupper" "asort" "asorti" "patsplit")
+    (keyword NAME
+      "BEGIN" "END" "function" "func" "if" "else" "while" "for" "do"
+      "break" "continue" "next" "nextfile" "exit" "return" "delete" "in"
+      "print" "printf")
+
+    (op "**=" "^=" "+=" "-=" "*=" "/=" "%=" "==" "!=" "<=" ">=" "&&" "||" "++" "--"
+        ">>" "!~" "**" "~" "=" "<" ">" "!" "?" ":" ";" "," "|"
+        "{" "}" "(" ")" "[" "]" "$" "+" "-" "*" "/" "%" "^"))
+
+  ;; ---- 程序 ------------------------------------------------------------------
+  ;;
+  ;; 一份 awk 程序是若干「项」：`模式 { 动作 }`、光一个模式、光一个动作，或一个函数定义。
+
+  (rule program
+    (-> (opt-nl items) (program $*2)))
+
+  ;; 换行/分号在 awk 里都是收尾（POSIX 的 `terminator`），而**允许换行但不收尾**的位置
+  ;; 要一处一处说 —— 那就是 opt-nl。这两格是这份语法里所有换行知识的全部。
+  (rule opt-nl
+    (-> () ())
+    (-> (NL) ()))
+
+  (rule term
+    (-> (";") $1)
+    (-> (NL) $1))
+
+  (rule terms
+    (-> (term) $1)
+    (-> (terms term) $1))
+
+  (rule items
+    (-> () ())
+    (-> (items item) ($*1 $2))
+    (-> (items item terms) ($*1 $2))
+    (-> (items terms) $1))
+
+  (rule item
+    (-> (pattern action) (rule $1 $2))
+    (-> (pattern) (rule $1))
+    (-> (action) (rule (always) $1))
+    (-> ("function" NAME "(" params ")" opt-nl action) (fn $2 (params $*4) $7))
+    (-> ("func" NAME "(" params ")" opt-nl action) (fn $2 (params $*4) $7)))
+
+  (rule pattern
+    (-> ("BEGIN") (begin))
+    (-> ("END") (end))
+    (-> (expr) (when $1))
+    (-> (expr "," opt-nl expr) (range $1 $4)))
+
+  (rule params
+    (-> () ())
+    (-> (NAME) ($1))
+    (-> (params "," opt-nl NAME) ($*1 $4)))
+
+  (rule action
+    (-> ("{" opt-nl stmts "}") (block $*3)))
+
+  ;; ---- 语句 ------------------------------------------------------------------
+
+  (rule stmts
+    (-> () ())
+    (-> (stmts stmt) ($*1 $2))
+    (-> (stmts stmt terms) ($*1 $2))
+    (-> (stmts terms) $1))
+
+  (rule stmt
+    (-> (simple) $1)
+    (-> (action) $1)
+    (-> ("if" "(" expr ")" opt-nl stmt) (if $3 $6))
+    (-> ("if" "(" expr ")" opt-nl stmt terms "else" opt-nl stmt) (if $3 $6 (else $10)))
+    (-> ("if" "(" expr ")" opt-nl stmt "else" opt-nl stmt) (if $3 $6 (else $9)))
+    (-> ("while" "(" expr ")" opt-nl stmt) (while $3 $6))
+    (-> ("do" opt-nl stmt terms "while" "(" expr ")") (do-while $3 $7))
+    (-> ("do" opt-nl stmt "while" "(" expr ")") (do-while $3 $6))
+    (-> ("for" "(" simple-opt ";" opt-nl expr-opt ";" opt-nl simple-opt ")" opt-nl stmt) (for $3 $6 $9 $12))
+    (-> ("for" "(" NAME "in" NAME ")" opt-nl stmt) (for-in $3 $5 $8))
+    (-> ("for" "(" "(" params ")" "in" NAME ")" opt-nl stmt) (for-in-multi (names $*4) $7 $10))
+    (-> ("break") (break))
+    (-> ("continue") (continue))
+    (-> ("next") (next))
+    (-> ("nextfile") (nextfile))
+    (-> ("exit") (exit))
+    (-> ("exit" expr) (exit $2))
+    (-> ("return") (return))
+    (-> ("return" expr) (return $2)))
+
+  (rule simple-opt
+    (-> () (none))
+    (-> (simple) $1))
+
+  (rule expr-opt
+    (-> () (none))
+    (-> (expr) $1))
+
+  (rule simple
+    (-> (expr) (expr $1))
+    (-> ("delete" NAME "[" exprs "]") (delete $2 (subscript $*4)))
+    (-> ("delete" NAME) (delete $2))
+    (-> (print) $1))
+
+  ;; `print a > b` 一律是重定向（awk 的规矩）。`(prefer 2)` 是给 GLR 驱动器定胜负用的：
+  ;; 两支都归约成功时，重定向那一支赢 —— 想要比较就自己加括号 `print (a > b)`。
+  (rule print
+    (-> ("print") (print))
+    (-> ("print" exprs) (print $*2))
+    (-> ("printf" exprs) (printf $*2))
+    (-> ("print" redirect) (print $2))
+    (-> ("print" exprs redirect) (prefer 2) (print $*2 $3))
+    (-> ("printf" exprs redirect) (prefer 2) (printf $*2 $3)))
+
+  (rule redirect
+    (-> (">" expr) (to $2))
+    (-> (">>" expr) (append $2))
+    (-> ("|" expr) (pipe-to $2)))
+
+  ;; ---- 表达式 ----------------------------------------------------------------
+  ;;
+  ;; 连接（concatenation）在 awk 里**没有算符** —— 两个表达式挨着就是连接。写成
+  ;; `(expr expr)` 加一格 CONCAT 优先级：于是 `a - b` 是减法（`-` 比 CONCAT 紧、移进赢），
+  ;; 而 `a " " b` 是连接。这一条是 awk 语法里最容易写错的地方，理由写在这儿。
+
+  (rule exprs
+    (-> (expr) ($1))
+    (-> (exprs "," opt-nl expr) ($*1 $4)))
+
+  (rule expr
+    (-> (NUMBER) (num $1))
+    (-> (STRING) (str $1))
+    (-> (ERE) (re $1))
+    (-> (NAME) (name $1))
+    (-> (NAME "[" exprs "]") (index $1 (subscript $*3)))
+    (-> ("$" expr) (prec "$") (field $2))
+    (-> ("(" expr ")") (paren $2))
+    (-> ("(" exprs "," expr ")" "in" NAME) (in-multi (key $*2 $4) $7))
+    (-> (NAME "(" args ")") (call $1 (args $*3)))
+    (-> (BUILTIN "(" args ")") (call $1 (args $*3)))
+    (-> (BUILTIN) (call $1 (args)))
+
+    (-> (expr expr) (prec CONCAT) (cat $1 $2))
+
+    (-> (expr "^" expr) (bin "^" $1 $3))
+    (-> (expr "**" expr) (bin "^" $1 $3))
+    (-> (expr "*" expr) (bin "*" $1 $3))
+    (-> (expr "/" expr) (bin "/" $1 $3))
+    (-> (expr "%" expr) (bin "%" $1 $3))
+    (-> (expr "+" expr) (bin "+" $1 $3))
+    (-> (expr "-" expr) (bin "-" $1 $3))
+    (-> (expr "<" expr) (bin "<" $1 $3))
+    (-> (expr "<=" expr) (bin "<=" $1 $3))
+    (-> (expr ">" expr) (bin ">" $1 $3))
+    (-> (expr ">=" expr) (bin ">=" $1 $3))
+    (-> (expr "==" expr) (bin "==" $1 $3))
+    (-> (expr "!=" expr) (bin "!=" $1 $3))
+    (-> (expr "~" expr) (bin "~" $1 $3))
+    (-> (expr "!~" expr) (bin "!~" $1 $3))
+    (-> (expr "&&" opt-nl expr) (bin "&&" $1 $4))
+    (-> (expr "||" opt-nl expr) (bin "||" $1 $4))
+    (-> (expr "in" NAME) (in $1 $3))
+    (-> (expr "?" expr ":" expr) (cond $1 $3 $5))
+
+    (-> ("-" expr) (prec UNARY) (neg $2))
+    (-> ("+" expr) (prec UNARY) (pos $2))
+    (-> ("!" expr) (prec UNARY) (not $2))
+    (-> ("++" expr) (prec UNARY) (preinc $2))
+    (-> ("--" expr) (prec UNARY) (predec $2))
+    (-> (expr "++") (prec POSTFIX) (postinc $1))
+    (-> (expr "--") (prec POSTFIX) (postdec $1))
+
+    (-> (expr "=" expr) (assign "=" $1 $3))
+    (-> (expr "+=" expr) (assign "+=" $1 $3))
+    (-> (expr "-=" expr) (assign "-=" $1 $3))
+    (-> (expr "*=" expr) (assign "*=" $1 $3))
+    (-> (expr "/=" expr) (assign "/=" $1 $3))
+    (-> (expr "%=" expr) (assign "%=" $1 $3))
+    (-> (expr "^=" expr) (assign "^=" $1 $3))
+    (-> (expr "**=" expr) (assign "^=" $1 $3))
+
+    ;; getline 六种形状。`cmd | getline` 那两支的 `|` 用的是重定向那一级 —— awk 里
+    ;; 管道在表达式里只出现在 getline 左边，所以不必另开一级优先级。
+    (-> (GETLINE) (getline))
+    (-> (GETLINE NAME) (getline (into $2)))
+    (-> (GETLINE "<" expr) (prec "<") (getline (from $3)))
+    (-> (GETLINE NAME "<" expr) (prec "<") (getline (into $2) (from $4)))
+    (-> (expr "|" GETLINE) (getline (cmd $1)))
+    (-> (expr "|" GETLINE NAME) (getline (cmd $1) (into $4))))
+
+  (rule args
+    (-> () ())
+    (-> (exprs) $1)))
+
+;; ---- 卡在哪儿（这一份的诊断，不是待办清单） --------------------------------------
+;;
+;; 量出来的：246 状态 / 120 条产生式 / **608 处冲突**，702 份 .awk 只过 33 份，
+;; 失败的话大多是「too many concurrent parses (> 400)」或「the input is ambiguous」。
+;; 也就是说：**不是语法写少了，是表太弱**。
+;;
+;; 根因是一句话：**我们的建表器是 SLR(1)**（glr/table.js —— 归约用的是 FOLLOW 集，
+;; 不是 LALR 的 lookahead 集）。awk 是第一门把这条边界顶出来的语言，因为它有两样东西
+;; 同时存在：
+;;
+;;   1. **连接没有算符**（`a " " b`）—— 于是 `expr -> expr expr` 这一条在**每一个**
+;;      能起头当操作数的记号上都是移进/归约冲突。给那几个终结符挂上 CONCAT 那一级
+;;      能消掉一批（784 -> 608），但消不掉靠 lookahead 才能分开的那些。
+;;   2. **一元 +/- 与二元 +/- 同形**（`a - b` vs `a` 连接 `(-b)`）—— POSIX 那份语法为此
+;;      把表达式劈成 `unary_expr` / `non_unary_expr` 两套。劈完之后 `pow` 会同时归约成
+;;      两个非终结符，**靠 lookahead 才分得开** —— 那正好是 SLR(1) 分不开、LALR(1)
+;;      分得开的那一格。
+;;
+;; 对照：gawk 自己那份 awkgram.y 走我们的导入器建表是 352 状态 / 203 产生式 /
+;; **58 处冲突** —— 同一门语言、同一台建表器，它少一个数量级，因为它是照 yacc
+;; 的 LALR 默认消歧写的。
+;;
+;; 所以这一格该做的**不是**继续改这份语法，而是把 glr/table.js 从 SLR(1) 升到 LALR(1)。
+;; 那一步对已经落地的几门也是净收益（lua 那份 23 处冲突多半会归零），而对后面
+;; go / vlang / nim / c++ 是**前提** —— 它们比 awk 更吃 lookahead。
+;; 在那之前，读 awk 语法用 `omni glr table $OMNI_REF_DIR/gawk/awkgram.y` 就行。

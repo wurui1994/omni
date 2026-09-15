@@ -1,0 +1,7 @@
+{
+  "grammar": "awk.grammar",
+  "doc": "语料 = gawk 那棵树里的 .awk（test/ 下那七百来个是 gawk 自己的回归语料 —— awk 的花样它用了个遍，自己挑片段挑不到）。树不在就跳过。语法本身照 POSIX 那份公开语法写，不从 gawk 的 awkgram.y 派生（许可证：那份是 GPLv3）。",
+  "corpus": [
+    { "tree": "gawk", "env": "GAWK_SRC", "ext": ".awk" }
+  ]
+}
