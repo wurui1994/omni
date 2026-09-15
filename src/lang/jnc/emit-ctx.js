@@ -103,6 +103,19 @@ export function makeFnEnv(o) {
     return name;
   };
   /**
+   * 这一段树是**一格**格式化字面量吗 —— `(fmt …)`，而**相邻的几段**（`(concat …)`）也算一格
+   * （jancy 的 `literal` 就是 `literal_atom+`，第二百五十五刀）。里头混了普通字面量的不算。
+   * 答的是**按源码顺序**那几个记号；不是这一族答 null。
+   */
+  const fmtTokens = (n, out = []) => {
+    if (headOf(n) === 'fmt') { out.push(named(n)?.text); return out; }
+    if (headOf(n) === 'concat') {
+      const nm0 = named(n) ?? {};
+      return fmtTokens(nm0.a, out) === null ? null : fmtTokens(nm0.b, out);
+    }
+    return null;
+  };
+  /**
    * **格式化字面量 `$"…"`**（第二百 / 二百五十四刀，literals.rst:62-88）：它产出的是**一格
    * 字符串的值**（不是一次输出）。词法把整个字面量当**一个记号**，里头 `$名字` / `$(表达式)`
    * 那几段于是要按位置**再解析一遍**（`parseExpr`）。四种注入：
@@ -117,17 +130,39 @@ export function makeFnEnv(o) {
    * `%08.3f` 该长什么样与 printf 是**同一份实现**，不是第二份。
    */
   const fmtOf = (node, argNodes = []) => {
-    const tok = named(node)?.text;
-    const raw = String(tok?.value ?? '');
-    if (!raw.startsWith('$"') || !raw.endsWith('"') || raw.length < 3) {
-      acct('格式化字面量的记号读不出来'); return null;
-    }
+    /**
+     * **相邻的几段拼在一起是一格**（第二百五十五刀，187-fmtconcat.jnc）：jancy 的 `literal`
+     * 是 `literal_atom+`，几段的文本进的是**同一个** `Literal` 缓冲、`m_fmtIndex` 也只有一格
+     * （Parser.cpp:3496）—— 所以序号在段与段之间**接着数**，实参表也是共用的那一张。
+     * 落法：几段文本首尾相接成一串扫；`$(…)` 那几段还要指得着**原文**的位置，所以记下每一段在
+     * 合起来那串里的起点，按偏移倒查是哪一段（`siteAt` —— 一格注入不会跨段，每段自己是一个记号）。
+     */
+    const toks = fmtTokens(node);
+    if (toks === null || toks.length === 0) { acct('格式化字面量的记号读不出来'); return null; }
     if (parseExpr === null) {
       acct('格式化字面量 `$"…"`（这一趟没有再解析一遍的入口）'); return null;
     }
-    const file = tok?.span?.file ?? null;
-    const base = (tok?.span?.start ?? 0) + 2;
-    const inner = raw.slice(2, -1);
+    const parts = [];
+    for (const tk of toks) {
+      const raw = String(tk?.value ?? '');
+      if (!raw.startsWith('$"') || !raw.endsWith('"') || raw.length < 3) {
+        acct('格式化字面量的记号读不出来'); return null;
+      }
+      parts.push({
+        s: raw.slice(2, -1), base: (tk?.span?.start ?? 0) + 2, file: tk?.span?.file ?? null,
+      });
+    }
+    const starts = [];
+    {
+      let acc = 0;
+      for (const p of parts) { starts.push(acc); acc += p.s.length; }
+    }
+    const inner = parts.map((p) => p.s).join('');
+    const siteAt = (off) => {
+      let k = parts.length - 1;
+      while (k > 0 && off < starts[k]) k -= 1;
+      return { file: parts[k].file, base: parts[k].base - starts[k] };
+    };
     let bad = false;
     let rawPct = false;
     let cfmt = '';
@@ -165,9 +200,11 @@ export function makeFnEnv(o) {
       cfmt += fmtMergeSpec(spec, d);
       vals.push(v.type?.k === 'enum' ? { code: v.code, type: v.type.base } : v);
     };
-    /* `$(…)` / `$id` 里那一段源码 → 一格值。位置按**原文**算，所以里头报错指的是真地方。 */
+    /* `$(…)` / `$id` 里那一段源码 → 一格值。位置按**原文**算（哪一段由 `siteAt` 倒查），
+       所以里头报错指的是真地方。 */
     const inlineVal = (src, off) => {
-      const t = parseExpr(file, src, base + off);
+      const a = siteAt(off);
+      const t = parseExpr(a.file, src, a.base + off);
       if (t === null) { acct(`格式化字面量里 '${src}' 解不出来`); bad = true; return null; }
       return emitExpr(t, null, ctxRef);
     };
@@ -2680,8 +2717,8 @@ export function makeFnEnv(o) {
       const args = allInChain(nm2.args, 'args-add', 'args');
       const asName = headOf(fn) === 'name' ? String(named(fn)?.text?.value ?? '') : null;
       /* **`$"…"(a, b)` 那对括号不是调用**（`CALL_ORDER` 的第一条）：它是格式化字面量自己的
-         实参表（`%N` 引的就是它）—— 所以这一问排在最前头。 */
-      if (headOf(fn) === 'fmt') return fmtOf(fn, args);
+         实参表（`%N` 引的就是它）—— 所以这一问排在最前头。相邻的几段算一格（`fmtTokens`）。 */
+      if (fmtTokens(fn) !== null) return fmtOf(fn, args);
       /**
        * **方法那一族**（第五十二刀）：`p.sum()`、`q.sum()`（`P*` 上与 `P` 上一样，第二十五刀）、
        * 以及方法体里**裸叫方法**（`sum()` 就是 `this.sum()`）。方言那一侧它是一格普通函数
@@ -3033,8 +3070,8 @@ export function makeFnEnv(o) {
        * 所以那种写法明说不收，而不是悄悄少印一个 `%`。
        * 字面量自己带实参表时 printf 这儿不能再给别的实参（那是两套序号）。
        */
-      const fl = headOf(args[0]) === 'fmt' ? { fn: args[0], as: [] }
-        : (headOf(args[0]) === 'call' && headOf(named(args[0])?.fn) === 'fmt'
+      const fl = fmtTokens(args[0]) !== null ? { fn: args[0], as: [] }
+        : (headOf(args[0]) === 'call' && fmtTokens(named(args[0])?.fn) !== null
           ? { fn: named(args[0]).fn, as: allInChain(named(args[0])?.args, 'args-add', 'args') }
           : null);
       if (fl !== null) {
