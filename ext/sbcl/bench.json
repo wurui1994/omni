@@ -1,0 +1,7 @@
+{
+  "grammar": "sbcl.grammar",
+  "doc": "语料 = SBCL 自己那棵树里的 .lisp（src/ 与 contrib/ 与 tests/ 全算 —— 那 1400 多份文件里 SBCL 把 CL 读取器的花样用了个遍，自己挑片段挑不到）。树不在就跳过。",
+  "corpus": [
+    { "tree": "sbcl", "env": "SBCL_SRC", "ext": ".lisp" }
+  ]
+}

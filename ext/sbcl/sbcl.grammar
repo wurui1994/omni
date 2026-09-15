@@ -1,0 +1,125 @@
+;; ext/sbcl/sbcl.grammar —— Common Lisp 的读取器语法（datum 层）
+;;
+;; 与 ext/chez 那份同一条路子（语法只到 datum，`defun` / `let` 是宏与特殊形式，
+;; 属于求值那一层），但 CL 的读取器比 Scheme 的花得多 —— 那些花样全在**词法**与
+;; 几条"读取器宏"上，不在产生式里：
+;;
+;;   `#+特性 形式` / `#-特性 形式`   读时条件（**吃两条 datum**）
+;;   `#.形式`                        读时求值
+;;   `#=` / `##`（`#0=` / `#0#`）    环形结构的标签
+;;   `#'f` `#(…)` `#*1011` `#\a`     函数、向量、位向量、字符
+;;   `#2A(…)` `#S(…)` `#C(1 2)` `#P"…"`  数组、结构、复数、路径名
+;;   `#:foo` `#|…|#` `|带空格的符号|`     未 intern 的符号、可嵌套块注释、竖线符号
+;;   `#xFF` `#36rZZ` `1/2` `1.0d0` `123.`  数
+;;
+;; 读时条件那两条是这份语法里最要紧的一处：`#+sb-thread (foo)` 在**读取器**那一层就
+;; 决定了后面那条 datum 收不收。我们**两条都读进来**（出 `(reader-cond …)` 三个孩子），
+;; 因为"哪些特性成立"是宿主的事，不是语法的事 —— 语法只该说"这儿有两条 datum"。
+;; SBCL 自己的源码里还有 `#!+` / `#!-`（宿主/目标之分），同样收。
+;;
+;; 明说的不足（不猜）：
+;;   1. `#|…|#` 里嵌的 `#|` 照 CL 的规矩计数（nest），但**`|` 竖线符号里的** `#|`
+;;      也会被算上 —— 块注释那一格是纯扫字符的，不认识记号。
+;;   2. 包标记（`pkg:sym` / `pkg::sym`）不切开：整段就是一个符号记号。
+;;   3. `#nA(…)` 的维数、`#*1011` 的位数不校验 —— 那是读取器建值那一步的事。
+
+(grammar sbcl
+  (tokens SYMBOL NUMBER STRING CHAR BITVEC PATHNAME LABELDEF LABELREF ARRAY COND)
+
+  (start program)
+
+  (lex
+    (skip space)
+    ;; 脚本头（SBCL 的 `--script` 那种写法）
+    (comment "#!/" (* (not "\n")))
+    (comment ";" (* (not "\n")))
+    (block-comment "#|" "|#" nest)
+
+    ;; ---- 数。摆在符号之前：同长时声明在前的赢，于是 `-1` 是数而不是符号。
+    ;; `#36rZZ` 那一支放最前（它比下面 `#x` 那支长）
+    (token NUMBER "#" (+ digit) (or "r" "R") (? (or "+" "-")) (+ alnum))
+    (token NUMBER "#" (set "bBoOxX") (? (or "+" "-")) (+ alnum) (? "/" (+ alnum)))
+    (token NUMBER (? (or "+" "-")) (+ digit) "/" (+ digit))
+    ;; `123.` 在 CL 里是十进制整数（尾巴那个点是进制标记，不是小数点）
+    (token NUMBER (? (or "+" "-")) (+ digit) (? "." (* digit))
+      (? (set "esfdlESFDL") (? (or "+" "-")) (+ digit)))
+    (token NUMBER (? (or "+" "-")) "." (+ digit)
+      (? (set "esfdlESFDL") (? (or "+" "-")) (+ digit)))
+
+    ;; ---- 字符。`#\Space` 这种名字比 `#\S` 长，所以先试字母数字那一支
+    (token CHAR "#\\" (or (+ (or alnum "-")) any))
+
+    ;; ---- 位向量、路径名、数组维数、标签
+    (token BITVEC "#*" (* (set "01")))
+    (token PATHNAME "#" (set "pP") "\"" (* (or (not "\"\\") (seq "\\" any))) "\"")
+    (token ARRAY "#" (+ digit) (set "aA"))
+    (token LABELDEF "#" (+ digit) "=")
+    (token LABELREF "#" (+ digit) "#")
+
+    ;; ---- 读时条件。SBCL 自己那两格 `#!+` / `#!-` 也收
+    (punct COND "#!+" "#!-" "#+" "#-")
+
+    ;; ---- 串，与 `|带空格的符号|`
+    (string STRING "\"")
+    ;; 与 chez 那边同一条理由：`|…|` 里不认反斜杠转义，只有下一个 `|` 收尾
+    (token SYMBOL "|" (* (not "|")) "|")
+
+    ;; ---- 算符与括号。**摆在符号之前** —— 点对里那个 `.` 与符号都只有一个字符，
+    ;;      同长时声明在前的赢。
+    (op "#S(" "#s(" "#C(" "#c(" "#'" "#(" "#:" "#." ",@" ",." "(" ")" "'" "`" "," ".")
+
+    ;; ---- 符号。CL 的符号构成字符几乎是"除了分隔符以外的一切"，所以直接按分隔符兜底
+    ;;      （真读取器就是这么干的）。`\x` 是单字符转义，`|…|` 上面单独一条。
+    ;;
+    ;;      **点也能起头**：`..`（contrib/code-extras.lisp:10 的 `(defun replace (..))`）与
+    ;;      `.value-record.`（contrib/sb-simd/code/record.lisp:135）都是真符号。而"光一个点"
+    ;;      仍然是点对里那个点 —— 靠的是同长时声明在前的赢（上面 `(op … ".")` 在这条之前）。
+    ;;      首字符只排掉数字，免得抢了数。
+    (token SYMBOL
+      (or alpha (set "!$%&*/:<=>?^_~+-.@[]{}") (seq "\\" any)
+        (not " \t\n\r()'\";,`|#\\0123456789"))
+      (* (or alnum (set "!$%&*/:<=>?^_~+-.@[]{}#") (seq "\\" any)
+        (not " \t\n\r()'\";,`|\\")))))
+
+  ;; ---- 语法 ------------------------------------------------------------------
+
+  (rule program
+    (-> (data) (program $*1)))
+
+  (rule data
+    (-> () ())
+    (-> (data datum) ($*1 $2)))
+
+  (rule datum
+    (-> (SYMBOL) (sym $1))
+    (-> (NUMBER) (num $1))
+    (-> (STRING) (str $1))
+    (-> (CHAR) (char $1))
+    (-> (BITVEC) (bitvec $1))
+    (-> (PATHNAME) (pathname $1))
+    ;; 读时条件：**两条** datum —— 特性表达式一条、被它管着的形式一条
+    (-> (COND datum datum) (reader-cond $1 $2 $3))
+    (-> ("#." datum) (read-eval $2))
+    (-> (LABELDEF datum) (labeled $1 $2))
+    (-> (LABELREF) (labelref $1))
+    (-> ("#:" SYMBOL) (uninterned $2))
+    (-> (list) $1)
+    (-> (abbrev) $1))
+
+  (rule list
+    (-> ("(" data ")") (list $*2))
+    (-> ("(" data "." datum ")") (dotted $*2 (tail $4)))
+    (-> ("#(" data ")") (vector $*2))
+    (-> (ARRAY list) (array $1 $2))
+    (-> ("#S(" data ")") (struct $*2))
+    (-> ("#s(" data ")") (struct $*2))
+    (-> ("#C(" data ")") (complex $*2))
+    (-> ("#c(" data ")") (complex $*2)))
+
+  (rule abbrev
+    (-> ("'" datum) (quote $2))
+    (-> ("`" datum) (backquote $2))
+    (-> ("," datum) (unquote $2))
+    (-> (",@" datum) (unquote-splicing $2))
+    (-> (",." datum) (unquote-nsplicing $2))
+    (-> ("#'" datum) (function $2))))
