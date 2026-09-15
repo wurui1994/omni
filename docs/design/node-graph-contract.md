@@ -292,3 +292,153 @@ G4 判据。
 后端只回答"我接不接得住"，不打印文本；异步全族落在一格效应、一格能力、五个节点上；
 C 是产品，js 是尺子，wasm 是契约的证明。**
 每一小句都对应一条可跑的检查或一份可印的清单 —— 没有清单的那一句不算写完。
+
+## 附录 A：十份规格的并集（第一版，量出来的）
+
+十份 `ext/<lang>/SPEC.md` 写完之后，§11 第 1 步那张"能力并集表"就有了。
+**这是第一版，会随实现调整** —— 但它已经能回答"需要多少节点"。
+判据照 ADR-0033 §5：**至少两个提供者才配叫能力。**
+
+### A.1 能力成立（≥2 个提供者）
+
+- `bind`、`region`、`branch`、`callable`、`indirect-call` —— **十门全有**
+  （`region` 一门例外，见 A.4 第 1 条）。
+- `loop-region` —— lua / awk / go / nim / vlang / mojo / freebasic / cpp（8）。
+  chez / sbcl 靠递归与 `tagbody`，不需要它 —— **所以它是能力，不是骨架的必需项**。
+- `record` + `layout` —— sbcl / lua / go / nim / vlang / mojo / freebasic / cpp / chez（9）。
+- `array` —— chez（四种向量）/ sbcl / lua / go / nim / vlang / mojo / freebasic / cpp。
+- `dict` —— lua（table）/ awk（关联数组）/ go（map）/ vlang（map）（4）。
+- `dispatch` —— sbcl（CLOS 多分派）/ lua（metatable）/ go（interface）/ nim（method）/
+  vlang（interface）/ mojo（trait）/ freebasic（virtual）/ cpp（virtual）（8）。
+- **`scope-exit` —— 8 个提供者**：sbcl（7 种 cleanup）/ lua（`<close>`）/ go（`defer`）/
+  nim（`=destroy` + `defer`）/ vlang（`defer` + **`lock`**）/ mojo（`__deinit__` + `with`）/
+  freebasic（`Destructor` + `Scope`）/ cpp（RAII）。**这是清单上最稳的一格。**
+- `task-queue` —— go / nim / vlang / mojo / lua（协程）（5）。
+- `channel` —— go / vlang（2）。
+- `monomorphize` —— go / nim / vlang / mojo / cpp（5）。
+- `stage`（编译期规则引擎）—— chez / sbcl / nim / vlang / mojo / cpp（6）。
+- **`text-stage`（记号级预处理）—— freebasic / cpp（2，刚够）。明确不进图。**
+- **`property` —— jnc / freebasic（2，刚够）。** ADR-0033 §2.2 拿它当例子，
+  这一版第一次数够了提供者。
+- **`raw-union` —— freebasic / cpp（2）**；`tagged-union` —— nim / vlang / sbcl（3）。
+  **两格，不是一格。**
+- `named-type` —— go / nim（`distinct`）/ cpp（typedef）/ chez（3+）。
+- `enum` —— go / nim / vlang / freebasic / cpp（5）。
+- `ptr` —— go / nim / vlang / mojo / freebasic / cpp / lua（userdata）（7）。
+- `foreign-call` —— chez（`foreign`/`fcallable`）/ sbcl / nim / vlang / mojo /
+  freebasic / cpp（7）。
+- `overload` —— nim / mojo / freebasic / cpp（4）。
+- `primitive`（内建不是语言结构）—— chez（`pr`）/ sbcl（primref）/ go（23 格）/
+  awk / lua / freebasic（自带词序的语句）（6）。
+- `truthiness` —— lua / awk / cpp / freebasic（4，**四家答案各不同**）。
+- `zero-init` / `nullable` —— go（零值）/ lua（`nil`）/ awk（取用即存在）/
+  vlang（无 null）/ nim（4+）。
+- `number-tower` —— chez / sbcl / lua / go / awk / freebasic（6）。
+- `bytes` —— lua / awk / go / vlang / freebasic（四种串表示）（5）。
+- `multi-value` —— lua / go / sbcl（`values`）/ nim（元组解包）（4）。
+- `gc-lifetime` —— chez / sbcl / lua（`__gc`）/ nim（ORC）/ vlang（autofree）（5）。
+  **这一格与"释放点靠图上最后一次使用算"冲突，见 A.5。**
+- `sexpr-read` / `graph-literal`（datum 标签）—— chez / sbcl（各 2）。
+- `mutex` —— vlang（`lock`）/ cpp（`std::mutex` 是库，但语义在语言里）/ go（同）。
+  **算 1.5 家，待第二个真正的语法级提供者** —— 现在按 vlang 那条落法
+  （`region` + `scope-exit`），零新节点。
+
+### A.2 只有一个提供者（不算能力）
+
+按纪律，这些**不进公共清单**，各留在自己那门的 `ext/<lang>/` 里，且必须有一条消去规则：
+
+- awk：`record-loop`（隐式主循环）、`field-view`（`$0` 与 `$1..$NF` 两种视图）、`regex`。
+- sbcl：`read-time-cond`（`#+`）、`read-time-eval`（`#.`）、`host-path`（`#P"…"`）。
+- chez：`cell`（`#&` 箱）—— 待第二家。
+- cpp：`runtime-type`（`dynamic_cast` / `typeid`）—— go 的类型 switch 与 vlang 的
+  sumtype 可能是第二、三家，**没定**。
+- freebasic：**"方言要有按宽度读写内存"** —— 这不是能力，是**对方言的要求**
+  （ADR-0031 那笔账的答案，见 `ext/freebasic/SPEC.md` §3.3）。
+
+### A.3 求解器（不是节点，也不是能力）
+
+ADR-0033 §10 保留的那一类零件，十份规格里点到的全部：
+
+- **重载决议 + ADL**（cpp 最难，nim / freebasic / mojo 也要）
+- **作用域查名**（十门全要；ADR-0029 的作用域图已落）
+- **模板实参推导 / SFINAE**（cpp）、**trait / interface 满足性判定**（go 结构式、
+  mojo、nim 的 `concept`）
+- **UFCS 的候选集**（nim）、**隐式转换偏序**（freebasic 最宽、go 两张表、cpp 转换序列）
+
+规则里以"副作用自由的查询"形式调它们，**每个特性的文档要写明它用了哪个求解器**。
+
+### A.4 不进图（五类，各有出处）
+
+1. **后端自己的节点**：sbcl 的 `jump-table` / `vop-jumper`、go 的 17 格
+   （`OITAB` / `OMAKEFACE` / `OJUMPTABLE` …）、V 的 `CTempVar` / `Likely`、
+   mojo 的 `__mlir_op.*`、`Asm` 块（V / freebasic / cpp）。
+   —— **后端可以有自己的节点，不许倒灌进契约。**
+2. **宿主语言里嵌的另一门语言**：V 的 `sql`（4 格 AST）、mojo 的 Python 互操作、
+   gsl-shell 的"字符串里的 DSL"。整块当外部调用。
+3. **记号级预处理**：freebasic 的 `#define`/`#macro`、cpp 的预处理（`text-stage`）——
+   读树之前就消掉了。
+4. **只检查不产生代码的特性**：mojo 的 exclusivity 与 origin 检查、vlang 的 `mut`、
+   nim 的 `requires`/`ensures`、cpp 的访问控制、freebasic 的 `BoundChk`/`PtrChk`。
+   —— ADR-0033 §7 已把这一类列为"不产生代码的特性"。
+5. **什么都不是**：cpp 的拷贝省略（prvalue 直接接到消费者的入端口上，
+   本来就没有那次拷贝）。
+
+### A.5 十份规格问出来的、现在没有答案的四笔账
+
+**这四笔比任何一格节点都要紧，因为它们是五栏或四种边的漏洞：**
+
+1. **跨线程的次序在图上没有表达方式。** go 的 `go_mem.html`（happens-before）与
+   cpp 的 `memory_order` 指到同一处：我们的 `effect` 边只表达"同一效应域内的次序"。
+   **两门语言独立指向同一空洞 ⇒ 该单独立一份 ADR。**
+2. **`gc-lifetime` 与"释放点靠图上最后一次使用算"冲突。** lua 的 `__gc`/弱表、
+   nim 的 `=trace`/ORC、vlang 的 autofree 三门都指到这儿。**同上，该单独立 ADR。**
+3. **`lifetime` 栏要几格取值？** mojo 给了四格（`owns`/`borrows`/`static`/**`untracked`**），
+   cpp 又加一格（**临时量绑到 `const&` 就延长所有者的寿命** —— 借的一方能改被借者的寿命）。
+   两门合起来说明 ADR-0033 §3.2 那三格**不够**。
+4. **驱动器缺一格"回问"机制。** cpp 判不了"声明还是表达式"、判不了 `<`/`>`
+   （要问"这个名字登记成类型了吗"），nim 的 `optInd` 要问"这一格的列号"。
+   **两门语言指向 `driver.js` 同一格缺口** —— 这比任何一门自己的欠账都值钱。
+
+### A.6 骨架节点候选清单（26 格，两位数，达标）
+
+从 A.1 直接推出来的第一版。每格都能指到至少两门语言的规格行：
+
+```
+值与名字   const · ref · set
+调用       call · primitive
+算子       binop · unop（&& / || / ?: 的第二个入端口是 lazy）
+分支与循环 branch · loop-region
+域与绑定   region · bind
+函数       func（元数分派是附属，见 ext/chez/SPEC.md §3.2 第 2 条）
+数据       record-new · field-get · field-set · index-get · index-set · slice
+表示       conv（go 12 格 Op 塌成的这一格）
+分配       alloc（make / new / 闭包分配 —— 与 allocates 效应的粒度待定）
+出口       scope-exit · init
+并发       spawn · chan-new · chan-send · chan-recv
+语言私有   record-loop · field-view（**只在 ext/awk/**，不算公共格）
+```
+
+公共格 **26**（不含最后两格 awk 私有的）。对照三份别人量好的表：
+chez 的 `Lsrc` 骨架 17 种（归成 11 族）、go 的 151 格 `Op` 塌成约 25、
+V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
+**四个独立来源都落在 20–30 这一档 —— 这就是"需要多少节点"的答案。**
+
+### A.7 附属节点（不逐个列，按挂点分七类）
+
+1. **挂在一条 `value` 边上**：sbcl 的 `cast` 与 8 个 `lvar-*-annotation`、
+   awk 的 `strnum`（值的来历）、cpp 的**值类别**、nim 的类型标注。
+2. **挂在一格 `callable` 上**：效应签名（nim 的 `raises`/`tags`、mojo/cpp 的
+   `noexcept`）、形参的 `borrow`/`consume`（mojo 五种约定、freebasic 的 `Byref`/`Byval`、
+   awk 的"数组按引用标量按值"）、元数与多值、调用约定。
+3. **挂在一格声明上**：nim 的 `pragma`（总入口）、V 的 `@[…]`、cpp 的 `[[…]]`、
+   mojo 的装饰器、go 的 struct tag、freebasic 的 `Align`/`Field`。
+4. **挂在一格 `branch` 上**：`truthiness`（四家答案不同）。
+5. **挂在宿主结构上**：awk 的 `BEGIN`/`END`（挂 `record-loop`）、
+   freebasic 的 `With` 块里的 `.field`（我们量出 +80 份的那一格）、
+   go 的嵌入字段、chez 的 `clause`。
+6. **挂在一格类型上**：nim 的七个 `=hook`、mojo 的 origin、cv 限定。
+7. **纯注解（删了不影响任何东西）**：chez 的 `profile` / `pariah` /
+   `cte-optimization-loc` / `moi`、go 的 `OPAREN`、V 的 `Comment`。
+
+**第 7 类的存在本身就是判据**：它们全是"删掉它，图还连得起来"——
+`node-graph-contract.md` §2.1 那条判据在别人的代码库里已经被验证过四遍。
