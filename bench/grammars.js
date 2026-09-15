@@ -24,7 +24,7 @@
 //       { "tree": "lua",  "env": "LUA_SRC", "ext": ".lua" },   // 参考树（refsrc 的口径）
 //       { "dir": "tests/corpus", "ext": ".lua" }               // 这个扩展目录里自带的
 //     ],
-//     "invalid": ["internal/syntax/testdata/"]                 // **故意写错的**用例，见下
+//     "invalid": { "paths": ["/testdata/"], "marker": "ERROR" }  // **故意写错的**用例，见下
 //   }
 //
 // ## `invalid`：**故意写错的用例不算覆盖率**
@@ -34,9 +34,13 @@
 // 那些文件语法分析器**就该拒**。把它们算进"没过"里，覆盖率那一栏永远到不了顶，而且
 // 会把"我们还欠什么"记糊 —— 分不清"我们读不了"与"它本来就不该读得了"。
 //
-// 所以 `invalid` 列一串**路径片段**（子串匹配，不是 glob）：命中的文件单独一栏 `坏例`，
-// **不进 `文件` 与 `过` 的分母分子**。反过来，坏例里要是有**居然过了**的，那一栏会写成
-// `N+M`（M 份居然过了）—— 那是另一种错：语法收得太宽。两个方向都不许糊过去。
+// 两种写法：
+//   `"invalid": ["tests/"]`                       整个目录都是故意写坏的（fbc 那种）
+//   `"invalid": {"paths": […], "marker": "ERROR"}` 目录里好坏混着，还得看文本里的标记
+//
+// 命中的文件单独一栏 `坏例`，**不进 `文件` 与 `过` 的分母分子**。反过来，坏例里要是有
+// **居然过了**的，那一栏会写成 `N+M`（M 份居然过了）—— 那是另一种错：语法收得太宽。
+// 两个方向都不许糊过去。
 //
 // 参考树不在就**跳过并说清**（不假装绿，也不假装量到了）。
 //
@@ -123,11 +127,24 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
   if (missing.length > 0) notes.push(`${name}: 少了参考树 ${missing.join(' / ')}（${REF_ROOT} 下没有）`);
 
   /* 故意写错的用例挑出来（见文件头 `invalid` 那一段）：它们**不进覆盖率**，
-     单独一栏，而且"居然过了"的也要数出来。 */
-  const invalid = cfg.invalid ?? [];
+     单独一栏，而且"居然过了"的也要数出来。
+     两种写法：一串路径片段，或者 `{paths, marker}` —— 后者多要一句"文本里得有这个标记"，
+     go 的 `testdata/` 底下既有故意写错的（带 `// ERROR`）也有好的，只按目录分不开。 */
+  const inv = cfg.invalid ?? [];
+  const invPaths = Array.isArray(inv) ? inv : (inv.paths ?? []);
+  const invMarker = Array.isArray(inv) ? null : (inv.marker ?? null);
+  const isInvalid = (f) => {
+    if (!invPaths.some((p) => f.includes(p))) return false;
+    if (invMarker === null) return true;
+    try {
+      return readFileSync(f, 'utf8').includes(invMarker);
+    } catch {
+      return false;
+    }
+  };
   const files = [];
   const bad = [];
-  for (const f of all) (invalid.some((p) => f.includes(p)) ? bad : files).push(f);
+  for (const f of all) (isInvalid(f) ? bad : files).push(f);
 
   // ---- 1) 冷建表。先问一遍拿到缓存路径，删掉它再计时 —— 键的算法只有 load.js 那一份，
   //          这儿不复制（复制了就会有第二种说法）。

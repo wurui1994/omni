@@ -241,13 +241,17 @@
     (-> ("print") (print))
     (-> ("print" exprs) (print $*2))
     (-> ("printf" exprs) (printf $*2))
-    ;; **带括号的实参表**：`printf("%s\n", a, b)`。这不是"一个括号表达式"——
-    ;; 括号里有逗号，而表达式里没有逗号。所以要单开一条（51 份卡在这儿）。
-    ;; 括号里也允许换行（`opt-nl`），语料里 printf 的实参常常折行。
-    (-> ("printf" "(" exprs ")") (printf $*3))
-    (-> ("print" "(" exprs ")") (print $*3))
-    (-> ("printf" "(" exprs ")" redirect) (printf $*3 $5))
-    (-> ("print" "(" exprs ")" redirect) (print $*3 $5))
+    ;; **带括号的实参表**：`printf("%s\n", a, b)`、`print (a, b) > "f"`。
+    ;; 这不是"一个括号表达式"—— 括号里有逗号，而表达式里没有逗号（51 份卡在这儿）。
+    ;;
+    ;; 一格实参时（`print("x")`）它与"print 一个括号表达式"是同一串输入两棵树 ——
+    ;; 两棵树在语义上一样，所以不删规则，而是**声明偏好**：括号实参表那一支 `(prefer 1)`。
+    ;; 试过"里头必须两格以上"那种收紧：`print (a, b) > "f"` 立刻只剩 `(i,j) in arr` 一条路，
+    ;; 报 "expected in"（量过，7 份）。偏好这一格才是对的手法。
+    (-> ("printf" "(" exprs ")") (prefer 1) (printf $*3))
+    (-> ("print" "(" exprs ")") (prefer 1) (print $*3))
+    (-> ("printf" "(" exprs ")" redirect) (prefer 1) (printf $*3 $5))
+    (-> ("print" "(" exprs ")" redirect) (prefer 1) (print $*3 $5))
     (-> ("print" redirect) (print $2))
     (-> ("print" exprs redirect) (prefer 2) (print $*2 $3))
     (-> ("printf" exprs redirect) (prefer 2) (printf $*2 $3)))

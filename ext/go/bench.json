@@ -3,5 +3,10 @@
   "doc": "语料 = Go 官方那棵树里 src/ 下的 .go（8000 多份 —— 标准库把这门语言的每个角落都用了，自己挑片段挑不到）。树不在就跳过。语法照 doc/go_spec.html 那份 EBNF 写。",
   "corpus": [
     { "tree": "go", "env": "GO_SRC", "sub": "src", "ext": ".go" }
-  ]
+  ],
+  "invalid": {
+    "paths": ["/internal/syntax/testdata/"],
+    "marker": "ERROR",
+    "doc": "Go **分析器自己的**错误用例：`cmd/compile/internal/syntax/testdata/` 下带 `// ERROR …` 标记的那些是故意写坏语法的（`_ []int = {1,2,3}`、`func T[P]m()`），语法分析器就该拒，所以不算覆盖率。范围只框到这一格是量出来的：一开始写成所有 `testdata/`，结果 378 份里 317 份照样过了 —— 那些是**类型**错误的用例，语法本来就是好的，不该算进坏例。"
+  }
 }

@@ -3,5 +3,10 @@
   "doc": "语料 = gawk 那棵树里的 .awk（test/ 下那七百来个是 gawk 自己的回归语料 —— awk 的花样它用了个遍，自己挑片段挑不到）。树不在就跳过。语法本身照 POSIX 那份公开语法写，不从 gawk 的 awkgram.y 派生（许可证：那份是 GPLv3）。",
   "corpus": [
     { "tree": "gawk", "env": "GAWK_SRC", "ext": ".awk" }
-  ]
+  ],
+  "invalid": [
+    "test/badassign1.awk",
+    "test/badbuild.awk"
+  ],
+  "invalidDoc": "gawk 自己的错误用例（`$i++ = 3`、`x == y = 1`）—— 分析器就该拒，不算覆盖率。为什么只有两份：gawk 的错误用例是靠同名 `.ok` 文件里那句 gawk 诊断认出来的，把没过的 57 份逐个对了一遍 .ok，只有这两份是故意写坏语法的，其余是我们真欠的。"
 }
