@@ -23,8 +23,20 @@
 //     "corpus": [
 //       { "tree": "lua",  "env": "LUA_SRC", "ext": ".lua" },   // 参考树（refsrc 的口径）
 //       { "dir": "tests/corpus", "ext": ".lua" }               // 这个扩展目录里自带的
-//     ]
+//     ],
+//     "invalid": ["internal/syntax/testdata/"]                 // **故意写错的**用例，见下
 //   }
+//
+// ## `invalid`：**故意写错的用例不算覆盖率**
+//
+// 真语言的仓库里躺着一大批**故意不合法**的文件：go 的 `internal/syntax/testdata/` 里
+// 每一份都带着 `// ERROR …` 标记，gawk 的 `test/badassign1.awk` 写的是 `$i++ = 3`。
+// 那些文件语法分析器**就该拒**。把它们算进"没过"里，覆盖率那一栏永远到不了顶，而且
+// 会把"我们还欠什么"记糊 —— 分不清"我们读不了"与"它本来就不该读得了"。
+//
+// 所以 `invalid` 列一串**路径片段**（子串匹配，不是 glob）：命中的文件单独一栏 `坏例`，
+// **不进 `文件` 与 `过` 的分母分子**。反过来，坏例里要是有**居然过了**的，那一栏会写成
+// `N+M`（M 份居然过了）—— 那是另一种错：语法收得太宽。两个方向都不许糊过去。
 //
 // 参考树不在就**跳过并说清**（不假装绿，也不假装量到了）。
 //
@@ -101,14 +113,21 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
   if (!existsSync(gpath)) { notes.push(`${name}: 自述里的 ${cfg.grammar} 不在`); continue; }
 
   // ---- 语料。少一棵树就说清少了哪一棵（这一门照旧量表，只是语料那几栏空着）
-  const files = [];
+  const all = [];
   const missing = [];
   for (const src of cfg.corpus ?? []) {
     const got = resolveCorpus(extDir, src);
     if (got === null) { missing.push(src.tree); continue; }
-    for (const f of got) files.push(f);
+    for (const f of got) all.push(f);
   }
   if (missing.length > 0) notes.push(`${name}: 少了参考树 ${missing.join(' / ')}（${REF_ROOT} 下没有）`);
+
+  /* 故意写错的用例挑出来（见文件头 `invalid` 那一段）：它们**不进覆盖率**，
+     单独一栏，而且"居然过了"的也要数出来。 */
+  const invalid = cfg.invalid ?? [];
+  const files = [];
+  const bad = [];
+  for (const f of all) (invalid.some((p) => f.includes(p)) ? bad : files).push(f);
 
   // ---- 1) 冷建表。先问一遍拿到缓存路径，删掉它再计时 —— 键的算法只有 load.js 那一份，
   //          这儿不复制（复制了就会有第二种说法）。
@@ -144,6 +163,8 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
     hit: warm.hit && !cold.hit,
     files: files.length,
     ok: 0,
+    bad: bad.length,
+    badOk: 0,
     bytes: 0,
     tokens: 0,
     nodes: 0,
@@ -185,12 +206,39 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
       row.ok++;
       row.nodes += countNodes(tree);
     }
+    /* 坏例：过了的要数出来（那是语法收得太宽）。它们的字节/记号/时间也算进吞吐 ——
+       那一趟活是真干了。 */
+    for (const f of bad) {
+      let text = null;
+      try {
+        text = readFileSync(f, 'utf8');
+      } catch {
+        continue;
+      }
+      const diags = new Diagnostics();
+      const t0 = performance.now();
+      let tree = null;
+      let toks = null;
+      try {
+        toks = lexText(g.lex, new SourceFile(f, text), diags);
+        if (toks !== null && !diags.hasErrors()) tree = glrParse(tb, toks, diags);
+      } catch (err) {
+        diags.error(null, err.message);
+      }
+      row.parseMs += performance.now() - t0;
+      row.bytes += statSync(f).size;
+      if (toks !== null) row.tokens += toks.length;
+      if (tree !== null && !diags.hasErrors()) {
+        row.badOk++;
+        row.nodes += countNodes(tree);
+      }
+    }
   }
   rows.push(row);
 }
 
 // ---- 印。两种排版：默认是给终端看的定宽表，`--md` 是给 DESIGN.md 用的
-const head = ['语言', '状态', '产生式', '终结符', '冲突', '冷建表', '热装表', '文件', '过', '字节', '记号', '节点', '解析', 'MB/s', '万记号/s'];
+const head = ['语言', '状态', '产生式', '终结符', '冲突', '冷建表', '热装表', '文件', '过', '坏例', '字节', '记号', '节点', '解析', 'MB/s', '万记号/s'];
 const body = rows.map((r) => [
   r.name,
   `${r.states}`,
@@ -201,6 +249,7 @@ const body = rows.map((r) => [
   r.hit ? ms(r.warmMs) : `MISS ${ms(r.warmMs)}`,
   `${r.files}`,
   r.note === undefined ? `${r.ok}` : '-',
+  r.badOk > 0 ? `${r.bad}+${r.badOk}` : `${r.bad}`,
   r.note === undefined ? kb(r.bytes) : '-',
   r.note === undefined ? `${r.tokens}` : '-',
   r.note === undefined ? `${r.nodes}` : '-',

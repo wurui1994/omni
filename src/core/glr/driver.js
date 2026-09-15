@@ -28,6 +28,8 @@
 // 而不是挂住。真遇到需要 DAG 的语法再说 —— 位置就在这一个文件里。
 
 const MAX_PARSES = 400;
+/** 一格记号上最多归约多少次 —— 只防"语法里有空环"导致的挂死，不是歧义的判据 */
+const MAX_REDUCE_WORK = 100000;
 
 const isTemplateHole = (n) => n.kind === 'atom' && /^\$[0-9]+$/.test(n.value);
 const isSpliceHole = (n) => n.kind === 'atom' && /^\$\*[0-9]+$/.test(n.value);
@@ -186,8 +188,10 @@ export function glrParse(tb, toks, diags) {
         const nn = mk(to, base, value, pref);
         merged.set(prev === undefined ? key : `${key}#${nn.id}`, nn);
         work.push(nn);
-        if (merged.size > MAX_PARSES) {
-          diags.error(tk.span, `too many concurrent parses (> ${MAX_PARSES}) — the grammar is too ambiguous around here`);
+        if (merged.size > MAX_REDUCE_WORK) {
+          /* 这一格是**挂死的兜底**，不是歧义的判据（见 MAX_PARSES 那一段）。
+             一格记号上归约出十万个顶点，只可能是语法里有一圈能反复归约的空环。 */
+          diags.error(tk.span, `the grammar loops here — one token produced more than ${MAX_REDUCE_WORK} reductions`);
           return null;
         }
       }
@@ -223,6 +227,23 @@ export function glrParse(tb, toks, diags) {
       }
       live = canShift.filter((s) => !cut.has(s.n.id));
       liveAccepted = accepted.filter((n) => !cut.has(n.id));
+    }
+
+    /* ---- 1.6) 「同时活着几个分析」的上限。
+     *
+     * 判据是**剪支之后还能动的支数**（`live`），不是归约期造过的顶点数。这一格改过一次，
+     * 起因量得很干净：go 那棵树里 84 份 `zerrors_*.go` 报 "too many concurrent parses"，
+     * 而合成一份"六百条 `const A = 1`"就能复现 —— 那里头一处歧义都没有。
+     *
+     * 原因是右递归：`decls -> decl ";" decls` 这种形状在**收尾那一格记号**上会连着归约
+     * N 次（先把最里层的空 `decls` 归约出来，再一层层往外收）。老版本把归约期造出来的
+     * 顶点数当上限，于是"声明多"直接被当成"歧义大"。而右递归正是这几份语法里最要紧的
+     * 一格形状（go 那一刀值 2571 份文件），不能因为这个上限被劝退。
+     *
+     * 归约期改成只管**挂死**（MAX_REDUCE_WORK，上面那一格），真正的分叉数在这儿判。 */
+    if (live.length > MAX_PARSES) {
+      diags.error(tk.span, `too many concurrent parses (> ${MAX_PARSES}) — the grammar is too ambiguous around here`);
+      return null;
     }
 
     // ---- 2) 接受
