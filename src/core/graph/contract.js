@@ -1,0 +1,198 @@
+// src/core/graph/contract.js —— **后端契约：五问。后端只回答问题，不打印文本**
+//
+// `docs/design/node-graph-contract.md` §6。这一份是那一节的可执行版本：
+//
+//   can(node)        这个节点的五栏我接得住吗（接不住给一句人话 —— 那句话就是账）
+//   carry(sort)      这格 sort 在我这儿落成什么
+//   effect(name)     六格效应 + synchronizes（ADR-0035）我怎么落
+//   region(kind)     一格存储/名字域我怎么开、怎么关
+//   lower(graph)     收一块**接口已知**的子图，出我自己的结构
+//
+// 三条纪律（写成代码而不是注释里的希望）：
+//   1. 后端**不许问"上一步把它放哪儿了"**：`lower` 只拿到图，端口的物化由调度器定。
+//   2. **接不住是构建期错误**：`gaps()` 把清单印出来，那是待办，不是运行期惊喜。
+//   3. 后端之间不比优劣，**比覆盖**：同一张图、每个后端跑出来的可观察行为必须一致 ——
+//      判据在 `tests/graph/run.js`（语言 × 后端的矩阵，加一门语言或一个后端自动多几格）。
+
+import { NODES, declOf } from './nodes.js';
+import { evalGraph, showValue, truthy } from './eval.js';
+import { toSx } from './graph.js';
+
+/** 已登记的后端。**核心不认识任何一个后端的细节**，只按这五问要答案。 */
+const BACKENDS = new Map();
+
+export function registerBackend(b) {
+  for (const q of ['name', 'can', 'carry', 'effect', 'lower']) {
+    if (b[q] === undefined) throw new Error(`backend ${b.name ?? '?'} 少答一问：${q}`);
+  }
+  BACKENDS.set(b.name, b);
+  return b;
+}
+
+export const backends = () => [...BACKENDS.values()];
+
+/**
+ * `omni backend --gaps <名字>` 的核心：这个后端接不住哪几格节点。
+ * **清单是算出来的**（问一遍 `can`），不是手写的文档。
+ */
+export function gaps(name) {
+  const b = BACKENDS.get(name);
+  if (b === undefined) throw new Error(`no such backend: ${name}`);
+  const out = [];
+  for (const [op] of NODES) {
+    const ans = b.can(op);
+    if (ans !== true) out.push({ op, why: typeof ans === 'string' ? ans : '（没给理由 —— 这本身是一笔账）' });
+  }
+  return out;
+}
+
+// ---- 后端一：`interp` —— 就是 eval。**默认的解释器不是额外的后端，是调度器的读法** ----
+registerBackend({
+  name: 'interp',
+  can: () => true,
+  carry: (sort) => `js value (${sort})`,
+  effect: () => 'js 语义直接给（宿主管次序）',
+  region: () => 'Env 一格',
+  lower: (g) => ({ run: () => evalGraph(g) }),
+});
+
+// ---- 后端二：`sx` —— 图的序列化。**它不是中间语言的文本形式**（§5.2）--------------
+registerBackend({
+  name: 'sx',
+  can: () => true,
+  carry: (sort) => `(sort ${sort})`,
+  effect: (e) => `(effect ${e})`,
+  region: () => '(region …)',
+  lower: (g) => ({ text: toSx(g), run: () => ({ value: null, out: [] }) }),
+  /** 只序列化，不承诺跑得起来 —— 所以它在测试矩阵里只对"文本稳定"负责。 */
+  runnable: false,
+});
+
+// ---- 后端三：`js` —— 真的落一格产物出来，用来验"同一张图，两条腿输出相同" ----------
+//
+// 这一格要说清：**js 的产物是文本（那是这门宿主语言的样子），但契约的界面不是文本** ——
+// 后端拿到的是图，它自己内部怎么攒都行。所以 §5.2 那句"不再拼接字符串"针对的是
+// **图与后端之间**，不是后端内部。
+registerBackend({
+  name: 'js',
+  can: (op) => {
+    if (op === 'ret') return true;
+    return NODES.has(op) ? true : `js 后端还没接：${op}`;
+  },
+  carry: (sort) => (sort === 'expr' ? 'js 表达式' : 'js 语句'),
+  effect: (e) => (e === 'suspends' ? 'async/await（这一批还没接）' : 'js 语义直接给'),
+  region: () => '一格 { } 块 + let',
+  lower: (g) => jsLower(g),
+});
+
+const JS_PRIM = new Map([
+  ['print', (a) => `__out.push([${a.join(', ')}].map(__show).join(' '))`],
+  ['+', (a) => (a.length === 0 ? '0' : `(${a.join(' + ')})`)],
+  ['-', (a) => (a.length === 1 ? `(-${a[0]})` : `(${a.join(' - ')})`)],
+  ['*', (a) => (a.length === 0 ? '1' : `(${a.join(' * ')})`)],
+  ['/', (a) => `(${a.join(' / ')})`],
+  ['%', (a) => `(${a.join(' % ')})`],
+  ['<', (a) => `(${a[0]} < ${a[1]})`],
+  ['>', (a) => `(${a[0]} > ${a[1]})`],
+  ['<=', (a) => `(${a[0]} <= ${a[1]})`],
+  ['>=', (a) => `(${a[0]} >= ${a[1]})`],
+  ['=', (a) => `(${a[0]} === ${a[1]})`],
+  ['==', (a) => `(${a[0]} === ${a[1]})`],
+  ['!=', (a) => `(${a[0]} !== ${a[1]})`],
+  ['not', (a) => `(!__truthy(${a[0]}))`],
+  ['concat', (a) => `[${a.join(', ')}].map(__show).join('')`],
+  ['len', (a) => `(${a[0]}).length`],
+]);
+
+/** 名字要能当 JS 标识符用（Scheme 的 `max2`、`string-append` 那种带横杠的名字）。 */
+const jsName = (n) => `v_${String(n).replace(/[^A-Za-z0-9_]/g, (c) => `$${c.charCodeAt(0).toString(16)}`)}`;
+
+function jsExpr(x) {
+  if (x === null || x === undefined) return 'null';
+  if (Array.isArray(x)) return `(() => { ${x.map(jsStmt).join(' ')} })()`;
+  if (x.lit !== undefined) return JSON.stringify(x.lit);
+  switch (x.op) {
+    case 'const': return JSON.stringify(x.attrs.value ?? null);
+    case 'ref': return jsName(x.attrs.name);
+    case 'binop': {
+      const f = JS_PRIM.get(x.attrs.op);
+      if (f === undefined) throw new Error(`js: 这个算子还没接：${x.attrs.op}`);
+      return f([jsExpr(x.ins.a), jsExpr(x.ins.b)]);
+    }
+    case 'unop': return JS_PRIM.get(x.attrs.op)([jsExpr(x.ins.a)]);
+    case 'prim': {
+      const f = JS_PRIM.get(x.attrs.name);
+      if (f === undefined) throw new Error(`js: 这格内建还没接：${x.attrs.name}`);
+      const args = (Array.isArray(x.ins.args) ? x.ins.args : [x.ins.args]).filter((y) => y !== undefined);
+      return f(args.map(jsExpr));
+    }
+    case 'branch': {
+      const e = x.ins.else === undefined ? 'null' : jsExpr(x.ins.else);
+      return `(__truthy(${jsExpr(x.ins.cond)}) ? ${jsExpr(x.ins.then)} : ${e})`;
+    }
+    case 'func': {
+      const ps = (x.attrs.params ?? []).map(jsName).join(', ');
+      return `((${ps}) => { ${jsFnBody(x.ins.body)} })`;
+    }
+    case 'call': {
+      const args = (Array.isArray(x.ins.args) ? x.ins.args : x.ins.args === undefined ? [] : [x.ins.args]);
+      return `${jsExpr(x.ins.fn)}(${args.map(jsExpr).join(', ')})`;
+    }
+    case 'region': return `(() => { ${asStmts(x.ins.body).map(jsStmt).join(' ')} })()`;
+    default: return `(() => { ${jsStmt(x)} })()`;
+  }
+}
+
+const asStmts = (b) => (b === undefined || b === null ? [] : Array.isArray(b) ? b : [b]);
+
+/**
+ * 函数体：**最后一格如果是 `expr` 那一类，它就是返回值**（`sort` 那一栏说的，不是猜的）。
+ *
+ * 这一条是"语言 × 后端"那张矩阵抓出来的第一个真差别：Scheme 的函数体没有 `return`
+ * （最后一格表达式就是值），Lua 的有 `ret`。`interp` 那边天然对（它一路交回最后一格值），
+ * js 后端不看 `sort` 的话就全成了 undefined —— 一门语言过、另一门不过。
+ * 判据是矩阵，修法是**读声明**。
+ */
+function jsFnBody(body) {
+  const list = asStmts(body);
+  if (list.length === 0) return 'return null;';
+  const head = list.slice(0, -1).map(jsStmt);
+  const last = list[list.length - 1];
+  const sort = last !== null && last !== undefined && last.op !== undefined ? declOf(last.op).sort : null;
+  head.push(sort === 'expr' ? `return ${jsExpr(last)};` : `${jsStmt(last)} return null;`);
+  return head.join(' ');
+}
+
+function jsStmt(x) {
+  if (x === null || x === undefined) return '';
+  if (Array.isArray(x)) return x.map(jsStmt).join(' ');
+  if (x.lit !== undefined) return `${JSON.stringify(x.lit)};`;
+  switch (x.op) {
+    case 'bind': return `let ${jsName(x.attrs.name)} = ${jsExpr(x.ins.init)};`;
+    case 'set': return `${jsName(x.attrs.name)} = ${jsExpr(x.ins.value)};`;
+    case 'ret': return `return ${x.ins.value === undefined ? 'null' : jsExpr(x.ins.value)};`;
+    case 'loop': return `while (__truthy(${jsExpr(x.ins.cond)})) { ${asStmts(x.ins.body).map(jsStmt).join(' ')} }`;
+    case 'region': return `{ ${asStmts(x.ins.body).map(jsStmt).join(' ')} }`;
+    case 'branch': {
+      const t = `{ ${asStmts(x.ins.then).map(jsStmt).join(' ')} }`;
+      const e = x.ins.else === undefined ? '' : ` else { ${asStmts(x.ins.else).map(jsStmt).join(' ')} }`;
+      return `if (__truthy(${jsExpr(x.ins.cond)})) ${t}${e}`;
+    }
+    default: return `${jsExpr(x)};`;
+  }
+}
+
+function jsLower(g) {
+  const body = asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n');
+  const source = `(__out, __show, __truthy) => {\n${body}\n}`;
+  return {
+    text: source,
+    run: () => {
+      const out = [];
+      // eslint-disable-next-line no-new-func
+      const f = new Function(`return ${source};`)();
+      f(out, showValue, truthy);
+      return { value: null, out };
+    },
+  };
+}
