@@ -14,7 +14,7 @@
 // ## 能接的子集（量出来的，见设计文档 §9 那三条）
 //
 //   整数（i64）· 函数 + 调用 + return · if（语句位置与**值位置**都行）· while（含 post 步进）
-//   · 打印整数 · **记录与列表**（线性内存 + 一格 bump 分配器）
+//   · 打印整数 · **记录与列表**（线性内存 + 一格 bump 分配器）· **多值**（同上）
 //
 // ## 布局（没有类型的那一层怎么排内存）
 //
@@ -30,6 +30,8 @@
 // ## 接不住的，有名有姓
 //
 //   * 字符串 —— 宿主面只有 `print_i64` 这一族（打印字符串要先有 `print_str` 那格导入）。
+//   * **打印一格多值**（`print(f())` 那条 arity 契约）—— 要运行期长度 + 拼串。
+//     多值本身接住了（一块 N 格存储 + 地址），印成一行没接。
 //   * `loop-exit`（break / continue）—— **墙在 OIR**：`br` 跳外层 block 报
 //     "OIR has no labeled break"。这一条是量出来的，不是猜的。
 //   * 闭包（`func` 当值用 / 嵌套 `func`）· 多值（`values` / `pick`）· `scope-exit`。
@@ -49,8 +51,7 @@ const CAN = new Map([
   // 记录与列表在线性内存里（一格 bump 分配器 + 一张字段偏移表，见文件头"布局"那一段）
   ['record-new', true], ['field-get', true], ['field-set', true],
   ['list-new', true], ['index-get', true], ['index-set', true],
-  ['values', 'wasm 没有多值出端口的表示（要先定 carry 那一问的答案）'],
-  ['pick', 'wasm 没有多值出端口的表示'],
+  ['values', true], ['pick', true],
   ['conv', 'wasm 这一批只有 i64：`float` 那一格要 f64 与"两种数值类型"的算术'],
   ['slice', 'wasm 那边要一格新分配 + 一圈拷贝循环 —— 分配器有了，拷贝那一格还没写'],
   ['scope-exit', 'wasm 没有 unwind：出口动作要先把 region 的出口显式化'],
@@ -114,7 +115,10 @@ class Mod {
 
   /** 建一格函数：`taken` 防重名、`locals` 收局部量、`ret` 记它到底出不出值。 */
   fn(name, params) {
-    const f = { name, params, locals: [], taken: new Set(params.map(wname)), body: [], ret: false };
+    const f = {
+      name, params, locals: [], taken: new Set(params.map(wname)), body: [], ret: false,
+      multi: false,   // 它返回的是不是**一格多值**（那格地址）—— 打印那一步要知道
+    };
     this.fns.set(name, f);
     return f;
   }
@@ -135,7 +139,7 @@ function topFuncs(items) {
  * 出一份 WAT。**跑两遍**：第一遍只为把"哪个函数出值"数出来（语句位置的调用要不要
  * `drop` 取决于它），第二遍拿着那张表出正式的文本。图都很小，两遍比猜便宜。
  */
-function emitOnce(graph, retOf) {
+function emitOnce(graph, retOf, multiOf) {
   const items = asList(graph.kind === 'graph' ? graph.body : graph);
   const mod = new Mod();
   const fns = topFuncs(items);
@@ -271,6 +275,26 @@ function emitOnce(graph, retOf) {
         return `(i64.load (i32.add ${addr(`(local.get ${o})`)}`
           + ` (i32.add (i32.const 8) ${addr(`(i64.mul (local.get ${i}) (i64.const 8))`)})))`;
       }
+      // ---- 多值：**`carry` 那一问的答案就是"线性内存里的一块"** ------------------
+      //
+      // wasm 的函数只有一格结果（multi-value 提案不在这一批），所以多值落成
+      // "一块 N 格的存储 + 返回它的地址"；消费侧的 `pick` 就是"读第 k 格"。
+      // **长度不存**：`pick` 的 k 是编译期常量（它是一格附属），用不着运行期长度 ——
+      // 与列表正相反（列表的下标是运行期算的，所以那儿存了长度好做边界检查）。
+      case 'values': {
+        const args = asList(x.ins.args);
+        const a = alloc(8 * Math.max(args.length, 1), sc, pre);
+        args.forEach((y, i) => {
+          const v = expr(y, sc, pre);
+          pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * i})) ${v})`);
+        });
+        return `(local.get ${a})`;
+      }
+      case 'pick': {
+        needMem = true;
+        const from = expr(x.ins.from, sc, pre);
+        return `(i64.load (i32.add ${addr(from)} (i32.const ${8 * Number(x.attrs.index ?? 0)})))`;
+      }
       default: throw why(x.op, '值位置');
     }
   }
@@ -359,6 +383,7 @@ function emitOnce(graph, retOf) {
       }
       case 'ret': {
         if (x.ins.value === undefined) return ['(return)'];
+        if (x.ins.value?.op === 'values') f.multi = true;
         const v = expr(x.ins.value, sc, pre);
         f.ret = true;
         return [...pre, `(return ${v})`];
@@ -370,6 +395,13 @@ function emitOnce(graph, retOf) {
         }
         const args = asList(x.ins.args);
         if (args.length !== 1) throw new Gap('打印只接一格实参（多格要先有字符串拼接）');
+        // `print(f())` 那条 arity 契约（列表里只有最后一格展开）在 wasm 上要
+        // **运行期长度 + 拼串**才能印成一行 —— 这一批没做，明说是缺口
+        const one = args[0];
+        if (one?.op === 'values'
+          || (one?.op === 'call' && multiOf.get(one.ins.fn?.attrs?.name) === true)) {
+          throw new Gap('打印一格多值要"运行期长度 + 拼串" —— 这一批只印一格 i64');
+        }
         const v = expr(args[0], sc, pre);
         return [...pre, `(call $print ${v})`];
       }
@@ -436,19 +468,27 @@ function emitOnce(graph, retOf) {
     lines.push('  )');
   }
   lines.push('  (export "main" (func $__entry))', ')');
-  return { text: lines.join('\n'), rets: new Map([...mod.fns.values()].map((f) => [f.name, f.ret])) };
+  return {
+    text: lines.join('\n'),
+    rets: new Map([...mod.fns.values()].map((f) => [f.name, f.ret])),
+    multis: new Map([...mod.fns.values()].map((f) => [f.name, f.multi])),
+  };
 }
 
 /**
  * 图 -> WAT 文本。接不住的形状抛 `Gap`（上层把它变成"这一格跳过，理由如下"）。
  */
 export function emitWat(graph) {
-  const first = emitOnce(graph, new Map());
+  const first = emitOnce(graph, new Map(), new Map());
   // 第二遍：拿着"哪个函数出值"那张表重出一次（语句位置的调用要不要 drop 靠它）
   const byName = new Map();
   const items = asList(graph.kind === 'graph' ? graph.body : graph);
-  for (const [src, wat] of topFuncs(items)) byName.set(src, first.rets.get(wat) === true);
-  return emitOnce(graph, byName).text;
+  const multiByName = new Map();
+  for (const [src, wat] of topFuncs(items)) {
+    byName.set(src, first.rets.get(wat) === true);
+    multiByName.set(src, first.multis.get(wat) === true);
+  }
+  return emitOnce(graph, byName, multiByName).text;
 }
 
 export { Gap };
