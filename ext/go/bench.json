@@ -1,0 +1,7 @@
+{
+  "grammar": "go.grammar",
+  "doc": "语料 = Go 官方那棵树里 src/ 下的 .go（8000 多份 —— 标准库把这门语言的每个角落都用了，自己挑片段挑不到）。树不在就跳过。语法照 doc/go_spec.html 那份 EBNF 写。",
+  "corpus": [
+    { "tree": "go", "env": "GO_SRC", "sub": "src", "ext": ".go" }
+  ]
+}

@@ -1,0 +1,650 @@
+;; ext/go/go.grammar —— Go 的语法（照 go_spec.html 那份 EBNF）
+;;
+;; Go 是这一批里第一门**要靠词法层补分号**的语言，而那一格（`auto-semi`）就是为它加的：
+;; Go 规范把"自动插入分号"明明白白写在词法那一节，规则是"换行紧跟在这几类记号后面就
+;; 变成一个分号" —— 标识符、各种字面量、`break` / `continue` / `fallthrough` / `return`、
+;; 以及 `++` `--` `)` `]` `}`。照抄就是，不必猜。
+;;
+;; 于是这份语法里**只有 `";"`**，没有 NL —— 与 awk 那份（换行算不算收尾要看语法位置，
+;; 所以 NL 必须是真记号）正好是两个极端。两门语言的换行规矩差在哪儿，就在这两份文件的
+;; 对比里：Go 的规矩只看**上一个记号**，awk 的规矩要看**当前在语法的哪一格**。
+;;
+;; ## 一处必须复制的链：`h-` 前缀
+;;
+;; Go 有一个**语法层解决不了、规范里用一句话打补丁**的歧义：
+;;
+;;     if x == T{} { … }
+;;     for i := range v { … }
+;;
+;; `T{}` 是复合字面量，`{ … }` 是块 —— 两个都以 `{` 起头。规范的原话是"出现在关键字与
+;; 左花括号之间的复合字面量必须加括号"，而 Go 自己的分析器是用一格 `exprLev` 计数器
+;; 实现这句话的。我们没有计数器（表就是表），所以照 awk 那边同一个办法：把控制头部
+;; 那一路表达式**另起一条链**（`h-or` / `h-and` / … / `h-primary`），链上唯一的差别是
+;; **不收裸类型名开头的复合字面量**。七个非终结符复制一遍，换来的是 `if ok {` 不分叉。
+;;
+;; 不这么做的代价量得出来：`if ok {` 里的 `ok {` 会被当成 `ok{…}` 的开头，于是**每一条
+;; if / for / switch** 都要分叉一次，靠"块里那些东西不像字面量元素"才死掉一支。
+;;
+;; ## 明说的不足（不猜）
+;;   1. 类型与表达式在 `a[i]` / `f(x)` 这两处**不分**：`f[int](x)`（泛型实例化）与 `a[i]`
+;;      （下标）走同一条产生式，`[]byte("s")`（转换）与调用也走同一条。分开它们要类型
+;;      信息，那是语义层的事 —— 具体语法树留住写的人写的形状就够。
+;;   2. `switch v := x.(type)` 单列一条产生式（`x.(type)` 只在这儿合法）。
+;;   3. 标签与 `goto` 收，但"标签必须存在"这类检查不在语法里。
+
+(grammar go
+  (tokens IDENT INT FLOAT IMAG RUNE STRING)
+
+  (start file)
+
+  (lex
+    ;; 空白**不含换行**：换行要么被 auto-semi 变成分号，要么被下面那条 skip 跳掉
+    (skip (+ (set " \t\r")))
+    (comment "//" (* (not "\n")))
+    (block-comment "/*" "*/")
+    (skip (+ "\n"))
+    ;; Go 规范 §Semicolons 那张表，照抄。**块注释里那些换行也算**（我们在跳过之后判，
+    ;; 看的是"上一个记号到这儿的那段原文里有没有换行"），与规范一致。
+    (auto-semi ";" after
+      IDENT INT FLOAT IMAG RUNE STRING
+      "break" "continue" "fallthrough" "return"
+      "++" "--" ")" "]" "}")
+
+    ;; ---- 字面量。虚数与浮点在前（它们比整数长）
+    (token IMAG (+ digit) (? "." (* digit)) (? (or "e" "E") (? (or "+" "-")) (+ digit)) "i")
+    (token FLOAT (+ digit) "." (* digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    (token FLOAT (+ digit) (or "e" "E") (? (or "+" "-")) (+ digit))
+    (token FLOAT "." (+ digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    (token INT "0" (or "x" "X") (+ (or hex "_")))
+    (token INT "0" (or "b" "B") (+ (set "01_")))
+    (token INT "0" (or "o" "O") (+ (set "01234567_")))
+    ;; 十进制：**必须以数字起头** —— 写成 `(+ (or digit "_"))` 的话光一个 `_` 也算数，
+    ;; 而 `_` 在 Go 里是那个空标识符，到处都是（量出来的第一号失败）。
+    (token INT digit (* (or digit "_")))
+    ;; 原始串：反引号里什么都不转义，连换行也算内容
+    (token STRING "`" (* (not "`")) "`")
+    (string STRING "\"")
+    (string RUNE "'")
+
+    (token IDENT (or alpha "_") (* (or alnum "_")))
+    (keyword IDENT
+      "break" "case" "chan" "const" "continue" "default" "defer" "else"
+      "fallthrough" "for" "func" "go" "goto" "if" "import" "interface" "map"
+      "package" "range" "return" "select" "struct" "switch" "type" "var")
+
+    ;; 算符：长的自然赢（最长匹配）
+    (op "<<=" ">>=" "&^=" "..." "&&" "||" "<-" "++" "--" "==" "!=" "<=" ">=" ":="
+        "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<" ">>" "&^"
+        "+" "-" "*" "/" "%" "&" "|" "^" "<" ">" "=" "!" "~"
+        "(" ")" "[" "]" "{" "}" "," ";" "." ":"))
+
+  ;; ---- 文件与顶层声明 --------------------------------------------------------
+
+  (rule file
+    (-> (opt-semis "package" IDENT ";" decls) (file $3 $*5)))
+
+  ;; 文件开头可能是几行注释（每行注释后面那个换行都被 auto-semi 变成分号了）
+  (rule opt-semis
+    (-> () ())
+    (-> (opt-semis ";") ()))
+
+  (rule decls
+    (-> () ())
+    (-> (decl) ($1))
+    (-> (";" decls) $2)
+    (-> (decl ";" decls) ($1 $*3)))
+
+  (rule decl
+    (-> (import-decl) $1)
+    (-> (const-decl) $1)
+    (-> (type-decl) $1)
+    (-> (var-decl) $1)
+    (-> (func-decl) $1))
+
+  (rule import-decl
+    (-> ("import" import-spec) (import $2))
+    (-> ("import" "(" specs ")") (import $*3)))
+
+  (rule import-spec
+    (-> (STRING) (path $1))
+    (-> (IDENT STRING) (path $2 (as $1)))
+    (-> ("." STRING) (path $2 (as $1))))
+
+  (rule specs
+    (-> () ())
+    (-> (import-spec) ($1))
+    (-> (";" specs) $2)
+    (-> (import-spec ";" specs) ($1 $*3)))
+
+  ;; `const` / `var` / `type` 三族的形状一样：一条，或者括起来一组
+  (rule const-decl
+    (-> ("const" val-spec) (const $2))
+    (-> ("const" "(" val-specs ")") (const $*3)))
+
+  (rule var-decl
+    (-> ("var" val-spec) (var $2))
+    (-> ("var" "(" val-specs ")") (var $*3)))
+
+  (rule val-spec
+    (-> (names) (spec (names $*1)))
+    (-> (names type) (spec (names $*1) $2))
+    (-> (names "=" exprs) (spec (names $*1) (init $*3)))
+    (-> (names type "=" exprs) (spec (names $*1) $2 (init $*4))))
+
+  (rule val-specs
+    (-> () ())
+    (-> (val-spec) ($1))
+    (-> (";" val-specs) $2)
+    (-> (val-spec ";" val-specs) ($1 $*3)))
+
+  (rule type-decl
+    (-> ("type" type-spec) (typedecl $2))
+    (-> ("type" "(" type-specs ")") (typedecl $*3)))
+
+  (rule type-spec
+    (-> (IDENT type) (tspec $1 $2))
+    (-> (IDENT "=" type) (talias $1 $3))
+    (-> (IDENT type-params type) (tspec $1 (tparams $*2) $3)))
+
+  (rule type-specs
+    (-> () ())
+    (-> (type-spec) ($1))
+    (-> (";" type-specs) $2)
+    (-> (type-spec ";" type-specs) ($1 $*3)))
+
+  (rule names
+    (-> (IDENT) ($1))
+    (-> (names "," IDENT) ($*1 $3)))
+
+  ;; ---- 函数与方法 ------------------------------------------------------------
+
+  (rule func-decl
+    (-> ("func" IDENT signature) (fn $2 $3))
+    (-> ("func" IDENT signature block) (fn $2 $3 $4))
+    (-> ("func" IDENT type-params signature) (fn $2 (tparams $*3) $4))
+    (-> ("func" IDENT type-params signature block) (fn $2 (tparams $*3) $4 $5))
+    (-> ("func" receiver IDENT signature) (method $2 $3 $4))
+    (-> ("func" receiver IDENT signature block) (method $2 $3 $4 $5)))
+
+  (rule receiver
+    (-> ("(" params ")") (recv $*2)))
+
+  ;; 泛型的类型参数表：`[T any]` / `[K comparable, V any]`
+  (rule type-params
+    (-> ("[" params "]") $2))
+
+  (rule signature
+    (-> ("(" params ")") (sig (in $*2)))
+    (-> ("(" params ")" type) (sig (in $*2) (out $4)))
+    (-> ("(" params ")" "(" params ")") (sig (in $*2) (out $*5))))
+
+  ;; 形参表在 Go 里是**一处真麻烦**：`(a, b int)` 与 `(int, string)` 在读到逗号时分不开。
+  ;; 这里两种都收成同一条 `param` 序列，"哪些是名字哪些是类型"留给语义层 ——
+  ;; Go 自己的分析器也是先收再回头判（parser.go 的 parseParameterList 那一段）。
+  (rule params
+    (-> () ())
+    (-> (param-list) $1)
+    (-> (param-list ",") $1))
+
+  (rule param-list
+    (-> (param) ($1))
+    (-> (param-list "," param) ($*1 $3)))
+
+  (rule param
+    (-> (type) (p $1))
+    (-> (IDENT type) (p $2 (name $1)))
+    (-> ("..." type) (p $2 variadic))
+    (-> (IDENT "..." type) (p $3 (name $1) variadic)))
+
+  ;; ---- 类型 ------------------------------------------------------------------
+
+  (rule type
+    (-> (type-name) $1)
+    (-> ("*" type) (ptr $2))
+    (-> ("[" "]" type) (slice $3))
+    (-> ("[" expr "]" type) (array $2 $4))
+    (-> ("[" "..." "]" type) (array-auto $4))
+    (-> ("map" "[" type "]" type) (map $3 $5))
+    (-> ("chan" type) (chan $2))
+    (-> ("chan" "<-" type) (chan-send $3))
+    (-> ("<-" "chan" type) (chan-recv $3))
+    (-> ("func" signature) (fntype $2))
+    (-> (struct-type) $1)
+    (-> (interface-type) $1)
+    (-> ("(" type ")") (paren $2)))
+
+  (rule type-name
+    (-> (IDENT) (tname $1))
+    (-> (IDENT "." IDENT) (tname $1 $3))
+    ;; 泛型实例化：`List[int]` / `Map[K, V]`
+    (-> (IDENT "[" types "]") (tinst (tname $1) $*3))
+    (-> (IDENT "." IDENT "[" types "]") (tinst (tname $1 $3) $*5)))
+
+  (rule types
+    (-> (type) ($1))
+    (-> (types "," type) ($*1 $3)))
+
+  (rule struct-type
+    (-> ("struct" "{" fields "}") (struct $*3)))
+
+  (rule fields
+    (-> () ())
+    (-> (field) ($1))
+    (-> (";" fields) $2)
+    (-> (field ";" fields) ($1 $*3)))
+
+  (rule field
+    (-> (names type) (f (names $*1) $2))
+    (-> (names type STRING) (f (names $*1) $2 (tag $3)))
+    ;; 嵌入字段：`io.Reader` / `*T`
+    (-> (type-name) (embed $1))
+    (-> (type-name STRING) (embed $1 (tag $2)))
+    (-> ("*" type-name) (embed (ptr $2)))
+    (-> ("*" type-name STRING) (embed (ptr $2) (tag $3))))
+
+  (rule interface-type
+    (-> ("interface" "{" ifitems "}") (interface $*3)))
+
+  (rule ifitems
+    (-> () ())
+    (-> (ifitem) ($1))
+    (-> (";" ifitems) $2)
+    (-> (ifitem ";" ifitems) ($1 $*3)))
+
+  (rule ifitem
+    (-> (IDENT signature) (m $1 $2))
+    (-> (type-set) (constraint $1)))
+
+  ;; 类型集（1.18 起）：`~int | ~string`
+  (rule type-set
+    (-> (type-term) $1)
+    (-> (type-set "|" type-term) (union $1 $3)))
+
+  (rule type-term
+    (-> (type) $1)
+    (-> ("~" type) (approx $2)))
+
+  ;; ---- 语句 ------------------------------------------------------------------
+  ;;
+  ;; 表用**右递归**：`list -> 空 | 一条 | 一条 分号 list`。理由与 awk 那边同一条 ——
+  ;; 左递归写法会让"不带收尾"在每一处都可用，于是"两条语句"与"一条长语句"两读并存。
+  ;; Go 这边分号几乎都是 auto-semi 补出来的，但形状仍然要对。
+
+  (rule block
+    (-> ("{" stmts "}") (block $*2)))
+
+  (rule stmts
+    (-> () ())
+    (-> (stmt) ($1))
+    (-> (";" stmts) $2)
+    (-> (stmt ";" stmts) ($1 $*3)))
+
+  (rule stmt
+    (-> (const-decl) $1)
+    (-> (type-decl) $1)
+    (-> (var-decl) $1)
+    (-> (simple) $1)
+    (-> (block) $1)
+    (-> (IDENT ":" stmt) (label $1 $3))
+    (-> ("go" expr) (go $2))
+    (-> ("defer" expr) (defer $2))
+    (-> ("return") (return))
+    (-> ("return" exprs) (return $*2))
+    (-> ("break") (break))
+    (-> ("break" IDENT) (break $2))
+    (-> ("continue") (continue))
+    (-> ("continue" IDENT) (continue $2))
+    (-> ("goto" IDENT) (goto $2))
+    (-> ("fallthrough") (fallthrough))
+    (-> (if-stmt) $1)
+    (-> (switch-stmt) $1)
+    (-> (select-stmt) $1)
+    (-> (for-stmt) $1))
+
+  ;; 「简单语句」：表达式、送值、自增自减、赋值、短变量声明
+  (rule simple
+    (-> (expr) (expr $1))
+    (-> (expr "<-" expr) (send $1 $3))
+    (-> (expr "++") (inc $1))
+    (-> (expr "--") (dec $1))
+    (-> (exprs assign-op exprs) (assign $2 (lhs $*1) (rhs $*3)))
+    (-> (exprs ":=" exprs) (define (lhs $*1) (rhs $*3))))
+
+  (rule assign-op
+    (-> ("=") $1) (-> ("+=") $1) (-> ("-=") $1) (-> ("*=") $1) (-> ("/=") $1)
+    (-> ("%=") $1) (-> ("&=") $1) (-> ("|=") $1) (-> ("^=") $1)
+    (-> ("<<=") $1) (-> (">>=") $1) (-> ("&^=") $1))
+
+  ;; 控制头部那一路走 `h-` 链（见文件头）。这里的「简单语句」也要跟着换 —— `for i := 0; …`
+  ;; 里那个 init 就在头部。
+  (rule h-simple
+    (-> (h-expr) (expr $1))
+    (-> (h-expr "<-" h-expr) (send $1 $3))
+    (-> (h-expr "++") (inc $1))
+    (-> (h-expr "--") (dec $1))
+    (-> (h-exprs assign-op h-exprs) (assign $2 (lhs $*1) (rhs $*3)))
+    (-> (h-exprs ":=" h-exprs) (define (lhs $*1) (rhs $*3))))
+
+  (rule if-stmt
+    (-> ("if" h-expr block) (if $2 $3))
+    (-> ("if" h-simple ";" h-expr block) (if (init $2) $4 $5))
+    (-> ("if" h-expr block "else" block) (if $2 $3 (else $5)))
+    (-> ("if" h-simple ";" h-expr block "else" block) (if (init $2) $4 $5 (else $7)))
+    (-> ("if" h-expr block "else" if-stmt) (if $2 $3 (else $5)))
+    (-> ("if" h-simple ";" h-expr block "else" if-stmt) (if (init $2) $4 $5 (else $7))))
+
+  (rule switch-stmt
+    (-> ("switch" "{" cases "}") (switch $*3))
+    (-> ("switch" h-expr "{" cases "}") (switch (tag $2) $*4))
+    (-> ("switch" h-simple ";" "{" cases "}") (switch (init $2) $*5))
+    (-> ("switch" h-simple ";" h-expr "{" cases "}") (switch (init $2) (tag $4) $*6))
+    ;; 类型 switch：`x.(type)` 只在这儿合法，所以单列
+    (-> ("switch" h-primary "." "(" "type" ")" "{" cases "}") (tswitch (subject $2) $*8))
+    (-> ("switch" IDENT ":=" h-primary "." "(" "type" ")" "{" cases "}") (tswitch (bind $2) (subject $4) $*10))
+    (-> ("switch" h-simple ";" h-primary "." "(" "type" ")" "{" cases "}") (tswitch (init $2) (subject $4) $*10))
+    (-> ("switch" h-simple ";" IDENT ":=" h-primary "." "(" "type" ")" "{" cases "}") (tswitch (init $2) (bind $4) (subject $6) $*12)))
+
+  (rule cases
+    (-> () ())
+    (-> (cases case) ($*1 $2))
+    (-> (cases ";") $1))
+
+  ;; `case` 后面既可能是表达式表（普通 switch）也可能是类型表（类型 switch）——
+  ;; 两者在语法上分不开（`case int:` 里 `int` 既是标识符也是类型名），所以收成一条
+  ;; `case-items`，谁是类型留给语义层。
+  (rule case
+    (-> ("case" case-items ":" stmts) (case (items $*2) (body $*4)))
+    (-> ("default" ":" stmts) (default (body $*3))))
+
+  (rule case-items
+    (-> (case-item) ($1))
+    (-> (case-items "," case-item) ($*1 $3)))
+
+  (rule case-item
+    (-> (expr) $1)
+    (-> ("*" type) (ptr $2))
+    (-> ("[" "]" type) (slice $3))
+    (-> ("map" "[" type "]" type) (map $3 $5))
+    (-> ("chan" type) (chan $2))
+    (-> ("<-" "chan" type) (chan-recv $3))
+    (-> ("func" signature) (fntype $2))
+    (-> (interface-type) $1)
+    (-> (struct-type) $1))
+
+  (rule select-stmt
+    (-> ("select" "{" comms "}") (select $*3)))
+
+  (rule comms
+    (-> () ())
+    (-> (comms comm) ($*1 $2))
+    (-> (comms ";") $1))
+
+  (rule comm
+    (-> ("case" simple ":" stmts) (case $2 (body $*4)))
+    (-> ("default" ":" stmts) (default (body $*3))))
+
+  (rule for-stmt
+    (-> ("for" block) (for $2))
+    (-> ("for" h-expr block) (for (cond $2) $3))
+    (-> ("for" opt-h-simple ";" opt-h-expr ";" opt-h-simple block) (for (init $2) (cond $4) (post $6) $7))
+    (-> ("for" "range" h-expr block) (for-range (values $3) $4))
+    (-> ("for" h-exprs ":=" "range" h-expr block) (for-range (define $*2) (values $5) $6))
+    (-> ("for" h-exprs "=" "range" h-expr block) (for-range (assign $*2) (values $5) $6)))
+
+  (rule opt-h-simple
+    (-> () (none))
+    (-> (h-simple) $1))
+
+  (rule opt-h-expr
+    (-> () (none))
+    (-> (h-expr) $1))
+
+  ;; ---- 表达式：五级级联（照规范那张优先级表） ----------------------------------
+
+  (rule exprs
+    (-> (expr) ($1))
+    (-> (exprs "," expr) ($*1 $3)))
+
+  (rule expr (-> (or-e) $1))
+
+  (rule or-e
+    (-> (and-e) $1)
+    (-> (or-e "||" and-e) (bin "||" $1 $3)))
+
+  (rule and-e
+    (-> (rel-e) $1)
+    (-> (and-e "&&" rel-e) (bin "&&" $1 $3)))
+
+  (rule rel-e
+    (-> (add-e) $1)
+    (-> (rel-e rel-op add-e) (bin $2 $1 $3)))
+
+  (rule rel-op
+    (-> ("==") $1) (-> ("!=") $1) (-> ("<") $1) (-> ("<=") $1) (-> (">") $1) (-> (">=") $1))
+
+  (rule add-e
+    (-> (mul-e) $1)
+    (-> (add-e add-op mul-e) (bin $2 $1 $3)))
+
+  (rule add-op
+    (-> ("+") $1) (-> ("-") $1) (-> ("|") $1) (-> ("^") $1))
+
+  (rule mul-e
+    (-> (unary-e) $1)
+    (-> (mul-e mul-op unary-e) (bin $2 $1 $3)))
+
+  (rule mul-op
+    (-> ("*") $1) (-> ("/") $1) (-> ("%") $1) (-> ("<<") $1) (-> (">>") $1)
+    (-> ("&") $1) (-> ("&^") $1))
+
+  (rule unary-e
+    (-> (primary) $1)
+    (-> ("+" unary-e) (un "+" $2))
+    (-> ("-" unary-e) (un "-" $2))
+    (-> ("!" unary-e) (un "!" $2))
+    (-> ("^" unary-e) (un "^" $2))
+    (-> ("*" unary-e) (deref $2))
+    (-> ("&" unary-e) (addr $2))
+    (-> ("<-" unary-e) (recv $2)))
+
+  (rule primary
+    (-> (operand) $1)
+    (-> (primary "." IDENT) (sel $1 $3))
+    (-> (primary "." "(" type ")") (assert $1 $4))
+    (-> (primary "[" expr "]") (index $1 $3))
+    (-> (primary "[" exprs "," expr "]") (index $1 $*3 $5))
+    (-> (primary "[" opt-expr ":" opt-expr "]") (slice3 $1 $3 $5))
+    (-> (primary "[" opt-expr ":" expr ":" expr "]") (slice4 $1 $3 $5 $7))
+    (-> (primary "(" args ")") (call $1 (args $*3))))
+
+  (rule opt-expr
+    (-> () (none))
+    (-> (expr) $1))
+
+  (rule opt-comma
+    (-> () ())
+    (-> (",") ()))
+
+  ;; 类型转换：`[]byte(s)` / `map[K]V(m)` / `(chan int)(c)`。
+  ;;
+  ;; **只收"写不成表达式"的那几种类型**。`(*T)(x)` 与 `(T)(x)` 刻意**不**收进来 ——
+  ;; 它们照 `("(" expr ")")` 加一次调用来读（`*T` 就是一次解引用、`T` 就是个名字）。
+  ;; 收了的话每一个括号表达式都要分叉一次"这是表达式还是类型"，套两层就是四支、
+  ;; 三层八支 —— 量出来的：`return (*headerGNU)(b)` 一行就把并发分析支数顶到 400。
+  ;; 这与文件头那条"类型与表达式在 `f(x)` 这一处不分"是同一个决定。
+  (rule conv-type
+    (-> ("[" "]" type) (slice $3))
+    (-> ("[" expr "]" type) (array $2 $4))
+    (-> ("map" "[" type "]" type) (map $3 $5))
+    (-> (interface-type) $1)
+    (-> (struct-type) $1)
+    (-> ("(" conv-type ")") (paren $2))
+    (-> ("(" "chan" type ")") (paren (chan $3)))
+    (-> ("(" "<-" "chan" type ")") (paren (chan-recv $4)))
+    (-> ("(" "func" signature ")") (paren (fntype $3))))
+
+  (rule args
+    (-> () ())
+    (-> (arg-list) $1)
+    (-> (arg-list ",") $1)
+    (-> (arg-list "...") ($*1 (spread)))
+    (-> (arg-list "..." ",") ($*1 (spread))))
+
+  ;; 实参既可能是表达式也可能是类型（`make([]int, 3)`、`new(T)`），所以两种都收
+  (rule arg-list
+    (-> (arg) ($1))
+    (-> (arg-list "," arg) ($*1 $3)))
+
+  (rule arg
+    (-> (expr) $1)
+    (-> ("[" "]" type) (slice $3))
+    (-> ("map" "[" type "]" type) (map $3 $5))
+    (-> ("chan" type) (chan $2))
+    (-> ("<-" "chan" type) (chan-recv $3))
+    (-> ("func" signature) (fntype $2)))
+
+  (rule operand
+    (-> (INT) (num $1))
+    (-> (FLOAT) (num $1))
+    (-> (IMAG) (imag $1))
+    (-> (RUNE) (rune $1))
+    (-> (STRING) (str $1))
+    (-> (IDENT) (name $1))
+    (-> ("(" expr ")") (paren $2))
+    (-> (func-lit) $1)
+    (-> (composite) $1)
+    (-> (conv-type "(" expr opt-comma ")") (conv $1 $3)))
+
+  (rule func-lit
+    (-> ("func" signature block) (fnlit $2 $3)))
+
+  ;; ---- 复合字面量 ------------------------------------------------------------
+
+  (rule composite
+    (-> (lit-type "{" elems "}") (lit $1 $*3)))
+
+  ;; 裸名字那两种（`T{…}` / `pkg.T{…}` / `T[X]{…}`）与别的分开列，因为 `h-composite`
+  ;; 恰恰只排掉它们（规范：出现在关键字与左花括号之间的复合字面量必须加括号）。
+  (rule lit-type
+    (-> (type-name) $1)
+    (-> (nb-lit-type) $1))
+
+  (rule nb-lit-type
+    (-> ("[" "]" type) (slice $3))
+    (-> ("[" expr "]" type) (array $2 $4))
+    (-> ("[" "..." "]" type) (array-auto $4))
+    (-> ("map" "[" type "]" type) (map $3 $5))
+    (-> (struct-type) $1))
+
+  (rule elems
+    (-> () ())
+    (-> (elem-list) $1)
+    (-> (elem-list ",") $1))
+
+  (rule elem-list
+    (-> (elem) ($1))
+    (-> (elem-list "," elem) ($*1 $3)))
+
+  (rule elem
+    (-> (elem-val) $1)
+    (-> (elem-val ":" elem-val) (kv $1 $3)))
+
+  ;; 嵌套的字面量可以省掉类型：`[][]int{{1},{2}}`
+  (rule elem-val
+    (-> (expr) $1)
+    (-> ("{" elems "}") (lit $*2)))
+
+  ;; ---- 控制头部那一路：`h-` 链 -------------------------------------------------
+  ;;
+  ;; 与上面那条链**逐条对应**，唯一的差别在 `h-operand`：它不收 `T{…}` / `pkg.T{…}` /
+  ;; `T[X]{…}` 这三种"裸名字起头"的复合字面量。`[]T{…}` / `map[K]V{…}` / `struct{…}{…}`
+  ;; 照收 —— 它们以 `[` / `map` / `struct` 起头，与块的 `{` 分得开，gc 也是这么收的。
+  ;;
+  ;; 括号一进去限制就解除（`if f(T{}) {` 是合法的），所以 `h-primary` 的调用/下标那几条
+  ;; 里面用的是**普通** `expr` / `args`，不是 `h-` 那一路。这一点正是规范那句"必须加括号"
+  ;; 的语法版说法。
+
+  (rule h-exprs
+    (-> (h-expr) ($1))
+    (-> (h-exprs "," h-expr) ($*1 $3)))
+
+  (rule h-expr (-> (h-or) $1))
+
+  (rule h-or
+    (-> (h-and) $1)
+    (-> (h-or "||" h-and) (bin "||" $1 $3)))
+
+  (rule h-and
+    (-> (h-rel) $1)
+    (-> (h-and "&&" h-rel) (bin "&&" $1 $3)))
+
+  (rule h-rel
+    (-> (h-add) $1)
+    (-> (h-rel rel-op h-add) (bin $2 $1 $3)))
+
+  (rule h-add
+    (-> (h-mul) $1)
+    (-> (h-add add-op h-mul) (bin $2 $1 $3)))
+
+  (rule h-mul
+    (-> (h-unary) $1)
+    (-> (h-mul mul-op h-unary) (bin $2 $1 $3)))
+
+  (rule h-unary
+    (-> (h-primary) $1)
+    (-> ("+" h-unary) (un "+" $2))
+    (-> ("-" h-unary) (un "-" $2))
+    (-> ("!" h-unary) (un "!" $2))
+    (-> ("^" h-unary) (un "^" $2))
+    (-> ("*" h-unary) (deref $2))
+    (-> ("&" h-unary) (addr $2))
+    (-> ("<-" h-unary) (recv $2)))
+
+  (rule h-primary
+    (-> (h-operand) $1)
+    (-> (h-primary "." IDENT) (sel $1 $3))
+    (-> (h-primary "." "(" type ")") (assert $1 $4))
+    (-> (h-primary "[" expr "]") (index $1 $3))
+    (-> (h-primary "[" exprs "," expr "]") (index $1 $*3 $5))
+    (-> (h-primary "[" opt-expr ":" opt-expr "]") (slice3 $1 $3 $5))
+    (-> (h-primary "[" opt-expr ":" expr ":" expr "]") (slice4 $1 $3 $5 $7))
+    (-> (h-primary "(" args ")") (call $1 (args $*3))))
+
+  (rule h-operand
+    (-> (INT) (num $1))
+    (-> (FLOAT) (num $1))
+    (-> (IMAG) (imag $1))
+    (-> (RUNE) (rune $1))
+    (-> (STRING) (str $1))
+    (-> (IDENT) (name $1))
+    (-> ("(" expr ")") (paren $2))
+    (-> (func-lit) $1)
+    (-> (conv-type "(" expr opt-comma ")") (conv $1 $3))
+    ;; 只收"不以裸名字起头"的那几种复合字面量
+    (-> (nb-lit-type "{" elems "}") (lit $1 $*3))))
+
+;; ---- 量到的与还欠的 --------------------------------------------------------------
+;;
+;; 662 状态 / 339 条产生式 / **48 处冲突**，Go 标准库 8243 份 .go 过 **7187**（87%）。
+;; 89.2 MB 语料 / 1741 万记号 / 2174 万节点，约 0.9 MB/s、18 万记号/s。
+;;
+;; 一路量下来四刀（每刀都是从语料里挖出来的，不是想出来的）：
+;;   3711/8243  81 冲突  第一版
+;;   4157       81       `_` 别当 INT —— `(+ (or digit "_"))` 让光一个下划线也算数，
+;;                       而 `_` 是 Go 的空标识符，到处都是
+;;   4616       85       加类型转换（`[]byte(s)`），**同时把 `("(" type ")")` 从 operand 里
+;;                       拿掉** —— 留着它，每个括号表达式都要分叉一次"这是表达式还是类型"，
+;;                       `return (*headerGNU)(b)` 一行就把并发支数顶到 400
+;;   7187       48       声明表全改成**右递归**（decls / specs / val-specs / type-specs /
+;;                       fields / ifitems）。左递归写法允许"两项挨着不带分号"，于是
+;;                       `sparseHoles []sparseEntry` 既能读成一个字段也能读成两个 ——
+;;                       这一刀一次值 2571 份文件，是全场最大的一刀
+;;
+;; 与 awk 那边同一条结论：**降歧义的是把规矩写进语法的形状**（右递归、`h-` 链、
+;; 不收写不成表达式的类型），不是优先级也不是建表器。
+;;
+;; 还欠 1056 份，两类：
+;;   1. `(tspec …)` 的真歧义 —— 结构体/接口体里某些形状仍有两读（archive/tar/common.go）。
+;;   2. 长文件上的 `too many concurrent parses` —— 48 处冲突单独看都不致命，但在几千行的
+;;      文件里分叉会攒起来（archive/tar/format.go）。这两类都要再挖一层：先把冲突清单
+;;      按"哪一条产生式参与得最多"排一遍，那才是下一刀该动的地方。
