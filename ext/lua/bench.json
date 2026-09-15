@@ -1,0 +1,9 @@
+{
+  "grammar": "lua.grammar",
+  "doc": "语料 = Lua 官方那棵树的 testes + LuaJIT 的 jit/*.lua + 本目录自带的四份。前两棵在参考树里（reference/lua、reference/luajit），不在就跳过。",
+  "corpus": [
+    { "tree": "lua", "env": "LUA_SRC", "ext": ".lua" },
+    { "tree": "luajit", "env": "LUAJIT_SRC", "ext": ".lua" },
+    { "dir": "tests/corpus", "ext": ".lua" }
+  ]
+}
