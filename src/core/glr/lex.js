@@ -34,6 +34,16 @@
 //   - **自动分号**（go / vlang）：换行在特定记号之后**就是**一个分号。
 //     `(auto-semi ";" after NAME NUMBER ")" "}" "return")`，跨过换行时补一格。
 //     文件末尾也补（Go 的规矩），不然最后一条语句收不了尾。
+//   - **紧贴才算**（nim 的广义字符串字面量）：`re"[a-z]+"` 是一次调用，`echo "hi"` 是
+//     命令式调用，两者在记号层一模一样（IDENT STRING），只差中间那个空格。
+//     `(token GSTRING (tight-after IDENT ")" "]") "\"" … "\"")` —— `tight-after` 比
+//     `after` 多要一句"上一个记号的末尾就是我的开头"。不分开的话同一串输入两个解，
+//     GLR 会老老实实报歧义（它就该报）。
+//   - **续行**（nim 的 `optInd`）：一行以二元运算符结尾时，下一行是这一行的接着写。
+//     `(join-after OP8 OP9 "and" …)` —— 换行落在这些记号后面就**一个记号都不发**，
+//     缩进栈也不动（等于把"括号里面是续行"那条规矩按上一个记号推广了一格）。
+//     Nim 的真规矩是按列号判（`optInd` 出现 56 次），但"上一行以运算符结尾"覆盖了
+//     真实代码里的绝大多数，而它只要一个记号的上下文 —— 正好是这台词法器有的那格。
 //
 // 两者都**只看类型、不回头改已经交出去的记号**，所以词法这一层仍然是一趟扫完、不回溯。
 //
@@ -187,16 +197,20 @@ function checkTerm(t, diags) {
 }
 
 /**
- * 一条规则前面那格可选的**上下文条件**：`(after T…)` 或 `(not-after T…)`。
+ * 一条规则前面那格可选的**上下文条件**：`(after T…)`、`(not-after T…)`、`(tight-after T…)`。
  * 答 `{cond, from}` —— `from` 是"条件之后从哪一项接着读"。
  *
  * 条件里的 T 既可以是记号类型名（`NAME`），也可以是字面量（`")"`）—— 后者按 litName
  * 折成内部名，与规则那边的口径同一份代码。
+ *
+ * `tight-after` 比 `after` 多一格要求：**中间不许有空白**（上一个记号的末尾就是这一个
+ * 记号的开头）。Nim 的广义字符串字面量要的就是这一格 —— `echo"hi"` 是一次调用，
+ * `echo "hi"` 是命令式调用，两者只差一个空格；不区分的话同一串输入两个解。
  */
 function readCond(items, from, diags) {
   const t = items[from];
   const h = head(t);
-  if (h !== 'after' && h !== 'not-after') return { cond: null, from };
+  if (h !== 'after' && h !== 'not-after' && h !== 'tight-after') return { cond: null, from };
   const types = new Set();
   for (const x of t.items.slice(1)) {
     if (isAtom(x)) types.add(x.value);
@@ -204,14 +218,19 @@ function readCond(items, from, diags) {
     else diags.error(x === null || x === undefined ? t.span : x.span, `(${h} T...) takes token names or string literals`);
   }
   if (types.size === 0) diags.error(t.span, `(${h} T...) needs at least one token type`);
-  return { cond: { neg: h === 'not-after', types }, from: from + 1 };
+  return { cond: { neg: h === 'not-after', tight: h === 'tight-after', types }, from: from + 1 };
 }
 
-/** 上一个交出去的记号（可能没有）满不满足这条规则的条件。 */
-function condOk(cond, prevType) {
+/**
+ * 上一个交出去的记号（可能没有）满不满足这条规则的条件。
+ * `tight` 那一格要看位置：`prevEnd === at` 就是"中间一个空白都没有"。
+ */
+function condOk(cond, prevType, prevEnd, at) {
   if (cond === null) return true;
   const hit = prevType !== null && cond.types.has(prevType);
-  return cond.neg ? !hit : hit;
+  if (cond.neg) return !hit;
+  if (!hit) return false;
+  return cond.tight ? prevEnd === at : true;
 }
 
 /**
@@ -223,6 +242,7 @@ function condOk(cond, prevType) {
  *   stops    : 扫到就收工的那几段文本（`#!eof` 一族）
  *   autoSemi : `{type, text, after:Set}` 或 null —— 跨过换行时补的那一格（go 的 ASI）
  *   indent   : `{nl, indent, dedent, brackets}` 或 null —— 缩进即块结构那一族（python / nim）
+ *   joinAfter: Set<tokenType> 或 null —— 落在这些记号后面的换行是**续行**（nim 的 optInd）
  */
 export function readLexSpec(node, diags) {
   const skips = [];
@@ -232,6 +252,7 @@ export function readLexSpec(node, diags) {
   const stops = [];
   let autoSemi = null;
   let indent = null;
+  let joinAfter = null;
   if (head(node) !== 'lex') {
     diags.error(node === null || node === undefined ? null : node.span, 'a lexer spec must be a (lex ...) form');
     return null;
@@ -278,16 +299,22 @@ export function readLexSpec(node, diags) {
        * 与一格计数（括号深度）—— 括号里面的换行是续行，不出记号（隐式行连接）。
        * 这是这套词法器里唯一有"栈"的一格，所以它是显式声明的，不许悄悄开着。
        *
-       * `brackets` 每一项是**两个字符**：开括号与闭括号。深度是按记号文本数的，
-       * 所以串里的括号不算（那时已经被 `(string …)` 收成一个记号了）。 */
+       * `brackets` 每一项要么是**两个字符**的 `"开闭"`（`"()"`），要么是一对字符串
+       * `("{." ".}")` —— 后者给 nim 的 pragma 用：`{.` 与 `.}` 是两个多字符记号，
+       * 而 pragma 里换行也是续行（`{.magic: "X", deprecated:\n  "…".}` 是一份真代码）。
+       * 深度是按记号文本数的，所以串里的括号不算（那时已经被 `(string …)` 收成一个记号了）。 */
       const nm = [];
       let brackets = [];
       for (const x of it.items.slice(1)) {
         if (isAtom(x)) { nm.push(x.value); continue; }
         if (head(x) === 'brackets') {
           for (const b of x.items.slice(1)) {
-            if (isStr(b) && b.value.length === 2) brackets.push({ open: b.value.slice(0, 1), close: b.value.slice(1, 2) });
-            else diags.error(b === null || b === undefined ? x.span : b.span, 'each (brackets …) entry is a two-character "开闭" pair');
+            if (isStr(b) && b.value.length === 2) { brackets.push({ open: b.value.slice(0, 1), close: b.value.slice(1, 2) }); continue; }
+            if (isList(b) && b.items.length === 2 && isStr(b.items[0]) && isStr(b.items[1])) {
+              brackets.push({ open: b.items[0].value, close: b.items[1].value });
+              continue;
+            }
+            diags.error(b === null || b === undefined ? x.span : b.span, 'each (brackets …) entry is a two-character "开闭" pair or a ("开" "闭") pair of strings');
           }
           continue;
         }
@@ -296,6 +323,21 @@ export function readLexSpec(node, diags) {
       if (nm.length !== 3) { diags.error(it.span, '(indent NEWLINE INDENT DEDENT [(brackets …)]) needs exactly three token names'); continue; }
       if (indent !== null) diags.error(it.span, 'a lexer spec may have at most one (indent …) form');
       indent = { nl: nm[0], indent: nm[1], dedent: nm[2], brackets };
+      continue;
+    }
+    if (h === 'join-after') {
+      /* `(join-after OP8 OP9 "," "and")`：换行落在这些记号后面就是**续行** ——
+       * 一个记号都不发，缩进栈也不动。nim 的 `optInd` 那一族靠这一格。
+       * 只在 `(indent …)` 那一族里有意义（没有缩进栈的语言换行本来就不出记号）。 */
+      const set = new Set();
+      for (const x of it.items.slice(1)) {
+        if (isAtom(x)) set.add(x.value);
+        else if (isStr(x)) set.add(litName(x.value));
+        else diags.error(x === null || x === undefined ? it.span : x.span, '(join-after T...) takes token names or string literals');
+      }
+      if (set.size === 0) diags.error(it.span, '(join-after T...) needs at least one token type');
+      if (joinAfter !== null) diags.error(it.span, 'a lexer spec may have at most one (join-after …) form');
+      joinAfter = set;
       continue;
     }
     if (h === 'auto-semi') {
@@ -390,7 +432,7 @@ export function readLexSpec(node, diags) {
     diags.error(node.span, 'a lexer spec needs at least one (token ...), (string ...) or (op ...)');
     return null;
   }
-  return { skips, blocks, rules, keywords, stops, autoSemi, indent };
+  return { skips, blocks, rules, keywords, stops, autoSemi, indent, joinAfter };
 }
 
 // ---- 扫描 ------------------------------------------------------------------
@@ -485,10 +527,10 @@ export function lexText(spec, file, diags) {
   const skipTrivia = () => {
     for (;;) {
       const before = i;
-      for (const terms of spec.skips) {
-        const e = matchSeq(terms, 0, src, i);
-        if (e > i) i = e;
-      }
+      /* **块注释先试**：`#[ … ]#` 与 `#` 到行尾这一对（Nim）里，行注释的开头是块注释
+         开头的前缀。先试 skips 的话 `#` 永远赢，`#[` 那一段的后几行就会当代码读
+         （Nim 的 locks.nim 就死在 `noop's` 那个撇号上）。块注释的开头更长更具体，
+         所以它先。空白与块注释的开头不重叠，这么排不影响别的语言。 */
       for (const b of spec.blocks) {
         if (!src.startsWith(b.open, i)) continue;
         const start = i;
@@ -503,6 +545,10 @@ export function lexText(spec, file, diags) {
           diags.error(mkSpan(file, start, src.length), 'unterminated block comment');
           failed = true;
         }
+      }
+      for (const terms of spec.skips) {
+        const e = matchSeq(terms, 0, src, i);
+        if (e > i) i = e;
       }
       if (i === before) return;
     }
@@ -548,7 +594,15 @@ export function lexText(spec, file, diags) {
         }
         skipTrivia();
       }
-      if (sawNL && i < src.length) {
+      /* `toks.length > 0`：NEWLINE 是**上一条逻辑行的句号**，前面没有记号就没有行要收。
+         文件开头那几行注释（Nim 的 `##` 文件头、python 的 shebang 之后）会走到这儿，
+         少了这一格判断就会在记号流最前面多出一个 NEWLINE —— Nim 标准库 316 份因此
+         一份不过。与文件尾那格 `toks.length > 0` 是同一条道理。
+
+         `joined`：上一个记号在 `(join-after …)` 表里，这个换行就是**续行** —— 什么都不发，
+         缩进栈也不动。等于把"括号里面的换行是续行"那条规矩按上一个记号推广了一格。 */
+      const joined = spec.joinAfter !== null && prevType !== null && spec.joinAfter.has(prevType);
+      if (sawNL && i < src.length && toks.length > 0 && !joined) {
         push(spec.indent.nl, '\n', i, i);
         if (col > cols[cols.length - 1]) {
           cols.push(col);
@@ -596,9 +650,10 @@ export function lexText(spec, file, diags) {
     let bestValue = null;
     for (let r = 0; r < spec.rules.length; r++) {
       const rule = spec.rules[r];
-      /* 条件规则（`(not-after …)` / `(after …)`）：不满足就**不参赛**。
-         awk 的 `/re/` 靠这一格躲开除号 —— 前面刚出现过操作数时它不参赛。 */
-      if (!condOk(rule.cond === undefined ? null : rule.cond, prevType)) continue;
+      /* 条件规则（`(not-after …)` / `(after …)` / `(tight-after …)`）：不满足就**不参赛**。
+         awk 的 `/re/` 靠这一格躲开除号 —— 前面刚出现过操作数时它不参赛。
+         Nim 的 `re"…"` 靠 tight 那一格与命令式调用分开。 */
+      if (!condOk(rule.cond === undefined ? null : rule.cond, prevType, prevEnd, i)) continue;
       let end = -1;
       let value = null;
       if (rule.kind === 'token') end = matchSeq(rule.terms, 0, src, i);

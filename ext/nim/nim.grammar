@@ -1,0 +1,803 @@
+;; ext/nim/nim.grammar —— Nim 的语法（**子集**，理由写在下面第二段）
+;;
+;; 有权威文本可抄：`Nim/doc/grammar.txt`，那份是**从 compiler/parser.nim 生成的**，
+;; 所以它就是 Nim 的语法。抄它的过程里量出一件要紧的事，先说清楚：
+;;
+;; ## Nim 要的不是 INDENT/DEDENT，是**列号谓词**
+;;
+;; 那份语法里有三个东西是我们（LR 表 + python 式 INDENT/DEDENT）表达不了的：
+;;
+;;   `optInd`   出现 **56 次**。它的定义是 `COMMENT? IND{>}?` —— "这儿**可以**换行，
+;;              只要新行的缩进比外层深"。它不是块，是**续行**：`a +\n  b` 与 `a + b` 同义。
+;;   `IND{>}`   22 次、`IND{=}` 29 次 —— 分别是"缩进更深"与"缩进相同"两个**谓词**，
+;;              判的是"当前记号的列号与外层上下文的列号"，**不发记号**。
+;;   `optPar`   27 次，`(IND{>} | IND{=})?` —— 括号里的换行按列号判，不是按深度判。
+;;
+;; python / mojo 的缩进是"变深就开一个块、变浅就关"，一进一出成对，所以 INDENT/DEDENT
+;; 两格记号够用（那就是 glr/lex.js 里 `(indent …)` 那一格）。Nim 不是：`optInd` 那 56 处
+;; 要的是"这儿有没有跨行都行"，而跨行之后**什么时候算回来**由列号决定，不由配对决定。
+;; 用 INDENT/DEDENT 硬套的话，那 56 处每一处都要在语法里写成 `(IND … DED)?`，而 DEDENT
+;; 会在一个由列号决定的、语法说不出来的位置冒出来。
+;;
+;; **所以这一份是子集**，但比"记在这儿等那一刀"走远了一步。量出来的分工是这样的：
+;;
+;;   * `IND{=}` 那一族（`:` 之后缩进那一段语句表）用 INDENT/DEDENT 收得住 —— 一一对上。
+;;   * `optInd` 那 56 处里的**绝大多数**是"一行以二元运算符收尾、下一行接着写"。这一格
+;;     不用列号也办得到：词法器里新加的 `(join-after OP8 OP9 "," "and" …)` —— 换行落在
+;;     这些记号后面就一个记号都不发、缩进栈也不动。等于把"括号里面的换行是续行"那条
+;;     规矩按上一个记号推广了一格，而它只要**一个记号**的上下文，正好是这台词法器有的。
+;;   * 剩下的（`x =\n  长表达式`、`optPar` 那 27 处里按列号收回来的）还是收不住。要收全，
+;;     缺的仍然是**驱动器里一格列号谓词** —— 那是 driver.js 的事，不是表的事。
+;;
+;; ## 抄这一份的过程里踩到的三格，都不在语法里，在**词法器**里
+;;
+;; 每一格都是"两种写法在记号层一模一样、只差空白"，靠一格上下文分开（都补进 glr/lex.js）：
+;;
+;;   1. `tight-after`：`re"[a-z]+"`（广义字符串字面量）vs `echo "hi"`（命令式调用）；
+;;      `f(x)`（调用）vs `f (x)`（命令式调用，实参是括号表达式）；`s[i]` vs `[1,2]`。
+;;      这三对不分开的话，每一份带调用的 Nim 文件都是"同一棵输入两个解"。
+;;   2. `join-after`：上面那格续行。
+;;   3. 两个 bug：文件开头那几行注释会多发一个 NEWLINE；`#[ … ]#` 输给了 `#` 到行尾
+;;      （skips 排在 blocks 前面）。两个都是"Nim 让它们现形"，但两个都不是 Nim 的事。
+;;
+;; ## 一处抄得动的：11 级运算符，按**首字符**分级
+;;
+;; Nim 的二元运算符可以是任意符号串（`+@`、`|>`、`=~`），优先级**由首字符定**
+;; （manual §Operators）。这一格我们的词法器正好办得到：按首字符分成 OP2…OP10 十来类
+;; 记号，语法里就是一串左递归的级联。关键字运算符（`div` `mod` `shl` `shr` / `in` `notin`
+;; `is` `isnot` `of` `as` `from` / `and` / `or` `xor`）各归各级。
+;;
+;; 明说的不足（不猜）：
+;;   1. `optInd` 那一族只收"上一行以运算符收尾"这一种续行（见上面第二段）。
+;;   2. 命令式调用（`echo "hi"`、`foo a, b` —— 不写括号）只收最常见的那一层，
+;;      嵌套的命令式调用（`echo foo a`）不收 —— 那是与 awk 的连接同一类的真歧义。
+;;   3. 运算符的"以 `=` 结尾算赋值级"、"以 `->` `=>` 结尾算箭头级"两条后缀规则不收：
+;;      我们的匹配器贪心不回溯，"以什么结尾"要另一套机制。常见的 `=` `=>` `->` 单独列。
+;;   4. 匿名例程只收单行体（`proc() = discard`）：多行体的 lambda 以 DED 收尾，
+;;      那要一整套 `-t` 的表达式级联。
+;;   5. 表达式里带 pragma 的类型（`ptr T {.foo.}`）不收 —— 它与"返回类型 + 例程 pragma"
+;;      重解（见 `primary` 那条注释）。语句上挂 pragma 是收的。
+
+
+(grammar nim
+  (tokens IDENT INT FLOAT STRING RSTRING GSTRING CHAR NL IND DED LP LB LC
+    OP2 OP3 OP4 OP5 OP6 OP7 OP8 OP9 OP10 ARROW ASGNOP)
+
+  (start module)
+
+  (lex
+    (skip (+ (set " \t\r")))
+    ;; `#[ … ]#` 是可嵌套的块注释；`#` 到行尾是行注释。**文档注释 `##` 也当注释**
+    ;; （它在 Nim 里是 AST 的一部分，但那是语义层的事）。
+    (block-comment "#[" "]#" nest)
+    (comment "#" (* (not "\n")))
+    (indent NL IND DED (brackets "()" "[]" "{}" ("{." ".}")))
+    ;; **续行**（grammar.txt 里那 56 处 `optInd`）：一行以二元运算符、`,` 或运算符关键字
+    ;; 结尾时，下一行是接着写的，不是新语句。`var y = (a) +\n        (b)` 是标准库里的
+    ;; 真代码 —— 少了这一格，那一族全过不去。
+    ;; **`:` 与 `=` 故意不在表里**：`if a:` 与 `proc f() =` 后面跟的是**块**，不是续行。
+    (join-after OP2 OP3 OP4 OP5 OP6 OP7 OP8 OP9 OP10 ARROW ASGNOP ","
+      "and" "or" "xor" "not" "in" "notin" "is" "isnot" "of" "as" "div" "mod" "shl" "shr")
+
+
+    ;; ---- 字面量
+    (token FLOAT (+ digit) (* (or digit "_")) "." (+ (or digit "_"))
+      (? (or "e" "E") (? (or "+" "-")) (+ digit)) (? "'" (+ alnum)))
+    (token FLOAT (+ digit) (* (or digit "_")) (or "e" "E") (? (or "+" "-")) (+ digit) (? "'" (+ alnum)))
+    (token INT "0" (or "x" "X") (+ (or hex "_")) (? "'" (+ alnum)))
+    (token INT "0" (or "b" "B") (+ (set "01_")) (? "'" (+ alnum)))
+    (token INT "0" (or "o" "O") (+ (set "01234567_")) (? "'" (+ alnum)))
+    (token INT digit (* (or digit "_")) (? "'" (+ alnum)))
+    ;; 三引号串（可跨行）要排在普通串之前 —— 最长匹配自然赢，但写在前面更清楚
+    ;;
+    ;; **广义字符串字面量**（`re"[a-z]+"`、`fmt"{x}"`、`CacheTable"myTable"`）单立一格记号：
+    ;; 它与命令式调用（`echo "hi"`）在记号层一模一样，只差中间那个空格，所以靠 `tight-after`
+    ;; 分开 —— 不分开的话 `echo "hi"` 同时是"调用"与"命令式调用"，GLR 会报歧义。
+    ;; 广义串是**生串**：`\` 不转义，`""` 表示一个引号。
+    (token GSTRING (tight-after IDENT ")" "]" "}")
+      "\"\"\"" (* (or (not "\"") (seq "\"" (not "\"")) (seq "\"\"" (not "\"")))) "\"\"\"")
+    (token GSTRING (tight-after IDENT ")" "]" "}") "\"" (* (or (not "\"") "\"\"")) "\"")
+    (token STRING "\"\"\"" (* (or (not "\"") (seq "\"" (not "\"")) (seq "\"\"" (not "\"")))) "\"\"\"")
+    (token RSTRING (or "r" "R") "\"" (* (or (not "\"") "\"\"")) "\"")
+    (string STRING "\"")
+    (token CHAR "'" (or (seq "\\" (+ alnum)) (seq "\\" any) (not "'")) "'")
+
+    ;; ---- 标识符与关键字。Nim 的标识符可以带下划线，而**大小写与下划线在语义上不敏感**
+    ;;      —— 那是名字解析那一层的事，记号照原样出。
+    (token IDENT (or alpha "_") (* (or alnum "_")))
+    ;; 反引号引起来的名字（`` `+` ``）：定义运算符时用
+    (token IDENT "`" (* (not "`")) "`")
+    (keyword IDENT
+      "addr" "and" "as" "asm" "bind" "block" "break" "case" "cast" "concept"
+      "const" "continue" "converter" "defer" "discard" "distinct" "div" "do"
+      ;; `end` 与 `interface` 是 Nim 保留字，但那份 grammar.txt 里**一处没用**（保留着没实现）。
+      ;; 关键字这一格的门槛是"声明了就得在语法里出现"，所以这两个不声明 —— 落回 IDENT。
+      ;; 后果为零：Nim 源码也不会拿它们当名字用。
+      "elif" "else" "enum" "except" "export" "finally" "for" "from" "func"
+      "if" "import" "in" "include" "is" "isnot" "iterator" "let"
+      "macro" "method" "mixin" "mod" "nil" "not" "notin" "object" "of" "or" "out"
+      "proc" "ptr" "raise" "ref" "return" "shl" "shr" "static" "template" "try"
+      "tuple" "type" "using" "var" "when" "while" "xor" "yield")
+
+    ;; ---- 运算符：按**首字符**分级（manual §Operators 那张表）。
+    ;; 每一级一格记号类型，语法里就是一串级联。`opchar` 那一串是 Nim 允许的符号字符。
+    ;;
+    ;; **声明顺序在这儿是语义**：这台匹配器最长优先、**同长先声明者胜**（ADR-0011）。
+    ;; `:` `.` `=` 三个既是标点又落在运算符的首字符集里 —— 头一版把 `(op …)` 放在最后，
+    ;; 于是 `:` 平局输给 OP2，`if a:` 里的 `:` 变成了一个二元运算符，整棵标准库一份不过。
+    ;; 所以标点这一行**先声明**：一个字符的平局归标点，`==` `..` `=>` 这些更长的仍归
+    ;; 运算符，靠"更长"取胜，不靠顺序。
+    ;;
+    ;; `*` 不在标点里：Nim 的导出标记（`proc f*()`）按 `identVis = symbol OPR?` 定义，
+    ;; 本来就是"名字后面跟一个运算符记号"，所以那一格在语法里写 OP9，不另立标点。
+    ;; `..` 同理，只走 OP6。
+    ;; **紧贴的开括号**单立三格记号。Nim 用空白区分"调用"与"命令式调用"：
+    ;;   `f(x)`  —— 一次调用（`(` 紧贴 `f`）
+    ;;   `f (x)` —— 命令式调用，实参是括号表达式 `(x)`
+    ;; 不分开的话 `initSysLock(l)` 同时是这两种，一份带调用的 Nim 文件都过不了。
+    ;; 同一格道理管着 `s[i]`（下标 / 泛型实例化）与 `[1,2]`（数组字面量）、
+    ;; `t{k}` 与 `{1,2}`。`{.` 更长，照最长优先自然还是 pragma。
+    ;; 声明在 `(op …)` 之前 —— 一个字符的平局归先声明的。
+    (token LP (tight-after IDENT ")" "]" "}" STRING RSTRING GSTRING INT FLOAT CHAR) "(")
+    (token LB (tight-after IDENT ")" "]" "}" STRING RSTRING GSTRING INT FLOAT CHAR) "[")
+    (token LC (tight-after IDENT ")" "]" "}" STRING RSTRING GSTRING INT FLOAT CHAR) "{")
+    (op "(" ")" "[" "]" "{" "}" "," ";" ":" "." "=" "{." ".}")
+    ;; 整串就是它的两族：箭头级与赋值级。`+=` 这些在 Nim 里是"以 = 结尾 ⇒ 赋值级"，
+    ;; 我们不实现那条后缀规则（见文件头不足 3），把常见的列出来。
+    (punct ARROW "->" "=>" "~>")
+    (punct ASGNOP "+=" "-=" "*=" "/=" "%=" "|=" "&=" "^=" "<<=" ">>=")
+    (token OP10 (set "$^") (* (set "=+-*/<>@$~&%|!?^.:\\")))
+    (token OP9 (set "*%\\/") (* (set "=+-*/<>@$~&%|!?^.:\\")))
+    (token OP8 (set "+-~|") (* (set "=+-*/<>@$~&%|!?^.:\\")))
+    (token OP7 (set "&") (* (set "=+-*/<>@$~&%|!?^.:\\")))
+    (token OP6 ".." (* (set "=+-*/<>@$~&%|!?^.:\\")))
+    (token OP5 (set "=<>!") (* (set "=+-*/<>@$~&%|!?^.:\\")))
+    (token OP2 (set "@?") (* (set "=+-*/<>@$~&%|!?^.:\\"))))
+
+  ;; ---- 模块 ------------------------------------------------------------------
+  ;;
+  ;; `module = complexOrSimpleStmt ^* (';' / IND{=})` —— 语句表，分隔符是分号或"同缩进"。
+  ;; 同缩进那一格在我们这儿就是 NL。
+
+  (rule module
+    (-> (stmts) (module $*1)))
+
+  ;; ## 语句表的形状：**每条语句自带终结符**
+  ;;
+  ;; 头一版写成 `stmts -> stmt sep stmts`，NL 当分隔符 —— 一份都不过。因为缩进块的结尾
+  ;; 是 `… NL DED`：那个 NL 被**块内**的语句表吃掉了，DED 之后再没有 NL，外层就找不到
+  ;; 分隔符（`if a:\n  b\nc` 就死在 `c` 上）。
+  ;;
+  ;; 改成 `tests/glr/indent/indent.grammar` 那个形状：语句表左递归，**每条语句自己终结**
+  ;; —— 小语句以 NL 收尾，块语句以 DED 收尾。这样 `stmts -> stmts stmt` 里没有"不用分隔符
+  ;; 也能相邻"的可能，左递归不会带来同树两解（与 go / awk 那两处右递归的教训是同一条：
+  ;; **让分隔符成为结构的一部分，别让它可选**）。
+  ;;
+  ;; 代价是往下每一层都要分两种：普通的，与 `-t` 的（t = terminated，最后一个记号是 DED）。
+  ;; `type A = object\n  x: int` 这条声明就是 `-t` 的 —— 它的 DED 就是它的句号。
+  (rule stmts
+    (-> () ())
+    (-> (stmts stmt) ($*1 $2)))
+
+  (rule stmt
+    (-> (smalls NL) (line $*1))
+    (-> (blocky) $1))
+
+  ;; 一行里用 `;` 隔开的几条小语句（`a; b`），允许行尾多一个 `;`
+  (rule smalls
+    (-> (small) ($1))
+    (-> (smalls ";") $*1)
+    (-> (smalls ";" small) ($*1 $3)))
+
+  ;; `:` 之后那一段 —— Nim 的 `IND{>} stmt ^+ IND{=} DED`，正好是 INDENT/DEDENT；
+  ;; 单行体（`if x: echo 1`）由 NL 收尾；`if a: if b: c` 由内层块语句自己收尾。
+  (rule body
+    (-> (NL IND stmts DED) (body $*3))
+    (-> (smalls NL) (body $*1))
+    (-> (blocky) (body $1)))
+
+  ;; ---- 小语句：不以 DED 收尾的那些
+  (rule small
+    (-> (simple) $1)
+    (-> (decl) $1)
+    (-> ("discard") (discard))
+    (-> ("discard" expr) (discard $2))
+    (-> ("return") (return))
+    (-> ("return" expr) (return $2))
+    (-> ("yield") (yield))
+    (-> ("yield" expr) (yield $2))
+    (-> ("raise") (raise))
+    (-> ("raise" expr) (raise $2))
+    (-> ("break") (break))
+    (-> ("break" IDENT) (break $2))
+    (-> ("continue") (continue))
+    (-> ("asm" expr) (asm $2))
+    (-> ("import" import-list) (import $*2))
+    (-> ("import" expr "except" expr-list) (import $2 (except $*4)))
+    (-> ("from" expr "import" import-list) (from $2 (import $*4)))
+    (-> ("export" import-list) (export $*2))
+    (-> ("include" import-list) (include $*2))
+    (-> ("mixin" expr-list) (mixin $*2))
+    (-> ("bind" expr-list) (bind $*2))
+    (-> (pragma) $1)
+    ;; 语句上挂 pragma：`hcrAddEventHandler(…) {.executeOnReload.}`。
+    ;; 只在**语句**这一层收 —— 写进表达式级联（`primary pragma`）的话
+    ;; `proc f(): bool {.inline.}` 里的 `bool {.inline.}` 就有两个解了。
+    (-> (expr pragma) (pragma-stmt $1 $2)))
+
+
+  ;; ---- 块语句：以 DED 收尾的，或者以 body 收尾的（body 自己会收）
+  (rule blocky
+    (-> (decl-t) $1)
+    (-> (if-stmt) $1)
+    (-> (when-stmt) $1)
+    (-> (case-stmt) $1)
+    (-> (for-stmt) $1)
+    (-> (while-stmt) $1)
+    (-> (try-stmt) $1)
+    (-> (block-stmt) $1)
+    (-> ("defer" ":" body) (defer $3))
+    (-> ("static" ":" body) (static $3))
+    ;; pragma 块：`{.locks: [a].}:` 之后一段体
+    (-> (pragma ":" body) (pragma-block $1 $3))
+    ;; `import` / `export` / `include` 的换行写法（`import\n  std/macros, std/os`）——
+    ;; 那是 grammar.txt 里的 `optInd`。这一处的 optInd 恰好等于一个缩进块（后面没有别的
+    ;; 东西要接），所以 INDENT/DEDENT 收得住；`a +\n  b` 那种续行仍然收不住。
+    (-> ("import" NL IND import-lines DED) (import $*4))
+    (-> ("export" NL IND import-lines DED) (export $*4))
+    (-> ("include" NL IND import-lines DED) (include $*4))
+    (-> ("from" expr "import" NL IND import-lines DED) (from $2 (import $*6)))
+    (-> (post-stmt) $1))
+
+  ;; 缩进块里的模块名表：一行一段，行尾可以带 `,`
+  (rule import-lines
+    (-> (import-line) $1)
+    (-> (import-lines import-line) ($*1 $*2)))
+
+  (rule import-line
+    (-> (import-list NL) $1)
+    (-> (import-list "," NL) $1))
+
+  (rule import-list
+    (-> (expr) ($1))
+    (-> (import-list "," expr) ($*1 $3)))
+
+  ;; 简单语句：表达式、赋值、命令式调用
+  (rule simple
+    (-> (expr) (expr $1))
+    (-> (expr "=" expr) (assign "=" $1 $3))
+    (-> (expr ASGNOP expr) (assign $2 $1 $3))
+    ;; 命令式调用（不写括号）：`echo "hi"` / `foo a, b`。只收一层（见文件头不足 2）。
+    (-> (primary cmd-args) (command $1 (args $*2))))
+
+  ;; **尾块**（`postExprBlocks`）—— Nim 里最常见的一格写法，`runnableExamples:` /
+  ;; `suite "x":` / `withLock l:` 全是它。头一版漏了这一族，标准库 316 份只过 3 份。
+  ;;   `postExprBlocks = (doBlock / ':' (extraPostExprBlock / stmt)) extraPostExprBlock*`
+  ;; 带尾块的语句以 body 收尾，所以它是**块语句**，不是小语句。
+  (rule post-stmt
+    (-> (expr post) (expr $1 $*2))
+    (-> (expr "=" expr post) (assign "=" $1 $3 $*4))
+    (-> (primary cmd-args post) (command $1 (args $*2) $*3)))
+
+  (rule post
+    (-> (":" body) ((colon $2)))
+    (-> (":" body extras) ((colon $2) $*3))
+    (-> (do-block) ($1))
+    (-> (do-block extras) ($1 $*2)))
+
+  (rule extras
+    (-> (extra) ($1))
+    (-> (extra extras) ($1 $*2)))
+
+  ;; `extraPostExprBlock` 前面那个 `IND{=}`（同缩进）在我们这儿**不出记号**：上一段
+  ;; body 要么以 DED 收尾、要么以 NL 收尾，两种都已经把行尾吃掉了，所以这儿不写 NL。
+  (rule extra
+    (-> ("of" expr-list ":" body) (of (list $*2) $4))
+    (-> ("elif" expr ":" body) (elif $2 $4))
+    (-> ("except" ":" body) (except $3))
+    (-> ("except" expr-list ":" body) (except (list $*2) $4))
+    (-> ("finally" ":" body) (finally $3))
+    (-> ("else" ":" body) (else $3))
+    (-> (do-block) $1))
+
+  ;; `doBlock = 'do' paramListArrow pragma? colcom stmt`
+  (rule do-block
+    (-> ("do" params ret pragma-opt ":" body) (do $2 $3 $4 $6)))
+
+  (rule cmd-args
+    (-> (expr) ($1))
+    (-> (cmd-args "," expr) ($*1 $3)))
+
+  ;; ---- 声明 ------------------------------------------------------------------
+  ;;
+  ;; 两个维度各分两套：
+  ;;   * `type` 段里的一条是 `typeDef`（`Foo[T] = ref object`），`var/let/const/using`
+  ;;     段里的一条是 `variable`（`x, y: int = 0`）。头一版把两者合成一个 `section-item`
+  ;;     —— 于是 `const x = 1` 同时是 tdef 与 item，**同一棵输入两个解**，GLR 直接报歧义。
+  ;;     这是那句老话的又一例：**歧义要写进语法**，不能指望驱动器替你选。
+  ;;   * 不以 DED 收尾的（普通）与以 DED 收尾的（`-t`，见语句表那段注释）。
+
+  (rule decl
+    (-> (routine) $1)
+    (-> ("type" type-def) (type-section $2))
+    (-> ("var" var-item) (var-section $2))
+    (-> ("let" var-item) (let-section $2))
+    (-> ("const" var-item) (const-section $2))
+    (-> ("using" var-item) (using $2)))
+
+  (rule decl-t
+    (-> (routine-t) $1)
+    (-> ("type" type-def-t) (type-section $2))
+    (-> ("var" var-item-t) (var-section $2))
+    (-> ("let" var-item-t) (let-section $2))
+    (-> ("const" var-item-t) (const-section $2))
+    (-> ("type" NL IND type-defs DED) (type-section $*4))
+    (-> ("var" NL IND var-items DED) (var-section $*4))
+    (-> ("let" NL IND var-items DED) (let-section $*4))
+    (-> ("const" NL IND var-items DED) (const-section $*4))
+    (-> ("using" NL IND var-items DED) (using $*4)))
+
+  ;; 缩进块里的一条条声明，每条自终结
+  (rule type-defs
+    (-> () ())
+    (-> (type-defs type-def NL) ($*1 $2))
+    (-> (type-defs type-def-t) ($*1 $2)))
+
+  (rule var-items
+    (-> () ())
+    (-> (var-items var-item NL) ($*1 $2))
+    (-> (var-items var-item-t) ($*1 $2)))
+
+  (rule type-def
+    (-> (ident-pragma) (tdef $1))
+    (-> (ident-pragma generic-params) (tdef $1 (generics $*2)))
+    (-> (ident-pragma "=" type-desc) (tdef $1 $3))
+    (-> (ident-pragma generic-params "=" type-desc) (tdef $1 (generics $*2) $4)))
+
+  (rule type-def-t
+    (-> (ident-pragma "=" type-desc-t) (tdef $1 $3))
+    (-> (ident-pragma generic-params "=" type-desc-t) (tdef $1 (generics $*2) $4)))
+
+  (rule var-item
+    (-> (idents) (item (names $*1)))
+    (-> (idents ":" type-desc) (item (names $*1) $3))
+    (-> (idents "=" expr) (item (names $*1) (init $3)))
+    (-> (idents ":" type-desc "=" expr) (item (names $*1) $3 (init $5)))
+    ;; 元组解包（`varTupleLhs`）：`let (a, b, h2) = next(t, h)`
+    (-> ("(" idents ")" "=" expr) (untuple (names $*2) (init $5))))
+
+
+  (rule var-item-t
+    (-> (idents ":" type-desc-t) (item (names $*1) $3)))
+
+  (rule idents
+    (-> (ident-pragma) ($1))
+    (-> (idents "," ident-pragma) ($*1 $3)))
+
+  ;; 名字后面可以挂导出标记与 pragma。导出标记按 `identVis = symbol OPR?` 写成 OP9
+  ;; （实际写的都是 `*`，但那一格在 Nim 里就是"任意运算符记号"，见 lex 里那段注释）。
+  (rule ident-pragma
+    (-> (IDENT) (n $1))
+    (-> (IDENT OP9) (n $1 export))
+    (-> (IDENT pragma) (n $1 $2))
+    (-> (IDENT OP9 pragma) (n $1 export $3)))
+
+
+  (rule pragma
+    (-> ("{." pragma-items ".}") (pragma $*2))
+    (-> ("{." pragma-items "}") (pragma $*2)))
+
+  (rule pragma-items
+    (-> () ())
+    (-> (pragma-item) ($1))
+    (-> (pragma-items "," pragma-item) ($*1 $3)))
+
+  (rule pragma-item
+    (-> (expr) $1)
+    (-> (field ":" expr) (kv $1 $3))
+    (-> (field "=" expr) (kv $1 $3))
+    ;; pragma 里也能写命令式调用：`{.push stackTrace: off.}`、`{.hint: "…".}`、
+    ;; `{.pragma: myAttr.}`。头一条 IDENT 是命令名，后面那一串是它的实参。
+    (-> (IDENT pragma-args) (cmd $1 $*2)))
+
+  (rule pragma-args
+    (-> (pragma-arg) ($1)))
+
+  (rule pragma-arg
+    (-> (expr) $1)
+    (-> (field ":" expr) (kv $1 $3))
+    (-> (field "=" expr) (kv $1 $3)))
+
+  ;; ---- 例程（proc / func / method / iterator / template / macro / converter）
+  ;; 没有 `= body` 的是前置声明（小语句），有 body 的以 body 收尾（块语句）。
+  (rule routine
+    (-> (routine-kw ident-pragma routine-rest) (routine $1 $2 $3))
+    (-> (routine-kw ident-pragma generic-params routine-rest) (routine $1 $2 (generics $*3) $4)))
+
+  (rule routine-t
+    (-> (routine-kw ident-pragma routine-impl) (routine $1 $2 $3))
+    (-> (routine-kw ident-pragma generic-params routine-impl) (routine $1 $2 (generics $*3) $4)))
+
+  (rule routine-kw
+    (-> ("proc") $1) (-> ("func") $1) (-> ("method") $1) (-> ("iterator") $1)
+    (-> ("template") $1) (-> ("macro") $1) (-> ("converter") $1))
+
+  (rule routine-rest
+    (-> (params ret pragma-opt) (sig $1 $2 $3)))
+
+  (rule routine-impl
+    (-> (params ret pragma-opt "=" body) (sig $1 $2 $3 (impl $5))))
+
+  (rule pragma-opt
+    (-> () ())
+    (-> (pragma) $1))
+
+  ;; `proc f(a: int)` 里 `(` 紧贴名字（LP），`proc(a: int)` 里紧贴的是关键字（普通 `(`）
+  ;; —— 两种都收。同一份输入只会出一种记号，所以不带歧义。
+  (rule params
+    (-> () ())
+    (-> (LP param-list ")") ($*2))
+    (-> ("(" param-list ")") ($*2)))
+
+
+  (rule param-list
+    (-> () ())
+    (-> (param) ($1))
+    (-> (param-list "," param) ($*1 $3))
+    (-> (param-list ";" param) ($*1 $3)))
+
+  (rule param
+    (-> (idents ":" type-desc) (p (names $*1) $3))
+    (-> (idents ":" type-desc "=" expr) (p (names $*1) $3 (default $5)))
+    ;; 只给缺省值、不写类型：`proc inc*(c: CacheCounter; by = 1)`
+    (-> (idents "=" expr) (p (names $*1) (default $3)))
+    (-> (idents) (p (names $*1))))
+
+
+  (rule ret
+    (-> () (none))
+    (-> (":" type-desc) $2))
+
+  (rule generic-params
+    (-> (LB param-list "]") ($*2))
+    (-> ("[" param-list "]") ($*2)))
+
+
+  ;; ---- 类型 ------------------------------------------------------------------
+
+  (rule type-desc
+    (-> (expr) $1)
+    (-> ("ref" type-desc) (ref $2))
+    (-> ("ptr" type-desc) (ptr $2))
+    (-> ("var" type-desc) (var $2))
+    (-> ("out" type-desc) (out $2))
+    (-> ("static" type-desc) (static $2))
+    (-> ("distinct" type-desc) (distinct $2))
+    (-> ("tuple" "[" param-list "]") (tuple $*3))
+    (-> ("tuple") (tuple))
+    (-> (object-type) $1)
+    (-> (enum-type) $1)
+    (-> (proc-type) $1))
+
+  ;; 以 DED 收尾的类型：`object` / `enum` / `concept` 带缩进体的那几种
+  (rule type-desc-t
+    (-> ("ref" type-desc-t) (ref $2))
+    (-> ("ptr" type-desc-t) (ptr $2))
+    (-> ("var" type-desc-t) (var $2))
+    (-> ("out" type-desc-t) (out $2))
+    (-> ("static" type-desc-t) (static $2))
+    (-> ("distinct" type-desc-t) (distinct $2))
+    (-> (object-type-t) $1)
+    (-> (enum-type-t) $1)
+    (-> (concept-type) $1))
+
+
+  (rule proc-type
+    (-> (routine-kw params ret pragma-opt) (proctype $1 $2 $3 $4)))
+
+  (rule object-type
+    (-> ("object" pragma-opt) (object))
+    (-> ("object" pragma-opt "of" type-desc) (object (of $4))))
+
+  (rule object-type-t
+    (-> ("object" pragma-opt NL IND obj-items DED) (object $*5))
+    (-> ("object" pragma-opt "of" type-desc NL IND obj-items DED) (object (of $4) $*7)))
+
+  ;; 字段表：每条自终结（普通字段以 NL 收，变体那格以 DED 收）
+  (rule obj-items
+    (-> () ())
+    (-> (obj-items obj-item NL) ($*1 $2))
+    (-> (obj-items obj-item-t) ($*1 $2)))
+
+  (rule obj-item
+    (-> (idents ":" type-desc) (f (names $*1) $3))
+    (-> ("discard") (discard))
+    (-> ("nil") (nil)))
+
+  (rule obj-item-t
+    (-> (idents ":" type-desc-t) (f (names $*1) $3))
+    (-> (case-obj) $1)
+    (-> ("when" expr ":" obj-body obj-elifs) (when $2 $4 (elifs $*5)))
+    (-> ("when" expr ":" obj-body obj-elifs "else" ":" obj-body) (when $2 $4 (elifs $*5) (else $8))))
+
+  (rule obj-elifs
+    (-> () ())
+    (-> (obj-elifs "elif" expr ":" obj-body) ($*1 (elif $3 $5))))
+
+  ;; 变体对象：`case kind: Kind` 之后那些 `of` 常常与 `case` **同列**（不发 IND），
+  ;; 也可以再缩进一格 —— 两种都收。
+  (rule case-obj
+    (-> ("case" IDENT ":" type-desc NL obj-branches) (variant $2 $4 $*6))
+    (-> ("case" IDENT ":" type-desc NL IND obj-branches DED) (variant $2 $4 $*7))
+    (-> ("case" IDENT NL obj-branches) (variant $2 $*4))
+    (-> ("case" IDENT NL IND obj-branches DED) (variant $2 $*5)))
+
+  (rule obj-branches
+    (-> (obj-branch) ($1))
+    (-> (obj-branches obj-branch) ($*1 $2)))
+
+  (rule obj-branch
+    (-> ("of" expr-list ":" obj-body) (of (values $*2) $4))
+    (-> ("elif" expr ":" obj-body) (elif $2 $4))
+    (-> ("else" ":" obj-body) (else $3)))
+
+  (rule obj-body
+    (-> (NL IND obj-items DED) (body $*3))
+    (-> (obj-item NL) (body $1))
+    (-> (obj-item-t) (body $1)))
+
+  (rule enum-type
+    (-> ("enum" enum-items-inline) (enum $*2)))
+
+  (rule enum-type-t
+    (-> ("enum" NL IND enum-lines DED) (enum $*4)))
+
+  ;; 缩进块里的枚举：一行一条或几条，行尾可以带一个 `,`
+  (rule enum-lines
+    (-> (enum-line) $1)
+    (-> (enum-lines enum-line) ($*1 $*2)))
+
+  (rule enum-line
+    (-> (enum-items-inline NL) $1)
+    (-> (enum-items-inline "," NL) $1))
+
+  (rule enum-items-inline
+    (-> (enum-item) ($1))
+    (-> (enum-items-inline "," enum-item) ($*1 $3)))
+
+  (rule enum-item
+    (-> (ident-pragma) (v $1))
+    (-> (ident-pragma "=" expr) (v $1 $3)))
+
+  (rule concept-type
+    (-> ("concept" concept-params body) (concept (params $*2) $3)))
+
+  (rule concept-params
+    (-> (expr-list) $1)
+    (-> (expr-list ";" expr-list) $1))
+
+  ;; ---- 控制流 ----------------------------------------------------------------
+  ;;
+  ;; `elif` / `else` / `of` / `except` / `finally` 与开头那个关键字**同列**，所以它们前面
+  ;; 不写 NL：上一段 body 已经把行尾（NL 或 DED）吃掉了。
+
+  (rule if-stmt
+    (-> ("if" expr ":" body elifs) (if $2 $4 (elifs $*5)))
+    (-> ("if" expr ":" body elifs "else" ":" body) (if $2 $4 (elifs $*5) (else $8))))
+
+  (rule elifs
+    (-> () ())
+    (-> (elifs "elif" expr ":" body) ($*1 (elif $3 $5))))
+
+  (rule when-stmt
+    (-> ("when" expr ":" body elifs) (when $2 $4 (elifs $*5)))
+    (-> ("when" expr ":" body elifs "else" ":" body) (when $2 $4 (elifs $*5) (else $8))))
+
+  ;; `case x` 之后那些 `of` 常常与 `case` 同列（不发 IND），也可以再缩进一格 —— 两种都收
+  (rule case-stmt
+    (-> ("case" expr NL branches) (case $2 $*4))
+    (-> ("case" expr NL IND branches DED) (case $2 $*5))
+    (-> ("case" expr ":" NL branches) (case $2 $*5))
+    (-> ("case" expr ":" NL IND branches DED) (case $2 $*6)))
+
+  (rule branches
+    (-> (branch) ($1))
+    (-> (branches branch) ($*1 $2)))
+
+  (rule branch
+    (-> ("of" expr-list ":" body) (of (values $*2) $4))
+    (-> ("elif" expr ":" body) (elif $2 $4))
+    (-> ("else" ":" body) (else $3)))
+
+  (rule for-stmt
+    (-> ("for" idents "in" expr ":" body) (for (names $*2) $4 $6)))
+
+  (rule while-stmt
+    (-> ("while" expr ":" body) (while $2 $4)))
+
+  (rule try-stmt
+    (-> ("try" ":" body handlers) (try $3 $*4)))
+
+  (rule handlers
+    (-> (handler) ($1))
+    (-> (handlers handler) ($*1 $2)))
+
+  (rule handler
+    (-> ("except" ":" body) (except $3))
+    (-> ("except" expr-list ":" body) (except (types $*2) $4))
+    (-> ("finally" ":" body) (finally $3)))
+
+  (rule block-stmt
+    (-> ("block" ":" body) (block $3))
+    (-> ("block" IDENT ":" body) (block $2 $4)))
+
+  ;; ---- 表达式：11 级级联，按首字符分的那几格记号 --------------------------------
+
+  (rule expr-list
+    (-> (expr) ($1))
+    (-> (expr-list "," expr) ($*1 $3)))
+
+  (rule expr (-> (e-arrow) $1))
+
+  (rule e-arrow
+    (-> (e2) $1)
+    (-> (e-arrow ARROW e2) (bin $2 $1 $3)))
+
+  (rule e2
+    (-> (e-or) $1)
+    (-> (e2 OP2 e-or) (bin $2 $1 $3)))
+
+  (rule e-or
+    (-> (e-and) $1)
+    (-> (e-or "or" e-and) (bin "or" $1 $3))
+    (-> (e-or "xor" e-and) (bin "xor" $1 $3))
+    (-> (e-or OP3 e-and) (bin $2 $1 $3)))
+
+  (rule e-and
+    (-> (e-cmp) $1)
+    (-> (e-and "and" e-cmp) (bin "and" $1 $3))
+    (-> (e-and OP4 e-cmp) (bin $2 $1 $3)))
+
+  (rule e-cmp
+    (-> (e-slice) $1)
+    (-> (e-cmp OP5 e-slice) (bin $2 $1 $3))
+    (-> (e-cmp "in" e-slice) (bin "in" $1 $3))
+    (-> (e-cmp "notin" e-slice) (bin "notin" $1 $3))
+    (-> (e-cmp "is" e-slice) (bin "is" $1 $3))
+    (-> (e-cmp "isnot" e-slice) (bin "isnot" $1 $3))
+    (-> (e-cmp "of" e-slice) (bin "of" $1 $3))
+    (-> (e-cmp "as" e-slice) (bin "as" $1 $3))
+    (-> (e-cmp "from" e-slice) (bin "from" $1 $3)))
+
+  (rule e-slice
+    (-> (e-amp) $1)
+    ;; `..` 只走 OP6（标点里没有 `..`，见 lex 那段注释）
+    (-> (e-slice OP6 e-amp) (bin $2 $1 $3)))
+
+  (rule e-amp
+    (-> (e-plus) $1)
+    (-> (e-amp OP7 e-plus) (bin $2 $1 $3)))
+
+  (rule e-plus
+    (-> (e-mul) $1)
+    (-> (e-plus OP8 e-mul) (bin $2 $1 $3)))
+
+  (rule e-mul
+    (-> (e-dollar) $1)
+    (-> (e-mul OP9 e-dollar) (bin $2 $1 $3))
+    (-> (e-mul "div" e-dollar) (bin "div" $1 $3))
+    (-> (e-mul "mod" e-dollar) (bin "mod" $1 $3))
+    (-> (e-mul "shl" e-dollar) (bin "shl" $1 $3))
+    (-> (e-mul "shr" e-dollar) (bin "shr" $1 $3)))
+
+  (rule e-dollar
+    (-> (unary) $1)
+    (-> (e-dollar OP10 unary) (bin $2 $1 $3)))
+
+  ;; 前缀运算符。Nim 里任何运算符都能当前缀，靠**空白**区分（`-x` 与 `a - b`）—— 我们
+  ;; 的词法器没有那一格条件，所以每加一级前缀就多一路分叉。只收实际当前缀用的那几级：
+  ;; OP2（`@[1,2]`、`?x`）、OP7（`&"fmt"`）、OP8（`-x`、`+x`）、OP10（`$v`、`^x`）。
+  (rule unary
+    (-> (primary) $1)
+    (-> ("not" unary) (un "not" $2))
+    (-> ("addr" unary) (addr $2))
+    (-> ("static" unary) (static $2))
+    (-> (OP2 unary) (un $1 $2))
+    (-> (OP7 unary) (un $1 $2))
+    (-> (OP8 unary) (un $1 $2))
+    (-> (OP10 unary) (un $1 $2)))
+
+  (rule primary
+    (-> (atom) $1)
+    ;; `.` 后面允许关键字（`symbolOrKeyword`）：`x.type`、`s.high`、`t.is`
+    (-> (primary "." field) (dot $1 $3))
+    ;; 后缀三件套用**紧贴**的开括号（LP / LB / LC）—— 见 lex 里那段注释
+    (-> (primary LP call-args ")") (call $1 (args $*3)))
+    (-> (primary LB call-args "]") (bracket $1 (args $*3)))
+    (-> (primary LC call-args "}") (curly $1 (args $*3)))
+    ;; 广义字符串字面量：`CacheTable"myTable"`、`re"[a-z]+"`、`fmt"{x}"`（名字**紧贴**一个串）
+    (-> (primary GSTRING) (gstr $1 $2)))
+    ;; 这儿**故意不写** `(primary pragma)`：`proc f(): bool {.inline.} =` 里那个
+    ;; `bool {.inline.}` 会同时是"返回类型 + 例程的 pragma"与"一个带 pragma 的表达式"
+    ;; —— 同一棵输入两个解。带 pragma 的类型表达式（`ptr T {.foo.}`）少见，不值这个价。
+
+
+  ;; `symbolOrKeyword` —— 点号后面那一格能写关键字
+  (rule field
+    (-> (IDENT) $1)
+    (-> ("type") $1) (-> ("addr") $1) (-> ("is") $1) (-> ("of") $1) (-> ("in") $1)
+    (-> ("out") $1) (-> ("static") $1) (-> ("from") $1) (-> ("as") $1) (-> ("object") $1)
+    (-> ("proc") $1) (-> ("func") $1) (-> ("iterator") $1) (-> ("template") $1)
+    (-> ("mod") $1) (-> ("div") $1) (-> ("not") $1) (-> ("and") $1) (-> ("or") $1)
+    (-> ("xor") $1) (-> ("shl") $1) (-> ("shr") $1) (-> ("ref") $1) (-> ("ptr") $1)
+    (-> ("var") $1) (-> ("let") $1) (-> ("const") $1) (-> ("enum") $1) (-> ("tuple") $1)
+    (-> ("nil") $1) (-> ("distinct") $1) (-> ("concept") $1) (-> ("if") $1)
+    (-> ("else") $1) (-> ("try") $1) (-> ("except") $1) (-> ("block") $1)
+    (-> ("do") $1) (-> ("using") $1) (-> ("when") $1) (-> ("case") $1) (-> ("for") $1))
+
+
+
+  (rule call-args
+    (-> () ())
+    (-> (call-arg) ($1))
+    (-> (call-args "," call-arg) ($*1 $3)))
+
+  (rule call-arg
+    (-> (expr) $1)
+    (-> (IDENT "=" expr) (named $1 $3))
+    (-> (expr ":" expr) (kv $1 $3)))
+
+  (rule atom
+    (-> (INT) (num $1))
+    (-> (FLOAT) (num $1))
+    (-> (STRING) (str $1))
+    (-> (RSTRING) (rstr $1))
+    (-> (CHAR) (char $1))
+    (-> ("nil") (nil))
+    (-> (IDENT) (name $1))
+    (-> ("(" expr ")") (paren $2))
+    (-> ("(" expr-list ")") (tuple-lit $*2))
+    (-> ("[" call-args "]") (array-lit $*2))
+    (-> ("{" call-args "}") (set-lit $*2))
+    ;; `cast[T](e)`：`[` 紧贴关键字 `cast`（普通 `[`），`(` 紧贴 `]`（LP）
+    (-> ("cast" "[" type-desc "]" LP expr ")") (cast $3 $6))
+
+    (-> ("if" expr ":" expr "else" ":" expr) (ifexpr $2 $4 $7))
+    ;; `when` / `case` 也能当表达式（`expr = (blockExpr | ifExpr | whenExpr | caseExpr …)`）：
+    ;; `(when i is BackwardsIndex: n.len - int(i) else: int(i))`
+    (-> ("when" expr ":" expr "else" ":" expr) (whenexpr $2 $4 $7))
+
+    ;; 匿名例程。**只收单行体**（`proc() = discard`）：多行体的 lambda 以 DED 收尾，
+    ;; 那要一整套 `-t` 的表达式级联，不值当 —— 记在文件头的不足里。
+    (-> (routine-kw params ret pragma-opt "=" smalls) (lambda $1 $2 $3 $4 $*6))))
+
+;; ## 量到的（`node bench/grammars.js nim`，语料 = Nim/lib 下 316 份 .nim）
+;;
+;;   721 状态 / 365 产生式 / 102 终结符 / 464 处冲突留给驱动器
+;;   冷建表 ~220ms、热装表 ~20ms（内容寻址缓存）
+;;   **39 / 316 过**，822614 记号、4.5MB，解析 ~2.4s（1.8 MB/s、33 万记号/s）
+;;
+;; 39/316 —— 这份语法还欠得多，欠在哪儿是**数出来的**，不是猜的。头一版只过 3 份，
+;; 一路量下来每一刀的账：
+;;
+;;   3   → 头一版（`:` 输给了 OP2，`if a:` 里的冒号变成二元运算符）
+;;   6   → 语句表改成"每条自终结"（NL 不是分隔符，是句号）+ 尾块 `postExprBlocks`
+;;         + 文件开头那个多出来的 NEWLINE（词法器 bug）
+;;   11  → 前缀运算符收全 + `.` 后面允许关键字 + `type`/`var` 段分开（tdef 与 item
+;;         合成一条 = 同一棵输入两个解）
+;;   15  → `{.` `.}` 算进括号深度（pragma 里也能换行）+ 无类型缺省参数（`by = 1`）
+;;   21  → 去掉 `primary pragma`（`proc f(): bool {.inline.}` 两个解）
+;;   31  → **紧贴的开括号**（LP / LB / LC）—— `f(x)` 与 `f (x)` 分开。这一刀最值：
+;;         冲突 624 → 458，过 21 → 31
+;;   36  → 语句 pragma / pragma 块 / 元组解包 / `when` 表达式
+;;   39  → `join-after` 续行
+;;
+;; 剩下 277 份的失败按信息量排，头几类：
+;;   * "too many concurrent parses" —— 还有真歧义没写进语法。已知的一处：命令式调用与
+;;     调用在**多层**上还会撞（文件头不足 2）。
+;;   * 类型段里的形状还缺：`object` 里的 `when`、`concept` 的各种写法、`ptr UncheckedArray[T]`
+;;     这类在 `type-desc` 与 `expr` 之间来回的写法。
+;;   * `optInd` 剩下的那一半（`x =\n  长表达式`）。
+;;
+;; 下一刀该往哪儿切也是量出来的：把 `--fail` 的头 50 条按报错信息归类，最大那一类先修。
+

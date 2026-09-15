@@ -1,0 +1,7 @@
+{
+  "grammar": "nim.grammar",
+  "doc": "语料 = Nim 官方那棵树里 lib/ 下的 .nim（316 份 —— 标准库把缩进块、命令调用、模板/宏、pragma 全用了）。树不在就跳过。语法照 doc/grammar.txt（那份是 compiler/parser.nim 生成的）写。",
+  "corpus": [
+    { "tree": "Nim", "env": "NIM_SRC", "sub": "lib", "ext": ".nim" }
+  ]
+}
