@@ -35,8 +35,8 @@ import { evalConst } from './const-eval.js';
 /* "一族候选里挑一条"这一句是**引擎**的（各实参里最差的一档当分、取最高分、并列即歧义）——
    打分才是这门语言的（`argCost`）。抄两份的坏处不是行数，是两份会各自漂。 */
 import { pick, worst } from '../../core/frontend-engine/overload.js';
-
 /**
+
  * 一格函数体要的那一整套探子。`o` 里：
  *   fnNode                      这一格函数的节点（形参、返回类型、体都从它读）
  *   env                         类型环境（名字 → struct/class/enum/typedef/const）
@@ -658,6 +658,31 @@ export function makeFnEnv(o) {
     const seg = String(f.name?.value ?? '');
     if (left === null || seg === '') return null;
     return `${left}$${seg}`;
+  };
+  /**
+   * **串字面量给 char 数组当初值**（`char a[] = "abc"` / `char d[8] = "ab"`，第二百六十二刀，
+   * jancy 那儿是 `Cast_Array`：串字面量是一段**带零尾**的字节，逐格抄进去）。
+   *
+   * 这一层一格窄整数占**一格**（`char[4]` 是 `(blk int 4)`），所以"逐字节"就是"逐格"。
+   * 多出来的那几格不用管：那段内存是 `pnew` 出来的、本来就是零 —— 零尾也就自带了
+   * （与花括号写少了那几格同一条）。
+   *
+   * 只收 ASCII：jancy 的串是 UTF-8 的字节，非 ASCII 的一个字符要占好几格 —— 那要"按字节"
+   * 而不是"按格"，等方言的整数带上宽度那一程（ADR-0031 §8.1）。所以见到就记账，不猜。
+   */
+  const strArrayLines = (dst, type, text, pad) => {
+    const codes = [...text].map((ch) => ch.codePointAt(0) ?? 0);
+    if (codes.some((c) => c > 127)) {
+      acct('串字面量给数组当初值：里头有非 ASCII（要按字节抄，等整数带上宽度那一程）');
+      return null;
+    }
+    /* 放不下（连零尾都放不下）是**源码的错** —— jancy 那儿同（"array is too small"）。 */
+    if (type.n < codes.length + 1) {
+      acct(`串字面量有 ${codes.length} 个字符（还要一格零尾），可那一格数组只有 ${type.n} 格`);
+      return null;
+    }
+    const b0 = `(pelem ${dst})`;
+    return codes.map((c, i) => `${pad}(pstore (padd ${b0} (int ${i})) (int ${c}))`);
   };
   /**
    * **一对花括号的初值**（`{ 10, 20, 30 }`）：按格子写。数组逐格、结构体逐字段；写少了的
@@ -2324,6 +2349,12 @@ export function makeFnEnv(o) {
         const cv = isCurlyNode ? (vn.value ?? null)
           : (isInit && headOf(named(d)?.value) === 'curly' ? named(d).value : null);
         /**
+         * **右边是一格串字面量**（`char a[] = "abc"`，第二百六十二刀）：与花括号是**同一族**
+         * （jancy 的 `Cast_Array`）—— 逐格抄进去，长度写空的就从那串字数（字符数 + 一格零尾）。
+         * 折不出一格串的（运行期拼出来的那种）照旧往下走，报的还是原来那句。
+         */
+        const sv = cv !== null || !isInit ? null : strLitFold(named(d)?.value ?? null);
+        /**
          * **`A a(x, y);`**（第一百〇三刀）：尾巴上那对括号在树上是**形参表**，可它是构造实参。
          * 判据在 `ctorArgsOf`；凑齐了就走造对象那条现成的路（类与结构体各一支，与 `new A(…)`
          * 是**同一个**构造）。判不出来的照旧往下走，报的还是"函数那一族（fn）"。
@@ -2346,6 +2377,12 @@ export function makeFnEnv(o) {
         if (r.type === null && cv !== null) {
           const inferred = arrayFromCurly({ name: t.name, type: t, at: node }, env, cv);
           if (inferred !== null) r = { type: inferred, why: null };
+        }
+        /* 长度写空 + 串字面量：长度 = 字符数 + 一格零尾（`char a[] = "abc"` 是 4 格）。
+           元素那一格照 `arrayFromCurly` 那条路解（把声明符摘掉再解一遍）。 */
+        if (r.type === null && sv !== null && (t.suffixes ?? []).includes('array-suffix')) {
+          const el = resolveType({ ...t, suffixes: [], raw: { specs: t.raw?.specs, dcl: null } }, env);
+          if (el.type !== null) r = { type: { k: 'arr', el: el.type, n: [...sv].length + 1 }, why: null };
         }
         if (r.type === null) { acct(`局部量 '${t.name}'：${r.why}`); return null; }
         names.set(t.name, t);
@@ -2393,6 +2430,22 @@ export function makeFnEnv(o) {
         }
         const ty = emitType(r.type, 'slot', tyc);
         const declTy = withBits(r.type, t);
+        /**
+         * **串字面量抄进一格数组**（`char a[] = "abc"` / `char d[8] = "ab"`，第二百六十二刀）：
+         * 与花括号那一族同一条路 —— 先开出那段内存（`pnew`）再逐格写，零尾自带（那段内存
+         * 本来是零）。`static` 那一档还没接（初值要包进那道只跑一次的闸门里）—— 记账，不猜。
+         */
+        if (sv !== null && r.type.k === 'arr') {
+          if (isStatic) {
+            acct(`局部量 '${t.name}'：\`static\` 的数组用串字面量当初值（初值要包进那道闸门）还没接`);
+            return null;
+          }
+          forced.set(t.name, r.type);
+          const ls2 = strArrayLines(`(var ${t.name})`, r.type, sv, pad);
+          if (ls2 === null) return null;                     // 账已经记过
+          out.push(`${pad}(let ${t.name} ${ty} (pnew ${ty} (int 1)))`, ...ls2);
+          continue;
+        }
         /**
          * **`static` 的局部量**（第二十六刀）：两件事各有出处。
          *   **存储**是"程序启动时分配、一直待到程序结束"（decl_storage.rst）—— 也就是一格
