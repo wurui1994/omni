@@ -106,6 +106,21 @@ export const NODES = new Map([
     doc: 'go ORETURN / lua return / nim return —— 早退是效应，不是边',
   }),
 
+  // ---- 作用域出口（1 格）：**八个提供者共用这一格**（附录 A.1 里最稳的一格能力）----
+  //
+  // go 的 `defer` / nim 的 `defer` / V 的 `defer` 与 `lock` / lua 的 `<close>` /
+  // CL 的 `unwind-protect` 与七种 cleanup / mojo 的 `__deinit__` 与 `with` /
+  // freebasic 的 `Destructor` 与 `Scope` / cpp 的 RAII —— 全落这一格。
+  //
+  // 它的语义只有三句话，而且**三句话都由调度器给，不由语言给**：
+  //   1. 在**注册的那一刻**记下这段动作（实参当场求值 —— go 的 defer 就是这条）；
+  //   2. 宿主 region 出口时**逆序**跑；
+  //   3. **早退也跑**（`may-early-exit` 切段之后那一段仍要经过出口）。
+  N('scope-exit', 'stat', [{ name: 'action', sem: SEM.body }], {
+    effects: ['writes'], outs: [],
+    doc: 'defer（go/nim/V）/ unwind-protect（CL）/ <close>（lua）/ with（mojo）/ RAII（cpp）',
+  }),
+
   // ---- 多值（2 格）：**多出端口是常态**（ADR-0033 §3.2）------------------------
   //
   // `return a, b`（go / lua / V）与 `(values a b)`（CL）落 `values`；

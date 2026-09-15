@@ -21,7 +21,28 @@ class Return { constructor(value) { this.value = value; } }
 
 /** 一格作用域 = 一格 region。`bind` 边（名字 -> 定义）按这条链查，与 ADR-0029 同一件事。 */
 class Env {
-  constructor(parent = null) { this.vars = new Map(); this.parent = parent; }
+  /**
+   * `region` 那一格：一格名字域 + 一格**出口动作表**（`exits`）。
+   * 只有 region / 函数体的 Env 带 exits —— `scope-exit` 往最近的那一格挂。
+   */
+  constructor(parent = null, { region = false } = {}) {
+    this.vars = new Map();
+    this.parent = parent;
+    this.exits = region ? [] : null;
+  }
+
+  /** 往最近的那格 region 挂一段出口动作（注册的那一刻就记下，实参已经算过了）。 */
+  onExit(fn) {
+    for (let e = this; e !== null; e = e.parent) if (e.exits !== null) { e.exits.push(fn); return; }
+    throw new Error('scope-exit 没有宿主 region —— 图上它必须挂在一格域里');
+  }
+
+  /** 出口：**逆序**跑（后注册的先跑），而且早退也要经过这儿（所以调用方用 finally）。 */
+  runExits() {
+    if (this.exits === null) return;
+    for (let i = this.exits.length - 1; i >= 0; i--) this.exits[i]();
+    this.exits.length = 0;
+  }
 
   define(name, value) { this.vars.set(name, value); }
 
@@ -147,8 +168,18 @@ function run(n, env, io) {
       return null;
     }
     case 'region': {
-      const inner = new Env(env);       // region 边：一格新的存储/名字域
-      return refValue(n.ins.body, inner, io);
+      const inner = new Env(env, { region: true });   // region 边：一格新的域 + 一格出口表
+      try {
+        return refValue(n.ins.body, inner, io);
+      } finally {
+        inner.runExits();               // **早退也跑** —— 这就是 finally 在这儿的全部理由
+      }
+    }
+    case 'scope-exit': {
+      // 注册那一刻就把动作记下（`arg('action')` 交出来的是一格 thunk）
+      const act = arg('action');
+      env.onExit(() => { if (act !== null) act(); });
+      return null;
     }
     case 'func': return new Closure(n.attrs.params ?? [], n.ins.body, env, n.attrs.name);
     case 'values': return new Values(arg('args') ?? []);
@@ -159,7 +190,7 @@ function run(n, env, io) {
       const args = arg('args') ?? [];
       if (typeof fn === 'string') return callPrim(fn, args, io);   // 名字直接指到内建
       if (!(fn instanceof Closure)) throw new Error(`not callable: ${showValue(fn)}`);
-      const inner = new Env(fn.env);
+      const inner = new Env(fn.env, { region: true });   // 函数体也是一格 region
       fn.params.forEach((p, i) => inner.define(p, args[i] ?? null));
       try {
         return refValue(fn.body, inner, io);
@@ -167,6 +198,8 @@ function run(n, env, io) {
         // `may-early-exit` 的切段在这儿收口：后半段（本次调用剩下的部分）不跑
         if (err instanceof Return) return err.value;
         throw err;
+      } finally {
+        inner.runExits();               // defer 一族：早退（return）之后仍要跑，逆序
       }
     }
     default: throw new Error(`eval: unhandled node ${n.op}`);
@@ -179,7 +212,7 @@ function run(n, env, io) {
  */
 export function evalGraph(g, opts = {}) {
   const io = { out: [], show: showValue, truthy };
-  const env = new Env(null);
+  const env = new Env(null, { region: true });
   for (const [k, v] of Object.entries(opts.globals ?? {})) env.define(k, v);
   let value = null;
   try {

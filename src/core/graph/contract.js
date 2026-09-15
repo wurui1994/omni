@@ -112,13 +112,13 @@ function jsExpr(x) {
     }
     case 'func': {
       const ps = (x.attrs.params ?? []).map(jsName).join(', ');
-      return `((${ps}) => { ${jsFnBody(x.ins.body)} })`;
+      return `((${ps}) => { ${withExits(jsFnBody(x.ins.body))} })`;
     }
     case 'call': {
       const args = (Array.isArray(x.ins.args) ? x.ins.args : x.ins.args === undefined ? [] : [x.ins.args]);
       return `${jsExpr(x.ins.fn)}(${args.map(jsExpr).join(', ')})`;
     }
-    case 'region': return `(() => { ${jsFnBody(x.ins.body)} })()`;
+    case 'region': return `(() => { ${withExits(jsFnBody(x.ins.body))} })()`;
     // 多值：js 后端落成一格数组 + 一格标记（`carry` 那一问的答案就是这一句）
     case 'values': {
       const args = (Array.isArray(x.ins.args) ? x.ins.args : [x.ins.args]).filter((y) => y !== undefined);
@@ -140,6 +140,14 @@ const asStmts = (b) => (b === undefined || b === null ? [] : Array.isArray(b) ? 
  *   2. CL 的 `(let (…) … acc)` 最后一格是 `region` —— 它 sort 是 stat，**但有值出端口**。
  * 改成读 out-ports，两门语言一起对。这就是"后端只回答问题、答案从声明来"的样子。
  */
+/**
+ * 一格 region / 函数体的出口表。**逆序 + 早退也跑**那两条由 JS 的 `finally` 给 ——
+ * 与 interp 那一侧同一条口径（eval.js 里 `runExits`）。
+ * 嵌套的那一层"最近的 region"靠 JS 的块作用域天然给：每层各自一格 `__ex`。
+ */
+const withExits = (body) => `const __ex = []; try { ${body} } finally { `
+  + 'for (let __i = __ex.length - 1; __i >= 0; __i--) __ex[__i](); }';
+
 function jsFnBody(body) {
   const list = asStmts(body);
   if (list.length === 0) return 'return null;';
@@ -160,7 +168,9 @@ function jsStmt(x) {
     case 'set': return `${jsName(x.attrs.name)} = ${jsExpr(x.ins.value)};`;
     case 'ret': return `return ${x.ins.value === undefined ? 'null' : jsExpr(x.ins.value)};`;
     case 'loop': return `while (__truthy(${jsExpr(x.ins.cond)})) { ${asStmts(x.ins.body).map(jsStmt).join(' ')} }`;
-    case 'region': return `{ ${asStmts(x.ins.body).map(jsStmt).join(' ')} }`;
+    case 'region': return `{ ${withExits(asStmts(x.ins.body).map(jsStmt).join(' '))} }`;
+    // 注册那一刻就记下动作；宿主 region 的 finally 里逆序跑（早退也经过那儿）
+    case 'scope-exit': return `__ex.push(() => { ${asStmts(x.ins.action).map(jsStmt).join(' ')} });`;
     case 'branch': {
       const t = `{ ${asStmts(x.ins.then).map(jsStmt).join(' ')} }`;
       const e = x.ins.else === undefined ? '' : ` else { ${asStmts(x.ins.else).map(jsStmt).join(' ')} }`;
@@ -171,7 +181,7 @@ function jsStmt(x) {
 }
 
 function jsLower(g) {
-  const body = asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n');
+  const body = withExits(asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n'));
   const source = `(__out, __show, __truthy, __pick) => {\n${body}\n}`;
   return {
     text: source,

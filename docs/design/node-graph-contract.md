@@ -471,7 +471,17 @@ V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
 （lua / go / CL 都是这条规矩）；`bind` 多一格附属 `keepMulti` —— 装住整格多值的那格
 临时量用它，没有它的话"`local x = f()` 只取第一格"与"装住多值"两件事分不开。
 
-下一批按 A.5 的顺序推：`scope-exit`（八个提供者已经齐了）、`record` 那一族。
+**第三批：`scope-exit` 已落地** —— 13 → 14 格，**一格节点收下八个提供者**。
+判据是第三个例子家族（`ext/go/examples/defer.go` 与 `ext/sbcl/examples/defer.lisp`，
+期望输出 `in / b / a / out`）：go 的两条 `defer` 与 CL 的嵌套 `unwind-protect`
+落**同一格节点**，三条语义全由调度器给 —— 注册那一刻记下动作、宿主 region 出口时
+**逆序**跑、**早退（return）也跑**。
+两个后端各自的落法：interp 用 `Env.exits` + `finally`，js 用每层 region 一格 `const __ex`
++ `try/finally`（"最近的那一格 region"靠 JS 的块作用域天然给）。
+
+下一批：`record` 那一族（`record-new` / `field-get` / `field-set`），
+以及把 `scope-exit` 的另外六个提供者（nim/V 的 defer、lua 的 `<close>`、mojo 的 `with`、
+freebasic 的 `Scope`、cpp 的 RAII）接上 —— G5 那条"提供者名单"要真的印出来才算数。
 
 ### A.7 附属节点（不逐个列，按挂点分七类）
 

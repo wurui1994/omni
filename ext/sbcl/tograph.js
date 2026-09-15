@@ -77,6 +77,14 @@ function toNode(x) {
       then: many(rest.slice(1)),
     });
     case 'progn': return node('region', { body: many(rest) });
+    // `(unwind-protect body cleanup…)` —— 与 go 的 defer **同一格节点**：
+    // 一格 region 装着"先注册清理、再跑 body"。CL 那七种 cleanup 都是这个形状。
+    case 'unwind-protect': return node('region', {
+      body: [
+        node('scope-exit', { action: many(rest.slice(1)) }),
+        ...many(rest.slice(0, 1)),
+      ],
+    });
     case 'let': case 'let*': {
       const binds = (asList(rest[0]) ?? []).map((b) => {
         const pair = asList(b) ?? [];

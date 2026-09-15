@@ -127,6 +127,8 @@ function toNode(x) {
       return node('ret', { value: v });
     }
     case 'expr': return toNode(kids(x)[0]);
+    // `defer f()` -> scope-exit（挂在**当前 region**上，逆序、早退也跑 —— 八家共用那一格）
+    case 'defer': return node('scope-exit', { action: many(kids(x)) });
     case 'call': {
       const [fn, args] = kids(x);
       const argNodes = args === undefined ? [] : many(kids(args));

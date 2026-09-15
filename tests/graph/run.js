@@ -48,6 +48,8 @@ const ROOT = `${HERE}../../`;
  */
 const BASICS = ['15', '120', '7', 'ok'];
 const MULTI = ['3', '7', '1 2'];
+/** defer：scope-exit 那一格 —— 逆序 + 早退也跑（八个提供者共用同一格节点） */
+const DEFER = ['in', 'b', 'a', 'out'];
 
 const CASES = [
   { name: 'chez', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/basics.ss', toGraph: chezToGraph, expect: BASICS },
@@ -62,6 +64,9 @@ const CASES = [
   // ---- 第二个家族：多值 ----
   { name: 'lua+multi', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/multi.lua', toGraph: luaToGraph, expect: MULTI },
   { name: 'go+multi', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/multi.go', toGraph: goToGraph, expect: MULTI },
+  // ---- 第三个家族：作用域出口（go 的 defer 与 CL 的 unwind-protect 同一格节点）----
+  { name: 'go+defer', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/defer.go', toGraph: goToGraph, expect: DEFER },
+  { name: 'sbcl+defer', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/defer.lisp', toGraph: sbclToGraph, expect: DEFER },
 ];
 
 const argv = process.argv.slice(2);
