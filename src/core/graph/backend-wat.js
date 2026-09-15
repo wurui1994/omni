@@ -130,23 +130,36 @@ function emitOnce(graph, retOf) {
   const mod = new Mod();
   const fns = topFuncs(items);
   let loopSeq = 0;
+  let tmpSeq = 0;
 
   const isTrue = (x) => x !== null && x !== undefined
     && ((x.lit === true) || (x.op === 'const' && x.attrs.value === true));
 
+  /** 一格临时量。**值位置的 `if` 要它** —— wasm 的 block 不带 result（见文件头那条账）。 */
+  function tmp(sc) {
+    const id = `$t${++tmpSeq}`;
+    sc.fn.taken.add(id);
+    sc.fn.locals.push(id);
+    return id;
+  }
+
   /** 条件位置：出 i32。比较那一族直接出，别的与 0 比。 */
-  function cond(x, sc) {
+  function cond(x, sc, pre) {
     if (isTrue(x)) return '(i32.const 1)';
     if (x !== null && x !== undefined && x.op === 'prim' && CMP.has(x.attrs.name)) {
       const [a, b] = asList(x.ins.args);
-      return `(${CMP.get(x.attrs.name)} ${expr(a, sc)} ${expr(b, sc)})`;
+      return `(${CMP.get(x.attrs.name)} ${expr(a, sc, pre)} ${expr(b, sc, pre)})`;
     }
-    return `(i64.ne ${expr(x, sc)} (i64.const 0))`;
+    return `(i64.ne ${expr(x, sc, pre)} (i64.const 0))`;
   }
 
-  /** 值位置：出 i64。**只有整数**（字符串 / 记录 / 列表在 `can` 那儿就挡住了）。 */
-  function expr(x, sc) {
+  /**
+   * 值位置：出 i64。**只有整数**（字符串 / 记录 / 列表在 `can` 那儿就挡住了）。
+   * 要先跑的语句推到 `pre` 里 —— 值位置的 `if` 就是靠这一格落地的。
+   */
+  function expr(x, sc, pre) {
     if (x === null || x === undefined) return '(i64.const 0)';
+    if (Array.isArray(x)) return valueOf(x, sc, pre);
     if (x.lit !== undefined) return litOf(x.lit);
     switch (x.op) {
       case 'const': return litOf(x.attrs.value);
@@ -161,16 +174,42 @@ function emitOnce(graph, retOf) {
       case 'prim': {
         const args = asList(x.ins.args);
         const op = ARITH.get(x.attrs.name);
-        if (op !== undefined) return `(${op} ${expr(args[0], sc)} ${expr(args[1], sc)})`;
+        if (op !== undefined) return `(${op} ${expr(args[0], sc, pre)} ${expr(args[1], sc, pre)})`;
         if (CMP.has(x.attrs.name)) {
           // 比较出 i32，要当值用得补一格符号扩展
-          return `(i64.extend_i32_s ${cond(x, sc)})`;
+          return `(i64.extend_i32_s ${cond(x, sc, pre)})`;
         }
         throw new Gap(`这格内建还没接：${x.attrs.name}`);
       }
-      case 'call': return callOf(x, sc);
+      case 'call': return callOf(x, sc, pre);
+      // **值位置的 `if`**：一格临时量 + 两支各赋值。wasm 的 block 不带 result，
+      // 所以"表达式位置的 if"不是接不住，是要**先物化成一格临时量** ——
+      // 而临时量本来就是调度器算出来的四样之一（ADR-0033 §3.5）。
+      case 'branch': {
+        const t = tmp(sc);
+        const c = cond(x.ins.cond, sc, pre);
+        const a = []; const av = valueOf(x.ins.then, new Scope(sc.fn, sc), a);
+        const b = []; const bv = valueOf(x.ins.else, new Scope(sc.fn, sc), b);
+        pre.push(`(if ${c} (then ${[...a, `(local.set ${t} ${av})`].join(' ')})`
+          + ` (else ${[...b, `(local.set ${t} ${bv})`].join(' ')}))`);
+        return `(local.get ${t})`;
+      }
+      // `region` 出值：前面几条当语句，最后一格是值（CL 的 `(let (…) … acc)`）
+      case 'region': return valueOf(x.ins.body, new Scope(sc.fn, sc), pre);
       default: throw why(x.op, '值位置');
     }
+  }
+
+  /**
+   * 一串东西的**值**：前面几条当语句，最后一格出值。
+   * "最后一格有值出端口就是值"这条规矩与 js 后端的 `jsFnBody` **同一条** ——
+   * 判据是出端口那一栏，不是 sort（那条被矩阵抓出来过两次）。
+   */
+  function valueOf(x, sc, pre) {
+    const list = asList(x);
+    if (list.length === 0) return '(i64.const 0)';
+    for (const y of list.slice(0, -1)) pre.push(...stmt(y, sc, sc.fn));
+    return expr(list[list.length - 1], sc, pre);
   }
 
   function litOf(v) {
@@ -181,11 +220,11 @@ function emitOnce(graph, retOf) {
     throw new Gap(`这格字面量还没接：${JSON.stringify(v)}`);
   }
 
-  function callOf(x, sc) {
+  function callOf(x, sc, pre) {
     const fn = x.ins.fn;
     const name = fn !== null && fn !== undefined && fn.op === 'ref' ? fn.attrs.name : null;
     if (name === null || !fns.has(name)) throw new Gap('间接调用（函数当值）还没接');
-    const args = asList(x.ins.args).map((a) => expr(a, sc));
+    const args = asList(x.ins.args).map((a) => expr(a, sc, pre));
     return `(call ${fns.get(name)}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
   }
 
@@ -195,25 +234,27 @@ function emitOnce(graph, retOf) {
     if (x === null || x === undefined) return [];
     if (Array.isArray(x)) return stmts(x, sc, f);
     if (x.lit !== undefined) return [];
+    const pre = [];
     switch (x.op) {
       case 'bind': {
         if (x.ins.init?.op === 'func') throw new Gap('嵌套的函数（闭包）还没接');
-        const id = sc.declare(x.attrs.name);
-        return [`(local.set ${id} ${expr(x.ins.init, sc)})`];
+        const v = expr(x.ins.init, sc, pre);
+        const id = sc.declare(x.attrs.name);      // 先算右值再声明：`local x = x` 才对
+        return [...pre, `(local.set ${id} ${v})`];
       }
       case 'set': {
         const id = sc.lookup(x.attrs.name);
         if (id === null) throw new Gap(`赋值到没绑过的名字：${x.attrs.name}`);
-        return [`(local.set ${id} ${expr(x.ins.value, sc)})`];
+        const v = expr(x.ins.value, sc, pre);
+        return [...pre, `(local.set ${id} ${v})`];
       }
       case 'region': return stmts(x.ins.body, new Scope(f, sc), f);
       case 'branch': {
-        if (x.ins.else === undefined) {
-          return [`(if ${cond(x.ins.cond, sc)} (then ${stmts(x.ins.then, new Scope(f, sc), f).join(' ')}))`];
-        }
-        return [`(if ${cond(x.ins.cond, sc)}`
-          + ` (then ${stmts(x.ins.then, new Scope(f, sc), f).join(' ')})`
-          + ` (else ${stmts(x.ins.else, new Scope(f, sc), f).join(' ')}))`];
+        const c = cond(x.ins.cond, sc, pre);
+        const t = stmts(x.ins.then, new Scope(f, sc), f).join(' ');
+        if (x.ins.else === undefined) return [...pre, `(if ${c} (then ${t}))`];
+        const e = stmts(x.ins.else, new Scope(f, sc), f).join(' ');
+        return [...pre, `(if ${c} (then ${t}) (else ${e}))`];
       }
       case 'loop': {
         // while 的形状：`(loop $L (if cond (then 体 步进 (br $L))))`
@@ -222,27 +263,54 @@ function emitOnce(graph, retOf) {
         const inner = new Scope(f, sc);
         const body = stmts(x.ins.body, inner, f).join(' ');
         const post = stmts(x.ins.post, inner, f).join(' ');
-        return [`(loop ${lab} (if ${cond(x.ins.cond, sc)} (then ${body} ${post} (br ${lab}))))`];
+        const c = cond(x.ins.cond, sc, pre);
+        // 条件里若要临时量，那几条得在**每轮**都跑一遍，所以它们进 loop 里面
+        return [`(loop ${lab} ${pre.join(' ')} (if ${c} (then ${body} ${post} (br ${lab}))))`];
       }
       case 'ret': {
         if (x.ins.value === undefined) return ['(return)'];
+        const v = expr(x.ins.value, sc, pre);
         f.ret = true;
-        return [`(return ${expr(x.ins.value, sc)})`];
+        return [...pre, `(return ${v})`];
       }
       case 'prim': {
-        if (x.attrs.name !== 'print') return [`(drop ${expr(x, sc)})`];
+        if (x.attrs.name !== 'print') {
+          const v = expr(x, sc, pre);
+          return [...pre, `(drop ${v})`];
+        }
         const args = asList(x.ins.args);
         if (args.length !== 1) throw new Gap('打印只接一格实参（多格要先有字符串拼接）');
-        return [`(call $print ${expr(args[0], sc)})`];
+        const v = expr(args[0], sc, pre);
+        return [...pre, `(call $print ${v})`];
       }
       case 'call': {
         const fn = x.ins.fn;
         const name = fn?.op === 'ref' ? fn.attrs.name : null;
-        const call = callOf(x, sc);
-        return [retOf.get(name) === true ? `(drop ${call})` : call];
+        const call = callOf(x, sc, pre);
+        return [...pre, retOf.get(name) === true ? `(drop ${call})` : call];
       }
       default: throw why(x.op, '语句位置');
     }
+  }
+
+  /**
+   * 一格函数体。**最后一格如果出值，它就是返回值** —— 与 js 后端同一条规矩。
+   * 两处例外要挑出来：`print`（wasm 里它不出值）与"调用一格不出值的函数"。
+   */
+  function fnBody(bodyIns, sc, f) {
+    const list = asList(bodyIns);
+    if (list.length === 0) return [];
+    const head = list.slice(0, -1).flatMap((y) => stmt(y, sc, f));
+    const last = list[list.length - 1];
+    const voidish = last?.op === 'prim' ? last.attrs.name === 'print'
+      : (last?.op === 'call' ? retOf.get(last.ins.fn?.attrs?.name) !== true : false);
+    const hasValue = last !== null && last !== undefined && !voidish
+      && (last.lit !== undefined || (last.op !== undefined && (NODES.get(last.op)?.outs.length ?? 0) > 0));
+    if (!hasValue) return [...head, ...stmt(last, sc, f)];
+    const pre = [];
+    const v = expr(last, sc, pre);
+    f.ret = true;
+    return [...head, ...pre, `(return ${v})`];
   }
 
   // ---- 走一遍顶层：函数各成一格 wat func，别的语句进 `$__entry` --------------
@@ -255,7 +323,7 @@ function emitOnce(graph, retOf) {
       const f = mod.fn(fns.get(it.attrs.name), params);
       const sc = new Scope(f);
       params.forEach((p) => sc.names.set(p, wname(p)));
-      f.body = stmts(fnode.ins.body, sc, f);
+      f.body = fnBody(fnode.ins.body, sc, f);
       continue;
     }
     entry.body.push(...stmt(it, entryScope, entry));

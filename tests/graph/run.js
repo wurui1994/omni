@@ -108,6 +108,9 @@ const CASES = [
   { name: 'mojo+intmath', grammar: 'ext/mojo/mojo.grammar', file: 'ext/mojo/examples/intmath.mojo', toGraph: mojoToGraph, expect: INTMATH },
   { name: 'awk+intmath', grammar: 'ext/awk/awk.grammar', file: 'ext/awk/examples/intmath.awk', toGraph: awkToGraph, expect: INTMATH },
   { name: 'freebasic+intmath', grammar: 'ext/freebasic/freebasic.grammar', file: 'ext/freebasic/examples/intmath.bas', toGraph: fbToGraph, expect: INTMATH },
+  // 两门 Lisp 压的是"`if` 出值"那一格（wasm 那边物化成一格临时量）
+  { name: 'chez+intmath', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/intmath.ss', toGraph: chezToGraph, expect: INTMATH },
+  { name: 'sbcl+intmath', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/intmath.lisp', toGraph: sbclToGraph, expect: INTMATH },
 ];
 
 /**
