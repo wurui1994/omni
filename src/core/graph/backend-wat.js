@@ -13,15 +13,26 @@
 //
 // ## 能接的子集（量出来的，见设计文档 §9 那三条）
 //
-//   整数（i64）· 函数 + 调用 + return · 语句位置的 if · while（含 post 步进）· 打印整数
+//   整数（i64）· 函数 + 调用 + return · if（语句位置与**值位置**都行）· while（含 post 步进）
+//   · 打印整数 · **记录与列表**（线性内存 + 一格 bump 分配器）
+//
+// ## 布局（没有类型的那一层怎么排内存）
+//
+//   * 一块 `(memory 1)` + 一格 `(global $hp (mut i32))`，从 8 号地址起（0 留空）。
+//   * 值一律 8 字节（i64）。地址也装在 i64 里，取内存时 `i32.wrap_i64` ——
+//     那一格转换就是"wasm 有线性内存但没有原生指针"的样子。
+//   * **字段名 -> 槽位是一张管整个模块的表**：图这一层没有类型，`field-get` 只拿到名字，
+//     所以 `x` 在任何记录里都落同一格偏移，记录按"它用到的最大槽位"分配。
+//     浪费空间但不会错 —— 真正按类型排的布局要等 `carry` 那一问有类型（附录 A.5）。
+//   * 列表：**长度存在偏移 0，元素从 8 起**。`index-get` 的边界检查因此有地方读
+//     （越界落 `unreachable` —— 那是 `index-get` 与 `field-get` 分两格的理由之一）。
 //
 // ## 接不住的，有名有姓
 //
-//   * 字符串与记录 / 列表 —— 要线性内存里的布局，这一批没做。
-//   * 表达式位置的 `if`（`branch` 出值）—— OIR 那侧 block 不带 result。
+//   * 字符串 —— 宿主面只有 `print_i64` 这一族（打印字符串要先有 `print_str` 那格导入）。
 //   * `loop-exit`（break / continue）—— **墙在 OIR**：`br` 跳外层 block 报
 //     "OIR has no labeled break"。这一条是量出来的，不是猜的。
-//   * 闭包（`func` 当值用）· 多值（`values` / `pick`）· `scope-exit`。
+//   * 闭包（`func` 当值用 / 嵌套 `func`）· 多值（`values` / `pick`）· `scope-exit`。
 
 import { NODES } from './nodes.js';
 // 判据那一侧：出来的文本交给**另一个前端**读、用 MIR 的解释器真跑
@@ -35,14 +46,11 @@ const CAN = new Map([
   ['const', true], ['ref', true], ['bind', true], ['set', true],
   ['call', true], ['prim', true], ['branch', true], ['loop', true],
   ['region', true], ['func', true], ['ret', true],
+  // 记录与列表在线性内存里（一格 bump 分配器 + 一张字段偏移表，见文件头"布局"那一段）
+  ['record-new', true], ['field-get', true], ['field-set', true],
+  ['list-new', true], ['index-get', true], ['index-set', true],
   ['values', 'wasm 没有多值出端口的表示（要先定 carry 那一问的答案）'],
   ['pick', 'wasm 没有多值出端口的表示'],
-  ['record-new', 'wasm 只有线性内存，记录要先定布局（field 的偏移量）'],
-  ['field-get', 'wasm 只有线性内存，记录要先定布局'],
-  ['field-set', 'wasm 只有线性内存，记录要先定布局'],
-  ['list-new', 'wasm 只有线性内存，列表要先定布局与长度的存法'],
-  ['index-get', 'wasm 只有线性内存，列表要先定布局'],
-  ['index-set', 'wasm 只有线性内存，列表要先定布局'],
   ['scope-exit', 'wasm 没有 unwind：出口动作要先把 region 的出口显式化'],
   ['loop-exit', 'OIR 还没有带标签的 break（br 跳外层 block 当场报）—— 墙在 OIR 不在 wasm'],
 ]);
@@ -131,6 +139,35 @@ function emitOnce(graph, retOf) {
   const fns = topFuncs(items);
   let loopSeq = 0;
   let tmpSeq = 0;
+  let needMem = false;
+  /**
+   * **字段名 -> 槽位**（一张表管整个模块）。图这一层没有类型，`field-get` 只拿到名字，
+   * 所以 `x` 在任何记录里都落同一格偏移；记录按"它用到的最大槽位"分配。
+   * 浪费空间但不会错 —— 真正按类型排的布局要等 `carry` 那一问有类型（附录 A.5）。
+   */
+  const slots = new Map();
+  const slotOf = (name) => {
+    if (!slots.has(name)) slots.set(name, slots.size);
+    return slots.get(name);
+  };
+  /** 地址：值一律 i64，取内存要 i32 —— 这一格转换就是"wasm 有内存没有指针"的样子。 */
+  const addr = (e) => `(i32.wrap_i64 ${e})`;
+
+  /** 一格 bump 分配：`$hp` 往前推 n 字节，返回装着地址的那格临时量。 */
+  function alloc(bytes, sc, pre) {
+    needMem = true;
+    const a = tmp(sc);
+    pre.push(`(local.set ${a} (i64.extend_i32_u (global.get $hp)))`);
+    pre.push(`(global.set $hp (i32.add (global.get $hp) (i32.const ${bytes})))`);
+    return a;
+  }
+
+  /** 下标的边界检查（`index-get` 与 `field-get` 分两格的理由之一，就是这一句）。 */
+  function guard(o, i, pre) {
+    pre.push(`(if (i64.lt_s (local.get ${i}) (i64.const 0)) (then (unreachable)))`);
+    pre.push(`(if (i64.ge_s (local.get ${i}) (i64.load ${addr(`(local.get ${o})`)}))`
+      + ' (then (unreachable)))');
+  }
 
   const isTrue = (x) => x !== null && x !== undefined
     && ((x.lit === true) || (x.op === 'const' && x.attrs.value === true));
@@ -196,6 +233,42 @@ function emitOnce(graph, retOf) {
       }
       // `region` 出值：前面几条当语句，最后一格是值（CL 的 `(let (…) … acc)`）
       case 'region': return valueOf(x.ins.body, new Scope(sc.fn, sc), pre);
+      // ---- 记录与列表：**线性内存 + 一格 bump 分配器**（wasm 有内存没有指针）----
+      case 'record-new': {
+        const names = x.attrs.names ?? [];
+        const vals = asList(x.ins.fields);
+        const size = 8 * (names.length === 0 ? 1 : 1 + Math.max(...names.map(slotOf)));
+        const a = alloc(size, sc, pre);
+        names.forEach((k, i) => {
+          const v = expr(vals[i], sc, pre);
+          pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * slotOf(k)})) ${v})`);
+        });
+        return `(local.get ${a})`;
+      }
+      case 'field-get': {
+        needMem = true;
+        const o = expr(x.ins.obj, sc, pre);
+        return `(i64.load (i32.add ${addr(o)} (i32.const ${8 * slotOf(x.attrs.field)})))`;
+      }
+      // 列表：**长度存在偏移 0，元素从 8 起** —— 边界检查因此有地方读
+      case 'list-new': {
+        const items = asList(x.ins.items);
+        const a = alloc(8 * (items.length + 1), sc, pre);
+        pre.push(`(i64.store ${addr(`(local.get ${a})`)} (i64.const ${items.length}))`);
+        items.forEach((y, i) => {
+          const v = expr(y, sc, pre);
+          pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * (i + 1)})) ${v})`);
+        });
+        return `(local.get ${a})`;
+      }
+      case 'index-get': {
+        needMem = true;
+        const o = tmp(sc); pre.push(`(local.set ${o} ${expr(x.ins.obj, sc, pre)})`);
+        const i = tmp(sc); pre.push(`(local.set ${i} ${expr(x.ins.index, sc, pre)})`);
+        guard(o, i, pre);
+        return `(i64.load (i32.add ${addr(`(local.get ${o})`)}`
+          + ` (i32.add (i32.const 8) ${addr(`(i64.mul (local.get ${i}) (i64.const 8))`)})))`;
+      }
       default: throw why(x.op, '值位置');
     }
   }
@@ -249,6 +322,21 @@ function emitOnce(graph, retOf) {
         return [...pre, `(local.set ${id} ${v})`];
       }
       case 'region': return stmts(x.ins.body, new Scope(f, sc), f);
+      case 'field-set': {
+        needMem = true;
+        const o = expr(x.ins.obj, sc, pre);
+        const v = expr(x.ins.value, sc, pre);
+        return [...pre, `(i64.store (i32.add ${addr(o)} (i32.const ${8 * slotOf(x.attrs.field)})) ${v})`];
+      }
+      case 'index-set': {
+        needMem = true;
+        const o = tmp(sc); pre.push(`(local.set ${o} ${expr(x.ins.obj, sc, pre)})`);
+        const i = tmp(sc); pre.push(`(local.set ${i} ${expr(x.ins.index, sc, pre)})`);
+        guard(o, i, pre);
+        const v = expr(x.ins.value, sc, pre);
+        return [...pre, `(i64.store (i32.add ${addr(`(local.get ${o})`)}`
+          + ` (i32.add (i32.const 8) ${addr(`(i64.mul (local.get ${i}) (i64.const 8))`)})) ${v})`];
+      }
       case 'branch': {
         const c = cond(x.ins.cond, sc, pre);
         const t = stmts(x.ins.then, new Scope(f, sc), f).join(' ');
@@ -330,6 +418,10 @@ function emitOnce(graph, retOf) {
   }
 
   const lines = ['(module', '  (import "omni" "print_i64" (func $print (param i64)))'];
+  if (needMem) {
+    // 一块内存 + 一格堆指针。**从 8 起**：0 号地址留空，好让"没初始化的地址"一眼看出来
+    lines.push('  (memory 1)', '  (global $hp (mut i32) (i32.const 8))');
+  }
   for (const f of mod.fns.values()) {
     const ps = f.params.map((p) => `(param ${wname(p)} i64)`).join(' ');
     const res = f.ret ? ' (result i64)' : '';
