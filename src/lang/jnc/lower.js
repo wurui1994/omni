@@ -24,7 +24,7 @@ import { scanAggs, scanFns, memberInit, sigOf } from './module-scan.js';
 import { readBodyMembers } from './agg.js';
 import { structLine, hasStatements as hasStmts } from './emit-agg.js';
 /* `variant_t` 那格结构体是合成出来的（用到才发、发在最前头）—— 名字与那一行的家在 runtime。 */
-import { VARIANT, variantStruct } from './runtime.js';
+import { VARIANT, variantStruct, mcFireName, mcFireShell } from './runtime.js';
 import {
   globalLines, addrTaken, liftable, liftedType, arrayFromCurly, staticCtorFlag,
 } from './emit-global.js';
@@ -675,6 +675,21 @@ export function lowerJncRules(tree0, diags, opts = {}) {
     });
     const ctx = makeCtx(e);
     const out = [];
+    /**
+     * **bindable 那格生成的事件要在构造里建单子**（第二百四十八刀，81-propbindmem.jnc）：
+     * 成员那一格事件是**对象里的一格字段**（`Property::createOnChanged` 的头一支，
+     * jnc_ct_Property.cpp:131-134：`m_parentType` 非空就 `createField`），而"一格空多播"在方言
+     * 那一侧是 `(anew (arr (fnty () void)) (int 0))` —— 少这一句，第一次通知就踩一个空引用
+     * （量出来正是 `omni: runtime error: null reference`）。
+     * 两种写法一起收：`int bindable m_state;` 与 `int bindable property m_p;`。
+     */
+    for (const m of a.members) {
+      if (m.name === null || m.type === null) continue;
+      if (!(m.type.mods ?? []).includes('bindable')) continue;
+      if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr' && m.shape !== 'prop') continue;
+      const mcT = emitType({ k: 'mc', params: [] }, 'value', tyc);
+      out.push(`${pad}(pstore (pfield (var $this) ${cls}$${m.name}$m_onChanged) (anew ${mcT} (int 0)))`);
+    }
     for (const m of a.members) {
       if (m.name === null || m.type === null) continue;
       if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr') continue;
@@ -1015,6 +1030,59 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   };
 
   /**
+   * **bindable 的存值器也是生成出来的**（第二百四十八刀，81-propbindmem.jnc）：
+   * `int bindable m_state;` 里取/存两格都是编译器实现的。存值器里那一句 `!=` 是
+   * **同值不通知**（`Property::compileAutoSetter`，jnc_ct_Property.cpp:788-822）——
+   * 这一条是可观测的（81-propbindmem.jnc 里同一个值写第二遍，一个听众都不叫）：
+   *
+   *   (fn S$m_state$set (($this (ptr S)) (x int)) void
+   *     (if (bin "!=" (pload (pfield (var $this) S$m_state$m_value)) (var x)) (do
+   *       (pstore (pfield (var $this) S$m_state$m_value) (var x))
+   *       (expr (call jnc$mc_fire (pload (pfield (var $this) S$m_state$m_onChanged)))))))
+   *
+   * 只有 `bindable` 那一格生成：光写 `autoget` 的属性在 jancy 那儿是**只读**的
+   * （prop_autoget.rst），写它照旧报"没有存值器"。人写了存值器的那一格不动（`methods.has`）。
+   * 模块级那一族（`bindable int g_d;`，70-binddata.jnc）还没接 —— 那一格的存储不是字段。
+   */
+  const genAutoset = (emitName, type, selfInfo) => {
+    if (!(type?.mods ?? []).includes('bindable')) return false;
+    const key = `${emitName}$set`;
+    if (methods.has(key) || fns.has(key)) return false;
+    if (selfInfo === null) return false;                   // 模块级那一族由它自己那一处记账
+    const r = resolveType({ ...type, shape: 'data' }, env);
+    if (r.type === null) { acct(`属性 '${emitName}' 生成的存值器：${r.why}`); return false; }
+    const ty = r.type;
+    if (!['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr', 'class'].includes(ty.k)) {
+      acct(`属性 '${emitName}' 生成的存值器落在 ${ty.k} 上（写法不是一句 pstore）还没接`); return false;
+    }
+    const mcTy = { k: 'mc', params: [] };
+    const fire = mcFireName(mcTy);
+    if (!helperBox.has(fire)) { helperBox.add(fire); decls.push(mcFireShell(mcTy)); }
+    const cell = `(pfield (var $this) ${emitName}$m_value)`;
+    const mc = `(pfield (var $this) ${emitName}$m_onChanged)`;
+    decls.push([
+      `  (fn ${key} (($this (ptr ${clsRoot(selfInfo.agg)})) (x ${emitType(ty, 'value', tyc)})) void`,
+      `    (if (bin "!=" (pload ${cell}) (var x)) (do`,
+      `      (pstore ${cell} (var x))`,
+      `      (expr (call ${fire} (pload ${mc}))))))`,
+    ].join('\n'));
+    methods.set(key, {
+      params: [{ ...type, shape: 'data' }],
+      defaults: [null],
+      ret: null,
+      retDecl: null,
+      emit: key,
+      ec: false,
+      stat: false,
+      owner: emitName,
+      name: 'set',
+      node: null,
+      hasBody: false,
+    });
+    return true;
+  };
+
+  /**
    * **`autoget` 的取值器是生成出来的**（prop_autoget.rst:15-17："取值器不用写，编译器给一格
    * 存储 `m_value`；写了取值器就用写的那个"）。所以这一层只做一件事：**没写取值器**的那一格
    * 生成一格 `(fn <属性>$get … (ret <读那格存储>))`。
@@ -1163,16 +1231,23 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   for (const a of aggs) {
     const kind = a.word === 'class' || a.word === 'opaque class' ? 'class' : 'struct';
     for (const m of a.members) {
-      if (m.shape !== 'prop' || m.name === null) continue;
+      if (m.name === null) continue;
+      /* **bindable / autoget 的 data** 与写全了的属性走同一条路（第二百四十八刀）：扫那一遍
+         已经把它记进属性表了，差别只在"它没有那对花括号"——没有取/存两个体要发。 */
+      const dataProp = (m.shape === 'data' || m.shape === 'array' || m.shape === 'fnptr')
+        && ((m.type?.mods ?? []).includes('bindable') || (m.type?.mods ?? []).includes('autoget'));
+      if (m.shape !== 'prop' && !dataProp) continue;
       const emitName = `${a.emitName}$${m.name}`;
       const self0 = { agg: a.emitName, kind, emit: kind === 'class' ? clsRoot(a.emitName) : a.emitName };
       /* 扫那一遍已经把体里的字段收进 `aggProps[…].store` 了 —— 这儿直接用它。 */
       const pr1 = aggProps.get(a.emitName)?.get(m.name);
       const store = pr1?.store ?? new Map();
-      if (emitPropBody(m.at, emitName, self0, null, store, true) === true) propDone.add(m.at);
+      if (!dataProp && emitPropBody(m.at, emitName, self0, null, store, true) === true) propDone.add(m.at);
       /* 那对花括号里没写取值器（或压根没有花括号）时，`autoget` 那一格自己生成一个
          —— `autoget` 写在属性上、还是写在体里那格存储上，两种写法都在这儿收（`pr1.auto`）。 */
       genAutoget(m.name, emitName, m.type, self0, pr1?.auto ?? null);
+      /* `bindable` 那一格的存值器同理是生成的（同值不通知）—— 人写了的不动。 */
+      genAutoset(emitName, m.type, self0);
     }
   }
   for (const { it, ns } of items) {

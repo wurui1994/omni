@@ -345,6 +345,16 @@ export function scanAggs(tree, env, ovl = new Map()) {
              它是一格真字段，可当普通字段收进这张表就把那一步**静静地**丢了。所以它进的是
              下面那张"路径"表（`be`：一条路 + "要反字节序"），读写两侧照它算。 */
           if ((m.type.mods ?? []).includes('bigendian')) { be0.set(m.name, { steps: [m.name], type: m.type, be: true }); continue; }
+          /**
+           * **bindable / autoget 的 data 不是一格字段**（第二百四十八刀，81-propbindmem.jnc）：
+           * `int bindable m_state;` 是一格"整个由编译器实现的属性"（samples/jnc/34_Bindable
+           * Properties.jnc:87-90 那句 "bindable data is a wholly compiler-implemented property"）
+           * —— 对象里那两格叫 `<东家>$<名字>$m_value` 与 `$m_onChanged`（发结构体那一层早就照
+           * 这个发了，emit-agg.js:345）。收进字段表就等于凭空多出一格叫 `m_state` 的字段：
+           * 读写落成 `(pfield … m_state)`，而结构体里压根没有它 —— 这一层于是**一句账都不记地**
+           * 发出一段引不着的码（下游那格检查器把它顶回来）。它那一格在下面 `ps` 那张属性表里。
+           */
+          if ((m.type.mods ?? []).includes('bindable') || (m.type.mods ?? []).includes('autoget')) continue;
           fs.set(m.name, m.type);
         }
         fields.set(emitName, fs);
@@ -381,6 +391,9 @@ export function scanAggs(tree, env, ovl = new Map()) {
               if (!be0.has(m.name)) be0.set(m.name, { steps: [m.name], type: m.type, be: true });
               continue;
             }
+            /* **bindable / autoget 的 data 不是字段**（与上头那一遍同一条界，第二百四十八刀）：
+               少这一句，它又被这一遍塞回字段表里，读写照旧落成引不着的 `(pfield … m_state)`。 */
+            if ((m.type.mods ?? []).includes('bindable') || (m.type.mods ?? []).includes('autoget')) continue;
             fs.set(m.name, m.type);
           }
         };
@@ -494,6 +507,25 @@ export function scanAggs(tree, env, ovl = new Map()) {
               name: m.name, owner: emitName, emit: `${emitName}$${m.name}`, type: m.type, at: m.at,
               store: propStore,
               auto,
+            });
+            continue;
+          }
+          /**
+           * **bindable / autoget 的 data 也是一格属性**（第二百四十八刀，81-propbindmem.jnc）：
+           * 取/存两格都是**生成**出来的（`Property::createOnChanged` 与 `compileAutoSetter`），
+           * 存储是 `<东家>$<名字>$m_value`（bindable 还多一格 `$m_onChanged`）。所以这儿把它
+           * 记进属性表 —— 与写全了 `int autoget bindable property m_p;` 那一格进的是同一张表，
+           * 往下（读写、`bindingof`、生成取/存）一个字都不用分开写。
+           */
+          if ((m.shape === 'data' || m.shape === 'array' || m.shape === 'fnptr')
+            && ((m.type.mods ?? []).includes('bindable') || (m.type.mods ?? []).includes('autoget'))) {
+            const propStore = new Map();
+            propStore.set('m_value', m.type);
+            ps.set(m.name, {
+              name: m.name, owner: emitName, emit: `${emitName}$${m.name}`, type: m.type, at: m.at,
+              store: propStore,
+              auto: m.type,
+              data: true,
             });
             continue;
           }

@@ -1318,9 +1318,30 @@ export function makeFnEnv(o) {
      */
     if (h === 'bindingof') {
       const inner = nm2.arg;
+      const ty0 = { k: 'mc', params: [] };
+      /**
+       * **`bindingof(x.p)`**（第二百四十八刀，81-propbindmem.jnc）：成员属性那一格生成的事件是
+       * **对象里的一格字段**（`Property::createOnChanged` 的头一支）—— 所以先求出左边那个对象，
+       * 再取那一格。裸写属性名（下面那一支）是它的特例：左边就是 `this`。
+       */
+      if (headOf(inner) === 'field' || headOf(inner) === 'ptr-field') {
+        const f0 = named(inner) ?? {};
+        const pn = String(f0.name?.value ?? '');
+        const ob = objBase(f0.obj);
+        if (ob === null) return null;                      // 账已经记过
+        const agg0 = aggBehind(ob.type);
+        if (agg0 === null) {
+          acct(`bindingof('${pn}')：'.' 的左边不是结构体/类（${ob.type?.k ?? '?'}）`); return null;
+        }
+        const pr0 = aggProps.get(agg0)?.get(pn);
+        if (pr0 === undefined) { acct(`bindingof('${pn}')：'${agg0}' 上查不着那格属性`); return null; }
+        if (!(pr0.type?.mods ?? []).includes('bindable')) {
+          acct(`bindingof('${pn}')：那格属性不是 bindable（没有生成的事件）`); return null;
+        }
+        return { shape: 'ptr', code: `(pfield ${ob.code} ${pr0.emit}$m_onChanged)`, type: ty0 };
+      }
       const key0 = headOf(inner) === 'name' ? String(named(inner)?.text?.value ?? '') : null;
       if (key0 === null) { acct('bindingof 里头不是一格名字'); return null; }
-      const ty0 = { k: 'mc', params: [] };
       const gp = gProps.get(key0);
       if (gp !== undefined) {
         if (!(gp.type?.mods ?? []).includes('bindable')) {
