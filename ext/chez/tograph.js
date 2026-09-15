@@ -10,7 +10,7 @@
 
 import { node, lit, program } from '../../src/core/graph/graph.js';
 import {
-  head, kids, text, symName, asList, branchOf,
+  head, kids, text, symName, asList, branchOf, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 // 走 datum 树的那几个小函数（`head` / `kids` / `text` / `symName` / `asList`）
@@ -92,6 +92,11 @@ function toNode(x) {
       return node('region', { body: [...binds, ...many(rest.slice(1))] });
     }
     // 没有 `while`：Scheme 的循环是递归。`loop` 那一格留给 lua / go / freebasic 用。
+    // 向量那三样**不是调用**：它们落 `list-new` / `index-get` / `index-set`
+    //（与 `display` 落 `prim print` 同一条 —— 写成什么样是语法的事）。
+    case 'vector': return listNew(many(rest));
+    case 'vector-ref': return indexGet(toNode(rest[0]), toNode(rest[1]));
+    case 'vector-set!': return indexSet(toNode(rest[0]), toNode(rest[1]), toNode(rest[2]));
     case 'newline': return node('prim', { args: [lit('')] }, { name: 'print' });
     default: break;
   }

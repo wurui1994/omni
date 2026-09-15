@@ -84,6 +84,11 @@ const CASES = [
   { name: 'lua+index', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/index.lua', toGraph: luaToGraph, expect: INDEX },
   { name: 'vlang+index', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/index.v', toGraph: vlangToGraph, expect: INDEX },
   { name: 'nim+index', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/index.nim', toGraph: nimToGraph, expect: INDEX },
+  // 同一个家族再加三门：Lisp 的向量（`vector` / `vector-ref` / `aref` / `setf` 位置）
+  // 与 mojo 的 `[…]` —— **七个提供者**落同一格
+  { name: 'chez+index', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/index.ss', toGraph: chezToGraph, expect: INDEX },
+  { name: 'sbcl+index', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/index.lisp', toGraph: sbclToGraph, expect: INDEX },
+  { name: 'mojo+index', grammar: 'ext/mojo/mojo.grammar', file: 'ext/mojo/examples/index.mojo', toGraph: mojoToGraph, expect: INDEX },
 ];
 
 const argv = process.argv.slice(2);

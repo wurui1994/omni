@@ -487,7 +487,7 @@ V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
  8 机器  loop / set          7 机器  region / ret
  4 机器  scope-exit                       go nim sbcl vlang
  4 机器  record-new / field-get / field-set  go lua nim vlang
- 4 机器  list-new / index-get / index-set    go lua nim vlang
+ 7 机器  list-new / index-get / index-set    chez go lua mojo nim sbcl vlang
  2 能力  values / pick       go lua
 ```
 
@@ -531,6 +531,14 @@ go 的 map 读可能 `allocates`、V 的返回 option，效应那一栏不同就
 下一批：map / dict 那一族（效应要先对表），以及 `scope-exit` 还欠的四个提供者
 （lua 的 `<close>`、mojo 的 `with`、freebasic 的 `Scope`、cpp 的 RAII）——
 这四个都要先有"方法调用 / 析构"那台机器，不是这一批能硬凑的。
+
+**同一个家族又加了三门（七个提供者）**：Scheme 的 `(vector …)` / `vector-ref` /
+`vector-set!`、CL 的 `vector` / `aref` / **`setf` 的广义位置**、mojo 的 `[…]` 与 `xs[i]`。
+这三门加进来一行新节点都没有 —— 这是"加语言不加节点"最干净的一次：
+两门 Lisp 那三样写起来像函数调用（`(vector-ref xs 0)`），落到的却是同一格 `index-get`，
+与 `display` 落 `prim print` 是同一条纪律（**写成什么样是语法的事**）。
+CL 的 `(setf (aref xs 1) 5)` 值得单记一笔：左边是**一格形式**而不是名字，
+而它落的正是 go 的 `xs[1] = 5` 那一格 —— 广义位置不是新节点，是"左边那格是什么"的事。
 
 ### A.7 附属节点（不逐个列，按挂点分七类）
 

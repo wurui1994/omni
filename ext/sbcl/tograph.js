@@ -13,7 +13,7 @@ import {
   node, lit, program, bin,
 } from '../../src/core/graph/graph.js';
 import {
-  head, kids, text, symName, asList, counted, branchOf,
+  head, kids, text, symName, asList, counted, branchOf, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 // 走 datum 树的那几个小函数与 chez **共用一份**（fromtree.js）—— 见那边的注释。
@@ -59,7 +59,19 @@ function toNode(x) {
       const params = (asList(rest[0]) ?? []).map((p) => symName(p));
       return node('func', { body: many(rest.slice(1)) }, { params });
     }
-    case 'setq': case 'setf': return node('set', { value: toNode(rest[1]) }, { name: symName(rest[0]) });
+    case 'setq': case 'setf': {
+      // **`setf` 的左边可以是一格形式**（广义位置）：`(setf (aref xs 1) 5)` -> index-set。
+      // 这一格是 CL 独有的形状，落到的却是别人也有的那格节点（go 的 `xs[1] = 5`）。
+      const inner = asList(rest[0]);
+      if (inner !== null) {
+        const place = symName(inner[0]);
+        if (place === 'aref' || place === 'svref' || place === 'elt') {
+          return indexSet(toNode(inner[1]), toNode(inner[2]), toNode(rest[1]));
+        }
+        throw new Error(`sbcl->graph: 这个 setf 位置还没接：${place}`);
+      }
+      return node('set', { value: toNode(rest[1]) }, { name: symName(rest[0]) });
+    }
     case 'defparameter': case 'defvar': case 'defconstant':
       return node('bind', { init: rest[1] === undefined ? lit(null) : toNode(rest[1]) }, { name: symName(rest[0]) });
     case 'if': return branchOf(
@@ -101,6 +113,9 @@ function toNode(x) {
       });
     }
     case 'terpri': return node('prim', { args: [lit('')] }, { name: 'print' });
+    // 向量那两样**不是调用**：落 `list-new` / `index-get`（写成什么样是语法的事）
+    case 'vector': return listNew(many(rest));
+    case 'aref': case 'svref': case 'elt': return indexGet(toNode(rest[0]), toNode(rest[1]));
     default: break;
   }
 

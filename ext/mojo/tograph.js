@@ -14,7 +14,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
-  ops, binOf, retOf, branchOf,
+  ops, binOf, retOf, branchOf, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -42,6 +42,9 @@ function toNode(x) {
       return node('ref', {}, { name: n });
     }
     case 'paren': return toNode(kids(x)[0]);
+    // `[10, 20, 30]` -> list-new；`xs[i]` -> index-get（下标装在一格 `(subs …)` 里）
+    case 'list': return listNew(many(kids(x)));
+    case 'index': return indexGet(toNode(kids(x)[0]), toNode(kids(kids(x)[1])[0]));
     case 'line': case 'body': return many(kids(x));
     case 'expr': return toNode(kids(x)[0]);
 
@@ -55,15 +58,18 @@ function toNode(x) {
       const [op, a] = kids(x);
       return un(leaf(op) === 'not' ? 'not' : leaf(op), toNode(a));
     }
-    // `var x = 1`（targets 里带 bind）出 bind；`x = 1` 出 set
+    // `var x = 1`（targets 里带 bind）出 bind；`x = 1` 出 set；`xs[1] = 5` 出 index-set
     case 'assign': {
       const targets = part(x, 'targets');
       const value = kids(x).find((y) => tag(y) !== 'targets');
+      const v = value === undefined ? lit(null) : toNode(value);
+      const t0 = targets === undefined ? undefined : kids(targets)[0];
+      if (tag(t0) === 'index') return indexSet(toNode(kids(t0)[0]), toNode(kids(kids(t0)[1])[0]), v);
       const isDecl = targets !== undefined && kids(targets).some((t) => tag(t) === 'bind');
       const name = nameOf(targets);
       return isDecl
-        ? node('bind', { init: value === undefined ? lit(null) : toNode(value) }, { name })
-        : node('set', { value: value === undefined ? lit(null) : toNode(value) }, { name });
+        ? node('bind', { init: v }, { name })
+        : node('set', { value: v }, { name });
     }
     case 'augassign': {
       const [op, target, value] = kids(x);
