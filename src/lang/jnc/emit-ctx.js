@@ -873,6 +873,15 @@ export function makeFnEnv(o) {
       const inferred = arrayFromCurly({ name: st.name, type: st.type, at: st.at }, env, st.curlyValue);
       if (inferred !== null) r.type = inferred;
     }
+    /* 串字面量那一格同理（`static char m_tag[] = "abc"`，第二百六十三刀）：长度 = 字符数 +
+       一格零尾。少了这一问，`m_tag[i]` 在体里也永远报"数组长度不是字面量"。 */
+    if (r.type === null && (st.type.suffixes ?? []).includes('array-suffix')
+      && st.init !== null && st.init !== undefined && st.init.curly !== true) {
+      const s0 = strLitFold(st.init.value ?? null);
+      const el = s0 === null ? null
+        : resolveType({ ...st.type, suffixes: [], raw: { specs: st.type.raw?.specs, dcl: null } }, env);
+      if (el !== null && el.type !== null) r.type = { k: 'arr', el: el.type, n: [...s0].length + 1 };
+    }
     if (r.type === null) { acct(`静态字段 '${st.name}'：${r.why}`); return null; }
     const ty = withBits(r.type, st.type);
     /* 取过地址的那一格要提成 `(ptr T)`（模块级那一半是第二十四刀）—— 还没接，明说。 */
@@ -2103,6 +2112,9 @@ export function makeFnEnv(o) {
      * 给多了、或落在"不是一整块"的类型上：当场记账（不猜）。
      */
     curlyLines: (dst, type, node, pad) => curlyLines(dst, type, node, pad),
+    /* 串字面量抄进一格数组（第二百六十二 / 二百六十三刀）—— 静态字段与模块级那两处的初值
+       由模块那一层发，所以要从这儿递出去（与 `curlyLines` 同一条门）。 */
+    strArrayLines: (dst, type, text, pad) => strArrayLines(dst, type, text, pad),
     /**
      * **按值抄一份那几行**（`copyValLines` 加上这一层的字段表）：模块级那一格聚合体写了初值
      * （`int h[3] = g;`，第二百零八刀）要它 —— 与局部量、按值传形参走的是同一份模板。

@@ -33,6 +33,7 @@ import {
 } from './emit-fn.js';
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
+import { strLitFold } from './emit-expr.js';
 import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
 import { templateTable, expandTemplates, synthType } from './generic.js';
 import { zeroText } from './expr-table.js';
@@ -397,8 +398,12 @@ export function lowerJncRules(tree0, diags, opts = {}) {
          发 `(global …)` 那一行本身就要那个长度，少了它整格连声明都发不出来。 */
       const cvs = st.init !== null && st.init.curly === true ? st.init.value
         : (st.curlyValue ?? null);
+      /* **右边是一格串字面量**（`static char m_tag[] = "abc"`，第二百六十三刀）：与花括号
+         同一族（jancy 的 `Cast_Array`）—— 长度写空的从那串字数出来，逐格抄进去。 */
+      const svs = cvs === null && st.init !== null && st.init.curly !== true
+        ? strLitFold(st.init.value ?? null) : null;
       const g = globalLines(st, env, {
-        ns: owner, clsRoot, taken: gLifted, curly: cvs,
+        ns: owner, clsRoot, taken: gLifted, curly: cvs, str: svs,
       });
       for (const l of g.lines) decls.push(`  ${l}`);
       if (g.why !== null) {
@@ -409,6 +414,12 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       if (r.type === null && cvs !== null) {
         const inferred = arrayFromCurly({ name: st.name, type: st.type, at: st.at }, env, cvs);
         if (inferred !== null) r = { type: inferred, why: null };
+      }
+      if (r.type === null && svs !== null && (st.type.suffixes ?? []).includes('array-suffix')) {
+        const el = resolveType(
+          { ...st.type, suffixes: [], raw: { specs: st.type.raw?.specs, dcl: null } }, env,
+        );
+        if (el.type !== null) r = { type: { k: 'arr', el: el.type, n: [...svs].length + 1 }, why: null };
       }
       /* 直接用 `var-decl-curly` 那一格的也走花括号那条路。 */
       const hasCurly = cvs !== null;
@@ -429,6 +440,14 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         const ls2 = mi2.e.curlyLines(`(var ${st.emit})`, r.type, cvs, '    ');
         if (ls2 === null) continue;                          // 账已经记过
         inits.push(...ls2);
+        continue;
+      }
+      /* 串字面量那一族（同上一格，只是"按格子写"的值来自那串字）。 */
+      if (svs !== null && r.type.k === 'arr') {
+        const mi3 = modInit();
+        const ls3 = mi3.e.strArrayLines(`(var ${st.emit})`, r.type, svs, '    ');
+        if (ls3 === null) continue;                          // 账已经记过
+        inits.push(...ls3);
         continue;
       }
       if (r.type.k === 'struct' || r.type.k === 'arr' || r.type.k === 'class') {

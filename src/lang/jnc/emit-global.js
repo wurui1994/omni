@@ -258,6 +258,16 @@ export function globalLines(m, env, ctx = { ns: null }) {
      所以由调用方把那一格花括号递进来（`ctx.curly`）—— 少了它，这一格永远报
      "数组长度不是字面量"，而它明明数得出来。 */
   if (rt === null) rt = arrayFromCurly(m, env, ctx.curly ?? null);
+  /* **串字面量给数组当初值**（`static char m_tag[] = "abc"`，第二百六十三刀）：长度写空的
+     从那串字数出来（字符数 + 一格零尾）。那串字由调用方折好递进来（`ctx.str`）—— 与花括号
+     那一格同一条门：发 `(global …)` 这一行本身就要那个长度。 */
+  if (rt === null && typeof ctx.str === 'string') {
+    const el = resolveType({ ...m.type, suffixes: [], raw: { specs: m.type.raw?.specs, dcl: null } }, env);
+    const sfx = (m.type.suffixes ?? []).filter((x) => x === 'array-suffix');
+    if (el.type !== null && sfx.length === 1) {
+      rt = { k: 'arr', el: el.type, n: [...ctx.str].length + 1 };
+    }
+  }
   if (rt === null) return { lines: [], why: resolveType(m.type, env).why };
   const r = { type: rt };
   const box = taken.has(m.name) && LIFTABLE.has(r.type.k);
