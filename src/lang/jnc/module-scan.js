@@ -54,8 +54,19 @@ export function sigOf(nm, env, emit, t0 = null) {
   };
 }
 
-/** 最小的那份探子：形参与局部量的类型表。 */
 /**
+ * **默认实参攒着看**（第二百六十刀）：原型与体外那个定义是同一格函数，而 jancy 把默认值
+ * 写在**声明**那一格上（decl_function.rst 那一族；`ui_PropertyGrid.jnc:233` 声明、`:414`
+ * 定义）。后来那一格没写默认值不该把先前记下的抹掉 —— 逐格取"谁有算谁的"。
+ */
+function keepDefaults(prev, next) {
+  const a = next ?? [];
+  const b = prev ?? [];
+  const n = Math.max(a.length, b.length);
+  return Array.from({ length: n }, (_, i) => a[i] ?? b[i] ?? null);
+}
+
+/** 最小的那份探子：形参与局部量的类型表。 *//**
  * **同名的那一族里第几格**（第五十八刀 A，76-overload.jnc 的 `f` / `f$o1` / `f$o2`）。
  *
  * jancy 判两条同名声明合不合法只看**实参那一串的签名**（`FunctionType::getArgSignature`），
@@ -689,6 +700,11 @@ export function scanAggs(tree, env, ovl = new Map()) {
             /* 原型 + 体外那个定义是**同一格**（签名一样）：`hasBody` 要**攒**着看 ——
                后来那一格是原型不能把先前记下的"有体"抹掉。 */
             hasBody: mh === 'fn-def' || methods.get(key)?.hasBody === true,
+            /* **默认实参也要攒**（第二百六十刀）：jancy 把它写在**声明**那一格上，而体外那个
+               定义的形参表上一个默认值都没有（`ui_PropertyGrid.jnc:233` 声明、`:414` 定义）。
+               后来那一格把先前的抹掉，于是 `createGroupProperty(,, name, toolTip)` 那两个空槽
+               就"没有默认值"了 —— 真语料 662 份上量出来 84 处。 */
+            defaults: keepDefaults(methods.get(key)?.defaults, sig.defaults),
           });
         }
 
@@ -761,6 +777,8 @@ export function scanAggs(tree, env, ovl = new Map()) {
             name: mname,
             node: it0,
             hasBody: mh === 'fn-def' || methods.get(one.key)?.hasBody === true,
+            /* 默认实参也要攒（理由同上，第二百六十刀）。 */
+            defaults: keepDefaults(methods.get(one.key)?.defaults, sig.defaults),
           });
         }
       }

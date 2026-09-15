@@ -1,0 +1,57 @@
+// 调用点的**空槽**遇上同名重载（第二百六十刀）—— 原样出自 `test/ioninja/api/ui_PropertyGrid.jnc:244`：
+//
+//     GroupProperty* createGroupProperty(Property* parentProp = null, Property* beforeProp = null,
+//                                        string_t name, string_t toolTip = null);
+//     GroupProperty* createGroupProperty(string_t name, string_t toolTip = null) {
+//         return createGroupProperty(,, name, toolTip);   // <- 两个空槽
+//     }
+//
+// 两件事先前都错着：
+//   1. **空槽是占位，不是"少给一个"**：jancy 把那一格填成那个形参的默认值，所以"给了几个
+//      实参"数的是**槽的个数**（4），不是非空的那几个（2）。先前滤掉空槽再数，于是这一句
+//      挑中了两形参那一条（也就是它自己）；
+//   2. **默认值写在声明那一格上**：体外那个定义的形参表上一个默认值都没有，后来那一格
+//      不该把先前记下的抹掉（`keepDefaults`）。
+//
+// 真语料 662 份上这一族量出来 84 处（doc_Layer / doc_Session / ui_PropertyGrid … 那一批 API 文件）。
+
+int pack(int a = 1, int b = 2, int c);
+
+int pack(int a = 1, int b = 2, int c) {
+	return a * 100 + b * 10 + c;
+}
+
+int pack(int c) {
+	// 前两格空槽 -> 各填自己的默认值（1、2）
+	return pack(,, c);
+}
+
+// 体外定义那一族：默认值只写在类体里那句声明上
+class Box {
+	int m_base;
+
+	construct() {
+		m_base = 1000;
+	}
+
+	int at(int i = 7, int j);
+	int at(int j);
+}
+
+int Box.at(int i, int j) {
+	return m_base + i * 10 + j;
+}
+
+int Box.at(int j) {
+	return at(, j);
+}
+
+int main() {
+	printf("%d\n", pack(3));
+	printf("%d\n", pack(9, 9, 9));
+
+	Box b;
+	printf("%d\n", b.at(4));
+	printf("%d\n", b.at(2, 4));
+	return 0;
+}

@@ -1134,22 +1134,42 @@ export function makeFnEnv(o) {
   const pickOvl = (key0, sig0, args) => {
     const fam = ovl.get(key0);
     if (fam === undefined || fam.length < 2) return { sig: sig0, key: key0 };
-    const real = args.filter((a) => headOf(a) !== 'unbound');
-    const given = real.length;
+    /**
+     * **空槽是占位，不是"少给一个"**（第二百六十刀，`createGroupProperty(,, name, toolTip)`
+     * —— ui_PropertyGrid.jnc:244）：jancy 那儿它把**那一格**填成那个形参的默认值，所以
+     * "给了几个实参"数的是**槽的个数**（4），不是非空的那几个（2）。先前把空槽滤掉再数，
+     * 于是这一句挑中了两形参那一条（也就是它自己），报"少了第 1 格实参"——
+     * 真语料 662 份上量出来 84 处，全是这一类。
+     */
+    const isHole = (a) => headOf(a) === 'unbound';
+    const given = args.length;
     const fits = [];
     for (const e of fam) {
       const s = sigAt(e.key);
       if (s === undefined) continue;
       const want = (s.params ?? []).length;
-      const opt = (s.defaults ?? []).filter((d) => d !== null).length;
-      if (given >= want - opt && given <= want) fits.push({ sig: s, key: e.key });
+      const defs = s.defaults ?? [];
+      const has = (i) => defs[i] !== null && defs[i] !== undefined;
+      if (given > want) continue;
+      /**
+       * **实参从左往右填，缺的那几格要**各自**有默认值**（第二百六十刀）。先前只数"有几个
+       * 默认值"（`opt`），于是 `int pack(int a = 1, int b = 2, int c)` 被当成"1~3 个都收"——
+       * 可它中间那一格 `c` 没有默认值，少给就填不上。jancy 那儿这一条正是 `ui_PropertyGrid`
+       * 那种写法（默认值在**前**、必填在后）要写空槽 `f(,, name)` 的原因。
+       */
+      let ok = true;
+      for (let i = given; i < want; i += 1) if (!has(i)) { ok = false; break; }
+      if (!ok) continue;
+      /* 空槽那几格**必须有默认值** —— 那正是"填成默认值"这句话的前提。 */
+      if (args.some((a, i) => isHole(a) && !has(i))) continue;
+      fits.push({ sig: s, key: e.key });
     }
     if (fits.length === 1) return fits[0];
     if (fits.length === 0) {
       acct(`'${key0}' 有 ${fam.length} 条重载，没有一条收 ${given} 个实参`);
       return null;
     }
-    const tys = real.map((a) => cheapTy(a));
+    const tys = args.map((a) => (isHole(a) ? 'hole' : cheapTy(a)));
     const bad = tys.findIndex((t) => t === null);
     if (bad >= 0) {
       acct(`'${key0}' 的同元重载：第 ${bad + 1} 个实参的类型这一层还得先降一遍才知道`);
@@ -1158,6 +1178,8 @@ export function makeFnEnv(o) {
     const { best, tie } = pick(fits, (c) => worst(
       tys.length,
       (i) => {
+        /* 空槽那一格不参与打分：填进去的是**那个形参自己的**默认值，永远正好合得上。 */
+        if (tys[i] === 'hole') return 4;
         const pt = (c.sig.params ?? [])[i] ?? null;
         const pr = pt === null ? null : resolveType(pt, env);
         const want = pr === null || pr.type === null ? null : withBits(pr.type, pt);
