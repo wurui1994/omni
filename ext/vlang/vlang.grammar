@@ -107,7 +107,7 @@
       "false" "fn" "for" "go" "goto" "if" "import" "in" "interface" "is" "isreftype"
       "lock" "match" "module" "mut" "none" "or" "pub" "return" "rlock" "select"
       "shared" "sizeof" "spawn" "struct" "true" "type" "typeof" "union"
-      "unsafe" "__global" "static" "volatile" "implements")
+      "unsafe" "__global" "static" "volatile" "implements" "thread")
 
     ;; `<-` 是通道收取符（`code := <-ch`）。少了它就被切成 `<` 加 `-`，107 份文件卡在这儿。
     (op "@[" "#[" "<<=" ">>=" ">>>=" "..." "&&" "||" "<-" "<<" ">>>" ">>" "++" "--" "==" "!=" "<="
@@ -268,6 +268,9 @@
     (-> ("[" expr "]" type) (fixed-array $2 $4))
     (-> (MAP "[" type "]" type) (map $3 $5))
     (-> (CHAN type) (chan $2))
+    ;; `[]thread int` / `thread` —— spawn 出来的句柄类型
+    (-> ("thread" type) (thread $2))
+    (-> ("thread") (thread))
     (-> ("?" type) (option $2))
     (-> ("!" type) (result $2))
     (-> ("shared" type) (shared $2))
@@ -423,6 +426,11 @@
     (-> ("continue" IDENT) (continue $2))
     (-> ("goto" IDENT) (goto $2))
     (-> ("defer" block) (defer $2))
+    ;; `spawn f(x)` / `go f(x)` 当**语句**。它们当**值**用的那一半（`h := spawn f()`、
+    ;; `threads << spawn f()`，112 份）还欠着：试过把它们搬到 `operand` 上（照 if / match
+    ;; 那条"只写一遍"的口径），语料从 4025 掉到 3926 —— 净 -99，退回来了。
+    ;; 那 112 份要收，得先想清楚它与"命令式调用的实参"以及 `<<` 那一级怎么分，
+    ;; 不是换个位置就行的。
     (-> ("go" expr) (go $2))
     (-> ("spawn" expr) (spawn $2))
     (-> ("lock" h-exprs block) (lock (on $*2) $3))
@@ -440,6 +448,9 @@
     (-> (for-stmt) $1))
 
   (rule simple
+    ;; 通道**发送**：`ch <- p.code`、`app.ch <- (now - elapsed)`。收取那一半（`<-ch`）
+    ;; 在 `unary-e` 里，发送这一半是语句 —— 106 份卡在这一条。
+    (-> (expr "<-" expr) (send $1 $3))
     (-> (expr) (expr $1))
     (-> (expr "++") (inc $1))
     (-> (expr "--") (dec $1))
@@ -892,7 +903,7 @@
     (-> (nb-lit) $1)))
 ;; ---- 量到的与还欠的 --------------------------------------------------------------
 ;;
-;; 962 状态 / 475 条产生式 / 679 处冲突，vlang 那棵树 6183 份 .v 过 **3947**（64%）。
+;; 966 状态 / 478 条产生式 / 685 处冲突，vlang 那棵树 6183 份 .v 过 **4015**（65%）。
 ;; 这一趟从 496（8%）走上来，一刀一刀都是量出来的 —— 判据只有语料这一个（文件头不足 1）。
 ;;
 ;; 这一趟的账（每一步都跑一遍分类器：把失败按错误话归类计数，改最大那一类，再量）：
@@ -930,6 +941,9 @@
 ;;                 `type` 本来就有它们，于是 `ret -> type` 与它们各成一条路，同一串输入
 ;;                 两种归约。这三条一共 **171 处冲突**（850 里的两成）。删掉：850 -> 679，
 ;;                 语义一点没少（`?int` 走 `ret -> type -> "?" type`，树还是那棵树）。
+;;
+;;   3947 -> 4015  通道**发送**语句 `ch <- p.code`（收取那一半早就有，发送这一半是语句，
+;;                 106 份）；`[]thread int` 那个句柄类型。
 ;;
 ;; 反过来被量否掉的（记下来免得再试）：CDIRECTIVE 的 `not-after` 名单里**不能有 `}`** ——
 ;; `}` 换一行接着写 `#flag -luser32` 是常见排版，加进去就把那一族挡死（净 -1，量过）。
