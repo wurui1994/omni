@@ -1,15 +1,19 @@
-// tests/graph/run.js —— 第一批节点的判据：**语言 × 后端的矩阵，输出逐行相同**
+// tests/graph/run.js —— 节点的判据：**语言 × 后端的矩阵，输出逐行相同**
 //
-// 一门语言一份 `examples/basics.*`（形状随它自己的写法），期望输出**只有一份**：
+// 一门语言一份 `examples/<家族>.*`（形状随它自己的写法），期望输出**一个家族一份**，
+// 家族里所有语言、所有后端共用。现在七个家族：
 //
-//     15 / 120 / 7 / ok
+//     basics 15/120/7/ok · multi 3/7/1 2 · defer in/b/a/out · record 1/5/6
+//     index 10/30/45 · loopexit 12/6/8 · intmath 15/120
 //
-// 两条轴各自的意思：
+// 三条轴各自的意思：
 //   * 横着看（语言）：`docs/design/node-graph-contract.md` §1 —— 同一张节点清单承载不同语言。
 //   * 竖着看（后端）：§6 —— 后端只回答五问，**同一张图在每个后端上的可观察行为必须一致**。
+//   * 第三档 **skip**：后端接不住的形状要**有名有姓**地跳过（§6 第 2 条）——
+//     跳过不是失败，它是算出来的待办。`wat` 那条腿现在就有 10 格缺口。
 // 加一门语言或加一个后端，矩阵自动多一行/一列 —— 这就是"自动覆盖全部后端"的确切含义。
 //
-//   node tests/graph/run.js            全跑
+//   node tests/graph/run.js            全跑（末尾按后端印一行覆盖率）
 //   node tests/graph/run.js --sx chez  顺带把那门语言的图印成 sx（人看的）
 //   node tests/graph/run.js --gaps     印每个后端接不住的节点清单
 //   node tests/graph/run.js --machines 印每格节点的**提供者名单**（G5 那条判据）
@@ -179,6 +183,12 @@ const only = argv.filter((a) => !a.startsWith('-'));
 let pass = 0;
 let fail = 0;
 let skipped = 0;
+/** 每个后端的覆盖（**比覆盖，不比优劣** —— 契约那一节的原话）。 */
+const cov = new Map();
+const tally = (name, kind) => {
+  if (!cov.has(name)) cov.set(name, { ok: 0, skip: 0, fail: 0 });
+  cov.get(name)[kind] += 1;
+};
 
 if (showGaps) {
   for (const b of backends()) {
@@ -202,28 +212,28 @@ function check(name, g, expect) {
     } catch (err) {
       // **缺口不是失败**：后端说不出口的形状要有名有姓地跳过（§6 第 2 条纪律）
       if (err instanceof Gap) {
-        process.stdout.write(`  skip ${label}：${err.message}\n`); skipped++;
-      } else { process.stdout.write(`  FAIL ${label}: ${err.message}\n`); fail++; }
+        process.stdout.write(`  skip ${label}：${err.message}\n`); skipped++; tally(b.name, 'skip');
+      } else { process.stdout.write(`  FAIL ${label}: ${err.message}\n`); fail++; tally(b.name, 'fail'); }
       continue;
     }
     if (b.runnable === false) {
       // 只序列化的后端（sx）只对"出得来、且不空"负责 —— 它不承诺跑
       if (typeof art.text === 'string' && art.text.length > 0) {
-        process.stdout.write(`  ok   ${label} [序列化 ${art.text.split('\n').length} 行]\n`); pass++;
-      } else { process.stdout.write(`  FAIL ${label}: 序列化出来是空的\n`); fail++; }
+        process.stdout.write(`  ok   ${label} [序列化 ${art.text.split('\n').length} 行]\n`); pass++; tally(b.name, 'ok');
+      } else { process.stdout.write(`  FAIL ${label}: 序列化出来是空的\n`); fail++; tally(b.name, 'fail'); }
       continue;
     }
     try {
       const { out } = art.run();
       const got = out.join(' / ');
       const want = expect.join(' / ');
-      if (got === want) { process.stdout.write(`  ok   ${label} [${got}]\n`); pass++; } else {
+      if (got === want) { process.stdout.write(`  ok   ${label} [${got}]\n`); pass++; tally(b.name, 'ok'); } else {
         process.stdout.write(`  FAIL ${label}\n       期望 ${want}\n       得到 ${got}\n`);
-        fail++;
+        fail++; tally(b.name, 'fail');
       }
     } catch (err) {
       process.stdout.write(`  FAIL ${label}: ${err.message}\n`);
-      fail++;
+      fail++; tally(b.name, 'fail');
     }
   }
 }
@@ -270,6 +280,17 @@ if (showMachines) {
     const mark = langs.size >= 4 ? '机器' : (langs.size >= 2 ? '能力' : '一家');
     process.stdout.write(`  ${String(langs.size).padStart(2)} ${mark}  ${op.padEnd(11)}${[...langs].sort().join(' ')}\n`);
   }
+}
+
+// 每个后端一行覆盖率。**后端之间不比优劣，比覆盖**（契约那一节的原话）——
+// 这一行就是那句话的可执行版本：跑通几格、因为什么跳过几格、缺口几格。
+process.stdout.write('\n每条腿的覆盖（比覆盖，不比优劣）：\n');
+for (const b of backends()) {
+  const c = cov.get(b.name) ?? { ok: 0, skip: 0, fail: 0 };
+  const total = c.ok + c.skip + c.fail;
+  const tail = b.runnable === false ? '（只序列化，不承诺跑）'
+    : (c.skip === 0 ? '' : `，${c.skip} 格跳过（缺口 ${gaps(b.name).length} 格）`);
+  process.stdout.write(`  ${b.name.padEnd(7)}${c.ok}/${total} 跑通${tail}\n`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed, ${skipped} skipped（缺口，有名有姓）`
