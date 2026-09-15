@@ -14,7 +14,7 @@
 import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
-import { counted, ops } from '../../src/core/graph/fromtree.js';
+import { counted, destructure, ops } from '../../src/core/graph/fromtree.js';
 
 const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
 const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
@@ -88,6 +88,8 @@ function toNode(x) {
     case 'local': {
       const names = partOf(x, 'names').map(nameOf);
       const values = partOf(x, 'values');
+      // `local a, b = f()`：N 个名字对 1 个右值 ⇒ 多值的消费侧（`destructure` 五门共用）
+      if (names.length > 1 && values.length === 1) return destructure(names, toNode(values[0]));
       return names.map((nm, i) => node('bind', {
         init: values[i] === undefined ? lit(null) : toNode(values[i]),
       }, { name: nm }));
@@ -150,7 +152,10 @@ function toNode(x) {
     }
     case 'return': {
       const vals = kids(x);
-      return node('ret', vals.length === 0 ? {} : { value: toNode(vals[0]) });
+      if (vals.length === 0) return node('ret', {});
+      // `return a, b` —— 多值的生产侧（**多出端口是常态**，ADR-0033 §3.2）
+      const v = vals.length === 1 ? toNode(vals[0]) : node('values', { args: many(vals) });
+      return node('ret', { value: v });
     }
     case 'call': {
       const [fn, args] = kids(x);

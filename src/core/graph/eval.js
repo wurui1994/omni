@@ -36,6 +36,15 @@ class Env {
   }
 }
 
+/**
+ * **一格多值**（`values` 那一格的出端口）。它不是"一个数组值" —— 是"这一格边上有 N 个值"。
+ * 消费者用 `pick` 取第 k 格；只要一格的地方（`print(f())` 那种）取第 0 格。
+ */
+class Values { constructor(list) { this.list = list; } }
+
+/** 只要一格值的地方：多值收成第一格（lua / go / CL 都是这条规矩）。 */
+const one = (v) => (v instanceof Values ? (v.list[0] ?? null) : v);
+
 /** 一格闭包。`func` 的出端口声明了 `owns`，所以它是一格有寿命的值（这一批由宿主管）。 */
 class Closure {
   constructor(params, body, env, name) {
@@ -56,12 +65,25 @@ function callPrim(name, args, io) {
 export function truthy(v) { return !(v === false || v === null || v === undefined); }
 
 export function showValue(v) {
+  if (v instanceof Values) return v.list.map(showValue).join(' ');
+  // js 后端把多值落成 `{ __vals: […] }`（`carry` 那一问的答案），印法要与 interp 一致
+  if (v !== null && typeof v === 'object' && Array.isArray(v.__vals)) return v.__vals.map(showValue).join(' ');
   if (v === null || v === undefined) return 'nil';
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(v);
   if (v instanceof Closure) return `<fn ${v.name ?? '?'}>`;
   return String(v);
 }
+
+/**
+ * 取多值的第 k 格。**一份实现，两个后端共用** —— `pick` 那格节点与 js 后端里那句
+ * `__pick(...)` 走的是这一个函数（内建表那一刀之后，这是第二处"同一份知识只写一遍"）。
+ */
+export const pick = (v, i) => {
+  if (v instanceof Values) return v.list[i] ?? null;
+  if (v !== null && typeof v === 'object' && Array.isArray(v.__vals)) return v.__vals[i] ?? null;
+  return i === 0 ? v : null;
+};
 
 /** 一格 thunk（`lazy` / `body` 端口交出来的东西）。调度器用它切段与延后求值。 */
 const thunk = (x, env, io) => () => run(x, env, io);
@@ -80,9 +102,16 @@ function inputOf(n, port, env, io) {
   if (port.sem === 'lazy' || port.sem === 'body') return thunk(x, env, io);
   if (port.rest) {
     const list = Array.isArray(x) ? x : [x];
-    return list.map((y) => refValue(y, env, io));
+    // 列表里**只有最后一格展开**（lua 那份规格里的 arity 契约，SDK 的 arity.js 同一条）
+    const vals = list.map((y) => refValue(y, env, io));
+    return vals.flatMap((v, k) => (v instanceof Values
+      ? (k === vals.length - 1 ? v.list : [one(v)])
+      : [v]));
   }
-  return refValue(x, env, io);
+  // `multi` 的端口（pick 的来源、ret 的值）与 keepMulti 的 bind 原样收多值；
+  // 别的端口"只要一格" ⇒ 多值收成第一格（lua / go / CL 都是这条规矩）
+  const raw = port.multi === true || n.attrs?.keepMulti === true;
+  return raw ? refValue(x, env, io) : one(refValue(x, env, io));
 }
 
 function run(n, env, io) {
@@ -122,6 +151,8 @@ function run(n, env, io) {
       return refValue(n.ins.body, inner, io);
     }
     case 'func': return new Closure(n.attrs.params ?? [], n.ins.body, env, n.attrs.name);
+    case 'values': return new Values(arg('args') ?? []);
+    case 'pick': return pick(arg('from'), Number(n.attrs.index ?? 0));
     case 'ret': throw new Return(arg('value') ?? null);
     case 'call': {
       const fn = arg('fn');

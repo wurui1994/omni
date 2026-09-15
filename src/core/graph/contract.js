@@ -15,7 +15,7 @@
 //      判据在 `tests/graph/run.js`（语言 × 后端的矩阵，加一门语言或一个后端自动多几格）。
 
 import { NODES, declOf } from './nodes.js';
-import { evalGraph, showValue, truthy } from './eval.js';
+import { evalGraph, showValue, truthy, pick } from './eval.js';
 import { toSx } from './graph.js';
 import { PRIMS } from './prims.js';
 
@@ -119,6 +119,12 @@ function jsExpr(x) {
       return `${jsExpr(x.ins.fn)}(${args.map(jsExpr).join(', ')})`;
     }
     case 'region': return `(() => { ${jsFnBody(x.ins.body)} })()`;
+    // 多值：js 后端落成一格数组 + 一格标记（`carry` 那一问的答案就是这一句）
+    case 'values': {
+      const args = (Array.isArray(x.ins.args) ? x.ins.args : [x.ins.args]).filter((y) => y !== undefined);
+      return `({ __vals: [${args.map(jsExpr).join(', ')}] })`;
+    }
+    case 'pick': return `__pick(${jsExpr(x.ins.from)}, ${Number(x.attrs.index ?? 0)})`;
     default: return `(() => { ${jsStmt(x)} })()`;
   }
 }
@@ -166,14 +172,14 @@ function jsStmt(x) {
 
 function jsLower(g) {
   const body = asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n');
-  const source = `(__out, __show, __truthy) => {\n${body}\n}`;
+  const source = `(__out, __show, __truthy, __pick) => {\n${body}\n}`;
   return {
     text: source,
     run: () => {
       const out = [];
       // eslint-disable-next-line no-new-func
       const f = new Function(`return ${source};`)();
-      f(out, showValue, truthy);
+      f(out, showValue, truthy, pick);
       return { value: null, out };
     },
   };

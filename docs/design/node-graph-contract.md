@@ -463,7 +463,15 @@ V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
 3. **形参装在一格无名的表里**（mojo / nim）—— 无名表的孩子是全部 items。
    少这一条，每个函数的第一个形参被当成标签吃掉。
 
-下一批按 A.5 的顺序推：`multi-value`（多出端口）、`scope-exit`、`record` 那一族。
+**第二批：多值（`values` / `pick`）已落地** —— 11 → 13 格。判据是第二个例子家族
+（`ext/{lua,go}/examples/multi.*`，期望输出 `3 / 7 / 1 2`）：`return a, b` 落 `values`、
+`x, y := f()` 落"一格临时 bind + 一串 pick"（`destructure` 五门语言共用）、
+`print(f())` 验 arity 契约那一条（**列表里只有最后一格展开**）。
+端口那一栏因此多一格 `multi`：`pick.from` 与 `ret.value` 原样收多值，别的端口"只要一格"
+（lua / go / CL 都是这条规矩）；`bind` 多一格附属 `keepMulti` —— 装住整格多值的那格
+临时量用它，没有它的话"`local x = f()` 只取第一格"与"装住多值"两件事分不开。
+
+下一批按 A.5 的顺序推：`scope-exit`（八个提供者已经齐了）、`record` 那一族。
 
 ### A.7 附属节点（不逐个列，按挂点分七类）
 

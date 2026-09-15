@@ -17,6 +17,7 @@ import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
   ops,
+  destructure,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -79,6 +80,10 @@ function toNode(x) {
       const isDef = tag(x) === 'define';
       const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
       const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
+      // `x, y := f()` / `x, ok = m[k]`：N 个名字对 1 个右值 ⇒ 多值的消费侧
+      if (lhs.length > 1 && rhs.length === 1) {
+        return destructure(lhs.map(nameOf), toNode(rhs[0]), { declare: isDef });
+      }
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
         return isDef
@@ -117,7 +122,9 @@ function toNode(x) {
     }
     case 'return': {
       const vals = kids(x);
-      return node('ret', vals.length === 0 ? {} : { value: toNode(vals[0]) });
+      if (vals.length === 0) return node('ret', {});
+      const v = vals.length === 1 ? toNode(vals[0]) : node('values', { args: many(vals) });
+      return node('ret', { value: v });
     }
     case 'expr': return toNode(kids(x)[0]);
     case 'call': {

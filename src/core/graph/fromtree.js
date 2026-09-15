@@ -123,3 +123,24 @@ export const lazyOr = (a, b, { keepValue = false } = {}) => node('branch', {
 /** `else` 那一格常是个包装（`(else (block …))`）—— go / vlang / awk 三处同一个坑。 */
 export const elseOf = (x) => (x === undefined || x === null ? undefined
   : (tag(x) === 'else' ? kids(x)[0] : x));
+
+/**
+ * **多值的消费侧**：`x, y := f()` / `local a, b = f()` / `(multiple-value-bind …)`。
+ *
+ * N 个名字对 1 个右值 ⇒ 一格临时 `bind` 装住那格多值，再一串 `pick` 各取一格。
+ * 五门语言（lua / go / vlang / nim / sbcl）是同一个形状，所以它在这儿只写一遍。
+ * N 对 N（`a, b = 1, 2`）不走这儿 —— 那是各配一格，语言映射自己配。
+ *
+ * @param {string[]} names 左边那几个名字
+ * @param {any} value 右边那**一格**（多值的生产者，通常是一格 call）
+ * @param {{declare?: boolean, tmp?: string}} opts declare = 是声明（bind）还是赋值（set）
+ */
+export function destructure(names, value, { declare = true, tmp = '__mv' } = {}) {
+  const holder = `${tmp}${names.join('$')}`;
+  const out = [node('bind', { init: value }, { name: holder, keepMulti: true })];
+  names.forEach((nm, i) => {
+    const got = node('pick', { from: node('ref', {}, { name: holder }) }, { index: i });
+    out.push(declare ? node('bind', { init: got }, { name: nm }) : node('set', { value: got }, { name: nm }));
+  });
+  return out;
+}

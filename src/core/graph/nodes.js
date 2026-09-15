@@ -55,7 +55,9 @@ export const NODES = new Map([
   N('const', 'expr', [], { attrs: ['value'], doc: 'chez quote / go OLITERAL / 十门全有' }),
   N('ref', 'expr', [], { attrs: ['name'], effects: ['reads'], doc: 'chez ref / sbcl ref' }),
   N('bind', 'decl', [{ name: 'init', sem: SEM.value }], {
-    attrs: ['name'], effects: ['writes'], lifetime: 'owns', outs: [],
+    // `keepMulti` 是一格**附属**：绑的是整格多值（`destructure` 那格临时量），不是第一格。
+    // 没有它的话 `local x = f()` 与"装住多值"两件事分不开 —— lua 的规矩是前者只取第一格。
+    attrs: ['name', 'keepMulti'], effects: ['writes'], lifetime: 'owns', outs: [],
     doc: 'decl 就是这一格：sbcl let / go OAS / lua local / nim let',
   }),
   N('set', 'stat', [{ name: 'value', sem: SEM.value }], {
@@ -99,9 +101,26 @@ export const NODES = new Map([
     attrs: ['params', 'name'], lifetime: 'owns',
     doc: 'chez case-lambda（函数只有这一种形式）/ 十门全有',
   }),
-  N('ret', 'stat', [{ name: 'value', sem: SEM.value, optional: true }], {
+  N('ret', 'stat', [{ name: 'value', sem: SEM.value, optional: true, multi: true }], {
     effects: ['may-early-exit'], outs: [],
     doc: 'go ORETURN / lua return / nim return —— 早退是效应，不是边',
+  }),
+
+  // ---- 多值（2 格）：**多出端口是常态**（ADR-0033 §3.2）------------------------
+  //
+  // `return a, b`（go / lua / V）与 `(values a b)`（CL）落 `values`；
+  // `x, y := f()` 那一侧落一串 `pick`（第 k 格出端口）。
+  //
+  // 为什么是"一个生产者 + 一串 pick"而不是"给 bind 加一栏名字表"：
+  //   * 出端口是**边的一端**，取第几格是**消费者**的事 —— 写成 pick 才是一条边一格消费者；
+  //   * go 的 `x, ok = m[k]` / V 的 `?T` / CL 的 `multiple-value-bind` 三种写法
+  //     从此共用同一对节点（`ext/go/SPEC.md` §五第 1 项那句"三种双值形式是同一个形状"）。
+  N('values', 'expr', [{ name: 'args', sem: SEM.value, rest: true }], {
+    doc: 'go `return a, b` / lua `return a, b` / CL `values` / V 的双值形式',
+  }),
+  N('pick', 'expr', [{ name: 'from', sem: SEM.value, multi: true }], {
+    attrs: ['index'],
+    doc: '多出端口的第 k 格。`x, y := f()` 那一侧就是一串它',
   }),
 ]);
 

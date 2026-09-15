@@ -40,19 +40,28 @@ import { nimToGraph } from '../../ext/nim/tograph.js';
 const HERE = new URL('.', import.meta.url).pathname;
 const ROOT = `${HERE}../../`;
 
-/** 期望的输出 —— **一份，所有语言、所有后端共用**。这就是这一格的全部判据。 */
-const EXPECT = ['15', '120', '7', 'ok'];
+/**
+ * 期望的输出。**一个例子家族一份**，家族里所有语言、所有后端共用 ——
+ * 这就是这一格的全部判据。
+ *   basics：第一批 11 格节点（decl / func / 控制流 / 循环 / print）
+ *   multi ：多值那两格（values / pick）+ arity 契约（列表里只有最后一格展开）
+ */
+const BASICS = ['15', '120', '7', 'ok'];
+const MULTI = ['3', '7', '1 2'];
 
 const CASES = [
-  { name: 'chez', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/basics.ss', toGraph: chezToGraph },
-  { name: 'lua', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/basics.lua', toGraph: luaToGraph },
-  { name: 'go', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/basics.go', toGraph: goToGraph },
-  { name: 'sbcl', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/basics.lisp', toGraph: sbclToGraph },
-  { name: 'vlang', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/basics.v', toGraph: vlangToGraph },
-  { name: 'awk', grammar: 'ext/awk/awk.grammar', file: 'ext/awk/examples/basics.awk', toGraph: awkToGraph },
-  { name: 'freebasic', grammar: 'ext/freebasic/freebasic.grammar', file: 'ext/freebasic/examples/basics.bas', toGraph: fbToGraph },
-  { name: 'mojo', grammar: 'ext/mojo/mojo.grammar', file: 'ext/mojo/examples/basics.mojo', toGraph: mojoToGraph },
-  { name: 'nim', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/basics.nim', toGraph: nimToGraph },
+  { name: 'chez', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/basics.ss', toGraph: chezToGraph, expect: BASICS },
+  { name: 'lua', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/basics.lua', toGraph: luaToGraph, expect: BASICS },
+  { name: 'go', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/basics.go', toGraph: goToGraph, expect: BASICS },
+  { name: 'sbcl', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/basics.lisp', toGraph: sbclToGraph, expect: BASICS },
+  { name: 'vlang', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/basics.v', toGraph: vlangToGraph, expect: BASICS },
+  { name: 'awk', grammar: 'ext/awk/awk.grammar', file: 'ext/awk/examples/basics.awk', toGraph: awkToGraph, expect: BASICS },
+  { name: 'freebasic', grammar: 'ext/freebasic/freebasic.grammar', file: 'ext/freebasic/examples/basics.bas', toGraph: fbToGraph, expect: BASICS },
+  { name: 'mojo', grammar: 'ext/mojo/mojo.grammar', file: 'ext/mojo/examples/basics.mojo', toGraph: mojoToGraph, expect: BASICS },
+  { name: 'nim', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/basics.nim', toGraph: nimToGraph, expect: BASICS },
+  // ---- 第二个家族：多值 ----
+  { name: 'lua+multi', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/multi.lua', toGraph: luaToGraph, expect: MULTI },
+  { name: 'go+multi', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/multi.go', toGraph: goToGraph, expect: MULTI },
 ];
 
 const argv = process.argv.slice(2);
@@ -106,7 +115,7 @@ for (const c of CASES) {
     try {
       const { out } = b.lower(g).run();
       const got = out.join(' / ');
-      const want = EXPECT.join(' / ');
+      const want = c.expect.join(' / ');
       if (got === want) { process.stdout.write(`  ok   ${label} [${got}]\n`); pass++; } else {
         process.stdout.write(`  FAIL ${label}\n       期望 ${want}\n       得到 ${got}\n`);
         fail++;
@@ -118,5 +127,5 @@ for (const c of CASES) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed（语言 ${CASES.length} × 后端 ${backends().length}）\n`);
+process.stdout.write(`\n${pass} passed, ${fail} failed（例子 ${CASES.length} × 后端 ${backends().length}）\n`);
 if (fail > 0) process.exit(1);
