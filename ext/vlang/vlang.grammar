@@ -28,7 +28,7 @@
 ;;   3. 编译期那一族（`$if` / `$compile_error` / `$embed_file`）只收 `$if`；别的当普通调用。
 
 (grammar vlang
-  (tokens IDENT INT FLOAT STRING CHAR CTIME ATNAME CDIRECTIVE)
+  (tokens IDENT INT FLOAT STRING CHAR CTIME ATNAME CDIRECTIVE MAP CHAN)
 
   (start file)
 
@@ -38,12 +38,28 @@
     (block-comment "/*" "*/")
     (skip (+ "\n"))
     ;; 与 Go 那张表同一个形状。多出来的 `?` `!` `]` 是 V 自己的后缀。
+    ;;
+    ;; `true` / `false` / `none` **必须单列**：它们是关键字，记号类型是那个词本身而不是
+    ;; IDENT，所以 IDENT 在名单里也管不到它们。漏掉的代价量过 —— `const x = true` 后面
+    ;; 那个换行不收尾，下一条 `const` 就撞上来（242 份都是这一条）。
+    ;; `@VEXE` / `@FILE` 也收尾 —— `const vexe = @VEXE` 后面那个换行不收尾的话，
+    ;; 下一条声明就撞上来（239 份都是这一条）。
+    ;; `unless-before` 那一句：V 不像 Go 那样要求续行的算符写在行尾，语料里到处是
+    ;;     if a != 'HEAD'
+    ;;         && os.execute(…).exit_code == 0 {
+    ;; 上一个记号（STRING）在 after 表里，可下一行才是这个表达式的下半截。往前看一眼就够。
+    ;; 只放 `&&` 与 `||`：`.` 不能放（`match` 的分支 `.foo {` 正是以点起头的一行，
+    ;; 挡住那一格分号就把分支表连成了一条），`-` 也不能放（下一行可能是新语句的负号）。
     (auto-semi ";" after
-      IDENT INT FLOAT STRING CHAR
+      IDENT INT FLOAT STRING CHAR ATNAME CDIRECTIVE
       "break" "continue" "return"
-      "++" "--" ")" "]" "}" "?" "!")
+      "true" "false" "none"
+      "++" "--" ")" "]" "}" "?" "!"
+      unless-before "&&" "||")
 
-    (token FLOAT (+ digit) "." (* digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    ;; 小数点后面**必须有数字**：不然 `command[1..]` 里那个 `1..` 会被读成 FLOAT `1.` 加
+    ;; 一个 `.`，切片就断了（151 份卡在这儿）。代价是 `1.` 这种写法不收 —— 语料里没有。
+    (token FLOAT (+ digit) "." (+ digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
     (token FLOAT (+ digit) (or "e" "E") (? (or "+" "-")) (+ digit))
     (token INT "0" (or "x" "X") (+ (or hex "_")))
     (token INT "0" (or "b" "B") (+ (set "01_")))
@@ -58,6 +74,13 @@
     (string STRING "\"")
     (token CHAR "`" (or (seq "\\" any) (not "`")) "`")
 
+    ;; `map` 与 `chan` 是 V 的关键字，可**不能**进 keyword 表：`arr.map(it * 2)` 里那个
+    ;; `map` 是方法名，V 的语料里到处是它。所以写成"前一个记号不是 `.` 才算关键字"的
+    ;; 条件规则，摆在 IDENT **前面** —— 长度相同的平手归先声明的那一条（见 lex.js 的口径）。
+    ;; 摆到后面就一点用没有（量过：`map[string]bool` 照旧读成 `map` 索引 `string`）。
+    ;; `mapper` 那种更长的名字照旧走 IDENT（最长匹配赢）。
+    (token MAP (not-after ".") "map")
+    (token CHAN (not-after ".") "chan")
     (token IDENT (or alpha "_") (* (or alnum "_")))
     ;; 编译期那一族：`$if` 之类。`$` 起头的名字单独一格记号类型，免得与运算符撞。
     (token CTIME "$" (+ (or alnum "_")))
@@ -66,7 +89,14 @@
     ;; `#include <stdio.h>` / `#flag -lm` / `#preinclude`：C 那一侧的指令。**整行是自由文本**
     ;; （里头有 `<` `>` `-` 什么都可能有），所以一整行收成一个记号 —— 与 `.y` 那边
     ;; `%lex NAME 正则` 取整行同一个理由：那一段不是这门语言的记号。
-    (token CDIRECTIVE "#" (* (not "\n")))
+    ;;
+    ;; `not-after` 那一格是必须的：V 还有个 `a#[1..]` 的切片写法（`os.args#[1..]` 到处是它，
+    ;; 131 份卡在这儿）。整行那条规则比 `#[` 长，最长匹配一定赢，所以只能靠"前一个记号是不是
+    ;; 一个操作数"把它挡在门外 —— 与 awk 的 `/re/` vs 除号同一格手法。
+    ;; 名单里**没有 `}`**：`}` 后面换一行接着写 `#flag -luser32` 是常见排版（`$if` 块的
+    ;; 下一行），把 `}` 加进去就把那一族挡死了（量过：112 份）。代价是 `}#[0..30]` 这种
+    ;; 紧跟在闭括号后面的切片读不了 —— 语料里一份。
+    (token CDIRECTIVE (not-after IDENT ")" "]" STRING INT FLOAT) "#" (* (not "\n")))
     (keyword IDENT
       "as" "asm" "assert" "atomic" "break" "const" "continue" "defer" "else" "enum"
       "false" "fn" "for" "go" "goto" "if" "import" "in" "interface" "is" "isreftype"
@@ -74,7 +104,7 @@
       "shared" "sizeof" "spawn" "struct" "true" "type" "typeof" "union"
       "unsafe" "__global")
 
-    (op "@[" "<<=" ">>=" ">>>=" "..." "&&" "||" "<<" ">>>" ">>" "++" "--" "==" "!=" "<="
+    (op "@[" "#[" "<<=" ">>=" ">>>=" "..." "&&" "||" "<<" ">>>" ">>" "++" "--" "==" "!=" "<="
         ">=" ":=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "&&=" "||=" ".."
         "+" "-" "*" "/" "%" "&" "|" "^" "<" ">" "=" "!" "?" "~"
         "(" ")" "[" "]" "{" "}" "," ";" "." ":"))
@@ -99,10 +129,14 @@
     (-> (CDIRECTIVE) (cdirective $1))
     (-> (import) $1)
     (-> (decl) $1)
+    ;; `$if windows { … }` 也出现在文件顶层（整段声明按平台开关）
+    (-> (ctime-if) $1)
     (-> (attrs decl) (attributed (attrs $*1) $2))
     ;; 属性表与声明之间那个换行会被 auto-semi 变成分号（`]` 在 after 名单里），
     ;; 所以要收一条带分号的 —— V 的习惯正是属性单独一行写在声明上面。
-    (-> (attrs ";" decl) (attributed (attrs $*1) $3)))
+    (-> (attrs ";" decl) (attributed (attrs $*1) $3))
+    ;; 文件级属性写在 `module` 上面：`@[has_globals]` 换行 `module main`（106 份）
+    (-> (attrs ";" "module" IDENT) (attributed (attrs $*1) (module $4))))
 
   (rule import
     (-> ("import" mod-path) (import $2))
@@ -130,14 +164,18 @@
     (-> ("[" attr-items "]") (attr $*2))
     (-> ("@[" attr-items "]") (attr $*2)))
 
+  ;; 属性表里也能用 `;` 分格：`@[short: v; xdoc: 'Show version and exit']`
   (rule attr-items
     (-> () ())
     (-> (attr-item) ($1))
-    (-> (attr-items "," attr-item) ($*1 $3)))
+    (-> (attr-items "," attr-item) ($*1 $3))
+    (-> (attr-items ";" attr-item) ($*1 $3)))
 
   (rule attr-item
     (-> (IDENT) $1)
     (-> ("if" IDENT) (cond $2))
+    ;; `@[if debug_vwatch ?]` —— 那个 `?` 是"这个编译期开关是可选的"
+    (-> ("if" IDENT "?") (cond $2 optional))
     (-> ("unsafe") $1)
     (-> (IDENT ":" expr) (kv $1 $3))
     (-> (STRING) (str $1)))
@@ -164,6 +202,10 @@
 
   (rule fn-name
     (-> (IDENT) $1)
+    ;; 挂在类型上的函数：`fn Game.new() &Game`、`fn C.malloc(int) voidptr`、
+    ;; `fn JS.Math.cos(JS.Number) JS.Number`（js 后端那一族点得更深）。209 份卡在这儿。
+    (-> (IDENT "." IDENT) (tfn $1 $3))
+    (-> (IDENT "." IDENT "." IDENT) (tfn $1 $3 $5))
     ;; 运算符重载：`fn (a Vec) + (b Vec) Vec`
     (-> ("+") $1) (-> ("-") $1) (-> ("*") $1) (-> ("/") $1) (-> ("%") $1)
     (-> ("==") $1) (-> ("<") $1) (-> (">") $1) (-> ("<=") $1) (-> (">=") $1) (-> ("!=") $1))
@@ -178,11 +220,14 @@
   (rule params
     (-> () ())
     (-> (param-list) $1)
-    (-> (param-list ",") $1))
+    (-> (param-list ",") $1)
+    (-> (param-list ";") $1)
+    (-> (param-list "," ";") $1))
 
   (rule param-list
     (-> (param) ($1))
-    (-> (param-list "," param) ($*1 $3)))
+    (-> (param-list "," param) ($*1 $3))
+    (-> (param-list ";" param) ($*1 $3)))
 
   (rule param
     (-> (IDENT type) (p $1 $2))
@@ -211,14 +256,18 @@
     (-> ("*" type) (ptr $2))
     (-> ("[" "]" type) (array $3))
     (-> ("[" expr "]" type) (fixed-array $2 $4))
-    (-> ("map" "[" type "]" type) (map $3 $5))
-    (-> ("chan" type) (chan $2))
+    (-> (MAP "[" type "]" type) (map $3 $5))
+    (-> (CHAN type) (chan $2))
     (-> ("?" type) (option $2))
     (-> ("!" type) (result $2))
     (-> ("shared" type) (shared $2))
     (-> ("atomic" type) (atomic $2))
     (-> ("fn" "(" params ")" ret) (fntype (params $*3) $5))
-    (-> ("(" types ")") (tuple $*2)))
+    (-> ("(" types ")") (tuple $*2))
+    ;; 编译期的"类型种类"：`$if T is $int { }` 里 `$int` / `$interface` / `$enum` 是 CTIME 记号
+    (-> (CTIME) (ctype $1))
+    ;; `x is none`（Option 判空）—— `none` 是关键字，在类型位置也出现
+    (-> ("none") (none)))
 
   (rule type-name
     (-> (IDENT) (tname $1))
@@ -230,6 +279,17 @@
     (-> (type) ($1))
     (-> (types "," type) ($*1 $3)))
 
+  ;; 「一看就不是表达式」的类型（nx = not-expression）。泛型实参那一格用它把
+  ;; `f[map[string]int](…)` 与 `a[i]` 分开 —— 判据是**起头那个记号**，不是语义。
+  (rule nx-type
+    (-> ("[" "]" type) (array $3))
+    (-> (MAP "[" type "]" type) (map $3 $5))
+    (-> (CHAN type) (chan $2))
+    (-> ("&" type) (ref $2))
+    (-> ("?" type) (option $2))
+    (-> ("!" type) (result $2))
+    (-> ("fn" "(" params ")" ret) (fntype (params $*3) $5)))
+
   ;; ---- 结构体 / 枚举 / 接口 / 类型别名 ------------------------------------------
 
   (rule struct-decl
@@ -237,14 +297,18 @@
     (-> ("union" type-name "{" fields "}") (union $2 $*4)))
 
   ;; 字段区里可以插 `pub:` / `mut:` / `pub mut:` 这种**段标记**
+  ;;
+  ;; 段标记后面**没有分号**：那一行以 `:` 收尾，而 `:` 不在 auto-semi 名单里（也不该在 ——
+  ;; `x := 1` 里的 `:` 也是它）。所以段标记不能当成一条普通字段，得单列一条"段标记直接接
+  ;; 下面的字段"。少这一条的代价量过：`mut:` 下面第一个字段就撞（几百份）。
   (rule fields
     (-> () ())
     (-> (field) ($1))
     (-> (";" fields) $2)
-    (-> (field ";" fields) ($1 $*3)))
+    (-> (field ";" fields) ($1 $*3))
+    (-> (section fields) ($1 $*2)))
 
   (rule field
-    (-> (section) $1)
     (-> (IDENT type) (f $1 $2))
     (-> (IDENT type "=" expr) (f $1 $2 (default $4)))
     (-> (IDENT type attrs) (f $1 $2 (attrs $*3)))
@@ -280,10 +344,10 @@
     (-> () ())
     (-> (imember) ($1))
     (-> (";" imembers) $2)
-    (-> (imember ";" imembers) ($1 $*3)))
+    (-> (imember ";" imembers) ($1 $*3))
+    (-> (section imembers) ($1 $*2)))
 
   (rule imember
-    (-> (section) $1)
     (-> (IDENT "(" params ")" ret) (m $1 (params $*3) $5))
     (-> (IDENT type) (f $1 $2))
     (-> (type-name) (embed $1)))
@@ -325,6 +389,14 @@
     (-> (";" stmts) $2)
     (-> (stmt ";" stmts) ($1 $*3)))
 
+  ;; **`if` / `match` / `$if` / `unsafe` 只写一遍，写在表达式那一侧。**
+  ;;
+  ;; 头一版把它们两边都写了（`stmt -> if-stmt` 与 `operand -> ifexpr`），结果每一个
+  ;; `if a { } else { }` 语句都有两棵树 —— 一棵 `(if …)`、一棵 `(expr (if …))`。
+  ;; 495 份文件报的 "too many concurrent parses" 就是它：语句表里每多一层 if，
+  ;; 并行栈翻一倍。这条与 nim 那边"把歧义写进语法"是同一课的另一半：
+  ;; **同一个形状只许有一处说法**。`stmt -> simple -> expr` 已经通到表达式了，
+  ;; 所以语句位置的 if 走的就是那条路，不必也不能再来一条。
   (rule stmt
     (-> (simple) $1)
     (-> (const-decl) $1)
@@ -341,17 +413,17 @@
     (-> ("defer" block) (defer $2))
     (-> ("go" expr) (go $2))
     (-> ("spawn" expr) (spawn $2))
-    (-> ("unsafe" block) (unsafe $2))
     (-> ("lock" h-exprs block) (lock (on $*2) $3))
     (-> ("lock" block) (lock $2))
     (-> ("rlock" h-exprs block) (rlock (on $*2) $3))
     (-> ("rlock" block) (rlock $2))
-    (-> ("assert" h-expr) (assert $2))
-    (-> ("assert" h-expr "," h-expr) (assert $2 (msg $4)))
+    ;; `assert` 后面**不跟块**，所以它不必走受限的 `h-` 那一路 —— 走全的 `expr`，
+    ;; 于是 `assert m == { 'a': 1 }` 与 `assert o == Opts{}` 都收得下（122 份卡在这儿）。
+    (-> ("assert" expr) (assert $2))
+    (-> ("assert" expr "," expr) (assert $2 (msg $4)))
     (-> ("asm" IDENT block) (asm $2 $3))
-    (-> (if-stmt) $1)
-    (-> (ctime-if) $1)
-    (-> (match-stmt) $1)
+    ;; `#flag` / `#include` 不只出现在顶层：`$if windows { #flag -lws2_32 }` 里也有
+    (-> (CDIRECTIVE) (cdirective $1))
     (-> (select-stmt) $1)
     (-> (for-stmt) $1))
 
@@ -376,24 +448,34 @@
     (-> ("%=") $1) (-> ("&=") $1) (-> ("|=") $1) (-> ("^=") $1)
     (-> ("<<=") $1) (-> (">>=") $1) (-> (">>>=") $1) (-> ("&&=") $1) (-> ("||=") $1))
 
-  ;; `if` 既是语句也是表达式（下面 operand 里也有一条），所以单列一格非终结符
-  (rule if-stmt
+  ;; `if` —— **只在这儿定义一次**，语句位置走 `simple -> expr -> … -> operand -> if-expr`。
+  ;; 不带 `else` 的那几支正是"当语句用"的形状，所以这一格既是表达式也是语句，不必写两遍。
+  (rule if-expr
     (-> ("if" h-expr block) (if $2 $3))
     (-> ("if" h-expr block "else" block) (if $2 $3 (else $5)))
-    (-> ("if" h-expr block "else" if-stmt) (if $2 $3 (else $5)))
+    (-> ("if" h-expr block "else" if-expr) (if $2 $3 (else $5)))
+    ;; 带绑定的 if：`if f := os.open(p) { … }` / `if mut f := … { … }`
+    ;; （Option/Result 的解包写法，154 份卡在这一条）
+    (-> ("if" IDENT ":=" h-expr block) (if-bind $2 $4 $5))
+    (-> ("if" IDENT ":=" h-expr block "else" block) (if-bind $2 $4 $5 (else $7)))
+    (-> ("if" IDENT ":=" h-expr block "else" if-expr) (if-bind $2 $4 $5 (else $7)))
+    (-> ("if" "mut" IDENT ":=" h-expr block) (if-bind (mut $3) $5 $6))
+    (-> ("if" "mut" IDENT ":=" h-expr block "else" block) (if-bind (mut $3) $5 $6 (else $8)))
+    (-> ("if" "mut" IDENT ":=" h-expr block "else" if-expr) (if-bind (mut $3) $5 $6 (else $8)))
     ;; `if x is T { }` 与 `if mut x is T { }`（类型收窄）
     (-> ("if" h-expr "is" type block) (if-is $2 $4 $5))
     (-> ("if" h-expr "is" type block "else" block) (if-is $2 $4 $5 (else $7)))
+    (-> ("if" h-expr "is" type block "else" if-expr) (if-is $2 $4 $5 (else $7)))
     (-> ("if" "mut" h-expr "is" type block) (if-is (mut $3) $5 $6))
     (-> ("if" "mut" h-expr "is" type block "else" block) (if-is (mut $3) $5 $6 (else $8))))
 
-  ;; 编译期分支：`$if windows { } $else { }`
+  ;; 编译期分支：`$if windows { } $else { }`（同样只此一处，语句位置走表达式那条路）
   (rule ctime-if
     (-> (CTIME h-expr block) (ctime $1 $2 $3))
     (-> (CTIME h-expr block CTIME block) (ctime $1 $2 $3 (else $5)))
     (-> (CTIME h-expr block CTIME ctime-if) (ctime $1 $2 $3 (else $5))))
 
-  (rule match-stmt
+  (rule match-expr
     (-> ("match" h-expr "{" arms "}") (match $2 $*4))
     (-> ("match" "mut" h-expr "{" arms "}") (match (mut $3) $*5)))
 
@@ -415,7 +497,7 @@
   (rule arm-item
     (-> (h-expr) $1)
     (-> ("[" "]" type) (array $3))
-    (-> ("map" "[" type "]" type) (map $3 $5))
+    (-> (MAP "[" type "]" type) (map $3 $5))
     (-> ("&" type) (ref $2)))
 
   (rule select-stmt
@@ -431,11 +513,31 @@
     (-> (simple block) (case $1 $2))
     (-> ("else" block) (else $2)))
 
+  ;; `for x in xs { }` 与 `for cond { }` 撞车 —— `x in xs` 本身就是一个 `in` 表达式，
+  ;; 两条产生式给同一串输入两棵树，295 份文件报的正是这一句歧义。解法是**受限并行链**
+  ;; （nim 的 `np-*`、freebasic 的 `c-*`、awk 的 `-nu` 是同一格手法）：`for` 的条件走一条
+  ;; 顶层不收 `in` 的链（f-or / f-and / f-cmp），底下三级以下与 `h-` 共用。
+  ;; 代价是 `for a && b in c { }` 这种（顶层是 `&&`、里头有 `in`）读不了 —— 语料里没有。
   (rule for-stmt
     (-> ("for" block) (for $2))
-    (-> ("for" h-expr block) (for (cond $2) $3))
+    (-> ("for" f-or block) (for (cond $2) $3))
     (-> ("for" opt-h-simple ";" opt-h-expr ";" opt-h-simple block) (for (init $2) (cond $4) (post $6) $7))
     (-> ("for" for-names "in" h-expr block) (for-in (names $*2) (values $4) $5)))
+
+  (rule f-or
+    (-> (f-and) $1)
+    (-> (f-or "||" f-and) (bin "||" $1 $3)))
+
+  (rule f-and
+    (-> (f-cmp) $1)
+    (-> (f-and "&&" f-cmp) (bin "&&" $1 $3)))
+
+  (rule f-cmp
+    (-> (h-bor) $1)
+    (-> (f-cmp cmp-op h-bor) (bin $2 $1 $3))
+    (-> (f-cmp "!" "in" h-bor) (not-in $1 $4))
+    (-> (f-cmp "is" type) (is $1 $3))
+    (-> (f-cmp "!" "is" type) (not-is $1 $4)))
 
   (rule for-names
     (-> (IDENT) ($1))
@@ -510,20 +612,31 @@
     (-> (postfix) $1)
     (-> ("-" unary-e) (un "-" $2))
     (-> ("!" unary-e) (un "!" $2))
+    ;; `?string(x)` / `?int(none)`：往 Option 类型上的转换。`?` 起头的类型加一对括号，
+    ;; 与 `T(x)` 那种"类型当函数用"的转换是同一件事，只是类型不是裸名字。
+    (-> ("?" type "(" args ")") (cast (option $2) (args $*4)))
     (-> ("~" unary-e) (un "~" $2))
     (-> ("&" unary-e) (addr $2))
     (-> ("*" unary-e) (deref $2))
-    (-> ("<-" unary-e) (recv $2))
-    (-> ("sizeof" "(" type ")") (sizeof $3))
-    (-> ("typeof" "(" expr ")") (typeof $3))
-    (-> ("isreftype" "(" type ")") (isreftype $3)))
+    (-> ("<-" unary-e) (recv $2)))
 
   (rule postfix
     (-> (operand) $1)
     (-> (postfix "." IDENT) (sel $1 $3))
-    (-> (postfix "." IDENT "[" types "]") (sel-inst $1 $3 $*5))
+    ;; `a.b[T](x)`（泛型方法）**不单列**：它与 `a.b[i]`（索引）在记号层一模一样，
+    ;; 分开它们要知道 `T` 是类型还是值 —— 那是符号表的事。115 份文件报的正是这一句歧义
+    ;; （"一个说 index、一个说 sel-inst"），而且每个 `a.b[i]` 都分叉一次，
+    ;; 并行栈的账也记在它头上。所以这儿只留索引一种读法。
     (-> (postfix "[" expr "]") (index $1 $3))
+    ;; 泛型实例化：`veb.run_at[App, Context](…)` / `cbor.encode[map[string]int](…)`。
+    ;; 与索引分得开的判据是"括号里那东西**不可能是表达式**"：要么有两格以上（索引只收一格），
+    ;; 要么是 `[]T` / `map[K]V` / `&T` / `?T` / `fn(…)` 这种一看就是类型的形状。
+    ;; 一格且长得像名字的（`a[T]`）照旧读成索引 —— 那要符号表才分得开，语法层不猜。
+    (-> (postfix "[" expr "," exprs "]") (tinst $1 $3 $*5))
+    (-> (postfix "[" nx-type "]") (tinst $1 $3))
     (-> (postfix "[" opt-expr ".." opt-expr "]") (slice $1 $3 $5))
+    ;; `os.args#[1..]`：V 的"越界不 panic"切片
+    (-> (postfix "#[" opt-expr ".." opt-expr "]") (slice-safe $1 $3 $5))
     (-> (postfix "(" args ")") (call $1 (args $*3)))
     (-> (postfix "?") (propagate $1))
     (-> (postfix "!") (propagate-err $1))
@@ -534,14 +647,24 @@
     (-> () (none))
     (-> (expr) $1))
 
+  ;; 实参表：`,` 分隔，但**表里最后一格后面那个换行会被 auto-semi 变成分号**（那一行以
+  ;; 串/数字/`)` 收尾），所以收一条"表后面跟着分号"。多行调用在 V 的语料里到处是它：
+  ;;     flag.add(…,
+  ;;         val_desc: '<search_dir>'
+  ;;     )
+  ;; 这一条与下面 elems / inits / pairs / params 四处是**同一个道理**：凡是括号里能跨行的
+  ;; 逗号表，都要认这一格分号。不认的代价量过（几百份）。
   (rule args
     (-> () ())
     (-> (arg-list) $1)
-    (-> (arg-list ",") $1))
+    (-> (arg-list ",") $1)
+    (-> (arg-list ";") $1)
+    (-> (arg-list "," ";") $1))
 
   (rule arg-list
     (-> (arg) ($1))
-    (-> (arg-list "," arg) ($*1 $3)))
+    (-> (arg-list "," arg) ($*1 $3))
+    (-> (arg-list ";" arg) ($*1 $3)))
 
   (rule arg
     (-> (expr) $1)
@@ -560,15 +683,42 @@
     (-> (IDENT) (name $1))
     (-> (ATNAME) (ctconst $1))
     (-> (CTIME) (ctconst $1))
-    (-> (IDENT "." IDENT) (qname $1 $3))
+    ;; `pkg.name` **不在这儿**：`postfix -> postfix "." IDENT`（sel）已经收了它，
+    ;; 再写一条 qname 就是同一棵树两种读法 —— 353 份文件报的正是"两个分析都成功，
+    ;; 一个说 sel 一个说 qname"。模块名与字段名分不开是**语义层**的事（要符号表），
+    ;; 语法层没有那个信息，所以这儿只留一种读法。
     (-> ("(" expr ")") (paren $2))
-    (-> ("if" h-expr block "else" block) (ifexpr $2 $3 (else $5)))
-    (-> ("match" h-expr "{" arms "}") (matchexpr $2 $*4))
+    ;; 枚举的短写法：`.macos`、`match x { .foo { … } }`、`f(family: .ip)`。
+    ;; 类型从上下文来，语法层只收"点加一个名字"。402 份文件卡在这一条。
+    (-> ("." IDENT) (evariant $2))
+    (-> ("unsafe" block) (unsafe $2))
+    ;; `sizeof` / `typeof` / `isreftype` 摆在**操作数**这一级，不在一元算符那一级 ——
+    ;; 因为它们后面还能接后缀：`typeof(x).name` 到处是它（103 份卡在这儿）。
+    ;; 泛型写法 `sizeof[gg.Color]()` 也在这儿一并收。
+    (-> ("sizeof" "(" type ")") (sizeof $3))
+    (-> ("sizeof" "[" type "]" "(" ")") (sizeof $3))
+    (-> ("typeof" "(" expr ")") (typeof $3))
+    (-> ("typeof" "[" type "]" "(" ")") (typeof $3))
+    (-> ("isreftype" "(" type ")") (isreftype $3))
+    (-> ("isreftype" "[" type "]" "(" ")") (isreftype $3))
+    (-> (if-expr) $1)
+    (-> (ctime-if) $1)
+    (-> (match-expr) $1)
     (-> ("fn" "(" params ")" ret block) (fnlit (params $*3) $5 $6))
+    ;; 带捕获表的闭包：`fn [a, mut b] (x int) int { … }`
+    (-> ("fn" "[" captures "]" "(" params ")" ret block) (fnlit (captures $*3) (params $*6) $8 $9))
     (-> (array-lit) $1)
     (-> (map-lit) $1)
     (-> (struct-lit) $1)
     (-> (nb-lit) $1))
+
+  (rule captures
+    (-> (capture) ($1))
+    (-> (captures "," capture) ($*1 $3)))
+
+  (rule capture
+    (-> (IDENT) $1)
+    (-> ("mut" IDENT) (mut $2)))
 
   ;; 数组与 map 字面量
   (rule array-lit
@@ -582,7 +732,8 @@
     (-> () ())
     (-> (pair) ($1))
     (-> (pairs "," pair) ($*1 $3))
-    (-> (pairs ";" pair) ($*1 $3)))
+    (-> (pairs ";" pair) ($*1 $3))
+    (-> (pairs ";") $1))
 
   (rule pair
     (-> (expr ":" expr) (kv $1 $3)))
@@ -590,11 +741,14 @@
   (rule elems
     (-> () ())
     (-> (elem-list) $1)
-    (-> (elem-list ",") $1))
+    (-> (elem-list ",") $1)
+    (-> (elem-list ";") $1)
+    (-> (elem-list "," ";") $1))
 
   (rule elem-list
     (-> (expr) ($1))
-    (-> (elem-list "," expr) ($*1 $3)))
+    (-> (elem-list "," expr) ($*1 $3))
+    (-> (elem-list ";" expr) ($*1 $3)))
 
   ;; 结构体字面量：`T{…}` / `pkg.T{…}` / `T[X]{…}`。裸名字起头，所以 `h-` 那一路不收它。
   (rule struct-lit
@@ -603,12 +757,18 @@
   ;; 不以裸名字起头的那几种字面量（`[]int{…}` / `map[K]V{…}` / `&T{…}`）—— `h-` 那路照收
   (rule nb-lit
     (-> ("[" "]" type "{" inits "}") (lit (array $3) $*5))
-    (-> ("map" "[" type "]" type "{" inits "}") (lit (map $3 $5) $*7)))
+    ;; 定长数组：`[boids_count]Vector{}`
+    (-> ("[" expr "]" type "{" inits "}") (lit (fixed-array $2 $4) $*6))
+    (-> (MAP "[" type "]" type "{" inits "}") (lit (map $3 $5) $*7))
+    ;; `chan T{cap: 2}` —— 通道也是"类型加一对花括号"
+    (-> (CHAN type "{" inits "}") (lit (chan $2) $*4)))
 
   (rule inits
     (-> () ())
     (-> (init-list) $1)
-    (-> (init-list ",") $1))
+    (-> (init-list ",") $1)
+    (-> (init-list ";") $1)
+    (-> (init-list "," ";") $1))
 
   (rule init-list
     (-> (init) ($1))
@@ -640,7 +800,10 @@
     (-> (h-bor) $1)
     (-> (h-cmp cmp-op h-bor) (bin $2 $1 $3))
     (-> (h-cmp "in" h-bor) (in $1 $3))
-    (-> (h-cmp "!" "in" h-bor) (not-in $1 $4)))
+    (-> (h-cmp "!" "in" h-bor) (not-in $1 $4))
+    ;; `is` / `!is` 在 h- 这一路也要有：`$if T is $int { }` 走的正是这条链（144 份）
+    (-> (h-cmp "is" type) (is $1 $3))
+    (-> (h-cmp "!" "is" type) (not-is $1 $4)))
 
   (rule h-bor
     (-> (h-band) $1)
@@ -675,15 +838,14 @@
     (-> ("!" h-unary) (un "!" $2))
     (-> ("~" h-unary) (un "~" $2))
     (-> ("&" h-unary) (addr $2))
-    (-> ("*" h-unary) (deref $2))
-    (-> ("sizeof" "(" type ")") (sizeof $3))
-    (-> ("typeof" "(" expr ")") (typeof $3)))
+    (-> ("*" h-unary) (deref $2)))
 
   (rule h-postfix
     (-> (h-operand) $1)
     (-> (h-postfix "." IDENT) (sel $1 $3))
     (-> (h-postfix "[" expr "]") (index $1 $3))
     (-> (h-postfix "[" opt-expr ".." opt-expr "]") (slice $1 $3 $5))
+    (-> (h-postfix "#[" opt-expr ".." opt-expr "]") (slice-safe $1 $3 $5))
     (-> (h-postfix "(" args ")") (call $1 (args $*3)))
     (-> (h-postfix "?") (propagate $1))
     (-> (h-postfix "!") (propagate-err $1))
@@ -700,36 +862,60 @@
     (-> (IDENT) (name $1))
     (-> (ATNAME) (ctconst $1))
     (-> (CTIME) (ctconst $1))
-    (-> (IDENT "." IDENT) (qname $1 $3))
+    ;; qname 不在这儿 —— 理由同 operand 那一段（sel 已经收了 `a.b`）
+    (-> ("." IDENT) (evariant $2))
+    (-> ("unsafe" block) (unsafe $2))
+    (-> ("sizeof" "(" type ")") (sizeof $3))
+    (-> ("sizeof" "[" type "]" "(" ")") (sizeof $3))
+    (-> ("typeof" "(" expr ")") (typeof $3))
+    (-> ("isreftype" "(" type ")") (isreftype $3))
     (-> ("(" expr ")") (paren $2))
     (-> ("[" elems "]") (array $*2))
     (-> (nb-lit) $1)))
-
 ;; ---- 量到的与还欠的 --------------------------------------------------------------
 ;;
-;; 803 状态 / 412 条产生式 / **725 处冲突**，vlang 那棵树 6183 份 .v 过 **496**（8%）。
-;; **这一份还早**，比 go 那份（87%）差得远，而差在哪儿是清楚的：
+;; 954 状态 / 473 条产生式 / 850 处冲突，vlang 那棵树 6183 份 .v 过 **3702**（60%）。
+;; 这一趟从 496（8%）走上来，一刀一刀都是量出来的 —— 判据只有语料这一个（文件头不足 1）。
 ;;
-;;   go 有权威文本可抄（go_spec.html 的 EBNF），这一份**只有语料**。
-;;   V 没有 spec EBNF、没有 .y，语言本身还在动（属性从 `[inline]` 改成 `@[inline]` 就是
-;;   这三年的事）。于是每一格形状都得从 6000 份文件里挖，而挖一格只值几十份文件。
+;; 这一趟的账（每一步都跑一遍分类器：把失败按错误话归类计数，改最大那一类，再量）：
 ;;
-;; 已经挖到并修掉的：
-;;   459 -> 461  `@[attr]`（V 现在的属性写法）与 `..`（区间，`for i in 0..10` 到处是它）
-;;   461 -> 496  属性表与声明之间那个换行会被 auto-semi 变成分号，要收一条带分号的
+;;    496 -> 1373  三刀一起：`true`/`false`/`none` 要进 auto-semi 名单（它们是关键字，
+;;                 记号类型是那个词本身，IDENT 在名单里也管不到）；`pub:` / `mut:` 段标记
+;;                 后面没有分号，得单列一条"段标记直接接下面的字段"；`operand` 里那条
+;;                 qname 与 `sel` 是同一棵树的两种读法，删掉。
+;;   1373 -> 2055  `.macos` 枚举短写法；`unsafe { … }` 当表达式；`ATNAME` 进 auto-semi
+;;                 （`const vexe = @VEXE` 那一族）；`fn Game.new()` 挂在类型上的函数；
+;;                 括号里的逗号表要认末尾那一格分号（args / elems / inits / pairs / params
+;;                 五处同一个道理）；`if f := … { }` 带绑定的 if。
+;;   2055 -> 2467  `map` / `chan` 用 `(not-after ".")` 的条件规则当关键字，且**必须摆在
+;;                 IDENT 前面**（平手归先声明的）；`for` 的条件走一条顶层不收 `in` 的
+;;                 受限链（f-or/f-and/f-cmp），`for x in xs` 的 295 份歧义就没了；
+;;                 `a#[1..]` 切片，靠 `not-after` 把"整行 CDIRECTIVE"挡在门外。
+;;   2467 -> 2606  auto-semi 新的一格 `unless-before "&&" "||"`（见 lex.js）：V 不像 Go
+;;                 那样要求续行算符写在行尾，下一行以 `&&` 起头的到处是。
+;;   2606 -> 3028  **`if` / `match` / `$if` / `unsafe` 只写一遍**（写在表达式那一侧）。
+;;                 两边都写的代价是每个 if 语句两棵树 —— 495 份的 "too many concurrent
+;;                 parses" 就是它。这是 nim 那一课的另一半：同一个形状只许一处说法。
+;;   3028 -> 3391  删掉 `a.b[T]`（与索引同形）；属性表里的 `;`；泛型实参用 nx-type
+;;                 （"一看就不是表达式"的类型）与多格类型表和索引分开；顶层 `$if`。
+;;   3391 -> 3702  CDIRECTIVE 进 auto-semi（连着两行 `#flag` 的到处是）；`?string(x)`
+;;                 往 Option 上的转换；文件级属性 `@[has_globals]` 写在 `module` 上面；
+;;                 `sizeof`/`typeof`/`isreftype` 从一元算符那一级搬到操作数那一级
+;;                 （`typeof(x).name` 要能接后缀）；`chan T{cap: 2}`。
 ;;
-;; 还没挖的（每一条都是从失败清单头几条里读出来的，位置具体）：
-;;   1. **725 处冲突**本身 —— 比 go 那份（48）高一个数量级。最可疑的三处：
-;;      `simple` 里 `exprs assign-op exprs` 与光一个 `expr` 撞；`arm` 是"表达式 + 块"
-;;      而 `h-expr` 后面也能跟块；`if` / `match` 既是语句又是表达式（各写了两遍）。
-;;      照 go 那边的经验，这一格该先把冲突清单按"哪条产生式参与得最多"排一遍。
-;;   2. 泛型函数声明 `fn f[T]()`：报 "unexpected `[` expected `(`"，说明 `generics`
-;;      那一格没接上（bench/bench_closure.v）。
-;;   3. 非 ASCII 字符（`—`）在某些位置出现 —— 词法器的 `alpha` 是 ASCII 的，
-;;      标识符与串之外的地方碰上它就停（bench/bench_gc.v）。
-;;   4. 长文件上的 `too many concurrent parses`（bench/crypto/ecdsa/ecdsa.v）—— 与 725
-;;      处冲突是同一件事。
+;; 反过来被量否掉的（记下来免得再试）：CDIRECTIVE 的 `not-after` 名单里**不能有 `}`** ——
+;; `}` 换一行接着写 `#flag -luser32` 是常见排版，加进去就把那一族挡死（净 -1，量过）。
 ;;
-;; 判据只有语料这一个（文件头不足 1 已经写明）。所以这一份的下一刀不是"再想想语法该
-;; 怎么写"，而是**把失败清单按错误话分类计数**，从最大的那一类开始 —— go 那边就是这么
-;; 从 3711 走到 7187 的（一刀值 2571 份）。
+;; 还欠的（按剩下的类由大到小，位置都具体）：
+;;   1. **串插值不切开**（文件头不足 2）：`'${os.join_path(out, 'index.html')}'` —— 插值里
+;;      又有单引号，我们那条 STRING 规则在第一个 `'` 就收尾。约 290 份卡在这儿。
+;;      修它要一格能递归回表达式的词法器，或者一条"串里嵌语法"的规则 —— 那是另一件事，
+;;      不是往这份语法里再加产生式能解决的。
+;;   2. 剩下约 240 份 `too many concurrent parses`。850 处冲突还是比 go（48）高一个
+;;      数量级，下一刀该按"哪条产生式参与冲突最多"排一遍，而不是继续从失败清单猜。
+;;   3. `result.$(field.name)` 编译期字段访问（`$(` 现在既不是 CTIME 也不是算符）。
+;;   4. `mut volatile sum := …`（`volatile` 还不是关键字）。
+;;
+;; 方法本身比这些数字重要：**分类、改最大的一类、再量**。go 那边一刀值 2571 份，
+;; 这边七刀值 3206 份。猜一格改一格是走不动的。
+

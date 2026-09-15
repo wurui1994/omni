@@ -241,7 +241,8 @@ function condOk(cond, prevType, prevEnd, at) {
  *   keywords : Map<tokenType, Set<text>>
  *   keywordsFold : Set<tokenType> —— 这几格记号类型的关键字不分大小写（basic 那一族）
  *   stops    : 扫到就收工的那几段文本（`#!eof` 一族）
- *   autoSemi : `{type, text, after:Set}` 或 null —— 跨过换行时补的那一格（go 的 ASI）
+ *   autoSemi : `{type, text, after:Set, unlessBefore:[string]}` 或 null —— 跨过换行时补的那一格
+ *              （go 的 ASI）。`unlessBefore` 里那几段文本挡住它：下一格文本以它们起头就不补。
  *   indent   : `{nl, indent, dedent, brackets}` 或 null —— 缩进即块结构那一族（python / nim）
  *   joinAfter: Set<tokenType> 或 null —— 落在这些记号后面的换行是**续行**（nim 的 optInd）
  */
@@ -345,20 +346,40 @@ export function readLexSpec(node, diags) {
     if (h === 'auto-semi') {
       /* `(auto-semi ";" after NAME NUMBER ")" "}")`：跨过换行时，若上一个记号在 after
        * 那张表里，就补一格。Go 的规范把它写成词法规则（"分号自动插入"），V 照抄。
-       * 文件末尾也补一格 —— 不然最后一条语句收不了尾。 */
+       * 文件末尾也补一格 —— 不然最后一条语句收不了尾。
+       *
+       * 尾巴上还能跟一句 `unless-before "&&" "||"`：**下一格文本以这几段起头就不补**。
+       * 为什么要有它：Go 要求续行的算符写在行尾，所以"看上一个记号"够了；V 不要求，
+       * 语料里到处是
+       *     if a != 'HEAD'
+       *         && os.execute(…).exit_code == 0 {
+       * 这时上一个记号（STRING）在 after 表里，可下一行是那个表达式的下半截。
+       * 判据只能是"往前看一眼"，而这一眼词法器出得起 —— 补分号这件事发生在跳过空白
+       * **之后**、读下一格记号**之前**，光标正停在那儿。
+       *
+       * 只收字面文本、不收记号类型：这一格要在"还没切出记号"的时候判，手上只有字符。 */
       const s = it.items[1];
       if (!isStr(s) || s.value.length === 0) { diags.error(it.span, '(auto-semi ";" after T...) needs the text to insert'); continue; }
       const kw = it.items[2];
       if (!isAtom(kw) || kw.value !== 'after') { diags.error(it.span, "(auto-semi \";\" after T...) needs the word 'after'"); continue; }
       const after = new Set();
+      const unlessBefore = [];
+      let mode = 'after';
       for (const x of it.items.slice(3)) {
+        if (isAtom(x) && x.value === 'unless-before') { mode = 'unless'; continue; }
+        if (mode === 'unless') {
+          if (isStr(x) && x.value.length > 0) unlessBefore.push(x.value);
+          else diags.error(x === null || x === undefined ? it.span : x.span, 'an unless-before entry must be a non-empty string literal');
+          continue;
+        }
         if (isAtom(x)) after.add(x.value);
         else if (isStr(x)) after.add(litName(x.value));
         else diags.error(x === null || x === undefined ? it.span : x.span, 'an auto-semi trigger must be a token name or a string literal');
       }
       if (after.size === 0) diags.error(it.span, '(auto-semi ...) needs at least one trigger token');
+      if (mode === 'unless' && unlessBefore.length === 0) diags.error(it.span, '(auto-semi ... unless-before "…") needs at least one string');
       if (autoSemi !== null) diags.error(it.span, 'a lexer spec may have at most one (auto-semi ...) form');
-      autoSemi = { type: litName(s.value), text: s.value, after };
+      autoSemi = { type: litName(s.value), text: s.value, after, unlessBefore };
       continue;
     }
     if (h === 'token') {
@@ -632,7 +653,13 @@ export function lexText(spec, file, diags) {
     //          文件尾也补一格 —— 不然最后一条语句收不了尾。
     if (spec.autoSemi !== null && prevType !== null && spec.autoSemi.after.has(prevType)) {
       const gap = src.slice(prevEnd, i >= src.length ? src.length : i);
-      if (i >= src.length || gap.includes('\n')) {
+      let blocked = false;
+      if (i < src.length) {
+        for (const t of spec.autoSemi.unlessBefore) {
+          if (src.startsWith(t, i)) { blocked = true; break; }
+        }
+      }
+      if (!blocked && (i >= src.length || gap.includes('\n'))) {
         const span = mkSpan(file, prevEnd, prevEnd);
         toks.push({ type: spec.autoSemi.type, node: { kind: 'atom', value: spec.autoSemi.text, span }, span });
         prevType = spec.autoSemi.type;
