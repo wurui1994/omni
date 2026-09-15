@@ -438,6 +438,33 @@ chez 的 `Lsrc` 骨架 17 种（归成 11 族）、go 的 151 格 `Op` 塌成约
 V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
 **四个独立来源都落在 20–30 这一档 —— 这就是"需要多少节点"的答案。**
 
+### A.6.1 第一批（13 格）已经落地 —— 量出来的现状
+
+`src/core/graph/nodes.js` 里那 13 格：
+`const · ref · bind · set · binop · unop · call · prim · branch · loop · region · func · ret`。
+选它们的判据是"够跑通一门语言含全部基础要素的完整例子"，而**四样刻意不给节点**
+（文件头写着出处）：type 是端口的 sort、stmt 是 `effect` 边、decl 就是 `bind`、
+**print 是 `prim` 的一格**。
+
+配套四份：`graph.js`（建节点时对着声明查每一格入端口 = G1）、
+`eval.js`（调度器 + 默认解释器，`lazy` 端口与 `may-early-exit` 切段都在这儿）、
+`contract.js`（契约五问 + `interp` / `sx` / `js` 三份答卷 + 算出来的 `gaps()`）、
+`tests/graph/run.js`（**语言 × 后端的矩阵**）。
+
+九门语言各一份 `ext/<lang>/examples/basics.*` + `ext/<lang>/tograph.js`，期望输出
+只有一份（`15 / 120 / 7 / ok`）：**9 × 3 = 27 格全绿**。缺的第十门是 cpp ——
+它连 7 行的例子都过不了语法（附录 A.5 第 3 笔账，驱动器缺"回问"机制），
+所以不进矩阵，理由记在测试文件头。
+
+矩阵抓出来的三处真差别（都不是"某门语言的特例"，都是判据写错）：
+1. 拿 `sort` 当"是不是值"的判据 —— Scheme 的函数体最后一格表达式就是值、
+   CL 的 `region` sort 是 stat 但有值出端口。改成读 **out-ports**，两门一起对。
+2. `(else …)` 是个包装 —— go / V / awk 三处同一个坑。
+3. **形参装在一格无名的表里**（mojo / nim）—— 无名表的孩子是全部 items。
+   少这一条，每个函数的第一个形参被当成标签吃掉。
+
+下一批按 A.5 的顺序推：`multi-value`（多出端口）、`scope-exit`、`record` 那一族。
+
 ### A.7 附属节点（不逐个列，按挂点分七类）
 
 1. **挂在一条 `value` 边上**：sbcl 的 `cast` 与 8 个 `lvar-*-annotation`、
