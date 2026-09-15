@@ -121,9 +121,15 @@ export const NODES = new Map([
   // freebasic 的 `Destructor` 与 `Scope` / cpp 的 RAII —— 全落这一格。
   //
   // 它的语义只有三句话，而且**三句话都由调度器给，不由语言给**：
-  //   1. 在**注册的那一刻**记下这段动作（实参当场求值 —— go 的 defer 就是这条）；
+  //   1. 注册的那一刻只记下"这段动作"，**动作里的值到出口那一刻才求**；
   //   2. 宿主 region 出口时**逆序**跑；
   //   3. **早退也跑**（`may-early-exit` 切段之后那一段仍要经过出口）。
+  //
+  // 第 1 条原来写的是"实参当场求值 —— go 的 defer 就是这条"，**那句话是错的**：
+  // 手搭一格图量过（`tests/graph/run.js` 的 `hand+exit-when`），interp 与 js 两条腿
+  // 都在出口那一刻才求值。这样对 CL 的 `unwind-protect` 与 nim 的 `defer:` 是对的，
+  // 对 go / V 的 `defer f(x)` **不对**（它们的实参在注册那一刻就算好了）。
+  // 要两家都对，得把 `action` 拆成"被调者 + 实参各一格端口" —— 那是一笔记下来的账。
   N('scope-exit', 'stat', [{ name: 'action', sem: SEM.body }], {
     effects: ['writes'], outs: [],
     doc: 'defer（go/nim/V）/ unwind-protect（CL）/ <close>（lua）/ with（mojo）/ RAII（cpp）',

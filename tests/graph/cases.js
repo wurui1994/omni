@@ -118,6 +118,28 @@ export const HAND = [
     ]),
   },
   {
+    // **出口动作在"跑到出口那一刻"求值**，不是在注册那一刻 ——
+    // 这一格钉住的是现在**真实**的语义（不是当初写在注释里的那句）：
+    //   x = 1; scope-exit{ print x }; x = 2   →  印 2
+    // 对 CL 的 `unwind-protect`（清理表在出口求值）与 nim 的 `defer:`（块作用域）**是对的**；
+    // 对 go / V 的 `defer f(x)` **不对** —— 它们的实参在注册那一刻就算好了（该印 1）。
+    // 要两家都对，`scope-exit` 得把 action 拆成"被调者 + 实参各一格端口"，
+    // 注册时把实参算进临时量。那笔账记在 docs/design/node-graph-contract.md A.6.1。
+    name: 'hand+exit-when',
+    expect: ['2'],
+    graph: () => program([
+      node('region', {
+        body: [
+          node('bind', { init: lit(1) }, { name: 'x' }),
+          node('scope-exit', {
+            action: [node('prim', { args: [node('ref', {}, { name: 'x' })] }, { name: 'print' })],
+          }),
+          node('set', { value: lit(2) }, { name: 'x' }),
+        ],
+      }),
+    ]),
+  },
+  {
     // continue **照跑步进**（`post` 端口那一条）。语言例子里 go 那份也压到了，
     // 这一条把它单独钉住：步进缀在体末尾的老写法在这儿是死循环。
     name: 'hand+continue-post',
