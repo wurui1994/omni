@@ -799,6 +799,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       if (headOf(body) !== 'compound') continue;
       for (const im of readBodyMembers(body)) {
         if (im.name === null || im.type === null) continue;
+        /* 属性体里那条 `alias` **不是一格字段**（第二百五十三刀）：等号右边那格说的是"指着谁"，
+           不是初值 —— 当初值降就报"认不出基类型 'no-type'"（142-propalias.jnc 量出来的）。 */
+        if ((im.storage ?? []).includes('alias') || (im.storage ?? []).includes('typedef')) continue;
         if (im.shape !== 'data' && im.shape !== 'array' && im.shape !== 'fnptr') continue;
         const ini = memberInit(im);
         if (ini === null) continue;
@@ -876,6 +879,9 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       if (r.type.k === 'class') return true;
       return r.type.k === 'struct' && aggCtors.has(r.type.name ?? '');
     });
+    /** 这一格里有要**建单子**的多播吗（事件、bindable 属性 / bindable data）。 */
+    const hasMc = (a) => a.members.some((m) => m.shape === 'event'
+      || (m.type?.mods ?? []).includes('bindable'));
     for (let pass = 0; pass < pending.length + 1; pass += 1) {
       let grew = false;
       for (const a of pending) {
@@ -883,9 +889,11 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         if (cls === null || synth.has(cls) || methods.has(`${cls}$construct`)) continue;
         if (!needsCtor(a, env) || otherReason(a)) continue;
         const bs = (aggBases.get(cls) ?? []).filter((b) => hasCtorOf(b));
-        /* 合成的**理由**有四样：基类要构造、字段带初值、内嵌的对象、以及**有静态构造**
-           （那一格实例构造里就只有那道闸门，193-staticctorns.jnc）。 */
-        if (bs.length === 0 && !fieldInits.has(cls) && !hasEmbedded(a) && !hasStaticCtor(a)) continue;
+        /* 合成的**理由**有五样：基类要构造、字段带初值、内嵌的对象、**有静态构造**
+           （那一格实例构造里就只有那道闸门，193-staticctorns.jnc）、以及**有一格多播要建单子**
+           （事件与 bindable 属性，第二百五十二 / 二百五十三刀 —— 不建的话第一次通知踩空引用）。 */
+        if (bs.length === 0 && !fieldInits.has(cls) && !hasEmbedded(a) && !hasStaticCtor(a)
+          && !hasMc(a)) continue;
         synth.set(cls, { bases: bs, agg: a });
         grew = true;
       }
@@ -1138,7 +1146,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    * 那时候读要 `pload`），成员那一格是**字段**（`<东家>$<属性>$m_value`）。
    * 聚合体/变体那几格明说不收（读法不是一句 `var`）。
    */
-  const genAutoget = (nameSrc, emitName, type, selfInfo, autoType = null, autoName = null) => {
+  const genAutoget = (nameSrc, emitName, type, selfInfo, autoType = null, autoPath = null) => {
     const mods = type?.mods ?? [];
     /* **`autoget` 那个词写在体里那一格存储上**（`int property m_v { int autoget m_value; … }`，
        141-propfullmem.jnc）：与写在属性上（`int autoget property m_v;`）是同一件事 ——
@@ -1163,10 +1171,13 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       && !['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr', 'class'].includes(ty.k)) {
       acct(`属性 '${emitName}' 生成的取值器落在 ${ty.k} 上（读法不是一句 var）还没接`); return false;
     }
-    /* 那格存储的**名字**由写的人定（`autoget int m_x;`，第二百五十一刀）—— 默认才是
-       `m_value`（prop_autoget.rst:26）。拿默认名去发就是发一个谁也没声明过的全局。 */
-    const storage = `${emitName}$${autoName ?? 'm_value'}`;
-    const boxed = (gLifted.has(nameSrc) || gLifted.has(autoName ?? 'm_value')) && liftable(ty);
+    /* 那格存储**在哪儿**由扫那一遍定（`autoPath`）：默认是 `<属性>$m_value`
+       （prop_autoget.rst:26），体里那格字段带 `autoget` 时是 `<属性>$<那个名字>`，
+       而体里那条 `autoget alias m_value = m_av;` 时**压根不在属性这一层** —— 它就是外层
+       那格成员 `m_av`（第二百五十三刀）。拿默认名去发就是发一个谁也没声明过的名字。 */
+    const storage = autoPath ?? `${emitName}$m_value`;
+    const boxed = (gLifted.has(nameSrc) || gLifted.has(storage.slice(storage.lastIndexOf('$') + 1)))
+      && liftable(ty);
     const read = selfInfo === null
       ? (boxed ? `(pload (var ${storage}))` : `(var ${storage})`)
       /* 一整块那一格（variant）**不 pload**：那个字段自己就是那段内存，它的地址就是值。 */
@@ -1306,7 +1317,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       if (!dataProp && emitPropBody(m.at, emitName, self0, null, store, true) === true) propDone.add(m.at);
       /* 那对花括号里没写取值器（或压根没有花括号）时，`autoget` 那一格自己生成一个
          —— `autoget` 写在属性上、还是写在体里那格存储上，两种写法都在这儿收（`pr1.auto`）。 */
-      genAutoget(m.name, emitName, m.type, self0, pr1?.auto ?? null, pr1?.autoName ?? null);
+      genAutoget(m.name, emitName, m.type, self0, pr1?.auto ?? null, pr1?.autoPath ?? null);
       /* `bindable` 那一格的存值器同理是生成的（同值不通知）—— 人写了的不动。 */
       genAutoset(emitName, m.type, self0);
     }
@@ -1362,7 +1373,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   /* 顶层那几格属性的 `autoget` 取值器（两种写法都在这张表里：`int autoget property g;` 与
      `property g { … }`）—— 写了取值器的那一格由上面那两条路发，这儿只补没写的。 */
   for (const [nameSrc, pr] of gProps) {
-    genAutoget(nameSrc, pr.emit, pr.type, null, pr.auto ?? null, pr.autoName ?? null);
+    genAutoget(nameSrc, pr.emit, pr.type, null, pr.auto ?? null, pr.autoPath ?? null);
     /* `bindable` 那一格的存值器同理是生成的（同值不通知，第二百四十九刀）—— 人写了的不动。 */
     genAutoset(pr.emit, pr.type, null, nameSrc);
   }

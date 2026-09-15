@@ -709,13 +709,14 @@ export function makeFnEnv(o) {
    * 调用去叫一个不存在的函数。
    */
   /**
-   * **一格属性生成的事件叫什么**（第二百五十一刀，73-propfullauto.jnc）：默认名是
-   * `m_onChanged`（prop_bindable.rst:23-29），可体里写了 `bindable event m_e();` 时就是 `m_e`
-   * —— 名字由写的人定，扫那一遍记在 `mc` 上（prop_full.rst:34 那句"体里那格带修饰词的成员
-   * 让整格属性也带上它"）。两样都没有就是"这一格不是 bindable"，答 null。
+   * **一格属性生成的事件在哪儿**（第二百五十一 / 二百五十三刀）：答的是**方言那一侧的名字**
+   * （字段名或量名）。默认是 `<属性>$m_onChanged`（prop_bindable.rst:23-29）；体里写了
+   * `bindable event m_e();` 时是 `<属性>$m_e`；体里写了 `bindable alias m_onChanged = m_onAny;`
+   * 时**压根不在属性这一层** —— 就是外层那格成员 `m_onAny`（142-propalias.jnc 里两格属性
+   * 共用同一格单子，靠的正是这一条）。三样都没有就是"这一格不是 bindable"，答 null。
    */
-  const mcNameOf = (pr) => (pr?.mc
-    ?? ((pr?.type?.mods ?? []).includes('bindable') ? 'm_onChanged' : null));
+  const mcPathOf = (pr) => (pr?.mcPath
+    ?? ((pr?.type?.mods ?? []).includes('bindable') ? `${pr.emit}$m_onChanged` : null));
   const propPlace = (pr, selfCode) => {
     const hasFn = (n) => methods.has(n) || fns.has(n);
     const g = `${pr.emit}$get`;
@@ -1349,29 +1350,29 @@ export function makeFnEnv(o) {
         }
         const pr0 = aggProps.get(agg0)?.get(pn);
         if (pr0 === undefined) { acct(`bindingof('${pn}')：'${agg0}' 上查不着那格属性`); return null; }
-        const mn0 = mcNameOf(pr0);
+        const mn0 = mcPathOf(pr0);
         if (mn0 === null) {
           acct(`bindingof('${pn}')：那格属性不是 bindable（没有生成的事件）`); return null;
         }
-        return { shape: 'ptr', code: `(pfield ${ob.code} ${pr0.emit}$${mn0})`, type: ty0 };
+        return { shape: 'ptr', code: `(pfield ${ob.code} ${mn0})`, type: ty0 };
       }
       const key0 = headOf(inner) === 'name' ? String(named(inner)?.text?.value ?? '') : null;
       if (key0 === null) { acct('bindingof 里头不是一格名字'); return null; }
       const gp = gProps.get(key0);
       if (gp !== undefined) {
-        const mn = mcNameOf(gp);
+        const mn = mcPathOf(gp);
         if (mn === null) {
           acct(`bindingof('${key0}')：那格属性不是 bindable（没有生成的事件）`); return null;
         }
-        return { shape: 'var', code: `${gp.emit}$${mn}`, type: ty0 };
+        return { shape: 'var', code: mn, type: ty0 };
       }
       const mp = self === null ? undefined : aggProps.get(self.agg)?.get(key0);
       if (mp !== undefined) {
-        const mn = mcNameOf(mp);
+        const mn = mcPathOf(mp);
         if (mn === null) {
           acct(`bindingof('${key0}')：那格属性不是 bindable（没有生成的事件）`); return null;
         }
-        return { shape: 'ptr', code: `(pfield (var $this) ${mp.emit}$${mn})`, type: ty0 };
+        return { shape: 'ptr', code: `(pfield (var $this) ${mn})`, type: ty0 };
       }
       acct(`bindingof('${key0}')：查不着那格属性`); return null;
     }

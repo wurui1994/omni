@@ -290,38 +290,49 @@ export function scanAggs(tree, env, ovl = new Map()) {
            *     才叫 `m_value`，prop_autoget.rst:26）；
            *   - `bindable event m_e();` —— 同理让整格属性 bindable，`bindingof(属性)` 说的就是
            *     它（默认名才是 `m_onChanged`，prop_bindable.rst:23-29）。
-           * 所以两个名字都记下来（`autoName` / `mc`）—— 拿默认名去发就是发一个不存在的全局。
+           * 所以两个名字都记下来（`autoPath` / `mcPath`）—— 拿默认名去发就是发一个不存在的全局。
+           * 体里那条 `alias` 同理（第二百五十三刀）：那两格**不生成**，用的是外层已有的那格。
            */
           let auto0 = null;
-          let autoName0 = null;
-          let mcName0 = null;
+          let autoPath0 = null;
+          let mcPath0 = null;
+          const emit1 = owner === null ? ft.name : `${owner}$${ft.name}`;
           const body1 = named(n)?.body;
           if (headOf(body1) === 'compound') {
             for (const im of readBodyMembers(body1)) {
-              if (im.name === null || im.type === null) continue;
-              const iws = [...(im.storage ?? []), ...(im.type.mods ?? [])];
+              if (im.name === null) continue;
+              const iws = [...(im.storage ?? []), ...(im.type?.mods ?? [])];
+              if (iws.includes('alias')) {
+                const tv = memberInit(im)?.value ?? null;
+                const tn = headOf(tv) === 'name' ? String(named(tv)?.text?.value ?? '') : null;
+                if (tn === null) continue;
+                if (iws.includes('autoget')) autoPath0 = owner === null ? tn : `${owner}$${tn}`;
+                if (iws.includes('bindable')) mcPath0 = owner === null ? tn : `${owner}$${tn}`;
+                continue;
+              }
+              if (im.type === null) continue;
               if (im.shape === 'event') {
                 store.set(im.name, im.type);
-                if (iws.includes('bindable')) mcName0 = im.name;
+                if (iws.includes('bindable')) mcPath0 = `${emit1}$${im.name}`;
                 continue;
               }
               if (im.shape !== 'data') continue;
               store.set(im.name, im.type);
               if (iws.includes('autoget') || iws.includes('bindable')) {
-                auto0 = im.type; autoName0 = im.name;
+                auto0 = im.type; autoPath0 = `${emit1}$${im.name}`;
               }
             }
           }
           const mods = ft.mods ?? [];
           if (mods.includes('autoget') || mods.includes('bindable')) store.set('m_value', ft);
-          if (mods.includes('bindable') && mcName0 === null) mcName0 = 'm_onChanged';
+          if (mods.includes('bindable') && mcPath0 === null) mcPath0 = `${emit1}$m_onChanged`;
           gProps.set(ft.name, {
-            emit: owner === null ? ft.name : `${owner}$${ft.name}`,
+            emit: emit1,
             type: ft,
             store,
             auto: auto0,
-            autoName: autoName0,
-            mc: mcName0,
+            autoPath: autoPath0,
+            mcPath: mcPath0,
           });
         }
       }
@@ -514,27 +525,48 @@ export function scanAggs(tree, env, ovl = new Map()) {
                （`int autoget property m_v;`）同一件事，差别只在"类型听谁的"。所以把那一格的
                类型记下来（`auto`），发的那一层照它生成。 */
             let auto = null;
-            let autoName = null;
-            let mcName = null;
+            let autoPath = null;
+            let mcPath = null;
+            const emit0 = `${emitName}$${m.name}`;
             const body1 = named(m.at)?.body;
             /* **简写取值器那对花括号里是语句、不是成员表**（第一百三十九刀，140-propgetbody.jnc
                里 `int t = m_twice;` 是取值器体里的**局部量**）—— 照成员表读就等于给这个类
                凭空添了一格"写了初值的字段"，于是造对象那一处报"字段写了初值可它没有构造"。 */
             if (headOf(body1) === 'compound' && !hasStatements(body1)) {
               for (const im of readBodyMembers(body1)) {
-                if (im.name === null || im.type === null) continue;
-                const ims = [...(im.storage ?? []), ...(im.type.mods ?? [])];
+                if (im.name === null) continue;
+                const ims = [...(im.storage ?? []), ...(im.type?.mods ?? [])];
+                /**
+                 * **属性那一层里的 `alias`**（第二百五十三刀，142-propalias.jnc）：**等号右边那格
+                 * 才是真东西**（`Parser::declareAlias`，jnc_ct_Parser.cpp:1346-1365 ——
+                 * 带 `bindable` 就 `setOnChanged(alias)`、带 `autoget` 就 `setAutoGetValue(alias)`）。
+                 * 所以这两句的意思是"这格属性的存储/事件**不生成**，就用外层已经有的那格成员"，
+                 * 左边那个名字只是属性这一层里的**另一个名字**（`alias doesn't need a type`）。
+                 */
+                if (ims.includes('alias')) {
+                  const tv = memberInit(im)?.value ?? null;
+                  const tn = headOf(tv) === 'name' ? String(named(tv)?.text?.value ?? '') : null;
+                  if (tn === null) continue;                 // 认不出目标：那一格照旧记账（发的那层）
+                  if (ims.includes('autoget')) {
+                    autoPath = tn;
+                    const tm = a.members.find((x) => x.name === tn && x.type !== null);
+                    auto = tm === undefined ? null : tm.type;
+                  }
+                  if (ims.includes('bindable')) mcPath = tn;
+                  continue;
+                }
+                if (im.type === null) continue;
                 /* 体里那格**事件**（`bindable event m_e();`，第二百五十一刀）：名字是写的人定的
                    —— 存值器体里裸写它就是"通知"，`bindingof(属性)` 说的也是它。 */
                 if (im.shape === 'event') {
                   propStore.set(im.name, im.type);
-                  if (ims.includes('bindable')) mcName = im.name;
+                  if (ims.includes('bindable')) mcPath = `${emit0}$${im.name}`;
                   continue;
                 }
                 if (im.shape === 'data') {
                   propStore.set(im.name, im.type);
                   if (ims.includes('autoget') || ims.includes('bindable')) {
-                    auto = im.type; autoName = im.name;
+                    auto = im.type; autoPath = `${emit0}$${im.name}`;
                   }
                   /* **体里那格字段写了初值**（`property m_p { int m_v = 7; … }`）：它就是这个类的
                      一格字段（`C$m_p$m_v`），所以"这一格里有初值"要记上 —— 合成构造那一步
@@ -545,13 +577,13 @@ export function scanAggs(tree, env, ovl = new Map()) {
             }
             const mods2 = m.type?.mods ?? [];
             if (mods2.includes('autoget') || mods2.includes('bindable')) propStore.set('m_value', m.type);
-            if (mods2.includes('bindable') && mcName === null) mcName = 'm_onChanged';
+            if (mods2.includes('bindable') && mcPath === null) mcPath = `${emit0}$m_onChanged`;
             ps.set(m.name, {
-              name: m.name, owner: emitName, emit: `${emitName}$${m.name}`, type: m.type, at: m.at,
+              name: m.name, owner: emitName, emit: emit0, type: m.type, at: m.at,
               store: propStore,
               auto,
-              autoName,
-              mc: mcName,
+              autoPath,
+              mcPath,
             });
             continue;
           }
@@ -570,6 +602,9 @@ export function scanAggs(tree, env, ovl = new Map()) {
               name: m.name, owner: emitName, emit: `${emitName}$${m.name}`, type: m.type, at: m.at,
               store: propStore,
               auto: m.type,
+              autoPath: `${emitName}$${m.name}$m_value`,
+              mcPath: (m.type.mods ?? []).includes('bindable')
+                ? `${emitName}$${m.name}$m_onChanged` : null,
               data: true,
             });
             continue;
@@ -825,8 +860,13 @@ export function scanAggs(tree, env, ovl = new Map()) {
               const store = new Map();
               const mods = t.mods ?? [];
               if (mods.includes('autoget') || mods.includes('bindable')) store.set('m_value', t);
+              const emit2 = owner === null ? t.name : `${owner}$${t.name}`;
               gProps.set(t.name, {
-                emit: owner === null ? t.name : `${owner}$${t.name}`, type: t, store,
+                emit: emit2,
+                type: t,
+                store,
+                autoPath: `${emit2}$m_value`,
+                mcPath: mods.includes('bindable') ? `${emit2}$m_onChanged` : null,
               });
             }
 
@@ -839,11 +879,14 @@ export function scanAggs(tree, env, ovl = new Map()) {
             if (bdata) {
               const store2 = new Map();
               store2.set('m_value', t);
+              const emit3 = owner === null ? t.name : `${owner}$${t.name}`;
               gProps.set(t.name, {
-                emit: owner === null ? t.name : `${owner}$${t.name}`,
+                emit: emit3,
                 type: t,
                 store: store2,
                 auto: t,
+                autoPath: `${emit3}$m_value`,
+                mcPath: `${emit3}$m_onChanged`,
                 data: true,
               });
             }
