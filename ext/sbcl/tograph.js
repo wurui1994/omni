@@ -13,7 +13,7 @@ import {
   node, lit, program, bin,
 } from '../../src/core/graph/graph.js';
 import {
-  head, kids, text, symName, asList, counted, branchOf, listNew, indexGet, indexSet,
+  head, kids, text, symName, asList, counted, branchOf, listNew, indexGet, indexSet, destructure,
 } from '../../src/core/graph/fromtree.js';
 
 // 走 datum 树的那几个小函数与 chez **共用一份**（fromtree.js）—— 见那边的注释。
@@ -85,6 +85,15 @@ function toNode(x) {
       then: many(rest.slice(1)),
     });
     case 'progn': return node('region', { body: many(rest) });
+    // 多值：CL 是**四门语言里唯一有专门形式的**（`values` / `multiple-value-bind`）——
+    // go / lua 靠 `return a, b`、nim 靠元组，落到的是同一对节点（values / 一串 pick）
+    case 'values': return node('values', { args: many(rest) });
+    case 'multiple-value-bind': {
+      const names = (asList(rest[0]) ?? []).map((p) => symName(p));
+      return node('region', {
+        body: [...destructure(names, toNode(rest[1])), ...many(rest.slice(2))],
+      });
+    }
     // `(unwind-protect body cleanup…)` —— 与 go 的 defer **同一格节点**：
     // 一格 region 装着"先注册清理、再跑 body"。CL 那七种 cleanup 都是这个形状。
     case 'unwind-protect': return node('region', {

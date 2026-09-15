@@ -15,7 +15,7 @@ import {
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit,
-  recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf,
+  recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, destructure,
 } from '../../src/core/graph/fromtree.js';
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
@@ -71,6 +71,9 @@ function toNode(x) {
       return un(leaf(op) === 'not' ? 'not' : leaf(op), toNode(a));
     }
     case 'array-lit': return listNew(many(kids(x)));
+    // `(a, b)` 元组 -> values（多值的生产侧）。nim 用元组表达"一次返回两格"，
+    // CL 用 `values`、go/lua 用 `return a, b` —— **同一对节点**
+    case 'tuple-lit': return node('values', { args: many(kids(x)) });
     // `xs[i]` -> index-get（nim 从 0 起，不用减）
     case 'bracket': {
       const sub = kids(part(x, 'args'))[0];
@@ -83,12 +86,18 @@ function toNode(x) {
     }
     // `var a = 1` / `let a = 1` / `const a = 1` —— 一段能声明好几格
     case 'var-section': case 'let-section': case 'const-section': {
-      return kids(x).filter((y) => tag(y) === 'item').map((it) => {
+      // `let (lo, hi) = f()` —— 树上是一格 `untuple`：N 个名字对 1 个右值 ⇒ 多值的消费侧
+      const untuples = kids(x).filter((y) => tag(y) === 'untuple').flatMap((u) => {
+        const names = kids(part(u, 'names')).map((n) => nameOf(n));
+        return destructure(names, toNode(kids(part(u, 'init'))[0]));
+      });
+      const items = kids(x).filter((y) => tag(y) === 'item').map((it) => {
         const init = part(it, 'init');
         return node('bind', {
           init: init === undefined ? lit(null) : toNode(kids(init)[0]),
         }, { name: nameOf(part(it, 'names')) });
       });
+      return [...untuples, ...items];
     }
     case 'assign': {
       const [op, lhs, rhs] = kids(x);

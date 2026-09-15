@@ -604,7 +604,7 @@ V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
  4 机器  record-new / field-get / field-set  go lua nim vlang
  7 机器  list-new / index-get / index-set    chez go lua mojo nim sbcl vlang
  5 机器  loop-exit           go lua mojo nim vlang
- 2 能力  values / pick       go lua
+ 4 机器  values / pick       go lua nim sbcl
 ```
 
 `scope-exit` 补上了 nim 与 V 的 `defer`（各多一个 `examples/defer.*`，与 go/CL 共用
@@ -657,6 +657,13 @@ go 的 12 格 `Op`（OCONV / OCONVIFACE / OCONVNOP …）塌成这一格。
 两笔差别明写在账上：`int` 是**截断**（FB 的 `CInt` 是四舍五入 —— 例子刻意用 7/3 绕开，
 真要对上得由 FB 的映射自己套一格 round）；wat 那条腿整格跳过，理由是
 "这一批只有 i64，`float` 要 f64 与两种数值类型的算术"。
+
+**多值那两格补到了四个提供者（过了 G5 的"机器"线）**：CL 的 `values` /
+`multiple-value-bind` 与 nim 的**元组**（`return (a, b)` / `let (lo, hi) = f()`）。
+两家都是"加语言不加节点" —— 消费侧共用 `destructure`，生产侧共用 `values`。
+它们单开了一个家族（`examples/values.*`，期望 `3 / 7`），理由写在那份例子的文件头里：
+`examples/multi.*` 还压着"实参表里只有最后一格展开"，而 CL 的 `princ` 遇到多值只印第一格、
+nim 的 `echo` 印的是元组 —— **硬凑成同一份输出就是替它们编语义**。
 
 **第八批：切片（`slice`）已落地** —— 22 → 23 格。判据是第九个例子家族
 （`ext/{go,vlang,nim,mojo}/examples/slice.*`，期望输出 `20 / 30`），四个提供者。
