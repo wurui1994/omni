@@ -218,8 +218,12 @@
     (-> ("property") $1) (-> ("constructor") $1) (-> ("destructor") $1))
 
   ;; `print` 的实参表用 `;` 与 `,` 隔开，而且**可以以分隔符收尾**（那是"不换行"的意思）
+  ;; 也可以**以分隔符起头**：`print , "LOWER", "UPPER"` 里那个逗号是"先跳一格制表位"
+  ;; （`Print ,` 单独一行也是真代码）。
   (rule print-args
     (-> (print-arg) ($1))
+    (-> (print-sep) ($1))
+    (-> (print-sep print-arg) ($1 $2))
     (-> (print-args print-sep) ($*1 $2))
     (-> (print-args print-sep print-arg) ($*1 $2 $3)))
 
@@ -247,6 +251,7 @@
   ;; 注意"只有一格实参时不许省"那条限制照旧管着（下面 c-orelse 那一支）。
   (rule cmd-args
     (-> (c-orelse) ($1))
+    (-> ("using" c-orelse) ((using $2)))
     (-> ("#" c-orelse) ((chan $2)))
     (-> (cmd-arg "," cmd-rest) ($1 $*3))
     (-> ("#" c-orelse "," cmd-rest) ((chan $2) $*4)))
@@ -259,6 +264,8 @@
     (-> () (omitted))
     (-> (expr) $1)
     (-> ("using" expr) (using $2))
+    ;; 类型当实参：`poke integer, p, 420`（见 nx-type）
+    (-> (nx-type) (type $1))
     ;; 图形语句的**坐标对**：`line buffer, (0, 0)-(w-1, h-1), 0, bf`、`pset image, (x, y), c`。
     ;; `(a, b)` 不是表达式（表达式里没有逗号），所以要单开这一格。
     (-> (point) $1)
@@ -457,7 +464,13 @@
   ;; `sub f (args)` 也有 `sub f cdecl (args)`，既有 `sub f cdecl alias "x" (args)`
   ;; 也有 `function f (args) as T static`。按固定顺序写就得排列组合。
   (rule routine-head
-    (-> (routine-kw routine-name head-parts) (head $1 $2 $*3)))
+    (-> (routine-kw routine-name head-parts) (head $1 $2 $*3))
+    ;; **修饰词写在 `sub` / `function` 前面**：`declare static sub f(…)`、
+    ;; `declare virtual function g(…)`、`declare abstract sub h(…)`（23 份）。
+    (-> (rt-mod routine-kw routine-name head-parts) (head $2 $3 (mod $1) $*4)))
+
+  (rule rt-mod
+    (-> ("static") $1) (-> ("virtual") $1) (-> ("abstract") $1))
 
   (rule head-parts
     (-> () ())
@@ -474,10 +487,13 @@
     (-> ("destructor") $1) (-> ("operator") $1) (-> ("property") $1))
 
   ;; 例程名：普通名字、带命名空间的名字（`Foo.bar`），或者运算符重载的那个符号
+  ;; 还有一种：**类型上的运算符重载**（`operator MyType.cast() as string`、
+  ;; `Operator T.Let(…)`）—— 名字后面那一格是关键字，不是 NAME（23 份）。
   (rule routine-name
     (-> () ())
     (-> (dotted) $1)
-    (-> (opsym) (op $1)))
+    (-> (opsym) (op $1))
+    (-> (dotted "." opsym) (op $1 $3)))
 
   (rule dotted
     (-> (NAME) (n $1))
@@ -542,10 +558,26 @@
   ;; `type NAME … end type` / `union … end union`。字段是 `name as T`，
   ;; 里面还能有 `declare`、嵌套的 `type`、`as` 段。
   (rule type-block
-    (-> (type-kw NAME type-head NL members "end" type-kw term) (typedecl $1 (n $2) $3 (members $*5)))
+    (-> (type-kw type-name type-head NL members "end" type-kw term) (typedecl $1 (n $2) $3 (members $*5)))
+    ;; **匿名的 `type` / `union`**：嵌在别的 type 里当"一格无名的子结构"用
+    ;; （`examples/manual/proguide/typeunion/` 那一族，34 份）。名字那一格空着就是它。
+    (-> (type-kw type-head NL members "end" type-kw term) (typedecl $1 (members $*4)))
     ;; `type T as integer` —— 类型别名，一行写完。两种词序语料里都有。
     (-> ("type" NAME "as" type term) (typealias (n $2) $4))
     (-> ("type" "as" type NAME term) (typealias (n $4) $3)))
+
+  ;; 类型名不只是 NAME：`Type Thread` 里那个 `thread` 在我们的词法层是关键字
+  ;; （它在 `mod-kw` 里），可 FreeBASIC 只在 `dim` 后面认它是修饰词。24 份卡在这儿。
+  ;; 只收这几个"看位置才是关键字"的词，不把 `field` 那张大表拉进来 ——
+  ;; 拉进来的话 `end` / `if` 也成了类型名，每个 `end type` 都要分叉一次。
+  (rule type-name
+    (-> (NAME) $1)
+    (-> (kw-name) $1))
+
+  ;; 这几个词**在类型位置上是名字**：`ByVal pt As Thread Ptr`（30 份）。
+  (rule kw-name
+    (-> ("thread") $1) (-> ("local") $1) (-> ("preserve") $1)
+    (-> ("import") $1) (-> ("export") $1))
 
 
   (rule type-kw
@@ -616,6 +648,19 @@
     (-> (type "ptr") (ptr $1))
     (-> (type "pointer") (ptr $1))
     (-> ("const" type) (const $2)))
+
+  ;; **"一看就不是表达式"的类型**（go 那边同名的 `nx-type` 是同一手）。
+  ;; BASIC 里有一批内建函数**收类型当实参**：`len(integer)`、`peek(integer, p)`、
+  ;; `poke integer, p, 420`、`cptr(any ptr ptr, x)`、`sizeof(T ptr)`。
+  ;; 实参位置上只收这两种形状 —— 光头的内建类型词，与任何带 `ptr` / `pointer` 的东西。
+  ;; **不收光一个 NAME**：那与"一格变量"完全同形，收了每个实参都要分叉一次。
+  (rule nx-type
+    (-> (builtin) (t $1))
+    (-> ("any") (t any))
+    (-> (nx-type "ptr") (ptr $1))
+    (-> (nx-type "pointer") (ptr $1))
+    (-> (dotted "ptr") (ptr $1))
+    (-> (dotted "pointer") (ptr $1)))
 
   (rule type-base
     (-> (dotted) $1)
@@ -731,16 +776,22 @@
     (-> ("var") $1) (-> ("let") $1) (-> ("using") $1) (-> ("return") $1)
     (-> ("option") $1) (-> ("import") $1) (-> ("export") $1) (-> ("local") $1))
 
+  ;; 括号里的实参也**可以省**：`GetMouse(x, y, , buttons)` 是真代码（与命令式调用那边
+  ;; 同一条规矩）。只在**逗号之后**允许空一格 —— 允许"光一格空实参"的话 `f()` 立刻两个解
+  ;; （零个实参 vs 一个省掉的实参）。
   (rule call-args
     (-> () ())
     (-> (call-arg) ($1))
-    (-> (call-args "," call-arg) ($*1 $3)))
+    (-> (call-args "," call-arg) ($*1 $3))
+    (-> (call-args ",") ($*1 (omitted))))
 
   (rule call-arg
     (-> (expr) $1)
     (-> ("byval" expr) (byval $2))
     (-> ("byref" expr) (byref $2))
     (-> ("any") (any))
+    ;; 类型当实参：`len(integer)`、`cptr(any ptr, p)`、`sizeof(T ptr)`（见 nx-type）
+    (-> (nx-type) (type $1))
     (-> (expr "to" expr) (range $1 $3)))
 
   ;; `atom` 拆成两半：括号表达式一半，别的一半（`c-atom`）。受限链只用后一半。
@@ -834,8 +885,8 @@
 
 ;; ## 量到的（`node bench/grammars.js freebasic`，语料 = fbc/examples + fbc/src 下 1722 份 .bas）
 ;;
-;;   969 状态 / 601 产生式 / 159 终结符 / 269 处冲突留给驱动器
-;;   **954 / 1722 过（55%）**
+;;   1006 状态 / 626 产生式 / 159 终结符 / 275 处冲突留给驱动器
+;;   **1037 / 1722 过（60%）**
 ;;
 ;; 一路的账（每一刀都先按报错归类，最大那一类先修，再量）：
 ;;   264 → 头一版（`fold-case` 关键字刚补上，语法本身还很粗）
@@ -897,3 +948,42 @@
 ;; 在 `union` 里嵌 `union` 的类型上炸开）：`member` 那一格里 `dim`/`static`/`const`/裸字段
 ;; 四条路重叠。下一刀该按"哪条产生式参与冲突最多"排一遍，而不是继续从失败清单猜 ——
 ;; 274 处冲突里绝大部分应该都聚在这儿。
+;;
+;; ---- 第三次上手：**按失败分类量，一类一刀** 954 -> 1037（+83，冲突 269 -> 275）------
+;;
+;; 这一趟没有再按冲突排名走（第一名 `:` 那一格要动词法层，是另一件事），改回第一把尺子：
+;; 把 768 份失败按报错形状归类，最大的几类各一刀。逐刀的数：
+;;
+;;   954 -> 985  (+31)  **nx-type**：`len(integer)` / `peek(integer, p)` / `poke integer, p, 420`
+;;                      / `cptr(any ptr ptr, x)` —— BASIC 有一批内建函数**收类型当实参**。
+;;                      与 go 那边同名的那一手同一条口径：只收"一看就不是表达式"的形状
+;;                      （光头的内建类型词、任何带 `ptr` 的东西），**不收光一个 NAME**。
+;;                      当场清掉两整类（31 份 `unexpected ")"` 与 28 份 `unexpected "ptr"`）。
+;;   985 -> 992  (+7)   匿名 `type` / `union`（嵌在别的 type 里，名字那格空着）
+;;                      + `type-name`：`Type Thread` 里 `thread` 是名字不是修饰词。
+;;   992 -> 1006 (+14)  `print , "x"` / `Print ,`（print 实参表可以**以分隔符起头**）
+;;                      + 括号里的实参可以省（`GetMouse(x, y, , buttons)`）——
+;;                      只在**逗号之后**允许空一格，不然 `f()` 立刻两个解。
+;;  1006 -> 1037 (+31)  `declare static sub` 那一族（修饰词写在 `sub`/`function` **前面**）
+;;                      + `operator MyType.cast() as string`（名字后面那格是关键字）。
+;;
+;; **被量否掉的两手，都记下来免得再试：**
+;;   1. `cmd-args -> (point)`（让 `Window (-15,-10)-(15,10)` 这种"只有一格坐标对实参"过）：
+;;      **1006 -> 872，一手 -134**。理由与文件中间那段注释是同一条：命令式调用只有一格实参时
+;;      那一格必须走**受限链**。坐标对以 `(` 起头，于是 `f (a, b)` 同时是"调用 f，两个实参"
+;;      与"命令式调用 f，实参是一格坐标对" —— 每个带括号的调用都分叉一次，长文件上攒成
+;;      "too many concurrent parses"。**这是第四次踩同一格：那条链底不许再摆任何以 `(` 起头的东西。**
+;;   2. `type-base -> kw-name`（让 `ByVal pt As Thread Ptr` 里 `thread` 当类型名）：
+;;      **1037 -> 1037，冲突 +1**。那 30 份文件卡的不是这一处，是别的地方；
+;;      neutral 的改动照旧退回来（与前一趟 `("function") (result)` 那手同一条规矩）。
+;;
+;; 还欠 685 份，最大的三类（都量过位置）：
+;;   1. 53 份 "too many concurrent parses"（`Print Using …; SizeOf(x) * 8; : Print "-bit"`、
+;;      `S.push = x : S.push = y` 那种一行几条语句的）—— 这一类的根还是 `:`：
+;;      `stmt -> simples term` 与 `simples -> simples ":" simple` 让 `a : b` 有**两棵树**
+;;      （一行两条 vs 两行各一条），每个 `:` 分叉一次。要动就得在词法层把 `:` 分成两种记号。
+;;   2. 48 份 `unexpected NAME`：`Line Input s` / `Option NoKeyword Int` 那一族 ——
+;;      `line` 与 `input` 在我们的词法层还不是关键字，所以它落成"两个挨着的名字"。
+;;      收它要先把这两个词升成关键字，再补进 `field` 那张表（`dim line as string` 得照旧过）。
+;;   3. 25 份 `unexpected "."`：`Print Type<T>.root`（类型字面量后面直接取成员）与
+;;      `..ThreadWait(._pt)`（`with` 块套 `with` 的双点隐式成员）。
