@@ -60,8 +60,7 @@ function tryCase(c) {
   try {
     g = c.tree === undefined ? c.graph() : c.toGraph(c.tree);
   } catch (err) {
-    const m = /^no such node: (.+)$/.exec(err.message);
-    return m === null ? { kind: 'broke', why: err.message } : { kind: 'needs', op: m[1] };
+    return classify(err);
   }
   try {
     const { out } = evalGraph(g);
@@ -69,50 +68,87 @@ function tryCase(c) {
     const want = c.expect.join(' / ');
     return got === want ? { kind: 'ok' } : { kind: 'broke', why: `跑出别的答案：${got}` };
   } catch (err) {
-    const m = /^no such node: (.+)$/.exec(err.message);
-    return m === null ? { kind: 'broke', why: err.message } : { kind: 'needs', op: m[1] };
+    return classify(err);
   }
+}
+
+/**
+ * 一个错误说的是"缺了我删掉的那一格"，还是"崩在别处"。
+ * 两种"缺"都认：缺节点（`no such node: X`）与缺附属（`node X has no attr "Y"`）——
+ * 后者是 G1 那条边完整检查顺手给的，不用新机制。
+ */
+function classify(err) {
+  const n = /^no such node: (.+)$/.exec(err.message);
+  if (n !== null) return { kind: 'needs', what: n[1] };
+  const a = /^node (\S+) has no attr "([^"]+)"/.exec(err.message);
+  if (a !== null) return { kind: 'needs', what: `${a[1]}.${a[2]}` };
+  return { kind: 'broke', why: err.message };
 }
 
 const all = [...trees, ...HAND];
 const ops = [...NODES.keys()].filter((op) => only.length === 0 || only.includes(op));
 const radius = [];
 
-for (const op of ops) {
-  const decl = NODES.get(op);
-  NODES.delete(op);                       // ← **删掉一格特性**（一处改动）
+/**
+ * 删一格东西，跑一遍全部例子。`what` 是"删掉的那一格"的名字 ——
+ * 例子只许两种反应：照旧全绿，或者说"缺 what"。第三种反应就是级联算漏了。
+ */
+function deleteAndRun(label, what, remove, restore) {
+  remove();
   const needs = [];
   const broke = [];
   let green = 0;
   for (const c of all) {
     const r = tryCase(c);
     if (r.kind === 'ok') { green++; continue; }
-    if (r.kind === 'needs' && r.op === op) { needs.push(c.name); continue; }
-    // 缺的是别的节点 = 也算"崩在别处"：删 A 不该让例子去要 B
-    broke.push(`${c.name}（${r.kind === 'needs' ? `改去要 ${r.op}` : r.why}）`);
+    if (r.kind === 'needs' && r.what === what) { needs.push(c.name); continue; }
+    // 缺的是别的东西 = 也算"崩在别处"：删 A 不该让例子去要 B
+    broke.push(`${c.name}（${r.kind === 'needs' ? `改去要 ${r.what}` : r.why}）`);
   }
-  NODES.set(op, decl);                    // 装回去
+  restore();
 
   if (broke.length === 0) {
-    process.stdout.write(`  ok   删 ${op.padEnd(11)}`
+    process.stdout.write(`  ok   删 ${label.padEnd(18)}`
       + `${needs.length} 份例子要它，剩下 ${green} 份照旧全绿\n`);
     pass++;
   } else {
-    process.stdout.write(`  FAIL 删 ${op}：${broke.length} 份例子崩在别处（级联算漏了）\n`);
+    process.stdout.write(`  FAIL 删 ${label}：${broke.length} 份例子崩在别处（级联算漏了）\n`);
     for (const b of broke.slice(0, 4)) process.stdout.write(`       ${b}\n`);
     fail++;
   }
-  radius.push({ op, needs: needs.length, green });
+  radius.push({ what: label, needs: needs.length, green });
+}
+
+// ---- 第一轮：删**节点**（骨架那一层）------------------------------------------
+for (const op of ops) {
+  const decl = NODES.get(op);
+  deleteAndRun(op, op, () => NODES.delete(op), () => NODES.set(op, decl));
+}
+
+// ---- 第二轮：删**附属**（挂在节点上那一层）------------------------------------
+//
+// 附属的删除不用新机制：`node()` 建节点时对不上声明就报 `has no attr` —— 那是 G1
+// 那条"边完整"检查顺手给的。半径小的附属（`keepMulti` 只有多值那两份例子要它）
+// 正是"附属可删"的证据；半径大的（`bind.name`）说明它其实是骨架的一部分。
+for (const op of ops) {
+  const decl = NODES.get(op);
+  const orig = [...decl.attrs];
+  for (const attr of orig) {
+    deleteAndRun(`${op}.${attr}`, `${op}.${attr}`,
+      () => { decl.attrs = orig.filter((a) => a !== attr); },
+      () => { decl.attrs = orig; });
+  }
 }
 
 // 级联半径表：**数出来的**。半径大的那几格就是"这台机器的骨架"，
 // 半径为 0 的那几格是"想删就能删"的 —— 后者才是"原子化"真正的样子。
-process.stdout.write('\n每格节点的级联半径（删了它，几份例子要它）：\n');
+process.stdout.write('\n级联半径（删了它，几份例子要它）：\n');
 for (const r of [...radius].sort((a, b) => b.needs - a.needs)) {
   const bar = '#'.repeat(Math.min(r.needs, 42));
-  process.stdout.write(`  ${r.op.padEnd(11)}${String(r.needs).padStart(2)}/${r.needs + r.green} ${bar}\n`);
+  process.stdout.write(`  ${r.what.padEnd(18)}${String(r.needs).padStart(2)}/${r.needs + r.green} ${bar}\n`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed`
-  + `（节点 ${ops.length} × 例子 ${all.length}）\n`);
+  + `（删了 ${radius.length} 样：节点 ${ops.length} 格 + 附属 ${radius.length - ops.length} 格，`
+  + `每样跑 ${all.length} 份例子）\n`);
 if (fail > 0) process.exit(1);

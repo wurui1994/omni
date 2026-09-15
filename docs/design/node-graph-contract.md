@@ -358,13 +358,19 @@ G4 判据。
    那说明删这一格会让**别处**崩，级联算漏了。
 3. **级联半径是数出来的**，不是手写的文档。
 
-现状：**21 格节点 × 42 份例子，21 passed / 0 failed**。数出来的半径（删了它，几份例子要它）：
+现状：**34 样 × 42 份例子，34 passed / 0 failed**（节点 21 格 + 附属 13 格）。
+数出来的半径（删了它，几份例子要它）：
 
 ```
-prim 42/42 · ref 41 · bind 41 · const 40 · call 33 · func 33 · loop 28
-set 27 · branch 27 · region 24 · ret 19
-list-new / index-get / index-set / loop-exit 各 7 · scope-exit 5
-record-new / field-get / field-set 各 4 · values / pick 各 2
+骨架那一层
+  prim 42/42 · ref 41 · bind 41 · const 40 · call 33 · func 33 · loop 28
+  set 27 · branch 27 · region 24 · ret 19
+  list-new / index-get / index-set / loop-exit 各 7 · scope-exit 5
+  record-new / field-get / field-set 各 4 · values / pick 各 2
+附属那一层
+  prim.name 42 · ref.name 41 · bind.name 41 · const.value 40 · func.params 33 · func.name 33
+  set.name 27 · loop-exit.kind 7 · record-new.names / field-get.field / field-set.field 各 4
+  bind.keepMulti 2 · pick.index 2
 ```
 
 这张表就是 target.md 要的"特性 DAG 排序"的可量版本，而且它比 DAG 说得更准：
@@ -372,13 +378,20 @@ record-new / field-get / field-set 各 4 · values / pick 各 2
 删掉 `record-new` 那三格，另外 38 份例子一行不改照旧全绿；删掉 `values`/`pick`，40 份照旧。
 这才是"原子化"真正的样子：不是"分层分得细"，是**删了不牵连**。
 
+附属那一轮还顺手给出一条**判"是不是附属"的可量标准**：拿"删节点"与"删它的附属"
+两个半径比一比。`bind` 41 而 `bind.keepMulti` 2 —— 差 39，`keepMulti` 是**真附属**；
+`prim` 与 `prim.name` 都是 42 —— 一格不差，说明 `name` 根本不是附属，
+它就是那格节点**自己的选择器**（"算符没有节点，全落 `prim`"那句话的另一面）。
+§2 的骨架 / 附属之分从此不靠直觉，靠这两个数。
+
 为什么它能成立，只有一条理由：ADR-0033 把节点之间的关系限成"端口 + 效应"，
 **没有"节点 A 认识节点 B"这种硬连接**。所以删一格节点，别的节点没有一行要改 ——
 这条判据跑绿，那句话才算兑现；跑红，就是架构漏了。
+附属那一轮也不用新机制：`node()` 建节点时对不上声明就报 `has no attr`，
+那是 G1"边完整"检查顺手给的。
 
-还欠的（明说）：这一条现在只删**骨架节点**。附属属性（`keepMulti` / `kind` / `names`
-那一族）与"删掉一门语言的某条语法"还没进这台机器 —— 前者要先有属性的声明表，
-后者是语法层的可删除测试（同一条纪律，另一条轴）。
+还欠的（明说）：**"删掉一门语言的某条语法"还没进这台机器** —— 那是同一条纪律的
+另一条轴（删一条产生式，其余那批文件必须照旧过）。
 
 ## 12. 落地顺序（每步一个可量产出）
 
