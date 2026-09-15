@@ -19,6 +19,13 @@ import { primOf } from './prims.js';
 /** 早退用的信号。**不是错误** —— 它是"图在这一点切开，后半段不跑"的表示。 */
 class Return { constructor(value) { this.value = value; } }
 
+/**
+ * 循环的早退（`loop-exit`）。与 `Return` 是同一台机器的两个终点：
+ * 一个切到函数出口、一个切到最近那格 `loop`。中间每一格 region 的出口照跑
+ * （靠 `finally` —— 与 defer 一族共用那一条）。
+ */
+class LoopExit { constructor(kind) { this.kind = kind; } }
+
 /** 一格作用域 = 一格 region。`bind` 边（名字 -> 定义）按这条链查，与 ADR-0029 同一件事。 */
 class Env {
   /**
@@ -210,10 +217,20 @@ function run(n, env, io) {
       return truthy(arg('cond')) ? (t === null ? null : t()) : (e === null ? null : e());
     }
     case 'loop': {
-      const cond = arg('cond'); const body = arg('body');
+      const cond = arg('cond'); const body = arg('body'); const post = arg('post');
       let guard = 0;
       while (truthy(cond())) {
-        if (body !== null) body();
+        // 这一格是"函数边界之外的 may-early-exit"落地的地方：break 收在这儿、
+        // continue 只吃掉本轮剩下的部分。途中每格 region 的出口由那边的 finally 跑。
+        let done = false;
+        try {
+          if (body !== null) body();
+        } catch (err) {
+          if (!(err instanceof LoopExit)) throw err;
+          if (err.kind === 'break') done = true;
+        }
+        if (done) break;
+        if (post !== null) post();      // **continue 也要跑步进**（不然是死循环）
         if (++guard > 10_000_000) throw new Error('loop did not terminate (10M iterations)');
       }
       return null;
@@ -248,6 +265,7 @@ function run(n, env, io) {
     case 'index-get': return index(arg('obj'), arg('index'));
     case 'index-set': return setIndex(arg('obj'), arg('index'), arg('value'));
     case 'ret': throw new Return(arg('value') ?? null);
+    case 'loop-exit': throw new LoopExit(n.attrs.kind ?? 'break');
     case 'call': {
       const fn = arg('fn');
       const args = arg('args') ?? [];

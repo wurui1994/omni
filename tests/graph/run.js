@@ -27,6 +27,7 @@ import { glrParse } from '../../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { readText } from '../../src/core/host/native.js';
 import { toSx } from '../../src/core/graph/graph.js';
+import { node, lit, program, bin } from '../../src/core/graph/graph.js';
 import { backends, gaps } from '../../src/core/graph/contract.js';
 import { chezToGraph } from '../../ext/chez/tograph.js';
 import { luaToGraph } from '../../ext/lua/tograph.js';
@@ -55,6 +56,8 @@ const DEFER = ['in', 'b', 'a', 'out'];
 const RECORD = ['1', '5', '6'];
 /** index：list-new / index-get / index-set —— **下标起点是语言的事**（lua 从 1 起） */
 const INDEX = ['10', '30', '45'];
+/** loopexit：break / continue 那一格 —— 函数边界**之外**的第一格 may-early-exit */
+const LOOPEXIT = ['12', '6', '8'];
 
 const CASES = [
   { name: 'chez', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/basics.ss', toGraph: chezToGraph, expect: BASICS },
@@ -89,6 +92,58 @@ const CASES = [
   { name: 'chez+index', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/index.ss', toGraph: chezToGraph, expect: INDEX },
   { name: 'sbcl+index', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/index.lisp', toGraph: sbclToGraph, expect: INDEX },
   { name: 'mojo+index', grammar: 'ext/mojo/mojo.grammar', file: 'ext/mojo/examples/index.mojo', toGraph: mojoToGraph, expect: INDEX },
+  // ---- 第六个家族：循环的早退（break / continue 落同一格，差的只有 kind）----
+  { name: 'go+loopexit', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/loopexit.go', toGraph: goToGraph, expect: LOOPEXIT },
+  { name: 'lua+loopexit', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/loopexit.lua', toGraph: luaToGraph, expect: LOOPEXIT },
+  { name: 'vlang+loopexit', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/loopexit.v', toGraph: vlangToGraph, expect: LOOPEXIT },
+  { name: 'nim+loopexit', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/loopexit.nim', toGraph: nimToGraph, expect: LOOPEXIT },
+  { name: 'mojo+loopexit', grammar: 'ext/mojo/mojo.grammar', file: 'ext/mojo/examples/loopexit.mojo', toGraph: mojoToGraph, expect: LOOPEXIT },
+];
+
+/**
+ * 手搭的图（不经过任何一门语言）—— 检的是**调度器自己的语义**。
+ * 每一条都要有理由说明"为什么不写成语言例子"，否则它该是一份 `examples/`。
+ */
+const say = (s) => node('prim', { args: [lit(s)] }, { name: 'print' });
+const HAND = [
+  {
+    // break **穿过一格 region**：途中那格 region 的出口（scope-exit）照跑。
+    // 不写成语言例子的理由：go / V 的 defer 是函数作用域、nim 的是块作用域，
+    // 而图上挂的是"最近的一格 region" —— 拿谁的语法当例子都会写歪一门的语义。
+    name: 'hand+break-exit',
+    expect: ['in', 'cleanup', 'out'],
+    graph: () => program([
+      node('loop', {
+        cond: lit(true),
+        body: [node('region', {
+          body: [
+            node('scope-exit', { action: [say('cleanup')] }),
+            say('in'),
+            node('loop-exit', {}, { kind: 'break' }),
+          ],
+        })],
+      }),
+      say('out'),
+    ]),
+  },
+  {
+    // continue **照跑步进**（`post` 端口那一条）。语言例子里 go 那份也压到了，
+    // 这一条把它单独钉住：步进缀在体末尾的老写法在这儿是死循环。
+    name: 'hand+continue-post',
+    expect: ['0', '2', 'done'],
+    graph: () => program([
+      node('bind', { init: lit(0) }, { name: 'i' }),
+      node('loop', {
+        cond: bin('<', node('ref', {}, { name: 'i' }), lit(3)),
+        body: [node('branch', {
+          cond: bin('=', node('ref', {}, { name: 'i' }), lit(1)),
+          then: [node('loop-exit', {}, { kind: 'continue' })],
+        }), node('prim', { args: [node('ref', {}, { name: 'i' })] }, { name: 'print' })],
+        post: [node('set', { value: bin('+', node('ref', {}, { name: 'i' }), lit(1)) }, { name: 'i' })],
+      }),
+      say('done'),
+    ]),
+  },
 ];
 
 const argv = process.argv.slice(2);
@@ -120,6 +175,38 @@ if (showGaps) {
   process.stdout.write('\n');
 }
 
+/**
+ * 一张图 × 每个后端。语言那一侧与"手搭图"那一侧共用它 ——
+ * 判据只有一条：**同一张图，每个后端的可观察行为必须一致**。
+ */
+function check(name, g, expect) {
+  for (const b of backends()) {
+    const label = `${name} × ${b.name}`;
+    if (b.runnable === false) {
+      // 只序列化的后端（sx）只对"出得来、且不空"负责 —— 它不承诺跑
+      try {
+        const art = b.lower(g);
+        if (typeof art.text === 'string' && art.text.length > 0) {
+          process.stdout.write(`  ok   ${label} [序列化 ${art.text.split('\n').length} 行]\n`); pass++;
+        } else { process.stdout.write(`  FAIL ${label}: 序列化出来是空的\n`); fail++; }
+      } catch (err) { process.stdout.write(`  FAIL ${label}: ${err.message}\n`); fail++; }
+      continue;
+    }
+    try {
+      const { out } = b.lower(g).run();
+      const got = out.join(' / ');
+      const want = expect.join(' / ');
+      if (got === want) { process.stdout.write(`  ok   ${label} [${got}]\n`); pass++; } else {
+        process.stdout.write(`  FAIL ${label}\n       期望 ${want}\n       得到 ${got}\n`);
+        fail++;
+      }
+    } catch (err) {
+      process.stdout.write(`  FAIL ${label}: ${err.message}\n`);
+      fail++;
+    }
+  }
+}
+
 for (const c of CASES) {
   if (only.length > 0 && !only.includes(c.name)) continue;
   let g = null;
@@ -140,31 +227,18 @@ for (const c of CASES) {
     continue;
   }
 
-  for (const b of backends()) {
-    const label = `${c.name} × ${b.name}`;
-    if (b.runnable === false) {
-      // 只序列化的后端（sx）只对"出得来、且不空"负责 —— 它不承诺跑
-      try {
-        const art = b.lower(g);
-        if (typeof art.text === 'string' && art.text.length > 0) {
-          process.stdout.write(`  ok   ${label} [序列化 ${art.text.split('\n').length} 行]\n`); pass++;
-        } else { process.stdout.write(`  FAIL ${label}: 序列化出来是空的\n`); fail++; }
-      } catch (err) { process.stdout.write(`  FAIL ${label}: ${err.message}\n`); fail++; }
-      continue;
-    }
-    try {
-      const { out } = b.lower(g).run();
-      const got = out.join(' / ');
-      const want = c.expect.join(' / ');
-      if (got === want) { process.stdout.write(`  ok   ${label} [${got}]\n`); pass++; } else {
-        process.stdout.write(`  FAIL ${label}\n       期望 ${want}\n       得到 ${got}\n`);
-        fail++;
-      }
-    } catch (err) {
-      process.stdout.write(`  FAIL ${label}: ${err.message}\n`);
-      fail++;
-    }
-  }
+  check(c.name, g, c.expect);
+}
+
+// ---- 手搭的图：**没有哪门语言的语法能直说的那几条调度器语义** --------------------
+//
+// 为什么不写成某门语言的例子：go / V 的 `defer` 是**函数**作用域、nim 的是块作用域，
+// 而图上 `scope-exit` 挂的是"最近的一格 region"—— 拿它们的语法当例子会把语义写歪
+// （那笔账记在 `docs/design/node-graph-contract.md` A.6.1）。这几条是**节点自己的**
+// 语义，所以直接搭图，两个能跑的后端必须给同一个答案。
+for (const c of HAND) {
+  if (only.length > 0 && !only.includes(c.name)) continue;
+  check(c.name, c.graph(), c.expect);
 }
 
 if (showMachines) {
@@ -177,5 +251,6 @@ if (showMachines) {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed（例子 ${CASES.length} × 后端 ${backends().length}）\n`);
+process.stdout.write(`\n${pass} passed, ${fail} failed`
+  + `（语言例子 ${CASES.length} + 手搭图 ${HAND.length}，× 后端 ${backends().length}）\n`);
 if (fail > 0) process.exit(1);

@@ -174,6 +174,21 @@ function jsFnBody(body) {
   return head.join(' ');
 }
 
+/**
+ * 步进那一格落成**表达式**（`for` 的更新段只收表达式）。
+ * 接不住的形状当场报 —— 那是一笔账，不是静默的错答案。
+ */
+function jsUpdate(x) {
+  if (x === null || x === undefined) return '0';
+  switch (x.op) {
+    case 'set': return `${jsName(x.attrs.name)} = ${jsExpr(x.ins.value)}`;
+    case 'field-set': return `__setField(${jsExpr(x.ins.obj)}, ${JSON.stringify(x.attrs.field)}, ${jsExpr(x.ins.value)})`;
+    case 'index-set': return `__setIndex(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.index)}, ${jsExpr(x.ins.value)})`;
+    case 'prim': case 'call': return jsExpr(x);
+    default: throw new Error(`js: 循环的步进那一格还没接：${x.op}`);
+  }
+}
+
 function jsStmt(x) {
   if (x === null || x === undefined) return '';
   if (Array.isArray(x)) return x.map(jsStmt).join(' ');
@@ -184,7 +199,15 @@ function jsStmt(x) {
     case 'field-set': return `__setField(${jsExpr(x.ins.obj)}, ${JSON.stringify(x.attrs.field)}, ${jsExpr(x.ins.value)});`;
     case 'index-set': return `__setIndex(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.index)}, ${jsExpr(x.ins.value)});`;
     case 'ret': return `return ${x.ins.value === undefined ? 'null' : jsExpr(x.ins.value)};`;
-    case 'loop': return `while (__truthy(${jsExpr(x.ins.cond)})) { ${asStmts(x.ins.body).map(jsStmt).join(' ')} }`;
+    case 'loop': {
+      const body = asStmts(x.ins.body).map(jsStmt).join(' ');
+      const post = asStmts(x.ins.post);
+      // 有步进那一格就落 `for (; cond; post)` —— JS 的 `for` 在 `continue` 时**照跑**
+      // 更新段，与调度器那一侧同一条口径（`while` + 缀在末尾的写法会漏掉它）。
+      if (post.length === 0) return `while (__truthy(${jsExpr(x.ins.cond)})) { ${body} }`;
+      return `for (; __truthy(${jsExpr(x.ins.cond)}); ${post.map(jsUpdate).join(', ')}) { ${body} }`;
+    }
+    case 'loop-exit': return x.attrs.kind === 'continue' ? 'continue;' : 'break;';
     case 'region': return `{ ${withExits(asStmts(x.ins.body).map(jsStmt).join(' '))} }`;
     // 注册那一刻就记下动作；宿主 region 的 finally 里逆序跑（早退也经过那儿）
     case 'scope-exit': return `__ex.push(() => { ${asStmts(x.ins.action).map(jsStmt).join(' ')} });`;

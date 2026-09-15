@@ -15,7 +15,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
-  ops, binOf, retOf, branchOf,
+  ops, binOf, retOf, branchOf, loopExit,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -131,6 +131,9 @@ function toNode(x) {
       return branchOf(toNode(parts[0]), toNode(parts[1]), els === undefined ? undefined : toNode(els));
     }
     case 'return': return retOf(many(kids(x)));
+    // `break` / `continue` -> **同一格节点**，差的只有一格附属 kind
+    case 'break': return loopExit('break');
+    case 'continue': return loopExit('continue');
     case 'expr': return toNode(kids(x)[0]);
     // `defer f()` -> scope-exit（挂在**当前 region**上，逆序、早退也跑 —— 八家共用那一格）
     case 'defer': return node('scope-exit', { action: many(kids(x)) });

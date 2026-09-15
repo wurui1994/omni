@@ -13,7 +13,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   tag, kids, leaf, part, threePart, elseOf,
-  ops, binOf, retOf, branchOf, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  ops, binOf, retOf, branchOf, loopExit, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -110,6 +110,8 @@ function toNode(x) {
       return branchOf(toNode(cond), toNode(then), e === undefined ? undefined : toNode(e));
     }
     case 'return': return retOf(many(kids(x)));
+    case 'break': return loopExit('break');
+    case 'continue': return loopExit('continue');
     case 'expr': return toNode(kids(x)[0]);
     // `defer { … }` / `defer: …` -> scope-exit（与 go 的 defer、CL 的 unwind-protect
     // **同一格节点**：逆序、早退也跑，八家共用那一格）

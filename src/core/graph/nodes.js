@@ -5,8 +5,8 @@
 // 够跑通一门语言"含全部基础要素的完整例子"的最小集，13 格。
 //
 // 之后按批往上加，每一批都要有一个新的例子家族做判据（`tests/graph/run.js`）：
-// 第二批多值（+2）、第三批 scope-exit（+1）、第四批记录（+3）、第五批列表与下标（+3）
-// —— 现在 **20 格**。
+// 第二批多值（+2）、第三批 scope-exit（+1）、第四批记录（+3）、第五批列表与下标（+3）、
+// 第六批循环的早退（+1）—— 现在 **21 格**。
 //
 // ## 先说清哪几样**不给节点**（这是这一份最要紧的内容，四条全有出处）
 //
@@ -94,6 +94,10 @@ export const NODES = new Map([
   N('loop', 'stat', [
     { name: 'cond', sem: SEM.lazy },
     { name: 'body', sem: SEM.body },
+    // **步进单列一格端口**（不是缀在体的末尾）：`continue` 必须跳过体的剩下部分
+    // 却**照跑步进** —— go 的三段式 `for` 与 lua 的 `for i = a, b` 都是这条规矩。
+    // 缀在体末尾的写法在没有 continue 的时候看不出差别，加上 continue 就是死循环。
+    { name: 'post', sem: SEM.body, optional: true },
   ], { outs: [], doc: 'lua while / go OFOR / freebasic Do…Loop 六种写法' }),
   N('region', 'stat', [{ name: 'body', sem: SEM.body, rest: true }], {
     outs: ['value'], doc: 'sbcl bind/creturn 一对 / freebasic Scope（SCOPEBEGIN/END）',
@@ -196,6 +200,22 @@ export const NODES = new Map([
   ], {
     effects: ['writes'], outs: [],
     doc: '`xs[1] = 5` —— 左边是下标的赋值落这格',
+  }),
+
+  // ---- 循环的早退（1 格）------------------------------------------------------
+  //
+  // `break` 与 `continue` 是**同一格节点**：五栏（sort / 端口 / 出端口 / 效应 / 寿命）
+  // 逐格相同，差的只有"跳到哪儿"—— 那是一格**附属**（`kind`）。
+  // 与 `prim` 收下所有内建、`scope-exit` 收下八种语法是同一条纪律。
+  //
+  // 它是这一批第一格**函数边界之外**的 `may-early-exit`：`ret` 切到函数出口，
+  // 它切到最近那一格 `loop` 的出口（break）或下一轮（continue）。
+  // 两条都由调度器给，而且**都要经过途中每一格 region 的出口**（scope-exit 照跑）。
+  //
+  // lua 只有 break（它的 continue 是 `goto`）—— 一格节点两个 kind，不是两格节点。
+  N('loop-exit', 'stat', [], {
+    attrs: ['kind'], effects: ['may-early-exit'], outs: [],
+    doc: 'break / continue（go/V/nim/mojo/awk）/ lua 只有 break / fb 的 Exit Do',
   }),
 ]);
 

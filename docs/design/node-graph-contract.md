@@ -488,6 +488,7 @@ V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
  4 机器  scope-exit                       go nim sbcl vlang
  4 机器  record-new / field-get / field-set  go lua nim vlang
  7 机器  list-new / index-get / index-set    chez go lua mojo nim sbcl vlang
+ 5 机器  loop-exit           go lua mojo nim vlang
  2 能力  values / pick       go lua
 ```
 
@@ -539,6 +540,29 @@ go 的 map 读可能 `allocates`、V 的返回 option，效应那一栏不同就
 与 `display` 落 `prim print` 是同一条纪律（**写成什么样是语法的事**）。
 CL 的 `(setf (aref xs 1) 5)` 值得单记一笔：左边是**一格形式**而不是名字，
 而它落的正是 go 的 `xs[1] = 5` 那一格 —— 广义位置不是新节点，是"左边那格是什么"的事。
+
+**第六批：循环的早退（`loop-exit`）已落地** —— 20 → 21 格。判据是第六个例子家族
+（`ext/{go,lua,vlang,nim,mojo}/examples/loopexit.*`，期望输出 `12 / 6 / 8`）。
+`break` 与 `continue` 是**同一格节点**：五栏逐格相同，差的只有一格附属 `kind` ——
+与 `prim` 收下所有内建、`scope-exit` 收下八种语法是同一条纪律。lua 只有 `break`
+（它的 continue 是 `goto`），一格节点两个 kind，不是两格节点。
+
+它是第一格**函数边界之外**的 `may-early-exit`（`ret` 切到函数出口，它切到最近那格
+`loop`）—— eval 文件头那句"这一批只有函数边界这一种早退"的账，到这儿还上了一半。
+
+这一批**改了 `loop` 的端口**：步进单列一格 `post`，不再缀在体的末尾。理由是量出来的：
+`continue` 要跳过体的剩下部分却**照跑步进**，缀在末尾的写法一加 continue 就是死循环。
+js 后端因此在有 `post` 时落 `for (; cond; post)`（JS 的 `for` 在 continue 时照跑更新段），
+`post` 里的语句要能写成表达式 —— 接不住的形状当场报（`jsUpdate`）。
+
+**测试多了一格"手搭的图"**（`tests/graph/run.js` 的 `HAND`）：两条调度器自己的语义，
+不经过任何一门语言 —— break 穿过一格 region 时那格的 `scope-exit` 照跑
+（`in / cleanup / out`）、continue 照跑步进（`0 / 2 / done`）。
+**为什么不写成语言例子**：go / V 的 `defer` 是**函数**作用域、nim 的是**块**作用域，
+而图上 `scope-exit` 挂的是"最近的一格 region" —— 拿谁的语法当例子都会写歪一门的语义。
+这是一笔新账：`scope-exit` 要不要一格附属说"挂到哪一层"（函数 / 块），得等真做 defer
+在循环里那一类例子时再定。现在的例子（defer 在函数体顶层）两种口径**恰好一致**，
+所以那四份 `examples/defer.*` 是对的 —— 但它们证明不了一般情形。
 
 ### A.7 附属节点（不逐个列，按挂点分七类）
 

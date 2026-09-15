@@ -16,7 +16,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf,
-  counted, ops, binOf, retOf, branchOf,
+  counted, ops, binOf, retOf, branchOf, loopExit,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -150,6 +150,8 @@ function toNode(x) {
       }
       return branchOf(toNode(cond), node('region', { body: many(kids(blk)) }), tail);
     }
+    // `break` -> loop-exit（lua 没有 continue —— 它的 continue 是 goto）
+    case 'break': return loopExit('break');
     case 'while': {
       const [cond, blk] = kids(x);
       return node('loop', { cond: toNode(cond), body: many(kids(blk)) });

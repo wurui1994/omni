@@ -14,7 +14,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
-  ops, binOf, retOf, branchOf, listNew, indexGet, indexSet,
+  ops, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -46,6 +46,8 @@ function toNode(x) {
     case 'list': return listNew(many(kids(x)));
     case 'index': return indexGet(toNode(kids(x)[0]), toNode(kids(kids(x)[1])[0]));
     case 'line': case 'body': return many(kids(x));
+    case 'break': return loopExit('break');
+    case 'continue': return loopExit('continue');
     case 'expr': return toNode(kids(x)[0]);
 
     // `bin` 与 `cmp` 是同一个形状（`(cmp "<=" a b)`）—— 比较在 mojo 的语法里单开一级

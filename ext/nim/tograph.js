@@ -14,7 +14,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
-  ops, binOf, retOf, branchOf, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  ops, binOf, retOf, branchOf, loopExit, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
@@ -46,6 +46,8 @@ function toNode(x) {
     // `p.x` -> field-get（与 lua 的 `(dot …)`、go/V 的 `(sel …)` 同一格节点）
     case 'dot': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
     case 'line': case 'body': case 'impl': return many(kids(x));
+    case 'break': return loopExit('break');
+    case 'continue': return loopExit('continue');
     case 'expr': return toNode(kids(x)[0]);
     // `defer { … }` / `defer: …` -> scope-exit（与 go 的 defer、CL 的 unwind-protect
     // **同一格节点**：逆序、早退也跑，八家共用那一格）

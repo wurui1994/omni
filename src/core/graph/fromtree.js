@@ -90,7 +90,8 @@ export function counted({ name, from, cond, step, body }) {
       node('bind', { init: from }, { name }),
       node('loop', {
         cond,
-        body: [...body, incr(name, step)],
+        body,
+        post: [incr(name, step)],     // 步进走 `post` 端口 —— `continue` 时照跑
       }),
     ],
   });
@@ -109,9 +110,16 @@ export function incr(name, by = lit(1), op = '+') {
  * 这一格的 post 是**任意语句**（`i++`、`i += 2`、几条一起）。
  */
 export function threePart({ init = [], cond, post = [], body }) {
-  const loop = node('loop', { cond: cond ?? lit(true), body: [...body, ...post] });
+  const loop = node('loop', {
+    cond: cond ?? lit(true),
+    body,
+    ...(post.length === 0 ? {} : { post }),   // 步进走 `post` 端口（continue 时照跑）
+  });
   return init.length === 0 ? loop : node('region', { body: [...init, loop] });
 }
+
+/** `break` / `continue` —— **一格节点两个 kind**（五栏逐格相同，差的只有跳到哪儿）。 */
+export const loopExit = (kind) => node('loop-exit', {}, { kind });
 
 /** `a op= b` 就是 `a = a op b`。四门语言（awk / freebasic / mojo / nim）用它。 */
 export function augset(name, op, value) {
