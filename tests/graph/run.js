@@ -12,6 +12,13 @@
 //   node tests/graph/run.js            全跑
 //   node tests/graph/run.js --sx chez  顺带把那门语言的图印成 sx（人看的）
 //   node tests/graph/run.js --gaps     印每个后端接不住的节点清单
+//
+// **十门语言里缺 cpp，理由量过**：拿同样这份例子（`int sumto(int n) { … }`，7 行）
+// 去过 `ext/cpp/cpp.grammar`，报的是 "too many concurrent parses" —— 连这么短的程序
+// 都进不来。根因不在这一批节点，在 `cpp.grammar` 文件头记的那两条**机制欠账**：
+// 判不了"声明还是表达式"、判不了 `<`/`>`，两条都要驱动器能回问一句"这个名字登记成
+// 类型了吗"（`docs/design/node-graph-contract.md` 附录 A.5 第 3 笔账）。
+// 那一格补上之前 cpp 不进这张矩阵 —— 硬塞一份"刚好能过的 C++ 子集"是自欺。
 
 import { loadGrammarTable } from '../../src/core/glr/load.js';
 import { lexText } from '../../src/core/glr/lex.js';
@@ -26,6 +33,9 @@ import { goToGraph } from '../../ext/go/tograph.js';
 import { sbclToGraph } from '../../ext/sbcl/tograph.js';
 import { vlangToGraph } from '../../ext/vlang/tograph.js';
 import { awkToGraph } from '../../ext/awk/tograph.js';
+import { fbToGraph } from '../../ext/freebasic/tograph.js';
+import { mojoToGraph } from '../../ext/mojo/tograph.js';
+import { nimToGraph } from '../../ext/nim/tograph.js';
 
 const HERE = new URL('.', import.meta.url).pathname;
 const ROOT = `${HERE}../../`;
@@ -40,6 +50,9 @@ const CASES = [
   { name: 'sbcl', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/basics.lisp', toGraph: sbclToGraph },
   { name: 'vlang', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/basics.v', toGraph: vlangToGraph },
   { name: 'awk', grammar: 'ext/awk/awk.grammar', file: 'ext/awk/examples/basics.awk', toGraph: awkToGraph },
+  { name: 'freebasic', grammar: 'ext/freebasic/freebasic.grammar', file: 'ext/freebasic/examples/basics.bas', toGraph: fbToGraph },
+  { name: 'mojo', grammar: 'ext/mojo/mojo.grammar', file: 'ext/mojo/examples/basics.mojo', toGraph: mojoToGraph },
+  { name: 'nim', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/basics.nim', toGraph: nimToGraph },
 ];
 
 const argv = process.argv.slice(2);
