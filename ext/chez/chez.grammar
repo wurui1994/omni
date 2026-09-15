@@ -1,0 +1,153 @@
+;; ext/chez/chez.grammar —— Chez Scheme 的读取器语法（datum 层）
+;;
+;; Scheme 与前面那几门不一样：**它的"语法"只有读取器那一层**。`(define (f x) …)`
+;; 不是语法，是一条 datum；`if` / `lambda` / `define` 全是宏与特殊形式，属于**求值**
+;; 那一层。所以这一份刻意只到 datum：把源文本读成一棵嵌套的表。
+;;
+;; 这件事本身就是这套架子的一个判据：**一门语言的语法可以只有 12 条产生式**。
+;; 前面 lua 那份 104 条与这一份 12 条走的是同一条路（同一个 buildTable、同一个 driver），
+;; 所以"加一门语言 = 一份语法"这句话在两个极端上都得成立。
+;;
+;; 难的不是语法，是**词法** —— Scheme 的记号层是这几门语言里最花的一层：
+;;   数：`#x1f` `#e1.0` `1/2` `+inf.0` `-nan.0` `1e10` `#b101`
+;;   符号：`+` `-` `...` `->list` `set!` `vector-ref` `<=?`，以及 `|带空格的符号|`
+;;   字符：`#\a` `#\space` `#\x41` `#\(`
+;;   注释三种：`;` 到行尾、`#| … |#`（**可嵌套**）、`#;` 把**下一条 datum** 注释掉
+;;
+;; 那个 `#;` 不是词法能干的事（它要跳过的是一棵树，不是一段字符），所以它在**语法**里：
+;; 序列那一格多一条 `(-> (data "#;" datum) $1)` —— 读进来，扔掉。这是 GLR 这条路
+;; 比手写读取器省事的一处：手写要在读取器里递归调用自己一次。
+;;
+;; 明说的不足（不猜）：
+;;   1. `#\x41;` 那种带分号的转义、`\x…;` 在串里的形状：记号切得对，**值**那一层
+;;      的转义表用的是 lex.js 那张通用的（分号会留在值里）。
+;;   2. `1+` 这种"数字开头的符号"（Chez 收，R6RS 不收）会切成 `1` 与 `+` 两个记号。
+;;   3. Chez 自己那几格 `#{gensym}` / `#[record]` 收成 datum，但里面不细分。
+
+(grammar chez
+  (tokens SYMBOL NUMBER STRING CHAR BOOL DIRECTIVE LABELDEF LABELREF)
+
+  (start program)
+
+  (lex
+    (skip space)
+    ;; `#!eof` 在 Chez 那儿是**两件事**：顶格写的是"读到这儿收工"（参考树里 16 个 .ss
+    ;; 这么用，后面接的是散文与 shell 命令，连词法都切不动）；写在一个表里面它是 eof
+    ;; 对象那格 datum（`'(#!eof #!bwp #!base-rtd)`，s/cmacros.ss:2526）。两者靠"在不在
+    ;; 第 1 列"分开 —— 顶层的 datum 顶格起，表里面的一定缩进。这是排版上的约定不是语义，
+    ;; 所以那个 `line-start` 要显式写出来（见 glr/lex.js 的 stop 那一段）。
+    (stop "#!eof" line-start)
+    ;; 脚本头：`#!/usr/bin/env scheme --script` 与 `#! ../bin/scheme --script` 两种写法
+    ;; （斜杠或空白紧跟 `#!`）。`#!chezscheme` / `#!r6rs` 是**真的 datum**，下面 DIRECTIVE
+    ;; 那条收它们，不许一起跳掉 —— 这就是这两条为什么要挑第三个字符。
+    (comment "#!/" (* (not "\n")))
+    (comment "#!" space (* (not "\n")))
+    (comment ";" (* (not "\n")))
+    ;; `#| … |#` 是**可嵌套**的（R6RS 明文规定），所以要 nest
+    (block-comment "#|" "|#" nest)
+
+    ;; ---- 数。放在符号之前：同长时声明在前的赢，于是 `-1` 是数而不是符号。
+    ;; 带 `#` 前缀的那一支最多收**两个**前缀（进制一格、精确性一格，可换序）——
+    ;; `#i#x10000000000000` 是 s/library.ss:735 里真有的写法。
+    (token NUMBER "#" (set "bBoOdDeEiIxX") (? "#" (set "bBoOdDeEiIxX"))
+      (? (or "+" "-")) (+ (or alnum ".")) (? "/" (+ (or alnum "."))))
+    (token NUMBER (or "+" "-") (or "inf" "nan") ".0")
+    (token NUMBER (? (or "+" "-")) (+ digit) "/" (+ digit))
+    (token NUMBER (? (or "+" "-")) (+ digit) (? "." (* digit)) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    (token NUMBER (? (or "+" "-")) "." (+ digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+
+    ;; ---- 布尔与 `#!名字` 那一族（`#!chezscheme` / `#!r6rs` / `#!fold-case` / `#!bwp` …）
+    (punct BOOL "#true" "#false" "#t" "#f" "#T" "#F")
+    (token DIRECTIVE "#!" (+ (or alpha "-")))
+
+    ;; ---- 字符。`#\space` 这种名字要比 `#\s` 长，所以先试字母数字那一支
+    (token CHAR "#\\" (or (+ alnum) any))
+
+    ;; ---- 串，与 `|带空格的符号|`
+    (string STRING "\"")
+    ;; `|…|` **不认反斜杠转义**：Chez 那儿 `'|\|)` 是"符号 `\`，然后一个右括号"
+    ;; （s/syntax.ss:8865）。用 `(string … "|")` 的话 `\|` 会被当成转义掉的引号，
+    ;; 于是那个符号一路吞到文件尾。所以这一条写成普通 token：只有下一个 `|` 收尾。
+    ;; 代价是 R6RS 允许的 `|\x41;|` 那种转义留在记号文本里 —— 值那一层的事。
+    (token SYMBOL "|" (* (not "|")) "|")
+
+    ;; ---- 算符与括号。**摆在符号之前**：`.` 与符号都能匹配一个字符，
+    ;;      同长时声明在前的赢 —— 点对里那个 `.` 必须赢。而 `...` 有三个字符，
+    ;;      最长匹配自然还是符号（syntax-rules 里到处是它）。
+    (op "#vu8(" "#vfx(" "#vfl(" "#,@" "#," "#'" "#`" "#;" "#(" "#[" "#&" ",@" "(" ")" "[" "]" "'" "`" "," ".")
+
+    ;; ---- datum 标签：`#0=(a . #0#)` 是**环形结构**的写法（fasl.ss 里用它认自引用）。
+    ;;      定义与引用各一格记号 —— 编号不定长，所以不能写成算符。
+    (token LABELDEF "#" (+ digit) "=")
+    (token LABELREF "#" (+ digit) "#")
+
+    ;; ---- 符号。R6RS 的 initial + subsequent，另加四格 Chez 自己的：
+    ;;   `#%car` / `#3%car`          原语引用（编译器内部到处是它）
+    ;;   `#{prelex grpmhtz…-0}`      gensym（`nongenerative` 记录类型的名字就写成这样）
+    ;;   `\#make-x` 与 `@if`         符号里的反斜杠转义、以 `@` 起头的符号（R6RS 都不许）
+    ;;   `ìn` / `'{`                 非 ASCII 的字母、以及花括号 —— 见下面那条兜底
+    ;;
+    ;; 最后那一格 `(not …)` 是**按分隔符兜底**，也就是真读取器的做法：不是分隔符的
+    ;; 字符就都算符号的一部分。它接住两样我们的字符类接不住的东西 —— 非 ASCII 的字母
+    ;; （`s/cptypes.ss:1878` 有个 `ìn`）与花括号（Chez 把 `{` `}` 读成符号，
+    ;; `s/read.ss:352` 自己写着 `(nonstandard "open brace")` 然后回一个 `'{`）。
+    ;; 排在 `or` 的最后：前面那几支都是一个字符，谁在前不影响长度，只影响可读性。
+    (token SYMBOL "#{" (* (not "}")) "}")
+    (token SYMBOL "#" (* digit) "%"
+      (* (or alnum (set "!$%&*/:<=>?^_~+-.@") (seq "\\" any) (not " \t\n\r()[]'\";,`|#\\"))))
+    (token SYMBOL
+      (or alpha (set "!$%&*/:<=>?^_~+-.@") (seq "\\" any) (not " \t\n\r()[]'\";,`|#\\.0123456789"))
+      (* (or alnum (set "!$%&*/:<=>?^_~+-.@") (seq "\\" any) (not " \t\n\r()[]'\";,`|#\\")))))
+
+  ;; ---- 语法：12 条产生式，就这些 -----------------------------------------------
+
+  (rule program
+    (-> (data) (program $*1)))
+
+  ;; 一串 datum。`#;` 那一条把下一棵树读进来再扔掉 —— datum 注释在这儿，不在词法里。
+  (rule data
+    (-> () ())
+    (-> (data datum) ($*1 $2))
+    (-> (data "#;" datum) $1))
+
+  (rule datum
+    (-> (SYMBOL) (sym $1))
+    (-> (NUMBER) (num $1))
+    (-> (STRING) (str $1))
+    (-> (CHAR) (char $1))
+    (-> (BOOL) (bool $1))
+    (-> (DIRECTIVE) (directive $1))
+    ;; 环形结构：`#0=…` 给下一棵树挂个号，`#0#` 引用它。语法只管形状，
+    ;; "这两个号对不对得上"是读取器建图那一步的事。
+    (-> (LABELDEF datum) (labeled $1 $2))
+    (-> (LABELREF) (labelref $1))
+    (-> (list) $1)
+    (-> (abbrev) $1))
+
+  ;; 圆括号与方括号在 Scheme 里等价（R6RS 要求配对，我们不较真那一格 ——
+  ;; 较真要在语法里把两种括号各写一遍，换来的只是一句更准的错话）
+  (rule list
+    (-> ("(" data ")") (list $*2))
+    (-> ("[" data "]") (list $*2))
+    (-> ("(" data "." datum ")") (dotted $*2 (tail $4)))
+    (-> ("[" data "." datum "]") (dotted $*2 (tail $4)))
+    (-> ("#(" data ")") (vector $*2))
+    (-> ("#vu8(" data ")") (bytevector $*2))
+    (-> ("#vfx(" data ")") (fxvector $*2))
+    (-> ("#vfl(" data ")") (flvector $*2))
+    ;; `#[类型名 字段…]` 是 Chez 的记录 datum（library.ss 里 profile-counter 那一族）
+    (-> ("#[" data "]") (record $*2)))
+
+  ;; 缩写：读取器把它们展开成 `(quote x)` 那种两元素表。这里**不展开** ——
+  ;; 展开是求值那一层的事，具体语法树该留住写的人写的形状。
+  (rule abbrev
+    (-> ("'" datum) (quote $2))
+    (-> ("`" datum) (quasiquote $2))
+    (-> ("," datum) (unquote $2))
+    (-> (",@" datum) (unquote-splicing $2))
+    (-> ("#'" datum) (syntax $2))
+    (-> ("#`" datum) (quasisyntax $2))
+    (-> ("#," datum) (unsyntax $2))
+    (-> ("#,@" datum) (unsyntax-splicing $2))
+    ;; `#&x` 是箱（box）—— Chez 自己的读取器扩展，syntax.ss 里用它装可变的一格
+    (-> ("#&" datum) (box $2))))

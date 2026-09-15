@@ -112,7 +112,15 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
 
   // ---- 1) 冷建表。先问一遍拿到缓存路径，删掉它再计时 —— 键的算法只有 load.js 那一份，
   //          这儿不复制（复制了就会有第二种说法）。
-  const probe = loadGrammarTable(gpath);
+  //          语法自己写错了（比如词法能发一格语法接不住的记号）不许把整趟带走：
+  //          那一门标一行 `语法读不进来`，别的照量。
+  let probe = null;
+  try {
+    probe = loadGrammarTable(gpath);
+  } catch (err) {
+    notes.push(`${name}: 语法读不进来 —— ${String(err.message).split('\n')[0]}`);
+    continue;
+  }
   rmSync(probe.cachePath, { force: true });
   let t = performance.now();
   const cold = loadGrammarTable(gpath);

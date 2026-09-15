@@ -19,7 +19,13 @@
 //     (keyword ID LIT "true" "false")         ;; 多写一个名字 = 改判成那个 token 类型
 //     (punct SELFOP "+=" "-=")                ;; 字面量，但出指定的 token 类型
 //     (fuse ID "operator" "+" "-" "init")     ;; 「一个词 + 一个算符名」粘成一个 token
+//     (stop "#!eof" line-start)               ;; 扫到这儿就收工 —— 后面那些字不是源码
 //     (op "+" "-" "->" "(" ")"))              ;; = punct，类型就是字面量自己
+//
+// `stop` 是给「文件后半截不是源码」那一族留的位置。Chez 的 `#!eof` 就是它（参考树里
+// 16 个 .ss 用了：后面接的是散文与 shell 命令，连词法都切不动），Perl / Ruby 的
+// `__END__` 同形。这件事**只能在词法层**做：语法层收不到"剩下的字不许当记号"这句话，
+// 而块注释那一格也不行 —— 它要求有个收尾标记，这里没有。
 //
 // `fuse` 是给 flex 的**起始条件**留的位置。camp.l 里 `operator` 会 `BEGIN opname`，把后面那个
 // 算符读掉，回一个名字叫 `operator +` 的 ID —— 于是 asymptote 的语法层根本不知道有算符重载
@@ -166,17 +172,19 @@ function checkTerm(t, diags) {
 }
 
 /**
- * 读 `(lex ...)`。返回 `{skips, blocks, rules, keywords}`：
+ * 读 `(lex ...)`。返回 `{skips, blocks, rules, keywords, stops}`：
  *   skips    : 要跳过的模式（项数组），来自 skip / comment
  *   blocks   : [{open, close, nest}] 块注释
  *   rules    : [{kind:'token'|'string'|'op'|'fuse', type, terms|quote|text, span}] 按声明顺序
  *   keywords : Map<tokenType, Set<text>>
+ *   stops    : 扫到就收工的那几段文本（`#!eof` 一族）
  */
 export function readLexSpec(node, diags) {
   const skips = [];
   const blocks = [];
   const rules = [];
   const keywords = new Map();
+  const stops = [];
   if (head(node) !== 'lex') {
     diags.error(node === null || node === undefined ? null : node.span, 'a lexer spec must be a (lex ...) form');
     return null;
@@ -187,6 +195,24 @@ export function readLexSpec(node, diags) {
       if (it.items.length < 2) { diags.error(it.span, `(${h} ...) needs a pattern`); continue; }
       for (const x of it.items.slice(1)) checkTerm(x, diags);
       skips.push(it.items.slice(1));
+      continue;
+    }
+    if (h === 'stop') {
+      /* `(stop "#!eof")`：扫到这儿收工。**不是**跳过一段，是"后面那些字根本不是源码"。
+       *
+       * `line-start` 是"只有**顶格**写的才算"。Chez 需要这一格：`#!eof` 在它那儿是
+       * 两件事 —— 顶层读到它就收工（后面接散文），而写在一个表里面它就是 eof 对象
+       * 那格 datum（`'(#!eof #!bwp)`，s/cmacros.ss:2526）。两者靠"在不在第 1 列"分开：
+       * 顶层的 datum 顶格起，表里面的一定缩进。这是一条**排版上的**约定，不是语义 ——
+       * 所以要显式写出来，而不是让 `stop` 自己偷偷这么办。 */
+      const flagAt = it.items.length - 1;
+      const lineStart = isAtom(it.items[flagAt]) && it.items[flagAt].value === 'line-start';
+      const upto = lineStart ? flagAt : it.items.length;
+      for (let k = 1; k < upto; k++) {
+        const s = it.items[k];
+        if (isStr(s) && s.value.length > 0) stops.push({ text: s.value, lineStart });
+        else diags.error(s === null || s === undefined ? it.span : s.span, '(stop "TEXT"... [line-start]) takes non-empty strings');
+      }
       continue;
     }
     if (h === 'block-comment') {
@@ -268,7 +294,7 @@ export function readLexSpec(node, diags) {
     diags.error(node.span, 'a lexer spec needs at least one (token ...), (string ...) or (op ...)');
     return null;
   }
-  return { skips, blocks, rules, keywords };
+  return { skips, blocks, rules, keywords, stops };
 }
 
 // ---- 扫描 ------------------------------------------------------------------
@@ -372,6 +398,17 @@ export function lexText(spec, file, diags) {
       if (i === before) break;
     }
     if (i >= src.length) break;
+
+    // ---- 1b) 收工标记（`#!eof` 一族）。摆在跳过之后、匹配之前：它必须落在一个
+    //          **记号边界**上，不然串里的 `#!eof` 会把文件截断。
+    let stopped = false;
+    for (const s of spec.stops) {
+      if (!src.startsWith(s.text, i)) continue;
+      if (s.lineStart && i > 0 && src.charCodeAt(i - 1) !== 10) continue;
+      stopped = true;
+      break;
+    }
+    if (stopped) break;
 
     // ---- 2) 最长匹配。长度相同时**声明在前的赢** —— flex 的规矩，所以是严格大于才换。
     let best = -1;

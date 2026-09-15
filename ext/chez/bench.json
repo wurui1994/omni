@@ -1,0 +1,8 @@
+{
+  "grammar": "chez.grammar",
+  "doc": "语料 = Chez Scheme 自己那棵树里的 .ss / .sls（s/ 与 unicode/ 那几处是生成出来的，也算 —— 生成出来的代码同样得读得进来）。树不在就跳过。",
+  "corpus": [
+    { "tree": "ChezScheme", "env": "CHEZ_SRC", "ext": ".ss" },
+    { "tree": "ChezScheme", "env": "CHEZ_SRC", "ext": ".sls" }
+  ]
+}
