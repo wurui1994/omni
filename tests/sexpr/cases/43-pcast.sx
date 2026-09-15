@@ -1,0 +1,36 @@
+;; `(pcast p (ptr U))` —— 换一副眼镜看同一格地址（第二百五十九刀）
+;;
+;; 地址与范围一个字都不动，变的只有"往后按几个字节走一格"。运行期它是**恒等**的：四个 OIR
+;; 消费者（JS / interp / C / MIR）都直接把操作数交出去，MIR 上连一条新指令都没有。
+;;
+;; 出处：jancy 的 `Cast_DataPtr`（同一个地址、同一个范围，只换元素类型）—— 协议解析里
+;; "把这段内存当字节看"那一句（`(uint8_t const*)p`）就是它。真语料 662 份上量出来 71 处。
+;;
+;; 这一格判据钉住三件事：换了眼镜之后 `padd` 按**新**元素走、范围检查照旧盖着整块、
+;; 再换回来读到的还是同一个数。
+
+(module
+  (struct Pair (a int) (b int))
+
+  (main
+    ;; 两格 int，写 10 / 20
+    (let p (ptr int) (pnew (ptr int) (int 2)))
+    (pstore (var p) (int 10))
+    (pstore (padd (var p) (int 1)) (int 20))
+
+    ;; 换成 (ptr Pair) 看：同一块内存，一格 Pair 就是那两个 int（结构体逐字段读，
+    ;; 整块读那一条方言刻意不给 —— 见 sexpr/lower.js 里 pload 那一段）
+    (let q (ptr Pair) (pcast (var p) (ptr Pair)))
+    (print (pload (pfield (var q) a)))
+    (print (pload (pfield (var q) b)))
+
+    ;; 再换回 (ptr int)：读到的还是同一个数
+    (let r (ptr int) (pcast (var q) (ptr int)))
+    (print (pload (var r)))
+    (print (pload (padd (var r) (int 1))))
+
+    ;; 范围照旧盖着整块 —— 空指针换了眼镜还是空的
+    (let z (ptr int) (pnull (ptr int)))
+    (print (pisnull (pcast (var z) (ptr Pair))))
+  )
+)

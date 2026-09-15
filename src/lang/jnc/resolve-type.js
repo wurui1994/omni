@@ -82,6 +82,18 @@ export function resolveType(t, env = new Map(), depth = 0) {
   let el = base;
   /* 类与**函数类型**那两族吞掉一个 `*`（`C* p` / `Fn* m_f` 里那一个星号是它们自己的形状）。 */
   const stars = base.k === 'class' || base.k === 'fnptr' ? Math.max(t.ptrs - 1, 0) : t.ptrs;
+  /**
+   * **`void*` 是另一族**（第二百五十九刀）：jancy 那儿它是"没有元素类型的数据指针"
+   * （`void const* p`，真语料里校验和/序列化那一族的形参都这么写）。方言的 `(ptr T)` 里
+   * T 还不收 void —— 收它要先有一格"按字节走"的指针类型（与整数带宽度那一格同一程，
+   * 见 ADR-0031 §8.1）。
+   *
+   * 在**这一层**记账而不是让它漏到方言那一侧：漏过去报的是 `.sx` 里那句
+   * "(ptr T) 的 T 只能是 …"，指着一份虚拟的中间文件，而写的人手里只有 `.jnc`。
+   */
+  if (base.k === 'void' && stars > 0) {
+    return { type: null, why: '`void*`（没有元素类型的字节指针）—— 方言的 `(ptr T)` 里 T 还不收 void' };
+  }
   for (let i = 0; i < stars; i += 1) el = { k: 'ptr', target: el };
 
   /* 多维数组按**源码次序**读长度（`int m_grid[2][3]` 是 [2,3]），从里往外套：

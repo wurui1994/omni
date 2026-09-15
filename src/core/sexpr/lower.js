@@ -2408,7 +2408,7 @@ class CoreLowerer {
     if (h === 'msize' || h === 'mgrow' || h === 'mload') return this.memExpr(n, h);
     if (h === 'pnew' || h === 'pnull' || h === 'pload' || h === 'padd' || h === 'psub'
       || h === 'pisnull' || h === 'pfield' || h === 'pthin' || h === 'pelem'
-      || h === 'peq') return this.ptrExpr(n, h);
+      || h === 'pcast' || h === 'peq') return this.ptrExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
     // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。
     // 没有"结构体字面量"：字段一多，字面量就要么按顺序（改字段顺序会静默改语义）、
@@ -2516,6 +2516,7 @@ class CoreLowerer {
    *   (pfield p 字段名)  结构体指针 -> 那个字段的指针（"把协议头盖在缓冲上"靠这一条）
    *   (pthin p)          fat 降成 thin；**只在 `(unsafe …)` 里**
    *   (pelem p)          `(ptr (blk T N))` -> `(ptr T)`（第十八刀）；地址与范围都不动
+   *   (pcast p (ptr U))  换一副眼镜看同一格地址（第二百五十九刀）；地址与范围都不动
    *   (peq p q)          两个指针指的是不是同一格
    *
    * `peq` 单开一条而不是走 `(bin "==" …)`：`==` 那一条要求"两边同型、按值比"，而 fat
@@ -2564,6 +2565,33 @@ class CoreLowerer {
       }
       const et = p.type.target.el;
       return { kind: 'PtrElem', ptr: p, type: thin ? tptrType(et) : ptrType(et) };
+    }
+    /**
+     * `(pcast p (ptr U))`：**换一副眼镜看同一格地址**（第二百五十九刀）。地址与范围一个字
+     * 都不动，变的只有"往后按几个字节走一格"—— 于是接下来的 `padd` / `pload` 按 `U` 算。
+     * 运行期它与 `pelem` 一样是**恒等**的（四个 OIR 消费者都直接把操作数交出去），
+     * 所以 MIR 上也没有新指令。
+     *
+     * 为什么要有它：`(uint8_t const*)p`（"把这段内存当字节看"）是协议解析里最常见的一句 ——
+     * jancy 那儿是 `Cast_DataPtr`（同一个地址、同一个范围，只换元素类型）。没有它，那一族
+     * 只能整句拒掉（真语料 662 份上量出来 71 处）。
+     *
+     * 三条与 `pthin` / `pelem` 同一条纪律：
+     *   - 范围**不缩**（fat 指针那三个字里的 base/len 原样带着）—— 所以它不比源指针更危险；
+     *   - thin 指针照旧只在 `(unsafe …)` 里（它本来就没有范围可带）；
+     *   - 目标要是 `(ptr U)` / `(tptr U)`，而且**粗细不换**（fat 换 thin 走 `pthin`）。
+     */
+    if (h === 'pcast') {
+      const t = this.ty(n.items[2], '(pcast p TYPE) 的 TYPE');
+      if (t === null) return null;
+      if (t.k !== 'ptr' && t.k !== 'tptr') {
+        return this.err(n, `(pcast p TYPE) 的 TYPE 要是 (ptr U) 或 (tptr U)，这里是 ${coreTypeText(t)}`);
+      }
+      if ((t.k === 'tptr') !== thin) {
+        return this.err(n, `(pcast …)：粗细不换 —— ${coreTypeText(p.type)} 换不成 ${coreTypeText(t)}`
+          + '（fat -> thin 用 (pthin p)）');
+      }
+      return { kind: 'PtrCast', ptr: p, type: t };
     }
     if (h === 'pload') {
       // 结构体整块读出来这一刀不给：那要按类型逐字段从内存里拼一个值出来，四条腿各一份

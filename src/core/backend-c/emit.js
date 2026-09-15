@@ -1727,6 +1727,9 @@ class CEmitter {
       case 'PtrThin': return `(${this.expr(e.ptr)}).a`;
       // `(pelem p)`（第十八刀）：omni_ptr 照原样传出去 —— 三个字都不动，只是类型上的一步。
       case 'PtrElem': return this.expr(e.ptr);
+      // `(pcast p (ptr U))`（第二百五十九刀）：同上 —— 这一层的 omni_ptr 里没有元素类型
+      // （读写那两处才按目标类型强转），所以"换一副眼镜"在 C 这边一个字都不用发。
+      case 'PtrCast': return this.expr(e.ptr);
       case 'PtrLoad':
         return `(*(${cTypeName(e.type)} *)${this.ptrChk(e.ptr, e.size)})`;
       case 'PtrStore':

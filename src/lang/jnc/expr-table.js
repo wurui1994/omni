@@ -260,6 +260,17 @@ export function castValue(v, to, c) {
       return { code: c.intConvCode(src.code, src.type, to.base), type: to };
     }
   }
+  /**
+   * **指针换指针**（第二百五十九刀，jancy 的 `Cast_DataPtr`）：`(uint8_t const*)p` ——
+   * 同一个地址、同一个范围，只换"往后按几个字节走一格"。方言里那一格算子是
+   * `(pcast p (ptr U))`（地址与范围一个字不动，四条腿上都是恒等的）。
+   *
+   * 真语料 662 份上量出来 71 处（协议解析那一族最常见的一句：把一段内存当字节看）。
+   * 粗细**不换**（fat 换 thin 是 `pthin`，而且要写在 `unsafe` 里）—— 那一格照旧另判。
+   */
+  if (c.isPtr(to) && c.isPtr(v.type) && (to.k === v.type.k) && c.tyText !== undefined) {
+    return { code: `(pcast ${v.code} ${c.tyText(to)})`, type: to };
+  }
   return null;
 }
 

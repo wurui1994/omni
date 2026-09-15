@@ -565,6 +565,9 @@ class JsEmitter {
       // `(pelem p)`（第十八刀）：只换类型，值一个字不动 —— 三元组照原样交出去。
       // 共用同一个数组没问题：fat 指针在这条腿上从不原地改（$padd 等都回新数组）。
       case 'PtrElem': return this.expr(e.ptr);
+      // `(pcast p (ptr U))`（第二百五十九刀）：同上 —— 三元组里没有元素类型（跨几个字节在
+      // `$padd` 的实参上、读写宽度在 `jsPtrLoad` 那一步），所以换类型不发一个字。
+      case 'PtrCast': return this.expr(e.ptr);
       case 'PtrLoad': return `${jsPtrLoad(e.type)}(${jsPtrChk(this, e.ptr, e.size)})`;
       case 'PtrStore':
         return `${jsPtrStore(e.type)}(${jsPtrChk(this, e.ptr, e.size)}, ${this.expr(e.value)})`;

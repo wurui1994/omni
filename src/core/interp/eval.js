@@ -356,6 +356,9 @@ class Interp {
       case 'PtrThin': return this.eval(e.ptr, env, frame)[0];
       // `(pelem p)`（第十八刀）：类型上的一步，运行期是恒等的。
       case 'PtrElem': return this.eval(e.ptr, env, frame);
+      // `(pcast p (ptr U))`（第二百五十九刀）：同上 —— 换的是"往后按几个字节走一格"，
+      // 而那个数在 `padd` / `pload` 自己的 `size` 上，不在指针值里。
+      case 'PtrCast': return this.eval(e.ptr, env, frame);
       case 'PtrLoad': return ptrLoad(e.type.k, this.ptrChk(e.ptr, e.size, env, frame));
       // 线性内存（ADR-0017 第二刀）。这条腿一次访问查一次表（memLoad 里那一步）——
       // 树遍历的执行器本来每个节点就是一次 switch，多一次 Map 查找不改数量级；

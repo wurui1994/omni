@@ -596,6 +596,9 @@ class ToMir {
       // `(pelem p)`（第十八刀）：两边的 MIR 类型都是 T_PTR，跨的字节数在**下一条** padd 的
       // aux 上，所以这里连一条指令都不用发 —— 直接把操作数的 ref 交出去。
       case 'PtrElem': return this.expr(e.ptr);
+      // `(pcast p (ptr U))`（第二百五十九刀）：同上 —— MIR 两边都是 T_PTR，跨的字节数在
+      // 下一条 padd / pload 的 aux 上，这里一条指令都不用发。
+      case 'PtrCast': return this.expr(e.ptr);
       case 'PtrLoad':
         return f.emit(OP.PLOAD, this.ty(e.type), this.expr(e.ptr), REF_NONE, e.size);
       // 线性内存（ADR-0017 第二刀）。方言里的 KIND 是个名字（`i32u`），MIR 上是描述符号 ——
