@@ -180,6 +180,11 @@ export function readGrammar(nodes, diags) {
         }
         if (!terms.has(type)) err(top, `(keyword ${type} ...) names a token type that is not a terminal`);
       }
+      /* 自动分号补出来的那一格也是词法器发的记号 —— 同一条规矩：语法接不住就当场报错。
+         不查的话症状会是"某个换行处莫名一句 unexpected"，那种错最难找。 */
+      if (lexSpec.autoSemi !== null && !terms.has(lexSpec.autoSemi.type)) {
+        err(top, `(auto-semi ...) inserts ${lexSpec.autoSemi.type}, which is not a terminal of this grammar`);
+      }
     }
   }
   return { name, terms, nonterms, rules, start, prec, lex: lexSpec };

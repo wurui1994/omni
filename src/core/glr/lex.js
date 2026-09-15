@@ -20,7 +20,22 @@
 //     (punct SELFOP "+=" "-=")                ;; 字面量，但出指定的 token 类型
 //     (fuse ID "operator" "+" "-" "init")     ;; 「一个词 + 一个算符名」粘成一个 token
 //     (stop "#!eof" line-start)               ;; 扫到这儿就收工 —— 后面那些字不是源码
+//     (auto-semi ";" after NAME NUM ")" "]")  ;; 跨过换行时按上一个记号补一格（go 的 ASI）
 //     (op "+" "-" "->" "(" ")"))              ;; = punct，类型就是字面量自己
+//
+// **「看上一个记号」那两格**（`(not-after …)` 与 `auto-semi`）是同一件事的两种用法：
+// 词法器手上唯一的上下文就是"上一个交出去的记号是什么"。它不是状态机（没有起始条件、
+// 没有栈），只有这一格，而这一格恰好把两族真问题解决掉：
+//
+//   - **正则字面量 vs 除号**（awk / js / perl）：`/re/` 与 `a / b` 在字符层一模一样，
+//     分开它们靠的是"前一个记号是不是一个操作数"。写成
+//     `(token ERE (not-after NAME NUMBER STRING ")" "]") "/" … "/")` —— 于是这条规则
+//     在"前面刚出现过操作数"的时候根本不参赛，除号自然赢。
+//   - **自动分号**（go / vlang）：换行在特定记号之后**就是**一个分号。
+//     `(auto-semi ";" after NAME NUMBER ")" "}" "return")`，跨过换行时补一格。
+//     文件末尾也补（Go 的规矩），不然最后一条语句收不了尾。
+//
+// 两者都**只看类型、不回头改已经交出去的记号**，所以词法这一层仍然是一趟扫完、不回溯。
 //
 // `stop` 是给「文件后半截不是源码」那一族留的位置。Chez 的 `#!eof` 就是它（参考树里
 // 16 个 .ss 用了：后面接的是散文与 shell 命令，连词法都切不动），Perl / Ruby 的
@@ -172,12 +187,41 @@ function checkTerm(t, diags) {
 }
 
 /**
- * 读 `(lex ...)`。返回 `{skips, blocks, rules, keywords, stops}`：
+ * 一条规则前面那格可选的**上下文条件**：`(after T…)` 或 `(not-after T…)`。
+ * 答 `{cond, from}` —— `from` 是"条件之后从哪一项接着读"。
+ *
+ * 条件里的 T 既可以是记号类型名（`NAME`），也可以是字面量（`")"`）—— 后者按 litName
+ * 折成内部名，与规则那边的口径同一份代码。
+ */
+function readCond(items, from, diags) {
+  const t = items[from];
+  const h = head(t);
+  if (h !== 'after' && h !== 'not-after') return { cond: null, from };
+  const types = new Set();
+  for (const x of t.items.slice(1)) {
+    if (isAtom(x)) types.add(x.value);
+    else if (isStr(x)) types.add(litName(x.value));
+    else diags.error(x === null || x === undefined ? t.span : x.span, `(${h} T...) takes token names or string literals`);
+  }
+  if (types.size === 0) diags.error(t.span, `(${h} T...) needs at least one token type`);
+  return { cond: { neg: h === 'not-after', types }, from: from + 1 };
+}
+
+/** 上一个交出去的记号（可能没有）满不满足这条规则的条件。 */
+function condOk(cond, prevType) {
+  if (cond === null) return true;
+  const hit = prevType !== null && cond.types.has(prevType);
+  return cond.neg ? !hit : hit;
+}
+
+/**
+ * 读 `(lex ...)`。返回 `{skips, blocks, rules, keywords, stops, autoSemi}`：
  *   skips    : 要跳过的模式（项数组），来自 skip / comment
  *   blocks   : [{open, close, nest}] 块注释
- *   rules    : [{kind:'token'|'string'|'op'|'fuse', type, terms|quote|text, span}] 按声明顺序
+ *   rules    : [{kind:'token'|'string'|'op'|'fuse', type, terms|quote|text, cond, span}] 按声明顺序
  *   keywords : Map<tokenType, Set<text>>
  *   stops    : 扫到就收工的那几段文本（`#!eof` 一族）
+ *   autoSemi : `{type, text, after:Set}` 或 null —— 跨过换行时补的那一格（go 的 ASI）
  */
 export function readLexSpec(node, diags) {
   const skips = [];
@@ -185,6 +229,7 @@ export function readLexSpec(node, diags) {
   const rules = [];
   const keywords = new Map();
   const stops = [];
+  let autoSemi = null;
   if (head(node) !== 'lex') {
     diags.error(node === null || node === undefined ? null : node.span, 'a lexer spec must be a (lex ...) form');
     return null;
@@ -224,22 +269,44 @@ export function readLexSpec(node, diags) {
       blocks.push({ open: open.value, close: close.value, nest });
       continue;
     }
+    if (h === 'auto-semi') {
+      /* `(auto-semi ";" after NAME NUMBER ")" "}")`：跨过换行时，若上一个记号在 after
+       * 那张表里，就补一格。Go 的规范把它写成词法规则（"分号自动插入"），V 照抄。
+       * 文件末尾也补一格 —— 不然最后一条语句收不了尾。 */
+      const s = it.items[1];
+      if (!isStr(s) || s.value.length === 0) { diags.error(it.span, '(auto-semi ";" after T...) needs the text to insert'); continue; }
+      const kw = it.items[2];
+      if (!isAtom(kw) || kw.value !== 'after') { diags.error(it.span, "(auto-semi \";\" after T...) needs the word 'after'"); continue; }
+      const after = new Set();
+      for (const x of it.items.slice(3)) {
+        if (isAtom(x)) after.add(x.value);
+        else if (isStr(x)) after.add(litName(x.value));
+        else diags.error(x === null || x === undefined ? it.span : x.span, 'an auto-semi trigger must be a token name or a string literal');
+      }
+      if (after.size === 0) diags.error(it.span, '(auto-semi ...) needs at least one trigger token');
+      if (autoSemi !== null) diags.error(it.span, 'a lexer spec may have at most one (auto-semi ...) form');
+      autoSemi = { type: litName(s.value), text: s.value, after };
+      continue;
+    }
     if (h === 'token') {
       const nm = isAtom(it.items[1]) ? it.items[1].value : null;
       if (nm === null || it.items.length < 3) { diags.error(it.span, '(token NAME PATTERN...) needs a name and a pattern'); continue; }
-      for (const x of it.items.slice(2)) checkTerm(x, diags);
-      rules.push({ kind: 'token', type: nm, terms: it.items.slice(2), span: it.span });
+      const c = readCond(it.items, 2, diags);
+      if (it.items.length <= c.from) { diags.error(it.span, '(token NAME PATTERN...) needs a pattern'); continue; }
+      for (const x of it.items.slice(c.from)) checkTerm(x, diags);
+      rules.push({ kind: 'token', type: nm, terms: it.items.slice(c.from), cond: c.cond, span: it.span });
       continue;
     }
     if (h === 'string') {
       const nm = isAtom(it.items[1]) ? it.items[1].value : null;
-      const q = it.items[2];
+      const c = readCond(it.items, 2, diags);
+      const q = it.items[c.from];
       if (nm === null || !isStr(q) || q.value.length !== 1) { diags.error(it.span, '(string NAME "Q") needs a name and a one-character quote'); continue; }
       // `verbatim` = 反斜杠只对引号本身有效，别的位置就是一个普通反斜杠。asy 的双引号串
       // 就是这样（量过：`"a\tb"` 是 4 个字符 a \ t b），因为它要直接往 TeX 里塞。
-      const verbatim = isAtom(it.items[3]) && it.items[3].value === 'verbatim';
-      if (it.items.length > 3 && !verbatim) diags.error(it.span, "the only flag after (string NAME \"Q\") is 'verbatim'");
-      rules.push({ kind: 'string', type: nm, quote: q.value, verbatim, span: it.span });
+      const verbatim = isAtom(it.items[c.from + 1]) && it.items[c.from + 1].value === 'verbatim';
+      if (it.items.length > c.from + 1 && !verbatim) diags.error(it.span, "the only flag after (string NAME \"Q\") is 'verbatim'");
+      rules.push({ kind: 'string', type: nm, quote: q.value, verbatim, cond: c.cond, span: it.span });
       continue;
     }
     if (h === 'keyword') {
@@ -269,7 +336,7 @@ export function readLexSpec(node, diags) {
         if (isStr(a) && a.value.length > 0) alts.push(a.value);
         else diags.error(a === null || a === undefined ? it.span : a.span, 'a fused alternative must be a non-empty string');
       }
-      rules.push({ kind: 'fuse', type: nm, text: w.value, alts, span: it.span });
+      rules.push({ kind: 'fuse', type: nm, text: w.value, alts, cond: null, span: it.span });
       continue;
     }
     if (h === 'op' || h === 'punct') {
@@ -284,7 +351,7 @@ export function readLexSpec(node, diags) {
       }
       for (const o of it.items.slice(from)) {
         if (!isStr(o) || o.value.length === 0) { diags.error(o.span, 'an operator must be a non-empty string'); continue; }
-        rules.push({ kind: 'op', type: to === null ? litName(o.value) : to, text: o.value, span: o.span });
+        rules.push({ kind: 'op', type: to === null ? litName(o.value) : to, text: o.value, cond: null, span: o.span });
       }
       continue;
     }
@@ -294,7 +361,7 @@ export function readLexSpec(node, diags) {
     diags.error(node.span, 'a lexer spec needs at least one (token ...), (string ...) or (op ...)');
     return null;
   }
-  return { skips, blocks, rules, keywords, stops };
+  return { skips, blocks, rules, keywords, stops, autoSemi };
 }
 
 // ---- 扫描 ------------------------------------------------------------------
@@ -371,6 +438,10 @@ export function lexText(spec, file, diags) {
   const toks = [];
   let i = 0;
   let failed = false;
+  /** 上一个交出去的记号的**类型**。条件规则与自动分号都只看这一格。 */
+  let prevType = null;
+  /** 上一个记号的结束位置 —— 自动分号要知道"这中间有没有跨过换行" */
+  let prevEnd = 0;
 
   for (;;) {
     // ---- 1) 跳空白、注释。跳一次可能让另一条又能跳，所以要转到不动点。
@@ -397,6 +468,19 @@ export function lexText(spec, file, diags) {
       }
       if (i === before) break;
     }
+
+    // ---- 1a) 自动分号（go 的 ASI）。**在跳过之后判**：跳掉的注释里那些换行也算跨过了。
+    //          文件尾也补一格 —— 不然最后一条语句收不了尾。
+    if (spec.autoSemi !== null && prevType !== null && spec.autoSemi.after.has(prevType)) {
+      const gap = src.slice(prevEnd, i >= src.length ? src.length : i);
+      if (i >= src.length || gap.includes('\n')) {
+        const span = mkSpan(file, prevEnd, prevEnd);
+        toks.push({ type: spec.autoSemi.type, node: { kind: 'atom', value: spec.autoSemi.text, span }, span });
+        prevType = spec.autoSemi.type;
+        /* prevEnd 不动：连着几个空行只补一格（上一格补完 prevType 就变成分号自己，
+           而分号一般不在 after 表里，于是自然不会连着补） */
+      }
+    }
     if (i >= src.length) break;
 
     // ---- 1b) 收工标记（`#!eof` 一族）。摆在跳过之后、匹配之前：它必须落在一个
@@ -416,6 +500,9 @@ export function lexText(spec, file, diags) {
     let bestValue = null;
     for (let r = 0; r < spec.rules.length; r++) {
       const rule = spec.rules[r];
+      /* 条件规则（`(not-after …)` / `(after …)`）：不满足就**不参赛**。
+         awk 的 `/re/` 靠这一格躲开除号 —— 前面刚出现过操作数时它不参赛。 */
+      if (!condOk(rule.cond === undefined ? null : rule.cond, prevType)) continue;
       let end = -1;
       let value = null;
       if (rule.kind === 'token') end = matchSeq(rule.terms, 0, src, i);
@@ -449,8 +536,10 @@ export function lexText(spec, file, diags) {
     // fuse 的文本是**规范化**的（`operator +`），不是源码里那一段
     const text = rule.kind === 'fuse' ? bestValue : src.slice(i, bestEnd);
     i = bestEnd;
+    prevEnd = bestEnd;
     if (rule.kind === 'string') {
       toks.push({ type: rule.type, node: { kind: 'string', value: bestValue, raw: text.slice(1, text.length - 1), span }, span });
+      prevType = rule.type;
       continue;
     }
     let type = rule.type;
@@ -460,6 +549,7 @@ export function lexText(spec, file, diags) {
       if (re !== undefined) type = re;
     }
     toks.push({ type, node: { kind: 'atom', value: text, span }, span });
+    prevType = type;
   }
 
   return failed ? null : toks;
