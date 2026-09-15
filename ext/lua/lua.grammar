@@ -1,0 +1,269 @@
+;; ext/lua/lua.grammar —— Lua 的完整语法（GLR 那条路）；收 5.1 到 5.4 的并集
+;;
+;; 为什么有这一份：这一格扩展本来有自己那套「节点表 + 洞的类别 + 读表的驱动器」
+;; （tokens.js / nodes.js / lang.js，见 DESIGN.md）。那一条**不弃用** —— 它是这门语言
+;; 今天真正在跑的路（`omni run x.lua`）。这一份是**第二条**：语法写成数据，走
+;; glr/table.js + glr/driver.js，与 asy / jnc 那两门同一条。
+;;
+;; 两条并存的理由不是"多一个选项"，是**互为判据**：同一份语料，两条路都要认。
+;; 一条认一条不认的每一处，都是一笔账 —— 要么手写的驱动器漏了一格，要么这份语法写错了。
+;;
+;; 语法照 Lua 手册第 9 节那份 EBNF 逐条抄下来（那份 EBNF 是权威且完整的），
+;; 抄的时候只做两件形式上的事：
+;;   - `{X}` 的重复改成左递归（LR 要的形状），出来的值用 `$*k` 摊平成一条平表；
+;;   - `exp binop exp` 那一大坨不展开成 14 层，用优先级声明消歧（与 Lua 自己
+;;     lparser.c 里那张 priority[] 表逐格对上，见下面 (prec …) 那一段的注释）。
+;;
+;; **收的是 5.1…5.4 的并集**，不是某一版：扩展这一门的自述写着 "Lua 5.1 / LuaJIT 2"，
+;; 而机器上的参考树（reference/lua）是 5.4 —— 一份语法要能吃下两边的语料，
+;; 就得把 5.2 的 goto/标签与空语句、5.3 的位运算与 `//`、5.4 的 `<const>` / `<close>`
+;; 都收进来。**一门语言的解析器认得比它该认的多**，代价落在下游（降级那一层拒掉
+;; 这一版没有的写法，且报得出是哪一版才有）；反过来"少认"的代价是语料根本进不来。
+;;
+;; 明说的三处不足（不猜，写在这儿）：
+;;   1. **长括号只收 0 级**：`[[…]]` 与 `--[[…]]` 收，`[==[…]==]` 不收 ——
+;;      lex.js 那套模式语言没有"数出 N 个等号再要求同样多的等号"这种东西（它不回溯）。
+;;   2. 串里的 `\z`（吃掉后面的空白）不收 —— 那是**值**那一层的转义表，lex.js 的
+;;      `(string …)` 用的是通用那张。
+;;   3. 长串开头那个换行 Lua 会吃掉 —— 同上，值那一层的事，这里的记号文本照原样留着。
+
+(grammar lua
+  (tokens NAME NUMBER STRING
+    ;; 只用来标 %prec 的两格伪终结符：
+    ;;   UNARY  一元 not / # / - / ~ 的那一级
+    ;;   STOP   「前缀表达式到此为止」那一条规则的级别 —— 见文件末尾那段注释
+    UNARY STOP)
+
+  ;; 优先级从低到高。中间那些与 Lua 5.4 lparser.c 的 priority[] 逐格对上：
+  ;;   or 1 / and 2 / 比较 3 / | 4 / ~ 5 / & 6 / << >> 7 / .. 9,8（右）/
+  ;;   + - 10 / * / // % 11 / 一元 12 / ^ 14,13（右）
+  ;; 第一行与最后一行是我们自己加的两级，Lua 里没有对应物：最后那一行把「前缀表达式
+  ;; 后面还能接调用/索引」变成**移进赢**，也就是 Lua 5.2 起那条"贪心"的规矩。
+  (prec nonassoc STOP)
+  (prec left "or")
+  (prec left "and")
+  (prec left "<" ">" "<=" ">=" "~=" "==")
+  (prec left "|")
+  (prec left "~")
+  (prec left "&")
+  (prec left "<<" ">>")
+  (prec right "..")
+  (prec left "+" "-")
+  (prec left "*" "/" "//" "%")
+  (prec right UNARY)
+  (prec right "^")
+  (prec left "(" "[" "." ":" "{" STRING)
+
+  (start block)
+
+  (lex
+    (skip space)
+    ;; 脚本头 `#!/usr/bin/lua`。Lua 自己也是这么收的（只认第一行），我们不限第一行 ——
+    ;; 代价是零：`#!` 在 Lua 里根本拼不出来（`#` 是取长，而 `!` 不是这门语言的记号）。
+    (comment "#!" (* (not "\n")))
+    ;; 行注释要**躲开** `--[[`：lexText 是先把所有 skip 跳一遍、再看块注释，
+    ;; 所以一条会吃到行尾的 `--` 会把长注释的头一行咬掉。写成"`--` 后面那一个字符
+    ;; 不是 `[`"（以及"是 `[` 但下一个不是 `[`"）两条，就把那一格让给块注释。
+    (comment "--" (not "[") (* (not "\n")))
+    (comment "--" "[" (not "[") (* (not "\n")))
+    (block-comment "--[[" "]]")
+
+    ;; 数：十六进制（含 5.2 起的十六进制浮点 `0x1p-4`）在前
+    (token NUMBER "0" (or "x" "X") (+ hex) (? "." (* hex)) (? (or "p" "P") (? (or "+" "-")) (+ digit)))
+    (token NUMBER (+ digit) (? "." (* digit)) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    (token NUMBER "." (+ digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+
+    ;; 串：两种引号 + 0 级长串。长串那条用的是「非 `]` ，或者 `]` 后面不是 `]`」——
+    ;; 贪心不回溯的匹配器要表达"扫到第一个 `]]` 为止"，只有这一种写法。
+    (string STRING "\"")
+    (string STRING "'")
+    (token STRING "[[" (* (or (not "]") (seq "]" (not "]")))) "]]")
+
+    (token NAME (or alpha "_") (* (or alnum "_")))
+    (keyword NAME
+      "and" "break" "do" "else" "elseif" "end" "false" "for" "function" "goto" "if" "in"
+      "local" "nil" "not" "or" "repeat" "return" "then" "true" "until" "while")
+
+    ;; 算符：长的自然赢（最长匹配），不用另排一层
+    (op "..." ".." "==" "~=" "<=" ">=" "<<" ">>" "//" "::"
+        "+" "-" "*" "/" "%" "^" "#" "&" "~" "|" "<" ">" "="
+        "(" ")" "{" "}" "[" "]" ";" ":" "," "."))
+
+  ;; ---- 语句 ------------------------------------------------------------------
+  ;;
+  ;; `chunk ::= {stat} [retstat]`。`block ::= chunk`，所以两者共用这一格。
+  ;; 5.1 的写法是 `{stat [';']}`，5.2 起 `;` 自己就是一条空语句 —— 收后者更宽，
+  ;; 而"宽"在这一层不产生歧义（空语句不带值）。
+
+  (rule block
+    (-> (stats) (block $*1))
+    (-> (stats laststat) (block $*1 $2))
+    (-> (stats laststat ";") (block $*1 $2)))
+
+  (rule stats
+    (-> () ())
+    (-> (stats stat) ($*1 $2))
+    (-> (stats stat ";") ($*1 $2))
+    (-> (stats ";") $1))
+
+  (rule laststat
+    (-> ("return") (return))
+    (-> ("return" explist) (return $*2))
+    (-> ("break") (break)))
+
+  (rule stat
+    (-> (varlist "=" explist) (assign (targets $*1) (values $*3)))
+    ;; 函数调用当一条语句 —— Lua 里唯一"表达式能当语句"的那一格
+    (-> (functioncall) $1)
+    ;; 5.2 起：标签与 goto。`break` 仍然是 laststat（5.1 的形状），5.2 起它其实是普通
+    ;; 语句 —— 收窄的那一格由降级那一层管，这里照 5.1 摆着就够（语料里没有反例）。
+    (-> ("::" NAME "::") (label $2))
+    (-> ("goto" NAME) (goto $2))
+    (-> ("do" block "end") (do $2))
+    (-> ("while" exp "do" block "end") (while $2 $4))
+    (-> ("repeat" block "until" exp) (repeat $2 $4))
+    (-> ("if" exp "then" block elseifs "end") (if $2 $4 (elseifs $*5)))
+    (-> ("if" exp "then" block elseifs "else" block "end") (if $2 $4 (elseifs $*5) (else $7)))
+    (-> ("for" NAME "=" exp "," exp "do" block "end") (fornum $2 $4 $6 $8))
+    (-> ("for" NAME "=" exp "," exp "," exp "do" block "end") (fornum-step $2 $4 $6 $8 $10))
+    (-> ("for" namelist "in" explist "do" block "end") (forin (names $*2) (values $*4) $6))
+    (-> ("function" funcname funcbody) (fndef $2 $3))
+    (-> ("local" "function" NAME funcbody) (localfn $3 $4))
+    (-> ("local" attnamelist) (local (names $*2)))
+    (-> ("local" attnamelist "=" explist) (local (names $*2) (values $*4))))
+
+  ;; 5.4 的属性：`local x <const>, y <close>`。属性名就是个普通名字（`const` / `close`
+  ;; 不是关键字），认哪几个是**降级那一层**的事 —— 语法只管"这儿能挂一个 `<名字>`"。
+  (rule attnamelist
+    (-> (attname) ($1))
+    (-> (attnamelist "," attname) ($*1 $3)))
+
+  (rule attname
+    (-> (NAME) $1)
+    (-> (NAME "<" NAME ">") (att $1 $3)))
+
+  (rule elseifs
+    (-> () ())
+    (-> (elseifs "elseif" exp "then" block) ($*1 (elseif $3 $5))))
+
+  ;; `funcname ::= Name {'.' Name} [':' Name]` —— 那个 `:` 只许有一个，且在最后
+  (rule funcname
+    (-> (dotted) $1)
+    (-> (dotted ":" NAME) (method $1 $3)))
+
+  (rule dotted
+    (-> (NAME) (name $1))
+    (-> (dotted "." NAME) (dot $1 $3)))
+
+  ;; ---- 名字与表达式的表 ------------------------------------------------------
+
+  (rule varlist
+    (-> (var) ($1))
+    (-> (varlist "," var) ($*1 $3)))
+
+  (rule namelist
+    (-> (NAME) ($1))
+    (-> (namelist "," NAME) ($*1 $3)))
+
+  (rule explist
+    (-> (exp) ($1))
+    (-> (explist "," exp) ($*1 $3)))
+
+  (rule var
+    (-> (NAME) (name $1))
+    (-> (prefixexp "[" exp "]") (index $1 $3))
+    (-> (prefixexp "." NAME) (dot $1 $3)))
+
+  (rule prefixexp
+    (-> (var) $1)
+    (-> (functioncall) $1)
+    (-> ("(" exp ")") (paren $2)))
+
+  (rule functioncall
+    (-> (prefixexp args) (call $1 (args $*2)))
+    (-> (prefixexp ":" NAME args) (mcall $1 $3 (args $*4))))
+
+  (rule args
+    (-> ("(" ")") ())
+    (-> ("(" explist ")") ($*2))
+    (-> (tablecons) ($1))
+    (-> (STRING) ($1)))
+
+  (rule fn
+    (-> ("function" funcbody) (fn $2)))
+
+  (rule funcbody
+    (-> ("(" ")" block "end") (body (params) $3))
+    (-> ("(" parlist ")" block "end") (body (params $*2) $4)))
+
+  (rule parlist
+    (-> (namelist) $1)
+    (-> (namelist "," "...") ($*1 (vararg)))
+    (-> ("...") ((vararg))))
+
+  (rule tablecons
+    (-> ("{" "}") (table))
+    (-> ("{" fieldlist "}") (table $*2))
+    (-> ("{" fieldlist fieldsep "}") (table $*2)))
+
+  (rule fieldlist
+    (-> (field) ($1))
+    (-> (fieldlist fieldsep field) ($*1 $3)))
+
+  (rule fieldsep
+    (-> (",") $1)
+    (-> (";") $1))
+
+  (rule field
+    (-> ("[" exp "]" "=" exp) (kv $2 $5))
+    (-> (NAME "=" exp) (named $1 $3))
+    (-> (exp) (item $1)))
+
+  ;; ---- 表达式 ----------------------------------------------------------------
+  ;;
+  ;; `(prec STOP)` 那一条是这份语法里唯一一处**我们自己**的决定，写清理由：
+  ;;
+  ;;   a = b
+  ;;   (f)(x)
+  ;;
+  ;; 这两行在 Lua 5.1 里是**真歧义**（`a = b(f)(x)` 一条语句，还是两条），5.1 的
+  ;; 解析器为此专门报一句 "ambiguous syntax"。5.2 起改成贪心：往下接，算一条。
+  ;; 我们照 5.2 —— 做法是给 `(` `[` `.` `:` `{` STRING 一级**最高**优先级，而给
+  ;; 「前缀表达式到此为止」这条规则最低那一级 STOP。于是撞上这几个记号时移进赢，
+  ;; 贪心就是表里的一格 shift，不是驱动器运行期的一次猜。
+  (rule exp
+    (-> ("nil") (nil))
+    (-> ("false") (false))
+    (-> ("true") (true))
+    (-> (NUMBER) (num $1))
+    (-> (STRING) (str $1))
+    (-> ("...") (vararg))
+    (-> (fn) $1)
+    (-> (prefixexp) (prec STOP) $1)
+    (-> (tablecons) $1)
+    (-> (exp "or" exp) (bin "or" $1 $3))
+    (-> (exp "and" exp) (bin "and" $1 $3))
+    (-> (exp "<" exp) (bin "<" $1 $3))
+    (-> (exp ">" exp) (bin ">" $1 $3))
+    (-> (exp "<=" exp) (bin "<=" $1 $3))
+    (-> (exp ">=" exp) (bin ">=" $1 $3))
+    (-> (exp "~=" exp) (bin "~=" $1 $3))
+    (-> (exp "==" exp) (bin "==" $1 $3))
+    ;; 5.3 起的位运算。`~` 既是二元异或也是一元取反 —— `~=` 有两个字符，最长匹配自己分得开
+    (-> (exp "|" exp) (bin "|" $1 $3))
+    (-> (exp "~" exp) (bin "~" $1 $3))
+    (-> (exp "&" exp) (bin "&" $1 $3))
+    (-> (exp "<<" exp) (bin "<<" $1 $3))
+    (-> (exp ">>" exp) (bin ">>" $1 $3))
+    (-> (exp ".." exp) (bin ".." $1 $3))
+    (-> (exp "+" exp) (bin "+" $1 $3))
+    (-> (exp "-" exp) (bin "-" $1 $3))
+    (-> (exp "*" exp) (bin "*" $1 $3))
+    (-> (exp "/" exp) (bin "/" $1 $3))
+    (-> (exp "//" exp) (bin "//" $1 $3))
+    (-> (exp "%" exp) (bin "%" $1 $3))
+    (-> (exp "^" exp) (bin "^" $1 $3))
+    (-> ("-" exp) (prec UNARY) (neg $2))
+    (-> ("not" exp) (prec UNARY) (not $2))
+    (-> ("#" exp) (prec UNARY) (len $2))
+    (-> ("~" exp) (prec UNARY) (bnot $2))))
