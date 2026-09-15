@@ -352,7 +352,10 @@ export function scanAggs(tree, env, ovl = new Map()) {
         const be0 = new Map();
         for (const m of a.members) {
           if (m.name === null || m.type === null) continue;
-          if (m.shape === 'bitfield' || m.shape === 'prop' || m.shape === 'event') continue;
+          if (m.shape === 'bitfield' || m.shape === 'prop') continue;
+          /* **类里的事件是一格字段**（第二百五十二刀，80-class-event.jnc）：jancy 那边它与
+             bindable 属性那格 `m_onChanged` 同一支（jnc_ct_Property.cpp:131-134），发结构体
+             那一层早就把它发成字段了 —— 所以字段表也得有它，不然 `b.m_onClick` 查不着。 */
           if (m.shape === 'typedef' || m.shape === 'nested-type' || m.shape === 'friend') continue;
           if (m.shape === 'fn') { if (m.name === 'construct') ctors.add(emitName); continue; }
           /* **`alias twice = doubled;` 不是一格字段**（第二百五十四刀）：它压根没有类型

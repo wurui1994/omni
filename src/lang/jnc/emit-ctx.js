@@ -1052,6 +1052,12 @@ export function makeFnEnv(o) {
     const a2 = aggBehind(resolveType(ft, env).type);
     return a2 !== null && findMethod(a2, 'op$call') !== null;
   };
+  /** 这格字段是一格**事件**（多播）吗（`m_onClick(code)`，第二百五十二刀）。 */
+  const mcField = (aggName, key) => {
+    const ft = aggFields.get(aggName)?.get(key);
+    if (ft === undefined) return false;
+    return resolveType(ft, env).type?.k === 'mc';
+  };
   /**
    * **方法当值用**（`c.bump`，第五十五刀）：jancy 的函数指针是**胖的** —— 里头捕着那个对象。
    * 方言那一侧是"一格闭包壳 + 一次 mkclo"：
@@ -2683,7 +2689,7 @@ export function makeFnEnv(o) {
              * "读出那个字段、按函数值调"。判据是它的类型解出来正好是 `fnptr` —— 是就
              * **不在这儿定**，落到下面"从一格函数指针上调"那条（`(callfn …)`，第五十五刀）。
              */
-            if (!fnptrField(agg, mname)) {
+            if (!fnptrField(agg, mname) && !mcField(agg, mname)) {
               acct(`'${agg}' 上查不着方法 '${mname}'（属性/事件/虚派发那几族另算）`); return null;
             }
           } else {
@@ -2714,6 +2720,9 @@ export function makeFnEnv(o) {
              stdt_HashTable.jnc:101 的原样）：与 `t.m_hash(key)` 是同一件事 —— 求出那一格，
              再按它类型上那个算符调。少这一条，报的是"调的那个 'm_hash' 查不着"，指着别处。 */
           || (self !== null && opCallField(self.agg, asName))
+          /* **方法体里裸写事件名**（`m_onClick(code)` 就是 `this.m_onClick(code)`，
+             第二百五十二刀，80-class-event.jnc）：求出那一格得一格多播，叫它就是通知所有听众。 */
+          || (self !== null && mcField(self.agg, asName))
           /* **取/存体里裸写那格生成的事件**（`m_onChanged();`，第一百一十七刀）：它不是
              函数表里的名字，是这格属性的生成物 —— 求它得出一格多播，叫它就是通知所有听众。
              **名字由写的人定**那一种同理（`bindable event m_e();` 之后的 `m_e();`，

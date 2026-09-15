@@ -710,6 +710,16 @@ export function lowerJncRules(tree0, diags, opts = {}) {
      */
     for (const m of a.members) {
       if (m.name === null || m.type === null) continue;
+      /* **类里那格事件**（第二百五十二刀）：它就是一格多播字段，名字上没有属性那一层前缀
+         （旧降级的真输出是 `(pstore (pfield (var $this) m_onClick) (anew … (int 0)))`）。 */
+      if (m.shape === 'event') {
+        const er = resolveType(m.type, env);
+        if (er.type === null || er.type.k !== 'mc') {
+          acct(`'${cls}.${m.name}' 那格事件的类型读不出来`); return null;
+        }
+        out.push(`${pad}(pstore (pfield (var $this) ${m.name}) (anew ${emitType(er.type, 'value', tyc)} (int 0)))`);
+        continue;
+      }
       if (!(m.type.mods ?? []).includes('bindable')) continue;
       if (m.shape !== 'data' && m.shape !== 'array' && m.shape !== 'fnptr' && m.shape !== 'prop') continue;
       const mcT = emitType({ k: 'mc', params: [] }, 'value', tyc);
@@ -854,8 +864,10 @@ export function lowerJncRules(tree0, diags, opts = {}) {
        （初值那几句由 `fieldInitLines` 发，152-propfieldinit.jnc）—— 真要另一套的是
        `autoget` / `bindable` 生成的那一格（下面那条）与事件、反应器。
        **`static construct` 也不算**：它落成"一道只跑一次的闸门 + 一次调用"（`staticGate`）。 */
-    const otherReason = (a) => a.members.some((m) => m.shape === 'event' || m.shape === 'reactor')
-      || a.members.some((m) => ['bindable', 'autoget'].some((w) => (m.type?.mods ?? []).includes(w)));
+    /* **事件不再是"接不上"的理由**（第二百五十二刀，80-class-event.jnc）：类里那格事件就是
+       一格多播字段，它要的只是"构造开头把单子建起来"—— 那一句由 `fieldInitLines` 发（与
+       bindable 属性那一格同一处）。反应器照旧：那一族另发 `$start` / `$stop` 两格。 */
+    const otherReason = (a) => a.members.some((m) => m.shape === 'reactor');
     /* **内嵌的对象字段**（类的字段、或带构造的结构体字段）也要一格构造 —— 它是合成的理由之一。 */
     const hasEmbedded = (a) => a.members.some((m) => {
       if (m.shape !== 'data' || m.type === null || m.type.ptrs !== 0) return false;
