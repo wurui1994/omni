@@ -475,6 +475,26 @@ export function lowerJncRules(tree0, diags, opts = {}) {
         const pt = liftedType(r.type, tyc);
         cells.push(`    (set ${full} (pnew ${pt} (int 1)))`);
       }
+      /**
+       * **模块级的 bindable data**（第二百四十九刀，70-binddata.jnc）：它在方言那一侧不是一格
+       * 叫 `g_data` 的量 —— 发的是 `g_data$m_value` 与 `g_data$m_onChanged` 两格（`globalLines`
+       * 那一头早就照 jancy 这么发了）。所以底下"给一格量开内存、写初值"那一套走不到它：照走
+       * 就是往一个谁也没声明过的名字上写。
+       * 这儿要发的只有两句：取过地址的那格存储要一句 pnew（与属性那一支同一条），以及**那格
+       * 事件要建单子**（少它，一个听众都还没加就通知的那一句踩空引用）。
+       * 写了初值的那一格明说不收 —— 那要在这儿调生成的存值器（还没接）。
+       */
+      if ((t.mods ?? []).includes('bindable')) {
+        const full1 = ns === null ? t.name : `${ns}$${t.name}`;
+        const rp1 = resolveType({ ...t, shape: 'data' }, env);
+        if (rp1.type !== null && (gLifted.has(t.name) || gLifted.has('m_value'))
+          && liftable(rp1.type)) {
+          cells.push(`    (set ${full1}$m_value (pnew ${liftedType(rp1.type, tyc)} (int 1)))`);
+        }
+        inits.push(`    (set ${full1}$m_onChanged (anew ${emitType({ k: 'mc', params: [] }, 'value', tyc)} (int 0)))`);
+        if (isInit) acct(`模块级的 bindable data '${t.name}' 写了初值（要在这儿调生成的存值器）还没接`);
+        continue;
+      }
       if (isInit) {
         /* 初值那一句由**函数体那一层**降（它认表达式）—— 借模块级那一格探子。 */
         /**
@@ -1044,27 +1064,37 @@ export function lowerJncRules(tree0, diags, opts = {}) {
    * （prop_autoget.rst），写它照旧报"没有存值器"。人写了存值器的那一格不动（`methods.has`）。
    * 模块级那一族（`bindable int g_d;`，70-binddata.jnc）还没接 —— 那一格的存储不是字段。
    */
-  const genAutoset = (emitName, type, selfInfo) => {
+  const genAutoset = (emitName, type, selfInfo, nameSrc = null) => {
     if (!(type?.mods ?? []).includes('bindable')) return false;
     const key = `${emitName}$set`;
     if (methods.has(key) || fns.has(key)) return false;
-    if (selfInfo === null) return false;                   // 模块级那一族由它自己那一处记账
     const r = resolveType({ ...type, shape: 'data' }, env);
     if (r.type === null) { acct(`属性 '${emitName}' 生成的存值器：${r.why}`); return false; }
     const ty = r.type;
     if (!['int', 'real', 'bool', 'string', 'ptr', 'tptr', 'enum', 'fnptr', 'class'].includes(ty.k)) {
       acct(`属性 '${emitName}' 生成的存值器落在 ${ty.k} 上（写法不是一句 pstore）还没接`); return false;
     }
+    /* **取过地址的那格存储**（提成一格 `(ptr T)`，第二十四刀）：写它要 `pstore`、读它要
+       `pload` —— 这一层还没接（宁可记账，也不静静地往那格单元本身上写）。 */
+    if (selfInfo === null && (gLifted.has(nameSrc ?? emitName) || gLifted.has('m_value'))
+      && liftable(ty)) {
+      acct(`属性 '${emitName}' 生成的存值器：那格存储被 & 取过地址（提进内存那一族）还没接`); return false;
+    }
     const mcTy = { k: 'mc', params: [] };
     const fire = mcFireName(mcTy);
     if (!helperBox.has(fire)) { helperBox.add(fire); decls.push(mcFireShell(mcTy)); }
-    const cell = `(pfield (var $this) ${emitName}$m_value)`;
-    const mc = `(pfield (var $this) ${emitName}$m_onChanged)`;
+    /* 成员那一格的存储与事件都是**字段**，模块级那一格是两格**量** —— 差别只在这三行文本。 */
+    const cell = selfInfo === null ? `${emitName}$m_value` : `(pfield (var $this) ${emitName}$m_value)`;
+    const read = selfInfo === null ? `(var ${cell})` : `(pload ${cell})`;
+    const write = selfInfo === null ? `(set ${cell} (var x))` : `(pstore ${cell} (var x))`;
+    const mc = selfInfo === null
+      ? `(var ${emitName}$m_onChanged)` : `(pload (pfield (var $this) ${emitName}$m_onChanged))`;
+    const selfPart = selfInfo === null ? '' : `($this (ptr ${clsRoot(selfInfo.agg)})) `;
     decls.push([
-      `  (fn ${key} (($this (ptr ${clsRoot(selfInfo.agg)})) (x ${emitType(ty, 'value', tyc)})) void`,
-      `    (if (bin "!=" (pload ${cell}) (var x)) (do`,
-      `      (pstore ${cell} (var x))`,
-      `      (expr (call ${fire} (pload ${mc}))))))`,
+      `  (fn ${key} (${selfPart}(x ${emitType(ty, 'value', tyc)})) void`,
+      `    (if (bin "!=" ${read} (var x)) (do`,
+      `      ${write}`,
+      `      (expr (call ${fire} ${mc})))))`,
     ].join('\n'));
     methods.set(key, {
       params: [{ ...type, shape: 'data' }],
@@ -1073,7 +1103,7 @@ export function lowerJncRules(tree0, diags, opts = {}) {
       retDecl: null,
       emit: key,
       ec: false,
-      stat: false,
+      stat: selfInfo === null,
       owner: emitName,
       name: 'set',
       node: null,
@@ -1300,7 +1330,11 @@ export function lowerJncRules(tree0, diags, opts = {}) {
   }
   /* 顶层那几格属性的 `autoget` 取值器（两种写法都在这张表里：`int autoget property g;` 与
      `property g { … }`）—— 写了取值器的那一格由上面那两条路发，这儿只补没写的。 */
-  for (const [nameSrc, pr] of gProps) genAutoget(nameSrc, pr.emit, pr.type, null);
+  for (const [nameSrc, pr] of gProps) {
+    genAutoget(nameSrc, pr.emit, pr.type, null, pr.auto ?? null);
+    /* `bindable` 那一格的存值器同理是生成的（同值不通知，第二百四十九刀）—— 人写了的不动。 */
+    genAutoset(pr.emit, pr.type, null, nameSrc);
+  }
 
   /* **方法那一族**（体写在类里的那几格）：一格一格发 `(fn <东家>$<方法名> (($this …) …) …)`。 */
   for (const key of overloads) {

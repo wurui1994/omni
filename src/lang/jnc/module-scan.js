@@ -759,10 +759,14 @@ export function scanAggs(tree, env, ovl = new Map()) {
            */
           if (t !== null && t.shape === 'fn') continue;
           if (t !== null && t.name !== null) {
+            /* **`bindable` 的数据**（`int bindable g_d;`）与属性同族：取/存是**生成**出来的
+               （第二百四十九刀）—— 所以它也不是一格量，收进 `vars` 就等于让读写落成一句
+               `(var g_d)`，而方言那一侧压根没有那个名字（发的是 `g_d$m_value`）。 */
+            const bdata = bind && t.shape !== 'prop';
             /* **属性不是一格量**（第六十九刀）：它没有内存，读写各是一次调用 —— 收进
                `vars` 的话查名那一层会当普通量算，报的是"属性/事件（prop）"这种认错人的账。
                它那一格在下面的 `gProps` 里。 */
-            if (t.shape !== 'prop') vars.set(t.name, t);
+            if (t.shape !== 'prop' && !bdata) vars.set(t.name, t);
             /* 方言那一侧的名字带**命名空间前缀**（`ns.g` 是 `ns$g`）—— 读写那两处都要它。 */
             if (owner !== null) gEmit.set(t.name, `${owner}$${t.name}`);
             /* **写出来的属性**（`int property g_p { get; set; }`）：读它是 `(call g_p$get)`、
@@ -784,7 +788,20 @@ export function scanAggs(tree, env, ovl = new Map()) {
             /* **`bindable` 的数据**（`bindable int g_d;`）：那一格的取/存是**生成**出来的。
                写了 `property` 的那几格不算 —— 它们在上面那张属性表里（先前这儿把
                `int autoget property g;` 也记成了"bindable data"，于是读它报的是那一族的账）。 */
-            if (bind && t.shape !== 'prop') bindable.add(t.name);
+            if (bdata) bindable.add(t.name);
+            /* 那一格也进属性表（第二百四十九刀）：读它是 `(call g_d$get)`、写它是
+               `(call g_d$set …)` —— 与写全了的属性同一张表，`auto` 记上"取值器要生成"。 */
+            if (bdata) {
+              const store2 = new Map();
+              store2.set('m_value', t);
+              gProps.set(t.name, {
+                emit: owner === null ? t.name : `${owner}$${t.name}`,
+                type: t,
+                store: store2,
+                auto: t,
+                data: true,
+              });
+            }
           }
         }
       }
