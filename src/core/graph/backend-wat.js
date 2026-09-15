@@ -35,10 +35,10 @@
 //
 // ## 接不住的，有名有姓
 //
-//   * **打印一格多值**（`print(f())` 那条 arity 契约）—— 要运行期长度 + 拼串。
-//     多值本身接住了（一块 N 格存储 + 地址），印成一行没接。
 //   * `conv` 的 `float`（这一批只有 i64）· 闭包（`func` 当值用 / 嵌套 `func`）。
-//   * 变参的 prim（CL 的 `(+ a b c)`）· 既装串又装数的那格量（awk 没有声明）。
+//   * 既装串又装数的那格量（awk 没有声明，所以那是真的没类型）。
+//   * 字符串的拼接（`+` 落在串上）—— 运行期造串的机器有了（`$__str_join`），
+//     但"结果也是串"要顺着 kindOf 传，那一步没做。
 
 import { NODES } from './nodes.js';
 // 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
@@ -86,6 +86,57 @@ const CMP = new Map([
 const wname = (n) => `$${String(n).replace(/[^A-Za-z0-9_]/g, '_')}`;
 
 class Gap extends Error {}
+
+/**
+ * **运行期造串**：把 `base` 处那 `n` 格 i64 印成一行（空格分隔），出一格串的地址。
+ * 只在"打印一格多值"用到，所以按需发（`needJoin`）。
+ *
+ * 这一格是"缺口清单会变短"的样子：多值本身早就接住了（一块 N 格存储 + 地址），
+ * 印成一行缺的只是**把数变成字节**。wasm 上没有 sprintf，所以就是三圈循环：
+ * 数位数 → 从末位往前填 → 最后把长度写进偏移 0（与 `print_str` 的约定同一份）。
+ *
+ * 预留 `8 + n * 22` 字节：一格 i64 最多 20 位数字 + 一格负号 + 一格分隔空格。
+ * 写完才知道真长度，所以 `$hp` 按预留量推 —— 浪费几个字节，但不会算错。
+ */
+const STR_JOIN = `  (func $__str_join (param $base i64) (param $n i64) (result i64)
+    (local $out i64) (local $p i32) (local $i i64) (local $v i64) (local $d i64) (local $t i64) (local $j i32)
+    (local.set $out (i64.extend_i32_u (global.get $hp)))
+    (global.set $hp (i32.add (global.get $hp)
+      (i32.add (i32.const 8) (i32.mul (i32.wrap_i64 (local.get $n)) (i32.const 22)))))
+    (local.set $p (i32.add (i32.wrap_i64 (local.get $out)) (i32.const 8)))
+    (local.set $i (i64.const 0))
+    (block $done (loop $each
+      (if (i64.ge_s (local.get $i) (local.get $n)) (then (br $done)))
+      (if (i64.gt_s (local.get $i) (i64.const 0)) (then
+        (i32.store8 (local.get $p) (i32.const 32))
+        (local.set $p (i32.add (local.get $p) (i32.const 1)))))
+      (local.set $v (i64.load (i32.add (i32.wrap_i64 (local.get $base))
+        (i32.wrap_i64 (i64.mul (local.get $i) (i64.const 8))))))
+      (if (i64.lt_s (local.get $v) (i64.const 0)) (then
+        (i32.store8 (local.get $p) (i32.const 45))
+        (local.set $p (i32.add (local.get $p) (i32.const 1)))
+        (local.set $v (i64.sub (i64.const 0) (local.get $v)))))
+      (local.set $d (i64.const 1))
+      (local.set $t (i64.div_s (local.get $v) (i64.const 10)))
+      (block $counted (loop $count
+        (if (i64.le_s (local.get $t) (i64.const 0)) (then (br $counted)))
+        (local.set $d (i64.add (local.get $d) (i64.const 1)))
+        (local.set $t (i64.div_s (local.get $t) (i64.const 10)))
+        (br $count)))
+      (local.set $j (i32.add (local.get $p) (i32.sub (i32.wrap_i64 (local.get $d)) (i32.const 1))))
+      (loop $digit
+        (i32.store8 (local.get $j)
+          (i32.add (i32.const 48) (i32.wrap_i64 (i64.rem_s (local.get $v) (i64.const 10)))))
+        (local.set $v (i64.div_s (local.get $v) (i64.const 10)))
+        (local.set $j (i32.sub (local.get $j) (i32.const 1)))
+        (if (i32.ge_s (local.get $j) (local.get $p)) (then (br $digit))))
+      (local.set $p (i32.add (local.get $p) (i32.wrap_i64 (local.get $d))))
+      (local.set $i (i64.add (local.get $i) (i64.const 1)))
+      (br $each)))
+    (i64.store (i32.wrap_i64 (local.get $out)) (i64.extend_i32_s
+      (i32.sub (local.get $p) (i32.add (i32.wrap_i64 (local.get $out)) (i32.const 8)))))
+    (local.get $out)
+  )`;
 
 /** 缺口那句话：白名单里写好的理由优先（`can` 与 `lower` 说的是同一句）。 */
 const why = (op, where) => {
@@ -152,7 +203,7 @@ class Mod {
   fn(name, params) {
     const f = {
       name, params, locals: [], taken: new Set(params.map(wname)), body: [], ret: false,
-      multi: false,   // 它返回的是不是**一格多值**（那格地址）—— 打印那一步要知道
+      multi: 0,   // 它返回的是**几格多值**（0 = 不是多值）—— 打印那一步要知道格数
     };
     this.fns.set(name, f);
     return f;
@@ -217,6 +268,7 @@ function emitOnce(graph, retOf, multiOf) {
   const data = [];            // [{ off, bytes }]
   let dataEnd = 8;            // 0 号地址留空（与 `$hp` 的起点同一条约定）
   let needStr = false;
+  let needJoin = false;   // 要不要那格运行期造串的辅助函数（打印多值）
   function strAddr(s) {
     if (strs.has(s)) return strs.get(s);
     const bytes = utf8Bytes(s);
@@ -684,7 +736,12 @@ function emitOnce(graph, retOf, multiOf) {
         if (x.ins.value === undefined) {
           return [...[...regions].reverse().flatMap(runExits), '(return)'];
         }
-        if (x.ins.value?.op === 'values') f.multi = true;
+        // 多值的格数要记下来（打印那一步靠它）。两条 `ret` 给的格数不一样就记成 'mix' ——
+        // 那种函数印不出来（要运行期长度），报缺口比猜一个数好
+        if (x.ins.value?.op === 'values') {
+          const n = asList(x.ins.value.ins.args).length;
+          f.multi = (f.multi === 0 || f.multi === n) ? n : 'mix';
+        }
         noStr(x.ins.value, sc, '返回值');
         const v = expr(x.ins.value, sc, pre);
         f.ret = true;
@@ -703,12 +760,19 @@ function emitOnce(graph, retOf, multiOf) {
         }
         const args = asList(x.ins.args);
         if (args.length !== 1) throw new Gap('打印只接一格实参（多格要先有字符串拼接）');
-        // `print(f())` 那条 arity 契约（列表里只有最后一格展开）在 wasm 上要
-        // **运行期长度 + 拼串**才能印成一行 —— 这一批没做，明说是缺口
         const one = args[0];
-        if (one?.op === 'values'
-          || (one?.op === 'call' && multiOf.get(one.ins.fn?.attrs?.name) === true)) {
-          throw new Gap('打印一格多值要"运行期长度 + 拼串" —— 这一批只印一格 i64');
+        // `print(f())` 那条 arity 契约（列表里只有最后一格展开）：多值要**印成一行** ——
+        // 靠一格运行期造串的辅助函数（`$__str_join`，见 STR_JOIN），格数是编译期就知道的
+        const n = one?.op === 'values' ? asList(one.ins.args).length
+          : (one?.op === 'call' ? multiOf.get(one.ins.fn?.attrs?.name) : undefined);
+        if (n === 'mix') {
+          throw new Gap('这格函数不同出口返回的多值格数不一样 —— 印一行要运行期长度');
+        }
+        if (typeof n === 'number' && n > 0) {
+          needStr = true;
+          needJoin = true;
+          const base = expr(one, sc, pre);
+          return [...pre, `(call $print_str ${addr(`(call $__str_join ${base} (i64.const ${n}))`)})`];
         }
         // 数走 `print_i64`，串走 `print_str`（宿主面那格导入认"长度 + 字节"那块内存）。
         // 既装串又装数的量在这儿报缺口 —— 印一格地址是错答案。
@@ -802,6 +866,7 @@ function emitOnce(graph, retOf, multiOf) {
       lines.push(`  (data (i32.const ${d.off}) ${d.bytes.join(' ')})`);
     }
   }
+  if (needJoin) lines.push(STR_JOIN);
   for (const g of globals.values()) lines.push(`  (global ${g} (mut i64) (i64.const 0))`);
   for (const f of mod.fns.values()) {
     const ps = f.params.map((p) => `(param ${wname(p)} i64)`).join(' ');
@@ -833,7 +898,7 @@ export function emitWat(graph) {
   const multiByName = new Map();
   for (const [src, wat] of topFuncs(items)) {
     byName.set(src, first.rets.get(wat) === true);
-    multiByName.set(src, first.multis.get(wat) === true);
+    multiByName.set(src, first.multis.get(wat));
   }
   return emitOnce(graph, byName, multiByName).text;
 }

@@ -175,4 +175,17 @@ export const HAND = [
       num(9),                      // 整数而不是字符串 —— 好让 wat 那条腿也验得上
     ]),
   },
+  {
+    // **打印一格多值**：wasm 上没有 sprintf，所以那一步是运行期造串
+    // （数位数 → 从末位往前填 → 长度写偏移 0，见 backend-wat.js 的 `$__str_join`）。
+    // 不写成语言例子的理由：lua / go 那两份 multi 印的是 1 与 2 —— 单数位、非负，
+    // 把"数位循环"和"负号"两条都盖不住。这一格专挑边界：**负数 · 0 · 多位数**。
+    name: 'hand+multi-print',
+    expect: ['-5 0 42'],
+    graph: () => program([
+      node('prim', {
+        args: [node('values', { args: [lit(-5), lit(0), lit(42)] })],
+      }, { name: 'print' }),
+    ]),
+  },
 ];
