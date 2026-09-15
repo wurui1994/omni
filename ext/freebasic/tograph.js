@@ -14,9 +14,8 @@ import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
 import {
-  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
-  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
-  ops,
+  isList, tag, kids, leaf, part, unquote, head,
+  counted, ops, binOf, retOf, branchOf,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -39,16 +38,10 @@ function toNode(x) {
 
     case 'bin': {
       const [op, a, b] = kids(x);
-      const o = OPS.get(String(leaf(op)).toLowerCase());
-      if (leaf(op) === 'andalso' || leaf(op) === 'and') {
-        return lazyAnd(toNode(a), toNode(b));
-      }
-      if (leaf(op) === 'orelse' || leaf(op) === 'or') {
-        return lazyOr(toNode(a), toNode(b));
-      }
-      if (o === undefined) throw new Error(`fb->graph: 这个算子还没接：${leaf(op)}`);
-      if (o === 'concat') return node('prim', { args: [toNode(a), toNode(b)] }, { name: 'concat' });
-      return bin(o, toNode(a), toNode(b));
+      // 关键字算符不分大小写 —— 先降成小写再查表（`AndAlso` 与 `andalso` 同一格）
+      return binOf(String(leaf(op)).toLowerCase(), toNode(a), toNode(b), OPS, {
+        lang: 'fb', and: ['andalso', 'and'], or: ['orelse', 'or'],
+      });
     }
     case 'un': {
       const [op, a] = kids(x);
@@ -119,20 +112,16 @@ function toNode(x) {
       });
     }
     case 'if': {
-      const parts = kids(x);
-      const cond = parts[0];
+      const cond = kids(x)[0];
       const then = part(x, 'body');
       const els = part(x, 'else');
-      return node('branch', {
-        cond: toNode(cond),
-        then: then === undefined ? [] : many(kids(then)),
-        ...(els === undefined ? {} : { else: many(kids(els)) }),
-      });
+      return branchOf(
+        toNode(cond),
+        then === undefined ? [] : many(kids(then)),
+        els === undefined ? undefined : many(kids(els)),
+      );
     }
-    case 'return': {
-      const vals = kids(x);
-      return node('ret', vals.length === 0 ? {} : { value: toNode(vals[0]) });
-    }
+    case 'return': return retOf(many(kids(x)));
     case 'print': return node('prim', { args: many(kids(x)) }, { name: 'print' });
     case 'call': {
       const [fn, args] = kids(x);

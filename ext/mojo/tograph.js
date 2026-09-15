@@ -13,9 +13,8 @@ import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
 import {
-  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
-  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
-  ops,
+  isList, tag, kids, leaf, part, groupItems, unquote,
+  ops, binOf, retOf, branchOf,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -50,11 +49,7 @@ function toNode(x) {
     // （Python 的链式比较），但**落到的是同一格 binop**：语法的级数不是节点的格数。
     case 'bin': case 'cmp': {
       const [op, a, b] = kids(x);
-      if (leaf(op) === 'and') return lazyAnd(toNode(a), toNode(b));
-      if (leaf(op) === 'or') return lazyOr(toNode(a), toNode(b));
-      const o = OPS.get(leaf(op));
-      if (o === undefined) throw new Error(`mojo->graph: 这个算子还没接：${leaf(op)}`);
-      return bin(o, toNode(a), toNode(b));
+      return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'mojo', and: ['and'], or: ['or'] });
     }
     case 'un': {
       const [op, a] = kids(x);
@@ -87,7 +82,6 @@ function toNode(x) {
       // `(sig ((p (n n) (n Int)) (p …)) (ret …))` —— 形参装在一格**无名的表**里。
       // 无名表的孩子是**全部** items（不是 items.slice(1)）—— 少了这一条，
       // 每个函数的第一个形参会被当成"标签"吃掉，于是 `n` 未绑定。矩阵当场抓出来的。
-      const groupItems = (g) => (tag(g) === null && isList(g) ? g.items : kids(g));
       const params = ps.flatMap((g) => (tag(g) === 'p' ? [g] : groupItems(g)))
         .filter((p) => tag(p) === 'p')
         .map((p) => nameOf(kids(p)[0]));
@@ -108,16 +102,13 @@ function toNode(x) {
       const cond = kids(x)[0];
       const body = part(x, 'body');
       const els = part(x, 'else') ?? part(x, 'orelse');
-      return node('branch', {
-        cond: toNode(cond),
-        then: body === undefined ? [] : many(kids(body)),
-        ...(els === undefined ? {} : { else: many(kids(els)) }),
-      });
+      return branchOf(
+        toNode(cond),
+        body === undefined ? [] : many(kids(body)),
+        els === undefined ? undefined : many(kids(els)),
+      );
     }
-    case 'return': {
-      const vals = kids(x);
-      return node('ret', vals.length === 0 ? {} : { value: toNode(vals[0]) });
-    }
+    case 'return': return retOf(many(kids(x)));
     case 'call': {
       const [fn, args] = kids(x);
       const argNodes = args === undefined ? [] : many(kids(args));

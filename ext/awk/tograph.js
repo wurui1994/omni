@@ -16,9 +16,7 @@ import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
 import {
-  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
-  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
-  ops,
+  isList, tag, kids, leaf, threePart, elseOf, ops, binOf, retOf, branchOf,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -57,11 +55,7 @@ function toNode(x) {
 
     case 'bin': {
       const [op, a, b] = kids(x);
-      if (leaf(op) === '&&') return lazyAnd(toNode(a), toNode(b));
-      if (leaf(op) === '||') return lazyOr(toNode(a), toNode(b));
-      const o = OPS.get(leaf(op));
-      if (o === undefined) throw new Error(`awk->graph: 这个算子还没接：${leaf(op)}`);
-      return bin(o, toNode(a), toNode(b));
+      return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'awk' });
     }
     case 'cat': return node('prim', { args: many(kids(x)) }, { name: 'concat' });
     case 'un': {
@@ -105,16 +99,9 @@ function toNode(x) {
       const [cond, then, els] = kids(x);
       // `else` 那一格是个包装（`(else …)`）—— 与 go / V 那两门同一处坑
       const e = elseOf(els);
-      return node('branch', {
-        cond: toNode(cond),
-        then: toNode(then),
-        ...(e === undefined ? {} : { else: toNode(e) }),
-      });
+      return branchOf(toNode(cond), toNode(then), e === undefined ? undefined : toNode(e));
     }
-    case 'return': {
-      const vals = kids(x);
-      return node('ret', vals.length === 0 ? {} : { value: toNode(vals[0]) });
-    }
+    case 'return': return retOf(many(kids(x)));
     case 'print': return node('prim', { args: many(kids(x)) }, { name: 'print' });
     case 'call': {
       const fn = leaf(kids(x)[0]);

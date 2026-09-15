@@ -12,6 +12,17 @@
 //      写九遍就有九处会走样。
 //
 // 纪律：这一份**只出图**，不认识任何一门语言的记号。谁的树长什么样，是那门语言自己的事。
+//
+// 第五刀（记录 / 列表两批落地之后再量一遍）又删掉三类：
+//   3. **算符那八行**：`&&`/`||` 走 branch、别的查表落 prim、查不到当场报 ——
+//      七门语言各抄一遍。现在是一格 `binOf`，留给语言的只有"它的表 / 它把与或写成什么 /
+//      交值还是交真假"三样。顺带删掉两处冗余：`concat` 那个特判与 `bin('concat', …)`
+//      本来就是同一格节点（nim 与 freebasic 各写过一遍）。
+//   4. **`return` 与 `if` 那两句**：`retOf`（0/1/N 个值 —— N 个走 `values`）与
+//      `branchOf`（`else` 可有可无那句 spread），七门各一遍。
+//   5. **datum 那几个小函数**：chez 与 sbcl 原来各抄一份 `head`/`text`/`symName`/`asList`，
+//      lua 也抄了一份 `isList`/`tag`/`kids`/`leaf` —— 全部改成用这儿的。
+// 量出来的：九份映射 1460 -> 1357 行，这一份 +36。
 
 import { node, lit, bin } from './graph.js';
 
@@ -123,6 +134,42 @@ export const lazyOr = (a, b, { keepValue = false } = {}) => node('branch', {
 /** `else` 那一格常是个包装（`(else (block …))`）—— go / vlang / awk 三处同一个坑。 */
 export const elseOf = (x) => (x === undefined || x === null ? undefined
   : (tag(x) === 'else' ? kids(x)[0] : x));
+
+/**
+ * **一格二元算符**。七门语言原来各写一遍这八行，内容九成相同：
+ * `&&` / `||`（写法各家不同）走 `branch`（第二个操作数 lazy），别的查表落 `prim`，
+ * 查不到当场报。留给语言的只有三样：它的算符表、它把"与/或"写成什么、交值还是交真假。
+ *
+ * @param {string} opText 树上那个算符的原文
+ * @param {any} a 左边（已经出好的节点）
+ * @param {any} b 右边
+ * @param {Map<string,string>} table 那门语言的算符表（`ops(delta)` 出来的）
+ * @param {{lang?: string, and?: string[], or?: string[], keepValue?: boolean}} how
+ */
+export function binOf(opText, a, b, table, how = {}) {
+  const t = String(opText);
+  if ((how.and ?? ['&&']).includes(t)) return lazyAnd(a, b, { keepValue: how.keepValue === true });
+  if ((how.or ?? ['||']).includes(t)) return lazyOr(a, b, { keepValue: how.keepValue === true });
+  const o = table.get(t);
+  if (o === undefined) throw new Error(`${how.lang ?? '?'}->graph: 这个算子还没接：${t}`);
+  return bin(o, a, b);
+}
+
+/**
+ * **一格返回**：0 个值 -> 空的 `ret`、1 个 -> 直接给、N 个 -> 一格 `values`（多值的生产侧）。
+ * 七门语言同一句话。
+ */
+export const retOf = (vals) => node('ret', vals.length === 0 ? {} : {
+  value: vals.length === 1 ? vals[0] : node('values', { args: vals }),
+});
+
+/**
+ * **一格分支**：`else` 那一格可有可无（没有就不连那条边 —— 端口是 optional 的）。
+ * 七门语言原来各写一遍那句 `...(els === undefined ? {} : { else: … })`。
+ */
+export const branchOf = (cond, then, els) => node('branch', {
+  cond, then, ...(els === undefined || els === null ? {} : { else: els }),
+});
 
 /**
  * **多值的消费侧**：`x, y := f()` / `local a, b = f()` / `(multiple-value-bind …)`。

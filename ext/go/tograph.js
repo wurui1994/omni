@@ -14,9 +14,8 @@ import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
 import {
-  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
-  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
-  ops,
+  tag, kids, leaf, part, partKids, threePart, elseOf,
+  ops, binOf, retOf, branchOf,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -73,12 +72,7 @@ function toNode(x) {
     // ---- 算子 --------------------------------------------------------------
     case 'bin': {
       const [op, a, b] = kids(x);
-      const o = OPS.get(leaf(op));
-      // `&&` / `||`：第二个操作数是 lazy ⇒ 走 branch（与 lua 那边同一条口径）
-      if (leaf(op) === '&&') return lazyAnd(toNode(a), toNode(b));
-      if (leaf(op) === '||') return lazyOr(toNode(a), toNode(b));
-      if (o === undefined) throw new Error(`go->graph: 这个算子还没接：${leaf(op)}`);
-      return bin(o, toNode(a), toNode(b));
+      return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'go' });
     }
     case 'un': {
       const [op, a] = kids(x);
@@ -132,22 +126,11 @@ function toNode(x) {
     }
     case 'if': {
       const parts = kids(x);
-      const cond = parts[0];
-      const then = parts[1];
       // `else` 那一格是个包装（`(else (block …))` 或 `(else (if …))` —— else-if 链）
-      const els = parts[2] === undefined ? undefined : (tag(parts[2]) === 'else' ? kids(parts[2])[0] : parts[2]);
-      return node('branch', {
-        cond: toNode(cond),
-        then: toNode(then),
-        ...(els === undefined ? {} : { else: toNode(els) }),
-      });
+      const els = elseOf(parts[2]);
+      return branchOf(toNode(parts[0]), toNode(parts[1]), els === undefined ? undefined : toNode(els));
     }
-    case 'return': {
-      const vals = kids(x);
-      if (vals.length === 0) return node('ret', {});
-      const v = vals.length === 1 ? toNode(vals[0]) : node('values', { args: many(vals) });
-      return node('ret', { value: v });
-    }
+    case 'return': return retOf(many(kids(x)));
     case 'expr': return toNode(kids(x)[0]);
     // `defer f()` -> scope-exit（挂在**当前 region**上，逆序、早退也跑 —— 八家共用那一格）
     case 'defer': return node('scope-exit', { action: many(kids(x)) });

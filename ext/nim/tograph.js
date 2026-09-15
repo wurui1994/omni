@@ -13,9 +13,8 @@ import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
 import {
-  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
-  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
-  ops, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  isList, tag, kids, leaf, part, groupItems, unquote,
+  ops, binOf, retOf, branchOf, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
@@ -54,12 +53,8 @@ function toNode(x) {
 
     case 'bin': {
       const [op, a, b] = kids(x);
-      if (leaf(op) === 'and') return lazyAnd(toNode(a), toNode(b));
-      if (leaf(op) === 'or') return lazyOr(toNode(a), toNode(b));
-      const o = OPS.get(leaf(op));
-      if (o === undefined) throw new Error(`nim->graph: 这个算子还没接：${leaf(op)}`);
-      if (o === 'concat') return node('prim', { args: [toNode(a), toNode(b)] }, { name: 'concat' });
-      return bin(o, toNode(a), toNode(b));
+      // `&` 是 nim 的串连接 —— 表里映到 `concat` 那格内建，与算符走同一条路
+      return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'nim', and: ['and'], or: ['or'] });
     }
     case 'un': {
       const [op, a] = kids(x);
@@ -130,16 +125,13 @@ function toNode(x) {
       const cond = kids(x)[0];
       const body = part(x, 'body');
       const els = part(x, 'else');
-      return node('branch', {
-        cond: toNode(cond),
-        then: body === undefined ? [] : many(kids(body)),
-        ...(els === undefined ? {} : { else: many(kids(els)) }),
-      });
+      return branchOf(
+        toNode(cond),
+        body === undefined ? [] : many(kids(body)),
+        els === undefined ? undefined : many(kids(els)),
+      );
     }
-    case 'return': {
-      const vals = kids(x);
-      return node('ret', vals.length === 0 ? {} : { value: toNode(vals[0]) });
-    }
+    case 'return': return retOf(many(kids(x)));
     // 命令式调用与括号调用是**同一格节点**（语法两条产生式，图上一格）
     case 'call': case 'command': {
       const [fn, args] = kids(x);

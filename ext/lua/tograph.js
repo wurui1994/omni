@@ -15,20 +15,15 @@ import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
 import {
-  counted, destructure, ops, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  isList, tag, kids, leaf,
+  counted, ops, binOf, retOf, branchOf,
+  destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
-const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
-const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
-const kids = (x) => (isList(x) ? x.items.slice(1) : []);
-/**
- * 一格叶子的值。叶子有两种 kind：`atom`（记号文本）与 `string`（已经解过转义的串值，
- * 语法动作里写的 `"+"` 这种字面量也是它）—— 只认 `atom` 的话 `(bin "+" …)` 里那个算符
- * 就成了 null。这一条踩过一次，记在这儿。
- */
-const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
+// 走树的那几个小函数（`isList` / `tag` / `kids` / `leaf`）**与另外八门共用一份**
+// （`src/core/graph/fromtree.js`）—— 叶子有 `atom` 与 `string` 两种 kind 这一条
+// 也写在那儿（只认 `atom` 的话 `(bin "+" …)` 里那个算符就成了 null，踩过一次）。
 const atomText = leaf;
-const raw = (v) => v;
 
 const PRIM = new Map([
   ['print', 'print'], ['tostring', 'concat'], ['#', 'len'],
@@ -42,7 +37,7 @@ const many = (xs) => xs.map(toNode);
  * 字面量当场减（`xs[1]` 出的是 `(lit 0)`，图上看不见多余的算符），别的减一格算符。
  */
 const zeroBased = (t) => (tag(t) === 'num'
-  ? lit(Number(raw(atomText(kids(t)[0]))) - 1)
+  ? lit(Number(atomText(kids(t)[0])) - 1)
   : bin('-', toNode(t), lit(1)));
 
 /** 一格 `(names …)` / `(values …)` / `(args …)` 里的孩子。 */
@@ -68,8 +63,8 @@ function funcOf(bodyNode, name) {
 function toNode(x) {
   switch (tag(x)) {
     // ---- 叶子 --------------------------------------------------------------
-    case 'num': return node('const', {}, { value: Number(raw(atomText(kids(x)[0]))) });
-    case 'str': return node('const', {}, { value: raw(atomText(kids(x)[0])) });
+    case 'num': return node('const', {}, { value: Number(atomText(kids(x)[0])) });
+    case 'str': return node('const', {}, { value: atomText(kids(x)[0]) });
     case 'nil': return node('const', {}, { value: null });
     case 'true': return node('const', {}, { value: true });
     case 'false': return node('const', {}, { value: false });
@@ -100,17 +95,15 @@ function toNode(x) {
     // ---- 算子 --------------------------------------------------------------
     case 'bin': {
       const [opTok, a, b] = kids(x);
-      const op = OPS.get(raw(atomText(opTok)));
-      if (op === undefined) throw new Error(`lua->graph: 这个算子还没接：${atomText(opTok)}`);
       // `and` / `or` 交出来的是**值**不是真假（lua 那份规格 L-007）：第二个操作数是 lazy，
-      // 所以它走 `branch` 而不是 `binop` —— 这一格正是"入端口求值语义"的用处。
-      if (op === 'and') return lazyAnd(toNode(a), toNode(b), { keepValue: true });
-      if (op === 'or') return lazyOr(toNode(a), toNode(b), { keepValue: true });
-      return bin(op, toNode(a), toNode(b));
+      // 所以它走 `branch` 而不是算符 —— 这一格正是"入端口求值语义"的用处。
+      return binOf(atomText(opTok), toNode(a), toNode(b), OPS, {
+        lang: 'lua', and: ['and'], or: ['or'], keepValue: true,
+      });
     }
     case 'un': {
       const [opTok, a] = kids(x);
-      return un(raw(atomText(opTok)) === 'not' ? 'not' : raw(atomText(opTok)), toNode(a));
+      return un(atomText(opTok) === 'not' ? 'not' : atomText(opTok), toNode(a));
     }
 
     // ---- 语句 --------------------------------------------------------------
@@ -153,17 +146,9 @@ function toNode(x) {
       let tail = els === undefined ? undefined : node('region', { body: many(kids(kids(els)[0])) });
       for (let i = elifList.length - 1; i >= 0; i--) {
         const [c, b] = kids(elifList[i]);
-        tail = node('branch', {
-          cond: toNode(c),
-          then: node('region', { body: many(kids(b)) }),
-          ...(tail === undefined ? {} : { else: tail }),
-        });
+        tail = branchOf(toNode(c), node('region', { body: many(kids(b)) }), tail);
       }
-      return node('branch', {
-        cond: toNode(cond),
-        then: node('region', { body: many(kids(blk)) }),
-        ...(tail === undefined ? {} : { else: tail }),
-      });
+      return branchOf(toNode(cond), node('region', { body: many(kids(blk)) }), tail);
     }
     case 'while': {
       const [cond, blk] = kids(x);
@@ -185,13 +170,8 @@ function toNode(x) {
         body: many(kids(blk)),
       });
     }
-    case 'return': {
-      const vals = kids(x);
-      if (vals.length === 0) return node('ret', {});
-      // `return a, b` —— 多值的生产侧（**多出端口是常态**，ADR-0033 §3.2）
-      const v = vals.length === 1 ? toNode(vals[0]) : node('values', { args: many(vals) });
-      return node('ret', { value: v });
-    }
+    // `return a, b` —— 多值的生产侧（**多出端口是常态**，ADR-0033 §3.2）
+    case 'return': return retOf(many(kids(x)));
     case 'call': {
       const [fn, args] = kids(x);
       const callee = tag(fn) === 'name' ? atomText(kids(fn)[0]) : null;

@@ -10,17 +10,13 @@
 //   * 多值（`values`）、条件系统、CLOS 都不在这一批（`ext/sbcl/SPEC.md` §五那张顺序表）。
 
 import {
-  node, lit, program, bin, un,
+  node, lit, program, bin,
 } from '../../src/core/graph/graph.js';
-import { counted } from '../../src/core/graph/fromtree.js';
+import {
+  head, kids, text, symName, asList, counted, branchOf,
+} from '../../src/core/graph/fromtree.js';
 
-const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
-const head = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
-const kids = (x) => (isList(x) ? x.items.slice(1) : []);
-const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
-const text = (x) => (isList(x) && x.items.length > 1 ? leaf(x.items[1]) : null);
-const symName = (x) => (head(x) === 'sym' ? text(x) : null);
-const asList = (x) => (head(x) === 'list' ? kids(x) : null);
+// 走 datum 树的那几个小函数与 chez **共用一份**（fromtree.js）—— 见那边的注释。
 
 /** CL 的内建 -> `prim` 那一格。`princ` / `print` / `write` 都是打印。 */
 const PRIM = new Map([
@@ -66,11 +62,11 @@ function toNode(x) {
     case 'setq': case 'setf': return node('set', { value: toNode(rest[1]) }, { name: symName(rest[0]) });
     case 'defparameter': case 'defvar': case 'defconstant':
       return node('bind', { init: rest[1] === undefined ? lit(null) : toNode(rest[1]) }, { name: symName(rest[0]) });
-    case 'if': return node('branch', {
-      cond: toNode(rest[0]),
-      then: toNode(rest[1]),
-      ...(rest[2] === undefined ? {} : { else: toNode(rest[2]) }),
-    });
+    case 'if': return branchOf(
+      toNode(rest[0]),
+      toNode(rest[1]),
+      rest[2] === undefined ? undefined : toNode(rest[2]),
+    );
     case 'when': return node('branch', { cond: toNode(rest[0]), then: many(rest.slice(1)) });
     case 'unless': return node('branch', {
       cond: node('prim', { args: [toNode(rest[0])] }, { name: 'not' }),

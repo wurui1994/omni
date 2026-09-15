@@ -9,22 +9,13 @@
 // 与真 Scheme 一样（`if` / `lambda` / `define` 是特殊形式，属于求值那一层）。
 
 import { node, lit, program } from '../../src/core/graph/graph.js';
+import {
+  head, kids, text, symName, asList, branchOf,
+} from '../../src/core/graph/fromtree.js';
 
-const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
-const head = (x) => (isList(x) && x.items.length > 0 && x.items[0].kind === 'atom' ? x.items[0].value : null);
-/** 一格 datum 的孩子（去掉头上那个标签）。 */
-const kids = (x) => (isList(x) ? x.items.slice(1) : []);
-/**
- * `(sym x)` / `(num 1)` / `(str "ok")` 那种"标签 + 一格叶子"的取值。
- * 叶子有两种 kind：`atom`（记号文本）与 `string`（已经解过转义的串值）——
- * 这一条踩过一次：只认 `atom` 的话 `(str …)` 全成了 null。
- */
-const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
-const text = (x) => (isList(x) && x.items.length > 1 ? leaf(x.items[1]) : null);
-
-const symName = (x) => (head(x) === 'sym' ? text(x) : null);
-/** 一格 datum 是不是"表"（`(list …)`）。 */
-const asList = (x) => (head(x) === 'list' ? kids(x) : null);
+// 走 datum 树的那几个小函数（`head` / `kids` / `text` / `symName` / `asList`）
+// **与 sbcl 共用一份**（`src/core/graph/fromtree.js`）—— 两门 Lisp 原来各抄一遍，
+// 而抄的内容完全相同：叶子有 `atom` 与 `string` 两种 kind 这一条也在那儿写着。
 
 /** 数：`1` / `-2` / `1.5`。这一批只收十进制（`#x1f` 那一族记账，见文件尾）。 */
 function numOf(t) {
@@ -81,11 +72,11 @@ function toNode(x) {
     }
     case 'set!': return node('set', { value: toNode(rest[1]) }, { name: symName(rest[0]) });
     // `if` 的两支是 `lazy` 端口 —— 只算一支，那一栏求值语义就是为它准备的
-    case 'if': return node('branch', {
-      cond: toNode(rest[0]),
-      then: toNode(rest[1]),
-      ...(rest[2] === undefined ? {} : { else: toNode(rest[2]) }),
-    });
+    case 'if': return branchOf(
+      toNode(rest[0]),
+      toNode(rest[1]),
+      rest[2] === undefined ? undefined : toNode(rest[2]),
+    );
     case 'when': return node('branch', { cond: toNode(rest[0]), then: many(rest.slice(1)) });
     case 'unless': return node('branch', {
       cond: node('prim', { args: [toNode(rest[0])] }, { name: 'not' }),
