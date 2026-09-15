@@ -67,11 +67,16 @@
     (token INT digit (* (or digit "_")))
 
     ;; 串：单引号与双引号等价（V 的习惯是单引号），另加 `r'…'` 原始串与 `c'…'` C 串。
-    ;; 插值不切开（见文件头不足 2）。
+    ;;
+    ;; 普通串走 `interp-string`：插值 `${…}` 里**又可能有引号**
+    ;;     elog('exported ${count} -> ${os.join_path(out, 'index.html')}')
+    ;; 一条模式写不出"扫到第一个未被插值括起来的引号为止"（那要配平括号，而配平是记数）。
+    ;; 整个串连插值收成一格记号 —— 切开插值是另一件事（见文件头不足 2）。
+    ;; 290 份文件卡在这一条。
     (token STRING (or "r" "c") "'" (* (or (not "'\\") (seq "\\" any))) "'")
     (token STRING (or "r" "c") "\"" (* (or (not "\"\\") (seq "\\" any))) "\"")
-    (string STRING "'")
-    (string STRING "\"")
+    (interp-string STRING "'" "${" "}")
+    (interp-string STRING "\"" "${" "}")
     (token CHAR "`" (or (seq "\\" any) (not "`")) "`")
 
     ;; `map` 与 `chan` 是 V 的关键字，可**不能**进 keyword 表：`arr.map(it * 2)` 里那个

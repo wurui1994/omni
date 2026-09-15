@@ -15,6 +15,7 @@
 //     (token NUM (+ digit) (? "." (* digit)))  ;; 一条 token 规则，若干项顺序相连
 //     (token ID (or alpha "_") (* (or alnum "_")))
 //     (string STRING "\"")                    ;; 带反斜杠转义的引号串，出 string 节点
+//     (interp-string STR "'" "${" "}")        ;; 带插值的串（`'${f(a, 'x')}'`）—— 配平括号
 //     (keyword ID "if" "else" "while")        ;; ID 命中这些字面量就改判成 "if" 之类
 //     (keyword ID LIT "true" "false")         ;; 多写一个名字 = 改判成那个 token 类型
 //     (punct SELFOP "+=" "-=")                ;; 字面量，但出指定的 token 类型
@@ -403,6 +404,36 @@ export function readLexSpec(node, diags) {
       rules.push({ kind: 'string', type: nm, quote: q.value, verbatim, cond: c.cond, span: it.span });
       continue;
     }
+    if (h === 'interp-string') {
+      /* `(interp-string STRING "'" "${" "}")` —— **带插值的串**（V、Kotlin、Swift、
+       * JS 的模板串都是这一族）。为什么它不能靠 `(string …)` 或 `(token …)` 写出来：
+       *
+       *   `'${os.join_path(out, 'index.html')}'`
+       *
+       * 插值里**又有引号**。一个不回溯、按最长匹配挑规则的词法器写不出"扫到第一个未被
+       * 插值括起来的引号为止" —— 那要**配平括号**，而配平是记数，不是模式。所以这一格
+       * 只能是词法器里的一段代码。量过：V 的语料里 290 份文件卡在这一条。
+       *
+       * 整个串（连插值）收成**一格记号**。切开插值是另一件事（要能递归回表达式），
+       * 这一格不做，也不假装做。
+       *
+       * `OPEN` 的末字符必须是 `{`、`CLOSE` 必须是 `}` —— 配平数的就是这一对。 */
+      const nm = isAtom(it.items[1]) ? it.items[1].value : null;
+      const c = readCond(it.items, 2, diags);
+      const q = it.items[c.from];
+      const op = it.items[c.from + 1];
+      const cl = it.items[c.from + 2];
+      if (nm === null || !isStr(q) || q.value.length !== 1 || !isStr(op) || !isStr(cl)) {
+        diags.error(it.span, '(interp-string NAME "Q" "${" "}") needs a name, a one-character quote, and the two brace strings');
+        continue;
+      }
+      if (!op.value.endsWith('{') || cl.value !== '}') {
+        diags.error(it.span, '(interp-string …) needs OPEN to end with "{" and CLOSE to be "}" — 配平数的就是这一对');
+        continue;
+      }
+      rules.push({ kind: 'interp', type: nm, quote: q.value, open: op.value, cond: c.cond, span: it.span });
+      continue;
+    }
     if (h === 'keyword') {
       const nm = isAtom(it.items[1]) ? it.items[1].value : null;
       if (nm === null) { diags.error(it.span, '(keyword TYPE w...) needs a token type'); continue; }
@@ -466,6 +497,46 @@ export function readLexSpec(node, diags) {
 }
 
 // ---- 扫描 ------------------------------------------------------------------
+
+/**
+ * 带插值的串（`(interp-string …)`）。从开引号扫到**配平之后**那个闭引号。
+ *
+ * 与 scanString 的唯一区别是那一段 `${ … }`：进去之后按 `{` / `}` 记数，
+ * 里头遇到引号就成对跳过（那是插值里的串，不是这一层的收尾）。这也是为什么它写不成
+ * 一条模式 —— 记数不是模式。
+ *
+ * 答 `{end, value}`；`value` 是**原样的内文**（连插值），不做转义解释：这一格的
+ * 记号是给语法层看形状的，串的值要等切开插值那一步才有意义。`end < 0` 表示没闭合。
+ */
+function scanInterp(src, pos, quote, open) {
+  let j = pos + 1;
+  while (j < src.length) {
+    const c = src[j];
+    if (c === '\\') { j += 2; continue; }
+    if (c === quote) return { end: j + 1, value: src.slice(pos + 1, j) };
+    if (src.startsWith(open, j)) {
+      j += open.length;
+      let depth = 1;
+      while (j < src.length && depth > 0) {
+        const d = src[j];
+        if (d === '\\') { j += 2; continue; }
+        if (d === '{') { depth++; j++; continue; }
+        if (d === '}') { depth--; j++; continue; }
+        if (d === "'" || d === '"' || d === '`') {
+          const q2 = d;
+          j++;
+          while (j < src.length && src[j] !== q2) { j += src[j] === '\\' ? 2 : 1; }
+          j++;
+          continue;
+        }
+        j++;
+      }
+      continue;
+    }
+    j++;
+  }
+  return { end: -1, value: null };
+}
 
 /**
  * 引号串。转义表跟 sexpr/read.js 保持一致（`\t \n \r \" \' \\` 与 `\xXX`），
@@ -698,6 +769,16 @@ export function lexText(spec, file, diags) {
         const f = matchFuse(rule, src, i);
         end = f.end;
         value = f.value;
+      } else if (rule.kind === 'interp') {
+        if (src.slice(i, i + 1) === rule.quote) {
+          const s = scanInterp(src, i, rule.quote, rule.open);
+          end = s.end;
+          value = s.value;
+          if (end < 0) {
+            diags.error(mkSpan(file, i, src.length), 'unterminated interpolated string');
+            failed = true;
+          }
+        }
       } else if (src.slice(i, i + 1) === rule.quote) {
         const s = scanString(src, i, rule.quote, rule.verbatim);
         end = s.end;
@@ -724,7 +805,7 @@ export function lexText(spec, file, diags) {
     const text = rule.kind === 'fuse' ? bestValue : src.slice(i, bestEnd);
     i = bestEnd;
     prevEnd = bestEnd;
-    if (rule.kind === 'string') {
+    if (rule.kind === 'string' || rule.kind === 'interp') {
       toks.push({ type: rule.type, node: { kind: 'string', value: bestValue, raw: text.slice(1, text.length - 1), span }, span });
       prevType = rule.type;
       continue;
