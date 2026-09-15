@@ -9,28 +9,51 @@
 //   node tests/lib/jnc-rules-sweep.js            # 归堆的账 + 一行总数
 //   node tests/lib/jnc-rules-sweep.js --files    # 再印每一堆底下是哪些语料
 //   node tests/lib/jnc-rules-sweep.js 07 12      # 只看名字里带这些片段的
+//   node tests/lib/jnc-rules-sweep.js --jancy    # 量**jancy 仓库那一整棵**（662 份，见下）
+//
+// `--jancy` 那一档量的是**真语料**（`$JANCY` / `~/Documents/Lang/reference/jancy`，
+// 见 refsrc.js）：tests/jnc/cases 那 199 份是我们自己挑出来的最小例，"还差哪些特性"
+// 只能从真语料上问。两处差别记着：那边**不要入口**（408 份没有 `int main()`，都是库模块），
+// import 也只按"写这条 import 的文件自己的目录"找（那棵树里就是这么摆的）。
 
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import {
-  join, isAbsolute, resolve, dirname,
+  join, isAbsolute, resolve, dirname, basename,
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse, jncParseExpr } from '../../src/core/lang/jnc.js';
 import { lowerJncRules } from '../../src/lang/jnc/lower.js';
+import { refDir } from './refsrc.js';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const CASES = join(HERE, '..', 'jnc', 'cases');
 
 const argv = process.argv.slice(2);
 const wantFiles = argv.includes('--files');
+const wantJancy = argv.includes('--jancy');
 const pick = argv.filter((a) => !a.startsWith('--'));
 
 initJnc({ log: () => {} });
 const tb = jncFrontEnd();
 
-const files = readdirSync(CASES)
+/** 一棵树里全部 `.jnc`（递归，按路径排序）。 */
+function walk(dir, out = []) {
+  let names = [];
+  try { names = readdirSync(dir).sort(); } catch { return out; }
+  for (const n of names) {
+    const p = join(dir, n);
+    let st = null;
+    try { st = statSync(p); } catch { continue; }
+    if (st.isDirectory()) walk(p, out);
+    else if (n.endsWith('.jnc')) out.push(p);
+  }
+  return out;
+}
+
+const files = (wantJancy ? walk(refDir('jancy', 'JANCY')) : readdirSync(CASES)
   .filter((f) => f.endsWith('.jnc'))
+  .map((f) => join(CASES, f)))
   .filter((f) => pick.length === 0 || pick.some((p) => f.includes(p)))
   .sort();
 
@@ -57,9 +80,37 @@ const okFiles = [];
  * CLI 的同一份，所以这把尺子量的与真跑的是同一件事（少了它，59-incdir.jnc 在尺子上
  * 报的是"import 找不着"，而真跑是对的）。
  */
+/** 一棵树里全部叫 `jnc` 的目录（jancy 的标准库 `.jnc` 就摆在 `src/jnc_ext/<库>/jnc/` 底下）。 */
+function libDirs(dir, out = []) {
+  let names = [];
+  try { names = readdirSync(dir).sort(); } catch { return out; }
+  for (const n of names) {
+    const p = join(dir, n);
+    let st = null;
+    try { st = statSync(p); } catch { continue; }
+    if (!st.isDirectory()) continue;
+    if (n === 'jnc') out.push(p);
+    else libDirs(p, out);
+  }
+  return out;
+}
+
+/* `--jancy --libs` 那一档的 import 搜索路径 = 那棵树里所有叫 `jnc` 的目录。jancy 真编的时候
+   这些声明是**扩展库**（`.jncx`）带进来的（abi.rst:60-70）；我们不解压 zip，所以按
+   "库的 `.jnc` 摆在哪儿"直接给一条搜索路径。
+
+   为什么**默认不给**：import 是"把那份文件的顶层条目并进来"（第六十刀），给了这条路径
+   之后每一份语料都把整棵标准库并进来，于是每一份都撞上库自己那几族还没接的特性
+   （async / scheduler / dynamic throw…）—— 量出来 0/662，什么信息都没有。不给这条路径时
+   量的是**这一份文件自己**用了哪些特性（146/662），那才是"下一刀切哪一族"的依据。
+   `--libs` 量的是另一问：**连库一起**降得下来吗（那是收尾那一程的数）。 */
+const JANCY_LIBS = wantJancy && argv.includes('--libs')
+  ? libDirs(join(refDir('jancy', 'JANCY'), 'src')) : [];
+
 const dirsOf = (f) => {
+  if (wantJancy) return JANCY_LIBS;
   let txt = '';
-  try { txt = readFileSync(join(CASES, `${f.replace(/\.jnc$/, '')}.args`), 'utf8'); } catch { return []; }
+  try { txt = readFileSync(`${f.replace(/\.jnc$/, '')}.args`, 'utf8'); } catch { return []; }
   const out = [];
   const parts = txt.trim().split(/\s+/);
   for (let i = 0; i < parts.length; i += 1) {
@@ -67,10 +118,10 @@ const dirsOf = (f) => {
   }
   return out;
 };
-for (const f of files) {
-  const p = join(CASES, f);
+for (const p of files) {
+  const f = wantJancy ? p.slice(refDir('jancy', 'JANCY').length + 1) : basename(p);
   const d = new Diagnostics();
-  const dirs = dirsOf(f);
+  const dirs = dirsOf(p);
   const find = (spec, from) => {
     if (isAbsolute(spec)) return existsSync(spec) ? resolve(spec) : null;
     const here = join(dirname(from), spec);
@@ -86,7 +137,7 @@ for (const f of files) {
     const tree = jncParse(tb, p, d);
     out = lowerJncRules(tree, d, {
       path: p,
-      needEntry: true,
+      needEntry: !wantJancy,
       find,
       parse: (q) => jncParse(tb, q, d),
       /* 格式化字面量里 `$(…)` 那一段要**再解析一遍**（第二百刀）—— 与真驱动递的是同一个入口，
