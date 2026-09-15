@@ -17,7 +17,7 @@ import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
   ops,
-  destructure, recordNew, fieldGet, fieldSet,
+  destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -53,16 +53,22 @@ function toNode(x) {
     case 'paren': return toNode(kids(x)[0]);
     // `p.x` -> field-get（与 lua/nim 的 `(dot …)`、V 的 `(sel …)` 同一格节点）
     case 'sel': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
-    // `Point{x: 1, y: 2}` -> record-new。**类型名不进图**（type 是端口的 sort）
+    // `Point{x: 1, y: 2}` -> record-new；`[]int{10, 20}` -> list-new。
+    // **同一条产生式两种字面量**：带字段名的落记录、不带的落列表（混着的当场报）。
     case 'lit': {
       const elems = kids(x).slice(1);
-      const pairs = elems.map((e) => {
-        if (tag(e) !== 'kv') throw new Error('go->graph: 这一批只接带字段名的复合字面量');
-        const [k, v] = kids(e);
-        return [nameOf(k), toNode(v)];
-      });
-      return recordNew(pairs);
+      if (elems.length > 0 && elems.every((e) => tag(e) === 'kv')) {
+        return recordNew(elems.map((e) => {
+          const [k, v] = kids(e);
+          return [nameOf(k), toNode(v)];
+        }));
+      }
+      if (elems.some((e) => tag(e) === 'kv')) {
+        throw new Error('go->graph: 这一批不接"字段名与位置混着"的复合字面量');
+      }
+      return listNew(many(elems));
     }
+    case 'index': return indexGet(toNode(kids(x)[0]), toNode(kids(x)[1]));
 
     // ---- 算子 --------------------------------------------------------------
     case 'bin': {
@@ -98,8 +104,10 @@ function toNode(x) {
       }
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
-        // 左边是一格字段（`p.y = 5`）⇒ field-set；`set` 只认名字
+        // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set；
+        // `set` 只认名字
         if (tag(t) === 'sel') return fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v);
+        if (tag(t) === 'index') return indexSet(toNode(kids(t)[0]), toNode(kids(t)[1]), v);
         return isDef
           ? node('bind', { init: v }, { name: nameOf(t) })
           : node('set', { value: v }, { name: nameOf(t) });

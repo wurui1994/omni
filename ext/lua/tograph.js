@@ -15,7 +15,7 @@ import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
 import {
-  counted, destructure, ops, recordNew, fieldGet, fieldSet,
+  counted, destructure, ops, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
@@ -36,6 +36,14 @@ const PRIM = new Map([
 const OPS = ops({ '^': '^', '~=': '!=', '..': 'concat', and: 'and', or: 'or' });
 
 const many = (xs) => xs.map(toNode);
+
+/**
+ * **1 起 -> 0 起**：lua 的下标从 1 开始，图上的 `index-get` 一律从 0 开始。
+ * 字面量当场减（`xs[1]` 出的是 `(lit 0)`，图上看不见多余的算符），别的减一格算符。
+ */
+const zeroBased = (t) => (tag(t) === 'num'
+  ? lit(Number(raw(atomText(kids(t)[0]))) - 1)
+  : bin('-', toNode(t), lit(1)));
 
 /** 一格 `(names …)` / `(values …)` / `(args …)` 里的孩子。 */
 const partOf = (x, name) => {
@@ -71,11 +79,23 @@ function toNode(x) {
     case 'dot': return fieldGet(toNode(kids(x)[0]), atomText(kids(x)[1]));
     // `{ x = 1, y = 2 }` -> record-new。**lua 的表没有类型**，落的却是同一格 ——
     // 这正是"record 不要求任何类型存在"那句话的证据（附录 A）。
-    case 'table': return recordNew(kids(x).map((e) => {
-      if (tag(e) !== 'named') throw new Error('lua->graph: 这一批只接 `{ k = v }` 那种表');
-      const [k, v] = kids(e);
-      return [atomText(k), toNode(v)];
-    }));
+    // `{ 10, 20, 30 }`（数组部分）-> list-new：同一条产生式，两种字面量。
+    case 'table': {
+      const items = kids(x);
+      if (items.length > 0 && items.every((e) => tag(e) === 'named')) {
+        return recordNew(items.map((e) => {
+          const [k, v] = kids(e);
+          return [atomText(k), toNode(v)];
+        }));
+      }
+      if (items.some((e) => tag(e) !== 'item')) {
+        throw new Error('lua->graph: 这一批不接"名字与位置混着"的表');
+      }
+      return listNew(items.map((e) => toNode(kids(e)[0])));
+    }
+    // `xs[i]` -> index-get。**lua 从 1 起，图上从 0 起** —— 差的那一格在这儿减掉
+    // （字面量当场算，别的减一格算符；语言的答案由语言的映射给，与真值观同一条）。
+    case 'index': return indexGet(toNode(kids(x)[0]), zeroBased(kids(x)[1]));
 
     // ---- 算子 --------------------------------------------------------------
     case 'bin': {
@@ -120,8 +140,9 @@ function toNode(x) {
       const values = partOf(x, 'values');
       return targets.map((t, i) => {
         const v = values[i] === undefined ? lit(null) : toNode(values[i]);
-        // 左边是一格字段（`p.y = 5`）⇒ field-set；`set` 只认名字
+        // 左边是一格字段（`p.y = 5`）或一格下标（`xs[2] = 5`）⇒ field-set / index-set
         if (tag(t) === 'dot') return fieldSet(toNode(kids(t)[0]), atomText(kids(t)[1]), v);
+        if (tag(t) === 'index') return indexSet(toNode(kids(t)[0]), zeroBased(kids(t)[1]), v);
         return node('set', { value: v }, { name: nameOf(t) });
       });
     }
@@ -192,8 +213,8 @@ export function luaToGraph(tree) {
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
-//   1. 表只接 `{ k = v }` 那一种（落 record-new）；数组部分、`t[k]`、metatable、
-//      `...`、`goto` 都不在这一批 —— 下标那一格是 `index-get`，不是 `field-get`
-//      （字段名编译期已知、下标运行期算，两者的 lower 不同）。
+//   1. 表接两种：`{ k = v }` 落 record-new、`{ 1, 2 }` 落 list-new（混着的当场报）。
+//      metatable、`...`、`goto` 都不在这一批；`t[k]`（键是任意值）也不在 ——
+//      那是 map 那一格，`index-get` 只管列表（go 的 map 读可能 allocates，效应不同）。
 //   2. 全局名字当普通名字收（真语义是 `_ENV` 表查）。
 //   3. `for … in`（迭代器三件套）没接：它要 `indirect-call` + 协议，排在 `loop` 之后。

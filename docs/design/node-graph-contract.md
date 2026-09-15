@@ -487,6 +487,7 @@ V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
  8 机器  loop / set          7 机器  region / ret
  4 机器  scope-exit                       go nim sbcl vlang
  4 机器  record-new / field-get / field-set  go lua nim vlang
+ 4 机器  list-new / index-get / index-set    go lua nim vlang
  2 能力  values / pick       go lua
 ```
 
@@ -509,8 +510,27 @@ V 的 `(f …)`、nim 的 `T(x: 1)`；取字段那一格收下两种标签（`se
 这一批按"实参全是 kv"判 —— 分开它们要驱动器能回问"这名字登记成类型了吗"，
 **与 cpp 那笔账是同一笔**（A.5 第 3 笔）。一笔账现在有两个欠款人，优先级因此上调。
 
-下一批：`scope-exit` 还欠的四个提供者（lua 的 `<close>`、mojo 的 `with`、
-freebasic 的 `Scope`、cpp 的 RAII），以及 `index-get` / `index-set` 那一族。
+**第五批：列表与下标（`list-new` / `index-get` / `index-set`）已落地** —— 17 → 20 格。
+判据是第五个例子家族（`ext/{go,lua,vlang,nim}/examples/index.*`，期望输出 `10 / 30 / 45`）。
+四种列表字面量落同一格：lua `{10,20,30}`、go `[]int{…}`、V `[…]`、nim `@[…]`；
+取下标那一格收下两种标签（`index` 与 nim 的 `bracket`）。
+
+`list` 是**高级节点**，收它的理由就是 §4 那两条：九门语言有列表字面量，不给节点
+就要在每门语言的降级里各写一遍"建一格存储、逐个塞"；而它有消去规则
+（`list-new` → 一格存储 + 一串 `index-set`），所以后端不认识它也不影响正确性。
+
+这一批量出来的那条界限值得单独记：**下标的起点不是节点的事**。lua 从 1 起、
+其余三门从 0 起 —— 图上 `index-get` 一律 0 起，lua 的映射里一格 `zeroBased`
+把差的那一格减掉（字面量当场算，别的减一格算符）。这与真值观是同一条纪律：
+语言之间答案不同的东西，答案由那门语言的映射给，不进节点。
+
+同一条纪律也划出了**没有做**的那一格：`m[k]`（map 读）不进 `index-get` ——
+go 的 map 读可能 `allocates`、V 的返回 option，效应那一栏不同就是另一格节点（§3）。
+`t[k]`（lua 的任意键）因此也留着，与 map 一起做。
+
+下一批：map / dict 那一族（效应要先对表），以及 `scope-exit` 还欠的四个提供者
+（lua 的 `<close>`、mojo 的 `with`、freebasic 的 `Scope`、cpp 的 RAII）——
+这四个都要先有"方法调用 / 析构"那台机器，不是这一批能硬凑的。
 
 ### A.7 附属节点（不逐个列，按挂点分七类）
 

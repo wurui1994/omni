@@ -93,7 +93,8 @@ export function showValue(v) {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(v);
   if (v instanceof Closure) return `<fn ${v.name ?? '?'}>`;
-  // 一格记录（`record-new` 出来的普通对象）。印法两个后端共用这一句
+  // 一格列表（`list-new` 出来的普通数组）与一格记录（普通对象）—— 两个后端共用这两句
+  if (Array.isArray(v)) return `[${v.map(showValue).join(', ')}]`;
   if (typeof v === 'object') {
     return `{${Object.entries(v).map(([k, x]) => `${k} = ${showValue(x)}`).join(', ')}}`;
   }
@@ -131,6 +132,28 @@ export const setField = (obj, name, value) => {
     throw new Error(`field-set: 不是一格记录（.${name}）`);
   }
   obj[name] = value;
+  return null;
+};
+
+/**
+ * 下标：**图上一律 0 起**（lua 从 1 起那一格差由 lua 的映射减掉）。越界当场报 ——
+ * 那是 `index-get` 与 `field-get` 分成两格的理由之一（这一句就是"边界检查"）。
+ * 两个后端共用（js 后端里那句 `__index`）。
+ */
+export const index = (obj, i) => {
+  if (!Array.isArray(obj)) throw new Error(`index-get: 不是一格列表（[${showValue(i)}]）`);
+  if (typeof i !== 'number' || i < 0 || i >= obj.length) {
+    throw new Error(`index-get: 下标越界 [${showValue(i)}]（长度 ${obj.length}）`);
+  }
+  return obj[i];
+};
+
+export const setIndex = (obj, i, value) => {
+  if (!Array.isArray(obj)) throw new Error(`index-set: 不是一格列表（[${showValue(i)}]）`);
+  if (typeof i !== 'number' || i < 0 || i >= obj.length) {
+    throw new Error(`index-set: 下标越界 [${showValue(i)}]（长度 ${obj.length}）`);
+  }
+  obj[i] = value;
   return null;
 };
 
@@ -221,6 +244,9 @@ function run(n, env, io) {
     }
     case 'field-get': return field(arg('obj'), n.attrs.field);
     case 'field-set': return setField(arg('obj'), n.attrs.field, arg('value'));
+    case 'list-new': return arg('items') ?? [];
+    case 'index-get': return index(arg('obj'), arg('index'));
+    case 'index-set': return setIndex(arg('obj'), arg('index'), arg('value'));
     case 'ret': throw new Return(arg('value') ?? null);
     case 'call': {
       const fn = arg('fn');

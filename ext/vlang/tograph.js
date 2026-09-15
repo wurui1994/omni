@@ -14,7 +14,7 @@ import {
 import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
-  ops, recordNew, fieldGet, fieldSet,
+  ops, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -57,6 +57,9 @@ function toNode(x) {
       if (tag(e) !== 'f') throw new Error('v->graph: 这一批只接带字段名的结构字面量');
       return [leaf(kids(e)[0]), toNode(kids(e)[1])];
     }));
+    // `[10, 20, 30]` -> list-new；`xs[0]` -> index-get（V 与 go 从 0 起，不用减）
+    case 'array': return listNew(many(kids(x)));
+    case 'index': return indexGet(toNode(kids(x)[0]), toNode(kids(x)[1]));
 
     case 'bin': {
       const [op, a, b] = kids(x);
@@ -82,8 +85,9 @@ function toNode(x) {
       const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
-        // 左边是一格字段（`p.y = 5`）⇒ field-set；`set` 只认名字
+        // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set
         if (tag(t) === 'sel') return fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v);
+        if (tag(t) === 'index') return indexSet(toNode(kids(t)[0]), toNode(kids(t)[1]), v);
         return isDef
           ? node('bind', { init: v }, { name: nameOf(t) })
           : node('set', { value: v }, { name: nameOf(t) });

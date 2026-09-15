@@ -15,7 +15,7 @@ import {
 import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
-  ops, recordNew, fieldGet, fieldSet,
+  ops, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
@@ -63,8 +63,13 @@ function toNode(x) {
     }
     case 'un': {
       const [op, a] = kids(x);
+      // `@[1, 2, 3]`：`@` 是"数组字面量 -> seq"的算符，两格合起来就是一格 list-new
+      if (leaf(op) === '@' && tag(a) === 'array-lit') return listNew(many(kids(a)));
       return un(leaf(op) === 'not' ? 'not' : leaf(op), toNode(a));
     }
+    case 'array-lit': return listNew(many(kids(x)));
+    // `xs[i]` -> index-get（nim 从 0 起，不用减）
+    case 'bracket': return indexGet(toNode(kids(x)[0]), toNode(kids(part(x, 'args'))[0]));
     // `var a = 1` / `let a = 1` / `const a = 1` —— 一段能声明好几格
     case 'var-section': case 'let-section': case 'const-section': {
       return kids(x).filter((y) => tag(y) === 'item').map((it) => {
@@ -80,12 +85,18 @@ function toNode(x) {
       if (leaf(op) !== '=' && o === undefined) {
         throw new Error(`nim->graph: 这个复合赋值还没接：${leaf(op)}`);
       }
-      // 左边是一格字段（`p.y = 5`）⇒ field-set；`set` 只认名字
+      // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set
       if (tag(lhs) === 'dot') {
         const obj = () => toNode(kids(lhs)[0]);
         const f = leaf(kids(lhs)[1]);
         const v = o === null ? toNode(rhs) : bin(o, fieldGet(obj(), f), toNode(rhs));
         return fieldSet(obj(), f, v);
+      }
+      if (tag(lhs) === 'bracket') {
+        const obj = () => toNode(kids(lhs)[0]);
+        const idx = () => toNode(kids(part(lhs, 'args'))[0]);
+        const v = o === null ? toNode(rhs) : bin(o, indexGet(obj(), idx()), toNode(rhs));
+        return indexSet(obj(), idx(), v);
       }
       const name = nameOf(lhs);
       if (o === null) return node('set', { value: toNode(rhs) }, { name });

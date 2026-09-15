@@ -149,6 +149,14 @@ export const recordNew = (pairs) => node(
 export const fieldGet = (obj, name) => node('field-get', { obj }, { field: name });
 export const fieldSet = (obj, name, value) => node('field-set', { obj, value }, { field: name });
 
+/**
+ * **列表与下标那三格的搭法**（go / lua / V / nim 四门共用）。
+ * `index` 交进来时**已经是 0 起的**（lua 减那一格由 lua 的映射自己做）。
+ */
+export const listNew = (items) => node('list-new', { items });
+export const indexGet = (obj, idx) => node('index-get', { obj, index: idx });
+export const indexSet = (obj, idx, value) => node('index-set', { obj, index: idx, value });
+
 export function destructure(names, value, { declare = true, tmp = '__mv' } = {}) {
   const holder = `${tmp}${names.join('$')}`;
   const out = [node('bind', { init: value }, { name: holder, keepMulti: true })];

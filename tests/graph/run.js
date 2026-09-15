@@ -53,6 +53,8 @@ const MULTI = ['3', '7', '1 2'];
 const DEFER = ['in', 'b', 'a', 'out'];
 /** record：record-new / field-get / field-set 那三格 —— **与类型无关**（lua 的表没有类型） */
 const RECORD = ['1', '5', '6'];
+/** index：list-new / index-get / index-set —— **下标起点是语言的事**（lua 从 1 起） */
+const INDEX = ['10', '30', '45'];
 
 const CASES = [
   { name: 'chez', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/basics.ss', toGraph: chezToGraph, expect: BASICS },
@@ -77,6 +79,11 @@ const CASES = [
   { name: 'lua+record', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/record.lua', toGraph: luaToGraph, expect: RECORD },
   { name: 'vlang+record', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/record.v', toGraph: vlangToGraph, expect: RECORD },
   { name: 'nim+record', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/record.nim', toGraph: nimToGraph, expect: RECORD },
+  // ---- 第五个家族：列表与下标（四门语言四种列表字面量，落同一格 list-new）----
+  { name: 'go+index', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/index.go', toGraph: goToGraph, expect: INDEX },
+  { name: 'lua+index', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/index.lua', toGraph: luaToGraph, expect: INDEX },
+  { name: 'vlang+index', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/index.v', toGraph: vlangToGraph, expect: INDEX },
+  { name: 'nim+index', grammar: 'ext/nim/nim.grammar', file: 'ext/nim/examples/index.nim', toGraph: nimToGraph, expect: INDEX },
 ];
 
 const argv = process.argv.slice(2);

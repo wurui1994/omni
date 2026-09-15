@@ -5,7 +5,8 @@
 // 够跑通一门语言"含全部基础要素的完整例子"的最小集，13 格。
 //
 // 之后按批往上加，每一批都要有一个新的例子家族做判据（`tests/graph/run.js`）：
-// 第二批多值（+2）、第三批 scope-exit（+1）、第四批记录（+3）—— 现在 **17 格**。
+// 第二批多值（+2）、第三批 scope-exit（+1）、第四批记录（+3）、第五批列表与下标（+3）
+// —— 现在 **20 格**。
 //
 // ## 先说清哪几样**不给节点**（这是这一份最要紧的内容，四条全有出处）
 //
@@ -163,6 +164,38 @@ export const NODES = new Map([
   ], {
     attrs: ['field'], effects: ['writes'], outs: [],
     doc: '`p.y = 5` —— 左边是字段的赋值落这格，不落 set（set 只认名字）',
+  }),
+
+  // ---- 列表与下标（3 格）------------------------------------------------------
+  //
+  // `list` 这一格是**高级节点**，收它的理由写在 §4：十门里九门有列表字面量，
+  // 不给节点就要在每门语言的降级里各写一遍"建一格存储、逐个塞"。它有消去规则
+  // （`list-new` -> 一格存储 + 一串 index-set），所以后端不认识它也不影响正确性。
+  //
+  // **下标的起点不在这儿**：图上 `index-get` 一律按 0 起，lua 从 1 起那一格差
+  // 由 lua 自己的映射减掉（与真值观同一条纪律 —— 语言的答案由语言的映射给）。
+  //
+  // 与 `field-get` 为什么不是一格：字段名编译期已知（lower 成偏移量）、下标运行期算
+  // （lower 要边界检查）。**也别把 `m[k]` 塞进来**：go 的 map 读可能 `allocates`、
+  // V 的返回 option —— 效应那一栏不同就是另一格节点（§3 那条"不许合并"的判据）。
+  N('list-new', 'expr', [{ name: 'items', sem: SEM.value, rest: true }], {
+    effects: ['allocates'], lifetime: 'owns',
+    doc: 'lua `{1,2}` / go `[]int{…}` / V `[…]` / nim `@[…]` —— 九门有列表字面量',
+  }),
+  N('index-get', 'expr', [
+    { name: 'obj', sem: SEM.value },
+    { name: 'index', sem: SEM.value },
+  ], {
+    effects: ['reads'], lifetime: 'borrows(obj)',
+    doc: 'lua/go/V 的 `(index …)` / nim 的 `(bracket …)`',
+  }),
+  N('index-set', 'stat', [
+    { name: 'obj', sem: SEM.value },
+    { name: 'index', sem: SEM.value },
+    { name: 'value', sem: SEM.value },
+  ], {
+    effects: ['writes'], outs: [],
+    doc: '`xs[1] = 5` —— 左边是下标的赋值落这格',
   }),
 ]);
 
