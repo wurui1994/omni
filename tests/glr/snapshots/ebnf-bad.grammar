@@ -1,0 +1,4 @@
+exit=1
+ebnf/bad.ebnf:10:27: error: unsupported `[` in EBNF right-hand side — 字符类（`[^\n]+`）是词法层的东西，这一格不收；可选请写 `?`
+  pragma-line ::= "#pragma" [^\n]+
+                            ^

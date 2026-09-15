@@ -3368,6 +3368,11 @@ function main(argv) {
       stdout(cap('glr.y')(path));
       return 0;
     }
+    // `.ebnf`（W3C / bottlecaps 风）同上一条 —— 标准里那份语法本身就是这个形状。
+    case 'glr-ebnf': {
+      stdout(cap('glr.ebnf')(path));
+      return 0;
+    }
     default:
       throw new OmniError(`unknown command '${cmd}'\n${renderHelp(ROOT, [])}`);
   }

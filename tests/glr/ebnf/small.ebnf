@@ -1,0 +1,37 @@
+// 一份手写的小 .ebnf —— 这一节的夹具，不是哪门真语言。
+//
+// 它要把 ebnf.js 收的方言**每一格都用到一次**，因为快照测的是"转出来的文本"：
+//
+//   `?` `*` `+`      三种后缀各一处
+//   `( … | … )`      分组，里面还有 `|`
+//   同形状复用        `expr?` 出现两次，辅助规则只许出一份（下面 return / index 两处）
+//   `'…'` 与 `"…"`   两种引号等价；`'"'` 是那个双引号字符本身
+//   `/*empty*/`      抹成空白之后那一支就是空产生式
+//   名字里的点        `a.b` 折成 `a-b`
+//   未定义的名字       identifier / number / string-lit 三个没人 ::= 过 —— 那就是终结符
+
+unit ::= stmt*
+
+stmt ::= "return" expr? ";"
+       | "if" "(" expr ")" stmt ("else" stmt)?
+       | "{" stmt* "}"
+       | decl.stmt
+       | ";"
+
+decl.stmt ::= "let" identifier ("=" expr)? ";"
+
+expr ::= term (("+" | "-") term)*
+
+term ::= identifier
+       | number
+       | string-lit
+       | '"' identifier '"'
+       | identifier "[" expr? "]"
+       | "(" expr ")"
+
+// 空产生式那一格：这条规则的第二支是空的
+opt-tail ::= "," expr
+           | /*empty*/
+
+// `+` 那一格
+name-list ::= identifier+

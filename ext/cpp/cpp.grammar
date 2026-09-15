@@ -1,0 +1,803 @@
+;; ext/cpp/cpp.grammar —— C++ 的语法（**子集**，不足写在末尾"量到的"那一节）
+;;
+;; 有权威文本可抄：`cpp-grammars/c++20.ebnf`（1467 行，标准里那份语法的机读版）。
+;; 抄它之前得先把三件**结构性**的事说清楚 —— 这三件不是"少写了几条产生式"，是这门语言
+;; 本身的性质，任何只有词法器 + LR 表的工具都会撞上：
+;;
+;; ## 一、C++ 的语法是定义在**预处理之后**的记号流上的
+;;
+;; 标准里的 `translation-unit` 假定预处理已经做完了。真实的 `.cpp` 里，声明常常是宏
+;; 展开出来的（`BEGIN_NAMESPACE`、`DECLARE_FOO(x)`、`Q_OBJECT`…）。我们不做预处理，
+;; 所以 `#…` 那些行当**指令**收（一整行记号，不解释），而**宏的使用**没法展开 ——
+;; 哪一份文件的声明是宏生成的，那一份就过不去。这是明说的限制，不是 bug。
+;;
+;; ## 二、"声明还是表达式"要**符号表**才判得了
+;;
+;; `T * x;` —— `T` 是类型就是声明，不是类型就是乘法。`f(x);` —— `f` 是类型就是声明一个
+;; 叫 `x` 的变量，不是类型就是调用。C++ 的语法**本身**是二义的，编译器靠"这个名字登记过
+;; 没有"来判（所谓 typedef-name 反馈）。
+;;
+;; 这一处正好是 GLR 的用处：两条路都走，靠后面的记号淘汰错的那一条。收得住的场合不少
+;; （`T * x = 0;` 只有声明说得通），收不住的场合就报歧义 —— **报出来比猜对一半好**。
+;; 真要全收，缺的不是产生式，是**驱动器能回问一句"这个名字是类型吗"**（与 nim 那份里
+;; 记的"列号谓词"是同一类的缺口，都在 driver.js 那一层）。
+;;
+;; ## 三、`<` `>` 既是模板括号又是比较
+;;
+;; `a<b>(c)` 是"模板实例化后调用"还是"两次比较"？同上，靠符号表。同样交给 GLR 分叉。
+;;
+;; 说完这三件，剩下的就是照 EBNF 抄了。抄的过程里用得上前面几门量出来的那几条：
+;;   * 歧义要写进语法（能写清的就写清，别指望驱动器猜）；
+;;   * 逗号表要么"每格必须带标记"、要么"整组同形"，别两种混着推；
+;;   * 两种读法只差第一个记号是什么时，复制一条受限链把那一格挡掉。
+
+(grammar cpp
+  (tokens ID INT FLOAT CHAR STRING PPLINE)
+
+  (start unit)
+
+  (lex
+    ;; 换页与纵向制表也是空白（生成的源码里有）。词法 DSL 的串里没有 `\f` `\v` 转义，
+    ;; 所以用 `(not …)` 的补集收不了 —— 直接把那两个字符写进字符集。
+    (skip (+ (set " \t\r\n")))
+    ;; 反斜杠续行：连换行一起吃掉（预处理的第一步就是它）
+    (skip "\\" (* (set " \t\r")) "\n")
+    (block-comment "/*" "*/")
+    (comment "//" (* (not "\n")))
+
+    ;; `#…` 一整行收成**一个记号**（连 `\` 续行一起）。
+    ;;
+    ;; 头一版是"发一格 NEWLINE 记号，指令按 `# 记号串 NEWLINE` 读" —— 结果 NEWLINE 到处
+    ;; 漏进声明中间（`inline double max(double a, double b)` 换行处就断了），351 份只过 51。
+    ;; 收成一个记号之后换行就纯是空白了，语法里一处不用管它。指令的载荷本来也不该按
+    ;; 表达式读（`#define F(a) a*2` 里那一串不是表达式），所以这么收反而更对。
+    (token PPLINE "#" (* (or (not "\n\\") (seq "\\" any))))
+
+    ;; ---- 字面量。生串（`R"(…)"`）只收最常见的空分隔符那一种。
+    (token STRING (? (or "u8" "U" "L" "u")) "R" "\"" "(" (* (or (not ")") (seq ")" (not "\"")))) ")" "\"")
+    (token STRING (? (or "u8" "U" "L" "u")) "\"" (* (or (not "\"\n\\") (seq "\\" any))) "\"")
+    (token CHAR (? (or "u8" "U" "L" "u")) "'" (+ (or (not "'\n\\") (seq "\\" any))) "'")
+    (token FLOAT (+ digit) (* (or digit "'")) "." (* (or digit "'"))
+      (? (or "e" "E") (? (set "+-")) (+ digit)) (* (or alnum "_")))
+    (token FLOAT "." (+ digit) (* (or digit "'")) (? (or "e" "E") (? (set "+-")) (+ digit)) (* (or alnum "_")))
+    (token FLOAT (+ digit) (* (or digit "'")) (or "e" "E") (? (set "+-")) (+ digit) (* (or alnum "_")))
+    (token INT "0" (or "x" "X") (+ (or hex "'")) (* (or alpha "_")))
+    (token INT "0" (or "b" "B") (+ (set "01'")) (* (or alpha "_")))
+    (token INT digit (* (or digit "'")) (* (or alpha "_")))
+
+    (token ID (or alpha "_" "$") (* (or alnum "_" "$")))
+    (keyword ID
+      "alignas" "alignof" "asm" "auto" "bool" "break" "case" "catch" "char"
+      "char16_t" "char32_t" "char8_t" "class" "concept" "const" "consteval"
+      "constexpr" "constinit" "const_cast" "continue" "co_await" "co_return"
+      "co_yield" "decltype" "default" "delete" "do" "double" "dynamic_cast"
+      ;; `export` 是模块那一族的词，这一份不收模块 —— 关键字这一格的门槛是"声明了就得
+      ;; 在语法里出现"，所以不声明它，落回 ID。
+      "else" "enum" "explicit" "extern" "false" "float" "for" "friend"
+      "goto" "if" "inline" "int" "long" "mutable" "namespace" "new" "noexcept"
+      "nullptr" "operator" "private" "protected" "public" "register"
+      "reinterpret_cast" "requires" "return" "short" "signed" "sizeof" "static"
+      "static_assert" "static_cast" "struct" "switch" "template" "this"
+      "thread_local" "throw" "true" "try" "typedef" "typeid" "typename" "union"
+      "unsigned" "using" "virtual" "void" "volatile" "wchar_t" "while")
+
+    ;; ---- 运算符与标点。C++ 的这一族是封闭的，一条条列（长的在前只为读起来清楚）。
+    (op "<<=" ">>=" "->*" "..." "<=>"
+        "::" "->" "++" "--" "<<" ">>" "<=" ">=" "==" "!=" "&&" "||"
+        "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" ".*"
+        "(" ")" "[" "]" "{" "}" ";" "," ":" "." "?" "=" "+" "-" "*" "/" "%"
+        "&" "|" "^" "~" "!" "<" ">"))
+
+  ;; ---- 翻译单元 ----------------------------------------------------------------
+
+  (rule unit
+    (-> (decls) (unit $*1)))
+
+  (rule decls
+    (-> () ())
+    (-> (decls decl) ($*1 $2)))
+
+  ;; ---- 声明 --------------------------------------------------------------------
+
+  (rule decl
+    (-> (PPLINE) (pp $1))
+    (-> (";") (empty))
+    (-> (simple-decl) $1)
+    (-> (func-def) $1)
+    (-> (template-decl) $1)
+    (-> (namespace-def) $1)
+    (-> (using-decl) $1)
+    (-> (extern-block) $1)
+    (-> (static-assert) $1)
+    (-> (asm-decl) $1))
+
+  ;; `int x = 1, *p;` / `class Foo;` / `typedef int T;` / `struct { … } v;`
+  (rule simple-decl
+    (-> (specs ";") (decl (specs $*1)))
+    (-> (specs declarators ";") (decl (specs $*1) (init $*2))))
+
+  (rule specs
+    (-> (spec) ($1))
+    (-> (specs spec) ($*1 $2)))
+
+  (rule spec
+    (-> (store-spec) $1)
+    (-> (cv) $1)
+    (-> (fn-spec) $1)
+    (-> (type-spec) $1)
+    (-> (attr-spec) $1))
+
+  (rule store-spec
+    (-> ("static") $1) (-> ("extern") $1) (-> ("register") $1)
+    (-> ("mutable") $1) (-> ("thread_local") $1) (-> ("typedef") $1)
+    (-> ("friend") $1))
+
+  (rule cv
+    (-> ("const") $1) (-> ("volatile") $1))
+
+  (rule fn-spec
+    (-> ("inline") $1) (-> ("virtual") $1) (-> ("explicit") $1)
+    (-> ("constexpr") $1) (-> ("consteval") $1) (-> ("constinit") $1))
+
+  ;; `[[nodiscard]]` / `[[gnu::always_inline]]` / `alignas(16)`。属性的载荷不细读 ——
+  ;; 收成一串"名字与标点"就够（里面可以有 `::`、`(…)`、`...`）。
+  (rule attr-spec
+    (-> ("[" "[" attr-toks "]" "]") (attrs $*3))
+    (-> ("[" "[" "]" "]") (attrs))
+    (-> ("alignas" "(" expr ")") (alignas $3))
+    (-> ("alignas" "(" type-id ")") (alignas $3)))
+
+  (rule attr-toks
+    (-> (attr-tok) ($1))
+    (-> (attr-toks attr-tok) ($*1 $2)))
+
+  (rule attr-tok
+    (-> (ID) $1) (-> (INT) $1) (-> (STRING) $1)
+    (-> ("::") $1) (-> (",") $1) (-> ("...") $1)
+    (-> ("(" args ")") (args $*2)))
+
+  (rule type-spec
+    (-> (builtin) $1)
+    (-> (qname) $1)
+    (-> ("auto") (auto))
+    (-> ("decltype" "(" expr ")") (decltype $3))
+    (-> ("decltype" "(" "auto" ")") (decltype auto))
+    (-> ("typename" qname) (typename $2))
+    (-> (class-spec) $1)
+    (-> (enum-spec) $1)
+    ;; `class Foo` / `struct Bar` 当**详述类型说明**用（前置引用）
+    (-> (class-key qname) (elaborated $1 $2)))
+
+  (rule builtin
+    (-> ("void") $1) (-> ("bool") $1) (-> ("char") $1) (-> ("char8_t") $1)
+    (-> ("char16_t") $1) (-> ("char32_t") $1) (-> ("wchar_t") $1)
+    (-> ("short") $1) (-> ("int") $1) (-> ("long") $1) (-> ("float") $1)
+    (-> ("double") $1) (-> ("signed") $1) (-> ("unsigned") $1))
+
+  ;; 限定名：`std::vector<int>::iterator`、`::foo`、`~Foo`、`operator+`
+  (rule qname
+    (-> (name-part) $1)
+    (-> ("::" name-part) (root $2))
+    (-> (qname "::" name-part) (qual $1 $3))
+    (-> (qname "::" "template" name-part) (qual $1 $4)))
+
+  (rule name-part
+    (-> (ID) (n $1))
+    (-> (ID targs) (tid (n $1) (targs $*2)))
+    (-> ("~" ID) (dtor $2))
+    (-> ("operator" opname) (opname $2))
+    (-> ("operator" type-id) (convop $2)))
+
+  ;; 模板实参表。`<` `>` 与比较撞车 —— 那一处交给 GLR 分叉（见文件头第三段）。
+  (rule targs
+    (-> ("<" ">") ())
+    (-> ("<" targ-list ">") ($*2)))
+
+  (rule targ-list
+    (-> (targ) ($1))
+    (-> (targ-list "," targ) ($*1 $3)))
+
+  (rule targ
+    (-> (type-id) $1)
+    (-> (assign-expr) $1)
+    (-> (targ "...") (pack $1)))
+
+  (rule opname
+    (-> ("+") $1) (-> ("-") $1) (-> ("*") $1) (-> ("/") $1) (-> ("%") $1)
+    (-> ("^") $1) (-> ("&") $1) (-> ("|") $1) (-> ("~") $1) (-> ("!") $1)
+    (-> ("=") $1) (-> ("<") $1) (-> (">") $1) (-> ("+=") $1) (-> ("-=") $1)
+    (-> ("*=") $1) (-> ("/=") $1) (-> ("%=") $1) (-> ("^=") $1) (-> ("&=") $1)
+    (-> ("|=") $1) (-> ("<<") $1) (-> (">>") $1) (-> ("<<=") $1) (-> (">>=") $1)
+    (-> ("==") $1) (-> ("!=") $1) (-> ("<=") $1) (-> (">=") $1) (-> ("<=>") $1)
+    (-> ("&&") $1) (-> ("||") $1) (-> ("++") $1) (-> ("--") $1) (-> (",") $1)
+    (-> ("->") $1) (-> ("->*") $1) (-> ("new") $1) (-> ("delete") $1)
+    (-> ("new" "[" "]") new-array)
+    (-> ("delete" "[" "]") delete-array)
+    (-> ("(" ")") call)
+    (-> ("[" "]") index)
+    ;; 用户定义字面量：`operator""_km`
+    (-> (STRING ID) (lit $2)))
+
+  ;; ---- 类与枚举 ----------------------------------------------------------------
+
+  (rule class-key
+    (-> ("class") $1) (-> ("struct") $1) (-> ("union") $1))
+
+  (rule class-spec
+    (-> (class-key class-head "{" members "}") (class $1 $2 (members $*4))))
+
+  (rule class-head
+    (-> () ())
+    (-> (qname) $1)
+    (-> (qname bases) ($1 $2))
+    (-> (bases) $1)
+    (-> (attr-spec qname) $2)
+    (-> (attr-spec qname bases) ($2 $3)))
+
+  (rule bases
+    (-> (":" base-list) (bases $*2)))
+
+  (rule base-list
+    (-> (base) ($1))
+    (-> (base-list "," base) ($*1 $3)))
+
+  (rule base
+    (-> (qname) (b $1))
+    (-> (access qname) (b $2 $1))
+    (-> ("virtual" qname) (b $2 virtual))
+    (-> ("virtual" access qname) (b $3 $2 virtual))
+    (-> (access "virtual" qname) (b $3 $1 virtual))
+    (-> (base "...") (pack $1)))
+
+  (rule access
+    (-> ("public") $1) (-> ("private") $1) (-> ("protected") $1))
+
+  (rule members
+    (-> () ())
+    (-> (members member) ($*1 $2)))
+
+  (rule member
+    (-> (access ":") (label $1))
+    (-> (decl) $1)
+    ;; 位域：`int flags : 3;`
+    (-> (specs bitfields ";") (bitfield (specs $*1) $*2)))
+
+  (rule bitfields
+    (-> (bitfield-one) ($1))
+    (-> (bitfields "," bitfield-one) ($*1 $3)))
+
+  (rule bitfield-one
+    (-> (declarator ":" assign-expr) (bf $1 $3))
+    (-> (":" assign-expr) (bf $2)))
+
+  (rule enum-spec
+    (-> (enum-key enum-head "{" enumerators "}") (enum $1 $2 (items $*4))))
+
+  (rule enum-key
+    (-> ("enum") $1)
+    (-> ("enum" "class") enum-class)
+    (-> ("enum" "struct") enum-class))
+
+  (rule enum-head
+    (-> () ())
+    (-> (qname) $1)
+    (-> (":" type-id) (base $2))
+    (-> (qname ":" type-id) ($1 (base $3))))
+
+  (rule enumerators
+    (-> () ())
+    (-> (enum-item) ($1))
+    (-> (enumerators "," enum-item) ($*1 $3))
+    (-> (enumerators ",") $*1))
+
+  (rule enum-item
+    (-> (ID) (v $1))
+    (-> (ID "=" assign-expr) (v $1 $3))
+    (-> (attr-spec ID) (v $2))
+    (-> (attr-spec ID "=" assign-expr) (v $2 $4)))
+  ;; ---- 声明符（declarator）------------------------------------------------------
+  ;;
+  ;; C++ 的声明符是"从名字往外读"的那套：`int *a[10]`、`void (*f)(int)`、
+  ;; `auto g() -> int`。按 EBNF 的分层写：`declarator` = 前缀（`*` `&` `&&`）套
+  ;; `noptr-declarator`（名字 + 后缀 `[]` `()`）。
+
+  (rule declarators
+    (-> (init-declarator) ($1))
+    (-> (declarators "," init-declarator) ($*1 $3)))
+
+  (rule init-declarator
+    (-> (declarator) (d $1))
+    (-> (declarator "=" initializer) (d $1 (init $3)))
+    (-> (declarator braced) (d $1 (init $2)))
+    (-> (declarator "(" args ")") (d $1 (ctor (args $*3))))
+    ;; `= 0` / `= delete` / `= default`（虚函数与特殊成员）
+    (-> (declarator "=" "delete") (d $1 deleted))
+    (-> (declarator "=" "default") (d $1 defaulted))
+    (-> (declarator requires-clause) (d $1 $2)))
+
+  (rule declarator
+    (-> (noptr) $1)
+    (-> (ptr-op declarator) (ptr $1 $2)))
+
+  (rule ptr-op
+    (-> ("*") $1)
+    (-> ("*" cvs) ($1 $*2))
+    (-> ("&") $1)
+    (-> ("&&") $1)
+    ;; 成员指针：`int Foo::*p`
+    (-> (qname "::" "*") (memptr $1))
+    (-> (qname "::" "*" cvs) (memptr $1 $*4)))
+
+  (rule cvs
+    (-> (cv) ($1))
+    (-> (cvs cv) ($*1 $2)))
+
+  (rule noptr
+    (-> (qname) $1)
+    (-> ("...") (pack))
+    (-> ("(" declarator ")") (paren $2))
+    (-> (noptr "[" "]") (array $1))
+    (-> (noptr "[" expr "]") (array $1 $3))
+    (-> (noptr "(" params ")" fn-tail) (fn $1 (params $*3) $*5))
+    ;; 抽象声明符（形参里只写类型不写名字）：`void f(int, char*)`
+    (-> () (abstract)))
+
+  ;; 函数声明符后面那一串：cv、`noexcept`、引用限定、`override`/`final`、尾置返回、
+  ;; `requires`。顺序不定 —— 与 mojo 的 `sig-parts` 同一手。
+  (rule fn-tail
+    (-> () ())
+    (-> (fn-tail fn-tail-part) ($*1 $2)))
+
+  (rule fn-tail-part
+    (-> (cv) $1)
+    (-> ("&") $1)
+    (-> ("&&") $1)
+    (-> ("noexcept") (noexcept))
+    (-> ("noexcept" "(" expr ")") (noexcept $3))
+    (-> ("throw" "(" ")") (throws))
+    (-> ("throw" "(" type-list ")") (throws $*3))
+    (-> ("->" type-id) (ret $2))
+    (-> (attr-spec) $1)
+    (-> (requires-clause) $1)
+    ;; `override` / `final` 是**上下文关键字**（普通标识符），所以按 ID 收
+    (-> (ID) (m $1)))
+
+  (rule params
+    (-> () ())
+    (-> (param-list) ($*1))
+    (-> (param-list "," "...") ($*1 (varargs)))
+    (-> ("...") ((varargs))))
+
+  (rule param-list
+    (-> (param) ($1))
+    (-> (param-list "," param) ($*1 $3)))
+
+  (rule param
+    (-> (specs declarator) (p (specs $*1) $2))
+    (-> (specs declarator "=" initializer) (p (specs $*1) $2 (default $4))))
+
+  (rule type-list
+    (-> (type-id) ($1))
+    (-> (type-list "," type-id) ($*1 $3)))
+
+  ;; `type-id` = 说明符 + 抽象声明符（`int*`、`std::vector<int>&`、`void(*)(int)`）
+  (rule type-id
+    (-> (specs) (type (specs $*1)))
+    (-> (specs declarator) (type (specs $*1) $2)))
+
+  ;; ---- 初始化器 ----------------------------------------------------------------
+
+  (rule initializer
+    (-> (assign-expr) $1)
+    (-> (braced) $1))
+
+  (rule braced
+    (-> ("{" "}") (braces))
+    (-> ("{" init-list "}") (braces $*2))
+    (-> ("{" init-list "," "}") (braces $*2)))
+
+  (rule init-list
+    (-> (init-item) ($1))
+    (-> (init-list "," init-item) ($*1 $3)))
+
+  (rule init-item
+    (-> (assign-expr) $1)
+    (-> (braced) $1)
+    ;; 指定初始化（C++20 / C 兼容）：`.x = 1`
+    (-> ("." ID "=" initializer) (desig $2 $4))
+    (-> (init-item "...") (pack $1)))
+
+  ;; ---- 函数定义 ----------------------------------------------------------------
+
+  (rule func-def
+    (-> (specs declarator ctor-init body) (func (specs $*1) $2 $3 $4))
+    (-> (declarator ctor-init body) (func $1 $2 $3)))
+
+  ;; 构造函数的成员初始化表：`: a(1), b{2}`
+  (rule ctor-init
+    (-> () ())
+    (-> (":" mem-inits) (ctor-init $*2)))
+
+  (rule mem-inits
+    (-> (mem-init) ($1))
+    (-> (mem-inits "," mem-init) ($*1 $3)))
+
+  (rule mem-init
+    (-> (qname "(" args ")") (mi $1 (args $*3)))
+    (-> (qname braced) (mi $1 $2))
+    (-> (mem-init "...") (pack $1)))
+
+  ;; ---- 模板 / 命名空间 / using / extern ------------------------------------------
+
+  (rule template-decl
+    (-> ("template" "<" tparams ">" decl) (template (params $*3) $5))
+    (-> ("template" "<" ">" decl) (specialization $4))
+    (-> ("template" "<" tparams ">" requires-clause decl) (template (params $*3) $5 $6))
+    ;; 显式实例化：`template class Foo<int>;`
+    (-> ("template" simple-decl) (instantiate $2))
+    (-> ("extern" "template" simple-decl) (instantiate extern $3))
+    (-> ("concept" ID "=" assign-expr ";") (concept $2 $4)))
+
+  (rule tparams
+    (-> (tparam) ($1))
+    (-> (tparams "," tparam) ($*1 $3)))
+
+  (rule tparam
+    (-> (tp-key) (tp $1))
+    (-> (tp-key ID) (tp $1 (n $2)))
+    (-> (tp-key "..." ) (tp $1 pack))
+    (-> (tp-key "..." ID) (tp $1 pack (n $3)))
+    (-> (tp-key ID "=" type-id) (tp $1 (n $2) (default $4)))
+    ;; 非类型模板形参：`int N`、`auto V`
+    (-> (param) $1)
+    ;; 模板模板形参：`template<class> class C`
+    (-> ("template" "<" tparams ">" tp-key ID) (tt (params $*3) (n $6))))
+
+  (rule tp-key
+    (-> ("class") $1) (-> ("typename") $1))
+
+  (rule requires-clause
+    (-> ("requires" logical-or) (requires $2)))
+
+  (rule namespace-def
+    (-> ("namespace" "{" decls "}") (namespace (body $*3)))
+    (-> ("namespace" qname "{" decls "}") (namespace $2 (body $*4)))
+    (-> ("inline" "namespace" qname "{" decls "}") (namespace inline $3 (body $*5)))
+    (-> ("namespace" ID "=" qname ";") (nsalias $2 $4)))
+
+  (rule using-decl
+    (-> ("using" qname ";") (using $2))
+    (-> ("using" "namespace" qname ";") (using-ns $3))
+    (-> ("using" "typename" qname ";") (using $3))
+    ;; 别名声明：`using T = std::vector<int>;`
+    (-> ("using" ID "=" type-id ";") (alias $2 $4))
+    (-> ("using" ID attr-spec "=" type-id ";") (alias $2 $5)))
+
+  (rule extern-block
+    (-> ("extern" STRING "{" decls "}") (extern $2 (body $*4)))
+    (-> ("extern" STRING decl) (extern $2 $3)))
+
+  (rule static-assert
+    (-> ("static_assert" "(" assign-expr ")" ";") (static-assert $3))
+    (-> ("static_assert" "(" assign-expr "," assign-expr ")" ";") (static-assert $3 $5)))
+
+  (rule asm-decl
+    (-> ("asm" "(" args ")" ";") (asm (args $*3))))
+  ;; ---- 语句 --------------------------------------------------------------------
+
+  (rule body
+    (-> ("{" stmts "}") (body $*2))
+    ;; `= delete;` / `= default;` 收在 `init-declarator` 里，这儿只收真正的体
+    (-> ("try" "{" stmts "}" handlers) (try-body (body $*3) $*5)))
+
+  (rule stmts
+    (-> () ())
+    (-> (stmts stmt) ($*1 $2)))
+
+  (rule stmt
+    (-> (PPLINE) (pp $1))
+    (-> (";") (empty))
+    (-> ("{" stmts "}") (block $*2))
+    (-> (expr ";") (expr $1))
+    (-> (simple-decl) $1)
+    (-> (func-def) $1)
+    (-> (template-decl) $1)
+    (-> (using-decl) $1)
+    (-> (static-assert) $1)
+    (-> (asm-decl) $1)
+    (-> (attr-spec stmt) (attr $1 $2))
+    ;; 标签
+    (-> (ID ":" stmt) (label $1 $3))
+    (-> ("case" assign-expr ":" stmt) (case $2 $4))
+    ;; GCC 的区间 case：`case 'a' ... 'z':`
+    (-> ("case" assign-expr "..." assign-expr ":" stmt) (case (range $2 $4) $6))
+    (-> ("default" ":" stmt) (default $3))
+    (-> ("if" "(" cond ")" stmt) (if $3 $5))
+    (-> ("if" "(" cond ")" stmt "else" stmt) (if $3 $5 (else $7)))
+    (-> ("if" "constexpr" "(" cond ")" stmt) (if constexpr $4 $6))
+    (-> ("if" "constexpr" "(" cond ")" stmt "else" stmt) (if constexpr $4 $6 (else $8)))
+    (-> ("switch" "(" cond ")" stmt) (switch $3 $5))
+    (-> ("while" "(" cond ")" stmt) (while $3 $5))
+    (-> ("do" stmt "while" "(" expr ")" ";") (do $2 $5))
+    (-> ("for" "(" for-init opt-expr ";" opt-expr ")" stmt) (for $3 $4 $6 $8))
+    ;; 范围 for：`for (auto& x : v)`
+    (-> ("for" "(" specs declarator ":" for-range ")" stmt) (for-range (specs $*3) $4 $6 $8))
+    (-> ("return" ";") (return))
+    (-> ("return" expr ";") (return $2))
+    (-> ("return" braced ";") (return $2))
+    (-> ("break" ";") (break))
+    (-> ("continue" ";") (continue))
+    (-> ("goto" ID ";") (goto $2))
+    (-> ("try" "{" stmts "}" handlers) (try (body $*3) $*5))
+    (-> ("co_return" ";") (co-return))
+    (-> ("co_return" expr ";") (co-return $2)))
+
+  (rule for-init
+    (-> (";") ())
+    (-> (expr ";") $1)
+    (-> (simple-decl) $1))
+
+  (rule for-range
+    (-> (expr) $1)
+    (-> (braced) $1))
+
+  (rule opt-expr
+    (-> () ())
+    (-> (expr) $1))
+
+  ;; 条件里可以是声明：`if (auto* p = f())`、`while (int c = get())`
+  (rule cond
+    (-> (expr) $1)
+    (-> (specs declarator "=" initializer) (cond-decl (specs $*1) $2 $4))
+    (-> (specs declarator braced) (cond-decl (specs $*1) $2 $3))
+    ;; C++17 的带初始化 if：`if (auto it = m.find(k); it != m.end())`
+    (-> (simple-decl expr) (cond-init $1 $2)))
+
+  (rule handlers
+    (-> (handler) ($1))
+    (-> (handlers handler) ($*1 $2)))
+
+  (rule handler
+    (-> ("catch" "(" "..." ")" "{" stmts "}") (catch all (body $*6)))
+    (-> ("catch" "(" specs declarator ")" "{" stmts "}") (catch (specs $*3) $4 (body $*7))))
+
+  ;; ---- 表达式：照 EBNF 的优先级分层 ---------------------------------------------
+
+  (rule expr
+    (-> (assign-expr) $1)
+    (-> (expr "," assign-expr) (comma $1 $3)))
+
+  (rule args
+    (-> () ())
+    (-> (arg-list) ($*1)))
+
+  (rule arg-list
+    (-> (arg) ($1))
+    (-> (arg-list "," arg) ($*1 $3)))
+
+  (rule arg
+    (-> (assign-expr) $1)
+    (-> (braced) $1)
+    (-> (arg "...") (pack $1)))
+
+  (rule assign-expr
+    (-> (cond-expr) $1)
+    (-> (unary-expr assign-op assign-expr) (assign $2 $1 $3))
+    (-> (unary-expr assign-op braced) (assign $2 $1 $3))
+    (-> (throw-expr) $1)
+    (-> (yield-expr) $1))
+
+  (rule assign-op
+    (-> ("=") $1) (-> ("+=") $1) (-> ("-=") $1) (-> ("*=") $1) (-> ("/=") $1)
+    (-> ("%=") $1) (-> ("&=") $1) (-> ("|=") $1) (-> ("^=") $1)
+    (-> ("<<=") $1) (-> (">>=") $1))
+
+  (rule throw-expr
+    (-> ("throw") (throw))
+    (-> ("throw" assign-expr) (throw $2)))
+
+  (rule yield-expr
+    (-> ("co_yield" assign-expr) (co-yield $2)))
+
+  (rule cond-expr
+    (-> (logical-or) $1)
+    (-> (logical-or "?" expr ":" assign-expr) (cond $1 $3 $5))
+    ;; GCC 的省略中项：`a ?: b`
+    (-> (logical-or "?" ":" assign-expr) (cond $1 () $4)))
+
+  (rule logical-or
+    (-> (logical-and) $1)
+    (-> (logical-or "||" logical-and) (bin "||" $1 $3)))
+
+  (rule logical-and
+    (-> (bor) $1)
+    (-> (logical-and "&&" bor) (bin "&&" $1 $3)))
+
+  (rule bor
+    (-> (bxor) $1)
+    (-> (bor "|" bxor) (bin "|" $1 $3)))
+
+  (rule bxor
+    (-> (band) $1)
+    (-> (bxor "^" band) (bin "^" $1 $3)))
+
+  (rule band
+    (-> (eq) $1)
+    (-> (band "&" eq) (bin "&" $1 $3)))
+
+  (rule eq
+    (-> (rel) $1)
+    (-> (eq "==" rel) (bin "==" $1 $3))
+    (-> (eq "!=" rel) (bin "!=" $1 $3)))
+
+  (rule rel
+    (-> (spaceship) $1)
+    (-> (rel "<" spaceship) (bin "<" $1 $3))
+    (-> (rel ">" spaceship) (bin ">" $1 $3))
+    (-> (rel "<=" spaceship) (bin "<=" $1 $3))
+    (-> (rel ">=" spaceship) (bin ">=" $1 $3)))
+
+  (rule spaceship
+    (-> (shift) $1)
+    (-> (spaceship "<=>" shift) (bin "<=>" $1 $3)))
+
+  (rule shift
+    (-> (add) $1)
+    (-> (shift "<<" add) (bin "<<" $1 $3))
+    (-> (shift ">>" add) (bin ">>" $1 $3)))
+
+  (rule add
+    (-> (mul) $1)
+    (-> (add "+" mul) (bin "+" $1 $3))
+    (-> (add "-" mul) (bin "-" $1 $3)))
+
+  (rule mul
+    (-> (pm) $1)
+    (-> (mul "*" pm) (bin "*" $1 $3))
+    (-> (mul "/" pm) (bin "/" $1 $3))
+    (-> (mul "%" pm) (bin "%" $1 $3)))
+
+  ;; 成员指针运算：`a.*p`、`a->*p`
+  (rule pm
+    (-> (cast-expr) $1)
+    (-> (pm ".*" cast-expr) (bin ".*" $1 $3))
+    (-> (pm "->*" cast-expr) (bin "->*" $1 $3)))
+
+  ;; C 式转换。`(T)x` 与 `(e)` 撞车 —— 交给 GLR（见文件头第二段）。
+  (rule cast-expr
+    (-> (unary-expr) $1)
+    (-> ("(" type-id ")" cast-expr) (cast $2 $4)))
+
+  (rule unary-expr
+    (-> (postfix) $1)
+    (-> ("++" cast-expr) (pre "++" $2))
+    (-> ("--" cast-expr) (pre "--" $2))
+    (-> ("*" cast-expr) (deref $2))
+    (-> ("&" cast-expr) (addrof $2))
+    (-> ("+" cast-expr) (un "+" $2))
+    (-> ("-" cast-expr) (un "-" $2))
+    (-> ("!" cast-expr) (un "!" $2))
+    (-> ("~" cast-expr) (un "~" $2))
+    (-> ("sizeof" unary-expr) (sizeof $2))
+    (-> ("sizeof" "(" type-id ")") (sizeof $3))
+    (-> ("sizeof" "..." "(" ID ")") (sizeof-pack $4))
+    (-> ("alignof" "(" type-id ")") (alignof $3))
+    (-> ("noexcept" "(" expr ")") (noexcept $3))
+    (-> ("co_await" cast-expr) (co-await $2))
+    (-> (new-expr) $1)
+    (-> (delete-expr) $1))
+
+  (rule new-expr
+    (-> ("new" new-type) (new $2))
+    (-> ("new" new-type "(" args ")") (new $2 (args $*4)))
+    (-> ("new" new-type braced) (new $2 $3))
+    (-> ("new" "(" args ")" new-type) (new (place $*3) $5))
+    (-> ("new" "(" args ")" new-type "(" args ")") (new (place $*3) $5 (args $*7)))
+    (-> ("::" "new" new-type) (new $3)))
+
+  ;; `new` 后面的类型不许带括号声明符（`new (T)` 会与放置形式撞车），所以单开一格
+  (rule new-type
+    (-> (specs) (type (specs $*1)))
+    (-> (specs new-decl) (type (specs $*1) $2)))
+
+  (rule new-decl
+    (-> (ptr-op) (ptr $1))
+    (-> (ptr-op new-decl) (ptr $1 $2))
+    (-> ("[" expr "]") (array $2))
+    (-> (new-decl "[" expr "]") (array $1 $3))
+    (-> (new-decl "[" "]") (array $1)))
+
+  (rule delete-expr
+    (-> ("delete" cast-expr) (delete $2))
+    (-> ("delete" "[" "]" cast-expr) (delete-array $4))
+    (-> ("::" "delete" cast-expr) (delete $3)))
+
+  (rule postfix
+    (-> (primary) $1)
+    (-> (postfix "[" expr "]") (index $1 $3))
+    (-> (postfix "[" braced "]") (index $1 $3))
+    (-> (postfix "(" args ")") (call $1 (args $*3)))
+    (-> (postfix "." name-part) (dot $1 $3))
+    (-> (postfix "." "template" name-part) (dot $1 $4))
+    (-> (postfix "->" name-part) (arrow $1 $3))
+    (-> (postfix "->" "template" name-part) (arrow $1 $4))
+    (-> (postfix "++") (post "++" $1))
+    (-> (postfix "--") (post "--" $1))
+    ;; 函数式转换与具名转换
+    (-> (builtin "(" args ")") (conv $1 (args $*3)))
+    (-> (named-cast "<" type-id ">" "(" expr ")") (named-cast $1 $3 $6))
+    (-> ("typeid" "(" expr ")") (typeid $3))
+    (-> ("typeid" "(" type-id ")") (typeid $3))
+    ;; 用户定义字面量与生串拼接由 `strings` 收
+    (-> (postfix braced) (brace-init $1 $2)))
+
+  (rule named-cast
+    (-> ("static_cast") $1) (-> ("dynamic_cast") $1)
+    (-> ("const_cast") $1) (-> ("reinterpret_cast") $1))
+
+  (rule primary
+    (-> (INT) (num $1))
+    (-> (FLOAT) (num $1))
+    (-> (CHAR) (ch $1))
+    (-> (strings) (str $*1))
+    (-> ("true") (true))
+    (-> ("false") (false))
+    (-> ("nullptr") (nullptr))
+    (-> ("this") (this))
+    (-> (qname) $1)
+    (-> ("(" expr ")") (paren $2))
+    (-> (lambda) $1)
+    (-> (requires-clause) $1)
+    ;; 折叠表达式（C++17）：`(... + args)` / `(args + ...)`
+    (-> ("(" "..." fold-op cast-expr ")") (fold-left $3 $4))
+    (-> ("(" cast-expr fold-op "..." ")") (fold-right $2 $3)))
+
+  (rule fold-op
+    (-> ("+") $1) (-> ("-") $1) (-> ("*") $1) (-> ("/") $1) (-> ("%") $1)
+    (-> ("&&") $1) (-> ("||") $1) (-> ("&") $1) (-> ("|") $1) (-> ("^") $1)
+    (-> (",") $1) (-> ("==") $1) (-> ("!=") $1) (-> ("<") $1) (-> (">") $1))
+
+  ;; lambda：`[&](int x) -> int { … }`、`[=, this]`、`[]<class T>(T t){}`
+  (rule lambda
+    (-> ("[" captures "]" lam-tail "{" stmts "}") (lambda (captures $*2) $*4 (body $*6))))
+
+  (rule lam-tail
+    (-> () ())
+    (-> (lam-tail lam-part) ($*1 $2)))
+
+  (rule lam-part
+    (-> ("(" params ")") (params $*2))
+    (-> ("<" tparams ">") (tparams $*2))
+    (-> (cv) $1)
+    (-> ("mutable") $1)
+    (-> ("constexpr") $1)
+    (-> ("noexcept") (noexcept))
+    (-> ("noexcept" "(" expr ")") (noexcept $3))
+    (-> ("->" type-id) (ret $2))
+    (-> (attr-spec) $1)
+    (-> (requires-clause) $1))
+
+  (rule captures
+    (-> () ())
+    (-> (capture-list) ($*1)))
+
+  (rule capture-list
+    (-> (capture) ($1))
+    (-> (capture-list "," capture) ($*1 $3)))
+
+  (rule capture
+    (-> ("=") (by-value-all))
+    (-> ("&") (by-ref-all))
+    (-> (ID) (c $1))
+    (-> ("&" ID) (c-ref $2))
+    (-> ("this") (c-this))
+    (-> ("*" "this") (c-star-this))
+    (-> (ID "=" initializer) (c-init $1 $3))
+    (-> ("&" ID "=" initializer) (c-ref-init $2 $4))
+    (-> ("..." ID) (c-pack $2))
+    (-> (ID "...") (c-pack $1)))
+
+  ;; 相邻串拼接（`"a" "b"`）与生串
+  (rule strings
+    (-> (STRING) ($1))
+    (-> (strings STRING) ($*1 $2))))

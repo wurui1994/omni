@@ -1,0 +1,30 @@
+// 上游那个排版毛病的**回归夹具**：一条规则的头黏在了前一条规则的分支表后面。
+//
+//   /Users/wurui/Documents/Lang/reference/cpp-grammars/c++17.ebnf:555
+//   /Users/wurui/Documents/Lang/reference/cpp-grammars/c++20.ebnf:615
+//
+// 都长这样（下面第 12 行照抄那个形状）：
+//
+//   selection-statement ::= …
+//     | "switch" "(" condition ")" statement
+//     | init-statement ::=              <-- 这一行既是分支表的一支、又是下一条规则的头
+//       expression-statement
+//
+// 口径：那个 `|` 谁也不属于。前一条规则的正文在它**之前**结束，`init-statement` 是新规则。
+// 不认这一种的话 c++17 / c++20 两份直接转不动 —— 量过。
+
+selection ::= "if" "(" cond ")" stmt
+  | "switch" "(" cond ")" stmt
+  | init-stmt ::=
+    expr-stmt
+  | simple-decl
+
+cond ::= expr
+
+stmt ::= expr-stmt
+
+expr-stmt ::= expr ";"
+
+simple-decl ::= "let" name ";"
+
+expr ::= name

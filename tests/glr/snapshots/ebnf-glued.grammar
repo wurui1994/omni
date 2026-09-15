@@ -1,0 +1,24 @@
+exit=0
+;; 由 ebnf/glued.ebnf 自动转成 —— 别手改这一份，改上游那个 .ebnf。
+;;
+;; `?` `*` `+` 与分组在转换期展开成了辅助规则（`-opt` / `-star` / `-plus` / `g…`）。
+;; 没有 `(lex …)`：一份 .ebnf 不带词法实现，所以这份语法能建表、不能直接吃源文本。
+(grammar glued
+  (tokens name)
+  (start selection)
+  (rule selection
+    (-> ("if" "(" cond ")" stmt) (selection $1 $2 $3 $4 $5))
+    (-> ("switch" "(" cond ")" stmt) (selection $1 $2 $3 $4 $5)))
+  (rule init-stmt
+    (-> (expr-stmt) (init-stmt $1))
+    (-> (simple-decl) (init-stmt $1)))
+  (rule cond
+    (-> (expr) (cond $1)))
+  (rule stmt
+    (-> (expr-stmt) (stmt $1)))
+  (rule expr-stmt
+    (-> (expr ";") (expr-stmt $1 $2)))
+  (rule simple-decl
+    (-> ("let" name ";") (simple-decl $1 $2 $3)))
+  (rule expr
+    (-> (name) (expr $1))))

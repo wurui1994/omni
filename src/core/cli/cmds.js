@@ -280,6 +280,12 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
            * 那份文本**印出来 —— 语法哪里读歪了，看这一份比看表快。 */
           brief: '把 bison/yacc 的 .y 转成 .grammar 印出来', flags: [],
         },
+        {
+          name: 'ebnf', key: 'glr-ebnf', usage: 'FILE.ebnf',
+          /* 与上一条同一件事，换一种方言：W3C / bottlecaps 风的 EBNF（标准里那份语法
+           * 本身就是这个形状）。`table` / `parse` 也直接认 `.ebnf`。 */
+          brief: '把 W3C 风的 .ebnf 转成 .grammar 印出来', flags: [],
+        },
       ],
     },
     {

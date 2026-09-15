@@ -68,7 +68,7 @@ export const BUILTINS = [
     caps: ['c.toMir', 'c.sysInclude', 'c.usrLib', 'c.preprocess', 'c.toMirNative', 'c.declsOf'],
   },
   {
-    name: 'grammar', mod: './grammar.js', reg: 'registerGrammarLang', caps: ['glr.table', 'glr.run', 'glr.y'],
+    name: 'grammar', mod: './grammar.js', reg: 'registerGrammarLang', caps: ['glr.table', 'glr.run', 'glr.y', 'glr.ebnf'],
   },
   {
     name: 'js',

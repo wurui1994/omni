@@ -22,6 +22,7 @@ import { readSexpr } from '../sexpr/read.js';
 import { Diagnostics, SourceFile } from '../source/diag.js';
 import { readGrammar } from './grammar.js';
 import { isYaccPath, yaccToGrammarText } from './yacc.js';
+import { isEbnfPath, ebnfToGrammarText } from './ebnf.js';
 import { buildTable, tableText, tableFromText, TABLE_FORMAT } from './table.js';
 
 /**
@@ -58,19 +59,25 @@ export function loadGrammarTable(path) {
 }
 
 /**
- * 一条路径 -> `(grammar …)` 的**文本**。`.y` 走转换器，别的照原样读。
+ * 一条路径 -> `(grammar …)` 的**文本**。`.y` 与 `.ebnf` 走各自的转换器，别的照原样读。
  *
- * 单独摆出来是给 `omni glr y` 用的：那条命令印的就是这段文本，于是「印出来的」与
- * 「建表用的」是同一份代码，不是同一份约定。
+ * 单独摆出来是给 `omni glr y` / `omni glr ebnf` 用的：那两条命令印的就是这段文本，
+ * 于是「印出来的」与「建表用的」是同一份代码，不是同一份约定。
  */
 export function grammarTextOf(path, diags) {
   const raw = readText(path);
-  if (!isYaccPath(path)) return raw;
-  const text = yaccToGrammarText(new SourceFile(path, raw), diags);
-  return text === null ? '' : text;
+  if (isYaccPath(path)) {
+    const text = yaccToGrammarText(new SourceFile(path, raw), diags);
+    return text === null ? '' : text;
+  }
+  if (isEbnfPath(path)) {
+    const text = ebnfToGrammarText(new SourceFile(path, raw), diags);
+    return text === null ? '' : text;
+  }
+  return raw;
 }
 
 /** 转出来的那份文本报错时印什么路径 —— 别让 caret 指着 `.y` 的行号却是转换后的正文。 */
 function sourceLabel(path) {
-  return isYaccPath(path) ? `${path} (转成 .grammar 之后)` : path;
+  return isYaccPath(path) || isEbnfPath(path) ? `${path} (转成 .grammar 之后)` : path;
 }

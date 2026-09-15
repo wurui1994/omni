@@ -84,12 +84,15 @@ export function glrRunText(path, srcs, countOnly, log) {
 }
 
 /**
- * `omni glr y <FILE.y>`：把 bison/yacc 的 `.y` 转成 `(grammar …)` 印出来。
+ * `omni glr y <FILE.y>` 与 `omni glr ebnf <FILE.ebnf>`：把外面那份语法转成
+ * `(grammar …)` 印出来。
  *
  * 这条命令印的与建表读的是**同一段文本**（都从 `grammarTextOf` 来），所以它不是一个
  * 「另写一份的调试打印」：转换器错了，这条命令的输出与那份表会一起变，快照当场变红。
+ *
+ * 两个入口共用这一个函数 —— 按扩展名分派那一格在 `grammarTextOf` 里，只有一处说法。
  */
-export function glrYaccText(path) {
+export function glrImportText(path) {
   if (!exists(path)) throw new OmniError(`no such file: ${path}`);
   const diags = new Diagnostics();
   const text = grammarTextOf(path, diags);
@@ -101,5 +104,6 @@ export function glrYaccText(path) {
 export function registerGrammarLang(api) {
   api.registerCap('glr.table', (path, brief) => glrTableText(path, brief, api.log));
   api.registerCap('glr.run', (path, srcs, countOnly) => glrRunText(path, srcs, countOnly, api.log));
-  api.registerCap('glr.y', (path) => glrYaccText(path));
+  api.registerCap('glr.y', (path) => glrImportText(path));
+  api.registerCap('glr.ebnf', (path) => glrImportText(path));
 }

@@ -1,0 +1,7 @@
+{
+  "grammar": "cpp.grammar",
+  "doc": "语料 = asymptote 那棵树里的 .cc（523 份 —— 真实的 C++，模板、运算符重载、异常、lambda 都用到了；这棵树本来就是这仓库里 asy 那几把尺子的语料，路径口径与它们一致）。树不在就跳过。语法照 cpp-grammars/c++20.ebnf（标准里那份语法的机读版）写。**不做预处理** —— `#…` 当指令收，宏展开出来的声明收不住，理由写在 cpp.grammar 的文件头。",
+  "corpus": [
+    { "tree": "asymptote", "env": "ASY_SRC", "ext": ".cc" }
+  ]
+}

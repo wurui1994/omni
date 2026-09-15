@@ -17,6 +17,9 @@
 //   6. **别人写好的 .y 直接收**：bison/yacc 的 `.y`（含我们早期那份把词法也写在里头的混合
 //      方言）转成同一份 `(grammar …)` 文本再往下走。判据见第 5 节 —— 转出来的文本进快照，
 //      表走同一格缓存，有词法段的当场跑 `.cases`，折不动的模式必须当场报错。
+//   7. **标准里那份 EBNF 直接收**：`.ebnf`（W3C / bottlecaps 风）走与第 6 条一样的路。
+//      多测一件事：`?` `*` `+` 与分组在**转换期**展开成辅助规则，同形状只出一份。
+//      这一支没有词法段，所以判据的第三条反过来 —— 它必须拒绝直接吃源文本。
 //
 // 每条都走 CLI（`omni glr-table` / `omni glr`），不是直接调库函数：这样同一条命令
 // 自举链里能让原生编译器再跑一遍，封闭 ABI 违规才有地方被抓住。
@@ -400,6 +403,63 @@ if (!filters.length || filters.some((x) => 'indent'.includes(x))) {
       ok(`indent/${name} [== snapshots/indent-${name}.tree]`);
     }
   }
+}
+
+// ------------------------------------------------- 7. `.ebnf`（W3C 风）转进来
+//
+// 与第 5 节是同一件事的另一半，判据也照抄：`.y` 那一支是"别人的**实现**"（bison 那一批），
+// `.ebnf` 这一支是"别人的**标准文本**" —— C++11/14/17/20/23、C99/11/17/23 的语法附录本身
+// 就是 EBNF。手抄一遍就是抄一遍的错（手写那份 C++ 语法 351 份只过 16，量过）。
+//
+// 三条判据与 `.y` 一一对应：
+//   a. **转出来的文本对上快照**。这一节盯的是展开那一步：`?` `*` `+` 与分组折成辅助规则，
+//      同形状只出一份（不然 c++23 那份 304 处 `?` 会生出 304 条一样的规则）。
+//   b. **表建得出来，第二遍命中缓存** —— 缓存键是转出来的文本，与 `.grammar` 同一格。
+//   c. **一份 .ebnf 不带词法实现**，所以它必须拒绝直接吃源文本，且说清理由。
+//      这不是缺陷：EBNF 答"什么串合法"，不答"字符怎么切成记号"。
+//
+// bad.ebnf 那一份是折不动的（正则字符类），与 ybad.y 同一个位置：当场报错，指到那个字符。
+
+const E_DIR = join(here, 'ebnf');
+const eFiles = readdirSync(E_DIR).filter((f) => f.endsWith('.ebnf')).sort()
+  .filter((f) => !filters.length || filters.some((x) => f.includes(x)));
+
+for (const file of eFiles) {
+  const name = basename(file, '.ebnf');
+  const epath = join(E_DIR, file);
+  const unpath = (s) => s.split(epath).join(`ebnf/${file}`);
+
+  // ---- a) 转出来的文本（或那句诊断）
+  const cv = run(['glr', 'ebnf', epath]);
+  const body = `exit=${cv.code}\n${unpath(cv.code === 0 ? cv.out : cv.err)}`;
+  const snap = join(here, 'snapshots', `ebnf-${name}.grammar`);
+  const want = read(snap);
+  if (update || want === null) {
+    writeFileSync(snap, body);
+    ok(`ebnf/${name} [snapshot ${want === null ? 'created' : 'updated'}] ${body.split('\n').length - 1} lines`);
+  } else if (body !== want) {
+    no(`ebnf/${name}`, `    转出来的语法变了；确实是有意改的话用 UPDATE=1 重写\n${firstDiff(want, body)}`);
+  } else {
+    ok(`ebnf/${name} [== snapshots/ebnf-${name}.grammar]`);
+  }
+  if (cv.code !== 0) continue;   // bad.ebnf 到这儿就完了
+
+  // ---- b) 表建得出来，第二遍走缓存且逐字节相同
+  const a = runRaw(['glr', 'table', epath, '--brief', '--verbose']);
+  const b = runRaw(['glr', 'table', epath, '--brief', '--verbose']);
+  const states = /(\d+) states/.exec(a.err);
+  if (a.code !== 0 || b.code !== 0) no(`ebnf-table/${name}`, `    glr table exit=${a.code}/${b.code}\n${a.err}${b.err}`);
+  else if (!b.err.includes('cache hit')) no(`ebnf-table/${name}`, `    第二遍没有命中缓存 —— .ebnf 那条路没有用上同一格缓存\n${b.err}`);
+  else if (a.out !== b.out) no(`ebnf-table/${name}`, `    缓存读回来的表与构出来的不同\n${firstDiff(a.out, b.out)}`);
+  else ok(`ebnf-table/${name} [${states === null ? '?' : states[1]} states，缓存命中且逐字节相同]`);
+
+  // ---- c) 没有词法段：必须拒绝源文本，且说清理由
+  const one = join(dir, `${name}.ebnf.in`);
+  writeFileSync(one, '\n');
+  const r = run(['glr', epath, one]);
+  if (r.code === 0) no(`ebnf-lex/${name}`, '    一份 .ebnf 没有词法段，却把源文本吃下去了');
+  else if (!r.err.includes('has no (lex ...) form')) no(`ebnf-lex/${name}`, `    拒得对，但理由不对\n      got: ${r.err.trim()}`);
+  else ok(`ebnf-lex/${name} [没有词法段，说清了]`);
 }
 
 const rep = cache.report();
