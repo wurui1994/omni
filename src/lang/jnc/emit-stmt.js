@@ -160,16 +160,27 @@ export function emitStmt(n, ctx) {
     const nth = ctx.tmp('');
     const sv = `$sv${nth}`;
     const sk = `$sk${nth}`;
+    const n0 = ctx.acctSeen?.() ?? 0;
     const plan = ctx.switchPlan?.(n, ctx.ind + 6);
-    if (plan === null || plan === undefined) { ctx.acct('switch 的分组还拼不出来'); return null; }
+    if (plan === null || plan === undefined) {
+      /* **账不许转手**（ADR-0031 §8）：分组拼不出来多半是**里头**某一句拼不出来，那一句
+         已经记过账了 —— 再补一条"分组还拼不出来"就把真原因盖住了（量出来的：test79.jnc
+         的 `for` 报的是"三格还拼不出来"，真原因是体里那句格式化字面量印不出 ptr）。 */
+      if ((ctx.acctSeen?.() ?? 0) === n0) ctx.acct('switch 的分组还拼不出来');
+      return null;
+    }
     return switchLines({
       sv, sk, condText: c, cases: plan.cases, groups: plan.groups, def: plan.def, pad,
     });
   }
 
   if (h === 'for') {
+    const n0 = ctx.acctSeen?.() ?? 0;
     const plan = ctx.forPlan?.(n, ctx.ind);
-    if (plan === null || plan === undefined) { ctx.acct('for 的三格还拼不出来'); return null; }
+    if (plan === null || plan === undefined) {
+      if ((ctx.acctSeen?.() ?? 0) === n0) ctx.acct('for 的三格还拼不出来');
+      return null;
+    }
     return forLines({ ...plan, pad });
   }
 
