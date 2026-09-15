@@ -1,12 +1,16 @@
 // 指针换指针（第二百五十九刀）—— jancy 的 `Cast_DataPtr`：同一个地址、同一个范围，
-// 只换"往后按几个字节走一格"。方言那一格算子是 `(pcast p (ptr U))`（tests/sexpr/cases/43-pcast.sx）。
+// 只换"往后按几格走一格"。方言那一格算子是 `(pcast p (ptr U))`（tests/sexpr/cases/43-pcast.sx）。
 //
 // 真语料里这一句最常见的样子就是下面这个（`test/ioninja/common/crc16.jnc:46`、
 // `crc8.jnc`、`ip4Checksum.jnc`、`io_Ethernet.jnc` …662 份里量出来 71 处）：
 //
 //     uint8_t const* b = (uint8_t const*)p;
 //
-// 也就是"把这段内存当字节看"。协议解析那一族全靠它。
+// **这一格钉住的是"换眼镜"本身，不是"按字节看"**：这一层的窄整数（`uint8_t` …）在方言里
+// 各占**一格**（`(struct Hdr (m_a int) …)`），所以下面那一遍走的是"一格一格"，不是
+// "一字节一字节"。真正的字节视图要等方言的整数带上宽度（ADR-0031 §8.1 那一程）——
+// 在那之前，源码里写 `uint8_t*` 而**指望它按字节走**的那一族还不收（墙在
+// bad/ptr-void.jnc 那一族旁边：那是"没有元素类型"的另一半）。
 
 struct Hdr {
 	uint8_t m_a;
@@ -15,11 +19,11 @@ struct Hdr {
 	uint8_t m_d;
 }
 
-// 按字节把一段内存加起来（真语料里那几个校验和函数的骨架）。
+// 逐格把一段内存加起来（真语料里那几个校验和函数的骨架，只是这一层一格是一格整数）。
 //
 // 形参写的是 `Hdr const*` 而不是语料里那句 `void const*`：**`void*` 是另一族**（方言的
 // `(ptr T)` 里 T 还不收 void —— 那要一格"没有元素类型的字节指针"），墙在 bad/ptr-void.jnc。
-int sumBytes(Hdr const* p, size_t n) {
+int sumCells(Hdr const* p, size_t n) {
 	uint8_t const* b = (uint8_t const*)p;
 	int s = 0;
 	for (size_t i = 0; i < n; i++)
@@ -35,8 +39,8 @@ int main() {
 	h.m_c = 3;
 	h.m_d = 4;
 
-	// 结构体指针 -> void* -> uint8_t*：三步都只换眼镜，地址一个字不动
-	printf("%d\n", sumBytes(h, 4));
+	// 结构体指针 -> uint8_t*：只换眼镜，地址一个字不动
+	printf("%d\n", sumCells(h, 4));
 
 	// 换过去再换回来，读到的还是同一格
 	uint8_t const* b = (uint8_t const*)h;
