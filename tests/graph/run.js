@@ -22,6 +22,8 @@ import { toSx } from '../../src/core/graph/graph.js';
 import { backends, gaps } from '../../src/core/graph/contract.js';
 import { chezToGraph } from '../../ext/chez/tograph.js';
 import { luaToGraph } from '../../ext/lua/tograph.js';
+import { goToGraph } from '../../ext/go/tograph.js';
+import { sbclToGraph } from '../../ext/sbcl/tograph.js';
 
 const HERE = new URL('.', import.meta.url).pathname;
 const ROOT = `${HERE}../../`;
@@ -32,6 +34,8 @@ const EXPECT = ['15', '120', '7', 'ok'];
 const CASES = [
   { name: 'chez', grammar: 'ext/chez/chez.grammar', file: 'ext/chez/examples/basics.ss', toGraph: chezToGraph },
   { name: 'lua', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/basics.lua', toGraph: luaToGraph },
+  { name: 'go', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/basics.go', toGraph: goToGraph },
+  { name: 'sbcl', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/basics.lisp', toGraph: sbclToGraph },
 ];
 
 const argv = process.argv.slice(2);

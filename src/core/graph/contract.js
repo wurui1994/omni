@@ -109,7 +109,7 @@ const jsName = (n) => `v_${String(n).replace(/[^A-Za-z0-9_]/g, (c) => `$${c.char
 
 function jsExpr(x) {
   if (x === null || x === undefined) return 'null';
-  if (Array.isArray(x)) return `(() => { ${x.map(jsStmt).join(' ')} })()`;
+  if (Array.isArray(x)) return `(() => { ${jsFnBody(x)} })()`;
   if (x.lit !== undefined) return JSON.stringify(x.lit);
   switch (x.op) {
     case 'const': return JSON.stringify(x.attrs.value ?? null);
@@ -138,7 +138,7 @@ function jsExpr(x) {
       const args = (Array.isArray(x.ins.args) ? x.ins.args : x.ins.args === undefined ? [] : [x.ins.args]);
       return `${jsExpr(x.ins.fn)}(${args.map(jsExpr).join(', ')})`;
     }
-    case 'region': return `(() => { ${asStmts(x.ins.body).map(jsStmt).join(' ')} })()`;
+    case 'region': return `(() => { ${jsFnBody(x.ins.body)} })()`;
     default: return `(() => { ${jsStmt(x)} })()`;
   }
 }
@@ -146,20 +146,22 @@ function jsExpr(x) {
 const asStmts = (b) => (b === undefined || b === null ? [] : Array.isArray(b) ? b : [b]);
 
 /**
- * 函数体：**最后一格如果是 `expr` 那一类，它就是返回值**（`sort` 那一栏说的，不是猜的）。
+ * 函数体 / 一格 IIFE 的体：**最后一格如果有值出端口，它就是返回值**。
  *
- * 这一条是"语言 × 后端"那张矩阵抓出来的第一个真差别：Scheme 的函数体没有 `return`
- * （最后一格表达式就是值），Lua 的有 `ret`。`interp` 那边天然对（它一路交回最后一格值），
- * js 后端不看 `sort` 的话就全成了 undefined —— 一门语言过、另一门不过。
- * 判据是矩阵，修法是**读声明**。
+ * 判据是 `out-ports` 那一栏 —— 不是 sort，也不是猜。这一条被"语言 × 后端"那张矩阵
+ * 连着抓出来两次，两次都是同一个毛病（拿 sort 当"是不是值"的判据）：
+ *   1. Scheme 的函数体没有 `return`（最后一格表达式就是值），Lua 的有 `ret`；
+ *   2. CL 的 `(let (…) … acc)` 最后一格是 `region` —— 它 sort 是 stat，**但有值出端口**。
+ * 改成读 out-ports，两门语言一起对。这就是"后端只回答问题、答案从声明来"的样子。
  */
 function jsFnBody(body) {
   const list = asStmts(body);
   if (list.length === 0) return 'return null;';
   const head = list.slice(0, -1).map(jsStmt);
   const last = list[list.length - 1];
-  const sort = last !== null && last !== undefined && last.op !== undefined ? declOf(last.op).sort : null;
-  head.push(sort === 'expr' ? `return ${jsExpr(last)};` : `${jsStmt(last)} return null;`);
+  const hasValue = last !== null && last !== undefined
+    && (last.lit !== undefined || (last.op !== undefined && declOf(last.op).outs.length > 0));
+  head.push(hasValue ? `return ${jsExpr(last)};` : `${jsStmt(last)} return null;`);
   return head.join(' ');
 }
 
