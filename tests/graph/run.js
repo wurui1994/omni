@@ -24,6 +24,8 @@ import { chezToGraph } from '../../ext/chez/tograph.js';
 import { luaToGraph } from '../../ext/lua/tograph.js';
 import { goToGraph } from '../../ext/go/tograph.js';
 import { sbclToGraph } from '../../ext/sbcl/tograph.js';
+import { vlangToGraph } from '../../ext/vlang/tograph.js';
+import { awkToGraph } from '../../ext/awk/tograph.js';
 
 const HERE = new URL('.', import.meta.url).pathname;
 const ROOT = `${HERE}../../`;
@@ -36,6 +38,8 @@ const CASES = [
   { name: 'lua', grammar: 'ext/lua/lua.grammar', file: 'ext/lua/examples/basics.lua', toGraph: luaToGraph },
   { name: 'go', grammar: 'ext/go/go.grammar', file: 'ext/go/examples/basics.go', toGraph: goToGraph },
   { name: 'sbcl', grammar: 'ext/sbcl/sbcl.grammar', file: 'ext/sbcl/examples/basics.lisp', toGraph: sbclToGraph },
+  { name: 'vlang', grammar: 'ext/vlang/vlang.grammar', file: 'ext/vlang/examples/basics.v', toGraph: vlangToGraph },
+  { name: 'awk', grammar: 'ext/awk/awk.grammar', file: 'ext/awk/examples/basics.awk', toGraph: awkToGraph },
 ];
 
 const argv = process.argv.slice(2);

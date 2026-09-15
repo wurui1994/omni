@@ -1,0 +1,155 @@
+// ext/awk/tograph.js —— **awk 的树 -> 节点图**（第六个前端，形状差得最远的一门）
+//
+// 这一份要处理一件前五门都没有的事：**awk 没有声明**。`acc = 0` 既是赋值也是"第一次
+// 出现"，而且函数里除了形参没有局部量（`ext/awk/SPEC.md` §四第 1 条：region 那一栏
+// 可以是空的）。图上 `set` 要求名字已经绑过 —— 所以映射得**自己把名字先绑出来**：
+// 扫一遍这一段里被赋值的名字，在它所在的 region 顶上补一串 `bind`。
+//
+// 这不是给 awk 开特例，是"**一门语言的形状与节点清单的差**由它自己的映射补上"——
+// 与 go 补一格 `call main`、lua 把 `for` 拆成 region+loop+set 同一条道理。
+//
+// 这一批**不接 record-loop**（隐式主循环）：`ext/awk/SPEC.md` §3.2 已经把它定成
+// "只有 awk 一家的节点，放在 ext/awk 底下"，而它要的输入源与字段视图都还没有。
+// 所以这一份只收 `BEGIN { … }` 与 `function`；别的 pattern-action 当场报，不猜。
+
+import { node, lit, program } from '../../src/core/graph/graph.js';
+
+const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
+const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
+const kids = (x) => (isList(x) ? x.items.slice(1) : []);
+const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
+
+const OPS = new Map([
+  ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%'],
+  ['<', '<'], ['>', '>'], ['<=', '<='], ['>=', '>='], ['==', '='], ['!=', '!='],
+]);
+
+const many = (xs) => xs.map(toNode).flat();
+const nameOf = (x) => (tag(x) === 'name' ? leaf(kids(x)[0]) : leaf(x));
+
+/** 扫一段树里所有"被赋值的名字" —— 那就是这一段要补的 `bind`（awk 没有声明）。 */
+function assignedNames(x, out = new Set()) {
+  if (!isList(x)) return out;
+  if (tag(x) === 'assign' || tag(x) === 'postinc' || tag(x) === 'preinc'
+    || tag(x) === 'postdec' || tag(x) === 'predec') {
+    const t = kids(x).find((y) => tag(y) === 'name');
+    if (t !== undefined) out.add(nameOf(t));
+  }
+  for (const k of kids(x)) assignedNames(k, out);
+  return out;
+}
+
+/** 一段体（函数体 / BEGIN 块）：先补 bind，再放语句。 */
+function bodyOf(blk, params = []) {
+  const stmts = blk === undefined ? [] : many(kids(blk));
+  const names = [...assignedNames(blk)].filter((n) => n !== null && !params.includes(n));
+  return [...names.map((n) => node('bind', { init: lit(null) }, { name: n })), ...stmts];
+}
+
+function toNode(x) {
+  switch (tag(x)) {
+    case 'num': return node('const', {}, { value: Number(leaf(kids(x)[0])) });
+    case 'str': return node('const', {}, { value: leaf(kids(x)[0]) });
+    case 'name': return node('ref', {}, { name: leaf(kids(x)[0]) });
+    case 'paren': return toNode(kids(x)[0]);
+    case 'expr': return toNode(kids(x)[0]);
+    case 'block': return node('region', { body: many(kids(x)) });
+
+    case 'bin': {
+      const [op, a, b] = kids(x);
+      if (leaf(op) === '&&') return node('branch', { cond: toNode(a), then: toNode(b), else: lit(false) });
+      if (leaf(op) === '||') return node('branch', { cond: toNode(a), then: lit(true), else: toNode(b) });
+      const o = OPS.get(leaf(op));
+      if (o === undefined) throw new Error(`awk->graph: 这个算子还没接：${leaf(op)}`);
+      return node('binop', { a: toNode(a), b: toNode(b) }, { op: o });
+    }
+    case 'cat': return node('prim', { args: many(kids(x)) }, { name: 'concat' });
+    case 'un': {
+      const [op, a] = kids(x);
+      return node('unop', { a: toNode(a) }, { op: leaf(op) === '!' ? 'not' : leaf(op) });
+    }
+    case 'assign': {
+      const [op, target, value] = kids(x);
+      const name = nameOf(target);
+      if (leaf(op) === '=') return node('set', { value: toNode(value) }, { name });
+      // `+=` 一族：`a op= b` 就是 `a = a op b`（**不给它开节点** —— 一格附属都不用）
+      const o = OPS.get(String(leaf(op)).slice(0, -1));
+      if (o === undefined) throw new Error(`awk->graph: 这个复合赋值还没接：${leaf(op)}`);
+      return node('set', {
+        value: node('binop', { a: node('ref', {}, { name }), b: toNode(value) }, { op: o }),
+      }, { name });
+    }
+    case 'postinc': case 'preinc': case 'postdec': case 'predec': {
+      const name = nameOf(kids(x)[0]);
+      const op = tag(x).endsWith('inc') ? '+' : '-';
+      return node('set', {
+        value: node('binop', { a: node('ref', {}, { name }), b: lit(1) }, { op }),
+      }, { name });
+    }
+    case 'for': {
+      // `for (init; cond; post) stmt` —— 与 lua / go / freebasic 同一个形状
+      const [init, cond, post, ...rest] = kids(x);
+      const body = rest.length === 0 ? [] : many(rest);
+      const loop = node('loop', {
+        cond: cond === undefined ? lit(true) : toNode(cond),
+        body: [...body, ...(post === undefined ? [] : many([post]))],
+      });
+      return init === undefined ? loop : node('region', { body: [...many([init]), loop] });
+    }
+    case 'while': {
+      const [cond, ...rest] = kids(x);
+      return node('loop', { cond: toNode(cond), body: many(rest) });
+    }
+    case 'if': {
+      const [cond, then, els] = kids(x);
+      // `else` 那一格是个包装（`(else …)`）—— 与 go / V 那两门同一处坑
+      const e = els === undefined ? undefined : (tag(els) === 'else' ? kids(els)[0] : els);
+      return node('branch', {
+        cond: toNode(cond),
+        then: toNode(then),
+        ...(e === undefined ? {} : { else: toNode(e) }),
+      });
+    }
+    case 'return': {
+      const vals = kids(x);
+      return node('ret', vals.length === 0 ? {} : { value: toNode(vals[0]) });
+    }
+    case 'print': return node('prim', { args: many(kids(x)) }, { name: 'print' });
+    case 'call': {
+      const fn = leaf(kids(x)[0]);
+      const args = kids(x).find((y) => tag(y) === 'args');
+      const argNodes = args === undefined ? [] : many(kids(args));
+      return node('call', { fn: node('ref', {}, { name: fn }), args: argNodes });
+    }
+    case 'fn': {
+      const name = leaf(kids(x)[0]);
+      const ps = kids(x).find((y) => tag(y) === 'params');
+      const params = ps === undefined ? [] : kids(ps).map((p) => leaf(p));
+      const blk = kids(x).find((y) => tag(y) === 'block');
+      return node('bind', {
+        init: node('func', { body: bodyOf(blk, params) }, { params, name }),
+      }, { name });
+    }
+    case 'rule': {
+      const pat = kids(x)[0];
+      const blk = kids(x).find((y) => tag(y) === 'block');
+      if (tag(pat) === 'begin') return node('region', { body: bodyOf(blk) });
+      throw new Error('awk->graph: 这一批只接 BEGIN —— 别的 pattern-action 要 record-loop'
+        + '（ext/awk/SPEC.md §3.2：那是只有 awk 一家的节点，还没做）');
+    }
+    default:
+      throw new Error(`awk->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
+  }
+}
+
+/** 一棵 awk 的 GLR 树（`(program 项…)`）-> 一张图。 */
+export function awkToGraph(tree) {
+  if (tag(tree) !== 'program') throw new Error('awk->graph: 这不是 (program …)');
+  return program(kids(tree).map(toNode).flat());
+}
+
+// ---- 这一批明说的不足（不猜）----------------------------------------------------
+//   1. 不接 record-loop / field-view（`$0` / `$1`）—— 那两格是 awk 私有的节点。
+//   2. `strnum`（值同时是串与数）没接：它是挂在一条 value 边上的附属，
+//      与 sbcl 的 cast 同一个位置（`ext/awk/SPEC.md` §3.3 第 2 条）。
+//   3. 关联数组、getline、重定向、正则都不在这一批。
