@@ -41,6 +41,8 @@
 //   * 变参的 prim（CL 的 `(+ a b c)`）· 既装串又装数的那格量（awk 没有声明）。
 
 import { NODES } from './nodes.js';
+// 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
+import { PRIMS } from './prims.js';
 // 字符串常量要发成一段字节 —— 与 C / LLVM 两条腿共用同一份编码（宿主的 TextEncoder 不用）
 import { utf8Bytes } from '../host/utf8.js';
 // 判据那一侧：出来的文本交给**另一个前端**读、用 MIR 的解释器真跑
@@ -232,6 +234,20 @@ function emitOnce(graph, retOf, multiOf) {
     return at;
   }
 
+  /* ---------------------------------------------- 顶层的名字：wasm 的全局量 --------
+   * 顶层 `bind` 里**不是函数**的那些落成 `(global $g_x (mut i64) …)`，初值在 `$__entry`
+   * 里赋。**为什么不能当 `$__entry` 的局部量**：wasm 的局部量是函数级的，别的函数看不见 ——
+   * 而 Scheme 那份 index 例子正是"顶层 define 一格向量、函数体里读它"（`xs`）。
+   * 图上它与函数体里的 `bind` 是**同一格节点**；落法分两种只因为 wasm 的作用域分两层。
+   */
+  const globals = new Map();      // 名字 -> wasm 全局量名
+  const globalKinds = new Map();  // 名字 -> 'int' | 'str' | 'mix'
+  for (const it of items) {
+    if (it !== null && it !== undefined && it.op === 'bind' && it.ins?.init?.op !== 'func') {
+      globals.set(it.attrs.name, wname(`g_${it.attrs.name}`));
+    }
+  }
+
   /**
    * 这一格值装的是**数**还是**串**（图那一层没有类型，所以只能静态追这几格）。
    * 追不到的一律按 `int` —— 而"串流到追不着的地方"这件事在各个消费点上报缺口
@@ -246,7 +262,10 @@ function emitOnce(graph, retOf, multiOf) {
     if (x.lit !== undefined) return typeof x.lit === 'string' ? 'str' : 'int';
     switch (x.op) {
       case 'const': return typeof x.attrs.value === 'string' ? 'str' : 'int';
-      case 'ref': return sc.kindOf(x.attrs.name);
+      case 'ref': {
+        const nm = x.attrs.name;
+        return sc.lookup(nm) !== null ? sc.kindOf(nm) : (globalKinds.get(nm) ?? 'int');
+      }
       case 'region': return kindOf(x.ins.body, sc);
       case 'branch': {
         const a = kindOf(x.ins.then, sc); const b = kindOf(x.ins.else, sc);
@@ -319,6 +338,9 @@ function emitOnce(graph, retOf, multiOf) {
       case 'ref': {
         const id = sc.lookup(x.attrs.name);
         if (id === null) {
+          // 顶层绑的名字在 wasm 里是全局量（函数看得见的只有它）
+          const g = globals.get(x.attrs.name);
+          if (g !== undefined) return `(global.get ${g})`;
           if (fns.has(x.attrs.name)) throw new Gap('函数当值用（闭包）还没接');
           throw new Gap(`没绑过的名字：${x.attrs.name}`);
         }
@@ -347,7 +369,23 @@ function emitOnce(graph, retOf, multiOf) {
             throw new Gap(`一元的 ${name} 还没接`);
           }
           if (args.length !== 2) {
-            throw new Gap(`${name} 收到 ${args.length} 格实参 —— 这一批只接一元与二元`);
+            // **变参的折法归内建表**（`prims.js` 里 `+ - * /` 声明的是 `arity: -1`）：
+            // 那张表里 interp 用 `reduce` 左折，所以这儿也左折 —— `(+ a b c)` = `(a + b) + c`。
+            // 折法写在两处就是两套语义，所以判据取自同一张表，不由这条腿自己定。
+            const arity = PRIMS.get(name)?.arity;
+            if (arity !== -1) {
+              throw new Gap(`${name} 收到 ${args.length} 格实参 —— 内建表里它声明的是 ${arity} 格`);
+            }
+            if (args.length === 0) {
+              // 空的中性元也归那张表：`+` 是 0、`*` 是 1，`-` / `/` 空本身没有意义
+              if (name === '+') return '(i64.const 0)';
+              if (name === '*') return '(i64.const 1)';
+              throw new Gap(`一格实参都没有的 ${name} 没有意义`);
+            }
+            return args.slice(1).reduce(
+              (acc, y) => `(${op} ${acc} ${expr(y, sc, pre)})`,
+              expr(args[0], sc, pre),
+            );
           }
           return `(${op} ${expr(args[0], sc, pre)} ${expr(args[1], sc, pre)})`;
         }
@@ -542,14 +580,26 @@ function emitOnce(graph, retOf, multiOf) {
         if (x.ins.init?.op === 'func') throw new Gap('嵌套的函数（闭包）还没接');
         const k = kindOf(x.ins.init, sc);
         const v = expr(x.ins.init, sc, pre);
+        // 顶层的名字落全局量（别的函数要看得见它）；函数体里的还是局部量
+        const g = sc === entryScope ? globals.get(x.attrs.name) : undefined;
+        if (g !== undefined) {
+          globalKinds.set(x.attrs.name, k);
+          return [...pre, `(global.set ${g} ${v})`];
+        }
         const id = sc.declare(x.attrs.name, k);   // 先算右值再声明：`local x = x` 才对
         return [...pre, `(local.set ${id} ${v})`];
       }
       case 'set': {
         const id = sc.lookup(x.attrs.name);
-        if (id === null) throw new Gap(`赋值到没绑过的名字：${x.attrs.name}`);
+        const g = id === null ? globals.get(x.attrs.name) : undefined;
+        if (id === null && g === undefined) throw new Gap(`赋值到没绑过的名字：${x.attrs.name}`);
         const k = kindOf(x.ins.value, sc);
         const v = expr(x.ins.value, sc, pre);
+        if (g !== undefined) {
+          const had = globalKinds.get(x.attrs.name) ?? 'int';
+          if (had !== k) globalKinds.set(x.attrs.name, 'mix');
+          return [...pre, `(global.set ${g} ${v})`];
+        }
         sc.merge(x.attrs.name, k);
         return [...pre, `(local.set ${id} ${v})`];
       }
@@ -752,6 +802,7 @@ function emitOnce(graph, retOf, multiOf) {
       lines.push(`  (data (i32.const ${d.off}) ${d.bytes.join(' ')})`);
     }
   }
+  for (const g of globals.values()) lines.push(`  (global ${g} (mut i64) (i64.const 0))`);
   for (const f of mod.fns.values()) {
     const ps = f.params.map((p) => `(param ${wname(p)} i64)`).join(' ');
     const res = f.ret ? ' (result i64)' : '';
