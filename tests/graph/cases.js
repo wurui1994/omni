@@ -96,25 +96,43 @@ export const CASES = [
  * 每一条都要有理由说明"为什么不写成语言例子"，否则它该是一份 `examples/`。
  */
 const say = (s) => node('prim', { args: [lit(s)] }, { name: 'print' });
+const num = (n) => node('prim', { args: [lit(n)] }, { name: 'print' });
 export const HAND = [
   {
     // break **穿过一格 region**：途中那格 region 的出口（scope-exit）照跑。
     // 不写成语言例子的理由：go / V 的 defer 是函数作用域、nim 的是块作用域，
     // 而图上挂的是"最近的一格 region" —— 拿谁的语法当例子都会写歪一门的语义。
+    // 印的是**整数**而不是字符串：字符串在 wat 那条腿上还没有（宿主面只有 print_i64），
+    // 用整数这一格就能在四条腿上一起验 —— 判据能多一条腿就多一条。
     name: 'hand+break-exit',
-    expect: ['in', 'cleanup', 'out'],
+    expect: ['1', '2', '3'],
     graph: () => program([
       node('loop', {
         cond: lit(true),
         body: [node('region', {
           body: [
-            node('scope-exit', { action: [say('cleanup')] }),
-            say('in'),
-            node('loop-exit', {}, { kind: 'break' }),
+            node('scope-exit', { action: [num(2)] }),     // 出口动作
+            num(1),                                        // 体
+            node('loop-exit', {}, { kind: 'break' }),      // 早退穿过这格 region
           ],
         })],
       }),
-      say('out'),
+      num(3),
+    ]),
+  },
+  {
+    // **逆序**：后注册的先跑。同样只用整数，四条腿一起验。
+    name: 'hand+exit-order',
+    expect: ['3', '2', '1', '4'],
+    graph: () => program([
+      node('region', {
+        body: [
+          node('scope-exit', { action: [num(1)] }),
+          node('scope-exit', { action: [num(2)] }),
+          num(3),
+        ],
+      }),
+      num(4),
     ]),
   },
   {
@@ -143,7 +161,7 @@ export const HAND = [
     // continue **照跑步进**（`post` 端口那一条）。语言例子里 go 那份也压到了，
     // 这一条把它单独钉住：步进缀在体末尾的老写法在这儿是死循环。
     name: 'hand+continue-post',
-    expect: ['0', '2', 'done'],
+    expect: ['0', '2', '9'],
     graph: () => program([
       node('bind', { init: lit(0) }, { name: 'i' }),
       node('loop', {
@@ -154,7 +172,7 @@ export const HAND = [
         }), node('prim', { args: [node('ref', {}, { name: 'i' })] }, { name: 'print' })],
         post: [node('set', { value: bin('+', node('ref', {}, { name: 'i' }), lit(1)) }, { name: 'i' })],
       }),
-      say('done'),
+      num(9),                      // 整数而不是字符串 —— 好让 wat 那条腿也验得上
     ]),
   },
 ];

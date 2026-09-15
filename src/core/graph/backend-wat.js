@@ -16,6 +16,7 @@
 //   整数（i64）· 函数 + 调用 + return · if（语句位置与**值位置**都行）· while（含 post 步进）
 //   · 打印整数 · **记录与列表**（线性内存 + 一格 bump 分配器）· **多值**（同上）
 //   · **切片**（运行期大小的分配 + 一圈拷贝循环）· **break / continue**（block + loop 两格标签）
+//   · **出口动作**（`scope-exit`：一格注册标志 + 每条出口上贴动作）
 //
 // ## 布局（没有类型的那一层怎么排内存）
 //
@@ -33,7 +34,7 @@
 //   * 字符串 —— 宿主面只有 `print_i64` 这一族（打印字符串要先有 `print_str` 那格导入）。
 //   * **打印一格多值**（`print(f())` 那条 arity 契约）—— 要运行期长度 + 拼串。
 //     多值本身接住了（一块 N 格存储 + 地址），印成一行没接。
-//   * 闭包（`func` 当值用 / 嵌套 `func`）· 多值（`values` / `pick`）· `scope-exit`。
+//   * `conv` 的 `float`（这一批只有 i64）· 闭包（`func` 当值用 / 嵌套 `func`）。
 
 import { NODES } from './nodes.js';
 // 判据那一侧：出来的文本交给**另一个前端**读、用 MIR 的解释器真跑
@@ -53,7 +54,7 @@ const CAN = new Map([
   ['values', true], ['pick', true],
   ['conv', 'wasm 这一批只有 i64：`float` 那一格要 f64 与"两种数值类型"的算术'],
   ['slice', true],
-  ['scope-exit', 'wasm 没有 unwind：出口动作要先把 region 的出口显式化'],
+  ['scope-exit', true],
   ['loop-exit', true],
 ]);
 
@@ -144,8 +145,18 @@ function emitOnce(graph, retOf, multiOf) {
   const fns = topFuncs(items);
   let loopSeq = 0;
   let tmpSeq = 0;
-  /** 当前嵌在哪几格 loop 里（`break` / `continue` 各有一格 block 标签）。 */
+  /** 当前嵌在哪几格 loop 里（`break` / `continue` 各有一格 block 标签 + 进来时的 region 深度）。 */
   const loops = [];
+  /**
+   * 当前嵌在哪几格 region 里，每格装着它的**出口动作**。
+   * 一格出口动作 = `{ flag, act }`：`flag` 是一格 i64 局部量（注册那一刻置 1），
+   * `act` 是动作的语句。**为什么要 flag**：`scope-exit` 可能藏在 `if` 里，
+   * 没注册过就不许在出口跑 —— 静态地把动作贴到出口上会把这一条丢掉。
+   */
+  const regions = [];
+  /** 一格 region 的出口：**逆序**，每格看自己的 flag。 */
+  const runExits = (marks) => [...marks].reverse()
+    .map((m) => `(if (i64.ne (local.get ${m.flag}) (i64.const 0)) (then ${m.act}))`);
   let needMem = false;
   /**
    * **字段名 -> 槽位**（一张表管整个模块）。图这一层没有类型，`field-get` 只拿到名字，
@@ -404,7 +415,24 @@ function emitOnce(graph, retOf, multiOf) {
         const v = expr(x.ins.value, sc, pre);
         return [...pre, `(local.set ${id} ${v})`];
       }
-      case 'region': return stmts(x.ins.body, new Scope(f, sc), f);
+      case 'region': {
+        const marks = [];
+        regions.push(marks);
+        const body = stmts(x.ins.body, new Scope(f, sc), f);
+        regions.pop();
+        if (marks.length === 0) return body;
+        // 进 region 先把每格 flag 清零（wasm 的局部量初值是 0，但 region 可能跑第二遍）
+        return [...marks.map((m) => `(local.set ${m.flag} (i64.const 0))`), ...body, ...runExits(marks)];
+      }
+      // 出口动作：注册那一刻只置一格 flag；动作本身贴在**每一条出口**上
+      // （落到 region 末尾、`ret`、`break`/`continue` 穿出去 —— 三条都要跑）。
+      case 'scope-exit': {
+        if (regions.length === 0) throw new Gap('scope-exit 没有宿主 region');
+        const flag = tmp(sc);
+        const act = stmts(x.ins.action, new Scope(f, sc), f).join(' ');
+        regions[regions.length - 1].push({ flag, act });
+        return [`(local.set ${flag} (i64.const 1))`];
+      }
       case 'field-set': {
         needMem = true;
         const o = expr(x.ins.obj, sc, pre);
@@ -443,7 +471,7 @@ function emitOnce(graph, retOf, multiOf) {
         const lab = `$L${n}`;
         const brk = `$B${n}`;
         const cont = `$C${n}`;
-        loops.push({ brk, cont });
+        loops.push({ brk, cont, depth: regions.length });
         const inner = new Scope(f, sc);
         const body = stmts(x.ins.body, inner, f).join(' ');
         const post = stmts(x.ins.post, inner, f).join(' ');
@@ -458,14 +486,20 @@ function emitOnce(graph, retOf, multiOf) {
       case 'loop-exit': {
         if (loops.length === 0) throw new Gap('loop-exit 不在任何一格 loop 里');
         const top = loops[loops.length - 1];
-        return [`(br ${x.attrs.kind === 'continue' ? top.cont : top.brk})`];
+        // 穿出去的时候，**这格 loop 里面开的**那几格 region 的出口要跑（从里往外）
+        const unwind = regions.slice(top.depth).reverse().flatMap(runExits);
+        return [...unwind, `(br ${x.attrs.kind === 'continue' ? top.cont : top.brk})`];
       }
       case 'ret': {
-        if (x.ins.value === undefined) return ['(return)'];
+        if (x.ins.value === undefined) {
+          return [...[...regions].reverse().flatMap(runExits), '(return)'];
+        }
         if (x.ins.value?.op === 'values') f.multi = true;
         const v = expr(x.ins.value, sc, pre);
         f.ret = true;
-        return [...pre, `(return ${v})`];
+        // 早退也要经过途中每一格 region 的出口（从里往外）
+        const unwind = [...regions].reverse().flatMap(runExits);
+        return [...pre, ...unwind, `(return ${v})`];
       }
       case 'prim': {
         if (x.attrs.name !== 'print') {
@@ -517,6 +551,8 @@ function emitOnce(graph, retOf, multiOf) {
   // ---- 走一遍顶层：函数各成一格 wat func，别的语句进 `$__entry` --------------
   const entry = mod.fn('$__entry', []);
   const entryScope = new Scope(entry);
+  const entryMarks = [];
+  regions.push(entryMarks);          // 顶层那一段也是一格 region
   for (const it of items) {
     if (it?.op === 'bind' && it.ins?.init?.op === 'func') {
       const fnode = it.ins.init;
@@ -524,10 +560,25 @@ function emitOnce(graph, retOf, multiOf) {
       const f = mod.fn(fns.get(it.attrs.name), params);
       const sc = new Scope(f);
       params.forEach((p) => sc.names.set(p, wname(p)));
+      // **函数体本身就是一格 region**（与调度器那侧 `new Env(fn.env, { region: true })`
+      // 同一条）—— go / V / nim 的 defer 就挂在这一层上。
+      const marks = [];
+      regions.push(marks);
       f.body = fnBody(fnode.ins.body, sc, f);
+      regions.pop();
+      if (marks.length !== 0) {
+        f.body = [...marks.map((m) => `(local.set ${m.flag} (i64.const 0))`),
+          ...f.body, ...runExits(marks)];
+      }
       continue;
     }
     entry.body.push(...stmt(it, entryScope, entry));
+  }
+
+  regions.pop();
+  if (entryMarks.length !== 0) {
+    entry.body = [...entryMarks.map((m) => `(local.set ${m.flag} (i64.const 0))`),
+      ...entry.body, ...runExits(entryMarks)];
   }
 
   const lines = ['(module', '  (import "omni" "print_i64" (func $print (param i64)))'];
