@@ -165,6 +165,18 @@ export const setIndex = (obj, i, value) => {
 };
 
 /**
+ * 切片：**一段范围复制成一格新列表**。上界不含、下标 0 起（各语言的差别由映射摆平）。
+ * 两个后端共用（js 后端里那句 `__slice`）。
+ */
+export const sliceOf = (obj, from, to) => {
+  if (!Array.isArray(obj)) throw new Error('slice: 不是一格列表');
+  const a = from === undefined || from === null ? 0 : Number(from);
+  const b = to === undefined || to === null ? obj.length : Number(to);
+  if (a < 0 || b > obj.length || a > b) throw new Error(`slice: 范围越界 [${a}, ${b})`);
+  return obj.slice(a, b);
+};
+
+/**
  * **表示转换**（`conv` 那一格）。目标只有四种：整数 / 实数 / 串 / 真假 ——
  * 具体是 `float64` 还是 `f64` 是那门语言的写法，映射那一侧的名字表管，这儿不认。
  * 两个后端共用（js 后端里那句 `__conv`）。
@@ -283,6 +295,7 @@ function run(n, env, io) {
     case 'index-set': return setIndex(arg('obj'), arg('index'), arg('value'));
     // 表示转换：目标在附属 `to` 上。**四家的写法不同，落的是同一格**
     case 'conv': return convert(arg('value'), n.attrs.to, io);
+    case 'slice': return sliceOf(arg('obj'), arg('from'), arg('to'));
     case 'ret': throw new Return(arg('value') ?? null);
     case 'loop-exit': throw new LoopExit(n.attrs.kind ?? 'break');
     case 'call': {

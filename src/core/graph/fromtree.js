@@ -87,6 +87,11 @@ export const CONV_COMMON = new Map([
 /** 一门语言的转换表 = 公共表 + 它自己那几格（`convs({ f64: 'float', i64: 'int' })`）。 */
 export const convs = (delta = {}) => new Map([...CONV_COMMON, ...Object.entries(delta)]);
 
+/** 切片那一格：**上界不含、下标 0 起**（各语言的差别由它自己的映射摆平）。 */
+export const sliceOf = (obj, from, to) => node('slice', {
+  obj, ...(from === undefined ? {} : { from }), ...(to === undefined ? {} : { to }),
+});
+
 /** `conv` 那一格：目标是附属，值是端口。 */
 export const convOf = (to, value) => node('conv', { value }, { to });
 

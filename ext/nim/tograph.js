@@ -14,7 +14,8 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit,
+  recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf,
 } from '../../src/core/graph/fromtree.js';
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
@@ -71,7 +72,15 @@ function toNode(x) {
     }
     case 'array-lit': return listNew(many(kids(x)));
     // `xs[i]` -> index-get（nim 从 0 起，不用减）
-    case 'bracket': return indexGet(toNode(kids(x)[0]), toNode(kids(part(x, 'args'))[0]));
+    case 'bracket': {
+      const sub = kids(part(x, 'args'))[0];
+      // `xs[1 .. 2]`：nim 的范围是**含**上界 —— 图上那格不含，所以这儿 +1
+      if (tag(sub) === 'bin' && leaf(kids(sub)[0]) === '..') {
+        const [, a, b] = kids(sub);
+        return sliceOf(toNode(kids(x)[0]), toNode(a), bin('+', toNode(b), lit(1)));
+      }
+      return indexGet(toNode(kids(x)[0]), toNode(sub));
+    }
     // `var a = 1` / `let a = 1` / `const a = 1` —— 一段能声明好几格
     case 'var-section': case 'let-section': case 'const-section': {
       return kids(x).filter((y) => tag(y) === 'item').map((it) => {

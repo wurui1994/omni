@@ -6,7 +6,7 @@
 //
 // 之后按批往上加，每一批都要有一个新的例子家族做判据（`tests/graph/run.js`）：
 // 第二批多值（+2）、第三批 scope-exit（+1）、第四批记录（+3）、第五批列表与下标（+3）、
-// 第六批循环的早退（+1）、第七批表示转换（+1）—— 现在 **22 格**。
+// 第六批循环的早退（+1）、第七批表示转换（+1）、第八批切片（+1）—— 现在 **23 格**。
 //
 // ## 先说清哪几样**不给节点**（这是这一份最要紧的内容，四条全有出处）
 //
@@ -231,6 +231,22 @@ export const NODES = new Map([
   N('conv', 'expr', [{ name: 'value', sem: SEM.value }], {
     attrs: ['to'],
     doc: 'go 的 conv 一族 / V 的 `f64(x)` / nim 的 `int(x)` / freebasic 的 `CInt` 一族 / mojo 的 `Int(x)`',
+  }),
+  // ---- 切片（1 格）：**一段范围复制成一格新的列表** ---------------------------
+  //
+  // 四门语言四种写法：go 的 `xs[1:3]`、V 的 `xs[1..3]`、nim 的 `xs[1 .. 2]`、
+  // mojo 的 `xs[1:3]`。**上界一律"不含"、下标一律 0 起** —— nim 的 `..` 是"含"，
+  // 那一格 +1 由 nim 自己的映射做（与"下标起点是语言的事"同一条纪律）。
+  //
+  // 为什么不与 `index-get` 合并：它出的是**一格新存储**（`allocates` + `owns`），
+  // 而 `index-get` 出的是宿主里的一格值（`borrows`）—— 效应与寿命两栏都不同。
+  N('slice', 'expr', [
+    { name: 'obj', sem: SEM.value },
+    { name: 'from', sem: SEM.value, optional: true },
+    { name: 'to', sem: SEM.value, optional: true },
+  ], {
+    effects: ['reads', 'allocates'], lifetime: 'owns',
+    doc: 'go `xs[1:3]` / V `xs[1..3]` / nim `xs[1 .. 2]` / mojo `xs[1:3]`',
   }),
 ]);
 

@@ -36,6 +36,8 @@ export const LOOPEXIT = ['12', '6', '8'];
 export const INTMATH = ['15', '120'];
 /** conv：表示转换那一格 —— 目标是附属，写法是语言的事（`int` / `f64` / `CInt` / `Int`） */
 export const CONV = ['2', '3.5'];
+/** slice：一段范围复制成一格新列表（上界不含、0 起） */
+export const SLICE = ['20', '30'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -80,6 +82,8 @@ export const CASES = [
   ...fam('intmath', INTMATH, ALL),
   // 第八个家族：表示转换（五门语言的转换在树上**都是调用的形状** —— 靠名字表分开）
   ...fam('conv', CONV, ['go', 'vlang', 'nim', 'mojo', 'freebasic']),
+  // 第九个家族：切片（四种写法一格节点；上界不含、0 起，差别由各自的映射摆平）
+  ...fam('slice', SLICE, ['go', 'vlang', 'nim', 'mojo']),
 ];
 
 /**

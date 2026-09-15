@@ -13,7 +13,8 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   tag, kids, leaf, part, threePart, elseOf,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit,
+  recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -64,6 +65,12 @@ function toNode(x) {
     // `[10, 20, 30]` -> list-new；`xs[0]` -> index-get（V 与 go 从 0 起，不用减）
     case 'array': return listNew(many(kids(x)));
     case 'index': return indexGet(toNode(kids(x)[0]), toNode(kids(x)[1]));
+    // `xs[1..3]` -> slice（V 的上界也**不含**）
+    case 'slice': {
+      const [o, a, b] = kids(x);
+      return sliceOf(toNode(o), a === undefined ? undefined : toNode(a),
+        b === undefined ? undefined : toNode(b));
+    }
 
     case 'bin': {
       const [op, a, b] = kids(x);

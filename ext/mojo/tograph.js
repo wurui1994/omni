@@ -14,7 +14,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet, sliceOf,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -49,7 +49,16 @@ function toNode(x) {
     case 'paren': return toNode(kids(x)[0]);
     // `[10, 20, 30]` -> list-new；`xs[i]` -> index-get（下标装在一格 `(subs …)` 里）
     case 'list': return listNew(many(kids(x)));
-    case 'index': return indexGet(toNode(kids(x)[0]), toNode(kids(kids(x)[1])[0]));
+    case 'index': {
+      const sub = kids(kids(x)[1])[0];
+      // `xs[1:3]`：下标里装着一格 `(slice from to)` -> slice；别的就是取一格
+      if (tag(sub) === 'slice') {
+        const [a, b] = kids(sub);
+        return sliceOf(toNode(kids(x)[0]), a === undefined ? undefined : toNode(a),
+          b === undefined ? undefined : toNode(b));
+      }
+      return indexGet(toNode(kids(x)[0]), toNode(sub));
+    }
     case 'line': case 'body': return many(kids(x));
     case 'break': return loopExit('break');
     case 'continue': return loopExit('continue');

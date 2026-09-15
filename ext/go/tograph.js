@@ -16,7 +16,7 @@ import {
 import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit,
-  destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -74,6 +74,12 @@ function toNode(x) {
       return listNew(many(elems));
     }
     case 'index': return indexGet(toNode(kids(x)[0]), toNode(kids(x)[1]));
+    // `xs[1:3]` -> slice（**上界不含**，与图上那格一致，go 不用调）
+    case 'slice3': {
+      const [o, a, b] = kids(x);
+      return sliceOf(toNode(o), a === undefined ? undefined : toNode(a),
+        b === undefined ? undefined : toNode(b));
+    }
 
     // ---- 算子 --------------------------------------------------------------
     case 'bin': {

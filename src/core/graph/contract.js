@@ -16,7 +16,7 @@
 
 import { NODES, declOf } from './nodes.js';
 import {
-  evalGraph, showValue, truthy, pick, field, setField, index, setIndex, convert,
+  evalGraph, showValue, truthy, pick, field, setField, index, setIndex, convert, sliceOf,
 } from './eval.js';
 import { toSx } from './graph.js';
 import { PRIMS } from './prims.js';
@@ -162,6 +162,7 @@ function jsExpr(x) {
     }
     case 'index-get': return `__index(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.index)})`;
     case 'conv': return `__conv(${jsExpr(x.ins.value)}, ${JSON.stringify(x.attrs.to)})`;
+    case 'slice': return `__slice(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.from)}, ${jsExpr(x.ins.to)})`;
     default: return `(() => { ${jsStmt(x)} })()`;
   }
 }
@@ -244,7 +245,7 @@ function jsStmt(x) {
 
 function jsLower(g) {
   const body = withExits(asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n'));
-  const source = '(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex, __conv) => {'
+  const source = '(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex, __conv, __slice) => {'
     + `\n${body}\n}`;
   return {
     text: source,
@@ -253,7 +254,7 @@ function jsLower(g) {
       // eslint-disable-next-line no-new-func
       const f = new Function(`return ${source};`)();
       f(out, showValue, truthy, pick, field, setField, index, setIndex,
-        (v, to) => convert(v, to, { show: showValue }));
+        (v, to) => convert(v, to, { show: showValue }), sliceOf);
       return { value: null, out };
     },
   };
