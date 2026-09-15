@@ -1,0 +1,736 @@
+;; ext/mojo/mojo.grammar —— Mojo 的语法（**子集**，不足写在末尾"量到的"那一节）
+;;
+;; ## 这一份从 nim 那一份学到什么
+;;
+;; nim 那一份是这套工具链上第一门"缩进即块结构"的语言，写它的时候把三条教训量出来了，
+;; 这一份从第一行起就照着办：
+;;
+;;   1. **每条语句自带终结符**。语句表左递归（`stmts -> stmts stmt`），小语句以 NEWLINE
+;;      收尾、块语句以 DEDENT 收尾。别把 NEWLINE 当"分隔符"——缩进块的结尾是 `… NL DED`，
+;;      那个 NL 已经被块内的语句表吃掉了，外层再要一个就永远等不到。
+;;   2. **歧义要写进语法**。驱动器报 "too many concurrent parses" 时，八成不是它不够强，
+;;      是两条产生式推出了同一棵树。最常见的两处：单元素元组与括号表达式（所以元组
+;;      要么两个以上元素、要么带尾随逗号），形参表里"光名字"与"带类型"混着推。
+;;   3. **只差空白的两种写法要在词法层分开**。Mojo 这一门运气好：它没有 nim 的命令式
+;;      调用，也没有开放的运算符集，所以这一格用不上（`tight-after` 那几条留给 nim）。
+;;
+;; ## 语料告诉我们的（不是从手册猜的）
+;;
+;; 语料 = `modular/mojo/stdlib` 下 602 份 `.mojo`。数了一遍关键字出现次数：
+;;   `var` 5018、`def` 3181、`comptime` 831、`raises` 3886、`mut` 1473、`out` 1033、
+;;   `ref` 547、`read` 246、`owned` 120、`alias` 88、`fn` 11。
+;; 也就是说**现在的 Mojo 基本只写 `def`，用 `comptime` 而不是 `alias`**（`fn`/`alias`
+;; 是旧写法，仍然收，但不是主路）。参数约定（`mut self`、`out self`、`ref self`、
+;; `read x`、`owned x`）是这门语言与 python 分道的地方，得当一等公民收。
+;;
+;; 还有两处只在语料里见得到的形状：
+;;   * 形参表里的 `//` 与 `*` 是**位置标记**（`[mut: Bool, //, T: Copyable]`）；
+;;   * `def timer() raises {var lb, mut max_iters}:` —— 闭包的**捕获表**写在花括号里。
+
+(grammar mojo
+  (tokens NAME INT FLOAT STRING NL IND DED AUGOP)
+
+  (start module)
+
+  (lex
+    (skip (+ (set " \t\r")))
+    ;; 反斜杠续行：整个吃掉，连换行一起 —— 于是缩进那一步根本看不见它
+    (skip "\\" (? "\r") "\n")
+    (comment "#" (* (not "\n")))
+    (indent NL IND DED (brackets "()" "[]" "{}"))
+
+    ;; ---- 字面量。三引号串（文档串）排在前面，最长匹配自然也让它赢
+    (token STRING "\"\"\"" (* (or (not "\"") (seq "\"" (not "\"")) (seq "\"\"" (not "\"")))) "\"\"\"")
+    (token STRING "'''" (* (or (not "'") (seq "'" (not "'")) (seq "''" (not "'")))) "'''")
+    (token STRING (? (set "rRbBuUfFtT")) (? (set "rRbBuUfFtT")) "\"" (* (or (not "\"\n\\") (seq "\\" any))) "\"")
+    (token STRING (? (set "rRbBuUfFtT")) (? (set "rRbBuUfFtT")) "'" (* (or (not "'\n\\") (seq "\\" any))) "'")
+    (token FLOAT (+ digit) (* (or digit "_")) "." (* (or digit "_"))
+      (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    ;; `.` 开头的浮点（`.5`）：小数点后**必须先是一个数字**。写成 `(+ (or digit "_"))` 的话
+    ;; `x.__len__()` 里的 `.__` 会被收成一个浮点数 —— 语料里立刻现形。
+    (token FLOAT "." digit (* (or digit "_")) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+
+    (token FLOAT (+ digit) (* (or digit "_")) (or "e" "E") (? (or "+" "-")) (+ digit))
+    (token INT "0" (or "x" "X") (+ (or hex "_")))
+    (token INT "0" (or "b" "B") (+ (set "01_")))
+    (token INT "0" (or "o" "O") (+ (set "01234567_")))
+    (token INT digit (* (or digit "_")))
+
+    (token NAME (or alpha "_") (* (or alnum "_")))
+    ;; 反引号引起来的名字：`__mlir_type.`!kgen.string`` —— MLIR 那一层的类型名直接嵌在
+    ;; Mojo 源码里，语料里 85 份文件用到（`std/_plugin/` 那一片全是）
+    (token NAME "`" (* (not "`")) "`")
+    (keyword NAME
+      "alias" "and" "as" "assert" "async" "break" "comptime" "continue" "def" "del"
+      "deinit" "elif" "else" "except" "finally" "fn" "for" "from" "global" "if"
+      "import" "in" "is" "lambda" "mut" "not" "or" "out" "owned" "pass" "raise"
+      "raises" "read" "ref" "return" "struct" "trait" "try" "var" "where" "while"
+      "with" "yield")
+
+    ;; ---- 运算符与标点。Mojo 的运算符集是**封闭的**（不像 nim），所以一条条列。
+    ;; 复合赋值归成一格 AUGOP：语法里它们的用法完全一样，分开只会多十来条产生式。
+    (punct AUGOP "**=" "//=" "<<=" ">>=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "@=")
+    (op "..."
+        "**" "//" "<<" ">>" "<=" ">=" "==" "!=" "->" ":="
+        "(" ")" "[" "]" "{" "}" "," ":" "." ";" "@" "=" "+" "-" "*" "/" "%" "&" "|" "^" "~" "<" ">"))
+
+  ;; ---- 语句表：每条语句自带终结符（见文件头教训 1）--------------------------------
+
+  (rule module
+    (-> (stmts) (module $*1)))
+
+  (rule stmts
+    (-> () ())
+    (-> (stmts stmt) ($*1 $2)))
+
+  (rule stmt
+    (-> (simples NL) (line $*1))
+    (-> (block) $1))
+
+  ;; 一行里用 `;` 隔开的几条小语句，行尾允许多一个 `;`
+  (rule simples
+    (-> (simple) ($1))
+    (-> (simples ";") $*1)
+    (-> (simples ";" simple) ($*1 $3)))
+
+  ;; `:` 之后那一段。缩进块以 DEDENT 收尾，单行体以 NEWLINE 收尾，`if a: if b: c` 由
+  ;; 内层块语句自己收尾。空体（体里只有文档串以外的注释）也收 —— 与 nim 同一条道理。
+  (rule body
+    (-> (NL IND stmts DED) (body $*3))
+    (-> (simples NL) (body $*1))
+    (-> (block) (body $1))
+    (-> (NL) (body)))
+  ;; ---- 小语句 ------------------------------------------------------------------
+
+  (rule simple
+    (-> (rhs-list) (expr $*1))
+    (-> (target-list "=" rhs-list) (assign (targets $*1) $*3))
+    (-> (expr AUGOP rhs) (augassign $2 $1 $3))
+    (-> (expr ":" type) (annot $1 $3))
+    (-> (expr ":" type "=" rhs) (annot $1 $3 (init $5)))
+    (-> ("pass") (pass))
+    (-> ("break") (break))
+    (-> ("continue") (continue))
+    (-> ("return") (return))
+    (-> ("return" rhs-list) (return $*2))
+    (-> ("yield") (yield))
+    (-> ("yield" rhs-list) (yield $*2))
+    (-> ("raise") (raise))
+    (-> ("raise" rhs) (raise $2))
+    (-> ("raise" rhs "from" rhs) (raise $2 (from $4)))
+    (-> ("del" target-list) (del $*2))
+    (-> ("assert" expr) (assert $2))
+    (-> ("assert" expr "," expr) (assert $2 $4))
+    ;; `comptime assert cond, "msg"` —— 编译期断言（旧名 `constrained`），语料里 24 份
+    (-> ("comptime" "assert" expr) (comptime (assert $3)))
+    (-> ("comptime" "assert" expr "," expr) (comptime (assert $3 $5)))
+    (-> ("global" names) (global $*2))
+    (-> (var-decl) $1)
+    (-> (comptime-decl) $1)
+    (-> (import-stmt) $1))
+
+  ;; `var x: T = e` / `var x = e` / `var x: T`
+  ;; `ref x = e` 是同一格形状的**引用绑定**（语料里 20 份文件用到），所以合成一个 `bind-kw`。
+  ;; 带 `=` 的那一种**故意不在这儿**：它走 `simple -> target-list "=" rhs-list`，而
+  ;; `target -> bind-kw target` 已经收得下开头那个 `var`/`ref` —— 两处都写就是两个解。
+  (rule var-decl
+    (-> (bind-kw target-list) (var $1 (targets $*2)))
+    (-> (bind-kw pname ":" type) (var $1 (n $2) $4))
+    (-> (bind-kw pname ":" type "=" rhs) (var $1 (n $2) $4 (init $6))))
+
+
+  (rule bind-kw
+    (-> ("var") $1)
+    (-> ("ref") $1))
+
+
+  ;; `comptime X = e` / `comptime X: T = e` / `comptime X[params]: T = e`（旧写法是 `alias`）
+  (rule comptime-decl
+    (-> (comptime-kw NAME "=" rhs) (const (n $2) (init $4)))
+    (-> (comptime-kw NAME ":" type) (const (n $2) $4))
+    ;; `comptime IteratorOwnedType: Iterator where conforms_to(…)` —— 条件遵从也能挂在
+    ;; comptime 声明的类型上
+    (-> (comptime-kw NAME ":" type "where" expr) (const (n $2) $4 (where $6)))
+    (-> (comptime-kw NAME ":" type "where" expr "=" rhs) (const (n $2) $4 (where $6) (init $8)))
+    (-> (comptime-kw NAME ":" type "=" rhs) (const (n $2) $4 (init $6)))
+    (-> (comptime-kw NAME generics "=" rhs) (const (n $2) (generics $*3) (init $5)))
+    (-> (comptime-kw NAME generics ":" type) (const (n $2) (generics $*3) $5))
+    (-> (comptime-kw NAME generics ":" type "=" rhs) (const (n $2) (generics $*3) $5 (init $7))))
+
+  (rule comptime-kw
+    (-> ("comptime") $1)
+    (-> ("alias") $1))
+
+  (rule import-stmt
+    (-> ("import" dotted-as-list) (import $*2))
+    (-> ("from" dotted-name "import" import-targets) (from $2 (import $*4)))
+    (-> ("from" dots "import" import-targets) (from $2 (import $*4)))
+    (-> ("from" dots dotted-name "import" import-targets) (from $2 $3 (import $*5))))
+
+  (rule dots
+    (-> (".") $1)
+    (-> ("...") $1)
+    (-> (dots ".") $1))
+
+  (rule import-targets
+    (-> ("*") (all))
+    (-> (import-as-list) ($*1))
+    (-> ("(" import-as-list ")") ($*2))
+    (-> ("(" import-as-list "," ")") ($*2)))
+
+  (rule import-as-list
+    (-> (import-as) ($1))
+    (-> (import-as-list "," import-as) ($*1 $3)))
+
+  (rule import-as
+    (-> (dotted-name) $1)
+    (-> (dotted-name "as" NAME) (as $1 $3)))
+
+  (rule dotted-as-list
+    (-> (import-as) ($1))
+    (-> (dotted-as-list "," import-as) ($*1 $3)))
+
+  (rule dotted-name
+    (-> (NAME) (n $1))
+    (-> (dotted-name "." NAME) (dot $1 $3)))
+
+  (rule names
+    (-> (NAME) ($1))
+    (-> (names "," NAME) ($*1 $3)))
+  ;; ---- 块语句 ------------------------------------------------------------------
+
+  (rule block
+    (-> (plain-block) $1)
+    (-> (decorated) $1))
+
+  ;; 不带装饰器的块语句。**装饰器那一族单独一层**：写成 `decorated -> decos block` 而
+  ;; `block -> decorated` 的话，`@a` `@b` `def f` 就有两个解（decos=[a,b]，或者 decos=[a]
+  ;; 再套一层 decos=[b]）。这就是"歧义要写进语法"那条的又一例。
+  (rule plain-block
+    (-> (if-stmt) $1)
+    (-> (while-stmt) $1)
+    (-> (for-stmt) $1)
+    (-> (try-stmt) $1)
+    (-> (with-stmt) $1)
+    (-> (routine) $1)
+    (-> (struct-decl) $1)
+    (-> (trait-decl) $1)
+    ;; `comptime if cond:` —— 编译期分支，语料里 831 处 `comptime` 有一半是它
+    (-> ("comptime" if-stmt) (comptime $2))
+    (-> ("comptime" for-stmt) (comptime $2))
+    ;; `async def add_async(a: Int, b: Int) raises -> Int:`
+    (-> ("async" routine) (async $2)))
+
+
+  ;; 装饰器一行一个（`@always_inline`、`@parameter`、`@fieldwise_init`、`@register_passable("trivial")`）
+  (rule decorated
+    (-> (decos plain-block) (decorated (decos $*1) $2)))
+
+  (rule decos
+    (-> (deco) ($1))
+    (-> (decos deco) ($*1 $2)))
+
+  (rule deco
+    (-> ("@" expr NL) (deco $2)))
+
+  (rule if-stmt
+    (-> ("if" named-expr ":" body elifs) (if $2 $4 (elifs $*5)))
+    (-> ("if" named-expr ":" body elifs "else" ":" body) (if $2 $4 (elifs $*5) (else $8))))
+
+  (rule elifs
+    (-> () ())
+    (-> (elifs "elif" named-expr ":" body) ($*1 (elif $3 $5))))
+
+  (rule while-stmt
+    (-> ("while" named-expr ":" body) (while $2 $4))
+    (-> ("while" named-expr ":" body "else" ":" body) (while $2 $4 (else $7))))
+
+  (rule for-stmt
+    (-> ("for" target-list "in" rhs-list ":" body) (for (targets $*2) (in $*4) $6))
+    (-> ("for" target-list "in" rhs-list ":" body "else" ":" body) (for (targets $*2) (in $*4) $6 (else $9))))
+
+  (rule try-stmt
+    (-> ("try" ":" body handlers) (try $3 $*4))
+    (-> ("try" ":" body handlers "else" ":" body) (try $3 $*4 (else $7)))
+    (-> ("try" ":" body handlers "finally" ":" body) (try $3 $*4 (finally $7)))
+    (-> ("try" ":" body handlers "else" ":" body "finally" ":" body) (try $3 $*4 (else $7) (finally $10)))
+    (-> ("try" ":" body "finally" ":" body) (try $3 (finally $6))))
+
+  (rule handlers
+    (-> (handler) ($1))
+    (-> (handlers handler) ($*1 $2)))
+
+  (rule handler
+    (-> ("except" ":" body) (except $3))
+    (-> ("except" expr ":" body) (except $2 $4))
+    (-> ("except" expr "as" NAME ":" body) (except $2 (as $4) $6)))
+
+  (rule with-stmt
+    (-> ("with" with-items ":" body) (with (items $*2) $4)))
+
+  (rule with-items
+    (-> (with-item) ($1))
+    (-> (with-items "," with-item) ($*1 $3)))
+
+  (rule with-item
+    (-> (expr) $1)
+    (-> (expr "as" target) (as $1 $3)))
+
+  ;; ---- 例程与类型声明 ----------------------------------------------------------
+  ;;
+  ;; `def f[T: Trait](mut self, x: Int = 0) raises E -> ref[o] T {var cap}:`
+  ;; 每一格都可选，顺序照语料里见到的：泛型、形参、raises、返回、捕获表。
+  ;; 例程名走 `pname`，不是 `NAME` —— `def read(self)`、`def comptime(…)` 在语料里都有：
+  ;; 那几个软关键字也能当方法名。
+  (rule routine
+    (-> (def-kw pname sig ":" body) (routine $1 (n $2) $3 $5))
+    (-> (def-kw pname generics sig ":" body) (routine $1 (n $2) (generics $*3) $4 $6)))
+
+
+  (rule def-kw
+    (-> ("def") $1)
+    (-> ("fn") $1))
+
+  ;; `def f[T](args) thin abi("C") raises E -> T where cond {var cap}:`
+  ;;
+  ;; 签名尾巴那几格**不定顺序**：语料里既有 `(…) raises {imm f}:` 也有 `(…) {imm self} -> Byte:`，
+  ;; 既有 `(…) thin -> T where c` 也有 `(…) capturing[_] -> T`。按固定顺序写就得排列组合，
+  ;; 所以写成"一串可重复的部件"—— 解析不是校验，多收几种排法不要紧。
+  ;;
+  ;; `raises` 后面那个错误类型走 `marker`（`raises StopIteration` = raises + 标记）——
+  ;; 单独写一条 `("raises" type)` 的话它与"raises + 标记"两个解，又是一处自找的歧义。
+  (rule sig
+    (-> (params sig-parts) (sig $1 $*2)))
+
+  (rule sig-parts
+    (-> () ())
+    (-> (sig-parts sig-part) ($*1 $2)))
+
+  (rule sig-part
+    (-> (marker) $1)
+    (-> ("raises") (raises))
+    (-> ("->" type) (ret $2))
+    ;; `-> ref[origin] T` / `-> deinit T`：Mojo 的返回约定。
+    ;; 不带方括号的 `-> ref T` **故意不收**：那与"`-> ref [o]`（列表字面量）后面跟一个
+    ;; 词标记 `T`"两个解，量到 7 份文件因此报歧义。带方括号的才是语料里的写法。
+    (-> ("->" "ref" "[" expr-list "]" type) (ret (ref $*4) $6))
+    (-> ("->" "deinit" type) (ret (deinit) $3))
+    (-> ("where" expr) (where $2))
+    ;; 闭包捕获表：`def timer() raises {var lb, mut max_iters}:`
+    (-> ("{" capture-list "}") (captures $*2))
+    (-> ("{" "}") (captures)))
+
+  (rule marker
+    (-> (NAME) (m $1))
+    (-> (NAME "(" call-args ")") (m $1 (args $*3)))
+    ;; `capturing[_] -> …` —— 词标记也能带方括号参数
+    (-> (NAME "[" subscripts "]") (m $1 (subs $*3))))
+
+
+
+  (rule params
+    (-> () ())
+    (-> ("(" param-list ")") ($*2)))
+
+  (rule capture-list
+    (-> (capture) ($1))
+    (-> (capture-list "," capture) ($*1 $3))
+    (-> (capture-list ",") $*1))
+
+  (rule capture
+    (-> (NAME) (c $1))
+    (-> (conv) (c $1))
+    (-> (conv NAME) (c $2 $1))
+    ;; `{imm items}` —— 捕获约定里还有 `imm` 这一族普通标识符，所以也收"名字 名字"
+    (-> (NAME NAME) (c $2 $1)))
+
+
+  (rule struct-decl
+    (-> ("struct" NAME struct-bases ":" body) (struct (n $2) (bases $*3) $5))
+    (-> ("struct" NAME generics struct-bases ":" body) (struct (n $2) (generics $*3) (bases $*4) $6)))
+
+  (rule trait-decl
+    (-> ("trait" NAME struct-bases ":" body) (trait (n $2) (bases $*3) $5))
+    (-> ("trait" NAME generics struct-bases ":" body) (trait (n $2) (generics $*3) (bases $*4) $6)))
+
+  ;; 基类 / trait 表。每一项后面可以挂 `where` —— **条件遵从**：
+  ;;   struct Deque[…](Copyable where conforms_to(ElementType, Copyable), …):
+  ;; 语料里 21 份文件这么写，是 Mojo 特有的一格（python 没有）。
+  (rule struct-bases
+    (-> () ())
+    (-> ("(" ")") ())
+    (-> ("(" base-list ")") ($*2))
+    (-> ("(" base-list "," ")") ($*2)))
+
+  (rule base-list
+    (-> (base) ($1))
+    (-> (base-list "," base) ($*1 $3)))
+
+  (rule base
+    (-> (expr) $1)
+    (-> (expr "where" expr) (base $1 (where $3))))
+
+
+  (rule generics
+    (-> ("[" param-list "]") ($*2)))
+
+  ;; 函数**类型**（不是声明）：`def(Int) -> None`、`def(Int) thin -> Int`、
+  ;; `def[dtype: DType](…) raises -> T`。与 `routine` 不打架 —— 那一条要求 `def` 后面
+  ;; 紧跟一个名字，这一条要求紧跟 `(` 或 `[`。
+  (rule fn-type
+    (-> (def-kw params sig-parts) (fntype $1 $2 $*3))
+    (-> (def-kw generics params sig-parts) (fntype $1 (generics $*2) $3 $*4)))
+
+
+  ;; ---- 形参 --------------------------------------------------------------------
+  ;;
+  ;; 这儿比 nim 简单一格：python / mojo 的形参**一格一个名字**（`(a, b: Int)` 是"形参 a
+  ;; 无类型"加"形参 b: Int"，不是"一格形参两个名字"），所以逗号表不带歧义，不用像 nim
+  ;; 那样按组切。
+  ;;
+  ;; `//` 与 `*` 是位置标记：`[mut: Bool, //, T: Copyable]` 里 `//` 之前的是仅位置参数。
+  ;; `//` 就是那个整除运算符记号，直接用。
+  (rule param-list
+    (-> () ())
+    (-> (param) ($1))
+    (-> (param-list "," param) ($*1 $3))
+    (-> (param-list ",") $*1))
+
+  (rule param
+    ;; 光一个类型也算一格形参 —— **函数类型**里就是这么写的：`def(Scalar[dtype]) -> T`。
+    ;; 这一条同时收下了"光写名字"的形参（`def f(a, b)`）：名字本身就是一个表达式，
+    ;; 所以不必再单写一条 `param -> pname`（写了就与这一条两个解）。
+    (-> (type) (p $1))
+    (-> (pname ":" type) (p (n $1) $3))
+    (-> (pname "=" rhs) (p (n $1) (default $3)))
+    (-> (pname ":" type "=" rhs) (p (n $1) $3 (default $5)))
+    ;; 约定后面那一格是**类型**，不只是名字：`Some[def(var Self.K, var Self.V)]` 里
+    ;; `var Self.K` 的 `Self.K` 是个带点的类型。
+    (-> (conv type) (p $2 $1))
+    (-> (conv NAME ":" type) (p (n $2) $1 $4))
+    (-> (conv NAME ":" type "=" rhs) (p (n $2) $1 $4 (default $6)))
+    ;; 位置标记。语料里两种都有：python 风的单斜杠 `/`，与 Mojo 的双斜杠 `//`。
+    (-> ("/") (posonly))
+    (-> ("//") (posonly))
+    (-> ("*") (kwonly))
+    (-> ("*" NAME) (vararg (n $2)))
+    (-> ("*" NAME ":" type) (vararg (n $2) $4))
+    ;; `*args: *Ts` —— 可变参数的类型自己也带一颗星（异构可变参数包）
+    (-> ("*" NAME ":" "*" type) (vararg (n $2) (unpack $5)))
+    ;; 可变参数前面还能挂约定：`def __init__(out self, var *values: Self.V)`
+    (-> (conv "*" NAME) (vararg (n $3) $1))
+    (-> (conv "*" NAME ":" type) (vararg (n $3) $1 $5))
+    (-> (conv "*" NAME ":" "*" type) (vararg (n $3) $1 (unpack $6)))
+    (-> ("**" NAME) (kwargs (n $2)))
+    (-> ("**" NAME ":" type) (kwargs (n $2) $4))
+    (-> (conv "**" NAME) (kwargs (n $3) $1))
+    (-> (conv "**" NAME ":" type) (kwargs (n $3) $1 $5)))
+
+
+
+  ;; 形参与具名实参那一格的名字：普通标识符，外加那几个**软关键字**。
+  ;; `struct _ListIter[mut: Bool, //, T: Copyable]` 里的 `mut` 是参数**名**，
+  ;; `Origin[mut=True]` 里的也是；而 `mut self` 里的 `mut` 是参数**约定**。
+  ;; 两者靠后面跟的是 `:`/`=` 还是一个名字分开 —— 不带歧义，所以不用像 nim 那样分链。
+  (rule pname
+    (-> (NAME) $1)
+    (-> ("mut") $1) (-> ("out") $1) (-> ("ref") $1) (-> ("read") $1)
+    (-> ("owned") $1) (-> ("deinit") $1) (-> ("raises") $1))
+
+
+  ;; 参数约定 —— Mojo 与 python 分道的地方（语料里 mut 1473、out 1033、ref 547、read 246）
+  (rule conv
+    (-> ("mut") $1)
+    (-> ("out") $1)
+    (-> ("read") $1)
+    (-> ("owned") $1)
+    (-> ("deinit") $1)
+    (-> ("var") $1)
+    (-> ("ref") $1)
+    ;; `ref[origin]` / `ref[_]` —— 后者由 `expr-list` 收（`_` 就是个名字），
+    ;; **不要**再单写一条 `("ref" "[" "_" "]")`：那与这一条对 `ref[_]` 两个解。
+    (-> ("ref" "[" expr-list "]") (ref $*3)))
+
+
+  (rule type
+    (-> (expr) $1))
+
+  ;; ---- 表达式：python 的优先级表 + Mojo 的 `^` 转移后缀 ---------------------------
+  ;;
+  ;; `x^` 是**所有权转移**，只在"实参 / 赋值右边 / return"这几处出现，所以单开一格 `rhs`，
+  ;; 不塞进运算符级联 —— 塞进去的话 `a^ + b` 与 `a ^ (+b)` 两个解（`^` 也是异或）。
+  (rule rhs
+    (-> (expr) $1)
+    (-> (expr "^") (transfer $1)))
+
+  (rule rhs-list
+    (-> (rhs) ($1))
+    (-> (rhs-list "," rhs) ($*1 $3))
+    (-> (rhs-list ",") $*1))
+
+  (rule expr-list
+    (-> (expr) ($1))
+    (-> (expr-list "," expr) ($*1 $3)))
+
+  (rule target-list
+    (-> (target) ($1))
+    (-> (target-list "," target) ($*1 $3))
+    (-> (target-list ",") $*1))
+
+  ;; 赋值目标就是 `primary`（`a`、`a.b`、`a[i]`）；元组 / 列表目标由 `atom` 那边收
+  ;; （`(a, b) = t` 里的 `(a, b)` 是一个 atom），所以这儿**不要**再写一遍括号形式 ——
+  ;; 写了就与 atom 两个解。
+  (rule target
+    (-> (primary) $1)
+    (-> ("*" target) (star $2))
+    ;; `for ref element in s:` / `count, ref chars = (…)` —— 绑定词也能出现在目标位置
+    (-> (bind-kw target) (bind $1 $2)))
+
+
+  (rule expr
+    (-> (ternary) $1)
+    (-> (lambda-expr) $1))
+
+  ;; `if` 表达式：`a if c else b`
+  (rule ternary
+    (-> (or-expr) $1)
+    (-> (or-expr "if" or-expr "else" ternary) (cond $3 $1 $5)))
+
+  ;; 海象：`while (line := f.readline()):`
+  (rule named-expr
+    (-> (expr) $1)
+    (-> (NAME ":=" expr) (walrus $1 $3)))
+
+  ;; Mojo 的 lambda 带括号形参、还能带返回类型与捕获表：
+  ;;   `lambda () -> Array[T, size]: {fill = T()}`
+  ;;   `lambda (v: StringSpan[O]) -> Int: v.byte_length()`
+  ;;   `lambda () {ref} -> T: init_with()`
+  ;; python 那种不带括号的 `lambda x: e` **不收** —— 收了就与 `lambda "(" …` 那条对
+  ;; `lambda (x): e` 两个解（`(x)` 既是形参表又是一个括号表达式形参）。语料里全带括号。
+  (rule lambda-expr
+    (-> ("lambda" ":" expr) (lambda () $3))
+    (-> ("lambda" "(" param-list ")" sig-parts ":" expr) (lambda (params $*3) (sig $*5) $7)))
+
+
+  (rule or-expr
+    (-> (and-expr) $1)
+    (-> (or-expr "or" and-expr) (or $1 $3)))
+
+  (rule and-expr
+    (-> (not-expr) $1)
+    (-> (and-expr "and" not-expr) (and $1 $3)))
+
+  (rule not-expr
+    (-> (cmp) $1)
+    (-> ("not" not-expr) (not $2)))
+
+  (rule cmp
+    (-> (bor) $1)
+    (-> (cmp cmpop bor) (cmp $2 $1 $3)))
+
+  (rule cmpop
+    (-> ("<") $1) (-> (">") $1) (-> ("<=") $1) (-> (">=") $1)
+    (-> ("==") $1) (-> ("!=") $1)
+    (-> ("in") $1) (-> ("is") $1)
+    (-> ("not" "in") notin)
+    (-> ("is" "not") isnot))
+
+  (rule bor
+    (-> (bxor) $1)
+    (-> (bor "|" bxor) (bin "|" $1 $3)))
+
+  (rule bxor
+    (-> (band) $1)
+    (-> (bxor "^" band) (bin "^" $1 $3)))
+
+  (rule band
+    (-> (shift) $1)
+    (-> (band "&" shift) (bin "&" $1 $3)))
+
+  (rule shift
+    (-> (arith) $1)
+    (-> (shift "<<" arith) (bin "<<" $1 $3))
+    (-> (shift ">>" arith) (bin ">>" $1 $3)))
+
+  (rule arith
+    (-> (term) $1)
+    (-> (arith "+" term) (bin "+" $1 $3))
+    (-> (arith "-" term) (bin "-" $1 $3)))
+
+  (rule term
+    (-> (factor) $1)
+    (-> (term "*" factor) (bin "*" $1 $3))
+    (-> (term "/" factor) (bin "/" $1 $3))
+    (-> (term "//" factor) (bin "//" $1 $3))
+    (-> (term "%" factor) (bin "%" $1 $3))
+    (-> (term "@" factor) (bin "@" $1 $3)))
+
+  (rule factor
+    (-> (power) $1)
+    (-> ("+" factor) (un "+" $2))
+    (-> ("-" factor) (un "-" $2))
+    (-> ("~" factor) (un "~" $2)))
+    ;; `comptime` **不能**当表达式前缀写在这儿。试过：`comptime X: T = e` 立刻有两个解
+    ;; （`comptime` 声明，或者"给表达式 `comptime X` 加类型标注"），标准库 569 掉到 504。
+    ;; `return comptime (…)` 那三处只好不收 —— 记在末尾的不足里。
+
+
+
+  ;; `**` 右结合，而且右边可以带一元号（`2 ** -1`）
+  (rule power
+    (-> (primary) $1)
+    (-> (primary "**" factor) (bin "**" $1 $3)))
+
+  (rule primary
+    (-> (atom) $1)
+    (-> (primary "." field) (attr $1 $3))
+    (-> (primary "(" call-args ")") (call $1 (args $*3)))
+    (-> (primary "[" subscripts "]") (index $1 (subs $*3)))
+    ;; 空下标就是**解引用**：`passwd_ptr[]`、`a[] == b[]`、`self._data[].ptr()`
+    (-> (primary "[" "]") (deref $1)))
+
+
+  ;; `.` 后面允许那几个**软关键字**：`f.read()`、`p.ref`、`x.out` 在语料里都出现，
+  ;; 而它们同时是参数约定的词。与 nim 那份的 `field` 是同一处理。
+  (rule field
+    (-> (NAME) $1)
+    (-> ("read") $1) (-> ("out") $1) (-> ("mut") $1) (-> ("ref") $1)
+    (-> ("owned") $1) (-> ("deinit") $1) (-> ("var") $1) (-> ("raises") $1)
+    (-> ("comptime") $1) (-> ("alias") $1) (-> ("trait") $1) (-> ("struct") $1)
+    (-> ("for") $1) (-> ("if") $1) (-> ("is") $1) (-> ("in") $1) (-> ("as") $1)
+    (-> ("from") $1) (-> ("import") $1) (-> ("not") $1) (-> ("and") $1) (-> ("or") $1))
+  (rule call-args
+    (-> () ())
+    (-> (call-arg) ($1))
+    (-> (call-args "," call-arg) ($*1 $3))
+    (-> (call-args ",") $*1))
+
+  (rule call-arg
+    (-> (rhs) $1)
+    (-> (pname "=" rhs) (kw $1 $3))
+    ;; 具名切片：`slice[grapheme=start:end]`、`s[byte=prefix_len:]`
+    (-> (pname "=" slice) (kw $1 $3))
+    (-> ("*" rhs) (star $2))
+    (-> ("**" rhs) (starstar $2))
+    (-> (expr comp-fors) (genexp $1 $*2)))
+
+
+  ;; 下标位置既可以是普通实参（`Origin[mut=mut]`、`SIMD[dtype, size]`）也可以是切片
+  (rule subscripts
+    (-> (subscript) ($1))
+    (-> (subscripts "," subscript) ($*1 $3))
+    (-> (subscripts ",") $*1))
+
+  (rule subscript
+    (-> (call-arg) $1)
+    (-> (slice) $1))
+
+  (rule slice
+    (-> (sl-opt ":" sl-opt) (slice $1 $3))
+    (-> (sl-opt ":" sl-opt ":" sl-opt) (slice $1 $3 $5)))
+
+  (rule sl-opt
+    (-> () ())
+    (-> (expr) $1))
+
+  (rule comp-fors
+    (-> (comp-for) ($1))
+    (-> (comp-fors comp-clause) ($*1 $2)))
+
+  (rule comp-for
+    (-> ("for" target-list "in" or-expr) (for (targets $*2) $4)))
+
+  (rule comp-clause
+    (-> (comp-for) $1)
+    (-> ("if" or-expr) (if $2)))
+
+  (rule dict-items
+    (-> (dict-item) ($1))
+    (-> (dict-items "," dict-item) ($*1 $3))
+    (-> (dict-items ",") $*1))
+
+  (rule dict-item
+    (-> (expr ":" rhs) (kv $1 $3))
+    ;; 花括号初始化表：`alloc[Int]({count = 100})`、`return {_mlir_value = typed_ptr}`
+    ;; —— Mojo 用它按字段名构造，语料里 15 份文件用到
+    (-> (pname "=" rhs) (init $1 $3))
+    (-> ("**" rhs) (starstar $2)))
+
+
+  ;; 相邻串自动拼接（python 的规矩，文档串常这么写）
+  (rule strings
+    (-> (STRING) ($1))
+    (-> (strings STRING) ($*1 $2)))
+
+  (rule atom
+    (-> (NAME) (n $1))
+    ;; `Origin[mut=mut]` / `StringSlice[mut=False, _]` —— `mut` 这几个软关键字也能当**值**
+    ;; 出现在参数位置上。只收 `mut`/`out`/`read`/`raises`：`ref`/`var` 不收，它们是绑定词，
+    ;; 收进来就与 `var x = e` 打架。
+    (-> ("mut") (n $1))
+    (-> ("out") (n $1))
+    (-> ("read") (n $1))
+    (-> ("raises") (n $1))
+    (-> (INT) (num $1))
+    (-> (FLOAT) (num $1))
+    (-> (strings) (str $*1))
+    (-> ("...") (ellipsis))
+    ;; 省掉类型名的成员引用：`SIMD[.bool, width]`、`res.cast[.float32]()`、
+    ;; `KeyEndType: DType = .uint32` —— 语料里 70 份文件用到
+    (-> ("." field) (implicit $2))
+    ;; **函数类型**：`Some[def(Int) -> None]`、`func: def(Int) thin -> Int`、
+    ;; `math_f1p: def[dtype: DType, size: SIMDLength](…)`
+    (-> (fn-type) $1)
+    (-> ("(" expr ")") (paren $2))
+    (-> ("(" ")") (unit))
+    ;; 元组要**两个以上**元素或者一个尾随逗号 —— 不然 `(a)` 同时是括号与单元素元组
+    ;; （nim 那一份的账里，这一条值 13 份文件）
+    (-> ("(" rhs "," rhs-list ")") (tuple $2 $*4))
+    (-> ("(" rhs "," ")") (tuple $2))
+    (-> ("(" expr comp-fors ")") (genexp $2 $*3))
+    (-> ("[" "]") (list))
+    (-> ("[" rhs-list "]") (list $*2))
+    (-> ("[" expr comp-fors "]") (listcomp $2 $*3))
+    (-> ("{" "}") (dict))
+    (-> ("{" dict-items "}") (dict $*2))
+    (-> ("{" rhs-list "}") (set $*2))
+    (-> ("{" expr comp-fors "}") (setcomp $2 $*3))
+    (-> ("{" expr ":" expr comp-fors "}") (dictcomp $2 $4 $*5))))
+
+;; ## 量到的（`node bench/grammars.js mojo`，语料 = modular/mojo/stdlib 下 602 份 .mojo）
+;;
+;;   594 状态 / 342 产生式 / 86 终结符 / 112 处冲突留给驱动器
+;;   **570 / 602 过（95%）**
+;;
+;; 头一版就过了 224 份 —— 而 nim 那一份头一版只过 3 份。差别不在这门语言更简单（Mojo 的
+;; 签名比 nim 的例程复杂得多），在于**nim 那一趟把三条教训量出来了，这一份从第一行就照办**：
+;; 语句自带终结符、歧义写进语法、只差空白的两种写法在词法层分开。
+;;
+;; 一路的账（每一刀都先按报错归类，最大那一类先修，再量）：
+;;   224 → 头一版
+;;   273 → `.5` 那条浮点规则写成 `"." (+ (or digit "_"))`，把 `x.__len__()` 的 `.__` 收成了
+;;         浮点数；装饰器那一层的自套歧义（`decos block` 而 `block -> decorated`）
+;;   392 → 反引号名字（`__mlir_type.`!kgen.string``，85 份）+ 省类型名的成员引用（`.uint32`，
+;;         70 份）+ 空下标即解引用（`ptr[]`，34 份）+ `comptime assert` + 函数**类型**（`def(Int) -> T`）
+;;   455 → 软关键字当参数名（`Origin[mut=mut]` 里的 `mut`）+ 签名尾巴的词标记（`thin`、
+;;         `abi("C")`）+ `where` 从句 + 花括号初始化表（`{count = 100}`）+ `t"…"` 串前缀
+;;   494 → 基类表上的条件遵从（`Copyable where conforms_to(…)`）+ `ref x = e` 绑定
+;;         + `*args: *Ts` + python 风的单斜杠位置标记
+;;   528 → **签名尾巴改成"一串不定顺序的部件"**：语料里既有 `(…) raises {imm f}:` 也有
+;;         `(…) {imm self} -> Byte:`，按固定顺序写就得排列组合
+;;   562 → 形参可以只是一个**类型**（函数类型里就这么写）+ 去掉 `ref[_]` 那条与
+;;         `ref[expr-list]` 重解的规则 + lambda 带括号形参与返回类型
+;;   570 → 约定后面跟的是类型不只是名字（`var Self.K`）+ 例程名走软关键字（`def read(self)`）
+;;         + `async def` + `var **kwargs`
+;;
+;; 中间试错了一次，也记下来：给 `factor` 加一条 `("comptime" factor)`（为了收
+;; `return comptime (…)` 那三处）之后，`comptime X: T = e` 立刻有两个解 —— "comptime 声明"
+;; 与"给表达式 `comptime X` 加类型标注" —— 569 掉到 504。退回来了。**加一条产生式之前
+;; 先想它会不会与已有的某条推出同一棵树**，比事后调冲突便宜得多。
+;;
+;; 剩下 32 份，按类：
+;;   * 15 份 `__mlir_region` / `__generator_type[Idx: Int] Trait` 这一族**编译器内部语法**
+;;     （只在 `std/builtin/` 与 `std/_plugin/` 里出现，不是给人写的）；
+;;   * 3 份 `return comptime (…)`（见上一段，故意不收）；
+;;   * 剩下是零散形状。
+

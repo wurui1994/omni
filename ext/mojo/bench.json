@@ -1,0 +1,7 @@
+{
+  "grammar": "mojo.grammar",
+  "doc": "语料 = modular 那棵树里 mojo/stdlib 下的 .mojo（602 份、7.3MB —— 标准库把这门语言的参数约定、comptime、trait 全用了；max/ 与 KGEN/ 下另有三千份，其中 mblack 那批是 python 格式化器的测试数据，故意写得古怪，不算语料）。树不在就跳过。",
+  "corpus": [
+    { "tree": "modular", "env": "MODULAR_SRC", "sub": "mojo/stdlib", "ext": ".mojo" }
+  ]
+}
