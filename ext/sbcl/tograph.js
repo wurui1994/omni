@@ -9,7 +9,10 @@
 //     `callable` 的一格**附属**（chez 那份规格 §3.2 第 2 条），这一批只收定长。
 //   * 多值（`values`）、条件系统、CLOS 都不在这一批（`ext/sbcl/SPEC.md` §五那张顺序表）。
 
-import { node, lit, program } from '../../src/core/graph/graph.js';
+import {
+  node, lit, program, bin, un,
+} from '../../src/core/graph/graph.js';
+import { counted } from '../../src/core/graph/fromtree.js';
 
 const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
 const head = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
@@ -85,19 +88,12 @@ function toNode(x) {
     case 'dotimes': {
       const spec = asList(rest[0]) ?? [];
       const i = symName(spec[0]);
-      return node('region', {
-        body: [
-          node('bind', { init: lit(0) }, { name: i }),
-          node('loop', {
-            cond: node('binop', { a: node('ref', {}, { name: i }), b: toNode(spec[1]) }, { op: '<' }),
-            body: [
-              ...many(rest.slice(1)),
-              node('set', {
-                value: node('binop', { a: node('ref', {}, { name: i }), b: lit(1) }, { op: '+' }),
-              }, { name: i }),
-            ],
-          }),
-        ],
+      // 与 lua / freebasic 的计数循环同一个形状 —— `counted` 只写一遍（fromtree.js）
+      return counted({
+        name: i,
+        from: lit(0),
+        cond: bin('<', node('ref', {}, { name: i }), toNode(spec[1])),
+        body: many(rest.slice(1)),
       });
     }
     case 'terpri': return node('prim', { args: [lit('')] }, { name: 'print' });

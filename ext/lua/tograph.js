@@ -11,7 +11,10 @@
 //   * 真值观：Lua 是"只有 nil / false 为假"，与 eval 里那格保守答案**恰好一致**，
 //     所以这一批不用套 `prim` 转一层（awk / cpp 那两家要转，见 eval.js 里那段注释）。
 
-import { node, lit, program } from '../../src/core/graph/graph.js';
+import {
+  node, lit, program, bin, un,
+} from '../../src/core/graph/graph.js';
+import { counted } from '../../src/core/graph/fromtree.js';
 
 const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
 const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
@@ -74,13 +77,13 @@ function toNode(x) {
       if (op === undefined) throw new Error(`lua->graph: 这个算子还没接：${atomText(opTok)}`);
       // `and` / `or` 交出来的是**值**不是真假（lua 那份规格 L-007）：第二个操作数是 lazy，
       // 所以它走 `branch` 而不是 `binop` —— 这一格正是"入端口求值语义"的用处。
-      if (op === 'and') return node('branch', { cond: toNode(a), then: toNode(b), else: toNode(a) });
-      if (op === 'or') return node('branch', { cond: toNode(a), then: toNode(a), else: toNode(b) });
-      return node('binop', { a: toNode(a), b: toNode(b) }, { op });
+      if (op === 'and') return lazyAnd(toNode(a), toNode(b), { keepValue: true });
+      if (op === 'or') return lazyOr(toNode(a), toNode(b), { keepValue: true });
+      return bin(op, toNode(a), toNode(b));
     }
     case 'un': {
       const [opTok, a] = kids(x);
-      return node('unop', { a: toNode(a) }, { op: raw(atomText(opTok)) === 'not' ? 'not' : raw(atomText(opTok)) });
+      return un(raw(atomText(opTok)) === 'not' ? 'not' : raw(atomText(opTok)), toNode(a));
     }
 
     // ---- 语句 --------------------------------------------------------------
@@ -140,22 +143,13 @@ function toNode(x) {
       const step = tag(x) === 'fornum-step' ? restKids[0] : null;
       const blk = restKids[restKids.length - 1];
       const i = atomText(nm);
-      return node('region', {
-        body: [
-          node('bind', { init: toNode(from) }, { name: i }),
-          node('loop', {
-            cond: node('binop', { a: node('ref', {}, { name: i }), b: toNode(to) }, { op: '<=' }),
-            body: [
-              ...many(kids(blk)),
-              node('set', {
-                value: node('binop', {
-                  a: node('ref', {}, { name: i }),
-                  b: step === null ? lit(1) : toNode(step),
-                }, { op: '+' }),
-              }, { name: i }),
-            ],
-          }),
-        ],
+      // 六门语言的计数循环是同一个形状 —— `counted` 只写一遍（fromtree.js）
+      return counted({
+        name: i,
+        from: toNode(from),
+        cond: bin('<=', node('ref', {}, { name: i }), toNode(to)),
+        step: step === null ? lit(1) : toNode(step),
+        body: many(kids(blk)),
       });
     }
     case 'return': {

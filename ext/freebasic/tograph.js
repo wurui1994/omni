@@ -10,14 +10,14 @@
 //     这正是那句"留给语义层"真正该落的地方 —— 图这一层，不是语法层。
 //   * 串字面量的引号**留在记号文本里**（`(str "\"ok\"")`），这儿剥掉。
 
-import { node, lit, program } from '../../src/core/graph/graph.js';
+import {
+  node, lit, program, bin, un,
+} from '../../src/core/graph/graph.js';
+import {
+  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
+  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
+} from '../../src/core/graph/fromtree.js';
 
-const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
-const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
-const kids = (x) => (isList(x) ? x.items.slice(1) : []);
-const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
-const part = (x, name) => kids(x).find((y) => tag(y) === name);
-const unquote = (s) => (typeof s === 'string' && s.length >= 2 && s[0] === '"' ? s.slice(1, -1) : s);
 
 const OPS = new Map([
   ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['mod', '%'],
@@ -44,18 +44,18 @@ function toNode(x) {
       const [op, a, b] = kids(x);
       const o = OPS.get(String(leaf(op)).toLowerCase());
       if (leaf(op) === 'andalso' || leaf(op) === 'and') {
-        return node('branch', { cond: toNode(a), then: toNode(b), else: lit(false) });
+        return lazyAnd(toNode(a), toNode(b));
       }
       if (leaf(op) === 'orelse' || leaf(op) === 'or') {
-        return node('branch', { cond: toNode(a), then: lit(true), else: toNode(b) });
+        return lazyOr(toNode(a), toNode(b));
       }
       if (o === undefined) throw new Error(`fb->graph: 这个算子还没接：${leaf(op)}`);
       if (o === 'concat') return node('prim', { args: [toNode(a), toNode(b)] }, { name: 'concat' });
-      return node('binop', { a: toNode(a), b: toNode(b) }, { op: o });
+      return bin(o, toNode(a), toNode(b));
     }
     case 'un': {
       const [op, a] = kids(x);
-      return node('unop', { a: toNode(a) }, { op: leaf(op) === 'not' ? 'not' : leaf(op) });
+      return un(leaf(op) === 'not' ? 'not' : leaf(op), toNode(a));
     }
     // 语句位置上的表达式：**顶上是 `=` 就是赋值**（见文件头第一条）
     case 'expr': {
@@ -72,7 +72,7 @@ function toNode(x) {
       const name = nameOf(lhs);
       if (o === undefined) throw new Error(`fb->graph: 这个复合赋值还没接：${leaf(op)}`);
       return node('set', {
-        value: node('binop', { a: node('ref', {}, { name }), b: toNode(rhs) }, { op: o }),
+        value: bin(o, node('ref', {}, { name }), toNode(rhs)),
       }, { name });
     }
     // `dim [mods] (v (n 名字) 类型 (init …))` —— **类型丢掉**（它是端口的 sort）
@@ -104,25 +104,13 @@ function toNode(x) {
       const from = part(head, 'from');
       const to = part(head, 'to');
       const step = part(head, 'step');
-      return node('region', {
-        body: [
-          node('bind', { init: toNode(kids(from)[0]) }, { name: i }),
-          node('loop', {
-            cond: node('binop', {
-              a: node('ref', {}, { name: i }),
-              b: toNode(kids(to)[0]),
-            }, { op: '<=' }),
-            body: [
-              ...(body === undefined ? [] : many(kids(body))),
-              node('set', {
-                value: node('binop', {
-                  a: node('ref', {}, { name: i }),
-                  b: step === undefined ? lit(1) : toNode(kids(step)[0]),
-                }, { op: '+' }),
-              }, { name: i }),
-            ],
-          }),
-        ],
+      // 与 lua / sbcl 的计数循环同一个形状 —— `counted` 只写一遍（fromtree.js）
+      return counted({
+        name: i,
+        from: toNode(kids(from)[0]),
+        cond: bin('<=', node('ref', {}, { name: i }), toNode(kids(to)[0])),
+        step: step === undefined ? lit(1) : toNode(kids(step)[0]),
+        body: body === undefined ? [] : many(kids(body)),
       });
     }
     case 'while': case 'do': {

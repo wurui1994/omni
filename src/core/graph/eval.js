@@ -14,6 +14,7 @@
 //     真用它要等 C 后端（ADR-0036）。这一条现在就写清，免得以后当成"做过了"。
 
 import { declOf } from './nodes.js';
+import { primOf } from './prims.js';
 
 /** 早退用的信号。**不是错误** —— 它是"图在这一点切开，后半段不跑"的表示。 */
 class Return { constructor(value) { this.value = value; } }
@@ -42,25 +43,9 @@ class Closure {
   }
 }
 
-/** 内建那一格（`prim`）。**print 在这儿，不是节点** —— 见 nodes.js 文件头第四条。 */
+/** 内建那一格（`prim`）。**表在 `prims.js`** —— 一格内建一行，kernel 与效应写在同一行上。 */
 function callPrim(name, args, io) {
-  switch (name) {
-    case 'print': io.out.push(args.map(showValue).join(' ')); return null;
-    case '+': return args.reduce((a, b) => a + b, 0);
-    case '-': return args.length === 1 ? -args[0] : args.reduce((a, b) => a - b);
-    case '*': return args.reduce((a, b) => a * b, 1);
-    case '/': return args.reduce((a, b) => a / b);
-    case '<': return args[0] < args[1];
-    case '>': return args[0] > args[1];
-    case '<=': return args[0] <= args[1];
-    case '>=': return args[0] >= args[1];
-    case '=': case '==': return args[0] === args[1];
-    case '!=': return args[0] !== args[1];
-    case 'not': return !truthy(args[0]);
-    case 'concat': return args.map(showValue).join('');
-    case 'len': return typeof args[0] === 'string' ? args[0].length : args[0].length;
-    default: throw new Error(`no such primitive: ${name}`);
-  }
+  return primOf(name).kernel(args, io);
 }
 
 /**
@@ -117,8 +102,6 @@ function run(n, env, io) {
     case 'ref': return env.lookup(n.attrs.name);
     case 'bind': env.define(n.attrs.name, arg('init')); return null;
     case 'set': env.assign(n.attrs.name, arg('value')); return null;
-    case 'binop': return callPrim(n.attrs.op, [arg('a'), arg('b')], io);
-    case 'unop': return callPrim(n.attrs.op, [arg('a')], io);
     case 'prim': return callPrim(n.attrs.name, arg('args') ?? [], io);
     case 'branch': {
       // 两支都是 `lazy` 端口 —— **只算一支**，这就是那一栏求值语义的全部用处。
@@ -164,7 +147,7 @@ function run(n, env, io) {
  * **判据就是它**：同一份例子、不同语言的前端，`out` 必须逐行相同（G4 的可跑版本）。
  */
 export function evalGraph(g, opts = {}) {
-  const io = { out: [] };
+  const io = { out: [], show: showValue, truthy };
   const env = new Env(null);
   for (const [k, v] of Object.entries(opts.globals ?? {})) env.define(k, v);
   let value = null;

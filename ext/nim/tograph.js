@@ -9,16 +9,15 @@
 // pragma（`{.inline.}`）在这一批直接丢掉 —— 它是**附属节点的总入口**
 // （`ext/nim/SPEC.md` §3.3 第 2 条），骨架这一批不碰。
 
-import { node, lit, program } from '../../src/core/graph/graph.js';
+import {
+  node, lit, program, bin, un,
+} from '../../src/core/graph/graph.js';
+import {
+  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
+  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
+} from '../../src/core/graph/fromtree.js';
 
-const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
-const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
-const kids = (x) => (isList(x) ? x.items.slice(1) : []);
-const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
-const part = (x, name) => kids(x).find((y) => tag(y) === name);
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
-const groupItems = (g) => (tag(g) === null && isList(g) ? g.items : kids(g));
-const unquote = (s) => (typeof s === 'string' && s.length >= 2 && s[0] === '"' ? s.slice(1, -1) : s);
 
 const OPS = new Map([
   ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['div', '/'], ['mod', '%'],
@@ -53,16 +52,16 @@ function toNode(x) {
 
     case 'bin': {
       const [op, a, b] = kids(x);
-      if (leaf(op) === 'and') return node('branch', { cond: toNode(a), then: toNode(b), else: lit(false) });
-      if (leaf(op) === 'or') return node('branch', { cond: toNode(a), then: lit(true), else: toNode(b) });
+      if (leaf(op) === 'and') return lazyAnd(toNode(a), toNode(b));
+      if (leaf(op) === 'or') return lazyOr(toNode(a), toNode(b));
       const o = OPS.get(leaf(op));
       if (o === undefined) throw new Error(`nim->graph: 这个算子还没接：${leaf(op)}`);
       if (o === 'concat') return node('prim', { args: [toNode(a), toNode(b)] }, { name: 'concat' });
-      return node('binop', { a: toNode(a), b: toNode(b) }, { op: o });
+      return bin(o, toNode(a), toNode(b));
     }
     case 'un': {
       const [op, a] = kids(x);
-      return node('unop', { a: toNode(a) }, { op: leaf(op) === 'not' ? 'not' : leaf(op) });
+      return un(leaf(op) === 'not' ? 'not' : leaf(op), toNode(a));
     }
     // `var a = 1` / `let a = 1` / `const a = 1` —— 一段能声明好几格
     case 'var-section': case 'let-section': case 'const-section': {
@@ -80,7 +79,7 @@ function toNode(x) {
       const o = OPS.get(String(leaf(op)).replace('=', ''));
       if (o === undefined) throw new Error(`nim->graph: 这个复合赋值还没接：${leaf(op)}`);
       return node('set', {
-        value: node('binop', { a: node('ref', {}, { name }), b: toNode(rhs) }, { op: o }),
+        value: bin(o, node('ref', {}, { name }), toNode(rhs)),
       }, { name });
     }
     case 'routine': {

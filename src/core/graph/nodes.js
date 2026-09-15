@@ -29,6 +29,8 @@
 //             synchronizes（第七格见 ADR-0035）。**六格全空 = pure**
 //   lifetime  出端口的归属：owns / borrows(k) / static / managed / untracked（ADR-0036）
 
+import { primEffects } from './prims.js';
+
 /** 求值语义（入端口那一栏的取值）。 */
 export const SEM = { value: 'value', lazy: 'lazy', name: 'name', body: 'body' };
 
@@ -44,7 +46,8 @@ const N = (op, sort, ins, opts = {}) => [op, {
 }];
 
 /**
- * 第一批：13 格。每一格后面那句话是它的**出处**（哪几门语言的规格要求它），
+ * 第一批：**11 格**（原来 13 格 —— `binop` / `unop` 并进了 `prim`，见那一段注释）。
+ * 每一格后面那句话是它的**出处**（哪几门语言的规格要求它），
  * 判据是 `omni nodes --source`：没有出处的节点不许存在。
  */
 export const NODES = new Map([
@@ -60,19 +63,20 @@ export const NODES = new Map([
     doc: 'chez set! / sbcl cset / go OAS',
   }),
 
-  // ---- 算子与调用（3 格）------------------------------------------------------
-  // `&&` / `||` 的第二个入端口是 lazy —— lua 那份规格 L-007 那笔账就是它。
-  N('binop', 'expr', [{ name: 'a', sem: SEM.value }, { name: 'b', sem: SEM.value }], {
-    attrs: ['op'], doc: 'go 19 格二元 Op 塌成这一格',
-  }),
-  N('unop', 'expr', [{ name: 'a', sem: SEM.value }], { attrs: ['op'], doc: 'go 7 格一元 Op' }),
+  // ---- 算子与调用（2 格）------------------------------------------------------
+  // **算符没有自己的节点**：`a + b` 与 `(+ a b)` 落的是同一格 `prim`。
+  // 原来这儿有 `binop` / `unop` 两格，与 `prim` 的差别只有效应那一栏（前者声明 pure、
+  // 后者声明 reads+writes）—— 而那一栏本来就该按**内建自己**分，不按"用哪种语法写它"分。
+  // 于是两格删掉，效应从 `prims.js` 那张表查（`+` pure、`print` writes）。
+  // 十门语言的算符与内建从此是同一格：go 的 19 格二元 + 7 格一元 + 23 格内建、
+  // chez 的 `pr`、awk 的 builtin、freebasic 那一批自带词序的语句，全落这儿。
   N('call', 'expr', [{ name: 'fn', sem: SEM.value }, { name: 'args', sem: SEM.value, rest: true }], {
     effects: ['reads', 'writes'], doc: 'chez call / go OCALL* 八格 / 十门全有',
   }),
-  // 内建。**print 就在这一格**，不单开节点（见文件头第四条）。
   N('prim', 'expr', [{ name: 'args', sem: SEM.value, rest: true }], {
     attrs: ['name'], effects: ['reads', 'writes'],
-    doc: 'chez pr（prims.ss）/ go 23 格内建 / awk builtin / freebasic 那一批语句',
+    doc: 'chez pr（prims.ss）/ go 19+7+23 格 / awk builtin / freebasic 那一批语句。'
+      + '效应那一栏**逐格内建**地查 prims.js —— 这儿写的是"最坏情况"的默认值',
   }),
 
   // ---- 控制流（3 格；控制流**不是**第五种边，是带效应的节点把图切段）--------
@@ -109,6 +113,12 @@ export function declOf(op) {
 }
 
 /** 纯不纯 —— 效应栏六格全空。pure 的节点不进 effect 图，于是可重排、可共享、可删。 */
-export function isPure(op) {
+/** 纯不纯 —— 效应栏六格全空。 那一格要**看内建名字**（ pure、 不是）。 */
+export function isPure(node) {
+  const op = typeof node === 'string' ? node : node.op;
+  if (op === 'prim') {
+    const name = typeof node === 'string' ? null : node.attrs?.name;
+    return name === null ? false : primEffects(name).length === 0;
+  }
   return declOf(op).effects.length === 0;
 }

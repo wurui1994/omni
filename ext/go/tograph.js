@@ -10,14 +10,14 @@
 //   * **入口是 `main`**：图从上到下跑，所以映射末尾显式补一格 `call main` ——
 //     那是这门语言的约定，不是新节点。
 
-import { node, lit, program } from '../../src/core/graph/graph.js';
+import {
+  node, lit, program, bin, un,
+} from '../../src/core/graph/graph.js';
+import {
+  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
+  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
+} from '../../src/core/graph/fromtree.js';
 
-const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
-const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
-const kids = (x) => (isList(x) ? x.items.slice(1) : []);
-const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
-const part = (x, name) => kids(x).find((y) => tag(y) === name);
-const partKids = (x, name) => { const p = part(x, name); return p === undefined ? [] : kids(p); };
 
 const OPS = new Map([
   ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%'],
@@ -58,14 +58,14 @@ function toNode(x) {
       const [op, a, b] = kids(x);
       const o = OPS.get(leaf(op));
       // `&&` / `||`：第二个操作数是 lazy ⇒ 走 branch（与 lua 那边同一条口径）
-      if (leaf(op) === '&&') return node('branch', { cond: toNode(a), then: toNode(b), else: lit(false) });
-      if (leaf(op) === '||') return node('branch', { cond: toNode(a), then: lit(true), else: toNode(b) });
+      if (leaf(op) === '&&') return lazyAnd(toNode(a), toNode(b));
+      if (leaf(op) === '||') return lazyOr(toNode(a), toNode(b));
       if (o === undefined) throw new Error(`go->graph: 这个算子还没接：${leaf(op)}`);
-      return node('binop', { a: toNode(a), b: toNode(b) }, { op: o });
+      return bin(o, toNode(a), toNode(b));
     }
     case 'un': {
       const [op, a] = kids(x);
-      return node('unop', { a: toNode(a) }, { op: leaf(op) === '!' ? 'not' : leaf(op) });
+      return un(leaf(op) === '!' ? 'not' : leaf(op), toNode(a));
     }
 
     // ---- 声明与语句 --------------------------------------------------------
@@ -89,24 +89,21 @@ function toNode(x) {
       });
     }
     case 'inc': case 'dec': return node('set', {
-      value: node('binop', { a: toNode(kids(x)[0]), b: lit(1) }, { op: tag(x) === 'inc' ? '+' : '-' }),
+      value: bin(tag(x) === 'inc' ? '+' : '-', toNode(kids(x)[0]), lit(1)),
     }, { name: nameOf(kids(x)[0]) });
     case 'for': {
-      // 三种 `for` 落成同一格 loop：带 init/post 的多包一格 region（**不给它开节点**）
+      // 三种 `for` 落成同一格 loop（**不给它开节点**）。形状与 vlang / awk 一模一样，
+      // 所以那句话只写一遍 —— `threePart` 在 `src/core/graph/fromtree.js` 里。
       const init = part(x, 'init');
       const cond = part(x, 'cond');
       const post = part(x, 'post');
       const blk = kids(x).find((y) => tag(y) === 'block');
-      const body = [
-        ...(blk === undefined ? [] : many(kids(blk))),
-        ...(post === undefined ? [] : many(kids(post))),
-      ];
-      const loop = node('loop', {
-        cond: cond === undefined ? lit(true) : toNode(kids(cond)[0]),
-        body,
+      return threePart({
+        init: init === undefined ? [] : many(kids(init)),
+        cond: cond === undefined ? undefined : toNode(kids(cond)[0]),
+        post: post === undefined ? [] : many(kids(post)),
+        body: blk === undefined ? [] : many(kids(blk)),
       });
-      if (init === undefined) return loop;
-      return node('region', { body: [...many(kids(init)), loop] });
     }
     case 'if': {
       const parts = kids(x);

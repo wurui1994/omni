@@ -8,13 +8,14 @@
 //   * `println` 是内建，不用走 `fmt.` 那一格选择器。
 // 三处都不影响节点：**落到的还是那 13 格**。
 
-import { node, lit, program } from '../../src/core/graph/graph.js';
+import {
+  node, lit, program, bin, un,
+} from '../../src/core/graph/graph.js';
+import {
+  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
+  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
+} from '../../src/core/graph/fromtree.js';
 
-const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
-const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
-const kids = (x) => (isList(x) ? x.items.slice(1) : []);
-const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
-const part = (x, name) => kids(x).find((y) => tag(y) === name);
 
 const OPS = new Map([
   ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%'],
@@ -54,15 +55,15 @@ function toNode(x) {
 
     case 'bin': {
       const [op, a, b] = kids(x);
-      if (leaf(op) === '&&') return node('branch', { cond: toNode(a), then: toNode(b), else: lit(false) });
-      if (leaf(op) === '||') return node('branch', { cond: toNode(a), then: lit(true), else: toNode(b) });
+      if (leaf(op) === '&&') return lazyAnd(toNode(a), toNode(b));
+      if (leaf(op) === '||') return lazyOr(toNode(a), toNode(b));
       const o = OPS.get(leaf(op));
       if (o === undefined) throw new Error(`v->graph: 这个算子还没接：${leaf(op)}`);
-      return node('binop', { a: toNode(a), b: toNode(b) }, { op: o });
+      return bin(o, toNode(a), toNode(b));
     }
     case 'un': {
       const [op, a] = kids(x);
-      return node('unop', { a: toNode(a) }, { op: leaf(op) === '!' ? 'not' : leaf(op) });
+      return un(leaf(op) === '!' ? 'not' : leaf(op), toNode(a));
     }
 
     case 'fn': {
@@ -82,25 +83,24 @@ function toNode(x) {
       });
     }
     case 'inc': case 'dec': return node('set', {
-      value: node('binop', { a: toNode(kids(x)[0]), b: lit(1) }, { op: tag(x) === 'inc' ? '+' : '-' }),
+      value: bin(tag(x) === 'inc' ? '+' : '-', toNode(kids(x)[0]), lit(1)),
     }, { name: nameOf(kids(x)[0]) });
     case 'for': {
       const init = part(x, 'init');
       const cond = part(x, 'cond');
       const post = part(x, 'post');
       const blk = kids(x).find((y) => tag(y) === 'block');
-      const loop = node('loop', {
-        cond: cond === undefined ? lit(true) : toNode(kids(cond)[0]),
-        body: [
-          ...(blk === undefined ? [] : many(kids(blk))),
-          ...(post === undefined ? [] : many(kids(post))),
-        ],
+      // 形状与 go / awk 一模一样 —— `threePart` 只写一遍（fromtree.js）
+      return threePart({
+        init: init === undefined ? [] : many(kids(init)),
+        cond: cond === undefined ? undefined : toNode(kids(cond)[0]),
+        post: post === undefined ? [] : many(kids(post)),
+        body: blk === undefined ? [] : many(kids(blk)),
       });
-      return init === undefined ? loop : node('region', { body: [...many(kids(init)), loop] });
     }
     case 'if': {
       const [cond, then, els] = kids(x);
-      const e = els === undefined ? undefined : (tag(els) === 'else' ? kids(els)[0] : els);
+      const e = elseOf(els);
       return node('branch', {
         cond: toNode(cond),
         then: toNode(then),

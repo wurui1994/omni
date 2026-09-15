@@ -9,14 +9,14 @@
 //   * `fn` 与 `def` 落同一格 `func`（`ext/mojo/SPEC.md` §六第 3 条记着它们效应默认值
 //     可能不同 —— 那是效应栏的事，不是节点的事）。
 
-import { node, lit, program } from '../../src/core/graph/graph.js';
+import {
+  node, lit, program, bin, un,
+} from '../../src/core/graph/graph.js';
+import {
+  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
+  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
+} from '../../src/core/graph/fromtree.js';
 
-const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
-const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
-const kids = (x) => (isList(x) ? x.items.slice(1) : []);
-const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
-const part = (x, name) => kids(x).find((y) => tag(y) === name);
-const unquote = (s) => (typeof s === 'string' && s.length >= 2 && (s[0] === '"' || s[0] === "'") ? s.slice(1, -1) : s);
 
 const OPS = new Map([
   ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%'], ['//', '/'],
@@ -52,15 +52,15 @@ function toNode(x) {
     // （Python 的链式比较），但**落到的是同一格 binop**：语法的级数不是节点的格数。
     case 'bin': case 'cmp': {
       const [op, a, b] = kids(x);
-      if (leaf(op) === 'and') return node('branch', { cond: toNode(a), then: toNode(b), else: lit(false) });
-      if (leaf(op) === 'or') return node('branch', { cond: toNode(a), then: lit(true), else: toNode(b) });
+      if (leaf(op) === 'and') return lazyAnd(toNode(a), toNode(b));
+      if (leaf(op) === 'or') return lazyOr(toNode(a), toNode(b));
       const o = OPS.get(leaf(op));
       if (o === undefined) throw new Error(`mojo->graph: 这个算子还没接：${leaf(op)}`);
-      return node('binop', { a: toNode(a), b: toNode(b) }, { op: o });
+      return bin(o, toNode(a), toNode(b));
     }
     case 'un': {
       const [op, a] = kids(x);
-      return node('unop', { a: toNode(a) }, { op: leaf(op) === 'not' ? 'not' : leaf(op) });
+      return un(leaf(op) === 'not' ? 'not' : leaf(op), toNode(a));
     }
     // `var x = 1`（targets 里带 bind）出 bind；`x = 1` 出 set
     case 'assign': {
@@ -78,7 +78,7 @@ function toNode(x) {
       const o = OPS.get(String(leaf(op)).replace('=', ''));
       if (o === undefined) throw new Error(`mojo->graph: 这个复合赋值还没接：${leaf(op)}`);
       return node('set', {
-        value: node('binop', { a: node('ref', {}, { name }), b: toNode(value) }, { op: o }),
+        value: bin(o, node('ref', {}, { name }), toNode(value)),
       }, { name });
     }
     case 'routine': {

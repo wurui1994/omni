@@ -12,12 +12,14 @@
 // "只有 awk 一家的节点，放在 ext/awk 底下"，而它要的输入源与字段视图都还没有。
 // 所以这一份只收 `BEGIN { … }` 与 `function`；别的 pattern-action 当场报，不猜。
 
-import { node, lit, program } from '../../src/core/graph/graph.js';
+import {
+  node, lit, program, bin, un,
+} from '../../src/core/graph/graph.js';
+import {
+  isList, tag, kids, leaf, part, partKids, groupItems, unquote,
+  counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
+} from '../../src/core/graph/fromtree.js';
 
-const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
-const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
-const kids = (x) => (isList(x) ? x.items.slice(1) : []);
-const leaf = (x) => (x === null || x === undefined || x.kind === 'list' ? null : x.value);
 
 const OPS = new Map([
   ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%'],
@@ -57,16 +59,16 @@ function toNode(x) {
 
     case 'bin': {
       const [op, a, b] = kids(x);
-      if (leaf(op) === '&&') return node('branch', { cond: toNode(a), then: toNode(b), else: lit(false) });
-      if (leaf(op) === '||') return node('branch', { cond: toNode(a), then: lit(true), else: toNode(b) });
+      if (leaf(op) === '&&') return lazyAnd(toNode(a), toNode(b));
+      if (leaf(op) === '||') return lazyOr(toNode(a), toNode(b));
       const o = OPS.get(leaf(op));
       if (o === undefined) throw new Error(`awk->graph: 这个算子还没接：${leaf(op)}`);
-      return node('binop', { a: toNode(a), b: toNode(b) }, { op: o });
+      return bin(o, toNode(a), toNode(b));
     }
     case 'cat': return node('prim', { args: many(kids(x)) }, { name: 'concat' });
     case 'un': {
       const [op, a] = kids(x);
-      return node('unop', { a: toNode(a) }, { op: leaf(op) === '!' ? 'not' : leaf(op) });
+      return un(leaf(op) === '!' ? 'not' : leaf(op), toNode(a));
     }
     case 'assign': {
       const [op, target, value] = kids(x);
@@ -76,25 +78,26 @@ function toNode(x) {
       const o = OPS.get(String(leaf(op)).slice(0, -1));
       if (o === undefined) throw new Error(`awk->graph: 这个复合赋值还没接：${leaf(op)}`);
       return node('set', {
-        value: node('binop', { a: node('ref', {}, { name }), b: toNode(value) }, { op: o }),
+        value: bin(o, node('ref', {}, { name }), toNode(value)),
       }, { name });
     }
     case 'postinc': case 'preinc': case 'postdec': case 'predec': {
       const name = nameOf(kids(x)[0]);
       const op = tag(x).endsWith('inc') ? '+' : '-';
       return node('set', {
-        value: node('binop', { a: node('ref', {}, { name }), b: lit(1) }, { op }),
+        value: bin(op, node('ref', {}, { name }), lit(1)),
       }, { name });
     }
     case 'for': {
       // `for (init; cond; post) stmt` —— 与 lua / go / freebasic 同一个形状
       const [init, cond, post, ...rest] = kids(x);
-      const body = rest.length === 0 ? [] : many(rest);
-      const loop = node('loop', {
-        cond: cond === undefined ? lit(true) : toNode(cond),
-        body: [...body, ...(post === undefined ? [] : many([post]))],
+      // 形状与 go / vlang 一模一样 —— `threePart` 只写一遍（fromtree.js）
+      return threePart({
+        init: init === undefined ? [] : many([init]),
+        cond: cond === undefined ? undefined : toNode(cond),
+        post: post === undefined ? [] : many([post]),
+        body: rest.length === 0 ? [] : many(rest),
       });
-      return init === undefined ? loop : node('region', { body: [...many([init]), loop] });
     }
     case 'while': {
       const [cond, ...rest] = kids(x);
@@ -103,7 +106,7 @@ function toNode(x) {
     case 'if': {
       const [cond, then, els] = kids(x);
       // `else` 那一格是个包装（`(else …)`）—— 与 go / V 那两门同一处坑
-      const e = els === undefined ? undefined : (tag(els) === 'else' ? kids(els)[0] : els);
+      const e = elseOf(els);
       return node('branch', {
         cond: toNode(cond),
         then: toNode(then),

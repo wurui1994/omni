@@ -73,3 +73,13 @@ export function toSx(x, depth = 0) {
   parts.push(')');
   return parts.join('');
 }
+
+/**
+ * **算符的糖**：`a + b`（lua / go / …）与 `(+ a b)`（chez / sbcl）落的是同一格 `prim` ——
+ * 算符没有自己的节点（原来的 `binop` / `unop` 已经并进去了，见 `prims.js` 文件头）。
+ *
+ * 这两个不是新节点，是**九门语言映射里那句重复的话只写一遍**：原来每份 tograph.js 都要
+ * 拼一遍 `node('binop', { a, b }, { op })`。
+ */
+export const bin = (op, a, b) => node('prim', { args: [a, b] }, { name: op });
+export const un = (op, a) => node('prim', { args: [a] }, { name: op });

@@ -17,6 +17,7 @@
 import { NODES, declOf } from './nodes.js';
 import { evalGraph, showValue, truthy } from './eval.js';
 import { toSx } from './graph.js';
+import { PRIMS } from './prims.js';
 
 /** 已登记的后端。**核心不认识任何一个后端的细节**，只按这五问要答案。 */
 const BACKENDS = new Map();
@@ -85,24 +86,9 @@ registerBackend({
   lower: (g) => jsLower(g),
 });
 
-const JS_PRIM = new Map([
-  ['print', (a) => `__out.push([${a.join(', ')}].map(__show).join(' '))`],
-  ['+', (a) => (a.length === 0 ? '0' : `(${a.join(' + ')})`)],
-  ['-', (a) => (a.length === 1 ? `(-${a[0]})` : `(${a.join(' - ')})`)],
-  ['*', (a) => (a.length === 0 ? '1' : `(${a.join(' * ')})`)],
-  ['/', (a) => `(${a.join(' / ')})`],
-  ['%', (a) => `(${a.join(' % ')})`],
-  ['<', (a) => `(${a[0]} < ${a[1]})`],
-  ['>', (a) => `(${a[0]} > ${a[1]})`],
-  ['<=', (a) => `(${a[0]} <= ${a[1]})`],
-  ['>=', (a) => `(${a[0]} >= ${a[1]})`],
-  ['=', (a) => `(${a[0]} === ${a[1]})`],
-  ['==', (a) => `(${a[0]} === ${a[1]})`],
-  ['!=', (a) => `(${a[0]} !== ${a[1]})`],
-  ['not', (a) => `(!__truthy(${a[0]}))`],
-  ['concat', (a) => `[${a.join(', ')}].map(__show).join('')`],
-  ['len', (a) => `(${a[0]}).length`],
-]);
+// **内建的 js 落法不在这儿** —— 它写在 `prims.js` 每一行的 `js` 那一格上。
+// 原来这儿有一张 16 行的 `JS_PRIM` 模板表，与 eval 里那张 switch 是同一份知识抄两遍：
+// 加一格内建要改两处。现在改一行。
 
 /** 名字要能当 JS 标识符用（Scheme 的 `max2`、`string-append` 那种带横杠的名字）。 */
 const jsName = (n) => `v_${String(n).replace(/[^A-Za-z0-9_]/g, (c) => `$${c.charCodeAt(0).toString(16)}`)}`;
@@ -114,17 +100,11 @@ function jsExpr(x) {
   switch (x.op) {
     case 'const': return JSON.stringify(x.attrs.value ?? null);
     case 'ref': return jsName(x.attrs.name);
-    case 'binop': {
-      const f = JS_PRIM.get(x.attrs.op);
-      if (f === undefined) throw new Error(`js: 这个算子还没接：${x.attrs.op}`);
-      return f([jsExpr(x.ins.a), jsExpr(x.ins.b)]);
-    }
-    case 'unop': return JS_PRIM.get(x.attrs.op)([jsExpr(x.ins.a)]);
     case 'prim': {
-      const f = JS_PRIM.get(x.attrs.name);
-      if (f === undefined) throw new Error(`js: 这格内建还没接：${x.attrs.name}`);
+      const p = PRIMS.get(x.attrs.name);
+      if (p === undefined) throw new Error(`js: 这格内建还没接：${x.attrs.name}`);
       const args = (Array.isArray(x.ins.args) ? x.ins.args : [x.ins.args]).filter((y) => y !== undefined);
-      return f(args.map(jsExpr));
+      return p.js(args.map(jsExpr));
     }
     case 'branch': {
       const e = x.ins.else === undefined ? 'null' : jsExpr(x.ins.else);
