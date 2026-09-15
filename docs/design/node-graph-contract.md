@@ -167,7 +167,8 @@ G4（"同一张图算出来的次序逐字节相同"）第一次有了可跑的�
 ```
 backend.can(node)      → 这个节点的五栏我接得住吗（接不住给一句人话，进账）
 backend.carry(port)    → 这格 sort 在我这儿落成什么（i32 / 一格 box / 一格 wasm local …）
-backend.effect(e)      → reads/writes/allocates/may-early-exit/suspends 我怎么落
+backend.effect(e)      → reads/writes/allocates/may-early-exit/suspends/synchronizes 我怎么落
+                         （最后一格见 ADR-0035：内存序就是这一问的答案）
 backend.region(r)      → 一格存储域我怎么开、怎么关
 backend.lower(subgraph)→ 收到一块**接口已知**的子图，出我自己的结构（不是字符串）
 ```
@@ -207,12 +208,18 @@ backend.lower(subgraph)→ 收到一块**接口已知**的子图，出我自己�
   早退的后半段只被"错误路径"用一次，挂起的后半段要**存起来**（成为一格值，有寿命）。
   所以 `suspends` 会给出端口加一格 `owns`，早退不会。这一格填错，后端会漏放续延帧。
   判据放在 G4 上：同一份语料在 `eval` 与 native 两边的挂起次数必须相同。
+- **第 4 层（ADR-0035 补的）**：**跨线程的次序**。第 1–3 层管的是"什么时候切段、
+  谁来跑、怎么交接"，都不管"两条线上的读写谁先谁后"。那一格是第七格效应
+  `synchronizes` + 效应域（只有 `spawn` 开新域），**仍然是 `effect` 边，边还是四种**。
+  §7 这三层与 ADR-0035 那一层的分工：**`suspends` 不开域**（`await` 之后的续延还在原域），
+  `spawn` 才开。
 
 ## 8. 信息怎么保留到 native 那一侧
 
 问题的实质是：**图上表达得比 js/wasm 精确的东西，不许在路上丢**。四格分开说。
 
-- **`ptr`**：指针是 `lifetime` 栏能表达的（`borrows(in-port k)` / `owns`），
+- **`ptr`**：指针是 `lifetime` 栏能表达的（`borrows(in-port k)` / `owns` /
+  `untracked`，五格取值见 ADR-0036），
   外加一格 `carry` 问答（`backend.carry` 里"这格 sort 在我这儿是地址还是 box"）。
   js 后端答"box"，c 后端答"地址"，wasm 答"线性内存里的 i32 偏移" —— **同一格声明，三种答案**。
   丢信息的唯一途径是有人把 `ptr` 降成"整数"，所以 `ptr` 是骨架节点，不许被别的节点消掉。
@@ -383,21 +390,29 @@ ADR-0033 §10 保留的那一类零件，十份规格里点到的全部：
 5. **什么都不是**：cpp 的拷贝省略（prvalue 直接接到消费者的入端口上，
    本来就没有那次拷贝）。
 
-### A.5 十份规格问出来的、现在没有答案的四笔账
+### A.5 十份规格问出来的四笔账（两笔已定，两笔还欠）
 
 **这四笔比任何一格节点都要紧，因为它们是五栏或四种边的漏洞：**
 
-1. **跨线程的次序在图上没有表达方式。** go 的 `go_mem.html`（happens-before）与
-   cpp 的 `memory_order` 指到同一处：我们的 `effect` 边只表达"同一效应域内的次序"。
-   **两门语言独立指向同一空洞 ⇒ 该单独立一份 ADR。**
-2. **`gc-lifetime` 与"释放点靠图上最后一次使用算"冲突。** lua 的 `__gc`/弱表、
-   nim 的 `=trace`/ORC、vlang 的 autofree 三门都指到这儿。**同上，该单独立 ADR。**
-3. **`lifetime` 栏要几格取值？** mojo 给了四格（`owns`/`borrows`/`static`/**`untracked`**），
-   cpp 又加一格（**临时量绑到 `const&` 就延长所有者的寿命** —— 借的一方能改被借者的寿命）。
-   两门合起来说明 ADR-0033 §3.2 那三格**不够**。
-4. **驱动器缺一格"回问"机制。** cpp 判不了"声明还是表达式"、判不了 `<`/`>`
+1. ~~跨线程的次序在图上没有表达方式。~~ **已定：ADR-0035。**
+   go 的 `go_mem.html` 与 cpp 的 `memory_order` 指到同一处。决定是：
+   效应域升成一等（只有 `spawn` 开新域）、加第七格效应 `synchronizes`、
+   跨域次序仍是 `effect` 边（**边还是四种**）、内存序是后端那一问的答案、
+   竞争检查是一次可达性。
+2. ~~`gc-lifetime` 与"释放点靠图上最后一次使用算"冲突。~~ **已定：ADR-0036。**
+   lua 的 `__gc`/弱表、nim 的 `=trace`/ORC、vlang 的 autofree 三门指到同一处。
+   决定是：`lifetime` 栏扩到五格（`owns` / `borrows(k)` / `static` / **`managed`** /
+   **`untracked`**），**一格值不许被两套机制同时管**；跨界只经 `hand-to-host` / `pin`
+   两格节点；`managed` 的值图只出根集与 trace 边。
+   —— 第 3 笔账（`lifetime` 要几格取值）一并在这一份里定了，
+   cpp 的"临时量延长"落成 `borrows(k)` 上的附属 `extends`，释放点计算一个字不改。
+3. **驱动器缺一格"回问"机制（还欠）。** cpp 判不了"声明还是表达式"、判不了 `<`/`>`
    （要问"这个名字登记成类型了吗"），nim 的 `optInd` 要问"这一格的列号"。
-   **两门语言指向 `driver.js` 同一格缺口** —— 这比任何一门自己的欠账都值钱。
+   **两门语言指向 `driver.js` 同一格缺口** —— 这比任何一门自己的欠账都值钱，
+   而且它是**语法侧**唯一还剩的机制欠账（cpp 16/351 与 nim 那 28 份都卡在它上面）。
+4. **`suspends` 的两种切段还没对账（还欠）。** `may-early-exit` 的后半段只被错误路径
+   用一次，`suspends` 的后半段要**存起来**（成为一格值，有寿命）——
+   §7 末尾那条判据（"`eval` 与 native 两边的挂起次数必须相同"）还没跑过。
 
 ### A.6 骨架节点候选清单（26 格，两位数，达标）
 
