@@ -28,15 +28,21 @@
 //     浪费空间但不会错 —— 真正按类型排的布局要等 `carry` 那一问有类型（附录 A.5）。
 //   * 列表：**长度存在偏移 0，元素从 8 起**。`index-get` 的边界检查因此有地方读
 //     （越界落 `unreachable` —— 那是 `index-get` 与 `field-get` 分两格的理由之一）。
+//   * **字符串在 data 段里**，布局与宿主面那格 `print_str` 的约定共用一份：
+//     前 8 字节长度、正文从 +8 起、一字节一格。常量的地址编译期就定下，`$hp` 从它们后面起步。
+//     "这一格装的是数还是串"没有类型可问，所以做一格最小的静态追踪（见 kindOf）：
+//     串只许待在"绑给局部量"与"打印"两处，流到别处一律报缺口。
 //
 // ## 接不住的，有名有姓
 //
-//   * 字符串 —— 宿主面只有 `print_i64` 这一族（打印字符串要先有 `print_str` 那格导入）。
 //   * **打印一格多值**（`print(f())` 那条 arity 契约）—— 要运行期长度 + 拼串。
 //     多值本身接住了（一块 N 格存储 + 地址），印成一行没接。
 //   * `conv` 的 `float`（这一批只有 i64）· 闭包（`func` 当值用 / 嵌套 `func`）。
+//   * 变参的 prim（CL 的 `(+ a b c)`）· 既装串又装数的那格量（awk 没有声明）。
 
 import { NODES } from './nodes.js';
+// 字符串常量要发成一段字节 —— 与 C / LLVM 两条腿共用同一份编码（宿主的 TextEncoder 不用）
+import { utf8Bytes } from '../host/utf8.js';
 // 判据那一侧：出来的文本交给**另一个前端**读、用 MIR 的解释器真跑
 // （所以这一格的正确性不由我自己证 —— 见文件头"判据"那一段）。
 import { lowerWat } from '../frontend-wat/lower.js';
@@ -85,22 +91,49 @@ const why = (op, where) => {
   return new Gap(typeof ans === 'string' ? ans : `${where}上还接不住 ${op}`);
 };
 
-/** 一格函数的作用域：名字 -> wasm 局部量名。嵌套 region 里同名的量各占一格。 */
+/**
+ * 一格函数的作用域：名字 -> wasm 局部量名。嵌套 region 里同名的量各占一格。
+ *
+ * 还带一格 `kinds`：那个名字装的是**数**还是**串**。图这一层没有类型，而 wasm 上
+ * 串是"内存里的一块地址"、数就是数，打印那一步必须知道是哪一种 —— 所以这里做一格
+ * 最小的静态追踪（只认 const / ref / bind / set 这几格，追不到的按数算）。
+ * 同一个名字先装串后装数（或反过来）记成 `mix`：那种量在 wasm 上打印不出来，报缺口。
+ */
 class Scope {
-  constructor(fn, parent = null) { this.fn = fn; this.parent = parent; this.names = new Map(); }
+  constructor(fn, parent = null) {
+    this.fn = fn; this.parent = parent; this.names = new Map(); this.kinds = new Map();
+  }
 
-  declare(name) {
+  declare(name, kind = 'int') {
     let id = wname(name);
     while (this.fn.taken.has(id)) id = `${id}_`;
     this.fn.taken.add(id);
     this.fn.locals.push(id);
     this.names.set(name, id);
+    this.kinds.set(name, kind);
     return id;
   }
 
   lookup(name) {
     for (let s = this; s !== null; s = s.parent) if (s.names.has(name)) return s.names.get(name);
     return null;
+  }
+
+  /** 那个名字装的是什么。没登记过（形参、追不到的）按数算。 */
+  kindOf(name) {
+    for (let s = this; s !== null; s = s.parent) if (s.names.has(name)) return s.kinds.get(name) ?? 'int';
+    return 'int';
+  }
+
+  /** 赋值：种类不一致就是 `mix`（打印那一步会因此报缺口，而不是印出一格地址）。 */
+  merge(name, kind) {
+    for (let s = this; s !== null; s = s.parent) {
+      if (s.names.has(name)) {
+        const had = s.kinds.get(name) ?? 'int';
+        if (had !== kind) s.kinds.set(name, 'mix');
+        return;
+      }
+    }
   }
 }
 
@@ -171,6 +204,66 @@ function emitOnce(graph, retOf, multiOf) {
   /** 地址：值一律 i64，取内存要 i32 —— 这一格转换就是"wasm 有内存没有指针"的样子。 */
   const addr = (e) => `(i32.wrap_i64 ${e})`;
 
+  /* ---------------------------------------------- 字符串：data 段里的一块 --------
+   * 布局与宿主面那格 `print_str` 的约定**共用一份**（tests/wat/cases/05-print-str.wat
+   * 钉的是同一句话）：**前 8 字节是长度，正文从 +8 起，一字节一格**。
+   * 常量的地址是编译期就定下的 —— 所以字符串不走 bump 分配器，`$hp` 从它们后面起步。
+   * 只认 ASCII：≥ 0x80 的字节报缺口（前端那侧也是当场 fail），理由同一条 ——
+   * 拼字节印出乱码比报错糟得多。
+   */
+  const strs = new Map();     // 文本 -> 地址
+  const data = [];            // [{ off, bytes }]
+  let dataEnd = 8;            // 0 号地址留空（与 `$hp` 的起点同一条约定）
+  let needStr = false;
+  function strAddr(s) {
+    if (strs.has(s)) return strs.get(s);
+    const bytes = utf8Bytes(s);
+    for (const b of bytes) {
+      if (b >= 0x80) throw new Gap('非 ASCII 的字符串还没接：宿主面那格 print_str 只认 ASCII 字节');
+    }
+    needMem = true;
+    const at = dataEnd;
+    const len = [];
+    for (let i = 0; i < 8; i++) len.push(Math.floor(bytes.length / 256 ** i) % 256);   // 小端
+    data.push({ off: at, bytes: [...len, ...bytes] });
+    // 8 字节对齐：长度那一格要按 i64 读
+    dataEnd = at + 8 + Math.ceil(bytes.length / 8) * 8;
+    strs.set(s, at);
+    return at;
+  }
+
+  /**
+   * 这一格值装的是**数**还是**串**（图那一层没有类型，所以只能静态追这几格）。
+   * 追不到的一律按 `int` —— 而"串流到追不着的地方"这件事在各个消费点上报缺口
+   * （见 noStr），所以答案不会悄悄错：要么是数，要么明说接不住。
+   */
+  function kindOf(x, sc) {
+    if (x === null || x === undefined) return 'int';
+    if (Array.isArray(x)) {
+      const l = asList(x);
+      return l.length === 0 ? 'int' : kindOf(l[l.length - 1], sc);
+    }
+    if (x.lit !== undefined) return typeof x.lit === 'string' ? 'str' : 'int';
+    switch (x.op) {
+      case 'const': return typeof x.attrs.value === 'string' ? 'str' : 'int';
+      case 'ref': return sc.kindOf(x.attrs.name);
+      case 'region': return kindOf(x.ins.body, sc);
+      case 'branch': {
+        const a = kindOf(x.ins.then, sc); const b = kindOf(x.ins.else, sc);
+        return a === b ? a : 'mix';
+      }
+      default: return 'int';
+    }
+  }
+
+  /** 串只许待在"绑给局部量"与"打印"这两处。别的地方接住了就是给错答案，所以报缺口。 */
+  function noStr(x, sc, where) {
+    const k = kindOf(x, sc);
+    if (k === 'str' || k === 'mix') {
+      throw new Gap(`${where}上还接不住字符串（wasm 上它是内存里的一块地址，要类型层才认得出）`);
+    }
+  }
+
   /**
    * 一格 bump 分配：`$hp` 往前推 n 字节，返回装着地址的那格临时量。
    * `bytes` 给数字就是编译期大小，给字符串就是一格 **i32 表达式**（运行期大小 ——
@@ -234,6 +327,14 @@ function emitOnce(graph, retOf, multiOf) {
       case 'prim': {
         const args = asList(x.ins.args);
         const name = x.attrs.name;
+        // 串上的算术只有一条有意义：`+` 是拼接。那要运行期分配 + 拷贝两段字节，
+        // 还得知道结果也是串 —— 这一批没做，明说是缺口（别的算符落在串上本身就是错的）
+        for (const a of args) {
+          if (kindOf(a, sc) !== 'int') {
+            throw new Gap(name === '+' ? '字符串的拼接（`+`）在 wasm 上还没接：要运行期分配 + 拷贝字节'
+              : `${name} 落在字符串上 —— wasm 这一批只有 i64 的算术`);
+          }
+        }
         const op = ARITH.get(name);
         if (op !== undefined) {
           // **一元与二元要分开**：`-1` 是一元的 `-`，当成"少一格实参的二元"就会
@@ -283,6 +384,7 @@ function emitOnce(graph, retOf, multiOf) {
         const size = 8 * (names.length === 0 ? 1 : 1 + Math.max(...names.map(slotOf)));
         const a = alloc(size, sc, pre);
         names.forEach((k, i) => {
+          noStr(vals[i], sc, '记录的字段');
           const v = expr(vals[i], sc, pre);
           pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * slotOf(k)})) ${v})`);
         });
@@ -299,6 +401,7 @@ function emitOnce(graph, retOf, multiOf) {
         const a = alloc(8 * (items.length + 1), sc, pre);
         pre.push(`(i64.store ${addr(`(local.get ${a})`)} (i64.const ${items.length}))`);
         items.forEach((y, i) => {
+          noStr(y, sc, '列表的元素');
           const v = expr(y, sc, pre);
           pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * (i + 1)})) ${v})`);
         });
@@ -353,6 +456,7 @@ function emitOnce(graph, retOf, multiOf) {
         const args = asList(x.ins.args);
         const a = alloc(8 * Math.max(args.length, 1), sc, pre);
         args.forEach((y, i) => {
+          noStr(y, sc, '多值里的一格');
           const v = expr(y, sc, pre);
           pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * i})) ${v})`);
         });
@@ -376,14 +480,42 @@ function emitOnce(graph, retOf, multiOf) {
     const list = asList(x);
     if (list.length === 0) return '(i64.const 0)';
     for (const y of list.slice(0, -1)) pre.push(...stmt(y, sc, sc.fn));
-    return expr(list[list.length - 1], sc, pre);
+    const last = list[list.length - 1];
+    // **wasm 里打印不出值**（宿主面那几条导入都是 `[] -> []`），落到值位置就是
+    // "跑一遍，值算 0"。CL 那份 defer 例子就是这个形状：`(princ "in")` 是 region
+    // 的最后一格，于是它同时是"要跑的动作"和"这一格 region 的值"。
+    if (isVoidish(last) || noFall(last)) {
+      pre.push(...stmt(last, sc, sc.fn));
+      return '(i64.const 0)';
+    }
+    return expr(last, sc, pre);
+  }
+
+  /**
+   * 这一格**不落回来**：`ret` 与 `loop-exit` 一走就不回值位置了，所以它后面那格
+   * "把值放进临时量"是死代码。值位置上碰到它们就当语句发一遍，值给 0（没人读得到）。
+   *
+   * `if (a > b) { return a } else { return b }` 是最常见的形状：函数体最后一格是
+   * branch，两支各是一条 `ret` —— 九门语言里有七门的 max2 就是这么写的。
+   */
+  function noFall(x) {
+    return x !== null && x !== undefined && (x.op === 'ret' || x.op === 'loop-exit');
+  }
+
+  /** 这一格在 wasm 上出不出值。`print` 与"调一格不出值的函数"是两处例外。 */
+  function isVoidish(x) {
+    if (x === null || x === undefined) return false;
+    if (x.op === 'prim') return x.attrs.name === 'print';
+    if (x.op === 'call') return retOf.get(x.ins.fn?.attrs?.name) !== true;
+    return false;
   }
 
   function litOf(v) {
     if (typeof v === 'number' && Number.isInteger(v)) return `(i64.const ${v})`;
     if (v === true) return '(i64.const 1)';
     if (v === false || v === null || v === undefined) return '(i64.const 0)';
-    if (typeof v === 'string') throw new Gap('字符串要线性内存里的布局');
+    // 串就是**它那块内存的地址**（编译期定下的常量），与 `print_str` 的约定同一份
+    if (typeof v === 'string') return `(i64.const ${strAddr(v)})`;
     throw new Gap(`这格字面量还没接：${JSON.stringify(v)}`);
   }
 
@@ -391,7 +523,10 @@ function emitOnce(graph, retOf, multiOf) {
     const fn = x.ins.fn;
     const name = fn !== null && fn !== undefined && fn.op === 'ref' ? fn.attrs.name : null;
     if (name === null || !fns.has(name)) throw new Gap('间接调用（函数当值）还没接');
-    const args = asList(x.ins.args).map((a) => expr(a, sc, pre));
+    const args = asList(x.ins.args).map((a) => {
+      noStr(a, sc, '实参');   // 串传进函数就追不着了（形参没有种类）—— 明说接不住
+      return expr(a, sc, pre);
+    });
     return `(call ${fns.get(name)}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
   }
 
@@ -405,14 +540,17 @@ function emitOnce(graph, retOf, multiOf) {
     switch (x.op) {
       case 'bind': {
         if (x.ins.init?.op === 'func') throw new Gap('嵌套的函数（闭包）还没接');
+        const k = kindOf(x.ins.init, sc);
         const v = expr(x.ins.init, sc, pre);
-        const id = sc.declare(x.attrs.name);      // 先算右值再声明：`local x = x` 才对
+        const id = sc.declare(x.attrs.name, k);   // 先算右值再声明：`local x = x` 才对
         return [...pre, `(local.set ${id} ${v})`];
       }
       case 'set': {
         const id = sc.lookup(x.attrs.name);
         if (id === null) throw new Gap(`赋值到没绑过的名字：${x.attrs.name}`);
+        const k = kindOf(x.ins.value, sc);
         const v = expr(x.ins.value, sc, pre);
+        sc.merge(x.attrs.name, k);
         return [...pre, `(local.set ${id} ${v})`];
       }
       case 'region': {
@@ -435,12 +573,14 @@ function emitOnce(graph, retOf, multiOf) {
       }
       case 'field-set': {
         needMem = true;
+        noStr(x.ins.value, sc, '记录的字段');
         const o = expr(x.ins.obj, sc, pre);
         const v = expr(x.ins.value, sc, pre);
         return [...pre, `(i64.store (i32.add ${addr(o)} (i32.const ${8 * slotOf(x.attrs.field)})) ${v})`];
       }
       case 'index-set': {
         needMem = true;
+        noStr(x.ins.value, sc, '列表的元素');
         const o = tmp(sc); pre.push(`(local.set ${o} ${expr(x.ins.obj, sc, pre)})`);
         const i = tmp(sc); pre.push(`(local.set ${i} ${expr(x.ins.index, sc, pre)})`);
         guard(o, i, pre);
@@ -495,11 +635,16 @@ function emitOnce(graph, retOf, multiOf) {
           return [...[...regions].reverse().flatMap(runExits), '(return)'];
         }
         if (x.ins.value?.op === 'values') f.multi = true;
+        noStr(x.ins.value, sc, '返回值');
         const v = expr(x.ins.value, sc, pre);
         f.ret = true;
-        // 早退也要经过途中每一格 region 的出口（从里往外）
+        // 早退也要经过途中每一格 region 的出口（从里往外）。
+        // **返回值先算完再跑出口动作**：调度器那侧就是这个顺序（出口动作看得见的是
+        // 已经定下的返回值），所以这儿要落一格临时量，不能把表达式留到出口后面求。
         const unwind = [...regions].reverse().flatMap(runExits);
-        return [...pre, ...unwind, `(return ${v})`];
+        if (unwind.length === 0) return [...pre, `(return ${v})`];
+        const r = tmp(sc);
+        return [...pre, `(local.set ${r} ${v})`, ...unwind, `(return (local.get ${r}))`];
       }
       case 'prim': {
         if (x.attrs.name !== 'print') {
@@ -515,7 +660,15 @@ function emitOnce(graph, retOf, multiOf) {
           || (one?.op === 'call' && multiOf.get(one.ins.fn?.attrs?.name) === true)) {
           throw new Gap('打印一格多值要"运行期长度 + 拼串" —— 这一批只印一格 i64');
         }
-        const v = expr(args[0], sc, pre);
+        // 数走 `print_i64`，串走 `print_str`（宿主面那格导入认"长度 + 字节"那块内存）。
+        // 既装串又装数的量在这儿报缺口 —— 印一格地址是错答案。
+        const k = kindOf(one, sc);
+        if (k === 'mix') throw new Gap('这一格量既装过串也装过数 —— 打印要知道是哪一种（要类型层）');
+        const v = expr(one, sc, pre);
+        if (k === 'str') {
+          needStr = true;
+          return [...pre, `(call $print_str ${addr(v)})`];
+        }
         return [...pre, `(call $print ${v})`];
       }
       case 'call': {
@@ -537,15 +690,22 @@ function emitOnce(graph, retOf, multiOf) {
     if (list.length === 0) return [];
     const head = list.slice(0, -1).flatMap((y) => stmt(y, sc, f));
     const last = list[list.length - 1];
-    const voidish = last?.op === 'prim' ? last.attrs.name === 'print'
-      : (last?.op === 'call' ? retOf.get(last.ins.fn?.attrs?.name) !== true : false);
+    const voidish = isVoidish(last);
     const hasValue = last !== null && last !== undefined && !voidish
       && (last.lit !== undefined || (last.op !== undefined && (NODES.get(last.op)?.outs.length ?? 0) > 0));
     if (!hasValue) return [...head, ...stmt(last, sc, f)];
     const pre = [];
+    noStr(last, sc, '返回值');
     const v = expr(last, sc, pre);
     f.ret = true;
-    return [...head, ...pre, `(return ${v})`];
+    // **落到函数末尾也是一条出口**：这儿走的是"最后一格就是返回值"那条路，所以出口动作
+    // 要在这儿跑 —— 贴在 `(return ...)` 后面等于没贴（CL 那份 defer 例子就是这么漏的：
+    // 印出 in / out，b 与 a 全丢了）。顺序与 `ret` 那格同一条：先算完返回值，再跑动作。
+    const unwind = [...regions].reverse().flatMap(runExits);
+    if (unwind.length === 0) return [...head, ...pre, `(return ${v})`];
+    f.unwound = true;   // 出口动作已经在这儿跑过，外面别再贴一遍
+    const r = tmp(sc);
+    return [...head, ...pre, `(local.set ${r} ${v})`, ...unwind, `(return (local.get ${r}))`];
   }
 
   // ---- 走一遍顶层：函数各成一格 wat func，别的语句进 `$__entry` --------------
@@ -568,7 +728,7 @@ function emitOnce(graph, retOf, multiOf) {
       regions.pop();
       if (marks.length !== 0) {
         f.body = [...marks.map((m) => `(local.set ${m.flag} (i64.const 0))`),
-          ...f.body, ...runExits(marks)];
+          ...f.body, ...(f.unwound === true ? [] : runExits(marks))];
       }
       continue;
     }
@@ -582,9 +742,15 @@ function emitOnce(graph, retOf, multiOf) {
   }
 
   const lines = ['(module', '  (import "omni" "print_i64" (func $print (param i64)))'];
+  // 串的那格导入只在**真用到**的时候发（它要读内存，没有 memory 段前端会当场拒）
+  if (needStr) lines.push('  (import "omni" "print_str" (func $print_str (param i32)))');
   if (needMem) {
-    // 一块内存 + 一格堆指针。**从 8 起**：0 号地址留空，好让"没初始化的地址"一眼看出来
-    lines.push('  (memory 1)', '  (global $hp (mut i32) (i32.const 8))');
+    // 一块内存 + 一格堆指针。**从 8 起**：0 号地址留空，好让"没初始化的地址"一眼看出来。
+    // 字符串常量躺在 data 段里，所以 `$hp` 从它们**后面**起步 —— 两块内存互不覆盖。
+    lines.push('  (memory 1)', `  (global $hp (mut i32) (i32.const ${dataEnd}))`);
+    for (const d of data) {
+      lines.push(`  (data (i32.const ${d.off}) ${d.bytes.join(' ')})`);
+    }
   }
   for (const f of mod.fns.values()) {
     const ps = f.params.map((p) => `(param ${wname(p)} i64)`).join(' ');

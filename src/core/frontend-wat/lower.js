@@ -17,8 +17,9 @@
 // - `i32` 的值在 OIR 里**始终以符号扩展后的 int64 保存**。于是无符号那一族
 //   （`div_u` / `shr_u` / `lt_u` …）能靠零扩展一步做对，见 zext32 的注释。
 // - `i64` 的无符号一族**不认**：那要真正的 64 位无符号，int64 表示不出来。
-// - `br` / `br_if` 只能跳最内层的那个 `block` / `loop`（或整个函数 = return）。
-//   OIR 只有 break/continue，没有带标签的跳转。跳更外层会明确报错。
+// - `br` / `br_if` **跳外层的标签也认了**（`tests/wat/cases/04-br-outer.wat`）：OIR 的
+//   Break/Continue 本来就带 `level`，四条腿都照着走 —— 原来这儿写着"OIR 没有带标签的
+//   跳转"，那句话是错的，墙在这个前端自己的 TODO 上。跳整个函数 = return。
 // - `block` / `loop` / `if` 不能带 `(result ...)`：它们在这里是语句，不是表达式。
 // - 表、`call_indirect`、`br_table` 一律不认。**线性内存与全局量已经认了**（ADR-0017
 //   第四刀）：那两格在 ADR-0017 第二刀里长进了核心方言与五条腿，这里只是把 wasm 的
@@ -30,12 +31,20 @@
 //
 // ## 宿主面
 //
-// wasm 自己没有输出能力，靠 import。这里只认一个模块名 `omni`，三条：
+// wasm 自己没有输出能力，靠 import。这里只认一个模块名 `omni`，四条：
 //   (import "omni" "print_i32" (func $p (param i32)))
 //   (import "omni" "print_i64" (func $p (param i64)))
 //   (import "omni" "print_f64" (func $p (param f64)))
-// 它们直接降成 OIR 的 print 内建（和 Omni 源码里的 `print` 是同一条），所以格式、
+//   (import "omni" "print_str" (func $p (param i32)))
+// 前三条直接降成 OIR 的 print 内建（和 Omni 源码里的 `print` 是同一条），所以格式、
 // 换行、四个执行器之间的一致性全都是现成的。
+//
+// 第四条是**唯一一条要读内存的**：实参是一格地址，那里放着「前 8 字节是长度，后面是
+// 那么多字节的正文」。wasm 侧没有字符串类型，字符串就是这么一块内存 —— 所以这条导入
+// 不是"多一个 print"，而是**把内存里的字节读成 OIR 的串**。做法是合成一格 OIR 函数
+// （见 strHelper）：一格 while，逐字节 `chr` 拼起来。
+// **只认 ASCII**：字节 ≥ 0x80 当场 `fail`。多字节的 UTF-8 要按码位组装，那是另一件事，
+// 现在硬拼会把一个汉字印成三个乱码字符 —— 宁可报错，不给错答案。
 //
 // ## 入口
 //
@@ -90,12 +99,19 @@ const wrap32 = (e) => ibin('>>', ibin('<<', e, iconst(32)), iconst(32));
 /** 零扩展。i32 的无符号比较/除法/逻辑右移全靠它：零扩展之后 int64 的有符号运算就是对的。 */
 const zext32 = (e) => ibin('&', e, iconst(0xffffffffn));
 
-/** 宿主面：模块名 `omni` 下认这三条，直接降成 OIR 的 print 内建 */
+/**
+ * 宿主面：模块名 `omni` 下认这四条。前三条直接降成 OIR 的 print 内建；
+ * `print_str` 多一步 —— 实参是地址，要先把内存读成串（`str: true`，见 strHelper）。
+ */
 const HOST_FUNCS = {
   print_i32: { params: ['i32'], results: [], argType: INT },
   print_i64: { params: ['i64'], results: [], argType: INT },
   print_f64: { params: ['f64'], results: [], argType: REAL },
+  print_str: { params: ['i32'], results: [], argType: STRING, str: true },
 };
+
+/** 合成出来的那格「内存 -> 串」函数的名字。用户函数名一律带 `$`，撞不上。 */
+const STR_HELPER = 'omni_wat_str';
 
 class LowerWat {
   constructor(diags) {
@@ -112,6 +128,7 @@ class LowerWat {
     this.globals = [];            // {wasmName, name, wt, mut, init}
     this.globalNames = new Map(); // `$g` -> globals 下标
     this.usedGlobalNames = new Set();
+    this.needStr = false;         // 用到 `print_str` 了吗（要不要合成那格「内存 -> 串」）
   }
 
   err(span, msg) {
@@ -961,7 +978,12 @@ class LowerWat {
     // 宿主面那几条不是真函数，直接落成内建 —— print 的格式与换行于是和别的前端共用一份
     if (d.host !== null) {
       const spec = HOST_FUNCS[d.host];
-      return { e: { kind: 'Builtin', name: 'print', args: lowered, type: VOID, argType: spec.argType }, t: 'void' };
+      // `print_str` 的实参是地址，不是值：先过一遍合成出来的「内存 -> 串」那格函数
+      const args = spec.str === true
+        ? [{ kind: 'Call', func: STR_HELPER, name: STR_HELPER, args: lowered, type: STRING }]
+        : lowered;
+      if (spec.str === true) this.needStr = true;
+      return { e: { kind: 'Builtin', name: 'print', args, type: VOID, argType: spec.argType }, t: 'void' };
     }
     const t = d.results.length === 0 ? 'void' : d.results[0];
     return { e: { kind: 'Call', func: d.mangled, name: d.name ?? d.mangled, args: lowered, type: d.results.length === 0 ? VOID : OIR_TYPE[t] }, t };
@@ -1142,6 +1164,11 @@ class LowerWat {
     for (const d of this.decls) {
       if (d.host === null && d.func !== undefined) funcs.push(d.func);
     }
+    if (this.needStr) {
+      // 读内存的那格函数要真有内存可读 —— 没有 `(memory ...)` 就是模块写错了，明说
+      if (this.mem === null) this.err(null, "omni.print_str reads linear memory, so the module needs a (memory ...) section");
+      funcs.push(strHelper());
+    }
     funcs.push({ name: 'main', mangled: 'omni_main', ret: VOID, params: [], body: oirBlock(stmts) });
     return {
       structs: [], classes: [], enums: [], containers: [], closures: [], fnTypes: [],
@@ -1153,8 +1180,57 @@ class LowerWat {
   }
 }
 
-const INT_BIN = { add: '+', sub: '-', mul: '*', div_s: '/', rem_s: '%', div_u: '/', rem_u: '%', and: '&', or: '|', xor: '^' };
-const INT_CMP = {
+/**
+ * 合成那格「内存 -> 串」的 OIR 函数（`print_str` 用）。
+ *
+ * 约定与图那侧的 wat 后端共用一份：**地址处 8 字节是长度，正文从 +8 起，一字节一格**。
+ * 这里不是"读一个字符串类型"，而是逐字节 `chr` 拼 —— OIR 没有"内存里的串"这种东西，
+ * 而这条路径要跑在四个执行器上，所以只能用最小的那几格（mload / chr / 串拼接）搭。
+ *
+ * `>= 0x80` 当场 `fail`：多字节 UTF-8 要按码位组装，硬拼会印出乱码。宁可报错。
+ */
+function strHelper() {
+  const v = (name, type) => ({ kind: 'VarRef', name, type });
+  const load = (mkind, addr) => ({ kind: 'MemLoad', mkind, addr, off: 0, type: INT });
+  const sconst = (s) => ({ kind: 'Const', type: STRING, value: s });
+  const setv = (name, type, value) => ({
+    kind: 'ExprStmt',
+    expr: { kind: 'Assign', target: v(name, type), value, type },
+  });
+  const body = [
+    { kind: 'Local', name: 'b', type: INT, init: load('i8u', ibin('+', ibin('+', v('a', INT), iconst(8)), v('i', INT))) },
+    {
+      kind: 'If',
+      cond: cmp('>=', INT, v('b', INT), iconst(0x80)),
+      then: oirBlock([{
+        kind: 'ExprStmt',
+        expr: { kind: 'Builtin', name: 'fail', args: [sconst('omni.print_str: only ASCII bytes are supported (a byte >= 0x80 needs real UTF-8 decoding)')], type: VOID },
+      }]),
+      otherwise: null,
+    },
+    setv('s', STRING, {
+      kind: 'Bin', op: '+', opType: STRING, type: STRING,
+      left: v('s', STRING),
+      right: { kind: 'Builtin', name: 'chr', args: [v('b', INT)], type: STRING, argType: INT },
+    }),
+    setv('i', INT, ibin('+', v('i', INT), iconst(1))),
+  ];
+  return {
+    name: STR_HELPER,
+    mangled: STR_HELPER,
+    ret: STRING,
+    params: [{ name: 'a', type: INT }],
+    body: oirBlock([
+      { kind: 'Local', name: 'n', type: INT, init: load('i64', v('a', INT)) },
+      { kind: 'Local', name: 'i', type: INT, init: iconst(0) },
+      { kind: 'Local', name: 's', type: STRING, init: sconst('') },
+      { kind: 'While', cond: cmp('<', INT, v('i', INT), v('n', INT)), body: oirBlock(body) },
+      { kind: 'Return', value: v('s', STRING) },
+    ]),
+  };
+}
+
+const INT_BIN = { add: '+', sub: '-', mul: '*', div_s: '/', rem_s: '%', div_u: '/', rem_u: '%', and: '&', or: '|', xor: '^' };const INT_CMP = {
   eq: '==', ne: '!=',
   lt_s: '<', le_s: '<=', gt_s: '>', ge_s: '>=',
   lt_u: '<', le_u: '<=', gt_u: '>', ge_u: '>=',
