@@ -14,13 +14,11 @@ import {
 import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
+  ops,
 } from '../../src/core/graph/fromtree.js';
 
 
-const OPS = new Map([
-  ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%'],
-  ['<', '<'], ['>', '>'], ['<=', '<='], ['>=', '>='], ['==', '='], ['!=', '!='],
-]);
+const OPS = ops();
 const PRINTS = new Set(['println', 'print', 'eprintln', 'dump']);
 
 const many = (xs) => xs.map(toNode).flat();

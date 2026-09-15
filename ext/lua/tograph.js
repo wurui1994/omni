@@ -14,7 +14,7 @@
 import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
-import { counted } from '../../src/core/graph/fromtree.js';
+import { counted, ops } from '../../src/core/graph/fromtree.js';
 
 const isList = (x) => x !== null && x !== undefined && x.kind === 'list';
 const tag = (x) => (isList(x) && x.items[0]?.kind === 'atom' ? x.items[0].value : null);
@@ -31,11 +31,7 @@ const raw = (v) => v;
 const PRIM = new Map([
   ['print', 'print'], ['tostring', 'concat'], ['#', 'len'],
 ]);
-const OPS = new Map([
-  ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%'], ['^', '^'],
-  ['<', '<'], ['>', '>'], ['<=', '<='], ['>=', '>='], ['==', '='], ['~=', '!='],
-  ['..', 'concat'], ['and', 'and'], ['or', 'or'],
-]);
+const OPS = ops({ '^': '^', '~=': '!=', '..': 'concat', and: 'and', or: 'or' });
 
 const many = (xs) => xs.map(toNode);
 

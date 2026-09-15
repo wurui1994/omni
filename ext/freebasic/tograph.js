@@ -16,14 +16,11 @@ import {
 import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
+  ops,
 } from '../../src/core/graph/fromtree.js';
 
 
-const OPS = new Map([
-  ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['mod', '%'],
-  ['<', '<'], ['>', '>'], ['<=', '<='], ['>=', '>='], ['=', '='], ['<>', '!='],
-  ['&', 'concat'],
-]);
+const OPS = ops({ mod: '%', '=': '=', '<>': '!=', '&': 'concat' });
 
 const many = (xs) => xs.map(toNode).flat();
 const nameOf = (x) => (tag(x) === 'n' ? leaf(kids(x)[0]) : leaf(x));

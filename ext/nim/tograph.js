@@ -15,15 +15,12 @@ import {
 import {
   isList, tag, kids, leaf, part, partKids, groupItems, unquote,
   counted, threePart, incr, augset, lazyAnd, lazyOr, elseOf,
+  ops,
 } from '../../src/core/graph/fromtree.js';
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
 
-const OPS = new Map([
-  ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['div', '/'], ['mod', '%'],
-  ['<', '<'], ['>', '>'], ['<=', '<='], ['>=', '>='], ['==', '='], ['!=', '!='],
-  ['&', 'concat'],
-]);
+const OPS = ops({ div: '/', mod: '%', '&': 'concat' });
 const PRINTS = new Set(['echo', 'write', 'stdout']);
 
 const many = (xs) => xs.map(toNode).flat();
