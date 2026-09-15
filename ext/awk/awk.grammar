@@ -31,27 +31,15 @@
 ;; 这一份见 DESIGN 那一行。两份都能建表，判据是**同一批 .awk 语料**谁认得多。
 
 (grammar awk
-  (tokens NAME NUMBER STRING ERE FUNC_NAME BUILTIN GETLINE NL
-    ;; 只用来标 %prec 的伪终结符
-    CONCAT UNARY POSTFIX)
+  (tokens NAME NUMBER STRING ERE FUNC_NAME BUILTIN GETLINE NL)
 
-  ;; 优先级从低到高，照 POSIX 那张表：
-  ;;   赋值（右）/ ?: （右）/ || / && / in / ~ !~ / 比较（不结合）/ **连接** /
-  ;;   + - / * / % / 一元 + - ! / ^（右）/ ++ -- / $
-  (prec right "=" "+=" "-=" "*=" "/=" "%=" "^=")
-  (prec right "?" ":")
-  (prec left "||")
-  (prec left "&&")
-  (prec left "in")
-  (prec left "~" "!~")
-  (prec nonassoc "<" "<=" ">" ">=" "!=" "==")
-  (prec left CONCAT NAME NUMBER STRING ERE BUILTIN GETLINE)
-  (prec left "+" "-")
-  (prec left "*" "/" "%")
-  (prec right UNARY "!")
-  (prec right "^")
-  (prec left POSTFIX "++" "--")
-  (prec left "$")
+  ;; **没有 (prec …) 声明** —— 优先级与结合性全在下面那串级联里（一级一个非终结符）。
+  ;;
+  ;; 这一条是量出来的：级联写完之后如果还留着优先级声明，那些声明会去**消掉**本该留给
+  ;; GLR 的冲突。最典型的是 `print "x" > "f"`：这儿的 `>` 是重定向，而 `cmp -> cat ">" cat`
+  ;; 也能移进它。两支都该活着（由 print 那条 `(prefer 2)` 定胜负），可只要 `>` 有优先级，
+  ;; resolveConflicts 就会当场砍掉一支，剩下的那支走不通就报 "unexpected >"。
+  ;; 换句话说：**级联与优先级声明不该混用**，混了就是两套消歧规则互相拆台。
 
   (start program)
 
@@ -98,8 +86,15 @@
   ;;
   ;; 一份 awk 程序是若干「项」：`模式 { 动作 }`、光一个模式、光一个动作，或一个函数定义。
 
+  ;; 开头那一段收尾用 `opt-terms` 而不是 `opt-nl`：**一行注释出一个 NL 记号**，所以
+  ;; 文件头连着几行注释就是连着几个 NL。`opt-nl` 只收一个 —— 那是量出来的第一号失败
+  ;; （gawk 的 awklib/eg/lib/*.awk 差不多都以两行注释开头）。
   (rule program
-    (-> (opt-nl items) (program $*2)))
+    (-> (opt-terms items) (program $*2)))
+
+  (rule opt-terms
+    (-> () ())
+    (-> (terms) ()))
 
   ;; 换行/分号在 awk 里都是收尾（POSIX 的 `terminator`），而**允许换行但不收尾**的位置
   ;; 要一处一处说 —— 那就是 opt-nl。这两格是这份语法里所有换行知识的全部。
@@ -115,13 +110,28 @@
     (-> (term) $1)
     (-> (terms term) $1))
 
+  ;; **项之间必须有收尾**（换行或分号），只有最后一项可以省。这一条不是讲究，是消歧：
+  ;; 若允许两个项直接挨着，`x==1 { print }` 就有两种读法 —— 一项（模式 + 动作）或者
+  ;; 两项（光一个模式，再一个光动作）。真 awk 靠"同一行上的动作绑给前面那个模式"来定，
+  ;; 而那件事在语法里的等价说法就是"两项之间要有收尾"。
+  ;;
+  ;; 也不要再写一条 `items terms`：那条与 `items item terms` 对着"一项 + 一个换行"
+  ;; 会给出两条不同的推导（同一棵树、两条路），GLR 照样当真歧义报出来。
+  ;; **右递归**的表，不是左递归。左递归写法（`items item terms | items item`）会让
+  ;; "不带收尾"那一条在**每一处**都可用，于是 `y = x 2` 既能读成一条语句（连接）也能读成
+  ;; 两条（`y = x` 和 `2`）—— 量出来的真歧义。右递归把"不带收尾"钉在**最后一格**：
+  ;;   list -> 空 | 一项 | 一项 收尾 list
+  ;; 于是"只有最后一项可以省收尾"变成语法上的事实，而不是一句注释。
   (rule items
     (-> () ())
-    (-> (items item) ($*1 $2))
-    (-> (items item terms) ($*1 $2))
-    (-> (items terms) $1))
+    (-> (item) ($1))
+    (-> (item terms items) ($1 $*3)))
 
+  ;; `BEGIN` / `END` **必须**带动作（真 awk 也是），所以单列两条 —— 让它们走
+  ;; `pattern` 那条的话，`BEGIN { … }` 又会有"一项还是两项"的两种读法。
   (rule item
+    (-> ("BEGIN" opt-nl action) (rule (begin) $3))
+    (-> ("END" opt-nl action) (rule (end) $3))
     (-> (pattern action) (rule $1 $2))
     (-> (pattern) (rule $1))
     (-> (action) (rule (always) $1))
@@ -129,8 +139,6 @@
     (-> ("func" NAME "(" params ")" opt-nl action) (fn $2 (params $*4) $7)))
 
   (rule pattern
-    (-> ("BEGIN") (begin))
-    (-> ("END") (end))
     (-> (expr) (when $1))
     (-> (expr "," opt-nl expr) (range $1 $4)))
 
@@ -144,11 +152,11 @@
 
   ;; ---- 语句 ------------------------------------------------------------------
 
+  ;; 与 items 同一个形状、同一个理由（见那边的注释）
   (rule stmts
     (-> () ())
-    (-> (stmts stmt) ($*1 $2))
-    (-> (stmts stmt terms) ($*1 $2))
-    (-> (stmts terms) $1))
+    (-> (stmt) ($1))
+    (-> (stmt terms stmts) ($1 $*3)))
 
   (rule stmt
     (-> (simple) $1)
@@ -200,104 +208,149 @@
     (-> (">>" expr) (append $2))
     (-> ("|" expr) (pipe-to $2)))
 
-  ;; ---- 表达式 ----------------------------------------------------------------
+  ;; ---- 表达式：照 POSIX 那张级联表，一级一个非终结符 ------------------------------
   ;;
-  ;; 连接（concatenation）在 awk 里**没有算符** —— 两个表达式挨着就是连接。写成
-  ;; `(expr expr)` 加一格 CONCAT 优先级：于是 `a - b` 是减法（`-` 比 CONCAT 紧、移进赢），
-  ;; 而 `a " " b` 是连接。这一条是 awk 语法里最容易写错的地方，理由写在这儿。
+  ;; **不用优先级声明**，用级联。理由是 awk 的两处硬骨头都不是优先级能表达的：
+  ;;
+  ;;   1. **连接没有算符** —— 两个表达式挨着就是连接（`"x" a b`）。写成
+  ;;      `expr -> expr expr` 加一格 CONCAT 优先级看着省事，量出来是灾难：那条规则在
+  ;;      **每一个**能起头当操作数的记号上都是移进/归约冲突（574 处，GLR 当场被淹）。
+  ;;   2. **一元与二元 `+` `-` 同形** —— `a - b` 是减法，`a (-b)` 是连接。区别只有一条：
+  ;;      连接的**右边那格不许以一元号起头**。这句话没法写成优先级，只能写成语法。
+  ;;
+  ;; 所以照 POSIX 的办法：把"不许以一元号起头"那一支单独拉一条链出来（下面带 `-nu` 的
+  ;; 那三格，nu = non-unary）。`cat -> cat add-nu` 里那个 `add-nu` 往下走到 `pow`，
+  ;; 而 `pow` 只能以操作数起头 —— 一元号那一支进不来。
+  ;;
+  ;; 这一套要 **LALR(1)** 才成立：劈完之后 `pow` 既能归约成 `un`（`add` 那条链）也能归约成
+  ;; `mul-nu`（`-nu` 那条链），靠的是"在 cat 的开头还是在 cat 的续接处"—— 那是两个不同的
+  ;; LR 状态，前看集分得开。SLR 的全局 FOLLOW 分不开，这也是先前那 574 处的一半来源。
 
   (rule exprs
     (-> (expr) ($1))
     (-> (exprs "," opt-nl expr) ($*1 $4)))
 
   (rule expr
+    (-> (assign) $1))
+
+  ;; 赋值：右结合，左边必须是能存的地方（lvalue）
+  (rule assign
+    (-> (ternary) $1)
+    (-> (lvalue "=" opt-nl assign) (assign "=" $1 $4))
+    (-> (lvalue "+=" opt-nl assign) (assign "+=" $1 $4))
+    (-> (lvalue "-=" opt-nl assign) (assign "-=" $1 $4))
+    (-> (lvalue "*=" opt-nl assign) (assign "*=" $1 $4))
+    (-> (lvalue "/=" opt-nl assign) (assign "/=" $1 $4))
+    (-> (lvalue "%=" opt-nl assign) (assign "%=" $1 $4))
+    (-> (lvalue "^=" opt-nl assign) (assign "^=" $1 $4))
+    (-> (lvalue "**=" opt-nl assign) (assign "^=" $1 $4)))
+
+  (rule lvalue
+    (-> (NAME) (name $1))
+    (-> (NAME "[" exprs "]") (index $1 (subscript $*3)))
+    (-> ("$" prim) (field $2)))
+
+  (rule ternary
+    (-> (orx) $1)
+    (-> (orx "?" opt-nl ternary ":" opt-nl ternary) (cond $1 $4 $7)))
+
+  (rule orx
+    (-> (andx) $1)
+    (-> (orx "||" opt-nl andx) (bin "||" $1 $4)))
+
+  (rule andx
+    (-> (inx) $1)
+    (-> (andx "&&" opt-nl inx) (bin "&&" $1 $4)))
+
+  (rule inx
+    (-> (matchx) $1)
+    (-> (inx "in" NAME) (in $1 $3)))
+
+  (rule matchx
+    (-> (cmp) $1)
+    (-> (matchx "~" cmp) (bin "~" $1 $3))
+    (-> (matchx "!~" cmp) (bin "!~" $1 $3)))
+
+  ;; 比较**不结合**（POSIX：`a < b < c` 不合法），所以两边都是 cat 而不是 cmp
+  (rule cmp
+    (-> (cat) $1)
+    (-> (cat "<" cat) (bin "<" $1 $3))
+    (-> (cat "<=" cat) (bin "<=" $1 $3))
+    (-> (cat ">" cat) (bin ">" $1 $3))
+    (-> (cat ">=" cat) (bin ">=" $1 $3))
+    (-> (cat "==" cat) (bin "==" $1 $3))
+    (-> (cat "!=" cat) (bin "!=" $1 $3))
+    ;; `cmd | getline [var]` —— 管道只在 getline 左边出现，所以摆在这一级就够
+    (-> (cmp "|" GETLINE) (getline (cmd $1)))
+    (-> (cmp "|" GETLINE lvalue) (getline (cmd $1) (into $4))))
+
+  ;; 连接：左结合，**右边那格不许以一元号起头**
+  (rule cat
+    (-> (add) $1)
+    (-> (cat add-nu) (cat $1 $2)))
+
+  (rule add
+    (-> (mul) $1)
+    (-> (add "+" mul) (bin "+" $1 $3))
+    (-> (add "-" mul) (bin "-" $1 $3)))
+
+  (rule add-nu
+    (-> (mul-nu) $1)
+    (-> (add-nu "+" mul) (bin "+" $1 $3))
+    (-> (add-nu "-" mul) (bin "-" $1 $3)))
+
+  (rule mul
+    (-> (un) $1)
+    (-> (mul "*" un) (bin "*" $1 $3))
+    (-> (mul "/" un) (bin "/" $1 $3))
+    (-> (mul "%" un) (bin "%" $1 $3)))
+
+  (rule mul-nu
+    (-> (pow) $1)
+    (-> (mul-nu "*" un) (bin "*" $1 $3))
+    (-> (mul-nu "/" un) (bin "/" $1 $3))
+    (-> (mul-nu "%" un) (bin "%" $1 $3)))
+
+  ;; 一元号与前缀增减。`^` 比一元号紧（`-2^2` 是 `-(2^2)`），所以 un 往下就是 pow
+  (rule un
+    (-> (pow) $1)
+    (-> ("-" un) (neg $2))
+    (-> ("+" un) (pos $2))
+    (-> ("!" un) (not $2))
+    (-> ("++" lvalue) (preinc $2))
+    (-> ("--" lvalue) (predec $2)))
+
+  ;; `^` 右结合，且右边可以带一元号（`2^-1`）
+  (rule pow
+    (-> (post) $1)
+    (-> (post "^" un) (bin "^" $1 $3))
+    (-> (post "**" un) (bin "^" $1 $3)))
+
+  (rule post
+    (-> (prim) $1)
+    (-> (post "++") (postinc $1))
+    (-> (post "--") (postdec $1)))
+
+  (rule prim
     (-> (NUMBER) (num $1))
     (-> (STRING) (str $1))
     (-> (ERE) (re $1))
     (-> (NAME) (name $1))
     (-> (NAME "[" exprs "]") (index $1 (subscript $*3)))
-    (-> ("$" expr) (prec "$") (field $2))
+    (-> ("$" prim) (field $2))
     (-> ("(" expr ")") (paren $2))
-    (-> ("(" exprs "," expr ")" "in" NAME) (in-multi (key $*2 $4) $7))
+    ;; `(i, j) in arr` —— 多下标的成员测试
+    (-> ("(" exprs "," opt-nl expr ")" "in" NAME) (in-multi (key $*2 $5) $8))
     (-> (NAME "(" args ")") (call $1 (args $*3)))
     (-> (BUILTIN "(" args ")") (call $1 (args $*3)))
     (-> (BUILTIN) (call $1 (args)))
-
-    (-> (expr expr) (prec CONCAT) (cat $1 $2))
-
-    (-> (expr "^" expr) (bin "^" $1 $3))
-    (-> (expr "**" expr) (bin "^" $1 $3))
-    (-> (expr "*" expr) (bin "*" $1 $3))
-    (-> (expr "/" expr) (bin "/" $1 $3))
-    (-> (expr "%" expr) (bin "%" $1 $3))
-    (-> (expr "+" expr) (bin "+" $1 $3))
-    (-> (expr "-" expr) (bin "-" $1 $3))
-    (-> (expr "<" expr) (bin "<" $1 $3))
-    (-> (expr "<=" expr) (bin "<=" $1 $3))
-    (-> (expr ">" expr) (bin ">" $1 $3))
-    (-> (expr ">=" expr) (bin ">=" $1 $3))
-    (-> (expr "==" expr) (bin "==" $1 $3))
-    (-> (expr "!=" expr) (bin "!=" $1 $3))
-    (-> (expr "~" expr) (bin "~" $1 $3))
-    (-> (expr "!~" expr) (bin "!~" $1 $3))
-    (-> (expr "&&" opt-nl expr) (bin "&&" $1 $4))
-    (-> (expr "||" opt-nl expr) (bin "||" $1 $4))
-    (-> (expr "in" NAME) (in $1 $3))
-    (-> (expr "?" expr ":" expr) (cond $1 $3 $5))
-
-    (-> ("-" expr) (prec UNARY) (neg $2))
-    (-> ("+" expr) (prec UNARY) (pos $2))
-    (-> ("!" expr) (prec UNARY) (not $2))
-    (-> ("++" expr) (prec UNARY) (preinc $2))
-    (-> ("--" expr) (prec UNARY) (predec $2))
-    (-> (expr "++") (prec POSTFIX) (postinc $1))
-    (-> (expr "--") (prec POSTFIX) (postdec $1))
-
-    (-> (expr "=" expr) (assign "=" $1 $3))
-    (-> (expr "+=" expr) (assign "+=" $1 $3))
-    (-> (expr "-=" expr) (assign "-=" $1 $3))
-    (-> (expr "*=" expr) (assign "*=" $1 $3))
-    (-> (expr "/=" expr) (assign "/=" $1 $3))
-    (-> (expr "%=" expr) (assign "%=" $1 $3))
-    (-> (expr "^=" expr) (assign "^=" $1 $3))
-    (-> (expr "**=" expr) (assign "^=" $1 $3))
-
-    ;; getline 六种形状。`cmd | getline` 那两支的 `|` 用的是重定向那一级 —— awk 里
-    ;; 管道在表达式里只出现在 getline 左边，所以不必另开一级优先级。
+    ;; getline 的四种"不带管道"形状。带 `<` 那两条 `(prefer 2)`：`getline < "f"` 里那个
+    ;; `<` 是重定向不是比较，两支都能归约时重定向赢（与真 awk 一致）。
     (-> (GETLINE) (getline))
-    (-> (GETLINE NAME) (getline (into $2)))
-    (-> (GETLINE "<" expr) (prec "<") (getline (from $3)))
-    (-> (GETLINE NAME "<" expr) (prec "<") (getline (into $2) (from $4)))
-    (-> (expr "|" GETLINE) (getline (cmd $1)))
-    (-> (expr "|" GETLINE NAME) (getline (cmd $1) (into $4))))
+    (-> (GETLINE lvalue) (getline (into $2)))
+    (-> (GETLINE "<" cat) (prefer 2) (getline (from $3)))
+    (-> (GETLINE lvalue "<" cat) (prefer 2) (getline (into $2) (from $4))))
 
   (rule args
     (-> () ())
     (-> (exprs) $1)))
-
-;; ---- 卡在哪儿（这一份的诊断，不是待办清单） --------------------------------------
-;;
-;; 量出来的：246 状态 / 120 条产生式 / **608 处冲突**，702 份 .awk 只过 33 份，
-;; 失败的话大多是「too many concurrent parses (> 400)」或「the input is ambiguous」。
-;; 也就是说：**不是语法写少了，是表太弱**。
-;;
-;; 根因是一句话：**我们的建表器是 SLR(1)**（glr/table.js —— 归约用的是 FOLLOW 集，
-;; 不是 LALR 的 lookahead 集）。awk 是第一门把这条边界顶出来的语言，因为它有两样东西
-;; 同时存在：
-;;
-;;   1. **连接没有算符**（`a " " b`）—— 于是 `expr -> expr expr` 这一条在**每一个**
-;;      能起头当操作数的记号上都是移进/归约冲突。给那几个终结符挂上 CONCAT 那一级
-;;      能消掉一批（784 -> 608），但消不掉靠 lookahead 才能分开的那些。
-;;   2. **一元 +/- 与二元 +/- 同形**（`a - b` vs `a` 连接 `(-b)`）—— POSIX 那份语法为此
-;;      把表达式劈成 `unary_expr` / `non_unary_expr` 两套。劈完之后 `pow` 会同时归约成
-;;      两个非终结符，**靠 lookahead 才分得开** —— 那正好是 SLR(1) 分不开、LALR(1)
-;;      分得开的那一格。
-;;
-;; 对照：gawk 自己那份 awkgram.y 走我们的导入器建表是 352 状态 / 203 产生式 /
-;; **58 处冲突** —— 同一门语言、同一台建表器，它少一个数量级，因为它是照 yacc
-;; 的 LALR 默认消歧写的。
-;;
-;; 所以这一格该做的**不是**继续改这份语法，而是把 glr/table.js 从 SLR(1) 升到 LALR(1)。
-;; 那一步对已经落地的几门也是净收益（lua 那份 23 处冲突多半会归零），而对后面
-;; go / vlang / nim / c++ 是**前提** —— 它们比 awk 更吃 lookahead。
-;; 在那之前，读 awk 语法用 `omni glr table $OMNI_REF_DIR/gawk/awkgram.y` 就行。
