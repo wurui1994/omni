@@ -214,9 +214,10 @@ export const NODES = new Map([
   //
   // lua 只有 break（它的 continue 是 `goto`）—— 一格节点两个 kind，不是两格节点。
   //
-  // **一笔量出来的账**：这一格想上 C / wasm 两条腿，先要 OIR 长出**带标签的 break** ——
-  // 拿手写的 WAT 试过，`br` 跳外层 `block` 当场报 "OIR has no labeled break"
-  // （`docs/design/node-graph-contract.md` §9 那段量的三条）。墙在 OIR，不在 wasm。
+  // **那笔账已经结了，而且结论与当初的猜相反**：当初拿手写 WAT 试出 "OIR has no
+  // labeled break"，以为墙在 OIR；再量一遍才发现 OIR 的 `Break` / `Continue` 本来就带
+  // 一格 `level`（1 = 最内层），四条腿全认 —— 墙其实在 **WAT 前端**那一句没写的 TODO。
+  // 补上之后（`level = depth + 1`），这一格在 wat 那条腿上也跑得起来了。
   N('loop-exit', 'stat', [], {
     attrs: ['kind'], effects: ['may-early-exit'], outs: [],
     doc: 'break / continue（go/V/nim/mojo/awk）/ lua 只有 break / fb 的 Exit Do',

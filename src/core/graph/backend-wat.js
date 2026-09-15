@@ -15,7 +15,7 @@
 //
 //   整数（i64）· 函数 + 调用 + return · if（语句位置与**值位置**都行）· while（含 post 步进）
 //   · 打印整数 · **记录与列表**（线性内存 + 一格 bump 分配器）· **多值**（同上）
-//   · **切片**（运行期大小的分配 + 一圈拷贝循环）
+//   · **切片**（运行期大小的分配 + 一圈拷贝循环）· **break / continue**（block + loop 两格标签）
 //
 // ## 布局（没有类型的那一层怎么排内存）
 //
@@ -33,8 +33,6 @@
 //   * 字符串 —— 宿主面只有 `print_i64` 这一族（打印字符串要先有 `print_str` 那格导入）。
 //   * **打印一格多值**（`print(f())` 那条 arity 契约）—— 要运行期长度 + 拼串。
 //     多值本身接住了（一块 N 格存储 + 地址），印成一行没接。
-//   * `loop-exit`（break / continue）—— **墙在 OIR**：`br` 跳外层 block 报
-//     "OIR has no labeled break"。这一条是量出来的，不是猜的。
 //   * 闭包（`func` 当值用 / 嵌套 `func`）· 多值（`values` / `pick`）· `scope-exit`。
 
 import { NODES } from './nodes.js';
@@ -56,7 +54,7 @@ const CAN = new Map([
   ['conv', 'wasm 这一批只有 i64：`float` 那一格要 f64 与"两种数值类型"的算术'],
   ['slice', true],
   ['scope-exit', 'wasm 没有 unwind：出口动作要先把 region 的出口显式化'],
-  ['loop-exit', 'OIR 还没有带标签的 break（br 跳外层 block 当场报）—— 墙在 OIR 不在 wasm'],
+  ['loop-exit', true],
 ]);
 
 export function watCan(op) {
@@ -146,6 +144,8 @@ function emitOnce(graph, retOf, multiOf) {
   const fns = topFuncs(items);
   let loopSeq = 0;
   let tmpSeq = 0;
+  /** 当前嵌在哪几格 loop 里（`break` / `continue` 各有一格 block 标签）。 */
+  const loops = [];
   let needMem = false;
   /**
    * **字段名 -> 槽位**（一张表管整个模块）。图这一层没有类型，`field-get` 只拿到名字，
@@ -222,13 +222,33 @@ function emitOnce(graph, retOf, multiOf) {
       }
       case 'prim': {
         const args = asList(x.ins.args);
-        const op = ARITH.get(x.attrs.name);
-        if (op !== undefined) return `(${op} ${expr(args[0], sc, pre)} ${expr(args[1], sc, pre)})`;
-        if (CMP.has(x.attrs.name)) {
+        const name = x.attrs.name;
+        const op = ARITH.get(name);
+        if (op !== undefined) {
+          // **一元与二元要分开**：`-1` 是一元的 `-`，当成"少一格实参的二元"就会
+          // 悄悄算成 `1 - 0`。这个错是矩阵抓出来的（nim / mojo 那两份 loopexit
+          // 从 `var j = -1` 起步，wat 那条腿印出 7 而不是 8）——
+          // **少一格实参不许当 0 用**，接不住就报缺口。
+          if (args.length === 1) {
+            if (name === '-') return `(i64.sub (i64.const 0) ${expr(args[0], sc, pre)})`;
+            if (name === '+') return expr(args[0], sc, pre);
+            throw new Gap(`一元的 ${name} 还没接`);
+          }
+          if (args.length !== 2) {
+            throw new Gap(`${name} 收到 ${args.length} 格实参 —— 这一批只接一元与二元`);
+          }
+          return `(${op} ${expr(args[0], sc, pre)} ${expr(args[1], sc, pre)})`;
+        }
+        if (CMP.has(name)) {
+          if (args.length !== 2) throw new Gap(`${name} 收到 ${args.length} 格实参`);
           // 比较出 i32，要当值用得补一格符号扩展
           return `(i64.extend_i32_s ${cond(x, sc, pre)})`;
         }
-        throw new Gap(`这格内建还没接：${x.attrs.name}`);
+        // `not`：真假在这一批用 0/1 表示，所以它就是"等于 0"
+        if (name === 'not' && args.length === 1) {
+          return `(i64.extend_i32_s (i64.eqz ${expr(args[0], sc, pre)}))`;
+        }
+        throw new Gap(`这格内建还没接：${name}`);
       }
       case 'call': return callOf(x, sc, pre);
       // **值位置的 `if`**：一格临时量 + 两支各赋值。wasm 的 block 不带 result，
@@ -408,15 +428,37 @@ function emitOnce(graph, retOf, multiOf) {
         return [...pre, `(if ${c} (then ${t}) (else ${e}))`];
       }
       case 'loop': {
-        // while 的形状：`(loop $L (if cond (then 体 步进 (br $L))))`
-        // —— **量过的那一条**：`br` 只能跳最内层，所以 while 只能长这个样子。
-        const lab = `$L${++loopSeq}`;
+        // while 的形状（三层，每一层都有确切的用处）：
+        //
+        //   (block $B            ← `break` 跳这儿：跳出整个循环
+        //     (loop $L           ← 一轮
+        //       (if cond (then
+        //         (block $C 体)  ← `continue` 跳这儿：吃掉体的剩下部分，**但步进照跑**
+        //         步进
+        //         (br $L)))))
+        //
+        // 中间那一格 `$C` 是关键：`continue` 直接跳 `$L` 会漏掉步进 —— 那正是
+        // 调度器那一侧把步进单列成 `post` 端口的同一条理由（漏了就是死循环）。
+        const n = ++loopSeq;
+        const lab = `$L${n}`;
+        const brk = `$B${n}`;
+        const cont = `$C${n}`;
+        loops.push({ brk, cont });
         const inner = new Scope(f, sc);
         const body = stmts(x.ins.body, inner, f).join(' ');
         const post = stmts(x.ins.post, inner, f).join(' ');
+        loops.pop();
         const c = cond(x.ins.cond, sc, pre);
         // 条件里若要临时量，那几条得在**每轮**都跑一遍，所以它们进 loop 里面
-        return [`(loop ${lab} ${pre.join(' ')} (if ${c} (then ${body} ${post} (br ${lab}))))`];
+        return [`(block ${brk} (loop ${lab} ${pre.join(' ')}`
+          + ` (if ${c} (then (block ${cont} ${body}) ${post} (br ${lab})))))`];
+      }
+      // break / continue：跳的是上面那两格 `block` 的标签 —— 深度由 WAT 前端自己算
+      // （`level = depth + 1`，四条腿的 Break/Continue 本来就带 level 那一格）。
+      case 'loop-exit': {
+        if (loops.length === 0) throw new Gap('loop-exit 不在任何一格 loop 里');
+        const top = loops[loops.length - 1];
+        return [`(br ${x.attrs.kind === 'continue' ? top.cont : top.brk})`];
       }
       case 'ret': {
         if (x.ins.value === undefined) return ['(return)'];

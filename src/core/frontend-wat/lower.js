@@ -711,12 +711,19 @@ class LowerWat {
       }
       return { stmt: { kind: 'Return', value: null }, condNode };
     }
-    if (depth !== 0) {
-      this.err(target.span, `br to a non-innermost label is not supported yet (OIR has no labeled break); target depth ${depth}`);
-      return null;
-    }
-    const l = ctx.labels[ctx.labels.length - 1];
-    return { stmt: { kind: l.kind === 'loop' ? 'Continue' : 'Break' }, condNode };
+    // **跳外层也认了**（原来这儿报 "OIR has no labeled break"，那句话是错的）：
+    // OIR 的 `Break` / `Continue` 本来就带一格 `level`（1 = 最内层），四条腿全认
+    // （interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签 jump）。
+    // 而这一份把 `block` 与 `loop` **都**降成一格 `While(true)`（见上面那一段），
+    // 所以**标签的距离就是循环的层数** —— `level = depth + 1`，一句话就够。
+    const l = ctx.labels[ctx.labels.length - 1 - depth];
+    const level = depth + 1;
+    return {
+      stmt: l.kind === 'loop'
+        ? { kind: 'Continue', level }        // loop 的 br：从头再来
+        : { kind: 'Break', level },          // block 的 br：跳出去
+      condNode,
+    };
   }
 
   // ---------------------------------------------------------------- 值
