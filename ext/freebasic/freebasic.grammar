@@ -98,10 +98,20 @@
     (-> (NL) $1)
     (-> (":") $1))
 
-  ;; 一行里用 `:` 隔开的几条语句
+  ;; 一行里用 `:` 隔开的几条语句。
+  ;;
+  ;; **这儿只有一格 simple**，重复由 `stmts` 那条递归给 —— `a : b` 于是只有一棵树
+  ;; （两条语句，前一条的终结符是 `:`）。写成 `simples -> simples ":" simple` 的话，
+  ;; 它与 `stmt -> simples term` + `term -> ":"` 说的是同一件事：`a : b` 既是
+  ;; "一行两条"又是"两行各一条"，每个 `:` 分叉一次，一行三条语句就八个解。
+  ;; 单行块（`for … : … : next`、`if … then … : …`）要的是**真的一串**，那一格用
+  ;; `inline-simples`（下面那条）—— 那儿的 `:` 位置固定，不与 `term` 抢。
   (rule simples
+    (-> (simple) ($1)))
+
+  (rule inline-simples
     (-> (simple) ($1))
-    (-> (simples ":" simple) ($*1 $3)))
+    (-> (inline-simples ":" simple) ($*1 $3)))
 
   ;; ---- 预处理指令（`#include once "x.bi"`、`#if`、`#define`）。它们自成一行。
   (rule pp
@@ -388,8 +398,8 @@
     (-> ("if" expr then-opt NL stmts elifs "end" "if" term) (if $2 (body $*5) (elifs $*6)))
     (-> ("if" expr then-opt NL stmts elifs "else" stmts "end" "if" term)
         (if $2 (body $*5) (elifs $*6) (else $*8)))
-    (-> ("if" expr "then" simples term) (if $2 (body $*4)))
-    (-> ("if" expr "then" simples "else" simples term) (if $2 (body $*4) (else $*6))))
+    (-> ("if" expr "then" inline-simples term) (if $2 (body $*4)))
+    (-> ("if" expr "then" inline-simples "else" inline-simples term) (if $2 (body $*4) (else $*6))))
 
   (rule then-opt
     (-> () ())
@@ -401,7 +411,7 @@
 
   (rule for-block
     (-> ("for" for-head NL stmts "next" next-tail term) (for $2 (body $*4)))
-    (-> ("for" for-head ":" simples "next" next-tail term) (for $2 (body $*4))))
+    (-> ("for" for-head ":" inline-simples "next" next-tail term) (for $2 (body $*4))))
 
   ;; `for i = 0 to 9 step 2` 与 `for i as integer = 0 to n`（**`as` 在名字后面**，
   ;; 不是前面 —— 头一版写反了，语料里 123 份文件立刻现形）
@@ -418,7 +428,7 @@
 
   (rule while-block
     (-> ("while" expr NL stmts "wend" term) (while $2 (body $*4)))
-    (-> ("while" expr ":" simples "wend" term) (while $2 (body $*4))))
+    (-> ("while" expr ":" inline-simples "wend" term) (while $2 (body $*4))))
 
   ;; `do … loop` 的四种：条件在头、条件在尾、以及 `while` / `until`（`until` 不是关键字，
   ;; 它是普通名字 —— FreeBASIC 里 `until` 只在这一处有意义，所以按 NAME 收）
@@ -442,9 +452,9 @@
     (-> () ())
     (-> (cases "case" case-vals NL stmts) ($*1 (case (vals $*3) (body $*5))))
     ;; `case v : stmt` —— 单行分支，行尾那个 NEWLINE 要自己收（漏了它 86 份文件不过）
-    (-> (cases "case" case-vals ":" simples NL) ($*1 (case (vals $*3) (body $*5))))
+    (-> (cases "case" case-vals ":" inline-simples NL) ($*1 (case (vals $*3) (body $*5))))
     (-> (cases "case" "else" NL stmts) ($*1 (else (body $*5))))
-    (-> (cases "case" "else" ":" simples NL) ($*1 (else (body $*5)))))
+    (-> (cases "case" "else" ":" inline-simples NL) ($*1 (else (body $*5)))))
 
 
   (rule case-vals
@@ -885,8 +895,8 @@
 
 ;; ## 量到的（`node bench/grammars.js freebasic`，语料 = fbc/examples + fbc/src 下 1722 份 .bas）
 ;;
-;;   1006 状态 / 626 产生式 / 159 终结符 / 275 处冲突留给驱动器
-;;   **1037 / 1722 过（60%）**
+;;   1007 状态 / 627 产生式 / 159 终结符 / 275 处冲突留给驱动器
+;;   **1063 / 1722 过（62%）**
 ;;
 ;; 一路的账（每一刀都先按报错归类，最大那一类先修，再量）：
 ;;   264 → 头一版（`fold-case` 关键字刚补上，语法本身还很粗）
@@ -966,6 +976,14 @@
 ;;                      只在**逗号之后**允许空一格，不然 `f()` 立刻两个解。
 ;;  1006 -> 1037 (+31)  `declare static sub` 那一族（修饰词写在 `sub`/`function` **前面**）
 ;;                      + `operator MyType.cast() as string`（名字后面那格是关键字）。
+;;  1037 -> 1063 (+26)  **`simples` 去重**：`stmt -> simples term` + `term -> ":"` 与
+;;                      `simples -> simples ":" simple` 说的是同一件事，于是 `a : b` 有
+;;                      **两棵树**（一行两条 vs 两行各一条），每个 `:` 分叉一次，一行三条
+;;                      语句就八个解。`simples` 收成一格 simple（重复由 `stmts` 那条递归给），
+;;                      单行块（`for … : … : next` / `if … then … : …`）另开一条
+;;                      `inline-simples` —— 那儿的 `:` 位置固定，不与 `term` 抢。
+;;                      节点数 396k -> 423k、解析 18.3s -> 16.9s（重复的解没了）。
+;;                      **与 vlang 那两刀是同一个毛病**：同一件事写了两遍。
 ;;
 ;; **被量否掉的两手，都记下来免得再试：**
 ;;   1. `cmd-args -> (point)`（让 `Window (-15,-10)-(15,10)` 这种"只有一格坐标对实参"过）：
