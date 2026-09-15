@@ -249,6 +249,12 @@ construct 的默认实参、赋值当表达式用（`jnc$asgn$T` 助手）。
 `@deprecated`：它是回退，不再收新特性；两条路不一致时看的是 `$JANCY` 那棵树
 （`doc/language/rst/*.rst` 与 `src/jnc_ct/**`）。
 
+**"不收"那个词作废了 —— 见 ADR-0032**。这一节前面几处写着"明说不收"的话（`destruct`、
+`weak`、`async`、`disposable`、`threadlocal once`、正则 switch、`dylayout`…）都是把**宿主的
+欠缺**说成了**语言的边界**：真实情况是它们在"单线程 + 有 GC 的宿主"上各有一份**合理化的
+落法**（`destruct` 落在作用域出口与程序结束前、`async` 落成事件队列 + 状态机、正则 switch
+落成编译期 DFA…）。那份对照表与做的次序在 ADR-0032 里，这一节只留"今天落到哪儿"的数。
+
 **翻默认之后欠下的那一笔（写在这儿，别忘）**：`tests/llvm` 上两处 `.jnc` 暂时钉着
 `JNC_RULES=0`（`tests/llvm/run.js` 的 `OLD_JNC`）—— 它们是**宿主面**那一族
 （`import "libglfw.dylib" with "glfw3.h"` 从 C 头文件收声明、`opaque class` 的方法降成
