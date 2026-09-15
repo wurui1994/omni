@@ -278,6 +278,27 @@ G4 判据。
 四个后端的分工写死：**C 是产品，js 是尺子，wasm 是契约的证明，sx 是给人看的序列化。**
 `ir` 那一格是 C/wasm 共用的下半段，不单独算一个后端的立场。
 
+**wasm 那条腿量过一遍了（还没写代码，先把路探明）。** 仓库里已经有一个 WAT 前端
+（`src/core/frontend-wat/lower.js`，WAT -> OIR）与一条能在**进程内**跑起来的路：
+`lowerWat(...)` -> `interpretMir(oir)`。拿手写的最小模块试过三样，结果是量出来的：
+
+- ✓ **函数 + 调用 + return**：`(func $twice (param $n i64) (result i64) (return …))` 收得下、跑得对（42）。
+- ✓ **while 的形状**：`(loop $again (if cond (then … (br $again))))` 收得下、跑得对（0/1/2）。
+- ✗ **`br` 跳外层 `block`**：报 `br to a non-innermost label is not supported yet
+  (OIR has no labeled break)`。
+
+第三条是这一批新节点撞上的第一堵墙，而且**墙在 OIR 那一层，不在 wasm 那一层**：
+`loop-exit`（break / continue）要的正是"跳出最内层之外的那一格"。所以账是这么记的 ——
+**`loop-exit` 想上 C / wasm 两条腿，先要 OIR 长出带标签的 break**；在那之前 wasm 后端
+能接的子集是"整数 + 函数 + 调用 + 语句位置的 if + while"，接不住的三格有名有姓：
+字符串与记录（要线性内存里的布局）、表达式位置的 `if`（OIR 那侧 block 不带 result）、
+`loop-exit`（上面那条）。
+
+这也说明 `gaps()` 那台机器**至今是空转的**：现在三个后端（interp / sx / js）都报"没有缺口"，
+因为它们都在 JS 宿主里，什么都接得住。**加 wasm 的第一份价值不是多一条腿，是让缺口清单
+第一次真的有内容** —— 那是 §6 第 2 条纪律（"接不住是构建期错误，清单是算出来的待办"）
+第一次被检验。
+
 ## 11. 落地顺序（每步一个可量产出）
 
 1. **十份 `ext/<lang>/SPEC.md`**（格式见 `docs/EXTENSIONS.md` §八）。

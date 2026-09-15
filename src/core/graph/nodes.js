@@ -213,6 +213,10 @@ export const NODES = new Map([
   // 两条都由调度器给，而且**都要经过途中每一格 region 的出口**（scope-exit 照跑）。
   //
   // lua 只有 break（它的 continue 是 `goto`）—— 一格节点两个 kind，不是两格节点。
+  //
+  // **一笔量出来的账**：这一格想上 C / wasm 两条腿，先要 OIR 长出**带标签的 break** ——
+  // 拿手写的 WAT 试过，`br` 跳外层 `block` 当场报 "OIR has no labeled break"
+  // （`docs/design/node-graph-contract.md` §9 那段量的三条）。墙在 OIR，不在 wasm。
   N('loop-exit', 'stat', [], {
     attrs: ['kind'], effects: ['may-early-exit'], outs: [],
     doc: 'break / continue（go/V/nim/mojo/awk）/ lua 只有 break / fb 的 Exit Do',
