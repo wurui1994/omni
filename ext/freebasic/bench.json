@@ -1,0 +1,8 @@
+{
+  "grammar": "freebasic.grammar",
+  "doc": "语料 = fbc 那棵树里 examples/ 与 src/ 下的 .bas（1722 份）。**tests/ 那 2515 份不算** —— 那是编译器的测试集，里面故意有写坏的代码，拿它当分母是自欺。树不在就跳过。语法照 FreeBASIC 语言手册的形状写，不是从 fbc 的源码（GPL）翻译来的；它的 .bas 只当解析语料读。",
+  "corpus": [
+    { "tree": "fbc", "env": "FBC_SRC", "sub": "examples", "ext": ".bas" },
+    { "tree": "fbc", "env": "FBC_SRC", "sub": "src", "ext": ".bas" }
+  ]
+}

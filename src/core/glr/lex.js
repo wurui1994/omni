@@ -239,6 +239,7 @@ function condOk(cond, prevType, prevEnd, at) {
  *   blocks   : [{open, close, nest}] 块注释
  *   rules    : [{kind:'token'|'string'|'op'|'fuse', type, terms|quote|text, cond, span}] 按声明顺序
  *   keywords : Map<tokenType, Set<text>>
+ *   keywordsFold : Set<tokenType> —— 这几格记号类型的关键字不分大小写（basic 那一族）
  *   stops    : 扫到就收工的那几段文本（`#!eof` 一族）
  *   autoSemi : `{type, text, after:Set}` 或 null —— 跨过换行时补的那一格（go 的 ASI）
  *   indent   : `{nl, indent, dedent, brackets}` 或 null —— 缩进即块结构那一族（python / nim）
@@ -249,6 +250,7 @@ export function readLexSpec(node, diags) {
   const blocks = [];
   const rules = [];
   const keywords = new Map();
+  const keywordsFold = new Set();
   const stops = [];
   let autoSemi = null;
   let indent = null;
@@ -383,14 +385,21 @@ export function readLexSpec(node, diags) {
     if (h === 'keyword') {
       const nm = isAtom(it.items[1]) ? it.items[1].value : null;
       if (nm === null) { diags.error(it.span, '(keyword TYPE w...) needs a token type'); continue; }
-      // 第三项如果又是个名字，它就是**改判成什么**：camp.l 里 `true` 是 LIT 而不是关键字，
-      // 于是写 `(keyword ID LIT "true" ...)`。省掉它就改判成字面量终结符（`"if"` 那种）。
+      /* `fold-case`：这一格记号类型的关键字**不分大小写**（basic / fortran / sql 那一族）。
+         写在类型名后面：`(keyword NAME fold-case "type" "end" …)`。表里存小写，查表前
+         把记号文本折成小写 —— 一门语言里要么全折要么全不折，所以按**记号类型**记这一格，
+         不按单个词记。 */
       let from = 2;
+      let fold = false;
+      if (isAtom(it.items[from]) && it.items[from].value === 'fold-case') { fold = true; from++; }
+      // 接下来那一项如果又是个名字，它就是**改判成什么**：camp.l 里 `true` 是 LIT 而不是
+      // 关键字，于是写 `(keyword ID LIT "true" ...)`。省掉它就改判成字面量终结符（`"if"` 那种）。
       let to = null;
-      if (isAtom(it.items[2])) { to = it.items[2].value; from = 3; }
+      if (isAtom(it.items[from])) { to = it.items[from].value; from++; }
       if (!keywords.has(nm)) keywords.set(nm, new Map());
+      if (fold) keywordsFold.add(nm);
       for (const w of it.items.slice(from)) {
-        if (isStr(w)) keywords.get(nm).set(w.value, to === null ? litName(w.value) : to);
+        if (isStr(w)) keywords.get(nm).set(fold ? w.value.toLowerCase() : w.value, to === null ? litName(w.value) : to);
         else diags.error(w.span, 'a keyword must be a string');
       }
       continue;
@@ -432,7 +441,7 @@ export function readLexSpec(node, diags) {
     diags.error(node.span, 'a lexer spec needs at least one (token ...), (string ...) or (op ...)');
     return null;
   }
-  return { skips, blocks, rules, keywords, stops, autoSemi, indent, joinAfter };
+  return { skips, blocks, rules, keywords, keywordsFold, stops, autoSemi, indent, joinAfter };
 }
 
 // ---- 扫描 ------------------------------------------------------------------
@@ -696,7 +705,7 @@ export function lexText(spec, file, diags) {
     let type = rule.type;
     const kw = spec.keywords.get(type);
     if (kw !== undefined) {
-      const re = kw.get(text);
+      const re = kw.get(spec.keywordsFold.has(type) ? text.toLowerCase() : text);
       if (re !== undefined) type = re;
     }
     toks.push({ type, node: { kind: 'atom', value: text, span }, span });

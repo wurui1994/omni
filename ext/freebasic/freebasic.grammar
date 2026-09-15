@@ -1,0 +1,801 @@
+;; ext/freebasic/freebasic.grammar —— FreeBASIC 的语法（**子集**，不足写在末尾"量到的"那一节）
+;;
+;; ## 这一门与前面几门不一样的地方：**行导向**，块靠关键字收尾
+;;
+;; nim / mojo 是"缩进即块结构"，所以词法器要发 INDENT / DEDENT。FreeBASIC 不是：
+;; 换行只是**语句终结符**（与 `:` 等价），块由 `End Sub` / `Next` / `Wend` / `Loop` /
+;; `End If` 这样的**关键字**收尾。所以这一份不用 `(indent …)`，只要一格 NEWLINE 记号。
+;; 续行是行尾一个 `_`（写进 skip，连换行一起吃掉，语法层根本看不见）。
+;;
+;; ## 为这一门补的词法器那一格：`fold-case`
+;;
+;; BASIC 的关键字**不分大小写**（`Type` / `type` / `TYPE` 是同一个词，语料里三种都有）。
+;; 之前的 `(keyword …)` 是按原文精确查表的，要收全就得把每个词的大小写排列都列一遍 ——
+;; 不可能。所以给关键字那一格加了个 `fold-case` 标志：表里存小写，查表前把记号文本折成
+;; 小写。这一格对 fortran / sql / pascal 那一族同样有用，不是 BASIC 专用。
+;;
+;; ## 语料
+;;
+;; = `fbc/examples` 与 `fbc/src` 下的 `.bas`（1722 份）。**`fbc/tests` 那 2515 份不算** ——
+;; 那是编译器的测试集，里面故意有写坏的代码，拿它当"过了多少"的分母是自欺。
+;;
+;; 许可：fbc 自己是 GPL。这一份语法是照 FreeBASIC 语言手册的形状写的，**不是从 fbc 的
+;; 源码翻译过来的**；它的 `.bas` 只当解析语料读。这与 awk 那一份的处理一致（那儿是照
+;; POSIX 公布的语法写，gawk 的 `awkgram.y` 只留给导入器现读）。
+
+(grammar freebasic
+  (tokens NAME INT FLOAT STRING NL)
+
+  (start module)
+
+  (lex
+    (skip (+ (set " \t\r")))
+    ;; 续行：行尾一个 `_`（后面可以跟注释）—— 整个吃掉，连换行一起
+    (skip "_" (* (set " \t\r")) (? "'" (* (not "\n"))) "\n")
+    ;; `/' … '/` 是可嵌套的块注释；`'` 到行尾是行注释
+    (block-comment "/'" "'/" nest)
+    (comment "'" (* (not "\n")))
+    (token NL (+ (seq (? "\r") "\n" (* (set " \t\r")))))
+
+    ;; ---- 字面量
+    (token STRING (? (set "$!")) "\"" (* (or (not "\"\n") "\"\"")) "\"")
+    (token INT "&" (or "h" "H") (+ hex) (? (set "&%!#uUlL")))
+    (token INT "&" (or "o" "O") (+ (set "01234567")) (? (set "&%!#uUlL")))
+    (token INT "&" (or "b" "B") (+ (set "01")) (? (set "&%!#uUlL")))
+    (token FLOAT (+ digit) "." (* digit) (? (or "e" "E" "d" "D") (? (set "+-")) (+ digit)) (? (set "!#fFdD")))
+    (token FLOAT "." (+ digit) (? (or "e" "E" "d" "D") (? (set "+-")) (+ digit)) (? (set "!#fFdD")))
+    (token FLOAT (+ digit) (or "e" "E" "d" "D") (? (set "+-")) (+ digit) (? (set "!#fFdD")))
+    (token INT (+ digit) (? (set "&%!#uUlL")))
+
+    ;; ---- 名字。BASIC 的名字后面可以挂类型记号（`n%`、`s$`、`f!`、`d#`、`i&`）
+    (token NAME (or alpha "_") (* (or alnum "_")) (? (set "$%!#&")))
+    (keyword NAME fold-case
+      "and" "andalso" "any" "as" "base" "byref" "byval" "call" "case"
+      "cast" "class" "common" "const" "constructor" "continue" "declare"
+      "defined" "destructor" "dim" "do" "double" "else" "elseif" "end"
+      "enum" "eqv" "erase" "exit" "export" "extends" "extern" "for" "function"
+      "goto" "if" "imp" "import" "integer" "is" "let" "lib" "long"
+      "longint" "loop" "mod" "namespace" "new" "next" "not" "operator" "option"
+      "or" "orelse" "overload" "override" "pascal" "pointer" "preserve" "print"
+      "private" "property" "protected" "ptr" "public" "redim" "restore"
+      "return" "scope" "select" "shared" "shl" "short" "shr" "single" "sizeof"
+      "static" "stdcall" "step" "string" "sub" "then" "to" "type" "typeof"
+      "ubyte" "uinteger" "ulong" "ulongint" "union" "unsigned" "ushort" "using"
+      "var" "varptr" "wend" "while" "with" "xor" "zstring" "wstring" "byte"
+      "boolean" "wchar" "delete" "abstract" "virtual" "alias" "explicit"
+      "thread" "local" "naked" "cdecl")
+
+    ;; ---- 运算符与标点。`\` 是整除，`^` 是幂，`@` 是取地址，`&` 是串接。
+    (op "<=" ">=" "<>" "->" "&=" "+=" "-=" "*=" "/=" "\\=" "^=" "##" "..."
+        "(" ")" "[" "]" "{" "}" "," ":" ";" "." "=" "+" "-" "*" "/" "\\" "^" "@"
+        "<" ">" "&" "#" "?" "!" "$"))
+
+  ;; ---- 模块与语句表 ------------------------------------------------------------
+  ;;
+  ;; 与 nim / mojo 同一条形状：**每条语句自带终结符**（这儿是 NEWLINE 或 `:`），
+  ;; 语句表左递归。行导向的语言里这一条更直白 —— 块语句以自己的 `End X` 收尾。
+
+  (rule module
+    (-> (stmts) (module $*1)))
+
+  (rule stmts
+    (-> () ())
+    (-> (stmts stmt) ($*1 $2)))
+
+  (rule stmt
+    (-> (simples term) (line $*1))
+    (-> (term) ())
+    (-> (block) $1)
+    (-> (pp) $1))
+
+  ;; 语句终结符：换行，或者行内的 `:`
+  (rule term
+    (-> (NL) $1)
+    (-> (":") $1))
+
+  ;; 一行里用 `:` 隔开的几条语句
+  (rule simples
+    (-> (simple) ($1))
+    (-> (simples ":" simple) ($*1 $3)))
+
+  ;; ---- 预处理指令（`#include once "x.bi"`、`#if`、`#define`）。它们自成一行。
+  (rule pp
+    (-> ("#" NAME pp-rest NL) (pp $2 $*3)))
+
+  (rule pp-rest
+    (-> () ())
+    (-> (pp-rest pp-tok) ($*1 $2)))
+
+  ;; 指令的载荷不按表达式读：`#define X(a) a*2` 里那一串不是一个表达式。
+  ;; 收成一串记号就够 —— 语义层要用时再解释。
+  (rule pp-tok
+    (-> (NAME) $1) (-> (INT) $1) (-> (FLOAT) $1) (-> (STRING) $1)
+    (-> ("(") $1) (-> (")") $1) (-> ("[") $1) (-> ("]") $1)
+    (-> (",") $1) (-> (":") $1) (-> (".") $1) (-> ("=") $1)
+    (-> ("+") $1) (-> ("-") $1) (-> ("*") $1) (-> ("/") $1) (-> ("\\") $1)
+    (-> ("^") $1) (-> ("@") $1) (-> ("<") $1) (-> (">") $1) (-> ("&") $1)
+    (-> ("<=") $1) (-> (">=") $1) (-> ("<>") $1) (-> ("##") $1) (-> ("$") $1)
+    (-> ("!") $1) (-> ("?") $1) (-> (";") $1) (-> ("{") $1) (-> ("}") $1)
+    (-> ("defined") $1) (-> ("not") $1) (-> ("and") $1) (-> ("or") $1)
+    (-> ("if") $1) (-> ("else") $1) (-> ("end") $1) (-> ("then") $1)
+    (-> ("const") $1) (-> ("as") $1) (-> ("ptr") $1) (-> ("integer") $1)
+    (-> ("string") $1) (-> ("sub") $1) (-> ("function") $1) (-> ("type") $1)
+    (-> ("dim") $1) (-> ("shared") $1) (-> ("static") $1) (-> ("declare") $1)
+    (-> ("print") $1) (-> ("using") $1) (-> ("import") $1) (-> ("export") $1)
+    (-> ("var") $1) (-> ("to") $1) (-> ("is") $1) (-> ("new") $1)
+    (-> ("byval") $1) (-> ("byref") $1) (-> ("any") $1) (-> ("cdecl") $1)
+    (-> ("private") $1) (-> ("public") $1) (-> ("lib") $1) (-> ("alias") $1))
+
+  ;; ---- 小语句 ------------------------------------------------------------------
+
+  (rule simple
+    ;; **赋值不另立规则**：BASIC 里 `=` 既是赋值也是比较，用的还是同一个记号。写成
+    ;; `simple -> expr "=" expr` 的话 `event = hiword(x)` 同时是"赋值"与"一个以 `=` 收尾
+    ;; 的比较表达式语句" —— 量到 113 份文件因此报歧义。所以这儿只收 `expr`，`=` 由
+    ;; 表达式级联里的 `cmpop` 收；到底是赋值还是比较，是**语义层**按位置判的事。
+    (-> (expr) (expr $1))
+    (-> (expr augop expr) (augassign $2 $1 $3))
+    (-> (decl) $1)
+    ;; 命令式调用（BASIC 从第一天就有）：`print x`、`f a, b`、`color 7, 0`
+    (-> (primary cmd-args) (command $1 (args $*2)))
+    (-> ("print") (print))
+    (-> ("print" print-args) (print $*2))
+    (-> ("return") (return))
+    (-> ("return" expr) (return $2))
+    (-> ("goto" NAME) (goto $2))
+    (-> ("goto" INT) (goto $2))
+    (-> ("exit" exit-kws) (exit $*2))
+    (-> ("continue" exit-kws) (continue $*2))
+    (-> ("end") (end))
+    (-> ("end" expr) (end $2))
+    (-> ("erase" expr-list) (erase $*2))
+    (-> ("restore") (restore))
+    (-> ("restore" NAME) (restore $2))
+    (-> ("option" cmd-args) (option $*2))
+    (-> ("call" expr) (call $2))
+    (-> ("let" expr "=" expr) (assign $2 $4))
+    (-> ("delete" expr) (delete $2))
+    (-> ("delete" "[" "]" expr) (delete-array $4))
+    ;; 标签：`mylabel:` —— 由 `simples` 那条 `:` 收尾，所以这儿只要名字
+    (-> (NAME ":") (label $1)))
+
+  (rule augop
+    (-> ("+=") $1) (-> ("-=") $1) (-> ("*=") $1) (-> ("/=") $1)
+    (-> ("\\=") $1) (-> ("^=") $1) (-> ("&=") $1))
+
+  (rule exit-kws
+    (-> (exit-kw) ($1))
+    (-> (exit-kws "," exit-kw) ($*1 $3)))
+
+  (rule exit-kw
+    (-> ("sub") $1) (-> ("function") $1) (-> ("for") $1) (-> ("while") $1)
+    (-> ("do") $1) (-> ("select") $1) (-> ("scope") $1) (-> ("operator") $1)
+    (-> ("property") $1) (-> ("constructor") $1) (-> ("destructor") $1))
+
+  ;; `print` 的实参表用 `;` 与 `,` 隔开，而且**可以以分隔符收尾**（那是"不换行"的意思）
+  (rule print-args
+    (-> (print-arg) ($1))
+    (-> (print-args print-sep) ($*1 $2))
+    (-> (print-args print-sep print-arg) ($*1 $2 $3)))
+
+  (rule print-sep
+    (-> (";") $1)
+    (-> (",") $1))
+
+  (rule print-arg
+    (-> (expr) $1)
+    (-> ("#" expr) (chan $2))
+    (-> ("using" expr) (using $2)))
+
+  ;; 命令式调用的实参**可以省**：`locate , , 0`、`put (0,0), img, pset` 是真代码
+  ;; （BASIC 从第一天就允许留空位，语料里 124 份文件这么写）。
+  ;; 但**只有一格实参时那一格不许省** —— 允许的话 `f` 自己就同时是"表达式语句"与
+  ;; "命令式调用 f，一个省掉的实参"，每个光名字的语句都两个解。
+  ;;
+  ;; 而且只有一格实参时它走 `c-orelse` 那条**受限链**：链底不许是括号表达式，也不许是
+  ;; 一元号。不加这条限制的话 `gtk_widget_show (win)` 同时是"调用"与"命令式调用，实参是
+  ;; 括号表达式 `(win)`"，`f -1` 同时是"命令式调用 f，实参 -1"与"减法" —— 量到 76 份
+  ;; 文件直接报歧义，另有一百多份在这上面炸开。
+  ;; 这是第三次用同一手了（awk 的连接、nim 的命令式调用、这儿），所以它算个套路：
+  ;; **两种读法只差"第一个记号是什么"时，复制一条链把那一格挡掉。**
+  (rule cmd-args
+    (-> (c-orelse) ($1))
+    (-> (cmd-arg "," cmd-rest) ($1 $*3)))
+
+  (rule cmd-rest
+    (-> (cmd-arg) ($1))
+    (-> (cmd-rest "," cmd-arg) ($*1 $3)))
+
+  (rule cmd-arg
+    (-> () (omitted))
+    (-> (expr) $1)
+    (-> ("using" expr) (using $2))
+    ;; 图形语句的**坐标对**：`line buffer, (0, 0)-(w-1, h-1), 0, bf`、`pset image, (x, y), c`。
+    ;; `(a, b)` 不是表达式（表达式里没有逗号），所以要单开这一格。
+    (-> (point) $1)
+    (-> (open-spec) $1))
+
+  (rule point
+    (-> ("(" expr "," expr ")") (pt $2 $4))
+    (-> ("step" "(" expr "," expr ")") (pt step $3 $5))
+    (-> (point "-" point) (span $1 $3)))
+
+  ;; `open "f" for binary access read as #f` —— 文件语句自带一套词序。`open` 本身不是
+  ;; 关键字（它是普通标识符），所以这一整段当**一格实参**收：既覆盖语句写法
+  ;; （`open … for …`，命令式调用），也覆盖 `If Open(fnam For Input As #n) Then` 那种
+  ;; 括号写法（那时它是 `call-arg`）。
+  (rule open-spec
+    (-> (expr "for" NAME open-parts) (openspec $1 (for $3) $*4)))
+
+  (rule open-parts
+    (-> () ())
+    (-> (open-parts open-part) ($*1 $2)))
+
+  (rule open-part
+    (-> ("as" "#" expr) (as $3))
+    (-> ("as" expr) (as $2))
+    (-> (NAME) (opt $1))
+    (-> (NAME "=" expr) (opt $1 $3)))
+
+
+
+  ;; ---- 声明 --------------------------------------------------------------------
+
+  (rule decl
+    ;; `dim [shared] [as T] a, b(1 to 3) = init`
+    (-> (dim-kw mods var-items) (dim $1 (mods $*2) $*3))
+    (-> (dim-kw mods "as" type var-items) (dim $1 (mods $*2) $4 $*5))
+    ;; `declare sub f (…)` —— 前置声明
+    (-> ("declare" routine-head) (declare $2)))
+
+  (rule dim-kw
+    (-> ("dim") $1) (-> ("static") $1) (-> ("const") $1) (-> ("var") $1)
+    (-> ("redim") $1) (-> ("common") $1) (-> ("extern") $1))
+
+
+  (rule mods
+    (-> () ())
+    (-> (mods mod-kw) ($*1 $2)))
+
+  (rule mod-kw
+    (-> ("shared") $1) (-> ("preserve") $1) (-> ("static") $1) (-> ("const") $1)
+    (-> ("public") $1) (-> ("private") $1) (-> ("protected") $1)
+    (-> ("thread") $1) (-> ("local") $1) (-> ("import") $1) (-> ("export") $1))
+
+  (rule var-items
+    (-> (var-item) ($1))
+    (-> (var-items "," var-item) ($*1 $3)))
+
+  (rule var-item
+    (-> (var-name) (v $1))
+    (-> (var-name "as" type) (v $1 $3))
+    (-> (var-name "=" init) (v $1 (init $3)))
+    (-> (var-name "as" type "=" init) (v $1 $3 (init $5))))
+
+  ;; 名字后面可以跟数组界（`a(0 to 9)`、`b()`、`c(any)`）
+  (rule var-name
+    (-> (NAME) (n $1))
+    (-> (NAME "(" bounds ")") (n $1 (bounds $*3))))
+
+  (rule bounds
+    (-> () ())
+    (-> (bound) ($1))
+    (-> (bounds "," bound) ($*1 $3)))
+
+  (rule bound
+    (-> (expr) $1)
+    (-> (expr "to" expr) (range $1 $3))
+    (-> ("any") (any)))
+
+  ;; 初始化器可以是花括号表（`{ 1, 2, { 3 } }`），也可以是**圆括号表**
+  ;; （`dim rcHorse as SDL_Rect = (0, 0, 93, 72)`）。圆括号那一种要**两个以上元素** ——
+  ;; 一个元素的 `(x)` 已经是括号表达式了，两边都收就是两个解。
+  (rule init
+    (-> (expr) $1)
+    (-> ("{" "}") (braces))
+    (-> ("{" init-list "}") (braces $*2))
+    (-> ("(" init "," init-list ")") (parens $2 $*4)))
+
+
+  (rule init-list
+    (-> (init) ($1))
+    (-> (init-list "," init) ($*1 $3))
+    (-> (init-list ",") $*1))
+  ;; ---- 块语句：靠 `End X` / `Next` / `Wend` / `Loop` 收尾 -------------------------
+
+  (rule block
+    (-> (if-block) $1)
+    (-> (for-block) $1)
+    (-> (while-block) $1)
+    (-> (do-block) $1)
+    (-> (select-block) $1)
+    (-> (routine-body) $1)
+    ;; `private sub f(…)` / `public function g(…)` —— 访问修饰写在例程前面
+    (-> (access routine-body) (access $1 $2))
+    (-> (type-block) $1)
+    (-> (enum-block) $1)
+    (-> (wrap-block) $1))
+
+
+  ;; `if c then` … `elseif` … `else` … `end if`。单行体（`if c then x = 1`）也收：
+  ;; 那一种由行尾的 NEWLINE 收尾，没有 `end if`。
+  ;; `else` 后面**不写**可选的 NEWLINE —— `stmts` 里那条 `stmt -> term` 已经把它收了，
+  ;; 两边都写就是两个解（量到 70 份文件报 `(else …)` 与 `(else …)` 撞车）。
+  (rule if-block
+    (-> ("if" expr then-opt NL stmts elifs "end" "if" term) (if $2 (body $*5) (elifs $*6)))
+    (-> ("if" expr then-opt NL stmts elifs "else" stmts "end" "if" term)
+        (if $2 (body $*5) (elifs $*6) (else $*8)))
+    (-> ("if" expr "then" simples term) (if $2 (body $*4)))
+    (-> ("if" expr "then" simples "else" simples term) (if $2 (body $*4) (else $*6))))
+
+  (rule then-opt
+    (-> () ())
+    (-> ("then") $1))
+
+  (rule elifs
+    (-> () ())
+    (-> (elifs "elseif" expr then-opt NL stmts) ($*1 (elif $3 (body $*6)))))
+
+  (rule for-block
+    (-> ("for" for-head NL stmts "next" next-tail term) (for $2 (body $*4)))
+    (-> ("for" for-head ":" simples "next" next-tail term) (for $2 (body $*4))))
+
+  ;; `for i = 0 to 9 step 2` 与 `for i as integer = 0 to n`（**`as` 在名字后面**，
+  ;; 不是前面 —— 头一版写反了，语料里 123 份文件立刻现形）
+  (rule for-head
+    (-> (expr "=" expr "to" expr) (head $1 (from $3) (to $5)))
+    (-> (expr "=" expr "to" expr "step" expr) (head $1 (from $3) (to $5) (step $7)))
+    (-> (expr "as" type "=" expr "to" expr) (head $1 $3 (from $5) (to $7)))
+    (-> (expr "as" type "=" expr "to" expr "step" expr) (head $1 $3 (from $5) (to $7) (step $9))))
+
+
+  (rule next-tail
+    (-> () ())
+    (-> (expr-list) ($*1)))
+
+  (rule while-block
+    (-> ("while" expr NL stmts "wend" term) (while $2 (body $*4)))
+    (-> ("while" expr ":" simples "wend" term) (while $2 (body $*4))))
+
+  ;; `do … loop` 的四种：条件在头、条件在尾、以及 `while` / `until`（`until` 不是关键字，
+  ;; 它是普通名字 —— FreeBASIC 里 `until` 只在这一处有意义，所以按 NAME 收）
+  (rule do-block
+    (-> ("do" NL stmts "loop" term) (do (body $*3)))
+    (-> ("do" NL stmts "loop" loop-cond term) (do (body $*3) $5))
+    (-> ("do" loop-cond NL stmts "loop" term) (do $2 (body $*4))))
+
+  (rule loop-cond
+    (-> ("while" expr) (while $2))
+    (-> (NAME expr) (until $2)))
+
+  (rule select-block
+    (-> ("select" "case" sel-head NL cases "end" "select" term) (select $3 (cases $*5))))
+
+  (rule sel-head
+    (-> (expr) $1)
+    (-> ("as" "const" expr) (const $3)))
+
+  (rule cases
+    (-> () ())
+    (-> (cases "case" case-vals NL stmts) ($*1 (case (vals $*3) (body $*5))))
+    ;; `case v : stmt` —— 单行分支，行尾那个 NEWLINE 要自己收（漏了它 86 份文件不过）
+    (-> (cases "case" case-vals ":" simples NL) ($*1 (case (vals $*3) (body $*5))))
+    (-> (cases "case" "else" NL stmts) ($*1 (else (body $*5))))
+    (-> (cases "case" "else" ":" simples NL) ($*1 (else (body $*5)))))
+
+
+  (rule case-vals
+    (-> (case-val) ($1))
+    (-> (case-vals "," case-val) ($*1 $3)))
+
+  (rule case-val
+    (-> (expr) $1)
+    (-> (expr "to" expr) (range $1 $3))
+    (-> ("is" cmpop expr) (is $2 $3)))
+
+  ;; `sub` / `function` / `constructor` / `destructor` / `operator` / `property` 的定义
+  (rule routine-body
+    (-> (routine-head NL stmts "end" routine-kw term) (routine $1 (body $*3))))
+
+  ;; 例程头的各格**不定顺序**（与 mojo 的 `sig-parts` 同一手）：语料里既有
+  ;; `sub f (args)` 也有 `sub f cdecl (args)`，既有 `sub f cdecl alias "x" (args)`
+  ;; 也有 `function f (args) as T static`。按固定顺序写就得排列组合。
+  (rule routine-head
+    (-> (routine-kw routine-name head-parts) (head $1 $2 $*3)))
+
+  (rule head-parts
+    (-> () ())
+    (-> (head-parts head-part) ($*1 $2)))
+
+  (rule head-part
+    (-> ("(" param-list ")") (params $*2))
+    (-> ("as" type) (ret $2))
+    (-> (attr) $1))
+
+
+  (rule routine-kw
+    (-> ("sub") $1) (-> ("function") $1) (-> ("constructor") $1)
+    (-> ("destructor") $1) (-> ("operator") $1) (-> ("property") $1))
+
+  ;; 例程名：普通名字、带命名空间的名字（`Foo.bar`），或者运算符重载的那个符号
+  (rule routine-name
+    (-> () ())
+    (-> (dotted) $1)
+    (-> (opsym) (op $1)))
+
+  (rule dotted
+    (-> (NAME) (n $1))
+    (-> (dotted "." NAME) (dot $1 $3)))
+
+  (rule opsym
+    (-> ("+") $1) (-> ("-") $1) (-> ("*") $1) (-> ("/") $1) (-> ("\\") $1)
+    (-> ("^") $1) (-> ("=") $1) (-> ("<") $1) (-> (">") $1) (-> ("<=") $1)
+    (-> (">=") $1) (-> ("<>") $1) (-> ("&") $1) (-> ("@") $1) (-> ("->") $1)
+    (-> ("mod") $1) (-> ("shl") $1) (-> ("shr") $1) (-> ("and") $1)
+    (-> ("or") $1) (-> ("xor") $1) (-> ("not") $1) (-> ("new") $1)
+    (-> ("delete") $1) (-> ("let") $1) (-> ("cast") $1) (-> ("for") $1)
+    (-> ("next") $1) (-> ("step") $1) (-> ("+=") $1) (-> ("-=") $1)
+    (-> ("*=") $1) (-> ("/=") $1) (-> ("\\=") $1) (-> ("^=") $1) (-> ("&=") $1)
+    (-> ("(" ")") call)
+    (-> ("[" "]") index))
+
+  (rule params
+    (-> () ())
+    (-> ("(" param-list ")") ($*2)))
+
+  (rule param-list
+    (-> () ())
+    (-> (param) ($1))
+    (-> (param-list "," param) ($*1 $3)))
+
+  (rule param
+    (-> (pmods var-name) (p $2 (mods $*1)))
+    (-> (pmods var-name "as" type) (p $2 (mods $*1) $4))
+    (-> (pmods var-name "as" type "=" init) (p $2 (mods $*1) $4 (default $6)))
+    (-> (pmods var-name "=" init) (p $2 (mods $*1) (default $4)))
+    (-> ("...") (varargs)))
+
+  (rule pmods
+    (-> () ())
+    (-> (pmods pmod) ($*1 $2)))
+
+  (rule pmod
+    (-> ("byval") $1) (-> ("byref") $1) (-> ("const") $1))
+
+  ;; 返回类型
+  (rule rt
+    (-> () ())
+    (-> ("as" type) (ret $2)))
+
+  ;; 例程头上那一串修饰：`cdecl`、`alias "x"`、`lib "y"`、`static`、`overload`…
+  (rule attr
+    (-> ("cdecl") $1) (-> ("stdcall") $1) (-> ("pascal") $1)
+    (-> ("static") $1) (-> ("export") $1) (-> ("overload") $1)
+    (-> ("override") $1) (-> ("abstract") $1) (-> ("virtual") $1)
+    (-> ("naked") $1) (-> ("const") $1) (-> ("byref") $1) (-> ("byval") $1)
+    (-> ("alias" STRING) (alias $2))
+    (-> ("lib" STRING) (lib $2)))
+    ;; 这儿**不能**收"任意名字"当调用约定（语料里 `Declare Function f WXCALL () As T` 里的
+    ;; `WXCALL` 是个宏）。试过：加一条 `attr -> NAME` 之后例程头立刻有两个解（名字 + 属性，
+    ;; 或者别的切法），1722 份从 473 掉到 412。那 61 份只好不收。
+
+
+  ;; `type NAME … end type` / `union … end union`。字段是 `name as T`，
+  ;; 里面还能有 `declare`、嵌套的 `type`、`as` 段。
+  (rule type-block
+    (-> (type-kw NAME type-head NL members "end" type-kw term) (typedecl $1 (n $2) $3 (members $*5)))
+    ;; `type T as integer` —— 类型别名，一行写完。两种词序语料里都有。
+    (-> ("type" NAME "as" type term) (typealias (n $2) $4))
+    (-> ("type" "as" type NAME term) (typealias (n $4) $3)))
+
+
+  (rule type-kw
+    (-> ("type") $1) (-> ("union") $1) (-> ("class") $1))
+
+  (rule type-head
+    (-> () ())
+    (-> ("extends" type) (extends $2))
+    (-> ("alias" STRING) (alias $2)))
+
+
+  (rule members
+    (-> () ())
+    (-> (members member) ($*1 $2)))
+
+  (rule member
+    (-> (term) ())
+    (-> (var-items term) (f $*1))
+    (-> ("as" type var-items term) (f $2 $*3))
+    (-> (access ":" term) (access $1))
+    (-> ("declare" routine-head term) (declare $2))
+    (-> (routine-body) $1)
+    (-> (type-block) $1)
+    (-> (enum-block) $1)
+    (-> ("static" var-items term) (static $*2))
+    (-> ("const" var-items term) (const $*2))
+    (-> ("dim" mods var-items term) (dim (mods $*2) $*3))
+    (-> ("dim" mods "as" type var-items term) (dim (mods $*2) $4 $*5)))
+
+  (rule access
+    (-> ("public") $1) (-> ("private") $1) (-> ("protected") $1))
+
+  (rule enum-block
+    (-> ("enum" NL enum-items "end" "enum" term) (enum (items $*3)))
+    (-> ("enum" NAME NL enum-items "end" "enum" term) (enum (n $2) (items $*4)))
+    (-> ("enum" "explicit" NL enum-items "end" "enum" term) (enum explicit (items $*4)))
+    (-> ("enum" NAME "explicit" NL enum-items "end" "enum" term) (enum (n $2) explicit (items $*5))))
+
+  (rule enum-items
+    (-> () ())
+    (-> (enum-items enum-item term) ($*1 $2))
+    (-> (enum-items term) $*1))
+
+  (rule enum-item
+    (-> (NAME) (v $1))
+    (-> (NAME "=" expr) (v $1 $3))
+    (-> (enum-item "," NAME) ($1 (v $3)))
+    (-> (enum-item "," NAME "=" expr) ($1 (v $3 $5))))
+
+  ;; `scope` / `with` / `namespace` / `extern` / `asm` —— 都是"开一段、`end X` 收"
+  (rule wrap-block
+    (-> ("scope" NL stmts "end" "scope" term) (scope (body $*3)))
+    (-> ("with" expr NL stmts "end" "with" term) (with $2 (body $*4)))
+    (-> ("namespace" dotted NL stmts "end" "namespace" term) (namespace $2 (body $*4)))
+    (-> ("extern" extern-tag NL stmts "end" "extern" term) (extern $2 (body $*4))))
+
+  (rule extern-tag
+    (-> () ())
+    (-> (STRING) $1)
+    (-> (STRING NAME STRING) ($1 $3)))
+
+  ;; ---- 类型 --------------------------------------------------------------------
+
+  (rule type
+    (-> (type-base) $1)
+    (-> (type "ptr") (ptr $1))
+    (-> (type "pointer") (ptr $1))
+    (-> ("const" type) (const $2)))
+
+  (rule type-base
+    (-> (dotted) $1)
+    (-> (builtin) $1)
+    (-> ("any") (any))
+    ;; `zstring * 32` / `string * 8` —— 定长串
+    (-> (builtin "*" expr) (fixed $1 $3))
+    (-> ("sub" params) (subtype (params $*2)))
+    (-> ("function" params rt) (functype (params $*2) $3))
+    (-> ("typeof" "(" expr ")") (typeof $3)))
+
+  (rule builtin
+    (-> ("integer") $1) (-> ("uinteger") $1) (-> ("byte") $1) (-> ("ubyte") $1)
+    (-> ("short") $1) (-> ("ushort") $1) (-> ("long") $1) (-> ("ulong") $1)
+    (-> ("longint") $1) (-> ("ulongint") $1) (-> ("single") $1) (-> ("double") $1)
+    (-> ("string") $1) (-> ("zstring") $1) (-> ("wstring") $1) (-> ("wchar") $1)
+    (-> ("boolean") $1) (-> ("unsigned") $1) (-> ("const") $1))
+
+  ;; ---- 表达式 ------------------------------------------------------------------
+  ;;
+  ;; FreeBASIC 的优先级表（低到高）：orelse / andalso / or xor eqv imp / and / not /
+  ;; 比较 / shl shr / + - & / * / \ mod / 一元 / ^ / 后缀。
+
+  (rule expr-list
+    (-> (expr) ($1))
+    (-> (expr-list "," expr) ($*1 $3)))
+
+  (rule expr
+    (-> (e-orelse) $1))
+
+  (rule e-orelse
+    (-> (e-andalso) $1)
+    (-> (e-orelse "orelse" e-andalso) (bin "orelse" $1 $3)))
+
+  (rule e-andalso
+    (-> (e-or) $1)
+    (-> (e-andalso "andalso" e-or) (bin "andalso" $1 $3)))
+
+  (rule e-or
+    (-> (e-and) $1)
+    (-> (e-or "or" e-and) (bin "or" $1 $3))
+    (-> (e-or "xor" e-and) (bin "xor" $1 $3))
+    (-> (e-or "eqv" e-and) (bin "eqv" $1 $3))
+    (-> (e-or "imp" e-and) (bin "imp" $1 $3)))
+
+  (rule e-and
+    (-> (e-not) $1)
+    (-> (e-and "and" e-not) (bin "and" $1 $3)))
+
+  (rule e-not
+    (-> (e-cmp) $1)
+    (-> ("not" e-not) (un "not" $2)))
+
+  (rule e-cmp
+    (-> (e-shift) $1)
+    (-> (e-cmp cmpop e-shift) (bin $2 $1 $3)))
+
+  (rule cmpop
+    (-> ("=") $1) (-> ("<>") $1) (-> ("<") $1) (-> (">") $1)
+    (-> ("<=") $1) (-> (">=") $1))
+
+  (rule e-shift
+    (-> (e-add) $1)
+    (-> (e-shift "shl" e-add) (bin "shl" $1 $3))
+    (-> (e-shift "shr" e-add) (bin "shr" $1 $3)))
+
+  ;; `&` 是串接（BASIC 的传统），与"取地址"的 `@` 不是一回事
+  (rule e-add
+    (-> (e-mul) $1)
+    (-> (e-add "+" e-mul) (bin "+" $1 $3))
+    (-> (e-add "-" e-mul) (bin "-" $1 $3))
+    (-> (e-add "&" e-mul) (bin "&" $1 $3)))
+
+  (rule e-mul
+    (-> (e-un) $1)
+    (-> (e-mul "*" e-un) (bin "*" $1 $3))
+    (-> (e-mul "/" e-un) (bin "/" $1 $3))
+    (-> (e-mul "\\" e-un) (bin "\\" $1 $3))
+    (-> (e-mul "mod" e-un) (bin "mod" $1 $3)))
+
+  (rule e-un
+    (-> (e-pow) $1)
+    (-> ("-" e-un) (un "-" $2))
+    (-> ("+" e-un) (un "+" $2))
+    (-> ("@" e-un) (addrof $2))
+    (-> ("*" e-un) (deref $2))
+    (-> ("new" type) (new $2))
+    (-> ("new" type "(" call-args ")") (new $2 (args $*4)))
+    (-> ("new" type "[" expr "]") (new-array $2 $4)))
+
+  (rule e-pow
+    (-> (primary) $1)
+    (-> (primary "^" e-un) (bin "^" $1 $3)))
+
+  (rule primary
+    (-> (atom) $1)
+    (-> (primary "." field) (dot $1 $3))
+    (-> (primary "->" field) (arrow $1 $3))
+    (-> (primary "(" call-args ")") (call $1 (args $*3)))
+    (-> (primary "[" call-args "]") (index $1 (args $*3))))
+
+  ;; `.` 后面允许关键字当字段名（BASIC 里 `x.type`、`p.next` 都常见）
+  (rule field
+    (-> (NAME) $1)
+    (-> ("type") $1) (-> ("next") $1) (-> ("string") $1) (-> ("long") $1)
+    (-> ("base") $1) (-> ("class") $1) (-> ("new") $1) (-> ("step") $1)
+    (-> ("to") $1) (-> ("for") $1) (-> ("do") $1) (-> ("if") $1)
+    (-> ("is") $1) (-> ("as") $1) (-> ("end") $1) (-> ("not") $1)
+    (-> ("and") $1) (-> ("or") $1) (-> ("mod") $1) (-> ("print") $1)
+    (-> ("integer") $1) (-> ("double") $1) (-> ("single") $1) (-> ("byte") $1)
+    (-> ("short") $1) (-> ("any") $1) (-> ("const") $1) (-> ("ptr") $1)
+    (-> ("static") $1) (-> ("shared") $1) (-> ("function") $1) (-> ("sub") $1)
+    (-> ("var") $1) (-> ("let") $1) (-> ("using") $1) (-> ("return") $1)
+    (-> ("option") $1) (-> ("import") $1) (-> ("export") $1) (-> ("local") $1))
+
+  (rule call-args
+    (-> () ())
+    (-> (call-arg) ($1))
+    (-> (call-args "," call-arg) ($*1 $3)))
+
+  (rule call-arg
+    (-> (expr) $1)
+    (-> ("byval" expr) (byval $2))
+    (-> ("byref" expr) (byref $2))
+    (-> ("any") (any))
+    (-> (expr "to" expr) (range $1 $3)))
+
+  ;; `atom` 拆成两半：括号表达式一半，别的一半（`c-atom`）。受限链只用后一半。
+  (rule atom
+    (-> (c-atom) $1)
+    (-> ("(" expr ")") (paren $2)))
+
+  (rule c-atom
+    (-> (NAME) (n $1))
+    (-> (INT) (num $1))
+    (-> (FLOAT) (num $1))
+    (-> (strings) (str $*1))
+    (-> ("base") (base))
+    ;; `function = a + b` —— 老式的"给隐式返回值赋值"，`function` 在这儿是个左值
+    (-> ("function") (result))
+    (-> ("base" "(" call-args ")") (base (args $*3)))
+    ;; `with` 块里的隐式成员引用：`.field`
+    (-> ("." field) (implicit $2))
+    (-> ("sizeof" "(" type ")") (sizeof $3))
+    (-> ("varptr" "(" expr ")") (varptr $3))
+    (-> ("typeof" "(" expr ")") (typeof $3))
+    (-> ("cast" "(" type "," expr ")") (cast $3 $5))
+    ;; `type<T>(a, b)` —— 类型构造（匿名 UDT 字面量）
+    (-> ("type" "<" type ">" "(" call-args ")") (typelit $3 (args $*6)))
+    (-> ("type" "(" call-args ")") (typelit (args $*3)))
+    ;; 内建类型当转换函数用：`integer(x)`、`cptr(any ptr, p)`
+    (-> (builtin "(" call-args ")") (conv $1 (args $*3))))
+
+  ;; ---- 受限链（`c-*`）：只有**最左端**受限，右操作数照旧走自由的 `e-*`。
+  ;; 用处见 `cmd-args` 那段注释。
+
+  (rule c-primary
+    (-> (c-atom) $1)
+    (-> (c-primary "." field) (dot $1 $3))
+    (-> (c-primary "->" field) (arrow $1 $3))
+    (-> (c-primary "(" call-args ")") (call $1 (args $*3)))
+    (-> (c-primary "[" call-args "]") (index $1 (args $*3))))
+
+  (rule c-pow
+    (-> (c-primary) $1)
+    (-> (c-primary "^" e-un) (bin "^" $1 $3)))
+
+  (rule c-mul
+    (-> (c-pow) $1)
+    (-> (c-mul "*" e-un) (bin "*" $1 $3))
+    (-> (c-mul "/" e-un) (bin "/" $1 $3))
+    (-> (c-mul "\\" e-un) (bin "\\" $1 $3))
+    (-> (c-mul "mod" e-un) (bin "mod" $1 $3)))
+
+  (rule c-add
+    (-> (c-mul) $1)
+    (-> (c-add "+" e-mul) (bin "+" $1 $3))
+    (-> (c-add "-" e-mul) (bin "-" $1 $3))
+    (-> (c-add "&" e-mul) (bin "&" $1 $3)))
+
+  (rule c-shift
+    (-> (c-add) $1)
+    (-> (c-shift "shl" e-add) (bin "shl" $1 $3))
+    (-> (c-shift "shr" e-add) (bin "shr" $1 $3)))
+
+  (rule c-cmp
+    (-> (c-shift) $1)
+    (-> (c-cmp cmpop e-shift) (bin $2 $1 $3)))
+
+  (rule c-and
+    (-> (c-cmp) $1)
+    (-> (c-and "and" e-not) (bin "and" $1 $3)))
+
+  (rule c-or
+    (-> (c-and) $1)
+    (-> (c-or "or" e-and) (bin "or" $1 $3))
+    (-> (c-or "xor" e-and) (bin "xor" $1 $3))
+    (-> (c-or "eqv" e-and) (bin "eqv" $1 $3))
+    (-> (c-or "imp" e-and) (bin "imp" $1 $3)))
+
+  (rule c-andalso
+    (-> (c-or) $1)
+    (-> (c-andalso "andalso" e-or) (bin "andalso" $1 $3)))
+
+  (rule c-orelse
+    (-> (c-andalso) $1)
+    (-> (c-orelse "orelse" e-andalso) (bin "orelse" $1 $3)))
+
+  ;; 相邻串拼接
+  (rule strings
+    (-> (STRING) ($1))
+    (-> (strings STRING) ($*1 $2))))
+
+;; ## 量到的（`node bench/grammars.js freebasic`，语料 = fbc/examples + fbc/src 下 1722 份 .bas）
+;;
+;;   896 状态 / 555 产生式 / 156 终结符 / 239 处冲突留给驱动器
+;;   **694 / 1722 过（40%）**
+;;
+;; 一路的账（每一刀都先按报错归类，最大那一类先修，再量）：
+;;   264 → 头一版（`fold-case` 关键字刚补上，语法本身还很粗）
+;;   473 → **赋值不另立规则**：BASIC 的 `=` 既是赋值也是比较，用的是同一个记号，写成
+;;         `simple -> expr "=" expr` 就与"以 `=` 收尾的比较表达式语句"两个解（113 份）。
+;;         + `for i as integer = …`（`as` 在名字后面，头一版写反了，123 份）
+;;         + 例程头改成"一串不定顺序的部件"（`sub f cdecl (args)`，111 份）
+;;   500 → 命令式调用的实参可以省（`locate , , 0`）
+;;   610 → **命令式调用的单实参走受限链**（链底不许是括号表达式、不许是一元号）——
+;;         `gtk_widget_show (win)` 本来同时是"调用"与"命令式调用，实参 `(win)`"。
+;;         这是第三次用同一手（awk 的连接、nim 的命令式调用、这儿），算个套路了。
+;;   679 → `else` 后面不写可选 NEWLINE（`stmts` 已经收了，两边都写就是两个解，70 份）
+;;         + 圆括号初始化表（`= (0, 0, 93, 72)`）+ 图形语句的坐标对（`(0,0)-(w,h)`）
+;;   694 → `private sub f(…)` + `open … for … as #f` + `case v : stmt` 的行尾 NEWLINE
+;;
+;; 中间试错一次也记下来：给例程头加一条 `attr -> NAME`（为了收 `Declare Function f WXCALL ()`
+;; 里那个宏，61 份）之后，例程头立刻两个解，473 掉到 412。退回来了。
+;;
+;; 还欠 1028 份。这一门是这几门里最难收的，原因不在语法规模，在于**BASIC 有一大批
+;; 自带词序的语句**（`open … for … access … as #n`、`line … , (x,y)-(x,y), c, bf`、
+;; `print #f, using "…";`、`get`/`put`/`draw`/`screen`/`window`/`view`/`palette`/`input`…）。
+;; 每一条都是一小套自己的语法，不能靠通用的"命令式调用"收。收全它们不难，就是**量大**，
+;; 一条条按语料里的实际写法补 —— 下一刀该补哪一条也是量出来的（`--fail` 里最大那一类）。
+;;
+;; 已知的另一族：`regs.x.ax = &H03` 这种在 `union` 里嵌 `union` 的类型上炸开（89 份报
+;; "too many concurrent parses"），那是 `member` 那一格里 `dim`/`static`/`const`/裸字段
+;; 四条路重叠，得像 nim 的 `type`/`var` 段那样分开。
