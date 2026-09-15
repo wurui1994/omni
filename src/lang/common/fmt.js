@@ -25,6 +25,59 @@ export function joinPieces(pieces) {
 }
 
 /**
+ * 格式化字面量里**没写 spec** 时按静态类型挑的那个转换字母（jancy 的 Parser.cpp:3670-3691）：
+ * 整数 ≤4 字节 `d` / `u`、64 位 `lld` / `llu`、浮点 `f`、字符串 `s`；别的答 null（jancy 那儿
+ * 也是一句 "don't know how to format"）。bool 一字节，所以是 `d`。
+ */
+export function fmtDefault(t) {
+  if (t === null || t === undefined) return null;
+  if (t.k === 'real') return 'f';
+  if (t.k === 'string') return 's';
+  if (t.k === 'bool') return 'd';
+  const b = t.k === 'enum' ? (t.base ?? null) : t;
+  if (b !== null && b.k === 'int') return b.w <= 32 ? (b.u ? 'u' : 'd') : (b.u ? 'llu' : 'lld');
+  return null;
+}
+
+/**
+ * spec 与默认字母并起来（`prepareFormatString`，CoreLib.cpp:702-723）：没写就是 `%` 加默认；
+ * 写了但开头不是 `%` 就补一个；**末尾不是字母**时把默认那个字母接上（`8` → `%8d`）。
+ */
+export function fmtMergeSpec(spec, dflt) {
+  if (spec === null) return `%${dflt}`;
+  const s = spec.startsWith('%') ? spec : `%${spec}`;
+  return /[A-Za-z]$/.test(s) ? s : s + dflt;
+}
+
+/**
+ * `$(…)` / `%(…)` 那一格的范围（词法那儿 `lit_fmt_opener` 收 `(` 与 `{` 两种，Lexer.rl:132）。
+ * **顶层第一个 `;` 后面是 spec**（Lexer.rl:455 的 onSemicolon 切到 lit_fmt_expr_spec）。
+ * 括号没配上答 null。
+ */
+export function fmtSplitSite(s, open) {
+  const closer = s[open] === '(' ? ')' : '}';
+  let depth = 0;
+  let semi = -1;
+  for (let i = open; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === '(' || c === '{') depth += 1;
+    else if (c === ')' || c === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        if (c !== closer) return null;
+        const spec = semi < 0 ? null : s.slice(semi + 1, i).trim();
+        return {
+          body: semi < 0 ? s.slice(open + 1, i) : s.slice(open + 1, semi),
+          spec: spec === null || spec === '' ? null : spec,
+          end: i + 1,
+        };
+      }
+    } else if (c === ';' && depth === 1 && semi < 0) semi = i;
+  }
+  return null;
+}
+
+/**
  * **一格转换说明**：`%` [标志] [宽度] [`.` 精度] 转换字符。
  * 五个标志都收（第二十九刀）：`-` 左对齐、`0` 补零、`+` 与空格给符号、`#` 另一种形式；
  * 宽度与精度收十进制常量，也收 `*` / `.*`（**从实参来**，第二十七刀）。

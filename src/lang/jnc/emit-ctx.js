@@ -22,7 +22,9 @@ import {
 } from './member-table.js';
 import { compoundValue, errTest, errValue, escapeText } from './stmt-table.js';
 import { wrapTo, realOf, intConvCode } from './int-table.js';
-import { fmtRun, specPiece, specDress } from '../common/fmt.js';
+import {
+  fmtRun, specPiece, specDress, fmtDefault, fmtMergeSpec, fmtSplitSite,
+} from '../common/fmt.js';
 import { zeroText, CRT_CHAR } from './expr-table.js';
 /* `variant_t` 那格结构体是合成出来的：名字与那四格字段的家在 runtime 那一份。 */
 import { VARIANT, VARIANT_FIELDS, varBoxShell, varUnboxShell, mcFireName, mcFireShell } from './runtime.js';
@@ -101,17 +103,20 @@ export function makeFnEnv(o) {
     return name;
   };
   /**
-   * **格式化字面量 `$"…"`**（第二百刀，literals.rst:62）：它产出的是**一格字符串的值**
-   * （不是一次输出），所以整条落成一串 `(bin "+" …)`。词法把整个字面量当**一个记号**，
-   * 里头 `$名字` / `$(表达式)` 那几段于是要按位置**再解析一遍**（`parseExpr`）。
+   * **格式化字面量 `$"…"`**（第二百 / 二百五十四刀，literals.rst:62-88）：它产出的是**一格
+   * 字符串的值**（不是一次输出）。词法把整个字面量当**一个记号**，里头 `$名字` / `$(表达式)`
+   * 那几段于是要按位置**再解析一遍**（`parseExpr`）。四种注入：
+   *   - `$id`：内嵌的一格值，**不占**实参表的位置；
+   *   - `$(expr)` / `$(expr; spec)`：内嵌的一整条表达式；
+   *   - `%N` / `%(N; spec)`：实参表（`$"…"(a, b)` 那对括号）里第 N 个，**1 起**；
+   *   - 光一个 `%spec`：也占一个实参位，序号是"上一个用过的 + 1"（Parser.cpp:3496）。
+   * 没写 spec 时按**静态类型**挑那个字母（`fmtDefault`，Parser.cpp:3670-3691）；写了 spec 而
+   * 末尾不是字母时把默认那个补上（`fmtMergeSpec` = prepareFormatString，CoreLib.cpp:702-723）。
    *
-   * 一格注入怎么变成串按它的类型走（与 printf 那张表同一口径）：串原样、整数 `tostr`、
-   * 实数 `sfix … 6`（C 的 `%f` 默认六位）、布尔按 1/0。
-   *
-   * `%…` 那两族（`%1` 按序号引实参、`%05d` 光写 spec）与 `$(…; spec)`（宽度/精度）
-   * **明说不收** —— 那要把 printf 那套 spec 机器接上来，是另一刀。
+   * 拼出来的是**一个 C 口径的格式串加一串值**，交给 `fmtRun` 的 `'str'` 那条路 —— 于是
+   * `%08.3f` 该长什么样与 printf 是**同一份实现**，不是第二份。
    */
-  const fmtOf = (node) => {
+  const fmtOf = (node, argNodes = []) => {
     const tok = named(node)?.text;
     const raw = String(tok?.value ?? '');
     if (!raw.startsWith('$"') || !raw.endsWith('"') || raw.length < 3) {
@@ -123,61 +128,177 @@ export function makeFnEnv(o) {
     const file = tok?.span?.file ?? null;
     const base = (tok?.span?.start ?? 0) + 2;
     const inner = raw.slice(2, -1);
-    const parts = [];
-    let lit = '';
-    const flushLit = () => { if (lit !== '') { parts.push(`(str "${lit}")`); lit = ''; } };
-    const strOf = (v) => {
-      const k = v.type?.k;
-      if (k === 'string') return v.code;
-      if (k === 'int' || k === 'enum') return `(tostr ${v.code})`;
-      if (k === 'real') return `(sfix ${v.code} (int 6))`;
-      if (k === 'bool') return `(tostr (sel ${v.code} (int 1) (int 0)))`;
-      return null;
+    let bad = false;
+    let rawPct = false;
+    let cfmt = '';
+    const vals = [];
+    const argVals = argNodes.map(() => null);
+    const used = argNodes.map(() => false);
+    /* 实参**按需**降级（引两次的 `%(1;x)` 只算一次），并记下谁被用过。 */
+    const argAt = (k) => {
+      if (k >= argNodes.length) {
+        acct(`格式化字面量里写了 %${k + 1}，可它的实参表只有 ${argNodes.length} 个`);
+        bad = true; return null;
+      }
+      if (argVals[k] === null) {
+        const v0 = emitExpr(argNodes[k], null, ctxRef);
+        if (v0 === null) { bad = true; return null; }
+        argVals[k] = v0;
+      }
+      used[k] = true;
+      return argVals[k];
     };
-    const inject = (src, off) => {
+    /* 文本里的 `%` 在 C 口径的格式串里要写成 `%%`；记一笔"有过裸的 `%`"—— `printf($"…")`
+       那条路要用它（jancy 那儿 printf 会把结果再解释一遍格式）。 */
+    const rawText = (s) => { if (s.includes('%')) rawPct = true; return s.replace(/%/g, '%%'); };
+    /* 一格注入：spec 与"这个类型默认那个字母"并起来，值排进去。 */
+    const site = (v, spec) => {
+      if (v === null) { bad = true; return; }
+      const d = fmtDefault(v.type);
+      if (d === null) {
+        acct(`格式化字面量里印不出 ${v.type?.k ?? '?'}（jancy 那边这也是一句 "don't know how to format"）`);
+        bad = true; return;
+      }
+      if (spec !== null && /B$/.test(spec)) {
+        acct('格式化字面量的 `B` 转换（jancy 那边是逐字节的二进制排版）还没接'); bad = true; return;
+      }
+      cfmt += fmtMergeSpec(spec, d);
+      vals.push(v.type?.k === 'enum' ? { code: v.code, type: v.type.base } : v);
+    };
+    /* `$(…)` / `$id` 里那一段源码 → 一格值。位置按**原文**算，所以里头报错指的是真地方。 */
+    const inlineVal = (src, off) => {
       const t = parseExpr(file, src, base + off);
-      if (t === null) { acct(`格式化字面量里 '${src}' 解不出来`); return false; }
-      const v = emitExpr(t, null, ctxRef);
-      if (v === null) return false;                       // 账已经记过
-      const s = strOf(v);
-      if (s === null) { acct(`格式化字面量里那一格是 ${v.type?.k ?? '?'}（还没接）`); return false; }
-      flushLit();
-      parts.push(s);
-      return true;
+      if (t === null) { acct(`格式化字面量里 '${src}' 解不出来`); bad = true; return null; }
+      return emitExpr(t, null, ctxRef);
+    };
+    let seq = 0;                                           // jancy 的 m_fmtIndex：0 = 还没用过
+    /** `%` 那一族（`%N` / `%(N; spec)` / 光写 spec / 裸的 `%`）—— 答**下一个下标**。 */
+    const pctAt = (at) => {
+      const rest = inner.slice(at + 1);
+      if (rest.startsWith('(')) {
+        const sp = fmtSplitSite(inner, at + 1);
+        if (sp === null) { acct('格式化字面量里 `%(` 没配上 `)`'); bad = true; return at + 1; }
+        const k = /^\d+$/.test(sp.body.trim()) ? Number(sp.body.trim()) : -1;
+        if (k <= 0) {
+          acct(`格式化字面量里的 \`%(${sp.body};…)\`（jancy 那儿这一格是实参的序号）还没接`);
+          bad = true; return at + 1;
+        }
+        seq = k;
+        site(argAt(k - 1), sp.spec);
+        return sp.end;
+      }
+      /* Ragel 的**最长匹配**：`%08x` 是 spec（4 字符）、`%8` 是序号（2 字符）—— spec 里的宽度
+         只跟在标志后面（Lexer.rl:133），所以 `%8d` 的 `%8` 是序号、`d` 是文本。 */
+      const idx = /^\d+/.exec(rest);
+      const sp2 = /^([-+ #0]\d*)?(\.\d+)?(ll|l|z)?[diuxXfeEgGcsp]/.exec(rest);
+      const spLen = sp2 === null ? 0 : 1 + sp2[0].length;
+      const idxLen = idx === null ? 0 : 1 + idx[0].length;
+      if (spLen >= idxLen && spLen > 0) {
+        seq += 1;
+        site(argAt(seq - 1), `%${sp2[0]}`);
+        return at + spLen;
+      }
+      if (idxLen > 0) {
+        seq = Number(idx[0]);
+        if (seq <= 0) { acct('格式化字面量里的实参序号从 1 起'); bad = true; return at + 1; }
+        site(argAt(seq - 1), null);
+        return at + idxLen;
+      }
+      cfmt += '%%';
+      rawPct = true;
+      return at + 1;
     };
     let i = 0;
-    while (i < inner.length) {
+    while (i < inner.length && !bad) {
       const c = inner[i];
-      if (c === '\\' && i + 1 < inner.length) { lit += inner.slice(i, i + 2); i += 2; continue; }
-      if (c === '%') {
-        acct('格式化字面量里的 `%…`（按序号引实参 / 光写 spec）还没接'); return null;
-      }
-      if (c !== '$') { lit += c; i += 1; continue; }
-      if (inner[i + 1] === '$') { lit += '$'; i += 2; continue; }
-      if (inner[i + 1] === '(') {
-        let depth = 0;
-        let j = i + 1;
-        for (; j < inner.length; j += 1) {
-          if (inner[j] === '(') depth += 1;
-          else if (inner[j] === ')') { depth -= 1; if (depth === 0) break; }
+      /* 转义照普通字面量那一套（词法那张表同）：`\t \n \r \xHH`，别的脱掉反斜杠。 */
+      if (c === '\\') {
+        const e = inner[i + 1];
+        i += 2;
+        if (e === 't') { cfmt += '\t'; continue; }
+        if (e === 'n') { cfmt += '\n'; continue; }
+        if (e === 'r') { cfmt += '\r'; continue; }
+        if (e === 'x') {
+          const cc = Number.parseInt(inner.slice(i, i + 2), 16);
+          if (Number.isInteger(cc)) { cfmt += rawText(String.fromCharCode(cc)); i += 2; continue; }
+          cfmt += 'x';
+          continue;
         }
-        if (depth !== 0) { acct('格式化字面量里 `$(` 没配上 `)`'); return null; }
-        const body = inner.slice(i + 2, j);
-        if (body.includes(';')) {
-          acct('格式化字面量里 `$(…; spec)`（宽度/精度）还没接'); return null;
-        }
-        if (!inject(body, i + 2)) return null;
-        i = j + 1;
+        cfmt += e === undefined ? '' : rawText(e);
         continue;
       }
-      const m = /^[A-Za-z_][\w$]*(\.[A-Za-z_][\w$]*)*/.exec(inner.slice(i + 1));
-      if (m === null) { acct('格式化字面量里 `$` 后面不是名字也不是 `(`'); return null; }
-      if (!inject(m[0], i + 1)) return null;
-      i += 1 + m[0].length;
+      if (c === '$') {
+        const rest = inner.slice(i + 1);
+        if (rest.startsWith('!')) {
+          acct('格式化字面量里的 `$!`（要 std.getLastError 那一套）还没接'); return null;
+        }
+        const id = /^[A-Za-z_]\w*/.exec(rest);
+        if (id !== null) { site(inlineVal(id[0], i + 1), null); i += 1 + id[0].length; continue; }
+        if (rest.startsWith('(')) {
+          const sp = fmtSplitSite(inner, i + 1);
+          if (sp === null) { acct('格式化字面量里 `$(` 没配上 `)`'); return null; }
+          site(inlineVal(sp.body, i + 2), sp.spec);
+          i = sp.end;
+          continue;
+        }
+        if (/^\d/.test(rest)) {
+          acct('格式化字面量里的 `$1`（正则捕获组，要 regex switch 那一套）还没接'); return null;
+        }
+        cfmt += '$';
+        i += 1;
+        continue;
+      }
+      if (c === '%') { i = pctAt(i); continue; }
+      cfmt += rawText(c);
+      i += 1;
     }
-    flushLit();
-    if (parts.length === 0) return { code: '(str "")', type: T.string };
-    return { code: parts.reduce((a, b) => `(bin "+" ${a} ${b})`), type: T.string };
+    if (bad) return null;
+    /* 实参表里有谁没被用到是**错**（jancy 那边也是，Parser.cpp:3583-3587）。 */
+    for (let q = 0; q < argNodes.length; q += 1) {
+      if (!used[q]) {
+        acct(`格式化字面量的第 ${q + 1} 个实参没有被用到（jancy 那边这也是一句错）`); return null;
+      }
+    }
+    /* 值都求好了，`%…` 那一层交给 **printf 那份实现**（`fmtRun` 的 `'str'`）—— 于是
+       `%08.3f` 该长什么样两处一个字不差。补零/宽度那几支要先把值落成局部量，那几行走
+       `ecOut`（与 errorcode 传播同一个通道）；插不进语句的位置明说不收。 */
+    const out = ctxRef.ecOut ?? null;
+    const pad = out === null ? '' : (ctxRef.ecPad ?? '    ');
+    const r = fmtRun(cfmt, 'str', (spec, i0, push) => {
+      const spill = (code, ty) => {
+        const t = `$f${tmpBox.n}`;
+        tmpBox.n += 1;
+        push(`${pad}(let ${t} ${ty} ${code})`);
+        return `(var ${t})`;
+      };
+      if (spec.width === '*' || spec.prec === '*') {
+        acct('格式化字面量里的 `*`（宽度/精度从实参来）还没接'); bad = true; return null;
+      }
+      const wCode = spec.width !== null
+        && (spec.width > 1 || (spec.width === 1 && spec.prec !== null))
+        ? `(int ${spec.width})` : null;
+      const pCode = spec.prec === null ? null : `(int ${spec.prec})`;
+      const v = vals[i0];
+      if (v === undefined) { acct('格式化字面量里的转换说明比值多'); bad = true; return null; }
+      const piece = specPiece(spec, v, ctxRef, pCode);
+      if (piece === null) {
+        acct(`%${spec.conv} 碰上这一格类型（${v.type?.k ?? '?'}）还没接`); bad = true; return null;
+      }
+      const d = specDress({
+        spec, piece, wCode, pCode, spill,
+      });
+      if (d.nope !== undefined) { acct(d.nope); bad = true; return null; }
+      return d.code;
+    }, pad);
+    if (bad || r === null) return null;
+    if (r.lines.length > 0) {
+      if (out === null) {
+        acct('这个位置上带宽度或补零的格式化字面量（那几支要先把值落成局部量，而这儿插不进语句）还没接');
+        return null;
+      }
+      out.push(...r.lines);
+    }
+    return { code: r.code, type: T.string, rawPct };
   };
   const fieldsOf = (aggName) => {
     /* variant 那四格字段由这一层给 —— "按值抄一份"走的就是它们（105-variant.jnc 的
@@ -2558,6 +2679,9 @@ export function makeFnEnv(o) {
       const fn = nm2.fn;
       const args = allInChain(nm2.args, 'args-add', 'args');
       const asName = headOf(fn) === 'name' ? String(named(fn)?.text?.value ?? '') : null;
+      /* **`$"…"(a, b)` 那对括号不是调用**（`CALL_ORDER` 的第一条）：它是格式化字面量自己的
+         实参表（`%N` 引的就是它）—— 所以这一问排在最前头。 */
+      if (headOf(fn) === 'fmt') return fmtOf(fn, args);
       /**
        * **方法那一族**（第五十二刀）：`p.sum()`、`q.sum()`（`P*` 上与 `P` 上一样，第二十五刀）、
        * 以及方法体里**裸叫方法**（`sum()` 就是 `this.sum()`）。方言那一侧它是一格普通函数
@@ -2900,6 +3024,31 @@ export function makeFnEnv(o) {
     printf: (node, ind, ctx) => {
       const args = allInChain(named(node)?.args, 'args-add', 'args');
       if (args.length === 0) { acct('printf 一个实参都没有'); return null; }
+      /**
+       * **`printf($"…")`**（第二百五十四刀）：格式化字面量自己就把值排好了，结果是**一格
+       * 字符串** —— 这一句就是把它写出去（`write` 不添换行，与 printf 一致）。
+       *
+       * 只有一处不能这么办：结果里还留着**裸的 `%`**。jancy 那边 printf 会把它再解释一遍
+       * （字面量产出的是 char*，printf 是真变参函数），而这一层没有运行期的格式解释 ——
+       * 所以那种写法明说不收，而不是悄悄少印一个 `%`。
+       * 字面量自己带实参表时 printf 这儿不能再给别的实参（那是两套序号）。
+       */
+      const fl = headOf(args[0]) === 'fmt' ? { fn: args[0], as: [] }
+        : (headOf(args[0]) === 'call' && headOf(named(args[0])?.fn) === 'fmt'
+          ? { fn: named(args[0]).fn, as: allInChain(named(args[0])?.args, 'args-add', 'args') }
+          : null);
+      if (fl !== null) {
+        if (args.length > 1) {
+          acct('格式化字面量自己带实参表（`$"…"(a, b)`），printf 这儿不能再给别的实参'); return null;
+        }
+        const v = fmtOf(fl.fn, fl.as);
+        if (v === null) return null;                        // 账已经记过
+        if (v.rawPct === true) {
+          acct('printf 的实参是带裸 `%` 的格式化字面量（jancy 那儿那个 `%` 还要被 printf 再解释一遍）还没接');
+          return null;
+        }
+        return [`${' '.repeat(ind)}(write ${v.code})`];
+      }
       /* 格式串那一格是一格**记号**，而且**转义已经解好了**：
          `{ kind:'string', value:'%d\n', raw:'%d\\n' }`（印出来才知道的 —— 先前既按裸引号
          判、又想 JSON.parse 一遍，两样都错）。所以直接用 `value`。
