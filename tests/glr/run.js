@@ -6,8 +6,8 @@
 //   1. **表是稳定的**：dumpTable 的输出对上 snapshots/NAME.table。快照测试在这里不是懒 ——
 //      项集族、FOLLOW、优先级消歧三者任一改错，症状都是"某个输入分析结果变了"，那种错
 //      看不出根因。表钉住了，根因就在表的 diff 里。
-//   2. **冲突处刻意分叉**：lookahead.grammar 是 SLR(1) 不够但语言不歧义的形状，
-//      两条输入分别走冲突的两支，两条都要过。只过一条 = 驱动退化成 LR 了。
+//   2. **冲突处刻意分叉**：lookahead.grammar 是 LALR(1) 不够但语言不歧义的形状，
+//      四条输入分别走那对归约/归约冲突的两支，四条都要过。少过一条 = 驱动退化成 LR 了。
 //   3. **真歧义要报错，不许猜**：dangling.grammar 不加优先级，
 //      `if a then if b then x else y` 必须撞上 bison 的那条硬边界。
 //   4. **真实语料一份不落**：asymptote 自带的 84 个 .asy 模块全都要出且只出一棵树。
@@ -239,13 +239,14 @@ function splitBatch(out, paths) {
 
 // ------------------------------------------------------------ 3. lookahead 必须留下冲突
 //
-// 反向的门槛：如果哪天有人把表升级成 LALR，这条会红。那不是坏事 —— 它提醒你
-// 这份 case 的意义（"冲突处两支都要活"）已经换了地方，得另找一份语法来担。
+// 反向的门槛：如果哪天有人把表升级得更强（LALR(1) -> 正规 LR(1)），这条会红。那不是坏事 ——
+// 它提醒你这份 case 的意义（"冲突处两支都要活"）已经换了地方，得另找一份语法来担。
+// 2026-09 从 SLR(1) 升到 LALR(1) 时就红过一次，那一次换掉了 lookahead.grammar 本身。
 
 if (grammars.includes('lookahead.grammar')) {
   const r = run(['glr-table', gpathOf('lookahead.grammar')]);
   if (r.out.includes('conflicts left to the GLR driver: none')) {
-    no('lookahead/has-conflicts', '    this grammar is supposed to be beyond SLR(1), but the table came out clean');
+    no('lookahead/has-conflicts', '    this grammar is supposed to be beyond LALR(1), but the table came out clean');
   } else {
     ok('lookahead/has-conflicts [the driver really does the splitting]');
   }

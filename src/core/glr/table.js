@@ -1,14 +1,27 @@
 // Omni stage0 — 语法表的构造（ADR-0014 决策 2）
 //
-// ## 为什么是 SLR(1) 而不是 LALR(1)
+// ## 为什么是 LALR(1)（从 SLR(1) 升上来的，2026-09）
 //
-// bison 用 LALR(1)，因为它必须在**构表期**把冲突压到最少 —— 剩下的冲突就是错误。
-// 我们不必：有了 GLR，构表期没解决的冲突留到**运行期**由分叉解决，走不通的那支自己死掉。
+// 先前这一格是 SLR(1)，理由写得也对：有了 GLR，构表期没解决的冲突留到运行期分叉解决，
+// 而 **SLR 与 LALR 接受的语言在 GLR 驱动下完全相同** —— 差别只是"错误的那支什么时候死"，
+// 不是"有没有合法的分析树"。所以那时的结论是"精度换来的只是速度，真嫌慢了再升级，
+// 位置就在这一个文件里"。
 //
-// 关键一点：SLR 与 LALR 接受的语言在 GLR 驱动下**完全相同**。两者的差别只是"错误的那支
-// 什么时候死"，不是"有没有合法的分析树"。如果两支都活到最后，那这个输入对这份语法就是
-// 真的有歧义 —— 用哪种表都一样。所以精度换来的只是速度，而 SLR 的构造是 LALR 的四分之一，
-// 短得能一眼看完，也就一眼能审对。真嫌慢了再升级，位置就在这一个文件里。
+// **现在就是那个时候，而且逼上来的不是速度，是能不能用。** 量出来的：
+//
+//   - POSIX awk 那份语法（ext/awk/awk.grammar）在 SLR 下剩 **608 处**冲突，702 份语料
+//     只过 33 份 —— 失败几乎全是 `too many concurrent parses (> 400)` 与
+//     `the input is ambiguous`。GLR 驱动器不是在"帮忙"，是在替表干活，然后被淹掉。
+//   - 同一门语言，gawk 自己那份照 yacc 的 LALR 写的 `awkgram.y`，过我们的导入器建表
+//     只剩 **58 处**。差一个数量级。
+//
+// 差的就是一句话：**SLR 的 FOLLOW 是全局的**。它把"这个非终结符在整份语法里能被什么
+// 跟着"当成"它在**这一处**能被什么跟着"。表达式语言里同一个非终结符出现在十几处，
+// 这个近似就把十几处的 FOLLOW 全糊在一起 —— 每一处都多出一堆假的归约动作。
+//
+// 升级的落点很小（这也是当初那句"位置就在这一个文件里"兑现的地方）：项集族那一趟
+// 一个字没改，只把"归约铺哪些记号"从 `FOLLOW(左部)` 换成 `lalrLookaheads` 算出来的
+// 那一格。见那个函数的注释。
 //
 // ## 优先级
 //
@@ -111,6 +124,131 @@ function closure(g, kernel) {
   return items;
 }
 
+/** 传播用的假前看记号。它只在 LALR 那一趟里流动，不会进表。 */
+const DUMMY = '#la';
+
+/**
+ * **带前看集的** LR(1) 闭包。`seed` 是 `Map<项, Set<记号>>`，答同样形状的 Map（含闭进来的）。
+ *
+ * 与上面那个 LR(0) 闭包的差别只有一句：拉 `B -> ·γ` 进来时，它的前看集是
+ * `FIRST(点后面剩下那串 · 本项的前看集)`。这一句就是 LALR 与 SLR 的全部分歧 ——
+ * SLR 用的是 `FOLLOW(B)`（不看上下文），这里用的是**这一处**点后面那串。
+ */
+function closure1(g, ns, seed) {
+  const la = new Map();
+  const work = [];
+  const add = (k, toks) => {
+    let s = la.get(k);
+    if (s === undefined) { s = new Set(); la.set(k, s); }
+    let grew = false;
+    for (const t of toks) {
+      if (!s.has(t)) { s.add(t); grew = true; }
+    }
+    if (grew) work.push(k);
+  };
+  for (const [k, toks] of seed) add(k, toks);
+  while (work.length > 0) {
+    const it = work.pop();
+    const ri = itemRule(it);
+    const dot = itemDot(it);
+    const r = g.rules[ri];
+    const B = r.rhs[dot];
+    if (B === undefined || !g.nonterms.has(B)) continue;
+    const tail = firstOfSeq(g, ns, r.rhs.slice(dot + 1), la.get(it));
+    for (const rj of g.nonterms.get(B).rules) add(itemKey(rj, 0), tail);
+  }
+  return la;
+}
+
+/**
+ * LALR(1) 的前看集（Aho/Sethi/Ullman 的"自发生成 + 传播"那套，算法 4.63）。
+ *
+ * 为什么非要它：从前这一格用的是 SLR(1)（归约照 `FOLLOW(左部)` 铺满一行）。SLR 的
+ * FOLLOW 是**全局**的 —— 它把"这个非终结符在整份语法里能被什么跟着"当成"它在**这一处**
+ * 能被什么跟着"。量出来的代价：POSIX awk 那份语法在 SLR 下剩 608 处冲突，GLR 驱动器
+ * 当场炸（`too many concurrent parses`），而同一门语言 gawk 那份照 LALR 写的 .y 只有 58 处。
+ * 差一个数量级，差的就是这一格。
+ *
+ * 算法三步，都在项集族**已经建好之后**跑（所以 LR(0) 那一趟一个字没改）：
+ *
+ *   1. **核项**：每个状态里点不在最左的那些项（0 号状态另加 `$accept -> ·S`）。
+ *      前看集只对核项算 —— 别的项是闭包拉进来的，它们的前看集由核项算得出来（第 3 步）。
+ *   2. **自发生成与传播**：对每个核项做一次 `closure1`，种子的前看集是**一格假记号** `#la`。
+ *      闭包里凡是"点后面是 X"的项，都在 `goto(状态, X)` 那边对应一个核项：
+ *        - 前看集里是真记号 a ⇒ a 在那边**自发生成**（与本项的前看集无关）；
+ *        - 前看集里是 `#la` ⇒ 本项的前看集要**传播**过去（画一条边，最后迭代到不动点）。
+ *      `$accept -> ·S` 的前看集初始化成 `{$end}` —— 整套的唯一源头。
+ *   3. **铺回全项**：每个状态拿核项的前看集再做一次 `closure1`，得到**所有**项的前看集。
+ *      这一步不是多余的：空产生式那些项（`A -> ·`）点在最左、不是核项，而它们恰恰要归约。
+ *
+ * 答 `full[状态号] = Map<项, Set<记号>>`。
+ */
+function lalrLookaheads(g, ns, states, rules, acceptRule) {
+  const kernels = [];
+  for (let i = 0; i < states.length; i++) {
+    const ks = [];
+    for (const it of states[i].items) {
+      if (itemDot(it) > 0 || (i === 0 && itemRule(it) === acceptRule)) ks.push(it);
+    }
+    kernels.push(ks);
+  }
+
+  const la = new Map();
+  const cell = (s, it) => `${s}#${it}`;
+  for (let i = 0; i < states.length; i++) {
+    for (const it of kernels[i]) la.set(cell(i, it), new Set());
+  }
+  la.get(cell(0, itemKey(acceptRule, 0))).add(END);
+
+  /* 传播边：`from -> [to…]`。一条边就是"这两格的前看集必须一样多"。 */
+  const edges = new Map();
+  for (let i = 0; i < states.length; i++) {
+    for (const it of kernels[i]) {
+      const seed = new Map();
+      seed.set(it, new Set([DUMMY]));
+      for (const [jt, toks] of closure1(g, ns, seed)) {
+        const ri = itemRule(jt);
+        const dot = itemDot(jt);
+        const X = rules[ri].rhs[dot];
+        if (X === undefined) continue;
+        const to = states[i].trans.get(X);
+        if (to === undefined) continue;
+        const tk = cell(to, itemKey(ri, dot + 1));
+        const dst = la.get(tk);
+        if (dst === undefined) continue;
+        for (const t of toks) {
+          if (t !== DUMMY) { dst.add(t); continue; }
+          const fk = cell(i, it);
+          if (!edges.has(fk)) edges.set(fk, []);
+          edges.get(fk).push(tk);
+        }
+      }
+    }
+  }
+
+  for (;;) {
+    let changed = false;
+    for (const [from, tos] of edges) {
+      const src = la.get(from);
+      for (const to of tos) {
+        const dst = la.get(to);
+        for (const t of src) {
+          if (!dst.has(t)) { dst.add(t); changed = true; }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+
+  const full = [];
+  for (let i = 0; i < states.length; i++) {
+    const seed = new Map();
+    for (const it of kernels[i]) seed.set(it, la.get(cell(i, it)));
+    full.push(closure1(g, ns, seed));
+  }
+  return full;
+}
+
 /**
  * 规范项集族。产生的表：
  *   states[i] = {items: string[], actions: Map<term, Action[]>, gotos: Map<nonterm, number>}
@@ -132,7 +270,9 @@ export function buildTable(g) {
     if (found !== undefined) return found;
     const id = states.length;
     byKey.set(key, id);
-    states.push({ items, actions: new Map(), gotos: new Map() });
+    /* `trans` 是"这个状态在某个符号上走到哪儿"—— 终结符那半与 actions 里的 shift 重复，
+       但 LALR 那一趟要按**符号**查（不分终结符/非终结符），单开一格比查两处清楚。 */
+    states.push({ items, actions: new Map(), gotos: new Map(), trans: new Map() });
     return id;
   };
 
@@ -151,20 +291,25 @@ export function buildTable(g) {
     }
     for (const [s, kernel] of groups) {
       const to = intern(kernel);
+      st.trans.set(s, to);
       if (gg.terms.has(s)) addAction(st, s, { kind: 'shift', to });
       else st.gotos.set(s, to);
     }
   }
 
-  // 归约与接受
-  for (const st of states) {
+  // 归约与接受。前看集是 **LALR(1)** 的（不是 FOLLOW）—— 见 lalrLookaheads 的注释。
+  const look = lalrLookaheads(gg, a.ns, states, rules, acceptRule);
+  for (let i = 0; i < states.length; i++) {
+    const st = states[i];
     for (const it of st.items) {
       const ri = itemRule(it);
       const dot = itemDot(it);
       const r = rules[ri];
       if (dot !== r.rhs.length) continue;
       if (ri === acceptRule) { addAction(st, END, { kind: 'accept' }); continue; }
-      for (const t of follow.get(r.lhs)) addAction(st, t, { kind: 'reduce', rule: ri });
+      const toks = look[i].get(it);
+      if (toks === undefined) continue;
+      for (const t of toks) addAction(st, t, { kind: 'reduce', rule: ri });
     }
   }
 
@@ -291,7 +436,7 @@ export function dumpTable(tb, brief = false) {
     lines.push(`conflicts left to the GLR driver: ${tb.conflicts.length}`);
     for (const c of tb.conflicts) lines.push(`  state ${c.state} on ${sym(c.token)}: ${c.kind} (${c.actions} actions)`);
   } else {
-    lines.push('conflicts left to the GLR driver: none (this grammar is SLR(1))');
+    lines.push('conflicts left to the GLR driver: none (this grammar is LALR(1))');
   }
   return lines.join('\n') + '\n';
 }
@@ -320,7 +465,7 @@ export function dumpTable(tb, brief = false) {
  */
 
 /** 缓存格式的版本。序列化的形状改了就加一 —— 缓存键里带着它，老文件自动失效。 */
-export const TABLE_FORMAT = 1;
+export const TABLE_FORMAT = 2;
 
 /** 表 -> 缓存文本 */
 export function tableText(tb) {

@@ -248,4 +248,4 @@ state 17
   on "/": reduce r6
   on "^": reduce r6
   on $end: reduce r6
-conflicts left to the GLR driver: none (this grammar is SLR(1))
+conflicts left to the GLR driver: none (this grammar is LALR(1))
