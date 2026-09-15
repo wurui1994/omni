@@ -61,6 +61,9 @@ const SUITES = [
   { s: 'run.js' }, { s: 'cli/tree.js' }, { s: 'oracle/run.js' },
   { s: 'oir/run.js' },
   { s: 'cabi/run.js' }, { s: 'wat/run.js' }, { s: 'glr/run.js' }, { s: 'mir/run.js' },
+  // 节点图那两条轴：矩阵（语言 × 后端）与**可删除测试**（删一格特性，剩下的照旧跑）。
+  // 两条都在 `tests/graph/` 底下，都只用得着 `src/core/graph` + 各语言的 `.grammar`。
+  { s: 'graph/run.js' }, { s: 'graph/delete.js' },
   { s: 'incr/run.js' }, { s: 'c/run.js' },
   { s: 'llvm/run.js', group: 'jit' }, { s: 'sexpr/run.js' }, { s: 'asy/run.js' },
   { s: 'jnc/run.js' }, { s: 'jit/run.js', group: 'jit' },
