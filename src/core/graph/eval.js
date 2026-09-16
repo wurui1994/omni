@@ -27,10 +27,10 @@ class Return { constructor(value) { this.value = value; } }
 class LoopExit { constructor(kind) { this.kind = kind; } }
 
 /** 一格作用域 = 一格 region。`bind` 边（名字 -> 定义）按这条链查，与 ADR-0029 同一件事。 */
-class Env {
+class GraphEnv {
   /**
    * `region` 那一格：一格名字域 + 一格**出口动作表**（`exits`）。
-   * 只有 region / 函数体的 Env 带 exits —— `scope-exit` 往最近的那一格挂。
+   * 只有 region / 函数体的 GraphEnv 带 exits —— `scope-exit` 往最近的那一格挂。
    */
   constructor(parent = null, { region = false } = {}) {
     this.vars = new Map();
@@ -71,7 +71,7 @@ class Env {
 class Values { constructor(list) { this.list = list; } }
 
 /** 只要一格值的地方：多值收成第一格（lua / go / CL 都是这条规矩）。 */
-const one = (v) => (v instanceof Values ? (v.list[0] ?? null) : v);
+const oneValue = (v) => (v instanceof Values ? (v.list[0] ?? null) : v);
 
 /** 一格闭包。`func` 的出端口声明了 `owns`，所以它是一格有寿命的值（这一批由宿主管）。 */
 class Closure {
@@ -90,7 +90,7 @@ function callPrim(name, args, io) {
  * lua / awk / go / cpp 四家答案不同）。这一批用"最保守"的那一档：
  * 只有 `false` / `null` / `undefined` 是假。哪门语言要别的答案，由它的映射自己套一格 `prim`。
  */
-export function truthy(v) { return !(v === false || v === null || v === undefined); }
+export function valTruthy(v) { return !(v === false || v === null || v === undefined); }
 
 export function showValue(v) {
   if (v instanceof Values) return v.list.map(showValue).join(' ');
@@ -118,7 +118,7 @@ export function showValue(v) {
  * 取多值的第 k 格。**一份实现，两个后端共用** —— `pick` 那格节点与 js 后端里那句
  * `__pick(...)` 走的是这一个函数（内建表那一刀之后，这是第二处"同一份知识只写一遍"）。
  */
-export const pick = (v, i) => {
+export const valPick = (v, i) => {
   if (v instanceof Values) return v.list[i] ?? null;
   if (v !== null && typeof v === 'object' && Array.isArray(v.__vals)) return v.__vals[i] ?? null;
   return i === 0 ? v : null;
@@ -176,7 +176,7 @@ export const setIndex = (obj, i, value) => {
  * awk 当场长出一格空串、V 给 option），所以调度器不替谁选：要默认值就用
  * `map-has` + `branch` 自己写一遍。三格都是两个后端共用的（js 那侧也调它们）。
  */
-export const mapNew = (keys, vals) => {
+export const valMapNew = (keys, vals) => {
   const m = new Map();
   (keys ?? []).forEach((k, i) => m.set(k, (vals ?? [])[i] ?? null));
   return m;
@@ -187,7 +187,7 @@ const asMap = (obj, who) => {
   return obj;
 };
 
-export const mapGet = (obj, k) => {
+export const valMapGet = (obj, k) => {
   const m = asMap(obj, 'map-get');
   if (!m.has(k)) {
     throw new Error(`map-get: 没有这一格键 ${showValue(k)}（缺键的默认值归语言，用 map-has 自己写）`);
@@ -195,17 +195,17 @@ export const mapGet = (obj, k) => {
   return m.get(k);
 };
 
-export const mapSet = (obj, k, value) => {
+export const valMapSet = (obj, k, value) => {
   asMap(obj, 'map-set').set(k, value);
   return null;
 };
 
-export const mapHas = (obj, k) => asMap(obj, 'map-has').has(k);
+export const valMapHas = (obj, k) => asMap(obj, 'map-has').has(k);
 
 /**
  * 切片：**一段范围复制成一格新列表**。上界不含、下标 0 起（各语言的差别由映射摆平）。
  * 两个后端共用（js 后端里那句 `__slice`）。
- */export const sliceOf = (obj, from, to) => {
+ */export const valSlice = (obj, from, to) => {
   if (!Array.isArray(obj)) throw new Error('slice: 不是一格列表');
   const a = from === undefined || from === null ? 0 : Number(from);
   const b = to === undefined || to === null ? obj.length : Number(to);
@@ -226,7 +226,7 @@ export const convert = (v, to, io) => {
     case 'int': return Math.trunc(Number(v));
     case 'float': return Number(v);
     case 'str': return (io?.show ?? showValue)(v);
-    case 'bool': return truthy(v);
+    case 'bool': return valTruthy(v);
     default: throw new Error(`conv: 还没接这个目标：${to}`);
   }
 };
@@ -251,20 +251,20 @@ function inputOf(n, port, env, io) {
     // 列表里**只有最后一格展开**（lua 那份规格里的 arity 契约，SDK 的 arity.js 同一条）
     const vals = list.map((y) => refValue(y, env, io));
     return vals.flatMap((v, k) => (v instanceof Values
-      ? (k === vals.length - 1 ? v.list : [one(v)])
+      ? (k === vals.length - 1 ? v.list : [oneValue(v)])
       : [v]));
   }
   // `multi` 的端口（pick 的来源、ret 的值）与 keepMulti 的 bind 原样收多值；
   // 别的端口"只要一格" ⇒ 多值收成第一格（lua / go / CL 都是这条规矩）
   const raw = port.multi === true || n.attrs?.keepMulti === true;
-  return raw ? refValue(x, env, io) : one(refValue(x, env, io));
+  return raw ? refValue(x, env, io) : oneValue(refValue(x, env, io));
 }
 
 function run(n, env, io) {
   if (n === null || n === undefined) return null;
   if (Array.isArray(n)) { let last = null; for (const y of n) last = run(y, env, io); return last; }
   if (n.lit !== undefined) return n.lit;
-  if (n.kind === 'graph') return run(n.body, new Env(env), io);
+  if (n.kind === 'graph') return run(n.body, new GraphEnv(env), io);
 
   const d = declOf(n.op);
   const arg = (name) => {
@@ -281,12 +281,12 @@ function run(n, env, io) {
     case 'branch': {
       // 两支都是 `lazy` 端口 —— **只算一支**，这就是那一栏求值语义的全部用处。
       const t = arg('then'); const e = arg('else');
-      return truthy(arg('cond')) ? (t === null ? null : t()) : (e === null ? null : e());
+      return valTruthy(arg('cond')) ? (t === null ? null : t()) : (e === null ? null : e());
     }
     case 'loop': {
       const cond = arg('cond'); const body = arg('body'); const post = arg('post');
       let guard = 0;
-      while (truthy(cond())) {
+      while (valTruthy(cond())) {
         // 这一格是"函数边界之外的 may-early-exit"落地的地方：break 收在这儿、
         // continue 只吃掉本轮剩下的部分。途中每格 region 的出口由那边的 finally 跑。
         let done = false;
@@ -303,7 +303,7 @@ function run(n, env, io) {
       return null;
     }
     case 'region': {
-      const inner = new Env(env, { region: true });   // region 边：一格新的域 + 一格出口表
+      const inner = new GraphEnv(env, { region: true });   // region 边：一格新的域 + 一格出口表
       try {
         return refValue(n.ins.body, inner, io);
       } finally {
@@ -318,7 +318,7 @@ function run(n, env, io) {
     }
     case 'func': return new Closure(n.attrs.params ?? [], n.ins.body, env, n.attrs.name);
     case 'values': return new Values(arg('args') ?? []);
-    case 'pick': return pick(arg('from'), Number(n.attrs.index ?? 0));
+    case 'pick': return valPick(arg('from'), Number(n.attrs.index ?? 0));
     case 'record-new': {
       // 字段名是**附属**（`names`），值是入端口 —— 名字表与值表按位置对上
       const vals = arg('fields') ?? [];
@@ -331,13 +331,13 @@ function run(n, env, io) {
     case 'index-get': return index(arg('obj'), arg('index'));
     case 'index-set': return setIndex(arg('obj'), arg('index'), arg('value'));
     // map / dict：键按值比较，**缺键报错**（默认值归语言 —— 用 map-has 自己写）
-    case 'map-new': return mapNew(arg('keys'), arg('vals'));
-    case 'map-get': return mapGet(arg('obj'), arg('key'));
-    case 'map-set': return mapSet(arg('obj'), arg('key'), arg('value'));
-    case 'map-has': return mapHas(arg('obj'), arg('key'));
+    case 'map-new': return valMapNew(arg('keys'), arg('vals'));
+    case 'map-get': return valMapGet(arg('obj'), arg('key'));
+    case 'map-set': return valMapSet(arg('obj'), arg('key'), arg('value'));
+    case 'map-has': return valMapHas(arg('obj'), arg('key'));
     // 表示转换：目标在附属 `to` 上。**四家的写法不同，落的是同一格**
     case 'conv': return convert(arg('value'), n.attrs.to, io);
-    case 'slice': return sliceOf(arg('obj'), arg('from'), arg('to'));
+    case 'slice': return valSlice(arg('obj'), arg('from'), arg('to'));
     case 'ret': throw new Return(arg('value') ?? null);
     case 'loop-exit': throw new LoopExit(n.attrs.kind ?? 'break');
     case 'call': {
@@ -345,7 +345,7 @@ function run(n, env, io) {
       const args = arg('args') ?? [];
       if (typeof fn === 'string') return callPrim(fn, args, io);   // 名字直接指到内建
       if (!(fn instanceof Closure)) throw new Error(`not callable: ${showValue(fn)}`);
-      const inner = new Env(fn.env, { region: true });   // 函数体也是一格 region
+      const inner = new GraphEnv(fn.env, { region: true });   // 函数体也是一格 region
       fn.params.forEach((p, i) => inner.define(p, args[i] ?? null));
       try {
         return refValue(fn.body, inner, io);
@@ -366,8 +366,8 @@ function run(n, env, io) {
  * **判据就是它**：同一份例子、不同语言的前端，`out` 必须逐行相同（G4 的可跑版本）。
  */
 export function evalGraph(g, opts = {}) {
-  const io = { out: [], show: showValue, truthy };
-  const env = new Env(null, { region: true });
+  const io = { out: [], show: showValue, truthy: valTruthy };
+  const env = new GraphEnv(null, { region: true });
   for (const [k, v] of Object.entries(opts.globals ?? {})) env.define(k, v);
   let value = null;
   try {

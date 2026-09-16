@@ -16,8 +16,8 @@
 
 import { NODES, declOf } from './nodes.js';
 import {
-  evalGraph, showValue, truthy, pick, field, setField, index, setIndex, convert, sliceOf,
-  mapNew, mapGet, mapSet, mapHas,
+  evalGraph, showValue, valTruthy, valPick, field, setField, index, setIndex, convert, valSlice,
+  valMapNew, valMapGet, valMapSet, valMapHas,
 } from './eval.js';
 import { toSx, fromSx } from './graph.js';
 import { PRIMS } from './prims.js';
@@ -292,9 +292,9 @@ function jsLower(g) {
       const out = [];
       // eslint-disable-next-line no-new-func
       const f = new Function(`return ${source};`)();
-      f(out, showValue, truthy, pick, field, setField, index, setIndex,
-        (v, to) => convert(v, to, { show: showValue }), sliceOf,
-        mapNew, mapGet, mapSet, mapHas);
+      f(out, showValue, valTruthy, valPick, field, setField, index, setIndex,
+        (v, to) => convert(v, to, { show: showValue }), valSlice,
+        valMapNew, valMapGet, valMapSet, valMapHas);
       return { value: null, out };
     },
   };

@@ -40,16 +40,21 @@ import { span as mkSpan } from '../source/diag.js';
 /** 这条路径是不是一份 EBNF。 */
 export const isEbnfPath = (p) => p.endsWith('.ebnf');
 
-/** 把文件名折成一个合法的语法名：`c++23.ebnf` -> `cpp23`、`elsa-cc.gr.ebnf` -> `elsa-cc-gr`。 */
-function grammarNameOf(path) {
+/** 把文件名折成一个合法的语法名：`c++23.ebnf` -> `cpp23`、`elsa-cc.gr.ebnf` -> `elsa-cc-gr`。
+ *
+ * 名字里带 `ebnf` 是**必须的**：`yacc.js` 里有一格同名不同规矩的（`.y` 那套按下划线折），
+ * 而整棵 import 树拼成一个程序之后模块级的名字共用一个空间（见 frontend-js/link.js 头上
+ * 那条"跨文件重名就报错"）。同名不同事比长名字坏得多。 */
+function ebnfGrammarName(path) {
   let base = path.replace(/^.*[/\\]/, '').replace(/\.ebnf$/, '');
   base = base.replace(/\+\+/g, 'pp').replace(/[^A-Za-z0-9_-]+/g, '-');
   base = base.replace(/^-+|-+$/g, '');
   return base === '' ? 'ebnf' : base;
 }
 
-/** 把一段文本转成 `.grammar` 里的串字面量（反斜杠与引号要转义 —— 散文终结符里什么都有）。 */
-function q(s) {
+/** 把一段文本转成 `.grammar` 里的串字面量（反斜杠与引号要转义 —— 散文终结符里什么都有）。
+ *  yacc.js 那边也有一格叫 `q` 的（那格是 `JSON.stringify`），所以这儿写全名。 */
+function quoteGrammarStr(s) {
   let out = '"';
   for (const ch of s) {
     if (ch === '\\') out += '\\\\';
@@ -151,8 +156,9 @@ function splitRules(src, file, diags) {
  * 右部：分支 -> 序列 -> 项（名字 / 串 / 分组）+ 后缀
  * ------------------------------------------------------------------------- */
 
-/** 右部的词法器。项之间的空白（含换行）都是分隔符。 */
-class Rx {
+/** 右部的词法器。项之间的空白（含换行）都是分隔符。
+ *  （`yacc.js` 里也有一格 `Rx` —— 那是正则那一族的，与这格不是一回事，所以这儿带上 Ebnf。） */
+class EbnfRx {
   constructor(text, base, file, diags) {
     this.s = text;
     this.i = 0;
@@ -412,7 +418,7 @@ export function ebnfToGrammarText(file, diags) {
   for (const r of rules) declared.add(r.name);
 
   for (const r of rules) {
-    const rx = new Rx(r.body, r.bodyAt, file, diags);
+    const rx = new EbnfRx(r.body, r.bodyAt, file, diags);
     const alts = parseAlts(rx);
     if (!rx.eof() && !rx.bad) rx.fail(rx.i, 'trailing junk in EBNF right-hand side');
     if (rx.bad) continue;
@@ -436,7 +442,7 @@ export function ebnfToGrammarText(file, diags) {
   }
   tokens.sort();
 
-  const name = grammarNameOf(file.path);
+  const name = ebnfGrammarName(file.path);
   const start = rules[0].name;
   const out = [];
   out.push(`;; 由 ${file.path} 自动转成 —— 别手改这一份，改上游那个 .ebnf。`);
@@ -462,7 +468,7 @@ export function ebnfToGrammarText(file, diags) {
     const prods = [];
     const dedup = new Set();
     for (const p of r.prods) {
-      const rhs = p.map((s) => (s.lit ? q(s.sym) : s.sym));
+      const rhs = p.map((s) => (s.lit ? quoteGrammarStr(s.sym) : s.sym));
       const key = rhs.join(' ');
       if (dedup.has(key)) continue;
       dedup.add(key);
