@@ -10,7 +10,11 @@
 //
 // CTX 那三条是尺子逼出来的：`break` 要循环、`...` 要变长参数、`goto` 要标签。
 
-export { bind } from '../../src/core/frontend-engine/bind.js';
+// 转手 SDK 那一格要**先导入再导出**（`export … from …` 我们自己的 JS 前端不收，
+// 见 frontend-js/link.js 的头几行）。
+import { bind } from '../../src/core/frontend-engine/bind.js';
+
+export { bind };
 
 /** 每个节点的配方。只有这九个节点有话说，其余按 `syn` 次序走。 */
 export const LUA_SCOPE = {

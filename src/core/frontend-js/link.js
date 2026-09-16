@@ -6,11 +6,26 @@
 // 于是 lower.js 完全不需要知道模块这回事（它见到 import 仍然是报错的，那是安全网）。
 //
 // 几条刻意的限制（都是量过源码之后定的）：
-//   - `export … from …` 报错 —— 量过：仓库里一处都没有。
+//   - `export … from …` 与 `export * from …` 都报错，报在写它的那一行上。
+//     **"量过：仓库里一处都没有"这句话过期过一次**：`ext/gsl-shell/tograph.js` 与
+//     `src/lang/jnc/int-table.js` 后来各写了一句（前者转手 lua 的映射、后者转口
+//     `src/lang/common/int.js`）。星号那一句更糟 —— 当时解析器压根不认 `*`，
+//     于是它掉进"表达式语句"，报出三条对不上号的错，而真正的红出现在**下游另一个文件**
+//     （"does not export 'intConvCode'"）。两句都改成了"先导入再导出"，
+//     解析器也认得出 `export *` 了。判据是 `tests/mir/run.js` 那格
+//     "编译器自己也要降得下来"：这一族 16 条诊断归零。
 //   - `import { a as b }` / `export { x as y }` / `export default …` / `import def` 都摊成模块级
 //     的一句绑定（不做重命名，也就不需要作用域分析）；`import * as ns` 摊成一格取值器对象。
 //   - 模块级的名字**跨文件重名就报错**：拼在一起之后它们是同一个作用域。改名比在这里
 //     做一遍带作用域的重写便宜得多，而且改完源码更好读。
+//     **这一条的价钱要按量出来的记**：现在 `cli.js` 那条自编译链上有 **142 条**重名
+//     （`tests/mir/run.js` 里 `lower/cli.js` 那一格因此是红的，而且这不是新事 ——
+//     在 a9df4874 上就有 126 条）。最大的一堆是 `ext/*/tograph.js` 那十一份：
+//     `toNode` / `nameOf` / `many` / `OPS` / `PRIM` 在每一门里都是最自然的名字，
+//     而 `src/core/graph/langs.js` 把十一门**静态**导进来，于是它们必然撞。
+//     也就是说"改名比作用域重写便宜"这句话在**一门一份映射**的形状上不成立 ——
+//     每加一门语言就多撞几格。要么这一层学会按模块自动改名（那要真的作用域分析），
+//     要么 langs.js 改成迟装。**这笔账现在是量出来的数，不是印象**。
 //   - `node:*` 的导入一律报错，让它去走封闭 ABI（ADR-0011 决策 2）。
 
 import { parseJs } from './parser.js';
@@ -227,6 +242,13 @@ function scan(m, diags) {
           if (sp.local !== sp.exported) m.aliases.push({ from: sp.local, to: sp.exported, span: s.span });
           m.exports.set(sp.exported, sp.local);
         }
+        break;
+      }
+      case 'ExportAll': {
+        /* `export * from "m"`：不收。星号那种"导出哪些名字要看另一个文件"落不到这一层的
+           模型上（整棵树拼成一个程序、名字共用一个顶层空间），所以照 `export … from …`
+           同一句话报 —— 而且报在写它的那一行上。转口要一格一格写。 */
+        diags.error(s.span, "'export * from …' is not supported; import the names and export them again");
         break;
       }
       case 'ExportDefault': {

@@ -539,6 +539,22 @@ class JsParser {
       this.semicolon();
       return { type: 'ExportDefault', value, span: this.spanFrom(start) };
     }
+    /* `export * from "m"` / `export * as ns from "m"`：**认得出来，但不收**（链接那一层
+       报一句人话，见 link.js 的 ExportAll）。头一版压根不认 `*`，于是它掉进"表达式语句"
+       那条路，报出三条对不上号的错（`expected an expression, found '*'` …）——
+       量出来的：`src/lang/jnc/int-table.js` 写了一句 `export * from …`，报错指的是下游
+       另一个文件"没有导出 intConvCode"。**认得出的错要报在写错的那一行上**。 */
+    if (this.at('*')) {
+      this.next();
+      if (this.cur().kind === 'ident' && this.cur().value === 'as') { this.next(); this.identName('namespace name'); }
+      let source = null;
+      if (this.cur().kind === 'ident' && this.cur().value === 'from') {
+        this.next();
+        source = this.cur().kind === 'str' ? this.next().value : '';
+      }
+      this.semicolon();
+      return { type: 'ExportAll', source, span: this.spanFrom(start) };
+    }
     const decl = this.statement();
     return { type: 'ExportDecl', decl, span: this.spanFrom(start) };
   }

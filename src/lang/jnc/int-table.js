@@ -7,4 +7,17 @@
 //
 // 等方言长出**带宽度的整数**（ADR-0031 §8.1）之后，`wrapTo` 那一串掩码会塌成一格
 // `trunc` / `sext`，塌的时候只改公共那一份 —— 两门语言一起跟着变。
-export * from '../common/int.js';
+//
+// **转口要一格一格写**（不是 `export * from …`）：我们自己那个 JS 前端不收 `export *`
+// （`frontend-js/link.js`：整棵 import 树拼成一个程序，星号那种"名字表要到运行期才知道"
+// 落不下来），写了的后果是 `tests/mir/run.js` 那格"编译器自己也要降得下来"当场红
+// —— 而且报的是下游那句莫名其妙的 "does not export 'intConvCode'"。
+import {
+  wrapTo, wrapVal, U_OPS, uOp, realOf, arithType, commonInt, intConvCode,
+  OVERFLOWS, intBinary, intUnary,
+} from '../common/int.js';
+
+export {
+  wrapTo, wrapVal, U_OPS, uOp, realOf, arithType, commonInt, intConvCode,
+  OVERFLOWS, intBinary, intUnary,
+};

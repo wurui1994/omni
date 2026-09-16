@@ -3,7 +3,11 @@
 // 四条规则里只有这一张三行的表是 Lua 自己的；另两条（列表只有最后一格展开、
 // 非列表的洞截成一格）是普适的，写在 SDK 那侧，一格数据都不用给。
 
-export { yieldsOf, listShape, arity, predict } from '../../src/core/frontend-engine/arity.js';
+// 转手 SDK 那几格要**先导入再导出**（`export … from …` 我们自己的 JS 前端不收，
+// 见 frontend-js/link.js 的头几行）。
+import { yieldsOf, listShape, arity, predict } from '../../src/core/frontend-engine/arity.js';
+
+export { yieldsOf, listShape, arity, predict };
 
 /** 元数表。三行说"谁产生多值"，一行说"谁把多值掐断"。 */
 export const LUA_YIELDS = {
