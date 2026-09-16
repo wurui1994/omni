@@ -32,9 +32,11 @@
 import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
-  COND, addImm, addReg, andImm, andReg, asrv, blr, cmpImm, cmpReg, cset, eorImm, eorReg, fadd,
+  COND, addImm, addReg, andImm, andReg, asrv, asrImm, blr, cmpImm, cmnImm, cmpReg, cset, eorImm,
+  eorReg, fadd,
   fcmpArm64, fcvtDS, fcvtSD, fcvtzs, fcvtzu, fdiv, fmovFromInt, fmovToInt, fmul, fneg, fsub,
-  ldpPost, ldrU, ldrsU, ldrRegOff, lslv, lsrv, movReg, movSp, movk, movz, msub, mul, mvn, neg, orrReg,
+  ldpPost, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz, msub, mul,
+  mvn, neg, orrImm, orrReg,
   retArm64, scvtf, sdiv, stpPre, strU, strRegOff, subImm, subReg, sxtb, sxth, sxtw, ucvtf, udiv
 } from './encode.js';
 import { Arm64CodeBuf } from './asm.js';
@@ -609,6 +611,68 @@ class FnGen {
     this.frameLoad(reg, this.valOff(vi));
   }
 
+  /** 这个 ref 是个整数常量吗（bool 按 0/1 算）—— 是就回它的值，不是回 null。 */
+  intConst(ref) {
+    if (ref === REF_NONE || !isConstRef(ref)) return null;
+    const k = this.mod.consts.get(ref);
+    if (k.kind === 'int') return BigInt(k.text);
+    if (k.kind === 'bool') return k.text === 'true' ? 1n : 0n;
+    return null;
+  }
+
+  /**
+   * 二目的右操作数是常量时，**能不能直接用立即数那一形**（第一百四十五片）。能就当场
+   * 发完（连 `def` 一起）、回 true；不能回 false，调用方照旧把常量装进寄存器再算。
+   *
+   * 省的是那条 `movz`：整份 `.text` 的 972 万条指令里 `mov` 占 321 万，造常量是其中一份。
+   * 认三类 ——
+   *   - `+`/`-`：12 位无符号。常量是负的就换一条方向（`x + (-3)` = `sub x, #3`）；
+   *   - 移位：位数是常量就走 `lsl`/`lsr`/`asr` 的立即数形（`ubfm`/`sbfm`）；
+   *   - `&`/`|`/`^`：走**逻辑立即数**，但只认两种保证编得出来的形状（见 `maskImmOk`）。
+   * 乘除取余没有立即数形，`bitmaskImm` 也不敢乱试 —— 它编不了就抛，而这一层不接异常。
+   */
+  binImm(op, sf, i, x, k, w) {
+    const buf = this.buf;
+    if (op === OP.ADD || op === OP.SUB) {
+      /* `x - k` 就是 `x + (-k)`：先归一到「加多少」，再按正负挑 add / sub。 */
+      const up = op === OP.SUB ? -k : k;
+      if (up >= 0n && up <= 4095n) {
+        const d = this.dest(i, x);
+        buf.emit(addImm(sf, d, x, Number(up)));
+        this.def(i, d, w);
+        return true;
+      }
+      if (up < 0n && up >= -4095n) {
+        const d = this.dest(i, x);
+        buf.emit(subImm(sf, d, x, Number(-up)));
+        this.def(i, d, w);
+        return true;
+      }
+      return false;
+    }
+    if (op === OP.SHL || op === OP.SHR || op === OP.USHR) {
+      const lim = sf === 1 ? 64n : 32n;
+      if (k < 0n || k >= lim) return false;
+      const n = Number(k);
+      const d = this.dest(i, x);
+      if (op === OP.SHL) buf.emit(lslImm(sf, d, x, n));
+      else if (op === OP.SHR) buf.emit(asrImm(sf, d, x, n));
+      else buf.emit(lsrImm(sf, d, x, n));
+      this.def(i, d, w);
+      return true;
+    }
+    if (op === OP.BAND || op === OP.BOR || op === OP.BXOR) {
+      if (!maskImmOk(sf, k)) return false;
+      const d = this.dest(i, x);
+      if (op === OP.BAND) buf.emit(andImm(sf, d, x, k));
+      else if (op === OP.BOR) buf.emit(orrImm(sf, d, x, k));
+      else buf.emit(eorImm(sf, d, x, k));
+      this.def(i, d, w);
+      return true;
+    }
+    return false;
+  }
+
   /* ------------------------------------------------- 寄存器缓存（见 `POOL`） */
 
   /** 池里的一个位置：先要空的，没空的就收一个用光了的。都没有回 -1。
@@ -1179,26 +1243,39 @@ class FnGen {
       return this.def(i, d);
     }
 
-    /* ---- 二目 */
+    /* ---- 二目。右操作数是常量时先试立即数那一形（`binImm`）—— 省掉造常量那条 `movz`。 */
     const bin = BIN[op];
     if (bin !== undefined) {
       const w = arm64WidthOf(t);
       const sf = w === 64 ? 1 : 0;
       const x = this.refReg(f.a[i], TMP0);
+      const kb = this.intConst(f.b[i]);
+      if (kb !== null && this.binImm(op, sf, i, x, kb, w)) return;
       const y = this.refReg(f.b[i], TMP1);
       const d = this.dest(i, x, y);
       bin(buf, sf, d, x, y);
       return this.def(i, d, w);
     }
 
-    /* ---- 比较：`t` 是操作数的类型，产出永远是 0/1 的 bool */
+    /* ---- 比较：`t` 是操作数的类型，产出永远是 0/1 的 bool。
+     * 与常量比也走立即数形（`cmp x, #k` / 负数用 `cmn x, #-k`）。 */
     const cond = CMP[op];
     if (cond !== undefined) {
       const sf = arm64WidthOf(t) === 64 ? 1 : 0;
       const x = this.refReg(f.a[i], TMP0);
-      const y = this.refReg(f.b[i], TMP1);
+      const kb = this.intConst(f.b[i]);
+      let y = -1;
+      if (kb !== null && kb >= 0n && kb <= 4095n) {
+        buf.emit(cmpImm(sf, x, Number(kb)));
+      } else if (kb !== null && kb < 0n && kb >= -4095n) {
+        buf.emit(cmnImm(sf, x, Number(-kb)));
+      } else {
+        y = this.refReg(f.b[i], TMP1);
+        buf.emit(cmpReg(sf, x, y));
+      }
+      /* `dest` 一个字都不发，所以标志位在这中间不会被动 —— `cset` 紧接着读它。 */
       const d = this.dest(i, x, y);
-      buf.emit(cmpReg(sf, x, y), cset(1, d, cond));
+      buf.emit(cset(1, d, cond));
       return this.def(i, d);
     }
 
@@ -1685,6 +1762,28 @@ const MLOAD_SIZE = { i8s: 0, i8u: 0, i16s: 1, i16u: 1, i32s: 2, i32u: 2, i64: 3,
 function foldOff(off, size) {
   const w = 1 << size;
   return off >= 0 && off % w === 0 && off / w <= 4095;
+}
+
+/**
+ * 这个常量**保准编得出**一条逻辑立即数吗（`and`/`orr`/`eor` 的那一格）。
+ *
+ * arm64 的逻辑立即数是「一段连着的 1，转过某个角度、按 2/4/8/16/32/64 位复制」——
+ * `encode.js` 的 `bitmaskImm` 会把它算出来，但**编不了的时候它抛**，而这一层不接异常。
+ * 所以这儿只认两种**一眼就成立**的形状：
+ *   - 低位连着的一段 1（`v & (v+1) == 0`）：0x1、0x3、0xff、0xffff、0xffffffff……
+ *   - 单独一位（`v & (v-1) == 0`）：1 << n。
+ * 全 0 与全 1 编不了（手册里那两个位模式留给了别的指令），先挡掉。
+ * 别的形状（0x0f0f0f0f 那种）也是合法立即数，但要判就得把 `bitmaskImm` 的判据抄一遍 ——
+ * 抄两份就会有一天不一致，所以宁可少省几条。
+ */
+function maskImmOk(sf, k) {
+  const width = sf === 1 ? 64 : 32;
+  const v = BigInt.asUintN(width, k);
+  if (v === 0n) return false;
+  if (v === BigInt.asUintN(width, -1n)) return false;
+  if ((v & (v + 1n)) === 0n) return true;
+  if ((v & (v - 1n)) === 0n) return true;
+  return false;
 }
 
 /* 六种写 -> `str` 的宽度对数。 */
