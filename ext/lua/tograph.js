@@ -29,8 +29,24 @@ import {
  * 混着用（既 `t[1]` 又 `t["a"]`）也判不了 —— 碰上就报错，不猜（见文件末尾的不足）。
  */
 const MAPS = new Set();
-const mapUseName = (x) => (isList(x) && tag(x) === 'index' && tag(kids(x)[1]) === 'str'
-  ? nameOf(kids(x)[0]) : null);
+/** `setmetatable(t, mt)` 那一格调用（元表那台机器的入口，见 mcall / closeBind）。 */
+const isSetmeta = (x) => isList(x) && tag(x) === 'call' && isList(kids(x)[0])
+  && tag(kids(x)[0]) === 'name' && leaf(kids(kids(x)[0])[0]) === 'setmetatable';
+/**
+ * **名字被当"表"用过的几种形状** —— 一条一格（`mapNames` 每趟只收一条，所以是一张表）。
+ * 头一条是最早的那条判据（串当键）；后四条是元表那台机器带进来的：
+ * 方法调用的接收者、`setmetatable` 的两格实参、往一格表上挂函数（`function T:m()`）。
+ * 判据都是**它被怎么用过** —— 与 go/V"字面量自带标记"是两条不同的路子（弱在哪儿见文件头）。
+ */
+const MAP_USES = [
+  (x) => (isList(x) && tag(x) === 'index' && tag(kids(x)[1]) === 'str' ? nameOf(kids(x)[0]) : null),
+  (x) => (isList(x) && tag(x) === 'mcall' ? nameOf(kids(x)[0]) : null),
+  (x) => (isSetmeta(x) ? nameOf(kids(kids(x)[1])[0]) : null),
+  (x) => (isSetmeta(x) ? nameOf(kids(kids(x)[1])[1]) : null),
+  (x) => (isList(x) && tag(x) === 'fndef' && isList(kids(x)[0])
+    && (tag(kids(x)[0]) === 'dot' || tag(kids(x)[0]) === 'method')
+    ? nameOf(kids(kids(x)[0])[0]) : null),
+];
 const isMap = (x) => tag(x) === 'name' && MAPS.has(nameOf(x));
 
 /**
@@ -130,8 +146,9 @@ function closeBind(nm, v) {
   ];
 }
 
-function funcOf(bodyNode, name) {
-  const params = partOf(bodyNode, 'params').map(nameOf);
+function funcOf(bodyNode, name, self) {
+  const own = partOf(bodyNode, 'params').map(nameOf);
+  const params = self === undefined ? own : [self, ...own];
   const blk = kids(bodyNode).find((y) => tag(y) === 'block');
   const attrs = name === null || name === undefined ? { params } : { params, name };
   return node('func', { body: blk === undefined ? [] : many(kids(blk)) }, attrs);
@@ -165,8 +182,15 @@ function toNode(x) {
     case 'false': return node('const', {}, { value: false });
     case 'name': return node('ref', {}, { name: atomText(kids(x)[0]) });
     case 'paren': return toNode(kids(x)[0]);
-    // `p.x` -> field-get（与 go/V 的 `(sel …)`、nim 的 `(dot …)` 同一格节点）
-    case 'dot': return fieldGet(toNode(kids(x)[0]), atomText(kids(x)[1]));
+    // `p.x` -> field-get（与 go/V 的 `(sel …)`、nim 的 `(dot …)` 同一格节点）。
+    // **被当表用过的名字例外**：`t.a` 与 `t["a"]` 在 lua 里是同一件事（语言的规矩），
+    // 所以那种名字上的点号落 map-get —— 元表那台机器要的正是这一条。
+    case 'dot': {
+      const [o, f] = kids(x);
+      return isMap(o)
+        ? mapGet(toNode(o), lit(atomText(f)))
+        : fieldGet(toNode(o), atomText(f));
+    }
     // `{ x = 1, y = 2 }` -> record-new。**lua 的表没有类型**，落的却是同一格 ——
     // 这正是"record 不要求任何类型存在"那句话的证据（附录 A）。
     // `{ 10, 20, 30 }`（数组部分）-> list-new：同一条产生式，两种字面量。
@@ -229,6 +253,18 @@ function toNode(x) {
         if (tag(nd) === 'att' && atomText(kids(nd)[1]) === 'close') {
           return closeBind(names[i], values[i]);
         }
+        // `local p = setmetatable({}, Point)` —— **造一格带元表的表**：元表存进保留键
+        // `__meta`（与 `<close>` 那一格同一条规矩），两格现成的节点，不加新格子。
+        if (values[i] !== undefined && isSetmeta(values[i])) {
+          const as = kids(kids(values[i])[1]);
+          if (as.length !== 2 || tag(as[0]) !== 'table' || kids(as[0]).length !== 0) {
+            throw new Error('lua->graph: `setmetatable` 这一批只接 `setmetatable({}, 元表)` 这一种形状');
+          }
+          return [
+            node('bind', { init: mapNew() }, { name: names[i] }),
+            mapSet(node('ref', {}, { name: names[i] }), lit('__meta'), toNode(as[1])),
+          ];
+        }
         return node('bind', {
           // **被当字典用过的名字**：`local m = {}` 出的是 map-new 而不是 list-new
           // （table 那一格自己看不出来是哪种 —— 判据在"它被怎么用过"，见 MAPS）
@@ -242,8 +278,35 @@ function toNode(x) {
     }
     case 'fndef': {
       const [nm, body] = kids(x);
+      // `function Point.new(x)` / `function Point:total()` —— **往一格表上挂函数**。
+      // 后者多一格隐含的形参 `self`（lua 的规矩），所以这两种写法在图上差的只有那一格。
+      if (isList(nm) && (tag(nm) === 'dot' || tag(nm) === 'method')) {
+        const [tbl, f] = kids(nm);
+        const key = atomText(f);
+        const fn = funcOf(body, key, tag(nm) === 'method' ? 'self' : undefined);
+        return isMap(tbl) ? mapSet(toNode(tbl), lit(key), fn) : fieldSet(toNode(tbl), key, fn);
+      }
       const name = nameOf(nm) ?? atomText(nm);
       return node('bind', { init: funcOf(body, name) }, { name });
+    }
+    // `p:total(…)` —— **元表那台机器**：先看这格表自己有没有这个键，没有就顺着
+    // `__meta.__index` 那一格表找。落的全是现成的节点（map-has / map-get / branch / call），
+    // 接收者是第一格实参 —— 与另外四门的方法**同一格 call**。
+    // 只顺**一层** `__index`（`Point.__index = Point` 那个惯用法）；链式继承要循环，
+    // 那是"运行期查表要走几步"的事，这一批不接，撞上就是查不着当场报。
+    case 'mcall': {
+      const [obj, m, args] = kids(x);
+      const self = () => toNode(obj);
+      const key = lit(atomText(m));
+      const meta = () => mapGet(mapGet(self(), lit('__meta')), lit('__index'));
+      return node('call', {
+        fn: node('branch', {
+          cond: mapHas(self(), key),
+          then: mapGet(self(), key),
+          else: mapGet(meta(), key),
+        }),
+        args: [self(), ...(args === undefined ? [] : many(kids(args)))],
+      });
     }
     case 'fn': return funcOf(kids(x)[0]);
     case 'assign': {
@@ -252,7 +315,13 @@ function toNode(x) {
       return targets.map((t, i) => {
         const v = values[i] === undefined ? lit(null) : toNode(values[i]);
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[2] = 5`）⇒ field-set / index-set
-        if (tag(t) === 'dot') return fieldSet(toNode(kids(t)[0]), atomText(kids(t)[1]), v);
+        // （被当表用过的名字上的点号落 map-set —— 与取值那一侧同一条规矩）
+        if (tag(t) === 'dot') {
+          const [o, f] = kids(t);
+          return isMap(o)
+            ? mapSet(toNode(o), lit(atomText(f)), v)
+            : fieldSet(toNode(o), atomText(f), v);
+        }
         if (tag(t) === 'index') {
           const [o, k] = kids(t);
           return isMap(o) ? mapSet(toNode(o), toNode(k), v) : indexSet(toNode(o), zeroBased(k), v);
@@ -315,14 +384,20 @@ export function luaToGraph(tree) {
   // 先扫一遍"哪些名字用串当过键" —— lua 的 table 既是数组又是字典，这是这门语言
   // 唯一分得开的判据（go / V 靠字面量自带标记，awk 里全是关联数组）
   MAPS.clear();
-  for (const nm of mapNames(tree, mapUseName)) if (nm !== null) MAPS.add(nm);
+  for (const use of MAP_USES) {
+    for (const nm of mapNames(tree, use)) if (nm !== null) MAPS.add(nm);
+  }
   return program(many(kids(tree)).flat());
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
 //   1. 表接三种：`{ k = v }` 落 record-new、`{ 1, 2 }` 落 list-new、
-//      **被串当键用过的名字**落 map（`local m = {}` + `m["a"]`，见 MAPS）。混着的当场报。
-//      metatable、`...`、`goto` 都不在这一批。
+//      **被当表用过的名字**落 map（串当键 / 方法调用的接收者 / `setmetatable` 的实参 /
+//      `function T:m()` 挂函数的那个名字，见 MAP_USES）。混着的当场报。
+//      **元表接了两处**：`local g <close> = setmetatable({}, { __close = … })`（closeBind）
+//      与 `p:m(…)`（mcall 那格，顺一层 `__index`）—— 两处都把元表存进保留键 `__meta`，
+//      一格新节点都没加。别的元方法（`__add` / `__tostring` / 链式 `__index`）不在这一批。
+//      `...`、`goto` 也不在。
 //   2. **map 那两条判不了的形状**（都报错，不猜）：键是变量（`t[k]` —— 那要真的类型）、
 //      同一个名字既 `t[1]` 又 `t["a"]`（lua 里合法，图上是两格节点）。
 //   3. **`t[k] ~= nil` 是一处窥孔**：lua 用它问"在不在"，而图上缺键是错误 ——

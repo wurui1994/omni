@@ -128,7 +128,7 @@ export const CASES = [
   // 第十六个家族：**方法**（接收者在声明里写着 ⇒ 单态分派 ⇒ 图上只多一格实参）。
   // 各门写法差得远（nim 的 UFCS 是纯改写、go 的接收者写在 `func (p Point)` 那一格里），
   // 落到的却全是现成的 call + func —— 这一族把"不给新节点"那句话变成判据。
-  ...fam('method', METHOD, ['nim', 'go', 'vlang', 'mojo']),
+  ...fam('method', METHOD, ['nim', 'go', 'vlang', 'mojo', 'lua']),
   // 第十七个家族：**CL 独有的早退形状**（从带名字的块里返回）。单开一族的理由与
   // `deferarg` 同一条：别的九门写不出这个形状 —— 而它落到的节点一格新的都没加
   // （循环里的 `(return)` 落 break、defun 里的 `(return-from f v)` 落 ret）。
