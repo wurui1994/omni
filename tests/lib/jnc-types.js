@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { Diagnostics } from '../../src/core/source/diag.js';
 import { initJnc, jncFrontEnd, jncParse } from '../../src/core/lang/jnc.js';
 import { headOf, named } from '../../src/lang/jnc/adapt.js';
-import { readDeclType, typeText } from '../../src/lang/jnc/types.js';
+import { readDeclType, jncTypeText } from '../../src/lang/jnc/types.js';
 import { refDir } from './refsrc.js';
 
 const EXTERNAL = refDir('jancy', 'JANCY');
@@ -124,7 +124,7 @@ for (const f of files) {
     if (t.ptrs !== p2 || t.suffixes.join(',') !== s2.join(',')) {
       bad += 1;
       if (badWhy.length < 12) {
-        badWhy.push(`${f.slice(CORPUS.length + 1)}　洞名读出 ${typeText(t)}`
+        badWhy.push(`${f.slice(CORPUS.length + 1)}　洞名读出 ${jncTypeText(t)}`
           + `（*${t.ptrs} ${t.suffixes.join(',')}），位置读出 *${p2} ${s2.join(',')}`);
       }
     }

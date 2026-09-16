@@ -38,7 +38,7 @@ const SPECIAL_NAMES = {
  * 真输出 122-opincdec.jnc 的 `It$op$inc` / `It$op$dec` / `It$op$inc$post`）。
  * 后置那两格自己带 `$post`（表里分开列，不在发的时候拼 —— 拼就成了隐式规则）。
  */
-export const OP_NAMES = {
+export const JNC_OP_NAMES = {
   ':=': 'assign', '++': 'inc', '--': 'dec', '*': 'mul', '->': 'arrow', '()': 'call',
   bool: 'bool', '==': 'eq', '!=': 'ne',
   '+=': 'addAssign', '-=': 'subAssign', '*=': 'mulAssign', '/=': 'divAssign',
@@ -105,7 +105,7 @@ export function fnName(m, inProp = false) {
   if (dc === null) return null;
   if (dc.special !== null) return SPECIAL_NAMES[dc.special] ?? null;
   if (dc.operator !== null) {
-    const w = dc.operator.postfix ? OP_POSTFIX[dc.operator.op] : OP_NAMES[dc.operator.op];
+    const w = dc.operator.postfix ? OP_POSTFIX[dc.operator.op] : JNC_OP_NAMES[dc.operator.op];
     return w === undefined ? null : `op$${w}`;
   }
   /* 属性的取/存：`<属性名>$get` / `$set`（旧降级 107-psetexpr.jnc 的 `C$m_val$get`）。 */
@@ -457,7 +457,7 @@ function leafName(leaf) {
      所以普通名字这一支也要过那张表（193-staticctorns.jnc 的 `void C.static construct()`）。 */
   if (leaf.kind === 'name') return SPECIAL_NAMES[leaf.text] ?? leaf.text;
   if (leaf.kind === 'accessor') return leaf.text;
-  const w = leaf.postfix ? OP_POSTFIX[leaf.op] : OP_NAMES[leaf.op];
+  const w = leaf.postfix ? OP_POSTFIX[leaf.op] : JNC_OP_NAMES[leaf.op];
   return w === undefined ? null : `op$${w}`;
 }
 

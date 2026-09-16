@@ -166,8 +166,9 @@ export function readAnonType(specsNode, ptrsNode) {
   };
 }
 
-/** 规范写法（只为对账：修饰词按出现次序、`*` 按层数、后缀按链的次序）。 */
-export function typeText(t) {
+/** 规范写法（只为对账：修饰词按出现次序、`*` 按层数、后缀按链的次序）。
+ *  名字带 `jnc`：`core/mir/ir.js` 里那格 `typeText` 印的是 **MIR 的类型码**，两件事。 */
+export function jncTypeText(t) {
   if (t === null) return '';
   const stars = '*'.repeat(t.ptrs);
   const sfx = t.suffixes.map((s) => (s === 'fn-suffix' ? '()' : (s === 'array-suffix' ? '[]' : `:${s}`))).join('');

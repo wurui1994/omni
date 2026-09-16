@@ -20,7 +20,7 @@
 //     做一遍带作用域的重写便宜得多，而且改完源码更好读。
 //     **这一条的价钱要按量出来的记**：`cli.js` 那条自编译链上量到过 **142 条**重名
 //     （`tests/mir/run.js` 里 `lower/cli.js` 那一格因此是红的，而且这不是新事 ——
-//     在 a9df4874 上就有 126 条）。现在**一片一片在还**，还到 **103 条**（改的都是
+//     在 a9df4874 上就有 126 条）。现在**一片一片在还**，还到 **101 条**（改的都是
 //     "同名却不同事"、而且尽量挑**私有那一侧**）：`graph/eval.js` 9 格（值上的运算 ->
 //     `valTruthy` / `valPick` / `valMap*` / `valSlice` · 内部的 `one` / `Env`）·
 //     `glr/ebnf.js` 3 格（`ebnfGrammarName` / `quoteGrammarStr` / `EbnfRx` —— 与 `yacc.js`
@@ -31,9 +31,13 @@
 //     4 格（`checkLangSpec` / `builtinSlen` / `MODULE_EXTS` / `LANG_PROVIDERS`）·
 //     3 格（`TYPE_SORTS` / `REGISTRARS` / `BASE_TYPES` —— 三处 `TYPES`/`REG` 各是一件事）·
 //     2 格（`jnc/resolve-type.js` 里的 `typeNameText` / `formalNodes` —— 与 `declare.js`、
-//     `emit-fn.js` 那两格同名不同事）。
+//     `emit-fn.js` 那两格同名不同事）· 2 格（jnc 那侧的 `JNC_OP_NAMES` / `jncTypeText` ——
+//     与 `mir/ir.js` 那两格撞，而 MIR 那两格有十个消费者，所以改语言那一侧）。
 //     `asList` 那一格最能说明为什么该改：它在 fromtree 里回 null、在 wat 后端里回空数组。
-//     剩下的 103 条分三堆（数出来的）：**ext 那十一份映射 71 条**
+//     **也有改不动的**：`frontend-js/lower.js` 的 `op` / `exprStmt` 虽然是私有的，可那份文件里
+//     `op` 同时是模块级的建造器、又是 158 处字段名 `op:` 与约 90 处形参/局部名 —— 机械改名
+//     必错，要改得先真的看作用域（那正是上一条说"刻意不做"的那件事）。**量出来的：不改**。
+//     剩下的 101 条分三堆（数出来的）：**ext 那十一份映射 71 条**
 //     （`toNode` / `nameOf` / `many` / `OPS` / `PRIM` 在每一门里都是最自然的名字，
 //     而 `graph/langs.js` 把十一门**静态**导进来，于是必然撞）· **旧降级 vs 规则那条路
 //     14 条**（`frontend-jnc/lower.js` 与 `src/lang/jnc/*`：那是迁移期的重复，migration

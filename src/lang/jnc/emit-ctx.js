@@ -14,7 +14,7 @@ import { readDeclType, readAnonType, hasStatic } from './types.js';
 import { readSpecs } from './specs.js';
 import { resolveType, INT_BITS } from './resolve-type.js';
 import { emitType, tyKey } from './emit-type.js';
-import { readFormals, OP_NAMES } from './emit-fn.js';
+import { readFormals, JNC_OP_NAMES } from './emit-fn.js';
 import { emitExpr, strLitFold, bytesLitFold } from './emit-expr.js';
 import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
 import {
@@ -2742,7 +2742,7 @@ export function makeFnEnv(o) {
        * 东家沿基类链找（与查普通方法同一条路）；不是一个形参的照旧记账，不猜。
        */
       if (op !== '=' && aggName !== null) {
-        const w = OP_NAMES[op];
+        const w = JNC_OP_NAMES[op];
         const oc0 = w === undefined ? null : findMethod(aggName, `op$${w}`);
         if (oc0 !== null && oc0 !== undefined) {
           /* **一格主人身上好几条同一个算符**（第二百零七刀）：按右边那一格的类型挑一条 ——
@@ -3493,7 +3493,7 @@ export function makeFnEnv(o) {
      * 不收，而不是落到"指针互比"那一支上去比地址。
      */
     opFor: (op, a, b) => {
-      const w = OP_NAMES[op];
+      const w = JNC_OP_NAMES[op];
       if (w === undefined) return false;
       for (const ty of [a, b]) {
         const agg = aggBehind(ty);
@@ -3517,7 +3517,7 @@ export function makeFnEnv(o) {
      * 收不下的照旧答 null（调用方记账），不静静地落到"指针互比"那一支上去比地址。
      */
     opBin: (op, a, b) => {
-      const w = OP_NAMES[op];
+      const w = JNC_OP_NAMES[op];
       if (w === undefined || !['==', '!='].includes(op)) return null;
       const agg = aggBehind(a?.type);
       if (agg === null) return null;
