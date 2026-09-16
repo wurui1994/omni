@@ -110,6 +110,9 @@ function isIdNum(c) {
   return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)
     || c === 95 || c >= 0x80;
 }
+
+/** `preprocessSkip` 行中那一跳的兴趣点（`#` 不在里头 —— 不在行首它不是指令）。 */
+const SKIP_MID = /[\n"'/\\]/g;
 function toup(c) {
   return c >= 97 && c <= 122 ? c - 32 : c;
 }
@@ -1572,22 +1575,18 @@ export class Cpp {
     let depth = 0;
     let startOfLine = true;
     for (;;) {
-      /* 先用一个**局部**循环把「不关心的那些字符」整段跳过（量出来的：被跳掉的字符
-       * 绝大多数落在这一段，而从前每个字符都要走一趟 `peekc()` + 一次 `this.file.pos++`；
-       * `preprocessSkip` 曾占前端 CPU 的 5.4%）。空白照旧**不动** `startOfLine` ——
-       * `   #endif` 里的缩进要能穿过去。`\` 与引号、注释、`#` 一样交回下面的分支。 */
-      const f = this.file;
-      const s = f.text;
-      let p = f.pos;
-      for (;;) {
-        const ch = s.charCodeAt(p);
-        if (ch === SPC || ch === TAB || ch === 11 || ch === 12 || ch === 13) { p++; continue; }
-        if (ch === LF || ch === 34 || ch === 39 || ch === 47 || ch === 35 || ch === 92
-          || !(ch >= 0)) break;
-        p++;
-        startOfLine = false;
+      /* 被跳掉的字符绝大多数是「不关心的」，所以**用正则一跳到底**：V8 里 `exec` 扫一个
+       * 小字符类比 JS 的逐字符循环快得多。行中的兴趣点只有五个（`SKIP_MID`）——
+       * 换行、两种引号、斜杠（注释）、反斜杠（`\<换行>` 拼接）；`#` **不在行首就不是指令**，
+       * 所以行中那一跳连它都不用停。缩进单独走一小段循环：`   #endif` 里的空白要能穿过去
+       * 而不把 `startOfLine` 弄丢。这一格曾占前端 CPU 的 6.7%。 */
+      if (startOfLine) {
+        const f0 = this.file;
+        const s0 = f0.text;
+        let p0 = f0.pos;
+        while (isSpaceCh(s0.charCodeAt(p0))) p0++;
+        f0.pos = p0;
       }
-      f.pos = p;
       const c = this.peekc();
       if (c === SPC || c === TAB || c === 11 || c === 12 || c === 13) {
         this.file.pos++;
@@ -1628,8 +1627,13 @@ export class Cpp {
         startOfLine = false;
         continue;
       }
-      this.file.pos++;
+      /* 不关心的字符：一跳跳到下一个兴趣点（`lastIndex` 从 pos+1 起 —— 当前这个已经看过了）。
+       * 找不着就跳到尽头，交给上面 `CH_EOF` 那一支去喊 `#endif expected`。 */
       startOfLine = false;
+      const f = this.file;
+      SKIP_MID.lastIndex = f.pos + 1;
+      const m = SKIP_MID.exec(f.text);
+      f.pos = m === null ? f.text.length : m.index;
     }
   }
 
