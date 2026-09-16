@@ -46,7 +46,8 @@ import { Gap } from './backend-wat.js';
 const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'loop-exit',
   'region', 'ret', 'func', 'call',
   'list-new', 'index-get', 'index-set', 'record-new', 'field-get', 'field-set',
-  'map-new', 'map-get', 'map-set', 'map-has', 'values', 'pick', 'conv', 'slice']);
+  'map-new', 'map-get', 'map-set', 'map-has', 'values', 'pick', 'conv', 'slice',
+  'scope-exit']);
 
 /** 这一刀接得住的内建。`prims.js` 里现有 16 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
@@ -564,6 +565,41 @@ class CGen {
     this.inFn = 0;
     /** 文件级的那几行（记录的键那种编译期常量数组）。 */
     this.decls = [];
+    /**
+     * 区域栈：`{ kind: 'region'|'loop'|'fn', exits, cond }`。`exits` 是那一层
+     * **静态就看得见**的 scope-exit 动作（见 `stmt` 里那一格）。
+     */
+    this.frames = [];
+    /** 现在嵌在几层条件/循环里 —— scope-exit 只认「区域自己那一层」注册的。 */
+    this.cond = 0;
+  }
+
+  /** 开一层区域。 */
+  pushFrame(kind) { this.frames.push({ kind, exits: [], cond: this.cond }); }
+
+  /**
+   * 关一层区域：把这一层注册的动作**逆序**跑一遍（与 `eval.js` 的 `runExits`、
+   * js 后端的 `finally` 同一条口径）。
+   */
+  popFrame() {
+    const f = this.frames.pop();
+    for (let i = f.exits.length - 1; i >= 0; i--) this.stmt(f.exits[i]);
+  }
+
+  /**
+   * 早退（`ret` / `break` / `continue`）要**先把路上每一层的动作跑掉**：C 里没有
+   * finally，所以这几条动作在每个出口各发一份。`stop` 是走到哪一层为止 ——
+   * `ret` 走到函数边界（`fn`），`break`/`continue` 走到最近的那圈循环。
+   */
+  emitExits(stop) {
+    for (let i = this.frames.length - 1; i >= 0; i--) {
+      const f = this.frames[i];
+      for (let k = f.exits.length - 1; k >= 0; k--) this.stmt(f.exits[k]);
+      /* **先跑这一层再停**：`ret` 要连函数自己那一层的动作一起跑掉（那一层正是
+       * 「函数体」这个区域）。先停后跑漏的就是它 —— 量出来的症状是四门语言的
+       * defer 例子印出 `in / out`，中间那两行没了。 */
+      if (f.kind === stop) break;
+    }
   }
 
   emit(s) { this.lines.push(`${'  '.repeat(this.depth)}${s}`); }
@@ -617,7 +653,9 @@ class CGen {
     this.inFn += 1;
     const t = this.fresh();
     this.emit(`gv ${t} = g_nil();`);
+    this.pushFrame('fn');
     this.body(asList(x.ins.body), t);
+    this.popFrame();
     this.emit(`return ${t};`);
     this.inFn -= 1;
     const lines = this.lines;
@@ -727,11 +765,15 @@ class CGen {
       this.emit(`gv ${t};`);
       this.emit(`if (g_truthy(${this.valOf(x.ins.cond)})) {`);
       this.depth += 1;
+      this.cond += 1;
       this.emit(`${t} = ${this.valOf(x.ins.then)};`);
+      this.cond -= 1;
       this.depth -= 1;
       this.emit('} else {');
       this.depth += 1;
+      this.cond += 1;
       this.emit(`${t} = ${x.ins.else === undefined ? 'g_nil()' : this.valOf(x.ins.else)};`);
+      this.cond -= 1;
       this.depth -= 1;
       this.emit('}');
       return t;
@@ -741,7 +783,9 @@ class CGen {
       this.emit(`gv ${t} = g_nil();`);
       this.emit('{');
       this.depth += 1;
+      this.pushFrame('region');
       this.body(asList(x.ins.body), t);
+      this.popFrame();
       this.depth -= 1;
       this.emit('}');
       return t;
@@ -826,10 +870,15 @@ class CGen {
       /* 函数体里 `ret` 就是 C 的 `return`。顶层（`main`）那一格回退出码 0：图的值不是
        * 进程的退出码，矩阵比的是印出来的那几行。值照旧算一遍 —— 它可能有副作用。 */
       if (this.inFn > 0) {
-        this.emit(`return ${x.ins.value === undefined ? 'g_nil()' : this.valOf(x.ins.value)};`);
+        const v = x.ins.value === undefined ? 'g_nil()' : this.valOf(x.ins.value);
+        const t = this.fresh();
+        this.emit(`gv ${t} = ${v};`);
+        this.emitExits('fn');
+        this.emit(`return ${t};`);
         return;
       }
       if (x.ins.value !== undefined) this.emit(`gv ${this.fresh()} = ${this.valOf(x.ins.value)};`);
+      this.emitExits('fn');
       this.emit('return 0;');
       return;
     }
@@ -841,12 +890,16 @@ class CGen {
     if (x.op === 'branch') {
       this.emit(`if (g_truthy(${this.valOf(x.ins.cond)})) {`);
       this.depth += 1;
+      this.cond += 1;
       this.stmt(asList(x.ins.then));
+      this.cond -= 1;
       this.depth -= 1;
       if (x.ins.else === undefined) { this.emit('}'); return; }
       this.emit('} else {');
       this.depth += 1;
+      this.cond += 1;
       this.stmt(asList(x.ins.else));
+      this.cond -= 1;
       this.depth -= 1;
       this.emit('}');
       return;
@@ -854,9 +907,25 @@ class CGen {
     if (x.op === 'region') {
       this.emit('{');
       this.depth += 1;
+      this.pushFrame('region');
       this.stmt(asList(x.ins.body));
+      this.popFrame();
       this.depth -= 1;
       this.emit('}');
+      return;
+    }
+    if (x.op === 'scope-exit') {
+      /* **只认「区域自己那一层」注册的动作**：C 里没有 finally，这几条动作是在每个
+       * 出口各发一份的（`emitExits`），所以那份名单必须**静态就定下来**。
+       * 注册在条件或循环里（`if (c) scope-exit …`）时名单是运行期才知道的 ——
+       * 那要一格运行期的动作表 + 函数指针 + 捕获，正是这条腿还欠的同一格能力，报缺口。 */
+      const f = this.frames[this.frames.length - 1];
+      if (f === undefined) throw new Gap('c 后端：scope-exit 不在任何 region 里');
+      if (this.cond !== f.cond) {
+        throw new Gap('c 后端：scope-exit 注册在条件/循环里 —— 那份名单运行期才知道，'
+          + '要一格动作表（函数指针 + 捕获）');
+      }
+      f.exits.push(asList(x.ins.action));
       return;
     }
     if (x.op === 'loop') return this.loop(x);
@@ -873,6 +942,7 @@ class CGen {
       return;
     }
     if (x.op === 'loop-exit') {
+      this.emitExits('loop');
       this.emit(x.attrs.kind === 'continue' ? 'continue;' : 'break;');
       return;
     }
@@ -895,6 +965,8 @@ class CGen {
     }
     this.emit('while (1) {');
     this.depth += 1;
+    this.pushFrame('loop');
+    this.cond += 1;
     if (first !== null) {
       this.emit(`if (${first} == 0) {`);
       this.depth += 1;
@@ -905,6 +977,8 @@ class CGen {
     }
     this.emit(`if (g_truthy(${this.valOf(x.ins.cond)}) == 0) break;`);
     this.stmt(asList(x.ins.body));
+    this.cond -= 1;
+    this.popFrame();
     this.depth -= 1;
     this.emit('}');
   }
@@ -930,7 +1004,9 @@ export function emitC(g) {
   const gen = new CGen();
   const top = asList(g !== null && g.kind === 'graph' ? g.body : g);
   gen.plan(top);
+  gen.pushFrame('fn');
   gen.body(top, null);
+  gen.popFrame();
   /* 原型先摆一遍：这样「A 调后面定义的 B」与互相递归都不必管定义次序。 */
   const protos = gen.fns.map((f) => `static gv ${f.cname}(${f.params.length === 0 ? 'void'
     : f.params.map((p) => `gv ${p}`).join(', ')});`);
@@ -971,6 +1047,50 @@ export const C_SHAPES = [
       kind: 'graph',
       body: [node('prim', { args: [node('prim', { args: [{ lit: 2 }, { lit: 0.5 }] }, { name: '^' })] },
         { name: 'print' })],
+    }),
+  },
+  {
+    what: '`func` **捕获了外层的名字**（真闭包）',
+    why: '函数一律提到顶层，C 那侧看得见的只有形参与别的顶层函数；读一格外层的局部量要一格'
+      + '环境对象 + 一格间接调用。`wat` 那侧第一条形状账是同一件事 —— 两条腿欠的是同一格能力',
+    witness: () => ({
+      kind: 'graph',
+      body: [
+        node('bind', { init: { lit: 1 } }, { name: 'a' }),
+        node('prim', {
+          args: [node('call', {
+            fn: node('func', { body: [node('ret', { value: node('ref', {}, { name: 'a' }) })] }, { params: [] }),
+            args: [],
+          })],
+        }, { name: 'print' }),
+      ],
+    }),
+  },
+  {
+    what: '**按值调用**（函数从一格变量里来，不是当场摆着也不是一个顶层名字）',
+    why: '要一格函数指针表 + 按元数分的签名。与上一条同一格能力的另一半：'
+      + '有了环境对象与间接调用，这一条跟着就通',
+    witness: () => ({
+      kind: 'graph',
+      body: [
+        node('bind', { init: node('list-new', { items: [{ lit: 1 }] }) }, { name: 'g' }),
+        node('prim', { args: [node('call', { fn: node('ref', {}, { name: 'g' }), args: [] })] },
+          { name: 'print' }),
+      ],
+    }),
+  },
+  {
+    what: '`scope-exit` **注册在条件或循环里**',
+    why: 'C 里没有 finally，所以那几条动作是在每个出口各发一份的（`emitExits`）——'
+      + '那份名单必须静态就定下来。注册在 `if` 里时名单运行期才知道，要一格动作表',
+    witness: () => ({
+      kind: 'graph',
+      body: [node('region', {
+        body: [node('branch', {
+          cond: { lit: true },
+          then: [node('scope-exit', { action: [node('prim', { args: [{ lit: 'x' }] }, { name: 'print' })] })],
+        })],
+      })],
     }),
   },
 ];
