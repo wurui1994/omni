@@ -111,13 +111,13 @@ export const CASES = [
   ...fam('slice', SLICE, ['go', 'vlang', 'nim', 'mojo', 'sbcl', 'chez']),
   // 第十个家族：多值的另外两个提供者（CL 的 values / nim 的元组）——
   // 单开一个家族的理由写在 ext/sbcl/examples/values.lisp 的文件头里
-  ...fam('values', VALUES, ['sbcl', 'nim', 'vlang', 'chez']),
+  ...fam('values', VALUES, ['sbcl', 'nim', 'vlang', 'chez', 'mojo']),
   // 第十一个家族：**go 独有**的 defer 实参时机（注册那一刻求值）。
   // 一门语言就单开一个家族，理由正是"它不该变成节点"：G5 那条判据里它是"一家"，
   // 而 defer.go 那份印的是常量 —— 看不出时机，所以要这一份把它钉住。
   ...fam('deferarg', DEFERARG, ['go']),
   // 第十二个家族：map / dict 那四格（键是值、缺键报错、默认值归语言）
-  ...fam('dict', DICT, ['go', 'vlang', 'awk', 'nim', 'lua', 'chez', 'sbcl']),
+  ...fam('dict', DICT, ['go', 'vlang', 'awk', 'nim', 'lua', 'chez', 'sbcl', 'mojo']),
   // 第十三个家族：串接（四种写法一格内建）—— 它同时钉住字符串在线性内存里的布局
   ...fam('strcat', STRCAT, ['lua', 'go', 'vlang', 'nim']),
   // 第十四个家族：**数 -> 串**（lua 隐式落 concat、nim 显式落 conv —— 两格节点，一份输出）

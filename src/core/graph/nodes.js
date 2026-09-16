@@ -229,13 +229,12 @@ export const NODES = new Map([
   //     从此共用同一对节点（`ext/go/SPEC.md` §五第 1 项那句"三种双值形式是同一个形状"）。
   N('values', 'expr', [{ name: 'args', sem: SEM.value, rest: true }], {
     doc: 'go `return a, b` / lua `return a, b` / CL `values` / V 的双值形式'
-      + ' / Scheme 的 `values` + `let-values` / nim 的元组',
+      + ' / Scheme 的 `values` + `let-values` / nim 与 mojo 的元组',
     // 规格里数出来**八门**（awk 与 freebasic 的语言里没有多值这件事）。
     // `pick` 是它的消费侧，一族一笔账，记在这一格上。
     providers: {
       spec: ['go', 'lua', 'vlang', 'nim', 'sbcl', 'chez', 'mojo', 'cpp'],
       why: {
-        mojo: '元组是库里的泛型类型（`Tuple[…]` + `[0]` 取用）—— 与 `Dict` 欠的是同一笔',
         cpp: '`std::tuple` / `std::pair` + 结构化绑定要模板与库那一族（与 slice / map 同一笔）',
       },
     },
@@ -338,13 +337,12 @@ export const NODES = new Map([
   ], {
     effects: ['allocates'], lifetime: 'owns',
     doc: 'go/V `map[K]V{…}` / lua `{}` / nim `initTable` / awk 的关联数组（隐式）'
-      + ' / Scheme `make-eqv-hashtable` / CL `make-hash-table`',
+      + ' / Scheme `make-eqv-hashtable` / CL `make-hash-table` / mojo `Dict[K, V]()`',
     // 规格里数出来**九门**（十门里只有 freebasic 没有：FB 的语言里没有字典这一格）。
     // map 那四格是一族，账记在这一格上（与 record-new 那格同一条：一族一笔账）。
     providers: {
       spec: ['go', 'vlang', 'awk', 'nim', 'lua', 'chez', 'sbcl', 'mojo', 'cpp'],
       why: {
-        mojo: '`Dict[K, V]` 是标准库的泛型容器 —— 要"库里的类型 + 方法"那一族先进来',
         cpp: '`std::map` / `std::unordered_map` 要模板与库那一族（与 slice 欠的是同一笔）',
       },
     },

@@ -15,6 +15,7 @@ import {
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet, sliceOf,
+  mapNew, mapGet, mapSet, mapHas, mapNames, destructure,
   fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -87,6 +88,32 @@ const nameOf = (x) => {
   return leaf(x);
 };
 
+/**
+ * **装 Dict 的那些名字**（`mojoToGraph` 里一趟扫查填好）。
+ *
+ * `m["a"]` 与 `xs[0]` 在树上同形（都是 `(index …)`）—— 分开它们靠的不是回问类型，是
+ * **造它的那一步自带标记**：`Dict[String, Int]()` 的被调者是一格 `(index (n Dict) (subs …))`
+ * （泛型实参），认得出就够（与 nim 的 `initTable[K, V]()` 是同一条办法）。
+ */
+const MAPS = new Set();
+const isMap = (x) => tag(x) === 'n' && MAPS.has(leaf(kids(x)[0]));
+/** `Dict[K, V]()` 那种造法（被调者是带泛型实参的 `Dict`）。 */
+const isDictCtor = (x) => {
+  if (!isList(x) || tag(x) !== 'call') return false;
+  const callee = kids(x)[0];
+  if (!isList(callee) || tag(callee) !== 'index') return false;
+  const base = kids(callee)[0];
+  return isList(base) && tag(base) === 'n' && leaf(kids(base)[0]) === 'Dict';
+};
+/** `var m = Dict[K, V]()` -> `'m'`（不是就给 null）。 */
+const dictBindName = (x) => {
+  if (!isList(x) || tag(x) !== 'assign') return null;
+  const value = kids(x).find((y) => tag(y) !== 'targets');
+  const targets = part(x, 'targets');
+  if (targets === undefined || value === undefined || !isDictCtor(value)) return null;
+  return nameOf(targets);
+};
+
 function toNode(x) {
   if (isList(x) && x.items.length === 0) return [];
   switch (tag(x)) {
@@ -112,8 +139,13 @@ function toNode(x) {
         return sliceOf(toNode(kids(x)[0]), a === undefined ? undefined : toNode(a),
           b === undefined ? undefined : toNode(b));
       }
-      return indexGet(toNode(kids(x)[0]), toNode(sub));
+      // `m["a"]` 与 `xs[0]` 在树上同形 —— 差别在**那个名字装的是什么**（见 MAPS）
+      return isMap(kids(x)[0])
+        ? mapGet(toNode(kids(x)[0]), toNode(sub))
+        : indexGet(toNode(kids(x)[0]), toNode(sub));
     }
+    // `(3, 7)` -> 一格 values（生产侧）。消费侧是 `var a, b = two()`（见 assign 那一格）
+    case 'tuple': return node('values', { args: many(kids(x)) });
     case 'line': case 'body': return many(kids(x));
     case 'break': return loopExit('break');
     case 'continue': return loopExit('continue');
@@ -123,6 +155,9 @@ function toNode(x) {
     // （Python 的链式比较），但**落到的是同一格 binop**：语法的级数不是节点的格数。
     case 'bin': case 'cmp': {
       const [op, a, b] = kids(x);
+      // `"a" in m` -> map-has。V 写成一格算子、go 写成 comma-ok、CL 写成多值的第二格 ——
+      // 同一格节点（**键在左、表在右**，那只是记号的顺序）
+      if (String(leaf(op)) === 'in' && isMap(b)) return mapHas(toNode(b), toNode(a));
       return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'mojo', and: ['and'], or: ['or'] });
     }
     case 'un': {
@@ -133,12 +168,26 @@ function toNode(x) {
     case 'assign': {
       const targets = part(x, 'targets');
       const value = kids(x).find((y) => tag(y) !== 'targets');
-      const v = value === undefined ? lit(null) : toNode(value);
-      const t0 = targets === undefined ? undefined : kids(targets)[0];
-      if (tag(t0) === 'index') return indexSet(toNode(kids(t0)[0]), toNode(kids(kids(t0)[1])[0]), v);
+      // `Dict[K, V]()` -> map-new：**造它的那一步自带标记**，认得出就不必回问类型
+      // （与 nim 的 `initTable[K, V]()` 同一条办法）
+      const v = value === undefined ? lit(null)
+        : (isDictCtor(value) ? mapNew() : toNode(value));
+      const ts = targets === undefined ? [] : kids(targets);
+      // `var a, b = two()`：**N 个名字对 1 个右值** ⇒ 多值的消费侧（一串 pick）。
+      // mojo 只在头一格上写 `var`，所以"是不是声明"看整张 targets（与下面那句同一条）。
+      if (ts.length > 1) {
+        return destructure(ts.map(nameOf), v, { declare: ts.some((t) => tag(t) === 'bind') });
+      }
+      const t0 = ts[0];
+      if (tag(t0) === 'index') {
+        const key = toNode(kids(kids(t0)[1])[0]);
+        return isMap(kids(t0)[0])
+          ? mapSet(toNode(kids(t0)[0]), key, v)
+          : indexSet(toNode(kids(t0)[0]), key, v);
+      }
       // `p.y = 5`：左边是字段 -> field-set（与 go 的 `p.y = 5` 同一格）
       if (tag(t0) === 'attr') return fieldSet(toNode(kids(t0)[0]), String(leaf(kids(t0)[1])), v);
-      const isDecl = targets !== undefined && kids(targets).some((t) => tag(t) === 'bind');
+      const isDecl = ts.some((t) => tag(t) === 'bind');
       const name = nameOf(targets);
       return isDecl
         ? node('bind', { init: v }, { name })
@@ -278,6 +327,8 @@ export function mojoToGraph(tree) {
   if (tag(tree) !== 'module') throw new Error('mojo->graph: 这不是 (module …)');
   STRUCTS.clear();          // 字段表是**一份源码一张**（见文件头 STRUCTS 那段）
   METHODS.clear();          // 方法表同理 —— 一份源码一张
+  MAPS.clear();             // "哪些名字装 Dict"那张表同理（见 MAPS 那段）
+  for (const nm of mapNames(tree, dictBindName)) if (nm !== null) MAPS.add(nm);
   withSeq = 0;              // 临时名字的序号也归零：同一份源码建两遍要**逐字节相同**（G4）
   collectMethods(tree);
   const body = kids(tree).map(toNode).flat();
