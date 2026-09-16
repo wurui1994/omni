@@ -17,6 +17,8 @@
 //   · 打印整数 · **记录与列表**（线性内存 + 一格 bump 分配器）· **多值**（同上）
 //   · **切片**（运行期大小的分配 + 一圈拷贝循环）· **break / continue**（block + loop 两格标签）
 //   · **出口动作**（`scope-exit`：一格注册标志 + 每条出口上贴动作）
+//   · **`func` 当值用 = 一格函数表下标**（`(table N funcref)` + `(elem …)`，间接调用点
+//     发 `call_indirect`）—— 没有捕获的那些；有捕获的还欠着，见 WAT_SHAPES 第一条。
 //
 // ## 布局（没有类型的那一层怎么排内存）
 //
@@ -37,8 +39,9 @@
 //
 // ## 接不住的，有名有姓（**节点级已经归零**，剩下的是形状上的账，见 WAT_SHAPES）
 //
-//   * `func` 当值用（真闭包）—— 要函数表 + call_indirect。**嵌套的函数不在这一条里**：
-//     只被直接调用的那些走 **lambda 提升**（捕获来的名字当多出来的形参）。
+//   * `func` 当值用**且捕获了外层的名字**（真闭包）—— 一格表下标带不了环境。
+//     没有捕获的那些接住了（表下标 + call_indirect）；**只被直接调用**的嵌套函数也不在
+//     这一条里：它们走 **lambda 提升**（捕获来的名字当多出来的形参）。
 //   * 嵌套的函数写了捕获来的名字 —— 提升是按值传的，那次写外面看不见。
 //   * 一格量先装串后装数（或先实数后整数）—— wasm 的局部量只有一种类型。
 //   * **实数 -> 串**（f64 的十进制是另一件事）· 实数进记录 / 列表 / 实参 / 返回值。
@@ -88,34 +91,34 @@ export function watCan(op) {
  */
 export const WAT_SHAPES = [
   {
-    what: '`func` 当值用（真闭包）',
-    why: '要函数表 + call_indirect（WAT 前端第一阶段不认）。**只被直接调用**的嵌套函数不走这条 —— 它们按 lambda 提升接住了',
-    // **这条账的价钱量过了**（记下来，好让下一批从测量而不是猜开始）：
-    //   1. 这一侧：发 `(table N funcref)` + `(elem …)`，函数值 = 表下标，
-    //      间接调用点发 `call_indirect`（签名按元数分，形参这一批全是 i64）；
-    //   2. `src/core/wasm/assemble.js`：**已经接了**（table / elem / type / call_indirect
-    //      四样，判据是 `tests/graph/wasm.js` 里那份手写模块，V8 里跑出 70 / 8）；
-    //   3. `src/core/frontend-wat/lower.js:797` 现在一律拒 —— 而这一处的价钱**记错过两遍**，
-    //      这是量到底的第三版：
-    //      * OIR **有**"按值调用"（`CallFn` -> MIR `CALLFN`，`interp.js:1033` 那格
-    //        `callFnValue`，JS 前端一直在用）。所以原来那句"OIR 里没有按值调用"**是错的**。
-    //      * OIR 欠的是**按函数号调用**：wasm 的函数值是**表下标**（一个 i32），
-    //        而 MIR 里对得上的是 `CALLI`（`interp.js:1046`，指针值 = 函数号 + 1，
-    //        `grep CALLI` 数出来只有 `frontend-c` 发它）。`CallFn` 那一格要的是"可调用的值"，
-    //        与表下标不是一回事，硬接就是在撒谎。
-    //      * 于是最小的一刀是四个文件：`frontend-wat`（认 table / elem / type /
-    //        call_indirect，出一格 OIR `CallIndirect`）· `hir/check.js`（定型）·
-    //        `mir/from_oir.js`（`CallIndirect` -> `CALLI`，表下标 -> 函数号要定一条
-    //        "elem 按模块函数顺序列全"的规矩）· 加上这一侧发表与 call_indirect。
-    //        **`backend-js` / `backend-c` 只有在往 `tests/wat/cases/` 加新用例时才躲不开**
-    //        （那条轴对每份 .wat 都跑 omni-js 与 omni-c）—— 图这条矩阵的 wat 腿走的是
-    //        WAT -> OIR -> MIR -> interp，用不着那两个后端。
-    // 也就是说：真引擎那条判据（V8）现在就能覆盖这个形状，而树里那条 MIR 判据要等 OIR
-    // 长出一格间接调用。**两条判据不一样长，这件事要写在账上**，不许含糊成"接不住"。
+    what: '`func` 当值用 **且捕获了外层的名字**（真闭包）',
+    why: '一格表下标带不了捕获来的环境；lambda 提升那条路要"只被直接调用"（捕获当多出来的实参）—— 真闭包要一格环境对象（线性内存里的一块 + 一格下标）',
+    // **"函数当值用"这条账付掉了**（原来这一条写的是整个形状接不住）。付法与前三版
+    // 记的价钱都不一样，所以把量出来的过程留在这儿：
+    //   1. 这一侧：`func` 落在值位置 = 提到顶层 + 值是**它在函数表里的下标**（funcValue）；
+    //      间接调用点发 `call_indirect`，签名按元数分。**表里的函数一律出值**
+    //      （`(param i64 …) (result i64)`）—— 调用点看得见的只有下标与元数，
+    //      而 wasm 的签名检查要求分毫不差，所以不出值的补一格 0（`forced`）。
+    //   2. `src/core/wasm/assemble.js`：本来就接了（table / elem / type / call_indirect
+    //      四样，判据是 `tests/graph/wasm.js` 里那份手写模块，V8 里跑出 70 / 8）。
+    //   3. `src/core/frontend-wat/lower.js`：**价钱记错过三遍**，第四版是量到底的那一版 ——
+    //      * OIR **有**"按值调用"（`CallFn` -> `CALLFN`），欠的是"按函数号调用"（`CALLI`）。
+    //        这两句上一版已经对了。
+    //      * 可 `CALLI` 收的指针是**MIR 里的函数号 + 1**，而 MIR 的编号是"先 externFuncs
+    //        再 oir.funcs"（`mir/from_oir.js:115`）。让 WAT 前端去假设那个顺序，就是把一条
+    //        隐藏契约埋在两个模块之间 —— 任何一次重排都静默地调错函数。所以"四个文件"
+    //        那条路**也是错的**。
+    //      * 真正的一刀只有**一个文件**：表在这条腿上是常量（`table.set` 不发、`(elem …)`
+    //        是静态的），于是 `call_indirect` 在 WAT 前端就能化开成「按下标选一个直接调用」
+    //        （见那边的 callIndirect / dispatchFunc）。OIR / MIR / hir 一格都没动。
+    // 剩下欠的就是这一条：**捕获**。两条判据这次一样长（V8 与树里的 MIR 都跑得通）。
     witness: () => prog([
-      fn('f', [ret(litOf(1))]),
-      bindTo('g', refTo('f')),
-      printOf([node('call', { fn: refTo('g'), args: [] })]),
+      fn('outer', [
+        bindTo('a', litOf(1)),
+        // 立刻调用的匿名函数，里面读外层的 `a` —— 值位置的 func + 捕获
+        ret(node('call', { fn: node('func', { body: [ret(refTo('a'))] }, { params: [] }), args: [] })),
+      ]),
+      printOf([node('call', { fn: refTo('outer'), args: [] })]),
     ]),
   },
   {
@@ -572,6 +575,30 @@ function emitOnce(graph, retOf, multiOf) {
   let needJoin = false;   // 要不要那格运行期造串的辅助函数（打印多值）
   let needMap = false;    // 要不要 map 那一组辅助函数（句柄 + 表 + 键比较）
   let needCat = false;    // 要不要那格串接（新分配一块 + 两段字节拷过去）
+  /* ------------------------------------------------ 函数表（ADR-0017 第五刀）------
+   * **`func` 当值用 = 一格表下标**。表在这条腿上是常量：只在这儿往里加，运行期不改
+   * （`table.set` 那一族一个都不发）—— WAT 前端也正是靠"表是常量"把 `call_indirect`
+   * 化开的（见 frontend-wat/lower.js 的 callIndirect）。
+   *
+   * **表里的函数签名一律 `(param i64 …) (result i64)`**：调用点看得见的只有下标与元数，
+   * 看不见"这一格出不出值"，而 wasm 的签名检查要求分毫不差。所以进了表的函数一律出值，
+   * 本来不出值的补一格 0（`forced`）。
+   */
+  const table = [];        // 表下标 -> wasm 函数名
+  const forced = new Set();// 进了表、因此被迫出值的那些 wasm 函数名
+  const sigs = new Map();  // 元数 -> `$sigN`
+  let fnvalSeq = 0;
+  const tableSlot = (watName) => {
+    const i = table.indexOf(watName);
+    if (i >= 0) return i;
+    forced.add(watName);
+    table.push(watName);
+    return table.length - 1;
+  };
+  const sigFor = (arity) => {
+    if (!sigs.has(arity)) sigs.set(arity, `$sig${arity}`);
+    return sigs.get(arity);
+  };
   function strAddr(s) {
     if (strs.has(s)) return strs.get(s);
     const bytes = utf8Bytes(s);
@@ -766,11 +793,14 @@ function emitOnce(graph, retOf, multiOf) {
           // 顶层绑的名字在 wasm 里是全局量（函数看得见的只有它）
           const g = globals.get(x.attrs.name);
           if (g !== undefined) return `(global.get ${g})`;
-          if (fns.has(x.attrs.name)) throw new Gap('函数当值用（闭包）还没接');
+          // 顶层的函数当值用：值就是**它在表里的下标**
+          if (fns.has(x.attrs.name)) return `(i64.const ${tableSlot(fns.get(x.attrs.name))})`;
           throw new Gap(`没绑过的名字：${x.attrs.name}`);
         }
         return `(local.get ${id})`;
       }
+      // **`func` 当值用**：把它提到顶层，值是它在表里的下标（funcValue）
+      case 'func': return funcValue(x, sc);
       case 'prim': {
         const args = asList(x.ins.args);
         const name = x.attrs.name;
@@ -1046,19 +1076,39 @@ function emitOnce(graph, retOf, multiOf) {
     throw new Gap(`这格字面量还没接：${JSON.stringify(v)}`);
   }
 
+  /** 被调者是名字（直接调）、提升上来的（直接调 + 捕获当实参）、还是一格值（间接调）？ */
+  function calleeKind(fn, sc) {
+    const name = fn !== null && fn !== undefined && fn.op === 'ref' ? fn.attrs.name : null;
+    if (name !== null && sc.lookupLift(name) !== null) return 'lift';
+    if (name !== null && fns.has(name) && sc.lookup(name) === null) return 'direct';
+    return 'indirect';
+  }
+
   function callOf(x, sc, pre) {
     const fn = x.ins.fn;
     const name = fn !== null && fn !== undefined && fn.op === 'ref' ? fn.attrs.name : null;
-    const lift = name === null ? null : sc.lookupLift(name);
-    if (lift === null && (name === null || !fns.has(name))) {
-      throw new Gap('间接调用（函数当值）还没接');
+    const kind = calleeKind(fn, sc);
+    if (kind === 'indirect') {
+      // **间接调用 = call_indirect**：被调者是一格值（表下标）。签名按元数分，
+      // 形参一律 i64、一律出值 —— 与 funcValue 那头是同一条约定。
+      // 被调者先落一格临时量：折叠形式里下标排在实参**后面**求值，而图上它在前面。
+      const c = expr(fn, sc, pre);
+      const t = tmp(sc);
+      pre.push(`(local.set ${t} ${c})`);
+      const args = asList(x.ins.args).map((a) => {
+        onlyInt(a, sc, '实参');
+        return expr(a, sc, pre);
+      });
+      const sig = sigFor(args.length);
+      return `(call_indirect (type ${sig})${args.length === 0 ? '' : ` ${args.join(' ')}`} (i32.wrap_i64 (local.get ${t})))`;
     }
     const args = asList(x.ins.args).map((a) => {
       onlyInt(a, sc, '实参');   // 串传进函数就追不着了（形参没有种类）—— 明说接不住
       return expr(a, sc, pre);
     });
     // 提升上来的那些：捕获来的名字当**多出来的实参**，排在原来的形参前面
-    if (lift !== null) {
+    if (kind === 'lift') {
+      const lift = sc.lookupLift(name);
       const caps = lift.captures.map((nm) => `(local.get ${sc.lookup(nm)})`);
       const all = [...caps, ...args];
       return `(call ${lift.wat}${all.length === 0 ? '' : ` ${all.join(' ')}`})`;
@@ -1196,7 +1246,10 @@ function emitOnce(graph, retOf, multiOf) {
       }
       case 'ret': {
         if (x.ins.value === undefined) {
-          return [...[...regions].reverse().flatMap(runExits), '(return)'];
+          // 光秃秃一条 `return`。这格函数要是出值的（自己出值，或者因为进了表被迫出值），
+          // wasm 要求 return 也带一格结果 —— 补 0，别发一条过不了校验的 `(return)`
+          const withVal = f.ret === true || retOf.get(f.src) === true || forced.has(f.name);
+          return [...[...regions].reverse().flatMap(runExits), withVal ? '(return (i64.const 0))' : '(return)'];
         }
         // 多值的格数要记下来（打印那一步靠它）。两条 `ret` 给的格数不一样就记成 'mix' ——
         // 那种函数印不出来（要运行期长度），报缺口比猜一个数好
@@ -1255,20 +1308,57 @@ function emitOnce(graph, retOf, multiOf) {
       case 'call': {
         const fn = x.ins.fn;
         const name = fn?.op === 'ref' ? fn.attrs.name : null;
+        const kind = calleeKind(fn, sc);
         const call = callOf(x, sc, pre);
-        return [...pre, retOf.get(name) === true ? `(drop ${call})` : call];
+        // 间接调用一律出值（表里的签名统一），所以语句位置一律 drop
+        const drop = kind === 'indirect' || retOf.get(name) === true;
+        return [...pre, drop ? `(drop ${call})` : call];
       }
       default: throw why(x.op, '语句位置');
     }
   }
 
   /**
+   * **`func` 当值用 = 一格表下标**（ADR-0017 第五刀的这一半）。
+   *
+   * 与 liftFunc 同一个动作（提到顶层），差别只在**值是什么**：那边的值不存在（只被直接
+   * 调用），这边要给出一格能装进 map、能传来传去的 i64 —— 那就是它在函数表里的下标。
+   *
+   * 一条限制是必须的：**捕获不了**。表下标只有一格数，带不了捕获来的环境；liftFunc 的
+   * 「捕获当多出来的实参」在这儿也用不上（调用点只看得见下标与元数）。所以有自由名字
+   * 就报缺口 —— 那才是真闭包，要一格闭包对象。
+   */
+  function funcValue(fnode, sc) {
+    const params = (fnode.attrs.params ?? []).map((p) => String(p));
+    const body = fnode.ins.body;
+    const refs = new Set(); const binds = new Set();
+    namesIn(body, refs, binds);
+    const free = [...refs].filter((nm) => !binds.has(nm) && !params.includes(nm)
+      && sc.lookup(nm) !== null);
+    if (free.length !== 0) {
+      throw new Gap(`当值用的函数捕获了外层的 ${free[0]} —— 一格表下标带不了捕获（要闭包对象）`);
+    }
+    const wat = mod.uniq(wname(`f_v${++fnvalSeq}`));
+    const g = mod.fn(wat, params, wat);
+    const gsc = new Scope(g);
+    params.forEach((p) => gsc.names.set(p, wname(p)));
+    const marks = [];
+    regions.push(marks);
+    g.body = fnBody(body, gsc, g);
+    regions.pop();
+    if (marks.length !== 0) {
+      g.body = [...marks.map((m) => `(local.set ${m.flag} (i64.const 0))`),
+        ...g.body, ...(g.unwound === true ? [] : runExits(marks))];
+    }
+    return `(i64.const ${tableSlot(wat)})`;
+  }
+
+  /**
    * **嵌套的函数：lambda 提升，不是闭包**。
    *
-   * wasm 的 `call_indirect` 与函数表这一批都不认（WAT 前端第一阶段的边界），所以"函数当值用"
-   * 确实接不住。但**嵌套的函数只被直接调用**时用不着闭包对象：把它提到顶层，
-   * 捕获来的名字当**多出来的形参**从每个调用点传进去 —— Scheme 那份 basics 的 `go`
-   * （捕获外层的 `n`、递归调用自己）就是这个形状。
+   * 只被直接调用的嵌套函数用不着闭包对象，也用不着进函数表：把它提到顶层，捕获来的名字当
+   * **多出来的形参**从每个调用点传进去 —— Scheme 那份 basics 的 `go`（捕获外层的 `n`、
+   * 递归调用自己）就是这个形状。当值用的那些走 funcValue（值 = 表下标，但带不了捕获）。
    *
    * 两条限制是**必须的**，不然按值提升会给错答案，所以都报缺口：
    *   * 捕获来的名字在里面被**写**过 —— 按值传的话外面看不见那次写。
@@ -1387,19 +1477,29 @@ function emitOnce(graph, retOf, multiOf) {
   if (needJoin) lines.push(STR_JOIN);
   if (needMap) lines.push(MAP_HELPERS);
   if (needCat) lines.push(STR_CAT);
+  // 函数表：每个用到的元数一格签名（形参一律 i64、一律出值），表按下标列全
+  if (table.length !== 0 || sigs.size !== 0) {
+    for (const n of [...sigs.keys()].sort((a, b) => a - b)) {
+      const ps = n === 0 ? '' : ` ${Array.from({ length: n }, () => '(param i64)').join(' ')}`;
+      lines.push(`  (type ${sigs.get(n)} (func${ps} (result i64)))`);
+    }
+    lines.push(`  (table ${table.length} funcref)`);
+    if (table.length !== 0) lines.push(`  (elem (i32.const 0) ${table.join(' ')})`);
+  }
   for (const [nm, g] of globals) {
     const ty = wty(globalKinds.get(nm) ?? 'int');
     lines.push(`  (global ${g} (mut ${ty}) (${ty}.const 0))`);
   }
   for (const f of mod.fns.values()) {
     const ps = f.params.map((p) => `(param ${wname(p)} i64)`).join(' ');
-    const res = f.ret ? ' (result i64)' : '';
+    const rets = f.ret || forced.has(f.name);
+    const res = rets ? ' (result i64)' : '';
     const locals = f.locals.map((l) => `(local ${l.id} ${l.ty})`).join(' ');
     lines.push(`  (func ${f.name}${ps === '' ? '' : ` ${ps}`}${res}`);
     if (locals !== '') lines.push(`    ${locals}`);
     for (const s of f.body) lines.push(`    ${s}`);
     // 出值的函数要有一条兜底的返回值（wasm 要求每条路径都留下一格结果）
-    if (f.ret) lines.push('    (i64.const 0)');
+    if (rets) lines.push('    (i64.const 0)');
     lines.push('  )');
   }
   lines.push('  (export "main" (func $__entry))');
@@ -1412,7 +1512,8 @@ function emitOnce(graph, retOf, multiOf) {
   return {
     text: lines.join('\n'),
     // 两张表按**图上的名字**排（不是 wasm 那边的名字）—— 提升上来的嵌套函数因此也查得到
-    rets: new Map([...mod.fns.values()].map((f) => [f.src, f.ret])),
+    // `forced` 要算进"出不出值"：进了表的函数被迫出值，直接调用点也得跟着 drop
+    rets: new Map([...mod.fns.values()].map((f) => [f.src, f.ret || forced.has(f.name)])),
     multis: new Map([...mod.fns.values()].map((f) => [f.src, f.multi])),
   };
 }
