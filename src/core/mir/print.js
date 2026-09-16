@@ -54,7 +54,7 @@ function operands(mod, f, i) {
     // 'n'：整数字面量。语义值得印成名字的那几个 op 单列 —— 快照要能读。
     if (op === OP.CVT) { out.push(CVT_NAMES[v]); continue; }
     if (op === OP.CALL) { out.push(mod.funcs[v] === undefined ? `fn?${v}` : mod.funcs[v].name); continue; }
-    if (op === OP.CALLOP) { out.push(opText(mod, v)); continue; }
+    if (op === OP.CALLOP) { out.push(mirOpText(mod, v)); continue; }
     /* CCALL 的 `a` 与 `aux` **都是数字、意思不同**（入口号 / 变参分界，见 mir/ir.js 的
        callVaFixed）。从前这儿只看 op 不看第几格，于是 aux 也被当成入口号印了一遍 ——
        量出来是 `CCALL void omni_probe_hi () omni_probe_add`：末尾那个名字是 0 号入口，
@@ -83,7 +83,7 @@ function operands(mod, f, i) {
   return out.join(' ');
 }
 
-function opText(mod, no) {
+function mirOpText(mod, no) {
   const o = mod.ops[no];
   if (o === undefined) return `op?${no}`;
   return o.lits.length === 0 ? o.name : `${o.name}[${o.lits.map((x) => JSON.stringify(x)).join(' ')}]`;
@@ -127,7 +127,7 @@ export function printMir(mod) {
     }
   }
   for (const c of mod.closures) L.push(`closure ${c.make} -> ${c.funcName}  captures: ${c.captures.join(' ')}`);
-  for (let i = 0; i < mod.ops.length; i++) L.push(`op ${pad(`o${i}`, 5)} ${opText(mod, i)}`);
+  for (let i = 0; i < mod.ops.length; i++) L.push(`op ${pad(`o${i}`, 5)} ${mirOpText(mod, i)}`);
   for (let i = 0; i < mod.cabi.length; i++) {
     // 模块自己声明的那些带签名（ADR-0022 的 J4b）；构建期封闭表里的那些没有这一格。
     const sig = (mod.cabiSig ?? [])[i];

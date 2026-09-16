@@ -100,7 +100,7 @@ export function grammarTextOf(path, diags) {
 function withExtends(path, text, diags) {
   const m = /\(extends\s+"([^"]+)"\)/.exec(text);
   if (m === null) return text;
-  const basePath = join(dirOf(path), m[1]);
+  const basePath = join(dirName(path), m[1]);
   if (!exists(basePath)) {
     diags.error(null, `(extends "${m[1]}")：找不到 ${basePath}`);
     return text;
@@ -187,8 +187,9 @@ function grammarName(text) {
   return m === null ? '?' : m[1];
 }
 
-/** 一条路径的目录（不引 `node:path` —— 这一份要能跟着编译器被降级）。 */
-function dirOf(p) {
+/** 一条路径的目录（不引 `node:path` —— 这一份要能跟着编译器被降级）。
+ *  不叫 `dirOf`：`frontend-js/link.js` 里也有一格同名的（那格按模块解析的口径切）。 */
+function dirName(p) {
   const i = String(p).lastIndexOf('/');
   return i < 0 ? '.' : String(p).slice(0, i);
 }

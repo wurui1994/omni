@@ -29,7 +29,7 @@ const SIZE_AT = 48;
 const SIZE_LEN = 10;
 const FMAG_AT = 58;
 
-function str(bytes, at, len) {
+function arStr(bytes, at, len) {
   let s = '';
   for (let i = 0; i < len; i++) s += String.fromCharCode(bytes[at + i]);
   return s;
@@ -58,14 +58,14 @@ function beAt(bytes, at, n) {
  *          `members` 每条 `{name, at, bytes}`，`at` 同样是头的偏移
  */
 export function readArchive(bytes) {
-  if (str(bytes, 0, ARMAG.length) !== ARMAG) throw new OmniError('ar: 开头不是 !<arch>');
+  if (arStr(bytes, 0, ARMAG.length) !== ARMAG) throw new OmniError('ar: 开头不是 !<arch>');
   const members = [];
   let index = null;
   let at = ARMAG.length;
   while (at + HDR_SIZE <= bytes.length) {
-    if (str(bytes, FMAG_AT + at, 2) !== '`\n') throw new OmniError(`ar: 0x${at.toString(16)} 处的成员头不对`);
-    const name = trimName(str(bytes, at, NAME_LEN));
-    const size = parseInt(str(bytes, at + SIZE_AT, SIZE_LEN).trim(), 10);
+    if (arStr(bytes, FMAG_AT + at, 2) !== '`\n') throw new OmniError(`ar: 0x${at.toString(16)} 处的成员头不对`);
+    const name = trimName(arStr(bytes, at, NAME_LEN));
+    const size = parseInt(arStr(bytes, at + SIZE_AT, SIZE_LEN).trim(), 10);
     if (!Number.isFinite(size) || size < 0) throw new OmniError(`ar: 成员 '${name}' 的长度读不出来`);
     const body = bytes.subarray(at + HDR_SIZE, at + HDR_SIZE + size);
     if (name === '/' || name === '/SYM64/') {
@@ -77,7 +77,7 @@ export function readArchive(bytes) {
       for (let i = 0; i < nsyms; i++) {
         let e = p;
         while (e < body.length && body[e] !== 0) e++;
-        syms.push({ name: str(body, p, e - p), at: beAt(body, entry + i * entry, entry) });
+        syms.push({ name: arStr(body, p, e - p), at: beAt(body, entry + i * entry, entry) });
         p = e + 1;
       }
       index = { entry, syms };

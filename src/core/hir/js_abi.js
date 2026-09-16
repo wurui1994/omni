@@ -989,7 +989,7 @@ function abiOf(op) {
   if (!abi) throw new Error(`js_abi: 成员表引用了表外的 op ${op}`);
   return abi;
 }
-function retOf(name, on) {
+function jsAbiRet(name, on) {
   // void 的分支（forEach）在派发器里返回 undefined，所以按 dyn 算
   const rets = new Set(Object.values(on).map((op) => (abiOf(op).ret === 'bool' ? 'bool' : 'dyn')));
   if (rets.size !== 1) throw new Error(`js_abi: 成员 ${name} 各分支的返回类型不一致`);
@@ -1000,7 +1000,7 @@ for (const [name, on] of Object.entries(JS_PROPS)) {
     if (abiOf(op).arity !== 1) throw new Error(`js_abi: 属性 ${name} 的 ${op} 不是一元的`);
   }
   JS_MEMBERS[`js_p_${name}`] = {
-    js: `$js_p_${name}`, c: `omni_js_p_${name}`, arity: 1, ret: retOf(name, on),
+    js: `$js_p_${name}`, c: `omni_js_p_${name}`, arity: 1, ret: jsAbiRet(name, on),
     member: { kind: 'prop', name, on, argc: 0 },
   };
 }
@@ -1012,7 +1012,7 @@ for (const [name, m] of Object.entries(JS_METHODS)) {
     if (a > argc) argc = a;
   }
   JS_MEMBERS[`js_m_${name}`] = {
-    js: `$js_m_${name}`, c: `omni_js_m_${name}`, arity: 1 + argc, ret: retOf(name, m.on),
+    js: `$js_m_${name}`, c: `omni_js_m_${name}`, arity: 1 + argc, ret: jsAbiRet(name, m.on),
     member: { kind: 'method', name, on: m.on, lit: m.lit, argc },
   };
 }

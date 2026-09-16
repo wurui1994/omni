@@ -115,7 +115,7 @@ function uText(v, bits, base, upper) {
  *   3. `0` 标志把零填在**符号之后**，`-` 与空格填在两侧。
  * 反过来做会让 `%+05d` 印成 `00+42` 而不是 `+0042`。
  */
-function padTo(body, sign, spec) {
+function libcPad(body, sign, spec) {
   let s = body;
   if (spec.prec >= 0 && spec.numeric) {
     while (s.length < spec.prec) s = '0' + s;
@@ -148,7 +148,7 @@ function trimZeros(s) {
 }
 
 /**
- * `%f` / `%e` / `%g` 的**数字部分**（不带符号，符号由 `padTo` 那一步加）。
+ * `%f` / `%e` / `%g` 的**数字部分**（不带符号，符号由 `libcPad` 那一步加）。
  *
  * 骨架借宿主的 `toFixed` / `toExponential`：它们的舍入是「在这个 double 的**精确**
  * 十进制值上取最近」，与 C 的 printf 同一件事。三处要自己补：
@@ -348,24 +348,24 @@ export function cFormat(fmt, va) {
       const v = BigInt.asIntN(bits, ap.int(bits));
       const neg = v < 0n;
       const body = (neg ? -v : v).toString(10);
-      out += padTo(body, neg ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : '')), spec);
+      out += libcPad(body, neg ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : '')), spec);
       continue;
     }
     if (conv === 'u') {
-      out += padTo(uText(ap.int(bits), bits, 10, false), '', spec);
+      out += libcPad(uText(ap.int(bits), bits, 10, false), '', spec);
       continue;
     }
     if (conv === 'o') {
       const body = uText(ap.int(bits), bits, 8, false);
       if (spec.alt && body[0] !== '0') spec.prefix = '0';
-      out += padTo(body, '', spec);
+      out += libcPad(body, '', spec);
       continue;
     }
     if (conv === 'x' || conv === 'X') {
       const v = ap.int(bits);
       const body = uText(v, bits, 16, conv === 'X');
       if (spec.alt && v !== 0n) spec.prefix = conv === 'X' ? '0X' : '0x';
-      out += padTo(body, '', spec);
+      out += libcPad(body, '', spec);
       continue;
     }
     if (conv === 'c' || conv === 'C') {
@@ -374,10 +374,10 @@ export function cFormat(fmt, va) {
        * 4 个字节（我们的 `wchar_t` 是 int），再按 UTF-8 摊成字节；窄的那一支只
        * 取低 8 位。宽度算的是**字节数**，与宿主 libc 一致。 */
       if (conv === 'C' || bits === 64) {
-        out += padTo(lcUtf8Of(Number(BigInt.asIntN(32, ap.int(32)))), '', spec);
+        out += libcPad(lcUtf8Of(Number(BigInt.asIntN(32, ap.int(32)))), '', spec);
         continue;
       }
-      out += padTo(String.fromCharCode(Number(BigInt.asUintN(8, ap.int(32)))), '', spec);
+      out += libcPad(String.fromCharCode(Number(BigInt.asUintN(8, ap.int(32)))), '', spec);
       continue;
     }
     if (conv === 's' || conv === 'S') {
@@ -391,14 +391,14 @@ export function cFormat(fmt, va) {
         s = readCStr(ap.ptr());
         if (spec.prec >= 0 && s.length > spec.prec) s = s.slice(0, spec.prec);
       }
-      out += padTo(s, '', spec);
+      out += libcPad(s, '', spec);
       continue;
     }
     if (conv === 'p') {
       /* 地址本身与 tcc 不同（我们的是线性内存偏移），所以这一格**不能对账**。
        * 形状照 glibc/macOS：`0x` 加小写十六进制，空指针印 `0x0`。 */
       spec.numeric = false;
-      out += padTo('0x' + uText(ap.ptr(), 64, 16, false), '', spec);
+      out += libcPad('0x' + uText(ap.ptr(), 64, 16, false), '', spec);
       continue;
     }
     if (conv === 'f' || conv === 'F' || conv === 'e' || conv === 'E'
@@ -414,7 +414,7 @@ export function cFormat(fmt, va) {
         const body = Number.isNaN(x) ? 'nan' : 'inf';
         const up = conv === 'F' || conv === 'E' || conv === 'G' || conv === 'A';
         const sign = x < 0 ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : ''));
-        out += padTo(up ? body.toUpperCase() : body, sign, spec);
+        out += libcPad(up ? body.toUpperCase() : body, sign, spec);
         continue;
       }
       /* 负号看的是 `x < 0` 之外还有 `-0.0`：C 印 `-0.000000`，而 `-0 < 0` 是假。
@@ -422,7 +422,7 @@ export function cFormat(fmt, va) {
        * 而 `1/-0` 是 -Infinity、`1/+0` 是 +Infinity —— 同一件事，只用已有的算符。 */
       const neg = x < 0 || (x === 0 && 1 / x < 0);
       /* 浮点这一格的「精度」已经在 `fText`/`aText` 里用掉了（小数位数 / 有效数字 /
-       * 十六进制位数），不能再让 `padTo` 拿它去补前导零 —— 所以按非数字对待。 */
+       * 十六进制位数），不能再让 `libcPad` 拿它去补前导零 —— 所以按非数字对待。 */
       spec.numeric = false;
       const v = neg ? -x : x;
       const body = hex ? aText(v, conv === 'A', spec) : fText(x, conv, spec);
@@ -431,14 +431,14 @@ export function cFormat(fmt, va) {
       spec.prefix = pfx;
       const sign = neg ? '-' : (spec.plus ? '+' : (spec.space ? ' ' : ''));
       if (spec.zero && !spec.left) {
-        /* `%08.2f` 的零补在**符号之后**，而 `padTo` 的补零那一支被上面关掉了，
+        /* `%08.2f` 的零补在**符号之后**，而 `libcPad` 的补零那一支被上面关掉了，
          * 所以这一格自己补 —— 数字部分补零是安全的（它已经有小数点了）。 */
         let n = spec.width - sign.length - pfx.length - body.length;
         if (n < 0) n = 0;
         out += sign + pfx + '0'.repeat(n) + body;
         continue;
       }
-      out += padTo(body, sign, spec);
+      out += libcPad(body, sign, spec);
       continue;
     }
     if (conv === 'a' || conv === 'A') {

@@ -11,8 +11,10 @@
 
 import { newPlan, addStage } from './stages.js';
 
-/** 从 `rest` 里捞一个带值开关（实现那一侧也是这么捞的，保证两边看到同一个数）。 */
-function opt(rest, name, dflt) {
+/** 从 `rest` 里捞一个带值开关（实现那一侧也是这么捞的，保证两边看到同一个数）。
+ *  不叫 `opt`：`frontend-engine/syntax.js` 里那格 `opt(...)` 是"语法里的可选项"，
+ *  与这格取命令行开关不是一回事（拼成一个程序之后模块级名字共用一个空间）。 */
+function cliOpt(rest, name, dflt) {
   const i = rest.indexOf(name);
   return i >= 0 ? rest[i + 1] : dflt;
 }
@@ -20,7 +22,7 @@ function opt(rest, name, dflt) {
 /** 这个目标上默认的容器格式。**注意**：tcc 的 `-c` 在所有目标上都写 ELF，所以这不是
  * 「OS 决定格式」——只是没给 `--format` 时的默认，给了就听给的。 */
 function fmtOf(rest, os) {
-  const f = opt(rest, '--format', null);
+  const f = cliOpt(rest, '--format', null);
   if (f !== null) return f;
   return os === 'osx' ? 'macho' : 'elf';
 }
@@ -45,10 +47,10 @@ function cppNote(rest) {
  * `macho-link`/`pe-link`）。
  */
 export function planForC(cmd, path, files, rest) {
-  const arch = opt(rest, '--arch', 'arm64');
-  const os = opt(rest, '--os', 'osx');
+  const arch = cliOpt(rest, '--arch', 'arm64');
+  const os = cliOpt(rest, '--os', 'osx');
   const cpu = CPU[arch] ?? arch;
-  const out = opt(rest, '-o', undefined);
+  const out = cliOpt(rest, '-o', undefined);
   const note = cppNote(rest);
 
   if (cmd === 'cpp') {
