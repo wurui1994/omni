@@ -229,14 +229,13 @@ export const NODES = new Map([
   //     从此共用同一对节点（`ext/go/SPEC.md` §五第 1 项那句"三种双值形式是同一个形状"）。
   N('values', 'expr', [{ name: 'args', sem: SEM.value, rest: true }], {
     doc: 'go `return a, b` / lua `return a, b` / CL `values` / V 的双值形式'
-      + ' / Scheme 的 `values` + `let-values` / nim 与 mojo 的元组',
-    // 规格里数出来**八门**（awk 与 freebasic 的语言里没有多值这件事）。
-    // `pick` 是它的消费侧，一族一笔账，记在这一格上。
+      + ' / Scheme 的 `values` + `let-values` / nim 与 mojo 的元组 / cpp 的 `std::make_pair`',
+    // **八门全接了**（awk 与 freebasic 的语言里没有多值这件事，所以不在规格里）。
+    // cpp 那门最后落地：双值载体是 `std::pair`，而"一格产生两个值 + 按第几格取用"
+    // 图上本来就有 —— `make_pair` 落 values、`t.first` / `t.second` 落 pick。
     providers: {
       spec: ['go', 'lua', 'vlang', 'nim', 'sbcl', 'chez', 'mojo', 'cpp'],
-      why: {
-        cpp: '`std::tuple` / `std::pair` + 结构化绑定要模板与库那一族（与 slice / map 同一笔）',
-      },
+      why: {},
     },
   }),
   N('pick', 'expr', [{ name: 'from', sem: SEM.value, multi: true }], {
@@ -343,7 +342,8 @@ export const NODES = new Map([
     providers: {
       spec: ['go', 'vlang', 'awk', 'nim', 'lua', 'chez', 'sbcl', 'mojo', 'cpp'],
       why: {
-        cpp: '`std::map` / `std::unordered_map` 要模板与库那一族（与 slice 欠的是同一笔）',
+        cpp: '`std::map<K,V> m;` 这一行**语法就读不进来**（模板名当类型那笔账，'
+          + 'cpp.grammar 的不足第 2 条）—— 与 slice 欠的是同一笔，一台机器两笔账',
       },
     },
   }),
@@ -445,8 +445,8 @@ export const NODES = new Map([
     providers: {
       spec: ['go', 'vlang', 'nim', 'mojo', 'sbcl', 'chez', 'cpp'],
       why: {
-        cpp: '要模板与库那一族（`std::vector` 的迭代器构造 / `std::span`）——'
-          + ' 这一批的 cpp 只有内建数组，切一段没有语言级的写法',
+        cpp: '`std::span` / `std::vector` 的迭代器构造这一行**语法就读不进来**'
+          + '（模板名当类型那笔账）—— 这一批的 cpp 只有内建数组，切一段没有语言级的写法',
       },
     },
   }),

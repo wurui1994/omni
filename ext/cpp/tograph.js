@@ -52,6 +52,27 @@ let STRUCTS = new Map();
 let DTORS = new Set();
 const dtorName = (ty) => `__destruct_${ty}`;
 
+/**
+ * **装 `std::pair` 的那些名字**（一格 `auto t = std::make_pair(3, 7)` 登记一个）。
+ *
+ * C++ 的双值载体是 `std::pair`，而图上"一格产生两个值 + 按第几格取用"本来就有
+ * （`values` / `pick`）—— 所以 `make_pair` 落 `values`、`t.first` / `t.second` 落 `pick`。
+ * 要这张表的理由只有一条：`.first` 在别的类型上可能真是一格字段，
+ * 所以**只有登记过的名字**才当 pick（判据还是"造它的那一步自带标记"）。
+ *
+ * 明说边界：`std::pair<int,int>` 当**类型**写出来（形参、返回值、`std::pair<…> t;`）
+ * 这一批读不进来 —— 那是语法里"模板名当类型"那笔账（cpp.grammar 的不足第 2 条），
+ * 与 `std::vector` / `std::map` 欠的是**同一笔**。
+ */
+let PAIRS = new Set();
+const isMakePair = (x) => {
+  if (!isList(x) || tag(x) !== 'call') return false;
+  const callee = kids(x)[0];
+  if (!isList(callee) || tag(callee) !== 'qual') return false;
+  const parts = kids(callee).map((y) => (isList(y) ? nameOf(y) : leaf(y)));
+  return parts.length === 2 && parts[0] === 'std' && parts[1] === 'make_pair';
+};
+
 /** `(class struct (n Point) (members …))` -> 登记字段名 */
 function collectStructs(x) {
   if (Array.isArray(x)) { x.forEach(collectStructs); return; }
@@ -223,7 +244,13 @@ function toNode(x) {
     // `p.x` -> field-get（`p->x` 也落这一格：指针是写法，图上没有取地址那件事）
     case 'dot': case 'arrow': {
       const [obj, f] = kids(x);
-      return fieldGet(toNode(obj), nameOf(f));
+      // `t.first` / `t.second`（`t` 是登记过的 pair）-> pick 那一格（第 0 / 1 个出端口）
+      const k = nameOf(f);
+      if (isList(obj) && (tag(obj) === 'n' || tag(obj) === 'name')
+        && PAIRS.has(nameOf(obj)) && (k === 'first' || k === 'second')) {
+        return node('pick', { from: toNode(obj) }, { index: k === 'first' ? 0 : 1 });
+      }
+      return fieldGet(toNode(obj), k);
     }
     // `{10, 20, 30}` -> list-new。**记录那一侧看的是被声明的类型**（见 decl 那一格）——
     // 走到这儿的花括号就是列表。
@@ -290,6 +317,13 @@ function toNode(x) {
       const rec = structOf(specs);
       return [...dtors, ...kids(initPart).filter((d) => tag(d) === 'd').map((d) => {
         const v = part(d, 'init');
+        // `auto t = std::make_pair(3, 7)` —— **装住整格多值**（`keepMulti` 那格附属），
+        // 取用那一侧是 `t.first` / `t.second` -> pick（见 dot 那一格）
+        if (v !== undefined && isMakePair(kids(v)[0])) {
+          const nm = declName(d);
+          PAIRS.add(nm);
+          return node('bind', { init: toNode(kids(v)[0]) }, { name: nm, keepMulti: true });
+        }
         // `Point p = {1, 2};` —— 记录（字段名从 struct 声明来，见 STRUCTS）。
         // `{…}` 本身在 cpp 里既能填记录也能填列表，所以**看被声明的类型是不是记录**，
         // 不看花括号里长什么样。
@@ -370,6 +404,8 @@ function toNode(x) {
     case 'call': {
       const [fn, args] = kids(x);
       const argKids = args === undefined ? [] : kids(args);
+      // `std::make_pair(a, b)` -> 一格 values（C++ 的双值载体就是它）
+      if (isMakePair(x)) return node('values', { args: many(argKids) });
       const callee = isList(fn) && (tag(fn) === 'n' || tag(fn) === 'name') ? nameOf(fn) : null;
       // `printf("%d\n", x)` -> prim print。**格式串不是节点**：只认那几种，别的报错
       if (callee === 'printf' || callee === 'puts') {
@@ -393,6 +429,7 @@ export function cppToGraph(tree) {
   // 先扫一遍记录声明（`struct P {…}` 的字段名）—— `{1, 2}` 填记录还是填列表靠它分开
   STRUCTS = new Map();
   DTORS = new Set();        // "哪些类型有 ~T()"那张表也是**一份源码一张**
+  PAIRS = new Set();        // "哪些名字装 pair"那张表同理
   collectStructs(kids(tree));
   const body = many(kids(tree));
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
@@ -402,7 +439,10 @@ export function cppToGraph(tree) {
 //   1. 类型全丢；指针 / 引用 / 数组的修饰只从声明符里取名字（`const char* t` 的 `*` 丢掉）。
 //   2. `T * x;` 那种"声明还是表达式"**已经不靠猜了** —— 驱动器会回问"这名字登记成类型
 //      了吗"（`declares-type` / `needs-type`，见 cpp.grammar 与 driver.js），
-//      cpp 那格 `prefer` 删掉了。还欠的是模板名那一类（`a<b>(c)`）。
+//      cpp 那格 `prefer` 删掉了。还欠的是模板名那一类（`a<b>(c)`）—— 而**那一笔挡住三样**：
+//      `std::map<K,V> m;` / `std::vector<int> xs` / `std::pair<int,int>` 当类型写出来
+//      （探针试过：`unexpected ID 'm'`）。所以 map 与 slice 那两格提供者账欠的是**语法**，
+//      不是映射；`std::make_pair(3, 7)` 造在原地那种写法读得进来，多值那一格因此接上了。
 //   3. 记录的字段名靠**扫同一份文件里的 struct 声明**（`STRUCTS`）—— 外部头文件里声明的
 //      记录扫不到，当场报错。这与 map 那一族"造它的那一步自带标记"是同一条判据。
 //   4. class 的成员函数只接**析构**（`~T()` -> 一格顶层函数 + scope-exit，第二十五批）；
