@@ -14,6 +14,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   head, kids, text, symName, asList, counted, branchOf, listNew, indexGet, indexSet, sliceOf, destructure,
+  mapNew, mapGet, mapSet, mapHas,
   fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -112,6 +113,11 @@ function toNode(x) {
         if (place === 'aref' || place === 'svref' || place === 'elt') {
           return indexSet(toNode(inner[1]), toNode(inner[2]), toNode(rest[1]));
         }
+        // `(setf (gethash k m) v)` -> map-set。**CL 的键在前、表在后**（与别的门反着），
+        // 那只是记号的顺序 —— 落的是同一格节点。
+        if (place === 'gethash') {
+          return mapSet(toNode(inner[2]), toNode(inner[1]), toNode(rest[1]));
+        }
         if (place !== null && STRUCTS.access.has(place)) {
           return fieldSet(toNode(inner[1]), STRUCTS.access.get(place), toNode(rest[1]));
         }
@@ -181,6 +187,20 @@ function toNode(x) {
       rest[1] === undefined ? undefined : toNode(rest[1]),
       rest[2] === undefined ? undefined : toNode(rest[2]),
     );
+    // 哈希表那几样也**不是调用**：落 map 那四格。CL 的记号有两处与别人不同 ——
+    // 键写在表前面（`(gethash k m)`），而"在不在"是 `gethash` 的**第二格返回值**
+    // （`(nth-value 1 …)`）。两处都只是记号：落到的是同一批节点。
+    case 'make-hash-table': return mapNew();
+    case 'gethash': return mapGet(toNode(rest[1]), toNode(rest[0]));
+    case 'nth-value': {
+      const inner = asList(rest[1]);
+      const k = rest[0] === undefined ? null : Number(text(rest[0]));
+      if (k === 1 && inner !== null && symName(inner[0]) === 'gethash') {
+        return mapHas(toNode(inner[2]), toNode(inner[1]));
+      }
+      throw new Error('sbcl->graph: 这一批只接 `(nth-value 1 (gethash …))` 那一种多值取用'
+        + '（别的要多值那一侧的 pick 一起接）');
+    }
     default: break;
   }
 

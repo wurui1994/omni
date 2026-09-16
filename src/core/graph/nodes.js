@@ -275,7 +275,17 @@ export const NODES = new Map([
     { name: 'vals', sem: SEM.value, rest: true },
   ], {
     effects: ['allocates'], lifetime: 'owns',
-    doc: 'go/V `map[K]V{…}` / lua `{}` / nim `initTable` / awk 的关联数组（隐式）',
+    doc: 'go/V `map[K]V{…}` / lua `{}` / nim `initTable` / awk 的关联数组（隐式）'
+      + ' / Scheme `make-eqv-hashtable` / CL `make-hash-table`',
+    // 规格里数出来**九门**（十门里只有 freebasic 没有：FB 的语言里没有字典这一格）。
+    // map 那四格是一族，账记在这一格上（与 record-new 那格同一条：一族一笔账）。
+    providers: {
+      spec: ['go', 'vlang', 'awk', 'nim', 'lua', 'chez', 'sbcl', 'mojo', 'cpp'],
+      why: {
+        mojo: '`Dict[K, V]` 是标准库的泛型容器 —— 要"库里的类型 + 方法"那一族先进来',
+        cpp: '`std::map` / `std::unordered_map` 要模板与库那一族（与 slice 欠的是同一笔）',
+      },
+    },
   }),
   N('map-get', 'expr', [
     { name: 'obj', sem: SEM.value },

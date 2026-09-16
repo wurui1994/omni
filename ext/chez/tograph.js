@@ -11,6 +11,7 @@
 import { node, lit, program } from '../../src/core/graph/graph.js';
 import {
   head, kids, text, symName, asList, branchOf, listNew, indexGet, indexSet, sliceOf,
+  mapNew, mapGet, mapSet, mapHas,
   fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -152,6 +153,15 @@ function toNode(x) {
     // 向量那三样**不是调用**：它们落 `list-new` / `index-get` / `index-set`
     //（与 `display` 落 `prim print` 同一条 —— 写成什么样是语法的事）。
     case 'vector': return listNew(many(rest));
+    // 哈希表那四样也**不是调用**：落 map 那四格（R6RS 的写法与别人差得最远 ——
+    // 别的门是下标语法或方法，这门是四个函数名，落到的却是同一批节点）。
+    // 明说一格：`hashtable-ref` 的**第三个实参是默认值**，图上没有那一格 ——
+    // 图的规矩是"缺键就是错误"，所以那个默认值丢掉（例子里不缺键）。
+    case 'make-eqv-hashtable': case 'make-eq-hashtable':
+    case 'make-equal-hashtable': case 'make-hashtable': return mapNew();
+    case 'hashtable-ref': return mapGet(toNode(rest[0]), toNode(rest[1]));
+    case 'hashtable-set!': return mapSet(toNode(rest[0]), toNode(rest[1]), toNode(rest[2]));
+    case 'hashtable-contains?': return mapHas(toNode(rest[0]), toNode(rest[1]));
     case 'vector-ref': return indexGet(toNode(rest[0]), toNode(rest[1]));
     case 'vector-set!': return indexSet(toNode(rest[0]), toNode(rest[1]), toNode(rest[2]));
     // `(vector-copy v 1 3)` -> slice。R6RS/R7RS 的规矩与图上一样（**上界不含、0 起**），
