@@ -256,7 +256,7 @@ function bytesOf(s) {
   return memoB;
 }
 
-function slen(s) {
+function builtinSlen(s) {
   return BigInt(bytesOf(s).length);
 }
 
@@ -1157,7 +1157,7 @@ export function applyBuiltin(I, e, a) {
     case 'write_text': return writeTextOrFail(a[0], a[1]);
     case 'run_proc': return runProc(a[0]);
     case 'len':
-      if (recv.k === 'string') return slen(a[0]);
+      if (recv.k === 'string') return builtinSlen(a[0]);
       return recv.k === 'list' ? BigInt(a[0].length) : BigInt(a[0].size);
     case 'push': a[0].push(a[1]); return undefined;
     case 'add': a[0].add(a[1]); return undefined;
@@ -1192,7 +1192,7 @@ export function applyBuiltin(I, e, a) {
       const t = dynTag(a[0]);
       if (t === 'list') return BigInt(a[0].length);
       if (t === 'dict') return BigInt(a[0].size);
-      if (t === 'string') return slen(a[0]);
+      if (t === 'string') return builtinSlen(a[0]);
       rtError('dynamic value of tag ' + t + ' has no length');
       return undefined;
     }

@@ -38,7 +38,7 @@ export const PACKAGES = new Map([['std', LIB_DIR]]);
 /** 文件后缀决定该文件的类型模式（ADR-0008 第 1 节）。模式是**按文件**的。 */
 export const MODE_BY_EXT = { '.omni': 'mixed', '.omnid': 'dynamic', '.omnis': 'static' };
 
-const EXTS = Object.keys(MODE_BY_EXT);
+const MODULE_EXTS = Object.keys(MODE_BY_EXT);
 
 export function modeOfPath(path, fallback = 'mixed') {
   const dot = path.lastIndexOf('.');
@@ -78,8 +78,8 @@ function classify(spec) {
     }
   }
 
-  if (!EXTS.some((e) => spec.endsWith(e))) {
-    fail(`module path must name a file with its extension (${EXTS.join(', ')}): '${spec}'`
+  if (!MODULE_EXTS.some((e) => spec.endsWith(e))) {
+    fail(`module path must name a file with its extension (${MODULE_EXTS.join(', ')}): '${spec}'`
       + ' — the extension also selects the type mode, so guessing it would mean guessing the mode');
   }
 

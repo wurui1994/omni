@@ -92,11 +92,11 @@ export function targetNames() {
  * 这正好是插件要的形状：`dlopen` 出来的那一格在 `omni_plugin_init` 里调 registerLang，
  * 与内建项走同一条路 —— 内建与外挂在这一层看不出区别，只是登记的时刻不同。
  */
-const LANGS = new Map();
+const LANG_PROVIDERS = new Map();
 
 /** @param exts 扩展名（带点）@param name 语言名 @param compile (path, argv) -> { mod, ... } */
 export function registerLang(exts, name, compile) {
-  for (const e of exts) LANGS.set(e, { name, compile });
+  for (const e of exts) LANG_PROVIDERS.set(e, { name, compile });
 }
 
 /* 目录里躺着、但**这条腿装不动**的那些（ADR-0021 的 S4）：名字先记下来，等真用到那门语言
@@ -120,13 +120,13 @@ export function unloadableFor(path) {
 
 /** 这个路径归哪种语言；不归任何登记过的语言就交 null（调用方落到核心方言那一支） */
 export function lang(path) {
-  for (const [ext, l] of LANGS) {
+  for (const [ext, l] of LANG_PROVIDERS) {
     if (path.endsWith(ext)) return l;
   }
   /* 声明了还没装的那些（迟装）：装进来再问一遍。这一步刻意在 UNLOADABLE 之前 ——
      内建的那门语言在就该用它，"装不动插件"是另一回事。 */
   if (resolvePending('exts', path)) {
-    for (const [ext, l] of LANGS) {
+    for (const [ext, l] of LANG_PROVIDERS) {
       if (path.endsWith(ext)) return l;
     }
     throw pendingMismatch('exts', path);
@@ -211,7 +211,7 @@ export function cap(name) {
 /** 装着的语言都有哪些（声明了还没装的也算 —— 与 targetNames 同一条理由） */
 export function langNames() {
   const out = [];
-  for (const [, l] of LANGS) if (!out.includes(l.name)) out.push(l.name);
+  for (const [, l] of LANG_PROVIDERS) if (!out.includes(l.name)) out.push(l.name);
   for (const p of PENDING) {
     if (p.done) continue;
     const isLang = p.claim.exts !== undefined || p.claim.runnerExts !== undefined;

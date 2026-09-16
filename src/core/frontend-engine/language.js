@@ -84,7 +84,7 @@ function derive(lang) {
   return lang;
 }
 
-function check(lang) {
+function checkLangSpec(lang) {
   const cls = new Set(lang.classes);
   for (const n of lang.nodes) {
     if (!cls.has(n.of)) throw new Error(`${lang.name}：节点 ${n.name} 的 of='${n.of}' 不是已知洞类`);
@@ -117,7 +117,7 @@ export function defineLang({
   /* 记号规则表**没有默认值**：那是语言自己的事（先前这儿默认成了 Lua 那张表 ——
      一份 SDK 不该知道有 Lua 这门语言）。 */
   if (tokens === null) throw new Error(`语言 ${name}：没给 tokens（记号规则表）`);
-  return check(derive({
+  return checkLangSpec(derive({
     name, doc, keywords: [...keywords], ops: [...ops], punct: [...punct], unaryPrec,
     classes: [...classes], subclass: { ...subclass }, nodes: [...nodes], numSuffix,
     tokens, start, str, ident,
