@@ -148,13 +148,11 @@ export const NODES = new Map([
     },
   }),
   N('region', 'stat', [{ name: 'body', sem: SEM.body, rest: true }], {
-    outs: ['value'], doc: 'sbcl bind/creturn 一对 / freebasic Scope（SCOPEBEGIN/END）',
-    // 十门都有"一段带自己作用域的语句"。矩阵九门 —— nim 那门的 `block:` 还没接
-    // （例子里没用到；nim 的 `defer:` 挂的是函数那一格 region）。
-    providers: {
-      spec: TEN,
-      why: { nim: '`block:` 那种显式块还没接 —— 例子用的是函数与 `defer:`（那两处的 region 是现成的）' },
-    },
+    outs: ['value'], doc: 'sbcl bind/creturn 一对 / freebasic Scope（SCOPEBEGIN/END）/ nim 的 `block:`',
+    // 十门都有"一段带自己作用域的语句"，十门都接了。nim 那门原来只欠一份显式块的例子
+    // （它的 region 全是函数与 `defer:` 顺带带来的）—— `ext/nim/examples/blockscope.nim`
+    // 补上的那一份还顺带压住"这一格真的开了一层作用域"（里外两个同名的 `x`：5 / 1）。
+    providers: { spec: TEN, why: {} },
   }),
 
   // ---- 函数与出口（3 格）------------------------------------------------------

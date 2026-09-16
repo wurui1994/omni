@@ -63,6 +63,11 @@ export const BLOCKRET = ['15', '6', '7'];
  * `set` 规格十门、矩阵九门，缺的 chez 欠的不是机制而是**一份用它的例子**。
  */
 export const MUT = ['1', '3'];
+/**
+ * blockscope：**一段带自己作用域的语句**（nim 的 `block:` -> region）。
+ * 里外两个同名的 `x`：块里印 5、块外印 1 —— 那两行压的是"region 真的开了一层作用域"。
+ */
+export const BLOCKSCOPE = ['5', '1'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -131,6 +136,9 @@ export const CASES = [
   // 第十八个家族：**改写一格已有的名字**（chez 独一份）。理由同上，是账上算出来的：
   // `set` 那格规格十门、矩阵九门，而缺的 chez 欠的是**判据**不是机制。
   ...fam('mut', MUT, ['chez']),
+  // 第十九个家族：**显式的块**（nim 的 `block:`）—— 同样是账上算出来的（`region`
+  // 规格十门、矩阵九门，缺 nim）。它顺带把"region 到底管不管用"也压住了：同名遮蔽。
+  ...fam('blockscope', BLOCKSCOPE, ['nim']),
 ];
 
 /**

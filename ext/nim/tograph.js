@@ -110,6 +110,12 @@ function toNode(x) {
     // `p.x` -> field-get（与 lua 的 `(dot …)`、go/V 的 `(sel …)` 同一格节点）
     case 'dot': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
     case 'line': case 'body': case 'impl': return many(kids(x));
+    // `block:` -> region（一段带自己作用域的语句）。nim 的 `defer:` 也挂在最近这一格上 ——
+    // 那正是 region 的用处：**作用域与出口是同一格**。
+    case 'block': {
+      const body = part(x, 'body');
+      return node('region', { body: body === undefined ? [] : many(kids(body)) });
+    }
     case 'break': return loopExit('break');
     case 'continue': return loopExit('continue');
     case 'expr': return toNode(kids(x)[0]);
