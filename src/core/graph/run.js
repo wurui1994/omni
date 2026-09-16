@@ -31,7 +31,7 @@ import { glrParse } from '../glr/driver.js';
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
 import { readText, stdout, stderr } from '../host/native.js';
 import { backends, Gap } from './contract.js';
-import { LANGS, pickLang, treeRoot } from './langs.js';
+import { LANGS, DIALECTS, pickLang, treeRoot } from './langs.js';
 
 /** 一格 `--flag VALUE`：给了就回那个值，没给回 null（不认 `--flag=VALUE`，与别处一致）。 */
 function argOf(argv, name) {
@@ -128,9 +128,11 @@ function runOr(back, art, path, langName) {
 /** `--engine graph --help` 那几行（`cmds.js` 里引它，免得两处各写一套）。 */
 export function graphEngineHelp() {
   const langs = [...LANGS.entries()].map(([n, d]) => `${n}(.${d.exts.join(' .')})`).join('  ');
+  const dias = [...DIALECTS.entries()].map(([n, d]) => `${n}(按 ${d.of} 读)`).join('  ');
   return `--engine graph：走节点图那台机器（ADR-0033）—— 十门语言共用一份节点清单与一份契约。
   语言按 --lang 定，没给就按后缀猜（**--lang 优先**：.lua 既可能是 lua 也可能是 gsl-shell）：
     ${langs}
+  方言（只能 --lang 点名，没有自己的后缀）：${dias}
   --backend 这一层有四条：${graphBackendNames().join(' / ')}
     interp  默认，就是 graph.eval（调度器的读法）
     js      降成 JS 源码，在本进程里跑掉

@@ -74,15 +74,39 @@ export const EXTS = (() => {
 })();
 
 /**
+ * **方言**：与某一门共用语法与映射，但有自己的名字 —— 只能靠 `--lang` 点名（没有后缀）。
+ *
+ * gsl-shell 是这一格的来由，也是"按后缀猜必然猜错"那句话的出处：它与 lua 用同一个 `.lua`。
+ * 现状是量出来的（`/Users/wurui/Train/gsl-shell` 那 186 份 .lua，用 lua 的语法过一遍）：
+ * **139/186 过**，没过的 47 份里 41 份是同一件事 —— gsl-shell 的**短 lambda** `|x| expr`
+ * （LuaJIT 那一支加的），lua 里没有这个写法。
+ *
+ * 为什么不把 `|x| expr` 加进 `lua.grammar`：那会让 lua 接受它自己没有的写法（假接受比报错坏）。
+ * 为什么不给 gsl-shell 单开一份语法：那要把 lua 那 113 条产生式抄一遍，而"抄两份就是两套
+ * 语义"是这棵树上反复吃过的教训。**正解是给语法 DSL 一格"方言"机制**（继承一份语法 +
+ * 加几条产生式），那是一笔记在账上的欠款；在它之前，`--lang gsl-shell` 就是"按 lua 读"，
+ * 撞上短 lambda 会**干净地报语法错**（不猜、不假接受）。
+ */
+export const DIALECTS = new Map([
+  ['gsl-shell', { of: 'lua', note: 'gsl-shell 与 lua 共用一份语法：短 lambda `|x| expr` 还没接（它的语料 139/186 过）' }],
+]);
+
+/**
  * 按"用户敲的 --lang"与"文件名后缀"定这一份源码归哪门语言。**--lang 优先**：
  * 后缀最多只是默认（`.lua` 既可能是 lua 也可能是 gsl-shell，见文件头）。
  * 两样都说不出来就报一句带清单的错 —— 不猜。
  */
 export function pickLang(path, want) {
   if (want !== null && want !== undefined && want !== '') {
+    const dia = DIALECTS.get(want);
+    if (dia !== undefined) {
+      // 方言：语法与映射借基准那一门的，名字仍是它自己的（报错里要认得出是谁）
+      return { name: want, ...LANGS.get(dia.of), dialectOf: dia.of, note: dia.note };
+    }
     const d = LANGS.get(want);
     if (d === undefined) {
-      throw new OmniError(`没有 --lang ${want} 这一门 —— 认得的十门是：${[...LANGS.keys()].join(' ')}`);
+      throw new OmniError(`没有 --lang ${want} 这一门 —— 认得的十门是：${[...LANGS.keys()].join(' ')}`
+        + `；方言：${[...DIALECTS.keys()].join(' ')}`);
     }
     return { name: want, ...d };
   }

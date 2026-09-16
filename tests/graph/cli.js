@@ -12,6 +12,8 @@
 //   node tests/graph/cli.js lua        只跑名字里带 lua 的那几格
 
 import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -75,8 +77,24 @@ check('--lang 盖过后缀（.lisp 当 chez 读 -> chez 的映射不认 defun）
   { code: 1, says: '跑的时候错了' });
 check('后缀不认得就报清单', ['run', 'README.md', '--engine', 'graph'],
   { code: 1, says: '这个后缀不认得' });
-check('--lang 打错就报那十门', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--lang', 'gsl-shell'],
+check('--lang 打错就报那十门', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--lang', 'gsl-no-such'],
   { code: 1, says: '认得的十门是' });
+
+// ---- 2b) 方言：gsl-shell 与 lua 共用 `.lua`，只能 `--lang` 点名（这就是 --lang 的来由）
+check('--lang gsl-shell（按 lua 读，共用一份语法）',
+  ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--lang', 'gsl-shell'],
+  { code: 0, out: BASICS });
+{
+  /**
+   * **那条方言账的判据**：gsl-shell 的短 lambda（`|x| expr`）现在**没接**，
+   * 所以撞上它必须干净地报语法错（不假接受）。量出来的：它那 186 份语料里 41 份用到这个写法。
+   * 哪天语法接了，这一格会变红 —— 那时要改的是 `langs.js` 里那条账，不是这一格。
+   */
+  const f = join(tmpdir(), 'omni-gsl-lambda.lua');
+  writeFileSync(f, 'local f = |x| x + 1\nprint(f(1))\n');
+  check('gsl-shell 的短 lambda 还没接（干净地报语法错）',
+    ['run', f, '--engine', 'graph', '--lang', 'gsl-shell'], { code: 1, says: 'unexpected "|"' });
+}
 
 // ---- 3) 缺口不是失败：有名有姓，退出码 3（与"程序自己跑错了"分开）
 check('awk × wat 是一格有名有姓的缺口（退出码 3）',
