@@ -1,7 +1,20 @@
 {
   "grammar": "cpp.grammar",
-  "doc": "语料 = asymptote 那棵树里的 .cc（523 份 —— 真实的 C++，模板、运算符重载、异常、lambda 都用到了；这棵树本来就是这仓库里 asy 那几把尺子的语料，路径口径与它们一致）。树不在就跳过。语法照 cpp-grammars/c++20.ebnf（标准里那份语法的机读版）写。**不做预处理** —— `#…` 当指令收，宏展开出来的声明收不住，理由写在 cpp.grammar 的文件头。",
+  "doc": "语料 = asymptote 那棵树里的 .cc（**量出来 351 份**，旧账写的 523 是错的 —— 真实的 C++，模板、运算符重载、异常、lambda 都用到了；这棵树本来就是这仓库里 asy 那几把尺子的语料，路径口径与它们一致）。树不在就跳过。语法照 cpp-grammars/c++20.ebnf（标准里那份语法的机读版）写。**这一栏读的是预处理后的文本**（`preprocess` 那一格）：找不到的头跳过（`--skip-missing-includes` —— 一份文件该配哪几个 `-I` 只有那棵树的构建系统知道，量出来 172 份卡在这儿），前言里定义 gtest 那五族宏（`TEST` / `TEST_F` / `TEST_P` / `TYPED_TEST(_P)` / `GTEST_DISABLE_MSC_WARNINGS_*`）—— 没过的 321 份里 99 份卡在「宏调用当顶层声明」，89% 是这一家。`过` 那一栏因此印成 `预处理后/原样`：**这门语言自己（`omni run x.cpp`）现在还不做预处理**，两个数都得说得出来。账与下一刀写在 cpp.grammar 末尾那一节。",
   "corpus": [
     { "tree": "asymptote", "env": "ASY_SRC", "ext": ".cc" }
-  ]
+  ],
+  "preprocess": {
+    "cap": "c.preprocess",
+    "skipMissingIncludes": true,
+    "defines": [
+      ["TEST(a, b)", "void a##_##b##_Test()"],
+      ["TEST_F(a, b)", "void a##_##b##_Test()"],
+      ["TEST_P(a, b)", "void a##_##b##_Test()"],
+      ["TYPED_TEST(a, b)", "void a##_##b##_Test()"],
+      ["TYPED_TEST_P(a, b)", "void a##_##b##_Test()"],
+      ["GTEST_DISABLE_MSC_WARNINGS_PUSH_(x)", ""],
+      ["GTEST_DISABLE_MSC_WARNINGS_POP_()", ""]
+    ]
+  }
 }

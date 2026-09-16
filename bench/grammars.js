@@ -44,6 +44,25 @@
 //
 // 参考树不在就**跳过并说清**（不假装绿，也不假装量到了）。
 //
+// ## `preprocess`：**读别人的源码时，先展开宏**
+//
+// 有的语言里"没预处理"就是墙本身。cpp 那条语料量出来：没过的 321 份里 99 份卡在
+// 「宏调用当顶层声明」（`TEST(A, B) { … }`），89% 是 gtest 一家的五个宏。所以 `bench.json`
+// 里可以配一格：
+//
+//   "preprocess": { "cap": "c.preprocess", "skipMissingIncludes": true,
+//                   "defines": [["TEST(a, b)", "void a##_##b##_Test()"], …] }
+//
+// `-I` 是**量出来的那两条**（文件自己的目录 + 语料那棵树的根）：一份文件真正该配哪几个
+// 只有那棵树的构建系统知道，所以找不到的头跳过（就是 `omni c cpp --skip-missing-includes`）。
+// 预处理自己炸了的那几份**退回原文**再读，数目单独印一行。
+//
+// 两件事要说清：
+//   * `过` 那一栏印成 `预处理后/原样` —— **那门语言自己（`omni run x.cpp`）还不做预处理**，
+//     两个数摆在一起才不会走散。
+//   * 跳过的每一份头都往 stderr 记一条警告（cpp 那趟 7626 行）。那是账不是噪音；
+//     只想看表就 `2>/dev/null`。
+//
 //   node bench/grammars.js
 //   node bench/grammars.js lua awk        # 只量这几门
 //   node bench/grammars.js --fail         # 把解析失败的头几条印出来
@@ -57,6 +76,9 @@ import { loadGrammarTable } from '../src/core/glr/load.js';
 import { lexText } from '../src/core/glr/lex.js';
 import { glrParse } from '../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../src/core/source/diag.js';
+/* 语料那一侧的预处理（`bench.json` 的 `preprocess` 那一格）。直接拿这门语言的函数 ——
+   这一趟不启插件注册表，`cap('c.preprocess')` 在这儿没人往里放过东西。 */
+import { cppText } from '../src/core/lang/c.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const EXT_ROOT = join(here, '..', 'ext');
@@ -104,6 +126,26 @@ function resolveCorpus(extDir, src) {
 const ms = (n) => `${n < 10 ? n.toFixed(1) : Math.round(n)}ms`;
 const kb = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.round(n / 1024)}KB`);
 
+/**
+ * 一格 `bench.json` 里的 `preprocess` -> 一个 `(路径) -> 文本` 的函数（没这一格答 null）。
+ *
+ * 语料这一侧为什么要它：读**别人的源码**时"宏没展开"是墙里最厚的一层 ——
+ * `TEST(A, B) { … }` 这种宏在**声明位置**展开出一整个函数定义，不展开只能读成"一个调用
+ * 当声明"。而一份文件该配哪几个 `-I` 只有那棵树的构建系统知道，所以配 `skipMissingIncludes`
+ * （找不到的头当空文件，就是 `omni c cpp --skip-missing-includes` 那一格）。
+ *
+ * **这一栏与那门语言自己的默认不是一件事**：`omni run x.cpp` 现在**不**做预处理。
+ * 两个数都要说得出来，所以 `过` 那一栏印的是 `预处理后/原样`（见 `row.okRaw`）。
+ */
+function preOf(cfg, treeDirs) {
+  const p = cfg.preprocess;
+  if (p === undefined) return null;
+  if (p.cap !== 'c.preprocess') throw new Error(`bench.json: 不认识的 preprocess.cap ${p.cap}`);
+  return (f) => cppText(f, [dirname(f), ...treeDirs, ...(p.includeDirs ?? [])], p.defines ?? [],
+    0, 1, undefined, [], undefined, 0, undefined, p.skipMissingIncludes === true);
+}
+
+
 const rows = [];
 const notes = [];
 
@@ -119,11 +161,16 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
   // ---- 语料。少一棵树就说清少了哪一棵（这一门照旧量表，只是语料那几栏空着）
   const all = [];
   const missing = [];
+  const treeDirs = [];
   for (const src of cfg.corpus ?? []) {
     const got = resolveCorpus(extDir, src);
     if (got === null) { missing.push(src.tree); continue; }
     for (const f of got) all.push(f);
+    /* 预处理那一格要的 `-I 树根`：语料在哪棵树里，那棵树的根就是它自己的 include 起点。 */
+    const tree = src.dir !== undefined ? join(extDir, src.dir) : refDirIf(src.tree, src.env ?? null);
+    if (tree !== null && !treeDirs.includes(tree)) treeDirs.push(tree);
   }
+  const pre = preOf(cfg, treeDirs);
   if (missing.length > 0) notes.push(`${name}: 少了参考树 ${missing.join(' / ')}（${REF_ROOT} 下没有）`);
 
   /* 故意写错的用例挑出来（见文件头 `invalid` 那一段）：它们**不进覆盖率**，
@@ -180,6 +227,10 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
     hit: warm.hit && !cold.hit,
     files: files.length,
     ok: 0,
+    /** 不预处理时过几份（没配 `preprocess` 的语言与 `ok` 相同）—— 两个数都得说得出来 */
+    okRaw: 0,
+    /** 预处理自己炸了几份（那些**退回原文**再读，不许悄悄少算一份语料） */
+    ppFail: 0,
     bad: bad.length,
     badOk: 0,
     bytes: 0,
@@ -194,11 +245,22 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
     row.note = '没有词法段（真 bison 的词法在 .l 里）';
   } else {
     for (const f of files) {
-      let text = null;
+      let raw = null;
       try {
-        text = readFileSync(f, 'utf8');
+        raw = readFileSync(f, 'utf8');
       } catch {
         continue;
+      }
+      /* 配了 `preprocess` 的语言：读的是预处理后的文本。预处理自己炸了就**退回原文**
+         （那一份照旧算一份语料，只是多记一笔 `ppFail`）。 */
+      let text = raw;
+      if (pre !== null) {
+        try {
+          text = pre(f);
+        } catch {
+          row.ppFail++;
+          text = raw;
+        }
       }
       const diags = new Diagnostics();
       const t0 = performance.now();
@@ -222,6 +284,29 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
       }
       row.ok++;
       row.nodes += countNodes(tree);
+    }
+    /* 「不预处理时过几份」那一栏。配了 `preprocess` 的语言才多读一遍原文 ——
+       这一遍**不进吞吐**（同一批语料读两次，字节数就不是这一趟干的活了）。 */
+    if (pre === null) {
+      row.okRaw = row.ok;
+    } else {
+      for (const f of files) {
+        let raw = null;
+        try {
+          raw = readFileSync(f, 'utf8');
+        } catch {
+          continue;
+        }
+        const d2 = new Diagnostics();
+        let t2 = null;
+        try {
+          const tk = lexText(g.lex, new SourceFile(f, raw), d2);
+          if (tk !== null && !d2.hasErrors()) t2 = glrParse(tb, tk, d2);
+        } catch (err) {
+          d2.error(null, err.message);
+        }
+        if (t2 !== null && !d2.hasErrors()) row.okRaw++;
+      }
     }
     /* 坏例：过了的要数出来（那是语法收得太宽）。它们的字节/记号/时间也算进吞吐 ——
        那一趟活是真干了。 */
@@ -265,7 +350,9 @@ const body = rows.map((r) => [
   ms(r.coldMs),
   r.hit ? ms(r.warmMs) : `MISS ${ms(r.warmMs)}`,
   `${r.files}`,
-  r.note === undefined ? `${r.ok}` : '-',
+  /* `过`：配了预处理的语言印 `预处理后/原样` —— 两个数都要说得出来，不然"这门语言自己
+     不做预处理"那句话与这一栏就会走散。 */
+  r.note !== undefined ? '-' : (r.okRaw === r.ok ? `${r.ok}` : `${r.ok}/${r.okRaw}`),
   r.badOk > 0 ? `${r.bad}+${r.badOk}` : `${r.bad}`,
   r.note === undefined ? kb(r.bytes) : '-',
   r.note === undefined ? `${r.tokens}` : '-',
@@ -287,6 +374,8 @@ if (asMd) {
 
 for (const r of rows) {
   if (r.note !== undefined) process.stdout.write(`\n${r.name}: ${r.note}\n`);
+  /* 预处理自己炸了的那些**退回原文**读了 —— 数目要印出来，不然这一栏看起来像"全预处理过了"。 */
+  if (r.ppFail > 0) process.stdout.write(`\n${r.name}: 预处理炸了 ${r.ppFail} 份（那些退回原文再读）\n`);
 }
 for (const n of notes) process.stdout.write(`\nskip ${n}\n`);
 
