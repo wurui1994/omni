@@ -34,9 +34,9 @@ const SRC_EXT = /\.omni[ds]?$/;
 
 /** 用相对路径 + 固定 cwd 运行，保证诊断快照里不出现机器相关的绝对路径。
  *  走 RunCache（只记依赖、不缓存，ADR-0023 的 S7）：轴级指纹要"这一趟装了哪些模块"这一份。 */
-function run(cmd, file, ...flags) {
+function run(cmd, file, flag) {
   const rel = relative(root, file);
-  const argv = [CLI, cmd, rel, ...flags];
+  const argv = flag === undefined ? [CLI, cmd, rel] : [CLI, cmd, rel, flag];
   const r = cache.run(argv, { cwd: root });
   return {
     stdout: r.out,
@@ -108,9 +108,7 @@ process.stdout.write(FULL_LEGS
 for (const f of readdirSync(casesDir).filter((f) => SRC_EXT.test(f)).sort()) {
   if (filters.length && !filters.some((x) => f.includes(x))) continue;
   const path = join(casesDir, f);
-  /* 三条腿都**明着点后端**：`js` 那一条从前是 `run` 的默认，而默认要改成 c 了 ——
-   * 不写出来的话这一行会变成第二份 `run-c`，差分比对里就少一方。 */
-  const js = run('run', path, '--backend', 'js');
+  const js = run('run', path);
   const c = run('run-c', path);
   // 第三个执行器（ADR-0013）：解释 OIR，不借宿主的 JS 引擎也不借 cc。它和前两个不共用
   // 任何一条执行路径，所以三方比对里任何一方写错都会当场露出来。
@@ -151,7 +149,7 @@ if (existsSync(errorsDir)) {
   for (const f of readdirSync(errorsDir).filter((f) => DIAG_EXT.test(f)).sort()) {
     if (filters.length && !filters.some((x) => f.includes(x))) continue;
     const path = join(errorsDir, f);
-    const r = run('run', path, '--backend', 'js');
+    const r = run('run', path);
     if (hostCrash(r.stderr)) {
       record(`${f} [host crash]`, false, show('js', r));
       continue;

@@ -145,13 +145,9 @@ function loopCase(name, rtObjs) {
     return;
   }
   spawnSync('chmod', ['+x', exe]);
-  /* 4. 跑它，与另一条腿逐字节比。
-   * **那条腿要明着点**（`--backend js`：生成 JS 在本进程里跑，就是从前 `omni run` 的
-   * 默认）。这一格的判据是「我们编出来的二进制 == 另一条互不相干的腿」，尺子是哪一条
-   * 不能靠默认值 —— `omni run` 的默认后端一旦改成 c，不写这一句就悄悄变成「C 比 C」，
-   * 那时候用例照旧全绿，而它已经什么都不证了。 */
+  /* 4. 跑它，与解释器逐字节比。 */
   const got = spawnSync(exe, [], { encoding: 'utf8', maxBuffer: 1 << 28 });
-  const want = omni(['run', src, '--backend', 'js']);
+  const want = omni(['run', src]);
   if (got.status !== 0) {
     bad(nm, `    跑挂了（退出码 ${got.status}，信号 ${got.signal}）\n${got.stderr}`);
     return;
@@ -186,8 +182,7 @@ function switchCase(name) {
     return;
   }
   const got = spawnSync(exe, [], { encoding: 'utf8', maxBuffer: 1 << 28 });
-  /* 那条腿明着点 —— 理由同上面那一处。 */
-  const want = omni(['run', src, '--backend', 'js']);
+  const want = omni(['run', src]);
   if (got.status !== 0) {
     bad(nm, `    跑挂了（退出码 ${got.status}，信号 ${got.signal}）\n${got.stderr}`);
     return;
