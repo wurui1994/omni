@@ -229,12 +229,12 @@ export const NODES = new Map([
   N('list-new', 'expr', [{ name: 'items', sem: SEM.value, rest: true }], {
     effects: ['allocates'], lifetime: 'owns',
     doc: 'lua `{1,2}` / go `[]int{…}` / V `[…]` / nim `@[…]` —— 九门有列表字面量',
-    // 规格里九门有列表字面量（awk 只有关联数组）。矩阵里接了八门。
+    // 规格里九门有列表字面量（awk 只有关联数组）。**九门全接上了** ——
+    // freebasic 那一条是最后补的：它的字面量绑在声明上（`Dim a(2) As Integer = {…}`），
+    // 而且 `a(0)` 与函数调用同形（映射登记数组名分开，见 ext/freebasic/tograph.js）。
     providers: {
       spec: ['lua', 'go', 'vlang', 'nim', 'chez', 'sbcl', 'mojo', 'cpp', 'freebasic'],
-      why: {
-        freebasic: '`Dim a(2) As Integer = {1,2,3}` 的字面量绑在**声明**上 —— 要先接"定长数组的声明"那一格，它不是一格独立的表达式',
-      },
+      why: {},
     },
   }),
   N('index-get', 'expr', [

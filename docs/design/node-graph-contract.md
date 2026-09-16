@@ -395,10 +395,10 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
 - 矩阵里因此第一次有了 **skip** 这一档：**每一格都带理由**
   （"打印一格多值要运行期长度 + 拼串" / "嵌套的函数（闭包）还没接" / "墙在 OIR 不在 wasm"）。
   跳过不是失败 —— 那正是 §6 第 2 条要的样子：待办是算出来的，不是文档里许的愿。
-  现在的总账：**330 passed / 0 failed / 1 skipped**（语言例子 73 + 手搭图 5 × 后端 4，
+  现在的总账：**334 passed / 0 failed / 1 skipped**（语言例子 74 + 手搭图 5 × 后端 4，
   再加 wat 那 5 条形状账各一份证物、五栏指纹那两组撞车、一格"出处齐不齐"、
   G1 与 G2 那八格、三格节点的"规格 vs 矩阵"提供者账），
-  每条腿末尾还印一行覆盖：`interp 78/78 · sx 78/78 · js 78/78 · wat 77/78`。
+  每条腿末尾还印一行覆盖：`interp 79/79 · sx 79/79 · js 79/79 · wat 78/79`。
   这三个数会随每一批节点变 —— 它们是**跑出来的**，不是写下来的，所以文档里这一行
   过期就是错，改代码的那一趟必须顺手改它。
 - **"还在跳的几乎全是字符串"那句话是错的 —— 数一遍就知道**。当时 21 格跳过里字符串只占 4 格
@@ -494,25 +494,25 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
    那说明删这一格会让**别处**崩，级联算漏了。
 3. **级联半径是数出来的**，不是手写的文档。
 
-现状：**41 样 × 78 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
+现状：**41 样 × 79 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
 数出来的半径（删了它，几份例子要它）：
 
 ```
 骨架那一层
-  prim 78/78 · const / ref / bind 各 73 · call / func 各 54 · branch / region 各 39
-  set 35 · loop 34 · ret 27
-  list-new / index-get 各 12 · record-new / field-get 各 8 · scope-exit / index-set / loop-exit 各 8
-  field-set 7 · conv 6
+  prim 79/79 · const / ref / bind 各 74 · call / func 各 54 · region 40 · branch 39
+  set 36 · loop 35 · ret 27
+  list-new / index-get 各 13 · index-set 9 · record-new / field-get 各 8
+  scope-exit / loop-exit 各 8 · field-set 7 · conv 6
   values / map-new / map-get / map-set / map-has 各 5 · pick / slice 各 4
 附属那一层
-  prim.name 78 · const.value / ref.name / bind.name 各 73 · func.params / func.name 各 54
-  set.name 35 · record-new.names / field-get.field 各 8 · loop-exit.kind 8 · field-set.field 7
+  prim.name 79 · const.value / ref.name / bind.name 各 74 · func.params / func.name 各 54
+  set.name 36 · record-new.names / field-get.field 各 8 · loop-exit.kind 8 · field-set.field 7
   conv.to 6 · bind.keepMulti / pick.index 各 4
 ```
 
 这张表就是 target.md 要的"特性 DAG 排序"的可量版本，而且它比 DAG 说得更准：
 **上面那 11 格是骨架**（半径 ≥ 27，删了就没程序可跑），**下面那 16 格想删就能删** ——
-删掉 `map` 那四格，另外 73 份例子一行不改照旧全绿；删掉 `record-new` 那三格是 70 份。
+删掉 `map` 那四格，另外 74 份例子一行不改照旧全绿；删掉 `record-new` 那三格是 71 份。
 这才是"原子化"真正的样子：不是"分层分得细"，是**删了不牵连**。
 
 顺带看一眼这张表的变化：加了 map 那四格（第九批）之后，**骨架那一层的半径没有一格变**
@@ -1100,6 +1100,19 @@ wat 那侧只加了两句：一格数放进一格 1 槽的存储，交给 `$__st
 
 还欠一格，明说：图那一层**没有复数、也没有 64 位整数**这两格值，所以 `1i` / `1LL`
 读得进来、映射当场报一句有名有姓的话（不许悄悄变成 `NaN`）。要接就是加值那一层的事。
+
+**第二十三批之二：freebasic 的数组进矩阵，`list-new` 那格账清零（9/9）** —— 总账 330 →
+**334**，例子 78 → 79 份。FB 欠的那一条是"**字面量绑在声明上**"
+（`Dim xs(2) As Integer = {10, 20, 30}`），外加一处它独有的难处：**`xs(0)` 与函数调用同形**。
+
+两处都不是节点的事：
+- 数组名从 `dim` 那一格看见 `(bounds …)` 时登记（与 CL / Scheme 的记录同一条纪律：
+  **名字从声明来**），于是 `xs(0)` 落 `index-get`、`xs(1) = 5` 落 `index-set`；
+- 没给初值的 `Dim xs(2)` 按 FB 的语义落成**零填满**的 `list-new`（0…2 三格）。
+
+下标起点也顺手记一句：FB 是 0 起，与图上一致 —— 这一族里要减一格的只有 lua。
+于是 `list-new` 那格提供者账从 9/8 变成 **9/9（清零）**，三格账现在是
+`scope-exit` 8/4 · `record-new` 9/7 · `list-new` **9/9**。
 
 **第二十三批：CL 的 `defstruct` 与 Scheme 的 `define-record-type` 进矩阵（一格新节点都没加）**
 —— 总账 322 → **330 passed / 0 failed / 1 skipped**，例子 76 → 78 份。这一批直接付了上一批

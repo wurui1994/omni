@@ -15,8 +15,21 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, unquote, head,
-  counted, ops, convs, convOf, binOf, retOf, branchOf,
+  counted, ops, convs, convOf, binOf, retOf, branchOf, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
+
+/**
+ * **FB 的数组：`xs(0)` 与函数调用同形**，所以得记住哪些名字是数组。
+ *
+ * `Dim xs(2) As Integer = {10, 20, 30}` 与 `f(0)` 在树上都是 `(call (n …) (args …))` ——
+ * 分不开的话要么把取下标当调用（`unbound name: xs`），要么把调用当取下标（更糟）。
+ * FB 自己是靠声明分的，映射也照这么办：`dim` 那一格看见 `(bounds …)` 就把名字记下来。
+ *
+ * 这与 CL / Scheme 的记录是**同一条纪律**：名字从声明来，落到的仍是现成那三格
+ * （`list-new` / `index-get` / `index-set`），一格新节点都不加。
+ * 下标起点：`Dim xs(2)` 是 0…2（0 起），与图上一致，所以不用像 lua 那样减一格。
+ */
+const ARRAYS = new Set();
 
 
 const OPS = ops({ mod: '%', '=': '=', '<>': '!=', '&': 'concat' });
@@ -57,6 +70,14 @@ function toNode(x) {
       const inner = kids(x)[0];
       if (tag(inner) === 'bin' && leaf(kids(inner)[0]) === '=') {
         const [, lhs, rhs] = kids(inner);
+        // `xs(1) = 5`：左边是**取下标**（数组名登记过）—— 落 index-set，与 go 的 `xs[1] = 5` 同一格
+        if (tag(lhs) === 'call') {
+          const [fn, args] = kids(lhs);
+          const nm = tag(fn) === 'n' ? String(nameOf(fn)).toLowerCase() : null;
+          if (nm !== null && ARRAYS.has(nm)) {
+            return indexSet(node('ref', {}, { name: nameOf(fn) }), toNode(kids(args)[0]), toNode(rhs));
+          }
+        }
         return node('set', { value: toNode(rhs) }, { name: nameOf(lhs) });
       }
       return toNode(inner);
@@ -75,9 +96,27 @@ function toNode(x) {
       const vs = kids(x).filter((y) => tag(y) === 'v');
       return vs.map((v) => {
         const init = part(v, 'init');
+        const nm = kids(v)[0];
+        const name = nameOf(nm);
+        // `(n xs (bounds …))` = 数组声明：登记名字（`xs(0)` 才分得清是取下标还是调用）
+        const bounds = isList(nm) ? kids(nm).find((y) => tag(y) === 'bounds') : undefined;
+        if (bounds !== undefined) {
+          ARRAYS.add(String(name).toLowerCase());   // FB 的名字不分大小写，登记按小写
+          const items = init === undefined ? null : kids(init)[0];
+          if (items !== undefined && items !== null && tag(items) === 'braces') {
+            // `= {10, 20, 30}`：字面量绑在声明上（这就是 list-new 那格账上 FB 欠的那一条）
+            return node('bind', { init: listNew(many(kids(items))) }, { name });
+          }
+          // 没给初值：FB 的数值数组是**零填满**的，`(bounds n)` 的上界含在内（0…n）
+          const hi = Number(leaf(kids(kids(bounds)[0])[0]));
+          const size = Number.isFinite(hi) ? hi + 1 : 0;
+          return node('bind', {
+            init: listNew(Array.from({ length: size }, () => lit(0))),
+          }, { name });
+        }
         return node('bind', {
           init: init === undefined ? lit(null) : toNode(kids(init)[0]),
-        }, { name: nameOf(kids(v)[0]) });
+        }, { name });
       });
     }
     case 'routine': {
@@ -136,6 +175,10 @@ function toNode(x) {
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
         return convOf(CONV.get(callee), argNodes[0]);
       }
+      // 数组名登记过 -> 这是**取下标**，不是调用（FB 两者同形，见文件头 ARRAYS 那段）
+      if (callee !== null && ARRAYS.has(callee) && argNodes.length === 1) {
+        return indexGet(node('ref', {}, { name: nameOf(fn) }), argNodes[0]);
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     // 命令式调用（`f a, b`）：这一批只在"名字 + 实参"这一种形状上接
@@ -152,6 +195,7 @@ function toNode(x) {
 /** 一棵 freebasic 的 GLR 树（`(module 项…)`）-> 一张图。 */
 export function fbToGraph(tree) {
   if (tag(tree) !== 'module') throw new Error('fb->graph: 这不是 (module …)');
+  ARRAYS.clear();          // 数组名那张表是**一份源码一张**（见上面那段注释）
   return program(kids(tree).map(toNode).flat());
 }
 
