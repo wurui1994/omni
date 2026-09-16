@@ -1372,7 +1372,12 @@ class FnGen {
       return this.def(i, d, w);
     }
     const d = this.dest(i, x);
-    /* 位重解释：栈位里躺的就是位模式，一条 mov。 */
+    /* 位重解释：栈位里躺的就是位模式，一条 mov。
+     *
+     * 这一条与下面的 `SEXT` 都是**空操作**，理应连 mov 都不必发 —— 记一笔「这个值就是
+     * 那个值」、往后谁读它就去读源头即可。试过（`alias` 那一版，三十行）：整份 `.text`
+     * 35331080 -> 35343832，**反而大了 12752 字节**。生成的 C 全是 i64 的 `omni_dyn`，
+     * 这两种转换几乎不出现，省下的还不够抵那三十行自己编出来的代码。所以不留。 */
     if (mode === CVT_BITCAST) {
       buf.emit(movReg(1, d, x));
       return this.def(i, d);
