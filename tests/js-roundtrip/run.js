@@ -66,10 +66,19 @@ function regen(path, text) {
 process.stdout.write('idempotence (gen∘parse 的第二轮必须不动)\n');
 // 闸门覆盖**仓库里所有自己写的 js**，不只是编译器：测试脚本和 bench 也是我们写的 JS，
 // 它们用到的语法同样必须被前端支持，否则"支持的子集"就是靠"没去解析"撑起来的。
-const TREES = ['src/core', 'tests', 'bench'];
+//
+// **`ext` 从前漏在外面 —— 量出来的**：`graph/langs.js` 静态导入十一份 `ext/*/tograph.js`，
+// 所以它们**就是编译器的源码**。漏掉的后果有两条，都不轻：① 这一轴对那十一份的语法
+// 一无所知；② 第 2 步重建出来的树缺 `ext/`，生成出来的编译器**根本起不来**
+// （`ERR_MODULE_NOT_FOUND … .omni-build/js-roundtrip/ext/chez/tograph.js`）——
+// 于是那两条"重新生成的编译器答案不同"（`tests/run.js` 与 `tests/oracle/run.js`）
+// 报的其实是"它没跑起来"。与文件头 `runtime-gl` 那一段是**同一类错，第二次犯**。
+const TREES = ['src/core', 'ext', 'tests', 'bench'];
 const files = TREES.flatMap((t) => walk(join(root, t)).filter((f) => f.endsWith('.js')).map((f) => join(t, f)));
 /** @type {Map<string, string>} src/core 下的相对路径 -> 第一轮生成的文本，第 2 步直接复用 */
 const generated = new Map();
+/** @type {Map<string, string>} 同上，`ext/` 那一侧（重建时写到 `OUT/ext/…`） */
+const generatedExt = new Map();
 
 for (const f of files) {
   const abs = join(root, f);
@@ -95,6 +104,7 @@ for (const f of files) {
     record(`${f} [反例：解析过得去，按往返查]`, true);
   }
   if (f.startsWith('src/core/')) generated.set(relative('src/core', f), g1);
+  if (f.startsWith('ext/')) generatedExt.set(relative('ext', f), g1);
   let g2;
   try {
     g2 = regen(`${f} (generated)`, g1);
@@ -153,6 +163,22 @@ function buildTree() {
       writeFileSync(dest, readFileSync(join(from, rel)));
     }
   }
+  /* `ext/` 那十一份也要写进来：`graph/langs.js` 静态导入它们，缺了生成出来的编译器
+     起不来（见第 1 步 `TREES` 那段账）。相对布局与仓库一致（`OUT/ext` 与 `OUT/src`
+     同级），所以那些 `../../src/core/…` 的导入照旧连得上。 */
+  for (const [rel, text] of generatedExt) {
+    const dest = join(OUT, 'ext', rel);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, text);
+  }
+  /* `ext/` 下的非 js（`*.grammar` / 例子 / `bench.json`）原样拷 —— 语法文件是那门语言的
+     前端的一部分，`omni run x.lua` 要读它。 */
+  for (const rel of walk(join(root, 'ext'))) {
+    if (rel.endsWith('.js')) continue;
+    const dest = join(OUT, 'ext', rel);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, readFileSync(join(root, 'ext', rel)));
+  }
   return join(OUT, 'src', 'core', 'cli.js');
 }
 
@@ -164,6 +190,14 @@ function runSuite(script, cli) {
   return { out: `${r.stdout}${r.stderr}`, status: r.status };
 }
 
+/**
+ * 比之前把**耗时**抹掉。这一格是量出来才加的：两边的用例全过、每一行都一样，
+ * 只有末尾那句摘要里的秒数差 0.3s（`真跑 14.8s` vs `真跑 14.5s`）——
+ * 那不是"生成出来的编译器答案不同"，那是**这台机器跑得快慢**。
+ * 判据要盯的是输出，不是钟。
+ */
+const noTimes = (s) => s.replace(/\d+(\.\d+)?\s*(ms|s)\b/g, '<time>');
+
 if (quick) {
   process.stdout.write('\n(--quick：跳过"用生成的编译器跑全套"这一步)\n');
 } else {
@@ -174,14 +208,14 @@ if (quick) {
   for (const script of ['tests/run.js', 'tests/oracle/run.js']) {
     const base = runSuite(join(root, script), null);
     const gen = runSuite(join(root, script), cli);
-    const same = base.out === gen.out && base.status === gen.status;
+    const same = noTimes(base.out) === noTimes(gen.out) && base.status === gen.status;
     if (same) {
       const summary = base.out.trim().split('\n').pop();
       record(`${script} [original == regenerated]`, true);
       process.stdout.write(`       ${summary}\n`);
     } else {
-      const a = base.out.split('\n');
-      const b = gen.out.split('\n');
+      const a = noTimes(base.out).split('\n');
+      const b = noTimes(gen.out).split('\n');
       const i = a.findIndex((l, k) => l !== b[k]);
       record(`${script} [original == regenerated]`, false, [
         `    exit ${base.status} vs ${gen.status}, first difference at line ${i + 1}:`,

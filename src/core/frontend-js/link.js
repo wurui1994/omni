@@ -26,8 +26,11 @@
 //         在每一门里都是最自然的名字。量出来的实测样本：**写 cpp 的 map 那一格时
 //         （`ext/cpp/tograph.js` 多一张 `MAPS`）这个数当场从 98 顶到 99** —— 一次普通的
 //         功能改动就撞一格，那不是"每加一门语言撞一次"，是**每次动 ext 都可能撞**。
-//     于是这一层学会了改名，`lower/cli.js` 那一族诊断 **99 -> 0**（剩下的 4 条是别的账：
-//     两处 `cannot assign to 'process.stdout.write'`、一处 `import.meta`、一处封闭 ABI）。
+//     于是这一层学会了改名，`lower/cli.js` 那一族诊断 **99 -> 0**，而那一格**整个绿了**
+//     （剩下的 4 条随后也付了，付法是"把事情放回该管它的那一层"：输出的去处归
+//     `interp/builtin.js` 的 `setOutSink`、"我在哪儿"归宿主的 `installDir()`）。
+//     顺带回来的是**自举不动点**：`tests/bootstrap/run.js -q` 现在 C1 == C2 逐字节相同
+//     （18,887,479 字节 / 481,225 行）—— 这一批之前那条轴连 C1 都出不来。
 //     判据是 `tests/js-exec/cases/56-module-collide.js`（三份文件都有模块级 `op`/`TAG`/`useOp`，
 //     还带着形参 / 局部 / catch / for-of / 键 / 成员名 / 简写七处陷阱）——
 //     `node == omni-js == omni-c` 逐行相同；把 `planRenames` 掐掉，这一份当场红。
