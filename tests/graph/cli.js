@@ -16,6 +16,8 @@ import { writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 落出来那份 `.wat` 要交给真引擎跑一遍 —— 这一份把文本装成二进制（V8 才认）
+import { watToWasm } from '../../src/core/wasm/assemble.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = join(ROOT, 'src/core/cli.js');
@@ -150,6 +152,42 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
     if (okHead && okImp) { pass++; process.stdout.write('  ok   落出来的 .wat 是一份模块（带宿主面那几格导入）\n'); } else {
       fail++;
       process.stdout.write(`  FAIL 落出来的 .wat 不像模块：${JSON.stringify(text.slice(0, 60))}\n`);
+    }
+    /**
+     * **落出来的那份东西，真引擎认不认**（命令行这一侧的那条判据）。
+     * `tests/graph/wasm.js` 已经在图那一层验过 76 份，这儿验的是**用户手里那个文件**：
+     * `omni build` 写出去的 `.wat` 装成二进制、V8 跑一遍，输出还是那四行。
+     * 用同步的 `new WebAssembly.Module/Instance`（这条轴是同步的）。
+     */
+    try {
+      const out = [];
+      const mem = { m: null };
+      const str = (addr) => {
+        const view = new DataView(mem.m.buffer);
+        const len = Number(view.getBigUint64(addr, true));
+        let s = '';
+        for (let k = 0; k < len; k++) s += String.fromCharCode(view.getUint8(addr + 8 + k));
+        return s;
+      };
+      const inst = new WebAssembly.Instance(new WebAssembly.Module(watToWasm(text)), {
+        omni: {
+          print_i64: (x) => out.push(String(x)),
+          print_f64: (x) => out.push(String(x)),
+          print_str: (a) => out.push(str(a)),
+        },
+      });
+      mem.m = inst.exports.mem ?? null;
+      inst.exports.main();
+      if (out.join(' / ') === BASICS.join(' / ')) {
+        pass++;
+        process.stdout.write(`  ok   落出来的 .wat 交给 V8 那台 wasm 引擎跑，还是 ${BASICS.join(' / ')}\n`);
+      } else {
+        fail++;
+        process.stdout.write(`  FAIL 落出来的 .wat 在 V8 里跑出别的：${out.join(' / ')}\n`);
+      }
+    } catch (err) {
+      fail++;
+      process.stdout.write(`  FAIL 落出来的 .wat 真引擎不认：${err.message}\n`);
     }
   }
   const sx = join(tmpdir(), 'omni-graph-basics.sx');

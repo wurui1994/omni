@@ -1380,7 +1380,13 @@ function emitOnce(graph, retOf, multiOf) {
     if (f.ret) lines.push('    (i64.const 0)');
     lines.push('  )');
   }
-  lines.push('  (export "main" (func $__entry))', ')');
+  lines.push('  (export "main" (func $__entry))');
+  // **内存也得导出去** —— 宿主面那格 `print_str` 的实参是一个**地址**，宿主要读那块内存
+  // 才印得出字来。不导出的话任何**外面的**宿主都读不到（这棵树里的 MIR 解释器读得到，
+  // 因为它与那块内存在同一个进程里 —— 所以这个漏洞只有把 `.wat` 交给真引擎才暴露，
+  // 见 `tests/graph/wasm.js`：那条轴第一次跑就卡在这儿）。
+  if (needMem) lines.push('  (export "mem" (memory 0))');
+  lines.push(')');
   return {
     text: lines.join('\n'),
     // 两张表按**图上的名字**排（不是 wasm 那边的名字）—— 提升上来的嵌套函数因此也查得到

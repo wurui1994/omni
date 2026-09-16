@@ -1118,7 +1118,15 @@ class LowerWat {
         const nm = f.items[1];
         const desc = f.items[2];
         if (!isStr(nm)) { this.err(f.span, '(export ...) needs a string name'); continue; }
-        if (head(desc) !== 'func') { this.err(f.span, 'only function exports are supported yet'); continue; }
+        if (head(desc) === 'memory') {
+          // 导出内存对**这条路**是空操作：MIR 解释器与那块内存在同一个进程里，
+          // 本来就读得到。它是给**外面的**宿主用的（`print_str` 的实参是地址，
+          // 真引擎里的宿主不导出就读不到那块内存 —— 见 backend-wat.js 那一行的注释）。
+          // 所以这儿收下、不做事，而不是报"只认函数导出"。
+          if (this.mem === null) this.err(f.span, '(export ... (memory ...)) but this module has no (memory ...) section');
+          continue;
+        }
+        if (head(desc) !== 'func') { this.err(f.span, 'only function and memory exports are supported yet'); continue; }
         const d = this.resolveFunc(desc.items[1]);
         if (d !== null) d.exportName = nm.value;
         continue;
