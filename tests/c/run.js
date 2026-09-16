@@ -43,6 +43,29 @@
 // （量到的原话：`include file 'stdbool.h' not found`）—— 这条轴的用例都带 `-B <TCC_DIR>`，
 // 但 `OMNI_CC=<那份 tcc>` 那种用法给不了 `-B`，所以还是 configure 时定死更省事。
 //
+// **还有一份交叉的**（`.omni-cache/tcc-cross`）：`macho-exe` / `macho-dylib` / `macho-libc`
+// / `macho-debug` / `macho-dll` / `macho-tcc` / `elf-roundtrip` / `elf-merge` / `char-sign`
+// 那几条尺子靠它 —— 它们把**我们写的目标文件/可执行文件与 tcc 写的逐字节比**。建法：
+//
+//   cd .omni-cache/tcc-build && make cross          # 出 x86_64-osx-tcc、arm64-win32-tcc……
+//   mkdir -p ../tcc-cross && cd ../tcc-cross
+//   ln -sf ../tcc-build/*-tcc ../tcc-build/*libtcc1.a .
+//   ln -sf ../tcc-build/config.mak ../tcc-build/config.h ../tcc-build/tccdefs_.h .
+//   ln -sfn $TINYCC_SRC/include include
+//
+// 四样都要，缺一样就整组跳过而不是失败（这是对的，但也就查不出回归）：
+//   - `config.mak` —— 尺子从里头读 `TOPSRC=` 找源码树
+//   - `config.h` —— `macho-tcc` 用它判「建好了没有」
+//   - `tccdefs_.h` —— **生成的**头（`c2str.exe` 出的）。少了它 `macho-tcc` 那四格是
+//     「编不出 tccpp.o」而后印 0 条相同 -> 报「与 tcc 自己链的不一样」，看着像我们错了
+//   - `include/` —— tcc 自带的那几份头
+//
+// 建齐之后量到的（这是**我们的写字节那一段**最硬的判据）：
+//   macho-exe 26 条、macho-dylib 111 条、macho-libc 180 条、macho-debug 40 条、
+//   macho-dll 27 条、elf-roundtrip 268 条、elf-merge 451 条 —— 全部逐字节相同；
+//   macho-tcc 4 条相同：**我们编 tcc 的源码、我们链出来的 tcc 与 tcc 自己链的一模一样**，
+//   而且那个二进制能编能跑。
+//
 //   node tests/c/run.js
 //   node tests/c/run.js macro
 
