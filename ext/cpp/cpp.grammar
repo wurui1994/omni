@@ -252,7 +252,26 @@
     (-> (ID targs) (tid (n $1) (targs $*2)))
     (-> ("~" ID) (dtor $2))
     (-> ("operator" opname) (opname $2))
-    (-> ("operator" type-id) (convop $2)))
+    ;; 转换函数的名字（[class.conv.fct]）：目标类型是 `conversion-type-id`，
+    ;; **不是** `type-id` —— 那一条的语法是
+    ;;
+    ;;   conversion-type-id:    type-specifier-seq conversion-declarator_opt
+    ;;   conversion-declarator: ptr-operator conversion-declarator_opt
+    ;;
+    ;; 也就是说里头**只能有 ptr-operator**（`*` `&` `&&` `Foo::*` 与 cv），
+    ;; 参数表与数组界都进不去。所以 `operator bool() const;` 里那个 `()` 只可能是
+    ;; **函数自己的参数表**，一解。收成 `type-id` 的话它还能读成「转换到函数类型
+    ;; `bool()`」—— 量出来的症状正是这个：`the input is ambiguous — one parse says
+    ;; (fn …), the other (convop …)`。
+    (-> ("operator" conv-type-id) (convop $2)))
+
+  (rule conv-type-id
+    (-> (specs) (type (specs $*1)))
+    (-> (specs ptr-ops) (type (specs $*1) (ptr $*2))))
+
+  (rule ptr-ops
+    (-> (ptr-op) ($1))
+    (-> (ptr-ops ptr-op) ($*1 $2)))
 
   ;; 模板实参表。`<` `>` 与比较撞车 —— 那一处交给 GLR 分叉（见文件头第三段）。
   (rule targs
@@ -932,7 +951,8 @@
 
 ;; ---- 语料上量出来的账（`node bench/grammars.js cpp`）------------------------------
 ;;
-;; 语料 = asymptote 那棵树里的 .cc（351 份）。冲突 2161。
+;; 语料 = asymptote 那棵树里的 .cc（351 份）。冲突 **2091**（第一百三十九片：
+;; 转换函数那一格收窄之后从 2161 掉下来的 —— 见 `conv-type-id` 那一条的注释）。
 ;; 过数现在印成两个（`bench.json` 那格 `preprocess` 落地之后）：**82 / 30**
 ;;   —— 82 = 预处理后（找不到的头跳过 + gtest 五族宏的前言 + `corpus-prelude.h` 那份
 ;;   标准库名字与模板名的前向声明 + `targ` 那格 [temp.arg] 的判定 + `_Pragma`），30 = 原样读。
@@ -1097,3 +1117,26 @@
 ;; 那段合成前言弄坏了）。也就是说库名这件事在这条语料上**只占 1%** —— 剩下的 321 份
 ;; 卡在别的地方（那三堆 ID / "," / "&" 得再一类一类数）。
 ;; 所以那两笔账继续欠着，而 why 里现在写着的是**量出来的原因**，不是印象。
+;;
+;; ---- 第一百三十九片：把 269 份没过的**按错的形状归堆**（`--fail` 新加的那一段）----
+;;
+;;    159  unexpected …                                        ← 真的语法洞，最大的一族
+;;    106  too many concurrent parses (> N) — 语法在那儿太歧义  ← GLR 爆栈
+;;      4  the input is ambiguous — 两条 parse 都成功
+;;
+;; 更正一句从前的说法：那「106 份」不是「模板形参在嵌套 `>>` 链里的歧义」，
+;; 就是**并发 parse 顶到上限**这一族的份数；具体是哪个构造让它炸还没量到。
+;;
+;; 这一片手工探到的两格（拿小例子量的，不是印象）：
+;;
+;;   1. **`operator bool() const;` 报两个解** —— 修了：转换函数的目标类型收成
+;;      `conversion-type-id`（[class.conv.fct]，只准 ptr-operator，不准参数表），
+;;      冲突 **2161 -> 2091**。语料的过数没动（那些文件卡在更前面），
+;;      而这正是账该记的样子。
+;;   2. **`A() = default;` / `~A();` 进不来** —— 还欠着。`= default`/`= delete` 本来就在
+;;      `init-declarator` 里收着（见那一条），卡的是**没有 decl-specifier-seq 的成员声明**
+;;      （[dcl.dcl]：那一串是可选的，构造/析构/转换函数都没有它）。
+;;      试过在 `member` 上加一条 `(-> (init-declarator ";") …)`：`A() = default;` 过了，
+;;      可**普通的 `void f();` 变成两个解**（两边都印 `(d …)`）—— 那说明这一条与
+;;      `simple-decl` 在某处真的重叠，重叠在哪儿还没量出来。所以退回去了：
+;;      **一条会把常见写法弄成歧义的规则，比一格缺口更贵。**
