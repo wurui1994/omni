@@ -35,6 +35,7 @@ import { mergeObjects as mergeElfObjects } from './link/elf_merge.js';
 import { peLoad, PE_GUI } from './link/pe_load.js';
 import { peWrite } from './link/pe_link.js';
 import { elfExe } from './link/elf_exe.js';
+import { parseLdScript } from './link/ldscript.js';
 import { machoExe, isMachoBinary } from './link/macho_exe.js';
 import { lowerToMir } from './mir/from_oir.js';
 import { printMir } from './mir/print.js';
@@ -2343,47 +2344,26 @@ function asyRunSetup(path, rest) {
  * 已经有了）。少这一格的时候 `_printf`/`_clock` 全报「符号没有定义」——
  * 而那不是链接器的毛病，是**没人把 libc 递给它**。
  *
- * 别的目标先不猜：linux 上还要 `crt1.o`/`crti.o` 那一串，摆法没量过，
- * 猜错了不如让「符号没有定义」照实说。
+ * Linux 上是 glibc：`-lc` 落到 `/usr/lib/libc.so`（一份 ld 脚本），crt 那三个 `.o`
+ * 由 `cCrt()` 单独交（次序不一样，见那儿）。
  */
 function cDefaultLibs(os) {
   if (os === 'osx') return ['-lc', '-L', cap('c.usrLib')()];
-  /* **Linux（第一百四十七片）**：链一个动态可执行文件必须把 libc 那份**共享库本体**
-   * 交进来，否则 `dllNames` 是空的 —— 而 `elf_exe.js` 的 `bind_exe_dynsyms` 那一段
-   * （copy 重定位）以「库里找得着这个名字」为前提。空表的后果是数据符号只留下一条
-   * 光秃秃的 `.dynsym`，装载时报 `undefined symbol: stdout`（x86_64 Arch 容器里量到的）。
+  /* **Linux**：与 macOS 同一句话 —— `-lc`。`elf-link` 那一格现在自己会找库、会认
+   * ld 脚本（`ldscript.js`，照 tcc 的 `tcc_load_ldscript`），于是
+   * `/usr/lib/libc.so` 那份 `GROUP ( libc.so.6 libc_nonshared.a AS_NEEDED ( … ) )`
+   * 展开成什么由**这台机器上的脚本**说，不再由我们把三个库名写死在这儿猜
+   * （从前那三行路径清单就是 stdout / fmod / atexit 三笔账一条条堆出来的）。
    *
-   * 直接给 `libc.so.6` 的**真身**，不走 `-lc`：`/usr/lib/libc.so` 在 glibc 上是一份
-   * **ld 脚本**（`GROUP ( libc.so.6 libc_nonshared.a …)`），我们的链接器不解析它。
-   * tcc 也不解析 —— 它靠 `CONFIG_TCC_CRT_PREFIX` 那几条路径直接找 `.so.6`。 */
+   * libm 单列一格：glibc 2.34 起数学函数并进了 libc，但**符号表里那一份**在有些
+   * 发行版上仍旧只从 `libm.so.6` 露出来（量到的：Arch 的容器里链 `fmod` 报「找不到」，
+   * 而 libc.so.6 已经在表上了）。找得着就带上 —— 找不着的那种正是并进去了的。 */
   if (os !== 'linux') return [];
-  const out = [];
-  const pick = (names) => {
-    for (const p of names) {
-      if (exists(p)) { out.push('--dll', p); return; }
-    }
-  };
-  /** 静态库那一路：`--ar`，按需取用。 */
-  const pickAr = (names) => {
-    for (const p of names) {
-      if (exists(p)) { out.push('--ar', p); return; }
-    }
-  };
-  pick(['/usr/lib/libc.so.6', '/lib/x86_64-linux-gnu/libc.so.6',
-    '/usr/lib/x86_64-linux-gnu/libc.so.6', '/lib/aarch64-linux-gnu/libc.so.6',
-    '/usr/lib/aarch64-linux-gnu/libc.so.6', '/lib64/libc.so.6', '/lib/libc.so.6']);
-  /* libm 单列一格：glibc 2.34 起数学函数并进了 libc，但**符号表里那一份**在有些发行版上
-   * 仍旧只在 `libm.so.6` 里露出来（量到的：Arch 的容器里链 `fmod` 报「找不到」，
-   * 而 libc.so.6 已经在表上了）。存在就带上，不存在就算了 —— 不存在的那种正是并进去了的。 */
-  pick(['/usr/lib/libm.so.6', '/lib/x86_64-linux-gnu/libm.so.6',
-    '/usr/lib/x86_64-linux-gnu/libm.so.6', '/lib/aarch64-linux-gnu/libm.so.6',
-    '/usr/lib/aarch64-linux-gnu/libm.so.6', '/lib64/libm.so.6', '/lib/libm.so.6']);
-  /* `libc_nonshared.a`：glibc 把 `atexit` / `at_quick_exit` / `__stack_chk_fail_local`
-   * 这几个**只放在静态库里**（`.so.6` 的 `.dynsym` 里查不到 `atexit`，量过）。
-   * `/usr/lib/libc.so` 那份 ld 脚本里写的 `GROUP ( libc.so.6 libc_nonshared.a )`
-   * 说的就是这件事 —— 我们不解析脚本，于是把这一份自己交进去。 */
-  pickAr(['/usr/lib/libc_nonshared.a', '/usr/lib/x86_64-linux-gnu/libc_nonshared.a',
-    '/usr/lib/aarch64-linux-gnu/libc_nonshared.a', '/lib64/libc_nonshared.a']);
+  const out = ['-lc'];
+  for (const p of ['/usr/lib/libm.so', '/usr/lib/x86_64-linux-gnu/libm.so',
+    '/usr/lib/aarch64-linux-gnu/libm.so', '/usr/lib/libm.so.6', '/lib64/libm.so.6']) {
+    if (exists(p)) { out.push('-lm'); break; }
+  }
   return out;
 }
 
@@ -3500,6 +3480,64 @@ function main(argv) {
       for (let k = 0; k < rest.length - 1; k++) {
         if (rest[k] === '--dll') dlls.push({ bytes: bytesOf(rest[k + 1]), name: rest[k + 1] });
         else if (rest[k] === '--ar') archives.push(bytesOf(rest[k + 1]));
+      }
+      /* ---- `-l` 找库（照 `tcc_add_library`，`libtcc.c:1299`）。
+       *
+       * 拼法在 ELF 上只有两条：`lib%s.so`、`lib%s.a`（`--static` 时只剩后一条）；
+       * `:name` 是「就照这个名字找」。路径是 `-L` 给的那些在前，然后
+       * `CONFIG_TCC_LIBPATHS`（非 PE 上是 `<sysroot>/usr/lib`，配了 triplet 的还多一层）。
+       *
+       * 找到的东西**认头**分派，不认扩展名（tcc 也是看头几个字节）：
+       *   `\x7fELF` -> 共享库、`!<arch>` -> 静态库、都不是就当 ld 脚本读
+       *   （glibc 的 `/usr/lib/libc.so` 正是一份 `GROUP ( libc.so.6 libc_nonshared.a … )`
+       *   的文本 —— 这一格从前是把三个库名写死在 `cDefaultLibs` 里猜的）。 */
+      const libPaths = [];
+      for (let k = 0; k < rest.length; k++) {
+        if (rest[k] === '-L' && k + 1 < rest.length) libPaths.push(rest[k + 1]);
+        else if (rest[k].startsWith('-L') && rest[k].length > 2) libPaths.push(rest[k].slice(2));
+      }
+      for (const d of ['/usr/lib', '/usr/lib/x86_64-linux-gnu', '/usr/lib/aarch64-linux-gnu',
+        '/lib/x86_64-linux-gnu', '/lib/aarch64-linux-gnu', '/lib64', '/lib']) libPaths.push(d);
+      const findLibElf = (name) => {
+        const fmts = name.startsWith(':') ? ['%s/%s']
+          : (rest.includes('--static') ? ['%s/lib%s.a'] : ['%s/lib%s.so', '%s/lib%s.a']);
+        const nm = name.startsWith(':') ? name.slice(1) : name;
+        for (const f of fmts) {
+          for (const d of libPaths) {
+            const p = f.replace('%s', d).replace('%s', nm);
+            if (exists(p)) return p;
+          }
+        }
+        return null;
+      };
+      /** 一份找到的文件收进来。`depth` 挡住脚本互相指的死圈（tcc 靠的是文件描述符栈）。 */
+      const takeLib = (p, depth) => {
+        const b = bytesOf(p);
+        if (b.length >= 4 && b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46) {
+          dlls.push({ bytes: b, name: p });
+          return;
+        }
+        if (b.length >= 8 && String.fromCharCode(b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]) === '!<arch>\n') {
+          archives.push(b);
+          return;
+        }
+        const names = depth > 4 ? null : parseLdScript(readText(p));
+        if (names === null) throw new OmniError(`elf: '${p}' 既不是 ELF、不是 .a，也不是认得的 ld 脚本`);
+        for (const n of names) {
+          const q = n.startsWith('-l') ? findLibElf(n.slice(2)) : (exists(n) ? n : findLibElf(`:${basename(n)}`));
+          /* 脚本里点到的东西不在这台机器上就跳过 —— `AS_NEEDED` 那一串本来就是「有就用」。 */
+          if (q !== null) takeLib(q, depth + 1);
+        }
+      };
+      for (let k = 0; k < rest.length; k++) {
+        const a = rest[k];
+        let nm = null;
+        if (a === '-l' && k + 1 < rest.length) nm = rest[k + 1];
+        else if (a.startsWith('-l') && a.length > 2) nm = a.slice(2);
+        if (nm === null) continue;
+        const p = findLibElf(nm);
+        if (p === null) throw new OmniError(`elf: 找不到库 '-l${nm}'`);
+        takeLib(p, 0);
       }
       /* 位置参数里的 `.a` 也算静态库 —— 链接器的命令行上库与目标文件是混着写的。 */
       const objs = [];

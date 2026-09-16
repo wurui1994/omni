@@ -23,10 +23,14 @@
 #      就往前挪一个符号 —— 而每一笔的落点都先去 tcc 源码里查过：
 #      a. `undefined symbol: stdout` —— 链的时候一个共享库都没交进去（`cDefaultLibs`
 #         在非 macOS 上回空表），于是 `elf_exe.js` 那段 copy 重定位的前提
-#         「库里找得着这个名字」不成立。**已还**：带上 `libc.so.6` 的真身
-#         （不走 `-lc`：glibc 的 `/usr/lib/libc.so` 是一份 ld 脚本。tcc 的
-#         `tcc_load_ldscript`（`tccelf.c:4169`）认 `GROUP(…)`，我们还不认 ——
-#         所以库名自己给。这一格是个**已知的缺口**，不是猜的。）
+#         「库里找得着这个名字」不成立。**已还**：`-lc`。
+#         这一格后来又往下走了一步：`/usr/lib/libc.so` 是**一份 ld 脚本**
+#         （`GROUP ( libc.so.6 libc_nonshared.a AS_NEEDED ( ld-linux-x86-64.so.2 ) )`），
+#         从前是把这三个库名一条条写死在 `cDefaultLibs` 里猜的；现在 `elf-link`
+#         自己找库、自己读脚本（`ldscript.js`，照 tcc 的 `tcc_load_ldscript`），
+#         `cDefaultLibs` 只剩 `-lc`（外加找得着才带的 `-lm`）。
+#         量到的 DT_NEEDED：libc.so.6、ld-linux-x86-64.so.2、libm.so.6、libmvec.so.1
+#         —— 一条不多一条不少，全是那两份脚本点的。
 #      b. `elf: 找不到 'fmod'` —— 数学那几个符号在这台机器上只从 `libm.so.6` 露出来。
 #         **已还**：存在就一起带上。
 #      c. `elf: 找不到 'atexit'` —— 欠的是一格能力：`elf-link` 从前只收 `.o` 与 `--dll`。
