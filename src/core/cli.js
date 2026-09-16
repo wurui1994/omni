@@ -2344,8 +2344,32 @@ function asyRunSetup(path, rest) {
  * 猜错了不如让「符号没有定义」照实说。
  */
 function cDefaultLibs(os) {
-  if (os !== 'osx') return [];
-  return ['-lc', '-L', cap('c.usrLib')()];
+  if (os === 'osx') return ['-lc', '-L', cap('c.usrLib')()];
+  /* **Linux（第一百四十七片）**：链一个动态可执行文件必须把 libc 那份**共享库本体**
+   * 交进来，否则 `dllNames` 是空的 —— 而 `elf_exe.js` 的 `bind_exe_dynsyms` 那一段
+   * （copy 重定位）以「库里找得着这个名字」为前提。空表的后果是数据符号只留下一条
+   * 光秃秃的 `.dynsym`，装载时报 `undefined symbol: stdout`（x86_64 Arch 容器里量到的）。
+   *
+   * 直接给 `libc.so.6` 的**真身**，不走 `-lc`：`/usr/lib/libc.so` 在 glibc 上是一份
+   * **ld 脚本**（`GROUP ( libc.so.6 libc_nonshared.a …)`），我们的链接器不解析它。
+   * tcc 也不解析 —— 它靠 `CONFIG_TCC_CRT_PREFIX` 那几条路径直接找 `.so.6`。 */
+  if (os !== 'linux') return [];
+  const out = [];
+  const pick = (names) => {
+    for (const p of names) {
+      if (exists(p)) { out.push('--dll', p); return; }
+    }
+  };
+  pick(['/usr/lib/libc.so.6', '/lib/x86_64-linux-gnu/libc.so.6',
+    '/usr/lib/x86_64-linux-gnu/libc.so.6', '/lib/aarch64-linux-gnu/libc.so.6',
+    '/usr/lib/aarch64-linux-gnu/libc.so.6', '/lib64/libc.so.6', '/lib/libc.so.6']);
+  /* libm 单列一格：glibc 2.34 起数学函数并进了 libc，但**符号表里那一份**在有些发行版上
+   * 仍旧只在 `libm.so.6` 里露出来（量到的：Arch 的容器里链 `fmod` 报「找不到」，
+   * 而 libc.so.6 已经在表上了）。存在就带上，不存在就算了 —— 不存在的那种正是并进去了的。 */
+  pick(['/usr/lib/libm.so.6', '/lib/x86_64-linux-gnu/libm.so.6',
+    '/usr/lib/x86_64-linux-gnu/libm.so.6', '/lib/aarch64-linux-gnu/libm.so.6',
+    '/usr/lib/aarch64-linux-gnu/libm.so.6', '/lib64/libm.so.6', '/lib/libm.so.6']);
+  return out;
 }
 
 /**

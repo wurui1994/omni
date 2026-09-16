@@ -19,10 +19,16 @@
 #      改之前这一步出的是 Mach-O arm64 —— 本机 clang / ld 一个都不认。
 #   2. `omni build bench/fib.omni` -> 编得过、链得出：2.1M、18 节、8 段、入口 0x4feb50
 #      （前端 16ms + 发射 14ms + cc 2.6s，via self -O0）。
-#   3. **跑起来还差一格**：`/tmp/fib: symbol lookup error: undefined symbol: stdout`
-#      —— glibc 的 `stdout` 是**数据符号**，动态链接那一侧要的是 copy 重定位
-#      （或者把它当 GLOB_DAT 处理），我们的 ELF 链接器还没有那一格。这是下一刀，
-#      有名有姓地记在这儿。
+#   3. **跑起来还差一格**，三笔账按顺序还了两笔（每还一笔就往前挪一个符号）：
+#      a. `undefined symbol: stdout` —— 链的时候一个共享库都没交进去（`cDefaultLibs`
+#         在非 macOS 上回空表），于是 `elf_exe.js` 那段 copy 重定位的前提
+#         「库里找得着这个名字」不成立。**已还**：带上 `libc.so.6` 的真身
+#         （不走 `-lc`：glibc 的 `/usr/lib/libc.so` 是一份 ld 脚本，我们不解析）。
+#      b. `elf: 找不到 'fmod'` —— 数学那几个符号在这台机器上只从 `libm.so.6` 露出来。
+#         **已还**：存在就一起带上。
+#      c. `elf: 找不到 'atexit'` —— 它住在 glibc 的 **`libc_nonshared.a`** 里
+#         （那份 ld 脚本的 `GROUP` 第二项就是它）。**还欠着**：要么把这个静态库
+#         也交进链接，要么在链接器里认那份 ld 脚本。下一刀。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"
