@@ -102,6 +102,12 @@ export function showValue(v) {
   if (v instanceof Closure) return `<fn ${v.name ?? '?'}>`;
   // 一格列表（`list-new` 出来的普通数组）与一格记录（普通对象）—— 两个后端共用这两句
   if (Array.isArray(v)) return `[${v.map(showValue).join(', ')}]`;
+  // **打印一格 map 没有格式**：go 印 `map[a:1]`、nim 印 `{"a": 1}`、lua 印地址 ——
+  // 四门各一套，调度器不替谁选。掉到下面那句会印成 `{}`（`Object.entries` 对 Map 是空的），
+  // 那是**悄悄给错答案**，所以在这儿当场报
+  if (v instanceof Map) {
+    throw new Error('print: 打印一格 map 的格式还没定（四门语言各不相同）—— 要印就自己遍历');
+  }
   if (typeof v === 'object') {
     return `{${Object.entries(v).map(([k, x]) => `${k} = ${showValue(x)}`).join(', ')}}`;
   }
