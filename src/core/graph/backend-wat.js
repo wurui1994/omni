@@ -35,11 +35,11 @@
 //
 // ## 接不住的，有名有姓（**节点级已经归零**，剩下的是形状上的账，见 WAT_SHAPES）
 //
-//   * 嵌套的 `func`（闭包）—— 要先定"环境怎么排"。
+//   * `func` 当值用（真闭包）—— 要函数表 + call_indirect。**嵌套的函数不在这一条里**：
+//     只被直接调用的那些走 **lambda 提升**（捕获来的名字当多出来的形参）。
+//   * 嵌套的函数写了捕获来的名字 —— 提升是按值传的，那次写外面看不见。
 //   * 一格量先装串后装数（或先实数后整数）—— wasm 的局部量只有一种类型。
-//   * 字符串的拼接（`+` 落在串上）—— 运行期造串的机器有了（`$__str_join`），
-//     但"结果也是串"要顺着 kindOf 传，那一步没做。
-//   * 实数进记录 / 列表 / 实参 / 返回值 —— 那要按类型排的布局（内存里一格是 8 字节 i64）。
+//   * 字符串的拼接（`+` 落在串上）· 实数进记录 / 列表 / 实参 / 返回值。
 
 import { NODES } from './nodes.js';
 // 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
@@ -81,8 +81,12 @@ export function watCan(op) {
  */
 export const WAT_SHAPES = [
   {
-    what: '嵌套的 `func`（闭包）',
-    why: '要先定"环境怎么排"：线性内存里的一块 + 一格函数下标（与记录同一台机器）',
+    what: '`func` 当值用（真闭包）',
+    why: '要函数表 + call_indirect（WAT 前端第一阶段不认）。**只被直接调用**的嵌套函数不走这条 —— 它们按 lambda 提升接住了',
+  },
+  {
+    what: '嵌套的函数写了捕获来的名字',
+    why: '提升是按值传的，那次写外面看不见 —— 要真的闭包环境（线性内存里的一块）',
   },
   {
     what: '一格量先装串后装数（或先实数后整数）',
@@ -197,6 +201,15 @@ const why = (op, where) => {
 class Scope {
   constructor(fn, parent = null) {
     this.fn = fn; this.parent = parent; this.names = new Map(); this.kinds = new Map();
+    /** 提升上来的嵌套函数：图上的名字 -> `{ wat, captures }`（只在它的宿主函数里看得见）。 */
+    this.lifts = new Map();
+  }
+
+  declareLift(name, info) { this.lifts.set(name, info); }
+
+  lookupLift(name) {
+    for (let s = this; s !== null; s = s.parent) if (s.lifts.has(name)) return s.lifts.get(name);
+    return null;
   }
 
   declare(name, kind = 'int') {
@@ -235,6 +248,29 @@ class Scope {
 const asList = (x) => (x === undefined || x === null ? [] : (Array.isArray(x) ? x : [x]));
 
 /**
+ * 一块图里出现的名字：读到的（`ref` / `set`）与绑住的（`bind` / `func` 的形参）。
+ * **lambda 提升**要它：自由名字 = 读到的 - 绑住的。
+ * 这是一趟纯结构的走查（按端口走，不认识任何具体节点）—— 加新节点不用改它。
+ */
+function namesIn(x, refs, binds) {
+  if (x === null || x === undefined) return;
+  if (Array.isArray(x)) { for (const y of x) namesIn(y, refs, binds); return; }
+  if (x.op === 'ref' || x.op === 'set') refs.add(x.attrs.name);
+  if (x.op === 'bind') binds.add(x.attrs.name);
+  if (x.op === 'func') for (const p of asList(x.attrs?.params)) binds.add(String(p));
+  for (const k of Object.keys(x.ins ?? {})) namesIn(x.ins[k], refs, binds);
+}
+
+/** 这块图里被**写**过的名字（`set`）。捕获来的量只许读，所以要单独数一遍。 */
+function writtenIn(x, out = new Set()) {
+  if (x === null || x === undefined) return out;
+  if (Array.isArray(x)) { for (const y of x) writtenIn(y, out); return out; }
+  if (x.op === 'set') out.add(x.attrs.name);
+  for (const k of Object.keys(x.ins ?? {})) writtenIn(x.ins[k], out);
+  return out;
+}
+
+/**
  * 一份 WAT 模块。`funcs` 是"顶层 bind 了一格 func"的那些，别的顶层语句进 `$__entry`。
  * 每个函数自己带一份 `locals`（wasm 的局部量是函数级的，所以 region 只影响名字查找）。
  */
@@ -242,13 +278,22 @@ class Mod {
   constructor() { this.fns = new Map(); this.out = []; }
 
   /** 建一格函数：`taken` 防重名、`locals` 收局部量、`ret` 记它到底出不出值。 */
-  fn(name, params) {
+  fn(name, params, src = null) {
     const f = {
       name, params, locals: [], taken: new Set(params.map(wname)), body: [], ret: false,
+      // 它在图上叫什么（提升出来的嵌套函数也要能被 `retOf` 查到 —— 那张表按**图上的名字**排）
+      src: src ?? name,
       multi: 0,   // 它返回的是**几格多值**（0 = 不是多值）—— 打印那一步要知道格数
     };
     this.fns.set(name, f);
     return f;
+  }
+
+  /** 一格没被占用的函数名（嵌套函数提升上来时可能与顶层同名）。 */
+  uniq(base) {
+    let id = base;
+    while (this.fns.has(id)) id = `${id}_`;
+    return id;
   }
 }
 
@@ -710,11 +755,20 @@ function emitOnce(graph, retOf, multiOf) {
   function callOf(x, sc, pre) {
     const fn = x.ins.fn;
     const name = fn !== null && fn !== undefined && fn.op === 'ref' ? fn.attrs.name : null;
-    if (name === null || !fns.has(name)) throw new Gap('间接调用（函数当值）还没接');
+    const lift = name === null ? null : sc.lookupLift(name);
+    if (lift === null && (name === null || !fns.has(name))) {
+      throw new Gap('间接调用（函数当值）还没接');
+    }
     const args = asList(x.ins.args).map((a) => {
       onlyInt(a, sc, '实参');   // 串传进函数就追不着了（形参没有种类）—— 明说接不住
       return expr(a, sc, pre);
     });
+    // 提升上来的那些：捕获来的名字当**多出来的实参**，排在原来的形参前面
+    if (lift !== null) {
+      const caps = lift.captures.map((nm) => `(local.get ${sc.lookup(nm)})`);
+      const all = [...caps, ...args];
+      return `(call ${lift.wat}${all.length === 0 ? '' : ` ${all.join(' ')}`})`;
+    }
     return `(call ${fns.get(name)}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
   }
 
@@ -727,7 +781,8 @@ function emitOnce(graph, retOf, multiOf) {
     const pre = [];
     switch (x.op) {
       case 'bind': {
-        if (x.ins.init?.op === 'func') throw new Gap('嵌套的函数（闭包）还没接');
+        // **嵌套的函数走 lambda 提升**（不是闭包对象）：见 liftFunc
+        if (x.ins.init?.op === 'func') return liftFunc(x, sc);
         const k = kindOf(x.ins.init, sc);
         const v = expr(x.ins.init, sc, pre);
         // 顶层的名字落全局量（别的函数要看得见它）；函数体里的还是局部量
@@ -904,6 +959,55 @@ function emitOnce(graph, retOf, multiOf) {
   }
 
   /**
+   * **嵌套的函数：lambda 提升，不是闭包**。
+   *
+   * wasm 的 `call_indirect` 与函数表这一批都不认（WAT 前端第一阶段的边界），所以"函数当值用"
+   * 确实接不住。但**嵌套的函数只被直接调用**时用不着闭包对象：把它提到顶层，
+   * 捕获来的名字当**多出来的形参**从每个调用点传进去 —— Scheme 那份 basics 的 `go`
+   * （捕获外层的 `n`、递归调用自己）就是这个形状。
+   *
+   * 两条限制是**必须的**，不然按值提升会给错答案，所以都报缺口：
+   *   * 捕获来的名字在里面被**写**过 —— 按值传的话外面看不见那次写。
+   *   * 捕获来的名字不是整数（实数 / 串）—— 形参这一批只有 i64（与别处同一条账）。
+   */
+  function liftFunc(x, sc) {
+    const fnode = x.ins.init;
+    const self = x.attrs.name;
+    const params = (fnode.attrs.params ?? []).map((p) => String(p));
+    const body = fnode.ins.body;
+    const refs = new Set(); const binds = new Set();
+    namesIn(body, refs, binds);
+    // 自由名字 = 读到的 - 自己绑的 - 形参 - 自己的名字，再筛出"宿主作用域里真有这一格"
+    const free = [...refs].filter((nm) => nm !== self && !binds.has(nm) && !params.includes(nm)
+      && sc.lookup(nm) !== null);
+    const written = writtenIn(body);
+    for (const nm of free) {
+      if (written.has(nm)) {
+        throw new Gap(`嵌套的函数写了捕获来的 ${nm} —— 按值提升会丢掉那次写（要闭包对象）`);
+      }
+      if (sc.kindOf(nm) !== 'int') {
+        throw new Gap(`嵌套的函数捕获了一格非整数的 ${nm} —— 形参这一批只有 i64`);
+      }
+    }
+    const wat = mod.uniq(wname(`f_${self}`));
+    const g = mod.fn(wat, [...free, ...params], self);
+    const gsc = new Scope(g);
+    [...free, ...params].forEach((p) => gsc.names.set(p, wname(p)));
+    const info = { wat, captures: free };
+    sc.declareLift(self, info);     // 宿主里看得见它
+    gsc.declareLift(self, info);    // 它自己也看得见（递归）
+    const marks = [];
+    regions.push(marks);
+    g.body = fnBody(body, gsc, g);
+    regions.pop();
+    if (marks.length !== 0) {
+      g.body = [...marks.map((m) => `(local.set ${m.flag} (i64.const 0))`),
+        ...g.body, ...(g.unwound === true ? [] : runExits(marks))];
+    }
+    return [];   // 提升上去了，宿主这儿一条语句都不留
+  }
+
+  /**
    * 一格函数体。**最后一格如果出值，它就是返回值** —— 与 js 后端同一条规矩。
    * 两处例外要挑出来：`print`（wasm 里它不出值）与"调用一格不出值的函数"。
    */
@@ -939,7 +1043,7 @@ function emitOnce(graph, retOf, multiOf) {
     if (it?.op === 'bind' && it.ins?.init?.op === 'func') {
       const fnode = it.ins.init;
       const params = (fnode.attrs.params ?? []).map((p) => String(p));
-      const f = mod.fn(fns.get(it.attrs.name), params);
+      const f = mod.fn(fns.get(it.attrs.name), params, it.attrs.name);
       const sc = new Scope(f);
       params.forEach((p) => sc.names.set(p, wname(p)));
       // **函数体本身就是一格 region**（与调度器那侧 `new Env(fn.env, { region: true })`
@@ -995,8 +1099,9 @@ function emitOnce(graph, retOf, multiOf) {
   lines.push('  (export "main" (func $__entry))', ')');
   return {
     text: lines.join('\n'),
-    rets: new Map([...mod.fns.values()].map((f) => [f.name, f.ret])),
-    multis: new Map([...mod.fns.values()].map((f) => [f.name, f.multi])),
+    // 两张表按**图上的名字**排（不是 wasm 那边的名字）—— 提升上来的嵌套函数因此也查得到
+    rets: new Map([...mod.fns.values()].map((f) => [f.src, f.ret])),
+    multis: new Map([...mod.fns.values()].map((f) => [f.src, f.multi])),
   };
 }
 
@@ -1004,16 +1109,10 @@ function emitOnce(graph, retOf, multiOf) {
  * 图 -> WAT 文本。接不住的形状抛 `Gap`（上层把它变成"这一格跳过，理由如下"）。
  */
 export function emitWat(graph) {
+  // 第一遍只为了那两张表（哪个函数出值 / 出几格多值），第二遍拿着它们出正式的文本。
+  // 图都很小，两遍比猜便宜。
   const first = emitOnce(graph, new Map(), new Map());
-  // 第二遍：拿着"哪个函数出值"那张表重出一次（语句位置的调用要不要 drop 靠它）
-  const byName = new Map();
-  const items = asList(graph.kind === 'graph' ? graph.body : graph);
-  const multiByName = new Map();
-  for (const [src, wat] of topFuncs(items)) {
-    byName.set(src, first.rets.get(wat) === true);
-    multiByName.set(src, first.multis.get(wat));
-  }
-  return emitOnce(graph, byName, multiByName).text;
+  return emitOnce(graph, first.rets, first.multis).text;
 }
 
 export { Gap };
