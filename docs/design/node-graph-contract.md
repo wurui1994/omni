@@ -1269,6 +1269,8 @@ omni build ext/cpp/examples/basics.cpp --engine graph --backend wat -o basics.wa
 四条腿在这一问上分三种，而**"没有产物"要说清而不是含糊过去**：
 - `wat` 落一份**自足的模块**（宿主面就是那四格 `print_*` 导入）—— 这是 target.md 那句
   "wasm 必须是后端"的落点：它不再只是测试里跑一跑的一条腿，命令行能把 `.wat` 交出来。
+  **而且现在能直接交出二进制**：产物按 `-o` 的后缀定 —— `.wat` 落文本、`.wasm` 落
+  真引擎吃的那份字节（`omni build x.lua --engine graph -o x.wasm` → 155 字节，V8 直接跑）。
   **那条"交给真引擎跑一遍"的判据后来补上了**（第二十一批）：这台机器上没有 wabt /
   wasmtime，可 Node 自带 V8，而 V8 里那台 wasm 引擎与这棵树没有半点关系 —— 缺的只是
   "文本 -> 二进制"这一步，补在 `src/core/wasm/assemble.js`。现在两条判据并存：

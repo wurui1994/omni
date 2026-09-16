@@ -240,15 +240,17 @@ ${graphEngineHelp()}
       name: 'build', key: 'build', usage: 'FILE -o NAME',
       brief: '编译成产物',
       help: `--engine graph 时落的是**图那一层的产物**（语言按 --lang / 后缀定，同 run）：
-  --backend wat  一份自足的 .wat 模块（宿主面就是那四格 print_* 导入）—— 默认
+  --backend wat  一份自足的 wasm 模块（宿主面就是那四格 print_* 导入）—— 默认。
+                 **产物按 -o 的后缀定**：.wat 落文本、**.wasm 落二进制**（真引擎吃的是它）
   --backend sx   一份图的序列化（fromSx 读得回来）
   --backend js   **落不了**：那份文本是一格函数表达式，还要外面喂运行时钩子（记在账上）
   --backend interp 没有产物：它就是 graph.eval
 
-  omni build ext/cpp/examples/basics.cpp --engine graph --backend wat -o basics.wat`,
+  omni build ext/cpp/examples/basics.cpp --engine graph --backend wat -o basics.wat
+  omni build ext/lua/examples/intmath.lua --engine graph -o intmath.wasm   （二进制，V8 直接吃）`,
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
         { name: '--engine', arity: 1, value: 'E',
-          brief: 'omni（默认）| graph（节点图：产物是 wat / sx）' },
+          brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
         { name: '--lang', arity: 1, value: 'L',
           brief: '（graph）这份源码归哪门语言，**优先于文件名后缀**' },
         { name: '--plugin', arity: 1, value: 'NAME', brief: '出一格插件动态库，NAME 是它的 register 函数' },

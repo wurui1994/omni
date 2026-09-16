@@ -190,6 +190,49 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
       process.stdout.write(`  FAIL 落出来的 .wat 真引擎不认：${err.message}\n`);
     }
   }
+  /**
+   * **产物按后缀定**：`-o x.wasm` 落的是**二进制**（真引擎吃的就是它）。
+   * 判据不是"文件在那儿"，是那份二进制**从文件里读出来能在 V8 里跑出同一份输出** ——
+   * 前四个字节还得是 wasm 的魔数（`\0asm`）。
+   */
+  const wasm = join(tmpdir(), 'omni-graph-basics.wasm');
+  check('build -o *.wasm 落一份二进制',
+    ['build', 'ext/cpp/examples/basics.cpp', '--engine', 'graph', '--backend', 'wat', '-o', wasm],
+    { code: 0, says: 'wat -> wasm 二进制' });
+  if (only.length === 0 || only.some((x) => 'build -o *.wasm 落一份二进制'.includes(x))) {
+    try {
+      const bin = readFileSync(wasm);
+      const magic = [...bin.slice(0, 4)].join(',') === '0,97,115,109';
+      const out = [];
+      const box = { m: null };
+      const str = (addr) => {
+        const view = new DataView(box.m.buffer);
+        const len = Number(view.getBigUint64(addr, true));
+        let s = '';
+        for (let k = 0; k < len; k++) s += String.fromCharCode(view.getUint8(addr + 8 + k));
+        return s;
+      };
+      const inst = new WebAssembly.Instance(new WebAssembly.Module(bin), {
+        omni: {
+          print_i64: (x) => out.push(String(x)),
+          print_f64: (x) => out.push(String(x)),
+          print_str: (a) => out.push(str(a)),
+        },
+      });
+      box.m = inst.exports.mem ?? null;
+      inst.exports.main();
+      if (magic && out.join(' / ') === BASICS.join(' / ')) {
+        pass++;
+        process.stdout.write('  ok   落出来的 .wasm 有魔数、V8 直接吃，输出照旧\n');
+      } else {
+        fail++;
+        process.stdout.write(`  FAIL 落出来的 .wasm 不对：魔数 ${magic} 输出 ${out.join(' / ')}\n`);
+      }
+    } catch (err) {
+      fail++;
+      process.stdout.write(`  FAIL 落出来的 .wasm 跑不起来：${err.message}\n`);
+    }
+  }
   const sx = join(tmpdir(), 'omni-graph-basics.sx');
   check('build sx 落一份序列化',
     ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'sx', '-o', sx],

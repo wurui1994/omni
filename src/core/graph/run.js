@@ -29,8 +29,9 @@ import { loadGrammarTable } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
-import { readText, writeText, stdout, stderr } from '../host/native.js';
+import { readText, writeText, writeBinary, stdout, stderr } from '../host/native.js';
 import { backends, Gap } from './contract.js';
+import { watToWasm } from '../wasm/assemble.js';
 import { LANGS, pickLang, treeRoot } from './langs.js';
 
 /** 一格 `--flag VALUE`：给了就回那个值，没给回 null（不认 `--flag=VALUE`，与别处一致）。 */
@@ -165,6 +166,16 @@ export function buildGraphFile(path, argv) {
       return 3;
     }
     throw err;
+  }
+  // **产物按后缀定**：`-o x.wat` 落文本，`-o x.wasm` 落**二进制**（`wasm/assemble.js` 装的）。
+  // 这一格是"wasm 是真后端"最后半步：真引擎吃的是二进制，`.wat` 得先有人装。
+  // 装出来的东西 V8 认（判据在 `tests/graph/wasm.js` 与 `tests/graph/cli.js`）。
+  if (back.name === 'wat' && out.endsWith('.wasm')) {
+    const bin = watToWasm(art.text);
+    // `writeBinary` 收的是 latin1 串（宿主面就这一格），一字节一个码位
+    writeBinary(out, Array.from(bin, (b) => String.fromCharCode(b)).join(''));
+    stderr(`omni: built ${out}（${bin.length} 字节，${got.lang.name} × wat -> wasm 二进制）\n`);
+    return 0;
   }
   writeText(out, `${art.text}\n`);
   stderr(`omni: built ${out}（${art.text.length} 字节，${got.lang.name} × ${back.name}）\n`);
