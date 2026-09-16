@@ -41,7 +41,8 @@
 //     只被直接调用的那些走 **lambda 提升**（捕获来的名字当多出来的形参）。
 //   * 嵌套的函数写了捕获来的名字 —— 提升是按值传的，那次写外面看不见。
 //   * 一格量先装串后装数（或先实数后整数）—— wasm 的局部量只有一种类型。
-//   * 字符串的拼接（`+` 落在串上）· 实数进记录 / 列表 / 实参 / 返回值。
+//   * 串接里混了数（`"n=" + 1`）—— 要先有"数 -> 串"那一格。
+//   * 实数进记录 / 列表 / 实参 / 返回值。
 
 import { NODES } from './nodes.js';
 // 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
@@ -98,8 +99,8 @@ export const WAT_SHAPES = [
     why: 'wasm 的局部量只有一种类型，而图这一层没有类型 —— awk 那种无声明的语言真的答不出来',
   },
   {
-    what: '字符串的拼接（`+` 落在串上）',
-    why: '运行期造串的机器有了（$__str_join），但"结果也是串"要顺着 kindOf 传，那一步没做',
+    what: '串接里混了数（`"n=" + 1`）',
+    why: '要先有"数 -> 串"那一格（造串的机器有了 —— $__str_join 里那圈数位循环就是它）',
   },
   {
     what: '实数进记录 / 列表 / 实参 / 返回值',
@@ -242,6 +243,40 @@ const MAP_HELPERS = `  (func $__str_eq (param $a i64) (param $b i64) (result i64
   (func $__map_has (param $h i64) (param $k i64) (param $mode i64) (result i64)
     (i64.extend_i32_s (i64.ne
       (call $__map_find (local.get $h) (local.get $k) (local.get $mode)) (i64.const -1)))
+  )`;
+
+/**
+ * **串接**（`"a" + "b"` / lua 的 `..` / nim 的 `&` 都落这儿）：新分配一块，两段字节拷进去。
+ * 布局与 `print_str`、`$__str_join` 共用同一份（前 8 字节长度、正文从 +8 起）。
+ * 长度按 8 字节对齐往上取整 —— 长度那一格要按 i64 读，对齐了才稳。
+ */
+const STR_CAT = `  (func $__str_cat (param $a i64) (param $b i64) (result i64)
+    (local $la i64) (local $lb i64) (local $out i32) (local $i i64)
+    (local.set $la (i64.load (i32.wrap_i64 (local.get $a))))
+    (local.set $lb (i64.load (i32.wrap_i64 (local.get $b))))
+    (local.set $out (global.get $hp))
+    (global.set $hp (i32.add (global.get $hp) (i32.add (i32.const 8)
+      (i32.mul (i32.div_s (i32.add (i32.wrap_i64 (i64.add (local.get $la) (local.get $lb)))
+        (i32.const 7)) (i32.const 8)) (i32.const 8)))))
+    (i64.store (local.get $out) (i64.add (local.get $la) (local.get $lb)))
+    (local.set $i (i64.const 0))
+    (block $da (loop $ca
+      (if (i64.ge_s (local.get $i) (local.get $la)) (then (br $da)))
+      (i32.store8
+        (i32.add (i32.add (local.get $out) (i32.const 8)) (i32.wrap_i64 (local.get $i)))
+        (i32.load8_u (i32.add (i32.wrap_i64 (i64.add (local.get $a) (local.get $i))) (i32.const 8))))
+      (local.set $i (i64.add (local.get $i) (i64.const 1)))
+      (br $ca)))
+    (local.set $i (i64.const 0))
+    (block $db (loop $cb
+      (if (i64.ge_s (local.get $i) (local.get $lb)) (then (br $db)))
+      (i32.store8
+        (i32.add (i32.add (local.get $out) (i32.wrap_i64 (i64.add (local.get $la) (local.get $i))))
+          (i32.const 8))
+        (i32.load8_u (i32.add (i32.wrap_i64 (i64.add (local.get $b) (local.get $i))) (i32.const 8))))
+      (local.set $i (i64.add (local.get $i) (i64.const 1)))
+      (br $cb)))
+    (i64.extend_i32_u (local.get $out))
   )`;
 
 class Gap extends Error {}
@@ -471,6 +506,7 @@ function emitOnce(graph, retOf, multiOf) {
   let needF64 = false;    // 用到实数了吗（宿主面那格 `print_f64` 按需发）
   let needJoin = false;   // 要不要那格运行期造串的辅助函数（打印多值）
   let needMap = false;    // 要不要 map 那一组辅助函数（句柄 + 表 + 键比较）
+  let needCat = false;    // 要不要那格串接（新分配一块 + 两段字节拷过去）
   function strAddr(s) {
     if (strs.has(s)) return strs.get(s);
     const bytes = utf8Bytes(s);
@@ -524,10 +560,15 @@ function emitOnce(graph, retOf, multiOf) {
       case 'region': return kindOf(x.ins.body, sc);
       // 表示转换：目标那一栏（`to`）就是答案 —— 这一格是"两种数值类型"的入口
       case 'conv': return x.attrs.to === 'float' ? 'real' : 'int';
-      // 算术：**有一边是实数，结果就是实数**（比较出的是真假，算 int）
+      // 算术：**有一边是实数，结果就是实数**（比较出的是真假，算 int）。
+      // 串接（`concat` 与落在串上的 `+`）出的是**串** —— 那一格在 `$__str_cat` 里
       case 'prim': {
-        if (!ARITH.has(x.attrs.name)) return 'int';
-        return asList(x.ins.args).some((a) => kindOf(a, sc) === 'real') ? 'real' : 'int';
+        const nm = x.attrs.name;
+        const args = asList(x.ins.args);
+        if (nm === 'concat') return 'str';
+        if (!ARITH.has(nm)) return 'int';
+        if (nm === '+' && args.some((a) => kindOf(a, sc) === 'str')) return 'str';
+        return args.some((a) => kindOf(a, sc) === 'real') ? 'real' : 'int';
       }
       case 'branch': {
         const a = kindOf(x.ins.then, sc); const b = kindOf(x.ins.else, sc);
@@ -645,13 +686,27 @@ function emitOnce(graph, retOf, multiOf) {
       case 'prim': {
         const args = asList(x.ins.args);
         const name = x.attrs.name;
-        // 串上的算术只有一条有意义：`+` 是拼接。那要运行期分配 + 拷贝两段字节，
-        // 还得知道结果也是串 —— 这一批没做，明说是缺口（别的算符落在串上本身就是错的）
+        // **串接**：`concat` 与落在串上的 `+` 都在这儿 —— 新分配一块、两段字节拷进去
+        // （`$__str_cat`）。混了数的串接报缺口：那要先有"数 -> 串"，与打印多值是同一台机器
+        if (kindOf(x, sc) === 'str') {
+          if (args.length === 0) throw new Gap('空的串接还没接');
+          for (const a of args) {
+            if (kindOf(a, sc) !== 'str') {
+              throw new Gap(`串接里混了${kindOf(a, sc) === 'real' ? '实数' : '数'} —— 要先有"数 -> 串"那一格`);
+            }
+          }
+          needCat = true;
+          needMem = true;
+          return args.slice(1).reduce(
+            (acc, y) => `(call $__str_cat ${acc} ${expr(y, sc, pre)})`,
+            expr(args[0], sc, pre),
+          );
+        }
+        // 串上别的算符本身就是错的（比较要按字节比、算术没意义）—— 明说
         for (const a of args) {
           const ka = kindOf(a, sc);
           if (ka === 'str' || ka === 'mix') {
-            throw new Gap(name === '+' ? '字符串的拼接（`+`）在 wasm 上还没接：要运行期分配 + 拷贝字节'
-              : `${name} 落在字符串上 —— wasm 这一批只有数的算术`);
+            throw new Gap(`${name} 落在字符串上 —— wasm 这一批只有数的算术（串只有 + 与 concat）`);
           }
         }
         // **有一边是实数，整个算式就在 f64 上做**（整数那一边补一格 convert）——
@@ -1245,6 +1300,7 @@ function emitOnce(graph, retOf, multiOf) {
   }
   if (needJoin) lines.push(STR_JOIN);
   if (needMap) lines.push(MAP_HELPERS);
+  if (needCat) lines.push(STR_CAT);
   for (const [nm, g] of globals) {
     const ty = wty(globalKinds.get(nm) ?? 'int');
     lines.push(`  (global ${g} (mut ${ty}) (${ty}.const 0))`);

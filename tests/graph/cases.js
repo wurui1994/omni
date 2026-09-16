@@ -48,6 +48,8 @@ export const VALUES = ['3', '7'];
 export const DEFERARG = ['2', '1'];
 /** dict：map 那四格（map-new / map-get / map-set / map-has）—— 键是**值**不是名字 */
 export const DICT = ['1', '3', '4', 'yes'];
+/** strcat：串接（lua 的 `..` / nim 的 `&` / go 与 V 的 `+`）—— 一格内建，不是新节点 */
+export const STRCAT = ['ab', 'hi there'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -103,6 +105,8 @@ export const CASES = [
   ...fam('deferarg', DEFERARG, ['go']),
   // 第十二个家族：map / dict 那四格（键是值、缺键报错、默认值归语言）
   ...fam('dict', DICT, ['go', 'vlang', 'awk', 'nim']),
+  // 第十三个家族：串接（四种写法一格内建）—— 它同时钉住字符串在线性内存里的布局
+  ...fam('strcat', STRCAT, ['lua', 'go', 'vlang', 'nim']),
 ];
 
 /**
