@@ -44,7 +44,7 @@ import { utf8Bytes } from '../host/utf8.js';
 import {
   aluRI, aluRR, callR, cdq, cqo, cvtF2F, cvtF2I, cvtI2F, divR, fbin, fcmp, fldM64, fldM80,
   fstpM64, fstpM80, fxor, idivR, imulRR, lea, movAbs, movMR, movRI, movRM, movRR, movqFromXmm,
-  movqToXmm, movsx, movsxM, movzx, movzxM, negR, notR, pop, push, ret, setcc, shiftRCl, shiftRI,
+  movqToXmm, movsx, movsxM, movzx, movzxM, negR, notR, pop, push, retInstr, setcc, shiftRCl, shiftRI,
   testRR
 } from './encode.js';
 import { REG, ALU, CC, SH, FOP, XMM } from './encode.js';
@@ -469,7 +469,7 @@ class x64FnGen {
     for (let i = 0; i < f.count(); i++) this.one(i);
 
     buf.place(this.retLabel);
-    buf.emit(movRR(8, REG.rsp, BP), pop(BP), ret());
+    buf.emit(movRR(8, REG.rsp, BP), pop(BP), retInstr());
     return buf;
   }
 

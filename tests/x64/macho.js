@@ -54,7 +54,7 @@ function fn(name, body) {
   body();
   buf.emit(x.movRR(8, R.rsp, R.rbp));
   buf.emit(x.pop(R.rbp));
-  buf.emit(x.ret());
+  buf.emit(x.retInstr());
 }
 
 // ---- 1. 最简单的：两个整数实参相加

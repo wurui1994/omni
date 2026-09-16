@@ -166,7 +166,7 @@ const rels = [
 t('callq *%rax', x.callR(R.rax));
 t('callq *%r11', x.callR(R.r11));
 t('jmpq *%rax', x.jmpR(R.rax));
-t('retq', x.ret());
+t('retq', x.retInstr());
 t('nop', x.nop());
 t('ud2', x.ud2());
 t('pushq %rbp', x.push(R.rbp));
@@ -256,7 +256,7 @@ const bufs = [];
   const b = new CodeBuf();
   const l = b.label();
   b.jcc(CC.e, l);
-  b.emit(x.ret());
+  b.emit(x.retInstr());
   b.place(l);
   b.finish();
   bufs.push({

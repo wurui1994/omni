@@ -547,7 +547,9 @@ export function jmpR(r) {
   return [...rex(false, false, false, r > 7, false), 0xff, modrm(3, 4, r)];
 }
 
-export function ret() { return [0xc3]; }
+/** `ret`（0xc3）。名字带 `Instr`：`lang/common/sx.js` 里那格 `ret` 造的是方言的 return
+ *  语句，与这一格发机器码不是一回事，而拼成一个程序之后模块级名字共用一个空间。 */
+export function retInstr() { return [0xc3]; }
 export function nop() { return [0x90]; }
 export function ud2() { return [0x0f, 0x0b]; }
 
