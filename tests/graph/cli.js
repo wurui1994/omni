@@ -98,6 +98,20 @@ check('--lang gsl-shell 读 lua 的例子（继承那份语法 = 基语言一个
     { code: 0, out: ['2'] });
   check('lua 不认短 lambda（同一份文件，按后缀就是 lua）', ['run', f, '--engine', 'graph'],
     { code: 1, says: 'unexpected "|"' });
+
+  /**
+   * **词法也能叠**那一格（`(lex …)` 在方言里能加）：LuaJIT 带 FFI 的虚数 `1i` 是**记号**
+   * 那一层的事（lj_lex.c:105-106 + lj_strscan.c:419-437），产生式加不出来。
+   * 两面都要：gsl-shell 读得进去（语料因此 176 → 186/186），lua 仍在词法上就分不开它；
+   * 而读进去之后**映射当场报一句有名有姓的话** —— 图这一层没有复数这格值，
+   * `Number("1i")` 是 NaN，落成 const 就是个看不出错的错答案。
+   */
+  const g = join(tmpdir(), 'omni-gsl-imag.lua');
+  writeFileSync(g, 'print(1i)\n');
+  check('gsl-shell 的 1i 读得进来，但映射说清了它接不住',
+    ['run', g, '--engine', 'graph', '--lang', 'gsl-shell'], { code: 1, says: '没有复数' });
+  check('lua 连 1i 都不认（词法就分不开）', ['run', g, '--engine', 'graph'],
+    { code: 1, says: "unexpected NAME 'i'" });
 }
 
 // ---- 3) 缺口不是失败：有名有姓，退出码 3（与"程序自己跑错了"分开）

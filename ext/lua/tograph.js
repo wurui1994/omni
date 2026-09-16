@@ -95,10 +95,28 @@ function funcOf(bodyNode, name) {
   return node('func', { body: blk === undefined ? [] : many(kids(blk)) }, attrs);
 }
 
+/**
+ * 一格数字记号 -> 一格 `const`。
+ *
+ * **不许悄悄变成 NaN**：gsl-shell（LuaJIT 带 FFI）的数字有后缀 —— 虚数 `1i`、
+ * 64 位整数 `1LL`（词法那一格在 `ext/gsl-shell/gsl-shell.grammar` 里，出处也在那儿）。
+ * 语法认得它们，而图这一层**没有复数、也没有 64 位整数**这两格值。
+ * `Number("1i")` 是 NaN，落成 `const` 就是一个看不出错的错答案 ——
+ * 所以这儿当场报一句有名有姓的话，把它记成账而不是糊过去。
+ */
+function numOf(text) {
+  const v = Number(text);
+  if (Number.isNaN(v)) {
+    throw new Error(`数字记号 \`${text}\` 这份映射还不认 —— 图这一层没有复数（\`1i\`）`
+      + '与 64 位整数（`1LL`）这两格值（语法认得它，是 LuaJIT 带 FFI 的写法）');
+  }
+  return node('const', {}, { value: v });
+}
+
 function toNode(x) {
   switch (tag(x)) {
     // ---- 叶子 --------------------------------------------------------------
-    case 'num': return node('const', {}, { value: Number(atomText(kids(x)[0])) });
+    case 'num': return numOf(atomText(kids(x)[0]));
     case 'str': return node('const', {}, { value: atomText(kids(x)[0]) });
     case 'nil': return node('const', {}, { value: null });
     case 'true': return node('const', {}, { value: true });

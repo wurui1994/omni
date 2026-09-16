@@ -1,0 +1,18 @@
+;; minidia —— 方言机制的三条判据（产生式能叠 · 词法能叠 · 基准不受影响）。
+;; 基准那门的全部 case 在 cases/mini.cases 里，这儿只写**方言多出来的那些**加两条边界。
+
+;; 1) 产生式叠上来了：`say` 与 `print` 落同一棵树
+main { say 1; }                                 ==> (module (main (print (int 1))))
+
+;; 2) 基准那条路一个字没变（同一份输入在 mini.cases 里也是这棵树）
+main { print 1; }                               ==> (module (main (print (int 1))))
+
+;; 3) 词法叠上来了：带后缀的数是**一格记号**（`3i` 一个 INT，不是 `3` 后面跟个 `i`）
+main { print 3i; }                              ==> (module (main (print (int 3i))))
+main { let x int = 2i + 3; }                     ==> (module (main (let x int (bin "+" (int 2i) (int 3)))))
+
+;; 4) 最长匹配那条规矩：没有后缀的数照旧是基准那条规则
+main { print 3; }                               ==> (module (main (print (int 3))))
+
+;; 5) 该拒的还得拒：后缀只认 `i`，`3x` 仍然是数后面跟个名字
+main { print 3x; }                              !!> unexpected ID

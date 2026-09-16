@@ -94,8 +94,8 @@ export function grammarTextOf(path, diags) {
  *   * 同名 `(rule N …)` 是**追加产生式**（`readGrammar` 本来就允许一个非终结符出现多次），
  *     所以方言只写"多出来的那几条"；
  *   * `(start N)` 后来的盖过先来的 —— 方言想换起始符号就自己写一条；
- *   * `(lex …)` **只许一份**：基准有了，方言就不许再写（`readGrammar` 会报
- *     "at most one (lex ...)"）。方言要加词法这一格还欠着 —— 记在账上，不假装它能用。
+ *   * `(lex …)` **叠**：方言写的条目接在基准那份的后面，合出来仍只有一个 `(lex …)` form
+ *     （见下面 `mergeLex` —— `readGrammar` 那句 "at most one (lex ...)" 因此不用改）。
  */
 function withExtends(path, text, diags) {
   const m = /\(extends\s+"([^"]+)"\)/.exec(text);
@@ -108,8 +108,61 @@ function withExtends(path, text, diags) {
   const baseInner = innerItems(grammarTextOf(basePath, diags), basePath, diags);
   const mine = innerItems(text.replace(m[0], ''), path, diags);
   const name = grammarName(text);
+  const [base2, mine2] = mergeLex(baseInner, mine);
   return `(grammar ${name}\n;; ==== 继承自 ${m[1]}（omni glr 里的"方言"，见 load.js 的 withExtends）====\n`
-    + `${baseInner}\n;; ==== 本份多出来的 ====\n${mine}\n)\n`;
+    + `${base2}\n;; ==== 本份多出来的 ====\n${mine2}\n)\n`;
+}
+
+/**
+ * **词法也能叠**：方言写自己的 `(lex …)`，里头的条目**接在基准那份的后面**，
+ * 合出来仍然只有一个 `(lex …)` form（`readGrammar` 那句 "at most one (lex ...)" 因此不用改）。
+ *
+ * 接在后面而不是前面，是因为 `lexText` 取**最长匹配**（同长才按声明顺序）：
+ * 方言加的形状总比基准那条长（`1i` 比 `1` 长、`say` 是新词），所以位置不影响谁赢。
+ * 反过来若把方言放前面，基准那条同长的规则就会被抢，改的东西比说的多。
+ *
+ * 这一格是 LuaJIT 的虚数字面量 `1i` 逼出来的：gsl-shell 自带的 LuaJIT 带 FFI，
+ * `1i` 是**记号**那一层的事（`lj_strscan.c:421-425`），产生式加不出来。
+ */
+function mergeLex(baseInner, mine) {
+  const d = formAt(mine, 'lex');
+  if (d === null) return [baseInner, mine];                 // 方言没写词法：原样
+  const mineOut = mine.slice(0, d.start) + mine.slice(d.end);
+  const b = formAt(baseInner, 'lex');
+  if (b === null) return [baseInner, mine];                 // 基准没有词法段：方言那份就是唯一一份
+  const merged = `${baseInner.slice(0, b.end - 1)}\n`
+    + `    ;; ==== 方言加的词法（接在后面：词法取最长匹配，所以顺序不决定谁赢）====\n`
+    + `${d.inner}\n  )${baseInner.slice(b.end)}`;
+  return [merged, mineOut];
+}
+
+/**
+ * 文本里第一个 `(HEAD …)` form 的位置：`{start, end, inner}`
+ * （`text.slice(start, end)` 就是整个 form，`inner` 是括号里 HEAD 之后那一截）。
+ * 自己数括号是因为这一层**刻意还没解析**（拼的是文本，见 `withExtends` 的理由），
+ * 所以字符串与 `;;` 注释里的括号要跳过 —— 词法段里正好有 `"("` 与 `")"` 这两条。
+ */
+function formAt(text, head) {
+  const at = text.indexOf(`(${head}`);
+  if (at < 0) return null;
+  let i = at + 1 + head.length;
+  if (i < text.length && !/[\s()]/.test(text[i])) return null;   // `(lexer` 不算 `(lex`
+  const inner0 = i;
+  let depth = 1;
+  while (i < text.length && depth > 0) {
+    const c = text[i];
+    if (c === '"') {                       // 串：里头的括号不算
+      i += 1;
+      while (i < text.length && text[i] !== '"') i += (text[i] === '\\' ? 2 : 1);
+    } else if (c === ';' && text[i + 1] === ';') {
+      while (i < text.length && text[i] !== '\n') i += 1;
+      continue;
+    } else if (c === '(') depth += 1;
+    else if (c === ')') depth -= 1;
+    i += 1;
+  }
+  if (depth !== 0) return null;
+  return { start: at, end: i, inner: text.slice(inner0, i - 1) };
 }
 
 /** `(grammar NAME …)` 里 NAME 后面那一截（不含最外层括号与名字）。 */

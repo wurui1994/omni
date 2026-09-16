@@ -1,0 +1,26 @@
+;; minidia —— **方言机制自己的判据**（`(extends …)`，见 src/core/glr/load.js 的 withExtends）
+;;
+;; 十门语言那边已经有一个方言在用它（ext/gsl-shell/gsl-shell.grammar 继承 lua），
+;; 可那一格证的是"gsl-shell 能跑"，不是"这个机制对"。这一份把机制单独钉住，而且钉的是
+;; 三件**分开**的事：
+;;
+;;   1. **产生式能叠**：同名 `(rule N …)` 追加候选式 —— 这儿给 Stmt 加一条 `say E ;`；
+;;   2. **词法能叠**：方言自己的 `(lex …)` 条目接在基准那份后面（合出来仍只有一个 lex form）
+;;      —— 这儿加一个关键字 `say`，和一条**带后缀的数**（`3i`）。
+;;      后者是真账逼出来的形状：LuaJIT 带 FFI 的虚数字面量 `1i` 在记号那一层，
+;;      产生式加不出来（lj_strscan.c:421-425）。
+;;   3. **基准一个字不改**：mini.grammar 仍然**不认** `say` 与 `3i`
+;;      （反面那两条写在 cases/mini.cases 末尾 —— 假接受比报错坏）。
+;;
+;; `3i` 这条为什么不怕与基准的 `(token INT (+ digit))` 撞车：lexText 取**最长匹配**，
+;; `3i` 两个字符比 `3` 长，所以谁先声明都不影响谁赢（同长才按声明顺序）。
+(grammar minidia
+  (extends "mini.grammar")
+
+  (lex
+    (keyword ID "say")
+    (token INT (+ digit) "i"))
+
+  ;; `say E ;` 与 `print E ;` 落**同一棵树** —— 方言换的是写法，不是语义
+  (rule Stmt
+    (-> ("say" E ";") (print $2))))

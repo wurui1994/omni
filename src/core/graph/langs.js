@@ -61,7 +61,7 @@ export const LANGS = new Map([
   // 方言：语法是"继承 lua 那份 + 两条产生式"（`(extends …)`，见 glr/load.js），
   // 映射一个字不改地借 lua 的。后缀仍是 `.lua`，但**不参与猜** —— 只能 --lang 点名。
   // 量出来的账面（`/Users/wurui/Train/gsl-shell` 那 186 份 .lua）：拿 lua 的语法 139/186，
-  // 拿这一份 176/186；剩下 10 份全是 LuaJIT 的虚数字面量 `1i`（那是基语言的账）。
+  // 加两条产生式 176/186，再叠上那一格词法（LuaJIT 的 `1i`）**186/186**。
   ['gsl-shell', {
     grammar: 'ext/gsl-shell/gsl-shell.grammar', toGraph: gslShellToGraph,
     exts: ['lua'], guess: false, extends: 'lua',

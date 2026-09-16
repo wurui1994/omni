@@ -26,3 +26,10 @@ main { while (a < b) { a = a + 1; } }           ==> (module (main (while (bin "<
 main { print 1 }                                !!> unexpected "}"
 main { print 1 == 2 == 3; }                     !!> unexpected "=="
 main { let x = 1; }                              !!> unexpected "="
+
+;; **方言加的那两样，基准这儿必须仍然不认**（grammars/minidia.grammar 继承的就是这一份）。
+;; 假接受比报错坏：解析器认得比它该认的多，错就漏到下游去了。
+;; 报的错正好说明它们**没被当成方言那两样**：`say` 只是个名字（后面跟个数说不通），
+;; `3i` 是数后面跟了个名字。
+main { say 1; }                                 !!> unexpected INT
+main { print 3i; }                              !!> unexpected ID
