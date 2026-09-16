@@ -52,6 +52,8 @@ export const DICT = ['1', '3', '4', 'yes'];
 export const STRCAT = ['ab', 'hi there'];
 /** numstr：数 -> 串（lua 隐式、nim 显式的 `$`）—— 两格节点、一份输出 */
 export const NUMSTR = ['n=7', 'i=42'];
+/** namedarg：`T(x: 1)`（record-new）与 `f(a = 3)`（call）—— 树上**不同形**，那笔账记错了 */
+export const NAMEDARG = ['1', '7'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -111,6 +113,9 @@ export const CASES = [
   ...fam('strcat', STRCAT, ['lua', 'go', 'vlang', 'nim']),
   // 第十四个家族：**数 -> 串**（lua 隐式落 concat、nim 显式落 conv —— 两格节点，一份输出）
   ...fam('numstr', NUMSTR, ['lua', 'nim']),
+  // 第十五个家族：**对象构造 vs 命名实参**（nim 独有）—— 钉的是"那笔账记错了"：
+  // 两者在调用实参这个位置上不同形，判"是不是类型"扫一遍 type 段就够
+  ...fam('namedarg', NAMEDARG, ['nim']),
 ];
 
 /**

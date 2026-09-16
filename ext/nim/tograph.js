@@ -28,6 +28,40 @@ const MAPS = new Set();
 const TABLE_CTORS = new Set(['initTable', 'newTable', 'toTable']);
 const isMap = (x) => tag(x) === 'name' && MAPS.has(leaf(kids(x)[0]));
 
+/**
+ * **登记过的类型名**（`type Point = object …`）与**每个 proc 的形参名**。
+ *
+ * 这两张表是"那笔账记错了"的证据：文档与这份文件原来都写着
+ * "nim 的对象构造 `T(x: 1)` 与命名实参 `f(x = 1)` 在树上同形，要驱动器能回问类型"。
+ * 量一遍就知道**在调用实参这个位置上不同形**：语法里 `IDENT "=" expr` 出 `named`、
+ * `expr ":" expr` 出 `kv`（两条产生式两个标签）。剩下要判的只有"这名字是类型还是函数"，
+ * 而那件事**扫一遍 `type-section` 与 `routine` 就有答案** —— 与 map 那一族同一条路子。
+ */
+const TYPES = new Set();
+const PARAMS = new Map();
+
+/** 扫一遍顶层：登记类型名与每个 proc 的形参名（嵌套的 routine 也一起收）。 */
+function collectDecls(x) {
+  if (!isList(x)) return;
+  if (tag(x) === 'tdef') {
+    const nm = kids(x).find((y) => tag(y) === 'n' || tag(y) === 'name');
+    if (nm !== undefined) TYPES.add(leaf(kids(nm)[0]));
+  }
+  if (tag(x) === 'routine') {
+    const nm = kids(x).find((y) => tag(y) === 'n' || tag(y) === 'name');
+    const sig = part(x, 'sig');
+    if (nm !== undefined && sig !== undefined) PARAMS.set(leaf(kids(nm)[0]), paramNames(sig));
+  }
+  for (const k of kids(x)) collectDecls(k);
+}
+
+/** 一格 `(sig …)` 里的形参名（分组写法 `(a, b: int)` 也拆开）。 */
+function paramNames(sig) {
+  return kids(sig).flatMap((g) => (tag(g) === 'p' ? [g] : groupItems(g)))
+    .filter((p) => tag(p) === 'p')
+    .map((p) => nameOf(part(p, 'names') ?? kids(p)[0]));
+}
+
 /** `var m = initTable[string, int]()` -> `'m'`（不是就给 null）。 */
 function mapBindName(x) {
   if (!isList(x) || tag(x) !== 'item') return null;
@@ -192,12 +226,35 @@ function toNode(x) {
     case 'call': case 'command': {
       const [fn, args] = kids(x);
       const argKids = args === undefined ? [] : kids(args);
-      // `Point(x: 1, y: 2)` -> record-new。**判据是"实参全是 kv"** —— nim 的对象构造
-      // 与命名实参在树上是同一格（`kv` 那两条产生式把 `:` 与 `=` 折成一格），
-      // 分开它们要驱动器能回问一句"这个名字登记成类型了吗" —— 与 cpp 那笔账是同一笔
-      // （`docs/design/node-graph-contract.md` 附录 A.5 第 3 笔）。这一批用形状判，记在账上。
+      // `Point(x: 1, y: 2)` -> record-new。**判据是"这名字登记成类型了吗"** ——
+      // 而那句话不用问驱动器：扫一遍 `type-section` 就有答案（见 TYPES）。
+      // 顺带把那笔账改对：命名实参在树上是 `named`（`=`），对象构造是 `kv`（`:`）——
+      // **在调用实参这个位置上两者不同形**，语法里就是两条产生式。
       if (argKids.length > 0 && argKids.every((a) => tag(a) === 'kv')) {
+        const ty = (tag(fn) === 'name' || tag(fn) === 'n') ? leaf(kids(fn)[0]) : null;
+        if (ty === null || !TYPES.has(ty)) {
+          throw new Error(`nim->graph: ${ty ?? '?'}(x: 1) 这个形状要它是登记过的类型 —— `
+            + '没在 type 段里见过它（命名实参请写 f(x = 1)）');
+        }
         return recordNew(argKids.map((a) => [nameOf(kids(a)[0]), toNode(kids(a)[1])]));
+      }
+      // `f(a = 3, b = 4)`：命名实参**按被调者的形参表排回位置** —— 图上只有位置实参
+      // （名字对不上、被调者的形参表不知道，都当场报，不猜）
+      if (argKids.some((a) => tag(a) === 'named')) {
+        const callee = (tag(fn) === 'name' || tag(fn) === 'n') ? leaf(kids(fn)[0]) : null;
+        const ps = callee === null ? undefined : PARAMS.get(callee);
+        if (ps === undefined) throw new Error(`nim->graph: ${callee ?? '?'} 的形参表不知道，命名实参排不回位置`);
+        const given = new Map();
+        for (const a of argKids) {
+          if (tag(a) !== 'named') throw new Error('nim->graph: 命名实参与位置实参混着写还没接');
+          const k = leaf(kids(a)[0]);
+          if (!ps.includes(k)) throw new Error(`nim->graph: ${callee} 没有名为 ${k} 的形参`);
+          given.set(k, toNode(kids(a)[1]));
+        }
+        if (given.size !== ps.length) {
+          throw new Error(`nim->graph: ${callee} 要 ${ps.length} 格实参，命名实参给了 ${given.size} 格`);
+        }
+        return node('call', { fn: toNode(fn), args: ps.map((p) => given.get(p)) });
       }
       const argNodes = many(argKids);
       // `initTable[string, int]()` -> map-new：造 Table 的那个调用**就是**那一格节点
@@ -231,6 +288,11 @@ export function nimToGraph(tree) {
   // 先扫一遍哪些名字装 Table（`initTable[K, V]()` 那种造法在树上认得出）
   MAPS.clear();
   for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
+  // 再扫一遍**登记过的类型名**与**每个 proc 的形参名**：前者判 `T(x: 1)`、
+  // 后者把 `f(x = 1)` 排回位置。这两问都不用驱动器回问 —— 树上就有答案。
+  TYPES.clear();
+  PARAMS.clear();
+  collectDecls(tree);
   return program(kids(tree).map(toNode).flat());
 }
 
