@@ -1527,12 +1527,31 @@ class FnGen {
   mload(i) {
     const f = this.f;
     const kind = MLOAD_KINDS[memKindNo(f.aux[i])];
-    const p = this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
     const ld = MLOAD_EMIT[kind];
     if (ld === undefined) return arm64Nyi(`MLOAD 的宽度 ${kind}`);
+    /* 静态偏移能折进立即数就折（见 `foldOff`）：那样地址寄存器直接是操作数本身，
+     * 连一条 `add` 都不发。折不进才走 `memAddr` 把真址算出来。 */
+    const off = memOff(f.aux[i]);
+    const fold = foldOff(off, MLOAD_SIZE[kind]);
+    const p = fold ? this.refReg(f.a[i], TMP0) : this.memAddr(TMP0, f.a[i], off);
     const d = this.dest(i, p);
-    ld(this.buf, d, p);
+    ld(this.buf, d, p, fold ? off : 0);
     return this.def(i, d);
+  }
+
+  /** `MSTORE`。六种宽度只管「把低若干位拍进内存」，没有符号可言（与 wasm 同）。 */
+  mstore(i) {
+    const f = this.f;
+    const kind = MSTORE_KINDS[memKindNo(f.aux[i])];
+    const size = MSTORE_SIZE[kind];
+    if (size === undefined) return arm64Nyi(`MSTORE 的宽度 ${kind}`);
+    /* 先取值再算地址：`memAddr` 在偏移大的时候要借 TMP1，所以值落在 RES 上。
+     * 值在池寄存器里的话 `refReg` 一个字都不发（从前这儿是 `ldr` + `mov` 两条）。 */
+    const v = this.refReg(f.b[i], RES);
+    const off = memOff(f.aux[i]);
+    const fold = foldOff(off, size);
+    const p = fold ? this.refReg(f.a[i], TMP0) : this.memAddr(TMP0, f.a[i], off);
+    this.buf.emit(strU(size, v, p, fold ? off : 0));
   }
 
   /** `MSTORE`。六种宽度只管「把低若干位拍进内存」，没有符号可言（与 wasm 同）。 */
@@ -1639,16 +1658,34 @@ ARM64_FCMP[OP.GE] = COND.ge;
 /* 线性内存的九种读。`ldrs*` 一律扩到 64 位（i32 的规范形就是那个样子），
  * 零扩展的三种与两种浮点都走整数加载 —— 栈位里躺的是位模式。 */
 const MLOAD_EMIT = {
-  i8s: (b, d, p) => b.emit(ldrsU(0, d, p, 0)),
-  i8u: (b, d, p) => b.emit(ldrU(0, d, p, 0)),
-  i16s: (b, d, p) => b.emit(ldrsU(1, d, p, 0)),
-  i16u: (b, d, p) => b.emit(ldrU(1, d, p, 0)),
-  i32s: (b, d, p) => b.emit(ldrsU(2, d, p, 0)),
-  i32u: (b, d, p) => b.emit(ldrU(2, d, p, 0)),
-  i64: (b, d, p) => b.emit(ldrU(3, d, p, 0)),
-  f32: (b, d, p) => b.emit(ldrU(2, d, p, 0)),
-  f64: (b, d, p) => b.emit(ldrU(3, d, p, 0)),
+  i8s: (b, d, p, o) => b.emit(ldrsU(0, d, p, o)),
+  i8u: (b, d, p, o) => b.emit(ldrU(0, d, p, o)),
+  i16s: (b, d, p, o) => b.emit(ldrsU(1, d, p, o)),
+  i16u: (b, d, p, o) => b.emit(ldrU(1, d, p, o)),
+  i32s: (b, d, p, o) => b.emit(ldrsU(2, d, p, o)),
+  i32u: (b, d, p, o) => b.emit(ldrU(2, d, p, o)),
+  i64: (b, d, p, o) => b.emit(ldrU(3, d, p, o)),
+  f32: (b, d, p, o) => b.emit(ldrU(2, d, p, o)),
+  f64: (b, d, p, o) => b.emit(ldrU(3, d, p, o)),
 };
+
+/* 九种读各自的宽度对数 —— 折静态偏移进立即数那一格要按它判缩放（见 `foldOff`）。 */
+const MLOAD_SIZE = { i8s: 0, i8u: 0, i16s: 1, i16u: 1, i32s: 2, i32u: 2, i64: 3, f32: 2, f64: 3 };
+
+/**
+ * 这个静态偏移**折得进** `ldr`/`str` 的立即数那一格吗（第一百四十四片）。
+ *
+ * 那一格是**按宽度缩放**的 12 位无符号：`ldr x, [x9, #16]` 里躺的是 2。所以偏移得是
+ * 宽度的整数倍、商还得进得了 12 位。折得进就省掉一条 `add` —— `p->field` 在生成的 C
+ * 里到处都是，量出来这一条占了整份 `.text` 的 1.27M 条 `add` 里的大头。
+ *
+ * 折不进（`struct { char c; int i; }` 里 `i` 在偏移 1 那种、或者偏移大过 4095×宽度）
+ * 就回 false，走 `memAddr` 那条老路先把地址算出来。
+ */
+function foldOff(off, size) {
+  const w = 1 << size;
+  return off >= 0 && off % w === 0 && off / w <= 4095;
+}
 
 /* 六种写 -> `str` 的宽度对数。 */
 const MSTORE_SIZE = { i8: 0, i16: 1, i32: 2, i64: 3, f32: 2, f64: 3 };
