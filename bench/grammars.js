@@ -395,6 +395,27 @@ if (showFail) {
     if (r.fails.length === 0) continue;
     process.stdout.write(`\n${r.name} 没过的 ${r.fails.length} 个（印头 ${FAIL_SHOWN} 条）：\n`);
     for (const f of r.fails.slice(0, FAIL_SHOWN)) process.stdout.write(`  ${f}\n`);
+    /* **再按错的形状归一次堆**（第一百三十八片）：头几条只告诉你「有哪几份没过」，
+     * 而下一刀该往哪儿切要看**哪一族最多**。归一的办法是把消息里那几样会变的东西
+     * （文件名、具体的记号、期待表）擦掉，只留形状 —— 于是「同一个洞」的几十份
+     * 会落在同一行上。量出来的例子：cpp 的 269 份里 GLR 爆栈那一族占多少、
+     * 「unexpected X」那一族占多少，一眼就分得开。 */
+    const fam = new Map();
+    for (const f of r.fails) {
+      const msg = f.slice(f.indexOf(': ') + 2);
+      const key = msg
+        .replace(/'[^']*'/g, "'…'")
+        .replace(/"[^"]*"/g, '"…"')
+        .replace(/expected .*/, 'expected …')
+        .replace(/\(> \d+\)/, '(> N)')
+        .trim();
+      fam.set(key, (fam.get(key) ?? 0) + 1);
+    }
+    const top = [...fam.entries()].sort((a, b) => b[1] - a[1]);
+    process.stdout.write(`  —— 按形状归堆（${fam.size} 族）：\n`);
+    for (const [k, n] of top.slice(0, 8)) {
+      process.stdout.write(`  ${String(n).padStart(4)}  ${k}\n`);
+    }
   }
 } else if (rows.some((r) => r.fails.length > 0)) {
   process.stdout.write('\n（有没过的文件；加 --fail 看头几条）\n');
