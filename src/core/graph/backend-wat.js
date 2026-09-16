@@ -95,11 +95,21 @@ export const WAT_SHAPES = [
     //      间接调用点发 `call_indirect`（签名按元数分，形参这一批全是 i64）；
     //   2. `src/core/wasm/assemble.js`：**已经接了**（table / elem / type / call_indirect
     //      四样，判据是 `tests/graph/wasm.js` 里那份手写模块，V8 里跑出 70 / 8）；
-    //   3. `src/core/frontend-wat/lower.js:797` 现在一律拒 —— 而这一处比它看起来贵：
-    //      **头一版把价钱记低了，改过来**。`mir/ir.js:340` 那格 `CALLI` 确实早就有，
-    //      可 `grep CALLI` 数出来**只有 `frontend-c` 发它**（C 那条路直接落 MIR）。
-    //      `frontend-wat` 落的是 **OIR**，而 OIR 里**没有**"按值调用"这一格 ——
-    //      加它就要动 OIR 的全部消费者（interp / js / c / llvm / native）。
+    //   3. `src/core/frontend-wat/lower.js:797` 现在一律拒 —— 而这一处的价钱**记错过两遍**，
+    //      这是量到底的第三版：
+    //      * OIR **有**"按值调用"（`CallFn` -> MIR `CALLFN`，`interp.js:1033` 那格
+    //        `callFnValue`，JS 前端一直在用）。所以原来那句"OIR 里没有按值调用"**是错的**。
+    //      * OIR 欠的是**按函数号调用**：wasm 的函数值是**表下标**（一个 i32），
+    //        而 MIR 里对得上的是 `CALLI`（`interp.js:1046`，指针值 = 函数号 + 1，
+    //        `grep CALLI` 数出来只有 `frontend-c` 发它）。`CallFn` 那一格要的是"可调用的值"，
+    //        与表下标不是一回事，硬接就是在撒谎。
+    //      * 于是最小的一刀是四个文件：`frontend-wat`（认 table / elem / type /
+    //        call_indirect，出一格 OIR `CallIndirect`）· `hir/check.js`（定型）·
+    //        `mir/from_oir.js`（`CallIndirect` -> `CALLI`，表下标 -> 函数号要定一条
+    //        "elem 按模块函数顺序列全"的规矩）· 加上这一侧发表与 call_indirect。
+    //        **`backend-js` / `backend-c` 只有在往 `tests/wat/cases/` 加新用例时才躲不开**
+    //        （那条轴对每份 .wat 都跑 omni-js 与 omni-c）—— 图这条矩阵的 wat 腿走的是
+    //        WAT -> OIR -> MIR -> interp，用不着那两个后端。
     // 也就是说：真引擎那条判据（V8）现在就能覆盖这个形状，而树里那条 MIR 判据要等 OIR
     // 长出一格间接调用。**两条判据不一样长，这件事要写在账上**，不许含糊成"接不住"。
     witness: () => prog([
