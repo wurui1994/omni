@@ -99,13 +99,10 @@ export const NODES = new Map([
   N('set', 'stat', [{ name: 'value', sem: SEM.value }], {
     attrs: ['name'], effects: ['writes'], outs: [],
     doc: 'chez set! / sbcl cset / go OAS',
-    // 十门的规格里都有"改一格已有的名字"。矩阵九门 —— chez 那一门的映射**接了**
-    // （`case 'set!'`），欠的是**例子**：Scheme 那几份写成纯递归，一处 `set!` 都没有。
-    // 这一条与别的 why 不同：它欠的不是机制，是判据。
-    providers: {
-      spec: TEN,
-      why: { chez: '映射里 `set!` 接了，可 Scheme 那几份例子是纯递归 —— 欠的是一份用它的例子' },
-    },
+    // 十门的规格里都有"改一格已有的名字"，十门都接了。chez 那一门原来只欠**一份用它的
+    // 例子**（Scheme 那几份写的是纯递归）—— `ext/chez/examples/mut.ss` 就是补上的那一份。
+    // 这条留在这儿当纪录：账上"欠机制"与"欠判据"是两件事，分得清才算数。
+    providers: { spec: TEN, why: {} },
   }),
 
   // ---- 算子与调用（2 格）------------------------------------------------------

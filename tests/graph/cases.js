@@ -58,6 +58,11 @@ export const METHOD = ['3', '9', '3'];
  * 形状独一门，节点一格新的都没加。三行是：循环里早退后的和 · 循环量 · 函数里早退的值。
  */
 export const BLOCKRET = ['15', '6', '7'];
+/**
+ * mut：**改写一格已有的名字**（`set`）。单开一族的理由是账上算出来的 ——
+ * `set` 规格十门、矩阵九门，缺的 chez 欠的不是机制而是**一份用它的例子**。
+ */
+export const MUT = ['1', '3'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -123,6 +128,9 @@ export const CASES = [
   // `deferarg` 同一条：别的九门写不出这个形状 —— 而它落到的节点一格新的都没加
   // （循环里的 `(return)` 落 break、defun 里的 `(return-from f v)` 落 ret）。
   ...fam('blockret', BLOCKRET, ['sbcl']),
+  // 第十八个家族：**改写一格已有的名字**（chez 独一份）。理由同上，是账上算出来的：
+  // `set` 那格规格十门、矩阵九门，而缺的 chez 欠的是**判据**不是机制。
+  ...fam('mut', MUT, ['chez']),
 ];
 
 /**
