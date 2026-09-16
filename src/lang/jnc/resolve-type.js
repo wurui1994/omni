@@ -129,7 +129,7 @@ function baseOf(t, env, depth = 0) {
     return w0;
   }
   if (t.base.kind === 'named' || t.base.kind === 'generic' || t.base.kind === 'qualified') {
-    const name = nameText(t);
+    const name = typeNameText(t);
     if (name === null) return null;
     if (STD_INT_TYPEDEFS.has(name)) return intOf(name, t.mods ?? []);
     if (name === 'string_t') return { k: 'string' };
@@ -214,7 +214,7 @@ function baseOf(t, env, depth = 0) {
  * 函数那两条腿同一条口径）。先前这儿只取**头一段**（`ui`），于是 `ui.Item g_one = {…};`
  * 报的是"认不出基类型 'qualified'"（189-importcurly.jnc）。
  */
-function nameText(t) {
+function typeNameText(t) {
   const specs = t.raw?.specs;
   if (specs === null || specs === undefined || !Array.isArray(specs.items)) return null;
   const head = specs.items[1];                       // `(specs 类型 前 后)` 的第一格
@@ -276,7 +276,7 @@ function aliasBase(e, name, env, depth) {
 
 /** 基类型是整数那一族时的**底宽**（位）；不是整数或认不出答 null。 */export function baseIntBits(t) {
   if (t === null || t === undefined) return null;
-  const w = t.base.kind === 'word' ? t.base.text : nameText(t);
+  const w = t.base.kind === 'word' ? t.base.text : typeNameText(t);
   if (w === null || w === undefined) return null;
   return INT_BITS[w] ?? null;
 }
@@ -323,7 +323,7 @@ function fnParts(t, env) {
   const fnSuffix = suffixChain(t.raw?.dcl?.items?.[3]).find((s) => s?.items?.[0]?.value === 'fn-suffix');
   if (fnSuffix === undefined) return null;
   const params = [];
-  for (const f of formalList(fnSuffix.items[1])) {
+  for (const f of formalNodes(fnSuffix.items[1])) {
     const p = formalType(f, env);
     if (p === null) return null;
     params.push(p);
@@ -336,7 +336,7 @@ function eventParams(t, env) {
   const fnSuffix = suffixChain(t.raw?.dcl?.items?.[3]).find((s) => s?.items?.[0]?.value === 'fn-suffix');
   if (fnSuffix === undefined) return null;
   const out = [];
-  for (const f of formalList(fnSuffix.items[1])) {
+  for (const f of formalNodes(fnSuffix.items[1])) {
     const p = formalType(f, env);
     if (p === null) return null;
     out.push(p);
@@ -345,7 +345,7 @@ function eventParams(t, env) {
 }
 
 /** 形参表里的每一格（`formals` / `formals-add` / `formals-varargs`，按源码次序）。 */
-function formalList(node) {
+function formalNodes(node) {
   const out = [];
   let cur = node;
   while (cur !== null && cur !== undefined && Array.isArray(cur.items)) {
