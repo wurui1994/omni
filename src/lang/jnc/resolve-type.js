@@ -11,6 +11,7 @@
 
 import { headOf, named } from './adapt.js';
 import { evalConst } from './const-eval.js';
+import { INT_BITS } from './int-bits.js';
 
 /** 关键字基类型 → 类型对象（出处：`frontend-jnc/lower.js` 的 tyText 与四种位宽都发 int）。 */
 export const WORD_TYPES = {
@@ -20,18 +21,11 @@ export const WORD_TYPES = {
 };
 
 /**
- * 整数那一族的**底宽**（位）。方言里它们一律是 `int`，宽度只在两处要用：
- * 位域怎么挤成一格（见 `emit-agg.js` 那条规则）、以后的截断规则。
- * 出处：jancy 的 `setupStdTypedef`（`jnc_ct_TypeMgr.cpp:1759-1782`）与那几个关键字的 TypeKind。
+ * 整数那一族的**底宽**（位）。表本身在 `int-bits.js` —— 那儿是叶子，`const-eval.js`
+ * 也从那儿拿（原来它从这儿拿，两份模块就成环了，而我们自己那个 JS 前端不收环）。
+ * 这儿照旧导出它：`emit-ctx.js` 一直按这个出处 import。
  */
-export const INT_BITS = {
-  char: 8, short: 16, int: 32, long: 64, intptr: 64,
-  int8_t: 8, uint8_t: 8, utf8_t: 8, uchar_t: 8, byte_t: 8,
-  int16_t: 16, uint16_t: 16, utf16_t: 16, ushort_t: 16, word_t: 16,
-  int32_t: 32, uint32_t: 32, utf32_t: 32, dword_t: 32, uint_t: 32,
-  int64_t: 64, uint64_t: 64, ulong_t: 64, qword_t: 64,
-  size_t: 64, intptr_t: 64, uintptr_t: 64,
-};
+export { INT_BITS };
 
 
 /** 标准 typedef 里"整数那一族"（`size_t` / `uint8_t` …）—— 方言里都是 int。 */

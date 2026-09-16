@@ -14,9 +14,11 @@
 import { headOf, named } from './adapt.js';
 import { readEnum } from './agg.js';
 import { nameText, allInChain } from './declare.js';
-/* 位宽那张表只有一处家（`resolve-type.js` 的 `INT_BITS`）。两份模块互相 import 是**成环**的，
-   可这一格只在**调用时**才用到它（不在模块体里），所以环是安全的 —— 换成再抄一份表才是错。 */
-import { INT_BITS } from './resolve-type.js';
+/* 位宽那张表只有一处家（`int-bits.js` —— 那是一格叶子模块）。原来它在 `resolve-type.js` 里，
+   而那份也 import 这一份：**两份模块成环**。node 不在乎（只在调用时才用到那格），可我们
+   自己那个 JS 前端把整棵树拼成一个程序、成环就报错，于是自编译链上一直挂着一条
+   `import cycle`。抄两份表是错的，所以搬家 —— 见 int-bits.js 头上那段。 */
+import { INT_BITS } from './int-bits.js';
 
 /**
  * 一格常量表达式的值；算不出来答 null。
