@@ -12,8 +12,10 @@
 //           `(global $id (mut T)? (expr))` `(data (i32.const N) b0 b1 … | "串")`
 //           `(func $id (export "n")? (param …)… (result T)? (local …)… body…)`
 //           `(export "n" (func $id) | (memory 0))` `(start $id)`
+//           `(type $sig (func …))` `(table N funcref)` `(elem (i32.const N) $a $b …)`
 //   指令层：折叠写法（`(i64.add (local.get $a) (i64.const 1))`）· `block` / `loop` /
 //           `if`+`then`/`else` · `br` / `br_if`（名字或深度）· `return` · `call` · `drop`
+//           · `call_indirect`（`(type $sig)` 与**内联签名**两种写法）
 //           · `memory.size` / `memory.grow` · 访存那一族（`align=` / `offset=` 都收）
 //           · 下面 `OPS` 那张表里的算子
 //
@@ -22,9 +24,11 @@
 // 内存上下界、串转义 `m\61in` …… 后端一条都不发）。收下后者的理由是它换来一条**反向**判据：
 // 同一份夹具，MIR 那条路与 V8 两边输出逐行相同 —— 前端读错了才咬得住（见 tests/graph/wasm.js）。
 //
-// 没有 `table` / `elem` / `call_indirect`（那是"函数当值用"那条账，`backend-wat.js` 里现在
-// 报缺口）· 没有 `select` / 位运算里那几格没人发过的。**发到没见过的东西就当场报错**，
-// 不许猜着编：编出一份 V8 拒收的二进制，错会指到最没关系的地方（V8 只会说 invalid section）。
+// `table` / `elem` / `call_indirect` **已经收了**（"函数当值用"那条账付掉之后，两侧都在发
+// 这种形状）· 没有 `table.set` 那一族（表在这条路上是常量，前端正是靠这一条把
+// `call_indirect` 化开的）· 没有 `select` / 位运算里那几格没人发过的。
+// **发到没见过的东西就当场报错**，不许猜着编：编出一份 V8 拒收的二进制，错会指到最没关系的
+// 地方（V8 只会说 invalid section）。
 //
 // 判据在 `tests/graph/wasm.js`：那 76 份例子的 `.wat` 逐个装出二进制、交给
 // `WebAssembly.instantiate` 跑，输出与另外三条腿逐行相同；那四条"边界"case 钉住报错本身。
@@ -266,10 +270,12 @@ export function watToWasm(text) {
   const gidx = new Map();
   globals.forEach((g, k) => gidx.set(g.id, k));
 
-  const bodies = funcs.map((f) => encodeFunc(f, { fidx, gidx, tidByName }));
+  // `typeIdx` 也传进去：`call_indirect` 的**内联签名**写法要"用这份签名，没有就添一格"，
+  // 而类型段是在下面拼的（比这一行晚），所以这儿添进 `types` 还赶得上
+  const bodies = funcs.map((f) => encodeFunc(f, { fidx, gidx, tidByName, typeIdx }));
 
-  // ---- 拼段。**顺序是规范定的**：1 type · 2 import · 3 func · 5 memory · 6 global ·
-  //      7 export · 10 code · 11 data（没有 table / elem / start —— 后端不发那些）
+  // ---- 拼段。**顺序是规范定的**：1 type · 2 import · 3 func · 4 table · 5 memory ·
+  //      6 global · 7 export · 8 start · 9 elem · 10 code · 11 data
   const out = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
   const sec = (id, payload) => {
     if (payload === null) return;
@@ -404,12 +410,26 @@ function code(form, ctx) {
   }
   if (h === 'call') return [...sub(kids.slice(1)), 0x10, ...uleb(idxOf(ctx.fidx, kids[0]))];
   if (h === 'call_indirect') {
-    // `(call_indirect (type $sig) 实参… 下标)` —— 下标最后进栈（它是 `call_indirect` 的操作数）
-    const t = kids[0];
-    if (!Array.isArray(t) || t[0] !== 'type') throw new Error('wasm: call_indirect 要 (type $sig)');
-    const tid = ctx.tidByName?.get(t[1]);
-    if (tid === undefined) throw new Error(`wasm: 没有 ${t[1]} 这个签名（模块层要有 (type …)）`);
-    return [...sub(kids.slice(1)), 0x11, ...uleb(tid), 0x00];
+    // `(call_indirect (type $sig) 实参… 下标)` —— 下标最后进栈（它是 `call_indirect` 的操作数）。
+    // **内联签名**也收（`(call_indirect (param i64) 实参… 下标)`）：那是 WAT 的缩写，
+    // 意思就是"用这份签名，模块里没有就添一格"—— 所以照着 typeIdx 去重那条路走。
+    const isSig = (x) => Array.isArray(x) && (x[0] === 'param' || x[0] === 'result');
+    let tid;
+    let k = 0;
+    if (Array.isArray(kids[0]) && kids[0][0] === 'type') {
+      tid = ctx.tidByName?.get(kids[0][1]);
+      if (tid === undefined) throw new Error(`wasm: 没有 ${kids[0][1]} 这个签名（模块层要有 (type …)）`);
+      k = 1;
+      while (isSig(kids[k])) k += 1;    // `(type $s)` 后面把签名再写一遍是允许的，跳过
+    } else if (isSig(kids[0])) {
+      const parts = [];
+      while (isSig(kids[k])) parts.push(kids[k++]);
+      const { params, results } = signature(['func', ...parts]);
+      tid = ctx.typeIdx(params.map((p) => p.type), results);
+    } else {
+      throw new Error('wasm: call_indirect 要 (type $sig) 或者内联签名 (param …) (result …)');
+    }
+    return [...sub(kids.slice(k)), 0x11, ...uleb(tid), 0x00];
   }
   if (h === 'local.get') return [0x20, ...uleb(local(kids[0]))];
   if (h === 'local.set' || h === 'local.tee') {
