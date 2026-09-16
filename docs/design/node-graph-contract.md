@@ -346,8 +346,8 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
 - 矩阵里因此第一次有了 **skip** 这一档：**每一格都带理由**
   （"打印一格多值要运行期长度 + 拼串" / "嵌套的函数（闭包）还没接" / "墙在 OIR 不在 wasm"）。
   跳过不是失败 —— 那正是 §6 第 2 条要的样子：待办是算出来的，不是文档里许的愿。
-  现在的总账：**291 passed / 0 failed / 1 skipped**（语言例子 68 + 手搭图 5 × 后端 4），
-  每条腿末尾还印一行覆盖：`interp 73/73 · sx 73/73 · js 73/73 · wat 72/73`。
+  现在的总账：**295 passed / 0 failed / 1 skipped**（语言例子 69 + 手搭图 5 × 后端 4），
+  每条腿末尾还印一行覆盖：`interp 74/74 · sx 74/74 · js 74/74 · wat 73/74`。
   这三个数会随每一批节点变 —— 它们是**跑出来的**，不是写下来的，所以文档里这一行
   过期就是错，改代码的那一趟必须顺手改它。
 - **"还在跳的几乎全是字符串"那句话是错的 —— 数一遍就知道**。当时 21 格跳过里字符串只占 4 格
@@ -437,33 +437,34 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
    那说明删这一格会让**别处**崩，级联算漏了。
 3. **级联半径是数出来的**，不是手写的文档。
 
-现状：**41 样 × 73 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
+现状：**41 样 × 74 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
 数出来的半径（删了它，几份例子要它）：
 
 ```
 骨架那一层
-  prim 73/73 · const / ref / bind 各 68 · call / func 各 51 · branch 37 · region 35
-  set 33 · loop 32 · ret 24
-  list-new / index-get 各 12 · scope-exit / index-set / loop-exit 各 8 · conv 6
-  values / record-new / field-get / map-new / map-get / map-set / map-has 各 5
-  pick / field-set / slice 各 4
+  prim 74/74 · const / ref / bind 各 69 · call / func 各 52 · branch 37 · region 35
+  set 33 · loop 32 · ret 25
+  list-new / index-get 各 12 · scope-exit / index-set / loop-exit 各 8
+  record-new / field-get / conv 各 6 · field-set 5
+  values / map-new / map-get / map-set / map-has 各 5 · pick / slice 各 4
 附属那一层
-  prim.name 73 · const.value / ref.name / bind.name 各 68 · func.params / func.name 各 51
-  set.name 33 · loop-exit.kind 8 · conv.to 6
-  bind.keepMulti / pick.index / record-new.names / field-get.field / field-set.field 各 4
+  prim.name 74 · const.value / ref.name / bind.name 各 69 · func.params / func.name 各 52
+  set.name 33 · loop-exit.kind 8 · conv.to 6 · record-new.names / field-get.field 各 6
+  field-set.field 5 · bind.keepMulti / pick.index 各 4
 ```
 
 这张表就是 target.md 要的"特性 DAG 排序"的可量版本，而且它比 DAG 说得更准：
-**上面那 11 格是骨架**（半径 ≥ 24，删了就没程序可跑），**下面那 16 格想删就能删** ——
-删掉 `map` 那四格，另外 68 份例子一行不改照旧全绿；删掉 `record-new` 那三格也是 68 份。
+**上面那 11 格是骨架**（半径 ≥ 25，删了就没程序可跑），**下面那 16 格想删就能删** ——
+删掉 `map` 那四格，另外 69 份例子一行不改照旧全绿；删掉 `record-new` 那三格是 68 份。
 这才是"原子化"真正的样子：不是"分层分得细"，是**删了不牵连**。
 
 顺带看一眼这张表的变化：加了 map 那四格（第九批）之后，**骨架那一层的半径没有一格变**
 —— 新节点只在自己那 4 份例子上有半径。加了第十门语言 cpp（第十二批，先两份例子）之后，
 骨架那一层每格**整整长两份**（`prim` 69 → 71、`bind` 64 → 66），下面那 16 格**一格没动**；
-再给 cpp 补 `loopexit` 与 `index` 两份例子之后（71 → 73），涨的是骨架那一层加上
-`loop-exit`（7 → 8）与 `list-new`/`index-get`（11 → 12）—— **正好是那两份例子用到的格子，
-一格不多**。"加语言不加节点"与"加特性不牵连"这两句话，是这么量出来的，方向还正好相反。
+再给 cpp 补 `loopexit` / `index` / `record` 三份例子之后（71 → 74），涨的是骨架那一层加上
+`loop-exit`（7 → 8）、`list-new`/`index-get`（11 → 12）、`record-new`/`field-get`（5 → 6）与
+`field-set`（4 → 5）—— **正好是那三份例子用到的格子，一格不多**。
+"加语言不加节点"与"加特性不牵连"这两句话，是这么量出来的，方向还正好相反。
 
 附属那一轮还顺手给出一条**判"是不是附属"的可量标准**：拿"删节点"与"删它的附属"
 两个半径比一比。`bind` 56 而 `bind.keepMulti` 4 —— 差 52，`keepMulti` 是**真附属**；
@@ -791,7 +792,7 @@ go 的映射把实参先 `bind` 到一格临时名字（`bind` 的语义就是"�
 10 机器  bind / func / branch / prim / ref / call / const   （十门语言全有）
  9 机器  loop / set          8 机器  region / ret
  4 机器  scope-exit                       go nim sbcl vlang
- 4 机器  record-new / field-get / field-set  go lua nim vlang
+ 5 机器  record-new / field-get / field-set  cpp go lua nim vlang
  8 机器  list-new / index-get / index-set    chez cpp go lua mojo nim sbcl vlang
  6 机器  loop-exit           cpp go lua mojo nim vlang
  4 机器  values / pick       go lua nim sbcl
@@ -801,16 +802,15 @@ go 的映射把实参先 `bind` 到一格临时名字（`bind` 的语义就是"�
 ```
 
 cpp 进来那一趟这张表变了三处，而**三处都是加提供者、不是加节点**：七格骨架从 9 到 10、
-`loop`/`set` 从 8 到 9、`region`/`ret` 从 7 到 8。后来 cpp 又进了 `loopexit`（5 → 6）与
-`index`（7 → 8）两族，同样一格新节点都没有：`break`/`continue` 落的就是那格 `loop-exit`，
-`int xs[3] = {10, 20, 30}` 落 `list-new` + `bind`、`xs[i]` 落 `index-get`、
-`xs[1] = 5` 落 `index-set`。
+`loop`/`set` 从 8 到 9、`region`/`ret` 从 7 到 8。后来 cpp 又进了 `loopexit`（5 → 6）、
+`index`（7 → 8）与 `record`（4 → 5）三族，同样一格新节点都没有：`break`/`continue` 落那格
+`loop-exit`，`int xs[3] = {10, 20, 30}` 落 `list-new` + `bind`、`xs[i]` 落 `index-get`、
+`xs[1] = 5` 落 `index-set`，`Point p = {1, 2}` 落 `record-new`、`p.x` 落 `field-get`、
+`p.y = 5` 落 `field-set`。
 
-**cpp 明确没进的两族，理由都是"硬凑就是看着绿其实错"**：
-- `conv`（期望 `2 / 3.5`）—— C++ 真跑 `printf("%f\n", 3.5)` 印的是 `3.500000`。
-  例子得是**那门语言真能跑出这份输出**的程序，凑不出来就不进。
-- `record`（期望 `1 / 5 / 6`）—— `P p = {1, 5};` 那种花括号初始化式既能填记录也能填列表，
-  分开要"这个类型有哪些字段"，而类型全丢。这一批 `braces` 一律当列表收，所以记录不进。
+**cpp 明确没进 `conv`（期望 `2 / 3.5`）**：C++ 真跑 `printf("%f\n", 3.5)` 印的是
+`3.500000`。例子得是**那门语言真能跑出这份输出**的程序，凑不出来就不进 —— 这一条比
+"多一个提供者"要紧。
 
 `scope-exit` 补上了 nim 与 V 的 `defer`（各多一个 `examples/defer.*`，与 go/CL 共用
 同一份期望输出 `in / b / a / out`），四个提供者，够 G5 的"机器"线。
@@ -961,6 +961,30 @@ wat 那侧只加了两句：一格数放进一格 1 槽的存储，交给 `$__st
 所以"印一格多值"与"数转串"用的是同一份代码，不是抄两遍。顺带发现 nim 的 `$` 在树上是
 **前缀算符**而不是调用，映射里原来只在调用那一侧查转换名字表 —— 一行补上（同一张表两处查）。
 还欠着的写在 `shapeGaps` 里：**实数 -> 串**（f64 的十进制是另一套：有效位、舍入、指数）。
+
+**第十四批：cpp 再进三族（loopexit / index / record，一行新节点都没加）** —— 总账
+283 → **295 passed / 0 failed / 1 skipped**（语言例子 66 → 69）。三族的期望输出一个字
+没改（`12 / 6 / 8`、`10 / 30 / 45`、`1 / 5 / 6`），提供者名单因此涨了三处：
+`loop-exit` 5 → 6、`list-new`/`index-get`/`index-set` 7 → 8、
+`record-new`/`field-get`/`field-set` 4 → 5。
+
+`record` 那份逼出了**第五类"语法写松了"**，而且这一类比前四类更隐蔽：
+`struct Point { int x; int y; };` **一度根本解析不出来**（报歧义）。根因是 `noptr` 可空
+（抽象声明符那一支），于是同一串记号还能读成"class-spec 当返回类型 + 没名字的声明符 +
+`{…}` 当函数体"这一格**函数定义**，后面那个 `;` 再当一格空声明。可"函数定义的声明符
+没有名字"在 C++ 里根本不合法 —— 抽象声明符只在**形参与 type-id** 里出现。
+按语法头上第三条那句办法（"复制一条受限链把那一格挡掉"）拆成两条链：
+`declarator`（必须有名字）与 `abs-decl` / `abs-noptr`（可以整格省掉，只给形参与 type-id 用）。
+拆完 `struct`/`class`/匿名 struct 全部单解，`basics.cpp` 一个字没动照旧对。
+
+映射那侧只加了一条判据，而它与 map 那一族是**同一条**：`{1, 2}` 在 C++ 里既能填记录
+也能填列表，分开靠的不是类型系统，是"造它的那一步自带标记" —— 这儿的标记是同一份文件里的
+`struct Point`（扫一遍拿到字段名，`STRUCTS`，二十行）。扫不到的（外部头文件里声明的记录）
+当场报错，不猜。`p.x` / `p->x` 落 `field-get`（指针是写法，图上没有取地址那件事），
+`p.y = 5` 落 `field-set`。
+
+**`conv` 那一族 cpp 明确不进**：C++ 真跑 `printf("%f\n", 3.5)` 印的是 `3.500000`。
+例子必须是那门语言**真能跑出这份期望输出**的程序 —— 多一个提供者不值这个价。
 
 **第十二批：第十门语言 cpp 进矩阵（一行新节点都没加）** —— 判据就是那份唯一的期望输出：
 `ext/cpp/examples/basics.cpp` 与另外九门同一份 `15 / 120 / 7 / ok`，加一份 `intmath.cpp`

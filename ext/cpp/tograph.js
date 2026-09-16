@@ -17,9 +17,60 @@ import {
 import {
   isList, tag, kids, leaf, part,
   ops, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
+  recordNew, fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
 const OPS = ops();
+
+/**
+ * **哪个名字是记录、它有哪些字段**（`struct Point { int x; int y; };` 扫出来的）。
+ *
+ * 与 go / V 的 `(lit (map …))`、nim 的 `initTable[…]()` 是同一条：`{1, 2}` 这种花括号
+ * 初始化式**既能填记录也能填列表**，分开靠的不是类型系统，是"造它的那一步自带标记" ——
+ * cpp 这儿的标记就是**同一份文件里的 struct 声明**。扫一遍就有答案（十几行），
+ * 不必回问类型（那是 `T * x;` 那笔账，另一件事）。
+ *
+ * 判不了的一律报错、不猜：外部头文件里声明的记录（没扫到）当场报。
+ */
+let STRUCTS = new Map();
+
+/** `(class struct (n Point) (members …))` -> 登记字段名 */
+function collectStructs(x) {
+  if (Array.isArray(x)) { x.forEach(collectStructs); return; }
+  if (!isList(x)) return;
+  if (tag(x) === 'class') {
+    const nm = kids(x).find((y) => isList(y) && (tag(y) === 'n' || tag(y) === 'name'));
+    const ms = part(x, 'members');
+    if (nm !== undefined && ms !== undefined) {
+      const fields = [];
+      for (const m of kids(ms)) {
+        if (!isList(m) || tag(m) !== 'decl') continue;
+        const ip = part(m, 'init');
+        if (ip === undefined) continue;
+        for (const d of kids(ip)) if (isList(d) && tag(d) === 'd') fields.push(declName(d));
+      }
+      STRUCTS.set(nameOf(nm), fields);
+    }
+  }
+  kids(x).forEach(collectStructs);
+}
+
+/** 这格 specs 说的是哪个**记录**（不是记录就回 null） */
+function structOf(specs) {
+  if (specs === undefined) return null;
+  for (const s of kids(specs)) {
+    if (!isList(s)) continue;
+    if (tag(s) === 'n' || tag(s) === 'name') {
+      const nm = nameOf(s);
+      if (STRUCTS.has(nm)) return nm;
+    }
+    if (tag(s) === 'elaborated') {
+      const nm = kids(s).find((y) => isList(y) && (tag(y) === 'n' || tag(y) === 'name'));
+      if (nm !== undefined && STRUCTS.has(nameOf(nm))) return nameOf(nm);
+    }
+  }
+  return null;
+}
 
 const many = (xs) => xs.map(toNode).flat();
 
@@ -96,9 +147,13 @@ function toNode(x) {
       const [obj, idx] = kids(x);
       return indexGet(toNode(obj), toNode(idx));
     }
-    // `{10, 20, 30}` -> list-new。**这一批只当列表收**：C++ 的花括号初始化式也能填记录，
-    // 那要"这个类型有哪些字段"才分得开（类型全丢，答不出来）—— 记录用 `P p = {…}` 的形状
-    // 时这儿会给一格列表，所以记录那一族 cpp 还没进（明说的限制，不猜）。
+    // `p.x` -> field-get（`p->x` 也落这一格：指针是写法，图上没有取地址那件事）
+    case 'dot': case 'arrow': {
+      const [obj, f] = kids(x);
+      return fieldGet(toNode(obj), nameOf(f));
+    }
+    // `{10, 20, 30}` -> list-new。**记录那一侧看的是被声明的类型**（见 decl 那一格）——
+    // 走到这儿的花括号就是列表。
     case 'braces': return listNew(many(kids(x)));
     case 'expr': return toNode(kids(x)[0]);
     case 'pp': return [];                       // `#include` 丢掉（这一批不做预处理）
@@ -128,6 +183,13 @@ function toNode(x) {
       if (leaf(op) !== '=' && o === undefined) {
         throw new Error(`cpp->graph: 这个复合赋值还没接：${leaf(op)}`);
       }
+      // 左边是一格**字段**（`p.y = 5`）⇒ field-set
+      if (tag(t) === 'dot' || tag(t) === 'arrow') {
+        const [obj, f] = kids(t);
+        const fname = nameOf(f);
+        const v2 = o === null ? toNode(v) : bin(o, fieldGet(toNode(obj), fname), toNode(v));
+        return fieldSet(toNode(obj), fname, v2);
+      }
       // 左边是一格**下标**（`xs[1] = 5`）⇒ index-set（与 go / lua 同一格节点）
       if (tag(t) === 'index') {
         const [obj, idx] = kids(t);
@@ -148,9 +210,24 @@ function toNode(x) {
       // 它在语法那侧却很要紧：那一格是驱动器"这名字登记成类型了吗"的登记处。
       if (specs !== undefined && kids(specs).some((s) => !isList(s) && leaf(s) === 'typedef')) return [];
       const initPart = part(x, 'init');
-      if (initPart === undefined) return [];    // `struct Foo;` 这种纯声明：图上没有它
+      if (initPart === undefined) return [];    // `struct Foo;` / `struct P {…};`：图上没有它
+      const rec = structOf(specs);
       return kids(initPart).filter((d) => tag(d) === 'd').map((d) => {
         const v = part(d, 'init');
+        // `Point p = {1, 2};` —— 记录（字段名从 struct 声明来，见 STRUCTS）。
+        // `{…}` 本身在 cpp 里既能填记录也能填列表，所以**看被声明的类型是不是记录**，
+        // 不看花括号里长什么样。
+        const braces = v !== undefined && isList(kids(v)[0]) && tag(kids(v)[0]) === 'braces'
+          ? kids(kids(v)[0]) : null;
+        if (rec !== null && braces !== null) {
+          const names = STRUCTS.get(rec);
+          if (names.length !== braces.length) {
+            throw new Error(`cpp->graph: ${rec} 有 ${names.length} 个字段，这儿给了 ${braces.length} 个值`);
+          }
+          return node('bind', {
+            init: recordNew(names.map((nm, i) => [nm, toNode(braces[i])])),
+          }, { name: declName(d) });
+        }
         return node('bind', {
           init: v === undefined ? lit(null) : toNode(kids(v)[0]),
         }, { name: declName(d) });
@@ -219,12 +296,19 @@ function toNode(x) {
 /** 一棵 cpp 的 GLR 树（`(unit 项…)`）-> 一张图。入口是 `main`（末尾补一格调用）。 */
 export function cppToGraph(tree) {
   if (tag(tree) !== 'unit') throw new Error('cpp->graph: 这不是 (unit …)');
+  // 先扫一遍记录声明（`struct P {…}` 的字段名）—— `{1, 2}` 填记录还是填列表靠它分开
+  STRUCTS = new Map();
+  collectStructs(kids(tree));
   const body = many(kids(tree));
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
 //   1. 类型全丢；指针 / 引用 / 数组的修饰只从声明符里取名字（`const char* t` 的 `*` 丢掉）。
-//   2. `T * x;` 那种"声明还是表达式"仍靠 `prefer` 偏表达式（真解要回问符号表，task #15）。
-//   3. class / 模板 / 命名空间 / 运算符重载 / lambda / 异常都不在这一批 ——
+//   2. `T * x;` 那种"声明还是表达式"**已经不靠猜了** —— 驱动器会回问"这名字登记成类型
+//      了吗"（`declares-type` / `needs-type`，见 cpp.grammar 与 driver.js），
+//      cpp 那格 `prefer` 删掉了。还欠的是模板名那一类（`a<b>(c)`）。
+//   3. 记录的字段名靠**扫同一份文件里的 struct 声明**（`STRUCTS`）—— 外部头文件里声明的
+//      记录扫不到，当场报错。这与 map 那一族"造它的那一步自带标记"是同一条判据。
+//   4. class 的方法 / 模板 / 命名空间 / 运算符重载 / lambda / 异常都不在这一批 ——
 //      它们各要一台机器（方法调用、实例化、作用域、闭包、切段）。
