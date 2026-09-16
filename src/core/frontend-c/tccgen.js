@@ -2879,6 +2879,32 @@ export class CGen {  /**
    * 长度是**见过的最大格号**，不是「格数」：指定初始化器可以往回跳
    * （`{ [4] = 5, [0] = 1 }` 的长度是 5）。
    */
+  /**
+   * 数格子那一遍里，把一个初始化项**读出来只为看它的类型**（第一百三十四片）。
+   *
+   * tcc 在 `DIF_SIZE_ONLY` 那一路上有一条明写的例外（`tccgen.c:8034` 那段注释就是
+   * 我们撞见的这一句）：
+   *
+   *     a struct may be initialized from a struct of same type, as in
+   *         struct {int x,y;} a = {1,2}, b = {3,4}, c[] = {a,b};
+   *     In that case we need to parse the element in order to check
+   *     it for compatibility below
+   *
+   * —— 目标类型是 struct 时，连数格子那一遍也得**真的解析**这一项，不然
+   * `c[] = {a,b}` 会被数成一格（每个成员各吃一项），报「excess elements」。
+   * tcc 用 `nocode_wanted++` 挡住代码生成；我们与 `sizeof` 同一个手法：把 `this.f`
+   * 换成一个用完就丢的 MirFunc。数格子这一遍走的是**回放的记号**，真正那一遍会重放
+   * 一次，所以这儿把记号吃掉不影响后面。
+   */
+  measureInitElem() {
+    const scratch = new MirFunc('$initsize', [], T_VOID);
+    const outer = this.f;
+    this.f = scratch;
+    const v = this.exprEq();
+    this.f = outer;
+    return v;
+  }
+
   countBraced(ty) {
     this.next();      // `{`
     const stack = [{ ty: mkArray(ty.ref, -1), off: 0, i: 0 }];
@@ -2892,6 +2918,7 @@ export class CGen {  /**
         nb = this.initDesignators(stack);
         if (stack.length > 1) chainAt = stack[0].i;
       }
+      let parsed = false;
       for (;;) {
         const el = this.initElem(stack[stack.length - 1]);
         if (this.tok === LBRACE) break;
@@ -2900,11 +2927,18 @@ export class CGen {  /**
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
           this.err(`'${cTypeText(el.ty)}' is an incomplete type`);
         }
+        /* 与 `initBraced` 那一路同一条规则（见 `measureInitElem`）：目标是 struct 时
+         * 这一项要真的解析一遍看类型 —— 相容就是**一整格**，不相容才是括号省略。 */
+        if (isStruct(el.ty.t) && !parsed) {
+          const v = this.measureInitElem();
+          parsed = true;
+          if (sameTypeUnqual(el.ty, v.ty)) break;
+        }
         stack.push({ ty: el.ty, off: el.off, i: 0 });
       }
       const lv = stack[stack.length - 1];
       this.initElem(lv);              // 越界那一条检查照旧
-      this.skipInitItem();
+      if (!parsed) this.skipInitItem();
       if (nb > 1) lv.i += nb - 1;
       this.initBump(lv);
       while (stack.length > 1 && this.initFull(stack[stack.length - 1])) {

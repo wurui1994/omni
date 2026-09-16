@@ -34,8 +34,8 @@ import { utf8Bytes } from '../host/utf8.js';
 import {
   COND, addImm, addReg, andImm, andReg, asrv, blr, cmpImm, cmpReg, cset, eorImm, eorReg, fadd,
   fcmpArm64, fcvtDS, fcvtSD, fcvtzs, fcvtzu, fdiv, fmovFromInt, fmovToInt, fmul, fneg, fsub,
-  ldpPost, ldrU, ldrsU, lslv, lsrv, movReg, movSp, movk, movz, msub, mul, mvn, neg, orrReg,
-  retArm64, scvtf, sdiv, stpPre, strU, subImm, subReg, sxtb, sxth, sxtw, ucvtf, udiv
+  ldpPost, ldrU, ldrsU, ldrRegOff, lslv, lsrv, movReg, movSp, movk, movz, msub, mul, mvn, neg, orrReg,
+  retArm64, scvtf, sdiv, stpPre, strU, strRegOff, subImm, subReg, sxtb, sxth, sxtw, ucvtf, udiv
 } from './encode.js';
 import { Arm64CodeBuf } from './asm.js';
 import {
@@ -441,15 +441,31 @@ class FnGen {
     return off;
   }
 
-  /** 帧里的一个 8 字节格子的读写。偏移超过 `ldr` 能表示的范围就明着报。 */
+  /**
+   * 帧里的一个 8 字节格子的读写。
+   *
+   * 偏移超过那一格能表示的范围（`ldr` 的立即数是缩放过的 12 位，8 字节宽时是
+   * 0..32760）就**把偏移造进 x30、走「基址 + 寄存器」那一形**（第一百三十三片）。
+   * 照 tcc 的 `arm64_ldrx`/`arm64_strx`（`arm64-gen.c`）——它挑的也是 x30：序言里
+   * `stp x29, x30` 已经把调用者的那份存起来了，函数体里没人用它，收场再取回来。
+   * 量出来的：`src/runtime/omni_r3.c` 的帧有 32768 字节以上，之前这儿直接报错。
+   */
   frameLoad(reg, off) {
-    if (off > 32760) throw new OmniError(`arm64: 帧偏移 ${off} 太大（这一片还不搬基址）`);
-    this.buf.emit(ldrU(3, reg, this.base, off));
+    if (off <= 32760) {
+      this.buf.emit(ldrU(3, reg, this.base, off));
+      return;
+    }
+    this.movImm(30, off);
+    this.buf.emit(ldrRegOff(3, reg, this.base, 30));
   }
 
   frameStore(reg, off) {
-    if (off > 32760) throw new OmniError(`arm64: 帧偏移 ${off} 太大（这一片还不搬基址）`);
-    this.buf.emit(strU(3, reg, this.base, off));
+    if (off <= 32760) {
+      this.buf.emit(strU(3, reg, this.base, off));
+      return;
+    }
+    this.movImm(30, off);
+    this.buf.emit(strRegOff(3, reg, this.base, 30));
   }
 
   /**
