@@ -100,10 +100,36 @@ function check(name, g, expect) {
       continue;
     }
     if (b.runnable === false) {
-      // 只序列化的后端（sx）只对"出得来、且不空"负责 —— 它不承诺跑
-      if (typeof art.text === 'string' && art.text.length > 0) {
-        process.stdout.write(`  ok   ${label} [序列化 ${art.text.split('\n').length} 行]\n`); pass++; tally(b.name, 'ok');
-      } else { process.stdout.write(`  FAIL ${label}: 序列化出来是空的\n`); fail++; tally(b.name, 'fail'); }
+      // sx 那一格：**三条一起验** —— 出得来、读回来逐字节相同、读回来那张图跑出同一份输出。
+      // 第二三条是后加的：原来只验"出得来、且不空"，那连"这份文本能不能读回来"都没管，
+      // 而"图的一种写法"这句话不成立的话 sx 就没有存在的理由（见 contract.js 那一段）。
+      if (typeof art.text !== 'string' || art.text.length === 0) {
+        process.stdout.write(`  FAIL ${label}: 序列化出来是空的\n`); fail++; tally(b.name, 'fail');
+        continue;
+      }
+      const lines = art.text.split('\n').length;
+      try {
+        const again = art.reread();
+        if (again !== art.text) {
+          const at = firstLineDiff(art.text, again);
+          process.stdout.write(`  FAIL ${label}: 读回来再序列化**不一样**\n${at}\n`);
+          fail++; tally(b.name, 'fail');
+          continue;
+        }
+        const { out } = art.run();
+        const got = out.join(' / ');
+        const want = expect.join(' / ');
+        if (got !== want) {
+          process.stdout.write(`  FAIL ${label}: 读回来那张图跑出别的结果\n       期望 ${want}\n       得到 ${got}\n`);
+          fail++; tally(b.name, 'fail');
+          continue;
+        }
+      } catch (err) {
+        process.stdout.write(`  FAIL ${label}: ${err.message}\n`); fail++; tally(b.name, 'fail');
+        continue;
+      }
+      process.stdout.write(`  ok   ${label} [序列化 ${lines} 行 · 读回来逐字节相同 · 跑出同一份输出]\n`);
+      pass++; tally(b.name, 'ok');
       continue;
     }
     try {
@@ -119,6 +145,17 @@ function check(name, g, expect) {
       fail++; tally(b.name, 'fail');
     }
   }
+}
+
+/** 两份文本第一处不同的那一行 —— 整份 sx 贴出来没人读 */
+function firstLineDiff(want, got) {
+  const a = want.split('\n');
+  const b = got.split('\n');
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] === b[i]) continue;
+    return `       第 ${i + 1} 行\n       原文 ${JSON.stringify(a[i] ?? '<结束>')}\n       读回 ${JSON.stringify(b[i] ?? '<结束>')}`;
+  }
+  return '       （只差在末尾的空白）';
 }
 
 for (const c of CASES) {
@@ -171,7 +208,7 @@ process.stdout.write('\n每条腿的覆盖（比覆盖，不比优劣）：\n');
 for (const b of backends()) {
   const c = cov.get(b.name) ?? { ok: 0, skip: 0, fail: 0 };
   const total = c.ok + c.skip + c.fail;
-  const tail = b.runnable === false ? '（只序列化，不承诺跑）'
+  const tail = b.runnable === false ? '（序列化 + 读回来逐字节相同 + 跑出同一份输出）'
     : (c.skip === 0 ? '' : `，${c.skip} 格跳过（节点级缺口 ${gaps(b.name).length} 格`
       + ` · 形状上的账 ${shapeGaps(b.name).length} 条）`);
   process.stdout.write(`  ${b.name.padEnd(7)}${c.ok}/${total} 跑通${tail}\n`);

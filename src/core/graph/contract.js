@@ -19,7 +19,7 @@ import {
   evalGraph, showValue, truthy, pick, field, setField, index, setIndex, convert, sliceOf,
   mapNew, mapGet, mapSet, mapHas,
 } from './eval.js';
-import { toSx } from './graph.js';
+import { toSx, fromSx } from './graph.js';
 import { PRIMS } from './prims.js';
 import { emitWat, watCan, runWat, WAT_SHAPES, Gap } from './backend-wat.js';
 
@@ -74,14 +74,28 @@ registerBackend({
 });
 
 // ---- 后端二：`sx` —— 图的序列化。**它不是中间语言的文本形式**（§5.2）--------------
+//
+// 判据从"出得来、且不空"升成了**读回来还是同一张图**：`toSx(fromSx(t)) === t` 逐字节相同，
+// 而且读回来的图交给默认解释器跑，输出与别的腿逐行相同（后者借 interp 那条腿，明说）。
+// 原来那句"只序列化，不承诺跑得起来"太松 —— 它连"这份文本能不能读回来"都没管，
+// 而"图的一种写法"这句话不成立的话，sx 这一格就没有存在的理由。
 registerBackend({
   name: 'sx',
   can: () => true,
   carry: (sort) => `(sort ${sort})`,
   effect: (e) => `(effect ${e})`,
   region: () => '(region …)',
-  lower: (g) => ({ text: toSx(g), run: () => ({ value: null, out: [] }) }),
-  /** 只序列化，不承诺跑得起来 —— 所以它在测试矩阵里只对"文本稳定"负责。 */
+  lower: (g) => {
+    const text = toSx(g);
+    return {
+      text,
+      /** 读回来再序列化 —— 与 text 逐字节相同才算这一格立住 */
+      reread: () => toSx(fromSx(text)),
+      /** 读回来的那张图跑一遍（借默认解释器 —— sx 自己不是执行器） */
+      run: () => evalGraph(fromSx(text)),
+    };
+  },
+  /** 不是"跑不了"，是**它跑的是读回来的那张图** —— 矩阵里单列一格判据（见 run.js） */
   runnable: false,
 });
 
