@@ -206,13 +206,15 @@ export const NODES = new Map([
   // 提供者只有 go 一门（G5 那条里的"一家"），更说明它不该变成节点。
   N('scope-exit', 'stat', [{ name: 'action', sem: SEM.body }], {
     effects: ['writes'], outs: [],
-    doc: 'defer（go/nim/V）/ unwind-protect（CL）/ <close>（lua）/ with（mojo）/ RAII（cpp）',
+    doc: 'defer（go/nim/V）/ unwind-protect（CL）/ <close>（lua）/ with（mojo）/ RAII（cpp）'
+      + ' / Destructor（freebasic）',
+    // **八门全接了**（这一格是矩阵里第一格"规格与矩阵对齐"的能力节点）。
+    // lua 那一门最后落地：它的出口动作在**元表**里，而元表量下来不要新节点 ——
+    // 一格 map（对象）+ 一格 map-set（元表存进保留键 `__meta`）+ 这一格 scope-exit
+    // （出口那一刻从元表里查出 `__close` 再调它）。
     providers: {
       spec: ['go', 'nim', 'vlang', 'sbcl', 'lua', 'mojo', 'freebasic', 'cpp'],
-      why: {
-        lua: '`local x <close>` 的出口动作是元表里的 `__close` —— 图这一层没有元表'
-          + '（那是真的运行期查表，与另外七门"名字从声明来"不是一回事）',
-      },
+      why: {},
     },
   }),
 

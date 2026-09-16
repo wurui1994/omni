@@ -88,6 +88,48 @@ function nameOf(x) {
  * 给 `undefined` 的代价是量出来的：那一格会被 `toSx` 印成字面的 `undefined`，
  * 读回来当场报"这一格附属的值不是 JSON"（`gsl-shell × sx` 那一格就是这么红的）。
  */
+/**
+ * `local g <close> = setmetatable({}, { __close = function(o, e) … end })`
+ * -> **三格现成的节点**：一格 map、一格 map-set（把元表存进保留键 `__meta`）、
+ * 一格 scope-exit（出口那一刻从元表里查出 `__close` 再调它）。
+ *
+ * 这就是"元表要不要新节点"那笔账量出来的答案：**不要**。元表是一格运行期的表，
+ * 而图上"一格表 + 按键取值"本来就有（map 那四格）—— 于是 lua 的 `<close>` 落的是
+ * 与 go 的 `defer`、CL 的 `unwind-protect`、cpp 的 `~T()` **同一格 scope-exit**。
+ *
+ * 这一批只接上面那一种形状（元表就在声明这一行里写着）：`setmetatable` 出现在别处、
+ * 元表是个变量、`__close` 从别的表继承来 —— 都当场报，不猜。那几种要"元表在运行期
+ * 才知道"，而那是 `__index` 那条链的事（`method` 那一族的账）。
+ */
+function closeBind(nm, v) {
+  const bad = (why) => {
+    throw new Error(`lua->graph: \`<close>\` 这一批只接 `
+      + '`setmetatable({}, { __close = function(o, e) … end })` 这一种形状'
+      + `（${why}）`);
+  };
+  if (v === undefined || tag(v) !== 'call') bad('右边不是一格调用');
+  const [fn, args] = kids(v);
+  if (tag(fn) !== 'name' || atomText(kids(fn)[0]) !== 'setmetatable') bad('被调者不是 setmetatable');
+  const as = args === undefined ? [] : kids(args);
+  if (as.length !== 2) bad('setmetatable 要两格实参');
+  if (tag(as[0]) !== 'table' || kids(as[0]).length !== 0) bad('第一格实参这一批只接空表 `{}`');
+  if (tag(as[1]) !== 'table') bad('第二格实参不是就地写出来的表');
+  const named = kids(as[1]);
+  if (named.length === 0 || !named.every((e) => tag(e) === 'named')) bad('元表里要写成 `键 = 值`');
+  if (!named.some((e) => atomText(kids(e)[0]) === '__close')) bad('元表里没有 __close');
+  const obj = () => node('ref', {}, { name: nm });
+  return [
+    node('bind', { init: mapNew() }, { name: nm }),
+    mapSet(obj(), lit('__meta'), mapNew(named.map((e) => [lit(atomText(kids(e)[0])), toNode(kids(e)[1])]))),
+    node('scope-exit', {
+      action: [node('call', {
+        fn: mapGet(mapGet(obj(), lit('__meta')), lit('__close')),
+        args: [obj(), lit(null)],     // lua 传给 `__close` 的是（那格量, 错误）
+      })],
+    }),
+  ];
+}
+
 function funcOf(bodyNode, name) {
   const params = partOf(bodyNode, 'params').map(nameOf);
   const blk = kids(bodyNode).find((y) => tag(y) === 'block');
@@ -177,15 +219,22 @@ function toNode(x) {
     case 'block': return node('region', { body: many(kids(x)) });
     case 'do': return node('region', { body: many(kids(kids(x)[0])) });
     case 'local': {
-      const names = partOf(x, 'names').map(nameOf);
+      const nameNodes = partOf(x, 'names');
+      const names = nameNodes.map(nameOf);
       const values = partOf(x, 'values');
       // `local a, b = f()`：N 个名字对 1 个右值 ⇒ 多值的消费侧（`destructure` 五门共用）
       if (names.length > 1 && values.length === 1) return destructure(names, toNode(values[0]));
-      return names.map((nm, i) => node('bind', {
-        // **被当字典用过的名字**：`local m = {}` 出的是 map-new 而不是 list-new
-        // （table 那一格自己看不出来是哪种 —— 判据在"它被怎么用过"，见 MAPS）
-        init: values[i] === undefined ? lit(null) : initFor(nm, values[i]),
-      }, { name: nm }));
+      return nameNodes.map((nd, i) => {
+        // `local g <close> = …`：**出口动作从元表里来** —— 三格现成的节点（见 closeBind）
+        if (tag(nd) === 'att' && atomText(kids(nd)[1]) === 'close') {
+          return closeBind(names[i], values[i]);
+        }
+        return node('bind', {
+          // **被当字典用过的名字**：`local m = {}` 出的是 map-new 而不是 list-new
+          // （table 那一格自己看不出来是哪种 —— 判据在"它被怎么用过"，见 MAPS）
+          init: values[i] === undefined ? lit(null) : initFor(names[i], values[i]),
+        }, { name: names[i] });
+      }).flat();
     }
     case 'localfn': case 'globalfn': {
       const [nm, body] = kids(x);
