@@ -87,7 +87,12 @@
       "reinterpret_cast" "requires" "return" "short" "signed" "sizeof" "static"
       "static_assert" "static_cast" "struct" "switch" "template" "this"
       "thread_local" "throw" "true" "try" "typedef" "typeid" "typename" "union"
-      "unsigned" "using" "virtual" "void" "volatile" "wchar_t" "while")
+      "unsigned" "using" "virtual" "void" "volatile" "wchar_t" "while"
+      ;; `_Pragma("…")`（[cpp.pragma.op]）：它是**运算符**，不是指令 —— 长在声明位置与
+      ;; 语句位置。收它的理由是量出来的：这条语料里 97 份卡在 `_Pragma( "GCC diagnostic pop" )`
+      ;; （宏展开出来的那一形，比如 libc++ 的 `_LIBCPP_SUPPRESS_DEPRECATED_POP`）。
+      ;; 名字是保留的，登记成关键字不会抢走谁的标识符。
+      "_Pragma")
 
     ;; ---- 运算符与标点。C++ 的这一族是封闭的，一条条列（长的在前只为读起来清楚）。
     (op "<<=" ">>=" "->*" "..." "<=>"
@@ -117,7 +122,12 @@
     (-> (using-decl) $1)
     (-> (extern-block) $1)
     (-> (static-assert) $1)
-    (-> (asm-decl) $1))
+    (-> (asm-decl) $1)
+    ;; `_Pragma("…")` 长在声明位置（[cpp.pragma.op]）。收下、原样记着 —— 这一门不解释 pragma。
+    (-> (pragma-op) $1))
+
+  (rule pragma-op
+    (-> ("_Pragma" "(" STRING ")") (pragma $3)))
 
   ;; `int x = 1, *p;` / `class Foo;` / `typedef int T;` / `struct { … } v;`
   ;;
@@ -608,6 +618,8 @@
     (-> (using-decl) $1)
     (-> (static-assert) $1)
     (-> (asm-decl) $1)
+    ;; 语句位置也收（`void f() { _Pragma("…") }`）—— 同一格产生式，两处都用得上。
+    (-> (pragma-op) $1)
     (-> (attr-spec stmt) (attr $1 $2))
     ;; 标签
     (-> (ID ":" stmt) (label $1 $3))
@@ -907,10 +919,10 @@
 
 ;; ---- 语料上量出来的账（`node bench/grammars.js cpp`）------------------------------
 ;;
-;; 语料 = asymptote 那棵树里的 .cc（351 份）。冲突 2159。
-;; 过数现在印成两个（`bench.json` 那格 `preprocess` 落地之后）：**81 / 30**
-;;   —— 81 = 预处理后（找不到的头跳过 + gtest 五族宏的前言 + `corpus-prelude.h` 那份
-;;   标准库名字的前向声明 + `targ` 那格 [temp.arg] 的判定），30 = 原样读。
+;; 语料 = asymptote 那棵树里的 .cc（351 份）。冲突 2161。
+;; 过数现在印成两个（`bench.json` 那格 `preprocess` 落地之后）：**82 / 30**
+;;   —— 82 = 预处理后（找不到的头跳过 + gtest 五族宏的前言 + `corpus-prelude.h` 那份
+;;   标准库名字与模板名的前向声明 + `targ` 那格 [temp.arg] 的判定 + `_Pragma`），30 = 原样读。
 ;; 这一节下面那些"没过的 321 份"是**原样那一侧**的账，一路量下来才走到 71 的：
 ;;
 ;;    95  unexpected ID       ·  66  unexpected ","   ·  36  unexpected "&"
@@ -1028,9 +1040,25 @@
 ;; 眼下还欠的（都有最小复现）：
 ;;   * `using V = typename A::type;` **报两个解**（两边都是 `(type …)`）——
 ;;     `typedef` 那一形现在过了，`using` 别名这一形还没。
-;;   * `using V = A;`（`A` 没登记成类型）读不了 —— 那是 `needs-type` 的既有规矩，不是 bug，
-;;     但它说明"语料里那些别名声明"要等类型名登记这件事再往前一步。
-;;   * 剩下的头几类：`unexpected ";"` 与 `unexpected ID 'std'` 各一堆（还没一类一类数）。
+;;   * `using V = A;`（`A` 没登记成类型）读不了 —— 那是 `needs-type` 的既有规矩，不是 bug。
+;;
+;; **接着又拆了两格，收成很小但墙确实往前挪了**（第十四支探针一趟一趟数出来的）：
+;;   1. **前言里补上标准库的模板名**（`template <class T> class vector;` 那一批，
+;;      50 行）：81 那一版的头名是 `typedef std::reverse_iterator< iterator > rit;`
+;;      —— **114 份**，卡的是"模板名没登记"。补上之后那 114 份的墙**整堆没了**，
+;;      但过数只 **81 -> 82**：它们往后走又撞上下一堵。
+;;   2. **`_Pragma("…")` 收进语法**（[cpp.pragma.op]，声明位置与语句位置各一格）：
+;;      上一步之后的头名是 `_Pragma( "GCC diagnostic pop" )` —— **97 份**。
+;;      收下之后那 97 份的墙也没了，过数 **82，一份都没多**。
+;;   这两笔的账要照实记：**拆墙 ≠ 涨过数**。这条语料上一份文件平均要过好几堵墙，
+;;   所以"头名那一类有多少份"是进度，"过数"是结果，两个都得印出来。
+;;
+;; **现在的头名（下一刀在这儿）**：**138 份**卡在
+;;   `template <typename Key, typename T, typename Compare = std::less<Key> > struct map : public …`
+;;   报的是 `unexpected ","` —— 模板形参表里那格**默认实参**（`= std::less<Key>`）。
+;;   `tp` 那条里 `(tp-key ID "=" type-id)` 是有的，所以这不是"缺产生式"，得先量清楚
+;;   到底哪一支没接上（多半又是一处歧义/登记的相互作用），别照印象改。
+;;   往后依次是：`&` 19 · 未终止的串 18 · 分叉太多 9 · `=` 9（`Base(const Base&) = default;`）。
 ;;
 ;; 在这之前，"给语法加库名种子表"这条路也量过了：**不值得**（见下面那段：30 -> 31）。
 ;;

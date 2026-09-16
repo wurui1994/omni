@@ -52,3 +52,67 @@ class stringstream;
 class ostringstream;
 class istringstream;
 class exception;
+
+/* **模板名也要登记**（量出来的：`typedef std::reverse_iterator< iterator > rit;` 这一形
+ * 在 81 那一版里是头名，114 份）。同一条规矩：只放标准库自己的名字，形状只求够登记 ——
+ * 形参个数按最常见的那一版写（`std::map<K,V>` 三个实参那种在语法上不看个数）。 */
+template <class T> class vector;
+template <class T> class list;
+template <class T> class deque;
+template <class T> class queue;
+template <class T> class stack;
+template <class T> class set;
+template <class T> class multiset;
+template <class T> class map;
+template <class T> class multimap;
+template <class T> class unordered_set;
+template <class T> class unordered_map;
+template <class T> class pair;
+template <class T> class tuple;
+template <class T> class array;
+template <class T> class valarray;
+template <class T> class complex;
+template <class T> class optional;
+template <class T> class variant;
+template <class T> class atomic;
+template <class T> class initializer_list;
+template <class T> class allocator;
+template <class T> class char_traits;
+template <class T> class basic_string;
+template <class T> class basic_ostream;
+template <class T> class basic_istream;
+template <class T> class basic_stringstream;
+template <class T> class shared_ptr;
+template <class T> class unique_ptr;
+template <class T> class weak_ptr;
+template <class T> class function;
+template <class T> class reference_wrapper;
+template <class T> class reverse_iterator;
+template <class T> class iterator;
+template <class T> class iterator_traits;
+template <class T> class numeric_limits;
+template <class T> class less;
+template <class T> class greater;
+template <class T> class equal_to;
+template <class T> class hash;
+
+/* <type_traits> 那一族（`typename std::remove_cv<T>::type` 这种写法要它们登记） */
+template <class T> class remove_cv;
+template <class T> class remove_const;
+template <class T> class remove_volatile;
+template <class T> class remove_reference;
+template <class T> class remove_pointer;
+template <class T> class remove_extent;
+template <class T> class decay;
+template <class T> class enable_if;
+template <class T> class conditional;
+template <class T> class is_same;
+template <class T> class is_const;
+template <class T> class is_pointer;
+template <class T> class is_reference;
+template <class T> class is_class;
+template <class T> class is_convertible;
+template <class T> class is_base_of;
+template <class T> class integral_constant;
+template <class T> class tuple_size;
+template <class T> class tuple_element;
