@@ -34,7 +34,7 @@ import { lexText } from '../../src/core/glr/lex.js';
 import { glrParse } from '../../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { readText } from '../../src/core/host/native.js';
-import { toSx } from '../../src/core/graph/graph.js';
+import { toSx, node, lit } from '../../src/core/graph/graph.js';
 import { backends, gaps, shapeGaps, Gap } from '../../src/core/graph/contract.js';
 // 五栏声明那张表 —— 下面"五栏指纹"那一节要拿它自己量自己（ADR-0033 §3.2）
 import { NODES } from '../../src/core/graph/nodes.js';
@@ -116,6 +116,46 @@ if (showGaps) {
     process.stdout.write(`  ok   出处 [节点 ${NODES.size} 格各有出处 · 内建 ${PRIMS.size} 格各有 arity 与 effects]\n`);
     pass++;
   } else fail += bad;
+}
+
+/**
+ * **G1 与 G2 也各要一条会红的判据**（ADR-0033 §5 那五条里的头两条）。
+ *
+ * 两条都已经在 `node()` 里落地了 —— 可"落地了"与"有判据"是两件事：这几句检查哪天被谁
+ * 顺手放宽（少一格端口也放过去、`seq` 悄悄进了 NODES），除了这一节没有别的地方会红。
+ *   G1 边完整：多一格端口、少一格端口、多一格附属，三种都得当场炸；
+ *   G2 调度器专属算子（`seq` / `let-temp` / `drop` / `split`）**不许出现在图上** ——
+ *     它们不在 NODES 里，所以 `node()` 报的就是 `no such node`。次序是**算出来的边**，
+ *     不是一格能手写的算子（§3.3）。
+ * 顺带把第十九批那条也钉住：附属的值是 `undefined` 要在**建图这一步**炸，
+ * 而不是等序列化那条腿去红。
+ */
+{
+  const cases = [
+    ['G2〔手写 seq〕', () => node('seq', {}), 'no such node: seq'],
+    ['G2〔手写 let-temp〕', () => node('let-temp', {}), 'no such node: let-temp'],
+    ['G2〔手写 drop〕', () => node('drop', {}), 'no such node: drop'],
+    ['G2〔手写 split〕', () => node('split', {}), 'no such node: split'],
+    ['G1〔多一格端口〕', () => node('bind', { init: lit(1), nope: lit(2) }, { name: 'x' }), 'has no in-port "nope"'],
+    ['G1〔少一格端口〕', () => node('bind', {}, { name: 'x' }), 'misses in-port "init"'],
+    ['G1〔多一格附属〕', () => node('const', {}, { valu: 1 }), 'has no attr "valu"'],
+    ['G1〔附属是 undefined〕', () => node('func', { body: [] }, { params: [], name: undefined }), 'is undefined'],
+  ];
+  for (const [label, mk, want] of cases) {
+    let msg = null;
+    try {
+      mk();
+    } catch (err) {
+      msg = err.message;
+    }
+    if (msg === null) {
+      process.stdout.write(`  FAIL ${label}: 没报错 —— 这一格检查已经不管事了\n`); fail++;
+    } else if (!msg.includes(want)) {
+      process.stdout.write(`  FAIL ${label}: 报错了，但理由不对\n       期望里有 ${want}\n       得到 ${msg}\n`); fail++;
+    } else {
+      process.stdout.write(`  ok   ${label} [${msg}]\n`); pass++;
+    }
+  }
 }
 
 /**
