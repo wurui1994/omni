@@ -346,8 +346,8 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
 - 矩阵里因此第一次有了 **skip** 这一档：**每一格都带理由**
   （"打印一格多值要运行期长度 + 拼串" / "嵌套的函数（闭包）还没接" / "墙在 OIR 不在 wasm"）。
   跳过不是失败 —— 那正是 §6 第 2 条要的样子：待办是算出来的，不是文档里许的愿。
-  现在的总账：**283 passed / 0 failed / 1 skipped**（语言例子 66 + 手搭图 5 × 后端 4），
-  每条腿末尾还印一行覆盖：`interp 71/71 · sx 71/71 · js 71/71 · wat 70/71`。
+  现在的总账：**291 passed / 0 failed / 1 skipped**（语言例子 68 + 手搭图 5 × 后端 4），
+  每条腿末尾还印一行覆盖：`interp 73/73 · sx 73/73 · js 73/73 · wat 72/73`。
   这三个数会随每一批节点变 —— 它们是**跑出来的**，不是写下来的，所以文档里这一行
   过期就是错，改代码的那一趟必须顺手改它。
 - **"还在跳的几乎全是字符串"那句话是错的 —— 数一遍就知道**。当时 21 格跳过里字符串只占 4 格
@@ -437,31 +437,33 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
    那说明删这一格会让**别处**崩，级联算漏了。
 3. **级联半径是数出来的**，不是手写的文档。
 
-现状：**41 样 × 71 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
+现状：**41 样 × 73 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
 数出来的半径（删了它，几份例子要它）：
 
 ```
 骨架那一层
-  prim 71/71 · const / ref / bind 各 66 · call / func 各 49 · branch 36 · region 33
-  set 31 · loop 30 · ret 22
-  list-new / index-get 各 11 · scope-exit 8 · index-set / loop-exit 各 7 · conv 6
+  prim 73/73 · const / ref / bind 各 68 · call / func 各 51 · branch 37 · region 35
+  set 33 · loop 32 · ret 24
+  list-new / index-get 各 12 · scope-exit / index-set / loop-exit 各 8 · conv 6
   values / record-new / field-get / map-new / map-get / map-set / map-has 各 5
   pick / field-set / slice 各 4
 附属那一层
-  prim.name 71 · const.value / ref.name / bind.name 各 66 · func.params / func.name 各 49
-  set.name 31 · loop-exit.kind 7 · conv.to 6
+  prim.name 73 · const.value / ref.name / bind.name 各 68 · func.params / func.name 各 51
+  set.name 33 · loop-exit.kind 8 · conv.to 6
   bind.keepMulti / pick.index / record-new.names / field-get.field / field-set.field 各 4
 ```
 
 这张表就是 target.md 要的"特性 DAG 排序"的可量版本，而且它比 DAG 说得更准：
-**上面那 11 格是骨架**（半径 ≥ 22，删了就没程序可跑），**下面那 16 格想删就能删** ——
-删掉 `map` 那四格，另外 66 份例子一行不改照旧全绿；删掉 `record-new` 那三格也是 66 份。
+**上面那 11 格是骨架**（半径 ≥ 24，删了就没程序可跑），**下面那 16 格想删就能删** ——
+删掉 `map` 那四格，另外 68 份例子一行不改照旧全绿；删掉 `record-new` 那三格也是 68 份。
 这才是"原子化"真正的样子：不是"分层分得细"，是**删了不牵连**。
 
 顺带看一眼这张表的变化：加了 map 那四格（第九批）之后，**骨架那一层的半径没有一格变**
-—— 新节点只在自己那 4 份例子上有半径。加了第十门语言 cpp（第十二批、两份例子）之后，
-骨架那一层每格**整整长两份**（`prim` 69 → 71、`bind` 64 → 66），下面那 16 格**一格没动** ——
-"加语言不加节点"与"加特性不牵连"这两句话，是这么量出来的，方向还正好相反。
+—— 新节点只在自己那 4 份例子上有半径。加了第十门语言 cpp（第十二批，先两份例子）之后，
+骨架那一层每格**整整长两份**（`prim` 69 → 71、`bind` 64 → 66），下面那 16 格**一格没动**；
+再给 cpp 补 `loopexit` 与 `index` 两份例子之后（71 → 73），涨的是骨架那一层加上
+`loop-exit`（7 → 8）与 `list-new`/`index-get`（11 → 12）—— **正好是那两份例子用到的格子，
+一格不多**。"加语言不加节点"与"加特性不牵连"这两句话，是这么量出来的，方向还正好相反。
 
 附属那一轮还顺手给出一条**判"是不是附属"的可量标准**：拿"删节点"与"删它的附属"
 两个半径比一比。`bind` 56 而 `bind.keepMulti` 4 —— 差 52，`keepMulti` 是**真附属**；
@@ -737,11 +739,11 @@ V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
 
 十门语言各一份 `ext/<lang>/examples/basics.*` + `ext/<lang>/tograph.js`，期望输出
 只有一份（`15 / 120 / 7 / ok`）：**10 × 4 = 40 格全绿**（第四条腿 wat 是后加的）。
-第十门 cpp 一度进不来 —— 它连 7 行的例子都过不了语法；后来量出三类歧义里两类是
+第十门 cpp 一度进不来 —— 它连 7 行的例子都过不了语法。后来量出三类歧义里两类是
 **语法自己写松了**（至多一格 type-spec、函数定义不进语句），收紧之后 40 行的
-`basics.cpp` 整份解析成一棵对的树。真要符号表的只剩 `T * x;` 那一类
-（附录 A.5 第 3 笔账，驱动器缺"回问"机制）—— 它现在被语法层的可删除测试**数出来了**，
-见 §11.1 末尾那一段。
+`basics.cpp` 整份解析成一棵对的树；剩下那类（`T * x;`）真要符号表，现在也补上了 ——
+驱动器会回问"这名字登记成类型了吗"（第十三批、附录 A.5 第 3 笔），cpp 那格 `prefer`
+删掉了。cpp 后来还进了 `intmath` / `loopexit` / `index` 三族，一格新节点都没加。
 
 矩阵抓出来的三处真差别（都不是"某门语言的特例"，都是判据写错）：
 1. 拿 `sort` 当"是不是值"的判据 —— Scheme 的函数体最后一格表达式就是值、
@@ -790,8 +792,8 @@ go 的映射把实参先 `bind` 到一格临时名字（`bind` 的语义就是"�
  9 机器  loop / set          8 机器  region / ret
  4 机器  scope-exit                       go nim sbcl vlang
  4 机器  record-new / field-get / field-set  go lua nim vlang
- 7 机器  list-new / index-get / index-set    chez go lua mojo nim sbcl vlang
- 5 机器  loop-exit           go lua mojo nim vlang
+ 8 机器  list-new / index-get / index-set    chez cpp go lua mojo nim sbcl vlang
+ 6 机器  loop-exit           cpp go lua mojo nim vlang
  4 机器  values / pick       go lua nim sbcl
  5 机器  map-new / map-get / map-set / map-has   awk go lua nim vlang
  5 机器  conv                freebasic go mojo nim vlang
@@ -799,7 +801,16 @@ go 的映射把实参先 `bind` 到一格临时名字（`bind` 的语义就是"�
 ```
 
 cpp 进来那一趟这张表变了三处，而**三处都是加提供者、不是加节点**：七格骨架从 9 到 10、
-`loop`/`set` 从 8 到 9、`region`/`ret` 从 7 到 8。
+`loop`/`set` 从 8 到 9、`region`/`ret` 从 7 到 8。后来 cpp 又进了 `loopexit`（5 → 6）与
+`index`（7 → 8）两族，同样一格新节点都没有：`break`/`continue` 落的就是那格 `loop-exit`，
+`int xs[3] = {10, 20, 30}` 落 `list-new` + `bind`、`xs[i]` 落 `index-get`、
+`xs[1] = 5` 落 `index-set`。
+
+**cpp 明确没进的两族，理由都是"硬凑就是看着绿其实错"**：
+- `conv`（期望 `2 / 3.5`）—— C++ 真跑 `printf("%f\n", 3.5)` 印的是 `3.500000`。
+  例子得是**那门语言真能跑出这份输出**的程序，凑不出来就不进。
+- `record`（期望 `1 / 5 / 6`）—— `P p = {1, 5};` 那种花括号初始化式既能填记录也能填列表，
+  分开要"这个类型有哪些字段"，而类型全丢。这一批 `braces` 一律当列表收，所以记录不进。
 
 `scope-exit` 补上了 nim 与 V 的 `defer`（各多一个 `examples/defer.*`，与 go/CL 共用
 同一份期望输出 `in / b / a / out`），四个提供者，够 G5 的"机器"线。

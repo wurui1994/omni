@@ -16,7 +16,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part,
-  ops, binOf, retOf, branchOf, loopExit,
+  ops, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
 } from '../../src/core/graph/fromtree.js';
 
 const OPS = ops();
@@ -90,6 +90,16 @@ function toNode(x) {
     case 'str': return node('const', {}, { value: strVal(x) });
     case 'n': case 'name': return node('ref', {}, { name: nameOf(x) });
     case 'paren': return toNode(kids(x)[0]);
+    // `xs[i]` -> index-get（与 go / lua / 两门 Lisp 同一格节点；下标起点是语言的事，
+    // C++ 与 go 一样从 0 起，所以这儿一个字不用换）
+    case 'index': {
+      const [obj, idx] = kids(x);
+      return indexGet(toNode(obj), toNode(idx));
+    }
+    // `{10, 20, 30}` -> list-new。**这一批只当列表收**：C++ 的花括号初始化式也能填记录，
+    // 那要"这个类型有哪些字段"才分得开（类型全丢，答不出来）—— 记录用 `P p = {…}` 的形状
+    // 时这儿会给一格列表，所以记录那一族 cpp 还没进（明说的限制，不猜）。
+    case 'braces': return listNew(many(kids(x)));
     case 'expr': return toNode(kids(x)[0]);
     case 'pp': return [];                       // `#include` 丢掉（这一批不做预处理）
     case 'unit': return many(kids(x));
@@ -117,6 +127,13 @@ function toNode(x) {
       const o = leaf(op) === '=' ? null : OPS.get(String(leaf(op)).replace('=', ''));
       if (leaf(op) !== '=' && o === undefined) {
         throw new Error(`cpp->graph: 这个复合赋值还没接：${leaf(op)}`);
+      }
+      // 左边是一格**下标**（`xs[1] = 5`）⇒ index-set（与 go / lua 同一格节点）
+      if (tag(t) === 'index') {
+        const [obj, idx] = kids(t);
+        const target = toNode(obj);
+        const at = toNode(idx);
+        return indexSet(target, at, o === null ? toNode(v) : bin(o, indexGet(toNode(obj), toNode(idx)), toNode(v)));
       }
       const name = nameOf(t);
       const value = o === null ? toNode(v) : bin(o, node('ref', {}, { name }), toNode(v));
