@@ -32,6 +32,8 @@
 //     前 8 字节长度、正文从 +8 起、一字节一格。常量的地址编译期就定下，`$hp` 从它们后面起步。
 //     "这一格装的是数还是串"没有类型可问，所以做一格最小的静态追踪（见 kindOf）：
 //     串只许待在"绑给局部量"与"打印"两处，流到别处一律报缺口。
+//   * **map 是一格句柄 + 一张表**（`[cap][count][k0][v0]…`，线性扫描）。句柄那一层是必须的：
+//     表满了要换一块更大的，而 `map-set` 只拿得到那格值 —— 见 MAP_HELPERS 的注释。
 //
 // ## 接不住的，有名有姓（**节点级已经归零**，剩下的是形状上的账，见 WAT_SHAPES）
 //
@@ -62,13 +64,9 @@ const CAN = new Map([
   ['list-new', true], ['index-get', true], ['index-set', true],
   ['values', true], ['pick', true],
   ['conv', true],
-  // map 那一族：线性内存里排一张表是做得到的（线性扫描 + 键比较），但**键是串**就要先有
-  // 串的比较，而串在这条腿上只够"存下来 + 打印"。三条都要先定：键怎么比、满了怎么扩、
-  // 缺键报什么。写成一句人话，就是缺口清单该有的样子
-  ['map-new', 'wasm 上的 map 要在内存里排一张表：键怎么比、满了怎么扩、缺键报什么，三条都还没定'],
-  ['map-get', 'wasm 上的 map 要在内存里排一张表（同上）'],
-  ['map-set', 'wasm 上的 map 要在内存里排一张表（同上）'],
-  ['map-has', 'wasm 上的 map 要在内存里排一张表（同上）'],
+  // map 那一族：线性内存里一格**句柄 + 一张表**（键值各 8 字节，线性扫描），
+  // 键按编译期知道的种类比（数直接比、串按"长度 + 字节"比），满了换一块更大的
+  ['map-new', true], ['map-get', true], ['map-set', true], ['map-has', true],
   ['slice', true],
   ['scope-exit', true],
   ['loop-exit', true],
@@ -137,6 +135,114 @@ const wname = (n) => `$${String(n).replace(/[^A-Za-z0-9_]/g, '_')}`;
  * `int` / `str`（地址）都是 i64，`real` 是 f64 —— **两种数值类型**就差这一格。
  */
 const wty = (kind) => (kind === 'real' ? 'f64' : 'i64');
+
+/**
+ * **map 在线性内存里的样子**（`needMap` 时按需发这一组）。
+ *
+ * 布局分两层，第二层是**必须的**：
+ *   * **句柄**（`map-new` 出的那格值）= 一格 8 字节，里面装当前表的地址；
+ *   * **表** = `[cap][count][k0][v0][k1][v1]…`，键值各 8 字节。
+ * 为什么要句柄：表满了要换一块更大的（bump 分配器不能原地长），而 `map-set` 只拿得到
+ * 那格值 —— 没有句柄就没法把新地址告诉别的持有者。这一格就是"运行期长出一格新键"
+ * （`map-set` 的 `allocates` 效应）在 wasm 上的落法。
+ *
+ * 键怎么比：**编译期就知道是数还是串**（kindOf），所以 `mode` 是一格实参 ——
+ * 0 = i64 直接比，1 = 串按"长度 + 字节"比（与 `print_str` 的布局同一份约定）。
+ * 混着用报缺口，不猜。
+ */
+const MAP_HELPERS = `  (func $__str_eq (param $a i64) (param $b i64) (result i64)
+    (local $la i64) (local $i i64)
+    (local.set $la (i64.load (i32.wrap_i64 (local.get $a))))
+    (if (i64.ne (local.get $la) (i64.load (i32.wrap_i64 (local.get $b))))
+      (then (return (i64.const 0))))
+    (local.set $i (i64.const 0))
+    (block $done (loop $each
+      (if (i64.ge_s (local.get $i) (local.get $la)) (then (br $done)))
+      (if (i32.ne
+            (i32.load8_u (i32.add (i32.wrap_i64 (i64.add (local.get $a) (local.get $i))) (i32.const 8)))
+            (i32.load8_u (i32.add (i32.wrap_i64 (i64.add (local.get $b) (local.get $i))) (i32.const 8))))
+        (then (return (i64.const 0))))
+      (local.set $i (i64.add (local.get $i) (i64.const 1)))
+      (br $each)))
+    (i64.const 1)
+  )
+  (func $__map_new (result i64)
+    (local $h i32) (local $t i32)
+    (local.set $h (global.get $hp))
+    (global.set $hp (i32.add (global.get $hp) (i32.const 8)))
+    (local.set $t (global.get $hp))
+    (global.set $hp (i32.add (global.get $hp) (i32.const 80)))
+    (i64.store (local.get $t) (i64.const 4))
+    (i64.store (i32.add (local.get $t) (i32.const 8)) (i64.const 0))
+    (i64.store (local.get $h) (i64.extend_i32_u (local.get $t)))
+    (i64.extend_i32_u (local.get $h))
+  )
+  (func $__map_find (param $h i64) (param $k i64) (param $mode i64) (result i64)
+    (local $t i32) (local $n i64) (local $i i64) (local $ka i32) (local $eq i64)
+    (local.set $t (i32.wrap_i64 (i64.load (i32.wrap_i64 (local.get $h)))))
+    (local.set $n (i64.load (i32.add (local.get $t) (i32.const 8))))
+    (local.set $i (i64.const 0))
+    (block $done (loop $each
+      (if (i64.ge_s (local.get $i) (local.get $n)) (then (br $done)))
+      (local.set $ka (i32.add (local.get $t)
+        (i32.add (i32.const 16) (i32.wrap_i64 (i64.mul (local.get $i) (i64.const 16))))))
+      (if (i64.eq (local.get $mode) (i64.const 0))
+        (then (local.set $eq (i64.extend_i32_s
+          (i64.eq (i64.load (local.get $ka)) (local.get $k)))))
+        (else (local.set $eq (call $__str_eq (i64.load (local.get $ka)) (local.get $k)))))
+      (if (i64.ne (local.get $eq) (i64.const 0))
+        (then (return (i64.extend_i32_u (i32.add (local.get $ka) (i32.const 8))))))
+      (local.set $i (i64.add (local.get $i) (i64.const 1)))
+      (br $each)))
+    (i64.const -1)
+  )
+  (func $__map_set (param $h i64) (param $k i64) (param $v i64) (param $mode i64)
+    (local $p i64) (local $t i32) (local $nt i32) (local $cap i64) (local $n i64) (local $i i64)
+    (local.set $p (call $__map_find (local.get $h) (local.get $k) (local.get $mode)))
+    (if (i64.ne (local.get $p) (i64.const -1))
+      (then (i64.store (i32.wrap_i64 (local.get $p)) (local.get $v)) (return)))
+    (local.set $t (i32.wrap_i64 (i64.load (i32.wrap_i64 (local.get $h)))))
+    (local.set $cap (i64.load (local.get $t)))
+    (local.set $n (i64.load (i32.add (local.get $t) (i32.const 8))))
+    (if (i64.ge_s (local.get $n) (local.get $cap)) (then
+      (local.set $nt (global.get $hp))
+      (global.set $hp (i32.add (global.get $hp)
+        (i32.add (i32.const 16) (i32.wrap_i64 (i64.mul (local.get $cap) (i64.const 32))))))
+      (i64.store (local.get $nt) (i64.mul (local.get $cap) (i64.const 2)))
+      (i64.store (i32.add (local.get $nt) (i32.const 8)) (local.get $n))
+      (local.set $i (i64.const 0))
+      (block $copied (loop $word
+        (if (i64.ge_s (local.get $i) (i64.mul (local.get $n) (i64.const 2))) (then (br $copied)))
+        (i64.store
+          (i32.add (i32.add (local.get $nt) (i32.const 16))
+            (i32.wrap_i64 (i64.mul (local.get $i) (i64.const 8))))
+          (i64.load (i32.add (i32.add (local.get $t) (i32.const 16))
+            (i32.wrap_i64 (i64.mul (local.get $i) (i64.const 8))))))
+        (local.set $i (i64.add (local.get $i) (i64.const 1)))
+        (br $word)))
+      (i64.store (i32.wrap_i64 (local.get $h)) (i64.extend_i32_u (local.get $nt)))
+      (local.set $t (local.get $nt))))
+    (i64.store
+      (i32.add (local.get $t) (i32.add (i32.const 16)
+        (i32.wrap_i64 (i64.mul (local.get $n) (i64.const 16)))))
+      (local.get $k))
+    (i64.store
+      (i32.add (local.get $t) (i32.add (i32.const 24)
+        (i32.wrap_i64 (i64.mul (local.get $n) (i64.const 16)))))
+      (local.get $v))
+    (i64.store (i32.add (local.get $t) (i32.const 8)) (i64.add (local.get $n) (i64.const 1)))
+  )
+  (func $__map_get (param $h i64) (param $k i64) (param $mode i64) (result i64)
+    (local $p i64)
+    (local.set $p (call $__map_find (local.get $h) (local.get $k) (local.get $mode)))
+    ;; 缺键是错误（与 interp 那侧 map-get 抛的那一句对应）—— 不给零值、不给 nil
+    (if (i64.eq (local.get $p) (i64.const -1)) (then (unreachable)))
+    (i64.load (i32.wrap_i64 (local.get $p)))
+  )
+  (func $__map_has (param $h i64) (param $k i64) (param $mode i64) (result i64)
+    (i64.extend_i32_s (i64.ne
+      (call $__map_find (local.get $h) (local.get $k) (local.get $mode)) (i64.const -1)))
+  )`;
 
 class Gap extends Error {}
 
@@ -364,6 +470,7 @@ function emitOnce(graph, retOf, multiOf) {
   let needStr = false;
   let needF64 = false;    // 用到实数了吗（宿主面那格 `print_f64` 按需发）
   let needJoin = false;   // 要不要那格运行期造串的辅助函数（打印多值）
+  let needMap = false;    // 要不要 map 那一组辅助函数（句柄 + 表 + 键比较）
   function strAddr(s) {
     if (strs.has(s)) return strs.get(s);
     const bytes = utf8Bytes(s);
@@ -446,6 +553,17 @@ function emitOnce(graph, retOf, multiOf) {
     if (k === 'real') {
       throw new Gap(`${where}上还接不住实数（内存里的一格是 i64，要按类型排的布局）`);
     }
+  }
+
+  /**
+   * map 的键怎么比：**编译期就知道**（种类那一趟追踪的另一个用处）。
+   * 0 = i64 直接比 · 1 = 串按"长度 + 字节"比。既装串又装数的键报缺口 —— 不猜。
+   */
+  function keyMode(k, sc) {
+    const kind = kindOf(k, sc);
+    if (kind === 'int') return 0;
+    if (kind === 'str') return 1;
+    throw new Gap(`map 的键既装过串也装过数（或是实数）—— 键怎么比就定不下来（要类型层）`);
   }
 
   /**
@@ -701,6 +819,34 @@ function emitOnce(graph, retOf, multiOf) {
         const from = expr(x.ins.from, sc, pre);
         return `(i64.load (i32.add ${addr(from)} (i32.const ${8 * Number(x.attrs.index ?? 0)})))`;
       }
+      // ---- map：一格句柄 + 一张表（见 MAP_HELPERS）。键的种类编译期就知道 ----------
+      case 'map-new': {
+        needMap = true;
+        needMem = true;
+        const ks = asList(x.ins.keys);
+        const vs = asList(x.ins.vals);
+        const h = tmp(sc);
+        pre.push(`(local.set ${h} (call $__map_new))`);
+        ks.forEach((k, i) => {
+          const m = keyMode(k, sc);
+          onlyInt(vs[i], sc, 'map 的值');
+          pre.push(`(call $__map_set (local.get ${h}) ${expr(k, sc, pre)}`
+            + ` ${expr(vs[i], sc, pre)} (i64.const ${m}))`);
+        });
+        return `(local.get ${h})`;
+      }
+      case 'map-get': {
+        needMap = true;
+        needMem = true;
+        const m = keyMode(x.ins.key, sc);
+        return `(call $__map_get ${expr(x.ins.obj, sc, pre)} ${expr(x.ins.key, sc, pre)} (i64.const ${m}))`;
+      }
+      case 'map-has': {
+        needMap = true;
+        needMem = true;
+        const m = keyMode(x.ins.key, sc);
+        return `(call $__map_has ${expr(x.ins.obj, sc, pre)} ${expr(x.ins.key, sc, pre)} (i64.const ${m}))`;
+      }
       default: throw why(x.op, '值位置');
     }
   }
@@ -854,6 +1000,16 @@ function emitOnce(graph, retOf, multiOf) {
         const v = expr(x.ins.value, sc, pre);
         return [...pre, `(i64.store (i32.add ${addr(`(local.get ${o})`)}`
           + ` (i32.add (i32.const 8) ${addr(`(i64.mul (local.get ${i}) (i64.const 8))`)})) ${v})`];
+      }
+      case 'map-set': {
+        needMap = true;
+        needMem = true;
+        const m = keyMode(x.ins.key, sc);
+        onlyInt(x.ins.value, sc, 'map 的值');
+        const o = expr(x.ins.obj, sc, pre);
+        const k = expr(x.ins.key, sc, pre);
+        const v = expr(x.ins.value, sc, pre);
+        return [...pre, `(call $__map_set ${o} ${k} ${v} (i64.const ${m}))`];
       }
       case 'branch': {
         const c = cond(x.ins.cond, sc, pre);
@@ -1088,6 +1244,7 @@ function emitOnce(graph, retOf, multiOf) {
     }
   }
   if (needJoin) lines.push(STR_JOIN);
+  if (needMap) lines.push(MAP_HELPERS);
   for (const [nm, g] of globals) {
     const ty = wty(globalKinds.get(nm) ?? 'int');
     lines.push(`  (global ${g} (mut ${ty}) (${ty}.const 0))`);
