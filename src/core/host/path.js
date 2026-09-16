@@ -31,7 +31,32 @@ function normalizeParts(parts, allowUp) {
   return out;
 }
 
+/**
+ * 要不要走一遍规整：出现 `.` / `..` **作为一整段**，或者连着两个斜杠。
+ * 注意不能只看有没有点 —— `omni.h` 里那个点是名字的一部分，不用收拾。
+ */
+const NEEDS_NORM = /(^|\/)\.{1,2}(\/|$)|\/\//;
+
 export function join(...parts) {
+  /* 快路（量出来的）：段都非空、都不用规整时直接接起来。老路一次 join 要走
+   * filter -> join -> split -> filter -> normalizeParts -> join 六趟，各带一份新数组；
+   * 而 `#include` 的搜索**每试一个目录就 join 一次**，20 份运行时编一遍里
+   * `join` + `split` 占了前端 CPU 的 3.4%（65ms/1898ms）。结果与老路逐字符相同。 */
+  let fast = parts.length !== 0;
+  for (let i = 0; i < parts.length; i++) {
+    const s = parts[i];
+    /* 后面的段自己带头斜杠时也走老路：`join("/", "/", "a")` 老路收成 `/a`，
+       直接接会得到 `//a`（量出来的 335 组差异全在这一类上）。 */
+    if (s === "" || (i !== 0 && s.startsWith("/")) || NEEDS_NORM.test(s)) { fast = false; break; }
+  }
+  if (fast) {
+    let out = parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      out += out.endsWith("/") ? parts[i] : `/${parts[i]}`;
+    }
+    /* 末尾那个斜杠老路是**吃掉**的（`split` 把空段滤了）：`join("a", "b/")` 是 `a/b`。 */
+    return out.length > 1 && out.endsWith("/") ? out.slice(0, out.length - 1) : out;
+  }
   const kept = parts.filter((s) => s !== "");
   if (kept.length === 0) return ".";
   const abs = kept[0].startsWith("/");

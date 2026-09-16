@@ -34,11 +34,24 @@
 // 不掺链接、不掺 node 启动之外的东西。量到的（arm64 macOS）：
 //
 //   20 份运行时：.text 我们 880624 / tcc 308556 = 2.85x
-//   编译耗时：我们 5.0s / tcc 257ms = 20x（其中我们每趟含 node + CLI 起步 ~180ms，
-//             所以拿最大的那份单独量：omni_r3.c 我们 0.37s / tcc 0.01s，扣掉起步还是 ~19x）
+//   进程内编那 20 份：冷 666ms、热 491ms   ——   tcc（20 个进程）215ms
+//   一趟一个进程：我们 4.0s / tcc 215ms = 19x  ← **这一栏不是编译速度**
 //
-// 也就是：**代码大 2.85 倍、编译慢 20 倍上下**。慢的那一头有确定的来源（JS、每函数一趟
-// MIR、没有寄存器分配的启发式），要不要治是另一件事 —— 先把数摆在这儿。
+// 中间那一栏才是编译速度：**冷 3.1x、热 2.3x**。最后那一栏里 20 × ~180ms 是 node + CLI
+// 的起步（占了七成），tcc 那侧起步 ~2ms —— 先前只量了它，于是把差距夸大了四五倍。
+// `buildSelf` 是**在一个进程里**连着编的，所以中间那一栏才是它的口径。
+//
+// 压过一轮（第一百三十九片，每一步都用「进程内、反复取最快」判，改完 `tests/c` 297/0）：
+//   572ms -> 441ms（-23%）。三处，都在前端：
+//     - 标识符按段 `slice`，不再一个字符一次 `+=`（C 源码里绝大多数记号是标识符）
+//     - `peekc()` 不再无条件叫 `splice()`：先看一眼是不是反斜杠
+//     - `preprocessSkip` 用局部循环整段跳过「不关心的字符」
+//     - `host/path.js` 的 `join` 加快路：老路一次要走六趟数组操作，而 include 的搜索
+//       每试一个目录就 join 一次（7220 组输入与老路逐字符比过，0 组不同）
+//   试过没留的：照 tcc 的 `isidnum_table` 换 Uint8Array 查表 —— 462ms vs 441ms，没更快。
+//
+// 也就是：**代码大 2.85 倍、编译慢 2 到 3 倍**。慢的那一头还有确定的来源（JS、
+// 每函数一趟 MIR、没有寄存器分配的启发式），要不要再压是另一件事 —— 先把数摆在这儿。
 
 import { spawnSync } from 'node:child_process';
 import { dirname, join, basename } from 'node:path';
@@ -67,6 +80,45 @@ const size = (p) => (existsSync(p) ? statSync(p).size : 0);
 function textBytes(p) {
   const s = readObject(readFileSync(p), p).secs.find((x) => x.name === '.text');
   return s === undefined || s.bytes === undefined ? 0 : s.bytes.length;
+}
+
+/**
+ * 我们这一侧**在一个进程里**编那 20 份 —— `buildSelf` 就是这么用的（`cObj` 在进程内叫）。
+ *
+ * 这一格是**对前一版量法的修正**：先前 `--rt` 每份文件起一个 `node src/cli.js c obj`，
+ * 于是 20 趟里有 20 × ~180ms 是 node + CLI 的起步 —— 占了量出来的 5.0s 的**七成**，
+ * 把「我们比 tcc 慢多少」夸大了四五倍。tcc 那一侧起步只有 ~2ms，摆在一起不可比。
+ *
+ * 冷 = 头一遍（真实的一次构建就是这个），热 = 反复取最快（改一处快没快看它，噪声小）。
+ * 只到 MIR + 机器码为止，不写 `.o`（写盘那一步两边都是 memcpy 级）。
+ */
+async function rtInProcess(reps) {
+  if (ARCH !== 'arm64') {
+    process.stdout.write('  skip  进程内那一格只接了 arm64（x86_64 换 x64/from_mir 的 genModule）\n');
+    return;
+  }
+  const RT = join(root, 'src', 'runtime');
+  const files = readdirSync(RT).filter((x) => x.endsWith('.c')).sort();
+  const { cMirNative, cSysInclude } = await import('../src/core/lang/c.js');
+  const { genArm64Module } = await import('../src/core/arm64/from_mir.js');
+  const { verifyMir } = await import('../src/core/mir/verify.js');
+  const sys = cSysInclude();
+  let cold = 0;
+  let best = Infinity;
+  for (let r = 0; r < reps; r++) {
+    const t0 = process.hrtime.bigint();
+    for (const f of files) {
+      const { mod } = cMirNative(join(RT, f),
+        { includeDirs: [RT], sysIncludeDirs: sys, arch: 'arm64', os: OS }, []);
+      verifyMir(mod);
+      genArm64Module(mod);
+    }
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    if (r === 0) cold = ms;
+    if (ms < best) best = ms;
+  }
+  process.stdout.write(`  进程内 ${files.length} 份：冷 ${fmtMs(cold)}、热 ${fmtMs(best)}`
+    + `（反复 ${reps} 遍取最快）\n`);
 }
 
 /**
@@ -107,8 +159,8 @@ function rtBench() {
     }
   }
   process.stdout.write(`  ${n} 份运行时：.text 我们 ${a} / tcc ${b}（${(a / b).toFixed(2)}x）\n`);
-  process.stdout.write(`  编译耗时：我们 ${fmtMs(ta)} / tcc ${fmtMs(tb)}（${(ta / tb).toFixed(0)}x）`
-    + `　—— 我们这一侧每趟含 node + CLI 起步 ~180ms\n`);
+  process.stdout.write(`  一趟一个进程：我们 ${fmtMs(ta)} / tcc ${fmtMs(tb)}（${(ta / tb).toFixed(0)}x）`
+    + `　—— 我们这一侧每趟含 node + CLI 起步 ~180ms，所以这一栏**不是**编译速度\n`);
 }
 
 /**
@@ -145,6 +197,7 @@ if (rt) {
   }
   process.stdout.write('bench/selfcc --rt：运行时那 20 份 .c，我们与 tcc 各编一遍 .o\n');
   rtBench();
+  await rtInProcess(5);
   process.exit(0);
 }
 

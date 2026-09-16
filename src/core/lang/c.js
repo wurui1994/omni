@@ -9,7 +9,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { join, dirname } from '../host/path.js';
-import { env, exists, isDir, installDir, readText, spawn, stderr } from '../host/native.js';
+import { env, exists, isDir, installDir, mtimeMs, readText, spawn, stderr } from '../host/native.js';
 import { C_INCLUDE_DIR } from '../runtime/c_runtime.js';
 import { lowerC, lowerCNative, declsOfC } from '../frontend-c/tccgen.js';
 import { Cpp } from '../frontend-c/tccpp.js';
@@ -124,8 +124,24 @@ export function cFrameworks() {
  *
  * 「读失败该是可接住的异常而不是致命错误」那处**两条腿的不对称**还欠着，记在这儿；
  * 这一格不靠它 —— 探测存在性本来就比"抛了再接"便宜。
+ *
+ * **读过的内容按路径记一份**（第一百三十九片，量出来的）：一趟里同一份头会被读很多遍 ——
+ * 20 份运行时各 `#include "omni.h"`，那条链再往下是 SDK 的 stdio/stdlib/string 一族。
+ * 在一个进程里编那 20 份，`readFileUtf8` 占了 CPU 的 **15%**（1518ms 的样本里 223ms）。
+ * 记一份之后同一个进程里第二次就是查表。**按 mtime 复核**，所以 REPL 那种长住的进程里
+ * 改了头文件也算得对（一次 stat ~1µs，比读+解码一份 100KB 的头便宜两个数量级）。
  */
-function readOrNull(p) { return exists(p) ? readText(p) : null; }
+const FILE_TEXT = new Map();
+
+function readOrNull(p) {
+  if (!exists(p)) return null;
+  const m = mtimeMs(p);
+  const hit = FILE_TEXT.get(p);
+  if (hit !== undefined && hit.mtime === m) return hit.text;
+  const text = readText(p);
+  FILE_TEXT.set(p, { mtime: m, text });
+  return text;
+}
 
 /**
  * 一份 `.c` -> MIR（ADR-0017 第六刀）。宿主回调与 `cppText` 同一套。

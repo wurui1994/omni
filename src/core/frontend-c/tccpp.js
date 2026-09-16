@@ -102,8 +102,13 @@ function isNumCh(c) {
 function isOctCh(c) {
   return c >= 48 && c <= 55;
 }
+/* 摊平成一串比较，而不是 `isIdCh(c) || isNumCh(c)` —— 它在标识符扫描的内圈里，
+ * 一个字符省两次函数调用。（照 tcc 的 `isidnum_table` 换成 Uint8Array 查表也试过：
+ * 462ms vs 441ms，**没有更快**，所以没留 —— 那张表在 C 里省的是分支，在 V8 里
+ * 换来的是一次可能带 NaN 下标的类型化数组访问。） */
 function isIdNum(c) {
-  return isIdCh(c) || isNumCh(c);
+  return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)
+    || c === 95 || c >= 0x80;
 }
 function toup(c) {
   return c >= 97 && c <= 122 ? c - 32 : c;
@@ -477,9 +482,17 @@ export class Cpp {
 
   /** 当前字符，已跳过拼接。文件尽头回 CH_EOF。 */
   peekc() {
-    this.splice();
+    /* 热到不能再热的一条（每个字符至少一次）。所以**不无条件叫 `splice()`**：
+     * 先取一次字符，不是 `\` 就直接回 —— 量出来 `splice` + `peekc` 合起来占过
+     * 前端 CPU 的 ~5%，而其中绝大多数次是"看一眼发现不是反斜杠"。
+     * `charCodeAt` 越界回 NaN，`NaN >= 0` 是 false，所以尽头那一支不必再比长度。 */
     const f = this.file;
-    return f.pos < f.text.length ? f.text.charCodeAt(f.pos) : CH_EOF;
+    const c = f.text.charCodeAt(f.pos);
+    if (c === 92) { // '\\'
+      this.splice();
+      return f.pos < f.text.length ? f.text.charCodeAt(f.pos) : CH_EOF;
+    }
+    return c >= 0 ? c : CH_EOF;
   }
 
   /** 吃掉当前字符，回下一个（tcc 的 `ninp()`，`tccpp.c:705`）。 */
@@ -641,13 +654,27 @@ export class Cpp {
 
       if (isIdCh(c)) {
         /* 标识符。`L'x'` / `L"x"` 借这一支认出来：标识符里不可能有引号，所以
-         * 「名字恰好是 L 且紧跟引号」与 tcc 那个 `p[1]` 的预看等价（`tccpp.c:2710`）。 */
+         * 「名字恰好是 L 且紧跟引号」与 tcc 那个 `p[1]` 的预看等价（`tccpp.c:2710`）。
+         *
+         * 名字**按段 slice**，不是一个字符一次 `+=`（量出来的：`+=` 那一版让这一段
+         * 成了前端最大的一块 —— C 源码里绝大多数记号是标识符）。分段是因为 `\<换行>`
+         * 可以劈开一个名字：一段扫到底、`peekc()` 吃掉拼接、还是标识符字符就再来一段。 */
         let name = '';
         let cc = c;
-        while (isIdNum(cc)) {
-          name += String.fromCharCode(cc);
-          this.file.pos++;
+        for (;;) {
+          /* `this.file` 每一轮重取 —— 头上那个 `f` 在 include 收尾那一支之后就旧了
+           * （那一支写 `this.file = this.file.prev` 再 `continue redo`）。 */
+          const ff = this.file;
+          const s = ff.text;
+          const start = ff.pos;
+          let p = start;
+          while (isIdNum(s.charCodeAt(p))) p++;
+          if (p > start) {
+            name += s.slice(start, p);
+            ff.pos = p;
+          }
           cc = this.peekc();
+          if (!isIdNum(cc)) break;
         }
         if (name === 'L' && (cc === 39 || cc === 34)) {
           this.lexPpString(cc, true);
@@ -1545,6 +1572,22 @@ export class Cpp {
     let depth = 0;
     let startOfLine = true;
     for (;;) {
+      /* 先用一个**局部**循环把「不关心的那些字符」整段跳过（量出来的：被跳掉的字符
+       * 绝大多数落在这一段，而从前每个字符都要走一趟 `peekc()` + 一次 `this.file.pos++`；
+       * `preprocessSkip` 曾占前端 CPU 的 5.4%）。空白照旧**不动** `startOfLine` ——
+       * `   #endif` 里的缩进要能穿过去。`\` 与引号、注释、`#` 一样交回下面的分支。 */
+      const f = this.file;
+      const s = f.text;
+      let p = f.pos;
+      for (;;) {
+        const ch = s.charCodeAt(p);
+        if (ch === SPC || ch === TAB || ch === 11 || ch === 12 || ch === 13) { p++; continue; }
+        if (ch === LF || ch === 34 || ch === 39 || ch === 47 || ch === 35 || ch === 92
+          || !(ch >= 0)) break;
+        p++;
+        startOfLine = false;
+      }
+      f.pos = p;
       const c = this.peekc();
       if (c === SPC || c === TAB || c === 11 || c === 12 || c === 13) {
         this.file.pos++;
