@@ -93,12 +93,15 @@ export const WAT_SHAPES = [
     // **这条账的价钱量过了**（记下来，好让下一批从测量而不是猜开始）：
     //   1. 这一侧：发 `(table N funcref)` + `(elem …)`，函数值 = 表下标，
     //      间接调用点发 `call_indirect`（签名按元数分，形参这一批全是 i64）；
-    //   2. `src/core/wasm/assemble.js`：table / elem / type / call_indirect 四样要收
-    //      —— 那一份已经在装二进制了，加这四样是照着规范补段；
-    //   3. `src/core/frontend-wat/lower.js:797` 现在**一律拒**（`call_indirect` / `br_table` /
-    //      `table.*`）。**MIR 那边不欠**：`src/core/mir/ir.js:340` 早就有间接调用
-    //      （"wasm 的 call_indirect，也是 C 的函数指针"）—— 所以缺的只是前端那一段读表。
-    // 也就是说这条账落在三处，其中最贵的那处（IR 与解释器）**已经付过了**。
+    //   2. `src/core/wasm/assemble.js`：**已经接了**（table / elem / type / call_indirect
+    //      四样，判据是 `tests/graph/wasm.js` 里那份手写模块，V8 里跑出 70 / 8）；
+    //   3. `src/core/frontend-wat/lower.js:797` 现在一律拒 —— 而这一处比它看起来贵：
+    //      **头一版把价钱记低了，改过来**。`mir/ir.js:340` 那格 `CALLI` 确实早就有，
+    //      可 `grep CALLI` 数出来**只有 `frontend-c` 发它**（C 那条路直接落 MIR）。
+    //      `frontend-wat` 落的是 **OIR**，而 OIR 里**没有**"按值调用"这一格 ——
+    //      加它就要动 OIR 的全部消费者（interp / js / c / llvm / native）。
+    // 也就是说：真引擎那条判据（V8）现在就能覆盖这个形状，而树里那条 MIR 判据要等 OIR
+    // 长出一格间接调用。**两条判据不一样长，这件事要写在账上**，不许含糊成"接不住"。
     witness: () => prog([
       fn('f', [ret(litOf(1))]),
       bindTo('g', refTo('f')),
