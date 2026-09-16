@@ -45,7 +45,8 @@ import { Gap } from './backend-wat.js';
 /** 这一刀接得住的节点。别的一律有名有姓地报缺口（`can` 那一问）。 */
 const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'loop-exit',
   'region', 'ret', 'func', 'call',
-  'list-new', 'index-get', 'index-set', 'record-new', 'field-get', 'field-set']);
+  'list-new', 'index-get', 'index-set', 'record-new', 'field-get', 'field-set',
+  'map-new', 'map-get', 'map-set', 'map-has', 'values', 'pick']);
 
 /** 这一刀接得住的内建。`prims.js` 里现有 16 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
@@ -67,6 +68,7 @@ int printf(const char *, ...);
 int snprintf(char *, unsigned long, const char *, ...);
 double strtod(const char *, char **);
 void *malloc(unsigned long);
+void *realloc(void *, unsigned long);
 void *memcpy(void *, const void *, unsigned long);
 unsigned long strlen(const char *);
 int strcmp(const char *, const char *);
@@ -81,12 +83,24 @@ typedef struct gv { long long t; long long b; } gv;
 #define GT_STR 3
 #define GT_LIST 4
 #define GT_REC 5
+#define GT_MAP 6
+#define GT_VALS 7
+
+/* 骂一句再退。**不悄悄给错答案**：越界、缺键、没定的格式都走这儿 —— 与调度器那侧
+ * 「当场报」同一条（eval.js 里那几处 throw）。 */
+static void g_die(const char *msg) {
+  printf("graph-c: %s\\n", msg);
+  exit(3);
+}
 
 /* 列表与记录都是**堆上一块**（载荷里躺的是指针）。记录的键是编译期就知道的常量串，
  * 所以键那一格是 const char * 的数组 —— 与 js 后端那侧「表示与 interp 相同」同一条：
  * 两条腿的可观察行为一致就够，内部怎么摆各自定。 */
 typedef struct glist { long long n; gv *v; } glist;
 typedef struct grec { long long n; const char **k; gv *v; } grec;
+/* 映射：键**按值**比，所以只能顺着找（g_eq）。九门语言里没有一门要求它有序，
+ * 而「一格哈希表」这一层不必要 —— 例子里的映射都是几格到几十格。 */
+typedef struct gmap { long long n; long long cap; gv *k; gv *v; } gmap;
 
 static gv g_nil(void) { gv v; v.t = GT_NIL; v.b = 0; return v; }
 static gv g_bool(long long x) { gv v; v.t = GT_BOOL; v.b = x != 0 ? 1 : 0; return v; }
@@ -97,6 +111,7 @@ static const char *g_s(gv v) { const char *s; memcpy(&s, &v.b, 8); return s; }
 
 static glist *g_L(gv v) { glist *p; memcpy(&p, &v.b, 8); return p; }
 static grec *g_R(gv v) { grec *p; memcpy(&p, &v.b, 8); return p; }
+static gmap *g_M(gv v) { gmap *p; memcpy(&p, &v.b, 8); return p; }
 
 static gv g_list_new(gv *items, long long n) {
   glist *L = (glist *)malloc(sizeof(glist));
@@ -108,6 +123,22 @@ static gv g_list_new(gv *items, long long n) {
   v.t = GT_LIST;
   memcpy(&v.b, &L, 8);
   return v;
+}
+
+/* 多值：与列表同一块结构，只是标签不同 —— 印法（空格分隔）与取第 k 格靠标签分开。 */
+static gv g_vals_new(gv *items, long long n) {
+  gv v = g_list_new(items, n);
+  v.t = GT_VALS;
+  return v;
+}
+
+/* 取多值的第 k 格。**不是多值时第 0 格就是它自己**，别的格是 nil ——
+ * 与 eval.js 的 valPick 一字不差（两个后端共用那一份的口径）。 */
+static gv g_pick(gv v, long long i) {
+  if (v.t != GT_VALS) return i == 0 ? v : g_nil();
+  glist *L = g_L(v);
+  if (i < 0 || i >= L->n) return g_nil();
+  return L->v[i];
 }
 
 static gv g_rec_new(const char **keys, gv *vals, long long n) {
@@ -208,12 +239,28 @@ static char *g_show_rec(gv v) {
   return g_cat2(s, "}");
 }
 
+static char *g_show_vals(gv v) {
+  glist *L = g_L(v);
+  char *s = g_dup("");
+  long long i = 0;
+  while (i < L->n) {
+    if (i > 0) s = g_cat2(s, " ");
+    s = g_cat2(s, g_show(L->v[i]));
+    i++;
+  }
+  return s;
+}
+
 static char *g_show(gv v) {
   if (v.t == GT_NIL) return g_dup("nil");
   if (v.t == GT_BOOL) return g_dup(v.b != 0 ? "true" : "false");
   if (v.t == GT_STR) return g_dup(g_s(v));
   if (v.t == GT_LIST) return g_show_list(v);
   if (v.t == GT_REC) return g_show_rec(v);
+  if (v.t == GT_VALS) return g_show_vals(v);
+  /* **打印一格 map 没有格式**：go 印 map[a:1]、nim 印 {"a": 1}、lua 印地址 ——
+   * 四门各一套，调度器不替谁选，所以这一格当场骂（调度器那侧也是 throw）。 */
+  if (v.t == GT_MAP) g_die("print: 打印一格 map 的格式还没定（四门语言各不相同）");
   return g_num_str(g_d(v));
 }
 `;
@@ -230,11 +277,6 @@ static char *g_show(gv v) {
  * 不悄悄给个错答案；那种形状在 `lower` 那一侧就报缺口（见 `C_SHAPES` 第一条）。
  */
 const P_PRIM = `/* ---- 内建 */
-static void g_die(const char *msg) {
-  printf("graph-c: %s\\n", msg);
-  exit(3);
-}
-
 static double g_fmod(double a, double b) {
   double q = a / b;
   double t = (double)(long long)q;
@@ -332,6 +374,57 @@ static long long g_key(gv o, const char *k) {
 
 static gv g_field_get(gv o, const char *k) { return g_R(o)->v[g_key(o, k)]; }
 static void g_field_set(gv o, const char *k, gv x) { g_R(o)->v[g_key(o, k)] = x; }
+
+/* ---- 映射那四格。缺键**当场骂**（不给零值、不给 nil）—— 见 eval.js 那一段。 */
+static void g_map_set(gv o, gv k, gv x);
+
+static gv g_map_new(gv *ks, gv *vs, long long n) {
+  gmap *M = (gmap *)malloc(sizeof(gmap));
+  long long cap = n > 0 ? n : 4;
+  M->n = 0;
+  M->cap = cap;
+  M->k = (gv *)malloc(sizeof(gv) * cap);
+  M->v = (gv *)malloc(sizeof(gv) * cap);
+  gv o;
+  o.t = GT_MAP;
+  memcpy(&o.b, &M, 8);
+  long long i = 0;
+  while (i < n) { g_map_set(o, ks[i], vs[i]); i++; }
+  return o;
+}
+
+static long long g_map_find(gv o, gv k) {
+  if (o.t != GT_MAP) g_die("map: 不是一格映射");
+  gmap *M = g_M(o);
+  long long i = 0;
+  while (i < M->n) {
+    if (g_eq(M->k[i], k) != 0) return i;
+    i++;
+  }
+  return -1;
+}
+
+static void g_map_set(gv o, gv k, gv x) {
+  long long at = g_map_find(o, k);
+  gmap *M = g_M(o);
+  if (at >= 0) { M->v[at] = x; return; }
+  if (M->n == M->cap) {
+    M->cap = M->cap * 2;
+    M->k = (gv *)realloc(M->k, sizeof(gv) * M->cap);
+    M->v = (gv *)realloc(M->v, sizeof(gv) * M->cap);
+  }
+  M->k[M->n] = k;
+  M->v[M->n] = x;
+  M->n = M->n + 1;
+}
+
+static gv g_map_get(gv o, gv k) {
+  long long at = g_map_find(o, k);
+  if (at < 0) g_die("map-get: 没有这一格键");
+  return g_M(o)->v[at];
+}
+
+static gv g_map_has(gv o, gv k) { return g_bool(g_map_find(o, k) >= 0 ? 1 : 0); }
 `;
 
 /** 名字要能当 C 标识符用（Scheme 的 `string-append`、awk 的 `$0` 那种）。 */
@@ -560,6 +653,28 @@ class CGen {
     if (x.op === 'field-get') {
       return `g_field_get(${this.valOf(x.ins.obj)}, ${cStr(x.attrs.field)})`;
     }
+    if (x.op === 'map-new') {
+      const ks = asList(x.ins.keys).filter((y) => y !== undefined).map((y) => this.valOf(y));
+      const vs = asList(x.ins.vals).filter((y) => y !== undefined).map((y) => this.valOf(y));
+      const n = ks.length;
+      const ka = `mk${this.fresh()}`;
+      const va = `mv${this.fresh()}`;
+      this.emit(`gv ${ka}[${n > 0 ? n : 1}];`);
+      this.emit(`gv ${va}[${n > 0 ? n : 1}];`);
+      for (let i = 0; i < n; i++) this.emit(`${ka}[${i}] = ${ks[i]};`);
+      for (let i = 0; i < n; i++) this.emit(`${va}[${i}] = ${vs[i]};`);
+      return `g_map_new(${ka}, ${va}, ${n})`;
+    }
+    if (x.op === 'map-get') return `g_map_get(${this.valOf(x.ins.obj)}, ${this.valOf(x.ins.key)})`;
+    if (x.op === 'map-has') return `g_map_has(${this.valOf(x.ins.obj)}, ${this.valOf(x.ins.key)})`;
+    if (x.op === 'values') {
+      const items = asList(x.ins.args).filter((y) => y !== undefined).map((y) => this.valOf(y));
+      const a = `w${this.fresh()}`;
+      this.emit(`gv ${a}[${items.length > 0 ? items.length : 1}];`);
+      for (let i = 0; i < items.length; i++) this.emit(`${a}[${i}] = ${items[i]};`);
+      return `g_vals_new(${a}, ${items.length})`;
+    }
+    if (x.op === 'pick') return `g_pick(${this.valOf(x.ins.from)}, ${Number(x.attrs.index ?? 0)})`;
     if (x.op === 'func') {
       throw new Gap('c 后端：`func` 当值用（不是当场调用、也不是绑给一个名字）还没接');
     }
@@ -707,6 +822,10 @@ class CGen {
     }
     if (x.op === 'field-set') {
       this.emit(`g_field_set(${this.valOf(x.ins.obj)}, ${cStr(x.attrs.field)}, ${this.valOf(x.ins.value)});`);
+      return;
+    }
+    if (x.op === 'map-set') {
+      this.emit(`g_map_set(${this.valOf(x.ins.obj)}, ${this.valOf(x.ins.key)}, ${this.valOf(x.ins.value)});`);
       return;
     }
     if (x.op === 'loop-exit') {
