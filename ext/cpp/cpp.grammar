@@ -526,7 +526,9 @@
     ;; 表达式 —— 所以偏表达式在这一批里不会挑错。`T * x;` 那种形状要等回问机制。
     (-> (expr ";") (prefer 1) (expr $1))
     (-> (simple-decl) $1)
-    (-> (func-def) $1)
+    ;; **函数定义不进语句** —— C++ 没有嵌套函数（lambda 是表达式，走 expr 那支）。
+    ;; 留它的代价是量出来的：`if (a > b) { return a; }` 里那个复合语句会与"声明符后面
+    ;; 跟一格函数体"撞成两解（`(block …)` vs `(func …)`）。又一处"语法写松了"。
     (-> (template-decl) $1)
     (-> (using-decl) $1)
     (-> (static-assert) $1)
