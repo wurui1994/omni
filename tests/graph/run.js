@@ -394,6 +394,34 @@ if (only.length === 0) {
   }
 }
 
+/**
+ * **每一格节点都要有一笔提供者账** —— 要么自己有（`providers`），要么 `family` 指向
+ * 一格有账的（"一族一笔账"：`record-new` / `field-get` / `field-set` 是同一件能力的三格）。
+ *
+ * 这一条是上一节的封口：上一节只检"有账的那几格算得对不对"，于是**不记账**就能绕过去 ——
+ * 而普查里 `--machines` 印出来的数正是这么烂的（"6 机器 loop-exit"从来没人判过）。
+ * 加上这一条之后，**新开一格节点却不记账当场会红**。
+ */
+{
+  const bad = [];
+  for (const [op, d] of NODES) {
+    if (d.providers !== null) continue;
+    if (d.family === null) { bad.push(`${op}（既没有 providers 也没写 family）`); continue; }
+    const headOf = NODES.get(d.family);
+    if (headOf === undefined) { bad.push(`${op}（family 指向 ${d.family}，可没有这一格节点）`); continue; }
+    if (headOf.providers === null) bad.push(`${op}（family 指向 ${d.family}，可那一格也没有账）`);
+  }
+  if (bad.length === 0) {
+    const own = [...NODES.values()].filter((d) => d.providers !== null).length;
+    process.stdout.write(`  ok   提供者账齐不齐 [${NODES.size} 格节点：${own} 格自己记账、`
+      + `${NODES.size - own} 格挂在族长名下]\n`);
+    pass++;
+  } else {
+    for (const b of bad) process.stdout.write(`  FAIL 提供者账齐不齐: ${b}\n`);
+    fail += bad.length;
+  }
+}
+
 if (showMachines) {
   // G5：一格节点的提供者名单。**只有一家的不算机器**（ADR-0033 §3.7 / §5 同一条纪律）。
   process.stdout.write('\n每格节点的提供者名单（数出来的）：\n');

@@ -57,6 +57,15 @@ const N = (op, sort, ins, opts = {}) => [op, {
    * "量出来的 ⊆ 规格里的"，且差集里每一门都得有一句为什么还没接。
    */
   providers: opts.providers ?? null,
+  /**
+   * 可选的一格：**这一格属于哪一族**（族长那一格记账，族里其余的指向它）。
+   *
+   * 理由是"一族一笔账"：`record-new` / `field-get` / `field-set` 是同一件能力的三格，
+   * 各记一遍账等于同一句话抄三份（而抄的那几份里总有一份会忘了改）。
+   * 判据在 `tests/graph/run.js`："每一格节点要么自己有账，要么 `family` 指向一格有账的"
+   * —— 于是**新加一格节点而不记账**这件事当场会红。
+   */
+  family: opts.family ?? null,
 }];
 
 /**
@@ -64,19 +73,39 @@ const N = (op, sort, ins, opts = {}) => [op, {
  * 每一格后面那句话是它的**出处**（哪几门语言的规格要求它），
  * 判据是 `omni nodes --source`：没有出处的节点不许存在。
  */
+/**
+ * 十门语言的名字（`src/core/graph/langs.js` 那张登记处里的十门 —— 方言不算一家）。
+ * 只有 `providers.spec` 用它：写 `spec: TEN` 就是"这一格十门的规格里都要求它"。
+ */
+const TEN = ['go', 'vlang', 'nim', 'lua', 'mojo', 'cpp', 'awk', 'freebasic', 'chez', 'sbcl'];
+
 export const NODES = new Map([
   // ---- 值与名字（4 格）--------------------------------------------------------
-  N('const', 'expr', [], { attrs: ['value'], doc: 'chez quote / go OLITERAL / 十门全有' }),
-  N('ref', 'expr', [], { attrs: ['name'], effects: ['reads'], doc: 'chez ref / sbcl ref' }),
+  N('const', 'expr', [], {
+    attrs: ['value'], doc: 'chez quote / go OLITERAL / 十门全有',
+    providers: { spec: TEN, why: {} },
+  }),
+  N('ref', 'expr', [], {
+    attrs: ['name'], effects: ['reads'], doc: 'chez ref / sbcl ref / 十门全有',
+    providers: { spec: TEN, why: {} },
+  }),
   N('bind', 'decl', [{ name: 'init', sem: SEM.value }], {
     // `keepMulti` 是一格**附属**：绑的是整格多值（`destructure` 那格临时量），不是第一格。
     // 没有它的话 `local x = f()` 与"装住多值"两件事分不开 —— lua 的规矩是前者只取第一格。
     attrs: ['name', 'keepMulti'], effects: ['writes'], lifetime: 'owns', outs: [],
     doc: 'decl 就是这一格：sbcl let / go OAS / lua local / nim let',
+    providers: { spec: TEN, why: {} },
   }),
   N('set', 'stat', [{ name: 'value', sem: SEM.value }], {
     attrs: ['name'], effects: ['writes'], outs: [],
     doc: 'chez set! / sbcl cset / go OAS',
+    // 十门的规格里都有"改一格已有的名字"。矩阵九门 —— chez 那一门的映射**接了**
+    // （`case 'set!'`），欠的是**例子**：Scheme 那几份写成纯递归，一处 `set!` 都没有。
+    // 这一条与别的 why 不同：它欠的不是机制，是判据。
+    providers: {
+      spec: TEN,
+      why: { chez: '映射里 `set!` 接了，可 Scheme 那几份例子是纯递归 —— 欠的是一份用它的例子' },
+    },
   }),
 
   // ---- 算子与调用（2 格）------------------------------------------------------
@@ -88,11 +117,13 @@ export const NODES = new Map([
   // chez 的 `pr`、awk 的 builtin、freebasic 那一批自带词序的语句，全落这儿。
   N('call', 'expr', [{ name: 'fn', sem: SEM.value }, { name: 'args', sem: SEM.value, rest: true }], {
     effects: ['reads', 'writes'], doc: 'chez call / go OCALL* 八格 / 十门全有',
+    providers: { spec: TEN, why: {} },
   }),
   N('prim', 'expr', [{ name: 'args', sem: SEM.value, rest: true }], {
     attrs: ['name'], effects: ['reads', 'writes'],
     doc: 'chez pr（prims.ss）/ go 19+7+23 格 / awk builtin / freebasic 那一批语句。'
       + '效应那一栏**逐格内建**地查 prims.js —— 这儿写的是"最坏情况"的默认值',
+    providers: { spec: TEN, why: {} },
   }),
 
   // ---- 控制流（3 格；控制流**不是**第五种边，是带效应的节点把图切段）--------
@@ -100,7 +131,10 @@ export const NODES = new Map([
     { name: 'cond', sem: SEM.value },
     { name: 'then', sem: SEM.lazy },
     { name: 'else', sem: SEM.lazy, optional: true },
-  ], { doc: 'chez if（入端口 lazy 就是它要的）/ 十门全有' }),
+  ], {
+    doc: 'chez if（入端口 lazy 就是它要的）/ 十门全有',
+    providers: { spec: TEN, why: {} },
+  }),
   N('loop', 'stat', [
     { name: 'cond', sem: SEM.lazy },
     { name: 'body', sem: SEM.body },
@@ -108,9 +142,22 @@ export const NODES = new Map([
     // 却**照跑步进** —— go 的三段式 `for` 与 lua 的 `for i = a, b` 都是这条规矩。
     // 缀在体末尾的写法在没有 continue 的时候看不出差别，加上 continue 就是死循环。
     { name: 'post', sem: SEM.body, optional: true },
-  ], { outs: [], doc: 'lua while / go OFOR / freebasic Do…Loop 六种写法' }),
+  ], {
+    outs: [], doc: 'lua while / go OFOR / freebasic Do…Loop 六种写法',
+    // 九门 —— **chez 不在规格里**：Scheme 的迭代是递归（尾调用），语言里没有循环这一格。
+    providers: {
+      spec: ['go', 'vlang', 'nim', 'lua', 'mojo', 'cpp', 'awk', 'freebasic', 'sbcl'],
+      why: {},
+    },
+  }),
   N('region', 'stat', [{ name: 'body', sem: SEM.body, rest: true }], {
     outs: ['value'], doc: 'sbcl bind/creturn 一对 / freebasic Scope（SCOPEBEGIN/END）',
+    // 十门都有"一段带自己作用域的语句"。矩阵九门 —— nim 那门的 `block:` 还没接
+    // （例子里没用到；nim 的 `defer:` 挂的是函数那一格 region）。
+    providers: {
+      spec: TEN,
+      why: { nim: '`block:` 那种显式块还没接 —— 例子用的是函数与 `defer:`（那两处的 region 是现成的）' },
+    },
   }),
 
   // ---- 函数与出口（3 格）------------------------------------------------------
@@ -118,10 +165,21 @@ export const NODES = new Map([
   N('func', 'expr', [{ name: 'body', sem: SEM.body }], {
     attrs: ['params', 'name'], lifetime: 'owns',
     doc: 'chez case-lambda（函数只有这一种形式）/ 十门全有',
+    providers: { spec: TEN, why: {} },
   }),
   N('ret', 'stat', [{ name: 'value', sem: SEM.value, optional: true, multi: true }], {
     effects: ['may-early-exit'], outs: [],
     doc: 'go ORETURN / lua return / nim return —— 早退是效应，不是边',
+    // 九门 —— **chez 不在规格里**：Scheme 的函数体就是它的值，语言里没有 return 这一格
+    // （要早退得用 call/cc）。欠 sbcl：CL 的 `return-from` 要"带名字的块"那一族，
+    // 与 loop-exit 欠的是**同一笔**。
+    providers: {
+      spec: ['go', 'vlang', 'nim', 'lua', 'mojo', 'cpp', 'awk', 'freebasic', 'sbcl'],
+      why: {
+        sbcl: 'CL 的早退是 `return-from` / `(return)`（从一格带名字的块里出去）——'
+          + ' 要"块 + 从块里返回"那一族，与 loop-exit 欠的是同一笔',
+      },
+    },
   }),
 
   // ---- 作用域出口（1 格）：**规格里数出来八个提供者**（附录 A.1 里最稳的一格能力）----
@@ -189,7 +247,7 @@ export const NODES = new Map([
     },
   }),
   N('pick', 'expr', [{ name: 'from', sem: SEM.value, multi: true }], {
-    attrs: ['index'],
+    attrs: ['index'], family: 'values',
     doc: '多出端口的第 k 格。`x, y := f()` 那一侧就是一串它',
   }),
 
@@ -214,14 +272,14 @@ export const NODES = new Map([
     },
   }),
   N('field-get', 'expr', [{ name: 'obj', sem: SEM.value }], {
-    attrs: ['field'], effects: ['reads'], lifetime: 'borrows(obj)',
+    attrs: ['field'], effects: ['reads'], lifetime: 'borrows(obj)', family: 'record-new',
     doc: 'go/V 的 `(sel …)` / lua/nim 的 `(dot …)` —— 规格里九门有（矩阵接了几门看 record-new 那格的账）',
   }),
   N('field-set', 'stat', [
     { name: 'obj', sem: SEM.value },
     { name: 'value', sem: SEM.value },
   ], {
-    attrs: ['field'], effects: ['writes'], outs: [],
+    attrs: ['field'], effects: ['writes'], outs: [], family: 'record-new',
     doc: '`p.y = 5` —— 左边是字段的赋值落这格，不落 set（set 只认名字）',
   }),
 
@@ -252,7 +310,7 @@ export const NODES = new Map([
     { name: 'obj', sem: SEM.value },
     { name: 'index', sem: SEM.value },
   ], {
-    effects: ['reads'], lifetime: 'borrows(obj)',
+    effects: ['reads'], lifetime: 'borrows(obj)', family: 'list-new',
     doc: 'lua/go/V 的 `(index …)` / nim 的 `(bracket …)`',
   }),
   N('index-set', 'stat', [
@@ -260,7 +318,7 @@ export const NODES = new Map([
     { name: 'index', sem: SEM.value },
     { name: 'value', sem: SEM.value },
   ], {
-    effects: ['writes'], outs: [],
+    effects: ['writes'], outs: [], family: 'list-new',
     doc: '`xs[1] = 5` —— 左边是下标的赋值落这格',
   }),
 
@@ -301,7 +359,7 @@ export const NODES = new Map([
     { name: 'obj', sem: SEM.value },
     { name: 'key', sem: SEM.value },
   ], {
-    effects: ['reads'], lifetime: 'borrows(obj)',
+    effects: ['reads'], lifetime: 'borrows(obj)', family: 'map-new',
     doc: '`m[k]` —— 缺键是错误（默认值归语言，用 map-has 自己写）',
   }),
   N('map-set', 'stat', [
@@ -309,15 +367,16 @@ export const NODES = new Map([
     { name: 'key', sem: SEM.value },
     { name: 'value', sem: SEM.value },
   ], {
-    effects: ['writes', 'allocates'], outs: [],
+    effects: ['writes', 'allocates'], outs: [], family: 'map-new',
     doc: '`m[k] = v` —— 可能长出一格新键，所以效应里有 allocates',
   }),
   N('map-has', 'expr', [
     { name: 'obj', sem: SEM.value },
     { name: 'key', sem: SEM.value },
   ], {
-    effects: ['reads'], lifetime: 'borrows(obj)',
-    doc: 'go 的 `_, ok := m[k]` / lua 的 `t[k] ~= nil` / awk 的 `k in m`',
+    effects: ['reads'], lifetime: 'borrows(obj)', family: 'map-new',
+    doc: 'go 的 `_, ok := m[k]` / lua 的 `t[k] ~= nil` / awk 的 `k in m`'
+      + ' / CL 的 `(nth-value 1 (gethash …))` / Scheme 的 `hashtable-contains?`',
   }),
 
   // ---- 循环的早退（1 格）------------------------------------------------------
