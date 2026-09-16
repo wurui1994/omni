@@ -11,6 +11,22 @@
 //
 // 默认还是外部 cc（`findCC()`）—— 这条路先钉在测试里，不动默认。
 //
+// **整份编译器那一趟量在这儿**（第一百三十六片，没进这条轴：它要 `dist/build/omni.c`
+// 这个构建产物，不该由测试去建）：
+//
+//   node src/cli.js c obj dist/build/omni.c -o omni-self.o --arch arm64 --os osx -f elf
+//       -> 过了，`.o` 65260089 字节、5.9s（要 `--max-old-space-size=8192`）
+//   node src/cli.js c link omni-self.o rt-*.o -o omni-selfhost -f macho -lc -L $SDK/usr/lib
+//       -> 55196344 字节、14 条加载命令、6 节、入口 0x31d3408、2.5s
+//   ./omni-selfhost --help                      -> 印出用法
+//   ./omni-selfhost check tests/cases/01_basics.omni
+//       -> `ok  …：6 个函数（前端 + 检查器，没出产物）`
+//
+// 也就是说**整个前端 + 检查器已经在一个我们自己编、自己链的二进制里跑起来了**。
+// 还差的一格是**插件**：核心与插件之间靠 `k_s16_N_s` 这一族串常量符号连着（插件引用
+// 核心导出的那些），所以两边必须一起建 —— 拿旧的插件喂新核心，症状是
+// `dlopen … symbol not found in flat namespace '_k_s16_1665_s'`。
+//
 //   node tests/selfc/run.js
 
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
