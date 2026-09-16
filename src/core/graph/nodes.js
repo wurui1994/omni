@@ -447,8 +447,10 @@ export const NODES = new Map([
     providers: {
       spec: ['go', 'vlang', 'nim', 'mojo', 'sbcl', 'chez', 'cpp'],
       why: {
-        cpp: '`std::span` / `std::vector` 那一行读不进来 —— 与 map 欠的是**同一笔**：'
-          + 'cpp 不做预处理，头文件里的类型名登记不进来（自己声明的模板已经能当类型用了）',
+        cpp: '**不是"读不进来"**（那句旧账在第二十五批之十九作废了：名字登记过就读得进来，'
+          + 'map 那一族因此接上了）—— cpp 这一侧的切片是 `std::span` / **迭代器区间**'
+          + '（`std::vector<int>(xs.begin()+1, xs.begin()+3)`），与另外六门那一格"下标算子/'
+          + '一次函数调用"**不同形**：要接得先有"表达式里的类型名 + 构造调用"那台机器',
       },
     },
   }),
