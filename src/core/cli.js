@@ -1613,6 +1613,38 @@ function hostIsDarwin() {
   return DARWIN_CACHE === 1;
 }
 
+/**
+ * 本机的操作系统名（我们这套目标名字：`osx` / `linux` / `win32`）与目标文件格式。
+ *
+ * **为什么要有这两格**（第一百四十七片）：`omni c obj|link|cpp|tcc` 那一组的
+ * `--arch` / `--os` 默认值从前写死是 `arm64` + `osx`（`macho`）—— 那是写这几条命令时
+ * 手边那台机器。在 x86_64 Linux 上不给开关就等于**默认交叉编译到 macOS**：出来的 `.o`
+ * 是 Mach-O，本机的 clang / ld 一律不认，而错误信息（"file format not recognized"）
+ * 离真正的原因隔着两层。默认值应当是「这台机器」，交叉编译才是要明说的那一路。
+ *
+ * `uname -s` 认不出来的（MSYS 那一族印 `MINGW64_NT-…`、Cygwin 印 `CYGWIN_NT-…`）
+ * 归到 `win32`；`uname` 本身跑不起来（真 Windows 的 cmd）也归它 —— 那三家里
+ * 只有 Windows 会让 `uname` 缺席。
+ */
+let OS_CACHE = '';
+function hostOs() {
+  if (OS_CACHE === '') {
+    const r = spawn('uname', ['-s'], 'c');
+    const s = r[0] === 0 ? r[1].trim() : '';
+    if (s === 'Darwin') OS_CACHE = 'osx';
+    else if (s === 'Linux') OS_CACHE = 'linux';
+    else OS_CACHE = 'win32';
+  }
+  return OS_CACHE;
+}
+
+/** 一个目标名 -> 目标文件格式。`osx` 是 Mach-O、`win32` 是 PE、其余（linux）是 ELF。 */
+function fmtOfOs(os) {
+  if (os === 'osx') return 'macho';
+  if (os === 'win32') return 'pe';
+  return 'elf';
+}
+
 function mainStackFlags(cc) {
   if (isTcc(cc) || !hostIsDarwin()) return [];
   return ['-Wl,-stack_size,0x20000000'];
@@ -2327,8 +2359,8 @@ function cDefaultLibs(os) {
  */
 function tccPrepLink(argv) {
   const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
-  const arch = val('--arch') ?? 'arm64';
-  const os = val('--os') ?? 'osx';
+  const arch = val('--arch') ?? hostArch();
+  const os = val('--os') ?? hostOs();
   const out = [];
   let nSrc = 0;
   for (const a of argv) {
@@ -2358,9 +2390,9 @@ function tccPrepLink(argv) {
 function runCFile(path, argv) {
   const ai = argv.indexOf('--arch');
   const si = argv.indexOf('--os');
-  const arch = ai >= 0 ? argv[ai + 1] : 'arm64';
-  const os = si >= 0 ? argv[si + 1] : 'osx';
-  const fmt = os === 'osx' ? 'macho' : os === 'win32' ? 'pe' : 'elf';
+  const arch = ai >= 0 ? argv[ai + 1] : hostArch();
+  const os = si >= 0 ? argv[si + 1] : hostOs();
+  const fmt = fmtOfOs(os);
   const dir = workDirFor('run-c-exe', hash16(path));
   mkdirAll(dir);
   const obj = join(dir, `${basename(path, '.c')}.o`);
@@ -2390,9 +2422,9 @@ function runCFile(path, argv) {
 function buildCFile(path, rest) {
   const ai = rest.indexOf('--arch');
   const si = rest.indexOf('--os');
-  const arch = ai >= 0 ? rest[ai + 1] : 'arm64';
-  const os = si >= 0 ? rest[si + 1] : 'osx';
-  const fmt = os === 'osx' ? 'macho' : os === 'win32' ? 'pe' : 'elf';
+  const arch = ai >= 0 ? rest[ai + 1] : hostArch();
+  const os = si >= 0 ? rest[si + 1] : hostOs();
+  const fmt = fmtOfOs(os);
   const oi = rest.indexOf('-o');
   const out = oi >= 0 ? rest[oi + 1] : basename(path, '.c');
   const { flags } = cSplitArgs(rest);
@@ -2718,11 +2750,12 @@ function main(argv) {
     }
   }
   /* `c link -f FMT`（决策二）：格式是**目标的一个属性**，不是命令的一级。这一片先翻译到
-   * 原来那四条实现上，四合一是分片 4 的事。 */
+   * 原来那四条实现上，四合一是分片 4 的事。
+   * 不给 `-f` 就按**这台机器**（第一百四十七片）—— 从前是硬要一个，而「链出本机能跑的
+   * 东西」是最常见的那一次，不该每回都写一遍。 */
   if (cmd === 'c-link') {
     const fi = rest.indexOf('--format') >= 0 ? rest.indexOf('--format') : rest.indexOf('-f');
-    const f = fi >= 0 ? rest[fi + 1] : null;
-    if (f === null) throw new OmniError('c link: 要给 -f elf|macho|pe');
+    const f = fi >= 0 ? rest[fi + 1] : fmtOfOs(hostOs());
     if (f === 'elf') cmd = rest.includes('-r') ? 'elf-r' : 'elf-link';
     else if (f === 'macho') cmd = 'macho-link';
     else if (f === 'pe') cmd = 'pe-link';
@@ -3145,10 +3178,11 @@ function main(argv) {
       let verbose = 0;
       for (const a of rest) if (/^-v+$/.test(a)) verbose = a.length - 1;
       /* `--arch` / `--os`：拿哪个目标的预定义（第一百二十九片）。与 `c-obj` 同名同值，
-       * 默认 arm64+osx —— 本机那一支。 */
+       * 默认**这台机器**（第一百四十七片：从前写死 arm64+osx，在 x86_64 Linux 上
+       * 等于默认交叉编译到 macOS）。 */
       const cai = rest.indexOf('--arch');
       const csi = rest.indexOf('--os');
-      const tgt = { arch: cai >= 0 ? rest[cai + 1] : 'arm64', os: csi >= 0 ? rest[csi + 1] : 'osx' };
+      const tgt = { arch: cai >= 0 ? rest[cai + 1] : hostArch(), os: csi >= 0 ? rest[csi + 1] : hostOs() };
       const out = cap('c.preprocess')(path, incDirs(rest), defArgs(rest), dflag, pflag, deps,
         sysIncDirs(rest), inclArgs(rest), verbose, tgt, rest.includes('--skip-missing-includes'));
       if (wantDeps) {
@@ -3185,7 +3219,7 @@ function main(argv) {
       const { mod, warnings } = cap('c.toMirNative')(path, {
         includeDirs: incDirs(flags),
         sysIncludeDirs: sysIncDirs(flags) ?? cap('c.sysInclude')(),
-        arch: 'arm64',
+        arch: hostArch(),
         os: undefined,
       }, defArgs(flags));
       for (const w of warnings) stderr(`${w}\n`);
@@ -3223,13 +3257,14 @@ function main(argv) {
       const oi = flags.indexOf('-o');
       const out = oi >= 0 ? flags[oi + 1] : `${basename(path, '.c')}.o`;
       const ai = flags.indexOf('--arch');
-      const arch = ai >= 0 ? flags[ai + 1] : 'arm64';
+      const arch = ai >= 0 ? flags[ai + 1] : hostArch();
       /* `--format elf` 写 tcc 那种 `.o`（`ET_REL`），`--os linux` 去掉符号名前那条
-       * 下划线。默认还是 Mach-O —— 本机的 clang 只吃那一种。 */
-      const fi = flags.indexOf('--format');
-      const fmt = fi >= 0 ? flags[fi + 1] : 'macho';
+       * 下划线。三格默认值都跟着**这台机器**走（第一百四十七片）：写死 macho + osx
+       * 在 x86_64 Linux 上就是默认交叉编译到 macOS，而本机的 clang / ld 一个都不认。 */
       const si = flags.indexOf('--os');
-      const os = si >= 0 ? flags[si + 1] : 'osx';
+      const os = si >= 0 ? flags[si + 1] : hostOs();
+      const fi = flags.indexOf('--format');
+      const fmt = fi >= 0 ? flags[fi + 1] : fmtOfOs(os);
       stdout(`${cObj(path, out, arch, incDirs(flags), defArgs(flags), fmt, os, sysIncDirs(flags))}\n`);
       return 0;
     }
