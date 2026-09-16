@@ -33,12 +33,13 @@
 //     "这一格装的是数还是串"没有类型可问，所以做一格最小的静态追踪（见 kindOf）：
 //     串只许待在"绑给局部量"与"打印"两处，流到别处一律报缺口。
 //
-// ## 接不住的，有名有姓
+// ## 接不住的，有名有姓（**节点级已经归零**，剩下的是形状上的账，见 WAT_SHAPES）
 //
-//   * `conv` 的 `float`（这一批只有 i64）· 闭包（`func` 当值用 / 嵌套 `func`）。
-//   * 既装串又装数的那格量（awk 没有声明，所以那是真的没类型）。
+//   * 嵌套的 `func`（闭包）—— 要先定"环境怎么排"。
+//   * 一格量先装串后装数（或先实数后整数）—— wasm 的局部量只有一种类型。
 //   * 字符串的拼接（`+` 落在串上）—— 运行期造串的机器有了（`$__str_join`），
 //     但"结果也是串"要顺着 kindOf 传，那一步没做。
+//   * 实数进记录 / 列表 / 实参 / 返回值 —— 那要按类型排的布局（内存里一格是 8 字节 i64）。
 
 import { NODES } from './nodes.js';
 // 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
@@ -60,7 +61,7 @@ const CAN = new Map([
   ['record-new', true], ['field-get', true], ['field-set', true],
   ['list-new', true], ['index-get', true], ['index-set', true],
   ['values', true], ['pick', true],
-  ['conv', 'wasm 这一批只有 i64：`float` 那一格要 f64 与"两种数值类型"的算术'],
+  ['conv', true],
   ['slice', true],
   ['scope-exit', true],
   ['loop-exit', true],
@@ -72,6 +73,31 @@ export function watCan(op) {
   return ans;
 }
 
+/**
+ * **形状上的账**：不是"哪格节点接不住"，而是"同一格节点的某种用法接不住"。
+ * 分开记的理由是 `gaps()` 只问得出前者 —— 到这一批为止，`CAN` 里已经没有 false 了
+ * （节点级缺口 0 格），可矩阵里还有两格在跳。那两格要是不写在这儿，
+ * "没有缺口（全接得住）"这句话就成了假话。
+ */
+export const WAT_SHAPES = [
+  {
+    what: '嵌套的 `func`（闭包）',
+    why: '要先定"环境怎么排"：线性内存里的一块 + 一格函数下标（与记录同一台机器）',
+  },
+  {
+    what: '一格量先装串后装数（或先实数后整数）',
+    why: 'wasm 的局部量只有一种类型，而图这一层没有类型 —— awk 那种无声明的语言真的答不出来',
+  },
+  {
+    what: '字符串的拼接（`+` 落在串上）',
+    why: '运行期造串的机器有了（$__str_join），但"结果也是串"要顺着 kindOf 传，那一步没做',
+  },
+  {
+    what: '实数进记录 / 列表 / 实参 / 返回值',
+    why: '内存里一格是 8 字节的 i64，实数要按类型排的布局（附录 A.5 的 carry）',
+  },
+];
+
 /** 一格算符 -> wasm 指令。比较那一族出 i32（只许在条件位置用），别的出 i64。 */
 const ARITH = new Map([
   ['+', 'i64.add'], ['-', 'i64.sub'], ['*', 'i64.mul'],
@@ -81,9 +107,25 @@ const CMP = new Map([
   ['<', 'i64.lt_s'], ['>', 'i64.gt_s'], ['<=', 'i64.le_s'], ['>=', 'i64.ge_s'],
   ['=', 'i64.eq'], ['!=', 'i64.ne'],
 ]);
+/**
+ * 实数那一侧的同一批算符。**两张表而不是一张带类型的表**：wasm 的指令名里就带着类型
+ * （`i64.add` / `f64.add`），所以"哪种数值类型"这一问在这一层的答案就是"查哪张表"。
+ * `%` 不在里面 —— wasm 的 f64 没有取余指令（要报缺口，不许拿 trunc 凑）。
+ */
+const FARITH = new Map([['+', 'f64.add'], ['-', 'f64.sub'], ['*', 'f64.mul'], ['/', 'f64.div']]);
+const FCMP = new Map([
+  ['<', 'f64.lt'], ['>', 'f64.gt'], ['<=', 'f64.le'], ['>=', 'f64.ge'],
+  ['=', 'f64.eq'], ['!=', 'f64.ne'],
+]);
 
 /** wasm 的名字：`$` + 安全化（`max2` / `string-append` 那种带横杠的名字要转）。 */
 const wname = (n) => `$${String(n).replace(/[^A-Za-z0-9_]/g, '_')}`;
+
+/**
+ * 一格值的**种类**落到 wasm 的哪种类型上。种类是这一层自己算的（图上没有类型）：
+ * `int` / `str`（地址）都是 i64，`real` 是 f64 —— **两种数值类型**就差这一格。
+ */
+const wty = (kind) => (kind === 'real' ? 'f64' : 'i64');
 
 class Gap extends Error {}
 
@@ -161,7 +203,7 @@ class Scope {
     let id = wname(name);
     while (this.fn.taken.has(id)) id = `${id}_`;
     this.fn.taken.add(id);
-    this.fn.locals.push(id);
+    this.fn.locals.push({ id, ty: wty(kind) });
     this.names.set(name, id);
     this.kinds.set(name, kind);
     return id;
@@ -268,6 +310,7 @@ function emitOnce(graph, retOf, multiOf) {
   const data = [];            // [{ off, bytes }]
   let dataEnd = 8;            // 0 号地址留空（与 `$hp` 的起点同一条约定）
   let needStr = false;
+  let needF64 = false;    // 用到实数了吗（宿主面那格 `print_f64` 按需发）
   let needJoin = false;   // 要不要那格运行期造串的辅助函数（打印多值）
   function strAddr(s) {
     if (strs.has(s)) return strs.get(s);
@@ -301,9 +344,10 @@ function emitOnce(graph, retOf, multiOf) {
   }
 
   /**
-   * 这一格值装的是**数**还是**串**（图那一层没有类型，所以只能静态追这几格）。
-   * 追不到的一律按 `int` —— 而"串流到追不着的地方"这件事在各个消费点上报缺口
-   * （见 noStr），所以答案不会悄悄错：要么是数，要么明说接不住。
+   * 这一格值装的是**数**（`int`）、**实数**（`real`）还是**串**（`str`，一格地址）。
+   * 图那一层没有类型，所以只能静态追这几格；追不到的一律按 `int` ——
+   * 而"串 / 实数流到追不着的地方"这件事在各个消费点上报缺口（见 onlyInt），
+   * 所以答案不会悄悄错：要么是数，要么明说接不住。
    */
   function kindOf(x, sc) {
     if (x === null || x === undefined) return 'int';
@@ -311,14 +355,21 @@ function emitOnce(graph, retOf, multiOf) {
       const l = asList(x);
       return l.length === 0 ? 'int' : kindOf(l[l.length - 1], sc);
     }
-    if (x.lit !== undefined) return typeof x.lit === 'string' ? 'str' : 'int';
+    if (x.lit !== undefined) return litKind(x.lit);
     switch (x.op) {
-      case 'const': return typeof x.attrs.value === 'string' ? 'str' : 'int';
+      case 'const': return litKind(x.attrs.value);
       case 'ref': {
         const nm = x.attrs.name;
         return sc.lookup(nm) !== null ? sc.kindOf(nm) : (globalKinds.get(nm) ?? 'int');
       }
       case 'region': return kindOf(x.ins.body, sc);
+      // 表示转换：目标那一栏（`to`）就是答案 —— 这一格是"两种数值类型"的入口
+      case 'conv': return x.attrs.to === 'float' ? 'real' : 'int';
+      // 算术：**有一边是实数，结果就是实数**（比较出的是真假，算 int）
+      case 'prim': {
+        if (!ARITH.has(x.attrs.name)) return 'int';
+        return asList(x.ins.args).some((a) => kindOf(a, sc) === 'real') ? 'real' : 'int';
+      }
       case 'branch': {
         const a = kindOf(x.ins.then, sc); const b = kindOf(x.ins.else, sc);
         return a === b ? a : 'mix';
@@ -327,11 +378,21 @@ function emitOnce(graph, retOf, multiOf) {
     }
   }
 
+  /** 一格字面量的种类。**整数与实数在图上都是 number**，判据只有"是不是整"这一条。 */
+  const litKind = (v) => {
+    if (typeof v === 'string') return 'str';
+    if (typeof v === 'number' && !Number.isInteger(v)) return 'real';
+    return 'int';
+  };
+
   /** 串只许待在"绑给局部量"与"打印"这两处。别的地方接住了就是给错答案，所以报缺口。 */
-  function noStr(x, sc, where) {
+  function onlyInt(x, sc, where) {
     const k = kindOf(x, sc);
     if (k === 'str' || k === 'mix') {
       throw new Gap(`${where}上还接不住字符串（wasm 上它是内存里的一块地址，要类型层才认得出）`);
+    }
+    if (k === 'real') {
+      throw new Gap(`${where}上还接不住实数（内存里的一格是 i64，要按类型排的布局）`);
     }
   }
 
@@ -359,11 +420,14 @@ function emitOnce(graph, retOf, multiOf) {
   const isTrue = (x) => x !== null && x !== undefined
     && ((x.lit === true) || (x.op === 'const' && x.attrs.value === true));
 
-  /** 一格临时量。**值位置的 `if` 要它** —— wasm 的 block 不带 result（见文件头那条账）。 */
-  function tmp(sc) {
+  /**
+   * 一格临时量。**值位置的 `if` 要它** —— wasm 的 block 不带 result（见文件头那条账）。
+   * `ty` 跟着值的种类走（实数要 f64 的那一格）。
+   */
+  function tmp(sc, ty = 'i64') {
     const id = `$t${++tmpSeq}`;
     sc.fn.taken.add(id);
-    sc.fn.locals.push(id);
+    sc.fn.locals.push({ id, ty });
     return id;
   }
 
@@ -372,9 +436,19 @@ function emitOnce(graph, retOf, multiOf) {
     if (isTrue(x)) return '(i32.const 1)';
     if (x !== null && x !== undefined && x.op === 'prim' && CMP.has(x.attrs.name)) {
       const [a, b] = asList(x.ins.args);
+      // 有一边是实数就用 f64 那一族（两边都补成 f64）—— 出的还是 i32，条件位置不变
+      if (kindOf(a, sc) === 'real' || kindOf(b, sc) === 'real') {
+        return `(${FCMP.get(x.attrs.name)} ${asF64(a, sc, pre)} ${asF64(b, sc, pre)})`;
+      }
       return `(${CMP.get(x.attrs.name)} ${expr(a, sc, pre)} ${expr(b, sc, pre)})`;
     }
+    if (kindOf(x, sc) === 'real') return `(f64.ne ${expr(x, sc, pre)} (f64.const 0))`;
     return `(i64.ne ${expr(x, sc, pre)} (i64.const 0))`;
+  }
+
+  /** 把一格值取成 f64：本来是实数就原样，是整数就补一格 convert。 */
+  function asF64(y, sc, pre) {
+    return kindOf(y, sc) === 'real' ? expr(y, sc, pre) : `(f64.convert_i64_s ${expr(y, sc, pre)})`;
   }
 
   /**
@@ -404,20 +478,28 @@ function emitOnce(graph, retOf, multiOf) {
         // 串上的算术只有一条有意义：`+` 是拼接。那要运行期分配 + 拷贝两段字节，
         // 还得知道结果也是串 —— 这一批没做，明说是缺口（别的算符落在串上本身就是错的）
         for (const a of args) {
-          if (kindOf(a, sc) !== 'int') {
+          const ka = kindOf(a, sc);
+          if (ka === 'str' || ka === 'mix') {
             throw new Gap(name === '+' ? '字符串的拼接（`+`）在 wasm 上还没接：要运行期分配 + 拷贝字节'
-              : `${name} 落在字符串上 —— wasm 这一批只有 i64 的算术`);
+              : `${name} 落在字符串上 —— wasm 这一批只有数的算术`);
           }
         }
-        const op = ARITH.get(name);
+        // **有一边是实数，整个算式就在 f64 上做**（整数那一边补一格 convert）——
+        // "两种数值类型"在这一层就是这一句：查哪张表 + 该不该补转换
+        const real = kindOf(x, sc) === 'real';
+        const num = (y) => (real ? asF64(y, sc, pre) : expr(y, sc, pre));
+        if (real && ARITH.has(name) && !FARITH.has(name)) {
+          throw new Gap(`实数上的 ${name} 还没接：wasm 的 f64 没有这条指令`);
+        }
+        const op = real ? FARITH.get(name) : ARITH.get(name);
         if (op !== undefined) {
           // **一元与二元要分开**：`-1` 是一元的 `-`，当成"少一格实参的二元"就会
           // 悄悄算成 `1 - 0`。这个错是矩阵抓出来的（nim / mojo 那两份 loopexit
           // 从 `var j = -1` 起步，wat 那条腿印出 7 而不是 8）——
           // **少一格实参不许当 0 用**，接不住就报缺口。
           if (args.length === 1) {
-            if (name === '-') return `(i64.sub (i64.const 0) ${expr(args[0], sc, pre)})`;
-            if (name === '+') return expr(args[0], sc, pre);
+            if (name === '-') return real ? `(f64.neg ${num(args[0])})` : `(i64.sub (i64.const 0) ${expr(args[0], sc, pre)})`;
+            if (name === '+') return num(args[0]);
             throw new Gap(`一元的 ${name} 还没接`);
           }
           if (args.length !== 2) {
@@ -430,16 +512,13 @@ function emitOnce(graph, retOf, multiOf) {
             }
             if (args.length === 0) {
               // 空的中性元也归那张表：`+` 是 0、`*` 是 1，`-` / `/` 空本身没有意义
-              if (name === '+') return '(i64.const 0)';
-              if (name === '*') return '(i64.const 1)';
+              if (name === '+') return real ? '(f64.const 0)' : '(i64.const 0)';
+              if (name === '*') return real ? '(f64.const 1)' : '(i64.const 1)';
               throw new Gap(`一格实参都没有的 ${name} 没有意义`);
             }
-            return args.slice(1).reduce(
-              (acc, y) => `(${op} ${acc} ${expr(y, sc, pre)})`,
-              expr(args[0], sc, pre),
-            );
+            return args.slice(1).reduce((acc, y) => `(${op} ${acc} ${num(y)})`, num(args[0]));
           }
-          return `(${op} ${expr(args[0], sc, pre)} ${expr(args[1], sc, pre)})`;
+          return `(${op} ${num(args[0])} ${num(args[1])})`;
         }
         if (CMP.has(name)) {
           if (args.length !== 2) throw new Gap(`${name} 收到 ${args.length} 格实参`);
@@ -453,11 +532,24 @@ function emitOnce(graph, retOf, multiOf) {
         throw new Gap(`这格内建还没接：${name}`);
       }
       case 'call': return callOf(x, sc, pre);
+      // **表示转换**：目标那一栏（`to`）说了要哪一侧的数值类型，这一层只补那一格指令。
+      // 往整数走是 `trunc`（截断，与 interp 那侧的 `Math.trunc` 同一条）；
+      // 往实数走是 `convert`。已经在那一侧的就什么都不做 —— 那正是"一格 conv 管 12 格 Op"。
+      case 'conv': {
+        const v = x.ins.value;
+        const kv = kindOf(v, sc);
+        if (kv === 'str' || kv === 'mix') throw new Gap('串上的表示转换还没接（要类型层）');
+        if (x.attrs.to === 'float') return asF64(v, sc, pre);
+        if (x.attrs.to === 'int') {
+          return kv === 'real' ? `(i64.trunc_f64_s ${expr(v, sc, pre)})` : expr(v, sc, pre);
+        }
+        throw new Gap(`这格表示转换还没接：${x.attrs.to}`);
+      }
       // **值位置的 `if`**：一格临时量 + 两支各赋值。wasm 的 block 不带 result，
       // 所以"表达式位置的 if"不是接不住，是要**先物化成一格临时量** ——
       // 而临时量本来就是调度器算出来的四样之一（ADR-0033 §3.5）。
       case 'branch': {
-        const t = tmp(sc);
+        const t = tmp(sc, wty(kindOf(x, sc)));
         const c = cond(x.ins.cond, sc, pre);
         const a = []; const av = valueOf(x.ins.then, new Scope(sc.fn, sc), a);
         const b = []; const bv = valueOf(x.ins.else, new Scope(sc.fn, sc), b);
@@ -474,7 +566,7 @@ function emitOnce(graph, retOf, multiOf) {
         const size = 8 * (names.length === 0 ? 1 : 1 + Math.max(...names.map(slotOf)));
         const a = alloc(size, sc, pre);
         names.forEach((k, i) => {
-          noStr(vals[i], sc, '记录的字段');
+          onlyInt(vals[i], sc, '记录的字段');
           const v = expr(vals[i], sc, pre);
           pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * slotOf(k)})) ${v})`);
         });
@@ -491,7 +583,7 @@ function emitOnce(graph, retOf, multiOf) {
         const a = alloc(8 * (items.length + 1), sc, pre);
         pre.push(`(i64.store ${addr(`(local.get ${a})`)} (i64.const ${items.length}))`);
         items.forEach((y, i) => {
-          noStr(y, sc, '列表的元素');
+          onlyInt(y, sc, '列表的元素');
           const v = expr(y, sc, pre);
           pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * (i + 1)})) ${v})`);
         });
@@ -546,7 +638,7 @@ function emitOnce(graph, retOf, multiOf) {
         const args = asList(x.ins.args);
         const a = alloc(8 * Math.max(args.length, 1), sc, pre);
         args.forEach((y, i) => {
-          noStr(y, sc, '多值里的一格');
+          onlyInt(y, sc, '多值里的一格');
           const v = expr(y, sc, pre);
           pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * i})) ${v})`);
         });
@@ -602,6 +694,12 @@ function emitOnce(graph, retOf, multiOf) {
 
   function litOf(v) {
     if (typeof v === 'number' && Number.isInteger(v)) return `(i64.const ${v})`;
+    // 实数：**这一层第二种数值类型**。指数写法先不认（前端只收十进制小数），报缺口不猜
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      const s = String(v);
+      if (/[eE]/.test(s)) throw new Gap(`指数写法的实数字面量还没接：${s}`);
+      return `(f64.const ${s})`;
+    }
     if (v === true) return '(i64.const 1)';
     if (v === false || v === null || v === undefined) return '(i64.const 0)';
     // 串就是**它那块内存的地址**（编译期定下的常量），与 `print_str` 的约定同一份
@@ -614,7 +712,7 @@ function emitOnce(graph, retOf, multiOf) {
     const name = fn !== null && fn !== undefined && fn.op === 'ref' ? fn.attrs.name : null;
     if (name === null || !fns.has(name)) throw new Gap('间接调用（函数当值）还没接');
     const args = asList(x.ins.args).map((a) => {
-      noStr(a, sc, '实参');   // 串传进函数就追不着了（形参没有种类）—— 明说接不住
+      onlyInt(a, sc, '实参');   // 串传进函数就追不着了（形参没有种类）—— 明说接不住
       return expr(a, sc, pre);
     });
     return `(call ${fns.get(name)}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
@@ -653,6 +751,11 @@ function emitOnce(graph, retOf, multiOf) {
           return [...pre, `(global.set ${g} ${v})`];
         }
         sc.merge(x.attrs.name, k);
+        // 局部量的 wasm 类型是声明那一刻定下的 —— 换一种数值类型往里塞，wasm 校验器会拒。
+        // 与 `mix` 那条同一条纪律：报缺口，不给错答案
+        if (wty(k) !== wty(sc.kindOf(x.attrs.name))) {
+          throw new Gap(`${x.attrs.name} 先后装了两种数值类型 —— 一格局部量只有一种（要类型层）`);
+        }
         return [...pre, `(local.set ${id} ${v})`];
       }
       case 'region': {
@@ -675,14 +778,14 @@ function emitOnce(graph, retOf, multiOf) {
       }
       case 'field-set': {
         needMem = true;
-        noStr(x.ins.value, sc, '记录的字段');
+        onlyInt(x.ins.value, sc, '记录的字段');
         const o = expr(x.ins.obj, sc, pre);
         const v = expr(x.ins.value, sc, pre);
         return [...pre, `(i64.store (i32.add ${addr(o)} (i32.const ${8 * slotOf(x.attrs.field)})) ${v})`];
       }
       case 'index-set': {
         needMem = true;
-        noStr(x.ins.value, sc, '列表的元素');
+        onlyInt(x.ins.value, sc, '列表的元素');
         const o = tmp(sc); pre.push(`(local.set ${o} ${expr(x.ins.obj, sc, pre)})`);
         const i = tmp(sc); pre.push(`(local.set ${i} ${expr(x.ins.index, sc, pre)})`);
         guard(o, i, pre);
@@ -742,7 +845,7 @@ function emitOnce(graph, retOf, multiOf) {
           const n = asList(x.ins.value.ins.args).length;
           f.multi = (f.multi === 0 || f.multi === n) ? n : 'mix';
         }
-        noStr(x.ins.value, sc, '返回值');
+        onlyInt(x.ins.value, sc, '返回值');
         const v = expr(x.ins.value, sc, pre);
         f.ret = true;
         // 早退也要经过途中每一格 region 的出口（从里往外）。
@@ -783,6 +886,11 @@ function emitOnce(graph, retOf, multiOf) {
           needStr = true;
           return [...pre, `(call $print_str ${addr(v)})`];
         }
+        // 实数走宿主面的 `print_f64` —— 小数位的格式因此与别的前端共用一份
+        if (k === 'real') {
+          needF64 = true;
+          return [...pre, `(call $print_f64 ${v})`];
+        }
         return [...pre, `(call $print ${v})`];
       }
       case 'call': {
@@ -809,7 +917,7 @@ function emitOnce(graph, retOf, multiOf) {
       && (last.lit !== undefined || (last.op !== undefined && (NODES.get(last.op)?.outs.length ?? 0) > 0));
     if (!hasValue) return [...head, ...stmt(last, sc, f)];
     const pre = [];
-    noStr(last, sc, '返回值');
+    onlyInt(last, sc, '返回值');
     const v = expr(last, sc, pre);
     f.ret = true;
     // **落到函数末尾也是一条出口**：这儿走的是"最后一格就是返回值"那条路，所以出口动作
@@ -858,6 +966,8 @@ function emitOnce(graph, retOf, multiOf) {
   const lines = ['(module', '  (import "omni" "print_i64" (func $print (param i64)))'];
   // 串的那格导入只在**真用到**的时候发（它要读内存，没有 memory 段前端会当场拒）
   if (needStr) lines.push('  (import "omni" "print_str" (func $print_str (param i32)))');
+  // 实数那格导入同理：**两种数值类型**在宿主面上也是两条（小数位的格式因此不由这条腿定）
+  if (needF64) lines.push('  (import "omni" "print_f64" (func $print_f64 (param f64)))');
   if (needMem) {
     // 一块内存 + 一格堆指针。**从 8 起**：0 号地址留空，好让"没初始化的地址"一眼看出来。
     // 字符串常量躺在 data 段里，所以 `$hp` 从它们**后面**起步 —— 两块内存互不覆盖。
@@ -867,11 +977,14 @@ function emitOnce(graph, retOf, multiOf) {
     }
   }
   if (needJoin) lines.push(STR_JOIN);
-  for (const g of globals.values()) lines.push(`  (global ${g} (mut i64) (i64.const 0))`);
+  for (const [nm, g] of globals) {
+    const ty = wty(globalKinds.get(nm) ?? 'int');
+    lines.push(`  (global ${g} (mut ${ty}) (${ty}.const 0))`);
+  }
   for (const f of mod.fns.values()) {
     const ps = f.params.map((p) => `(param ${wname(p)} i64)`).join(' ');
     const res = f.ret ? ' (result i64)' : '';
-    const locals = f.locals.map((l) => `(local ${l} i64)`).join(' ');
+    const locals = f.locals.map((l) => `(local ${l.id} ${l.ty})`).join(' ');
     lines.push(`  (func ${f.name}${ps === '' ? '' : ` ${ps}`}${res}`);
     if (locals !== '') lines.push(`    ${locals}`);
     for (const s of f.body) lines.push(`    ${s}`);

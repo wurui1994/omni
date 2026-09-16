@@ -20,7 +20,7 @@ import {
 } from './eval.js';
 import { toSx } from './graph.js';
 import { PRIMS } from './prims.js';
-import { emitWat, watCan, runWat, Gap } from './backend-wat.js';
+import { emitWat, watCan, runWat, WAT_SHAPES, Gap } from './backend-wat.js';
 
 export { Gap };
 
@@ -50,6 +50,16 @@ export function gaps(name) {
     if (ans !== true) out.push({ op, why: typeof ans === 'string' ? ans : '（没给理由 —— 这本身是一笔账）' });
   }
   return out;
+}
+
+/**
+ * **形状上的账**：`gaps()` 只答得出"哪格节点接不住"，答不出"同一格节点的某种用法接不住"。
+ * 后端可以自己报一份（`shapes`），没有就是空 —— 这样"没有缺口"那句话不会盖住还在跳的格子。
+ */
+export function shapeGaps(name) {
+  const b = BACKENDS.get(name);
+  if (b === undefined) throw new Error(`no such backend: ${name}`);
+  return b.shapes ?? [];
 }
 
 // ---- 后端一：`interp` —— 就是 eval。**默认的解释器不是额外的后端，是调度器的读法** ----
@@ -99,11 +109,14 @@ registerBackend({
 registerBackend({
   name: 'wat',
   can: watCan,
-  carry: (sort) => (sort === 'expr' ? 'i64 值（这一批只有整数）' : '一条 wasm 指令'),
+  // 两种数值类型 + 一格地址：整数与"串的地址"都是 i64，实数是 f64
+  // （种类是这一层自己算的 —— 图上没有类型，见 backend-wat.js 的 kindOf）
+  carry: (sort) => (sort === 'expr' ? 'i64（整数 / 串的地址）或 f64（实数）' : '一条 wasm 指令'),
   effect: (e) => (e === 'may-early-exit'
-    ? 'return 有、带标签的 break 没有（墙在 OIR）'
+    ? 'return / break / continue 都有（跳外层的标签也有 —— "墙在 OIR"那句话是错的）'
     : 'wasm 的次序天然是栈序'),
   region: () => '函数级的局部量 + 结构化控制流（wasm 没有独立的域）',
+  shapes: WAT_SHAPES,
   lower: (g) => {
     const text = emitWat(g);
     return { text, run: () => runWat(text) };

@@ -31,7 +31,7 @@ import { glrParse } from '../../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { readText } from '../../src/core/host/native.js';
 import { toSx } from '../../src/core/graph/graph.js';
-import { backends, gaps, Gap } from '../../src/core/graph/contract.js';
+import { backends, gaps, shapeGaps, Gap } from '../../src/core/graph/contract.js';
 // 例子表两条判据共用一份（`delete.js` 也 import 它）—— 抄两份就会有一份忘了改
 import { CASES, HAND } from './cases.js';
 
@@ -68,8 +68,12 @@ const tally = (name, kind) => {
 if (showGaps) {
   for (const b of backends()) {
     const g = gaps(b.name);
-    process.stdout.write(`${b.name}: ${g.length === 0 ? '没有缺口（全接得住）' : `${g.length} 格接不住`}\n`);
+    const sh = shapeGaps(b.name);
+    process.stdout.write(`${b.name}: ${g.length === 0 ? '节点级没有缺口' : `${g.length} 格节点接不住`}`
+      + `${sh.length === 0 ? '' : ` · ${sh.length} 条形状上的账`}\n`);
     for (const x of g) process.stdout.write(`    ${x.op} —— ${x.why}\n`);
+    // 形状上的账要一起印 —— 不然"节点级没有缺口"会盖住矩阵里还在跳的格子
+    for (const x of sh) process.stdout.write(`    〔形状〕${x.what} —— ${x.why}\n`);
   }
   process.stdout.write('\n');
 }
@@ -164,7 +168,8 @@ for (const b of backends()) {
   const c = cov.get(b.name) ?? { ok: 0, skip: 0, fail: 0 };
   const total = c.ok + c.skip + c.fail;
   const tail = b.runnable === false ? '（只序列化，不承诺跑）'
-    : (c.skip === 0 ? '' : `，${c.skip} 格跳过（缺口 ${gaps(b.name).length} 格）`);
+    : (c.skip === 0 ? '' : `，${c.skip} 格跳过（节点级缺口 ${gaps(b.name).length} 格`
+      + ` · 形状上的账 ${shapeGaps(b.name).length} 条）`);
   process.stdout.write(`  ${b.name.padEnd(7)}${c.ok}/${total} 跑通${tail}\n`);
 }
 
