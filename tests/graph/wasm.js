@@ -169,6 +169,65 @@ for (const c of HAND) {
   }
 }
 
+// ---- WAT 前端那几份夹具：**两台引擎对账** -----------------------------------------
+//
+// 上面验的是"我们发出去的 `.wat`"。这一节反过来：`tests/wat/cases/*.wat` 是给**前端**写的
+// 夹具（块注释、十六进制、数字下标、`local.tee`、`br_if`、`align=` / `offset=`、
+// `(start …)`、内存上下界、`data` 里的串…… 后端一条都不发），`.expected` 是那条
+// MIR 路印出来的。把同一份文件交给 V8，两边必须**逐行相同**。
+//
+// 值钱的地方：这是**反向**的判据 —— 前端读错了（比如 `align=` 当成操作数、`local.tee`
+// 少留一格值），MIR 那边自成一套也能"看起来对"，只有第二台引擎才咬得住。
+// 实数那几行按这棵树自己的 `fmtReal` 印（格式是**宿主**的事，不是引擎的事）。
+{
+  const { readdirSync } = await import('node:fs');
+  const { fmtReal } = await import('../../src/core/host/native.js');
+  const dir = `${ROOT}tests/wat/cases`;
+  for (const f of readdirSync(dir).filter((x) => x.endsWith('.wat')).sort()) {
+    const label = `wat 夹具 ${f}`;
+    if (only.length > 0 && !only.some((x) => label.includes(x))) continue;
+    const text = readText(`${dir}/${f}`);
+    const want = readText(`${dir}/${f.replace(/\.wat$/, '.expected')}`).split('\n')
+      .filter((l) => l !== '');
+    const out = [];
+    const box = { mem: null };
+    // 用 `print_str` 却**没把内存导出去**的夹具，外面的宿主本来就读不到那块内存 ——
+    // 那正是第二十一批抓出来的那个洞（夹具是给树里那条路写的，它与内存同进程）。
+    // 所以这一格有名有姓地跳过，而不是假装能验。
+    if (text.includes('print_str') && !/\(export\s+"[^"]*"\s+\(memory/.test(text)) {
+      process.stdout.write(`  skip ${label}：这份夹具用 print_str 但没导出内存 —— 外面的宿主读不到那块内存\n`);
+      skipped++;
+      continue;
+    }
+    const str = (addr) => {
+      const view = new DataView(box.mem.buffer);
+      const len = Number(view.getBigUint64(addr, true));
+      let s = '';
+      for (let k = 0; k < len; k++) s += String.fromCharCode(view.getUint8(addr + 8 + k));
+      return s;
+    };
+    try {
+      const bin = watToWasm(text);
+      const { instance } = await WebAssembly.instantiate(bin, {
+        omni: {
+          print_i64: (x) => out.push(String(x)),
+          print_i32: (x) => out.push(String(x)),
+          print_f64: (x) => out.push(fmtReal(x)),
+          print_str: (a) => out.push(str(a)),
+        },
+      });
+      box.mem = instance.exports.mem ?? instance.exports.memory ?? null;
+      // 入口两种：`(start …)`（实例化时就跑了）或者导出名 main
+      if (typeof instance.exports.main === 'function') instance.exports.main();
+      if (out.join(' / ') !== want.join(' / ')) {
+        no(label, `       期望 ${want.join(' / ')}\n       得到 ${out.join(' / ')}`);
+      } else ok(`${label} [两台引擎逐行相同（${want.length} 行）]`);
+    } catch (err) {
+      no(label, `       ${err.message}`);
+    }
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed, ${skipped} skipped`
   + `（同一份 .wat 交给 V8 那台 wasm 引擎跑，输出与别的腿逐行相同）\n`);
 if (fail > 0) process.exit(1);
