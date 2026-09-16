@@ -47,7 +47,7 @@ import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
  * 那条路是反着的。现在这么写是因为那十份都是纯 JS、小、且没有别的依赖；哪天核心大小
  * 要紧了，正解是把 graph 这台机器登记成一格 lang / plugin（`lang/builtin.js` 那一套），
  * 不是在这儿加一句 `await import`（这份文件里 44 个 import 全是静态的，只有一套规矩）。 */
-import { runGraphFile } from './graph/run.js';
+import { runGraphFile, buildGraphFile } from './graph/run.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -2447,6 +2447,19 @@ function main(argv) {
     if (eng !== null && eng !== 'omni') {
       throw new OmniError(`没有 --engine ${eng} 这一条 —— 现在两台：omni（默认，前端 -> OIR -> 后端）`
         + '与 graph（节点图 + 契约五问，见 `omni run --help`）');
+    }
+  }
+  /* `build --engine graph -o OUT`：把那条腿的产物落成文件（wat / sx 有产物，
+   * js 与 interp 各有一句说清为什么没有 —— 见 `graph/run.js` 的 buildGraphFile）。 */
+  if (node.key === 'build' && rest.includes('--engine')) {
+    const ei = rest.indexOf('--engine');
+    const eng = ei + 1 < rest.length ? rest[ei + 1] : null;
+    if (eng === 'graph') {
+      if (path === undefined || path === null) throw new OmniError('build --engine graph 要一个源文件');
+      return buildGraphFile(path, rest);
+    }
+    if (eng !== null && eng !== 'omni') {
+      throw new OmniError(`没有 --engine ${eng} 这一条 —— 现在两台：omni 与 graph`);
     }
   }
   /* `run`/`build --backend B`（决策一）：同样先只做翻译。 */

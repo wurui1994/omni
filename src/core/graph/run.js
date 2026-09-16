@@ -29,7 +29,7 @@ import { loadGrammarTable } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
-import { readText, stdout, stderr } from '../host/native.js';
+import { readText, writeText, stdout, stderr } from '../host/native.js';
 import { backends, Gap } from './contract.js';
 import { LANGS, DIALECTS, pickLang, treeRoot } from './langs.js';
 
@@ -50,48 +50,52 @@ export function graphBackendNames() {
  * @param {string} path 源文件
  * @param {string[]} argv `run` 后面那些参数（`--lang` / `--backend` 在里头）
  */
-export function runGraphFile(path, argv) {
-  const want = argOf(argv, '--lang');
-  const lang = pickLang(path, want);
-  const backName = argOf(argv, '--backend') ?? 'interp';
-  const back = backends().find((b) => b.name === backName);
-  if (back === undefined) {
-    throw new OmniError(`run --engine graph：没有 --backend ${backName} 这一条 —— `
-      + `图这一层现在有 ${graphBackendNames().join(' / ')} 四条`
-      + '（interp 就是 graph.eval；sx 只序列化，不出输出行）');
-  }
-
-  // ---- 1) 源码 -> 树。语法与映射都是那门语言自己的，这儿一个字不改
+/**
+ * 源码 -> 图。回 `{ lang, graph }`，或者回 `{ code }`（语法说不通，诊断已经印了）。
+ * `run` 与 `build` 共用它 —— 两条命令的前两步一个字都不该差。
+ */
+function graphOf(path, argv) {
+  const lang = pickLang(path, argOf(argv, '--lang'));
   const grammarPath = `${treeRoot()}/${lang.grammar}`;
   const { tb, g } = loadGrammarTable(grammarPath);
   const src = readText(path);
   const diags = new Diagnostics();
   const toks = lexText(g.lex, new SourceFile(path, src), diags);
-  if (toks === null || diags.hasErrors()) {
-    stderr(diags.format());
-    return 1;
-  }
+  if (toks === null || diags.hasErrors()) { stderr(diags.format()); return { code: 1 }; }
   const tree = glrParse(tb, toks, diags);
-  if (tree === null || diags.hasErrors()) {
-    stderr(diags.format());
-    return 1;
-  }
-
-  // ---- 2) 树 -> 图
-  let graph = null;
+  if (tree === null || diags.hasErrors()) { stderr(diags.format()); return { code: 1 }; }
   try {
-    graph = lang.toGraph(tree);
+    return { lang, graph: lang.toGraph(tree) };
   } catch (err) {
     throw new OmniError(`${path}: ${lang.name} 的映射说不通 —— ${err.message}`);
   }
+}
 
-  // ---- 3) 图 -> 那条腿。缺口与"跑错了"分开记
+/** 挑一条腿。名字打错就报那四条（**清单是注册出来的**，不是手写的）。 */
+function pickBackend(verb, argv, dflt) {
+  const backName = argOf(argv, '--backend') ?? dflt;
+  const back = backends().find((b) => b.name === backName);
+  if (back === undefined) {
+    throw new OmniError(`${verb} --engine graph：没有 --backend ${backName} 这一条 —— `
+      + `图这一层现在有 ${graphBackendNames().join(' / ')} 四条`
+      + '（interp 就是 graph.eval；sx 只序列化，不出输出行）');
+  }
+  return back;
+}
+
+export function runGraphFile(path, argv) {
+  const back = pickBackend('run', argv, 'interp');
+  const got = graphOf(path, argv);
+  if (got.code !== undefined) return got.code;
+  const { lang, graph } = got;
+
+  // ---- 图 -> 那条腿。缺口与"跑错了"分开记
   let art = null;
   try {
     art = back.lower(graph);
   } catch (err) {
     if (err instanceof Gap) {
-      stderr(`omni: ${backName} 这条腿接不住 —— ${err.message}\n`);
+      stderr(`omni: ${back.name} 这条腿接不住 —— ${err.message}\n`);
       return 3;
     }
     throw err;
@@ -125,8 +129,49 @@ function runOr(back, art, path, langName) {
   }
 }
 
-/** `--engine graph --help` 那几行（`cmds.js` 里引它，免得两处各写一套）。 */
-export function graphEngineHelp() {
+/**
+ * `omni build --engine graph -o OUT`：把那条腿的**产物**落成一个文件。
+ *
+ * 三条腿有产物、一条没有，而"没有"这件事要说清而不是含糊过去：
+ *   wat  一份自足的 `.wat` 模块（宿主面就是那四格 `print_*` 导入）—— wasm 是真后端，
+ *        不是只在测试里跑一跑的那种（这正是 target.md 那一条的落点）
+ *   sx   一份图的序列化（`fromSx` 读得回来 —— 那是它自己的判据）
+ *   js   **落不了**：现在那份文本是一格函数表达式，要外面喂十几个运行时钩子才跑得起来，
+ *        不是能 `node` 直接跑的脚本。写出去等于给一份跑不起来的产物 —— 记成账，不糊过去。
+ *   interp 没有产物：它就是 `graph.eval`（§5：默认解释器不是"另一个后端"）。
+ */
+export function buildGraphFile(path, argv) {
+  const back = pickBackend('build', argv, 'wat');
+  if (back.name === 'interp') {
+    throw new OmniError('build --engine graph --backend interp：interp 没有产物 —— '
+      + '它就是 graph.eval（要跑就 `omni run --engine graph`）');
+  }
+  if (back.name === 'js') {
+    throw new OmniError('build --engine graph --backend js：那条腿的文本是一格**函数表达式**，'
+      + '要外面喂十几个运行时钩子才跑得起来 —— 还不是能直接跑的脚本，所以这一格宁可不落产物'
+      + '（要看那份文本用 `omni run --engine graph --backend js -v`；自足打包记在账上）');
+  }
+  const got = graphOf(path, argv);
+  if (got.code !== undefined) return got.code;
+  const dot = path.lastIndexOf('/') >= 0 ? path.slice(path.lastIndexOf('/') + 1) : path;
+  const stem = dot.lastIndexOf('.') > 0 ? dot.slice(0, dot.lastIndexOf('.')) : dot;
+  const out = argOf(argv, '-o') ?? `${stem}.${back.name}`;
+  let art = null;
+  try {
+    art = back.lower(got.graph);
+  } catch (err) {
+    if (err instanceof Gap) {
+      stderr(`omni: ${back.name} 这条腿接不住 —— ${err.message}\n`);
+      return 3;
+    }
+    throw err;
+  }
+  writeText(out, `${art.text}\n`);
+  stderr(`omni: built ${out}（${art.text.length} 字节，${got.lang.name} × ${back.name}）\n`);
+  return 0;
+}
+
+/** `--engine graph --help` 那几行（`cmds.js` 里引它，免得两处各写一套）。 */export function graphEngineHelp() {
   const langs = [...LANGS.entries()].map(([n, d]) => `${n}(.${d.exts.join(' .')})`).join('  ');
   const dias = [...DIALECTS.entries()].map(([n, d]) => `${n}(按 ${d.of} 读)`).join('  ');
   return `--engine graph：走节点图那台机器（ADR-0033）—— 十门语言共用一份节点清单与一份契约。

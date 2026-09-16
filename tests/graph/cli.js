@@ -12,7 +12,7 @@
 //   node tests/graph/cli.js lua        只跑名字里带 lua 的那几格
 
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -117,6 +117,32 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
     fail++;
     process.stdout.write(`  FAIL run --help 里缺：${miss.join(' / ')}\n`);
   }
+}
+
+// ---- 6) `build --engine graph`：产物那一侧。**有产物的落文件，没有的说清为什么没有**
+{
+  const wat = join(tmpdir(), 'omni-graph-basics.wat');
+  check('build wat 落一份 .wat',
+    ['build', 'ext/cpp/examples/basics.cpp', '--engine', 'graph', '--backend', 'wat', '-o', wat],
+    { code: 0, says: 'built' });
+  if (only.length === 0 || only.some((x) => 'build wat 落一份 .wat'.includes(x))) {
+    const text = readFileSync(wat, 'utf8');
+    const okHead = text.startsWith('(module');
+    const okImp = text.includes('(import "omni" "print_i64"');
+    if (okHead && okImp) { pass++; process.stdout.write('  ok   落出来的 .wat 是一份模块（带宿主面那几格导入）\n'); } else {
+      fail++;
+      process.stdout.write(`  FAIL 落出来的 .wat 不像模块：${JSON.stringify(text.slice(0, 60))}\n`);
+    }
+  }
+  const sx = join(tmpdir(), 'omni-graph-basics.sx');
+  check('build sx 落一份序列化',
+    ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'sx', '-o', sx],
+    { code: 0, says: 'built' });
+  check('build js 说清为什么落不了', ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'js'],
+    { code: 1, says: '函数表达式' });
+  check('build interp 说清它没有产物',
+    ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'interp'],
+    { code: 1, says: '它就是 graph.eval' });
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed（omni run --engine graph）\n`);

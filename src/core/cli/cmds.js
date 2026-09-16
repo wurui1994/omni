@@ -239,7 +239,18 @@ ${graphEngineHelp()}
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',
       brief: '编译成产物',
+      help: `--engine graph 时落的是**图那一层的产物**（语言按 --lang / 后缀定，同 run）：
+  --backend wat  一份自足的 .wat 模块（宿主面就是那四格 print_* 导入）—— 默认
+  --backend sx   一份图的序列化（fromSx 读得回来）
+  --backend js   **落不了**：那份文本是一格函数表达式，还要外面喂运行时钩子（记在账上）
+  --backend interp 没有产物：它就是 graph.eval
+
+  omni build ext/cpp/examples/basics.cpp --engine graph --backend wat -o basics.wat`,
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
+        { name: '--engine', arity: 1, value: 'E',
+          brief: 'omni（默认）| graph（节点图：产物是 wat / sx）' },
+        { name: '--lang', arity: 1, value: 'L',
+          brief: '（graph）这份源码归哪门语言，**优先于文件名后缀**' },
         { name: '--plugin', arity: 1, value: 'NAME', brief: '出一格插件动态库，NAME 是它的 register 函数' },
         { name: '--fat', arity: 0, brief: '把所有语言都编进核心（默认是薄核心 + plugins/）' },
         { name: '--extern', arity: 0, brief: '生成的函数用外部链接并导出（插件要能绑到它）' },
