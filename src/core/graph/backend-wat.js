@@ -90,6 +90,15 @@ export const WAT_SHAPES = [
   {
     what: '`func` 当值用（真闭包）',
     why: '要函数表 + call_indirect（WAT 前端第一阶段不认）。**只被直接调用**的嵌套函数不走这条 —— 它们按 lambda 提升接住了',
+    // **这条账的价钱量过了**（记下来，好让下一批从测量而不是猜开始）：
+    //   1. 这一侧：发 `(table N funcref)` + `(elem …)`，函数值 = 表下标，
+    //      间接调用点发 `call_indirect`（签名按元数分，形参这一批全是 i64）；
+    //   2. `src/core/wasm/assemble.js`：table / elem / type / call_indirect 四样要收
+    //      —— 那一份已经在装二进制了，加这四样是照着规范补段；
+    //   3. `src/core/frontend-wat/lower.js:797` 现在**一律拒**（`call_indirect` / `br_table` /
+    //      `table.*`）。**MIR 那边不欠**：`src/core/mir/ir.js:340` 早就有间接调用
+    //      （"wasm 的 call_indirect，也是 C 的函数指针"）—— 所以缺的只是前端那一段读表。
+    // 也就是说这条账落在三处，其中最贵的那处（IR 与解释器）**已经付过了**。
     witness: () => prog([
       fn('f', [ret(litOf(1))]),
       bindTo('g', refTo('f')),
