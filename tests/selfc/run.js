@@ -32,6 +32,8 @@
 //
 //   OMNI_CC=self omni build src/cli.js --extern --plugins -o dist-self/omni
 //       -> 核心 52.7M（C 13.7M / 272588 行，发射 316ms + cc 8.6s）+ 12 格插件 115.3M，31.5s
+//       （这一行是第一百四十二到一百四十五片那四刀**之前**量的；单独一个核心那一档
+//        现在是 35.4M，见 `cli.js` 的 `selfCC` —— 带插件的整档没有重新量过）
 //   ./dist-self/omni emit c|js|llvm tests/cases/01_basics.omni
 //       -> 三格 target 插件都 dlopen 得动，`emit c` 与 node 那条腿逐字节相同
 //
