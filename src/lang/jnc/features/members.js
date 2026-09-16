@@ -5,7 +5,9 @@
 
 import { feature } from '../../../core/frontend-engine/feature.js';
 
-const TYPES = ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body'];
+/* 名字带 `SORTS`：`TYPES` 这个名字在 `jnc/syntax.js`（记号 -> 类型关键字那张表）与
+   `core/sexpr/lower.js`（方言的基本类型表）里各有一格，三处不是一回事。 */
+const TYPE_SORTS = ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body'];
 const OWNERS = ['class-body', 'struct-body', 'opaque-class-body', 'extension-body'];
 
 export default feature({
@@ -99,18 +101,18 @@ export default feature({
   positions: [
     // 带体的方法 / static 方法：类与结构体收，extension 也收（那正是 extension 的用处）
     ...['method-body', 'method-static'].flatMap((kind) => [
-      { kind, sorts: [...TYPES, 'extension-body'], verdict: 'ok' },
+      { kind, sorts: [...TYPE_SORTS, 'extension-body'], verdict: 'ok' },
       { kind, sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
       { kind, sorts: ['fn-body'], verdict: 'refuse', account: 'S-002' },
       { kind, sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
     ]),
     // 只有原型的方法（宿主面，ADR-0022 的 J4b）：union 里那一格是第 253 刀收的
-    { kind: 'method-proto', sorts: [...TYPES, 'union-body'], verdict: 'ok' },
+    { kind: 'method-proto', sorts: [...TYPE_SORTS, 'union-body'], verdict: 'ok' },
     { kind: 'method-proto', sorts: ['fn-body'], verdict: 'refuse', account: 'S-003' },
     { kind: 'method-proto', sorts: ['property-body'], verdict: 'refuse', account: 'P-007' },
     { kind: 'method-proto', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },
     // errorcode 的原型：同上；函数体里那一格是**认错人**
-    { kind: 'method-errorcode', sorts: [...TYPES, 'union-body'], verdict: 'ok' },
+    { kind: 'method-errorcode', sorts: [...TYPE_SORTS, 'union-body'], verdict: 'ok' },
     { kind: 'method-errorcode', sorts: ['fn-body'], verdict: 'refuse', account: 'S-003' },
     { kind: 'method-errorcode', sorts: ['property-body'], verdict: 'refuse', account: 'P-004' },
     { kind: 'method-errorcode', sorts: ['extension-body'], verdict: 'refuse', account: 'T-004' },

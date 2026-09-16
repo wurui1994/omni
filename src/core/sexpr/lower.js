@@ -61,7 +61,9 @@ import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 import { SourceFile } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 
-const TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
+/** 方言里那几个**基本类型**的名字。不叫 `TYPES`：`src/lang/jnc/syntax.js` 里那格
+ *  （jnc 的类型关键字表）是另一件事，而拼成一个程序之后模块级名字共用一个空间。 */
+const BASE_TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
 
 /* 外部 C 符号的类型词汇（`(cabi …)` / `(ccall …)`，ADR-0022 的 J4b）-> 方言里的核心类型。
  *
@@ -235,7 +237,7 @@ class CoreLowerer {
   ty(node, what) {
     // `(buf int|real)`：一段连续的元素 + 一个运行期长度（门槛 7 第一阶段）
     if (isList(node) && head(node) === 'buf') {
-      const e = isAtom(node.items[1]) ? TYPES.get(node.items[1].value) : undefined;
+      const e = isAtom(node.items[1]) ? BASE_TYPES.get(node.items[1].value) : undefined;
       if (e === undefined || (e !== INT && e !== REAL)) {
         return this.err(node, `${what}：(buf 元素) 的元素只能是 int 或 real`);
       }
@@ -279,7 +281,7 @@ class CoreLowerer {
         return this.err(node, `${what}：数组的元素是结构体 '${nm}'（值语义）这一刀还不收 ——`
           + ` 类（引用语义）可以，见 sexpr/lower.js 的 ty`);
       }
-      const e = nm === null ? undefined : TYPES.get(nm);
+      const e = nm === null ? undefined : BASE_TYPES.get(nm);
       if (e === undefined || e === VOID) {
         return this.err(node, `${what}：(arr 元素) 的元素只能是 int / real / bool / string / (vec T N) / 类名`);
       }
@@ -306,7 +308,7 @@ class CoreLowerer {
     }
     // `(vec int 4)`：元素只能是 int/real（bool/string 的向量没有意义，也没有硬件对应）
     if (isList(node) && head(node) === 'vec') {
-      const e = isAtom(node.items[1]) ? TYPES.get(node.items[1].value) : undefined;
+      const e = isAtom(node.items[1]) ? BASE_TYPES.get(node.items[1].value) : undefined;
       const n = isAtom(node.items[2]) ? Number(node.items[2].value) : NaN;
       if (e === undefined || (e !== INT && e !== REAL)) {
         return this.err(node, `${what}：(vec 元素 宽度) 的元素只能是 int 或 real`);
@@ -336,14 +338,14 @@ class CoreLowerer {
       // callfn 那里登记就会漏掉"只是传来传去、没在这一份里调"的那些签名。
       return this.useFnType(fnType(ps, r));
     }
-    if (!isAtom(node) || !TYPES.has(node.value)) {
+    if (!isAtom(node) || !BASE_TYPES.has(node.value)) {
       // 结构体名（第十二刀）与类名（第十三刀）：方言里用户能起的类型名只有这两种，
       // 所以放在内建名单后面查 —— 内建名字不可能被遮蔽（那两遍会拒掉重名）。
       if (isAtom(node) && this.structs.has(node.value)) return this.structs.get(node.value);
       if (isAtom(node) && this.classes.has(node.value)) return this.classes.get(node.value);
       return this.err(node, `${what} 的类型只能是 int / real / bool / string / void / (vec T N) / (buf T) / (arr T) / (fnty (T...) R) / 结构体名 / 类名`);
     }
-    return TYPES.get(node.value);
+    return BASE_TYPES.get(node.value);
   }
 
   /**
@@ -482,7 +484,7 @@ class CoreLowerer {
       if (head(f) !== 'struct') continue;
       const sn = isAtom(f.items[1]) ? f.items[1].value : null;
       if (sn === null) continue;                       // 缺名字：下面那一遍报
-      if (TYPES.has(sn)) continue;                     // 内建类型名：下面那一遍报
+      if (BASE_TYPES.has(sn)) continue;                     // 内建类型名：下面那一遍报
       if (this.structs.has(sn) || this.classes.has(sn)) continue;   // 重名：下面那一遍报
       this.structs.set(sn, structType(sn, []));
       this.preStruct.add(sn);
@@ -492,7 +494,7 @@ class CoreLowerer {
       if (head(f) !== 'class') continue;
       const cn = isAtom(f.items[1]) ? f.items[1].value : null;
       if (cn === null) continue;                       // 缺名字：下面那一遍报
-      if (TYPES.has(cn)) continue;                     // 内建类型名：下面那一遍报
+      if (BASE_TYPES.has(cn)) continue;                     // 内建类型名：下面那一遍报
       if (this.structs.has(cn) || this.classes.has(cn)) continue;   // 重名：下面那一遍报
       this.classes.set(cn, classType(cn, []));
       this.preClass.add(cn);
@@ -781,7 +783,7 @@ class CoreLowerer {
     const what = kind === 'struct' ? '结构体' : '类';
     const nm = isAtom(n.items[1]) ? n.items[1].value : null;
     if (nm === null) return this.err(n, `(${kind} NAME (字段 类型)...) 缺名字`);
-    if (TYPES.has(nm)) return this.err(n, `'${nm}' 是内建类型名，不能当${what}名`);
+    if (BASE_TYPES.has(nm)) return this.err(n, `'${nm}' 是内建类型名，不能当${what}名`);
     // 上面那一遍替这个类/结构体先占了一格（preClass / preStruct）：那不是"重复定义"，
     // 是同一条声明的前半截。
     const pre = kind === 'class'

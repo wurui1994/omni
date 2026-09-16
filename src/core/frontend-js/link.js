@@ -20,7 +20,7 @@
 //     做一遍带作用域的重写便宜得多，而且改完源码更好读。
 //     **这一条的价钱要按量出来的记**：`cli.js` 那条自编译链上量到过 **142 条**重名
 //     （`tests/mir/run.js` 里 `lower/cli.js` 那一格因此是红的，而且这不是新事 ——
-//     在 a9df4874 上就有 126 条）。现在**一片一片在还**，还到 **108 条**（改的都是
+//     在 a9df4874 上就有 126 条）。现在**一片一片在还**，还到 **105 条**（改的都是
 //     "同名却不同事"、而且尽量挑**私有那一侧**）：`graph/eval.js` 9 格（值上的运算 ->
 //     `valTruthy` / `valPick` / `valMap*` / `valSlice` · 内部的 `one` / `Env`）·
 //     `glr/ebnf.js` 3 格（`ebnfGrammarName` / `quoteGrammarStr` / `EbnfRx` —— 与 `yacc.js`
@@ -28,9 +28,10 @@
 //     `WatScope` · `watItems` · `retNode`）· 4 格（`positionGaps` · `parseWatText` /
 //     `WASM_OPS` · `cliArg`）· 2 格（`jsLit` / `jsBin`：造 JS 树的，与造图节点的同名）·
 //     6 格（`cliOpt` / `dirName` / `jsAbiRet` / `libcPad` / `arStr` / `mirOpText`）·
-//     4 格（`checkLangSpec` / `builtinSlen` / `MODULE_EXTS` / `LANG_PROVIDERS`）。
+//     4 格（`checkLangSpec` / `builtinSlen` / `MODULE_EXTS` / `LANG_PROVIDERS`）·
+//     3 格（`TYPE_SORTS` / `REGISTRARS` / `BASE_TYPES` —— 三处 `TYPES`/`REG` 各是一件事）。
 //     `asList` 那一格最能说明为什么该改：它在 fromtree 里回 null、在 wat 后端里回空数组。
-//     剩下的 108 条分三堆（数出来的）：**ext 那十一份映射 71 条**
+//     剩下的 105 条分三堆（数出来的）：**ext 那十一份映射 71 条**
 //     （`toNode` / `nameOf` / `many` / `OPS` / `PRIM` 在每一门里都是最自然的名字，
 //     而 `graph/langs.js` 把十一门**静态**导进来，于是必然撞）· **旧降级 vs 规则那条路
 //     14 条**（`frontend-jnc/lower.js` 与 `src/lang/jnc/*`：那是迁移期的重复，migration

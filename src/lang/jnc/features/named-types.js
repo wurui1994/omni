@@ -19,7 +19,7 @@ const NAMED = ['struct', 'union-named', 'class', 'enum', 'enum-anon', 'enum-bitf
    `body` 是解体那一遍。枚举与聚合各有一种机制，typedef 那一族只有体那一遍。
    `localTypeDecl` 读的就是这一列 —— 于是"函数体里能写哪几种类型声明"是这张表说的，
    不是那个函数里的一串 `if`（第 219 / 250 / 260 刀那三格就是一格一格补出来的）。 */
-const REG = {
+const REGISTRARS = {
   enum: { name: 'enumName', body: 'enumDecl' },
   'enum-anon': { name: 'enumName', body: 'enumDecl' },
   'enum-bitflag': { name: 'enumName', body: 'enumDecl' },
@@ -80,14 +80,14 @@ export default feature({
   },
   positions: [
     ...NAMED.flatMap((kind) => [
-      { kind, sorts: ['module'], verdict: 'ok', register: REG[kind] },
-      { kind, sorts: KEEPS, verdict: 'ok', escapes: false, register: REG[kind] },
+      { kind, sorts: ['module'], verdict: 'ok', register: REGISTRARS[kind] },
+      { kind, sorts: KEEPS, verdict: 'ok', escapes: false, register: REGISTRARS[kind] },
       {
         kind,
         sorts: ['fn-body'],
         verdict: 'ok',
         escapes: true,
-        register: REG[kind],
+        register: REGISTRARS[kind],
         note: 'T-005 的代价',
       },
       { kind, sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
@@ -129,7 +129,7 @@ export default feature({
       kind: 'class-opaque',
       sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body', 'fn-body'],
       verdict: 'ok',
-      register: REG.class,
+      register: REGISTRARS.class,
     },
     { kind: 'class-opaque', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'class-opaque', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
@@ -140,7 +140,7 @@ export default feature({
       kind: 'enum-typed',
       sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body', 'fn-body'],
       verdict: 'ok',
-      register: REG.enum,
+      register: REGISTRARS.enum,
     },
     { kind: 'enum-typed', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'enum-typed', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
@@ -152,7 +152,7 @@ export default feature({
       kind: 'class-multi-base',
       sorts: ['module', 'namespace', 'class-body', 'struct-body', 'opaque-class-body', 'fn-body'],
       verdict: 'ok',
-      register: REG.class,
+      register: REGISTRARS.class,
     },
     { kind: 'class-multi-base', sorts: ['union-body'], verdict: 'refuse', account: 'T-003' },
     { kind: 'class-multi-base', sorts: ['property-body'], verdict: 'refuse', account: 'P-005' },
