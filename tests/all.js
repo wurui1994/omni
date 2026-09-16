@@ -61,6 +61,10 @@ const SUITES = [
   { s: 'run.js' }, { s: 'cli/tree.js' }, { s: 'oracle/run.js' },
   { s: 'oir/run.js' },
   { s: 'cabi/run.js' }, { s: 'wat/run.js' }, { s: 'glr/run.js' }, { s: 'mir/run.js' },
+  /* 闭环那一条（第一百三十五片）：`.omni` -> 生成的 C -> **我们自己那台 C 前端**的
+   * `.o` -> **我们自己的链接器**的可执行文件 -> 输出与解释器逐字节相同。
+   * 一个外部工具都不用，所以它守的是「整条自己的路」而不是某一格。 */
+  { s: 'selfc/run.js' },
   // 节点图那几条轴：矩阵（语言 × 后端）与**可删除测试**（删一格特性，剩下的照旧跑），
   // 加上命令行那一侧（`omni run --engine graph`）与那三条公理轴：
   //   iface.js  G3 子图替换前后接口逐格对上
