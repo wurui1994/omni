@@ -136,47 +136,58 @@ const ARCH = {
 };
 
 /* ---------------------------------------------------------------- 写字节 */
+/**
+ * 一条会长的字节缓冲。
+ *
+ * 从前是「一段一个 `Uint8Array`，攒在数组里，最后 `set` 拼起来」：那样每写一个 `u32`
+ * 就要 **一个 Uint8Array + 一个 DataView + 一个闭包**。量出来的（编整份编译器那 14.4M
+ * 的 C、出 65M 的 `.o`）：`push` 占 CPU 的 4.8%，而 GC 占 12.1% —— 符号表十万条、
+ * 每条几个字段，全是这种小对象。现在是一条会翻倍的缓冲 + 一个常驻的 DataView。
+ *
+ * `len` 之后的字节**恒为 0**（新分配的是零、`ensure` 只搬 [0,len)），所以 `padTo` 只需
+ * 把 `len` 推过去，不必真写零。
+ */
 class Buf {
   constructor() {
-    this.parts = [];
+    this.buf = new Uint8Array(1 << 16);
+    this.dv = new DataView(this.buf.buffer);
     this.len = 0;
   }
 
-  u8(v) { return this.push(1, (dv) => dv.setUint8(0, v)); }
-  u16(v) { return this.push(2, (dv) => dv.setUint16(0, v, true)); }
-  u32(v) { return this.push(4, (dv) => dv.setUint32(0, v >>> 0, true)); }
-  u64(v) { return this.push(8, (dv) => dv.setBigUint64(0, BigInt(v), true)); }
-  i64(v) { return this.push(8, (dv) => dv.setBigInt64(0, BigInt(v), true)); }
-
-  push(n, fill) {
-    const b = new Uint8Array(n);
-    fill(new DataView(b.buffer));
-    this.parts.push(b);
-    this.len += n;
-    return this;
+  ensure(n) {
+    const need = this.len + n;
+    if (need <= this.buf.length) return;
+    let cap = this.buf.length * 2;
+    while (cap < need) cap *= 2;
+    const nb = new Uint8Array(cap);
+    nb.set(this.buf.subarray(0, this.len));
+    this.buf = nb;
+    this.dv = new DataView(nb.buffer);
   }
 
+  u8(v) { this.ensure(1); this.dv.setUint8(this.len, v); this.len += 1; return this; }
+  u16(v) { this.ensure(2); this.dv.setUint16(this.len, v, true); this.len += 2; return this; }
+  u32(v) { this.ensure(4); this.dv.setUint32(this.len, v >>> 0, true); this.len += 4; return this; }
+  u64(v) { this.ensure(8); this.dv.setBigUint64(this.len, BigInt(v), true); this.len += 8; return this; }
+  i64(v) { this.ensure(8); this.dv.setBigInt64(this.len, BigInt(v), true); this.len += 8; return this; }
+
   bytes(b) {
-    this.parts.push(b);
+    this.ensure(b.length);
+    this.buf.set(b, this.len);
     this.len += b.length;
     return this;
   }
 
   /** 补 0 到某个文件偏移 —— tcc 那边是一个 `fputc(0, f)` 的循环。 */
   padTo(off) {
-    while (this.len < off) this.u8(0);
-    if (this.len !== off) throw new OmniError(`elf: 已经写过了 ${off}（现在 ${this.len}）`);
+    if (off < this.len) throw new OmniError(`elf: 已经写过了 ${off}（现在 ${this.len}）`);
+    this.ensure(off - this.len);
+    this.len = off;
     return this;
   }
 
   out() {
-    const all = new Uint8Array(this.len);
-    let at = 0;
-    for (const p of this.parts) {
-      all.set(p, at);
-      at += p.length;
-    }
-    return all;
+    return this.buf.slice(0, this.len);
   }
 }
 

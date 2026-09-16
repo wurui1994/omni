@@ -84,54 +84,57 @@ const MACH_N_UNDF = 0x00;
  * 定长记录一格一格填。用 DataView 而不是自己拼字节：字段宽度混着 4/8 字节，
  * 手拼一次就会错一格，而错一格的目标文件链接器只会说「malformed object」。 */
 class machBuf {
+  /* 与 `elf.js` 的 `Buf` 同一手法（第一百三十九片）：一条会翻倍的缓冲 + 一个常驻的
+   * DataView，而不是「一段一个 Uint8Array 攒起来最后拼」——那样每写一个 `u32` 就是
+   * 一个 Uint8Array + 一个 DataView + 一个闭包。`len` 之后的字节恒为 0。 */
   constructor() {
-    this.parts = [];
+    this.buf = new Uint8Array(1 << 16);
+    this.dv = new DataView(this.buf.buffer);
     this.len = 0;
   }
 
-  u8(v) { return this.push(1, (dv) => dv.setUint8(0, v)); }
-  u16(v) { return this.push(2, (dv) => dv.setUint16(0, v, true)); }
-  u32(v) { return this.push(4, (dv) => dv.setUint32(0, v >>> 0, true)); }
-  u64(v) { return this.push(8, (dv) => dv.setBigUint64(0, BigInt(v), true)); }
-  i32(v) { return this.push(4, (dv) => dv.setInt32(0, v, true)); }
-
-  push(n, fill) {
-    const b = new Uint8Array(n);
-    fill(new DataView(b.buffer));
-    this.parts.push(b);
-    this.len += n;
-    return this;
+  ensure(n) {
+    const need = this.len + n;
+    if (need <= this.buf.length) return;
+    let cap = this.buf.length * 2;
+    while (cap < need) cap *= 2;
+    const nb = new Uint8Array(cap);
+    nb.set(this.buf.subarray(0, this.len));
+    this.buf = nb;
+    this.dv = new DataView(nb.buffer);
   }
 
+  u8(v) { this.ensure(1); this.dv.setUint8(this.len, v); this.len += 1; return this; }
+  u16(v) { this.ensure(2); this.dv.setUint16(this.len, v, true); this.len += 2; return this; }
+  u32(v) { this.ensure(4); this.dv.setUint32(this.len, v >>> 0, true); this.len += 4; return this; }
+  u64(v) { this.ensure(8); this.dv.setBigUint64(this.len, BigInt(v), true); this.len += 8; return this; }
+  i32(v) { this.ensure(4); this.dv.setInt32(this.len, v, true); this.len += 4; return this; }
+
   bytes(b) {
-    this.parts.push(b);
+    this.ensure(b.length);
+    this.buf.set(b, this.len);
     this.len += b.length;
     return this;
   }
 
   /** 定长的名字格（`segname`/`sectname` 都是 16 字节、不足补 0）。 */
   name16(s) {
-    const b = new Uint8Array(16);
-    for (let i = 0; i < s.length; i++) {
-      if (i >= 16) throw new OmniError(`macho: 名字 '${s}' 超过 16 字节`);
-      b[i] = s.charCodeAt(i);
-    }
-    return this.bytes(b);
+    if (s.length > 16) throw new OmniError(`macho: 名字 '${s}' 超过 16 字节`);
+    this.ensure(16);
+    for (let i = 0; i < s.length; i++) this.buf[this.len + i] = s.charCodeAt(i);
+    this.len += 16;
+    return this;
   }
 
   pad(to) {
-    while (this.len % to !== 0) this.u8(0);
+    const n = (to - (this.len % to)) % to;
+    this.ensure(n);
+    this.len += n;
     return this;
   }
 
   out() {
-    const all = new Uint8Array(this.len);
-    let at = 0;
-    for (const p of this.parts) {
-      all.set(p, at);
-      at += p.length;
-    }
-    return all;
+    return this.buf.slice(0, this.len);
   }
 }
 
