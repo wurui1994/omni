@@ -20,7 +20,7 @@
 //     做一遍带作用域的重写便宜得多，而且改完源码更好读。
 //     **这一条的价钱要按量出来的记**：`cli.js` 那条自编译链上量到过 **142 条**重名
 //     （`tests/mir/run.js` 里 `lower/cli.js` 那一格因此是红的，而且这不是新事 ——
-//     在 a9df4874 上就有 126 条）。现在**一片一片在还**，还到 **101 条**（改的都是
+//     在 a9df4874 上就有 126 条）。现在**一片一片在还**，还到 **99 条**（改的都是
 //     "同名却不同事"、而且尽量挑**私有那一侧**）：`graph/eval.js` 9 格（值上的运算 ->
 //     `valTruthy` / `valPick` / `valMap*` / `valSlice` · 内部的 `one` / `Env`）·
 //     `glr/ebnf.js` 3 格（`ebnfGrammarName` / `quoteGrammarStr` / `EbnfRx` —— 与 `yacc.js`
@@ -32,7 +32,10 @@
 //     3 格（`TYPE_SORTS` / `REGISTRARS` / `BASE_TYPES` —— 三处 `TYPES`/`REG` 各是一件事）·
 //     2 格（`jnc/resolve-type.js` 里的 `typeNameText` / `formalNodes` —— 与 `declare.js`、
 //     `emit-fn.js` 那两格同名不同事）· 2 格（jnc 那侧的 `JNC_OP_NAMES` / `jncTypeText` ——
-//     与 `mir/ir.js` 那两格撞，而 MIR 那两格有十个消费者，所以改语言那一侧）。
+//     与 `mir/ir.js` 那两格撞，而 MIR 那两格有十个消费者，所以改语言那一侧）·
+//     2 格（`jncEnumBase` / `wrapEnumVal` —— 与 `frontend-c/ctype.js`、`lang/common/int.js`
+//     那两格撞；后者**只改名没合并**：两格在 w ≥ 64 上答得不一样，合了就是在没判据的地方
+//     改语义，理由记在那格声明旁边）。
 //     `asList` 那一格最能说明为什么该改：它在 fromtree 里回 null、在 wat 后端里回空数组。
 //     **也有改不动的**：`frontend-js/lower.js` 的 `op` / `exprStmt` 虽然是私有的，可那份文件里
 //     `op` 同时是模块级的建造器、又是 158 处字段名 `op:` 与约 90 处形参/局部名 —— 机械改名

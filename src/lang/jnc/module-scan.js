@@ -12,7 +12,7 @@ import { nameText, allInChain, readDcl } from './declare.js';
 import { readDeclType } from './types.js';
 import { readSpecs } from './specs.js';
 import { readAgg, readEnum, readBodyMembers } from './agg.js';
-import { enumBase } from './const-eval.js';
+import { jncEnumBase } from './const-eval.js';
 import { resolveType } from './resolve-type.js';
 import { tyKey } from './emit-type.js';
 import { readFormals, fnName, overloadSuffix } from './emit-fn.js';
@@ -806,7 +806,7 @@ export function scanAggs(tree, env, ovl = new Map()) {
       if (nm !== null) {
         /* 枚举那一格记上它的**底类型与 bitflag 位**：`enum E: uint8_t` 的值就存在 8 位那一格里，
            而 `%d` / 比较 / `|` 那几族都要问"底下那格整数是什么"（`enum-to-int` 那条规则）。 */
-        const b = enumBase(e.base);
+        const b = jncEnumBase(e.base);
         env.set(nm, {
           kind: 'enum',
           /* 名字带上主人那几段前缀（与聚合体、typedef 同一条口径）：点串写法 `a.Kind kk;`

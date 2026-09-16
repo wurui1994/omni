@@ -138,7 +138,7 @@ export function enumConsts(enumNode, env) {
   if (e === null) return;
   const ename = nameText(e.name);
   const bits = String(e.word ?? '').includes('bitflag');
-  const { w, u } = enumBase(e.base);
+  const { w, u } = jncEnumBase(e.base);
   /* **bitflag 的头一格是 1**，不是 0（`calcBitflagEnumConstValues` 里那个 `: 1`）——
      普通枚举从 0 起。 */
   let next = bits ? 1n : 0n;
@@ -149,7 +149,7 @@ export function enumConsts(enumNode, env) {
     else v = evalConst(it.value, env);
     if (v === null) { broke = true; continue; }               // 断了就断了，不往下猜
     broke = false;
-    const val = wrapVal(v, w, u);
+    const val = wrapEnumVal(v, w, u);
     if (!bits) next = v + 1n;
     else {
       const uv = v < 0n ? v + (1n << BigInt(w)) : v;
@@ -163,7 +163,7 @@ export function enumConsts(enumNode, env) {
 }
 
 /** 枚举的**底类型**（`enum E: uint64_t` 那一格）：答它的位宽与符号性，没写就是 32 位有符号。 */
-export function enumBase(base) {
+export function jncEnumBase(base) {
   if (base === null || base === undefined) return { w: 32, u: false };
   /* 那一格里躺的是一格类型说明符 —— 只要它头一个**记号的文字**（`uint64_t` / `char` …）。 */
   let word = null;
@@ -179,8 +179,13 @@ export function enumBase(base) {
   return { w: INT_BITS[word] ?? 32, u };
 }
 
-/** 一格整数按 `w` 位、有/无符号折一下（枚举项存进底类型那一格时就是这一步）。 */
-function wrapVal(v, w, u) {
+/** 一格整数按 `w` 位、有/无符号折一下（枚举项存进底类型那一格时就是这一步）。
+ *
+ * 名字不叫 `wrapVal`：`src/lang/common/int.js` 里有一格同名的，而**两格在 w ≥ 64 上答得
+ * 不一样** —— 那一份先 `if (w >= 64) return BigInt.asIntN(64, v)`（一律按有符号读），
+ * 这一份在 `u` 为真时给 `asUintN(64, v)`。哪一种对 jancy 的 `qword_t` / `size_t` 枚举底类型
+ * 才对，得有一份真例子才判得了，所以这一趟**只改名、不并**（并了就是在没有判据的地方改语义）。 */
+function wrapEnumVal(v, w, u) {
   return u ? BigInt.asUintN(w, v) : BigInt.asIntN(w, v);
 }
 
