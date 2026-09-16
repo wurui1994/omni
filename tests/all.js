@@ -61,9 +61,14 @@ const SUITES = [
   { s: 'run.js' }, { s: 'cli/tree.js' }, { s: 'oracle/run.js' },
   { s: 'oir/run.js' },
   { s: 'cabi/run.js' }, { s: 'wat/run.js' }, { s: 'glr/run.js' }, { s: 'mir/run.js' },
-  // 节点图那两条轴：矩阵（语言 × 后端）与**可删除测试**（删一格特性，剩下的照旧跑）。
-  // 两条都在 `tests/graph/` 底下，都只用得着 `src/core/graph` + 各语言的 `.grammar`。
-  { s: 'graph/run.js' }, { s: 'graph/delete.js' },
+  // 节点图那几条轴：矩阵（语言 × 后端）与**可删除测试**（删一格特性，剩下的照旧跑），
+  // 加上命令行那一侧（`omni run --engine graph`）与那三条公理轴：
+  //   iface.js  G3 子图替换前后接口逐格对上
+  //   order.js  G4 次序与临时量命名逐字节相同、与加载顺序无关
+  //   wasm.js   那份 `.wat` 交给 V8 那台**树外**的 wasm 引擎跑（宿主面另写一遍）
+  // 都在 `tests/graph/` 底下，都只用得着 `src/core/graph` + 各语言的 `.grammar`。
+  { s: 'graph/run.js' }, { s: 'graph/delete.js' }, { s: 'graph/cli.js' },
+  { s: 'graph/iface.js' }, { s: 'graph/order.js' }, { s: 'graph/wasm.js' },
   // 可删除测试的**第二层**：删一支产生式（语法那一层）。默认只跑两门小语法 ——
   // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
   { s: 'grammar/delete.js' },
