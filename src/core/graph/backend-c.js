@@ -44,7 +44,7 @@ import { Gap } from './backend-wat.js';
 
 /** 这一刀接得住的节点。别的一律有名有姓地报缺口（`can` 那一问）。 */
 const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'loop-exit',
-  'region', 'ret']);
+  'region', 'ret', 'func', 'call']);
 
 /** 这一刀接得住的内建。`prims.js` 里现有 16 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
@@ -263,6 +263,48 @@ function constNum(x) {
 }
 
 /**
+ * 一块子图**读到了哪些外面的名字** —— 捕获检测（`func` 那一格的判据）。
+ *
+ * 为什么要它：函数提到顶层之后，C 那侧看得见的只有形参与别的顶层函数；函数体里读一格
+ * 外层的局部量（真闭包）在 C 里没有落处（要一格环境对象）。所以**先数出来、当场报缺口**，
+ * 而不是发一份编不动的 C —— 缺口是账，编不动是事故。`wat` 那侧的第一条形状账是同一件事。
+ *
+ * `bound` 用数组而不是 Set：这一格要能被我们自己编出来的编译器编（ADR-0011 的封闭子集）。
+ */
+function freeRefs(x, bound, out) {
+  if (x === null || x === undefined) return;
+  if (Array.isArray(x)) {
+    for (const y of x) freeRefs(y, bound, out);
+    return;
+  }
+  if (x.op === undefined) return;
+  if (x.op === 'ref') {
+    const n = x.attrs.name;
+    if (!bound.includes(n) && !out.includes(n)) out.push(n);
+    return;
+  }
+  if (x.op === 'bind') {
+    freeRefs(x.ins.init, bound, out);
+    bound.push(x.attrs.name);
+    return;
+  }
+  if (x.op === 'set') {
+    const n = x.attrs.name;
+    if (!bound.includes(n) && !out.includes(n)) out.push(n);
+    freeRefs(x.ins.value, bound, out);
+    return;
+  }
+  if (x.op === 'func') {
+    const inner = bound.slice();
+    for (const p of x.attrs.params ?? []) inner.push(p);
+    freeRefs(x.ins.body, inner, out);
+    return;
+  }
+  const ins = x.ins ?? {};
+  for (const k of Object.keys(ins)) freeRefs(ins[k], bound, out);
+}
+
+/**
  * 一格 C 的 double 字面量。**要能一位不差地读回来**：整数写 `3.0`，别的写 17 位有效数字
  * （IEEE 754 双精度的往返位数）。无穷与 NaN 用 `1.0/0.0` 这一族写 —— C 里没有它们的
  * 字面量，而 `<math.h>` 的 `INFINITY` 要 `#include`（这份产物一个头都不 include）。
@@ -286,6 +328,12 @@ class CGen {
     this.lines = [];
     this.n = 0;
     this.depth = 1;
+    /** 提到顶层的那些函数：`{ cname, params, lines }`。 */
+    this.fns = [];
+    /** 图上的名字 -> 顶层 C 函数名。 */
+    this.fnOf = new Map();
+    /** 正在生成的是**函数体**吗（`ret` 要回值，而 `main` 里 `ret` 回退出码 0）。 */
+    this.inFn = 0;
   }
 
   emit(s) { this.lines.push(`${'  '.repeat(this.depth)}${s}`); }
@@ -295,6 +343,71 @@ class CGen {
   /** 这格节点这一刀接不接得住 —— 接不住当场报缺口（有名有姓，不是静默的错答案）。 */
   chk(op) {
     if (!OPS.has(op)) throw new Gap(`c 后端还没接这格节点：${op}`);
+  }
+
+  /**
+   * **先给顶层那些函数派好 C 名字**，再生成任何一行 —— 这样「A 调后面定义的 B」不会
+   * 被当成捕获（`freeRefs` 数出来的名字里，已经是顶层函数的那些不算）。
+   */
+  plan(list) {
+    for (const x of list) {
+      if (x !== null && x !== undefined && x.op === 'bind'
+        && x.ins.init !== undefined && x.ins.init !== null && x.ins.init.op === 'func') {
+        this.n += 1;
+        this.fnOf.set(x.attrs.name, `fn${this.n}_${cName(x.attrs.name).slice(2)}`);
+      }
+    }
+  }
+
+  /**
+   * 把一格 `func` 提到顶层：出一个 `static gv fnN(gv p1, …)`，回它的 C 名字。
+   *
+   * **捕获当场报缺口**（`freeRefs`）：函数提上去之后 C 那侧看得见的只有形参与别的顶层
+   * 函数，读一格外层的局部量在 C 里没有落处（要一格环境对象 + 一格间接调用）。
+   * `wat` 那侧第一条形状账记的是同一件事 —— 两条腿欠的是同一格能力。
+   */
+  liftFunc(x, name) {
+    let cname = name === undefined ? undefined : this.fnOf.get(name);
+    if (cname === undefined) {
+      this.n += 1;
+      cname = `fn${this.n}_${name === undefined ? 'anon' : cName(name).slice(2)}`;
+      if (name !== undefined) this.fnOf.set(name, cname);
+    }
+    const params = x.attrs.params ?? [];
+    const free = [];
+    freeRefs(x.ins.body, params.slice(), free);
+    const cap = free.filter((n) => !this.fnOf.has(n));
+    if (cap.length > 0) {
+      throw new Gap(`c 后端：这格 func 捕获了外层的名字（${cap.join('、')}）—— 真闭包要一格环境对象`);
+    }
+    const outer = this.lines;
+    const outerDepth = this.depth;
+    this.lines = [];
+    this.depth = 1;
+    this.inFn += 1;
+    const t = this.fresh();
+    this.emit(`gv ${t} = g_nil();`);
+    this.body(asList(x.ins.body), t);
+    this.emit(`return ${t};`);
+    this.inFn -= 1;
+    const lines = this.lines;
+    this.lines = outer;
+    this.depth = outerDepth;
+    this.fns.push({ cname, params: params.map(cName), lines });
+    return cname;
+  }
+
+  /** 一格调用。名字指向顶层函数、或者当场摆着一格 `func` —— 别的（按值调用）报缺口。 */
+  callOf(x) {
+    const args = asList(x.ins.args).filter((y) => y !== undefined).map((y) => this.valOf(y));
+    const fn = x.ins.fn;
+    if (fn !== undefined && fn !== null && fn.op === 'ref' && this.fnOf.has(fn.attrs.name)) {
+      return `${this.fnOf.get(fn.attrs.name)}(${args.join(', ')})`;
+    }
+    if (fn !== undefined && fn !== null && fn.op === 'func') {
+      return `${this.liftFunc(fn, undefined)}(${args.join(', ')})`;
+    }
+    throw new Gap('c 后端：按值调用（函数从一格变量里来）还没接 —— 要一格函数指针表');
   }
 
   lit(v) {
@@ -314,6 +427,10 @@ class CGen {
     if (x.op === 'const') return this.lit(x.attrs.value ?? null);
     if (x.op === 'ref') return cName(x.attrs.name);
     if (x.op === 'prim') return this.prim(x);
+    if (x.op === 'call') return this.callOf(x);
+    if (x.op === 'func') {
+      throw new Gap('c 后端：`func` 当值用（不是当场调用、也不是绑给一个名字）还没接');
+    }
     if (x.op === 'branch') {
       const t = this.fresh();
       this.emit(`gv ${t};`);
@@ -402,6 +519,11 @@ class CGen {
     if (x.lit !== undefined) return;
     this.chk(x.op);
     if (x.op === 'bind') {
+      /* 绑给一个名字的 `func`：提到顶层，这一格不发局部量（C 里没有嵌套函数）。 */
+      if (x.ins.init !== undefined && x.ins.init !== null && x.ins.init.op === 'func') {
+        this.liftFunc(x.ins.init, x.attrs.name);
+        return;
+      }
       this.emit(`gv ${cName(x.attrs.name)} = ${this.valOf(x.ins.init)};`);
       return;
     }
@@ -410,9 +532,12 @@ class CGen {
       return;
     }
     if (x.op === 'ret') {
-      /* 这一刀里 `func` 还没接，所以 `ret` 只会出现在顶层 —— 落成 `main` 的返回。
-       * 值照旧算一遍（它可能有副作用，`ret print(1)` 那种），只是不当退出码用：
-       * 矩阵比的是印出来的那几行，退出码是另一件事。 */
+      /* 函数体里 `ret` 就是 C 的 `return`。顶层（`main`）那一格回退出码 0：图的值不是
+       * 进程的退出码，矩阵比的是印出来的那几行。值照旧算一遍 —— 它可能有副作用。 */
+      if (this.inFn > 0) {
+        this.emit(`return ${x.ins.value === undefined ? 'g_nil()' : this.valOf(x.ins.value)};`);
+        return;
+      }
       if (x.ins.value !== undefined) this.emit(`gv ${this.fresh()} = ${this.valOf(x.ins.value)};`);
       this.emit('return 0;');
       return;
@@ -497,11 +622,22 @@ class CGen {
   }
 }
 
-/** 一张图 -> 一份自足的 `.c`。顶层那一块落成 `main`。 */
+/** 一张图 -> 一份自足的 `.c`。顶层那一块落成 `main`，`func` 一律提到顶层。 */
 export function emitC(g) {
   const gen = new CGen();
-  gen.body(asList(g !== null && g.kind === 'graph' ? g.body : g), null);
+  const top = asList(g !== null && g.kind === 'graph' ? g.body : g);
+  gen.plan(top);
+  gen.body(top, null);
+  /* 原型先摆一遍：这样「A 调后面定义的 B」与互相递归都不必管定义次序。 */
+  const protos = gen.fns.map((f) => `static gv ${f.cname}(${f.params.length === 0 ? 'void'
+    : f.params.map((p) => `gv ${p}`).join(', ')});`);
+  const bodies = gen.fns.map((f) => `static gv ${f.cname}(${f.params.length === 0 ? 'void'
+    : f.params.map((p) => `gv ${p}`).join(', ')}) {\n${f.lines.join('\n')}\n}\n`);
   return `${PRELUDE_ALL()}
+/* ---- 提到顶层的那些函数 */
+${protos.join('\n')}
+
+${bodies.join('\n')}
 /* ---- 顶层那一块 */
 int main(void) {
 ${gen.lines.join('\n')}
