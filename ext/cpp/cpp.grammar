@@ -499,7 +499,10 @@
     (-> (";") (empty))
     (-> ("{" stmts "}") (block $*2))
     (-> (expr ";") (expr $1))
-    (-> (simple-decl) $1)
+    ;; **"能当声明就是声明"** —— 这是 C++ 自己的消歧规则（[stmt.ambig]），不是我们的偏好。
+    ;; `T * x;` 这种形状在 GLR 下两支都归约得成，靠 `prefer` 定胜负（bison 的 %dprec）。
+    ;; 这一条**不需要符号表**：它是语法层的规则，与"这名字登记成类型了吗"是两件事。
+    (-> (simple-decl) (prefer 1) $1)
     (-> (func-def) $1)
     (-> (template-decl) $1)
     (-> (using-decl) $1)
