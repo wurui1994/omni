@@ -90,6 +90,8 @@ function umod(a, b) {
  */
 let outBuf = '';
 let outIsBytes = false;
+/** 输出的去处：`null` = 宿主 stdout；装上一格函数就往它写（见 `setOutSink`） */
+let outSink = null;
 
 function outMode(bytes) {
   if (outBuf.length > 0 && bytes !== outIsBytes) flushOut();
@@ -121,8 +123,36 @@ export function flushOut() {
   if (outBuf.length === 0) return;
   const s = outBuf;
   outBuf = '';
+  if (outSink !== null) { outSink(s); return; }
   if (outIsBytes) stdoutBytes(s);
   else stdout(s);
+}
+
+/**
+ * **把这条腿的输出接过来**（而不是去改宿主的 `process.stdout.write`）。
+ *
+ * 为什么要这一格：`graph/backend-wat.js` 的 `runWat` 从前是改宿主收输出的
+ * （`const real = process.stdout.write.bind(…)` + 两句赋值）—— 那三行在自编译轴上
+ * 直接报错（给成员赋值不许、`.bind` 不在封闭 ABI 里）。而"输出往哪儿去"本来就是**这一层**
+ * 的事（缓冲在这儿），所以开一格接口：装上就往它写，卸下照旧往宿主写。
+ *
+ * 回上一格接住的（于是能嵌套）。装与卸之前都先把攒着的冲掉 —— 不然两段输出会混在一起。
+ */
+export function setOutSink(fn) {
+  flushOut();
+  const prev = outSink;
+  outSink = fn === undefined || fn === null ? null : fn;
+  return prev;
+}
+
+/**
+ * 不经缓冲的那一路（libc 的 `write(1, …)`）也认这格接口：它**刻意**绕过缓冲
+ * （先 printf 再 write(1) 的先后要与 tcc 一致，见 libc.js 那段），
+ * 但"往哪儿写"与缓冲那一路是同一件事。
+ */
+export function outDirect(s) {
+  if (outSink !== null) { outSink(s); return; }
+  stdoutBytes(s);
 }
 
 /* ------------------------------------------------------------ 实数的格式化

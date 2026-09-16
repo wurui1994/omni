@@ -58,6 +58,8 @@ import { utf8Bytes } from '../host/utf8.js';
 import { lowerWat } from '../frontend-wat/lower.js';
 import { Diagnostics, SourceFile } from '../source/diag.js';
 import { interpretMir } from '../mir/interp.js';
+/* 输出的去处（`runWat` 收输出用）—— 那一层管缓冲，也就该管"往哪儿写"。 */
+import { setOutSink } from '../interp/builtin.js';
 
 /** 能接住的节点：**白名单**（不在名单里的一律给一句人话，那句话就是账）。 */
 const CAN = new Map([
@@ -1534,8 +1536,9 @@ export { Gap };
 
 /**
  * **真跑一遍**：出来的 WAT 交给另一个前端读（`frontend-wat`，WAT -> OIR），
- * 再用 MIR 的解释器跑。输出是靠接管 `process.stdout.write` 收的 ——
- * 那条打印路径（OIR 的 print 内建）本来就是写给宿主 stdout 的，不改它。
+ * 再用 MIR 的解释器跑。输出靠解释器那一层的**输出去处**收（`interp/builtin.js` 的
+ * `setOutSink`）—— 从前这儿是接管宿主的 `process.stdout.write`，那三行在自编译轴上
+ * 直接报错（给成员赋值不许、`.bind` 不在封闭 ABI 里）。"输出往哪儿去"本来就该由那一层管。
  */
 export function runWat(text) {
   const diags = new Diagnostics();
@@ -1544,13 +1547,12 @@ export function runWat(text) {
     throw new Error(`wat 前端不收：${diags.items.map((d) => d.msg).join('; ')}`);
   }
   const out = [];
-  const real = process.stdout.write.bind(process.stdout);
   let buf = '';
-  process.stdout.write = (s) => { buf += String(s); return true; };
+  const prev = setOutSink((s) => { buf += String(s); });
   try {
     interpretMir(oir);
   } finally {
-    process.stdout.write = real;
+    setOutSink(prev);
   }
   for (const line of buf.split('\n')) if (line !== '') out.push(line);
   return { value: null, out };

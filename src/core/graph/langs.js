@@ -21,6 +21,8 @@
 // 声明一栏"支持哪些特性"就等于给自己开一处会过期的账（见设计文档里那几次教训）。
 
 import { OmniError } from '../source/diag.js';
+/* "镜像在哪儿"这一格由宿主答（封闭 ABI 的 `js_install_dir`）—— 见 `treeRoot()` 那段账。 */
+import { installDir } from '../host/native.js';
 import { chezToGraph } from '../../../ext/chez/tograph.js';
 import { luaToGraph } from '../../../ext/lua/tograph.js';
 import { gslShellToGraph } from '../../../ext/gsl-shell/tograph.js';
@@ -34,16 +36,18 @@ import { nimToGraph } from '../../../ext/nim/tograph.js';
 import { cppToGraph } from '../../../ext/cpp/tograph.js';
 
 /**
- * 这棵树的根（`src/core/graph/langs.js` 往上三层）。
- * 走的是 `installDir()` 那一手（`import.meta.url` 切到目录），不引 `node:path` ——
- * 这一份要能跟着编译器自己被降级。
+ * 这棵树的根。**从宿主那格 `installDir()` 走上去**（`src/core/host` 往上三层）——
+ * 从前这儿直接读 `import.meta.url`，而那一格在自编译轴上是一条硬错
+ * （`import.meta is not supported`：它不在这门语言的子集里）。宿主那一格是封闭 ABI 的
+ * `js_install_dir`，两代产物各自答得出来 —— 于是这一份跟着编译器被降级时也说得通。
+ *
+ * 明写一格边界：原生那一代的 `installDir()` 回的是**可执行文件所在目录**，布局与源码树
+ * 不一样，所以那时候 `ext/*.grammar` 不在这条相对路径上 —— 那是"产物怎么装"的另一笔账
+ * （与 runtime/ 和 lib/ 一样），不是这一格的事。
  */
 export function treeRoot() {
-  const url = import.meta.url;
-  const p = url.startsWith('file://') ? decodeURIComponent(url.slice('file://'.length)) : url;
-  const parts = p.split('/');
-  parts.pop();            // langs.js
-  parts.pop();            // graph
+  const parts = installDir().split('/');
+  parts.pop();            // host
   parts.pop();            // core
   parts.pop();            // src
   return parts.join('/');

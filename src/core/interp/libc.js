@@ -25,8 +25,8 @@
 // 浮点原先也在这份清单里，第十四片之后 `%f`/`%e`/`%g` 已经逐字节对上了（见 `fText`），
 // 第二十一片补上了 `%a`（见 `aText`）—— 于是这份清单只剩 `%p` 一格。
 
-import { memLoad, memStore, printBytes, flushOut, memSize, memGrow } from './builtin.js';
-import { stderrBytes as hostStderr, stdoutBytes as hostStdout, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn, nowMs } from '../host/native.js';
+import { memLoad, memStore, printBytes, flushOut, memSize, memGrow, outDirect } from './builtin.js';
+import { stderrBytes as hostStderr, readBinary, writeBinary, removeFile, env as hostEnv, spawn as hostSpawn, nowMs } from '../host/native.js';
 
 /**
  * `exit` 抛的那个信号（第六刀第十七片）。
@@ -1527,7 +1527,7 @@ const LIBC = {
      * `streamWrite(F_STDOUT)`（那是 stdio 那条腿）：走了的话
      * 「先 printf 再 write(1)」两句的先后就与 tcc 相反 —— tcc 那边 write 先出来，
      * printf 那份要等退出时才冲。量出来的：`tests/c/sys/03-fd.c`。 */
-    if (f === 1n) { hostStdout(s); return BigInt(n); }
+    if (f === 1n) { outDirect(s); return BigInt(n); }
     if (f === 2n) { hostStderr(s); return BigInt(n); }
     const e = files.get(f);
     if (e === undefined) { setErrno(9); return -1n; }
