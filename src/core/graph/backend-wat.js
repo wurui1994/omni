@@ -62,6 +62,13 @@ const CAN = new Map([
   ['list-new', true], ['index-get', true], ['index-set', true],
   ['values', true], ['pick', true],
   ['conv', true],
+  // map 那一族：线性内存里排一张表是做得到的（线性扫描 + 键比较），但**键是串**就要先有
+  // 串的比较，而串在这条腿上只够"存下来 + 打印"。三条都要先定：键怎么比、满了怎么扩、
+  // 缺键报什么。写成一句人话，就是缺口清单该有的样子
+  ['map-new', 'wasm 上的 map 要在内存里排一张表：键怎么比、满了怎么扩、缺键报什么，三条都还没定'],
+  ['map-get', 'wasm 上的 map 要在内存里排一张表（同上）'],
+  ['map-set', 'wasm 上的 map 要在内存里排一张表（同上）'],
+  ['map-has', 'wasm 上的 map 要在内存里排一张表（同上）'],
   ['slice', true],
   ['scope-exit', true],
   ['loop-exit', true],

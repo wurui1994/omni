@@ -17,7 +17,29 @@ import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, deferNow,
+  mapNew, mapGet, mapSet, mapHas, mapNames, isList,
 } from '../../src/core/graph/fromtree.js';
+
+/**
+ * 装 map 的那些名字（一趟扫查填好，见 goToGraph）。
+ * `m[k]` 与 `xs[i]` 在树上同形 —— 分开它们靠的不是驱动器回问类型，是**字面量自带标记**。
+ */
+const MAPS = new Set();
+const isMap = (x) => tag(x) === 'name' && MAPS.has(leaf(kids(x)[0]));
+
+/** 一格 `(define (lhs (name m)) (rhs (lit (map …) …)))` -> `'m'`（不是就给 null）。 */
+function mapBindName(x) {
+  if (!isList(x) || (tag(x) !== 'define' && tag(x) !== 'assign')) return null;
+  const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
+  const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
+  for (let i = 0; i < lhs.length; i++) {
+    const r = rhs[i];
+    if (r !== undefined && tag(r) === 'lit' && tag(kids(r)[0]) === 'map' && tag(lhs[i]) === 'name') {
+      return leaf(kids(lhs[i])[0]);
+    }
+  }
+  return null;
+}
 
 
 const OPS = ops();
@@ -61,7 +83,17 @@ function toNode(x) {
     // `Point{x: 1, y: 2}` -> record-new；`[]int{10, 20}` -> list-new。
     // **同一条产生式两种字面量**：带字段名的落记录、不带的落列表（混着的当场报）。
     case 'lit': {
+      const ty = kids(x)[0];
       const elems = kids(x).slice(1);
+      // **map 字面量自带标记**：`map[K]V{…}` 在树上就是 `(lit (map …) (kv …)…)` ——
+      // 所以"这名字是不是 map"不用回问驱动器（那笔账在 map 这一格上是不必的）。
+      // 判据要在"全是 kv"之前：记录字面量的 kv 也长这样，差的正是类型那一格。
+      if (tag(ty) === 'map') {
+        return mapNew(elems.map((e) => {
+          const [k, v] = kids(e);
+          return [toNode(k), toNode(v)];     // 键是**值**（不是名字）—— 与记录正相反
+        }));
+      }
       if (elems.length > 0 && elems.every((e) => tag(e) === 'kv')) {
         return recordNew(elems.map((e) => {
           const [k, v] = kids(e);
@@ -73,7 +105,11 @@ function toNode(x) {
       }
       return listNew(many(elems));
     }
-    case 'index': return indexGet(toNode(kids(x)[0]), toNode(kids(x)[1]));
+    // `m[k]` 与 `xs[i]` 在树上同形，差别在**那个名字装的是什么**（`MAPS` 那一趟扫查）
+    case 'index': {
+      const [o, i] = kids(x);
+      return isMap(o) ? mapGet(toNode(o), toNode(i)) : indexGet(toNode(o), toNode(i));
+    }
     // `xs[1:3]` -> slice（**上界不含**，与图上那格一致，go 不用调）
     case 'slice3': {
       const [o, a, b] = kids(x);
@@ -106,6 +142,19 @@ function toNode(x) {
       const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
       // `x, y := f()` / `x, ok = m[k]`：N 个名字对 1 个右值 ⇒ 多值的消费侧
       if (lhs.length > 1 && rhs.length === 1) {
+        // **`v, ok := m[k]` 不是多值**：go 在这儿给的是"值 + 在不在"，落 map-get + map-has。
+        // `_` 那一格跳过取值 —— 缺键在图上是错误（默认值归语言），而 comma-ok 的用处
+        // 正是"键可能不在"，所以问在不在的那种写法不许去取值。
+        if (lhs.length === 2 && tag(rhs[0]) === 'index' && isMap(kids(rhs[0])[0])) {
+          const [o, k] = kids(rhs[0]);
+          const mk = (t, init) => (isDef
+            ? node('bind', { init }, { name: nameOf(t) })
+            : node('set', { value: init }, { name: nameOf(t) }));
+          const out = [];
+          if (nameOf(lhs[0]) !== '_') out.push(mk(lhs[0], mapGet(toNode(o), toNode(k))));
+          out.push(mk(lhs[1], mapHas(toNode(o), toNode(k))));
+          return out;
+        }
         return destructure(lhs.map(nameOf), toNode(rhs[0]), { declare: isDef });
       }
       return lhs.map((t, i) => {
@@ -113,7 +162,10 @@ function toNode(x) {
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set；
         // `set` 只认名字
         if (tag(t) === 'sel') return fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v);
-        if (tag(t) === 'index') return indexSet(toNode(kids(t)[0]), toNode(kids(t)[1]), v);
+        if (tag(t) === 'index') {
+          const [o, i] = kids(t);
+          return isMap(o) ? mapSet(toNode(o), toNode(i), v) : indexSet(toNode(o), toNode(i), v);
+        }
         return isDef
           ? node('bind', { init: v }, { name: nameOf(t) })
           : node('set', { value: v }, { name: nameOf(t) });
@@ -182,6 +234,10 @@ function toNode(x) {
 /** 一棵 go 的 GLR 树（`(file 包名 顶层项…)`）-> 一张图。末尾补一格 `call main`。 */
 export function goToGraph(tree) {
   if (tag(tree) !== 'file') throw new Error('go->graph: 这不是 (file …)');
+  // **先扫一遍哪些名字装 map**：`m := map[K]V{…}` 在树上自带标记，所以这一趟就够了
+  // —— `m[k]` 与 `xs[i]` 同形那笔账，在 go 上不需要驱动器回问类型。
+  MAPS.clear();
+  for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
   const items = kids(tree).slice(1);          // 第一格是包名
   const body = items.map(toNode).flat();
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);

@@ -15,7 +15,24 @@ import {
   tag, kids, leaf, part, threePart, elseOf,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit,
   recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf,
+  mapNew, mapGet, mapSet, mapHas, mapNames, isList,
 } from '../../src/core/graph/fromtree.js';
+
+/** 装 map 的那些名字（`vlangToGraph` 里一趟扫查填好）—— 与 go 那一份同一条办法。 */
+const MAPS = new Set();
+const isMap = (x) => tag(x) === 'name' && MAPS.has(leaf(kids(x)[0]));
+
+/** `(define (lhs (mut (name m))) (rhs (lit (map …) …)))` -> `'m'`（`mut` 要拆一层）。 */
+function mapBindName(x) {
+  if (!isList(x) || (tag(x) !== 'define' && tag(x) !== 'assign')) return null;
+  const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
+  const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
+  for (let i = 0; i < lhs.length; i++) {
+    const r = rhs[i];
+    if (r !== undefined && tag(r) === 'lit' && tag(kids(r)[0]) === 'map') return nameOf(lhs[i]);
+  }
+  return null;
+}
 
 
 const OPS = ops();
@@ -58,13 +75,32 @@ function toNode(x) {
     // `p.x` -> field-get；`Point{ x: 1 }` -> record-new（**类型名不进图**）。
     // V 的字段表标签是 `f`，go 的是 `kv`，lua 的是 `named` —— 三种记号一格节点。
     case 'sel': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
-    case 'lit': return recordNew(kids(x).slice(1).map((e) => {
-      if (tag(e) !== 'f') throw new Error('v->graph: 这一批只接带字段名的结构字面量');
-      return [leaf(kids(e)[0]), toNode(kids(e)[1])];
-    }));
+    // 结构字面量与 **map 字面量**在树上都叫 `lit`，差的是类型那一格：
+    // `map[K]V{…}` 是 `(lit (map …) …)` —— **自带标记**，所以不必回问"这名字是什么类型"
+    case 'lit': {
+      if (tag(kids(x)[0]) === 'map') {
+        return mapNew(kids(x).slice(1).filter((e) => tag(e) === 'kv').map((e) => {
+          const [k, v] = kids(e);
+          return [toNode(k), toNode(v)];
+        }));
+      }
+      return recordNew(kids(x).slice(1).map((e) => {
+        if (tag(e) !== 'f') throw new Error('v->graph: 这一批只接带字段名的结构字面量');
+        return [leaf(kids(e)[0]), toNode(kids(e)[1])];
+      }));
+    }
     // `[10, 20, 30]` -> list-new；`xs[0]` -> index-get（V 与 go 从 0 起，不用减）
     case 'array': return listNew(many(kids(x)));
-    case 'index': return indexGet(toNode(kids(x)[0]), toNode(kids(x)[1]));
+    case 'index': {
+      const [o, i] = kids(x);
+      return isMap(o) ? mapGet(toNode(o), toNode(i)) : indexGet(toNode(o), toNode(i));
+    }
+    // `k in m` -> map-has。V 把"在不在"写成一格算子、go 写成 comma-ok —— 同一格节点
+    case 'in': {
+      const [k, o] = kids(x);
+      if (!isMap(o)) throw new Error('v->graph: `in` 这一批只接 map（数组的 in 要线性查找）');
+      return mapHas(toNode(o), toNode(k));
+    }
     // `xs[1..3]` -> slice（V 的上界也**不含**）
     case 'slice': {
       const [o, a, b] = kids(x);
@@ -94,7 +130,10 @@ function toNode(x) {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set
         if (tag(t) === 'sel') return fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v);
-        if (tag(t) === 'index') return indexSet(toNode(kids(t)[0]), toNode(kids(t)[1]), v);
+        if (tag(t) === 'index') {
+          const [o, i] = kids(t);
+          return isMap(o) ? mapSet(toNode(o), toNode(i), v) : indexSet(toNode(o), toNode(i), v);
+        }
         return isDef
           ? node('bind', { init: v }, { name: nameOf(t) })
           : node('set', { value: v }, { name: nameOf(t) });
@@ -147,6 +186,9 @@ function toNode(x) {
 /** 一棵 V 的 GLR 树（`(file 顶层项…)`）-> 一张图。末尾补一格 `call main`（同 go）。 */
 export function vlangToGraph(tree) {
   if (tag(tree) !== 'file') throw new Error('v->graph: 这不是 (file …)');
+  // 先扫一遍哪些名字装 map（`m := map[K]V{…}` 自带标记）—— 与 go 那一份同一条办法
+  MAPS.clear();
+  for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
   const body = kids(tree).map(toNode).flat();
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
 }

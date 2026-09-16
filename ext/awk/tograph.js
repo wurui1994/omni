@@ -17,6 +17,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, threePart, elseOf, ops, binOf, retOf, branchOf,
+  mapNew, mapGet, mapSet, mapHas,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -40,8 +41,33 @@ function assignedNames(x, out = new Set()) {
 /** 一段体（函数体 / BEGIN 块）：先补 bind，再放语句。 */
 function bodyOf(blk, params = []) {
   const stmts = blk === undefined ? [] : many(kids(blk));
-  const names = [...assignedNames(blk)].filter((n) => n !== null && !params.includes(n));
-  return [...names.map((n) => node('bind', { init: lit(null) }, { name: n })), ...stmts];
+  // **awk 的数组就是 map**（关联数组）—— 带下标用过的名字补的是 `map-new` 那一格，
+  // 不是 `null`。这一格不用回问类型：awk 里所有下标都是 map，没有第二种可能。
+  const arrays = blk === undefined ? new Set() : arrayNames(blk);
+  const names = [...assignedNames(blk)]
+    .filter((n) => n !== null && !params.includes(n) && !arrays.has(n));
+  return [
+    ...[...arrays].filter((n) => !params.includes(n))
+      .map((n) => node('bind', { init: mapNew() }, { name: n })),
+    ...names.map((n) => node('bind', { init: lit(null) }, { name: n })),
+    ...stmts,
+  ];
+}
+
+/** 带下标用过的名字（`m["a"]` / `"a" in m`）—— awk 里那就是一格关联数组。 */
+function arrayNames(x, out = new Set()) {
+  if (!isList(x)) return out;
+  if (tag(x) === 'index') out.add(nameOf(kids(x)[0]));
+  if (tag(x) === 'in') out.add(nameOf(kids(x)[1]));
+  for (const k of kids(x)) arrayNames(k, out);
+  return out;
+}
+
+/** `(subscript e)` -> 那一格键。多维下标（`m[i,j]`）这一批不接 —— 明说，不猜。 */
+function keyOf(sub) {
+  const ks = tag(sub) === 'subscript' ? kids(sub) : [sub];
+  if (ks.length !== 1) throw new Error('awk->graph: 多维下标（m[i,j]）还没接');
+  return toNode(ks[0]);
 }
 
 function toNode(x) {
@@ -52,6 +78,16 @@ function toNode(x) {
     case 'paren': return toNode(kids(x)[0]);
     case 'expr': return toNode(kids(x)[0]);
     case 'block': return node('region', { body: many(kids(x)) });
+    // `m["a"]` -> map-get，`"a" in m` -> map-has。**awk 的数组就是 map** ——
+    // 所以这一格不像 go / V 那样要先分清"数组还是字典"，awk 里没有第二种可能。
+    case 'index': return mapGet(
+      node('ref', {}, { name: nameOf(kids(x)[0]) }),
+      keyOf(kids(x)[1]),
+    );
+    case 'in': return mapHas(
+      node('ref', {}, { name: nameOf(kids(x)[1]) }),
+      toNode(kids(x)[0]),
+    );
 
     case 'bin': {
       const [op, a, b] = kids(x);
@@ -64,6 +100,16 @@ function toNode(x) {
     }
     case 'assign': {
       const [op, target, value] = kids(x);
+      // 左边带下标 ⇒ map-set（awk 的数组就是关联数组）。`+=` 一族的左值也可以带下标，
+      // 那时读一格再写回去 —— 与名字那一侧同一条"不给复合赋值开节点"
+      if (tag(target) === 'index') {
+        const obj = node('ref', {}, { name: nameOf(kids(target)[0]) });
+        const key = keyOf(kids(target)[1]);
+        if (leaf(op) === '=') return mapSet(obj, key, toNode(value));
+        const o2 = OPS.get(String(leaf(op)).slice(0, -1));
+        if (o2 === undefined) throw new Error(`awk->graph: 这个复合赋值还没接：${leaf(op)}`);
+        return mapSet(obj, key, bin(o2, mapGet(obj, key), toNode(value)));
+      }
       const name = nameOf(target);
       if (leaf(op) === '=') return node('set', { value: toNode(value) }, { name });
       // `+=` 一族：`a op= b` 就是 `a = a op b`（**不给它开节点** —— 一格附属都不用）

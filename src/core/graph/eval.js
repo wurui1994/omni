@@ -164,11 +164,42 @@ export const setIndex = (obj, i, value) => {
   return null;
 };
 
+/* ---------------------------------------------- map / dict（4 格）--------------
+ * 表示用宿主的 `Map`：键**按值**比较，数与串各成一格键（`1` 与 `"1"` 不是同一格）。
+ * **缺键报错**（不给零值、不给 nil）—— 九门语言的答案各不相同（go 给零值、lua 给 nil、
+ * awk 当场长出一格空串、V 给 option），所以调度器不替谁选：要默认值就用
+ * `map-has` + `branch` 自己写一遍。三格都是两个后端共用的（js 那侧也调它们）。
+ */
+export const mapNew = (keys, vals) => {
+  const m = new Map();
+  (keys ?? []).forEach((k, i) => m.set(k, (vals ?? [])[i] ?? null));
+  return m;
+};
+
+const asMap = (obj, who) => {
+  if (!(obj instanceof Map)) throw new Error(`${who}: 不是一格 map`);
+  return obj;
+};
+
+export const mapGet = (obj, k) => {
+  const m = asMap(obj, 'map-get');
+  if (!m.has(k)) {
+    throw new Error(`map-get: 没有这一格键 ${showValue(k)}（缺键的默认值归语言，用 map-has 自己写）`);
+  }
+  return m.get(k);
+};
+
+export const mapSet = (obj, k, value) => {
+  asMap(obj, 'map-set').set(k, value);
+  return null;
+};
+
+export const mapHas = (obj, k) => asMap(obj, 'map-has').has(k);
+
 /**
  * 切片：**一段范围复制成一格新列表**。上界不含、下标 0 起（各语言的差别由映射摆平）。
  * 两个后端共用（js 后端里那句 `__slice`）。
- */
-export const sliceOf = (obj, from, to) => {
+ */export const sliceOf = (obj, from, to) => {
   if (!Array.isArray(obj)) throw new Error('slice: 不是一格列表');
   const a = from === undefined || from === null ? 0 : Number(from);
   const b = to === undefined || to === null ? obj.length : Number(to);
@@ -293,6 +324,11 @@ function run(n, env, io) {
     case 'list-new': return arg('items') ?? [];
     case 'index-get': return index(arg('obj'), arg('index'));
     case 'index-set': return setIndex(arg('obj'), arg('index'), arg('value'));
+    // map / dict：键按值比较，**缺键报错**（默认值归语言 —— 用 map-has 自己写）
+    case 'map-new': return mapNew(arg('keys'), arg('vals'));
+    case 'map-get': return mapGet(arg('obj'), arg('key'));
+    case 'map-set': return mapSet(arg('obj'), arg('key'), arg('value'));
+    case 'map-has': return mapHas(arg('obj'), arg('key'));
     // 表示转换：目标在附属 `to` 上。**四家的写法不同，落的是同一格**
     case 'conv': return convert(arg('value'), n.attrs.to, io);
     case 'slice': return sliceOf(arg('obj'), arg('from'), arg('to'));

@@ -213,6 +213,52 @@ export const NODES = new Map([
     doc: '`xs[1] = 5` —— 左边是下标的赋值落这格',
   }),
 
+  // ---- map / dict（4 格）------------------------------------------------------
+  //
+  // **五个提供者**：lua 的 table（字符串键）/ awk 的关联数组 / go 与 V 的 `map[K]V` /
+  // nim 的 `Table` —— G5 那条里的"机器"。
+  //
+  // **为什么不与 `index-*` 合并**（§3 那条"效应不同就是两格"）：列表的下标是**位置**，
+  // map 的键是**值**。`map-set` 可能**长出一格新键**（`allocates` + `writes`），
+  // 而 `index-set` 只写已经在那儿的一格（`writes`）；`map-get` 要按键比较，
+  // `index-get` 是一次寻址。这不是"看起来像"的差别，是五栏里第四格的差别。
+  //
+  // **缺键怎么办：报错**（明说的一条）。九门语言的答案各不相同（go 给零值、lua 给 nil、
+  // awk 当场长出一格空串、V 给 option），所以调度器**不替谁选**：要默认值就用
+  // `map-has` + `branch` 自己写一遍 —— 那正是"写法归语言"。
+  //
+  // **两格 rest 端口**（`keys` / `vals`）而不是一格交替的表：键与值都是运行期的值，
+  // 交替表要靠"偶数格是键"这种约定，而约定不是端口。
+  N('map-new', 'expr', [
+    { name: 'keys', sem: SEM.value, rest: true },
+    { name: 'vals', sem: SEM.value, rest: true },
+  ], {
+    effects: ['allocates'], lifetime: 'owns',
+    doc: 'go/V `map[K]V{…}` / lua `{}` / nim `initTable` / awk 的关联数组（隐式）',
+  }),
+  N('map-get', 'expr', [
+    { name: 'obj', sem: SEM.value },
+    { name: 'key', sem: SEM.value },
+  ], {
+    effects: ['reads'], lifetime: 'borrows(obj)',
+    doc: '`m[k]` —— 缺键是错误（默认值归语言，用 map-has 自己写）',
+  }),
+  N('map-set', 'stat', [
+    { name: 'obj', sem: SEM.value },
+    { name: 'key', sem: SEM.value },
+    { name: 'value', sem: SEM.value },
+  ], {
+    effects: ['writes', 'allocates'], outs: [],
+    doc: '`m[k] = v` —— 可能长出一格新键，所以效应里有 allocates',
+  }),
+  N('map-has', 'expr', [
+    { name: 'obj', sem: SEM.value },
+    { name: 'key', sem: SEM.value },
+  ], {
+    effects: ['reads'], lifetime: 'borrows(obj)',
+    doc: 'go 的 `_, ok := m[k]` / lua 的 `t[k] ~= nil` / awk 的 `k in m`',
+  }),
+
   // ---- 循环的早退（1 格）------------------------------------------------------
   //
   // `break` 与 `continue` 是**同一格节点**：五栏（sort / 端口 / 出端口 / 效应 / 寿命）

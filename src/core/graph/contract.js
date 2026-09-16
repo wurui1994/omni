@@ -17,6 +17,7 @@
 import { NODES, declOf } from './nodes.js';
 import {
   evalGraph, showValue, truthy, pick, field, setField, index, setIndex, convert, sliceOf,
+  mapNew, mapGet, mapSet, mapHas,
 } from './eval.js';
 import { toSx } from './graph.js';
 import { PRIMS } from './prims.js';
@@ -174,6 +175,14 @@ function jsExpr(x) {
       return `([${items.map(jsExpr).join(', ')}])`;
     }
     case 'index-get': return `__index(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.index)})`;
+    // map / dict：表示也与 interp 相同（宿主的 `Map`），三格全共用 eval 里那几句
+    case 'map-new': {
+      const ks = asStmts(x.ins.keys).filter((y) => y !== undefined);
+      const vs = asStmts(x.ins.vals).filter((y) => y !== undefined);
+      return `__mapNew([${ks.map(jsExpr).join(', ')}], [${vs.map(jsExpr).join(', ')}])`;
+    }
+    case 'map-get': return `__mapGet(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.key)})`;
+    case 'map-has': return `__mapHas(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.key)})`;
     case 'conv': return `__conv(${jsExpr(x.ins.value)}, ${JSON.stringify(x.attrs.to)})`;
     case 'slice': return `__slice(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.from)}, ${jsExpr(x.ins.to)})`;
     default: return `(() => { ${jsStmt(x)} })()`;
@@ -220,6 +229,7 @@ function jsUpdate(x) {
     case 'set': return `${jsName(x.attrs.name)} = ${jsExpr(x.ins.value)}`;
     case 'field-set': return `__setField(${jsExpr(x.ins.obj)}, ${JSON.stringify(x.attrs.field)}, ${jsExpr(x.ins.value)})`;
     case 'index-set': return `__setIndex(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.index)}, ${jsExpr(x.ins.value)})`;
+    case 'map-set': return `__mapSet(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.key)}, ${jsExpr(x.ins.value)})`;
     case 'prim': case 'call': return jsExpr(x);
     default: throw new Error(`js: 循环的步进那一格还没接：${x.op}`);
   }
@@ -234,6 +244,7 @@ function jsStmt(x) {
     case 'set': return `${jsName(x.attrs.name)} = ${jsExpr(x.ins.value)};`;
     case 'field-set': return `__setField(${jsExpr(x.ins.obj)}, ${JSON.stringify(x.attrs.field)}, ${jsExpr(x.ins.value)});`;
     case 'index-set': return `__setIndex(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.index)}, ${jsExpr(x.ins.value)});`;
+    case 'map-set': return `__mapSet(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.key)}, ${jsExpr(x.ins.value)});`;
     case 'ret': return `return ${x.ins.value === undefined ? 'null' : jsExpr(x.ins.value)};`;
     case 'loop': {
       const body = asStmts(x.ins.body).map(jsStmt).join(' ');
@@ -258,7 +269,8 @@ function jsStmt(x) {
 
 function jsLower(g) {
   const body = withExits(asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n'));
-  const source = '(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex, __conv, __slice) => {'
+  const source = '(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex, __conv, __slice,'
+    + ' __mapNew, __mapGet, __mapSet, __mapHas) => {'
     + `\n${body}\n}`;
   return {
     text: source,
@@ -267,7 +279,8 @@ function jsLower(g) {
       // eslint-disable-next-line no-new-func
       const f = new Function(`return ${source};`)();
       f(out, showValue, truthy, pick, field, setField, index, setIndex,
-        (v, to) => convert(v, to, { show: showValue }), sliceOf);
+        (v, to) => convert(v, to, { show: showValue }), sliceOf,
+        mapNew, mapGet, mapSet, mapHas);
       return { value: null, out };
     },
   };

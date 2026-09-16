@@ -16,7 +16,31 @@ import {
   isList, tag, kids, leaf, part, groupItems, unquote,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit,
   recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, destructure,
+  mapNew, mapGet, mapSet, mapHas, mapNames,
 } from '../../src/core/graph/fromtree.js';
+
+/**
+ * 装 `Table` 的那些名字（`nimToGraph` 里一趟扫查填好）。
+ * nim 的标记不是字面量而是**造它的那个调用**（`initTable[K, V]()`）—— 还是能在树上认出来，
+ * 所以这一格也不必回问类型（真要回问的是 `T(x: 1)` vs `f(x = 1)`，见文件末尾的欠款）。
+ */
+const MAPS = new Set();
+const TABLE_CTORS = new Set(['initTable', 'newTable', 'toTable']);
+const isMap = (x) => tag(x) === 'name' && MAPS.has(leaf(kids(x)[0]));
+
+/** `var m = initTable[string, int]()` -> `'m'`（不是就给 null）。 */
+function mapBindName(x) {
+  if (!isList(x) || tag(x) !== 'item') return null;
+  const init = part(x, 'init');
+  if (init === undefined) return null;
+  const rhs = kids(init)[0];
+  if (rhs === undefined || tag(rhs) !== 'call') return null;
+  const callee = kids(rhs)[0];
+  // `initTable[string, int]()`：被调者是一格 `bracket`（泛型实参），名字在它里面
+  const nm = tag(callee) === 'bracket' ? kids(callee)[0] : callee;
+  if (tag(nm) !== 'name' || !TABLE_CTORS.has(leaf(kids(nm)[0]))) return null;
+  return nameOf(part(x, 'names'));
+}
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
 
@@ -82,7 +106,9 @@ function toNode(x) {
         const [, a, b] = kids(sub);
         return sliceOf(toNode(kids(x)[0]), toNode(a), bin('+', toNode(b), lit(1)));
       }
-      return indexGet(toNode(kids(x)[0]), toNode(sub));
+      // `m["a"]` 与 `xs[0]` 在树上同形（都是 `bracket`）—— 分开靠那一趟扫查
+      const obj = kids(x)[0];
+      return isMap(obj) ? mapGet(toNode(obj), toNode(sub)) : indexGet(toNode(obj), toNode(sub));
     }
     // `var a = 1` / `let a = 1` / `const a = 1` —— 一段能声明好几格
     case 'var-section': case 'let-section': case 'const-section': {
@@ -115,8 +141,10 @@ function toNode(x) {
       if (tag(lhs) === 'bracket') {
         const obj = () => toNode(kids(lhs)[0]);
         const idx = () => toNode(kids(part(lhs, 'args'))[0]);
-        const v = o === null ? toNode(rhs) : bin(o, indexGet(obj(), idx()), toNode(rhs));
-        return indexSet(obj(), idx(), v);
+        const isM = isMap(kids(lhs)[0]);
+        const get = () => (isM ? mapGet(obj(), idx()) : indexGet(obj(), idx()));
+        const v = o === null ? toNode(rhs) : bin(o, get(), toNode(rhs));
+        return isM ? mapSet(obj(), idx(), v) : indexSet(obj(), idx(), v);
       }
       const name = nameOf(lhs);
       if (o === null) return node('set', { value: toNode(rhs) }, { name });
@@ -169,6 +197,17 @@ function toNode(x) {
         return recordNew(argKids.map((a) => [nameOf(kids(a)[0]), toNode(kids(a)[1])]));
       }
       const argNodes = many(argKids);
+      // `initTable[string, int]()` -> map-new：造 Table 的那个调用**就是**那一格节点
+      // （nim 的标记不在字面量上，在造它的调用上 —— 认得出就不用回问类型）
+      const gen = tag(fn) === 'bracket' ? kids(fn)[0] : fn;
+      if ((tag(gen) === 'name' || tag(gen) === 'n') && TABLE_CTORS.has(leaf(kids(gen)[0]))) {
+        if (argNodes.length !== 0) throw new Error('nim->graph: 带初值的 Table 造法还没接');
+        return mapNew();
+      }
+      // `m.hasKey(k)` -> map-has。V 写成 `k in m`、go 写成 comma-ok —— 同一格节点
+      if (tag(fn) === 'dot' && leaf(kids(fn)[1]) === 'hasKey' && argNodes.length === 1) {
+        return mapHas(toNode(kids(fn)[0]), argNodes[0]);
+      }
       const callee = (tag(fn) === 'name' || tag(fn) === 'n') ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
       // `int(x)` / `float(x)` 在树上与调用同形 —— 与对象构造那笔账同一笔，这一批按名字表判
@@ -186,6 +225,9 @@ function toNode(x) {
 /** 一棵 nim 的 GLR 树（`(module 项…)`）-> 一张图。 */
 export function nimToGraph(tree) {
   if (tag(tree) !== 'module') throw new Error('nim->graph: 这不是 (module …)');
+  // 先扫一遍哪些名字装 Table（`initTable[K, V]()` 那种造法在树上认得出）
+  MAPS.clear();
+  for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
   return program(kids(tree).map(toNode).flat());
 }
 

@@ -46,6 +46,8 @@ export const VALUES = ['3', '7'];
  * 是 go 自己用 bind + ref 说清的一条规矩（`fromtree.js` 的 `deferNow`）。
  */
 export const DEFERARG = ['2', '1'];
+/** dict：map 那四格（map-new / map-get / map-set / map-has）—— 键是**值**不是名字 */
+export const DICT = ['1', '3', '4', 'yes'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -99,6 +101,8 @@ export const CASES = [
   // 一门语言就单开一个家族，理由正是"它不该变成节点"：G5 那条判据里它是"一家"，
   // 而 defer.go 那份印的是常量 —— 看不出时机，所以要这一份把它钉住。
   ...fam('deferarg', DEFERARG, ['go']),
+  // 第十二个家族：map / dict 那四格（键是值、缺键报错、默认值归语言）
+  ...fam('dict', DICT, ['go', 'vlang', 'awk', 'nim']),
 ];
 
 /**

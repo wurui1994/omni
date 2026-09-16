@@ -233,6 +233,40 @@ export const listNew = (items) => node('list-new', { items });
 export const indexGet = (obj, idx) => node('index-get', { obj, index: idx });
 export const indexSet = (obj, idx, value) => node('index-set', { obj, index: idx, value });
 
+/**
+ * **map / dict 那四格的搭法**（go / V 的 `map[K]V{…}`、awk 的关联数组、nim 的 `Table`）。
+ * 键与值各一格 rest 端口 —— 交替表要靠"偶数格是键"这种约定，而约定不是端口。
+ *
+ * @param {Array<[any, any]>} pairs 键 × 值（都已经是出好的节点）
+ */
+export const mapNew = (pairs = []) => node('map-new', {
+  keys: pairs.map(([k]) => k),
+  vals: pairs.map(([, v]) => v),
+});
+export const mapGet = (obj, key) => node('map-get', { obj, key });
+export const mapSet = (obj, key, value) => node('map-set', { obj, key, value });
+export const mapHas = (obj, key) => node('map-has', { obj, key });
+
+/**
+ * **哪些名字装的是 map** —— 一门语言自己的一趟扫查，不是驱动器回问类型。
+ *
+ * 那笔"要驱动器回问'这名字登记成类型了吗'"的账在 map 这一格上**量出来是不必的**：
+ * go 与 V 的 map 字面量自带标记（`map[K]V{…}` 在树上就是 `(lit (map …) …)`），
+ * nim 的是 `initTable[…]()`，awk 的所有下标都是关联数组 —— 三种都能在树上认出来。
+ * 剩下真要回问的只有 cpp 的"声明还是表达式"与 nim 的 `T(x: 1)` vs `f(x = 1)`。
+ *
+ * @param {any} x 树（整棵或一块）
+ * @param {(node: any) => string|null} isMapBind 一格节点 -> 它绑的 map 名字（不是就给 null）
+ */
+export function mapNames(x, isMapBind, out = new Set()) {
+  if (x === null || x === undefined) return out;
+  if (Array.isArray(x)) { for (const y of x) mapNames(y, isMapBind, out); return out; }
+  const nm = isMapBind(x);
+  if (nm !== null && nm !== undefined) out.add(nm);
+  if (isList(x)) for (const y of x.items) mapNames(y, isMapBind, out);
+  return out;
+}
+
 export function destructure(names, value, { declare = true, tmp = '__mv' } = {}) {
   const holder = `${tmp}${names.join('$')}`;
   const out = [node('bind', { init: value }, { name: holder, keepMulti: true })];
