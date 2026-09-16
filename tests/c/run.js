@@ -29,7 +29,19 @@
 //                    话）。同样没有 .expected —— 期望值就是 tcc 的那一行。
 //
 // tcc 不在的时候整组**跳过而不是假过**（印 skip 并说明原因）—— 悄悄变成 0 passed
-// 才是最坏的结局。
+// 才是最坏的结局。量过一次：那份二进制不在，这条轴是 `107 passed, 0 failed, 191 skipped`；
+// 编出来之后是 `297 passed, 0 failed, 1 skipped`。
+//
+// **那份参考 tcc 怎么编**（仓库里没有脚本，这几行就是；三处都是踩出来的）：
+//
+//   mkdir -p .omni-cache/tcc-build && cd .omni-cache/tcc-build
+//   ln -s $TINYCC_SRC/include include                      # {B}/include：树外编译没有它
+//   $TINYCC_SRC/configure --cc=clang --tccdir=$PWD          # 缺省 tccdir 是 /usr/local/lib/tcc
+//   make -j8
+//
+// 不给 `--tccdir` 的话，`tcc x.c` 找不到自己那份 `stdbool.h`
+// （量到的原话：`include file 'stdbool.h' not found`）—— 这条轴的用例都带 `-B <TCC_DIR>`，
+// 但 `OMNI_CC=<那份 tcc>` 那种用法给不了 `-B`，所以还是 configure 时定死更省事。
 //
 //   node tests/c/run.js
 //   node tests/c/run.js macro
