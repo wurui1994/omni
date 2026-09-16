@@ -322,6 +322,18 @@ export class Cpp {
     /** 只预处理（`-E`）还是要编译。tcc 那边是 `output_type == TCC_OUTPUT_PREPROCESS`，
      *  它决定 `#pragma` 是**原样印回**还是**当场解释**（见 `pragmaParse`）。 */
     this.ppOnly = false;
+    /** **找不到的 `#include` 跳过而不是报错**（tcc 没有这一格，默认 `false` = 与 tcc 同）。
+     *
+     *  为什么要有它：给**别人的源码**当语料读的时候，一份文件该配哪几个 `-I` 只有那棵树的
+     *  构建系统知道（量出来的：asymptote 那 351 份 `.cc`，逐份配"自己的目录 + 树根"之后
+     *  仍有 172 份卡在"include 找不到"）。而读语料要的往往只是**宏展开**——
+     *  `TEST(A, B) { … }` 这种在声明位置展开出一整个函数定义的宏，不展开就只能读成
+     *  "一个调用当声明"。跳过找不到的那些、再用 `-D` 递一份合成前言，这条语料的过数
+     *  量出来是 30 -> 72。
+     *
+     *  默认关着，所以 `omni c -E` 与 `tcc -E` 逐字节那条判据不动；打开时每跳过一份记一条
+     *  警告（跳了什么必须说得出来）。 */
+    this.skipMissingIncludes = false;
 
     /* __LINE__ 那一族在 tcc 里也要有个 Sym 占位，否则 `defined(__LINE__)` 是假的
      * （`tccpp.c:3734`）。`special` 就是 tcc 的 `d == NULL`。 */
@@ -2004,6 +2016,12 @@ export class Cpp {
         if (this.includeSysDeps || i - 2 < this.includeDirs.length) this.targetDeps.push(t.path);
       }
       this.tokFlags = TOK_FLAG_BOL | TOK_FLAG_BOF;
+      return;
+    }
+    /* 一个都没找到。默认与 tcc 同：报错。`skipMissingIncludes` 打开时改成
+     * "这一份当空文件"——**记一条警告**，别静悄悄地少读一份头。 */
+    if (this.skipMissingIncludes) {
+      this.warn(`include file '${name}' not found (skipped)`);
       return;
     }
     this.err(`include file '${name}' not found`);

@@ -138,7 +138,7 @@ export function cMir(path, incs, defs, args, sysIncs) {
  * 文件 IO 在这里，预处理器自己只认一个 `readFile` 回调 —— 于是 REPL 那一路可以把
  * 内存里的几份 `.h` 直接喂进去，测试也不必碰 fs。
  */
-export function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, verbose, tgt) {
+export function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, verbose, tgt, skipMissing) {
   const cpp = new Cpp({
     readFile: (p) => {
       try {
@@ -164,6 +164,9 @@ export function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, ve
    * `ppOnly` 同理：命令行那一层出的警告，前头那个空行也得算进输出里。 */
   cpp.dflag = dflag ?? 0;
   cpp.ppOnly = true;
+  /* `--skip-missing-includes`：找不到的头当空文件（每份记一条警告）。默认关着 ——
+   * 开着的时候输出就**不再**与 `tcc -E` 逐字节相同了，所以这一格必须由命令行明说。 */
+  cpp.skipMissingIncludes = skipMissing === true;
   cpp.installPredefs(path);
   /* `-include`：开工前先读的那几份（压在主文件上面的 `<command line>` 那一层）。 */
   if (incls !== undefined) cpp.cmdlineIncls = incls;

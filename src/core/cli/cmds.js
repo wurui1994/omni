@@ -133,6 +133,10 @@ const C_GROUP = {  name: 'c',
         { name: '-v', arity: 0, brief: 'tcc 的 -v：印版本条与头文件搜索路径' },
         { name: '-vv', arity: 0, brief: '同上，更细' },
         { name: '-nostdinc', arity: 0, brief: '不找系统头' },
+        /* tcc 没有这一格：找不到的头当空文件跳过（每份记一条警告）。开着就**不再**与
+         * `tcc -E` 逐字节相同，所以必须在命令行上明说。读别人的源码当语料时要它 ——
+         * 一份文件该配哪几个 `-I` 只有那棵树的构建系统知道（账在 ext/cpp/cpp.grammar）。 */
+        { name: '--skip-missing-includes', arity: 0, brief: '找不到的头跳过并记警告，不报错' },
         /* 给 make 的依赖清单那一族（tcc 的 `-M` 一家）。`-MF` 在 `C_CPP_FLAGS` 里。 */
         { name: '-M', arity: 0, brief: '只出依赖清单（含系统头）' },
         { name: '-MM', arity: 0, brief: '只出依赖清单（不含系统头）' },

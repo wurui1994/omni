@@ -253,6 +253,41 @@ for (const f of pick('inc')) {
  * `-E`，tcc 会真的把文件编一遍，而 `cpp/` 那几份是预处理器的探针、本来就不是合法的 C。 */
 if (pick('gen').includes('01-expr.c')) depsCase('gen', '01-expr.c', [], ['-MM']);
 
+// ------------------------------------------------- 2.5 `--skip-missing-includes`（**没有 oracle**）
+//
+// 这一格 tcc 没有，所以判据不是"与 tcc 逐字节"，而是我们自己那两句话：
+//   关着 = 与 tcc 同（报 `include file '…' not found`，退出码非 0）；
+//   开着 = 那一份当空文件跳过、**警告里说得出跳了谁**，正文照出、宏照展开。
+//
+// 它为什么存在：读**别人的源码**当语料时，一份文件该配哪几个 `-I` 只有那棵树的构建系统
+// 知道，而读语料要的往往只是宏展开（`TEST(A, B) { … }` 这种在声明位置展开出一整个函数
+// 定义的宏）。量出来的账在 ext/cpp/cpp.grammar 那一节：asymptote 那 351 份 `.cc`，
+// 过数 30 -> 72。
+{
+  const path = join(here, 'skipinc', 'prelude.c');
+  const D = '-DTEST(a, b)=void a##_##b##_Test()';
+  const strict = cliRun(['cpp', path, '-P', D], [join(here, 'skipinc')]);
+  if (strict.code === 0) {
+    bad('skipinc/prelude 关着', '    默认竟然过了 —— 找不到的头必须报错（与 tcc 同）');
+  } else if (!strict.err.includes("include file 'no-such-header.h' not found")) {
+    bad('skipinc/prelude 关着', `    拒的理由不对：\n${strict.err}`);
+  } else {
+    ok('skipinc/prelude 关着 [默认与 tcc 同：找不到的头报错]');
+  }
+  const lax = cliRun(['cpp', path, '-P', D, '--skip-missing-includes'], [join(here, 'skipinc')]);
+  const want = 'void A_Empty_Test() { return 0; }';
+  if (lax.code !== 0) {
+    bad('skipinc/prelude 开着', `    还是拒了：\n${lax.err}`);
+  } else if (!lax.out.includes(want)) {
+    bad('skipinc/prelude 开着', `    宏没展开成\n    ${want}\n    --- 实际 ---\n${lax.out}`);
+  } else if (!lax.err.includes("'no-such-header.h' not found (skipped)")
+    || !lax.err.includes("'also-not-here.h' not found (skipped)")) {
+    bad('skipinc/prelude 开着', `    跳过的那两份没在警告里说清楚：\n${lax.err}`);
+  } else {
+    ok('skipinc/prelude 开着 [跳过两份、各记一条警告，前言里的宏照展开]');
+  }
+}
+
 /**
  * 驱动层的开关（`-D`/`-U`/`-isystem`/`-nostdinc`，第八十五片）：同样比两边 CLI 的
  * stdout，尺子是 `tcc -E -P <开关>`。这些开关改的是「宏表里有什么」与「往哪儿找头」，

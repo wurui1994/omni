@@ -2994,7 +2994,7 @@ function main(argv) {
       const csi = rest.indexOf('--os');
       const tgt = { arch: cai >= 0 ? rest[cai + 1] : 'arm64', os: csi >= 0 ? rest[csi + 1] : 'osx' };
       const out = cap('c.preprocess')(path, incDirs(rest), defArgs(rest), dflag, pflag, deps,
-        sysIncDirs(rest), inclArgs(rest), verbose, tgt);
+        sysIncDirs(rest), inclArgs(rest), verbose, tgt, rest.includes('--skip-missing-includes'));
       if (wantDeps) {
         const target = oi >= 0 ? rest[oi + 1] : depTarget(path);
         const text = makedepsText(target, deps.list, rest.includes('-MP'));
