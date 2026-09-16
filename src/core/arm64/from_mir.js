@@ -42,7 +42,7 @@ import {
   OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
-  CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes, memArgSize,
+  CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, OP_MODES, hexBytes, memArgSize,
   memArgHfa, memArgAlign16,
   callVaFixed,
 } from '../mir/ir.js';
@@ -54,6 +54,24 @@ const TMP0 = 9;
 const TMP1 = 10;
 const RES = 8;
 const SP = 31;
+/**
+ * **值的寄存器缓存**（第一百四十三片）：x11-x15。
+ *
+ * 「每个值一个栈位」这个口径没改 —— 改的是「算完先别急着写回去」：结果落在这五个里的
+ * 一个，用它的那条指令**直接读那个寄存器**，一条 `ldr` 都不发。用光了（`cacheLeft`
+ * 归零）寄存器就还回池子；控制流一分岔一合并、或者一条 `bl` 之前，还有人要的那几个
+ * 写回栈位（`flush`）—— 这五个都是调用者保存的，跨不过一次调用。
+ *
+ * 为什么是「缓存」而不是「寄存器分配」：分配要先算活跃区间、再上色，是一整遍额外的
+ * 遍历；这一格只用「这个值还要用几次」这一个数（`countUses`，编译前一遍数完），
+ * 一遍过的代码生成器里当场就够用。省下来的正是那条 `ldr`：
+ *   `int add(int,int)`  92 -> 72（不可达那一刀）-> 60 字节，与 tcc 的 60 齐平。
+ *
+ * 为什么取 x11-x15：x0-x7 是实参、x8 是 `RES` 兼间接结果、x9/x10 是草稿、x28 是帧基址、
+ * x29/x30 是帧与返回地址 —— 这五个是这一层里**谁都不碰**的（量过：整份 from_mir 里
+ * 没有一处发到它们身上），所以缓存不需要任何「会不会被踩」的推理。
+ */
+const POOL = [11, 12, 13, 14, 15];
 /* 帧基址（第三十六片）：**只有会动栈顶的函数里才用**（变长数组、`alloca`）。
  * 那种函数里 `sp` 会往下跑，而槽位与值的栈位都是「基址 + 正偏移」—— 所以序言里把
  * 降完的 `sp` 抄进这一个寄存器，往后一律按它寻址。x28 是**被调用者保存的**，
@@ -90,6 +108,43 @@ function floatBits(x, size) {
 
 function arm64Nyi(what) {
   throw new OmniError(`arm64 后端还不认识 ${what}`);
+}
+
+/**
+ * 每个值被引用几次 —— 寄存器缓存的全部账本（见 `POOL`）。
+ *
+ * 角色表照 `verify.js` 的口径：三个字段里只有 `'r'`（一个 ref）与 `'p'`（一池 ref）
+ * 躺着值，`'s'`/`'n'`/`'j'` 分别是槽号、下标、跳几层。常量与空位不算。
+ *
+ * 数得**多**是安全的（寄存器多攥一会儿，到边界上照旧写回栈位），数得**少**是不安全的
+ * （攥着的那个会被当成用完了让出去）—— 所以这一遍宁可宽，别自作聪明。
+ * 数出 0 的那些是 `discard` 掉的表达式（C 里 `f();` 那种）：连写回都省了。
+ */
+function countUses(f) {
+  const n = f.count();
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(0);
+  for (let i = 0; i < n; i++) {
+    const mode = OP_MODES[f.op[i]];
+    for (let k = 0; k < 3; k++) {
+      const role = mode[k];
+      if (role !== 'r' && role !== 'p') continue;
+      const v = k === 0 ? f.a[i] : (k === 1 ? f.b[i] : f.aux[i]);
+      if (role === 'r') {
+        if (v !== REF_NONE && !isConstRef(v)) out[f.at(v)]++;
+        continue;
+      }
+      for (const r of f.argsOf(v)) {
+        if (r !== REF_NONE && !isConstRef(r)) out[f.at(r)]++;
+      }
+    }
+  }
+  /* `ARGSRET`（返回值那一块的地址）**读两次**：调用之前进 x8（`callArgs` 里那一格），
+   * 调用之后 `callRet` 还要按它把 x0/x1 写进那一块 —— 而实参池里它只出现一次。
+   * 少数这一次就是「攥着的寄存器被当成用完了让出去」，量出来的症状是 `take24(mk24(...))`
+   * 段错误（第一百四十三片踩过一次）。 */
+  for (let i = 0; i < n; i++) if (f.op[i] === OP.ARGSRET) out[i]++;
+  return out;
 }
 
 /** 这一片认的类型。bool 在栈位上是 0/1 的 64 位。 */
@@ -419,6 +474,30 @@ class FnGen {
     /** 区域栈：`{kind, endLabel, contLabel?, elseLabel?, elseDone?}` */
     this.regions = [];
     this.retLabel = this.buf.label();
+    /**
+     * 上一条是不是「走了就不回来」的（`RET`/`BR`/`BRTABLE`）—— 是的话后面那几条到下一个
+     * 标签落地之前都到不了，一个字都别发（第一百四十二片）。
+     *
+     * 为什么值这一刀：C 前端在每个函数尾巴上都补一条 `RET 0`（`tccgen.js:7739`），
+     * 而函数体自己以 `return` 收尾时那一条就是死的 —— arm64 上是 `movz`+`mov`+`b`
+     * 三个字。量出来的：`int add(int,int)` 92 -> 76 字节。
+     *
+     * 判「到得了」这件事**故意往宽算**：只要碰上一条区域指令（BLOCK/LOOP/IF/ELSE/END）
+     * 就当活过来了。真正的判据是「有没有标签钉在这儿」，而 END 那一格钉的标签正可能是
+     * 让我们死掉的那条 `BR` 的目标 —— 宽算的代价只是少省几个字，窄算的代价是发出跳不到
+     * 的代码，两边不对称。
+     */
+    this.dead = false;
+    /* 寄存器缓存的三张表（见 `POOL`）。全是定长数组 —— 这一格要能被我们自己编出来的
+     * 编译器编（ADR-0011 的封闭子集），Map 的迭代器不在里头。 */
+    this.uses = countUses(f);
+    /** 第 s 个池寄存器现在装着哪个值（-1 = 空）。 */
+    this.cacheIdx = [-1, -1, -1, -1, -1];
+    /** 那个值还剩几次要用（<= 0 = 用光了，寄存器可以让出去）。 */
+    this.cacheLeft = [0, 0, 0, 0, 0];
+    /** 值 -> 池里的第几个（-1 = 不在寄存器里，得走栈位）。 */
+    this.valReg = [];
+    for (let k = 0; k < f.count(); k++) this.valReg.push(-1);
   }
 
   /* -------------------------------------------------------------- 位置 */
@@ -516,7 +595,84 @@ class FnGen {
       if (k.kind === 'str' || k.kind === 'bytes') return this.symAddr(reg, this.strSym(ref));
       return arm64Nyi(`常量 ${k.kind}`);
     }
-    this.frameLoad(reg, this.valOff(this.f.at(ref)));
+    /* 在池寄存器里（见 `POOL`）就一条 `mov` —— 省的是一次访存。真正省下一整条指令的是
+     * `refReg`：那条连 `mov` 都不发。 */
+    const vi = this.f.at(ref);
+    const s = this.valReg[vi];
+    if (s >= 0) {
+      this.cacheLeft[s] -= 1;
+      this.buf.emit(movReg(1, reg, POOL[s]));
+      return;
+    }
+    this.frameLoad(reg, this.valOff(vi));
+  }
+
+  /* ------------------------------------------------- 寄存器缓存（见 `POOL`） */
+
+  /** 池里的一个位置：先要空的，没空的就收一个用光了的。都没有回 -1。 */
+  takeSlot() {
+    for (let s = 0; s < 5; s++) if (this.cacheIdx[s] === -1) return s;
+    for (let s = 0; s < 5; s++) {
+      if (this.cacheLeft[s] <= 0) {
+        this.valReg[this.cacheIdx[s]] = -1;
+        this.cacheIdx[s] = -1;
+        return s;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * **这个 ref 现在在哪个寄存器里** —— 在池里就直接回那一个（一个字都不发），
+   * 否则装进 `fallback` 再回它。省下来的正是那条 `ldr`。
+   *
+   * 调用方只要「有个寄存器装着这个值」而不在乎是哪个时用这一条；非得是某一个特定
+   * 寄存器（实参要进 x0、返回值要进 x0）时用 `loadRef`。
+   */
+  refReg(ref, fallback) {
+    if (ref !== REF_NONE && !isConstRef(ref)) {
+      const s = this.valReg[this.f.at(ref)];
+      if (s >= 0) {
+        this.cacheLeft[s] -= 1;
+        return POOL[s];
+      }
+    }
+    this.loadRef(fallback, ref);
+    return fallback;
+  }
+
+  /**
+   * 把还有人要的那几个写回栈位，清空缓存。
+   *
+   * 三处必须走：控制流一分岔或一合并（区域指令、`BR`/`BRIF`/`BRTABLE`/`RET`）——
+   * 缓存只在一段直线代码里成立；以及**每条 `bl` 之前** —— x11-x15 是调用者保存的。
+   * 用光了的（`cacheLeft <= 0`）连写都不写：那一格从头到尾没碰过内存。
+   *
+   * 「用光了」这件事全靠 `countUses` 数得准：数漏一处，攥着的值就会被当成用完了、
+   * 让给下一个 def，而它的下一次读会去读一个从没写过的栈位。已知要特别数的只有
+   * `ARGSRET`（见 `countUses` 末尾那一段），别的口径都由角色表 `OP_MODES` 兜住。
+   */
+  flush() {
+    for (let s = 0; s < 5; s++) {
+      const i = this.cacheIdx[s];
+      if (i === -1) continue;
+      if (this.cacheLeft[s] > 0) {
+        this.frameStore(POOL[s], this.valOff(i));
+      }
+      this.valReg[i] = -1;
+      this.cacheIdx[s] = -1;
+      this.cacheLeft[s] = 0;
+    }
+  }
+
+  /**
+   * `RET` 处也走一趟 `flush`（摆在那条 `b` 之前）：此刻攥着的值按理都是死的（剩下的
+   * 引用在这条 `RET` 之后，到不了），但「按理」不够 —— 到不了的那一段里若有一条区域
+   * 指令把标签钉下来，后面那几条就又发得出来了（`dead` 是往宽算的）。写回去几条 `str`
+   * 换掉一整类「读一个从没落地的栈位」，这笔账划得来。
+   */
+  dropCache() {
+    this.flush();
   }
 
   /** 一个 ref 产出的类型（比较的 `t` 是操作数的类型，所以不能直接读 `t`）。 */
@@ -656,27 +812,42 @@ class FnGen {
     const op = f.op[i];
     const t = f.t[i];
 
-    /* ---- 控制流 */
+    /* 到不了的就不发（见构造器里的 `dead`）。区域指令照旧走 —— 它们钉的标签是「活过来」
+     * 的唯一入口，跳过的话 END 那一格的落点就没了。 */
+    if (this.dead) {
+      if (op !== OP.BLOCK && op !== OP.LOOP && op !== OP.IF && op !== OP.ELSE && op !== OP.END) {
+        return;
+      }
+      this.dead = false;
+    }
+
+    /* ---- 控制流。每一条都得先把缓存写回栈位（见 `flush`）：缓存只在一段直线代码里
+     * 成立。带条件的那几条**先取条件、后 flush** —— 反过来的话刚存下去的那一个立刻又要
+     * 读回来，白搭一条 `ldr`。 */
     if (op === OP.BLOCK) {
+      this.flush();
       this.regions.push({ kind: 'block', endLabel: buf.label() });
       return;
     }
     if (op === OP.LOOP) {
+      this.flush();
       const contLabel = buf.label();
       buf.place(contLabel);
       this.regions.push({ kind: 'loop', endLabel: buf.label(), contLabel });
       return;
     }
     if (op === OP.IF) {
-      this.loadRef(TMP0, f.a[i]);
+      const c = this.refReg(f.a[i], TMP0);
+      this.flush();
       const elseLabel = buf.label();
-      buf.cbz(1, TMP0, elseLabel);
+      buf.cbz(1, c, elseLabel);
       this.regions.push({ kind: 'if', endLabel: buf.label(), elseLabel, elseDone: false });
       return;
     }
     if (op === OP.ELSE) {
       const r = this.regions[this.regions.length - 1];
       if (r === undefined || r.kind !== 'if') throw new OmniError('arm64: ELSE 没有对应的 IF');
+      this.flush();
       buf.b(r.endLabel);
       buf.place(r.elseLabel);
       r.elseDone = true;
@@ -685,18 +856,22 @@ class FnGen {
     if (op === OP.END) {
       const r = this.regions.pop();
       if (r === undefined) throw new OmniError('arm64: END 多了一条');
+      this.flush();
       /* 没有 ELSE 的 IF：条件假就直接落到 END —— 两个标签钉在同一处。 */
       if (r.kind === 'if' && !r.elseDone) buf.place(r.elseLabel);
       buf.place(r.endLabel);
       return;
     }
     if (op === OP.BR) {
+      this.flush();
       buf.b(this.brTarget(f.aux[i]));
+      this.dead = true;
       return;
     }
     if (op === OP.BRIF) {
-      this.loadRef(TMP0, f.a[i]);
-      buf.cbnz(1, TMP0, this.brTarget(f.aux[i]));
+      const c = this.refReg(f.a[i], TMP0);
+      this.flush();
+      buf.cbnz(1, c, this.brTarget(f.aux[i]));
       return;
     }
     /* `BRTABLE`（第十九片，C 的 `switch` 落在这儿）：**比较链**，不是跳表。
@@ -705,21 +880,22 @@ class FnGen {
      * （`0 <= a < n` 的那一段），所以这里只是「等于 k 就跳第 k 项」。
      * 下标按**无符号**读：负数与 >= n 都落到兜底那一支。 */
     if (op === OP.BRTABLE) {
-      this.loadRef(TMP0, f.a[i]);
+      const x = this.refReg(f.a[i], TMP0);
+      this.flush();
       const levels = f.levelsOf(f.b[i]);
       let k = 0;
       for (const lv of levels) {
         if (k >= 4096) arm64Nyi('BRTABLE 的表超过 4096 项（cmp 的立即数装不下）');
-        buf.emit(cmpImm(1, TMP0, k));
+        buf.emit(cmpImm(1, x, k));
         buf.bcond(COND.eq, this.brTarget(lv));
         k++;
       }
       buf.b(this.brTarget(f.aux[i]));
+      this.dead = true;
       return;
     }
     if (op === OP.RET) {
       if (f.a[i] !== REF_NONE) {
-        this.loadRef(TMP0, f.a[i]);
         /* 返回一整块 struct 且 ≤16 字节（第一百三十一片）：MIR 那条 RET 带的是**那一块的
          * 地址**，而 ABI 要的是值在 x0/x1（或 v0-v3，HFA）里 —— 所以在这儿装一次。
          * 与 tcc 的 `gfunc_return`（`arm64-gen.c:1546`）是同一件事。>16 字节那条路不走
@@ -728,6 +904,7 @@ class FnGen {
          * 那一块前端补齐到了至少 16 字节，所以满 8 字节地读，不按 5/6/7 分岔。 */
         const rs = f.retStruct;
         if (rs !== 0 && memArgSize(rs) <= 16) {
+          this.loadRef(TMP0, f.a[i]);
           const hfa = memArgHfa(rs);
           if (hfa !== null) {
             const dbl = hfa.size === 8;
@@ -739,24 +916,39 @@ class FnGen {
             buf.emit(ldrU(3, 0, TMP0, 0));
             if (memArgSize(rs) > 8) buf.emit(ldrU(3, 1, TMP0, 8));
           }
+          this.dropCache();
           buf.b(this.retLabel);
+          this.dead = true;
           return;
         }
         /* 浮点的返回值在 d0，整数在 x0。i32 的规范形是符号扩展过的 64 位，而 AAPCS
-         * 只看 w0 —— 两边都对，不用再削。 */
-        if (isFloatType(t)) this.toFp(0, TMP0, typeKind(t) === T_F64);
-        else buf.emit(movReg(1, 0, TMP0));
+         * 只看 w0 —— 两边都对，不用再削。
+         *
+         * 整数那一路**直接取进 x0**（第一百四十二片）：先进 x8 再 `mov x0, x8` 是白发的
+         * 一条 —— 这之后没人再用 x8，而 `loadRef` 对哪个寄存器都一样。每个「带值的
+         * return」省一个字。 */
+        if (isFloatType(t)) {
+          this.loadRef(TMP0, f.a[i]);
+          this.toFp(0, TMP0, typeKind(t) === T_F64);
+        } else {
+          this.loadRef(0, f.a[i]);
+        }
       }
+      this.dropCache();
       buf.b(this.retLabel);
+      this.dead = true;
       return;
     }
 
     /* ---- 调用。整数实参进 x0-x7、浮点实参进 v0-v7（两串各自从 0 起数），返回值在
-     * x0 或 d0。不用管调用者保存的寄存器：这一片的值全在栈位上，跨调用活着的东西一个
-     * 也没有 —— 「全落栈」这个笨办法在这儿一次性省掉了整个调用点的溢出逻辑。 */
+     * x0 或 d0。跨调用**活着的东西一个也没有**：实参摆完就把寄存器缓存写回栈位
+     * （`flush`，x11-x15 是调用者保存的），于是整个调用点还是一条溢出逻辑都不欠。
+     * 次序要紧：flush 摆在实参之后 —— 实参正好是刚算出来的那几个值，那时它们还在
+     * 寄存器里，一条 `ldr` 都省了。 */
     if (op === OP.CALL) {
       if (this.callLabels === null) arm64Nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
       const sret = this.callArgs(f.argsOf(f.b[i]), -1);
+      this.flush();
       /* 模块内的直接调用也走**符号**（第一百二十七片，与 x64 那一份同一条）：位移留 0、
        * 发一条重定位。量过 tcc：哪怕被调的就在同一个 `.o` 里、哪怕它是局部符号，
        * `.rela.text` 里也有那一条。`callLabels` 还留着 —— 那一格是「这个模块里有没有
@@ -773,6 +965,7 @@ class FnGen {
       /* aux 是变参分界（第二十二片）：0 = 不是变参调用，否则固定实参个数 + 1。
        * 高位那一格（`CALL_LDRET`）是 x86_64 的事，这条腿上前端不会点它。 */
       const sret = this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
+      this.flush();
       buf.blSym(name);
       return this.callRet(i, t, sret);
     }
@@ -784,6 +977,7 @@ class FnGen {
       /* aux 是变参分界（第三十五片），与 `CCALL` 同一个编码。 */
       const sret = this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
       this.loadRef(TMP0, f.a[i]);
+      this.flush();
       buf.emit(blr(TMP0));
       return this.callRet(i, t, sret);
     }
@@ -934,22 +1128,22 @@ class FnGen {
      * 那几种 CVT 都在那儿。结果是整数的 F2I 留在 `cvt()`（那条的 `t` 是整数）。 */
     if (isFloatType(t)) return this.float(i);
 
-    /* ---- 单目 */
+    /* ---- 单目。操作数用 `refReg`：值本来就在池寄存器里的话，这一条连 `ldr` 都不发。 */
     if (op === OP.NEG) {
       const w = arm64WidthOf(t);
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(neg(w === 64 ? 1 : 0, RES, TMP0));
+      const x = this.refReg(f.a[i], TMP0);
+      buf.emit(neg(w === 64 ? 1 : 0, RES, x));
       return this.def(i, RES, w);
     }
     if (op === OP.BNOT) {
       const w = arm64WidthOf(t);
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(mvn(w === 64 ? 1 : 0, RES, TMP0));
+      const x = this.refReg(f.a[i], TMP0);
+      buf.emit(mvn(w === 64 ? 1 : 0, RES, x));
       return this.def(i, RES, w);
     }
     if (op === OP.NOT) {
-      this.loadRef(TMP0, f.a[i]);
-      buf.emit(eorImm(1, RES, TMP0, 1));
+      const x = this.refReg(f.a[i], TMP0);
+      buf.emit(eorImm(1, RES, x, 1));
       return this.def(i, RES);
     }
 
@@ -958,9 +1152,9 @@ class FnGen {
     if (bin !== undefined) {
       const w = arm64WidthOf(t);
       const sf = w === 64 ? 1 : 0;
-      this.loadRef(TMP0, f.a[i]);
-      this.loadRef(TMP1, f.b[i]);
-      bin(buf, sf, RES, TMP0, TMP1);
+      const x = this.refReg(f.a[i], TMP0);
+      const y = this.refReg(f.b[i], TMP1);
+      bin(buf, sf, RES, x, y);
       return this.def(i, RES, w);
     }
 
@@ -968,9 +1162,9 @@ class FnGen {
     const cond = CMP[op];
     if (cond !== undefined) {
       const sf = arm64WidthOf(t) === 64 ? 1 : 0;
-      this.loadRef(TMP0, f.a[i]);
-      this.loadRef(TMP1, f.b[i]);
-      buf.emit(cmpReg(sf, TMP0, TMP1), cset(1, RES, cond));
+      const x = this.refReg(f.a[i], TMP0);
+      const y = this.refReg(f.b[i], TMP1);
+      buf.emit(cmpReg(sf, x, y), cset(1, RES, cond));
       return this.def(i, RES);
     }
 
@@ -1261,17 +1455,24 @@ class FnGen {
     return this.symAddr(reg, this.globalSym(no));
   }
 
-  /** 真址 = 地址本身 + 静态偏移，算进 `reg`。地址就是真指针 —— 见文件上头那段。 */
+  /**
+   * 真址 = 地址本身 + 静态偏移，**回哪个寄存器装着它**。地址就是真指针 —— 见文件上头那段。
+   *
+   * 偏移是 0（最常见的一格：`*p`、数组下标已经算进地址里了）时不动它：地址本来在池
+   * 寄存器里的话直接用那一个，连 `mov` 都不发。偏移不是 0 就得算，那就落到 `reg` 里 ——
+   * 池寄存器是别人的值，不能往上写。
+   */
   memAddr(reg, ref, off) {
+    if (off === 0) return this.refReg(ref, reg);
     this.loadRef(reg, ref);
-    if (off === 0) return;
     if (off < 4096) {
       this.buf.emit(addImm(1, reg, reg, off));
-      return;
+      return reg;
     }
     /* 静态偏移大过一格立即数就先造出来 —— 用 TMP1 当中转（这两条路上它都还没被占）。 */
     this.movImm(TMP1, BigInt(off));
     this.buf.emit(addReg(1, reg, reg, TMP1));
+    return reg;
   }
 
   /**
@@ -1290,10 +1491,10 @@ class FnGen {
   mload(i) {
     const f = this.f;
     const kind = MLOAD_KINDS[memKindNo(f.aux[i])];
-    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
+    const p = this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
     const ld = MLOAD_EMIT[kind];
     if (ld === undefined) return arm64Nyi(`MLOAD 的宽度 ${kind}`);
-    ld(this.buf, RES, TMP0);
+    ld(this.buf, RES, p);
     return this.def(i, RES);
   }
 
@@ -1303,16 +1504,31 @@ class FnGen {
     const kind = MSTORE_KINDS[memKindNo(f.aux[i])];
     const size = MSTORE_SIZE[kind];
     if (size === undefined) return arm64Nyi(`MSTORE 的宽度 ${kind}`);
-    this.loadRef(TMP1, f.b[i]);
-    /* 先取值再算地址：`memAddr` 在偏移大的时候要借 TMP1，所以值得换个落脚点。 */
-    this.buf.emit(movReg(1, RES, TMP1));
-    this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
-    this.buf.emit(strU(size, RES, TMP0, 0));
+    /* 先取值再算地址：`memAddr` 在偏移大的时候要借 TMP1，所以值落在 RES 上。
+     * 值在池寄存器里的话 `refReg` 一个字都不发（从前这儿是 `ldr` + `mov` 两条）。 */
+    const v = this.refReg(f.b[i], RES);
+    const p = this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
+    this.buf.emit(strU(size, v, p, 0));
   }
 
-  /** 把结果写回这条指令的栈位。32 位的结果先按 i32 的规范形符号扩展。 */
+  /**
+   * 把结果交出去。32 位的结果先按 i32 的规范形符号扩展。
+   *
+   * 落点有三种（见 `POOL`）：没人要的连交都不交；池里有空位的就 `mov` 进那一个，
+   * 用它的指令直接读那个寄存器；池满了才写回栈位 —— 那是从前唯一的一条路。
+   */
   def(i, reg, w) {
     if (w === 32) this.buf.emit(sxtw(reg, reg));
+    const n = this.uses[i];
+    if (n === 0) return;
+    const s = this.takeSlot();
+    if (s >= 0) {
+      this.cacheIdx[s] = i;
+      this.cacheLeft[s] = n;
+      this.valReg[i] = s;
+      this.buf.emit(movReg(1, POOL[s], reg));
+      return;
+    }
     this.frameStore(reg, this.valOff(i));
   }
 }

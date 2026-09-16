@@ -49,6 +49,8 @@ export class Arm64CodeBuf {
     this.fixups = [];
     /** 重定位：`{ at, kind, sym, addend }`，`at` 是**字节**位置。 */
     this.relocs = [];
+    /** 最近一次落标签的字节位置（`dropFallThru` 的第三个闸门）。 */
+    this.lastPlace = -1;
   }
 
   /** 下一条指令的字节位置。**方法而不是取值器**：访问器不在自编译子集里（ADR-0011），
@@ -84,8 +86,34 @@ export class Arm64CodeBuf {
     if (this.labels[l] !== undefined) {
       throw new OmniError(`arm64: 标签 ${l} 已经在 ${this.labels[l]} 落过了`);
     }
+    this.dropFallThru(l);
     this.labels[l] = this.pos();
+    this.lastPlace = this.pos();
     return this;
+  }
+
+  /**
+   * 「跳到紧接着的下一条」那条 `b` 是白发的 —— 落标签的这一刻正好知道，撤掉它
+   * （第一百四十二片）。每条 `return` 都欠这一条：函数体里 `RET` 发的是
+   * `b <收场>`，而最后那一条 `RET` 后面就是收场。
+   *
+   * 三个闸门，缺一条就不敢撤：
+   *   - 那个字是**这次**要落的标签的欠账，且正好是最后一个字（`at === len-1`）；
+   *   - 它是无条件的 `b`（`b.cond`/`cbz` 撤不得 —— 撤了条件就丢了）；
+   *   - 这个位置上**还没落过别的标签**（落过就说明有人记着 `pos()`，一撤那个记录就
+   *     指到了下一条指令的位置上）、也**没有重定位**记在这儿。
+   */
+  dropFallThru(l) {
+    const n = this.fixups.length;
+    if (n === 0) return;
+    const f = this.fixups[n - 1];
+    if (f.uncond !== true || f.label !== l || f.at !== this.words.length - 1) return;
+    if (this.lastPlace === this.pos()) return;
+    const r = this.relocs.length;
+    if (r > 0 && this.relocs[r - 1].at >= f.at * 4) return;
+    this.fixups.pop();
+    this.words.pop();
+    this.dropFallThru(l);
   }
 
   chkLabel(l) {
@@ -98,18 +126,18 @@ export class Arm64CodeBuf {
    * 往后跳（标签已落地）当场算得出来；往前跳先占个位、记一笔账。
    * 两条路都走同一个 `make(off)` —— 偏移是「目标 - 这条指令自己」。 */
 
-  toLabel(l, make) {
+  toLabel(l, make, uncond) {
     this.chkLabel(l);
     const at = this.words.length;
     const here = this.pos();
     const target = this.labels[l];
     if (target !== undefined) return this.word(make(target - here));
     this.words.push(0);
-    this.fixups.push({ at, label: l, make });
+    this.fixups.push({ at, label: l, make, uncond: uncond === true });
     return this;
   }
 
-  b(l) { return this.toLabel(l, (off) => b(off)); }
+  b(l) { return this.toLabel(l, (off) => b(off), true); }
   bl(l) { return this.toLabel(l, (off) => bl(off)); }
   bcond(cond, l) { return this.toLabel(l, (off) => bcond(cond, off)); }
   cbz(sf, rt, l) { return this.toLabel(l, (off) => cbz(sf, rt, off)); }
