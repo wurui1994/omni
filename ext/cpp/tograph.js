@@ -16,11 +16,20 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part,
-  ops, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
   recordNew, fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
 const OPS = ops();
+/**
+ * **强制转换的目标类型 -> `conv` 那格的 `to`**。C++ 的转换不是"调用的形状"（别的门
+ * 都是），它自己有语法：`(int)x` 与 `static_cast<int>(x)` —— 两种写法一格节点。
+ * 定宽的那一族全往四格收（类型是端口的 sort，不是格子）。
+ */
+const CONV = convs({
+  int: 'int', long: 'int', short: 'int', char: 'int', unsigned: 'int', signed: 'int',
+  float: 'float', double: 'float', bool: 'bool',
+});
 
 /**
  * **哪个名字是记录、它有哪些字段**（`struct Point { int x; int y; };` 扫出来的）。
@@ -180,7 +189,7 @@ function oneStr(raw) {
 const strVal = (x) => kids(x).map((k) => oneStr(leaf(k))).join('');
 
 /** `printf` 的格式串：只认这几种，别的报错（格式化不是节点 —— 见文件头）。 */
-const FORMATS = new Set(['%d\n', '%s\n', '%ld\n', '%f\n']);
+const FORMATS = new Set(['%d\n', '%s\n', '%ld\n', '%f\n', '%g\n']);
 
 function toNode(x) {
   switch (tag(x)) {
@@ -190,6 +199,20 @@ function toNode(x) {
     case 'n': case 'name': return node('ref', {}, { name: nameOf(x) });
     // `this` —— 析构体提成顶层函数之后，它就是那一格形参的名字（见 dtorFuncs）
     case 'this': return node('ref', {}, { name: 'this' });
+    // `(int)x` 与 `static_cast<int>(x)` —— **两种写法一格 conv 节点**（目标是附属）。
+    // 别的九门的转换都长成"调用"的样子，靠一张名字表分开；C++ 这一门语法上就是转换，
+    // 所以这儿不需要那张表 —— 需要的是"目标类型往四格里收"（见 CONV）。
+    case 'cast': case 'named-cast': {
+      const ty = part(x, 'type');
+      const val = kids(x)[kids(x).length - 1];
+      const specs = ty === undefined ? undefined : part(ty, 'specs');
+      const bt = specs === undefined ? undefined : kids(specs).find((s) => isList(s) && tag(s) === 'btype');
+      const base = bt === undefined ? null : String(leaf(kids(bt)[0])).toLowerCase();
+      if (base === null || !CONV.has(base)) {
+        throw new Error(`cpp->graph: 这一格强制转换还没接：到 ${base ?? '?'}（指针 / 用户类型不在这一批）`);
+      }
+      return convOf(CONV.get(base), toNode(val));
+    }
     case 'paren': return toNode(kids(x)[0]);
     // `xs[i]` -> index-get（与 go / lua / 两门 Lisp 同一格节点；下标起点是语言的事，
     // C++ 与 go 一样从 0 起，所以这儿一个字不用换）
