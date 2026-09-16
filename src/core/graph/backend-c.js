@@ -44,7 +44,8 @@ import { Gap } from './backend-wat.js';
 
 /** 这一刀接得住的节点。别的一律有名有姓地报缺口（`can` 那一问）。 */
 const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'loop-exit',
-  'region', 'ret', 'func', 'call']);
+  'region', 'ret', 'func', 'call',
+  'list-new', 'index-get', 'index-set', 'record-new', 'field-get', 'field-set']);
 
 /** 这一刀接得住的内建。`prims.js` 里现有 16 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
@@ -78,6 +79,14 @@ typedef struct gv { long long t; long long b; } gv;
 #define GT_BOOL 1
 #define GT_NUM 2
 #define GT_STR 3
+#define GT_LIST 4
+#define GT_REC 5
+
+/* 列表与记录都是**堆上一块**（载荷里躺的是指针）。记录的键是编译期就知道的常量串，
+ * 所以键那一格是 const char * 的数组 —— 与 js 后端那侧「表示与 interp 相同」同一条：
+ * 两条腿的可观察行为一致就够，内部怎么摆各自定。 */
+typedef struct glist { long long n; gv *v; } glist;
+typedef struct grec { long long n; const char **k; gv *v; } grec;
 
 static gv g_nil(void) { gv v; v.t = GT_NIL; v.b = 0; return v; }
 static gv g_bool(long long x) { gv v; v.t = GT_BOOL; v.b = x != 0 ? 1 : 0; return v; }
@@ -85,6 +94,34 @@ static gv g_num(double d) { gv v; v.t = GT_NUM; memcpy(&v.b, &d, 8); return v; }
 static double g_d(gv v) { double d; memcpy(&d, &v.b, 8); return d; }
 static gv g_str(const char *s) { gv v; v.t = GT_STR; memcpy(&v.b, &s, 8); return v; }
 static const char *g_s(gv v) { const char *s; memcpy(&s, &v.b, 8); return s; }
+
+static glist *g_L(gv v) { glist *p; memcpy(&p, &v.b, 8); return p; }
+static grec *g_R(gv v) { grec *p; memcpy(&p, &v.b, 8); return p; }
+
+static gv g_list_new(gv *items, long long n) {
+  glist *L = (glist *)malloc(sizeof(glist));
+  L->n = n;
+  L->v = (gv *)malloc(sizeof(gv) * (n > 0 ? n : 1));
+  long long i = 0;
+  while (i < n) { L->v[i] = items[i]; i++; }
+  gv v;
+  v.t = GT_LIST;
+  memcpy(&v.b, &L, 8);
+  return v;
+}
+
+static gv g_rec_new(const char **keys, gv *vals, long long n) {
+  grec *R = (grec *)malloc(sizeof(grec));
+  R->n = n;
+  R->k = keys;
+  R->v = (gv *)malloc(sizeof(gv) * (n > 0 ? n : 1));
+  long long i = 0;
+  while (i < n) { R->v[i] = vals[i]; i++; }
+  gv v;
+  v.t = GT_REC;
+  memcpy(&v.b, &R, 8);
+  return v;
+}
 
 /* 真值观：**只有 false / nil 是假**（\`eval.js\` 的 valTruthy —— 0 与 "" 都是真）。
  * 四门语言各有一套更宽的读法，调度器给的是最保守这一档，两条腿必须同一档。 */
@@ -131,13 +168,6 @@ static char *g_num_str(double d) {
   return g_dup(buf);
 }
 
-static char *g_show(gv v) {
-  if (v.t == GT_NIL) return g_dup("nil");
-  if (v.t == GT_BOOL) return g_dup(v.b != 0 ? "true" : "false");
-  if (v.t == GT_STR) return g_dup(g_s(v));
-  return g_num_str(g_d(v));
-}
-
 /* 把两段接起来（concat 与 print 的分隔符都用它）。 */
 static char *g_cat2(const char *a, const char *b) {
   unsigned long na = strlen(a);
@@ -146,6 +176,45 @@ static char *g_cat2(const char *a, const char *b) {
   memcpy(p, a, na);
   memcpy(p + na, b, nb + 1);
   return p;
+}
+
+/* 列表印 [a, b]、记录印 {k = v, l = w} —— 与 showValue 那两句一字不差。
+ * 自己套自己，所以先给一句声明。 */
+static char *g_show(gv v);
+
+static char *g_show_list(gv v) {
+  glist *L = g_L(v);
+  char *s = g_dup("[");
+  long long i = 0;
+  while (i < L->n) {
+    if (i > 0) s = g_cat2(s, ", ");
+    s = g_cat2(s, g_show(L->v[i]));
+    i++;
+  }
+  return g_cat2(s, "]");
+}
+
+static char *g_show_rec(gv v) {
+  grec *R = g_R(v);
+  char *s = g_dup("{");
+  long long i = 0;
+  while (i < R->n) {
+    if (i > 0) s = g_cat2(s, ", ");
+    s = g_cat2(s, R->k[i]);
+    s = g_cat2(s, " = ");
+    s = g_cat2(s, g_show(R->v[i]));
+    i++;
+  }
+  return g_cat2(s, "}");
+}
+
+static char *g_show(gv v) {
+  if (v.t == GT_NIL) return g_dup("nil");
+  if (v.t == GT_BOOL) return g_dup(v.b != 0 ? "true" : "false");
+  if (v.t == GT_STR) return g_dup(g_s(v));
+  if (v.t == GT_LIST) return g_show_list(v);
+  if (v.t == GT_REC) return g_show_rec(v);
+  return g_num_str(g_d(v));
 }
 `;
 
@@ -210,6 +279,7 @@ static long long g_cmp(gv a, gv b) {
 
 static gv g_len(gv v) {
   if (v.t == GT_STR) return g_num((double)strlen(g_s(v)));
+  if (v.t == GT_LIST) return g_num((double)g_L(v)->n);
   return g_num(0.0);
 }
 
@@ -226,7 +296,43 @@ static void g_print(gv *a, long long n) {
 }
 `;
 
-const PRELUDE_ALL = () => PRELUDE + P_SHOW + P_PRIM;
+const PRELUDE_ALL = () => PRELUDE + P_SHOW + P_PRIM + P_AGG;
+
+/**
+ * 列表与记录的存取。**越界与缺字段一律当场骂了再退**，不给零值、不给 nil ——
+ * 与 `eval.js` 那侧一字不差（`index` 的注释里写着「越界当场报」，`field` 的
+ * 「没有这一格字段」同理）。九门语言的默认值答案各不相同，调度器不替谁选，
+ * 那么两条腿也都不许自己选一个。
+ */
+const P_AGG = `/* ---- 列表与记录的存取（越界 / 缺字段都是硬错） */
+static long long g_idx(gv o, gv i) {
+  if (o.t != GT_LIST) g_die("index: 不是一格列表");
+  if (i.t != GT_NUM) g_die("index: 下标不是数");
+  double d = g_d(i);
+  long long k = (long long)d;
+  if ((double)k != d) g_die("index: 下标不是整数");
+  if (k < 0 || k >= g_L(o)->n) g_die("index: 下标越界");
+  return k;
+}
+
+static gv g_index_get(gv o, gv i) { return g_L(o)->v[g_idx(o, i)]; }
+static void g_index_set(gv o, gv i, gv x) { g_L(o)->v[g_idx(o, i)] = x; }
+
+static long long g_key(gv o, const char *k) {
+  if (o.t != GT_REC) g_die("field: 不是一格记录");
+  grec *R = g_R(o);
+  long long i = 0;
+  while (i < R->n) {
+    if (strcmp(R->k[i], k) == 0) return i;
+    i++;
+  }
+  g_die("field: 没有这一格字段");
+  return 0;
+}
+
+static gv g_field_get(gv o, const char *k) { return g_R(o)->v[g_key(o, k)]; }
+static void g_field_set(gv o, const char *k, gv x) { g_R(o)->v[g_key(o, k)] = x; }
+`;
 
 /** 名字要能当 C 标识符用（Scheme 的 `string-append`、awk 的 `$0` 那种）。 */
 const cName = (n) => `v_${String(n).replace(/[^A-Za-z0-9_]/g, (c) => `_${c.charCodeAt(0).toString(16)}`)}`;
@@ -334,6 +440,8 @@ class CGen {
     this.fnOf = new Map();
     /** 正在生成的是**函数体**吗（`ret` 要回值，而 `main` 里 `ret` 回退出码 0）。 */
     this.inFn = 0;
+    /** 文件级的那几行（记录的键那种编译期常量数组）。 */
+    this.decls = [];
   }
 
   emit(s) { this.lines.push(`${'  '.repeat(this.depth)}${s}`); }
@@ -428,6 +536,30 @@ class CGen {
     if (x.op === 'ref') return cName(x.attrs.name);
     if (x.op === 'prim') return this.prim(x);
     if (x.op === 'call') return this.callOf(x);
+    if (x.op === 'list-new') {
+      const items = asList(x.ins.items).filter((y) => y !== undefined).map((y) => this.valOf(y));
+      const a = `a${this.fresh()}`;
+      this.emit(`gv ${a}[${items.length > 0 ? items.length : 1}];`);
+      for (let i = 0; i < items.length; i++) this.emit(`${a}[${i}] = ${items[i]};`);
+      return `g_list_new(${a}, ${items.length})`;
+    }
+    if (x.op === 'index-get') {
+      return `g_index_get(${this.valOf(x.ins.obj)}, ${this.valOf(x.ins.index)})`;
+    }
+    if (x.op === 'record-new') {
+      const names = x.attrs.names ?? [];
+      const vals = asList(x.ins.fields).filter((y) => y !== undefined).map((y) => this.valOf(y));
+      /* 键是编译期就知道的常量 -> 一格文件级的静态数组（记录一多，这样比每次都造省）。 */
+      const kn = `gk${this.fresh()}`;
+      this.decls.push(`static const char *${kn}[${names.length > 0 ? names.length : 1}] = { ${names.length > 0 ? names.map(cStr).join(', ') : '0'} };`);
+      const a = `a${this.fresh()}`;
+      this.emit(`gv ${a}[${vals.length > 0 ? vals.length : 1}];`);
+      for (let i = 0; i < vals.length; i++) this.emit(`${a}[${i}] = ${vals[i]};`);
+      return `g_rec_new(${kn}, ${a}, ${names.length})`;
+    }
+    if (x.op === 'field-get') {
+      return `g_field_get(${this.valOf(x.ins.obj)}, ${cStr(x.attrs.field)})`;
+    }
     if (x.op === 'func') {
       throw new Gap('c 后端：`func` 当值用（不是当场调用、也不是绑给一个名字）还没接');
     }
@@ -569,6 +701,14 @@ class CGen {
       return;
     }
     if (x.op === 'loop') return this.loop(x);
+    if (x.op === 'index-set') {
+      this.emit(`g_index_set(${this.valOf(x.ins.obj)}, ${this.valOf(x.ins.index)}, ${this.valOf(x.ins.value)});`);
+      return;
+    }
+    if (x.op === 'field-set') {
+      this.emit(`g_field_set(${this.valOf(x.ins.obj)}, ${cStr(x.attrs.field)}, ${this.valOf(x.ins.value)});`);
+      return;
+    }
     if (x.op === 'loop-exit') {
       this.emit(x.attrs.kind === 'continue' ? 'continue;' : 'break;');
       return;
@@ -634,6 +774,9 @@ export function emitC(g) {
   const bodies = gen.fns.map((f) => `static gv ${f.cname}(${f.params.length === 0 ? 'void'
     : f.params.map((p) => `gv ${p}`).join(', ')}) {\n${f.lines.join('\n')}\n}\n`);
   return `${PRELUDE_ALL()}
+/* ---- 编译期就知道的那几格常量 */
+${gen.decls.join('\n')}
+
 /* ---- 提到顶层的那些函数 */
 ${protos.join('\n')}
 
