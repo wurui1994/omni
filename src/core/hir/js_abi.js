@@ -543,6 +543,27 @@ export const JS_ABI = {
   js_buf_of_list: { js: '$js_buf_of_list', c: 'omni_js_buf_of_list', arity: 1 },
   js_buf_view: { js: '$js_buf_view', c: 'omni_js_buf_view', arity: 3 },
   js_buf_len: { js: '$js_buf_len', c: 'omni_js_buf_len', arity: 1 },
+  /* `.buffer` 与 `.byteOffset`（第一百四十片）。这一格里 **ArrayBuffer、Uint8Array、
+     DataView 是同一种值**（一个 `{p, len}` 视图），所以：
+       `.buffer`     -> **它自己**
+       `.byteOffset` -> 0
+     于是 `new DataView(b.buffer, b.byteOffset, b.byteLength)`（我们自己链接器里到处是
+     这一句）在两条腿上落到同一个窗口。**与真 JS 差在哪儿**要说清：真的 `.buffer` 是那块
+     更大的底层缓冲，`new DataView(sub.buffer)` 能看到整块；我们只能看到 `sub` 自己那一段。
+     用得着这一条的地方（`new DataView(x.buffer)`，x 是刚开的整块）两边一样；
+     而「拿子视图的 .buffer 再按父偏移读」那种写法在 node 上本来也是错的。
+     少这两格的症状：`./dist/omni c obj x.c` 报
+     `a byte-buffer view expects a byte buffer, found undefined` —— 那个 undefined
+     就是 C 那条腿上读不着的 `.buffer`。 */
+  js_buf_buffer: { js: '$js_buf_buffer', c: 'omni_js_buf_buffer', arity: 1 },
+  js_buf_byte_off: { js: '$js_buf_byte_off', c: 'omni_js_buf_byte_off', arity: 1 },
+  /* `.subarray(begin, end)`（规范 23.2.3.28）与 `.slice(begin, end)`（23.2.3.27）：
+     下标的规矩与数组那一族同一套（负数从末尾数、夹到 [0, len]）。
+     **差别只有一处**：subarray 是**视图**（改它就是改原来那块），slice 是**拷贝**。
+     少了这两格的症状是 `TypeError: not a function` —— 而 `u8.subarray(0, n)` 在我们自己
+     的链接器里到处是。 */
+  js_buf_sub: { js: '$js_buf_sub', c: 'omni_js_buf_sub', arity: 3 },
+  js_buf_slice: { js: '$js_buf_slice', c: 'omni_js_buf_slice', arity: 3 },
   js_buf_set: { js: '$js_buf_set', c: 'omni_js_buf_set', arity: 3, ret: 'void' },
   js_buf_fill: { js: '$js_buf_fill', c: 'omni_js_buf_fill', arity: 4 },
   js_buf_get_u8: { js: '$js_buf_get_u8', c: 'omni_js_buf_get_u8', arity: 2 },
@@ -771,6 +792,10 @@ export const JS_PROPS = {
   hasIndices: { regexp: 'js_re_has_indices' },
   // ArrayBuffer 与 DataView 上都叫 byteLength；这一格里三者是同一种值，所以同一个 op
   byteLength: { bytes: 'js_buf_len' },
+  /* 同一条理由（第一百四十片）：视图就是缓冲，所以 `.buffer` 是它自己、`.byteOffset` 是 0。
+     见 `js_buf_buffer` 那一段的注释 —— 与真 JS 的差别写在那儿。 */
+  buffer: { bytes: 'js_buf_buffer' },
+  byteOffset: { bytes: 'js_buf_byte_off' },
 };
 /** @type {Record<string, {on: Record<string, string>, lit?: Record<string, any>}>} */
 export const JS_METHODS = {
@@ -800,7 +825,9 @@ export const JS_METHODS = {
 
   // 两种接收者都有的。形参个数取多的那支（string 的 indexOf 还带 from），
   // list 分支只吃前面几个
-  slice: { on: { list: 'js_arr_slice', string: 'js_str_slice' } },
+  slice: { on: { list: 'js_arr_slice', string: 'js_str_slice', bytes: 'js_buf_slice' } },
+  // 字节缓冲上的 subarray：与 slice 同一套下标规矩，但**回一格视图**（见 js_buf_sub）
+  subarray: { on: { bytes: 'js_buf_sub' } },
   indexOf: { on: { list: 'js_arr_index_of', string: 'js_str_index_of', bytes: 'js_buf_index_of' } },
   lastIndexOf: { on: { list: 'js_arr_last_index_of', string: 'js_str_last_index_of' } },
   includes: { on: { list: 'js_arr_includes', string: 'js_str_includes', bytes: 'js_buf_includes' } },
@@ -843,6 +870,16 @@ export const JS_METHODS = {
   setFloat32: { on: { bytes: 'js_buf_setn' }, lit: { sel: 'f' } },
   getBigInt64: { on: { bytes: 'js_buf_get_i64' } },
   setBigInt64: { on: { bytes: 'js_buf_set_i64' } },
+  /* 无符号那两格（第一百四十片）走**同一对 op**：
+     - 写是逐字节相同的（两边都是"取低 64 位摆下去"，规范的 NumericToRawBytes 模 2^64）；
+     - 读在 [0, 2^63) 上也相同，而 >= 2^63 时我们回的是**负的 int64** —— 方言的 int 就是
+       i64，装不下 2^63..2^64-1。这是一处**有意的偏差**：我们自己用它读的是 ELF/Mach-O 的
+       地址与长度，都在 2^63 以下。（错的标签上报的那句话会写 getBigInt64，也记在这儿。）
+     少这两格的症状是 `TypeError: not a function`，而且**不带名字** —— 那是 C 侧所有 JS
+     调用的独木桥，到那儿名字已经没了。找法记一笔：`emit js` 出一份，在生成的
+     `$js_asFn` 里插一句 `console.error(new Error().stack)`，栈上就是 `l_Buf_u64`。 */
+  getBigUint64: { on: { bytes: 'js_buf_get_i64' } },
+  setBigUint64: { on: { bytes: 'js_buf_set_i64' } },
   getFloat64: { on: { bytes: 'js_buf_get_f64' } },
   setFloat64: { on: { bytes: 'js_buf_set_f64' } },
   encode: { on: { TextEncoder: 'js_text_encode' } },

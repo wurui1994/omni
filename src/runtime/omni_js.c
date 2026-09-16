@@ -876,6 +876,56 @@ omni_dyn omni_js_buf_len(omni_dyn b) {
   return omni_dyn_of_real((double)want_bytes(b, ".length")->len);
 }
 
+/* `.buffer` / `.byteOffset`（第一百四十片）：这一格里视图**就是**缓冲，所以 `.buffer`
+ * 回它自己、`.byteOffset` 回 0，与 prelude 的 `$js_buf_buffer` / `$js_buf_byte_off`
+ * 一一对应。照旧先过一次 `want_bytes` —— 别的标签上读这两个名字要照样报错。
+ * 少了这两格的症状：装好的编译器一编 C 就是
+ * `a byte-buffer view expects a byte buffer, found undefined`（那个 undefined 就是
+ * 读不着的 `.buffer`），于是 `OMNI_CC=self` 出的编译器编不了 C。 */
+omni_dyn omni_js_buf_buffer(omni_dyn b) {
+  want_bytes(b, ".buffer");
+  return b;
+}
+
+omni_dyn omni_js_buf_byte_off(omni_dyn b) {
+  want_bytes(b, ".byteOffset");
+  return omni_dyn_of_real(0);
+}
+
+/* `.subarray` / `.slice` 的一段下标（规范 23.2.3.28 / 23.2.3.27）：负数从末尾数、
+ * 夹到 [0, len]，末端不小于起点。与 prelude 的 `$js_buf_span` 一字对着写。 */
+static int64_t buf_rel(omni_dyn v, int64_t dflt, int64_t len, const char *who) {
+  double d;
+  int64_t i;
+  if (v.tag == OMNI_DYN_UNDEF) return dflt;
+  d = want_bufnum(v, who);
+  i = d != d ? 0 : (int64_t)trunc(d);   /* NaN 当 0，与 $js_idx 一样 */
+  if (i < 0) i += len;
+  if (i < 0) return 0;
+  return i > len ? len : i;
+}
+
+omni_dyn omni_js_buf_sub(omni_dyn bd, omni_dyn s, omni_dyn e) {
+  omni_js_bytes *b = want_bytes(bd, ".subarray");
+  int64_t a = buf_rel(s, 0, b->len, ".subarray");
+  int64_t z = buf_rel(e, b->len, b->len, ".subarray");
+  if (z < a) z = a;
+  return bytes_wrap(b->p + a, z - a);   /* **视图**：不拷 */
+}
+
+omni_dyn omni_js_buf_slice(omni_dyn bd, omni_dyn s, omni_dyn e) {
+  omni_js_bytes *b = want_bytes(bd, ".slice");
+  int64_t a = buf_rel(s, 0, b->len, ".slice");
+  int64_t z = buf_rel(e, b->len, b->len, ".slice");
+  int64_t n;
+  uint8_t *p;
+  if (z < a) z = a;
+  n = z - a;
+  p = (uint8_t *)omni_alloc((size_t)(n == 0 ? 1 : n));
+  if (n > 0) memcpy(p, b->p + a, (size_t)n);   /* **拷贝**：与视图那一格的唯一差别 */
+  return bytes_wrap(p, n);
+}
+
 /* 用 memmove：两个视图可能落在同一块内存上并且重叠，宿主的 TypedArray.set 也是安全的 */
 /* .set(src[, offset])（规范 23.2.3.26）与 .fill(v[, start[, end]])（23.2.3.9）：
    从前这两格的 op 少一/两个形参，成员派发器把多出来的实参**静静地丢了** ——

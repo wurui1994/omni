@@ -5494,7 +5494,12 @@ function $js_fs_read_bytes(p) {
 }
 function $js_fs_write_bytes(p, body, mode) {
   const opts = mode === undefined ? undefined : { mode: Number(mode) };
-  $node("node:fs").writeFileSync($js_asS16(p), Buffer.from($js_asS16(body), "latin1"), opts);
+  /* body 收两种（第一百四十片）：latin1 的串，**或者一段字节**。链接器出来的是字节，
+     而这条 ABI 从前只认串 —— 在 node 上 Buffer.from 两种都吃，所以那条不对称一直没露头，
+     直到装好的编译器去编 C：报的是 "bytes is not a string"。 */
+  const b = $dynTag(body) === "bytes"
+    ? $js_bytes(body, "writeBinary").u8 : Buffer.from($js_asS16(body), "latin1");
+  $node("node:fs").writeFileSync($js_asS16(p), b, opts);
   return undefined;
 }
 function $js_proc_stdout_bytes(s) {
@@ -5995,6 +6000,35 @@ function $js_buf_view(b, off, len) {
   return new $JsBytes(new Uint8Array(src.buffer, src.byteOffset + o, n));
 }
 function $js_buf_len(b) { return $js_bytes(b, ".length").u8.byteLength; }
+/* .buffer 与 .byteOffset（第一百四十片）：这一格里视图**就是**缓冲，所以 .buffer 回它自己、
+   .byteOffset 回 0。于是 new DataView(b.buffer, b.byteOffset, b.byteLength) 落到与宿主上
+   同一个窗口。与真 JS 的差别（子视图看不到父缓冲）记在 hir/js_abi.js 那一段。
+   照旧先过一次 $js_bytes —— 在别的标签上读这两个名字要与宿主一样报错。
+   （这段注释里一个反引号都不能有：整份 prelude 是 String.raw 的模板串。） */
+function $js_buf_buffer(b) { $js_bytes(b, ".buffer"); return b; }
+function $js_buf_byte_off(b) { $js_bytes(b, ".byteOffset"); return 0; }
+/* .subarray(begin, end)（规范 23.2.3.28）与 .slice（23.2.3.27）：下标与数组那一族同一套
+   （负数从末尾数、夹到 [0, len]）。差别只有一处 —— subarray 是视图，slice 是拷贝。 */
+function $js_buf_span(u, s, e) {
+  const n = u.byteLength;
+  let a = $js_idx(s, 0);
+  let b = $js_idx(e, n);
+  if (a < 0) a += n;
+  if (b < 0) b += n;
+  a = a < 0 ? 0 : (a > n ? n : a);
+  b = b < 0 ? 0 : (b > n ? n : b);
+  return [a, b < a ? a : b];
+}
+function $js_buf_sub(b, s, e) {
+  const u = $js_bytes(b, ".subarray").u8;
+  const w = $js_buf_span(u, s, e);
+  return new $JsBytes(u.subarray(w[0], w[1]));
+}
+function $js_buf_slice(b, s, e) {
+  const u = $js_bytes(b, ".slice").u8;
+  const w = $js_buf_span(u, s, e);
+  return new $JsBytes(u.slice(w[0], w[1]));
+}
 /* .set(src[, offset])（规范 23.2.3.26）与 .fill(v[, start[, end]])（23.2.3.9）：
    从前这两格的 op 少一/两个形参，成员派发器把多出来的实参**静静地丢了** ——
    d.set(src, 2) 写到 0 去、f.fill(9, 1, 3) 把整格填满。两处都是静悄悄的错值。

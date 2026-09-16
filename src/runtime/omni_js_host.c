@@ -189,9 +189,20 @@ omni_dyn omni_js_fs_read_bytes(omni_dyn path) {
 omni_dyn omni_js_fs_write_bytes(omni_dyn path, omni_dyn body, omni_dyn mode) {
   char *p = cpath(path);
   int64_t n = 0;
-  unsigned char *b = raw_of_s16(body, &n);
+  unsigned char *b;
   int m = mode.tag == OMNI_DYN_UNDEF ? 0666 : (int)omni_dyn_as_real(mode);
-  int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, m);
+  int fd;
+  /* body 收两种（第一百四十片）：latin1 的串，**或者一段字节**。链接器出来的是字节，
+   * 而这条 ABI 从前只认串 —— node 上 `Buffer.from` 两种都吃，于是那条不对称一直没露头，
+   * 直到装好的编译器去编 C：报的是 `bytes is not a string`。 */
+  if (body.tag == OMNI_DYN_BYTES) {
+    omni_js_bytes *bs = (omni_js_bytes *)body.u.ref;
+    b = bs->p;
+    n = bs->len;
+  } else {
+    b = raw_of_s16(body, &n);
+  }
+  fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, m);
   if (fd < 0) omni_errorf("cannot write '%s': %s", p, strerror(errno));
   if (n > 0 && write(fd, b, (size_t)n) != (ssize_t)n) {
     close(fd);

@@ -708,6 +708,12 @@ omni_dyn omni_js_re_new(omni_dyn source, omni_dyn flags);
 omni_dyn omni_js_buf_new(omni_dyn n);
 omni_dyn omni_js_buf_view(omni_dyn b, omni_dyn off, omni_dyn len);
 omni_dyn omni_js_buf_len(omni_dyn b);
+/* 视图就是缓冲（第一百四十片）：`.buffer` 回它自己、`.byteOffset` 回 0。 */
+omni_dyn omni_js_buf_buffer(omni_dyn b);
+omni_dyn omni_js_buf_byte_off(omni_dyn b);
+/* `.subarray` 回视图、`.slice` 回拷贝（第一百四十片）。 */
+omni_dyn omni_js_buf_sub(omni_dyn b, omni_dyn s, omni_dyn e);
+omni_dyn omni_js_buf_slice(omni_dyn b, omni_dyn s, omni_dyn e);
 void omni_js_buf_set(omni_dyn dst, omni_dyn src, omni_dyn off);
 omni_dyn omni_js_buf_fill(omni_dyn b, omni_dyn v, omni_dyn start, omni_dyn end);
 omni_dyn omni_js_buf_get_u8(omni_dyn b, omni_dyn at);
