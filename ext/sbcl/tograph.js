@@ -13,7 +13,7 @@ import {
   node, lit, program, bin,
 } from '../../src/core/graph/graph.js';
 import {
-  head, kids, text, symName, asList, counted, branchOf, retOf, loopExit,
+  head, kids, text, symName, asList, counted, branchOf, retOf, loopExit, convOf,
   listNew, indexGet, indexSet, sliceOf, destructure,
   mapNew, mapGet, mapSet, mapHas,
   fieldGet, fieldSet,
@@ -221,6 +221,12 @@ function toNode(x) {
       });
     }
     case 'terpri': return node('prim', { args: [lit('')] }, { name: 'print' });
+    // **表示转换**（`conv` 那一格）：CL 的写法就是一族函数名。
+    // `(truncate x)` 在 CL 里**回两格值**（商与余），而这儿只落第一格 —— 那正是
+    // 单值上下文里 CL 自己的规矩（`(princ (truncate …))` 印的就是商）。
+    // 要第二格得写 `(nth-value 1 …)`，那一格另有判据（gethash 那条）。
+    case 'truncate': return convOf('int', toNode(rest[0]));
+    case 'float': return convOf('float', toNode(rest[0]));
     // 向量那两样**不是调用**：落 `list-new` / `index-get`（写成什么样是语法的事）
     case 'vector': return listNew(many(rest));
     case 'aref': case 'svref': case 'elt': return indexGet(toNode(rest[0]), toNode(rest[1]));

@@ -10,7 +10,7 @@
 
 import { node, lit, program } from '../../src/core/graph/graph.js';
 import {
-  head, kids, text, symName, asList, branchOf, listNew, indexGet, indexSet, sliceOf,
+  head, kids, text, symName, asList, branchOf, convOf, listNew, indexGet, indexSet, sliceOf,
   mapNew, mapGet, mapSet, mapHas, destructure,
   fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
@@ -185,6 +185,15 @@ function toNode(x) {
       rest[2] === undefined ? undefined : toNode(rest[2]),
     );
     case 'newline': return node('prim', { args: [lit('')] }, { name: 'print' });
+    // **表示转换**（`conv` 那一格）：Scheme 的写法也是一族函数名。
+    // 明说一格：图上**没有精确/非精确这一格**（只有整数与实数），所以 `exact` 与
+    // `truncate` 都落 `conv to=int`、`inexact` 与 `exact->inexact` 都落 `conv to=float`。
+    // 那个差别在 Scheme 里看得见（`2.0` 与 `2` 是两个记号），在图上看不见 ——
+    // 所以 `examples/conv.ss` 挑的形状是两家印出来一样的那种。
+    case 'exact': case 'inexact->exact': case 'truncate':
+      return convOf('int', toNode(rest[0]));
+    case 'inexact': case 'exact->inexact':
+      return convOf('float', toNode(rest[0]));
     default: break;
   }
 

@@ -408,19 +408,18 @@ export const NODES = new Map([
   N('conv', 'expr', [{ name: 'value', sem: SEM.value }], {
     attrs: ['to'],
     doc: 'go 的 conv 一族 / V 的 `f64(x)` / nim 的 `int(x)` / freebasic 的 `CInt` 一族'
-      + ' / mojo 的 `Int(x)` / cpp 的 `(int)x` 与 `static_cast<int>(x)`',
-    // 十门的规格里都有"显式换一种表示"这件事，矩阵接了六门。**九门的写法是"调用的形状"，
-    // 只有 cpp 语法上就是转换** —— 所以那六门各要一张名字表，cpp 不要。
+      + ' / mojo 的 `Int(x)` / cpp 的 `(int)x` 与 `static_cast<int>(x)`'
+      + ' / CL 的 `truncate` 与 `float` / Scheme 的 `exact` 与 `exact->inexact`',
+    // 十门的规格里都有"显式换一种表示"这件事，矩阵接了八门。**九门的写法是"调用的形状"，
+    // 只有 cpp 语法上就是转换** —— 所以那八门各要一张名字表，cpp 不要。
     providers: {
       spec: ['go', 'vlang', 'nim', 'mojo', 'freebasic', 'cpp', 'lua', 'awk', 'chez', 'sbcl'],
       why: {
         lua: '数只有一族（整数与浮点是同一类型的两个子型），显式转换全在库里'
-          + '（`math.floor` / `tostring` / `tonumber`）—— 要"内建库那一族"先进来',
+          + '（`math.floor` / `tostring` / `tonumber`）—— 而"整数 -> 实数"在 lua 里**没有写法**'
+          + '（`7 / 2` 本来就出实数），所以这一族的第二行在 lua 上落不到 conv',
         awk: '数只有 double，`int()` 是截断的内建；串 <-> 数是**自动**的 ——'
-          + ' 那是一条规则不是一格节点，要先有"自动转换"这一层才谈得上判据',
-        chez: 'Scheme 的数塔（exact/inexact）与图上四格值对不上：`(exact (truncate x))`'
-          + ' 是两格，而且印出来 `2.0` 与 `2` 是两个记号（例子家族的输出对不上）',
-        sbcl: 'CL 的 `truncate` **回两格值**（商与余）—— 要与多值那一侧的 pick 一起接',
+          + ' 那是一条规则不是一格节点，而"整数 -> 实数"同样没有写法（与 lua 同一条）',
       },
     },
   }),
