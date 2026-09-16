@@ -22,6 +22,7 @@ import {
 import { toSx, fromSx } from './graph.js';
 import { PRIMS } from './prims.js';
 import { emitWat, watCan, runWat, WAT_SHAPES, Gap } from './backend-wat.js';
+import { emitC, cCan, runC, C_SHAPES } from './backend-c.js';
 /* js 这条腿要在宿主里跑一段生成出来的 JS —— 走 ABI 那两格（`new Function` 不在语言子集里）。 */
 import { evalJs, hasJsEngine } from '../host/native.js';
 
@@ -137,6 +138,29 @@ registerBackend({
   lower: (g) => {
     const text = emitWat(g);
     return { text, run: () => runWat(text) };
+  },
+});
+
+// ---- 后端五：`c` —— **与 `wat` 对称的那一格**（第一百四十六片）---------------------
+//
+// 它的价值与 wat 同一条：正确性由**一条互不相干的已有实现**来证 —— 出来的文本交给
+// 我们自己那台 C 前端（`frontend-c`，ADR-0017）读成 MIR、还是那台 MIR 解释器跑。
+// 产物是自足的（宿主面只有 libc 那七格），所以这条腿一个外部 cc 都不借。
+// 缺口也与 wat 一样有名有姓：这一刀接第一批 + 早退，函数/多值/记录/列表/映射还欠着。
+registerBackend({
+  name: 'c',
+  can: cCan,
+  // 一格 16 字节的 `gv`：标签 + 载荷（bool 的 0/1、double 的位模式、串的指针）。
+  // 16 不是随手挑的 —— 两个 ABI 都把这么大的结构放进两个寄存器（见 backend-c.js 的头）
+  carry: (sort) => (sort === 'expr' ? '一格 gv（标签 + 载荷，16 字节）' : '一条或几条 C 语句'),
+  effect: (e) => (e === 'may-early-exit'
+    ? 'return / break / continue 都有（`continue` 那一格靠「第一圈标志」保住步进）'
+    : 'C 的次序天然是语句序'),
+  region: () => '一格 `{ }` 块 + `gv` 局部量（有值的块先声明一格临时量再在块里赋值）',
+  shapes: C_SHAPES,
+  lower: (g) => {
+    const text = emitC(g);
+    return { text, run: () => runC(text) };
   },
 });
 
