@@ -18,7 +18,32 @@ import {
   isList, tag, kids, leaf,
   counted, ops, binOf, retOf, branchOf, loopExit,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
+  mapNew, mapGet, mapSet, mapHas, mapNames,
 } from '../../src/core/graph/fromtree.js';
+
+/**
+ * 装 map 的那些名字。**lua 的 table 既是数组又是字典**，所以这门语言的判据只能是
+ * "它被怎么用过"：**用串当过键**（`t["a"]`）就算 map，只用数当键就是列表。
+ *
+ * 这一条比 go / V 那种"字面量自带标记"弱，弱在哪儿写清楚：键是变量（`t[k]`）判不了，
+ * 混着用（既 `t[1]` 又 `t["a"]`）也判不了 —— 碰上就报错，不猜（见文件末尾的不足）。
+ */
+const MAPS = new Set();
+const mapUseName = (x) => (isList(x) && tag(x) === 'index' && tag(kids(x)[1]) === 'str'
+  ? nameOf(kids(x)[0]) : null);
+const isMap = (x) => tag(x) === 'name' && MAPS.has(nameOf(x));
+
+/**
+ * 一格绑定的右值。名字被当字典用过、右值又是个**空表**时出 `map-new` ——
+ * 非空的表混着当字典用判不了（`{1,2}` 到底是列表还是"1、2 两个键"），报错不猜。
+ */
+function initFor(nm, v) {
+  if (!MAPS.has(nm) || tag(v) !== 'table') return toNode(v);
+  if (kids(v).length !== 0) {
+    throw new Error(`lua->graph: ${nm} 被当字典用过，可它的初值是个非空的表 —— 这一批判不了`);
+  }
+  return mapNew();
+}
 
 // 走树的那几个小函数（`isList` / `tag` / `kids` / `leaf`）**与另外八门共用一份**
 // （`src/core/graph/fromtree.js`）—— 叶子有 `atom` 与 `string` 两种 kind 这一条
@@ -90,11 +115,25 @@ function toNode(x) {
     }
     // `xs[i]` -> index-get。**lua 从 1 起，图上从 0 起** —— 差的那一格在这儿减掉
     // （字面量当场算，别的减一格算符；语言的答案由语言的映射给，与真值观同一条）。
-    case 'index': return indexGet(toNode(kids(x)[0]), zeroBased(kids(x)[1]));
+    // `t["a"]` -> map-get（键是串）；`xs[i]` -> index-get。**lua 从 1 起，图上从 0 起** ——
+    // 差的那一格只在列表那一侧减（map 的键是值，没有"起点"这回事）
+    case 'index': {
+      const [o, k] = kids(x);
+      return isMap(o) ? mapGet(toNode(o), toNode(k)) : indexGet(toNode(o), zeroBased(k));
+    }
 
     // ---- 算子 --------------------------------------------------------------
     case 'bin': {
       const [opTok, a, b] = kids(x);
+      // **`t[k] ~= nil` 是 lua 问"在不在"的写法** —— 而图上缺键是错误（`map-get` 会报），
+      // 所以这个形状认成一格 `map-has`。这是**一处窥孔**，只认字面上的 `~= nil`：
+      // lua 的"缺键给 nil"那条语义与"缺键报错"那条对不上，账记在文件末尾。
+      if (atomText(opTok) === '~=' && (tag(a) === 'nil' || tag(b) === 'nil')) {
+        const other = tag(a) === 'nil' ? b : a;
+        if (tag(other) === 'index' && isMap(kids(other)[0])) {
+          return mapHas(toNode(kids(other)[0]), toNode(kids(other)[1]));
+        }
+      }
       // `and` / `or` 交出来的是**值**不是真假（lua 那份规格 L-007）：第二个操作数是 lazy，
       // 所以它走 `branch` 而不是算符 —— 这一格正是"入端口求值语义"的用处。
       return binOf(atomText(opTok), toNode(a), toNode(b), OPS, {
@@ -115,7 +154,9 @@ function toNode(x) {
       // `local a, b = f()`：N 个名字对 1 个右值 ⇒ 多值的消费侧（`destructure` 五门共用）
       if (names.length > 1 && values.length === 1) return destructure(names, toNode(values[0]));
       return names.map((nm, i) => node('bind', {
-        init: values[i] === undefined ? lit(null) : toNode(values[i]),
+        // **被当字典用过的名字**：`local m = {}` 出的是 map-new 而不是 list-new
+        // （table 那一格自己看不出来是哪种 —— 判据在"它被怎么用过"，见 MAPS）
+        init: values[i] === undefined ? lit(null) : initFor(nm, values[i]),
       }, { name: nm }));
     }
     case 'localfn': case 'globalfn': {
@@ -135,7 +176,10 @@ function toNode(x) {
         const v = values[i] === undefined ? lit(null) : toNode(values[i]);
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[2] = 5`）⇒ field-set / index-set
         if (tag(t) === 'dot') return fieldSet(toNode(kids(t)[0]), atomText(kids(t)[1]), v);
-        if (tag(t) === 'index') return indexSet(toNode(kids(t)[0]), zeroBased(kids(t)[1]), v);
+        if (tag(t) === 'index') {
+          const [o, k] = kids(t);
+          return isMap(o) ? mapSet(toNode(o), toNode(k), v) : indexSet(toNode(o), zeroBased(k), v);
+        }
         return node('set', { value: v }, { name: nameOf(t) });
       });
     }
@@ -191,12 +235,21 @@ function toNode(x) {
 /** 一棵 lua 的 GLR 树（`(block stat…)`）-> 一张图。 */
 export function luaToGraph(tree) {
   if (tag(tree) !== 'block') throw new Error('lua->graph: 这不是 (block …)');
+  // 先扫一遍"哪些名字用串当过键" —— lua 的 table 既是数组又是字典，这是这门语言
+  // 唯一分得开的判据（go / V 靠字面量自带标记，awk 里全是关联数组）
+  MAPS.clear();
+  for (const nm of mapNames(tree, mapUseName)) if (nm !== null) MAPS.add(nm);
   return program(many(kids(tree)).flat());
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
-//   1. 表接两种：`{ k = v }` 落 record-new、`{ 1, 2 }` 落 list-new（混着的当场报）。
-//      metatable、`...`、`goto` 都不在这一批；`t[k]`（键是任意值）也不在 ——
-//      那是 map 那一格，`index-get` 只管列表（go 的 map 读可能 allocates，效应不同）。
-//   2. 全局名字当普通名字收（真语义是 `_ENV` 表查）。
-//   3. `for … in`（迭代器三件套）没接：它要 `indirect-call` + 协议，排在 `loop` 之后。
+//   1. 表接三种：`{ k = v }` 落 record-new、`{ 1, 2 }` 落 list-new、
+//      **被串当键用过的名字**落 map（`local m = {}` + `m["a"]`，见 MAPS）。混着的当场报。
+//      metatable、`...`、`goto` 都不在这一批。
+//   2. **map 那两条判不了的形状**（都报错，不猜）：键是变量（`t[k]` —— 那要真的类型）、
+//      同一个名字既 `t[1]` 又 `t["a"]`（lua 里合法，图上是两格节点）。
+//   3. **`t[k] ~= nil` 是一处窥孔**：lua 用它问"在不在"，而图上缺键是错误 ——
+//      所以这个形状认成 `map-has`。只认字面上的 `~= nil`；写成 `if m[k] then` 判不了
+//      （值是 false 时两条语义分不开），碰上会落 map-get 然后在缺键上报错。
+//   4. 全局名字当普通名字收（真语义是 `_ENV` 表查）。
+//   5. `for … in`（迭代器三件套）没接：它要 `indirect-call` + 协议，排在 `loop` 之后。
