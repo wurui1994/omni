@@ -143,6 +143,14 @@ if (c1 && !quick) {
 // 这一段**不再自己实现**：自举是编译器的内置命令（`omni bootstrap`，见 src/core/bootstrap.js），
 // 测试只负责调用它并检查退出码。它比这里原来那段多做两件事 —— 摆出可安装的产物树、
 // 让 N1 编译出 N2 并比对两代原生编译器的产出（真正的 stage2）。
+//
+// **一格量出来的坑（第一百三十六片）**：这一步会红在一句看着与自举无关的话上 ——
+//   `插件装不上：dist/plugins/omni-lang-c.dylib（dlopen … symbol not found in flat
+//    namespace '_k_s16_6049_s'）`
+// 那不是自举坏了，是**核心与插件不是一起建的**：两边靠 `k_s16_N_s` 这一族串常量符号
+// 连着（插件引用核心导出的那几个），改过前端之后核心那一侧的编号就变了。
+// 判据是「一起建」：`npm run build:native`（核心 + 12 格插件一趟出）之后再跑，
+// 量到的就是 10 passed / 0 failed（那一趟 244.2s，四条不动点全绿）。
 if (c1 && !quick) {
   const r = node([cli, 'bootstrap', '-o', join(dir, 'dist')]);
   for (const line of r.out.split('\n')) {
