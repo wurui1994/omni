@@ -38,6 +38,8 @@ import { toSx } from '../../src/core/graph/graph.js';
 import { backends, gaps, shapeGaps, Gap } from '../../src/core/graph/contract.js';
 // 五栏声明那张表 —— 下面"五栏指纹"那一节要拿它自己量自己（ADR-0033 §3.2）
 import { NODES } from '../../src/core/graph/nodes.js';
+// 内建那张表 —— "出处"那一节要它（arity 与 effects 两栏必须都在）
+import { PRIMS } from '../../src/core/graph/prims.js';
 // 例子表两条判据共用一份（`delete.js` 也 import 它）—— 抄两份就会有一份忘了改
 import { CASES, HAND } from './cases.js';
 
@@ -82,6 +84,29 @@ if (showGaps) {
     for (const x of sh) process.stdout.write(`    〔形状〕${x.what} —— ${x.why}\n`);
   }
   process.stdout.write('\n');
+}
+
+/**
+ * **"没有出处的节点不许存在"也是一条判据**（§3 那句话）。
+ * 每格节点的 `doc` 里写的是"哪几门语言的规格要求它" —— 空着就等于这一格是我想出来的。
+ * 内建那张表（`PRIMS`）比着来：arity 与 effects 两栏必须都在（arity 是 -1 表示变参）。
+ */
+{
+  let bad = 0;
+  for (const [op, d] of NODES) {
+    if (typeof d.doc === 'string' && d.doc.trim() !== '') continue;
+    process.stdout.write(`  FAIL 出处〔${op}〕: 这格节点没写出处（哪几门语言的规格要求它）\n`);
+    bad++;
+  }
+  for (const [nm, d] of PRIMS) {
+    if (typeof d.arity === 'number' && Array.isArray(d.effects)) continue;
+    process.stdout.write(`  FAIL 出处〔内建 ${nm}〕: arity 或 effects 没声明\n`);
+    bad++;
+  }
+  if (bad === 0) {
+    process.stdout.write(`  ok   出处 [节点 ${NODES.size} 格各有出处 · 内建 ${PRIMS.size} 格各有 arity 与 effects]\n`);
+    pass++;
+  } else fail += bad;
 }
 
 /**
