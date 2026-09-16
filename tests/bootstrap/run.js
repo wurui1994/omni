@@ -62,11 +62,19 @@ const bad = (msg, detail) => {
 };
 
 // ---- 阶段 1/2：C0 -> C1 -> C2 -------------------------------------------------
+/* **这两代都要额外的堆**（量出来的，第二十六批）：C1 编 C2 那一步在 node 默认的老年代
+ * （这台机器上约 2 GB）里 OOM —— 崩在 `Mark-Compact … 1990.7 MB … last resort`。
+ * 给 3072 MB 就过，出来的 C2 是 19,099,746 字节；4096 与 8192 出的是**同一份**，
+ * 所以瓶颈是"够不够"，不是"给多少变多少"。
+ *
+ * 记在这儿而不是悄悄加：**这是编译器自己的内存账**（C1 是生成出来的 JS，比 C0 费内存），
+ * 哪天那笔账还了，这一格该往回调。 */
+const HEAP_MB = 3072;
 const stages = [];
 let prev = ['node', cli]; // C0 的调用方式：node src/core/cli.js
 for (const gen of [1, 2]) {
   const t0 = Date.now();
-  const r = node([...prev.slice(1), 'emit-js', cli]);
+  const r = node([`--max-old-space-size=${HEAP_MB}`, ...prev.slice(1), 'emit-js', cli]);
   const ms = Date.now() - t0;
   if (r.code !== 0 || !r.out) {
     bad(`C${gen} = C${gen - 1} emit-js cli.js`, `    exit=${r.code}\n${r.err}`);
