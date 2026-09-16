@@ -15,7 +15,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, unquote, head,
-  counted, ops, convs, convOf, binOf, retOf, branchOf, listNew, indexGet, indexSet,
+  counted, ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
   fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -43,6 +43,18 @@ const ARRAYS = new Set();
  * 量出来**记重了**：要的只是一张字段表（登记处），不是图里的类型层。
  */
 const TYPES = new Map();
+
+/**
+ * **哪些类型有 `Destructor`**（按小写记名 —— FB 的名字不分大小写）。
+ *
+ * 这是"出口动作也从声明来"：`Type Say … Declare Destructor() … End Type` 一句话说清
+ * "这个类型的量出了作用域要跑一段"，于是 `Dim s As Say` 落的是
+ * **一格 bind + 一格 scope-exit** —— 与 go 的 `defer`、mojo 的 `with` 是同一格节点。
+ * 析构体自己落成一格普通函数（形参就叫 `This`，FB 里本来就这么写），
+ * 名字用 `__destruct_<类型>` —— **不加节点、不加类型层**。
+ */
+const DTORS = new Set();
+const dtorName = (ty) => `__destruct_${ty}`;
 
 
 const OPS = ops({ mod: '%', '=': '=', '<>': '!=', '&': 'concat' });
@@ -74,6 +86,10 @@ function toNode(x) {
         .map((f) => nameOf(kids(kids(f)[0])[0]))
         .filter((s) => s !== undefined && s !== null);
       if (nm !== undefined) TYPES.set(String(nameOf(nm)).toLowerCase(), fields);
+      // `Declare Destructor()` 这一格成员就是"这个类型的量出作用域要跑一段"的声明
+      const hasDtor = ms !== undefined && kids(ms).some((m) => tag(m) === 'declare'
+        && String(leaf(kids(kids(m)[0])[0])).toLowerCase() === 'destructor');
+      if (nm !== undefined && hasDtor) DTORS.add(String(nameOf(nm)).toLowerCase());
       return [];
     }
     // 一行 = 一条或几条语句（`:` 隔开的那几条也在这一格里）
@@ -120,7 +136,8 @@ function toNode(x) {
         value: bin(o, node('ref', {}, { name }), toNode(rhs)),
       }, { name });
     }
-    // `dim [mods] (v (n 名字) 类型 (init …))` —— **类型丢掉**（它是端口的 sort）
+    // `dim [mods] (v (n 名字) 类型 (init …))` —— **类型丢掉**（它是端口的 sort）。
+    // 一格声明可能落**两格**（有 Destructor 的类型：bind + scope-exit），所以末尾摊平一层。
     case 'dim': case 'static': case 'const': case 'f': {
       const vs = kids(x).filter((y) => tag(y) === 'v');
       return vs.map((v) => {
@@ -148,21 +165,43 @@ function toNode(x) {
         const tyName = ty !== undefined && tag(ty) === 'n' ? String(nameOf(ty)).toLowerCase() : null;
         if (tyName !== null && TYPES.has(tyName) && init === undefined) {
           const fields = TYPES.get(tyName);
-          return node('bind', {
+          const mk = node('bind', {
             init: node('record-new', { fields: fields.map(() => lit(0)) }, { names: fields }),
           }, { name });
+          // 类型有 `Destructor` -> 顺带挂一格 scope-exit（**出了作用域就跑**，
+          // 逆序、早退也跑都是那一格本来的语义 —— 与 go 的 defer 同一格节点）
+          if (!DTORS.has(tyName)) return mk;
+          return [mk, node('scope-exit', {
+            action: [node('call', {
+              fn: node('ref', {}, { name: dtorName(tyName) }),
+              args: [node('ref', {}, { name })],
+            })],
+          })];
         }
         return node('bind', {
           init: init === undefined ? lit(null) : toNode(kids(init)[0]),
         }, { name });
-      });
-    }    case 'routine': {
+      }).flat();
+    }
+    case 'routine': {
       const head = part(x, 'head');
+      const kw = String(leaf(kids(head)[0])).toLowerCase();
       const nm = kids(head).find((y) => tag(y) === 'n');
-      const name = nm === undefined ? null : leaf(kids(nm)[0]);
       const ps = kids(head).find((y) => tag(y) === 'params');
       const params = ps === undefined ? [] : kids(ps).map((p) => nameOf(kids(p)[0]));
       const body = part(x, 'body');
+      // `Destructor Say()` —— 头上那格名字是**类型名**，不是函数名。落成一格普通函数
+      // （形参就叫 `This`，FB 的析构体里本来就这么写它），名字用 `__destruct_<类型>`。
+      if (kw === 'destructor') {
+        if (nm === undefined) throw new Error('fb->graph: Destructor 头上没有类型名');
+        const ty = String(leaf(kids(nm)[0])).toLowerCase();
+        const name = dtorName(ty);
+        return node('bind', {
+          init: node('func', { body: body === undefined ? [] : many(kids(body)) },
+            { params: ['This'], name }),
+        }, { name });
+      }
+      const name = nm === undefined ? null : leaf(kids(nm)[0]);
       return node('bind', {
         init: node('func', { body: body === undefined ? [] : many(kids(body)) }, { params, name }),
       }, { name });
@@ -203,6 +242,18 @@ function toNode(x) {
       );
     }
     case 'return': return retOf(many(kids(x)));
+    // `Exit Sub` / `Exit Function` -> ret（函数的早退）；`Exit For` / `While` / `Do`
+    // -> loop-exit break（循环的早退）。**两格已有的节点**，FB 只是写法不同。
+    // 一句里写好几个（`Exit For, For`）是"跳出好几层"，那要带标签的早退 —— 当场报。
+    case 'exit': {
+      const ks = kids(x);
+      if (ks.length !== 1) throw new Error('fb->graph: `Exit a, b` 那种跳好几层还没接');
+      const kw = String(leaf(ks[0])).toLowerCase();
+      if (kw === 'sub' || kw === 'function' || kw === 'property'
+        || kw === 'constructor' || kw === 'destructor') return retOf([]);
+      if (kw === 'for' || kw === 'while' || kw === 'do' || kw === 'select') return loopExit('break');
+      throw new Error(`fb->graph: Exit ${kw} 还没接`);
+    }
     case 'print': return node('prim', { args: many(kids(x)) }, { name: 'print' });
     case 'call': {
       const [fn, args] = kids(x);
@@ -234,13 +285,16 @@ export function fbToGraph(tree) {
   if (tag(tree) !== 'module') throw new Error('fb->graph: 这不是 (module …)');
   ARRAYS.clear();          // 数组名那张表是**一份源码一张**（见上面那段注释）
   TYPES.clear();           // 字段表同理
+  DTORS.clear();           // "哪些类型有析构"那张表同理
   return program(kids(tree).map(toNode).flat());
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
 //   1. 自带词序的语句只接 `print`（`line` / `get` / `put` / `draw` 那一大批在图上是
 //      `prim` + 外部 IO，量大不难 —— `ext/freebasic/SPEC.md` §3.5）。
-//   2. `Type` / `Union` / 属性（`Property Get/Set`）/ `Gosub` 都不在这一批。
+//   2. `Type` 接了两件事（字段表与 `Declare Destructor()`），`Union` / 属性
+//      （`Property Get/Set`）/ `Gosub` / 构造器（`Constructor`）都不在这一批 ——
+//      构造器要"造的时候按实参调它"，那是与 mojo 的 `__init__` 同一笔账。
 //   3. 定宽整数与四种字符串表示丢掉了 —— 它们是**方言必须有"按宽度读写"**那笔账
 //      （SPEC §五第 1 项），要用起来是契约 `carry` 那一问的事。
 //   4. `CInt` 是**四舍五入**（到偶数），图上 `conv to=int` 是**截断** —— `examples/conv.bas`

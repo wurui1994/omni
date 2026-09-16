@@ -474,10 +474,26 @@
   ;; `sub f (args)` 也有 `sub f cdecl (args)`，既有 `sub f cdecl alias "x" (args)`
   ;; 也有 `function f (args) as T static`。按固定顺序写就得排列组合。
   (rule routine-head
-    (-> (routine-kw routine-name head-parts) (head $1 $2 $*3))
+    (-> (plain-kw plain-name head-parts) (head $1 $2 $*3))
+    ;; 只有 `operator` 的名字**可以是个符号**（见 routine-name / opsym）。别的例程头
+    ;; 拿 opsym 当名字会造出一格**假歧义**：`declare destructor()` 既读得成"没名字 +
+    ;; 一格空形参表"，也读得成"名字是 `()` 这个运算符 + 没形参表"，两棵树都成立。
+    ;; 可 FB 里 `()` / `[]` 重载只写在 `operator` 上 —— 所以这是**语法自己写松了**，
+    ;; 不是真歧义（与 cpp 那三类里的前两类同一种毛病）。
+    (-> ("operator" routine-name head-parts) (head $1 $2 $*3))
     ;; **修饰词写在 `sub` / `function` 前面**：`declare static sub f(…)`、
     ;; `declare virtual function g(…)`、`declare abstract sub h(…)`（23 份）。
-    (-> (rt-mod routine-kw routine-name head-parts) (head $2 $3 (mod $1) $*4)))
+    (-> (rt-mod plain-kw plain-name head-parts) (head $2 $3 (mod $1) $*4))
+    (-> (rt-mod "operator" routine-name head-parts) (head $2 $3 (mod $1) $*4)))
+
+  ;; 除 `operator` 以外的例程种类 —— 它们的名字只能是**名字**
+  (rule plain-kw
+    (-> ("sub") $1) (-> ("function") $1) (-> ("constructor") $1)
+    (-> ("destructor") $1) (-> ("property") $1))
+
+  (rule plain-name
+    (-> () ())
+    (-> (dotted) $1))
 
   (rule rt-mod
     (-> ("static") $1) (-> ("virtual") $1) (-> ("abstract") $1))
@@ -984,6 +1000,15 @@
 ;;                      `inline-simples` —— 那儿的 `:` 位置固定，不与 `term` 抢。
 ;;                      节点数 396k -> 423k、解析 18.3s -> 16.9s（重复的解没了）。
 ;;                      **与 vlang 那两刀是同一个毛病**：同一件事写了两遍。
+;;  1063 -> 1086 (+23)  **opsym 只留给 `operator`**：`routine-name` 里那两支
+;;                      `("(" ")") call` / `("[" "]") index` 对所有例程种类都开着，于是
+;;                      `Declare Destructor()` 有**两棵树**（"没名字 + 空形参表" vs
+;;                      "名字是 `()` 这个运算符 + 没形参表"）。FB 里 `()` / `[]` 重载
+;;                      只写在 `operator` 上 —— 于是 `sub`/`function`/`constructor`/
+;;                      `destructor`/`property` 改走 `plain-kw` + `plain-name`（名字只能是名字），
+;;                      `operator` 单开一支照旧走 `routine-name`。冲突 275 -> 243。
+;;                      这一刀是**接 Destructor 那一批量出来的**：一门语言的出口动作
+;;                      写在类型上（`Declare Destructor()`），而那一行原来根本读不进来。
 ;;
 ;; **被量否掉的两手，都记下来免得再试：**
 ;;   1. `cmd-args -> (point)`（让 `Window (-15,-10)-(15,10)` 这种"只有一格坐标对实参"过）：
