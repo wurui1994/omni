@@ -8265,6 +8265,41 @@ function constsOfC(cpp, gen, preMacros) {
   return { consts, skipped };
 }
 
+/**
+ * native 那一步的**暂存区**：前端照旧把初值摆在一块线性地址上，这里再按块切出来。
+ *
+ * 从前是一个 `Map<绝对偏移, 字节>` —— **一个字节一格**，摆一张 300KB 的静态表就是 30 万次
+ * `Map.set`。量出来的：编 `src/runtime/omni_r3.c` 时 `lowerCNative` 自己那一段占前端 CPU 的
+ * **7.2%**（1838ms 的样本里 133ms），几乎全花在这上面。两条 `Uint8Array`（值 + 有没有）
+ * 语义一样，代价是一次线性分配。
+ *
+ * 越界的下标要自己挡：类型化数组上越界写是**静静丢掉**的，而 `has[越界]` 回 `undefined`
+ * —— 不挡的话 `delete` 会把 `size` 减成负数，那句「还有几个字节落在线性内存上」的
+ * 断言就废了。
+ */
+class ByteStage {
+  constructor(len) {
+    this.len = len;
+    this.data = new Uint8Array(len);
+    this.has = new Uint8Array(len);
+    this.size = 0;
+  }
+
+  set(a, v) {
+    if (a < 0 || a >= this.len) throw new Error(`internal: 暂存区越界 ${a} >= ${this.len}`);
+    if (this.has[a] === 0) { this.has[a] = 1; this.size++; }
+    this.data[a] = v;
+  }
+
+  get(a) {
+    return a >= 0 && a < this.len && this.has[a] !== 0 ? this.data[a] : undefined;
+  }
+
+  delete(a) {
+    if (a >= 0 && a < this.len && this.has[a] !== 0) { this.has[a] = 0; this.size--; }
+  }
+}
+
 export function lowerCNative(path, text, host, defs) {
   /* `long double` 的宽度按目标拨（第一百一十一片）：x86_64 是 16 字节的 x87 80 位，
    * arm64-macho 与 PE 是 8。它是 ctype.js 里一格模块级状态（tcc 那边是编译期常量），
@@ -8295,7 +8330,8 @@ export function lowerCNative(path, text, host, defs) {
   /* 全局量（第二十一片）：前端照旧在**一块暂存的线性地址**上摆它们（`allocGlobal` 与
    * 整套初值代码一字不改），这里再把每一块切出来交给 MIR 的全局。于是「初值怎么算」
    * 那几百行两条腿共用，差别只在最后这一步：一边是 data 段里的偏移，一边是一个符号。 */
-  const stage = new Map();   // 暂存区：绝对偏移 -> 字节
+  const stage = new ByteStage(gen.pendingData.reduce(
+    (m, d) => Math.max(m, d.off + d.bytes.length), 0));
   for (const d of gen.pendingData) {
     for (let k = 0; k < d.bytes.length; k++) stage.set(d.off + k, d.bytes[k]);
   }
@@ -8325,10 +8361,11 @@ export function lowerCNative(path, text, host, defs) {
       throw new OmniError(`${path}: error: 全局量 '${name}' 要 ${al} 字节对齐`
         + `（__data 这一节最多 4096）`);
     }
-    const bytes = [];
+    /* 先分配好再按下标写 —— `push` 那一版在几百 KB 的静态表上要一路扩容。 */
+    const bytes = new Array(size);
     for (let k = 0; k < size; k++) {
       const b = stage.get(e.addr + k);
-      bytes.push(b === undefined ? 0 : b);
+      bytes[k] = b === undefined ? 0 : b;
       stage.delete(e.addr + k);
     }
     const fixups = [];
@@ -8361,10 +8398,10 @@ export function lowerCNative(path, text, host, defs) {
   /* 匿名的静态块（第三十四片）：静态的复合字面量。与有名字的那些一模一样地切 ——
    * 差别只在名字是编出来的，而且没有「试探性定义」「外部的」这两种情况。 */
   for (const b of gen.anonStatics) {
-    const bytes = [];
+    const bytes = new Array(b.size);
     for (let k = 0; k < b.size; k++) {
       const v = stage.get(b.addr + k);
-      bytes.push(v === undefined ? 0 : v);
+      bytes[k] = v === undefined ? 0 : v;
       stage.delete(b.addr + k);
     }
     const fixups = [];
