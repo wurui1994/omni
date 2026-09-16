@@ -15,7 +15,21 @@ import {
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet, sliceOf,
+  fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
+
+/**
+ * **mojo 的 `struct`：字段表在类型上**（与 FB 的 `Type … End Type` 同一形状）。
+ *
+ * `@value struct Point: var x: Int …` 里那个 `@value` 正是 mojo 生成 `__init__` 的写法，
+ * 所以 `Point(1, 2)` 是**按字段顺序**的构造 —— 那就是 `record-new` 那一格。
+ * 字段顺序从声明登记（与 CL / Scheme / FB 同一条纪律：**名字与顺序从声明来**），
+ * `p.x` 落 `field-get`、`p.y = 5` 落 `field-set`。
+ *
+ * 只收"字段顺序就是构造顺序"这一种：自己写 `fn __init__` 的那种要方法分派
+ * （账上另一条），撞上就当普通调用 —— 于是干净地报 `unbound name`，不假接受。
+ */
+const STRUCTS = new Map();
 
 
 const OPS = ops({ '//': '/' });
@@ -49,6 +63,8 @@ function toNode(x) {
     case 'paren': return toNode(kids(x)[0]);
     // `[10, 20, 30]` -> list-new；`xs[i]` -> index-get（下标装在一格 `(subs …)` 里）
     case 'list': return listNew(many(kids(x)));
+    // `p.x` -> field-get（与 go/V 的 `(sel …)`、lua/nim 的 `(dot …)` 同一格）
+    case 'attr': return fieldGet(toNode(kids(x)[0]), String(leaf(kids(x)[1])));
     case 'index': {
       const sub = kids(kids(x)[1])[0];
       // `xs[1:3]`：下标里装着一格 `(slice from to)` -> slice；别的就是取一格
@@ -81,6 +97,8 @@ function toNode(x) {
       const v = value === undefined ? lit(null) : toNode(value);
       const t0 = targets === undefined ? undefined : kids(targets)[0];
       if (tag(t0) === 'index') return indexSet(toNode(kids(t0)[0]), toNode(kids(kids(t0)[1])[0]), v);
+      // `p.y = 5`：左边是字段 -> field-set（与 go 的 `p.y = 5` 同一格）
+      if (tag(t0) === 'attr') return fieldSet(toNode(kids(t0)[0]), String(leaf(kids(t0)[1])), v);
       const isDecl = targets !== undefined && kids(targets).some((t) => tag(t) === 'bind');
       const name = nameOf(targets);
       return isDecl
@@ -139,9 +157,33 @@ function toNode(x) {
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
         return convOf(CONV.get(callee), argNodes[0]);   // `Int(x)` / `Float64(x)`
       }
+      // `Point(1, 2)`：struct 登记过 -> 一格 record-new（实参按字段顺序，位置对位置）
+      if (callee !== null && STRUCTS.has(callee)) {
+        const fields = STRUCTS.get(callee);
+        return node('record-new', {
+          fields: fields.map((f, i) => (argNodes[i] === undefined ? lit(null) : argNodes[i])),
+        }, { names: fields });
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
-    case 'import': case 'from-import': case 'struct': case 'trait': case 'alias': return [];
+    // `@value struct Point: var x: Int …` —— 装饰器这一层剥掉，里头那格照常走
+    case 'decorated': {
+      const inner = kids(x).filter((y) => tag(y) !== 'decos');
+      return inner.map(toNode).flat();
+    }
+    // `struct` 只登记**字段顺序**（声明这一批没有运行期动作）—— 见文件头 STRUCTS 那段
+    case 'struct': {
+      const nm = kids(x).find((y) => tag(y) === 'n');
+      const body = part(x, 'body');
+      const fields = body === undefined ? [] : kids(body)
+        .map((ln) => (tag(ln) === 'line' ? kids(ln)[0] : ln))
+        .filter((s) => s !== undefined && tag(s) === 'var')
+        .map((s) => nameOf(kids(s).find((y) => tag(y) === 'n')))
+        .filter((s) => s !== undefined && s !== null);
+      if (nm !== undefined && fields.length > 0) STRUCTS.set(String(nameOf(nm)), fields);
+      return [];
+    }
+    case 'import': case 'from-import': case 'trait': case 'alias': return [];
     default:
       throw new Error(`mojo->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
   }
@@ -150,6 +192,7 @@ function toNode(x) {
 /** 一棵 mojo 的 GLR 树（`(module 项…)`）-> 一张图。末尾补一格 `call main`。 */
 export function mojoToGraph(tree) {
   if (tag(tree) !== 'module') throw new Error('mojo->graph: 这不是 (module …)');
+  STRUCTS.clear();          // 字段表是**一份源码一张**（见文件头 STRUCTS 那段）
   const body = kids(tree).map(toNode).flat();
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
 }
