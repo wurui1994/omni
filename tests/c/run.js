@@ -34,11 +34,12 @@
 //   node tests/c/run.js
 //   node tests/c/run.js macro
 
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { RunCache } from '../lib/incr.js';
+import { workDir } from '../work.js';
 import { Cpp } from '../../src/core/frontend-c/tccpp.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -527,6 +528,115 @@ function jsLegCase(group, f, incDirs = []) {
 }
 
 for (const f of pick('gen')) jsLegCase('gen', f);
+
+// -------------------------------- 4.7 abi/：按值收发 struct，与 cc 编的 `.o` 对账
+//
+// 前面那几组都在「我们自己两条腿一致」或者「与 tcc -run 一致」上。这一组问的是**另一件
+// 事**：我们编出来的 `.o` 与 cc 编出来的 `.o` 摆实参的方式是不是同一套 ABI
+// （AAPCS64 §6.4.2 / SysV x86_64 3.2.3）。按值收发 struct 是这上面唯一真会分家的地方
+// —— 标量那几格早就被前面的组按住了。
+//
+// 判法：`abi/def.c` 与 `abi/use.c` 两半各自可以由我们或 cc 编，四种链法里
+//
+//   ref = cc + cc     参照（**它就是尺子**）
+//   a   = 我们 + cc    我们的**定义**摆得对不对
+//   b   = cc + 我们    我们的**调用点**摆得对不对
+//   c   = 我们 + 我们   两头一致（自洽，单独看没意义，与 a/b 一起才补全）
+//
+// a/b/c 三个的 stdout 都必须与 ref 逐字节相同。少 a 或少 b 就只剩自洽 ——
+// 而「两头用同一套错约定」正是自洽的，那种错在与别人链起来的那天才炸。
+//
+// 架构：本机那个一定跑；另一个（arm64 mac 上的 x86_64）先拿一个空 main 试探
+// 「编得出来、跑得起来」，试探过了才跑 —— Rosetta 不在就跳过而不是假过。
+
+const CC = ['clang', 'cc', 'gcc'].find((x) => spawnSync('which', [x]).status === 0) ?? null;
+const ABI_DIR = join(here, 'abi');
+/** 本机的容器格式与 os 名字（`omni c obj` 要这两格）。 */
+const ABI_OS = process.platform === 'darwin' ? 'osx' : 'linux';
+const ABI_FMT = process.platform === 'darwin' ? 'macho' : 'elf';
+
+/** cc 那一侧的架构开关：苹果的 clang 认 `-arch`，别处只跑本机那个（不用加开关）。 */
+const ccArch = (arch) => (process.platform === 'darwin' ? ['-arch', arch] : []);
+
+function abiArchs(dir) {
+  if (CC === null) return [];
+  const host = process.arch === 'arm64' ? 'arm64' : 'x86_64';
+  const out = [host];
+  const other = host === 'arm64' ? 'x86_64' : 'arm64';
+  const src = join(dir, 'probe.c');
+  const bin = join(dir, 'probe');
+  writeFileSync(src, 'int main(void) { return 0; }\n');
+  /* `-arch` 是苹果那套 clang 的开关；别的平台上「另一个架构」这一格压根问不到，
+   * 于是只跑本机那个。 */
+  if (process.platform !== 'darwin') return out;
+  const built = spawnSync(CC, ['-arch', other, src, '-o', bin]).status === 0;
+  if (built && spawnSync(bin, []).status === 0) out.push(other);
+  return out;
+}
+
+function abiCase(dir, arch) {
+  const name = `abi/struct-byval [${arch}] [我们的 .o == cc 的 .o]`;
+  const objs = {};
+  for (const half of ['def', 'use']) {
+    const src = join(ABI_DIR, `${half}.c`);
+    objs[`${half}-cc`] = join(dir, `${half}-cc-${arch}.o`);
+    const r = spawnSync(CC, [...ccArch(arch), '-c', src, '-o', objs[`${half}-cc`]],
+      { encoding: 'utf8' });
+    if (r.status !== 0) {
+      bad(name, `    cc 编 ${half}.c 就没过：\n${r.stderr}`);
+      return;
+    }
+    objs[`${half}-omni`] = join(dir, `${half}-omni-${arch}.o`);
+    /* 这一格**不走运行缓存**（ADR-0023）：缓存回放的是 stdout/stderr，而这一步要的是
+     * 磁盘上那个 `.o` —— 命中一次就没人写那个文件。量出来的：先按
+     * `node tests/c/run.js abi` 跑一趟、再整轴跑，第二趟就炸在「链不起来：no such file」。 */
+    const g = spawnSync(process.execPath, [CLI, 'c', 'obj', src, '-o', objs[`${half}-omni`],
+      '--arch', arch, '--os', ABI_OS, '-f', ABI_FMT], { encoding: 'utf8' });
+    if (g.status !== 0) {
+      bad(name, `    我们编 ${half}.c 没过：\n${g.stderr}`);
+      return;
+    }
+  }
+  const mixes = {
+    ref: ['def-cc', 'use-cc'],
+    a: ['def-omni', 'use-cc'],
+    b: ['def-cc', 'use-omni'],
+    c: ['def-omni', 'use-omni'],
+  };
+  const outs = {};
+  for (const [tag, halves] of Object.entries(mixes)) {
+    const bin = join(dir, `abi-${tag}-${arch}`);
+    const l = spawnSync(CC, [...ccArch(arch), objs[halves[0]], objs[halves[1]], '-o', bin],
+      { encoding: 'utf8' });
+    if (l.status !== 0) {
+      bad(name, `    ${tag} 链不起来：\n${l.stderr}`);
+      return;
+    }
+    const r = spawnSync(bin, [], { encoding: 'utf8' });
+    if (r.status !== 0) {
+      bad(name, `    ${tag} 跑挂了（退出码 ${r.status}，信号 ${r.signal}）\n${r.stderr}`);
+      return;
+    }
+    outs[tag] = r.stdout;
+  }
+  for (const tag of ['a', 'b', 'c']) {
+    if (outs[tag] !== outs.ref) {
+      bad(name, `    ${tag} 与参照不同：\n--- cc+cc ---\n${outs.ref}--- ${tag} ---\n${outs[tag]}`);
+      return;
+    }
+  }
+  ok(`${name} [8 种形状 × 3 种混法]`);
+}
+
+if (CC === null) {
+  skip++;
+} else {
+  const abiWork = workDir('c-abi');
+  const archs = abiArchs(abiWork);
+  for (const arch of archs) abiCase(abiWork, arch);
+  /* 只跑到一个架构（没有 Rosetta / 不是 mac）：另一条 ABI 那一格没人看着，记一笔 skip。 */
+  if (archs.length < 2) skip++;
+}
 
 // ------------------------------------------------------------ 5. gen-bad/：边界与语法错误
 

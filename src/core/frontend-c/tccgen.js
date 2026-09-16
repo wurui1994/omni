@@ -180,7 +180,7 @@ import {
   ctype, mkPointer, mkArray, mkStruct, mkEnum, enumBase, mkFunc, typeSize, cTypeText, sameType,
   sameTypeUnqual, mkVla, isVla, compareTypes,
   TY_VOID, TY_INT, TY_UINT, TY_LLONG, TY_ULLONG, TY_CHAR, TY_UCHAR, TY_SHORT, TY_BOOL,
-  TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE, sseEightbytes, ldoubleSize, setLdoubleTarget,
+  TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, VT_LDOUBLE, sseEightbytes, hfaOf, ldoubleSize, setLdoubleTarget,
   wcharType, wcharSize, isWcharType, setWcharTarget, charIsUnsigned, setCharTarget,
 } from './ctype.js';
 import {
@@ -3569,8 +3569,21 @@ export class CGen {  /**
      * 一定装得下它。 */
     let sret = null;
     if (isStruct(ret.t)) {
-      sret = sMem(ret, this.fpRef, this.frameAlloc(ret));
-      refs.push(this.addrOf(sret));
+      /* native（第一百三十一片）：这一块**至少 16 字节、16 对齐**。理由在寄存器那条
+       * 回路上：≤16 字节的返回值从 x0/x1 回来，调用方要把它写进这一块，而
+       * 「按大小一格一格地写」在 5/6/7/11 那几种宽度上要移位（tcc 干脆写满 16 字节：
+       * `arm64-gen.c:1205` 的 `stp x0,x1,[x8]`）。多留几个字节，那条路上一条移位都不用，
+       * 也不会踩到旁边的局部量。 */
+      const pad = this.native ? Math.max(0, 16 - typeSize(ret).size) : 0;
+      sret = sMem(ret, this.fpRef, this.frameAlloc(ret, pad === 0 ? 0 : 16, pad));
+      /* native（第一百三十一片）：这一块的地址走 `ARGSRET` 而不是一个普通实参 ——
+       * 真的 ABI 里「返回值在哪儿」按大小分两条路（arm64：>16 字节走 x8 那个隐藏实参、
+       * ≤16 字节从 x0/x1 取回来自己写进去），而两条路都要**这个地址**。哪一条由后端按
+       * aux 里的字节数选，前端只管把地址交出去。 */
+      if (this.native && typeSize(ret).size > 0) {
+        refs.push(this.f.emit(OP.ARGSRET, T_I64, this.addrOf(sret), REF_NONE,
+          this.memArgAuxOf(ret)));
+      } else refs.push(this.addrOf(sret));
     }
     /** @type {{ty:object,ref:number}[]} `...` 后面那些实参（进变参区，不进实参表） */
     const extra = [];
@@ -3588,10 +3601,25 @@ export class CGen {  /**
        * 于是一次调用只有一次拷贝，而且那次拷贝是 C 要求的那一次
        * （形参是实参的一份可改的拷贝，C11 6.9.1 第 10 段）。 */
       if (isStruct(want.t)) {
-        if (!sameType(want, vals[i].ty)) {
+        /* 限定符不算数（C11 6.5.16.1 第 1 段第 2 条：左边可以是「相容类型的**限定或
+         * 非限定**版本」，实参也照赋值那一套走 6.5.2.2 第 2 段）。`const omni_dyn *p`
+         * 的 `*p` 是 `const omni_dyn`，传给收 `omni_dyn` 的形参是对的 —— 按 `sameType`
+         * 比会把 `r3_straightness(p0, p[4], ...)` 那种寻常写法判成错。 */
+        if (!sameTypeUnqual(want, vals[i].ty)) {
           this.err(`cannot pass '${cTypeText(vals[i].ty)}' as '${cTypeText(want)}'`);
         }
         if (fixed) {
+          /* native（第一百三十一片）：固定的 struct 实参也发 `ARGMEM` —— 摆位是 ABI 的账，
+           * 只有后端知道（`arm64_pcs_aux` 的 B.3/B.4/C.2/C.10/C.13 五条分岔）。线性内存
+           * 那条腿照旧传地址、被调方拷：那边的被调者是宿主的 JS，没有寄存器这一说。
+           *
+           * 空的 struct（`struct {}`，GCC 扩展）没有字节可摆，ARGMEM 的字节数不许是 0 ——
+           * 那一格照旧传地址，两条腿一样。tcc 那边也是 `if (size)` 一句躲过去的。 */
+          if (this.native && typeSize(want).size > 0) {
+            refs.push(this.f.emit(OP.ARGMEM, T_I64, this.addrOf(vals[i]), REF_NONE,
+              this.memArgAuxOf(want)));
+            continue;
+          }
           refs.push(this.addrOf(vals[i]));
           continue;
         }
@@ -3735,15 +3763,22 @@ export class CGen {  /**
   }
 
   /**
-   * 一块内容（变参里的 struct）的 aux：字节数 + SSE 位图（第四十片）。
+   * 一块内容（按值传的 struct）的 aux：字节数 + SSE 位图 + HFA 那两格 + 对齐是不是 16。
    *
    * 位图是一条**类型事实**（"前两个八字节里哪几整格只装浮点"），不是 ABI 决定 ——
    * 可是要它的只有 SysV（分类要它），而 MIR 不分架构，所以只能在这儿算好带下去。
    * 超过 16 字节的一律进内存，位图没有意义，填 0。
+   *
+   * HFA 那两格（第一百三十一片）同一个道理，要它的是 AAPCS64：`arm64_pcs_aux` 的
+   * B.2 把 HFA 从「size > 16 换指针」那一条里摘出去、C.2 把它摆进连着的几个 v 寄存器，
+   * 而「是不是同质浮点聚合」按字节数一个字也看不出来（`struct {double a,b,c;}` 是
+   * 24 字节的 HFA，`omni_ptr` 是 24 字节的非 HFA）。对齐是 16 的那一位给 C.8/C.12。
    */
   memArgAuxOf(ty) {
     const s = typeSize(ty);
-    return memArgAux(s.size, s.size > 16 ? 0 : sseEightbytes(ty));
+    const hfa = hfaOf(ty);
+    return memArgAux(s.size, s.size > 16 ? 0 : sseEightbytes(ty),
+      { hfa, align16: s.align === 16 });
   }
 
   /**
@@ -3847,21 +3882,24 @@ export class CGen {  /**
   /**
    * 这个外部函数**不用桩也能调**吗（第一百二十八片）。
    *
-   * 桩除了转发，还顺手在做三件调用点现在不做的 ABI 事，所以这三类还得留着它：
+   * 桩除了转发，还顺手在做两件调用点现在不做的 ABI 事，所以这两类还得留着它：
    *
    * * 变参的 —— 其实它的调用点早就直接发 `CCALL`（`funcCall`），走到这儿只是收尾
-   * * 按值收发 struct 的 —— 桩里那两条 `todo` 是边界，得留在那儿报
    * * 带 x87 `long double`（x86_64 的 16 字节那种）的实参或返回值 —— 要
    *   `ARGMEM`+`MEMARG_F80` 与 `st0` 那一格
+   *
+   * **按值收发 struct 的不在这个名单里了**（第一百三十一片）：调用点现在按真的 ABI 摆
+   * （`ARGMEM`/`ARGSRET` + `arm64_pcs` 那一串规则），所以外部符号与自家函数摆出来的
+   * 是同一个样子 —— 桩挡在中间已经没有用了。桩里那两条 `todo` 还留着，它们守的是
+   * **线性内存那条腿**：那边转手的是宿主的 libc，按真 ABI 读寄存器，读不到我们线性
+   * 内存里的一个偏移（第五片证明过「转手宿主 libc」不成立，同一个理由）。
    */
   externSimple(info) {
     if (info.variadic) return false;
     /* 取过地址的留着桩 —— `adrp+add` 指不着未定义符号（见 `funcCall` 那一段）。 */
     if (info.addrTaken === true) return false;
-    if (isStruct(info.ret.t)) return false;
     if (this.ldRetAux(info.ret) !== 0) return false;
     for (const p of info.params === null ? [] : info.params) {
-      if (isStruct(p.ty.t)) return false;
       if (btype(p.ty.t) === VT_LDOUBLE && ldoubleSize() === 16) return false;
     }
     return true;
@@ -4054,6 +4092,14 @@ export class CGen {  /**
        * 整条 `? :` 当一条语句用，两支都是返回 void 的调用。
        * 只有一支是 void 的那种在下面报错（tcc 也报 `cannot convert 'void' to …`）。 */
       if (btype(x.ty.t) === VT_VOID) return;
+      /* 两支是 struct（第一百三十二片）：照 tcc 的那一手（`tccgen.c:6684` 那条注释）——
+       * `(c ? a : b)` 变成 `*(c ? &a : &b)`，槽里存的是**地址**。这么做不只是省事：
+       * 整条表达式因此**还是个左值**，`(c ? a : b).mem` 才不会报「要一个左值」，
+       * 而按值拷一份进临时量的话那一格就没了。 */
+      if (isStruct(x.ty.t)) {
+        f.emit(OP.STORE, T_VOID, this.addrOf(x), REF_NONE, slot);
+        return;
+      }
       if (isFloat(x.ty.t)) {
         f.emit(OP.STORE, T_VOID, this.gv(this.castTo(x, TY_DOUBLE)), REF_NONE, fslot);
         return;
@@ -4081,6 +4127,17 @@ export class CGen {  /**
     if (va && vb) return sVal(TY_VOID, REF_NONE);
     if (va || vb) {
       this.err(`cannot convert 'void' to '${cTypeText(va ? b.ty : a.ty)}'`);
+    }
+    /* 两支是 struct（第一百三十二片）：结果就是那个类型（C11 6.5.15 第 3 段要求两支
+     * 的类型相容），而槽里存的是地址 —— 于是这儿把它读回来当**左值**用，
+     * 与 tcc 的 `*(c ? &a : &b)` 逐字对应。`omni_js_host.c:294` 那一行
+     * （`return v ? s16_of_cstr(v) : omni_dyn_undef();`）就是它。 */
+    if (isStruct(a.ty.t) || isStruct(b.ty.t)) {
+      if (!isStruct(a.ty.t) || !isStruct(b.ty.t) || !sameTypeUnqual(a.ty, b.ty)) {
+        this.err(`cannot convert '${cTypeText(b.ty)}' to '${cTypeText(a.ty)}'`);
+        return sVal(a.ty, REF_NONE);
+      }
+      return sMem(a.ty, f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot), 0);
     }
     /* 有一支是浮点：公共类型是两支里等级高的那个浮点（C11 6.5.15 第 5 段走的是
      * 常规算术转换），值从 f64 那个槽里读。 */
@@ -7477,14 +7534,34 @@ export class CGen {  /**
       }
     }
 
-    /* 返回 struct 的函数多一个**隐藏的第一个形参**：调用方划好的那块地方的地址
-     * （第十一片的 ABI）。`return` 把返回值拷进去、再把这个地址返回，于是 MIR 那条 RET
-     * 照旧只带一个 i64 —— 与 SysV 用 rax 回那个隐藏指针是同一件事。 */
+    /* 返回 struct 的函数：线性内存那条腿上多一个**隐藏的第一个形参** —— 调用方划好的
+     * 那块地方的地址（第十一片的 ABI）。`return` 把返回值拷进去、再把这个地址返回，
+     * 于是 MIR 那条 RET 照旧只带一个 i64。
+     *
+     * native（第一百三十一片）按真的 ABI 分两条路，分界是 16 字节（AAPCS64 §6.9）：
+     *
+     *   - >16 字节：隐藏形参还在，只是它进的是 **x8** 而不是 x0（`arm64_pcs` 的 `a[0]==1`）
+     *   - ≤16 字节：**压根没有这个形参** —— 值从 x0/x1（或 v0-v3）回去。所以这儿在自己
+     *     帧上划一块当「返回值的家」，`return` 照旧往那儿拷，收场那一步再从那儿装进
+     *     寄存器（`arm64-gen.c:1577` 的 `gfunc_return` 就是这么做的）
+     *
+     * 两条路上函数体都不用改：`this.sretRef` 照旧是「返回值那一块的地址」。 */
     this.sretRef = REF_NONE;
     if (isStruct(ret.t)) {
-      const slot = f.slot('$sret', T_I64);
-      f.params.push({ name: '$sret', t: T_I64, slot });
-      this.sretRef = f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot);
+      const size = typeSize(ret).size;
+      const inRegs = this.native && size > 0 && size <= 16;
+      if (this.native && size > 0) f.retStruct = this.memArgAuxOf(ret);
+      if (inRegs) {
+        const pad = Math.max(0, 16 - size);
+        const off = this.frameAlloc(ret, 16, pad);
+        this.sretRef = this.addrOf(sMem(ret, this.fpRef, off));
+      } else {
+        const slot = f.slot('$sret', T_I64);
+        f.params.push(this.native
+          ? { name: '$sret', t: T_I64, slot, sret: true }
+          : { name: '$sret', t: T_I64, slot });
+        this.sretRef = f.emit(OP.LOAD, T_I64, REF_NONE, REF_NONE, slot);
+      }
     }
 
     /* 形参就是前几个槽 —— MIR 的解释器按这个约定填帧（interp.js:274 的注释）。
@@ -7497,7 +7574,15 @@ export class CGen {  /**
        * 一个 16 字节的格子里（X87 类，与调用点那一侧的 `ldArgMem` 对着）。这是**这个
        * 形参**的一条事实，所以按在形参表那一格上，由 x86_64 的序言看它。 */
       const ld = btype(p.ty.t) === VT_LDOUBLE && ldoubleSize() === 16;
+      /* native（第一百三十一片）：按值收的 struct 进来时在**寄存器或入参区**里，不是
+       * 一个地址 —— 哪几个寄存器由 ABI 说（`pcsPlaces` 那一串 C.x）。所以把「这一块多大、
+       * 是不是 HFA、对齐是不是 16」按在形参表这一格上，序言照它把那几个寄存器落进一块
+       * 地方、再把那块的地址写进这个槽。于是函数体那一侧一个字都不用改：槽里照旧是
+       * 「一个 struct 的地址」，下面那次 `structCopy` 也照旧是 C 要求的那一次拷贝。 */
+      const mem = this.native && isStruct(p.ty.t) && typeSize(p.ty).size > 0
+        ? this.memArgAuxOf(p.ty) : 0;
       if (ld) f.params.push({ name: p.name, t: mt, slot, ld: true });
+      else if (mem !== 0) f.params.push({ name: p.name, t: mt, slot, mem });
       else f.params.push({ name: p.name, t: mt, slot });
       if (isStruct(p.ty.t)) {
         /* 传值的 struct：进来的是**调用方那个对象的地址**，而形参是它的一份可改的拷贝

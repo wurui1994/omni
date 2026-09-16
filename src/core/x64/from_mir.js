@@ -116,12 +116,39 @@ function widthOf(t) {
 function argMemOf(f, ar) {
   if (isConstRef(ar)) return null;
   const i = f.at(ar);
-  if (f.op[i] !== OP.ARGMEM) return null;
+  const op = f.op[i];
+  if (op !== OP.ARGMEM && op !== OP.ARGSRET) return null;
   return {
+    sret: op === OP.ARGSRET,
     size: memArgSize(f.aux[i]),
     sse: memArgSse(f.aux[i]),
     f80: memArgIsF80(f.aux[i]),
   };
+}
+
+/**
+ * 按值返回的聚合回在哪几个寄存器里（SysV 3.2.3 的「返回值」那一节，第一百三十一片）：
+ * INTEGER 的格子依次 `rax`、`rdx`，SSE 的依次 `xmm0`、`xmm1`。
+ *
+ * 超过 16 字节的不走这一条 —— 那是 MEMORY 类：调用方给一个指针（头一个整数实参），
+ * 被调方写进去、并把同一个指针回在 `rax` 里。
+ */
+function retRegsOf(mem) {
+  const words = Math.ceil(mem.size / 8);
+  const ints = [X64_RES, REG.rdx];
+  const out = [];
+  let gi = 0;
+  let si = 0;
+  for (let e = 0; e < words; e++) {
+    if ((mem.sse & (e === 0 ? 1 : 2)) !== 0) {
+      out.push({ v: FARG[si] });
+      si++;
+    } else {
+      out.push({ x: ints[gi] });
+      gi++;
+    }
+  }
+  return out;
 }
 
 /**
@@ -164,6 +191,17 @@ function x64ArgPlaces(mod, f, args) {
   for (const ar of args) {
     const mem = argMemOf(f, ar);
     if (mem !== null) {
+      /* 返回值那一块（`ARGSRET`，第一百三十一片）。MEMORY 类（>16 字节）的那个隐藏
+       * 指针在 SysV 里是**头一个普通整数实参**（占 rdi，与 arm64 的 x8 不一样），
+       * 被调方还要把同一个指针回在 `rax` 里；≤16 字节的按类回在 rax/rdx 或
+       * xmm0/xmm1 里，一个实参寄存器都不占。 */
+      if (mem.sret === true) {
+        if (mem.size > 16) {
+          at.push({ sret: mem, x: ngrn });
+          ngrn++;
+        } else at.push({ sret: mem });
+        continue;
+      }
       /* X87 类（第一百一十三片）：`long double` **不看大小**一律 MEMORY —— 栈上一个
        * 16 字节、16 对齐的格子，里头只有前十个字节有效（余下六个字节 clang 也不写）。
        * 16 对齐这一格靠出参区本身是 16 对齐的（`outArgsBytes` 按 16 取整）。 */
@@ -217,31 +255,71 @@ function outArgsBytes(mod, f) {
 }
 
 /**
- * 固定形参占掉了几个寄存器、又有几个字节排在**入参区**上（`rbp + 16` 起）。
+ * 形参那一侧的摆位（第一百三十一片起与实参那一侧共用 `classifyMem`）。
  *
- * 序言按 `bytes` 把放不下的形参读回来，`VASTART` 三样都要：`gp_offset` 与 `fp_offset`
- * 就是「固定实参已经用掉的那一段」，`overflow_arg_area` 从溢出的固定形参之后起。
+ * 每一格是 `{x}` / `{v}` / `{off}` / `{off, ld}` / `{regs, bytes}` / `{off, bytes}` /
+ * `{sret, x}` 之一，另外回三个游标：`ngrn`/`nsse`（固定实参用掉的两串，`VASTART` 要）
+ * 与 `bytes`（排在入参区上的字节数，序言与 `overflow_arg_area` 要）。
  *
  * `p.ld`（第一百一十三片）是 x86_64 的 `long double`：X87 类，**不占寄存器**，
  * 在入参区里占一个 16 字节、16 对齐的格子。入参区从 `rbp + 16` 起，16 本身是 16 的
  * 整数倍，所以「偏移对齐到 16」就等于「地址对齐到 16」。
+ *
+ * `p.sret`（第一百三十一片）是 MEMORY 类返回值那个隐藏指针：SysV 里它就是**头一个
+ * 普通整数实参**（占 rdi），与 arm64 的 x8 不是一回事。
  */
-function inArgPlaces(f) {
+function paramPlaces(f) {
+  const at = [];
   let ngrn = 0;
   let nsse = 0;
   let bytes = 0;
   for (const p of f.params) {
+    if (p.sret === true) {
+      at.push({ sret: true, x: ngrn });
+      ngrn++;
+      continue;
+    }
     if (p.ld === true) {
       bytes += bytes % 16 === 0 ? 0 : 16 - (bytes % 16);
+      at.push({ off: bytes, ld: true });
       bytes += 16;
       continue;
     }
+    if (p.mem !== undefined) {
+      const mem = { size: memArgSize(p.mem), sse: memArgSse(p.mem), f80: false };
+      const c = classifyMem(mem, ngrn, nsse);
+      if (c !== null) {
+        at.push({ regs: c.regs, bytes: mem.size });
+        ngrn = c.ngrn;
+        nsse = c.nsse;
+        continue;
+      }
+      /* MEMORY 类：整份躺在入参区里，**地址就是它待着的地方** —— 不用拷，
+       * 「形参是实参的一份可改的拷贝」那次拷贝是前端发的（`structCopy`）。 */
+      at.push({ off: bytes, bytes: mem.size });
+      bytes += mem.size + (mem.size % 8 === 0 ? 0 : 8 - (mem.size % 8));
+      continue;
+    }
     const flt = isFloatType(p.t);
-    if (flt && nsse < FARG.length) { nsse++; continue; }
-    if (!flt && ngrn < IARG.length) { ngrn++; continue; }
+    if (flt && nsse < FARG.length) {
+      at.push({ v: nsse });
+      nsse++;
+      continue;
+    }
+    if (!flt && ngrn < IARG.length) {
+      at.push({ x: ngrn });
+      ngrn++;
+      continue;
+    }
+    at.push({ off: bytes });
     bytes += 8;
   }
-  return { ngrn, nsse, bytes };
+  return { at, ngrn, nsse, bytes };
+}
+
+/** 固定形参占掉了几个寄存器、又有几个字节排在入参区上（`VASTART` 与序言问的是这个）。 */
+function inArgPlaces(f) {
+  return paramPlaces(f);
 }
 
 class x64FnGen {
@@ -266,6 +344,21 @@ class x64FnGen {
       let depth = bytes + blk.size;
       if (depth % blk.align !== 0) depth += blk.align - (depth % blk.align);
       this.frameOffs.push(-depth);
+      bytes = depth;
+    }
+    /* 按值收的 struct 落脚的那几块（第一百三十一片）：进来在**寄存器**里的那些要有一块
+     * 地方待着 —— 序言把那几格存进去、槽里放这一块的地址。MEMORY 类的不用这一块：
+     * 它整份躺在入参区里，地址已经现成。
+     * 方向与 arm64 相反：偏移是负的（`rbp` 往下挖），所以把深度往上取整再取负。 */
+    this.paramBlocks = [];
+    for (const pl of paramPlaces(f).at) {
+      if (pl.regs === undefined) {
+        this.paramBlocks.push(0);
+        continue;
+      }
+      let depth = bytes + pl.regs.length * 8;
+      if (depth % 16 !== 0) depth += 16 - (depth % 16);
+      this.paramBlocks.push(-depth);
       bytes = depth;
     }
     /* 变参函数还要两块（第二十四片）：
@@ -428,42 +521,66 @@ class x64FnGen {
         k++;
       }
     }
-    /* 形参：整数一串（六个）、浮点一串（八个），各自从 0 起数。放不下的从**入参区**
-     * 读（第二十三片）：调用方摆在它自己的出参区里，也就是我们这一层 `rbp + 16` 起 ——
+    /* 形参照 `paramPlaces` 摆（第一百三十一片起与实参那一侧共用 `classifyMem`）：
+     * 整数一串（六个）、浮点一串（八个），各自从 0 起数。放不下的从**入参区**读
+     * （第二十三片）：调用方摆在它自己的出参区里，也就是我们这一层 `rbp + 16` 起 ——
      * `rbp + 0` 是存起来的 `rbp`、`rbp + 8` 是返回地址。
      * （与 arm64 那一份的 `fp + 16` 是同一句话，只是两样东西的次序不同。） */
-    let ngrn = 0;
-    let nsse = 0;
-    let inArg = 16;
+    const places = paramPlaces(f).at;
+    let pi = 0;
     for (const p of f.params) {
+      const place = places[pi];
+      const blk = this.paramBlocks[pi];
+      pi++;
+      /* MEMORY 类返回值的那个隐藏指针：它是头一个普通整数实参。 */
+      if (place.sret === true) {
+        this.frameStore(IARG[place.x], this.slotOff(p.slot));
+        continue;
+      }
       /* x86_64 的 `long double` 形参（第一百一十三片）：X87 类，**不占寄存器** ——
        * 它在入参区里是一个 16 字节、16 对齐的格子。`fld tbyte` 把那十个字节读进 x87，
        * 再 `fstp qword` 收成 double 落进槽里（值在 MIR 里是 f64，形状只活在内存里）。 */
-      if (p.ld === true) {
-        inArg += inArg % 16 === 0 ? 0 : 16 - (inArg % 16);
-        buf.emit(fldM80(BP, inArg));
+      if (place.ld === true) {
+        buf.emit(fldM80(BP, 16 + place.off));
         buf.emit(push(X64_RES));
         buf.emit(fstpM64(REG.rsp, 0));
         buf.emit(pop(X64_TMP0));
         this.frameStore(X64_TMP0, this.slotOff(p.slot));
-        inArg += 16;
         continue;
       }
-      const flt = isFloatType(p.t);
-      if (flt && nsse < FARG.length) {
-        this.fromFp(X64_TMP0, FARG[nsse]);
+      /* 按值收的 struct 分到了寄存器上：整格整格地落进 `blk` 那一块，槽里放它的地址 ——
+       * 于是函数体那一侧照旧「槽里是一个 struct 的地址」，一个字都不用改。 */
+      if (place.regs !== undefined) {
+        let e = 0;
+        for (const r of place.regs) {
+          if (r.x !== undefined) buf.emit(movMR(8, BP, blk + e * 8, IARG[r.x]));
+          else {
+            this.fromFp(X64_TMP0, FARG[r.v]);
+            buf.emit(movMR(8, BP, blk + e * 8, X64_TMP0));
+          }
+          e++;
+        }
+        buf.emit(lea(8, X64_TMP0, BP, blk));
         this.frameStore(X64_TMP0, this.slotOff(p.slot));
-        nsse++;
         continue;
       }
-      if (!flt && ngrn < IARG.length) {
-        this.frameStore(IARG[ngrn], this.slotOff(p.slot));
-        ngrn++;
+      /* MEMORY 类的 struct：**不用拷** —— 地址就是它在入参区里待着的地方。 */
+      if (place.bytes !== undefined) {
+        buf.emit(lea(8, X64_TMP0, BP, 16 + place.off));
+        this.frameStore(X64_TMP0, this.slotOff(p.slot));
         continue;
       }
-      buf.emit(movRM(8, X64_TMP0, BP, inArg));
+      if (place.v !== undefined) {
+        this.fromFp(X64_TMP0, FARG[place.v]);
+        this.frameStore(X64_TMP0, this.slotOff(p.slot));
+        continue;
+      }
+      if (place.x !== undefined) {
+        this.frameStore(IARG[place.x], this.slotOff(p.slot));
+        continue;
+      }
+      buf.emit(movRM(8, X64_TMP0, BP, 16 + place.off));
       this.frameStore(X64_TMP0, this.slotOff(p.slot));
-      inArg += 8;
     }
 
     for (let i = 0; i < f.count(); i++) this.one(i);
@@ -541,6 +658,25 @@ class x64FnGen {
     if (op === OP.RET) {
       if (f.a[i] !== REF_NONE) {
         this.loadRef(X64_TMP0, f.a[i]);
+        /* 返回一整块 struct 且不是 MEMORY 类（第一百三十一片）：MIR 那条 RET 带的是
+         * **那一块的地址**，而 ABI 要的是值在 rax/rdx 或 xmm0/xmm1 里 —— 在这儿装一次。
+         * MEMORY 类不走这儿：地址原样回在 rax 里（SysV 3.2.3 要求的就是这个）。
+         * 那一块前端补齐到了至少 16 字节，所以整格读。 */
+        const rs = f.retStruct;
+        if (rs !== 0 && memArgSize(rs) <= 16) {
+          const mem = { size: memArgSize(rs), sse: memArgSse(rs), f80: false };
+          let e = 0;
+          for (const r of retRegsOf(mem)) {
+            if (r.x !== undefined) buf.emit(movRM(8, r.x, X64_TMP0, e * 8));
+            else {
+              buf.emit(movRM(8, X64_TMP1, X64_TMP0, e * 8));
+              this.toFp(r.v, X64_TMP1);
+            }
+            e++;
+          }
+          buf.jmp(this.retLabel);
+          return;
+        }
         /* 浮点的返回值在 xmm0，整数在 rax。i32 的规范形是符号扩展过的 64 位，
          * 而 SysV 只看 eax —— 两边都对，不用再削。
          * `long double` 例外（第一百一十二片）：它回在 **x87 的 st0** 里 —— 把 double
@@ -559,7 +695,7 @@ class x64FnGen {
     /* ---- 调用 */
     if (op === OP.CALL) {
       if (this.callLabels === null) nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
-      this.callArgs(f.argsOf(f.b[i]));
+      const sret = this.callArgs(f.argsOf(f.b[i]));
       /* 模块内的直接调用也走**符号**（第一百二十七片）：位移留 0，发一条重定位。
        * 量过 tcc：`static int a(); … a();` 那一条 `e8` 后面是四个零，`.rela.text` 里
        * 一条 `R_X86_64_PLT32`（加数 −4）指着 `a` —— 哪怕 `a` 就在同一个 `.o` 里、
@@ -568,7 +704,7 @@ class x64FnGen {
       buf.callSym(this.funcSym(f.a[i]));
       /* 直接调用：被调的是谁看得见，所以「返回值在 st0 里」问**那个函数**
        * （第一百一十二片）—— 调用点不用带这一位。 */
-      return this.callRet(i, t, this.mod.funcs[f.a[i]].ldRet === true);
+      return this.callRet(i, t, this.mod.funcs[f.a[i]].ldRet === true, sret);
     }
     if (op === OP.CCALL) {
       const name = this.mod.cabi[f.a[i]];
@@ -576,9 +712,9 @@ class x64FnGen {
       /* aux 是变参分界（第二十二片），**x86_64 用不着它**：SysV 把变参也放寄存器里，
        * 与固定实参一个待遇；要报的只有 `al`（xmm 个数），而那一条对非变参函数无害，
        * 所以一律发。苹果的 arm64 不一样（变参走栈），那一边才要看 aux。 */
-      this.callArgs(f.argsOf(f.b[i]), true);
+      const sret = this.callArgs(f.argsOf(f.b[i]), true);
       buf.callSym(name);
-      return this.callRet(i, t, callLdRet(f.aux[i]));
+      return this.callRet(i, t, callLdRet(f.aux[i]), sret);
     }
     /* `CALLI` 是**按指针调用**（第二十七片）：native 上函数指针就是真地址，一条
      * `call *r`。次序与 arm64 那份一样 —— 先摆实参，再取目标进草稿（r10 不是实参
@@ -586,10 +722,10 @@ class x64FnGen {
      * 变参这一层不知道，多发一条无害。 */
     if (op === OP.CALLI) {
       if (!this.mod.native) nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
-      this.callArgs(f.argsOf(f.b[i]), true);
+      const sret = this.callArgs(f.argsOf(f.b[i]), true);
       this.loadRef(X64_TMP0, f.a[i]);
       buf.emit(callR(X64_TMP0));
-      return this.callRet(i, t, callLdRet(f.aux[i]));
+      return this.callRet(i, t, callLdRet(f.aux[i]), sret);
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 一样是一条 RIP 相对的 `lea`，
      * 只是符号在 `__TEXT` 里。 */
@@ -776,7 +912,7 @@ class x64FnGen {
     /* 变参里的一整块内容（第三十九片）：这一条本身**不发访存** —— 内容什么时候拷、
      * 拷到哪儿（寄存器还是溢出区），是调用那一头按分类决定的（`callArgs`）。
      * 这儿只把地址落到自己的栈位上。 */
-    if (op === OP.ARGMEM) {
+    if (op === OP.ARGMEM || op === OP.ARGSRET) {
       this.loadRef(X64_RES, f.a[i]);
       return this.def(i, X64_RES);
     }
@@ -921,10 +1057,18 @@ class x64FnGen {
   /** 实参就位：整数一串（六个）、浮点一串（八个）。`variadic` 时还要报 xmm 的个数。 */
   callArgs(args, variadic) {
     const p = x64ArgPlaces(this.mod, this.f, args);
+    let sret = null;
     let k = 0;
     for (const ar of args) {
       const place = p.at[k];
       k++;
+      /* 返回值那一块（`ARGSRET`）：MEMORY 类的把地址装进那个整数实参寄存器，
+       * ≤16 字节的这一步什么都不发 —— 值回来之后由 `callRet` 写进去。 */
+      if (place.sret !== undefined) {
+        if (place.x !== undefined) this.loadRef(IARG[place.x], ar);
+        sret = { place, ref: ar };
+        continue;
+      }
       /* 走栈的：一格 8 字节，摆在出参区里（`rsp + off`）。 */
       if (place.off !== undefined) {
         /* 一整块内容进 MEMORY（`ARGMEM`，第四十片）：按 8/4/2/1 递降着拷，
@@ -971,6 +1115,7 @@ class x64FnGen {
     /* SysV：调变参函数之前 `al` 要等于用掉的 xmm 个数。被调的是不是变参这一层不知道，
      * 所以外部调用一律发这一条 —— 对非变参函数完全无害，少了它 `printf` 会崩。 */
     if (variadic === true) this.buf.emit(movRI(1, X64_RES, p.nsse));
+    return sret;
   }
 
   /**
@@ -979,7 +1124,27 @@ class x64FnGen {
    * `ldret` = 这次调用的浮点返回值在 **x87 的 st0** 里（x86_64 的 `long double`）。
    * 直接调用看被调那个 MirFunc 的标注，间接/外部调用看调用点的 `CALL_LDRET`。
    */
-  callRet(i, t, ldret) {
+  callRet(i, t, ldret, sret) {
+    /* 返回的是一整块 struct（第一百三十一片）：这条指令的"值"是**那一块的地址** ——
+     * 前端拿它当 struct 的左值。MEMORY 类那条路上被调方已经写好了（地址就是我们给的
+     * 那个）；≤16 字节那条要调用方把 rax/rdx 或 xmm0/xmm1 写进去，与 tcc 的
+     * `gfunc_call` 收尾那一段是同一件事。那一块前端补齐到了至少 16 字节，所以整格写。 */
+    if (sret !== undefined && sret !== null) {
+      const m = sret.place.sret;
+      this.loadRef(X64_TMP0, sret.ref);
+      if (m.size <= 16) {
+        let e = 0;
+        for (const r of retRegsOf(m)) {
+          if (r.x !== undefined) this.buf.emit(movMR(8, X64_TMP0, e * 8, r.x));
+          else {
+            this.fromFp(X64_TMP1, r.v);
+            this.buf.emit(movMR(8, X64_TMP0, e * 8, X64_TMP1));
+          }
+          e++;
+        }
+      }
+      return this.def(i, X64_TMP0);
+    }
     if (typeKind(t) === T_VOID) return;
     if (isFloatType(t)) {
       /* `long double`（第一百一十二片）：SysV 说它回在 **x87 的 st0** 里，不是 xmm0。

@@ -437,26 +437,48 @@ const OPS = [
   ['SPGET', '-', '-', '-'],     // t = T_I64：当前的栈顶
   ['SPSET', 'r', '-', '-'],     // a = 新的栈顶，t = T_VOID
   ['SPALLOC', 'r', '-', '-'],   // a = 字节数（16 的倍数），t = T_I64：切下来那一块的基址
-  // ---- 变参里的一整块内容（第三十九片）
+  // ---- 一整块内容当实参（第三十九片起，第一百三十一片补齐固定形参那一半）
   //
-  // MIR 的实参一律是标量，而 C 能把一整个 struct 塞进 `...` 的可变部分。固定形参那边
-  // 不需要新东西 —— 前端的约定是「传地址、被调方拷」（见 tccgen.js 文件头）。可变部分
-  // 不行：`va_arg(ap, struct P)` 只知道自己要什么类型，拿不到「这一格里放的是地址还是
-  // 内容」这条额外信息，所以内容必须**直接躺在格子里**，而 ABI 说那是几个字节、
-  // 摆在哪儿，只有后端知道。
+  // MIR 的实参一律是标量，而 C 能把一整个 struct 按值传。两处都要这一条，理由不同：
   //
-  // 于是这一条：a = 那一份内容的地址，aux = `memArgAux(字节数, SSE 位图)`，t = T_I64。
-  // 它产的"值"**只能**当一次变参调用的实参用，而且只能落在分界之后 —— 后端见到它就把
-  // 那几个字节拷进那一格，而不是把地址写进去。
-  ['ARGMEM', 'r', '-', 'n'],    // a = 内容的地址，aux = 字节数 + SSE 位图
+  //   - 变参的可变部分（第三十九片）：`va_arg(ap, struct P)` 只知道自己要什么类型，
+  //     拿不到「这一格里放的是地址还是内容」这条额外信息，所以内容必须**直接躺在
+  //     格子里**，而 ABI 说那是几个字节、摆在哪儿，只有后端知道。
+  //   - 固定形参（第一百三十一片，**只有 native**）：真的 ABI 说 ≤16 字节的聚合进
+  //     一两个寄存器、HFA 进 v 寄存器、>16 字节换成「指向调用方那份拷贝」的指针
+  //     （`arm64-gen.c` 的 `arm64_pcs_aux`，B.2-B.4 与 C.1-C.15）。这几条都是
+  //     **摆位**，只有后端知道 —— 所以固定的 struct 实参也发这一条。
+  //     线性内存那条腿照旧「传地址、被调方拷」（前端的约定，见 tccgen.js 文件头）：
+  //     那边的被调者是宿主的 JS，压根没有寄存器这一说。
+  //
+  // 于是这一条：a = 那一份内容的地址，aux = `memArgAux(字节数, SSE 位图, 那几样)`，
+  // t = T_I64。后端见到它就按 ABI 把那几个字节摆进那一格，而不是把地址写进去。
+  ['ARGMEM', 'r', '-', 'n'],    // a = 内容的地址，aux 见下面那一段
+  // ---- 返回值那一块在哪儿（第一百三十一片，**只有 native**）
+  //
+  // 真的 ABI 里「按值返回 struct」按大小分两条路，而两条路都要**调用方那一块的地址**：
+  //
+  //   - >16 字节（arm64 的 `a[0] == 1`）：地址进 x8，被调方自己写进去
+  //   - ≤16 字节（`a[0] == 0` 或 `16`）：值从 x0/x1（或 v0-v3）回来，**调用方**写进去
+  //
+  // 哪一条由后端按 aux 里的字节数与 HFA 那两格选。所以这一条不是「一个实参」——
+  // 它是「这次调用的返回值落在哪儿」，摆在实参池的**第一格**，后端见到它就按 ABI 处置，
+  // 一格实参寄存器都不一定占（≤16 字节那条就不占）。
+  //
+  // 线性内存那条腿不发它：那边的约定是「地址当第一个实参传进去、被调方拷、再返回同一个
+  // 地址」（前端的约定，见 tccgen.js 文件头），一条 ABI 分岔都没有。
+  ['ARGSRET', 'r', '-', 'n'],   // a = 调用方那一块的地址，aux 与 ARGMEM 同一套
 ];
 
 /* ---------------------------------------------------------------- 一块内容的 aux
- * `ARGMEM` 与「取 struct 的 `VAARG`」的 aux 里塞着三样东西：
+ * `ARGMEM` 与「取 struct 的 `VAARG`」的 aux 里塞着这几样东西：
  *
  *   低 20 位   字节数（`sizeof`）
  *   再两位     **SSE 位图** —— 第 0 位说 `[0,8)` 那一整格只装浮点，第 1 位说 `[8,16)`
  *   再一位     **x87 的 80 位**（`MEMARG_F80`，第九刀第一百一十三片）
+ *   再三位     **HFA 的成员个数**（arm64，第一百三十一片；0 = 不是 HFA）
+ *   再两位     HFA 每个成员多宽（4/8/16 的码）
+ *   再一位     **对齐是 16**（`arm64_pcs_aux` 的 C.8 与 C.12 要它）
  *
  * 为什么位图也得跟着走：SysV 的聚合分类要它（一格里全是 float/double 就进 xmm，
  * 掺进一个整型就进整数寄存器），而 MIR 是**不分架构**的 —— 同一份 MIR 喂 arm64 与
@@ -471,13 +493,45 @@ const OPS = [
 const MEMARG_SHIFT = 2 ** 20;
 /** 这一块是 x87 的 80 位（一律 MEMORY，16 字节的格子）。按在 SSE 位图之上那一位。 */
 export const MEMARG_F80 = 4;
-export function memArgAux(size, sseMask) {
+/* arm64 那三样（第一百三十一片）：HFA 的成员个数、每个成员多宽、对齐是不是 16。
+ *
+ * 与 SSE 位图同一个理由挤在这儿：`arm64_pcs_aux` 的 B.2/C.2/C.3 要「是不是 HFA、
+ * 几个成员」，C.8/C.12 要「对齐是不是 16」，而这两条都是**类型事实**，MIR 里的
+ * 标量类型看不出来。宽度只有 4/8/16 三种（float/double/`long double`），所以编成
+ * 两位的码而不是原样的字节数。 */
+const MEMARG_HFA_SHIFT = MEMARG_SHIFT * 8;
+const MEMARG_HSZ_SHIFT = MEMARG_HFA_SHIFT * 8;
+const MEMARG_A16_SHIFT = MEMARG_HSZ_SHIFT * 4;
+const HFA_SIZES = [4, 8, 16];
+export function memArgAux(size, sseMask, extra) {
   if (size <= 0 || size >= MEMARG_SHIFT) throw new Error(`mir: ARGMEM 的字节数 ${size} 出界`);
-  return size + sseMask * MEMARG_SHIFT;
+  let n = size + sseMask * MEMARG_SHIFT;
+  if (extra === undefined || extra === null) return n;
+  const hfa = extra.hfa === undefined ? null : extra.hfa;
+  if (hfa !== null) {
+    if (hfa.n < 1 || hfa.n > 4) throw new Error(`mir: HFA 的成员个数 ${hfa.n} 出界`);
+    const code = HFA_SIZES.indexOf(hfa.size);
+    if (code < 0) throw new Error(`mir: HFA 的成员宽度 ${hfa.size} 不是 4/8/16`);
+    n += hfa.n * MEMARG_HFA_SHIFT + code * MEMARG_HSZ_SHIFT;
+  }
+  if (extra.align16 === true) n += MEMARG_A16_SHIFT;
+  return n;
 }
 export function memArgSize(aux) { return aux % MEMARG_SHIFT; }
 export function memArgSse(aux) { return Math.floor(aux / MEMARG_SHIFT) % MEMARG_F80; }
-export function memArgIsF80(aux) { return Math.floor(aux / MEMARG_SHIFT) >= MEMARG_F80; }
+export function memArgIsF80(aux) {
+  return Math.floor(aux / MEMARG_SHIFT) % 8 >= MEMARG_F80;
+}
+/** 这一块是 HFA 吗（arm64）：是就回 `{n, size}`，不是回 null。 */
+export function memArgHfa(aux) {
+  const n = Math.floor(aux / MEMARG_HFA_SHIFT) % 8;
+  if (n === 0) return null;
+  return { n, size: HFA_SIZES[Math.floor(aux / MEMARG_HSZ_SHIFT) % 4] };
+}
+/** 这一块的对齐是 16 吗（`arm64_pcs_aux` 的 C.8 与 C.12 要它）。 */
+export function memArgAlign16(aux) {
+  return Math.floor(aux / MEMARG_A16_SHIFT) % 2 === 1;
+}
 
 /* -------------------------------------------- `CCALL`/`CALLI` 的 aux
  * 两件事挤在一格里（第九刀第一百一十二片给它加了第二件）：
@@ -737,6 +791,16 @@ export class MirFunc {
     this.kernel = false;
     /** 形参表末尾有 `...`（见 `VASTART`/`VAARG`）。只有 native 那条腿用得上。 */
     this.variadic = false;
+    /* 这个函数**按值返回一个 struct**（第一百三十一片，只有 native）：aux 与 `ARGSRET`
+     * 同一套（`memArgAux`），0 = 不是。两条路，分界在 16 字节：
+     *
+     *   - >16 字节：形参表头上那个 `$sret`（打了 `sret: true`）收的是调用方给的地址，
+     *     它进 x8；`RET` 照旧带那个地址回去
+     *   - ≤16 字节：**没有那个形参** —— `RET` 带的是「自己帧上那一块」的地址，收场那一步
+     *     照这一格把值装进 x0/x1 或 v0-v3（`arm64-gen.c:1546` 的 `gfunc_return`）
+     *
+     * 按在函数上而不是某条指令上：这是**这个函数的签名**的一部分，每条 `RET` 都要看它。 */
+    this.retStruct = 0;
     /**
      * 这个函数的符号是**局部**的吗（第九刀第九十二片）。与 `kernel` 同一个性质：
      * 标注，不是语义 —— 只有写目标文件那一步看它（Mach-O 的 `N_EXT`）。

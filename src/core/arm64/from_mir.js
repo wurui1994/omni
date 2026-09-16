@@ -43,6 +43,7 @@ import {
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, hexBytes, memArgSize,
+  memArgHfa, memArgAlign16,
   callVaFixed,
 } from '../mir/ir.js';
 import { planRodata, planData, planBss } from '../mir/rodata.js';
@@ -99,59 +100,198 @@ function arm64WidthOf(t) {
   return arm64Nyi(`类型 ${k}`);
 }
 
-/**
- * 一次调用的实参各自落在哪儿（第二十三片）。
- *
- * AAPCS64：整数进 x0-x7、浮点进 v0-v7，两串各自数；放不下的按次序摆在**出参区**
- * （`sp + 0` 起，一格 8 字节）。变参那几个（`nfixed` 之后）一律进出参区 ——
- * 苹果的改动，见第二十二片。
- *
- * 这个函数是**唯一**一处算「谁在哪儿」的地方：`arm64OutArgsBytes`（算帧要多大）与
- * `callArgs`（真的发指令）都问它。两处各算一遍的话，迟早在某个边角上分家，
- * 而那种错的症状是「实参串位」——最难查的一类。
- */
-/**
- * 这个实参是不是「一整块内容」（`ARGMEM`，第三十九片）—— 是就回它有几个字节，不是回 0。
- *
- * 苹果的 arm64 上变参一律走栈，所以一块内容就是**栈上连着的 `align8(n)` 个字节**：
- * 与标量那一格同一条规则（一格至少 8 字节），只是格子更宽。
- */
-function argMemBytes(f, ar) {
-  if (isConstRef(ar)) return 0;
-  const i = f.at(ar);
-  return f.op[i] === OP.ARGMEM ? memArgSize(f.aux[i]) : 0;
+/** `ARGMEM`/`ARGSRET` 的 aux 摊成那几格。`sret` 由调用者说（形参那一侧从函数上读）。 */
+function memInfoOf(aux, sret) {
+  return {
+    sret: sret === true,
+    size: memArgSize(aux),
+    hfa: memArgHfa(aux),
+    align16: memArgAlign16(aux),
+  };
 }
 
-function argPlaces(mod, f, args, nfixed) {
-  const at = [];
-  let ngrn = 0;
-  let nsrn = 0;
-  let stack = 0;
-  let k = 0;
-  for (const ar of args) {
-    const va = nfixed >= 0 && k >= nfixed;
-    const t = f.typeOf(ar, mod.consts);
-    const n = argMemBytes(f, ar);
-    if (n > 0) {
-      /* 一整块内容只可能出现在变参那一段（前端只在那儿发 `ARGMEM`）—— 真在固定实参
-       * 里撞见，那是上一层错了，不该悄悄按地址传过去。 */
-      if (!va) return arm64Nyi('固定实参里的 ARGMEM（那一段传的是地址）');
-      at.push({ off: stack, bytes: n });
-      stack += n + (n % 8 === 0 ? 0 : 8 - (n % 8));
-    } else if (!va && isFloatType(t) && nsrn <= 7) {
-      at.push({ v: nsrn });
-      nsrn++;
-    } else if (!va && !isFloatType(t) && ngrn <= 7) {
-      at.push({ x: ngrn });
-      ngrn++;
-    } else {
-      at.push({ off: stack });
-      stack += 8;
-    }
-    k++;
-  }
-  return { at, stack };
+/**
+ * 这个实参是「一整块内容」吗（`ARGMEM`，第三十九片；`ARGSRET`，第一百三十一片）——
+ * 是就回 `{sret, size, hfa, align16}`，不是回 null。
+ */
+function argMemOf(f, ar) {
+  if (isConstRef(ar)) return null;
+  const i = f.at(ar);
+  const op = f.op[i];
+  if (op !== OP.ARGMEM && op !== OP.ARGSRET) return null;
+  return memInfoOf(f.aux[i], op === OP.ARGSRET);
 }
+
+/** 一个标量占几个字节（C.7/C.9/C.14 那几条要它）。指针与 i64 都是 8。 */
+function scalarBytes(t) {
+  const k = typeKind(t);
+  if (k === T_I32 || k === T_F32) return 4;
+  if (k === T_BOOL) return 1;
+  return 8;
+}
+
+/**
+ * 一次调用的实参各自落在哪儿（第二十三片；第一百三十一片按 tcc 补齐了聚合那几条）。
+ *
+ * **照 `arm64-gen.c:818` 的 `arm64_pcs_aux` 抄**，连编号一起：B.2/B.3/B.4 是
+ * 「HFA 例外、>16 字节换指针、聚合按 8 取整」，C.1-C.15 是那一长串摆位。抄编号不是
+ * 摆样子 —— AAPCS64 §6.4.2 的规则本来就是按编号一条条来的，跳一条的症状是「实参串位」，
+ * 而那是最难查的一类错。
+ *
+ * 回的每一格是这几种之一：
+ *
+ *   - `{x}` 一个整数寄存器 / `{v}` 一个向量寄存器（标量）
+ *   - `{x, xn, bytes}` 聚合摊进 `xn` 个连着的整数寄存器（C.10）
+ *   - `{v, hfa, bytes}` HFA 摊进 `hfa.n` 个连着的向量寄存器（C.2）
+ *   - `{x|off, ptr, bytes, copyOff}` >16 字节的聚合：传一个指向出参区里那份拷贝的指针（B.3）
+ *   - `{off}` / `{off, bytes}` 出参区里的一格 / 一整块（C.13/C.15）
+ *   - `{sret, x8?}` 返回值那一块（`ARGSRET`）—— 不占实参的位置
+ *
+ * 这个函数是**唯一**一处算「谁在哪儿」的地方：`arm64OutArgsBytes`（算帧要多大）与
+ * `callArgs`（真的发指令）都问它。两处各算一遍的话，迟早在某个边角上分家。
+ */
+function argPlaces(mod, f, args, nfixed) {
+  return pcsPlaces(args.map((ar) => {
+    const mem = argMemOf(f, ar);
+    if (mem !== null) return { mem };
+    const t = f.typeOf(ar, mod.consts);
+    return { mem: null, flt: isFloatType(t), bytes: scalarBytes(t) };
+  }), nfixed);
+}
+
+/**
+ * 摆位那一段本身。`descs` 的每一格是 `{mem}`（一整块内容）或 `{flt, bytes}`（标量）。
+ *
+ * 分成两层是因为**形参那一侧要问同一个问题**：序言得知道「进来的这个 struct 在哪几个
+ * 寄存器里」，而它手上是 `f.params` 不是实参的 ref。两处各写一遍摆位规则的话，
+ * 迟早在某条 C.x 上分家 —— 那种错的症状是「实参串位」，最难查的一类。
+ */
+function pcsPlaces(descs, nfixed) {
+  const at = [];
+  let nx = 0;          // 下一个整数寄存器（tcc 的 `nx`）
+  let nv = 0;          // 下一个向量寄存器（tcc 的 `nv`）
+  let ns = 0;          // 出参区里的下一个偏移（tcc 从 32 起数，减回来是同一件事）
+  /* B.3 那些拷贝（>16 字节的聚合按值传 = 传一个指向**调用方那份拷贝**的指针）落在
+   * 出参区之后。tcc 也是在同一块 `sub sp` 里划的（`gfunc_call` 的 `a1[i]`）。 */
+  let copies = 0;
+  const pending = [];
+  let k = 0;
+  for (const d of descs) {
+    const va = nfixed >= 0 && k >= nfixed;
+    k++;
+    const mem = d.mem === undefined ? null : d.mem;
+    /* 返回值那一块（`ARGSRET`）不按实参排 —— 它要么进 x8（>16 字节），要么压根不传
+     * （≤16 字节：值从 x0/x1 或 v0-v3 回来，调用方自己写进去）。tcc 的 `arm64_pcs`
+     * 把它当 `a[0]` 单独算，这儿同一个道理：不动 nx/nv/ns 三个游标。 */
+    if (mem !== null && mem.sret) {
+      at.push(mem.size > 16 ? { sret: mem, x8: true } : { sret: mem });
+      continue;
+    }
+    /* 苹果的 arm64 上变参一律走栈（AAPCS64 的苹果改动）：tcc 是
+     * `if (variadic && i == variadic) { nx = 8; nv = 8; }`（`arm64-gen.c:836`）——
+     * 分界那一格把两串寄存器都数满，后面的自然全落到 C.12 起那几条上。 */
+    if (va && nfixed >= 0 && k - 1 === nfixed) { nx = 8; nv = 8; }
+    if (mem !== null) {
+      const align = mem.align16 ? 16 : 8;
+      let size = mem.size;
+      const hfa = mem.hfa;
+      /* B.2：HFA 不走「换成指针」那一条，哪怕它超过 16 字节
+       * （`struct {double a,b,c;}` 是 24 字节的 HFA，进三个 v 寄存器）。
+       * B.3：别的 >16 字节的聚合换成一个指针 —— 指向调用方现做的一份拷贝。 */
+      if (hfa === null && size > 16) {
+        const copyOff = copies;
+        copies += size + (size % 8 === 0 ? 0 : 8 - (size % 8));
+        if (nx < 8) {
+          at.push({ x: nx, ptr: true, bytes: size, copyOff });
+          nx++;
+        } else {
+          ns = alignUp8(ns);
+          at.push({ off: ns, ptr: true, bytes: size, copyOff });
+          ns += 8;
+        }
+        pending.push(at[at.length - 1]);
+        continue;
+      }
+      // B.4：聚合按 8 取整
+      if (hfa === null) size = alignUp8(size);
+      // C.2：HFA 进连着的几个 v 寄存器
+      if (hfa !== null && nv + hfa.n <= 8) {
+        at.push({ v: nv, hfa, bytes: mem.size });
+        nv += hfa.n;
+        continue;
+      }
+      // C.3：放不下的 HFA 把 v 那一串数满，按 8 取整
+      if (hfa !== null) {
+        nv = 8;
+        size = alignUp8(size);
+        // C.4
+        ns = alignUp8(ns);
+        ns = ns + ((align - ns % align) % align);
+        // C.6
+        at.push({ off: ns, bytes: mem.size });
+        ns += size;
+        continue;
+      }
+      // C.8
+      if (align === 16) nx = (nx + 1) & ~1;
+      // C.10：整个聚合摊进 nx 起的几个整数寄存器
+      if (size <= (8 - nx) * 8) {
+        /* 字节数不是 8 的整数倍时（`struct {int a; char b;}` 是 12 或 5 字节）先在
+         * 出参区里落一份补齐到 8 的拷贝，再从那儿整格整格地取 —— 直接按 8 字节读源，
+         * 末尾那一格会读到 struct 之外去，源正好贴着一页的末尾就踩空。tcc 那边是
+         * `arm64_ldrs`（`arm64-gen.c:1145`）一条条算宽度拼出来的，效果一样，
+         * 而这一条落在「奇数宽度的聚合」这一路上，常见的 8/16 字节一条指令都不多。 */
+        const odd = mem.size % 8 !== 0;
+        const copyOff = odd ? copies : -1;
+        if (odd) copies += size;
+        at.push({ x: nx, xn: size / 8, bytes: mem.size, copyOff });
+        if (odd) pending.push(at[at.length - 1]);
+        nx += size / 8;
+        continue;
+      }
+      // C.11 / C.12 / C.13
+      nx = 8;
+      ns = alignUp8(ns);
+      ns = ns + ((align - ns % align) % align);
+      at.push({ off: ns, bytes: mem.size });
+      ns += size;
+      continue;
+    }
+    const flt = d.flt === true;
+    // C.1
+    if (flt && nv < 8) {
+      at.push({ v: nv });
+      nv++;
+      continue;
+    }
+    // C.5 / C.6：浮点走栈时一格 8 字节
+    if (flt) {
+      ns = alignUp8(ns);
+      at.push({ off: ns });
+      ns += 8;
+      continue;
+    }
+    // C.7
+    if (d.bytes <= 8 && nx < 8) {
+      at.push({ x: nx });
+      nx++;
+      continue;
+    }
+    // C.11 / C.12 / C.14 / C.15
+    nx = 8;
+    ns = alignUp8(ns);
+    at.push({ off: ns });
+    ns += 8;
+  }
+  /* 拷贝区排在出参区后面，两块在同一次 `sub sp` 里。偏移到这一步才定 —— 出参区
+   * 有多大要等所有实参都排完。 */
+  const base = alignUp8(ns);
+  for (const p of pending) p.copyOff += base;
+  return { at, stack: base + copies, argStack: base };
+}
+
+/** 往上取到 8 的倍数（`arm64_pcs_aux` 里那句 `(ns + 7) & ~7` 出现过五次）。 */
+function alignUp8(n) { return n + (n % 8 === 0 ? 0 : 8 - (n % 8)); }
 
 /**
  * 出参区要多大：本函数里最费的那次调用要往栈上摆几个字节（按 16 取整）。
@@ -191,16 +331,23 @@ function hasDynStack(f) {
   return false;
 }
 
-function inArgBytes(f) {  let ngrn = 0;
-  let nsrn = 0;
-  let bytes = 0;
-  for (const p of f.params) {
-    const flt = isFloatType(p.t);
-    if (flt && nsrn <= 7) { nsrn++; continue; }
-    if (!flt && ngrn <= 7) { ngrn++; continue; }
-    bytes += 8;
-  }
-  return bytes;
+/**
+ * 形参那一侧的描述表（喂 `pcsPlaces`）。
+ *
+ * 与实参那一侧问的是同一个问题（"这一格 ABI 摆在哪儿"），所以走同一段规则：
+ * `mem` 是按值收的 struct（前端按在形参表上的那一格），`sret` 是「返回值那一块的地址」
+ * 那个隐藏形参 —— 它进 x8，不占 x0（`arm64_pcs` 的 `a[0] == 1`）。
+ */
+function paramDescs(f) {
+  return f.params.map((p) => {
+    if (p.sret === true) return { mem: memInfoOf(f.retStruct, true) };
+    if (p.mem !== undefined) return { mem: memInfoOf(p.mem, false) };
+    return { mem: null, flt: isFloatType(p.t), bytes: scalarBytes(p.t) };
+  });
+}
+
+function inArgBytes(f) {
+  return pcsPlaces(paramDescs(f), -1).argStack;
 }
 
 class FnGen {
@@ -233,6 +380,25 @@ class FnGen {
       const pad = bytes % blk.align === 0 ? 0 : blk.align - (bytes % blk.align);
       this.frameOffs.push(bytes + pad);
       bytes = bytes + pad + blk.size;
+    }
+    /* 按值收的 struct 落脚的那几块（第一百三十一片）：进来在**寄存器**里的那些要有一块
+     * 地方待着 —— 序言把那几个寄存器存进去、槽里放这一块的地址，于是函数体那一侧照旧
+     * 「槽里是一个 struct 的地址」，一个字都不用改。在入参区里的（C.13）与换成指针的
+     * （B.3）不用这一块：地址已经现成。
+     *
+     * 划在帧里而不是出参区：它得活到函数返回，而出参区每次调用都会被踩。 */
+    this.paramBlocks = [];
+    for (const pl of pcsPlaces(paramDescs(f), -1).at) {
+      let need = 0;
+      if (pl.xn !== undefined) need = pl.xn * 8;
+      else if (pl.hfa !== undefined) need = pl.hfa.n * pl.hfa.size;
+      if (need === 0) {
+        this.paramBlocks.push(-1);
+        continue;
+      }
+      const pad = bytes % 16 === 0 ? 0 : 16 - (bytes % 16);
+      this.paramBlocks.push(bytes + pad);
+      bytes = bytes + pad + need;
     }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
     /* 会动栈顶的函数（第三十六片）：帧最上面留一格存调用者的 x28，往后一律按 `FB`
@@ -284,6 +450,25 @@ class FnGen {
   frameStore(reg, off) {
     if (off > 32760) throw new OmniError(`arm64: 帧偏移 ${off} 太大（这一片还不搬基址）`);
     this.buf.emit(strU(3, reg, this.base, off));
+  }
+
+  /**
+   * `rd = base + off`（第一百三十一片：按值收发 struct 要「某一块在哪儿」这个地址）。
+   *
+   * 拆成「多少个 4096」+「余下的」两条**立即数形式**的 add，而不是造个立即数再走
+   * 寄存器形式 —— 后者在 `base` 是 `sp` 时是错的：移位寄存器形式里 31 号是 `xzr`
+   * 不是 `sp`（同一个坑第二十六片踩过一次，见序言里那一段）。
+   */
+  addOff(rd, base, off) {
+    const hi = Math.floor(off / 4096);
+    const lo = off % 4096;
+    if (hi > 4095) throw new OmniError(`arm64: 偏移 ${off} 太大（两条 add 装不下）`);
+    if (hi === 0) {
+      this.buf.emit(addImm(1, rd, base, lo));
+      return;
+    }
+    this.buf.emit(addImm(1, rd, base, hi, 1));
+    if (lo > 0) this.buf.emit(addImm(1, rd, rd, lo));
   }
 
   /* -------------------------------------------------------------- 立即数
@@ -378,25 +563,62 @@ class FnGen {
      * 一格按 8 字节读。欠账：i32 的形参按规范形（符号扩展的 64 位）用，而别人（clang）
      * 摆在栈上的那一格高 32 位是不保证的 —— 与寄存器那一路的同一笔账（那边也直接
      * 存了整个 x 寄存器），一起还。 */
-    let ngrn = 0;
-    let nsrn = 0;
-    let inArg = 16;
+    /* 形参照 `pcsPlaces` 摆（第一百三十一片起与实参那一侧共用同一段规则）：
+     * 整数与浮点分成两串（x0-x7 与 v0-v7），放不下的从**入参区**读 —— 调用方摆在它
+     * 自己的出参区里，也就是我们这一层 `fp + 16` 起的地方（`fp`/`lr` 那一对占了前 16）。
+     *
+     * 一格按 8 字节读。欠账：i32 的形参按规范形（符号扩展的 64 位）用，而别人（clang）
+     * 摆在栈上的那一格高 32 位是不保证的 —— 与寄存器那一路的同一笔账，一起还。 */
+    const places = pcsPlaces(paramDescs(f), -1).at;
+    let pi = 0;
     for (const p of f.params) {
-      const flt = isFloatType(p.t);
-      if (flt && nsrn <= 7) {
-        this.fromFp(TMP0, nsrn, typeKind(p.t) === T_F64);
+      const place = places[pi];
+      const blk = this.paramBlocks[pi];
+      pi++;
+      /* 隐藏的返回值指针（>16 字节那条路）：它在 **x8** 里，不在 x0 里。 */
+      if (place.sret !== undefined) {
+        this.frameStore(8, this.slotOff(p.slot));
+        continue;
+      }
+      /* HFA 进来在 v 寄存器里（C.2）：落进 `blk` 那一块，槽里放它的地址。 */
+      if (place.hfa !== undefined) {
+        const dbl = place.hfa.size === 8;
+        for (let j = 0; j < place.hfa.n; j++) {
+          this.fromFp(TMP0, place.v + j, dbl);
+          buf.emit(strU(dbl ? 3 : 2, TMP0, this.base, blk + j * place.hfa.size));
+        }
+        this.addOff(TMP0, this.base, blk);
         this.frameStore(TMP0, this.slotOff(p.slot));
-        nsrn++;
         continue;
       }
-      if (!flt && ngrn <= 7) {
-        this.frameStore(ngrn, this.slotOff(p.slot));
-        ngrn++;
+      /* 聚合摊在几个整数寄存器里（C.10）：同上，落进 `blk`。 */
+      if (place.xn !== undefined) {
+        for (let j = 0; j < place.xn; j++) {
+          buf.emit(strU(3, place.x + j, this.base, blk + j * 8));
+        }
+        this.addOff(TMP0, this.base, blk);
+        this.frameStore(TMP0, this.slotOff(p.slot));
         continue;
       }
-      buf.emit(ldrU(3, TMP0, 29, inArg));
-      this.frameStore(TMP0, this.slotOff(p.slot));
-      inArg += 8;
+      /* 入参区里的一整块（C.13）：**不用拷** —— 地址就是它待着的地方，而「形参是实参的
+       * 一份可改的拷贝」那次拷贝是前端发的（`structCopy`），不是这一层的事。 */
+      if (place.off !== undefined && place.bytes !== undefined && place.ptr !== true) {
+        this.addOff(TMP0, 29, 16 + place.off);
+        this.frameStore(TMP0, this.slotOff(p.slot));
+        continue;
+      }
+      /* 入参区里的一格（标量、或 B.3 换成的那个指针）。 */
+      if (place.off !== undefined) {
+        buf.emit(ldrU(3, TMP0, 29, 16 + place.off));
+        this.frameStore(TMP0, this.slotOff(p.slot));
+        continue;
+      }
+      if (place.v !== undefined) {
+        this.fromFp(TMP0, place.v, typeKind(p.t) === T_F64);
+        this.frameStore(TMP0, this.slotOff(p.slot));
+        continue;
+      }
+      this.frameStore(place.x, this.slotOff(p.slot));
     }
 
     for (let i = 0; i < f.count(); i++) this.one(i);
@@ -480,6 +702,28 @@ class FnGen {
     if (op === OP.RET) {
       if (f.a[i] !== REF_NONE) {
         this.loadRef(TMP0, f.a[i]);
+        /* 返回一整块 struct 且 ≤16 字节（第一百三十一片）：MIR 那条 RET 带的是**那一块的
+         * 地址**，而 ABI 要的是值在 x0/x1（或 v0-v3，HFA）里 —— 所以在这儿装一次。
+         * 与 tcc 的 `gfunc_return`（`arm64-gen.c:1546`）是同一件事。>16 字节那条路不走
+         * 这儿：被调方写的就是 x8 那个地址，回去照旧把地址放 x0（tcc 的 rax 也一样）。
+         *
+         * 那一块前端补齐到了至少 16 字节，所以满 8 字节地读，不按 5/6/7 分岔。 */
+        const rs = f.retStruct;
+        if (rs !== 0 && memArgSize(rs) <= 16) {
+          const hfa = memArgHfa(rs);
+          if (hfa !== null) {
+            const dbl = hfa.size === 8;
+            for (let j = 0; j < hfa.n; j++) {
+              buf.emit(ldrU(dbl ? 3 : 2, TMP1, TMP0, j * hfa.size));
+              this.toFp(j, TMP1, dbl);
+            }
+          } else {
+            buf.emit(ldrU(3, 0, TMP0, 0));
+            if (memArgSize(rs) > 8) buf.emit(ldrU(3, 1, TMP0, 8));
+          }
+          buf.b(this.retLabel);
+          return;
+        }
         /* 浮点的返回值在 d0，整数在 x0。i32 的规范形是符号扩展过的 64 位，而 AAPCS
          * 只看 w0 —— 两边都对，不用再削。 */
         if (isFloatType(t)) this.toFp(0, TMP0, typeKind(t) === T_F64);
@@ -494,13 +738,13 @@ class FnGen {
      * 也没有 —— 「全落栈」这个笨办法在这儿一次性省掉了整个调用点的溢出逻辑。 */
     if (op === OP.CALL) {
       if (this.callLabels === null) arm64Nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
-      this.callArgs(f.argsOf(f.b[i]), -1);
+      const sret = this.callArgs(f.argsOf(f.b[i]), -1);
       /* 模块内的直接调用也走**符号**（第一百二十七片，与 x64 那一份同一条）：位移留 0、
        * 发一条重定位。量过 tcc：哪怕被调的就在同一个 `.o` 里、哪怕它是局部符号，
        * `.rela.text` 里也有那一条。`callLabels` 还留着 —— 那一格是「这个模块里有没有
        * 落点」的判据。 */
       buf.blSym(this.funcSym(f.a[i]));
-      return this.callRet(i, t);
+      return this.callRet(i, t, sret);
     }
     /* `CCALL` 是**外部符号**（`printf`、`malloc`）。模块内的调用走标签、跨模块的走符号
      * ——这一格是欠链接器的第一笔账（`asm.js` 的 `blSym` 记，`macho.js` 写成
@@ -510,9 +754,9 @@ class FnGen {
       if (name === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号 C 入口`);
       /* aux 是变参分界（第二十二片）：0 = 不是变参调用，否则固定实参个数 + 1。
        * 高位那一格（`CALL_LDRET`）是 x86_64 的事，这条腿上前端不会点它。 */
-      this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
+      const sret = this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
       buf.blSym(name);
-      return this.callRet(i, t);
+      return this.callRet(i, t, sret);
     }
     /* `CALLI` 是**按指针调用**（第二十七片）。native 上函数指针就是真地址，所以一条
      * `blr`。次序要紧：先把实参摆好（那一步用 x0-x7 与草稿寄存器），**再**把目标地址
@@ -520,10 +764,10 @@ class FnGen {
     if (op === OP.CALLI) {
       if (!this.mod.native) arm64Nyi('CALLI（解释器那条腿上函数指针是「号 + 1」，不是地址）');
       /* aux 是变参分界（第三十五片），与 `CCALL` 同一个编码。 */
-      this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
+      const sret = this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
       this.loadRef(TMP0, f.a[i]);
       buf.emit(blr(TMP0));
-      return this.callRet(i, t);
+      return this.callRet(i, t, sret);
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 同一对指令，只是符号在 `__TEXT` 里。 */
     if (op === OP.FADDR) {
@@ -616,7 +860,7 @@ class FnGen {
     /* 变参里的一整块内容（第三十九片）：这一条本身**不发访存** —— 内容什么时候拷、
      * 拷到哪儿，是调用那一头的事（`callArgs` 里按 `place.bytes` 拷）。这儿只把地址
      * 落到自己的栈位上，好让 `callArgs` 拿得到。 */
-    if (op === OP.ARGMEM) {
+    if (op === OP.ARGMEM || op === OP.ARGSRET) {
       this.loadRef(RES, f.a[i]);
       return this.def(i, RES);
     }
@@ -824,32 +1068,54 @@ class FnGen {
   }
 
   /** 实参就位：整数一串（x0-x7）、浮点一串（v0-v7），**各自从 0 起数**（AAPCS）。 */
+  /**
+   * 把实参摆到位。回「返回值那一块」的那一格（`{place, ref}`，没有就 null）——
+   * 调用之后 `callRet` 要按它把 x0/x1（或 v0-v3）里的值写进去。
+   */
   callArgs(args, nfixed) {
     const p = argPlaces(this.mod, this.f, args, nfixed);
+    let sret = null;
     let k = 0;
     for (const ar of args) {
       const place = p.at[k];
       k++;
-      /* 走栈的（放不下的固定实参、以及变参那几个）：一格 8 字节，摆在出参区里。
-       * 这一条**只能按 `sp` 写**（第三十六片）：出参区的约定是「紧贴 sp」，而会动栈顶的
-       * 函数里 `this.base` 是那个钉住的帧基址，与 `sp` 早就不是一回事了。 */
+      /* 返回值那一块（`ARGSRET`，第一百三十一片）：放到最后再摆 —— 它要占 x8，
+       * 而 x8 正是这一层的草稿寄存器（`RES`），别的实参摆完之前不能占着。 */
+      if (place.sret !== undefined) {
+        sret = { place, ref: ar };
+        continue;
+      }
+      /* >16 字节的聚合（B.3）：ABI 传的是指针，而 C 要的是**一份拷贝**（形参是实参的
+       * 一份可改的拷贝，C11 6.9.1 第 10 段）—— 所以先在出参区里拷一份，传那一份的地址。
+       * tcc 也是这么做的（`gfunc_call` 里的 `a1[i]`，同一块 `sub sp` 里划出来的）。 */
+      if (place.ptr === true) {
+        this.blockCopy(ar, place.copyOff, place.bytes);
+        if (place.x !== undefined) this.addOff(place.x, SP, place.copyOff);
+        else {
+          this.addOff(TMP1, SP, place.copyOff);
+          this.buf.emit(strU(3, TMP1, SP, place.off));
+        }
+        continue;
+      }
+      /* 出参区里的一整块（C.13/C.15 那两条与变参那一段）。 */
       if (place.off !== undefined) {
-        /* 一整块内容（`ARGMEM`，第三十九片）：把 `bytes` 个字节拷进那一格。
-         * 按 8/4/2/1 递降着拷，**不拷到格子的末尾**（格子补齐到 8，源没有那么长）——
-         * 多读的那几个字节大多无害，可源要是正好贴着一页的末尾就会踩空。 */
         if (place.bytes !== undefined) {
-          this.loadRef(TMP0, ar);
-          let at = 0;
-          for (const [w, sz] of [[8, 3], [4, 2], [2, 1], [1, 0]]) {
-            while (place.bytes - at >= w) {
-              this.buf.emit(ldrU(sz, TMP1, TMP0, at), strU(sz, TMP1, SP, place.off + at));
-              at += w;
-            }
-          }
+          this.blockCopy(ar, place.off, place.bytes);
           continue;
         }
         this.loadRef(TMP0, ar);
         this.buf.emit(strU(3, TMP0, SP, place.off));
+        continue;
+      }
+      /* HFA 进连着的几个 v 寄存器（C.2）：一个成员一格。位模式先进整数草稿再 `fmov`
+       * 过去 —— 这一层本来就是这么搬浮点的（见 `toFp`），不用新的编码。 */
+      if (place.hfa !== undefined) {
+        this.loadRef(TMP0, ar);
+        for (let j = 0; j < place.hfa.n; j++) {
+          const dbl = place.hfa.size === 8;
+          this.buf.emit(ldrU(dbl ? 3 : 2, TMP1, TMP0, j * place.hfa.size));
+          this.toFp(place.v + j, TMP1, dbl);
+        }
         continue;
       }
       if (place.v !== undefined) {
@@ -857,12 +1123,67 @@ class FnGen {
         this.toFp(place.v, TMP0, typeKind(this.typeOfRef(ar)) === T_F64);
         continue;
       }
+      /* 聚合摊进几个整数寄存器（C.10）：整格整格地取。奇数宽度的先落一份补齐的拷贝
+       * （`argPlaces` 划的那一块），从那儿取就不会读到 struct 之外。 */
+      if (place.xn !== undefined) {
+        if (place.copyOff >= 0) {
+          this.blockCopy(ar, place.copyOff, place.bytes);
+          this.addOff(TMP0, SP, place.copyOff);
+        } else this.loadRef(TMP0, ar);
+        for (let j = 0; j < place.xn; j++) {
+          this.buf.emit(ldrU(3, place.x + j, TMP0, j * 8));
+        }
+        continue;
+      }
       this.loadRef(place.x, ar);
+    }
+    if (sret !== null && sret.place.x8 === true) this.loadRef(8, sret.ref);
+    return sret;
+  }
+
+  /**
+   * 把 `ar` 指着的 `bytes` 个字节拷到出参区的 `off` 处。
+   *
+   * 按 8/4/2/1 递降着拷，**不拷到格子的末尾**（格子补齐到 8，源没有那么长）——
+   * 多读的那几个字节大多无害，可源要是正好贴着一页的末尾就会踩空。
+   */
+  blockCopy(ar, off, bytes) {
+    this.loadRef(TMP0, ar);
+    let at = 0;
+    for (const [w, sz] of [[8, 3], [4, 2], [2, 1], [1, 0]]) {
+      while (bytes - at >= w) {
+        this.buf.emit(ldrU(sz, TMP1, TMP0, at), strU(sz, TMP1, SP, off + at));
+        at += w;
+      }
     }
   }
 
-  /** 返回值落回栈位。 */
-  callRet(i, t) {
+  /** 返回值落回栈位。`sret` 是 `callArgs` 回的那一格（没有就 null）。 */
+  callRet(i, t, sret) {
+    /* 返回的是一整块 struct（第一百三十一片）：这条指令的"值"是**那一块的地址** ——
+     * 前端拿它当 struct 的左值（`sMem(ret, r, 0)`）。>16 字节那条路上被调方已经按我们
+     * 进去前放进 x8 的地址写好了；≤16 字节那条要调用方自己把 x0/x1（或 v0-v3）写进去，
+     * 与 tcc 的 `gfunc_call` 收尾那一段（`arm64-gen.c:1197`）是同一件事。
+     *
+     * 那一块前端补齐到了至少 16 字节（见 `callArgs` 里那一段），所以这儿满 8 字节地写，
+     * 不用按 5/6/7 那几种宽度分岔（tcc 也是直接 `stp x0,x1,[x8]`）。 */
+    if (sret !== undefined && sret !== null) {
+      const m = sret.place.sret;
+      this.loadRef(TMP0, sret.ref);
+      if (sret.place.x8 !== true) {
+        if (m.hfa !== null) {
+          for (let j = 0; j < m.hfa.n; j++) {
+            const dbl = m.hfa.size === 8;
+            this.fromFp(TMP1, j, dbl);
+            this.buf.emit(strU(dbl ? 3 : 2, TMP1, TMP0, j * m.hfa.size));
+          }
+        } else {
+          this.buf.emit(strU(3, 0, TMP0, 0));
+          if (m.size > 8) this.buf.emit(strU(3, 1, TMP0, 8));
+        }
+      }
+      return this.def(i, TMP0);
+    }
     if (typeKind(t) === T_VOID) return;
     if (isFloatType(t)) {
       this.fromFp(RES, 0, typeKind(t) === T_F64);

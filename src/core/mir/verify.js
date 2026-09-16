@@ -247,16 +247,19 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     }
     return;
   }
-  /* 变参里的一整块内容（第三十九片）：只有 native 有真 ABI 可言 —— 线性内存那条腿上
-   * 变参走的是我们自己摆的那块变参区（`vaBlock`），struct 直接摊进去，不用新 op。 */
-  if (op === OP.ARGMEM) {
-    if (!mod.native) { bad(i, 'ARGMEM：只有 native 这条腿上变参按真 ABI 走'); return; }
-    if (memArgSize(v) <= 0) { bad(i, `ARGMEM 的字节数是 ${memArgSize(v)}，只能是正数`); return; }
+  /* 一整块内容当实参（第三十九片；第一百三十一片起固定形参也走它）：只有 native 有真
+   * ABI 可言 —— 线性内存那条腿上变参走的是我们自己摆的那块变参区（`vaBlock`）、固定的
+   * struct 实参传地址，两处都不用新 op。`ARGSRET` 是同一族的第二条，带的是「返回值那
+   * 一块在哪儿」，规矩一样。 */
+  if (op === OP.ARGMEM || op === OP.ARGSRET) {
+    const nm = OP_NAMES[op];
+    if (!mod.native) { bad(i, `${nm}：只有 native 这条腿上按真 ABI 走`); return; }
+    if (memArgSize(v) <= 0) { bad(i, `${nm} 的字节数是 ${memArgSize(v)}，只能是正数`); return; }
     if (memArgSize(v) > 16 && memArgSse(v) !== 0) {
-      bad(i, `ARGMEM 有 ${memArgSize(v)} 字节，超过 16 的一律进内存，SSE 位图该是 0`);
+      bad(i, `${nm} 有 ${memArgSize(v)} 字节，超过 16 的一律进内存，SSE 位图该是 0`);
       return;
     }
-    if (f.t[i] !== T_I64) bad(i, `ARGMEM 的 t 是 ${typeText(f.t[i])}，它拿的是地址，只能是 i64`);
+    if (f.t[i] !== T_I64) bad(i, `${nm} 的 t 是 ${typeText(f.t[i])}，它拿的是地址，只能是 i64`);
     return;
   }
   /* 会动的栈顶（第三十六片）：只有 native 有真的机器栈可动 —— 线性内存那条腿上

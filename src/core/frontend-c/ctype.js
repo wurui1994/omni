@@ -300,6 +300,74 @@ export function sseEightbytes(ty) {
   return mask;
 }
 
+/**
+ * 这个类型是不是 arm64 的 **HFA/HVA**（同质浮点聚合，AAPCS64 的 §5.9.5）——
+ * 是就回 `{n, size}`（`n` 个成员、每个 `size` 字节），不是就回 `null`（第一百三十一片）。
+ *
+ * 照 `arm64-gen.c:752` 的 `arm64_hfa_aux` / `arm64_hfa` 抄，包括那三条容易漏的：
+ *
+ *   - 成员的偏移必须**正好**是「已经数出来的个数 × 每个的宽度」，而整个聚合的
+ *     `sizeof` 也必须正好是那个乘积 —— 于是任何空洞、任何尾部补齐都把它踢出 HFA
+ *     （`struct { float a; int b; float c; }` 靠这一条被挡住，而不是靠数成员）
+ *   - union 的每个成员**各自从 num0 数起**，取最大的那个
+ *   - 结构体里的浮点数组是摊开算的，摊开之后超过 4 个就不是 HFA
+ *
+ * 与 `sseEightbytes` 同一个理由住在这儿：这是一条**类型事实**，不是 ABI 决定 ——
+ * 我们的 MIR 是标量类型的，后端看不到 CType（tcc 的后端能看到，这是唯一的偏离），
+ * 所以算在前端、结果编在 `ARGMEM` 的 aux 上带下去。
+ *
+ * 只有聚合类型会回非 null：标量的 float/double 自己走 `is_float` 那一路（C.1），
+ * 与 tcc 的 `arm64_hfa` 一样先要 `VT_STRUCT`。
+ */
+export function hfaOf(ty) {
+  if (!isStruct(ty.t)) return null;
+  /** `fsize` 在 tcc 那边是个 `int *` 出参；这儿用一格盒子装，语义一样。 */
+  const box = { size: 0 };
+  const aux = (t, num) => {
+    const b = btype(t.t);
+    if (!isArray(t.t) && !isStruct(t.t)
+      && (b === VT_FLOAT || b === VT_DOUBLE || b === VT_LDOUBLE)) {
+      const n = typeSize(t).size;
+      if (num >= 4 || (box.size !== 0 && box.size !== n)) return -1;
+      box.size = n;
+      return num + 1;
+    }
+    if (isStruct(t.t)) {
+      if (t.ref === null || t.ref.fields === undefined) return -1;
+      const num0 = num;
+      let cur = num;
+      if (!isUnion(t.t)) {
+        for (const fd of t.ref.fields) {
+          if (fd.off !== (cur - num0) * box.size) return -1;
+          cur = aux(fd.ty, cur);
+          if (cur === -1) return -1;
+        }
+        if (t.ref.size !== (cur - num0) * box.size) return -1;
+        return cur;
+      }
+      for (const fd of t.ref.fields) {
+        const num1 = aux(fd.ty, num0);
+        if (num1 === -1) return -1;
+        cur = num1 < cur ? cur : num1;
+      }
+      if (t.ref.size !== (cur - num0) * box.size) return -1;
+      return cur;
+    }
+    if (isArray(t.t)) {
+      if (t.count === 0) return num;
+      let num1 = aux(t.ref, num);
+      if (num1 === -1 || (num1 !== num && t.count > 4)) return -1;
+      num1 = num + t.count * (num1 - num);
+      if (num1 > 4) return -1;
+      return num1;
+    }
+    return -1;
+  };
+  const n = aux(ty, 0);
+  if (n > 0 && n <= 4) return { n, size: box.size };
+  return null;
+}
+
 /* `long double` 的宽度按**目标**走（第一百一十一片）。tcc 那边这是个编译期常量
  * （`x86_64-gen.c:102-103` 的 LDOUBLE_SIZE/ALIGN 是 16/16；MACHO+ARM64 与 PE 开
  * `TCC_USING_DOUBLE_FOR_LDOUBLE`，于是 8/8）；我们的目标是运行时的一个开关，
