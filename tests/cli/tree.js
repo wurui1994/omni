@@ -284,9 +284,13 @@ eq('run/build 还没覆盖（边走边决定）', planForOmni('run', 'a.omni', [
 }
 
 /* ---- tcc 那一层翻译（ADR-0018 决策三）。门拿**同一串 argv** 喂两边，靠的就是它，
- *      所以它自己也得有人称。 */
+ *      所以它自己也得有人称。
+ *
+ * 第三个参数是「这台机器」（不给 `-b` 时的默认目标）—— 这一份不碰宿主，所以测里
+ * 把宿主钉成 arm64-osx，判据才不跟着跑测的机器变。 */
+const HOST = { arch: 'arm64', os: 'osx' };
 {
-  const r = tccTranslate(['-B', '/t', '-c', 'x.c', '-o', 'x.o'], err);
+  const r = tccTranslate(['-B', '/t', '-c', 'x.c', '-o', 'x.o'], err, HOST);
   /* `-B DIR` 递的是 `--tcc-lib-dir DIR`，**不是** `-isystem DIR/include`：
    * tcc 那边 `{B}/include` 就是自带那一份的位置，给了 `-B` 就没有别的自带头了，
    * 所以它是「换掉」而不是「多一条」。从前翻成 `-isystem` 还有第二个毛病 ——
@@ -301,7 +305,7 @@ eq('run/build 还没覆盖（边走边决定）', planForOmni('run', 'a.omni', [
   /* `-D` 与 `-U` 按**命令行次序**走 —— 攒成「先所有 -D 再所有 -U」就把
    * `-DA=1 -UA` 与 `-UA -DA=1` 弄成一回事了（`tests/c/dm-order.js` 称的那一格）。 */
   const head = (a) => {
-    const v = tccTranslate([...a, '-E', 'x.c'], err).argv;
+    const v = tccTranslate([...a, '-E', 'x.c'], err, HOST).argv;
     const i = v.findIndex((t) => t.startsWith('--'));
     return i < 0 ? v : v.slice(0, i);
   };
@@ -310,12 +314,12 @@ eq('run/build 还没覆盖（边走边决定）', planForOmni('run', 'a.omni', [
 }
 {
   let msg = '';
-  try { tccTranslate(['-c', 'x.c', '-zzz'], err); } catch (e) { msg = e.message; }
+  try { tccTranslate(['-c', 'x.c', '-zzz'], err, HOST); } catch (e) { msg = e.message; }
   eq('不认识的开关直接骂（不像别处那样放过）', msg.includes("不认识的开关 '-zzz'"), true);
 }
 {
   /* `-v` 是数出来的（tcc 的 `do ++verbose; while (*optarg++ == 'v')`），不是查表。 */
-  const r = tccTranslate(['-E', 'x.c', '-vv'], err);
+  const r = tccTranslate(['-E', 'x.c', '-vv'], err, HOST);
   eq('-vv 数成两个 -v', r.argv.filter((t) => t === '-v').length, 2);
 }
 

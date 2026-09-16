@@ -34,9 +34,15 @@ const FLAGS = new Set([
   '-pie', '-rdynamic', '-w', '-Wall', '-fPIC', '-funsigned-char', '-m64',
 ]);
 
-/** `-b x86_64-linux` -> `{arch, os}`。默认 arm64-osx（本机那一支，与别处同一个默认）。 */
-function targetOf(b) {
-  if (b === undefined) return { arch: 'arm64', os: 'osx' };
+/**
+ * `-b x86_64-linux` -> `{arch, os}`。不给 `-b` 就是**这台机器**（`host`）——
+ * 从前这儿写死 arm64-osx，代价在 x86_64 容器里量到了：`omni c tcc x.c` 报
+ * `/usr/include/gnu/stubs.h:7: error: include file 'gnu/stubs-32.h' not found`
+ * （预定义里没有 `__x86_64__`，glibc 的头于是走 32 位那一支）。
+ * 与 `omni c` 那一组同一条规矩（第一百四十七片），这一条当时漏了。
+ */
+function targetOf(b, host) {
+  if (b === undefined) return { arch: host.arch, os: host.os };
   const i = b.indexOf('-');
   if (i < 0) throw new Error(`-b 要写成 ARCH-OS（比如 x86_64-linux），给的是 '${b}'`);
   return { arch: b.slice(0, i), os: b.slice(i + 1) };
@@ -45,9 +51,11 @@ function targetOf(b) {
 /**
  * 把 tcc 的一串 argv 翻成 `(omni 命令的 key, 那条命令的 argv)`。
  *
- * `err` 是造错误的（`cli.js` 给 `OmniError`）—— 这一份不碰宿主，好单独测。
+ * `err` 是造错误的（`cli.js` 给 `OmniError`）；`host` 是不给 `-b` 时的默认目标
+ * （`{arch, os}`，`cli.js` 传 `uname` 问出来的那一份）—— 这一份**不碰宿主**，
+ * 宿主的事都由调用方递进来，好单独测。
  */
-export function tccTranslate(argv, err) {
+export function tccTranslate(argv, err, host) {
   /** @type {Map<string, string[]>} */
   const opts = new Map();
   /** `-D`/`-U` **按命令行次序**攒的一串 —— 见下面 `passIncs` 里那段。 */
@@ -90,7 +98,7 @@ export function tccTranslate(argv, err) {
   const has = (n) => opts.has(n);
   const one = (n) => (opts.has(n) ? opts.get(n)[0] : undefined);
   const all = (n) => opts.get(n) ?? [];
-  const tgt = targetOf(one('-b'));
+  const tgt = targetOf(one('-b'), host);
   /** `-B DIR` 那一格（tcc 里叫 `tcc_lib_path`），没给就是 `null`。 */
   let passB = null;
 
