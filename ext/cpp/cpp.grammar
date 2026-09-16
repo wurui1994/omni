@@ -116,15 +116,28 @@
     (-> (specs ";") (decl (specs $*1)))
     (-> (specs declarators ";") (decl (specs $*1) (init $*2))))
 
+  ;; **至多一格 type-spec** —— C++ 本来就不许写两格类型说明符（`unsigned long` 那种是
+  ;; builtin 的组合，单开一条 `builtin-seq` 收）。不这么限死的话 `int main()` 有两解：
+  ;; `main` 也能当 type-spec 读（`type-spec -> qname -> ID`），于是"specs=[int] + 声明符
+  ;; main()"与"specs=[int,main] + 声明符 ()"都成立。**那不是"要回问类型"，是语法写松了。**
   (rule specs
-    (-> (spec) ($1))
-    (-> (specs spec) ($*1 $2)))
+    (-> (nt-specs1) $*1)
+    (-> (nt-specs type-spec nt-specs) ($*1 $2 $*3)))
 
-  (rule spec
+  ;; 非类型说明符：可以空的一串（type-spec 前后各一串）
+  (rule nt-specs
+    (-> () ())
+    (-> (nt-specs nt-spec) ($*1 $2)))
+
+  ;; 至少一格（`static x;` 这种没有类型的声明也得能读出来，判它合不合法不是语法的事）
+  (rule nt-specs1
+    (-> (nt-spec) ($1))
+    (-> (nt-specs1 nt-spec) ($*1 $2)))
+
+  (rule nt-spec
     (-> (store-spec) $1)
     (-> (cv) $1)
     (-> (fn-spec) $1)
-    (-> (type-spec) $1)
     (-> (attr-spec) $1))
 
   (rule store-spec
@@ -157,7 +170,7 @@
     (-> ("(" args ")") (args $*2)))
 
   (rule type-spec
-    (-> (builtin) $1)
+    (-> (builtin-seq) (btype $*1))
     (-> (qname) $1)
     (-> ("auto") (auto))
     (-> ("decltype" "(" expr ")") (decltype $3))
@@ -167,6 +180,12 @@
     (-> (enum-spec) $1)
     ;; `class Foo` / `struct Bar` 当**详述类型说明**用（前置引用）
     (-> (class-key qname) (elaborated $1 $2)))
+
+  ;; `unsigned long int` 那种组合：**它们合起来才是一格 type-spec**
+  ;; （"至多一格 type-spec"那条规矩因此不会把它们判成两格）
+  (rule builtin-seq
+    (-> (builtin) ($1))
+    (-> (builtin-seq builtin) ($*1 $2)))
 
   (rule builtin
     (-> ("void") $1) (-> ("bool") $1) (-> ("char") $1) (-> ("char8_t") $1)
@@ -498,11 +517,15 @@
     (-> (PPLINE) (pp $1))
     (-> (";") (empty))
     (-> ("{" stmts "}") (block $*2))
-    (-> (expr ";") (expr $1))
-    ;; **"能当声明就是声明"** —— 这是 C++ 自己的消歧规则（[stmt.ambig]），不是我们的偏好。
-    ;; `T * x;` 这种形状在 GLR 下两支都归约得成，靠 `prefer` 定胜负（bison 的 %dprec）。
-    ;; 这一条**不需要符号表**：它是语法层的规则，与"这名字登记成类型了吗"是两件事。
-    (-> (simple-decl) (prefer 1) $1)
+    ;; **两支撞车时偏表达式** —— 而且这个方向是量出来才定的：
+    ;; 先按 C++ 的 [stmt.ambig]"能当声明就是声明"给 `simple-decl` 加 prefer，结果
+    ;; `printf("%d\n", 1);` 被读成一格**声明**（`printf` 当类型名、实参当 ctor 初值）——
+    ;; 解析成功但树是错的，比报错糟。原因是那条标准规则的前提是"`printf` 是不是类型名"，
+    ;; 而那句话要**符号表**才答得出（task #15 剩下的那一笔）。
+    ;; 这个子集里每一格真声明都从 builtin 起头（`int` / `void` / …），而 builtin 起不了
+    ;; 表达式 —— 所以偏表达式在这一批里不会挑错。`T * x;` 那种形状要等回问机制。
+    (-> (expr ";") (prefer 1) (expr $1))
+    (-> (simple-decl) $1)
     (-> (func-def) $1)
     (-> (template-decl) $1)
     (-> (using-decl) $1)
