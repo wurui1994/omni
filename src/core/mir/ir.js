@@ -156,7 +156,14 @@ export const REF_NONE = 0xffff;  // 「没有操作数」。指令上界因此�
  *      而换来的只是"一个更大的上界"，没解决"入口无限长"这件事。
  *
  * C 与 JS 那两条腿不受影响（它们不经 MIR），所以自举链是绿的 —— 这一格只卡 MIR 那条腿
- * 吃整份编译器。 */
+ * 吃整份编译器。
+ *
+ * **第一百三十五片补一笔量**：闭环那条路上（生成的 C 交给我们自己那台 C 前端）这一格
+ * 又撞见了，而且这一次**第一条路走不通**：报的是
+ * `mir: 函数 $scan$u_elfExeImage 超过 32766 条指令` —— 它不是入口、不是模块级初始化，
+ * 是一个**普通的生成函数**（`elfExeImage` 那一段 scan），拆不出去。
+ * 所以「整份编译器过我们自己的 C 前端」这件事欠的就是第二条路：把 ref 加宽到 32 位。
+ * 小一点的程序不受影响：`tests/cases/01_basics.omni` 那一趟已经通了（见那一条提交）。 */
 
 export function isConstRef(ref) { return ref < REF_BIAS; }
 export function refText(ref) {
