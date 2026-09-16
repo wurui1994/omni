@@ -192,12 +192,11 @@ export const NODES = new Map([
   N('record-new', 'expr', [{ name: 'fields', sem: SEM.value, rest: true }], {
     attrs: ['names'], effects: ['allocates'], lifetime: 'owns',
     doc: 'go `T{…}` / lua `{x=1}` / V `T{…}` / nim `T(x: 1)` / CL defstruct',
-    // 规格里九门有记录（awk 只有关联数组，没有"按名字的字段"）。矩阵里接了五门。
+    // 规格里九门有记录（awk 只有关联数组，没有"按名字的字段"）。矩阵里接了七门 ——
+    // chez 与 sbcl 是后来接上的：难处不在节点，在"一句话生成一族名字"（那归映射）。
     providers: {
       spec: ['go', 'vlang', 'lua', 'nim', 'cpp', 'chez', 'sbcl', 'freebasic', 'mojo'],
       why: {
-        chez: '`define-record-type` 一句话生成一族构造器 / 访问器 —— 映射得先能"定义时造出名字"',
-        sbcl: '`defstruct` 同上（`make-point` / `point-x` 都是那一句生成的）',
         freebasic: '`Type … End Type` 要类型声明那一族（字段表在类型上，不在字面量上）',
         mojo: '`struct` 的字段要类型声明 + `__init__`，不是一格字面量',
       },

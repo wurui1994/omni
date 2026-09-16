@@ -14,6 +14,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   head, kids, text, symName, asList, counted, branchOf, listNew, indexGet, indexSet, destructure,
+  fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
 // 走 datum 树的那几个小函数与 chez **共用一份**（fromtree.js）—— 见那边的注释。
@@ -27,6 +28,48 @@ const PRIM = new Map([
 ]);
 
 const many = (xs) => xs.map(toNode);
+
+/**
+ * **`defstruct` 生成的那一族名字**（`(defstruct point x y)` → `make-point` / `point-x` / …）。
+ *
+ * 这是 CL 与 Scheme 在记录那一格上的**全部难处**：字段名不写在使用处，而是"一句话生成
+ * 一族名字"。可落到图上仍然只有现成的三格（`record-new` / `field-get` / `field-set`）——
+ * 所以这一格**归映射**，不是新节点，也不要类型层（`nodes.js` 里 record 那三格头一句就是
+ * "与类型无关"）。表在这儿：扫到 `defstruct` 就登记，用到那些名字时查。
+ *
+ * 只收最朴素的写法（`(defstruct 名字 字段…)`，字段可带默认值 `(x 0)`）：
+ * `(:constructor …)` / `:include` / `:conc-name` 那几个选项**不收** —— 它们会换掉生成的
+ * 名字，而"名字怎么生成"正是这一格的要害，猜不得。撞上就当普通调用（于是报 unbound name）。
+ */
+const STRUCTS = { fields: new Map(), maker: new Map(), access: new Map() };
+
+/** `(defstruct point x y)` -> 登记那一族名字。回一格空 region（声明这一批没有运行期动作）。 */
+function defstruct(rest) {
+  const name = symName(rest[0]);
+  if (name === null) throw new Error('sbcl->graph: defstruct 的名字那一格还没接（不收 (:constructor …) 那些选项）');
+  const fields = rest.slice(1).map((f) => {
+    const s = symName(f);
+    if (s !== null) return s;
+    const pair = asList(f) ?? [];        // `(x 0)`：带默认值的字段，名字仍是第一格
+    return symName(pair[0]);
+  }).filter((s) => s !== null);
+  STRUCTS.fields.set(name, fields);
+  STRUCTS.maker.set(`make-${name}`, name);
+  for (const f of fields) STRUCTS.access.set(`${name}-${f}`, f);
+  return node('region', { body: [] });
+}
+
+/** `(make-point :x 1 :y 2)` -> 一格 `record-new`（字段顺序按 `defstruct` 那一行，没给的是 nil）。 */
+function makeRecord(type, rest) {
+  const fields = STRUCTS.fields.get(type) ?? [];
+  const given = new Map();
+  for (let i = 0; i < rest.length - 1; i += 2) {
+    const k = symName(rest[i]);
+    if (k === null || !k.startsWith(':')) throw new Error(`sbcl->graph: make-${type} 只收关键字实参（:x 1）`);
+    given.set(k.slice(1), toNode(rest[i + 1]));
+  }
+  return node('record-new', { fields: fields.map((f) => given.get(f) ?? lit(null)) }, { names: fields });
+}
 
 function toNode(x) {
   switch (head(x)) {
@@ -60,18 +103,24 @@ function toNode(x) {
       return node('func', { body: many(rest.slice(1)) }, { params });
     }
     case 'setq': case 'setf': {
-      // **`setf` 的左边可以是一格形式**（广义位置）：`(setf (aref xs 1) 5)` -> index-set。
-      // 这一格是 CL 独有的形状，落到的却是别人也有的那格节点（go 的 `xs[1] = 5`）。
+      // **`setf` 的左边可以是一格形式**（广义位置）：`(setf (aref xs 1) 5)` -> index-set，
+      // `(setf (point-y p) 5)` -> field-set（那个名字是 `defstruct` 生成的，查登记表）。
+      // 这一格是 CL 独有的形状，落到的却是别人也有的那几格节点（go 的 `xs[1] = 5` / `p.y = 5`）。
       const inner = asList(rest[0]);
       if (inner !== null) {
         const place = symName(inner[0]);
         if (place === 'aref' || place === 'svref' || place === 'elt') {
           return indexSet(toNode(inner[1]), toNode(inner[2]), toNode(rest[1]));
         }
+        if (place !== null && STRUCTS.access.has(place)) {
+          return fieldSet(toNode(inner[1]), STRUCTS.access.get(place), toNode(rest[1]));
+        }
         throw new Error(`sbcl->graph: 这个 setf 位置还没接：${place}`);
       }
       return node('set', { value: toNode(rest[1]) }, { name: symName(rest[0]) });
     }
+    // `(defstruct point x y)` —— 一句话生成一族名字（构造器 / 访问器），见上面那段注释
+    case 'defstruct': return defstruct(rest);
     case 'defparameter': case 'defvar': case 'defconstant':
       return node('bind', { init: rest[1] === undefined ? lit(null) : toNode(rest[1]) }, { name: symName(rest[0]) });
     case 'if': return branchOf(
@@ -129,12 +178,20 @@ function toNode(x) {
   }
 
   if (op !== null && PRIM.has(op)) return node('prim', { args: many(rest) }, { name: PRIM.get(op) });
+  // `defstruct` 生成的那两族名字：构造器落 record-new、访问器落 field-get
+  if (op !== null && STRUCTS.maker.has(op)) return makeRecord(STRUCTS.maker.get(op), rest);
+  if (op !== null && STRUCTS.access.has(op)) return fieldGet(toNode(rest[0]), STRUCTS.access.get(op));
   return node('call', { fn: toNode(items[0]), args: many(rest) });
 }
 
 /** 一棵 sbcl 的 GLR 树（`(program datum…)`）-> 一张图。 */
 export function sbclToGraph(tree) {
   if (head(tree) !== 'program') throw new Error('sbcl->graph: 这不是 (program …)');
+  // 那张 `defstruct` 登记表是**一份源码一张**（模块层的 Map 在这儿清掉）——
+  // 不清的话第二份源码会看见第一份的字段名，那是"跨文件漏进来"的错。
+  STRUCTS.fields.clear();
+  STRUCTS.maker.clear();
+  STRUCTS.access.clear();
   return program(many(kids(tree)));
 }
 

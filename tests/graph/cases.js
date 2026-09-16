@@ -75,8 +75,9 @@ export const CASES = [
   ...fam('multi', MULTI, ['lua', 'go']),
   // 第三个家族：作用域出口（go/V/nim 的 defer 与 CL 的 unwind-protect 同一格节点）
   ...fam('defer', DEFER, ['go', 'sbcl', 'vlang', 'nim']),
-  // 第四个家族：记录（四门语言四种字面量记号，落同一格 record-new）
-  ...fam('record', RECORD, ['go', 'lua', 'vlang', 'nim', 'cpp']),
+  // 第四个家族：记录（**六门六种写法**，落同一格 record-new）——
+  // sbcl 那一份的难处与别人不同：字段名是 `(defstruct point x y)` 一句话生成的一族名字
+  ...fam('record', RECORD, ['go', 'lua', 'vlang', 'nim', 'cpp', 'sbcl', 'chez']),
   // 第五个家族：列表与下标（七个提供者 —— 两门 Lisp 的向量写起来像函数调用）
   ...fam('index', INDEX, ['go', 'lua', 'vlang', 'nim', 'chez', 'sbcl', 'mojo', 'cpp']),
   // 第六个家族：循环的早退（break / continue 落同一格，差的只有 kind；lua 只有 break）

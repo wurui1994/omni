@@ -11,6 +11,7 @@
 import { node, lit, program } from '../../src/core/graph/graph.js';
 import {
   head, kids, text, symName, asList, branchOf, listNew, indexGet, indexSet,
+  fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
 // 走 datum 树的那几个小函数（`head` / `kids` / `text` / `symName` / `asList`）
@@ -35,6 +36,59 @@ const PRIM = new Map([
 /** 一串 datum -> 一串节点（`region` 的 body 端口收的就是它）。 */
 const many = (xs) => xs.map(toNode);
 
+/**
+ * **`define-record-type` 生成的那一族名字** —— 与 CL 的 `defstruct` 是同一件事，
+ * 所以两份映射各有一张这样的表（`ext/sbcl/tograph.js` 里那段注释写了为什么它归映射）。
+ *
+ * 两种写法都收，因为它们**在同一门语言里都合法**，而且难处不一样：
+ *   R6RS（Chez 自带）：`(define-record-type point (fields x y))`
+ *     —— 名字是**生成**的：`make-point` / `point-x` / `point-x-set!`；
+ *   R7RS：`(define-record-type point (make-point x y) point? (x point-x set-point-x!) …)`
+ *     —— 名字**写在形式里**，一个都不用猜（所以这一支更省事，反倒是后来的标准更老实）。
+ * 别的选项（`(parent …)` / `(protocol …)` / `(nongenerative)`）不收：它们会换掉这一族名字。
+ */
+const RECORDS = { fields: new Map(), maker: new Map(), access: new Map(), setter: new Map() };
+
+function defRecord(rest) {
+  const name = symName(rest[0]) ?? symName((asList(rest[0]) ?? [])[0]);
+  if (name === null) throw new Error('chez->graph: define-record-type 的名字那一格还没接');
+  const ctor = asList(rest[1]);
+  if (ctor !== null && symName(ctor[0]) !== null && symName(ctor[0]) !== 'fields') {
+    // R7RS：`(make-point x y)` 给了构造器名与字段顺序，后面每一条 `(字段 访问器 [写入器])`
+    const fields = ctor.slice(1).map((f) => symName(f)).filter((s) => s !== null);
+    RECORDS.fields.set(name, fields);
+    RECORDS.maker.set(symName(ctor[0]), name);
+    for (const cl of rest.slice(3)) {
+      const c = asList(cl) ?? [];
+      const f = symName(c[0]);
+      if (f === null) continue;
+      if (symName(c[1]) !== null) RECORDS.access.set(symName(c[1]), f);
+      if (symName(c[2]) !== null) RECORDS.setter.set(symName(c[2]), f);
+    }
+    return node('region', { body: [] });
+  }
+  // R6RS：`(fields x y)` —— 那一族名字按规则生成
+  const fieldsClause = rest.slice(1).map((c) => asList(c) ?? [])
+    .find((c) => symName(c[0]) === 'fields') ?? [];
+  const fields = fieldsClause.slice(1).map((f) => symName(f) ?? symName((asList(f) ?? [])[1]))
+    .filter((s) => s !== null);
+  RECORDS.fields.set(name, fields);
+  RECORDS.maker.set(`make-${name}`, name);
+  for (const f of fields) {
+    RECORDS.access.set(`${name}-${f}`, f);
+    RECORDS.setter.set(`${name}-${f}-set!`, f);
+  }
+  return node('region', { body: [] });
+}
+
+/** `(make-point 1 2)` -> 一格 `record-new`（构造器的实参按字段顺序，位置对位置）。 */
+function makeRecord(type, rest) {
+  const fields = RECORDS.fields.get(type) ?? [];
+  return node('record-new', {
+    fields: fields.map((f, i) => (rest[i] === undefined ? lit(null) : toNode(rest[i]))),
+  }, { names: fields });
+}
+
 function toNode(x) {
   // ---- 叶子 ----------------------------------------------------------------
   switch (head(x)) {
@@ -54,6 +108,9 @@ function toNode(x) {
   const rest = items.slice(1);
 
   switch (op) {
+    // `(define-record-type point (fields x y))` —— 与 CL 的 `defstruct` 同一件事：
+    // **一句话生成一族名字**。落到的仍是现成那三格（见 ext/sbcl/tograph.js 那段注释）。
+    case 'define-record-type': return defRecord(rest);
     // `(define (f a b) body…)` 与 `(define x e)` —— **decl 就是 bind**（没有 decl 节点）
     case 'define': {
       const target = rest[0];
@@ -105,6 +162,12 @@ function toNode(x) {
   if (op !== null && PRIM.has(op)) {
     return node('prim', { args: many(rest) }, { name: PRIM.get(op) });
   }
+  // `define-record-type` 生成的那三族名字：构造器 / 访问器 / 写入器
+  if (op !== null && RECORDS.maker.has(op)) return makeRecord(RECORDS.maker.get(op), rest);
+  if (op !== null && RECORDS.access.has(op)) return fieldGet(toNode(rest[0]), RECORDS.access.get(op));
+  if (op !== null && RECORDS.setter.has(op)) {
+    return fieldSet(toNode(rest[0]), RECORDS.setter.get(op), toNode(rest[1]));
+  }
   return node('call', { fn: toNode(items[0]), args: many(rest) });
 }
 
@@ -114,6 +177,11 @@ function toNode(x) {
  */
 export function chezToGraph(tree) {
   if (head(tree) !== 'program') throw new Error('chez->graph: 这不是 (program …)');
+  // `define-record-type` 那张登记表是**一份源码一张**（不清的话第二份会看见第一份的字段名）
+  RECORDS.fields.clear();
+  RECORDS.maker.clear();
+  RECORDS.access.clear();
+  RECORDS.setter.clear();
   return program(many(kids(tree)));
 }
 

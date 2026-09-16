@@ -395,10 +395,10 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
 - 矩阵里因此第一次有了 **skip** 这一档：**每一格都带理由**
   （"打印一格多值要运行期长度 + 拼串" / "嵌套的函数（闭包）还没接" / "墙在 OIR 不在 wasm"）。
   跳过不是失败 —— 那正是 §6 第 2 条要的样子：待办是算出来的，不是文档里许的愿。
-  现在的总账：**322 passed / 0 failed / 1 skipped**（语言例子 71 + 手搭图 5 × 后端 4，
+  现在的总账：**330 passed / 0 failed / 1 skipped**（语言例子 73 + 手搭图 5 × 后端 4，
   再加 wat 那 5 条形状账各一份证物、五栏指纹那两组撞车、一格"出处齐不齐"、
   G1 与 G2 那八格、三格节点的"规格 vs 矩阵"提供者账），
-  每条腿末尾还印一行覆盖：`interp 76/76 · sx 76/76 · js 76/76 · wat 75/76`。
+  每条腿末尾还印一行覆盖：`interp 78/78 · sx 78/78 · js 78/78 · wat 77/78`。
   这三个数会随每一批节点变 —— 它们是**跑出来的**，不是写下来的，所以文档里这一行
   过期就是错，改代码的那一趟必须顺手改它。
 - **"还在跳的几乎全是字符串"那句话是错的 —— 数一遍就知道**。当时 21 格跳过里字符串只占 4 格
@@ -494,25 +494,25 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
    那说明删这一格会让**别处**崩，级联算漏了。
 3. **级联半径是数出来的**，不是手写的文档。
 
-现状：**41 样 × 76 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
+现状：**41 样 × 78 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
 数出来的半径（删了它，几份例子要它）：
 
 ```
 骨架那一层
-  prim 76/76 · const / ref / bind 各 71 · call / func 各 54 · branch 39 · region 37
+  prim 78/78 · const / ref / bind 各 73 · call / func 各 54 · branch / region 各 39
   set 35 · loop 34 · ret 27
-  list-new / index-get 各 12 · scope-exit / index-set / loop-exit 各 8
-  record-new / field-get / conv 各 6 · field-set 5
+  list-new / index-get 各 12 · record-new / field-get 各 8 · scope-exit / index-set / loop-exit 各 8
+  field-set 7 · conv 6
   values / map-new / map-get / map-set / map-has 各 5 · pick / slice 各 4
 附属那一层
-  prim.name 76 · const.value / ref.name / bind.name 各 71 · func.params / func.name 各 54
-  set.name 35 · loop-exit.kind 8 · conv.to 6 · record-new.names / field-get.field 各 6
-  field-set.field 5 · bind.keepMulti / pick.index 各 4
+  prim.name 78 · const.value / ref.name / bind.name 各 73 · func.params / func.name 各 54
+  set.name 35 · record-new.names / field-get.field 各 8 · loop-exit.kind 8 · field-set.field 7
+  conv.to 6 · bind.keepMulti / pick.index 各 4
 ```
 
 这张表就是 target.md 要的"特性 DAG 排序"的可量版本，而且它比 DAG 说得更准：
 **上面那 11 格是骨架**（半径 ≥ 27，删了就没程序可跑），**下面那 16 格想删就能删** ——
-删掉 `map` 那四格，另外 71 份例子一行不改照旧全绿；删掉 `record-new` 那三格是 70 份。
+删掉 `map` 那四格，另外 73 份例子一行不改照旧全绿；删掉 `record-new` 那三格是 70 份。
 这才是"原子化"真正的样子：不是"分层分得细"，是**删了不牵连**。
 
 顺带看一眼这张表的变化：加了 map 那四格（第九批）之后，**骨架那一层的半径没有一格变**
@@ -1100,6 +1100,29 @@ wat 那侧只加了两句：一格数放进一格 1 槽的存储，交给 `$__st
 
 还欠一格，明说：图那一层**没有复数、也没有 64 位整数**这两格值，所以 `1i` / `1LL`
 读得进来、映射当场报一句有名有姓的话（不许悄悄变成 `NaN`）。要接就是加值那一层的事。
+
+**第二十三批：CL 的 `defstruct` 与 Scheme 的 `define-record-type` 进矩阵（一格新节点都没加）**
+—— 总账 322 → **330 passed / 0 failed / 1 skipped**，例子 76 → 78 份。这一批直接付了上一批
+量出来的那笔账里最便宜的两门：记录那三格从 5 个提供者变成 **7 个**。
+
+为什么便宜：这两门的难处**不在节点，在名字**。字段名不写在使用处，而是一句话生成一族名字 ——
+`(defstruct point x y)` 生出 `make-point` / `point-x` / `(setf (point-y p) …)`；
+`(define-record-type point (fields x y))` 生出 `make-point` / `point-x` / `point-x-set!`。
+落到图上仍然只有现成的三格（`record-new` / `field-get` / `field-set`），所以这一格**归映射**：
+两份 `tograph.js` 各多一张登记表（扫到声明就登记，用到那些名字时查），一份源码一张（用完就清）。
+
+顺带把两件事说明白了：
+- **它不需要类型层**。`nodes.js` 里 record 那三格头一句就是"与类型无关" —— 现在同一格节点
+  接着 lua 的无类型表、go 的有类型 struct、CL 的 defstruct、Scheme 的 record type 四种来路。
+- **两种标准写法都收**。R6RS（Chez 自带）是"按规则生成名字"，R7RS 是"名字写在形式里" ——
+  后者反倒省事。选项那一族（`(:constructor …)` / `(parent …)` / `:conc-name`）**不收**：
+  它们会换掉生成的名字，而"名字怎么生成"正是这一格的要害，猜不得。
+
+于是那三格提供者账现在是：`scope-exit` 8/4 · `record-new` 9/**7** · `list-new` 9/8，
+"还欠"的只剩 freebasic 与 mojo 那两门 —— 它们欠的确实是**类型与方法分派**那一族
+（`Type … End Type` 的字段表在类型上、mojo 的 `struct` 要 `__init__`），
+与 lua 的 `<close>`、mojo 的 `with`、cpp 的 RAII 是同一族。上一批"三格的差集摆在一起"
+读出来的那句话因此更准了一格：**先能接的都接了，剩下的全指着同一个方向。**
 
 **第二十二批：把"规格里几门"与"矩阵里接了几门"分开，而且变成判据** —— 总账 319 →
 **322 passed / 0 failed / 1 skipped**（多的三格就是这一节）。这一批修的是一处**真烂过的账**：
