@@ -328,7 +328,10 @@ export function buildTable(g) {
 function augment(g) {
   // 增广：`$accept -> start`。归约它就是接受，所以它不进 rules，单独认。
   const acceptRule = g.rules.length;
-  const rules = [...g.rules, { lhs: ACCEPT, rhs: [g.start], action: null, prec: null, prefer: 0, span: null }];
+  const rules = [...g.rules, {
+    lhs: ACCEPT, rhs: [g.start], action: null, prec: null, prefer: 0,
+    declaresType: null, needsType: null, needsNonType: null, span: null,
+  }];
   // `new Map(x)` 落到 `js_map_of_pairs`，它现在**也收 Map**（浅拷贝），所以这里就是
   // 一句拷贝。从前手写一遍循环，是因为闭 ABI 的初值只收"成对的列表"—— node 上照跑，
   // 原生构建里当场报 "dynamic value is Map, expected list"（量出来的：自举链阶段 9）。
@@ -405,8 +408,14 @@ export function dumpTable(tb, brief = false) {
   lines.push(`grammar ${tb.grammar.name}: ${tb.grammar.terms.size} terminals, ${tb.grammar.nonterms.size} nonterminals, ${tb.grammar.rules.length} rules, ${tb.states.length} states`);
   for (let i = 0; i < tb.rules.length; i++) {
     const r = tb.rules[i];
-    // 印出 prefer：它不影响表，但它影响运行期定胜负，快照要能看住它
-    const tail = r.prefer === undefined || r.prefer === 0 ? '' : `   [prefer ${r.prefer}]`;
+    // 印出 prefer 与"回问"那三条：它们都不影响表，但都影响运行期定胜负，快照要能看住它们。
+    // 没写的一律不印 —— 这样十门里九门的快照一个字节都不变。
+    const marks = [];
+    if (r.prefer !== undefined && r.prefer !== 0) marks.push(`prefer ${r.prefer}`);
+    if (r.declaresType !== undefined && r.declaresType !== null) marks.push(`declares-type ${r.declaresType}`);
+    if (r.needsType !== undefined && r.needsType !== null) marks.push(`needs-type ${r.needsType}`);
+    if (r.needsNonType !== undefined && r.needsNonType !== null) marks.push(`needs-non-type ${r.needsNonType}`);
+    const tail = marks.length === 0 ? '' : `   [${marks.join(' ')}]`;
     lines.push(`  r${i}  ${r.lhs} -> ${r.rhs.length === 0 ? '<empty>' : r.rhs.map(sym).join(' ')}${tail}`);
   }
   for (let i = 0; i < tb.states.length && !brief; i++) {

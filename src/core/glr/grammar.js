@@ -29,6 +29,15 @@
 // - `(prefer N)` 可选，与 `(prec X)` 同位置、可换序，N 是整数，默认 0。它**不参与建表**，
 //   只在运行期"两支都归约成功、值又不同"的时候定胜负（见 driver.js 头部）。这就是 bison 的
 //   `%dprec`：GLR 下处理真歧义的唯一声明式手段，C 系语言的「声明 vs 表达式」绕不开它。
+// - **回问三条**（同位置、可换序，参数是 RHS 的位置 `1..n`）—— C 系语言的「这个名字登记成
+//   类型了吗」，也就是 bison 里做不到、靠 C 代码回问符号表的那件事：
+//     `(declares-type K)`   这一支归约成功之后，第 K 格里那个名字**登记成类型**；
+//     `(needs-type K)`      第 K 格那个名字**登记过**才许归约；
+//     `(needs-non-type K)`  第 K 格那个名字**没登记过**才许归约。
+//   与 `prefer` 一样**不参与建表**（表还是那张 LALR 表），只在运行期判。登记表是**每支
+//   分析各一份**的（见 driver.js）—— GLR 会分叉，一支里的 typedef 不能影响另一支。
+//   有了这三条，`T * x;` 那类歧义不必再靠 `prefer` 猜：`T` 登记过就只有声明说得通，
+//   没登记过就只有乘法说得通。
 
 import { isList, isAtom, isStr, head } from '../sexpr/read.js';
 import { readLexSpec, litName } from './lex.js';
@@ -129,26 +138,51 @@ export function readGrammar(nodes, diags) {
       let k = 1;
       let rulePrec = null;
       let prefer = 0;
-      // 标注可以有零个、一个或两个，次序不限 —— 两条各判一次，判到就往后挪
-      while (head(parts[k]) === 'prec' || head(parts[k]) === 'prefer') {
-        if (head(parts[k]) === 'prec') {
+      let declaresType = null;
+      let needsType = null;
+      let needsNonType = null;
+      /**
+       * 一格标注要一个**位置**（`1..rhs.length`）。三条"回问"标注共用这一格判断 ——
+       * 位置写错（不是整数、越界）是语法自己写错了，当场报，不猜。
+       */
+      const posOf = (form, what) => {
+        const p = form.items[1];
+        const txt = isAtom(p) ? p.value : '';
+        if (!/^[0-9]+$/.test(txt)) { err(form, `(${what} K) needs a right-hand side position`); return null; }
+        const n = Number(txt);
+        if (n < 1 || n > rhs.length) { err(form, `(${what} ${n}) is out of range (rhs has ${rhs.length})`); return null; }
+        return n;
+      };
+      const ANNOT = new Set(['prec', 'prefer', 'declares-type', 'needs-type', 'needs-non-type']);
+      // 标注可以有零到几个，次序不限 —— 每条各判一次，判到就往后挪
+      while (ANNOT.has(head(parts[k]))) {
+        const h = head(parts[k]);
+        if (h === 'prec') {
           const p = parts[k].items[1];
           const nm = isAtom(p) ? p.value : isStr(p) ? litName(p.value) : null;
           if (nm === null || !prec.has(nm)) err(parts[k], `(prec X) needs a terminal that has a precedence level`);
           else rulePrec = nm;
-        } else {
+        } else if (h === 'prefer') {
           const p = parts[k].items[1];
           // 刻意不用 Number.isInteger：它不在封闭 ABI 里。正则字面量在（从字面量降下来的那几个）
           const txt = isAtom(p) ? p.value : '';
           if (!/^-?[0-9]+$/.test(txt)) err(parts[k], '(prefer N) needs an integer');
           else prefer = Number(txt);
+        } else if (h === 'declares-type') {
+          declaresType = posOf(parts[k], 'declares-type');
+        } else if (h === 'needs-type') {
+          needsType = posOf(parts[k], 'needs-type');
+        } else {
+          needsNonType = posOf(parts[k], 'needs-non-type');
         }
         k++;
       }
       const action = parts[k] ?? null;
       if (action === null) err(alt, 'a rule alternative needs an action template');
       nonterms.get(lhs).rules.push(rules.length);
-      rules.push({ lhs, rhs, action, prec: rulePrec, prefer, span: alt.span });
+      rules.push({
+        lhs, rhs, action, prec: rulePrec, prefer, declaresType, needsType, needsNonType, span: alt.span,
+      });
     }
   }
 

@@ -11,20 +11,26 @@
 ;; 所以 `#…` 那些行当**指令**收（一整行记号，不解释），而**宏的使用**没法展开 ——
 ;; 哪一份文件的声明是宏生成的，那一份就过不去。这是明说的限制，不是 bug。
 ;;
-;; ## 二、"声明还是表达式"要**符号表**才判得了
+;; ## 二、"声明还是表达式"要**符号表**才判得了 —— 这一格现在真的有了
 ;;
 ;; `T * x;` —— `T` 是类型就是声明，不是类型就是乘法。`f(x);` —— `f` 是类型就是声明一个
 ;; 叫 `x` 的变量，不是类型就是调用。C++ 的语法**本身**是二义的，编译器靠"这个名字登记过
 ;; 没有"来判（所谓 typedef-name 反馈）。
 ;;
-;; 这一处正好是 GLR 的用处：两条路都走，靠后面的记号淘汰错的那一条。收得住的场合不少
-;; （`T * x = 0;` 只有声明说得通），收不住的场合就报歧义 —— **报出来比猜对一半好**。
-;; 真要全收，缺的不是产生式，是**驱动器能回问一句"这个名字是类型吗"**（与 nim 那份里
-;; 记的"列号谓词"是同一类的缺口，都在 driver.js 那一层）。
+;; 这一处正好是 GLR 的用处：两条路都走，靠后面的记号淘汰错的那一条。可光靠它收不住的
+;; 场合不少，而**偏一支（`%dprec` / 我们的 `prefer`）是在猜** —— 量过：偏声明（标准
+;; [stmt.ambig] 的字面读法）会把 `printf("%d\n", x);` 读成一格声明，树是错的。
+;;
+;; 所以驱动器补了三条**声明式**标注（`declares-type` / `needs-type` / `needs-non-type`，
+;; 见 `src/core/glr/driver.js` 文件头）：登记表挂在图结构栈的顶点上，一支的 typedef 不会
+;; 污染另一支。这份语法里用到它们的地方有五处 —— `type-spec -> tname`（查）、
+;; typedef 那条 simple-decl、`class-head` / `enum-head`、`using X = …`、模板类型形参（登记）。
+;; 于是 `stmt -> expr ";"` 上那格 `prefer` **删掉了**，这一类歧义不再靠猜。
 ;;
 ;; ## 三、`<` `>` 既是模板括号又是比较
 ;;
-;; `a<b>(c)` 是"模板实例化后调用"还是"两次比较"？同上，靠符号表。同样交给 GLR 分叉。
+;; `a<b>(c)` 是"模板实例化后调用"还是"两次比较"？同上，靠符号表 —— 这一类**还没**接上
+;; 那格回问（现在只有类型名登记，模板名没单独登记），照旧交给 GLR 分叉。
 ;;
 ;; 说完这三件，剩下的就是照 EBNF 抄了。抄的过程里用得上前面几门量出来的那几条：
 ;;   * 歧义要写进语法（能写清的就写清，别指望驱动器猜）；
@@ -112,9 +118,16 @@
     (-> (asm-decl) $1))
 
   ;; `int x = 1, *p;` / `class Foo;` / `typedef int T;` / `struct { … } v;`
+  ;;
+  ;; **typedef 单开一条**（不再当 store-spec 收）。理由是标注要贴得准：`declares-type`
+  ;; 得只在**真的 typedef** 上登记名字 —— 贴在 `specs declarators ";"` 上的话
+  ;; `int x = y;` 也会把 `y` 登记成类型名，那之后 `y * z;` 就要被读成声明（**给错的树**）。
+  ;; 代价写清楚：`int typedef T;`（typedef 不在最前）这一批读不了。标准允许那么写，
+  ;; 真实代码里没有；读不了会干净地报错，不会读错。
   (rule simple-decl
     (-> (specs ";") (decl (specs $*1)))
-    (-> (specs declarators ";") (decl (specs $*1) (init $*2))))
+    (-> (specs declarators ";") (decl (specs $*1) (init $*2)))
+    (-> ("typedef" specs declarators ";") (declares-type 3) (decl (specs typedef $*2) (init $*3))))
 
   ;; **至多一格 type-spec** —— C++ 本来就不许写两格类型说明符（`unsigned long` 那种是
   ;; builtin 的组合，单开一条 `builtin-seq` 收）。不这么限死的话 `int main()` 有两解：
@@ -140,9 +153,10 @@
     (-> (fn-spec) $1)
     (-> (attr-spec) $1))
 
+  ;; `typedef` **不在这里** —— 它单开了一条 simple-decl（见那一条的注释）
   (rule store-spec
     (-> ("static") $1) (-> ("extern") $1) (-> ("register") $1)
-    (-> ("mutable") $1) (-> ("thread_local") $1) (-> ("typedef") $1)
+    (-> ("mutable") $1) (-> ("thread_local") $1)
     (-> ("friend") $1))
 
   (rule cv
@@ -171,15 +185,26 @@
 
   (rule type-spec
     (-> (builtin-seq) (btype $*1))
-    (-> (qname) $1)
+    ;; **用户定义的类型名要登记过**（`needs-type`）—— 这一格就是文件头第二条说的那件事，
+    ;; 现在是驱动器真的回问了一句，不再靠 `prefer` 偏一支。判据贴在**裸 ID** 上，
+    ;; 不是贴在 qname 上：位置要指得准（见 driver.js 的 nameIn）。
+    (-> (tname) $1)
     (-> ("auto") (auto))
     (-> ("decltype" "(" expr ")") (decltype $3))
     (-> ("decltype" "(" "auto" ")") (decltype auto))
     (-> ("typename" qname) (typename $2))
     (-> (class-spec) $1)
     (-> (enum-spec) $1)
-    ;; `class Foo` / `struct Bar` 当**详述类型说明**用（前置引用）
-    (-> (class-key qname) (elaborated $1 $2)))
+    ;; `class Foo` / `struct Bar` 当**详述类型说明**用（前置引用）—— 顺带把名字登记上
+    (-> (class-key qname) (declares-type 2) (elaborated $1 $2)))
+
+  ;; 用户定义的类型名。`std::vector<int>` 那种限定名按**最后一段**查
+  ;; （`vector` 登记过就算）—— 与 nameIn 的规矩一致。
+  (rule tname
+    (-> (ID) (needs-type 1) (n $1))
+    (-> (ID targs) (needs-type 1) (tid (n $1) (targs $*2)))
+    (-> (qname "::" ID) (needs-type 3) (qual $1 (n $3)))
+    (-> (qname "::" ID targs) (needs-type 3) (qual $1 (tid (n $3) (targs $*4)))))
 
   ;; `unsigned long int` 那种组合：**它们合起来才是一格 type-spec**
   ;; （"至多一格 type-spec"那条规矩因此不会把它们判成两格）
@@ -245,13 +270,14 @@
   (rule class-spec
     (-> (class-key class-head "{" members "}") (class $1 $2 (members $*4))))
 
+  ;; 类名在**读到 `{` 之前**就登记（这一支归约得比成员早）—— 成员里用得着它自己
   (rule class-head
     (-> () ())
-    (-> (qname) $1)
-    (-> (qname bases) ($1 $2))
+    (-> (qname) (declares-type 1) $1)
+    (-> (qname bases) (declares-type 1) ($1 $2))
     (-> (bases) $1)
-    (-> (attr-spec qname) $2)
-    (-> (attr-spec qname bases) ($2 $3)))
+    (-> (attr-spec qname) (declares-type 2) $2)
+    (-> (attr-spec qname bases) (declares-type 2) ($2 $3)))
 
   (rule bases
     (-> (":" base-list) (bases $*2)))
@@ -299,9 +325,9 @@
 
   (rule enum-head
     (-> () ())
-    (-> (qname) $1)
+    (-> (qname) (declares-type 1) $1)
     (-> (":" type-id) (base $2))
-    (-> (qname ":" type-id) ($1 (base $3))))
+    (-> (qname ":" type-id) (declares-type 1) ($1 (base $3))))
 
   (rule enumerators
     (-> () ())
@@ -461,16 +487,18 @@
     (-> (tparam) ($1))
     (-> (tparams "," tparam) ($*1 $3)))
 
+  ;; 模板的**类型形参也是类型名**：`template <class T> … T x;` 里的 T 得登记
+  ;; （非类型形参 `int N` 走 `param` 那一支，不登记 —— 它是值不是类型）
   (rule tparam
     (-> (tp-key) (tp $1))
-    (-> (tp-key ID) (tp $1 (n $2)))
+    (-> (tp-key ID) (declares-type 2) (tp $1 (n $2)))
     (-> (tp-key "..." ) (tp $1 pack))
-    (-> (tp-key "..." ID) (tp $1 pack (n $3)))
-    (-> (tp-key ID "=" type-id) (tp $1 (n $2) (default $4)))
+    (-> (tp-key "..." ID) (declares-type 3) (tp $1 pack (n $3)))
+    (-> (tp-key ID "=" type-id) (declares-type 2) (tp $1 (n $2) (default $4)))
     ;; 非类型模板形参：`int N`、`auto V`
     (-> (param) $1)
     ;; 模板模板形参：`template<class> class C`
-    (-> ("template" "<" tparams ">" tp-key ID) (tt (params $*3) (n $6))))
+    (-> ("template" "<" tparams ">" tp-key ID) (declares-type 6) (tt (params $*3) (n $6))))
 
   (rule tp-key
     (-> ("class") $1) (-> ("typename") $1))
@@ -488,9 +516,9 @@
     (-> ("using" qname ";") (using $2))
     (-> ("using" "namespace" qname ";") (using-ns $3))
     (-> ("using" "typename" qname ";") (using $3))
-    ;; 别名声明：`using T = std::vector<int>;`
-    (-> ("using" ID "=" type-id ";") (alias $2 $4))
-    (-> ("using" ID attr-spec "=" type-id ";") (alias $2 $5)))
+    ;; 别名声明：`using T = std::vector<int>;` —— T 也是类型名，登记
+    (-> ("using" ID "=" type-id ";") (declares-type 2) (alias $2 $4))
+    (-> ("using" ID attr-spec "=" type-id ";") (declares-type 2) (alias $2 $5)))
 
   (rule extern-block
     (-> ("extern" STRING "{" decls "}") (extern $2 (body $*4)))
@@ -517,14 +545,15 @@
     (-> (PPLINE) (pp $1))
     (-> (";") (empty))
     (-> ("{" stmts "}") (block $*2))
-    ;; **两支撞车时偏表达式** —— 而且这个方向是量出来才定的：
-    ;; 先按 C++ 的 [stmt.ambig]"能当声明就是声明"给 `simple-decl` 加 prefer，结果
+    ;; **这一格原来有一个 `(prefer 1)`，现在没有了** —— 那笔账还上了。
+    ;; 经过：先按 C++ 的 [stmt.ambig]"能当声明就是声明"给 `simple-decl` 加 prefer，结果
     ;; `printf("%d\n", 1);` 被读成一格**声明**（`printf` 当类型名、实参当 ctor 初值）——
-    ;; 解析成功但树是错的，比报错糟。原因是那条标准规则的前提是"`printf` 是不是类型名"，
-    ;; 而那句话要**符号表**才答得出（task #15 剩下的那一笔）。
-    ;; 这个子集里每一格真声明都从 builtin 起头（`int` / `void` / …），而 builtin 起不了
-    ;; 表达式 —— 所以偏表达式在这一批里不会挑错。`T * x;` 那种形状要等回问机制。
-    (-> (expr ";") (prefer 1) (expr $1))
+    ;; 解析成功但树是错的，比报错糟；于是反过来偏表达式，那是"这一批里挑不错"，不是对。
+    ;; 两个方向都不对的根因只有一个：那条标准规则的前提是"`printf` 是不是类型名"，
+    ;; 而那句话要**符号表**才答得出。现在驱动器真的会回问了
+    ;; （`declares-type` / `needs-type`，见 driver.js 与 `type-spec` 那一条），
+    ;; 于是这一处不必偏谁：名字登记过就只有声明说得通，没登记过就只有表达式说得通。
+    (-> (expr ";") (expr $1))
     (-> (simple-decl) $1)
     ;; **函数定义不进语句** —— C++ 没有嵌套函数（lambda 是表达式，走 expr 那支）。
     ;; 留它的代价是量出来的：`if (a > b) { return a; }` 里那个复合语句会与"声明符后面

@@ -28,13 +28,16 @@ const nameOf = (x) => (tag(x) === 'n' || tag(x) === 'name' ? leaf(kids(x)[0]) : 
 
 /**
  * 声明符里那个名字。修饰可以套好几层（`const char* t` 是 `(d (ptr * (n t)) …)`，
- * `int a[3]` 是 `(d (arr (n a) …))`），所以**往下找**，但**不进 `init`** ——
- * `int x = y;` 里的 `y` 不是被声明的那个名字。指针 / 引用 / 数组的修饰本身丢掉（类型全丢）。
+ * `int a[3]` 是 `(d (arr (n a) …))`），所以**往下找**，但有两处不进：
+ *   * `init` —— `int x = y;` 里的 `y` 不是被声明的那个名字；
+ *   * `specs` —— 用户定义的类型名也是名字（`myint n` 的 specs 里有 `(n myint)`），
+ *     进去就会把类型名当成被声明的名字（量出来过：形参 `myint n` 一度绑成了 `myint`）。
+ * 指针 / 引用 / 数组的修饰本身丢掉（类型全丢）。
  */
 function findName(y) {
   if (!isList(y)) return null;
   if (tag(y) === 'n' || tag(y) === 'name') return nameOf(y);
-  if (tag(y) === 'init') return null;
+  if (tag(y) === 'init' || tag(y) === 'specs') return null;
   for (const k of kids(y)) { const r = findName(k); if (r !== null) return r; }
   return null;
 }
@@ -123,6 +126,10 @@ function toNode(x) {
     // ---- 声明与函数 --------------------------------------------------------
     // `int x = 3, y;` -> 一串 bind（**decl 就是 bind**，没有 decl 节点）
     case 'decl': {
+      const specs = part(x, 'specs');
+      // `typedef int myint;` —— **图上没有它**。类型是端口的 sort，不是格子（与 go / V 同一条）。
+      // 它在语法那侧却很要紧：那一格是驱动器"这名字登记成类型了吗"的登记处。
+      if (specs !== undefined && kids(specs).some((s) => !isList(s) && leaf(s) === 'typedef')) return [];
       const initPart = part(x, 'init');
       if (initPart === undefined) return [];    // `struct Foo;` 这种纯声明：图上没有它
       return kids(initPart).filter((d) => tag(d) === 'd').map((d) => {

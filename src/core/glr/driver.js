@@ -26,6 +26,27 @@
 //
 // 顶点是**单前驱**的：不做 DAG。代价是最坏情况下分叉数会涨，所以有一道上限，撞到就报错
 // 而不是挂住。真遇到需要 DAG 的语法再说 —— 位置就在这一个文件里。
+//
+// ## 「这个名字登记成类型了吗」（`declares-type` / `needs-type` / `needs-non-type`）
+//
+// 上面那段说 `T* c;` 要符号表才分得开，还说"那是符号表的事"。这一格就是把那件事补上，
+// 而且**补在该补的地方**：登记表挂在**顶点**上，不是挂在驱动器上的一份全局表。
+//
+// 为什么必须挂在顶点上：GLR 会分叉，两支同时活着。一支把 `T` 读成了 typedef 名、另一支
+// 读成了变量名 —— 一份全局表会让先归约的那支污染另一支（而归约次序是实现细节，那就等于
+// 让答案取决于实现细节）。挂在顶点上就没这回事：归约时看的是**栈顶那个顶点**的表
+// （`n.types` —— 表按读到的次序累加，最新的一份就在它身上），登记出来的新表只属于
+// 新顶点，沿前驱链自然继承。
+//
+// 表是**不可变**的：登记一格就复制一份（`new Set(prev).add(name)`）。声明比记号少得多，
+// 复制的代价可以忽略；换来的是"一支的表另一支绝对看不见"这条硬保证。
+//
+// 两处明说的限制（都是"这一批不做"，不是"看不见"）：
+//   * **没有作用域出栈**：登记只加不减，所以块里 `typedef` 出来的名字出了块还算类型名。
+//     真要做得给顶点再挂一格"这一层登记了哪些"，等有一份真被它咬到的例子再说。
+//   * **合并时不比表**：状态 + 前驱 + 值都相同就当同一支，留先到的那个。要撞上这一格，
+//     得有"同一棵树、登记表却不同"的两支 —— 那说明语法把 `declares-type` 贴在了不影响
+//     树形的地方，是语法写错了，不是这儿该猜。
 
 const MAX_PARSES = 400;
 /** 一格记号上最多归约多少次 —— 只防"语法里有空环"导致的挂死，不是歧义的判据 */
@@ -133,6 +154,31 @@ function applyTemplate(tpl, kids, span) {
 }
 
 /**
+ * 一格子树里的**名字**：深度优先**最后一个** atom。
+ *
+ * 为什么取最后一个而不是第一个：这几种形状都要取对 —— 光秃秃的记号 `T` 取自己、
+ * `(n T)` 取 `T`（第一个 atom 是标签 `n`，取它就错了）、`(qual (n a) (n b))` 取 `b`
+ * （限定名按最后一段登记 / 查，与 C++ 里"名字"那一格对得上）。
+ *
+ * 取不到（空子树、只有串）就回 null，而"取不到"一律当**判据不成立**：
+ * `needs-type` 不许归约、`declares-type` 什么也不登记 —— 名字取不出来还照样登记等于在猜。
+ *
+ * 明说的限制：这条规矩只对"名字在最右边"的形状准。所以**语法要把标注贴在贴得准的地方**
+ * （ext/cpp 就是把 typedef 单开一条产生式、把类型名的查询贴在裸 ID 上），
+ * 贴歪了的后果是"该过的过不去"（干净地报错），不是给一棵错的树。
+ */
+function nameIn(v) {
+  if (v === null || v === undefined) return null;
+  if (v.kind === 'atom') return v.value;
+  if (v.kind === 'string') return null;
+  for (let i = v.items.length - 1; i >= 0; i--) {
+    const n = nameIn(v.items[i]);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+/**
  * 分析一串词法单元，返回起始符号的值（一棵 s-expr）。失败时返回 null 并把诊断记进 diags。
  *
  * @param {any} tb buildTable 的输出
@@ -142,8 +188,10 @@ function applyTemplate(tpl, kids, span) {
 export function glrParse(tb, toks, diags) {
   const { states, rules } = tb;
   let nextId = 0;
-  const mk = (state, pred, value, pref) => ({ id: nextId++, state, pred, value, pref });
-  let tops = [mk(0, null, null, 0)];
+  const mk = (state, pred, value, pref, types) => ({ id: nextId++, state, pred, value, pref, types });
+  /** 空的登记表只造一份：没有 `declares-type` 的语法（十门里九门）一格都不会复制它 */
+  const NO_TYPES = new Set();
+  let tops = [mk(0, null, null, 0, NO_TYPES)];
 
   for (let i = 0; i <= toks.length; i++) {
     const tk = i < toks.length ? toks[i] : { type: '$end', node: null, span: i > 0 ? toks[i - 1].span : null };
@@ -177,6 +225,24 @@ export function glrParse(tb, toks, diags) {
         const kids = rev.reverse();
         const to = states[base.state].gotos.get(r.lhs);
         if (to === undefined) continue;
+        // ---- 回问：登记表看**栈顶**那个顶点的（`n.types`），不是 `base.types`。
+        // 这一格量出来过：取 base 的话，`typedef int T ;` 登记出来的 T 在
+        // `stmts -> stmts stmt` 这一步就被丢掉了（base 是 stmts 前面那个顶点，它没见过 T），
+        // 于是下一句的 `T x ;` 认不出 T。表是**按读到的次序累加**的，而累加到的最新一份
+        // 就在栈顶那个顶点上 —— 归约消掉的那一截里若有登记，也在它身上。
+        let types = n.types;
+        if (r.needsType !== undefined && r.needsType !== null) {
+          const nm = nameIn(kids[r.needsType - 1]);
+          if (nm === null || !types.has(nm)) continue;
+        }
+        if (r.needsNonType !== undefined && r.needsNonType !== null) {
+          const nm = nameIn(kids[r.needsNonType - 1]);
+          if (nm !== null && types.has(nm)) continue;
+        }
+        if (r.declaresType !== undefined && r.declaresType !== null) {
+          const nm = nameIn(kids[r.declaresType - 1]);
+          if (nm !== null && !types.has(nm)) { types = new Set(types); types.add(nm); }
+        }
         const value = applyTemplate(r.action, kids, spanOf(kids.length > 0 ? kids : [tk]));
         const pref = n.pref + r.prefer;
         // 合并：状态、前驱、值三者都一样才算同一支。值不同就看偏好 —— 严格低的那支现在就丢，
@@ -185,7 +251,7 @@ export function glrParse(tb, toks, diags) {
         const prev = merged.get(key);
         if (prev !== undefined && sameValue(prev.value, value)) continue;
         if (prev !== undefined && pref < prev.pref) continue;
-        const nn = mk(to, base, value, pref);
+        const nn = mk(to, base, value, pref, types);
         merged.set(prev === undefined ? key : `${key}#${nn.id}`, nn);
         work.push(nn);
         if (merged.size > MAX_REDUCE_WORK) {
@@ -278,7 +344,7 @@ export function glrParse(tb, toks, diags) {
       diags.error(tk.span, `unexpected ${describeToken(tk)}${expected === '' ? '' : `; expected ${expected}`}`);
       return null;
     }
-    tops = live.map((s) => mk(s.to, s.n, tk.node, s.n.pref));
+    tops = live.map((s) => mk(s.to, s.n, tk.node, s.n.pref, s.n.types));
   }
   return null;
 }

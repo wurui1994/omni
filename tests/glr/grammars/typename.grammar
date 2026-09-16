@@ -1,0 +1,62 @@
+;; typename —— 「**这个名字登记成类型了吗**」那格机制的最小判据（driver.js 的
+;; `declares-type` / `needs-type` / `needs-non-type`）。
+;;
+;; 压的形状是 C 系语言那条谁都绕不开的歧义：
+;;
+;;   T * x ;     —— `T` 是类型名就是"声明一个 T 指针"，不是类型名就是"T 乘 x"这条语句。
+;;
+;; **任何 LR 语法都分不开它**，这不是产生式写少了：两种读法用的记号一模一样，差别只在
+;; "前面有没有 `typedef … T ;` 把 T 登记过"。bison 里的办法是在动作里写 C 代码回问符号表
+;; （jancy 的 `qualified_type_name_rslv` 就是这么干的），GLR + `%dprec` 只能**偏**一支 ——
+;; 偏了就有一半的输入拿到错的树。
+;;
+;; 这一份用三条声明式标注把那件事说清，一行宿主代码都不写：
+;;   * `typedef` 那一支带 `(declares-type 3)` —— 归约成功之后第 3 格那个名字算类型名；
+;;   * `tname` 带 `(needs-type 1)` —— 名字登记过才许当类型名归约；
+;;   * `expr -> ID` 带 `(needs-non-type 1)` —— 名字没登记过才许当变量归约。
+;; 于是同一串记号在**登记过**与**没登记过**两种上下文里各只有一棵树（见 cases/）——
+;; 没有 `prefer`，也没有"两支都活着"的歧义报错。
+;;
+;; 登记表是**每支分析各一份**的（挂在图结构栈的顶点上，见 driver.js 文件头），
+;; 这一条这份语法测不到 —— 它太规整，不会分叉到两支带着不同登记表。测得到的地方是
+;; ext/cpp（`tests/grammar/delete.js cpp` 那一档），所以那边是这条机制的第二份判据。
+(grammar typename
+  (tokens ID)
+  (start unit)
+
+  (lex
+    (skip space)
+    (token ID (or alpha "_") (* (or alnum "_")))
+    (keyword ID "typedef" "int")
+    (op "*" ";"))
+
+  (rule unit
+    (-> (stmts) (unit $*1)))
+
+  (rule stmts
+    (-> () ())
+    (-> (stmts stmt) ($*1 $2)))
+
+  (rule stmt
+    ;; `typedef int T ;` —— 登记 T
+    (-> ("typedef" "int" ID ";") (declares-type 3) (typedef $3))
+    ;; `T x ;` / `T * x ;` —— 声明。第一格必须是登记过的名字（见 tname）
+    (-> (tname declarator ";") (decl $1 $2))
+    ;; `a * b ;` —— 表达式语句
+    (-> (expr ";") (expr $1)))
+
+  ;; 类型名：**登记过的**名字才算
+  (rule tname
+    (-> (ID) (needs-type 1) (t $1)))
+
+  (rule declarator
+    (-> (ID) (var $1))
+    (-> ("*" ID) (ptr $2)))
+
+  ;; 表达式里出现的名字：**没登记过的**才算变量（类型名不是值）
+  (rule expr
+    (-> (expr "*" factor) (mul $1 $3))
+    (-> (factor) $1))
+
+  (rule factor
+    (-> (ID) (needs-non-type 1) (n $1))))

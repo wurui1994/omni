@@ -1,0 +1,18 @@
+;; 同一串记号，**登记过与没登记过各一棵树**。这四行就是那格机制的判据：
+;; 没有 prefer、没有歧义报错，靠的只是"这个名字登记成类型了吗"。
+typedef int T ;                    ==> (unit (typedef T))
+typedef int T ; T x ;              ==> (unit (typedef T) (decl (t T) (var x)))
+
+;; 最要紧的一对：同一串 `? * ? ;`，登记过是声明，没登记过是乘法
+typedef int T ; T * x ;            ==> (unit (typedef T) (decl (t T) (ptr x)))
+a * b ;                            ==> (unit (expr (mul (n a) (n b))))
+
+;; 登记只影响那一个名字：T 登记了，a 照旧是变量
+typedef int T ; a * b ; T * y ;    ==> (unit (typedef T) (expr (mul (n a) (n b))) (decl (t T) (ptr y)))
+
+;; 反过来也要拦住：登记过的名字不是值。`a * T ;` 两条路都不通 ——
+;; 声明那条要第一格是类型名（`a` 没登记），乘法那条不许拿类型名当乘数（`T` 登记过）。
+typedef int T ; a * T ;            !!> unexpected
+
+;; 没登记过的名字后面跟名字不是声明（`a b ;` 两条路都不通）
+a b ;                              !!> unexpected

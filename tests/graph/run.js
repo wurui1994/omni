@@ -23,10 +23,11 @@
 // "too many concurrent parses" —— 连这么短的程序都过不去。把三类歧义一类一类量下来，
 // 两类根本不是机制欠账，是**语法自己写松了**（`specs` 允许两格 type-spec；`stmt` 收了
 // 函数定义，而 C++ 没有嵌套函数），改在语法里；第三类（`T * x;`）才是真要驱动器回问
-// 一句"这个名字登记成类型了吗"（附录 A.5 第 3 笔账），这一批用一格 `(prefer 1)` 偏
-// 表达式挡着，**代价写在语法里**，而且被 `tests/grammar/delete.js` 数了出来（那两份例子
-// 的基线树是 prefer 挑的）。所以 cpp 现在进矩阵，`ext/cpp/examples/basics.cpp` 与另外
-// 九门同一份期望输出 `15 / 120 / 7 / ok`。
+// 一句"这个名字登记成类型了吗"（附录 A.5 第 3 笔账）—— 那一格**后来也补上了**
+// （`declares-type` / `needs-type`，见 driver.js），于是 cpp 那个 `(prefer 1)` 删掉了。
+// `ext/cpp/examples/basics.cpp` 里那行 `typedef int myint;` 就是这条机制的判据：
+// 把语法里 `needs-type` 那一格删掉，这份例子当场过不去。期望输出与另外九门同一份
+// `15 / 120 / 7 / ok`。
 
 import { loadGrammarTable } from '../../src/core/glr/load.js';
 import { lexText } from '../../src/core/glr/lex.js';

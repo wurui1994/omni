@@ -1,0 +1,122 @@
+grammar typename: 6 terminals, 7 nonterminals, 12 rules, 21 states
+  r0  unit -> stmts
+  r1  stmts -> <empty>
+  r2  stmts -> stmts stmt
+  r3  stmt -> "typedef" "int" ID ";"   [declares-type 3]
+  r4  stmt -> tname declarator ";"
+  r5  stmt -> expr ";"
+  r6  tname -> ID   [needs-type 1]
+  r7  declarator -> ID
+  r8  declarator -> "*" ID
+  r9  expr -> expr "*" factor
+  r10  expr -> factor
+  r11  factor -> ID   [needs-non-type 1]
+  r12  $accept -> unit
+state 0
+  item unit -> . stmts
+  item stmts -> .
+  item $accept -> . unit
+  item stmts -> . stmts stmt
+  on "typedef": reduce r1
+  on $end: reduce r1
+  on ID: reduce r1
+  goto stmts: 1
+  goto unit: 2
+state 1
+  item unit -> stmts .
+  item expr -> . factor
+  item factor -> . ID
+  item stmts -> stmts . stmt
+  item stmt -> . "typedef" "int" ID ";"
+  item stmt -> . tname declarator ";"
+  item stmt -> . expr ";"
+  item tname -> . ID
+  item expr -> . expr "*" factor
+  on "typedef": shift 6
+  on $end: reduce r0
+  on ID: shift 4
+  goto expr: 8
+  goto factor: 3
+  goto stmt: 5
+  goto tname: 7
+state 2
+  item $accept -> unit .
+  on $end: accept
+state 3
+  item expr -> factor .
+  on "*": reduce r10
+  on ";": reduce r10
+state 4
+  item factor -> ID .
+  item tname -> ID .
+  on "*": reduce r11 | reduce r6
+  on ";": reduce r11
+  on ID: reduce r6
+state 5
+  item stmts -> stmts stmt .
+  on "typedef": reduce r2
+  on $end: reduce r2
+  on ID: reduce r2
+state 6
+  item stmt -> "typedef" . "int" ID ";"
+  on "int": shift 9
+state 7
+  item stmt -> tname . declarator ";"
+  item declarator -> . ID
+  item declarator -> . "*" ID
+  on "*": shift 12
+  on ID: shift 11
+  goto declarator: 10
+state 8
+  item stmt -> expr . ";"
+  item expr -> expr . "*" factor
+  on "*": shift 14
+  on ";": shift 13
+state 9
+  item stmt -> "typedef" "int" . ID ";"
+  on ID: shift 15
+state 10
+  item stmt -> tname declarator . ";"
+  on ";": shift 16
+state 11
+  item declarator -> ID .
+  on ";": reduce r7
+state 12
+  item declarator -> "*" . ID
+  on ID: shift 17
+state 13
+  item stmt -> expr ";" .
+  on "typedef": reduce r5
+  on $end: reduce r5
+  on ID: reduce r5
+state 14
+  item factor -> . ID
+  item expr -> expr "*" . factor
+  on ID: shift 18
+  goto factor: 19
+state 15
+  item stmt -> "typedef" "int" ID . ";"
+  on ";": shift 20
+state 16
+  item stmt -> tname declarator ";" .
+  on "typedef": reduce r4
+  on $end: reduce r4
+  on ID: reduce r4
+state 17
+  item declarator -> "*" ID .
+  on ";": reduce r8
+state 18
+  item factor -> ID .
+  on "*": reduce r11
+  on ";": reduce r11
+state 19
+  item expr -> expr "*" factor .
+  on "*": reduce r9
+  on ";": reduce r9
+state 20
+  item stmt -> "typedef" "int" ID ";" .
+  on "typedef": reduce r3
+  on $end: reduce r3
+  on ID: reduce r3
+conflicts left to the GLR driver: 1
+  state 4 on "*": reduce/reduce (2 actions)
