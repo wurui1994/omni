@@ -36,6 +36,8 @@ import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { readText } from '../../src/core/host/native.js';
 import { toSx } from '../../src/core/graph/graph.js';
 import { backends, gaps, shapeGaps, Gap } from '../../src/core/graph/contract.js';
+// 五栏声明那张表 —— 下面"五栏指纹"那一节要拿它自己量自己（ADR-0033 §3.2）
+import { NODES } from '../../src/core/graph/nodes.js';
 // 例子表两条判据共用一份（`delete.js` 也 import 它）—— 抄两份就会有一份忘了改
 import { CASES, HAND } from './cases.js';
 
@@ -80,6 +82,64 @@ if (showGaps) {
     for (const x of sh) process.stdout.write(`    〔形状〕${x.what} —— ${x.why}\n`);
   }
   process.stdout.write('\n');
+}
+
+/**
+ * **五栏这条公理自己也要被量一遍**（ADR-0033 §3.2："五栏里任何一格不同就是两个节点"）。
+ *
+ * 反过来读那句话：五栏**一格不差**的两格节点，就该是同一格（差别该落进附属，像
+ * `loop-exit` 的 `break`/`continue`）。所以这一节给每格节点算一个**指纹** ——
+ * sort + 入端口（求值语义 + rest/multi/optional，**名字抹掉**：改名不是语义差别）
+ * + 出端口 + 效应 + 寿命 —— 撞了就得说清为什么。
+ *
+ * 说得清的写进 `SAME_FIVE`（一条一句人话），说不清的当场失败。
+ * 这一节抓出来的两组都留在清单里，而且两组的性质**不一样**（见那两句话）——
+ * 那正是"公理也会有说不清的地方，把它写下来比装作没有好"。
+ */
+const fiveFp = (d) => JSON.stringify([
+  d.sort,
+  d.ins.map((p) => `${p.sem}${p.rest ? '*' : ''}${p.multi ? '+' : ''}${p.optional ? '?' : ''}`),
+  [...d.outs].sort(),
+  [...d.effects].sort(),
+  d.lifetime,
+]);
+/** 五栏撞车而**说得清**的那几组：一组一句话，说的是"差别在哪儿" */
+const SAME_FIVE = new Map([
+  ['list-new / record-new', '差别只在附属（`names` 有没有）—— 按公理该是一格节点两个 kind，'
+    + '现在分两格是**这一批的记账**：记录的字段名是编译期的、列表的下标是运行期的，'
+    + '而"编译期还是运行期"这件事五栏里没有一栏说得出来。要合就得先有那一栏。'],
+  ['index-get / map-get / map-has', '**五栏与附属都一模一样，差别只在 op 名字上** ——'
+    + ' 这是这条公理目前最露的一处。三格的真差别是"缺了怎么办"（越界 / 缺键 / 只问在不在），'
+    + '那是一格**语义**，不在五栏里。合成一格要多一栏（缺项语义），拆成三格是现在的样子；'
+    + '两条路都比"装作五栏说清了"好。'],
+]);
+{
+  const groups = new Map();
+  for (const [op, d] of NODES) {
+    const k = fiveFp(d);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(op);
+  }
+  for (const ops of groups.values()) {
+    if (ops.length < 2) continue;
+    const key = [...ops].sort().join(' / ');
+    const why = SAME_FIVE.get(key);
+    if (why === undefined) {
+      process.stdout.write(`  FAIL 五栏指纹〔${key}〕: 五栏一格不差却是两格节点 —— 要么合成一格，`
+        + `要么把差别写进 SAME_FIVE（一句人话）\n`);
+      fail++;
+    } else {
+      process.stdout.write(`  ok   五栏指纹〔${key}〕[撞车，理由记着]\n`);
+      pass++;
+    }
+  }
+  for (const key of SAME_FIVE.keys()) {
+    const still = [...groups.values()].some((ops) => [...ops].sort().join(' / ') === key);
+    if (!still) {
+      process.stdout.write(`  FAIL 五栏指纹〔${key}〕: 这一组**已经不撞了** —— 从 SAME_FIVE 里删掉它\n`);
+      fail++;
+    }
+  }
 }
 
 /**
