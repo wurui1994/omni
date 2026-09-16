@@ -221,7 +221,9 @@ const xf = (name, why) => {
 const want = (f) => (!filters.length || filters.some((x) => f.includes(x)));
 
 const ALL_LEGS = [
-  { tag: 'run', args: (p) => ['run', p] },
+  /* `run` 这一格**明着点后端**：它就是 js 那条腿（生成 JS 在本进程里跑），从前是
+   * `omni run` 的默认。默认要改成 c 了 —— 不写出来这一格就与下一格重了。 */
+  { tag: 'run', args: (p) => ['run', p, '--backend', 'js'] },
   { tag: 'run-c', args: (p) => ['run-c', p] },
   { tag: 'interp', args: (p) => ['interp', p] },
   { tag: 'interp --mir', args: (p) => ['interp', p, '--mir'] },

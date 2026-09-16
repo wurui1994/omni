@@ -127,7 +127,9 @@ const isCase = (f) => f.endsWith('.asy') && !f.startsWith('mod_');
 
 /** 五条腿，跟 tests/sexpr 那条轴同一份名单 —— 那边喂 .sx，这边喂 .asy */
 const ALL_LEGS = [
-  { tag: 'run', args: (p) => ['run', p] },
+  /* `run` 这一格**明着点后端**：它就是 js 那条腿，从前是 `omni run` 的默认。
+   * 默认要改成 c 了 —— 不写出来这一格就与下一格重了。 */
+  { tag: 'run', args: (p) => ['run', p, '--backend', 'js'] },
   { tag: 'run-c', args: (p) => ['run-c', p] },
   { tag: 'interp', args: (p) => ['interp', p] },
   { tag: 'interp --mir', args: (p) => ['interp', p, '--mir'] },
