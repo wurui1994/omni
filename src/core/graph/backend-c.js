@@ -46,7 +46,7 @@ import { Gap } from './backend-wat.js';
 const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'loop-exit',
   'region', 'ret', 'func', 'call',
   'list-new', 'index-get', 'index-set', 'record-new', 'field-get', 'field-set',
-  'map-new', 'map-get', 'map-set', 'map-has', 'values', 'pick']);
+  'map-new', 'map-get', 'map-set', 'map-has', 'values', 'pick', 'conv', 'slice']);
 
 /** 这一刀接得住的内建。`prims.js` 里现有 16 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
@@ -425,6 +425,35 @@ static gv g_map_get(gv o, gv k) {
 }
 
 static gv g_map_has(gv o, gv k) { return g_bool(g_map_find(o, k) >= 0 ? 1 : 0); }
+
+/* ---- 表示转换（conv）。目标只有四种，与 eval.js 的 convert 一条一条对：
+ *   int  截断（向零）· float 就是数 · str 走 g_show · bool 走真值观。
+ * 「数」这一步照 JS 的 Number()：串按 strtod、nil 是 0、真假是 1/0。
+ * 列表 / 记录 / 映射转数在 JS 里是另一套（Number([]) 是 0、Number({}) 是 NaN），
+ * 这一格给 NaN 并记在账上 —— 那种用法十门规格里一门都没有。 */
+static double g_tonum(gv v) {
+  if (v.t == GT_NUM) return g_d(v);
+  if (v.t == GT_BOOL) return v.b != 0 ? 1.0 : 0.0;
+  if (v.t == GT_NIL) return 0.0;
+  if (v.t == GT_STR) return strtod(g_s(v), 0);
+  return 0.0 / 0.0;
+}
+
+static gv g_conv_int(gv v) {
+  double d = g_tonum(v);
+  if (d != d) return g_num(d);
+  return g_num((double)(long long)d);
+}
+
+/* ---- 切片。**只切列表**（eval.js 那侧对非列表直接报），范围越界当场骂。 */
+static gv g_slice(gv o, gv from, gv to) {
+  if (o.t != GT_LIST) g_die("slice: 不是一格列表");
+  glist *L = g_L(o);
+  long long a = from.t == GT_NIL ? 0 : (long long)g_tonum(from);
+  long long b = to.t == GT_NIL ? L->n : (long long)g_tonum(to);
+  if (a < 0 || b > L->n || a > b) g_die("slice: 范围越界");
+  return g_list_new(L->v + a, b - a);
+}
 `;
 
 /** 名字要能当 C 标识符用（Scheme 的 `string-append`、awk 的 `$0` 那种）。 */
@@ -675,6 +704,21 @@ class CGen {
       return `g_vals_new(${a}, ${items.length})`;
     }
     if (x.op === 'pick') return `g_pick(${this.valOf(x.ins.from)}, ${Number(x.attrs.index ?? 0)})`;
+    if (x.op === 'conv') {
+      const v = this.valOf(x.ins.value);
+      const to = x.attrs.to;
+      if (to === 'int') return `g_conv_int(${v})`;
+      if (to === 'float') return `g_num(g_tonum(${v}))`;
+      if (to === 'str') return `g_str(g_show(${v}))`;
+      if (to === 'bool') return `g_bool(g_truthy(${v}))`;
+      throw new Gap(`c 后端：conv 还没接这个目标：${to}`);
+    }
+    if (x.op === 'slice') {
+      const o = this.valOf(x.ins.obj);
+      const a = x.ins.from === undefined ? 'g_nil()' : this.valOf(x.ins.from);
+      const b = x.ins.to === undefined ? 'g_nil()' : this.valOf(x.ins.to);
+      return `g_slice(${o}, ${a}, ${b})`;
+    }
     if (x.op === 'func') {
       throw new Gap('c 后端：`func` 当值用（不是当场调用、也不是绑给一个名字）还没接');
     }
