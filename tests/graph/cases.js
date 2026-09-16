@@ -95,7 +95,7 @@ export const CASES = [
   ...fam('slice', SLICE, ['go', 'vlang', 'nim', 'mojo', 'sbcl', 'chez']),
   // 第十个家族：多值的另外两个提供者（CL 的 values / nim 的元组）——
   // 单开一个家族的理由写在 ext/sbcl/examples/values.lisp 的文件头里
-  ...fam('values', VALUES, ['sbcl', 'nim']),
+  ...fam('values', VALUES, ['sbcl', 'nim', 'vlang', 'chez']),
   // 第十一个家族：**go 独有**的 defer 实参时机（注册那一刻求值）。
   // 一门语言就单开一个家族，理由正是"它不该变成节点"：G5 那条判据里它是"一家"，
   // 而 defer.go 那份印的是常量 —— 看不出时机，所以要这一份把它钉住。

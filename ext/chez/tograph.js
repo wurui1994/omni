@@ -11,7 +11,7 @@
 import { node, lit, program } from '../../src/core/graph/graph.js';
 import {
   head, kids, text, symName, asList, branchOf, listNew, indexGet, indexSet, sliceOf,
-  mapNew, mapGet, mapSet, mapHas,
+  mapNew, mapGet, mapSet, mapHas, destructure,
   fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -141,6 +141,19 @@ function toNode(x) {
       then: many(rest.slice(1)),
     });
     case 'begin': return node('region', { body: many(rest) });
+    // 多值那两格：`(values 3 7)` 是生产侧，`let-values` 是消费侧（一串 pick）——
+    // 与 go / V 的多返回、CL 的 `values`、nim 的元组是**同一对节点**。
+    case 'values': return node('values', { args: many(rest) });
+    case 'let-values': case 'let*-values': {
+      const out = [];
+      for (const b of (asList(rest[0]) ?? [])) {
+        const pair = asList(b) ?? [];
+        const names = (asList(pair[0]) ?? []).map((s) => symName(s));
+        if (names.length === 0) throw new Error('chez->graph: `let-values` 的形参表空着还没接');
+        out.push(...[destructure(names, toNode(pair[1]), { declare: true })].flat());
+      }
+      return node('region', { body: [...out, ...many(rest.slice(1))] });
+    }
     // `(let ((x 1) (y 2)) body…)` —— 一格 region + 一串 bind
     case 'let': {
       const binds = (asList(rest[0]) ?? []).map((b) => {

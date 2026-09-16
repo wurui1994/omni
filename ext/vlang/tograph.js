@@ -14,7 +14,7 @@ import {
 import {
   tag, kids, leaf, part, threePart, elseOf,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit,
-  recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf,
+  recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, destructure,
   mapNew, mapGet, mapSet, mapHas, mapNames, isList,
 } from '../../src/core/graph/fromtree.js';
 
@@ -163,6 +163,12 @@ function toNode(x) {
       const isDef = tag(x) === 'define';
       const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
       const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
+      // `a, b := two()`：**N 个名字对 1 个右值** ⇒ 多值的消费侧（一串 pick）。
+      // 与 go 那一份同一条（`destructure` 在 fromtree.js）—— V 的多返回写成
+      // `fn two() (int, int)` + `return 3, 7`，生产侧落 `values`，这儿落 pick。
+      if (lhs.length > 1 && rhs.length === 1) {
+        return destructure(lhs.map(nameOf), toNode(rhs[0]), { declare: isDef });
+      }
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set

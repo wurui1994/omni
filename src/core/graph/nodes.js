@@ -176,7 +176,17 @@ export const NODES = new Map([
   //   * go 的 `x, ok = m[k]` / V 的 `?T` / CL 的 `multiple-value-bind` 三种写法
   //     从此共用同一对节点（`ext/go/SPEC.md` §五第 1 项那句"三种双值形式是同一个形状"）。
   N('values', 'expr', [{ name: 'args', sem: SEM.value, rest: true }], {
-    doc: 'go `return a, b` / lua `return a, b` / CL `values` / V 的双值形式',
+    doc: 'go `return a, b` / lua `return a, b` / CL `values` / V 的双值形式'
+      + ' / Scheme 的 `values` + `let-values` / nim 的元组',
+    // 规格里数出来**八门**（awk 与 freebasic 的语言里没有多值这件事）。
+    // `pick` 是它的消费侧，一族一笔账，记在这一格上。
+    providers: {
+      spec: ['go', 'lua', 'vlang', 'nim', 'sbcl', 'chez', 'mojo', 'cpp'],
+      why: {
+        mojo: '元组是库里的泛型类型（`Tuple[…]` + `[0]` 取用）—— 与 `Dict` 欠的是同一笔',
+        cpp: '`std::tuple` / `std::pair` + 结构化绑定要模板与库那一族（与 slice / map 同一笔）',
+      },
+    },
   }),
   N('pick', 'expr', [{ name: 'from', sem: SEM.value, multi: true }], {
     attrs: ['index'],
