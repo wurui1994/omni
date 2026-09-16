@@ -143,7 +143,8 @@ for (const c of HAND) {
 {
   const bad = [
     ['没见过的算子', '(module (func $f (result i32) (i32.trunc_f32_s (f32.const 1))))', '还没见过的算子'],
-    ['没见过的模块层 form', '(module (table 1 funcref))', '模块层还没见过'],
+    ['没见过的模块层 form', '(module (tag $e))', '模块层还没见过'],
+    ['只认函数那种导入', '(module (import "m" "g" (global $g i32)))', '只认 (import … (func …))'],
     ['标签不在作用域里', '(module (func $f (block $A (br $B))))', '这个标签不在作用域里'],
     ['还不认的导出种类', '(module (global $g (mut i32) (i32.const 0)) (export "g" (global $g)))', '还不认 (export'],
   ];
@@ -166,6 +167,37 @@ for (const c of HAND) {
     const b = Buffer.from(watToWasm(t)).toString('hex');
     if (a !== b) no('装两遍', '       同一份文本装两遍，二进制不一样');
     else ok(`装两遍逐字节相同（${a.length / 2} 字节）`);
+  }
+
+  /**
+   * **函数表 + `call_indirect` 这一格先在装的这侧落地**（"函数当值用"那条账的第二处，
+   * 见 `backend-wat.js` 里 `WAT_SHAPES` 第一条那段量出来的价钱）。
+   * 后端还没发这种形状，所以这儿用一份**手写**的模块钉住装出来的二进制是对的：
+   * 表里两格函数，下标从局部量来（编译期看不出是哪一个），两次调用各走一格。
+   */
+  {
+    const wat = `(module
+  (import "omni" "print_i64" (func $print (param i64)))
+  (type $sig1 (func (param i64) (result i64)))
+  (table 2 funcref)
+  (elem (i32.const 0) $f $g)
+  (func $f (param $x i64) (result i64) (return (i64.add (local.get $x) (i64.const 1))))
+  (func $g (param $x i64) (result i64) (return (i64.mul (local.get $x) (i64.const 10))))
+  (func $__entry
+    (local $p i64)
+    (local.set $p (i64.const 1))
+    (call $print (call_indirect (type $sig1) (i64.const 7) (i32.wrap_i64 (local.get $p))))
+    (local.set $p (i64.const 0))
+    (call $print (call_indirect (type $sig1) (i64.const 7) (i32.wrap_i64 (local.get $p)))))
+  (export "main" (func $__entry))
+)`;
+    try {
+      const { out, bytes } = await runWat(wat);
+      if (out.join(' / ') !== '70 / 8') no('函数表 + call_indirect', `       期望 70 / 8，得到 ${out.join(' / ')}`);
+      else ok(`函数表 + call_indirect [V8 里跑出 70 / 8（二进制 ${bytes} 字节）]`);
+    } catch (err) {
+      no('函数表 + call_indirect', `       ${err.message}`);
+    }
   }
 }
 

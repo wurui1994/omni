@@ -201,6 +201,9 @@ export function watToWasm(text) {
   const globals = [];
   const datas = [];
   const exps = [];
+  const tidByName = new Map();     // `(type $sig …)` 的名字 -> 类型下标
+  const elems = [];
+  let tableN = null;
   let memMin = null;
   let memMax = null;
   let startId = null;
@@ -233,6 +236,20 @@ export function watToWasm(text) {
       for (const nm of inlineExports) exps.push({ name: nm, kind: 0x00, id });
     } else if (h === 'start') {
       startId = it[1];
+    } else if (h === 'type') {
+      // `(type $sig (func (param i64) (result i64)))` —— 间接调用要一个**有名字的**签名
+      const [, id, f] = it;
+      if (!Array.isArray(f) || f[0] !== 'func') throw new Error('wasm: (type … ) 里要一个 (func …)');
+      const { params, results } = signature(f);
+      tidByName.set(id, typeIdx(params.map((p) => p.type), results));
+    } else if (h === 'table') {
+      // `(table N funcref)` —— 函数值就是这张表上的下标（"函数当值用"那条账的落点）
+      if (it[2] !== 'funcref' && it[2] !== 'anyfunc') throw new Error('wasm: 表里只收 funcref');
+      tableN = Number(it[1]);
+    } else if (h === 'elem') {
+      // `(elem (i32.const 0) $a $b …)` —— 往表里填函数
+      const [, off, ...ids] = it;
+      elems.push({ off, ids });
     } else if (h === 'export') {
       const [, nm, what] = it;
       if (!Array.isArray(what)) throw new Error('wasm: (export …) 后面要一个 (func …) / (memory …)');
@@ -249,7 +266,7 @@ export function watToWasm(text) {
   const gidx = new Map();
   globals.forEach((g, k) => gidx.set(g.id, k));
 
-  const bodies = funcs.map((f) => encodeFunc(f, { fidx, gidx }));
+  const bodies = funcs.map((f) => encodeFunc(f, { fidx, gidx, tidByName }));
 
   // ---- 拼段。**顺序是规范定的**：1 type · 2 import · 3 func · 5 memory · 6 global ·
   //      7 export · 10 code · 11 data（没有 table / elem / start —— 后端不发那些）
@@ -262,6 +279,8 @@ export function watToWasm(text) {
   sec(2, imports.length === 0 ? null
     : vec(imports.map((im) => [...name(im.mod), ...name(im.nm), 0x00, ...uleb(im.typeidx)])));
   sec(3, funcs.length === 0 ? null : vec(funcs.map((f) => uleb(f.typeidx))));
+  // 4 table：函数表（`funcref` 那一种，0x70）
+  sec(4, tableN === null ? null : vec([[0x70, 0x00, ...uleb(tableN)]]));
   sec(5, memMin === null ? null
     : vec([memMax === null ? [0x00, ...uleb(memMin)] : [0x01, ...uleb(memMin), ...uleb(memMax)]]));
   sec(6, globals.length === 0 ? null
@@ -272,6 +291,11 @@ export function watToWasm(text) {
       ...uleb(e.kind === 0x00 ? idxOf(fidx, e.id) : e.memidx)])));
   // 8 start：入口也可以不靠导出名（`tests/wat/cases/02-control.wat` 用的就是这种）
   sec(8, startId === null ? null : uleb(idxOf(fidx, startId)));
+  // 9 elem：往表里填函数（`(elem (i32.const 0) $a $b …)`）
+  sec(9, elems.length === 0 ? null
+    : vec(elems.map((e) => [0x00,
+      ...encodeExpr(e.off, { fidx, gidx, tidByName, locals: new Map(), labels: [] }), 0x0b,
+      ...vec(e.ids.map((id) => uleb(idxOf(fidx, id))))])));
   sec(10, funcs.length === 0 ? null : vec(bodies));
   sec(11, datas.length === 0 ? null
     : vec(datas.map((d) => [0x00,
@@ -379,6 +403,14 @@ function code(form, ctx) {
     return h === 'br' ? [0x0c, ...uleb(depth)] : [...sub(kids.slice(1)), 0x0d, ...uleb(depth)];
   }
   if (h === 'call') return [...sub(kids.slice(1)), 0x10, ...uleb(idxOf(ctx.fidx, kids[0]))];
+  if (h === 'call_indirect') {
+    // `(call_indirect (type $sig) 实参… 下标)` —— 下标最后进栈（它是 `call_indirect` 的操作数）
+    const t = kids[0];
+    if (!Array.isArray(t) || t[0] !== 'type') throw new Error('wasm: call_indirect 要 (type $sig)');
+    const tid = ctx.tidByName?.get(t[1]);
+    if (tid === undefined) throw new Error(`wasm: 没有 ${t[1]} 这个签名（模块层要有 (type …)）`);
+    return [...sub(kids.slice(1)), 0x11, ...uleb(tid), 0x00];
+  }
   if (h === 'local.get') return [0x20, ...uleb(local(kids[0]))];
   if (h === 'local.set' || h === 'local.tee') {
     return [...sub(kids.slice(1)), h === 'local.set' ? 0x21 : 0x22, ...uleb(local(kids[0]))];
