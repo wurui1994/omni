@@ -64,6 +64,9 @@ const SUITES = [
   // 节点图那两条轴：矩阵（语言 × 后端）与**可删除测试**（删一格特性，剩下的照旧跑）。
   // 两条都在 `tests/graph/` 底下，都只用得着 `src/core/graph` + 各语言的 `.grammar`。
   { s: 'graph/run.js' }, { s: 'graph/delete.js' },
+  // 可删除测试的**第二层**：删一支产生式（语法那一层）。默认只跑两门小语法 ——
+  // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
+  { s: 'grammar/delete.js' },
   { s: 'incr/run.js' }, { s: 'c/run.js' },
   { s: 'llvm/run.js', group: 'jit' }, { s: 'sexpr/run.js' }, { s: 'asy/run.js' },
   { s: 'jnc/run.js' }, { s: 'jit/run.js', group: 'jit' },
