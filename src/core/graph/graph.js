@@ -38,6 +38,14 @@ export function node(op, ins = {}, attrs = {}) {
   for (const k of Object.keys(attrs)) {
     if (k === 'span') continue;
     if (!d.attrs.includes(k)) throw new Error(`node ${op} has no attr "${k}" (attrs: ${d.attrs.join(', ')})`);
+    // 附属的值不许是 `undefined`：**"没有这一格"要靠不给这个键来说**
+    // （chez / sbcl 的匿名 lambda 一直是这么写的 —— `{ params }`，不带 name）。
+    // 给 `undefined` 的代价量过：`toSx` 会把它印成字面的 `undefined`，那份文本读回来当场报
+    // "这一格附属的值不是 JSON" —— 也就是"图的一种写法"破在一格看不见的地方。
+    // 所以在建图这一步就拦住，而不是等序列化那条腿去红。
+    if (attrs[k] === undefined) {
+      throw new Error(`node ${op} attr "${k}" is undefined —— 没有这一格就别给这个键`);
+    }
     n.attrs[k] = attrs[k];
   }
   return n;

@@ -40,6 +40,8 @@ import { backends, gaps, shapeGaps, Gap } from '../../src/core/graph/contract.js
 import { NODES } from '../../src/core/graph/nodes.js';
 // 内建那张表 —— "出处"那一节要它（arity 与 effects 两栏必须都在）
 import { PRIMS } from '../../src/core/graph/prims.js';
+// 登记处（这儿只用它一栏：谁是方言 —— 方言不算独立的一家，见下面 `baseOf`）
+import { LANGS } from '../../src/core/graph/langs.js';
 // 例子表两条判据共用一份（`delete.js` 也 import 它）—— 抄两份就会有一份忘了改
 import { CASES, HAND } from './cases.js';
 
@@ -52,13 +54,20 @@ const showGaps = argv.includes('--gaps');
 const showMachines = argv.includes('--machines');
 /** 每格节点用了它的语言名单 —— **数出来的**，不是手写的（ADR-0033 §3.7 的 G5）。 */
 const providers = new Map();
+/**
+ * **方言不算独立的一家**：gsl-shell 的映射就是 lua 那份（`ext/gsl-shell/tograph.js` 是转手），
+ * 所以它给同一格节点作证等于同一家作证两遍 —— 那会把"≥4 家 = 机器"这条判据灌水
+ * （落地那天先看到的就是 `11 机器 bind … gsl-shell lua …`）。
+ * 于是按**基准那门**记名：`LANGS` 里有 `extends` 的，票投给它继承的那门。
+ */
+const baseOf = (lang) => LANGS.get(lang)?.extends ?? lang;
 function countOps(x, lang) {
   if (x === null || x === undefined) return;
   if (Array.isArray(x)) { x.forEach((y) => countOps(y, lang)); return; }
   if (x.kind === 'graph') { countOps(x.body, lang); return; }
   if (x.op === undefined) return;
   if (!providers.has(x.op)) providers.set(x.op, new Set());
-  providers.get(x.op).add(lang);
+  providers.get(x.op).add(baseOf(lang));
   Object.values(x.ins).forEach((y) => countOps(y, lang));
 }
 const only = argv.filter((a) => !a.startsWith('-'));

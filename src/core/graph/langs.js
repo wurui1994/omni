@@ -1,4 +1,7 @@
-// src/core/graph/langs.js —— **十门语言的登记处**（名字 · 语法 · 映射 · 文件名后缀）
+// src/core/graph/langs.js —— **语言的登记处**（名字 · 语法 · 映射 · 文件名后缀）
+//
+// 现在十一格：十门语言 + 一门方言（gsl-shell —— 它的语法是 `(extends "../lua/lua.grammar")`
+// 加两条产生式，所以在这张表里它与别人**一样是一门**，没有"方言"那一栏）。
 //
 // 为什么单开一份：这张表原来只长在 `tests/graph/cases.js` 里，可它现在有**两个消费者** ——
 // 测试矩阵与 `omni run --engine graph`。抄两份的话，加一门语言要改两处，而其中一处一定会忘
@@ -9,6 +12,8 @@
 // `.lua` 是最清楚的例子：lua 与 gsl-shell 用同一个后缀，源码也几乎同形。按后缀猜必然猜错一半，
 // 所以后缀只是**默认**，`--lang` 一给就盖过它（`omni run x.lua --lang gsl-shell`）。
 // 一个后缀只许登记在一门语言上（下面 `EXTS` 建表时撞了就当场报错）—— 猜得含糊比报错糟。
+// 于是多出一栏 `guess: false`：那门语言的源文件**确实**是这个后缀（例子文件要按它命名），
+// 但它**不参与按后缀猜**（gsl-shell 就是这一格：`.lua` 归 lua，gsl-shell 只能 `--lang` 点名）。
 //
 // ## 这张表里**没有**"能力"这一栏
 //
@@ -18,6 +23,7 @@
 import { OmniError } from '../source/diag.js';
 import { chezToGraph } from '../../../ext/chez/tograph.js';
 import { luaToGraph } from '../../../ext/lua/tograph.js';
+import { gslShellToGraph } from '../../../ext/gsl-shell/tograph.js';
 import { goToGraph } from '../../../ext/go/tograph.js';
 import { sbclToGraph } from '../../../ext/sbcl/tograph.js';
 import { vlangToGraph } from '../../../ext/vlang/tograph.js';
@@ -45,12 +51,21 @@ export function treeRoot() {
 
 /**
  * 一门语言一格：`grammar` 是相对这棵树根的路径，`toGraph` 是那门语言的映射，
- * `exts` 是"按文件名能猜到它"的后缀（不带点）。
+ * `exts` 是它的源文件后缀（不带点，`exts[0]` 就是例子文件用的那个）。
+ * `guess: false` = 那些后缀**不参与按文件名猜**（见文件头）。
  */
 export const LANGS = new Map([
   ['chez', { grammar: 'ext/chez/chez.grammar', toGraph: chezToGraph, exts: ['ss', 'scm'] }],
   ['sbcl', { grammar: 'ext/sbcl/sbcl.grammar', toGraph: sbclToGraph, exts: ['lisp', 'cl'] }],
   ['lua', { grammar: 'ext/lua/lua.grammar', toGraph: luaToGraph, exts: ['lua'] }],
+  // 方言：语法是"继承 lua 那份 + 两条产生式"（`(extends …)`，见 glr/load.js），
+  // 映射一个字不改地借 lua 的。后缀仍是 `.lua`，但**不参与猜** —— 只能 --lang 点名。
+  // 量出来的账面（`/Users/wurui/Train/gsl-shell` 那 186 份 .lua）：拿 lua 的语法 139/186，
+  // 拿这一份 176/186；剩下 10 份全是 LuaJIT 的虚数字面量 `1i`（那是基语言的账）。
+  ['gsl-shell', {
+    grammar: 'ext/gsl-shell/gsl-shell.grammar', toGraph: gslShellToGraph,
+    exts: ['lua'], guess: false, extends: 'lua',
+  }],
   ['go', { grammar: 'ext/go/go.grammar', toGraph: goToGraph, exts: ['go'] }],
   ['vlang', { grammar: 'ext/vlang/vlang.grammar', toGraph: vlangToGraph, exts: ['v'] }],
   ['awk', { grammar: 'ext/awk/awk.grammar', toGraph: awkToGraph, exts: ['awk'] }],
@@ -64,6 +79,7 @@ export const LANGS = new Map([
 export const EXTS = (() => {
   const m = new Map();
   for (const [name, d] of LANGS) {
+    if (d.guess === false) continue;      // 有后缀但不参与猜（gsl-shell 的 `.lua`）
     for (const e of d.exts) {
       const had = m.get(e);
       if (had !== undefined) throw new Error(`langs.js: 后缀 .${e} 被 ${had} 与 ${name} 抢了 —— 一个后缀只许登记在一门语言上`);
@@ -74,22 +90,12 @@ export const EXTS = (() => {
 })();
 
 /**
- * **方言**：与某一门共用语法与映射，但有自己的名字 —— 只能靠 `--lang` 点名（没有后缀）。
- *
- * gsl-shell 是这一格的来由，也是"按后缀猜必然猜错"那句话的出处：它与 lua 用同一个 `.lua`。
- * 现状是量出来的（`/Users/wurui/Train/gsl-shell` 那 186 份 .lua，用 lua 的语法过一遍）：
- * **139/186 过**，没过的 47 份里 41 份是同一件事 —— gsl-shell 的**短 lambda** `|x| expr`
- * （LuaJIT 那一支加的），lua 里没有这个写法。
- *
- * 为什么不把 `|x| expr` 加进 `lua.grammar`：那会让 lua 接受它自己没有的写法（假接受比报错坏）。
- * 为什么不给 gsl-shell 单开一份语法：那要把 lua 那 113 条产生式抄一遍，而"抄两份就是两套
- * 语义"是这棵树上反复吃过的教训。**正解是给语法 DSL 一格"方言"机制**（继承一份语法 +
- * 加几条产生式），那是一笔记在账上的欠款；在它之前，`--lang gsl-shell` 就是"按 lua 读"，
- * 撞上短 lambda 会**干净地报语法错**（不猜、不假接受）。
+ * 只能靠 `--lang` 点名的那几门（后缀被别人占着）。**它是算出来的**，不是第二张表 ——
+ * 原来这儿有一张 `DIALECTS`（gsl-shell 借 lua 的语法读），那张表在方言机制落地那天就
+ * 该没了：现在 gsl-shell 是 `LANGS` 里真的一门（自己的语法 `(extends "../lua/lua.grammar")`
+ * + 两条短 lambda 产生式），"方言"这件事整个落在语法 DSL 里，登记处不必再知道。
  */
-export const DIALECTS = new Map([
-  ['gsl-shell', { of: 'lua', note: 'gsl-shell 与 lua 共用一份语法：短 lambda `|x| expr` 还没接（它的语料 139/186 过）' }],
-]);
+export const BY_NAME_ONLY = [...LANGS].filter(([, d]) => d.guess === false).map(([n]) => n);
 
 /**
  * 按"用户敲的 --lang"与"文件名后缀"定这一份源码归哪门语言。**--lang 优先**：
@@ -98,15 +104,10 @@ export const DIALECTS = new Map([
  */
 export function pickLang(path, want) {
   if (want !== null && want !== undefined && want !== '') {
-    const dia = DIALECTS.get(want);
-    if (dia !== undefined) {
-      // 方言：语法与映射借基准那一门的，名字仍是它自己的（报错里要认得出是谁）
-      return { name: want, ...LANGS.get(dia.of), dialectOf: dia.of, note: dia.note };
-    }
     const d = LANGS.get(want);
     if (d === undefined) {
-      throw new OmniError(`没有 --lang ${want} 这一门 —— 认得的十门是：${[...LANGS.keys()].join(' ')}`
-        + `；方言：${[...DIALECTS.keys()].join(' ')}`);
+      throw new OmniError(`没有 --lang ${want} 这一门 —— 认得的是：${[...LANGS.keys()].join(' ')}`
+        + `（其中 ${BY_NAME_ONLY.join(' ')} 只能这么点名，后缀归别人）`);
     }
     return { name: want, ...d };
   }

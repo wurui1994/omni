@@ -1,0 +1,56 @@
+;; ext/gsl-shell/gsl-shell.grammar —— **第一份"方言"语法**（`(extends …)` 的第一个用户）
+;;
+;; gsl-shell 是 LuaJIT 上那个数值计算 shell（GSL 的绑定）。它与 lua 的关系是这棵树上
+;; 第一次真正需要"方言"这个词的地方：
+;;   * 后缀一样（`.lua`）—— 所以按文件名分不开，只能 `--lang gsl-shell` 点名；
+;;   * 源码几乎同形 —— 量出来：拿 lua 的语法过它那 186 份 `.lua`，**139 份直接过**；
+;;   * 没过的 47 份里 **41 份是同一件事** —— 短 lambda `|x| expr`。
+;;
+;; 那 41 份就是这一份文件存在的全部理由。三条别的路都不走：
+;;   * 把 `|x| expr` 加进 `lua.grammar` —— 那是让 lua 接受它自己没有的写法（假接受比报错坏）；
+;;   * 把 lua 那 113 条产生式抄一遍 —— "抄两份就是两套语义"，这棵树上吃过好几次；
+;;   * 假装 `--lang gsl-shell` 等于 lua —— 那是把账藏起来。
+;; 于是给语法 DSL 加了 `(extends …)`（见 `src/core/glr/load.js` 的 `withExtends`），
+;; 这一份只写**多出来的那两条**。
+;;
+;; ## 短 lambda 的形状：落成与 `function` **同一棵树**
+;;
+;; `|x| x + 1` 与 `function(x) return x + 1 end` 在 gsl-shell 里是同一件事，所以这儿出的树
+;; 也与 lua 的 `(fn (body (params …) (block (return …))))` 逐格一样 —— 于是
+;; **映射一个字都不用改**（`ext/gsl-shell/tograph.js` 直接转手 lua 那份）。
+;; 这正是"写法归语言、格子归节点"那条纪律在方言这一层的样子：新写法不带来新节点。
+;;
+;; ## 还欠的（明说，不猜）
+;;
+;;   * **方言加不了词法**：`(lex …)` 只许一份，基准那份占了。gsl-shell 用得着的
+;;     `|` 恰好已经是 lua 的记号（按位或），所以这一批不需要 —— 真需要那天要给
+;;     `withExtends` 加一格"词法也能叠"。
+;;   * 那 10 份仍然没过的**全是同一件事，而且不是这门方言的账**：LuaJIT 带 FFI 时的
+;;     虚数字面量 `1i` / `2i` / `0i`（`luajit2/src/lj_strscan.c:421-425` —— 属于**基语言**，
+;;     `ext/gsl-shell/lang.js` 文件头里那笔"撤回"记的就是它）。要补是补 `lua.grammar`
+;;     的数字记号，不是这一份。
+;;
+;; ## 落地之后重量的一遍（同一份语料、同一台机器，只换语法）
+;;
+;;   拿 lua 的语法：      139/186（没过的 47 份里 41 份栽在 `|`）
+;;   拿这一份：           **176/186** —— 栽在 `|` 的**归零**，剩下 10 份全是上面那个 `1i`
+;;   （量的是 `/Users/wurui/Train/gsl-shell` 那 186 份 `.lua`）
+;;
+;; ## 体到哪儿为止：**吃到不能再吃**（量出来的，不是我定的）
+;;
+;; `|a, b| (a > b) and a or b` 有两种读法：体只到 `(a > b)`（那整个 lambda 就成了 `and` 的左项），
+;; 还是体一路吃到 `b`。出处说的是第二种：
+;;   luajit2/src/lj_parse.c:1906  `parse_simple_body` 的体是 `expr(ls, &e)`，而 `expr` 就是
+;;                                `expr_binop(ls, v, 0)` —— **最低优先级**起手，所以 and / or 都归体。
+;; 落到这份 LR 语法上就是给这两条标最低那一级（`(prec STOP)` —— lua 那份里级别最低的伪终结符），
+;; 于是看见 `and` 时是**移进**而不是归约。不标的话规则优先级取 RHS 里最后一个有优先级的终结符
+;; = `|`（按位或那一级，比 and/or 高），体就只到 `(a > b)` —— 那一格是真错的，
+;; `ext/gsl-shell/examples/basics.lua` 当场报 `unbound name: a`（这条读法就是那么钉住的）。
+(grammar gsl-shell
+  (extends "../lua/lua.grammar")
+
+  ;; 短 lambda。两条：无参与有参。`|` 在 lua 里是按位或，所以这儿**不会**与它撞车 ——
+  ;; `a | b` 的两边都是表达式，而 `|x| e` 以 `|` 起头（表达式起头不许是 `|`）。
+  (rule exp
+    (-> ("|" "|" exp) (prec STOP) (fn (body (params) (block (return $3)))))
+    (-> ("|" namelist "|" exp) (prec STOP) (fn (body (params $*2) (block (return $4)))))))

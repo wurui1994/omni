@@ -6,7 +6,7 @@
 // 抄两份的话，加一门语言就要改两处，而其中一处一定会忘。
 
 import { node, lit, program, bin } from '../../src/core/graph/graph.js';
-// 十门语言的登记处（语法 · 映射 · 后缀）。这一份**只挑家族**，不再自己抄一张语言表
+// 语言的登记处（语法 · 映射 · 后缀）。这一份**只挑家族**，不再自己抄一张语言表
 import { LANGS } from '../../src/core/graph/langs.js';
 
 /**

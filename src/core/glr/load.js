@@ -74,7 +74,70 @@ export function grammarTextOf(path, diags) {
     const text = ebnfToGrammarText(new SourceFile(path, raw), diags);
     return text === null ? '' : text;
   }
-  return raw;
+  return withExtends(path, raw, diags);
+}
+
+/**
+ * **方言：`(extends "别的.grammar")`** —— 继承一份语法，再加几条产生式。
+ *
+ * 这一格是 gsl-shell 逼出来的：它与 lua 用同一个 `.lua`，源码几乎同形，差的是一个
+ * 短 lambda（`|x| expr`）。之前只有两条路，两条都不好：把那条产生式加进 `lua.grammar`
+ * 是让 lua 接受它自己没有的写法（**假接受比报错坏**），另开一份语法要把 lua 那 113 条
+ * 抄一遍（**抄两份就是两套语义**）。所以给 DSL 加这一格。
+ *
+ * 落在**文本**这一层而不是对象这一层，理由是缓存：`loadGrammarTable` 的键就是这段文本，
+ * 拼进基准那份之后，**改 `lua.grammar` 会让方言的表自动失效**。落在对象层就得再想一套
+ * "键里也要算上基准文件"的办法 —— 那是第二处会忘的地方。
+ *
+ * 合并规矩（都简单到不用记）：
+ *   * 基准那份的**全部条目**先放，本份的接在后面；
+ *   * 同名 `(rule N …)` 是**追加产生式**（`readGrammar` 本来就允许一个非终结符出现多次），
+ *     所以方言只写"多出来的那几条"；
+ *   * `(start N)` 后来的盖过先来的 —— 方言想换起始符号就自己写一条；
+ *   * `(lex …)` **只许一份**：基准有了，方言就不许再写（`readGrammar` 会报
+ *     "at most one (lex ...)"）。方言要加词法这一格还欠着 —— 记在账上，不假装它能用。
+ */
+function withExtends(path, text, diags) {
+  const m = /\(extends\s+"([^"]+)"\)/.exec(text);
+  if (m === null) return text;
+  const basePath = join(dirOf(path), m[1]);
+  if (!exists(basePath)) {
+    diags.error(null, `(extends "${m[1]}")：找不到 ${basePath}`);
+    return text;
+  }
+  const baseInner = innerItems(grammarTextOf(basePath, diags), basePath, diags);
+  const mine = innerItems(text.replace(m[0], ''), path, diags);
+  const name = grammarName(text);
+  return `(grammar ${name}\n;; ==== 继承自 ${m[1]}（omni glr 里的"方言"，见 load.js 的 withExtends）====\n`
+    + `${baseInner}\n;; ==== 本份多出来的 ====\n${mine}\n)\n`;
+}
+
+/** `(grammar NAME …)` 里 NAME 后面那一截（不含最外层括号与名字）。 */
+function innerItems(text, path, diags) {
+  const i = text.indexOf('(grammar');
+  if (i < 0) { diags.error(null, `${path}: 不是一份 (grammar …)`); return ''; }
+  let j = i + '(grammar'.length;
+  while (j < text.length && /\s/.test(text[j])) j += 1;
+  while (j < text.length && !/[\s()]/.test(text[j])) j += 1;   // 跳过名字
+  const last = text.lastIndexOf(')');
+  if (last < j) { diags.error(null, `${path}: (grammar …) 没收口`); return ''; }
+  if (text.slice(last + 1).trim() !== '') {
+    diags.error(null, `${path}: (grammar …) 收口之后还有别的东西 —— 方言拼接要求一份文件只有一个 form`);
+    return '';
+  }
+  return text.slice(j, last);
+}
+
+/** `(grammar NAME …)` 的 NAME。 */
+function grammarName(text) {
+  const m = /\(grammar\s+([^\s()]+)/.exec(text);
+  return m === null ? '?' : m[1];
+}
+
+/** 一条路径的目录（不引 `node:path` —— 这一份要能跟着编译器被降级）。 */
+function dirOf(p) {
+  const i = String(p).lastIndexOf('/');
+  return i < 0 ? '.' : String(p).slice(0, i);
 }
 
 /** 转出来的那份文本报错时印什么路径 —— 别让 caret 指着 `.y` 的行号却是转换后的正文。 */

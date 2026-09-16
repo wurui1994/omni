@@ -79,10 +79,20 @@ function nameOf(x) {
   return null;
 }
 
+/**
+ * `(body (params …) (block …))` -> 一格 `func`。
+ *
+ * `name` 这一格**没有就不给**（而不是给一个 `undefined`）：匿名函数在 lua 里是
+ * `local f = function(x) … end`，在 gsl-shell 里是 `|x| …`，两处都没有名字。
+ * chez / sbcl 的 `lambda` 早就是这么写的（`{ params }`，不带 name）—— 这儿跟上。
+ * 给 `undefined` 的代价是量出来的：那一格会被 `toSx` 印成字面的 `undefined`，
+ * 读回来当场报"这一格附属的值不是 JSON"（`gsl-shell × sx` 那一格就是这么红的）。
+ */
 function funcOf(bodyNode, name) {
   const params = partOf(bodyNode, 'params').map(nameOf);
   const blk = kids(bodyNode).find((y) => tag(y) === 'block');
-  return node('func', { body: blk === undefined ? [] : many(kids(blk)) }, { params, name });
+  const attrs = name === null || name === undefined ? { params } : { params, name };
+  return node('func', { body: blk === undefined ? [] : many(kids(blk)) }, attrs);
 }
 
 function toNode(x) {

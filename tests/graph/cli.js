@@ -77,23 +77,27 @@ check('--lang 盖过后缀（.lisp 当 chez 读 -> chez 的映射不认 defun）
   { code: 1, says: '跑的时候错了' });
 check('后缀不认得就报清单', ['run', 'README.md', '--engine', 'graph'],
   { code: 1, says: '这个后缀不认得' });
-check('--lang 打错就报那十门', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--lang', 'gsl-no-such'],
-  { code: 1, says: '认得的十门是' });
+check('--lang 打错就报认得的那些', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--lang', 'gsl-no-such'],
+  { code: 1, says: '认得的是' });
 
 // ---- 2b) 方言：gsl-shell 与 lua 共用 `.lua`，只能 `--lang` 点名（这就是 --lang 的来由）
-check('--lang gsl-shell（按 lua 读，共用一份语法）',
+check('--lang gsl-shell 读 lua 的例子（继承那份语法 = 基语言一个字都不少）',
   ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--lang', 'gsl-shell'],
   { code: 0, out: BASICS });
 {
   /**
-   * **那条方言账的判据**：gsl-shell 的短 lambda（`|x| expr`）现在**没接**，
-   * 所以撞上它必须干净地报语法错（不假接受）。量出来的：它那 186 份语料里 41 份用到这个写法。
-   * 哪天语法接了，这一格会变红 —— 那时要改的是 `langs.js` 里那条账，不是这一格。
+   * **方言那一格的判据，两面都要**：
+   *   1. `--lang gsl-shell` 认短 lambda（`|x| expr`）—— 那两条产生式是它存在的全部理由
+   *      （量出来的：它那 186 份语料里 41 份用这个写法）；
+   *   2. **lua 不认**它 —— 假接受比报错坏，所以同一份文件按 lua 读必须干净地报语法错。
+   * 这一格原来是"还没接，报 unexpected |"，`ext/gsl-shell/gsl-shell.grammar` 落地那天反过来了。
    */
   const f = join(tmpdir(), 'omni-gsl-lambda.lua');
   writeFileSync(f, 'local f = |x| x + 1\nprint(f(1))\n');
-  check('gsl-shell 的短 lambda 还没接（干净地报语法错）',
-    ['run', f, '--engine', 'graph', '--lang', 'gsl-shell'], { code: 1, says: 'unexpected "|"' });
+  check('gsl-shell 认短 lambda', ['run', f, '--engine', 'graph', '--lang', 'gsl-shell'],
+    { code: 0, out: ['2'] });
+  check('lua 不认短 lambda（同一份文件，按后缀就是 lua）', ['run', f, '--engine', 'graph'],
+    { code: 1, says: 'unexpected "|"' });
 }
 
 // ---- 3) 缺口不是失败：有名有姓，退出码 3（与"程序自己跑错了"分开）

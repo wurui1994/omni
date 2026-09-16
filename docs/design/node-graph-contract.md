@@ -200,9 +200,14 @@ G4（"同一张图算出来的次序逐字节相同"）第一次有了可跑的�
 连痕迹都没有。加一颗星（`:k` 是一个、`:k*` 是一串）就够了，这是让 `fromSx` 成立的最小代价。
 
 现在 sx 那一格的判据是**三条一起**：出得来 · `toSx(fromSx(t)) === t` 逐字节相同 ·
-读回来那张图交给默认解释器跑，输出与别的腿逐行相同。74 份例子全过。
+读回来那张图交给默认解释器跑，输出与别的腿逐行相同。76 份例子全过。
 顺带白拿一条：`fromSx` 拼完节点还是走 `node()` 查五栏，所以**删一格节点之后老的 sx 文本
 会以同一句话失败**（`no such node: X`）—— 节点层那条可删除判据自动覆盖到了序列化这一格。
+
+这条判据后来又替别处抓了一次虫（第十九批）：匿名函数落成 `func` 且 `name: undefined`，
+interp / js / wat 三条腿照跑，**只有 sx 红了** —— `toSx` 把它印成字面的 `undefined`。
+修在建图那一步（`node()` 不许附属是 `undefined`，"没有这一格"要靠不给这个键说），
+不是在序列化这一步。**能读回来这件事，是一把照出上游毛病的尺子。**
 
 ## 6. 契约：后端只回答问题，不打印文本
 
@@ -388,9 +393,9 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
 - 矩阵里因此第一次有了 **skip** 这一档：**每一格都带理由**
   （"打印一格多值要运行期长度 + 拼串" / "嵌套的函数（闭包）还没接" / "墙在 OIR 不在 wasm"）。
   跳过不是失败 —— 那正是 §6 第 2 条要的样子：待办是算出来的，不是文档里许的愿。
-  现在的总账：**303 passed / 0 failed / 1 skipped**（语言例子 69 + 手搭图 5 × 后端 4，
+  现在的总账：**311 passed / 0 failed / 1 skipped**（语言例子 71 + 手搭图 5 × 后端 4，
   再加 wat 那 5 条形状账各一份证物、五栏指纹那两组撞车、一格"出处齐不齐"），
-  每条腿末尾还印一行覆盖：`interp 74/74 · sx 74/74 · js 74/74 · wat 73/74`。
+  每条腿末尾还印一行覆盖：`interp 76/76 · sx 76/76 · js 76/76 · wat 75/76`。
   这三个数会随每一批节点变 —— 它们是**跑出来的**，不是写下来的，所以文档里这一行
   过期就是错，改代码的那一趟必须顺手改它。
 - **"还在跳的几乎全是字符串"那句话是错的 —— 数一遍就知道**。当时 21 格跳过里字符串只占 4 格
@@ -486,25 +491,25 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
    那说明删这一格会让**别处**崩，级联算漏了。
 3. **级联半径是数出来的**，不是手写的文档。
 
-现状：**41 样 × 74 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
+现状：**41 样 × 76 份例子，41 passed / 0 failed**（节点 27 格 + 附属 14 格）。
 数出来的半径（删了它，几份例子要它）：
 
 ```
 骨架那一层
-  prim 74/74 · const / ref / bind 各 69 · call / func 各 52 · branch 37 · region 35
-  set 33 · loop 32 · ret 25
+  prim 76/76 · const / ref / bind 各 71 · call / func 各 54 · branch 39 · region 37
+  set 35 · loop 34 · ret 27
   list-new / index-get 各 12 · scope-exit / index-set / loop-exit 各 8
   record-new / field-get / conv 各 6 · field-set 5
   values / map-new / map-get / map-set / map-has 各 5 · pick / slice 各 4
 附属那一层
-  prim.name 74 · const.value / ref.name / bind.name 各 69 · func.params / func.name 各 52
-  set.name 33 · loop-exit.kind 8 · conv.to 6 · record-new.names / field-get.field 各 6
+  prim.name 76 · const.value / ref.name / bind.name 各 71 · func.params / func.name 各 54
+  set.name 35 · loop-exit.kind 8 · conv.to 6 · record-new.names / field-get.field 各 6
   field-set.field 5 · bind.keepMulti / pick.index 各 4
 ```
 
 这张表就是 target.md 要的"特性 DAG 排序"的可量版本，而且它比 DAG 说得更准：
-**上面那 11 格是骨架**（半径 ≥ 25，删了就没程序可跑），**下面那 16 格想删就能删** ——
-删掉 `map` 那四格，另外 69 份例子一行不改照旧全绿；删掉 `record-new` 那三格是 68 份。
+**上面那 11 格是骨架**（半径 ≥ 27，删了就没程序可跑），**下面那 16 格想删就能删** ——
+删掉 `map` 那四格，另外 71 份例子一行不改照旧全绿；删掉 `record-new` 那三格是 70 份。
 这才是"原子化"真正的样子：不是"分层分得细"，是**删了不牵连**。
 
 顺带看一眼这张表的变化：加了 map 那四格（第九批）之后，**骨架那一层的半径没有一格变**
@@ -566,6 +571,7 @@ grammar     产生式   例子用到   备用   覆盖
 chez           32        8       24    25%
 sbcl           30        8       22    27%
 lua           113       55       58    49%
+gsl-shell     115       40       75    35%
 awk           165       61      104    37%
 mojo          342       82      260    24%
 go            354      109      245    31%
@@ -575,6 +581,11 @@ cpp           529      109      420    21%
 freebasic     627       80      547    13%
 合计         3114      738     2376    24%
 ```
+
+（`gsl-shell` 那一行是**方言进来之后单跑的**（`node tests/grammar/delete.js gsl-shell`，
+27.5s，158 passed / 0 failed），还没并进那次 `--all` 的 665 秒里 —— 所以合计那一行仍是十门的数。
+它的 115 = lua 的 113 + 短 lambda 那两条：**方言在这条轴上与别人同样可删**，
+删掉哪一条它的例子当场红、而 lua 那十几份例子一个字不改照旧全绿。）
 
 "备用 245 条"这个数在 go 上更说明问题：**Go 语法里七成的产生式，八份例子一条都没碰到** ——
 `ext/go/SPEC.md` 里那些"这一批不收"的东西（goroutine / channel / 接口 / 泛型）
@@ -1033,6 +1044,61 @@ wat 那侧只加了两句：一格数放进一格 1 槽的存储，交给 `$__st
 **前缀算符**而不是调用，映射里原来只在调用那一侧查转换名字表 —— 一行补上（同一张表两处查）。
 还欠着的写在 `shapeGaps` 里：**实数 -> 串**（f64 的十进制是另一套：有效位、舍入、指数）。
 
+**第十九批：语法 DSL 有了"方言"，上一批那笔账结了** —— 总账 303 → **311 passed / 0 failed
+/ 1 skipped**（多的八格是 gsl-shell 两份例子 × 四条腿）。这一批**一格新节点都没加，
+一行映射都没写**，加的是语法层的一格机制：
+
+```
+(grammar gsl-shell
+  (extends "../lua/lua.grammar")
+  (rule exp
+    (-> ("|" "|" exp) (prec STOP) (fn (body (params) (block (return $3)))))
+    (-> ("|" namelist "|" exp) (prec STOP) (fn (body (params $*2) (block (return $4)))))))
+```
+
+`(extends …)` 在**文本层**拼（`src/core/glr/load.js` 的 `withExtends`）：基准那份的正文原样
+插进来，再接上本份多出来的那两条。选文本层不是省事 —— 表缓存是按**内容**寻址的，
+文本层拼进去之后 **改 `lua.grammar` 会让方言那张表自动失效**；落在对象层就得再写一套依赖跟踪。
+同名 `(rule N …)` 追加候选式（`readGrammar` 本来就允许），所以方言只写增量。
+
+**账面（同一份语料、同一台机器，只换语法）**：`/Users/wurui/Train/gsl-shell` 那 186 份 `.lua`，
+拿 lua 的语法 **139/186**，拿这份方言 **176/186**。栽在 `|` 的那 41 份**归零**；
+剩下 10 份全是同一件事，而且**不是这门方言的账** —— LuaJIT 带 FFI 的虚数字面量 `1i`
+（`luajit2/src/lj_strscan.c:421-425`，属于基语言，要补是补 `lua.grammar` 的数字记号）。
+
+三件量出来才知道的事：
+
+1. **体到哪儿为止是要读源码定的。** `|a, b| (a > b) and a or b` 有两种读法，
+   而规则优先级默认取 RHS 里最后一个有优先级的终结符 = `|`（按位或那一级，比 and/or 高），
+   于是体只到 `(a > b)`、整个 lambda 成了 `and` 的左项 —— `basics.lua` 当场
+   `unbound name: a`。出处说的是另一种：`parse_simple_body` 的体是 `expr(ls, &e)`
+   = `expr_binop(ls, v, 0)`，**最低优先级**起手。所以那两条标 `(prec STOP)`。
+2. **"没有名字"要靠不给那个键来说。** 匿名函数（`|x| …`、lua 的 `local f = function…`）
+   在 lua 的映射里落成 `func` 且 `name: undefined` —— 四条腿里三条照跑，**sx 那条红了**：
+   `toSx` 把它印成字面的 `undefined`，读回来报"这一格附属的值不是 JSON"。
+   修在两处：映射照 chez / sbcl 的老写法不给这个键，`node()` 再加一句"附属不许是 undefined"，
+   于是这一类错以后在**建图那一步**就炸，而不是等序列化那条腿。
+   —— 这是 §5.2 那条"读得回来"判据第二次替别处抓虫。
+3. **登记处少了一张表。** 原来 `langs.js` 里有 `DIALECTS`（"gsl-shell 借 lua 的语法读"），
+   方言机制落地那天它就该没了：现在 gsl-shell 在 `LANGS` 里与别人一样是一门，
+   只多一栏 `guess: false`（源文件后缀确实是 `.lua`，但**不参与按后缀猜** —— 只能 `--lang` 点名）。
+   "只能点名的那几门"是从这一栏**算**出来的，不是第二张表。
+4. **方言不算独立的一家 —— 这一格差点把 G5 灌了水。** 加进来之后普查当场印
+   `11 机器 bind … gsl-shell lua …`：可 gsl-shell 的映射**就是 lua 那份**（转手一行），
+   它作证等于同一家投两票。G5 那条判据（≥4 家 = 机器）靠的是"互相独立的提供者"，
+   所以普查改成按基准那门记名（`LANGS` 里有 `extends` 的票投给它继承的那门），
+   名单回到 10 家。**加一门语言会不会让某个数变好看，也得先问这一门是不是新证据。**
+
+判据（都跑了）：`tests/graph/run.js` 里 gsl-shell 的 basics 与 intmath 四条腿全绿
+（两份例子里那个短 lambda 都是**载重**的 —— intmath 的 120 是 `fact(4) * inc(4)`）；
+`tests/graph/cli.js` 21 格（上一批那格"短 lambda 还没接，必须报错"**反过来了**，
+并且补了一格反面：同一份文件按 lua 读必须仍报 `unexpected "|"` —— 假接受比报错坏）；
+`tests/grammar/delete.js gsl-shell` 158 passed / 0 failed（115 条产生式，例子用到 40 条）。
+
+还欠一格，明说：**方言加不了词法**（`(lex …)` 只许一份，基准那份占了）。
+gsl-shell 恰好不需要 —— 它要的 `|` 已经是 lua 的记号。真需要那天要给 `withExtends`
+加一格"词法也能叠"。
+
 **第十八批：接进 `omni run`（`--engine graph`）** —— 图这台机器从"只有测试轴看得见"变成
 **用户敲得到的一条命令**。这一批一格新节点都没加，加的是**接线与说明**：
 
@@ -1056,7 +1122,8 @@ omni run x.lua --engine graph --lang gsl-shell                   # --lang 盖过
 退出码分三档，**"接不住"与"跑错了"分开**：0 跑通 · 1 语法/映射/开关说不通 ·
 **3 那条腿有缺口**（有名有姓，例如 `awk × wat` 那格量既装串又装数）。
 
-判据是一条新轴 `node tests/graph/cli.js`（13 格，全绿）：四条腿各跑一门语言、
+判据是一条新轴 `node tests/graph/cli.js`（当时 13 格，加上 build 那一侧与第十九批的方言两面
+现在是 21 格，全绿）：四条腿各跑一门语言、
 按后缀选语言、`--lang` 盖过后缀（`.lisp --lang chez` 必须报"跑的时候错了"）、
 三种开关打错各报一句人话、缺口那格退出码必须是 3、以及 `run --help` 里真有那一段。
 最后那一格是防"声明了不能用"的反面：**能用就得写清**。
@@ -1075,6 +1142,8 @@ lua 共用同一个 `.lua`，那就是 `--lang` 存在的理由）。落之前�
 - 真正缺的东西记成一笔账：**语法 DSL 少一格"方言"机制**（继承一份语法 + 加几条产生式）。
 那 41 份就是这笔账的账面，而且 `tests/graph/cli.js` 里有一格盯着它（短 lambda 必须报错 ——
 哪天接上了那一格会变红，提醒把这条账改掉）。
+**（这一段是当时的实情；那笔账在第十九批结了 —— `(extends …)` 落地，那一格测试如约变红、
+反过来写成"gsl-shell 认短 lambda + lua 仍然不认"。上面 139/186 那个数也在那一批重量过：176/186。）**
 
 **产物那一侧也接上了**（`omni build --engine graph -o OUT`）：
 
