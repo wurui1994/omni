@@ -1,0 +1,105 @@
+#!/usr/bin/env node
+// tests/graph/cli.js —— **`omni run --engine graph` 那条命令的门**
+//
+// `tests/graph/run.js` 量的是"图 × 后端"（库里直接调）；这一份量的是**用户敲的那条命令**：
+// 引擎怎么选、语言怎么定、`--backend` 那四条在不在、错了报什么、退出码是几。
+//
+// 为什么要单独一份：矩阵绿不代表命令能用。这条轴上量过一次教训 —— `--backend interp`
+// 会把 `run` 改写成另一个动词，`--engine graph` 要是摆在那张表**后面**就永远走不到
+// （与 `.c` 那一处是同一个 bug）。那种事只有从命令行敲一遍才看得见。
+//
+//   node tests/graph/cli.js
+//   node tests/graph/cli.js lua        只跑名字里带 lua 的那几格
+
+import { spawnSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
+const CLI = join(ROOT, 'src/core/cli.js');
+const only = process.argv.slice(2).filter((a) => !a.startsWith('-'));
+
+let pass = 0;
+let fail = 0;
+
+/** 敲一条命令，回 `{ code, out, err }`（out 按行切好，末尾空行去掉）。 */
+function omni(args) {
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', cwd: ROOT });
+  const out = (r.stdout ?? '').split('\n');
+  while (out.length > 0 && out[out.length - 1] === '') out.pop();
+  return { code: r.status ?? 1, out, err: r.stderr ?? '' };
+}
+
+/**
+ * 一格判据：命令 + 期望退出码 + 期望输出行（`null` = 不比）+ 期望 stderr 里有的那句话。
+ * 输出**逐行比**（那是这条轴唯一的判据），stderr 只查"有没有那句人话"。
+ */
+function check(name, args, want) {
+  if (only.length > 0 && !only.some((x) => name.includes(x))) return;
+  const got = omni(args);
+  const bad = [];
+  if (got.code !== want.code) bad.push(`退出码 期望 ${want.code} 得到 ${got.code}`);
+  if (want.out !== undefined && want.out !== null
+    && JSON.stringify(got.out) !== JSON.stringify(want.out)) {
+    bad.push(`输出 期望 ${JSON.stringify(want.out)} 得到 ${JSON.stringify(got.out)}`);
+  }
+  if (want.head !== undefined && got.out[0] !== want.head) {
+    bad.push(`第一行 期望 ${JSON.stringify(want.head)} 得到 ${JSON.stringify(got.out[0])}`);
+  }
+  if (want.says !== undefined && !got.err.includes(want.says)) {
+    bad.push(`stderr 里应该有「${want.says}」，实际是 ${JSON.stringify(got.err.slice(0, 120))}`);
+  }
+  if (bad.length === 0) { pass++; process.stdout.write(`  ok   ${name}\n`); return; }
+  fail++;
+  process.stdout.write(`  FAIL ${name}\n${bad.map((b) => `       ${b}\n`).join('')}`);
+}
+
+const BASICS = ['15', '120', '7', 'ok'];
+
+// ---- 1) 四条腿各跑一门语言（同一份期望输出 —— 那是矩阵里那条判据的命令行版）
+check('lua × interp（默认后端）', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph'],
+  { code: 0, out: BASICS });
+check('cpp × wat', ['run', 'ext/cpp/examples/basics.cpp', '--engine', 'graph', '--backend', 'wat'],
+  { code: 0, out: BASICS });
+check('nim × js', ['run', 'ext/nim/examples/basics.nim', '--engine', 'graph', '--backend', 'js'],
+  { code: 0, out: BASICS });
+check('chez × sx（只序列化，第一行是 (graph）',
+  ['run', 'ext/chez/examples/basics.ss', '--engine', 'graph', '--backend', 'sx'],
+  { code: 0, head: '(graph' });
+
+// ---- 2) 语言怎么定：后缀是默认，`--lang` 盖过它
+check('go 按后缀', ['run', 'ext/go/examples/intmath.go', '--engine', 'graph'],
+  { code: 0, out: ['15', '120'] });
+check('--lang 盖过后缀（.lisp 当 chez 读 -> chez 的映射不认 defun）',
+  ['run', 'ext/sbcl/examples/basics.lisp', '--engine', 'graph', '--lang', 'chez'],
+  { code: 1, says: '跑的时候错了' });
+check('后缀不认得就报清单', ['run', 'README.md', '--engine', 'graph'],
+  { code: 1, says: '这个后缀不认得' });
+check('--lang 打错就报那十门', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--lang', 'gsl-shell'],
+  { code: 1, says: '认得的十门是' });
+
+// ---- 3) 缺口不是失败：有名有姓，退出码 3（与"程序自己跑错了"分开）
+check('awk × wat 是一格有名有姓的缺口（退出码 3）',
+  ['run', 'ext/awk/examples/basics.awk', '--engine', 'graph', '--backend', 'wat'],
+  { code: 3, says: '接不住' });
+
+// ---- 4) 开关本身错了也要有一句人话
+check('--backend 打错就报那四条', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'llvm'],
+  { code: 1, says: 'interp / sx / js / wat' });
+check('--engine 打错就报那两台', ['run', 'ext/lua/examples/basics.lua', '--engine', 'wasm'],
+  { code: 1, says: '现在两台' });
+check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, says: '要一个源文件' });
+
+// ---- 5) `run --help` 里得真有那几行（**声明了就得能用**的反面：能用就得写清）
+{
+  const h = omni(['run', '--help']);
+  const want = ['--engine graph', '--backend 这一层有四条', '--lang'];
+  const miss = want.filter((w) => !h.out.join('\n').includes(w));
+  if (miss.length === 0) { pass++; process.stdout.write('  ok   run --help 里有 graph 那一段\n'); } else {
+    fail++;
+    process.stdout.write(`  FAIL run --help 里缺：${miss.join(' / ')}\n`);
+  }
+}
+
+process.stdout.write(`\n${pass} passed, ${fail} failed（omni run --engine graph）\n`);
+if (fail > 0) process.exit(1);

@@ -12,6 +12,10 @@
  */
 
 import { TCC_HELP } from './cmd-tcc.js';
+/* `--engine graph` 那几行说明**从图那一层现取**（后端名单是 `contract.js` 里注册出来的）。
+ * 这一份是"数据"，本来不该 import 别人；破例的理由只有一条：手抄一份后端名单就是第二处
+ * 会过期的账，而这份 help 正是用户唯一看得到的那张清单。 */
+import { graphEngineHelp } from '../graph/run.js';
 
 /* ---- 与语言无关的那几格开关，好几条命令共用。 */
 const F_OUT = { name: '-o', arity: 1, value: 'NAME', brief: '产物落在哪儿' };
@@ -19,7 +23,7 @@ const F_MODE = { name: '--mode', arity: 1, value: 'M', brief: 'mixed|dynamic|sta
 const F_WORK = { name: '--work', arity: 1, value: 'DIR', brief: '生成的中间文件留在这儿' };
 const F_BACKEND = {
   name: '--backend', arity: 1, value: 'B',
-  brief: 'interp|js|c|llvm|jit|native|spirv',
+  brief: 'interp|js|c|llvm|jit|native|spirv（--engine graph 时是 interp|js|wat|sx）',
 };
 /**
  * `build` 那一份**不一样**：`jit` 是「就地编就地跑」（只在 `run` 上有意义），
@@ -211,8 +215,18 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
 --timeout 0 撤掉它。到点的两条出口不一样，而且没法一样：跑在子进程里
 （.asy 的默认路、.c、.frag、原生可执行文件）是先杀孩子再印那句话，退出码 124
 （与 timeout(1) 同一个约定）；跑在本进程里（--interp 与编成 JS 直接 eval 那条）
-只能开枪，退出码 137 —— 被 SIGKILL 的进程没有机会再设自己的退出码。`,
+只能开枪，退出码 137 —— 被 SIGKILL 的进程没有机会再设自己的退出码。
+
+${graphEngineHelp()}
+
+  omni run ext/lua/examples/basics.lua --engine graph
+  omni run x.lua --engine graph --lang gsl-shell        （--lang 盖过后缀）
+  omni run ext/cpp/examples/basics.cpp --engine graph --backend wat`,
       flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT,
+        { name: '--engine', arity: 1, value: 'E',
+          brief: 'omni（默认：前端 -> OIR -> 后端）| graph（节点图 + 契约五问）' },
+        { name: '--lang', arity: 1, value: 'L',
+          brief: '（graph）这份源码归哪门语言，**优先于文件名后缀**' },
         { name: '--format', alias: '-f', arity: 1, value: 'FMT',
           brief: '（asy）出图格式 eps|svg；不给就看 -o 的后缀' },
         { name: '--timeout', arity: 1, value: 'SEC',

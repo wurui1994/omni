@@ -6,16 +6,8 @@
 // 抄两份的话，加一门语言就要改两处，而其中一处一定会忘。
 
 import { node, lit, program, bin } from '../../src/core/graph/graph.js';
-import { chezToGraph } from '../../ext/chez/tograph.js';
-import { luaToGraph } from '../../ext/lua/tograph.js';
-import { goToGraph } from '../../ext/go/tograph.js';
-import { sbclToGraph } from '../../ext/sbcl/tograph.js';
-import { vlangToGraph } from '../../ext/vlang/tograph.js';
-import { awkToGraph } from '../../ext/awk/tograph.js';
-import { fbToGraph } from '../../ext/freebasic/tograph.js';
-import { mojoToGraph } from '../../ext/mojo/tograph.js';
-import { nimToGraph } from '../../ext/nim/tograph.js';
-import { cppToGraph } from '../../ext/cpp/tograph.js';
+// 十门语言的登记处（语法 · 映射 · 后缀）。这一份**只挑家族**，不再自己抄一张语言表
+import { LANGS } from '../../src/core/graph/langs.js';
 
 /**
  * 期望的输出。**一个例子家族一份**，家族里所有语言、所有后端共用 ——
@@ -58,30 +50,23 @@ export const NAMEDARG = ['1', '7'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
-const G = {
-  chez: ['ext/chez/chez.grammar', chezToGraph, 'ss'],
-  lua: ['ext/lua/lua.grammar', luaToGraph, 'lua'],
-  go: ['ext/go/go.grammar', goToGraph, 'go'],
-  sbcl: ['ext/sbcl/sbcl.grammar', sbclToGraph, 'lisp'],
-  vlang: ['ext/vlang/vlang.grammar', vlangToGraph, 'v'],
-  awk: ['ext/awk/awk.grammar', awkToGraph, 'awk'],
-  freebasic: ['ext/freebasic/freebasic.grammar', fbToGraph, 'bas'],
-  mojo: ['ext/mojo/mojo.grammar', mojoToGraph, 'mojo'],
-  nim: ['ext/nim/nim.grammar', nimToGraph, 'nim'],
-  cpp: ['ext/cpp/cpp.grammar', cppToGraph, 'cpp'],
-};
-
 /**
  * 一格例子 = 一门语言 × 一个家族。文件名是**算出来的**
  * （`ext/<lang>/examples/<家族>.<后缀>`）—— 那条命名约定因此不许破，破了当场报"文件没有"。
+ *
+ * 语法 / 映射 / 后缀三样**从 `src/core/graph/langs.js` 取**（那是登记处）。
+ * 这儿原来自己抄了一张同样的表，而它现在有第二个消费者（`omni run --engine graph`）——
+ * 抄两份的话加一门语言要改两处，忘掉的那处就是"测试里绿的、命令行上没有"。
+ * 后缀取 `exts[0]`：例子文件用的就是那门语言最常见的那个后缀。
  */
 const fam = (family, expect, langs) => langs.map((lang) => {
-  const [grammar, toGraph, ext] = G[lang];
+  const d = LANGS.get(lang);
+  if (d === undefined) throw new Error(`cases.js: langs.js 里没有 ${lang} 这一门`);
   return C(family === 'basics' ? lang : `${lang}+${family}`,
-    grammar, `ext/${lang}/examples/${family}.${ext}`, toGraph, expect);
+    d.grammar, `ext/${lang}/examples/${family}.${d.exts[0]}`, d.toGraph, expect);
 });
 
-const ALL = Object.keys(G);
+const ALL = [...LANGS.keys()];
 
 export const CASES = [
   // 第一个家族：含全部基础要素的完整例子（九门全有）

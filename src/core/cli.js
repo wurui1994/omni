@@ -42,6 +42,12 @@ import { verifyMir } from './mir/verify.js';
 import { dumpBytes } from './mir/bytes.js';
 import { IncrCache, compileIncremental, incrReport } from './incr/cache.js';
 import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
+/* `--engine graph`（那十门语言 -> 节点图 -> 契约五问）。**静态 import 是有代价的**：
+ * 它把十份 tograph.js（`ext/<lang>/tograph.js`）一起拽进核心，与"薄核心 + plugins"
+ * 那条路是反着的。现在这么写是因为那十份都是纯 JS、小、且没有别的依赖；哪天核心大小
+ * 要紧了，正解是把 graph 这台机器登记成一格 lang / plugin（`lang/builtin.js` 那一套），
+ * 不是在这儿加一句 `await import`（这份文件里 44 个 import 全是静态的，只有一套规矩）。 */
+import { runGraphFile } from './graph/run.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -2420,6 +2426,29 @@ function main(argv) {
    * 把 `run` 换成另一条 case（`run-c`/`interp`/`c-run`…），而判据是**用户敲的那个动词**
    * （`node.key`）—— 一条腿都不能漏，漏掉的那条就是「按了 --timeout 却还在挂着」。 */
   if (node.key === 'run') armRunTimeout(rest);
+  /**
+   * **`--engine graph`（第十八批）：切到节点图那台机器**（ADR-0033 + 契约五问）。
+   *
+   * 摆在这儿的理由与 `.c` 那一处一模一样：下面那张 `--backend` 表会把 `run` 改写成
+   * 别的动词（`--backend interp` -> `cmd = 'interp'`），改写完就绕过 `case 'run'` 里
+   * 按扩展名分派的那条规矩。而图这一层的 `--backend` 是**它自己那四条**
+   * （interp / sx / js / wat），与 OIR 那条腿的同名参数不是一回事 ——
+   * **分派必须在 backend 翻译之前**。
+   *
+   * 语言由 `--lang` 定，没给才按后缀猜（`graph/langs.js`）。
+   */
+  if (node.key === 'run' && rest.includes('--engine')) {
+    const ei = rest.indexOf('--engine');
+    const eng = ei + 1 < rest.length ? rest[ei + 1] : null;
+    if (eng === 'graph') {
+      if (path === undefined || path === null) throw new OmniError('run --engine graph 要一个源文件');
+      return runGraphFile(path, rest);
+    }
+    if (eng !== null && eng !== 'omni') {
+      throw new OmniError(`没有 --engine ${eng} 这一条 —— 现在两台：omni（默认，前端 -> OIR -> 后端）`
+        + '与 graph（节点图 + 契约五问，见 `omni run --help`）');
+    }
+  }
   /* `run`/`build --backend B`（决策一）：同样先只做翻译。 */
   if (cmd === 'run' || cmd === 'build') {
     const bi = rest.indexOf('--backend');
