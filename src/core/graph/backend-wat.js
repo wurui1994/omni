@@ -116,7 +116,7 @@ export const WAT_SHAPES = [
       fn('outer', [
         bindTo('a', litOf(1)),
         // 立刻调用的匿名函数，里面读外层的 `a` —— 值位置的 func + 捕获
-        ret(node('call', { fn: node('func', { body: [ret(refTo('a'))] }, { params: [] }), args: [] })),
+        retNode(node('call', { fn: node('func', { body: [retNode(refTo('a'))] }, { params: [] }), args: [] })),
       ]),
       printOf([node('call', { fn: refTo('outer'), args: [] })]),
     ]),
@@ -129,7 +129,7 @@ export const WAT_SHAPES = [
         bindTo('a', litOf(1)),
         fn('inner', [node('set', { value: litOf(2) }, { name: 'a' })]),
         node('call', { fn: refTo('inner'), args: [] }),
-        ret(refTo('a')),
+        retNode(refTo('a')),
       ]),
       printOf([node('call', { fn: refTo('outer'), args: [] })]),
     ]),
@@ -171,17 +171,17 @@ export const WAT_SHAPES = [
 const litOf = (v) => ({ lit: v });
 const refTo = (name) => node('ref', {}, { name });
 const bindTo = (name, init) => node('bind', { init }, { name });
-const ret = (value) => node('ret', { value });
+const retNode = (value) => node('ret', { value });
 const printOf = (args) => node('prim', { args }, { name: 'print' });
 const fn = (name, body) => bindTo(name, node('func', { body }, { params: [], name }));
 const prog = (body) => ({ kind: 'graph', body });
 
 /** 一格算符 -> wasm 指令。比较那一族出 i32（只许在条件位置用），别的出 i64。 */
-const ARITH = new Map([
+const WAT_ARITH = new Map([
   ['+', 'i64.add'], ['-', 'i64.sub'], ['*', 'i64.mul'],
   ['/', 'i64.div_s'], ['%', 'i64.rem_s'],
 ]);
-const CMP = new Map([
+const WAT_CMP = new Map([
   ['<', 'i64.lt_s'], ['>', 'i64.gt_s'], ['<=', 'i64.le_s'], ['>=', 'i64.ge_s'],
   ['=', 'i64.eq'], ['!=', 'i64.ne'],
 ]);
@@ -190,8 +190,8 @@ const CMP = new Map([
  * （`i64.add` / `f64.add`），所以"哪种数值类型"这一问在这一层的答案就是"查哪张表"。
  * `%` 不在里面 —— wasm 的 f64 没有取余指令（要报缺口，不许拿 trunc 凑）。
  */
-const FARITH = new Map([['+', 'f64.add'], ['-', 'f64.sub'], ['*', 'f64.mul'], ['/', 'f64.div']]);
-const FCMP = new Map([
+const WAT_FARITH = new Map([['+', 'f64.add'], ['-', 'f64.sub'], ['*', 'f64.mul'], ['/', 'f64.div']]);
+const WAT_FCMP = new Map([
   ['<', 'f64.lt'], ['>', 'f64.gt'], ['<=', 'f64.le'], ['>=', 'f64.ge'],
   ['=', 'f64.eq'], ['!=', 'f64.ne'],
 ]);
@@ -414,7 +414,7 @@ const why = (op, where) => {
  * 最小的静态追踪（只认 const / ref / bind / set 这几格，追不到的按数算）。
  * 同一个名字先装串后装数（或反过来）记成 `mix`：那种量在 wasm 上打印不出来，报缺口。
  */
-class Scope {
+class WatScope {
   constructor(fn, parent = null) {
     this.fn = fn; this.parent = parent; this.names = new Map(); this.kinds = new Map();
     /** 提升上来的嵌套函数：图上的名字 -> `{ wat, captures }`（只在它的宿主函数里看得见）。 */
@@ -461,7 +461,9 @@ class Scope {
   }
 }
 
-const asList = (x) => (x === undefined || x === null ? [] : (Array.isArray(x) ? x : [x]));
+/** 一格入端口摊成数组（一格就是一格、空就是空）。**与 fromtree.js 的 `asList` 不是一回事**：
+ *  那一格是"这棵 datum 是 list 吗"（不是就回 null），所以这儿不许叫同一个名字。 */
+const watItems = (x) => (x === undefined || x === null ? [] : (Array.isArray(x) ? x : [x]));
 
 /**
  * 一块图里出现的名字：读到的（`ref` / `set`）与绑住的（`bind` / `func` 的形参）。
@@ -473,7 +475,7 @@ function namesIn(x, refs, binds) {
   if (Array.isArray(x)) { for (const y of x) namesIn(y, refs, binds); return; }
   if (x.op === 'ref' || x.op === 'set') refs.add(x.attrs.name);
   if (x.op === 'bind') binds.add(x.attrs.name);
-  if (x.op === 'func') for (const p of asList(x.attrs?.params)) binds.add(String(p));
+  if (x.op === 'func') for (const p of watItems(x.attrs?.params)) binds.add(String(p));
   for (const k of Object.keys(x.ins ?? {})) namesIn(x.ins[k], refs, binds);
 }
 
@@ -529,7 +531,7 @@ function topFuncs(items) {
  * `drop` 取决于它），第二遍拿着那张表出正式的文本。图都很小，两遍比猜便宜。
  */
 function emitOnce(graph, retOf, multiOf) {
-  const items = asList(graph.kind === 'graph' ? graph.body : graph);
+  const items = watItems(graph.kind === 'graph' ? graph.body : graph);
   const mod = new Mod();
   const fns = topFuncs(items);
   let loopSeq = 0;
@@ -639,7 +641,7 @@ function emitOnce(graph, retOf, multiOf) {
   function kindOf(x, sc) {
     if (x === null || x === undefined) return 'int';
     if (Array.isArray(x)) {
-      const l = asList(x);
+      const l = watItems(x);
       return l.length === 0 ? 'int' : kindOf(l[l.length - 1], sc);
     }
     if (x.lit !== undefined) return litKind(x.lit);
@@ -659,9 +661,9 @@ function emitOnce(graph, retOf, multiOf) {
       // 串接（`concat` 与落在串上的 `+`）出的是**串** —— 那一格在 `$__str_cat` 里
       case 'prim': {
         const nm = x.attrs.name;
-        const args = asList(x.ins.args);
+        const args = watItems(x.ins.args);
         if (nm === 'concat') return 'str';
-        if (!ARITH.has(nm)) return 'int';
+        if (!WAT_ARITH.has(nm)) return 'int';
         if (nm === '+' && args.some((a) => kindOf(a, sc) === 'str')) return 'str';
         return args.some((a) => kindOf(a, sc) === 'real') ? 'real' : 'int';
       }
@@ -760,13 +762,13 @@ function emitOnce(graph, retOf, multiOf) {
   /** 条件位置：出 i32。比较那一族直接出，别的与 0 比。 */
   function cond(x, sc, pre) {
     if (isTrue(x)) return '(i32.const 1)';
-    if (x !== null && x !== undefined && x.op === 'prim' && CMP.has(x.attrs.name)) {
-      const [a, b] = asList(x.ins.args);
+    if (x !== null && x !== undefined && x.op === 'prim' && WAT_CMP.has(x.attrs.name)) {
+      const [a, b] = watItems(x.ins.args);
       // 有一边是实数就用 f64 那一族（两边都补成 f64）—— 出的还是 i32，条件位置不变
       if (kindOf(a, sc) === 'real' || kindOf(b, sc) === 'real') {
-        return `(${FCMP.get(x.attrs.name)} ${asF64(a, sc, pre)} ${asF64(b, sc, pre)})`;
+        return `(${WAT_FCMP.get(x.attrs.name)} ${asF64(a, sc, pre)} ${asF64(b, sc, pre)})`;
       }
-      return `(${CMP.get(x.attrs.name)} ${expr(a, sc, pre)} ${expr(b, sc, pre)})`;
+      return `(${WAT_CMP.get(x.attrs.name)} ${expr(a, sc, pre)} ${expr(b, sc, pre)})`;
     }
     if (kindOf(x, sc) === 'real') return `(f64.ne ${expr(x, sc, pre)} (f64.const 0))`;
     return `(i64.ne ${expr(x, sc, pre)} (i64.const 0))`;
@@ -802,7 +804,7 @@ function emitOnce(graph, retOf, multiOf) {
       // **`func` 当值用**：把它提到顶层，值是它在表里的下标（funcValue）
       case 'func': return funcValue(x, sc);
       case 'prim': {
-        const args = asList(x.ins.args);
+        const args = watItems(x.ins.args);
         const name = x.attrs.name;
         // **串接**：`concat` 与落在串上的 `+` 都在这儿 —— 新分配一块、两段字节拷进去
         // （`$__str_cat`）。混了数的串接报缺口：那要先有"数 -> 串"，与打印多值是同一台机器
@@ -827,10 +829,10 @@ function emitOnce(graph, retOf, multiOf) {
         // "两种数值类型"在这一层就是这一句：查哪张表 + 该不该补转换
         const real = kindOf(x, sc) === 'real';
         const num = (y) => (real ? asF64(y, sc, pre) : expr(y, sc, pre));
-        if (real && ARITH.has(name) && !FARITH.has(name)) {
+        if (real && WAT_ARITH.has(name) && !WAT_FARITH.has(name)) {
           throw new Gap(`实数上的 ${name} 还没接：wasm 的 f64 没有这条指令`);
         }
-        const op = real ? FARITH.get(name) : ARITH.get(name);
+        const op = real ? WAT_FARITH.get(name) : WAT_ARITH.get(name);
         if (op !== undefined) {
           // **一元与二元要分开**：`-1` 是一元的 `-`，当成"少一格实参的二元"就会
           // 悄悄算成 `1 - 0`。这个错是矩阵抓出来的（nim / mojo 那两份 loopexit
@@ -859,7 +861,7 @@ function emitOnce(graph, retOf, multiOf) {
           }
           return `(${op} ${num(args[0])} ${num(args[1])})`;
         }
-        if (CMP.has(name)) {
+        if (WAT_CMP.has(name)) {
           if (args.length !== 2) throw new Gap(`${name} 收到 ${args.length} 格实参`);
           // 比较出 i32，要当值用得补一格符号扩展
           return `(i64.extend_i32_s ${cond(x, sc, pre)})`;
@@ -892,18 +894,18 @@ function emitOnce(graph, retOf, multiOf) {
       case 'branch': {
         const t = tmp(sc, wty(kindOf(x, sc)));
         const c = cond(x.ins.cond, sc, pre);
-        const a = []; const av = valueOf(x.ins.then, new Scope(sc.fn, sc), a);
-        const b = []; const bv = valueOf(x.ins.else, new Scope(sc.fn, sc), b);
+        const a = []; const av = valueOf(x.ins.then, new WatScope(sc.fn, sc), a);
+        const b = []; const bv = valueOf(x.ins.else, new WatScope(sc.fn, sc), b);
         pre.push(`(if ${c} (then ${[...a, `(local.set ${t} ${av})`].join(' ')})`
           + ` (else ${[...b, `(local.set ${t} ${bv})`].join(' ')}))`);
         return `(local.get ${t})`;
       }
       // `region` 出值：前面几条当语句，最后一格是值（CL 的 `(let (…) … acc)`）
-      case 'region': return valueOf(x.ins.body, new Scope(sc.fn, sc), pre);
+      case 'region': return valueOf(x.ins.body, new WatScope(sc.fn, sc), pre);
       // ---- 记录与列表：**线性内存 + 一格 bump 分配器**（wasm 有内存没有指针）----
       case 'record-new': {
         const names = x.attrs.names ?? [];
-        const vals = asList(x.ins.fields);
+        const vals = watItems(x.ins.fields);
         const size = 8 * (names.length === 0 ? 1 : 1 + Math.max(...names.map(slotOf)));
         const a = alloc(size, sc, pre);
         names.forEach((k, i) => {
@@ -920,7 +922,7 @@ function emitOnce(graph, retOf, multiOf) {
       }
       // 列表：**长度存在偏移 0，元素从 8 起** —— 边界检查因此有地方读
       case 'list-new': {
-        const items = asList(x.ins.items);
+        const items = watItems(x.ins.items);
         const a = alloc(8 * (items.length + 1), sc, pre);
         pre.push(`(i64.store ${addr(`(local.get ${a})`)} (i64.const ${items.length}))`);
         items.forEach((y, i) => {
@@ -976,7 +978,7 @@ function emitOnce(graph, retOf, multiOf) {
       // **长度不存**：`pick` 的 k 是编译期常量（它是一格附属），用不着运行期长度 ——
       // 与列表正相反（列表的下标是运行期算的，所以那儿存了长度好做边界检查）。
       case 'values': {
-        const args = asList(x.ins.args);
+        const args = watItems(x.ins.args);
         const a = alloc(8 * Math.max(args.length, 1), sc, pre);
         args.forEach((y, i) => {
           onlyInt(y, sc, '多值里的一格');
@@ -994,8 +996,8 @@ function emitOnce(graph, retOf, multiOf) {
       case 'map-new': {
         needMap = true;
         needMem = true;
-        const ks = asList(x.ins.keys);
-        const vs = asList(x.ins.vals);
+        const ks = watItems(x.ins.keys);
+        const vs = watItems(x.ins.vals);
         const h = tmp(sc);
         pre.push(`(local.set ${h} (call $__map_new))`);
         ks.forEach((k, i) => {
@@ -1028,7 +1030,7 @@ function emitOnce(graph, retOf, multiOf) {
    * 判据是出端口那一栏，不是 sort（那条被矩阵抓出来过两次）。
    */
   function valueOf(x, sc, pre) {
-    const list = asList(x);
+    const list = watItems(x);
     if (list.length === 0) return '(i64.const 0)';
     for (const y of list.slice(0, -1)) pre.push(...stmt(y, sc, sc.fn));
     const last = list[list.length - 1];
@@ -1095,14 +1097,14 @@ function emitOnce(graph, retOf, multiOf) {
       const c = expr(fn, sc, pre);
       const t = tmp(sc);
       pre.push(`(local.set ${t} ${c})`);
-      const args = asList(x.ins.args).map((a) => {
+      const args = watItems(x.ins.args).map((a) => {
         onlyInt(a, sc, '实参');
         return expr(a, sc, pre);
       });
       const sig = sigFor(args.length);
       return `(call_indirect (type ${sig})${args.length === 0 ? '' : ` ${args.join(' ')}`} (i32.wrap_i64 (local.get ${t})))`;
     }
-    const args = asList(x.ins.args).map((a) => {
+    const args = watItems(x.ins.args).map((a) => {
       onlyInt(a, sc, '实参');   // 串传进函数就追不着了（形参没有种类）—— 明说接不住
       return expr(a, sc, pre);
     });
@@ -1116,7 +1118,7 @@ function emitOnce(graph, retOf, multiOf) {
     return `(call ${fns.get(name)}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
   }
 
-  function stmts(xs, sc, f) { return asList(xs).flatMap((y) => stmt(y, sc, f)); }
+  function stmts(xs, sc, f) { return watItems(xs).flatMap((y) => stmt(y, sc, f)); }
 
   function stmt(x, sc, f) {
     if (x === null || x === undefined) return [];
@@ -1160,7 +1162,7 @@ function emitOnce(graph, retOf, multiOf) {
       case 'region': {
         const marks = [];
         regions.push(marks);
-        const body = stmts(x.ins.body, new Scope(f, sc), f);
+        const body = stmts(x.ins.body, new WatScope(f, sc), f);
         regions.pop();
         if (marks.length === 0) return body;
         // 进 region 先把每格 flag 清零（wasm 的局部量初值是 0，但 region 可能跑第二遍）
@@ -1171,7 +1173,7 @@ function emitOnce(graph, retOf, multiOf) {
       case 'scope-exit': {
         if (regions.length === 0) throw new Gap('scope-exit 没有宿主 region');
         const flag = tmp(sc);
-        const act = stmts(x.ins.action, new Scope(f, sc), f).join(' ');
+        const act = stmts(x.ins.action, new WatScope(f, sc), f).join(' ');
         regions[regions.length - 1].push({ flag, act });
         return [`(local.set ${flag} (i64.const 1))`];
       }
@@ -1204,9 +1206,9 @@ function emitOnce(graph, retOf, multiOf) {
       }
       case 'branch': {
         const c = cond(x.ins.cond, sc, pre);
-        const t = stmts(x.ins.then, new Scope(f, sc), f).join(' ');
+        const t = stmts(x.ins.then, new WatScope(f, sc), f).join(' ');
         if (x.ins.else === undefined) return [...pre, `(if ${c} (then ${t}))`];
-        const e = stmts(x.ins.else, new Scope(f, sc), f).join(' ');
+        const e = stmts(x.ins.else, new WatScope(f, sc), f).join(' ');
         return [...pre, `(if ${c} (then ${t}) (else ${e}))`];
       }
       case 'loop': {
@@ -1226,7 +1228,7 @@ function emitOnce(graph, retOf, multiOf) {
         const brk = `$B${n}`;
         const cont = `$C${n}`;
         loops.push({ brk, cont, depth: regions.length });
-        const inner = new Scope(f, sc);
+        const inner = new WatScope(f, sc);
         const body = stmts(x.ins.body, inner, f).join(' ');
         const post = stmts(x.ins.post, inner, f).join(' ');
         loops.pop();
@@ -1254,7 +1256,7 @@ function emitOnce(graph, retOf, multiOf) {
         // 多值的格数要记下来（打印那一步靠它）。两条 `ret` 给的格数不一样就记成 'mix' ——
         // 那种函数印不出来（要运行期长度），报缺口比猜一个数好
         if (x.ins.value?.op === 'values') {
-          const n = asList(x.ins.value.ins.args).length;
+          const n = watItems(x.ins.value.ins.args).length;
           f.multi = (f.multi === 0 || f.multi === n) ? n : 'mix';
         }
         onlyInt(x.ins.value, sc, '返回值');
@@ -1273,12 +1275,12 @@ function emitOnce(graph, retOf, multiOf) {
           const v = expr(x, sc, pre);
           return [...pre, `(drop ${v})`];
         }
-        const args = asList(x.ins.args);
+        const args = watItems(x.ins.args);
         if (args.length !== 1) throw new Gap('打印只接一格实参（多格要先有字符串拼接）');
         const one = args[0];
         // `print(f())` 那条 arity 契约（列表里只有最后一格展开）：多值要**印成一行** ——
         // 靠一格运行期造串的辅助函数（`$__str_join`，见 STR_JOIN），格数是编译期就知道的
-        const n = one?.op === 'values' ? asList(one.ins.args).length
+        const n = one?.op === 'values' ? watItems(one.ins.args).length
           : (one?.op === 'call' ? multiOf.get(one.ins.fn?.attrs?.name) : undefined);
         if (n === 'mix') {
           throw new Gap('这格函数不同出口返回的多值格数不一样 —— 印一行要运行期长度');
@@ -1340,7 +1342,7 @@ function emitOnce(graph, retOf, multiOf) {
     }
     const wat = mod.uniq(wname(`f_v${++fnvalSeq}`));
     const g = mod.fn(wat, params, wat);
-    const gsc = new Scope(g);
+    const gsc = new WatScope(g);
     params.forEach((p) => gsc.names.set(p, wname(p)));
     const marks = [];
     regions.push(marks);
@@ -1385,7 +1387,7 @@ function emitOnce(graph, retOf, multiOf) {
     }
     const wat = mod.uniq(wname(`f_${self}`));
     const g = mod.fn(wat, [...free, ...params], self);
-    const gsc = new Scope(g);
+    const gsc = new WatScope(g);
     [...free, ...params].forEach((p) => gsc.names.set(p, wname(p)));
     const info = { wat, captures: free };
     sc.declareLift(self, info);     // 宿主里看得见它
@@ -1406,7 +1408,7 @@ function emitOnce(graph, retOf, multiOf) {
    * 两处例外要挑出来：`print`（wasm 里它不出值）与"调用一格不出值的函数"。
    */
   function fnBody(bodyIns, sc, f) {
-    const list = asList(bodyIns);
+    const list = watItems(bodyIns);
     if (list.length === 0) return [];
     const head = list.slice(0, -1).flatMap((y) => stmt(y, sc, f));
     const last = list[list.length - 1];
@@ -1430,7 +1432,7 @@ function emitOnce(graph, retOf, multiOf) {
 
   // ---- 走一遍顶层：函数各成一格 wat func，别的语句进 `$__entry` --------------
   const entry = mod.fn('$__entry', []);
-  const entryScope = new Scope(entry);
+  const entryScope = new WatScope(entry);
   const entryMarks = [];
   regions.push(entryMarks);          // 顶层那一段也是一格 region
   for (const it of items) {
@@ -1438,7 +1440,7 @@ function emitOnce(graph, retOf, multiOf) {
       const fnode = it.ins.init;
       const params = (fnode.attrs.params ?? []).map((p) => String(p));
       const f = mod.fn(fns.get(it.attrs.name), params, it.attrs.name);
-      const sc = new Scope(f);
+      const sc = new WatScope(f);
       params.forEach((p) => sc.names.set(p, wname(p)));
       // **函数体本身就是一格 region**（与调度器那侧 `new Env(fn.env, { region: true })`
       // 同一条）—— go / V / nim 的 defer 就挂在这一层上。
