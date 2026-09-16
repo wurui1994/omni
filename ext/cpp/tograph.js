@@ -34,6 +34,15 @@ const OPS = ops();
  */
 let STRUCTS = new Map();
 
+/**
+ * **哪些类型有 `~T()`**（RAII）。出口动作也是"名字从声明来"：析构写在类里，
+ * 于是 `Say s;` 落成**一格 bind + 一格 scope-exit** —— 与 FB 的 `Destructor`、
+ * mojo 的 `__exit__`、go 的 `defer` 是同一格节点。析构体自己是一格普通函数
+ * （形参就叫 `this`，C++ 里本来就这么写），名字用 `__destruct_<类型>`。
+ */
+let DTORS = new Set();
+const dtorName = (ty) => `__destruct_${ty}`;
+
 /** `(class struct (n Point) (members …))` -> 登记字段名 */
 function collectStructs(x) {
   if (Array.isArray(x)) { x.forEach(collectStructs); return; }
@@ -50,6 +59,16 @@ function collectStructs(x) {
         for (const d of kids(ip)) if (isList(d) && tag(d) === 'd') fields.push(declName(d));
       }
       STRUCTS.set(nameOf(nm), fields);
+      // **`~Say()` 就是"这个类型的量出了作用域要跑一段"**（RAII）—— 与 FB 的
+      // `Declare Destructor()`、mojo 的 `__exit__`、go 的 `defer` 是同一格 scope-exit。
+      // 这儿只登记"哪个类型有析构"，析构体在 `case 'decl'` 那格提成一格顶层函数。
+      for (const m of kids(ms)) {
+        if (!isList(m) || tag(m) !== 'func') continue;
+        const fn = part(m, 'fn');
+        if (fn !== undefined && kids(fn).some((y) => isList(y) && tag(y) === 'dtor')) {
+          DTORS.add(nameOf(nm));
+        }
+      }
     }
   }
   kids(x).forEach(collectStructs);
@@ -73,6 +92,35 @@ function structOf(specs) {
 }
 
 const many = (xs) => xs.map(toNode).flat();
+
+/**
+ * 这格 specs 里的类声明带的**析构体** -> 一串顶层函数（形参 `this`）。
+ * `~Say() { … }` 在树上是类成员里的一格 `(func (fn (dtor Say) (params)) () (body …))` ——
+ * 提出来就是一格普通函数，图上不加节点。**只接这一种成员函数**：别的方法要单态分派
+ * 那一层（`ext/cpp` 那笔账），撞上照旧当"这一格还没接"报。
+ */
+function dtorFuncs(specs) {
+  if (specs === undefined) return [];
+  const out = [];
+  for (const s of kids(specs)) {
+    if (!isList(s) || tag(s) !== 'class') continue;
+    const ms = part(s, 'members');
+    if (ms === undefined) continue;
+    for (const m of kids(ms)) {
+      if (!isList(m) || tag(m) !== 'func') continue;
+      const fn = part(m, 'fn');
+      const dt = fn === undefined ? undefined : kids(fn).find((y) => isList(y) && tag(y) === 'dtor');
+      if (dt === undefined) continue;
+      const body = part(m, 'body');
+      const name = dtorName(nameOf(kids(dt)[0]));
+      out.push(node('bind', {
+        init: node('func', { body: body === undefined ? [] : many(kids(body)) },
+          { params: ['this'], name }),
+      }, { name }));
+    }
+  }
+  return out;
+}
 
 /** 一格名字：`(n x)` 或光秃秃的叶子。 */
 const nameOf = (x) => (tag(x) === 'n' || tag(x) === 'name' ? leaf(kids(x)[0]) : leaf(x));
@@ -140,6 +188,8 @@ function toNode(x) {
     case 'num': return node('const', {}, { value: Number(leaf(kids(x)[0])) });
     case 'str': return node('const', {}, { value: strVal(x) });
     case 'n': case 'name': return node('ref', {}, { name: nameOf(x) });
+    // `this` —— 析构体提成顶层函数之后，它就是那一格形参的名字（见 dtorFuncs）
+    case 'this': return node('ref', {}, { name: 'this' });
     case 'paren': return toNode(kids(x)[0]);
     // `xs[i]` -> index-get（与 go / lua / 两门 Lisp 同一格节点；下标起点是语言的事，
     // C++ 与 go 一样从 0 起，所以这儿一个字不用换）
@@ -210,9 +260,12 @@ function toNode(x) {
       // 它在语法那侧却很要紧：那一格是驱动器"这名字登记成类型了吗"的登记处。
       if (specs !== undefined && kids(specs).some((s) => !isList(s) && leaf(s) === 'typedef')) return [];
       const initPart = part(x, 'init');
-      if (initPart === undefined) return [];    // `struct Foo;` / `struct P {…};`：图上没有它
+      // `struct Say { … ~Say() {…} };` —— 类**声明**在图上没有格子，可里头的析构体有：
+      // 把它提成一格顶层函数（形参 `this`）。名字从声明来，不加节点、不加类型层。
+      const dtors = dtorFuncs(specs);
+      if (initPart === undefined) return dtors;    // `struct Foo;` / `struct P {…};`
       const rec = structOf(specs);
-      return kids(initPart).filter((d) => tag(d) === 'd').map((d) => {
+      return [...dtors, ...kids(initPart).filter((d) => tag(d) === 'd').map((d) => {
         const v = part(d, 'init');
         // `Point p = {1, 2};` —— 记录（字段名从 struct 声明来，见 STRUCTS）。
         // `{…}` 本身在 cpp 里既能填记录也能填列表，所以**看被声明的类型是不是记录**，
@@ -228,10 +281,28 @@ function toNode(x) {
             init: recordNew(names.map((nm, i) => [nm, toNode(braces[i])])),
           }, { name: declName(d) });
         }
+        // `Say s;` —— 类型登记过、没给初值：造一格记录（字段按 0 起）。C++ 里那几格成员
+        // 本来是**未初始化**的（读了是 UB），图上没有"未初始化"这一格值，所以给 0 ——
+        // 例子先写后读，绕开那件事；真要对上得有值那一层的"未定"。
+        // 类型有 `~T()` -> 顺带挂一格 scope-exit（逆序、早退也跑都是那一格本来的语义）。
+        if (rec !== null && v === undefined) {
+          const names = STRUCTS.get(rec);
+          const name = declName(d);
+          const mk = node('bind', {
+            init: recordNew(names.map((nm) => [nm, lit(0)])),
+          }, { name });
+          if (!DTORS.has(rec)) return mk;
+          return [mk, node('scope-exit', {
+            action: [node('call', {
+              fn: node('ref', {}, { name: dtorName(rec) }),
+              args: [node('ref', {}, { name })],
+            })],
+          })];
+        }
         return node('bind', {
           init: v === undefined ? lit(null) : toNode(kids(v)[0]),
         }, { name: declName(d) });
-      });
+      }).flat()];
     }
     case 'func': {
       const fn = part(x, 'fn');
@@ -298,6 +369,7 @@ export function cppToGraph(tree) {
   if (tag(tree) !== 'unit') throw new Error('cpp->graph: 这不是 (unit …)');
   // 先扫一遍记录声明（`struct P {…}` 的字段名）—— `{1, 2}` 填记录还是填列表靠它分开
   STRUCTS = new Map();
+  DTORS = new Set();        // "哪些类型有 ~T()"那张表也是**一份源码一张**
   collectStructs(kids(tree));
   const body = many(kids(tree));
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
@@ -310,5 +382,6 @@ export function cppToGraph(tree) {
 //      cpp 那格 `prefer` 删掉了。还欠的是模板名那一类（`a<b>(c)`）。
 //   3. 记录的字段名靠**扫同一份文件里的 struct 声明**（`STRUCTS`）—— 外部头文件里声明的
 //      记录扫不到，当场报错。这与 map 那一族"造它的那一步自带标记"是同一条判据。
-//   4. class 的方法 / 模板 / 命名空间 / 运算符重载 / lambda / 异常都不在这一批 ——
+//   4. class 的成员函数只接**析构**（`~T()` -> 一格顶层函数 + scope-exit，第二十五批）；
+//      别的方法 / 构造器 / 模板 / 命名空间 / 运算符重载 / lambda / 异常都不在这一批 ——
 //      它们各要一台机器（方法调用、实例化、作用域、闭包、切段）。
