@@ -13,7 +13,7 @@ import {
   node, lit, program, bin,
 } from '../../src/core/graph/graph.js';
 import {
-  head, kids, text, symName, asList, counted, branchOf, listNew, indexGet, indexSet, destructure,
+  head, kids, text, symName, asList, counted, branchOf, listNew, indexGet, indexSet, sliceOf, destructure,
   fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -174,6 +174,13 @@ function toNode(x) {
     // 向量那两样**不是调用**：落 `list-new` / `index-get`（写成什么样是语法的事）
     case 'vector': return listNew(many(rest));
     case 'aref': case 'svref': case 'elt': return indexGet(toNode(rest[0]), toNode(rest[1]));
+    // `(subseq v 1 3)` -> slice（**上界不含、0 起** —— CL 这一条与图上一样，不用调）。
+    // 少写上界（`(subseq v 1)`）就是"到末尾"，那格端口空着。
+    case 'subseq': return sliceOf(
+      toNode(rest[0]),
+      rest[1] === undefined ? undefined : toNode(rest[1]),
+      rest[2] === undefined ? undefined : toNode(rest[2]),
+    );
     default: break;
   }
 

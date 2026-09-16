@@ -10,7 +10,7 @@
 
 import { node, lit, program } from '../../src/core/graph/graph.js';
 import {
-  head, kids, text, symName, asList, branchOf, listNew, indexGet, indexSet,
+  head, kids, text, symName, asList, branchOf, listNew, indexGet, indexSet, sliceOf,
   fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
@@ -154,6 +154,13 @@ function toNode(x) {
     case 'vector': return listNew(many(rest));
     case 'vector-ref': return indexGet(toNode(rest[0]), toNode(rest[1]));
     case 'vector-set!': return indexSet(toNode(rest[0]), toNode(rest[1]), toNode(rest[2]));
+    // `(vector-copy v 1 3)` -> slice。R6RS/R7RS 的规矩与图上一样（**上界不含、0 起**），
+    // 所以这一门一格都不用调（nim 那门的 `..` 是"含"，要 +1）。少写上界 = 到末尾。
+    case 'vector-copy': case 'subvector': return sliceOf(
+      toNode(rest[0]),
+      rest[1] === undefined ? undefined : toNode(rest[1]),
+      rest[2] === undefined ? undefined : toNode(rest[2]),
+    );
     case 'newline': return node('prim', { args: [lit('')] }, { name: 'print' });
     default: break;
   }

@@ -92,7 +92,7 @@ export const CASES = [
   // 第八个家族：表示转换（五门语言的转换在树上**都是调用的形状** —— 靠名字表分开）
   ...fam('conv', CONV, ['go', 'vlang', 'nim', 'mojo', 'freebasic', 'cpp']),
   // 第九个家族：切片（四种写法一格节点；上界不含、0 起，差别由各自的映射摆平）
-  ...fam('slice', SLICE, ['go', 'vlang', 'nim', 'mojo']),
+  ...fam('slice', SLICE, ['go', 'vlang', 'nim', 'mojo', 'sbcl', 'chez']),
   // 第十个家族：多值的另外两个提供者（CL 的 values / nim 的元组）——
   // 单开一个家族的理由写在 ext/sbcl/examples/values.lisp 的文件头里
   ...fam('values', VALUES, ['sbcl', 'nim']),

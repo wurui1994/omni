@@ -369,7 +369,18 @@ export const NODES = new Map([
     { name: 'to', sem: SEM.value, optional: true },
   ], {
     effects: ['reads', 'allocates'], lifetime: 'owns',
-    doc: 'go `xs[1:3]` / V `xs[1..3]` / nim `xs[1 .. 2]` / mojo `xs[1:3]`',
+    doc: 'go `xs[1:3]` / V `xs[1..3]` / nim `xs[1 .. 2]` / mojo `xs[1:3]`'
+      + ' / CL `(subseq v 1 3)` / Scheme `(vector-copy v 1 3)`',
+    // 规格里数出来**七门**：四门写成下标语法、两门 Lisp 写成函数调用（**同一格节点**），
+    // 加上 cpp。lua / awk / freebasic 三门的规格里没有"一段范围复制成新列表"这件事
+    // （lua 的 `table.move` 是往现成的表里搬、`string.sub` 是串那一侧）—— 所以不在 spec。
+    providers: {
+      spec: ['go', 'vlang', 'nim', 'mojo', 'sbcl', 'chez', 'cpp'],
+      why: {
+        cpp: '要模板与库那一族（`std::vector` 的迭代器构造 / `std::span`）——'
+          + ' 这一批的 cpp 只有内建数组，切一段没有语言级的写法',
+      },
+    },
   }),
 ]);
 
