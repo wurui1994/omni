@@ -670,7 +670,11 @@ chez 的 `Lsrc` 骨架 17 种（归成 11 族）、go 的 151 格 `Op` 塌成约
 V 的 83 格 AST 塌成约 23、fbc 的 45 格 `AST_NODECLASS`。
 **四个独立来源都落在 20–30 这一档 —— 这就是"需要多少节点"的答案。**
 
-### A.6.1 第一批（13 格）已经落地 —— 量出来的现状
+### A.6.1 第一批（13 格）已经落地 —— 当时量出来的样子
+
+（这一段是**第一批那一刻**的记录，往下每一批都接着记。今天的清单是 27 格，
+`binop` / `unop` 那两格后来并进了 `prim`（`prims.js` 那一刀），
+后端也从三条腿变成四条 —— 别拿这一段当现状读。）
 
 `src/core/graph/nodes.js` 里那 13 格：
 `const · ref · bind · set · binop · unop · call · prim · branch · loop · region · func · ret`。
