@@ -83,6 +83,40 @@ if (showGaps) {
 }
 
 /**
+ * **形状上的账要有证物**（每条都跑一遍）。
+ *
+ * 一条"接不住"写在清单里不花钱，**过期也不花钱** —— 哪天有人把实数转串接上了，账还留着，
+ * 清单就开始说假话。所以每条账带一份手搭的小图：那份图必须**当场**抛出 Gap。
+ * 不抛就报"这条账已经不欠了" —— 那是好消息，但它得改清单，不许留着。
+ */
+for (const b of backends()) {
+  for (const sh of shapeGaps(b.name)) {
+    const label = `${b.name} 形状账〔${sh.what}〕`;
+    if (typeof sh.witness !== 'function') {
+      process.stdout.write(`  FAIL ${label}: 这条账没有证物（一份当场触发它的小图）\n`);
+      fail++;
+      continue;
+    }
+    let threw = null;
+    try {
+      b.lower(sh.witness());
+    } catch (err) {
+      threw = err;
+    }
+    if (threw === null) {
+      process.stdout.write(`  FAIL ${label}: 证物**没**报缺口 —— 这条账已经不欠了，删掉它\n`);
+      fail++;
+    } else if (!(threw instanceof Gap)) {
+      process.stdout.write(`  FAIL ${label}: 证物报的不是缺口而是异常：${threw.message}\n`);
+      fail++;
+    } else {
+      process.stdout.write(`  ok   ${label} [证物当场报缺口]\n`);
+      pass++;
+    }
+  }
+}
+
+/**
  * 一张图 × 每个后端。语言那一侧与"手搭图"那一侧共用它 ——
  * 判据只有一条：**同一张图，每个后端的可观察行为必须一致**。
  */

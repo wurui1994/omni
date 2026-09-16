@@ -44,6 +44,8 @@
 //   * **实数 -> 串**（f64 的十进制是另一件事）· 实数进记录 / 列表 / 实参 / 返回值。
 
 import { NODES } from './nodes.js';
+// 五份"形状上的账"各带一份证物，证物是**手搭的小图** —— 所以要 node()（它顺带查五栏声明）
+import { node } from './graph.js';
 // 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
 import { PRIMS } from './prims.js';
 // 字符串常量要发成一段字节 —— 与 C / LLVM 两条腿共用同一份编码（宿主的 TextEncoder 不用）
@@ -88,24 +90,66 @@ export const WAT_SHAPES = [
   {
     what: '`func` 当值用（真闭包）',
     why: '要函数表 + call_indirect（WAT 前端第一阶段不认）。**只被直接调用**的嵌套函数不走这条 —— 它们按 lambda 提升接住了',
+    witness: () => prog([
+      fn('f', [ret(litOf(1))]),
+      bindTo('g', refTo('f')),
+      printOf([node('call', { fn: refTo('g'), args: [] })]),
+    ]),
   },
   {
     what: '嵌套的函数写了捕获来的名字',
     why: '提升是按值传的，那次写外面看不见 —— 要真的闭包环境（线性内存里的一块）',
+    witness: () => prog([
+      fn('outer', [
+        bindTo('a', litOf(1)),
+        fn('inner', [node('set', { value: litOf(2) }, { name: 'a' })]),
+        node('call', { fn: refTo('inner'), args: [] }),
+        ret(refTo('a')),
+      ]),
+      printOf([node('call', { fn: refTo('outer'), args: [] })]),
+    ]),
   },
   {
     what: '一格量先装串后装数（或先实数后整数）',
     why: 'wasm 的局部量只有一种类型，而图这一层没有类型 —— awk 那种无声明的语言真的答不出来',
+    witness: () => prog([
+      bindTo('x', litOf('s')),
+      node('set', { value: litOf(1) }, { name: 'x' }),
+      printOf([refTo('x')]),
+    ]),
   },
   {
     what: '实数 -> 串（`$1.5` / `"x=" + 1.5`）',
     why: 'f64 的十进制那一套（有效位、舍入、指数）是另一件事 —— 整数那一圈数位循环用不上',
+    witness: () => prog([
+      printOf([node('prim', { args: [litOf('x='), litOf(1.5)] }, { name: 'concat' })]),
+    ]),
   },
   {
     what: '实数进记录 / 列表 / 实参 / 返回值',
     why: '内存里一格是 8 字节的 i64，实数要按类型排的布局（附录 A.5 的 carry）',
+    witness: () => prog([
+      bindTo('xs', node('list-new', { items: [litOf(1.5)] })),
+      printOf([node('index-get', { obj: refTo('xs'), index: litOf(0) })]),
+    ]),
   },
 ];
+
+/**
+ * 上面那五份**证物**要用的几个小搭子。
+ *
+ * 为什么账要带证物：一条"接不住"的账写在这儿不花钱，**过期也不花钱** —— 哪天有人把
+ * 实数转串接上了，账还留着，清单就开始说假话。带上证物之后这件事会当场变红：
+ * `tests/graph/run.js` 逐条跑证物，**必须**抛出 Gap；不抛就报"这条账已经不欠了，删掉它"。
+ * 这与"缺口清单是算出来的，不是文档里许的愿"是同一条纪律，只是把它推到了形状那一层。
+ */
+const litOf = (v) => ({ lit: v });
+const refTo = (name) => node('ref', {}, { name });
+const bindTo = (name, init) => node('bind', { init }, { name });
+const ret = (value) => node('ret', { value });
+const printOf = (args) => node('prim', { args }, { name: 'print' });
+const fn = (name, body) => bindTo(name, node('func', { body }, { params: [], name }));
+const prog = (body) => ({ kind: 'graph', body });
 
 /** 一格算符 -> wasm 指令。比较那一族出 i32（只许在条件位置用），别的出 i64。 */
 const ARITH = new Map([
