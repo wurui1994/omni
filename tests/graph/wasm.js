@@ -135,6 +135,40 @@ for (const c of HAND) {
   await check(c.name, c.graph(), c.expect);
 }
 
+// ---- 那个"只收一个子集"的边界，也要有会红的一格 ----------------------------------
+//
+// 文件头写着"发到没见过的东西就当场报错，不许猜着编"。那句话得能被证伪：编出一份 V8 拒收的
+// 二进制，错会指到最没关系的地方（V8 只会说 "invalid section"），所以这四条钉住**报错本身**。
+// 顺带一条正面的：同一份文本装两遍，二进制逐字节相同（G4 那条纪律在这一层也成立）。
+{
+  const bad = [
+    ['没见过的算子', '(module (func $f (result i32) (i32.trunc_f32_s (f32.const 1))))', '还没见过的算子'],
+    ['没见过的模块层 form', '(module (table 1 funcref))', '模块层还没见过'],
+    ['标签不在作用域里', '(module (func $f (block $A (br $B))))', '这个标签不在作用域里'],
+    ['还不认的导出种类', '(module (global $g (mut i32) (i32.const 0)) (export "g" (global $g)))', '还不认 (export'],
+  ];
+  for (const [label, text, want] of bad) {
+    if (only.length > 0 && !only.some((x) => label.includes(x))) continue;
+    let msg = null;
+    try {
+      watToWasm(text);
+    } catch (err) {
+      msg = err.message;
+    }
+    if (msg === null) no(`边界：${label}`, '       没报错 —— 那就是在猜着编了');
+    else if (!msg.includes(want)) no(`边界：${label}`, `       报的理由不对：${msg}`);
+    else ok(`边界：${label} [${msg}]`);
+  }
+  // 内联的 `(func $f (export "main") …)` 后端不发，所以这儿也用它发的那种写法
+  const twice = ['(module (func $f (call $f)) (export "main" (func $f)))'];
+  for (const t of twice) {
+    const a = Buffer.from(watToWasm(t)).toString('hex');
+    const b = Buffer.from(watToWasm(t)).toString('hex');
+    if (a !== b) no('装两遍', '       同一份文本装两遍，二进制不一样');
+    else ok(`装两遍逐字节相同（${a.length / 2} 字节）`);
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed, ${skipped} skipped`
   + `（同一份 .wat 交给 V8 那台 wasm 引擎跑，输出与别的腿逐行相同）\n`);
 if (fail > 0) process.exit(1);
