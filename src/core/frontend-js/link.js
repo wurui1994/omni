@@ -178,20 +178,35 @@ function dirOf(p) {
   return i < 0 ? '.' : p.slice(0, i);
 }
 
-/** 把 './x.js' / '../y/z.js' 归一化到一个干净的路径 */
+/**
+ * 把 './x.js' / '../y/z.js' 归一化到一个干净的路径。
+ *
+ * **`..` 能退到哪儿是量出来的一格**：从前写的是 `if (out.length > 1) out.pop()` ——
+ * 那条对**绝对**路径是对的（`/` 之上还是 `/`），对**相对**路径是错的：
+ * `src/core/graph/langs.js` 里那句 `../../../ext/cpp/tograph.js` 该落在 `ext/…`，
+ * 可最后一格 `src` 被那条守卫护住了，于是变成 `src/ext/cpp/tograph.js` ——
+ * 报出来是一串 `cannot read module 'src/ext/…/tograph.js'`。
+ *
+ * 症状看着像"ext 找不到"，其实是**入口给的是相对路径**（`npm run build:native` 就是
+ * `node src/cli.js build src/cli.js …`）。给绝对路径就没事，所以这个坑藏了很久。
+ * 现在按 posix 的规矩分开：绝对路径退到根就停；相对路径退到起点之上要**留着 `..`**
+ * （不许悄悄吞掉 —— 吞掉就等于把路径指到别的地方去）。
+ */
 function resolvePath(base, rel) {
-  const parts = (rel.startsWith('/') ? rel : `${base}/${rel}`).split('/');
-  const out = [];
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i];
-    if (p === '.') continue;
-    if (p === '' && i > 0) continue;
+  const joined = rel.startsWith('/') ? rel : `${base}/${rel}`;
+  const abs = joined.startsWith('/');
+  const out = abs ? [''] : [];
+  const floor = abs ? 1 : 0;
+  for (const p of joined.split('/')) {
+    if (p === '' || p === '.') continue;
     if (p === '..') {
-      if (out.length > 1) out.pop();
+      if (out.length > floor && out[out.length - 1] !== '..') out.pop();
+      else if (!abs) out.push('..');
       continue;
     }
     out.push(p);
   }
+  if (abs && out.length === 1) return '/';
   return out.join('/');
 }
 

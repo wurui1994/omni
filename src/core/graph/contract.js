@@ -22,6 +22,8 @@ import {
 import { toSx, fromSx } from './graph.js';
 import { PRIMS } from './prims.js';
 import { emitWat, watCan, runWat, WAT_SHAPES, Gap } from './backend-wat.js';
+/* js 这条腿要在宿主里跑一段生成出来的 JS —— 走 ABI 那两格（`new Function` 不在语言子集里）。 */
+import { evalJs, hasJsEngine } from '../host/native.js';
 
 export { Gap };
 
@@ -290,8 +292,19 @@ function jsLower(g) {
     text: source,
     run: () => {
       const out = [];
-      // eslint-disable-next-line no-new-func
-      const f = new Function(`return ${source};`)();
+      /* **走宿主那格 `evalJs`，不写 `new Function`**（ADR-0011 决策 2 的原话：
+       * `new Function` 不在语言子集里，所以这种事要收成一格 ABI op）。
+       * 量出来的：这一处是整棵链接图里**最后一个** `new Function` —— 它让
+       * `npm run build:native` 直接停在 `backend-c: 'js_src_fn' 还没有 C 实现`。
+       * 换成 `evalJs` 之后 C 那一侧有实现（`runtime/omni_js_host.c`：没有引擎就报一句
+       * 清楚的错），于是"能不能跑 js 这条腿"变成**运行期**的能力问题，不再是"编不出来"。
+       *
+       * 语义对得上：间接 eval 一格括起来的箭头函数表达式，回的就是那个函数；
+       * 那个函数体只用它自己的形参，不看外层作用域。 */
+      if (!hasJsEngine()) {
+        throw new Error('graph 的 js 这条腿要一个 JS 引擎（这台宿主没有）—— 换 interp 或 wat');
+      }
+      const f = evalJs(`(${source})`);
       f(out, showValue, valTruthy, valPick, field, setField, index, setIndex,
         (v, to) => convert(v, to, { show: showValue }), valSlice,
         valMapNew, valMapGet, valMapSet, valMapHas);
