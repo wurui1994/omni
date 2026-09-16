@@ -58,6 +58,10 @@ export const CORE_DATA = [
   { dir: 'runtime', probe: 'omni.h' },
   { dir: 'jit', probe: 'omni_jit.c' },
   { dir: 'runtime-gl', probe: 'omni_gl.h' },
+  /* C 前端**自带的那几份头**（`stdbool.h`/`stddef.h`/`stdarg.h`/`float.h` —— tcc 的
+     `{B}/include` 那一格）。不带走的话装好的编译器一编 C 就说 `stdbool.h` 找不着，
+     而 `omni.h` 头几行就 include 它：`OMNI_CC=self` 的第二代于是过不去（第一百三十八片）。 */
+  { dir: 'include', probe: 'stdbool.h' },
   /* `std` 那个包（`import "std/json.omni"`）。它属于核心而不是哪一格插件 ——
      `print(<dynamic>)` 就要它，而那句话跟装了哪几门语言无关。子目录（lib/asy）不在这里：
      那是 asy 插件的数据，跟着那一格走。 */

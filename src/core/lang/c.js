@@ -9,7 +9,8 @@
 
 import { OmniError } from '../source/diag.js';
 import { join, dirname } from '../host/path.js';
-import { env, isDir, installDir, readText, spawn, stderr } from '../host/native.js';
+import { env, exists, isDir, installDir, readText, spawn, stderr } from '../host/native.js';
+import { C_INCLUDE_DIR } from '../runtime/c_runtime.js';
 import { lowerC, lowerCNative, declsOfC } from '../frontend-c/tccgen.js';
 import { Cpp } from '../frontend-c/tccpp.js';
 import { verifyMir } from '../mir/verify.js';
@@ -68,10 +69,16 @@ export function sdkUsrLib() {
  * `libDir` 给了就**换掉**自带那一份（`libDir/include`）—— 那是 tcc 的 `-B`
  * （`tcc_lib_path`）：tcc 里 `{B}/include` 就是自带那一份的位置，不是多一条。
  * SDK 那一段照留（tcc 的 `CONFIG_TCC_SYSINCLUDEPATHS` 也不受 `-B` 影响）。
+ *
+ * 自带那一份**先按数据目录找**（`dataDir('include', 'stdbool.h')`，与 `RUNTIME_DIR`
+ * 同一条规矩），找不着才退回源码树里的相对位置。少了这一格，**装好的**编译器
+ * （`dist/omni`、自举的 N1）一编 C 就是
+ * `share/runtime/omni.h:19: error: include file 'stdbool.h' not found` ——
+ * `installDir()/../../include` 在源码树里是 `src/include`，在 dist 布局里什么都不是。
+ * 第一百三十八片量到的（`OMNI_CC=self` 的第 2 阶段）。
  */
 export function cSysInclude(libDir) {
-  const out = [libDir === undefined ? join(installDir(), '..', '..', 'include')
-    : join(libDir, 'include')];
+  const out = [libDir === undefined ? C_INCLUDE_DIR : join(libDir, 'include')];
   const sdk = sdkUsrInclude();
   if (sdk !== null) out.push(sdk);
   return out;
@@ -101,18 +108,32 @@ export function cFrameworks() {
 }
 
 /**
+ * 一个候选路径读得着就回内容，读不着回 `null`（`Cpp` 那格 `readFile` 要的就是这个约定）。
+ *
+ * **不能写成 `try { readText(p) } catch { return null }`** —— 那样只在 node 上成立。
+ * try/catch 本身两条腿都有（C 那边降成「待决异常槽」，`omni_js_pending()` 那一套），
+ * 差的是**宿主读文件失败走的不是那条路**：`omni_js_host.c:146` 打的是 `omni_errorf`
+ * （致命，当场收摊），而 node 上 `readFileSync` 抛的是一个真异常、接得住。于是症状是
+ * **自己编出来的编译器再去编 C** 时死在头一个候选上：
+ *
+ *   omni: runtime error: ENOENT: cannot read '<工作目录>/omni.h'
+ *
+ * 而那个候选本来就该落空 —— `#include "omni.h"` 先找源文件同目录、再走 `-I`。
+ * 这一格是 `omni bootstrap` 在 `OMNI_CC=self` 下第 2 阶段（N2 = N1 build）挂掉的原因，
+ * 第一百三十八片量到的。`exists` 是纯查询，两条腿上都不抛。
+ *
+ * 「读失败该是可接住的异常而不是致命错误」那处**两条腿的不对称**还欠着，记在这儿；
+ * 这一格不靠它 —— 探测存在性本来就比"抛了再接"便宜。
+ */
+function readOrNull(p) { return exists(p) ? readText(p) : null; }
+
+/**
  * 一份 `.c` -> MIR（ADR-0017 第六刀）。宿主回调与 `cppText` 同一套。
  * 良构检查在这里做完 —— 前端刚长出来，让 verifier 先骂比让解释器崩掉好查。
  */
 export function cMir(path, incs, defs, args, sysIncs) {
   const { mod, warnings } = lowerC(path, readText(path), {
-    readFile: (p) => {
-      try {
-        return readText(p);
-      } catch {
-        return null;
-      }
-    },
+    readFile: readOrNull,
     includeDirs: incs,
     sysIncludeDirs: sysIncs ?? cSysInclude(),
     dirname,
@@ -140,13 +161,7 @@ export function cMir(path, incs, defs, args, sysIncs) {
  */
 export function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, verbose, tgt, skipMissing) {
   const cpp = new Cpp({
-    readFile: (p) => {
-      try {
-        return readText(p);
-      } catch {
-        return null;
-      }
-    },
+    readFile: readOrNull,
     includeDirs: incs,
     /* 自己那一格直接调本地函数 —— 不绕 cap()：这一份独立成插件时 `cap` 不在它的作用域里
        （量出来是 `unresolved function 'cap'`），而"C 的系统头在哪"本来就是它自己的事。 */
@@ -198,13 +213,7 @@ export function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, ve
  */
 export function cMirNative(path, opts, defs) {
   return lowerCNative(path, readText(path), {
-    readFile: (p) => {
-      try {
-        return readText(p);
-      } catch {
-        return null;
-      }
-    },
+    readFile: readOrNull,
     includeDirs: opts.includeDirs,
     sysIncludeDirs: opts.sysIncludeDirs,
     frameworkDirs: opts.frameworkDirs ?? cFrameworks(),
@@ -229,13 +238,7 @@ export function cMirNative(path, opts, defs) {
  */
 export function cDeclsOf(path, opts, defs) {
   return declsOfC(path, opts.text === undefined ? readText(path) : opts.text, {
-    readFile: (p) => {
-      try {
-        return readText(p);
-      } catch {
-        return null;
-      }
-    },
+    readFile: readOrNull,
     includeDirs: opts.includeDirs,
     sysIncludeDirs: opts.sysIncludeDirs,
     frameworkDirs: opts.frameworkDirs ?? cFrameworks(),

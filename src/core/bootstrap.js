@@ -37,7 +37,7 @@ import {
 } from './host/native.js';
 import { join, basename } from './host/path.js';
 import { dataDir } from './host/data.js';
-import { RUNTIME_DIR, JIT_DIR, GL_DIR } from './runtime/c_runtime.js';
+import { RUNTIME_DIR, JIT_DIR, GL_DIR, C_INCLUDE_DIR } from './runtime/c_runtime.js';
 import { LIB_DIR } from './module/load.js';
 
 /* 语法与内建表是**数据**，不进二进制：两个语法驱动的前端按布局找它们（host/data.js）。
@@ -135,6 +135,10 @@ export function bootstrapSelf(o) {
   // copyTree 是平的，所以子目录要单独来一趟。
   const libAsyN = copyTree(join(LIB_DIR, 'asy'), join(share, 'lib', 'asy'), ['.asy']);
   const rtN = copyTree(RUNTIME_DIR, join(share, 'runtime'), ['.c', '.h']);
+  /* C 前端自带的那几份头（tcc 的 `{B}/include`）。`omni.h` 头几行就 `#include <stdbool.h>`，
+     所以少了这一格，装好的编译器**编不了 C** —— `OMNI_CC=self` 的第 2 阶段量到过：
+     `share/runtime/omni.h:19: error: include file 'stdbool.h' not found`。 */
+  const incN = copyTree(C_INCLUDE_DIR, join(share, 'include'), ['.h']);
   // JIT 宿主的 C 源码也要带走，否则 N1 的 run-jit 找不到它（布局错，不是编译器错）
   const jitN = copyTree(JIT_DIR, join(share, 'jit'), ['.c', '.h']);
   // 三维那一档的 GL 插件源码同理（cli.js 的 glPlugin 现编现用）。不带走只是**少一条腿**：
@@ -145,9 +149,9 @@ export function bootstrapSelf(o) {
   // 同样是布局错，不是编译器错。
   const gAsyN = copyTree(ASY_DIR, join(share, 'frontend-asy'), ['.grammar', '.tab']);
   const gJncN = copyTree(JNC_DIR, join(share, 'frontend-jnc'), ['.grammar']);
-  const counts = `lib ${libN}+${libAsyN} files, runtime ${rtN} files, jit ${jitN} files,`
+  const counts = `lib ${libN}+${libAsyN} files, runtime ${rtN}+${incN} files, jit ${jitN} files,`
     + ` grammar ${gAsyN}+${gJncN} files`;
-  if (libN > 0 && libAsyN > 0 && rtN > 0 && jitN > 0 && gAsyN > 0 && gJncN > 0) {
+  if (libN > 0 && libAsyN > 0 && rtN > 0 && incN > 0 && jitN > 0 && gAsyN > 0 && gJncN > 0) {
     ok(`layout ${o.outDir}  ${counts}`);
   } else bad(`layout ${o.outDir}`, `${counts} (all must be > 0)`);
 

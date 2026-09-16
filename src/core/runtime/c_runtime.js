@@ -33,6 +33,15 @@ export const JIT_DIR = dataDir('jit', 'omni_jit.c') ?? join(installDir(), '..', 
  */
 export const GL_DIR = dataDir('runtime-gl', 'omni_gl.h') ?? join(installDir(), '..', '..', 'runtime-gl');
 
+/**
+ * **我们自己那台 C 前端自带的那几份头**（`stdbool.h`/`stddef.h`/`stdarg.h`/`float.h`）——
+ * tcc 的 `{B}/include`。和运行时一样是**数据**，所以同一条规矩按布局找。
+ * 摆在这儿而不是 lang/c.js 里，是因为**两处要它**：`cSysInclude()` 要拿它当第一条搜索路径，
+ * 自举的布局那一步要把它抄进 `share/include`。少了后者，装好的编译器一编 C 就是
+ * `omni.h:19: error: include file 'stdbool.h' not found`（第一百三十八片量到的）。
+ */
+export const C_INCLUDE_DIR = dataDir('include', 'stdbool.h') ?? join(installDir(), '..', '..', 'include');
+
 
 /** 生成的 .c 开头只需要这一行；其余靠 -I RUNTIME_DIR + 链接 runtimeSources() */
 export const RUNTIME_INCLUDE = '#include "omni.h"';

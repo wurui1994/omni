@@ -197,7 +197,7 @@ type modes（ADR-0008）：.omni mixed / .omnid dynamic / .omnis static
 
 env: OMNI_CC、OMNI_CLANG、OMNI_LLVM_CONFIG
      OMNI_CC=self 是**不借外部 cc**那一路：生成的 C 交给我们自己那台 C 前端与链接器
-     （可执行文件行、插件还不行）。不是默认，见 tests/selfc 那条轴。`,
+     （可执行文件与插件都行 —— dylib 那格链完自己补一句 codesign）。不是默认，见 tests/selfc。`,
   children: [
     {
       name: 'run', key: 'run', usage: 'FILE [-- args...]',

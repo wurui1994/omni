@@ -23,9 +23,37 @@
 //       -> `ok  …：6 个函数（前端 + 检查器，没出产物）`
 //
 // 也就是说**整个前端 + 检查器已经在一个我们自己编、自己链的二进制里跑起来了**。
-// 还差的一格是**插件**：核心与插件之间靠 `k_s16_N_s` 这一族串常量符号连着（插件引用
-// 核心导出的那些），所以两边必须一起建 —— 拿旧的插件喂新核心，症状是
+// 核心与插件之间靠 `k_s16_N_s` 这一族串常量符号连着（插件引用核心导出的那些），所以两边
+// 必须**一起建** —— 拿旧的插件喂新核心，症状是
 // `dlopen … symbol not found in flat namespace '_k_s16_1665_s'`。
+//
+// **插件那一格也通了**（第一百三十八片）：链接器早有 `--shared`（macho_exe 的 MH_DYLIB /
+// elf_exe 的 ET_DYN），`OMNI_CC=self` 那条路以前只是没接过来。整份量到的是：
+//
+//   OMNI_CC=self omni build src/cli.js --extern --plugins -o dist-self/omni
+//       -> 核心 52.7M（C 13.7M / 272588 行，发射 316ms + cc 8.6s）+ 12 格插件 115.3M，31.5s
+//   ./dist-self/omni emit c|js|llvm tests/cases/01_basics.omni
+//       -> 三格 target 插件都 dlopen 得动，`emit c` 与 node 那条腿逐字节相同
+//
+// arm64 macOS 上共享库**没签名就 dlopen 不了**（`missing code signature in <no uuid> …`），
+// 所以 `buildSelf` 链完补一句 `codesign -f -s -` —— tcc 自己也是这么做的（`tccmacho.c:2243`）。
+// 下面 `dylibCase` 把这一格钉住：一份 `.c` 出 dylib，另一份 `.c` 出可执行文件去 dlopen 它，
+// 两边都走我们自己的 `c obj` + `c link`。
+//
+// **这条路的天花板也量到了**（第一百三十八片）：`OMNI_CC=self` 只在 **node 这条腿**上成立。
+// 装好的编译器**跑不了自己的 C 前端**，而且与谁编的无关：
+//
+//   ./dist/omni c obj x.c            -> runtime error: a byte-buffer view expects a byte
+//                                       buffer, found undefined      （cc 编的核心，一样）
+//   OMNI_CC=self ./dist-self/omni build x.omni -> uncaught: TypeError: not a function
+//
+// 也就是 **C 那条腿上的 JS 支持还差几格**（不是这条路的问题）。于是 `omni bootstrap`
+// 在 `OMNI_CC=self` 下停在第 2 阶段（N2 = N1 build，7 passed 1 failed）；默认那一路
+// （外部 cc）照旧 **10 passed 0 failed**。往这一格走之前先补的两处是真 bug：
+//   - `lang/c.js` 的 `readFile` 从前是 `try { readText } catch`，而 C 那条腿上读失败是
+//     **致命错误**（`omni_js_host.c:146` 的 `omni_errorf`）—— 改成先 `exists` 再读；
+//   - 自带的那几份头（`src/include`）从前不跟着产物走，装好的编译器一编 C 就说
+//     `stdbool.h` 找不着 —— 进了 `CORE_DATA` 与自举的布局（`share/include`）。
 //
 //   node tests/selfc/run.js
 
@@ -164,6 +192,55 @@ function switchCase(name) {
   ok(`${nm} [${want.stdout.split('\n').length - 1} 行]`);
 }
 
+/**
+ * 共享库那一格（第一百三十八片）：`--shared` 出一份 dylib/so，再由**我们自己链的**
+ * 可执行文件把它 `dlopen` 进来。插件那条路上的每一样东西都在这一格里：
+ * `--shared`、`--install-name`（`LC_ID_DYLIB`）、arm64 上非签不可的那一句 `codesign`。
+ *
+ * 故意用两份小 `.c` 而不是真插件：真插件要先有 `--extern` 的核心与 `.syms`（分钟级，
+ * 而且那是 `build:native` 的事）。这一格问的是**链接器与装载器这一段**通不通。
+ */
+function dylibCase(name) {
+  const nm = `selfc/${name} [我们出 dylib + 我们链的可执行文件 dlopen 它]`;
+  const so = join(dir, OS === 'osx' ? 'libselfc.dylib' : 'libselfc.so');
+  const lsrc = join(dir, 'dl-lib.c');
+  const hsrc = join(dir, 'dl-host.c');
+  writeFileSync(lsrc, 'int selfc_add(int a, int b) { return a + b; }\nint selfc_g = 7;\n');
+  /* 宿主自己 `dlopen`：路径由 argv[1] 给（写死在源码里就换不了工作目录）。 */
+  writeFileSync(hsrc, '#include <stdio.h>\n#include <dlfcn.h>\n'
+    + 'int main(int c, char **v) {\n'
+    + '  void *h = dlopen(v[1], RTLD_NOW);\n'
+    + '  if (h == 0) { printf("dlopen: %s\\n", dlerror()); return 1; }\n'
+    + '  int (*f)(int, int) = (int (*)(int, int)) dlsym(h, "selfc_add");\n'
+    + '  int *g = (int *) dlsym(h, "selfc_g");\n'
+    + '  if (f == 0 || g == 0) { printf("dlsym 找不到\\n"); return 2; }\n'
+    + '  printf("%d %d\\n", f(3, 4), *g);\n'
+    + '  return 0;\n}\n');
+  const lo = join(dir, 'dl-lib.o');
+  const ho = join(dir, 'dl-host.o');
+  for (const [src, o] of [[lsrc, lo], [hsrc, ho]]) {
+    const g = omni(['c', 'obj', src, '-o', o, '--arch', ARCH, '--os', OS, '-f', 'elf']);
+    if (g.status !== 0) { bad(nm, `    编 ${basename(src)} 没过：\n${g.stderr}`); return; }
+  }
+  const sl = omni(['c', 'link', lo, '-o', so, '--arch', ARCH, '--os', OS, '-f', FMT,
+    '--shared', '--install-name', so, ...libs, '-q']);
+  if (sl.status !== 0) { bad(nm, `    出共享库没过：\n${sl.stderr}`); return; }
+  /* 签名不属于链接器（tcc 也是链完 `system("codesign …")`）；少了它 arm64 上
+   * `dlopen` 报的是 `missing code signature in <no uuid> '…'`。 */
+  if (OS === 'osx') spawnSync('codesign', ['-f', '-s', '-', so], { encoding: 'utf8' });
+  const exe = join(dir, 'dl-host');
+  const hl = omni(['c', 'link', ho, '-o', exe, '--arch', ARCH, '--os', OS, '-f', FMT,
+    ...libs, '-q']);
+  if (hl.status !== 0) { bad(nm, `    链宿主没过：\n${hl.stderr}`); return; }
+  spawnSync('chmod', ['+x', exe]);
+  const got = spawnSync(exe, [so], { encoding: 'utf8' });
+  if (got.status !== 0 || got.stdout !== '7 7\n') {
+    bad(nm, `    退出码 ${got.status}，stdout ${JSON.stringify(got.stdout)}\n${got.stderr}`);
+    return;
+  }
+  ok(`${nm} [selfc_add(3,4)=7、selfc_g=7]`);
+}
+
 if (libs === null) {
   process.stdout.write('selfc: 取不到 SDK 路径（xcrun），整轴跳过\n');
   skip = picked.length;
@@ -178,6 +255,7 @@ if (libs === null) {
     for (const n of picked) loopCase(n, rt.objs);
     /* 开关那一格只跑头一个用例：它量的是「三步接起来了吗」，不是语言覆盖。 */
     if (picked.length > 0) switchCase(picked[0]);
+    dylibCase('dylib');
   }
 }
 

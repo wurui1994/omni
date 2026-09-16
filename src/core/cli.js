@@ -1507,8 +1507,9 @@ function findCC() {
  * 已经通了的那条路摆到手边。闭环本身钉在 `tests/selfc` 那条轴上（`.omni` -> 生成的 C
  * -> 我们的 `.o` -> 我们链的可执行文件 -> 输出与解释器逐字节相同）。
  *
- * 覆盖不到的一格记在这儿：**插件**（`.dylib`/`.so`）还得用外部 cc —— 我们的链接器
- * 现在只会写可执行文件与可重定位的 `.o`，没有「写共享库」那一格。
+ * 覆盖到哪儿：可执行文件、可重定位的 `.o`，**以及插件那格共享库**（`--shared`，
+ * 第一百三十八片）—— arm64 macOS 上共享库还得补一句 `codesign -f -s -` 才 dlopen 得动，
+ * 那一句 tcc 自己也喊（`tccmacho.c:2243`）。
  */
 function selfCC() { return env('OMNI_CC') === 'self'; }
 
@@ -1560,8 +1561,21 @@ function optFlag() {
 function ccFlags(cc) {
   // -pthread：入口可能跑在一条大栈的线程上（omni_run_entry），编译与链接两边都要这一位。
   // macOS 上 pthread 就在 libSystem 里、这个开关等于空操作；glibc 2.34 起也已并进 libc。
-  return cc === 'tcc' ? ['-I', RUNTIME_DIR]
+  return isTcc(cc) ? ['-I', RUNTIME_DIR]
     : [optFlag(), '-std=c99', '-ffp-contract=off', '-w', '-pthread', '-I', RUNTIME_DIR];
+}
+
+/**
+ * 这台 cc 是 tcc 吗 —— 按**基名**认，不按整条命令认。
+ *
+ * 从前两处写的是 `cc === 'tcc'`，于是 `OMNI_CC=/…/.omni-cache/tcc-build/tcc`（指着一份
+ * 自己编出来的 tcc，正是对照量它的时候要写的那一路）走的是 clang 那一支：
+ * 量到的报错是 `tcc: error: unsupported linker option '-stack_size'`。
+ * `tcc-x86_64`/`i386-tcc` 这种带前后缀的交叉名也按 tcc 算 —— 它们认的开关是同一套。
+ */
+function isTcc(cc) {
+  const b = basename(cc);
+  return b === 'tcc' || b.startsWith('tcc-') || b.endsWith('-tcc');
 }
 
 /**
@@ -1589,7 +1603,7 @@ function hostIsDarwin() {
 }
 
 function mainStackFlags(cc) {
-  if (cc === 'tcc' || !hostIsDarwin()) return [];
+  if (isTcc(cc) || !hostIsDarwin()) return [];
   return ['-Wl,-stack_size,0x20000000'];
 }
 
@@ -1898,8 +1912,12 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
  *     这一格与 `omni build x.c` 共用 `cDefaultLibs`。
  *   - 执行位得自己补（我们自己写字节，没有 `chmod 0777` 那一步）。
  *
- * 插件（`.dylib`/`.so`）走不到这儿：我们的链接器还没有「写共享库」那一格，所以明着拒，
- * 而不是让它编到一半再炸在别的地方。
+ * 插件（`.dylib`/`.so`）也走这儿（第一百三十八片）：链接器早就有 `--shared` 那一格
+ * （macho_exe 的 MH_DYLIB / elf_exe 的 ET_DYN），缺的只是这条路上没接过来。接法是三样：
+ * `--shared`、**不链运行时的 .o**、`--install-name <基名>`（`LC_ID_DYLIB`）。
+ * 少一句 `codesign -f -s -` 就 `dlopen` 不动 —— 量到的原话是
+ * `missing code signature in <no uuid> '…/omni-lang-c.dylib'`；签名不属于链接器，
+ * tcc 自己也是链完 `system("codesign …")`。可执行文件不签也跑得动，只有 dylib 非签不可。
  *
  * **「self 出的核心 + cc 出的插件」量过了**：装得上、跑得对。`--extern` 在外部 cc 上靠
  * `-Wl,-export_dynamic` 把符号导给插件 `dlopen` 解析，我们的链接器没有那个开关 ——
@@ -1915,10 +1933,6 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
  * （与 `dist` 同形）就好。那是 `installDir` 那条「往上数几层」的规矩，不是这一路的事。
  */
 function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms) {
-  if (plugin !== undefined) {
-    throw new OmniError('OMNI_CC=self 还出不了插件：我们的链接器只会写可执行文件与'
-      + '可重定位的 .o，没有「写共享库」那一格 —— 插件那一路请用外部 cc（不设 OMNI_CC）');
-  }
   const arch = hostArch();
   const os = hostIsDarwin() ? 'osx' : 'linux';
   const fmt = hostIsDarwin() ? 'macho' : 'elf';
@@ -1926,18 +1940,30 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   const obj = `${cPath}.o`;
   cObj(cPath, obj, arch, [RUNTIME_DIR], [], 'elf', os, undefined);
   vStep(`c obj（我们自己那台 C 前端）  ${cPath} -> ${obj}  ${fileSize(obj)} bytes`);
-  const rc = main(['c', 'link', obj, ...runtimeObjectsSelf(arch, os), '-o', outPath,
-    '--arch', arch, '--os', os, '-f', fmt, ...cDefaultLibs(os), ...libs, '-q']);
+  /* 插件与可执行文件在链接这一步只差三样：`--shared`、**不链运行时的 .o**（状态住在核心里，
+   * ADR-0021 的 S1）、`--install-name`（Mach-O 的 `LC_ID_DYLIB`；不给这一格 macho_exe
+   * 会喊「造 dylib 要知道输出的文件名」）。核心里那些符号留成未定义 —— 造共享库时
+   * `relocate_syms` 那道筛子整个撤掉（`tccelf.c`：`|| s1->output_type != TCC_OUTPUT_EXE`），
+   * 由 `dlopen` 在平坦命名空间里解析。 */
+  const rt = plugin === undefined ? runtimeObjectsSelf(arch, os) : [];
+  const sh = plugin === undefined ? [] : ['--shared', '--install-name', basename(outPath)];
+  const rc = main(['c', 'link', obj, ...rt, '-o', outPath,
+    '--arch', arch, '--os', os, '-f', fmt, ...sh, ...cDefaultLibs(os), ...libs, '-q']);
   if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（C 留在 ${cPath}）`);
   /* 执行位（tcc 在 `tcc_output_file` 里 chmod 0777；我们自己写字节，所以自己补一句 ——
    * 少了它只能看着 `Permission denied`）。 */
   spawn('chmod', ['+x', outPath], 'c');
+  /* arm64 macOS 上共享库**没签名就 dlopen 不了**（量到的原话：`missing code signature
+   * in <no uuid> '…/omni-c.dylib'`）。签名不在链接器里 —— tcc 自己也是链完
+   * `system("codesign -f -s - <文件>")`（`tccmacho.c:2243`，configure 开 CONFIG_CODESIGN），
+   * 所以这一句与 tcc 同口径。可执行文件走到这儿不签也跑得动（量过），只有 dylib 非签不可。 */
+  if (plugin !== undefined && hostIsDarwin()) spawn('codesign', ['-f', '-s', '-', outPath], 'c');
   vStep(`c link（我们自己的链接器）  -> ${outPath}  ${fileSize(outPath)} bytes`);
   if (extern === true) {
     writeText(`${outPath}.syms`, `${syms.join('\n')}\n`);
     vStep(`syms  ${syms.length} 个符号 -> ${outPath}.syms`);
   }
-  tally(basename(outPath), false, cText, fileSize(outPath), tGen, nowMs() - t0);
+  tally(basename(outPath), plugin !== undefined, cText, fileSize(outPath), tGen, nowMs() - t0);
   return { cPath, cc: 'self' };
 }
 
