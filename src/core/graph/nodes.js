@@ -169,16 +169,13 @@ export const NODES = new Map([
   }),
   N('ret', 'stat', [{ name: 'value', sem: SEM.value, optional: true, multi: true }], {
     effects: ['may-early-exit'], outs: [],
-    doc: 'go ORETURN / lua return / nim return —— 早退是效应，不是边',
+    doc: 'go ORETURN / lua return / nim return / CL 的 `(return-from f v)` —— 早退是效应，不是边',
     // 九门 —— **chez 不在规格里**：Scheme 的函数体就是它的值，语言里没有 return 这一格
-    // （要早退得用 call/cc）。欠 sbcl：CL 的 `return-from` 要"带名字的块"那一族，
-    // 与 loop-exit 欠的是**同一笔**。
+    // （要早退得用 call/cc）。九门都接了：CL 那门的 `return-from` 落的就是这一格
+    // （`ext/sbcl/examples/blockret.lisp`），所以**没加"带标签的早退"那格节点**。
     providers: {
       spec: ['go', 'vlang', 'nim', 'lua', 'mojo', 'cpp', 'awk', 'freebasic', 'sbcl'],
-      why: {
-        sbcl: 'CL 的早退是 `return-from` / `(return)`（从一格带名字的块里出去）——'
-          + ' 要"块 + 从块里返回"那一族，与 loop-exit 欠的是同一笔',
-      },
+      why: {},
     },
   }),
 
@@ -397,15 +394,13 @@ export const NODES = new Map([
   // 补上之后（`level = depth + 1`），这一格在 wat 那条腿上也跑得起来了。
   N('loop-exit', 'stat', [], {
     attrs: ['kind'], effects: ['may-early-exit'], outs: [],
-    doc: 'break / continue（go/V/nim/mojo/awk/cpp）/ lua 只有 break / fb 的 Exit Do',
+    doc: 'break / continue（go/V/nim/mojo/awk/cpp）/ lua 只有 break / fb 的 Exit Do'
+      + ' / CL 的 `(return)`（从循环那格 `nil` 块里出去）',
     // 规格里数出来**九门**（十门里只有 chez 没有：Scheme 的迭代出口是 named let 与
-    // call/cc，语言里根本没有 break 这一格）。矩阵接了八门 —— 差的一门写在 why 里。
+    // call/cc，语言里根本没有 break 这一格）。九门都接了 —— 账清零。
     providers: {
       spec: ['go', 'vlang', 'nim', 'lua', 'mojo', 'cpp', 'awk', 'freebasic', 'sbcl'],
-      why: {
-        sbcl: 'CL 的循环早退是 `(return)` 从 `nil` 块里出去（`loop-finish` 同理）——'
-          + ' 要"带名字的块 + 从块里返回"那一族，那是切段的另一台机器',
-      },
+      why: {},
     },
   }),
   // ---- 表示（1 格）：**目标类型是一格附属，不是端口** ------------------------

@@ -13,7 +13,8 @@ import {
   node, lit, program, bin,
 } from '../../src/core/graph/graph.js';
 import {
-  head, kids, text, symName, asList, counted, branchOf, listNew, indexGet, indexSet, sliceOf, destructure,
+  head, kids, text, symName, asList, counted, branchOf, retOf, loopExit,
+  listNew, indexGet, indexSet, sliceOf, destructure,
   mapNew, mapGet, mapSet, mapHas,
   fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
@@ -43,6 +44,14 @@ const many = (xs) => xs.map(toNode);
  * 名字，而"名字怎么生成"正是这一格的要害，猜不得。撞上就当普通调用（于是报 unbound name）。
  */
 const STRUCTS = { fields: new Map(), maker: new Map(), access: new Map() };
+
+/**
+ * **当前套着的那几格"带名字的块"** —— CL 的早退是"从块里返回"，而那两种块图上都有：
+ * `defun f` 的体是一格名叫 `f` 的块（早退落 `ret`）、循环的体是一格名叫 `nil` 的块
+ * （早退落 `loop-exit break`）。所以这一门**不需要"带标签的早退"那格新节点**。
+ * 一份源码一份（进门时清掉，见 sbclToGraph）。
+ */
+const BLOCKS = [];
 
 /** `(defstruct point x y)` -> 登记那一族名字。回一格空 region（声明这一批没有运行期动作）。 */
 function defstruct(rest) {
@@ -97,11 +106,42 @@ function toNode(x) {
     case 'defun': {
       const name = symName(rest[0]);
       const params = (asList(rest[1]) ?? []).map((p) => symName(p));
-      return node('bind', { init: node('func', { body: many(rest.slice(2)) }, { params, name }) }, { name });
+      // **`defun` 的体是一格名叫函数名的块**（CL 的规矩）—— 压进 BLOCKS，
+      // 里头的 `(return-from f v)` 因此落一格现成的 `ret`（见 `case 'return-from'`）。
+      BLOCKS.push({ name, kind: 'func' });
+      const body = many(rest.slice(2));
+      BLOCKS.pop();
+      return node('bind', { init: node('func', { body }, { params, name }) }, { name });
     }
     case 'lambda': {
       const params = (asList(rest[0]) ?? []).map((p) => symName(p));
-      return node('func', { body: many(rest.slice(1)) }, { params });
+      BLOCKS.push({ name: null, kind: 'func' });
+      const body = many(rest.slice(1));
+      BLOCKS.pop();
+      return node('func', { body }, { params });
+    }
+    // **CL 的早退是"从一格带名字的块里返回"** —— 而那两种块图上本来就有：
+    //   `(return-from f v)` 在 `defun f` 里 -> `ret`（函数出口）
+    //   `(return)` = `(return-from nil)` 在循环里 -> `loop-exit break`（循环出口）
+    // 所以这一门不需要"带标签的早退"那格节点。跨层的、带值从循环里出去的当场报，不猜。
+    case 'return': case 'return-from': {
+      const name = op === 'return' ? 'nil' : symName(rest[0]);
+      const val = op === 'return' ? rest[0] : rest[1];
+      const inner = BLOCKS[BLOCKS.length - 1];
+      if (inner === undefined) throw new Error(`sbcl->graph: ${op} 在任何块之外`);
+      if (name === 'nil') {
+        if (inner.kind !== 'loop') {
+          throw new Error('sbcl->graph: `(return)` 要它在循环里（`nil` 那格块是循环的）');
+        }
+        if (val !== undefined) {
+          throw new Error('sbcl->graph: 从循环里**带值**返回还没接 —— 图上 break 不带值');
+        }
+        return loopExit('break');
+      }
+      if (inner.kind === 'func' && inner.name === name) {
+        return retOf(val === undefined ? [] : [toNode(val)]);
+      }
+      throw new Error(`sbcl->graph: 从 ${name} 那格块里返回要跨过一层 —— 跨层的早退还没接`);
     }
     case 'setq': case 'setf': {
       // **`setf` 的左边可以是一格形式**（广义位置）：`(setf (aref xs 1) 5)` -> index-set，
@@ -168,12 +208,16 @@ function toNode(x) {
     case 'dotimes': {
       const spec = asList(rest[0]) ?? [];
       const i = symName(spec[0]);
+      // 循环的体在 CL 里是一格**名叫 nil 的块** —— 压进去，`(return)` 因此落 break
+      BLOCKS.push({ name: 'nil', kind: 'loop' });
+      const body = many(rest.slice(1));
+      BLOCKS.pop();
       // 与 lua / freebasic 的计数循环同一个形状 —— `counted` 只写一遍（fromtree.js）
       return counted({
         name: i,
         from: lit(0),
         cond: bin('<', node('ref', {}, { name: i }), toNode(spec[1])),
-        body: many(rest.slice(1)),
+        body,
       });
     }
     case 'terpri': return node('prim', { args: [lit('')] }, { name: 'print' });
@@ -219,6 +263,7 @@ export function sbclToGraph(tree) {
   STRUCTS.fields.clear();
   STRUCTS.maker.clear();
   STRUCTS.access.clear();
+  BLOCKS.length = 0;       // 块的栈同理（上一份源码里没配平的话也在这儿归零）
   return program(many(kids(tree)));
 }
 

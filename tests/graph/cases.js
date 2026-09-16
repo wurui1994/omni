@@ -52,6 +52,12 @@ export const NAMEDARG = ['1', '7'];
  * 三行分别是：点号写法 · 点号写法带实参 · 函数写法（与第一行是**同一张图**）。
  */
 export const METHOD = ['3', '9', '3'];
+/**
+ * blockret：**CL 独有的那个形状** —— 早退是"从带名字的块里返回"。
+ * `(return)` 在循环里落 loop-exit break、`(return-from f v)` 在 defun 里落 ret：
+ * 形状独一门，节点一格新的都没加。三行是：循环里早退后的和 · 循环量 · 函数里早退的值。
+ */
+export const BLOCKRET = ['15', '6', '7'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -113,6 +119,10 @@ export const CASES = [
   // 各门写法差得远（nim 的 UFCS 是纯改写、go 的接收者写在 `func (p Point)` 那一格里），
   // 落到的却全是现成的 call + func —— 这一族把"不给新节点"那句话变成判据。
   ...fam('method', METHOD, ['nim', 'go', 'vlang', 'mojo']),
+  // 第十七个家族：**CL 独有的早退形状**（从带名字的块里返回）。单开一族的理由与
+  // `deferarg` 同一条：别的九门写不出这个形状 —— 而它落到的节点一格新的都没加
+  // （循环里的 `(return)` 落 break、defun 里的 `(return-from f v)` 落 ret）。
+  ...fam('blockret', BLOCKRET, ['sbcl']),
 ];
 
 /**
