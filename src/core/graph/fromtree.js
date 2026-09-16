@@ -242,3 +242,40 @@ export function destructure(names, value, { declare = true, tmp = '__mv' } = {})
   });
   return out;
 }
+
+let deferSeq = 0;
+
+/**
+ * **注册那一刻就把实参算掉的出口动作**（go 的 `defer f(x)` 就是这一条）。
+ *
+ * `scope-exit` 那一格的 `action` 是 lazy 的：动作**整条**在出口才跑 —— CL 的
+ * `unwind-protect`、nim 与 V 的 `defer`（它们收的是一整块语句）都正是这个语义。
+ * 但 go 不同：`defer fmt.Println(i)` 在**注册那一刻**就把 `i` 算掉了，出口只是调用。
+ *
+ * **这不需要新节点**（那条账原来记成"要把 action 拆成 callee + args 两格端口"，
+ * 量一遍发现拆错了）：用现成的 `bind` + `ref` 就说得清 ——
+ * 每个实参先绑到一格新名字（注册点求值，那是 `bind` 的语义），动作里改用 `ref` 那个名字。
+ * 于是"什么时候求值"归**语言**，不归节点 —— 与"写法归语言、格子归节点"同一条。
+ *
+ * 常量不必物化（它没有"什么时候算"的问题）。别的形状（动作不是 `prim` / `call`）
+ * 原样留着 —— 那种 `defer` go 里写不出来。
+ *
+ * @param {any[]} actions 出口要跑的那几格（已经出好的节点）
+ * @returns {any[]} `[bind…, scope-exit]` —— 前面几格是注册点的求值
+ */
+export function deferNow(actions) {
+  const pre = [];
+  const acts = (Array.isArray(actions) ? actions : [actions]).map((a) => {
+    if (a === null || a === undefined || (a.op !== 'prim' && a.op !== 'call')) return a;
+    const args = (Array.isArray(a.ins.args) ? a.ins.args : [a.ins.args])
+      .filter((y) => y !== undefined)
+      .map((y) => {
+        if (y === null || y === undefined || y.lit !== undefined || y.op === 'const') return y;
+        const nm = `__defer${++deferSeq}`;
+        pre.push(node('bind', { init: y }, { name: nm }));
+        return node('ref', {}, { name: nm });
+      });
+    return node(a.op, { ...a.ins, args }, { ...a.attrs });
+  });
+  return [...pre, node('scope-exit', { action: acts })];
+}

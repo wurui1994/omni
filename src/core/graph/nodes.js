@@ -127,9 +127,14 @@ export const NODES = new Map([
   //
   // 第 1 条原来写的是"实参当场求值 —— go 的 defer 就是这条"，**那句话是错的**：
   // 手搭一格图量过（`tests/graph/run.js` 的 `hand+exit-when`），interp 与 js 两条腿
-  // 都在出口那一刻才求值。这样对 CL 的 `unwind-protect` 与 nim 的 `defer:` 是对的，
-  // 对 go / V 的 `defer f(x)` **不对**（它们的实参在注册那一刻就算好了）。
-  // 要两家都对，得把 `action` 拆成"被调者 + 实参各一格端口" —— 那是一笔记下来的账。
+  // 都在出口那一刻才求值。这样对 CL 的 `unwind-protect` 与 nim / V 的 `defer` 块是对的，
+  // 对 go 的 `defer f(x)` **不对**（它的实参在注册那一刻就算好了）。
+  //
+  // 当时记的账是"得把 `action` 拆成被调者 + 实参各一格端口"，**那笔账也记错了**：
+  // 拆端口是给节点加格子，而这件事**归语言**。go 的映射把实参先 `bind` 到一格临时名字
+  // （`bind` 的语义就是"这一刻算"），动作里用 `ref` 那个名字 —— 现成的两格节点就说清了。
+  // 判据是 `ext/go/examples/deferarg.go`（注册之后改那个变量，两种语义因此分得开）。
+  // 提供者只有 go 一门（G5 那条里的"一家"），更说明它不该变成节点。
   N('scope-exit', 'stat', [{ name: 'action', sem: SEM.body }], {
     effects: ['writes'], outs: [],
     doc: 'defer（go/nim/V）/ unwind-protect（CL）/ <close>（lua）/ with（mojo）/ RAII（cpp）',

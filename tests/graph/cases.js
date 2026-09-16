@@ -40,6 +40,12 @@ export const CONV = ['2', '3.5'];
 export const SLICE = ['20', '30'];
 /** values：多值那两格的另外两个提供者（CL 的 `values` 与 nim 的元组） */
 export const VALUES = ['3', '7'];
+/**
+ * deferarg：**go 独有的那一条** —— defer 的实参在注册那一刻就算掉。
+ * 只有一门语言（G5 那条判据里的"一家"），所以它不是一格新节点，
+ * 是 go 自己用 bind + ref 说清的一条规矩（`fromtree.js` 的 `deferNow`）。
+ */
+export const DEFERARG = ['2', '1'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -89,6 +95,10 @@ export const CASES = [
   // 第十个家族：多值的另外两个提供者（CL 的 values / nim 的元组）——
   // 单开一个家族的理由写在 ext/sbcl/examples/values.lisp 的文件头里
   ...fam('values', VALUES, ['sbcl', 'nim']),
+  // 第十一个家族：**go 独有**的 defer 实参时机（注册那一刻求值）。
+  // 一门语言就单开一个家族，理由正是"它不该变成节点"：G5 那条判据里它是"一家"，
+  // 而 defer.go 那份印的是常量 —— 看不出时机，所以要这一份把它钉住。
+  ...fam('deferarg', DEFERARG, ['go']),
 ];
 
 /**

@@ -16,7 +16,7 @@ import {
 import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit,
-  destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf,
+  destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, deferNow,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -147,8 +147,11 @@ function toNode(x) {
     case 'break': return loopExit('break');
     case 'continue': return loopExit('continue');
     case 'expr': return toNode(kids(x)[0]);
-    // `defer f()` -> scope-exit（挂在**当前 region**上，逆序、早退也跑 —— 八家共用那一格）
-    case 'defer': return node('scope-exit', { action: many(kids(x)) });
+    // `defer f(x)` -> scope-exit（挂在**当前 region**上，逆序、早退也跑 —— 八家共用那一格）。
+    // go 独有的一条在 `deferNow` 里：**实参在注册那一刻就算掉**（CL / nim / V 不是这样，
+    // 它们 defer 的是一整块语句）。办法是把实参先绑到临时名字 —— 用现成的 bind + ref
+    // 说清"什么时候求值"，不给 scope-exit 加端口。
+    case 'defer': return deferNow(many(kids(x)));
     case 'call': {
       const [fn, args] = kids(x);
       const argNodes = args === undefined ? [] : many(kids(args));
