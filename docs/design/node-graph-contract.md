@@ -439,24 +439,28 @@ interp 的 `BREAK + OUTER*(level-1)`、MIR 的 `levelOf`、C 与 js 的带标签
 
 ```
 骨架那一层
-  prim 42/42 · ref 41 · bind 41 · const 40 · call 33 · func 33 · loop 28
-  set 27 · branch 27 · region 24 · ret 19
-  list-new / index-get / index-set / loop-exit 各 7 · scope-exit 5
-  record-new / field-get / field-set 各 4 · values / pick 各 2
+  prim 61/61 · const / ref / bind 各 56 · call / func 各 44 · branch 33 · region 30
+  set 29 · loop 28 · ret 20
+  list-new / index-get 各 11 · scope-exit 8 · index-set / loop-exit 各 7 · values / conv 各 5
+  pick / record-new / field-get / field-set / map-new / map-get / map-set / map-has / slice 各 4
 附属那一层
-  prim.name 42 · ref.name 41 · bind.name 41 · const.value 40 · func.params 33 · func.name 33
-  set.name 27 · loop-exit.kind 7 · record-new.names / field-get.field / field-set.field 各 4
-  bind.keepMulti 2 · pick.index 2
+  prim.name 61 · const.value / ref.name / bind.name 各 56 · func.params / func.name 各 44
+  set.name 29 · loop-exit.kind 7 · conv.to 5
+  bind.keepMulti / pick.index / record-new.names / field-get.field / field-set.field 各 4
 ```
 
 这张表就是 target.md 要的"特性 DAG 排序"的可量版本，而且它比 DAG 说得更准：
-**上面那 11 格是骨架**（半径 ≥ 19，删了就没程序可跑），**下面那 10 格想删就能删** ——
-删掉 `record-new` 那三格，另外 38 份例子一行不改照旧全绿；删掉 `values`/`pick`，40 份照旧。
+**上面那 11 格是骨架**（半径 ≥ 20，删了就没程序可跑），**下面那 16 格想删就能删** ——
+删掉 `map` 那四格，另外 57 份例子一行不改照旧全绿；删掉 `record-new` 那三格也是 57 份。
 这才是"原子化"真正的样子：不是"分层分得细"，是**删了不牵连**。
 
+顺带看一眼这张表的变化：加了 map 那四格（第九批）之后，**骨架那一层的半径没有一格变**
+（`prim` 还是 61、`bind` 还是 56）—— 新节点只在自己那 4 份例子上有半径。
+"加特性不牵连"这句话，就是这么量出来的。
+
 附属那一轮还顺手给出一条**判"是不是附属"的可量标准**：拿"删节点"与"删它的附属"
-两个半径比一比。`bind` 41 而 `bind.keepMulti` 2 —— 差 39，`keepMulti` 是**真附属**；
-`prim` 与 `prim.name` 都是 42 —— 一格不差，说明 `name` 根本不是附属，
+两个半径比一比。`bind` 56 而 `bind.keepMulti` 4 —— 差 52，`keepMulti` 是**真附属**；
+`prim` 与 `prim.name` 都是 61 —— 一格不差，说明 `name` 根本不是附属，
 它就是那格节点**自己的选择器**（"算符没有节点，全落 `prim`"那句话的另一面）。
 §2 的骨架 / 附属之分从此不靠直觉，靠这两个数。
 
