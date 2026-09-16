@@ -81,6 +81,20 @@ export function cSysInclude(libDir) {
   const out = [libDir === undefined ? C_INCLUDE_DIR : join(libDir, 'include')];
   const sdk = sdkUsrInclude();
   if (sdk !== null) out.push(sdk);
+  /* **Linux（与别的没有 SDK 那一套的宿主）那几处**（第一百四十七片）：
+   * `sdkUsrInclude` 是问 `xcrun` 的，只有 macOS 答得出来 —— 在别处它回 null，
+   * 于是这张表只剩自带那一份，`#include <stdio.h>` 当场找不着
+   * （量出来的：x86_64 Arch 容器里 `omni build bench/fib.omni` 停在
+   * `src/runtime/omni.h:15: error: include file 'stdio.h' not found`）。
+   *
+   * 顺序照 clang / tcc 的默认：`/usr/local/include` 在前、多架构那一层
+   * （Debian/Ubuntu 的 `/usr/include/<triple>`）居中、`/usr/include` 在最后。
+   * **只放真存在的**：这张表每 include 一次就要走一遍，摆一堆不存在的路径只是白试
+   * （与 `cFrameworks` 同一条规矩）。macOS 上这三处一般都不存在，所以那条腿一个字不变。 */
+  for (const p of ['/usr/local/include', '/usr/include/x86_64-linux-gnu',
+    '/usr/include/aarch64-linux-gnu', '/usr/include']) {
+    if (isDir(p)) out.push(p);
+  }
   return out;
 }
 
