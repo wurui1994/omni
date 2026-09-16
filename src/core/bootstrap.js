@@ -165,7 +165,16 @@ export function bootstrapSelf(o) {
   if (probe[0] !== 0) {
     stdout(`  skip C2 == C1: no JS engine ('${nodeExe}' not runnable)  [${lap()}]\n`);
   } else {
-    const r = spawn(nodeExe, [c1, 'emit-js', o.source], 'c');
+    /* **C1 编 C2 要额外的堆**（量出来的）：node 默认的老年代（这台机器上约 2 GB）不够，
+     * 崩在 `Mark-Compact … 1990.7 MB … last resort`；给 3072 MB 就过，4096 / 8192 出的是
+     * 同一份产物。所以这是"够不够"的问题 —— 是**编译器自己的内存账**（C1 是生成出来的 JS，
+     * 比 C0 费内存），哪天那笔账还了这一格该往回调。
+     *
+     * 只在**看起来是 node** 的引擎上加这个开关（`--version` 回 `v…`）：别的 JS 引擎
+     * 不认它，加上去会把"能跑"变成"起不来"。 */
+    const nodeish = String(probe[1]).startsWith('v');
+    const heap = ['--max-old-space-size=3072'];
+    const r = spawn(nodeExe, nodeish ? [...heap, c1, 'emit-js', o.source] : [c1, 'emit-js', o.source], 'c');
     // C2 的产出留在构建目录里：不动点失败时要能离线 diff 这两份 JS
     if (r[0] === 0) writeText(join(work, 'c2.mjs'), r[1]);
     if (r[0] !== 0) bad('C2 = C1 emit-js', `exit=${r[0]}\n${r[2]}`);
