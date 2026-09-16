@@ -17,7 +17,7 @@ import {
 import {
   isList, tag, kids, leaf, part,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
-  recordNew, fieldGet, fieldSet,
+  recordNew, fieldGet, fieldSet, mapNew, mapGet, mapSet, mapHas,
 } from '../../src/core/graph/fromtree.js';
 
 const OPS = ops();
@@ -61,8 +61,8 @@ const dtorName = (ty) => `__destruct_${ty}`;
  * 所以**只有登记过的名字**才当 pick（判据还是"造它的那一步自带标记"）。
  *
  * 明说边界：`std::pair<int,int>` 当**类型**写出来（形参、返回值、`std::pair<…> t;`）
- * 这一批读不进来 —— 那是语法里"模板名当类型"那笔账（cpp.grammar 的不足第 2 条），
- * 与 `std::vector` / `std::map` 欠的是**同一笔**。
+ * 这一批**没接映射**，但不是语法读不进来 —— 那句旧账这一批作废了（见文件末尾第 2 条）：
+ * 名字登记过就读得进来，欠的是"取出来那两格怎么落"（`t.first` 现在只认登记过的名字）。
  */
 let PAIRS = new Set();
 const isMakePair = (x) => {
@@ -72,6 +72,44 @@ const isMakePair = (x) => {
   const parts = kids(callee).map((y) => (isList(y) ? nameOf(y) : leaf(y)));
   return parts.length === 2 && parts[0] === 'std' && parts[1] === 'make_pair';
 };
+
+/**
+ * **装映射的那些名字**（`std::map<std::string, int> m;` 声明一个）。
+ *
+ * 与 nim 的 `initTable[K, V]()`、mojo 的 `Dict[K, V]()` 是**同一条办法**：
+ * 造它的那一步自带标记，所以不必回问类型。cpp 这儿的标记就是**声明里那个模板名** ——
+ * `map` / `unordered_map`（限定不限定都认：`std::map<…>` 与 `using namespace std` 之后的
+ * `map<…>` 是同一件事）。
+ *
+ * 为什么这一格现在做得了：模板名当类型那笔账**不在语法上**了 —— `needs-type` 那台机器
+ * 只要名字登记过就读得进来（量出来的：`namespace std { template <class K, class V> class map; }`
+ * 之后 `std::map<std::string,int> m; m["a"] = 1;` 整段过）。所以例子把它用到的库名
+ * **自己声明出来**（头文件干的就是这件事，而这一门不做预处理）。
+ *
+ * 边界照旧明说：只认"声明出来的那一格"。`auto m = std::map<…>{}` 这种造在原地的写法
+ * 不在这一批（那要一格"表达式里的类型名"），落 `call` 之后会当场报错，不会读错。
+ */
+let MAPS = new Set();
+const MAP_TEMPLATES = new Set(['map', 'unordered_map']);
+
+/**
+ * 一格 `specs` 是不是"映射类型"（`std::map<K,V>` / `unordered_map<K,V>`）。
+ * 回那个模板名，不是就回 null。限定名按**最后一段**看 —— 与语法里 `needs-type` 的规矩一致。
+ */
+function mapTemplateOf(specs) {
+  if (specs === undefined || specs === null) return null;
+  for (const s of kids(specs)) {
+    if (!isList(s)) continue;
+    const t = tag(s) === 'qual' ? kids(s)[kids(s).length - 1] : s;
+    if (!isList(t) || tag(t) !== 'tid') continue;
+    const nm = nameOf(kids(t)[0]);
+    if (MAP_TEMPLATES.has(nm)) return nm;
+  }
+  return null;
+}
+
+/** 一格表达式是不是"登记过的映射名"（`m` 而不是 `xs`）—— 下标那一格靠它分流。 */
+const isMapName = (x) => isList(x) && (tag(x) === 'n' || tag(x) === 'name') && MAPS.has(nameOf(x));
 
 /** `(class struct (n Point) (members …))` -> 登记字段名 */
 function collectStructs(x) {
@@ -239,6 +277,9 @@ function toNode(x) {
     // C++ 与 go 一样从 0 起，所以这儿一个字不用换）
     case 'index': {
       const [obj, idx] = kids(x);
+      // `m["a"]`（`m` 是登记过的映射）-> map-get。**与 `xs[i]` 同一个记号、两格节点** ——
+      // 分开靠的是"造它的那一步自带标记"（MAPS），与 go / V / nim / mojo 同一条。
+      if (isMapName(obj)) return mapGet(toNode(obj), toNode(idx));
       return indexGet(toNode(obj), toNode(idx));
     }
     // `p.x` -> field-get（`p->x` 也落这一格：指针是写法，图上没有取地址那件事）
@@ -257,6 +298,16 @@ function toNode(x) {
     case 'braces': return listNew(many(kids(x)));
     case 'expr': return toNode(kids(x)[0]);
     case 'pp': return [];                       // `#include` 丢掉（这一批不做预处理）
+    // `namespace std { … }` / `template <class K, class V> class map;`
+    // —— 这一批只收它们**当声明用**的那一面：图上没有命名空间与模板这两格，里头那些
+    // 声明该出什么就出什么（库名的前向声明出 `[]`，就是"只往类型表里登记一笔"）。
+    // 例子要它是因为这一门**不做预处理**：头文件里那句 `template <class K, class V> class map;`
+    // 得由例子自己写出来，`m["a"]` 才认得出 `m` 是映射。
+    case 'namespace': {
+      const body = part(x, 'body');
+      return body === undefined ? [] : many(kids(body));
+    }
+    case 'template': return many(kids(x).filter((y) => isList(y) && tag(y) !== 'params'));
     case 'unit': return many(kids(x));
     case 'block': return node('region', { body: many(kids(x)) });
     case 'body': return many(kids(x));
@@ -293,6 +344,11 @@ function toNode(x) {
       // 左边是一格**下标**（`xs[1] = 5`）⇒ index-set（与 go / lua 同一格节点）
       if (tag(t) === 'index') {
         const [obj, idx] = kids(t);
+        // `m["a"] = 1`（登记过的映射）⇒ map-set
+        if (isMapName(obj)) {
+          const cur = () => mapGet(toNode(obj), toNode(idx));
+          return mapSet(toNode(obj), toNode(idx), o === null ? toNode(v) : bin(o, cur(), toNode(v)));
+        }
         const target = toNode(obj);
         const at = toNode(idx);
         return indexSet(target, at, o === null ? toNode(v) : bin(o, indexGet(toNode(obj), toNode(idx)), toNode(v)));
@@ -315,8 +371,19 @@ function toNode(x) {
       const dtors = dtorFuncs(specs);
       if (initPart === undefined) return dtors;    // `struct Foo;` / `struct P {…};`
       const rec = structOf(specs);
+      // `std::map<std::string, int> m;` -> map-new + bind，并把 `m` 记进 MAPS
+      // （下标那两格靠它分流）。**声明就是造**：C++ 里这一行真的构造出一个空映射。
+      const mapTpl = mapTemplateOf(specs);
       return [...dtors, ...kids(initPart).filter((d) => tag(d) === 'd').map((d) => {
         const v = part(d, 'init');
+        if (mapTpl !== null) {
+          const nm = declName(d);
+          if (v !== undefined) {
+            throw new Error(`cpp->graph: ${mapTpl} 这一批只接"声明出来就是空映射"，${nm} 那格给了初值`);
+          }
+          MAPS.add(nm);
+          return node('bind', { init: mapNew() }, { name: nm });
+        }
         // `auto t = std::make_pair(3, 7)` —— **装住整格多值**（`keepMulti` 那格附属），
         // 取用那一侧是 `t.first` / `t.second` -> pick（见 dot 那一格）
         if (v !== undefined && isMakePair(kids(v)[0])) {
@@ -407,6 +474,16 @@ function toNode(x) {
       // `std::make_pair(a, b)` -> 一格 values（C++ 的双值载体就是它）
       if (isMakePair(x)) return node('values', { args: many(argKids) });
       const callee = isList(fn) && (tag(fn) === 'n' || tag(fn) === 'name') ? nameOf(fn) : null;
+      // `m.count("a")` -> map-has（`m` 是登记过的映射）。C++ 里 `count` 回 0/1，
+      // 在条件里就是"在不在" —— 与 go 的 comma-ok、V 的 `in`、nim 的 `hasKey`、
+      // mojo 的 `in` 同一格节点（八种记号一格 map-has）。
+      if (isList(fn) && (tag(fn) === 'dot' || tag(fn) === 'arrow')) {
+        const [obj, m] = kids(fn);
+        if (isMapName(obj) && nameOf(m) === 'count') {
+          if (argKids.length !== 1) throw new Error('cpp->graph: count 那一格要正好一个键');
+          return mapHas(toNode(obj), toNode(argKids[0]));
+        }
+      }
       // `printf("%d\n", x)` -> prim print。**格式串不是节点**：只认那几种，别的报错
       if (callee === 'printf' || callee === 'puts') {
         if (callee === 'puts') return node('prim', { args: many(argKids) }, { name: 'print' });
@@ -430,6 +507,7 @@ export function cppToGraph(tree) {
   STRUCTS = new Map();
   DTORS = new Set();        // "哪些类型有 ~T()"那张表也是**一份源码一张**
   PAIRS = new Set();        // "哪些名字装 pair"那张表同理
+  MAPS = new Set();         // "哪些名字装映射"同理（声明那一行登记，见 mapTemplateOf）
   collectStructs(kids(tree));
   const body = many(kids(tree));
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
@@ -439,10 +517,14 @@ export function cppToGraph(tree) {
 //   1. 类型全丢；指针 / 引用 / 数组的修饰只从声明符里取名字（`const char* t` 的 `*` 丢掉）。
 //   2. `T * x;` 那种"声明还是表达式"**已经不靠猜了** —— 驱动器会回问"这名字登记成类型
 //      了吗"（`declares-type` / `needs-type`，见 cpp.grammar 与 driver.js），
-//      cpp 那格 `prefer` 删掉了。还欠的是模板名那一类（`a<b>(c)`）—— 而**那一笔挡住三样**：
-//      `std::map<K,V> m;` / `std::vector<int> xs` / `std::pair<int,int>` 当类型写出来
-//      （探针试过：`unexpected ID 'm'`）。所以 map 与 slice 那两格提供者账欠的是**语法**，
-//      不是映射；`std::make_pair(3, 7)` 造在原地那种写法读得进来，多值那一格因此接上了。
+//      cpp 那格 `prefer` 删掉了。
+//      **这一条原来写着"模板名那一类还欠着，它挡住 map / vector / pair 三样"—— 那句话是错的，
+//      这一批量出来作废**：模板名当类型**本来就读得进来**，前提只有一个 —— 那个名字登记过。
+//      量出来的（探针）：`namespace std { template <class K, class V> class map; class string; }`
+//      之后 `std::map<std::string,int> m; m["a"] = 1; m.count("a")` 整段过。
+//      所以那两笔账欠的**不是语法**，是"库里的名字从哪儿来"：这一门不做预处理，头文件里的
+//      声明进不来。map 那一族因此**接上了**（例子自己前向声明库名，见 examples/dict.cpp）；
+//      `slice` 还欠着 —— C++ 那一侧要的是 `std::span` / 迭代器区间，不是一格下标写法。
 //   3. 记录的字段名靠**扫同一份文件里的 struct 声明**（`STRUCTS`）—— 外部头文件里声明的
 //      记录扫不到，当场报错。这与 map 那一族"造它的那一步自带标记"是同一条判据。
 //   4. class 的成员函数只接**析构**（`~T()` -> 一格顶层函数 + scope-exit，第二十五批）；

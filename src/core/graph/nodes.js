@@ -339,14 +339,14 @@ export const NODES = new Map([
       + ' / Scheme `make-eqv-hashtable` / CL `make-hash-table` / mojo `Dict[K, V]()`',
     // 规格里数出来**九门**（十门里只有 freebasic 没有：FB 的语言里没有字典这一格）。
     // map 那四格是一族，账记在这一格上（与 record-new 那格同一条：一族一笔账）。
+    //
+    // **九门全接上了**（cpp 最后进来，第二十五批之十九）。cpp 那一笔的 why 记错过一版：
+    // 写的是"`std::map<K,V> m;` 这一行读不进来"，量下来**读得进来** —— 前提是那个名字
+    // 登记过（`needs-type` 那台机器）。真欠的是"库里的名字从哪儿来"：这一门不做预处理。
+    // 还法一句话：例子把用到的库名**自己前向声明**（头文件干的就是这件事），于是
+    // `std::map<K,V> m;` 落 map-new + bind、`m[k]` 落 map-get/set、`m.count(k)` 落 map-has。
     providers: {
       spec: ['go', 'vlang', 'awk', 'nim', 'lua', 'chez', 'sbcl', 'mojo', 'cpp'],
-      why: {
-        cpp: '`std::map<K,V> m;` 这一行读不进来，而**卡的地方不是模板那台机器**'
-          + '（自己声明的 `template <class T> struct Box` + `Box<int> b;` 已经过了）——'
-          + '卡的是 **cpp 这一门不做预处理**：头文件里的类型名登记不进那张表。'
-          + '给语法加一格"库名种子表"量过了：语料 351 份里只多过 1 份（不值得动机制）',
-      },
     },
   }),
   N('map-get', 'expr', [
