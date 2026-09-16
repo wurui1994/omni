@@ -63,7 +63,9 @@ for (const f of readdirSync(here).filter((f) => f.endsWith('.omni')).sort()) {
   /** @type {{label: string, out: string, code: number, err: string}[]} */
   const results = [];
   const omniRel = join('tests', 'oracle', f);
-  results.push({ label: 'omni-js', ...norm(run(process.execPath, [CLI, 'run', omniRel])) });
+  /* `omni-js` 这条腿**明着点后端**：它就是「生成 JS 在本进程里跑」，从前是 `run` 的
+   * 默认。默认一旦改成 c，不写这一句这一行就变成第二份 `omni-c` —— 三方比对里少一方。 */
+  results.push({ label: 'omni-js', ...norm(run(process.execPath, [CLI, 'run', omniRel, '--backend', 'js'])) });
   results.push({ label: 'omni-c', ...norm(run(process.execPath, [CLI, 'run-c', omniRel])) });
 
   const py = join(here, `${name}.py`);
