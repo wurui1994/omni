@@ -132,12 +132,12 @@ const HOISTABLE_KINDS = new Set([
 
 const ident = (name, sp) => ({ type: 'Ident', name, span: sp });
 const gNum = (v, sp) => ({ type: 'Num', value: v, raw: String(v), span: sp });
-const lit = (v, sp) => ({ type: 'Lit', value: v, span: sp });
+const jsLit = (v, sp) => ({ type: 'Lit', value: v, span: sp });
 const undef = (sp) => ident('undefined', sp);
 const opCall = (op, args, sp) => ({ type: 'OpCall', op, args, span: sp });
 const gExprStmt = (e, sp) => ({ type: 'ExprStmt', expr: e, span: sp });
 const gAssign = (target, value, sp) => ({ type: 'Assign', op: '=', target, value, span: sp });
-const bin = (op, left, right, sp) => ({ type: 'Binary', op, left, right, span: sp });
+const jsBin = (op, left, right, sp) => ({ type: 'Binary', op, left, right, span: sp });
 const member = (obj, name, sp) => ({
   type: 'Member', object: obj, name, computed: false, optional: false, span: sp,
 });
@@ -158,7 +158,7 @@ const FIN = '_g_fin';    // 当前活着的 finally 的入口段（0 = 没有）
 const CAT = '_g_cat';    // 当前活着的 catch 的入口段（0 = 没有）
 const EX = '_g_ex';      // 接住的那一格异常值
 
-const genRes = (v, done, sp) => opCall('js_gen_res', [v, lit(done, sp)], sp);
+const genRes = (v, done, sp) => opCall('js_gen_res', [v, jsLit(done, sp)], sp);
 
 /** 原样发进段里的那些句子：里面的 return 是"生成器完成"，要换成 return js_gen_res(v, true) */
 function rewriteReturns(node) {
@@ -695,13 +695,13 @@ class Split {
     this.emit(head, lazy
       ? ifSt(opCall('js_iter_done', [ident(it, sp), ident(ix, sp)], sp),
         this.gotoBlock(exit, sp), this.gotoBlock(bodyB, sp), sp)
-      : ifSt(bin('<', ident(ix, sp), opCall('js_arr_len', [ident(it, sp)], sp), sp),
+      : ifSt(jsBin('<', ident(ix, sp), opCall('js_arr_len', [ident(it, sp)], sp), sp),
         this.gotoBlock(bodyB, sp), this.gotoBlock(exit, sp), sp));
     this.term[head] = true;
     // 先取值再进位：`continue` 于是可以直接跳回 head
     this.emit(bodyB, gExprStmt(gAssign(ident(s.left.name, sp),
       opCall(lazy ? 'js_iter_cur' : 'js_idx_get', [ident(it, sp), ident(ix, sp)], sp), sp), sp));
-    this.emit(bodyB, gExprStmt(gAssign(ident(ix, sp), bin('+', ident(ix, sp), gNum(1, sp), sp), sp), sp));
+    this.emit(bodyB, gExprStmt(gAssign(ident(ix, sp), jsBin('+', ident(ix, sp), gNum(1, sp), sp), sp), sp));
     if (lazy) this.openIters.push({ v: it, op: 'js_iter_close' });
     const x = this.stmt(s.body, bodyB, { ...ctx, brk: exit, cont: head });
     if (lazy) this.openIters.pop();
@@ -830,7 +830,7 @@ class Split {
       setState(unw, FIN, 0);
       if (catchB >= 0) setState(unw, CAT, 0);
       this.emit(unw, s.finalizer);
-      this.emit(unw, ifSt(bin('===', ident(UNW, sp), gNum(2, sp), sp),
+      this.emit(unw, ifSt(jsBin('===', ident(UNW, sp), gNum(2, sp), sp),
         gBlock([{ type: 'Throw', arg: ident(RV, sp), span: sp }], sp), null, sp));
       this.emit(unw, gRet(genRes(ident(RV, sp), true, sp), sp));
       this.term[unw] = true;
@@ -861,7 +861,7 @@ function modePrologue(sp) {
     gExprStmt(gAssign(ident(RV, sp), ident(SENT, sp), sp), sp),
     gExprStmt(gAssign(ident(ST, sp), ident(FIN, sp), sp), sp),
   ], sp);
-  const noFin = bin('===', ident(FIN, sp), gNum(0, sp), sp);
+  const noFin = jsBin('===', ident(FIN, sp), gNum(0, sp), sp);
   /* 抛进来的那一格（it.throw 与"体里抛出来的"是同一件事）：
    *   有活着的 catch  -> 跳到 catch 段，值放在 _g_ex 上
    *   否则有 finally  -> 跑 finally，跑完把异常接回去（unw 段）
@@ -872,16 +872,16 @@ function modePrologue(sp) {
     gExprStmt(gAssign(ident(CAT, sp), gNum(0, sp), sp), sp),
   ], sp);
   const thrownIn = gBlock([
-    ifSt(bin('!==', ident(CAT, sp), gNum(0, sp), sp), toCatch,
+    ifSt(jsBin('!==', ident(CAT, sp), gNum(0, sp), sp), toCatch,
       gBlock([
         ifSt(noFin, gBlock([{ type: 'Throw', arg: ident(SENT, sp), span: sp }], sp), unwindTo(2), sp),
       ], sp), sp),
   ], sp);
   return [
-    ifSt(bin('===', ident(MODE, sp), gNum(1, sp), sp), gBlock([
+    ifSt(jsBin('===', ident(MODE, sp), gNum(1, sp), sp), gBlock([
       ifSt(noFin, gBlock([gRet(genRes(ident(SENT, sp), true, sp), sp)], sp), unwindTo(1), sp),
     ], sp), null, sp),
-    ifSt(bin('===', ident(MODE, sp), gNum(2, sp), sp), thrownIn, null, sp),
+    ifSt(jsBin('===', ident(MODE, sp), gNum(2, sp), sp), thrownIn, null, sp),
   ];
 }
 
@@ -932,7 +932,7 @@ export function genToStateMachine(node, err) {
   }
   const chain = [];
   for (let i = 0; i < sx.blocks.length; i++) {
-    chain.push(ifSt(bin('===', ident(ST, sp), gNum(i, sp), sp), gBlock(sx.blocks[i], sp), null, sp));
+    chain.push(ifSt(jsBin('===', ident(ST, sp), gNum(i, sp), sp), gBlock(sx.blocks[i], sp), null, sp));
   }
   // 派发不中（不该发生，也包括"跑完之后又被叫一次"）：当 done
   chain.push(gRet(genRes(undef(sp), true, sp), sp));
@@ -941,7 +941,7 @@ export function genToStateMachine(node, err) {
     params: [ident(SENT, sp), ident(MODE, sp)],
     rest: null,
     body: gBlock([...modePrologue(sp),
-      { type: 'While', test: lit(true, sp), body: gBlock(chain, sp), span: sp }], sp),
+      { type: 'While', test: jsLit(true, sp), body: gBlock(chain, sp), span: sp }], sp),
     expression: false,
     span: sp,
   };

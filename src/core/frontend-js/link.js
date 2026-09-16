@@ -20,16 +20,18 @@
 //     做一遍带作用域的重写便宜得多，而且改完源码更好读。
 //     **这一条的价钱要按量出来的记**：`cli.js` 那条自编译链上量到过 **142 条**重名
 //     （`tests/mir/run.js` 里 `lower/cli.js` 那一格因此是红的，而且这不是新事 ——
-//     在 a9df4874 上就有 126 条）。现在**一片一片在还**，还到 **120 条**：
+//     在 a9df4874 上就有 126 条）。现在**一片一片在还**，还到 **118 条**：
 //     `graph/eval.js` 那 9 格（值上的运算 -> `valTruthy` / `valPick` / `valMap*` / `valSlice`
 //     · 内部的 `one` / `Env`）· `glr/ebnf.js` 那 3 格（`ebnfGrammarName` /
 //     `quoteGrammarStr` / `EbnfRx` —— 与 `yacc.js` 同名却**不同规矩**，这种最该改）·
 //     `graph/backend-wat.js` 那 6 格（`WAT_ARITH` / `WAT_CMP` / `WAT_FCMP` 三张表 ·
 //     `WatScope` · `watItems` · `retNode`）· 又 4 格（`positionGaps`（与 contract 的
-//     `gaps` 是两件事）· `parseWatText` / `WASM_OPS`（wasm 装配那侧）· `cliArg`）。
+//     `gaps` 是两件事）· `parseWatText` / `WASM_OPS`（wasm 装配那侧）· `cliArg`）·
+//     再 2 格（`frontend-js/genfn.js` 里造 JS 树的 `jsLit` / `jsBin` —— 与 `graph/graph.js`
+//     那两格建**图节点**的同名）。
 //     **这几处的共同点是"同名却不同事"** —— `asList` 在 fromtree 里回 null、在 wat 后端里
 //     回空数组，这种最该先改。
-//     剩下的 120 条分三堆（数出来的）：**ext 那十一份映射 71 条**
+//     剩下的 118 条分三堆（数出来的）：**ext 那十一份映射 71 条**
 //     （`toNode` / `nameOf` / `many` / `OPS` / `PRIM` 在每一门里都是最自然的名字，
 //     而 `graph/langs.js` 把十一门**静态**导进来，于是必然撞）· **旧降级 vs 规则那条路
 //     14 条**（`frontend-jnc/lower.js` 与 `src/lang/jnc/*`：那是迁移期的重复，migration
