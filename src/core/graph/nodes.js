@@ -47,6 +47,16 @@ const N = (op, sort, ins, opts = {}) => [op, {
   lifetime: opts.lifetime ?? 'static',
   attrs: opts.attrs ?? [],
   doc: opts.doc ?? '',
+  /**
+   * 可选的一格：**规格里数出来的提供者名单 + 还没接的那几门各欠什么**。
+   * `{ spec: ['go', …], why: { lua: '…' } }`
+   *
+   * 为什么要有它：`--machines` 那份普查印的是"矩阵里量出来接了几门"，而节点注释里常写
+   * "规格里有几门" —— **两个数**。混成一句话，账就会烂（`scope-exit` 上真烂过：
+   * 注释写八个、普查印 4）。给了这一格之后它是判据：`tests/graph/run.js` 检
+   * "量出来的 ⊆ 规格里的"，且差集里每一门都得有一句为什么还没接。
+   */
+  providers: opts.providers ?? null,
 }];
 
 /**
@@ -114,11 +124,16 @@ export const NODES = new Map([
     doc: 'go ORETURN / lua return / nim return —— 早退是效应，不是边',
   }),
 
-  // ---- 作用域出口（1 格）：**八个提供者共用这一格**（附录 A.1 里最稳的一格能力）----
+  // ---- 作用域出口（1 格）：**规格里数出来八个提供者**（附录 A.1 里最稳的一格能力）----
   //
-  // go 的 `defer` / nim 的 `defer` / V 的 `defer` 与 `lock` / lua 的 `<close>` /
-  // CL 的 `unwind-protect` 与七种 cleanup / mojo 的 `__deinit__` 与 `with` /
-  // freebasic 的 `Destructor` 与 `Scope` / cpp 的 RAII —— 全落这一格。
+  // 「八个」是从十份 `ext/*/SPEC.md` 里数出来的，**不是矩阵里接了八门**：
+  //   go 的 `defer` / nim 的 `defer` / V 的 `defer` 与 `lock` / CL 的 `unwind-protect`
+  //   —— 这四门矩阵里**接了**（`node tests/graph/run.js --machines` 数得出来）；
+  //   lua 的 `<close>` / mojo 的 `with` / freebasic 的 `Destructor` / cpp 的 RAII
+  //   —— 这四门**还没接**，每一门欠的东西写在下面 `providers.why` 里。
+  // 这两个数原来在这段注释里混成一句"八个提供者共用这一格"，而普查印的是 4 ——
+  // **一句话对着两个数**就是账要烂掉的样子。所以现在它是一格**判据**：
+  // `tests/graph/run.js` 检"量出来的 ⊆ 规格里的"，且差集里每一门都得有一句为什么。
   //
   // 它的语义只有三句话，而且**三句话都由调度器给，不由语言给**：
   //   1. 注册的那一刻只记下"这段动作"，**动作里的值到出口那一刻才求**；
@@ -138,6 +153,15 @@ export const NODES = new Map([
   N('scope-exit', 'stat', [{ name: 'action', sem: SEM.body }], {
     effects: ['writes'], outs: [],
     doc: 'defer（go/nim/V）/ unwind-protect（CL）/ <close>（lua）/ with（mojo）/ RAII（cpp）',
+    providers: {
+      spec: ['go', 'nim', 'vlang', 'sbcl', 'lua', 'mojo', 'freebasic', 'cpp'],
+      why: {
+        lua: '`local x <close>` 的出口动作是元表里的 `__close` —— 图这一层没有元表（那要方法分派）',
+        mojo: '`with open(…) as f:` 要上下文管理器（对象 + `__enter__`/`__exit__` 两个方法）',
+        freebasic: '`Destructor` 挂在类型上 —— 要类型与析构那一族（`Scope` 本身落的是 region）',
+        cpp: 'RAII 同上：出口动作来自析构函数，要类型 + 析构',
+      },
+    },
   }),
 
   // ---- 多值（2 格）：**多出端口是常态**（ADR-0033 §3.2）------------------------
@@ -168,10 +192,20 @@ export const NODES = new Map([
   N('record-new', 'expr', [{ name: 'fields', sem: SEM.value, rest: true }], {
     attrs: ['names'], effects: ['allocates'], lifetime: 'owns',
     doc: 'go `T{…}` / lua `{x=1}` / V `T{…}` / nim `T(x: 1)` / CL defstruct',
+    // 规格里九门有记录（awk 只有关联数组，没有"按名字的字段"）。矩阵里接了五门。
+    providers: {
+      spec: ['go', 'vlang', 'lua', 'nim', 'cpp', 'chez', 'sbcl', 'freebasic', 'mojo'],
+      why: {
+        chez: '`define-record-type` 一句话生成一族构造器 / 访问器 —— 映射得先能"定义时造出名字"',
+        sbcl: '`defstruct` 同上（`make-point` / `point-x` 都是那一句生成的）',
+        freebasic: '`Type … End Type` 要类型声明那一族（字段表在类型上，不在字面量上）',
+        mojo: '`struct` 的字段要类型声明 + `__init__`，不是一格字面量',
+      },
+    },
   }),
   N('field-get', 'expr', [{ name: 'obj', sem: SEM.value }], {
     attrs: ['field'], effects: ['reads'], lifetime: 'borrows(obj)',
-    doc: 'go/V 的 `(sel …)` / lua/nim 的 `(dot …)` —— 九门全有',
+    doc: 'go/V 的 `(sel …)` / lua/nim 的 `(dot …)` —— 规格里九门有（矩阵接了几门看 record-new 那格的账）',
   }),
   N('field-set', 'stat', [
     { name: 'obj', sem: SEM.value },
@@ -196,6 +230,13 @@ export const NODES = new Map([
   N('list-new', 'expr', [{ name: 'items', sem: SEM.value, rest: true }], {
     effects: ['allocates'], lifetime: 'owns',
     doc: 'lua `{1,2}` / go `[]int{…}` / V `[…]` / nim `@[…]` —— 九门有列表字面量',
+    // 规格里九门有列表字面量（awk 只有关联数组）。矩阵里接了八门。
+    providers: {
+      spec: ['lua', 'go', 'vlang', 'nim', 'chez', 'sbcl', 'mojo', 'cpp', 'freebasic'],
+      why: {
+        freebasic: '`Dim a(2) As Integer = {1,2,3}` 的字面量绑在**声明**上 —— 要先接"定长数组的声明"那一格，它不是一格独立的表达式',
+      },
+    },
   }),
   N('index-get', 'expr', [
     { name: 'obj', sem: SEM.value },

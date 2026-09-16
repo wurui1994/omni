@@ -360,6 +360,40 @@ for (const c of HAND) {
   check(c.name, c.graph(), c.expect);
 }
 
+/**
+ * **规格里数出来的提供者 vs 矩阵里量出来的**（`nodes.js` 那格 `providers`）。
+ *
+ * 这一节的来由是一处真烂过的账：`scope-exit` 的注释写"八个提供者共用这一格"，
+ * 而 `--machines` 印的是 4 —— 一句话对着两个数。两个数都是真的（一个来自十份
+ * `ext/<lang>/SPEC.md`、一个来自这条矩阵），可它们不是一件事。所以现在检两条：
+ *   1. **量出来的 ⊆ 规格里的** —— 反了就说明规格那份名单数漏了（那才是要改的地方）；
+ *   2. **差集里每一门都得有一句"还欠什么"** —— 没写就是把账藏起来了。
+ * 只在不带过滤参数时检：带了 `only` 时矩阵只跑几格，量出来的名单本来就不全。
+ */
+if (only.length === 0) {
+  for (const [op, d] of NODES) {
+    if (d.providers === null) continue;
+    const got = [...(providers.get(op) ?? new Set())].sort();
+    const spec = [...d.providers.spec].sort();
+    const extra = got.filter((x) => !spec.includes(x));
+    const missing = spec.filter((x) => !got.includes(x));
+    const noWhy = missing.filter((x) => (d.providers.why ?? {})[x] === undefined);
+    if (extra.length > 0) {
+      process.stdout.write(`  FAIL 提供者〔${op}〕: 矩阵里接了 ${extra.join(' ')}，`
+        + '可规格那份名单里没有它 —— 该改的是名单\n');
+      fail++;
+    } else if (noWhy.length > 0) {
+      process.stdout.write(`  FAIL 提供者〔${op}〕: ${noWhy.join(' ')} 在规格里有、矩阵里没接，`
+        + '却没写一句还欠什么\n');
+      fail++;
+    } else {
+      process.stdout.write(`  ok   提供者〔${op}〕[规格 ${spec.length} 门 · 矩阵接了 ${got.length} 门`
+        + `${missing.length === 0 ? '' : ` · 还欠 ${missing.join(' ')}（各有一句为什么）`}]\n`);
+      pass++;
+    }
+  }
+}
+
 if (showMachines) {
   // G5：一格节点的提供者名单。**只有一家的不算机器**（ADR-0033 §3.7 / §5 同一条纪律）。
   process.stdout.write('\n每格节点的提供者名单（数出来的）：\n');
