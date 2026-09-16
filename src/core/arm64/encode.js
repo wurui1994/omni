@@ -328,6 +328,21 @@ export const nopArm64 = () => 0xd503201f;
  *   3. imms = (那段 1 的个数 - 1) | 掩掉 e 的那几位，immr = 转的角度，N = (e === 64)。
  * 编不下去的当场报 —— 调用方该改走 movz/movk 再 and 那条路（tcc 也是这么分的）。
  */
+/* 这一格里所有 64 位宽的中间量都要**按位模式**算，不能指望 `1n << 64n` 是 2^64 ——
+ * 我们这个值域里的 int 是 **i64**（ADR-0005），移位的位数照硬件取模 64，于是
+ * `1n << 64n === 1n`、`(1n << 64n) - 1n === 0n`。node 上跑同一份源码时它是真 BigInt，
+ * 于是 mask 是 2^64-1 —— **同一份代码两种答案**。
+ *
+ * 踩过的那一脚（第一百四十片）：e === 64 时 mask 算成 0，`first` 于是是 0，
+ * 而 `while ((x & 1n) === 0n) { x >>= 1n; rot++; }` 永远到不了头 ——
+ * 装好的编译器一编「带循环的 C」（循环要 `eor` 的逻辑立即数）就在这儿转圈，
+ * 而 node 上一切正常。所以：宽掩码走 `asUintN`，左移的结果一律再 `asUintN(64)` 归一。 */
+const ONES64 = BigInt.asUintN(64, -1n);
+/** n 个 1（n 可以是 64）。 */
+const onesOf = (n) => (n >= 64n ? ONES64 : (1n << n) - 1n);
+/** 归一到 64 位的无符号位模式：两条腿上都是同一个值。 */
+const u64 = (x) => BigInt.asUintN(64, x);
+
 export function bitmaskImm(sf, value) {
   const width = sf ? 64n : 32n;
   let v = BigInt.asUintN(Number(width), BigInt(value));
@@ -336,7 +351,7 @@ export function bitmaskImm(sf, value) {
   }
   for (let e = 2n; e <= width; e *= 2n) {
     /* 一、每 e 位一个样吗 */
-    const mask = (1n << e) - 1n;
+    const mask = onesOf(e);
     const first = v & mask;
     let uniform = true;
     for (let i = e; i < width; i += e) {
@@ -362,8 +377,10 @@ export function bitmaskImm(sf, value) {
       let z = first;
       while ((z & 1n) === 1n) { z >>= 1n; lo++; }
       if (hi === 0n || lo === 0n) continue;
-      /* 该长什么样：高 hi 位全 1、低 lo 位全 1、中间全 0。不是这个形状就换下一个 e。 */
-      const want = (((1n << hi) - 1n) << (e - hi)) | ((1n << lo) - 1n);
+      /* 该长什么样：高 hi 位全 1、低 lo 位全 1、中间全 0。不是这个形状就换下一个 e。
+       * 左移的结果过一次 `u64` —— e === 64 时 `onesOf(hi) << (e - hi)` 会漫过 64 位，
+       * 在 i64 上回卷、在 node 上不回卷，归一之后两条腿才是同一个值。 */
+      const want = u64(onesOf(hi) << (e - hi)) | onesOf(lo);
       if (first !== want) continue;
       ones = hi + lo;
       rot = e - hi;

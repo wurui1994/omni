@@ -1096,11 +1096,16 @@ function $js_arith(op, a, b) {
     default: $rt_error("unknown arithmetic op '" + op + "'");
   }
 }
+/* ++ / -- （规范 13.4.4.1 的 ApplyStringOrNumericBinaryOperator 之前那一步）：
+   **先 ToNumeric，再按那个数值类型加/减 1** —— int（我们这儿的 bigint）走 int 的回卷加法，
+   别的先 ToNumber 再 +/-1。所以 "5"++ 是 6（不是 "51"），而 bigint 上不会撞
+   "cannot mix bigint and number"。 */
+function $js_inc(x) { return $dynTag(x) === "int" ? $iadd(x, 1n) : $js_num_of(x) + 1; }
+function $js_dec(x) { return $dynTag(x) === "int" ? $isub(x, 1n) : $js_num_of(x) - 1; }
 function $js_neg(a) {
   const t = $dynTag(a);
   if (t === "int") return $DW(-a);
-  if (t === "real") return -a;
-  /* 别的一律先 ToNumber（规范 13.5.5 的一元负号先 ToNumeric）：-"3" 是 -3、-true 是 -1、
+  if (t === "real") return -a;  /* 别的一律先 ToNumber（规范 13.5.5 的一元负号先 ToNumeric）：-"3" 是 -3、-true 是 -1、
      -[] 是 -0、-{} 是 NaN。从前这儿直接报"cannot negate string"（loud，但两把尺子都给
      答案）。bigint 已经在上面那两支里了，所以这儿转的都是 Number。 */
   return -$js_num_of(a);

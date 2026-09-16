@@ -649,6 +649,20 @@ omni_dyn omni_js_neg(omni_dyn a) {
   return omni_dyn_of_real(-omni_js_num_of(a).u.r);
 }
 
+/* `++` / `--`（规范 13.4.4.1）：**先 ToNumeric，再按那个数值类型加/减 1**。
+ * int 那一支走回卷的 int64 加法（这个值域里的 int 就是 int64），别的先 ToNumber。
+ * 与 prelude 的 `$js_inc` / `$js_dec` 一一对应。降级器从前发的是 `js_add(x, 1)`，
+ * 于是 bigint 上撞 "cannot mix bigint and number"、串上 `"5"++` 拼成 `"51"`。 */
+omni_dyn omni_js_inc(omni_dyn v) {
+  if (is_int(v)) return omni_dyn_of_int(omni_add(v.u.i, 1));
+  return omni_dyn_of_real(omni_js_num_of(v).u.r + 1.0);
+}
+
+omni_dyn omni_js_dec(omni_dyn v) {
+  if (is_int(v)) return omni_dyn_of_int(omni_sub(v.u.i, 1));
+  return omni_dyn_of_real(omni_js_num_of(v).u.r - 1.0);
+}
+
 /* Number 上的位运算：先 ToInt32（规范 7.1.6），结果是 Number。int（= BigInt）那一支照旧
    按 64 位算 —— JS 里 bigint 与 number 混着做位运算是 TypeError，而这个值域里两者同一个
    标签，所以判据只能是"两边都 int 才按 64 位算"。判据与 prelude 的 $js_toi32 相同。 */

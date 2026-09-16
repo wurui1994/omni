@@ -634,6 +634,9 @@ static inline bool omni_js_eq_s16k(omni_dyn a, omni_s16 k) {
     && (k.len == 0 || memcmp(a.u.s16.p, k.p, (size_t)k.len * 2) == 0);
 }
 omni_dyn omni_js_neg(omni_dyn a);
+/* `++` / `--`：ToNumeric 之后按那个数值类型加/减 1（第一百四十片）。 */
+omni_dyn omni_js_inc(omni_dyn v);
+omni_dyn omni_js_dec(omni_dyn v);
 
 /* throw / try（ADR-0007 决定 1：静态降级，不用宿主异常）。
    运行时只有一个"待处理错误"的槽；跳转是 lower.js 发出来的普通控制流。

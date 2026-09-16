@@ -4040,10 +4040,14 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
 
   /** ++ / --：只对 number 有意义（js_arith 不许 bigint 与 number 混用） */
   update(e, discard) {
-    // '+' 不在 js_arith 里（字符串拼接与加法是同一个 op），所以自增走 js_add
-    const bump = (x) => (e.op === '++'
-      ? op('js_add', [x, constReal(1)])
-      : op('js_arith', [x, constReal(1)], { op: '-' }));
+    /* `++` / `--`（规范 13.4.4.1）：**先 ToNumeric，再按那个数值类型加 1** —— bigint 加 1n、
+     * number 加 1。所以它不是 `x + 1`，而是自己一格 op。从前发的是
+     * `js_add(x, constReal(1))`，两处错：
+     *   - 操作数是 bigint（方言的 int）时报 `cannot mix bigint and number in '+'` ——
+     *     我们自己 arm64 编码器里的 `rot++` 就是这一格（第一百四十片量到：装好的编译器
+     *     用自己那台 C 编译器建程序时挂在这儿）；
+     *   - 操作数是串时 `"5"++` 会拼成 `"51"`，而规范里是 6。 */
+    const bump = (x) => op(e.op === '++' ? 'js_inc' : 'js_dec', [x]);
     /* 惰性位置（三元的分支、`&&` 的右边）里开不了语句 —— 那儿 emitPre 会报
      * "hoist it into a statement"，而 lvalue 对**成员目标**头一件事就是 emitPre 存接收者。
      * 所以这一支要抢在 lvalue 之前：把"存接收者"与"存计算键"也折进表达式，靠

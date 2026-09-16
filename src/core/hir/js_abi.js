@@ -31,6 +31,12 @@ export const JS_ABI = {
   js_disp: { js: '$js_disp', c: 'omni_js_disp_v', arity: 1 },
   js_add: { js: '$js_add', c: 'omni_js_add', arity: 2 },
   js_neg: { js: '$js_neg', c: 'omni_js_neg', arity: 1 },
+  /* `++` / `--`（规范 13.4.4.1）自己一格 op：**ToNumeric 之后按那个数值类型加 1** ——
+     bigint 加 1n、number 加 1。降级器从前发的是 `js_add(x, 1)`，两处错：bigint 上撞
+     `cannot mix bigint and number in '+'`（我们 arm64 编码器里的 `rot++` 就是），
+     串上 `"5"++` 拼成 `"51"`（规范里是 6）。int 那一支照旧回卷到 64 位。 */
+  js_inc: { js: '$js_inc', c: 'omni_js_inc', arity: 1 },
+  js_dec: { js: '$js_dec', c: 'omni_js_dec', arity: 1 },
   // op: '-' '*' '/' '%' 加 'p' 幂（JS 的 `**`）。`+` 不在这儿 —— 它要先问字符串，是 js_add。
   // 幂那一格与别的算术一视同仁：int 那一支**照样回卷到 64 位**（ADR-0005 的值语义 ——
   // 这个值域里的 int 就是 int64，不是无界的 BigInt），所以 `2n ** 64n` 是 0，不是 2^64。
