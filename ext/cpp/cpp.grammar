@@ -519,12 +519,19 @@
 
   ;; 模板的**类型形参也是类型名**：`template <class T> … T x;` 里的 T 得登记
   ;; （非类型形参 `int N` 走 `param` 那一支，不登记 —— 它是值不是类型）
+  ;;
+  ;; `class T` 在这一格上**两读都成立**：一是类型形参（`tp`），二是"没有名字的形参，
+  ;; 类型是 `class T` 这个 elaborated 说明符"（`p`）。第二读语法上立得住、语义上是废话，
+  ;; 而**标准自己也是靠一条规则定的**（[temp.param]：这种歧义按类型形参读）。
+  ;; 所以这儿声明一格偏好 —— 与 go 那条 `type X [N]T` 同一种用法（偏好只在两棵树
+  ;; 都成立时定胜负，别处驱动器照旧不猜）。量出来的代价：不声明的话
+  ;; `template <class T> struct Box {…}` 这一行本身就报"两个解"。
   (rule tparam
     (-> (tp-key) (tp $1))
-    (-> (tp-key ID) (declares-type 2) (tp $1 (n $2)))
+    (-> (tp-key ID) (prefer 1) (declares-type 2) (tp $1 (n $2)))
     (-> (tp-key "..." ) (tp $1 pack))
-    (-> (tp-key "..." ID) (declares-type 3) (tp $1 pack (n $3)))
-    (-> (tp-key ID "=" type-id) (declares-type 2) (tp $1 (n $2) (default $4)))
+    (-> (tp-key "..." ID) (prefer 1) (declares-type 3) (tp $1 pack (n $3)))
+    (-> (tp-key ID "=" type-id) (prefer 1) (declares-type 2) (tp $1 (n $2) (default $4)))
     ;; 非类型模板形参：`int N`、`auto V`
     (-> (param) $1)
     ;; 模板模板形参：`template<class> class C`
@@ -907,6 +914,17 @@
 ;; "这名字登记成类型了吗"（`declares-type` / `needs-type`）是同一类回问，所以下一步先量
 ;; "能不能用现成那一格"，别照印象改。
 ;;
-;; 已经修掉的一格（这一批）：**换页与纵向制表不算空白** —— 那 14 份卡在**词法**的文件
-;; 现在能进语法了（`unexpected "*"` 那一堆因此从 21 涨到 35）。过的份数没动，
-;; 而这正是账该记的样子：一堵墙拆了，后面那堵还在。
+;; 已经修掉的两格（这一批）：
+;;   1. **换页与纵向制表不算空白** —— 那 14 份卡在**词法**的文件现在能进语法了
+;;      （`unexpected "*"` 那一堆因此从 21 涨到 35）。过的份数没动，
+;;      而这正是账该记的样子：一堵墙拆了，后面那堵还在。
+;;   2. **`template <class T>` 这一行本身报"两个解"** —— `class T` 既能读成类型形参（`tp`）、
+;;      又能读成"没有名字的形参，类型是 `class T` 这个 elaborated 说明符"（`p`）。
+;;      标准自己也是靠一条规则定的（[temp.param]：按类型形参读），所以声明一格
+;;      `(prefer 1)`。修掉之后 **`template <class T> struct Box {…}` + `Box<int> b;` 过了**
+;;      —— 也就是说"模板名当类型"那台机器**本来就在**（`(ID targs) (needs-type 1)` 那一支）。
+;;
+;; **于是 map / slice 那两笔提供者账的原因被改对了**：`std::map<K,V> m;` 卡的不是模板，
+;; 是**这一门不做预处理** —— 头文件里的类型名登记不进"这名字是类型吗"那张表。
+;; 要还那两笔，先要的是"库里的名字从哪儿来"（读头文件、或者一张声明过的名字表），
+;; 而不是动语法。

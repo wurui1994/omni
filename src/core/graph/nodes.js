@@ -342,8 +342,9 @@ export const NODES = new Map([
     providers: {
       spec: ['go', 'vlang', 'awk', 'nim', 'lua', 'chez', 'sbcl', 'mojo', 'cpp'],
       why: {
-        cpp: '`std::map<K,V> m;` 这一行**语法就读不进来**（模板名当类型那笔账，'
-          + 'cpp.grammar 的不足第 2 条）—— 与 slice 欠的是同一笔，一台机器两笔账',
+        cpp: '`std::map<K,V> m;` 这一行读不进来，而**卡的地方不是模板那台机器**'
+          + '（自己声明的 `template <class T> struct Box` + `Box<int> b;` 已经过了）——'
+          + '卡的是 **cpp 这一门不做预处理**：头文件里的类型名登记不进"这名字是类型吗"那张表',
       },
     },
   }),
@@ -445,8 +446,8 @@ export const NODES = new Map([
     providers: {
       spec: ['go', 'vlang', 'nim', 'mojo', 'sbcl', 'chez', 'cpp'],
       why: {
-        cpp: '`std::span` / `std::vector` 的迭代器构造这一行**语法就读不进来**'
-          + '（模板名当类型那笔账）—— 这一批的 cpp 只有内建数组，切一段没有语言级的写法',
+        cpp: '`std::span` / `std::vector` 那一行读不进来 —— 与 map 欠的是**同一笔**：'
+          + 'cpp 不做预处理，头文件里的类型名登记不进来（自己声明的模板已经能当类型用了）',
       },
     },
   }),
