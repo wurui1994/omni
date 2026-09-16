@@ -13,14 +13,17 @@
 //   2. **不用它的例子必须解析出与原来逐字相同的树**。这就是"源码不需要到处改动"在语法层
 //      的可执行版本。树用 `printSexpr` 取指纹 —— 比"解析没崩"强得多。
 //   3. **用了它的例子必须干净地失败**（诊断，不是异常）。解析成功但**树不一样**是最坏的
-//      情况：那说明删掉一支之后，同一份源码悄悄换了另一种解析 —— 一律算失败。
+//      情况：那说明删掉一支之后，同一份源码悄悄换了另一种解析 —— 一律算失败。**唯一的例外
+//      也是机械判的**：这份例子的基线树本来就是 `(prefer N)` 从两棵里挑的（把偏好抹平就
+//      报歧义），那么另一棵浮上来是这门语法自己承认的二义，归"歧义"那一档，数出来（见
+//      `noPrefer`）。九门里只有 cpp 写了 prefer，所以别的语言这一档恒为 0。
 //
 // 于是"级联半径"在这一层也是**数出来的**：一支产生式删了会让几份例子解析不出来。
 //
 // ## 为什么默认只跑两门小语法
 //
-// 量过（`node tests/grammar/delete.js --all`）：九门语法一共 2585 条产生式，
-// 一次建表平均 140ms —— 整跑一遍是分钟级的。这条轴因此**按语法给**：
+// 量过（`node tests/grammar/delete.js --all`）：十门语法一共 3100 条产生式，
+// 一次建表平均 140ms —— 整跑一遍是分钟级的（cpp 一门 515 条，单跑 130s）。这条轴因此**按语法给**：
 // 默认跑 chez 与 sbcl（两门 datum 语法，加起来 62 条，秒级），要全量就自己加 `--all`。
 // 这不是"挑好看的跑"：判据对每一门都一样，跑哪几门是**时间的事**，写在这儿明说。
 //
@@ -72,6 +75,19 @@ function without(g, k) {
 }
 
 /**
+ * 同一份语法，**把偏好全抹平**（`(prefer N)` 当没写）。
+ *
+ * 用处是给"删了一支之后换了另一棵树"这一档**分两种**。判据要机械，不能靠我说哪个是例外：
+ *   * 抹平偏好之后这份例子**报歧义** —— 说明基线那棵树本来就是 `prefer` 从两棵里挑的。
+ *     那么删掉被挑中的那一支、另一棵浮上来，是这门语法**自己承认的二义**（cpp 的
+ *     `printf(…)` 既能读成调用也能读成声明），归"歧义"这一档：要数出来、要写在报告里，
+ *     不算失败 —— 它量的正是 task #15 那笔账（驱动器回问"这名字登记成类型了吗"）的大小。
+ *   * 抹平偏好之后照旧单解 —— 那"另一棵树"就是真的悄悄变样了，照旧算失败。
+ * 一处 `prefer` 都没写的语法（另外九门）抹平是空操作，这一档永远是 0。
+ */
+const noPrefer = (g) => ({ ...g, rules: g.rules.map((r) => ({ ...r, prefer: 0 })) });
+
+/**
  * 拿一张表解析一份源码。三种结果：
  *   `{ ok: 树的指纹 }` · `{ bad: '一句人话' }`（干净地失败）· `{ crash: '…' }`（异常）
  */
@@ -116,6 +132,9 @@ for (const lang of langs) {
   // 基线：每份例子的树指纹。基线自己不过就不用往下比了
   const texts = files.map((f) => ({ file: f, text: readText(`${ROOT}${f}`) }));
   const want = new Map();
+  /** 抹平偏好之后就报歧义的那些例子 —— 它们的基线树是 `prefer` 挑出来的（见 noPrefer） */
+  const preferDecided = new Set();
+  const flat = buildTable(noPrefer(g));
   let baseOk = true;
   for (const { file, text } of texts) {
     const r = parseWith(base, g.lex, file, text);
@@ -124,10 +143,12 @@ for (const lang of langs) {
       fail++; baseOk = false; continue;
     }
     want.set(file, r.ok);
+    if (parseWith(flat, g.lex, file, text).ok !== r.ok) preferDecided.add(file);
   }
   if (!baseOk) continue;
 
   let noTable = 0;
+  let ambig = 0;        // 删了这支之后换了另一棵树，而这份例子的基线本来就是 prefer 定的
   const used = [];      // 删了它就有例子解析不出来的那些（半径 > 0）
   const spare = [];     // 删了它所有例子照旧（这门语言的例子用不到的那些）
   const radius = new Map(texts.map(({ file }) => [file, 0]));
@@ -149,7 +170,10 @@ for (const lang of langs) {
       }
       if (r.bad !== undefined) { broke++; radius.set(file, radius.get(file) + 1); continue; }
       if (r.ok !== want.get(file)) {
-        // 最坏的一档：还是解析成功，但**换了另一种解析** —— 那才是"删一格会让别处悄悄变样"
+        // 最坏的一档：还是解析成功，但**换了另一种解析** —— 那才是"删一格会让别处悄悄变样"。
+        // 例外只有一种，而且是机械判的：这份例子的基线本来就是 prefer 从两棵里挑的
+        // （抹平偏好就报歧义）。那种情况归"歧义"这一档，数出来。
+        if (preferDecided.has(file)) { ambig++; continue; }
         failures.push(`${lang} 删掉 ${ruleText(g.rules[k])} 之后 ${file} 解析出**另一棵树**`);
         fail++; continue;
       }
@@ -159,7 +183,9 @@ for (const lang of langs) {
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   process.stdout.write(`  ok   ${lang}：产生式 ${g.rules.length} 条`
-    + ` · 例子用到 ${used.length} 条 · 备用 ${spare.length} 条 · 建不出表 ${noTable} 条（${secs}s）\n`);
+    + ` · 例子用到 ${used.length} 条 · 备用 ${spare.length} 条 · 建不出表 ${noTable} 条`
+    + (preferDecided.size === 0 ? '' : ` · prefer 定的例子 ${preferDecided.size} 份（换了另一棵树 ${ambig} 处）`)
+    + `（${secs}s）\n`);
   for (const { file } of texts) {
     process.stdout.write(`         ${file.replace(`ext/${lang}/examples/`, '')} 要 ${radius.get(file)} 条产生式\n`);
   }

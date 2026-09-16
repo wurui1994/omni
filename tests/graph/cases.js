@@ -15,6 +15,7 @@ import { awkToGraph } from '../../ext/awk/tograph.js';
 import { fbToGraph } from '../../ext/freebasic/tograph.js';
 import { mojoToGraph } from '../../ext/mojo/tograph.js';
 import { nimToGraph } from '../../ext/nim/tograph.js';
+import { cppToGraph } from '../../ext/cpp/tograph.js';
 
 /**
  * 期望的输出。**一个例子家族一份**，家族里所有语言、所有后端共用 ——
@@ -67,6 +68,7 @@ const G = {
   freebasic: ['ext/freebasic/freebasic.grammar', fbToGraph, 'bas'],
   mojo: ['ext/mojo/mojo.grammar', mojoToGraph, 'mojo'],
   nim: ['ext/nim/nim.grammar', nimToGraph, 'nim'],
+  cpp: ['ext/cpp/cpp.grammar', cppToGraph, 'cpp'],
 };
 
 /**

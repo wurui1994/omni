@@ -18,12 +18,15 @@
 //   node tests/graph/run.js --gaps     印每个后端接不住的节点清单
 //   node tests/graph/run.js --machines 印每格节点的**提供者名单**（G5 那条判据）
 //
-// **十门语言里缺 cpp，理由量过**：拿同样这份例子（`int sumto(int n) { … }`，7 行）
-// 去过 `ext/cpp/cpp.grammar`，报的是 "too many concurrent parses" —— 连这么短的程序
-// 都进不来。根因不在这一批节点，在 `cpp.grammar` 文件头记的那两条**机制欠账**：
-// 判不了"声明还是表达式"、判不了 `<`/`>`，两条都要驱动器能回问一句"这个名字登记成
-// 类型了吗"（`docs/design/node-graph-contract.md` 附录 A.5 第 3 笔账）。
-// 那一格补上之前 cpp 不进这张矩阵 —— 硬塞一份"刚好能过的 C++ 子集"是自欺。
+// **第十门 cpp 后来进来了，而它当初进不来的理由与后来进得来的理由都是量出来的**：
+// 头一版拿 7 行的 `int sumto(int n) { … }` 去过 `ext/cpp/cpp.grammar`，报
+// "too many concurrent parses" —— 连这么短的程序都过不去。把三类歧义一类一类量下来，
+// 两类根本不是机制欠账，是**语法自己写松了**（`specs` 允许两格 type-spec；`stmt` 收了
+// 函数定义，而 C++ 没有嵌套函数），改在语法里；第三类（`T * x;`）才是真要驱动器回问
+// 一句"这个名字登记成类型了吗"（附录 A.5 第 3 笔账），这一批用一格 `(prefer 1)` 偏
+// 表达式挡着，**代价写在语法里**，而且被 `tests/grammar/delete.js` 数了出来（那两份例子
+// 的基线树是 prefer 挑的）。所以 cpp 现在进矩阵，`ext/cpp/examples/basics.cpp` 与另外
+// 九门同一份期望输出 `15 / 120 / 7 / ok`。
 
 import { loadGrammarTable } from '../../src/core/glr/load.js';
 import { lexText } from '../../src/core/glr/lex.js';
