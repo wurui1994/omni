@@ -124,11 +124,21 @@ export function typeText(t) {
 }
 
 /* ------------------------------------------------------------------- ref
- * 16 位下标空间的中点。常量在 `[0, REF_BIAS)`，指令在 `[REF_BIAS, 0xffff]`。
+ * 下标空间的中点。常量在 `[0, REF_BIAS)`，指令在 `[REF_BIAS, REF_NONE)`。
  * 「是不是常量」= `ref < REF_BIAS`，一次比较。
+ *
+ * **第一百三十六片：16 位 -> 31 位。** 下面那一段账记的是这一格为什么必须加宽 ——
+ * 一个生成函数（`$scan$u_elfExeImage`）就超过了 32766 条指令，而它不是入口、
+ * 拆不出去。加宽只动三处：这两个常量、`MirFunc.emit` 与常量池那两条上界检查、
+ * 还有 `bytes.js` 里那个定长编码（一格从 2 字节变 4 字节）。
+ * 别的地方（四个后端、interp、verify、print）拿 ref 当**普通数字**用，一个字不改 ——
+ * 那正是「ref 只是个数」这条设计当初买到的东西。
+ *
+ * 挑 2^30 / 2^31-1 而不是 2^32：这样每一个 ref 都还在 **int32** 里，
+ * JS 的位运算（`| 0`、`>>`）碰到它不会掉进 float，写字节那一侧也正好是 4 字节小端。
  */
-export const REF_BIAS = 0x8000;
-export const REF_NONE = 0xffff;  // 「没有操作数」。指令上界因此是 0xfffe。
+export const REF_BIAS = 0x40000000;
+export const REF_NONE = 0x7fffffff;  // 「没有操作数」。指令上界因此是 REF_NONE - 1。
 /* 那句「一个函数体超过 32766 条指令的话，那个函数本身有问题」**被数据否掉了**：
  * 整份编译器（`src/core/cli.js`，JS 前端链完 119 个模块）降下来的 `omni_main` 有
  * **5085 条顶层语句、约 83000 个 OIR 节点** —— 是这个上界的两倍半。它不是"某个函数写坏了"，
@@ -162,8 +172,12 @@ export const REF_NONE = 0xffff;  // 「没有操作数」。指令上界因此�
  * 又撞见了，而且这一次**第一条路走不通**：报的是
  * `mir: 函数 $scan$u_elfExeImage 超过 32766 条指令` —— 它不是入口、不是模块级初始化，
  * 是一个**普通的生成函数**（`elfExeImage` 那一段 scan），拆不出去。
- * 所以「整份编译器过我们自己的 C 前端」这件事欠的就是第二条路：把 ref 加宽到 32 位。
- * 小一点的程序不受影响：`tests/cases/01_basics.omni` 那一趟已经通了（见那一条提交）。 */
+ *
+ * **第一百三十六片：第二条路也走了**（`REF_BIAS` 16 位 -> 31 位，见上面那一段）。
+ * 那时说的「换来的只是一个更大的上界」现在有了第二个理由：**上界本身就是错的** ——
+ * 「一个函数体超过三万条指令说明那个函数有问题」这句话对生成的代码不成立，而生成的
+ * 代码正是这条腿的主要输入。代价量出来了：`bytes.js` 的定长编码一格从 2 字节变 4 字节
+ * （8 字节/条 -> 14 字节/条），别的地方一个字没改。 */
 
 export function isConstRef(ref) { return ref < REF_BIAS; }
 export function refText(ref) {
@@ -702,7 +716,7 @@ export class ConstPool {
     const hit = this.index.get(key);
     if (hit !== undefined) return hit;
     const ref = this.items.length;
-    if (ref >= REF_BIAS) throw new Error('mir: 常量池超过 32768 条');
+    if (ref >= REF_BIAS) throw new Error('mir: 常量池超过 1073741824 条');
     this.items.push({ t, kind, text });
     this.index.set(key, ref);
     return ref;
@@ -720,7 +734,7 @@ export class ConstPool {
    */
   fresh(t, kind, text) {
     const ref = this.items.length;
-    if (ref >= REF_BIAS) throw new Error('mir: 常量池超过 32768 条');
+    if (ref >= REF_BIAS) throw new Error('mir: 常量池超过 1073741824 条');
     this.items.push({ t, kind, text });
     return ref;
   }
@@ -859,7 +873,9 @@ export class MirFunc {
   /** 追加一条指令，返回它的 ref。 */
   emit(op, t, a, b, aux) {
     const i = this.op.length;
-    if (i + REF_BIAS >= REF_NONE) throw new Error(`mir: 函数 ${this.name} 超过 32766 条指令`);
+    if (i + REF_BIAS >= REF_NONE) {
+      throw new Error(`mir: 函数 ${this.name} 超过 ${REF_NONE - REF_BIAS - 1} 条指令`);
+    }
     this.op.push(op);
     this.t.push(t);
     this.a.push(a === undefined ? REF_NONE : a);

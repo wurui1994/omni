@@ -10,8 +10,8 @@
  */
 
 import {
-  OP, OP_NAMES, OP_MODES, REF_NONE, refText, typeText, CVT_NAMES, isConstRef, memDescText,
-  callVaFixed, callLdRet,
+  OP, OP_NAMES, OP_MODES, REF_BIAS, REF_NONE, refText, typeText, CVT_NAMES, isConstRef,
+  memDescText, callVaFixed, callLdRet,
 } from './ir.js';
 
 /** 常量的文本：字符串要转义（快照里得能看出空白与换行）。 */
@@ -150,7 +150,7 @@ export function printFunc(mod, f) {
     const op = f.op[i];
     // END/ELSE 先退一格再印，读起来才和括号对齐
     if (op === OP.END || op === OP.ELSE) depth--;
-    const head = pad(refText(i + 0x8000), 7);
+    const head = pad(refText(i + REF_BIAS), 7);
     const body = `${pad(OP_NAMES[op], 8)} ${pad(typeText(f.t[i]), 7)} ${operands(mod, f, i)}`;
     L.push(`  ${head}${'  '.repeat(depth < 0 ? 0 : depth)}${body}`.replace(/\s+$/, ''));
     if (op === OP.IF || op === OP.LOOP || op === OP.BLOCK || op === OP.ELSE) depth++;

@@ -28,15 +28,24 @@ function insnBytes(f, i, out) {
   const x = f.aux[i];
   out.push(f.op[i] % 256);
   out.push(f.t[i] % 256);
-  out.push(a % 256);
-  out.push((a - (a % 256)) / 256);
-  out.push(b % 256);
-  out.push((b - (b % 256)) / 256);
-  out.push(x % 256);
-  out.push((x - (x % 256)) / 256);
+  /* 一格 **4 字节**（小端）。从前是 2 字节，ref 加宽到 31 位之后装不下了
+   * （第一百三十六片）；顺手还补了一个早就漏出去的洞 —— `aux` 本来就有超过 65535 的
+   * （`memArgAux` 的字节数就占 20 位、`memDesc` 的偏移也能过），旧编码把它们悄悄截掉。
+   * 这一份字节只有 `tests/mir` 拿来比「两次编出来的模块逐字节相同」，所以截掉的那几位
+   * 从来没让谁错过 —— 但那是运气，不是设计。 */
+  const four = (v) => {
+    let n = v;
+    for (let k = 0; k < 4; k++) {
+      out.push(n % 256);
+      n = (n - (n % 256)) / 256;
+    }
+  };
+  four(a);
+  four(b);
+  four(x);
 }
 
-/** 一个函数体的全部指令字节。长度恒为 `8 * 指令数` —— 这一条是定长编码的意义所在。 */
+/** 一个函数体的全部指令字节。长度恒为 `14 * 指令数` —— 这一条是定长编码的意义所在。 */
 export function funcBytes(f) {
   const out = [];
   let i = 0;
