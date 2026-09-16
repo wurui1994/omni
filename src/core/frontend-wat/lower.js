@@ -21,7 +21,12 @@
 //   Break/Continue 本来就带 `level`，四条腿都照着走 —— 原来这儿写着"OIR 没有带标签的
 //   跳转"，那句话是错的，墙在这个前端自己的 TODO 上。跳整个函数 = return。
 // - `block` / `loop` / `if` 不能带 `(result ...)`：它们在这里是语句，不是表达式。
-// - 表、`call_indirect`、`br_table` 一律不认。**线性内存与全局量已经认了**（ADR-0017
+// - **函数表与 `call_indirect` 认了**（ADR-0017 第五刀）：`(type $sig …)` / `(table N funcref)` /
+//   `(elem (i32.const 0) $f …)` 四样都收。做法不是"给 OIR 加一格按表调用" —— 而是用掉
+//   **这一层已经知道的事实：表是常量**（`table.set` 不认，段是静态的），于是按签名合成
+//   一格「按下标选一个直接调用」的函数（见 callIndirect 与 dispatchFunc）。签名对不上
+//   的那一格不进链，落到 `fail` —— 正是 wasm 的签名检查该有的样子。
+//   `br_table`、`table.*`（表可写）仍然不认。**线性内存与全局量也认了**（ADR-0017
 //   第四刀）：那两格在 ADR-0017 第二刀里长进了核心方言与五条腿，这里只是把 wasm 的
 //   写法接上去 —— 于是同一套内存语义有了**第二个互不相干的前端**来证。
 // - **求值顺序没有钉死**。wasm 是栈机，操作数必然从左到右求值；OIR 的 Bin/Call 落到 C
@@ -129,6 +134,14 @@ class LowerWat {
     this.globalNames = new Map(); // `$g` -> globals 下标
     this.usedGlobalNames = new Set();
     this.needStr = false;         // 用到 `print_str` 了吗（要不要合成那格「内存 -> 串」）
+    // 函数表与 `call_indirect`（ADR-0017 第五刀）。表在这个前端里是**常量**：
+    // `table.set` 不认，所以每一格装的是哪个函数，降级期就已经定死 —— 见 callIndirect。
+    this.sigs = new Map();        // `$sig` -> {params:[wt], results:[wt], key}
+    this.sigList = [];            // 同上，按声明序（`(type N)` 用数字下标）
+    this.table = null;            // {min, span}
+    this.elems = [];              // 未解析的 `(elem ...)` 段
+    this.tableEntries = [];       // 下标 -> decl（解析完 elem 之后才有）
+    this.dispatch = new Map();    // sig.key -> {name, sig}：按签名合成的那格「按下标选一个直接调用」
   }
 
   err(span, msg) {
@@ -182,6 +195,9 @@ class LowerWat {
     }
     // 两遍：先把所有函数登记进符号表，`call` 才能往前引用
     for (const f of fields) this.declare(f);
+    // `elem` 里的函数名要等所有函数都登记完才解析得了（段可以写在函数前面）；
+    // 而函数体里的 `call_indirect` 要按下标选一个直接调用，所以表必须在降级函数体**之前**定死
+    this.resolveElems();
     for (const d of this.decls) if (d.host === null) this.lowerBody(d);
     return this.finish(fields);
   }
@@ -193,12 +209,15 @@ class LowerWat {
     if (h === 'memory') return this.declareMemory(f);
     if (h === 'data') return this.declareData(f);
     if (h === 'global') return this.declareGlobal(f);
+    if (h === 'type') return this.declareType(f);
+    if (h === 'table') return this.declareTable(f);
+    if (h === 'elem') { this.elems.push(f); return; }
     if (h === 'export' || h === 'start') return;   // 第二遍处理，那时函数都在表里了
     if (h === null) {
       this.err(f.span, 'expected a module field like (func ...) / (import ...) / (start ...)');
       return;
     }
-    this.err(f.span, `module field '${h}' is not supported yet (func / import / export / start / memory / data / global)`);
+    this.err(f.span, `module field '${h}' is not supported yet (func / import / export / start / memory / data / global / type / table / elem)`);
   }
 
   /**
@@ -360,6 +379,139 @@ class LowerWat {
       return null;
     }
     return this.globals[i];
+  }
+
+  // -------------------------------------------------- 函数表（ADR-0017 第五刀）
+
+  /**
+   * `(type $sig (func (param i64) (result i64)))`。
+   *
+   * 只为 `call_indirect` 而认：`(func (type $sig) …)` 那种"用类型代替签名"仍然不认
+   * （declareFunc 里那条报错），因为那要求两处的形参名字对得上，是另一件事。
+   */
+  declareType(f) {
+    const items = f.items.slice(1);
+    let k = 0;
+    let name = null;
+    if (isAtom(items[k]) && items[k].value.startsWith('$')) name = items[k++].value;
+    const fn = items[k];
+    if (head(fn) !== 'func') {
+      this.err(f.span, '(type ...) needs a (func ...) form like (type $sig (func (param i64) (result i64)))');
+      return;
+    }
+    const sig = this.sigOf(fn.items.slice(1), fn.span);
+    if (sig === null) return;
+    if (name !== null) {
+      if (this.sigs.has(name)) { this.err(f.span, `duplicate type name '${name}'`); return; }
+      this.sigs.set(name, sig);
+    }
+    this.sigList.push(sig);
+  }
+
+  /** `(param …)` / `(result …)` 一串 -> {params, results, key}。签名只按类型算，不带名字。 */
+  sigOf(items, span) {
+    const params = [];
+    const results = [];
+    for (const it of items) {
+      const ih = head(it);
+      if (ih !== 'param' && ih !== 'result') {
+        this.err(it === undefined ? span : it.span, 'a signature takes only (param ...) and (result ...)');
+        return null;
+      }
+      const into = ih === 'param' ? params : results;
+      let rest = it.items.slice(1);
+      // `(param $x i64)`：名字对签名没用，跳过
+      if (ih === 'param' && rest.length === 2 && isAtom(rest[0]) && rest[0].value.startsWith('$')) rest = rest.slice(1);
+      for (const t of rest) {
+        const wt = this.valType(t);
+        if (wt === null) return null;
+        into.push(wt);
+      }
+    }
+    if (results.length > 1) {
+      this.err(span, 'multiple results are not supported yet (OIR functions return one value)');
+      return null;
+    }
+    return { params, results, key: `${params.join('.')}_${results.join('.')}` };
+  }
+
+  /** 一个函数声明的签名（拿来和 `call_indirect` 那份比） */
+  sigOfDecl(d) {
+    return { params: d.params.map((p) => p.wt), results: d.results.slice(), key: `${d.params.map((p) => p.wt).join('.')}_${d.results.join('.')}` };
+  }
+
+  /** `(table [$t] MIN [MAX] funcref)`。一个模块一张（这一刀只要一张，和内存同理）。 */
+  declareTable(f) {
+    if (this.table !== null) {
+      this.err(f.span, 'only one table is supported');
+      return;
+    }
+    let items = f.items.slice(1);
+    if (isAtom(items[0]) && items[0].value.startsWith('$')) items = items.slice(1);
+    const last = items[items.length - 1];
+    if (!isAtom(last) || (last.value !== 'funcref' && last.value !== 'anyfunc')) {
+      this.err(f.span, '(table MIN funcref) is the only supported form (the element type must be funcref)');
+      return;
+    }
+    const min = intLit(items[0], 64);
+    if (min === null || min < 0n) {
+      this.err(f.span, '(table MIN funcref) needs a non-negative minimum size');
+      return;
+    }
+    if (items.length > 3) {
+      this.err(f.span, '(table [MIN [MAX]] funcref) takes at most two sizes');
+      return;
+    }
+    this.table = { min: Number(min), span: f.span };
+  }
+
+  /**
+   * `(elem (i32.const OFF) $f …)` —— 把段里的函数名解析成声明，按下标摊进 tableEntries。
+   *
+   * 这一步在降级函数体**之前**跑完，因为 `call_indirect` 要按下标选一个直接调用
+   * （见 callIndirect）。表是常量这件事就是在这儿定的：段是静态的，`table.set` 不认。
+   */
+  resolveElems() {
+    for (const seg of this.elems) {
+      if (this.table === null) {
+        this.err(seg.span, '(elem ...) but this module has no (table ...) section');
+        continue;
+      }
+      let items = seg.items.slice(1);
+      if (isAtom(items[0]) && items[0].value.startsWith('$')) items = items.slice(1);   // 表名
+      const offNode = items[0];
+      let off = null;
+      if (head(offNode) === 'i32.const' || head(offNode) === 'offset') {
+        const c = head(offNode) === 'offset' ? offNode.items[1] : offNode;
+        off = head(c) === 'i32.const' ? intLit(c.items[1], 32) : null;
+      } else if (isAtom(offNode)) {
+        off = intLit(offNode, 32);
+      }
+      if (off === null || off < 0n) {
+        this.err(seg.span, '(elem (i32.const OFF) $f ...) needs a constant non-negative offset');
+        continue;
+      }
+      const base = Number(off);
+      const names = items.slice(1);
+      for (let i = 0; i < names.length; i++) {
+        const d = this.resolveFunc(names[i]);
+        if (d === null) continue;
+        if (d.host !== null) {
+          this.err(names[i].span, `'${d.name ?? d.mangled}' is a host import, so it cannot go in the table (the host side is not a real function here)`);
+          continue;
+        }
+        const at = base + i;
+        if (at >= this.table.min) {
+          this.err(names[i].span, `this element lands at table index ${at}, past the declared size ${this.table.min}`);
+          continue;
+        }
+        if (this.tableEntries[at] !== undefined) {
+          this.err(names[i].span, `table index ${at} is filled twice`);
+          continue;
+        }
+        this.tableEntries[at] = d;
+      }
+    }
   }
 
   /** 登记一个函数，把签名、局部量、函数体分开存好；函数体这一遍不看 */
@@ -545,6 +697,17 @@ class LowerWat {
       const d = this.resolveFunc(n.items[1]);
       return d === null || d.results.length === 0;
     }
+    if (h === 'call_indirect') {
+      // 这里**不报错**（报了就会和 stmt/value 那一遍重一次）：只看有没有结果
+      const items = n.items.slice(1);
+      for (const it of items) if (head(it) === 'result') return false;
+      if (head(items[0]) === 'type' && isAtom(items[0].items[1])) {
+        const r = items[0].items[1].value;
+        const s = r.startsWith('$') ? this.sigs.get(r) : this.sigList[Number.parseInt(r, 10)];
+        if (s !== undefined) return s.results.length === 0;
+      }
+      return true;
+    }
     return false;
   }
 
@@ -663,6 +826,16 @@ class LowerWat {
         if (v === null) return;
         if (v.t !== 'void') {
           this.err(n.span, `this call returns ${v.t} and nothing consumes it; wrap it in (drop ...)`);
+          return;
+        }
+        out.push({ kind: 'ExprStmt', expr: v.e });
+        return;
+      }
+      case 'call_indirect': {
+        const v = this.callIndirect(n, ctx);
+        if (v === null) return;
+        if (v.t !== 'void') {
+          this.err(n.span, `this indirect call returns ${v.t} and nothing consumes it; wrap it in (drop ...)`);
           return;
         }
         out.push({ kind: 'ExprStmt', expr: v.e });
@@ -794,7 +967,8 @@ class LowerWat {
       this.err(n.span, `'${h}' produces no value`);
       return null;
     }
-    if (h === 'call_indirect' || h === 'br_table' || h.startsWith('table.')) {
+    if (h === 'call_indirect') return this.callIndirect(n, ctx);
+    if (h === 'br_table' || h.startsWith('table.')) {
       this.err(n.span, `'${h}' is not supported yet (see the boundary at the top of frontend-wat/lower.js)`);
       return null;
     }
@@ -989,6 +1163,132 @@ class LowerWat {
     return { e: { kind: 'Call', func: d.mangled, name: d.name ?? d.mangled, args: lowered, type: d.results.length === 0 ? VOID : OIR_TYPE[t] }, t };
   }
 
+  /**
+   * `(call_indirect (type $sig) ARG… IDX)` / `(call_indirect (param …) (result …) ARG… IDX)`。
+   *
+   * **表是常量**（`table.set` 不认，`(elem …)` 是静态的），所以"按表下标调用"在降级期
+   * 就化得开：合成一格「按下标选一个直接调用」的函数（见 dispatchFunc），调用点变成一次
+   * 普通的直接调用，实参与下标各求值一次。
+   *
+   * 为什么不走 MIR 的 `CALLI`：那格指令的函数指针值是**MIR 里的函数号 + 1**，而 MIR 的
+   * 编号是"先 externFuncs 再 oir.funcs"（mir/from_oir.js:115）—— 让这个前端去假设那个
+   * 顺序，就是把一条隐藏契约埋进两个模块之间，任何一次重排都会静默地调错函数。
+   * 而 OIR 里**没有**"给顶层函数取个值"这种东西（没有 FuncRef），`CallFn` 要的是闭包值。
+   * 表是常量这件事既然是真的，就该在知道它的这一层用掉。
+   *
+   * 签名对不上的那一格不进选择链 —— 于是落到最后那句 `fail`，正是 wasm 的签名检查该有的样子。
+   */
+  callIndirect(n, ctx) {
+    const items = n.items.slice(1);
+    const at = (i) => (items[i] === undefined ? null : head(items[i]));
+    let k = 0;
+    let sig = null;
+    if (at(0) === 'type') {
+      sig = this.resolveSig(items[0].items[1]);
+      k = 1;
+      // `(type $t)` 后面还允许把签名再写一遍；写了就按写的算（两处对不上是模块自己的错，
+      // 这里不比 —— 比的话要先有"类型身份"这件事，那是另一刀）
+      const parts = [];
+      while (at(k) === 'param' || at(k) === 'result') parts.push(items[k++]);
+      if (parts.length > 0) sig = this.sigOf(parts, n.span);
+    } else {
+      const parts = [];
+      while (at(k) === 'param' || at(k) === 'result') parts.push(items[k++]);
+      sig = this.sigOf(parts, n.span);
+    }
+    if (sig === null) return null;
+    if (this.table === null) {
+      this.err(n.span, '(call_indirect ...) but this module has no (table ...) section');
+      return null;
+    }
+    const rest = items.slice(k);
+    if (rest.length !== sig.params.length + 1) {
+      this.err(n.span, `(call_indirect ...) with this signature needs ${sig.params.length} argument(s) and then the table index, got ${rest.length} operand(s)`);
+      return null;
+    }
+    const args = rest.slice(0, sig.params.length)
+      .map((a, i) => this.coerce(this.value(a, ctx), sig.params[i], a.span));
+    const idxNode = rest[rest.length - 1];
+    const idx = this.coerce(this.value(idxNode, ctx), 'i32', idxNode.span);
+    const name = this.dispatcher(sig);
+    const t = sig.results.length === 0 ? 'void' : sig.results[0];
+    return {
+      e: {
+        kind: 'Call', func: name, name, args: [idx, ...args],
+        type: sig.results.length === 0 ? VOID : OIR_TYPE[t],
+      },
+      t,
+    };
+  }
+
+  /** `$sig` 或数字下标 -> 签名 */
+  resolveSig(n) {
+    if (!isAtom(n)) {
+      this.err(n ? n.span : null, 'expected a type name or index');
+      return null;
+    }
+    if (n.value.startsWith('$')) {
+      const s = this.sigs.get(n.value);
+      if (s === undefined) {
+        this.err(n.span, `unknown type '${n.value}'`);
+        return null;
+      }
+      return s;
+    }
+    const i = Number.parseInt(n.value, 10);
+    if (!Number.isInteger(i) || i < 0 || i >= this.sigList.length) {
+      this.err(n.span, `type index ${n.value} is out of range`);
+      return null;
+    }
+    return this.sigList[i];
+  }
+
+  /** 登记「这个签名要一格选择函数」，返回它的名字。同一个签名只合成一次。 */
+  dispatcher(sig) {
+    const hit = this.dispatch.get(sig.key);
+    if (hit !== undefined) return hit.name;
+    const name = `omni_wat_ci_${sig.key.replace(/[^A-Za-z0-9_]/g, '_')}`;
+    this.dispatch.set(sig.key, { name, sig });
+    return name;
+  }
+
+  /**
+   * 合成那格选择函数：`(t, a0, a1, …)`，`t` 是表下标。
+   * 每一格签名对得上的表项是一条 `if (t == i) return f(a…)`，末尾 `fail`。
+   */
+  dispatchFunc(dsp) {
+    const { name, sig } = dsp;
+    const ret = sig.results.length === 0 ? VOID : OIR_TYPE[sig.results[0]];
+    const params = [{ name: 't', type: INT },
+      ...sig.params.map((wt, i) => ({ name: `a${i}`, type: OIR_TYPE[wt] }))];
+    const body = [];
+    let filled = 0;
+    for (let i = 0; i < this.table.min; i++) {
+      const d = this.tableEntries[i];
+      if (d === undefined) continue;
+      if (this.sigOfDecl(d).key !== sig.key) continue;   // 签名对不上 = 那一格该 trap，不进链
+      filled++;
+      const call = {
+        kind: 'Call', func: d.mangled, name: d.name ?? d.mangled,
+        args: sig.params.map((wt, j) => ({ kind: 'VarRef', name: `a${j}`, type: OIR_TYPE[wt] })),
+        type: ret,
+      };
+      const then = ret === VOID
+        ? [{ kind: 'ExprStmt', expr: call }, { kind: 'Return', value: null }]
+        : [{ kind: 'Return', value: call }];
+      body.push({ kind: 'If', cond: cmp('==', INT, { kind: 'VarRef', name: 't', type: INT }, iconst(i)), then: oirBlock(then), otherwise: null });
+    }
+    body.push({
+      kind: 'ExprStmt',
+      expr: {
+        kind: 'Builtin', name: 'fail', type: VOID,
+        args: [{ kind: 'Const', type: STRING, value: `call_indirect: the table index selects no function with signature (${sig.params.join(' ')}) -> (${sig.results.join(' ')}) (${filled} of the table's ${this.table.min} slot(s) match it)` }],
+      },
+    });
+    body.push({ kind: 'Return', value: ret === VOID ? null : zeroValue(ret) });
+    return { name, mangled: name, ret, params, body: oirBlock(body) };
+  }
+
   // ---------------------------------------------------------------- 数值指令
 
   /** 取第 k 个折叠实参并调成 want 类型 */
@@ -1177,6 +1477,8 @@ class LowerWat {
       if (this.mem === null) this.err(null, "omni.print_str reads linear memory, so the module needs a (memory ...) section");
       funcs.push(strHelper());
     }
+    // 每个用到的签名一格「按下标选一个直接调用」（call_indirect 化开的那一半）
+    for (const dsp of this.dispatch.values()) funcs.push(this.dispatchFunc(dsp));
     funcs.push({ name: 'main', mangled: 'omni_main', ret: VOID, params: [], body: oirBlock(stmts) });
     return {
       structs: [], classes: [], enums: [], containers: [], closures: [], fnTypes: [],
