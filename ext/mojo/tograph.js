@@ -38,6 +38,38 @@ const STRUCTS = new Map();
  */
 const METHODS = new Map();
 
+/**
+ * 进门时一趟扫查：把每个 struct 里的方法名登记成 `名字 -> 它声明在哪个 struct 里`。
+ * 单独扫一遍而不是边翻边填，因为 `with` 在 `main` 里就要问"`__exit__` 是方法吗"，
+ * 而 struct 可以写在 `main` 后面 —— 判据不许依赖文件里的先后。
+ */
+function collectMethods(x) {
+  if (!isList(x)) return;
+  if (tag(x) === 'struct') {
+    const nm = kids(x).find((y) => tag(y) === 'n');
+    const owner = nm === undefined ? '?' : String(nameOf(nm));
+    const body = part(x, 'body');
+    const stmts = body === undefined ? [] : kids(body)
+      .map((ln) => (tag(ln) === 'line' ? kids(ln)[0] : ln))
+      .filter((s) => s !== undefined && tag(s) === 'routine');
+    for (const m of stmts) {
+      const mn = kids(m).find((y) => tag(y) === 'n');
+      if (mn === undefined) continue;
+      const name = String(leaf(kids(mn)[0]));
+      const had = METHODS.get(name);
+      if (had !== undefined && had !== owner) {
+        throw new Error(`mojo->graph: ${had} 与 ${owner} 都声明了方法 ${name} —— `
+          + '重名要类型才分得开，这一批不猜');
+      }
+      METHODS.set(name, owner);
+    }
+  }
+  for (const k of kids(x)) collectMethods(k);
+}
+
+/** `with` 那几格临时名字的序号 —— **一份源码一份**（进门时清零，见 mojoToGraph）。 */
+let withSeq = 0;
+
 
 const OPS = ops({ '//': '/' });
 /** mojo 的转换名是**大写开头**的类型名（`Int` / `Float64` / `String`）。 */
@@ -200,21 +232,40 @@ function toNode(x) {
         .map((s) => nameOf(kids(s).find((y) => tag(y) === 'n')))
         .filter((s) => s !== undefined && s !== null);
       if (nm !== undefined && fields.length > 0) STRUCTS.set(String(nameOf(nm)), fields);
-      const methods = stmts.filter((s) => tag(s) === 'routine');
-      const owner = nm === undefined ? '?' : String(nameOf(nm));
-      for (const m of methods) {
-        const mn = m.items === undefined ? undefined : kids(m).find((y) => tag(y) === 'n');
-        if (mn === undefined) continue;
-        const name = String(leaf(kids(mn)[0]));
-        const had = METHODS.get(name);
-        if (had !== undefined && had !== owner) {
-          throw new Error(`mojo->graph: ${had} 与 ${owner} 都声明了方法 ${name} —— `
-            + '重名要类型才分得开，这一批不猜');
-        }
-        METHODS.set(name, owner);
+      // 字段表先登记好再翻方法体（方法里可能就有 `Point(…)` 那种构造）。
+      // 方法**名字**那张表是进门时一趟扫查填好的（见 collectMethods）—— `with` 要在
+      // 翻到 `main` 时就知道 `__exit__` 是不是方法，而 struct 可能写在后面。
+      return stmts.filter((s) => tag(s) === 'routine').map(toNode).flat();
+    }
+    // `with A(1), B(2): 体` —— **出口动作从声明来**：`__enter__` 进、`__exit__` 出，
+    // 两格都是方法（第二十四批已经跑得起来）。落的是**现成的 region + scope-exit**：
+    //   region { bind t = A(1); bind _ = __enter__(t); scope-exit{ __exit__(t) }; … 体 }
+    // 多个 item 按写的顺序进、**逆序**出（scope-exit 本来就是逆序，不用额外说一句），
+    // 早退也跑（这一格与 go 的 defer、CL 的 unwind-protect 是**同一格节点**）。
+    case 'with': {
+      const items = part(x, 'items');
+      const body = part(x, 'body');
+      if (!METHODS.has('__enter__') || !METHODS.has('__exit__')) {
+        throw new Error('mojo->graph: `with` 要 __enter__ 与 __exit__ 两格方法 —— '
+          + '这份源码的 struct 里没声明过它们');
       }
-      // 字段表先登记好再翻方法体（方法里可能就有 `Point(…)` 那种构造）
-      return methods.map(toNode).flat();
+      const pre = [];
+      for (const it of (items === undefined ? [] : kids(items))) {
+        const isAs = tag(it) === 'as';
+        const t = `__with${++withSeq}`;
+        const call1 = (m) => node('call', {
+          fn: node('ref', {}, { name: m }),
+          args: [node('ref', {}, { name: t })],
+        });
+        pre.push(node('bind', { init: toNode(isAs ? kids(it)[0] : it) }, { name: t }));
+        // `as y` 有没有都要**进**（那是 mojo 的协议）：没写就绑到一格用不着的名字上
+        pre.push(node('bind', { init: call1('__enter__') },
+          { name: isAs ? String(nameOf(kids(it)[1])) : `${t}_v` }));
+        pre.push(node('scope-exit', { action: [call1('__exit__')] }));
+      }
+      return node('region', {
+        body: [...pre, ...(body === undefined ? [] : many(kids(body)))],
+      });
     }
     case 'import': case 'from-import': case 'trait': case 'alias': return [];
     default:
@@ -227,6 +278,8 @@ export function mojoToGraph(tree) {
   if (tag(tree) !== 'module') throw new Error('mojo->graph: 这不是 (module …)');
   STRUCTS.clear();          // 字段表是**一份源码一张**（见文件头 STRUCTS 那段）
   METHODS.clear();          // 方法表同理 —— 一份源码一张
+  withSeq = 0;              // 临时名字的序号也归零：同一份源码建两遍要**逐字节相同**（G4）
+  collectMethods(tree);
   const body = kids(tree).map(toNode).flat();
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
 }

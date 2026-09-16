@@ -79,7 +79,7 @@ export const CASES = [
   // 第二个家族：多值（生产侧 values / 消费侧一串 pick）
   ...fam('multi', MULTI, ['lua', 'go']),
   // 第三个家族：作用域出口（go/V/nim 的 defer 与 CL 的 unwind-protect 同一格节点）
-  ...fam('defer', DEFER, ['go', 'sbcl', 'vlang', 'nim']),
+  ...fam('defer', DEFER, ['go', 'sbcl', 'vlang', 'nim', 'mojo']),
   // 第四个家族：记录（**六门六种写法**，落同一格 record-new）——
   // sbcl 那一份的难处与别人不同：字段名是 `(defstruct point x y)` 一句话生成的一族名字
   ...fam('record', RECORD, ['go', 'lua', 'vlang', 'nim', 'cpp', 'sbcl', 'chez', 'freebasic', 'mojo']),
