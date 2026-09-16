@@ -580,24 +580,26 @@ class FnGen {
         this.frameStore(8, this.slotOff(p.slot));
         continue;
       }
-      /* HFA 进来在 v 寄存器里（C.2）：落进 `blk` 那一块，槽里放它的地址。 */
+      /* HFA 进来在 v 寄存器里（C.2）：落进 `blk` 那一块，槽里放它的地址。
+       * **先把地址算进草稿**再按它存：`str` 的偏移是缩放过的 12 位，帧一大
+       * （`omni_r3.c` 的帧有四万多字节）那一格就装不下，而症状是编不出来。 */
       if (place.hfa !== undefined) {
         const dbl = place.hfa.size === 8;
+        this.addOff(TMP1, this.base, blk);
         for (let j = 0; j < place.hfa.n; j++) {
           this.fromFp(TMP0, place.v + j, dbl);
-          buf.emit(strU(dbl ? 3 : 2, TMP0, this.base, blk + j * place.hfa.size));
+          buf.emit(strU(dbl ? 3 : 2, TMP0, TMP1, j * place.hfa.size));
         }
-        this.addOff(TMP0, this.base, blk);
-        this.frameStore(TMP0, this.slotOff(p.slot));
+        this.frameStore(TMP1, this.slotOff(p.slot));
         continue;
       }
       /* 聚合摊在几个整数寄存器里（C.10）：同上，落进 `blk`。 */
       if (place.xn !== undefined) {
+        this.addOff(TMP1, this.base, blk);
         for (let j = 0; j < place.xn; j++) {
-          buf.emit(strU(3, place.x + j, this.base, blk + j * 8));
+          buf.emit(strU(3, place.x + j, TMP1, j * 8));
         }
-        this.addOff(TMP0, this.base, blk);
-        this.frameStore(TMP0, this.slotOff(p.slot));
+        this.frameStore(TMP1, this.slotOff(p.slot));
         continue;
       }
       /* 入参区里的一整块（C.13）：**不用拷** —— 地址就是它待着的地方，而「形参是实参的

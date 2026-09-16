@@ -2201,7 +2201,21 @@ export class CGen {  /**
    *   `{ stat: false, addr }` —— 线性内存，addr 是基址的 ref，`off` 是它上面的偏移
    *   `{ slot }`              —— MIR 的槽（只可能是标量，没被取过地址的局部量）
    */
-  initializer(dest, off, ty) {
+  initializer(dest, off, ty, pre = null) {
+    /* 已经读出来的那个值（`initBraced` 里「元素本身是 struct」那一路，tcc 的
+     * `DIF_HAVE_ELEM`，`tccgen.c:8016`）：不再读记号，直接落地。 */
+    if (pre !== null) {
+      if (isStruct(ty.t)) {
+        this.structCopy(sMem(ty, dest.addr, off), pre);
+        return;
+      }
+      if (dest.slot !== undefined) {
+        this.vstore(sLval(ty, dest.slot, null), pre);
+        return;
+      }
+      this.vstore(sMem(ty, dest.addr, off), pre);
+      return;
+    }
     // `char s[4] = "ab"`：字符串直接铺进数组（不是「指针赋值」）
     if (isArray(ty.t) && this.tok === TOK_STR) {
       this.initString(dest, off, ty, this.readStrTok(this.tokc));
@@ -2531,6 +2545,7 @@ export class CGen {  /**
         nb = this.initDesignators(stack);
         if (stack.length > 1) chainAt = stack[0].i;
       }
+      let pre = null;
       for (;;) {
         const el = this.initElem(stack[stack.length - 1]);
         if (this.tok === LBRACE) break;                          // 花括号写全了
@@ -2539,12 +2554,24 @@ export class CGen {  /**
         if (isStruct(el.ty.t) && el.ty.ref.fields === null) {
           this.err(`'${cTypeText(el.ty)}' is an incomplete type`);
         }
+        /* 元素本身是 struct、而下一项不是花括号：**先把那个表达式读出来看类型**
+         * （tcc 的 `DIF_HAVE_ELEM`，`tccgen.c:8016`）。
+         *
+         *   - 类型相容 -> 它就是这一格的初始化式，一整块拷过来（C11 6.7.9 第 13 段）：
+         *     `V arr[3] = { a, b, mk(7) };`（`omni_r3.c:1009` 那十个 `r3v` 就是这个）
+         *   - 不相容 -> 那是**括号省略**，这个值是最里层那个标量的初始化式：
+         *     `V arr[2] = { 1,2,3, 4,5,6 };`
+         *
+         * 静态那一侧不走这一路：那儿每一项都得是常量表达式，而「一个 struct 类型的
+         * 表达式」在那儿本来就不合法（`{…}` 那一种在上面 LBRACE 就分出去了）。 */
+        if (isStruct(el.ty.t) && !dest.stat && pre === null) pre = this.exprEq();
+        if (pre !== null && sameTypeUnqual(el.ty, pre.ty)) break;
         stack.push({ ty: el.ty, off: el.off, i: 0 });
       }
       const lv = stack[stack.length - 1];
       const at = this.initElem(lv);
       const mark = this.pendingData.length;
-      this.initializer(dest, at.off, at.ty);
+      this.initializer(dest, at.off, at.ty, pre);
       if (nb > 1) {
         this.initRange(dest, at.off, at.ty, nb, mark);
         lv.i += nb - 1;
@@ -3011,6 +3038,15 @@ export class CGen {  /**
   }
 
   /** `unary`（`tccgen.c:5595`）。前缀与后缀都在这儿，与 tcc 一样。 */  unary() {
+    /* `__extension__`（`tccgen.c:5611` 的 `case TOK_EXTENSION: next(); goto tok_next;`）：
+     * 它是「别为下面这个 gcc 扩展警告」，一元位置上**吃掉就完**。用 `while` 而不是一次 if
+     * 是照那条 `goto` 的语义（连着写几个也认）。
+     *
+     * 少了这一格，`(__extension__({ … }))` 这一整族都读不进来 —— 语句表达式
+     * （`stmtExpr`）本来就有，卡住的只是前面这个词。量出来的：我们自己的
+     * `src/runtime/omni.h` 的 `OMNI__ALEN`/`OMNI__AGET` 一族就是这么写的，
+     * 于是 `omni_arr.c` 一份都编不过（症状是 `')' expected (got '{')`）。 */
+    while (this.tok === TOK_EXTENSION) this.next();
     const t = this.tok;
     /* `sizeof (` 的那一次标记（见 `sizeofType`）。一次性：取下来就清掉，于是里层的
      * 括号是普通括号 —— tcc 那边是「换掉那一个记号」，效果一样。 */
@@ -3072,6 +3108,12 @@ export class CGen {  /**
 
     if (t === LPAR) {
       this.next();
+      /* `(__extension__({ … }))`：括号里头那个 `__extension__` 也得吃掉，而且要在
+       * 「这是强制转换吗」之前 —— 它在我们这儿是个**类型起始记号**（`isTypeStart`，
+       * 声明说明符里真有它：`__extension__ typedef …`），不先吃掉就会拐进
+       * `typeName()`，然后撞在 `{` 上报 `')' expected`。glibc 的头与我们自己的
+       * `omni.h`（`OMNI__AGET` 一族）都是这么写的。 */
+      while (this.tok === TOK_EXTENSION) this.next();
       /* 强制转换 `(int)x` 与括号表达式在这儿分岔（`tccgen.c:5620`）。 */
       if (this.isTypeStart(this.tok)) {
         const ty = this.typeName();
