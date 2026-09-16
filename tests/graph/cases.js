@@ -50,6 +50,8 @@ export const DEFERARG = ['2', '1'];
 export const DICT = ['1', '3', '4', 'yes'];
 /** strcat：串接（lua 的 `..` / nim 的 `&` / go 与 V 的 `+`）—— 一格内建，不是新节点 */
 export const STRCAT = ['ab', 'hi there'];
+/** numstr：数 -> 串（lua 隐式、nim 显式的 `$`）—— 两格节点、一份输出 */
+export const NUMSTR = ['n=7', 'i=42'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -107,6 +109,8 @@ export const CASES = [
   ...fam('dict', DICT, ['go', 'vlang', 'awk', 'nim']),
   // 第十三个家族：串接（四种写法一格内建）—— 它同时钉住字符串在线性内存里的布局
   ...fam('strcat', STRCAT, ['lua', 'go', 'vlang', 'nim']),
+  // 第十四个家族：**数 -> 串**（lua 隐式落 concat、nim 显式落 conv —— 两格节点，一份输出）
+  ...fam('numstr', NUMSTR, ['lua', 'nim']),
 ];
 
 /**

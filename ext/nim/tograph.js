@@ -92,6 +92,9 @@ function toNode(x) {
       const [op, a] = kids(x);
       // `@[1, 2, 3]`：`@` 是"数组字面量 -> seq"的算符，两格合起来就是一格 list-new
       if (leaf(op) === '@' && tag(a) === 'array-lit') return listNew(many(kids(a)));
+      // `$x` 是**前缀算符**而不是调用 —— 但它与 `int(x)` / `float(x)` 是同一件事
+      // （表示转换），所以查同一张转换名字表，落同一格 `conv`
+      if (CONV.has(leaf(op))) return convOf(CONV.get(leaf(op)), toNode(a));
       return un(leaf(op) === 'not' ? 'not' : leaf(op), toNode(a));
     }
     case 'array-lit': return listNew(many(kids(x)));

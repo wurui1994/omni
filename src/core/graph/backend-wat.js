@@ -41,8 +41,7 @@
 //     只被直接调用的那些走 **lambda 提升**（捕获来的名字当多出来的形参）。
 //   * 嵌套的函数写了捕获来的名字 —— 提升是按值传的，那次写外面看不见。
 //   * 一格量先装串后装数（或先实数后整数）—— wasm 的局部量只有一种类型。
-//   * 串接里混了数（`"n=" + 1`）—— 要先有"数 -> 串"那一格。
-//   * 实数进记录 / 列表 / 实参 / 返回值。
+//   * **实数 -> 串**（f64 的十进制是另一件事）· 实数进记录 / 列表 / 实参 / 返回值。
 
 import { NODES } from './nodes.js';
 // 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
@@ -99,8 +98,8 @@ export const WAT_SHAPES = [
     why: 'wasm 的局部量只有一种类型，而图这一层没有类型 —— awk 那种无声明的语言真的答不出来',
   },
   {
-    what: '串接里混了数（`"n=" + 1`）',
-    why: '要先有"数 -> 串"那一格（造串的机器有了 —— $__str_join 里那圈数位循环就是它）',
+    what: '实数 -> 串（`$1.5` / `"x=" + 1.5`）',
+    why: 'f64 的十进制那一套（有效位、舍入、指数）是另一件事 —— 整数那一圈数位循环用不上',
   },
   {
     what: '实数进记录 / 列表 / 实参 / 返回值',
@@ -559,7 +558,10 @@ function emitOnce(graph, retOf, multiOf) {
       }
       case 'region': return kindOf(x.ins.body, sc);
       // 表示转换：目标那一栏（`to`）就是答案 —— 这一格是"两种数值类型"的入口
-      case 'conv': return x.attrs.to === 'float' ? 'real' : 'int';
+      case 'conv': {
+        if (x.attrs.to === 'str') return 'str';
+        return x.attrs.to === 'float' ? 'real' : 'int';
+      }
       // 算术：**有一边是实数，结果就是实数**（比较出的是真假，算 int）。
       // 串接（`concat` 与落在串上的 `+`）出的是**串** —— 那一格在 `$__str_cat` 里
       case 'prim': {
@@ -642,6 +644,26 @@ function emitOnce(graph, retOf, multiOf) {
     return id;
   }
 
+  /**
+   * **数 -> 串**：造串的机器早就有了（`$__str_join` 里那圈数位循环），这儿只是把一格数
+   * 放进一格 1 槽的存储再交给它 —— 于是"印一格多值"与"数转串"用的是同一份代码。
+   */
+  function intToStr(y, sc, pre) {
+    needJoin = true;
+    needMem = true;
+    const a = alloc(8, sc, pre);
+    pre.push(`(i64.store ${addr(`(local.get ${a})`)} ${expr(y, sc, pre)})`);
+    return `(call $__str_join (local.get ${a}) (i64.const 1))`;
+  }
+
+  /** 把一格值取成**串**：本来是串就原样，是数就过一遍"数 -> 串"。实数还欠着。 */
+  function asStr(y, sc, pre) {
+    const k = kindOf(y, sc);
+    if (k === 'str') return expr(y, sc, pre);
+    if (k === 'int') return intToStr(y, sc, pre);
+    throw new Gap(`${k === 'real' ? '实数' : '既装串又装数的量'} -> 串还没接（要 f64 的十进制那一套）`);
+  }
+
   /** 条件位置：出 i32。比较那一族直接出，别的与 0 比。 */
   function cond(x, sc, pre) {
     if (isTrue(x)) return '(i32.const 1)';
@@ -690,16 +712,12 @@ function emitOnce(graph, retOf, multiOf) {
         // （`$__str_cat`）。混了数的串接报缺口：那要先有"数 -> 串"，与打印多值是同一台机器
         if (kindOf(x, sc) === 'str') {
           if (args.length === 0) throw new Gap('空的串接还没接');
-          for (const a of args) {
-            if (kindOf(a, sc) !== 'str') {
-              throw new Gap(`串接里混了${kindOf(a, sc) === 'real' ? '实数' : '数'} —— 要先有"数 -> 串"那一格`);
-            }
-          }
           needCat = true;
           needMem = true;
+          // 混了数就先过一遍"数 -> 串"（`asStr`）—— lua 的 `"n=" .. 7` 就是这个形状
           return args.slice(1).reduce(
-            (acc, y) => `(call $__str_cat ${acc} ${expr(y, sc, pre)})`,
-            expr(args[0], sc, pre),
+            (acc, y) => `(call $__str_cat ${acc} ${asStr(y, sc, pre)})`,
+            asStr(args[0], sc, pre),
           );
         }
         // 串上别的算符本身就是错的（比较要按字节比、算术没意义）—— 明说
@@ -763,6 +781,8 @@ function emitOnce(graph, retOf, multiOf) {
       case 'conv': {
         const v = x.ins.value;
         const kv = kindOf(v, sc);
+        // `$x`（nim）/ `string(x)`（V）—— **数 -> 串**走的是造串那台机器（见 asStr）
+        if (x.attrs.to === 'str') return asStr(v, sc, pre);
         if (kv === 'str' || kv === 'mix') throw new Gap('串上的表示转换还没接（要类型层）');
         if (x.attrs.to === 'float') return asF64(v, sc, pre);
         if (x.attrs.to === 'int') {
