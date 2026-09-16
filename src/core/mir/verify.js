@@ -78,10 +78,14 @@ function verifyFunc(mod, f, errs) {
 function checkOperands(mod, f, i, live, regionOf, depth, bad) {
   const op = f.op[i];
   const mode = OP_MODES[op];
-  const vals = [f.a[i], f.b[i], f.aux[i]];
   for (let k = 0; k < 3; k++) {
     const role = mode[k];
-    const v = vals[k];
+    /* 空位先挡一手（多数指令有空位），而三个字段**按下标现取**——
+     * 从前这儿是 `const vals = [f.a[i], f.b[i], f.aux[i]]`：一条指令一个三元数组。
+     * 量出来的：编整份编译器那 14.4M 的 C 时 `checkOperands` 占 CPU 3.1%、GC 占 12.1%，
+     * 而这条验证是**每条指令都走**的。 */
+    if (role === '-') continue;
+    const v = k === 0 ? f.a[i] : (k === 1 ? f.b[i] : f.aux[i]);
     if (role === 'r') {
       if (v === REF_NONE) continue;
       checkRef(mod, f, i, v, live, regionOf, bad);
