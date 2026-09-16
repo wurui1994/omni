@@ -1901,10 +1901,18 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
  * 插件（`.dylib`/`.so`）走不到这儿：我们的链接器还没有「写共享库」那一格，所以明着拒，
  * 而不是让它编到一半再炸在别的地方。
  *
- * **还没量过的一格**：`--extern` 那一路（核心）在外部 cc 上靠 `-Wl,-export_dynamic`
- * 把符号导出给插件 `dlopen` 解析，我们的链接器没有对应的开关。`.syms` 照旧落一份
- * （产物要完整），但「self 出的核心 + cc 出的插件」配不配得起来**没试过** ——
- * 真要试，判据是那 12 格插件装得上、语言表登记满。
+ * **「self 出的核心 + cc 出的插件」量过了**：装得上、跑得对。`--extern` 在外部 cc 上靠
+ * `-Wl,-export_dynamic` 把符号导给插件 `dlopen` 解析，我们的链接器没有那个开关 ——
+ * 而事实是不需要：Mach-O 的可执行文件里那些**非局部符号本来就在符号表里**，
+ * 平坦命名空间的 `dlopen` 查得到。判据（同一份源码，两边分别建）：
+ *
+ *   `OMNI_CC=self omni build src/cli.js --extern -o dist/omni` + `npm run build:native`
+ *   出的 `dist/plugins` 摆在一起 -> `omni run tests/cases/01_basics.omni` 与解释器逐字节相同
+ *
+ * 一处**与本改动无关的粗糙边**顺手量到了：那个二进制放在 `/tmp/sd/omni` 这种
+ * 「上面没有几层目录」的地方时，`.omni-cache` 会被解析到 `/`，报
+ * `cannot mkdir '/.omni-cache': Read-only file system` —— 摆成 `…/repo/dist/omni`
+ * （与 `dist` 同形）就好。那是 `installDir` 那条「往上数几层」的规矩，不是这一路的事。
  */
 function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms) {
   if (plugin !== undefined) {
