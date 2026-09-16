@@ -192,13 +192,14 @@ export const NODES = new Map([
   N('record-new', 'expr', [{ name: 'fields', sem: SEM.value, rest: true }], {
     attrs: ['names'], effects: ['allocates'], lifetime: 'owns',
     doc: 'go `T{…}` / lua `{x=1}` / V `T{…}` / nim `T(x: 1)` / CL defstruct',
-    // 规格里九门有记录（awk 只有关联数组，没有"按名字的字段"）。矩阵里接了七门 ——
-    // chez 与 sbcl 是后来接上的：难处不在节点，在"一句话生成一族名字"（那归映射）。
+    // 规格里九门有记录（awk 只有关联数组，没有"按名字的字段"）。矩阵里接了八门 ——
+    // chez / sbcl / freebasic 都是后来接上的，难处都在**名字从哪儿来**（那归映射）：
+    // 前两门是"一句话生成一族名字"，FB 是"字段表在类型上、而且没有字面量"。
+    // 那三条原来记的"要类型声明那一族"**记重了**：要的只是一张字段表，不是图里的类型层。
     providers: {
       spec: ['go', 'vlang', 'lua', 'nim', 'cpp', 'chez', 'sbcl', 'freebasic', 'mojo'],
       why: {
-        freebasic: '`Type … End Type` 要类型声明那一族（字段表在类型上，不在字面量上）',
-        mojo: '`struct` 的字段要类型声明 + `__init__`，不是一格字面量',
+        mojo: '`struct` 的字段要类型声明 + `__init__`（方法分派那一族，与 `with` 那条账同一族）',
       },
     },
   }),

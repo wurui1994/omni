@@ -16,6 +16,7 @@ import {
 import {
   isList, tag, kids, leaf, part, unquote, head,
   counted, ops, convs, convOf, binOf, retOf, branchOf, listNew, indexGet, indexSet,
+  fieldGet, fieldSet,
 } from '../../src/core/graph/fromtree.js';
 
 /**
@@ -30,6 +31,18 @@ import {
  * 下标起点：`Dim xs(2)` 是 0…2（0 起），与图上一致，所以不用像 lua 那样减一格。
  */
 const ARRAYS = new Set();
+
+/**
+ * **FB 的 `Type … End Type`：字段表在类型上**，字面量那种写法它没有。
+ *
+ * 所以记录这一格也是"名字从声明来"：扫到 `(typedecl … (members (f (v (n x) …)) …))`
+ * 就把字段顺序记下来，`Dim p As Point` 落成一格 `record-new`（数值字段按 FB 的语义**零起**），
+ * `p.x` 落 `field-get`、`p.x = 1` 落 `field-set`。
+ *
+ * 图上还是现成那三格 —— 这件事原来在 `nodes.js` 的账上写着"要类型声明那一族"，
+ * 量出来**记重了**：要的只是一张字段表（登记处），不是图里的类型层。
+ */
+const TYPES = new Map();
 
 
 const OPS = ops({ mod: '%', '=': '=', '<>': '!=', '&': 'concat' });
@@ -50,6 +63,19 @@ function toNode(x) {
     case 'str': return node('const', {}, { value: unquote(leaf(kids(x)[0])) });
     case 'n': return node('ref', {}, { name: leaf(kids(x)[0]) });
     case 'paren': return toNode(kids(x)[0]);
+    // `p.x` —— 与 go/V 的 `(sel …)`、lua/nim 的 `(dot …)` 同一格 field-get
+    case 'dot': return fieldGet(toNode(kids(x)[0]), String(leaf(kids(x)[1])));
+    // `Type Point … End Type` —— 只登记字段表（声明这一批没有运行期动作）
+    case 'typedecl': {
+      const nm = kids(x).find((y) => tag(y) === 'n');
+      const ms = part(x, 'members');
+      const fields = ms === undefined ? [] : kids(ms)
+        .filter((f) => tag(f) === 'f')
+        .map((f) => nameOf(kids(kids(f)[0])[0]))
+        .filter((s) => s !== undefined && s !== null);
+      if (nm !== undefined) TYPES.set(String(nameOf(nm)).toLowerCase(), fields);
+      return [];
+    }
     // 一行 = 一条或几条语句（`:` 隔开的那几条也在这一格里）
     case 'line': return many(kids(x));
     case 'body': return many(kids(x));
@@ -78,11 +104,14 @@ function toNode(x) {
             return indexSet(node('ref', {}, { name: nameOf(fn) }), toNode(kids(args)[0]), toNode(rhs));
           }
         }
+        // `p.x = 1`：左边是字段 —— 落 field-set（与 go 的 `p.x = 1` 同一格）
+        if (tag(lhs) === 'dot') {
+          return fieldSet(toNode(kids(lhs)[0]), String(leaf(kids(lhs)[1])), toNode(rhs));
+        }
         return node('set', { value: toNode(rhs) }, { name: nameOf(lhs) });
       }
       return toNode(inner);
-    }
-    case 'augassign': {
+    }    case 'augassign': {
       const [op, lhs, rhs] = kids(x);
       const o = OPS.get(String(leaf(op)).replace('=', '').trim().toLowerCase());
       const name = nameOf(lhs);
@@ -114,12 +143,20 @@ function toNode(x) {
             init: listNew(Array.from({ length: size }, () => lit(0))),
           }, { name });
         }
+        // `Dim p As Point`：类型登记过 -> 一格 record-new（数值字段按 FB 的语义零起）
+        const ty = kids(v)[1];
+        const tyName = ty !== undefined && tag(ty) === 'n' ? String(nameOf(ty)).toLowerCase() : null;
+        if (tyName !== null && TYPES.has(tyName) && init === undefined) {
+          const fields = TYPES.get(tyName);
+          return node('bind', {
+            init: node('record-new', { fields: fields.map(() => lit(0)) }, { names: fields }),
+          }, { name });
+        }
         return node('bind', {
           init: init === undefined ? lit(null) : toNode(kids(init)[0]),
         }, { name });
       });
-    }
-    case 'routine': {
+    }    case 'routine': {
       const head = part(x, 'head');
       const nm = kids(head).find((y) => tag(y) === 'n');
       const name = nm === undefined ? null : leaf(kids(nm)[0]);
@@ -196,6 +233,7 @@ function toNode(x) {
 export function fbToGraph(tree) {
   if (tag(tree) !== 'module') throw new Error('fb->graph: 这不是 (module …)');
   ARRAYS.clear();          // 数组名那张表是**一份源码一张**（见上面那段注释）
+  TYPES.clear();           // 字段表同理
   return program(kids(tree).map(toNode).flat());
 }
 
