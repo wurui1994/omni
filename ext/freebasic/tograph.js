@@ -254,6 +254,14 @@ function toNode(x) {
       if (kw === 'for' || kw === 'while' || kw === 'do' || kw === 'select') return loopExit('break');
       throw new Error(`fb->graph: Exit ${kw} 还没接`);
     }
+    // `Continue For` / `Continue Do` / `Continue While` -> loop-exit continue（同一格节点）
+    case 'continue': {
+      const ks = kids(x);
+      if (ks.length !== 1) throw new Error('fb->graph: `Continue a, b` 那种跳好几层还没接');
+      const kw = String(leaf(ks[0])).toLowerCase();
+      if (kw === 'for' || kw === 'while' || kw === 'do') return loopExit('continue');
+      throw new Error(`fb->graph: Continue ${kw} 还没接`);
+    }
     case 'print': return node('prim', { args: many(kids(x)) }, { name: 'print' });
     case 'call': {
       const [fn, args] = kids(x);

@@ -128,12 +128,16 @@ export const NODES = new Map([
   //
   // 「八个」是从十份 `ext/*/SPEC.md` 里数出来的，**不是矩阵里接了八门**：
   //   go 的 `defer` / nim 的 `defer` / V 的 `defer` 与 `lock` / CL 的 `unwind-protect`
-  //   —— 这四门矩阵里**接了**（`node tests/graph/run.js --machines` 数得出来）；
-  //   lua 的 `<close>` / mojo 的 `with` / freebasic 的 `Destructor` / cpp 的 RAII
-  //   —— 这四门**还没接**，每一门欠的东西写在下面 `providers.why` 里。
+  //   / mojo 的 `with`（`__enter__`/`__exit__`）/ freebasic 的 `Destructor` / cpp 的 RAII
+  //   —— 这七门矩阵里**接了**（`node tests/graph/run.js --machines` 数得出来）；
+  //   lua 的 `<close>` —— **还欠这一门**，欠的东西写在下面 `providers.why` 里。
   // 这两个数原来在这段注释里混成一句"八个提供者共用这一格"，而普查印的是 4 ——
   // **一句话对着两个数**就是账要烂掉的样子。所以现在它是一格**判据**：
   // `tests/graph/run.js` 检"量出来的 ⊆ 规格里的"，且差集里每一门都得有一句为什么。
+  //
+  // 后三门（mojo / freebasic / cpp）当初记的账都是"要类型与析构那一族"，**量下来记重了**：
+  // 要的只是"名字从声明来 + 一格 self 实参"（第二十四批的方法），出口动作因此落成
+  // **现成的 call**，一格新节点都没加。剩下 lua 那一门才是真的运行期查表（元表）。
   //
   // 它的语义只有三句话，而且**三句话都由调度器给，不由语言给**：
   //   1. 注册的那一刻只记下"这段动作"，**动作里的值到出口那一刻才求**；
@@ -156,10 +160,8 @@ export const NODES = new Map([
     providers: {
       spec: ['go', 'nim', 'vlang', 'sbcl', 'lua', 'mojo', 'freebasic', 'cpp'],
       why: {
-        lua: '`local x <close>` 的出口动作是元表里的 `__close` —— 图这一层没有元表（那要方法分派）',
-        mojo: '`with open(…) as f:` 要上下文管理器（对象 + `__enter__`/`__exit__` 两个方法）',
-        freebasic: '`Destructor` 挂在类型上 —— 要类型与析构那一族（`Scope` 本身落的是 region）',
-        cpp: 'RAII 同上：出口动作来自析构函数，要类型 + 析构',
+        lua: '`local x <close>` 的出口动作是元表里的 `__close` —— 图这一层没有元表'
+          + '（那是真的运行期查表，与另外七门"名字从声明来"不是一回事）',
       },
     },
   }),
@@ -316,7 +318,16 @@ export const NODES = new Map([
   // 补上之后（`level = depth + 1`），这一格在 wat 那条腿上也跑得起来了。
   N('loop-exit', 'stat', [], {
     attrs: ['kind'], effects: ['may-early-exit'], outs: [],
-    doc: 'break / continue（go/V/nim/mojo/awk）/ lua 只有 break / fb 的 Exit Do',
+    doc: 'break / continue（go/V/nim/mojo/awk/cpp）/ lua 只有 break / fb 的 Exit Do',
+    // 规格里数出来**九门**（十门里只有 chez 没有：Scheme 的迭代出口是 named let 与
+    // call/cc，语言里根本没有 break 这一格）。矩阵接了八门 —— 差的一门写在 why 里。
+    providers: {
+      spec: ['go', 'vlang', 'nim', 'lua', 'mojo', 'cpp', 'awk', 'freebasic', 'sbcl'],
+      why: {
+        sbcl: 'CL 的循环早退是 `(return)` 从 `nil` 块里出去（`loop-finish` 同理）——'
+          + ' 要"带名字的块 + 从块里返回"那一族，那是切段的另一台机器',
+      },
+    },
   }),
   // ---- 表示（1 格）：**目标类型是一格附属，不是端口** ------------------------
   //

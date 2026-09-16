@@ -16,7 +16,7 @@ import {
   node, lit, program, bin, un,
 } from '../../src/core/graph/graph.js';
 import {
-  isList, tag, kids, leaf, threePart, elseOf, ops, binOf, retOf, branchOf,
+  isList, tag, kids, leaf, threePart, elseOf, ops, binOf, retOf, branchOf, loopExit,
   mapNew, mapGet, mapSet, mapHas,
 } from '../../src/core/graph/fromtree.js';
 
@@ -148,6 +148,9 @@ function toNode(x) {
       return branchOf(toNode(cond), toNode(then), e === undefined ? undefined : toNode(e));
     }
     case 'return': return retOf(many(kids(x)));
+    // `break` / `continue` -> **同一格节点**，差的只有一格附属 kind（与 go / lua 同一格）
+    case 'break': return loopExit('break');
+    case 'continue': return loopExit('continue');
     case 'print': return node('prim', { args: many(kids(x)) }, { name: 'print' });
     case 'call': {
       const fn = leaf(kids(x)[0]);

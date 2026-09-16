@@ -86,7 +86,7 @@ export const CASES = [
   // 第五个家族：列表与下标（七个提供者 —— 两门 Lisp 的向量写起来像函数调用）
   ...fam('index', INDEX, ['go', 'lua', 'vlang', 'nim', 'chez', 'sbcl', 'mojo', 'cpp', 'freebasic']),
   // 第六个家族：循环的早退（break / continue 落同一格，差的只有 kind；lua 只有 break）
-  ...fam('loopexit', LOOPEXIT, ['go', 'lua', 'vlang', 'nim', 'mojo', 'cpp']),
+  ...fam('loopexit', LOOPEXIT, ['go', 'lua', 'vlang', 'nim', 'mojo', 'cpp', 'awk', 'freebasic']),
   // 第七个家族：**四条腿都跑得动的那个子集**（只有整数 / 函数 / if / while）
   ...fam('intmath', INTMATH, ALL),
   // 第八个家族：表示转换（五门语言的转换在树上**都是调用的形状** —— 靠名字表分开）
