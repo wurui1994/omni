@@ -35,7 +35,10 @@
  */
 
 import { OmniError } from '../source/diag.js';
+import { alacarte, readArchive } from './ar.js';
+import { readObject } from './elf.js';
 import { linkObjects } from './elf_merge.js';
+import { SymTab } from './pe_load.js';
 import { relocateOne } from './pe_reloc.js';
 
 const EE_EHDR_SIZE = 64;
@@ -462,13 +465,74 @@ export function parseDll(bytes, filename) {
 }
 
 /**
+ * 一个 `ET_REL` 里的非局部符号 —— 只要 `{name, bind, shndx}` 这三格，够 `SymTab`
+ * 记账用（`readObject` 不解释符号表，所以这一层自己走一遍 `.symtab` 的字节）。
+ *
+ * `Elf32_Sym` 的次序与 64 位那份不一样：名字、值、大小在前，`st_info` 在后 ——
+ * 与 `elf_merge.js` 里那两支一模一样的判据。
+ */
+function elfObjSyms(bytes) {
+  const obj = readObject(bytes);
+  const c32 = obj.class32 === true;
+  const ssz = c32 ? EE_SYM32_SIZE : EE_SYM_SIZE;
+  const out = [];
+  for (const s of obj.secs) {
+    if (s.type !== EE_SHT_SYMTAB) continue;
+    /* `sh_link` 是 1 起的 ELF 节号，`obj.secs` 是从 1 号那一条起数的数组。 */
+    const str = obj.secs[s.link - 1];
+    if (str === undefined) throw new OmniError('elf: 符号表的 sh_link 指不到字符串表');
+    const nameAt = (n) => {
+      let e = n;
+      while (e < str.bytes.length && str.bytes[e] !== 0) e++;
+      let t = '';
+      for (let k = n; k < e; k++) t += String.fromCharCode(str.bytes[k]);
+      return t;
+    };
+    const dv = new DataView(s.bytes.buffer, s.bytes.byteOffset, s.bytes.byteLength);
+    for (let p = ssz; p + ssz <= s.bytes.length; p += ssz) {
+      out.push({
+        name: nameAt(dv.getUint32(p, true)),
+        bind: Math.floor(s.bytes[p + (c32 ? 12 : 4)] / 16),
+        shndx: dv.getUint16(p + (c32 ? 14 : 6), true),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 静态库按需取用（`tcc_load_archive` 的 alacarte 那一路）—— 与 Mach-O 那一侧
+ * （`macho_exe.js:708`）同一个算式：命令行上那几个 `.o` 先进符号表，然后一份库
+ * 一份库地取，取进来的成员自己又进表，于是后一份库能补上前一份带出来的洞。
+ *
+ * 这一格是 `libc_nonshared.a` 要的能力：glibc 的 `atexit` / `__libc_csu_init`
+ * 只住在那份静态库里，`libc.so.6` 的 `.dynsym` 里根本没有它们。
+ *
+ * @returns 输入的 `.o` 加上取进来的成员，按取进来的次序
+ */
+function takeArchives(inp) {
+  const objs = [...inp.objs];
+  if (inp.archives === undefined || inp.archives.length === 0) return objs;
+  const tab = new SymTab();
+  for (const b of inp.objs) tab.addObject(elfObjSyms(b));
+  for (const ar of inp.archives) {
+    alacarte(readArchive(ar), (n) => tab.isUndef(n), (m) => {
+      objs.push(m.bytes);
+      tab.addObject(elfObjSyms(m.bytes));
+    });
+  }
+  return objs;
+}
+
+/**
  * 摆好一份 ELF 可执行文件：节的地址、文件偏移、程序头，重定位也落完笔。
  *
  * @param inp `{objs, entryName}`：`objs` 是几个 `ET_REL` 的字节，`entryName` 是
- *            `-Wl,-e,` 给的入口名（不给就找 `_start`）
+ *            `-Wl,-e,` 给的入口名（不给就找 `_start`）；`archives` 是几份 `.a` 的
+ *            字节，按需取用
  */
 export function elfExeImage(inp) {
-  const st = linkObjects(inp.objs, { rdata: '.data.ro', unwind: true });
+  const st = linkObjects(takeArchives(inp), { rdata: '.data.ro', unwind: true });
   const {
     machine, secs, syms, relas, byName,
   } = st;
@@ -607,6 +671,28 @@ export function elfExeImage(inp) {
       defineSym(`__stop_${p0}`, i, s.size);
     }
   }
+
+  /* ---- `__dso_handle`。
+   *
+   * 谁要它：glibc 的 `atexit`（住在 `libc_nonshared.a` 里那一份）编译成
+   * `__cxa_atexit(f, 0, &__dso_handle)` —— 于是「接静态库」一通，账就从
+   * `找不到 'atexit'` 挪到了 `找不到 '__dso_handle'`（x86_64 容器里量到的两笔）。
+   *
+   * tcc 怎么办的（照过源码）：**它自己给**。`lib/dsohandle.c` 一行
+   * `void *__dso_handle __attribute((visibility("hidden"))) = &__dso_handle;`，
+   * 进 `libtcc1.a`（`lib/Makefile` 的 `LIN_O`，i386/x86_64/arm/arm64/riscv64 这几个
+   * Linux 目标都带）。它**不**链 `crtbegin.o`（`tccelf_add_crtbegin` 在 glibc 那一支
+   * 只加 `crt1.o` 与 `crti.o`）—— 而 gcc/clang 的 `__dso_handle` 正是 crtbegin 给的。
+   *
+   * 我们照的是同一句话「不链 crtbegin，就自己给」，落点换成链接器：`libtcc1.a` 是
+   * **按需取用**的，「只在还没有定义时才给」是它的语义本身，而这一层已经有一台
+   * 干这件事的机器（`set_linker_sym`/`defined`）。真造一份我们自己的 `.a` 要先会写
+   * `ar`，为一个 8 字节的数据符号不值。
+   *
+   * 值可以随便挑：`__cxa_atexit` 只把它当**身份牌**存着，`__cxa_finalize` 只在
+   * `dlclose` 时按它筛（可执行文件里没人调）。gcc 的 crtbegin.o 在非共享那一路写的是
+   * 0，tcc 写的是自己的地址；我们给 `.data` 末尾那个地址 —— 唯一、非 0、不用重定位。 */
+  if (!defined('__dso_handle')) defineSym('__dso_handle', DATA, secs[DATA].size);
 
   /* ---- 动态那一套（`!static_link`，也就是 tcc 的默认）。
    *

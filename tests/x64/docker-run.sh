@@ -13,26 +13,36 @@
 #           tests/x64/docker-run.sh 'node tests/c/run.js'   # 自己指定一条命令
 #           OMNI_X64_IMAGE=arch_llvm:latest tests/x64/docker-run.sh
 #
-# 量到的（2026-09-16，Docker Desktop on Apple Silicon，amd64 靠模拟跑）：
+# 量到的（2026-09-16/17，Docker Desktop on Apple Silicon，amd64 靠模拟跑）：
 #   1. `omni c obj tests/c/abi/def.c` -> **ELF x86_64 可重定位**（`7f 45 4c 46 02 01 01`
 #      … `01 00 3e 00`），头 20 字节与本机 clang 出的 `.o` 逐字节相同。
 #      改之前这一步出的是 Mach-O arm64 —— 本机 clang / ld 一个都不认。
-#   2. `omni build bench/fib.omni` -> 编得过、链得出：2.1M、18 节、8 段、入口 0x4feb50
-#      （前端 16ms + 发射 14ms + cc 2.6s，via self -O0）。
-#   3. **跑起来还差一格**，三笔账按顺序还了两笔（每还一笔就往前挪一个符号）：
+#   2. `omni build bench/fib.omni` -> 编得过、链得出：2.1M、24 节、8 段、入口 0x4fe500
+#      （前端 16ms + 发射 15ms + cc 821ms，via self -O0）。
+#   3. **跑起来了**（`rc=0`，印 `196418` / `999794999321`）。四笔账按顺序还完，每还一笔
+#      就往前挪一个符号 —— 而每一笔的落点都先去 tcc 源码里查过：
 #      a. `undefined symbol: stdout` —— 链的时候一个共享库都没交进去（`cDefaultLibs`
 #         在非 macOS 上回空表），于是 `elf_exe.js` 那段 copy 重定位的前提
 #         「库里找得着这个名字」不成立。**已还**：带上 `libc.so.6` 的真身
-#         （不走 `-lc`：glibc 的 `/usr/lib/libc.so` 是一份 ld 脚本，我们不解析）。
+#         （不走 `-lc`：glibc 的 `/usr/lib/libc.so` 是一份 ld 脚本。tcc 的
+#         `tcc_load_ldscript`（`tccelf.c:4169`）认 `GROUP(…)`，我们还不认 ——
+#         所以库名自己给。这一格是个**已知的缺口**，不是猜的。）
 #      b. `elf: 找不到 'fmod'` —— 数学那几个符号在这台机器上只从 `libm.so.6` 露出来。
 #         **已还**：存在就一起带上。
-#      c. `elf: 找不到 'atexit'` —— **还欠着，而且欠的是一格能力**。证据（容器里
-#         `llvm-nm -D --defined-only /usr/lib/libc.so.6`）：`stdout` 在（`D`，数据符号，
-#         `@@GLIBC_2.2.5`），`atexit` 与 `fmod` **都不在**。`fmod` 从 `libm.so.6` 补上了；
-#         `atexit` 只住在 `/usr/lib/libc_nonshared.a`（7266 字节，那份 ld 脚本
-#         `GROUP` 的第二项）。而 `elf-link` 那一格**只收 `.o` 与 `--dll`，不收静态库**
-#         （`macho-link` 那一侧早有 `archives`）。所以下一刀是「给 ELF 链接器接静态库」，
-#         不是再补一个库名。
+#      c. `elf: 找不到 'atexit'` —— 欠的是一格能力：`elf-link` 从前只收 `.o` 与 `--dll`。
+#         证据（`llvm-nm -D --defined-only /usr/lib/libc.so.6`）：`stdout` 在（`D`），
+#         `atexit` 不在 —— 它只住在 `/usr/lib/libc_nonshared.a`（7266 字节，那份 ld
+#         脚本 `GROUP` 的第二项）。**已还**：ELF 链接器接了静态库（`--ar`，按需取用，
+#         照 `macho_exe.js:708` 那段抄），`cDefaultLibs` 把 `libc_nonshared.a` 交进去。
+#      d. `找不到 '__dso_handle'`（接上静态库之后冒出来的下一个）与**印完才 SIGSEGV**
+#         （139）。两件事都是「不链 crt 就得自己补」：
+#           * `__dso_handle` —— tcc 自己给（`lib/dsohandle.c` 一行，进 `libtcc1.a` 的
+#             `LIN_O`；它**不**链 `crtbegin.o`）。我们落在链接器里：只在还没有定义时才给。
+#           * SIGSEGV —— 入口指着 `main`，而 ELF 上内核直接跳 `e_entry`，栈上没有返回
+#             地址，`main` 一 return 就 `ret` 到 argc 那格上去。tcc 的规矩是加
+#             `crt1.o`+`crti.o`（末尾 `crtn.o`）、入口查 `_start`（`tccelf.c:1761/2717`）。
+#             **已还**：`cCrt()` 按这个次序交进去。
+#   4. `omni run x.c` / `omni build x.c`（printf + fmod）也都跑得对：`hello 42 1.5`。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"
@@ -48,7 +58,7 @@ clang -c tests/c/abi/def.c -o /tmp/ref.o
 od -An -tx1 -N20 /tmp/ref.o
 node src/cli.js c run tests/c/abi/def.c 2>&1 | tail -3 || true
 node src/cli.js build bench/fib.omni -o /tmp/fib
-/tmp/fib || echo "（跑挂了 —— 见文件头第 3 条账）"
+/tmp/fib; echo "fib rc=$?"
 '
 
 CMD="${1:-$DEFAULT_CMD}"

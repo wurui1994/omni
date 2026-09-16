@@ -1988,8 +1988,11 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
    * 由 `dlopen` 在平坦命名空间里解析。 */
   const rt = plugin === undefined ? runtimeObjectsSelf(arch, os) : [];
   const sh = plugin === undefined ? [] : ['--shared', '--install-name', basename(outPath)];
-  const rc = main(['c', 'link', obj, ...rt, '-o', outPath,
-    '--arch', arch, '--os', os, '-f', fmt, ...sh, ...cDefaultLibs(os), ...libs, '-q']);
+  /* crt 那三个 `.o` 只有可执行文件要（共享库没有 `_start`）。 */
+  const crt = plugin === undefined ? cCrt(os) : { pre: [], post: [] };
+  const ent = crt.pre.length === 0 ? [] : ['-e', '_start'];
+  const rc = main(['c', 'link', ...crt.pre, obj, ...rt, ...crt.post, '-o', outPath,
+    '--arch', arch, '--os', os, '-f', fmt, ...ent, ...sh, ...cDefaultLibs(os), ...libs, '-q']);
   if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（C 留在 ${cPath}）`);
   /* 执行位（tcc 在 `tcc_output_file` 里 chmod 0777；我们自己写字节，所以自己补一句 ——
    * 少了它只能看着 `Permission denied`）。 */
@@ -2360,6 +2363,12 @@ function cDefaultLibs(os) {
       if (exists(p)) { out.push('--dll', p); return; }
     }
   };
+  /** 静态库那一路：`--ar`，按需取用。 */
+  const pickAr = (names) => {
+    for (const p of names) {
+      if (exists(p)) { out.push('--ar', p); return; }
+    }
+  };
   pick(['/usr/lib/libc.so.6', '/lib/x86_64-linux-gnu/libc.so.6',
     '/usr/lib/x86_64-linux-gnu/libc.so.6', '/lib/aarch64-linux-gnu/libc.so.6',
     '/usr/lib/aarch64-linux-gnu/libc.so.6', '/lib64/libc.so.6', '/lib/libc.so.6']);
@@ -2369,7 +2378,50 @@ function cDefaultLibs(os) {
   pick(['/usr/lib/libm.so.6', '/lib/x86_64-linux-gnu/libm.so.6',
     '/usr/lib/x86_64-linux-gnu/libm.so.6', '/lib/aarch64-linux-gnu/libm.so.6',
     '/usr/lib/aarch64-linux-gnu/libm.so.6', '/lib64/libm.so.6', '/lib/libm.so.6']);
+  /* `libc_nonshared.a`：glibc 把 `atexit` / `at_quick_exit` / `__stack_chk_fail_local`
+   * 这几个**只放在静态库里**（`.so.6` 的 `.dynsym` 里查不到 `atexit`，量过）。
+   * `/usr/lib/libc.so` 那份 ld 脚本里写的 `GROUP ( libc.so.6 libc_nonshared.a )`
+   * 说的就是这件事 —— 我们不解析脚本，于是把这一份自己交进去。 */
+  pickAr(['/usr/lib/libc_nonshared.a', '/usr/lib/x86_64-linux-gnu/libc_nonshared.a',
+    '/usr/lib/aarch64-linux-gnu/libc_nonshared.a', '/lib64/libc_nonshared.a']);
   return out;
+}
+
+/**
+ * crt 那三个 `.o`（`tccelf_add_crtbegin` / `tccelf_add_crtend`）。
+ *
+ * 为什么非有不可：ELF 上内核**直接跳到 `e_entry`**，栈上没有返回地址。入口指着 `main`
+ * 的时候程序跑得完、印得对，`main` 一 `return` 就 `ret` 到栈上那格 argc 上去 ——
+ * x86_64 容器里量到的正是这个：fib 印完 `196418` / `999794999321` 之后 SIGSEGV（139）。
+ * `_start` 是 glibc 的 `crt1.o` 给的，它把 `main` 交给 `__libc_start_main`，
+ * 后者拿 `main` 的返回值去调 `exit`。
+ *
+ * tcc 的规矩（`tccelf.c:1761` / `:1796`，glibc 那一支）：**只加 `crt1.o` 与 `crti.o`**
+ * （crtbegin.o 不加 —— 所以 `__dso_handle` 由 `libtcc1.a` 自己给，见 `elf_exe.js`），
+ * 末尾补 `crtn.o`；找的路径是 `CONFIG_TCC_CRTPREFIX`（`tcc.h:272`），默认
+ * `<sysroot>/usr/lib`，配了 triplet 的还多一层 `/usr/lib/<triplet>`。
+ * 入口名不给的时候查的是 `_start`（`tccelf.c:2717`）。
+ *
+ * 次序有讲究：`crt1.o` `crti.o` 在**前**，`crtn.o` 在**最后** —— `_init` / `_fini`
+ * 的开头一半在 crti、结尾一半在 crtn，中间夹着各家的 `.init` 片段。
+ *
+ * @returns `{pre, post}`，两串位置参数（`.o` 的路径）；这台机器上找不着就都是空的
+ */
+function cCrt(os) {
+  if (os !== 'linux') return { pre: [], post: [] };
+  const dirs = ['/usr/lib', '/usr/lib/x86_64-linux-gnu', '/usr/lib/aarch64-linux-gnu', '/lib64'];
+  const find = (name) => {
+    for (const d of dirs) {
+      const p = `${d}/${name}`;
+      if (exists(p)) return p;
+    }
+    return null;
+  };
+  const one = find('crt1.o');
+  const i = find('crti.o');
+  const n = find('crtn.o');
+  if (one === null || i === null || n === null) return { pre: [], post: [] };
+  return { pre: [one, i], post: [n] };
 }
 
 /**
@@ -2398,6 +2450,16 @@ function tccPrepLink(argv) {
     nSrc++;
   }
   if (!argv.includes('-nostdlib')) out.push(...cDefaultLibs(os));
+  /* crt 那三个 `.o`：`crt1.o`/`crti.o` 摆在所有输入的**前面**，`crtn.o` 摆最后
+   * （`tccelf_add_crtbegin` / `tccelf_add_crtend` 的次序）。共享库与 `-nostdlib` 不加。
+   * 入口跟着换成 `_start` —— 那是 crt1.o 给的名字，也是 tcc 不给 `-e` 时查的名字。 */
+  const crt = argv.includes('-nostdlib') || argv.includes('--shared')
+    ? { pre: [], post: [] } : cCrt(os);
+  if (crt.pre.length !== 0) {
+    out.unshift(...crt.pre);
+    out.push(...crt.post);
+    if (!out.includes('-e')) out.push('-e', '_start');
+  }
   return { argv: out, nSrc, out: val('-o') ?? 'a.out', os };
 }
 
@@ -2424,7 +2486,10 @@ function runCFile(path, argv) {
   const { flags, prog } = cSplitArgs(argv);
   cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
   vStep(`c front end + codegen  ${path} -> ${obj}`);
-  const rc = main(['c', 'link', obj, '-o', exe, '-f', fmt, '--arch', arch, '--os', os,
+  const crt = cCrt(os);
+  const rc = main(['c', 'link', ...crt.pre, obj, ...crt.post, '-o', exe,
+    '-f', fmt, '--arch', arch, '--os', os,
+    ...(crt.pre.length === 0 ? [] : ['-e', '_start']),
     ...cDefaultLibs(os), '-q']);
   if (rc !== 0) return rc;
   /* tcc 在 `tcc_output_file` 里给可执行文件补执行位（chmod 0777）—— 我们自己写字节，
@@ -2456,7 +2521,10 @@ function buildCFile(path, rest) {
   mkdirAll(dirname(obj));
   cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
   vStep(`c front end + codegen  ${path} -> ${obj}`);
-  const rc = main(['c', 'link', obj, '-o', out, '-f', fmt, '--arch', arch, '--os', os,
+  const crt = cCrt(os);
+  const rc = main(['c', 'link', ...crt.pre, obj, ...crt.post, '-o', out,
+    '-f', fmt, '--arch', arch, '--os', os,
+    ...(crt.pre.length === 0 ? [] : ['-e', '_start']),
     ...cDefaultLibs(os), '-q']);
   if (rc !== 0) return rc;
   if (os !== 'win32') spawn('chmod', ['+x', out], 'c');
@@ -2569,7 +2637,7 @@ function main(argv) {
    * 按 omni 的规矩动手），而 `splitArgv` 现在见到不认识的开关就骂 —— 排在后面的话
    * `c tcc -B … -c …` 会被自己这一层挡下来。 */
   if (node.key === 'c-tcc') {
-    const t = tccTranslate(raw, (m) => new OmniError(m));
+    const t = tccTranslate(raw, (m) => new OmniError(m), { arch: hostArch(), os: hostOs() });
     const AT = {
       cpp: ['c', 'cpp'], 'c-obj': ['c', 'obj'], 'c-run': ['c', 'run'],
       'elf-r': ['c', 'elf-r'], 'elf-link': ['c', 'elf-link'],
@@ -3407,9 +3475,10 @@ function main(argv) {
      * 默认动态（跟 tcc 一样，`.interp` / `.dynsym` / `.dynamic` 那一套都摆出来），
      * `--static` 只摆装载得下的那几条，`--shared` 造共享库（第五十九片），
      * `--dll` 接一份真的共享库（第六十片），`--pie` 位置无关、`--rdynamic` 全导出、
-     * `--soname` / `--rpath` 是 `.dynamic` 里那两条（第六十二片）。没有 libc，入口自己指：
+     * `--soname` / `--rpath` 是 `.dynamic` 里那两条（第六十二片），`--ar` 接一份静态库
+     * （按需取用；glibc 的 `atexit` 只住在 `libc_nonshared.a` 里）。没有 libc，入口自己指：
      *   omni elf-link a.o [b.o …] -o a.out [-e main] [--static] [--shared]
-     *                  [--dll libfoo.so] [--pie] [--rdynamic]
+     *                  [--dll libfoo.so] [--ar libfoo.a] [--pie] [--rdynamic]
      *                  [--soname libfoo.so.1] [--rpath /opt/lib] [--enable-new-dtags] */
     case 'elf-link': {
       const oi = rest.indexOf('-o');
@@ -3427,11 +3496,19 @@ function main(argv) {
         return b;
       };
       const dlls = [];
+      const archives = [];
       for (let k = 0; k < rest.length - 1; k++) {
         if (rest[k] === '--dll') dlls.push({ bytes: bytesOf(rest[k + 1]), name: rest[k + 1] });
+        else if (rest[k] === '--ar') archives.push(bytesOf(rest[k + 1]));
+      }
+      /* 位置参数里的 `.a` 也算静态库 —— 链接器的命令行上库与目标文件是混着写的。 */
+      const objs = [];
+      for (const p of files) {
+        if (p.endsWith('.a')) archives.push(bytesOf(p));
+        else objs.push(bytesOf(p));
       }
       const r = elfExe({
-        objs: files.map(bytesOf),
+        objs,
         entryName,
         static: rest.includes('--static'),
         shared: rest.includes('--shared'),
@@ -3441,6 +3518,7 @@ function main(argv) {
         rpath: valOf('--rpath'),
         newDtags: rest.includes('--enable-new-dtags'),
         dlls,
+        archives,
       });
       writeBinary(out, r.bytes);
       stdout(`${out} (${r.bytes.length} 字节，${r.shnum} 节，${r.phnum} 段，`

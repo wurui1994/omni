@@ -91,6 +91,7 @@ const LINK_ELF_ONLY = [
   { name: '--rpath', arity: 1, value: 'PATH', brief: '（-f elf）' },
   { name: '--enable-new-dtags', arity: 0, brief: '（-f elf）' },
   { name: '--dll', arity: 1, value: 'libfoo.so', brief: '（-f elf）链一个共享库' },
+  { name: '--ar', arity: 1, value: 'libfoo.a', brief: '（-f elf）按需取用一份静态库' },
 ];
 const LINK_MACHO_ONLY = [
   { name: '--dylib', arity: 1, value: 'PATH', brief: '（-f macho）libc.tbd' },
