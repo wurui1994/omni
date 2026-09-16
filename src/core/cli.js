@@ -1500,18 +1500,26 @@ function findCC() {
 }
 
 /**
- * `OMNI_CC=self`：**一个外部 C 编译器都不借** —— 生成的 C 交给我们自己那台 C 前端
- * （`omni c obj`）、再交给我们自己的链接器（`omni c link`）。第一百三十七片。
+ * **自带的那台 C 编译器是默认**（第一百四十一片）：生成的 C 交给我们自己那台 C 前端
+ * （`omni c obj`）、再交给我们自己的链接器（`omni c link`）——一个外部 C 编译器都不借。
  *
- * **不是默认**，而且刻意不是：默认那一路（tcc/clang/gcc）一个字都不改，这一格只是把
- * 已经通了的那条路摆到手边。闭环本身钉在 `tests/selfc` 那条轴上（`.omni` -> 生成的 C
- * -> 我们的 `.o` -> 我们链的可执行文件 -> 输出与解释器逐字节相同）。
+ * 要走外部 cc 就明说：`OMNI_CC=clang`（或 `tcc` / `gcc` / `cc` / 一条路径）。
+ * `OMNI_CC=self` 还认，只是现在它就是缺省。
  *
- * 覆盖到哪儿：可执行文件、可重定位的 `.o`，**以及插件那格共享库**（`--shared`，
- * 第一百三十八片）—— arm64 macOS 上共享库还得补一句 `codesign -f -s -` 才 dlopen 得动，
- * 那一句 tcc 自己也喊（`tccmacho.c:2243`）。
+ * 覆盖到哪儿：可执行文件、可重定位的 `.o`、插件那格共享库（`--shared`）。arm64 macOS 上
+ * 共享库要补一句 `codesign -f -s -` 才 dlopen 得动（tcc 自己也喊，`tccmacho.c:2243`）。
+ *
+ * **代价是量出来的，摆在这儿**（arm64 macOS，同一份生成的 C）：
+ *   核心产物   我们 52.7M   /  clang 11.7M      —— 4.5x
+ *   `.text`（20 份运行时）我们 880624 / tcc 308556 —— 2.85x
+ *   编译时间（进程内 20 份）冷 571ms / tcc 204ms  —— 2.8x
+ * 大的那一头来自**没有寄存器分配**：每个 MIR 值都过一趟栈格
+ * （`int add(int,int)` 我们 92 字节、tcc 60 字节）。这是下一刀要治的。
  */
-function selfCC() { return env('OMNI_CC') === 'self'; }
+function selfCC() {
+  const v = env('OMNI_CC');
+  return !v || v === 'self';
+}
 
 /**
  * 本机是哪个架构。与 `hostIsDarwin` 同一条路子（问一次 `uname` 记住）——
@@ -1859,14 +1867,12 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   const tGen = nowMs() - tGen0;
   vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
   vStats(cText, stats);
-  const cc = findCC();
-  // 运行时是 src/runtime/ 下真正的 C 文件，预编成 .o 缓存起来；热的叶子函数是
-  // omni.h 里的 static inline，所以不靠 LTO 也能内联（tcc 没有 -flto）
-  // 外部 C 符号用到的库跟在后面（ADR-0014 决策 4）；libc 的那些 lib 是 null，不产生 -l
   const libs = cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`);
-  /* `OMNI_CC=self`（第一百三十七片）：从这儿岔出去，走我们自己那台 C 前端 + 链接器。
-   * 摆在 `libs` 之后、外部 cc 那一串开关之前 —— 岔口只有一处，默认那一路一个字不改。 */
+  /* **自带的那台 C 编译器是默认**（第一百四十一片）：生成的 C 交给我们自己的 C 前端 +
+   * 链接器，一个外部 cc 都不借。要走外部 cc 就给 `OMNI_CC=clang`（或 tcc/gcc/cc/路径）。
+   * 岔口只有这一处，摆在 `libs` 之后、外部 cc 那一串开关之前。 */
   if (selfCC()) return buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms);
+  const cc = findCC();
   /* 插件是一格动态库，两处与可执行文件不同：
    *   - **不链运行时的 .o**：状态住在核心里（ADR-0021 的 S1），链进自己那一份就等于自带
    *     一套 realm / xprops / this 槽 —— 那正是要避开的坑。符号靠动态解析过去。

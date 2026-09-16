@@ -196,8 +196,9 @@ export const ROOT = {
 type modes（ADR-0008）：.omni mixed / .omnid dynamic / .omnis static
 
 env: OMNI_CC、OMNI_CLANG、OMNI_LLVM_CONFIG
-     OMNI_CC=self 是**不借外部 cc**那一路：生成的 C 交给我们自己那台 C 前端与链接器
-     （可执行文件与插件都行 —— dylib 那格链完自己补一句 codesign）。不是默认，见 tests/selfc。`,
+     **默认不借外部 cc**：生成的 C 交给我们自己那台 C 前端与链接器（可执行文件、.o、
+     插件的共享库都行 —— dylib 那格链完自己补一句 codesign）。要走外部 cc 就明说：
+     OMNI_CC=clang（或 tcc / gcc / cc / 一条路径）。代价量在 selfCC 那段注释里。`,
   children: [
     {
       name: 'run', key: 'run', usage: 'FILE [-- args...]',
