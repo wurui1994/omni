@@ -1500,6 +1500,33 @@ function findCC() {
 }
 
 /**
+ * `OMNI_CC=self`：**一个外部 C 编译器都不借** —— 生成的 C 交给我们自己那台 C 前端
+ * （`omni c obj`）、再交给我们自己的链接器（`omni c link`）。第一百三十七片。
+ *
+ * **不是默认**，而且刻意不是：默认那一路（tcc/clang/gcc）一个字都不改，这一格只是把
+ * 已经通了的那条路摆到手边。闭环本身钉在 `tests/selfc` 那条轴上（`.omni` -> 生成的 C
+ * -> 我们的 `.o` -> 我们链的可执行文件 -> 输出与解释器逐字节相同）。
+ *
+ * 覆盖不到的一格记在这儿：**插件**（`.dylib`/`.so`）还得用外部 cc —— 我们的链接器
+ * 现在只会写可执行文件与可重定位的 `.o`，没有「写共享库」那一格。
+ */
+function selfCC() { return env('OMNI_CC') === 'self'; }
+
+/**
+ * 本机是哪个架构。与 `hostIsDarwin` 同一条路子（问一次 `uname` 记住）——
+ * `process.arch` 不在封闭 ABI 里（ADR-0011 决策 2），这份源码要能被自己编译。
+ */
+let ARCH_CACHE = '';
+function hostArch() {
+  if (ARCH_CACHE === '') {
+    const r = spawn('uname', ['-m'], 'c');
+    const m = r[0] === 0 ? r[1].trim() : '';
+    ARCH_CACHE = (m === 'arm64' || m === 'aarch64') ? 'arm64' : 'x86_64';
+  }
+  return ARCH_CACHE;
+}
+
+/**
  * 优化档。**默认 -O0**：这条腿在测试轴上的角色是"另一份语义实现"，不是性能基线，
  * 而 clang -O2 在这些几百行的翻译单元上就是纯粹的等待（量过：run-c 一次 0.42s -> 0.28s，
  * 五条腿 × 四十个用例乘起来就是半分钟）。要性能数字的场合显式开：`OMNI_OPT=2`。
@@ -1761,6 +1788,41 @@ function runtimeObjects(cc) {
 }
 
 /**
+ * 同一件事，**用我们自己那台 C 前端编**（`OMNI_CC=self`，第一百三十七片）。
+ *
+ * 与上面那一份的差别只有两处：编的人（`cObj` 而不是 spawn 外部 cc）与容器
+ * （**ELF**：`omni c link` 读 ELF 目标文件、写 macho/pe，见 `omni c link --help`）。
+ * 缓存的键里带上 `self` 与目标，所以两条路的 `.o` 各占一格、不会互相盖。
+ *
+ * 不并行：`cObj` 是本进程里的一趟编译（不是子进程），并行要另一台机器（`spawnPar`
+ * 摆的是命令行）。量出来的代价是二十份 runtime 一趟 6.8s —— 缓存命中之后是 0。
+ */
+function runtimeObjectsSelf(arch, os) {
+  const srcs = runtimeSources();
+  const deps = readDir(RUNTIME_DIR).filter((f) => /\.[ch]$/.test(f)).sort()
+    .map((f) => {
+      const p = join(RUNTIME_DIR, f);
+      return `${f}:${mtimeMs(p)}:${fileSize(p)}`;
+    });
+  const key = hash16(['self', arch, os, ...deps].join('|'));
+  const dir = join(cacheRoot(), 'rt', key);
+  const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
+  if (objs.every((o) => exists(o))) {
+    vStep(`runtime .o  ${objs.length} objects, cache hit ${dir}`);
+    return objs;
+  }
+  const stage = workDirFor('rt-stage', key);
+  const staged = srcs.map((p) => join(stage, `${basename(p, '.c')}.o`));
+  for (let i = 0; i < srcs.length; i++) {
+    cObj(srcs[i], staged[i], arch, [RUNTIME_DIR], [], 'elf', os, undefined);
+  }
+  mkdirAll(join(cacheRoot(), 'rt'));
+  if (!exists(dir)) rename(stage, dir);
+  vStep(`runtime .o  ${srcs.length} objects compiled with 我们自己那台 C 前端`);
+  return objs.every((o) => exists(o)) ? objs : staged;
+}
+
+/**
  * workDir 给的时候，生成的 .c 就留在那里（名字跟着产物走）——
  * `omni bootstrap` 与 `build --work DIR` 要的是"中间产物留在构建目录里"：链断在哪一代
  * 都能直接翻出那份 C 来看。不给的时候落在 `.omni-cache/work/c-<产物名>` 底下，
@@ -1788,6 +1850,9 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   // omni.h 里的 static inline，所以不靠 LTO 也能内联（tcc 没有 -flto）
   // 外部 C 符号用到的库跟在后面（ADR-0014 决策 4）；libc 的那些 lib 是 null，不产生 -l
   const libs = cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`);
+  /* `OMNI_CC=self`（第一百三十七片）：从这儿岔出去，走我们自己那台 C 前端 + 链接器。
+   * 摆在 `libs` 之后、外部 cc 那一串开关之前 —— 岔口只有一处，默认那一路一个字不改。 */
+  if (selfCC()) return buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms);
   /* 插件是一格动态库，两处与可执行文件不同：
    *   - **不链运行时的 .o**：状态住在核心里（ADR-0021 的 S1），链进自己那一份就等于自带
    *     一套 realm / xprops / this 槽 —— 那正是要避开的坑。符号靠动态解析过去。
@@ -1818,6 +1883,54 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
     vStep(`syms  ${syms.length} 个符号 -> ${outPath}.syms`);
   }
   return { cPath, cc };
+}
+
+/**
+ * `OMNI_CC=self` 那一路（第一百三十七片）：生成的 C -> **我们自己那台 C 前端**的 `.o`
+ * -> **我们自己的链接器**的可执行文件。一个外部 C 编译器都不借。
+ *
+ * 三条与外部 cc 那一路不同的地方，都是量出来的：
+ *
+ *   - 目标文件的容器是 **ELF**（`omni c link` 读 ELF、写 macho/pe）。按 macho 编的 `.o`
+ *     交给它，报的是「macho: 还不会给 0 号架构写可执行文件」—— 那个 0 是把 Mach-O 的头
+ *     当 ELF 的 `e_machine` 读出来的。
+ *   - 链接要 `-lc -L <SDK>/usr/lib`（macOS 上 `__error` 一族在 libSystem 里），
+ *     这一格与 `omni build x.c` 共用 `cDefaultLibs`。
+ *   - 执行位得自己补（我们自己写字节，没有 `chmod 0777` 那一步）。
+ *
+ * 插件（`.dylib`/`.so`）走不到这儿：我们的链接器还没有「写共享库」那一格，所以明着拒，
+ * 而不是让它编到一半再炸在别的地方。
+ *
+ * **还没量过的一格**：`--extern` 那一路（核心）在外部 cc 上靠 `-Wl,-export_dynamic`
+ * 把符号导出给插件 `dlopen` 解析，我们的链接器没有对应的开关。`.syms` 照旧落一份
+ * （产物要完整），但「self 出的核心 + cc 出的插件」配不配得起来**没试过** ——
+ * 真要试，判据是那 12 格插件装得上、语言表登记满。
+ */
+function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms) {
+  if (plugin !== undefined) {
+    throw new OmniError('OMNI_CC=self 还出不了插件：我们的链接器只会写可执行文件与'
+      + '可重定位的 .o，没有「写共享库」那一格 —— 插件那一路请用外部 cc（不设 OMNI_CC）');
+  }
+  const arch = hostArch();
+  const os = hostIsDarwin() ? 'osx' : 'linux';
+  const fmt = hostIsDarwin() ? 'macho' : 'elf';
+  const t0 = nowMs();
+  const obj = `${cPath}.o`;
+  cObj(cPath, obj, arch, [RUNTIME_DIR], [], 'elf', os, undefined);
+  vStep(`c obj（我们自己那台 C 前端）  ${cPath} -> ${obj}  ${fileSize(obj)} bytes`);
+  const rc = main(['c', 'link', obj, ...runtimeObjectsSelf(arch, os), '-o', outPath,
+    '--arch', arch, '--os', os, '-f', fmt, ...cDefaultLibs(os), ...libs, '-q']);
+  if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（C 留在 ${cPath}）`);
+  /* 执行位（tcc 在 `tcc_output_file` 里 chmod 0777；我们自己写字节，所以自己补一句 ——
+   * 少了它只能看着 `Permission denied`）。 */
+  spawn('chmod', ['+x', outPath], 'c');
+  vStep(`c link（我们自己的链接器）  -> ${outPath}  ${fileSize(outPath)} bytes`);
+  if (extern === true) {
+    writeText(`${outPath}.syms`, `${syms.join('\n')}\n`);
+    vStep(`syms  ${syms.length} 个符号 -> ${outPath}.syms`);
+  }
+  tally(basename(outPath), false, cText, fileSize(outPath), tGen, nowMs() - t0);
+  return { cPath, cc: 'self' };
 }
 
 /**

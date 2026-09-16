@@ -134,6 +134,36 @@ function loopCase(name, rtObjs) {
 const CASES = ['01_basics.omni', '02_numeric.omni', '03_structs.omni'];
 const picked = CASES.filter((n) => !filters.length || filters.some((x) => n.includes(x)));
 
+/**
+ * 同一条路，**从 `omni build` 那一头走**（`OMNI_CC=self`，第一百三十七片）。
+ *
+ * 上面那几格是手工摆的三步（emit c / c obj / c link）；这一格问的是「那个开关真的把
+ * 三步接起来了吗」—— 少了它，`buildSelf` 里任何一处摆错（容器、libc、执行位）都要等到
+ * 有人手工试才发现。判据照旧是**与解释器逐字节相同**。
+ */
+function switchCase(name) {
+  const src = join(root, 'tests', 'cases', name);
+  const nm = `selfc/${name} [OMNI_CC=self omni build == 解释器]`;
+  const exe = join(dir, `sw-${basename(name, '.omni')}`);
+  const b = spawnSync(process.execPath, [CLI, 'build', src, '-o', exe, '--backend', 'c'],
+    { encoding: 'utf8', env: { ...process.env, OMNI_CC: 'self' }, maxBuffer: 1 << 28 });
+  if (b.status !== 0) {
+    bad(nm, `    build 没过：\n${b.stderr}`);
+    return;
+  }
+  const got = spawnSync(exe, [], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  const want = omni(['run', src]);
+  if (got.status !== 0) {
+    bad(nm, `    跑挂了（退出码 ${got.status}，信号 ${got.signal}）\n${got.stderr}`);
+    return;
+  }
+  if (got.stdout !== want.stdout) {
+    bad(nm, `    stdout 不同：\n--- 解释器 ---\n${want.stdout}--- 二进制 ---\n${got.stdout}`);
+    return;
+  }
+  ok(`${nm} [${want.stdout.split('\n').length - 1} 行]`);
+}
+
 if (libs === null) {
   process.stdout.write('selfc: 取不到 SDK 路径（xcrun），整轴跳过\n');
   skip = picked.length;
@@ -146,6 +176,8 @@ if (libs === null) {
   } else {
     ok(`selfc/runtime [${rt.objs.length} 份运行时都编过了]`);
     for (const n of picked) loopCase(n, rt.objs);
+    /* 开关那一格只跑头一个用例：它量的是「三步接起来了吗」，不是语言覆盖。 */
+    if (picked.length > 0) switchCase(picked[0]);
   }
 }
 
