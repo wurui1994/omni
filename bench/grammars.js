@@ -136,13 +136,24 @@ const kb = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.roun
  *
  * **这一栏与那门语言自己的默认不是一件事**：`omni run x.cpp` 现在**不**做预处理。
  * 两个数都要说得出来，所以 `过` 那一栏印的是 `预处理后/原样`（见 `row.okRaw`）。
+ *
+ * **系统头默认也不找**（`systemIncludes` 不写就是 `false`）。这一格是量出来的，不是省事：
+ * 把 SDK 那几条搜索路径接上，cpp 那一栏从 **79 掉到 69**（没有前言那一版是 71 -> 61）——
+ * 真进来的头里 `stdarg.h` 一族写着 `typedef __builtin_va_list va_list;`，而这门语法不认
+ * `__builtin_va_list` 这个类型名，于是几十份当场卡在它上面。语料这一栏量的是"**这份 `.cc`
+ * 自己**读不读得动"，拿系统头去换那十份过数不值。
  */
-function preOf(cfg, treeDirs) {
+function preOf(cfg, extDir, treeDirs) {
   const p = cfg.preprocess;
   if (p === undefined) return null;
   if (p.cap !== 'c.preprocess') throw new Error(`bench.json: 不认识的 preprocess.cap ${p.cap}`);
+  /* `includes`：开工前先压上的那几份（`-include` 那一格）。路径相对这个扩展目录 ——
+     语料树里没有它们，它们是**这条语料的口径**的一部分（见 ext/cpp/corpus-prelude.h）。 */
+  const incls = (p.includes ?? []).map((x) => join(extDir, x));
   return (f) => cppText(f, [dirname(f), ...treeDirs, ...(p.includeDirs ?? [])], p.defines ?? [],
-    0, 1, undefined, [], undefined, 0, undefined, p.skipMissingIncludes === true);
+    0, 1, undefined, p.systemIncludes === true ? undefined : [],
+    incls.length === 0 ? undefined : incls, 0, undefined,
+    p.skipMissingIncludes === true);
 }
 
 
@@ -170,7 +181,7 @@ for (const name of readdirSync(EXT_ROOT).sort()) {
     const tree = src.dir !== undefined ? join(extDir, src.dir) : refDirIf(src.tree, src.env ?? null);
     if (tree !== null && !treeDirs.includes(tree)) treeDirs.push(tree);
   }
-  const pre = preOf(cfg, treeDirs);
+  const pre = preOf(cfg, extDir, treeDirs);
   if (missing.length > 0) notes.push(`${name}: 少了参考树 ${missing.join(' / ')}（${REF_ROOT} 下没有）`);
 
   /* 故意写错的用例挑出来（见文件头 `invalid` 那一段）：它们**不进覆盖率**，
