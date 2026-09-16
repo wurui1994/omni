@@ -31,6 +31,13 @@ import {
  */
 const STRUCTS = new Map();
 
+/**
+ * **方法名 -> 它声明在哪个 struct 里**（`case 'struct'` 那一格边翻边填）。
+ * mojo 的 `self` 写在形参表第一格 —— 所以方法在图上就是**普通函数**，
+ * 这张表只用来认出 `p.total()` 那种写法该改写成 `total(p)`（不查表、不加节点）。
+ */
+const METHODS = new Map();
+
 
 const OPS = ops({ '//': '/' });
 /** mojo 的转换名是**大写开头**的类型名（`Int` / `Float64` / `String`）。 */
@@ -164,6 +171,14 @@ function toNode(x) {
           fields: fields.map((f, i) => (argNodes[i] === undefined ? lit(null) : argNodes[i])),
         }, { names: fields });
       }
+      // `p.total()` -> `total(p)`：接收者是**第一格实参** —— 而 mojo 的 `self` 本来就
+      // 写在形参表第一格，所以这一步只是"把点号那边的对象挪到实参里"，纯改写。
+      if (tag(fn) === 'attr' && METHODS.has(String(leaf(kids(fn)[1])))) {
+        return node('call', {
+          fn: node('ref', {}, { name: String(leaf(kids(fn)[1])) }),
+          args: [toNode(kids(fn)[0]), ...argNodes],
+        });
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     // `@value struct Point: var x: Int …` —— 装饰器这一层剥掉，里头那格照常走
@@ -171,17 +186,35 @@ function toNode(x) {
       const inner = kids(x).filter((y) => tag(y) !== 'decos');
       return inner.map(toNode).flat();
     }
-    // `struct` 只登记**字段顺序**（声明这一批没有运行期动作）—— 见文件头 STRUCTS 那段
+    // `struct` 登记**字段顺序**，并把里头的方法**提到顶层** —— 见文件头 STRUCTS 那段。
+    // 方法在 mojo 里连改写都不用：`self` 已经**写在形参表第一格**（声明里就有），
+    // 所以 `fn total(self) -> Int` 落的就是现成的 bind + func，一格新节点也不加。
     case 'struct': {
       const nm = kids(x).find((y) => tag(y) === 'n');
       const body = part(x, 'body');
-      const fields = body === undefined ? [] : kids(body)
+      const stmts = body === undefined ? [] : kids(body)
         .map((ln) => (tag(ln) === 'line' ? kids(ln)[0] : ln))
-        .filter((s) => s !== undefined && tag(s) === 'var')
+        .filter((s) => s !== undefined);
+      const fields = stmts
+        .filter((s) => tag(s) === 'var')
         .map((s) => nameOf(kids(s).find((y) => tag(y) === 'n')))
         .filter((s) => s !== undefined && s !== null);
       if (nm !== undefined && fields.length > 0) STRUCTS.set(String(nameOf(nm)), fields);
-      return [];
+      const methods = stmts.filter((s) => tag(s) === 'routine');
+      const owner = nm === undefined ? '?' : String(nameOf(nm));
+      for (const m of methods) {
+        const mn = m.items === undefined ? undefined : kids(m).find((y) => tag(y) === 'n');
+        if (mn === undefined) continue;
+        const name = String(leaf(kids(mn)[0]));
+        const had = METHODS.get(name);
+        if (had !== undefined && had !== owner) {
+          throw new Error(`mojo->graph: ${had} 与 ${owner} 都声明了方法 ${name} —— `
+            + '重名要类型才分得开，这一批不猜');
+        }
+        METHODS.set(name, owner);
+      }
+      // 字段表先登记好再翻方法体（方法里可能就有 `Point(…)` 那种构造）
+      return methods.map(toNode).flat();
     }
     case 'import': case 'from-import': case 'trait': case 'alias': return [];
     default:
@@ -193,6 +226,7 @@ function toNode(x) {
 export function mojoToGraph(tree) {
   if (tag(tree) !== 'module') throw new Error('mojo->graph: 这不是 (module …)');
   STRUCTS.clear();          // 字段表是**一份源码一张**（见文件头 STRUCTS 那段）
+  METHODS.clear();          // 方法表同理 —— 一份源码一张
   const body = kids(tree).map(toNode).flat();
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
 }
@@ -201,4 +235,6 @@ export function mojoToGraph(tree) {
 //   1. 实参约定（默认 / `mut` / `var`+`^` / `out` / `ref`）与 origin 全丢掉 ——
 //      它们是 `lifetime` 那一栏（`ext/mojo/SPEC.md` §五第 1-2 项），这一批只检查不使用。
 //   2. `for x in …`（迭代器协议）不在这一批，所以例子用 `while`。
-//   3. struct / trait / 编译期参数 `[…]` / `with` 都不在这一批。
+//   3. `struct` 只接**字段表 + 方法提到顶层**（第二十三、二十四批）；trait（真的动态分派）、
+//      编译期参数 `[…]`、`with`、自己写的 `__init__` 都不在这一批 —— 撞上干净地报错。
+//      同名方法（两个 struct 各有一个 `total`）当场报：分开它们要的是类型那一层。

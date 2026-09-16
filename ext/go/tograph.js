@@ -42,6 +42,36 @@ function mapBindName(x) {
 }
 
 
+/**
+ * **方法名 -> 它声明的接收者类型名**，以及**登记过的类型名**。
+ *
+ * 两张表都是一趟扫查得的（见 goToGraph），存在的理由是同一句话：
+ * go 的接收者写在声明里（`func (p Point) total() int`），所以分派是**单态的** ——
+ * 图上不需要运行期查表，方法就是"名字从声明来 + 接收者当第一格实参"。
+ * 重名（两个类型各有一个 `total`）要类型才分得开，这一批**当场报**，不猜。
+ */
+const METHODS = new Map();
+const TYPES = new Set();
+
+/** 扫一遍顶层：登记类型名（`type Point struct …`）与每个方法的接收者类型。 */
+function collectDecls(x) {
+  if (!isList(x)) return;
+  if (tag(x) === 'tspec' || tag(x) === 'talias') TYPES.add(leaf(kids(x)[0]));
+  if (tag(x) === 'method') {
+    const [recv, nm] = kids(x);
+    const name = leaf(nm);
+    const ty = part(kids(recv)[0], 'tname');
+    const owner = ty === undefined ? '?' : leaf(kids(ty)[0]);
+    const had = METHODS.get(name);
+    if (had !== undefined && had !== owner) {
+      throw new Error(`go->graph: ${had} 与 ${owner} 都声明了方法 ${name} —— `
+        + '重名要类型才分得开，这一批不猜');
+    }
+    METHODS.set(name, owner);
+  }
+  for (const k of kids(x)) collectDecls(k);
+}
+
 const OPS = ops();
 /** 转换名 -> `conv` 的目标。go 的定宽整数与浮点各自那几格都往这四格收。 */
 const CONV = convs({
@@ -57,12 +87,13 @@ const many = (xs) => xs.map(toNode).flat();
 /** `(name x)`。Go 的 lhs 也是它。 */
 const nameOf = (x) => (tag(x) === 'name' ? leaf(kids(x)[0]) : leaf(x));
 
-function funcOf(sig, blk, name) {
+function funcOf(sig, blk, name, self) {
   const params = partKids(sig, 'in').map((p) => {
     const nm = part(p, 'name');
     return nm === undefined ? null : leaf(kids(nm)[0]);
   }).filter((n) => n !== null);
-  return node('func', { body: blk === undefined ? [] : many(kids(blk)) }, { params, name });
+  return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
+    { params: self === undefined ? params : [self, ...params], name });
 }
 
 function toNode(x) {
@@ -132,6 +163,18 @@ function toNode(x) {
       const [nm, sig, blk] = kids(x);
       const name = leaf(nm);
       return node('bind', { init: funcOf(sig, blk, name) }, { name });
+    }
+    // `func (p Point) total() int { … }` -> 与 `fn` **同一格 bind + func**，
+    // 差的只有一件事：**接收者当第一格形参**。方法不是一格新节点，分派也不查表 ——
+    // 接收者的类型写在声明里，所以这一格在图上就是个多一个实参的普通函数。
+    case 'method': {
+      const [recv, nm, sig, blk] = kids(x);
+      const name = leaf(nm);
+      const self = part(kids(recv)[0], 'name');
+      if (self === undefined) {
+        throw new Error(`go->graph: ${name} 的接收者没有名字 —— 匿名接收者这一批没接`);
+      }
+      return node('bind', { init: funcOf(sig, blk, name, leaf(kids(self)[0])) }, { name });
     }
     case 'block': return node('region', { body: many(kids(x)) });
     case 'define': case 'assign': {
@@ -212,7 +255,19 @@ function toNode(x) {
       if (tag(fn) === 'sel') {
         const m = leaf(kids(fn)[1]);
         if (PRINTS.has(m)) return node('prim', { args: argNodes }, { name: 'print' });
-        throw new Error(`go->graph: 这一批只接 fmt.Print* 那一族，收不了 .${m}`);
+        // `p.total()` -> `total(p)`：接收者是**第一格实参**（声明里写着是哪个类型，
+        // 所以这一步是纯改写，不查表、不加节点）。
+        // `Point.total(p)`（方法表达式）是**同一件事的另一种写法** —— 左边是登记过的
+        // 类型名时，接收者已经在实参里了，不再补。
+        if (METHODS.has(m)) {
+          const obj = kids(fn)[0];
+          const onType = tag(obj) === 'name' && TYPES.has(leaf(kids(obj)[0]));
+          return node('call', {
+            fn: node('ref', {}, { name: m }),
+            args: onType ? argNodes : [toNode(obj), ...argNodes],
+          });
+        }
+        throw new Error(`go->graph: 这一批只接 fmt.Print* 与声明过的方法，收不了 .${m}`);
       }
       const callee = tag(fn) === 'name' ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
@@ -238,6 +293,11 @@ export function goToGraph(tree) {
   // —— `m[k]` 与 `xs[i]` 同形那笔账，在 go 上不需要驱动器回问类型。
   MAPS.clear();
   for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
+  // 再扫一遍**声明过的方法名与类型名**：go 的接收者写在声明里，所以这一趟就够了 ——
+  // 方法在图上是"多一格实参的普通函数"，不需要运行期查表（见 METHODS 那段）。
+  METHODS.clear();
+  TYPES.clear();
+  collectDecls(tree);
   const items = kids(tree).slice(1);          // 第一格是包名
   const body = items.map(toNode).flat();
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
@@ -249,3 +309,5 @@ export function goToGraph(tree) {
 //      （`ext/go/SPEC.md` §五那张顺序表说了它们各排在哪一步）。
 //   3. 选择器（`a.b`）落 `field-get`（第四批），但**只当它是取字段** ——
 //      `fmt.Println` 那种"包名点方法"仍在 `call` 那一格特判，因为它不是取字段。
+//   4. 方法：接收者提到形参表第一格（第二十四批）。**指针接收者、接口、方法值**都不在这一批 ——
+//      重名的方法（两个类型各有一个 `total`）当场报：分开它们要的正是类型那一层。

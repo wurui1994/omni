@@ -268,6 +268,17 @@ function toNode(x) {
       if (tag(fn) === 'dot' && leaf(kids(fn)[1]) === 'hasKey' && argNodes.length === 1) {
         return mapHas(toNode(kids(fn)[0]), argNodes[0]);
       }
+      // `p.total()` -> `total(p)`：nim 的方法**只是调用的另一种写法**（UFCS）——
+      // 图上是**纯改写**，不加节点、也不要注册表以外的东西：方法名从声明来
+      // （`PARAMS` 是扫 routine 得的那张表），点号左边那一格就是第一个实参。
+      // 名字没在 proc 表里就仍然是取字段 —— 判据在声明里，不猜。
+      if (tag(fn) === 'dot' && PARAMS.has(leaf(kids(fn)[1]))) {
+        const m = leaf(kids(fn)[1]);
+        return node('call', {
+          fn: node('ref', {}, { name: m }),
+          args: [toNode(kids(fn)[0]), ...argNodes],
+        });
+      }
       const callee = (tag(fn) === 'name' || tag(fn) === 'n') ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
       // `int(x)` / `float(x)` 在树上与调用同形 —— 与对象构造那笔账同一笔，这一批按名字表判
@@ -304,3 +315,6 @@ export function nimToGraph(tree) {
 //   4. **对象构造与命名实参分不开**：`T(x: 1)` 与 `f(x = 1)` 在树上是同一格 `kv`，
 //      这一批按"实参全是 kv"判成 record-new。要分开得驱动器能回问"这名字是类型吗" ——
 //      与 cpp 那笔账同一笔（设计文档附录 A.5 第 3 笔）。
+//   5. 方法（第二十四批）：`p.total()` 是 UFCS，纯改写成 `total(p)`。**不带括号**的
+//      `p.total` 仍落 field-get（那是取字段还是无参调用，要形参表以外的一句话），
+//      泛型 proc、`var` 接收者、`method`（真的动态分派）都不在这一批。

@@ -47,6 +47,11 @@ export const STRCAT = ['ab', 'hi there'];
 export const NUMSTR = ['n=7', 'i=42'];
 /** namedarg：`T(x: 1)`（record-new）与 `f(a = 3)`（call）—— 树上**不同形**，那笔账记错了 */
 export const NAMEDARG = ['1', '7'];
+/**
+ * method：**方法不是一格新节点** —— 名字从声明来，接收者只是第一格实参。
+ * 三行分别是：点号写法 · 点号写法带实参 · 函数写法（与第一行是**同一张图**）。
+ */
+export const METHOD = ['3', '9', '3'];
 
 const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
 
@@ -104,6 +109,10 @@ export const CASES = [
   // 第十五个家族：**对象构造 vs 命名实参**（nim 独有）—— 钉的是"那笔账记错了"：
   // 两者在调用实参这个位置上不同形，判"是不是类型"扫一遍 type 段就够
   ...fam('namedarg', NAMEDARG, ['nim']),
+  // 第十六个家族：**方法**（接收者在声明里写着 ⇒ 单态分派 ⇒ 图上只多一格实参）。
+  // 各门写法差得远（nim 的 UFCS 是纯改写、go 的接收者写在 `func (p Point)` 那一格里），
+  // 落到的却全是现成的 call + func —— 这一族把"不给新节点"那句话变成判据。
+  ...fam('method', METHOD, ['nim', 'go', 'vlang', 'mojo']),
 ];
 
 /**

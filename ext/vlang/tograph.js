@@ -43,6 +43,31 @@ const CONV = convs({
 });
 const PRINTS = new Set(['println', 'print', 'eprintln', 'dump']);
 
+/**
+ * **方法名 -> 它声明的接收者类型名**（一趟扫查得的，见 vlangToGraph）。
+ * V 的接收者写在声明里（`fn (p Point) total() int`）—— 与 go 同一件事：分派是单态的，
+ * 图上方法就是"多一格实参的普通函数"，不加节点、不查表。重名当场报，不猜。
+ */
+const METHODS = new Map();
+
+/** 扫一遍顶层：登记每个方法的名字与它的接收者类型。 */
+function collectMethods(x) {
+  if (!isList(x)) return;
+  if (tag(x) === 'method') {
+    const [recv, nm] = kids(x);
+    const name = leaf(nm);
+    const ty = part(kids(recv)[0], 'tname');
+    const owner = ty === undefined ? '?' : leaf(kids(ty)[0]);
+    const had = METHODS.get(name);
+    if (had !== undefined && had !== owner) {
+      throw new Error(`v->graph: ${had} 与 ${owner} 都声明了方法 ${name} —— `
+        + '重名要类型才分得开，这一批不猜');
+    }
+    METHODS.set(name, owner);
+  }
+  for (const k of kids(x)) collectMethods(k);
+}
+
 const many = (xs) => xs.map(toNode).flat();
 
 /** 左值：`(name x)` 或 `(mut (name x))`。`mut` 只是一格检查，拆掉。 */
@@ -52,11 +77,12 @@ function nameOf(x) {
   return leaf(x);
 }
 
-function funcOf(x, name) {
+function funcOf(x, name, self) {
   const ps = part(x, 'params');
   const params = ps === undefined ? [] : kids(ps).map((p) => leaf(kids(p)[0]));
   const blk = kids(x).find((y) => tag(y) === 'block');
-  return node('func', { body: blk === undefined ? [] : many(kids(blk)) }, { params, name });
+  return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
+    { params: self === undefined ? params : [self, ...params], name });
 }
 
 function toNode(x) {
@@ -121,6 +147,17 @@ function toNode(x) {
       const name = leaf(kids(x)[0]);
       return node('bind', { init: funcOf(x, name) }, { name });
     }
+    // `fn (p Point) total() int { … }` -> 与 `fn` **同一格 bind + func**，
+    // 差的只有"接收者当第一格形参"（go 那份一字不差 —— 接收者在声明里，分派是单态的）
+    case 'method': {
+      const [recv, nm] = kids(x);
+      const name = leaf(nm);
+      const self = kids(kids(recv)[0])[0];
+      if (self === undefined) {
+        throw new Error(`v->graph: ${name} 的接收者没有名字 —— 匿名接收者这一批没接`);
+      }
+      return node('bind', { init: funcOf(x, name, leaf(self)) }, { name });
+    }
     case 'block': return node('region', { body: many(kids(x)) });
     case 'define': case 'assign': {
       const isDef = tag(x) === 'define';
@@ -175,6 +212,14 @@ function toNode(x) {
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
         return convOf(CONV.get(callee), argNodes[0]);   // `int(x)` / `f64(x)`
       }
+      // `p.total()` -> `total(p)`：接收者是**第一格实参**（声明里写着是哪个类型，
+      // 所以这一步是纯改写）。名字没登记成方法就仍然是"取字段再调它" —— 判据在声明里。
+      if (tag(fn) === 'sel' && METHODS.has(leaf(kids(fn)[1]))) {
+        return node('call', {
+          fn: node('ref', {}, { name: leaf(kids(fn)[1]) }),
+          args: [toNode(kids(fn)[0]), ...argNodes],
+        });
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     case 'module': case 'import': case 'struct': case 'enum': case 'type-decl': return [];
@@ -189,6 +234,9 @@ export function vlangToGraph(tree) {
   // 先扫一遍哪些名字装 map（`m := map[K]V{…}` 自带标记）—— 与 go 那一份同一条办法
   MAPS.clear();
   for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
+  // 再扫一遍**声明过的方法名**（接收者的类型写在声明里 —— 单态分派，不查表）
+  METHODS.clear();
+  collectMethods(tree);
   const body = kids(tree).map(toNode).flat();
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
 }
@@ -199,3 +247,5 @@ export function vlangToGraph(tree) {
 //   2. `mut` 只拆不检查（它是一格不产生代码的检查特性）。
 //   3. struct **声明**丢掉（字段名从字面量那儿来 —— record-new 不要求类型存在）；
 //      sumtype / match / spawn / chan 都不在这一批。
+//   4. 方法：接收者提到形参表第一格（第二十四批，与 go 同一条办法）。`mut` 接收者只拆不检查、
+//      接口与方法值不在这一批；同名方法当场报 —— 分开它们要的是类型那一层。
