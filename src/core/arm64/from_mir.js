@@ -498,6 +498,8 @@ class FnGen {
     /** 值 -> 池里的第几个（-1 = 不在寄存器里，得走栈位）。 */
     this.valReg = [];
     for (let k = 0; k < f.count(); k++) this.valReg.push(-1);
+    /** `dest` 给这条指令留下的池位置（-1 = 没留），等 `def` 来认领。 */
+    this.pending = -1;
   }
 
   /* -------------------------------------------------------------- 位置 */
@@ -609,17 +611,39 @@ class FnGen {
 
   /* ------------------------------------------------- 寄存器缓存（见 `POOL`） */
 
-  /** 池里的一个位置：先要空的，没空的就收一个用光了的。都没有回 -1。 */
-  takeSlot() {
-    for (let s = 0; s < 5; s++) if (this.cacheIdx[s] === -1) return s;
+  /** 池里的一个位置：先要空的，没空的就收一个用光了的。都没有回 -1。
+   *  `a`/`b` 是要**避开**的寄存器（见 `dest`）。 */
+  takeSlot(a, b) {
     for (let s = 0; s < 5; s++) {
-      if (this.cacheLeft[s] <= 0) {
+      if (this.cacheIdx[s] === -1 && POOL[s] !== a && POOL[s] !== b) return s;
+    }
+    for (let s = 0; s < 5; s++) {
+      if (this.cacheLeft[s] <= 0 && POOL[s] !== a && POOL[s] !== b) {
         this.valReg[this.cacheIdx[s]] = -1;
         this.cacheIdx[s] = -1;
         return s;
       }
     }
     return -1;
+  }
+
+  /**
+   * 这条指令的结果**直接算进哪个寄存器**：池里要得到位置就算进池寄存器，`def` 认领它时
+   * 连那条 `mov RES -> 池` 都不发（每个有人要的值省一个字）。要不到就回 `RES`，
+   * 走从前那条路。
+   *
+   * 两条使用规矩：
+   *   - **先把操作数读进来（`refReg`）再要落点** —— 反过来会占掉本来能让出来的位置；
+   *   - 操作数所在的寄存器要当 `a`/`b` 传进来**避开**：让出来的位置可能正是它们之一
+   *     （`refReg` 刚把那个值读空），而 `MOD` 那两条（`sdiv d,x,y` 接 `msub d,d,y,x`）
+   *     里 d 撞上 x 或 y 就算错了。
+   */
+  dest(i, a, b) {
+    if (this.uses[i] === 0) return RES;
+    const s = this.takeSlot(a, b);
+    if (s < 0) return RES;
+    this.pending = s;
+    return POOL[s];
   }
 
   /**
@@ -983,18 +1007,20 @@ class FnGen {
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 同一对指令，只是符号在 `__TEXT` 里。 */
     if (op === OP.FADDR) {
-      this.symAddr(RES, this.funcSym(f.aux[i]));
-      return this.def(i, RES);
+      const d = this.dest(i);
+      this.symAddr(d, this.funcSym(f.aux[i]));
+      return this.def(i, d);
     }
 
     /* ---- 槽位 */
     if (op === OP.LOAD) {
-      this.frameLoad(RES, this.slotOff(f.aux[i]));
-      return this.def(i, RES);
+      const d = this.dest(i);
+      this.frameLoad(d, this.slotOff(f.aux[i]));
+      return this.def(i, d);
     }
     if (op === OP.STORE) {
-      this.loadRef(RES, f.a[i]);
-      this.frameStore(RES, this.slotOff(f.aux[i]));
+      const v = this.refReg(f.a[i], RES);
+      this.frameStore(v, this.slotOff(f.aux[i]));
       return;
     }
 
@@ -1009,13 +1035,14 @@ class FnGen {
       const hi = Math.floor(off / 4096);
       const lo = off % 4096;
       if (hi > 4095) arm64Nyi(`帧偏移 ${off}（两条 add 也装不下）`);
+      const d = this.dest(i);
       if (hi === 0) {
-        buf.emit(addImm(1, RES, this.base, lo));
+        buf.emit(addImm(1, d, this.base, lo));
       } else {
-        buf.emit(addImm(1, RES, this.base, hi, 1));
-        if (lo > 0) buf.emit(addImm(1, RES, RES, lo));
+        buf.emit(addImm(1, d, this.base, hi, 1));
+        if (lo > 0) buf.emit(addImm(1, d, d, lo));
       }
-      return this.def(i, RES);
+      return this.def(i, d);
     }
 
     /* ---- 模块级变量（第九刀第九片）。**靠符号寻址**：`adrp` 取页、`add` 取页内偏移。
@@ -1024,21 +1051,22 @@ class FnGen {
      * 那个「adrp 的页号填不出来」，现在从写出去的那一头解释清楚了。 */
     if (op === OP.GLOAD) {
       this.globalAddr(TMP0, f.aux[i]);
-      GLOAD_EMIT[arm64WidthKey(t)](buf, RES, TMP0);
-      return this.def(i, RES);
+      const d = this.dest(i);
+      GLOAD_EMIT[arm64WidthKey(t)](buf, d, TMP0);
+      return this.def(i, d);
     }
     if (op === OP.GSTORE) {
-      this.loadRef(TMP1, f.a[i]);
-      buf.emit(movReg(1, RES, TMP1));
+      const v = this.refReg(f.a[i], RES);
       this.globalAddr(TMP0, f.aux[i]);
-      buf.emit(strU(STORE_SIZE[arm64WidthKey(f.t[i])], RES, TMP0, 0));
+      buf.emit(strU(STORE_SIZE[arm64WidthKey(f.t[i])], v, TMP0, 0));
       return;
     }
     /* 全局的**地址**（第二十一片）：`GLOAD` 里那两条的前半截，只是不接 `ldr`。
      * C 的全局量都从这儿走 —— 取地址、按成员写、按下标写，后头接 `MLOAD`/`MSTORE`。 */
     if (op === OP.GADDR) {
-      this.globalAddr(RES, f.aux[i]);
-      return this.def(i, RES);
+      const d = this.dest(i);
+      this.globalAddr(d, f.aux[i]);
+      return this.def(i, d);
     }
 
     /* ---- 变参的定义那一侧（第二十四片）。苹果的 arm64 上 `va_list` 就是一个 `char *`：
@@ -1128,23 +1156,27 @@ class FnGen {
      * 那几种 CVT 都在那儿。结果是整数的 F2I 留在 `cvt()`（那条的 `t` 是整数）。 */
     if (isFloatType(t)) return this.float(i);
 
-    /* ---- 单目。操作数用 `refReg`：值本来就在池寄存器里的话，这一条连 `ldr` 都不发。 */
+    /* ---- 单目。操作数用 `refReg`：值本来就在池寄存器里的话，这一条连 `ldr` 都不发。
+     * 结果的落点用 `dest`：要得到池位子就直接算在那儿，`def` 那条 `mov` 也免了。 */
     if (op === OP.NEG) {
       const w = arm64WidthOf(t);
       const x = this.refReg(f.a[i], TMP0);
-      buf.emit(neg(w === 64 ? 1 : 0, RES, x));
-      return this.def(i, RES, w);
+      const d = this.dest(i, x);
+      buf.emit(neg(w === 64 ? 1 : 0, d, x));
+      return this.def(i, d, w);
     }
     if (op === OP.BNOT) {
       const w = arm64WidthOf(t);
       const x = this.refReg(f.a[i], TMP0);
-      buf.emit(mvn(w === 64 ? 1 : 0, RES, x));
-      return this.def(i, RES, w);
+      const d = this.dest(i, x);
+      buf.emit(mvn(w === 64 ? 1 : 0, d, x));
+      return this.def(i, d, w);
     }
     if (op === OP.NOT) {
       const x = this.refReg(f.a[i], TMP0);
-      buf.emit(eorImm(1, RES, x, 1));
-      return this.def(i, RES);
+      const d = this.dest(i, x);
+      buf.emit(eorImm(1, d, x, 1));
+      return this.def(i, d);
     }
 
     /* ---- 二目 */
@@ -1154,8 +1186,9 @@ class FnGen {
       const sf = w === 64 ? 1 : 0;
       const x = this.refReg(f.a[i], TMP0);
       const y = this.refReg(f.b[i], TMP1);
-      bin(buf, sf, RES, x, y);
-      return this.def(i, RES, w);
+      const d = this.dest(i, x, y);
+      bin(buf, sf, d, x, y);
+      return this.def(i, d, w);
     }
 
     /* ---- 比较：`t` 是操作数的类型，产出永远是 0/1 的 bool */
@@ -1164,8 +1197,9 @@ class FnGen {
       const sf = arm64WidthOf(t) === 64 ? 1 : 0;
       const x = this.refReg(f.a[i], TMP0);
       const y = this.refReg(f.b[i], TMP1);
-      buf.emit(cmpReg(sf, x, y), cset(1, RES, cond));
-      return this.def(i, RES);
+      const d = this.dest(i, x, y);
+      buf.emit(cmpReg(sf, x, y), cset(1, d, cond));
+      return this.def(i, d);
     }
 
     /* ---- 宽度转换 */
@@ -1245,38 +1279,40 @@ class FnGen {
     const f = this.f;
     const buf = this.buf;
     const mode = f.aux[i];
-    this.loadRef(TMP0, f.a[i]);
+    const x = this.refReg(f.a[i], TMP0);
     /* 浮点 -> 整数（向零取整，C 的强制转换就是这一种）。`t` 是整数所以落在这儿。 */
     if (mode === CVT_F2I || mode === CVT_F2U) {
       const srcDbl = typeKind(this.typeOfRef(f.a[i])) === T_F64;
       const w = arm64WidthOf(f.t[i]);
-      this.toFp(FTMP0, TMP0, srcDbl);
+      this.toFp(FTMP0, x, srcDbl);
+      const d = this.dest(i, x);
       /* 无符号那条是 `fcvtzu`（第九十五片）：`fcvtzs` 在越界处饱和到有符号上界，
        * 于是 `(unsigned long long)9223372036854775808.0` 会少一位。arm64 上两条指令
        * 只差一个位域，所以这一格只是挑一条。 */
       buf.emit(mode === CVT_F2U
-        ? fcvtzu(w === 64 ? 1 : 0, srcDbl, RES, FTMP0)
-        : fcvtzs(w === 64 ? 1 : 0, srcDbl, RES, FTMP0));
-      return this.def(i, RES, w);
+        ? fcvtzu(w === 64 ? 1 : 0, srcDbl, d, FTMP0)
+        : fcvtzs(w === 64 ? 1 : 0, srcDbl, d, FTMP0));
+      return this.def(i, d, w);
     }
+    const d = this.dest(i, x);
     /* 位重解释：栈位里躺的就是位模式，一条 mov。 */
     if (mode === CVT_BITCAST) {
-      buf.emit(movReg(1, RES, TMP0));
-      return this.def(i, RES);
+      buf.emit(movReg(1, d, x));
+      return this.def(i, d);
     }
     /* i32 的规范形是**符号扩展后的 64 位**，所以：
      *  - SEXT（i32 -> i64）什么都不用做（值本来就是那个样子）；
      *  - ZEXT 要把高 32 位抹掉；
      *  - TRUNC（i64 -> i32）要重新按 32 位符号扩展一遍。 */
-    if (mode === CVT_SEXT) buf.emit(movReg(1, RES, TMP0));
-    else if (mode === CVT_ZEXT) buf.emit(andImm(1, RES, TMP0, 0xffffffffn));
-    else if (mode === CVT_TRUNC) buf.emit(sxtw(RES, TMP0));
+    if (mode === CVT_SEXT) buf.emit(movReg(1, d, x));
+    else if (mode === CVT_ZEXT) buf.emit(andImm(1, d, x, 0xffffffffn));
+    else if (mode === CVT_TRUNC) buf.emit(sxtw(d, x));
     /* `sxtb x8, w9` 一条就把 64 位都符号扩展好了 —— i32 与 i64 的规范形在这儿是同一个值，
      * 所以不按结果类型分 w/x 系（分了反而要给 i32 再补一条 `sxtw`）。 */
-    else if (mode === CVT_SEXT8) buf.emit(sxtb(1, RES, TMP0));
-    else if (mode === CVT_SEXT16) buf.emit(sxth(1, RES, TMP0));
+    else if (mode === CVT_SEXT8) buf.emit(sxtb(1, d, x));
+    else if (mode === CVT_SEXT16) buf.emit(sxth(1, d, x));
     else return arm64Nyi(`CVT 模式 ${mode}`);
-    return this.def(i, RES);
+    return this.def(i, d);
   }
 
   /** 实参就位：整数一串（x0-x7）、浮点一串（v0-v7），**各自从 0 起数**（AAPCS）。 */
@@ -1494,8 +1530,9 @@ class FnGen {
     const p = this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
     const ld = MLOAD_EMIT[kind];
     if (ld === undefined) return arm64Nyi(`MLOAD 的宽度 ${kind}`);
-    ld(this.buf, RES, p);
-    return this.def(i, RES);
+    const d = this.dest(i, p);
+    ld(this.buf, d, p);
+    return this.def(i, d);
   }
 
   /** `MSTORE`。六种宽度只管「把低若干位拍进内存」，没有符号可言（与 wasm 同）。 */
@@ -1520,7 +1557,16 @@ class FnGen {
   def(i, reg, w) {
     if (w === 32) this.buf.emit(sxtw(reg, reg));
     const n = this.uses[i];
+    const p = this.pending;
+    this.pending = -1;
     if (n === 0) return;
+    /* `dest` 早就把位置留好了、结果也已经算在那个寄存器里：认领一下就完，不发指令。 */
+    if (p >= 0 && POOL[p] === reg) {
+      this.cacheIdx[p] = i;
+      this.cacheLeft[p] = n;
+      this.valReg[i] = p;
+      return;
+    }
     const s = this.takeSlot();
     if (s >= 0) {
       this.cacheIdx[s] = i;
