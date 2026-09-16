@@ -1,6 +1,6 @@
 {
   "grammar": "cpp.grammar",
-  "doc": "语料 = asymptote 那棵树里的 .cc（**量出来 351 份**，旧账写的 523 是错的 —— 真实的 C++，模板、运算符重载、异常、lambda 都用到了；这棵树本来就是这仓库里 asy 那几把尺子的语料，路径口径与它们一致）。树不在就跳过。语法照 cpp-grammars/c++20.ebnf（标准里那份语法的机读版）写。**这一栏读的是预处理后的文本**（`preprocess` 那一格）：找不到的头跳过（`--skip-missing-includes` —— 一份文件该配哪几个 `-I` 只有那棵树的构建系统知道，量出来 172 份卡在这儿），前言里定义 gtest 那五族宏（`TEST` / `TEST_F` / `TEST_P` / `TYPED_TEST(_P)` / `GTEST_DISABLE_MSC_WARNINGS_*`）—— 没过的 321 份里 99 份卡在「宏调用当顶层声明」，89% 是这一家；再压一份 `corpus-prelude.h`（只有标准库与编译器自己的名字，理由写在那份文件头）。`过` 那一栏因此印成 `预处理后/原样`：**这门语言自己（`omni run x.cpp`）现在还不做预处理**，两个数都得说得出来。**系统头默认不找**（`systemIncludes`）：接上反而从 79 掉到 69，SDK 的 `stdarg.h` 那句 `typedef __builtin_va_list va_list;` 会把几十份弄不过。账与下一刀写在 cpp.grammar 末尾那一节。",
+  "doc": "语料 = asymptote 那棵树里的 .cc（**量出来 351 份**，旧账写的 523 是错的 —— 真实的 C++，模板、运算符重载、异常、lambda 都用到了；这棵树本来就是这仓库里 asy 那几把尺子的语料，路径口径与它们一致）。树不在就跳过。语法照 cpp-grammars/c++20.ebnf（标准里那份语法的机读版）写。**这一栏读的是预处理后的文本**（`preprocess` 那一格）：找不到的头跳过（`--skip-missing-includes` —— 一份文件该配哪几个 `-I` 只有那棵树的构建系统知道，量出来 172 份卡在这儿），前言里定义 gtest 那五族宏（`TEST` / `TEST_F` / `TEST_P` / `TYPED_TEST(_P)` / `GTEST_DISABLE_MSC_WARNINGS_*`）—— 没过的 321 份里 99 份卡在「宏调用当顶层声明」，89% 是这一家；再压一份 `corpus-prelude.h`（只有标准库与编译器自己的名字，理由写在那份文件头）。`过` 那一栏因此印成 `预处理后/原样`：**这门语言自己（`omni run x.cpp`）现在还不做预处理**，两个数都得说得出来。**系统头默认不找**（`systemIncludes`）：接上反而从 79 掉到 69（那一对是 `targ` 那格 [temp.arg] 判定之前量的基线），SDK 的 `stdarg.h` 那句 `typedef __builtin_va_list va_list;` 会把几十份弄不过。账与下一刀写在 cpp.grammar 末尾那一节。",
   "corpus": [
     { "tree": "asymptote", "env": "ASY_SRC", "ext": ".cc" }
   ],
