@@ -19,7 +19,7 @@
 //   E     普通错（认错人的话大多在这一类里 —— 这一栏是下一刀的料）
 //   syn   语法就不认（那一格在这门语言里压根写不出来 —— 这是**规格**，不是洞）
 
-import { compose, diff, gaps, lookup } from '../../src/core/frontend-engine/positions.js';
+import { compose, diff, positionGaps, lookup } from '../../src/core/frontend-engine/positions.js';
 import { JNC_FEATURES, JNC_SORTS } from '../../src/lang/jnc/features/index.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -227,7 +227,7 @@ if (check) {
   const sortList = sorts.map(([s]) => s);
   const kindList = KINDS.map(([k]) => k);
   const bad = diff(spec, cells);
-  const { todo, undeclared } = gaps(spec, sortList, kindList);
+  const { todo, undeclared } = positionGaps(spec, sortList, kindList);
   process.stdout.write(`\n规格：${spec.features.length} 个特性、`
     + `${spec.accounts.size} 个账号、声明了 ${spec.cells.size} 格\n`);
   if (todo.length > 0) {

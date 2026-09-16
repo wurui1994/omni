@@ -17,7 +17,7 @@
 //           `if`+`then`/`else` · `br` / `br_if`（名字或深度）· `return` · `call` · `drop`
 //           · `call_indirect`（`(type $sig)` 与**内联签名**两种写法）
 //           · `memory.size` / `memory.grow` · 访存那一族（`align=` / `offset=` 都收）
-//           · 下面 `OPS` 那张表里的算子
+//           · 下面 `WASM_OPS` 那张表里的算子
 //
 // 两处语料决定了这张表有多大：**后端真发过的**（`grep` 出来的）与 `tests/wat/cases/*.wat`
 // 那几份**给前端写的夹具**（块注释、十六进制、数字下标、`local.tee`、`(start …)`、
@@ -81,7 +81,7 @@ function tokens(text) {
 }
 
 /** 语法：token 串 -> 嵌套数组（一份 `.wat` 只有一个顶层 form）。 */
-function parse(text) {
+function parseWatText(text) {
   const ts = tokens(text);
   let i = 0;
   const form = () => {
@@ -155,7 +155,7 @@ const sized = (bytes) => [...uleb(bytes.length), ...bytes];
  * **算子表**：只收 `backend-wat.js` 真发过的那些（`grep` 出来的一份清单，不是抄规范）。
  * 值是操作码；`i64.load` 那几格后面还要跟 align/offset，见 `MEM`。
  */
-const OPS = new Map(Object.entries({
+const WASM_OPS = new Map(Object.entries({
   'i64.eqz': 0x50, 'i64.eq': 0x51, 'i64.ne': 0x52, 'i64.lt_s': 0x53, 'i64.gt_s': 0x55,
   'i64.le_s': 0x57, 'i64.ge_s': 0x59,
   'i64.add': 0x7c, 'i64.sub': 0x7d, 'i64.mul': 0x7e, 'i64.div_s': 0x7f, 'i64.rem_s': 0x81,
@@ -189,7 +189,7 @@ const MEM = new Map(Object.entries({
  * 看不懂的东西一律当场抛错 —— 见文件头那句"不许猜着编"。
  */
 export function watToWasm(text) {
-  const mod = parse(text);
+  const mod = parseWatText(text);
   if (mod[0] !== 'module') throw new Error('wasm: 顶层不是 (module …)');
 
   const types = [];                       // 签名去重（一份签名一格）
@@ -370,7 +370,7 @@ const encodeExpr = (form, ctx) => code(form, ctx);
 function code(form, ctx) {
   if (!Array.isArray(form)) {
     // 裸记号：只可能是没有立即数、也没有操作数的那几格（`return` / `drop` / `nop` …）
-    if (OPS.has(form)) return [OPS.get(form)];
+    if (WASM_OPS.has(form)) return [WASM_OPS.get(form)];
     throw new Error(`wasm: 裸记号 ${form} 不认（后端没发过这种写法）`);
   }
   const h = form[0];
@@ -456,7 +456,7 @@ function code(form, ctx) {
   }
   if (h === 'memory.size') return [0x3f, 0x00];
   if (h === 'memory.grow') return [...sub(kids), 0x40, 0x00];
-  if (OPS.has(h)) return [...sub(kids), OPS.get(h)];
+  if (WASM_OPS.has(h)) return [...sub(kids), WASM_OPS.get(h)];
   throw new Error(`wasm: 还没见过的算子 ${h}（这一份只收 backend-wat.js 真发过的那些）`);
 }
 

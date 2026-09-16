@@ -152,8 +152,10 @@ function matchOf(acc) {
   return acc.text.replace(/[`*]/g, '').slice(0, 8);
 }
 
-/** 表里还没定的格（`todo`）与压根没声明的格 —— 这两栏就是"我们不知道什么"的清单。 */
-export function gaps(spec, sortList, kindList) {
+/** 表里还没定的格（`todo`）与压根没声明的格 —— 这两栏就是"我们不知道什么"的清单。
+ *  名字带 `position` 是**必须的**：`graph/contract.js` 里的 `gaps(name)` 是另一件事
+ *  （那格问的是"这个后端接不住哪几格节点"），而拼成一个程序之后模块级名字共用一个空间。 */
+export function positionGaps(spec, sortList, kindList) {
   const todo = [];
   const undeclared = [];
   for (const s of sortList) {

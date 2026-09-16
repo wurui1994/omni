@@ -34,8 +34,9 @@ import { backends, Gap } from './contract.js';
 import { watToWasm } from '../wasm/assemble.js';
 import { LANGS, pickLang, treeRoot } from './langs.js';
 
-/** 一格 `--flag VALUE`：给了就回那个值，没给回 null（不认 `--flag=VALUE`，与别处一致）。 */
-function argOf(argv, name) {
+/** 一格 `--flag VALUE`：给了就回那个值，没给回 null（不认 `--flag=VALUE`，与别处一致）。
+ *  名字不叫 `argOf`：`src/lang/jnc/generic.js` 里那格叫这个名字（取泛型实参，是另一件事）。 */
+function cliArg(argv, name) {
   const i = argv.indexOf(name);
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : null;
 }
@@ -56,7 +57,7 @@ export function graphBackendNames() {
  * `run` 与 `build` 共用它 —— 两条命令的前两步一个字都不该差。
  */
 function graphOf(path, argv) {
-  const lang = pickLang(path, argOf(argv, '--lang'));
+  const lang = pickLang(path, cliArg(argv, '--lang'));
   const grammarPath = `${treeRoot()}/${lang.grammar}`;
   const { tb, g } = loadGrammarTable(grammarPath);
   const src = readText(path);
@@ -74,7 +75,7 @@ function graphOf(path, argv) {
 
 /** 挑一条腿。名字打错就报那四条（**清单是注册出来的**，不是手写的）。 */
 function pickBackend(verb, argv, dflt) {
-  const backName = argOf(argv, '--backend') ?? dflt;
+  const backName = cliArg(argv, '--backend') ?? dflt;
   const back = backends().find((b) => b.name === backName);
   if (back === undefined) {
     throw new OmniError(`${verb} --engine graph：没有 --backend ${backName} 这一条 —— `
@@ -156,7 +157,7 @@ export function buildGraphFile(path, argv) {
   if (got.code !== undefined) return got.code;
   const dot = path.lastIndexOf('/') >= 0 ? path.slice(path.lastIndexOf('/') + 1) : path;
   const stem = dot.lastIndexOf('.') > 0 ? dot.slice(0, dot.lastIndexOf('.')) : dot;
-  const out = argOf(argv, '-o') ?? `${stem}.${back.name}`;
+  const out = cliArg(argv, '-o') ?? `${stem}.${back.name}`;
   let art = null;
   try {
     art = back.lower(got.graph);
