@@ -14,13 +14,26 @@
 //     （"does not export 'intConvCode'"）。两句都改成了"先导入再导出"，
 //     解析器也认得出 `export *` 了。判据是 `tests/mir/run.js` 那格
 //     "编译器自己也要降得下来"：这一族 16 条诊断归零。
-//   - `import { a as b }` / `export { x as y }` / `export default …` / `import def` 都摊成模块级
-//     的一句绑定（不做重命名，也就不需要作用域分析）；`import * as ns` 摊成一格取值器对象。
-//   - 模块级的名字**跨文件重名就报错**：拼在一起之后它们是同一个作用域。改名比在这里
-//     做一遍带作用域的重写便宜得多，而且改完源码更好读。
+//   - `export { x as y }` / `export default …` / `import def` 摊成模块级的一句绑定；
+//     `import { a as b }` **改成改写引用**（见 rename.js 的 `renameImports`）——
+//     少占一格模块级名字，`let` 那种活绑定也跟着对；`import * as ns` 摊成一格取值器对象。
+//   - 模块级的名字跨文件重名**由这一层自己改名**（`rename.js`）：留头一个、后来的改成
+//     `名字$模块短名`。原来这一格是硬错（"rename one"），账上写着"改名比在这里做一遍
+//     带作用域的重写便宜得多"——**那句话量出来只对一半，现在作废**：
+//       * 对"同名却不同事"那些（`asList` 在 fromtree 里回 null、在 wat 后端里回空数组）
+//         确实是改源码更好读，那 44 格照旧改在源码里（下面那串清单）；
+//       * 对 `ext/*/tograph.js` 那一堆**不成立**：`toNode` / `nameOf` / `many` / `OPS` / `MAPS`
+//         在每一门里都是最自然的名字。量出来的实测样本：**写 cpp 的 map 那一格时
+//         （`ext/cpp/tograph.js` 多一张 `MAPS`）这个数当场从 98 顶到 99** —— 一次普通的
+//         功能改动就撞一格，那不是"每加一门语言撞一次"，是**每次动 ext 都可能撞**。
+//     于是这一层学会了改名，`lower/cli.js` 那一族诊断 **99 -> 0**（剩下的 4 条是别的账：
+//     两处 `cannot assign to 'process.stdout.write'`、一处 `import.meta`、一处封闭 ABI）。
+//     判据是 `tests/js-exec/cases/56-module-collide.js`（三份文件都有模块级 `op`/`TAG`/`useOp`，
+//     还带着形参 / 局部 / catch / for-of / 键 / 成员名 / 简写七处陷阱）——
+//     `node == omni-js == omni-c` 逐行相同；把 `planRenames` 掐掉，这一份当场红。
 //     **这一条的价钱要按量出来的记**：`cli.js` 那条自编译链上量到过 **142 条**重名
 //     （`tests/mir/run.js` 里 `lower/cli.js` 那一格因此是红的，而且这不是新事 ——
-//     在 a9df4874 上就有 126 条）。现在**一片一片在还**，还到 **98 条**（改的都是
+//     在 a9df4874 上就有 126 条）。**一片一片还了 44 格**（改的都是
 //     "同名却不同事"、而且尽量挑**私有那一侧**）：`graph/eval.js` 9 格（值上的运算 ->
 //     `valTruthy` / `valPick` / `valMap*` / `valSlice` · 内部的 `one` / `Env`）·
 //     `glr/ebnf.js` 3 格（`ebnfGrammarName` / `quoteGrammarStr` / `EbnfRx` —— 与 `yacc.js`
@@ -41,42 +54,33 @@
 //     `asList` 那一格最能说明为什么该改：它在 fromtree 里回 null、在 wat 后端里回空数组。
 //     **也有改不动的**：`frontend-js/lower.js` 的 `op` / `exprStmt` 虽然是私有的，可那份文件里
 //     `op` 同时是模块级的建造器、又是 158 处字段名 `op:` 与约 90 处形参/局部名 —— 机械改名
-//     必错，要改得先真的看作用域（那正是上一条说"刻意不做"的那件事）。**量出来的：不改**。
-//     剩下的 98 条分三堆（数出来的）：**ext 那十一份映射 71 条**
+//     必错。**而这一格现在也不用改了**：链接器按 AST 改名，字段名与形参本来就是不同节点。
+//     那 99 条当时分三堆（数出来的）：**ext 那十一份映射 71 条**
 //     （`toNode` / `nameOf` / `many` / `OPS` / `PRIM` 在每一门里都是最自然的名字，
 //     而 `graph/langs.js` 把十一门**静态**导进来，于是必然撞）· **旧降级 vs 规则那条路
-//     14 条**（`frontend-jnc/lower.js` 与 `src/lang/jnc/*`：那是迁移期的重复，migration
-//     走完自己就没了，现在改名是给移动靶子上漆）· 剩下 13 条是真正独立同名的，
-//     而且**两边都公开**（`sexpr/read.js` 的 `head`/`isList` vs `graph/fromtree.js`、
-//     `graph/graph.js` 的 `bin`/`un` vs `lang/common/sx.js` …）—— 那种得先挑一侧，不再是清理。
-//     也就是说"改名比作用域重写便宜"这句话对后两堆成立、对 ext 那一堆**不成立**：
-//     每加一门语言就多撞几格。**而"改成迟装就好了"这条路量过了 —— 它治不了这一堆**：
-//     迟装（`lang/builtin.js` 那一份的办法）只省得下 node 那条腿的启动，可自编译轴编的是
-//     **fat 那一份**（`tests/mir/run.js:63` 传 `builtinAlt(p, true)`，而 `builtin-fat.js`
-//     是一串静态 import）—— 那十一门于是照样进静态图。所以真的只剩三条路，都得先做选择：
-//       1. 这一层学会**按模块自动改名**（要真的作用域分析 —— 这一份现在刻意不做）；
-//       2. 在那十一份 `tograph.js` 里改名（机械但每加一门再撞一次）；
-//       3. 认下"编出来的 cli 不带图那侧的语言映射"（那就没有 fat 那一份，自编译轴得编
-//          `builtin-core.js` 那种口径）—— 这是**产品决定**，不是清理。
+//     14 条**（`frontend-jnc/lower.js` 与 `src/lang/jnc/*`：迁移期的重复，走完自己就没了）·
+//     剩下 13 条真正独立同名、而且两边都公开（`sexpr/read.js` 的 `head`/`isList` vs
+//     `graph/fromtree.js`、`graph/graph.js` 的 `bin`/`un` vs `lang/common/sx.js` …）。
+//     **三堆一起被这一层吃掉了** —— 而"改成迟装就好了"那条路当初量过：治不了（自编译轴编的是
+//     `builtin-fat.js` 那一串静态 import，十一门照样进静态图）。
+//     三条路里选的是第 1 条（这一层自己改名），第 2 条（改十一份 tograph.js）每次动 ext 都要
+//     再撞一次、第 3 条（编出来的 cli 不带图那侧映射）是产品倒退。
 //
-//     **选第 1 条。而且是量出来才选的**：写 cpp 的 map 那一格（`ext/cpp/tograph.js` 多一张
-//     `MAPS` 表）当场把这个数从 **98 顶到 99** —— 与 `ext/nim/tograph.js` 里那张同名。
-//     一次普通的功能改动就撞一格，这就是第 2 条"每加一门再撞一次"的实测样本：
-//     它不是偶尔发生，是**每次动 ext 都可能发生**。第 3 条更贵（编出来的 cli 少十一门语言）。
-//     于是这一层要学会的那件事写清楚（还没做，做的时候按这个形状）：
-//       * 输入是 `order` 那串模块 + 每个模块的模块级名字（`declNames` 已经有了）；
-//       * 撞名时**留头一个**、给后来的那些改成 `名字$模块短名`，改名只发生在**声明与引用**上；
-//       * 引用要靠**真作用域**判（形参 / 局部 / catch / 类名 / for 头 都会遮住模块级那一格），
-//         所以是一趟带作用域栈的 AST 遍历（52 种节点，parser.js 数出来的）；
-//       * **对象字面量的简写要展开**（`{ op }` -> `{ op: op$2 }`），成员名与属性键**不许动** ——
-//         这两条正是"文本改名必错"的那两处（`op` 那一格量出来的），而在 AST 上它们是不同节点，
-//         所以这条路比文本改名**更安全**，不是更险；
-//       * 导入摊出来的那句别名（`const 本地名 = 原名;`）要跟着改到新名字上，否则连不起来；
-//       * 判据：`tests/mir/run.js` 的 `lower/cli.js` 这一族诊断从 99 条归零，
-//         而 `tests/js-exec` / `tests/js-roundtrip` 一条都不许变红（改名不许改语义）。
+//     落地的形状（`rename.js`）：
+//       * 输入是 `order` 那串模块 + 每个模块的模块级名字（`declNames`）；
+//       * 撞名时**留头一个**、后来的改成 `名字$模块短名`，新名字不许撞上任何已有名字；
+//       * 引用靠**真作用域**判（形参 / 局部 / catch / 类名 / for 头 都会遮住模块级那一格）——
+//         一趟**通用**遍历（不是 52 种节点一条条列：列的那份会在加语法的那天漏掉一格，
+//         而漏掉的表现是静默读错名字）；
+//       * `{ op }` 简写展开成 `{ op: op$…}`；成员名与属性键不动；
+//       * 导入这一侧**改写引用**而不再摊 `const 本地名 = 原名;`（少占一格名字、活绑定也对）；
+//       * 量出来的两个坑（都在头一版里踩过）：**声明的名字是字符串**（`function f(){}` 的 `id`
+//         不是 Ident 节点），以及 **`VarDecl.decls` 那些小对象没有 `type`**（只认"有 type 的
+//         节点"就会把 `const MAPS = …` 整类漏掉）。两个坑各让那个数停在 65 / 53 过。
 //   - `node:*` 的导入一律报错，让它去走封闭 ABI（ADR-0011 决策 2）。
 
 import { parseJs } from './parser.js';
+import { planRenames, applyRenames, renameImports } from './rename.js';
 import { SourceFile } from '../source/diag.js';
 import { C_ABI } from '../hir/c_abi.js';
 
@@ -356,6 +360,15 @@ export function linkJs(entry, read, diags) {
 
   load(entry, null);
 
+  /* **按模块自动改名**（见 rename.js）：撞名不再是"改源码"，这一层自己解决。
+   * 留头一个（依赖序里先来的那个模块），后来的改成 `名字$模块短名`。
+   * 导入这一侧跟着改写引用（而不是再摊一句绑定）—— 那句绑定本身就占一格模块级名字。
+   * 下面那一遍撞名检查**留着当安全网**：改完还撞就是这一层坏了，要当场看见。 */
+  const plan = planRenames(order, declNames);
+  for (const m of order) applyRenames(m, plan.get(m.path));
+  const rewritten = new Map();
+  for (const m of order) rewritten.set(m.path, renameImports(m, mods));
+
   // 模块级的名字拼在一起就是同一个作用域，重名必须当场报错
   const owner = new Map();
   for (const m of order) {
@@ -477,8 +490,11 @@ export function linkJs(entry, read, diags) {
           diags.error(imp.span, `'${imp.path}' does not export '${sp.imported}'`);
           continue;
         }
-        // 别名摊成一句模块级的绑定：不重命名，也就不需要作用域分析
-        if (sp.local !== sp.imported && bindAlias(sp.local, sp.imported, imp.span)) {
+        /* 改名的导入（`import { A as B }`）：**引用已经在 rename.js 那一遍改写过了**
+         * （`renameImports`），所以这儿不再摊那句 `const B = A;` —— 少占一格模块级名字，
+         * 而且 `let` 那种活绑定也跟着对。只有"改写没管到"的才回落到老办法。 */
+        if (sp.local !== sp.imported && !(rewritten.get(m.path) ?? new Set()).has(sp.local)
+          && bindAlias(sp.local, sp.imported, imp.span)) {
           body.push({
             type: 'VarDecl',
             kind: 'const',
