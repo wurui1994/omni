@@ -26,9 +26,13 @@
 #         （不走 `-lc`：glibc 的 `/usr/lib/libc.so` 是一份 ld 脚本，我们不解析）。
 #      b. `elf: 找不到 'fmod'` —— 数学那几个符号在这台机器上只从 `libm.so.6` 露出来。
 #         **已还**：存在就一起带上。
-#      c. `elf: 找不到 'atexit'` —— 它住在 glibc 的 **`libc_nonshared.a`** 里
-#         （那份 ld 脚本的 `GROUP` 第二项就是它）。**还欠着**：要么把这个静态库
-#         也交进链接，要么在链接器里认那份 ld 脚本。下一刀。
+#      c. `elf: 找不到 'atexit'` —— **还欠着，而且欠的是一格能力**。证据（容器里
+#         `llvm-nm -D --defined-only /usr/lib/libc.so.6`）：`stdout` 在（`D`，数据符号，
+#         `@@GLIBC_2.2.5`），`atexit` 与 `fmod` **都不在**。`fmod` 从 `libm.so.6` 补上了；
+#         `atexit` 只住在 `/usr/lib/libc_nonshared.a`（7266 字节，那份 ld 脚本
+#         `GROUP` 的第二项）。而 `elf-link` 那一格**只收 `.o` 与 `--dll`，不收静态库**
+#         （`macho-link` 那一侧早有 `archives`）。所以下一刀是「给 ELF 链接器接静态库」，
+#         不是再补一个库名。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"
