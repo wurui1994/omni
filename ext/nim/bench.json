@@ -2,6 +2,18 @@
   "grammar": "nim.grammar",
   "doc": "语料 = Nim 官方那棵树里 lib/ 下的 .nim（316 份 —— 标准库把缩进块、命令调用、模板/宏、pragma 全用了）。树不在就跳过。语法照 doc/grammar.txt（那份是 compiler/parser.nim 生成的）写。",
   "corpus": [
-    { "tree": "Nim", "env": "NIM_SRC", "sub": "lib", "ext": ".nim" }
-  ]
+    {
+      "tree": "Nim",
+      "env": "NIM_SRC",
+      "sub": "lib",
+      "ext": ".nim"
+    }
+  ],
+  "selfhost": {
+    "tree": "Nim",
+    "env": "NIM_SRC",
+    "sub": "compiler",
+    "ext": ".nim",
+    "doc": "nim 自己的编译器（Nim 写的，179 份）—— 同上。"
+  }
 }

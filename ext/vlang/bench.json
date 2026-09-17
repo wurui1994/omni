@@ -2,6 +2,17 @@
   "grammar": "vlang.grammar",
   "doc": "语料 = vlang 那棵树里的 .v（vlib/ 与 cmd/ 六千多份 —— V 没有官方形式语法，这批语料就是唯一的判据）。树不在就跳过。",
   "corpus": [
-    { "tree": "vlang", "env": "V_SRC", "ext": ".v" }
-  ]
+    {
+      "tree": "vlang",
+      "env": "V_SRC",
+      "ext": ".v"
+    }
+  ],
+  "selfhost": {
+    "tree": "vlang",
+    "env": "V_SRC",
+    "sub": "vlib/v",
+    "ext": ".v",
+    "doc": "V 自己的编译器（V 写的，vlib/v 底下 —— 词法/语法/检查/生成都在这儿）。"
+  }
 }
