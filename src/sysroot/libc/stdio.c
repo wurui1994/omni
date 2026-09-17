@@ -67,15 +67,23 @@ static int fmtUintTo(char *tmp, unsigned long long v, int base, int upper) {
   return n;
 }
 
-/* 把 `tmp` 里倒着的 n 位数按宽度/对齐吐出去。`pre` 是符号那一位（'-' 或 0）。 */
-static void fmtPad(FmtOut *o, char *tmp, int n, int width, char pad, int left, char pre) {
-  int total = n + (pre ? 1 : 0);
-  if (!left) {
-    /* 零填充时符号要在填充**之前**（`-007` 而不是 `00-7`）。 */
-    if (pad == '0' && pre) { fmtPut(o, pre); pre = 0; }
+/* 把 `tmp` 里倒着的 n 位数按宽度/对齐吐出去。`pre` 是**前缀串**：符号（`-`/`+`/空格）
+ * 或者 `%#x` 的 `0x`（第十二格改成串的 —— 一个 char 装不下两个字符，量到过 `%#x`
+ * 把 `0x` 整个丢了）。次序：零填充时前缀在填充**之前**（`-007`、`0x00ff`），
+ * 空格填充时前缀在填充**之后**（`  -7`）。 */
+static void fmtPad(FmtOut *o, char *tmp, int n, int width, char pad, int left,
+  const char *pre) {
+  int pl = 0;
+  while (pre != (const char *)0 && pre[pl] != 0) pl++;
+  int total = n + pl;
+  if (!left && pad == '0') {
+    for (int i = 0; i < pl; i++) fmtPut(o, pre[i]);
+    pl = 0;
     while (total < width) { fmtPut(o, pad); total++; }
+  } else if (!left) {
+    while (total < width) { fmtPut(o, ' '); total++; }
   }
-  if (pre) fmtPut(o, pre);
+  for (int i = 0; i < pl; i++) fmtPut(o, pre[i]);
   while (n > 0) fmtPut(o, tmp[--n]);
   if (left) while (total < width) { fmtPut(o, ' '); total++; }
 }
@@ -162,7 +170,8 @@ static int fmtRound(double v, int want, int fixedMode, char *out, int cap, int *
  *
  * 数字来自 `fmtRound`（精确展开），所以 `1e100` 那一行的一百位数字**全是真的**，
  * 与 glibc 逐字节相同 —— 上一版只有前 25 位是真的、后头补零。 */
-static void fmtFixed(FmtOut *o, double v, int prec, int width, char pad, int left, char pre) {
+static void fmtFixed(FmtOut *o, double v, int prec, int width, char pad, int left,
+  const char *pre, int alt) {
   char dg[DEC_DIGITS];
   int e10 = 0;
   int nd = fmtRound(v, prec, 1, dg, DEC_DIGITS, &e10);
@@ -176,6 +185,7 @@ static void fmtFixed(FmtOut *o, double v, int prec, int width, char pad, int lef
     idx--; frac--;
   }
   if (prec > 0 && n < cap) tmp[n++] = '.';
+  else if (alt && n < cap) tmp[n++] = '.';   /* `%#.0f` 要留那个点（C11 7.21.6.1） */
   if (e10 < 0 || v == 0.0) { if (n < cap) tmp[n++] = '0'; }
   else {
     int i = e10;
@@ -188,8 +198,8 @@ static void fmtFixed(FmtOut *o, double v, int prec, int width, char pad, int lef
 }
 
 /* `%e`：科学计数。`prec` 位小数（默认 6），指数至少两位。 */
-static void fmtSci(FmtOut *o, double v, int prec, int width, char pad, int left, char pre,
-  int upper) {
+static void fmtSci(FmtOut *o, double v, int prec, int width, char pad, int left,
+  const char *pre, int upper, int alt) {
   char dg[DEC_DIGITS];
   int e10 = 0;
   int want = prec + 1;
@@ -221,25 +231,25 @@ static void fmtSci(FmtOut *o, double v, int prec, int width, char pad, int left,
 }
 
 /* `%g`：有效数字 `prec` 位（默认 6，0 当 1），指数在 [-4, prec) 之外走 `%e`，
- * 而且**去掉末尾的零**（C11 7.21.6.1 第 8 段）。 */
-static void fmtGen(FmtOut *o, double v, int prec, int width, char pad, int left, char pre,
-  int upper) {
+ * 而且**去掉末尾的零**（C11 7.21.6.1 第 8 段）—— 带 `#` 时那些零留着。 */
+static void fmtGen(FmtOut *o, double v, int prec, int width, char pad, int left,
+  const char *pre, int upper, int alt) {
   if (prec == 0) prec = 1;
   char dg[DEC_DIGITS];
   int e10 = 0;
   int nd = fmtRound(v, prec > DEC_DIGITS ? DEC_DIGITS : prec, 0, dg, DEC_DIGITS, &e10);
   if (v == 0.0) e10 = 0;
-  /* 去零：从末位往前砍（至少留一位） */
+  /* 去零：从末位往前砍（至少留一位）。`#` 那一档不砍。 */
   int keep = nd;
-  while (keep > 1 && dg[keep - 1] == '0') keep--;
+  if (!alt) while (keep > 1 && dg[keep - 1] == '0') keep--;
   if (e10 < -4 || e10 >= prec) {
     /* 走 `%e`，小数位 = keep - 1。重新抠一遍最省事（位数变了）。 */
-    fmtSci(o, v, keep - 1, width, pad, left, pre, upper);
+    fmtSci(o, v, keep - 1, width, pad, left, pre, upper, alt);
     return;
   }
   int fprec = keep - 1 - e10;
   if (fprec < 0) fprec = 0;
-  fmtFixed(o, v, fprec, width, pad, left, pre);
+  fmtFixed(o, v, fprec, width, pad, left, pre, alt);
 }
 
 /* ---- 格式串那一趟 */
@@ -247,14 +257,19 @@ static int doFmt(FmtOut *o, const char *fmt, __builtin_va_list ap) {
   while (*fmt) {
     if (*fmt != '%') { fmtPut(o, *fmt++); continue; }
     fmt++;
-    /* 标志 */
+    /* 标志。`#` 与 `h`/`hh` 这两格是第十二格补的（判据一比就露出来：`%#x` 丢了 `0x`、
+     * `%hhd` 不截位）。`pre` 从一个 char 变成了**三字节的串** —— `0x` 装不进一个 char。 */
     int left = 0;
     char pad = ' ';
-    char pre = 0;
+    char pre[4];
+    int alt = 0;
+    pre[0] = 0;
     while (*fmt == '-' || *fmt == '0' || *fmt == '+' || *fmt == ' ' || *fmt == '#') {
       if (*fmt == '-') left = 1;
       else if (*fmt == '0') pad = '0';
-      else if (*fmt == '+') pre = '+';
+      else if (*fmt == '+') { pre[0] = '+'; pre[1] = 0; }
+      else if (*fmt == ' ') { if (pre[0] == 0) { pre[0] = ' '; pre[1] = 0; } }
+      else alt = 1;
       fmt++;
     }
     /* 宽度 */
@@ -271,23 +286,36 @@ static int doFmt(FmtOut *o, const char *fmt, __builtin_va_list ap) {
     }
     /* 长度前缀（`z`/`t` 都当 long） */
     int lng = 0;
+    int shrt = 0;
     while (*fmt == 'l') { lng++; fmt++; }
     if (*fmt == 'z' || *fmt == 't' || *fmt == 'j') { lng = 1; fmt++; }
-    if (*fmt == 'h') { fmt++; if (*fmt == 'h') fmt++; }
+    if (*fmt == 'h') { fmt++; shrt = 1; if (*fmt == 'h') { fmt++; shrt = 2; } }
     if (*fmt == 'L') fmt++;
     char spec = *fmt++;
     char tmp[80];
     if (spec == 'd' || spec == 'i') {
       long long v = lng >= 2 ? __builtin_va_arg(ap, long long)
         : (lng == 1 ? (long long)__builtin_va_arg(ap, long) : (long long)__builtin_va_arg(ap, int));
-      if (v < 0) { pre = '-'; v = -v; }
+      /* `h`/`hh`：变参里传的是 int（提升过的），**印之前要截回去**。
+       * 量到过 `printf("%hhd", 300)` 印 300 而 glibc 印 44。 */
+      if (shrt == 1) v = (long long)(short)v;
+      else if (shrt == 2) v = (long long)(signed char)v;
+      if (v < 0) { pre[0] = '-'; pre[1] = 0; v = -v; }
       fmtPad(o, tmp, fmtUintTo(tmp, (unsigned long long)v, 10, 0), width, pad, left, pre);
     } else if (spec == 'u' || spec == 'x' || spec == 'X' || spec == 'o') {
       unsigned long long v = lng >= 2 ? __builtin_va_arg(ap, unsigned long long)
         : (lng == 1 ? (unsigned long long)__builtin_va_arg(ap, unsigned long)
           : (unsigned long long)__builtin_va_arg(ap, unsigned int));
+      if (shrt == 1) v = (unsigned long long)(unsigned short)v;
+      else if (shrt == 2) v = (unsigned long long)(unsigned char)v;
       int base = spec == 'u' ? 10 : (spec == 'o' ? 8 : 16);
-      fmtPad(o, tmp, fmtUintTo(tmp, v, base, spec == 'X'), width, pad, left, 0);
+      /* `#`：十六进制补 `0x`/`0X`、八进制补一个 `0`（值是 0 时都不补 —— C11 那一条）。 */
+      pre[0] = 0;
+      if (alt && v != 0) {
+        if (base == 16) { pre[0] = '0'; pre[1] = spec == 'X' ? 'X' : 'x'; pre[2] = 0; }
+        else if (base == 8) { pre[0] = '0'; pre[1] = 0; }
+      }
+      fmtPad(o, tmp, fmtUintTo(tmp, v, base, spec == 'X'), width, pad, left, pre);
     } else if (spec == 's') {
       /* 宽度对 `%s` 也算（`%10s` / `%-10s`）—— 第一版漏了这一格，量到的是
        * `printf("%10s", "ab")` 一个空格都不补。 */
@@ -303,7 +331,8 @@ static int doFmt(FmtOut *o, const char *fmt, __builtin_va_list ap) {
     } else if (spec == 'p') {
       void *p = __builtin_va_arg(ap, void *);
       fmtPut(o, '0'); fmtPut(o, 'x');
-      fmtPad(o, tmp, fmtUintTo(tmp, (unsigned long long)(unsigned long)p, 16, 0), 0, ' ', 0, 0);
+      fmtPad(o, tmp, fmtUintTo(tmp, (unsigned long long)(unsigned long)p, 16, 0), 0, ' ', 0,
+        (const char *)0);
     } else if (spec == 'f' || spec == 'F' || spec == 'e' || spec == 'E'
       || spec == 'g' || spec == 'G') {
       double v = __builtin_va_arg(ap, double);
@@ -312,15 +341,16 @@ static int doFmt(FmtOut *o, const char *fmt, __builtin_va_list ap) {
       {
         union { double d; unsigned long long u; } sb;
         sb.d = v;
-        if ((sb.u >> 63) != 0) { pre = '-'; v = -v; }
+        if ((sb.u >> 63) != 0) { pre[0] = '-'; pre[1] = 0; v = -v; }
       }
       /* nan / inf：位模式认出来（这一份不依赖 math.c）。 */
       if (v != v) { fmtStr(o, "nan", -1); continue; }
-      if (v > 1.7976931348623157e308) { fmtStr(o, pre == '-' ? "-inf" : "inf", -1); continue; }
-      if (spec == 'f' || spec == 'F') fmtFixed(o, v, prec < 0 ? 6 : prec, width, pad, left, pre);
-      else if (spec == 'e' || spec == 'E') {
-        fmtSci(o, v, prec < 0 ? 6 : prec, width, pad, left, pre, spec == 'E');
-      } else fmtGen(o, v, prec < 0 ? 6 : prec, width, pad, left, pre, spec == 'G');
+      if (v > 1.7976931348623157e308) { fmtStr(o, pre[0] == '-' ? "-inf" : "inf", -1); continue; }
+      if (spec == 'f' || spec == 'F') {
+        fmtFixed(o, v, prec < 0 ? 6 : prec, width, pad, left, pre, alt);
+      } else if (spec == 'e' || spec == 'E') {
+        fmtSci(o, v, prec < 0 ? 6 : prec, width, pad, left, pre, spec == 'E', alt);
+      } else fmtGen(o, v, prec < 0 ? 6 : prec, width, pad, left, pre, spec == 'G', alt);
     } else if (spec == '%') {
       fmtPut(o, '%');
     } else {

@@ -213,3 +213,65 @@ int sscanf(const char *src, const char *fmt, ...) {
 /* ---- 回失败但不崩的那几格（这些在两个目标上同一个实现：不碰内核） */
 int backtrace(void **buf, int n) { (void)buf; (void)n; return 0; }
 char **backtrace_symbols(void *const *buf, int n) { (void)buf; (void)n; return (char **)0; }
+
+/* ---- `qsort` / `bsearch`（第一百四十片第十二格）。
+ *
+ * 两个头文件里早就声明了它们，可**谁都没实现** —— 量到的是链接时一句
+ * `macho: 符号 '_bsearch' 没有定义`（`qsort` 排在它后面，还没轮到报）。
+ *
+ * `qsort` 用**堆排序**，三条硬约束逼出来的：
+ *   - 不许 `malloc`（libc 内部再要堆容易绕回自己），所以就地换
+ *   - 不许递归（栈深度要有上界）—— 堆排序是两个循环
+ *   - **最坏也是 O(n log n)**：快排的最坏是 O(n²)，而这一份没有随机数可用来防
+ * 代价是不稳定（C 标准也不要求稳定）。元素按字节搬 —— `sz` 是运行期的数。 */
+static void qsSwap(char *a, char *b, unsigned long sz) {
+  for (unsigned long i = 0; i < sz; i++) {
+    char t = a[i];
+    a[i] = b[i];
+    b[i] = t;
+  }
+}
+
+static void qsSift(char *base, unsigned long n, unsigned long i, unsigned long sz,
+  int (*cmp)(const void *, const void *)) {
+  for (;;) {
+    unsigned long big = i;
+    unsigned long l = 2 * i + 1;
+    unsigned long r = l + 1;
+    if (l < n && cmp(base + l * sz, base + big * sz) > 0) big = l;
+    if (r < n && cmp(base + r * sz, base + big * sz) > 0) big = r;
+    if (big == i) return;
+    qsSwap(base + i * sz, base + big * sz, sz);
+    i = big;
+  }
+}
+
+void qsort(void *base, unsigned long n, unsigned long sz,
+  int (*cmp)(const void *, const void *)) {
+  if (n < 2 || sz == 0) return;
+  char *b = (char *)base;
+  /* 建堆：从最后一个非叶子往前。循环变量从 `n / 2` 数到 1、里头用 `i - 1`，
+   * 免得在 0 上减一绕回（这儿的类型是无符号的）。 */
+  for (unsigned long i = n / 2; i > 0; i--) qsSift(b, n, i - 1, sz, cmp);
+  for (unsigned long end = n - 1; end > 0; end--) {
+    qsSwap(b, b + end * sz, sz);
+    qsSift(b, end, 0, sz, cmp);
+  }
+}
+
+/* `bsearch`：二分。区间记成「起点 + 个数」而不是「左右下标」—— 下标那一版在
+ * 空区间上要用 -1，而这儿是无符号的（与上面建堆那一行同一个坑）。 */
+void *bsearch(const void *key, const void *base, unsigned long n, unsigned long sz,
+  int (*cmp)(const void *, const void *)) {
+  const char *b = (const char *)base;
+  while (n > 0) {
+    unsigned long half = n / 2;
+    const char *mid = b + half * sz;
+    int c = cmp(key, mid);
+    if (c == 0) return (void *)mid;
+    if (c > 0) { b = mid + sz; n = n - half - 1; }
+    else n = half;
+  }
+  return (void *)0;
+}
+

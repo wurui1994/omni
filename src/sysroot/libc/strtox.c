@@ -24,10 +24,13 @@ static int digitOf(int c, int base) {
 }
 
 /* 有符号/无符号共用的那一趟。`neg` 回给调用方自己定夺溢出该饱和到哪一头。 */
-static unsigned long long strtoBody(const char *s, char **end, int base, int *neg) {
+/* `*ovf` 回「攒的时候溢出过没有」。C11 7.22.1.4：溢出要**饱和**到极值并且 errno = ERANGE。
+ * 溢出之后**照旧把数字吃完** —— `endptr` 得指到数字后头，不能停在半路。 */
+static unsigned long long strtoBody(const char *s, char **end, int base, int *neg, int *ovf) {
   const char *p = s;
   while (isSpace((unsigned char)*p)) p++;
   *neg = 0;
+  *ovf = 0;
   if (*p == '+' || *p == '-') { *neg = (*p == '-'); p++; }
   if ((base == 0 || base == 16) && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')
     && digitOf((unsigned char)p[2], 16) >= 0) {
@@ -37,10 +40,12 @@ static unsigned long long strtoBody(const char *s, char **end, int base, int *ne
   }
   unsigned long long v = 0;
   const char *first = p;
+  unsigned long long b = (unsigned long long)base;
   while (1) {
     int d = digitOf((unsigned char)*p, base);
     if (d < 0) break;
-    v = v * (unsigned long long)base + (unsigned long long)d;
+    if (v > (~0ULL - (unsigned long long)d) / b) *ovf = 1;
+    else v = v * b + (unsigned long long)d;
     p++;
   }
   if (end != (char **)0) *end = (char *)(p == first ? s : p);
@@ -49,13 +54,25 @@ static unsigned long long strtoBody(const char *s, char **end, int base, int *ne
 
 long long strtoll(const char *s, char **end, int base) {
   int neg = 0;
-  unsigned long long v = strtoBody(s, end, base, &neg);
+  int ovf = 0;
+  unsigned long long v = strtoBody(s, end, base, &neg, &ovf);
+  /* 有符号那一路还得自己看一眼范围（无符号里装得下的数，有符号里可能已经过了）。
+   * 量到过：`strtol("99999999999999999999")` 回的是 7766279631452241919 —— 那是
+   * 攒出来的低 64 位，而 glibc 回 LONG_MAX。 */
+  if (ovf || (!neg && v > 0x7fffffffffffffffULL) || (neg && v > 0x8000000000000000ULL)) {
+    __libc_errno_val = 34;                     /* ERANGE（两条腿上都是 34） */
+    return neg ? (-0x7fffffffffffffffLL - 1) : 0x7fffffffffffffffLL;
+  }
   return neg ? -(long long)v : (long long)v;
 }
 long strtol(const char *s, char **end, int base) { return (long)strtoll(s, end, base); }
 unsigned long long strtoull(const char *s, char **end, int base) {
   int neg = 0;
-  unsigned long long v = strtoBody(s, end, base, &neg);
+  int ovf = 0;
+  unsigned long long v = strtoBody(s, end, base, &neg, &ovf);
+  if (ovf) { __libc_errno_val = 34; return ~0ULL; }        /* ERANGE + ULLONG_MAX */
+  /* 负号在无符号那一路是**合法的**（C11 7.22.1.4：按模 2^64 取反），
+   * 所以 `strtoul("-1")` 回的是 ULONG_MAX —— 与 glibc 一样。 */
   return neg ? (unsigned long long)(-(long long)v) : v;
 }
 unsigned long strtoul(const char *s, char **end, int base) {

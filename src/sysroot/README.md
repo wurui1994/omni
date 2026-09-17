@@ -79,7 +79,11 @@ MIR 说「要什么」，摆法归后端。
               与平台 libm 逐点对账（395 个采样，判据 `tests/c/libc-libm.js`）：
               **最大误差 5.4e-15**，302 个点逐字节相同
 - `misc.c`    时间（UTC，没有时区库）、`getenv`/`setenv`、进程（`fork`/`execvp`/
-              `system`）、目录（`getdents64`）、`atexit`、`strerror`、`sscanf`
+              `system`）、目录（`getdents64`）
+- `pure.c`    纯计算的杂项：`strerror`、`atexit`、`gmtime_r`/`strftime`、`sscanf`、
+              `qsort`（堆排序：不 malloc、不递归、最坏也是 O(n log n)）、`bsearch`。
+              这一族与 `string.c`/`stdio.c` 的边角由 `tests/c/libc-str.js` 逐行对账
+              （22 行，两条腿都与平台 libc 一行不差）
 
 **还没有的**（明说）：
 - 线程：`pthread_create` 照 POSIX 回 `EAGAIN` —— 我们的运行时**本来就有退路**
