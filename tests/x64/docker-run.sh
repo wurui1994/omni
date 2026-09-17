@@ -53,6 +53,24 @@
 #      （量到 `undefined symbol: stdout` 与 `undefined symbol: dlopen`）。判据没错，
 #      错在判据自己拼清单 —— 于是「默认 libc + crt」收成 `c link --stdlib` 一个词，
 #      `omni build` / `omni run` / 这条轴走同一条路。
+#   6. **整份编译器在容器里自己编、自己链、跑起来了**（一个外部 C 编译器都不借）：
+#        OMNI_CC=self node --max-old-space-size=8192 src/cli.js build src/cli.js -o /tmp/omni-x64
+#        -> 75945472 字节（72.4M）、24 节、8 段、入口 0x5e9bb0
+#           C 16.6M / 326444 行；前端 2.4s + 发射 809ms + cc 36.9s（整趟 44.5s，还是模拟出来的）
+#        /tmp/omni-x64 --help                          -> 印出用法
+#        /tmp/omni-x64 check tests/cases/01_basics.omni -> `ok  …：6 个函数`
+#      本机 arm64 那一份是 35.4M（`cli.js` 的 `selfCC`）—— 两台机器不可直接比大小
+#      （x86_64 这一份没有量过 `.text` 分布），这里只记「跑得起来」。
+#   7. **还欠一格，记在这儿**：`omni c run`（线性内存那条解释器腿）在 Linux 上报
+#        /usr/include/gnu/stubs.h:7: error: include file 'gnu/stubs-32.h' not found
+#      根因不是路径：那条腿的目标是**写死的虚拟目标 arm64-osx**（`tccgen.js` 的
+#      `setCharTarget('arm64','osx')`，注释里也这么说），而它读的是**这台机器真的**
+#      glibc 头 —— 预定义里没有 `__x86_64__`，`stubs.h` 于是走 32 位那一支。
+#      macOS 上两边正好对得上，所以从来没露头。这是「虚拟目标 vs 真头文件」的一格
+#      设计账（要么给那条腿一份自带的头，要么让它的预定义跟着宿主走），不是一行修得掉的，
+#      所以先钉住不猜。容器里 `tests/c/run.js` 的 `gen/` 那一组还另有一个环境限制：
+#      仓库里那份 tcc 尺子是 **macOS 二进制**（`Exec format error`），所以那一轴
+#      在容器里本来就不是判据。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"
