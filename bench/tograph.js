@@ -79,7 +79,7 @@ function filesUnder(dir, ext, out) {
  * 任何东西（漏一族就会看见"没归类"涨），这也是它敢用正则的理由。
  */
 const CLASSES = [
-  ['指针（addr / deref / &）', /addr|deref|这个算子还没接：&(?!&)/],
+  ['指针（addr / deref / &）', /addr|deref|这个算子还没接：&(?!&)|（解引用）/],
   ['option / result（or-block · 传播 · ?T）', /or-block|propagate|option/],
   ['编译期求值（when / \$if / ctconst）', /编译期|ctime|ctconst|comptime/],
   ['函数值与闭包（fnlit）', /fnlit|闭包|函数值/],
@@ -87,16 +87,24 @@ const CLASSES = [
   ['集合与字符（set-lit / char / rune）', /set 字面量|char 是自己一格类型|还没接：char|还没接：rune/],
   ['类型层的算子（typeof / sizeof / is / as / x.(T)）',
     /typeof|sizeof|isreftype|还没接：is$|还没接：as$|还没接：tswitch|还没接：assert$|登记过的类型/],
+  // **这一族是"没归类"那一栏第二回指出来的**（2026-09-18）：内嵌字段的名字要从被嵌的那格
+  // 类型来、泛型实例化 `Foo[int]{…}` 也要类型、"两个类型都声明了同名方法"更是非类型不能分。
+  // 三条都不是"哪一格还没接"，是**这一层看不见类型** —— 与"跨文件才知道的事"是邻居。
+  ['类型才分得开的事（embed / tinst / 方法重名）',
+    /是 embed|还没接：tinst|重名要类型才分得开|sum type 那一族要类型/],
   ['C 指令与外部声明（#flag / $c）', /cdirective/],
   ['语句头上的绑定（V 的 `if x := …`）', /还没接：if-bind/],
   ['命名实参 / 变参展开', /还没接：named|还没接：spread|命名实参/],
   ['成员是不是在里头（数组的 `in`）', /只接 map（数组的 in|还没接：in$/],
+  // 表达式位置上的 match 那两条也是**明说过的**（没有 else 就没有值 · 一支只准一格表达式）
   ['明说过的形状限制（主语要算好几遍 · 匿名接收者 · 格式动词 …）',
-    /要算好几遍|匿名接收者|格式动词|不是字面量|要 N 是整数字面量|只接 map 与切片|混着/],
-  ['并发与异常（chan / spawn / try / yield / select）', /chan|spawn|select|try|yield|raise|throw/],
+    /要算好几遍|匿名接收者|格式动词|不是字面量|要 N 是整数字面量|只接 map 与切片|混着|没有 else|正好是一格表达式/],
+  ['并发与异常（chan / spawn / try / yield / select · lock）',
+    /chan|spawn|select|try|yield|raise|throw|还没接：r?lock/],
   ['跨文件才知道的事（跨模块的类型 / 库函数）',
     /跨模块|声明不在这一份文件里|这份文件里没见过|只接 fmt\.Print|零值还没接：tname/],
   ['要一格"按长度造"的节点', /按长度造|list-new 收的是元素表/],
+  ['要一格"按键遍历"的节点（map 的 for-in）', /按键遍历/],
 ];
 
 /** 一堵墙归到哪一族（认不出来回 null —— 那时它进"没归类"，印出来）。 */
