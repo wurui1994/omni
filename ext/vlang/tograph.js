@@ -144,6 +144,20 @@ function collectDecls(x) {
 
 const many = (xs) => xs.map(toNode).flat();
 
+/** 图上是**引用**的那几种字面量（`&` 只接它们 —— 见 `case 'addr'`）。 */
+const AGG = new Set(['lit', 'array', 'array-fixed', 'map']);
+
+/**
+ * `(*p).f` / `(*p)[i]` 里那一层 `deref` **剥掉**（`(paren …)` 也一并剥）。
+ * 只在"当对象用"那几处调它 —— 光秃秃的 `*p` 仍旧当场报（见 `case 'deref'`）。
+ */
+function unwrapDeref(x) {
+  let y = x;
+  while (tag(y) === 'paren') y = kids(y)[0];
+  return tag(y) === 'deref' ? kids(y)[0] : x;
+}
+
+
 /**
  * `const a = 1` / `const ( … )` / `__global ( … )` -> **一串 bind**（没有 decl 节点）。
  *
@@ -379,7 +393,9 @@ function toNode(x) {
     // V 的字段表标签是 `f`，go 的是 `kv`，lua 的是 `named` —— 三种记号一格节点。
     case 'sel': {
       // `Color.red` 与 `p.x` 在树上同形 —— 左边是**登记过的枚举名**时它是那个变体的值。
-      const [obj, fld] = kids(x);
+      // 左边是 `(*p)` 时剥掉那一层（见 addr / deref 那一段）。
+      const obj = unwrapDeref(kids(x)[0]);
+      const fld = kids(x)[1];
       if (tag(obj) === 'name') {
         const key = `${leaf(kids(obj)[0])}.${leaf(fld)}`;
         if (ENUMS.has(key)) return node('const', {}, { value: ENUMS.get(key) });
@@ -452,8 +468,24 @@ function toNode(x) {
     // 但语法给 `none` 一条**自己的产生式**，与 `(bool …)` 是同一种错）。
     // 注意它与三段 for 里那个空格子**同一个标签**：那几处在 `for` 那一格上先滤掉了。
     case 'none': return lit(null);
+    // ---- 指针：只接**与图的语义正好重合**的那一半（与 go 那一门同一条口径）--------
+    //
+    // 图上的记录 / 列表 / map 本来就是**引用**，所以 `&Foo{…}`（V 的语料里到处是它：
+    // `&ast.Ident{…}`）在图上**就是那一格聚合本身** —— 不是近似，是重合。
+    // `&x`（名字的地址）与光秃秃的 `*p` 当场报：那两处要真的指针。
+    // V 的 `&Foo` 当**类型**用时走的是另一条产生式（`(ref …)`），类型不进图，与这儿无关。
+    case 'addr': {
+      const a = kids(x)[0];
+      if (AGG.has(tag(a))) return toNode(a);
+      throw new Error('v->graph: `&` 只接"刚造出来的那一格聚合"（`&T{…}` / `&[…]`）——'
+        + '一个名字的地址是真别名，图上没有指针那一格');
+    }
+    case 'deref':
+      throw new Error('v->graph: `*p` 只接"当对象用"那一处（`(*p).f` / `(*p)[i]`）——'
+        + '当值用要指针那一格');
     case 'index': {
-      const [o, i] = kids(x);
+      const o = unwrapDeref(kids(x)[0]);
+      const i = kids(x)[1];
       return isMap(o) ? mapGet(toNode(o), toNode(i)) : indexGet(toNode(o), toNode(i));
     }
     // `k in m` -> map-has（键在不在，go 那门写成 comma-ok —— 同一格节点）、

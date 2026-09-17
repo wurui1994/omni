@@ -319,6 +319,16 @@ function valSpecs(x) {
 /** `(name x)`。Go 的 lhs 也是它。 */
 const nameOf = (x) => (tag(x) === 'name' ? leaf(kids(x)[0]) : leaf(x));
 
+/**
+ * `(*p).f` / `(*p)[i]` 里的那一层 `deref` **剥掉**（`(paren …)` 也一并剥）。
+ * 只在"当对象用"那几处调它 —— 光秃秃的 `*p` 仍旧当场报（见 `case 'deref'`）。
+ */
+function unwrapDeref(x) {
+  let y = x;
+  while (tag(y) === 'paren') y = kids(y)[0];
+  return tag(y) === 'deref' ? kids(y)[0] : x;
+}
+
 function funcOf(sig, blk, name, self) {
   const params = partKids(sig, 'in').map((p) => {
     const nm = part(p, 'name');
@@ -546,8 +556,28 @@ function toNode(x) {
     // `(none)` 是 go.grammar 里 opt-h-simple / opt-h-expr 的空产生式
     // （三段 for 的任何一格省略时会出现）—— 它不是节点，丢掉。
     case 'none': return [];
-    // `p.x` -> field-get（与 lua/nim 的 `(dot …)`、V 的 `(sel …)` 同一格节点）
-    case 'sel': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
+    // `p.x` -> field-get（与 lua/nim 的 `(dot …)`、V 的 `(sel …)` 同一格节点）。
+    // 左边是 `(deref …)` 时**剥掉那一层**：`(*p).f` 读的就是那一格聚合的字段（见 addr 那一段）。
+    case 'sel': return fieldGet(toNode(unwrapDeref(kids(x)[0])), leaf(kids(x)[1]));
+    // ---- 指针：图上没有那一格，所以只接**与图的语义正好重合**的那一半 -------------
+    //
+    // 图上的记录与列表本来就是**引用**（`record-new` 交出来的是同一格对象，见 eval.js 的
+    // 那一格）—— 所以 `&T{…}`（取一格刚造出来的聚合的地址）在图上**就是那一格聚合本身**，
+    // 这不是近似，是重合：go 里 `p := &T{}` 之后 `p.f = 1` 改的是那一格，图上一样。
+    //
+    // 反过来两处刻意当场报，因为它们**要真的指针**：
+    //   * `&x`（一个名字的地址）—— 两处名字要指同一格，图上没有那一格；
+    //   * 光秃秃的 `*p` 当值用 —— 要么是标量指针（图上没有），要么是"换掉被指的那一整格"
+    //     （`*p = v`）。`(*p).f` / `(*p)[i]` 那两处是例外：它们读的是聚合，剥一层就对。
+    case 'addr': {
+      const a = kids(x)[0];
+      if (tag(a) === 'lit') return toNode(a);
+      throw new Error('go->graph: `&` 只接"刚造出来的那一格聚合"（`&T{…}`）——'
+        + '一个名字的地址是真别名，图上没有指针那一格');
+    }
+    case 'deref':
+      throw new Error('go->graph: `*p` 只接"当对象用"那一处（`(*p).f` / `(*p)[i]`）——'
+        + '当值用要指针那一格');
     // `Point{x: 1, y: 2}` -> record-new；`[]int{10, 20}` -> list-new。
     // **同一条产生式两种字面量**：带字段名的落记录、不带的落列表（混着的当场报）。
     case 'lit': {
@@ -575,7 +605,8 @@ function toNode(x) {
     }
     // `m[k]` 与 `xs[i]` 在树上同形，差别在**那个名字装的是什么**（`MAPS` 那一趟扫查）
     case 'index': {
-      const [o, i] = kids(x);
+      const [o0, i] = kids(x);
+      const o = unwrapDeref(o0);
       return isMap(o) ? mapGet(toNode(o), toNode(i)) : indexGet(toNode(o), toNode(i));
     }
     // `xs[1:3]` -> slice（**上界不含**，与图上那格一致，go 不用调）
