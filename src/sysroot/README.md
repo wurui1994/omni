@@ -148,14 +148,18 @@ e < 0：m / 2^k = m·5^k / 10^k —— 算 m·5^k，小数点往左退 k 位（�
 ## 整份编译器跑在自带 libc 上（两条腿都量过）
 
 ```
-x86_64-linux（容器里）  72.6M   ./omni-self --help / check 01_basics.omni  两条 rc=0
+x86_64-linux（容器里）  72.9M   ./omni --help / check / emit mir  三条 rc=0
                         ldd 说 statically linked，DT_NEEDED 一条都没有
+                        （76453421 字节、16 节、8 段；前端 1.5s + 发射 1.1s + cc 20.0s）
 arm64-osx（本机）       43.2M   OMNI_CC=self omni build src/cli.js --extern \
                                   --libc self --sysroot src/sysroot/arm64-osx
                         C 16.8M / 334626 行，前端 1.2s + 发射 394ms + cc 9.2s
                         otool -L **一行都不印** —— 连 libSystem 都不沾
                         ./omni check 五份用例，输出与 node 那条腿逐字相同
 ```
+
+两条腿都是在**这一版 libc**（精确的浮点打印与 strtod、Payne-Hanek、补齐的
+qsort/bsearch/ungetc/fscanf 那一批）上重新量的。
 
 macOS 那一趟顺出三笔账，都是「按 Linux 的形状照抄」踩出来的：
 
