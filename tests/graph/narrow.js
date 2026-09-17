@@ -156,7 +156,7 @@ const cOf = (g) => cBack.lower(g).text;
   has('intmath〔循环条件也是 C 的比较〕', c, 'if (!((v_i <= v_n))) break;');
   has('intmath〔形参也窄了〕', c, 'static double fn2_fact(double v_n)');
   has('intmath〔调用点递的就是数〕', c, 'fn2_fact(5.0)');
-  has('intmath〔递归那一句：一格装箱都没有〕', c, 'double t7 = (v_n * fn2_fact((v_n - 1.0)));');
+  has('intmath〔递归那一句：一格装箱都没有〕', c, 'return (v_n * fn2_fact((v_n - 1.0)));');
   /* 判据 3 的原话是「`intmath` 那一族的 `g_num(g_d(` 往返归零」——**现在是 0**，
    * 而且这一回是**真没了**：形参、局部量、返回值三处都窄了（`numPlan` 的三格），
    * 那份 C 里剩下的唯一一次装箱在**印那一步**（`g_print` 收的是 `gv *`）：
@@ -165,7 +165,7 @@ const cOf = (g) => cBack.lower(g).text;
   const round = c.split('g_num(g_d(').length - 1;
   if (round === 0) ok('intmath〔g_num(g_d( 归零：形参 / 局部量 / 返回值三处都窄了〕');
   else no('intmath〔g_num(g_d( 的次数〕', `量到 ${round} 次，账上写的是 0 —— 改了就把账一起改`);
-  has('intmath〔只在印那一步装箱（g_print 收 gv *）〕', c, 'pt9[0] = g_num(fn2_fact(5.0));');
+  has('intmath〔只在印那一步装箱（g_print 收 gv *）〕', c, '] = g_num(fn2_fact(5.0));');
 }
 
 // ---- 形参不该窄的不窄：有一个调用点递的不是数

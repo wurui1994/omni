@@ -975,6 +975,16 @@ class CGen {
     }
   }
 
+  /** 路上（走到 `stop` 那一层为止）有没有出口动作要跑 —— 没有的话早退不必先落一格临时量。 */
+  hasExits(stop) {
+    for (let i = this.frames.length - 1; i >= 0; i--) {
+      const f = this.frames[i];
+      if (f.exits.length > 0) return true;
+      if (f.kind === stop) break;
+    }
+    return false;
+  }
+
   emit(s) { this.lines.push(`${'  '.repeat(this.depth)}${s}`); }
 
   fresh() { this.n += 1; return `t${this.n}`; }
@@ -1038,13 +1048,17 @@ class CGen {
     const outerRnum = this.rnum;
     this.rnum = rnum;
     const t = this.fresh();
-    /* 尾巴那格临时量：回 double 的函数里它也是 double。**它是走不到的那一条路**
-     * （能窄的前提就是「体的最后一格是 `ret`」），摆在这儿只为让 C 有个返回值可回。 */
-    this.emit(rnum ? `double ${t} = 0.0;` : `gv ${t} = g_nil();`);
+    /* 尾巴那格临时量：回 double 而且体的最后一格就是 `ret` 时，它是**走不到的一条路** ——
+     * 那就别发那一格声明了，末尾直接 `return 0.0;`（C 要有个返回值可回，仅此而已）。 */
+    const lastNode = asList(x.ins.body).length > 0
+      ? asList(x.ins.body)[asList(x.ins.body).length - 1] : null;
+    const tailRet = lastNode !== null && lastNode !== undefined && lastNode.op === 'ret';
+    const dead = rnum && tailRet;
+    if (!dead) this.emit(rnum ? `double ${t} = 0.0;` : `gv ${t} = g_nil();`);
     this.pushFrame('fn');
-    this.body(asList(x.ins.body), t);
+    this.body(asList(x.ins.body), dead ? null : t);
     this.popFrame();
-    this.emit(`return ${t};`);
+    this.emit(dead ? 'return 0.0;' : `return ${t};`);
     this.inFn -= 1;
     const lines = this.lines;
     this.lines = outer;
@@ -1315,16 +1329,21 @@ class CGen {
       /* 函数体里 `ret` 就是 C 的 `return`。顶层（`main`）那一格回退出码 0：图的值不是
        * 进程的退出码，矩阵比的是印出来的那几行。值照旧算一遍 —— 它可能有副作用。 */
       if (this.inFn > 0) {
-        const t = this.fresh();
+        /* 路上没有出口动作时**直接回**：那一格临时量本来是为了「先算值、再跑出口动作」
+         * 才有的（那些动作可能改到值里读的那几个名字）。没有动作，它就是白发一行。 */
+        const noExits = !this.hasExits('fn');
         if (this.rnum) {
-          /* 回 double 的函数：这一格也走 double（值照旧先算成一格临时量 —— 出口动作
-           * 要在它之后跑，而那些动作可能改到值里读的那几个名字）。 */
-          this.emit(`double ${t} = ${x.ins.value === undefined ? '0.0' : this.dVal(x.ins.value)};`);
+          const v = x.ins.value === undefined ? '0.0' : this.dVal(x.ins.value);
+          if (noExits) { this.emit(`return ${v};`); return; }
+          const t = this.fresh();
+          this.emit(`double ${t} = ${v};`);
           this.emitExits('fn');
           this.emit(`return ${t};`);
           return;
         }
         const v = x.ins.value === undefined ? 'g_nil()' : this.valOf(x.ins.value);
+        if (noExits) { this.emit(`return ${v};`); return; }
+        const t = this.fresh();
         this.emit(`gv ${t} = ${v};`);
         this.emitExits('fn');
         this.emit(`return ${t};`);
