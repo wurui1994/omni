@@ -48,7 +48,7 @@
 
 import { NODES } from './nodes.js';
 // 五份"形状上的账"各带一份证物，证物是**手搭的小图** —— 所以要 node()（它顺带查五栏声明）
-import { node } from './graph.js';
+import { node, lit } from './graph.js';
 // 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
 import { PRIMS } from './prims.js';
 // 字符串常量要发成一段字节 —— 与 C / LLVM 两条腿共用同一份编码（宿主的 TextEncoder 不用）
@@ -77,12 +77,13 @@ const CAN = new Map([
   ['slice', true],
   ['scope-exit', true],
   ['loop-exit', true],
-  /* **断言**（第二十九批）：条件与那句话这两格都接得住，欠的是"停下来"——
-     wasm 有 `unreachable`，可我们这条腿的判据是把文本交给 frontend-wat 读成 MIR 再跑，
-     而那一侧的陷入会把**已经印出去的话一起吞掉** —— 于是"印一句话再停下来"这个口径
-     在这条腿上给不出来。给一句人话，不硬发。 */
-  ['assert', 'wat 后端还没接：assert（`unreachable` 会把已经印出去的话一起吞掉，'
-    + '而这一格的口径是"先印一句话再停下来"）'],
+  /* **断言**（第二十九批）：`(if (i32.eqz 条件) (then 印那一句 (unreachable)))`。
+     那一刀落地时我写的是"`unreachable` 会把已经印出去的话一起吞掉，所以这条腿给不出
+     那个口径" —— **那句话是我猜的，量下来是错的**：MIR 那台解释器把 `unreachable` 当成
+     一句运行期错误（印 `omni: runtime error: wasm: unreachable` 然后停），而 `runWat`
+     收输出走的是 sink —— 所以陷入**之前**印出去的那一行留得住。判据是
+     `tests/graph/assertfail.js`（那一格现在六条腿全绿）。 */
+  ['assert', true],
 ]);
 
 export function watCan(op) {
@@ -1211,6 +1212,24 @@ function emitOnce(graph, retOf, multiOf) {
         const k = expr(x.ins.key, sc, pre);
         const v = expr(x.ins.value, sc, pre);
         return [...pre, `(call $__map_set ${o} ${k} ${v} (i64.const ${m}))`];
+      }
+      /**
+       * **断言**：条件成立什么都不做；不成立先印那一句、再 `unreachable` 停下来。
+       *
+       * 那一行照 `print` 走一遍（串在这条腿上只许待在"绑给局部量"与"打印"两处 ——
+       * 而这儿正是打印），拼一句用现成的 `concat` 内建。所以这一格**没给这条腿加新东西**。
+       */
+      case 'assert': {
+        const c = cond(x.ins.cond, sc, pre);
+        const line = x.ins.msg === undefined || x.ins.msg === null
+          ? node('prim', { args: [lit('assert failed')] }, { name: 'print' })
+          : node('prim', {
+            args: [node('prim', {
+              args: [lit('assert failed: '), x.ins.msg],
+            }, { name: 'concat' })],
+          }, { name: 'print' });
+        const say = stmts([line], new WatScope(f, sc), f).join(' ');
+        return [...pre, `(if (i32.eqz ${c}) (then ${say} (unreachable)))`];
       }
       case 'branch': {
         const c = cond(x.ins.cond, sc, pre);
