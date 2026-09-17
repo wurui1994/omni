@@ -72,6 +72,10 @@ const LINK_COMMON = [
   { name: '-e', arity: 1, value: 'NAME', brief: '入口符号' },
   { name: '-L', arity: 1, value: 'DIR', brief: '库的搜索目录，可重复' },
   { name: '-l', arity: 1, value: 'NAME', brief: '链一个库' },
+  /* `--stdlib`：tcc 的 `tcc_add_runtime`（默认 libc + crt 那三个 `.o` + 入口 `_start`）。
+   * tcc 那边这件事是 `-nostdlib` 反过来说的；我们摆成开关，因为 `c link` 也用来链
+   * 不带 libc 的东西（交叉目标、字节判据）。 */
+  { name: '--stdlib', arity: 0, brief: '带上默认 libc 与 crt（= tcc 不给 -nostdlib 时那一份）' },
   { name: '-r', arity: 0, brief: '出可重定位的 .o（tcc -r，从前叫 elf-r）' },
   { name: '--shared', arity: 0, brief: '出共享库' },
   { name: '--rdata', arity: 1, value: 'NAME', brief: '只读节的名字（PE 上叫 .rdata）' },

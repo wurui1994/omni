@@ -1989,11 +1989,10 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
    * 由 `dlopen` 在平坦命名空间里解析。 */
   const rt = plugin === undefined ? runtimeObjectsSelf(arch, os) : [];
   const sh = plugin === undefined ? [] : ['--shared', '--install-name', basename(outPath)];
-  /* crt 那三个 `.o` 只有可执行文件要（共享库没有 `_start`）。 */
-  const crt = plugin === undefined ? cCrt(os) : { pre: [], post: [] };
-  const ent = crt.pre.length === 0 ? [] : ['-e', '_start'];
-  const rc = main(['c', 'link', ...crt.pre, obj, ...rt, ...crt.post, '-o', outPath,
-    '--arch', arch, '--os', os, '-f', fmt, ...ent, ...sh, ...cDefaultLibs(os), ...libs, '-q']);
+  /* `--stdlib` 一个词把「默认 libc + crt + 入口 `_start`」都带上（见 `c-link` 那一段）；
+   * 共享库那一路它自己夹掉 crt。 */
+  const rc = main(['c', 'link', obj, ...rt, '-o', outPath,
+    '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...libs, '-q']);
   if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（C 留在 ${cPath}）`);
   /* 执行位（tcc 在 `tcc_output_file` 里 chmod 0777；我们自己写字节，所以自己补一句 ——
    * 少了它只能看着 `Permission denied`）。 */
@@ -2466,11 +2465,8 @@ function runCFile(path, argv) {
   const { flags, prog } = cSplitArgs(argv);
   cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
   vStep(`c front end + codegen  ${path} -> ${obj}`);
-  const crt = cCrt(os);
-  const rc = main(['c', 'link', ...crt.pre, obj, ...crt.post, '-o', exe,
-    '-f', fmt, '--arch', arch, '--os', os,
-    ...(crt.pre.length === 0 ? [] : ['-e', '_start']),
-    ...cDefaultLibs(os), '-q']);
+  const rc = main(['c', 'link', obj, '-o', exe,
+    '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
   if (rc !== 0) return rc;
   /* tcc 在 `tcc_output_file` 里给可执行文件补执行位（chmod 0777）—— 我们自己写字节，
    * 所以这一格得自己补，不然只能看着 `Permission denied`。 */
@@ -2501,11 +2497,8 @@ function buildCFile(path, rest) {
   mkdirAll(dirname(obj));
   cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
   vStep(`c front end + codegen  ${path} -> ${obj}`);
-  const crt = cCrt(os);
-  const rc = main(['c', 'link', ...crt.pre, obj, ...crt.post, '-o', out,
-    '-f', fmt, '--arch', arch, '--os', os,
-    ...(crt.pre.length === 0 ? [] : ['-e', '_start']),
-    ...cDefaultLibs(os), '-q']);
+  const rc = main(['c', 'link', obj, '-o', out,
+    '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
   if (rc !== 0) return rc;
   if (os !== 'win32') spawn('chmod', ['+x', out], 'c');
   stderr(`omni: built ${out} via 自带的 C 前端 + ${fmt} 链接器\n`);
@@ -2832,6 +2825,28 @@ function main(argv) {
     else if (f === 'macho') cmd = 'macho-link';
     else if (f === 'pe') cmd = 'pe-link';
     else throw new OmniError(`c link: 不认识格式 '${f}'；有 elf macho pe`);
+    /* `--stdlib`：tcc 的 `tcc_add_runtime` + `tccelf_add_crtbegin/end` 那一份 ——
+     * 默认 libc 加上 crt 那三个 `.o`，入口跟着换成 `_start`。
+     *
+     * 为什么摆成一个开关而不是默认：`c link` 的四条腿也用来链**不带 libc 的东西**
+     * （交叉编译的目标、`-nostdlib` 那一路、我们自己的那些字节判据），tcc 那边这件事
+     * 是 `-nostdlib` 反过来说的。摆成开关，「要一份能跑的可执行文件」的调用方
+     * （`omni build`、`omni run`、selfc 那条轴）就只写一个词，不必各自去拼三份清单
+     * —— 少一处拼错的机会（selfc 那条轴在 Linux 上就是这么漏掉 libc 的：
+     * 容器里量到 `undefined symbol: stdout` 与 `undefined symbol: dlopen`）。 */
+    if (rest.includes('--stdlib')) {
+      const si = rest.indexOf('--os');
+      const os = si >= 0 ? rest[si + 1] : hostOs();
+      if (cmd === 'elf-link' && !rest.includes('--shared')) {
+        const crt = cCrt(os);
+        if (crt.pre.length !== 0) {
+          files.unshift(...crt.pre);
+          files.push(...crt.post);
+          if (!rest.includes('-e')) rest.push('-e', '_start');
+        }
+      }
+      rest.push(...cDefaultLibs(os));
+    }
   }
   // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）。
   // `--lang` 选前端：驱动是与语言无关的，omni 走检查器的增量会话，sx/asy 走核心方言的，

@@ -47,6 +47,12 @@
 #             `crt1.o`+`crti.o`（末尾 `crtn.o`）、入口查 `_start`（`tccelf.c:1761/2717`）。
 #             **已还**：`cCrt()` 按这个次序交进去。
 #   4. `omni run x.c` / `omni build x.c`（printf + fmod）也都跑得对：`hello 42 1.5`。
+#   5. **`node tests/selfc/run.js` 在容器里 6/0** —— 我们编、我们链，跑出来与解释器
+#      逐字节相同，连「我们出 `.so` + 我们链的可执行文件 `dlopen` 它」那一格都过。
+#      这条轴一开始是 2/4：它自己手拼 `-lc`，而那份清单**在非 macOS 上是空表**
+#      （量到 `undefined symbol: stdout` 与 `undefined symbol: dlopen`）。判据没错，
+#      错在判据自己拼清单 —— 于是「默认 libc + crt」收成 `c link --stdlib` 一个词，
+#      `omni build` / `omni run` / 这条轴走同一条路。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

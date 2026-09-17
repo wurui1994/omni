@@ -86,12 +86,23 @@ const FMT = OS === 'osx' ? 'macho' : OS === 'win32' ? 'pe' : 'elf';
 const node = (args) => spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 1 << 28 });
 const omni = (args) => node([CLI, ...args]);
 
-/** macOS 上链接要 libSystem（`___error` 一族在那儿）：SDK 的 usr/lib。取不到就跳过。 */
+/**
+ * 链接时那一份「默认 libc + crt」——一个词：`--stdlib`（`c link` 那一格，
+ * 与 `omni build` / `omni run` 走同一条路）。
+ *
+ * 从前这儿是手写的 `['-lc', '-L', <SDK>/usr/lib]`，而**非 macOS 上回的是空表** ——
+ * 于是 x86_64 容器里这条轴 4 条挂在 `undefined symbol: stdout` 与
+ * `undefined symbol: dlopen` 上：链出来的东西一个共享库都没带，crt 也没有。
+ * 判据本身没错，错在判据自己拼那份清单。
+ *
+ * macOS 上 SDK 那一层还是要探一次（`-L <SDK>/usr/lib` 由 `cDefaultLibs('osx')` 给，
+ * 它走的是 `c.usrLib` 那格能力）—— 取不到就跳过整轴，与从前一样。
+ */
 function usrLib() {
-  if (OS !== 'osx') return [];
+  if (OS !== 'osx') return ['--stdlib'];
   const r = spawnSync('xcrun', ['--show-sdk-path'], { encoding: 'utf8' });
   if (r.status !== 0) return null;
-  return ['-lc', '-L', join((r.stdout ?? '').trim(), 'usr', 'lib')];
+  return ['--stdlib'];
 }
 
 const dir = workDir('selfc');
