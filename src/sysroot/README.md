@@ -64,7 +64,8 @@ MIR 说「要什么」，摆法归后端。
 - `start.c`   `_start`：`__builtin_frame_address(0)` 取 argc/argv/environ，收场走 `exit`
 - `string.c`  `mem*` / `str*`，零 syscall
 - `io.c`      `open`/`read`/`write`/`stat`/`mkdir`… 加 `__errno_location`
-- `malloc.c`  `brk` 上的 first-fit（每块一个 16 字节头，free 只清标记）
+- `malloc.c`  32 个箱的空闲表 + 顶上切，全是 O(1)。判据 `tests/c/libc-malloc.js`
+              （本机 0.3s 跑完 20 万块；第一版是**线性 first-fit**，在那儿 timeout）
 - `stdio.c`   `printf` 一族：整数/字符串**与 glibc 逐字节相同**，浮点见下
 - `strtox.c`  `strtol` 一族 + `strtod`（尾数攒成 u64，最后**一次**乘 10 的幂）
 - `file.c`    `FILE *` 那一层：无缓冲，`FILE` 就是一个 fd 加两位状态

@@ -1,96 +1,143 @@
-/* malloc.c — brk 上的极简分配器（第一百四十片）。
+/* malloc.c — 分箱的空闲表 + 顶上切（第一百四十片，第二版）。
  *
- * 设计：线性 bump allocator + 每块一个 header（size + used 位）。
- * free 只标记 used=0，realloc 原地扩或重分配。没有合并、没有分桶。
- * 够我们的编译器跑起来就行 —— 真的性能优化是以后的事。
+ * 第一版是「整堆线性 first-fit」，两个错，都是要命的：
  *
- * 对齐：所有返回地址 16 字节对齐（SysV 要求 malloc 回 16 对齐）。
+ * 一、**死循环**。`heap_grow` 一次至少长 64K，而只有「这次要的那一块」写了块头，
+ *     后面那一大截 slack 是**零**。下一次 malloc 扫到那儿：`bsz = 0`，既不满足
+ *     `bsz >= total`，`p += bsz` 又不动 —— 原地转圈。72M 那份编译器在容器里跑了
+ *     214s 出不来就是这一格（不是模拟慢）。
+ * 二、**O(n²)**。每次 malloc 从堆底扫一遍。编译器一趟几十万次分配，扫的总量是
+ *     块数的平方。
+ *
+ * 这一版：
+ *   - 每块一个 16 字节头：`[0]` = 块的总字节数（含头）| used 位，`[8]` = 空闲表的下一格。
+ *   - 32 个箱子按 2 的幂分（箱 k 装 [2^k, 2^(k+1)) 字节的块）。malloc 从「够大的
+ *     那个箱」往上找第一个非空的，弹出表头；一个都没有就从顶上切一块。都是 O(1)。
+ *   - free 只把块推回它那个箱（LIFO）。**不合并** —— 明写在这儿：一块 1M 的空闲块
+ *     只服务 ≥ 512K 的请求。合并要边界标记加双向表，那是下一步的事；这一版先把
+ *     「不死循环、不平方」这两件事钉住。
+ *   - 顶上切完就长堆，一次长 max(要的, 上次的两倍, 1M) —— brk 的次数于是是对数级。
  */
-#include "syscall.h"
+#include "libc.h"
 
-/* brk(0) 返回当前堆顶；brk(addr) 设新堆顶，成功回新值，失败回旧值。 */
-static unsigned long heap_start;
-static unsigned long heap_end;
-
-#define HEADER_SIZE 16   /* 8 字节 size + 8 字节对齐/标记 */
+#define HDR       16
 #define ALIGN16(x) (((x) + 15) & ~(unsigned long)15)
+#define NBIN      32
 
-static void heap_init(void) {
-  if (heap_start != 0) return;
-  long cur = __omni_syscall(SYS_brk, 0);
-  heap_start = (unsigned long)cur;
-  heap_end = heap_start;
+static unsigned long heapCur;       /* 顶上还没切的那一格 */
+static unsigned long heapEnd;       /* brk 到哪儿了 */
+static unsigned long heapStep = 1048576;
+static unsigned long bins[NBIN];    /* 每个箱的表头（0 = 空） */
+
+/* 块大小 -> 箱号：最高位的位置（`total` 至少 32，所以箱号至少 5）。 */
+static int binOf(unsigned long total) {
+  int k = 0;
+  while ((total >> k) > 1) k++;     /* k = floor(log2 total) */
+  return k >= NBIN ? NBIN - 1 : k;
 }
 
-static void *heap_grow(unsigned long need) {
-  unsigned long new_end = ALIGN16(heap_end + need);
-  /* 一次至少长 64K，减少 brk 调用次数。 */
-  if (new_end - heap_end < 65536) new_end = ALIGN16(heap_end + 65536);
-  long r = __omni_syscall(SYS_brk, (long)new_end);
-  if ((unsigned long)r < new_end) return (void *)0;   /* brk 失败 */
-  unsigned long old = heap_end;
-  heap_end = (unsigned long)r;
-  return (void *)old;
+static int heapGrow(unsigned long need) {
+  if (heapEnd == 0) {
+    long cur = __omni_syscall(SYS_brk, 0);
+    if (cur <= 0) return -1;
+    heapCur = (unsigned long)cur;
+    heapEnd = heapCur;
+  }
+  unsigned long want = need;
+  if (want < heapStep) want = heapStep;
+  unsigned long ne = ALIGN16(heapEnd + want);
+  long r = __omni_syscall(SYS_brk, (long)ne);
+  if ((unsigned long)r < ne) return -1;
+  heapEnd = (unsigned long)r;
+  if (heapStep < 67108864UL) heapStep *= 2;   /* 长到 64M 一步为止 */
+  return 0;
 }
 
 void *malloc(unsigned long size) {
-  heap_init();
   if (size == 0) size = 1;
-  unsigned long total = ALIGN16(size + HEADER_SIZE);
-
-  /* 线性扫一遍找 free 块（first-fit）。 */
-  unsigned long p = heap_start;
-  while (p + HEADER_SIZE <= heap_end) {
-    unsigned long *hdr = (unsigned long *)p;
-    unsigned long bsz = hdr[0] & ~1UL;
-    int used = (int)(hdr[0] & 1);
-    if (!used && bsz >= total) {
-      hdr[0] = bsz | 1;
-      return (void *)(p + HEADER_SIZE);
+  unsigned long total = ALIGN16(size + HDR);
+  /* 1. 箱子里找。从「装得下 total 的那个箱」起往上 —— 箱 k 里最小的块是 2^k，
+   *    所以 k >= binOf(total) 那些箱里的块一定够大（binOf 是向下取的，所以
+   *    binOf(total) 那一箱里可能有比 total 小的，得挑一下）。 */
+  int k = binOf(total);
+  int b = k;
+  while (b < NBIN) {
+    unsigned long p = bins[b];
+    /* 高一档的箱子里**每一块都够大**（箱 b 里最小的块是 2^b ≥ total），所以直接弹表头。
+     * 只有 binOf(total) 那一箱要挑 —— 而那一挑最多看 8 格就走，不然一条长表能把
+     * malloc 拖回 O(n)（第一版就是被「扫」拖死的，这儿不许再留一条扫的路）。 */
+    if (b > k) {
+      if (p != 0) {
+        unsigned long *h = (unsigned long *)p;
+        bins[b] = h[1];
+        h[0] = (h[0] & ~1UL) | 1;
+        h[1] = 0;
+        return (void *)(p + HDR);
+      }
+      b++;
+      continue;
     }
-    p += bsz;
+    unsigned long prev = 0;
+    int look = 0;
+    while (p != 0 && look < 8) {
+      unsigned long *h = (unsigned long *)p;
+      unsigned long bsz = h[0] & ~1UL;
+      if (bsz >= total) {
+        if (prev == 0) bins[b] = h[1];
+        else ((unsigned long *)prev)[1] = h[1];
+        h[0] = bsz | 1;
+        h[1] = 0;
+        return (void *)(p + HDR);
+      }
+      prev = p;
+      p = h[1];
+      look++;
+    }
+    b++;
   }
-
-  /* 没有空闲块，往后长。 */
-  void *base = heap_grow(total);
-  if (base == (void *)0) return (void *)0;
-  unsigned long *hdr = (unsigned long *)base;
-  hdr[0] = total | 1;
-  hdr[1] = 0;
-  return (void *)((unsigned long)base + HEADER_SIZE);
+  /* 2. 顶上切。不够就长堆。 */
+  if (heapEnd == 0 || heapCur + total > heapEnd) {
+    if (heapGrow(total) < 0) return (void *)0;
+  }
+  unsigned long blk = heapCur;
+  heapCur += total;
+  unsigned long *h = (unsigned long *)blk;
+  h[0] = total | 1;
+  h[1] = 0;
+  return (void *)(blk + HDR);
 }
 
 void free(void *ptr) {
   if (ptr == (void *)0) return;
-  unsigned long *hdr = (unsigned long *)((unsigned long)ptr - HEADER_SIZE);
-  hdr[0] &= ~1UL;   /* 清 used 位 */
+  unsigned long p = (unsigned long)ptr - HDR;
+  unsigned long *h = (unsigned long *)p;
+  unsigned long bsz = h[0] & ~1UL;
+  if (bsz < HDR + 16) return;            /* 不像我们发出去的块：不碰 */
+  h[0] = bsz;                            /* 清 used */
+  int b = binOf(bsz);
+  h[1] = bins[b];
+  bins[b] = p;
 }
 
 void *calloc(unsigned long n, unsigned long size) {
   unsigned long total = n * size;
   void *p = malloc(total);
-  if (p == (void *)0) return (void *)0;
-  /* memset 在 string.c 里 */
-  unsigned char *b = (unsigned char *)p;
-  unsigned long i = 0;
-  while (i < total) { b[i] = 0; i++; }
+  if (p == (void *)0) return p;
+  memset(p, 0, total);
   return p;
 }
 
 void *realloc(void *ptr, unsigned long size) {
   if (ptr == (void *)0) return malloc(size);
   if (size == 0) { free(ptr); return (void *)0; }
-  unsigned long *hdr = (unsigned long *)((unsigned long)ptr - HEADER_SIZE);
-  unsigned long old_total = hdr[0] & ~1UL;
-  unsigned long old_usable = old_total - HEADER_SIZE;
-  if (size <= old_usable) return ptr;   /* 原地够用 */
+  unsigned long *h = (unsigned long *)((unsigned long)ptr - HDR);
+  unsigned long old = (h[0] & ~1UL) - HDR;
+  if (size <= old) return ptr;
   void *nw = malloc(size);
-  if (nw == (void *)0) return (void *)0;
-  /* memcpy 在 string.c 里 —— 但这一份不 include string.h，手写一遍。 */
-  unsigned char *dp = (unsigned char *)nw;
-  unsigned char *sp = (unsigned char *)ptr;
-  unsigned long i = 0;
-  while (i < old_usable) { dp[i] = sp[i]; i++; }
+  if (nw == (void *)0) return nw;
+  memcpy(nw, ptr, old);
   free(ptr);
   return nw;
 }
+
+/* 这一份用得着的两条（`string.c` 里那两个是同一份实现，这儿只是声明在 libc.h 上）。 */
