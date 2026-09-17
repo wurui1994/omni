@@ -9,6 +9,10 @@
 //   3. **值位置要装回去**：`print(x)` 那一格得是 `g_num(v_x)` —— 少了它就是发一份编不动的 C
 //   4. **跑起来一样**：同一张图，C 那条腿的输出与解释器逐格相同（窄化不许改语义）
 //
+// 外加**临时量那一族**（第七节第 3 条）：`ret` 路上没有出口动作时直接回表达式；
+// `branch` 落在值位置上、两边都发不出语句时是一格三目 —— 而**有一边要先发语句就不许用三目**
+// （那几行会无条件先跑，分支的规矩是只跑一边），那一格也有判据。
+//
 // 外加一格是文档点了名的那一行（`ext/lua/examples/intmath.lua`）：
 // `g_d(g_num(1.0))` 那趟往返没了，而 `g_num(g_d(` 还剩几次 —— 剩的那几次在**形参**
 // 与**返回值**那一侧，要归零得做跨函数的那一刀。**这一格把数字钉住**，别让账糊过去。
@@ -139,6 +143,43 @@ const cOf = (g) => cBack.lower(g).text;
   const got = cBack.lower(g).run().out.join('|');
   if (got === want && want === 'ne|zero-is-true') ok(`条件〔C 腿跑出来一样：${got}〕`);
   else no('条件〔C 腿跑出来一样〕', `解释器 ${want}，C ${got}`);
+}
+
+// ---- 临时量那一族：`branch` 落在值位置上，两边都发不出语句时是一格三目
+{
+  const g = program([
+    node('bind', { init: num(3) }, { name: 'n' }),
+    prim('print', [node('branch', {
+      cond: prim('<', [ref('n'), num(5)]),
+      then: lit('small'),
+      else: lit('big'),
+    })]),
+  ]);
+  const c = cOf(g);
+  has('三目〔五行收成一格三目〕', c, 'g_print1(((v_n < 5.0) ? g_str("small") : g_str("big")));');
+  hasnt('三目〔不再声明那格临时量〕', c, 'gv t');
+  const want = evalGraph(g).out.join('|');
+  const got = cBack.lower(g).run().out.join('|');
+  if (got === want && want === 'small') ok(`三目〔C 腿跑出来一样：${got}〕`);
+  else no('三目〔C 腿跑出来一样〕', `解释器 ${want}，C ${got}`);
+}
+{
+  /* **有一边要先发语句就不许用三目**（那几行会无条件先跑，而分支只跑一边）：
+   * 这一格的 else 边是 `print`（要发缓冲 + 调），所以照旧走 if/else。 */
+  const g = program([
+    node('bind', { init: num(9) }, { name: 'm' }),
+    prim('print', [node('branch', {
+      cond: prim('<', [ref('m'), num(5)]),
+      then: lit('small'),
+      else: prim('print', [lit('side')]),
+    })]),
+  ]);
+  const c = cOf(g);
+  hasnt('三目〔一边要发语句：不许用三目〕', c, '? g_str("small")');
+  const want = evalGraph(g).out.join('|');
+  const got = cBack.lower(g).run().out.join('|');
+  if (got === want && want === 'side|nil') ok(`三目〔那一边的副作用只跑一次：${got}〕`);
+  else no('三目〔一边要发语句：C 腿一样〕', `解释器 ${want}，C ${got}`);
 }
 
 // ---- 文档点名那一行：`ext/lua/examples/intmath.lua`

@@ -1102,6 +1102,37 @@ class CGen {
     throw new Gap(`c 后端还没接这种常量：${typeof v}`);
   }
 
+  /**
+   * 这一格的**值位置**落成 C 时会不会先发几行语句？
+   *
+   * 为什么要问：`branch` 落在值位置上现在是「先声明一格临时量、两个分支各赋一次」五行。
+   * 两边都发不出语句时，那五行就是一格三目（`c ? a : b`）—— 而**只要有一边要先发语句，
+   * 三目就不能用**：那几行会**无条件**先跑，而分支的规矩是只跑一边。
+   * 所以这儿是一张**白名单**（认得的才算发不出语句），宁可少收一格，不许算错。
+   */
+  noEmit(x) {
+    if (x === null || x === undefined) return true;
+    if (Array.isArray(x)) return false;
+    if (x.lit !== undefined) return true;
+    const op = x.op;
+    if (op === 'const' || op === 'ref') return true;
+    if (op === 'field-get' || op === 'conv' || op === 'pick') {
+      return this.noEmit(x.ins.obj ?? x.ins.value ?? x.ins.from);
+    }
+    if (op === 'index-get' || op === 'map-get' || op === 'map-has') {
+      return this.noEmit(x.ins.obj) && this.noEmit(x.ins.index ?? x.ins.key);
+    }
+    if (op === 'slice') {
+      return this.noEmit(x.ins.obj) && this.noEmit(x.ins.from) && this.noEmit(x.ins.to);
+    }
+    const argsOk = () => asList(x.ins.args ?? []).filter((y) => y !== undefined)
+      .every((y) => this.noEmit(y));
+    /* `print` 是要发语句的那一格（缓冲 + 调）—— 内建里就它与它一族的例外。 */
+    if (op === 'prim') return x.attrs.name !== 'print' && argsOk();
+    if (op === 'call') return argsOk();
+    return false;                     /* branch / region / loop / list-new / record-new … */
+  }
+
   /** 值位置。回一段 C 表达式（要发语句的先发，再回那格临时量的名字）。 */
   valOf(x) {
     if (x === null || x === undefined) return 'g_nil()';
@@ -1194,6 +1225,12 @@ class CGen {
       throw new Gap('c 后端：`func` 当值用（不是当场调用、也不是绑给一个名字）还没接');
     }
     if (x.op === 'branch') {
+      /* 两边都发不出语句 -> 一格三目（省下「声明 + 两次赋值」那五行）。 */
+      if (this.noEmit(x.ins.then) && this.noEmit(x.ins.else)) {
+        const a = this.valOf(x.ins.then);
+        const b = x.ins.else === undefined ? 'g_nil()' : this.valOf(x.ins.else);
+        return `(${this.cCond(x.ins.cond)} ? ${a} : ${b})`;
+      }
       const t = this.fresh();
       this.emit(`gv ${t};`);
       this.emit(`if (${this.cCond(x.ins.cond)}) {`);
