@@ -114,5 +114,31 @@ const one = (name) => {
   }
 }
 
+// ---- 第一节那一行：**按源码长起来的那一段**不许比源码大（shrink 文档的目标那一句）
+{
+  const t = one('lua');
+  if (t !== null) {
+    const src = readText(`${ROOT}ext/lua/examples/basics.lua`);
+    const i = t.indexOf('/* ---- 提到顶层的那些函数');
+    const prog = t.slice(i);
+    /* 「固定序言另算，那一段是常数」—— 文档第三节那句话的量法就是这个切点。
+     * **按字节数**（不是 JS 的字符数）：两边都有中文注释，字符数与字节数不是一回事，
+     * 而文档第一节记的 1092 是字节。 */
+    const bytes = (s) => new TextEncoder().encode(s).length;
+    const ratio = bytes(prog) / bytes(src);
+    if (ratio < 1) {
+      ok(`第一节〔按源码长起来的那一段 ${bytes(prog)} 字节 < 源码 ${bytes(src)} 字节`
+        + `（${ratio.toFixed(2)}x）—— 目标那一句成立了〕`);
+    } else {
+      no('第一节〔按源码长起来的那一段〕', `${bytes(prog)} / ${bytes(src)} = ${ratio.toFixed(2)}x`
+        + ' —— 又胀回 1 以上了');
+    }
+    const pl = prog.split('\n').length;
+    const sl = src.split('\n').length;
+    if (pl < 70) ok(`第一节〔行数 ${pl} 行 / 源码 ${sl} 行 = ${(pl / sl).toFixed(2)}x（还大于 1）〕`);
+    else no('第一节〔行数〕', `${pl} 行 —— 涨回去了`);
+  }
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed（序言按用到的族裁：裁得动 · 不许漏留 · 该留的留）\n`);
 if (fail > 0) process.exit(1);

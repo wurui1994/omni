@@ -68,14 +68,15 @@ const sameRun = (label, g, want) => {
   const g = d.toGraph(glrParse(tb, toks, diags));
   const c = cOf(g);
   has('record.lua〔出现 struct〕', cAll(g), 'struct r1 { gv f_x; gv f_y; };');
-  has('record.lua〔取字段是一格偏移〕', c, 'pt1[0] = v_p.f_x;');
+  has('record.lua〔取字段是一格偏移〕', c, 'g_print1(v_p.f_x);');
   has('record.lua〔放字段也是〕', c, 'v_p.f_y = g_num(5.0);');
   hasnt('record.lua〔不再堆上造一块〕', c, 'g_rec_new(');
   hasnt('record.lua〔不再按名字找键〕', c, 'g_field_get(');
-  /* 「`gv` 计数下降」那一条：这一份现在一格 `gv` 局部量都不剩（原来 1 格 v_p + 3 格 print 缓冲）。 */
+  /* 「`gv` 计数下降」那一条：这一份现在**一格 `gv` 局部量都不剩** ——
+   * 记录那一格成了 `struct r1`，三格 print 缓冲也没了（`g_print1` 那一格）。 */
   const gvs = c.split('\n  gv ').length - 1;
-  if (gvs === 3) ok(`record.lua〔gv 局部量剩 3 格（三格 print 缓冲，记录那一格没了）〕`);
-  else no('record.lua〔gv 局部量的格数〕', `量到 ${gvs} 格，账上写的是 3 —— 改了就把账一起改`);
+  if (gvs === 0) ok('record.lua〔gv 局部量一格都不剩（记录落 struct、print 走 g_print1）〕');
+  else no('record.lua〔gv 局部量的格数〕', `量到 ${gvs} 格，账上写的是 0 —— 改了就把账一起改`);
   sameRun('record.lua〔C 腿跑出来一样〕', g, '1|5|6');
 }
 

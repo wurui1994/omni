@@ -165,7 +165,7 @@ const cOf = (g) => cBack.lower(g).text;
   const round = c.split('g_num(g_d(').length - 1;
   if (round === 0) ok('intmath〔g_num(g_d( 归零：形参 / 局部量 / 返回值三处都窄了〕');
   else no('intmath〔g_num(g_d( 的次数〕', `量到 ${round} 次，账上写的是 0 —— 改了就把账一起改`);
-  has('intmath〔只在印那一步装箱（g_print 收 gv *）〕', c, '] = g_num(fn2_fact(5.0));');
+  has('intmath〔只在印那一步装箱（g_print 收 gv）〕', c, 'g_print1(g_num(fn2_fact(5.0)));');
 }
 
 // ---- 形参不该窄的不窄：有一个调用点递的不是数

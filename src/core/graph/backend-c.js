@@ -337,6 +337,11 @@ static void g_print(gv *a, long long n) {
   }
   printf("%s\\n", s);
 }
+
+/* 一格 / 两格实参的 print：那是**绝大多数**（十门例子里数出来的），而按数组那条路要发
+ * 三行（声明缓冲、逐格赋值、调）。这两格把那三行收成一行 —— 语义还是上面那一格。 */
+static void g_print1(gv a) { gv b[1]; b[0] = a; g_print(b, 1); }
+static void g_print2(gv a, gv b) { gv c[2]; c[0] = a; c[1] = b; g_print(c, 2); }
 `;
 
 const PRELUDE_ALL = () => PRELUDE + P_SHOW + P_PRIM + P_AGG;
@@ -1276,6 +1281,11 @@ class CGen {
     /* print */
     if (args.length === 0) {
       this.emit('g_print((gv *)0, 0);');
+      return 'g_nil()';
+    }
+    /* 一格 / 两格实参走那两个专门的（省下「声明缓冲 + 逐格赋值」那两行）。 */
+    if (args.length <= 2) {
+      this.emit(`g_print${args.length}(${args.join(', ')});`);
       return 'g_nil()';
     }
     const buf = `p${this.fresh()}`;
