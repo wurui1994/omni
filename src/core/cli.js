@@ -3012,6 +3012,13 @@ function main(argv) {
         + '与 graph（节点图 + 契约五问，见 `omni run --help`）');
     }
   }
+  /* `run --stat` 落到 omni 那台机器上时**没东西可报**（图的形状归 `--engine graph`，
+   * 构建统计归 `build --stat`）。收了开关却一声不响是最坏的一种：用户会当自己看过了。
+   * 所以说一句，然后照常跑 —— 这不是错，只是这一趟没有那份账。 */
+  if (node.key === 'run' && STAT !== null && !rest.includes('--engine')) {
+    stderr('omni: run --stat：omni 那台机器上这一趟没有统计可报 —— '
+      + '图的形状用 `--engine graph --stat`，构建统计用 `build --stat`\n');
+  }
   /* `build --engine graph -o OUT`：把那条腿的产物落成文件（wat / sx 有产物，
    * js 与 interp 各有一句说清为什么没有 —— 见 `graph/run.js` 的 buildGraphFile）。 */
   if (node.key === 'build' && rest.includes('--engine')) {
