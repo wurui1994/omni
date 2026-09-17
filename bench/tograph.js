@@ -20,6 +20,10 @@
 //   node bench/tograph.js nim          只跑一门
 //   node bench/tograph.js --limit 200  每门最多跑这么多份（改映射的时候快看一眼）
 //   node bench/tograph.js --walls 20   墙那一栏印前几条
+//   node bench/tograph.js --nc         逐条那一栏里只印**没归类**的（"上面那张表漏了什么"）
+//
+// 印出来的第一栏是**按族的账**（`CLASSES`）。那一栏才是"下一刀该做什么"看的 ——
+// "还差多少"这句话的答案不是"一百条不同的话"，是**十几族决定**。
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
@@ -62,6 +66,45 @@ function filesUnder(dir, ext, out) {
   return out;
 }
 
+/**
+ * **一堵墙属于哪一族**。这一栏是这份尺子最要紧的一栏 —— 因为"还差多少"这句话的答案
+ * 不是"一百条不同的话"，是**五六族决定**：
+ *
+ *   指针 · option/result · 编译期求值 · 函数值 · 位运算 · 集合与字符 · 映射还没写全
+ *
+ * 前五族每一族都是一次**设计决定**（要不要给图加那一格 / 加在哪一层），最后一族才是
+ * "接着写就行"。分开印出来，"下一刀该做什么"就不用靠人去数一百行。
+ *
+ * **判据是这张表自己**：认不出来的落进"没归类"，那一栏印在最后 —— 所以这张表**盖不住**
+ * 任何东西（漏一族就会看见"没归类"涨），这也是它敢用正则的理由。
+ */
+const CLASSES = [
+  ['指针（addr / deref / &）', /addr|deref|这个算子还没接：&(?!&)/],
+  ['option / result（or-block · 传播 · ?T）', /or-block|propagate|option/],
+  ['编译期求值（when / \$if / ctconst）', /编译期|ctime|ctconst|comptime/],
+  ['函数值与闭包（fnlit）', /fnlit|闭包|函数值/],
+  ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%)/],
+  ['集合与字符（set-lit / char / rune）', /set 字面量|char 是自己一格类型|还没接：char|还没接：rune/],
+  ['类型层的算子（typeof / sizeof / is / as / x.(T)）',
+    /typeof|sizeof|isreftype|还没接：is$|还没接：as$|还没接：tswitch|还没接：assert$|登记过的类型/],
+  ['C 指令与外部声明（#flag / $c）', /cdirective/],
+  ['语句头上的绑定（V 的 `if x := …`）', /还没接：if-bind/],
+  ['命名实参 / 变参展开', /还没接：named|还没接：spread|命名实参/],
+  ['成员是不是在里头（数组的 `in`）', /只接 map（数组的 in|还没接：in$/],
+  ['明说过的形状限制（主语要算好几遍 · 匿名接收者 · 格式动词 …）',
+    /要算好几遍|匿名接收者|格式动词|不是字面量|要 N 是整数字面量|只接 map 与切片|混着/],
+  ['并发与异常（chan / spawn / try / yield / select）', /chan|spawn|select|try|yield|raise|throw/],
+  ['跨文件才知道的事（跨模块的类型 / 库函数）',
+    /跨模块|声明不在这一份文件里|这份文件里没见过|只接 fmt\.Print|零值还没接：tname/],
+  ['要一格"按长度造"的节点', /按长度造|list-new 收的是元素表/],
+];
+
+/** 一堵墙归到哪一族（认不出来回 null —— 那时它进"没归类"，印出来）。 */
+function classOf(msg) {
+  for (const [name, re] of CLASSES) if (re.test(msg)) return name;
+  return null;
+}
+
 /** 一句错误消息**归一**成一格墙：把里面的名字与数字抹掉，不然每份文件都是一条新墙。 */
 function wallOf(msg) {
   return String(msg)
@@ -100,11 +143,14 @@ function measure(lang) {
     root: got.root, files: files.length, parsed: 0, graphed: 0, bytes: 0, ms: 0,
   };
   const walls = new Map();
+  const classes = new Map();
   const bump = (msg, path) => {
     const k = wallOf(msg);
     const w = walls.get(k) ?? { n: 0, first: path };
     w.n = w.n + 1;
     walls.set(k, w);
+    const c = classOf(msg) ?? '没归类（这一栏涨了就是上面那张表漏了一族）';
+    classes.set(c, (classes.get(c) ?? 0) + 1);
   };
   const t0 = Date.now();
   for (const p of files) {
@@ -129,6 +175,7 @@ function measure(lang) {
   }
   row.ms = Date.now() - t0;
   row.walls = [...walls.entries()].sort((a, b) => b[1].n - a[1].n);
+  row.classes = [...classes.entries()].sort((a, b) => b[1] - a[1]);
   return row;
 }
 
@@ -161,6 +208,19 @@ if (rows.length === 0) {
       + `${mb(r.bytes).padStart(9)}${`${(r.ms / 1000).toFixed(1)}s`.padStart(8)}`
       + `  ${relative(ROOT, r.root)}\n`);
   }
+  /* **按族的那一栏印在前面** —— 那是"下一刀该做什么"看的那一栏（逐条的话在它下面）。 */
+  const tot = new Map();
+  for (const [, r] of rows) for (const [c, n] of r.classes) tot.set(c, (tot.get(c) ?? 0) + n);
+  if (tot.size > 0) {
+    const all = [...tot.entries()].sort((a, b) => b[1] - a[1]);
+    const sum = all.reduce((a, [, n]) => a + n, 0);
+    process.stdout.write(`\n三门合起来，没落成图的那 ${sum} 份卡在哪几族上：\n`);
+    for (const [c, n] of all) {
+      process.stdout.write(`  ${String(n).padStart(5)} ${pct(n, sum).padStart(7)}  ${c}\n`);
+    }
+    process.stdout.write('  —— 前几族每一族都是一次**设计决定**（要不要给图加那一格 / 加在哪一层）；'
+      + '"没归类"那一栏涨了就是 CLASSES 那张表漏了一族。\n');
+  }
   for (const [lang, r] of rows) {
     if (r.walls.length === 0) continue;
     const shown = r.walls.slice(0, WALLS);
@@ -169,6 +229,16 @@ if (rows.length === 0) {
       + `${r.walls.length} 条不同的话${rest > 0 ? `，印前 ${shown.length} 条` : ''}）：\n`);
     for (const [msg, w] of shown) {
       process.stdout.write(`  ${String(w.n).padStart(5)}  ${msg}\n`);
+    }
+    /* `--nc` 只印**没归类**的那几条 —— 那是"上面那张表漏了什么"的清单。 */
+    if (argv.includes('--nc')) {
+      const nc = r.walls.filter(([m]) => classOf(m) === null).slice(0, WALLS);
+      if (nc.length > 0) {
+        process.stdout.write(`  ——（没归类的前 ${nc.length} 条）\n`);
+        for (const [msg, w] of nc) {
+          process.stdout.write(`  ${String(w.n).padStart(5)}  ${msg}\n`);
+        }
+      }
     }
   }
   process.stdout.write('\n这一份量的是**映射写全了没有**（改的是 ext/<语言>/tograph.js）；'
