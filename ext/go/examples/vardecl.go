@@ -38,6 +38,15 @@ const (
 	green
 )
 
+// **泛型函数**：类型参数在图上丢掉（类型不进图，单态化是另一层的事）—— 落的是一格普通函数。
+// 它摆在这一份里是为了钉住一件**结构上**的事：`(fn IDENT type-params signature block)`
+// 比不带类型参数的那一条**多一格**，所以映射里要**按标签找**签名与体，不能按位置数。
+// 按位置数的代价量过：tparams 被当成签名、签名被当成体，于是 `(in …)` 走进了 toNode ——
+// 尺子印出来的是"这一格还没接：in"（看着像 V 的 `in` 算子），而根本不是那件事。
+func firstOf[T any](xs []T) T {
+	return xs[0]
+}
+
 func main() {
 	var n = start + step
 	fmt.Println(n)
@@ -63,4 +72,5 @@ func main() {
 	fmt.Println(m["k"])
 	xs := make([]int, 0)
 	fmt.Println(len(xs))
+	fmt.Println(firstOf([]int{9, 1}))
 }

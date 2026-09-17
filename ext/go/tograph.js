@@ -552,7 +552,14 @@ function toNode(x) {
 
     // ---- 声明与语句 --------------------------------------------------------
     case 'fn': {
-      const [nm, sig, blk] = kids(x);
+      // **按标签找，不按位置数**：泛型函数多出一格 `(tparams …)`
+      // （`(fn IDENT type-params signature block)`），按位置数就把 tparams 当成了签名、
+      // 把签名当成了体 —— 于是 `(in …)` 会被当成一条语句走进 `toNode`。
+      // 那正是 `in` 那 13 份墙的来历（尺子印的是"这一格还没接：in"，看着像 V 的 `in` 算子）。
+      // **类型参数丢掉**：类型不进图，单态化是另一层的事。
+      const nm = kids(x)[0];
+      const sig = kids(x).find((y) => tag(y) === 'sig');
+      const blk = kids(x).find((y) => tag(y) === 'block');
       const name = leaf(nm);
       return node('bind', { init: funcOf(sig, blk, name) }, { name });
     }
@@ -560,7 +567,9 @@ function toNode(x) {
     // 差的只有一件事：**接收者当第一格形参**。方法不是一格新节点，分派也不查表 ——
     // 接收者的类型写在声明里，所以这一格在图上就是个多一个实参的普通函数。
     case 'method': {
-      const [recv, nm, sig, blk] = kids(x);
+      const [recv, nm] = kids(x);
+      const sig = kids(x).find((y) => tag(y) === 'sig');
+      const blk = kids(x).find((y) => tag(y) === 'block');
       const name = leaf(nm);
       const self = part(kids(recv)[0], 'name');
       if (self === undefined) {
