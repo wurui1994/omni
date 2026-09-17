@@ -110,6 +110,23 @@
 #      `196418` / `999794999321`、rc=0。
 #      arm64 那条腿上 `FPGET` **明着报错** —— 那边帧基址按「这个函数动不动栈顶」在
 #      x28 与 sp 之间选，x86_64 的 rbp 那条死规矩不成立，猜一个的后果是读到垃圾 argv。
+#  10. **自带 libc 补齐到「整份编译器链得出来」**（第一百四十片第三格）。
+#      九个 `.c`（start/string/io/malloc/stdio/strtox/file/math/misc，见
+#      `src/sysroot/README.md` 那张表）。量到的：
+#      a. `omni build bench/fib.omni --libc self` -> 1.7M、16 节、8 段，
+#         **`readelf --dyn-syms` 里 UND 一条都没有**、`ldd` 说 statically linked，
+#         跑出来 `196418` / `999794999321`、rc=0。
+#      b. `setjmp`/`longjmp` 是两条新 op（`SETJMP`/`LONGJMP`）—— 要存的是**调用者的**
+#         机器状态（rbx/r12-r15/rbp/rsp/返回地址），只有后端知道，与 `SYSCALL` 同一个
+#         理由。判据程序（三层深处 longjmp 回来 + 「0 换成 1」）与 glibc **逐行相同**。
+#      c. `printf` 的整数/字符串/宽度/对齐与 glibc **逐字节相同**；浮点那三条
+#         （`%f %e %g`）17 行的对账里 7 行不同，差的**全在末位**（我们的数字是
+#         「归一化 + 逐位取整」抠的，全在 double 上算）。`%f` 印 1e100 那一档只有前
+#         25 位有效数字是真的 —— glibc 印的是精确展开，那要大整数。
+#      d. `pthread_create` 照 POSIX 回 `EAGAIN`（不崩）—— 运行时本来就有退路
+#         （`omni_js_host.c:88`）。第一版在这儿 `abort`，量到的就是 `rc=134`。
+#      e. 整份编译器交叉编 + 链得出来：76164213 字节（72.6M）、16 节、8 段、
+#         入口 0x5668a8（前端 1.2s + 发射 480ms + cc 13.3s）。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

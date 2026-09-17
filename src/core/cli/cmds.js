@@ -269,6 +269,7 @@ ${graphEngineHelp()}
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
         ...C_TARGET_FLAGS,
         { name: '--sysroot', arity: 1, value: 'DIR', brief: '交叉编译：系统头 DIR/include、库 DIR/lib' },
+        { name: '--libc', arity: 1, value: 'KIND', brief: 'system（默认）| self：自带 libc，纯静态' },
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
         { name: '--lang', arity: 1, value: 'L',

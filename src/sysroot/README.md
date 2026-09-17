@@ -59,17 +59,33 @@ omni c link x.o -o x --stdlib --libc self \
 预编译一个 `.o` 塞进仓库是「复制二进制」。所以照 `SPGET`/`FRAME` 的先例 ——
 MIR 说「要什么」，摆法归后端。
 
-现在有的（量在 `tests/x64/docker-run.sh` 第 8 笔账）：
-`printf` / `fprintf` / `snprintf`（`%d %u %x %s %c %p`，带宽度与零填充）、
-`malloc`/`free`/`calloc`/`realloc`（brk 上的 first-fit）、
-`mem*` 与 `str*` 那一族、`open`/`read`/`write`/`close`/`stat` 一路文件 IO、
-`exit`/`_exit`/`abort`。
+九个 `.c`（量在 `tests/x64/docker-run.sh` 第 8/10 笔账）：
 
-**还没有的**：`%f` 那一族、`atexit` 的回调、线程、`dlopen`、目录遍历。
-整份编译器自举到这份 libc 上还差这些。
+- `start.c`   `_start`：`__builtin_frame_address(0)` 取 argc/argv/environ，收场走 `exit`
+- `string.c`  `mem*` / `str*`，零 syscall
+- `io.c`      `open`/`read`/`write`/`stat`/`mkdir`… 加 `__errno_location`
+- `malloc.c`  `brk` 上的 first-fit（每块一个 16 字节头，free 只清标记）
+- `stdio.c`   `printf` 一族：整数/字符串**与 glibc 逐字节相同**，浮点见下
+- `strtox.c`  `strtol` 一族 + `strtod`（尾数攒成 u64，最后**一次**乘 10 的幂）
+- `file.c`    `FILE *` 那一层：无缓冲，`FILE` 就是一个 fd 加两位状态
+- `math.c`    自己那份 libm：exp/log 用 Cody-Waite 归约 + 泰勒，sqrt 牛顿，
+              sin/cos 折进 π/4，atan 用加法公式往下压
+- `misc.c`    时间（UTC，没有时区库）、`getenv`/`setenv`、进程（`fork`/`execvp`/
+              `system`）、目录（`getdents64`）、`atexit`、`strerror`、`sscanf`
 
-`libc/*.c` 只吃 `libc/syscall.h`，**看不见** `include/` 里那份给用户程序的头 ——
-那边的 `FILE` 是 glibc 的形状，与我们的 `struct __FILE { int fd; }` 是两回事。
+**还没有的**（明说）：
+- 浮点打印是「归一化 + 逐位取整」，全在 double 上算 —— `%.17g` 最后一两位可能与
+  glibc 差一个 ulp（17 行的对账里 7 行不同，差的都在末位）。`%f` 印很大的数时
+  只有前 25 位有效数字是真的（glibc 印的是精确展开，那要大整数）。
+- 线程：`pthread_create` 照 POSIX 回 `EAGAIN` —— 我们的运行时**本来就有退路**
+  （`omni_js_host.c:88`：开不出线程就直接调 `entry()`）。
+- `sigaction` 回 `ENOSYS`（要 `SA_RESTORER` 那个跳板，得等汇编器）；
+  `backtrace` 回 0；`dlopen` 一族调到就崩（假句柄比崩坏）。
+
+`libc/*.c` 只吃 `libc/syscall.h` 与 `libc/libc.h`，**看不见** `include/` 里那份给用户
+程序的头 —— 那边的 `FILE` 是 glibc 的形状，与我们的 `struct __FILE` 是两回事。
+内部符号一律 `__libc_` 前缀，不许用 `__omni_`：那个前缀是**线性内存那条腿的宿主接口**，
+C 前端在 native 上见到它就明着报错（`tccgen.js:7933`）。
 
 ## `.def` 的形状
 

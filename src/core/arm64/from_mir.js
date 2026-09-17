@@ -1089,6 +1089,12 @@ class FnGen {
       buf.emit(svcArm64(0));
       return this.def(i, 0);
     }
+    /* `SETJMP`/`LONGJMP`（第一百四十片第三格）：明着报错。要存的是 x19-x28 与 d8-d15
+     * （AAPCS64 的被调用者保存那一串），与 x86_64 那五个不是同一件事；而这条腿上
+     * macOS 走 libSystem，第二个用户还没出现 —— 没有判据的代码不写。 */
+    if (op === OP.SETJMP || op === OP.LONGJMP) {
+      arm64Nyi(`${OP_NAMES[op]}（要存 x19-x28 与 d8-d15，这条腿上还没有用户）`);
+    }
     /* `FPGET`（第一百四十片第二格）：明着报错。这一条的用途是「把内核放在进函数那一刻
      * 栈上的 argc/argv 找回来」，而它成立靠的是 x86_64 那条死规矩
      * （`push rbp; mov rbp, rsp` 之后 `[rbp+8]` 就是第一格）。这条腿上帧基址按

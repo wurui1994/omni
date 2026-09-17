@@ -3535,6 +3535,13 @@ export class CGen {  /**
     if (name === '__builtin_frame_address') {
       return this.frameAddressBuiltin();
     }
+    /* `__omni_setjmp(env)` / `__omni_longjmp(env, val)`（第一百四十片第三格）：
+     * 自带 libc 里 `setjmp`/`longjmp` 那薄薄一层的内容。为什么是内建见
+     * `mir/ir.js` 的 `SETJMP` 那一段。 */
+    if (name === '__omni_setjmp' || name === '__omni_longjmp') {
+      const hit = this.funcs.get(name);
+      if (hit === undefined || !hit.defined) return this.jmpBuiltin(name === '__omni_setjmp');
+    }
     const info = this.funcSym(name);
     info.used = true;
     const a = this.callArgs(`function '${name}'`, info.params, info.variadic, info.ret,
@@ -3645,6 +3652,30 @@ export class CGen {  /**
     }
     return this.postfix(sVal(mkPointer(TY_VOID), this.f.emit(OP.FPGET, T_I64, REF_NONE,
       REF_NONE, 0)));
+  }
+
+  /**
+   * `__omni_setjmp(env)` -> `OP.SETJMP`（产 int）；
+   * `__omni_longjmp(env, val)` -> `OP.LONGJMP`（不产值、不返回）。
+   *
+   * 两个都只有 native 有 —— 线性内存那条腿上没有机器状态可存，而那边的 JSON 那两段
+   * 走的是宿主自己的 throw（见 `runtime/omni_js_json.h` 的注）。
+   */
+  jmpBuiltin(isSet) {
+    if (!this.native) {
+      this.err(`${isSet ? '__omni_setjmp' : '__omni_longjmp'} 只有 native 那两条腿有`);
+    }
+    this.skip(LPAR);
+    const env = this.gv(this.castTo(this.exprEq(), mkPointer(TY_VOID)));
+    if (isSet) {
+      this.skip(RPAR);
+      return this.postfix(sVal(TY_INT, this.f.emit(OP.SETJMP, T_I32, env, REF_NONE, 0)));
+    }
+    this.skip(COMMA);
+    const val = this.gv(this.castTo(this.exprEq(), TY_INT));
+    this.skip(RPAR);
+    this.f.emit(OP.LONGJMP, T_VOID, env, val, 0);
+    return sVal(TY_VOID, REF_NONE);
   }
 
   /**

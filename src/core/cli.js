@@ -495,6 +495,12 @@ let MAIN_NEST = 0;
  * `null` = 就是这台机器（绝大多数时候）。
  */
 let CROSS = null;
+/**
+ * 哪一份 libc（`--libc self`，第一百四十片）—— 与 `CROSS` 同一个理由摆成一格状态：
+ * `omni build x.omni` 那条路上这件事要传到 `buildSelf` 里的那次 `c link` 上，
+ * 而中间三层的签名是给本机那一趟定的。`null` = 系统那一份（绝大多数时候）。
+ */
+let LIBC = null;
 /* 编出来的核心默认只内建 js -> c，别的语言/目标各自一格 plugins/ 里的插件（ADR-0021 S4）。
    接缝是 linkJs 的 read 回调 —— 编译器读源码全过它，所以"换掉 builtin.js 那一份文本"
    就等于"不把那几门 import 进来"，链接器与摇树都跟着少活。
@@ -2037,7 +2043,12 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   const os = CROSS === null ? (hostIsDarwin() ? 'osx' : 'linux') : CROSS.os;
   const fmt = fmtOfOs(os);
   const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
-  const sysArgs = CROSS === null ? [] : ['--sysroot', CROSS.sysroot];
+  const sysArgs = [
+    ...(CROSS === null ? [] : ['--sysroot', CROSS.sysroot]),
+    /* `--libc self` 也要递下去（第一百四十片）：那次 `c link` 是**这儿**发的，
+     * 而「链哪一份 libc」是链接那一步的事 —— 与 `--sysroot` 同一条路。 */
+    ...(LIBC === null ? [] : ['--libc', LIBC]),
+  ];
   const t0 = nowMs();
   const obj = `${cPath}.o`;
   cObj(cPath, obj, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs);
@@ -2653,6 +2664,9 @@ function main(argv) {
      * 机器 —— 那种写法没意义，但也不拦），头与库都只从 DIR 里取。 */
     const si = rest.indexOf('--sysroot');
     CROSS = si < 0 ? null : { ...cTgt(rest), sysroot: rest[si + 1] };
+    /* `--libc self`：链我们自己那份 libc（`<sysroot>/libc/*.c`），一个外部库都不要。 */
+    const bi = rest.indexOf('--libc');
+    LIBC = bi < 0 ? null : rest[bi + 1];
   }
   /* 发现插件摆在这儿而不是模块作用域：一来 `-v` 刚解析出来，装了哪几格才印得出来；
      二来插件装不上是**响错**，那句话得走 main 的错误出口（模块作用域抛出来的话，

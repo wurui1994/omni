@@ -38,11 +38,11 @@
 #define SYS_pipe2           293
 
 /* errno 翻译：内核回 -errno，libc 翻成 -1 + 全局 errno。 */
-extern int __omni_errno_val;
+extern int __libc_errno_val;
 
-static long __omni_check(long r) {
+static long __libc_check(long r) {
   if (r < 0 && r >= -4095) {
-    __omni_errno_val = (int)(-r);
+    __libc_errno_val = (int)(-r);
     return -1;
   }
   return r;

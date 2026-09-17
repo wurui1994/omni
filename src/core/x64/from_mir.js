@@ -43,7 +43,7 @@ import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
   aluRI, aluRR, callR, cdq, cqo, cvtF2F, cvtF2I, cvtI2F, divR, fbin, fcmp, fldM64, fldM80,
-  fstpM64, fstpM80, fxor, idivR, imulRR, lea, movAbs, movMR, movRI, movRM, movRR, movqFromXmm,
+  fstpM64, fstpM80, fxor, idivR, imulRR, jmpR, lea, movAbs, movMR, movRI, movRM, movRR, movqFromXmm,
   movqToXmm, movsx, movsxM, movzx, movzxM, negR, notR, pop, push, retInstr, setcc, shiftRCl, shiftRI,
   syscallInstr, testRR
 } from './encode.js';
@@ -759,6 +759,48 @@ class x64FnGen {
     if (op === OP.FPGET) {
       buf.emit(movRR(8, X64_RES, BP));
       return this.def(i, X64_RES);
+    }
+    /* `SETJMP`（第一百四十片第三格）：把**调用者**接着往下走要的那几格存进 jmp_buf。
+     * 序言一律 `push rbp; mov rbp, rsp`，所以调用者的那三格都在 rbp 上量得出来
+     * （布局见 `mir/ir.js` 那一段）。产的值是 0 —— 从 `LONGJMP` 回来那一路不经过这儿。 */
+    if (op === OP.SETJMP) {
+      this.loadRef(X64_TMP0, f.a[i]);
+      let jo = 0;
+      for (const r of [REG.rbx, REG.r12, REG.r13, REG.r14, REG.r15]) {
+        buf.emit(movMR(8, X64_TMP0, jo, r));
+        jo += 8;
+      }
+      buf.emit(movRM(8, X64_TMP1, BP, 0));            /* 调用者的 rbp */
+      buf.emit(movMR(8, X64_TMP0, 40, X64_TMP1));
+      buf.emit(lea(8, X64_TMP1, BP, 16));             /* 调用者 call 之后的 rsp */
+      buf.emit(movMR(8, X64_TMP0, 48, X64_TMP1));
+      buf.emit(movRM(8, X64_TMP1, BP, 8));            /* 返回地址 */
+      buf.emit(movMR(8, X64_TMP0, 56, X64_TMP1));
+      this.movImm(X64_RES, 0n);
+      return this.def(i, X64_RES);
+    }
+    /* `LONGJMP`：反过来装一遍，最后一条 `jmp r11`。
+     *
+     * 次序要紧：**先**把返回地址取进 r11、再动 rbp/rsp —— 反过来的话取地址那一条
+     * 已经踩在别人的栈上了。值 0 换成 1（C11 7.13.2.1 第 2 段）。 */
+    if (op === OP.LONGJMP) {
+      this.loadRef(X64_RES, f.b[i]);
+      const nz = buf.label();
+      buf.emit(testRR(8, X64_RES, X64_RES));
+      buf.jcc(CC.ne, nz);
+      this.movImm(X64_RES, 1n);
+      buf.place(nz);
+      this.loadRef(X64_TMP0, f.a[i]);
+      buf.emit(movRM(8, X64_TMP1, X64_TMP0, 56));     /* 落点 */
+      let ro = 0;
+      for (const r of [REG.rbx, REG.r12, REG.r13, REG.r14, REG.r15]) {
+        buf.emit(movRM(8, r, X64_TMP0, ro));
+        ro += 8;
+      }
+      buf.emit(movRM(8, BP, X64_TMP0, 40));
+      buf.emit(movRM(8, REG.rsp, X64_TMP0, 48));
+      buf.emit(jmpR(X64_TMP1));
+      return;
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 一样是一条 RIP 相对的 `lea`，
      * 只是符号在 `__TEXT` 里。 */

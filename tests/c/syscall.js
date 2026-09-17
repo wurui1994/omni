@@ -91,6 +91,29 @@ try {
 } catch (e) { lvErr = String(e.message ?? e); }
 has('层数不是 0 就报错', lvErr, '只认 0');
 
+/* ---- `setjmp`/`longjmp` 那两条（第三格）。行为对不对在容器里量（与 glibc 逐行相同），
+ * 这儿钉两件只看字节就能钉住的事：`LONGJMP` 收尾是一句 `jmp r11`（`41 ff e3` —— 落点
+ * 必须**先**取进草稿，因为它后面那两条要改 rbp 与 rsp），以及这条腿之外明着报错。 */
+const LJ = textHex(`
+void f(void *env) {
+  __omni_longjmp(env, 7);
+}
+`, 'x86_64');
+has('x86_64：longjmp 收尾是 jmp r11', LJ, '41 ff e3');
+const SJ = textHex(`
+int f(void *env) {
+  return __omni_setjmp(env);
+}
+`, 'x86_64');
+has('x86_64：setjmp 头一条是 mov [r10], rbx', SJ, '49 89 1a');
+has('x86_64：setjmp 存了返回地址（[rbp+8] -> [r10+56]）', SJ, '4c 8b 5d 08 4d 89 5a 38');
+
+let a64Err = '';
+try {
+  textHex('int f(void *e) { return __omni_setjmp(e); }', 'arm64');
+} catch (e) { a64Err = String(e.message ?? e); }
+has('arm64 上那两条明着报错', a64Err, 'SETJMP');
+
 /* ---- 目标是 macOS 时不给（那边 BSD 的约定是另一件事：号带类别位、出错看进位标志）。 */
 let osxErr = '';
 try {

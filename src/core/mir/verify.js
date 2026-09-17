@@ -296,6 +296,17 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     if (f.t[i] !== T_I64) bad(i, `FPGET 的 t 是 ${typeText(f.t[i])}，地址只能是 i64`);
     return;
   }
+  /* 非局部跳转（第一百四十片第三格）：只有 native 有机器状态可存。
+   * `SETJMP` 产一个 int（0 / 那个值），`LONGJMP` 不产值。 */
+  if (op === OP.SETJMP || op === OP.LONGJMP) {
+    if (!mod.native) { bad(i, `${OP_NAMES[op]}：只有 native 这条腿上有机器状态可存`); return; }
+    if (op === OP.SETJMP) {
+      if (f.t[i] !== T_I32) bad(i, `SETJMP 的 t 是 ${typeText(f.t[i])}，它产的是 int`);
+      return;
+    }
+    if (f.t[i] !== T_VOID) bad(i, `LONGJMP 的 t 是 ${typeText(f.t[i])}，它不产值`);
+    return;
+  }
   /* 函数的地址（第二十七片）：号要在表里、`t` 只能是 i64、而且只有 native 有真地址可谈   * （解释器那条腿上函数指针是「号 + 1」，不是地址）。 */
   if (op === OP.FADDR) {
     if (mod.funcs[v] === undefined) { bad(i, `函数号 ${v} 越界`); return; }
