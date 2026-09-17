@@ -124,6 +124,7 @@ function typeOf(x, env, ctx) {
     return d === null ? 'int' : d.val;
   }
   if (x.op === 'map-has') return 'bool';
+  if (x.op === 'values') return multiShape(argList(x, 'args'), env, ctx).tag;
   if (x.op === 'pick') {
     const shape = ctx.shapes.get(typeOf(x.ins.from, env, ctx));
     if (shape === undefined) return 'int';
@@ -274,7 +275,19 @@ function expr(x, env, ctx) {
       if (i < 0 || i >= shape.names.length) gap(`pick 的第 ${i} 格超出了这格多值的宽度`);
       return `(fld ${objText(x.ins.from, env, ctx)} v${i})`;
     }
-    case 'values': gap('values 不在 `ret` 上（这一刀只接"多值就是返回值"那一格）');
+    case 'values': {
+      /* 表达式位置上的多值（`print(values …)` 那种）：物化成一格临时结构体。
+       * **只接纯的那几格实参**：这一处的物化是"一次使用一份"，实参有副作用时同一格 values
+       * 被用两回就会算两遍 —— 那是静默的错答案，所以宁可报。 */
+      if (ctx.pre === null || ctx.pre === undefined) gap('values 出现在没法摆物化那几句的位置上');
+      const vals = argList(x, 'args');
+      for (const a of vals) {
+        if (!isPure(a)) gap('表达式位置上的多值里有一格带副作用的实参（这一刀只接纯值）');
+      }
+      const b = buildValues(x, env, ctx);
+      for (const line of b.out) ctx.pre.push(line);
+      return `(var ${b.name})`;
+    }
     case 'map-get': {
       const dt = typeOf(x.ins.obj, env, ctx);
       const d = dictOf(dt);
@@ -656,15 +669,8 @@ function stmtIn(x, env, ctx) {
       const pend = pendingDefers(ctx);
       /* 多值：先把那格合成结构体拼出来（零值 + 逐个 fldset），再交回去。 */
       if (isNode(v) && v.op === 'values') {
-        const vals = argList(v, 'args');
-        const shape = multiShape(vals, env, ctx);
-        ctx.tmp = ctx.tmp + 1;
-        const nm = `mv_tmp${ctx.tmp}`;
-        const out = [`(let ${nm} ${shape.tag} (new ${shape.tag}))`];
-        for (let i = 0; i < vals.length; i++) {
-          out.push(`(fldset (var ${nm}) v${i} ${expr(vals[i], env, ctx)})`);
-        }
-        return [...out, ...pend, `(ret (var ${nm}))`];
+        const b = buildValues(v, env, ctx);
+        return [...b.out, ...pend, `(ret (var ${b.name})`.concat(')')];
       }
       if (pend.length === 0) {
         return [v === undefined || v === null ? '(ret)' : `(ret ${expr(v, env, ctx)})`];
@@ -833,6 +839,32 @@ function bindList(nm, lst, env, ctx) {
 
 
 /**
+ * 把一格 `values` 拼成那格合成结构体：零值 + 逐个 `fldset`。回"那几句 + 临时量的名字"。
+ */
+function buildValues(v, env, ctx) {
+  const vals = argList(v, 'args');
+  const shape = multiShape(vals, env, ctx);
+  ctx.tmp = ctx.tmp + 1;
+  const name = `mv_tmp${ctx.tmp}`;
+  const out = [`(let ${name} ${shape.tag} (new ${shape.tag}))`];
+  for (let i = 0; i < vals.length; i++) {
+    out.push(`(fldset (var ${name}) v${i} ${expr(vals[i], env, ctx)})`);
+  }
+  return { shape: shape, name: name, out: out };
+}
+
+/** 纯不纯（够这一刀用的那一档：字面量、常量、名字、纯内建）。 */
+function isPure(x) {
+  if (isLit(x)) return true;
+  if (!isNode(x)) return false;
+  if (x.op === 'const' || x.op === 'ref') return true;
+  if (x.op === 'prim') {
+    return x.attrs.name !== 'print' && argList(x, 'args').every(isPure);
+  }
+  return false;
+}
+
+/**
  * 一格多值印成一句：`(tostr v0) + " " + (tostr v1) …`。
  *
  * 为什么敢拿 `tostr` 顶 `print`：这门方言里两处印的是同一份字符串（量过 int / real /
@@ -899,7 +931,8 @@ export function emitCore(g) {
         const penv = new Map(env);
         for (const p of params) penv.set(p, 'int');
         const t = typeOf(impl, penv, ctx);
-        if (t !== 'void' && isScalar(t)) rt = t;
+        /* 标量或**一格形状**（chez 的 `(values 3 7)` 当函数体就是后者）都算 */
+        if (t !== 'void' && (isScalar(t) || ctx.shapes.has(t))) rt = t;
       }
       fns[fns.length - 1].impl = rt === null ? null : impl;
       env.set(`fn:${it.attrs.name}`, rt ?? 'void');
@@ -1034,6 +1067,11 @@ function tailRet(x, env, ctx) {
  * —— 方言的 `if` 是语句，这么写就不必有块表达式，那正是 chez 的 `(if c a b)` 当函数体的形状。
  */
 function retify(x, env, ctx) {
+  /* 体末尾就是一格多值（chez 的 `(values 3 7)`）：先拼那格结构体，再交回去。 */
+  if (isNode(x) && x.op === 'values') {
+    const b = buildValues(x, env, ctx);
+    return [...b.out, `(ret (var ${b.name}))`];
+  }
   if (isNode(x) && x.op === 'branch' && x.ins.else !== undefined && x.ins.else !== null) {
     return [`(if ${condText(x.ins.cond, env, ctx)}`
       + ` (do ${retify(x.ins.then, env, ctx).join(' ')})`
@@ -1165,12 +1203,19 @@ export const CORE_SHAPES = [
     ]),
   },
   {
-    what: 'values 不在 `ret` 上',
-    why: '多值落成一格合成结构体，而那格结构体是**函数的返回类型** —— 所以 `values` 只认'
-      + '"它就是返回值"那一处。别处（绑给一个名字、当实参）要先有元组类型，那是另一刀',
-    witness: () => program([node('bind', {
-      init: node('values', { args: [litNode(1), litNode(2)] }),
-    }, { name: 't' })]),
+    what: '表达式位置上的多值里有带副作用的实参',
+    why: '那一处的物化是"一次使用一份"，实参有副作用时同一格 values 被用两回就会算两遍 ——'
+      + '静默的错答案。要接得先给物化过的那几格记一张备忘（按节点 id），那是另一刀',
+    witness: () => program([
+      node('bind', {
+        init: node('func', { body: [node('ret', { value: litNode(1) })] }, { params: [] }),
+      }, { name: 'f' }),
+      node('prim', {
+        args: [node('values', {
+          args: [node('call', { fn: node('ref', {}, { name: 'f' }), args: [] }), litNode(2)],
+        })],
+      }, { name: 'print' }),
+    ]),
   },
   {
     what: '表达式位置上的记录 / 列表',
