@@ -515,6 +515,15 @@ let LIBC = null;
  */
 let CC = null;
 /**
+ * `--no-trim`：**不裁**产物里的运行时那一段（js 腿的摇树，见 `backend-js/emit.js` 的
+ * `trimJsRuntime`）。摆成一格状态而不是一路传下去，与 `CC` 同一个理由：中间那几层的
+ * 签名不带它，而它要落到四个发射点上。
+ *
+ * 它是**逃生门**，不是调优开关：摇树漏留一个名字的后果是运行期 `xxx is not defined`，
+ * 那时候第一件要分清的事就是「是不是这一刀削掉的」—— 一句话切回整份带上。
+ */
+let NO_TRIM = false;
+/**
  * 运行时 profiler（`--profile`，第一百四十七片）—— 与 `CC` 同一个理由摆成一格状态：
  * 这件事要落到三处（发射期插桩、外部 cc 的开关、子进程的环境），而中间几层的签名
  * 都不带它。
@@ -3103,6 +3112,8 @@ function main(argv) {
     /* `--cc CC`：生成的 C 交给谁（`self` = 我们自己那台）。比 `OMNI_CC` 优先。 */
     const ci = rest.indexOf('--cc');
     CC = ci < 0 ? null : rest[ci + 1];
+    /* `--no-trim`：不裁产物里的运行时那一段（逃生门，见 `NO_TRIM` 头上那段）。 */
+    NO_TRIM = rest.includes('--no-trim');
     /* `--profile MODE`（第一百四十七片）：`cc` | `sample[:hz]` | `stub`。
      *
      * 三档落在三个**不同的时刻**，所以这一格要早解析：`stub` 改的是发射期（生成的 C 里
@@ -3770,7 +3781,10 @@ function main(argv) {
       // 在自举出来的编译器上也过），少的只是"直接吃一段 JS 文本当程序跑"的那个引擎。
       if (hasJsEngine()) {
         /* `--profile stub` 在这条腿上就是发射期插桩（与 C 那条腿同名同账）。 */
-        const js = target('js').emit(mod, { profile: PROF !== null && PROF.mode === 'stub' });
+        const js = target('js').emit(mod, {
+          profile: PROF !== null && PROF.mode === 'stub',
+          trim: !NO_TRIM,
+        });
         LAST_EMIT_BYTES = js.length;
         /* `--stat` 那张分层的账要「按源码长起来的那一段」：不带 prelude 再发一遍
          * （`chunk: true` 就是那个形态）。多发一趟只在 `--stat` 那一趟里发生。 */
@@ -3793,7 +3807,7 @@ function main(argv) {
     }
     case 'emit-js': {
       const { mod } = compile(path, rest);
-      stdout(target('js').emit(mod));
+      stdout(target('js').emit(mod, { trim: !NO_TRIM }));
       return 0;
     }
     case 'emit-c': {
@@ -3885,7 +3899,7 @@ function main(argv) {
       const oi = rest.indexOf('-o');
       const stem = basename(path).replace(/\.(omni|omnis|omnid|js|sx|asy)$/, '');
       const out = oi >= 0 ? rest[oi + 1] : `${stem}.js`;
-      const js = target('js').emit(mod);
+      const js = target('js').emit(mod, { trim: !NO_TRIM });
       writeText(out, js);
       stderr(`omni: built ${out} (${js.length} 字节，node ${basename(out)} 就能跑)\n`);
       return 0;

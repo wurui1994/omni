@@ -83,6 +83,16 @@ const F_PROFILE_OUT = {
   brief: '折叠栈写到 FILE（火焰图 / gprof2dot 吃它）；`.svg` 直接出火焰图',
 };
 /**
+ * **不裁产物里的运行时那一段**（js 腿的摇树，见 `backend-js/emit.js` 的 `trimJsRuntime`）。
+ *
+ * 是逃生门不是调优开关：摇树漏留一个名字的后果是运行期 `xxx is not defined`，
+ * 这一格让人一句话把「是不是这一刀削掉的」分清。量出来的账在那个函数头上。
+ */
+const F_NO_TRIM = {
+  name: '--no-trim', arity: 0,
+  brief: '（js）不按用到的名字裁运行时那一段 —— 出了事用它把整份带回来对照',
+};
+/**
  * 构建统计与依赖图（第一百四十七片第二格）。
  *
  * **与 `--stats` 是两格不同的东西**（名字只差一个 s，所以这儿说清楚）：
@@ -321,7 +331,7 @@ ${graphEngineHelp()}
         /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，
          * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格
          * （`--libc self` 那一趟的 sysroot 按本机取自带的，不用给）。 */
-        F_CC, F_LIBC, F_PROFILE, F_PROFILE_OUT,
+        F_CC, F_LIBC, F_PROFILE, F_PROFILE_OUT, F_NO_TRIM,
         /* `--stat` 在 `run` 上只对 `--engine graph` 那一路有话说（图的形状与结构）——
          * 另一台机器的构建统计要 `build --stat`（那儿才有 cgen 的产出分布）。 */
         F_STAT, F_STAT_OUT, F_STAT_DIFF, F_SHRINK,
@@ -392,6 +402,7 @@ ${graphEngineHelp()}
         { name: '--amalgamate', arity: 0, brief: '（c）把整份运行时内联进一个文件' },
         { name: '--split', arity: 0, brief: '（c）按模块分成一个个 .c 落到 --work DIR' },
         { name: '--fat', arity: 0, brief: '把所有语言都编进核心（默认是薄核心 + plugins/）' },
+        F_NO_TRIM,
         { name: '--bytes', arity: 0, brief: '（mir）印大小与每个函数的内容哈希' },
         { name: '--kernel', arity: 1, value: 'NAME', brief: '（spirv）哪一个 kernel' }],
     },

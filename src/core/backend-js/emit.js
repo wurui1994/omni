@@ -29,6 +29,135 @@ function jsIntLit(v) {
  *  （多维数组那一刀量出来的：`a.push(row)` 拷一份之后，"两处是同一条"在五条腿上不一致）。 */
 const jsElemCopy = (t) => (t.elem.k === 'vec' ? 'true' : 'false');
 
+/**
+ * **产物按这份程序用到的那几族裁**（与 C 腿同一个办法 —— `graph/backend-c.js` 的
+ * `trimPrelude`。用户那句话的原文是「优化方法是统一的，我们做统一支持」）。
+ *
+ * 量到的账（`bench/fib.js`，823 字节源码）：
+ *   序言          265308 字节 / 7459 行     —— 无条件全带
+ *   两格派发器    `$js_call_op` 把 JS_ABI 里**每一格 op** 的名字都提到，
+ *                 `$m_*` 那一族把每个成员方法都提到 —— 所以从前一格都摇不掉
+ *   整份产物      371770 字节 = 源码的 **451x**
+ * 而 fib.js 用到的只有算术、比较、`process.stdout.write` 那几格。
+ *
+ * 三条与 C 腿逐条对应的规矩：
+ *   1. 文本切成一格格顶层定义。JS 这边**不数花括号**（序言里有正则与模板串，数不准）：
+ *      判据是「第 0 列上以 function / const / let / class 起头的一行开一格新定义」——
+ *      我们自己写的文本，顶层从第 0 列起、里头一律缩进。注释与空行跟着**下面**那格走。
+ *   2. 名字认得出来的（`function $x(` / `const $x =`）才可能被裁；**认不出名字的一律留**
+ *      （顶层那几句有副作用的语句：`$js_pm_set(...)`、`process.on(...)`）。
+ *   3. 根是**程序自己那一段**里出现的 `$xxx`，然后按每格定义里引用到的名字传递地留。
+ *
+ * **什么时候一格都不敢裁**：`$js_src_eval` / `$js_src_fn` / `$js_call_op` 这三扇门后面，
+ * 名字是**运行期**才到的（eval 进来的那段文本、按串查的那格 op）—— 静态看不见。
+ * 程序里一旦提到它们仨，这一格整份让过（宁可胖，不许悄悄少一个名字）。
+ */
+export function trimJsRuntime(text, rootText) {
+  /* 三扇运行期的门：提到任一格就不裁（理由见上面那段）。 */
+  for (const door of ['$js_src_eval', '$js_src_fn', '$js_call_op']) {
+    if (rootText.includes(door)) return text;
+  }
+  const isDefStart = (ln) => /^(function|const|let|class)\s/.test(ln);
+  /**
+   * 这一行把括号收平了吗（`{}` `[]` `()` 三种一起数）。用来判「这一格是不是一行写完的」——
+   * **只看行末有没有分号是不够的**：序言里有一批函数是
+   * `function $js_eq(strict, a, b) {  const ta = …;` 这种写法（头一句就跟在同一行上），
+   * 行末真有分号，可花括号还开着。量到过漏这一步的后果：那格函数被从中间切开，
+   * 产物 `SyntaxError: Unexpected end of input`（9 格中招）。
+   */
+  const delta = (ln) => {
+    let d = 0;
+    for (const ch of ln) {
+      if (ch === '{' || ch === '[' || ch === '(') d += 1;
+      else if (ch === '}' || ch === ']' || ch === ')') d -= 1;
+    }
+    return d;
+  };
+  const oneLiner = (ln) => /;\s*$/.test(ln) && delta(ln) === 0;
+  const chunks = [];
+  let cur = [];
+  let inDef = false;
+  /* `cur` 里有没有**代码**（不算注释与空行）—— 决定新定义起头时要不要先收上一格。 */
+  let curCode = false;
+  const close = () => {
+    if (cur.length > 0) { chunks.push(cur.join('\n')); cur = []; }
+    inDef = false;
+    curCode = false;
+  };
+  for (const ln of text.split('\n')) {
+    const col0 = ln.length > 0 && !/^[ \t]/.test(ln);
+    const comment = /^\s*(\/\/|\/\*|\*)/.test(ln) || ln.trim() === '';
+    if (col0 && isDefStart(ln)) {
+      /**
+       * **先收上一格**：判据是「攒着的东西里有代码」，不是「上一格是不是定义」。
+       * 量到过按后者判的后果：`$js_pm_set([…\n]);` 那一大批裸语句（原型成员表）收不了尾
+       * （`]);` 那一行括号不平），于是整批被并进**下一格**函数里 —— 那格函数一被裁，
+       * 表就跟着消失。fib.js 上当场量到「表 false / 定义 false」。
+       */
+      if (curCode) close();
+      inDef = true;
+      cur.push(ln);
+      curCode = true;
+      /* 一行写完的（`const $x = …;`）当场收 —— 不然它会把后面的裸语句吞进来。 */
+      if (oneLiner(ln)) close();
+      continue;
+    }
+    cur.push(ln);
+    if (!comment) curCode = true;
+    if (!col0) continue;
+    /* 顶层收尾那一行：`}` / `};` / `});` / `]);` —— 这一格定义到此结束。 */
+    if (inDef && /^[)}\];]/.test(ln)) { close(); continue; }
+    /**
+     * **顶层的裸语句**（`$js_pm_set('String', 'replace', $js_str_replace, 2);` 那一大批：
+     * `pmRowsText()` 生成的原型成员表）。它们必须**自己成一格**：粘在别格里的话，
+     * 那格被裁掉时这一批跟着消失 —— 量到过，`tests/js-exec/cases/44-proto-member-values.js`
+     * 当场变成一片 `undefined` 加一句 `cannot read property 'call' of undefined`。
+     *
+     * 收尾认两种：一行写完的（分号 + 括号平），以及**跨行调用的收尾行**（`]);` / `});`）。
+     */
+    if (!inDef && (oneLiner(ln) || /^[)}\]]+\s*;\s*$/.test(ln))) close();
+  }
+  if (cur.length > 0) chunks.push(cur.join('\n'));
+
+  const ids = (s) => {
+    const out = new Set();
+    const m = s.match(/\$[A-Za-z_][A-Za-z0-9_]*/g);
+    if (m !== null) for (const x of m) out.add(x);
+    return out;
+  };
+  const defs = chunks.map((c) => {
+    const m = c.match(/^(?:function|const|let|class)\s+(\$[A-Za-z0-9_]+)/m);
+    const name = m === null ? null : m[1];
+    /* 自己的名字不算依赖（不然每格都自证留下来）。 */
+    const deps = ids(c);
+    if (name !== null) deps.delete(name);
+    return { text: c, name, deps };
+  });
+  const keep = new Set(ids(rootText));
+  /**
+   * **认不出名字的那几格也是根**：它们一律留（顶层有副作用的语句），所以它们**用到的**
+   * 名字同样得留。量到过漏这一步的后果：`$js_pm_set([…])` 那一大批留下来了，可
+   * `$js_pm_set` 自己被裁了 —— 一跑就是 `ReferenceError: $js_pm_set is not defined`。
+   */
+  for (const d of defs) {
+    if (d.name !== null) continue;
+    for (const x of d.deps) keep.add(x);
+  }
+  /* 传递闭包：留下来的定义里引用到的名字也要留。只加不减，最多转 defs.length 轮。 */
+  for (let round = 0; round < defs.length + 1; round++) {
+    let grew = false;
+    for (const d of defs) {
+      if (d.name === null || !keep.has(d.name)) continue;
+      for (const dep of d.deps) {
+        if (!keep.has(dep)) { keep.add(dep); grew = true; }
+      }
+    }
+    if (!grew) break;
+  }
+  /* 认不出名字的那几格（顶层有副作用的语句）一律留 —— 与 C 腿的 `#include` 同一条。 */
+  return defs.filter((d) => d.name === null || keep.has(d.name)).map((d) => d.text).join('\n');
+}
+
 // 指针（ADR-0016）。fat 是三元组 [addr, base, end]，thin 是一个数 —— 所以"拿地址"
 // 与"查范围"这两件事在两种指针上各是一行，读写那一半共用。
 const jsPtrAddr = (code, t) => (t.k === 'tptr' ? code : `${code}[0]`);
@@ -138,12 +267,20 @@ class JsEmitter {
     // 一个库文件编出一份自己的 JS 就是这个形态 —— 几份拼到一份 prelude 后面就是整个程序。
     // 这条路在 JS 后端成立的原因见 emitJsFunc 的注释：函数体引用外部世界只靠**名字**。
     const chunk = this.chunk === true;
+    /* 运行时那一段（序言 + 两格派发器）**先攒着别拼进去**：它要按程序段用到的名字裁
+     * （`trimJsRuntime`），而"程序段用到什么"只有程序发完才知道。攒法是把 `this.out`
+     * 临时借走 —— `memberDispatch` / `callOpDispatch` 是往 `this.line` 上写的。 */
+    let head = '';
     if (!chunk) {
+      const outer = this.out;
+      this.out = [];
       this.out.push(JS_PRELUDE.trim());
       /* `--profile stub`：那几十行收集器只有量的时候才推进来（见 prelude.js 的 JS_PROF_RT）。 */
       if (this.prof === true) this.out.push(JS_PROF_RT.trim());
       this.memberDispatch();
       this.callOpDispatch();
+      head = this.out.join('\n');
+      this.out = outer;
     }
     if (this.esm === true) this.importLines();
     for (const s of this.mod.structs) this.struct(s);
@@ -180,7 +317,11 @@ class JsEmitter {
     // 没人接的错误：和 C 侧的 main 一样，在入口返回之后查一次（ADR-0007 决定 1）
     this.line('$js_check_uncaught();');
     this.line('$flush();');
-    return this.out.join('\n') + '\n';
+    const prog = this.out.join('\n');
+    /* 运行时那一段按这份程序用到的名字裁（`trimJsRuntime`）。`trim: false` 是逃生门：
+     * 出了事要能一句话切回"整份都带"，好把"是不是摇树摇掉了什么"当场分清。 */
+    const rt = this.trim === false ? head : trimJsRuntime(head, prog);
+    return `${rt}\n${prog}\n`;
   }
 
   /**
@@ -853,10 +994,12 @@ function fmtRealLit(v) {
   return v > 0 ? 'Infinity' : Number.isNaN(v) ? 'NaN' : '-Infinity';
 }
 
-/** @param {any} mod OIR 模块 @param {{chunk?: boolean, esm?: boolean, repl?: boolean}} [opts] */
+/** @param {any} mod OIR 模块 @param {{chunk?: boolean, esm?: boolean, repl?: boolean, trim?: boolean}} [opts] */
 export function emitJs(mod, opts) {
   const e = new JsEmitter(mod);
   if (opts !== undefined && opts.chunk === true) e.chunk = true;
+  /* `trim: false`：不裁运行时那一段（逃生门 —— 见 `trimJsRuntime` 头上那段账）。 */
+  if (opts !== undefined && opts.trim === false) e.trim = false;
   /* `--profile stub`（第一百四十七片第四格）：**发射期插桩**那一档在 js 这条腿上的开关。
    * 与 C 那条腿同一个名字、同一套账 —— 「我们自己插的那一对」两个后端都得有，
    * 不然 `--profile stub --backend js` 就是收下开关然后一声不响（那比报错坏）。 */

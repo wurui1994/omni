@@ -59,7 +59,11 @@ const force = process.env.FORCE === '1';
 // 要跑就点名（`node tests/all.js js-exec`）或者 `SLOW=1 node tests/all.js`（提交/发版前那一遍）。
 const SUITES = [
   { s: 'run.js' }, { s: 'cli/tree.js' }, { s: 'cli/verbose.js' },
-  { s: 'cli/build-flags.js' }, { s: 'cli/profile.js' }, { s: 'oracle/run.js' },
+  { s: 'cli/build-flags.js' }, { s: 'cli/profile.js' },
+  /* js 腿的摇树（产物按用到的名字裁）：小了多少 + **裁前裁后逐字节相同**。
+     后一条是它唯一讲得通的判据 —— 削掉的必须是没人用的。 */
+  { s: 'cli/js-trim.js' },
+  { s: 'oracle/run.js' },
   { s: 'oir/run.js' },
   { s: 'cabi/run.js' }, { s: 'wat/run.js' }, { s: 'glr/run.js' }, { s: 'mir/run.js' },
   /* 闭环那一条（第一百三十五片）：`.omni` -> 生成的 C -> **我们自己那台 C 前端**的
