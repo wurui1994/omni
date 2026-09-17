@@ -210,8 +210,9 @@ function runOr(back, art, path, langName) {
  *   wat  一份自足的 `.wat` 模块（宿主面就是那四格 `print_*` 导入）—— wasm 是真后端，
  *        不是只在测试里跑一跑的那种（这正是 target.md 那一条的落点）
  *   sx   一份图的序列化（`fromSx` 读得回来 —— 那是它自己的判据）
- *   js   **落不了**：现在那份文本是一格函数表达式，要外面喂十几个运行时钩子才跑得起来，
- *        不是能 `node` 直接跑的脚本。写出去等于给一份跑不起来的产物 —— 记成账，不糊过去。
+ *   js   一份**自足的 `.mjs`**（第一百五十一片）：十四个钩子的文本版摊在最前面
+ *        （`js_rt.js`），`node x.mjs` 直接跑。从前这一格是"落不了"，理由是钩子得由外面喂
+ *        —— 钩子有文本版之后那句话就不成立了
  *   interp 没有产物：它就是 `graph.eval`（§5：默认解释器不是"另一个后端"）。
  */
 export function buildGraphFile(path, argv) {
@@ -221,9 +222,21 @@ export function buildGraphFile(path, argv) {
       + '它就是 graph.eval（要跑就 `omni run --engine graph`）');
   }
   if (back.name === 'js') {
-    throw new OmniError('build --engine graph --backend js：那条腿的文本是一格**函数表达式**，'
-      + '要外面喂十几个运行时钩子才跑得起来 —— 还不是能直接跑的脚本，所以这一格宁可不落产物'
-      + '（要看那份文本用 `omni run --engine graph --backend js -v`；自足打包记在账上）');
+    /* 从前这儿是一句拒绝："那份文本是一格函数表达式，要外面喂十几个运行时钩子"。
+     * 钩子有文本版之后（`js_rt.js` 的 `GRAPH_JS_RT`）那句话作废 —— 落的是一份**自足的
+     * ESM**，`node x.mjs` 直接跑。判据 `tests/graph/js-artifact.js`：产物跑出来的 stdout
+     * 与本进程那条腿逐行相同（那条判据同时钉住"文本版的钩子不许与 eval.js 分叉"）。 */
+    const got = graphOf(path, argv);
+    if (got.code !== undefined) return got.code;
+    const graph = shrinkOf(got.graph, argv);
+    statOf(graph, argv, path);
+    const base = path.lastIndexOf('/') >= 0 ? path.slice(path.lastIndexOf('/') + 1) : path;
+    const stem = base.lastIndexOf('.') > 0 ? base.slice(0, base.lastIndexOf('.')) : base;
+    const out = cliArg(argv, '-o') ?? `${stem}.mjs`;
+    const text = back.lower(graph).module(`${path}（${got.lang.name} × 图那一层的 js 后端）`);
+    writeText(out, text);
+    stderr(`omni: built ${out}（${text.length} 字节，${got.lang.name} × js —— 自足，node ${out} 直接跑）\n`);
+    return 0;
   }
   const got = graphOf(path, argv);
   if (got.code !== undefined) return got.code;
@@ -231,7 +244,9 @@ export function buildGraphFile(path, argv) {
   statOf(graph, argv, path);
   const dot = path.lastIndexOf('/') >= 0 ? path.slice(path.lastIndexOf('/') + 1) : path;
   const stem = dot.lastIndexOf('.') > 0 ? dot.slice(0, dot.lastIndexOf('.')) : dot;
-  const out = cliArg(argv, '-o') ?? `${stem}.${back.name}`;
+  /* js 那条腿的默认后缀是 `.mjs`（第一百五十一片）：产物离开这个仓库之后，`.js` 还要靠
+   * package.json 的 `"type": "module"` 才被当模块，而 `.mjs` 在哪儿都是模块。 */
+  const out = cliArg(argv, '-o') ?? `${stem}.${back.name === 'js' ? 'mjs' : back.name}`;
   let art = null;
   try {
     art = back.lower(graph);
@@ -268,7 +283,7 @@ export function buildGraphFile(path, argv) {
   只能 --lang 点名的（后缀被别人占着）：${named}
   --backend 这一层有四条：${graphBackendNames().join(' / ')}
     interp  默认，就是 graph.eval（调度器的读法）
-    js      降成 JS 源码，在本进程里跑掉
+    js      降成 JS 源码：run 在本进程里跑掉，build 落一份**自足的 .mjs**（node 直接跑）
     wat     降成 WAT，交给 frontend-wat 读回来用 MIR 解释器跑（互不相干的实现来证）
     sx      只序列化：印图的文本 + 验一遍读回来逐字节相同（不出输出行）
   退出码：0 跑通 · 1 语法或映射说不通 · 3 那条腿有缺口（有名有姓）`;

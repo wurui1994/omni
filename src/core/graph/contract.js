@@ -23,6 +23,7 @@ import { toSx, fromSx } from './graph.js';
 import { PRIMS } from './prims.js';
 import { emitWat, watCan, runWat, WAT_SHAPES, Gap } from './backend-wat.js';
 import { emitC, cCan, runC, C_SHAPES } from './backend-c.js';
+import { jsModuleText } from './js_rt.js';
 /* js 这条腿要在宿主里跑一段生成出来的 JS —— 走 ABI 那两格（`new Function` 不在语言子集里）。 */
 import { evalJs, hasJsEngine } from '../host/native.js';
 
@@ -314,6 +315,14 @@ function jsLower(g) {
     + `\n${body}\n}`;
   return {
     text: source,
+    /**
+     * **落一份自足的产物**（钩子跟着走，node 直接 `node x.mjs` 跑）。
+     *
+     * 从前 `build --backend js` 是明着拒绝的，理由是"那份文本是一格函数表达式，
+     * 要外面喂十几个运行时钩子"。那句话现在只剩前半句是事实 —— 钩子有文本版了
+     * （`js_rt.js` 的 `GRAPH_JS_RT`），所以拒绝没有理由了。
+     */
+    module: (note) => jsModuleText(source, note),
     run: () => {
       const out = [];
       /* **走宿主那格 `evalJs`，不写 `new Function`**（ADR-0011 决策 2 的原话：

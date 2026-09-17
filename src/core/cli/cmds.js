@@ -377,7 +377,7 @@ ${graphEngineHelp()}
   --backend wat  一份自足的 wasm 模块（宿主面就是那四格 print_* 导入）—— 默认。
                  **产物按 -o 的后缀定**：.wat 落文本、**.wasm 落二进制**（真引擎吃的是它）
   --backend sx   一份图的序列化（fromSx 读得回来）
-  --backend js   **落不了**：那份文本是一格函数表达式，还要外面喂运行时钩子（记在账上）
+  --backend js   一份**自足的 .mjs**（钩子摊在最前面，node 直接跑）—— 默认 -o 后缀是 .mjs
   --backend interp 没有产物：它就是 graph.eval
 
   omni build ext/cpp/examples/basics.cpp --engine graph --backend wat -o basics.wat

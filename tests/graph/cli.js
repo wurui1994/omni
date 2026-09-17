@@ -237,8 +237,13 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
   check('build sx 落一份序列化',
     ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'sx', '-o', sx],
     { code: 0, says: 'built' });
-  check('build js 说清为什么落不了', ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'js'],
-    { code: 1, says: '函数表达式' });
+  /* 从前这一格判的是"说清为什么落不了"。钩子有文本版之后（`graph/js_rt.js`）那句话作废：
+     现在它落一份**自足的 `.mjs`**，`node` 直接跑。产物与本进程那条腿逐行相同这一条
+     由 `tests/graph/js-artifact.js` 钉（三门语言的全部例子）。 */
+  const mjs = join(tmpdir(), 'omni-graph-basics.mjs');
+  check('build js 落一份自足的 .mjs',
+    ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'js', '-o', mjs],
+    { code: 0, says: '自足' });
   check('build interp 说清它没有产物',
     ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'interp'],
     { code: 1, says: '它就是 graph.eval' });

@@ -67,6 +67,10 @@ const SUITES = [
      还有一条**中性** —— 不带那一行的文件一个字节都不受影响（词法与 s-expr 读入器各加了
      "跳第一行"那一手，它们只在真有那一行时动）。 */
   { s: 'cli/lang.js' },
+  /* 图那条 js 腿的**自足产物**（第一百五十一片）：`build --backend js` 落的 `.mjs`
+     node 直接跑，而且与本进程那条腿逐行相同。那条比对同时钉住"钩子的文本版
+     （graph/js_rt.js）不许与 eval.js 分叉"。 */
+  { s: 'graph/js-artifact.js' },
   { s: 'oracle/run.js' },
   { s: 'oir/run.js' },
   { s: 'cabi/run.js' }, { s: 'wat/run.js' }, { s: 'glr/run.js' }, { s: 'mir/run.js' },
