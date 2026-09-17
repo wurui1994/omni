@@ -313,16 +313,31 @@ const FIB_CALLS = '635621';
 {
   const r = omni(['run', PROBE, '--profile', 'stub', '--cc', 'clang']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.status !== 0 && s.includes('我们不改你的 C')) {
-    ok('.c 输入 --profile stub：明说发射期插桩对别人的源码不成立');
+  if (r.status !== 0 && s.includes('不经我们的发射器') && s.includes('降级时插桩')) {
+    ok('.c 输入 --profile stub：明说发射期插桩对别人的源码没意义，并指出等价能力在哪儿');
   } else bad('.c 输入 --profile stub 要报错', `rc=${r.status} ${s.slice(0, 400)}`);
 }
 {
-  const r = omni(['run', PROBE, '--profile', 'sample']);
+  /* **`sample` 不再要外部 cc**（第一百五十片第二格）：这一格从"必须报错"翻成"必须量得到"
+   * —— 我们自己那台前端 + 链接器全做得到（编收集器 + 换名 main + 自己发一格 main）。
+   * 判据跟着翻：`.c` 输入不给 `--cc` 时**照样出榜**，榜首还是 hot。 */
+  const r = omni(['run', PROBE, '--profile', 'sample:997']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.status !== 0 && s.includes('要外部编译器') && s.includes('--cc clang')) {
-    ok('.c 输入 --profile sample 不给 --cc：当场要外部 cc，不假装量过');
-  } else bad('.c 输入少 --cc 要报错', `rc=${r.status} ${s.slice(0, 400)}`);
+  const rows = topRows(s);
+  const first = rows.length > 0 ? rows[0][rows[0].length - 1] : '';
+  if (r.status === 0 && first === 'hot' && s.includes('热路径')) {
+    ok('.c 输入 sample 不给 --cc：我们自己那台就量得到（榜首 hot），零外部依赖');
+  } else bad('.c 输入 sample 该自己量得到', `rc=${r.status} 榜首=${first}\n    ${s.slice(-300)}`);
+}
+{
+  /* **只有 `cc` 那一档还要外部编译器**（那一档就是 `-finstrument-functions`，我们那台前端
+   * 还没有等价物 —— 任务 #48）。这一格钉住那句话里两件事都在：要外部 cc、以及
+   * **sample 不用**。 */
+  const r = omni(['run', PROBE, '--profile', 'cc']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status !== 0 && s.includes('要外部编译器') && s.includes('不需要外部 cc')) {
+    ok('.c 输入 --profile cc 不给 --cc：当场要外部 cc，并指出 sample 那一档不用');
+  } else bad('.c 输入 cc 少 --cc 要报错', `rc=${r.status} ${s.slice(0, 400)}`);
 }
 /* ---- 四、**五张读法**（第一百四十九片）：函数表之外，还要看得见热路径
  *
@@ -579,6 +594,28 @@ const FIB_CALLS = '635621';
   if (r.status === 0 && hasCalls && hasPath && s.includes('折叠栈写到了')) {
     ok('stub · c 腿：按函数的表（635621 次）+ 精确调用栈（omni_main > u_fib），--cc self 也编得过');
   } else bad('stub 该有调用栈', `次数 ${hasCalls} / 路径 ${hasPath}\n    ${s.slice(-300)}`);
+}
+
+{
+  /* **`.c` 输入 + `--cc self` 上的采样**（第一百五十片第二格）：一个外部编译器都不借。
+   * 用户那句话：部署的机器不一定有外部 cc —— 而采样要的两样我们自己都有
+   * （编收集器 + 启动时开采样；后者靠 `-Dmain=omni_user_main` 换名 + 自己发一格 main）。 */
+  const r = omni(['run', PROBE, '--profile', 'sample:997', '--cc', 'self']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  const rows = topRows(s);
+  const first = rows.length > 0 ? rows[0][rows[0].length - 1] : '';
+  if (r.status === 0 && first === 'hot' && /omni_user_main/.test(s) && s.includes('热路径')) {
+    ok('.c 输入 + --cc self 采样：榜首 hot，栈上看得见我们那格 main 包装（零外部 cc）');
+  } else bad('self 那条路该量得到', `rc=${r.status} 榜首=${first}\n    ${s.slice(-300)}`);
+}
+{
+  /* `.c` + stub：那一档在别人的 C 上没有意义 —— 但话要说到点上（等价能力是我们那台前端
+   * 在降级时插桩，任务 #48），并且**指出 sample 不需要外部 cc**。 */
+  const r = omni(['run', PROBE, '--profile', 'stub', '--cc', 'self']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status !== 0 && s.includes('降级时插桩') && s.includes('不需要外部 cc')) {
+    ok('.c 输入 + stub：说清等价能力在哪儿，并指出 sample 不用外部 cc');
+  } else bad('.c + stub 那句话', `rc=${r.status} ${s.slice(0, 300)}`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

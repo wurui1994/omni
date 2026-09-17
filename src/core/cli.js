@@ -680,21 +680,25 @@ const LEG_SAY = { c: 'c', 'c-src': '.c 输入', js: 'js', node: '--direct' };
 /** 这一趟的 `--profile MODE` 落在这条腿上成不成立 —— 不成立就一句话说清怎么办。 */
 function profCheckLeg(mode, leg) {
   if (PROF_LEGS[mode].includes(leg)) {
-    /* `.c` 输入那条腿上，两档都得有外部 cc 才有那台机器：`-finstrument-functions` 是
-     * 它的开关，采样那一档也要把 `omni_prof.c` 与那格构造器编进**别人的**二进制里。
-     * 我们自己那台 C 前端还没有这两样 —— 明着说，别悄悄出一份没插桩的二进制。 */
-    if (leg === 'c-src' && selfCC()) {
-      throw new OmniError(`--profile ${mode} 在 .c 输入这条腿上要外部编译器：`
-        + '这一趟默认走我们自己那台 C 前端 + 链接器，它还没有 -finstrument-functions，'
-        + '也没有把收集器塞进别人 main 的办法。加 `--cc clang`（或 gcc / tcc）再来');
+    /* `.c` 输入那条腿上，**`cc` 那一档**要外部 cc 才有那台机器：`-finstrument-functions`
+     * 是它的开关，而我们自己那台 C 前端还没有等价的插桩（任务 #48）。
+     * **`sample` 不在这一条里**：它要的两样（编收集器、启动时开采样）我们自己都做得到
+     * —— 见 `cFileSelfProf`。用户那句话是对的：部署的机器不一定有外部 cc。 */
+    if (leg === 'c-src' && mode === 'cc' && selfCC()) {
+      throw new OmniError('--profile cc 在 .c 输入这条腿上要外部编译器：那一档就是'
+        + '`-finstrument-functions`（编译器自己插桩），而我们自己那台 C 前端还没有等价的'
+        + '那一格（记在任务 #48）。两条路：加 `--cc clang`（或 gcc / tcc），'
+        + '或者用 `--profile sample` —— 采样这一档**不需要外部 cc**，我们自己全做得到');
     }
     return;
   }
   const has = (m) => `${m}（${PROF_LEGS[m].map((l) => LEG_SAY[l] || l).join(' / ')}）`;
   if (leg === 'c-src' && mode === 'stub') {
-    throw new OmniError('--profile stub 是**我们发射期**插的那一对，而 `.c` 输入是你的源码，'
-      + '不经我们的发射器 —— 我们不改你的 C。这条腿上用 `--profile cc`（外部编译器插桩）'
-      + '或 `--profile sample`（运行期采样），两档都要 `--cc clang`');
+    throw new OmniError('--profile stub 是**我们发射期**插的那一对，而 `.c` 输入不经我们的'
+      + '发射器（那份 C 是你写的）—— 这一档在它上头没有意义。对 `.c` 输入，等价的那格能力是'
+      + '**我们自己那台 C 前端在降级时插桩**（与 `-finstrument-functions` 同一件事），'
+      + '还没接，记在任务 #48。现在两条路：`--profile sample`（**不需要外部 cc**，'
+      + '我们自己全做得到）或 `--profile cc --cc clang`（外部编译器插桩，带调用次数）');
   }
   if (leg === 'js' && mode === 'sample') {
     /* 这一格早晚不该再有：`sample` 已经在 js 腿上接上了（V8 采样器）。留一句是给
@@ -3123,6 +3127,38 @@ function runJsDirect(path, args) {
   return st;
 }
 
+/**
+ * **`.c` 输入 + `--cc self` 上的采样**（第一百五十片第二格）。
+ *
+ * 用户那句话：「self 没有任何一条路径不可做，毕竟我们最后部署的机器不一定有外部 cc。」
+ * 对 —— 采样这一档要的两样东西我们**自己都有**：
+ *   一、把收集器（`src/runtime/omni_prof.c`）编成一格 `.o` —— 我们自己那台 C 前端本来就在
+ *       编整份运行时（`OMNI_CC=self` 那条闭环）；
+ *   二、启动时叫一句 `omni_prof_env_init()`。外部 cc 那条路用的是构造器属性，而我们这台
+ *       前端不必依赖那个：**把用户的 `main` 改个名**（`-Dmain=omni_user_main`，预处理层，
+ *       任何 C 编译器都认），再发一格自己的 `main` 先开采样、再调它。
+ * 于是一个外部编译器都不借，`.c` 输入照样量得到热路径。
+ *
+ * 回 `{ defs, objs }`：`defs` 要接到用户那一份的宏定义上，`objs` 要一起链进去。
+ * 不是采样档就回 `null`（这一格只管采样；`cc` 那一档要真插桩 —— 那是我们那台前端还欠的
+ * 一格能力，记在任务 #48）。
+ */
+function cFileSelfProf(dir, arch, os, sysIncs) {
+  if (PROF === null || PROF.mode !== 'sample') return null;
+  const pobj = join(dir, 'omni_prof.o');
+  cObj(join(RUNTIME_DIR, 'omni_prof.c'), pobj, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs);
+  vStep(`c obj（我们自己那台）  omni_prof.c -> ${pobj}`);
+  const shim = join(dir, 'omni_prof_boot.c');
+  writeText(shim, 'void omni_prof_env_init(void);\n'
+    + 'int omni_user_main(int argc, char **argv);\n'
+    + 'int main(int argc, char **argv) { omni_prof_env_init(); return omni_user_main(argc, argv); }\n');
+  const sobj = join(dir, 'omni_prof_boot.o');
+  cObj(shim, sobj, arch, [], [], 'elf', os, sysIncs);
+  vStep(`c obj（我们自己那台）  ${shim} -> ${sobj}（改名 main + 开采样）`);
+  /* 宏的形状是 `[名字, 值]` 的数组（见 `defArgs`）—— 不是命令行那种 `-Dk=v` 串。 */
+  return { defs: [['main', 'omni_user_main']], objs: [pobj, sobj] };
+}
+
 function runCFile(path, argv) {
   const ai = argv.indexOf('--arch');
   const si = argv.indexOf('--os');
@@ -3138,9 +3174,12 @@ function runCFile(path, argv) {
    * 在这条腿上被悄悄忽略（见 `cFileViaCc` 头上那段量到的原话）。 */
   const via = cFileViaCc(path, argv, exe);
   if (via === null) {
-    cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
+    /* 我们自己那台前端 + 链接器这条路上的采样：收集器与那格 main 包装都自己编（见上）。 */
+    const sp = cFileSelfProf(dir, arch, os, sysIncDirs(flags));
+    cObj(path, obj, arch, incDirs(flags),
+      [...defArgs(flags), ...(sp === null ? [] : sp.defs)], 'elf', os, sysIncDirs(flags));
     vStep(`c front end + codegen  ${path} -> ${obj}`);
-    const rc = subMain(['c', 'link', obj, '-o', exe,
+    const rc = subMain(['c', 'link', obj, ...(sp === null ? [] : sp.objs), '-o', exe,
       '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
     if (rc !== 0) return rc;
     /* tcc 在 `tcc_output_file` 里给可执行文件补执行位（chmod 0777）—— 我们自己写字节，
