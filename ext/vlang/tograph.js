@@ -147,6 +147,14 @@ const many = (xs) => xs.map(toNode).flat();
 /** 图上是**引用**的那几种字面量（`&` 只接它们 —— 见 `case 'addr'`）。 */
 const AGG = new Set(['lit', 'array', 'array-fixed', 'map']);
 
+/**
+ * `@FN` / `@METHOD` / `@STRUCT` / `@MOD` 问的是"**我在谁里头**"——
+ * 这几格上下文遍历时随手记着（模块名在 `vlangToGraph` 那一趟扫出来）。
+ */
+let MODNAME = null;
+let CUR_FN = null;
+let CUR_TYPE = null;
+
 /** Option / Result 那一族的三个标签（`x or { … }` · `f()!` · `f()?`）。 */
 const OPT_TAGS = new Set(['or-block', 'propagate-err', 'propagate']);
 let OPT_N = 0;
@@ -243,12 +251,22 @@ function nameOf(x) {
   return leaf(x);
 }
 
-function funcOf(x, name, self) {
+function funcOf(x, name, self, typeName) {
   const ps = part(x, 'params');
   const params = ps === undefined ? [] : kids(ps).map((p) => leaf(kids(p)[0]));
   const blk = kids(x).find((y) => tag(y) === 'block');
-  return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
-    { params: self === undefined ? params : [self, ...params], name });
+  // `@FN` / `@METHOD` / `@STRUCT` 问的就是"我在谁里头" —— 落一格常量串要这两格上下文
+  const savedFn = CUR_FN;
+  const savedType = CUR_TYPE;
+  CUR_FN = name;
+  CUR_TYPE = typeName ?? null;
+  try {
+    return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
+      { params: self === undefined ? params : [self, ...params], name });
+  } finally {
+    CUR_FN = savedFn;
+    CUR_TYPE = savedType;
+  }
 }
 
 /**
@@ -533,6 +551,28 @@ function toNode(x) {
     // 但语法给 `none` 一条**自己的产生式**，与 `(bool …)` 是同一种错）。
     // 注意它与三段 for 里那个空格子**同一个标签**：那几处在 `for` 那一格上先滤掉了。
     case 'none': return lit(null);
+    // ---- `@FN` 那一族：**"我在谁里头"落一格常量串** ------------------------------
+    //
+    // V 的编译期常量分两类，这一格只接**第一类**：
+    //   * `@FN` / `@METHOD` / `@STRUCT` / `@MOD` —— 答案就在这棵树里（当前函数 / 接收者的
+    //     类型 / 模块名），落一格 const 串是**准确的**，不是猜；
+    //   * `@FILE` / `@LINE` / `@DIR` / `@LOCATION`（位置信息 —— 这一层的树上没有行号）与
+    //     `@VEXE` / `@VEXEROOT` / `@VMODROOT` / `@VROOT` / `@OS` / `@CCOMPILER`
+    //     （**编译那台机器**上的路径与目标平台）—— 当场报。编个串上去就是静默的错答案。
+    case 'ctconst': {
+      const w = leaf(kids(x)[0]);
+      if (w === '@FN' && CUR_FN !== null) return lit(CUR_FN);
+      if (w === '@MOD' && MODNAME !== null) return lit(MODNAME);
+      if (w === '@STRUCT' && CUR_TYPE !== null) return lit(CUR_TYPE);
+      if (w === '@METHOD' && CUR_TYPE !== null && CUR_FN !== null) {
+        return lit(`${CUR_TYPE}.${CUR_FN}`);
+      }
+      throw new Error(`v->graph: 编译期常量 ${w} 这一格答不出来 —— `
+        + '`@FN` / `@METHOD` / `@STRUCT` / `@MOD` 要在函数（方法）里头才有答案，'
+        + '位置那一族（`@FILE` / `@LINE` / `@DIR` / `@LOCATION`）这一层的树上没有行号，'
+        + '`@VEXE` 那一族是编译那台机器上的事');
+    }
+
     // ---- 指针：只接**与图的语义正好重合**的那一半（与 go 那一门同一条口径）--------
     //
     // 图上的记录 / 列表 / map 本来就是**引用**，所以 `&Foo{…}`（V 的语料里到处是它：
@@ -600,7 +640,9 @@ function toNode(x) {
       if (self === undefined) {
         throw new Error(`v->graph: ${name} 的接收者没有名字 —— 匿名接收者这一批没接`);
       }
-      return node('bind', { init: funcOf(x, name, leaf(self)) }, { name });
+      return node('bind', {
+        init: funcOf(x, name, leaf(self), tnameText(kids(kids(recv)[0])[1])),
+      }, { name });
     }
     case 'block': return node('region', { body: many(kids(x)) });
     case 'define': case 'assign': {
@@ -807,6 +849,12 @@ export function vlangToGraph(tree, opts) {
   ENUMS.clear();
   EVARIANTS.clear();
   collectDecls(tree);
+  // 模块名（`@MOD` 要它）—— 顶层那一条 `(module 名)`，没写就是 null（那时 `@MOD` 当场报）
+  const mod = kids(tree).find((y) => tag(y) === 'module');
+  MODNAME = mod === undefined ? null : leaf(kids(mod)[0]);
+  CUR_FN = null;
+  CUR_TYPE = null;
+
   const body = kids(tree).map(toNode).flat();
   if (opts !== undefined && opts.asModule === true) return program(body);
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);

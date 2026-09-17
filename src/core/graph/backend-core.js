@@ -1417,6 +1417,27 @@ function endsWithRet(body) {
   return false;
 }
 
+/**
+ * **只看字面量的那一档类型**（`retTypeOf` 用它 —— 那一趟跑得早，问不了 env 与形状）。
+ *
+ * 为什么要它：V 与 go 的**串接也写成 `+`**（`'a' + 'b'`、`@STRUCT + '.' + @FN`），
+ * 而 `+` 的类型"要看实参"。原来这一趟一律当 int，于是"函数返回一格串接"被说成返回 int，
+ * 方言当场骂"要返回 int，给的是 string" —— 那是**一句错误，不是一格有名有姓的缺口**。
+ * 这张表只顺着字面量与固定那几格往下看（不查名字，所以早跑也安全）：推不出来回 null。
+ */
+function litLeaningType(x) {
+  if (isLit(x)) return litType(x.lit);
+  if (!isNode(x)) return null;
+  if (x.op === 'const') return litType(x.attrs.value);
+  if (x.op !== 'prim') return null;
+  const fixed = primFixedType(x.attrs.name);
+  if (fixed !== undefined) return fixed;
+  const ts = argList(x, 'args').map(litLeaningType);
+  if (ts.some((t) => t === 'string')) return 'string';
+  if (ts.some((t) => t === 'real')) return 'real';
+  return null;
+}
+
 /** 一格函数体里 `ret` 交出来的类型（只看第一处 —— 这一刀不做合一）。一格都没有回 null。 */
 function retTypeOf(body, env, ctx) {
   const seek = (x) => {
@@ -1436,9 +1457,9 @@ function retTypeOf(body, env, ctx) {
         /* 与实参无关的那几格查**共用的那张表**（`primFixedType`）—— 原来这儿重抄了一份
            且写漏了 `concat`，于是"函数返回一格 concat"被说成返回 int（go 的 `fmt.Sprintf`
            那一族撞出来的）。**不能直接调 `typeOf`**：这一趟跑得早，形状还没登记全，
-           问算术那一档会报缺口（method 那一族当场红过）。要看实参的就还是 int。 */
-        const fixed = primFixedType(v.attrs.name);
-        return fixed === undefined ? 'int' : fixed;
+           问算术那一档会报缺口（method 那一族当场红过）。要看实参的走 `litLeaningType`
+           （只顺着字面量看 —— V 的 `'a' + 'b'` 那一族撞出来的，见那一格的注）。 */
+        return litLeaningType(v) ?? 'int';
       }
       return 'int';
     }
