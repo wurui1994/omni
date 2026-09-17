@@ -36,6 +36,7 @@
 
 import { OmniError } from '../source/diag.js';
 import { alacarte, readArchive } from './ar.js';
+import { parseDefSyms } from './defsyms.js';
 import { readObject } from './elf.js';
 import { linkObjects } from './elf_merge.js';
 import { SymTab } from './pe_load.js';
@@ -398,6 +399,32 @@ function eeSectionClass(s, i, named, bss, hasAllocReloc, isLast, isGot, isInterp
 }
 
 /**
+ * 一份 `.def`（符号预设，见 `defsyms.js`）变成 `parseDll` 那个形状。
+ *
+ * 交叉编译时目标平台的 `.so` 不在这台机器上 —— 而链接只要「库叫什么、有哪些名字、
+ * 哪些是数据（多大）」这三样。`shndx` 给 1（**任意一个非 0 的节号**）：这一层只被
+ * `bind_exe_dynsyms` 拿去判「库里有定义吗」，具体是第几节从来不看。
+ *
+ * @param text `.def` 的内容
+ * @param filename 报错用的路径
+ */
+export function defToDll(text, filename) {
+  const d = parseDefSyms(text, filename);
+  return {
+    soname: d.soname,
+    syms: d.syms.map((s) => ({
+      name: s.name,
+      /* STB_GLOBAL(1) << 4 | STT_OBJECT(1) / STT_FUNC(2) */
+      info: 1 * 16 + (s.data ? 1 : 2),
+      other: 0,
+      shndx: 1,
+      value: 0,
+      size: s.data ? s.size : 0,
+    })),
+  };
+}
+
+/**
  * 读一份共享库（`tcc_load_dll`）。只要两样东西：库的名字（`DT_SONAME`，没有就用文件名）
  * 与 `.dynsym` 里非局部的那些符号 —— 链的时候「这个名字谁提供」问的就是这张表。
  *
@@ -594,7 +621,13 @@ export function elfExeImage(inp) {
   const dllSyms = [];
   const dllByName = new Map();
   for (const d of inp.dlls ?? []) {
-    const lib = parseDll(d.bytes, d.name);
+    /* 给的可以是**真的 `.so`**，也可以是一份 `.def`（符号预设，交叉编译那一路）——
+     * 认头四个字节分派，与 tcc 判文件类型同一个办法。 */
+    const elf = d.bytes.length >= 4 && d.bytes[0] === 0x7f && d.bytes[1] === 0x45
+      && d.bytes[2] === 0x4c && d.bytes[3] === 0x46;
+    let text = '';
+    if (!elf) for (let k = 0; k < d.bytes.length; k++) text += String.fromCharCode(d.bytes[k]);
+    const lib = elf ? parseDll(d.bytes, d.name) : defToDll(text, d.name);
     if (dllNames.includes(lib.soname)) continue;
     dllNames.push(lib.soname);
     for (const s of lib.syms) {

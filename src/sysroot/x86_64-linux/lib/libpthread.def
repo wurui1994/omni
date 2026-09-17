@@ -1,0 +1,13 @@
+; libpthread.def — x86_64-linux libpthread 的符号预设（交叉编译用）。
+;
+; glibc 2.34 起 pthread 也并进了 libc.so.6，但老发行版上还是单独一个 .so。
+; 交叉编译时带上，链接器见了就在 DT_NEEDED 里记一条。
+
+LIBRARY libpthread.so.0
+EXPORTS
+pthread_attr_init
+pthread_attr_destroy
+pthread_attr_setstacksize
+pthread_create
+pthread_join
+pthread_self

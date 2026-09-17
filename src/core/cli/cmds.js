@@ -55,6 +55,8 @@ const C_CPP_FLAGS = [
    * 不是多一条 `-isystem`。`omni c tcc` 把 `-B` 递成这个（ADR-0017 第一百三十九片）。
    * 得在这张表里声明 —— 不然带的那个目录会被当成一个**位置参数**（源文件）。 */
   { name: '--tcc-lib-dir', arity: 1, value: 'DIR', brief: 'tcc 的 -B：换掉自带的系统头目录' },
+  { name: '-nostdinc', arity: 0, brief: '不带自带/系统那两层头目录（只剩 -I 给的）' },
+  { name: '--sysroot', arity: 1, value: 'DIR', brief: '交叉编译：系统头 DIR/include、库 DIR/lib' },
 ];
 const C_TARGET_FLAGS = [
   { name: '--arch', arity: 1, value: 'A', brief: 'arm64|x86_64' },
@@ -86,6 +88,7 @@ const LINK_COMMON = [
   /* `-q`：不印那行产物摘要。给的是**上层命令**用的（`omni run x.c` 内部要链一次，
    * 而 `run` 的 stdout 归被跑的程序）—— 交互着用的时候没必要给。 */
   { name: '-q', arity: 0, brief: '不印产物摘要（给上层命令内部调用用）' },
+  { name: '--sysroot', arity: 1, value: 'DIR', brief: '交叉编译：库 DIR/lib' },
 ];
 const LINK_ELF_ONLY = [
   { name: '--static', arity: 0, brief: '（-f elf）静态，不出 .interp/.dynamic' },
@@ -261,6 +264,8 @@ ${graphEngineHelp()}
   omni build ext/cpp/examples/basics.cpp --engine graph --backend wat -o basics.wat
   omni build ext/lua/examples/intmath.lua --engine graph -o intmath.wasm   （二进制，V8 直接吃）`,
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
+        ...C_TARGET_FLAGS,
+        { name: '--sysroot', arity: 1, value: 'DIR', brief: '交叉编译：系统头 DIR/include、库 DIR/lib' },
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
         { name: '--lang', arity: 1, value: 'L',

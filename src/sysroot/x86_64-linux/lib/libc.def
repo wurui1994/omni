@@ -1,0 +1,114 @@
+; libc.def — x86_64-linux libc 的符号预设（交叉编译用）。
+;
+; 量法：在 x86_64 Arch 容器里 `omni build bench/fib.omni` 之后，
+;   llvm-nm -u .omni-cache/rt/*/*.o .omni-cache/work/c-*/a.out.c.o
+; 取不带 `_` 前缀、不带 `omni_` 前缀的那些（Linux 上没有下划线前缀）。
+;
+; `DATA 8` 的那几个是**数据符号**：ELF 上要 copy 重定位（在可执行文件自己的 .bss
+; 里划一块、放一条 R_X86_64_COPY），划多大由这个数说。stdout/stderr/stdin 在 glibc
+; 上是 `FILE *`（8 字节指针）。
+;
+; atexit 住在 libc_nonshared.a 里（.so.6 的 .dynsym 里查不到），但 ld 脚本
+; `GROUP ( libc.so.6 libc_nonshared.a … )` 把它们拉到一起了 —— 交叉编译时没有
+; 那份 .a，所以这儿一起列上。
+;
+; atexit **不在这一份里**：glibc 的 libc.so.6 不导出它（`llvm-nm -D --defined-only`
+; 查不到），它只住在 `libc_nonshared.a`。写在这儿的后果量到过 ——
+; 链得过，跑起来 `symbol lookup error: undefined symbol: atexit`。
+; 那份 `.a` 由 sysroot/lib 里那一份提供（见 README 的拷法）。
+;
+; 这一份只列 libc 自己的（不含 libm / libpthread / libdl）。
+
+LIBRARY libc.so.6
+EXPORTS
+stdin DATA 8
+stdout DATA 8
+stderr DATA 8
+__errno_location
+__libc_start_main
+__isnan
+__isnanf
+__isnanl
+__isinf
+__isinff
+__isinfl
+__finite
+__finitef
+__finitel
+__signbit
+__signbitf
+__signbitl
+abort
+__cxa_atexit
+__cxa_finalize
+atof
+atoi
+alarm
+backtrace
+backtrace_symbols
+calloc
+clock
+clock_gettime
+close
+closedir
+dup2
+execvp
+exit
+_exit
+fclose
+fflush
+fgetc
+fopen
+fork
+fprintf
+fread
+free
+fseek
+ftell
+fwrite
+getcwd
+getenv
+getrlimit
+getrusage
+isatty
+kill
+localtime_r
+malloc
+memcmp
+memcpy
+memmove
+memset
+mkdir
+mkdtemp
+open
+opendir
+pipe
+printf
+read
+readdir
+realloc
+realpath
+remove
+rename
+rewind
+setenv
+sigaction
+snprintf
+sscanf
+stat
+strchr
+strcmp
+strerror
+strftime
+strlen
+strncmp
+strrchr
+strtod
+strtol
+strtoll
+strtoull
+system
+time
+vsnprintf
+waitpid
+write

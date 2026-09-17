@@ -46,6 +46,7 @@ import { relocateOne } from './pe_reloc.js';
 import { readObject } from './elf.js';
 import { readArchive, alacarte } from './ar.js';
 import { readSymbols, SymTab } from './pe_load.js';
+import { isDefSyms, parseDefSyms } from './defsyms.js';
 
 const MO_EM_X86_64 = 62;
 const MO_EM_AARCH64 = 183;
@@ -486,6 +487,18 @@ function exportTrie(syms, secs, vmaddr) {
 }
 
 /**
+ * 一份 `.def`（符号预设，见 `defsyms.js`）当成 `.tbd` 那个形状。
+ *
+ * Mach-O 这一侧比 ELF 简单一格：数据符号也走 bind 操作码，没有 copy 重定位，
+ * 所以 `DATA <字节数>` 那一格在这儿用不上 —— 只要名字。名字里那条**下划线自己带**
+ * （`_printf`），与真的 `.tbd` 里一样。
+ */
+export function defToTbd(text, where) {
+  const d = parseDefSyms(text, where);
+  return { soname: d.soname, syms: d.syms.map((s) => s.name) };
+}
+
+/**
  * `macho_load_tbd`：一份 `.tbd`（SDK 里那种文本 stub）里的安装名与导出符号。
  *
  * 这个「解析器」照抄 tcc 的那几个宏，粗得可以 —— 它不认 YAML，只会
@@ -688,7 +701,9 @@ function loadInputs(inp) {
       inp.objs[0].byteLength).getUint16(18, true)).cputype;
   for (const one of inp.dylibs === undefined ? [] : inp.dylibs) {
     if (typeof one === 'string') {
-      const d = parseTbd(one);
+      /* 文本那一路有两种形式：SDK 里的 `.tbd`，与我们自己那份 `.def`（符号预设，
+       * 交叉编译时代替真的库）。看头一个非注释的词分派。 */
+      const d = isDefSyms(one) ? defToTbd(one, '<def>') : parseTbd(one);
       if (d === null) throw new OmniError('macho: 这份 .tbd 里没有 install-name');
       const old = dllrefs.find((x) => x.soname === d.soname);
       if (old !== undefined) continue;                 // `tcc_add_dllref(...)->found`

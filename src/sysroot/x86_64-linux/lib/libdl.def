@@ -1,0 +1,10 @@
+; libdl.def — x86_64-linux libdl 的符号预设（交叉编译用）。
+;
+; 同 libpthread —— glibc 2.34 起并进了 libc，但老发行版上还是单独一个 .so。
+
+LIBRARY libdl.so.2
+EXPORTS
+dlopen
+dlsym
+dlclose
+dlerror

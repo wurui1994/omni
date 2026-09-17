@@ -36,6 +36,7 @@ import { peLoad, PE_GUI } from './link/pe_load.js';
 import { peWrite } from './link/pe_link.js';
 import { elfExe } from './link/elf_exe.js';
 import { parseLdScript } from './link/ldscript.js';
+import { isDefSyms } from './link/defsyms.js';
 import { machoExe, isMachoBinary } from './link/macho_exe.js';
 import { lowerToMir } from './mir/from_oir.js';
 import { printMir } from './mir/print.js';
@@ -155,6 +156,19 @@ function sysIncDirs(argv) {
       out.push(d);
     }
     i++;
+  }
+  /* `--sysroot DIR`：系统头指向 `DIR/include`，跳过本机探测（SDK / /usr/include）。
+   * 自带那一份（`src/include`）照留 —— `stdarg.h` 一族是编译器自己的，不是系统的。
+   * **不走 `cSysInclude()`**：那个函数会把 macOS SDK 与 `/usr/include` 都带进来，
+   * 而交叉编译的时候本机的那些头正是要**换掉**的。 */
+  const si = argv.indexOf('--sysroot');
+  if (si >= 0) {
+    if (argv[si + 1] === undefined) throw new OmniError('--sysroot 后面要一个目录');
+    /* 自带的那一份只有一条 —— `C_INCLUDE_DIR`（`src/include`），里头是
+     * `stdarg.h`/`stddef.h`/`stdbool.h`/`float.h`，编译器自己的。 */
+    out.push(cap('c.sysInclude')()[0]);  // C_INCLUDE_DIR（src/include）
+    out.push(join(argv[si + 1], 'include'));
+    return out;
   }
   const bi = argv.indexOf('--tcc-lib-dir');
   if (bi >= 0 && argv[bi + 1] === undefined) throw new OmniError('--tcc-lib-dir 后面要一个目录');
@@ -470,6 +484,17 @@ let VERBOSE = false;
  * 判据摆在 `tests/cli/verbose.js`。
  */
 let MAIN_NEST = 0;
+/**
+ * 交叉编译那一格（`--sysroot DIR` 加上 `--arch`/`--os`）—— `main` 一进门记下来。
+ *
+ * 为什么是一格全局状态而不是参数：`omni build x.omni` 那条路上「目标是什么」要一直
+ * 传到 `buildSelf` / `runtimeObjectsSelf` / `cObj` 三层里去，而那三层的签名是给
+ * **本机**那一趟定的（`hostArch()` 直接就在里头调）。摆成一格状态，交叉编译这件事
+ * 只在**一处**读，别处一个字不改 —— 与 `VERBOSE` 同一个手法。
+ *
+ * `null` = 就是这台机器（绝大多数时候）。
+ */
+let CROSS = null;
 /* 编出来的核心默认只内建 js -> c，别的语言/目标各自一格 plugins/ 里的插件（ADR-0021 S4）。
    接缝是 linkJs 的 read 回调 —— 编译器读源码全过它，所以"换掉 builtin.js 那一份文本"
    就等于"不把那几门 import 进来"，链接器与摇树都跟着少活。
@@ -1891,7 +1916,7 @@ function runtimeObjectsSelf(arch, os) {
       const p = join(RUNTIME_DIR, f);
       return `${f}:${mtimeMs(p)}:${fileSize(p)}`;
     });
-  const key = hash16(['self', arch, os, ...deps].join('|'));
+  const key = hash16(['self', arch, os, CROSS === null ? '' : CROSS.sysroot, ...deps].join('|'));
   const dir = join(cacheRoot(), 'rt', key);
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
   if (objs.every((o) => exists(o))) {
@@ -1900,8 +1925,10 @@ function runtimeObjectsSelf(arch, os) {
   }
   const stage = workDirFor('rt-stage', key);
   const staged = srcs.map((p) => join(stage, `${basename(p, '.c')}.o`));
+  /* 交叉编译那一趟的头也从 sysroot 里取（与 `buildSelf` 同一格状态）。 */
+  const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
   for (let i = 0; i < srcs.length; i++) {
-    cObj(srcs[i], staged[i], arch, [RUNTIME_DIR], [], 'elf', os, undefined);
+    cObj(srcs[i], staged[i], arch, [RUNTIME_DIR], [], 'elf', os, sysIncs);
   }
   mkdirAll(join(cacheRoot(), 'rt'));
   if (!exists(dir)) rename(stage, dir);
@@ -2004,12 +2031,16 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
  * （与 `dist` 同形）就好。那是 `installDir` 那条「往上数几层」的规矩，不是这一路的事。
  */
 function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms) {
-  const arch = hostArch();
-  const os = hostIsDarwin() ? 'osx' : 'linux';
-  const fmt = hostIsDarwin() ? 'macho' : 'elf';
+  /* 交叉编译（`--sysroot`）那一趟：目标由 `CROSS` 说，头与库都从 sysroot 里取；
+   * 本机那一趟一个字不变。 */
+  const arch = CROSS === null ? hostArch() : CROSS.arch;
+  const os = CROSS === null ? (hostIsDarwin() ? 'osx' : 'linux') : CROSS.os;
+  const fmt = fmtOfOs(os);
+  const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
+  const sysArgs = CROSS === null ? [] : ['--sysroot', CROSS.sysroot];
   const t0 = nowMs();
   const obj = `${cPath}.o`;
-  cObj(cPath, obj, arch, [RUNTIME_DIR], [], 'elf', os, undefined);
+  cObj(cPath, obj, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs);
   vStep(`c obj（我们自己那台 C 前端）  ${cPath} -> ${obj}  ${fileSize(obj)} bytes`);
   /* 插件与可执行文件在链接这一步只差三样：`--shared`、**不链运行时的 .o**（状态住在核心里，
    * ADR-0021 的 S1）、`--install-name`（Mach-O 的 `LC_ID_DYLIB`；不给这一格 macho_exe
@@ -2021,7 +2052,7 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   /* `--stdlib` 一个词把「默认 libc + crt + 入口 `_start`」都带上（见 `c-link` 那一段）；
    * 共享库那一路它自己夹掉 crt。 */
   const rc = subMain(['c', 'link', obj, ...rt, '-o', outPath,
-    '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...libs, '-q']);
+    '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...sysArgs, ...libs, '-q']);
   if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（C 留在 ${cPath}）`);
   /* 执行位（tcc 在 `tcc_output_file` 里 chmod 0777；我们自己写字节，所以自己补一句 ——
    * 少了它只能看着 `Permission denied`）。 */
@@ -2618,6 +2649,10 @@ function main(argv) {
     VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
     STATS = rest.includes('--stats');
     LANGS_FAT = rest.includes('--fat');
+    /* `--sysroot DIR`：这一趟是**交叉编译**。目标由 `--arch`/`--os` 说（不给就按这台
+     * 机器 —— 那种写法没意义，但也不拦），头与库都只从 DIR 里取。 */
+    const si = rest.indexOf('--sysroot');
+    CROSS = si < 0 ? null : { ...cTgt(rest), sysroot: rest[si + 1] };
   }
   /* 发现插件摆在这儿而不是模块作用域：一来 `-v` 刚解析出来，装了哪几格才印得出来；
      二来插件装不上是**响错**，那句话得走 main 的错误出口（模块作用域抛出来的话，
@@ -2888,15 +2923,53 @@ function main(argv) {
     if (rest.includes('--stdlib')) {
       const si = rest.indexOf('--os');
       const os = si >= 0 ? rest[si + 1] : hostOs();
-      if (cmd === 'elf-link' && !rest.includes('--shared')) {
-        const crt = cCrt(os);
-        if (crt.pre.length !== 0) {
-          files.unshift(...crt.pre);
-          files.push(...crt.post);
-          if (!rest.includes('-e')) rest.push('-e', '_start');
+      /* `--sysroot` 那一路不找本机的 crt 与 libc —— 那些属于**目标平台**，
+       * 而交叉编译时它们不在这台机器上。库全靠 sysroot/lib 里的 `.def`。
+       * crt 那三个 `.o` 也从 sysroot/lib 里取（容器里拷过来的）。 */
+      const sysroot = rest.indexOf('--sysroot') >= 0 ? rest[rest.indexOf('--sysroot') + 1] : null;
+      if (sysroot !== null) {
+        /* sysroot/lib 里的 `.def` 当成 `-l` 的搜索目录。 */
+        rest.push('-L', join(sysroot, 'lib'));
+        rest.push('-lc');
+        rest.push('-lm');
+        rest.push('-lpthread');
+        rest.push('-ldl');
+        /* crt 也从 sysroot 里取 —— `atexit` 住在 `libc_nonshared.a` 里，而那份 `.a`
+         * 由 `crt1.o` 的 `__libc_start_main` 拉进来。交叉编译时没有那份 `.a`，
+         * 但 `.def` 里列了 `atexit`，链接器会在 `.dynsym` 里记一条 —— 装载器去
+         * `libc.so.6` 里找。（本机那一路 `atexit` 的 copy 重定位指向 `libc_nonshared.a`
+         * 里那一份，但那是同一个函数，效果一样。） */
+        if (cmd === 'elf-link' && !rest.includes('--shared')) {
+          /* crt 与 atexit：sysroot/lib 里的 `.c` 用我们的 C 前端编成 `.o`，
+           * 不从目标机器拷二进制（与 tcc 的 `lib/dsohandle.c` 同一个思路）。 */
+          const sysLib = join(sysroot, 'lib');
+          const sysObj = (name) => {
+            const src = join(sysLib, name + '.c');
+            if (!exists(src)) return null;
+            const o = join(workDirFor('sysroot-obj', hash16(src)), name + '.o');
+            cObj(src, o, CROSS.arch, [], [], 'elf', CROSS.os,
+              [cap('c.sysInclude')()[0], join(sysroot, 'include')]);
+            return o;
+          };
+          const crt1 = sysObj('crt1');
+          const atexit = sysObj('atexit');
+          if (crt1 !== null) {
+            files.unshift(crt1);
+            if (!rest.includes('-e')) rest.push('-e', '_start');
+          }
+          if (atexit !== null) files.push(atexit);
         }
+      } else {
+        if (cmd === 'elf-link' && !rest.includes('--shared')) {
+          const crt = cCrt(os);
+          if (crt.pre.length !== 0) {
+            files.unshift(...crt.pre);
+            files.push(...crt.post);
+            if (!rest.includes('-e')) rest.push('-e', '_start');
+          }
+        }
+        rest.push(...cDefaultLibs(os));
       }
-      rest.push(...cDefaultLibs(os));
     }
   }
   // repl 没有源文件；默认模式是 ADR-0008 第 3 节的 dynamic（沿革见 repl.js 文件头）。
@@ -3569,7 +3642,7 @@ function main(argv) {
         '/lib/x86_64-linux-gnu', '/lib/aarch64-linux-gnu', '/lib64', '/lib']) libPaths.push(d);
       const findLibElf = (name) => {
         const fmts = name.startsWith(':') ? ['%s/%s']
-          : (rest.includes('--static') ? ['%s/lib%s.a'] : ['%s/lib%s.so', '%s/lib%s.a']);
+          : (rest.includes('--static') ? ['%s/lib%s.a'] : ['%s/lib%s.so', '%s/lib%s.def', '%s/lib%s.a']);
         const nm = name.startsWith(':') ? name.slice(1) : name;
         for (const f of fmts) {
           for (const d of libPaths) {
@@ -3591,7 +3664,15 @@ function main(argv) {
           return;
         }
         const names = depth > 4 ? null : parseLdScript(readText(p));
-        if (names === null) throw new OmniError(`elf: '${p}' 既不是 ELF、不是 .a，也不是认得的 ld 脚本`);
+        if (names === null) {
+          /* 不是 ld 脚本 —— 看看是不是 `.def`（符号预设，交叉编译那一路）。 */
+          const txt = readText(p);
+          if (isDefSyms(txt)) {
+            dlls.push({ bytes: bytesOf(p), name: p });
+            return;
+          }
+          throw new OmniError(`elf: '${p}' 既不是 ELF、不是 .a，也不是认得的 ld 脚本或 .def`);
+        }
         for (const n of names) {
           const q = n.startsWith('-l') ? findLibElf(n.slice(2)) : (exists(n) ? n : findLibElf(`:${basename(n)}`));
           /* 脚本里点到的东西不在这台机器上就跳过 —— `AS_NEEDED` 那一串本来就是「有就用」。 */

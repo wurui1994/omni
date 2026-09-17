@@ -1,0 +1,24 @@
+/* `<sys/types.h>` —— x86_64-linux 的那一份（交叉编译用，见 `src/sysroot/README.md`）。
+ *
+ * 只留我们的运行时用得着的那些 typedef，底层类型照 glibc 的 x86_64 那一支
+ * （`bits/typesizes.h`：`__SLONGWORD_TYPE` 一族在 LP64 上都是 long）。 */
+#ifndef _SYS_TYPES_H
+#define _SYS_TYPES_H
+
+#include <stddef.h>
+
+typedef unsigned long int dev_t;
+typedef unsigned long int ino_t;
+typedef unsigned int mode_t;
+typedef unsigned long int nlink_t;
+typedef unsigned int uid_t;
+typedef unsigned int gid_t;
+typedef long int off_t;
+typedef int pid_t;
+typedef long int blksize_t;
+typedef long int blkcnt_t;
+typedef long int time_t;
+typedef long int clock_t;
+typedef long int suseconds_t;
+
+#endif
