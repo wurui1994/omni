@@ -24,7 +24,14 @@ const isMap = (x) => tag(x) === 'name' && MAPS.has(leaf(kids(x)[0]));
 
 /** `(define (lhs (mut (name m))) (rhs (lit (map …) …)))` -> `'m'`（`mut` 要拆一层）。 */
 function mapBindName(x) {
-  if (!isList(x) || (tag(x) !== 'define' && tag(x) !== 'assign')) return null;
+  if (!isList(x)) return null;
+  // `const m = map[K]V{…}` 也要进这张表（树上是 `(c 名 值)`）—— 漏了它，后面 `m[k]`
+  // 会静静落成列表下标，那是"答案错而不报"
+  if (tag(x) === 'c') {
+    const [nm, v] = kids(x);
+    return v !== undefined && tag(v) === 'lit' && tag(kids(v)[0]) === 'map' ? leaf(nm) : null;
+  }
+  if (tag(x) !== 'define' && tag(x) !== 'assign') return null;
   const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
   const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
   for (let i = 0; i < lhs.length; i++) {
@@ -70,6 +77,19 @@ function collectMethods(x) {
 
 const many = (xs) => xs.map(toNode).flat();
 
+/**
+ * `const a = 1` / `const ( … )` / `__global ( … )` -> **一串 bind**（没有 decl 节点）。
+ *
+ * 树上每一格是 `(c 名 值)`。V 这一格比 go 干净：语法里就写着 `IDENT "=" expr` ——
+ * **没有** go 那两条规矩（省略初值重复上一条、`iota`），所以这儿一格一格绑就完了。
+ */
+function cbinds(x) {
+  return kids(x).map((c) => {
+    if (tag(c) !== 'c') throw new Error(`v->graph: ${tag(x)} 里不该有 ${tag(c)}`);
+    return node('bind', { init: toNode(kids(c)[1]) }, { name: leaf(kids(c)[0]) });
+  });
+}
+
 /** 左值：`(name x)` 或 `(mut (name x))`。`mut` 只是一格检查，拆掉。 */
 function nameOf(x) {
   if (tag(x) === 'mut') return nameOf(kids(x)[0]);
@@ -98,6 +118,9 @@ function toNode(x) {
     }
     case 'paren': return toNode(kids(x)[0]);
     case 'mut': return toNode(kids(x)[0]);
+    // `true` / `false` 在 V 的语法里是**自己一条产生式**（`(bool $1)`），不是名字 ——
+    // `name` 那一格里认 'true'/'false' 只兜住了写成标识符的那一路
+    case 'bool': return node('const', {}, { value: leaf(kids(x)[0]) === 'true' });
     // `p.x` -> field-get；`Point{ x: 1 }` -> record-new（**类型名不进图**）。
     // V 的字段表标签是 `f`，go 的是 `kv`，lua 的是 `named` —— 三种记号一格节点。
     case 'sel': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
@@ -228,7 +251,17 @@ function toNode(x) {
       }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
-    case 'module': case 'import': case 'struct': case 'enum': case 'type-decl': return [];
+    // 顶层的这几样在这一批里没有对应物 —— 丢掉，不猜。
+    // `typedecl`（`type X = A | B` —— 别名与 sumtype）与 `interface` 都是**类型的声明**，
+    // 而类型不进图。树上的标签是 `typedecl` 不是 `type-decl` —— 原来写的那一格是**死代码**
+    // （283 份卡在这儿，与 go 那份 `var-decl` / `const-decl` 是同一个错）。
+    case 'module': case 'import': case 'struct': case 'enum':
+    case 'typedecl': case 'interface': return [];
+    // `pub` 是可见性、`attrs` 是属性表 —— 两样都**不产生代码**（与 `mut` 同一类），
+    // 拆一层接着走。`(attributed (attrs …) (module …))` 那一路拆完落到 module，也就是空。
+    case 'pub': return toNode(kids(x)[0]);
+    case 'attributed': return toNode(kids(x)[1]);
+    case 'const': case 'global': return cbinds(x);
     default:
       throw new Error(`v->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
   }
@@ -279,7 +312,10 @@ export function vlangImports(tree) {
 //   1. option/result（`?T` / `!T` / `or {}` / `!` 传播）不在这一批 —— 它是
 //      **错误出端口 + 切段**，排在 `multi-value` 那一步（`ext/vlang/SPEC.md` §五第 1 项）。
 //   2. `mut` 只拆不检查（它是一格不产生代码的检查特性）。
-//   3. struct **声明**丢掉（字段名从字面量那儿来 —— record-new 不要求类型存在）；
-//      sumtype / match / spawn / chan 都不在这一批。
+//   3. struct / enum / interface / `type X = …` 的**声明**都丢掉（字段名从字面量那儿来
+//      —— record-new 不要求类型存在）；match / spawn / chan 都不在这一批。
+//      **enum 丢掉是有代价的**：`.red` / `Color.red` 那种引用还没有出处（这一格还在墙上）。
+//   3b. `assert` 要的是一格"停下来"的内建（图上的 prim 表里没有），所以它留在墙上 ——
+//      那不是映射的账。
 //   4. 方法：接收者提到形参表第一格（第二十四批，与 go 同一条办法）。`mut` 接收者只拆不检查、
 //      接口与方法值不在这一批；同名方法当场报 —— 分开它们要的是类型那一层。

@@ -71,6 +71,12 @@ export const MUT = ['1', '3'];
  */
 export const VARDECL = ['15', '1', '3', '6', '5', '2'];
 /**
+ * decls：**顶层那几格声明与修饰**（V 独一份）—— `pub` 与 `@[inline]` 拆一层（不产生代码）、
+ * `const` 落一串 bind（V 没有 go 那两条规矩）、`type X = …` 与 `interface` 整格丢掉、
+ * `true` 是自己一条产生式而不是名字。
+ */
+export const DECLS = ['25', '20', '1'];
+/**
  * forrange：**`for … range` 落一格计数循环**（go 独一份）—— 序列与长度只算一次、
  * 第一格是下标、第二格是元素（index-get）、`_` 不绑名字、`:=` 出 bind / `=` 出 set、
  * 嵌一层换号。五行各压一样。
@@ -172,6 +178,10 @@ export const CASES = [
   // 现成的 `counted`（一格 region + 一格 loop），图上一格新节点也没加。它顺带把
   // "序列只算一次"与"长度只算一次"压在判据上（那两样是 go 规范的原话）。
   ...fam('forrange', FORRANGE, ['go']),
+  // 第二十三个家族：**顶层的声明与修饰**（V 独一份）。理由同 `vardecl`：判"该丢还是该拆"
+  // 只有这门语言说得清（`pub` / `@[…]` 不产生代码 -> 拆；类型的声明 -> 丢；`const` -> bind），
+  // 而落到的节点一格新的都没有。
+  ...fam('decls', DECLS, ['vlang']),
 ];
 
 /**
