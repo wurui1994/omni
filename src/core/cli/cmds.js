@@ -395,12 +395,12 @@ ${graphEngineHelp()}
        * 交叉编出去的二进制、别人机器上跑的那一份）—— 那些文件回来之后要有一格能渲的门。
        * 渲染归 CLI 这条纪律没变（运行时在信号里，不干这种事）。
        */
-      name: 'flame', key: 'flame', usage: 'FILE.folded [-o OUT.svg | --table | --diff 基线]',
-      brief: '折叠栈的四种读法：火焰图 / 五张表 / 两份对照（OMNI_PROF=sample 那份文件走这儿）',
+      name: 'flame', key: 'flame', usage: 'FILE[.folded|.cpuprofile|.heapprofile] [-o OUT.svg | --table | --diff 基线]',
+      brief: '一份聚合回溯的四种读法：火焰图 / 五张表 / 两份对照（时间与**分配**两种账都收）',
       flags: [{ name: '-o', arity: 1, value: 'OUT', brief: '出到哪儿；不给就是 FILE 换成 .svg' },
         { name: '--table', arity: 0, brief: '印那五张（摘要 / 函数表 / 热路径 / 调用边 / 调用树），不出图' },
-        { name: '--diff', arity: 1, value: 'BASE', brief: '与基线折叠栈对照：每格函数的 Δ自用 与 Δ占比' },
-        { name: '--unit', arity: 1, value: 'U', brief: '权重的单位：frames（默认，我们运行时落的）| us（node 采样器落的）' }],
+        { name: '--diff', arity: 1, value: 'BASE', brief: '与基线对照：每格函数的 Δ自用 与 Δ占比（百分点）' },
+        { name: '--unit', arity: 1, value: 'U', brief: 'frames（.folded）| us（.cpuprofile）| bytes（.heapprofile）—— 默认按后缀' }],
     },
     {
       name: 'plugins', key: 'plugins', usage: '--core FILE [-o DIR]',

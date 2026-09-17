@@ -443,5 +443,31 @@ const FIB_CALLS = '635621';
   } else bad('flame 该认 .cpuprofile', `rc=${r.status} ${s.slice(0, 400)}`);
 }
 
+{
+  /* `.heapprofile`（`node --heap-prof`）：**分配**那份账，单位是字节（印 KB）。
+   * 为什么要它：CPU 那份上 `(garbage collector)` 常年第一名，而 GC 只是结果 ——
+   * 「谁在分配」只有这份答得出。形状与 CPU 那份是同一棵树，所以五张表一个字不改。 */
+  const p = join(WORK, 'mini.heapprofile');
+  writeFileSync(p, JSON.stringify({
+    head: {
+      callFrame: { functionName: '(root)' },
+      selfSize: 0,
+      children: [{
+        callFrame: { functionName: 'alloc' },
+        selfSize: 2048,
+        children: [{ callFrame: { functionName: '', url: 'file:///x/y/mod.js', lineNumber: 41 }, selfSize: 1024, children: [] }],
+      }],
+    },
+    samples: [],
+  }));
+  const r = omni(['flame', p, '--table']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  /* alloc 自用 2048B = 2.0KB / 66.67%；匿名那格带上了文件与行（mod.js:42）。 */
+  if (r.status === 0 && s.includes('KB') && s.includes('2.0') && s.includes('66.67%')
+    && s.includes('(匿名 mod.js:42)')) {
+    ok('flame 收 .heapprofile：按字节读（印 KB），匿名帧带上文件:行');
+  } else bad('flame 该认 .heapprofile', `rc=${r.status} ${s.slice(0, 400)}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

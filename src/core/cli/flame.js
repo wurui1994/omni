@@ -156,8 +156,7 @@ export function cpuProfileToFolded(jsonText) {
   const nameOf = (id) => {
     const n = byId.get(id);
     if (n === undefined) return '(未知)';
-    const f = n.callFrame ?? {};
-    return (f.functionName === undefined || f.functionName === '') ? '(匿名)' : f.functionName;
+    return frameName(n.callFrame);
   };
   /* 一格 id 的整条栈（根在前）。同一格会被问很多次，记下来 —— 采样数很容易上万。 */
   const memo = new Map();
@@ -180,6 +179,53 @@ export function cpuProfileToFolded(jsonText) {
     acc.set(k, (acc.get(k) ?? 0) + w);
   }
   /* 落盘的次序按权重从大到小 —— 两次同样的输入出来的文本要逐字节相同（可 diff）。 */
+  const rows = [...acc.entries()].sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : 1));
+  return rows.map(([k, v]) => `${k} ${v}`).join('\n') + (rows.length > 0 ? '\n' : '');
+}
+
+/**
+ * **一帧的名字**（两份 node 账共用）：函数名有就用它，没有（V8 里匿名函数就是空串）
+ * 就落成 `(匿名 文件:行)`。
+ *
+ * 为什么要带位置：量到过一份账里 `(匿名)` 自用 13.85% 排第三 —— 那一格其实是**几十个
+ * 不同的闭包**挤在一个名字上，指不出任何一处代码。带上 `文件:行` 之后它们各归各位，
+ * 而这一层本来就有那两个字段（`callFrame.url` / `lineNumber`）。
+ */
+function frameName(callFrame) {
+  const f = callFrame ?? {};
+  if (f.functionName !== undefined && f.functionName !== '') return f.functionName;
+  const url = typeof f.url === 'string' ? f.url : '';
+  const base = url === '' ? '' : url.slice(url.lastIndexOf('/') + 1);
+  const ln = typeof f.lineNumber === 'number' && f.lineNumber >= 0 ? f.lineNumber + 1 : null;
+  if (base === '') return '(匿名)';
+  return ln === null ? `(匿名 ${base})` : `(匿名 ${base}:${ln})`;
+}
+
+/**
+ * **node 的分配采样 -> 折叠栈**（`node --heap-prof`）。
+ *
+ * 为什么要它：CPU 那份账上 `(garbage collector)` 常年第一名（量到 14.68%），而 GC 只是
+ * **结果** —— 要修的是"谁在分配"。分配采样答的正是这个问题，而它的形状与 CPU 那份是
+ * 同一棵树，所以转成同一种折叠栈之后，那五张表一个字都不用改。
+ *
+ * 格式（`.heapprofile`）：`{ head: { callFrame, selfSize, children[] }, samples }` ——
+ * 是一棵**树**（不是 CPU 那份的扁平 nodes 数组），每格自带 `selfSize`（字节）。
+ * 权重就是 selfSize，所以这份账的单位是**字节**，不是时间。
+ */
+export function heapProfileToFolded(jsonText) {
+  const p = JSON.parse(jsonText);
+  const acc = new Map();
+  const nameOf = (n) => frameName(n.callFrame);
+  /* 递归会太深（自编译那份栈量到 196 层），所以自己拿一根栈走。 */
+  const stack = [{ n: p.head, path: '' }];
+  while (stack.length > 0) {
+    const { n, path } = stack.pop();
+    if (n === undefined || n === null) continue;
+    const here = path === '' ? nameOf(n) : `${path};${nameOf(n)}`;
+    const w = Math.max(0, Math.round(n.selfSize ?? 0));
+    if (w > 0) acc.set(here, (acc.get(here) ?? 0) + w);
+    for (const c of n.children ?? []) stack.push({ n: c, path: here });
+  }
   const rows = [...acc.entries()].sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : 1));
   return rows.map(([k, v]) => `${k} ${v}`).join('\n') + (rows.length > 0 ? '\n' : '');
 }
@@ -215,9 +261,12 @@ const cap = (title) => (title === undefined || title === '' ? '' : `${title} · 
  * 混着读就会差三个数量级：量到过 143 帧被印成 `0.143 ms`（997Hz 上其实是 ~143ms）。
  * 所以单位由**调用方**说，这一层只按它换算与起表头。百分比与单位无关，两种都一样。
  */
-const unitOf = (unit) => (unit === 'frames'
-  ? { head: '      帧数', of: (v) => `${v}` }
-  : { head: '        ms', of: ms });
+const unitOf = (unit) => {
+  if (unit === 'frames') return { head: '      帧数', of: (v) => `${v}` };
+  /* 分配那份账的单位是**字节**（`--heap-prof`）：印 KB，一位小数够看趋势了。 */
+  if (unit === 'bytes') return { head: '        KB', of: (v) => (v / 1024).toFixed(1) };
+  return { head: '        ms', of: ms };
+};
 
 /**
  * **一行摘要**：这一趟总共量到多少、栈有多深、有没有递归。
@@ -239,7 +288,8 @@ export function foldedSummary(text, unit) {
     if (new Set(r.frames).size !== r.frames.length) rec += 1;
   }
   const avg = rows.length > 0 ? (sum / rows.length).toFixed(1) : '0.0';
-  return `  合计 ${u.of(total)} ${unit === 'frames' ? '帧' : 'ms'} / ${rows.length} 条栈`
+  const label = unit === 'frames' ? '帧' : (unit === 'bytes' ? 'KB' : 'ms');
+  return `  合计 ${u.of(total)} ${label} / ${rows.length} 条栈`
     + ` · 栈深 最深 ${deep} · 平均 ${avg}`
     + `${rec > 0 ? ` · 递归栈 ${rec} 条（「含子」那一栏在递归上会重复计）` : ''}\n`;
 }

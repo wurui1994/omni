@@ -26,8 +26,8 @@ import { planForC } from './cli/plan-c.js';
 import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
 import {
-  foldedToSvg, cpuProfileToFolded, foldedTable, foldedSummary, foldedPaths, foldedTree, foldedEdges,
-  foldedDiff,
+  foldedToSvg, cpuProfileToFolded, heapProfileToFolded, foldedTable, foldedSummary, foldedPaths,
+  foldedTree, foldedEdges, foldedDiff,
 } from './cli/flame.js';
 import { statModel, statTable, statDot, statJson } from './cli/statgraph.js';
 import { layerModel, layerTable, countNodes, stepTable, kindStat, kindTable } from './cli/layers.js';
@@ -3763,17 +3763,25 @@ function main(argv) {
     if (path === undefined || path === null) throw new OmniError('flame 要一份折叠栈文件');
     if (!exists(path)) throw new OmniError(`flame: 找不到 ${path}`);
     /**
-     * **`.cpuprofile` 直接收**（第一百四十九片）：node 自己那台采样器落的就是这个格式
-     * （`node --cpu-prof …`），而转成折叠栈的那一格我们本来就有（`cpuProfileToFolded`）。
-     * 这一格让「量一趟编译器自己」变成一条命令 —— 不必在外头手写一段转换。
-     * 单位跟着来源走：`.cpuprofile` 是微秒，`.folded` 默认按帧（我们运行时落的）。
+     * **三种来源按后缀认**（第一百四十九片）：
+     *   `.folded`      折叠栈（我们运行时落的：权重是**采样帧数**）
+     *   `.cpuprofile`  node 的 CPU 采样（`--cpu-prof`：权重是**微秒**）
+     *   `.heapprofile` node 的**分配**采样（`--heap-prof`：权重是**字节**）
+     * 转换那两格都在 `cli/flame.js`（纯计算），转完之后五张表一个字都不改 ——
+     * 折叠栈是它们共用的那种形式。单位跟着来源走，`--unit` 还能盖掉。
+     *
+     * 分配那份账为什么要：CPU 那份上 `(garbage collector)` 常年第一名（量到 14.68%），
+     * 而 GC 只是**结果** —— 要修的是「谁在分配」，那只有分配采样答得出。
      */
     const isCpu = path.endsWith('.cpuprofile');
-    const folded = isCpu ? cpuProfileToFolded(readText(path)) : readText(path);
+    const isHeap = path.endsWith('.heapprofile');
+    const folded = isCpu ? cpuProfileToFolded(readText(path))
+      : (isHeap ? heapProfileToFolded(readText(path)) : readText(path));
     const lines = folded.split('\n').filter((l) => l.trim() !== '');
     if (lines.length === 0) throw new OmniError(`flame: ${path} 里一条栈都没有`);
     const ui = rest.indexOf('--unit');
-    const unit = ui >= 0 ? (rest[ui + 1] === 'us' ? 'us' : 'frames') : (isCpu ? 'us' : 'frames');
+    const dflt = isCpu ? 'us' : (isHeap ? 'bytes' : 'frames');
+    const unit = ui >= 0 ? rest[ui + 1] : dflt;
     /* `--diff 基线.folded`：**两份对照**（优化循环里最有用的一张）—— 这一趟是"新"，
      * 给的那份是"基线"。只印表，不出图：图是给一份看的，对照要的是数。 */
     const di = rest.indexOf('--diff');
