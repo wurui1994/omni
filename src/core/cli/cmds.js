@@ -66,17 +66,18 @@ const F_SYSROOT = {
 };
 /**
  * 运行时 profiler（第一百四十七片）。三档：
- *   cc      编译器插桩（`-finstrument-functions`，clang/gcc 跨平台都有，**默认这一档**）
+ *   cc      编译器插桩（`-finstrument-functions`）。**外部 clang/gcc 与我们自己那台 C
+ *           前端都有**（第一百五十片第三格：`emitProfCall`），所以 `--cc self` 也量得到
  *   sample  定时器 + backtrace（低开销）；`sample:997` 指定每秒帧数
- *   stub    发射期插桩（`OMNI_PROFILE=1`，只给 `--cc self`；emit.js 里那一份）
+ *   stub    发射期插桩（`OMNI_PROFILE=1`，emit.js 里那一份）；`.c` 输入上它与 `cc` 同一台机器
  * `--profile` 一个字不带 = `cc`（外部 cc 那一路）或 `sample`（`--cc self` 那一路）。
  * `--profile-out FILE` 输出折叠栈文件（火焰图 / gprof2dot 吃它）。
  */
 const F_PROFILE = {
   name: '--profile', arity: 1, value: 'MODE',
-  brief: 'cc（C 腿 / .c 输入，-finstrument-functions）| stub（C + js 两条，我们插的桩）'
-    + ' | sample[:hz]（C 腿 / .c 输入，定时器采样）—— 认腿，对不上当场报；'
-    + '`.c` 输入那两档要 --cc clang',
+  brief: 'cc（C 腿 / .c 输入，-finstrument-functions，自带前端也有）'
+    + ' | stub（C + js + .c 输入，插桩）'
+    + ' | sample[:hz]（C 腿 / .c 输入 / --direct，定时器采样）—— 认腿，对不上当场报',
 };
 const F_PROFILE_OUT = {
   name: '--profile-out', arity: 1, value: 'FILE',

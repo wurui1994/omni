@@ -12,8 +12,9 @@
  *       而且 `u_fib` 的**调用次数是确定的 635621**（斐波那契那棵树的形状定死了它）——
  *       时间会飘，次数不会，所以判据钉的是次数。
  *
- * 反面两格：`--profile cc` 碰上 `--cc self` 要明着骂（我们那台 C 前端还没有
- * `-finstrument-functions`）；`--profile 瞎写` 要把三档列出来。
+ * 反面一格：`--profile 瞎写` 要把三档列出来。**「`cc` 要外部编译器」那两句判据作废了**
+ * （第一百五十片第三格）：我们自己那台 C 前端复刻了 `-finstrument-functions`，
+ * 于是 `--cc self` 下三档都该真的量得到 —— 那几格现在判的是「出榜」，不是「报错」。
  *
  *   node tests/cli/profile.js
  */
@@ -170,12 +171,16 @@ const FIB_CALLS = '635621';
   } else bad('run --profile-out x.svg', `svg=${existsSync(svg)} folded=${existsSync(`${svg}.folded`)}`);
 }
 
-/* ---- 反面两格 */{
+/* ---- 反面一格 + 「self 也做得到」那一格 */{
+  /* 从前这一格判的是「`--profile cc` 碰上 `--cc self` 要明着骂」。**翻过来了**
+   * （第一百五十片第三格）：我们自己那台 C 前端现在有 `-finstrument-functions` 的等价物，
+   * 于是这一趟该**真的量得到** —— 判据钉的是次数（`u_fib` 635621，那棵树的形状定死了它）
+   * 与调用栈，不是时间。 */
   const r = omni(['run', FIB, '--backend', 'c', '--profile', 'cc']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.status !== 0 && s.includes('-finstrument-functions') && s.includes('--profile sample')) {
-    ok('--profile cc 碰上 --cc self：明着骂，还给出另两档');
-  } else bad('--profile cc + --cc self 要报错', `rc=${r.status} ${s.slice(0, 200)}`);
+  if (r.status === 0 && /635621\s+u_fib/.test(s) && /omni_main > u_fib/.test(s)) {
+    ok('--profile cc + --cc self：我们自己那台前端插的桩（u_fib 635621 次 + 精确调用栈）');
+  } else bad('--profile cc + --cc self 该量得到', `rc=${r.status} ${s.slice(-400)}`);
 }
 {
   const r = omni(['run', FIB, '--backend', 'c', '--profile', 'bogus']);
@@ -311,11 +316,14 @@ const FIB_CALLS = '635621';
   } else bad('.c 输入 --profile sample', `rc=${r.status} ${s.slice(0, 400)}`);
 }
 {
+  /* `.c` 输入 + `stub`：这条腿上 `stub` 与 `cc` 是**同一件事**（第一百五十片第三格）——
+   * 那份 C 不经我们的发射器，所以"发射期插的那一对"在这儿只能理解成"插桩"，谁编的谁插。
+   * 从前这一格判的是「要报错」，现在判的是**真的出榜**、而且次数是确定的 2000。 */
   const r = omni(['run', PROBE, '--profile', 'stub', '--cc', 'clang']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.status !== 0 && s.includes('不经我们的发射器') && s.includes('降级时插桩')) {
-    ok('.c 输入 --profile stub：明说发射期插桩对别人的源码没意义，并指出等价能力在哪儿');
-  } else bad('.c 输入 --profile stub 要报错', `rc=${r.status} ${s.slice(0, 400)}`);
+  if (r.status === 0 && /2000\s+hot/.test(s) && /main > hot/.test(s)) {
+    ok('.c 输入 --profile stub：与 cc 同一台机器（hot 2000 次 + 路径 main > hot）');
+  } else bad('.c 输入 --profile stub 要出榜', `rc=${r.status} ${s.slice(-400)}`);
 }
 {
   /* **`sample` 不再要外部 cc**（第一百五十片第二格）：这一格从"必须报错"翻成"必须量得到"
@@ -330,14 +338,14 @@ const FIB_CALLS = '635621';
   } else bad('.c 输入 sample 该自己量得到', `rc=${r.status} 榜首=${first}\n    ${s.slice(-300)}`);
 }
 {
-  /* **只有 `cc` 那一档还要外部编译器**（那一档就是 `-finstrument-functions`，我们那台前端
-   * 还没有等价物 —— 任务 #48）。这一格钉住那句话里两件事都在：要外部 cc、以及
-   * **sample 不用**。 */
+  /* **`cc` 那一档也不再要外部编译器**（第一百五十片第三格）：我们自己那台 C 前端复刻了
+   * `-finstrument-functions`（`emitProfCall`）。判据钉的是**次数**（`hot` 恰好 2000 次，
+   * 那个循环写死的）与路径 —— 时间会飘，这两样不会。 */
   const r = omni(['run', PROBE, '--profile', 'cc']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.status !== 0 && s.includes('要外部编译器') && s.includes('不需要外部 cc')) {
-    ok('.c 输入 --profile cc 不给 --cc：当场要外部 cc，并指出 sample 那一档不用');
-  } else bad('.c 输入 cc 少 --cc 要报错', `rc=${r.status} ${s.slice(0, 400)}`);
+  if (r.status === 0 && /2000\s+hot/.test(s) && /main > hot/.test(s)) {
+    ok('.c 输入 --profile cc 不给 --cc：我们自己那台前端插的桩（hot 2000 次 + main > hot）');
+  } else bad('.c 输入 cc 该自己插桩', `rc=${r.status} ${s.slice(-400)}`);
 }
 /* ---- 四、**五张读法**（第一百四十九片）：函数表之外，还要看得见热路径
  *
@@ -609,13 +617,14 @@ const FIB_CALLS = '635621';
   } else bad('self 那条路该量得到', `rc=${r.status} 榜首=${first}\n    ${s.slice(-300)}`);
 }
 {
-  /* `.c` + stub：那一档在别人的 C 上没有意义 —— 但话要说到点上（等价能力是我们那台前端
-   * 在降级时插桩，任务 #48），并且**指出 sample 不需要外部 cc**。 */
+  /* `.c` + stub + `--cc self`：**两个名字落到同一台机器上** —— 我们自己那台 C 前端插的桩
+   * （第一百五十片第三格）。从前这一格判的是"要报错"，那句话作废了：用户说得对，
+   * 我们用 js 实现了完整的 tcc，`-finstrument-functions` 不是别人才有的开关。 */
   const r = omni(['run', PROBE, '--profile', 'stub', '--cc', 'self']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.status !== 0 && s.includes('降级时插桩') && s.includes('不需要外部 cc')) {
-    ok('.c 输入 + stub：说清等价能力在哪儿，并指出 sample 不用外部 cc');
-  } else bad('.c + stub 那句话', `rc=${r.status} ${s.slice(0, 300)}`);
+  if (r.status === 0 && /2000\s+hot/.test(s) && /main > hot/.test(s)) {
+    ok('.c 输入 + stub + --cc self：我们自己插的桩（hot 2000 次 + main > hot），零外部 cc');
+  } else bad('.c + stub + self 该量得到', `rc=${r.status} ${s.slice(-400)}`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

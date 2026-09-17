@@ -6,18 +6,19 @@
  *
  * 三种喂法，**按「后端自己有没有」排优先**：
  *
- *   一、`cc` 档（默认，外部 clang/gcc 那一路）：**编译器自己插桩** ——
- *       `-finstrument-functions`，于是每个函数进出各调一次
- *       `__cyg_profile_func_enter/exit`（那两个名字是 gcc 定的，clang 照抄）。
+ *   一、`cc` 档（默认）：**编译器自己插桩** —— `-finstrument-functions`，于是每个函数
+ *       进出各调一次 `__cyg_profile_func_enter/exit`（那两个名字是 gcc 定的，clang 照抄）。
  *       为什么挑它当默认：**gcc 与 clang 都有、Linux 与 macOS 都有** —— 而 `-pg`/gprof
  *       在 Darwin 上早就不出 `gmon.out` 了（那条路只在 Linux 上成立，不是跨平台的）。
  *       而且这一格是**按翻译单元**给的：只给生成的那一份 `.c`，运行时自己不被插。
+ *       **我们自己那台 C 前端也会插了**（第一百五十片第三格，`tccgen.js` 的
+ *       `emitProfCall`）—— 那一路喂进来的是同一对钩子，所以这一份一个字都不用改。
  *   二、`sample` 档：定时器 + `backtrace()`。开销最低（每秒几百次，不是每次调用两次
  *       `clock_gettime`），而且**看得见调用栈**；代价是要帧指针（-O0 有，见 backtrace
  *       那一段）。精确度按采样率算，不是每一格都记。
  *   三、`stub` 档：我们自己在**发射期**插的那一对（`backend-c/emit.js` 的 `profTable`）。
- *       `--cc self` 那一路只有这一档 —— 我们自己那台 C 前端还没有
- *       `-finstrument-functions`。它按**函数序号**报数，不进这一份的表。
+ *       它按**函数序号**报数，不进这一份的表。`.c` 输入那条腿上没有"发射期"可言，
+ *       所以那儿的 `stub` 与 `cc` 落到同一台机器上（都是插桩）。
  *
  * 插桩那一档的开销是量过的（emit.js 那段注释里的原话）：3.2 亿次调用 × 两次
  * `clock_gettime` = 7.9s，占了那一趟的大头。所以「要精确就插桩、要低开销就采样」

@@ -336,8 +336,14 @@ function ehFrameOf(blob, arch, os) {
  * `MH_OBJECT`，之后由 `clang`（或我们自己的链接器）与 crt/libc 链起来。
  *
  * `arch` 给 `x86_64` 就在 Apple Silicon 上交叉出 Rosetta 能跑的码，不给按本机。
+ *
+ * `instr`（最后那一格）= **插桩**：`-finstrument-functions` 的那一对钩子由我们自己那台
+ * C 前端插（第一百五十片第三格）。只有一处给 `true` —— `run x.c --profile cc` 那一趟里
+ * **用户那一份**；收集器（`omni_prof.c`）与那格 `main` 包装绝不能插（钩子里再触发钩子
+ * 就是栈爆，量到的是当场 `Segmentation fault: 11`）。所以这一格是显式的参数、不是一格
+ * 全局状态：谁被插过在调用点上看得见。
  */
-function cObj(path, out, arch, incs, defs, fmt, os, sysIncs) {
+function cObj(path, out, arch, incs, defs, fmt, os, sysIncs, instr) {
   /* C -> 原生 MIR 那一步按名字要（ADR-0021 的 S4）：读文件、预处理、降级都在 C 那门语言里，
      驱动这一层只管把参数递过去、再把产物写成目标文件。 */
   const { mod, warnings } = cap('c.toMirNative')(path, {
@@ -348,6 +354,7 @@ function cObj(path, out, arch, incs, defs, fmt, os, sysIncs) {
      * 剩下那四十几条跟着 `--os` 走（第一百二十九片），`wchar_t` 的宽度也是（第一百三十片）。 */
     arch: arch === 'x86_64' ? 'x86_64' : 'arm64',
     os,
+    instrument: instr === true,
   }, defs);
   for (const w of warnings) stderr(`${w}\n`);
   const errs = verifyMir(mod);
@@ -610,9 +617,9 @@ let vRss = 0;
  *           js 那条腿要 node 自己那台 V8 采样器（`--cpu-prof` / `node:inspector`），
  *           还没接 —— 这一格有名有姓地报，不假装量过
  *
- * `.c` **输入**（`omni run x.c`）是第四条腿，名字叫 `c-src`：那是**你的** C，不经我们的
- * 发射器，所以 `stub` 在那儿不成立；`cc` / `sample` 成立，但要 `--cc clang` 把插桩与
- * 收集器编进去（见 `cFileViaCc`）。
+ * `.c` **输入**（`omni run x.c`）是第四条腿，名字叫 `c-src`：那是**你的** C，但插桩的人
+ * 是**我们**（第一百五十片第三格）—— 三档都成立，而且一档都不要外部编译器。给了
+ * `--cc clang` 就整趟交给它（`cFileViaCc`），那是同一件事的另一条路。
  *
  * 别的腿（llvm / jit / interp / wasm / graph 那台机器）三档都还没有。**收下开关却一声不响
  * 是最坏的一种**：用户会以为量过了。所以这一格当场报，并把「哪条腿有什么」一起说清。
@@ -648,8 +655,8 @@ function profLeg(key, path, rest) {
   const isC = typeof path === 'string' && path.endsWith('.c');
   if (isC) {
     /* `.c` 输入是**别人的 C**，不是我们发的 C —— 两条腿要分开（第一百四十七片第六格）：
-     * 发射期插桩（`stub`）在这儿根本不成立（那份源码不经我们的发射器），而 `cc` / `sample`
-     * 成立的前提是这一趟交给外部 cc。所以给它自己的名字。 */
+     * 那份源码不经我们的**发射器**，但它经我们的**前端**，所以三档都在（第一百五十片
+     * 第三格）：`cc`/`stub` 是前端插桩，`sample` 是定时器。 */
     if (b === null || b === 'native' || b === 'c') return 'c-src';
     return b;
   }
@@ -661,16 +668,21 @@ function profLeg(key, path, rest) {
 /**
  * 那三档各自认的腿（名单就是上面那段注释的机器可读版本）。
  *
- * `c-src` = **`.c` 输入那条腿**（别人的 C）：`cc` / `sample` 在那儿成立，但要外部 cc
- * 把插桩/收集器编进去（见 `cFileViaCc`）；`stub` 不成立 —— 我们不改别人的源码。
+ * `c-src` = **`.c` 输入那条腿**（别人的 C）：三档全成立，而且**一档都不要外部 cc**
+ * （第一百五十片第三格）—— 插桩那一对钩子由我们自己那台 C 前端插（`emitProfCall`），
+ * 收集器由我们自己那台前端编。给了 `--cc clang` 就整趟交给它（`cFileViaCc`），
+ * 那是同一件事的另一条路，不是唯一那条。
  * `node`  = **`--direct` 那条腿**（一份 js 原样交给 node）：只有 `sample` 成立，
  * 靠的是 node 自己那台 V8 采样器（`--cpu-prof`，见 `profNodeArgs`）。
  * `js` 这条腿上 `sample` **也接上了**（同一台采样器，量的是我们发出来的那份 JS）——
  * 从前这一格是有名有姓地欠着的，第一百四十八片第三格还上了。
+ *
+ * `stub` 与 `cc` 在 `c-src` 上是**同一台机器**：两个名字都落到「我们这台编译器自己插桩」
+ * 上。分不开也不必分 —— 那份 C 是别人写的，而插桩的人是我们。
  */
 const PROF_LEGS = {
   cc: ['c', 'c-src'],
-  stub: ['c', 'js'],
+  stub: ['c', 'js', 'c-src'],
   sample: ['c', 'c-src', 'js', 'node'],
 };
 
@@ -680,26 +692,14 @@ const LEG_SAY = { c: 'c', 'c-src': '.c 输入', js: 'js', node: '--direct' };
 /** 这一趟的 `--profile MODE` 落在这条腿上成不成立 —— 不成立就一句话说清怎么办。 */
 function profCheckLeg(mode, leg) {
   if (PROF_LEGS[mode].includes(leg)) {
-    /* `.c` 输入那条腿上，**`cc` 那一档**要外部 cc 才有那台机器：`-finstrument-functions`
-     * 是它的开关，而我们自己那台 C 前端还没有等价的插桩（任务 #48）。
-     * **`sample` 不在这一条里**：它要的两样（编收集器、启动时开采样）我们自己都做得到
-     * —— 见 `cFileSelfProf`。用户那句话是对的：部署的机器不一定有外部 cc。 */
-    if (leg === 'c-src' && mode === 'cc' && selfCC()) {
-      throw new OmniError('--profile cc 在 .c 输入这条腿上要外部编译器：那一档就是'
-        + '`-finstrument-functions`（编译器自己插桩），而我们自己那台 C 前端还没有等价的'
-        + '那一格（记在任务 #48）。两条路：加 `--cc clang`（或 gcc / tcc），'
-        + '或者用 `--profile sample` —— 采样这一档**不需要外部 cc**，我们自己全做得到');
-    }
+    /* 从前这儿有两句「`.c` 输入 + `--cc self` 做不到」的话（`cc` 那一档要外部
+     * `-finstrument-functions`、`stub` 那一档"不改别人的源码"）。两句都作废了
+     * （第一百五十片第三格）：用户那句话是对的 —— 我们用 js 实现了完整的 tcc，
+     * 把 cc 当外部这件事本身才是那个限制。现在 `emitProfCall` 就是我们自己的
+     * `-finstrument-functions`，三档在这条腿上都不必借外部编译器。 */
     return;
   }
   const has = (m) => `${m}（${PROF_LEGS[m].map((l) => LEG_SAY[l] || l).join(' / ')}）`;
-  if (leg === 'c-src' && mode === 'stub') {
-    throw new OmniError('--profile stub 是**我们发射期**插的那一对，而 `.c` 输入不经我们的'
-      + '发射器（那份 C 是你写的）—— 这一档在它上头没有意义。对 `.c` 输入，等价的那格能力是'
-      + '**我们自己那台 C 前端在降级时插桩**（与 `-finstrument-functions` 同一件事），'
-      + '还没接，记在任务 #48。现在两条路：`--profile sample`（**不需要外部 cc**，'
-      + '我们自己全做得到）或 `--profile cc --cc clang`（外部编译器插桩，带调用次数）');
-  }
   if (leg === 'js' && mode === 'sample') {
     /* 这一格早晚不该再有：`sample` 已经在 js 腿上接上了（V8 采样器）。留一句是给
      * 「名单与这几句话对不上」当门 —— 走到这儿说明 PROF_LEGS 被改坏了。 */
@@ -2569,7 +2569,10 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   ];
   const t0 = nowMs();
   const obj = `${cPath}.o`;
-  cObj(cPath, obj, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs);
+  /* `--profile cc` 那一趟：**生成的这一份**要插桩（第一百五十片第三格）。运行时那二十份
+   * 走 `runtimeObjectsSelf`，一份都不插 —— 收集器（`omni_prof.c`）也在里头，插它就是栈爆。 */
+  cObj(cPath, obj, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs,
+    PROF !== null && PROF.mode === 'cc');
   vStep(`c obj（我们自己那台 C 前端）  ${cPath} -> ${obj}  ${fileSize(obj)} bytes`);
   /* 插件与可执行文件在链接这一步只差三样：`--shared`、**不链运行时的 .o**（状态住在核心里，
    * ADR-0021 的 S1）、`--install-name`（Mach-O 的 `LC_ID_DYLIB`；不给这一格 macho_exe
@@ -3049,14 +3052,16 @@ function tccPrepLink(argv) {
  * `omni run -v BBP_Formula.c --profile sample --cc clang` 印的是「c front end + codegen」
  * ——也就是**我们自己那台**，而且一份 profile 都没出。收下开关一声不响是最坏的一种。
  *
- * 现在这一格把两根线都接上，办法是**把这一趟整个交给那台 cc**（它才有插桩那台机器）：
+ * 现在这一格把两根线都接上，办法是**把这一趟整个交给那台 cc**（那时插桩由它做）：
  *   `--profile cc`      加 `-finstrument-functions`，并把 `src/runtime/omni_prof.c` 一起编进去
  *                       （那份收集器的 `__cyg_profile_func_enter` 自己 `atexit` 挂报告）
+ *   `--profile stub`    在这条腿上与 `cc` 是同一件事（见下面 `instr` 那一格）
  *   `--profile sample`  同样编进 `omni_prof.c`，再加一格构造器 TU 调 `omni_prof_env_init()`
  *                       （用户的 `main` 不是我们的，没有 `omni_host_init` 那一步）
  *   没有 profile        就是「用那台 cc 编一编、链一链」——`--cc` 这一格本来就该管这个
  *
- * 回 `null` 表示这一趟不该走这条路（`--cc self` 或者没给）；调用方接着走自己那条。
+ * 回 `null` 表示这一趟不该走这条路（`--cc self` 或者没给）；调用方接着走自己那条
+ * （那条路上三档也都齐了，见 `cFileSelfProf`）。
  */
 function cFileViaCc(path, argv, exe) {
   const cc = ccPick();
@@ -3064,7 +3069,11 @@ function cFileViaCc(path, argv, exe) {
   const mode = PROF === null ? null : PROF.mode;
   const objs = [];
   const flags = ['-O2', '-g'];
-  if (mode === 'cc' || mode === 'sample') {
+  /* `.c` 输入这条腿上 **`cc` 与 `stub` 是同一件事**：那份 C 不经我们的发射器，所以"发射期
+   * 插的那一对"在这儿只能理解成"插桩" —— 谁编的谁插（我们自己那台前端也会插了，
+   * 见 `emitProfCall`）。两个名字都落到 `-finstrument-functions` 上，不多一句拒绝。 */
+  const instr = mode === 'cc' || mode === 'stub';
+  if (instr || mode === 'sample') {
     flags.push('-I', RUNTIME_DIR);
     /* **收集器自己不能被插桩**：`omni_prof.c` 里那对钩子一旦也带上 `-finstrument-functions`，
      * 进入钩子又触发钩子 —— 量到的就是当场 `Segmentation fault: 11`（栈爆）。所以它
@@ -3074,7 +3083,7 @@ function cFileViaCc(path, argv, exe) {
       join(RUNTIME_DIR, 'omni_prof.c'), '-o', pobj], 'c')[0];
     if (prc !== 0) throw new OmniError(`${cc} 编不过收集器 omni_prof.c（退出码 ${prc}）`);
     objs.push(pobj);
-    if (mode === 'cc') flags.push('-finstrument-functions');
+    if (instr) flags.push('-finstrument-functions');
     if (mode === 'sample') {
       /* 采样那条栈是靠**帧指针**往上走的（`ucontext` 拿到 fp 再一格格串）—— `-O2` 默认
        * 会省掉它，省掉就只剩最外那一帧。这一格明着要回来。 */
@@ -3128,26 +3137,38 @@ function runJsDirect(path, args) {
 }
 
 /**
- * **`.c` 输入 + `--cc self` 上的采样**（第一百五十片第二格）。
+ * **`.c` 输入 + `--cc self` 上的 profile**（第一百五十片第二、三格）。
  *
  * 用户那句话：「self 没有任何一条路径不可做，毕竟我们最后部署的机器不一定有外部 cc。」
- * 对 —— 采样这一档要的两样东西我们**自己都有**：
- *   一、把收集器（`src/runtime/omni_prof.c`）编成一格 `.o` —— 我们自己那台 C 前端本来就在
- *       编整份运行时（`OMNI_CC=self` 那条闭环）；
- *   二、启动时叫一句 `omni_prof_env_init()`。外部 cc 那条路用的是构造器属性，而我们这台
- *       前端不必依赖那个：**把用户的 `main` 改个名**（`-Dmain=omni_user_main`，预处理层，
- *       任何 C 编译器都认），再发一格自己的 `main` 先开采样、再调它。
- * 于是一个外部编译器都不借，`.c` 输入照样量得到热路径。
+ * 两档现在都成立，要的东西我们**自己都有**：
  *
- * 回 `{ defs, objs }`：`defs` 要接到用户那一份的宏定义上，`objs` 要一起链进去。
- * 不是采样档就回 `null`（这一格只管采样；`cc` 那一档要真插桩 —— 那是我们那台前端还欠的
- * 一格能力，记在任务 #48）。
+ *   `sample`：一、把收集器（`src/runtime/omni_prof.c`）编成一格 `.o` —— 我们自己那台 C
+ *       前端本来就在编整份运行时（`OMNI_CC=self` 那条闭环）；二、启动时叫一句
+ *       `omni_prof_env_init()`。外部 cc 那条路用的是构造器属性，而我们这台前端不必依赖
+ *       那个：**把用户的 `main` 改个名**（`-Dmain=omni_user_main`，预处理层，任何 C
+ *       编译器都认），再发一格自己的 `main` 先开采样、再调它。
+ *   `cc` / `stub`：**我们自己那台前端插桩**（`-finstrument-functions` 的复刻，见
+ *       `emitProfCall`）。这一档只要把收集器链进去 —— 那对钩子第一次被调到时自己
+ *       `atexit` 挂报告，没有启动那一步要做。
+ *
+ * 于是一个外部编译器都不借，`.c` 输入上采样与精确插桩两档都量得到。
+ *
+ * 回 `{ defs, objs, instr }`：`defs` 要接到用户那一份的宏定义上，`objs` 要一起链进去，
+ * `instr` 说的是「用户那一份要不要插桩」。没开 profile 就回 `null`。
  */
 function cFileSelfProf(dir, arch, os, sysIncs) {
-  if (PROF === null || PROF.mode !== 'sample') return null;
+  if (PROF === null) return null;
+  const mode = PROF.mode;
   const pobj = join(dir, 'omni_prof.o');
+  /* **收集器自己绝不能被插桩**（与 `cFileViaCc` 里那一格同一个理由）：钩子里再触发钩子
+   * 就是栈爆。所以这一趟不给 `instr` —— 它是 `cObj` 最后那个参数，默认关着。 */
   cObj(join(RUNTIME_DIR, 'omni_prof.c'), pobj, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs);
   vStep(`c obj（我们自己那台）  omni_prof.c -> ${pobj}`);
+  if (mode !== 'sample') {
+    /* 插桩那两档（`cc` / `stub`）：钩子自己挂报告，不用那格 `main` 包装。 */
+    vStep('插桩（我们自己那台前端复刻 -finstrument-functions）');
+    return { defs: [], objs: [pobj], instr: true };
+  }
   const shim = join(dir, 'omni_prof_boot.c');
   writeText(shim, 'void omni_prof_env_init(void);\n'
     + 'int omni_user_main(int argc, char **argv);\n'
@@ -3156,7 +3177,7 @@ function cFileSelfProf(dir, arch, os, sysIncs) {
   cObj(shim, sobj, arch, [], [], 'elf', os, sysIncs);
   vStep(`c obj（我们自己那台）  ${shim} -> ${sobj}（改名 main + 开采样）`);
   /* 宏的形状是 `[名字, 值]` 的数组（见 `defArgs`）—— 不是命令行那种 `-Dk=v` 串。 */
-  return { defs: [['main', 'omni_user_main']], objs: [pobj, sobj] };
+  return { defs: [['main', 'omni_user_main']], objs: [pobj, sobj], instr: false };
 }
 
 function runCFile(path, argv) {
@@ -3174,10 +3195,12 @@ function runCFile(path, argv) {
    * 在这条腿上被悄悄忽略（见 `cFileViaCc` 头上那段量到的原话）。 */
   const via = cFileViaCc(path, argv, exe);
   if (via === null) {
-    /* 我们自己那台前端 + 链接器这条路上的采样：收集器与那格 main 包装都自己编（见上）。 */
+    /* 我们自己那台前端 + 链接器这条路上的 profile：收集器、那格 main 包装、以及
+       「用户那一份要不要插桩」都在这儿说定（见上）。 */
     const sp = cFileSelfProf(dir, arch, os, sysIncDirs(flags));
     cObj(path, obj, arch, incDirs(flags),
-      [...defArgs(flags), ...(sp === null ? [] : sp.defs)], 'elf', os, sysIncDirs(flags));
+      [...defArgs(flags), ...(sp === null ? [] : sp.defs)], 'elf', os, sysIncDirs(flags),
+      sp !== null && sp.instr);
     vStep(`c front end + codegen  ${path} -> ${obj}`);
     const rc = subMain(['c', 'link', obj, ...(sp === null ? [] : sp.objs), '-o', exe,
       '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
@@ -3477,12 +3500,10 @@ function main(argv) {
         PROF.svg = PROF.out;
         PROF.out = `${PROF.out}.folded`;
       }
-      /* `cc` 那一档要外部编译器的开关，我们自己那台 C 前端还没有 `-finstrument-functions`
-       * —— 明着说，别悄悄出一份没插桩的二进制然后印一张空表。 */
-      if (mode === 'cc' && selfCC()) {
-        throw new OmniError('--profile cc 要外部编译器（-finstrument-functions）：'
-          + '给 --cc clang/gcc，或者换 --profile sample（运行期采样）/ --profile stub（发射期插桩）');
-      }
+      /* 从前这儿有一句「`cc` 那一档要外部编译器」的硬拒绝。作废了（第一百五十片第三格）：
+       * 我们自己那台 C 前端现在**有** `-finstrument-functions` 的等价物（`emitProfCall`），
+       * 两条 C 腿（生成的 C 与 `.c` 输入）上都是它插的桩。别的腿上仍旧没有这台机器，
+       * 那由 `profCheckLeg` 按腿说 —— 不再按"编译器是谁"一刀切。 */
       /* `sample` 是运行期的事：设进环境，`spawn` 出去的孩子自己继承（与 `-f svg` 同一个手法）。 */
       if (mode === 'sample') setEnv('OMNI_PROF', hz > 0 ? `sample:${hz}` : 'sample');
       if (PROF.out !== null && PROF.out !== undefined) {

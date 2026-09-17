@@ -261,6 +261,10 @@ export function cMirNative(path, opts, defs) {
     join,
     arch: opts.arch,
     os: opts.os,
+    /* `-finstrument-functions`（第一百五十片第三格）：每个函数进出各插一次
+     * `__cyg_profile_func_enter/exit`。`omni run x.c --profile cc` 那一趟要它 ——
+     * 于是 `.c` 输入上「精确的调用次数与自用时间」不再要外部编译器。 */
+    instrument: opts.instrument === true,
   }, defs.map(([name, body]) => ({ name, body })));
 }
 

@@ -653,6 +653,15 @@ export class CGen {  /**
      * 真地址。除此之外整个前端一字不改 —— 帧的布局、`&x` 是 `fp + 偏移`、聚合体怎么摆，
      * 两条腿共用同一段代码，差的只有「`fp` 从哪来」这一处。 */
     this.native = opts === undefined ? false : opts.native === true;
+    /* **插桩**（第一百五十片第三格）：这台前端自己复刻 `-finstrument-functions` ——
+     * 每个函数体的入口发一次 `__cyg_profile_func_enter(自己的地址, 0)`、每条 `RET` 之前
+     * 发一次 `__cyg_profile_func_exit(…)`。收集器就是运行时那份 `omni_prof.c`（一字不改），
+     * 于是外部 cc 与我们自己这台前端喂给它的是同一对钩子、报出来的是同一张表。
+     * 只在 native 那条腿上成立：钩子的第一个实参是**函数的真地址**（`FADDR`），
+     * 而线性内存那条腿上函数指针是「号 + 1」，`backtrace_symbols` 翻不出名字。 */
+    this.instrument = opts === undefined ? false : opts.instrument === true;
+    /** 正在发的这个函数在模块里的号（插桩要取它的地址）；-1 = 不插 */
+    this.instrFnNo = -1;
     /** 当前记号（tcc 的全局 `tok` / `tokc`）。镜像一份是为了代码读起来像 tccgen。 */
     this.tok = TOK_EOF;
     this.tokc = null;
@@ -7671,6 +7680,9 @@ export class CGen {  /**
     // ---- 第二遍：真的
     this.frameSize = alignUp(est, 16);
     this.frameOff = 0;
+    /* 插桩要取**这个函数自己的地址**（`FADDR` 的实参是函数号）。`runBody` 的签名是给
+     * 「两遍走同一段」定的，里头没有 `info` —— 所以号在这儿交过去，与 `frameSize` 同一格。 */
+    this.instrFnNo = this.instrument ? info.no : -1;
     this.runBody(body, info.f, ret, name, params, info.variadic);
   }
 
@@ -7864,6 +7876,12 @@ export class CGen {  /**
      * 必须在形参都绑好之后 —— 长度里写的就是别的形参。 */
     for (const p of params) this.vlaParamCode(p.ty);
 
+    /* 插桩的**进门**那一钩（第一百五十片第三格）。位置有讲究：
+     *   - 在形参绑好**之后** —— 钩子那次调用会动寄存器，序言那几条得先落地；
+     *   - 在下面那圈 `goto` 用的 `LOOP` **之前** —— 摆进去的话一次 `goto` 往回跳
+     *     就再报一次"进门"，影子栈当场歪掉（那是量出来才想到的一格）。 */
+    this.emitProfEnter();
+
     /* 这个函数里有标签 -> 摆那台**唯一**的状态机（第二十四片，见 `gotoStmt` 头上那段）：
      * 一个状态槽、一圈 `LOOP`。`goto` = 「写状态、`BR` 回这圈 LOOP 的开头」，
      * 剩下的由函数体那条分派链把控制送到位。走完函数体要**出去**而不是掉回循环开头。 */
@@ -7921,10 +7939,46 @@ export class CGen {  /**
   }
 
   /** 收场：把 `$sp` 还回去。**每条 RET 之前都要**，所以单独一个函数。
-   * native 上没有这一步 —— 帧是 `FRAME` 要的一块，`ret` 一收全收。 */
+   * native 上没有这一步 —— 帧是 `FRAME` 要的一块，`ret` 一收全收。
+   *
+   * 插桩的**出门**那一钩也挂在这儿（第一百五十片第三格）：函数体里每条 `RET` 都先经过
+   * 这一格（`return` 那四支与落到函数尾那一条，一处不漏），于是"每条返回路径各一次"
+   * 这件事不靠在五个地方各写一遍来保证。 */
   emitEpilogue() {
+    this.emitProfExit();
     if (this.pass1 || this.native || this.frameSize === 0) return;
     this.f.emit(OP.GSTORE, T_VOID, this.spSave, REF_NONE, this.spNo);
+  }
+
+  /**
+   * 插桩那一对钩子（`-finstrument-functions` 的复刻，第一百五十片第三格）。
+   *
+   * 用户那句话是对的：「我们使用 js 实现了完整的 tcc，有什么事情是做不到？」——
+   * 把 cc 当外部，这一格就是我们自己的：钩子的名字、实参与语义**照 gcc 定的那一对**
+   * （`__cyg_profile_func_enter(this_fn, call_site)`），于是运行时那份收集器
+   * （`omni_prof.c`）一个字都不用改，外部 clang 与我们自己这台前端喂给它的是同一对钩子。
+   *
+   * `call_site` 给 0：那一格收集器现在不看（它头上写着「要调用图的时候才用得上」），
+   * 而"调用点在哪"在 MIR 这一层没有现成的 ref —— 拿返回地址要落到后端去。
+   * 少这一格不影响热路径：影子栈上父子关系是靠 enter/exit 配对来的，不靠 call_site。
+   *
+   * 函数名怎么回来的：`this_fn` 是**真地址**，报告那一层用 `backtrace_symbols` 翻
+   * （量过：我们自己那台链接器写出来的 Mach-O 上翻得出 `hot` / `cold` / `main`）。
+   */
+  emitProfEnter() {
+    this.emitProfCall('__cyg_profile_func_enter');
+  }
+
+  emitProfExit() {
+    this.emitProfCall('__cyg_profile_func_exit');
+  }
+
+  emitProfCall(name) {
+    if (!this.instrument || this.pass1 || !this.native || this.instrFnNo < 0) return;
+    const f = this.f;
+    const self = f.emit(OP.FADDR, T_I64, REF_NONE, REF_NONE, this.instrFnNo);
+    f.emit(OP.CCALL, T_VOID, this.mod.cabiNo(name),
+      f.pushArgs([self, this.mod.consts.int(0n)]), 0);
   }
 
   /**
@@ -8488,7 +8542,10 @@ export function lowerCNative(path, text, host, defs) {
   const mod = new MirModule(path);
   mod.setNative();
   mod.setOs(host === undefined ? 'osx' : host.os);
-  const gen = new CGen(cpp, mod, { native: true });
+  /* `instrument`：`-finstrument-functions` 的那一格（第一百五十片第三格）。默认关着 ——
+   * 开着的时候每个函数进出各多一次调用，那是 profile 那一趟才该付的价。 */
+  const gen = new CGen(cpp, mod,
+    { native: true, instrument: host !== undefined && host.instrument === true });
   gen.preamble(COMPILE_PREAMBLE);
   cpp.startParse(path, text);
   gen.unit();
