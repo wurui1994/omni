@@ -347,6 +347,13 @@ function toNode(x) {
     }
     // `[10, 20, 30]` -> list-new；`xs[0]` -> index-get（V 与 go 从 0 起，不用减）
     case 'array': return listNew(many(kids(x)));
+    // `[10, 20, 30]!` 是**定长数组**字面量 —— 元素都写出来了，落的还是那一格 list-new：
+    // "定长"是**类型上**的性质，而类型不进图（`nodes.js` 文件头第一条）。
+    case 'array-fixed': return listNew(many(kids(x)));
+    // `none` 是 V 的 Option 空值 —— 与 `nil` 落同一格（`name` 那一格里也认它，
+    // 但语法给 `none` 一条**自己的产生式**，与 `(bool …)` 是同一种错）。
+    // 注意它与三段 for 里那个空格子**同一个标签**：那几处在 `for` 那一格上先滤掉了。
+    case 'none': return lit(null);
     case 'index': {
       const [o, i] = kids(x);
       return isMap(o) ? mapGet(toNode(o), toNode(i)) : indexGet(toNode(o), toNode(i));
@@ -427,11 +434,20 @@ function toNode(x) {
       const cond = part(x, 'cond');
       const post = part(x, 'post');
       const blk = kids(x).find((y) => tag(y) === 'block');
-      // 形状与 go / awk 一模一样 —— `threePart` 只写一遍（fromtree.js）
+      // 形状与 go / awk 一模一样 —— `threePart` 只写一遍（fromtree.js）。
+      // 三段里省掉的那几格在树上是 `(none)`（`vlang.grammar` 的空产生式），
+      // 而 `(none)` 在**表达式位置**上是 Option 的空值（落 nil）—— 两件事同一个标签。
+      // **条件那一格不能落成 nil**：`for ;; {}` 是无条件循环，那是 `cond: undefined`
+      // （落成 nil 就是"条件为假"，循环一次都不跑 —— 答案错而不报）。
+      const slot = (g) => (g === undefined ? [] : many(kids(g).filter((k) => tag(k) !== 'none')));
+      const condOf = () => {
+        const c = cond === undefined ? undefined : kids(cond)[0];
+        return c === undefined || tag(c) === 'none' ? undefined : toNode(c);
+      };
       return threePart({
-        init: init === undefined ? [] : many(kids(init)),
-        cond: cond === undefined ? undefined : toNode(kids(cond)[0]),
-        post: post === undefined ? [] : many(kids(post)),
+        init: slot(init),
+        cond: condOf(),
+        post: slot(post),
         body: blk === undefined ? [] : many(kids(blk)),
       });
     }
