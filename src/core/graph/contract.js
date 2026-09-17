@@ -24,6 +24,7 @@ import { PRIMS } from './prims.js';
 import { emitWat, watCan, runWat, WAT_SHAPES, Gap } from './backend-wat.js';
 import { emitC, cCan, runC, C_SHAPES } from './backend-c.js';
 import { jsModuleText } from './js_rt.js';
+import { emitCore, coreCan, runCore, CORE_SHAPES } from './backend-core.js';
 /* js 这条腿要在宿主里跑一段生成出来的 JS —— 走 ABI 那两格（`new Function` 不在语言子集里）。 */
 import { evalJs, hasJsEngine } from '../host/native.js';
 
@@ -162,6 +163,33 @@ registerBackend({
   lower: (g) => {
     const text = emitC(g);
     return { text, run: () => runC(text) };
+  },
+});
+
+// ---- 后端六：`core` —— **落成核心方言**（第一百五十二片，ADR-0037 §5.1 的 B 路）
+//
+// **名字要说准**：落的是**核心方言**（`sexpr/lower.js` 那份 `.sx`，ADR-0014 的汇聚点）——
+// 它是**中间格式**，不是 omni 那门语言。omni 主语言有自己的前端（`parse/parser.js` +
+// `hir/check.js`），与这一条腿没有关系。头一版这个后端叫 `omni`，那是**错的名字**：
+// 它会让人以为产物是 omni 的源码。
+//
+// 与前五条的差别是**方向**：别的后端把图落成"别人那门语言"，这一条落成我们自己的中间格式，
+// 于是往下 OIR -> js / c / wasm / llvm 四条腿、摇树、profile、REPL 全都白得 ——
+// 借用一门语言之后拿到的不是"能跑"，是"我们这套工具链全都对它有效"。
+// 代价写在 `backend-core.js` 的头上：图上没有类型，而方言有，所以这一刀只接
+// 整数 / 串 / 真假那一档，别的**有名有姓**地报（`can` 与 `shapes` 两处都答）。
+registerBackend({
+  name: 'core',
+  can: coreCan,
+  carry: (sort) => (sort === 'expr' ? '方言的一格表达式（有类型：int/real/bool/string）' : '方言的一条语句'),
+  effect: (e) => (e === 'may-early-exit'
+    ? 'ret / brk / cont 都有（方言里带层号）'
+    : '方言的次序就是语句序'),
+  region: () => '一格 `(do …)` + `(let …)`',
+  shapes: CORE_SHAPES,
+  lower: (g) => {
+    const text = emitCore(g);
+    return { text, run: () => runCore(text) };
   },
 });
 
