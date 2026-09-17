@@ -162,6 +162,20 @@ function sysIncDirs(argv) {
   return out;
 }
 
+/**
+ * 预定义宏要的那个目标：`--arch` / `--os` 给了就听，不给按**这台机器**。
+ *
+ * 谁要它：`c.toMir`（线性内存那条解释器腿）。它读的是这台机器**真的**系统头，而头文件
+ * 按 `__x86_64__` / `__linux__` 分支 —— 从前那条腿的预定义写死 arm64-osx，
+ * x86_64 Linux 上于是报 `gnu/stubs.h:7: include file 'gnu/stubs-32.h' not found`。
+ * 那条腿的 **ABI** 仍是虚拟目标（`lowerC` 自己钉），这一格只管宏。
+ */
+function cTgt(argv) {
+  const ai = argv.indexOf('--arch');
+  const si = argv.indexOf('--os');
+  return { arch: ai >= 0 ? argv[ai + 1] : hostArch(), os: si >= 0 ? argv[si + 1] : hostOs() };
+}
+
 /** `-include 文件`（tcc 的 `cmdline_incl`）：开工前先读的那几份，按命令行次序。 */
 function inclArgs(argv) {
   const out = [];
@@ -2756,7 +2770,7 @@ function main(argv) {
         const oi = rest.indexOf('-o');
         const out = oi >= 0 ? rest[oi + 1] : `${basename(path, '.c')}.js`;
         const { flags, prog } = cSplitArgs(rest);
-        const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
+        const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags));
         const text = emitMirJs(mir, { rtImport: join(installDir(), '..', 'mir', 'js_rt.js') });
         writeText(out, text);
         stderr(`omni: built ${out} (${text.length} 字节，MIR -> JS；`
@@ -2769,7 +2783,7 @@ function main(argv) {
         const oi = rest.indexOf('-o');
         const out = oi >= 0 ? rest[oi + 1] : `${basename(path, '.c')}.mir`;
         const { flags, prog } = cSplitArgs(rest);
-        const text = printMir(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags)));
+        const text = printMir(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags)));
         writeText(out, text);
         stderr(`omni: built ${out} (${text.length} 字节，MIR —— 解释器吃的就是这一层；`
           + '喂回去跑还差「可回读的 IR」那一格，见 ADR-0018)\n');
@@ -2954,7 +2968,7 @@ function main(argv) {
    * 而 `--explain` 的承诺是「一个字节都不写盘、不执行」。（第一版就摆错了，量出来了。） */
   if (cmd === 'check') {
     if (path.endsWith('.c')) {
-      const mod = cap('c.toMir')(path, incDirs(rest), defArgs(rest), [], sysIncDirs(rest));
+      const mod = cap('c.toMir')(path, incDirs(rest), defArgs(rest), [], sysIncDirs(rest), cTgt(rest));
       stdout(`ok  ${path}：${mod.funcs.length} 个函数（C 一遍过 + MIR 自检）\n`);
       return 0;
     }
@@ -3286,12 +3300,12 @@ function main(argv) {
     // **退出码就是 C 的 `main` 的返回值**，与 `tcc -run` 逐条相同，那也是这一刀的 oracle。
     case 'c-mir': {
       const { flags, prog } = cSplitArgs(rest);
-      stdout(printMir(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
+      stdout(printMir(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags))));
       return 0;
     }
     case 'c-emit-js': {
       const { flags, prog } = cSplitArgs(rest);
-      stdout(emitMirJs(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags))));
+      stdout(emitMirJs(cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags))));
       return 0;
     }
     /**
@@ -3317,7 +3331,7 @@ function main(argv) {
     }
     case 'c-run': {
       const { flags, prog } = cSplitArgs(rest);
-      const mod = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
+      const mod = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags));
       return runMirModule({ structs: [], enums: [], classes: [], js: false }, mod);
     }
     /**
@@ -3332,7 +3346,7 @@ function main(argv) {
      */
     case 'c-run-js': {
       const { flags, prog } = cSplitArgs(rest);
-      const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags));
+      const mir = cap('c.toMir')(path, incDirs(flags), defArgs(flags), prog, sysIncDirs(flags), cTgt(flags));
       const js = emitMirJs(mir);
       vStep(`backend js (from mir)  ${js.length} bytes`);
       return runMirJs(js);

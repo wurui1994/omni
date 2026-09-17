@@ -61,16 +61,23 @@
 #        /tmp/omni-x64 check tests/cases/01_basics.omni -> `ok  …：6 个函数`
 #      本机 arm64 那一份是 35.4M（`cli.js` 的 `selfCC`）—— 两台机器不可直接比大小
 #      （x86_64 这一份没有量过 `.text` 分布），这里只记「跑得起来」。
-#   7. **还欠一格，记在这儿**：`omni c run`（线性内存那条解释器腿）在 Linux 上报
+#   7. `omni c run`（线性内存那条解释器腿）在 Linux 上从前一句都跑不了：
 #        /usr/include/gnu/stubs.h:7: error: include file 'gnu/stubs-32.h' not found
-#      根因不是路径：那条腿的目标是**写死的虚拟目标 arm64-osx**（`tccgen.js` 的
-#      `setCharTarget('arm64','osx')`，注释里也这么说），而它读的是**这台机器真的**
-#      glibc 头 —— 预定义里没有 `__x86_64__`，`stubs.h` 于是走 32 位那一支。
-#      macOS 上两边正好对得上，所以从来没露头。这是「虚拟目标 vs 真头文件」的一格
-#      设计账（要么给那条腿一份自带的头，要么让它的预定义跟着宿主走），不是一行修得掉的，
-#      所以先钉住不猜。容器里 `tests/c/run.js` 的 `gen/` 那一组还另有一个环境限制：
-#      仓库里那份 tcc 尺子是 **macOS 二进制**（`Exec format error`），所以那一轴
-#      在容器里本来就不是判据。
+#      根因不是路径 —— 那条腿的**预定义宏**写死 arm64-osx，而它读的是这台机器真的
+#      glibc 头（`__x86_64__` 没定义，`stubs.h` 于是走 32 位那一支）。macOS 上两边
+#      正好对得上，所以从来没露头。**已还**：预定义跟着 `--arch`/`--os`（默认这台机器）走
+#      （`cli.js` 的 `cTgt`）；那条腿的 **ABI** 仍是虚拟目标（`long double` = double、
+#      `wchar_t` = int、`char` 有符号），由 `lowerC` 自己钉，见那儿的注。
+#      量到的（`tests/c/gen/*.c` 逐个 `c run`，数「输出里带 error:」的）：
+#        本机 arm64 macOS 1 份（39-strerror，那是 strerror 自己的字串）
+#        容器 x86_64 5 份 —— 多出来的四份都在**解释器自带的那份 libc** 上，各是一格：
+#          33-ctype           interp: C ABI call '__ctype_b_loc' is not supported
+#          35-streams         undefined symbol 'stdout'（glibc 那儿是数据符号）
+#          38-bytes           undefined symbol 'stderr'（同上）
+#          53-typedef-shadow  storage class specified for 'struct' member（前端，glibc 头触发）
+#      这四格是**解释器的 libc 与 glibc 头对不上**，不是目标默认值的事，各自单列。
+#      顺带记下：容器里 `tests/c/run.js` 的 `gen/` 一组本来就不是判据 ——
+#      仓库里那份 tcc 尺子是 macOS 二进制（`Exec format error`）。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

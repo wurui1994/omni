@@ -160,14 +160,24 @@ function readOrNull(p) {
 /**
  * 一份 `.c` -> MIR（ADR-0017 第六刀）。宿主回调与 `cppText` 同一套。
  * 良构检查在这里做完 —— 前端刚长出来，让 verifier 先骂比让解释器崩掉好查。
+ *
+ * `tgt`（`{arch, os}`）只管**预定义宏**：这条腿读的是**这台机器真的**系统头，
+ * 而头文件按 `__x86_64__` / `__linux__` 分支。少这一格的代价在 x86_64 容器里量到了：
+ * `omni c run x.c` 报 `/usr/include/gnu/stubs.h:7: error: include file
+ * 'gnu/stubs-32.h' not found`（预定义说自己是 arm64-osx，glibc 的头于是走 32 位那支）。
+ *
+ * 这条腿的 **ABI** 仍旧是那个虚拟目标（`long double` = double、`wchar_t` = int、
+ * `char` 有符号），由 `lowerC` 自己钉住 —— 见那儿的注。
  */
-export function cMir(path, incs, defs, args, sysIncs) {
+export function cMir(path, incs, defs, args, sysIncs, tgt) {
   const { mod, warnings } = lowerC(path, readText(path), {
     readFile: readOrNull,
     includeDirs: incs,
     sysIncludeDirs: sysIncs ?? cSysInclude(),
     dirname,
     join,
+    arch: tgt?.arch,
+    os: tgt?.os,
   }, defs.map(([name, body]) => ({ name, body })), args);
   for (const w of warnings) stderr(`${w}\n`);
   const errs = verifyMir(mod);

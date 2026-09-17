@@ -7916,7 +7916,14 @@ function genUtf8Bytes(s) {
  * @param {string[]} [args] 被跑的程序自己的命令行实参（`argv[1]` 起；`argv[0]` 是 `path`）
  */
 export function lowerC(path, text, host, defs, args) {
-  /* 线性内存那条腿上 `long double` 就是 double（那儿没有 x87 可谈）—— 明着拨一次，
+  /* 下面三格是**这条腿自己的 ABI**（那个虚拟目标），与 `host.arch`/`host.os` 无关 ——
+   * 后两格只管**预定义宏**，因为这条腿读的是这台机器**真的**系统头，而头文件按
+   * `__x86_64__` / `__linux__` 分支（见 `lang/c.js` 的 `cMir`）。
+   *
+   * 一处已知的不对齐钉在这儿：arm64 **Linux** 上 glibc 的 `char` 是无符号的，而这儿
+   * 钉的是有符号 —— 那台机器上没量过，不猜。x86_64 的两个 OS 都是有符号，对得上。
+   *
+   * 线性内存那条腿上 `long double` 就是 double（那儿没有 x87 可谈）—— 明着拨一次，
    * 免得同一个进程里先编过 x86_64 之后串了（第一百一十一片）。 */
   setLdoubleTarget('arm64');
   /* 线性内存那条腿上 `wchar_t` 就是 int（那儿没有 PE 可谈）—— 同样明着拨一次。 */
