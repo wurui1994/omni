@@ -21,13 +21,14 @@
  *         | (global NAME TYPE)                      模块级变量（零初始化，跨函数共享）
  *         | (main STMT...)                          入口体
  *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8) | (buf int|real)
- *         | (arr T) | (fnty (TYPE...) TYPE) | 结构体名 | 类名
+ *         | (arr T) | (dict int|string T) | (fnty (TYPE...) TYPE) | 结构体名 | 类名
  *   STMT  = (let NAME TYPE E) | (set NAME E) | (do STMT...)
  *         | (if E (do ...) [(do ...)]) | (while E (do ...))
  *         | (brk) | (cont)
  *         | (ret [E]) | (print E) | (expr E)
  *         | (bset E E E) | (dispatch NAME E E...)
  *         | (aset E E E) | (apush E E) | (fldset E 字段 E)
+ *         | (dset E E E)
  *   E     = (int TEXT) | (real TEXT) | (bool TEXT) | (str "…") | (tostr E) | (tostr E N)
  *         | (rmath "NAME" A [B])
  *         | (slen E) | (ssub E I N) | (sfind E T)
@@ -36,6 +37,7 @@
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
  *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
  *         | (anew TYPE E) | (aget E E) | (alen E) | (apop E)
+ *         | (dnew TYPE) | (dget E E) | (dhas E E) | (dlen E)
  *         | (new NAME) | (fld E 字段) | (cnew NAME)
  *         | (fnref NAME) | (mkclo NAME E...) | (cap NAME) | (callfn E E...)
  *
@@ -56,7 +58,7 @@
  */
 
 import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, classType, fnType, typeKey, zeroValue,
-  ptrType, tptrType, ptrTargetOk, blkType, structLayout, sizeOf } from '../hir/types.js';
+  ptrType, tptrType, ptrTargetOk, blkType, structLayout, sizeOf, dictType, listType } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 import { expandTemplates } from './template.js';
 import { SourceFile } from '../source/diag.js';
@@ -174,6 +176,12 @@ class CoreLowerer {
     // 结构体：名字 -> OIR 的 struct 类型对象。**声明就是类型**（hir/types.js 的 structType），
     // 所以这张表里的对象和每个 (fld …) 节点上挂的 `type` 是同一个对象，与 hir/check.js 一致。
     this.structs = new Map();
+    /* 字典那一格用到的**容器类型登记处**（typeKey -> 类型）。C 那条腿的容器是**单态**的：
+     * `OMNI_DICT_BODY`/`OMNI_DICT_DEFINE` 按 K/V 逐个生成，所以生成器要拿到"这份模块用到
+     * 哪几个容器"。别的腿不看这一格（js 是 Map、MIR 那条走运行时的 omni_dict_*）。
+     * 一格 `(dict K V)` 要连**键的列表类型**一起登记 —— `OMNI_DICT_DEFINE` 的最后一个实参
+     * 就是它（`keys()` 用），少了它生成的 C 里是一个没声明的类型名。 */
+    this.containers = new Map();
     // 类：**引用**语义的聚合。跟 struct 的区别只有一条 —— 赋值/传参/返回**不复制**
     // （from_oir 的 rvalue 只给 struct 与 enum 发 OP.COPY）。asy 的 struct 就是这种
     // （量过：`A b = a; b.x = 7;` 之后 `a.x` 是 7），所以这两种都要有，不是重复。
@@ -253,6 +261,27 @@ class CoreLowerer {
     // **结构体元素还不收**：那是值语义，格子里躺的是内容，于是 `aset`/`apush`/`anew`
     // 三处都要按元素类型拷一份 —— JS 与解释器那两条腿的 `arrCopy` 是**类型擦除**的
     // （只认 Array.isArray），拷不动一个普通对象。`tests/sexpr/bad/arr-elem-struct.sx` 钉着。
+    // `(dict K V)`：字典（第一百五十三片）。键只收 int / string（要哈希与相等，
+    // 而 real 当键在两条腿上的相等判定说不到一起），值收四格标量。
+    // OIR 那一层**一个新节点都不加**：`(dnew …)` 是 `NewContainer`、`(dget …)`/`(dset …)`
+    // 是 `IndexGet`/`IndexSet`、`(dhas …)` 是 `contains` 内建 —— 主语言的 `dict<K,V>`
+    // 走的就是这几格，所以六条腿本来就认得（见 hir/check.js 的 indexGet / membership）。
+    if (isList(node) && head(node) === 'dict') {
+      const kn = isAtom(node.items[1]) ? node.items[1].value : null;
+      const vn = isAtom(node.items[2]) ? node.items[2].value : null;
+      const k = kn === null ? undefined : BASE_TYPES.get(kn);
+      const v = vn === null ? undefined : BASE_TYPES.get(vn);
+      if (k !== INT && k !== STRING) {
+        return this.err(node, `${what}：(dict K V) 的键只能是 int 或 string`);
+      }
+      if (v === undefined || v === VOID) {
+        return this.err(node, `${what}：(dict K V) 的值只能是 int / real / bool / string`);
+      }
+      const t = dictType(k, v);
+      this.useContainer(t);
+      this.useContainer(listType(k));
+      return t;
+    }
     if (isList(node) && head(node) === 'arr') {
       const en = node.items[1];
       if (isList(en) && head(en) === 'vec') {
@@ -1143,7 +1172,7 @@ class CoreLowerer {
       this.memEmitted = true;
     }
     return {
-      structs: structs, classes: classes, enums: [], containers: [],
+      structs: structs, classes: classes, enums: [], containers: [...this.containers.values()],
       closures: clos, fnTypes: fnTys,
       funcs: funcs.concat(lifted),
       globals: globals,
@@ -1486,6 +1515,7 @@ class CoreLowerer {
     if (h === 'mstore') return this.memStore(n);
     if (h === 'unsafe') return this.unsafeBlock(n, ret);
     if (h === 'aset' || h === 'apush') return this.arrWrite(n, h);
+    if (h === 'dset') return this.dictWrite(n);
     if (h === 'fldset') return this.fldSet(n);
     if (h === 'dispatch') return this.dispatch(n);
     return this.err(n, `不认识的语句 '${h}'`);
@@ -2450,6 +2480,7 @@ class CoreLowerer {
       || h === 'pisnull' || h === 'pfield' || h === 'pthin' || h === 'pelem'
       || h === 'pcast' || h === 'peq') return this.ptrExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
+    if (h === 'dnew' || h === 'dget' || h === 'dhas' || h === 'dlen') return this.dictExpr(n, h);
     // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。
     // 没有"结构体字面量"：字段一多，字面量就要么按顺序（改字段顺序会静默改语义）、
     // 要么带名字（那是命名实参那套东西，属于各语言的前端）。零值 + 逐个 fldset 少一条路。
@@ -2731,6 +2762,71 @@ class CoreLowerer {
   }
 
   /**
+   * 字典那四格（第一百五十三片）。**OIR 一个新节点都不加** —— 主语言的 `dict<K,V>`
+   * 走的就是这几格，所以六条腿本来就认得：
+   *
+   *   (dnew (dict K V))   空字典            -> NewContainer
+   *   (dget d k)          按键读；**缺键是运行期错误**（与主语言同一条，不静默给零值）
+   *   (dhas d k)          在不在              -> contains 内建
+   *   (dlen d)            有几格              -> length 内建
+   *   (dset d k v)        写；键不在就**长一格**（语句，见 dictWrite）
+   *
+   * 刻意没有的：字面量（`(dnew …)` + 逐个 `(dset …)` 少一条路，与结构体那儿同一条理由）、
+   * 遍历（键的次序要先定死，那是另一刀）、删除。
+   */
+  dictExpr(n, h) {
+    if (h === 'dnew') {
+      const t = this.ty(n.items[1], 'dnew 的类型');
+      if (t === null) return null;
+      if (t.k !== 'dict') return this.err(n, '(dnew TYPE) 的 TYPE 要是 (dict K V)');
+      return { kind: 'NewContainer', type: t };
+    }
+    const d = this.expr(n.items[1]);
+    if (d === null) return null;
+    if (d.type.k !== 'dict') {
+      return this.err(n, `${h} 的第一个实参要是字典，这里是 ${coreTypeText(d.type)}`);
+    }
+    if (h === 'dlen') return { kind: 'Builtin', name: 'len', args: [d], recvType: d.type, type: INT };
+    const k = this.expr(n.items[2]);
+    if (k === null) return null;
+    if (!sameCoreType(k.type, d.type.key)) {
+      return this.err(n, `${h} 的键要是 ${coreTypeText(d.type.key)}，这里是 ${coreTypeText(k.type)}`);
+    }
+    if (h === 'dhas') {
+      return { kind: 'Builtin', name: 'contains', args: [d, k], recvType: d.type, type: BOOL };
+    }
+    return { kind: 'IndexGet', obj: d, index: k, recvType: d.type, type: d.type.val };
+  }
+
+  /** `(dset d k v)` —— 写一格。键不在就长一格（`IndexSet` 在 dict 上就是这个语义）。 */
+  dictWrite(n) {
+    const d = this.expr(n.items[1]);
+    if (d === null) return null;
+    if (d.type.k !== 'dict') {
+      return this.err(n, `dset 的第一个实参要是字典，这里是 ${coreTypeText(d.type)}`);
+    }
+    const k = this.expr(n.items[2]);
+    const v = this.expr(n.items[3]);
+    if (k === null || v === null) return this.err(n, '(dset 字典 键 值) 要三个实参');
+    if (!sameCoreType(k.type, d.type.key)) {
+      return this.err(n, `dset 的键要是 ${coreTypeText(d.type.key)}，这里是 ${coreTypeText(k.type)}`);
+    }
+    if (!sameCoreType(v.type, d.type.val)) {
+      return this.err(n, `dset 的值要是 ${coreTypeText(d.type.val)}，这里是 ${coreTypeText(v.type)}`);
+    }
+    return {
+      kind: 'ExprStmt',
+      expr: { kind: 'IndexSet', obj: d, index: k, value: v, recvType: d.type, type: d.type.val },
+    };
+  }
+
+  /** 这份模块用到的容器类型登记一格（C 那条腿要按类型生成，见构造器那段注释）。 */
+  useContainer(t) {
+    const key = typeKey(t);
+    if (!this.containers.has(key)) this.containers.set(key, t);
+  }
+
+  /**
    * 向量的四条（ADR-0014 门槛 6 第一阶段）。刻意只有这四条 —— 比较、select、shuffle、
    * 从容器加载都还没有，因为每一条都要在六个执行器上各实现一次，而它们的答案要逐位相同。
    *
@@ -2871,6 +2967,9 @@ function sameCoreType(a, b) {
   if (a.k === 'struct' || a.k === 'class') return a.name === b.name;
   // 递归而不是比 `elem.k`：`(arr (vec real 2))` 与 `(arr (vec int 4))` 的 elem.k 都是 'vec'
   if (a.k === 'arr') return sameCoreType(a.elem, b.elem);
+  // 字典：键与值都同型才算一个类型（C 那条腿的容器是单态的，两格 K/V 不同就是两份实现）
+  if (a.k === 'dict') return sameCoreType(a.key, b.key) && sameCoreType(a.val, b.val);
+  if (a.k === 'list') return sameCoreType(a.elem, b.elem);
   // 指针同理，而且 fat 与 thin 是**两个类型**（`a.k !== b.k` 上面已经挡了）
   if (a.k === 'ptr' || a.k === 'tptr') return sameCoreType(a.target, b.target);
   // 定长内存（第十八刀）：元素同型、格数相同才算一个类型 —— `int(*)[3]` 与 `int(*)[4]`
@@ -2898,6 +2997,8 @@ function coreTypeText(t) {
   if (t.k === 'vec') return `vec<${coreTypeText(t.elem)},${t.lanes}>`;
   if (t.k === 'buf') return `buf<${coreTypeText(t.elem)}>`;
   if (t.k === 'arr') return `arr<${coreTypeText(t.elem)}>`;
+  if (t.k === 'dict') return `dict<${coreTypeText(t.key)},${coreTypeText(t.val)}>`;
+  if (t.k === 'list') return `list<${coreTypeText(t.elem)}>`;
   if (t.k === 'ptr') return `${coreTypeText(t.target)}*`;
   if (t.k === 'tptr') return `${coreTypeText(t.target)} thin*`;
   if (t.k === 'blk') return `${coreTypeText(t.el)}[${t.n}]`;

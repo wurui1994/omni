@@ -42,6 +42,9 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   /* 记录与列表两族（第二刀）：方言里本来就有 `(struct …)`/`(fld …)` 与 `(arr T)`/`(aget …)`，
      所以这两族不必动方言，只是**把类型算出来**（图上没有类型，见文件头）。 */
   'record-new', 'field-get', 'field-set', 'list-new', 'index-get', 'index-set',
+  /* 映射四格：方言第一百五十三片给了 `(dict K V)` 与 `dnew/dget/dset/dhas`，所以这一族
+     也不必动 OIR（那几格就是主语言 `dict<K,V>` 走的 NewContainer / IndexGet / …）。 */
+  'map-new', 'map-get', 'map-set', 'map-has',
   /* 切片：方言里没有，走 `nodes.js` 写着的消去规则（新建 + 一圈 apush，见 `bindSlice`）。 */
   'slice',
   /* defer：方言里没有出口钩子，所以走一趟**变换**（在这一层的末尾与每条 ret 前各放一份，
@@ -107,6 +110,11 @@ function typeOf(x, env, ctx) {
   if (x.op === 'branch') return typeOf(x.ins.then, env, ctx);
   if (x.op === 'field-get') return fieldType(x, env, ctx);
   if (x.op === 'index-get') return elemType(typeOf(x.ins.obj, env, ctx)) ?? 'int';
+  if (x.op === 'map-get') {
+    const d = dictOf(typeOf(x.ins.obj, env, ctx));
+    return d === null ? 'int' : d.val;
+  }
+  if (x.op === 'map-has') return 'bool';
   if (x.op === 'conv') return convTo(x);
   return 'int';
 }
@@ -125,6 +133,17 @@ function elemType(t) {
   if (typeof t !== 'string' || !t.startsWith('(arr ')) return null;
   return t.slice(5, -1);
 }
+
+/** `(dict K V)` 的键与值。不是字典回 null。 */
+function dictOf(t) {
+  if (typeof t !== 'string' || !t.startsWith('(dict ')) return null;
+  const two = t.slice(6, -1).split(' ');
+  if (two.length !== 2) return null;
+  return { key: two[0], val: two[1] };
+}
+
+/** 这一格类型是不是方言的标量（记录 / 列表 / 字典的元素只收这四格）。 */
+const isScalar = (t) => t === 'int' || t === 'real' || t === 'bool' || t === 'string';
 
 /** 一格 `field-get` 交出来的类型：宿主的形状表里查那个字段。查不到当场报。 */
 function fieldType(x, env, ctx) {
@@ -160,6 +179,7 @@ function expr(x, env, ctx) {
       const t = env.get(x.attrs.name);
       if (ctx.shapes.has(t)) gap(`把记录 '${x.attrs.name}' 整格当值用（这一刀只接字段读写）`);
       if (elemType(t) !== null) gap(`把列表 '${x.attrs.name}' 整格当值用（这一刀只接下标读写与 len）`);
+      if (dictOf(t) !== null) gap(`把字典 '${x.attrs.name}' 整格当值用（这一刀只接按键读写与 len）`);
       return `(var ${x.attrs.name})`;
     }
     case 'prim': {
@@ -198,7 +218,20 @@ function expr(x, env, ctx) {
     }
     case 'record-new': gap('记录出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'list-new': gap('列表出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+    case 'map-get': {
+      const dt = typeOf(x.ins.obj, env, ctx);
+      const d = dictOf(dt);
+      if (d === null) gap('map-get 的宿主不是字典');
+      return `(dget ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)})`;
+    }
+    case 'map-has': {
+      const dt = typeOf(x.ins.obj, env, ctx);
+      const d = dictOf(dt);
+      if (d === null) gap('map-has 的宿主不是字典');
+      return `(dhas ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)})`;
+    }
     case 'slice': gap('切片出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+    case 'map-new': gap('映射出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'conv': {
       /* **已经在那一侧的什么都不做** —— 与 wat 那条腿同一句话（`backend-wat.js` 的 conv）。
        * 方言里 int 与 real 不隐式混算，所以这一格必须落准：多补一格 `(toreal …)` 会
@@ -255,9 +288,12 @@ function concatText(args, env, ctx) {
   return args.slice(1).reduce((acc, a) => `(bin "+" ${acc} ${one(a)})`, one(args[0]));
 }
 
-/** `len`：串问 `slen`、列表问 `alen`（图上是同一格内建，方言里是两个）。 */function lenText(a, env, ctx) {
-  if (isNode(a) && a.op === 'ref' && elemType(env.get(a.attrs.name)) !== null) {
-    return `(alen (var ${a.attrs.name}))`;
+/** `len`：串问 `slen`、列表问 `alen`、字典问 `dlen`（图上是同一格内建，方言里是三个）。 */
+function lenText(a, env, ctx) {
+  if (isNode(a) && a.op === 'ref') {
+    const t = env.get(a.attrs.name);
+    if (elemType(t) !== null) return `(alen (var ${a.attrs.name}))`;
+    if (dictOf(t) !== null) return `(dlen (var ${a.attrs.name}))`;
   }
   return `(slen ${expr(a, env, ctx)})`;
 }
@@ -269,8 +305,8 @@ function concatText(args, env, ctx) {
 function objText(obj, env, ctx) {
   if (!isNode(obj) || obj.op !== 'ref') gap('字段 / 下标的宿主不是一个名字（嵌套那一档还没接）');
   const t = env.get(obj.attrs.name);
-  if (!ctx.shapes.has(t) && elemType(t) === null) {
-    gap(`'${obj.attrs.name}' 说不清形状（这一刀只认 \`bind\` 一格记录 / 列表绑出来的名字）`);
+  if (!ctx.shapes.has(t) && elemType(t) === null && dictOf(t) === null) {
+    gap(`'${obj.attrs.name}' 说不清形状（这一刀只认 \`bind\` 一格记录 / 列表 / 字典绑出来的名字）`);
   }
   return `(var ${obj.attrs.name})`;
 }
@@ -309,6 +345,15 @@ function lit(v) {
  */
 function stmtList(list, env, ctx) {
   const arr = list === null || list === undefined ? [] : (Array.isArray(list) ? list : [list]);
+  /* 这一层的语句序摆在 ctx 上：空字典要往后找第一处 `map-set` 才知道类型（见 `mapHint`）。 */
+  const outerScope = ctx.scope;
+  ctx.scope = arr;
+  const out = stmtListIn(arr, env, ctx);
+  ctx.scope = outerScope;
+  return out;
+}
+
+function stmtListIn(arr, env, ctx) {
   const isExit = (s) => isNode(s) && s.op === 'scope-exit';
   if (!arr.some(isExit)) {
     for (const s of arr) if (hasScopeExit(s)) gap('嵌在里层的 scope-exit（这一刀只接一层的语句序）');
@@ -378,6 +423,7 @@ function stmt(x, env, ctx) {
       if (isNode(init) && init.op === 'record-new') return bindRecord(nm, init, env, ctx);
       if (isNode(init) && init.op === 'list-new') return bindList(nm, init, env, ctx);
       if (isNode(init) && init.op === 'slice') return bindSlice(nm, init, env, ctx);
+      if (isNode(init) && init.op === 'map-new') return bindMap(nm, init, env, ctx);
       const t = typeOf(init, env, ctx);
       env.set(nm, t);
       return [`(let ${nm} ${t} ${expr(init, env, ctx)})`];
@@ -390,6 +436,12 @@ function stmt(x, env, ctx) {
         gap('往一格说不清形状的东西里按下标写（这一刀只接 list-new 绑出来的那格）');
       }
       return [`(aset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.index, env, ctx)} ${expr(x.ins.value, env, ctx)})`];
+    }
+    case 'map-set': {
+      if (dictOf(typeOf(x.ins.obj, env, ctx)) === null) {
+        gap('往一格说不清形状的东西里按键写（这一刀只接 map-new 绑出来的那格）');
+      }
+      return [`(dset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)} ${expr(x.ins.value, env, ctx)})`];
     }
     case 'region': {
       /* **一格 region 就是一层作用域** —— 方言里那是 `(do …)`。摊平过一版，`nim+blockscope`
@@ -483,6 +535,64 @@ function bindRecord(nm, rec, env, ctx) {
 }
 
 /**
+ * `let m = {"a": 1}` —— 方言里是 `(dnew (dict K V))` 再逐格 `(dset …)`。
+ *
+ * 键与值的类型从**字面量**推（图上没有类型）。麻头是**空字典**：lua 的 `local m = {}`、
+ * awk 的隐式数组落出来的 `map-new` 一格键值都没有，类型只能等第一次写才知道 ——
+ * 所以这儿往这一层的语句序里找第一处 `map-set`（`ctx.scope`，由 `stmtList` 摆好）。
+ * 找不着就报缺口：一格永远不写的空字典说不清它是什么。
+ */
+function bindMap(nm, mp, env, ctx) {
+  const keys = argList(mp, 'keys');
+  const vals = argList(mp, 'vals');
+  if (keys.length !== vals.length) {
+    gap(`映射的键给了 ${keys.length} 格、值给了 ${vals.length} 格`);
+  }
+  let kt = keys.length > 0 ? typeOf(keys[0], env, ctx) : null;
+  let vt = vals.length > 0 ? typeOf(vals[0], env, ctx) : null;
+  if (kt === null) {
+    const hint = mapHint(nm, ctx, env);
+    kt = hint.key;
+    vt = hint.val;
+  }
+  if (kt !== 'int' && kt !== 'string') gap(`字典的键只能是 int 或 string（量到的是 ${kt}）`);
+  if (!isScalar(vt)) gap(`字典的值只能是标量（量到的是 ${vt}）`);
+  for (let i = 0; i < keys.length; i++) {
+    if (typeOf(keys[i], env, ctx) !== kt) gap('字典字面量里的键类型不一样 —— 方言的字典是单态的');
+    if (typeOf(vals[i], env, ctx) !== vt) gap('字典字面量里的值类型不一样 —— 方言的字典是单态的');
+  }
+  const dt = `(dict ${kt} ${vt})`;
+  const out = [`(let ${nm} ${dt} (dnew ${dt}))`];
+  for (let i = 0; i < keys.length; i++) {
+    out.push(`(dset (var ${nm}) ${expr(keys[i], env, ctx)} ${expr(vals[i], env, ctx)})`);
+  }
+  env.set(nm, dt);
+  return out;
+}
+
+/** 空字典的类型从**第一处写**上取（lua / awk 那一档）。找不着就报缺口，不猜。 */
+function mapHint(nm, ctx, env) {
+  const seek = (x) => {
+    if (Array.isArray(x)) {
+      for (const y of x) { const r = seek(y); if (r !== null) return r; }
+      return null;
+    }
+    if (!isNode(x)) return null;
+    if (x.op === 'map-set' && isNode(x.ins.obj) && x.ins.obj.op === 'ref'
+      && x.ins.obj.attrs.name === nm) {
+      return { key: typeOf(x.ins.key, env, ctx), val: typeOf(x.ins.value, env, ctx) };
+    }
+    for (const k of Object.values(x.ins)) { const r = seek(k); if (r !== null) return r; }
+    return null;
+  };
+  const got = seek(ctx.scope);
+  if (got === null) {
+    gap(`空字典 '${nm}' 的键值类型推不出来（这一层里没有一处 map-set —— 图上没有类型）`);
+  }
+  return got;
+}
+
+/**
  * `let ys = xs[1:3]` —— 方言里**没有列表切片**，所以这一格走 `nodes.js` 上写着的那条
  * **消去规则**（"`list-new` -> 一格存储 + 一串写"的同一条）：新建一格空数组，再拿一圈
  * `while` 把 `[from, to)` 逐格 `apush` 过去。
@@ -554,7 +664,7 @@ export function emitCore(g) {
   const env = new Map();
   /* 整份产物共用的登记处：`byKey` 按"字段名单 + 类型"去重、`shapes` 按标签查、
      `decls` 是要印在模块头上的那几句 `(struct …)`。 */
-  const ctx = { byKey: new Map(), shapes: new Map(), decls: [], tmp: 0, defers: [] };
+  const ctx = { byKey: new Map(), shapes: new Map(), decls: [], tmp: 0, defers: [], scope: [] };
   /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
   const fns = [];
   const rest = [];

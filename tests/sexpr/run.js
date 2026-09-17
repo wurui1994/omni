@@ -92,16 +92,42 @@ const LEGS = pickLegs(ALL_LEGS, ['run', 'run-llvm']);
 /** 报告里那句"几方一致"要跟真跑了几条腿对上 —— 不跑齐就写它们的名字，别虚报 */
 const AGREE = LEGS.length === ALL_LEGS.length ? '五方一致' : LEGS.map((l) => l.tag).join(' == ');
 
-/** 一份 .sx + 一份期望值 -> 四方一致 + 对上期望值。返回失败明细（空数组 = 过） */
-function agree(sx, expected) {
+/**
+ * **一份 case 跑不了哪条腿，以及为什么。**
+ *
+ * 这张表是有代价的：上面那句"方言加了新节点而 LLVM 那边没跟上，这里立刻红"在这几格上
+ * 不成立。所以每一格都要说清**欠在哪儿**、以及**主语言是不是也欠** —— 欠在后端而不是欠在
+ * 方言这一侧，才轮得到这张表。而且 `ok` 那行会把它印出来：看不见的例外过一阵就没人记得，
+ * 那比红更坏。
+ */
+const CANT = {
+  '44-dicts': {
+    legs: ['run-llvm'],
+    why: 'LLVM 后端不支持聚合容器（dict / list / set）。**主语言也一样** ——'
+      + '`dict<string,int> m;` 走 run-llvm 报「llvm 后端目前不支持聚合 dict」，'
+      + '所以这是后端那一侧的既有缺口，不是方言这一格新欠的',
+  },
+};
+
+/** 这份 case 这一趟真跑哪几条腿。基准（第一条）被排掉就整格判不了 —— 那时照旧全跑，让它红。 */
+function legsFor(name) {
+  const c = CANT[name];
+  if (c === undefined) return { legs: LEGS, note: '' };
+  const legs = LEGS.filter((l) => !c.legs.includes(l.tag));
+  if (legs.length === 0) return { legs: LEGS, note: '' };
+  return { legs, note: ` · 少跑 ${c.legs.join(' / ')}：${c.why}` };
+}
+
+/** 一份 .sx + 一份期望值 -> 几方一致 + 对上期望值。返回失败明细（空数组 = 过） */
+function agree(sx, expected, legs = LEGS) {
   const bad = [];
-  const first = cmd(LEGS[0].args(sx));
-  if (first.code !== 0) bad.push(`    ${LEGS[0].tag} exit=${first.code}\n${first.err}`);
-  for (const leg of LEGS.slice(1)) {
+  const first = cmd(legs[0].args(sx));
+  if (first.code !== 0) bad.push(`    ${legs[0].tag} exit=${first.code}\n${first.err}`);
+  for (const leg of legs.slice(1)) {
     const r = cmd(leg.args(sx));
     if (r.code !== 0) { bad.push(`    ${leg.tag} exit=${r.code}\n${r.err}`); continue; }
     if (r.out !== first.out) {
-      bad.push(`    ${leg.tag} 与 ${LEGS[0].tag} 不同\n      ${LEGS[0].tag}: ${JSON.stringify(first.out)}\n      ${leg.tag}: ${JSON.stringify(r.out)}`);
+      bad.push(`    ${leg.tag} 与 ${legs[0].tag} 不同\n      ${legs[0].tag}: ${JSON.stringify(first.out)}\n      ${leg.tag}: ${JSON.stringify(r.out)}`);
     }
   }
   if (expected === null) bad.push('    缺 .expected');
@@ -119,7 +145,9 @@ function agree(sx, expected) {
   const argLists = [];
   for (const f of readdirSync(join(here, 'cases')).filter((x) => x.endsWith('.sx')).sort()) {
     if (!want(f)) continue;
-    for (const leg of LEGS) argLists.push([cli, ...leg.args(join(here, 'cases', f))]);
+    for (const leg of legsFor(basename(f, '.sx')).legs) {
+      argLists.push([cli, ...leg.args(join(here, 'cases', f))]);
+    }
   }
   for (const f of readdirSync(join(here, 'rt')).filter((x) => x.endsWith('.sx')).sort()) {
     if (!want(f)) continue;
@@ -145,8 +173,10 @@ function agree(sx, expected) {
 for (const f of readdirSync(join(here, 'cases')).filter((x) => x.endsWith('.sx')).sort()) {
   if (!want(f)) continue;
   const name = basename(f, '.sx');
-  const bad = agree(join(here, 'cases', f), read(join(here, 'cases', `${name}.expected`)));
-  if (bad.length === 0) ok(`core/${name} [${AGREE} == ${name}.expected]`);
+  const pick = legsFor(name);
+  const bad = agree(join(here, 'cases', f), read(join(here, 'cases', `${name}.expected`)), pick.legs);
+  const agreeNote = pick.legs.length === ALL_LEGS.length ? '五方一致' : pick.legs.map((l) => l.tag).join(' == ');
+  if (bad.length === 0) ok(`core/${name} [${agreeNote} == ${name}.expected${pick.note}]`);
   else no(`core/${name}`, bad.join('\n'));
 }
 

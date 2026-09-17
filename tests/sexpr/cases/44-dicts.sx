@@ -1,0 +1,76 @@
+;; 字典（第一百五十三片）。这一份的存在理由是**图那一层的 map 四格要落到方言上** ——
+;; go/V/lua/nim/awk 那五门的 map 在节点图上是 `map-new`/`map-get`/`map-set`/`map-has`，
+;; 而方言原先没有字典，于是 core 那条腿上 11 个例子全卡在这儿（tests/graph/run.js 的账）。
+;;
+;; OIR 那一层**一个新节点都不加**：`(dnew …)` 是 NewContainer、`(dget …)`/`(dset …)` 是
+;; IndexGet/IndexSet、`(dhas …)`/`(dlen …)` 是 contains/length 两格内建 —— 主语言的
+;; `dict<K,V>` 走的就是这几格。所以这一份判的是"方言这一侧的开口"，而不是一套新实现。
+;;
+;; 五条腿要逐字节相同：C 那条腿的容器是**单态**的（按 K/V 生成 OMNI_DICT_BODY），
+;; 所以 lower.js 把用到的容器类型登记进 mod.containers —— 少登记一格，C 那边就是
+;; 一个没声明的类型名。这一份两种键（string / int）各压一格，正是为了钉住那个登记。
+(module
+  ;; 字典穿过函数：引用语义（句柄），就地写，回来调用方看得见
+  (fn bump ((d (dict string int)) (k string)) void
+    (dset (var d) (var k) (bin "+" (dget (var d) (var k)) (int 1))))
+
+  (fn total ((d (dict int real))) real
+    (let s real (real 0.0))
+    (let i int (int 0))
+    (while (bin "<" (var i) (int 3))
+      (do
+        (if (dhas (var d) (var i))
+          (do (set s (bin "+" (var s) (dget (var d) (var i)))))
+          (do))
+        (set i (bin "+" (var i) (int 1)))))
+    (ret (var s)))
+
+  (main
+    ;; 空字典：长度 0、什么键都没有
+    (let m (dict string int) (dnew (dict string int)))
+    (print (dlen (var m)))
+    (print (dhas (var m) (str "a")))
+
+    ;; 写：键不在就长一格
+    (dset (var m) (str "a") (int 1))
+    (dset (var m) (str "b") (int 3))
+    (print (dlen (var m)))
+    (print (dget (var m) (str "a")))
+    (print (dget (var m) (str "b")))
+    (print (dhas (var m) (str "a")))
+    (print (dhas (var m) (str "z")))
+
+    ;; 写已有的键：不长
+    (dset (var m) (str "a") (int 7))
+    (print (dlen (var m)))
+    (print (dget (var m) (str "a")))
+
+    ;; 穿过函数：句柄，就地写
+    (expr (call bump (var m) (str "b")))
+    (print (dget (var m) (str "b")))
+
+    ;; 别名：赋值传的是同一段存储
+    (let n (dict string int) (var m))
+    (dset (var n) (str "c") (int 9))
+    (print (dget (var m) (str "c")))
+    (print (dlen (var m)))
+
+    ;; 另一种键（int）与另一种值（real）—— C 那条腿要为它另生成一份容器
+    (let r (dict int real) (dnew (dict int real)))
+    (dset (var r) (int 0) (real 1.5))
+    (dset (var r) (int 2) (real 2.5))
+    (print (dlen (var r)))
+    (print (dget (var r) (int 0)))
+    (print (call total (var r)))
+
+    ;; 键与值都是串
+    (let s (dict string string) (dnew (dict string string)))
+    (dset (var s) (str "hi") (bin "+" (str "the") (str "re")))
+    (print (dget (var s) (str "hi")))
+    (print (slen (dget (var s) (str "hi"))))
+
+    ;; 真假值：零值不是"没有"—— `dhas` 与 `dget` 是两问
+    (let b (dict string bool) (dnew (dict string bool)))
+    (dset (var b) (str "no") (bool false))
+    (print (dhas (var b) (str "no")))
+    (print (dget (var b) (str "no")))))
