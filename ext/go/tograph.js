@@ -170,8 +170,17 @@ const CONV = convs({
   uint: 'int', uint8: 'int', uint16: 'int', uint32: 'int', uint64: 'int',
   float32: 'float', float64: 'float', string: 'str',
 });
-/** `fmt.Println` / `println` / `print` 都落 `prim print`（**print 不是节点**）。 */
-const PRINTS = new Set(['Println', 'Printf', 'Print', 'println', 'print']);
+/**
+ * `fmt.Println` / `println` / `print` 都落 `prim print`（**print 不是节点**）。
+ *
+ * **`Printf` 不在这张表里**：它带格式串，而"把格式串当成第一个要印的东西"是
+ * **答案错而不报** —— `fmt.Printf("x=%d\n", 3)` 会印成 `x=%d\n 3`。
+ * 它走 `fmtOf` 那一路（见下面）。
+ */
+const PRINTS = new Set(['Println', 'Print', 'println', 'print']);
+
+/** 这三格带格式串：`Sprintf` / `Errorf` 交一格串，`Printf` 印出去。 */
+const FORMATS = new Set(['Sprintf', 'Errorf', 'Printf']);
 
 const many = (xs) => xs.map(toNode).flat();
 
@@ -469,6 +478,42 @@ function forRangeOf(x) {
  *     `make([]T, n)` 要的是"一格长度为 n 的新列表"，而图上的 `list-new` 收的是**元素表**
  *     —— 那是另一格节点（动态长度的构造），不在这一批。
  */
+/**
+ * **格式串落成一格 `concat`**（`fmt.Sprintf` / `Errorf` / `Printf`）。
+ *
+ * 只接三格动词，别的**当场报**（不猜宽度、精度、进制 —— 那几样要一台真的格式化机器）：
+ *   * `%d` 整数 · `%s` 串 · `%v` 按 show 印 —— 图上这三格是**同一件事**：
+ *     `concat` 那格内建本来就是"把各格印出来接起来"（`prims.js` 那一行）。
+ *   * `%%` 一个百分号。
+ *
+ * `Errorf` 交出来的在 go 里是 `error` 不是 string —— 这一批把那一层**类型丢掉了**
+ * （图上没有 error 那一格），所以它与 `Sprintf` 落同一格。明说在文件末尾。
+ */
+function fmtOf(text, args) {
+  const parts = [];
+  let run = '';
+  let ai = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '%') { run += text[i]; continue; }
+    const v = text[i + 1];
+    if (v === '%') { run += '%'; i += 1; continue; }
+    if (v !== 'd' && v !== 's' && v !== 'v') {
+      throw new Error(`go->graph: 格式动词 %${v ?? '?'} 还没接`
+        + '（这一批只有 %d / %s / %v / %%，别的要一台真的格式化机器）');
+    }
+    if (ai >= args.length) throw new Error('go->graph: 格式串里的动词比实参多');
+    if (run !== '') { parts.push(lit(run)); run = ''; }
+    parts.push(args[ai]);
+    ai += 1;
+    i += 1;
+  }
+  if (run !== '') parts.push(lit(run));
+  if (ai !== args.length) {
+    throw new Error(`go->graph: 格式串里 ${ai} 个动词，实参给了 ${args.length} 个`);
+  }
+  return node('prim', { args: parts.length === 0 ? [lit('')] : parts }, { name: 'concat' });
+}
+
 function makeOf(args) {
   if (args.length === 0) throw new Error('go->graph: make() 一格实参都没有');
   const ty = args[0];
@@ -685,6 +730,24 @@ function toNode(x) {
       if (tag(fn) === 'sel') {
         const m = leaf(kids(fn)[1]);
         if (PRINTS.has(m)) return node('prim', { args: argNodes }, { name: 'print' });
+        // 带格式串那三格。**格式串必须是字面量**（要在这一层读它的动词），不是就报。
+        if (FORMATS.has(m)) {
+          const raw = args === undefined ? [] : kids(args);
+          if (raw.length === 0 || tag(raw[0]) !== 'str') {
+            throw new Error(`go->graph: ${m} 的格式串不是字面量 —— 这一层读不出它的动词`);
+          }
+          let text = leaf(kids(raw[0])[0]);
+          const rest = argNodes.slice(1);
+          if (m !== 'Printf') return fmtOf(text, rest);
+          /* `Printf` **自己不换行**，而图上那格 `print` 换行 —— 所以格式串以 `\n` 收尾时
+             把它去掉（两边正好对上）；不以 `\n` 收尾的这一批接不了：图上没有"不换行的印"。 */
+          if (!text.endsWith('\n')) {
+            throw new Error('go->graph: Printf 的格式串不以换行收尾 —— 图上那格 print 自带换行，'
+              + '没有"不换行的印"那一格');
+          }
+          text = text.slice(0, -1);
+          return node('prim', { args: [fmtOf(text, rest)] }, { name: 'print' });
+        }
         // `p.total()` -> `total(p)`：接收者是**第一格实参**（声明里写着是哪个类型，
         // 所以这一步是纯改写，不查表、不加节点）。
         // `Point.total(p)`（方法表达式）是**同一件事的另一种写法** —— 左边是登记过的
@@ -781,6 +844,8 @@ export function goImports(tree) {
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
 //   1. 类型全丢（见文件头）。`var` / `const` 现在接了（落一串 bind），但类型只用在
 //      **零值**那一处（`zeroOf`）—— 具名结构体的零值当场报，字段表不进图。
+//   1a. `fmt.Errorf` 交出来的在 go 里是 `error` 不是 string —— 这一批把那一层**类型丢掉了**
+//      （图上没有 error 那一格），所以它与 `Sprintf` 落同一格 `concat`。
 //   1b. `range` 那一格**判不出来的两种**沿用 `MAPS` 那条既有约定（没登记成 map 的当序列），
 //      所以这两种会落成"按下标走"而不报：**串**（go 给的是 rune，`s[i]` 给的是字节 ——
 //      ASCII 上同值，别的不同）与**通道**。判得出来的两种（map、整数字面量）当场报。

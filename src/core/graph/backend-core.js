@@ -82,6 +82,23 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
 const PRIMS_OK = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
   'not', 'len', 'print', 'concat', 'push']);
 
+/**
+ * **与实参无关的那几格内建的类型**（比较出 bool、`len` 出 int、`concat` 出串、
+ * `push` 是语句所以 null）。别的内建（算术）要看实参，不在这张表里 —— 回 undefined。
+ *
+ * 为什么单抽一格：这张表原来在 `typeOf` 与 `retTypeOf` 里**各写了一份**，而后者写漏了
+ * （只有"比较出 bool、别的出 int"），于是"函数返回一格 `concat`"被说成返回 int ——
+ * go 的 `fmt.Sprintf` 那一族撞出来的。`retTypeOf` 不能直接调 `typeOf`：它**跑得早**
+ * （形状还没登记全），问算术那一档会报缺口。所以两处共用的是这张**只管固定那几格**的表。
+ */
+function primFixedType(nm) {
+  if (nm === '<' || nm === '>' || nm === '<=' || nm === '>=' || nm === '=' || nm === '!=' || nm === 'not') return 'bool';
+  if (nm === 'len') return 'int';
+  if (nm === 'concat') return 'string';
+  if (nm === 'push') return null;      // 语句，没有值
+  return undefined;                    // 要看实参
+}
+
 /** 方言里那几个算符的名字与图上的**一一对应**（`=` / `!=` 是两边唯一不同的两格）。 */
 const BINOP = {
   '+': '+', '-': '-', '*': '*', '/': '/', '%': '%', '^': '^',
@@ -116,11 +133,8 @@ function typeOf(x, env, ctx) {
   if (x.op === 'ref') return env.get(x.attrs.name) ?? 'int';
   if (x.op === 'prim') {
     const nm = x.attrs.name;
-    if (nm === '<' || nm === '>' || nm === '<=' || nm === '>=' || nm === '=' || nm === '!=' || nm === 'not') return 'bool';
-    if (nm === 'len') return 'int';
-    if (nm === 'concat') return 'string';
-    /* `push` 交出来的是 nil（语句），落不进这几档 —— 问到它就是形状错了。 */
-    if (nm === 'push') return null;
+    const fixed = primFixedType(nm);
+    if (fixed !== undefined) return fixed;
     /* 算术：串在一起是 `string`、任一边是 real 就 real（方言里 int 与 real 不隐式混算 ——
        混着写它当场报，那正是我们要的：与 ADR-0031 §1 那一格"位宽写在类型上"同一条纪律）。 */
     const ts = argList(x, 'args').map((a) => typeOf(a, env, ctx));
@@ -1419,9 +1433,12 @@ function retTypeOf(body, env, ctx) {
       /* 多值：交回去的是那格合成结构体（登记在这儿 —— 调用点要靠它定型）。 */
       if (isNode(v) && v.op === 'values') return multiShape(argList(v, 'args'), env, ctx).tag;
       if (isNode(v) && v.op === 'prim') {
-        const nm = v.attrs.name;
-        return (nm === '<' || nm === '>' || nm === '<=' || nm === '>=' || nm === '=' || nm === '!=' || nm === 'not')
-          ? 'bool' : 'int';
+        /* 与实参无关的那几格查**共用的那张表**（`primFixedType`）—— 原来这儿重抄了一份
+           且写漏了 `concat`，于是"函数返回一格 concat"被说成返回 int（go 的 `fmt.Sprintf`
+           那一族撞出来的）。**不能直接调 `typeOf`**：这一趟跑得早，形状还没登记全，
+           问算术那一档会报缺口（method 那一族当场红过）。要看实参的就还是 int。 */
+        const fixed = primFixedType(v.attrs.name);
+        return fixed === undefined ? 'int' : fixed;
       }
       return 'int';
     }

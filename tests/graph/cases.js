@@ -147,6 +147,13 @@ export const DECLS = ['25', '20', '1'];
  */
 export const FORRANGE = ['80', '3', '30', '32', '9'];
 /**
+ * format：**格式串落成一格 `concat`**（go 独一份）—— 它先堵一个错而不报：`Printf` 原来在
+ * "都落 print"那张表里，于是 `fmt.Printf("x=%d\n", 3)` 印成 `x=%d\n 3`。
+ * 只接 `%d` / `%s` / `%v` / `%%`（在图上那三格动词是同一件事：`concat` 会把值印出来），
+ * 别的当场报；`Printf` 自己不换行而 `print` 换行，所以格式串以 `\n` 收尾时去掉它。
+ */
+export const FORMAT = ['k=7', 'a=1 b=z', '100%', '42'];
+/**
  * zeroval：**零值那一族**（go 独一份）—— `var x T` 的零值从**声明**来：具名 struct 是
  * "每个字段各自的零值"（字段名与顺序从 `type X struct{…}` 登记）、嵌套是递归一层、
  * 匿名 struct 走同一条路、别的具名类型（`type Level int` / `type Name = string`）是
@@ -248,6 +255,9 @@ export const CASES = [
   // 第三十三个家族：**零值**（go 独一份）。它是"名字与顺序从声明来"那条既有路子的
   // 又一处提供者 —— 三处当场报（嵌入字段 / 跨模块的类型 / `[N]T` 里 N 不是字面量）。
   ...fam('zeroval', ZEROVAL, ['go']),
+  // 第三十四个家族：**格式串**（go 独一份）。落的是现成的 `concat` 内建 —— 一格新节点也没加，
+  // 而它同时是"`Printf` 被当成 print 那一族"那个错而不报的证物。
+  ...fam('format', FORMAT, ['go']),
   // 第二十二个家族：**for range**（go 独一份）。同一条理由：`for i, v := range xs` 落的是
   // 现成的 `counted`（一格 region + 一格 loop），图上一格新节点也没加。它顺带把
   // "序列只算一次"与"长度只算一次"压在判据上（那两样是 go 规范的原话）。
