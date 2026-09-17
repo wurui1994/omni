@@ -175,6 +175,67 @@ const freshOpt = () => `__opt${OPT_N++}`;
 /** 匿名 `fn (…) { … }` 的名字（`func` 那一格的 name 是附属，可它得有一个）。 */
 let FN_N = 0;
 
+/**
+ * **表达式位置上的临时量（"物化"）**：`g(f() or { 0 })` 那一族。
+ *
+ * `or-block` / `f()!` 落出来的是**一串语句**（绑一格 + 一格 branch），塞不进表达式位置。
+ * 这一格的办法是把那一串**提到当前语句前面**，表达式位置上只留一格 `ref`。
+ *
+ * **提升会改求值次序，所以要一条判据**：`g(a(), f() or { 0 })` 里把 `f()` 提到 `a()`
+ * 前面，两个都有副作用 —— 答案就变了。判据是**它前面不许有带副作用的东西**：
+ * 按求值次序走一遍当前语句，走到这一格之前**不许遇到**调用 / 赋值 / 自增 / 另一格
+ * or-block / match。遇到了就照旧当场报（那一族留在墙上，不猜）。
+ *
+ * `HOIST` 由 `stmts()` 逐条排空：一条语句映射完，它这一趟攒下的绑定摆在它**前面**。
+ */
+const HOIST = [];
+let CUR_STMT = null;
+
+/** 树上这一格**带副作用**吗（提升那条判据只认这几样 —— 别的当纯的）。 */
+const EFFECTFUL = new Set([
+  'call', 'define', 'assign', 'inc', 'dec', 'or-block', 'propagate', 'propagate-err',
+  'match', 'if-bind', 'assert', 'unsafe', 'spawn', 'go',
+]);
+
+/**
+ * 按求值次序走一遍 `stmt`，看 `target` **前面**有没有带副作用的东西。
+ * 走到 target 就停（它自己那棵子树里的副作用不算 —— 那一串整个一起提）。
+ */
+function safeToHoist(stmt, target) {
+  if (stmt === null) return false;
+  /* target 在这棵子树里头吗（**包着它的那格调用不算"先发生"** —— 一格调用的实参先算、
+     它自己后发生，所以往里走；不包着它的那格调用才是"先发生"的那个）。 */
+  const has = (x) => x === target || (isList(x) && kids(x).some(has));
+  let dirty = false;
+  const walk = (x) => {
+    if (dirty) return false;
+    if (x === target) return true;
+    if (!isList(x)) return false;
+    if (EFFECTFUL.has(tag(x)) && !has(x)) { dirty = true; return false; }
+    for (const k of kids(x)) {
+      if (walk(k)) return true;
+      if (dirty) return false;
+    }
+    return false;
+  };
+  const hit = walk(stmt);
+  return hit && !dirty;
+}
+
+/** 一串**语句**：逐条映射，把这一条攒下的提升摆在它前面。 */
+const stmts = (xs) => xs.flatMap((one) => {
+  const mark = HOIST.length;
+  const saved = CUR_STMT;
+  CUR_STMT = one;
+  let out;
+  try {
+    out = [toNode(one)].flat();
+  } finally {
+    CUR_STMT = saved;
+  }
+  return [...HOIST.splice(mark), ...out];
+});
+
 /** 这棵子树里提到 `err` 这个名字吗？（or-block 里的错误值 —— 这一批没有它。） */
 function mentionsErr(x) {
   if (!isList(x)) return false;
@@ -275,7 +336,7 @@ function funcOf(x, name, self, typeName) {
   CUR_FN = name;
   CUR_TYPE = typeName ?? null;
   try {
-    return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
+    return node('func', { body: blk === undefined ? [] : stmts(kids(blk)) },
       { params: self === undefined ? params : [self, ...params], name });
   } finally {
     CUR_FN = savedFn;
@@ -392,7 +453,7 @@ function forInOf(x) {
   FI_DEPTH += 1;
   let inner;
   try {
-    inner = blk === undefined ? [] : many(kids(blk));
+    inner = blk === undefined ? [] : stmts(kids(blk));
   } finally {
     FI_DEPTH -= 1;
   }
@@ -559,7 +620,7 @@ function toNode(x) {
     // 所以拆成一格 region —— 与 `mut` / `pub` 同一类（不产生代码的修饰）。
     case 'unsafe': {
       const blk = kids(x).find((y) => tag(y) === 'block');
-      return node('region', { body: blk === undefined ? [] : many(kids(blk)) });
+      return node('region', { body: blk === undefined ? [] : stmts(kids(blk)) });
     }
     // `none` 是 V 的 Option 空值 —— 与 `nil` 落同一格（`name` 那一格里也认它，
     // 但语法给 `none` 一条**自己的产生式**，与 `(bool …)` 是同一种错）。
@@ -676,7 +737,7 @@ function toNode(x) {
         init: funcOf(x, name, leaf(self), tnameText(kids(kids(recv)[0])[1])),
       }, { name });
     }
-    case 'block': return node('region', { body: many(kids(x)) });
+    case 'block': return node('region', { body: stmts(kids(x)) });
     case 'define': case 'assign': {
       const isDef = tag(x) === 'define';
       const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
@@ -718,7 +779,7 @@ function toNode(x) {
       // 而 `(none)` 在**表达式位置**上是 Option 的空值（落 nil）—— 两件事同一个标签。
       // **条件那一格不能落成 nil**：`for ;; {}` 是无条件循环，那是 `cond: undefined`
       // （落成 nil 就是"条件为假"，循环一次都不跑 —— 答案错而不报）。
-      const slot = (g) => (g === undefined ? [] : many(kids(g).filter((k) => tag(k) !== 'none')));
+      const slot = (g) => (g === undefined ? [] : stmts(kids(g).filter((k) => tag(k) !== 'none')));
       const condOf = () => {
         const c = cond === undefined ? undefined : kids(cond)[0];
         return c === undefined || tag(c) === 'none' ? undefined : toNode(c);
@@ -727,7 +788,7 @@ function toNode(x) {
         init: slot(init),
         cond: condOf(),
         post: slot(post),
-        body: blk === undefined ? [] : many(kids(blk)),
+        body: blk === undefined ? [] : stmts(kids(blk)),
       });
     }
     /**
@@ -792,11 +853,20 @@ function toNode(x) {
 
       return toNode(inner);
     }
-    // 这一族**只在语句位置上接**（define / assign / return / 单独一条）——
-    // 走到这儿就说明它长在一格表达式里头（`f(g() or { 0 })`），那要临时量那一刀。
-    case 'or-block': case 'propagate-err': case 'propagate':
-      throw new Error(`v->graph: \`${tag(x)}\` 长在表达式里头 —— 这一族只接语句位置`
-        + '（`x := f() or { … }` / `return f()!` / 单独一条），表达式位置要临时量那一刀');
+    /**
+     * 长在**表达式里头**的那一族（`g(f() or { 0 })`）—— 走**物化**那条路：
+     * 把"绑一格 + branch"提到当前语句前面，这儿只留一格 `ref`。
+     * 提不了（它前面有带副作用的东西）就照旧当场报 —— 见 `safeToHoist` 那一段。
+     */
+    case 'or-block': case 'propagate-err': case 'propagate': {
+      if (!safeToHoist(CUR_STMT, x)) {
+        throw new Error(`v->graph: \`${tag(x)}\` 长在表达式里头，而它**前面还有带副作用的`
+          + '东西** —— 提一格临时量上去会改求值次序，这一格不猜');
+      }
+      const nm = freshOpt();
+      HOIST.push(...optOf(x, { name: nm, kind: 'bind' }));
+      return node('ref', {}, { name: nm });
+    }
     case 'match': return matchOf(x, false);
     case 'for-in': return forInOf(x);
     // `assert cond` / `assert cond, msg` -> 一格 assert 节点（第二十九批）。
@@ -807,7 +877,7 @@ function toNode(x) {
     }
     // `defer { … }` / `defer: …` -> scope-exit（与 go 的 defer、CL 的 unwind-protect
     // **同一格节点**：逆序、早退也跑，八家共用那一格）
-    case 'defer': return node('scope-exit', { action: many(kids(x)) });
+    case 'defer': return node('scope-exit', { action: stmts(kids(x)) });
     case 'call': {
       const [fn, args] = kids(x);
       const rawArgs = args === undefined ? [] : kids(args);
@@ -903,7 +973,13 @@ export function vlangToGraph(tree, opts) {
   CUR_FN = null;
   CUR_TYPE = null;
 
-  const body = kids(tree).map(toNode).flat();
+  HOIST.length = 0;
+  const body = stmts(kids(tree));
+  /* 提升必须**全被排空**（每条语句一趟）—— 剩下就是漏了一处语句列表，
+     那时表达式里那格 `ref` 会指向一个没绑过的名字。宁可当场报。 */
+  if (HOIST.length !== 0) {
+    throw new Error(`v->graph: 有 ${HOIST.length} 格提升没人收 —— 漏了一处语句列表`);
+  }
   if (opts !== undefined && opts.asModule === true) return program(body);
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
 }
