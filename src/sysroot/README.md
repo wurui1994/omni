@@ -59,7 +59,7 @@ omni c link x.o -o x --stdlib --libc self \
 预编译一个 `.o` 塞进仓库是「复制二进制」。所以照 `SPGET`/`FRAME` 的先例 ——
 MIR 说「要什么」，摆法归后端。
 
-九个 `.c`（量在 `tests/x64/docker-run.sh` 第 8/10 笔账）：
+十个 `.c`（量在 `tests/x64/docker-run.sh` 第 8/10 笔账）：
 
 - `start.c`   `_start`：`__builtin_frame_address(0)` 取 argc/argv/environ，收场走 `exit`
 - `string.c`  `mem*` / `str*`，零 syscall
@@ -68,7 +68,9 @@ MIR 说「要什么」，摆法归后端。
               （本机 0.3s 跑完 20 万块；第一版是**线性 first-fit**，在那儿 timeout）
 - `stdio.c`   `printf` 一族：整数/字符串**与 glibc 逐字节相同**，浮点也是（见下面
               「浮点打印」那一节 —— 数字从位模式摊成精确的十进制）
-- `strtox.c`  `strtol` 一族 + `strtod`（尾数攒成 u64，最后**一次**乘 10 的幂）
+- `strtox.c`  `strtol` 一族 + `strtod`（**正确舍入**：两个大整数的商 + 一次长除法，
+              见下面「`strtod`」那一节）
+- `dec.c`     基 10^9 的大整数 —— 浮点的两头（打印与解析）共用这一份
 - `file.c`    `FILE *` 那一层：无缓冲，`FILE` 就是一个 fd 加两位状态
 - `math.c`    自己那份 libm：exp/log 用 Cody-Waite 归约 + 泰勒，sqrt 牛顿六次，
               sin/cos 折进 π/4，atan 半角三次压到 0.1 以下。与 glibc 逐点对账
@@ -113,6 +115,27 @@ e < 0：m / 2^k = m·5^k / 10^k —— 算 m·5^k，小数点往左退 k 位（�
 更差 —— 28 个采样 17 个不同，而且 `2.2250738585072014e-308` 印成
 `4.4674407370955161e-306`（那个 10 的幂自己就溢了）。没收。
 
+## `strtod`：反方向也精确（第十格）
+
+同一个大整数（`dec.c`）反着用：一串十进制就是两个大整数的商 `N / Den`（`10^dexp`
+往哪边乘看指数的符号），把商挪进 `[2^52, 2^53)` 再做**一次长除法** —— 商是 53 位尾数、
+余数决定末位。**一次浮点运算都没有**。
+
+判据 `tests/c/libc-strtod.js`（探子 `tests/x64/libc-strtod-probe.c`）比的是 `%016llx`
+**位模式**，而不是印出来的样子：差一个 ulp 在十进制上常常看不见、在位上藏不住。
+31 个串 + 21 个往返（印 17 位再读回来）：
+
+```
+改之前   21 / 31 位不同、21 个往返里 8 个回不来
+         1.7976931348623157e308 -> inf（中间那次乘法自己溢了）、5e-324 -> 0
+改之后    0 / 31、往返 0 个不同   arm64-osx 与 Apple 的 libc、x86_64-linux 与 glibc
+```
+
+**收位只许收一次**：先收成 53 位再为非规格化右移是**两次舍入** —— 量到过
+`2.2250738585072011e-308`（glibc 那个著名样本）读成最小的规格化数
+`0x0010000000000000`，而正确答案是最大的非规格化数 `0x000fffffffffffff`。
+现在长除法只交回「截断的 53 位 + 余数在哪一档」，收位在 `decBits` 里做，一次。
+
 ## 整份编译器跑在自带 libc 上（两条腿都量过）
 
 ```
@@ -146,8 +169,8 @@ macOS 那一趟顺出三笔账，都是「按 Linux 的形状照抄」踩出来�
 ## 两个目标各自的那一半（第一百四十片第五格）
 
 ```
-src/sysroot/libc/                公用：一行 syscall 都没有的七份
-                                 string math strtox stdio file malloc pure + libc.h
+src/sysroot/libc/                公用：一行 syscall 都没有的八份
+                                 string math strtox stdio file malloc pure dec + libc.h
 src/sysroot/x86_64-linux/libc/   syscall.h io.c misc.c start.c
 src/sysroot/arm64-osx/libc/      同上四份，内容各不同
 ```

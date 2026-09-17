@@ -40,6 +40,28 @@ char *strchr(const char *s, int c);
 void *malloc(unsigned long size);
 void free(void *p);
 
+/* ---- 基 10^9 的大整数（`dec.c`）：浮点的两头共用一份。
+ *
+ * 打印那一头要「double 的精确十进制展开」，解析那一头要「一串十进制离哪个 double 最近」
+ * —— 都是同一件事的两个方向，所以实现摆在公用的 `dec.c` 里，一份。
+ * 节数的上界是量出来的（见那份的文件头）：一个 `__libc_dec` 808 字节，全在栈上。 */
+#define LIBC_DEC_LIMBS 200
+typedef struct { unsigned int w[LIBC_DEC_LIMBS]; int n; } __libc_dec;
+
+void __libc_dec_set(__libc_dec *d, unsigned long long v);
+void __libc_dec_add(__libc_dec *d, unsigned int v);
+void __libc_dec_copy(__libc_dec *dst, const __libc_dec *src);
+int __libc_dec_zero(const __libc_dec *d);
+void __libc_dec_mul(__libc_dec *d, unsigned int m);
+unsigned int __libc_dec_div(__libc_dec *d, unsigned int m);
+int __libc_dec_cmp(const __libc_dec *a, const __libc_dec *b);
+void __libc_dec_sub(__libc_dec *a, const __libc_dec *b);
+void __libc_dec_pow2(__libc_dec *d, int e);
+void __libc_dec_pow5(__libc_dec *d, int k);
+void __libc_dec_pow10(__libc_dec *d, int k);
+int __libc_dec_digits(const __libc_dec *d, char *out, int cap);
+int __libc_dec_of_me(unsigned long long m, int e, char *out, int cap, int *frac);
+
 /* ---- 每个目标的 io.c / misc.c 各给一份（这一半认得内核） */
 long write(int fd, const void *buf, unsigned long n);
 long read(int fd, void *buf, unsigned long n);

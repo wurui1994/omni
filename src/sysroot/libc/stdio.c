@@ -82,50 +82,17 @@ static void fmtPad(FmtOut *o, char *tmp, int n, int width, char pad, int left, c
 
 /* ---- 浮点：**精确的十进制展开**（第一百四十片第九格）。
  *
- * 一个 double 就是 `m × 2^e`（m 是 53 位整数）—— 它的十进制展开**是有限的**，
- * 所以「精确」不需要 dragon4 那套循环，只要一个大整数乘法：
- *
- *   e ≥ 0：值就是整数 `m·2^e`，小数位 0（最多 309 位）
- *   e < 0：`m / 2^k = m·5^k / 10^k` —— 算 `m·5^k`，小数点往左退 k 位（最多 1074 位）
- *
- * 大整数用**基 10^9 的节**：这样「摊成数字串」就是逐节印九位，一次除法都不用。
- * 一个节乘 2^29 或 5^12 都还在 u64 里（1e9 × 5.4e8 < 1.8e19），所以幂是成块吃的。
+ * 一个 double 就是 `m × 2^e`（m 是 53 位整数）—— 它的十进制展开**是有限的**，所以
+ * 「精确」不需要 dragon4 那套循环，只要一个大整数乘法。那个大整数在公用的 `dec.c` 里
+ * （`__libc_dec_of_me`）—— 解析那一头（`strtox.c` 的 `strtod`）要的是同一件东西的
+ * 反方向，所以它不摆在这一份里。
  *
  * 上一版是「归一化到 [1,10) 再逐位取整」，全在 double 上算，末一两位会差一个 ulp
  * （量到的是 41 行不同 / 155 行）。**也试过「只除一次」那一版，更差，没收**：
  * `2.2250738585072014e-308` 印成 `4.4674407370955161e-306`（`10^(e10-16)` 自己就溢了）。
  * 现在这一条路上一次浮点运算都没有 —— 位模式进来，整数出去。 */
-#define DEC_LIMBS 132              /* 132 × 9 = 1188 位数字，够 1074 + 17 */
 #define DEC_DIGITS 1200
-#define DEC_BASE 1000000000u
 
-typedef struct { unsigned int w[DEC_LIMBS]; int n; } Dec;
-
-static const unsigned int DEC_P10[9] = {
-  1u, 10u, 100u, 1000u, 10000u, 100000u, 1000000u, 10000000u, 100000000u
-};
-
-static void decSetU64(Dec *d, unsigned long long v) {
-  d->n = 0;
-  while (v > 0 && d->n < DEC_LIMBS) {
-    d->w[d->n++] = (unsigned int)(v % DEC_BASE);
-    v /= DEC_BASE;
-  }
-  if (d->n == 0) { d->w[0] = 0; d->n = 1; }
-}
-
-static void decMulSmall(Dec *d, unsigned int m) {
-  unsigned long long carry = 0;
-  for (int i = 0; i < d->n; i++) {
-    unsigned long long t = (unsigned long long)d->w[i] * m + carry;
-    d->w[i] = (unsigned int)(t % DEC_BASE);
-    carry = t / DEC_BASE;
-  }
-  while (carry > 0 && d->n < DEC_LIMBS) {
-    d->w[d->n++] = (unsigned int)(carry % DEC_BASE);
-    carry /= DEC_BASE;
-  }
-}
 /* `v`（> 0、有限）的精确十进制展开。数字串没有前导零，`*frac` 是小数点右边的位数
  * （也就是这串数字要往左退多少位）。回值是数字个数。 */
 static int decExpand(double v, char *digits, int cap, int *frac) {
@@ -133,38 +100,8 @@ static int decExpand(double v, char *digits, int cap, int *frac) {
   b.d = v;
   int E = (int)((b.u >> 52) & 0x7ff);
   unsigned long long M = b.u & 0xfffffffffffffULL;
-  unsigned long long m;
-  int e;
-  if (E == 0) { m = M; e = -1074; }              /* 非规格化 */
-  else { m = M | (1ULL << 52); e = E - 1075; }
-  Dec d;
-  decSetU64(&d, m);
-  if (e >= 0) {
-    int k = e;
-    while (k >= 29) { decMulSmall(&d, 1u << 29); k -= 29; }
-    if (k > 0) decMulSmall(&d, 1u << k);
-    *frac = 0;
-  } else {
-    int k = -e;
-    *frac = k;
-    while (k >= 12) { decMulSmall(&d, 244140625u); k -= 12; }   /* 5^12 */
-    while (k-- > 0) decMulSmall(&d, 5u);
-  }
-  /* 摊成数字串：最高一节不补零，往下每节都是整整九位。 */
-  int L = 0;
-  char t[12];
-  int tn = 0;
-  unsigned int hi = d.w[d.n - 1];
-  if (hi == 0) t[tn++] = '0';
-  while (hi > 0) { t[tn++] = (char)('0' + (hi % 10)); hi /= 10; }
-  while (tn > 0 && L < cap) digits[L++] = t[--tn];
-  for (int i = d.n - 2; i >= 0; i--) {
-    unsigned int x = d.w[i];
-    for (int p = 8; p >= 0 && L < cap; p--) {
-      digits[L++] = (char)('0' + ((x / DEC_P10[p]) % 10));
-    }
-  }
-  return L;
+  if (E == 0) return __libc_dec_of_me(M, -1074, digits, cap, frac);   /* 非规格化 */
+  return __libc_dec_of_me(M | (1ULL << 52), E - 1075, digits, cap, frac);
 }
 /* 摊完再按要求收位。两种要法：
  *   `fixedMode == 0`：要 `want` 位**有效数字**（`%e` / `%g`）
