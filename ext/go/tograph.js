@@ -33,12 +33,26 @@ function mapBindName(x) {
   const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
   const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
   for (let i = 0; i < lhs.length; i++) {
-    const r = rhs[i];
-    if (r !== undefined && tag(r) === 'lit' && tag(kids(r)[0]) === 'map' && tag(lhs[i]) === 'name') {
-      return leaf(kids(lhs[i])[0]);
-    }
+    if (isMapCtor(rhs[i]) && tag(lhs[i]) === 'name') return leaf(kids(lhs[i])[0]);
   }
   return null;
+}
+
+/**
+ * 右边是**造一格 map** 吗。go 有两种写法，两种都要认：
+ *   * 字面量：`map[K]V{…}` -> `(lit (map …) …)`；
+ *   * `make`：`make(map[K]V)` -> `(call (name make) (args (map …)))`。
+ * 漏掉后一种的代价是**答案错而不报**：`m["k"] = 5` 会静静落成列表下标写。
+ * （V 那一侧同一天踩过同一个坑 —— 那儿是"不写类型的字面量"。）
+ */
+function isMapCtor(r) {
+  if (r === undefined || !isList(r)) return false;
+  if (tag(r) === 'lit') return tag(kids(r)[0]) === 'map';
+  if (tag(r) !== 'call') return false;
+  const [fn, args] = kids(r);
+  if (fn === undefined || tag(fn) !== 'name' || leaf(kids(fn)[0]) !== 'make') return false;
+  const first = args === undefined ? undefined : kids(args)[0];
+  return first !== undefined && tag(first) === 'map';
 }
 
 
@@ -135,6 +149,21 @@ function zeroOf(ty, name) {
   const t = tag(ty);
   if (t === 'paren') return zeroOf(kids(ty)[0], name);
   if (NIL_TYPES.has(t)) return lit(null);
+  // `[N]T` 的零值是**N 格元素零值**（数组是值语义的，不是切片）——
+  // N 得是个整数字面量、元素也得有零值，两样缺一样就当场报。
+  if (t === 'array') {
+    const [n, el] = kids(ty);
+    if (tag(n) !== 'num') {
+      throw new Error(`go->graph: [N]T 的零值要 N 是整数字面量（这儿是 ${tag(n)}）`);
+    }
+    const cnt = Number(leaf(kids(n)[0]));
+    if (!Number.isInteger(cnt) || cnt < 0 || cnt > 1024) {
+      throw new Error(`go->graph: [${cnt}]T 的零值这一批只接 0..1024 格`);
+    }
+    /* **每格各算一遍**（不是复制同一格）：`lit(0)` 出的是 `{lit: 0}` 而不是一格节点，
+       复制那条路要分两种形状 —— 而"再算一遍"本来就更直白，零值也没有作用。 */
+    return listNew(Array.from({ length: cnt }, () => zeroOf(el, name)));
+  }
   if (t === 'tname' && kids(ty).length === 1) {
     const n = leaf(kids(ty)[0]);
     if (INT_TYPES.has(n)) return lit(0);
@@ -363,6 +392,30 @@ function forRangeOf(x) {
   });
 }
 
+/**
+ * `make(T, …)` —— go 里造 map / 切片 / 通道的那一格。**第一格实参是一格类型**，
+ * 所以它在树上与普通调用同形却不能按调用走（实参里躺着类型，`toNode` 收不了）。
+ *
+ * 接两种，别的当场报：
+ *   * `make(map[K]V)` -> 一格空 map（容量那格提示丢掉 —— 图上没有容量）；
+ *   * `make([]T, 0[, cap])` -> 一格空列表。**长度不是 0 的那种接不了**：
+ *     `make([]T, n)` 要的是"一格长度为 n 的新列表"，而图上的 `list-new` 收的是**元素表**
+ *     —— 那是另一格节点（动态长度的构造），不在这一批。
+ */
+function makeOf(args) {
+  if (args.length === 0) throw new Error('go->graph: make() 一格实参都没有');
+  const ty = args[0];
+  if (tag(ty) === 'map') return mapNew([]);
+  if (tag(ty) === 'slice') {
+    const n = args[1];
+    if (n === undefined) return listNew([]);
+    if (tag(n) === 'num' && Number(leaf(kids(n)[0])) === 0) return listNew([]);
+    throw new Error('go->graph: `make([]T, n)`（长度不是 0）要一格"按长度造"的节点 ——'
+      + ' 图上的 list-new 收的是元素表，这一批没有那一格');
+  }
+  throw new Error(`go->graph: make 的第一格是 ${tag(ty)} —— 这一批只接 map 与切片`);
+}
+
 function toNode(x) {
   switch (tag(x)) {
     // ---- 叶子 --------------------------------------------------------------
@@ -544,6 +597,12 @@ function toNode(x) {
     case 'defer': return deferNow(many(kids(x)));
     case 'call': {
       const [fn, args] = kids(x);
+      // `make(…)` 要在 `many(kids(args))` **之前**拦：它的第一格实参是**一格类型**
+      // （`make(map[K]V)` / `make([]T, 0, 8)`），`toNode` 收不了类型 —— 先算实参就先炸了。
+      // 头一版正是把这一格放在后面，于是 `map` 那 20 份一份都没动（尺子当场说了话）。
+      if (tag(fn) === 'name' && leaf(kids(fn)[0]) === 'make') {
+        return makeOf(args === undefined ? [] : kids(args));
+      }
       const argNodes = args === undefined ? [] : many(kids(args));
       // `fmt.Println(x)`：选择器那一格在这一批还没有节点（`record` 排在后面），
       // 所以只认"打印"这一族，别的 sel 调用当场报 —— 不猜、不静默。
@@ -566,6 +625,12 @@ function toNode(x) {
       }
       const callee = tag(fn) === 'name' ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
+      // `len(x)` 是 go 的内建，落 `prim len` —— 与 lua 的 `#s`、awk 的 `length(s)`、
+      // V 的 `.len` **同一格节点**（写法归语言）。原来它落成"调一个叫 len 的函数"，
+      // 而那个函数不存在 —— 跑起来才报，不如在这儿就对。
+      if (callee === 'len' && argNodes.length === 1) {
+        return node('prim', { args: argNodes }, { name: 'len' });
+      }
       // 转换（`int(x)` / `float64(x)`）在树上与调用**同形** —— 靠一张名字表分开
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
         return convOf(CONV.get(callee), argNodes[0]);
