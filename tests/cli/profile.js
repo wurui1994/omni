@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { foldedToSvg } from '../../src/core/cli/flame.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
@@ -136,8 +137,38 @@ const FIB_CALLS = '635621';
   else bad('run --profile sample', s.split('\n').slice(-6).join('\n    '));
 }
 
-/* ---- 反面两格 */
+/* ---- 三、火焰图（`cli/flame.js`）：折叠栈 -> SVG。
+ *
+ * 这一层是**纯字符串计算**，所以直接喂它一段折叠栈 —— 不必先跑一趟程序。
+ * 判两件事：形状（每一格一个 `<g>`、宽度按计数分）与**确定性**（两次出来逐字节相同，
+ * 不然「两张图对着看」这件事就不成立）。 */
 {
+  const folded = 'main;a 3\nmain;b 1\n';
+  const svg1 = foldedToSvg(folded, 't');
+  const svg2 = foldedToSvg(folded, 't');
+  const groups = (svg1.match(/<g>/g) ?? []).length;
+  if (svg1.startsWith('<svg') && groups === 4) ok(`折叠栈 -> SVG：4 格（all/main/a/b），${svg1.length} 字节`);
+  else bad('折叠栈 -> SVG 的形状', `groups=${groups} 头 40 字 ${JSON.stringify(svg1.slice(0, 40))}`);
+  if (svg1 === svg2) ok('同一份折叠栈两次出来逐字节相同');
+  else bad('SVG 要确定', '两次不同');
+  /* `a` 占 3/4，`b` 占 1/4 —— 宽度就该是 900 与 300（总宽 1200）。 */
+  const widths = [...svg1.matchAll(/width="(\d+\.\d)"/g)].map((m) => m[1]);
+  if (widths.includes('900.0') && widths.includes('300.0')) ok('宽度按计数分（900 / 300）');
+  else bad('宽度按计数分', `量到 ${JSON.stringify(widths)}`);
+}
+{
+  const svg = join(WORK, 'fib.svg');
+  rmSync(svg, { force: true });
+  rmSync(`${svg}.folded`, { force: true });
+  const r = omni(['run', FIB, '--backend', 'c', '--cc', 'clang',
+    '--profile', 'sample:997', '--profile-out', svg]);
+  const s = r.stderr || '';
+  if (existsSync(svg) && existsSync(`${svg}.folded`) && s.includes('火焰图')) {
+    ok('run --profile-out x.svg：SVG 与折叠栈都落了盘（折叠栈留着，能喂别的工具）');
+  } else bad('run --profile-out x.svg', `svg=${existsSync(svg)} folded=${existsSync(`${svg}.folded`)}`);
+}
+
+/* ---- 反面两格 */{
   const r = omni(['run', FIB, '--backend', 'c', '--profile', 'cc']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
   if (r.status !== 0 && s.includes('-finstrument-functions') && s.includes('--profile sample')) {

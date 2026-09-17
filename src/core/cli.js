@@ -25,6 +25,7 @@ import { renderPlan, renderSummary, renderStage } from './cli/stages.js';
 import { planForC } from './cli/plan-c.js';
 import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
+import { foldedToSvg } from './cli/flame.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { genArm64Module as genArm64 } from './arm64/from_mir.js';
@@ -525,6 +526,30 @@ let CC = null;
  *               `--cc self` 那一路只有这一档。
  */
 let PROF = null;
+
+/**
+ * `--profile-out x.svg` 的收尾：把运行时落下的折叠栈摊成火焰图（第一百四十七片）。
+ *
+ * 为什么分两步：渲染是**字符串计算**，而落折叠栈那一步发生在**被量的那个进程里**
+ * （信号处理函数与 atexit 那一层）。让运行时去画 SVG 等于把一份渲染器塞进每个产物；
+ * 让 CLI 去画，运行时只管「把数按通用格式吐出来」—— 那格格式（`a;b;c 计数`）本来就是
+ * 火焰图、speedscope、gprof2dot 共用的。
+ *
+ * 折叠栈那份**留着不删**：它比 SVG 有用（能喂别的工具、能 diff 两次采样）。
+ */
+function profSvgFinish() {
+  if (PROF === null || PROF.svg === undefined || PROF.out === null) return;
+  if (!exists(PROF.out)) return;                    /* 一帧都没采到（程序太短）：不画空图 */
+  const folded = readText(PROF.out);
+  const frames = folded.split('\n').filter((l) => l !== '').length;
+  let total = 0;
+  for (const line of folded.split('\n')) {
+    const sp = line.lastIndexOf(' ');
+    if (sp > 0) total += Number(line.slice(sp + 1)) || 0;
+  }
+  writeText(PROF.svg, foldedToSvg(folded, `omni profile —— ${total} 帧 / ${frames} 条栈`));
+  stderr(`omni: 火焰图 -> ${PROF.svg}（折叠栈留在 ${PROF.out}）\n`);
+}
 /* 编出来的核心默认只内建 js -> c，别的语言/目标各自一格 plugins/ 里的插件（ADR-0021 S4）。
    接缝是 linkJs 的 read 回调 —— 编译器读源码全过它，所以"换掉 builtin.js 那一份文本"
    就等于"不把那几门 import 进来"，链接器与摇树都跟着少活。
@@ -2781,6 +2806,13 @@ function main(argv) {
       }
       const oi = rest.indexOf('--profile-out');
       PROF = { mode, hz: Number.isFinite(hz) ? hz : 0, out: oi < 0 ? null : rest[oi + 1] };
+      /* `--profile-out x.svg`：**火焰图**。运行时那一层只会写折叠栈（它在信号里，不该
+       * 干渲染这种事），所以这儿把落点换成 `x.svg.folded`，收尾时再摊成 SVG
+       * （见底下那个汇合点）。给 `.folded` 之类别的后缀就原样落，不多此一举。 */
+      if (PROF.out !== null && PROF.out !== undefined && PROF.out.endsWith('.svg')) {
+        PROF.svg = PROF.out;
+        PROF.out = `${PROF.out}.folded`;
+      }
       /* `cc` 那一档要外部编译器的开关，我们自己那台 C 前端还没有 `-finstrument-functions`
        * —— 明着说，别悄悄出一份没插桩的二进制然后印一张空表。 */
       if (mode === 'cc' && selfCC()) {
@@ -4118,6 +4150,10 @@ try {
   /* 超时那一格摆在这儿（而不是 `run` 那二十来个 return 上）：这是所有腿唯一的汇合点，
    * 于是「按了 --timeout 却没人报告」不可能漏掉一条。见 armRunTimeout。 */
   const st = main(procArgs());
+  /* `--profile-out x.svg` 的第二步（第一百四十七片）：把运行时落下的折叠栈摊成火焰图。
+   * **同一个理由摆在这儿** —— run / build / plugins 三条腿都从这儿出去，写在这儿一处
+   * 就不会有「哪条腿忘了渲染」。渲染是纯字符串计算（`cli/flame.js`）。 */
+  profSvgFinish();
   setExitCode(runTimedOut() ? 124 : st);
 } catch (e) {
   if (e instanceof OmniError) {
