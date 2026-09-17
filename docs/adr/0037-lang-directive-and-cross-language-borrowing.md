@@ -19,7 +19,7 @@ ADR-0031（`sx` 的承载力 = 语言与方言的契约）、ADR-0033（特性�
 
 | 底座 | 事情一要它做什么 | 事情二要它做什么 |
 |---|---|---|
-| **语法对象**（树 + span + 作用域集） | 宏的卫生靠作用域集；`#lang` 的产物就是它 | `as g` 那一档交给用户的就是它（同像能力） |
+| **语法对象**（树 + span；作用域集**不必加**，见 §4.1） | 宏在它上头重写；`#lang` 的产物就是它 | `as g` 那一档交给用户的就是它（同像能力） |
 | **语言注册表**（`plugin.js` 的 `registerLang` / `declareProvider`） | `#lang <名字>` 查的就是这张表 | `import "x.nim"` 认语言查的也是这张表 |
 | **方言词汇**（ADR-0031 的类型与算子） | 宏引入的算子要落进它 | 两门语言"契约一致"是在它上头判定的 |
 
@@ -42,6 +42,11 @@ ADR-0031（`sx` 的承载力 = 语言与方言的契约）、ADR-0033（特性�
 - **语法对象缺一半**：s-expr 读入器出的是三种节点 `{kind:'list'|'atom'|'string', …, span}`
   （`src/core/sexpr/read.js:15-18`），**每个节点都带 span**（好消息），但没有作用域集。
 - **语法可以是数据**：GLR + `.grammar`，`.y` 直接收（ADR-0034）。一门新语言的 L0 不必手抄。
+- **借用要优先的那三门，L0 已经在了**：`ext/go/go.grammar`、`ext/nim/nim.grammar`（405 条产生式）、
+  `ext/vlang/vlang.grammar`，各带一份 `tograph.js`（CST -> 节点图）与 `examples/`。
+  **缺的是出口**：节点图那一层只有 `graph/backend-c.js` 与 `graph/backend-wat.js`，
+  **没有 js**（`ls src/core/graph` 里没有 `backend-js.js`）。所以"编到 js"这件事今天卡在
+  一格后端，不卡在语法。
 - **跨层那一半已经有两块**：封闭的 `C_ABI` 表（`src/core/hir/c_abi.js`）与 `C_SYSLIBS`；
   但**类型词汇只有七格标量**，聚合体按值、数组、回调「一律不支持」（那份文件头上的原话）。
 - **标准库现状**：`src/lib` = `json.omni` + `asy/`。所以"借用优先"不是偏好，是现状的名字。
@@ -59,9 +64,12 @@ ADR-0031（`sx` 的承载力 = 语言与方言的契约）、ADR-0033（特性�
   三处给了**不同**答案就报（印出三处各说了什么），不许"最后一个赢"。
 - **D4** 宏跑在**语法对象**上，不在文本上。语法对象 = `read.js` 那三种节点各加一格
   `scopes`（作用域集）。**不新开表示**：`{kind, span, scopes, …}` 仍是那三种。
-- **D5** 卫生按 **set-of-scopes**（Flatt 2016，Racket 现行那套），不用 gensym-only。
-  理由是硬的：内置 DSL 的模板里既有**引入**的名字（要换）又有**引用**外部的名字（不能换），
-  gensym 只会把两者一起换掉。
+- **D5**（**修订**）卫生照 **Nim 那两趟**：定义期把体里的局部标成 gensym、自由名字**在定义处
+  绑定**、体里定义的函数默认 inject；展开期按位置替形参 + 一张 per-展开 的 mapping 表换名
+  （`semtempl.nim` / `evaltempl.nim`，见 §4.1 那张对照表）。
+  **不用 set-of-scopes**：Racket 那套要给每个节点挂一格作用域集 + 一个子集最大匹配的解析器，
+  而 Nim 用两趟拿到同一份卫生（含"模板里的 `+` 不被调用处的局部 `+` 遮住"那一条），
+  代价只是要求"定义处查得到名字"。初版写的是 set-of-scopes，这一条是明着改的。
 - **D6** 宏展开是 ADR-0029 那七层里插在 L1 之后的一步（记作 **L1.5**），输出仍是 AST；
   L2（位置矩阵）/ L3（作用域图）/ L4（类型偏序）/ L5（nanopass）**一格不动**。
 - **D7** 借用四档写成**一张表**（§5），每档有自己的边界、语法、契约与判据。
@@ -149,59 +157,76 @@ declareProvider({
 
 ## 4. 事情一（下）：卫生宏
 
-### 4.1 语法对象 = 三种节点 + 一格 `scopes`
+### 4.1 卫生怎么落：照 Nim 那两趟（**修订：不用 set-of-scopes**）
 
-```js
-// 今天（sexpr/read.js:16-19）
-{kind:'list', items, span}   {kind:'atom', value, span}   {kind:'string', value, raw, span}
-// 之后
-{kind:'list', items, span, scopes}   … 各加一格
-```
+初版这一节写的是"每个节点加一格 `scopes`、按 set-of-scopes 解析"。**改了**，理由不是审美：
+Nim 用**更便宜的两趟**拿到同一份卫生，而且它那两趟正好落在我们已有的结构上。
+参考实现（本机 `~/Documents/Lang/reference/Nim/compiler/`）：
 
-`scopes` 是**整数集合**（一个 `Set<number>` 或位集），语义照 set-of-scopes：
+**第一趟 · 定义期**（`semtempl.nim`，模板体在**定义处**就走一遍带作用域栈的遍历）：
 
-- 每次"引入绑定的形式"（`let` / `fn` 的形参 / 宏展开一次）分配一格**新 scope 号**，
-  盖在它作用域里所有节点的 `scopes` 上；
-- 一个标识符引用解析时，在候选绑定里取 `scopes` **子集且最大**的那一格；
-  两格同样大 = **歧义**，当场报（这正是卫生宏该报的那种错，Racket 也报）。
+| Nim 那一条 | 在哪儿 | 我们照抄什么 |
+|---|---|---|
+| **局部默认 gensym** | `addLocalDecl`（`semtempl.nim:185`，注释原话 "locals default to 'gensym', fields default to 'inject'"）；`newGenSym` 打上 `{sfGenSym, sfShadowed}`（`:181-183`） | 体里 `let` / 形参引入的名字，标成"这一格要换名" |
+| **自由名字在定义处解析** | `qualifiedLookUp` + 换成 `nkSym` 节点（`semtempl.nim:299` 那一族） | 体里引用的外部名字，在**定义处**绑定成一格**具体引用**（不再是一个待查的名字） |
+| **routine 默认 inject** | `semRoutineInTemplBody`（`:311`，注释原话 "routines default to 'inject'"） | 模板体里定义的函数**不换名**（它就是要泄出去的那格） |
+| 显式覆盖 | `{.inject.}` / `{.gensym.}`（`symBinding`）、`mixin` | 同名两格标注；`mixin` = 明说"这个名字留到用处再查" |
+| 作用域栈 | `openScope` / `closeScope`（`:170-179`） | 我们两台解释器与各前端都已经有这一格 |
 
-为什么这一格值得单独一步落：它**可以逐字节中性**地先落进去 —— `scopes` 是空集时打印与
-解析一个字节都不变（判据见 §7 第 1 步）。
+**第二趟 · 展开期**（`evaltempl.nim`，"Template evaluation engine. Now hygienic." 那一行）：
+
+- 形参**按位置**替（`handleParam actual[s.position]`，`evaltempl.nim:53-56`）；
+- **每次展开一张 mapping 表**（`TemplCtx.mapping`，`:19-21`：注释原话 "every gensym'ed symbol
+  needs to be mapped to some new symbol"），gensym 的名字换成 `` name`gensymN ``
+  （`:73-74`，`N` = `instID`，一次展开一个号）。
+
+**这一改省掉了初版的第 1 步**：不必给三种节点各加一格 `scopes`、不必写子集最大匹配的解析器。
+代价写清楚：Nim 这套的"定义处解析"要求**那门语言在定义处查得到名字** ——
+所以第一格落在 `sx` 上（顶层名字与算子表在读完那一遍就齐了），而不是先落在 asy / jnc 上。
 
 ### 4.2 两层宏，各自一格开关
 
 | 层 | 形状 | 编译期跑谁的代码 | 默认 |
 |---|---|---|---|
-| **模式宏** | `define-syntax` + `syntax-rules`（模式 → 模板） | 谁都不跑，只重写树 | 跟 `#lang` 一起开 |
-| **过程宏** | `define-macro`（宏体是一段真代码，收树回树） | **跑用户的代码** | **另一格开关，单独开** |
+| **模板宏** | `(define-template 名 (形参…) 体)`（Nim 的 `template`：按位置替 + 上面那两趟） | 谁都不跑，只重写树 | 跟 `#lang` 一起开 |
+| **过程宏** | `(define-macro 名 (树) 体)`（Nim 的 `macro`：宏体是真代码，收树回树） | **跑用户的代码** | **另一格开关，单独开** |
+
+Nim 自己就是这两层（`template` 与 `macro` 是两个关键字，后者跑在它那台编译期 VM 上）——
+所以"两层"不是我们的发明，是那门语言已经验证过的分法。
 
 过程宏不必新写求值器：我们已经有两台（`src/core/interp/eval.js` 与 `src/core/mir/interp.js`）。
 但它把"编译一份文件"变成"跑一份别人的程序"，所以它是**第二格开关**
 （`--macro-eval`），而且诊断里要明说"这一趟在编译期跑了你的代码"。
 
-### 4.3 三条经典卫生用例（判据就是它们）
+### 4.3 三条卫生用例（判据就是它们）
+
+写成我们这边的形状（Nim 的 `template` + 按位置的形参）：
 
 ```
-;; 1. 模板引入的临时量不许捕获调用方的名字
-(define-syntax my-or (syntax-rules () ((_ a b) (let ((t a)) (if t t b)))))
-(let ((t 5)) (my-or #f t))        ;; 要 5，不是 #f
+;; 1. 体里引入的局部不许捕获调用处的名字（Nim：locals default to gensym）
+(define-template my-or (a b) (let ((t a)) (if t t b)))
+(let ((t 5)) (my-or false t))     ;; 要 5，不是 false
 
-;; 2. 模板引用的外部名字不许被调用方遮住
-(define-syntax add1 (syntax-rules () ((_ x) (+ x 1))))
+;; 2. 体里引用的外部名字不许被调用处遮住（Nim：自由名字在定义处绑定成 nkSym）
+(define-template add1 (x) (+ x 1))
 (let ((+ *)) (add1 3))            ;; 要 4（模板里的 + 是定义处那个 +）
 
-;; 3. 交换两个变量（经典 swap!）：两个洞都是调用方的名字，一个都不许换
-(define-syntax swap! (syntax-rules () ((_ a b) (let ((t a)) (set! a b) (set! b t)))))
+;; 3. 两个洞都是调用处的名字，一个都不许换（经典 swap!）
+(define-template swap! (a b) (let ((t a)) (set! a b) (set! b t)))
 ```
 
-gensym-only 能过第 1 与第 3 条，**过不了第 2 条** —— 那正是 D5 的证据，不是偏好。
+gensym-only 能过第 1 与第 3 条，**过不了第 2 条** —— 那一条就是 Nim 定义期那半趟
+（`qualifiedLookUp` 换 `nkSym`）在判据上的样子，不是偏好。
+
+第四条判据（Nim 有、Racket 那套里叫 `datum->syntax` 的反面）：**inject 要能明说** ——
+体里定义的函数默认泄出去（`semRoutineInTemplBody` 那一条），而局部要泄出去得写标注。
 
 ### 4.4 内置 DSL = 宏 + 位置矩阵的一行（不是新读入器）
 
 "语法兼容的内置 DSL"这句话在这套分层里有确切的落点：
 
 - 语法一格不加（所以叫"语法兼容"）：DSL 的入口就是一个普通调用形式；
-- 展开规则一条条写在 `syntax-rules` 里，出的是**核心形式**；
+- 展开规则一条条写在模板里，出的是**核心形式**；
 - 它能出现在哪儿由 ADR-0029 §4.1 那张 **Sort × Kind 矩阵**里加一行说，
   而不是靠"在哪儿写都行"；
 - 它对方言的要求（要哪几格算子）由模板右手边**算出来**（ADR-0033 的 I2）；
@@ -234,9 +259,25 @@ gensym-only 能过第 1 与第 3 条，**过不了第 2 条** —— 那正是 D
 
 ### 5.1 第一档：同层编译（都落到 js / c / wasm）
 
-今天已经**五门**语言汇到同一棵 sx（asy / jnc / js / glsl / wat，各自 `lang/*.js` 登记）。
-所以这一档不是新架构，缺的只有两样：那门语言的 **L0 语法**（`.y` 直接收，ADR-0034）
-与 **L5 降级规则**（nanopass，ADR-0029）。
+**先做哪三门是定了的：go / nim / vlang。** 理由不是喜好，是**调用形状与我们基本兼容**
+（位置实参、返回值一格、方法 = 名字 + 一格 self），于是 §5.1 那三条自动转换的条件最容易全中。
+它们的现状（`ls ext/`）：
+
+| 门 | L0 语法 | CST -> 节点图 | 例子 | 到 js | 缺什么 |
+|---|---|---|---|---|---|
+| go | `ext/go/go.grammar` | `ext/go/tograph.js` | `ext/go/examples/` | ✗ | 节点图那层没有 js 后端 |
+| nim | `ext/nim/nim.grammar`（405 条产生式） | `ext/nim/tograph.js` | 有 | ✗ | 同上 |
+| vlang | `ext/vlang/vlang.grammar` | `ext/vlang/tograph.js` | 有 | ✗ | 同上 |
+
+所以这一档的下一步是**一格出口**，两条路选一条（判据相同，代价不同）：
+
+- **A. 给节点图加 `graph/backend-js.js`**：那层只有 27 格算子，后端小；但 js 那一整套语义
+  （ADR-0011 的规范形、字符串按字节、闭包按值捕获）要在那儿再写一遍；
+- **B. 把 `tograph.js` 的产物接到 `sx`/OIR**：一次接通，**js / c / wasm / llvm 四条腿一起有**，
+  ADR-0011 那套语义与摇树、profile、REPL 全都白得；代价是节点图那 27 格要映到方言词汇上
+  （ADR-0031 那张表正是为这件事写的）。
+
+**倾向 B**，理由与 ADR-0034 那句一样：不新开一条路，就不会有两条路走散。
 
 "无缝函数调用"的可判定条件（三条全中才自动，缺一条就报，不猜）：
 
@@ -246,6 +287,20 @@ gensym-only 能过第 1 与第 3 条，**过不了第 2 条** —— 那正是 D
 
 三条里第 1 条最容易缺，而且**缺的地方是已知的**：`C_ABI` 那七格标量、`sx` 缺聚合按值拷贝。
 于是这一档的进度不由"又接了一门语言"衡量，而由 **ADR-0031 那几格补齐了多少**衡量。
+
+### 5.1a 尺子：编得动它们自己的编译器
+
+go / nim / v 的编译器都是**用它们自己写的**。所以这一档有一把现成的、不掺水的尺子，
+分四级（与我们自己那条 N1/N2 自举链同一形状）：
+
+| 级 | 判据 | 说明 |
+|---|---|---|
+| ① | 编得过它们 stdlib 的**一个**模块，输出与官方编译器一致 | 语法与降级的第一道真墙 |
+| ② | 编得过**整棵** stdlib | 这一级会把泛型 / 效应 / 生命期那几栏逼出来 |
+| ③ | 编得过**编译器自己**（一遍） | 这是"完整解析"这句话唯一的证明 |
+| ④ | 编出来的那个编译器**能再编一遍自己**，两代产物逐字节相同 | 闭环；与 `OMNI_CC=self` 那条链是同一条纪律 |
+
+**不许把 ③ 当下一步**：它是尺子，不是任务。任务是 §7 那张表。
 
 ### 5.2 第二档：跨层 FFI（大部分在 js 层，一格在 C）
 
@@ -342,20 +397,24 @@ define-macro                             // 事情一：过程宏（另一格开
 
 ## 7. 落地顺序（每一步一个可执行判据）
 
+**优先级已定**：先事情一的头两格（`#lang` 与卫生模板），再借用那三门（go / nim / vlang）。
+
 | # | 步 | 判据 |
 |---|---|---|
-| 1 | `read.js` 三种节点各加一格 `scopes`（空集） | **全树逐字节中性**：`tests/sexpr`、`tests/glr`、六条腿的产物一个字节不变 |
-| 2 | `#lang` 指令 + 两处开关 + `langNames()` 印表 | 关着时报那三行（含开法与装着的读入器）；开着时 `.omni` 里写 `#lang sx` 能编能跑 |
-| 3 | `--as <名字>` 与 D3 那张优先级 | 三处冲突时报"三处各说了什么"；单处给时按它走 |
-| 4 | `syntax-rules` 模式宏（含 set-of-scopes 解析） | §4.3 三条经典用例；第 2 条**必须**过（gensym 过不了它） |
-| 5 | `with "h"` 从 jancy 提到 omni | 同一份头，jnc 与 omni 两侧收到的声明与常量集合**逐条相同** |
-| 6 | `as g` 只读两格（查 + 展开） | 拿一份 `.jnc` 当 `g` 读进来，`g.lower` 出的 sx 与直接编那份 `.jnc` **逐字节相同** |
-| 7 | `via rpc`（同步调用） | 先拿 `.js` 当"假 python"（它两条路都有）：第一档与第四档**答案相同** |
-| 8 | 过程宏 + `--macro-eval` | 编译期跑用户代码那一句诊断在；关着时 `define-macro` 报错 |
-| 9 | `g.rewrite` / `g.splice` / `g.bind` | 塞进去的树按 Σ 校验；未绑的名字**报错**而不是静默解析 |
-| 10 | 聚合与回调进方言词汇（挂 ADR-0031 §2/§3） | `C_ABI` 那句"聚合一律不支持"删掉的同时，六条腿逐字节判据不许变差 |
+| 1 | `#lang` 指令 + 两处开关 + `langNames()` 印表 | 关着时报那三行（含开法与装着的读入器）；开着时 `.omni` 里写 `#lang sx` 能编能跑 |
+| 2 | `--as <名字>` 与 D3 那张优先级 | 三处冲突时报"三处各说了什么"；单处给时按它走 |
+| 3 | **定义期那半趟**（局部标 gensym、自由名字在定义处绑定、routine 默认 inject） | §4.3 第 2 条用例（`let + = *` 时模板里的 `+` 仍是定义处那个） |
+| 4 | **展开期那半趟**（按位置替形参 + per-展开 mapping 换名） | §4.3 第 1、3 条用例；同一模板展开两次，两次的 gensym 名**不同**（`instID`） |
+| 5 | 借用第一档的出口：`tograph` 的产物接到 `sx`（§5.1 的 B 路） | `ext/{go,nim,vlang}/examples` 每份跑出来的输出与官方编译器一致 |
+| 6 | `with "h"` 从 jancy 提到 omni | 同一份头，jnc 与 omni 两侧收到的声明与常量集合**逐条相同** |
+| 7 | `as g` 只读两格（查 + 展开） | 拿一份 `.jnc` 当 `g` 读进来，`g.lower` 出的 sx 与直接编那份 `.jnc` **逐字节相同** |
+| 8 | `via rpc`（同步调用） | 先拿 `.js` 当"假 python"（它两条路都有）：第一档与第四档**答案相同** |
+| 9 | 过程宏 + `--macro-eval` | 编译期跑用户代码那一句诊断在；关着时 `define-macro` 报错 |
+| 10 | `g.rewrite` / `g.splice` / `g.bind` | 塞进去的树按 Σ 校验；未绑的名字**报错**而不是静默解析 |
+| 11 | 聚合与回调进方言词汇（挂 ADR-0031 §2/§3） | `C_ABI` 那句"聚合一律不支持"删掉的同时，六条腿逐字节判据不许变差 |
 
-第 1、5、6 三步是"**先中性、再有新能力**"的形状 —— 与 ADR-0026/0027/0028 那几刀同一条纪律。
+**初版那个"第 1 步：三种节点各加一格 `scopes`"删掉了** —— D5 改成 Nim 那两趟之后不需要它
+（省掉的正是"给每个节点挂集合 + 写子集最大匹配解析器"那一整块）。
 
 ---
 
@@ -363,10 +422,13 @@ define-macro                             // 事情一：过程宏（另一格开
 
 - **过程宏要跑用户代码**：默认关；它与"编译一份文件是纯函数"这件事天然冲突，
   缓存的键里必须带上宏代码本身（否则改宏不重编 —— 与 `.grammar` 那格内容寻址同一个理由）。
+- **Nim 那套卫生要求"定义处查得到名字"**：所以第一格落在 `sx`（顶层名字与算子表读完就齐）。
+  asy / jnc 那两门的名字解析在各自 5000~15000 行里，要等 ADR-0029 的 L3（作用域图）才好接。
 - **`g.rewrite` 不带卫生**：跨语言的树没有共同的作用域图，所以名字要显式绑。
   这不是"以后补上"，是这一档的**定义**：要卫生就用第一档（同一棵 sx 里的宏）。
 - **值语义在第四档只能是拷贝**（ADR-0005 那套在进程边界上无从谈起）。
-- **python / nim 的 L0 语法今天没有**：第一档对它们还不成立，只有第三、四档。
+- **go / nim / vlang 缺的是"到 js"那一格出口**，不是语法（`ext/` 里三份 `.grammar` 与三份
+  `tograph.js` 都在，节点图那层只有 c 与 wat 两个后端）。python 那门连 L0 都还没有。
 - **`C_ABI` 的聚合与回调今天没有**：第二档能借的还只是标量签名那一层。
 - **项目清单还不存在**：`PACKAGES` 是写死的一格（`module/load.js:35` 上那句注释自己说了
   "将来会被真正的项目清单文件取代"）。所以 §3.2 的开关只有命令行与环境两处，
@@ -377,8 +439,14 @@ define-macro                             // 事情一：过程宏（另一格开
 
 ## 9. 参考
 
-- Racket：`#lang` 与 reader/expander 分层；Flatt 2016《Binding as Sets of Scopes》（D5 的来源）
+- **Nim（卫生宏这一格的主要参考）**，本机 `~/Documents/Lang/reference/Nim/compiler/`：
+  `semtempl.nim`（定义期那半趟：`addLocalDecl` 的 "locals default to 'gensym'"、
+  `semRoutineInTemplBody` 的 "routines default to 'inject'"、`openScope`/`closeScope`）与
+  `evaltempl.nim`（展开期那半趟：`TemplCtx.mapping`、按位置替形参、`` `gensymN `` 换名）。
+  另有 `doc/manual.md` 的 Templates / Macros 两节与 `doc/astspec.txt`（写宏的人看的那份节点表）。
+- Racket：`#lang` 与 reader/expander 分层（`#lang` 这一格的形状来源）；
+  Flatt 2016《Binding as Sets of Scopes》——**读过、没采**（理由见 D5 与 §4.1）。
 - nanopass 框架（ADR-0029 的 L5 与本文 L1.5 的形状）
-- 本机参考树：`~/Documents/Lang/reference`（go / vlang / nim / mojo / sbcl / chez / LLVM）——
-  第一档要收的那几门语言的语法多半已经是 `.y` 或与它一对一（ADR-0034 就是为这件事）
+- 本机参考树 `~/Documents/Lang/reference`：`go` / `vlang` / `Nim` 三棵是借用第一档的头三门
+  （它们的编译器都是用自己写的 —— §5.1a 那把尺子）；`ChezScheme` / `sbcl` 是宏那一族的另一组对照
 - 这个仓库里的先例：`import "libfoo.dylib" with "foo.h"`（ADR-0022 的 J4d，jancy 那一侧已跑通）
