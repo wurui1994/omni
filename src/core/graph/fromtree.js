@@ -193,6 +193,24 @@ export const retOf = (vals) => node('ret', vals.length === 0 ? {} : {
 });
 
 /**
+ * **数字字面量当条件**：`while (1)` / `if (0)`。
+ *
+ * 这一格的答案在编译期就定了（C 家族与 awk 都是"非零为真"），所以落成一格 **bool 字面量**
+ * —— 那是这几门语言的真值观在这一处的**准确**样子，不是猜。
+ *
+ * **变量当条件不在这儿**：那要按类型说（C 是 `!= 0`、awk 的串是 `!= ""`、lua 里 0 是真），
+ * 而图上没有类型 —— 所以那一格留给各门自己的映射（能定的补一格比较，定不了的当场报），
+ * 这一格只管"字面量"这一档。收在这儿而不是抄两遍：cpp 与 awk 的 `while (1)` 是同一件事。
+ */
+export const truthyLit = (c) => {
+  if (c !== null && c !== undefined && typeof c.lit === 'number') return lit(c.lit !== 0);
+  if (c !== null && c !== undefined && c.op === 'const' && typeof c.attrs?.value === 'number') {
+    return lit(c.attrs.value !== 0);
+  }
+  return c;
+};
+
+/**
  * **一格分支**：`else` 那一格可有可无（没有就不连那条边 —— 端口是 optional 的）。
  * 七门语言原来各写一遍那句 `...(els === undefined ? {} : { else: … })`。
  */

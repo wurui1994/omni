@@ -17,7 +17,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, threePart, elseOf, ops, binOf, retOf, branchOf, loopExit,
-  mapNew, mapGet, mapSet, mapHas,
+  mapNew, mapGet, mapSet, mapHas, truthyLit,
 } from '../../src/core/graph/fromtree.js';
 
 
@@ -132,20 +132,21 @@ function toNode(x) {
       // 形状与 go / vlang 一模一样 —— `threePart` 只写一遍（fromtree.js）
       return threePart({
         init: init === undefined ? [] : many([init]),
-        cond: cond === undefined ? undefined : toNode(cond),
+        cond: cond === undefined ? undefined : truthyLit(toNode(cond)),
         post: post === undefined ? [] : many([post]),
         body: rest.length === 0 ? [] : many(rest),
       });
     }
     case 'while': {
       const [cond, ...rest] = kids(x);
-      return node('loop', { cond: toNode(cond), body: many(rest) });
+      // `while (1)` 那一格：字面量的真值观在编译期就定了（见 fromtree.js 的 truthyLit）
+      return node('loop', { cond: truthyLit(toNode(cond)), body: many(rest) });
     }
     case 'if': {
       const [cond, then, els] = kids(x);
       // `else` 那一格是个包装（`(else …)`）—— 与 go / V 那两门同一处坑
       const e = elseOf(els);
-      return branchOf(toNode(cond), toNode(then), e === undefined ? undefined : toNode(e));
+      return branchOf(truthyLit(toNode(cond)), toNode(then), e === undefined ? undefined : toNode(e));
     }
     case 'return': return retOf(many(kids(x)));
     // `break` / `continue` -> **同一格节点**，差的只有一格附属 kind（与 go / lua 同一格）

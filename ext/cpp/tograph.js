@@ -16,7 +16,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet, truthyLit,
   recordNew, fieldGet, fieldSet, mapNew, mapGet, mapSet, mapHas,
 } from '../../src/core/graph/fromtree.js';
 
@@ -446,11 +446,12 @@ function toNode(x) {
     case 'empty': return [];
     case 'if': {
       const [c, then, els] = kids(x);
-      return branchOf(toNode(c), toNode(then), els === undefined ? undefined : toNode(kids(els)[0]));
+      return branchOf(truthyLit(toNode(c)), toNode(then), els === undefined ? undefined : toNode(kids(els)[0]));
     }
     case 'while': {
       const [c, body] = kids(x);
-      return node('loop', { cond: toNode(c), body: body === undefined ? [] : [toNode(body)] });
+      // `while (1)`：字面量的真值观在编译期就定了（见 fromtree.js 的 truthyLit）
+      return node('loop', { cond: truthyLit(toNode(c)), body: body === undefined ? [] : [toNode(body)] });
     }
     // `for (init; cond; post) body` -> region + loop（**步进单列一格端口**，continue 也要跑）
     case 'for': {
@@ -459,7 +460,7 @@ function toNode(x) {
         body: [
           ...(init === undefined ? [] : many([init])),
           node('loop', {
-            cond: cond === undefined ? lit(true) : toNode(cond),
+            cond: cond === undefined ? lit(true) : truthyLit(toNode(cond)),
             body: body === undefined ? [] : [toNode(body)],
             post: post === undefined ? [] : many([post]),
           }),
