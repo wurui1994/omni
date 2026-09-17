@@ -13,12 +13,19 @@
 #define SIGKILL 9
 #define SIGALRM 14
 #define SIGTERM 15
+/* 采样 profiler 用的那两个。这两个号**两条腿一样**（26/27），少见的一格。 */
+#define SIGVTALRM 26
+#define SIGPROF 27
 #define SIGUSR1 30
 
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
 
 #define SA_RESTART 0x0002
+/* `SA_SIGINFO`：三个参数的处理函数。Darwin 的值是 **0x0040**（Linux 上是 4）——
+ * 又一格「同名不同号」。采样 profiler 要它：PC 只有 ucontext 里有（见 `omni_prof.c`）。
+ * Darwin 的跳板本来就按三个参数调（`sa_tramp` 那一段），所以这一格装上就成立。 */
+#define SA_SIGINFO 0x0040
 
 typedef unsigned int sigset_t;
 

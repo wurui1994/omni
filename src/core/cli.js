@@ -511,6 +511,20 @@ let LIBC = null;
  * 两处都没给就是 `self`（我们自己那台 C 前端 + 我们自己的链接器）。
  */
 let CC = null;
+/**
+ * 运行时 profiler（`--profile`，第一百四十七片）—— 与 `CC` 同一个理由摆成一格状态：
+ * 这件事要落到三处（发射期插桩、外部 cc 的开关、子进程的环境），而中间几层的签名
+ * 都不带它。
+ *
+ * `null` = 不量。带上时是 `{ mode, hz, out }`，`mode` 三档（理由见 `cmds.js` 的 F_PROFILE）：
+ *   `cc`     —— 编译器自己插桩（`-finstrument-functions`）。**默认这一档**：
+ *               gcc 与 clang 都有、Linux 与 macOS 都有，比 `-pg`/gprof 跨平台
+ *               （Darwin 上 `-pg` 早就不出 `gmon.out` 了）。
+ *   `sample` —— 定时器 + `backtrace`（`omni_prof.c`）。开销最低，纯运行期开关。
+ *   `stub`   —— 我们自己在发射期插的那一对（`backend-c/emit.js` 的 `profTable`）；
+ *               `--cc self` 那一路只有这一档。
+ */
+let PROF = null;
 /* 编出来的核心默认只内建 js -> c，别的语言/目标各自一格 plugins/ 里的插件（ADR-0021 S4）。
    接缝是 linkJs 的 read 回调 —— 编译器读源码全过它，所以"换掉 builtin.js 那一份文本"
    就等于"不把那几门 import 进来"，链接器与摇树都跟着少活。
@@ -969,8 +983,12 @@ function exeCacheStamp(cc) {
   // **`OMNI_PROFILE` 也得在**：它改的是生成的 C（插桩），不是 flags；不进印记的话
   // 开过一次 profile 之后，后面不带开关的运行会命中缓存、复用那份**带插桩**的二进制，
   // 于是量出来的时间被抬高、stderr 还多出 prof 那几行 —— 正是拿这条腿量性能时最坑的一种。
-  const prof = env('OMNI_PROFILE') === '1' ? '|prof' : '';
-  return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}${prof}`;
+  // `--profile cc|stub` 同一个理由（第一百四十七片）：那两档也改二进制。
+  // **`sample` 不进**：它一个字节都不改，只是运行期多一个环境变量 —— 进了印记反而
+  // 让「同一份二进制，采一趟、再不采一趟」白编两遍。
+  const profEnv = env('OMNI_PROFILE') === '1' ? '|prof' : '';
+  const profFlag = PROF !== null && PROF.mode !== 'sample' ? `|prof:${PROF.mode}` : '';
+  return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}${profEnv}${profFlag}`;
 }
 function exeCacheGet(path, cc) {
   if (env('OMNI_NO_EXECACHE') === '1') return null;
@@ -2006,6 +2024,9 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   const { text: cText, stats, syms } = cap('cgen.stats')(mod, {
     plugin: plugin, extern: extern === true, own: own === undefined ? null : own,
     bind: bind === undefined ? null : bind,
+    /* `--profile stub`：发射期插的那一对计时（`profTable`）。别的两档不动生成的 C ——
+     * `cc` 那一档是编译器自己插，`sample` 那一档一个字节都不改。 */
+    profile: PROF !== null && PROF.mode === 'stub',
   });
   writeText(cPath, cText);
   const tGen = nowMs() - tGen0;
@@ -2028,7 +2049,13 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
      macOS / Linux 的 clang 都认 -Wl,-export_dynamic。 */
   const ex = extern === true ? ['-Wl,-export_dynamic'] : [];
   const cargs = plugin === undefined
-    ? [...ccFlags(cc), ...mainStackFlags(cc), ...ex, cPath, ...runtimeObjects(cc),
+    ? [...ccFlags(cc), ...mainStackFlags(cc), ...ex,
+      /* `--profile cc`：编译器自己插桩。只给**生成的那一份 `.c`**——运行时自己不被插，
+       * 否则 `clock_gettime` 那一对桩就计进去了，量出来的全是插桩自己（3.2 亿次调用 7.9s，
+       * emit.js 里那段注释的原话）。`-finstrument-functions` 是 gcc 与 clang 都有的
+       * 跨平台机制（Darwin 上 `-pg`/gprof 早就不出 `gmon.out` 了）。 */
+      ...(PROF !== null && PROF.mode === 'cc' ? ['-finstrument-functions'] : []),
+      cPath, ...runtimeObjects(cc),
       '-o', outPath, '-lm', ...libs, ...libLinkArgs(mod.libs)]
     : [...ccFlags(cc), ...shared, cPath, '-o', outPath, ...libs, ...libLinkArgs(mod.libs)];
   const tCc0 = nowMs();
@@ -2735,6 +2762,35 @@ function main(argv) {
     /* `--cc CC`：生成的 C 交给谁（`self` = 我们自己那台）。比 `OMNI_CC` 优先。 */
     const ci = rest.indexOf('--cc');
     CC = ci < 0 ? null : rest[ci + 1];
+    /* `--profile MODE`（第一百四十七片）：`cc` | `sample[:hz]` | `stub`。
+     *
+     * 三档落在三个**不同的时刻**，所以这一格要早解析：`stub` 改的是发射期（生成的 C 里
+     * 多一对计时），`cc` 改的是外部 cc 的开关（`-finstrument-functions`），`sample` 一个
+     * 字节都不改二进制 —— 它是运行期的环境变量。前两档进可执行文件的缓存印记，后一档不进。 */
+    const pi = rest.indexOf('--profile');
+    if (pi < 0) {
+      PROF = null;
+    } else {
+      const raw = rest[pi + 1] === undefined ? 'cc' : rest[pi + 1];
+      const colon = raw.indexOf(':');
+      const mode = colon < 0 ? raw : raw.slice(0, colon);
+      const hz = colon < 0 ? 0 : Number(raw.slice(colon + 1));
+      if (mode !== 'cc' && mode !== 'sample' && mode !== 'stub') {
+        throw new OmniError(`--profile ${raw}：认的是 cc | sample[:hz] | stub`
+          + '（cc = 编译器自己插桩，sample = 定时器采样，stub = 我们发射期插的那一对）');
+      }
+      const oi = rest.indexOf('--profile-out');
+      PROF = { mode, hz: Number.isFinite(hz) ? hz : 0, out: oi < 0 ? null : rest[oi + 1] };
+      /* `cc` 那一档要外部编译器的开关，我们自己那台 C 前端还没有 `-finstrument-functions`
+       * —— 明着说，别悄悄出一份没插桩的二进制然后印一张空表。 */
+      if (mode === 'cc' && selfCC()) {
+        throw new OmniError('--profile cc 要外部编译器（-finstrument-functions）：'
+          + '给 --cc clang/gcc，或者换 --profile sample（运行期采样）/ --profile stub（发射期插桩）');
+      }
+      /* `sample` 是运行期的事：设进环境，`spawn` 出去的孩子自己继承（与 `-f svg` 同一个手法）。 */
+      if (mode === 'sample') setEnv('OMNI_PROF', hz > 0 ? `sample:${hz}` : 'sample');
+      if (PROF.out !== null && PROF.out !== undefined) setEnv('OMNI_PROF_OUT', PROF.out);
+    }
   }
   /* 发现插件摆在这儿而不是模块作用域：一来 `-v` 刚解析出来，装了哪几格才印得出来；
      二来插件装不上是**响错**，那句话得走 main 的错误出口（模块作用域抛出来的话，

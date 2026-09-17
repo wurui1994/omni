@@ -64,6 +64,22 @@ const F_SYSROOT = {
   name: '--sysroot', arity: 1, value: 'DIR',
   brief: '系统头 DIR/include、符号预设 DIR/lib/*.def；不给就按 --arch/--os 取自带的',
 };
+/**
+ * 运行时 profiler（第一百四十七片）。三档：
+ *   cc      编译器插桩（`-finstrument-functions`，clang/gcc 跨平台都有，**默认这一档**）
+ *   sample  定时器 + backtrace（低开销）；`sample:997` 指定每秒帧数
+ *   stub    发射期插桩（`OMNI_PROFILE=1`，只给 `--cc self`；emit.js 里那一份）
+ * `--profile` 一个字不带 = `cc`（外部 cc 那一路）或 `sample`（`--cc self` 那一路）。
+ * `--profile-out FILE` 输出折叠栈文件（火焰图 / gprof2dot 吃它）。
+ */
+const F_PROFILE = {
+  name: '--profile', arity: 1, value: 'MODE',
+  brief: 'cc（默认，-finstrument-functions）| sample[:hz] | stub —— 比 OMNI_PROFILE 优先',
+};
+const F_PROFILE_OUT = {
+  name: '--profile-out', arity: 1, value: 'FILE',
+  brief: '折叠栈写到 FILE（火焰图 / gprof2dot 吃它）',
+};
 
 /* ---- C 前端那几格（`-I` 这种只在这儿出现，不在顶层）。 */
 const C_CPP_FLAGS = [
@@ -269,7 +285,7 @@ ${graphEngineHelp()}
         /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，
          * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格
          * （`--libc self` 那一趟的 sysroot 按本机取自带的，不用给）。 */
-        F_CC, F_LIBC,
+        F_CC, F_LIBC, F_PROFILE, F_PROFILE_OUT,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认：前端 -> OIR -> 后端）| graph（节点图 + 契约五问）' },
         { name: '--lang', arity: 1, value: 'L',
@@ -297,7 +313,7 @@ ${graphEngineHelp()}
   omni build ext/lua/examples/intmath.lua --engine graph -o intmath.wasm   （二进制，V8 直接吃）`,
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
         ...C_TARGET_FLAGS,
-        F_SYSROOT, F_LIBC, F_CC,
+        F_SYSROOT, F_LIBC, F_CC, F_PROFILE, F_PROFILE_OUT,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
         { name: '--lang', arity: 1, value: 'L',

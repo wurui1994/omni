@@ -189,6 +189,16 @@ unsigned int alarm(unsigned int sec) {
 }
 int getpid(void) { return (int)__omni_syscall(SYS_getpid); }
 
+/* `setitimer`/`getitimer`（第一百四十七片）：采样 profiler 要它 —— `alarm` 只到秒，
+ * 而采样要的是毫秒以下、还要**重复**。`struct itimerval` 的布局在
+ * `include/sys/time.h` 里（这条腿上 `tv_usec` 是 long）。 */
+int setitimer(int which, const void *nv, void *ov) {
+  return (int)__libc_check(__omni_syscall(SYS_setitimer, which, (long)nv, (long)ov));
+}
+int getitimer(int which, void *cur) {
+  return (int)__libc_check(__omni_syscall(SYS_getitimer, which, (long)cur));
+}
+
 /* ---- 目录：`getdents64`（217）。内核回的是一串变长记录：
  *   {u64 ino, i64 off, u16 reclen, u8 type, char name[]}  —— name 从第 19 字节起。
  * 我们把它包成 POSIX 的 `DIR`/`struct dirent`（后者按**我们自己头里的布局**）。 */

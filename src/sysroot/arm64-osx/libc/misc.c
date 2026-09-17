@@ -226,6 +226,16 @@ unsigned int alarm(unsigned int sec) {
 }
 int getpid(void) { return (int)__omni_syscall(SYS_getpid); }
 
+/* `setitimer`/`getitimer`（第一百四十七片）：采样 profiler 要它 —— `alarm` 只到秒，
+ * 而采样要毫秒以下、还要重复。上面那格 `alarm` 走的就是它（Darwin 没有 alarm 这个号）。
+ * `struct itimerval` 的布局在 `include/sys/time.h` 里（这条腿上 `tv_usec` 是 int）。 */
+int setitimer(int which, const void *nv, void *ov) {
+  return (int)__libc_check(__omni_syscall(SYS_setitimer, which, (long)nv, (long)ov));
+}
+int getitimer(int which, void *cur) {
+  return (int)__libc_check(__omni_syscall(SYS_getitimer, which, (long)cur));
+}
+
 /* ---- 目录：`getdirentries64`（344）。Darwin 回的记录是
  *   {u64 d_ino, u64 d_seekoff, u16 d_reclen, u16 d_namlen, u8 d_type, char d_name[]}
  * —— 名字从第 **21** 字节起（Linux 的 `getdents64` 是 19：那边没有 `d_namlen`）。

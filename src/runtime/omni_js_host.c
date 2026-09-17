@@ -38,6 +38,10 @@ static int host_exit_code;
 void omni_host_init(int argc, char **argv) {
   host_argc = argc;
   host_argv = argv;
+  /* 采样 profiler 是**运行期**的开关（`OMNI_PROF=sample[:hz]`）：同一份二进制不带
+   * 开关跑就是一分钱不花，带上就开始采。摆在这儿而不是 main 里，是因为插件那一支
+   * 也走这条初始化。 */
+  omni_prof_env_init();
 }
 
 int omni_host_exit_code(void) { return host_exit_code; }

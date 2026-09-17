@@ -13,11 +13,20 @@
 #define SIGUSR1 10
 #define SIGALRM 14
 #define SIGTERM 15
+/* 采样 profiler 用的那两个（`ITIMER_VIRTUAL`/`ITIMER_PROF` 各自的信号）。
+ * 这两个号**两条腿一样**（26/27），少见的一格。 */
+#define SIGVTALRM 26
+#define SIGPROF 27
 
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
 
 #define SA_RESTART 0x10000000
+/* `SA_SIGINFO`：三个参数的处理函数（`(sig, siginfo *, ucontext *)`）。采样 profiler 要它
+ * —— 「此刻在谁身上」只有 ucontext 里那个 PC 说得出来（见 `omni_prof.c`）。
+ * 我们那一层只把 `sa_handler` 抄进内核结构，所以三参数的处理函数**装得上**：
+ * 内核按 flags 决定调几个参数，libc 这一侧不掺和。 */
+#define SA_SIGINFO 4
 
 typedef struct { unsigned long int __val[16]; } sigset_t;  /* 128 bytes */
 

@@ -760,6 +760,14 @@ omni_dyn omni_js_num_to_string(omni_dyn v, omni_dyn radix);
    结果是数组的三个（readdir / argv / spawnSync）在 omni_js_host.h 的宏里。 */
 void omni_host_init(int argc, char **argv);
 int omni_host_exit_code(void);
+/* omni_prof.c —— 运行期的 profiler（第一百四十七片）。收集器一处，喂法三种：
+   编译器插桩（`-finstrument-functions` 的那一对 `__cyg_profile_func_*`，默认那一档）、
+   定时器采样（`OMNI_PROF=sample[:hz]`）、发射期插的桩（那一档在生成的 C 里，不进这儿）。
+   `omni_prof_env_init` 由 `omni_host_init` 调一次：采样档是**运行期**的开关，
+   于是同一份二进制既能不带开销地跑、也能被采。 */
+void omni_prof_env_init(void);
+void omni_prof_sample_start(int hz);
+void omni_prof_report(void);
 /* 入口不在主线程上跑：开一条大栈的线程，把 entry 交给它。
    主线程的栈是链接期定死的（macOS 8MB），而这条链上最深的递归就是编译器自己 ——
    `emit-c` 一份 16 万行的 JS，词法/语法/降级三遍全是递归下降，8MB 上只剩一点余量，
