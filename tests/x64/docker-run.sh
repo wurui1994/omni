@@ -201,6 +201,17 @@
 #           `sin(1e300)` / `cos(1e300)` / `tan(1e300)` 与 Apple 的 libm **逐字节相同**
 #           判据加了 1e18 / 1e40 / 1.23e17 三个大参数，395 个采样点：
 #             arm64-osx 302/395 相同、x86_64-linux 299/395 相同，两边最大误差都是 5.4e-15
+#      m. 日历那一格也上了判据（`tests/c/libc-time.js` + `libc-time-probe.c`）：14 个时刻
+#         （epoch、负秒数、1900/1972/2000/2100 那四个闰年边、int32 两侧、9999-12-31）
+#         × `gmtime_r` 九个字段 + 七种 `strftime` 格式，再加「1970 一年里每 3607 秒扫一遍」
+#         的校验和。两条腿**各 113 行、一行不差**（这一格是**没找出错**的判据 —— 秒数掰
+#         年月日走的是 civil_from_days 那条封闭公式，本来就没有分支可错；留着是为了以后
+#         谁动那条公式时当场知道）：
+#           x86_64-linux（容器，`--libc self`）：238061 字节、`ldd` = statically linked、rc=0
+#           arm64-osx（本机，`node tests/c/libc-time.js`）：5 passed, 0 failed
+#         三条**说明白的**不比：`localtime_r`（我们没有时区库，本地就是 UTC）、`%Z`
+#         （我们印 UTC、Darwin 的 gmtime 印 GMT）、cap 不够时的缓冲内容（C11 说
+#         indeterminate）。认不出的转换（`%Q`）两台平台 libc 自己就不一样，也不设判据。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

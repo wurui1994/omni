@@ -88,7 +88,11 @@ MIR 说「要什么」，摆法归后端。
 - `pure.c`    纯计算的杂项：`strerror`、`atexit`、`gmtime_r`/`strftime`、`sscanf`、
               `qsort`（堆排序：不 malloc、不递归、最坏也是 O(n log n)）、`bsearch`。
               这一族与 `string.c`/`stdio.c` 的边角由 `tests/c/libc-str.js` 逐行对账
-              （22 行，两条腿都与平台 libc 一行不差）
+              （22 行，两条腿都与平台 libc 一行不差）；日历那一格另有
+              `tests/c/libc-time.js`（14 个时刻 × 九个字段 + 七种格式，两条腿各 113 行
+              一行不差 —— 秒数掰年月日走 civil_from_days 那条封闭公式，没有分支可错，
+              这条判据是**为了守住它**，不是为了顺错）。`localtime_r` 就是 `gmtime_r`
+              （没有时区库），`%Z` 印 `UTC`。
 
 **还没有的**（明说）：
 - 线程：`pthread_create` 照 POSIX 回 `EAGAIN` —— 我们的运行时**本来就有退路**
