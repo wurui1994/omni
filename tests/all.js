@@ -77,6 +77,9 @@ const SUITES = [
   //   stat.js   图的形状与结构那把尺子（`--stat`）：数得对、共享只算一次、两遍一样、
   //             减法是减法 —— 它是 `docs/design/node-graph-shrink.md` 第三条的量尺
   { s: 'graph/stat.js' },
+  //   shrink.js 第一个 pass（常量折叠 + 死绑定删除）：折 / 不折 / 删 / 不删 / 共享 / 停，
+  //             + 现有例子 × 五条腿输出一字不变 —— shrink 文档第五节第 1 条的判据
+  { s: 'graph/shrink.js' },
   // 可删除测试的**第二层**：删一支产生式（语法那一层）。默认只跑两门小语法 ——
   // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
   { s: 'grammar/delete.js' },

@@ -37,6 +37,7 @@ import { backends, Gap } from './contract.js';
 import {
   graphStat, graphStatTable, graphStatJson, graphStatDot, graphStatDiff, graphStatDiffTable,
 } from './stat.js';
+import { shrink } from './shrink.js';
 import { watToWasm } from '../wasm/assemble.js';
 import { LANGS, pickLang, treeRoot } from './langs.js';
 
@@ -119,11 +120,29 @@ function statOf(graph, argv, path) {
   }
 }
 
+/**
+ * `--shrink`（第一个 pass）：常量折叠 + 死绑定删除。**账当场报** ——
+ * `docs/design/node-graph-shrink.md` 第三条要求的原话是「每个 pass 要能报出删了几格节点」，
+ * 所以这一句不是 `-v` 才印的调试话，是这个开关本身的输出（在 stderr 上）。
+ * 再给了 `--stat` 就连那张按 op 的差表一起印 —— 「哪一格少了」比「少了几格」更有用。
+ */
+function shrinkOf(graph, argv) {
+  if (!argv.includes('--shrink')) return graph;
+  const s0 = graphStat(graph);
+  const r = shrink(graph);
+  const s1 = graphStat(r.graph);
+  stderr(`omni: shrink 折 ${r.folded} 格常量、删 ${r.dropped} 格死绑定（${r.rounds} 轮）`
+    + ` —— 节点 ${s0.nodes} -> ${s1.nodes} 格\n`);
+  if (argv.includes('--stat')) stderr(graphStatDiffTable(graphStatDiff(s0, s1)));
+  return r.graph;
+}
+
 export function runGraphFile(path, argv) {
   const back = pickBackend('run', argv, 'interp');
   const got = graphOf(path, argv);
   if (got.code !== undefined) return got.code;
-  const { lang, graph } = got;
+  const { lang } = got;
+  const graph = shrinkOf(got.graph, argv);
   statOf(graph, argv, path);
 
   // ---- 图 -> 那条腿。缺口与"跑错了"分开记
@@ -190,13 +209,14 @@ export function buildGraphFile(path, argv) {
   }
   const got = graphOf(path, argv);
   if (got.code !== undefined) return got.code;
-  statOf(got.graph, argv, path);
+  const graph = shrinkOf(got.graph, argv);
+  statOf(graph, argv, path);
   const dot = path.lastIndexOf('/') >= 0 ? path.slice(path.lastIndexOf('/') + 1) : path;
   const stem = dot.lastIndexOf('.') > 0 ? dot.slice(0, dot.lastIndexOf('.')) : dot;
   const out = cliArg(argv, '-o') ?? `${stem}.${back.name}`;
   let art = null;
   try {
-    art = back.lower(got.graph);
+    art = back.lower(graph);
   } catch (err) {
     if (err instanceof Gap) {
       stderr(`omni: ${back.name} 这条腿接不住 —— ${err.message}\n`);

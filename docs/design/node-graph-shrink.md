@@ -71,17 +71,25 @@
   （`tests/graph/run.js`，108/108）。这就是保真性的判据，不是感觉。
 - **灵活性够**：十门语言 × 5 个后端的矩阵，569 passed / 0 failed；
   节点级缺口 interp/sx/js 各 0 格、wat 0 格、c 0 格（剩的是形状上的账，各有证物）。
-- **变换那一格是空的**：`src/core/graph/` 下**没有一个 pass**。
-  路是 `fromtree` -> 后端，一遍到底。ADR-0033 那套效应/lifetime 声明是**为了变换**才写的，
-  而现在没有一个消费者在用它做减法。**这就是这份文档要钉住的欠账。**
+- **变换那一格原来是空的**：`src/core/graph/` 下一个 pass 都没有，路是 `fromtree` -> 后端
+  一遍到底 —— ADR-0033 那套效应/lifetime 声明是**为了变换**才写的，却一个消费者都没有。
+  **这就是这份文档钉住的欠账**（2026-09-17 起：第一个 pass 落地，见下面两条）。
 - **尺子先有了**（2026-09-17）：`src/core/graph/stat.js` + `omni run/build --engine graph --stat`
   能报出「这张图多少格、都是些什么格、纯与有效应各几格」，`--stat-diff FILE` 按 op 逐格相减。
   量到的原话（`ext/lua/examples/`，arm64 macOS）：
   `record.lua` 19 格 / 14 条边 / 深 4（纯 4、有效应 15），
   `method.lua` 84 格 / 71 条边 / 深 10（纯 12、有效应 72）——
   两者相减是 `+17 map-get · +7 map-set · -4 field-get · -1 record-new`，
-  也就是「一格 `record-new` 换成一族 map 操作」这笔账**现在有数字了**。
-  尺子不是 pass：第三格仍然是空的，但从此「缩了没有」不再靠感觉（判据 `tests/graph/stat.js`）。
+  也就是「一格 `record-new` 换成一族 map 操作」这笔账**现在有数字了**（判据 `tests/graph/stat.js`）。
+- **第一个 pass 也有了**（2026-09-17）：`src/core/graph/shrink.js` + `--shrink` ——
+  常量折叠（pure 的内建 + 全常量实参，借的是解释器那同一个 kernel）
+  与死绑定删除（名字没人 `ref`/`set` + 初值通体 pure）。
+  量到的数：`lua/strcat` 12 -> 8 格（`-2 const · -2 prim:concat`）、
+  `lua/numstr` 10 -> 8、`nim/conv` 10 -> 8；十门例子里**16 份缩得动、85 份报 0**
+  （缩不动不是失败，是那几份里本来没有常量表达式、也没有死绑定），
+  101 份**输出无一处改变**（interp 那条腿逐份比过）。
+  **五条腿的输出一字不变**，`sx` 那条腿缩完仍然读回来逐字节相同（判据 `tests/graph/shrink.js`，39 格）。
+  于是第三格从「空的」变成「**有一个消费者、还欠后面那两条**」。
 
 ## 五、下一刀的判据（做到了怎么算）
 
@@ -89,6 +97,10 @@
 
 1. **常量折叠 + 死绑定删除**（pure 那一栏的第一个消费者）：
    `tests/graph` 里现有例子上报出「删了几格」，且五个后端输出一字不变。
+   **已落地**（2026-09-17，`src/core/graph/shrink.js` + `--shrink`，判据 `tests/graph/shrink.js`
+   529 格：规则六条 + 十门例子全矩阵 × 五条腿缩前缩后一字不变 + 「16 份缩得动」那一格眼睛）——
+   剩的那一步是「让它默认开」：判据已经够了，缺的是一句决定（默认开会改掉
+   `build --engine graph` 的产物文本，那是要单独记一笔的事）。
 2. **形状推断落到 C**：字段名静态可知的 `record-new` -> C `struct`；
    判据是 `ext/*/examples/record.*` 那一族出来的 C 里**出现 `struct`、`gv` 计数下降**。
 3. **数值窄化**：只与整数常量与整数变量作用的量 -> `long long`；
