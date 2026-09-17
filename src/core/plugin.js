@@ -141,6 +141,31 @@ export function lang(path) {
   return null;
 }
 
+/**
+ * 这个**名字**归哪门语言（ADR-0037 的 `#lang` 与 `--lang`）——`lang()` 是按扩展名问的，
+ * 这一格是按语言名问的。两处同一张表，只是钥匙不同。
+ *
+ * 迟装那一格照顾到：声明里的 `name` 对上就装进来（不必在声明表上另加一栏 —— 加一栏就
+ * 多一处会走散的地方，`resolvePending` 那段注释说的就是这件事）。
+ * 装完还是没有就交 null，让调用方去印"装着的是哪些"。
+ */
+export function langByName(name) {
+  for (const [, l] of LANG_PROVIDERS) {
+    if (l.name === name) return l;
+  }
+  for (const p of PENDING) {
+    if (p.done || p.claim.name !== name) continue;
+    p.done = true;
+    p.load();
+    for (const [, l] of LANG_PROVIDERS) {
+      if (l.name === name) return l;
+    }
+    throw new OmniError(`迟装那一格对不上：声明里说有 '${name}' 这门语言，`
+      + '装进来之后注册表里却没有它（lang/builtin.js 的声明与那门语言的 registerLang 走散了）');
+  }
+  return null;
+}
+
 /* ---- 跑法（runner）：有些语言的"执行"根本不产 OIR ----
  *
  * `.frag` / `.glsl` 的"跑"是**渲一帧、写一张 PNG**（ADR-0019 决策九），它没有 OIR 这一层。

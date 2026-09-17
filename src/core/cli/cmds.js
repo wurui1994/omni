@@ -79,6 +79,16 @@ const F_PROFILE = {
     + ' | stub（C + js + .c 输入，插桩）'
     + ' | sample[:hz]（C 腿 / .c 输入 / --direct，定时器采样）—— 认腿，对不上当场报',
 };
+/**
+ * **`#lang` 那一格的开关**（ADR-0037 的事情一）。默认关着 —— ADR-0009 立的规矩是
+ * "一份文件的语言由后缀决定，不猜"，`#lang` 是那条规矩的一个 opt-in 例外，不是替代。
+ * 关着的时候遇到 `#lang` **当场报**并给出开法（静默当注释是最坏的一种）。
+ * 环境那一格 `OMNI_LANG_DIRECTIVE=1` 是给子进程继承用的，与 `OMNI_PROF` 同一手法。
+ */
+const F_LANG_DIRECTIVE = {
+  name: '--lang-directive', arity: 0,
+  brief: '认第一行的 `#lang <名字>`（默认不认；等价 OMNI_LANG_DIRECTIVE=1）',
+};
 const F_PROFILE_OUT = {
   name: '--profile-out', arity: 1, value: 'FILE',
   brief: '折叠栈写到 FILE（火焰图 / gprof2dot 吃它）；`.svg` 直接出火焰图',
@@ -343,7 +353,7 @@ ${graphEngineHelp()}
         /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，
          * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格
          * （`--libc self` 那一趟的 sysroot 按本机取自带的，不用给）。 */
-        F_CC, F_LIBC, F_PROFILE, F_PROFILE_OUT, F_NO_TRIM, F_DIRECT,
+        F_CC, F_LIBC, F_PROFILE, F_PROFILE_OUT, F_NO_TRIM, F_DIRECT, F_LANG_DIRECTIVE,
         /* `--stat` 在 `run` 上只对 `--engine graph` 那一路有话说（图的形状与结构）——
          * 另一台机器的构建统计要 `build --stat`（那儿才有 cgen 的产出分布）。 */
         F_STAT, F_STAT_OUT, F_STAT_DIFF, F_SHRINK,
@@ -375,7 +385,7 @@ ${graphEngineHelp()}
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
         ...C_TARGET_FLAGS,
         F_SYSROOT, F_LIBC, F_CC, F_PROFILE, F_PROFILE_OUT, F_STAT, F_STAT_OUT, F_STAT_DIFF,
-        F_SHRINK,
+        F_SHRINK, F_LANG_DIRECTIVE,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
         { name: '--lang', arity: 1, value: 'L',
@@ -413,7 +423,7 @@ ${graphEngineHelp()}
     {
       name: 'emit', key: 'emit', usage: 'FORM FILE',
       brief: '印某个中间/目标形态：ast|oir|mir|sx|asy|js|c|llvm|spirv',
-      flags: [F_MODE, F_WORK, F_INC, F_STATS,
+      flags: [F_MODE, F_WORK, F_INC, F_STATS, F_LANG_DIRECTIVE,
         { name: '--amalgamate', arity: 0, brief: '（c）把整份运行时内联进一个文件' },
         { name: '--split', arity: 0, brief: '（c）按模块分成一个个 .c 落到 --work DIR' },
         { name: '--fat', arity: 0, brief: '把所有语言都编进核心（默认是薄核心 + plugins/）' },

@@ -61,7 +61,7 @@ import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
 import {
   target, registerTarget, registerLang, lang, registerRunner, runner, noteUnloadable,
-  registerCap, cap, langNames, declareProvider,
+  registerCap, cap, langNames, langByName, declareProvider,
 } from './plugin.js';
 /* 已经搬成独立模块的语言（ADR-0021 S4）：它们不 import 这一份，所以能独立编译。
  * 内建就是"核心自己调一次 register"，外挂是"dlopen 之后 omni_plugin_init 调同一个 register"
@@ -1265,9 +1265,109 @@ function discoverPlugins() {
 }
 
 
+/**
+ * **`#lang` 那一格**（ADR-0037 的事情一）：一份文件的第一行说自己该交给哪台读入器。
+ *
+ * 默认**关着**。为什么默认关：ADR-0009 立的规矩是"一份文件的语言由后缀决定，不猜"——
+ * `#lang` 是那条规矩的一个 opt-in 例外，不是它的替代。开法两处（不设第三处）：
+ * 命令行 `--lang-directive`、环境 `OMNI_LANG_DIRECTIVE=1`（后者给 `spawn` 出去的孩子继承用，
+ * 与 `OMNI_PROF` 同一手法）。
+ *
+ * 关着的时候遇到 `#lang` **当场报**并给出开法 —— 静默当注释是最坏的一种（同 `--profile` 认腿）。
+ */
+let LANG_DIRECTIVE = false;
+
+/**
+ * 头一行的 `#lang <名字> [参数…]`。没有就回 null。
+ *
+ * 只看**第一行**（允许前面是空行与 shebang）：位置固定才有"一眼看得出这是什么"的价值，
+ * 而且不必扫整份文件。`#` 这个字在 s-expr 的 idchar 表里（`sexpr/read.js` 的 IDCHAR），
+ * 于是这一行对读入器就是个普通 atom；而 C / js / jnc 那几门里行首 `#lang` 都不是合法代码，
+ * 所以"被误当程序"这件事在装着的语言上都不成立。
+ */
+function langDirectiveOf(text) {
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t === '') continue;
+    if (i === 0 && t.startsWith('#!')) continue;      // shebang
+    const m = /^#lang[ \t]+(\S+)[ \t]*(.*)$/.exec(t);
+    if (m === null) return null;
+    return { name: m[1], rest: m[2].trim(), line: i + 1 };
+  }
+  return null;
+}
+
+/** 装着的读入器印成一行（`langNames()` 是唯一那份名单，声明了还没装的也算） */
+function langsSay() {
+  const have = langNames();
+  return have.length === 0 ? '这份 omni 里一门语言都没装' : have.join(' / ');
+}
+
+/**
+ * 这一趟按**哪门语言**读这份文件（ADR-0037 的 D3）。三处按固定优先级：
+ *
+ *   `#lang` 行  >  命令行 `--lang`  >  后缀
+ *
+ * 三处给了**不同**答案就报，并印出每一处各说了什么 —— "最后一个赢"那种默默择一，
+ * 出错时人根本不知道自己在编哪门语言。
+ *
+ * 回 `{ l, why }`：`l` 是那门语言（`null` = 落到核心方言那一支），`why` 是它由哪一处定的。
+ */
+function pickLang(path, argv) {
+  const byExt = lang(path);
+  const li = argv.indexOf('--lang');
+  const byFlag = li >= 0 && argv[li + 1] !== undefined ? argv[li + 1] : null;
+  const dir = LANG_DIRECTIVE && exists(path) ? langDirectiveOf(readText(path)) : null;
+  /* 关着的时候也要**看一眼**：看到了就报，不是当注释混过去。 */
+  if (!LANG_DIRECTIVE && exists(path)) {
+    const peek = langDirectiveOf(readText(path));
+    if (peek !== null) {
+      throw new OmniError(`${basename(path)}:${peek.line}: #lang 这一格默认关着 —— `
+        + '一份文件的语言默认只由后缀决定（ADR-0009）。'
+        + '开法：加 `--lang-directive`，或 `OMNI_LANG_DIRECTIVE=1`。'
+        + `装着的读入器：${langsSay()}`);
+    }
+  }
+  const names = [];
+  if (dir !== null) names.push(['#lang 行', dir.name]);
+  if (byFlag !== null) names.push(['--lang', byFlag]);
+  if (byExt !== null) names.push(['后缀', byExt.name]);
+  /* 冲突：两处以上说了话而且说的不是同一门。**报**，不择一。 */
+  const distinct = [];
+  for (const [, n] of names) if (!distinct.includes(n)) distinct.push(n);
+  if (distinct.length > 1) {
+    throw new OmniError(`${basename(path)}: 这份文件该按哪门语言读，几处说的不是同一个 —— `
+      + names.map(([w, n]) => `${w} 说 ${n}`).join('、')
+      + '。按 #lang 走就删掉 --lang（或改文件名），按后缀走就删掉那一行');
+  }
+  if (dir !== null) {
+    /* `#lang omni` = 核心方言那一支。它**不在**语言注册表里（核心不是插件），所以单列一格 ——
+     * 少了它，一份写着 `#lang omni` 的 `.omni` 会被报成"没有 omni 这台读入器"，而那句话是假的。 */
+    if (dir.name === 'omni') return { l: null, why: '#lang omni' };
+    const l = langByName(dir.name);
+    if (l === null) {
+      throw new OmniError(`${basename(path)}:${dir.line}: 没有 '${dir.name}' 这台读入器`
+        + `（装着的是 ${langsSay()}）`);
+    }
+    return { l, why: `#lang ${dir.name}` };
+  }
+  if (byFlag !== null) {
+    const l = langByName(byFlag);
+    if (l === null) {
+      throw new OmniError(`--lang ${byFlag}：没有这门语言（装着的是 ${langsSay()}）`);
+    }
+    return { l, why: `--lang ${byFlag}` };
+  }
+  return { l: byExt, why: '后缀' };
+}
+
 function compileFront(path, argv) {
-  const l = lang(path);
-  if (l !== null) return l.compile(path, argv);
+  const { l, why } = pickLang(path, argv);
+  if (l !== null) {
+    if (why !== '后缀') vStep(`lang  ${basename(path)} 按 ${why} 交给 ${l.name}`);
+    return l.compile(path, argv);
+  }
   /* 不是核心方言、又没有哪门语言认它：**响着拒**，别拿核心方言去解析。
      量到过（薄核心上跑 `.asy`）：落到核心方言之后报的是 `undefined function 'write'` ——
      那句话把人往错的方向带，真相是"这份 omni 里没有 asy 这门语言"。 */
@@ -3467,6 +3567,9 @@ function main(argv) {
     CC = ci < 0 ? null : rest[ci + 1];
     /* `--no-trim`：不裁产物里的运行时那一段（逃生门，见 `NO_TRIM` 头上那段）。 */
     NO_TRIM = rest.includes('--no-trim');
+    /* `--lang-directive`：认不认第一行的 `#lang`（ADR-0037，默认不认）。
+     * 环境那一格是给 `spawn` 出去的孩子继承用的（自举链里那几趟子进程），与 `OMNI_PROF` 同一手法。 */
+    LANG_DIRECTIVE = rest.includes('--lang-directive') || env('OMNI_LANG_DIRECTIVE') === '1';
     /* `--profile MODE`（第一百四十七片）：`cc` | `sample[:hz]` | `stub`。
      *
      * 三档落在三个**不同的时刻**，所以这一格要早解析：`stub` 改的是发射期（生成的 C 里

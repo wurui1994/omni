@@ -47,6 +47,24 @@ export function lex(file, diags) {
   /** @type {Token[]} */
   const tokens = [];
   let i = 0;
+  /* `#lang <名字>`（ADR-0037）与 shebang：**只在第一行**，读到就整行跳过。
+   *
+   * 为什么词法这一层要认它：那一行是给**驱动**看的（决定这份文件交给哪台读入器，见
+   * cli.js 的 `pickLang`），到了这儿它的活已经干完了。收下开关的地方在驱动那一层
+   * （默认关着），所以这儿不判开关 —— 走到这里说明驱动已经放行了。
+   * 只跳第一行：位置固定才有"一眼看得出这是什么"的价值，也不必扫整份文件。 */
+  if (src.startsWith('#!')) {
+    while (i < n && src[i] !== '\n') i++;
+    if (i < n) i++;
+  }
+  {
+    let j = i;
+    while (j < n && (src[j] === ' ' || src[j] === '\t' || src[j] === '\r' || src[j] === '\n')) j++;
+    if (src.startsWith('#lang', j)) {
+      i = j;
+      while (i < n && src[i] !== '\n') i++;
+    }
+  }
 
   const push = (kind, start, value, trivia) => {
     tokens.push({ kind, text: src.slice(start, i), value, span: span(file, start, i), trivia });

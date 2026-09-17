@@ -40,6 +40,22 @@ const isSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r';
 export function readSexpr(file, diags) {
   const src = file.text;
   let i = 0;
+  /* `#lang <名字>` 与 shebang：**只在第一行**，整行跳过（ADR-0037）。
+   * `#` 在上面那张 idchar 表里，所以不跳的话 `#lang` 与它后面那个名字会读成两个顶层 atom，
+   * 而上层等的是 `(module …)` 那种表。这一行是给**驱动**看的（`cli.js` 的 `pickLang` 拿它
+   * 决定这份文件交给谁读），到这儿它的活已经干完了；开关也在那一层，所以这儿不判开关。 */
+  if (src.startsWith('#!')) {
+    while (i < src.length && src[i] !== '\n') i++;
+    if (i < src.length) i++;
+  }
+  {
+    let j = i;
+    while (j < src.length && isSpace(src[j])) j++;
+    if (src.startsWith('#lang', j)) {
+      i = j;
+      while (i < src.length && src[i] !== '\n') i++;
+    }
+  }
 
   const err = (start, end, msg) => diags.error(mkSpan(file, start, end), msg);
 
