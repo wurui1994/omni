@@ -920,6 +920,111 @@ function getErrno() {
   return Number(BigInt.asIntN(32, memLoad('i32s', errnoAddr, 0)));
 }
 
+/* ---------------------------------------------------------------- glibc 的 ctype 是**查表**
+ *
+ * macOS 的 `<ctype.h>` 在 `_DONT_USE_CTYPE_INLINE_` 下把 `isalpha` 一族留成**函数**
+ * （我们那一组 `ctypeFn` 就是给它的）。glibc 不是：
+ *
+ *   #define __isctype(c, type) ((*__ctype_b_loc ())[(int) (c)] & (unsigned short) type)
+ *   extern const unsigned short int **__ctype_b_loc (void);
+ *
+ * 也就是说它要的是**三张表加三个取表的函数**。少这一格的指纹（x86_64 容器里量到的）：
+ *
+ *   omni: runtime error: interp: C ABI call '__ctype_b_loc' is not supported
+ *
+ * 表在**堆上**造（第一次问的时候）：这一层已经有 `heapAlloc`，而版图是前端定的 ——
+ * 宿主不该自己在线性内存里挑地方。三张表都按 `[-128, 256)` 摆（`ctype.h:209` 的
+ * `__c >= -128 && __c < 256` 就是这个区间），回的指针指着**下标 0** 那一格，
+ * 负下标读的是它前面那 128 格。
+ *
+ * 位的值不是我们挑的（`ctype.h:30-43` 的 `_ISbit`）：小端目标上
+ * `_ISbit(bit) = bit < 8 ? (1 << bit) << 8 : (1 << bit) >> 8` —— 于是 upper 是 0x0100、
+ * blank 是 0x0001。**大端目标上这张表不一样**（那儿 `_ISbit(bit)` 就是 `1 << bit`）；
+ * 我们的线性内存是小端，量的也是小端的机器，所以只摆这一份。
+ *
+ * 只做 "C" locale —— 与 `ctypeFn` 那一组同一条规矩（见那儿的第 3 条）。
+ */
+const CT_UPPER = 0x0100;
+const CT_LOWER = 0x0200;
+const CT_ALPHA = 0x0400;
+const CT_DIGIT = 0x0800;
+const CT_XDIGIT = 0x1000;
+const CT_SPACE = 0x2000;
+const CT_PRINT = 0x4000;
+const CT_GRAPH = 0x8000;
+const CT_BLANK = 0x0001;
+const CT_CNTRL = 0x0002;
+const CT_PUNCT = 0x0004;
+const CT_ALNUM = 0x0008;
+
+/** 三个「取表」函数各自那一格（`const T **` 指着的那个 cell）。0 = 还没造。 */
+let ctypeCells = [0n, 0n, 0n];
+
+/** 宿主自己要过的线性内存到哪儿了（见 `hostBytes`）。0 = 还没要过。 */
+let hostEnd = 0n;
+
+/**
+ * **宿主自己**要一块线性内存（查表那三张表要）。
+ *
+ * 有堆就走堆（`malloc` 那条路，free 得掉）。没堆的情形是真的：前端只在模块**用到堆**时
+ * 才发 `__omni_heap_init`，而 `isalpha` 一族并不需要 malloc —— 量到的原话是
+ * `__ctype_b_loc: libc: malloc 之前堆没有初始化`。那就从**线性内存的末尾**要：
+ * 那一段的上面没有别人（版图里的数据段与影子栈都在 `memSize()` 以下），
+ * 而 `memGrow` 与 brk 推上限走的是同一条路。
+ */
+function hostBytes(n) {
+  if (heapBase !== 0n) return heapAlloc(n);
+  if (hostEnd === 0n) hostEnd = memSize() * 65536n;
+  const at = hostEnd;
+  const want = at + (n + 15n) / 16n * 16n;
+  const have = memSize() * 65536n;
+  if (want > have) {
+    const pages = (want - have + 65535n) / 65536n;
+    if (memGrow(pages) === -1n) throw new Error('libc: 线性内存要不到了（ctype 的那几张表）');
+  }
+  hostEnd = want;
+  return at;
+}
+
+/** `c` 在 "C" locale 下的那一组位。128 起与负数一律 0（都不是可打印字符）。 */
+function ctypeBits(c) {
+  if (c < 0 || c > 127) return 0;
+  let b = 0;
+  if (isUpper(c)) b += CT_UPPER + CT_ALPHA + CT_ALNUM;
+  if (isLower(c)) b += CT_LOWER + CT_ALPHA + CT_ALNUM;
+  if (isDigit(c)) b += CT_DIGIT + CT_ALNUM;
+  if (isXdigit(c)) b += CT_XDIGIT;
+  if (lcIsSpace(c)) b += CT_SPACE;
+  if (c === 32 || c === 9) b += CT_BLANK;
+  if (c < 32 || c === 127) b += CT_CNTRL;
+  if (isPunct(c)) b += CT_PUNCT;
+  if (c >= 32 && c <= 126) b += CT_PRINT;
+  if (c >= 33 && c <= 126) b += CT_GRAPH;
+  return b;
+}
+
+/**
+ * 第 `which` 张表（0 = `__ctype_b`、1 = tolower、2 = toupper）那个 cell 的地址。
+ *
+ * 造一次就记住。堆没初始化过（这个程序压根没用堆）也得能造 —— 那种情形下
+ * `heapAlloc` 会喊，而喊得对：查表要内存，而内存的版图是前端交过来的。
+ */
+function ctypeLoc(which) {
+  if (ctypeCells[which] !== 0n) return ctypeCells[which];
+  const wide = which === 0 ? 2 : 4;             // b 是 unsigned short，另两张是 int32
+  const table = hostBytes(BigInt(384 * wide));
+  for (let i = -128; i < 256; i++) {
+    const at = table + BigInt((i + 128) * wide);
+    if (which === 0) memStore('i16', at, 0, BigInt(ctypeBits(i)));
+    else if (which === 1) memStore('i32', at, 0, BigInt(isUpper(i) ? i + 32 : i));
+    else memStore('i32', at, 0, BigInt(isLower(i) ? i - 32 : i));
+  }
+  const cell = hostBytes(8n);
+  memStore('i64', cell, 0, table + BigInt(128 * wide));
+  ctypeCells[which] = cell;
+  return cell;
+}
+
 /* `strerror` 回一个 `char *`，所以那些串必须**落在线性内存里**。macOS 上它是一张
  * 常量表（同一个号两次回同一个地址，不同的号互不干扰），只有表外的号共用一块 ——
  * 都量过，见下面那条。这块地方同样由**前端**在 data 段里留、开跑前用
@@ -1227,6 +1332,9 @@ const LIBC = {
   __omni_heap_init: (a) => {
     heapBase = BigInt(a[0]);
     brkSet(heapBase + HEAP_HDR);
+    /* 同一个进程里跑第二个程序时堆是新的 —— 那三张 ctype 表的地址跟着作废。 */
+    ctypeCells = [0n, 0n, 0n];
+    hostEnd = 0n;
     return undefined;
   },
   /* `errno` 那一格的地址（第八刀第八片）。与上面那条同一个形状。 */
@@ -1961,8 +2069,13 @@ const LIBC = {
   exit: (a) => { throw new ExitCall(Number(BigInt.asIntN(32, BigInt(a[0])))); },
   abort: () => { throw new ExitCall(134); },
 
-  isalpha: ctypeFn(isAlpha),
-  isdigit: ctypeFn(isDigit),
+  /* glibc 的 ctype 三张表（见上面 `ctypeLoc` 那段）：`isalpha` 一族在那儿是宏，
+   * 展开成 `(*__ctype_b_loc ())[c] & _ISalpha`。回的是那个 `cell` 的地址。 */
+  __ctype_b_loc: () => ctypeLoc(0),
+  __ctype_tolower_loc: () => ctypeLoc(1),
+  __ctype_toupper_loc: () => ctypeLoc(2),
+
+  isalpha: ctypeFn(isAlpha),  isdigit: ctypeFn(isDigit),
   isalnum: ctypeFn((c) => isAlpha(c) || isDigit(c)),
   isspace: ctypeFn(lcIsSpace),
   isupper: ctypeFn(isUpper),

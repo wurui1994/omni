@@ -313,8 +313,17 @@ const STRERROR_BYTES = 109 * 48;
  *
  * 值是几由**宿主**说（`interp/libc.js` 的 `F_STDIN`/`F_STDOUT`/`F_STDERR`），
  * 前端只交地址与序号 —— 前端不该知道句柄长什么样。
+ *
+ * **glibc 那三个名字不一样**：它的 `<stdio.h>` 写的是 `extern FILE *stdin, *stdout,
+ * *stderr;`（没有那层 `__…p` 的宏），所以同一格能力在 Linux 上要按 `stdout` 这个名字
+ * 认。少这三条的代价在 x86_64 容器里量到了：`c run tests/c/gen/35-streams.c` 报
+ * `undefined symbol 'stdout'`、`38-bytes.c` 报 `'stderr'`。两套名字都收着 ——
+ * 名字是**头文件的事实**，不是我们的选择。
  */
-const STREAM_GVARS = new Map([['__stdinp', 0], ['__stdoutp', 1], ['__stderrp', 2]]);
+const STREAM_GVARS = new Map([
+  ['__stdinp', 0], ['__stdoutp', 1], ['__stderrp', 2],
+  ['stdin', 0], ['stdout', 1], ['stderr', 2],
+]);
 
 /**
  * 影子栈的大小。1 MiB —— 与 tcc 在本机上的默认线程栈同一个量级，而递归深度超出它时
