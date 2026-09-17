@@ -205,6 +205,55 @@ function fieldType(x, env, ctx) {
   return ft;
 }
 
+/**
+ * 一格绑定落成什么。
+ *
+ * **函数体也看得见的那几格落成模块级变量**：方言里那是 `(global 名 类型)` + 一句 `(set …)`
+ * （`tests/sexpr/cases/12-globals.sx` 钉着这一格）。为什么要有这一档：chez 的
+ * `(define xs (vector 10 20 30))` 是**模块级**的，而它下面那个 `sum` 函数要用它 ——
+ * 方言的函数看不见 main 的局部，看得见 global。哪几格要落成 global 由 `freeInFns` 算
+ * （函数体里的自由名字），别的照旧是 `(let …)`。
+ */
+function bindLine(nm, t, initText, env, ctx) {
+  env.set(nm, t);
+  if (!ctx.globals.has(nm)) return `(let ${nm} ${t} ${initText})`;
+  ctx.decls.push(`  (global ${nm} ${t})`);
+  ctx.fnEnv.set(nm, t);
+  return `(set ${nm} ${initText})`;
+}
+
+/**
+ * 函数体里的**自由名字**：既不是形参、也不是体里绑出来的、也不是一格函数名。
+ * 那几格只可能是模块级变量（chez 的 `xs`）—— 或者是真闭包（那一格另有账）。
+ */
+function freeInFns(fns, env) {
+  const out = new Set();
+  for (const f of fns) {
+    const bound = new Set(f.params);
+    walkCore(f.body, (n) => {
+      if (n.op === 'bind') bound.add(n.attrs.name);
+      if (n.op === 'func') for (const p of n.attrs.params ?? []) bound.add(String(p));
+    });
+    walkCore(f.body, (n) => {
+      if (n.op !== 'ref') return;
+      const nm = n.attrs.name;
+      if (!bound.has(nm) && !env.has(`fn:${nm}`)) out.add(nm);
+    });
+  }
+  return out;
+}
+
+/** 一棵子图上每一格节点走一遍（只读）。 */
+function walkCore(x, f) {
+  if (Array.isArray(x)) {
+    for (const y of x) walkCore(y, f);
+    return;
+  }
+  if (!isNode(x) || x.op === undefined) return;
+  f(x);
+  for (const k of Object.values(x.ins ?? {})) walkCore(k, f);
+}
+
 /** 一格 `rest` 端口收成数组（图上一格与一串两种写法都有）。 */
 function argList(n, port) {
   const x = n.ins[port];
@@ -603,13 +652,12 @@ function stmtIn(x, env, ctx) {
        * 的 bodyOf）。方言是有类型的，所以这一格照**第一次赋值**定型，值给那个类型的零值 ——
        * 与 awk 的语义对得上（那门语言里没赋过值的变量当数是 0、当串是 ""，正好都是零值）。 */
       if (isLitNull(init)) {
-        const t = nullHint(nm, ctx, env);
-        env.set(nm, t);
-        return [`(let ${nm} ${t} ${zeroText(t)})`];
+        const t0 = nullHint(nm, ctx, env);
+        return [bindLine(nm, t0, zeroText(t0), env, ctx)];
       }
       const t = typeOf(init, env, ctx);
-      env.set(nm, t);
-      return [`(let ${nm} ${t} ${expr(init, env, ctx)})`];
+      const initText = expr(init, env, ctx);
+      return [bindLine(nm, t, initText, env, ctx)];
     }
     case 'set': return [`(set ${x.attrs.name} ${expr(x.ins.value, env, ctx)})`];
     case 'field-set':
@@ -732,11 +780,10 @@ function bindRecord(nm, rec, env, ctx) {
     return t;
   });
   const shape = shapeOf(names, types, false, ctx);
-  const out = [`(let ${nm} ${shape.tag} (new ${shape.tag}))`];
+  const out = [bindLine(nm, shape.tag, `(new ${shape.tag})`, env, ctx)];
   for (let i = 0; i < names.length; i++) {
     out.push(`(fldset (var ${nm}) ${names[i]} ${expr(vals[i], env, ctx)})`);
   }
-  env.set(nm, shape.tag);
   return out;
 }
 
@@ -768,11 +815,10 @@ function bindMap(nm, mp, env, ctx) {
     if (typeOf(vals[i], env, ctx) !== vt) gap('字典字面量里的值类型不一样 —— 方言的字典是单态的');
   }
   const dt = `(dict ${kt} ${vt})`;
-  const out = [`(let ${nm} ${dt} (dnew ${dt}))`];
+  const out = [bindLine(nm, dt, `(dnew ${dt})`, env, ctx)];
   for (let i = 0; i < keys.length; i++) {
     out.push(`(dset (var ${nm}) ${expr(keys[i], env, ctx)} ${expr(vals[i], env, ctx)})`);
   }
-  env.set(nm, dt);
   return out;
 }
 
@@ -844,9 +890,8 @@ function bindSlice(nm, sl, env, ctx) {
   const to = sl.ins.to === undefined || sl.ins.to === null ? `(alen ${src})` : expr(sl.ins.to, env, ctx);
   ctx.tmp = ctx.tmp + 1;
   const i = `slice_i${ctx.tmp}`;
-  env.set(nm, at);
   return [
-    `(let ${nm} ${at} (anew ${at} (int 0)))`,
+    bindLine(nm, at, `(anew ${at} (int 0))`, env, ctx),
     `(do (let ${i} int ${from})`
       + ` (while (bin "<" (var ${i}) ${to})`
       + ` (do (apush (var ${nm}) (aget ${src} (var ${i}))) (set ${i} (bin "+" (var ${i}) (int 1))))))`,
@@ -867,11 +912,10 @@ function bindList(nm, lst, env, ctx) {
   }
   if (ts.some((t) => t !== et)) gap(`列表里的元素类型不一样（${ts.join(' / ')}）—— 方言的数组是单态的`);
   const at = `(arr ${et})`;
-  const out = [`(let ${nm} ${at} (anew ${at} (int ${items.length})))`];
+  const out = [bindLine(nm, at, `(anew ${at} (int ${items.length}))`, env, ctx)];
   for (let i = 0; i < items.length; i++) {
     out.push(`(aset (var ${nm}) (int ${i}) ${expr(items[i], env, ctx)})`);
   }
-  env.set(nm, at);
   return out;
 }
 
@@ -946,6 +990,7 @@ export function emitCore(g) {
   const ctx = {
     byKey: new Map(), shapes: new Map(), decls: [], tmp: 0,
     defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [], collect: false,
+    globals: new Set(), fnEnv: null,
   };
   /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
   const fns = [];
@@ -993,6 +1038,9 @@ export function emitCore(g) {
    * 留一份只有 `fn:` 那几格的干净底子。少了这一格，闭那种借外面名字的函数就会一路落到
    * 方言那儿才报"未声明的变量"（硬错，不是有名有姓的缺口）—— `chez+index` 当场量到过。 */
   const fnEnv = new Map(env);
+  ctx.fnEnv = fnEnv;
+  /* 哪几格顶层绑定要落成**模块级变量**：函数体里的自由名字（见 `freeInFns` / `bindLine`）。 */
+  ctx.globals = freeInFns(fns, env);
   const mainStmts = stmtList(rest, env, ctx);
   /* **函数体走两趟**。第一趟只为收实参类型：一个函数体里的调用点也会给别的函数的形参定型
    * （cpp 的析构器 `__destruct_Say(this)` 就是从另一个函数体里调的，而它在图上排在前面），
