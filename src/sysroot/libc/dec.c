@@ -81,6 +81,21 @@ void __libc_dec_copy(__libc_dec *dst, const __libc_dec *src) {
   for (int i = 0; i < src->n; i++) dst->w[i] = src->w[i];
 }
 
+/* a += b。 */
+void __libc_dec_addbig(__libc_dec *a, const __libc_dec *b) {
+  int n = a->n > b->n ? a->n : b->n;
+  unsigned long long carry = 0;
+  for (int i = 0; i < n || carry > 0; i++) {
+    if (i >= LIBC_DEC_LIMBS) break;
+    unsigned long long t = carry
+      + (i < a->n ? (unsigned long long)a->w[i] : 0ULL)
+      + (i < b->n ? (unsigned long long)b->w[i] : 0ULL);
+    a->w[i] = (unsigned int)(t % DEC_BASE);
+    carry = t / DEC_BASE;
+    if (i >= a->n) a->n = i + 1;
+  }
+}
+
 /* a 与 b 比大小：-1 / 0 / 1。 */int __libc_dec_cmp(const __libc_dec *a, const __libc_dec *b) {
   int an = a->n;
   int bn = b->n;

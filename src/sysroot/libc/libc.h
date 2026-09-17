@@ -51,6 +51,7 @@ typedef struct { unsigned int w[LIBC_DEC_LIMBS]; int n; } __libc_dec;
 void __libc_dec_set(__libc_dec *d, unsigned long long v);
 void __libc_dec_add(__libc_dec *d, unsigned int v);
 void __libc_dec_copy(__libc_dec *dst, const __libc_dec *src);
+void __libc_dec_addbig(__libc_dec *a, const __libc_dec *b);
 int __libc_dec_zero(const __libc_dec *d);
 void __libc_dec_mul(__libc_dec *d, unsigned int m);
 unsigned int __libc_dec_div(__libc_dec *d, unsigned int m);

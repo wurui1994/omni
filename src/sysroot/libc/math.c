@@ -274,12 +274,9 @@ double pow(double x, double y) {
 #define PIO2_HI 1.57079632673412561417
 #define PIO2_LO 6.07710050630396597660e-11
 #define PIO2_LO2 2.02226624879595063154e-21
-/* 2π 的 double：**大参数**先按它折一次。`fmod` 是精确运算，所以这一步不引入任何误差 ——
- * 但 2π 自己与真值差 2.4e-17，于是 |x| 很大时折出来的相对位置**不是**真的那一个。
- * 这一格明说：我们没有 Payne-Hanek（那要几百位的 2/π），所以 |x| > 2^45 时回的是
- * 「把 2π 当成它的 double 值」那个世界里的答案 —— 有限、在值域里、可重复，但与
- * glibc/Apple 不同（它们真做了）。判据 `tests/c/libc-libm.js` 把这一档单列。 */
-#define TWO_PI 6.283185307179586477
+/* 大参数（|x| > 2^45）走 Payne-Hanek —— 见下面 `foldBig` 那一段。曾经在这儿摆过一个
+ * 「2π 的 double」先折一次的版本：有限、在值域里，可那是把 2π 当成它的 double 值
+ * （与真值差 2.4e-17）算出来的答案，`sin(1e300)` 与 glibc/Apple 完全不同。现在不用它了。 */
 
 static double sinCore(double x) {          /* |x| ≤ π/4 */
   /* 泰勒到 x^17。**13! 与 15! 那两项不能跳**：上一版这儿写的是 1/17! 与 1/18!
@@ -310,12 +307,109 @@ static double cosCore(double x) {          /* |x| ≤ π/4 */
   return 1.0 + x2 * s;
 }
 
-/* 折叠：回象限号 q（mod 4），把折完的 r 写回 `*rp`。 */
+/* ---- 大参数：Payne-Hanek，拿**几百位的 π**去除（第一百四十片第十一格）。
+ *
+ * 上一版这一档按 2π 的 double 折一次 —— 有限、在值域里，但那是「把 2π 当成它的 double
+ * 值」那个世界里的答案，与 glibc/Apple 差一大截（`sin(1e300)` 完全不同）。
+ *
+ * 真办法：x 本来就是精确的（`m·2^e`），π 也**自己算得出来** ——
+ *   π = 16·atan(1/5) − 4·atan(1/239)（Machin），每一项都只要「大整数除小数」，
+ * 所以这儿一个常数表都不抄：400 位的 π 是算出来的，算一次存着。
+ * 然后 `x·2/π = 2·Dx·10^(N-1) / (π_scaled·10^fx)` —— 一次二进制长除法，
+ * 商的低两位就是象限、余数就是小数部分（再取 60 位）。
+ *
+ * 400 位是量出来的下限：|x| < 1.8e308 要 309 位整数 + 53 位尾数（17 位十进制）的余量。 */
+#define PI_DIGITS 400
+
+static __libc_dec PiScaled;                /* π · 10^(PI_DIGITS-1) */
+static int piReady = 0;
+
+/* atan(1/x) · 10^(PI_DIGITS-1)。莱布尼茨那条级数：1/x − 1/(3x³) + 1/(5x⁵) − …
+ * 每一项都是上一项除以 x²（再除 2k+1），所以只要 `div`（除小数）这一条。
+ * x = 5 时每项掉 1.4 个十进制位，400 位要 ~290 项；x = 239 时 ~84 项。 */
+static void atanInvScaled(unsigned int x, __libc_dec *res) {
+  __libc_dec t;
+  __libc_dec term;
+  __libc_dec_set(&t, 1);
+  __libc_dec_pow10(&t, PI_DIGITS - 1);
+  __libc_dec_div(&t, x);
+  __libc_dec_copy(res, &t);
+  unsigned int x2 = x * x;
+  unsigned int k = 1;
+  while (!__libc_dec_zero(&t) && k < 4000) {
+    __libc_dec_div(&t, x2);
+    if (__libc_dec_zero(&t)) break;
+    __libc_dec_copy(&term, &t);
+    __libc_dec_div(&term, 2 * k + 1);
+    if ((k & 1) != 0) __libc_dec_sub(res, &term);
+    else __libc_dec_addbig(res, &term);
+    k++;
+  }
+}
+
+static void piInit(void) {
+  __libc_dec a;
+  __libc_dec b;
+  atanInvScaled(5, &a);
+  atanInvScaled(239, &b);
+  __libc_dec_mul(&a, 16);
+  __libc_dec_mul(&b, 4);
+  __libc_dec_sub(&a, &b);
+  __libc_dec_copy(&PiScaled, &a);
+  piReady = 1;
+}
+
+/* |x| 很大时的折叠（x > 0）。回象限号，把 |r| ≤ π/4 的 r 写回 `*rp`。 */
+static int foldBig(double x, double *rp) {
+  if (!piReady) piInit();
+  DBits b;
+  b.d = x;
+  int E = (int)((b.u >> 52) & 0x7ff);
+  unsigned long long m = (b.u & 0xfffffffffffffULL) | (1ULL << 52);
+  int e = E - 1075;
+  /* x = Dx · 10^-fx（精确）：e ≥ 0 走 2^e、e < 0 走 5^k 再退小数点。 */
+  __libc_dec num;
+  __libc_dec den;
+  __libc_dec_set(&num, m);
+  int fx = 0;
+  if (e >= 0) __libc_dec_pow2(&num, e);
+  else { fx = -e; __libc_dec_pow5(&num, fx); }
+  __libc_dec_mul(&num, 2);
+  __libc_dec_pow10(&num, PI_DIGITS - 1);
+  __libc_dec_copy(&den, &PiScaled);
+  __libc_dec_pow10(&den, fx);
+  /* 二进制长除法：先把 den 抬到刚过 num，再一位一位落下来。只留商的低两位。 */
+  int sh = 0;
+  while (__libc_dec_cmp(&num, &den) >= 0 && sh < 4200) { __libc_dec_mul(&den, 2); sh++; }
+  unsigned long long qlow = 0;
+  for (int i = 0; i < sh; i++) {
+    __libc_dec_div(&den, 2);
+    qlow <<= 1;
+    if (__libc_dec_cmp(&num, &den) >= 0) { __libc_dec_sub(&num, &den); qlow |= 1; }
+  }
+  /* 小数部分：余数 / den，再取 60 位（2^-60 ≈ 8.7e-19，比 double 的分辨率还细）。 */
+  unsigned long long fbits = 0;
+  for (int i = 0; i < 60; i++) {
+    __libc_dec_mul(&num, 2);
+    fbits <<= 1;
+    if (__libc_dec_cmp(&num, &den) >= 0) { __libc_dec_sub(&num, &den); fbits |= 1; }
+  }
+  double frac = (double)fbits / 1152921504606846976.0;   /* 2^60 */
+  int qi = (int)(qlow & 3);
+  if (frac > 0.5) { frac -= 1.0; qi = (qi + 1) & 3; }
+  *rp = frac * PIO2_HI + frac * PIO2_LO + frac * PIO2_LO2;
+  return qi;
+}
+
 static int foldPi2(double x, double *rp) {
-  /* 大参数：先按 2π 的 double 折一次（`fmod` 精确，不引入误差；理由见上面那一段）。
-   * 少了这一步 `nd * PIO2_HI` 那个乘积会大到 1e300，减完剩下的 r 也是 1e300 ——
-   * 量到过 `sin(1e300)` 回 **inf**（`sinCore` 里 x² 溢出）。 */
-  if (x > 3.5e13 || x < -3.5e13) x = fmod(x, TWO_PI);
+  /* 大参数走 Payne-Hanek（上面那一段）。负的先取绝对值再翻过来：
+   * x = q·π/2 + r 反号就是 -q·π/2 - r，于是象限是 (4 - q) & 3、r 取负。 */
+  if (x > 3.5e13) return foldBig(x, rp);
+  if (x < -3.5e13) {
+    int q = foldBig(-x, rp);
+    *rp = -*rp;
+    return (4 - q) & 3;
+  }
   double nd = rint(x * (2.0 / PI));
   double r = ((x - nd * PIO2_HI) - nd * PIO2_LO) - nd * PIO2_LO2;
   *rp = r;

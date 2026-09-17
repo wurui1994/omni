@@ -31,15 +31,14 @@ double fabs(double);
 static const double xs[] = {
   0.0, 1e-8, 0.1, 0.25, 0.5, 0.7071067811865476, 1.0, 1.5707963267948966,
   2.0, 3.141592653589793, 10.0, 100.0, 1e6, 1e-300, 1e300, 700.0, 0.9999999999,
+  /* 大参数：折叠靠 Payne-Hanek（几百位的 π）。1e18 与 1e40 都在 2^45 之上。 */
+  1e18, 1e40, 123456789012345678.0,
 };
 
 int main(void) {
   int n = (int)(sizeof(xs) / sizeof(xs[0]));
   for (int i = 0; i < n; i++) {
     double x = xs[i];
-    /* `~` 打头的行是「大参数的三角函数」：那一档我们**明说不比值**（没有
-     * Payne-Hanek，见 math.c 里 `TWO_PI` 那一段），判据只要求有限、在值域里。 */
-    const char *tg = (x > 3.5e13 || x < -3.5e13) ? "~" : "";
     printf("sqrt %d %.17g\n", i, sqrt(x));
     printf("exp %d %.17g\n", i, x > 710.0 ? 0.0 : exp(x));
     if (x > 0.0) {
@@ -47,9 +46,9 @@ int main(void) {
       printf("log2 %d %.17g\n", i, log2(x));
       printf("log10 %d %.17g\n", i, log10(x));
     }
-    printf("%ssin %d %.17g\n", tg, i, sin(x));
-    printf("%scos %d %.17g\n", tg, i, cos(x));
-    printf("%stan %d %.17g\n", tg, i, tan(x));
+    printf("sin %d %.17g\n", i, sin(x));
+    printf("cos %d %.17g\n", i, cos(x));
+    printf("tan %d %.17g\n", i, tan(x));
     if (x <= 1.0) {
       printf("asin %d %.17g\n", i, asin(x));
       printf("acos %d %.17g\n", i, acos(x));

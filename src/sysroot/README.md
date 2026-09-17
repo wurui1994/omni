@@ -73,20 +73,15 @@ MIR 说「要什么」，摆法归后端。
 - `dec.c`     基 10^9 的大整数 —— 浮点的两头（打印与解析）共用这一份
 - `file.c`    `FILE *` 那一层：无缓冲，`FILE` 就是一个 fd 加两位状态
 - `math.c`    自己那份 libm：exp/log 用 Cody-Waite 归约 + 泰勒，sqrt 牛顿六次，
-              sin/cos 折进 π/4（π/2 拆**三段**），atan 半角三次压到 0.1 以下。
-              与平台 libm 逐点对账（338 个采样，判据 `tests/c/libc-libm.js`）：
-              **最大误差 5.4e-15**，252 个点逐字节相同
+              sin/cos 折进 π/4（π/2 拆**三段**；|x| > 2^45 走 **Payne-Hanek** ——
+              拿 400 位的 π 去除，而那 400 位是用 Machin 级数**自己算**的，
+              不抄常数表），atan 半角三次压到 0.1 以下。
+              与平台 libm 逐点对账（395 个采样，判据 `tests/c/libc-libm.js`）：
+              **最大误差 5.4e-15**，302 个点逐字节相同
 - `misc.c`    时间（UTC，没有时区库）、`getenv`/`setenv`、进程（`fork`/`execvp`/
               `system`）、目录（`getdents64`）、`atexit`、`strerror`、`sscanf`
 
 **还没有的**（明说）：
-- **大参数的三角函数没有 Payne-Hanek**：`sin`/`cos`/`tan` 在 |x| > 2^45 时先按 **2π 的
-  double** 折一次（`fmod` 是精确运算，所以这一步本身不引入误差），但 2π 自己与真值差
-  2.4e-17 —— 于是 `sin(1e300)` 回的是「把 2π 当成它的 double 值」那个世界里的答案：
-  有限、在值域里、可重复，但**与 glibc/Apple 不同**（它们拿几百位的 2/π 真折了）。
-  判据里这一档单列（探子里 `~` 打头的那些行只判「有限且在值域里」）。
-  要还它得几百位的 2/π —— `dec.c` 那个大整数已经够用，是一件独立的事。
-  上一版这儿更糟：`nd * PIO2_HI` 那个乘积到 1e300，`sin(1e300)` 直接回 **inf**。
 - 线程：`pthread_create` 照 POSIX 回 `EAGAIN` —— 我们的运行时**本来就有退路**
   （`omni_js_host.c:88`：开不出线程就直接调 `entry()`）。
 - `sigaction` 回 `ENOSYS`（要 `SA_RESTORER` 那个跳板，得等汇编器）；

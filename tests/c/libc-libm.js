@@ -87,21 +87,10 @@ if (existsSync(REF) && existsSync(BIN)) {
   let worst = 0;
   let worstAt = '';
   let same = 0;
-  let loose = 0;
   for (let i = 0; i < Math.min(la.length, lb.length); i++) {
     const [fn, ix, sa] = la[i].split(' ');
     const [fn2, ix2, sb] = lb[i].split(' ');
     if (fn !== fn2 || ix !== ix2) { bad('两边的行对得上', `${la[i]} / ${lb[i]}`); break; }
-    /* `~` 打头的是「大参数的三角函数」：不比值，只要求有限、在值域里
-     * （我们没有 Payne-Hanek，明记在 math.c 与 README 上）。 */
-    if (fn.startsWith('~')) {
-      loose++;
-      const v = Number(sb);
-      const inRange = Number.isFinite(v)
-        && (fn === '~tan' || (v >= -1.0000000001 && v <= 1.0000000001));
-      if (!inRange) bad(`${fn}[${ix}] 有限且在值域里`, `我们回的是 ${sb}`);
-      continue;
-    }
     if (sa === sb) { same++; continue; }
     const va = Number(sa);
     const vb = Number(sb);
