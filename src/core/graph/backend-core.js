@@ -7,26 +7,28 @@
 // llvm 四条腿、摇树、profile、REPL、错误模型。ADR-0037 §5.1 那两条路里的 **B 路**就是它 ——
 // 「不新开一条路，就不会有两条路走散」（ADR-0034 那句话的同一条理由）。
 //
-// ## 这一刀接哪几档：**标量 + 记录 + 列表**
+// ## 这一刀接哪几档：**27 格全接**（节点级缺口 0）
 //
 // 图上**没有类型**（`nodes.js` 文件头第一条：type 不是节点），而核心方言是**有类型的**。
-// 这中间那一格差是这条腿的全部难处，所以边界画得很清：
+// 这中间那一格差是这条腿的全部难处 —— 所以这一份里最多的代码是**把类型算出来**：
 //
-//   接：`const`（整/实/串/真假）· `ref` · `bind` · `set` · `prim`（算术 / 比较 / not /
-//       len / concat / print 单实参）· `branch` · `loop` · `loop-exit` · `region` · `ret` ·
-//       `func`（顶层的）· `call` · **记录三格**（`record-new` / `field-get` / `field-set`）·
-//       **列表三格**（`list-new` / `index-get` / `index-set`）
-//   不接（**有名有姓**，`can()` 逐格答带上"欠在方言里还是欠在这份翻译上"，`Gap` 当场报）：
-//       映射四格（**方言里没有字典**）· 多值 · 表示转换 · 切片 · scope-exit ·
-//       闭包（非顶层的 `func`）· 多实参 print
+//   标量    字面量按值推（整 `int`、带小数点 `real`、串 `string`、真假 `bool`）
+//   记录    按"字段名单 + 字段类型"登记成一格 `(struct rN …)`，同形的共用一格
+//   列表    按第一格元素推成 `(arr T)`；切片走消去规则（新建 + 一圈 apush）
+//   字典    按键值推成 `(dict K V)`；空字典从**同层第一处 map-set** 上取（lua / awk 那一档）
+//   多值    落成一格合成结构体 `(struct mN (v0 …) (v1 …))` —— 方言的函数只交一格回来，
+//           而结构体是值语义的，那正好就是 `return a, b` 的语义
+//   defer   方言里没有出口钩子，所以走一趟变换：注册处落动作、末尾逆序放一份、每条 ret 前
+//           也放一份（带值的 ret 先把值算进临时量 —— go 的次序）
+//   转换    `conv` 落 `toreal`/`toint`/`tostr`；两元运算自己**把矮的那边抬上去**
+//           （方言里 int 与 real 不隐式混算）
 //
-// 类型是**推**出来的：字面量按值推（整数 `int`、带小数点 `real`、串 `string`、真假 `bool`）、
-// 记录按"字段名单 + 字段类型"登记成一格 `(struct rN …)`、列表按第一格元素推成 `(arr T)`；
 // 形参与返回**默认 int**，推不出来就当场报（不猜）。
 //
-// **聚合只能从字段与下标那两条路走**：一格记录 / 列表整格当值用（当实参、被 print、被 return）
-// 一律报缺口 —— 这一刀的函数形参与返回都是 int，跑出去就说不清类型了。同一条纪律在
-// `backend-c` 那边是 `recPlan` 的三个条件，这儿靠"谁来拼文本"落实（`objText` 一处）。
+// **聚合只能从字段 / 下标 / 键那三条路走**：一格记录 / 列表 / 字典整格当值用（当实参、被
+// print、被 return）一律报缺口 —— 这一刀的函数形参与返回都是 int，跑出去就说不清类型了。
+// 同一条纪律在 `backend-c` 那边是 `recPlan` 的三个条件，这儿靠"谁来拼文本"落实
+// （`objText` 一处把门）。剩下的账全是**形状上的**（见 `CORE_SHAPES`，各带一份证物）。
 
 import { Gap } from './backend-wat.js';
 import { declOf } from './nodes.js';
@@ -45,6 +47,9 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   /* 映射四格：方言第一百五十三片给了 `(dict K V)` 与 `dnew/dget/dset/dhas`，所以这一族
      也不必动 OIR（那几格就是主语言 `dict<K,V>` 走的 NewContainer / IndexGet / …）。 */
   'map-new', 'map-get', 'map-set', 'map-has',
+  /* 多值（go 的 `return a, b`）：方言的函数只交一格回来，所以这一族落成**一格合成的结构体**
+     （值语义，方言里返回结构体本来就是复制）—— `values` 是构造、`pick` 是取第 k 个字段。 */
+  'values', 'pick',
   /* 切片：方言里没有，走 `nodes.js` 写着的消去规则（新建 + 一圈 apush，见 `bindSlice`）。 */
   'slice',
   /* defer：方言里没有出口钩子，所以走一趟**变换**（在这一层的末尾与每条 ret 前各放一份，
@@ -115,6 +120,11 @@ function typeOf(x, env, ctx) {
     return d === null ? 'int' : d.val;
   }
   if (x.op === 'map-has') return 'bool';
+  if (x.op === 'pick') {
+    const shape = ctx.shapes.get(typeOf(x.ins.from, env, ctx));
+    if (shape === undefined) return 'int';
+    return shape.types.get(`v${Number(x.attrs.index ?? 0)}`) ?? 'int';
+  }
   if (x.op === 'conv') return convTo(x);
   return 'int';
 }
@@ -144,6 +154,40 @@ function dictOf(t) {
 
 /** 这一格类型是不是方言的标量（记录 / 列表 / 字典的元素只收这四格）。 */
 const isScalar = (t) => t === 'int' || t === 'real' || t === 'bool' || t === 'string';
+
+/**
+ * 一格形状（记录或多值）在登记处里的那一份。同形的两格共用一格 `(struct …)`，
+ * 标签按登记顺序发（记录 `rN`、多值 `mN`）—— 所以同一张图落两遍逐字节相同。
+ */
+function shapeOf(names, types, multi, ctx) {
+  const key = `${multi ? 'm' : 'r'}|${names.map((n, i) => `${n}:${types[i]}`).join('|')}`;
+  let shape = ctx.byKey.get(key);
+  if (shape !== undefined) return shape;
+  shape = {
+    tag: `${multi ? 'm' : 'r'}${ctx.byKey.size + 1}`,
+    names: names,
+    types: new Map(),
+    multi: multi,
+  };
+  for (let i = 0; i < names.length; i++) shape.types.set(names[i], types[i]);
+  ctx.byKey.set(key, shape);
+  ctx.shapes.set(shape.tag, shape);
+  ctx.decls.push(`  (struct ${shape.tag} ${names.map((n, i) => `(${n} ${types[i]})`).join(' ')})`);
+  return shape;
+}
+
+/**
+ * 一格 `values`（`return a, b`）落成的那格结构体：字段就叫 `v0` / `v1` …
+ *
+ * 为什么是结构体而不是别的：方言的函数**只交一格回来**，而结构体是**值语义**的
+ * （赋值/传参/返回都复制，见 tests/sexpr/cases/06-structs.sx）—— 那正好就是多值的语义。
+ * 用全局变量当第二个出口是错的：中间再调一次同一个函数就串味了。
+ */
+function multiShape(vals, env, ctx) {
+  const types = vals.map((v) => typeOf(v, env, ctx));
+  for (const t of types) if (!isScalar(t)) gap(`多值里有一格不是标量（量到的是 ${t}）`);
+  return shapeOf(types.map((_, i) => `v${i}`), types, true, ctx);
+}
 
 /** 一格 `field-get` 交出来的类型：宿主的形状表里查那个字段。查不到当场报。 */
 function fieldType(x, env, ctx) {
@@ -218,6 +262,15 @@ function expr(x, env, ctx) {
     }
     case 'record-new': gap('记录出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'list-new': gap('列表出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+    case 'pick': {
+      const t = typeOf(x.ins.from, env, ctx);
+      const shape = ctx.shapes.get(t);
+      if (shape === undefined || shape.multi !== true) gap('pick 的来源不是一格多值');
+      const i = Number(x.attrs.index ?? 0);
+      if (i < 0 || i >= shape.names.length) gap(`pick 的第 ${i} 格超出了这格多值的宽度`);
+      return `(fld ${objText(x.ins.from, env, ctx)} v${i})`;
+    }
+    case 'values': gap('values 不在 `ret` 上（这一刀只接"多值就是返回值"那一格）');
     case 'map-get': {
       const dt = typeOf(x.ins.obj, env, ctx);
       const d = dictOf(dt);
@@ -472,6 +525,18 @@ function stmt(x, env, ctx) {
     case 'ret': {
       const v = x.ins.value;
       const pend = pendingDefers(ctx);
+      /* 多值：先把那格合成结构体拼出来（零值 + 逐个 fldset），再交回去。 */
+      if (isNode(v) && v.op === 'values') {
+        const vals = argList(v, 'args');
+        const shape = multiShape(vals, env, ctx);
+        ctx.tmp = ctx.tmp + 1;
+        const nm = `mv_tmp${ctx.tmp}`;
+        const out = [`(let ${nm} ${shape.tag} (new ${shape.tag}))`];
+        for (let i = 0; i < vals.length; i++) {
+          out.push(`(fldset (var ${nm}) v${i} ${expr(vals[i], env, ctx)})`);
+        }
+        return [...out, ...pend, `(ret (var ${nm}))`];
+      }
       if (pend.length === 0) {
         return [v === undefined || v === null ? '(ret)' : `(ret ${expr(v, env, ctx)})`];
       }
@@ -486,6 +551,10 @@ function stmt(x, env, ctx) {
       if (x.attrs.name !== 'print') return [`(expr ${expr(x, env, ctx)})`];
       const args = argList(x, 'args');
       if (args.length !== 1) gap(`print 收了 ${args.length} 格实参（方言的 print 只收一格）`);
+      /* **一格多值直接印**（go 的 `fmt.Println(minmax(1, 2))` 印 "1 2"）：图上那条 arity 契约
+       * 是"列表里最后一格展开"，落到方言这边就是把那几格拼成一句（空格分隔）。 */
+      const shape = ctx.shapes.get(typeOf(args[0], env, ctx));
+      if (shape !== undefined && shape.multi === true) return printMulti(args[0], shape, env, ctx);
       return [`(print ${expr(args[0], env, ctx)})`];
     }
     case 'call':
@@ -517,15 +586,7 @@ function bindRecord(nm, rec, env, ctx) {
     }
     return t;
   });
-  const key = names.map((n, i) => `${n}:${types[i]}`).join('|');
-  let shape = ctx.byKey.get(key);
-  if (shape === undefined) {
-    shape = { tag: `r${ctx.byKey.size + 1}`, names: names, types: new Map() };
-    for (let i = 0; i < names.length; i++) shape.types.set(names[i], types[i]);
-    ctx.byKey.set(key, shape);
-    ctx.shapes.set(shape.tag, shape);
-    ctx.decls.push(`  (struct ${shape.tag} ${names.map((n, i) => `(${n} ${types[i]})`).join(' ')})`);
-  }
+  const shape = shapeOf(names, types, false, ctx);
   const out = [`(let ${nm} ${shape.tag} (new ${shape.tag}))`];
   for (let i = 0; i < names.length; i++) {
     out.push(`(fldset (var ${nm}) ${names[i]} ${expr(vals[i], env, ctx)})`);
@@ -642,6 +703,22 @@ function bindList(nm, lst, env, ctx) {
 }
 
 
+/**
+ * 一格多值印成一句：`(tostr v0) + " " + (tostr v1) …`。
+ *
+ * 为什么敢拿 `tostr` 顶 `print`：这门方言里两处印的是同一份字符串（量过 int / real /
+ * bool 三格都一样，`(print (tostr (real 1.5)))` 与 `(print (real 1.5))` 都是 `1.5`）。
+ */
+function printMulti(a, shape, env, ctx) {
+  ctx.tmp = ctx.tmp + 1;
+  const nm = `pv_tmp${ctx.tmp}`;
+  let s = `(tostr (fld (var ${nm}) ${shape.names[0]}))`;
+  for (const n of shape.names.slice(1)) {
+    s = `(bin "+" ${s} (bin "+" (str " ") (tostr (fld (var ${nm}) ${n}))))`;
+  }
+  return [`(let ${nm} ${shape.tag} ${expr(a, env, ctx)})`, `(print ${s})`];
+}
+
 /** 这块子图里有没有 `continue`（步进那一格要它才报缺口）。 */
 function hasContinue(x) {
   if (Array.isArray(x)) return x.some(hasContinue);
@@ -678,7 +755,7 @@ export function emitCore(g) {
        * 分不开 —— 所以这儿一律记成 `void`，等**调用点**说话：它被当值用了才报缺口
        * （见 `expr` 的 call 那一支）。糊一格 `(ret 0)` 上去是最坏的：矩阵上量到过
        * chez+intmath 印 0 / 0、sbcl+blockret 末行印 0 —— 悄悄给错答案。 */
-      const rt = retTypeOf(f.ins.body) ?? 'void';
+      const rt = retTypeOf(f.ins.body, env, ctx) ?? 'void';
       env.set(`fn:${it.attrs.name}`, rt);
       continue;
     }
@@ -725,7 +802,7 @@ function endsWithRet(body) {
 }
 
 /** 一格函数体里 `ret` 交出来的类型（只看第一处 —— 这一刀不做合一）。一格都没有回 null。 */
-function retTypeOf(body) {
+function retTypeOf(body, env, ctx) {
   const seek = (x) => {
     if (Array.isArray(x)) {
       for (const y of x) { const t = seek(y); if (t !== null) return t; }
@@ -737,6 +814,8 @@ function retTypeOf(body) {
       if (v === undefined || v === null) return 'void';
       if (isLit(v)) return litType(v.lit);
       if (isNode(v) && v.op === 'const') return litType(v.attrs.value);
+      /* 多值：交回去的是那格合成结构体（登记在这儿 —— 调用点要靠它定型）。 */
+      if (isNode(v) && v.op === 'values') return multiShape(argList(v, 'args'), env, ctx).tag;
       if (isNode(v) && v.op === 'prim') {
         const nm = v.attrs.name;
         return (nm === '<' || nm === '>' || nm === '<=' || nm === '>=' || nm === '=' || nm === '!=' || nm === 'not')
@@ -751,32 +830,18 @@ function retTypeOf(body) {
 }
 
 /**
- * 还没接的那几格**各自欠在哪儿**：欠在方言里（要先给 `sexpr/lower.js` 加词汇）还是欠在
- * 这一份翻译上（方言里有对应物，只是没写）。这两类的还债成本差一个数量级，混成一句
- * "还没接"就看不出来了。
+ * `can` 那一问：这格节点接不接得住（接不住给一句人话 —— 那句话就是账）。
+ *
+ * **27 格全接上了**（第一百五十三片之后）：节点级缺口 0。剩下的账都是**形状上的**
+ * （同一格节点的某种用法接不住）—— 那几条在 `CORE_SHAPES` 里，各带一份证物。
+ * 原先这儿挂着一张 `WHY` 表（逐格说"欠在方言里还是欠在这份翻译上"），现在一格不欠，
+ * 留着就是过期的账 —— 所以删了，不留。
  */
-const WHY = {
-  'map-new': '方言里**没有字典**这一格（`sexpr/lower.js` 的词汇表里只有 struct / arr）——'
-    + '要先给方言加，不是这一份翻译的事',
-  'map-get': '同 map-new：方言里没有字典',
-  'map-set': '同 map-new：方言里没有字典',
-  'map-has': '同 map-new：方言里没有字典',
-  values: '多值（go 的 `a, b := f()`）—— 方言的函数只交一格回来，要先有元组或出参',
-  pick: '多值的第几格 —— 跟 values 同一笔账',
-  conv: '表示转换（`int(x)` / `str(x)`）—— 方言里有 `toreal`/`tostr`/`toint` 那几格，'
-    + '欠的是"图上这一格该落到哪一个"那张表（图上没有类型，得先把源类型算出来）',
-  slice: '切片 —— 方言的 `ssub` 只切串，列表的切片还没有',
-  'scope-exit': 'go 的 `defer` —— 方言里没有作用域退出钩子，要先有它（或者在这儿做一趟'
-    + '"把 defer 摊成末尾语句 + 每条 ret 前复制一份"的变换，那是另一刀）',
-};
-
-/** `can` 那一问：这格节点接不接得住（接不住给一句人话 —— 那句话就是账）。 */
 export function coreCan(op) {
   if (OPS.has(op)) return true;
   if (declOf(op) === undefined) return `core 后端不认识这格节点：${op}`;
-  const why = WHY[op];
-  if (why !== undefined) return `core 这条腿还没接：${op} —— ${why}`;
-  return `core 这条腿还没接：${op}（这一刀接的是标量 + 记录 + 列表那三档，见 backend-core.js 的头）`;
+  return `core 这条腿还没接：${op}（27 格里没有它 —— 这一格是新加的节点，`
+    + '要么补进 backend-core.js，要么在这儿说清为什么不接）';
 }
 
 /**
@@ -830,13 +895,21 @@ export const CORE_SHAPES = [
     ]),
   },
   {
-    what: '记录 / 列表整格当值用',
+    what: '记录 / 列表 / 字典整格当值用',
     why: '这一刀的函数形参与返回都是 int，聚合一跑出去（当实参、被 print、被 return）'
-      + '就说不清类型了 —— 只接字段与下标那两条路（`objText` 一处把门）',
+      + '就说不清类型了 —— 只接字段 / 下标 / 键那三条路（`objText` 一处把门）',
     witness: () => program([
       node('bind', { init: node('record-new', { fields: [litNode(1)] }, { names: ['x'] }) }, { name: 'p' }),
       node('prim', { args: [node('ref', {}, { name: 'p' })] }, { name: 'print' }),
     ]),
+  },
+  {
+    what: 'values 不在 `ret` 上',
+    why: '多值落成一格合成结构体，而那格结构体是**函数的返回类型** —— 所以 `values` 只认'
+      + '"它就是返回值"那一处。别处（绑给一个名字、当实参）要先有元组类型，那是另一刀',
+    witness: () => program([node('bind', {
+      init: node('values', { args: [litNode(1), litNode(2)] }),
+    }, { name: 't' })]),
   },
   {
     what: '表达式位置上的记录 / 列表',

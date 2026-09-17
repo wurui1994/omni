@@ -176,14 +176,14 @@ registerBackend({
 // 与前五条的差别是**方向**：别的后端把图落成"别人那门语言"，这一条落成我们自己的中间格式，
 // 于是往下 OIR -> js / c / wasm / llvm 四条腿、摇树、profile、REPL 全都白得 ——
 // 借用一门语言之后拿到的不是"能跑"，是"我们这套工具链全都对它有效"。
-// 代价写在 `backend-core.js` 的头上：图上没有类型，而方言有，所以这一刀接的是
-// 标量 + 记录 + 列表那三档，别的**有名有姓**地报（`can` 与 `shapes` 两处都答，
-// 而且 `can` 会说清欠在方言里还是欠在这份翻译上）。
+// 代价写在 `backend-core.js` 的头上：图上没有类型，而方言有，所以这一份里最多的代码是
+// **把类型算出来**（记录 / 列表 / 字典 / 多值各一套推法）。27 格节点**全接上了**，
+// 剩下的账都是形状上的（`shapes` 那几条，各带一份证物）。
 registerBackend({
   name: 'core',
   can: coreCan,
   carry: (sort) => (sort === 'expr'
-    ? '方言的一格表达式（有类型：int/real/bool/string + `(struct rN …)` 与 `(arr T)`）'
+    ? '方言的一格表达式（有类型：int/real/bool/string + `(struct rN …)` / `(arr T)` / `(dict K V)`）'
     : '方言的一条语句'),
   effect: (e) => (e === 'may-early-exit'
     ? 'ret / brk / cont 都有（方言里带层号）'
