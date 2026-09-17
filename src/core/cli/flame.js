@@ -128,3 +128,89 @@ export function foldedToSvg(text, title) {
   out.push('</svg>');
   return `${out.join('\n')}\n`;
 }
+
+/**
+ * **node 自己那台 V8 采样器的产物 -> 折叠栈**（第一百四十八片第三格）。
+ *
+ * `node --cpu-prof` 落一份 `.cpuprofile`（Chrome DevTools 那个格式）：
+ *   nodes[]      每格一帧：`id` · `callFrame{functionName,url,lineNumber}` · `children[]`
+ *   samples[]    每次采样命中的那格 `id`
+ *   timeDeltas[] 与 samples 一一对应，**微秒**
+ * 折叠栈（`a;b;c 计数`）是 C 腿那边已经在用的交换格式，所以这一格只做**格式转换**，
+ * 不新造一种账：转完之后表怎么印、图怎么画，两条腿走同一段代码。
+ *
+ * 权重用 `timeDeltas`（微秒）而不是"采样次数"：node 的采样间隔不保证均匀（默认 1000µs，
+ * 但 GC / 系统调用会拖长），按次数数会把长间隔那一帧数轻。C 腿那边的权重也是时间。
+ *
+ * 名字：`functionName` 空的那几格是匿名函数（V8 里就是空串），落成 `(匿名)`；
+ * `(program)` / `(idle)` / `(garbage collector)` 是 V8 自己那几格，**照留** ——
+ * 它们是真的在花时间，藏起来等于给自己一份好看的假账。
+ */
+export function cpuProfileToFolded(jsonText) {
+  const p = JSON.parse(jsonText);
+  const nodes = p.nodes ?? [];
+  const byId = new Map();
+  const parent = new Map();
+  for (const n of nodes) byId.set(n.id, n);
+  for (const n of nodes) for (const c of n.children ?? []) parent.set(c, n.id);
+  const nameOf = (id) => {
+    const n = byId.get(id);
+    if (n === undefined) return '(未知)';
+    const f = n.callFrame ?? {};
+    return (f.functionName === undefined || f.functionName === '') ? '(匿名)' : f.functionName;
+  };
+  /* 一格 id 的整条栈（根在前）。同一格会被问很多次，记下来 —— 采样数很容易上万。 */
+  const memo = new Map();
+  const stackOf = (id) => {
+    const hit = memo.get(id);
+    if (hit !== undefined) return hit;
+    const up = parent.get(id);
+    const s = up === undefined ? nameOf(id) : `${stackOf(up)};${nameOf(id)}`;
+    memo.set(id, s);
+    return s;
+  };
+  const samples = p.samples ?? [];
+  const deltas = p.timeDeltas ?? [];
+  const acc = new Map();
+  for (let i = 0; i < samples.length; i++) {
+    /* 负的 delta 出现过（时钟回拨）：按 0 算，不让它把某一格减成负数。 */
+    const w = Math.max(0, Math.round(deltas[i] ?? 0));
+    if (w === 0) continue;
+    const k = stackOf(samples[i]);
+    acc.set(k, (acc.get(k) ?? 0) + w);
+  }
+  /* 落盘的次序按权重从大到小 —— 两次同样的输入出来的文本要逐字节相同（可 diff）。 */
+  const rows = [...acc.entries()].sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : 1));
+  return rows.map(([k, v]) => `${k} ${v}`).join('\n') + (rows.length > 0 ? '\n' : '');
+}
+
+/**
+ * 折叠栈 -> **按自用时间排的那张表**（与 C 腿印出来的读法一致：% · 权重 · 名字）。
+ *
+ * 「自用」= 这一格自己在栈顶的那些权重之和（折叠栈的每一行本来就是一条完整的栈，
+ * 行尾那一格就是栈顶）—— 所以这张表不用再算一遍父子关系。
+ */
+export function foldedTable(text, title, top = 20) {
+  const self = new Map();
+  let total = 0;
+  for (const line of text.split('\n')) {
+    if (line === '') continue;
+    const sp = line.lastIndexOf(' ');
+    if (sp <= 0) continue;
+    const w = Number(line.slice(sp + 1)) || 0;
+    const frames = line.slice(0, sp).split(';');
+    const leaf = frames[frames.length - 1];
+    self.set(leaf, (self.get(leaf) ?? 0) + w);
+    total += w;
+  }
+  const rows = [...self.entries()].sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : 1));
+  const out = [`\n${title}：按自用时间排前 ${top} 行`];
+  out.push('        ms      占比  函数');
+  for (const [name, w] of rows.slice(0, top)) {
+    const ms = (w / 1000).toFixed(3);
+    const pct = total > 0 ? ((w / total) * 100).toFixed(2) : '0.00';
+    out.push(`  ${ms.padStart(10)}  ${`${pct}%`.padStart(7)}  ${name}`);
+  }
+  if (rows.length > top) out.push(`  …还有 ${rows.length - top} 格`);
+  return `${out.join('\n')}\n`;
+}

@@ -93,6 +93,17 @@ const F_NO_TRIM = {
   brief: '（js）不按用到的名字裁运行时那一段 —— 出了事用它把整份带回来对照',
 };
 /**
+ * **一份 `.js` 原样交给 node**（第一百四十八片第二格）。
+ *
+ * 量到的账（`bench/fib.js` 823 字节）：我们那一轮发出来 371770 字节、整趟 459ms；
+ * 直接给 node 是 823 字节、113ms。语义差别明说：直路上没有 ADR-0011 那层
+ * （int 的规范形、按字节的字符串…），直路就是 node 自己的语义 —— 所以是开关不是默认。
+ */
+const F_DIRECT = {
+  name: '--direct', arity: 0,
+  brief: '（.js）原样交给 node，不过我们这一轮 —— 语义就是 node 自己的',
+};
+/**
  * 构建统计与依赖图（第一百四十七片第二格）。
  *
  * **与 `--stats` 是两格不同的东西**（名字只差一个 s，所以这儿说清楚）：
@@ -331,7 +342,7 @@ ${graphEngineHelp()}
         /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，
          * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格
          * （`--libc self` 那一趟的 sysroot 按本机取自带的，不用给）。 */
-        F_CC, F_LIBC, F_PROFILE, F_PROFILE_OUT, F_NO_TRIM,
+        F_CC, F_LIBC, F_PROFILE, F_PROFILE_OUT, F_NO_TRIM, F_DIRECT,
         /* `--stat` 在 `run` 上只对 `--engine graph` 那一路有话说（图的形状与结构）——
          * 另一台机器的构建统计要 `build --stat`（那儿才有 cgen 的产出分布）。 */
         F_STAT, F_STAT_OUT, F_STAT_DIFF, F_SHRINK,

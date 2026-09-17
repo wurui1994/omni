@@ -30,6 +30,8 @@ const CLI = join(ROOT, 'src', 'cli.js');
 const PROBE = join(ROOT, 'tests', 'x64', 'prof-probe.c');
 const RT = join(ROOT, 'src', 'runtime', 'omni_prof.c');
 const FIB = join(ROOT, 'bench', 'fib.omni');
+/** `--direct` 那条腿的样本：它只认 `.js`（同一个算法的手写 JS 那一份）。 */
+const FIBJS = join(ROOT, 'bench', 'fib.js');
 const WORK = join(ROOT, '.omni-cache', 'work', 'cli-profile');
 
 let pass = 0;
@@ -219,11 +221,43 @@ const FIB_CALLS = '635621';
   } else bad('js 腿 --profile cc 要报错', `rc=${r.status} ${s.slice(0, 300)}`);
 }
 {
-  const r = omni(['run', FIB, '--profile', 'sample']);
+  /* js 腿的 `sample` 从前是有名有姓地欠着的（要 node 自己那台采样器）——
+   * 第一百四十八片第三格接上了：量的是**我们发出来那份 JS**，所以榜上有 `u_fib`
+   * 那种我们发的名字，也有 `$js_*` 那些运行时助手（正是"胀在哪儿"的答案）。 */
+  const r = omni(['run', FIB, '--profile', 'sample:200']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.status !== 0 && s.includes('cpu-prof') && s.includes('--profile stub')) {
-    ok('js 腿 --profile sample：有名有姓地欠着（要 node 自己那台采样器），并给出替代');
-  } else bad('js 腿 --profile sample 要报错', `rc=${r.status} ${s.slice(0, 300)}`);
+  if (r.status === 0 && s.includes('node 的 V8 采样器') && /u_fib|u_sumTo|\$js_/.test(s)) {
+    ok('js 腿 --profile sample：借 node 的 V8 采样器，量的是我们发的那份 JS');
+  } else bad('js 腿 sample 要出榜', `rc=${r.status} ${s.slice(-300)}`);
+}
+{
+  /* `--direct`：一份 js 原样交给 node（不过我们这一轮）。判据是**输出对** +
+   * `-v` 里那一行说清它没走我们那一轮。 */
+  const r = omni(['run', '-v', FIBJS, '--direct']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0 && s.includes('196418') && s.includes('没过我们这一轮')
+    && !s.includes('backend js')) {
+    ok('--direct：原样交给 node，我们那一轮一个字节都没发生');
+  } else bad('--direct 该直接给 node', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  const out = join(WORK, 'node.svg');
+  const folded = `${out}.folded`;
+  rmSync(folded, { force: true });
+  rmSync(out, { force: true });
+  const r = omni(['run', FIBJS, '--direct', '--profile', 'sample:200', '--profile-out', out]);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  const f = existsSync(folded) ? readFileSync(folded, 'utf8') : '';
+  if (r.status === 0 && existsSync(out) && /(^|;)(sumTo|fib)\b/m.test(f)) {
+    ok('--direct + sample：node 采样器的折叠栈里有源码里的名字（sumTo / fib），火焰图也落了');
+  } else bad('--direct sample 要出折叠栈', `rc=${r.status} ${s.slice(-300)}\n    folded=${f.slice(0, 200)}`);
+}
+{
+  const r = omni(['run', FIBJS, '--direct', '--profile', 'stub']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status !== 0 && s.includes('我们不改你的 js')) {
+    ok('--direct + stub：明说发射期插桩对原样交出去的 js 不成立');
+  } else bad('--direct stub 要报错', `rc=${r.status} ${s.slice(0, 300)}`);
 }
 {
   const lua = join(ROOT, 'ext', 'lua', 'examples', 'basics.lua');

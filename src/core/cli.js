@@ -25,7 +25,7 @@ import { renderPlan, renderSummary, renderStage } from './cli/stages.js';
 import { planForC } from './cli/plan-c.js';
 import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
-import { foldedToSvg } from './cli/flame.js';
+import { foldedToSvg, cpuProfileToFolded, foldedTable } from './cli/flame.js';
 import { statModel, statTable, statDot, statJson } from './cli/statgraph.js';
 import { layerModel, layerTable, countNodes, stepTable, kindStat, kindTable } from './cli/layers.js';
 import { linkJs } from './frontend-js/link.js';
@@ -638,6 +638,9 @@ function profLeg(key, path, rest) {
     return i >= 0 ? rest[i + 1] : null;
   };
   if (val('--engine') === 'graph') return 'graph';
+  /* `--direct`（原样交给 node）是**另一条腿**：那份 js 不经我们的发射器，所以发射期插桩
+   * 在它上头不成立，而 node 自己那台采样器成立。 */
+  if (rest.includes('--direct')) return 'node';
   const b = val('--backend');
   const isC = typeof path === 'string' && path.endsWith('.c');
   if (isC) {
@@ -657,11 +660,19 @@ function profLeg(key, path, rest) {
  *
  * `c-src` = **`.c` 输入那条腿**（别人的 C）：`cc` / `sample` 在那儿成立，但要外部 cc
  * 把插桩/收集器编进去（见 `cFileViaCc`）；`stub` 不成立 —— 我们不改别人的源码。
+ * `node`  = **`--direct` 那条腿**（一份 js 原样交给 node）：只有 `sample` 成立，
+ * 靠的是 node 自己那台 V8 采样器（`--cpu-prof`，见 `profNodeArgs`）。
+ * `js` 这条腿上 `sample` **也接上了**（同一台采样器，量的是我们发出来的那份 JS）——
+ * 从前这一格是有名有姓地欠着的，第一百四十八片第三格还上了。
  */
-const PROF_LEGS = { cc: ['c', 'c-src'], stub: ['c', 'js'], sample: ['c', 'c-src'] };
+const PROF_LEGS = {
+  cc: ['c', 'c-src'],
+  stub: ['c', 'js'],
+  sample: ['c', 'c-src', 'js', 'node'],
+};
 
 /** 腿名印给人看时的说法（`c-src` 这个内部名字对用户没意思）。 */
-const LEG_SAY = { c: 'c', 'c-src': '.c 输入', js: 'js' };
+const LEG_SAY = { c: 'c', 'c-src': '.c 输入', js: 'js', node: '--direct' };
 
 /** 这一趟的 `--profile MODE` 落在这条腿上成不成立 —— 不成立就一句话说清怎么办。 */
 function profCheckLeg(mode, leg) {
@@ -683,10 +694,19 @@ function profCheckLeg(mode, leg) {
       + '或 `--profile sample`（运行期采样），两档都要 `--cc clang`');
   }
   if (leg === 'js' && mode === 'sample') {
-    throw new OmniError('--profile sample 在 js 这条腿上还没接：采样要宿主自己那台'
-      + '（node 的 --cpu-prof / node:inspector 那台 V8 采样器）—— 这一格有名有姓地欠着。'
-      + '现在 js 腿上用 `--profile stub`（我们自己插的那一对，两条腿都有）；'
-      + '要采样就 `--backend c`');
+    /* 这一格早晚不该再有：`sample` 已经在 js 腿上接上了（V8 采样器）。留一句是给
+     * 「名单与这几句话对不上」当门 —— 走到这儿说明 PROF_LEGS 被改坏了。 */
+    throw new OmniError('--profile sample 在 js 这条腿上本该成立（node 的 V8 采样器）——'
+      + '走到这句说明 PROF_LEGS 那张名单与这几句话对不上，是这一层自己的错');
+  }
+  if (leg === 'node' && mode === 'stub') {
+    throw new OmniError('--profile stub 是**我们发射期**插的那一对，而 `--direct` 是把你的 js'
+      + '原样交给 node —— 不经我们的发射器，我们不改你的 js。这条腿上用 `--profile sample`'
+      + '（node 自己那台 V8 采样器）；要发射期插桩就去掉 `--direct`（走我们这一轮）');
+  }
+  if (leg === 'node' && mode === 'cc') {
+    throw new OmniError('--profile cc 是**外部 C 编译器**自己的插桩（-finstrument-functions），'
+      + '`--direct` 那条腿上跑的是 node，没有这台机器。用 `--profile sample`');
   }
   if (leg === 'js' && mode === 'cc') {
     throw new OmniError('--profile cc 是**外部 C 编译器**自己的插桩（-finstrument-functions），'
@@ -718,6 +738,62 @@ function profJsFinish() {
     return;
   }
   stderr(evalJs('$prof_table()'));
+}
+
+/** 这一趟给 node 加了采样开关时记一格（落点在哪儿），收尾时按它取账。 */
+let PROF_NODE = null;
+
+/**
+ * **node 腿的 sample：借 node 自己那台 V8 采样器**（第一百四十八片第三格）。
+ *
+ * 这一格从前是**有名有姓地欠着**的（`profCheckLeg` 里那句「采样要宿主自己那台」）。
+ * 现在接上了，办法是把开关加在**被跑的那个 node 进程**的命令行上：
+ *   --cpu-prof                 采样开
+ *   --cpu-prof-dir / -name     落点由我们定（不然它按 PID 起名，捞不着）
+ *   --cpu-prof-interval µs     `--profile sample:200` 那个 hz 折成微秒（默认 1000µs）
+ * 采样器只能在**进程启动时**开，所以两条路都得是「spawn 一个 node」：
+ *   `--direct` 那条本来就是（`runJsDirect`）；
+ *   我们发射出来那份 JS 从前在本进程里 eval，这一档改成落盘 + spawn（见 `runJsChild`）。
+ *
+ * 两条路共用这一格与收尾那一格 —— 用户那句话的原文是「node prof 对直到到 node 和一轮
+ * 处理后的 js 都适用」。
+ */
+function profNodeArgs() {
+  if (PROF === null || PROF.mode !== 'sample') return [];
+  const dir = workDirFor('prof-node', hash16(`${PROF.hz}`));
+  mkdirAll(dir);
+  PROF_NODE = { dir, file: join(dir, 'omni.cpuprofile') };
+  /* 旧的那份先删：`.cpuprofile` 不在的时候我们要能说「这一趟没量到」，
+   * 而上一趟留下的那份会把这句话变成谎话。 */
+  if (exists(PROF_NODE.file)) writeText(PROF_NODE.file, '');
+  const us = PROF.hz > 0 ? Math.max(1, Math.round(1000000 / PROF.hz)) : 0;
+  return ['--cpu-prof', '--cpu-prof-dir', dir, '--cpu-prof-name', 'omni.cpuprofile',
+    ...(us > 0 ? ['--cpu-prof-interval', `${us}`] : [])];
+}
+
+/** node 采样那一趟的收尾：`.cpuprofile` -> 折叠栈 -> 表 / 落盘（火焰图由汇合点画）。 */
+function profNodeFinish() {
+  if (PROF_NODE === null) return;
+  const f = PROF_NODE.file;
+  PROF_NODE = null;
+  const raw = exists(f) ? readText(f) : '';
+  if (raw === '') {
+    stderr('omni: node 那台采样器没落下 .cpuprofile —— 这一趟没量到'
+      + '（程序太短？或者这个 node 版本没有 --cpu-prof）\n');
+    return;
+  }
+  const folded = cpuProfileToFolded(raw);
+  if (folded === '') {
+    stderr('omni: node 采样器落了账但一帧都没采到（程序太短）\n');
+    return;
+  }
+  const lines = folded.split('\n').length - 1;
+  if (PROF.out !== null && PROF.out !== undefined) {
+    writeText(PROF.out, folded);
+    stderr(`omni: 折叠栈 -> ${PROF.out}（${lines} 条栈，node 腿 · V8 采样器）\n`);
+    return;
+  }
+  stderr(foldedTable(folded, `omni prof（node 的 V8 采样器，${lines} 条栈）`));
 }
 
 /**
@@ -2938,6 +3014,34 @@ function cFileViaCc(path, argv, exe) {
   return exe;
 }
 
+/**
+ * **`--direct`：一份 `.js` 原样交给 node**（第一百四十八片第二格）。
+ *
+ * 从前 `omni run x.js` 只有一条路：前端 -> OIR -> 发一份 JS -> 在本进程里 eval。
+ * 量到的账（`bench/fib.js`，823 字节）：
+ *   我们那一轮   发出来 371770 字节（裁过还有 192735），整趟 459ms，其中 442ms 在 exec 上
+ *   直接给 node  823 字节，整趟 113ms（含 node 自己的启动）
+ * 输入本来就是这门语言的源码，那一轮**在很多用途上是纯开销**（看一眼输出、量一段性能）。
+ *
+ * **为什么是开关而不是默认**：两条路的语义不是同一格。我们那一轮上有 ADR-0011 那层
+ * （int = i64 的规范形、按字节的字符串、按值捕获的闭包…），直路上没有 —— 直路就是 node
+ * 自己的语义。要「我们那套语义」就别给这个开关；要「就是 node」才给。
+ *
+ * 只对 `.js` / `.mjs` 成立：别的后缀 node 读不懂，当场说清而不是把一份 `.omni` 塞给 node
+ * 让它报一句莫名其妙的语法错。
+ */
+function runJsDirect(path, args) {
+  if (!path.endsWith('.js') && !path.endsWith('.mjs')) {
+    throw new OmniError(`--direct 是「原样交给 node」这一格，只认 .js / .mjs：${path} 不是。`
+      + '别的语言要先过我们这一轮（去掉 --direct 就是那条路）');
+  }
+  const pre = profNodeArgs();
+  const st = spawn('node', [...pre, path, ...args], 'i')[0];
+  vStep(`node ${pre.join(' ')}${pre.length > 0 ? ' ' : ''}${path}  exit=${st}（--direct：没过我们这一轮）`);
+  profNodeFinish();
+  return st;
+}
+
 function runCFile(path, argv) {
   const ai = argv.indexOf('--arch');
   const si = argv.indexOf('--os');
@@ -3723,6 +3827,9 @@ function main(argv) {
        * 片元着色器没有 main 可跑，它的「跑一遍」就是把每个像素算出来。 */
       const rn = path === undefined || path === null ? null : runner(path);
       if (rn !== null) return rn.run(path, rest);
+      /* `--direct`（第一百四十八片第二格）：一份 `.js` **原样交给 node**，不过我们这一轮。
+       * 摆在这儿 —— compile 之前：这一格的全部意义就是「那一轮一个字节都别发生」。 */
+      if (rest.includes('--direct')) return runJsDirect(path, files.slice(1));
       /* `.c`：**编 + 链 + 跑**，走自带的 C 前端 + 代码生成 + 链接器（见 `runCFile`）。
        * 从前这儿没有这一格，`.c` 一路掉到 omni 的前端上，报的是
        * `unexpected character: "#"` —— 前端由扩展名选那条规矩漏了 C 这一门。 */
@@ -3791,6 +3898,26 @@ function main(argv) {
         if (STAT !== null) LAST_EMIT_PROG = target('js').emit(mod, { chunk: true }).length;
         vStep(`backend js  ${js.length} bytes`);
         if (cacheable) jsCachePut(path, js, cap('asy.deps')());
+        /**
+         * `--profile sample`：**采样器只能在 node 启动时开**，所以这一档不能在本进程里
+         * eval —— 落盘 + spawn 一个带 `--cpu-prof` 的 node（`profNodeArgs`）。
+         *
+         * 换来的是「我们发射出来那份 JS」也量得到，与 `--direct` 那条走同一格收尾
+         * （用户那句话：node prof 对两条路都适用）。代价明写：多一个进程 + 一次落盘，
+         * 而这一档本来就是「量一段性能」，那点开销在账里看得见（`-v` 里印得出来）。
+         */
+        if (PROF !== null && PROF.mode === 'sample') {
+          const dir = workDirFor('run-js-prof', hash16(path));
+          mkdirAll(dir);
+          const outJs = join(dir, `${basename(path).replace(/\.[^.]*$/, '')}.js`);
+          writeText(outJs, js);
+          const pre = profNodeArgs();
+          const st = spawn('node', [...pre, outJs], 'i')[0];
+          vStep(`node --cpu-prof ${outJs}  exit=${st}（我们发的那份 JS，走子进程才开得了采样器）`);
+          profNodeFinish();
+          statReport(cr);
+          return st;
+        }
         // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）：跑在本进程里的这一条
         // 装得上那格钩子，编成独立产物的场合装不上 —— 那时那两个 op 当场报错
         installSrcEvalHook((m, o) => target('js').emit(m, o));
