@@ -71,6 +71,12 @@ export const MUT = ['1', '3'];
  */
 export const VARDECL = ['15', '1', '3', '6', '5', '2'];
 /**
+ * forrange：**`for … range` 落一格计数循环**（go 独一份）—— 序列与长度只算一次、
+ * 第一格是下标、第二格是元素（index-get）、`_` 不绑名字、`:=` 出 bind / `=` 出 set、
+ * 嵌一层换号。五行各压一样。
+ */
+export const FORRANGE = ['80', '3', '30', '32', '9'];
+/**
  * switch：**`switch` 落一条 branch 链**（go 独一份）—— 没有隐式贯穿，所以不给它开节点。
  * 六行分别压：主语相等 · 一个分支几个值（或）· default 垫底 · 没主语那一路 ·
  * `switch k := …; k` 的 init + 主语临时量 · 嵌一层换个临时量号。
@@ -162,6 +168,10 @@ export const CASES = [
   // 就是一串 if / else if / else —— 图上一格新节点也没加。它顺带把一条**答案错而不报**的
   // 口子钉住：switch 里的 `break` 是跳出 switch，落成 branch 链会变成跳出循环，所以当场报。
   ...fam('switch', SWITCH, ['go']),
+  // 第二十二个家族：**for range**（go 独一份）。同一条理由：`for i, v := range xs` 落的是
+  // 现成的 `counted`（一格 region + 一格 loop），图上一格新节点也没加。它顺带把
+  // "序列只算一次"与"长度只算一次"压在判据上（那两样是 go 规范的原话）。
+  ...fam('forrange', FORRANGE, ['go']),
 ];
 
 /**

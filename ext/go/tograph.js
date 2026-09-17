@@ -15,7 +15,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, counted,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, deferNow,
   mapNew, mapGet, mapSet, mapHas, mapNames, isList,
 } from '../../src/core/graph/fromtree.js';
@@ -294,6 +294,72 @@ function switchOf(x) {
   return body.length === 0 ? [] : node('region', { body });
 }
 
+/**
+ * **`for i, v := range xs` 落一格计数循环**（`counted`，与三段式 for 同一格 loop）。
+ *
+ * 三样归 go 自己，都不是节点的事：
+ *   * **序列只算一次**、**长度也只算一次** —— go 的规范就是这么说的（切片的 len 在开头
+ *     取一次），所以落两格 bind（`__rgN` / `__rnN`）而不是每轮重算；
+ *   * 第一格是**下标**、第二格是**那一格元素**（`index-get`）—— `_` 那一格不绑名字；
+ *   * `:=` 出 bind、`=` 出 set（与 `define` / `assign` 那一格同一条）。
+ *
+ * **能判出来的两种当场报**（图上没有那一格，不拿列表下标充）：
+ *   * `range` 一格 map —— 要按键遍历，而次序在 go 里本来也是不定的；
+ *   * `range` 一格整数字面量（go 1.22 起的写法）。
+ * 判不出来的那两种（串按 rune 走、通道）写在文件末尾"明说的不足"里 —— 这一份沿用
+ * `MAPS` 那条既有约定：**没登记成 map 的就当序列**。
+ *
+ * `__rgN` 的 N 是**嵌套深度**（与 `__swN` 同一条理由）。
+ */
+let RG_DEPTH = 0;
+
+function forRangeOf(x) {
+  const lhs = kids(x).find((y) => tag(y) === 'define' || tag(y) === 'assign');
+  const vals = part(x, 'values');
+  const blk = kids(x).find((y) => tag(y) === 'block');
+  if (vals === undefined) throw new Error('go->graph: for-range 里没有 (values …)');
+  const subj = kids(vals)[0];
+  if (isMap(subj)) {
+    throw new Error('go->graph: range 一格 map 要按键遍历 —— 图上还没有那一格'
+      + '（次序在 go 里本来也是不定的，不能拿列表下标充）');
+  }
+  if (tag(subj) === 'num') {
+    throw new Error('go->graph: range 一格整数（go 1.22 起）这一批还没接');
+  }
+  const names = lhs === undefined ? [] : kids(lhs).map(nameOf);
+  if (names.length > 2) throw new Error(`go->graph: range 左边最多两格，给了 ${names.length}`);
+  const isDef = lhs === undefined || tag(lhs) === 'define';
+  const seq = `__rg${RG_DEPTH}`;
+  const idx = `__ri${RG_DEPTH}`;
+  const cnt = `__rn${RG_DEPTH}`;
+  const at = (n) => node('ref', {}, { name: n });
+  RG_DEPTH += 1;
+  let inner;
+  try {
+    inner = blk === undefined ? [] : many(kids(blk));
+  } finally {
+    RG_DEPTH -= 1;
+  }
+  const mk = (n, v) => (isDef
+    ? node('bind', { init: v }, { name: n })
+    : node('set', { value: v }, { name: n }));
+  const head = [];
+  if (names.length > 0 && names[0] !== '_') head.push(mk(names[0], at(idx)));
+  if (names.length > 1 && names[1] !== '_') head.push(mk(names[1], indexGet(at(seq), at(idx))));
+  return node('region', {
+    body: [
+      node('bind', { init: toNode(subj) }, { name: seq }),
+      node('bind', { init: node('prim', { args: [at(seq)] }, { name: 'len' }) }, { name: cnt }),
+      counted({
+        name: idx,
+        from: lit(0),
+        cond: bin('<', at(idx), at(cnt)),
+        body: [node('region', { body: [...head, ...inner] })],
+      }),
+    ],
+  });
+}
+
 function toNode(x) {
   switch (tag(x)) {
     // ---- 叶子 --------------------------------------------------------------
@@ -456,6 +522,7 @@ function toNode(x) {
       return node('region', { body: [...many(kids(ini).filter((k) => tag(k) !== 'none')), br] });
     }
     case 'return': return retOf(many(kids(x)));
+    case 'for-range': return forRangeOf(x);
     case 'switch': return switchOf(x);
     // `break` / `continue` -> **同一格节点**，差的只有一格附属 kind。
     // **带标签的那两个当场报**：`break L` 跳的是 L 那一层，而图上这一格跳的是最近一层 ——
@@ -568,6 +635,9 @@ export function goImports(tree) {
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
 //   1. 类型全丢（见文件头）。`var` / `const` 现在接了（落一串 bind），但类型只用在
 //      **零值**那一处（`zeroOf`）—— 具名结构体的零值当场报，字段表不进图。
+//   1b. `range` 那一格**判不出来的两种**沿用 `MAPS` 那条既有约定（没登记成 map 的当序列），
+//      所以这两种会落成"按下标走"而不报：**串**（go 给的是 rune，`s[i]` 给的是字节 ——
+//      ASCII 上同值，别的不同）与**通道**。判得出来的两种（map、整数字面量）当场报。
 //   2. 多返回值、`x, ok = m[k]`、defer、goroutine、channel 都不在这一批
 //      （`ext/go/SPEC.md` §五那张顺序表说了它们各排在哪一步）。
 //   3. 选择器（`a.b`）落 `field-get`（第四批），但**只当它是取字段** ——
