@@ -14,6 +14,10 @@
 //     而"这个名字装的是 map"那张表要**两种写法都认**，漏一种后面 `m['b']` 就静静变成列表下标。
 //   * `unsafe { … }` 是一格块：`unsafe` 本身**不产生代码**（只放开指针那几样的检查），
 //     所以拆成一格 region —— 与 `mut` / `pub` 同一类。
+//   * `if v := maybe(6) { … } else { … }` —— **语句头上的绑定**（Option 那一族的拆法）：
+//     落成 region 包着"绑一格 + branch"，条件是"拆得开吗"。这一批把 Option 的类型丢掉了，
+//     所以"拆得开"落成 `v != nil` —— 那是这一批的口径，不是 V 的完整语义。
+//     绑的那一格**作用域是整条链**（else 里也看得见），所以要 region 包着。
 //
 // **明说一处**：真的 V 里 `?int` 的值要 `or { … }` 或 `?` 才拆得开，而这一批把 Option
 // 那一层**类型丢掉了**（`ext/vlang/SPEC.md` §五第 1 项：option/result 排在后面一步）。
@@ -51,5 +55,15 @@ fn main() {
 	println(m['b'])
 	unsafe {
 		println(9)
+	}
+	if v := maybe(6) {
+		println(v)
+	} else {
+		println(0)
+	}
+	if w := maybe(0) {
+		println(w)
+	} else {
+		println(8)
 	}
 }

@@ -549,6 +549,38 @@ function toNode(x) {
         body: blk === undefined ? [] : many(kids(blk)),
       });
     }
+    /**
+     * `if x := opt() { … } else { … }` —— V 的**语句头上的绑定**（Option / Result 那一族的
+     * 拆法）。落成一格 region 包着"绑一格 + branch"：
+     *
+     *   region { bind x = opt() ; branch (x != nil) then else }
+     *
+     * 三件事要说清：
+     *   * **绑的那一格作用域是整条链**（else 里也看得见 `x`）—— 与 go 的 `if v := f(); cond`
+     *     同一条，所以同样用 region 包着，不是把那句话挪到外面去。
+     *   * 条件是"**拆得开吗**"。这一批把 Option 那一层的**类型丢掉了**
+     *     （`ext/vlang/SPEC.md` §五第 1 项），所以"拆得开"落成 `x != nil` ——
+     *     那是这一批的口径，不是 V 的完整语义（真的 V 里那是"有没有值"）。
+     *   * `mut x` 只拆不检查（与别处同一条）。
+     */
+    case 'if-bind': {
+      const all = kids(x);
+      const nm = nameOf(all[0]);
+      const src = all[1];
+      const then = all[2];
+      const e = elseOf(all[3]);
+      const at = node('ref', {}, { name: nm });
+      return node('region', {
+        body: [
+          node('bind', { init: toNode(src) }, { name: nm }),
+          branchOf(
+            binOf('!=', at, lit(null), OPS, { lang: 'v' }),
+            toNode(then),
+            e === undefined ? undefined : toNode(e),
+          ),
+        ],
+      });
+    }
     case 'if': {
       const [cond, then, els] = kids(x);
       const e = elseOf(els);
