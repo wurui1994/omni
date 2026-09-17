@@ -218,8 +218,39 @@ int sscanf(const char *src, const char *fmt, ...) {
   return got;
 }
 
-/* ---- 回失败但不崩的那几格（这些在两个目标上同一个实现：不碰内核） */
-int backtrace(void **buf, int n) { (void)buf; (void)n; return 0; }
+/* ---- `backtrace`（第一百四十片第十八格）。**真的走一遍帧链**，不再回 0。
+ *
+ * 为什么走得通：我们两条腿的序言都是「压帧指针、再把它指向栈顶」——
+ *   x86_64：`push rbp; mov rbp, rsp`      -> `[rbp]` = 上一层的 rbp、`[rbp+8]` = 返回地址
+ *   arm64 ：`stp x29,x30,[sp,#-16]!; mov x29,sp` -> `[x29]` = 上一层的 x29、`[x29+8]` = 返回地址
+ * 两边**同一个形状**，所以这一份是公用的。当前帧靠 `__builtin_frame_address(0)`
+ * （降成一条 `OP.FPGET`，见 `mir/ir.js`）。
+ *
+ * 三条防乱走的闸（栈是往下长的，链必须严格往高地址走）：
+ *   - 返回地址是 0 就停（`_start` 那一层）
+ *   - 下一格不比这一格高就停（垃圾或者被踩过的帧）
+ *   - 最多走 256 层（链成环时不至于转不出来）
+ * **明说**：`-O2` 那种省掉帧指针的编译方式下这条路不成立 —— 我们自己发的码一律有帧指针
+ * （`omni_mem.c:85` 那句「-O0 有帧指针，所以 backtrace 拿得到」说的就是这件事）。
+ *
+ * `backtrace_symbols` 仍然回 0：那要读自己的符号表（ELF/Mach-O 两套），是另一件事；
+ * 调用方（`omni_mem.c`）只按地址聚合，不需要名字。 */
+int backtrace(void **buf, int n) {
+  if (n <= 0) return 0;
+  unsigned long fp = (unsigned long)__builtin_frame_address(0);
+  int k = 0;
+  int hops = 0;
+  while (fp != 0 && k < n && hops < 256) {
+    unsigned long ret = *(unsigned long *)(fp + 8);
+    unsigned long up = *(unsigned long *)fp;
+    if (ret == 0) break;
+    buf[k++] = (void *)ret;
+    if (up <= fp) break;
+    fp = up;
+    hops++;
+  }
+  return k;
+}
 char **backtrace_symbols(void *const *buf, int n) { (void)buf; (void)n; return (char **)0; }
 
 /* ---- `qsort` / `bsearch`（第一百四十片第十二格）。

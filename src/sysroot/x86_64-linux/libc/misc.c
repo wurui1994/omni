@@ -6,7 +6,7 @@
  *               remove / realpath / mkdtemp / getrlimit / getrusage / atexit /
  *               localtime_r / strftime（UTC）/ strerror / sscanf（三种转换）/
  *               **sigaction**（第十五格，跳板 mmap+mprotect，见那一段的注释）
- *   回失败但不崩：backtrace 一族（诊断用，回 0 比崩好）、pthread 一族（回 EAGAIN ——
+ *   回失败但不崩：pthread 一族（回 EAGAIN ——
  *               调用方本来就有退路，见那一段）
  *   调到就崩：  dlopen 一族（`__libc_unimpl`）—— 悄悄回一个假句柄的后果是
  *               调用方拿着它往下跑，那比崩在原地坏得多。

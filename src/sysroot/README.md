@@ -97,7 +97,15 @@ MIR 说「要什么」，摆法归后端。
 **还没有的**（明说）：
 - 线程：`pthread_create` 照 POSIX 回 `EAGAIN` —— 我们的运行时**本来就有退路**
   （`omni_js_host.c:88`：开不出线程就直接调 `entry()`）。
-- `backtrace` 回 0（诊断用）；`dlopen` 一族调到就崩（假句柄比崩坏）。
+- `backtrace` **真的走帧链了**（第十八格）：两条腿的序言都是「压帧指针、再把它指向
+  栈顶」（x86_64 `push rbp; mov rbp,rsp`、arm64 `stp x29,x30,[sp,#-16]!; mov x29,sp`），
+  于是 `[fp]` 是上一层、`[fp+8]` 是返回地址 —— **同一个形状**，所以这一份在公用的
+  `pure.c` 里；当前帧靠 `__builtin_frame_address(0)`（降成 `OP.FPGET`）。三条闸：
+  返回地址为 0 停、链不往高地址走就停、最多 256 层。判据在 `libc-str.js` 里
+  （印**布尔**不印地址）：三层嵌套至少 4 层、地址互不相同、`n=0` 回 0、装两格回 2 ——
+  两条腿都与平台 libc 逐行相同。`backtrace_symbols` 仍回 0（那要读自己的符号表，
+  两套格式，另一件事；`omni_mem.c` 只按地址聚合）。
+- `dlopen` 一族调到就崩（假句柄比崩坏）。
 
 **信号那一格（两条腿都真的了，第十五、十六格）**：`sigaction` 各走各的号
 （Linux `rt_sigaction(13)` / Darwin `sigaction(46)`），共同点是**跳板运行时自己写**

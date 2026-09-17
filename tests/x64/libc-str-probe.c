@@ -33,6 +33,25 @@ static int cmpInt(const void *a, const void *b) {
   return x < y ? -1 : (x > y ? 1 : 0);
 }
 
+/* backtrace（第十八格）那几格。印的是**布尔**不是地址：地址每次跑都不一样，而
+ * 「走出来够不够深、地址互不相同、装不下时截到几层」两边该一样。 */
+int backtrace(void **buf, int size);
+static void *btBuf[32];
+static int btN;
+static void bt3(void) { btN = backtrace(btBuf, 32); }
+static void bt2(void) { bt3(); }
+static void bt1(void) { bt2(); }
+static int btDeep(void) { bt1(); return btN >= 4 ? 1 : 0; }
+static int btDistinct(void) {
+  bt1();
+  for (int i = 0; i < 4 && i < btN; i++) {
+    for (int j = i + 1; j < 4 && j < btN; j++) if (btBuf[i] == btBuf[j]) return 0;
+  }
+  return btN >= 4 ? 1 : 0;
+}
+static int btZero(void) { return backtrace(btBuf, 0) == 0 ? 1 : 0; }
+static int btTwo(void) { bt1(); return backtrace(btBuf, 2) == 2 ? 1 : 0; }
+
 int main(void) {
   /* 1. printf 的旗与长度 */
   printf("[%#x] [%#o] [% d] [%+d] [%05d] [%-5d|]\n", 255, 8, 42, 42, 42, 42);
@@ -106,5 +125,9 @@ int main(void) {
   int n2 = 0;
   int got2 = sscanf("7,8", "%d,%d", &n1, &n2);
   printf("sscanf 逗号 %d: %d %d\n", got2, n1, n2);
+
+  /* 7. backtrace（第十八格）。印的是布尔不是地址 —— 地址每次跑都不一样。 */
+  printf("backtrace 三层嵌套至少 4 层 %d、地址互不相同 %d、n=0 回 0 %d、装两格回 2 %d\n",
+    btDeep(), btDistinct(), btZero(), btTwo());
   return 0;
 }
