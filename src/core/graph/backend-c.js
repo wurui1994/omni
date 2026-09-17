@@ -1402,8 +1402,7 @@ export function emitC(g) {
     : f.params.map((p) => `${f.pnum === true ? 'double' : 'gv'} ${p}`).join(', '));
   const protos = gen.fns.map((f) => `static gv ${f.cname}(${sig(f)});`);
   const bodies = gen.fns.map((f) => `static gv ${f.cname}(${sig(f)}) {\n${f.lines.join('\n')}\n}\n`);
-  return `${PRELUDE_ALL()}
-/* ---- 编译期就知道的那几格常量 */
+  const prog = `/* ---- 编译期就知道的那几格常量 */
 ${gen.decls.join('\n')}
 
 /* ---- 提到顶层的那些函数 */
@@ -1416,6 +1415,75 @@ ${gen.lines.join('\n')}
   return 0;
 }
 `;
+  /* 序言按这份程序用到的那几族裁（第七节第 1 条）—— 漏留一格的后果是编不动，当场红。 */
+  return `${trimPrelude(PRELUDE_ALL(), prog)}
+${prog}`;
+}
+
+/**
+ * **序言按用到的那几族裁**（`docs/design/node-graph-shrink.md` 第七节第 1 条）。
+ *
+ * 重量那一节量到的原话：`basics.lua` 那 435 行里**固定序言占 361 行（83%）**。它是常数，
+ * 源码一长就摊薄 —— 可小例子上它就是那份产物的绝大部分，而一份只印两个串的程序**用不着**
+ * 映射那一族、列表那一族、`g_pow`…
+ *
+ * 做法是**按名字传递地留**（一格土生土长的摇树）：
+ *   1. 序言切成一格格定义（这份文本是我们自己写的，格式规整：定义都从第 0 列起，
+ *      花括号配平，一行注释跟着它下面那格定义走）；
+ *   2. 名字认得出来的（`static … g_xxx(`）才可能被裁；`#include` / `typedef` /
+ *      `#define` / libc 的那几行原型**一律留**（它们是地基，也就几行）；
+ *   3. 根是**这份程序自己那一段**里出现的 `g_*`，然后按每格定义里引用的 `g_*` 传递地留。
+ *
+ * 为什么敢裁：漏留一格的后果是**编不动**（我们自己那台 C 前端当场报「不认得这个名字」），
+ * 而那条路上有 98 份例子在跑（`tests/graph/run.js` 的 c 那一列）—— 漏了当场红，不会
+ * 悄悄给个错答案。
+ */
+function trimPrelude(text, rootText) {
+  const chunks = [];
+  let cur = [];
+  let depth = 0;
+  for (const ln of text.split('\n')) {
+    cur.push(ln);
+    for (const ch of ln) {
+      if (ch === '{') depth += 1;
+      else if (ch === '}') depth -= 1;
+    }
+    const t = ln.trim();
+    /* 一格定义在**深度回到 0 且这一行以 `}` 或 `;` 收尾**时算完。注释与空行不收尾，
+     * 于是它们跟着下面那格定义走 —— 裁掉一格函数，它头上那段注释跟着走。 */
+    if (depth === 0 && (t.endsWith('}') || t.endsWith(';') || t.startsWith('#'))) {
+      chunks.push(cur.join('\n'));
+      cur = [];
+    }
+  }
+  if (cur.length > 0) chunks.push(cur.join('\n'));
+
+  const ids = (s) => {
+    const out = new Set();
+    const m = s.match(/\bg_[A-Za-z0-9_]+/g);
+    if (m !== null) for (const x of m) out.add(x);
+    return out;
+  };
+  const defs = chunks.map((c) => {
+    /* 名字：`static <类型…> g_xxx(` 那一格（原型与定义同名，两格一起留或者一起裁）。 */
+    const m = c.match(/static[^\n(]*?\b(g_[A-Za-z0-9_]+)\s*\(/);
+    const name = m === null ? null : m[1];
+    return { text: c, name, deps: ids(c) };
+  });
+  const keep = new Set();
+  for (const x of ids(rootText)) keep.add(x);
+  /* 传递闭包：留下来的定义里引用到的名字也要留。只加不减，所以最多转 defs.length 轮。 */
+  for (let round = 0; round < defs.length + 1; round++) {
+    let grew = false;
+    for (const d of defs) {
+      if (d.name === null || !keep.has(d.name)) continue;
+      for (const dep of d.deps) {
+        if (!keep.has(dep)) { keep.add(dep); grew = true; }
+      }
+    }
+    if (!grew) break;
+  }
+  return defs.filter((d) => d.name === null || keep.has(d.name)).map((d) => d.text).join('\n');
 }
 
 /** `can` 那一问：这格节点接不接得住（接不住给一句人话 —— 那句话就是账）。 */
