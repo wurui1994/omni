@@ -115,6 +115,16 @@ export const MEMBER = ['true', 'false', 'true', 'false'];
  * `&x`（名字的地址）与光秃秃的 `*p` 当值用 —— 那两处要真的指针。
  */
 export const POINTER = ['11', '20', '5', '20'];
+/**
+ * optres：**Option / Result 落成"有没有值 + 一支垫底"**（V 独一份）—— 一格新节点也没加。
+ * 四种写法各落一串现成的节点：`or { 垫底 }`（`if x == nil { set x = … }`）、
+ * `or { panic(…) }`（`panic` 落那格 assert）、`f()!`（`if x == nil { return x }`）、
+ * 单独一条语句的 `f() or { … }`（一格临时名，**那一支的值不要** —— 要了就把一格 print
+ * 塞进值位置，wat 当场报）。`return error('…')` 也落 nil：**消息不在图上**，所以
+ * `or { … }` 的体里一用 `err` 就当场报。
+ */
+export const OPTRES = ['6', '7', '5', '4', '10'];
+
 
 
 /**
@@ -328,6 +338,9 @@ export const CASES = [
   // 有一半根本不要新节点"：图上的记录就是引用，所以 `&T{…}` 落的就是那一格记录。
   // 另一半（`&x` / 光秃秃的 `*p`）当场报 —— 判据只判走得通的路，报的那两处在墙上。
   ...fam('pointer', POINTER, ['go', 'vlang']),
+  // 第三十七个家族：**Option / Result**（V 独一份）。账上第二大的一族，落地靠的是
+  // "这一层只问有没有值"那一条口径 —— 与 `if-bind` 那一格同一条。图上一格新节点也没加。
+  ...fam('optres', OPTRES, ['vlang']),
 ];
 
 

@@ -147,6 +147,71 @@ const many = (xs) => xs.map(toNode).flat();
 /** 图上是**引用**的那几种字面量（`&` 只接它们 —— 见 `case 'addr'`）。 */
 const AGG = new Set(['lit', 'array', 'array-fixed', 'map']);
 
+/** Option / Result 那一族的三个标签（`x or { … }` · `f()!` · `f()?`）。 */
+const OPT_TAGS = new Set(['or-block', 'propagate-err', 'propagate']);
+let OPT_N = 0;
+/** 语句位置上那一格临时名（`f() or { … }` 自己没有名字）。 */
+const freshOpt = () => `__opt${OPT_N++}`;
+
+/** 这棵子树里提到 `err` 这个名字吗？（or-block 里的错误值 —— 这一批没有它。） */
+function mentionsErr(x) {
+  if (!isList(x)) return false;
+  if (tag(x) === 'name' && leaf(kids(x)[0]) === 'err') return true;
+  return kids(x).some(mentionsErr);
+}
+
+/** `panic('…')` / `exit(N)` 那一类"到这儿就停"（or-block 的体常常以它收尾）。 */
+const stopsHere = (s) => {
+  if (tag(s) === 'return' || tag(s) === 'break' || tag(s) === 'continue') return true;
+  const e = tag(s) === 'expr' ? kids(s)[0] : s;
+  return tag(e) === 'call' && ['panic', 'exit'].includes(leaf(kids(kids(e)[0])[0]));
+};
+
+/**
+ * **Option / Result 落成一串语句**（不是一格表达式）—— 这一批的口径写在这儿：
+ *
+ * 这一层没有类型，Option / Result 那格值只剩"**有没有**"（`if-bind` 那一格已经是这个
+ * 口径：`!= nil`）。于是：
+ *   * `x := e or { blk }` -> `bind x = e` · `if x == nil { blk }`，而 blk 的**末一句是
+ *     表达式**时那就是垫底的值 -> `set x = 那个值`；末一句是 return / break / continue /
+ *     `panic(…)` 时照原样放（那一路根本不回来）；
+ *   * `x := f()!` / `f()?` -> `bind x = f()` · `if x == nil { return x }`（把"没有值"
+ *     原样传上去 —— 这一批的错误值就是"没有"）。
+ *
+ * **两处刻意不接**：or-block 的体里用了 `err`（错误消息不在图上，印出来会是 nil ——
+ * 那是静默的错答案），以及这一族出现在**表达式里头**（`f(g() or { 0 })`）—— 那要临时量
+ * 那一刀。`target` 给 `{ name, kind }`：kind 是 bind（`:=`）/ set（`=`）/ 别的（临时量）。
+ */
+function optOf(r, target) {
+  const kind = tag(r);
+  const src = kids(r)[0];
+  const nm = target.name;
+  const at = () => node('ref', {}, { name: nm });
+  const head = target.kind === 'set'
+    ? node('set', { value: toNode(src) }, { name: nm })
+    : node('bind', { init: toNode(src) }, { name: nm });
+  const missing = () => binOf('==', at(), lit(null), OPS, { lang: 'v' });
+  if (kind !== 'or-block') {
+    // `f()!` / `f()?`：没有值就原样传上去
+    return [head, branchOf(missing(), node('region', { body: [retOf([at()])] }))];
+  }
+  const blk = kids(r)[1];
+  if (mentionsErr(blk)) {
+    throw new Error('v->graph: `or { … }` 的体里用了 `err` —— 这一批把 Option / Result'
+      + '丢成了"有没有值"，错误消息不在图上，补个 nil 上去是静默的错答案');
+  }
+  const stmts = kids(blk);
+  const last = stmts[stmts.length - 1];
+  // **语句位置上那一路（`temp`）不补垫底的值**：`f() or { println('…') }` 的体交出来的
+  // 是那句 print 的值，没人要 —— 把它落成 `set` 反而把一格 print 塞进了值位置
+  // （量过：wat 那条腿当场报"值位置上还接不住 set"）。
+  const body = last !== undefined && !stopsHere(last) && target.temp !== true
+    ? [...many(stmts.slice(0, -1)),
+      node('set', { value: toNode(tag(last) === 'expr' ? kids(last)[0] : last) }, { name: nm })]
+    : many(stmts);
+  return [head, branchOf(missing(), node('region', { body: body }))];
+}
+
 /**
  * `(*p).f` / `(*p)[i]` 里那一层 `deref` **剥掉**（`(paren …)` 也一并剥）。
  * 只在"当对象用"那几处调它 —— 光秃秃的 `*p` 仍旧当场报（见 `case 'deref'`）。
@@ -548,6 +613,11 @@ function toNode(x) {
       if (lhs.length > 1 && rhs.length === 1) {
         return destructure(lhs.map(nameOf), toNode(rhs[0]), { declare: isDef });
       }
+      // `x := f() or { … }` / `x := f()!` -> **一串语句**（见 optOf 那一段的口径）
+      if (lhs.length === 1 && rhs.length === 1 && OPT_TAGS.has(tag(rhs[0]))
+        && tag(lhs[0]) !== 'sel' && tag(lhs[0]) !== 'index') {
+        return optOf(rhs[0], { name: nameOf(lhs[0]), kind: isDef ? 'bind' : 'set' });
+      }
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set
@@ -623,7 +693,17 @@ function toNode(x) {
       const e = elseOf(els);
       return branchOf(toNode(cond), toNode(then), e === undefined ? undefined : toNode(e));
     }
-    case 'return': return retOf(many(kids(x)));
+    case 'return': {
+      const one = kids(x)[0];
+      // `return f() or { … }` / `return f()!`：先落成那一串语句，再把那一格交出去
+      if (kids(x).length === 1 && OPT_TAGS.has(tag(one))) {
+        const nm = freshOpt();
+        return [...optOf(one, { name: nm, kind: 'bind' }),
+          retOf([node('ref', {}, { name: nm })])];
+      }
+      return retOf(many(kids(x)));
+    }
+
     case 'break': return loopExit('break');
     case 'continue': return loopExit('continue');
     case 'expr': {
@@ -631,8 +711,18 @@ function toNode(x) {
       // 表达式那一路每支要交出一个值）。这儿是唯一知道"它在语句位置上"的地方。
       const inner = kids(x)[0];
       if (tag(inner) === 'match') return matchOf(inner, true);
+      // `f() or { … }` / `f()!` 单独当一条语句：交出来的值没人要，落一格临时名
+      if (OPT_TAGS.has(tag(inner))) {
+        return optOf(inner, { name: freshOpt(), kind: 'bind', temp: true });
+      }
+
       return toNode(inner);
     }
+    // 这一族**只在语句位置上接**（define / assign / return / 单独一条）——
+    // 走到这儿就说明它长在一格表达式里头（`f(g() or { 0 })`），那要临时量那一刀。
+    case 'or-block': case 'propagate-err': case 'propagate':
+      throw new Error(`v->graph: \`${tag(x)}\` 长在表达式里头 —— 这一族只接语句位置`
+        + '（`x := f() or { … }` / `return f()!` / 单独一条），表达式位置要临时量那一刀');
     case 'match': return matchOf(x, false);
     case 'for-in': return forInOf(x);
     // `assert cond` / `assert cond, msg` -> 一格 assert 节点（第二十九批）。
@@ -666,6 +756,13 @@ function toNode(x) {
       const argNodes = many(rawArgs);
       const callee = tag(fn) === 'name' ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
+      // `panic('…')` -> **那格 assert**（条件恒假 + 消息）：图上"印一句话再停下来"只有那一格，
+      // 而 or-block 的体十有八九以 panic 收尾 —— 这一格是 Option 那一刀的前提。
+      if (callee === 'panic' && argNodes.length === 1) return assertOf(lit(false), argNodes[0]);
+      // `error('…')` -> **nil**：这一批的 Result 只剩"有没有值"（见 optOf 那一段），
+      // 错误消息不在图上。`or { … }` 的体里一用 `err` 就当场报 —— 消息丢了不许装作没丢。
+      if (callee === 'error' && argNodes.length === 1) return lit(null);
+
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
         return convOf(CONV.get(callee), argNodes[0]);   // `int(x)` / `f64(x)`
       }

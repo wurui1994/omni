@@ -85,7 +85,10 @@ const CLASSES = [
   // （落地那一刻忘了加，"没归类"当场从 41 涨到 199 —— 那一栏又一次自己举了手）。
   ['指针（真别名：`&x` · 光秃秃的 `*p`）',
     /addr|deref|这个算子还没接：&(?!&)|（解引用）|指针那一格/],
-  ['option / result（or-block · 传播 · ?T）', /or-block|propagate|option/],
+  // `体里的 err` 那一条也归这一族（Option 那一刀之后剩下的最大一块 —— 错误消息不在图上）
+  ['option / result（or-block · 传播 · ?T · `or { … }` 体里的 err）',
+    /or-block|propagate|option|Option \/ Result/],
+
   ['编译期求值（when / \$if / ctconst）', /编译期|ctime|ctconst|comptime/],
   ['函数值与闭包（fnlit）', /fnlit|闭包|函数值/],
   ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%)/],
