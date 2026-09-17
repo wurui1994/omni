@@ -91,12 +91,59 @@ const METHODS = new Map();
 const TYPES = new Set();
 
 /**
+ * **具名类型 -> 它的字段表**（`[[字段名, 字段类型的树], …]`，按声明顺序）。
+ *
+ * 为什么要登记：`var p Point` 的零值是"**每个字段各自的零值**"，而 record-new 那一格要的是
+ * 字段名 + 值 —— 两样都得从**声明**来。这是"名字与顺序从声明来"那条既有路子的又一处
+ * （V 的 `STRUCTS`、mojo 的 `@value struct`、CL 的 `defstruct`、Scheme 的
+ * `define-record-type`、FB 的 `Type` 都是它）。
+ *
+ * 只登记 `type X struct{…}` 那一种。别的具名类型（`type X = Y` 别名、`type X int`）
+ * 不进这张表 —— 它们的零值当场报。
+ */
+const STRUCTS = new Map();
+
+/**
+ * **具名类型 -> 它的底子**（`type Level int` / `type Name = string` / `type S []int`）。
+ *
+ * 零值那一格要它：`var a Level` 的零值就是**底子的零值**（go 里具名类型与它的底层类型
+ * 零值相同，别名更是同一个类型）。所以这一格是**一层间接**，不是新语义。
+ * 结构体那一种走上面的 `STRUCTS`（那一族要字段名，不是一层间接）。
+ */
+const UNDER = new Map();
+
+/** `(struct (f (names x y) 类型) …)` -> `[[名, 类型], …]`（一格 `f` 里能有好几个名字）。 */
+function fieldsOf(st) {
+  const out = [];
+  for (const f of kids(st)) {
+    if (tag(f) !== 'f') return null;          // 嵌入字段（`embed`）这一批不接
+    const nms = part(f, 'names');
+    const ty = kids(f).find((y) => tag(y) !== 'names' && tag(y) !== 'tag' && tag(y) !== 'attrs');
+    if (nms === undefined || ty === undefined) return null;
+    for (const n of kids(nms)) out.push([leaf(n), ty]);
+  }
+  return out;
+}
+
+/**
  * 扫一遍顶层：登记类型名（`type Point struct …`）、每个方法的接收者类型，
  * 以及 `var` / `const` 里**装 map 的名字**（`specMapNames` 那段说了为什么要在这儿收）。
  */
 function collectDecls(x) {
   if (!isList(x)) return;
-  if (tag(x) === 'tspec' || tag(x) === 'talias') TYPES.add(leaf(kids(x)[0]));
+  if (tag(x) === 'tspec' || tag(x) === 'talias') {
+    TYPES.add(leaf(kids(x)[0]));
+    const body = kids(x).find((y) => tag(y) === 'struct');
+    if (body !== undefined) {
+      const fs = fieldsOf(body);
+      /* 收不齐（有嵌入字段）就存 null —— 那时零值当场报，不猜嵌入的那一格占几格。 */
+      STRUCTS.set(leaf(kids(x)[0]), fs);
+    } else {
+      /* 别的具名类型：记下它的**底子**（零值就是底子的零值 —— 一层间接，不是新语义）。 */
+      const und = kids(x)[1];
+      if (und !== undefined && isList(und)) UNDER.set(leaf(kids(x)[0]), und);
+    }
+  }
   if (tag(x) === 'spec') for (const n of specMapNames(x)) MAPS.add(n);
   if (tag(x) === 'method') {
     const [recv, nm] = kids(x);
@@ -164,6 +211,14 @@ function zeroOf(ty, name) {
        复制那条路要分两种形状 —— 而"再算一遍"本来就更直白，零值也没有作用。 */
     return listNew(Array.from({ length: cnt }, () => zeroOf(el, name)));
   }
+  // 匿名 struct（`var x struct{ n int }`）的零值 = 每个字段各自的零值
+  if (t === 'struct') {
+    const fs = fieldsOf(ty);
+    if (fs === null) {
+      throw new Error(`go->graph: ${name} 那格 struct 有嵌入字段 —— 零值这一批不猜`);
+    }
+    return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${name}.${fn}`)]));
+  }
   if (t === 'tname' && kids(ty).length === 1) {
     const n = leaf(kids(ty)[0]);
     if (INT_TYPES.has(n)) return lit(0);
@@ -171,7 +226,19 @@ function zeroOf(ty, name) {
     if (n === 'string') return lit('');
     if (n === 'bool') return lit(false);
     if (NIL_NAMES.has(n)) return lit(null);
-    throw new Error(`go->graph: ${n} 的零值还没接 —— 具名类型要字段表才写得出来`);
+    // **具名 struct**：字段名与顺序从声明来（`STRUCTS` 那段），每个字段各算一遍零值。
+    // 声明不在这一份文件里、或者那个 struct 有嵌入字段，都当场报 —— 不猜。
+    if (STRUCTS.has(n)) {
+      const fs = STRUCTS.get(n);
+      if (fs === null) {
+        throw new Error(`go->graph: ${n} 有嵌入字段 —— 它在零值里占几格要展开被嵌类型才知道`);
+      }
+      return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${n}.${fn}`)]));
+    }
+    // 别的具名类型：零值就是**底子的零值**（`type Level int` / `type Name = string`）。
+    if (UNDER.has(n)) return zeroOf(UNDER.get(n), `${name}:${n}`);
+    throw new Error(`go->graph: ${n} 的零值还没接 —— 这份文件里没见过它的声明`
+      + '（跨模块的类型在这一格上）');
   }
   throw new Error(`go->graph: 这一格的零值还没接：${t}`);
 }
@@ -667,6 +734,8 @@ export function goToGraph(tree, opts) {
   // 方法在图上是"多一格实参的普通函数"，不需要运行期查表（见 METHODS 那段）。
   METHODS.clear();
   TYPES.clear();
+  STRUCTS.clear();
+  UNDER.clear();
   collectDecls(tree);
   const items = kids(tree).slice(1);          // 第一格是包名
   const body = items.map(toNode).flat();

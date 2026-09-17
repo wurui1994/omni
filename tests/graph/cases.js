@@ -145,6 +145,13 @@ export const DECLS = ['25', '20', '1'];
  */
 export const FORRANGE = ['80', '3', '30', '32', '9'];
 /**
+ * zeroval：**零值那一族**（go 独一份）—— `var x T` 的零值从**声明**来：具名 struct 是
+ * "每个字段各自的零值"（字段名与顺序从 `type X struct{…}` 登记）、嵌套是递归一层、
+ * 匿名 struct 走同一条路、别的具名类型（`type Level int` / `type Name = string`）是
+ * **底子的零值**（一层间接）。图上一格新节点都没加，落的是 record-new。
+ */
+export const ZEROVAL = ['4', '0', '0', '0', 'true'];
+/**
  * switch：**`switch` 落一条 branch 链**（go 独一份）—— 没有隐式贯穿，所以不给它开节点。
  * 六行分别压：主语相等 · 一个分支几个值（或）· default 垫底 · 没主语那一路 ·
  * `switch k := …; k` 的 init + 主语临时量 · 嵌一层换个临时量号。
@@ -236,6 +243,9 @@ export const CASES = [
   // 就是一串 if / else if / else —— 图上一格新节点也没加。它顺带把一条**答案错而不报**的
   // 口子钉住：switch 里的 `break` 是跳出 switch，落成 branch 链会变成跳出循环，所以当场报。
   ...fam('switch', SWITCH, ['go']),
+  // 第三十三个家族：**零值**（go 独一份）。它是"名字与顺序从声明来"那条既有路子的
+  // 又一处提供者 —— 三处当场报（嵌入字段 / 跨模块的类型 / `[N]T` 里 N 不是字面量）。
+  ...fam('zeroval', ZEROVAL, ['go']),
   // 第二十二个家族：**for range**（go 独一份）。同一条理由：`for i, v := range xs` 落的是
   // 现成的 `counted`（一格 region + 一格 loop），图上一格新节点也没加。它顺带把
   // "序列只算一次"与"长度只算一次"压在判据上（那两样是 go 规范的原话）。
