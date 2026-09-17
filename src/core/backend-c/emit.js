@@ -1032,7 +1032,14 @@ class CEmitter {
   /** 那个坑：这份程序真按名字调过 op 才把派发器填进去（见 `callOpAt` 那段账）。 */
   fillCallOp() {
     if (this.callOpAt === undefined || this.callOpAt === null) return;
-    if (!this.out.join('\n').includes('omni_js_call_op(')) return;
+    /* **一行行找，别先 join**：`this.out` 在自编译那一趟里是几 MB 的一大堆行，
+     * `join('\n')` 出来那份大串只为了做一次 `includes` —— 量出来这一格自用 55.9ms
+     * （整趟 2069ms 的 2.70%，`node --cpu-prof` 那份账里排第 9）。逐行看一遍是同一个答案。 */
+    let used = false;
+    for (const ln of this.out) {
+      if (typeof ln === 'string' && ln.includes('omni_js_call_op(')) { used = true; break; }
+    }
+    if (!used) return;
     const outer = this.out;
     this.out = [];
     this.callOpDispatch();
