@@ -159,6 +159,10 @@ const WASM_OPS = new Map(Object.entries({
   'i64.eqz': 0x50, 'i64.eq': 0x51, 'i64.ne': 0x52, 'i64.lt_s': 0x53, 'i64.gt_s': 0x55,
   'i64.le_s': 0x57, 'i64.ge_s': 0x59,
   'i64.add': 0x7c, 'i64.sub': 0x7d, 'i64.mul': 0x7e, 'i64.div_s': 0x7f, 'i64.rem_s': 0x81,
+  /* 位运算那五格（位运算那一刀落地时补的 —— 这张表只收 backend-wat.js 真发过的算子，
+     所以它一涨这儿就要跟着涨；`tests/graph/wasm.js` 当场把这一条钉住了）。 */
+  'i64.and': 0x83, 'i64.or': 0x84, 'i64.xor': 0x85,
+  'i64.shl': 0x86, 'i64.shr_s': 0x87,
   'i32.eqz': 0x45, 'i32.eq': 0x46, 'i32.ne': 0x47, 'i32.lt_s': 0x48, 'i32.lt_u': 0x49,
   'i32.ge_s': 0x4e,
   'i32.add': 0x6a, 'i32.sub': 0x6b, 'i32.mul': 0x6c, 'i32.div_s': 0x6d, 'i32.div_u': 0x6e,

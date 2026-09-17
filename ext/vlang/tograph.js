@@ -53,7 +53,10 @@ function isMapLit(r) {
 }
 
 
-const OPS = ops();
+/* V 的位运算：`&` `|` `>>` 在公共表里，这儿补 V 自己那一格 —— **V 的 `^` 是 xor**
+   （V 没有幂算符，而图上 `^` 是幂，所以映到 `bxor`）。
+   `<<` **不走这张表**：在 V 里它压倒性地是列表追加，`case 'bin'` 那儿先截住了。 */
+const OPS = ops({ '^': 'bxor' });
 const CONV = convs({
   i8: 'int', i16: 'int', i32: 'int', i64: 'int',
   u8: 'int', u16: 'int', u32: 'int', u64: 'int',
@@ -626,8 +629,9 @@ function toNode(x) {
       const [op, a, b] = kids(x);
       const o = leaf(op);
       // V 的 `<<` **压倒性地是列表追加**（V 自己的编译器里 3228 行含 `<<`，抽样 20 行
-      // 只有词法表里那几行是位移，其余全是 `arr << x`）。所以这一格落 `prim push`，
-      // 不是位运算 —— 位运算（`shl`/`shr`/`band`/`bor`/`bxor`）归下一刀。
+      // 只有词法表里那几行是位移，其余全是 `arr << x`）。所以这一格落 `prim push`。
+      // **位运算那一刀落地之后这一条更要留着**：公共表里 `<<` 已经是 `shl` 了，
+      // 而 V 这一门要的是 push —— 截在这儿，不动那张公共表（`fromtree.js` 的注也写着）。
       if (o === '<<') {
         return node('prim', { args: [toNode(a), toNode(b)] }, { name: 'push' });
       }
@@ -635,7 +639,9 @@ function toNode(x) {
     }
     case 'un': {
       const [op, a] = kids(x);
-      return un(leaf(op) === '!' ? 'not' : leaf(op), toNode(a));
+      const uo = leaf(op);
+      if (uo === '~') return un('bnot', toNode(a));      // V 的 `~x` 是按位取反
+      return un(uo === '!' ? 'not' : uo, toNode(a));
     }
 
     case 'fn': {

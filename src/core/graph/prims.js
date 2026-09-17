@@ -20,6 +20,34 @@ const P = (name, arity, effects, kernel, js) => [name, { name, arity, effects, k
 
 const show = (v, showValue) => showValue(v);
 
+/**
+ * 位运算那六格（`band` / `bor` / `bxor` / `bnot` / `shl` / `shr`）。
+ *
+ * kernel 那一侧算在 **BigInt** 上再折回 Number（js 的位运算是 32 位的），
+ * js 那一侧发出去的代码也一样 —— 两侧同一套算法，不许一侧 32 位一侧 64 位。
+ */
+const asI64 = (v) => BigInt(Math.trunc(Number(v)));
+const shiftCount = (v) => {
+  const n = Math.trunc(Number(v));
+  if (!(n >= 0 && n <= 63)) throw new Error(`移位的位数要在 0..63，给的是 ${n}`);
+  return BigInt(n);
+};
+/**
+ * js 那一侧的移位位数检查：**发一格自带的箭头函数**，不新开运行期钩子。
+ * （那张钩子表是契约的一部分 —— 为一格检查加第 16 格不值，而两侧的规矩必须一样。）
+ */
+const jsShift = (v) => `((__c) => { if (!(__c >= 0 && __c <= 63)) `
+  + `throw new Error('移位的位数要在 0..63，给的是 ' + __c); return BigInt(__c); })(${v})`;
+const bitPrims = () => [
+  P('band', 2, [], (a) => Number(asI64(a[0]) & asI64(a[1])), (a) => `Number(BigInt(${a[0]}) & BigInt(${a[1]}))`),
+  P('bor', 2, [], (a) => Number(asI64(a[0]) | asI64(a[1])), (a) => `Number(BigInt(${a[0]}) | BigInt(${a[1]}))`),
+  P('bxor', 2, [], (a) => Number(asI64(a[0]) ^ asI64(a[1])), (a) => `Number(BigInt(${a[0]}) ^ BigInt(${a[1]}))`),
+  P('bnot', 1, [], (a) => Number(~asI64(a[0])), (a) => `Number(~BigInt(${a[0]}))`),
+  P('shl', 2, [], (a) => Number(asI64(a[0]) << shiftCount(a[1])), (a) => `Number(BigInt(${a[0]}) << ${jsShift(a[1])})`),
+  P('shr', 2, [], (a) => Number(asI64(a[0]) >> shiftCount(a[1])), (a) => `Number(BigInt(${a[0]}) >> ${jsShift(a[1])})`),
+];
+
+
 export const PRIMS = new Map([
   // ---- 算术与比较：**pure**（效应六格全空 ⇒ 可重排、可共享、可删）------------
   P('+', -1, [], (a) => (a.length === 0 ? 0 : a.reduce((x, y) => x + y)), (a) => (a.length === 0 ? '0' : `(${a.join(' + ')})`)),
@@ -38,6 +66,22 @@ export const PRIMS = new Map([
   P('not', 1, [], (a, io) => !io.truthy(a[0]), (a) => `(!__truthy(${a[0]}))`),
   P('concat', -1, [], (a, io) => a.map((v) => show(v, io.show)).join(''), (a) => `[${a.join(', ')}].map(__show).join('')`),
   P('len', 1, [], (a) => (a[0] === null || a[0] === undefined ? 0 : a[0].length), (a) => `(${a[0]}).length`),
+
+  // ---- 位运算那六格：**pure**，只对整数 ------------------------------------------
+  //
+  // 账上算出来的一族（三门合起来 64 份印"这个算子还没接：`<<` / `&` / `|` / `^` / `shl`"）。
+  // **名字不能用符号**：图上的 `^` 早就是**幂**（`P('^')` 就在上面几行），所以这六格用词 ——
+  // 与 nim 写源码的那几个词一致（`and` / `or` / `xor` / `not` / `shl` / `shr` 的位运算义）。
+  // go / V 的 `&` `|` `^` `~` `<<` `>>` 由各自的算符表映到这六个名字上。
+  //
+  // **算在 BigInt 上再折回 Number**：js 的 `&` / `<<` 是**32 位**的（`1 << 40` 会得 256），
+  // 而这一层的整数按 64 位看（c 那侧是 `long long`、wat 那侧是 i64、方言那侧也是 64 位）。
+  // BigInt 的位运算按无穷精度的二补数算，负数与 int64 的答案一致，折回 Number 在 ±2^53
+  // 之内准确 —— 超出那一档是"这一层的整数就是 f64"那笔老账，不是这一刀新欠的。
+  //
+  // 移位的位数**必须在 0..63**：负数或过大在 go 里是 panic、在 wasm 里是取模，
+  // 两种都不许静静地给个答案 —— 当场报。
+  ...bitPrims(),
 
   // ---- 列表追加：**writes**（改的是那格列表本身）------------------------------
   //

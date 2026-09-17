@@ -189,6 +189,10 @@ const prog = (body) => ({ kind: 'graph', body });
 const WAT_ARITH = new Map([
   ['+', 'i64.add'], ['-', 'i64.sub'], ['*', 'i64.mul'],
   ['/', 'i64.div_s'], ['%', 'i64.rem_s'],
+  /* 位运算那五格：wasm 的 i64 本来就有这几条指令（`bnot` 不在这儿 —— 它是一元，
+     拼成 `xor -1`，见下面 `bnot` 那一处）。移位的位数在这一层已经查过 0..63。 */
+  ['band', 'i64.and'], ['bor', 'i64.or'], ['bxor', 'i64.xor'],
+  ['shl', 'i64.shl'], ['shr', 'i64.shr_s'],
 ]);
 const WAT_CMP = new Map([
   ['<', 'i64.lt_s'], ['>', 'i64.gt_s'], ['<=', 'i64.le_s'], ['>=', 'i64.ge_s'],
@@ -878,6 +882,11 @@ function emitOnce(graph, retOf, multiOf) {
         // `not`：真假在这一批用 0/1 表示，所以它就是"等于 0"
         if (name === 'not' && args.length === 1) {
           return `(i64.extend_i32_s (i64.eqz ${expr(args[0], sc, pre)}))`;
+        }
+        /* `bnot` 是**按位取反**（不是逻辑非）：wasm 没有一元的取反指令，
+           拼成 `xor -1`（二补数的按位取反 = 与 -1 做 xor）。 */
+        if (name === 'bnot' && args.length === 1) {
+          return `(i64.xor ${expr(args[0], sc, pre)} (i64.const -1))`;
         }
         throw new Gap(`这格内建还没接：${name}`);
       }

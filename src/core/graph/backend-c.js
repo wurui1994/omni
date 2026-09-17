@@ -49,9 +49,11 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   'map-new', 'map-get', 'map-set', 'map-has', 'values', 'pick', 'conv', 'slice',
   'scope-exit', 'assert']);
 
-/** 这一刀接得住的内建。`prims.js` 里现有 18 格，全在这儿。 */
+/** 这一刀接得住的内建。`prims.js` 里现有 24 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
-  'not', 'concat', 'len', 'print', 'push', 'contains']);
+  'not', 'concat', 'len', 'print', 'push', 'contains',
+  /* 位运算那六格（C 里就是 `& | ^ ~ << >>`，不需要 BigInt 那层转译）。 */
+  'band', 'bor', 'bxor', 'bnot', 'shl', 'shr']);
 
 /**
  * 产物开头那一段**固定的 C**：值的表示 + 真值观 + 印法 + 那几格内建的实现。
@@ -1343,6 +1345,16 @@ class CGen {
     if (name === 'len') return `g_len(${args[0]})`;
     if (name === 'push') return `g_push(${args[0]}, ${args[1]})`;
     if (name === 'contains') return `g_contains(${args[0]}, ${args[1]})`;
+    /* 位运算那六格：**值先取成 double 再折成 long long**（这一层的值是 `gv`，
+       数那一格里装的是 double —— 与别的算术走同一条路），算完再包回 `g_num`。
+       头一版直接把 `gv` 当 long long 转，C 那侧当场报"cannot convert 'struct gv'"。 */
+    const iArg = (i) => `(long long)(${dArg(i)})`;
+    if (name === 'band') return `g_num((double)(${iArg(0)} & ${iArg(1)}))`;
+    if (name === 'bor') return `g_num((double)(${iArg(0)} | ${iArg(1)}))`;
+    if (name === 'bxor') return `g_num((double)(${iArg(0)} ^ ${iArg(1)}))`;
+    if (name === 'bnot') return `g_num((double)(~${iArg(0)}))`;
+    if (name === 'shl') return `g_num((double)(${iArg(0)} << ${iArg(1)}))`;
+    if (name === 'shr') return `g_num((double)(${iArg(0)} >> ${iArg(1)}))`;
     if (name === 'concat') {
       if (args.length === 0) return 'g_str("")';
       return args.reduce((a, b) => `g_str(g_cat2(g_show(${a}), g_show(${b})))`);

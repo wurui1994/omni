@@ -81,7 +81,13 @@ function mapBindName(x) {
 
 /** 无名表的孩子是**全部** items（形参装在这种表里 —— mojo 那边踩过同一处）。 */
 
-const OPS = ops({ div: '/', mod: '%', '&': 'concat' });
+/* nim 的 `shl` / `shr` 就是位移（没有第二种意思）；**`and` / `or` / `xor` / `not` 不接** ——
+   那四个词在 nim 里**按类型**决定是逻辑还是位运算（`true and false` 与 `5 and 3`），
+   而这一层没有类型。猜一个就是静默的错答案，所以那四个照旧报。
+   `&` 是串接（nim 自己的规矩），所以它在这张 delta 里盖掉公共表那一格。 */
+const OPS = ops({
+  div: '/', mod: '%', '&': 'concat', shl: 'shl', shr: 'shr',
+});
 const CONV = convs({
   int8: 'int', int16: 'int', int32: 'int', int64: 'int',
   uint: 'int', uint8: 'int', uint32: 'int', uint64: 'int',

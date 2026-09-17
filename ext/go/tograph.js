@@ -167,7 +167,9 @@ function collectDecls(x, shapesOnly) {
 // go 的算符表：标准那一批。位运算那一族（`<<` / `>>` / `&` / `|` / `^` / `&^`）
 // **不在这张表里** —— 它们要的是 prim 表里加那几格，归"词汇表"那一刀。
 // `binOf` 查不到就当场报，不是静默落成别的东西。
-const OPS = ops();
+/* go 的位运算：`&` `|` `<<` `>>` 在公共表里，这儿补 go 自己那两格 ——
+   **`^` 在 go 里是 xor**（图上 `^` 是幂，所以映到 `bxor`），`&^` 是 and-not（下面拼）。 */
+const OPS = ops({ '^': 'bxor' });
 /** 转换名 -> `conv` 的目标。go 的定宽整数与浮点各自那几格都往这四格收。 */
 const CONV = convs({
   int8: 'int', int16: 'int', int32: 'int', int64: 'int',
@@ -626,11 +628,18 @@ function toNode(x) {
     // ---- 算子 --------------------------------------------------------------
     case 'bin': {
       const [op, a, b] = kids(x);
+      /* `a &^ b` 是 go 独有的 and-not —— 拼成 `band(a, bnot(b))`，不给它开一格内建。 */
+      if (leaf(op) === '&^') {
+        return node('prim', { args: [toNode(a), un('bnot', toNode(b))] }, { name: 'band' });
+      }
       return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'go' });
     }
     case 'un': {
       const [op, a] = kids(x);
-      return un(leaf(op) === '!' ? 'not' : leaf(op), toNode(a));
+      const o = leaf(op);
+      if (o === '!') return un('not', toNode(a));
+      if (o === '^') return un('bnot', toNode(a));      // go 的一元 `^` 是按位取反
+      return un(o, toNode(a));
     }
 
     // ---- 声明与语句 --------------------------------------------------------

@@ -80,7 +80,9 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
 
 /** 这一刀接得住的内建（`prims.js` 里 16 格中的 15 格；只有多实参 print 还欠着）。 */
 const PRIMS_OK = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
-  'not', 'len', 'print', 'concat', 'push']);
+  'not', 'len', 'print', 'concat', 'push',
+  /* 位运算那六格（`bnot` 拼成 `bxor -1` —— 方言的 `bin` 是二元的）。 */
+  'band', 'bor', 'bxor', 'bnot', 'shl', 'shr']);
 
 /**
  * **与实参无关的那几格内建的类型**（比较出 bool、`len` 出 int、`concat` 出串、
@@ -94,6 +96,8 @@ const PRIMS_OK = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=
 function primFixedType(nm) {
   if (nm === '<' || nm === '>' || nm === '<=' || nm === '>=' || nm === '=' || nm === '!=' || nm === 'not') return 'bool';
   if (nm === 'len') return 'int';
+  if (nm === 'band' || nm === 'bor' || nm === 'bxor' || nm === 'bnot'
+    || nm === 'shl' || nm === 'shr') return 'int';   // 位运算只对整数，答案也是整数
   if (nm === 'concat') return 'string';
   if (nm === 'push') return null;      // 语句，没有值
   return undefined;                    // 要看实参
@@ -103,6 +107,9 @@ function primFixedType(nm) {
 const BINOP = {
   '+': '+', '-': '-', '*': '*', '/': '/', '%': '%', '^': '^',
   '<': '<', '>': '>', '<=': '<=', '>=': '>=', '=': '==', '!=': '!=',
+  /* 位运算那五格：**方言里早就有**（`(bin "&" …)` / `(bin "<<" …)`，按 64 位整数算）——
+     图上那六个名字用词是因为 `^` 在图上是幂，方言那侧没有这个撞名，所以直接映回符号。 */
+  band: '&', bor: '|', bxor: '^', shl: '<<', shr: '>>',
 };
 
 const isNode = (x) => x !== null && x !== undefined && x.op !== undefined;
@@ -329,6 +336,11 @@ function expr(x, env, ctx) {
       if (nm === 'print') gap('print 出现在表达式位置上');
       if (nm === 'push') gap('push 出现在表达式位置上（方言里 apush 是一条语句）');
       if (nm === 'concat') return concatText(args, env, ctx);
+      /* **bnot 是一元的**：方言里没有一元的 `~`，用 `(bin "^" x (int -1))` 拼
+         （二补数的按位取反 = 与 -1 做 xor）。 */
+      if (nm === 'bnot' && args.length === 1) {
+        return `(bin "^" ${expr(args[0], env, ctx)} (int -1))`;
+      }
       /* 一格实参的 `-` 是**取负**（方言里那是另一个形状：`(un "-" …)`）。 */
       if (nm === '-' && args.length === 1) return `(un "-" ${expr(args[0], env, ctx)})`;
       if (args.length < 2) gap(`${nm} 收了 ${args.length} 格实参（这一刀只接两格）`);
