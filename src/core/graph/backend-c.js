@@ -815,14 +815,27 @@ class CGen {
     if (p.arity >= 0 && args.length !== p.arity) {
       throw new Gap(`内建 ${name} 收 ${p.arity} 格实参，这张图给了 ${args.length}`);
     }
-    const num2 = (op) => args.reduce((a, b) => `g_num(g_d(${a}) ${op} g_d(${b}))`);
+    /**
+     * **别装了又拆**（`docs/design/node-graph-shrink.md` 第二节那一行「最扎眼的」账）：
+     * 算术这几格本来就按数算（下面每一处都套着 `g_d`），所以实参是编译期就知道的数时
+     * 直接发那个 double —— `g_d(g_num(1.0))` 变回 `1.0`。
+     *
+     * 等价性是显然的一句话：`g_d(g_num(k)) == k`（那两格就是 memcpy 的一来一回，
+     * 见这份序言里的 `g_num` / `g_d`）。所以这一格不动语义，只少一趟往返。
+     * 只管**常量**：变量那一侧要少这趟往返得先把局部量窄成 `double`，那是另一刀。
+     */
+    const dArg = (i) => {
+      const k = constNum(raw[i]);
+      return k === null ? `g_d(${args[i]})` : cNum(k);
+    };
+    const num2 = (op) => args.map((_, i) => dArg(i)).reduce((a, b) => `g_num(${a} ${op} ${b})`);
     const rel = (op) => `g_bool(g_cmp(${args[0]}, ${args[1]}) ${op})`;
     if (name === '+') return args.length === 0 ? 'g_num(0.0)' : args.reduce((a, b) => `g_add(${a}, ${b})`);
-    if (name === '-') return args.length === 1 ? `g_num(-g_d(${args[0]}))` : num2('-');
+    if (name === '-') return args.length === 1 ? `g_num(-${dArg(0)})` : num2('-');
     if (name === '*') return args.length === 0 ? 'g_num(1.0)' : num2('*');
     if (name === '/') return num2('/');
-    if (name === '%') return `g_num(g_fmod(g_d(${args[0]}), g_d(${args[1]})))`;
-    if (name === '^') return `g_num(g_pow(g_d(${args[0]}), g_d(${args[1]})))`;
+    if (name === '%') return `g_num(g_fmod(${dArg(0)}, ${dArg(1)}))`;
+    if (name === '^') return `g_num(g_pow(${dArg(0)}, ${dArg(1)}))`;
     if (name === '<') return rel('< 0');
     if (name === '>') return rel('> 0');
     if (name === '<=') return rel('<= 0');
