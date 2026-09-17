@@ -597,6 +597,14 @@ function stmtIn(x, env, ctx) {
       if (isNode(init) && init.op === 'list-new') return bindList(nm, init, env, ctx);
       if (isNode(init) && init.op === 'slice') return bindSlice(nm, init, env, ctx);
       if (isNode(init) && init.op === 'map-new') return bindMap(nm, init, env, ctx);
+      /* **awk 的"没赋过值的变量"**：映射把它落成 `bind n = null`（`ext/awk/tograph.js`
+       * 的 bodyOf）。方言是有类型的，所以这一格照**第一次赋值**定型，值给那个类型的零值 ——
+       * 与 awk 的语义对得上（那门语言里没赋过值的变量当数是 0、当串是 ""，正好都是零值）。 */
+      if (isLitNull(init)) {
+        const t = nullHint(nm, ctx, env);
+        env.set(nm, t);
+        return [`(let ${nm} ${t} ${zeroText(t)})`];
+      }
       const t = typeOf(init, env, ctx);
       env.set(nm, t);
       return [`(let ${nm} ${t} ${expr(init, env, ctx)})`];
@@ -766,6 +774,34 @@ function bindMap(nm, mp, env, ctx) {
   return out;
 }
 
+/** 一格 `null` 字面量（awk 的"没赋过值"）。 */
+function isLitNull(x) {
+  if (isLit(x)) return x.lit === null;
+  return isNode(x) && x.op === 'const' && x.attrs.value === null;
+}
+
+/** `null` 那一格的类型从**第一处赋值**上取。找不着就报缺口，不猜。 */
+function nullHint(nm, ctx, env) {
+  const seek = (x) => {
+    if (Array.isArray(x)) {
+      for (const y of x) { const r = seek(y); if (r !== null) return r; }
+      return null;
+    }
+    if (!isNode(x)) return null;
+    if (x.op === 'set' && x.attrs.name === nm && !isLitNull(x.ins.value)) {
+      return typeOf(x.ins.value, env, ctx);
+    }
+    for (const k of Object.values(x.ins)) { const r = seek(k); if (r !== null) return r; }
+    return null;
+  };
+  const t = seek(ctx.scope);
+  if (t === null || !isScalar(t)) {
+    gap(`'${nm}' 是一格 null（没赋过值），而这一层里找不到一处给它赋标量的地方 ——`
+      + '方言是有类型的，说不清类型就落不下去');
+  }
+  return t;
+}
+
 /** 空字典的类型从**第一处写**上取（lua / awk 那一档）。找不着就报缺口，不猜。 */
 function mapHint(nm, ctx, env) {
   const seek = (x) => {
@@ -923,16 +959,26 @@ export function emitCore(g) {
        * （见 `expr` 的 call 那一支）。糊一格 `(ret 0)` 上去是最坏的：矩阵上量到过
        * chez+intmath 印 0 / 0、sbcl+blockret 末行印 0 —— 悄悄给错答案。 */
       let rt = retTypeOf(f.ins.body, env, ctx);
-      /* 一格 `ret` 都没有时再问一句：**体末尾是不是一个值**（chez / sbcl 的隐式返回）。
-       * 是就把它当返回值 —— 那不是"补零值"（补零值给错答案，之前量到过两次），
-       * 那就是那两门语言的语义本身。判据是 `nodes.js` 上那一栏 sort：expr 才算值。 */
-      const impl = rt === null ? implicitRet(f.ins.body) : null;
+      /* **体末尾是不是一个值**（chez / sbcl 的隐式返回）。是就把它当返回值 —— 那不是
+       * "补零值"（补零值给错答案，之前量到过两次），那就是那两门语言的语义本身。
+       * 判据是 `isValueish`（sort 那一栏 + print 与"两支躺着语句"那两格例外）。
+       *
+       * **体里有显式 ret 也要问这一句**：sbcl 的 `max2` 是
+       * `(if (> a b) (return-from max2 a)) b` —— 前面一格显式 ret、末尾那个值也是返回值。
+       * 原先只在"一格 ret 都没有"时问，于是那一格落到"体末尾不是 ret"上报了缺口。 */
+      let impl = implicitRet(f.ins.body);
       if (impl !== null) {
         const penv = new Map(env);
         for (const p of params) penv.set(p, 'int');
         const t = typeOf(impl, penv, ctx);
         /* 标量或**一格形状**（chez 的 `(values 3 7)` 当函数体就是后者）都算 */
-        if (t !== 'void' && (isScalar(t) || ctx.shapes.has(t))) rt = t;
+        if (t === 'void' || !(isScalar(t) || ctx.shapes.has(t))) impl = null;
+        else if (rt === null) rt = t;
+        else if (rt === 'void') impl = null;      // void 函数末尾那个值不是返回值
+        else if (rt !== t) {
+          gap(`函数 '${it.attrs.name}' 的显式 ret 交的是 ${rt}，体末尾那个值是 ${t}`
+            + '（这一刀不做合一）');
+        }
       }
       fns[fns.length - 1].impl = rt === null ? null : impl;
       env.set(`fn:${it.attrs.name}`, rt ?? 'void');
