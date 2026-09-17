@@ -58,6 +58,7 @@
 import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, classType, fnType, typeKey, zeroValue,
   ptrType, tptrType, ptrTargetOk, blkType, structLayout, sizeOf } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
+import { expandTemplates } from './template.js';
 import { SourceFile } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 
@@ -1367,6 +1368,24 @@ class CoreLowerer {
         : { kind: 'VarRef', name: nm, type: t };
       return { kind: 'ExprStmt', expr: { kind: 'Assign', target: tgt, value: v, type: t } };
     }
+    /** `(gset 名 值)` —— `(gvar …)` 的写侧（同一个理由，见那儿）。 */
+    if (h === 'gset') {
+      const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+      if (nm === null) return this.err(n, '(gset 名字 值)');
+      const t = this.globals.get(nm);
+      if (t === undefined) return this.err(n, `没有模块级变量 '${nm}'`);
+      if (this.inKernel) {
+        return this.err(n, `kernel 里改模块级变量 '${nm}'（GPU 那条腿上没有它，`
+          + '结果写回 (buf …) 形参）');
+      }
+      const v = this.expr(n.items[2]);
+      if (v === null) return null;
+      if (!sameCoreType(v.type, t)) {
+        return this.err(n, `'${nm}' 是 ${coreTypeText(t)}，赋的值是 ${coreTypeText(v.type)}`);
+      }
+      const tgt = { kind: 'GlobalRef', name: nm, type: t };
+      return { kind: 'ExprStmt', expr: { kind: 'Assign', target: tgt, value: v, type: t } };
+    }
     return this.stmt2(n, h, ret);
   }
 
@@ -2265,6 +2284,25 @@ class CoreLowerer {
       return { kind: 'VarRef', name: nm, type: r.type };
     }
     /**
+     * `(gvar 名)` —— **只认模块级变量**（ADR-0037 的卫生模板）。
+     *
+     * 它不是给人写的，是模板那一趟自己发的：模板体里引用一格模块级变量时，定义期就把
+     * `(var g)` 改写成 `(gvar g)`，于是调用处有个同名的局部也遮不住它
+     * （Nim 那边这一手是把自由标识符换成 `nkSym`，`semtempl.nim`）。
+     * 人手写也合法 —— 那时它的意思就是"我要的是模块级那一格，不是局部"。
+     */
+    if (h === 'gvar') {
+      const nm = isAtom(n.items[1]) ? n.items[1].value : null;
+      if (nm === null) return this.err(n, '(gvar 名字)');
+      const t = this.globals.get(nm);
+      if (t === undefined) return this.err(n, `没有模块级变量 '${nm}'`);
+      if (this.inKernel) {
+        return this.err(n, `kernel 里读模块级变量 '${nm}'（GPU 那条腿上没有它，`
+          + '要的数据从 (buf …) 形参进来）');
+      }
+      return { kind: 'GlobalRef', name: nm, type: t };
+    }
+    /**
      * `(ccall 名字 实参…)` —— 调一个 `(cabi …)` 声明过的**外部 C 符号**（ADR-0022 的 J4b）。
      *
      * 与 dynamic 域那条 C 调用（`hir/c_abi.js` + `backend-c` 的 `case 'CCall'`）是**两回事**：
@@ -2876,12 +2914,16 @@ function coreTypeText(t) {
  * 核心方言的源文本 -> OIR。`.sx` 文件走这条，`omni glr` 的输出也走这条 ——
  * 后者才是重点：语法文件的映射模板拼出这份方言，中间没有为那门语言写的一行代码。
  */
-export function lowerCoreSexpr(file, diags, entry) {
+export function lowerCoreSexpr(file, diags, entry, opts) {
   const nodes = readSexpr(file, diags);
+  if (diags.hasErrors()) return null;
+  /* 卫生模板那一趟（ADR-0037，`sexpr/template.js`）：`(define-template …)` 在这儿展开完，
+     再往下就是原来那条路 —— 降级器一个字都不知道模板这回事。没有模板的文件原样穿过去。 */
+  const expanded = expandTemplates(nodes, diags, opts !== undefined && opts.templates === true);
   if (diags.hasErrors()) return null;
   // 入口名默认是 `omni_main`（整个程序）。一个库文件编成一份自己的产物时给它自己的名字
   // （`omni_init_plain` 之类）：那一份的 `(main …)` 就是这个库的初始化函数。
-  return new CoreLowerer(diags).chunk(nodes, entry === undefined ? 'omni_main' : entry);
+  return new CoreLowerer(diags).chunk(expanded, entry === undefined ? 'omni_main' : entry);
 }
 
 /**

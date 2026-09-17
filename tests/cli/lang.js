@@ -113,5 +113,106 @@ const sxFile = sample('sx-in-omni.omni', SX);
   } else bad('不带指令的文件该照旧', `rc=${r.status} ${both(r).slice(-300)}`);
 }
 
+/* ---- 五、卫生模板（ADR-0037 的事情一下半，**照 Nim 那两趟**）
+ *
+ * 判的是三条性质，每一条都能一句话说清"错了会怎样"：
+ *   1. 体里的局部不许捕获调用处的同名变量（Nim：locals default to gensym）
+ *   2. 体里引用的**模块级变量**不许被调用处的同名局部遮住 —— 这一条就是 Nim 那句
+ *      "自由名字在定义处解析成 nkSym"在这门方言里的样子（运算符是字符串，所以捕获只可能
+ *      发生在变量上）。gensym-only 的实现**过不了这一条**。
+ *   3. 两个洞都是调用处的名字时一个都不许换（经典 swap!）
+ * 一份文件三条一起跑，输出对上就三条都成立。 */
+const TPL = '(module\n'
+  + '  (global counter int)\n'
+  + '  (define-template dbl (x)\n'
+  + '    (do (let t int (var x)) (print (bin "+" (var t) (var t)))))\n'
+  /* 体里写的是普通的 `(var counter)` / `(set counter …)` —— 定义期那一趟自己把它们绑到
+     模块级那一格上（改写成 `(gvar …)` / `(gset …)`）。这一格判的正是那一趟。 */
+  + '  (define-template bump ()\n'
+  + '    (do (set counter (bin "+" (var counter) (int 1))) (print (var counter))))\n'
+  + '  (define-template swap! (a b)\n'
+  + '    (do (let t int (var a)) (set a (var b)) (set b (var t))))\n'
+  + '  (main\n'
+  + '    (let t int (int 5))\n'
+  + '    (dbl (var t))\n'
+  + '    (print (var t))\n'
+  + '    (let counter int (int 100))\n'
+  + '    (bump)\n'
+  + '    (print (var counter))\n'
+  + '    (let p int (int 1))\n'
+  + '    (let q int (int 2))\n'
+  + '    (swap! (var p) (var q))\n'
+  + '    (print (var p))\n'
+  + '    (print (var q))))\n';
+const tplFile = sample('hygiene.sx', TPL);
+{
+  const r = omni(['run', tplFile, '--lang-directive']);
+  const out = (r.stdout || '').trim().split('\n');
+  const want = ['10', '5', '1', '100', '2', '1'];
+  if (r.status === 0 && out.join(',') === want.join(',')) {
+    ok('卫生三条一起过：局部不捕获（10 / 5）、模块级变量不被遮（1 / 100）、swap!（2 / 1）');
+  } else bad('卫生三条', `rc=${r.status} 出来的是 ${out.join(',')}\n    ${both(r).slice(-300)}`);
+}
+{
+  const r = omni(['run', tplFile]);
+  const s = both(r);
+  if (r.status !== 0 && s.includes('默认关着') && s.includes('--lang-directive')) {
+    ok('(define-template …) 与 #lang 同一格开关：关着时当场报 + 给开法');
+  } else bad('模板该跟 #lang 同一格开关', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  /* 同一个模板展开两次，两次的局部名**必须不同**（Nim 的 `instID`：一次展开一个号）。
+     一样的话两次展开的临时量会互相盖 —— 那是"卫生"没做到的另一种。 */
+  const p = sample('twice.sx', '(module\n'
+    + '  (define-template dbl (x) (do (let t int (var x)) (print (bin "+" (var t) (var t)))))\n'
+    + '  (main (dbl (int 3)) (dbl (int 4))))\n');
+  const run = omni(['run', p, '--lang-directive']);
+  const js = omni(['emit', 'js', p, '--lang-directive']);
+  const names = [...new Set(((js.stdout || '').match(/t_gensym[0-9]+/g) ?? []))];
+  if (run.status === 0 && (run.stdout || '').trim() === '6\n8' && names.length === 2) {
+    ok(`展开两次两个号：${names.join(' / ')}（6 / 8 也对）`);
+  } else bad('两次展开该是两个号', `rc=${run.status} 名字=${names.join(',')}`);
+}
+
+/* ---- 六、模板那三处拒绝：每一处都要说到原因上，不是一句"语法错" */{
+  const p = sample('free.sx', '(module\n'
+    + '  (define-template bad () (print (var nope)))\n  (main (bad)))\n');
+  const r = omni(['run', p, '--lang-directive']);
+  const s = both(r);
+  if (r.status !== 0 && s.includes("引用了 'nope'") && s.includes('定义处')) {
+    ok('体里的自由名字查不到：说清"要在定义处就查得到"，并列出形参');
+  } else bad('自由名字该报', `rc=${r.status} ${s.slice(0, 250)}`);
+}
+{
+  const p = sample('arity.sx', '(module\n'
+    + '  (define-template two (a b) (print (bin "+" (var a) (var b))))\n'
+    + '  (main (two (int 1))))\n');
+  const r = omni(['run', p, '--lang-directive']);
+  const s = both(r);
+  if (r.status !== 0 && s.includes("模板 'two' 要 2 个实参")) {
+    ok('实参个数不对：报"要几个、给了几个"，并印出形参名');
+  } else bad('实参个数该报', `rc=${r.status} ${s.slice(0, 250)}`);
+}
+{
+  /* 模板不是函数：递归展开停不下来。到上限就报，而且要说清**为什么**不能递归。 */
+  const p = sample('rec.sx', '(module\n'
+    + '  (define-template loop1 (x) (loop1 (var x)))\n  (main (loop1 (int 1))))\n');
+  const r = omni(['run', p, '--lang-directive']);
+  const s = both(r);
+  if (r.status !== 0 && s.includes('在调自己') && s.includes('不能递归')) {
+    ok('模板调自己：到展开上限就报，说清"展开是编译期做完的"');
+  } else bad('递归该报', `rc=${r.status} ${s.slice(0, 250)}`);
+}
+{
+  /* **中性**：一份没有模板的 `.sx`，开着开关与不开跑出来一模一样
+     （没有 `(define-template …)` 时 `expandTemplates` 原样把那棵树交回去，一次遍历都不做）。 */
+  const p = join(ROOT, 'tests', 'sexpr', 'cases', '01-core.sx');
+  const a = omni(['run', p]);
+  const b = omni(['run', p, '--lang-directive']);
+  if (a.status === 0 && b.status === 0 && a.stdout === b.stdout) {
+    ok('中性：没有模板的 .sx，开关开与不开输出逐字节相同');
+  } else bad('没有模板的 .sx 该中性', `rc=${a.status}/${b.status}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

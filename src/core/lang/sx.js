@@ -5,7 +5,7 @@
 // 那两门以后搬出去的时候，共用的这一格已经在插件那一侧了。
 
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
-import { readText } from '../host/native.js';
+import { readText, env } from '../host/native.js';
 import { lowerCoreSexpr, lowerCoreSession, CoreSession } from '../sexpr/lower.js';
 
 /** @param api `{ registerLang, log }` */
@@ -14,9 +14,14 @@ import { lowerCoreSexpr, lowerCoreSession, CoreSession } from '../sexpr/lower.js
    等每门语言各自成一个动态库、各自独立编译，C ABI 那一层的入口才是统一的
    `omni_plugin_init`，JS 这一侧的名字就不必再避让了。 */
 export function registerSxLang(api) {
-  api.registerLang(['.sx'], 'sx', (path) => {
+  api.registerLang(['.sx'], 'sx', (path, argv) => {
     const diags = new Diagnostics();
-    const mod = lowerCoreSexpr(new SourceFile(path, readText(path)), diags);
+    /* 卫生模板（ADR-0037）与 `#lang` **同一格开关**：`--lang-directive` 或
+     * `OMNI_LANG_DIRECTIVE=1`。这一门自己读环境与 argv —— 那格状态住在 cli.js 里，
+     * 而这一份不许 import 它（插件那条规矩，见文件头）。 */
+    const on = (argv ?? []).includes('--lang-directive') || env('OMNI_LANG_DIRECTIVE') === '1';
+    const mod = lowerCoreSexpr(new SourceFile(path, readText(path)), diags, undefined,
+      { templates: on });
     diags.throwIfErrors();
     api.log(`core sexpr front end  ${path} -> OIR  ${mod.funcs.length} funcs`);
     return { ast: null, mod, diags };
