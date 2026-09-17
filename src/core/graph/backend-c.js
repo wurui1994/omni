@@ -49,9 +49,9 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   'map-new', 'map-get', 'map-set', 'map-has', 'values', 'pick', 'conv', 'slice',
   'scope-exit', 'assert']);
 
-/** 这一刀接得住的内建。`prims.js` 里现有 16 格，全在这儿。 */
+/** 这一刀接得住的内建。`prims.js` 里现有 18 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
-  'not', 'concat', 'len', 'print', 'push']);
+  'not', 'concat', 'len', 'print', 'push', 'contains']);
 
 /**
  * 产物开头那一段**固定的 C**：值的表示 + 真值观 + 印法 + 那几格内建的实现。
@@ -352,6 +352,16 @@ static gv g_push(gv xs, gv x) {
   L->v[L->n] = x;
   L->n = L->n + 1;
   return g_nil();
+}
+
+/* 成员是不是在里头：列表**找元素**（线性扫，用 g_eq —— 与 map 的键比同一条）。
+   串找子串**刻意不接**：没有一份判据用得上它（见 prims.js 那一行）。 */
+static gv g_contains(gv c, gv x) {
+  if (c.t != GT_LIST) g_die("contains: 第一格不是列表");
+  glist *L = g_L(c);
+  long long i = 0;
+  while (i < L->n) { if (g_eq(L->v[i], x)) return g_bool(1); i++; }
+  return g_bool(0);
 }
 
 /* 断言：不成立就把那句话印在同一格 print 上、然后停下来。
@@ -1332,6 +1342,7 @@ class CGen {
     if (name === 'not') return `g_bool(g_truthy(${args[0]}) == 0)`;
     if (name === 'len') return `g_len(${args[0]})`;
     if (name === 'push') return `g_push(${args[0]}, ${args[1]})`;
+    if (name === 'contains') return `g_contains(${args[0]}, ${args[1]})`;
     if (name === 'concat') {
       if (args.length === 0) return 'g_str("")';
       return args.reduce((a, b) => `g_str(g_cat2(g_show(${a}), g_show(${b})))`);

@@ -125,8 +125,16 @@ function toNode(x) {
 
     case 'bin': {
       const [op, a, b] = kids(x);
+      const o = leaf(op);
+      // `x in xs` / `x notin xs` —— **两边要换个位置**（`contains(容器, 元素)`），
+      // 所以走不了 `binOf` 那条查表的路。那格内建**只找列表里的元素**：nim 的 `x in s`
+      // （串）要 char 那一格，而 char 还没接。判据 `ext/nim/examples/member.nim`。
+      if (o === 'in' || o === 'notin') {
+        const yes = node('prim', { args: [toNode(b), toNode(a)] }, { name: 'contains' });
+        return o === 'in' ? yes : un('not', yes);
+      }
       // `&` 是 nim 的串连接 —— 表里映到 `concat` 那格内建，与算符走同一条路
-      return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'nim', and: ['and'], or: ['or'] });
+      return binOf(o, toNode(a), toNode(b), OPS, { lang: 'nim', and: ['and'], or: ['or'] });
     }
     case 'un': {
       const [op, a] = kids(x);

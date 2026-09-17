@@ -59,6 +59,23 @@ export const PRIMS = new Map([
     /* 交出来的是 nil（与 interp 一侧同一个值 —— js 的 `push` 回的是新长度，要压掉）。 */
     (a) => `((${a[0]}).push(${a[1]}), null)`),
 
+  // ---- 成员是不是在里头：**pure**（只读，不改）--------------------------------
+  //
+  // 与 `push` 同一类（列表上的一个库函数 -> **内建**，不是节点）。账上算出来的：
+  // V 的 `x in arr` 20 份 + nim 的 `x in xs` 5 份 —— 那 25 份印的是"这个算子还没接：in"。
+  //
+  // **只接列表**（线性扫找元素）。两处刻意不接：
+  //   * map 不走这一格 —— 那是 `map-has`（键在不在），图上早有那一格；
+  //   * **串找子串也不走这一格** —— 头一版写了那一支，可**没有一份判据用得上它**
+  //     （V 的 `in` 只对数组与 map 合法，串要 `.contains()`；nim 的 `x in s` 要 char，
+  //     而 char 那一格还没接）。没有判据的代码不留 —— 要接就连它的判据一起来。
+  P('contains', 2, [],
+    (a) => {
+      if (!Array.isArray(a[0])) throw new Error('contains: 第一格不是列表');
+      return a[0].some((v) => v === a[1]);
+    },
+    (a) => `((${a[0]}).some((__v) => __v === (${a[1]})))`),
+
   // ---- 外部 IO：**writes**。`print` 就在这儿 —— 它不是节点（见 nodes.js 文件头）----
   P('print', -1, ['writes'],
     (a, io) => { io.out.push(a.map((v) => show(v, io.show)).join(' ')); return null; },

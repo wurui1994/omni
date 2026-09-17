@@ -456,11 +456,16 @@ function toNode(x) {
       const [o, i] = kids(x);
       return isMap(o) ? mapGet(toNode(o), toNode(i)) : indexGet(toNode(o), toNode(i));
     }
-    // `k in m` -> map-has。V 把"在不在"写成一格算子、go 写成 comma-ok —— 同一格节点
-    case 'in': {
+    // `k in m` -> map-has（键在不在，go 那门写成 comma-ok —— 同一格节点）、
+    // `x in arr` -> `prim contains`（**找元素**，线性扫）。
+    // 两件事在树上同形，分开靠的还是那一趟扫查（`MAPS`）—— 与 `m[k]` / `xs[i]` 同一条。
+    // `x !in arr` 是 `(not-in …)`，套一层 `not`。
+    case 'in': case 'not-in': {
       const [k, o] = kids(x);
-      if (!isMap(o)) throw new Error('v->graph: `in` 这一批只接 map（数组的 in 要线性查找）');
-      return mapHas(toNode(o), toNode(k));
+      const yes = isMap(o)
+        ? mapHas(toNode(o), toNode(k))
+        : node('prim', { args: [toNode(o), toNode(k)] }, { name: 'contains' });
+      return tag(x) === 'in' ? yes : un('not', yes);
     }
     // `xs[1..3]` -> slice（V 的上界也**不含**）
     case 'slice': {
