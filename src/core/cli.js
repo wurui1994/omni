@@ -501,6 +501,16 @@ let CROSS = null;
  * 而中间三层的签名是给本机那一趟定的。`null` = 系统那一份（绝大多数时候）。
  */
 let LIBC = null;
+/**
+ * 生成的 C 交给谁（`--cc`，第一百四十六片）——与 `CROSS`/`LIBC` 同一个理由摆成一格状态：
+ * 这件事要一直传到 `selfCC()` / `findCC()` 两处，而中间几层的签名是给「按环境变量决定」
+ * 那一趟定的。
+ *
+ * **比 `OMNI_CC` 优先**：环境变量说的是「这一整轮都这样」，命令行说的是「这一趟这样」，
+ * 后者盖前者是唯一讲得通的次序（`make CC=…` 也是这个规矩）。`null` = 没给，看环境变量；
+ * 两处都没给就是 `self`（我们自己那台 C 前端 + 我们自己的链接器）。
+ */
+let CC = null;
 /* 编出来的核心默认只内建 js -> c，别的语言/目标各自一格 plugins/ 里的插件（ADR-0021 S4）。
    接缝是 linkJs 的 read 回调 —— 编译器读源码全过它，所以"换掉 builtin.js 那一份文本"
    就等于"不把那几门 import 进来"，链接器与摇树都跟着少活。
@@ -1547,25 +1557,34 @@ function compileProgram(path, text, mode) {
   return { ast: program, mod, diags };
 }
 
+/** 生成的 C 交给谁：`--cc` 先说，没给才看 `OMNI_CC`（两处都没给 = `self`）。 */
+function ccPick() {
+  if (CC !== null && CC !== '') return CC;
+  return env('OMNI_CC');
+}
+
 /** 找一个可用的 C 编译器：tcc 最快，适合开发循环；clang/gcc 用于发布 */
 let findCCMemo = '';
 function findCC() {
+  /* `--cc` 不进 memo：那一格是「这一趟」的话，而 memo 是进程级的
+   * （同一条进程里 `build --plugins` 会连着编好几份，但它们同属这一趟）。 */
+  const explicit = ccPick();
+  if (explicit) return explicit;
   if (findCCMemo !== '') return findCCMemo;
-  const explicit = env('OMNI_CC');
-  if (explicit) { findCCMemo = explicit; return findCCMemo; }
   for (const cc of ['tcc', 'clang', 'gcc', 'cc']) {
     const r = spawn('which', [cc], 'c');
     if (r[0] === 0 && r[1].trim()) { findCCMemo = cc; return findCCMemo; }
   }
-  throw new OmniError('no C compiler found (tried tcc, clang, gcc, cc; override with OMNI_CC)');
+  throw new OmniError('no C compiler found (tried tcc, clang, gcc, cc; '
+    + 'override with --cc or OMNI_CC)');
 }
 
 /**
  * **自带的那台 C 编译器是默认**（第一百四十一片）：生成的 C 交给我们自己那台 C 前端
  * （`omni c obj`）、再交给我们自己的链接器（`omni c link`）——一个外部 C 编译器都不借。
  *
- * 要走外部 cc 就明说：`OMNI_CC=clang`（或 `tcc` / `gcc` / `cc` / 一条路径）。
- * `OMNI_CC=self` 还认，只是现在它就是缺省。
+ * 要走外部 cc 就明说：`--cc clang`（或 `tcc` / `gcc` / `cc` / 一条路径），也可以用
+ * `OMNI_CC=clang` —— **`--cc` 比它优先**。`self` 那个值两处都还认，只是现在它就是缺省。
  *
  * 覆盖到哪儿：可执行文件、可重定位的 `.o`、插件那格共享库（`--shared`）。arm64 macOS 上
  * 共享库要补一句 `codesign -f -s -` 才 dlopen 得动（tcc 自己也喊，`tccmacho.c:2243`）。
@@ -1581,7 +1600,7 @@ function findCC() {
  * `int add(int,int)` 我们 52 字节、tcc 60 字节。
  */
 function selfCC() {
-  const v = env('OMNI_CC');
+  const v = ccPick();
   return !v || v === 'self';
 }
 
@@ -1597,6 +1616,33 @@ function hostArch() {
     ARCH_CACHE = (m === 'arm64' || m === 'aarch64') ? 'arm64' : 'x86_64';
   }
   return ARCH_CACHE;
+}
+
+/**
+ * 自带的那几份 sysroot 在 `src/sysroot/<arch>-<os>`：精简系统头 + `lib/*.def` 符号预设 +
+ * 那一份自带 libc 的源码。`--sysroot` 不给时按目标取它（第一百四十六片）。
+ *
+ * 找法与插件那一格同一个路子（`installDir()` 往上数几层都试一遍）：从源码跑时
+ * `installDir()` 是 `src/core/<某一格>`，装过之后层数可能少一层。
+ *
+ * 取不到**抛错**，不悄悄退回本机：交叉编译按本机的头编出来的东西，要到目标机器上跑
+ * 才发现不对 —— 那笔账最贵。自带的是哪几个目标一并印出来。
+ */
+function bundledSysroot(tgt) {
+  const name = `${tgt.arch}-${tgt.os}`;
+  const dirs = [join(installDir(), '..', '..', 'sysroot'), join(installDir(), '..', 'sysroot')];
+  for (const d of dirs) {
+    const p = join(d, name);
+    if (isDir(p)) return p;
+  }
+  const have = [];
+  for (const d of dirs) {
+    if (!isDir(d)) continue;
+    for (const f of readDir(d)) if (f.includes('-') && isDir(join(d, f))) have.push(f);
+  }
+  throw new OmniError(`没有 ${name} 那一份 sysroot`
+    + (have.length > 0 ? `（自带的有：${[...new Set(have)].sort().join('、')}）` : '')
+    + ' —— 自己给一份：--sysroot DIR');
 }
 
 /**
@@ -2660,13 +2706,35 @@ function main(argv) {
     VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
     STATS = rest.includes('--stats');
     LANGS_FAT = rest.includes('--fat');
-    /* `--sysroot DIR`：这一趟是**交叉编译**。目标由 `--arch`/`--os` 说（不给就按这台
-     * 机器 —— 那种写法没意义，但也不拦），头与库都只从 DIR 里取。 */
-    const si = rest.indexOf('--sysroot');
-    CROSS = si < 0 ? null : { ...cTgt(rest), sysroot: rest[si + 1] };
-    /* `--libc self`：链我们自己那份 libc（`<sysroot>/libc/*.c`），一个外部库都不要。 */
+    /* `--sysroot DIR`：头与库都只从 DIR 里取。目标由 `--arch`/`--os` 说。
+     *
+     * **不给 `--sysroot` 也能交叉编译**（第一百四十六片）：目标与本机不同、或者要
+     * `--libc self`（那一份 libc 的头就在 sysroot 里）时，按目标去取**自带的那一份**
+     * `src/sysroot/<arch>-<os>`。于是常用的两条写法各少一个开关：
+     *   omni build x.omni --arch x86_64 --os linux     （交叉到 Linux）
+     *   omni build x.omni --libc self                  （本机，纯静态）
+     * 取不到就明着骂（自带的只有两个目标）—— 悄悄按本机编出来的东西，拿到目标机器上
+     * 才发现不对，那笔账最贵。
+     *
+     * **只有 `build`/`run`/`plugins` 这几条推**：`omni c obj|link` 是**低一层的工具**
+     * （对着 `cc` 的口径），那一层「头从哪儿来」得写明白 —— 判据里那些交叉编探子正是
+     * 靠「不给 sysroot 就用本机 SDK 的头」在跑的，推一手会悄悄换掉它们的尺子。 */
     const bi = rest.indexOf('--libc');
     LIBC = bi < 0 ? null : rest[bi + 1];
+    const si = rest.indexOf('--sysroot');
+    const infer = node.key === 'build' || node.key === 'run' || node.key === 'plugins';
+    if (si >= 0) {
+      CROSS = { ...cTgt(rest), sysroot: rest[si + 1] };
+    } else if (infer) {
+      const tgt = cTgt(rest);
+      const cross = tgt.arch !== hostArch() || tgt.os !== hostOs();
+      CROSS = (cross || LIBC === 'self') ? { ...tgt, sysroot: bundledSysroot(tgt) } : null;
+    } else {
+      CROSS = null;
+    }
+    /* `--cc CC`：生成的 C 交给谁（`self` = 我们自己那台）。比 `OMNI_CC` 优先。 */
+    const ci = rest.indexOf('--cc');
+    CC = ci < 0 ? null : rest[ci + 1];
   }
   /* 发现插件摆在这儿而不是模块作用域：一来 `-v` 刚解析出来，装了哪几格才印得出来；
      二来插件装不上是**响错**，那句话得走 main 的错误出口（模块作用域抛出来的话，
@@ -2940,7 +3008,10 @@ function main(argv) {
       /* `--sysroot` 那一路不找本机的 crt 与 libc —— 那些属于**目标平台**，
        * 而交叉编译时它们不在这台机器上。库全靠 sysroot/lib 里的 `.def`。
        * crt 那三个 `.o` 也从 sysroot/lib 里取（容器里拷过来的）。 */
-      const sysroot = rest.indexOf('--sysroot') >= 0 ? rest[rest.indexOf('--sysroot') + 1] : null;
+      /* 没写 `--sysroot` 时落回 `CROSS`（`main` 一进门按目标算出来的那一份自带的，
+       * 第一百四十六片）—— 于是 `c link --libc self` 也不必再写一遍路径。 */
+      const sysroot = rest.indexOf('--sysroot') >= 0 ? rest[rest.indexOf('--sysroot') + 1]
+        : (CROSS === null ? null : CROSS.sysroot);
       /* `--libc self`（第一百四十片）：**我们自己那份 libc**，一个外部库都不链。
        *
        * 来源是 `<sysroot>/libc/*.c` —— 用我们自己的 C 前端编，底下踩的是

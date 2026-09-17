@@ -50,6 +50,20 @@ omni c link x.o -o x --stdlib --libc self \
   --sysroot src/sysroot/x86_64-linux -f elf --arch x86_64 --os linux
 ```
 
+`build`/`run` 那一层**不用写 sysroot**（第一百四十六片）：`--libc self` 与
+「目标和本机不同」这两件事各自都足以定下要哪一份 sysroot，于是按 `<arch>-<os>` 去取
+自带的那一份（取不到就明着骂，自带的只有 `arm64-osx` 与 `x86_64-linux`）：
+
+```sh
+omni build x.omni --libc self                    # 本机，纯静态；otool -L 一行不印
+omni build x.omni --arch x86_64 --os linux        # 交叉到 Linux，头与 .def 都从 sysroot 取
+omni build x.omni --cc clang                      # 换外部 cc（比 OMNI_CC 优先）
+omni run x.omni --libc self                       # run 只有 --cc / --libc：它就跑在本机
+```
+
+`omni c obj|link` 那一层**不推**：它对着 `cc` 的口径，「头从哪儿来」在那一层得写明白
+（判据里那些交叉编的探子正是靠「不给 sysroot 就用本机 SDK 的头」在跑）。
+
 `libc/` 里那几个 `.c` 编出来的 `.o` 与用户程序一起链，**一个外部库都不要**：
 出来的可执行文件 `ldd` 说 `statically linked`，`DT_NEEDED` 一条都没有。
 

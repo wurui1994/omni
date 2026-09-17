@@ -42,6 +42,28 @@ const F_INC = { name: '-I', arity: 1, value: 'DIR', brief: '找 import / #includ
 /* 产出分布：每个源文件发了多少行、多少字节、多少个函数（印到 stderr）。
    单体构建里"是谁撑起了那几十万行"从前没有答案，而看不见正是最贵的那一笔。 */
 const F_STATS = { name: '--stats', arity: 0, brief: '印按源文件的产出分布（stderr）' };
+/**
+ * 生成的 C 交给谁（第一百四十六片）。**比 `OMNI_CC` 优先** —— 环境变量是「这一整轮都这样」，
+ * 命令行是「这一趟这样」，后者盖前者是唯一讲得通的次序（`make CC=…` 也是这个规矩）。
+ * `self` 就是缺省：我们自己那台 C 前端 + 我们自己的链接器，一个外部 cc 都不借。
+ */
+const F_CC = {
+  name: '--cc', arity: 1, value: 'CC',
+  brief: 'self（默认）|tcc|gcc|clang|cc|一条路径 —— 比 OMNI_CC 优先',
+};
+/**
+ * 链哪一份 libc。`self` 那一格要一份 sysroot（头与 `.def` 都在里头）——
+ * **不给 `--sysroot` 就按目标取自带的那一份**（`src/sysroot/<arch>-<os>`），
+ * 所以本机上 `--libc self` 一个开关就够。
+ */
+const F_LIBC = {
+  name: '--libc', arity: 1, value: 'KIND',
+  brief: 'system（默认）| self：自带 libc，纯静态（sysroot 不给就按目标取自带的）',
+};
+const F_SYSROOT = {
+  name: '--sysroot', arity: 1, value: 'DIR',
+  brief: '系统头 DIR/include、符号预设 DIR/lib/*.def；不给就按 --arch/--os 取自带的',
+};
 
 /* ---- C 前端那几格（`-I` 这种只在这儿出现，不在顶层）。 */
 const C_CPP_FLAGS = [
@@ -88,10 +110,11 @@ const LINK_COMMON = [
   /* `-q`：不印那行产物摘要。给的是**上层命令**用的（`omni run x.c` 内部要链一次，
    * 而 `run` 的 stdout 归被跑的程序）—— 交互着用的时候没必要给。 */
   { name: '-q', arity: 0, brief: '不印产物摘要（给上层命令内部调用用）' },
-  { name: '--sysroot', arity: 1, value: 'DIR', brief: '交叉编译：库 DIR/lib' },
+  { name: '--sysroot', arity: 1, value: 'DIR', brief: '交叉编译：库 DIR/lib；不给就按 --arch/--os 取自带的' },
   /* `--libc self`（第一百四十片）：链 `<sysroot>/libc/*.c` 编出来的那份自带 libc，
-   * 一个外部库都不要 —— 出来的是纯静态的可执行文件。要配 `--sysroot`。 */
-  { name: '--libc', arity: 1, value: 'KIND', brief: 'system（默认）| self：自带 libc，纯静态' },
+   * 一个外部库都不要 —— 出来的是纯静态的可执行文件。sysroot 不给就按目标取自带的
+   * （`src/sysroot/<arch>-<os>`，第一百四十六片）。 */
+  F_LIBC,
 ];
 const LINK_ELF_ONLY = [
   { name: '--static', arity: 0, brief: '（-f elf）静态，不出 .interp/.dynamic' },
@@ -209,7 +232,9 @@ type modes（ADR-0008）：.omni mixed / .omnid dynamic / .omnis static
 env: OMNI_CC、OMNI_CLANG、OMNI_LLVM_CONFIG
      **默认不借外部 cc**：生成的 C 交给我们自己那台 C 前端与链接器（可执行文件、.o、
      插件的共享库都行 —— dylib 那格链完自己补一句 codesign）。要走外部 cc 就明说：
-     OMNI_CC=clang（或 tcc / gcc / cc / 一条路径）。代价量在 selfCC 那段注释里。`,
+     --cc clang（或 tcc / gcc / cc / 一条路径），或者 OMNI_CC=clang ——
+     **--cc 比 OMNI_CC 优先**（环境变量管一整轮，命令行管这一趟）。
+     代价量在 selfCC 那段注释里。`,
   children: [
     {
       name: 'run', key: 'run', usage: 'FILE [-- args...]',
@@ -241,6 +266,10 @@ ${graphEngineHelp()}
   omni run x.lua --engine graph --lang gsl-shell        （--lang 盖过后缀）
   omni run ext/cpp/examples/basics.cpp --engine graph --backend wat`,
       flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT,
+        /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，
+         * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格
+         * （`--libc self` 那一趟的 sysroot 按本机取自带的，不用给）。 */
+        F_CC, F_LIBC,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认：前端 -> OIR -> 后端）| graph（节点图 + 契约五问）' },
         { name: '--lang', arity: 1, value: 'L',
@@ -268,8 +297,7 @@ ${graphEngineHelp()}
   omni build ext/lua/examples/intmath.lua --engine graph -o intmath.wasm   （二进制，V8 直接吃）`,
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
         ...C_TARGET_FLAGS,
-        { name: '--sysroot', arity: 1, value: 'DIR', brief: '交叉编译：系统头 DIR/include、库 DIR/lib' },
-        { name: '--libc', arity: 1, value: 'KIND', brief: 'system（默认）| self：自带 libc，纯静态' },
+        F_SYSROOT, F_LIBC, F_CC,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
         { name: '--lang', arity: 1, value: 'L',
@@ -284,7 +312,7 @@ ${graphEngineHelp()}
     {
       name: 'plugins', key: 'plugins', usage: '--core FILE [-o DIR]',
       brief: '把默认那一套插件一次编齐（核心什么都不内建）',
-      flags: [F_OUT, F_WORK, F_STATS,
+      flags: [F_OUT, F_WORK, F_STATS, F_CC,
         { name: '--core', arity: 1, value: 'FILE', brief: '核心产物（按它旁边那份 .syms 绑符号）' },
         { name: '--only', arity: 1, value: 'A,B', brief: '只编这几格（名字见 core/plugin-set.js）' }],
     },
