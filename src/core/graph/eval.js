@@ -26,6 +26,17 @@ class Return { constructor(value) { this.value = value; } }
  */
 class LoopExit { constructor(kind) { this.kind = kind; } }
 
+/**
+ * **断言不成立**（`assert`）。与 `Return` / `LoopExit` 是同一台机器的第三个终点，
+ * 差别在它切到**整个程序**的出口 —— 中间每一格 region 的出口照跑（还是那条 `finally`）。
+ *
+ * 导出它的理由：js 那条腿也要认得出这一格（同一个口径），而"退出码"不在图上 ——
+ * 所以宿主这一侧的语义是"停下来，把已经印出去的话交出来"。
+ */
+export class AssertFailed {
+  constructor(text) { this.text = text; }
+}
+
 /** 一格作用域 = 一格 region。`bind` 边（名字 -> 定义）按这条链查，与 ADR-0029 同一件事。 */
 class GraphEnv {
   /**
@@ -340,6 +351,16 @@ function run(n, env, io) {
     case 'slice': return valSlice(arg('obj'), arg('from'), arg('to'));
     case 'ret': throw new Return(arg('value') ?? null);
     case 'loop-exit': throw new LoopExit(n.attrs.kind ?? 'break');
+    /* **断言**：成立什么都不做；不成立就把一句话印在 print 那一格上、然后整个程序停下来。
+       印出去用的是同一格 `io.out`（图上只有这一个可观察的通道），"停下来"用哨兵 ——
+       与 `ret` / `loop-exit` 同一台机器，只是终点是整个程序。 */
+    case 'assert': {
+      if (io.truthy(arg('cond'))) return null;
+      const m = n.ins.msg === undefined ? null : arg('msg');
+      const text = m === null ? 'assert failed' : `assert failed: ${io.show(m)}`;
+      io.out.push(text);
+      throw new AssertFailed(text);
+    }
     case 'call': {
       const fn = arg('fn');
       const args = arg('args') ?? [];
@@ -373,7 +394,11 @@ export function evalGraph(g, opts = {}) {
   try {
     value = run(g, env, io);
   } catch (err) {
-    if (err instanceof Return) value = err.value; else throw err;
+    if (err instanceof Return) value = err.value;
+    /* 断言不成立就是"整个程序停在这儿" —— 已经印出去的话照样交出来（那是可观察的部分）。
+       `failed` 那一格让上面那层（判据 / CLI）分得出"跑完了"与"断言停下的"。 */
+    else if (err instanceof AssertFailed) return { value: null, out: io.out, failed: err.text };
+    else throw err;
   }
   return { value, out: io.out };
 }

@@ -71,6 +71,13 @@ export const MUT = ['1', '3'];
  */
 export const VARDECL = ['15', '1', '3', '6', '5', '2'];
 /**
+ * assertok：**断言那一格**（V 与 mojo）—— 条件与消息各一个端口。这一格是账上算出来的
+ * （V 自己的编译器里 578 份文件的第一堵墙），也是**第二十八格节点**。
+ * 这一族里的断言**都成立**，判的是"它不搅和别的"；不成立那一路在
+ * `tests/graph/assertfail.js`（各腿的"停下来"不同形，所以单开一格判据）。
+ */
+export const ASSERTOK = ['3', '7'];
+/**
  * casefor：**`case` 与 `for … in`**（nim 独一份）—— 落 branch 链 / `counted`，一格新节点
  * 都没加。nim 在这两处各有一条别人没有的：`case` 里除了 `of` 还能有 **`elif`**（走自己的
  * 条件，不是"主语等于什么"）；区间是**中缀算符**（`..<` 不含、`..` 含）而不是另一条产生式。
@@ -230,6 +237,10 @@ export const CASES = [
   // match/for-in 是同一批格子 —— 单开一族是为了压住 nim 多出来的那两条：
   // case 里的 `elif`（走自己的条件）与"区间是中缀算符"。
   ...fam('casefor', CASEFOR, ['nim']),
+  // 第二十九个家族：**断言**（V + mojo）。两门的 assert 在树上不同形（V 是语句形状、
+  // mojo 是 Python 形状），落到的是**同一格新节点** —— 这一批唯一加了节点的一刀，
+  // 理由在 nodes.js 的 `assert` 那一格上（消息是自己的端口 + 可以整格删掉）。
+  ...fam('assertok', ASSERTOK, ['vlang', 'mojo']),
 ];
 
 /**

@@ -139,6 +139,16 @@ export function threePart({ init = [], cond, post = [], body }) {
   return init.length === 0 ? loop : node('region', { body: [...init, loop] });
 }
 
+/**
+ * **断言**那一格：条件一个端口、那句话一个端口。
+ *
+ * 为什么不是 `prim`：`prim` 的实参是一串，分不出"哪个是条件、哪个是话"（`nodes.js` 里
+ * `assert` 那一格的注释写了全部三条理由）。两门语言（V 与 mojo）共用这一行。
+ */
+export const assertOf = (cond, msg) => node('assert', {
+  cond, ...(msg === undefined || msg === null ? {} : { msg }),
+});
+
 /** `break` / `continue` —— **一格节点两个 kind**（五栏逐格相同，差的只有跳到哪儿）。 */
 export const loopExit = (kind) => node('loop-exit', {}, { kind });
 

@@ -17,7 +17,7 @@
 import { NODES, declOf } from './nodes.js';
 import {
   evalGraph, showValue, valTruthy, valPick, field, setField, index, setIndex, convert, valSlice,
-  valMapNew, valMapGet, valMapSet, valMapHas,
+  valMapNew, valMapGet, valMapSet, valMapHas, AssertFailed,
 } from './eval.js';
 import { toSx, fromSx } from './graph.js';
 import { PRIMS } from './prims.js';
@@ -330,6 +330,11 @@ function jsStmt(x) {
     case 'region': return `{ ${withExits(asStmts(x.ins.body).map(jsStmt).join(' '))} }`;
     // 注册那一刻就记下动作；宿主 region 的 finally 里逆序跑（早退也经过那儿）
     case 'scope-exit': return `__ex.push(() => { ${asStmts(x.ins.action).map(jsStmt).join(' ')} });`;
+    // 断言：条件与那句话各一格端口（**不是 prim 的一串实参**），落成一格钩子调用
+    case 'assert': {
+      const m = x.ins.msg === undefined ? 'null' : jsExpr(x.ins.msg);
+      return `__assert(${jsExpr(x.ins.cond)}, ${m});`;
+    }
     case 'branch': {
       const t = `{ ${asStmts(x.ins.then).map(jsStmt).join(' ')} }`;
       const e = x.ins.else === undefined ? '' : ` else { ${asStmts(x.ins.else).map(jsStmt).join(' ')} }`;
@@ -342,7 +347,7 @@ function jsStmt(x) {
 function jsLower(g) {
   const body = withExits(asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n'));
   const source = '(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex, __conv, __slice,'
-    + ' __mapNew, __mapGet, __mapSet, __mapHas) => {'
+    + ' __mapNew, __mapGet, __mapSet, __mapHas, __assert) => {'
     + `\n${body}\n}`;
   return {
     text: source,
@@ -369,9 +374,24 @@ function jsLower(g) {
         throw new Error('graph 的 js 这条腿要一个 JS 引擎（这台宿主没有）—— 换 interp 或 wat');
       }
       const f = evalJs(`(${source})`);
-      f(out, showValue, valTruthy, valPick, field, setField, index, setIndex,
-        (v, to) => convert(v, to, { show: showValue }), valSlice,
-        valMapNew, valMapGet, valMapSet, valMapHas);
+      /* 断言不成立就是"整个程序停在这儿"：本进程这一侧抛一格哨兵，在这儿收住 ——
+         与 interp 那条腿同一个口径（`eval.js` 的 `AssertFailed`），
+         已经印出去的话照样交出来。产物那一侧落的是非零退出（`js_rt.js` 里那格钩子）。 */
+      const jsAssert = (cond, msg) => {
+        if (valTruthy(cond)) return;
+        const text = msg === undefined || msg === null ? 'assert failed'
+          : `assert failed: ${showValue(msg)}`;
+        out.push(text);
+        throw new AssertFailed(text);
+      };
+      try {
+        f(out, showValue, valTruthy, valPick, field, setField, index, setIndex,
+          (v, to) => convert(v, to, { show: showValue }), valSlice,
+          valMapNew, valMapGet, valMapSet, valMapHas, jsAssert);
+      } catch (err) {
+        if (!(err instanceof AssertFailed)) throw err;
+        return { value: null, out, failed: err.text };
+      }
       return { value: null, out };
     },
   };

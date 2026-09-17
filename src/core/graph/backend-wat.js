@@ -77,6 +77,12 @@ const CAN = new Map([
   ['slice', true],
   ['scope-exit', true],
   ['loop-exit', true],
+  /* **断言**（第二十九批）：条件与那句话这两格都接得住，欠的是"停下来"——
+     wasm 有 `unreachable`，可我们这条腿的判据是把文本交给 frontend-wat 读成 MIR 再跑，
+     而那一侧的陷入会把**已经印出去的话一起吞掉** —— 于是"印一句话再停下来"这个口径
+     在这条腿上给不出来。给一句人话，不硬发。 */
+  ['assert', 'wat 后端还没接：assert（`unreachable` 会把已经印出去的话一起吞掉，'
+    + '而这一格的口径是"先印一句话再停下来"）'],
 ]);
 
 export function watCan(op) {

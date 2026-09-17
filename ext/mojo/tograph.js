@@ -16,7 +16,7 @@ import {
   isList, tag, kids, leaf, part, groupItems, unquote,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit, listNew, indexGet, indexSet, sliceOf,
   mapNew, mapGet, mapSet, mapHas, mapNames, destructure,
-  fieldGet, fieldSet,
+  fieldGet, fieldSet, assertOf,
 } from '../../src/core/graph/fromtree.js';
 
 /**
@@ -318,6 +318,13 @@ function toNode(x) {
     }
     // `import` / `from … import …` / `trait` 在这一批里没有对应物 —— 丢掉，不猜。
     // 树上的标签是 `from` 不是 `from-import` —— 原来那一格是**死代码**（deadcase.js 量的）。
+    // `assert cond` / `assert cond, msg` -> 一格 assert 节点（与 V 共用那一格 —— Python 形状
+    // 的 assert 与 V 的语句形状在树上不同形，落到的是同一格节点）。
+    // `comptime assert` 走 `comptime` 那一格（编译期的事，不在这一批）。
+    case 'assert': {
+      const [c, m] = kids(x);
+      return assertOf(toNode(c), m === undefined ? undefined : toNode(m));
+    }
     case 'import': case 'from': case 'trait': return [];
     // `comptime X = e`（旧写法 `alias X = e`）-> **一格 bind**。树上是
     // `(const (n X) … (init e))` —— 原来写的 `case 'alias'` 也是死代码。

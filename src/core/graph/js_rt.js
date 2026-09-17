@@ -1,6 +1,6 @@
 // src/core/graph/js_rt.js —— **图那条 js 腿的运行时（文本）+ 自足产物的外壳**
 //
-// 为什么单独一份文本：`contract.js` 的 js 后端出的是一格**函数表达式**，要外面喂十四个钩子
+// 为什么单独一份文本：`contract.js` 的 js 后端出的是一格**函数表达式**，要外面喂十五个钩子
 // （`__out` / `__show` / `__truthy` / …）。在本进程里跑没问题（`evalJs` 之后把
 // `eval.js` 里那几个函数传进去），可 `build` 要落的是**一份 node 直接跑得起来的脚本** ——
 // 那时钩子得跟着产物走。这一份就是跟着走的那一份。
@@ -19,7 +19,7 @@
 // 的**出处**都在 `eval.js` 的 `showValue` 上，这儿是它的文本版；改那边就要改这边。
 
 /**
- * 十四个钩子的文本。产物里原样摊在最前面。
+ * 十五个钩子的文本。产物里原样摊在最前面。
  *
  * `__out` 是**一格有 push 的东西**（不是数组）：`prims.js` 里 print 那一行发的是
  * `__out.push(…)`，所以产物这侧只要接住 push 就行 —— 一行一句，直接写出去。
@@ -133,12 +133,22 @@ const __conv = (v, to) => {
   if (to === 'bool') return __truthy(v);
   throw new Error('conv: 还没接这个目标：' + to);
 };
+
+/* 断言：不成立就把那句话印在同一格输出上、然后整个程序停下来。
+   **退出码不在图上**，所以这一侧落成"非零退出" —— 那是这门宿主的样子
+   （有 process 就 exit(1)，没有就抛）。判据比的是那句话，不是退出码。 */
+const __assert = (cond, msg) => {
+  if (__truthy(cond)) return;
+  __out.push(msg === undefined || msg === null ? 'assert failed' : 'assert failed: ' + __show(msg));
+  if (typeof process !== 'undefined' && process.exit !== undefined) process.exit(1);
+  throw new Error('assert failed');
+};
 `;
 
 /**
  * 一份**自足的 ESM**：钩子 + 那格函数表达式 + 一句调用。node 直接 `node x.mjs` 跑得起来。
  *
- * 形参的**顺序**与 `contract.js` 里 `jsLower` 发的那一行一字不差（十四格）——
+ * 形参的**顺序**与 `contract.js` 里 `jsLower` 发的那一行一字不差（十五格）——
  * 那一行是产物与运行时之间唯一的接口，错一格就是错位传参，而错位传参不一定当场炸。
  * 所以这两处必须一起改；判据是 `tests/graph/js-artifact.js`（产物与本进程那条腿逐行比）。
  *
@@ -149,5 +159,5 @@ export function jsModuleText(source, note) {
   return `// ${note}\n// 自足产物：node 直接跑（钩子摊在下面，见 src/core/graph/js_rt.js）\n`
     + `${GRAPH_JS_RT}\nconst __main = ${source};\n`
     + '__main(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex,\n'
-    + '  __conv, __slice, __mapNew, __mapGet, __mapSet, __mapHas);\n';
+    + '  __conv, __slice, __mapNew, __mapGet, __mapSet, __mapHas, __assert);\n';
 }

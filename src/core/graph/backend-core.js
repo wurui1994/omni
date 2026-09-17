@@ -65,7 +65,11 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   'scope-exit',
   /* 表示转换：方言里是 `(toreal …)`/`(toint …)`/`(tostr …)` 三格 —— 图上那一格的 `to`
      说了要哪一侧，源那一侧得我们自己算（`typeOf`）。 */
-  'conv']);
+  'conv',
+  /* **断言**（第二十九批）：这一格**方言里没有对应物** —— 核心方言（`sexpr/lower.js`）
+     里没有"停下来"那一句话（没有 panic / abort / exit），所以这一刀发不出来。
+     它不是"忘了接"，是词汇表在**下一层**也欠一格；`coreCan` 里给了人话。 */
+]);
 
 /** 这一刀接得住的内建（`prims.js` 里 16 格中的 15 格；只有多实参 print 还欠着）。 */
 const PRIMS_OK = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
@@ -1404,6 +1408,12 @@ function retTypeOf(body, env, ctx) {
  */
 export function coreCan(op) {
   if (OPS.has(op)) return true;
+  /* **断言**：欠的不是这一层，是**方言**里没有"停下来"那一句话（没有 panic / abort /
+     exit）。所以这一格不是"忘了接"，是词汇表在下一层也欠一格 —— 说清了再欠。 */
+  if (op === 'assert') {
+    return 'core 这条腿还没接：assert —— 核心方言里没有"停下来"那一句话'
+      + '（没有 panic / abort / exit），这一格要先在方言那一层加';
+  }
   if (declOf(op) === undefined) return `core 后端不认识这格节点：${op}`;
   return `core 这条腿还没接：${op}（27 格里没有它 —— 这一格是新加的节点，`
     + '要么补进 backend-core.js，要么在这儿说清为什么不接）';

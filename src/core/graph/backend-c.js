@@ -47,7 +47,7 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   'region', 'ret', 'func', 'call',
   'list-new', 'index-get', 'index-set', 'record-new', 'field-get', 'field-set',
   'map-new', 'map-get', 'map-set', 'map-has', 'values', 'pick', 'conv', 'slice',
-  'scope-exit']);
+  'scope-exit', 'assert']);
 
 /** 这一刀接得住的内建。`prims.js` 里现有 16 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
@@ -342,6 +342,15 @@ static void g_print(gv *a, long long n) {
  * 三行（声明缓冲、逐格赋值、调）。这两格把那三行收成一行 —— 语义还是上面那一格。 */
 static void g_print1(gv a) { gv b[1]; b[0] = a; g_print(b, 1); }
 static void g_print2(gv a, gv b) { gv c[2]; c[0] = a; c[1] = b; g_print(c, 2); }
+
+/* 断言：不成立就把那句话印在同一格 print 上、然后停下来。
+   "停下来"在 C 这一侧是 exit(1) —— 退出码不在图上，那是这条腿自己的样子。 */
+static void g_assert(gv cond, gv msg, long long has_msg) {
+  if (g_truthy(cond)) return;
+  if (has_msg) printf("assert failed: %s\\n", g_show(msg));
+  else printf("assert failed\\n");
+  exit(1);
+}
 `;
 
 const PRELUDE_ALL = () => PRELUDE + P_SHOW + P_PRIM + P_AGG;
@@ -1468,6 +1477,13 @@ class CGen {
     if (x.op === 'loop-exit') {
       this.emitExits('loop');
       this.emit(x.attrs.kind === 'continue' ? 'continue;' : 'break;');
+      return;
+    }
+    /* 断言：条件与那句话各一格端口。没给消息时第三格传 0 —— C 这边没有"可有可无的实参"。 */
+    if (x.op === 'assert') {
+      const c = this.valOf(x.ins.cond);
+      const m = x.ins.msg === undefined ? 'g_nil()' : this.valOf(x.ins.msg);
+      this.emit(`g_assert(${c}, ${m}, ${x.ins.msg === undefined ? 0 : 1});`);
       return;
     }
     /* 剩下的都是「有值但摆在语句位置」的那些：算一遍、扔掉。 */

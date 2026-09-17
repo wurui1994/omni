@@ -15,7 +15,7 @@ import {
   tag, kids, leaf, part, threePart, elseOf,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, counted, partKids,
   recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, destructure,
-  mapNew, mapGet, mapSet, mapHas, mapNames, isList,
+  mapNew, mapGet, mapSet, mapHas, mapNames, isList, assertOf,
 } from '../../src/core/graph/fromtree.js';
 
 /** 装 map 的那些名字（`vlangToGraph` 里一趟扫查填好）—— 与 go 那一份同一条办法。 */
@@ -445,6 +445,12 @@ function toNode(x) {
     }
     case 'match': return matchOf(x, false);
     case 'for-in': return forInOf(x);
+    // `assert cond` / `assert cond, msg` -> 一格 assert 节点（第二十九批）。
+    // 这一格是**账上算出来的**：V 自己的编译器里 578 份文件的第一堵墙就是它。
+    case 'assert': {
+      const m = part(x, 'msg');
+      return assertOf(toNode(kids(x)[0]), m === undefined ? undefined : toNode(kids(m)[0]));
+    }
     // `defer { … }` / `defer: …` -> scope-exit（与 go 的 defer、CL 的 unwind-protect
     // **同一格节点**：逆序、早退也跑，八家共用那一格）
     case 'defer': return node('scope-exit', { action: many(kids(x)) });
