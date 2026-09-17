@@ -341,6 +341,24 @@ function concatText(args, env, ctx) {
   return args.slice(1).reduce((acc, a) => `(bin "+" ${acc} ${one(a)})`, one(args[0]));
 }
 
+/**
+ * 循环 / 分支的**条件**。方言里条件必须是 `bool`，而图上那一格可能是 `const 1`
+ * （cpp 的 `while (1)`、awk 的 `while (n)`）—— **真值观是语言那一侧的事**
+ * （`nodes.js` 文件头那条：语言之间答案不同的东西由那门语言的映射给）。
+ *
+ * 所以这儿不替谁做主：不是 bool 就**报**，不擅自补 `!= 0`。补了在 C 家族里对、在 lua 里
+ * 错（那门语言 0 是真），而这一份翻译看不见自己在给哪门语言干活 —— 那正是会给出静默错
+ * 答案的形状。
+ */
+function condText(c, env, ctx) {
+  const t = typeOf(c, env, ctx);
+  if (t !== 'bool') {
+    gap(`条件不是 bool（量到的是 ${t}）—— 方言的条件必须是 bool，而"几算真"是语言`
+      + '那一侧的事（该由那门语言的映射补成一格比较，不该由这份翻译替它猜）');
+  }
+  return expr(c, env, ctx);
+}
+
 /** `len`：串问 `slen`、列表问 `alen`、字典问 `dlen`（图上是同一格内建，方言里是三个）。 */
 function lenText(a, env, ctx) {
   if (isNode(a) && a.op === 'ref') {
@@ -506,20 +524,24 @@ function stmt(x, env, ctx) {
     case 'scope-exit':
       return gap('这处 scope-exit 不在一层语句序上（这一刀只接函数体与 `(do …)` 那两处）');
     case 'loop': {
-      const body = stmt(x.ins.body, env, ctx);
-      /* 步进那一格（`post`）在方言里没有对应物 —— 缀在体末尾就够（这一刀不接 `continue`
-       * 与 `post` 同时出现的那种：那时缀在末尾会把步进跳掉，见 nodes.js 上那段）。 */
+      /* 步进那一格（`post`）在方言里没有对应物：缀在体末尾就够 —— 但**`continue` 会跳过它**。
+       * 所以进体之前先把这一层的步进文本摆在 `ctx.post` 上，`loop-exit continue` 那一格
+       * 自己在 `(cont)` 前面补一份（C 的 for 就是这个语义）。嵌套时逐层保存/还原：
+       * 里层的 continue 是里层的事。 */
       const post = x.ins.post === undefined ? [] : stmt(x.ins.post, env, ctx);
-      if (post.length > 0 && hasContinue(x.ins.body)) {
-        gap('循环里同时有 continue 与步进（方言里得把步进抬出来，还没接）');
-      }
-      return [`(while ${expr(x.ins.cond, env, ctx)} (do ${[...body, ...post].join(' ')}))`];
+      const outerPost = ctx.post;
+      ctx.post = post;
+      const body = stmt(x.ins.body, env, ctx);
+      ctx.post = outerPost;
+      return [`(while ${condText(x.ins.cond, env, ctx)} (do ${[...body, ...post].join(' ')}))`];
     }
-    case 'loop-exit': return [x.attrs.kind === 'continue' ? '(cont)' : '(brk)'];
+    case 'loop-exit':
+      if (x.attrs.kind === 'continue') return [...ctx.post, '(cont)'];
+      return ['(brk)'];
     case 'branch': {
       const then = stmt(x.ins.then, env, ctx);
       const els = x.ins.else === undefined ? [] : stmt(x.ins.else, env, ctx);
-      const head = `(if ${expr(x.ins.cond, env, ctx)} (do ${then.join(' ')})`;
+      const head = `(if ${condText(x.ins.cond, env, ctx)} (do ${then.join(' ')})`;
       return [els.length === 0 ? `${head})` : `${head} (do ${els.join(' ')}))`];
     }
     case 'ret': {
@@ -741,7 +763,7 @@ export function emitCore(g) {
   const env = new Map();
   /* 整份产物共用的登记处：`byKey` 按"字段名单 + 类型"去重、`shapes` 按标签查、
      `decls` 是要印在模块头上的那几句 `(struct …)`。 */
-  const ctx = { byKey: new Map(), shapes: new Map(), decls: [], tmp: 0, defers: [], scope: [] };
+  const ctx = { byKey: new Map(), shapes: new Map(), decls: [], tmp: 0, defers: [], scope: [], post: [] };
   /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
   const fns = [];
   const rest = [];
@@ -872,12 +894,13 @@ export const CORE_SHAPES = [
     }, { name: 'x' })]),
   },
   {
-    what: 'continue + 步进同时出现',
-    why: '缀在体末尾会把步进跳掉；抬出来那一刀还没做',
+    what: '不是 bool 的条件',
+    why: 'cpp 的 `while (1)` / awk 的 `while (n)` 那种。方言的条件必须是 bool，而**几算真**'
+      + '是语言那一侧的事（C 家族里 0 假、lua 里 0 真）—— 这份翻译看不见自己在给哪门语言'
+      + '干活，替它补 `!= 0` 就是一处静默的错答案，所以宁可报',
     witness: () => program([node('loop', {
-      cond: litNode(true),
-      body: [node('loop-exit', {}, { kind: 'continue' })],
-      post: [node('set', { value: litNode(1) }, { name: 'i' })],
+      cond: litNode(1),
+      body: [node('prim', { args: [litNode(1)] }, { name: 'print' })],
     })]),
   },
   {
