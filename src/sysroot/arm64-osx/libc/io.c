@@ -14,6 +14,18 @@
 
 int __libc_errno_val;
 
+/* 三条标准流的 **Darwin 名字**（第一百四十片第八格）。SDK 的 `<stdio.h>` 是
+ * `extern FILE *__stdoutp;` 加 `#define stdout __stdoutp`，所以用户程序引的是
+ * `__stdoutp`（Mach-O 里再加一条下划线，量到的原话：`macho: 符号 '___stderrp'
+ * 没有定义`）。FILE 那三个**对象**在公用的 `stdio.c` 里，这儿只是三个指针指过去 ——
+ * 不新开一份，否则 `printf` 与用户的 `fprintf(stderr, …)` 会各攒一半。 */
+extern FILE __libc_stdin_f;
+extern FILE __libc_stdout_f;
+extern FILE __libc_stderr_f;
+FILE *__stdinp  = &__libc_stdin_f;
+FILE *__stdoutp = &__libc_stdout_f;
+FILE *__stderrp = &__libc_stderr_f;
+
 long write(int fd, const void *buf, unsigned long n) {
   return __libc_check(__omni_syscall(SYS_write, fd, (long)buf, (long)n));
 }
@@ -86,8 +98,30 @@ int isatty(int fd) {
 }
 
 char *getcwd(char *buf, unsigned long size) {
-  long r = __libc_check(__omni_syscall(SYS_getcwd, (long)buf, (long)size));
-  return r < 0 ? (char *)0 : buf;
+  /* **326 号（`__getcwd`）在 arm64 macOS 上不是一个有效的调用号** —— 量到的是 SIGSYS
+   * （`Bad system call: 12`），而且**连 Apple 自己的 `syscall(326, …)` 也一样崩**，
+   * 所以不是我们摆错了寄存器：那个号在这台机器上就不通。上一版按 Linux 的形状照抄了
+   * 一个「有 getcwd 这个 syscall」的假设，整份编译器一起来就死在这一格。
+   *
+   * 换成 libSystem 那条路：打开 `.`，再问这个 fd 的路径（`fcntl(F_GETPATH)`，与
+   * `realpath` 同一条）。F_GETPATH 要一块 MAXPATHLEN（1024）的地方 —— 用户给的可能更小，
+   * 所以先落在本地再抄回去；装不下按 POSIX 回 ERANGE。 */
+  char tmp[1024];
+  int fd = open(".", 0);
+  if (fd < 0) return (char *)0;
+  long r = __omni_syscall(SYS_fcntl, fd, 50 /* F_GETPATH */, (long)tmp);
+  close(fd);
+  if (r < 0) {
+    __libc_errno_val = (int)-r;
+    return (char *)0;
+  }
+  unsigned long n = strlen(tmp);
+  if (n + 1 > size) {
+    __libc_errno_val = 34;            /* ERANGE（Darwin 的号） */
+    return (char *)0;
+  }
+  memcpy(buf, tmp, n + 1);
+  return buf;
 }
 
 int fcntl(int fd, int cmd, ...) {

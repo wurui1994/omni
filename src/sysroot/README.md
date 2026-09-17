@@ -88,6 +88,36 @@ MIR 说「要什么」，摆法归后端。
 - `sigaction` 回 `ENOSYS`（要 `SA_RESTORER` 那个跳板，得等汇编器）；
   `backtrace` 回 0；`dlopen` 一族调到就崩（假句柄比崩坏）。
 
+## 整份编译器跑在自带 libc 上（两条腿都量过）
+
+```
+x86_64-linux（容器里）  72.6M   ./omni-self --help / check 01_basics.omni  两条 rc=0
+                        ldd 说 statically linked，DT_NEEDED 一条都没有
+arm64-osx（本机）       43.2M   OMNI_CC=self omni build src/cli.js --extern \
+                                  --libc self --sysroot src/sysroot/arm64-osx
+                        C 16.8M / 334626 行，前端 1.2s + 发射 394ms + cc 9.2s
+                        otool -L **一行都不印** —— 连 libSystem 都不沾
+                        ./omni check 五份用例，输出与 node 那条腿逐字相同
+```
+
+macOS 那一趟顺出三笔账，都是「按 Linux 的形状照抄」踩出来的：
+
+- `___isfinited` 一族没定义。Darwin 的 `<math.h>` 把 `isnan`/`isfinite` 展开成
+  `__isnand`/`__isfinited`（glibc 是 `__isnan`/`__finite`）。**判断一份都没重写** ——
+  八个名字在 `arm64-osx/libc/misc.c` 里接到公用 `math.c` 上。
+- `___stderrp` 没定义。三条流在 Darwin 上叫 `__stdinp`/`__stdoutp`/`__stderrp`。
+  FILE **那三个对象**移到公用 `stdio.c` 里导出，两套名字指同一份 —— 各开一份的后果是
+  `printf` 与用户的 `fprintf(stderr, …)` 各攒一半。
+- **`getcwd` 那个调用号在 arm64 macOS 上无效**：326 调下去收 SIGSYS
+  （`Bad system call: 12`），而且**Apple 自己的 `syscall(326, …)` 也一样崩** ——
+  所以不是我们摆错寄存器，是那个号不通。改走 libSystem 那条路：打开 `.` 再
+  `fcntl(F_GETPATH)`。这一格整份编译器一起来就死，判据搬到了最近的一层：一份
+  15 行的探子挨个调（time/clock_gettime/getcwd/isatty/access/stat/readlink/
+  getrlimit/getrusage/sigaction/kill/realpath/pthread_*），死在第几行就是第几格。
+
+这条腿上 `omni run` **还到不了**：它要 cgen 插件，插件要 `dlopen` —— 那一格是崩的
+（见上面「还没有的」）。所以现在成立的是「前端 + 检查器」，与 Linux 那一趟同一档。
+
 ## 两个目标各自的那一半（第一百四十片第五格）
 
 ```
@@ -188,6 +218,8 @@ argc=4 / argv[0]=./argsbin / argv[1]=one / argv[2]=two / argv[3]=three   rc=4
 argc=4 / argv[0]=./argsglibc / argv[1]=a / argv[2]=bb / argv[3]=ccc      rc=4
 ```
 
-这一格只有 x86_64：arm64 那边帧基址按「这个函数动不动栈顶」在 x28 与 sp 之间选，
-「帧指针」不是一句话说得清的东西，所以那条腿上 `FPGET` 明着报错（猜一个的后果是
-crt 读到垃圾 argv）。
+arm64 上这一格**不是同一件事**：`FPGET` 现在也实现了（一句 `mov x0, x29` —— 这条腿的
+序言一律 `stp x29, x30, [sp, #-16]!` + `mov x29, sp`，x29 从来就是个真的帧指针；曾经
+报错的理由说的是帧基址 `FB`，那是另一个寄存器），可 macOS 上**用不着它**：`LC_MAIN` 的
+入口是**像 main 一样被调用的**，argc 在 x0、argv 在 x1、envp 在 x2。按栈上捞那一版在
+macOS 上量到的是 `argc=0`，所以 `arm64-osx/libc/start.c` 直接把三个当形参收下。

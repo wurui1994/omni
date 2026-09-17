@@ -11,12 +11,16 @@
  */
 #include "libc.h"
 
-static FILE __stdin_f  = { 0, 0, 0 };
-static FILE __stdout_f = { 1, 0, 0 };
-static FILE __stderr_f = { 2, 0, 0 };
-FILE *stdin  = &__stdin_f;
-FILE *stdout = &__stdout_f;
-FILE *stderr = &__stderr_f;
+/* 三条标准流。**FILE 那三个对象是公用的、名字是目标专有的**：glibc 认 `stdout`
+ * 这个指针符号，Darwin 认 `__stdoutp`（SDK 的 `<stdio.h>` 里 `#define stdout __stdoutp`）。
+ * 所以对象在这儿摆一份、导出出去，Darwin 那三个名字在 `arm64-osx/libc/io.c` 里
+ * 指向同一份 —— 两条腿上都不会出现「两个 stdout 各攒一半」。 */
+FILE __libc_stdin_f  = { 0, 0, 0 };
+FILE __libc_stdout_f = { 1, 0, 0 };
+FILE __libc_stderr_f = { 2, 0, 0 };
+FILE *stdin  = &__libc_stdin_f;
+FILE *stdout = &__libc_stdout_f;
+FILE *stderr = &__libc_stderr_f;
 
 typedef struct {
   char *buf;              /* cap > 0：往这块写（snprintf） */

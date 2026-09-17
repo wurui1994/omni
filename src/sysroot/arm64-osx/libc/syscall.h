@@ -44,7 +44,9 @@
 #define SYS_getrlimit       (SYS_CLASS_UNIX | 194)
 #define SYS_mmap            (SYS_CLASS_UNIX | 197)
 #define SYS_lseek           (SYS_CLASS_UNIX | 199)
-#define SYS_getcwd          (SYS_CLASS_UNIX | 326)
+/* 326（`__getcwd`）**故意不在这张表上**：那个号在 arm64 macOS 上无效 —— 调它收 SIGSYS
+ * （`Bad system call: 12`），连 Apple 自己的 `syscall(326, …)` 也一样。`getcwd` 于是走
+ * 「打开 `.` 再问 `fcntl(F_GETPATH)`」，见 io.c 那一段。 */
 #define SYS_stat64          (SYS_CLASS_UNIX | 338)
 #define SYS_fstat64         (SYS_CLASS_UNIX | 339)
 #define SYS_getdirentries64 (SYS_CLASS_UNIX | 344)

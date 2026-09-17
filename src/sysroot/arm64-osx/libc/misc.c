@@ -362,3 +362,27 @@ void longjmp(void *env, int val) { __omni_longjmp(env, val); }
  * 所以 `savemask` 收下就丢 —— 与 Linux 那一份同一个理由。 */
 int sigsetjmp(void *env, int savemask) { (void)savemask; return __omni_setjmp(env); }
 void siglongjmp(void *env, int val) { __omni_longjmp(env, val); }
+
+/* ---- Darwin 的 `isnan` 一族（第一百四十片第八格）。
+ *
+ * 这八个名字是**头文件的账**，不是数学的账：Darwin 的 `<math.h>` 把 `isnan(x)` 展开成
+ * `__isnand((double)x)`（我们那份 `include/math.h` 照着量到的外部符号写的，见它的文件头），
+ * 而 glibc 展开成 `__isnan`。所以判断本身一份都不重写 —— 全在公用的 `math.c` 里，
+ * 这儿只把名字接过去。float 那四个转成 double 再问：nan / inf / 符号位在放宽这一步
+ * 都不会变。
+ *
+ * 为什么非要有：整份编译器（`dist/build/omni.c`）里 `isfinite` 是真有人用的，量到过
+ * `macho: 符号 '___isfinited' 没有定义` —— 链接那一步才说话。 */
+int __isnan(double x);
+int __isinf(double x);
+int __finite(double x);
+int __signbit(double x);
+
+int __isnand(double x) { return __isnan(x); }
+int __isnanf(float x) { return __isnan((double)x); }
+int __isinfd(double x) { return __isinf(x); }
+int __isinff(float x) { return __isinf((double)x); }
+int __isfinited(double x) { return __finite(x); }
+int __isfinitef(float x) { return __finite((double)x); }
+int __signbitd(double x) { return __signbit(x); }
+int __signbitf(float x) { return __signbit((double)x); }

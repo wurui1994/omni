@@ -163,6 +163,14 @@
 #         `setjmp/longjmp: r=7 stage=1`（递归三层再跳回来）与 `longjmp(0) 换成: 1`。
 #         macOS 上前两格靠 `SYSCALL2`（`fork` 的 x1 = 是不是子进程、`pipe` 的第二个 fd
 #         也在 x1）—— 之前「探子后四行印两遍」的病根就在这儿。
+#      i. **调用号本身**那一类账另开一份判据：`tests/x64/libc-syscall-probe.c`（一行一格、
+#         自己判自己）。号错了的症状不是输出不同，是当场 SIGSYS —— 量到过整份 43M 的
+#         macOS 编译器一起来就死，真凶只是 `getcwd` 那一个号（326 在 arm64 macOS 上
+#         **无效**，Apple 自己的 `syscall(326, …)` 也一样崩；改走 `fcntl(F_GETPATH)`）。
+#         两条腿加尺子各量一趟，都是 `11 passed, 0 failed`：
+#           x86_64-linux（容器，`--libc self`）：178325 字节，rc=0
+#           x86_64-linux（容器，gcc 那份尺子）：rc=0
+#           arm64-osx（本机，`node tests/c/libc-self.js`）：5/0，`otool -L` 一行都不印
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"
