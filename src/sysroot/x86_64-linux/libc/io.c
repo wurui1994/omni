@@ -82,3 +82,23 @@ int fcntl(int fd, int cmd, ...) {
 int *__errno_location(void) {
   return &__libc_errno_val;
 }
+
+/* 公用那份 malloc 跟系统要地方走这一条（约定见 `libc.h`）。
+ * Linux 这边是 `brk`：一路往上推，所以要来的地方其实**是**连着的 —— 但公用那一份
+ * 不许依赖这一点（macOS 那边没有 brk，是一块块 `mmap` 来的）。 */
+unsigned long __libc_chunk(unsigned long least, unsigned long *got) {
+  static unsigned long top;
+  if (top == 0) {
+    long cur = __omni_syscall(SYS_brk, 0);
+    if (cur <= 0) return 0;
+    top = (unsigned long)cur;
+  }
+  unsigned long want = (least + 15) & ~15UL;
+  unsigned long ne = top + want;
+  long r = __omni_syscall(SYS_brk, (long)ne);
+  if ((unsigned long)r < ne) return 0;
+  unsigned long base = top;
+  top = (unsigned long)r;
+  *got = top - base;
+  return base;
+}

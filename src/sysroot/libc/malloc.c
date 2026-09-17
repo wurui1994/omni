@@ -16,7 +16,9 @@
  *   - free 只把块推回它那个箱（LIFO）。**不合并** —— 明写在这儿：一块 1M 的空闲块
  *     只服务 ≥ 512K 的请求。合并要边界标记加双向表，那是下一步的事；这一版先把
  *     「不死循环、不平方」这两件事钉住。
- *   - 顶上切完就长堆，一次长 max(要的, 上次的两倍, 1M) —— brk 的次数于是是对数级。
+ *   - 地方从 `__libc_chunk` 要（Linux 的 `brk` / macOS 的 `mmap` —— 那儿没有 brk）。
+ *     **两次要来的地方不一定连着**，所以这一份只在「当前那一块」里往上切，切不动了
+ *     再要一块，旧那块剩下的尾巴推回箱里不丢。
  */
 #include "libc.h"
 
@@ -24,9 +26,9 @@
 #define ALIGN16(x) (((x) + 15) & ~(unsigned long)15)
 #define NBIN      32
 
-static unsigned long heapCur;       /* 顶上还没切的那一格 */
-static unsigned long heapEnd;       /* brk 到哪儿了 */
-static unsigned long heapStep = 1048576;
+static unsigned long curPos;        /* 当前这块地方切到哪儿了 */
+static unsigned long curEnd;        /* 当前这块地方的尽头 */
+static unsigned long chunkStep = 1048576;
 static unsigned long bins[NBIN];    /* 每个箱的表头（0 = 空） */
 
 /* 块大小 -> 箱号：最高位的位置（`total` 至少 32，所以箱号至少 5）。 */
@@ -36,20 +38,27 @@ static int binOf(unsigned long total) {
   return k >= NBIN ? NBIN - 1 : k;
 }
 
-static int heapGrow(unsigned long need) {
-  if (heapEnd == 0) {
-    long cur = __omni_syscall(SYS_brk, 0);
-    if (cur <= 0) return -1;
-    heapCur = (unsigned long)cur;
-    heapEnd = heapCur;
-  }
+/* 把一块地方推回箱里（`moreCore` 收旧尾巴、`free` 都走它）。 */
+static void binPush(unsigned long p, unsigned long bsz) {
+  unsigned long *h = (unsigned long *)p;
+  h[0] = bsz;                       /* used 位是 0 */
+  int b = binOf(bsz);
+  h[1] = bins[b];
+  bins[b] = p;
+}
+
+/* 再要一块地方。要不到回 -1。 */
+static int moreCore(unsigned long need) {
   unsigned long want = need;
-  if (want < heapStep) want = heapStep;
-  unsigned long ne = ALIGN16(heapEnd + want);
-  long r = __omni_syscall(SYS_brk, (long)ne);
-  if ((unsigned long)r < ne) return -1;
-  heapEnd = (unsigned long)r;
-  if (heapStep < 67108864UL) heapStep *= 2;   /* 长到 64M 一步为止 */
+  if (want < chunkStep) want = chunkStep;
+  unsigned long got = 0;
+  unsigned long p = __libc_chunk(want, &got);
+  if (p == 0 || got < need) return -1;
+  /* 旧那块剩下的尾巴不丢：够一个块头就推回箱里。 */
+  if (curEnd > curPos && curEnd - curPos >= HDR + 16) binPush(curPos, curEnd - curPos);
+  curPos = ALIGN16(p);
+  curEnd = p + got;
+  if (chunkStep < 67108864UL) chunkStep *= 2;   /* 长到 64M 一步为止 */
   return 0;
 }
 
@@ -95,12 +104,12 @@ void *malloc(unsigned long size) {
     }
     b++;
   }
-  /* 2. 顶上切。不够就长堆。 */
-  if (heapEnd == 0 || heapCur + total > heapEnd) {
-    if (heapGrow(total) < 0) return (void *)0;
+  /* 2. 当前那块地方的顶上切。切不动就再要一块。 */
+  if (curEnd == 0 || curPos + total > curEnd) {
+    if (moreCore(total) < 0) return (void *)0;
   }
-  unsigned long blk = heapCur;
-  heapCur += total;
+  unsigned long blk = curPos;
+  curPos += total;
   unsigned long *h = (unsigned long *)blk;
   h[0] = total | 1;
   h[1] = 0;
@@ -113,10 +122,7 @@ void free(void *ptr) {
   unsigned long *h = (unsigned long *)p;
   unsigned long bsz = h[0] & ~1UL;
   if (bsz < HDR + 16) return;            /* 不像我们发出去的块：不碰 */
-  h[0] = bsz;                            /* 清 used */
-  int b = binOf(bsz);
-  h[1] = bins[b];
-  bins[b] = p;
+  binPush(p, bsz);
 }
 
 void *calloc(unsigned long n, unsigned long size) {

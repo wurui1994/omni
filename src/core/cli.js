@@ -2962,16 +2962,27 @@ function main(argv) {
         if (sysroot === null) throw new OmniError('--libc self 要配 --sysroot');
         const libcDir = join(sysroot, 'libc');
         if (!isDir(libcDir)) throw new OmniError(`--libc self: 找不到 ${libcDir}`);
+        /* 公用那一半（第一百四十片第五格）：`src/sysroot/libc/` —— string/math/strtox/
+         * stdio/file/malloc 六份，一行 syscall 都没有，两个目标**同一份文件**。
+         * 目标专有那一半在 `<sysroot>/libc/`（syscall.h、io.c、misc.c、start.c）。
+         * 头的搜索次序是「先专有、后公用」：`libc.h` 里那句 `#include "syscall.h"`
+         * 必须落到这台目标那一份上。 */
+        const sharedDir = join(sysroot, '..', 'libc');
+        const incs = isDir(sharedDir) ? [libcDir, sharedDir] : [libcDir];
         /* `start.c` 得排在最前（它是入口所在的那个 `.o`），剩下的按名字排 ——
          * 顺序稳定，于是同一份输入两次链出来逐字节相同（容器里量过）。 */
-        const srcs = readDir(libcDir).filter((f) => f.endsWith('.c')).sort();
+        const srcs = [];
+        for (const d of incs) {
+          for (const f of readDir(d)) if (f.endsWith('.c')) srcs.push(join(d, f));
+        }
+        srcs.sort();
         const objs = [];
-        for (const f of srcs) {
-          const src = join(libcDir, f);
-          const o = join(workDirFor('libc-self', hash16(src)), f.replace(/\.c$/, '.o'));
-          cObj(src, o, CROSS === null ? hostArch() : CROSS.arch, [libcDir], [], 'elf',
-            'linux', [cap('c.sysInclude')()[0], libcDir]);
-          if (f === 'start.c') objs.unshift(o); else objs.push(o);
+        for (const src of srcs) {
+          const base = basename(src).replace(/\.c$/, '');
+          const o = join(workDirFor('libc-self', hash16(src)), base + '.o');
+          cObj(src, o, CROSS === null ? hostArch() : CROSS.arch, incs, [], 'elf',
+            'linux', [cap('c.sysInclude')()[0], ...incs]);
+          if (base === 'start') objs.unshift(o); else objs.push(o);
         }
         files.unshift(...objs.filter((o) => o.endsWith('start.o')));
         files.push(...objs.filter((o) => !o.endsWith('start.o')));
