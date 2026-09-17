@@ -34,6 +34,9 @@ import { glrParse } from '../glr/driver.js';
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
 import { readText, writeText, writeBinary, stdout, stderr } from '../host/native.js';
 import { backends, Gap } from './contract.js';
+import {
+  graphStat, graphStatTable, graphStatJson, graphStatDot, graphStatDiff, graphStatDiffTable,
+} from './stat.js';
 import { watToWasm } from '../wasm/assemble.js';
 import { LANGS, pickLang, treeRoot } from './langs.js';
 
@@ -88,11 +91,40 @@ function pickBackend(verb, argv, dflt) {
   return back;
 }
 
+/**
+ * `--stat` / `--stat-out FILE` / `--stat-diff FILE`（第一百四十七片第三格）：图的形状与结构。
+ *
+ * 印到 **stderr** —— stdout 上是那份程序的输出，判据逐行比对它，多一行都不行。
+ * 算在 `stat.js`（纯计算，图进数出），这儿只管接线：读开关、落文件、印那几句。
+ *
+ * `--stat-diff` 要**再走一遍前端**（另一份源码 -> 另一张图）。那是有代价的一步，
+ * 所以只在给了这个开关时才走 —— 「变换是减法」这个量尺不该让平常那一趟变慢。
+ */
+function statOf(graph, argv, path) {
+  const out = cliArg(argv, '--stat-out');
+  const other = cliArg(argv, '--stat-diff');
+  if (!argv.includes('--stat') && out === null && other === null) return;
+  const s = graphStat(graph);
+  stderr(graphStatTable(s));
+  if (other !== null) {
+    const got = graphOf(other, argv);
+    if (got.code !== undefined) throw new OmniError(`--stat-diff ${other}：那份源码自己就说不通`);
+    stderr(`omni: 基线 ${path} -> 变换后 ${other}\n`);
+    stderr(graphStatDiffTable(graphStatDiff(s, graphStat(got.graph))));
+  }
+  if (out !== null) {
+    const json = out.endsWith('.json');
+    writeText(out, json ? graphStatJson(s) : graphStatDot(graph));
+    stderr(`omni: 图的形状 -> ${out}（${json ? 'json' : 'dot：dot -Tsvg 出图'}）\n`);
+  }
+}
+
 export function runGraphFile(path, argv) {
   const back = pickBackend('run', argv, 'interp');
   const got = graphOf(path, argv);
   if (got.code !== undefined) return got.code;
   const { lang, graph } = got;
+  statOf(graph, argv, path);
 
   // ---- 图 -> 那条腿。缺口与"跑错了"分开记
   let art = null;
@@ -158,6 +190,7 @@ export function buildGraphFile(path, argv) {
   }
   const got = graphOf(path, argv);
   if (got.code !== undefined) return got.code;
+  statOf(got.graph, argv, path);
   const dot = path.lastIndexOf('/') >= 0 ? path.slice(path.lastIndexOf('/') + 1) : path;
   const stem = dot.lastIndexOf('.') > 0 ? dot.slice(0, dot.lastIndexOf('.')) : dot;
   const out = cliArg(argv, '-o') ?? `${stem}.${back.name}`;

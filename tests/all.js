@@ -74,6 +74,9 @@ const SUITES = [
   // 都在 `tests/graph/` 底下，都只用得着 `src/core/graph` + 各语言的 `.grammar`。
   { s: 'graph/run.js' }, { s: 'graph/delete.js' }, { s: 'graph/cli.js' },
   { s: 'graph/iface.js' }, { s: 'graph/order.js' }, { s: 'graph/wasm.js' },
+  //   stat.js   图的形状与结构那把尺子（`--stat`）：数得对、共享只算一次、两遍一样、
+  //             减法是减法 —— 它是 `docs/design/node-graph-shrink.md` 第三条的量尺
+  { s: 'graph/stat.js' },
   // 可删除测试的**第二层**：删一支产生式（语法那一层）。默认只跑两门小语法 ——
   // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
   { s: 'grammar/delete.js' },

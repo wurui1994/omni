@@ -74,6 +74,14 @@
 - **变换那一格是空的**：`src/core/graph/` 下**没有一个 pass**。
   路是 `fromtree` -> 后端，一遍到底。ADR-0033 那套效应/lifetime 声明是**为了变换**才写的，
   而现在没有一个消费者在用它做减法。**这就是这份文档要钉住的欠账。**
+- **尺子先有了**（2026-09-17）：`src/core/graph/stat.js` + `omni run/build --engine graph --stat`
+  能报出「这张图多少格、都是些什么格、纯与有效应各几格」，`--stat-diff FILE` 按 op 逐格相减。
+  量到的原话（`ext/lua/examples/`，arm64 macOS）：
+  `record.lua` 19 格 / 14 条边 / 深 4（纯 4、有效应 15），
+  `method.lua` 84 格 / 71 条边 / 深 10（纯 12、有效应 72）——
+  两者相减是 `+17 map-get · +7 map-set · -4 field-get · -1 record-new`，
+  也就是「一格 `record-new` 换成一族 map 操作」这笔账**现在有数字了**。
+  尺子不是 pass：第三格仍然是空的，但从此「缩了没有」不再靠感觉（判据 `tests/graph/stat.js`）。
 
 ## 五、下一刀的判据（做到了怎么算）
 

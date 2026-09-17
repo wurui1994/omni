@@ -96,6 +96,15 @@ const F_STAT_OUT = {
   name: '--stat-out', arity: 1, value: 'FILE',
   brief: '依赖图写到 FILE —— `.dot`（graphviz）/ `.json` 按后缀定',
 };
+/**
+ * 两张图**逐格相减**（只在 `--engine graph` 那一路有意思）：本文件是基线，`FILE` 是变换后。
+ * 这一格是 `docs/design/node-graph-shrink.md` 第三条要求（「变换是减法：每个 pass 要能报出
+ * 删了几格节点」）的量尺 —— 没有它，「缩了没有」只能靠感觉。
+ */
+const F_STAT_DIFF = {
+  name: '--stat-diff', arity: 1, value: 'FILE',
+  brief: '（--engine graph）拿 FILE 的图当变换后，按 op 逐格相减（+ 是胀，- 是缩）',
+};
 
 /* ---- C 前端那几格（`-I` 这种只在这儿出现，不在顶层）。 */
 const C_CPP_FLAGS = [
@@ -302,6 +311,9 @@ ${graphEngineHelp()}
          * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格
          * （`--libc self` 那一趟的 sysroot 按本机取自带的，不用给）。 */
         F_CC, F_LIBC, F_PROFILE, F_PROFILE_OUT,
+        /* `--stat` 在 `run` 上只对 `--engine graph` 那一路有话说（图的形状与结构）——
+         * 另一台机器的构建统计要 `build --stat`（那儿才有 cgen 的产出分布）。 */
+        F_STAT, F_STAT_OUT, F_STAT_DIFF,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认：前端 -> OIR -> 后端）| graph（节点图 + 契约五问）' },
         { name: '--lang', arity: 1, value: 'L',
@@ -329,7 +341,7 @@ ${graphEngineHelp()}
   omni build ext/lua/examples/intmath.lua --engine graph -o intmath.wasm   （二进制，V8 直接吃）`,
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
         ...C_TARGET_FLAGS,
-        F_SYSROOT, F_LIBC, F_CC, F_PROFILE, F_PROFILE_OUT, F_STAT, F_STAT_OUT,
+        F_SYSROOT, F_LIBC, F_CC, F_PROFILE, F_PROFILE_OUT, F_STAT, F_STAT_OUT, F_STAT_DIFF,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
         { name: '--lang', arity: 1, value: 'L',
