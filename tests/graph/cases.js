@@ -152,6 +152,13 @@ export const BITS = ['8', '14', '6', '6', '-13'];
  * `&^` 是 go 独一份，落的是 `band(a, bnot(b))` 两格现成的内建。
  */
 export const BITSGO = ['48', '4'];
+/**
+ * caserange：**`of 1 .. 5:` 是一段区间**（nim 独一份）—— 落成两格比较用 and 串起来
+ * （`n >= lo and n <= hi`），一格新节点也没加。nim 的区间是**中缀算符**（含上界），
+ * 所以 case 的分支左边也能是它；从前这一支跟着走 `==`，那格 `..` 当场报。
+ * wasm 那条腿按名跳过（返回值上还接不住字符串 —— 旧账）。
+ */
+export const CASERANGE = ['bad', 'ok', 'great', '?'];
 
 
 
@@ -381,6 +388,8 @@ export const CASES = [
   ...fam('bits', BITS, ['go', 'vlang']),
   // 第四十一个家族：**go 自己那两格**（`<<` 与 `&^`）—— 理由与 deferarg 同一条。
   ...fam('bitsgo', BITSGO, ['go']),
+  // 第四十二个家族：**case 的分支左边是一段区间**（nim 独一份 —— 区间是中缀算符）。
+  ...fam('caserange', CASERANGE, ['nim']),
 ];
 
 

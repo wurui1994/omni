@@ -642,6 +642,27 @@ function toNode(x) {
       return un(o, toNode(a));
     }
 
+    // ---- 说清楚的三条墙（原来只印"这一格还没接：X"，落进了"没归类"那一栏）------
+    //
+    // `[]byte(s)` / `(*T)(p)` / `map[K]V(m)` 那一族是**表示层的转换**：字节表示、
+    // 指针重解释、底层类型的换名。`conv` 那格节点只管四种值的类型（int/float/str/bool）——
+    // 表示层要类型才说得清（`byte` 在图上没有那一格），所以这一条留着等类型覆盖层。
+    case 'conv':
+      throw new Error('go->graph: `[]byte(s)` / `(*T)(p)` 这一族是**表示层的转换**（字节'
+        + '表示 / 指针重解释）—— `conv` 那格只管 int / float / str / bool 四种，'
+        + '这一格要类型覆盖层');
+    // `fallthrough` 是"接着走下一支"——而 switch 落成的是 branch 链（每支各自一格 region），
+    // 链上没有"下一支"这个概念。要接得把 case 体拆成一串带标签的块，那是另一种降级。
+    case 'fallthrough':
+      throw new Error('go->graph: `fallthrough` 落不进 branch 链（链上没有"下一支"）——'
+        + '要接得把 switch 换成带标签的块，那是另一种降级');
+    // `L: for { … continue L }` —— 带标签的语句。`loop-exit` 那格节点只认"最近的一层"，
+    // 标签要一格"跳到哪儿"的附属。带标签的 break / continue 早就当场报了（switch 那一刀），
+    // 这一格是**标签本身**（声明的那一侧）。
+    case 'label':
+      throw new Error('go->graph: 带标签的语句（`L: for …`）——`loop-exit` 只认最近的'
+        + '那一层，标签要一格"跳到哪儿"的附属，这一格没接');
+
     // ---- 声明与语句 --------------------------------------------------------
     // `func(x int) int { … }` 当值用 —— **图上一格新节点也不用加**：`func` 那一格本来就是
     // 表达式（`nodes.js` 里它的 sort 是 expr），只是从前这门映射没接它，于是 60 份文件

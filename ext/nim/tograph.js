@@ -14,7 +14,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, counted,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, lazyAnd, counted,
   recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, destructure,
   mapNew, mapGet, mapSet, mapHas, mapNames,
 } from '../../src/core/graph/fromtree.js';
@@ -465,8 +465,20 @@ function toNode(x) {
         const vals = part(a, 'values');
         const body = kids(a).find((y) => tag(y) === 'body');
         if (vals === undefined) throw new Error('nim->graph: of 里没有 (values …)');
-        const conds = kids(vals).map((v) =>
-          binOf('==', at(holder), toNode(v), OPS, { lang: 'nim', and: ['and'], or: ['or'] }));
+        /* **`of 1 .. 5:` 是一段区间**（nim 的区间**含上界**）—— 落成两格比较用 and 串起来。
+           从前这一支跟着走 `==`，于是那格 `..` 掉进 `binOf` 里当场报"这个算子还没接：.."。
+           区间在 nim 里是中缀算符，所以这儿要自己认（`for` 那一格早就是这么认的）。 */
+        const oneCond = (v) => {
+          if (tag(v) === 'bin' && leaf(kids(v)[0]) === '..') {
+            const [, lo, hi] = kids(v);
+            return lazyAnd(
+              binOf('>=', at(holder), toNode(lo), OPS, { lang: 'nim', and: ['and'], or: ['or'] }),
+              binOf('<=', at(holder), toNode(hi), OPS, { lang: 'nim', and: ['and'], or: ['or'] }),
+            );
+          }
+          return binOf('==', at(holder), toNode(v), OPS, { lang: 'nim', and: ['and'], or: ['or'] });
+        };
+        const conds = kids(vals).map(oneCond);
         arms.push([
           conds.reduce((p, q) => lazyOr(p, q)),
           node('region', { body: body === undefined ? [] : many(kids(body)) }),
