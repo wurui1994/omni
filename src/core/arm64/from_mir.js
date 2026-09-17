@@ -1099,6 +1099,30 @@ class FnGen {
       if (darwin) buf.emit(cneg(1, 0, 0, COND.cs));
       return this.def(i, 0);
     }
+    /* `SYSCALL2`（第一百四十片第六格）：与上面那一条只差收尾两步 —— 池的**第一格是
+     * 「第二个返回值写到哪儿」的地址**，实参从第二格起。
+     *
+     * 次序要紧：`svc` 之后先把 x1 存出去，**再**折进位（`cneg` 只动 x0，所以反过来
+     * 也行，但先存 x1 少一处要推理的地方）。存地址用 TMP0（x9）—— 它不在实参那八个
+     * 里，内核也不动它，所以 `svc` 之后再取都来得及。 */
+    if (op === OP.SYSCALL2) {
+      const all = f.argsOf(f.b[i]);
+      if (all.length < 1) arm64Nyi('SYSCALL2 的池是空的（第一格该是第二个返回值的地址）');
+      if (all.length - 1 > 6) arm64Nyi(`${all.length - 1} 个实参的 SYSCALL2`);
+      const darwin2 = this.mod.os === 'osx';
+      this.flush();
+      let k2 = 0;
+      for (const ar of all.slice(1)) {
+        this.loadRef(k2, ar);
+        k2++;
+      }
+      this.loadRef(darwin2 ? 16 : RES, f.a[i]);
+      buf.emit(svcArm64(darwin2 ? 0x80 : 0));
+      this.loadRef(TMP0, all[0]);
+      buf.emit(strU(3, 1, TMP0, 0));
+      if (darwin2) buf.emit(cneg(1, 0, 0, COND.cs));
+      return this.def(i, 0);
+    }
     /* `SETJMP`/`LONGJMP`（第一百四十片第三格）：明着报错。要存的是 x19-x28 与 d8-d15
      * （AAPCS64 的被调用者保存那一串），与 x86_64 那五个不是同一件事；而这条腿上
      * macOS 走 libSystem，第二个用户还没出现 —— 没有判据的代码不写。 */

@@ -111,17 +111,20 @@ src/sysroot/arm64-osx/libc/      同上四份，内容各不同
   malloc 只跟目标要 `__libc_chunk`，**不假设两次要来的地方连着**。
 - **目录**：`getdents64` 与 `getdirentries64` 的记录不一样 —— 名字一个在第 19 字节、
   一个在第 21（Darwin 多一格 `d_namlen`）。
-- **macOS 上还欠 `fork`**：Darwin 的 `fork` 有**两个**返回值（x0 = pid、**x1 = 是不是
-  子进程**），而 `SYSCALL` 现在只交回 x0。只看 x0 的话父子都以为自己是父 —— 量到过：
-  探子的后四行印了两遍。所以 `fork`/`system`/`pipe` 在那条腿上**明着崩**，不假装成功。
-  要还这一格得给 op 一个「第二个返回值写到哪儿」的变体。
+- **两个返回值**：Darwin 的 `fork` 交回 x0 = pid、**x1 = 是不是子进程**（父 0、子 1），
+  `pipe` 的两个 fd 也都在 x0/x1 上。只看 x0 的话父子都以为自己是父 —— 量到过：探子的
+  后四行印了**两遍**。所以有了 `SYSCALL2`（`__omni_syscall2(号, &第二个返回值, 实参…)`）：
+  池的第一格是「x1 写到哪儿」的地址，后端在 `svc` 之后补一条 `str x1, [x9]`。
+  Linux 那条腿上**没有**这个用户（`fork` 只交回 rax、`pipe2` 写用户给的数组），
+  所以 x86_64 的 `SYSCALL2` 明着报错，不写没人用的码。
 - **macOS 上还欠 `setjmp`**：arm64 的 `SETJMP`/`LONGJMP` 还没实现（要存 x19-x28 与
   d8-d15），所以 JSON 那两段在那条腿上还不能用。
 
 量到的（都是本机 arm64 macOS 上直接跑，不进容器）：
 
 - `argc/argv`：`./a-osx one two three` -> `argc=4`、四行 argv 全对、rc=4
-- 「系统那一半」（`tests/x64/libc-sys-probe.c`，14 行）：与 Apple 的 libc **逐行相同**
+- 「系统那一半」（`tests/x64/libc-sys-probe.c`，15 行，含 `system("true")` 与 `pipe`）：
+  与 Apple 的 libc **逐行相同**（`diff` 无输出），两边 rc=0
 - libm 对账（120 个采样）：最大相对误差 **2.18e-12**，与 Linux 那一趟同一个数
   （math.c 是同一份文件）
 

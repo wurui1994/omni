@@ -138,19 +138,22 @@ int unsetenv(const char *name) {
 
 /* ---- 进程。
  *
- * **`fork` 在这条腿上拿不到**，理由是真的、也很具体：Darwin 的 `fork` 有**两个**
- * 返回值 —— x0 是 pid、**x1 是「我是不是子进程」**（父 0、子 1）。子进程里 x0 装的是
+ * `fork` 这一格是 Darwin 与 Linux 差得最开的地方：Darwin 的 `fork` 交回**两个**
+ * 寄存器 —— x0 是 pid、**x1 是「我是不是子进程」**（父 0、子 1）。子进程里 x0 装的是
  * 父的 pid，所以只看 x0 的话父子都以为自己是父。量到过：`system("true")` 之后
  * 探子的后四行印了**两遍** —— 那就是子进程接着往下跑。
  *
- * 而 `OP.SYSCALL` 现在只交回 x0（约定见 `mir/ir.js`）。要还这一格得给它一个「第二个
- * 返回值写到哪儿」的变体 —— 那是下一步，不在这一片里。所以这儿**明着崩**，
- * 不假装成功：`fork` 回错值的后果是两个进程一起往下跑，比崩坏得多。
- * `pipe` 同一个理由（第二个 fd 也在 x1 上），在 io.c 里。
+ * 所以这一格要的是 `__omni_syscall2`（`OP.SYSCALL2`，见 `mir/ir.js`）：第二格是
+ * 「第二个返回值写到哪儿」的地址，`svc` 之后后端补一条 `str x1, [x9]`。有了它，
+ * 「我是谁」这一句就是读一个本地变量 —— 子进程读到的是它自己那份栈上的 1。
+ *
+ * `pipe` 同一个形状（两个 fd 在 x0/x1 上），在 io.c 里。
  */
 int fork(void) {
-  __libc_unimpl("fork（Darwin 的第二个返回值在 x1 上，SYSCALL 这条 op 还拿不到）");
-  return -1;
+  long child = 0;
+  long pid = __libc_check(__omni_syscall2(SYS_fork, (long)&child));
+  if (pid < 0) return -1;
+  return child ? 0 : (int)pid;
 }
 int kill(int pid, int sig) { return (int)__libc_check(__omni_syscall(SYS_kill, pid, sig)); }
 int waitpid(int pid, int *status, int opts) {
@@ -186,11 +189,24 @@ int execvp(const char *file, char *const argv[]) {
   return -1;
 }
 
-/* `system` 要 fork，所以跟着一起欠（理由见上面那一段）。 */
+/* `system`：fork + `/bin/sh -c` + wait，与 x86_64-linux 那一份逐行同形 —— 差别都在
+ * `fork` 里（上面那一段），到这一层已经看不出来了。 */
 int system(const char *cmd) {
-  if (cmd == (const char *)0) return 0;   /* 「有没有 shell」：这条腿上按没有算 */
-  __libc_unimpl("system（要 fork，见上面那一段）");
-  return -1;
+  if (cmd == (const char *)0) return 1;         /* 「有没有 shell」：有 */
+  int pid = fork();
+  if (pid < 0) return -1;
+  if (pid == 0) {
+    char *av[4];
+    av[0] = (char *)"/bin/sh";
+    av[1] = (char *)"-c";
+    av[2] = (char *)cmd;
+    av[3] = (char *)0;
+    execve("/bin/sh", av, environ);
+    _exit(127);
+  }
+  int st = 0;
+  waitpid(pid, &st, 0);
+  return st;
 }
 
 unsigned int alarm(unsigned int sec) { (void)sec; return 0; }   /* 要 SIGALRM，见文件头 */

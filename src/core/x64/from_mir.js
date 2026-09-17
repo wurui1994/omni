@@ -753,6 +753,15 @@ class x64FnGen {
       buf.emit(syscallInstr());
       return this.def(i, X64_RES);
     }
+    /* `SYSCALL2`（第一百四十片第六格）：明着报错。
+     *
+     * 这一格是给「内核交回两个寄存器」的调用留的，而**它只在 Darwin 上存在**
+     * （`fork` 的 x1、`pipe` 的 x1）。x86_64 上第二个回值该是 rdx —— 但那要 x86_64-osx
+     * 才用得上，而我们这条腿只有 x86_64-linux：Linux 的 `fork` 只交回 rax（子进程里
+     * 是 0），`pipe2` 把两个 fd 写进用户给的数组。没有用户的代码不写，写了也无从判。 */
+    if (op === OP.SYSCALL2) {
+      nyi('SYSCALL2（x86_64 上第二个回值在 rdx，但只有 Darwin 用得上它，这条腿是 linux）');
+    }
     /* `FPGET`（第一百四十片第二格）：帧指针自己。x86_64 上序言一律是
      * `push rbp; mov rbp, rsp`（见文件头「一、帧靠 rbp」），所以这一条就是一句
      * `mov reg, rbp` —— tcc 那边是 `lea (%rbp), %rax`，同一个值，少一个字节。 */

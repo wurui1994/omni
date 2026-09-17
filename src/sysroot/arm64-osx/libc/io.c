@@ -1,12 +1,14 @@
 /* io.c — arm64 macOS 的文件 IO 与「跟系统要地方」（第一百四十片第五格）。
  *
- * 与 Linux 那一份逐个对应（函数名、签名、错误约定都一样），差别只有三处，都是
+ * 与 Linux 那一份逐个对应（函数名、签名、错误约定都一样），差别只有四处，都是
  * Darwin 自己的：
  *   - `open` 是**真的 open**（Linux 那边我们走 `openat(AT_FDCWD, …)`）
  *   - `stat` 落到 `stat64`（338）：Darwin 的 `struct stat` 早年换过一次布局，
  *     64 位那一版才是现在 SDK 头里那个（`include/sys/stat.h` 量过：144 字节）
  *   - **没有 brk**：`__libc_chunk` 走 `mmap`，于是要来的地方是一块块散的 ——
  *     公用那份 malloc 早就不假设连着了（见它的文件头）
+ *   - `pipe` 把两个 fd 回在**寄存器**上（x0/x1），不写用户给的数组 —— 所以它走
+ *     `__omni_syscall2`（Linux 那边 `pipe(fd)` 内核自己写内存）
  */
 #include "libc.h"
 
@@ -65,11 +67,15 @@ int dup2(int old, int new_) {
 }
 
 int pipe(int fd[2]) {
-  /* Darwin 的 `pipe` 把两个 fd 回在 x0/x1 上（不写内存）。x1 这一层拿不到 ——
-   * 所以这一格明着不给：拿不到第二个 fd 的 `pipe` 比没有更坏。 */
-  (void)fd;
-  __libc_errno_val = 78;            /* ENOSYS（Darwin 的号） */
-  return -1;
+  /* Darwin 的 `pipe` 把两个 fd 回在 x0/x1 上（**不写内存** —— 与 Linux 的
+   * `pipe2(fd, 0)` 不是同一件事）。第二个用 `__omni_syscall2` 接：池的第一格是
+   * 「x1 写到哪儿」的地址，理由与 `fork` 同一条（见 misc.c 那一段）。 */
+  long second = 0;
+  long r = __libc_check(__omni_syscall2(SYS_pipe, (long)&second));
+  if (r < 0) return -1;
+  fd[0] = (int)r;
+  fd[1] = (int)second;
+  return 0;
 }
 
 int isatty(int fd) {

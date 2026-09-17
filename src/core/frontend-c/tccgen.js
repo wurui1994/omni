@@ -3528,6 +3528,13 @@ export class CGen {  /**
       const hit = this.funcs.get(name);
       if (hit === undefined || !hit.defined) return this.syscallBuiltin();
     }
+    /* `__omni_syscall2(号, &第二个返回值, 实参…)`（第一百四十片第六格）：交回**两个**
+     * 寄存器。Darwin 的 `fork`（x0 = pid、**x1 = 是不是子进程**）与 `pipe`（两个 fd
+     * 在 x0/x1 上）要它 —— 只看 x0 的话父子都以为自己是父。 */
+    if (name === '__omni_syscall2') {
+      const hit = this.funcs.get(name);
+      if (hit === undefined || !hit.defined) return this.syscall2Builtin();
+    }
     /* `__builtin_frame_address(0)`（第一百四十片第二格，`tccgen.c:5867`）。
      * tcc 那边它是 `vset(&type, VT_LOCAL, 0)` —— 「本地帧，偏移 0」，x86_64 上就是
      * `rbp`。我们降成一条 `OP.FPGET`。用途只有一个：crt 拿它把内核放在栈上的
@@ -3629,6 +3636,43 @@ export class CGen {  /**
     }
     return this.postfix(sVal(TY_LLONG,
       this.f.emit(OP.SYSCALL, T_I64, no, this.f.pushArgs(refs), 0)));
+  }
+
+  /**
+   * `__omni_syscall2(号, &第二个返回值, 实参…)` -> 一条 `OP.SYSCALL2`（第六格）。
+   *
+   * 与上面那一条差一格：内核交回**两个**寄存器。产的值是第一个（x0 / rax），
+   * 第二个写进那个地址。Darwin 的 `fork` 与 `pipe` 要它（理由见 `mir/ir.js`）。
+   * 池的第一格就是那个地址 —— 与 `ARGSRET` 同一条路数。
+   */
+  syscall2Builtin() {
+    if (!this.native) {
+      this.err('__omni_syscall2 只有 native 那两条腿有（解释器那边 libc 是宿主的 JS）');
+    }
+    const os2 = this.cpp.os ?? 'osx';
+    if (os2 !== 'linux' && os2 !== 'osx') {
+      this.err(`__omni_syscall2 现在只有 linux 与 osx 有（这一趟是 ${os2}）`);
+    }
+    this.skip(LPAR);
+    const no = this.gv(this.castTo(this.exprEq(), TY_LLONG));
+    /* 第二格不能省：省了的话池是空的，后端会拿实参当地址往里写 —— 症状是一次段错，
+     * 离病根隔着整条 op。所以这儿自己报，不让 `skip(COMMA)` 只说「少个逗号」。 */
+    if (this.tok !== COMMA) {
+      this.err('__omni_syscall2 的第二格是「第二个返回值写到哪儿」的地址，不能省');
+    }
+    this.next();
+    const out = this.gv(this.castTo(this.exprEq(), TY_LLONG));
+    const refs = [out];
+    while (this.tok === COMMA) {
+      this.next();
+      refs.push(this.gv(this.castTo(this.exprEq(), TY_LLONG)));
+    }
+    this.skip(RPAR);
+    if (refs.length - 1 > 6) {
+      this.err(`__omni_syscall2 给了 ${refs.length - 1} 个实参，内核 ABI 只有六格`);
+    }
+    return this.postfix(sVal(TY_LLONG,
+      this.f.emit(OP.SYSCALL2, T_I64, no, this.f.pushArgs(refs), 0)));
   }
 
   /**

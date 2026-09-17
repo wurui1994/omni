@@ -152,6 +152,15 @@
 #           node src/cli.js c link /tmp/sp.o -o sp --stdlib --libc self \
 #             --sysroot src/sysroot/x86_64-linux -f elf --arch x86_64 --os linux
 #           # 容器里：./sp > a.txt; gcc -o ref libc-sys-probe.c && ./ref > b.txt; diff a.txt b.txt
+#      h. 探子后来多了一格 `pipe`（`SYSCALL2` 那一片），所以现在是 **15 行输出**，
+#         而 `system` 那一行两条腿都真的跑（原先 macOS 上是 `#ifdef __APPLE__` 跳过的）。
+#         两边各量了一趟，都是**逐行相同**（`diff` 无输出）、两边 rc=0：
+#           x86_64-linux（容器）：`./sp_lin` 与 `gcc` 那份 —— `ldd` 说 statically linked，
+#             180477 字节、16 节、8 段
+#           arm64-osx（本机，不进容器）：与 Apple 的 libc 那份 —— 127728 字节、13 条加载命令
+#         两行新的：`system(true) 状态字: 0`、`pipe 0: 写 7 读 7 「pipe ok」`。
+#         macOS 上这两格靠 `SYSCALL2`（`fork` 的 x1 = 是不是子进程、`pipe` 的第二个 fd
+#         也在 x1）—— 之前「探子后四行印两遍」的病根就在这儿。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

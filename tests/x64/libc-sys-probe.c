@@ -16,6 +16,10 @@ int closedir(void *);
 char *getenv(const char *);
 int setenv(const char *, const char *, int);
 int system(const char *);
+int pipe(int *);
+long write(int, const void *, unsigned long);
+long read(int, void *, unsigned long);
+int close(int);
 long time(long *);
 unsigned long strftime(char *, unsigned long, const char *, const void *);
 void *localtime(const long *);
@@ -64,13 +68,18 @@ int main(void) {
   printf("strftime %lu 字符，年份四位: %d\n", k,
     ts[0] >= '2' && ts[4] == '-' && ts[7] == '-' && ts[13] == ':');
 
-  /* 5. 进程。macOS 上 `fork` 拿不到第二个返回值（在 x1 上），所以那条腿上
-   *    `system` 是明着不给的 —— 两边都印同一句，判据照旧逐行比。 */
-#ifdef __APPLE__
-  printf("system: 跳过（Darwin 的 fork 第二个返回值在 x1 上）\n");
-#else
+  /* 5. 进程与管道。这两格是 Darwin 与 Linux 差得最开的地方（`fork` 的第二个返回值在
+   *    x1、`pipe` 的两个 fd 都在寄存器上），所以**两边跑同一段**、逐行比。 */
   printf("system(true) 状态字: %d\n", system("true"));
-#endif
+  int fd[2];
+  int pr = pipe(fd);
+  char pb[16];
+  long wn = write(fd[1], "pipe ok", 7);
+  long rn = read(fd[0], pb, 15);
+  pb[rn < 0 ? 0 : rn] = 0;
+  close(fd[0]);
+  close(fd[1]);
+  printf("pipe %d: 写 %ld 读 %ld 「%s」\n", pr, wn, rn, pb);
 
   /* 6. 杂 */
   printf("strerror(2): %s\n", strerror(2));

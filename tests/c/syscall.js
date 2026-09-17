@@ -128,6 +128,37 @@ has('osx：svc #0x80', OSX, '01 10 00 d4');
 has('osx：紧跟一条 cneg x0, x0, cs（把进位折进符号）', OSX, '01 10 00 d4 00 34 80 da');
 has('linux：还是 svc #0（不带 0x80）', textHex(WRITE, 'arm64'), '01 00 00 d4');
 
+/* ---- `SYSCALL2`（第六格）：Darwin 的 `fork` 与 `pipe` 交回**两个**寄存器 —— x0 是
+ * pid / 头一个 fd，x1 是「我是不是子进程」/ 第二个 fd。只看 x0 的话父子都以为自己是父
+ * （量到过：`system("true")` 之后探子的后四行印了两遍）。所以这一条多两步收尾：
+ * 把池的第一格（「x1 写到哪儿」的地址）取进 x9、一条 `str x1, [x9]`，**再**折进位。
+ * 次序要钉：`cneg` 只动 x0，可要是先折了再存，读这段代码的人就得自己推一遍 x1 有没有被动。 */
+const S2 = textHex(`
+int f(void) {
+  long c = 0;
+  return (int)__omni_syscall2(0x2000002, (long)&c);
+}
+`, 'arm64', 'osx');
+has('osx：syscall2 的号照旧进 x16（movz x16, #2 + movk 0x200）', S2, '50 00 80 d2 10 40 a0 f2');
+has('osx：svc #0x80 之后先取地址、再 str x1, [x9]', S2, '01 10 00 d4 e9 03 40 f9 21 01 00 f9');
+has('osx：存完 x1 才折进位（cneg 在最后）', S2, '21 01 00 f9 00 34 80 da');
+
+/* 池是空的（一个实参都没给，连「写到哪儿」都没有）明着报错 —— 这一格错了症状是
+ * 往地址 0 上写，离病根隔着一次段错。 */
+let s2Err = '';
+try {
+  textHex('int f(void) { return (int)__omni_syscall2(2); }', 'arm64', 'osx');
+} catch (e) { s2Err = String(e.message ?? e); }
+has('syscall2 少了「第二个返回值写到哪儿」就报错', s2Err, 'syscall2');
+
+/* x86_64 上明着不给：第二个回值该是 rdx，但只有 Darwin 用得上它，而这条腿只有
+ * x86_64-linux（那边 `fork` 只交回 rax、`pipe2` 写用户给的数组）。 */
+let s2x = '';
+try {
+  textHex('int f(void) { long c = 0; return (int)__omni_syscall2(57, (long)&c); }', 'x86_64');
+} catch (e) { s2x = String(e.message ?? e); }
+has('x86_64 上 SYSCALL2 明着报错', s2x, 'SYSCALL2');
+
 /* 别的目标（win32）上仍旧明着报错。 */
 let winErr = '';
 try {

@@ -288,6 +288,18 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     if (n > 6) bad(i, `SYSCALL 有 ${n} 个实参，内核 ABI 只有六格`);
     return;
   }
+  /* 交回两个寄存器的那一条（第一百四十片第六格）：池的**第一格是地址**（第二个返回值
+   * 写到哪儿），所以实参上限连着那一格是 7。 */
+  if (op === OP.SYSCALL2) {
+    if (!mod.native) { bad(i, 'SYSCALL2：只有 native 这条腿上有内核可谈'); return; }
+    if (f.t[i] !== T_I64) {
+      bad(i, `SYSCALL2 的 t 是 ${typeText(f.t[i])}，它产第一个寄存器，只能是 i64`);
+    }
+    const n2 = f.argsOf(f.b[i]).length;
+    if (n2 < 1) bad(i, 'SYSCALL2 的池至少要有一格（第二个返回值写到哪儿）');
+    else if (n2 > 7) bad(i, `SYSCALL2 有 ${n2 - 1} 个实参，内核 ABI 只有六格`);
+    return;
+  }
   /* 帧指针（第一百四十片第二格）：只有 native 有真的帧可谈，回的是一个地址。
    * 「x86_64 才有」那一格由后端报（arm64 那边帧基址按函数在 x28 与 sp 之间选，
    * 见那份后端的 `FB`）—— 这一层只管「这条 op 出现在对的腿上、类型对」。 */
