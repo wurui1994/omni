@@ -106,18 +106,26 @@ double ldexp(double x, int n) {
 }
 double scalbn(double x, int n) { return ldexp(x, n); }
 
-/* ---- sqrt：指数减半当初值，三次牛顿（每次翻倍有效位，53 位够了）。
- * 收尾再拿一次「牛顿的对称形式」把最后一位压住。 */
+/* ---- sqrt：指数减半当初值，牛顿迭代（每次翻倍有效位）。
+ *
+ * 两格都是量出来才对的：
+ *   - 初值的指数要按 **floor** 减半。C 的 `/` 是往零截，`-1/2` 得 0 —— 于是 x = 0.5
+ *     的初值成了 2^0·√2 = 1.414（真值 0.707），起手相对误差 0.7。
+ *   - 从那个初值起 4 次牛顿只到 4.6e-8（量到的就是这个数：120 个采样点里最大的
+ *     那一格是 `sqrt(0.5)`）。牛顿每次翻倍有效位，0.7 -> 0.25 -> 0.017 -> 2.4e-4
+ *     -> 4.6e-8 -> 1.5e-15 -> 收敛，所以要 6 次。 */
 double sqrt(double x) {
   if (x != x || x < 0.0) { double z = 0.0; return x == 0.0 ? x : z / z; }   /* nan */
   if (x == 0.0 || !__finite(x)) return x;
   DBits b; b.d = x;
-  /* 初值：指数除以 2（偏移 1023 得先减掉再加回来）。 */
   int e = (int)((b.u >> 52) & 0x7ff) - 1023;
+  int half = e >= 0 ? e / 2 : -((-e + 1) / 2);        /* floor(e/2) */
   DBits g;
-  g.u = ((unsigned long long)((e / 2) + 1023) & 0x7ffULL) << 52;
+  g.u = ((unsigned long long)(half + 1023) & 0x7ffULL) << 52;
   double r = g.d;
-  if (e & 1) r *= 1.4142135623730951;
+  if (e - 2 * half != 0) r *= 1.4142135623730951;     /* e 是奇数 */
+  r = 0.5 * (r + x / r);
+  r = 0.5 * (r + x / r);
   r = 0.5 * (r + x / r);
   r = 0.5 * (r + x / r);
   r = 0.5 * (r + x / r);
@@ -317,9 +325,14 @@ double cos(double x) {
   return sinCore(r);
 }
 double tan(double x) { return sin(x) / cos(x); }
-/* ---- atan：|x| > 1 换成 π/2 - atan(1/x)；剩下的用加法公式往 0.5 以下压，
- * 再上级数。压一次之后 |t| ≤ 0.2679，17 项余项 < 2^-56。 */
-static double atanCore(double x) {         /* |x| ≤ 0.2679 */
+/* ---- atan：|x| > 1 换成 π/2 - atan(1/x)，然后**半角三次**把 x 压到 0.1 以下再上级数。
+ *
+ * 半角用的是 atan(x) = 2·atan( x / (1 + √(1+x²)) )。为什么不是加法公式那一版：
+ * 第一版写的是「> 0.5 就用 atan(0.5) + atanCore((x-0.5)/(1+x/2))」，而 x = 1 那一档
+ * 压完还有 0.333 —— 级数在 0.2679 之外就不够了。量到的后果是 `atan(0.5)` 与 glibc
+ * 差 **1.8e-7**（120 个采样点里最大的那一格），因为 0.5 直接进了级数。
+ * 半角这一版每次把 x 压到不到一半，x ≤ 1 时三次就到 0.0985，余项 < 2^-63。 */
+static double atanCore(double x) {         /* |x| ≤ 0.1 */
   double x2 = x * x;
   double s = 1.0 / 17.0;
   s = -1.0 / 15.0 + x2 * s;
@@ -332,19 +345,21 @@ static double atanCore(double x) {         /* |x| ≤ 0.2679 */
   s = 1.0 + x2 * s;
   return x * s;
 }
-#define ATAN_HALF 0.46364760900080611621   /* atan(0.5) */
 double atan(double x) {
   if (x != x) return x;
   int neg = x < 0.0;
   x = fabs(x);
   double r;
   if (!__finite(x)) r = PI_2;
-  else if (x > 1.0) {
-    double t = 1.0 / x;
-    r = PI_2 - (t > 0.5 ? ATAN_HALF + atanCore((t - 0.5) / (1.0 + 0.5 * t)) : atanCore(t));
-  } else if (x > 0.5) {
-    r = ATAN_HALF + atanCore((x - 0.5) / (1.0 + 0.5 * x));
-  } else r = atanCore(x);
+  else {
+    int inv = 0;
+    if (x > 1.0) { x = 1.0 / x; inv = 1; }
+    int h = 0;
+    while (x > 0.1 && h < 4) { x = x / (1.0 + sqrt(1.0 + x * x)); h++; }
+    r = atanCore(x);
+    while (h > 0) { r *= 2.0; h--; }
+    if (inv) r = PI_2 - r;
+  }
   return neg ? -r : r;
 }
 double atan2(double y, double x) {
