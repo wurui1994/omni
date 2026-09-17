@@ -109,6 +109,14 @@
    `build --engine graph` 的产物文本，那是要单独记一笔的事）。
 2. **形状推断落到 C**：字段名静态可知的 `record-new` -> C `struct`；
    判据是 `ext/*/examples/record.*` 那一族出来的 C 里**出现 `struct`、`gv` 计数下降**。
+   **落地了**（2026-09-17，`backend-c.js` 的 `recPlan`，判据 `tests/graph/shape.js` 19 格）：
+   `record.lua` 那一份现在发 `struct r1 { gv f_x; gv f_y; };`，取字段是 `v_p.f_x`
+   （一格偏移），`g_rec_new` / `g_field_get` 在程序那一段**一次都不出现**，
+   `gv` 局部量从 4 格降到 3 格（剩的三格是 print 的缓冲）。
+   同形的记录共用一格 `struct`（编号按登记顺序，所以两次出来逐字节相同）。
+   三处不动：记录**跑出去**（当实参 / 被 print / 进列表 —— 宿主面只认 `gv`）、
+   字段名不在名单里、那格 `record-new` 被共享 —— 每一条都有一格判据。
+   91 份例子的 C 合计 982075 -> 980994 字节、`gv` 局部声明 943 -> 923。
 3. **数值窄化**：只与整数常量与整数变量作用的量 -> `long long`；
    判据是 `intmath` 那一族的 `g_num(g_d(` 往返归零。
    **头一半落地了**（2026-09-17，`backend-c.js` 的 `numPlan` + `dOf`/`condOf`，

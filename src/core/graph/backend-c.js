@@ -460,6 +460,9 @@ static gv g_slice(gv o, gv from, gv to) {
 /** 名字要能当 C 标识符用（Scheme 的 `string-append`、awk 的 `$0` 那种）。 */
 const cName = (n) => `v_${String(n).replace(/[^A-Za-z0-9_]/g, (c) => `_${c.charCodeAt(0).toString(16)}`)}`;
 
+/** 一格 struct 字段名（与 `cName` 同一套转义，前缀不同 —— 免得撞上 C 的关键字）。 */
+const cField = (n) => `f_${String(n).replace(/[^A-Za-z0-9_]/g, (c) => `_${c.charCodeAt(0).toString(16)}`)}`;
+
 /** 一格 C 串字面量。C 与 JSON 的转义不同一套，所以自己来（八进制那两格是关键）。 */
 function cStr(s) {
   let out = '"';
@@ -677,6 +680,100 @@ function numPlan(top) {
 }
 
 /**
+ * **形状推断落到 C**（`docs/design/node-graph-shrink.md` 第五节第 2 条）：字段名编译期就
+ * 知道的记录，落成 C 的 `struct`，而不是「堆上一块 + 按名字线性找键」。
+ *
+ * 哪一格记录动得了，三个条件（**都能在图上问出来**，一格新声明都不加）：
+ *   1. 一格 `bind` 的初值就是 `record-new`，字段名是那一格的附属（编译期已知）；
+ *   2. 那格 `record-new` 在整张图里**只被这一处用**（共享出去了就说不清谁的存储）；
+ *   3. 这个名字的每一次 `ref`，都长在 `field-get` / `field-set` 的 `obj` 槽上，
+ *      而且字段在那张名单里 —— **一处跑出去（当实参、进列表、被 print、被 return）就不动**。
+ *      理由：跑出去之后那一格要是 `gv`（宿主面只认 `gv`），而 struct 不是 `gv`。
+ *
+ * 回的是「体的 key -> (名字 -> 形状)」。形状按**字段名单**去重，于是两格同形的记录共用
+ * 一格 `struct`（`r1` / `r2` … 的编号是登记顺序，所以同一张图两次出来逐字节相同）。
+ */
+function recPlan(top) {
+  /* ---- 一趟：数每格节点被用了几次（**不去重** —— 共享要认得出来），并收集体。 */
+  const uses = new Map();
+  const bodies = [];
+  const walk = (x, depth) => {
+    if (x === null || x === undefined || depth > 400) return;
+    if (Array.isArray(x)) { for (const y of x) walk(y, depth + 1); return; }
+    if (x.op === undefined) return;
+    uses.set(x.id, (uses.get(x.id) ?? 0) + 1);
+    if (uses.get(x.id) > 1) return;                 /* 已经走过一遍，只把次数记上 */
+    if (x.op === 'func') bodies.push({ key: x.id, list: asList(x.ins.body) });
+    for (const k of Object.keys(x.ins ?? {})) walk(x.ins[k], depth + 1);
+  };
+  walk(top, 0);
+  bodies.push({ key: 'top', list: asList(top) });
+
+  const shapes = new Map();                          /* 字段名单 -> struct 名 */
+  const out = new Map();
+  for (const b of bodies) {
+    const cands = new Map();                         /* 名字 -> record-new 节点 */
+    const bad = new Set();
+    const seen = new Set();
+    const scan = (x, slot) => {
+      if (x === null || x === undefined) return;
+      if (Array.isArray(x)) { for (const y of x) scan(y, null); return; }
+      if (x.op === undefined) return;
+      if (x.op === 'ref') {
+        /* 条件 3：只认这两个槽，别的地方一出现就作废。 */
+        if (slot !== 'field-obj') bad.add(x.attrs.name);
+        return;
+      }
+      if (seen.has(x.id)) return;
+      seen.add(x.id);
+      if (x.op === 'func') return;
+      if (x.op === 'bind') {
+        const init = x.ins.init;
+        if (init !== null && init !== undefined && init.op === 'record-new'
+          && Array.isArray(init.attrs.names) && init.attrs.names.length > 0
+          && uses.get(init.id) === 1 && !cands.has(x.attrs.name)) {
+          cands.set(x.attrs.name, init);
+        } else bad.add(x.attrs.name);
+        scan(init, null);
+        return;
+      }
+      if (x.op === 'set') { bad.add(x.attrs.name); scan(x.ins.value, null); return; }
+      if (x.op === 'field-get' || x.op === 'field-set') {
+        scan(x.ins.obj, 'field-obj');
+        if (x.op === 'field-set') scan(x.ins.value, null);
+        return;
+      }
+      for (const k of Object.keys(x.ins ?? {})) scan(x.ins[k], null);
+    };
+    scan(b.list, null);
+    /* 字段名对不上名单的也作废（`p.z` 那种 —— 报错归运行期，别在这儿改语义）。 */
+    const chk = (x) => {
+      if (x === null || x === undefined) return;
+      if (Array.isArray(x)) { for (const y of x) chk(y); return; }
+      if (x.op === undefined) return;
+      if (x.op === 'func') return;
+      if ((x.op === 'field-get' || x.op === 'field-set')
+        && x.ins.obj !== null && x.ins.obj !== undefined && x.ins.obj.op === 'ref') {
+        const n = x.ins.obj.attrs.name;
+        const c = cands.get(n);
+        if (c !== undefined && !c.attrs.names.includes(x.attrs.field)) bad.add(n);
+      }
+      for (const k of Object.keys(x.ins ?? {})) chk(x.ins[k]);
+    };
+    chk(b.list);
+    for (const n of bad) cands.delete(n);
+    const got = new Map();
+    for (const [n, rec] of cands) {
+      const key = rec.attrs.names.join('|');
+      if (!shapes.has(key)) shapes.set(key, `r${shapes.size + 1}`);
+      got.set(n, { names: rec.attrs.names, tag: shapes.get(key) });
+    }
+    if (got.size > 0) out.set(b.key, got);
+  }
+  return { locals: out, shapes };
+}
+
+/**
  * 一格 C 的 double 字面量。**要能一位不差地读回来**：整数写 `3.0`，别的写 17 位有效数字
  * （IEEE 754 双精度的往返位数）。无穷与 NaN 用 `1.0/0.0` 这一族写 —— C 里没有它们的
  * 字面量，而 `<math.h>` 的 `INFINITY` 要 `#include`（这份产物一个头都不 include）。
@@ -722,6 +819,10 @@ class CGen {
     this.num = new Set();
     /** 窄化那张全局的计划（`numPlan`）：哪个体窄了哪几格、哪个函数的形参窄了。 */
     this.np = { locals: new Map(), params: new Set(), nameOfBody: new Map() };
+    /** 这个体里落成 C `struct` 的那几格记录（`recPlan` 算的：名字 -> { names, tag }）。 */
+    this.rec = new Map();
+    /** 记录那张全局的计划。 */
+    this.rp = { locals: new Map(), shapes: new Map() };
   }
 
   /**
@@ -878,6 +979,8 @@ class CGen {
     /* 窄化是**按函数体**算的（`numPlan` 一趟算齐，这儿只取那一份）。 */
     this.num = new Set(this.np.locals.get(x.id) ?? []);
     if (pnum) for (const p of params) this.num.add(p);
+    const outerRec = this.rec;
+    this.rec = this.rp.locals.get(x.id) ?? new Map();
     const t = this.fresh();
     this.emit(`gv ${t} = g_nil();`);
     this.pushFrame('fn');
@@ -889,6 +992,7 @@ class CGen {
     this.lines = outer;
     this.depth = outerDepth;
     this.num = outerNum;
+    this.rec = outerRec;
     this.fns.push({ cname, params: params.map(cName), pnum, lines });
     return cname;
   }
@@ -953,6 +1057,11 @@ class CGen {
       return `g_rec_new(${kn}, ${a}, ${names.length})`;
     }
     if (x.op === 'field-get') {
+      /* 落成 struct 的那几格记录：字段就是**一格偏移**，不是按名字线性找键。 */
+      const o = x.ins.obj;
+      if (o !== null && o !== undefined && o.op === 'ref' && this.rec.has(o.attrs.name)) {
+        return `${cName(o.attrs.name)}.${cField(x.attrs.field)}`;
+      }
       return `g_field_get(${this.valOf(x.ins.obj)}, ${cStr(x.attrs.field)})`;
     }
     if (x.op === 'map-new') {
@@ -1109,6 +1218,18 @@ class CGen {
         this.emit(`double ${cName(x.attrs.name)} = ${this.dVal(x.ins.init)};`);
         return;
       }
+      /* 落成 C `struct` 的那几格记录（判据 2）：一格声明 + 逐个字段赋值。
+       * 不用 `{ … }` 初始化式：字段的值可能要先发几行语句（列表、调用…），
+       * 而那几行必须在这一格声明**之后**才轮到它 —— 逐个赋值就没有这个次序问题。 */
+      const shape = this.rec.get(x.attrs.name);
+      if (shape !== undefined) {
+        const vals = asList(x.ins.init.ins.fields).filter((y) => y !== undefined);
+        this.emit(`struct ${shape.tag} ${cName(x.attrs.name)};`);
+        for (let i = 0; i < shape.names.length; i++) {
+          this.emit(`${cName(x.attrs.name)}.${cField(shape.names[i])} = ${this.valOf(vals[i])};`);
+        }
+        return;
+      }
       this.emit(`gv ${cName(x.attrs.name)} = ${this.valOf(x.ins.init)};`);
       return;
     }
@@ -1188,6 +1309,11 @@ class CGen {
       return;
     }
     if (x.op === 'field-set') {
+      const o = x.ins.obj;
+      if (o !== null && o !== undefined && o.op === 'ref' && this.rec.has(o.attrs.name)) {
+        this.emit(`${cName(o.attrs.name)}.${cField(x.attrs.field)} = ${this.valOf(x.ins.value)};`);
+        return;
+      }
       this.emit(`g_field_set(${this.valOf(x.ins.obj)}, ${cStr(x.attrs.field)}, ${this.valOf(x.ins.value)});`);
       return;
     }
@@ -1259,6 +1385,13 @@ export function emitC(g) {
   const top = asList(g !== null && g.kind === 'graph' ? g.body : g);
   gen.plan(top);
   gen.np = numPlan(top);
+  gen.rp = recPlan(top);
+  gen.rec = gen.rp.locals.get('top') ?? new Map();
+  /* 字段名编译期就知道的记录 -> 一格 `struct`（判据 2）。同形的共用一格，
+   * 编号按登记顺序 —— 所以同一张图两次出来逐字节相同。 */
+  for (const [names, tag] of gen.rp.shapes) {
+    gen.decls.push(`struct ${tag} { ${names.split('|').map((f) => `gv ${cField(f)};`).join(' ')} };`);
+  }
   gen.num = new Set(gen.np.locals.get('top') ?? []);
   gen.pushFrame('fn');
   gen.body(top, null);
