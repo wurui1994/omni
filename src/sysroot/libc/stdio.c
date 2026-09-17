@@ -5,9 +5,9 @@
  * 一格 256 字节的攒写缓冲 —— 不是为了「缓冲的语义」，是为了少发 syscall
  * （`fflush` 照旧是把攒着的吐出去，不留任何跨调用的状态）。
  *
- * **浮点那三条的精度**：数字是「归一化 + 逐位取整」抠出来的（`fmtDigits`），
- * 全在 double 上算，所以最后一两位可能与 glibc 差一个 ulp。量法与量到的数记在
- * `tests/x64/docker-run.sh` 上。真的最短往返（Ryu / Grisu）是另一件事，没做。
+ * **浮点那三条是精确的**（第九格）：数字从**位模式**摊成十进制（`decExpand`，
+ * 基 10^9 的大整数），收位是半到偶 —— 与平台 libc 逐行相同（155 行的对账 0 行不同，
+ * 判据 `tests/c/libc-float.js`）。改之前那一版是「归一化 + 逐位取整」，41 行不同。
  */
 #include "libc.h"
 
@@ -80,89 +80,157 @@ static void fmtPad(FmtOut *o, char *tmp, int n, int width, char pad, int left, c
   if (left) while (total < width) { fmtPut(o, ' '); total++; }
 }
 
-/* ---- 浮点：`nd` 位有效数字 + 十进制指数（第一百四十片）。
+/* ---- 浮点：**精确的十进制展开**（第一百四十片第九格）。
  *
- * 归一化到 `[1, 10)` 再逐位 `d = (int)x; x = (x - d) * 10`。全在 double 上算，
- * 所以 17 位那一档最后一两位可能与 glibc 差一个 ulp（量到的数记在 docker-run.sh）。
- * 归一化用**乘/除 10 的幂**而不是 `log10`：这一份不许依赖 math.c（那边反过来也
- * 不依赖这儿），而且 `log10` 自己就有误差。
+ * 一个 double 就是 `m × 2^e`（m 是 53 位整数）—— 它的十进制展开**是有限的**，
+ * 所以「精确」不需要 dragon4 那套循环，只要一个大整数乘法：
  *
- * **试过一版「只除一次」的，更差，没收**（第一百四十片第四格，量在本机
- * `cc` 编的小探子上）：先算 e10、再 `v / 10^(e10-16)` 落进 [1e16, 1e17)、取整成 u64
- * 一次取完 17 位。想法是「一次除法只有一个 ulp 的误差」，结果 28 个采样里 17 个与
- * 系统 libc 不同，而且**极端处是灾难性的**：`2.2250738585072014e-308` 印成
- * `4.4674407370955161e-306`（差两个数量级 —— `10^(e10-16)` 那个幂本身已经溢出/下溢）。
- * 现在这一版最坏也只错末位（`5e-324` 那一档量到的是末位 9 与 4 之差）。
+ *   e ≥ 0：值就是整数 `m·2^e`，小数位 0（最多 309 位）
+ *   e < 0：`m / 2^k = m·5^k / 10^k` —— 算 `m·5^k`，小数点往左退 k 位（最多 1074 位）
  *
- * 真的对法是大整数（Ryu / Grisu / dragon4：把 double 的尾数与 2 的幂摊成精确的十进制
- * 再取最短往返）—— 那是一件独立的事，没做，明记在 sysroot 的 README 上。 */
-static int fmtDigits(double v, int nd, char *out, int *e10) {
-  int e = 0;
+ * 大整数用**基 10^9 的节**：这样「摊成数字串」就是逐节印九位，一次除法都不用。
+ * 一个节乘 2^29 或 5^12 都还在 u64 里（1e9 × 5.4e8 < 1.8e19），所以幂是成块吃的。
+ *
+ * 上一版是「归一化到 [1,10) 再逐位取整」，全在 double 上算，末一两位会差一个 ulp
+ * （量到的是 41 行不同 / 155 行）。**也试过「只除一次」那一版，更差，没收**：
+ * `2.2250738585072014e-308` 印成 `4.4674407370955161e-306`（`10^(e10-16)` 自己就溢了）。
+ * 现在这一条路上一次浮点运算都没有 —— 位模式进来，整数出去。 */
+#define DEC_LIMBS 132              /* 132 × 9 = 1188 位数字，够 1074 + 17 */
+#define DEC_DIGITS 1200
+#define DEC_BASE 1000000000u
+
+typedef struct { unsigned int w[DEC_LIMBS]; int n; } Dec;
+
+static const unsigned int DEC_P10[9] = {
+  1u, 10u, 100u, 1000u, 10000u, 100000u, 1000000u, 10000000u, 100000000u
+};
+
+static void decSetU64(Dec *d, unsigned long long v) {
+  d->n = 0;
+  while (v > 0 && d->n < DEC_LIMBS) {
+    d->w[d->n++] = (unsigned int)(v % DEC_BASE);
+    v /= DEC_BASE;
+  }
+  if (d->n == 0) { d->w[0] = 0; d->n = 1; }
+}
+
+static void decMulSmall(Dec *d, unsigned int m) {
+  unsigned long long carry = 0;
+  for (int i = 0; i < d->n; i++) {
+    unsigned long long t = (unsigned long long)d->w[i] * m + carry;
+    d->w[i] = (unsigned int)(t % DEC_BASE);
+    carry = t / DEC_BASE;
+  }
+  while (carry > 0 && d->n < DEC_LIMBS) {
+    d->w[d->n++] = (unsigned int)(carry % DEC_BASE);
+    carry /= DEC_BASE;
+  }
+}
+/* `v`（> 0、有限）的精确十进制展开。数字串没有前导零，`*frac` 是小数点右边的位数
+ * （也就是这串数字要往左退多少位）。回值是数字个数。 */
+static int decExpand(double v, char *digits, int cap, int *frac) {
+  union { double d; unsigned long long u; } b;
+  b.d = v;
+  int E = (int)((b.u >> 52) & 0x7ff);
+  unsigned long long M = b.u & 0xfffffffffffffULL;
+  unsigned long long m;
+  int e;
+  if (E == 0) { m = M; e = -1074; }              /* 非规格化 */
+  else { m = M | (1ULL << 52); e = E - 1075; }
+  Dec d;
+  decSetU64(&d, m);
+  if (e >= 0) {
+    int k = e;
+    while (k >= 29) { decMulSmall(&d, 1u << 29); k -= 29; }
+    if (k > 0) decMulSmall(&d, 1u << k);
+    *frac = 0;
+  } else {
+    int k = -e;
+    *frac = k;
+    while (k >= 12) { decMulSmall(&d, 244140625u); k -= 12; }   /* 5^12 */
+    while (k-- > 0) decMulSmall(&d, 5u);
+  }
+  /* 摊成数字串：最高一节不补零，往下每节都是整整九位。 */
+  int L = 0;
+  char t[12];
+  int tn = 0;
+  unsigned int hi = d.w[d.n - 1];
+  if (hi == 0) t[tn++] = '0';
+  while (hi > 0) { t[tn++] = (char)('0' + (hi % 10)); hi /= 10; }
+  while (tn > 0 && L < cap) digits[L++] = t[--tn];
+  for (int i = d.n - 2; i >= 0; i--) {
+    unsigned int x = d.w[i];
+    for (int p = 8; p >= 0 && L < cap; p--) {
+      digits[L++] = (char)('0' + ((x / DEC_P10[p]) % 10));
+    }
+  }
+  return L;
+}
+/* 摊完再按要求收位。两种要法：
+ *   `fixedMode == 0`：要 `want` 位**有效数字**（`%e` / `%g`）
+ *   `fixedMode == 1`：要小数点后 `want` 位（`%f`）—— 位数由指数定
+ * 出：`out` 里的数字（回值是几位）、`*e10` 是第一位的十进制指数。
+ *
+ * 舍入是**半到偶**（glibc 默认那一档：exact 值离两边一样远时取偶数末位）。判据里
+ * `9007199254740992` 与 `4503599627370497` 那两行专门盯这一格。 */
+static int fmtRound(double v, int want, int fixedMode, char *out, int cap, int *e10) {
   if (v == 0.0) {
-    int k = 0;
-    while (k < nd) out[k++] = '0';
+    int nd = fixedMode ? 1 : (want < 1 ? 1 : want);
+    if (nd > cap) nd = cap;
+    for (int i = 0; i < nd; i++) out[i] = '0';
     *e10 = 0;
     return nd;
   }
-  /* 归一化那两条**都带上界**：double 的十进制指数在 ±324 之间，超出就只能是 inf
-   * （那时 `v /= 10` 永远回 inf，循环不结束）。`doFmt` 里已经挡过 inf 与 nan，
-   * 这儿是第二道 —— malloc 那一格的教训：不留任何一条能原地不动的循环。 */
-  while (v >= 10.0 && e < 400) { v /= 10.0; e++; }
-  while (v < 1.0 && e > -400) { v *= 10.0; e--; }
-  int k = 0;
-  while (k < nd) {
-    int d = (int)v;
-    if (d > 9) d = 9;            /* 舍入的边角：1e17 那一档 v 可能刚过 10 */
-    out[k++] = (char)('0' + d);
-    v = (v - (double)d) * 10.0;
+  char dg[DEC_DIGITS];
+  int frac = 0;
+  int L = decExpand(v, dg, DEC_DIGITS, &frac);
+  int e = L - frac - 1;                     /* 第一位有效数字的十进制指数 */
+  int nd = fixedMode ? e + 1 + want : want;
+  if (nd > cap) nd = cap;
+  if (nd < 0) nd = 0;
+  for (int k = 0; k < nd; k++) out[k] = (k < L) ? dg[k] : '0';
+  int up = 0;
+  if (nd < L) {
+    char c = dg[nd];
+    if (c > '5') up = 1;
+    else if (c == '5') {
+      int rest = 0;
+      for (int i = nd + 1; i < L; i++) if (dg[i] != '0') { rest = 1; break; }
+      up = rest ? 1 : (nd > 0 ? ((out[nd - 1] - '0') & 1) : 0);
+    }
   }
-  /* 末位四舍五入：剩下的 v 是「下一位及以后」。 */
-  if (v >= 5.0) {
+  if (up) {
     int j = nd - 1;
     while (j >= 0) {
       if (out[j] != '9') { out[j]++; break; }
       out[j] = '0';
       j--;
     }
-    if (j < 0) {                 /* 999… 全进位：变成 1 后头补 0，指数 +1 */
-      out[0] = '1';
-      int m = 1;
-      while (m < nd) out[m++] = '0';
+    if (j < 0) {                            /* 999… 全进位：1 后头补零，指数 +1 */
+      if (nd == 0) { if (cap > 0) { out[0] = '1'; nd = 1; } }
+      else { out[0] = '1'; for (int m = 1; m < nd; m++) out[m] = '0'; }
       e++;
     }
   }
+  if (nd == 0 && cap > 0) out[0] = '0';
   *e10 = e;
   return nd;
 }
 
 /* `%f`：定点。`prec` 位小数（默认 6）。
  *
- * `tmp` 得放得下**整数部分的全部位数** —— double 最大 1.8e308，那是 309 位，
- * 再加小数与小数点。第一版给了 64 字节，量到的后果是 `printf("%f", 1e100)` 把栈上
- * 后面那一片写花（输出里一长串 NUL）。所以这一格是 512，而且每一步都守着上界。
+ * `tmp` 得放得下**整数部分的全部位数** —— double 最大 1.8e308，那是 309 位，再加小数与
+ * 小数点。第一版给了 64 字节，量到的后果是 `printf("%f", 1e100)` 把栈上后面那一片写花
+ * （输出里一长串 NUL）。所以这一格是 1200（309 + 小数点 + 精度），每一步都守着上界。
  *
- * 与 glibc 的差别（明说）：那边 `%f` 印的是这个 double 的**精确十进制展开**
- * （1e100 那一行 100 位数字全是真的），我们只有前 25 位有效数字是真的、后头补零 ——
- * 精确展开要大整数，这一份没有。 */
+ * 数字来自 `fmtRound`（精确展开），所以 `1e100` 那一行的一百位数字**全是真的**，
+ * 与 glibc 逐字节相同 —— 上一版只有前 25 位是真的、后头补零。 */
 static void fmtFixed(FmtOut *o, double v, int prec, int width, char pad, int left, char pre) {
-  char dg[32];
+  char dg[DEC_DIGITS];
   int e10 = 0;
-  int nd;
-  {
-    double t = v;
-    int e = 0;
-    if (t != 0.0) {
-      /* 上界与 `fmtDigits` 里那两条同一个理由（inf 上除不动）。 */
-      while (t >= 10.0 && e < 400) { t /= 10.0; e++; }
-      while (t < 1.0 && e > -400) { t *= 10.0; e--; }
-    }
-    nd = e + 1 + prec;
-    if (nd < 1) nd = 1;
-    if (nd > 25) nd = 25;
-  }
-  fmtDigits(v, nd, dg, &e10);
-  char tmp[512];
-  const int cap = 512;
+  int nd = fmtRound(v, prec, 1, dg, DEC_DIGITS, &e10);
+  char tmp[DEC_DIGITS];
+  const int cap = DEC_DIGITS;
   int n = 0;                       /* tmp 是倒着放的（fmtPad 从后往前吐） */
   int frac = prec;
   int idx = e10 + prec;            /* dg 里最后那一位小数的下标 */
@@ -185,14 +253,14 @@ static void fmtFixed(FmtOut *o, double v, int prec, int width, char pad, int lef
 /* `%e`：科学计数。`prec` 位小数（默认 6），指数至少两位。 */
 static void fmtSci(FmtOut *o, double v, int prec, int width, char pad, int left, char pre,
   int upper) {
-  char dg[32];
+  char dg[DEC_DIGITS];
   int e10 = 0;
-  int nd = prec + 1;
-  if (nd > 25) nd = 25;
-  fmtDigits(v, nd, dg, &e10);
+  int want = prec + 1;
+  if (want > DEC_DIGITS) want = DEC_DIGITS;
+  int nd = fmtRound(v, want, 0, dg, DEC_DIGITS, &e10);
   if (v == 0.0) e10 = 0;
-  char tmp[128];
-  const int cap = 128;
+  char tmp[DEC_DIGITS];
+  const int cap = DEC_DIGITS;
   int n = 0;                        /* 倒着放 */
   /* 指数：`e±dd` */
   int ex = e10 < 0 ? -e10 : e10;
@@ -203,11 +271,11 @@ static void fmtSci(FmtOut *o, double v, int prec, int width, char pad, int left,
   while (k < en) tmp[n++] = ed[k++];        /* ed 本来倒着，直接倒进 tmp = 正序 */
   tmp[n++] = e10 < 0 ? '-' : '+';
   tmp[n++] = upper ? 'E' : 'e';
-  /* 小数位（倒着）。要的位数比抠得出来的多时（`%.30e`）后头补零 —— 有效数字封顶
-   * 在 25 位，再往后是猜的，补零至少不撒谎。 */
-  int want = prec;
+  /* 小数位（倒着）。要的位数比摊得出来的多时（`%.30e`）后头补零 —— 那是**对的**，
+   * 不是偷懒：double 的十进制展开有限，超出那么多位本来就全是零。 */
+  int wantf = prec;
   int have = nd - 1;
-  while (want > have && n < cap) { tmp[n++] = '0'; want--; }
+  while (wantf > have && n < cap) { tmp[n++] = '0'; wantf--; }
   int i = have;
   while (i >= 1 && n < cap) { tmp[n++] = dg[i]; i--; }
   if (prec > 0 && n < cap) tmp[n++] = '.';
@@ -220,10 +288,9 @@ static void fmtSci(FmtOut *o, double v, int prec, int width, char pad, int left,
 static void fmtGen(FmtOut *o, double v, int prec, int width, char pad, int left, char pre,
   int upper) {
   if (prec == 0) prec = 1;
-  char dg[40];
+  char dg[DEC_DIGITS];
   int e10 = 0;
-  int nd = prec > 25 ? 25 : prec;
-  fmtDigits(v, nd, dg, &e10);
+  int nd = fmtRound(v, prec > DEC_DIGITS ? DEC_DIGITS : prec, 0, dg, DEC_DIGITS, &e10);
   if (v == 0.0) e10 = 0;
   /* 去零：从末位往前砍（至少留一位） */
   int keep = nd;
@@ -303,7 +370,13 @@ static int doFmt(FmtOut *o, const char *fmt, __builtin_va_list ap) {
     } else if (spec == 'f' || spec == 'F' || spec == 'e' || spec == 'E'
       || spec == 'g' || spec == 'G') {
       double v = __builtin_va_arg(ap, double);
-      if (v < 0.0) { pre = '-'; v = -v; }
+      /* 符号看**位模式**，不是 `v < 0`：`-0.0 < 0.0` 是假的，而 glibc 印的是 `-0`
+       * （C11 7.21.6.1：负号照符号位走）。量到过这一格 —— 五行里差的就是那个减号。 */
+      {
+        union { double d; unsigned long long u; } sb;
+        sb.d = v;
+        if ((sb.u >> 63) != 0) { pre = '-'; v = -v; }
+      }
       /* nan / inf：位模式认出来（这一份不依赖 math.c）。 */
       if (v != v) { fmtStr(o, "nan", -1); continue; }
       if (v > 1.7976931348623157e308) { fmtStr(o, pre == '-' ? "-inf" : "inf", -1); continue; }
