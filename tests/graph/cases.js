@@ -71,6 +71,12 @@ export const MUT = ['1', '3'];
  */
 export const VARDECL = ['15', '1', '3', '6', '5', '2'];
 /**
+ * posinit：**位置型结构字面量**（V 独一份）—— `Point{1, 5}` 只给了值，字段名与顺序从
+ * **声明**来（与 mojo / CL / Scheme / FB 那四门同一条）。同一条产生式两种写法：
+ * 位置型出 `(positional …)`、带名字的出 `(f 名 值)`；混着写当场报。
+ */
+export const POSINIT = ['3', '11', '16'];
+/**
  * match：**`match` 落一条 branch 链**（V 独一份）—— 与 go 的 switch 同一件事，多压一样：
  * match **既是语句也是表达式**，两者在图上不同形（语句那一路主语落一格 bind、体是 region；
  * 表达式那一路每支交出一个值、主语抄进每格比较、必须有 else）。
@@ -209,6 +215,10 @@ export const CASES = [
   // `for x in xs` 里 x 是**元素**不是下标、`0..4` 是区间。
   ...fam('match', MATCH, ['vlang']),
   ...fam('forin', FORIN, ['vlang']),
+  // 第二十七个家族：**位置型结构字面量**（V 独一份）。它不是一格新节点 —— 是"字段名与
+  // 顺序从声明来"那条既有路子在这一门上的第五个提供者，而 V 的特殊之处是**同一条产生式
+  // 两种写法**（位置型与带名字的），所以要一格判据把两者摆在一起。
+  ...fam('posinit', POSINIT, ['vlang']),
 ];
 
 /**

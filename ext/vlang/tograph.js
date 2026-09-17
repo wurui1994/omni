@@ -57,9 +57,37 @@ const PRINTS = new Set(['println', 'print', 'eprintln', 'dump']);
  */
 const METHODS = new Map();
 
-/** 扫一遍顶层：登记每个方法的名字与它的接收者类型。 */
-function collectMethods(x) {
+/**
+ * **类型名 -> 它声明里的字段名与顺序**（同一趟扫查）。
+ *
+ * `Point{1, 2}` 是**按声明顺序**的构造，而 `record-new` 那一格要的是**字段名** ——
+ * 位置型字面量只给了值，所以"名字与顺序从声明来"（mojo / sbcl / chez / freebasic
+ * 那四门都是这一条，不是这一门特有的办法）。
+ *
+ * 段标记（`pub:` / `mut:`）不是字段，跳过。**带嵌入字段的存成 null**：嵌入的那一格在
+ * 构造顺序里占几格要展开被嵌类型才知道 —— 那一批不猜，位置型构造当场报。
+ */
+const STRUCTS = new Map();
+
+/** `(tname Point)` -> `'Point'`、`(tname mod Point)` -> `'mod.Point'`；别的形状回 null。 */
+const tnameText = (tn) => (tn !== undefined && tag(tn) === 'tname'
+  ? kids(tn).map(leaf).join('.') : null);
+
+/** 扫一遍顶层：登记每个方法的接收者类型，以及每个 struct 的字段名与顺序。 */
+function collectDecls(x) {
   if (!isList(x)) return;
+  if (tag(x) === 'struct' || tag(x) === 'union') {
+    const nm = tnameText(kids(x)[0]);
+    if (nm !== null) {
+      const fs = [];
+      let embedded = false;
+      for (const f of kids(x).slice(1)) {
+        if (tag(f) === 'f') fs.push(leaf(kids(f)[0]));
+        else if (tag(f) === 'embed') embedded = true;
+      }
+      STRUCTS.set(nm, embedded ? null : fs);
+    }
+  }
   if (tag(x) === 'method') {
     const [recv, nm] = kids(x);
     const name = leaf(nm);
@@ -72,7 +100,7 @@ function collectMethods(x) {
     }
     METHODS.set(name, owner);
   }
-  for (const k of kids(x)) collectMethods(k);
+  for (const k of kids(x)) collectDecls(k);
 }
 
 const many = (xs) => xs.map(toNode).flat();
@@ -289,8 +317,31 @@ function toNode(x) {
           return [toNode(k), toNode(v)];
         }));
       }
-      return recordNew(kids(x).slice(1).map((e) => {
-        if (tag(e) !== 'f') throw new Error('v->graph: 这一批只接带字段名的结构字面量');
+      const elems = kids(x).slice(1);
+      // **位置型**（`Point{1, 2}`）：字段名与顺序从**声明**来（见 STRUCTS 那段）。
+      if (elems.some((e) => tag(e) === 'positional')) {
+        if (!elems.every((e) => tag(e) === 'positional')) {
+          throw new Error('v->graph: 结构字面量里位置与字段名混着 —— V 也不许这么写');
+        }
+        const nm = tnameText(kids(x)[0]);
+        const fs = nm === null ? undefined : STRUCTS.get(nm);
+        if (fs === undefined) {
+          throw new Error(`v->graph: 位置型结构字面量要字段名与顺序，而 ${nm ?? '这个类型'} 的`
+            + '声明不在这一份文件里');
+        }
+        if (fs === null) {
+          throw new Error(`v->graph: ${nm} 有嵌入字段 —— 它在构造顺序里占几格要展开被嵌类型`
+            + '才知道，这一批不猜');
+        }
+        if (fs.length !== elems.length) {
+          throw new Error(`v->graph: ${nm} 声明了 ${fs.length} 格字段，`
+            + `位置型字面量给了 ${elems.length} 格`);
+        }
+        return recordNew(elems.map((e, i) => [fs[i], toNode(kids(e)[0])]));
+      }
+      return recordNew(elems.map((e) => {
+        if (tag(e) !== 'f') throw new Error(`v->graph: 结构字面量里这一格是 ${tag(e)} ——`
+          + ' 这一批只接带字段名的与位置型的');
         return [leaf(kids(e)[0]), toNode(kids(e)[1])];
       }));
     }
@@ -442,7 +493,8 @@ export function vlangToGraph(tree, opts) {
   for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
   // 再扫一遍**声明过的方法名**（接收者的类型写在声明里 —— 单态分派，不查表）
   METHODS.clear();
-  collectMethods(tree);
+  STRUCTS.clear();
+  collectDecls(tree);
   const body = kids(tree).map(toNode).flat();
   if (opts !== undefined && opts.asModule === true) return program(body);
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
@@ -481,8 +533,10 @@ export function vlangImports(tree) {
 //      后者落 counted。
 //   2c. `match` 的分支左边是**类型**的那一族（sum type）当场报；`.foo` 那种枚举短写法
 //      走兜底（枚举声明整格丢掉了，那个名字没有出处 —— 见下面第 3 条）。
-//   3. struct / enum / interface / `type X = …` 的**声明**都丢掉（字段名从字面量那儿来
-//      —— record-new 不要求类型存在）；match / spawn / chan 都不在这一批。
+//   3. struct / enum / interface / `type X = …` 的**声明**在图上都丢掉，但 struct 的
+//      **字段名与顺序要登记**（`STRUCTS`）—— 位置型字面量 `Point{1, 2}` 只给了值，
+//      名字得从声明来。声明不在这一份文件里、或者那个 struct 有嵌入字段，都当场报。
+//      spawn / chan 不在这一批。
 //      **enum 丢掉是有代价的**：`.red` / `Color.red` 那种引用还没有出处（这一格还在墙上）。
 //   3b. `assert` 要的是一格"停下来"的内建（图上的 prim 表里没有），所以它留在墙上 ——
 //      那不是映射的账。
