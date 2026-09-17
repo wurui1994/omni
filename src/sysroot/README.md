@@ -97,8 +97,20 @@ MIR 说「要什么」，摆法归后端。
 **还没有的**（明说）：
 - 线程：`pthread_create` 照 POSIX 回 `EAGAIN` —— 我们的运行时**本来就有退路**
   （`omni_js_host.c:88`：开不出线程就直接调 `entry()`）。
-- `sigaction` 回 `ENOSYS`（要 `SA_RESTORER` 那个跳板，得等汇编器）；
-  `backtrace` 回 0；`dlopen` 一族调到就崩（假句柄比崩坏）。
+- `backtrace` 回 0（诊断用）；`dlopen` 一族调到就崩（假句柄比崩坏）。
+- macOS 那条腿的 `sigaction` 还回 `ENOSYS`：Darwin 的 `sigaction(46)` 要用户自己给
+  `sa_tramp`，那个跳板得保住 x1/x4/x5 再走 `sigreturn(184)`—— 与 Linux 那 9 个字节
+  不是一回事，另开一格。
+
+**信号那一格（x86_64-linux，第十五格）已经是真的**：`sigaction` 走 `rt_sigaction(13)`，
+`SA_RESTORER` 要的那个跳板**运行时自己写**（`mmap` 一页 → 填
+`48 c7 c0 0f 00 00 00 | 0f 05`（`mov rax,15; syscall`）→ `mprotect` 成可执行），
+所以不用等汇编器。用户那份 `struct sigaction`（`{handler, mask[128], flags@136,
+restorer@144}`）与内核那份（`{handler, flags, restorer, mask}`，还要第四个参数
+`sigsetsize=8`）在这一层翻译。顺带把两处**假话**改真：`alarm` 原先「收下就扔」
+（现在是号 37），`sigemptyset`/`sigaddset` 原先「回 0 什么都不做」（现在是真的位算术，
+外加 `sigfillset`/`sigdelset`/`sigismember`）。判据 `tests/x64/libc-signal-probe.c`
+自己判自己，12 格全 ok —— 我们那份与 gcc 那份尺子**逐行相同**。
 
 ## 浮点打印：与平台 libc **一行不差**（第一百四十片第九格）
 

@@ -212,6 +212,20 @@
 #         三条**说明白的**不比：`localtime_r`（我们没有时区库，本地就是 UTC）、`%Z`
 #         （我们印 UTC、Darwin 的 gmtime 印 GMT）、cap 不够时的缓冲内容（C11 说
 #         indeterminate）。认不出的转换（`%Q`）两台平台 libc 自己就不一样，也不设判据。
+#      n. **信号装上了**（第十五格，x86_64-linux）：`sigaction` 走 `rt_sigaction(13)`，
+#         `SA_RESTORER` 那个跳板**运行时自己写**（`mmap` 一页 → 9 个字节
+#         `mov rax,15; syscall` → `mprotect` 成可执行）—— 原先那句「得等汇编器」是多余的。
+#         顺带把 `alarm`（原先收下就扔）与 `sigemptyset`/`sigaddset`（原先回 0 什么都不做）
+#         改成真的。判据 `tests/x64/libc-signal-probe.c` 自己判自己，12 格：装得上、打一发
+#         处理函数跑且**回得来**、连来三发都跑、号对、old 那格回上一个、SIG_IGN 不跑也不死、
+#         位算术、`alarm(1)` 一秒后真的响。量到的：
+#           x86_64-linux（容器，`--libc self`）：245229 字节，`all ok`，rc=0
+#           x86_64-linux（容器，gcc 那份尺子）：同样 12 格 `all ok`，rc=0
+#         踩到的一格（**判据自己的错**，差点记成 libc 的错）：交叉编探子**不带
+#         `--sysroot`** 时，头是本机 macOS SDK 的，而 Darwin 把 `sigemptyset`/`sigaddset`
+#         写成宏（那儿的 `sigset_t` 是 32 位）—— 那三格根本没调到我们的 libc，是内联的
+#         32 位读写，于是「清完只清了低四字节、第 63 位怎么都置不上」。加 `--sysroot` 之后
+#         12 格全过。这条写进探子头上了。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

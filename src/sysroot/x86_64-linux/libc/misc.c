@@ -4,9 +4,9 @@
  *   真的实现了：clock_gettime / time / clock / getenv / setenv / fork / execvp /
  *               waitpid / system / kill / alarm / opendir / readdir / closedir /
  *               remove / realpath / mkdtemp / getrlimit / getrusage / atexit /
- *               localtime_r / strftime（UTC）/ strerror / sscanf（三种转换）
- *   回失败但不崩：sigaction（要 SA_RESTORER 那个跳板，得等汇编器）、
- *               backtrace 一族（诊断用，回 0 比崩好）、pthread 一族（回 EAGAIN ——
+ *               localtime_r / strftime（UTC）/ strerror / sscanf（三种转换）/
+ *               **sigaction**（第十五格，跳板 mmap+mprotect，见那一段的注释）
+ *   回失败但不崩：backtrace 一族（诊断用，回 0 比崩好）、pthread 一族（回 EAGAIN ——
  *               调用方本来就有退路，见那一段）
  *   调到就崩：  dlopen 一族（`__libc_unimpl`）—— 悄悄回一个假句柄的后果是
  *               调用方拿着它往下跑，那比崩在原地坏得多。
@@ -182,7 +182,12 @@ int system(const char *cmd) {
   return st;
 }
 
-unsigned int alarm(unsigned int sec) { (void)sec; return 0; }   /* 要 SIGALRM，见文件头 */
+/* `alarm` 原先是「收下参数什么都不做」—— 那时 `sigaction` 回 ENOSYS，闹钟响了也没人接，
+ * 于是干脆不设。现在 `sigaction` 是真的了，这一格也就该是真的（号 37）。 */
+unsigned int alarm(unsigned int sec) {
+  return (unsigned int)__omni_syscall(SYS_alarm, (long)sec);
+}
+int getpid(void) { return (int)__omni_syscall(SYS_getpid); }
 
 /* ---- 目录：`getdents64`（217）。内核回的是一串变长记录：
  *   {u64 ino, i64 off, u16 reclen, u8 type, char name[]}  —— name 从第 19 字节起。
@@ -322,14 +327,103 @@ int getrusage(int who, void *ru) {
 
 /* `atexit`：一张 32 格的表，`exit` 那边**倒着**调（C11 7.22.4.4 第 3 段）。
  * `__cxa_atexit` 也落这儿（多一个参数，我们不管 dso 那一格 —— 没有动态卸载）。 */
-/* ---- 回失败但不崩的那几格（理由见文件头） */
-int sigaction(int sig, const void *act, void *old) {
-  (void)sig; (void)act; (void)old;
-  __libc_errno_val = 38;            /* ENOSYS */
-  return -1;
+/* ---- 信号处理（第一百四十片第十五格）。**真的装得上了**。
+ *
+ * 之前这一格回 ENOSYS，理由写的是「要 SA_RESTORER 那个跳板，得等汇编器」。汇编器不用等 ——
+ * 跳板是**运行时自己写出来的**：
+ *
+ * 一、为什么非要跳板。`rt_sigaction` 的内核结构里有一格 `restorer`，处理函数返回之后
+ *     内核**跳到它**，它必须执行 `rt_sigreturn`（号 15）把被信号打断的上下文换回来。
+ *     C 函数当不了这个跳板：任何序言都会动 rsp，而 `rt_sigreturn` 读的正是「进来时
+ *     rsp 指着的那一帧」。所以它只能是两条指令、序言一个字节都不许有。
+ * 二、于是不写在 .text 里，而是 `mmap` 一页可写的、把那 9 个字节填进去、再 `mprotect`
+ *     成可执行：`48 c7 c0 0f 00 00 00`（mov rax, 15）+ `0f 05`（syscall）。
+ *     一次装好存着，之后所有信号共用（内核只要它的地址）。
+ * 三、用户那份 `struct sigaction` 与内核那份**不是同一个形状**：内核的是
+ *     `{ handler, flags, restorer, mask }`（flags 在第二格！），mask 是 8 字节；
+ *     用户那份是 `{ handler, mask[128], flags@136, restorer@144 }`（见 include/signal.h）。
+ *     这一层就是那个翻译，外加 `sigsetsize = 8` 这个第四个参数（少了它内核回 EINVAL）。
+ */
+#define SA_RESTORER 0x04000000
+
+struct __ksigaction {
+  unsigned long handler;
+  unsigned long flags;
+  unsigned long restorer;
+  unsigned long mask;
+};
+
+static unsigned long sigTramp;      /* 那 9 个字节在哪儿（0 = 还没要过） */
+
+static unsigned long sigTrampGet(void) {
+  if (sigTramp) return sigTramp;
+  long p = __omni_syscall(SYS_mmap, 0, 4096, 3 /* READ|WRITE */,
+                          0x22 /* PRIVATE|ANONYMOUS */, -1, 0);
+  if (p < 0 && p >= -4095) return 0;
+  unsigned char *c = (unsigned char *)p;
+  c[0] = 0x48; c[1] = 0xc7; c[2] = 0xc0;             /* mov rax, imm32 */
+  c[3] = 15; c[4] = 0; c[5] = 0; c[6] = 0;           /*   imm32 = 15 = rt_sigreturn */
+  c[7] = 0x0f; c[8] = 0x05;                          /* syscall */
+  long m = __omni_syscall(SYS_mprotect, p, 4096, 5 /* READ|EXEC */);
+  if (m < 0 && m >= -4095) return 0;
+  sigTramp = (unsigned long)p;
+  return sigTramp;
 }
-int sigemptyset(void *set) { (void)set; return 0; }
-int sigaddset(void *set, int sig) { (void)set; (void)sig; return 0; }
+
+int sigaction(int sig, const void *act, void *old) {
+  struct __ksigaction k;
+  struct __ksigaction ko;
+  const unsigned char *a = (const unsigned char *)act;
+  unsigned char *o = (unsigned char *)old;
+  if (act) {
+    unsigned long t = sigTrampGet();
+    if (t == 0) { __libc_errno_val = 38 /* ENOSYS */; return -1; }
+    k.handler = *(const unsigned long *)a;
+    k.mask = *(const unsigned long *)(a + 8);         /* 1..64 号就在头 64 位里 */
+    k.flags = (unsigned long)(unsigned int)*(const int *)(a + 136);
+    k.flags |= SA_RESTORER;
+    k.restorer = t;
+  }
+  long r = __omni_syscall(SYS_rt_sigaction, sig, act ? (long)&k : 0,
+                          old ? (long)&ko : 0, 8 /* sigsetsize */);
+  if (r < 0 && r >= -4095) { __libc_errno_val = (int)-r; return -1; }
+  if (old) {
+    *(unsigned long *)o = ko.handler;
+    for (int i = 0; i < 16; i++) ((unsigned long *)(o + 8))[i] = 0;
+    *(unsigned long *)(o + 8) = ko.mask;
+    *(int *)(o + 136) = (int)(unsigned int)(ko.flags & ~(unsigned long)SA_RESTORER);
+    *(unsigned long *)(o + 144) = ko.restorer;
+  }
+  return 0;
+}
+
+/* `sigset_t` 是 16 个 64 位字（128 字节）。这三格原先是「回 0 什么都不做」——
+ * 那是**假话**：没 memset 过的 set 会带着栈上的垃圾进内核。 */
+int sigemptyset(void *set) {
+  unsigned long *s = (unsigned long *)set;
+  for (int i = 0; i < 16; i++) s[i] = 0;
+  return 0;
+}
+int sigfillset(void *set) {
+  unsigned long *s = (unsigned long *)set;
+  for (int i = 0; i < 16; i++) s[i] = ~(unsigned long)0;
+  return 0;
+}
+int sigaddset(void *set, int sig) {
+  if (sig < 1 || sig > 1024) { __libc_errno_val = 22 /* EINVAL */; return -1; }
+  ((unsigned long *)set)[(sig - 1) / 64] |= (unsigned long)1 << ((sig - 1) % 64);
+  return 0;
+}
+int sigdelset(void *set, int sig) {
+  if (sig < 1 || sig > 1024) { __libc_errno_val = 22 /* EINVAL */; return -1; }
+  ((unsigned long *)set)[(sig - 1) / 64] &= ~((unsigned long)1 << ((sig - 1) % 64));
+  return 0;
+}
+int sigismember(const void *set, int sig) {
+  if (sig < 1 || sig > 1024) { __libc_errno_val = 22 /* EINVAL */; return -1; }
+  return (((const unsigned long *)set)[(sig - 1) / 64]
+    >> ((sig - 1) % 64)) & 1 ? 1 : 0;
+}
 
 /* ---- 调到就崩的那几格 */
 void *dlopen(const char *p, int f) { (void)p; (void)f; __libc_unimpl("dlopen"); return (void *)0; }
@@ -345,8 +439,9 @@ char *dlerror(void) { return (char *)0; }
  * `jmp_buf` 是 200 字节（glibc 的尺寸，见 `include/setjmp.h`），我们只用头 64。 */
 int setjmp(void *env) { return __omni_setjmp(env); }
 void longjmp(void *env, int val) { __omni_longjmp(env, val); }
-/* `sigsetjmp`/`siglongjmp`：信号掩码那一格我们没有（`sigaction` 都还回 ENOSYS），
- * 所以与不带 sig 的那一对同一个实现 —— `savemask` 忽略。 */
+/* `sigsetjmp`/`siglongjmp`：信号掩码那一格我们不存（`sigaction` 是真的了，但
+ * `rt_sigprocmask` 那一层还没有），所以与不带 sig 的那一对同一个实现 —— `savemask`
+ * 忽略。**明说**：在处理函数里 `siglongjmp` 出来之后，被信号挡住的那个号仍然是挡着的。 */
 int sigsetjmp(void *env, int savemask) { (void)savemask; return __omni_setjmp(env); }
 void siglongjmp(void *env, int val) { __omni_longjmp(env, val); }
 

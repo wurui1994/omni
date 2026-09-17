@@ -15,6 +15,7 @@ long int write(int fd, const void *buf, size_t n);
 int dup2(int old, int new);
 int pipe(int fds[2]);
 pid_t fork(void);
+pid_t getpid(void);
 int execvp(const char *file, char *const argv[]);
 int isatty(int fd);
 char *getcwd(char *buf, size_t n);
