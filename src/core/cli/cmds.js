@@ -74,7 +74,8 @@ const F_SYSROOT = {
  */
 const F_PROFILE = {
   name: '--profile', arity: 1, value: 'MODE',
-  brief: 'cc（默认，-finstrument-functions）| sample[:hz] | stub —— 比 OMNI_PROFILE 优先',
+  brief: 'cc（C 腿，-finstrument-functions）| stub（C + js 两条，我们插的桩）'
+    + ' | sample[:hz]（C 腿，定时器采样）—— 认腿，对不上当场报',
 };
 const F_PROFILE_OUT = {
   name: '--profile-out', arity: 1, value: 'FILE',
@@ -362,6 +363,19 @@ ${graphEngineHelp()}
         { name: '--own', arity: 1, value: 'A,B', brief: '只发这些文件里的函数与全局，别的当 extern' },
         { name: '--bind', arity: 1, value: 'FILE', brief: '按核心的 .syms 决定发哪些：它有的绑过去，没有的自己发' },
         { name: '--plugins', arity: 0, brief: '核心编完接着把默认那一套插件编齐（同一条进程，流水账才算得齐）' }],
+    },
+    {
+      /**
+       * 折叠栈 -> 火焰图（第一百四十七片第四格）。
+       *
+       * 为什么要单独一格命令：`--profile-out x.svg` 只管**这一趟**跑出来的账，而
+       * `OMNI_PROF=sample` 那一路是**产物自己**写的折叠栈（自举出来的 `dist/omni`、
+       * 交叉编出去的二进制、别人机器上跑的那一份）—— 那些文件回来之后要有一格能渲的门。
+       * 渲染归 CLI 这条纪律没变（运行时在信号里，不干这种事）。
+       */
+      name: 'flame', key: 'flame', usage: 'FILE.folded [-o OUT.svg]',
+      brief: '折叠栈渲成火焰图（OMNI_PROF=sample 落下来的那份文件走这儿）',
+      flags: [{ name: '-o', arity: 1, value: 'OUT', brief: '出到哪儿；不给就是 FILE 换成 .svg' }],
     },
     {
       name: 'plugins', key: 'plugins', usage: '--core FILE [-o DIR]',

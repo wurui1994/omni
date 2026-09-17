@@ -19,7 +19,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { foldedToSvg } from '../../src/core/cli/flame.js';
@@ -180,6 +180,71 @@ const FIB_CALLS = '635621';
   const s = `${r.stdout || ''}${r.stderr || ''}`;
   if (r.status !== 0 && s.includes('cc | sample[:hz] | stub')) ok('--profile 瞎写：把三档列出来');
   else bad('--profile 瞎写要列出三档', `rc=${r.status} ${s.slice(0, 200)}`);
+}
+
+/* ---- 三、认腿那一层（第一百四十七片第四格）：**后端不只有 C 一条**。
+ *
+ * 三档各只在有那台机制的腿上成立，不成立就**当场报** —— 收下开关然后印一张空表是最坏的
+ * 一种（用户会以为量过了）。这几格判的就是那张表：
+ *   stub   js 腿上**真的能量**（我们自己插的那一对，两个后端发的都是我们的代码）
+ *   cc     js 腿上没有（它是外部 C 编译器的 -finstrument-functions）
+ *   sample js 腿上还没接（要 node 自己那台 V8 采样器）—— 有名有姓地欠着
+ *   graph  那台机器（--engine graph）三档都还没有
+ */
+{
+  const r = omni(['run', FIB, '--profile', 'stub']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  const m = /([0-9]+) calls\s+u_fib/.exec(s);
+  if (r.status === 0 && s.includes('js 腿 · 发射期插桩') && m !== null && m[1] === '635621') {
+    ok(`js 腿 --profile stub：u_fib 调了 ${m[1]} 次（次数是确定的）`);
+  } else bad('js 腿 --profile stub 要印出榜来', `rc=${r.status} ${s.slice(-300)}`);
+}
+{
+  const out = join(WORK, 'js.svg');
+  const folded = `${out}.folded`;
+  rmSync(folded, { force: true });
+  rmSync(out, { force: true });
+  const r = omni(['run', FIB, '--profile', 'stub', '--profile-out', out]);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0 && existsSync(folded) && existsSync(out)
+    && readFileSync(folded, 'utf8').includes('u_fib')) {
+    ok('js 腿 --profile-out x.svg：折叠栈 + 火焰图两份都落了');
+  } else bad('js 腿 --profile-out', `rc=${r.status} ${s.slice(-300)}`);
+}
+{
+  const r = omni(['run', FIB, '--profile', 'cc']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status !== 0 && s.includes('外部 C 编译器') && s.includes('--backend c')) {
+    ok('js 腿 --profile cc：明着说这条腿上没有那台机器');
+  } else bad('js 腿 --profile cc 要报错', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  const r = omni(['run', FIB, '--profile', 'sample']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status !== 0 && s.includes('cpu-prof') && s.includes('--profile stub')) {
+    ok('js 腿 --profile sample：有名有姓地欠着（要 node 自己那台采样器），并给出替代');
+  } else bad('js 腿 --profile sample 要报错', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  const lua = join(ROOT, 'ext', 'lua', 'examples', 'basics.lua');
+  const r = omni(['run', '--engine', 'graph', lua, '--profile', 'stub']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status !== 0 && s.includes('graph 这条腿上没有')) {
+    ok('graph 那台机器：三档都还没有，当场报');
+  } else bad('graph 腿要报 profile 没接', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+/* `omni flame FILE.folded`：**产物自己**写下来的折叠栈（`OMNI_PROF=sample` 那一路，
+ * 比如自举出来的 `dist/omni`）回来之后要有一格门能渲。 */
+{
+  const folded = join(WORK, 'hand.folded');
+  const svg = join(WORK, 'hand.svg');
+  rmSync(svg, { force: true });
+  writeFileSync(folded, 'main;hot 90\nmain;cold 10\n');
+  const r = omni(['flame', folded, '-o', svg]);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0 && existsSync(svg) && readFileSync(svg, 'utf8').includes('hot')) {
+    ok('omni flame：折叠栈渲成火焰图（100 帧 / 2 条栈）');
+  } else bad('omni flame 要渲出 svg', `rc=${r.status} ${s.slice(0, 300)}`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

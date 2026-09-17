@@ -6381,3 +6381,93 @@ function pmRowsText() {
 }
 
 export const JS_PRELUDE = JS_PRELUDE_RAW + pmRowsText();
+
+/**
+ * **`--profile stub` 在 js 这条腿上的收集器**（第一百四十七片第四格）。
+ *
+ * 为什么它不在上面那份 prelude 里：那一份**每份产物都带**，而这几十行只有量的时候才用。
+ * 所以它单摆一格，由发射器在 `--profile stub` 那一趟才推进去（见 `emit.js` 的 `prof`）。
+ *
+ * 与 C 那条腿（`src/runtime/omni_prof.c`）**同一套账**，于是两条腿的报告能对着看：
+ *   - 影子栈：进的时候记开头时刻，出的时候「总 = 现在 - 开头」「自身 = 总 - 孩子」，
+ *     再把「总」加到父帧的孩子上；
+ *   - 按**整条栈**记（`a;b;c`），出来的就是折叠栈 —— 火焰图 / gprof2dot 直接吃；
+ *   - 折叠栈那格权重用**微秒**（工具只要整数，同名行它自己相加）。
+ *
+ * `try/finally` 是这一层的关键：JS 里 `return` 与 `throw` 都要还栈，而 finally 是唯一
+ * 一处两条路都过的地方（C 那边靠的是 `__cyg_profile_func_exit`）。
+ */
+export const JS_PROF_RT = String.raw`
+const $prof = { stack: [], rows: new Map(), done: false };
+function $prof_now() {
+  return typeof performance === 'object' && performance !== null ? performance.now() : Date.now();
+}
+function $prof_enter(name) {
+  const f = { name: name, t0: $prof_now(), kids: 0 };
+  $prof.stack.push(f);
+  return f;
+}
+function $prof_exit(f) {
+  const total = $prof_now() - f.t0;
+  const st = $prof.stack;
+  st.pop();
+  if (st.length > 0) st[st.length - 1].kids += total;
+  let path = '';
+  for (let i = 0; i < st.length; i++) path = path + st[i].name + ';';
+  path = path + f.name;
+  let e = $prof.rows.get(path);
+  if (e === undefined) { e = { n: 0, self: 0, total: 0 }; $prof.rows.set(path, e); }
+  e.n = e.n + 1;
+  e.self = e.self + (total - f.kids);
+  e.total = e.total + total;
+}
+function $prof_folded() {
+  const keys = [...$prof.rows.keys()].sort();
+  const out = [];
+  for (const k of keys) {
+    const us = Math.round($prof.rows.get(k).self * 1000);
+    if (us > 0) out.push(k + ' ' + us);
+  }
+  return out.length === 0 ? '' : out.join('\n') + '\n';
+}
+function $prof_table() {
+  const rows = [];
+  for (const [k, v] of $prof.rows) {
+    const nm = k.slice(k.lastIndexOf(';') + 1);
+    let e = null;
+    for (const r of rows) if (r.name === nm) { e = r; break; }
+    if (e === null) { e = { name: nm, n: 0, self: 0 }; rows.push(e); }
+    e.n = e.n + v.n;
+    e.self = e.self + v.self;
+  }
+  rows.sort((a, b) => b.self - a.self);
+  const out = ['omni: profile（js 腿 · 发射期插桩）  ' + rows.length + ' 个函数'];
+  for (let i = 0; i < rows.length && i < 20; i++) {
+    const r = rows[i];
+    out.push('  ' + r.self.toFixed(1).padStart(9) + 'ms self  '
+      + String(r.n).padStart(9) + ' calls  ' + r.name);
+  }
+  return out.join('\n') + '\n';
+}
+function $prof_report() {
+  if ($prof.done) return '';
+  $prof.done = true;
+  return $prof_folded();
+}
+globalThis.$prof_report = $prof_report;
+globalThis.$prof_table = $prof_table;
+/**
+ * 没人来收的时候自己印一张表（直接 node 跑那份产物的场合）。CLI 那一趟会**先**叫
+ * $prof_report() 把折叠栈取走（done 那一格立起来），于是这儿就不再重复印。
+ *
+ * 这几行注释里**一个反引号都不许有** —— 整份是 String.raw 模板，反引号会把它提前闭合
+ * （这份文件头上那句话记的就是这个坑，今天又栽了一次）。
+ */
+if (typeof process === 'object' && process !== null && typeof process.on === 'function') {
+  process.on('exit', function () {
+    if ($prof.done) return;
+    $prof.done = true;
+    if (process.stderr !== undefined) process.stderr.write($prof_table());
+  });
+}
+`;

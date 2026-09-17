@@ -12,7 +12,7 @@
 //   dynamic -> JS 原生值（null/boolean/BigInt/number/string/Array/Map）；这一格里的 int
 //              **一律 BigInt**（$dynTag 靠 typeof 分 int 与 real），装箱那条边界上转
 
-import { JS_PRELUDE } from './prelude.js';
+import { JS_PRELUDE, JS_PROF_RT } from './prelude.js';
 import { typeKey, loopLabelNeeds } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS } from '../hir/js_abi.js';
 import { C_ABI } from '../hir/c_abi.js';
@@ -140,6 +140,8 @@ class JsEmitter {
     const chunk = this.chunk === true;
     if (!chunk) {
       this.out.push(JS_PRELUDE.trim());
+      /* `--profile stub`：那几十行收集器只有量的时候才推进来（见 prelude.js 的 JS_PROF_RT）。 */
+      if (this.prof === true) this.out.push(JS_PROF_RT.trim());
       this.memberDispatch();
       this.callOpDispatch();
     }
@@ -418,7 +420,20 @@ class JsEmitter {
         this.line(`v_${p.name} = ${this.copyOf(p.type, `v_${p.name}`)};`);
       }
     }
+    /* `--profile stub`：这一对就是 C 那条腿 `__cyg_profile_func_enter/exit` 的孪生。
+     * 用 `try/finally` 而不是「体末尾再叫一次」：JS 里 `return` 与 `throw` 都要还栈，
+     * 而 finally 是唯一一处两条路都过的地方 —— 少了它，一个 throw 就把影子栈弄歪。 */
+    const prof = this.prof === true;
+    if (prof) {
+      this.line(`const __pf = $prof_enter(${JSON.stringify(f.mangled)});`);
+      this.line('try {');
+      this.indent++;
+    }
     for (const s of f.body.stmts) this.stmt(s);
+    if (prof) {
+      this.indent--;
+      this.line('} finally { $prof_exit(__pf); }');
+    }
     this.indent--;
     this.line('}');
     this.hoisted = null;
@@ -842,6 +857,10 @@ function fmtRealLit(v) {
 export function emitJs(mod, opts) {
   const e = new JsEmitter(mod);
   if (opts !== undefined && opts.chunk === true) e.chunk = true;
+  /* `--profile stub`（第一百四十七片第四格）：**发射期插桩**那一档在 js 这条腿上的开关。
+   * 与 C 那条腿同一个名字、同一套账 —— 「我们自己插的那一对」两个后端都得有，
+   * 不然 `--profile stub --backend js` 就是收下开关然后一声不响（那比报错坏）。 */
+  if (opts !== undefined && opts.profile === true) e.prof = true;
   // REPL 的一批：也是片段，区别在模块级变量用 `var`（见 emit() 里那段注释）
   if (opts !== undefined && opts.repl === true) { e.repl = true; e.chunk = true; }
   // ESM 模式一定是片段：它自己就是一个模块文件，入口由**引它的那一份**去调

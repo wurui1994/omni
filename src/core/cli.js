@@ -569,6 +569,81 @@ let vMark = 0;
 let vRss = 0;
 
 /**
+ * **`--profile` 认哪条腿**（第一百四十七片第四格）。三档落在三个不同的**机制**上，
+ * 所以它们各只在有那台机制的腿上成立 —— 后端从来不只有 C 一条：
+ *
+ *   cc      外部编译器自己的插桩（`-finstrument-functions`）—— **只有 C 那条腿**
+ *   stub    我们自己在发射期插的那一对 —— **C 与 js 两条**（两边发的都是我们的代码）
+ *   sample  运行期采样 —— 现在**只有 C 那条腿**（`ITIMER_PROF` + ucontext）；
+ *           js 那条腿要 node 自己那台 V8 采样器（`--cpu-prof` / `node:inspector`），
+ *           还没接 —— 这一格有名有姓地报，不假装量过
+ *
+ * 别的腿（llvm / jit / interp / wasm / graph 那台机器）三档都还没有。**收下开关却一声不响
+ * 是最坏的一种**：用户会以为量过了。所以这一格当场报，并把「哪条腿有什么」一起说清。
+ */
+function profLeg(key, path, rest) {
+  const val = (n) => {
+    const i = rest.indexOf(n);
+    return i >= 0 ? rest[i + 1] : null;
+  };
+  if (val('--engine') === 'graph') return 'graph';
+  const b = val('--backend');
+  const isC = typeof path === 'string' && path.endsWith('.c');
+  if (isC) {
+    if (b === null || b === 'native' || b === 'c') return 'c';
+    return b;
+  }
+  if (b !== null) return b === 'native' ? 'c' : b;
+  /* 默认腿：`run` 在 node 宿主上是 js（本进程 eval），`build` 是 C（编 + 链出可执行文件）。 */
+  return key === 'build' ? 'c' : 'js';
+}
+
+/** 那三档各自认的腿（名单就是上面那段注释的机器可读版本）。 */
+const PROF_LEGS = { cc: ['c'], stub: ['c', 'js'], sample: ['c'] };
+
+/** 这一趟的 `--profile MODE` 落在这条腿上成不成立 —— 不成立就一句话说清怎么办。 */
+function profCheckLeg(mode, leg) {
+  if (PROF_LEGS[mode].includes(leg)) return;
+  const has = (m) => `${m}（${PROF_LEGS[m].join(' / ')}）`;
+  if (leg === 'js' && mode === 'sample') {
+    throw new OmniError('--profile sample 在 js 这条腿上还没接：采样要宿主自己那台'
+      + '（node 的 --cpu-prof / node:inspector 那台 V8 采样器）—— 这一格有名有姓地欠着。'
+      + '现在 js 腿上用 `--profile stub`（我们自己插的那一对，两条腿都有）；'
+      + '要采样就 `--backend c`');
+  }
+  if (leg === 'js' && mode === 'cc') {
+    throw new OmniError('--profile cc 是**外部 C 编译器**自己的插桩（-finstrument-functions），'
+      + 'js 这条腿上没有这台机器。要么 `--backend c`，要么换 `--profile stub`（js 腿也有）');
+  }
+  throw new OmniError(`--profile ${mode} 在 ${leg} 这条腿上没有：现在 `
+    + `${has('cc')} · ${has('stub')} · ${has('sample')}`
+    + `${leg === 'graph' ? '。graph 那台机器（--engine graph）的 profile 还没接' : ''}`);
+}
+
+/**
+ * js 那条腿的 `--profile stub` 收尾（第一百四十七片第四格）。
+ *
+ * 收集器在**被跑的那份 JS 里**（`prelude.js` 的 `JS_PROF_RT`），所以取账的办法是再走一次
+ * 间接 `eval`：那两个名字挂在全局上，同一个全局作用域里叫得到。这样这份文件里一个
+ * `globalThis` 都不用出现（自举那条腿的封闭子集，ADR-0011）。
+ */
+function profJsFinish() {
+  if (PROF === null || PROF.mode !== 'stub' || PROF.leg !== 'js') return;
+  const folded = evalJs('typeof $prof_report === "function" ? $prof_report() : ""');
+  if (typeof folded !== 'string' || folded === '') {
+    stderr('omni: profile：一格函数都没量到（这一趟里没有插得上桩的函数？）\n');
+    return;
+  }
+  if (PROF.out !== null && PROF.out !== undefined) {
+    writeText(PROF.out, folded);
+    stderr(`omni: 折叠栈 -> ${PROF.out}（${folded.split('\n').length - 1} 条栈`
+      + '，js 腿 · 发射期插桩）\n');
+    return;
+  }
+  stderr(evalJs('$prof_table()'));
+}
+
+/**
  * `--stat` / `--stat-out` 的落地（第一百四十七片第二格）：模块依赖图 + 构建统计。
  *
  * 数据来自两处，**都是已经算出来的**，这一层只是把它们对在一起：
@@ -2853,6 +2928,10 @@ function main(argv) {
       }
       const oi = rest.indexOf('--profile-out');
       PROF = { mode, hz: Number.isFinite(hz) ? hz : 0, out: oi < 0 ? null : rest[oi + 1] };
+      /* **认腿**（第一百四十七片第四格）：后端不只有 C 一条，而三档各只在有那台机制的腿上
+       * 成立。不成立就当场报（`profCheckLeg` 里那几句），不许收下开关然后印一张空表。 */
+      PROF.leg = profLeg(node.key, cpath, rest);
+      profCheckLeg(mode, PROF.leg);
       /* `--profile-out x.svg`：**火焰图**。运行时那一层只会写折叠栈（它在信号里，不该
        * 干渲染这种事），所以这儿把落点换成 `x.svg.folded`，收尾时再摊成 SVG
        * （见底下那个汇合点）。给 `.folded` 之类别的后缀就原样落，不多此一举。 */
@@ -3292,6 +3371,31 @@ function main(argv) {
    * 清单在 core/plugin-set.js，一格一个 `.dylib`；`--bind` 用的是核心 `build --extern`
    * 时落下的 `.syms`（谁有哪些符号是**数据**，不是规则 —— 核心是剪过枝的）。
    */
+  /**
+   * `omni flame FILE.folded [-o OUT.svg]`（第一百四十七片第四格）。
+   *
+   * `--profile-out x.svg` 管的是**这一趟**跑出来的账；而 `OMNI_PROF=sample` 那一路是
+   * **产物自己**写的折叠栈（自举出来的 `dist/omni`、交叉编出去的二进制、别人机器上那一份）
+   * —— 那些文件回来之后要有一格门能渲。渲染归 CLI 这条纪律没变（运行时在信号处理器里，
+   * 不干这种事），这一格就是那道门。
+   */
+  if (cmd === 'flame') {
+    if (path === undefined || path === null) throw new OmniError('flame 要一份折叠栈文件');
+    if (!exists(path)) throw new OmniError(`flame: 找不到 ${path}`);
+    const oi = rest.indexOf('-o');
+    const out = oi >= 0 ? rest[oi + 1] : `${path.replace(/\.folded$/, '')}.svg`;
+    const folded = readText(path);
+    const lines = folded.split('\n').filter((l) => l.trim() !== '');
+    if (lines.length === 0) throw new OmniError(`flame: ${path} 里一条栈都没有`);
+    let total = 0;
+    for (const l of lines) {
+      const n = Number(l.slice(l.lastIndexOf(' ') + 1));
+      if (Number.isFinite(n)) total = total + n;
+    }
+    writeText(out, foldedToSvg(folded, `omni profile —— ${total} 帧 / ${lines.length} 条栈`));
+    stderr(`omni: 火焰图 -> ${out}（${lines.length} 条栈、${total} 帧）\n`);
+    return 0;
+  }
   if (cmd === 'plugins') {
     const ci = rest.indexOf('--core');
     const core = ci >= 0 ? rest[ci + 1] : join(cwd(), 'dist', 'omni');
@@ -3467,7 +3571,8 @@ function main(argv) {
       // 注意这不是"原生构建少了一种能力"：JS 源码在两边都能编能跑（tests/js-exec 那条轴
       // 在自举出来的编译器上也过），少的只是"直接吃一段 JS 文本当程序跑"的那个引擎。
       if (hasJsEngine()) {
-        const js = target('js').emit(mod);
+        /* `--profile stub` 在这条腿上就是发射期插桩（与 C 那条腿同名同账）。 */
+        const js = target('js').emit(mod, { profile: PROF !== null && PROF.mode === 'stub' });
         vStep(`backend js  ${js.length} bytes`);
         if (cacheable) jsCachePut(path, js, cap('asy.deps')());
         // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）：跑在本进程里的这一条
@@ -3475,6 +3580,7 @@ function main(argv) {
         installSrcEvalHook((m, o) => target('js').emit(m, o));
         evalJs(js);
         vStep('exec in-process (node host, new Function)');
+        profJsFinish();
         return 0;
       }
       // 这一代没有 JS 引擎，"直接执行"就是 C 路径（产物缓存见 runViaC）
