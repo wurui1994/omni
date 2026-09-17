@@ -505,5 +505,33 @@ const FIB_CALLS = '635621';
   } else bad('没采到帧该有一句话', `rc=${r.status} ${s.slice(-300)}`);
 }
 
+{
+  /* **插桩那一档也有调用栈**（第一百四十九片第四格）：影子栈本来就在手边，记下来的是
+   * **精确**的调用链（权重是微秒的自用时间），不是采样估的。用户那句话是对的：
+   * backtrace 不是只有 sample 才做得到。
+   * 同时钉住**两张表都在**：按函数那张有「调用次数」（采样永远给不出），
+   * 聚合回溯那几张有路径 —— 谁也替不了谁。 */
+  const r = omni(['run', PROBE, '--profile', 'cc', '--cc', 'clang']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  const hasCounts = /2000\s+hot/.test(s);          /* 探子里 hot 调 2000 次，是确定的 */
+  const hasPath = s.includes('main > hot');
+  const inMs = s.includes('ms') && !s.slice(s.indexOf('聚合回溯')).includes('帧数');
+  if (r.status === 0 && hasCounts && hasPath && inMs) {
+    ok('cc 档：按函数那张有调用次数 2000，聚合回溯那几张有精确路径 main > hot（按 ms）');
+  } else {
+    bad('cc 档该两张表都有', `次数 ${hasCounts} / 路径 ${hasPath} / 单位 ${inMs}\n    ${s.slice(0, 300)}`);
+  }
+}
+{
+  /* C 腿的 stub 是**另一个收集器**（发射期插进生成的 C 的 `prof[core]`），它还没记调用链 ——
+   * 这一格钉住那句话是**指路**而不是含糊的"没记到"。 */
+  const r = omni(['run', FIB, '--profile', 'stub', '--backend', 'c', '--cc', 'clang']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0 && s.includes('prof[core]') && s.includes('没有调用栈')
+    && s.includes('--profile cc')) {
+    ok('stub · c 腿：按函数的账在，没有调用栈这件事说清并指到 cc / sample');
+  } else bad('stub·c 该指路', `rc=${r.status} ${s.slice(-300)}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

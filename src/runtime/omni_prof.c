@@ -45,6 +45,15 @@
 #define PF_SLOTS  8192          /* 表长（按 2 的幂，开放寻址） */
 #define PF_STK    65536         /* 影子栈：算自用时间要减掉子调用 */
 #define PF_BT     40            /* 采样一帧最多记几层 */
+/**
+ * **插桩那一档记调用栈时最多记几层**（`cc` / `stub`）。
+ *
+ * 比采样那一档浅（40 -> 16）是有理由的：插桩是**每次函数返回都记一笔**，而记一笔要把
+ * 那条路上的指针都哈一遍 —— 深度直接乘在热路径的开销上。16 层足够看清"这一支是从哪儿
+ * 来的"，更深的那几层截掉并在报告里明说（`pf_deep`）。采样那一档一秒才几百次，
+ * 记 40 层不心疼。
+ */
+#define PF_CC_BT  16
 
 /* 按**函数地址**归属（`cc` 档）。 */
 typedef struct {
@@ -56,8 +65,12 @@ typedef struct {
 static pf_fn pf_fns[PF_SLOTS];
 static int pf_fns_used = 0;
 
-/* 按**调用栈**归属（`sample` 档）。与 `omni_mem.c` 那格分配采样同一个形状 —— 那一份
- * 已经证明这张表在热路径上够用（开放寻址、不分配）。 */
+/* 按**调用栈**归属。两档共用这一张表 —— 差别只在 `hits` 那一栏的**单位**：
+ *   `sample` 档：采到的帧数（一帧 = 一次定时器打中）
+ *   `cc` / `stub` 档：**纳秒**的自用时间（影子栈上算出来的，精确到每次返回）
+ * 一趟只会是其中一档（`pf_instr` 记着是哪一档），写折叠栈时按它换算成微秒。
+ * 与 `omni_mem.c` 那格分配采样同一个形状 —— 那一份已经证明这张表在热路径上够用
+ * （开放寻址、不分配）。 */
 typedef struct {
   void *fr[PF_BT];
   int n;
@@ -67,6 +80,8 @@ static pf_stack pf_stacks[PF_SLOTS];
 static int pf_stacks_used = 0;
 static unsigned long long pf_samples = 0;
 static unsigned long long pf_lost = 0;      /* 表满或者一层都没采到 */
+static int pf_instr = 0;                    /* 1 = 这张表里的权重是插桩量出来的纳秒 */
+static int pf_deep = 0;                     /* 有路径深过 PF_CC_BT，被截过（报告里明说） */
 
 static int pf_on = 0;                       /* 装过没有（atexit 只挂一次） */
 static int pf_sampling = 0;
@@ -128,6 +143,38 @@ static void *pf_pc_of(void *uc) {
 #endif
 }
 
+/**
+ * 把一条栈（`st[0]` 是栈顶）连着一个权重记进那张表。**两档共用这一格** ——
+ * 采样那一档喂 1（一帧），插桩那一档喂这次返回算出来的自用纳秒。
+ *
+ * 信号安全：只碰自己那张表，不分配、不加锁、不调 stdio。
+ */
+static void pf_stack_add(void **st, int m, unsigned long long w) {
+  if (m <= 0) { pf_lost++; return; }
+  unsigned long long h = 1469598103934665603ULL;
+  for (int i = 0; i < m; i++) {
+    h ^= (unsigned long long)(size_t)st[i];
+    h *= 1099511628211ULL;
+  }
+  int slot = (int)(h & (PF_SLOTS - 1));
+  for (int probe = 0; probe < PF_SLOTS; probe++) {
+    pf_stack *e = &pf_stacks[slot];
+    if (e->n == 0) {
+      memcpy(e->fr, st, sizeof(void *) * (size_t)m);
+      e->n = m;
+      e->hits = w;
+      pf_stacks_used++;
+      return;
+    }
+    if (e->n == m && memcmp(e->fr, st, sizeof(void *) * (size_t)m) == 0) {
+      e->hits += w;
+      return;
+    }
+    slot = (slot + 1) & (PF_SLOTS - 1);
+  }
+  pf_lost++;
+}
+
 static void pf_tick(int sig, void *info, void *uc) {
   (void)sig;
   (void)info;
@@ -141,29 +188,7 @@ static void pf_tick(int sig, void *info, void *uc) {
   if (pc) st[m++] = pc;
   for (int i = skip; i < got && m < PF_BT; i++) st[m++] = fr[i];
   pf_samples++;
-  if (m <= 0) { pf_lost++; return; }
-  unsigned long long h = 1469598103934665603ULL;
-  for (int i = 0; i < m; i++) {
-    h ^= (unsigned long long)(size_t)st[i];
-    h *= 1099511628211ULL;
-  }
-  int slot = (int)(h & (PF_SLOTS - 1));
-  for (int probe = 0; probe < PF_SLOTS; probe++) {
-    pf_stack *e = &pf_stacks[slot];
-    if (e->n == 0) {
-      memcpy(e->fr, st, sizeof(void *) * (size_t)m);
-      e->n = m;
-      e->hits = 1;
-      pf_stacks_used++;
-      return;
-    }
-    if (e->n == m && memcmp(e->fr, st, sizeof(void *) * (size_t)m) == 0) {
-      e->hits++;
-      return;
-    }
-    slot = (slot + 1) & (PF_SLOTS - 1);
-  }
-  pf_lost++;
+  pf_stack_add(st, m, 1);
 }
 
 static void pf_warm(void) {
@@ -239,6 +264,25 @@ void __cyg_profile_func_exit(void *this_fn, void *call_site) {
   pf_fn *e = pf_fn_slot(pf_stk_fn[pf_sp]);
   if (e) { e->total += dt; e->self += self; }
   if (pf_sp > 0) pf_stk_child[pf_sp - 1] += dt;
+  /**
+   * **插桩这一档也记调用栈**（第一百四十九片第四格）。
+   *
+   * 从前这儿只往「按函数」那张表上加，报告里于是只有一张直方图 —— 而**影子栈就在手边**
+   * （`pf_stk_fn[0..pf_sp]`）：谁调的谁、这一支从哪儿来，一格不缺，而且是**精确**的，
+   * 不是采样估的。用户那句话是对的：backtrace 不是只有采样才做得到。
+   *
+   * 权重是这次返回的**自用纳秒**（`self`），落到栈顶那一格上 —— 与采样那一档
+   * "帧落在栈顶"是同一种归属，所以两档的折叠栈能用同一段代码读。
+   * 深度截在 `PF_CC_BT`：每次返回都要哈一遍这条路，深度直接乘在开销上。
+   */
+  if (self > 0) {
+    void *st[PF_CC_BT];
+    int m = 0;
+    for (int i = pf_sp; i >= 0 && m < PF_CC_BT; i--) st[m++] = pf_stk_fn[i];
+    if (pf_sp + 1 > PF_CC_BT) pf_deep = 1;
+    pf_instr = 1;
+    pf_stack_add(st, m, self);
+  }
 }
 
 /* ---- 报告。
@@ -277,7 +321,11 @@ static int pf_cmp_self(const void *a, const void *b) {
 }
 
 /* 折叠栈：`底;…;顶 计数`（Brendan Gregg 那一套）。火焰图与 gprof2dot 都吃它。
- * 栈是**倒着印**的：`backtrace` 回来是「顶在前」，而折叠栈要「底在前」。 */
+ * 栈是**倒着印**的：`backtrace` 回来是「顶在前」，而折叠栈要「底在前」。
+ *
+ * 权重的单位跟着档走：采样那一档是**帧数**，插桩那一档是**微秒**（表里存的是纳秒，
+ * 这儿除 1000）。CLI 那一层按档告诉那几张表该怎么读（`--unit`）—— 折叠栈这个格式
+ * 自己不带单位，所以两边说的必须是同一句话。 */
 static void pf_write_folded(const char *path) {
   FILE *f = fopen(path, "w");
   if (f == 0) return;
@@ -292,12 +340,14 @@ static void pf_write_folded(const char *path) {
         else fprintf(f, "0x%llx", (unsigned long long)(size_t)e->fr[j]);
         if (j > 0) fprintf(f, ";");
       }
-      fprintf(f, " %llu\n", e->hits);
+      unsigned long long w = pf_instr ? e->hits / 1000ull : e->hits;
+      if (pf_instr && w == 0) w = 1;          /* 不满 1µs 的那些别整格消失 */
+      fprintf(f, " %llu\n", w);
       if (syms) free(syms);
     }
   } else {
-    /* 插桩那一档没有栈，只有一格一格的函数 —— 折叠栈退化成一层，照样喂得进火焰图
-     * （那时它就是一张直方图，形状上诚实：我们确实没记调用链）。 */
+    /* 一条栈都没记下来时退化成一层（`self` 全是 0 的那种极短程序）—— 照样喂得进
+     * 火焰图，形状上诚实：那时我们确实没有调用链。 */
     for (int i = 0; i < PF_SLOTS; i++) {
       pf_fn *e = &pf_fns[i];
       if (e->fn == 0 || e->self == 0) continue;
@@ -319,7 +369,14 @@ void omni_prof_report(void) {
   }
   const char *out = getenv("OMNI_PROF_OUT");
   if (out && out[0]) pf_write_folded(out);
-  if (pf_stacks_used > 0) {
+  /**
+   * 印哪张表按**这一趟是哪一档**分，不按"那张栈表里有没有东西"分（第一百四十九片第四格
+   * 量到的一格）：插桩那一档现在也往栈表里记（那是它精确的调用栈），于是从前那个
+   * `pf_stacks_used > 0` 的判据把 `cc` 档也认成采样，印出来是
+   * 「采样 CPU 时间，0 帧、3 条栈」加三行 `0.00%` 与一串纳秒 —— 而**调用次数**那一栏
+   * （采样永远给不出的那一栏）整格没了。两张表各答各的问题，谁也替不了谁。
+   */
+  if (pf_sampling && !pf_instr) {
     /* **按名字并**，不按 PC 并（量出来的一格）：采样采到的是**指令地址**，同一个函数里
      * 几十条不同的指令就是几十条不同的栈 —— 第一版直接按栈排，一份九成时间在 `hot` 里的
      * 程序印出来是 `hot 48%` / `hot 13%` / `hot 11%`… 十五行，每行都是它。折叠栈那一份

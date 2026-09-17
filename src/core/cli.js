@@ -788,6 +788,9 @@ function profFoldedFinish() {
   const f = PROF.tmpOut;
   PROF.tmpOut = null;
   const folded = exists(f) ? readText(f) : '';
+  /* 单位跟着档走（与 `omni_prof.c` 的 `pf_write_folded` 是同一句话）：采样落的是帧数，
+   * 插桩落的是**微秒**的自用时间。折叠栈这个格式自己不带单位，两边说的必须一致。 */
+  const unit = PROF.mode === 'sample' ? 'frames' : 'us';
   if (folded.trim() === '') {
     /**
      * **一帧都没采到也要说话**（第一百四十九片第三格补的那一句）。
@@ -798,13 +801,30 @@ function profFoldedFinish() {
      * 而这一层当时选择了沉默（注释里写的是"孩子那侧已经说过了"，可孩子只说了落点）。
      * 沉默让人怀疑开关没生效，比多印一行糟得多。
      */
-    stderr(`omni: profile（${PROF.mode} · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿）一帧都没采到`
-      + ' —— 采样只在**这个进程真的在烧 CPU** 的时候才有帧，而这一趟太短。'
-      + '三条路：把工作量加大、把频率提上去（`--profile sample:9973`）、'
-      + '或者换成不靠采样的那一档（`--profile cc` / `--profile stub`，按调用计数与时间）\n');
+    if (PROF.mode === 'sample') {
+      stderr(`omni: profile（sample · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿）一帧都没采到`
+        + ' —— 采样只在**这个进程真的在烧 CPU** 的时候才有帧，而这一趟太短。'
+        + '三条路：把工作量加大、把频率提上去（`--profile sample:9973`）、'
+        + '或者换成不靠采样的那一档（`--profile cc` / `--profile stub`，按调用计数与时间）\n');
+    } else if (PROF.mode === 'stub') {
+      /**
+       * **C 腿的 stub 是另一个收集器**：那一对计时是**发射期**插进生成的 C 里的
+       * （`prof[core]` 那张表，见 backend-c 的 profile 那一格），它与 `omni_prof.c` 的
+       * 影子栈是两套东西 —— 所以那一档现在只有按函数的账，没有调用栈。
+       * 说清楚而不是含糊成"没记到"：把要热路径的人直接指到有的那两档上。
+       */
+      stderr('omni: profile（stub · c 腿）没有调用栈 —— 这一档的收集器是**发射期插进生成的 C**'
+        + '的那一对计时（上面 `prof[core]` 那张表：自用 / 含子 / 次数），它还没记调用链。'
+        + '要热路径就换 `--profile cc`（外部编译器插桩，**精确**的调用栈 + 次数）'
+        + '或 `--profile sample`（采样，看得见整条栈）\n');
+    } else {
+      stderr(`omni: profile（${PROF.mode} · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿）`
+        + '一条调用栈都没记下来 —— 插桩那一档按**每次返回的自用时间**记，'
+        + '这一趟每一格都不到 1µs（或者根本没有被插桩的函数）。上面那张按函数的表还在\n');
+    }
     return;
   }
-  profViews(folded, `omni prof（${PROF.mode} · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿）`, 'frames');
+  profViews(folded, `omni prof（${PROF.mode} · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿 · 聚合回溯）`, unit);
 }
 
 /** 这一趟给 node 加了采样开关时记一格（落点在哪儿），收尾时按它取账。 */
@@ -3328,17 +3348,22 @@ function main(argv) {
       if (mode === 'sample') setEnv('OMNI_PROF', hz > 0 ? `sample:${hz}` : 'sample');
       if (PROF.out !== null && PROF.out !== undefined) {
         setEnv('OMNI_PROF_OUT', PROF.out);
-      } else if (mode === 'sample') {
+      } else if (PROF.leg === 'c' || PROF.leg === 'c-src') {
         /**
          * **没给 `--profile-out` 时也把折叠栈捞回来**（第一百四十九片）：C 那几条腿的表是
          * 孩子自己印的（`omni_prof.c` 的 atexit），而热路径 / 调用树 / 调用边这三张只有
          * **CLI 这一层**算得出来 —— 它要那份聚合回溯。所以偷偷给它一个落点，回来自己读。
          *
+         * **三档都要**（第四格补的）：`cc` / `stub` 那两档的影子栈本来就在手边，
+         * 记下来的调用栈是**精确**的（权重是微秒的自用时间），比采样估的还准 ——
+         * 用户那句话是对的：backtrace 不是只有采样才做得到。
+         *
+         * 只有 C 那两条腿走这儿：js 腿的 stub 收集器在被跑的那份 JS 里，账从
+         * `profJsFinish` 那条路回来（那边直接拿到折叠栈，不落盘）。
+         *
          * `tmpOut` 与 `out` 分开记：`out` 是用户要的产物（要印一句"落在哪儿"），
          * `tmpOut` 是这一趟的中间物（不印路径，只印那几张表）。
          */
-        /* 落点按 **这一趟的源文件 + 档 + 频率** 起名：只按档与频率起名的话，两份不同的
-         * 程序会共用同一个文件 —— 上一趟的账被下一趟读成自己的（量到过那个目录被两趟共用）。 */
         PROF.tmpOut = join(
           workDirFor('prof-folded', hash16(`${srcArg(node, rest) ?? ''}|${mode}|${hz}`)),
           'omni.folded',
