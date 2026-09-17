@@ -366,7 +366,14 @@ function toNode(x) {
 
     case 'bin': {
       const [op, a, b] = kids(x);
-      return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'v' });
+      const o = leaf(op);
+      // V 的 `<<` **压倒性地是列表追加**（V 自己的编译器里 3228 行含 `<<`，抽样 20 行
+      // 只有词法表里那几行是位移，其余全是 `arr << x`）。所以这一格落 `prim push`，
+      // 不是位运算 —— 位运算（`shl`/`shr`/`band`/`bor`/`bxor`）归下一刀。
+      if (o === '<<') {
+        return node('prim', { args: [toNode(a), toNode(b)] }, { name: 'push' });
+      }
+      return binOf(o, toNode(a), toNode(b), OPS, { lang: 'v' });
     }
     case 'un': {
       const [op, a] = kids(x);

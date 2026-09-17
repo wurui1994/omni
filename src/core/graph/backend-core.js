@@ -66,14 +66,16 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   /* 表示转换：方言里是 `(toreal …)`/`(toint …)`/`(tostr …)` 三格 —— 图上那一格的 `to`
      说了要哪一侧，源那一侧得我们自己算（`typeOf`）。 */
   'conv',
-  /* **断言**（第二十九批）：这一格**方言里没有对应物** —— 核心方言（`sexpr/lower.js`）
+  /* **列表追加**（第三十批的 `prim push`）不在这张表里 —— 那是**内建**不是节点，
+     账记在 `PRIMS_OK` 上（方言里现成的一句 `(apush 数组 值)`）。
+     **断言**（第二十九批）：这一格**方言里没有对应物** —— 核心方言（`sexpr/lower.js`）
      里没有"停下来"那一句话（没有 panic / abort / exit），所以这一刀发不出来。
      它不是"忘了接"，是词汇表在**下一层**也欠一格；`coreCan` 里给了人话。 */
 ]);
 
 /** 这一刀接得住的内建（`prims.js` 里 16 格中的 15 格；只有多实参 print 还欠着）。 */
 const PRIMS_OK = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
-  'not', 'len', 'print', 'concat']);
+  'not', 'len', 'print', 'concat', 'push']);
 
 /** 方言里那几个算符的名字与图上的**一一对应**（`=` / `!=` 是两边唯一不同的两格）。 */
 const BINOP = {
@@ -112,6 +114,8 @@ function typeOf(x, env, ctx) {
     if (nm === '<' || nm === '>' || nm === '<=' || nm === '>=' || nm === '=' || nm === '!=' || nm === 'not') return 'bool';
     if (nm === 'len') return 'int';
     if (nm === 'concat') return 'string';
+    /* `push` 交出来的是 nil（语句），落不进这几档 —— 问到它就是形状错了。 */
+    if (nm === 'push') return null;
     /* 算术：串在一起是 `string`、任一边是 real 就 real（方言里 int 与 real 不隐式混算 ——
        混着写它当场报，那正是我们要的：与 ADR-0031 §1 那一格"位宽写在类型上"同一条纪律）。 */
     const ts = argList(x, 'args').map((a) => typeOf(a, env, ctx));
@@ -304,6 +308,7 @@ function expr(x, env, ctx) {
       }
       if (nm === 'len') return lenText(args[0], env, ctx);
       if (nm === 'print') gap('print 出现在表达式位置上');
+      if (nm === 'push') gap('push 出现在表达式位置上（方言里 apush 是一条语句）');
       if (nm === 'concat') return concatText(args, env, ctx);
       /* 一格实参的 `-` 是**取负**（方言里那是另一个形状：`(un "-" …)`）。 */
       if (nm === '-' && args.length === 1) return `(un "-" ${expr(args[0], env, ctx)})`;
@@ -757,6 +762,17 @@ function stmtIn(x, env, ctx) {
       return [`(let ${nm} ${typeOf(v, env, ctx)} ${expr(v, env, ctx)})`, ...pend, `(ret (var ${nm}))`];
     }
     case 'prim': {
+      /* **列表追加**：方言里现成的一句 `(apush 数组 值)`（`bindSlice` 用的就是它）。
+         它在方言里是**语句**，所以只在语句位置上给 —— 表达式位置上那一格报缺口
+         （V 的 `arr << x` 本来也是语句）。 */
+      if (x.attrs.name === 'push') {
+        const ps = argList(x, 'args');
+        if (ps.length !== 2) gap(`push 收了 ${ps.length} 格实参（要两格）`);
+        if (elemType(typeOf(ps[0], env, ctx)) === null) {
+          gap('push 的第一格推不出是列表（方言的数组是单态的，元素类型得知道）');
+        }
+        return [`(apush ${objText(ps[0], env, ctx)} ${expr(ps[1], env, ctx)})`];
+      }
       if (x.attrs.name !== 'print') return [`(expr ${expr(x, env, ctx)})`];
       const args = argList(x, 'args');
       if (args.length !== 1) gap(`print 收了 ${args.length} 格实参（方言的 print 只收一格）`);

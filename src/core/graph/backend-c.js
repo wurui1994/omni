@@ -51,7 +51,7 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
 
 /** 这一刀接得住的内建。`prims.js` 里现有 16 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
-  'not', 'concat', 'len', 'print']);
+  'not', 'concat', 'len', 'print', 'push']);
 
 /**
  * 产物开头那一段**固定的 C**：值的表示 + 真值观 + 印法 + 那几格内建的实现。
@@ -342,6 +342,17 @@ static void g_print(gv *a, long long n) {
  * 三行（声明缓冲、逐格赋值、调）。这两格把那三行收成一行 —— 语义还是上面那一格。 */
 static void g_print1(gv a) { gv b[1]; b[0] = a; g_print(b, 1); }
 static void g_print2(gv a, gv b) { gv c[2]; c[0] = a; c[1] = b; g_print(c, 2); }
+
+/* 列表追加（V 的 arr << x）：改的是那格列表本身。每次 realloc —— 这一批不给它容量那一栏
+   （例子里的列表是几格到几十格；那一栏是性能的事，不是语义的事）。 */
+static gv g_push(gv xs, gv x) {
+  if (xs.t != GT_LIST) g_die("push: 第一格不是列表");
+  glist *L = g_L(xs);
+  L->v = (gv *)realloc(L->v, sizeof(gv) * (unsigned long)(L->n + 1));
+  L->v[L->n] = x;
+  L->n = L->n + 1;
+  return g_nil();
+}
 
 /* 断言：不成立就把那句话印在同一格 print 上、然后停下来。
    "停下来"在 C 这一侧是 exit(1) —— 退出码不在图上，那是这条腿自己的样子。 */
@@ -1320,6 +1331,7 @@ class CGen {
     if (name === '!=') return `g_bool(g_eq(${args[0]}, ${args[1]}) == 0)`;
     if (name === 'not') return `g_bool(g_truthy(${args[0]}) == 0)`;
     if (name === 'len') return `g_len(${args[0]})`;
+    if (name === 'push') return `g_push(${args[0]}, ${args[1]})`;
     if (name === 'concat') {
       if (args.length === 0) return 'g_str("")';
       return args.reduce((a, b) => `g_str(g_cat2(g_show(${a}), g_show(${b})))`);

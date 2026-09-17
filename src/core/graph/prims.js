@@ -39,6 +39,26 @@ export const PRIMS = new Map([
   P('concat', -1, [], (a, io) => a.map((v) => show(v, io.show)).join(''), (a) => `[${a.join(', ')}].map(__show).join('')`),
   P('len', 1, [], (a) => (a[0] === null || a[0] === undefined ? 0 : a[0].length), (a) => `(${a[0]}).length`),
 
+  // ---- 列表追加：**writes**（改的是那格列表本身）------------------------------
+  //
+  // **为什么是内建而不是节点**：两格实参都是普通的值（要追加的那格表、要追加的那个东西），
+  // 没有"哪一格是什么角色"要分 —— 与 `len` 同一类，是**列表上的一个库函数**。
+  // （`nodes.js` 文件头那一条：给库函数开节点等于给每门语言的每个库函数开节点。
+  // 这也正是它与 `assert` 的差别 —— 那一格的消息是**自己的端口**，所以那一格才是节点。）
+  //
+  // 它是**账上算出来的**，而且那笔账原来记错了：`bench/tograph.js` 印的是
+  // "这个算子还没接：`<<`"（V 那一栏 98 份），看着像位运算 —— 抽一遍语料才知道
+  // V 自己的编译器里 `<<` **压倒性地是数组追加**（`nodes << x`、`lines << continued`），
+  // 位移只有词法表里那几行。所以那 98 份要的是这一格，不是位运算那一刀。
+  P('push', 2, ['writes'],
+    (a) => {
+      if (!Array.isArray(a[0])) throw new Error('push: 第一格不是列表');
+      a[0].push(a[1]);
+      return null;
+    },
+    /* 交出来的是 nil（与 interp 一侧同一个值 —— js 的 `push` 回的是新长度，要压掉）。 */
+    (a) => `((${a[0]}).push(${a[1]}), null)`),
+
   // ---- 外部 IO：**writes**。`print` 就在这儿 —— 它不是节点（见 nodes.js 文件头）----
   P('print', -1, ['writes'],
     (a, io) => { io.out.push(a.map((v) => show(v, io.show)).join(' ')); return null; },

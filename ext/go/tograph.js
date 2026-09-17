@@ -99,6 +99,9 @@ function collectDecls(x) {
   for (const k of kids(x)) collectDecls(k);
 }
 
+// go 的算符表：标准那一批。位运算那一族（`<<` / `>>` / `&` / `|` / `^` / `&^`）
+// **不在这张表里** —— 它们要的是 prim 表里加那几格，归"词汇表"那一刀。
+// `binOf` 查不到就当场报，不是静默落成别的东西。
 const OPS = ops();
 /** 转换名 -> `conv` 的目标。go 的定宽整数与浮点各自那几格都往这四格收。 */
 const CONV = convs({
