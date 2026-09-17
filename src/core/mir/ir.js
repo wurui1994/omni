@@ -553,8 +553,10 @@ const OPS = [
   //   +56 返回地址 = [rbp + 8]
   // 一共 64 字节，而 `jmp_buf` 是 200（glibc 的尺寸，见 sysroot 的头）—— 够。
   //
-  // `LONGJMP` **不产值也不返回**（后面的指令到不了）。只有 x86_64：arm64 上要存的是
-  // x19-x28 与 d8-d15，而那条腿上 macOS 走 libSystem，没有第二个用户。
+  // `LONGJMP` **不产值也不返回**（后面的指令到不了）。两条腿都有了，各按自己那套 ABI 存：
+  // arm64 上是 x19-x28 与 d8-d15，加调用者的 x29 / sp / 返回地址，一共 168 字节
+  // （`jmp_buf` 在那边是 192；布局与「值要放 x0 不是内部那个 RES」这一格见
+  // `arm64/from_mir.js`）。
   ['SETJMP', 'r', '-', '-'],    // a = jmp_buf 的地址，t = T_I32
   ['LONGJMP', 'r', 'r', '-'],   // a = jmp_buf 的地址，b = 值，t = T_VOID
 

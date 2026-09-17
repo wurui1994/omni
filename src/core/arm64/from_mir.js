@@ -32,12 +32,15 @@
 import { OmniError } from '../source/diag.js';
 import { utf8Bytes } from '../host/utf8.js';
 import {
-  COND, addImm, addReg, andImm, andReg, asrv, asrImm, blr, cmpImm, cmnImm, cmpReg, cset, eorImm,
+  COND, addImm, addReg, andImm, andReg, asrv, asrImm, blr, br, cmpImm, cmnImm, cmpReg, cset, csinc,
+  eorImm,
   eorReg, fadd,
   fcmpArm64, fcvtDS, fcvtSD, fcvtzs, fcvtzu, fdiv, fmovFromInt, fmovToInt, fmul, fneg, fsub,
-  ldpPost, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz, msub, mul,
+  ldpPost, ldrFpU, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz,
+  msub, mul,
   mvn, neg, orrImm, orrReg,
-  cneg, retArm64, scvtf, sdiv, stpPre, strU, strRegOff, subImm, subReg, svcArm64, sxtb, sxth, sxtw,
+  cneg, retArm64, scvtf, sdiv, stpPre, strFpU, strU, strRegOff, subImm, subReg, svcArm64, sxtb,
+  sxth, sxtw,
   ucvtf, udiv
 } from './encode.js';
 import { Arm64CodeBuf } from './asm.js';
@@ -1123,11 +1126,73 @@ class FnGen {
       if (darwin2) buf.emit(cneg(1, 0, 0, COND.cs));
       return this.def(i, 0);
     }
-    /* `SETJMP`/`LONGJMP`（第一百四十片第三格）：明着报错。要存的是 x19-x28 与 d8-d15
-     * （AAPCS64 的被调用者保存那一串），与 x86_64 那五个不是同一件事；而这条腿上
-     * macOS 走 libSystem，第二个用户还没出现 —— 没有判据的代码不写。 */
-    if (op === OP.SETJMP || op === OP.LONGJMP) {
-      arm64Nyi(`${OP_NAMES[op]}（要存 x19-x28 与 d8-d15，这条腿上还没有用户）`);
+    /* `SETJMP`/`LONGJMP`（第一百四十片第三格，第七格实现的）。
+     *
+     * 与 x86_64 那一对同一个语义（`mir/ir.js` 那一段），存的东西按 AAPCS64 换一套：
+     * 被调用者保存的是 **x19-x28 与 d8-d15**（不是那边的 rbx/r12-r15），而且返回地址
+     * 在这条腿上也占一格 —— 序言一律 `stp x29, x30, [sp, #-16]!` + `mov x29, sp`，
+     * 所以调用者的三样都在 x29 上量得出来。
+     *
+     * 布局（一共 168 字节，而 `jmp_buf` 是 192 —— 见 `arm64-osx/include/setjmp.h`）：
+     *   +0   x19 … +72 x28（十格）
+     *   +80  d8  … +136 d15（八格）
+     *   +144 调用者的 x29   = [x29]
+     *   +152 调用者在 bl 之后的 sp = x29 + 16
+     *   +160 返回地址       = [x29, #8]
+     *
+     * x28 那一格不是凑数：它就是 `FB`（会动栈顶的函数按它寻址），跳回去的那个函数
+     * 可能正靠着它 —— 少存这一个，`longjmp` 回到一个有变长数组的函数里就读错地方。
+     */
+    if (op === OP.SETJMP) {
+      this.flush();
+      this.loadRef(TMP0, f.a[i]);
+      let jo = 0;
+      for (let r = 19; r <= 28; r++) {
+        buf.emit(strU(3, r, TMP0, jo));
+        jo += 8;
+      }
+      for (let v = 8; v <= 15; v++) {
+        buf.emit(strFpU(3, v, TMP0, jo));
+        jo += 8;
+      }
+      buf.emit(ldrU(3, TMP1, 29, 0), strU(3, TMP1, TMP0, 144));      /* 调用者的 x29 */
+      buf.emit(addImm(1, TMP1, 29, 16), strU(3, TMP1, TMP0, 152));   /* 调用者的 sp */
+      buf.emit(ldrU(3, TMP1, 29, 8), strU(3, TMP1, TMP0, 160));      /* 返回地址 */
+      this.movImm(RES, 0n);
+      return this.def(i, RES);
+    }
+    /* `LONGJMP`：反过来装一遍，最后一条 `br x10`。
+     *
+     * 次序要紧，两处：
+     *   1. 值先算好（0 换成 1，C11 7.13.2.1 第 2 段）—— 那一步要读栈上的值，得趁
+     *      x19-x28 还没被覆盖、`sp` 还没动的时候做完。
+     *   2. 落点、目标的 x29、目标的 sp **三条读完了才 `mov sp`** —— 反过来的话最后
+     *      那条 `ldr` 已经踩在别人的栈上了（x86_64 那边同一条纪律）。
+     * 目标 sp 借 x30 当草稿：这一条一去不回，lr 没有人再要了。
+     *
+     * 值放 **x0，不是 `RES`（x8）**：落点是调用者那条 `bl setjmp` 的下一条，它按 ABI
+     * 从 x0 取返回值。x86_64 上这两个角色是同一个寄存器（rax），照抄那边就会写到 x8 上 ——
+     * 量到过：`setjmp` 回 47923552（一个地址），而控制流是对的，最难查的那一种。 */
+    if (op === OP.LONGJMP) {
+      this.flush();
+      this.loadRef(TMP1, f.b[i]);
+      buf.emit(cmpImm(1, TMP1, 0), csinc(1, 0, TMP1, 31, COND.ne));
+      this.loadRef(TMP0, f.a[i]);
+      let ro = 0;
+      for (let r = 19; r <= 28; r++) {
+        buf.emit(ldrU(3, r, TMP0, ro));
+        ro += 8;
+      }
+      for (let v = 8; v <= 15; v++) {
+        buf.emit(ldrFpU(3, v, TMP0, ro));
+        ro += 8;
+      }
+      buf.emit(ldrU(3, TMP1, TMP0, 160));      /* 落点 */
+      buf.emit(ldrU(3, 30, TMP0, 152));        /* 目标的 sp（借 lr 当草稿） */
+      buf.emit(ldrU(3, 29, TMP0, 144));        /* 目标的 x29 */
+      buf.emit(movSp(1, SP, 30));
+      buf.emit(br(TMP1));
+      return;
     }
     /* `FPGET`（第一百四十片第二格，第五格改的）：帧指针自己 —— 一句 `mov x0, x29`。
      *

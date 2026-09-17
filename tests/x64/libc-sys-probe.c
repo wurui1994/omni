@@ -26,8 +26,23 @@ void *localtime(const long *);
 int atexit(void (*)(void));
 char *strerror(int);
 int sscanf(const char *, const char *, ...);
+int setjmp(void *);
+void longjmp(void *, int);
+
+/* `jmp_buf` 两条腿上不一样大（Linux 200、Darwin 192），而这份探子两边共用 ——
+ * 所以自己开一块 256 字节的，比两边都大。 */
+static long jb[32];
 
 static void bye(void) { printf("atexit 跑了\n"); }
+
+/* 递归三层再 `longjmp` 回去：跳过的那三个帧是「sp 有没有收回去」的判据。 */
+static void deep(int n) {
+  if (n > 0) {
+    deep(n - 1);
+    return;
+  }
+  longjmp(jb, 7);
+}
 
 int main(void) {
   /* 1. 文件 */
@@ -86,6 +101,21 @@ int main(void) {
   int a = 0; double b = 0.0; char w[16];
   int got = sscanf("17 2.5 abc", "%d %lf %s", &a, &b, w);
   printf("sscanf %d: %d %.1f %s\n", got, a, b, w);
+  /* 7. setjmp/longjmp。两条腿上要存的东西完全不同（x86_64 是 rbx/r12-r15，
+   *    arm64 是 x19-x28 与 d8-d15），可**看得见的行为只有一个**，所以照旧逐行比。
+   *    `deep` 递归三层再跳回来 —— 跳过的三个帧就是「sp 收回去了没有」的判据。 */
+  volatile int stage = 0;
+  int r = setjmp(jb);
+  if (r == 0) {
+    stage = 1;
+    deep(3);
+    printf("到不了这儿\n");
+  }
+  printf("setjmp/longjmp: r=%d stage=%d\n", r, stage);
+  int z = setjmp(jb);
+  if (z == 0) longjmp(jb, 0);       /* C11 7.13.2.1：0 要换成 1 */
+  printf("longjmp(0) 换成: %d\n", z);
+
   atexit(bye);
   return 0;
 }

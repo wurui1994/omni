@@ -108,11 +108,26 @@ int f(void *env) {
 has('x86_64：setjmp 头一条是 mov [r10], rbx', SJ, '49 89 1a');
 has('x86_64：setjmp 存了返回地址（[rbp+8] -> [r10+56]）', SJ, '4c 8b 5d 08 4d 89 5a 38');
 
-let a64Err = '';
-try {
-  textHex('int f(void *e) { return __omni_setjmp(e); }', 'arm64');
-} catch (e) { a64Err = String(e.message ?? e); }
-has('arm64 上那两条明着报错', a64Err, 'SETJMP');
+/* arm64 上这两条存的是另一套（x19-x28 与 d8-d15，AAPCS64 的被调用者保存那一串），
+ * 布局与字节都钉住 —— 行为对不对在本机量（探子与 Apple 的 libc 逐行相同），这儿钉的是
+ * 「存了哪几个、次序对不对」：
+ *   x19 起头（`str x19, [x9]`）、d8 落在 +80（`str d8, [x9, #80]`）、
+ *   调用者的 x29 / sp / 返回地址依次进 +144 / +152 / +160。 */
+const SJ64 = textHex('int f(void *e) { return __omni_setjmp(e); }', 'arm64', 'osx');
+has('arm64：setjmp 头一条是 str x19, [x9]', SJ64, '33 01 00 f9');
+has('arm64：d8 存在 +80（str d8, [x9, #80]）', SJ64, '28 29 00 fd');
+has('arm64：调用者的 x29 -> +144', SJ64, 'aa 03 40 f9 2a 49 00 f9');
+has('arm64：调用者的 sp（x29+16）-> +152', SJ64, 'aa 43 00 91 2a 4d 00 f9');
+has('arm64：返回地址（[x29+8]）-> +160', SJ64, 'aa 07 40 f9 2a 51 00 f9');
+
+/* `LONGJMP`：值先算（0 换成 1 是一条 `csinc x0, x10, xzr, ne`），落在 **x0** 而不是
+ * x8 —— 落点是调用者那条 `bl` 的下一条，它按 ABI 从 x0 取返回值。量到过：写到 x8 上
+ * 的那一版控制流全对、`setjmp` 却回了个地址（47923552）。
+ * 收尾三条读完才 `mov sp, x30`，最后 `br x10`。 */
+const LJ64 = textHex('void f(void *e) { __omni_longjmp(e, 7); }', 'arm64', 'osx');
+has('arm64：0 换成 1 是 csinc x0, x10, xzr, ne（落在 x0）', LJ64, '5f 01 00 f1 40 15 9f 9a');
+has('arm64：落点/sp/x29 三条读完才 mov sp（最后 br x10）', LJ64,
+  '2a 51 40 f9 3e 4d 40 f9 3d 49 40 f9 df 03 00 91 40 01 1f d6');
 
 /* ---- Darwin（arm64-osx）那一套：号进 **x16**、`svc #0x80`，而且出错是**置进位标志**、
  * x0 里放**正的** errno。op 的约定只有「回负数就是 -errno」，所以后端要多一条

@@ -6,10 +6,10 @@
  * 这一份里分得清的三档：
  *   真的实现了：gettimeofday/time/clock、getenv/setenv、fork/execvp/waitpid/system/
  *               kill、opendir/readdir/closedir（`getdirentries64`）、remove、
- *               realpath（`fcntl(F_GETPATH)`）、mkdtemp、getrlimit/getrusage
+ *               realpath（`fcntl(F_GETPATH)`）、mkdtemp、getrlimit/getrusage、
+ *               setjmp/longjmp（后端那两条 op，布局见 `arm64/from_mir.js`）
  *   回失败但不崩：sigaction（要跳板）、pthread 一族（回 EAGAIN，运行时有退路）
- *   调到就崩：  dlopen 一族、setjmp/longjmp（**这条腿的 `SETJMP` 还没实现** ——
- *               要存 x19-x28 与 d8-d15，见 `arm64/from_mir.js` 那一段）
+ *   调到就崩：  dlopen 一族
  */
 #include "libc.h"
 
@@ -353,8 +353,12 @@ void *dlsym(void *h, const char *n) { (void)h; (void)n; __libc_unimpl("dlsym"); 
 int dlclose(void *h) { (void)h; __libc_unimpl("dlclose"); return -1; }
 char *dlerror(void) { return (char *)0; }
 
-/* `setjmp`/`longjmp`：**这条腿还没有**。要存 x19-x28 与 d8-d15（AAPCS64 的被调用者
- * 保存那一串），而 `arm64/from_mir.js` 里那两条 op 现在是明着报错。调到就崩，
- * 不假装成功 —— JSON 那两段（`runtime/omni_js_json.h`）在这条腿上于是还不能用。 */
-int setjmp(void *env) { (void)env; __libc_unimpl("setjmp（arm64 的 SETJMP 还没实现）"); return 0; }
-void longjmp(void *env, int v) { (void)env; (void)v; __libc_unimpl("longjmp"); }
+/* `setjmp`/`longjmp`：与 Linux 那一份**同一行代码**，差别全在后端（`OP.SETJMP` 存的是
+ * x19-x28 与 d8-d15、调用者的 x29/sp 与返回地址，布局见 `arm64/from_mir.js`）。
+ * `jmp_buf` 在这条腿上是 192 字节（`include/setjmp.h` 量的），我们只用头 168。 */
+int setjmp(void *env) { return __omni_setjmp(env); }
+void longjmp(void *env, int val) { __omni_longjmp(env, val); }
+/* `sigsetjmp`/`siglongjmp`：信号掩码那一格我们没有（`sigaction` 都还回 ENOSYS），
+ * 所以 `savemask` 收下就丢 —— 与 Linux 那一份同一个理由。 */
+int sigsetjmp(void *env, int savemask) { (void)savemask; return __omni_setjmp(env); }
+void siglongjmp(void *env, int val) { __omni_longjmp(env, val); }

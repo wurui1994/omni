@@ -117,14 +117,19 @@ src/sysroot/arm64-osx/libc/      同上四份，内容各不同
   池的第一格是「x1 写到哪儿」的地址，后端在 `svc` 之后补一条 `str x1, [x9]`。
   Linux 那条腿上**没有**这个用户（`fork` 只交回 rax、`pipe2` 写用户给的数组），
   所以 x86_64 的 `SYSCALL2` 明着报错，不写没人用的码。
-- **macOS 上还欠 `setjmp`**：arm64 的 `SETJMP`/`LONGJMP` 还没实现（要存 x19-x28 与
-  d8-d15），所以 JSON 那两段在那条腿上还不能用。
+- **macOS 上的 `setjmp`**：与 Linux 那一份**同一行 C**（`__omni_setjmp(env)`），差别全在
+  后端：存的是 x19-x28 与 d8-d15（不是那边的 rbx/r12-r15），加调用者的 x29 / sp /
+  返回地址，一共 168 字节（`jmp_buf` 是 192）。x28 那一格不是凑数 —— 它就是帧基址
+  `FB`，跳回一个有变长数组的函数时要它。`longjmp` 的值放 **x0 而不是内部那个 `RES`
+  （x8）**：落点是调用者 `bl` 的下一条，它按 ABI 从 x0 取值。量到过：写到 x8 上那一版
+  控制流全对、`setjmp` 却回了个地址（47923552）—— 最难查的那一种。
 
 量到的（都是本机 arm64 macOS 上直接跑，不进容器）：
 
 - `argc/argv`：`./a-osx one two three` -> `argc=4`、四行 argv 全对、rc=4
-- 「系统那一半」（`tests/x64/libc-sys-probe.c`，15 行，含 `system("true")` 与 `pipe`）：
-  与 Apple 的 libc **逐行相同**（`diff` 无输出），两边 rc=0
+- 「系统那一半」（`tests/x64/libc-sys-probe.c`，17 行，含 `system("true")`、`pipe`、
+  `setjmp`/`longjmp`）：与 Apple 的 libc **逐行相同**（`diff` 无输出），两边 rc=0。
+  同一份探子在 x86_64-linux 容器里与 glibc 也逐行相同。
 - libm 对账（120 个采样）：最大相对误差 **2.18e-12**，与 Linux 那一趟同一个数
   （math.c 是同一份文件）
 
