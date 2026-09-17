@@ -45,7 +45,7 @@ import {
   aluRI, aluRR, callR, cdq, cqo, cvtF2F, cvtF2I, cvtI2F, divR, fbin, fcmp, fldM64, fldM80,
   fstpM64, fstpM80, fxor, idivR, imulRR, lea, movAbs, movMR, movRI, movRM, movRR, movqFromXmm,
   movqToXmm, movsx, movsxM, movzx, movzxM, negR, notR, pop, push, retInstr, setcc, shiftRCl, shiftRI,
-  testRR
+  syscallInstr, testRR
 } from './encode.js';
 import { REG, ALU, CC, SH, FOP, XMM } from './encode.js';
 import { CodeBuf } from './asm.js';
@@ -77,6 +77,10 @@ const X64_FRES = XMM.xmm10;
 const IARG = [REG.rdi, REG.rsi, REG.rdx, REG.rcx, REG.r8, REG.r9];
 /** 浮点实参 xmm0-7，八个。 */
 const FARG = [XMM.xmm0, XMM.xmm1, XMM.xmm2, XMM.xmm3, XMM.xmm4, XMM.xmm5, XMM.xmm6, XMM.xmm7];
+
+/** **内核** ABI 的实参寄存器（第一百四十片）。与上面那六个只差第四格：`rcx` 换成
+ *  `r10` —— `syscall` 指令把返回地址塞进 rcx，所以内核那边约定第四个实参走 r10。 */
+const SYSARG = [REG.rdi, REG.rsi, REG.rdx, REG.r10, REG.r8, REG.r9];
 
 /** 一个 double / float 的 IEEE 754 位模式。与 arm64 那一份同一个写法。 */
 function x64FloatBits(v, size) {
@@ -726,6 +730,28 @@ class x64FnGen {
       this.loadRef(X64_TMP0, f.a[i]);
       buf.emit(callR(X64_TMP0));
       return this.callRet(i, t, callLdRet(f.aux[i]), sret);
+    }
+    /* `SYSCALL`（第一百四十片）：**不是**调用 —— 没有 `call`、没有出参区、栈一动不动。
+     * 号进 rax、实参进 rdi/rsi/rdx/r10/r8/r9（第四格是 r10 不是 rcx，见 `syscallInstr`），
+     * 一条 `0f 05`，回值在 rax。
+     *
+     * 次序：先摆实参、最后摆号。`loadRef` 只写目标那一个寄存器（常量走 `mov imm`、
+     * 变量走 `[rbp + off]`），所以摆好的格子不会被后一格踩掉；号最后摆是因为 rax
+     * 也是 `X64_RES`，中间任何一步都可能拿它当落点。
+     *
+     * `al` 那一条（SysV 的 xmm 计数）这儿**不发**：内核不看它，而且它就是 rax 的低八位，
+     * 发了会把号的低字节改掉。 */
+    if (op === OP.SYSCALL) {
+      const args = f.argsOf(f.b[i]);
+      if (args.length > SYSARG.length) nyi(`${args.length} 个实参的 SYSCALL`);
+      let k = 0;
+      for (const ar of args) {
+        this.loadRef(SYSARG[k], ar);
+        k++;
+      }
+      this.loadRef(X64_RES, f.a[i]);
+      buf.emit(syscallInstr());
+      return this.def(i, X64_RES);
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 一样是一条 RIP 相对的 `lea`，
      * 只是符号在 `__TEXT` 里。 */

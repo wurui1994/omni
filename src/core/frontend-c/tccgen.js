@@ -3521,6 +3521,13 @@ export class CGen {  /**
       const hit = this.funcs.get(name);
       if (hit === undefined || !hit.defined) return this.allocaCall();
     }
+    /* `__omni_syscall(号, 实参…)`（第一百四十片）：**自带 libc 的地基**。
+     * 与 alloca 同一条路数（这个单元自己定义了同名函数时不拦），只是它降到一条
+     * `OP.SYSCALL` 而不是一条栈上的减法。为什么它非得是内建见 `mir/ir.js` 那一段。 */
+    if (name === '__omni_syscall') {
+      const hit = this.funcs.get(name);
+      if (hit === undefined || !hit.defined) return this.syscallBuiltin();
+    }
     const info = this.funcSym(name);
     info.used = true;
     const a = this.callArgs(`function '${name}'`, info.params, info.variadic, info.ret,
@@ -3573,6 +3580,41 @@ export class CGen {  /**
       this.mod.consts.int(-16n), 0);
     f.emit(OP.GSTORE, T_VOID, base, REF_NONE, spNo);
     return this.postfix(sVal(mkPointer(TY_VOID), base));
+  }
+
+  /**
+   * `__omni_syscall(号, 实参…)` -> 一条 `OP.SYSCALL`（第一百四十片）。
+   *
+   * 形状照两个内核 ABI 里都成立的那一份：号与最多六个实参一律当 `long long` 传
+   * （指针在 native 上就是一个字），回的是**内核的原始返回值** —— Linux 上失败是
+   * `-errno`。翻成 C 的「-1 加 errno」是我们 libc 里 `__omni_errno` 那一层的事。
+   *
+   * 只有 native 那两条腿有它：解释器与线性内存那边没有内核，那两边的 libc 是宿主的
+   * JS（`interp/libc.js`）。目标是 macOS 时也不给 —— 那边的 BSD 调用约定是另一件事
+   * （号带 `0x2000000` 的类别位、出错看的是进位标志），而 macOS 上我们本来就走
+   * libSystem（`sysroot/arm64-osx/lib/libSystem.def`）。
+   */
+  syscallBuiltin() {
+    if (!this.native) {
+      this.err('__omni_syscall 只有 native 那两条腿有（解释器那边 libc 是宿主的 JS）');
+    }
+    const os = this.cpp.os ?? 'osx';
+    if (os !== 'linux') {
+      this.err(`__omni_syscall 现在只有 linux 目标有（这一趟是 ${os}）`);
+    }
+    this.skip(LPAR);
+    const no = this.gv(this.castTo(this.exprEq(), TY_LLONG));
+    const refs = [];
+    while (this.tok === COMMA) {
+      this.next();
+      refs.push(this.gv(this.castTo(this.exprEq(), TY_LLONG)));
+    }
+    this.skip(RPAR);
+    if (refs.length > 6) {
+      this.err(`__omni_syscall 给了 ${refs.length} 个实参，内核 ABI 只有六格`);
+    }
+    return this.postfix(sVal(TY_LLONG,
+      this.f.emit(OP.SYSCALL, T_I64, no, this.f.pushArgs(refs), 0)));
   }
 
   /**

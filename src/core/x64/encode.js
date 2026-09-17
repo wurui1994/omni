@@ -552,6 +552,10 @@ export function jmpR(r) {
 export function retInstr() { return [0xc3]; }
 export function nop() { return [0x90]; }
 export function ud2() { return [0x0f, 0x0b]; }
+/** `syscall`（`0f 05`，第一百四十片）。号在 rax、实参在 rdi、rsi、rdx、**r10**、r8、r9 ——
+ *  第四格是 r10 而不是 rcx，因为 rcx 被这条指令自己拿去装返回地址了（r11 装 rflags），
+ *  于是这两个寄存器过了这一条就是垃圾。回值在 rax，失败是 `-errno`。 */
+export function syscallInstr() { return [0x0f, 0x05]; }
 
 /** `push r64`（`50+r`）/ `pop r64`（`58+r`）。这两条不带 REX.W。 */
 export function push(r) {

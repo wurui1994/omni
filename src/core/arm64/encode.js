@@ -310,6 +310,12 @@ export const retArm64 = (rn = 30) => branchReg(2, rn);
 /** `nopArm64` 是 hint #0（C6.2.203）。 */
 export const nopArm64 = () => 0xd503201f;
 
+/** `svc #imm16`（C6.2.256：`1101 0100 000 imm16 00001`，第一百四十片）。
+ *  Linux 的 arm64 上系统调用就是 `svc #0`：号在 x8、实参在 x0-x5、回值在 x0
+ *  （失败是 `-errno`）。macOS 的 BSD 约定是另一件事（x16 + `svc #0x80`），
+ *  那边我们走 libSystem，所以这一格只出 Linux 那一种。 */
+export const svcArm64 = (imm = 0) => u32(0xd4 * 2 ** 24 + chkU(imm, 16, 'imm16') * 2 ** 5 + 1);
+
 /* ================================================================ 第九刀第二片
  * 逻辑立即数、位段、单目位运算、浮点、单向屏障的存取。 */
 

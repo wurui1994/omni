@@ -278,6 +278,16 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     if (t !== T_I64) bad(i, `${OP_NAMES[op]} 的 t 是 ${typeText(t)}，栈顶只能是 i64`);
     return;
   }
+  /* 系统调用（第一百四十片）：只有 native 两条腿有内核可谈，实参最多六个 ——
+   * 两个内核 ABI 都是六个寄存器（Linux 的 rdi/rsi/rdx/r10/r8/r9、arm64 的 x0-x5），
+   * 第七个没有摆的地方，所以这一条在这儿挡住而不是让后端各自崩一种法。 */
+  if (op === OP.SYSCALL) {
+    if (!mod.native) { bad(i, 'SYSCALL：只有 native 这条腿上有内核可谈'); return; }
+    if (f.t[i] !== T_I64) bad(i, `SYSCALL 的 t 是 ${typeText(f.t[i])}，内核回的是一个字，只能是 i64`);
+    const n = f.argsOf(f.b[i]).length;
+    if (n > 6) bad(i, `SYSCALL 有 ${n} 个实参，内核 ABI 只有六格`);
+    return;
+  }
   /* 函数的地址（第二十七片）：号要在表里、`t` 只能是 i64、而且只有 native 有真地址可谈   * （解释器那条腿上函数指针是「号 + 1」，不是地址）。 */
   if (op === OP.FADDR) {
     if (mod.funcs[v] === undefined) { bad(i, `函数号 ${v} 越界`); return; }

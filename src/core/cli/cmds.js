@@ -89,6 +89,9 @@ const LINK_COMMON = [
    * 而 `run` 的 stdout 归被跑的程序）—— 交互着用的时候没必要给。 */
   { name: '-q', arity: 0, brief: '不印产物摘要（给上层命令内部调用用）' },
   { name: '--sysroot', arity: 1, value: 'DIR', brief: '交叉编译：库 DIR/lib' },
+  /* `--libc self`（第一百四十片）：链 `<sysroot>/libc/*.c` 编出来的那份自带 libc，
+   * 一个外部库都不要 —— 出来的是纯静态的可执行文件。要配 `--sysroot`。 */
+  { name: '--libc', arity: 1, value: 'KIND', brief: 'system（默认）| self：自带 libc，纯静态' },
 ];
 const LINK_ELF_ONLY = [
   { name: '--static', arity: 0, brief: '（-f elf）静态，不出 .interp/.dynamic' },

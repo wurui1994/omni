@@ -2927,7 +2927,42 @@ function main(argv) {
        * 而交叉编译时它们不在这台机器上。库全靠 sysroot/lib 里的 `.def`。
        * crt 那三个 `.o` 也从 sysroot/lib 里取（容器里拷过来的）。 */
       const sysroot = rest.indexOf('--sysroot') >= 0 ? rest[rest.indexOf('--sysroot') + 1] : null;
-      if (sysroot !== null) {
+      /* `--libc self`（第一百四十片）：**我们自己那份 libc**，一个外部库都不链。
+       *
+       * 来源是 `<sysroot>/libc/*.c` —— 用我们自己的 C 前端编，底下踩的是
+       * `__omni_syscall` 那条内建（见 `mir/ir.js` 的 `SYSCALL`）。于是链出来的
+       * 可执行文件是**纯静态**的：没有 `DT_NEEDED`、没有解释器、没有 crt。
+       * 量到的（容器里 `ldd`）：`statically linked`。
+       *
+       * 为什么与 `--sysroot` 绑在一起：那一份 libc 的**头**也在 sysroot 里
+       * （`<sysroot>/include`），而「头与实现是同一份账」这件事只有摆在同一个
+       * 目录下才守得住。libc 自己那几个 `.c` 反过来只吃 `<sysroot>/libc`
+       * 里的 `syscall.h` —— 它不许看见那份给用户程序的 glibc 形状的头
+       * （那边的 `FILE` 与我们的 `struct __FILE` 是两回事）。 */
+      const libcSelf = rest.indexOf('--libc') >= 0
+        && rest[rest.indexOf('--libc') + 1] === 'self';
+      if (libcSelf) {
+        if (cmd !== 'elf-link') {
+          throw new OmniError('--libc self 现在只有 ELF（linux）那条腿有');
+        }
+        if (sysroot === null) throw new OmniError('--libc self 要配 --sysroot');
+        const libcDir = join(sysroot, 'libc');
+        if (!isDir(libcDir)) throw new OmniError(`--libc self: 找不到 ${libcDir}`);
+        /* `start.c` 得排在最前（它是入口所在的那个 `.o`），剩下的按名字排 ——
+         * 顺序稳定，于是同一份输入两次链出来逐字节相同（容器里量过）。 */
+        const srcs = readDir(libcDir).filter((f) => f.endsWith('.c')).sort();
+        const objs = [];
+        for (const f of srcs) {
+          const src = join(libcDir, f);
+          const o = join(workDirFor('libc-self', hash16(src)), f.replace(/\.c$/, '.o'));
+          cObj(src, o, CROSS === null ? hostArch() : CROSS.arch, [libcDir], [], 'elf',
+            'linux', [cap('c.sysInclude')()[0], libcDir]);
+          if (f === 'start.c') objs.unshift(o); else objs.push(o);
+        }
+        files.unshift(...objs.filter((o) => o.endsWith('start.o')));
+        files.push(...objs.filter((o) => !o.endsWith('start.o')));
+        if (!rest.includes('-e')) rest.push('-e', '_start');
+      } else if (sysroot !== null) {
         /* sysroot/lib 里的 `.def` 当成库的来源。格式不同，走法不同：
          *   ELF：`-L DIR/lib -lc -lm …`，findLibElf 认 `lib%s.def`
          *   Mach-O：`--dylib <.def 路径>`，loadInputs 那侧认 `.def`

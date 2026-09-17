@@ -78,6 +78,26 @@
 #      这四格是**解释器的 libc 与 glibc 头对不上**，不是目标默认值的事，各自单列。
 #      顺带记下：容器里 `tests/c/run.js` 的 `gen/` 一组本来就不是判据 ——
 #      仓库里那份 tcc 尺子是 macOS 二进制（`Exec format error`）。
+#   8. **自带 libc 跑通了**（第一百四十片：`OP.SYSCALL` + `--libc self`）。
+#      地基是一条新 op —— `__omni_syscall(号, 实参…)` 降成一条 `syscall`（x86_64）/
+#      `svc #0`（arm64）。为什么非得是 op：C 前端的非空 `__asm__` 模板还没到，
+#      而预编译一个 `.o` 塞进仓库是「复制二进制」（不收）。字节判据在
+#      `tests/c/syscall.js`（9 条，本机就跑得动）；跑起来这一半在容器里量：
+#      a. 零 libc 的 hello（`write(1,…)` + `exit(7)` 两条 syscall）：
+#         `c obj` + `elf-link -e _start` -> 2155 字节、15 节、8 段、入口 0x4016b8，
+#         印 `hello from syscall`、`rc=7`。**容器里编的与 macOS 上交叉编的逐字节相同。**
+#      b. 我们自己那份 libc（`src/sysroot/x86_64-linux/libc/`，五个 `.c`：
+#         start / string / io / malloc / stdio）与用户程序一起链：
+#           node src/cli.js c link tl.o --stdlib --libc self \
+#             --sysroot src/sysroot/x86_64-linux -f elf --arch x86_64 --os linux
+#         -> 29781 字节、16 节、8 段、入口 0x4023b8。`ldd` 说 **statically linked**
+#         —— `DT_NEEDED` 一条都没有，glibc 一个字节都不沾。跑出来五格全对：
+#         `hello 42 world` / `malloc: AAAAAAAAAA` / `strlen: 6` / `strcmp: 0` /
+#         `memcpy: hello` / `all ok`，`rc=0`。
+#      **还欠的**（明说，别当已完成）：`_start` 取不到真的 argc/argv（那要动 rsp，
+#      得等自带汇编器、或者链接器自己合成那几条指令），所以现在是 `main(0, 0)`；
+#      `%f` 那一族、`atexit` 的回调、线程、`dlopen`、目录遍历都还没有 ——
+#      整份编译器自举到这份 libc 上还差这些。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

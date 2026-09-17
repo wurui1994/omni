@@ -37,7 +37,8 @@ import {
   fcmpArm64, fcvtDS, fcvtSD, fcvtzs, fcvtzu, fdiv, fmovFromInt, fmovToInt, fmul, fneg, fsub,
   ldpPost, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz, msub, mul,
   mvn, neg, orrImm, orrReg,
-  retArm64, scvtf, sdiv, stpPre, strU, strRegOff, subImm, subReg, sxtb, sxth, sxtw, ucvtf, udiv
+  retArm64, scvtf, sdiv, stpPre, strU, strRegOff, subImm, subReg, svcArm64, sxtb, sxth, sxtw,
+  ucvtf, udiv
 } from './encode.js';
 import { Arm64CodeBuf } from './asm.js';
 import {
@@ -1068,6 +1069,25 @@ class FnGen {
       this.flush();
       buf.emit(blr(TMP0));
       return this.callRet(i, t, sret);
+    }
+    /* `SYSCALL`（第一百四十片）：**不是**调用 —— 没有 `bl`、没有出参区、`sp` 一动不动。
+     * Linux 的 arm64 约定：号在 x8、实参在 x0-x5、回值在 x0（失败是 `-errno`）。
+     *
+     * `flush()` 照 `CCALL` 那一条发在前头：池里那五个（x11-x15）内核不动，但前端手上
+     * 攥着的值得先落回帧里，`loadRef` 才取得到 —— 少这一步，摆实参那几条会读到还没
+     * 写回去的格子。号最后摆：x8 就是 `RES`，摆实参那几步都可能拿它当落点。 */
+    if (op === OP.SYSCALL) {
+      const sysArgs = f.argsOf(f.b[i]);
+      if (sysArgs.length > 6) arm64Nyi(`${sysArgs.length} 个实参的 SYSCALL`);
+      this.flush();
+      let sysK = 0;
+      for (const ar of sysArgs) {
+        this.loadRef(sysK, ar);
+        sysK++;
+      }
+      this.loadRef(RES, f.a[i]);
+      buf.emit(svcArm64(0));
+      return this.def(i, 0);
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 同一对指令，只是符号在 `__TEXT` 里。 */
     if (op === OP.FADDR) {

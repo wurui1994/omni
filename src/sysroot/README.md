@@ -35,11 +35,41 @@ src/sysroot/<arch>-<os>/
   lib/*.def        符号预设：库叫什么、有哪些名字（哪些是数据、多大）
   lib/crt1.c       我们自己的 `_start`（不拷目标平台的 crt1.o）
   lib/atexit.c     我们自己的 `atexit`（glibc 那份只在 libc_nonshared.a 里）
+  libc/*.c         **我们自己那份 libc**（`--libc self`，见下）
 ```
 
 `lib/*.c` 那两份由**我们自己的 C 前端**在链接前编成 `.o`（`cli.js` 的 `sysObj`），
 所以这个目录里**一个目标平台的二进制都没有** —— 与 tcc 的 `lib/dsohandle.c`
 同一个思路（它也是拿自己编，进 `libtcc1.a`）。
+
+## `--libc self`：自己那份 libc（第一百四十片）
+
+```sh
+omni c obj x.c --arch x86_64 --os linux -o x.o
+omni c link x.o -o x --stdlib --libc self \
+  --sysroot src/sysroot/x86_64-linux -f elf --arch x86_64 --os linux
+```
+
+`libc/` 里那几个 `.c` 编出来的 `.o` 与用户程序一起链，**一个外部库都不要**：
+出来的可执行文件 `ldd` 说 `statically linked`，`DT_NEEDED` 一条都没有。
+
+地基是一条 MIR op —— `__omni_syscall(号, 实参…)`（`mir/ir.js` 的 `SYSCALL`），
+在 x86_64 上降成一条 `syscall`、在 arm64 上降成 `svc #0`。**为什么非得是 op**：
+调 libc 是循环依赖；内联汇编那条路上 C 前端的非空 `__asm__` 模板还没到；
+预编译一个 `.o` 塞进仓库是「复制二进制」。所以照 `SPGET`/`FRAME` 的先例 ——
+MIR 说「要什么」，摆法归后端。
+
+现在有的（量在 `tests/x64/docker-run.sh` 第 8 笔账）：
+`printf` / `fprintf` / `snprintf`（`%d %u %x %s %c %p`，带宽度与零填充）、
+`malloc`/`free`/`calloc`/`realloc`（brk 上的 first-fit）、
+`mem*` 与 `str*` 那一族、`open`/`read`/`write`/`close`/`stat` 一路文件 IO、
+`exit`/`_exit`/`abort`。
+
+**还没有的**：`%f` 那一族、`atexit` 的回调、线程、`dlopen`、目录遍历。
+整份编译器自举到这份 libc 上还差这些。
+
+`libc/*.c` 只吃 `libc/syscall.h`，**看不见** `include/` 里那份给用户程序的头 ——
+那边的 `FILE` 是 glibc 的形状，与我们的 `struct __FILE { int fd; }` 是两回事。
 
 ## `.def` 的形状
 
@@ -69,7 +99,7 @@ stdout DATA 8              ; 数据符号：ELF 上要 copy 重定位，得知�
 | `isnan` 一族 | `__isnan` / `__finite` / `__signbit` | `___isnand` / `___isfinited` |
 | `pthread_main_np` | 没有（走 `getrlimit`） | 有 |
 
-结构体的字节数与字段偏移都是**量出来的**（`tests/x64/offsets.c`，在目标机器上
+结构体的字节数与字段偏移都是**量出来的**（`src/sysroot/offsets.c`，在目标机器上
 `gcc -o offsets offsets.c && ./offsets`），不是照文档抄。
 
 ## 还欠的一格
