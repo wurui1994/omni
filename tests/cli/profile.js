@@ -493,5 +493,17 @@ const FIB_CALLS = '635621';
   } else bad('基线该按后缀转', `rc=${r.status} ${s.slice(0, 300)}`);
 }
 
+{
+  /* **一帧都没采到也要说话**：量到的原话是 `run 14_json_native.omni --profile sample:997
+   * --backend c` 只剩一句「折叠栈写到了 …」，五张表一张都没有 —— 看着像 `--backend c`
+   * 被忽略了。真相是那份程序几毫秒就跑完，一帧都没落。沉默让人怀疑开关没生效。 */
+  const tiny = join(ROOT, 'tests', 'cases', '14_json_native.omni');
+  const r = omni(['run', tiny, '--profile', 'sample:997', '--cc', 'clang', '--backend', 'c']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0 && s.includes('一帧都没采到') && s.includes('--profile stub')) {
+    ok('sample 一帧都没采到：明说为什么 + 三条出路（不再沉默）');
+  } else bad('没采到帧该有一句话', `rc=${r.status} ${s.slice(-300)}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

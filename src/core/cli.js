@@ -787,9 +787,23 @@ function profFoldedFinish() {
   if (PROF === null || PROF.tmpOut === undefined || PROF.tmpOut === null) return;
   const f = PROF.tmpOut;
   PROF.tmpOut = null;
-  if (!exists(f)) return;                      /* 这条腿没落账（比如 js 腿走的是别的收尾） */
-  const folded = readText(f);
-  if (folded.trim() === '') return;            /* 一帧都没采到：孩子那侧已经说过了 */
+  const folded = exists(f) ? readText(f) : '';
+  if (folded.trim() === '') {
+    /**
+     * **一帧都没采到也要说话**（第一百四十九片第三格补的那一句）。
+     *
+     * 量到的原话（用户那一趟）：`run tests/cases/14_json_native.omni --profile sample:997
+     * --backend c` 印完程序输出，只剩一句「折叠栈写到了 …」，五张表一张都没有 ——
+     * 看着像 `--backend c` 被忽略了。真相是那份程序几毫秒就跑完，997Hz 上**一帧都没落**，
+     * 而这一层当时选择了沉默（注释里写的是"孩子那侧已经说过了"，可孩子只说了落点）。
+     * 沉默让人怀疑开关没生效，比多印一行糟得多。
+     */
+    stderr(`omni: profile（${PROF.mode} · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿）一帧都没采到`
+      + ' —— 采样只在**这个进程真的在烧 CPU** 的时候才有帧，而这一趟太短。'
+      + '三条路：把工作量加大、把频率提上去（`--profile sample:9973`）、'
+      + '或者换成不靠采样的那一档（`--profile cc` / `--profile stub`，按调用计数与时间）\n');
+    return;
+  }
   profViews(folded, `omni prof（${PROF.mode} · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿）`, 'frames');
 }
 
@@ -3323,7 +3337,12 @@ function main(argv) {
          * `tmpOut` 与 `out` 分开记：`out` 是用户要的产物（要印一句"落在哪儿"），
          * `tmpOut` 是这一趟的中间物（不印路径，只印那几张表）。
          */
-        PROF.tmpOut = join(workDirFor('prof-folded', hash16(`${mode}${hz}`)), 'omni.folded');
+        /* 落点按 **这一趟的源文件 + 档 + 频率** 起名：只按档与频率起名的话，两份不同的
+         * 程序会共用同一个文件 —— 上一趟的账被下一趟读成自己的（量到过那个目录被两趟共用）。 */
+        PROF.tmpOut = join(
+          workDirFor('prof-folded', hash16(`${srcArg(node, rest) ?? ''}|${mode}|${hz}`)),
+          'omni.folded',
+        );
         mkdirAll(dirname(PROF.tmpOut));
         if (exists(PROF.tmpOut)) writeText(PROF.tmpOut, '');
         setEnv('OMNI_PROF_OUT', PROF.tmpOut);
