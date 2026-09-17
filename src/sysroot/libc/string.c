@@ -1,5 +1,8 @@
 /* string.c — 纯计算的字符串/内存函数（第一百四十片）。
- * 零 syscall —— 全是字节搬运，所以这一份一个头都不 include。 */
+ * 零 syscall —— 全是字节搬运，所以这一份**一个头都不 include**，要用的两个
+ * （`malloc`：只有 `strdup` 要）就在这儿声明一行。 */
+
+void *malloc(unsigned long n);
 
 void *memcpy(void *d, const void *s, unsigned long n) {
   unsigned char *dp = (unsigned char *)d;
