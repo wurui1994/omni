@@ -592,13 +592,14 @@ function numPlan(top) {
   walkAll(top, false);
   bodies.push({ key: 'top', list: asList(top), params: [] });
 
-  /* ---- 每个体自己那几样：绑了谁、写了谁、调了谁（**不进嵌套的 func 体**）。 */
+  /* ---- 每个体自己那几样：绑了谁、写了谁、调了谁、`ret` 回了什么（**不进嵌套的 func 体**）。 */
   const info = new Map();
   for (const b of bodies) {
     const count = new Map();
     const inits = new Map();
     const writes = [];
     const calls = [];
+    const retVals = [];
     const s = new Set();
     const scan = (x) => {
       if (x === null || x === undefined) return;
@@ -613,6 +614,11 @@ function numPlan(top) {
         return;
       }
       if (x.op === 'set') { writes.push([x.attrs.name, x.ins.value]); scan(x.ins.value); return; }
+      if (x.op === 'ret') {
+        retVals.push(x.ins.value === undefined ? null : x.ins.value);
+        scan(x.ins.value);
+        return;
+      }
       if (x.op === 'call') {
         const fn = x.ins.fn;
         const args = asList(x.ins.args).filter((y) => y !== undefined);
@@ -628,12 +634,28 @@ function numPlan(top) {
       const init = inits.get(n);
       if (c === 1 && init !== null && init !== undefined && init.op !== 'func') cands.add(n);
     }
-    info.set(b.key, { inits, writes, calls, cands, params: b.params });
+    /* 「体的最后一格是 `ret`」——那说明**走不到掉出去那一条路**（掉出去回的是 nil）。 */
+    const last = b.list.length > 0 ? b.list[b.list.length - 1] : null;
+    const tailIsRet = last !== null && last !== undefined && last.op === 'ret';
+    info.set(b.key, {
+      inits, writes, calls, cands, params: b.params, retVals, tailIsRet,
+    });
   }
 
   const params = new Set();
   for (const [n, f] of namedFn) {
     if (f.params.length > 0 && !badFnRef.has(n)) params.add(n);
+  }
+  /**
+   * **返回值也窄**的候选：有名字的顶层函数，而且
+   *   - 体的最后一格是 `ret`（掉出去那条路走不到 —— 掉出去回的是 nil，那可不是数）；
+   *   - 体里每一格 `ret` 都带值，而且那个值**是数**。
+   * 名字被当值用过的照样出局（调用点数不齐）。
+   */
+  const rets = new Set();
+  for (const [n, f] of namedFn) {
+    const inf = info.get(f.key);
+    if (inf !== undefined && inf.tailIsRet && inf.retVals.length > 0 && !badFnRef.has(n)) rets.add(n);
   }
   const numish = (x, key) => {
     if (x === null || x === undefined || Array.isArray(x)) return false;
@@ -645,6 +667,11 @@ function numPlan(top) {
       const fname = nameOfBody.get(key);
       return fname !== undefined && params.has(fname) && inf.params.includes(x.attrs.name);
     }
+    /* 一次调用**算数**，前提是那个函数的返回值窄了（不然回的可能是 nil）。 */
+    if (x.op === 'call') {
+      const fn = x.ins.fn;
+      return fn !== null && fn !== undefined && fn.op === 'ref' && rets.has(fn.attrs.name);
+    }
     if (x.op === 'conv') return x.attrs.to === 'int' || x.attrs.to === 'float';
     if (x.op !== 'prim') return false;
     if (x.attrs.name === 'len') return true;
@@ -652,7 +679,7 @@ function numPlan(top) {
     const args = asList(x.ins.args).filter((y) => y !== undefined);
     return args.length > 0 && args.every((y) => numish(y, key));
   };
-  for (let round = 0; round < bodies.length + params.size + 8; round++) {
+  for (let round = 0; round < bodies.length + params.size + rets.size + 8; round++) {
     let dropped = false;
     for (const [key, inf] of info) {
       for (const n of [...inf.cands]) {
@@ -672,11 +699,19 @@ function numPlan(top) {
       }
       if (!ok) { params.delete(fname); dropped = true; }
     }
+    for (const fname of [...rets]) {
+      const f = namedFn.get(fname);
+      const inf = info.get(f.key);
+      const ok = inf.retVals.every((v) => v !== null && numish(v, f.key));
+      if (!ok) { rets.delete(fname); dropped = true; }
+    }
     if (!dropped) break;
   }
   const locals = new Map();
   for (const [key, inf] of info) locals.set(key, inf.cands);
-  return { locals, params, nameOfBody };
+  return {
+    locals, params, rets, nameOfBody,
+  };
 }
 
 /**
@@ -817,8 +852,12 @@ class CGen {
      * 一进一出一格函数体就换一张（见 `liftFunc` 与 `emitC`）—— 名字是按体算的。
      */
     this.num = new Set();
-    /** 窄化那张全局的计划（`numPlan`）：哪个体窄了哪几格、哪个函数的形参窄了。 */
-    this.np = { locals: new Map(), params: new Set(), nameOfBody: new Map() };
+    /** 窄化那张全局的计划（`numPlan`）：哪个体窄了哪几格、哪个函数的形参 / 返回值窄了。 */
+    this.np = {
+      locals: new Map(), params: new Set(), rets: new Set(), nameOfBody: new Map(),
+    };
+    /** 正在生成的这个函数**回 double** 吗（`ret` 与那格尾巴临时量要跟着换）。 */
+    this.rnum = false;
     /** 这个体里落成 C `struct` 的那几格记录（`recPlan` 算的：名字 -> { names, tag }）。 */
     this.rec = new Map();
     /** 记录那张全局的计划。 */
@@ -841,6 +880,19 @@ class CGen {
     const k = constNum(x);
     if (k !== null) return cNum(k);
     if (x.op === 'ref' && this.num.has(x.attrs.name)) return cName(x.attrs.name);
+    /* 一次调用：那个函数**回 double** 而且实参也都拼得出 double 形态时，就是一段裸调用。
+     * 「实参也拼得出来」这条不只是省事 —— `dOf` **一行语句都不许发**（它会被试着调、
+     * 结果被丢掉），而 `valOf` 是会发语句的（列表、print 那种）。 */
+    if (x.op === 'call') {
+      const fn = x.ins.fn;
+      if (fn === null || fn === undefined || fn.op !== 'ref') return null;
+      const nm2 = fn.attrs.name;
+      if (!this.np.rets.has(nm2) || !this.fnOf.has(nm2)) return null;
+      const as = asList(x.ins.args).filter((y) => y !== undefined).map((y) => this.dOf(y));
+      if (as.some((d) => d === null)) return null;
+      if (!this.np.params.has(nm2) && as.length > 0) return null;   /* 那边收 gv，递不进去 */
+      return `${this.fnOf.get(nm2)}(${as.join(', ')})`;
+    }
     if (x.op !== 'prim') return null;
     const nm = x.attrs.name;
     if (nm !== '+' && nm !== '-' && nm !== '*' && nm !== '/') return null;
@@ -964,6 +1016,8 @@ class CGen {
     /* 形参窄不窄是**按函数名**定的（`numPlan` 里那半个不动点）：窄了就连形参一起进
      * `this.num`，于是体里读它是那个 double、当值用时才 `g_num` 装回去。 */
     const pnum = this.np.params.has(this.np.nameOfBody.get(x.id));
+    /* 返回值窄不窄（`numPlan` 的第三格）：体的最后一格是 `ret`、每格 `ret` 都回数。 */
+    const rnum = this.np.rets.has(this.np.nameOfBody.get(x.id));
     const free = [];
     freeRefs(x.ins.body, params.slice(), free);
     const cap = free.filter((n) => !this.fnOf.has(n));
@@ -981,8 +1035,12 @@ class CGen {
     if (pnum) for (const p of params) this.num.add(p);
     const outerRec = this.rec;
     this.rec = this.rp.locals.get(x.id) ?? new Map();
+    const outerRnum = this.rnum;
+    this.rnum = rnum;
     const t = this.fresh();
-    this.emit(`gv ${t} = g_nil();`);
+    /* 尾巴那格临时量：回 double 的函数里它也是 double。**它是走不到的那一条路**
+     * （能窄的前提就是「体的最后一格是 `ret`」），摆在这儿只为让 C 有个返回值可回。 */
+    this.emit(rnum ? `double ${t} = 0.0;` : `gv ${t} = g_nil();`);
     this.pushFrame('fn');
     this.body(asList(x.ins.body), t);
     this.popFrame();
@@ -993,7 +1051,10 @@ class CGen {
     this.depth = outerDepth;
     this.num = outerNum;
     this.rec = outerRec;
-    this.fns.push({ cname, params: params.map(cName), pnum, lines });
+    this.rnum = outerRnum;
+    this.fns.push({
+      cname, params: params.map(cName), pnum, rnum, lines,
+    });
     return cname;
   }
 
@@ -1034,7 +1095,16 @@ class CGen {
       return this.num.has(x.attrs.name) ? `g_num(${cName(x.attrs.name)})` : cName(x.attrs.name);
     }
     if (x.op === 'prim') return this.prim(x);
-    if (x.op === 'call') return this.callOf(x);
+    if (x.op === 'call') {
+      /* 回 double 的那几个函数：这儿是**值位置**，所以装回去（与窄了的名字同一条规矩）。 */
+      const fn = x.ins.fn;
+      const t = this.callOf(x);
+      if (fn !== null && fn !== undefined && fn.op === 'ref' && this.np.rets.has(fn.attrs.name)
+        && this.fnOf.has(fn.attrs.name)) {
+        return `g_num(${t})`;
+      }
+      return t;
+    }
     if (x.op === 'list-new') {
       const items = asList(x.ins.items).filter((y) => y !== undefined).map((y) => this.valOf(y));
       const a = `a${this.fresh()}`;
@@ -1245,8 +1315,16 @@ class CGen {
       /* 函数体里 `ret` 就是 C 的 `return`。顶层（`main`）那一格回退出码 0：图的值不是
        * 进程的退出码，矩阵比的是印出来的那几行。值照旧算一遍 —— 它可能有副作用。 */
       if (this.inFn > 0) {
-        const v = x.ins.value === undefined ? 'g_nil()' : this.valOf(x.ins.value);
         const t = this.fresh();
+        if (this.rnum) {
+          /* 回 double 的函数：这一格也走 double（值照旧先算成一格临时量 —— 出口动作
+           * 要在它之后跑，而那些动作可能改到值里读的那几个名字）。 */
+          this.emit(`double ${t} = ${x.ins.value === undefined ? '0.0' : this.dVal(x.ins.value)};`);
+          this.emitExits('fn');
+          this.emit(`return ${t};`);
+          return;
+        }
+        const v = x.ins.value === undefined ? 'g_nil()' : this.valOf(x.ins.value);
         this.emit(`gv ${t} = ${v};`);
         this.emitExits('fn');
         this.emit(`return ${t};`);
@@ -1400,8 +1478,10 @@ export function emitC(g) {
    * 形参窄了的那几个收 `double`（`numPlan` 证过每个调用点递的都是数）。 */
   const sig = (f) => (f.params.length === 0 ? 'void'
     : f.params.map((p) => `${f.pnum === true ? 'double' : 'gv'} ${p}`).join(', '));
-  const protos = gen.fns.map((f) => `static gv ${f.cname}(${sig(f)});`);
-  const bodies = gen.fns.map((f) => `static gv ${f.cname}(${sig(f)}) {\n${f.lines.join('\n')}\n}\n`);
+  /* 返回值窄了的那几个回 `double`（`numPlan` 证过：体的最后一格是 `ret`、每格 ret 都回数）。 */
+  const rty = (f) => (f.rnum === true ? 'double' : 'gv');
+  const protos = gen.fns.map((f) => `static ${rty(f)} ${f.cname}(${sig(f)});`);
+  const bodies = gen.fns.map((f) => `static ${rty(f)} ${f.cname}(${sig(f)}) {\n${f.lines.join('\n')}\n}\n`);
   const prog = `/* ---- 编译期就知道的那几格常量 */
 ${gen.decls.join('\n')}
 
