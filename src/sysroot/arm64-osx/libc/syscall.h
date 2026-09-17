@@ -30,6 +30,8 @@
 #define SYS_kill            (SYS_CLASS_UNIX | 37)
 #define SYS_pipe            (SYS_CLASS_UNIX | 42)
 #define SYS_sigaction       (SYS_CLASS_UNIX | 46)
+#define SYS_sigprocmask     (SYS_CLASS_UNIX | 48)
+#define SYS_sigpending      (SYS_CLASS_UNIX | 52)
 #define SYS_ioctl           (SYS_CLASS_UNIX | 54)
 #define SYS_readlink        (SYS_CLASS_UNIX | 58)
 #define SYS_execve          (SYS_CLASS_UNIX | 59)

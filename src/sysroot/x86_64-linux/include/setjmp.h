@@ -11,9 +11,14 @@ struct __jmp_buf_tag {
   unsigned long int __saved_mask[16]; /* sigset_t = 128 bytes */
 };
 typedef struct __jmp_buf_tag jmp_buf[1];
+typedef struct __jmp_buf_tag sigjmp_buf[1];
 
 int setjmp(jmp_buf env);
 void longjmp(jmp_buf env, int val);
+/* `savemask` 非零时**真的存**掩码：旗子在偏移 168、掩码在 176（后端那条 `SETJMP`
+ * 只用头 64，所以那两格是空的 —— 见 `libc/misc.c` 里 `sigsetjmp` 那一段）。 */
+int sigsetjmp(sigjmp_buf env, int savemask);
+void siglongjmp(sigjmp_buf env, int val);
 
 #define _setjmp setjmp
 #define _longjmp longjmp

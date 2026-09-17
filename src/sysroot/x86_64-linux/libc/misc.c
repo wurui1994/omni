@@ -439,11 +439,56 @@ char *dlerror(void) { return (char *)0; }
  * `jmp_buf` 是 200 字节（glibc 的尺寸，见 `include/setjmp.h`），我们只用头 64。 */
 int setjmp(void *env) { return __omni_setjmp(env); }
 void longjmp(void *env, int val) { __omni_longjmp(env, val); }
-/* `sigsetjmp`/`siglongjmp`：信号掩码那一格我们不存（`sigaction` 是真的了，但
- * `rt_sigprocmask` 那一层还没有），所以与不带 sig 的那一对同一个实现 —— `savemask`
- * 忽略。**明说**：在处理函数里 `siglongjmp` 出来之后，被信号挡住的那个号仍然是挡着的。 */
-int sigsetjmp(void *env, int savemask) { (void)savemask; return __omni_setjmp(env); }
-void siglongjmp(void *env, int val) { __omni_longjmp(env, val); }
+/* `sigsetjmp`/`siglongjmp`：`savemask` 现在**真的存**（第十七格）。
+ *
+ * 存哪儿：`jmp_buf` 是 200 字节，`__omni_setjmp` 只用头 64 —— 所以旗子放在偏移 168、
+ * 掩码放在 176（两条腿都装得下：Linux 200、Darwin 192）。掩码只存头 64 位，因为
+ * 我们能装的号就在 1..64 里。
+ * 顺序要紧：`siglongjmp` **先把掩码换回来、再跳** —— 跳过去之后这一层的栈就没了。 */
+int sigsetjmp(void *env, int savemask) {
+  unsigned char *e = (unsigned char *)env;
+  *(long *)(e + 168) = savemask ? 1 : 0;
+  if (savemask) {
+    unsigned long cur = 0;
+    __omni_syscall(SYS_rt_sigprocmask, 0 /* SIG_BLOCK，set=0 只是问 */, 0, (long)&cur, 8);
+    *(unsigned long *)(e + 176) = cur;
+  }
+  return __omni_setjmp(env);
+}
+void siglongjmp(void *env, int val) {
+  unsigned char *e = (unsigned char *)env;
+  if (*(long *)(e + 168)) {
+    unsigned long m = *(unsigned long *)(e + 176);
+    __omni_syscall(SYS_rt_sigprocmask, 2 /* SIG_SETMASK */, (long)&m, 0, 8);
+  }
+  __omni_longjmp(env, val);
+}
+
+/* `sigprocmask(how, set, old)`：`how` 是 0=BLOCK / 1=UNBLOCK / 2=SETMASK（Linux 的号，
+ * 与 Darwin 的 1/2/3 **不一样** —— 各自那份头里定义）。内核那一层要 `sigsetsize=8`。 */
+int sigprocmask(int how, const void *set, void *old) {
+  unsigned long s = 0;
+  unsigned long o = 0;
+  if (set) s = *(const unsigned long *)set;
+  long r = __omni_syscall(SYS_rt_sigprocmask, how, set ? (long)&s : 0,
+                          old ? (long)&o : 0, 8);
+  if (r < 0 && r >= -4095) { __libc_errno_val = (int)-r; return -1; }
+  if (old) {
+    unsigned long *po = (unsigned long *)old;
+    for (int i = 0; i < 16; i++) po[i] = 0;
+    po[0] = o;
+  }
+  return 0;
+}
+int sigpending(void *set) {
+  unsigned long o = 0;
+  long r = __omni_syscall(127 /* rt_sigpending */, (long)&o, 8);
+  if (r < 0 && r >= -4095) { __libc_errno_val = (int)-r; return -1; }
+  unsigned long *po = (unsigned long *)set;
+  for (int i = 0; i < 16; i++) po[i] = 0;
+  po[0] = o;
+  return 0;
+}
 
 /* ---- 线程：**照约定回失败**，不崩。
  *

@@ -238,6 +238,14 @@
 #           arm64-osx（本机，`--libc self`）：162928 字节，12/12，与 Apple 的 libc
 #             **逐行相同**（14 行）
 #           x86_64-linux（容器，`--libc self`）：245509 字节，12/12，与 glibc 逐行相同
+#      p. 掩码那一层补齐（第十七格）：`sigprocmask`/`sigpending` 两条腿各走各的号，
+#         而 `how` 的**号本身两条腿不一样**（Linux 0/1/2、Darwin 1/2/3）—— 这一格
+#         摆在各自的 `<signal.h>` 里。`sigsetjmp` 的 `savemask` 于是从「收下就丢」
+#         变成真的存：旗子在 `jmp_buf` 偏移 168、掩码在 176（后端那条 SETJMP 用不到
+#         那两格），`siglongjmp` 先换掩码再跳。判据长到 18 格，两条腿都 18/18、
+#         与平台 libc 逐行相同（各 20 行）：
+#           arm64-osx（本机）：`node tests/c/libc-signal.js` 7 passed, 0 failed
+#           x86_64-linux（容器）：250765 字节，rc=0，`diff` 无输出
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

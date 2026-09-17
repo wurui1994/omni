@@ -460,10 +460,48 @@ char *dlerror(void) { return (char *)0; }
  * `jmp_buf` 在这条腿上是 192 字节（`include/setjmp.h` 量的），我们只用头 168。 */
 int setjmp(void *env) { return __omni_setjmp(env); }
 void longjmp(void *env, int val) { __omni_longjmp(env, val); }
-/* `sigsetjmp`/`siglongjmp`：信号掩码那一格我们没有（`sigaction` 都还回 ENOSYS），
- * 所以 `savemask` 收下就丢 —— 与 Linux 那一份同一个理由。 */
-int sigsetjmp(void *env, int savemask) { (void)savemask; return __omni_setjmp(env); }
-void siglongjmp(void *env, int val) { __omni_longjmp(env, val); }
+/* `sigsetjmp`/`siglongjmp`：`savemask` **真的存**（第十七格）。旗子放在 `jmp_buf` 的
+ * 偏移 168、掩码放 176 —— 后端那条 `SETJMP` 只用头 168，而这条腿的 `jmp_buf` 是 192，
+ * 装得下（Linux 那份 200，同一个摆法）。Darwin 的掩码是**一个 32 位字**。
+ * `siglongjmp` 先换掩码、再跳：跳过去之后这一层的栈就没了。 */
+int sigsetjmp(void *env, int savemask) {
+  unsigned char *e = (unsigned char *)env;
+  *(long *)(e + 168) = savemask ? 1 : 0;
+  if (savemask) {
+    unsigned int cur = 0;
+    __omni_syscall(SYS_sigprocmask, 1 /* SIG_BLOCK，set=0 只是问 */, 0, (long)&cur);
+    *(unsigned int *)(e + 176) = cur;
+  }
+  return __omni_setjmp(env);
+}
+void siglongjmp(void *env, int val) {
+  unsigned char *e = (unsigned char *)env;
+  if (*(long *)(e + 168)) {
+    unsigned int m = *(unsigned int *)(e + 176);
+    __omni_syscall(SYS_sigprocmask, 3 /* SIG_SETMASK（Darwin 的号是 1/2/3） */,
+                   (long)&m, 0);
+  }
+  __omni_longjmp(env, val);
+}
+
+/* `sigprocmask(how, set, old)`：`how` 在 Darwin 上是 **1=BLOCK / 2=UNBLOCK /
+ * 3=SETMASK**（Linux 是 0/1/2 —— 各自那份头里定义，这是「同名不同号」的一格）。 */
+int sigprocmask(int how, const void *set, void *old) {
+  unsigned int s = 0;
+  unsigned int o = 0;
+  if (set) s = *(const unsigned int *)set;
+  long r = __omni_syscall(SYS_sigprocmask, how, set ? (long)&s : 0, old ? (long)&o : 0);
+  if (r < 0 && r >= -4095) { __libc_errno_val = (int)-r; return -1; }
+  if (old) *(unsigned int *)old = o;
+  return 0;
+}
+int sigpending(void *set) {
+  unsigned int o = 0;
+  long r = __omni_syscall(SYS_sigpending, (long)&o);
+  if (r < 0 && r >= -4095) { __libc_errno_val = (int)-r; return -1; }
+  *(unsigned int *)set = o;
+  return 0;
+}
 
 /* ---- Darwin 的 `isnan` 一族（第一百四十片第八格）。
  *

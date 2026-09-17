@@ -11,6 +11,8 @@
  *   4. `SIG_IGN`：不跑处理函数，进程也不死
  *   5. old 那格拿得回来（装 h2 时回的是 h1）
  *   6. `sigemptyset`/`sigaddset`/`sigismember`/`sigdelset` 的位算术
+ * 掩码那几格（第十七格）：挡住的时候不来、`sigpending` 说它挂着、放开就补上（只补一次）、
+ * `sigsetjmp(env,1)` 存的掩码被 `siglongjmp` 换回来。
  *
  * `alarm` 那一格（真的定时器）单独在最后：设 1 秒，等到旗子起来或者 5 秒超时。
  *
@@ -28,10 +30,13 @@
 #include <unistd.h>
 #include <string.h>
 #include <time.h>
+#include <setjmp.h>
 
 static volatile int hits;
 static volatile int lastSig;
 static volatile int alarmHit;
+static volatile int jhop;
+static sigjmp_buf jenv;
 
 static void h1(int s) { hits++; lastSig = s; }
 static void h2(int s) { (void)s; hits += 100; }
@@ -108,6 +113,36 @@ int main(void) {
   time_t t0 = time(0);
   while (!alarmHit && time(0) - t0 < 5) { /* 等闹钟 */ }
   judge(alarmHit == 1, "alarm(1)：一秒后真的收到 SIGALRM");
+
+  /* ---- 掩码那一格（第十七格）：挡住的时候不来、挂着、放开就补上。 */
+  install(SIGUSR1, h1, 0);
+  sigset_t one;
+  sigset_t prev;
+  sigset_t pend;
+  sigemptyset(&one);
+  sigaddset(&one, SIGUSR1);
+  sigemptyset(&prev);
+  hits = 0;
+  judge(sigprocmask(SIG_BLOCK, &one, &prev) == 0, "sigprocmask(SIG_BLOCK) 装得上");
+  kill(me, SIGUSR1);
+  judge(hits == 0, "挡住的时候不进处理函数");
+  sigemptyset(&pend);
+  sigpending(&pend);
+  judge(sigismember(&pend, SIGUSR1) == 1, "sigpending 说那一发挂着");
+  judge(sigprocmask(SIG_SETMASK, &prev, 0) == 0, "掩码换回来");
+  judge(hits == 1, "放开之后挂着那一发补上了（只补一次）");
+
+  /* `sigsetjmp(env, 1)` 存的是**这一刻**的掩码；跳回来之后该按那一刻的算。 */
+  if (sigsetjmp(jenv, 1) == 0) {
+    sigprocmask(SIG_BLOCK, &one, 0);
+    jhop = 1;
+    siglongjmp(jenv, 5);
+  }
+  sigset_t now;
+  sigemptyset(&now);
+  sigprocmask(SIG_BLOCK, 0, &now);
+  judge(jhop == 1 && sigismember(&now, SIGUSR1) == 0,
+    "sigsetjmp(env,1) 存的掩码被 siglongjmp 换回来了");
 
   printf("%s\n", fails == 0 ? "all ok" : "有失败");
   return fails == 0 ? 0 : 1;

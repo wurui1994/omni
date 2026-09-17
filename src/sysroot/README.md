@@ -115,9 +115,19 @@ MIR 说「要什么」，摆法归后端。
 `sigemptyset`/`sigaddset`（原先回 0 什么都不做），外加 `sigfillset`/`sigdelset`/
 `sigismember`/`getpid`。`sigset_t` 两条腿不是一回事（Linux 16 个 64 位字、Darwin
 一个 32 位字，所以只有 1..32 号），这五格只能各写一份。
-判据 `tests/c/libc-signal.js` + `tests/x64/libc-signal-probe.c`（自己判自己 12 格）：
-两条腿都 12/12，与平台 libc **逐行相同**（各 14 行）。
+判据 `tests/c/libc-signal.js` + `tests/x64/libc-signal-probe.c`（自己判自己 18 格）：
+两条腿都 18/18，与平台 libc **逐行相同**（各 20 行）。
 `SA_SIGINFO` 故意不给：那要三参数的处理函数，我们那一层只翻译一参数的。
+
+**掩码那一层也补齐了（第十七格）**：`sigprocmask`/`sigpending` 各走各的号
+（Linux `rt_sigprocmask(14)`/`rt_sigpending(127)`、Darwin `sigprocmask(48)`/
+`sigpending(52)`），而 `how` 的**号两条腿不一样** —— Linux 是 0/1/2、Darwin 是 1/2/3
+（各自那份 `<signal.h>` 里定义，这是「同名不同号」的典型一格）。
+于是 `sigsetjmp(env, savemask)` 的 `savemask` 从「收下就丢」变成**真的存**：旗子放
+`jmp_buf` 偏移 168、掩码放 176（后端那条 `SETJMP` 在 Linux 上只用头 64、arm64 上用头
+168，而 `jmp_buf` 是 200/192 字节，那两格是空的）；`siglongjmp` **先换掩码再跳**，
+因为跳过去之后这一层的栈就没了。判据里那四格量的正是「挡住的时候不来、`sigpending`
+说它挂着、放开就补上（只补一次）、跳回来之后掩码是 `sigsetjmp` 那一刻的」。
 
 ## 浮点打印：与平台 libc **一行不差**（第一百四十片第九格）
 

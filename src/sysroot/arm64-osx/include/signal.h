@@ -35,5 +35,12 @@ int sigfillset(sigset_t *set);
 int sigaddset(sigset_t *set, int sig);
 int sigdelset(sigset_t *set, int sig);
 int sigismember(const sigset_t *set, int sig);
+int sigprocmask(int how, const sigset_t *set, sigset_t *old);
+int sigpending(sigset_t *set);
+
+/* **号与 Linux 不一样**（那边是 0/1/2）—— 同名不同号的一格。 */
+#define SIG_BLOCK   1
+#define SIG_UNBLOCK 2
+#define SIG_SETMASK 3
 
 #endif
