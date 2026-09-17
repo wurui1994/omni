@@ -188,7 +188,7 @@ function shrinkOf(graph, argv) {
 /**
  * 各层的账（第一百四十七片第五格）：**与 omni 那台机器同一把尺子**（`cli/layers.js`）。
  *
- * 图这一层的节点表（上面 `statOf` 那张）说的是「图定义的那 27 格节点」；这一张说的是
+ * 图这一层的节点表（上面 `statOf` 那张）说的是「图定义的那几格节点」；这一张说的是
  * 「源码 -> 图 -> 目标文本」每层多少、比源码大几倍。两张要分开看：一张是形状，一张是胀。
  */
 function statLayersGraph(path, s, textLen, argv) {
