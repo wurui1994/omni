@@ -77,7 +77,10 @@ const SUITES = [
   // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
   { s: 'grammar/delete.js' },
   { s: 'incr/run.js' }, { s: 'c/run.js' }, { s: 'c/ldscript.js' }, { s: 'c/syscall.js' },
-  { s: 'c/libc-malloc.js' },
+  // 自带 libc 的四条判据（第一百四十片）。后三条要 arm64 macOS（本机自己编、自己链、
+  // 自己跑，还要 codesign），别的机器上它们自己跳过 —— 不是靠这儿挑。
+  { s: 'c/libc-malloc.js' }, { s: 'c/libc-self.js' },
+  { s: 'c/libc-float.js' }, { s: 'c/libc-strtod.js' }, { s: 'c/libc-libm.js' },
   { s: 'llvm/run.js', group: 'jit' }, { s: 'sexpr/run.js' }, { s: 'asy/run.js' },
   { s: 'jnc/run.js' }, { s: 'jit/run.js', group: 'jit' },
   { s: 'gpu/run.js' },
