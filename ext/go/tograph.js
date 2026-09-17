@@ -286,8 +286,13 @@ function toNode(x) {
   }
 }
 
-/** 一棵 go 的 GLR 树（`(file 包名 顶层项…)`）-> 一张图。末尾补一格 `call main`。 */
-export function goToGraph(tree) {
+/**
+ * 一棵 go 的 GLR 树（`(file 包名 顶层项…)`）-> 一张图。末尾补一格 `call main`。
+ *
+ * `opts.asModule` = 这一份是**被 import 进来的**（第一百五十一片第二格）：那时**不补**
+ * 那一格 `call main` —— 被导入的那份文件里若也有个 `main`，补了就会跑两次。
+ */
+export function goToGraph(tree, opts) {
   if (tag(tree) !== 'file') throw new Error('go->graph: 这不是 (file …)');
   // **先扫一遍哪些名字装 map**：`m := map[K]V{…}` 在树上自带标记，所以这一趟就够了
   // —— `m[k]` 与 `xs[i]` 同形那笔账，在 go 上不需要驱动器回问类型。
@@ -300,7 +305,34 @@ export function goToGraph(tree) {
   collectDecls(tree);
   const items = kids(tree).slice(1);          // 第一格是包名
   const body = items.map(toNode).flat();
+  if (opts !== undefined && opts.asModule === true) return program(body);
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
+}
+
+/**
+ * 这份文件 `import` 了哪几格（第一百五十一片第二格）。回一串 specifier 的原文。
+ *
+ * 树上的形状是 `(import (path "fmt"))` —— 一句 `import (…)` 里几格就是几格实参。
+ * **这一格知识归这门语言**：驱动那一层只问"你 import 了什么"，不认识 go 的树。
+ */
+export function goImports(tree) {
+  const out = [];
+  const walk = (x) => {
+    if (!isList(x)) return;
+    if (tag(x) === 'import') {
+      /* `kids()` 不含标签（`fromtree.js:34`），所以这儿直接遍历它。 */
+      for (const it of kids(x)) {
+        if (isList(it) && tag(it) === 'path') {
+          const s = kids(it)[0];
+          if (s !== undefined && s.kind === 'string') out.push(s.value);
+        }
+      }
+      return;
+    }
+    for (const k of kids(x)) walk(k);
+  };
+  walk(tree);
+  return out;
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------

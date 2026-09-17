@@ -32,8 +32,9 @@ import { loadGrammarTable } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
-import { readText, writeText, writeBinary, stdout, stderr } from '../host/native.js';
+import { readText, writeText, writeBinary, stdout, stderr, exists } from '../host/native.js';
 import { backends, Gap } from './contract.js';
+import { program } from './graph.js';
 import {
   graphStat, graphStatTable, graphStatJson, graphStatDot, graphStatDiff, graphStatDiffTable,
 } from './stat.js';
@@ -68,14 +69,59 @@ function graphOf(path, argv) {
   const lang = pickLang(path, cliArg(argv, '--lang'));
   const grammarPath = `${treeRoot()}/${lang.grammar}`;
   const { tb, g } = loadGrammarTable(grammarPath);
-  const src = readText(path);
   const diags = new Diagnostics();
-  const toks = lexText(g.lex, new SourceFile(path, src), diags);
-  if (toks === null || diags.hasErrors()) { stderr(diags.format()); return { code: 1 }; }
-  const tree = glrParse(tb, toks, diags);
+  /** 一份源文件 -> 一棵树（语法说不通就回 null，诊断已经记在 diags 上）。 */
+  const treeOf = (p) => {
+    const toks = lexText(g.lex, new SourceFile(p, readText(p)), diags);
+    if (toks === null || diags.hasErrors()) return null;
+    return glrParse(tb, toks, diags);
+  };
+  const tree = treeOf(path);
   if (tree === null || diags.hasErrors()) { stderr(diags.format()); return { code: 1 }; }
+  /**
+   * **同目录下的同语言文件真的读进来**（第一百五十一片第二格）。
+   *
+   * 规则只有一条，而且刻意不搜索（与 ADR-0009 那套模块路径同一条纪律）：
+   * `import x` 里那个 `x`（去掉 `./`）拼上这门语言的后缀，**就在导入方旁边**找；
+   * 找着就读，找不着就照旧当"标准库那一格"交给映射（`import tables` / `import "fmt"`
+   * 就是这么被丢掉的 —— 那几格由节点与内建接住）。所以这一格不会改变任何现有例子。
+   *
+   * 被导入的那份走 `asModule: true`：go / v 要夹掉末尾那格 `call main`，
+   * 不然被导入的 `main` 也会跑一遍。环靠 `seen` 挡（读过的不再读，不报错 ——
+   * nim 与 go 里 A 引 B、B 引 A 都是合法的）。
+   */
+  const seen = new Set([path]);
+  const mods = [];
+  const dirOf = (p) => (p.lastIndexOf('/') >= 0 ? p.slice(0, p.lastIndexOf('/')) : '.');
+  const load = (p, t) => {
+    if (lang.imports === undefined) return true;
+    for (const spec of lang.imports(t)) {
+      const rel = spec.startsWith('./') ? spec.slice(2) : spec;
+      let hit = null;
+      for (const e of lang.exts) {
+        const cand = `${dirOf(p)}/${rel}.${e}`;
+        if (exists(cand)) { hit = cand; break; }
+      }
+      if (hit === null || seen.has(hit)) continue;   // 标准库那一格 / 已经读过
+      seen.add(hit);
+      const sub = treeOf(hit);
+      if (sub === null || diags.hasErrors()) return false;
+      if (!load(hit, sub)) return false;            // 它自己的 import 先读（依赖在前）
+      mods.push({ path: hit, tree: sub });
+    }
+    return true;
+  };
+  if (!load(path, tree)) { stderr(diags.format()); return { code: 1 }; }
   try {
-    return { lang, graph: lang.toGraph(tree) };
+    const main = lang.toGraph(tree);
+    if (mods.length === 0) return { lang, graph: main };
+    /* 拼一张图：**被导入的在前**（那些是声明，`ref` 要看得见它们），主文件在后。 */
+    const body = [];
+    for (const m of mods) body.push(...lang.toGraph(m.tree, { asModule: true }).body);
+    body.push(...main.body);
+    stderr(`omni: ${mods.length} 份 import 进来的同语言文件：`
+      + `${mods.map((m) => m.path).join(' ')}\n`);
+    return { lang, graph: program(body) };
   } catch (err) {
     throw new OmniError(`${path}: ${lang.name} 的映射说不通 —— ${err.message}`);
   }

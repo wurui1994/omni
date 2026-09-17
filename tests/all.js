@@ -71,6 +71,9 @@ const SUITES = [
      node 直接跑，而且与本进程那条腿逐行相同。那条比对同时钉住"钩子的文本版
      （graph/js_rt.js）不许与 eval.js 分叉"。 */
   { s: 'graph/js-artifact.js' },
+  /* 同目录下的同语言文件真的 import 进来（借用第一档的第一步）：三门语言 × 两条腿，
+     加"环不许挂死"与"标准库那一格照旧交给映射"。 */
+  { s: 'graph/modules.js' },
   { s: 'oracle/run.js' },
   { s: 'oir/run.js' },
   { s: 'cabi/run.js' }, { s: 'wat/run.js' }, { s: 'glr/run.js' }, { s: 'mir/run.js' },

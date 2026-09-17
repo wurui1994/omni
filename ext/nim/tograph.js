@@ -299,8 +299,14 @@ function toNode(x) {
   }
 }
 
-/** 一棵 nim 的 GLR 树（`(module 项…)`）-> 一张图。 */
-export function nimToGraph(tree) {
+/**
+ * 一棵 nim 的 GLR 树（`(module 项…)`）-> 一张图。
+ *
+ * `opts` 收下但不用：nim 的顶层代码**本来就该跑**（import 一份 nim 模块会跑它的顶层），
+ * 所以"被导入的那份"与"主文件"在这门语言里没有区别 —— go / v 那两门要夹掉末尾那格
+ * `call main`，这门不用。
+ */
+export function nimToGraph(tree, opts) {
   if (tag(tree) !== 'module') throw new Error('nim->graph: 这不是 (module …)');
   // 先扫一遍哪些名字装 Table（`initTable[K, V]()` 那种造法在树上认得出）
   MAPS.clear();
@@ -311,6 +317,33 @@ export function nimToGraph(tree) {
   PARAMS.clear();
   collectDecls(tree);
   return program(kids(tree).map(toNode).flat());
+}
+
+/**
+ * 这份文件 `import` / `include` 了哪几格（第一百五十一片第二格）。
+ * 树上是 `(import (name tables) …)`；`import a/b` 那种带斜杠的路径拼回原文。
+ */
+export function nimImports(tree) {
+  const out = [];
+  const text = (x) => {
+    if (!isList(x)) return leaf(x) ?? '';
+    /* `kids()` **本来就不含标签**（`fromtree.js:34` 是 `items.slice(1)`）——
+     * 所以这儿不能再 slice 一次。踩过：那样 `(name util)` 拼出来是空串。 */
+    return kids(x).map(text).filter((s) => s !== '').join('/');
+  };
+  const walk = (x) => {
+    if (!isList(x)) return;
+    if (tag(x) === 'import' || tag(x) === 'include') {
+      for (const it of kids(x)) {
+        const spec = text(it);
+        if (spec !== '') out.push(spec);
+      }
+      return;
+    }
+    for (const k of kids(x)) walk(k);
+  };
+  walk(tree);
+  return out;
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------

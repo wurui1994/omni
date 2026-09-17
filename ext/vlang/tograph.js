@@ -234,8 +234,11 @@ function toNode(x) {
   }
 }
 
-/** 一棵 V 的 GLR 树（`(file 顶层项…)`）-> 一张图。末尾补一格 `call main`（同 go）。 */
-export function vlangToGraph(tree) {
+/**
+ * 一棵 V 的 GLR 树（`(file 顶层项…)`）-> 一张图。末尾补一格 `call main`（同 go）。
+ * `opts.asModule` = 被 import 进来的那份：**不补**那一格（不然被导入的 `main` 也会跑）。
+ */
+export function vlangToGraph(tree, opts) {
   if (tag(tree) !== 'file') throw new Error('v->graph: 这不是 (file …)');
   // 先扫一遍哪些名字装 map（`m := map[K]V{…}` 自带标记）—— 与 go 那一份同一条办法
   MAPS.clear();
@@ -244,7 +247,32 @@ export function vlangToGraph(tree) {
   METHODS.clear();
   collectMethods(tree);
   const body = kids(tree).map(toNode).flat();
+  if (opts !== undefined && opts.asModule === true) return program(body);
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
+}
+
+/**
+ * 这份文件 `import` 了哪几格（第一百五十一片第二格）。树上是 `(import <mod-path> [(as 名)])`；
+ * mod-path 可能是一格名字、也可能点分几格 —— 一律拼回原文（`a.b` 那种）。
+ */
+export function vlangImports(tree) {
+  const out = [];
+  const text = (x) => {
+    if (!isList(x)) return leaf(x) ?? '';
+    /* `kids()` 不含标签（`fromtree.js:34`）—— 别再 slice 一次。 */
+    return kids(x).map(text).filter((s) => s !== '').join('.');
+  };
+  const walk = (x) => {
+    if (!isList(x)) return;
+    if (tag(x) === 'import') {
+      const spec = text(kids(x)[0]);
+      if (spec !== '') out.push(spec);
+      return;
+    }
+    for (const k of kids(x)) walk(k);
+  };
+  walk(tree);
+  return out;
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------

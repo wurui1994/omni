@@ -26,13 +26,13 @@ import { installDir } from '../host/native.js';
 import { chezToGraph } from '../../../ext/chez/tograph.js';
 import { luaToGraph } from '../../../ext/lua/tograph.js';
 import { gslShellToGraph } from '../../../ext/gsl-shell/tograph.js';
-import { goToGraph } from '../../../ext/go/tograph.js';
+import { goToGraph, goImports } from '../../../ext/go/tograph.js';
 import { sbclToGraph } from '../../../ext/sbcl/tograph.js';
-import { vlangToGraph } from '../../../ext/vlang/tograph.js';
+import { vlangToGraph, vlangImports } from '../../../ext/vlang/tograph.js';
 import { awkToGraph } from '../../../ext/awk/tograph.js';
 import { fbToGraph } from '../../../ext/freebasic/tograph.js';
 import { mojoToGraph } from '../../../ext/mojo/tograph.js';
-import { nimToGraph } from '../../../ext/nim/tograph.js';
+import { nimToGraph, nimImports } from '../../../ext/nim/tograph.js';
 import { cppToGraph } from '../../../ext/cpp/tograph.js';
 
 /**
@@ -70,12 +70,20 @@ export const LANGS = new Map([
     grammar: 'ext/gsl-shell/gsl-shell.grammar', toGraph: gslShellToGraph,
     exts: ['lua'], guess: false, extends: 'lua',
   }],
-  ['go', { grammar: 'ext/go/go.grammar', toGraph: goToGraph, exts: ['go'] }],
-  ['vlang', { grammar: 'ext/vlang/vlang.grammar', toGraph: vlangToGraph, exts: ['v'] }],
+  /* `imports` 是**可选**的一格（第一百五十一片第二格）：这门语言答"这份文件 import 了什么"。
+     给了它，驱动那一层就能把**同目录下的同语言文件**真的读进来（`run.js` 的 `graphOf`）；
+     不给就是老样子（import 那一行由映射自己丢掉 —— 标准库那几格靠映射接）。
+     知识按语言分：驱动不认识 go 的 `(import (path "…"))` 与 nim 的 `(import (name …))`。 */
+  ['go', { grammar: 'ext/go/go.grammar', toGraph: goToGraph, imports: goImports, exts: ['go'] }],
+  ['vlang', {
+    grammar: 'ext/vlang/vlang.grammar', toGraph: vlangToGraph, imports: vlangImports, exts: ['v'],
+  }],
   ['awk', { grammar: 'ext/awk/awk.grammar', toGraph: awkToGraph, exts: ['awk'] }],
   ['freebasic', { grammar: 'ext/freebasic/freebasic.grammar', toGraph: fbToGraph, exts: ['bas', 'bi'] }],
   ['mojo', { grammar: 'ext/mojo/mojo.grammar', toGraph: mojoToGraph, exts: ['mojo'] }],
-  ['nim', { grammar: 'ext/nim/nim.grammar', toGraph: nimToGraph, exts: ['nim'] }],
+  ['nim', {
+    grammar: 'ext/nim/nim.grammar', toGraph: nimToGraph, imports: nimImports, exts: ['nim'],
+  }],
   ['cpp', { grammar: 'ext/cpp/cpp.grammar', toGraph: cppToGraph, exts: ['cpp', 'cc', 'cxx', 'hpp'] }],
 ]);
 
