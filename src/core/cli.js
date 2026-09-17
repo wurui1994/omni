@@ -3775,22 +3775,31 @@ function main(argv) {
      */
     const isCpu = path.endsWith('.cpuprofile');
     const isHeap = path.endsWith('.heapprofile');
-    const folded = isCpu ? cpuProfileToFolded(readText(path))
-      : (isHeap ? heapProfileToFolded(readText(path)) : readText(path));
+    /**
+     * **一份账 -> 折叠栈**（按后缀认）。基线那一份也要过这儿 —— 量到过漏这一步的后果：
+     * `--diff 基线.heapprofile` 把基线当折叠栈读，一行都解析不出来，表上印
+     * 「合计 0.0 -> 11893.0」，看着像"这一刀把所有分配都新造出来了"。假话比没有更坏。
+     */
+    const foldedOf = (p) => {
+      if (p.endsWith('.cpuprofile')) return cpuProfileToFolded(readText(p));
+      if (p.endsWith('.heapprofile')) return heapProfileToFolded(readText(p));
+      return readText(p);
+    };
+    const folded = foldedOf(path);
     const lines = folded.split('\n').filter((l) => l.trim() !== '');
     if (lines.length === 0) throw new OmniError(`flame: ${path} 里一条栈都没有`);
     const ui = rest.indexOf('--unit');
     const dflt = isCpu ? 'us' : (isHeap ? 'bytes' : 'frames');
     const unit = ui >= 0 ? rest[ui + 1] : dflt;
-    /* `--diff 基线.folded`：**两份对照**（优化循环里最有用的一张）—— 这一趟是"新"，
+    /* `--diff 基线`：**两份对照**（优化循环里最有用的一张）—— 这一趟是"新"，
      * 给的那份是"基线"。只印表，不出图：图是给一份看的，对照要的是数。 */
     const di = rest.indexOf('--diff');
     if (di >= 0) {
       const base = rest[di + 1];
-      if (base === undefined) throw new OmniError('flame --diff 要一份基线折叠栈');
+      if (base === undefined) throw new OmniError('flame --diff 要一份基线（折叠栈或 profile）');
       if (!exists(base)) throw new OmniError(`flame --diff: 找不到 ${base}`);
       stderr(`\nomni prof 对照（基线 ${base} -> 新 ${path}）\n`);
-      stderr(foldedDiff(readText(base), folded, '', 20, unit));
+      stderr(foldedDiff(foldedOf(base), folded, '', 20, unit));
       return 0;
     }
     /* `--table`：把那五张读法印出来（产物自己写下来的折叠栈也该看得见热路径）。 */

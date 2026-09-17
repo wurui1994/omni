@@ -680,17 +680,33 @@ export function evalCaptured(code) {
  * 取出那 138 个 $js_* 当实现。于是"解释执行"和"编译成 JS 再执行"用的是同一份代码，
  * 一个字符都不会分叉 —— 决策 5 的做法在这里是最省的：省掉 138 份手抄的包装。
  */
-const JS_OPS = (() => {
+/**
+ * **这张表按需才建**（第一百四十九片）：建它要把整份 `JS_PRELUDE`（265KB）过一遍
+ * `new Function` —— V8 得解析那 7400 行，还要造出 138 个闭包。而它的用户只有一个：
+ * 解释器那条路（`callJsOp`）。`emit` / `build` / `run` 那几趟一次都不会问它。
+ *
+ * 量到的账（`node --heap-prof --heap-prof-interval 1024 src/cli.js emit c src/cli.js`）：
+ * 这一格自用 **720.2 KB = 那趟分配的 5.75%**，在我们自己的代码里排第一（前两名是 node
+ * 加载 200 多份 ESM 的 `decode` 与 `compileSourceTextModule`）。改成懒建之后，
+ * 不走解释器的那些趟一个字节都不花。
+ *
+ * 懒建的形状是「一格 null + 第一次用时填」—— 不是 `Map` 也不是 getter：这份文件在
+ * 封闭 ABI 里（ADR-0011），getter 与 `Proxy` 那些花样不在自举那条腿的子集里。
+ */
+let JS_OPS = null;
+function jsOps() {
+  if (JS_OPS !== null) return JS_OPS;
   const entries = Object.entries(JS_ABI).filter(([, a]) => a.js !== '$js_call_op');
   // 按 **op 名字** 建表（不是 $ 前缀的实现名）：调用点手里拿的是 op 名字，每次调用再拼一次
   // `$${name}` 是白花的字符串拼接 —— 这条路每个 JS op 都要过。
   const pick = entries.map(([n, a]) => `${JSON.stringify(n)}: typeof ${a.js} === 'function' ? ${a.js} : null`);
   // eslint-disable-next-line no-new-func
-  return new Function(`${JS_PRELUDE}\nreturn {${pick.join(',')}};`)();
-})();
+  JS_OPS = new Function(`${JS_PRELUDE}\nreturn {${pick.join(',')}};`)();
+  return JS_OPS;
+}
 
 export function callJsOp(name, args) {
-  const f = JS_OPS[name];
+  const f = jsOps()[name];
   if (!f) throw new Error(`no such op: ${name}`);
   return f(...args);
 }

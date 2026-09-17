@@ -469,5 +469,29 @@ const FIB_CALLS = '635621';
   } else bad('flame 该认 .heapprofile', `rc=${r.status} ${s.slice(0, 400)}`);
 }
 
+{
+  /* **基线那一份也要按后缀转**：量到过漏这一步的后果 —— `--diff 基线.heapprofile`
+   * 把基线当折叠栈读，一行都解析不出来，表上印「合计 0.0 -> …」，看着像"这一刀把所有
+   * 分配都新造出来了"。假话比没有更坏，所以这一格钉住「基线的合计不是 0」。 */
+  const a = join(WORK, 'base.heapprofile');
+  const b = join(WORK, 'new.heapprofile');
+  const mk = (w) => JSON.stringify({
+    head: {
+      callFrame: { functionName: '(root)' },
+      selfSize: 0,
+      children: [{ callFrame: { functionName: 'alloc' }, selfSize: w, children: [] }],
+    },
+    samples: [],
+  });
+  writeFileSync(a, mk(4096));
+  writeFileSync(b, mk(1024));
+  const r = omni(['flame', b, '--diff', a]);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  /* 4.0KB -> 1.0KB：合计那一行两头都要有数，Δ自用 -3.0。 */
+  if (r.status === 0 && s.includes('4.0 -> 1.0') && s.includes('-3.0')) {
+    ok('flame --diff：基线也按后缀转（4.0KB -> 1.0KB，不是 0 -> …）');
+  } else bad('基线该按后缀转', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);
