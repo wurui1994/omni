@@ -234,10 +234,15 @@ function toNode(x) {
         lang: 'lua', and: ['and'], or: ['or'], keepValue: true,
       });
     }
-    case 'un': {
-      const [opTok, a] = kids(x);
-      return un(atomText(opTok) === 'not' ? 'not' : atomText(opTok), toNode(a));
-    }
+    // 一元那四格：lua 的语法给它们**各自一条产生式**（`(neg …)` / `(not …)` / `(len …)` /
+    // `(bnot …)`），不是一格带算符的 `un`。原来这儿写的 `case 'un'` 是**死代码** ——
+    // 于是 `-x` / `not x` / `#xs` 一格都落不成图，而例子里正好没有它们。
+    // `tests/graph/deadcase.js` 量出来的。
+    case 'neg': return un('-', toNode(kids(x)[0]));
+    case 'not': return un('not', toNode(kids(x)[0]));
+    case 'len': return un('len', toNode(kids(x)[0]));
+    case 'bnot':
+      throw new Error('lua->graph: 按位取反（`~x`）图上没有那格内建 —— 位运算不在这一批');
 
     // ---- 语句 --------------------------------------------------------------
     case 'block': return node('region', { body: many(kids(x)) });

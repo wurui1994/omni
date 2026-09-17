@@ -34,11 +34,14 @@ import { refDirIf } from '../tests/lib/refsrc.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 const argv = process.argv.slice(2);
-const only = argv.filter((a) => !a.startsWith('-'));
 const numArg = (name, dflt) => {
   const i = argv.indexOf(name);
   return i < 0 ? dflt : Number(argv[i + 1]);
 };
+/* **带值的开关后面那一格不是语言名**：`--walls 8` 里的 `8` 原来被当成语言过滤器，
+   于是 `node bench/tograph.js --walls 8` 报"一门都没量到"。 */
+const VALUED = new Set(['--limit', '--walls']);
+const only = argv.filter((a, i) => !a.startsWith('-') && !VALUED.has(argv[i - 1]));
 const LIMIT = numArg('--limit', 0);
 const WALLS = numArg('--walls', 8);
 

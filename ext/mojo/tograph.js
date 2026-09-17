@@ -316,7 +316,19 @@ function toNode(x) {
         body: [...pre, ...(body === undefined ? [] : many(kids(body)))],
       });
     }
-    case 'import': case 'from-import': case 'trait': case 'alias': return [];
+    // `import` / `from … import …` / `trait` 在这一批里没有对应物 —— 丢掉，不猜。
+    // 树上的标签是 `from` 不是 `from-import` —— 原来那一格是**死代码**（deadcase.js 量的）。
+    case 'import': case 'from': case 'trait': return [];
+    // `comptime X = e`（旧写法 `alias X = e`）-> **一格 bind**。树上是
+    // `(const (n X) … (init e))` —— 原来写的 `case 'alias'` 也是死代码。
+    // **只带类型不带初值**的那一路（`comptime X: T`）是编译期的类型别名：类型不进图，丢掉。
+    case 'const': {
+      const nm = part(x, 'n');
+      const ini = part(x, 'init');
+      if (nm === undefined) throw new Error('mojo->graph: comptime 声明里没有名字');
+      if (ini === undefined) return [];
+      return node('bind', { init: toNode(kids(ini)[0]) }, { name: leaf(kids(nm)[0]) });
+    }
     default:
       throw new Error(`mojo->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
   }

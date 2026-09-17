@@ -255,7 +255,8 @@ function toNode(x) {
     // ---- 叶子与名字 --------------------------------------------------------
     case 'num': return node('const', {}, { value: Number(leaf(kids(x)[0])) });
     case 'str': return node('const', {}, { value: strVal(x) });
-    case 'n': case 'name': return node('ref', {}, { name: nameOf(x) });
+    // 树上只有 `(n …)` 这一格（`case 'name'` 原来跟在后面，是**死代码** —— deadcase.js 量的）
+    case 'n': return node('ref', {}, { name: nameOf(x) });
     // `this` —— 析构体提成顶层函数之后，它就是那一格形参的名字（见 dtorFuncs）
     case 'this': return node('ref', {}, { name: 'this' });
     // `(int)x` 与 `static_cast<int>(x)` —— **两种写法一格 conv 节点**（目标是附属）。

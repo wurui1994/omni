@@ -71,6 +71,13 @@ export const MUT = ['1', '3'];
  */
 export const VARDECL = ['15', '1', '3', '6', '5', '2'];
 /**
+ * unary：**一元那三格**（lua 与 awk）—— `prim -`（一个实参就是取负）· `prim not` ·
+ * `prim len`。这一族是 `tests/graph/deadcase.js` 找出来的：两份映射里那格 `case 'un'`
+ * 是死代码（两门的语法给一元算子各自一条产生式），于是 `-x` / `not x` 一格都落不成图。
+ * 第三行两门写法不同、节点相同：lua 写 `#s`、awk 写 `length(s)`。
+ */
+export const UNARY = ['-5', '1', '3'];
+/**
  * decls：**顶层那几格声明与修饰**（V 独一份）—— `pub` 与 `@[inline]` 拆一层（不产生代码）、
  * `const` 落一串 bind（V 没有 go 那两条规矩）、`type X = …` 与 `interface` 整格丢掉、
  * `true` 是自己一条产生式而不是名字。
@@ -182,6 +189,10 @@ export const CASES = [
   // 只有这门语言说得清（`pub` / `@[…]` 不产生代码 -> 拆；类型的声明 -> 丢；`const` -> bind），
   // 而落到的节点一格新的都没有。
   ...fam('decls', DECLS, ['vlang']),
+  // 第二十四个家族：**一元算子**（lua + awk）。这一族的来历与别的都不同 ——
+  // 它是**另一格判据**（`tests/graph/deadcase.js`）算出来的：那两门的 `case 'un'` 接的
+  // 标签语法出不来，所以 `-x` / `not x` / `#s` 从来没落成过图。有了这一族才押得住。
+  ...fam('unary', UNARY, ['lua', 'awk']),
 ];
 
 /**

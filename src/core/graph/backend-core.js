@@ -289,7 +289,15 @@ function expr(x, env, ctx) {
       const nm = x.attrs.name;
       if (!PRIMS_OK.has(nm)) gap(`内建 ${nm}`);
       const args = argList(x, 'args');
-      if (nm === 'not') return `(not ${expr(args[0], env, ctx)})`;
+      /* 方言里的逻辑非是 **`(un "!" …)`**，不是 `(not …)`（`sexpr/lower.js:2894`）——
+         原来这儿发的那个词方言不认，而例子里正好没有 `not`，所以从没露出来。
+         `tests/graph/deadcase.js` 把 lua / awk 那两格一元算子接上之后才撞出来。
+         方言的 `!` 要求实参是 bool；推不出 bool 就报缺口，不硬发一句编不过的话。 */
+      if (nm === 'not') {
+        const at = typeOf(args[0], env, ctx);
+        if (at !== null && at !== 'bool') gap(`\`not\` 的实参推成了 ${at}（方言的 ! 要 bool）`);
+        return `(un "!" ${expr(args[0], env, ctx)})`;
+      }
       if (nm === 'len') return lenText(args[0], env, ctx);
       if (nm === 'print') gap('print 出现在表达式位置上');
       if (nm === 'concat') return concatText(args, env, ctx);

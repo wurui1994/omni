@@ -94,10 +94,10 @@ function toNode(x) {
       return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'awk' });
     }
     case 'cat': return node('prim', { args: many(kids(x)) }, { name: 'concat' });
-    case 'un': {
-      const [op, a] = kids(x);
-      return un(leaf(op) === '!' ? 'not' : leaf(op), toNode(a));
-    }
+    // 一元那两格：awk 的语法也给它们各自一条产生式（`(neg …)` / `(not …)`）。
+    // 与 lua 那一份同一个错：原来写的 `case 'un'` 是**死代码**（deadcase.js 量出来的）。
+    case 'neg': return un('-', toNode(kids(x)[0]));
+    case 'not': return un('not', toNode(kids(x)[0]));
     case 'assign': {
       const [op, target, value] = kids(x);
       // 左边带下标 ⇒ map-set（awk 的数组就是关联数组）。`+=` 一族的左值也可以带下标，
@@ -157,6 +157,11 @@ function toNode(x) {
       const fn = leaf(kids(x)[0]);
       const args = kids(x).find((y) => tag(y) === 'args');
       const argNodes = args === undefined ? [] : many(kids(args));
+      // `length(s)` 是 POSIX 的内建，落 `prim len` —— 与 lua 的 `#s` **同一格节点**
+      // （写法归语言）。别的内建还没接：它们在树上与用户函数同形，靠的正是这张名字表。
+      if (fn === 'length' && argNodes.length === 1) {
+        return node('prim', { args: argNodes }, { name: 'len' });
+      }
       return node('call', { fn: node('ref', {}, { name: fn }), args: argNodes });
     }
     case 'fn': {
