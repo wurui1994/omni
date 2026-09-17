@@ -41,7 +41,10 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   'region', 'ret', 'func', 'call',
   /* 记录与列表两族（第二刀）：方言里本来就有 `(struct …)`/`(fld …)` 与 `(arr T)`/`(aget …)`，
      所以这两族不必动方言，只是**把类型算出来**（图上没有类型，见文件头）。 */
-  'record-new', 'field-get', 'field-set', 'list-new', 'index-get', 'index-set']);
+  'record-new', 'field-get', 'field-set', 'list-new', 'index-get', 'index-set',
+  /* 表示转换：方言里是 `(toreal …)`/`(toint …)`/`(tostr …)` 三格 —— 图上那一格的 `to`
+     说了要哪一侧，源那一侧得我们自己算（`typeOf`）。 */
+  'conv']);
 
 /** 这一刀接得住的内建（`prims.js` 里 16 格中的 15 格；只有多实参 print 还欠着）。 */
 const PRIMS_OK = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
@@ -99,7 +102,17 @@ function typeOf(x, env, ctx) {
   if (x.op === 'branch') return typeOf(x.ins.then, env, ctx);
   if (x.op === 'field-get') return fieldType(x, env, ctx);
   if (x.op === 'index-get') return elemType(typeOf(x.ins.obj, env, ctx)) ?? 'int';
+  if (x.op === 'conv') return convTo(x);
   return 'int';
+}
+
+/** 一格 `conv` 的目标在方言里是哪个类型。不认的那一格当场报。 */
+function convTo(x) {
+  const to = x.attrs.to;
+  if (to === 'int') return 'int';
+  if (to === 'float') return 'real';
+  if (to === 'str') return 'string';
+  return gap(`这格表示转换还没接：to=${to}`);
 }
 
 /** `(arr T)` 的元素类型。不是数组回 null。 */
@@ -154,14 +167,13 @@ function expr(x, env, ctx) {
       if (nm === 'concat') return concatText(args, env, ctx);
       /* 一格实参的 `-` 是**取负**（方言里那是另一个形状：`(un "-" …)`）。 */
       if (nm === '-' && args.length === 1) return `(un "-" ${expr(args[0], env, ctx)})`;
-      /* `+` / `*` 收好几格是**结合律那一族**（sbcl 的 `(+ a b c)`）—— 往左折，
-         方言里就是嵌起来的两元运算。别的算符收不齐两格才报。 */
-      if ((nm === '+' || nm === '*') && args.length > 2) {
-        return args.slice(1).reduce((acc, a) => `(bin "${BINOP[nm]}" ${acc} ${expr(a, env, ctx)})`,
-          expr(args[0], env, ctx));
+      if (args.length < 2) gap(`${nm} 收了 ${args.length} 格实参（这一刀只接两格）`);
+      /* `+` / `*` 收好几格是**结合律那一族**（sbcl 的 `(+ a b c)`）—— 往左折。
+         别的算符收不齐两格才报。 */
+      if (args.length > 2 && nm !== '+' && nm !== '*') {
+        gap(`${nm} 收了 ${args.length} 格实参（这一刀只接两格）`);
       }
-      if (args.length !== 2) gap(`${nm} 收了 ${args.length} 格实参（这一刀只接两格）`);
-      return `(bin "${BINOP[nm]}" ${expr(args[0], env, ctx)} ${expr(args[1], env, ctx)})`;
+      return binText(nm, args, env, ctx);
     }
     case 'call': {
       const f = x.ins.fn;
@@ -181,11 +193,50 @@ function expr(x, env, ctx) {
     }
     case 'record-new': gap('记录出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'list-new': gap('列表出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+    case 'conv': {
+      /* **已经在那一侧的什么都不做** —— 与 wat 那条腿同一句话（`backend-wat.js` 的 conv）。
+       * 方言里 int 与 real 不隐式混算，所以这一格必须落准：多补一格 `(toreal …)` 会
+       * 把整数除法变成实数除法。 */
+      const to = convTo(x);
+      const from = typeOf(x.ins.value, env, ctx);
+      const v = expr(x.ins.value, env, ctx);
+      if (to === from) return v;
+      if (to === 'string') return `(tostr ${v})`;
+      if (from === 'string') gap(`串上的表示转换还没接（方言里没有"串 -> ${to}"）`);
+      if (to === 'real') return `(toreal ${v})`;
+      if (from === 'real') return `(toint ${v})`;
+      return gap(`这格表示转换还没接：${from} -> ${to}`);
+    }
     case 'branch':
       /* 方言里 `if` 是语句 —— 表达式位置上的 branch 这一刀不接（要块表达式，ADR-0031 §5）。 */
       return gap('branch 出现在表达式位置上（方言的块表达式还欠着）');
     default: return gap(`${x.op} 出现在表达式位置上`);
   }
+}
+
+/**
+ * 一格两元（或结合律那一族）运算 -> 方言的 `(bin …)`。
+ *
+ * **两边要同型**是方言的规矩（`int` 与 `real` 不隐式混算），而图上没有类型 ——
+ * 所以这一格得自己**把矮的那边抬上去**：一边 real 一边 int 就给 int 那边补 `(toreal …)`。
+ * 这是 `go+conv` 那一族当场量出来的：`float64(7) / 2` 落出来是 `(bin "/" (toreal …) (int 2))`，
+ * 方言直接报"两边要同型"。抬不上去（真假与数混算那种）就报缺口，不猜。
+ */
+function binText(nm, args, env, ctx) {
+  const ts = args.map((a) => typeOf(a, env, ctx));
+  let want = 'int';
+  if (ts.some((t) => t === 'string')) want = 'string';
+  else if (ts.some((t) => t === 'real')) want = 'real';
+  else if (ts.every((t) => t === 'bool')) want = 'bool';
+  const one = (a, t) => {
+    const v = expr(a, env, ctx);
+    if (t === want) return v;
+    if (want === 'string') return `(tostr ${v})`;
+    if (want === 'real' && t === 'int') return `(toreal ${v})`;
+    return gap(`'${nm}' 的两边说不到一起（${t} 与 ${want}）`);
+  };
+  return args.slice(1).reduce((acc, a, i) => `(bin "${BINOP[nm]}" ${acc} ${one(a, ts[i + 1])})`,
+    one(args[0], ts[0]));
 }
 
 /**
