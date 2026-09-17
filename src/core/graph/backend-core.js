@@ -18,8 +18,12 @@
 //   字典    按键值推成 `(dict K V)`；空字典从**同层第一处 map-set** 上取（lua / awk 那一档）
 //   多值    落成一格合成结构体 `(struct mN (v0 …) (v1 …))` —— 方言的函数只交一格回来，
 //           而结构体是值语义的，那正好就是 `return a, b` 的语义
-//   defer   方言里没有出口钩子，所以走一趟变换：注册处落动作、末尾逆序放一份、每条 ret 前
-//           也放一份（带值的 ret 先把值算进临时量 —— go 的次序）
+//   形参    从**调用点**收（图上没有类型）：函数体走两趟，第一趟只收实参类型，第二趟出文本
+//   隐式返回 体里一格 ret 都没有、末尾又是**一个值**（`isValueish`）时，改写成 `(ret …)`；
+//           分支把 ret 沉到两支里去。两支里躺的是语句（cpp 的析构器）就不算值 —— 那是 void
+//   defer   方言里没有出口钩子，所以走一趟变换：注册处落动作、这一层末尾逆序放一份、
+//           每条 ret 前放**全部**层、`brk`/`cont` 前放**到那个循环为止**那几层
+//           （带值的 ret 先把值算进临时量 —— go 的次序）。一层套一层的 region 各管自己那层
 //   转换    `conv` 落 `toreal`/`toint`/`tostr`；两元运算自己**把矮的那边抬上去**
 //           （方言里 int 与 real 不隐式混算）
 //
@@ -901,29 +905,24 @@ export function emitCore(g) {
    * 方言那儿才报"未声明的变量"（硬错，不是有名有姓的缺口）—— `chez+index` 当场量到过。 */
   const fnEnv = new Map(env);
   const mainStmts = stmtList(rest, env, ctx);
-  const body = [];
+  /* **函数体走两趟**。第一趟只为收实参类型：一个函数体里的调用点也会给别的函数的形参定型
+   * （cpp 的析构器 `__destruct_Say(this)` 就是从另一个函数体里调的，而它在图上排在前面），
+   * 而那时 `ctx.args` 还没记上。所以先空跑一趟（缺口忽略 —— 这一趟不出文本），把登记处
+   * 再落第二趟出真文本。
+   *
+   * **登记处不回滚**：第一趟登记的形状（`(struct rN …)`）第二趟还要按同一个标签用 ——
+   * 第二趟里被调的那个函数可能排在调用者**前面**（cpp 的析构器就是），那时它的形参类型
+   * 已经从 `ctx.args` 上拿到了，可那格形状要等调用者落到才登记。回滚过一版，症状正是
+   * "在一格说不清形状的东西上取字段"。代价是第一趟可能多登记一格用不上的 struct —— 
+   * 那是一句声明，不影响答案。 */
   for (const f of fns) {
-    const fenv = new Map(fnEnv);
-    const pts = f.params.map((p, i) => ctx.args.get(`${f.name}#${i}`) ?? 'int');
-    for (let i = 0; i < f.params.length; i++) fenv.set(f.params[i], pts[i]);
-    const ps = f.params.map((p, i) => `(${p} ${pts[i]})`).join(' ');
-    const ret = env.get(`fn:${f.name}`) ?? 'int';
-    /* 隐式返回那一档：末尾那个值改写成 `(ret …)`（分支就把 ret 沉到两支里去 ——
-       方言的 `if` 是语句，这样就不必有块表达式）。 */
-    const arr = Array.isArray(f.body) ? f.body : (f.body === undefined || f.body === null ? [] : [f.body]);
-    const fbody = f.impl === null || f.impl === undefined
-      ? stmtList(f.body, fenv, ctx)
-      : [...stmtList(arr.slice(0, -1), fenv, ctx), ...tailRet(arr[arr.length - 1], fenv, ctx)];
-    /* **掉到函数尾**这件事不许糊：方言要求非 void 的函数每条路都有 `ret`，而图上"体末尾那个
-     * 值就是返回值"（chez / sbcl 那两门）是合法的。补一格 `(ret 0)` 交上去 = 悄悄给错答案
-     * —— 矩阵上量到过两次（chez+intmath 印 0/0、sbcl+blockret 末行印 0）。
-     * 所以这儿只认"末尾就是 ret"那一种，别的当场报缺口。 */
-    if (!endsWithRet(f.body) && ret !== 'void' && (f.impl === null || f.impl === undefined)) {
-      gap(`函数 '${f.name}' 的体末尾不是 ret（隐式返回那一档 —— 补零值会给错答案）`);
+    try {
+      emitFn(f, fnEnv, env, ctx);
+    } catch (err) {
+      if (!(err instanceof Gap)) throw err;
     }
-    body.push(`  (fn ${f.name} (${ps}) ${ret} ${fbody.join(' ')})`);
-    for (let i = 0; i < f.params.length; i++) ctx.args.set(`emitted:${f.name}#${i}`, pts[i]);
   }
+  const body = fns.map((f) => emitFn(f, fnEnv, env, ctx));
   /* **落完再核一遍**：函数体里的调用点也会往 `ctx.args` 上记类型，而那时被调的那个函数
    * 可能已经落过了（形参按当时知道的类型发的）。对不上就报缺口 —— 交出去等着方言报
    * "实参类型不对"是最坏的一种（那是一格硬错，不是有名有姓的缺口）。 */
@@ -943,6 +942,30 @@ export function emitCore(g) {
   return `${['(module', ...ctx.decls, ...body].join('\n')}\n`;
 }
 
+/** 一格 `(fn …)` 的文本。走两趟（见 `emitCore` 里那段），所以单独拎出来。 */
+function emitFn(f, fnEnv, env, ctx) {
+  const fenv = new Map(fnEnv);
+  const pts = f.params.map((p, i) => ctx.args.get(`${f.name}#${i}`) ?? 'int');
+  for (let i = 0; i < f.params.length; i++) fenv.set(f.params[i], pts[i]);
+  const ps = f.params.map((p, i) => `(${p} ${pts[i]})`).join(' ');
+  const ret = env.get(`fn:${f.name}`) ?? 'int';
+  /* 隐式返回那一档：末尾那个值改写成 `(ret …)`（分支就把 ret 沉到两支里去 ——
+     方言的 `if` 是语句，这样就不必有块表达式）。 */
+  const arr = Array.isArray(f.body) ? f.body : (f.body === undefined || f.body === null ? [] : [f.body]);
+  const fbody = f.impl === null || f.impl === undefined
+    ? stmtList(f.body, fenv, ctx)
+    : [...stmtList(arr.slice(0, -1), fenv, ctx), ...tailRet(arr[arr.length - 1], fenv, ctx)];
+  /* **掉到函数尾**这件事不许糊：方言要求非 void 的函数每条路都有 `ret`，而图上"体末尾那个
+   * 值就是返回值"（chez / sbcl 那两门）是合法的。补一格 `(ret 0)` 交上去 = 悄悄给错答案
+   * —— 矩阵上量到过两次（chez+intmath 印 0/0、sbcl+blockret 末行印 0）。
+   * 所以这儿只认"末尾就是 ret"那一种，别的当场报缺口。 */
+  if (!endsWithRet(f.body) && ret !== 'void' && (f.impl === null || f.impl === undefined)) {
+    gap(`函数 '${f.name}' 的体末尾不是 ret（隐式返回那一档 —— 补零值会给错答案）`);
+  }
+  for (let i = 0; i < f.params.length; i++) ctx.args.set(`emitted:${f.name}#${i}`, pts[i]);
+  return `  (fn ${f.name} (${ps}) ${ret} ${fbody.join(' ')})`;
+}
+
 /**
  * **隐式返回**：体里一格 `ret` 都没有，而末尾那一格是**一个值**（chez / sbcl 的函数体
  * 末尾那个表达式就是返回值）。是就把它交回来，不是就回 null（那时这个函数是 void ——
@@ -953,10 +976,24 @@ export function emitCore(g) {
  */
 function implicitRet(body) {
   const last = Array.isArray(body) ? body[body.length - 1] : body;
-  if (!isNode(last)) return null;
-  if (declOf(last.op).sort !== 'expr') return null;
-  if (last.op === 'prim' && last.attrs.name === 'print') return null;
-  return last;
+  return isValueish(last) ? last : null;
+}
+
+/**
+ * 这一格**能不能当一个值**。sort 那一栏是 expr 只是第一问，还有两格例外：
+ *   * `print` 在图上是一格 prim（expr），可它在源语言里是一句话；
+ *   * `branch` 是 expr，可**两支里躺的可能是语句**（cpp 的析构器就是：`(if c (region …) (region …))`
+ *     —— 那是一个 void 函数，不是"末尾那个值"）。所以分支要两支都递归问一遍。
+ */
+function isValueish(x) {
+  if (!isNode(x)) return false;
+  if (declOf(x.op).sort !== 'expr') return false;
+  if (x.op === 'prim' && x.attrs.name === 'print') return false;
+  if (x.op === 'branch') {
+    return isValueish(x.ins.then) && x.ins.else !== undefined && x.ins.else !== null
+      && isValueish(x.ins.else);
+  }
+  return true;
 }
 
 /**
