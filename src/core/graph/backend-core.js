@@ -485,17 +485,16 @@ function stmtList(list, env, ctx) {
 
 function stmtListIn(arr, env, ctx) {
   const isExit = (s) => isNode(s) && s.op === 'scope-exit';
-  if (!arr.some(isExit)) {
-    for (const s of arr) if (hasScopeExit(s)) gap('嵌在里层的 scope-exit（这一刀只接一层的语句序）');
-    return arr.flatMap((s) => stmt(s, env, ctx));
-  }
+  /* 里层的 `region` **自己管自己那一层的出口动作**（它也走这一趟），所以这儿不必往里查 ——
+   * 落到别处（分支 / 循环体的语句序上）的那几格由 `stmtIn` 的 `case 'scope-exit'` 兜住。
+   * sbcl 的 unwind-protect 与 lua 的元表就是"一层套一层的 region"那种形状。 */
+  if (!arr.some(isExit)) return arr.flatMap((s) => stmt(s, env, ctx));
   let last = -1;
   for (let i = 0; i < arr.length; i++) if (isExit(arr[i])) last = i;
   for (let i = 0; i < last; i++) {
     if (!isExit(arr[i]) && hasRet(arr[i])) {
       gap('scope-exit 注册之前就有 ret（这一刀要"注册都在前头"，不然得按位置算跑哪几格）');
     }
-    if (!isExit(arr[i]) && hasScopeExit(arr[i])) gap('嵌在里层的 scope-exit（这一刀只接一层的语句序）');
   }
   const frame = [];
   ctx.defers.push(frame);
@@ -609,7 +608,12 @@ function stmtIn(x, env, ctx) {
       const post = x.ins.post === undefined ? [] : stmt(x.ins.post, env, ctx);
       const outerPost = ctx.post;
       ctx.post = post;
+      /* **break / continue 也要跑出口动作** —— 跑的是"从这儿到这个循环之间"那几层
+       * （`hand+break-exit` 当场量到过：漏掉的话 1/2/3 印成 1/3，那是静默的错答案）。
+       * 所以进体之前把"这个循环那一层的 defer 栈深"记下来，`loop-exit` 照它往上收。 */
+      ctx.loopBase.push(ctx.defers.length);
       const body = stmt(x.ins.body, env, ctx);
+      ctx.loopBase.pop();
       ctx.post = outerPost;
       /* 条件里要是有一格得物化的东西（表达式位置的 branch），提到循环外面就**不是每轮算**
        * 了 —— 那是静默的错答案，所以报。 */
@@ -620,9 +624,15 @@ function stmtIn(x, env, ctx) {
       }
       return [`(while ${cond} (do ${[...body, ...post].join(' ')}))`];
     }
-    case 'loop-exit':
-      if (x.attrs.kind === 'continue') return [...ctx.post, '(cont)'];
-      return ['(brk)'];
+    case 'loop-exit': {
+      /* 离开这个循环要跑的出口动作：栈顶往下收到这个循环那一层为止（每层各自已是逆序）。
+       * `continue` 再补一份步进 —— 次序是"出口动作、步进、跳"（C 家族就是这个次序）。 */
+      const base = ctx.loopBase.length === 0 ? 0 : ctx.loopBase[ctx.loopBase.length - 1];
+      const acts = [];
+      for (let i = ctx.defers.length - 1; i >= base; i--) acts.push(...ctx.defers[i]);
+      if (x.attrs.kind === 'continue') return [...acts, ...ctx.post, '(cont)'];
+      return [...acts, '(brk)'];
+    }
     case 'branch': {
       const then = stmt(x.ins.then, env, ctx);
       const els = x.ins.else === undefined ? [] : stmt(x.ins.else, env, ctx);
@@ -853,7 +863,7 @@ export function emitCore(g) {
      `decls` 是要印在模块头上的那几句 `(struct …)`、`args` 是调用点记下的实参类型。 */
   const ctx = {
     byKey: new Map(), shapes: new Map(), decls: [], tmp: 0,
-    defers: [], scope: [], post: [], args: new Map(), pre: null,
+    defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [],
   };
   /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
   const fns = [];
