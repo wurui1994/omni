@@ -2928,17 +2928,23 @@ function main(argv) {
        * crt 那三个 `.o` 也从 sysroot/lib 里取（容器里拷过来的）。 */
       const sysroot = rest.indexOf('--sysroot') >= 0 ? rest[rest.indexOf('--sysroot') + 1] : null;
       if (sysroot !== null) {
-        /* sysroot/lib 里的 `.def` 当成 `-l` 的搜索目录。 */
-        rest.push('-L', join(sysroot, 'lib'));
-        rest.push('-lc');
-        rest.push('-lm');
-        rest.push('-lpthread');
-        rest.push('-ldl');
-        /* crt 也从 sysroot 里取 —— `atexit` 住在 `libc_nonshared.a` 里，而那份 `.a`
-         * 由 `crt1.o` 的 `__libc_start_main` 拉进来。交叉编译时没有那份 `.a`，
-         * 但 `.def` 里列了 `atexit`，链接器会在 `.dynsym` 里记一条 —— 装载器去
-         * `libc.so.6` 里找。（本机那一路 `atexit` 的 copy 重定位指向 `libc_nonshared.a`
-         * 里那一份，但那是同一个函数，效果一样。） */
+        /* sysroot/lib 里的 `.def` 当成库的来源。格式不同，走法不同：
+         *   ELF：`-L DIR/lib -lc -lm …`，findLibElf 认 `lib%s.def`
+         *   Mach-O：`--dylib <.def 路径>`，loadInputs 那侧认 `.def`
+         * 两条路都落到同一份 `defsyms.js`。 */
+        if (cmd === 'elf-link') {
+          rest.push('-L', join(sysroot, 'lib'));
+          rest.push('-lc', '-lm', '-lpthread', '-ldl');
+        } else if (cmd === 'macho-link') {
+          /* Mach-O 那侧：每份 `.def` 当 `--dylib` 给 —— machoExe 的 loadInputs
+           * 认 `.def`（`isDefSyms` 那一格岔开了 .tbd 那条路）。 */
+          const sysLib = join(sysroot, 'lib');
+          if (isDir(sysLib)) {
+            for (const f of readDir(sysLib)) {
+              if (f.endsWith('.def')) rest.push('--dylib', join(sysLib, f));
+            }
+          }
+        }
         if (cmd === 'elf-link' && !rest.includes('--shared')) {
           /* crt 与 atexit：sysroot/lib 里的 `.c` 用我们的 C 前端编成 `.o`，
            * 不从目标机器拷二进制（与 tcc 的 `lib/dsohandle.c` 同一个思路）。 */
