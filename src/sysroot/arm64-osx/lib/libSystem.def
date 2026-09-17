@@ -78,6 +78,7 @@ _ftell
 _fwrite
 _getcwd
 _getenv
+_getitimer
 _getrusage
 _hypot
 _isatty
@@ -110,6 +111,7 @@ _pthread_get_stacksize_np
 _pthread_join
 _pthread_main_np
 _pthread_self
+_qsort
 _read
 _readdir
 _realloc
@@ -119,6 +121,7 @@ _rename
 _rewind
 _round
 _setenv
+_setitimer
 _setjmp
 _sigaction
 _sin

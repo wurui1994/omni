@@ -68,6 +68,7 @@ ftell
 fwrite
 getcwd
 getenv
+getitimer
 getrlimit
 getrusage
 isatty
@@ -84,6 +85,7 @@ open
 opendir
 pipe
 printf
+qsort
 read
 readdir
 realloc
@@ -92,6 +94,7 @@ remove
 rename
 rewind
 setenv
+setitimer
 sigaction
 snprintf
 sscanf
