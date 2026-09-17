@@ -36,11 +36,22 @@ function walkStrings(x, hit, seen) {
     if (v === null || typeof v !== 'object') continue;
     if (seen.has(v)) continue;
     seen.add(v);
-    if (Array.isArray(v)) {
-      for (const y of v) stack.push(y);
-      continue;
+    /**
+     * **只把有可能出字符串的那些格子压栈**（数与布尔一律不进）。
+     *
+     * 量到的账（`node --cpu-prof src/cli.js emit c src/cli.js`）：这一格自用
+     * 236.744ms = 整趟的 11.44%，是全程序里自用最高的一格函数。而 OIR 的节点上
+     * 半数以上的字段是 span 的行列号、arity、那几个布尔标志 —— 它们压进去、弹出来、
+     * 各走一次 `typeof`，全是白工。`Object.values` 换掉 `Object.keys` + `v[k]`：
+     * 同样一次数组分配，少 N 次按串取属性。
+     *
+     * 两样都留在自举那条腿的子集里（`for…in` 整棵树一处都没用过 —— 那不是巧合）。
+     */
+    const vals = Array.isArray(v) ? v : Object.values(v);
+    for (const y of vals) {
+      if (typeof y === 'string') { hit(y); continue; }
+      if (y !== null && typeof y === 'object') stack.push(y);
     }
-    for (const k of Object.keys(v)) stack.push(v[k]);
   }
 }
 
