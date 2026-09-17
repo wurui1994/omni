@@ -534,80 +534,146 @@ function freeRefs(x, bound, out) {
 }
 
 /**
- * **数值窄化**（`docs/design/node-graph-shrink.md` 第五节第 3 条）：这一个函数体里，
- * 哪几格局部量**从头到尾只装数**。它们落成 C 的 `double` 而不是 16 字节的 `gv`，
+ * **数值窄化**（`docs/design/node-graph-shrink.md` 第五节第 3 条）：哪几格量
+ * **从头到尾只装数**。它们落成 C 的 `double` 而不是 16 字节的 `gv`，
  * 于是那一族 `g_num(g_d(…))` 的往返跟着消掉。
  *
+ * 这一趟同时算两样，因为它们**互相依赖**（所以是一个不动点，不是两趟）：
+ *   `locals`  一个函数体（顶层那一块，或者一格 `func`）里窄成 `double` 的局部量；
+ *   `params`  一格**有名字的顶层函数**，它的形参窄成 `double` ——
+ *             条件是**每一个调用点递进来的都是数**（而「是数」又可能是「某格窄了的局部量」）。
+ *
  * 判断只用图上现成的东西，一格新声明都不加：
- *   - 名字由这个体里的 `bind` 绑，初值**是数**；
- *   - 这个体里对它的每一次 `set` 也**是数**；
+ *   - 局部量：这个体里的 `bind` 绑它、初值**是数**，且这个体里对它的每一次 `set` 也**是数**；
  *   - 「是数」= 数字常量 / `len` / `conv int|float`（这三样怎么算都出数）
  *     / `+ - * / % ^` 且实参都是数（`+` 只有在实参都是数时才是加法 —— 串接那一路不算）
- *     / `ref` 一格**同样窄了**的名字（所以要转几轮，见下面的不动点）。
+ *     / `ref` 一格**同样窄了**的名字（局部量或者窄了的形参）。
  *
- * 四处保守，每一处都有理由：
+ * 五处保守，每一处都有理由：
  *   1. **同名绑两次就不窄**：C 那侧两次 `bind` 落在两层块里各是一格声明，而这儿只有一张
  *      按名字的表 —— 分不开就不动。
- *   2. **形参不窄**：它是 `gv` 形参（调用方可能递任何东西）。
- *   3. **不进嵌套 `func` 的体**：那一层是另一个 C 函数；读外层局部量这条路本来就报缺口
- *      （`liftFunc` 里的 `freeRefs`），所以窄化不会把一格捕获的量弄坏。
- *   4. 一轮下来只**去掉**候选，不加 —— 于是必然停（最多名字个数那么多轮）。
+ *   2. **一次调用的结果不算数**：函数回的是 `gv`，回 nil 也可能（返回值那一格没窄），
+ *      而 `g_d(nil)` 是读一串没意义的字节。所以 `bind x = f()` 不窄。
+ *   3. **函数名被当值用过就不窄形参**：那一路的调用点数不齐（`callOf` 里也报缺口）。
+ *   4. **匿名 `func` 不窄形参**：它没名字，调用点认不出来。
+ *   5. 一轮下来只**去掉**候选，不加 —— 于是必然停。
  */
 const NUM_PRIMS = ['+', '-', '*', '/', '%', '^'];
-function numLocals(list) {
+function numPlan(top) {
+  const bodies = [];                 /* { key, list, params } —— 一格「体」= 一个 C 函数 */
+  const nameOfBody = new Map();      /* 体的 key -> 那个函数的名字（匿名的没有） */
+  const namedFn = new Map();         /* 名字 -> { key, params } */
+  const badFnRef = new Set();        /* 被当值用过的名字（保守第 3 条） */
   const seen = new Set();
-  const count = new Map();
-  const inits = new Map();
-  const writes = [];
-  const scan = (x) => {
+  const walkAll = (x, inFnSlot) => {
     if (x === null || x === undefined) return;
-    if (Array.isArray(x)) { for (const y of x) scan(y); return; }
+    if (Array.isArray(x)) { for (const y of x) walkAll(y, false); return; }
     if (x.op === undefined) return;
+    /* `ref` 是叶子，不去重 —— 同一格 ref 被两处引用时，"当值用过"这件事要认得出来。 */
+    if (x.op === 'ref') {
+      if (!inFnSlot) badFnRef.add(x.attrs.name);
+      return;
+    }
     if (seen.has(x.id)) return;
     seen.add(x.id);
-    if (x.op === 'func') return;                 /* 保守第 3 条：不进另一个 C 函数 */
-    if (x.op === 'bind') {
-      const n = x.attrs.name;
-      count.set(n, (count.get(n) ?? 0) + 1);
-      inits.set(n, x.ins.init);
-      scan(x.ins.init);
-      return;
+    if (x.op === 'bind' && x.ins.init !== null && x.ins.init !== undefined
+      && x.ins.init.op === 'func') {
+      nameOfBody.set(x.ins.init.id, x.attrs.name);
+      namedFn.set(x.attrs.name, { key: x.ins.init.id, params: x.ins.init.attrs.params ?? [] });
     }
-    if (x.op === 'set') {
-      writes.push([x.attrs.name, x.ins.value]);
-      scan(x.ins.value);
-      return;
+    if (x.op === 'func') bodies.push({ key: x.id, list: asList(x.ins.body), params: x.attrs.params ?? [] });
+    for (const k of Object.keys(x.ins ?? {})) {
+      walkAll(x.ins[k], x.op === 'call' && k === 'fn');
     }
-    const ins = x.ins ?? {};
-    for (const k of Object.keys(ins)) scan(ins[k]);
   };
-  scan(list);
-  const cands = new Set();
-  for (const [n, c] of count) {
-    const init = inits.get(n);
-    if (c === 1 && init !== null && init !== undefined && init.op !== 'func') cands.add(n);
+  walkAll(top, false);
+  bodies.push({ key: 'top', list: asList(top), params: [] });
+
+  /* ---- 每个体自己那几样：绑了谁、写了谁、调了谁（**不进嵌套的 func 体**）。 */
+  const info = new Map();
+  for (const b of bodies) {
+    const count = new Map();
+    const inits = new Map();
+    const writes = [];
+    const calls = [];
+    const s = new Set();
+    const scan = (x) => {
+      if (x === null || x === undefined) return;
+      if (Array.isArray(x)) { for (const y of x) scan(y); return; }
+      if (x.op === undefined || s.has(x.id)) return;
+      s.add(x.id);
+      if (x.op === 'func') return;
+      if (x.op === 'bind') {
+        count.set(x.attrs.name, (count.get(x.attrs.name) ?? 0) + 1);
+        inits.set(x.attrs.name, x.ins.init);
+        scan(x.ins.init);
+        return;
+      }
+      if (x.op === 'set') { writes.push([x.attrs.name, x.ins.value]); scan(x.ins.value); return; }
+      if (x.op === 'call') {
+        const fn = x.ins.fn;
+        const args = asList(x.ins.args).filter((y) => y !== undefined);
+        if (fn !== null && fn !== undefined && fn.op === 'ref') calls.push([fn.attrs.name, args]);
+        for (const y of args) scan(y);
+        return;
+      }
+      for (const k of Object.keys(x.ins ?? {})) scan(x.ins[k]);
+    };
+    scan(b.list);
+    const cands = new Set();
+    for (const [n, c] of count) {
+      const init = inits.get(n);
+      if (c === 1 && init !== null && init !== undefined && init.op !== 'func') cands.add(n);
+    }
+    info.set(b.key, { inits, writes, calls, cands, params: b.params });
   }
-  const numish = (x) => {
+
+  const params = new Set();
+  for (const [n, f] of namedFn) {
+    if (f.params.length > 0 && !badFnRef.has(n)) params.add(n);
+  }
+  const numish = (x, key) => {
     if (x === null || x === undefined || Array.isArray(x)) return false;
     if (constNum(x) !== null) return true;
-    if (x.op === 'ref') return cands.has(x.attrs.name);
+    if (x.op === 'ref') {
+      const inf = info.get(key);
+      if (inf === undefined) return false;
+      if (inf.cands.has(x.attrs.name)) return true;
+      const fname = nameOfBody.get(key);
+      return fname !== undefined && params.has(fname) && inf.params.includes(x.attrs.name);
+    }
     if (x.op === 'conv') return x.attrs.to === 'int' || x.attrs.to === 'float';
     if (x.op !== 'prim') return false;
     if (x.attrs.name === 'len') return true;
     if (!NUM_PRIMS.includes(x.attrs.name)) return false;
     const args = asList(x.ins.args).filter((y) => y !== undefined);
-    return args.length > 0 && args.every(numish);
+    return args.length > 0 && args.every((y) => numish(y, key));
   };
-  for (let round = 0; round < cands.size + 1; round++) {
+  for (let round = 0; round < bodies.length + params.size + 8; round++) {
     let dropped = false;
-    for (const n of [...cands]) {
-      const ok = numish(inits.get(n))
-        && writes.every(([w, v]) => w !== n || numish(v));
-      if (!ok) { cands.delete(n); dropped = true; }
+    for (const [key, inf] of info) {
+      for (const n of [...inf.cands]) {
+        const ok = numish(inf.inits.get(n), key)
+          && inf.writes.every(([w, v]) => w !== n || numish(v, key));
+        if (!ok) { inf.cands.delete(n); dropped = true; }
+      }
+    }
+    for (const fname of [...params]) {
+      const f = namedFn.get(fname);
+      let ok = true;
+      for (const [key, inf] of info) {
+        for (const [callee, args] of inf.calls) {
+          if (callee !== fname) continue;
+          if (args.length !== f.params.length || !args.every((y) => numish(y, key))) ok = false;
+        }
+      }
+      if (!ok) { params.delete(fname); dropped = true; }
     }
     if (!dropped) break;
   }
-  return cands;
+  const locals = new Map();
+  for (const [key, inf] of info) locals.set(key, inf.cands);
+  return { locals, params, nameOfBody };
 }
 
 /**
@@ -654,6 +720,8 @@ class CGen {
      * 一进一出一格函数体就换一张（见 `liftFunc` 与 `emitC`）—— 名字是按体算的。
      */
     this.num = new Set();
+    /** 窄化那张全局的计划（`numPlan`）：哪个体窄了哪几格、哪个函数的形参窄了。 */
+    this.np = { locals: new Map(), params: new Set(), nameOfBody: new Map() };
   }
 
   /**
@@ -792,6 +860,9 @@ class CGen {
       if (name !== undefined) this.fnOf.set(name, cname);
     }
     const params = x.attrs.params ?? [];
+    /* 形参窄不窄是**按函数名**定的（`numPlan` 里那半个不动点）：窄了就连形参一起进
+     * `this.num`，于是体里读它是那个 double、当值用时才 `g_num` 装回去。 */
+    const pnum = this.np.params.has(this.np.nameOfBody.get(x.id));
     const free = [];
     freeRefs(x.ins.body, params.slice(), free);
     const cap = free.filter((n) => !this.fnOf.has(n));
@@ -804,8 +875,9 @@ class CGen {
     this.lines = [];
     this.depth = 1;
     this.inFn += 1;
-    /* 窄化是**按函数体**算的（形参不窄：调用方可能递任何东西）。 */
-    this.num = numLocals(asList(x.ins.body));
+    /* 窄化是**按函数体**算的（`numPlan` 一趟算齐，这儿只取那一份）。 */
+    this.num = new Set(this.np.locals.get(x.id) ?? []);
+    if (pnum) for (const p of params) this.num.add(p);
     const t = this.fresh();
     this.emit(`gv ${t} = g_nil();`);
     this.pushFrame('fn');
@@ -817,17 +889,21 @@ class CGen {
     this.lines = outer;
     this.depth = outerDepth;
     this.num = outerNum;
-    this.fns.push({ cname, params: params.map(cName), lines });
+    this.fns.push({ cname, params: params.map(cName), pnum, lines });
     return cname;
   }
 
   /** 一格调用。名字指向顶层函数、或者当场摆着一格 `func` —— 别的（按值调用）报缺口。 */
   callOf(x) {
-    const args = asList(x.ins.args).filter((y) => y !== undefined).map((y) => this.valOf(y));
+    const raw = asList(x.ins.args).filter((y) => y !== undefined);
     const fn = x.ins.fn;
     if (fn !== undefined && fn !== null && fn.op === 'ref' && this.fnOf.has(fn.attrs.name)) {
-      return `${this.fnOf.get(fn.attrs.name)}(${args.join(', ')})`;
+      /* 形参窄了的那几个函数：**递 double**（`numPlan` 已经证过每个调用点都是数）。 */
+      const num = this.np.params.has(fn.attrs.name);
+      const as = raw.map((y) => (num ? this.dVal(y) : this.valOf(y)));
+      return `${this.fnOf.get(fn.attrs.name)}(${as.join(', ')})`;
     }
+    const args = raw.map((y) => this.valOf(y));
     if (fn !== undefined && fn !== null && fn.op === 'func') {
       return `${this.liftFunc(fn, undefined)}(${args.join(', ')})`;
     }
@@ -1182,15 +1258,17 @@ export function emitC(g) {
   const gen = new CGen();
   const top = asList(g !== null && g.kind === 'graph' ? g.body : g);
   gen.plan(top);
-  gen.num = numLocals(top);
+  gen.np = numPlan(top);
+  gen.num = new Set(gen.np.locals.get('top') ?? []);
   gen.pushFrame('fn');
   gen.body(top, null);
   gen.popFrame();
-  /* 原型先摆一遍：这样「A 调后面定义的 B」与互相递归都不必管定义次序。 */
-  const protos = gen.fns.map((f) => `static gv ${f.cname}(${f.params.length === 0 ? 'void'
-    : f.params.map((p) => `gv ${p}`).join(', ')});`);
-  const bodies = gen.fns.map((f) => `static gv ${f.cname}(${f.params.length === 0 ? 'void'
-    : f.params.map((p) => `gv ${p}`).join(', ')}) {\n${f.lines.join('\n')}\n}\n`);
+  /* 原型先摆一遍：这样「A 调后面定义的 B」与互相递归都不必管定义次序。
+   * 形参窄了的那几个收 `double`（`numPlan` 证过每个调用点递的都是数）。 */
+  const sig = (f) => (f.params.length === 0 ? 'void'
+    : f.params.map((p) => `${f.pnum === true ? 'double' : 'gv'} ${p}`).join(', '));
+  const protos = gen.fns.map((f) => `static gv ${f.cname}(${sig(f)});`);
+  const bodies = gen.fns.map((f) => `static gv ${f.cname}(${sig(f)}) {\n${f.lines.join('\n')}\n}\n`);
   return `${PRELUDE_ALL()}
 /* ---- 编译期就知道的那几格常量 */
 ${gen.decls.join('\n')}

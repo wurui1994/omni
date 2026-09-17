@@ -111,16 +111,21 @@
    判据是 `ext/*/examples/record.*` 那一族出来的 C 里**出现 `struct`、`gv` 计数下降**。
 3. **数值窄化**：只与整数常量与整数变量作用的量 -> `long long`；
    判据是 `intmath` 那一族的 `g_num(g_d(` 往返归零。
-   **头一半落地了**（2026-09-17，`backend-c.js` 的 `numLocals` + `dOf`，
-   判据 `tests/graph/narrow.js` 15 格）：一个函数体里「只装数」的**局部量**落 C 的 `double`，
-   于是 `intmath.lua` 的循环变成 `double v_acc = 0.0; … v_acc = (v_acc + v_i);`，
-   `gv` 声明 12 -> 10、字节 10921 -> 10902，文档第二节那行 `g_d(g_num(1.0))` 没了。
-   **还没归零**：`g_num(g_d(` 仍是 3 次，全在**形参与返回值**那一侧
-   （`fn2_fact(gv v_n)` 收 gv、回 gv）—— 要归零得做跨函数的那一刀
-   （每个调用点都递数 + 返回值也窄），那是另一刀，判据里把这个 3 钉住了。
-   顺带一格**条件位置**：两边都是数时，`g_truthy(g_bool(g_cmp(g_num(v_i), v_n) <= 0))`
-   那四趟（装箱 / 比较 / 再装箱 / 拆箱）塌成 `v_i < 3.0` 一条 C 的条件。
-   量到的数（91 份例子的 C 合计）：984881 -> 983211 字节、`g_truthy(g_bool(` 92 -> 48 次。
+   **头一半落地了**（2026-09-17，`backend-c.js` 的 `numPlan` + `dOf`/`condOf`，
+   判据 `tests/graph/narrow.js` 27 格）：一个函数体里「只装数」的**局部量**、以及
+   **每个调用点递的都是数**的那些**形参**，落 C 的 `double`。`intmath.lua` 现在是
+
+   ```c
+   static gv fn1_sumto(double v_n) { double v_acc = 0.0; double v_i = 1.0;
+     while (1) { if (!((v_i <= v_n))) break; v_acc = (v_acc + v_i); v_i = (v_i + 1.0); } … }
+   static gv fn2_fact(double v_n) { if ((v_n == 0.0)) { … } gv t7 = g_num(v_n * g_d(fn2_fact((v_n - 1.0)))); … }
+   ```
+
+   量到的数：`intmath.lua` 10921 -> 10827 字节、`gv` 声明 12 -> 10、`g_num(` 17 -> 10；
+   91 份例子的 C 合计 984881 -> 982075 字节，`g_truthy(g_bool(` 92 -> 7 次。
+   **还差一样**：`g_num(g_d(` 还剩 1 次，在**返回值**那一侧（`g_d(fn2_fact(…))`）。
+   返回值没窄是有理由的：函数体走到底没 `ret` 时回的是 nil，而 `g_d(nil)` 是读一串没意义的
+   字节 —— 要窄得先证「每条路都回数」。这个 1 判据里钉住了，改了就得连账一起改。
 
 三条都落地之后再重量第 1 节那五行——**目标是让至少一行小于 1**。
 

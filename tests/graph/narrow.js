@@ -153,11 +153,34 @@ const cOf = (g) => cBack.lower(g).text;
   hasnt('intmath〔字面量不再装了又拆〕', c, 'g_d(g_num(1.0))');
   has('intmath〔循环那两格量窄了〕', c, 'double v_acc = 0.0;');
   has('intmath〔累加就是 C 的加法〕', c, 'v_acc = (v_acc + v_i);');
-  /* 剩下的往返**有数**：3 次，全在形参 / 返回值那一侧（跨函数那一刀还没做）。
-   * 写等号而不是「<= 3」：它变小了是好事，可是那时候这条账要跟着改，不许悄悄漂。 */
+  has('intmath〔循环条件也是 C 的比较〕', c, 'if (!((v_i <= v_n))) break;');
+  has('intmath〔形参也窄了〕', c, 'static gv fn2_fact(double v_n)');
+  has('intmath〔调用点递的就是数〕', c, 'fn2_fact(5.0)');
+  has('intmath〔递归那一句〕', c, 'fn2_fact((v_n - 1.0))');
+  /* 剩下的往返**有数**：1 次，在**返回值**那一侧（`g_d(fn2_fact(…))`）。
+   * 返回值没窄是有理由的：函数体走到底没 `ret` 时回的是 nil，而 `g_d(nil)` 是读一串
+   * 没意义的字节 —— 要窄得先证「每条路都回数」。写等号而不是「<= 1」：它变小了是好事，
+   * 可是那时候这条账要跟着改，不许悄悄漂。 */
   const round = c.split('g_num(g_d(').length - 1;
-  if (round === 3) ok('intmath〔g_num(g_d( 还剩 3 次：形参与返回值那一侧，跨函数那一刀还没做〕');
-  else no('intmath〔g_num(g_d( 的次数〕', `量到 ${round} 次，账上写的是 3 —— 改了就把账一起改`);
+  if (round === 1) ok('intmath〔g_num(g_d( 还剩 1 次：在返回值那一侧（回 nil 的那条路没证过）〕');
+  else no('intmath〔g_num(g_d( 的次数〕', `量到 ${round} 次，账上写的是 1 —— 改了就把账一起改`);
+}
+
+// ---- 形参不该窄的不窄：有一个调用点递的不是数
+{
+  const g = program([
+    node('bind', {
+      init: node('func', { body: [node('ret', { value: ref('a') })] }, { params: ['a'] }),
+    }, { name: 'id' }),
+    prim('print', [node('call', { fn: ref('id'), args: [num(1)] })]),
+    prim('print', [node('call', { fn: ref('id'), args: [lit('s')] })]),
+  ]);
+  const c = cOf(g);
+  has('形参〔有一个调用点递的是串：还是 gv〕', c, '(gv v_a)');
+  const want = evalGraph(g).out.join('|');
+  const got = cBack.lower(g).run().out.join('|');
+  if (got === want && want === '1|s') ok(`形参〔C 腿跑出来一样：${got}〕`);
+  else no('形参〔C 腿跑出来一样〕', `解释器 ${want}，C ${got}`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed（数值窄化：窄得动 · 不该窄的不窄 · 装回去 · 跑起来一样）\n`);
