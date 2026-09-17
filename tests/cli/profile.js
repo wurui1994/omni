@@ -523,14 +523,13 @@ const FIB_CALLS = '635621';
   }
 }
 {
-  /* C 腿的 stub 是**另一个收集器**（发射期插进生成的 C 的 `prof[core]`），它还没记调用链 ——
-   * 这一格钉住那句话是**指路**而不是含糊的"没记到"。 */
+  /* stub 那一档在**外部 cc** 上也一样有调用栈（生成的 C 是同一份，编译器只是换了台）。 */
   const r = omni(['run', FIB, '--profile', 'stub', '--backend', 'c', '--cc', 'clang']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.status === 0 && s.includes('prof[core]') && s.includes('没有调用栈')
-    && s.includes('--profile cc')) {
-    ok('stub · c 腿：按函数的账在，没有调用栈这件事说清并指到 cc / sample');
-  } else bad('stub·c 该指路', `rc=${r.status} ${s.slice(-300)}`);
+  if (r.status === 0 && s.includes('prof[core]') && /omni_main > u_fib/.test(s)
+    && s.includes('调用树')) {
+    ok('stub · c 腿（clang）：按函数的账 + 调用栈 + 调用树都在');
+  } else bad('stub·c（clang）该有调用栈', `rc=${r.status} ${s.slice(-300)}`);
 }
 
 /* ---- 五、**量自己**（第一百五十片）：开关摆在动词前面就是量这一趟 omni 自己
@@ -566,6 +565,20 @@ const FIB_CALLS = '635621';
   if (r.status !== 0 && s.includes('量自己') && s.includes('sample')) {
     ok('量自己 --profile cc：说清那一档是量被编译的程序用的');
   } else bad('量自己该只认 sample', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+
+{
+  /* **stub 也有调用栈**（第一百五十片）：这份 C 是我们自己发的，enter/exit 那一对与
+   * 影子栈都在手里 —— 「不能改源码」在 self 这一侧根本不成立。判据是三件事一起：
+   * 按函数那张表（含**调用次数**）还在、聚合回溯那几张有路径、而且**`--cc self` 也编得过**
+   * （生成的那段 C 要能被我们自己那台 C 前端读）。 */
+  const r = omni(['run', FIB, '--profile', 'stub', '--backend', 'c', '--cc', 'self']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  const hasCalls = /635621\s+u_fib/.test(s);
+  const hasPath = /omni_main > u_fib/.test(s);
+  if (r.status === 0 && hasCalls && hasPath && s.includes('折叠栈写到了')) {
+    ok('stub · c 腿：按函数的表（635621 次）+ 精确调用栈（omni_main > u_fib），--cc self 也编得过');
+  } else bad('stub 该有调用栈', `次数 ${hasCalls} / 路径 ${hasPath}\n    ${s.slice(-300)}`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

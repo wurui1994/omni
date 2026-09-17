@@ -807,16 +807,10 @@ function profFoldedFinish() {
         + '三条路：把工作量加大、把频率提上去（`--profile sample:9973`）、'
         + '或者换成不靠采样的那一档（`--profile cc` / `--profile stub`，按调用计数与时间）\n');
     } else if (PROF.mode === 'stub') {
-      /**
-       * **C 腿的 stub 是另一个收集器**：那一对计时是**发射期**插进生成的 C 里的
-       * （`prof[core]` 那张表，见 backend-c 的 profile 那一格），它与 `omni_prof.c` 的
-       * 影子栈是两套东西 —— 所以那一档现在只有按函数的账，没有调用栈。
-       * 说清楚而不是含糊成"没记到"：把要热路径的人直接指到有的那两档上。
-       */
-      stderr('omni: profile（stub · c 腿）没有调用栈 —— 这一档的收集器是**发射期插进生成的 C**'
-        + '的那一对计时（上面 `prof[core]` 那张表：自用 / 含子 / 次数），它还没记调用链。'
-        + '要热路径就换 `--profile cc`（外部编译器插桩，**精确**的调用栈 + 次数）'
-        + '或 `--profile sample`（采样，看得见整条栈）\n');
+      /* stub 现在也记调用栈了（生成的 C 里那张按路径的表，见 backend-c 的 `omni_prof_path`）
+       * —— 走到这儿是「这一趟一条路都没记下来」：程序太短，每格自用都不满 1µs。 */
+      stderr('omni: profile（stub · c 腿）一条调用栈都没记下来 —— 这一档按**每次返回的自用时间**'
+        + '记，这一趟每一格都不到 1µs。上面 `prof[core]` 那张按函数的表（含调用次数）还在\n');
     } else {
       stderr(`omni: profile（${PROF.mode} · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿）`
         + '一条调用栈都没记下来 —— 插桩那一档按**每次返回的自用时间**记，'

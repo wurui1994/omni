@@ -1012,7 +1012,7 @@ class CEmitter {
       // 成员派发器：调的全是上面这些宏摊出来的 static 函数，所以只能在这之后生成
       this.memberDispatch();
       this.protoMembers();
-      /**
+    /**
        * **按名字调 op 那格派发器留一个坑，最后再填**（第一百四十八片第四格）。
        *
        * 量到的账（`bench/fib.js` 823 字节源码 -> 156424 字节 C，190x）：这一格自己
@@ -1361,6 +1361,81 @@ class CEmitter {
     this.line('  clock_gettime(CLOCK_MONOTONIC, &ts);');
     this.line('  return (unsigned long long) ts.tv_sec * 1000000000ull + (unsigned long long) ts.tv_nsec;');
     this.line('}');
+    /* 每份产物各有一张自己的表（都是 static），所以印的时候要说清是**谁**的 ——
+       核心 + 12 格插件一起跑时，不带标签的 13 张表混在 stderr 上分不出谁是谁。
+       摆在这儿（而不是 dump 前面）是因为底下那格折叠栈也要用它。 */
+    this.line(`static const char *omni_prof_tag = ${JSON.stringify(this.plugin === null ? 'core' : this.plugin)};`);
+    /**
+     * **按调用栈归属的那张表**（第一百五十片）：stub 这一档一样能出 backtrace。
+     *
+     * 用户那句话是对的，而且这是最不该欠的一格：**这份 C 是我们自己发的**，
+     * enter/exit 那一对就在我们手里，影子栈（`omni_prof_stkf`）本来就在算自用时间时用着 ——
+     * 「不能改源码」在 self 这一侧根本不成立。所以这儿加一张按路径归属的表：
+     * 每次返回把这次的**自用纳秒**记到「根;…;它自己」那条路上，落盘就是折叠栈，
+     * CLI 那五张表（热路径 / 调用边 / 调用树）一个字都不用改。
+     *
+     * 两个上限都是量出来的取舍：路径深度 16（每次返回都要哈一遍，深度直接乘在开销上），
+     * 路径条数 4096（满了就丢，`omni_prof_plost` 记着，报告里明说 —— 宁可少记也不乱记）。
+     */
+    this.line('#define OMNI_PROF_PSLOTS 4096');
+    this.line('#define OMNI_PROF_PDEPTH 16');
+    this.line('static int omni_prof_pfr[OMNI_PROF_PSLOTS][OMNI_PROF_PDEPTH];');
+    this.line('static int omni_prof_pn[OMNI_PROF_PSLOTS];');
+    this.line('static unsigned long long omni_prof_pw[OMNI_PROF_PSLOTS];');
+    this.line('static int omni_prof_pused = 0;');
+    this.line('static int omni_prof_plost = 0;');
+    this.line('static int omni_prof_pdeep = 0;');
+    this.line('static void omni_prof_path(int sp, unsigned long long w) {');
+    this.line('  int fr[OMNI_PROF_PDEPTH];');
+    this.line('  int m = 0;');
+    this.line('  int i;');
+    /* 从栈顶往下取（栈顶在前，与采样那一档同一种存法 —— 写折叠栈时再倒过来）。 */
+    this.line('  for (i = sp; i >= 0 && m < OMNI_PROF_PDEPTH; i--) fr[m++] = omni_prof_stkf[i];');
+    this.line('  if (sp + 1 > OMNI_PROF_PDEPTH) omni_prof_pdeep = 1;');
+    this.line('  unsigned long long h = 1469598103934665603ull;');
+    this.line('  for (i = 0; i < m; i++) { h ^= (unsigned long long) fr[i]; h *= 1099511628211ull; }');
+    this.line('  int slot = (int) (h & (OMNI_PROF_PSLOTS - 1));');
+    this.line('  int probe;');
+    this.line('  for (probe = 0; probe < OMNI_PROF_PSLOTS; probe++) {');
+    this.line('    if (omni_prof_pn[slot] == 0) {');
+    this.line('      for (i = 0; i < m; i++) omni_prof_pfr[slot][i] = fr[i];');
+    this.line('      omni_prof_pn[slot] = m;');
+    this.line('      omni_prof_pw[slot] = w;');
+    this.line('      omni_prof_pused++;');
+    this.line('      return;');
+    this.line('    }');
+    this.line('    if (omni_prof_pn[slot] == m) {');
+    this.line('      int same = 1;');
+    this.line('      for (i = 0; i < m; i++) if (omni_prof_pfr[slot][i] != fr[i]) { same = 0; break; }');
+    this.line('      if (same) { omni_prof_pw[slot] += w; return; }');
+    this.line('    }');
+    this.line('    slot = (slot + 1) & (OMNI_PROF_PSLOTS - 1);');
+    this.line('  }');
+    this.line('  omni_prof_plost++;');
+    this.line('}');
+    /* 折叠栈落盘：`OMNI_PROF_OUT` 给了就写（与 `omni_prof.c` 那份同一个约定与单位 ——
+     * 插桩那一档的权重是**微秒**）。CLI 收尾时读它、印那五张表。 */
+    this.line('static void omni_prof_folded(void) {');
+    this.line('  const char *p = getenv("OMNI_PROF_OUT");');
+    this.line('  if (!p || !p[0] || omni_prof_pused == 0) return;');
+    this.line('  FILE *f = fopen(p, "w");');
+    this.line('  if (!f) return;');
+    this.line('  int i;');
+    this.line('  int j;');
+    this.line('  for (i = 0; i < OMNI_PROF_PSLOTS; i++) {');
+    this.line('    if (omni_prof_pn[i] == 0) continue;');
+    this.line('    for (j = omni_prof_pn[i] - 1; j >= 0; j--) {');
+    this.line('      fprintf(f, "%s", omni_prof_name[omni_prof_pfr[i][j]]);');
+    this.line('      if (j > 0) fprintf(f, ";");');
+    this.line('    }');
+    this.line('    unsigned long long w = omni_prof_pw[i] / 1000ull;');
+    this.line('    if (w == 0) w = 1;');
+    this.line('    fprintf(f, " %llu\\n", w);');
+    this.line('  }');
+    this.line('  fclose(f);');
+    this.line('  fprintf(stderr, "prof[%s]: 折叠栈写到了 %s（%d 条路%s%s）\\n", omni_prof_tag, p,'
+      + ' omni_prof_pused, omni_prof_plost ? "，有丢" : "", omni_prof_pdeep ? "，有截深" : "");');
+    this.line('}');
     this.line('static void omni_prof_enter(int i) {');
     this.line('  omni_prof_calls[i]++;');
     this.line('  if (omni_prof_depth[i]++ == 0) omni_prof_beg[i] = omni_prof_now();');
@@ -1381,15 +1456,16 @@ class CEmitter {
     this.line('    if (omni_prof_sp < OMNI_PROF_STK) {');
     this.line('      int s = omni_prof_sp;');
     this.line('      unsigned long long dt = omni_prof_now() - omni_prof_stkt[s];');
-    this.line('      omni_prof_self[omni_prof_stkf[s]] += dt - omni_prof_stkc[s];');
+    this.line('      unsigned long long self = dt - omni_prof_stkc[s];');
+    this.line('      omni_prof_self[omni_prof_stkf[s]] += self;');
     this.line('      if (s > 0) omni_prof_stkc[s - 1] += dt;');
+    this.line('      omni_prof_path(s, self);');
     this.line('    }');
     this.line('  }');
     this.line('}');
-    /* 每份产物各有一张自己的表（都是 static），所以印的时候要说清是**谁**的 ——
-       核心 + 12 格插件一起跑时，不带标签的 13 张表混在 stderr 上分不出谁是谁。 */
-    this.line(`static const char *omni_prof_tag = ${JSON.stringify(this.plugin === null ? 'core' : this.plugin)};`);
-    this.line('static void omni_prof_dump(void) {');    this.line('  int ord[OMNI_PROF_N];');
+    /* 每份产物各有一张自己的表（都是 static）—— 标签在上面那格已经定过了。 */
+    this.line('static void omni_prof_dump(void) {');
+    this.line('  omni_prof_folded();');    this.line('  int ord[OMNI_PROF_N];');
     this.line('  int m = 0;');
     this.line('  for (int i = 0; i < OMNI_PROF_N; i++) if (omni_prof_calls[i]) ord[m++] = i;');
     this.line('  for (int a = 1; a < m; a++) {');
