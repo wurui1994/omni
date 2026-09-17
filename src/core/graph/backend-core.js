@@ -7,7 +7,7 @@
 // llvm 四条腿、摇树、profile、REPL、错误模型。ADR-0037 §5.1 那两条路里的 **B 路**就是它 ——
 // 「不新开一条路，就不会有两条路走散」（ADR-0034 那句话的同一条理由）。
 //
-// ## 这一刀接哪几档：**28 格里接了 27 格**（欠 `assert` —— 见 `coreCan` 那一句）
+// ## 这一刀接哪几档：**28 格全接**（节点级缺口 0）
 //
 // 图上**没有类型**（`nodes.js` 文件头第一条：type 不是节点），而核心方言是**有类型的**。
 // 这中间那一格差是这条腿的全部难处 —— 所以这一份里最多的代码是**把类型算出来**：
@@ -67,10 +67,15 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
      说了要哪一侧，源那一侧得我们自己算（`typeOf`）。 */
   'conv',
   /* **列表追加**（第三十批的 `prim push`）不在这张表里 —— 那是**内建**不是节点，
-     账记在 `PRIMS_OK` 上（方言里现成的一句 `(apush 数组 值)`）。
-     **断言**（第二十九批）：这一格**方言里没有对应物** —— 核心方言（`sexpr/lower.js`）
-     里没有"停下来"那一句话（没有 panic / abort / exit），所以这一刀发不出来。
-     它不是"忘了接"，是词汇表在**下一层**也欠一格；`coreCan` 里给了人话。 */
+     账记在 `PRIMS_OK` 上（方言里现成的一句 `(apush 数组 值)`）。 */
+  /* **断言**（第二十九批）：方言里**有**"停下来"那一句话 —— `(fail 串)`
+     （六条腿都是"印 omni: runtime error: 消息、退 70"，`sexpr/lower.js:1474`）。
+     那一刀落地时我写的是"方言里没有 panic / abort / exit" —— **那句话是错的**：
+     只 grep 了那三个词，漏了 `fail`。所以这一格不是欠账，是**照口径拼出来**：
+       (if (un "!" 条件) (do (print "assert failed…") (fail "assert failed")))
+     `print` 那一句让**可观察的那一行**与别的腿逐字节相同（图上只有这一个输出通道），
+     `fail` 那一句给"停下来"。 */
+  'assert',
 ]);
 
 /** 这一刀接得住的内建（`prims.js` 里 16 格中的 15 格；只有多实参 print 还欠着）。 */
@@ -761,6 +766,18 @@ function stmtIn(x, env, ctx) {
       const nm = `ret_tmp${ctx.tmp}`;
       return [`(let ${nm} ${typeOf(v, env, ctx)} ${expr(v, env, ctx)})`, ...pend, `(ret (var ${nm}))`];
     }
+    /**
+     * **断言**：方言里没有 assert 这一格，但有"停下来"（`(fail 串)`）—— 所以照口径拼：
+     *   条件不成立 -> 先 `print` 那一行（**可观察的那一行要与别的腿逐字节相同**），
+     *   再 `fail` 停下来。条件那一格走 `condText`（不是 bool 就报，不擅自补 `!= 0`）。
+     */
+    case 'assert': {
+      const cond = condText(x.ins.cond, env, ctx);
+      const line = x.ins.msg === undefined || x.ins.msg === null
+        ? '(str "assert failed")'
+        : concatText([litNode('assert failed: '), x.ins.msg], env, ctx);
+      return [`(if (un "!" ${cond}) (do (print ${line}) (fail (str "assert failed"))))`];
+    }
     case 'prim': {
       /* **列表追加**：方言里现成的一句 `(apush 数组 值)`（`bindSlice` 用的就是它）。
          它在方言里是**语句**，所以只在语句位置上给 —— 表达式位置上那一格报缺口
@@ -1417,20 +1434,14 @@ function retTypeOf(body, env, ctx) {
 /**
  * `can` 那一问：这格节点接不接得住（接不住给一句人话 —— 那句话就是账）。
  *
- * **28 格里接了 27 格**：只欠 `assert`（第二十九批新加的那一格 —— 核心方言里没有
- * "停下来"那一句话，见下面 `coreCan` 里那段）。剩下的账都是**形状上的**
+ * **28 格全接上了**（第二十九批那格 `assert` 照口径拼出来 —— 方言的 `(fail 串)` 给"停下来"、
+ * 一句 `print` 给那行可观察的话）：节点级缺口 0。剩下的账都是**形状上的**
  * （同一格节点的某种用法接不住）—— 那几条在 `CORE_SHAPES` 里，各带一份证物。
  * 原先这儿挂着一张 `WHY` 表（逐格说"欠在方言里还是欠在这份翻译上"），现在一格不欠，
  * 留着就是过期的账 —— 所以删了，不留。
  */
 export function coreCan(op) {
   if (OPS.has(op)) return true;
-  /* **断言**：欠的不是这一层，是**方言**里没有"停下来"那一句话（没有 panic / abort /
-     exit）。所以这一格不是"忘了接"，是词汇表在下一层也欠一格 —— 说清了再欠。 */
-  if (op === 'assert') {
-    return 'core 这条腿还没接：assert —— 核心方言里没有"停下来"那一句话'
-      + '（没有 panic / abort / exit），这一格要先在方言那一层加';
-  }
   if (declOf(op) === undefined) return `core 后端不认识这格节点：${op}`;
   return `core 这条腿还没接：${op}（清单里没有它 —— 这一格是新加的节点，`
     + '要么补进 backend-core.js，要么在这儿说清为什么不接）';
