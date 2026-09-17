@@ -609,7 +609,24 @@ function toNode(x) {
     case 'defer': return node('scope-exit', { action: many(kids(x)) });
     case 'call': {
       const [fn, args] = kids(x);
-      const argNodes = args === undefined ? [] : many(kids(args));
+      const rawArgs = args === undefined ? [] : kids(args);
+      /**
+       * `f(a: 3, b: 4)` —— V 的**"命名实参"其实是那格参数结构体的字面量**
+       * （`fn f(o Opts)` 可以写成 `f(a: 3, b: 4)`，等价于 `f(Opts{a: 3, b: 4})`）。
+       *
+       * 所以它落的是**一格 record-new 当唯一的实参**，不是"按形参名排回位置" ——
+       * 那些名字是**结构体的字段名**，不是形参名（形参只有一个，叫 `o`）。
+       * 按形参名排会错得很难看：字段名与形参名根本不是同一族名字。
+       * 混着写（有名的与位置的一起）V 自己也不许 —— 当场报。
+       */
+      if (rawArgs.length > 0 && rawArgs.some((a) => tag(a) === 'named')) {
+        if (!rawArgs.every((a) => tag(a) === 'named')) {
+          throw new Error('v->graph: 实参里"有名的"与"位置的"混着 —— V 也不许这么写');
+        }
+        const rec = recordNew(rawArgs.map((a) => [leaf(kids(a)[0]), toNode(kids(a)[1])]));
+        return node('call', { fn: toNode(fn), args: [rec] });
+      }
+      const argNodes = many(rawArgs);
       const callee = tag(fn) === 'name' ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {

@@ -10,12 +10,21 @@
 //
 // 声明不在这一份文件里、或者那个 struct 有**嵌入字段**（嵌入的那一格在构造顺序里占几格
 // 要展开被嵌类型才知道），都当场报 —— 不猜。
+//
+// 末一行是**第三种写法**：`total(x: 2, y: 3)`。V 的"命名实参"其实就是**那格参数结构体的
+// 字面量**（`fn total(o Point)` 可以这么调，等价于 `total(Point{x: 2, y: 3})`）——
+// 所以它落的是一格 record-new 当唯一的实参，**不是"按形参名排回位置"**：那些名字是
+// **字段名**，不是形参名（形参只有一个，叫 `o`）。混着写（有名的与位置的一起）当场报。
 
 module main
 
 struct Point {
 	x int
 	y int
+}
+
+fn total(o Point) int {
+	return o.x + o.y
 }
 
 fn main() {
@@ -26,4 +35,5 @@ fn main() {
 	mut r := Point{7, 8}
 	r.y = 9
 	println(r.x + r.y)
+	println(total(x: 2, y: 3))
 }
