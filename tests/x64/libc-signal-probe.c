@@ -43,6 +43,10 @@ static void judge(int cond, const char *what) {
   else { printf("FAIL %s\n", what); fails++; }
 }
 
+/* 最高那一号两条腿不一样：Darwin 的 `sigset_t` 是 32 位（1..32），Linux 那边
+ * `sigset_t` 是 128 字节但 `NSIG` 是 65 —— 所以按 sigset 的大小挑「顶上那一号」。 */
+#define TOPSIG (sizeof(sigset_t) == 4 ? 32 : 64)
+
 static int install(int sig, void (*fn)(int), struct sigaction *old) {
   struct sigaction sa;
   memset(&sa, 0, sizeof sa);
@@ -84,15 +88,17 @@ int main(void) {
 
   sigset_t set;
   sigemptyset(&set);
+  int top = TOPSIG;
   int a = sigismember(&set, SIGUSR1);
   sigaddset(&set, SIGUSR1);
-  sigaddset(&set, 64);
+  sigaddset(&set, top);
   int b = sigismember(&set, SIGUSR1);
-  int c = sigismember(&set, 64);
+  int c = sigismember(&set, top);
   int d = sigismember(&set, SIGALRM);
   sigdelset(&set, SIGUSR1);
   int e = sigismember(&set, SIGUSR1);
-  printf("     位算术拿到的五个数：%d %d %d %d %d（该是 0 1 1 0 0）\n", a, b, c, d, e);
+  printf("     位算术拿到的五个数：%d %d %d %d %d（该是 0 1 1 0 0，顶上那号是 %d）\n",
+    a, b, c, d, e, top);
   judge(a == 0 && b == 1 && c == 1 && d == 0 && e == 0,
     "sigemptyset/sigaddset/sigismember/sigdelset 的位算术");
 

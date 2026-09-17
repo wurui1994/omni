@@ -226,6 +226,18 @@
 #         写成宏（那儿的 `sigset_t` 是 32 位）—— 那三格根本没调到我们的 libc，是内联的
 #         32 位读写，于是「清完只清了低四字节、第 63 位怎么都置不上」。加 `--sysroot` 之后
 #         12 格全过。这条写进探子头上了。
+#      o. macOS 那条腿的信号也补上了（第十六格）：Darwin 内核跳的是**用户给的
+#         `sa_tramp`**，所以跳板长一些 —— 15 条 arm64 指令：存住 x1（infostyle）、
+#         x4（uctx）、x5（token），按 `handler(sig, siginfo, uctx)` 调过去，回来走
+#         `sigreturn(uctx, infostyle, token)`（号 184，少了 token 新内核会拒）。
+#         同样是 mmap 一页 → 填码 → mprotect 成可执行（Apple Silicon 上「先可写、
+#         再改成可执行」对没上 hardened runtime 的进程通，单开一格量过才敢这么写）。
+#         `alarm` 那边没有对应的号，走 `setitimer(ITIMER_REAL)`（83）。
+#         判据变成 `tests/c/libc-signal.js`（7 格：编得过、链得上、跑得完、尺子自己
+#         全过、我们全过、逐行相同）。量到的：
+#           arm64-osx（本机，`--libc self`）：162928 字节，12/12，与 Apple 的 libc
+#             **逐行相同**（14 行）
+#           x86_64-linux（容器，`--libc self`）：245509 字节，12/12，与 glibc 逐行相同
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

@@ -98,19 +98,26 @@ MIR 说「要什么」，摆法归后端。
 - 线程：`pthread_create` 照 POSIX 回 `EAGAIN` —— 我们的运行时**本来就有退路**
   （`omni_js_host.c:88`：开不出线程就直接调 `entry()`）。
 - `backtrace` 回 0（诊断用）；`dlopen` 一族调到就崩（假句柄比崩坏）。
-- macOS 那条腿的 `sigaction` 还回 `ENOSYS`：Darwin 的 `sigaction(46)` 要用户自己给
-  `sa_tramp`，那个跳板得保住 x1/x4/x5 再走 `sigreturn(184)`—— 与 Linux 那 9 个字节
-  不是一回事，另开一格。
 
-**信号那一格（x86_64-linux，第十五格）已经是真的**：`sigaction` 走 `rt_sigaction(13)`，
-`SA_RESTORER` 要的那个跳板**运行时自己写**（`mmap` 一页 → 填
-`48 c7 c0 0f 00 00 00 | 0f 05`（`mov rax,15; syscall`）→ `mprotect` 成可执行），
-所以不用等汇编器。用户那份 `struct sigaction`（`{handler, mask[128], flags@136,
-restorer@144}`）与内核那份（`{handler, flags, restorer, mask}`，还要第四个参数
-`sigsetsize=8`）在这一层翻译。顺带把两处**假话**改真：`alarm` 原先「收下就扔」
-（现在是号 37），`sigemptyset`/`sigaddset` 原先「回 0 什么都不做」（现在是真的位算术，
-外加 `sigfillset`/`sigdelset`/`sigismember`）。判据 `tests/x64/libc-signal-probe.c`
-自己判自己，12 格全 ok —— 我们那份与 gcc 那份尺子**逐行相同**。
+**信号那一格（两条腿都真的了，第十五、十六格）**：`sigaction` 各走各的号
+（Linux `rt_sigaction(13)` / Darwin `sigaction(46)`），共同点是**跳板运行时自己写**
+（`mmap` 一页 → 填机器码 → `mprotect` 成可执行），所以不用等汇编器：
+- Linux：内核跳 `restorer`，9 个字节就够 —— `48 c7 c0 0f 00 00 00 | 0f 05`
+  （`mov rax,15; syscall`）。C 函数当不了它：任何序言都会动 rsp，而 `rt_sigreturn`
+  读的正是进来时那一帧。用户那份 `{handler, mask[128], flags@136, restorer@144}`
+  与内核那份 `{handler, flags, restorer, mask}`（外加 `sigsetsize=8`）在这一层翻译。
+- Darwin：内核跳的是**用户给的 `sa_tramp`**，15 条 arm64 指令 —— 存住 x1（infostyle）、
+  x4（uctx）、x5（token），按 `handler(sig, siginfo, uctx)` 调过去，回来
+  `sigreturn(uctx, infostyle, token)`（号 184）。少了 token 那一格新内核会拒。
+  Apple Silicon 上 W^X 是真的，但「先可写、再改成可执行」这条路对没上 hardened
+  runtime 的进程通 —— 单开一格量过。
+顺带把三处**假话**改真：`alarm`（原先收下就扔；Linux 号 37、Darwin 走 `setitimer`）、
+`sigemptyset`/`sigaddset`（原先回 0 什么都不做），外加 `sigfillset`/`sigdelset`/
+`sigismember`/`getpid`。`sigset_t` 两条腿不是一回事（Linux 16 个 64 位字、Darwin
+一个 32 位字，所以只有 1..32 号），这五格只能各写一份。
+判据 `tests/c/libc-signal.js` + `tests/x64/libc-signal-probe.c`（自己判自己 12 格）：
+两条腿都 12/12，与平台 libc **逐行相同**（各 14 行）。
+`SA_SIGINFO` 故意不给：那要三参数的处理函数，我们那一层只翻译一参数的。
 
 ## 浮点打印：与平台 libc **一行不差**（第一百四十片第九格）
 

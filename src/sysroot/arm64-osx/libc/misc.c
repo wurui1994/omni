@@ -7,8 +7,9 @@
  *   真的实现了：gettimeofday/time/clock、getenv/setenv、fork/execvp/waitpid/system/
  *               kill、opendir/readdir/closedir（`getdirentries64`）、remove、
  *               realpath（`fcntl(F_GETPATH)`）、mkdtemp、getrlimit/getrusage、
- *               setjmp/longjmp（后端那两条 op，布局见 `arm64/from_mir.js`）
- *   回失败但不崩：sigaction（要跳板）、pthread 一族（回 EAGAIN，运行时有退路）
+ *               setjmp/longjmp（后端那两条 op）、**sigaction**（第十六格，跳板 mmap+mprotect，
+ *               见那一段注释）、alarm（`setitimer`）、getpid
+ *   回失败但不崩：pthread 一族（回 EAGAIN，运行时有退路）
  *   调到就崩：  dlopen 一族
  */
 #include "libc.h"
@@ -209,7 +210,21 @@ int system(const char *cmd) {
   return st;
 }
 
-unsigned int alarm(unsigned int sec) { (void)sec; return 0; }   /* 要 SIGALRM，见文件头 */
+/* `alarm` 原先是「收下参数什么都不做」—— 那时 `sigaction` 回 ENOSYS，闹钟响了也没人接。
+ * 现在 `sigaction` 是真的了，这一格也补上：Darwin **没有 `alarm` 这个号**，走
+ * `setitimer(ITIMER_REAL, …)`（83）。`struct itimerval` 是两个 `timeval`，
+ * Darwin 的 `timeval` = `{long tv_sec; int tv_usec;}`（对齐到 8，所以一格 16 字节）。 */
+unsigned int alarm(unsigned int sec) {
+  unsigned long nv[4];
+  unsigned long ov[4];
+  nv[0] = 0; nv[1] = 0;                     /* it_interval：不重复 */
+  nv[2] = (unsigned long)sec; nv[3] = 0;    /* it_value */
+  for (int i = 0; i < 4; i++) ov[i] = 0;
+  long r = __omni_syscall(SYS_setitimer, 0 /* ITIMER_REAL */, (long)nv, (long)ov);
+  if (r < 0 && r >= -4095) { __libc_errno_val = (int)-r; return 0; }
+  return (unsigned int)ov[2];               /* 上一个闹钟还剩几秒 */
+}
+int getpid(void) { return (int)__omni_syscall(SYS_getpid); }
 
 /* ---- 目录：`getdirentries64`（344）。Darwin 回的记录是
  *   {u64 d_ino, u64 d_seekoff, u16 d_reclen, u16 d_namlen, u8 d_type, char d_name[]}
@@ -324,14 +339,101 @@ int getrusage(int who, void *ru) {
   return (int)__libc_check(__omni_syscall(SYS_getrusage, who, (long)ru));
 }
 
-/* ---- 回失败但不崩的那几格（理由见文件头） */
-int sigaction(int sig, const void *act, void *old) {
-  (void)sig; (void)act; (void)old;
-  __libc_errno_val = 78;            /* ENOSYS（Darwin 的号） */
-  return -1;
+/* ---- 信号（第一百四十片第十六格）。**真的装得上了**，两条腿的做法不一样。
+ *
+ * Linux 那边内核跳 `restorer`，两条指令就够；Darwin 这边内核跳的是**用户给的
+ * `sa_tramp`**，而且那个跳板要干三件事：把 x1（infostyle）、x4（uctx）、x5（token）
+ * 存住，按 `handler(sig, siginfo, uctx)` 调过去，回来再 `sigreturn(uctx, infostyle,
+ * token)`（号 184）。token 那一格是新内核要的，少了就拒。
+ *
+ * 跳板同样是**运行时自己写的机器码**（`mmap` 一页 → 填 15 条 arm64 指令 →
+ * `mprotect` 成可执行）。Apple Silicon 上 W^X 是真的，但「先可写、再改成可执行」
+ * 这条路对没上 hardened runtime 的进程是通的 —— 单开一格量过才敢这么写。
+ *
+ * 进内核那份结构（`struct __sigaction`，24 字节）与用户那份（16 字节，见
+ * include/signal.h）不是一个形状：内核那份中间多一格 `sa_tramp`，`sa_mask` 是
+ * **32 位**（Darwin 的 sigset_t 就是 `unsigned int`，所以只有 1..32 号）。 */
+#define MOVX(d, s) (0xAA0003E0u | ((unsigned int)(s) << 16) | (unsigned int)(d))
+
+struct __ksigaction {
+  unsigned long handler;
+  unsigned long tramp;
+  unsigned int mask;
+  int flags;
+};
+
+static unsigned long sigTramp;      /* 那一页在哪儿（0 = 还没要过） */
+
+static unsigned long sigTrampGet(void) {
+  if (sigTramp) return sigTramp;
+  long p = __omni_syscall(SYS_mmap, 0, 16384, 3 /* READ|WRITE */,
+                          0x1002 /* PRIVATE|ANON */, -1, 0);
+  if (p < 0 && p >= -4095) return 0;
+  unsigned int *c = (unsigned int *)p;
+  int i = 0;
+  c[i++] = MOVX(19, 0);                            /* x19 = handler */
+  c[i++] = MOVX(20, 4);                            /* x20 = uctx */
+  c[i++] = MOVX(21, 1);                            /* x21 = infostyle */
+  c[i++] = MOVX(22, 5);                            /* x22 = token */
+  c[i++] = MOVX(0, 2);                             /* x0 = sig */
+  c[i++] = MOVX(1, 3);                             /* x1 = siginfo */
+  c[i++] = MOVX(2, 20);                            /* x2 = uctx */
+  c[i++] = 0xD63F0000u | (19u << 5);               /* blr x19 */
+  c[i++] = MOVX(0, 20);
+  c[i++] = MOVX(1, 21);
+  c[i++] = MOVX(2, 22);
+  c[i++] = 0xD2800000u | (184u << 5) | 16u;        /* movz x16, #184（sigreturn） */
+  c[i++] = 0xF2A00000u | (0x200u << 5) | 16u;      /* movk x16, #0x200, lsl #16 */
+  c[i++] = 0xD4001001u;                            /* svc #0x80 */
+  c[i++] = 0xD4200000u;                            /* brk #0（sigreturn 不回来） */
+  long m = __omni_syscall(SYS_mprotect, p, 16384, 5 /* READ|EXEC */);
+  if (m < 0 && m >= -4095) return 0;
+  sigTramp = (unsigned long)p;
+  return sigTramp;
 }
-int sigemptyset(void *set) { (void)set; return 0; }
-int sigaddset(void *set, int sig) { (void)set; (void)sig; return 0; }
+
+int sigaction(int sig, const void *act, void *old) {
+  struct __ksigaction k;
+  struct __ksigaction ko;
+  const unsigned char *a = (const unsigned char *)act;
+  unsigned char *o = (unsigned char *)old;
+  if (act) {
+    unsigned long t = sigTrampGet();
+    if (t == 0) { __libc_errno_val = 78 /* ENOSYS */; return -1; }
+    k.handler = *(const unsigned long *)a;
+    k.mask = *(const unsigned int *)(a + 8);
+    k.flags = *(const int *)(a + 12);
+    k.tramp = t;
+  }
+  long r = __omni_syscall(SYS_sigaction, sig, act ? (long)&k : 0, old ? (long)&ko : 0);
+  if (r < 0 && r >= -4095) { __libc_errno_val = (int)-r; return -1; }
+  if (old) {
+    *(unsigned long *)o = ko.handler;
+    *(unsigned int *)(o + 8) = ko.mask;
+    *(int *)(o + 12) = ko.flags;
+  }
+  return 0;
+}
+
+/* Darwin 的 `sigset_t` 是**一个 32 位字**（1..32 号），Linux 那边是 16 个 64 位字 ——
+ * 所以这五格两条腿各一份，提不到公用的 `pure.c` 里去。原先那两格「回 0 什么都不做」
+ * 是假话：没清过的 set 会带着栈上的垃圾进内核。 */
+int sigemptyset(void *set) { *(unsigned int *)set = 0; return 0; }
+int sigfillset(void *set) { *(unsigned int *)set = ~0u; return 0; }
+int sigaddset(void *set, int sig) {
+  if (sig < 1 || sig > 32) { __libc_errno_val = 22 /* EINVAL */; return -1; }
+  *(unsigned int *)set |= 1u << (sig - 1);
+  return 0;
+}
+int sigdelset(void *set, int sig) {
+  if (sig < 1 || sig > 32) { __libc_errno_val = 22 /* EINVAL */; return -1; }
+  *(unsigned int *)set &= ~(1u << (sig - 1));
+  return 0;
+}
+int sigismember(const void *set, int sig) {
+  if (sig < 1 || sig > 32) { __libc_errno_val = 22 /* EINVAL */; return -1; }
+  return (*(const unsigned int *)set >> (sig - 1)) & 1 ? 1 : 0;
+}
 
 int pthread_create(void *t, const void *a, void *(*fn)(void *), void *arg) {
   (void)t; (void)a; (void)fn; (void)arg;

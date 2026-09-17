@@ -34,6 +34,8 @@
 #define SYS_readlink        (SYS_CLASS_UNIX | 58)
 #define SYS_execve          (SYS_CLASS_UNIX | 59)
 #define SYS_munmap          (SYS_CLASS_UNIX | 73)
+#define SYS_mprotect        (SYS_CLASS_UNIX | 74)
+#define SYS_setitimer       (SYS_CLASS_UNIX | 83)
 #define SYS_dup2            (SYS_CLASS_UNIX | 90)
 #define SYS_fcntl           (SYS_CLASS_UNIX | 92)
 #define SYS_gettimeofday    (SYS_CLASS_UNIX | 116)
