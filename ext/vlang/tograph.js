@@ -478,7 +478,7 @@ function toNode(x) {
     case 'attributed': return toNode(kids(x)[1]);
     case 'const': case 'global': return cbinds(x);
     default:
-      throw new Error(`v->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
+      throw new Error(`v->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
   }
 }
 

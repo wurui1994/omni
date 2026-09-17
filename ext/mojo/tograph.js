@@ -330,7 +330,7 @@ function toNode(x) {
       return node('bind', { init: toNode(kids(ini)[0]) }, { name: leaf(kids(nm)[0]) });
     }
     default:
-      throw new Error(`mojo->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
+      throw new Error(`mojo->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
   }
 }
 

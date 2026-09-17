@@ -498,7 +498,7 @@ function toNode(x) {
       return node('call', { fn: toNode(fn), args: many(argKids) });
     }
     default:
-      throw new Error(`cpp->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
+      throw new Error(`cpp->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
   }
 }
 

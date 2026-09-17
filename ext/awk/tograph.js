@@ -181,7 +181,7 @@ function toNode(x) {
         + '（ext/awk/SPEC.md §3.2：那是只有 awk 一家的节点，还没做）');
     }
     default:
-      throw new Error(`awk->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
+      throw new Error(`awk->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
   }
 }
 

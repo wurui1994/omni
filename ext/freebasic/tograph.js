@@ -284,7 +284,7 @@ function toNode(x) {
     }
     case 'scope': return node('region', { body: many(kids(part(x, 'body') ?? { kind: 'list', items: [] })) });
     default:
-      throw new Error(`fb->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
+      throw new Error(`fb->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
   }
 }
 

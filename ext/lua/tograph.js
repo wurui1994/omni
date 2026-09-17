@@ -379,7 +379,7 @@ function toNode(x) {
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     default:
-      throw new Error(`lua->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
+      throw new Error(`lua->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
   }
 }
 

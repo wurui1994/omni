@@ -71,6 +71,13 @@ export const MUT = ['1', '3'];
  */
 export const VARDECL = ['15', '1', '3', '6', '5', '2'];
 /**
+ * casefor：**`case` 与 `for … in`**（nim 独一份）—— 落 branch 链 / `counted`，一格新节点
+ * 都没加。nim 在这两处各有一条别人没有的：`case` 里除了 `of` 还能有 **`elif`**（走自己的
+ * 条件，不是"主语等于什么"）；区间是**中缀算符**（`..<` 不含、`..` 含）而不是另一条产生式。
+ * 末一行是 `discard f()`：算掉、把值扔了 —— 带作用的那一格留下。
+ */
+export const CASEFOR = ['10', '20', '30', '40', '60', '6'];
+/**
  * posinit：**位置型结构字面量**（V 独一份）—— `Point{1, 5}` 只给了值，字段名与顺序从
  * **声明**来（与 mojo / CL / Scheme / FB 那四门同一条）。同一条产生式两种写法：
  * 位置型出 `(positional …)`、带名字的出 `(f 名 值)`；混着写当场报。
@@ -219,6 +226,10 @@ export const CASES = [
   // 顺序从声明来"那条既有路子在这一门上的第五个提供者，而 V 的特殊之处是**同一条产生式
   // 两种写法**（位置型与带名字的），所以要一格判据把两者摆在一起。
   ...fam('posinit', POSINIT, ['vlang']),
+  // 第二十八个家族：**case 与 for … in**（nim 独一份）。与 go 的 switch/range、V 的
+  // match/for-in 是同一批格子 —— 单开一族是为了压住 nim 多出来的那两条：
+  // case 里的 `elif`（走自己的条件）与"区间是中缀算符"。
+  ...fam('casefor', CASEFOR, ['nim']),
 ];
 
 /**

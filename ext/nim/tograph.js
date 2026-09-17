@@ -14,7 +14,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   isList, tag, kids, leaf, part, groupItems, unquote,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, counted,
   recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, destructure,
   mapNew, mapGet, mapSet, mapHas, mapNames,
 } from '../../src/core/graph/fromtree.js';
@@ -149,7 +149,12 @@ function toNode(x) {
         const [, a, b] = kids(sub);
         return sliceOf(toNode(kids(x)[0]), toNode(a), bin('+', toNode(b), lit(1)));
       }
-      // `m["a"]` 与 `xs[0]` 在树上同形（都是 `bracket`）—— 分开靠那一趟扫查
+      // `m["a"]` 与 `xs[0]` 在树上同形（都是 `bracket`）—— 分开靠那一趟扫查。
+      // **下标那一格是空的**就是 nim 的解引用（`p[]`）：图上没有指针那一格，当场报 ——
+      // 原来这儿把 undefined 往下传，一路走到兜底那句话上炸成了 TypeError。
+      if (sub === undefined) {
+        throw new Error('nim->graph: `p[]`（解引用）图上没有指针那一格 —— 这一批不猜');
+      }
       const obj = kids(x)[0];
       return isMap(obj) ? mapGet(toNode(obj), toNode(sub)) : indexGet(toNode(obj), toNode(sub));
     }
@@ -293,9 +298,182 @@ function toNode(x) {
       }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
+    // `nil` 那一格在 `name` 分支里认 'nil' 只兜住了写成名字的那一路，
+    // 而 nim.grammar 给 nil 一条**自己的产生式** `(nil)` —— 与 vlang 的 `(bool …)` 同一种错
+    case 'nil': return node('const', {}, { value: null });
+    // `'a'` —— nim 的字符字面量是**自己一格类型**：`echo 'a'` 印的是字符，而 `ord('a')`
+    // 又要它是数。图上这两件事是两格（串与整数），落哪一格都会在另一处错 ——
+    // **当场报**，等有了字符那一格再说。
+    case 'char':
+      throw new Error('nim->graph: char 是自己一格类型（印出来是字符、`ord` 又要它是数）'
+        + ' —— 图上这两件事是两格，这一批不猜');
+    // `{1, 3, 5}` —— nim 的 set 字面量。图上没有 set，**当场报**。
+    case 'set-lit':
+      throw new Error('nim->graph: set 字面量（`{1, 3, 5}`）图上没有那格节点 —— 这一批不猜');
+    // `from system import nil` / `export symbol` —— 另两种导入写法，丢掉
+    case 'from': case 'export': return [];
+    // `discard f()` / `discard` —— **算掉、把值扔了**。带作用的那一格（调用）要留下，
+    // 纯值那一格扔了就是真的没了（`discard 0` 是 nim 写"这儿什么都不做"的办法）。
+    case 'discard': {
+      const e = kids(x)[0];
+      if (e === undefined) return [];
+      const v = toNode(e);
+      return v.op === 'call' || v.op === 'prim' ? v : [];
+    }
+    /**
+     * `for x in xs:` 落一格**计数循环**（`counted`，与 go 的 range、V 的 `for … in` 同一格）。
+     *
+     * nim 这一格的特殊之处在于 **`countup` / `countdown` / 区间操作符 `..` 和 `..<`**
+     * 都在语料里——但它们在树上就是普通调用或中缀运算符。所以这一格收两条路：
+     *   * `for x in collection:` —— 按长度遍历（与 V 的 `for x in xs` 一样：
+     *     一个名字给的是元素，两个名字才是"下标 + 元素"）。
+     *   * `for x in a ..< b:` —— 区间（上界不含 `..<` 或含 `..`）：没有序列，
+     *     x 直接走 counted。
+     *
+     * 迭代器（`items` / `pairs`）还没接——但它们在树上也只是一格调用，
+     * 第一批走不进去只是因为调用的返回值没有类型。
+     */
+    case 'for': {
+      const nms = part(x, 'names') ?? part(x, 'untuple');
+      const body = kids(x).find((y) => tag(y) === 'body');
+      const subj = kids(x).find((y) => tag(y) !== 'names' && tag(y) !== 'untuple'
+        && tag(y) !== 'body');
+      if (nms === undefined || subj === undefined) {
+        throw new Error('nim->graph: for 里没有 (names …) 或 subject');
+      }
+      const names = kids(nms).map((n) => nameOf(n));
+      const inner = body === undefined ? [] : many(kids(body));
+      const at = (n) => node('ref', {}, { name: n });
+      // 区间：`for i in 0 ..< n:` —— 中缀 `..<` 或 `..` 在树上就是一格 bin
+      if (tag(subj) === 'bin' && (leaf(kids(subj)[0]) === '..<'
+          || leaf(kids(subj)[0]) === '..')) {
+        if (names.length !== 1) {
+          throw new Error('nim->graph: 区间那一路只能有一格名字');
+        }
+        const [op, lo, hi] = kids(subj);
+        const limName = '__fl0';
+        const isExcl = leaf(op) === '..<';
+        return node('region', {
+          body: [
+            node('bind', { init: toNode(hi) }, { name: limName }),
+            counted({
+              name: names[0],
+              from: toNode(lo),
+              cond: bin(isExcl ? '<' : '<=', at(names[0]), at(limName)),
+              body: [node('region', { body: inner })],
+            }),
+          ],
+        });
+      }
+      // 调用 countup / countdown 也是区间：`for i in countup(a, b):`
+      if ((tag(subj) === 'call' || tag(subj) === 'command')) {
+        const fn = kids(subj)[0];
+        const cName = (tag(fn) === 'name' || tag(fn) === 'n') ? leaf(kids(fn)[0]) : null;
+        if (cName === 'countup' || cName === 'countdown') {
+          if (names.length !== 1) {
+            throw new Error(`nim->graph: ${cName} 那一路只能有一格名字`);
+          }
+          const argNodes = kids(kids(subj)[1] ?? []);
+          if (argNodes.length < 2) {
+            throw new Error(`nim->graph: ${cName} 要两格实参`);
+          }
+          const limName = '__fl0';
+          return node('region', {
+            body: [
+              node('bind', { init: toNode(argNodes[1]) }, { name: limName }),
+              counted({
+                name: names[0],
+                from: toNode(argNodes[0]),
+                cond: bin(cName === 'countdown' ? '>=' : '<=', at(names[0]), at(limName)),
+                body: [node('region', { body: inner })],
+                step: cName === 'countdown' ? lit(-1) : undefined,
+              }),
+            ],
+          });
+        }
+      }
+      // 集合遍历
+      if (isMap(subj)) {
+        throw new Error('nim->graph: `for k in table:` 要按键遍历 —— 图上还没有那一格');
+      }
+      // 一般集合（seq / array）
+      const seq = '__ns0';
+      const idx = '__ni0';
+      const cnt = '__nn0';
+      const head = [];
+      const elem = indexGet(at(seq), at(idx));
+      if (names.length === 1) {
+        if (names[0] !== '_') head.push(node('bind', { init: elem }, { name: names[0] }));
+      } else if (names.length === 2) {
+        if (names[0] !== '_') head.push(node('bind', { init: at(idx) }, { name: names[0] }));
+        if (names[1] !== '_') head.push(node('bind', { init: elem }, { name: names[1] }));
+      }
+      return node('region', {
+        body: [
+          node('bind', { init: toNode(subj) }, { name: seq }),
+          node('bind', { init: node('prim', { args: [at(seq)] }, { name: 'len' }) }, { name: cnt }),
+          counted({
+            name: idx,
+            from: lit(0),
+            cond: bin('<', at(idx), at(cnt)),
+            body: [node('region', { body: [...head, ...inner] })],
+          }),
+        ],
+      });
+    }
+    /**
+     * `case x` 落一条 **branch 链**（与 go 的 switch、V 的 match 同一件事）。
+     *
+     * nim 的 case 有 `of` / `elif` / `else` 三种分支 —— `elif` 走**自己的条件**
+     * （不是"主语等于什么"），它比 go 的 switch 多出来的正是这一格。
+     */
+    case 'case': {
+      const subj = kids(x)[0];
+      const holder = '__cs0';
+      const at = (n) => node('ref', {}, { name: n });
+      const arms = [];
+      let dflt;
+      for (const a of kids(x).slice(1)) {
+        if (tag(a) === 'else') {
+          dflt = node('region', { body: many(kids(a)) });
+          continue;
+        }
+        if (tag(a) === 'elif') {
+          const eb = part(a, 'body');
+          if (eb === undefined) throw new Error('nim->graph: elif 里没有 (body …)');
+          arms.push([toNode(kids(a)[0]), node('region', { body: many(kids(eb)) })]);
+          continue;
+        }
+        if (tag(a) !== 'of') throw new Error(`nim->graph: case 里不该有 ${tag(a)}`);
+        const vals = part(a, 'values');
+        const body = kids(a).find((y) => tag(y) === 'body');
+        if (vals === undefined) throw new Error('nim->graph: of 里没有 (values …)');
+        const conds = kids(vals).map((v) =>
+          binOf('==', at(holder), toNode(v), OPS, { lang: 'nim', and: ['and'], or: ['or'] }));
+        arms.push([
+          conds.reduce((p, q) => lazyOr(p, q)),
+          node('region', { body: body === undefined ? [] : many(kids(body)) }),
+        ]);
+      }
+      let chain = dflt;
+      for (let i = arms.length - 1; i >= 0; i -= 1) chain = branchOf(arms[i][0], arms[i][1], chain);
+      if (chain === undefined) return [];
+      return node('region', {
+        body: [node('bind', { init: toNode(subj) }, { name: holder }), chain],
+      });
+    }
+    // `when` 是 nim 的**编译期分支**（V 里那一格叫 `ctime`、`$if`）。
+    //
+    // **它不是映射的账，也不能丢掉**：`when defined(windows): …` 丢掉就少了一段代码，
+    // 顶层的 `when` 里还装着声明 —— 丢了就是"答案错而不报"。落成运行期 branch 也不对：
+    // 没走的那一支在 nim 里根本不要求编得过。这一格要的是**编译期求值**（ADR-0037 §7
+    // 第 9 步那一刀），所以它留在墙上。
+    case 'when':
+      throw new Error('nim->graph: `when` 是编译期分支 —— 丢掉会少一段代码、落成运行期'
+        + ' branch 又不对（没走的那一支不要求编得过）。这一格等编译期求值那一刀');
     case 'import': case 'include': case 'type-section': case 'pragma': return [];
     default:
-      throw new Error(`nim->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
+      throw new Error(`nim->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
   }
 }
 
