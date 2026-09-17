@@ -387,9 +387,30 @@ function objText(obj, env, ctx) {
 function callText(x, env, ctx) {
   const f = x.ins.fn;
   if (!isNode(f) || f.op !== 'ref') gap('调一格不是名字的东西（函数值那一档）');
-  const args = argList(x, 'args').map((a) => expr(a, env, ctx));
+  const args = argList(x, 'args').map((a, i) => argText(f.attrs.name, i, a, env, ctx));
   return `(call ${f.attrs.name}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
 }
+
+/**
+ * 一格实参。两件事：
+ *   一、**把类型记进 `ctx.args`** —— 形参就是靠这一格定型的（图上没有类型，只有调用点知道）；
+ *   二、聚合在实参位置上**是允许的**（方言的结构体是值语义、数组与字典是句柄，三样都能当
+ *       形参）—— 所以这儿绕过 `expr` 那道"整格当值用"的门，自己拼名字。
+ */
+function argText(fname, i, a, env, ctx) {
+  const t = typeOf(a, env, ctx);
+  const key = `${fname}#${i}`;
+  const had = ctx.args.get(key);
+  if (had !== undefined && had !== t) {
+    gap(`'${fname}' 第 ${i + 1} 格实参在两处的类型不一样（${had} 与 ${t}）—— 方言的形参是单态的`);
+  }
+  ctx.args.set(key, t);
+  if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return `(var ${a.attrs.name})`;
+  return expr(a, env, ctx);
+}
+
+/** 这一格类型是不是聚合（记录 / 列表 / 字典 / 多值）。 */
+const isAggregate = (t, ctx) => ctx.shapes.has(t) || elemType(t) !== null || dictOf(t) !== null;
 
 /** 一格字面量的方言写法。 */
 function lit(v) {
@@ -751,19 +772,25 @@ function hasContinue(x) {
 }
 
 /**
- * 图 -> 方言文本（`(module (fn …)… (main …))`）。
+ * 图 -> 方言文本（`(module (struct …)… (fn …)… (main …))`）。
  *
  * 顶层分两拨：`bind` 一格 `func` 的落成 `(fn …)`，别的落进 `(main …)`。
- * 函数的**形参与返回都按 int**（这一刀的边界，见文件头）—— 体里 `ret` 一格串或真假时
- * 按那个类型收，收不齐就当场报（不猜）。
+ *
+ * **先落 main、后落函数**（次序是刻意的，不是随手）：形参的类型只有**调用点**知道
+ * （图上没有类型），而调用点绝大多数在 main 里。所以先走一遍 main 把每处调用的实参类型
+ * 记进 `ctx.args`，再落函数体时形参就有类型了 —— 记录、字典、串都能当形参。
+ * 只被别的函数调的那些仍旧按 int（那时账还没记上）—— 那一格照旧报缺口，不猜。
  */
 export function emitCore(g) {
   const items = Array.isArray(g) ? g : (g.kind === 'graph' ? g.body : [g]);
   const list = Array.isArray(items) ? items : [items];
   const env = new Map();
   /* 整份产物共用的登记处：`byKey` 按"字段名单 + 类型"去重、`shapes` 按标签查、
-     `decls` 是要印在模块头上的那几句 `(struct …)`。 */
-  const ctx = { byKey: new Map(), shapes: new Map(), decls: [], tmp: 0, defers: [], scope: [], post: [] };
+     `decls` 是要印在模块头上的那几句 `(struct …)`、`args` 是调用点记下的实参类型。 */
+  const ctx = {
+    byKey: new Map(), shapes: new Map(), decls: [], tmp: 0,
+    defers: [], scope: [], post: [], args: new Map(),
+  };
   /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
   const fns = [];
   const rest = [];
@@ -777,33 +804,98 @@ export function emitCore(g) {
        * 分不开 —— 所以这儿一律记成 `void`，等**调用点**说话：它被当值用了才报缺口
        * （见 `expr` 的 call 那一支）。糊一格 `(ret 0)` 上去是最坏的：矩阵上量到过
        * chez+intmath 印 0 / 0、sbcl+blockret 末行印 0 —— 悄悄给错答案。 */
-      const rt = retTypeOf(f.ins.body, env, ctx) ?? 'void';
-      env.set(`fn:${it.attrs.name}`, rt);
+      let rt = retTypeOf(f.ins.body, env, ctx);
+      /* 一格 `ret` 都没有时再问一句：**体末尾是不是一个值**（chez / sbcl 的隐式返回）。
+       * 是就把它当返回值 —— 那不是"补零值"（补零值给错答案，之前量到过两次），
+       * 那就是那两门语言的语义本身。判据是 `nodes.js` 上那一栏 sort：expr 才算值。 */
+      const impl = rt === null ? implicitRet(f.ins.body) : null;
+      if (impl !== null) {
+        const penv = new Map(env);
+        for (const p of params) penv.set(p, 'int');
+        const t = typeOf(impl, penv, ctx);
+        if (t !== 'void' && isScalar(t)) rt = t;
+      }
+      fns[fns.length - 1].impl = rt === null ? null : impl;
+      env.set(`fn:${it.attrs.name}`, rt ?? 'void');
       continue;
     }
     rest.push(it);
   }
+  /* **函数体看得见的只有函数名**（外加它自己的形参）：`env` 走一趟 main 之后会带上 main
+   * 的局部（那是这一刀"先落 main"的副作用），而方言的函数看不见调用方的局部 —— 所以先
+   * 留一份只有 `fn:` 那几格的干净底子。少了这一格，闭那种借外面名字的函数就会一路落到
+   * 方言那儿才报"未声明的变量"（硬错，不是有名有姓的缺口）—— `chez+index` 当场量到过。 */
+  const fnEnv = new Map(env);
+  const mainStmts = stmtList(rest, env, ctx);
   const body = [];
   for (const f of fns) {
-    const fenv = new Map(env);
-    for (const p of f.params) fenv.set(p, 'int');
-    const ps = f.params.map((p) => `(${p} int)`).join(' ');
+    const fenv = new Map(fnEnv);
+    const pts = f.params.map((p, i) => ctx.args.get(`${f.name}#${i}`) ?? 'int');
+    for (let i = 0; i < f.params.length; i++) fenv.set(f.params[i], pts[i]);
+    const ps = f.params.map((p, i) => `(${p} ${pts[i]})`).join(' ');
     const ret = env.get(`fn:${f.name}`) ?? 'int';
-    const fbody = stmtList(f.body, fenv, ctx);
+    /* 隐式返回那一档：末尾那个值改写成 `(ret …)`（分支就把 ret 沉到两支里去 ——
+       方言的 `if` 是语句，这样就不必有块表达式）。 */
+    const arr = Array.isArray(f.body) ? f.body : (f.body === undefined || f.body === null ? [] : [f.body]);
+    const fbody = f.impl === null || f.impl === undefined
+      ? stmtList(f.body, fenv, ctx)
+      : [...stmtList(arr.slice(0, -1), fenv, ctx), ...retify(arr[arr.length - 1], fenv, ctx)];
     /* **掉到函数尾**这件事不许糊：方言要求非 void 的函数每条路都有 `ret`，而图上"体末尾那个
      * 值就是返回值"（chez / sbcl 那两门）是合法的。补一格 `(ret 0)` 交上去 = 悄悄给错答案
      * —— 矩阵上量到过两次（chez+intmath 印 0/0、sbcl+blockret 末行印 0）。
      * 所以这儿只认"末尾就是 ret"那一种，别的当场报缺口。 */
-    if (!endsWithRet(f.body) && ret !== 'void') {
+    if (!endsWithRet(f.body) && ret !== 'void' && (f.impl === null || f.impl === undefined)) {
       gap(`函数 '${f.name}' 的体末尾不是 ret（隐式返回那一档 —— 补零值会给错答案）`);
     }
     body.push(`  (fn ${f.name} (${ps}) ${ret} ${fbody.join(' ')})`);
+    for (let i = 0; i < f.params.length; i++) ctx.args.set(`emitted:${f.name}#${i}`, pts[i]);
   }
-  const mainStmts = stmtList(rest, env, ctx);
+  /* **落完再核一遍**：函数体里的调用点也会往 `ctx.args` 上记类型，而那时被调的那个函数
+   * 可能已经落过了（形参按当时知道的类型发的）。对不上就报缺口 —— 交出去等着方言报
+   * "实参类型不对"是最坏的一种（那是一格硬错，不是有名有姓的缺口）。 */
+  for (const f of fns) {
+    for (let i = 0; i < f.params.length; i++) {
+      const want = ctx.args.get(`${f.name}#${i}`);
+      const had = ctx.args.get(`emitted:${f.name}#${i}`);
+      if (want !== undefined && had !== undefined && want !== had) {
+        gap(`'${f.name}' 第 ${i + 1} 格形参落成了 ${had}，可后面有一处调用给的是 ${want}`
+          + '（那处调用在另一个函数体里 —— 形参的类型这一刀只从 main 里的调用点收）');
+      }
+    }
+  }
   body.push(`  (main ${mainStmts.join(' ')}))`);
   /* `(struct …)` 要印在**用到它的东西前头**，而形状是落语句的时候才登记上的 ——
      所以这几句最后拼（次序：模块头、struct 那几句、函数、main）。 */
   return `${['(module', ...ctx.decls, ...body].join('\n')}\n`;
+}
+
+/**
+ * **隐式返回**：体里一格 `ret` 都没有，而末尾那一格是**一个值**（chez / sbcl 的函数体
+ * 末尾那个表达式就是返回值）。是就把它交回来，不是就回 null（那时这个函数是 void ——
+ * go / V 的 `main` 就是那种）。
+ *
+ * 判据是 `nodes.js` 上的 sort 那一栏（expr 才算值），外加一格例外：`print` 在图上是
+ * 一格 prim（expr），可它在源语言里是一句话 —— 拿它当返回值就错了。
+ */
+function implicitRet(body) {
+  const last = Array.isArray(body) ? body[body.length - 1] : body;
+  if (!isNode(last)) return null;
+  if (declOf(last.op).sort !== 'expr') return null;
+  if (last.op === 'prim' && last.attrs.name === 'print') return null;
+  return last;
+}
+
+/**
+ * 把一格值改写成 `(ret …)`。**分支要把 ret 沉到两支里**（`(if c (do (ret a)) (do (ret b)))`）
+ * —— 方言的 `if` 是语句，这么写就不必有块表达式，那正是 chez 的 `(if c a b)` 当函数体的形状。
+ */
+function retify(x, env, ctx) {
+  if (isNode(x) && x.op === 'branch' && x.ins.else !== undefined && x.ins.else !== null) {
+    return [`(if ${condText(x.ins.cond, env, ctx)}`
+      + ` (do ${retify(x.ins.then, env, ctx).join(' ')})`
+      + ` (do ${retify(x.ins.else, env, ctx).join(' ')}))`];
+  }
+  return [`(ret ${expr(x, env, ctx)})`];
 }
 
 /**
