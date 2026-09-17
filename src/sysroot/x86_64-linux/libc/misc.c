@@ -221,6 +221,10 @@ struct __dirent *readdir(DIR *d) {
   }
   char *rec = d->buf + d->pos;
   unsigned short reclen = *(unsigned short *)(rec + 16);
+  /* `reclen == 0` 就当读完了。**同一类错刚在 malloc 上栽过**（`p += bsz` 里的
+   * `bsz = 0` 原地转圈）：调用方是 `while (readdir(d) != 0)`，这儿一格不动就是
+   * 一个永不结束的循环，而症状会出现在离这儿很远的地方。 */
+  if (reclen == 0 || d->pos + (int)reclen > d->len) { d->pos = d->len; return (struct __dirent *)0; }
   d->pos += reclen;
   d->ent.d_ino = *(unsigned long *)rec;
   d->ent.d_off = *(long *)(rec + 8);

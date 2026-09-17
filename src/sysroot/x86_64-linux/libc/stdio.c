@@ -90,8 +90,11 @@ static int fmtDigits(double v, int nd, char *out, int *e10) {
     *e10 = 0;
     return nd;
   }
-  while (v >= 10.0) { v /= 10.0; e++; }
-  while (v < 1.0) { v *= 10.0; e--; }
+  /* 归一化那两条**都带上界**：double 的十进制指数在 ±324 之间，超出就只能是 inf
+   * （那时 `v /= 10` 永远回 inf，循环不结束）。`doFmt` 里已经挡过 inf 与 nan，
+   * 这儿是第二道 —— malloc 那一格的教训：不留任何一条能原地不动的循环。 */
+  while (v >= 10.0 && e < 400) { v /= 10.0; e++; }
+  while (v < 1.0 && e > -400) { v *= 10.0; e--; }
   int k = 0;
   while (k < nd) {
     int d = (int)v;
@@ -134,7 +137,11 @@ static void fmtFixed(FmtOut *o, double v, int prec, int width, char pad, int lef
   {
     double t = v;
     int e = 0;
-    if (t != 0.0) { while (t >= 10.0) { t /= 10.0; e++; } while (t < 1.0) { t *= 10.0; e--; } }
+    if (t != 0.0) {
+      /* 上界与 `fmtDigits` 里那两条同一个理由（inf 上除不动）。 */
+      while (t >= 10.0 && e < 400) { t /= 10.0; e++; }
+      while (t < 1.0 && e > -400) { t *= 10.0; e--; }
+    }
     nd = e + 1 + prec;
     if (nd < 1) nd = 1;
     if (nd > 25) nd = 25;
