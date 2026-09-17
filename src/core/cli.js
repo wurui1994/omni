@@ -25,7 +25,9 @@ import { renderPlan, renderSummary, renderStage } from './cli/stages.js';
 import { planForC } from './cli/plan-c.js';
 import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
-import { foldedToSvg, cpuProfileToFolded, foldedTable } from './cli/flame.js';
+import {
+  foldedToSvg, cpuProfileToFolded, foldedTable, foldedSummary, foldedPaths, foldedTree, foldedEdges,
+} from './cli/flame.js';
 import { statModel, statTable, statDot, statJson } from './cli/statgraph.js';
 import { layerModel, layerTable, countNodes, stepTable, kindStat, kindTable } from './cli/layers.js';
 import { linkJs } from './frontend-js/link.js';
@@ -738,6 +740,56 @@ function profJsFinish() {
     return;
   }
   stderr(evalJs('$prof_table()'));
+  /* 五张表（第一百四十九片）：那份折叠栈就在手里，热路径 / 调用边 / 调用树三张只有
+   * 这一层算得出来。上面那张是收集器自己印的（自用 / 含子 / 调用次数）—— **次数**那一栏
+   * 采样与聚合回溯都给不出，所以两张并排留着，各答各的问题。 */
+  profViews(folded, 'omni prof（stub · js 腿 · 聚合回溯）', 'us');
+}
+
+/**
+ * **一份折叠栈的五张读法**（第一百四十九片）。
+ *
+ * 用户那句话的原文：「我们的 cli 开 profile，只是显示函数调用次数和时间是不够。需要同时
+ * 显示热路径。」—— 聚合回溯（一条栈 + 一个权重）本来就是为了看热路径，火焰图只是它的
+ * 一种**画法**；在终端上真正好用的是排好序的表：能读、能 diff、能贴进提交信息。
+ *
+ * 五张各答一个不同的问题，谁也替不了谁：
+ *   摘要      这些百分比是从多少绝对时间里分出来的（3ms 的账上"40%"没有意义）
+ *   函数表    时间花在谁身上（自用 + 含子两栏：是它慢，还是它叫的人慢）
+ *   热路径    **从哪儿走过来的** —— 一格函数被十处调用时，热的是哪一处
+ *   调用边    一格热函数是被谁引热的（同一条边在所有路径上的权重加总）
+ *   调用树    时间在每个分叉上怎么分的（对半分的两条子路在路径榜上都不显眼）
+ *
+ * `--profile-out` 给了的时候这五张不印：那一趟的产出是**那份折叠栈**（喂火焰图 /
+ * speedscope / gprof2dot），要看表就 `omni flame` 或者不给 `--profile-out`。
+ */
+function profViews(folded, title, unit) {
+  stderr(`\n${title}\n`);
+  stderr(foldedSummary(folded, unit));
+  stderr(foldedTable(folded, '', 20, unit));
+  stderr(foldedPaths(folded, '', 10, unit));
+  stderr(foldedEdges(folded, '', 10, unit));
+  stderr(foldedTree(folded, '', 8, 1.0, unit));
+}
+
+/**
+ * C 那几条腿的收尾（第一百四十九片）：把孩子落下的折叠栈读回来，印那五张表。
+ *
+ * 为什么不在孩子里印：热路径 / 调用边 / 调用树都要**整份聚合回溯**在手里排序，而孩子那侧
+ * 是在 atexit（甚至信号处理函数）附近，那儿不该干排序与格式化这种事 —— 它只管把
+ * `a;b;c 权重` 吐出来。这条分工与「渲染 SVG 归 CLI」是同一条（见 `profSvgFinish`）。
+ *
+ * 只在**没给 `--profile-out`** 时走（那时候 `tmpOut` 才有值）：给了的话那一趟的产出就是
+ * 那份文件，表由 `omni flame` 或者下一趟不带 `--profile-out` 去看。
+ */
+function profFoldedFinish() {
+  if (PROF === null || PROF.tmpOut === undefined || PROF.tmpOut === null) return;
+  const f = PROF.tmpOut;
+  PROF.tmpOut = null;
+  if (!exists(f)) return;                      /* 这条腿没落账（比如 js 腿走的是别的收尾） */
+  const folded = readText(f);
+  if (folded.trim() === '') return;            /* 一帧都没采到：孩子那侧已经说过了 */
+  profViews(folded, `omni prof（${PROF.mode} · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿）`, 'frames');
 }
 
 /** 这一趟给 node 加了采样开关时记一格（落点在哪儿），收尾时按它取账。 */
@@ -793,7 +845,7 @@ function profNodeFinish() {
     stderr(`omni: 折叠栈 -> ${PROF.out}（${lines} 条栈，node 腿 · V8 采样器）\n`);
     return;
   }
-  stderr(foldedTable(folded, `omni prof（node 的 V8 采样器，${lines} 条栈）`));
+  profViews(folded, `omni prof（node 的 V8 采样器，${lines} 条栈）`, 'us');
 }
 
 /**
@@ -3259,7 +3311,22 @@ function main(argv) {
       }
       /* `sample` 是运行期的事：设进环境，`spawn` 出去的孩子自己继承（与 `-f svg` 同一个手法）。 */
       if (mode === 'sample') setEnv('OMNI_PROF', hz > 0 ? `sample:${hz}` : 'sample');
-      if (PROF.out !== null && PROF.out !== undefined) setEnv('OMNI_PROF_OUT', PROF.out);
+      if (PROF.out !== null && PROF.out !== undefined) {
+        setEnv('OMNI_PROF_OUT', PROF.out);
+      } else if (mode === 'sample') {
+        /**
+         * **没给 `--profile-out` 时也把折叠栈捞回来**（第一百四十九片）：C 那几条腿的表是
+         * 孩子自己印的（`omni_prof.c` 的 atexit），而热路径 / 调用树 / 调用边这三张只有
+         * **CLI 这一层**算得出来 —— 它要那份聚合回溯。所以偷偷给它一个落点，回来自己读。
+         *
+         * `tmpOut` 与 `out` 分开记：`out` 是用户要的产物（要印一句"落在哪儿"），
+         * `tmpOut` 是这一趟的中间物（不印路径，只印那几张表）。
+         */
+        PROF.tmpOut = join(workDirFor('prof-folded', hash16(`${mode}${hz}`)), 'omni.folded');
+        mkdirAll(dirname(PROF.tmpOut));
+        if (exists(PROF.tmpOut)) writeText(PROF.tmpOut, '');
+        setEnv('OMNI_PROF_OUT', PROF.tmpOut);
+      }
     }
     /* `--stat`（第一百四十七片第二格）：构建统计与模块依赖图。 */
     STAT = rest.includes('--stat') ? { out: null } : null;
@@ -4668,6 +4735,7 @@ try {
   /* `--profile-out x.svg` 的第二步（第一百四十七片）：把运行时落下的折叠栈摊成火焰图。
    * **同一个理由摆在这儿** —— run / build / plugins 三条腿都从这儿出去，写在这儿一处
    * 就不会有「哪条腿忘了渲染」。渲染是纯字符串计算（`cli/flame.js`）。 */
+  profFoldedFinish();
   profSvgFinish();
   setExitCode(runTimedOut() ? 124 : st);
 } catch (e) {

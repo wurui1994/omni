@@ -324,6 +324,63 @@ const FIB_CALLS = '635621';
     ok('.c 输入 --profile sample 不给 --cc：当场要外部 cc，不假装量过');
   } else bad('.c 输入少 --cc 要报错', `rc=${r.status} ${s.slice(0, 400)}`);
 }
+/* ---- 四、**五张读法**（第一百四十九片）：函数表之外，还要看得见热路径
+ *
+ * 用户那句话的原文：「只是显示函数调用次数和时间是不够。需要同时显示热路径。」
+ * 聚合回溯（一条栈 + 一个权重）本来就是为这个准备的，火焰图只是它的一种画法。 */
+{
+  const r = omni(['run', PROBE, '--profile', 'sample:997', '--cc', 'clang']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  const has = (x) => s.includes(x);
+  if (r.status === 0 && has('合计') && has('函数表') && has('热路径')
+    && has('最热的调用边') && has('调用树')) {
+    ok('C 腿 sample：摘要 / 函数表 / 热路径 / 调用边 / 调用树 五张都印了');
+  } else bad('五张读法该都在', `rc=${r.status} ${s.slice(-400)}`);
+}
+{
+  const r = omni(['run', PROBE, '--profile', 'sample:997', '--cc', 'clang']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  /* 热路径那一段里，榜首那条必须落在 `hot` 上 —— 这份探子九成时间在那儿。 */
+  const seg = s.slice(s.indexOf('热路径'));
+  const first = seg.split('\n').filter((l) => /^\s+[\d.]+\s/.test(l))[0] ?? '';
+  if (first.includes('hot') && first.includes('>')) {
+    ok(`热路径榜首是整条栈、落在 hot 上：${first.trim().slice(0, 60)}`);
+  } else bad('热路径榜首该是 hot 那条', `第一行=${first}`);
+}
+{
+  /* **单位不许混**：C 腿落的是采样帧数，node 腿落的是微秒。量到过 143 帧被印成
+   * `0.143 ms`（997Hz 上其实是 ~143ms）—— 差三个数量级的假话。 */
+  const c = omni(['run', PROBE, '--profile', 'sample:997', '--cc', 'clang']);
+  const cs = `${c.stdout || ''}${c.stderr || ''}`;
+  const n = omni(['run', FIBJS, '--direct', '--profile', 'sample:200']);
+  const ns = `${n.stdout || ''}${n.stderr || ''}`;
+  if (cs.includes('帧数') && cs.includes('帧 /') && ns.includes('ms') && !ns.includes('帧数')) {
+    ok('单位跟着腿走：C 腿印「帧数」、node 腿印「ms」');
+  } else bad('单位该分开', `C=${cs.includes('帧数')} node=${ns.includes('帧数')}`);
+}
+{
+  /* 递归上**同一条边只算一次**：不去重的话 `u_fib > u_fib` 能量出 90%+ 甚至超过 100%
+   * —— 比它所在的整条栈还大。这一格钉住「每条边都 ≤ 100%」。 */
+  const r = omni(['run', FIB, '--profile', 'stub']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  const seg = s.slice(s.indexOf('最热的调用边'));
+  const pcts = [...seg.matchAll(/(\d+\.\d+)%/g)].map((m) => Number(m[1]));
+  const over = pcts.filter((p) => p > 100);
+  if (seg.includes('u_fib > u_fib') && pcts.length > 0 && over.length === 0) {
+    ok(`调用边：递归那条边 ≤ 100%（${pcts.length} 条边，最大 ${Math.max(...pcts)}%）`);
+  } else bad('递归边不许超过 100%', `超了 ${over.join(' / ')}`);
+}
+{
+  /* 给了 `--profile-out` 那一趟的产出是**那份折叠栈**，五张不印（要看表就别给它）。 */
+  const out = join(WORK, 'views.folded');
+  rmSync(out, { force: true });
+  const r = omni(['run', FIB, '--profile', 'stub', '--profile-out', out]);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0 && existsSync(out) && !s.includes('热路径') && !s.includes('调用树')) {
+    ok('--profile-out 那一趟不印五张（产出是那份折叠栈）');
+  } else bad('--profile-out 时该只落文件', `rc=${r.status} ${s.slice(-200)}`);
+}
+
 /* `omni flame FILE.folded`：**产物自己**写下来的折叠栈（`OMNI_PROF=sample` 那一路，
  * 比如自举出来的 `dist/omni`）回来之后要有一格门能渲。 */
 {
