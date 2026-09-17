@@ -80,6 +80,21 @@ const METHODS = new Map();
  */
 const STRUCTS = new Map();
 
+/**
+ * **枚举**：`枚举名.变体名 -> 值`，加一张"变体名出现在几个枚举里"的账。
+ *
+ * 枚举的**声明在图上是丢掉的**（类型不进图），可 `.red` / `Color.red` 这两种写法要拿到**值**
+ * —— 所以名字与值要登记，与 `STRUCTS`（字段名与顺序从声明来）同一条路子。
+ *
+ * V 的值规则：默认从 0 数上去，写了 `= 表达式` 就从那儿接着数。这一批只接**整数字面量**
+ * 那一档（别的当场报 —— 那要编译期求值）。
+ *
+ * `.red` 那种短写法**类型从上下文来**，而上下文这一层看不见。办法与方法重名那一格同一条：
+ * 变体名在整份文件里唯一就用它，撞了就当场报（不猜）。
+ */
+const ENUMS = new Map();          // '枚举名.变体名' -> 值
+const EVARIANTS = new Map();      // '变体名' -> 值（撞名的存 null）
+
 /** `(tname Point)` -> `'Point'`、`(tname mod Point)` -> `'mod.Point'`；别的形状回 null。 */
 const tnameText = (tn) => (tn !== undefined && tag(tn) === 'tname'
   ? kids(tn).map(leaf).join('.') : null);
@@ -97,6 +112,19 @@ function collectDecls(x) {
         else if (tag(f) === 'embed') embedded = true;
       }
       STRUCTS.set(nm, embedded ? null : fs);
+    }
+  }
+  if (tag(x) === 'enum') {
+    const en = leaf(kids(x)[0]);
+    let next = 0;
+    for (const v of kids(x).slice(1)) {
+      if (tag(v) !== 'v') continue;              // `(as 类型)` 那一格不是变体
+      const vn = leaf(kids(v)[0]);
+      const explicit = kids(v).find((y) => tag(y) === 'num');
+      if (explicit !== undefined) next = Number(leaf(kids(explicit)[0]));
+      ENUMS.set(`${en}.${vn}`, next);
+      EVARIANTS.set(vn, EVARIANTS.has(vn) ? null : next);   // 撞名存 null
+      next += 1;
     }
   }
   if (tag(x) === 'method') {
@@ -316,9 +344,48 @@ function toNode(x) {
     // `true` / `false` 在 V 的语法里是**自己一条产生式**（`(bool $1)`），不是名字 ——
     // `name` 那一格里认 'true'/'false' 只兜住了写成标识符的那一路
     case 'bool': return node('const', {}, { value: leaf(kids(x)[0]) === 'true' });
+    // `.red` —— 枚举的短写法。**值从声明来**（`ENUMS` 那段说了为什么要登记）；
+    // 类型从上下文来而这一层看不见，所以靠"变体名在整份文件里唯一"定，撞了当场报。
+    case 'evariant': {
+      const vn = leaf(kids(x)[0]);
+      if (!EVARIANTS.has(vn)) {
+        throw new Error(`v->graph: .${vn} 是枚举的短写法，而这份文件里没见过那个枚举的声明`);
+      }
+      const val = EVARIANTS.get(vn);
+      if (val === null) {
+        throw new Error(`v->graph: .${vn} 在这份文件里的两个枚举里都有 —— `
+          + '分开它们要类型那一层，这一批不猜（写成 `枚举名.变体名`）');
+      }
+      return node('const', {}, { value: val });
+    }
+    // `?int(x)` / `?string(none)` —— 往 **Option 类型**上的转换。这一批把 Option 那一层
+    // **类型丢掉了**（`ext/vlang/SPEC.md` §五第 1 项），所以：实参是 `none` 就落 nil、
+    // 里头那格类型认得出就落一格 conv、认不出就原样交出去（丢掉那层包装）。
+    case 'cast': {
+      const args = kids(x).find((y) => tag(y) === 'args');
+      const inner = args === undefined ? [] : kids(args);
+      if (inner.length !== 1) {
+        throw new Error(`v->graph: ?T(…) 收了 ${inner.length} 格实参（要一格）`);
+      }
+      if (tag(inner[0]) === 'none') return lit(null);
+      const opt = kids(x)[0];
+      const ty = opt !== undefined && tag(opt) === 'option' ? kids(opt)[0] : undefined;
+      const tn = ty !== undefined && tag(ty) === 'tname' && kids(ty).length === 1
+        ? leaf(kids(ty)[0]) : null;
+      const v = toNode(inner[0]);
+      return tn !== null && CONV.has(tn) ? convOf(CONV.get(tn), v) : v;
+    }
     // `p.x` -> field-get；`Point{ x: 1 }` -> record-new（**类型名不进图**）。
     // V 的字段表标签是 `f`，go 的是 `kv`，lua 的是 `named` —— 三种记号一格节点。
-    case 'sel': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
+    case 'sel': {
+      // `Color.red` 与 `p.x` 在树上同形 —— 左边是**登记过的枚举名**时它是那个变体的值。
+      const [obj, fld] = kids(x);
+      if (tag(obj) === 'name') {
+        const key = `${leaf(kids(obj)[0])}.${leaf(fld)}`;
+        if (ENUMS.has(key)) return node('const', {}, { value: ENUMS.get(key) });
+      }
+      return fieldGet(toNode(obj), leaf(fld));
+    }
     // 结构字面量与 **map 字面量**在树上都叫 `lit`，差的是类型那一格：
     // `map[K]V{…}` 是 `(lit (map …) …)` —— **自带标记**，所以不必回问"这名字是什么类型"
     case 'lit': {
@@ -554,6 +621,8 @@ export function vlangToGraph(tree, opts) {
   // 再扫一遍**声明过的方法名**（接收者的类型写在声明里 —— 单态分派，不查表）
   METHODS.clear();
   STRUCTS.clear();
+  ENUMS.clear();
+  EVARIANTS.clear();
   collectDecls(tree);
   const body = kids(tree).map(toNode).flat();
   if (opts !== undefined && opts.asModule === true) return program(body);
