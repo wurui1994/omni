@@ -144,6 +144,14 @@
 #         没有块头，扫到零头 `bsz = 0` 就原地转圈），不是模拟慢。换成「32 个箱的
 #         空闲表 + 顶上切」之后同一份二进制立刻出来了。判据搬到了离病根最近的那一层：
 #         `tests/c/libc-malloc.js`（本机 0.3s 跑完 20 万块；死循环那一版在那儿是 124）。
+#      g. **「系统那一半」与 glibc 逐行相同**（`tests/x64/libc-sys-probe.c`，17 行输出）：
+#         fopen/fwrite/fread/ftell/fseek/remove、mkdir/opendir/readdir/rmdir、
+#         getenv/setenv、strftime+localtime（只比格式）、system、strerror、sscanf、
+#         atexit。跑法（macOS 上交叉编，容器里比）：
+#           node src/cli.js c obj tests/x64/libc-sys-probe.c --arch x86_64 --os linux -o /tmp/sp.o
+#           node src/cli.js c link /tmp/sp.o -o sp --stdlib --libc self \
+#             --sysroot src/sysroot/x86_64-linux -f elf --arch x86_64 --os linux
+#           # 容器里：./sp > a.txt; gcc -o ref libc-sys-probe.c && ./ref > b.txt; diff a.txt b.txt
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

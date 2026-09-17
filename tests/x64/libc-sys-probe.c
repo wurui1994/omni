@@ -1,0 +1,77 @@
+/* 自带 libc 的「系统那一半」判据：文件、目录、时间、环境、进程。
+ * 与 glibc 那份逐行比（时间那一行只比格式，不比值）。 */
+int printf(const char *fmt, ...);
+void *fopen(const char *, const char *);
+unsigned long fwrite(const void *, unsigned long, unsigned long, void *);
+unsigned long fread(void *, unsigned long, unsigned long, void *);
+int fclose(void *);
+int fseek(void *, long, int);
+long ftell(void *);
+int remove(const char *);
+int mkdir(const char *, unsigned int);
+int rmdir(const char *);
+void *opendir(const char *);
+void *readdir(void *);
+int closedir(void *);
+char *getenv(const char *);
+int setenv(const char *, const char *, int);
+int system(const char *);
+long time(long *);
+unsigned long strftime(char *, unsigned long, const char *, const void *);
+void *localtime(const long *);
+int atexit(void (*)(void));
+char *strerror(int);
+int sscanf(const char *, const char *, ...);
+
+static void bye(void) { printf("atexit 跑了\n"); }
+
+int main(void) {
+  /* 1. 文件 */
+  void *f = fopen("/tmp/omni-probe.txt", "w");
+  printf("fopen w: %d\n", f != 0);
+  fwrite("hello libc", 1, 10, f);
+  fclose(f);
+  char buf[32];
+  f = fopen("/tmp/omni-probe.txt", "r");
+  unsigned long n = fread(buf, 1, 31, f);
+  buf[n] = 0;
+  printf("fread %lu: %s ftell=%ld\n", n, buf, ftell(f));
+  fseek(f, 6, 0);
+  n = fread(buf, 1, 31, f);
+  buf[n] = 0;
+  printf("fseek+fread: %s\n", buf);
+  fclose(f);
+  printf("remove: %d\n", remove("/tmp/omni-probe.txt"));
+
+  /* 2. 目录 */
+  printf("mkdir: %d\n", mkdir("/tmp/omni-probe-dir", 0755));
+  void *d = opendir("/tmp/omni-probe-dir");
+  int cnt = 0;
+  while (readdir(d) != 0) cnt++;
+  closedir(d);
+  printf("readdir 条数（. 与 ..）: %d\n", cnt);
+  printf("rmdir: %d\n", rmdir("/tmp/omni-probe-dir"));
+
+  /* 3. 环境 */
+  printf("PATH 有没有: %d\n", getenv("PATH") != 0);
+  setenv("OMNI_PROBE", "42", 1);
+  printf("setenv/getenv: %s\n", getenv("OMNI_PROBE"));
+
+  /* 4. 时间（只看格式对不对） */
+  long t = time(0);
+  char ts[64];
+  unsigned long k = strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", localtime(&t));
+  printf("strftime %lu 字符，年份四位: %d\n", k,
+    ts[0] >= '2' && ts[4] == '-' && ts[7] == '-' && ts[13] == ':');
+
+  /* 5. 进程 */
+  printf("system(true) 状态字: %d\n", system("true"));
+
+  /* 6. 杂 */
+  printf("strerror(2): %s\n", strerror(2));
+  int a = 0; double b = 0.0; char w[16];
+  int got = sscanf("17 2.5 abc", "%d %lf %s", &a, &b, w);
+  printf("sscanf %d: %d %.1f %s\n", got, a, b, w);
+  atexit(bye);
+  return 0;
+}
