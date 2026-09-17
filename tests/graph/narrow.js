@@ -103,6 +103,44 @@ const cOf = (g) => cBack.lower(g).text;
   else no('不窄〔同名绑两次：C 腿一样〕', `解释器 ${want}，C ${got}`);
 }
 
+// ---- 条件位置：两边都是数时，四趟（装箱 / 比较 / 再装箱 / 拆箱）塌成一条 C 的条件
+{
+  const g = program([
+    node('bind', { init: num(0) }, { name: 'i' }),
+    node('loop', {
+      cond: prim('<', [ref('i'), num(3)]),
+      body: [node('set', { value: prim('+', [ref('i'), num(1)]) }, { name: 'i' })],
+    }),
+    prim('print', [ref('i')]),
+  ]);
+  const c = cOf(g);
+  has('条件〔循环那一句就是 C 的比较〕', c, 'if (!((v_i < 3.0))) break;');
+  hasnt('条件〔不再绕 g_truthy(g_bool(〕', c, 'g_truthy(g_bool(');
+  const want = evalGraph(g).out.join('|');
+  const got = cBack.lower(g).run().out.join('|');
+  if (got === want && want === '3') ok(`条件〔C 腿跑出来一样：${got}〕`);
+  else no('条件〔C 腿跑出来一样〕', `解释器 ${want}，C ${got}`);
+}
+{
+  /* `not` 与常量两条：真值观**只有 false / nil 是假**，所以 `0` 也真（`g_truthy` 那一格）。 */
+  const g = program([
+    node('bind', { init: num(1) }, { name: 'k' }),
+    node('branch', {
+      cond: prim('not', [prim('=', [ref('k'), num(2)])]),
+      then: [prim('print', [lit('ne')])],
+      else: [prim('print', [lit('eq')])],
+    }),
+    node('branch', { cond: lit(0), then: [prim('print', [lit('zero-is-true')])] }),
+  ]);
+  const c = cOf(g);
+  has('条件〔not 就是 C 的取反〕', c, 'if ((!((v_k == 2.0)))) {');
+  has('条件〔常量 0 是真（真值观只有 false/nil 假）〕', c, 'if (1) {');
+  const want = evalGraph(g).out.join('|');
+  const got = cBack.lower(g).run().out.join('|');
+  if (got === want && want === 'ne|zero-is-true') ok(`条件〔C 腿跑出来一样：${got}〕`);
+  else no('条件〔C 腿跑出来一样〕', `解释器 ${want}，C ${got}`);
+}
+
 // ---- 文档点名那一行：`ext/lua/examples/intmath.lua`
 {
   const d = LANGS.get('lua');

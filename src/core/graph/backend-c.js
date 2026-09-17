@@ -686,6 +686,46 @@ class CGen {
     return this.dOf(x) ?? `g_d(${this.valOf(x)})`;
   }
 
+  /**
+   * 一格**条件**的 C 形态（int 值），拼不出来回 `null`。
+   *
+   * 为什么值得单列一格：`while i <= n` 现在落成
+   * `if (g_truthy(g_bool(g_cmp(g_num(v_i), v_n) <= 0)) == 0) break;` ——
+   * 一趟装箱（`g_num`）、一趟比较、一趟再装箱（`g_bool`）、一趟拆箱（`g_truthy`），
+   * 而两边都是数的时候这四趟就是 `v_i <= v_n` 一条指令。
+   *
+   * 每一条都对着序言里那格函数**逐句**看过（这份不许"看起来一样"）：
+   *   `<` 一族  `g_cmp` 在两边都不是串时算的就是 `x < y`（见 `g_cmp`）
+   *   `=` 一族  `g_eq` 在同型且是数时算的就是 `g_d(a) == g_d(b)`（见 `g_eq`）
+   *   `not`     `g_truthy` 的反面
+   *   常量      真值观**只有 false / nil 是假**（`g_truthy`）—— 所以 `0` 也真
+   */
+  condOf(x) {
+    if (x === null || x === undefined || Array.isArray(x)) return null;
+    if (x.lit !== undefined || (x.op === 'const' && x.attrs.value !== undefined)) {
+      const v = x.lit !== undefined ? x.lit : x.attrs.value;
+      if (v === false || v === null) return '0';
+      return '1';
+    }
+    if (x.op !== 'prim') return null;
+    const nm = x.attrs.name;
+    const args = asList(x.ins.args).filter((y) => y !== undefined);
+    if (nm === 'not' && args.length === 1) {
+      const c = this.condOf(args[0]);
+      return c === null ? null : `(!(${c}))`;
+    }
+    const REL = { '<': '<', '>': '>', '<=': '<=', '>=': '>=', '=': '==', '!=': '!=' };
+    if (REL[nm] === undefined || args.length !== 2) return null;
+    const a = this.dOf(args[0]);
+    const b = this.dOf(args[1]);
+    return a === null || b === null ? null : `(${a} ${REL[nm]} ${b})`;
+  }
+
+  /** 条件位置：拼得出 C 的条件就用它，拼不出来才走 `g_truthy(<装箱的那份>)`。 */
+  cCond(x) {
+    return this.condOf(x) ?? `g_truthy(${this.valOf(x)})`;
+  }
+
   /** 开一层区域。 */
   pushFrame(kind) { this.frames.push({ kind, exits: [], cond: this.cond }); }
 
@@ -882,7 +922,7 @@ class CGen {
     if (x.op === 'branch') {
       const t = this.fresh();
       this.emit(`gv ${t};`);
-      this.emit(`if (g_truthy(${this.valOf(x.ins.cond)})) {`);
+      this.emit(`if (${this.cCond(x.ins.cond)}) {`);
       this.depth += 1;
       this.cond += 1;
       this.emit(`${t} = ${this.valOf(x.ins.then)};`);
@@ -1026,7 +1066,7 @@ class CGen {
       return;
     }
     if (x.op === 'branch') {
-      this.emit(`if (g_truthy(${this.valOf(x.ins.cond)})) {`);
+      this.emit(`if (${this.cCond(x.ins.cond)}) {`);
       this.depth += 1;
       this.cond += 1;
       this.stmt(asList(x.ins.then));
@@ -1113,7 +1153,7 @@ class CGen {
       this.emit('}');
       this.emit(`${first} = 0;`);
     }
-    this.emit(`if (g_truthy(${this.valOf(x.ins.cond)}) == 0) break;`);
+    this.emit(`if (!(${this.cCond(x.ins.cond)})) break;`);
     this.stmt(asList(x.ins.body));
     this.cond -= 1;
     this.popFrame();
