@@ -43,6 +43,29 @@ function mapBindName(x) {
 
 
 /**
+ * 一格 `(spec (names a b) 类型? (init …))` 里**装 map 的那几个名字**。
+ *
+ * `mapBindName` 那一格只认 `:=` 与 `=`，而 `var m = map[K]V{…}` / `var m map[K]V` 是
+ * 另一条产生式 —— 漏了它，后面 `m[k]` 就会静静落成列表下标（**答案错而不报**）。
+ * 声明这一格比赋值还清楚：**类型写着 map 的时候连字面量都不必看**。
+ */
+function specMapNames(x) {
+  const nm = part(x, 'names');
+  if (nm === undefined) return [];
+  const names = kids(nm).map(leaf);
+  const ty = kids(x).find((y) => tag(y) !== 'names' && tag(y) !== 'init');
+  if (ty !== undefined && tag(ty) === 'map') return names;
+  const ini = part(x, 'init');
+  if (ini === undefined) return [];
+  const rhs = kids(ini);
+  return names.filter((n, i) => {
+    const r = rhs[i];
+    return r !== undefined && tag(r) === 'lit' && tag(kids(r)[0]) === 'map';
+  });
+}
+
+
+/**
  * **方法名 -> 它声明的接收者类型名**，以及**登记过的类型名**。
  *
  * 两张表都是一趟扫查得的（见 goToGraph），存在的理由是同一句话：
@@ -53,10 +76,14 @@ function mapBindName(x) {
 const METHODS = new Map();
 const TYPES = new Set();
 
-/** 扫一遍顶层：登记类型名（`type Point struct …`）与每个方法的接收者类型。 */
+/**
+ * 扫一遍顶层：登记类型名（`type Point struct …`）、每个方法的接收者类型，
+ * 以及 `var` / `const` 里**装 map 的名字**（`specMapNames` 那段说了为什么要在这儿收）。
+ */
 function collectDecls(x) {
   if (!isList(x)) return;
   if (tag(x) === 'tspec' || tag(x) === 'talias') TYPES.add(leaf(kids(x)[0]));
+  if (tag(x) === 'spec') for (const n of specMapNames(x)) MAPS.add(n);
   if (tag(x) === 'method') {
     const [recv, nm] = kids(x);
     const name = leaf(nm);
@@ -84,6 +111,103 @@ const PRINTS = new Set(['Println', 'Printf', 'Print', 'println', 'print']);
 
 const many = (xs) => xs.map(toNode).flat();
 
+/**
+ * `var x int` 那一格的**零值**：go 里"什么都没写时它是几"。
+ *
+ * 这**不是**类型进图了 —— 图上落的仍是一格 `const`，只是"落几"这句话由 go 说。
+ * 定宽整数那一族全收 0、`float64` 走一格 `conv float`（图上没有类型，那格转换正是
+ * "这个 0 是实数"唯一说得出口的地方）、指针 / 切片 / map / 通道 / 接口是 nil。
+ * 具名结构体的零值**当场报**：它是"每个字段各自的零值"，而字段表按约定不进图。
+ */
+const INT_TYPES = new Set(['int', 'int8', 'int16', 'int32', 'int64', 'rune', 'byte',
+  'uint', 'uint8', 'uint16', 'uint32', 'uint64', 'uintptr']);
+const NIL_TYPES = new Set(['ptr', 'slice', 'map', 'chan', 'chan-send', 'chan-recv',
+  'fntype', 'interface']);
+const NIL_NAMES = new Set(['error', 'any']);
+
+function zeroOf(ty, name) {
+  if (ty === undefined) {
+    throw new Error(`go->graph: ${name} 既没类型也没初值 —— go 不许这么写`);
+  }
+  const t = tag(ty);
+  if (t === 'paren') return zeroOf(kids(ty)[0], name);
+  if (NIL_TYPES.has(t)) return lit(null);
+  if (t === 'tname' && kids(ty).length === 1) {
+    const n = leaf(kids(ty)[0]);
+    if (INT_TYPES.has(n)) return lit(0);
+    if (n === 'float32' || n === 'float64') return convOf('float', lit(0));
+    if (n === 'string') return lit('');
+    if (n === 'bool') return lit(false);
+    if (NIL_NAMES.has(n)) return lit(null);
+    throw new Error(`go->graph: ${n} 的零值还没接 —— 具名类型要字段表才写得出来`);
+  }
+  throw new Error(`go->graph: 这一格的零值还没接：${t}`);
+}
+
+/**
+ * **`iota` 当下的值**（一格 const 组里"这是第几条 spec"）。
+ *
+ * 组外是 null —— 那时 `iota` 就是个普通名字（go 自己也是这样：它只在 const 里有意义）。
+ * 拿一格模块变量记这个状态，与 `MAPS` / `METHODS` 同一条路子：**扫查得的上下文**。
+ */
+let IOTA = null;
+
+/** `_` 是 go 的空位：**不绑名字**，但初值里的作用（调用）要留下。 */
+function bindName(n, v) {
+  if (n === '_') return v.op === 'call' || v.op === 'prim' ? [v] : [];
+  return [node('bind', { init: v }, { name: n })];
+}
+
+/** 一格 spec 的名字表对初值表：数目相等就逐个绑，N 对 1 是多值，没初值就落零值。 */
+function specBinds(names, exprs, ty) {
+  if (exprs === null) return names.flatMap((n) => bindName(n, zeroOf(ty, n)));
+  if (names.length > 1 && exprs.length === 1) {
+    return destructure(names, toNode(exprs[0]), { declare: true });
+  }
+  if (names.length !== exprs.length) {
+    throw new Error(`go->graph: ${names.length} 个名字对 ${exprs.length} 个初值 —— 这一批不猜`);
+  }
+  return names.flatMap((n, i) => bindName(n, toNode(exprs[i])));
+}
+
+/**
+ * `var` / `const` -> 一串 **bind**（没有 decl 节点，那句话在 `define` 那一格已经说过）。
+ *
+ * 两条 go 自己的规矩在这儿摆平，都不是图的事：
+ *   * **const 组里省略初值 = 重复上一条**（`k1` / `k2` 抄 `k0 = iota` 那一句）；
+ *   * **`iota` 是这一条 spec 在组里的序号** —— 所以重复的那几条各拿自己的号。
+ * `var` 没有这两条（go 里 `var` 的 spec 省了初值就是零值，`iota` 也写不进去）。
+ */
+function valSpecs(x) {
+  const isConst = tag(x) === 'const';
+  const specs = kids(x);
+  const out = [];
+  let last = null;
+  for (let i = 0; i < specs.length; i++) {
+    const sp = specs[i];
+    if (tag(sp) !== 'spec') throw new Error(`go->graph: ${tag(x)} 里不该有 ${tag(sp)}`);
+    const nm = part(sp, 'names');
+    if (nm === undefined) throw new Error(`go->graph: ${tag(x)} 的 spec 里没有名字`);
+    const names = kids(nm).map(leaf);
+    const ty = kids(sp).find((y) => tag(y) !== 'names' && tag(y) !== 'init');
+    const ini = part(sp, 'init');
+    let exprs = null;
+    if (ini !== undefined) {
+      exprs = kids(ini);
+      if (isConst) last = exprs;
+    } else if (isConst) {
+      exprs = last;
+    }
+    IOTA = isConst ? i : null;
+    try {
+      out.push(...specBinds(names, exprs, ty));
+    } finally {
+      IOTA = null;
+    }
+  }
+  return out;
+}
+
 /** `(name x)`。Go 的 lhs 也是它。 */
 const nameOf = (x) => (tag(x) === 'name' ? leaf(kids(x)[0]) : leaf(x));
 
@@ -106,9 +230,14 @@ function toNode(x) {
       if (n === 'true') return node('const', {}, { value: true });
       if (n === 'false') return node('const', {}, { value: false });
       if (n === 'nil') return node('const', {}, { value: null });
+      // 一格 const 组里的 `iota` 是**序号**，不是名字（见 IOTA 那段）
+      if (n === 'iota' && IOTA !== null) return node('const', {}, { value: IOTA });
       return node('ref', {}, { name: n });
     }
     case 'paren': return toNode(kids(x)[0]);
+    // `(none)` 是 go.grammar 里 opt-h-simple / opt-h-expr 的空产生式
+    // （三段 for 的任何一格省略时会出现）—— 它不是节点，丢掉。
+    case 'none': return [];
     // `p.x` -> field-get（与 lua/nim 的 `(dot …)`、V 的 `(sel …)` 同一格节点）
     case 'sel': return fieldGet(toNode(kids(x)[0]), leaf(kids(x)[1]));
     // `Point{x: 1, y: 2}` -> record-new；`[]int{10, 20}` -> list-new。
@@ -224,18 +353,33 @@ function toNode(x) {
       const cond = part(x, 'cond');
       const post = part(x, 'post');
       const blk = kids(x).find((y) => tag(y) === 'block');
+      // 三段里省掉的那几格在树上是 `(none)`（`go.grammar` 的空产生式）。
+      // **条件那一格不能落成"空列表"**：`for ;; {}` 是无条件循环，那是 `cond: undefined`。
+      const slot = (p) => (p === undefined ? [] : many(kids(p).filter((k) => tag(k) !== 'none')));
+      const condOf = () => {
+        const c = cond === undefined ? undefined : kids(cond)[0];
+        return c === undefined || tag(c) === 'none' ? undefined : toNode(c);
+      };
       return threePart({
-        init: init === undefined ? [] : many(kids(init)),
-        cond: cond === undefined ? undefined : toNode(kids(cond)[0]),
-        post: post === undefined ? [] : many(kids(post)),
+        init: slot(init),
+        cond: condOf(),
+        post: slot(post),
         body: blk === undefined ? [] : many(kids(blk)),
       });
     }
     case 'if': {
-      const parts = kids(x);
+      const all = kids(x);
+      // `if v := f(); v > 0 { … }` —— 头上那一格 init 的**作用域是整条 if 链**
+      // （else 里也看得见 `v`）。所以它落成一格 region 包着 branch，
+      // 不是把那句话挪到 if 外面去：挪出去就多活了一层作用域。
+      const ini = all.length > 0 && tag(all[0]) === 'init' ? all[0] : undefined;
+      const parts = ini === undefined ? all : all.slice(1);
       // `else` 那一格是个包装（`(else (block …))` 或 `(else (if …))` —— else-if 链）
       const els = elseOf(parts[2]);
-      return branchOf(toNode(parts[0]), toNode(parts[1]), els === undefined ? undefined : toNode(els));
+      const br = branchOf(toNode(parts[0]), toNode(parts[1]),
+        els === undefined ? undefined : toNode(els));
+      if (ini === undefined) return br;
+      return node('region', { body: [...many(kids(ini).filter((k) => tag(k) !== 'none')), br] });
     }
     case 'return': return retOf(many(kids(x)));
     // `break` / `continue` -> **同一格节点**，差的只有一格附属 kind
@@ -277,10 +421,15 @@ function toNode(x) {
       }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
+    // `var` / `const` 落**一串 bind**（顶层与语句里同一格 —— go 两处都写得下）。
+    // 树上的标签是 `var` / `const`（`go.grammar` 的 const-decl / var-decl 两条产生式
+    // 出的就是它们）—— 这儿原来写的是 `const-decl` / `var-decl` 两格**死代码**，
+    // 所以 720 份里 285 份卡在"这一格还没接：var / const"上。
+    case 'var': case 'const': return valSpecs(x);
     // 顶层的这几样在这一批里没有对应物（包、导入、类型声明）—— 丢掉，不猜。
     // `typedecl` 那格：**struct 的字段表不进图**（record-new 的字段名从字面量那儿来），
     // 树上的标签是 `typedecl` 不是 `type-decl` —— 原来写错了一格，record 那份例子量出来的。
-    case 'import': case 'typedecl': case 'const-decl': case 'var-decl': return [];
+    case 'import': case 'typedecl': return [];
     default:
       throw new Error(`go->graph: 这一格还没接：${tag(x) ?? JSON.stringify(x).slice(0, 40)}`);
   }
@@ -336,7 +485,8 @@ export function goImports(tree) {
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
-//   1. 类型全丢（见文件头）；`var` / `const` 顶层声明也丢 —— 例子里不用它们。
+//   1. 类型全丢（见文件头）。`var` / `const` 现在接了（落一串 bind），但类型只用在
+//      **零值**那一处（`zeroOf`）—— 具名结构体的零值当场报，字段表不进图。
 //   2. 多返回值、`x, ok = m[k]`、defer、goroutine、channel 都不在这一批
 //      （`ext/go/SPEC.md` §五那张顺序表说了它们各排在哪一步）。
 //   3. 选择器（`a.b`）落 `field-get`（第四批），但**只当它是取字段** ——

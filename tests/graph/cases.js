@@ -64,6 +64,13 @@ export const BLOCKRET = ['15', '6', '7'];
  */
 export const MUT = ['1', '3'];
 /**
+ * vardecl：**`var` / `const`**（go 独一份）—— 零值、const 组里省略初值就重复上一条、
+ * `iota` 是组里的序号、`_` 是空位。前四行落到的节点全是 bind，**一格新的都没有**。
+ * 后两行是**语句头上的声明位**：`if v := …; cond`（init 的作用域是整条链 -> region 包着
+ * branch）与 `for ; cond ;`（省掉的格子在树上是 `(none)`，不是节点）。
+ */
+export const VARDECL = ['15', '1', '3', '6', '5', '2'];
+/**
  * blockscope：**一段带自己作用域的语句**（nim 的 `block:` -> region）。
  * 里外两个同名的 `x`：块里印 5、块外印 1 —— 那两行压的是"region 真的开了一层作用域"。
  */
@@ -141,6 +148,10 @@ export const CASES = [
   // 第十九个家族：**显式的块**（nim 的 `block:`）—— 同样是账上算出来的（`region`
   // 规格十门、矩阵九门，缺 nim）。它顺带把"region 到底管不管用"也压住了：同名遮蔽。
   ...fam('blockscope', BLOCKSCOPE, ['nim']),
+  // 第二十个家族：**`var` / `const`**（go 独一份）。理由与 deferarg 同一条：那三条规矩
+  // （零值 · 省略初值重复上一条 · `iota` 是序号）都归 go 的映射，图上一格新节点也没加。
+  // 它顺带把**模块级变量**压在四条腿上（顶层的 bind 在 `call main` 之前）。
+  ...fam('vardecl', VARDECL, ['go']),
 ];
 
 /**
