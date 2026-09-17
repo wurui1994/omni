@@ -333,6 +333,9 @@ function unwrapDeref(x) {
   return tag(y) === 'deref' ? kids(y)[0] : x;
 }
 
+/** 匿名 `func(){…}` 的名字（`func` 那一格的 name 是附属，可它得有一个）。 */
+let FN_N = 0;
+
 function funcOf(sig, blk, name, self) {
   const params = partKids(sig, 'in').map((p) => {
     const nm = part(p, 'name');
@@ -631,6 +634,15 @@ function toNode(x) {
     }
 
     // ---- 声明与语句 --------------------------------------------------------
+    // `func(x int) int { … }` 当值用 —— **图上一格新节点也不用加**：`func` 那一格本来就是
+    // 表达式（`nodes.js` 里它的 sort 是 expr），只是从前这门映射没接它，于是 60 份文件
+    // 卡在"这一格还没接：fnlit"上。名字这一格是附属，匿名的就现取一个（`__fnN`）——
+    // 提升与按值调用那几条形状账（c / wat / core）本来就照着名字走。
+    case 'fnlit': {
+      const sig = kids(x).find((y) => tag(y) === 'sig');
+      const blk = kids(x).find((y) => tag(y) === 'block');
+      return funcOf(sig, blk, `__fn${FN_N++}`);
+    }
     case 'fn': {
       // **按标签找，不按位置数**：泛型函数多出一格 `(tparams …)`
       // （`(fn IDENT type-params signature block)`），按位置数就把 tparams 当成了签名、
@@ -852,6 +864,7 @@ export function goToGraph(tree, opts) {
     collectDecls(t, true);   // shapesOnly：类型与字段名要，方法名不要（重名太多）
   }
   collectDecls(tree);
+  FN_N = 0;                                   // 匿名 func 的编号按文件重来（图要可重现）
   const items = kids(tree).slice(1);          // 第一格是包名
   const body = items.map(toNode).flat();
   if (opts !== undefined && opts.asModule === true) return program(body);

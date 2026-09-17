@@ -169,6 +169,9 @@ let OPT_N = 0;
 /** 语句位置上那一格临时名（`f() or { … }` 自己没有名字）。 */
 const freshOpt = () => `__opt${OPT_N++}`;
 
+/** 匿名 `fn (…) { … }` 的名字（`func` 那一格的 name 是附属，可它得有一个）。 */
+let FN_N = 0;
+
 /** 这棵子树里提到 `err` 这个名字吗？（or-block 里的错误值 —— 这一批没有它。） */
 function mentionsErr(x) {
   if (!isList(x)) return false;
@@ -639,6 +642,21 @@ function toNode(x) {
       const name = leaf(kids(x)[0]);
       return node('bind', { init: funcOf(x, name) }, { name });
     }
+    /**
+     * `fn (x int) int { … }` 当值用 —— **图上一格新节点也不用加**：`func` 那一格本来就是
+     * 表达式，只是这门映射从前没接它（92 份文件卡在"这一格还没接：fnlit"上）。
+     *
+     * **带捕获表的那一种当场报**（`fn [a] (x int) { … }`，语料里 82 份）：V 的 `[a]` 是
+     * **按值抄一份**，而图上的闭包是按引用看外层那一格 —— 外层那个名字后来改了，两者的
+     * 答案就不一样。要接得先有"创建时抄一份"那一刀（一格新绑定 + 体里改名），不在这一刀。
+     */
+    case 'fnlit': {
+      if (part(x, 'captures') !== undefined) {
+        throw new Error('v->graph: `fn [a] (…) { … }` 的捕获表是**按值抄一份**，'
+          + '而图上的闭包按引用看外层那一格 —— 要接得先有"创建时抄一份"那一刀');
+      }
+      return funcOf(x, `__fn${FN_N++}`);
+    }
     // `fn (p Point) total() int { … }` -> 与 `fn` **同一格 bind + func**，
     // 差的只有"接收者当第一格形参"（go 那份一字不差 —— 接收者在声明里，分派是单态的）
     case 'method': {
@@ -868,6 +886,10 @@ export function vlangToGraph(tree, opts) {
     collectDecls(t, true);   // shapesOnly: struct / enum 要，方法名不要（重名太多）
   }
   collectDecls(tree);
+  /* 匿名 fn 与 Option 那格临时名的编号**按文件重来** —— 同一份源码要落出同一张图
+     （`tests/graph/stat.js` 那一条"两遍一样"就是判这个）。 */
+  FN_N = 0;
+  OPT_N = 0;
 
   // 模块名（`@MOD` 要它）—— 顶层那一条 `(module 名)`，没写就是 null（那时 `@MOD` 当场报）
   const mod = kids(tree).find((y) => tag(y) === 'module');

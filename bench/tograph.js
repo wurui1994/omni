@@ -94,12 +94,12 @@ const CLASSES = [
   ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%)/],
   ['集合与字符（set-lit / char / rune）', /set 字面量|char 是自己一格类型|还没接：char|还没接：rune/],
   ['类型层的算子（typeof / sizeof / is / as / x.(T)）',
-    /typeof|sizeof|isreftype|还没接：is$|还没接：as$|还没接：tswitch|还没接：assert$|登记过的类型/],
+    /typeof|sizeof|isreftype|还没接：is$|还没接：as$|还没接：tswitch|还没接：assert$|登记过的类型|还没接：if-is/],
   // **这一族是"没归类"那一栏第二回指出来的**（2026-09-18）：内嵌字段的名字要从被嵌的那格
   // 类型来、泛型实例化 `Foo[int]{…}` 也要类型、"两个类型都声明了同名方法"更是非类型不能分。
   // 三条都不是"哪一格还没接"，是**这一层看不见类型** —— 与"跨文件才知道的事"是邻居。
-  ['类型才分得开的事（embed / tinst / 方法重名）',
-    /是 embed|还没接：tinst|重名要类型才分得开|sum type 那一族要类型/],
+  ['类型才分得开的事（embed / tinst / 方法重名 / 变体重名）',
+    /是 embed|还没接：tinst|重名要类型才分得开|sum type 那一族要类型|有嵌入字段|两个枚举里都有/],
   ['C 指令与外部声明（#flag / $c）', /cdirective/],
   ['语句头上的绑定（V 的 `if x := …`）', /还没接：if-bind/],
   ['命名实参 / 变参展开', /还没接：named|还没接：spread|命名实参/],
