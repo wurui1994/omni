@@ -172,8 +172,19 @@ macOS 那一趟顺出三笔账，都是「按 Linux 的形状照抄」踩出来�
   15 行的探子挨个调（time/clock_gettime/getcwd/isatty/access/stat/readlink/
   getrlimit/getrusage/sigaction/kill/realpath/pthread_*），死在第几行就是第几格。
 
-这条腿上 `omni run` **还到不了**：它要 cgen 插件，插件要 `dlopen` —— 那一格是崩的
-（见上面「还没有的」）。所以现在成立的是「前端 + 检查器」，与 Linux 那一趟同一档。
+这条腿上**做得到与做不到，量过一遍**（43.2M 那个二进制，本机 macOS）：
+
+```
+omni --help                                  rc=0
+omni check tests/cases/*.omni（五份）         与 node 那条腿逐字相同
+omni emit ast|oir|mir 01_basics.omni         三格都出，rc=0（这三格在核心里）
+omni cpp x.c                                 「c 没装：这份 omni 里没有 'c.preprocess'」
+omni run x.omni                              「cgen 没装」
+```
+
+分界线很干净：**核心里的走得通，要插件的走不通** —— 插件是 `dlopen` 装的，而自带 libc
+里 `dlopen` 一族是崩的（见上面「还没有的」）。所以现在成立的是「前端 + 检查器 +
+中间形态」，与 Linux 那一趟同一档。
 
 ## 两个目标各自的那一半（第一百四十片第五格）
 
