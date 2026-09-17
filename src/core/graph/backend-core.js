@@ -44,6 +44,9 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   'record-new', 'field-get', 'field-set', 'list-new', 'index-get', 'index-set',
   /* 切片：方言里没有，走 `nodes.js` 写着的消去规则（新建 + 一圈 apush，见 `bindSlice`）。 */
   'slice',
+  /* defer：方言里没有出口钩子，所以走一趟**变换**（在这一层的末尾与每条 ret 前各放一份，
+     逆序）—— 见 `stmtList`。 */
+  'scope-exit',
   /* 表示转换：方言里是 `(toreal …)`/`(toint …)`/`(tostr …)` 三格 —— 图上那一格的 `to`
      说了要哪一侧，源那一侧得我们自己算（`typeOf`）。 */
   'conv']);
@@ -291,6 +294,76 @@ function lit(v) {
   return `(int ${v})`;
 }
 
+/**
+ * **一层的语句序** -> 方言的文本。`defer`（`scope-exit`）那一格的变换住在这儿。
+ *
+ * 方言里没有"作用域出口钩子"，所以照三条语义各放一份文本（三条都写在
+ * `ext/go/examples/defer.go` 上）：
+ *   一、注册那一刻记下动作 —— 所以动作的文本**在这一格 scope-exit 那儿就落**
+ *       （它只引用得到那之前绑的名字，正是 go 的"实参在注册时算掉"）；
+ *   二、这一层出口时**逆序**跑 —— `frame` 用 unshift 攒，末尾放一份；
+ *   三、**早退也跑** —— `ret` 那一格自己去 `ctx.defers` 里取（见 `stmt` 的 ret 支）。
+ *
+ * 明着不接的两格：注册在里层（分支 / 循环体里）、以及**注册之前就有 ret**
+ * （那时"这条 ret 该跑哪几格"要按位置算，这一刀不做）。
+ */
+function stmtList(list, env, ctx) {
+  const arr = list === null || list === undefined ? [] : (Array.isArray(list) ? list : [list]);
+  const isExit = (s) => isNode(s) && s.op === 'scope-exit';
+  if (!arr.some(isExit)) {
+    for (const s of arr) if (hasScopeExit(s)) gap('嵌在里层的 scope-exit（这一刀只接一层的语句序）');
+    return arr.flatMap((s) => stmt(s, env, ctx));
+  }
+  let last = -1;
+  for (let i = 0; i < arr.length; i++) if (isExit(arr[i])) last = i;
+  for (let i = 0; i < last; i++) {
+    if (!isExit(arr[i]) && hasRet(arr[i])) {
+      gap('scope-exit 注册之前就有 ret（这一刀要"注册都在前头"，不然得按位置算跑哪几格）');
+    }
+    if (!isExit(arr[i]) && hasScopeExit(arr[i])) gap('嵌在里层的 scope-exit（这一刀只接一层的语句序）');
+  }
+  const frame = [];
+  ctx.defers.push(frame);
+  const out = [];
+  for (const s of arr) {
+    if (isExit(s)) {
+      /* 逆序：后注册的先跑。动作里的 `bind` 走一格自己的类型表 —— 那几个名字是动作私有的。 */
+      frame.unshift(...stmt(s.ins.action, new Map(env), ctx));
+      continue;
+    }
+    out.push(...stmt(s, env, ctx));
+  }
+  ctx.defers.pop();
+  /* 末尾已经是 ret 的话那一格自己放过了，别再放一份（死代码）。 */
+  if (!endsWithRet(arr)) out.push(...frame);
+  return out;
+}
+
+/** 这一层往里还有没有 `scope-exit`（有就报缺口 —— 别悄悄漏掉一格出口动作）。 */
+function hasScopeExit(x) {
+  if (Array.isArray(x)) return x.some(hasScopeExit);
+  if (!isNode(x)) return false;
+  if (x.op === 'scope-exit') return true;
+  if (x.op === 'func') return false;                 // 里层函数的出口是它自己的事
+  return Object.values(x.ins).some(hasScopeExit);
+}
+
+/** 这块子图里有没有 `ret`（`scope-exit` 那一格要按它判"注册是不是都在前头"）。 */
+function hasRet(x) {
+  if (Array.isArray(x)) return x.some(hasRet);
+  if (!isNode(x)) return false;
+  if (x.op === 'ret') return true;
+  if (x.op === 'func') return false;
+  return Object.values(x.ins).some(hasRet);
+}
+
+/** 这一处 `ret` 要先跑哪几句：从里层往外层，每层都逆序（`frame` 攒的时候就是逆序）。 */
+function pendingDefers(ctx) {
+  const out = [];
+  for (let i = ctx.defers.length - 1; i >= 0; i--) out.push(...ctx.defers[i]);
+  return out;
+}
+
 /** 一格**语句** -> 方言的文本（可能是好几句，所以回数组）。 */
 function stmt(x, env, ctx) {
   if (x === null || x === undefined) return [];
@@ -323,8 +396,10 @@ function stmt(x, env, ctx) {
        * 当场红：两层各有一格 `x`，摊平之后就是"'x' 在这一层已经声明过了"。
        * 类型表也跟着分层（`new Map(env)`），不然里层那格的类型会漏到外层。 */
       const inner = new Map(env);
-      return [`(do ${stmt(x.ins.body, inner, ctx).join(' ')})`];
+      return [`(do ${stmtList(x.ins.body, inner, ctx).join(' ')})`];
     }
+    case 'scope-exit':
+      return gap('这处 scope-exit 不在一层语句序上（这一刀只接函数体与 `(do …)` 那两处）');
     case 'loop': {
       const body = stmt(x.ins.body, env, ctx);
       /* 步进那一格（`post`）在方言里没有对应物 —— 缀在体末尾就够（这一刀不接 `continue`
@@ -344,7 +419,16 @@ function stmt(x, env, ctx) {
     }
     case 'ret': {
       const v = x.ins.value;
-      return [v === undefined || v === null ? '(ret)' : `(ret ${expr(v, env, ctx)})`];
+      const pend = pendingDefers(ctx);
+      if (pend.length === 0) {
+        return [v === undefined || v === null ? '(ret)' : `(ret ${expr(v, env, ctx)})`];
+      }
+      if (v === undefined || v === null) return [...pend, '(ret)'];
+      /* **先把要交回去的值算掉，再跑出口动作** —— go 的语义就是这个次序（出口动作改了
+       * 那个变量也改不了已经算出来的返回值）。所以物化一格临时量，不是直接 `(ret …)`。 */
+      ctx.tmp = ctx.tmp + 1;
+      const nm = `ret_tmp${ctx.tmp}`;
+      return [`(let ${nm} ${typeOf(v, env, ctx)} ${expr(v, env, ctx)})`, ...pend, `(ret (var ${nm}))`];
     }
     case 'prim': {
       if (x.attrs.name !== 'print') return [`(expr ${expr(x, env, ctx)})`];
@@ -470,7 +554,7 @@ export function emitCore(g) {
   const env = new Map();
   /* 整份产物共用的登记处：`byKey` 按"字段名单 + 类型"去重、`shapes` 按标签查、
      `decls` 是要印在模块头上的那几句 `(struct …)`。 */
-  const ctx = { byKey: new Map(), shapes: new Map(), decls: [], tmp: 0 };
+  const ctx = { byKey: new Map(), shapes: new Map(), decls: [], tmp: 0, defers: [] };
   /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
   const fns = [];
   const rest = [];
@@ -496,7 +580,7 @@ export function emitCore(g) {
     for (const p of f.params) fenv.set(p, 'int');
     const ps = f.params.map((p) => `(${p} int)`).join(' ');
     const ret = env.get(`fn:${f.name}`) ?? 'int';
-    const fbody = stmt(f.body, fenv, ctx);
+    const fbody = stmtList(f.body, fenv, ctx);
     /* **掉到函数尾**这件事不许糊：方言要求非 void 的函数每条路都有 `ret`，而图上"体末尾那个
      * 值就是返回值"（chez / sbcl 那两门）是合法的。补一格 `(ret 0)` 交上去 = 悄悄给错答案
      * —— 矩阵上量到过两次（chez+intmath 印 0/0、sbcl+blockret 末行印 0）。
@@ -506,7 +590,7 @@ export function emitCore(g) {
     }
     body.push(`  (fn ${f.name} (${ps}) ${ret} ${fbody.join(' ')})`);
   }
-  const mainStmts = rest.flatMap((it) => stmt(it, env, ctx));
+  const mainStmts = stmtList(rest, env, ctx);
   body.push(`  (main ${mainStmts.join(' ')}))`);
   /* `(struct …)` 要印在**用到它的东西前头**，而形状是落语句的时候才登记上的 ——
      所以这几句最后拼（次序：模块头、struct 那几句、函数、main）。 */
