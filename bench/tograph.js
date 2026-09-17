@@ -169,24 +169,47 @@ function measure(lang) {
     classes.set(c, (classes.get(c) ?? 0) + 1);
   };
   const t0 = Date.now();
+  /**
+   * **按目录分两趟**（2026-09-18）：go 的一个**包**、V 的一个**模块**就是一个目录，
+   * 而"这个类型有哪几格字段"、"这名字登记成类型了吗"这两问的答案常常在**旁边那份文件**里
+   * （账上"跨文件才知道的事"那一族 470 份 / 25.2%，是最大的一族）。
+   *
+   * 所以先把一个目录里的树全解析出来，再把**整目录的树**一起交给每一次映射（`opts.also`）：
+   * 那几张声明表先按旁边那几份填一遍、再按自己这一份填。这不是"猜"——它就是真编译器的
+   * 模块那一趟，而且**同一格机制驱动那一侧也用**（`src/core/graph/run.js` 里 import
+   * 进来的那几份现在也这么传，那儿原来读进来了却看不见声明）。
+   */
+  const byDir = new Map();
   for (const p of files) {
-    const text = readFileSync(p, 'utf8');
-    row.bytes += text.length;
-    const diags = new Diagnostics();
-    let tree = null;
-    try {
-      const toks = lexText(tb.grammar.lex, new SourceFile(p, text), diags);
-      if (toks !== null && !diags.hasErrors()) tree = glrParse(tb, toks, diags);
-    } catch {
-      tree = null;
+    const d = dirname(p);
+    if (!byDir.has(d)) byDir.set(d, []);
+    byDir.get(d).push(p);
+  }
+  for (const [, ps] of byDir) {
+    const trees = [];
+    for (const p of ps) {
+      const text = readFileSync(p, 'utf8');
+      row.bytes += text.length;
+      const diags = new Diagnostics();
+      let tree = null;
+      try {
+        const toks = lexText(tb.grammar.lex, new SourceFile(p, text), diags);
+        if (toks !== null && !diags.hasErrors()) tree = glrParse(tb, toks, diags);
+      } catch {
+        tree = null;
+      }
+      if (tree === null || diags.hasErrors()) continue;    // 第一层的账在 grammars.js 上
+      row.parsed += 1;
+      trees.push({ path: p, tree: tree });
     }
-    if (tree === null || diags.hasErrors()) continue;      // 第一层的账在 grammars.js 上
-    row.parsed += 1;
-    try {
-      lang.toGraph(tree);
-      row.graphed += 1;
-    } catch (err) {
-      bump(err.message, p);
+    const also = trees.map((t) => t.tree);
+    for (const t of trees) {
+      try {
+        lang.toGraph(t.tree, { also: also });
+        row.graphed += 1;
+      } catch (err) {
+        bump(err.message, t.path);
+      }
     }
   }
   row.ms = Date.now() - t0;

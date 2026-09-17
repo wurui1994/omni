@@ -129,7 +129,7 @@ function fieldsOf(st) {
  * 扫一遍顶层：登记类型名（`type Point struct …`）、每个方法的接收者类型，
  * 以及 `var` / `const` 里**装 map 的名字**（`specMapNames` 那段说了为什么要在这儿收）。
  */
-function collectDecls(x) {
+function collectDecls(x, shapesOnly) {
   if (!isList(x)) return;
   if (tag(x) === 'tspec' || tag(x) === 'talias') {
     TYPES.add(leaf(kids(x)[0]));
@@ -145,7 +145,11 @@ function collectDecls(x) {
     }
   }
   if (tag(x) === 'spec') for (const n of specMapNames(x)) MAPS.add(n);
-  if (tag(x) === 'method') {
+  /* `shapesOnly` 是**同一包里别的文件**那一趟用的（`opts.also`）：类型与字段名要收，
+     **方法名不收** —— 那张表是"名字 -> 接收者类型"的单态分派，一个包摊开看重名到处都是
+     （`Error` / `String` / `Format` …）。量过：整包一起收方法名，go 那一栏从 81 掉到 47。
+     跨文件的方法调用因此仍旧走"取字段再调它" —— 那条墙留着，它要的正是类型那一层。 */
+  if (tag(x) === 'method' && shapesOnly !== true) {
     const [recv, nm] = kids(x);
     const name = leaf(nm);
     const ty = part(kids(recv)[0], 'tname');
@@ -157,7 +161,7 @@ function collectDecls(x) {
     }
     METHODS.set(name, owner);
   }
-  for (const k of kids(x)) collectDecls(k);
+  for (const k of kids(x)) collectDecls(k, shapesOnly);
 }
 
 // go 的算符表：标准那一批。位运算那一族（`<<` / `>>` / `&` / `|` / `^` / `&^`）
@@ -839,6 +843,14 @@ export function goToGraph(tree, opts) {
   TYPES.clear();
   STRUCTS.clear();
   UNDER.clear();
+  /* **同一包里别的文件先扫**（`opts.also`）：go 的一个包摊在好几份文件上，
+     `var x SomeType` 的零值、`T{…}` 的字段名都可能声明在旁边那份里。
+     这一趟只收声明，不落节点；**旁边的先扫、自己的后扫**（同名时自己这一份说了算）。 */
+  for (const t of opts?.also ?? []) {
+    if (t === tree) continue;
+    for (const nm of mapNames(t, mapBindName)) MAPS.add(nm);
+    collectDecls(t, true);   // shapesOnly：类型与字段名要，方法名不要（重名太多）
+  }
   collectDecls(tree);
   const items = kids(tree).slice(1);          // 第一格是包名
   const body = items.map(toNode).flat();

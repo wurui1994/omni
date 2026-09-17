@@ -113,11 +113,20 @@ function graphOf(path, argv) {
   };
   if (!load(path, tree)) { stderr(diags.format()); return { code: 1 }; }
   try {
-    const main = lang.toGraph(tree);
+    /**
+     * **一起编的那几份要互相看得见声明**（`also`）。
+     *
+     * 每份文件的映射本来各扫各的声明（`STRUCTS` / `TYPES` / `METHODS` 那几张表每趟都清），
+     * 于是 `import util` 之后 `util.Point{1, 2}` 仍旧报"声明不在这一份文件里"——
+     * 读进来了却看不见，那是这一格落地时漏掉的一半。现在把**这一趟所有的树**一起交给
+     * 每一次映射：那几张表先按旁边那几份填一遍，再按自己这一份填（同名时自己说了算）。
+     */
+    const also = [tree, ...mods.map((m) => m.tree)];
+    const main = lang.toGraph(tree, { also });
     if (mods.length === 0) return { lang, graph: main };
     /* 拼一张图：**被导入的在前**（那些是声明，`ref` 要看得见它们），主文件在后。 */
     const body = [];
-    for (const m of mods) body.push(...lang.toGraph(m.tree, { asModule: true }).body);
+    for (const m of mods) body.push(...lang.toGraph(m.tree, { asModule: true, also }).body);
     body.push(...main.body);
     stderr(`omni: ${mods.length} 份 import 进来的同语言文件：`
       + `${mods.map((m) => m.path).join(' ')}\n`);

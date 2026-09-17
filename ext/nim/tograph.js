@@ -41,18 +41,21 @@ const TYPES = new Set();
 const PARAMS = new Map();
 
 /** 扫一遍顶层：登记类型名与每个 proc 的形参名（嵌套的 routine 也一起收）。 */
-function collectDecls(x) {
+function collectDecls(x, shapesOnly) {
   if (!isList(x)) return;
   if (tag(x) === 'tdef') {
     const nm = kids(x).find((y) => tag(y) === 'n' || tag(y) === 'name');
     if (nm !== undefined) TYPES.add(leaf(kids(nm)[0]));
   }
-  if (tag(x) === 'routine') {
+  /* `shapesOnly` 是**一起编的那几份**那一趟用的（`opts.also`）：类型名要收，
+     **形参名不收** —— 那张表按 proc 名索引，重名的 proc（nim 允许重载）会互相盖掉，
+     而 `f(x = 1)` 排回位置靠的正是它：盖错了就是静默的错答案。 */
+  if (tag(x) === 'routine' && shapesOnly !== true) {
     const nm = kids(x).find((y) => tag(y) === 'n' || tag(y) === 'name');
     const sig = part(x, 'sig');
     if (nm !== undefined && sig !== undefined) PARAMS.set(leaf(kids(nm)[0]), paramNames(sig));
   }
-  for (const k of kids(x)) collectDecls(k);
+  for (const k of kids(x)) collectDecls(k, shapesOnly);
 }
 
 /** 一格 `(sig …)` 里的形参名（分组写法 `(a, b: int)` 也拆开）。 */
@@ -501,6 +504,14 @@ export function nimToGraph(tree, opts) {
   // 后者把 `f(x = 1)` 排回位置。这两问都不用驱动器回问 —— 树上就有答案。
   TYPES.clear();
   PARAMS.clear();
+  /* **一起编的那几份先扫**（`opts.also`）：nim 的 `T(x: 1)` 要"这名字登记成类型了吗"、
+     `f(x = 1)` 要形参名，而这两样都可能声明在 import 进来的那份里。
+     这一趟只收声明，不落节点；旁边的先扫、自己的后扫。 */
+  for (const t of opts?.also ?? []) {
+    if (t === tree) continue;
+    for (const nm of mapNames(t, mapBindName)) MAPS.add(nm);
+    collectDecls(t, true);   // shapesOnly：类型名要，形参名不要（重载会盖错）
+  }
   collectDecls(tree);
   return program(kids(tree).map(toNode).flat());
 }

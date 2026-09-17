@@ -61,6 +61,13 @@ bothLegs('vlang import util', join(MODS, 'vmain.v'), '81');
 /* ---- 三：环不许挂死（读过的不再读） */
 bothLegs('nim 互相 import（A 引 B、B 引 A）不挂死', join(MODS, 'ring1.nim'), '3');
 
+/* ---- 三之二：**声明也要看得见**（不只是名字能连上）。
+   `Point{3, 4}` 那种位置型字面量要"字段名与顺序"，而 struct 只写在被导入的那份里。
+   落地这一格时漏掉的正是这一半：读进来了，可每份文件的映射各扫各的声明，于是导入方
+   照旧报"声明不在这一份文件里"。现在一起编的那几份互相看得见声明（`opts.also`）。 */
+bothLegs('vlang import 之后**看得见对方的 struct**（位置型字面量的字段名）',
+  join(MODS, 'vshape.v'), '12');
+
 /* ---- 四：标准库那一格照旧被映射接住（`import tables` 不该被这一刀带坏） */{
   const p = join(ROOT, 'ext', 'nim', 'examples', 'dict.nim');
   const r = omni(['run', p, '--engine', 'graph']);

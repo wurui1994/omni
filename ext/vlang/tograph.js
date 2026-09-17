@@ -99,8 +99,16 @@ const EVARIANTS = new Map();      // '变体名' -> 值（撞名的存 null）
 const tnameText = (tn) => (tn !== undefined && tag(tn) === 'tname'
   ? kids(tn).map(leaf).join('.') : null);
 
-/** 扫一遍顶层：登记每个方法的接收者类型，以及每个 struct 的字段名与顺序。 */
-function collectDecls(x) {
+/**
+ * 扫一遍顶层：登记每个方法的接收者类型，以及每个 struct 的字段名与顺序。
+ *
+ * `shapesOnly` 那一格是**旁边那几份文件**用的（`opts.also`）：只收"这个类型长什么样"
+ * （struct 的字段名与顺序 · enum 的变体），**不收方法名**。理由是量出来的：
+ * 方法名那张表是"名字 -> 接收者类型"的单态分派，一个模块摊开看**重名到处都是**
+ * （`Ship` 与 `GameObject` 都有 `instance`）—— 整目录一起收，V 那一栏当场从 1044 掉到 338。
+ * 跨文件的方法调用因此仍旧走"取字段再调它"，那条墙留着（它要的正是类型那一层）。
+ */
+function collectDecls(x, shapesOnly) {
   if (!isList(x)) return;
   if (tag(x) === 'struct' || tag(x) === 'union') {
     const nm = tnameText(kids(x)[0]);
@@ -127,7 +135,7 @@ function collectDecls(x) {
       next += 1;
     }
   }
-  if (tag(x) === 'method') {
+  if (tag(x) === 'method' && shapesOnly !== true) {
     const [recv, nm] = kids(x);
     const name = leaf(nm);
     const ty = part(kids(recv)[0], 'tname');
@@ -139,7 +147,7 @@ function collectDecls(x) {
     }
     METHODS.set(name, owner);
   }
-  for (const k of kids(x)) collectDecls(k);
+  for (const k of kids(x)) collectDecls(k, shapesOnly);
 }
 
 const many = (xs) => xs.map(toNode).flat();
@@ -848,7 +856,19 @@ export function vlangToGraph(tree, opts) {
   STRUCTS.clear();
   ENUMS.clear();
   EVARIANTS.clear();
+  /**
+   * **同一格模块里别的文件先扫**（`opts.also`）：V 里同一个目录就是同一个模块，
+   * `Point{1, 2}` 的字段名与顺序**可能声明在旁边那份文件里**。这一趟只收声明
+   * （struct / enum / method / 装 map 的名字），不落一格节点 —— 落节点是各自那一趟的事。
+   * **旁边的先扫、自己的后扫**：同名时自己这一份说了算。
+   */
+  for (const t of opts?.also ?? []) {
+    if (t === tree) continue;
+    for (const nm of mapNames(t, mapBindName)) MAPS.add(nm);
+    collectDecls(t, true);   // shapesOnly: struct / enum 要，方法名不要（重名太多）
+  }
   collectDecls(tree);
+
   // 模块名（`@MOD` 要它）—— 顶层那一条 `(module 名)`，没写就是 null（那时 `@MOD` 当场报）
   const mod = kids(tree).find((y) => tag(y) === 'module');
   MODNAME = mod === undefined ? null : leaf(kids(mod)[0]);
