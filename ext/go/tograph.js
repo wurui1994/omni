@@ -15,7 +15,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, deferNow,
   mapNew, mapGet, mapSet, mapHas, mapNames, isList,
 } from '../../src/core/graph/fromtree.js';
@@ -220,6 +220,80 @@ function funcOf(sig, blk, name, self) {
     { params: self === undefined ? params : [self, ...params], name });
 }
 
+/**
+ * **`switch` 落一条 branch 链**（不给它开节点）。go 这一格与 C 家族差得远，正好是
+ * "写法归语言、格子归节点"的又一例：**没有隐式贯穿**，所以它就是一串 if / else if / else。
+ *
+ * 三件事归 go 自己：
+ *   * 主语**只算一次** —— 落一格 `bind` 到 `__swN`，各分支拿 `ref` 去比（`==`）；
+ *     `switch { case cond: }`（没主语）那一路直接拿分支的表达式当条件。
+ *   * 一个 case 里几个值 = 或 —— 落 `lazyOr`（第二格是 lazy，与 `||` 同一格 branch）。
+ *   * `default` 是**最里那一层 else**，写在中间也一样（条件按源码次序判，default 垫底）。
+ *
+ * `__swN` 的 N 是**嵌套深度**不是全局计数：兄弟位置上的两格 switch 各自一格 region，
+ * 名字撞不上；而嵌了一层的那个换个号，免得读的人以为是同一个临时量。
+ *
+ * **`break` 在 switch 里是跳出 switch**，落成 branch 链之后它会变成跳出循环 ——
+ * 那是"答案错而不报"，所以当场报。`fallthrough` 走 toNode 的兜底（那一格还没接）。
+ */
+let SW_DEPTH = 0;
+
+/** case 体里不许有 `break`（进不去内层的循环 / switch / 函数 —— 那几格各管自己）。 */
+const BREAK_STOP = new Set(['for', 'switch', 'tswitch', 'select', 'fn', 'fnlit', 'method']);
+function noBreak(x) {
+  if (!isList(x)) return;
+  if (tag(x) === 'break') {
+    throw new Error('go->graph: switch 里的 break 是跳出 switch —— 落成 branch 链会变成'
+      + '跳出循环，这一格当场报');
+  }
+  if (BREAK_STOP.has(tag(x))) return;
+  for (const k of kids(x)) noBreak(k);
+}
+
+/** 一格分支的体：`(body 语句…)` -> 一格 region（go 的 case 体自带一层作用域）。 */
+function armOf(c) {
+  const stmts = partKids(c, 'body');
+  for (const st of stmts) noBreak(st);
+  return node('region', { body: many(stmts) });
+}
+
+function switchOf(x) {
+  const all = kids(x);
+  const ini = all.length > 0 && tag(all[0]) === 'init' ? all[0] : undefined;
+  const rest = ini === undefined ? all : all.slice(1);
+  const subj = rest.length > 0 && tag(rest[0]) === 'tag' ? kids(rest[0])[0] : undefined;
+  const cs = subj === undefined ? rest : rest.slice(1);
+  const holder = `__sw${SW_DEPTH}`;
+  const arms = [];
+  let dflt;
+  SW_DEPTH += 1;
+  try {
+    for (const c of cs) {
+      if (tag(c) === 'default') {
+        if (dflt !== undefined) throw new Error('go->graph: 一格 switch 里两个 default');
+        dflt = armOf(c);
+        continue;
+      }
+      if (tag(c) !== 'case') throw new Error(`go->graph: switch 里不该有 ${tag(c)}`);
+      const items = partKids(c, 'items');
+      if (items.length === 0) throw new Error('go->graph: case 后面一个值都没有');
+      // 比较落的是**算符表里那一格**（`==` 在图上写成 `=`）—— 表是唯一的出处，
+      // 所以这儿走 `binOf` 而不是自己拼一格 `bin`
+      const conds = items.map((it) => (subj === undefined ? toNode(it)
+        : binOf('==', node('ref', {}, { name: holder }), toNode(it), OPS, { lang: 'go' })));
+      arms.push([conds.reduce((a, b) => lazyOr(a, b)), armOf(c)]);
+    }
+  } finally {
+    SW_DEPTH -= 1;
+  }
+  let chain = dflt;
+  for (let i = arms.length - 1; i >= 0; i -= 1) chain = branchOf(arms[i][0], arms[i][1], chain);
+  const body = ini === undefined ? [] : many(kids(ini).filter((k) => tag(k) !== 'none'));
+  if (subj !== undefined) body.push(node('bind', { init: toNode(subj) }, { name: holder }));
+  if (chain !== undefined) body.push(chain);
+  return body.length === 0 ? [] : node('region', { body });
+}
+
 function toNode(x) {
   switch (tag(x)) {
     // ---- 叶子 --------------------------------------------------------------
@@ -382,9 +456,16 @@ function toNode(x) {
       return node('region', { body: [...many(kids(ini).filter((k) => tag(k) !== 'none')), br] });
     }
     case 'return': return retOf(many(kids(x)));
-    // `break` / `continue` -> **同一格节点**，差的只有一格附属 kind
-    case 'break': return loopExit('break');
-    case 'continue': return loopExit('continue');
+    case 'switch': return switchOf(x);
+    // `break` / `continue` -> **同一格节点**，差的只有一格附属 kind。
+    // **带标签的那两个当场报**：`break L` 跳的是 L 那一层，而图上这一格跳的是最近一层 ——
+    // 原来把标签直接丢了，那是"答案错而不报"。
+    case 'break': case 'continue': {
+      if (kids(x).length > 0) {
+        throw new Error(`go->graph: 带标签的 ${tag(x)} 跳的不是最近那一层 —— 这一格当场报`);
+      }
+      return loopExit(tag(x));
+    }
     case 'expr': return toNode(kids(x)[0]);
     // `defer f(x)` -> scope-exit（挂在**当前 region**上，逆序、早退也跑 —— 八家共用那一格）。
     // go 独有的一条在 `deferNow` 里：**实参在注册那一刻就算掉**（CL / nim / V 不是这样，

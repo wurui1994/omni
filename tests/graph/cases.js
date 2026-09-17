@@ -71,6 +71,12 @@ export const MUT = ['1', '3'];
  */
 export const VARDECL = ['15', '1', '3', '6', '5', '2'];
 /**
+ * switch：**`switch` 落一条 branch 链**（go 独一份）—— 没有隐式贯穿，所以不给它开节点。
+ * 六行分别压：主语相等 · 一个分支几个值（或）· default 垫底 · 没主语那一路 ·
+ * `switch k := …; k` 的 init + 主语临时量 · 嵌一层换个临时量号。
+ */
+export const SWITCH = ['10', '20', '30', '2', '4', '3'];
+/**
  * blockscope：**一段带自己作用域的语句**（nim 的 `block:` -> region）。
  * 里外两个同名的 `x`：块里印 5、块外印 1 —— 那两行压的是"region 真的开了一层作用域"。
  */
@@ -152,6 +158,10 @@ export const CASES = [
   // （零值 · 省略初值重复上一条 · `iota` 是序号）都归 go 的映射，图上一格新节点也没加。
   // 它顺带把**模块级变量**压在四条腿上（顶层的 bind 在 `call main` 之前）。
   ...fam('vardecl', VARDECL, ['go']),
+  // 第二十一个家族：**switch**（go 独一份）。同一条理由：go 没有隐式贯穿，所以这一格
+  // 就是一串 if / else if / else —— 图上一格新节点也没加。它顺带把一条**答案错而不报**的
+  // 口子钉住：switch 里的 `break` 是跳出 switch，落成 branch 链会变成跳出循环，所以当场报。
+  ...fam('switch', SWITCH, ['go']),
 ];
 
 /**
