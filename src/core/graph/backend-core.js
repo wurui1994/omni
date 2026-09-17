@@ -299,9 +299,39 @@ function expr(x, env, ctx) {
       if (from === 'real') return `(toint ${v})`;
       return gap(`这格表示转换还没接：${from} -> ${to}`);
     }
-    case 'branch':
-      /* 方言里 `if` 是语句 —— 表达式位置上的 branch 这一刀不接（要块表达式，ADR-0031 §5）。 */
-      return gap('branch 出现在表达式位置上（方言的块表达式还欠着）');
+    case 'branch': {
+      /* 方言里 `if` 是语句，所以表达式位置上的 branch **物化**成一格临时量 + 两支各赋值
+       * （wat 那条腿也是这么做的：`backend-wat.js` 的"值位置的 if"）。两支各带自己的筐 ——
+       * 把 `(set …)` 之外的东西提到 `if` 前面是错的：那两支里可能有副作用（chez 的
+       * `sum-go` 两支各是一次递归调用，提出去就无限递归了）。 */
+      if (ctx.pre === null || ctx.pre === undefined) gap('branch 出现在表达式位置上，而这一处没地方摆物化的那两句');
+      const els = x.ins.else;
+      if (els === undefined || els === null) gap('表达式位置上的 branch 少了 else 那一支');
+      const t = typeOf(x.ins.then, env, ctx);
+      const t2 = typeOf(els, env, ctx);
+      if (t !== t2) gap(`表达式位置上的 branch 两支不同型（${t} 与 ${t2}）`);
+      if (!isScalar(t)) gap(`表达式位置上的 branch 交出来的不是标量（${t}）`);
+      ctx.tmp = ctx.tmp + 1;
+      const nm = `if_tmp${ctx.tmp}`;
+      const arm = (e) => {
+        const outer = ctx.pre;
+        const p = [];
+        ctx.pre = p;
+        let v;
+        try {
+          v = expr(e, env, ctx);
+        } finally {
+          ctx.pre = outer;
+        }
+        return `(do ${[...p, `(set ${nm} ${v})`].join(' ')})`;
+      };
+      const cond = condText(x.ins.cond, env, ctx);
+      const a = arm(x.ins.then);
+      const b = arm(els);
+      ctx.pre.push(`(let ${nm} ${t} ${zeroText(t)})`);
+      ctx.pre.push(`(if ${cond} ${a} ${b})`);
+      return `(var ${nm})`;
+    }
     default: return gap(`${x.op} 出现在表达式位置上`);
   }
 }
@@ -412,6 +442,14 @@ function argText(fname, i, a, env, ctx) {
 /** 这一格类型是不是聚合（记录 / 列表 / 字典 / 多值）。 */
 const isAggregate = (t, ctx) => ctx.shapes.has(t) || elemType(t) !== null || dictOf(t) !== null;
 
+/** 一格标量的零值（物化那一格要它 —— `(let tmp T 零值)` 之后两支各赋值）。 */
+function zeroText(t) {
+  if (t === 'real') return '(real 0.0)';
+  if (t === 'bool') return '(bool false)';
+  if (t === 'string') return '(str "")';
+  return '(int 0)';
+}
+
 /** 一格字面量的方言写法。 */
 function lit(v) {
   const t = litType(v);
@@ -501,8 +539,27 @@ function pendingDefers(ctx) {
   return out;
 }
 
-/** 一格**语句** -> 方言的文本（可能是好几句，所以回数组）。 */
+/**
+ * 一格**语句** -> 方言的文本（可能是好几句，所以回数组）。
+ *
+ * 这一层还管**物化**：表达式位置上的 `branch` 要一格临时量 + 两支各赋值才落得下去
+ * （方言的 `if` 是语句），那两句得摆在这条语句**前面** —— `ctx.pre` 就是那个筐。
+ * 每条语句一只自己的筐（进来换、出去还），所以嵌在里层的物化不会漏到外层去。
+ */
 function stmt(x, env, ctx) {
+  const outer = ctx.pre;
+  const pre = [];
+  ctx.pre = pre;
+  let out;
+  try {
+    out = stmtIn(x, env, ctx);
+  } finally {
+    ctx.pre = outer;
+  }
+  return pre.length === 0 ? out : [...pre, ...out];
+}
+
+function stmtIn(x, env, ctx) {
   if (x === null || x === undefined) return [];
   if (Array.isArray(x)) return x.flatMap((y) => stmt(y, env, ctx));
   if (!isNode(x)) return [`(expr ${expr(x, env, ctx)})`];
@@ -554,7 +611,14 @@ function stmt(x, env, ctx) {
       ctx.post = post;
       const body = stmt(x.ins.body, env, ctx);
       ctx.post = outerPost;
-      return [`(while ${condText(x.ins.cond, env, ctx)} (do ${[...body, ...post].join(' ')}))`];
+      /* 条件里要是有一格得物化的东西（表达式位置的 branch），提到循环外面就**不是每轮算**
+       * 了 —— 那是静默的错答案，所以报。 */
+      const nPre = ctx.pre.length;
+      const cond = condText(x.ins.cond, env, ctx);
+      if (ctx.pre.length !== nPre) {
+        gap('循环的条件里有一格要物化的表达式（提到循环外就不是每轮算了）');
+      }
+      return [`(while ${cond} (do ${[...body, ...post].join(' ')}))`];
     }
     case 'loop-exit':
       if (x.attrs.kind === 'continue') return [...ctx.post, '(cont)'];
@@ -789,7 +853,7 @@ export function emitCore(g) {
      `decls` 是要印在模块头上的那几句 `(struct …)`、`args` 是调用点记下的实参类型。 */
   const ctx = {
     byKey: new Map(), shapes: new Map(), decls: [], tmp: 0,
-    defers: [], scope: [], post: [], args: new Map(),
+    defers: [], scope: [], post: [], args: new Map(), pre: null,
   };
   /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
   const fns = [];
@@ -839,7 +903,7 @@ export function emitCore(g) {
     const arr = Array.isArray(f.body) ? f.body : (f.body === undefined || f.body === null ? [] : [f.body]);
     const fbody = f.impl === null || f.impl === undefined
       ? stmtList(f.body, fenv, ctx)
-      : [...stmtList(arr.slice(0, -1), fenv, ctx), ...retify(arr[arr.length - 1], fenv, ctx)];
+      : [...stmtList(arr.slice(0, -1), fenv, ctx), ...tailRet(arr[arr.length - 1], fenv, ctx)];
     /* **掉到函数尾**这件事不许糊：方言要求非 void 的函数每条路都有 `ret`，而图上"体末尾那个
      * 值就是返回值"（chez / sbcl 那两门）是合法的。补一格 `(ret 0)` 交上去 = 悄悄给错答案
      * —— 矩阵上量到过两次（chez+intmath 印 0/0、sbcl+blockret 末行印 0）。
@@ -883,6 +947,24 @@ function implicitRet(body) {
   if (declOf(last.op).sort !== 'expr') return null;
   if (last.op === 'prim' && last.attrs.name === 'print') return null;
   return last;
+}
+
+/**
+ * 末尾那一格的 `(ret …)`：**自带一只物化的筐**。`retify` 不是从 `stmt` 里叫起来的
+ * （它是 `emitCore` 直接叫的），所以那时 `ctx.pre` 还是空的 —— 少了这一格，末尾是一格
+ * 表达式位置的 branch 时就报"没地方摆物化的那两句"。
+ */
+function tailRet(x, env, ctx) {
+  const outer = ctx.pre;
+  const pre = [];
+  ctx.pre = pre;
+  let out;
+  try {
+    out = retify(x, env, ctx);
+  } finally {
+    ctx.pre = outer;
+  }
+  return [...pre, ...out];
 }
 
 /**
@@ -979,11 +1061,13 @@ export const CORE_SHAPES = [
     witness: () => program([node('prim', { args: [litNode(1), litNode(2)] }, { name: 'print' })]),
   },
   {
-    what: '表达式位置上的 branch',
-    why: '方言的块表达式还欠着（ADR-0031 §5）',
-    witness: () => program([node('bind', {
-      init: node('branch', { cond: litNode(true), then: litNode(1), else: litNode(2) }),
-    }, { name: 'x' })]),
+    what: '循环的条件里有一格要物化的表达式',
+    why: '表达式位置上的 branch 落成"一格临时量 + 两支各赋值"，那两句得摆在这条语句前面 ——'
+      + '而循环的条件**每轮都要算**，提到循环外面就是一处静默的错答案，所以宁可报',
+    witness: () => program([node('loop', {
+      cond: node('branch', { cond: litNode(true), then: litNode(true), else: litNode(false) }),
+      body: [node('prim', { args: [litNode(1)] }, { name: 'print' })],
+    })]),
   },
   {
     what: '不是 bool 的条件',
