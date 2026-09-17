@@ -38,6 +38,7 @@ import {
   graphStat, graphStatTable, graphStatJson, graphStatDot, graphStatDiff, graphStatDiffTable,
 } from './stat.js';
 import { shrink } from './shrink.js';
+import { layerModel, layerTable } from '../cli/layers.js';
 import { watToWasm } from '../wasm/assemble.js';
 import { LANGS, pickLang, treeRoot } from './langs.js';
 
@@ -104,7 +105,7 @@ function pickBackend(verb, argv, dflt) {
 function statOf(graph, argv, path) {
   const out = cliArg(argv, '--stat-out');
   const other = cliArg(argv, '--stat-diff');
-  if (!argv.includes('--stat') && out === null && other === null) return;
+  if (!argv.includes('--stat') && out === null && other === null) return null;
   const s = graphStat(graph);
   stderr(graphStatTable(s));
   if (other !== null) {
@@ -118,6 +119,7 @@ function statOf(graph, argv, path) {
     writeText(out, json ? graphStatJson(s) : graphStatDot(graph));
     stderr(`omni: 图的形状 -> ${out}（${json ? 'json' : 'dot：dot -Tsvg 出图'}）\n`);
   }
+  return s;
 }
 
 /**
@@ -137,13 +139,27 @@ function shrinkOf(graph, argv) {
   return r.graph;
 }
 
+/**
+ * 各层的账（第一百四十七片第五格）：**与 omni 那台机器同一把尺子**（`cli/layers.js`）。
+ *
+ * 图这一层的节点表（上面 `statOf` 那张）说的是「图定义的那 27 格节点」；这一张说的是
+ * 「源码 -> 图 -> 目标文本」每层多少、比源码大几倍。两张要分开看：一张是形状，一张是胀。
+ */
+function statLayersGraph(path, s, textLen, argv) {
+  if (!argv.includes('--stat')) return;
+  const src = readText(path);
+  const layers = [{ name: '图', n: s.nodes, unit: '格', bytes: null }];
+  if (textLen > 0) layers.push({ name: '目标文本', n: null, unit: '', bytes: textLen });
+  stderr(layerTable(layerModel({ bytes: src.length, lines: src.split('\n').length }, layers)));
+}
+
 export function runGraphFile(path, argv) {
   const back = pickBackend('run', argv, 'interp');
   const got = graphOf(path, argv);
   if (got.code !== undefined) return got.code;
   const { lang } = got;
   const graph = shrinkOf(got.graph, argv);
-  statOf(graph, argv, path);
+  const st = statOf(graph, argv, path);
 
   // ---- 图 -> 那条腿。缺口与"跑错了"分开记
   let art = null;
@@ -156,6 +172,8 @@ export function runGraphFile(path, argv) {
     }
     throw err;
   }
+  /* 各层的账：这条腿的目标文本大小只有降完才知道（interp 那条没有文本 —— 报 0）。 */
+  if (st !== null) statLayersGraph(path, st, typeof art.text === 'string' ? art.text.length : 0, argv);
   if (back.runnable === false) {
     // sx：印那份文本，顺带把"读回来还是同一张图"验一遍（那是它在矩阵里的判据）
     stdout(`${art.text}\n`);

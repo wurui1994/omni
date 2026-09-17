@@ -139,5 +139,41 @@ rmSync(join(WORK, 'lin'), { force: true });
   } else bad('build --stat', `dot=${dotOk} ${s.split('\n').slice(-6).join('\n    ')}`);
 }
 
+/* ---- `--stat` 的另两半（第一百四十七片第五格）：**时间**与**各层的账**。
+ *
+ * 「构建统计」说的不只是依赖：时间去哪儿了、每层多少格、哪一层最胀，三样一起才叫统计。
+ * 各层那张表**两台机器共用一份量法**（`cli/layers.js`）—— 老那几条腿（js -> js、
+ * 前端 -> OIR -> C）还没有显式的图，可胀是同一种胀，尺子得是同一把。
+ */
+{
+  const r = omni(['run', join(ROOT, 'tests', 'cases', '01_basics.omni'), '--stat']);
+  const s = r.stderr || '';
+  const t = /时间去哪儿了\s+(\d+) 步 \/ 合计 (\d+)ms/.exec(s);
+  if (r.status === 0 && t !== null && Number(t[1]) >= 3) {
+    ok(`run --stat：时间表 ${t[1]} 步 / 合计 ${t[2]}ms（前端 / check / backend / exec 都在）`);
+  } else bad('run --stat 要有时间表', s.split('\n').slice(-8).join('\n    '));
+  /* 层与层之间那几个比：**目标文本**（含固定序言）与**按源码那一段**要分开报 ——
+   * 一份 67 行的程序在 js 腿上「目标文本」是两百多倍，那两百倍里 99% 是 prelude。 */
+  const all = /目标文本\s+(\d+) 字符\s+([\d.]+)x/.exec(s);
+  const prog = /按源码那一段\s+(\d+) 字符\s+([\d.]+)x/.exec(s);
+  if (all !== null && prog !== null && Number(prog[1]) < Number(all[1])
+    && Number(prog[2]) < Number(all[2])) {
+    ok(`run --stat：各层的账（目标文本 ${all[2]}x、按源码那一段 ${prog[2]}x —— 固定序言另算）`);
+  } else bad('run --stat 要把两个比分开报', s.split('\n').slice(-8).join('\n    '));
+  if (s.includes('AST') && s.includes('OIR') && s.includes('最胀的一层')) {
+    ok('run --stat：源码 -> AST -> OIR -> 目标文本 四层都在，且指出最胀的一层');
+  } else bad('run --stat 的层要齐', s.split('\n').slice(-8).join('\n    '));
+}
+{
+  /* graph 那台机器上是同一张表（层名不同：那儿的中间层就是「图」）—— 统一那件事的判据。 */
+  const lua = join(ROOT, 'ext', 'lua', 'examples', 'basics.lua');
+  const r = omni(['run', '--engine', 'graph', lua, '--backend', 'c', '--stat']);
+  const s = r.stderr || '';
+  const g = /各层的账\s+源码 (\d+) 行[\s\S]*?图\s+(\d+) 格[\s\S]*?目标文本\s+(\d+) 字符\s+([\d.]+)x/.exec(s);
+  if (r.status === 0 && g !== null && s.includes('图的形状')) {
+    ok(`graph 腿 --stat：图那一层 ${g[2]} 格、目标文本 ${g[4]}x（与 omni 腿同一把尺子）`);
+  } else bad('graph 腿要有同一张各层的账', s.split('\n').slice(-8).join('\n    '));
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

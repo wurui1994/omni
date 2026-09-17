@@ -27,6 +27,7 @@ import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
 import { foldedToSvg } from './cli/flame.js';
 import { statModel, statTable, statDot, statJson } from './cli/statgraph.js';
+import { layerModel, layerTable, countNodes, stepTable } from './cli/layers.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { genArm64Module as genArm64 } from './arm64/from_mir.js';
@@ -565,6 +566,25 @@ let STATS = false;
 let STAT = null;
 /** cgen 回的那份「按源文件的产出分布」—— `--stat` 那张表要它（理由见 buildNative 里那一段）。 */
 let LAST_CGEN_STATS = null;
+/** 最后一趟发出来的目标文本有多大（`--stat` 那张分层的账要它：最后一层就是它）。 */
+let LAST_EMIT_BYTES = 0;
+/**
+ * 那份目标文本里**按源码长起来的那一段**有多大（固定序言另算）。
+ *
+ * 为什么要把这两个数分开：`docs/design/node-graph-shrink.md` 第三节钉的那条要求是
+ * 「源码 N 行 -> 按源码长起来的那一段 ≤ N 行（**固定序言另算，那一段是常数**）」。
+ * 不分开的话，一份 40 行的程序在 js 腿上会报 250 倍 —— 那 250 倍里 99% 是那份
+ * 三十万字符的 prelude，与这份源码一个字都没关系。
+ */
+let LAST_EMIT_PROG = 0;
+/**
+ * `--stat` 那张「时间去哪儿了」的表：每格 `[步骤, 毫秒, 峰值]`，由 `vStep` 攒。
+ *
+ * 为什么攒的是**现成的那些步骤**而不是新插一套计时点：那几十处 `vStep` 已经把这条流水线
+ * 切成了有名字的段（前端 / check -> OIR / backend c / 外部 cc / 链接 …），再插一套就是
+ * 两处会分叉的账。`--stat` 只是把它们从「只有 -v 才印」变成「攒起来算一张表」。
+ */
+let STEPS = [];
 let vMark = 0;
 let vRss = 0;
 
@@ -653,8 +673,52 @@ function profJsFinish() {
  *
  * 拿不到模块图时**说清楚**（别的语言前端还没交出这一格），不假装印一张空表。
  */
+/**
+ * 各层的账（第一百四十七片第五格）：源码 -> AST -> OIR -> 目标文本，每层多少格、多少字符。
+ *
+ * 为什么要与 graph 那台机器**共用一份量法**（`cli/layers.js`）：胀不是图那条腿独有的，
+ * 老那几条（js -> js、asy -> js、前端 -> OIR -> C）胀得更厉害，而它们还没有显式的图。
+ * 「优化方法是统一的」这句话要落地，先得有一把两台机器都认的尺子 —— 这一格就是那把尺子
+ * 在 omni 腿上的接线（graph 腿在 `graph/run.js` 的 `statOf` 里接同一份）。
+ */
+function statLayers(cr) {
+  if (cr === undefined || cr === null) return;
+  const paths = cr.modPath === undefined || cr.modPath === null ? [] : [...cr.modPath.values()];
+  let chars = 0;
+  let lines = 0;
+  for (const p of paths) {
+    if (!exists(p)) continue;
+    const t = readText(p);
+    chars += t.length;
+    lines += t.split('\n').length;
+  }
+  const layers = [];
+  if (cr.ast !== undefined && cr.ast !== null) {
+    layers.push({ name: 'AST', n: countNodes(cr.ast.decls), unit: '格', bytes: null });
+  }
+  if (cr.mod !== undefined && cr.mod !== null) {
+    layers.push({ name: 'OIR', n: cr.mod.funcs.length, unit: '个函数', bytes: null });
+  }
+  if (LAST_EMIT_BYTES > 0) {
+    layers.push({ name: '目标文本', n: null, unit: '', bytes: LAST_EMIT_BYTES });
+  }
+  /* **按源码长起来的那一段**（固定序言另算 —— shrink 文档第三节钉的就是这一行）。
+   * js 腿上这个数是「不带 prelude 再发一遍」（`chunk: true`）；C 腿上是 cgen 那份
+   * 按源文件的产出分布之和（总字节减掉它就是共用的那几样）。 */
+  if (LAST_EMIT_PROG > 0) {
+    layers.push({ name: '按源码那一段', n: null, unit: '', bytes: LAST_EMIT_PROG });
+  }
+  if (layers.length === 0 || chars === 0) return;
+  stderr(layerTable(layerModel({ bytes: chars, lines }, layers)));
+}
+
 function statReport(cr) {
   if (STAT === null) return;
+  /* 一、**时间**（构建统计不只是依赖）：那几十处 `vStep` 攒出来的一张表。 */
+  if (STEPS.length > 0) stderr(stepTable(STEPS));
+  /* 二、各层的账（与 graph 那台机器同一把尺子）。 */
+  statLayers(cr);
+  /* 三、模块依赖图 —— 只有核心方言那条腿交得出来。 */
   const modPath = cr === undefined || cr === null ? undefined : cr.modPath;
   if (modPath === undefined || modPath === null || modPath.size === 0) {
     stderr('omni: --stat：这门语言的前端还没交出模块图（只有核心方言 .omni 那条腿有）\n');
@@ -761,17 +825,21 @@ function vTally() {
 }
 
 function vStep(msg) {
-  if (!VERBOSE) return;
+  /* **算一步的耗时与攒起来这件事与 `-v` 无关**（第一百四十七片第五格）：`--stat` 那张
+   * 「时间去哪儿了」的表就是这些步骤攒出来的 —— 构建统计不只是依赖，还有时间。
+   * 从前这一格第一句就是 `if (!VERBOSE) return;`，于是不带 `-v` 时连 `vMark` 都不动。 */
   const now = nowMs();
   const d = Math.trunc(now - vMark);
   vMark = now;
+  const rss = Math.trunc(maxRssBytes());
+  const grew = rss > vRss;
+  vRss = rss;
+  if (STAT !== null) STEPS.push([msg, d, rss]);
+  if (!VERBOSE) return;
   /* 峰值常驻内存**只在它长了的时候**印：它是单调的，每行都印是噪声，而"是哪一步把它顶上去
      的"才是要看的那件事。这一格与耗时同等重要 —— 这条腿上墙上时间的大头常常是内存压力而
      不是 CPU（量出来的：emit-c 编译器自己一趟 35.6s 墙 / 25.9s 用户 / 峰值 1.56 GB /
      页回收 147 万，同一步在不同轮次能差两倍）。 */
-  const rss = Math.trunc(maxRssBytes());
-  const grew = rss > vRss;
-  vRss = rss;
   stderr(`omni: ${msg}  [${d}ms${grew ? ` peak ${fmtBytes(rss)}` : ''}]\n`);
 }
 
@@ -2177,6 +2245,14 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
    * 加一格状态改一处，改返回形状要改三处。 */
   LAST_CGEN_STATS = stats;
   const tGen = nowMs() - tGen0;
+  LAST_EMIT_BYTES = cText.length;
+  /* C 腿上「按源码长起来的那一段」= cgen 那份按源文件的产出分布之和（总字节减掉它
+   * 就是共用的那几样：字面量池、容器实例化、成员派发器、内联的运行时）。 */
+  {
+    let sum = 0;
+    for (const r of stats.values()) sum += r.bytes;
+    LAST_EMIT_PROG = sum;
+  }
   vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
   vStats(cText, stats);
   const libs = cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`);
@@ -3091,12 +3167,12 @@ function main(argv) {
         + '与 graph（节点图 + 契约五问，见 `omni run --help`）');
     }
   }
-  /* `run --stat` 落到 omni 那台机器上时**没东西可报**（图的形状归 `--engine graph`，
-   * 构建统计归 `build --stat`）。收了开关却一声不响是最坏的一种：用户会当自己看过了。
-   * 所以说一句，然后照常跑 —— 这不是错，只是这一趟没有那份账。 */
-  if (node.key === 'run' && STAT !== null && !rest.includes('--engine')) {
-    stderr('omni: run --stat：omni 那台机器上这一趟没有统计可报 —— '
-      + '图的形状用 `--engine graph --stat`，构建统计用 `build --stat`\n');
+  /* `run --stat` 在 js 那条腿上现在**有账可报**（时间 + 各层的账，见 `statReport`）；
+   * 别的腿（llvm / jit / interp）还没接上那张表 —— 一声不响是最坏的，所以说一句。 */
+  if (node.key === 'run' && STAT !== null && !rest.includes('--engine')
+    && rest.indexOf('--backend') >= 0) {
+    stderr('omni: run --stat：这一趟的后端还没接上那张表 —— js 腿（默认）与 '
+      + '`--engine graph` 有，`build --stat` 上是全的\n');
   }
   /* `build --engine graph -o OUT`：把那条腿的产物落成文件（wat / sx 有产物，
    * js 与 interp 各有一句说清为什么没有 —— 见 `graph/run.js` 的 buildGraphFile）。 */
@@ -3561,7 +3637,8 @@ function main(argv) {
           return st;
         }
       }
-      const { mod } = compile(path, rest);
+      const cr = compile(path, rest);
+      const { mod } = cr;
       // 自己的解释器（ADR-0013）。阶段 1 还没覆盖全部 op，所以要显式要它
       if (rest.includes('--interp')) return runInterp(mod);
       // `run` 的意思是"解析完直接执行"，怎么执行是**这一代宿主的事**：node 上是生成 JS
@@ -3573,6 +3650,10 @@ function main(argv) {
       if (hasJsEngine()) {
         /* `--profile stub` 在这条腿上就是发射期插桩（与 C 那条腿同名同账）。 */
         const js = target('js').emit(mod, { profile: PROF !== null && PROF.mode === 'stub' });
+        LAST_EMIT_BYTES = js.length;
+        /* `--stat` 那张分层的账要「按源码长起来的那一段」：不带 prelude 再发一遍
+         * （`chunk: true` 就是那个形态）。多发一趟只在 `--stat` 那一趟里发生。 */
+        if (STAT !== null) LAST_EMIT_PROG = target('js').emit(mod, { chunk: true }).length;
         vStep(`backend js  ${js.length} bytes`);
         if (cacheable) jsCachePut(path, js, cap('asy.deps')());
         // eval / Function(src) 要编译器在运行期在场（ADR-0020 P6）：跑在本进程里的这一条
@@ -3581,6 +3662,9 @@ function main(argv) {
         evalJs(js);
         vStep('exec in-process (node host, new Function)');
         profJsFinish();
+        /* `run --stat` 在这条腿上**有账可报**（第一百四十七片第五格）：时间 + 各层的账
+         * —— js -> js 那一路的胀正是这张表要看的东西。 */
+        statReport(cr);
         return 0;
       }
       // 这一代没有 JS 引擎，"直接执行"就是 C 路径（产物缓存见 runViaC）
