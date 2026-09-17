@@ -58,7 +58,7 @@ const force = process.env.FORCE === '1';
 // 不是"我这一改对不对" —— 每改一行都付这笔钱是纯浪费。
 // 要跑就点名（`node tests/all.js js-exec`）或者 `SLOW=1 node tests/all.js`（提交/发版前那一遍）。
 const SUITES = [
-  { s: 'run.js' }, { s: 'cli/tree.js' }, { s: 'oracle/run.js' },
+  { s: 'run.js' }, { s: 'cli/tree.js' }, { s: 'cli/verbose.js' }, { s: 'oracle/run.js' },
   { s: 'oir/run.js' },
   { s: 'cabi/run.js' }, { s: 'wat/run.js' }, { s: 'glr/run.js' }, { s: 'mir/run.js' },
   /* 闭环那一条（第一百三十五片）：`.omni` -> 生成的 C -> **我们自己那台 C 前端**的

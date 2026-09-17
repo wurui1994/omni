@@ -455,6 +455,21 @@ function modeFor(path, argv, fallback = 'mixed') {
  * 时间是墙上时间（js_now_ms）：大头是 cc 与子进程，CPU 时间量不到它们。
  */
 let VERBOSE = false;
+/**
+ * 嵌套的那几趟 `main`（`buildSelf` 链一次、`tccPrepLink` 先编几份 `.c` …）有多深。
+ *
+ * 为什么要它：`VERBOSE` / `STATS` / `LANGS_FAT` 与 `vMark` 都是**模块级**的，而 `main`
+ * 一进门就按自己那串 argv 把它们重置一遍 —— 于是内层那一趟（argv 里只有 `-q`）
+ * 把外层的 `-v` 关掉了，**外层后面的账全丢**。量到的原话（`run -v --backend c`）：
+ *
+ *   omni: runtime .o  20 objects, cache hit …  [1ms]
+ *   196418                       <- 程序自己的输出
+ *   （没有 `c link` 那一行，也没有 `exec` 那一行）
+ *
+ * 也就是说这条腿的**链接与执行两步一直没有耗时**，而 js 那条腿最后一行正是 `exec`。
+ * 判据摆在 `tests/cli/verbose.js`。
+ */
+let MAIN_NEST = 0;
 /* 编出来的核心默认只内建 js -> c，别的语言/目标各自一格 plugins/ 里的插件（ADR-0021 S4）。
    接缝是 linkJs 的 read 回调 —— 编译器读源码全过它，所以"换掉 builtin.js 那一份文本"
    就等于"不把那几门 import 进来"，链接器与摇树都跟着少活。
@@ -2005,7 +2020,7 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   const sh = plugin === undefined ? [] : ['--shared', '--install-name', basename(outPath)];
   /* `--stdlib` 一个词把「默认 libc + crt + 入口 `_start`」都带上（见 `c-link` 那一段）；
    * 共享库那一路它自己夹掉 crt。 */
-  const rc = main(['c', 'link', obj, ...rt, '-o', outPath,
+  const rc = subMain(['c', 'link', obj, ...rt, '-o', outPath,
     '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...libs, '-q']);
   if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（C 留在 ${cPath}）`);
   /* 执行位（tcc 在 `tcc_output_file` 里 chmod 0777；我们自己写字节，所以自己补一句 ——
@@ -2479,7 +2494,7 @@ function runCFile(path, argv) {
   const { flags, prog } = cSplitArgs(argv);
   cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
   vStep(`c front end + codegen  ${path} -> ${obj}`);
-  const rc = main(['c', 'link', obj, '-o', exe,
+  const rc = subMain(['c', 'link', obj, '-o', exe,
     '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
   if (rc !== 0) return rc;
   /* tcc 在 `tcc_output_file` 里给可执行文件补执行位（chmod 0777）—— 我们自己写字节，
@@ -2511,7 +2526,7 @@ function buildCFile(path, rest) {
   mkdirAll(dirname(obj));
   cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
   vStep(`c front end + codegen  ${path} -> ${obj}`);
-  const rc = main(['c', 'link', obj, '-o', out,
+  const rc = subMain(['c', 'link', obj, '-o', out,
     '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
   if (rc !== 0) return rc;
   if (os !== 'win32') spawn('chmod', ['+x', out], 'c');
@@ -2565,6 +2580,21 @@ function runTimedOut() {
   return true;
 }
 
+/**
+ * 嵌套地跑一趟 `main`（链一次、先把几份 `.c` 编成 `.o` …）。
+ *
+ * 与直接调 `main` 的差别只有一件事：内层**不重置**那几格全局开关（`MAIN_NEST`）。
+ * 于是外层的 `-v` / `--stats` 一路活到最后一行，而内层那一趟也照外层的开关记账。
+ */
+function subMain(argv) {
+  MAIN_NEST++;
+  /* 内层抛出去的时候这个计数就不还原了 —— 那一趟整个是要失败退出的，
+   * 而 `main` 没有 try/finally（这一层不为「反正要退出」的路径加结构）。 */
+  const rc = main(argv);
+  MAIN_NEST--;
+  return rc;
+}
+
 function main(argv) {
   /* 分派走命令树（ADR-0018 决策四）：走到哪个节点、那个节点认识哪些带值开关，都由
    * `cli/cmds.js` 那份数据说 —— 顶层不再认识 `--image-base` / `-isystem` 这种语言与格式
@@ -2580,17 +2610,24 @@ function main(argv) {
   // 这儿曾经紧跟着一行 `VERBOSE = rest.includes('--verbose') || rest.includes('-v')` ——
   // 上一片加 `ownsVerbose` 时旧的那行没删掉，而它在后面，于是**把这一行整个盖掉了**。
   // 没门抓到它：`omni c cpp -v` 的那些门只比 stdout，而 `--verbose` 写 stderr。
-  VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
-  STATS = rest.includes('--stats');
-  LANGS_FAT = rest.includes('--fat');
+  //
+  // **嵌套那几趟不重置这三格**（见 `MAIN_NEST` 那段）：内层的 argv 里没有 `-v`，
+  // 重置一次就把外层的账掐断了。内层照样按外层的开关印自己的步骤。
+  const nested = MAIN_NEST > 0;
+  if (!nested) {
+    VERBOSE = rest.includes('--verbose') || (!ownsVerbose(node) && raw.includes('-v'));
+    STATS = rest.includes('--stats');
+    LANGS_FAT = rest.includes('--fat');
+  }
   /* 发现插件摆在这儿而不是模块作用域：一来 `-v` 刚解析出来，装了哪几格才印得出来；
      二来插件装不上是**响错**，那句话得走 main 的错误出口（模块作用域抛出来的话，
      连 `omni help` 都印不出来了 —— 一格坏插件不该让整个 CLI 说不出话）。 */
   /* 计时的基准点在这儿起：发现插件是**第一步**，而 vMark 从前是等到进管线才置的 ——
-     量出来的：第一行印成 `[1789012444800ms]`（拿 0 当基准，等于整个 epoch）。 */
-  vMark = nowMs();
+     量出来的：第一行印成 `[1789012444800ms]`（拿 0 当基准，等于整个 epoch）。
+     嵌套那几趟不动它：内层这一趟本身就是外层的一个步骤，重置一次外层那一行的耗时就少了。 */
+  if (!nested) vMark = nowMs();
   discoverPlugins();
-  vMark = nowMs();
+  if (!nested) vMark = nowMs();
   /* `--help` 在**任何一级**都由同一个函数处理：`findCmd` 走到第一个不是子命令名的记号就停，
    * 所以 `omni c --help` 落在 `c` 上、`omni c link --help` 落在 `link` 上，不必特判。 */
   if (argv.length === 0 || rest.includes('--help') || rest.includes('-h')) {
@@ -2634,11 +2671,11 @@ function main(argv) {
     /* 链接那三条要先把 `.c` 编成 `.o`（tcc 的「编 + 链一步走」），并补上默认 libc。 */
     if (t.key === 'elf-link' || t.key === 'macho-link' || t.key === 'pe-link') {
       const p = tccPrepLink(t.argv);
-      const rc = main([...AT[t.key], ...p.argv]);
+      const rc = subMain([...AT[t.key], ...p.argv]);
       if (rc === 0 && p.os !== 'win32') spawn('chmod', ['+x', p.out], 'c');
       return rc;
     }
-    return main([...AT[t.key], ...t.argv]);
+    return subMain([...AT[t.key], ...t.argv]);
   }
   const { args } = splitArgv(node, rest, (m) => new OmniError(m));
   /* 位置参数就是「文件」：链接器与 `glr` 要一整串，别的只看第一个。 */
@@ -2951,8 +2988,11 @@ function main(argv) {
     return 0;
   }
   /* `-v` 也走那张表（分片 2 后半）：先接过来，再由实现一格一格标完成。造不出表的命令
-   * （还没覆盖的那些）`LIVE` 就是 `null`，那些路上照旧走老的 `vStep`。 */
-  if (VERBOSE) vBegin(planForC(cmd, path, files, rest) ?? planForOmni(cmd, path, files, rest));
+   * （还没覆盖的那些）`LIVE` 就是 `null`，那些路上照旧走老的 `vStep`。
+   *
+   * 嵌套那一趟不另起一张表：内层（链一次）是**外层的一个步骤**，起表会把外层的 `LIVE`
+   * 与 `vMark` 顶掉，还会多印一行 `pipeline …`（量到过）。 */
+  if (VERBOSE && !nested) vBegin(planForC(cmd, path, files, rest) ?? planForOmni(cmd, path, files, rest));
 
   /* `check`（决策一）：只走**前端与检查器**，不出产物、不执行。
    *
