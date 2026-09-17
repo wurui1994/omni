@@ -29,16 +29,27 @@ function mapBindName(x) {
   // 会静静落成列表下标，那是"答案错而不报"
   if (tag(x) === 'c') {
     const [nm, v] = kids(x);
-    return v !== undefined && tag(v) === 'lit' && tag(kids(v)[0]) === 'map' ? leaf(nm) : null;
+    return isMapLit(v) ? leaf(nm) : null;
   }
   if (tag(x) !== 'define' && tag(x) !== 'assign') return null;
   const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
   const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
   for (let i = 0; i < lhs.length; i++) {
-    const r = rhs[i];
-    if (r !== undefined && tag(r) === 'lit' && tag(kids(r)[0]) === 'map') return nameOf(lhs[i]);
+    if (isMapLit(rhs[i])) return nameOf(lhs[i]);
   }
   return null;
+}
+
+/**
+ * 右边是一格 **map 字面量**吗。V 有**两种写法**，两种都要认：
+ *   * 写类型的：`map[string]int{…}` -> `(lit (map …) (kv …)…)`；
+ *   * 不写类型的：`{'a': 1}` -> `(map (kv …)…)`（`map-lit` 那条产生式）。
+ * 漏掉后一种的代价是**答案错而不报**：后面 `m['b']` 会静静落成列表下标。
+ */
+function isMapLit(r) {
+  if (r === undefined || !isList(r)) return false;
+  if (tag(r) === 'lit') return tag(kids(r)[0]) === 'map';
+  return tag(r) === 'map' && kids(r).every((e) => tag(e) === 'kv');
 }
 
 
@@ -350,6 +361,26 @@ function toNode(x) {
     // `[10, 20, 30]!` 是**定长数组**字面量 —— 元素都写出来了，落的还是那一格 list-new：
     // "定长"是**类型上**的性质，而类型不进图（`nodes.js` 文件头第一条）。
     case 'array-fixed': return listNew(many(kids(x)));
+    // `{'a': 1, 'b': 2}` 是**不写类型的 map 字面量**（`map-lit` 那条产生式）——
+    // 落的就是那一格 map-new。**同一个标签 `map` 还是那格类型**（`map[K]V`）：
+    // 类型那一路的孩子是两格类型、字面量那一路的孩子全是 `kv`，靠这个分开；
+    // 类型出现在表达式位置上当场报（那要"表达式里的类型名"那台机器）。
+    case 'map': {
+      const ps = kids(x);
+      if (ps.length > 0 && !ps.every((e) => tag(e) === 'kv')) {
+        throw new Error('v->graph: 一格 map **类型**出现在表达式位置上 —— 这一批不猜');
+      }
+      return mapNew(ps.map((e) => {
+        const [k, v] = kids(e);
+        return [toNode(k), toNode(v)];
+      }));
+    }
+    // `unsafe { … }` 是一格**块**：`unsafe` 本身不产生代码（它只是放开指针那几样的检查），
+    // 所以拆成一格 region —— 与 `mut` / `pub` 同一类（不产生代码的修饰）。
+    case 'unsafe': {
+      const blk = kids(x).find((y) => tag(y) === 'block');
+      return node('region', { body: blk === undefined ? [] : many(kids(blk)) });
+    }
     // `none` 是 V 的 Option 空值 —— 与 `nil` 落同一格（`name` 那一格里也认它，
     // 但语法给 `none` 一条**自己的产生式**，与 `(bool …)` 是同一种错）。
     // 注意它与三段 for 里那个空格子**同一个标签**：那几处在 `for` 那一格上先滤掉了。
