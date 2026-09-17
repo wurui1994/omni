@@ -3762,16 +3762,18 @@ function main(argv) {
   if (cmd === 'flame') {
     if (path === undefined || path === null) throw new OmniError('flame 要一份折叠栈文件');
     if (!exists(path)) throw new OmniError(`flame: 找不到 ${path}`);
-    const folded = readText(path);
+    /**
+     * **`.cpuprofile` 直接收**（第一百四十九片）：node 自己那台采样器落的就是这个格式
+     * （`node --cpu-prof …`），而转成折叠栈的那一格我们本来就有（`cpuProfileToFolded`）。
+     * 这一格让「量一趟编译器自己」变成一条命令 —— 不必在外头手写一段转换。
+     * 单位跟着来源走：`.cpuprofile` 是微秒，`.folded` 默认按帧（我们运行时落的）。
+     */
+    const isCpu = path.endsWith('.cpuprofile');
+    const folded = isCpu ? cpuProfileToFolded(readText(path)) : readText(path);
     const lines = folded.split('\n').filter((l) => l.trim() !== '');
     if (lines.length === 0) throw new OmniError(`flame: ${path} 里一条栈都没有`);
-    /**
-     * **单位由用户说**（第一百四十九片）：折叠栈这个格式自己不声明单位 —— 我们运行时落的是
-     * 采样帧数，node 的 V8 采样器落的是微秒。默认按帧（`OMNI_PROF=sample` 那一路是
-     * 这个门最常见的来源），`--unit us` 换成微秒。猜单位比要一格开关糟：差三个数量级。
-     */
     const ui = rest.indexOf('--unit');
-    const unit = ui >= 0 && rest[ui + 1] === 'us' ? 'us' : 'frames';
+    const unit = ui >= 0 ? (rest[ui + 1] === 'us' ? 'us' : 'frames') : (isCpu ? 'us' : 'frames');
     /* `--diff 基线.folded`：**两份对照**（优化循环里最有用的一张）—— 这一趟是"新"，
      * 给的那份是"基线"。只印表，不出图：图是给一份看的，对照要的是数。 */
     const di = rest.indexOf('--diff');

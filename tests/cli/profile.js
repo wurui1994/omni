@@ -421,5 +421,27 @@ const FIB_CALLS = '635621';
   } else bad('flame --diff 该给出两栏差', `rc=${r.status} ${s.slice(0, 400)}`);
 }
 
+{
+  /* `flame` 直接收 `.cpuprofile`（node 采样器的原生格式）：单位自动按微秒 ——
+   * 「量一趟编译器自己」于是是一条命令（`npm run prof:self -- emit c src/cli.js`）。 */
+  const p = join(WORK, 'mini.cpuprofile');
+  writeFileSync(p, JSON.stringify({
+    nodes: [
+      { id: 1, callFrame: { functionName: '(root)' }, children: [2] },
+      { id: 2, callFrame: { functionName: 'outer' }, children: [3] },
+      { id: 3, callFrame: { functionName: 'inner' }, children: [] },
+    ],
+    samples: [3, 3, 2],
+    timeDeltas: [1000, 2000, 500],
+  }));
+  const r = omni(['flame', p, '--table']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  /* inner 自用 3000µs = 3ms、占比 3/3.5 = 85.71%；路径是 (root) > outer > inner。 */
+  if (r.status === 0 && s.includes('3.000') && s.includes('85.71%')
+    && s.includes('(root) > outer > inner') && !s.includes('帧数')) {
+    ok('flame 直接收 .cpuprofile：按微秒读，热路径也对');
+  } else bad('flame 该认 .cpuprofile', `rc=${r.status} ${s.slice(0, 400)}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);
