@@ -3613,8 +3613,8 @@ export class CGen {  /**
       this.err('__omni_syscall 只有 native 那两条腿有（解释器那边 libc 是宿主的 JS）');
     }
     const os = this.cpp.os ?? 'osx';
-    if (os !== 'linux') {
-      this.err(`__omni_syscall 现在只有 linux 目标有（这一趟是 ${os}）`);
+    if (os !== 'linux' && os !== 'osx') {
+      this.err(`__omni_syscall 现在只有 linux 与 osx 有（这一趟是 ${os}）`);
     }
     this.skip(LPAR);
     const no = this.gv(this.castTo(this.exprEq(), TY_LLONG));
@@ -8276,6 +8276,9 @@ export function declsOfC(path, text, host, defs) {
   for (const v of cpp.defines.keys()) preMacros.add(v);
   const mod = new MirModule(path);
   mod.setNative();
+  /* 哪一家内核（第一百四十片第五格）：`SYSCALL` 在 Darwin 与 Linux 上摆法不同，
+   * 而后端只看得见这份 MIR —— 所以「给谁编的」得记在模块上。 */
+  mod.setOs(host === undefined ? 'osx' : host.os);
   const gen = new CGen(cpp, mod, { native: true });
   gen.preamble(COMPILE_PREAMBLE);
   cpp.startParse(path, text);
@@ -8440,6 +8443,7 @@ export function lowerCNative(path, text, host, defs) {
   }
   const mod = new MirModule(path);
   mod.setNative();
+  mod.setOs(host === undefined ? 'osx' : host.os);
   const gen = new CGen(cpp, mod, { native: true });
   gen.preamble(COMPILE_PREAMBLE);
   cpp.startParse(path, text);

@@ -1148,6 +1148,21 @@ export class MirModule {
      * verify 于是既不能骂也不能不骂。立了，两种都能查：线性内存那边必须有 `mem`，
      * native 那边必须**没有** `mem`。 */
     this.native = false;
+    /* **哪一家的内核**（第一百四十片第五格）。只有 `SYSCALL` 那一条用得着：
+     * Linux 的 arm64 是「号进 x8、`svc #0`、失败回 -errno」，Darwin 的 arm64 是
+     * 「号进 x16、`svc #0x80`、失败**置进位标志**、x0 里是正的 errno」——
+     * 同一条 op、两套摆法，而 op 的约定（回负数就是 -errno）两边都得成立，
+     * 所以 Darwin 那一支要多两条指令把进位折进符号里。
+     *
+     * 为什么摆在模块上而不是后端的参数：一个模块只编给一个目标，而这件事**不是**
+     * 调用方要挑的开关 —— 它跟着「这份 MIR 是给谁编的」走。`null` = 没说
+     * （那时 `SYSCALL` 按 linux 那一套发，见后端里那一段）。 */
+    this.os = null;
+  }
+
+  /** 这份 MIR 是编给哪一家内核的（`'linux'` / `'osx'`）。只有 `SYSCALL` 看它。 */
+  setOs(os) {
+    this.os = os;
   }
 
   /** 认真地址（native 两条腿）。与线性内存互斥 —— 一个模块只能是一种地址模型。 */

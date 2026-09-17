@@ -180,6 +180,11 @@ export const csinc = (sf, rd, rn, rm, cond) => csel4(sf, 0, 1, rm, cond, rn, rd)
 /** `cset Rd, cond` = `csinc Rd, xzr, xzr, invert(cond)` —— 条件要**取反**
  * （C6.2.72 的别名规则），取反就是最低位翻一下。 */
 export const cset = (sf, rd, cond) => csinc(sf, rd, 31, 31, cond ^ 1);
+/** `csneg Rd, Rn, Rm, cond`（C6.2.75：`op = 1`、`op2 = 1`）。
+ *  `cneg Rd, Rn, cond` 是它的别名 —— `csneg Rd, Rn, Rn, invert(cond)`：
+ *  条件成立就取负。Darwin 的 syscall 拿它把进位标志折进符号里（见 `from_mir.js`）。 */
+export const csneg = (sf, rd, rn, rm, cond) => csel4(sf, 1, 1, rm, cond, rn, rd);
+export const cneg = (sf, rd, rn, cond) => csneg(sf, rd, rn, rn, cond ^ 1);
 
 /* ---------------------------------------------------------------- 取地址
  * C4.1.4 PC-rel. addressing：op immlo 1 0 0 0 0 immhi Rd

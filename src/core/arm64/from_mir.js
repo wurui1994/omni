@@ -37,7 +37,7 @@ import {
   fcmpArm64, fcvtDS, fcvtSD, fcvtzs, fcvtzu, fdiv, fmovFromInt, fmovToInt, fmul, fneg, fsub,
   ldpPost, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz, msub, mul,
   mvn, neg, orrImm, orrReg,
-  retArm64, scvtf, sdiv, stpPre, strU, strRegOff, subImm, subReg, svcArm64, sxtb, sxth, sxtw,
+  cneg, retArm64, scvtf, sdiv, stpPre, strU, strRegOff, subImm, subReg, svcArm64, sxtb, sxth, sxtw,
   ucvtf, udiv
 } from './encode.js';
 import { Arm64CodeBuf } from './asm.js';
@@ -1071,22 +1071,32 @@ class FnGen {
       return this.callRet(i, t, sret);
     }
     /* `SYSCALL`（第一百四十片）：**不是**调用 —— 没有 `bl`、没有出参区、`sp` 一动不动。
-     * Linux 的 arm64 约定：号在 x8、实参在 x0-x5、回值在 x0（失败是 `-errno`）。
+     *
+     * 两家内核两套摆法（`mod.os` 那一格就是为这儿立的）：
+     *   Linux ：号进 x8、实参 x0-x5、`svc #0`，失败回 `-errno`
+     *   Darwin：号进 **x16**、实参 x0-x5、`svc #0x80`，失败**置进位标志**、x0 里是
+     *           **正的** errno（`open` 失败回 2 长得跟 fd 2 一模一样）
+     *
+     * op 的约定只有一条「回负数就是 -errno」（见 `mir/ir.js`），所以 Darwin 这一支
+     * 多一条 `cneg x0, x0, cs`：进位置了就取负。少了它，`open("/nope")` 会被当成
+     * 一个能用的 fd —— 这正是「同一条 op、约定不变、摆法归后端」该由后端补的那一格。
      *
      * `flush()` 照 `CCALL` 那一条发在前头：池里那五个（x11-x15）内核不动，但前端手上
-     * 攥着的值得先落回帧里，`loadRef` 才取得到 —— 少这一步，摆实参那几条会读到还没
-     * 写回去的格子。号最后摆：x8 就是 `RES`，摆实参那几步都可能拿它当落点。 */
+     * 攥着的值得先落回帧里，`loadRef` 才取得到。号最后摆：Linux 那边 x8 就是 `RES`，
+     * 摆实参那几步都可能拿它当落点。 */
     if (op === OP.SYSCALL) {
       const sysArgs = f.argsOf(f.b[i]);
       if (sysArgs.length > 6) arm64Nyi(`${sysArgs.length} 个实参的 SYSCALL`);
+      const darwin = this.mod.os === 'osx';
       this.flush();
       let sysK = 0;
       for (const ar of sysArgs) {
         this.loadRef(sysK, ar);
         sysK++;
       }
-      this.loadRef(RES, f.a[i]);
-      buf.emit(svcArm64(0));
+      this.loadRef(darwin ? 16 : RES, f.a[i]);
+      buf.emit(svcArm64(darwin ? 0x80 : 0));
+      if (darwin) buf.emit(cneg(1, 0, 0, COND.cs));
       return this.def(i, 0);
     }
     /* `SETJMP`/`LONGJMP`（第一百四十片第三格）：明着报错。要存的是 x19-x28 与 d8-d15
@@ -1095,13 +1105,19 @@ class FnGen {
     if (op === OP.SETJMP || op === OP.LONGJMP) {
       arm64Nyi(`${OP_NAMES[op]}（要存 x19-x28 与 d8-d15，这条腿上还没有用户）`);
     }
-    /* `FPGET`（第一百四十片第二格）：明着报错。这一条的用途是「把内核放在进函数那一刻
-     * 栈上的 argc/argv 找回来」，而它成立靠的是 x86_64 那条死规矩
-     * （`push rbp; mov rbp, rsp` 之后 `[rbp+8]` 就是第一格）。这条腿上帧基址按
-     * 「这个函数动不动栈顶」在 x28 与 sp 之间选（见 `FB` 那一段），没有同一句话
-     * 说得清的「帧指针」—— 猜一个的后果是 crt 读到垃圾 argv，所以宁可不给。 */
+    /* `FPGET`（第一百四十片第二格，第五格改的）：帧指针自己 —— 一句 `mov x0, x29`。
+     *
+     * 上一版这儿明着报错，理由写的是「帧基址按这个函数动不动栈顶在 x28 与 sp 之间选」。
+     * **那句话说的是 `FB`**（只有会动栈顶的函数才用那一格），与 x29 是两件事：这条腿的
+     * 序言一律 `stp x29, x30, [sp, #-16]!` 加 `mov x29, sp`（见 `emitPrologue`），
+     * x29 从来就是个真的帧指针。所以那次报错是报错了，这一格是改正。
+     *
+     * crt 靠它取 argc/argv：内核跳到 `_start` 时 sp 指着 argc，推完 fp/lr 那一对之后
+     * `[x29 + 16]` 是 argc、`x29 + 24` 是 argv 的第一格 —— x86_64 那边是 +8 / +16，
+     * 差的正是 lr 在这条腿上也占一格。 */
     if (op === OP.FPGET) {
-      arm64Nyi('FPGET（这条腿上帧基址按函数选，x86_64 的 rbp 那条规矩不成立）');
+      buf.emit(movReg(1, RES, 29));
+      return this.def(i, RES);
     }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 同一对指令，只是符号在 `__TEXT` 里。 */
     if (op === OP.FADDR) {
