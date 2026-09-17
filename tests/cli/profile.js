@@ -233,6 +233,63 @@ const FIB_CALLS = '635621';
     ok('graph 那台机器：三档都还没有，当场报');
   } else bad('graph 腿要报 profile 没接', `rc=${r.status} ${s.slice(0, 300)}`);
 }
+/* ---- 三、`.c` **输入**那条腿（`c-src`，第一百四十七片第六格）
+ *
+ * 从前 `run x.c` 把 `--cc` 与 `--profile` 两个开关**悄悄忽略**：那条腿一路走我们自己的
+ * C 前端 + 链接器，谁都没问过。量到的原话是
+ * `omni run -v BBP_Formula.c --profile sample --cc clang` 印「c front end + codegen」、
+ * 一份 profile 都没出。底下五格钉住修好之后的五种结果。 */
+{
+  /* 这一格用**自带的**一份小 C（`prof-probe.c` 自己会叫 `omni_prof_sample_start`，
+   * 不带收集器编不过 —— 那是它作为"运行时那一层的探子"该有的样子）。 */
+  const hello = join(WORK, 'hello.c');
+  writeFileSync(hello, '#include <stdio.h>\nint main(void) { printf("hi\\n"); return 0; }\n');
+  const r = omni(['run', '-v', hello, '--cc', 'clang']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0 && /omni: clang .*hello\.c ->/.test(s)
+    && !s.includes('c front end + codegen') && s.includes('hi')) {
+    ok('.c 输入 + --cc clang：整趟交给那台 cc（不再是我们自己那台）');
+  } else bad('.c 输入要认 --cc', `rc=${r.status} ${s.slice(0, 400)}`);
+}
+{
+  const r = omni(['run', PROBE, '--profile', 'cc', '--cc', 'clang']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  const rows = topRows(s);
+  const hot = rows.find((c) => c[c.length - 1] === 'hot');
+  const cold = rows.find((c) => c[c.length - 1] === 'cold');
+  if (r.status === 0 && rows.length > 0 && rows[0][rows[0].length - 1] === 'hot'
+    && hot !== undefined && cold !== undefined
+    && Number(hot[0]) >= Number(cold[0]) * 10) {
+    ok(`.c 输入 --profile cc：榜首是 hot，是 cold 的 ${(Number(hot[0]) / Number(cold[0])).toFixed(1)} 倍`);
+  } else bad('.c 输入 --profile cc 要出榜', `rc=${r.status} ${s.slice(0, 400)}`);
+}
+{
+  const out = join(WORK, 'csrc.svg');
+  const folded = `${out}.folded`;
+  rmSync(folded, { force: true });
+  rmSync(out, { force: true });
+  const r = omni(['run', PROBE, '--profile', 'sample:997', '--cc', 'clang',
+    '--profile-out', out]);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0 && existsSync(folded) && existsSync(out)
+    && readFileSync(folded, 'utf8').includes('hot')) {
+    ok('.c 输入 --profile sample：折叠栈里有 hot，火焰图也落了盘');
+  } else bad('.c 输入 --profile sample', `rc=${r.status} ${s.slice(0, 400)}`);
+}
+{
+  const r = omni(['run', PROBE, '--profile', 'stub', '--cc', 'clang']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status !== 0 && s.includes('我们不改你的 C')) {
+    ok('.c 输入 --profile stub：明说发射期插桩对别人的源码不成立');
+  } else bad('.c 输入 --profile stub 要报错', `rc=${r.status} ${s.slice(0, 400)}`);
+}
+{
+  const r = omni(['run', PROBE, '--profile', 'sample']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status !== 0 && s.includes('要外部编译器') && s.includes('--cc clang')) {
+    ok('.c 输入 --profile sample 不给 --cc：当场要外部 cc，不假装量过');
+  } else bad('.c 输入少 --cc 要报错', `rc=${r.status} ${s.slice(0, 400)}`);
+}
 /* `omni flame FILE.folded`：**产物自己**写下来的折叠栈（`OMNI_PROF=sample` 那一路，
  * 比如自举出来的 `dist/omni`）回来之后要有一格门能渲。 */
 {

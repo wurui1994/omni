@@ -598,9 +598,31 @@ let vRss = 0;
  *           js 那条腿要 node 自己那台 V8 采样器（`--cpu-prof` / `node:inspector`），
  *           还没接 —— 这一格有名有姓地报，不假装量过
  *
+ * `.c` **输入**（`omni run x.c`）是第四条腿，名字叫 `c-src`：那是**你的** C，不经我们的
+ * 发射器，所以 `stub` 在那儿不成立；`cc` / `sample` 成立，但要 `--cc clang` 把插桩与
+ * 收集器编进去（见 `cFileViaCc`）。
+ *
  * 别的腿（llvm / jit / interp / wasm / graph 那台机器）三档都还没有。**收下开关却一声不响
  * 是最坏的一种**：用户会以为量过了。所以这一格当场报，并把「哪条腿有什么」一起说清。
  */
+/**
+ * 这一趟被编/被跑的**源文件**是哪个（认腿要它，而它得在动词分派之前就知道）。
+ *
+ * 用的是与底下那 28 段实现同一台切分器（`splitArgv`）—— 「哪些开关带值」这份知识只有
+ * `cli/cmds.js` 一处。自己拿「前一个是不是 `-` 开头」猜过一版，量出来当场就错：
+ * `run -v x.c` 里 `x.c` 的前一个是 `-v`（那是**布尔**开关），于是输入认成了空。
+ *
+ * 切不动（这一趟的开关本来就有问题）就回 `null`：那句话该由后面正经那一趟去报。
+ */
+function srcArg(node, rest) {
+  try {
+    const { args } = splitArgv(node, rest, (m) => new OmniError(m));
+    return args.length > 0 ? args[0] : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function profLeg(key, path, rest) {
   const val = (n) => {
     const i = rest.indexOf(n);
@@ -610,7 +632,10 @@ function profLeg(key, path, rest) {
   const b = val('--backend');
   const isC = typeof path === 'string' && path.endsWith('.c');
   if (isC) {
-    if (b === null || b === 'native' || b === 'c') return 'c';
+    /* `.c` 输入是**别人的 C**，不是我们发的 C —— 两条腿要分开（第一百四十七片第六格）：
+     * 发射期插桩（`stub`）在这儿根本不成立（那份源码不经我们的发射器），而 `cc` / `sample`
+     * 成立的前提是这一趟交给外部 cc。所以给它自己的名字。 */
+    if (b === null || b === 'native' || b === 'c') return 'c-src';
     return b;
   }
   if (b !== null) return b === 'native' ? 'c' : b;
@@ -618,13 +643,36 @@ function profLeg(key, path, rest) {
   return key === 'build' ? 'c' : 'js';
 }
 
-/** 那三档各自认的腿（名单就是上面那段注释的机器可读版本）。 */
-const PROF_LEGS = { cc: ['c'], stub: ['c', 'js'], sample: ['c'] };
+/**
+ * 那三档各自认的腿（名单就是上面那段注释的机器可读版本）。
+ *
+ * `c-src` = **`.c` 输入那条腿**（别人的 C）：`cc` / `sample` 在那儿成立，但要外部 cc
+ * 把插桩/收集器编进去（见 `cFileViaCc`）；`stub` 不成立 —— 我们不改别人的源码。
+ */
+const PROF_LEGS = { cc: ['c', 'c-src'], stub: ['c', 'js'], sample: ['c', 'c-src'] };
+
+/** 腿名印给人看时的说法（`c-src` 这个内部名字对用户没意思）。 */
+const LEG_SAY = { c: 'c', 'c-src': '.c 输入', js: 'js' };
 
 /** 这一趟的 `--profile MODE` 落在这条腿上成不成立 —— 不成立就一句话说清怎么办。 */
 function profCheckLeg(mode, leg) {
-  if (PROF_LEGS[mode].includes(leg)) return;
-  const has = (m) => `${m}（${PROF_LEGS[m].join(' / ')}）`;
+  if (PROF_LEGS[mode].includes(leg)) {
+    /* `.c` 输入那条腿上，两档都得有外部 cc 才有那台机器：`-finstrument-functions` 是
+     * 它的开关，采样那一档也要把 `omni_prof.c` 与那格构造器编进**别人的**二进制里。
+     * 我们自己那台 C 前端还没有这两样 —— 明着说，别悄悄出一份没插桩的二进制。 */
+    if (leg === 'c-src' && selfCC()) {
+      throw new OmniError(`--profile ${mode} 在 .c 输入这条腿上要外部编译器：`
+        + '这一趟默认走我们自己那台 C 前端 + 链接器，它还没有 -finstrument-functions，'
+        + '也没有把收集器塞进别人 main 的办法。加 `--cc clang`（或 gcc / tcc）再来');
+    }
+    return;
+  }
+  const has = (m) => `${m}（${PROF_LEGS[m].map((l) => LEG_SAY[l] || l).join(' / ')}）`;
+  if (leg === 'c-src' && mode === 'stub') {
+    throw new OmniError('--profile stub 是**我们发射期**插的那一对，而 `.c` 输入是你的源码，'
+      + '不经我们的发射器 —— 我们不改你的 C。这条腿上用 `--profile cc`（外部编译器插桩）'
+      + '或 `--profile sample`（运行期采样），两档都要 `--cc clang`');
+  }
   if (leg === 'js' && mode === 'sample') {
     throw new OmniError('--profile sample 在 js 这条腿上还没接：采样要宿主自己那台'
       + '（node 的 --cpu-prof / node:inspector 那台 V8 采样器）—— 这一格有名有姓地欠着。'
@@ -2823,6 +2871,64 @@ function tccPrepLink(argv) {
  * 产物摊在工作目录里（`-q` 让链接那一步别印产物摘要）：`run` 的 stdout 归被跑的程序，
  * 与 `.asy` 那条路同一条规矩。
  */
+/**
+ * `.c` 那条腿上**交给外部 cc 的那一趟**（第一百四十七片第六格）。
+ *
+ * 从前 `run x.c --cc clang` 与 `run x.c --profile …` 两个开关都被**悄悄忽略**：那条腿
+ * 一路走我们自己的 C 前端 + 链接器，谁都没问过 `CC` 与 `PROF`。量到的原话（用户那一趟）：
+ * `omni run -v BBP_Formula.c --profile sample --cc clang` 印的是「c front end + codegen」
+ * ——也就是**我们自己那台**，而且一份 profile 都没出。收下开关一声不响是最坏的一种。
+ *
+ * 现在这一格把两根线都接上，办法是**把这一趟整个交给那台 cc**（它才有插桩那台机器）：
+ *   `--profile cc`      加 `-finstrument-functions`，并把 `src/runtime/omni_prof.c` 一起编进去
+ *                       （那份收集器的 `__cyg_profile_func_enter` 自己 `atexit` 挂报告）
+ *   `--profile sample`  同样编进 `omni_prof.c`，再加一格构造器 TU 调 `omni_prof_env_init()`
+ *                       （用户的 `main` 不是我们的，没有 `omni_host_init` 那一步）
+ *   没有 profile        就是「用那台 cc 编一编、链一链」——`--cc` 这一格本来就该管这个
+ *
+ * 回 `null` 表示这一趟不该走这条路（`--cc self` 或者没给）；调用方接着走自己那条。
+ */
+function cFileViaCc(path, argv, exe) {
+  const cc = ccPick();
+  if (!cc || cc === 'self') return null;
+  const mode = PROF === null ? null : PROF.mode;
+  const objs = [];
+  const flags = ['-O2', '-g'];
+  if (mode === 'cc' || mode === 'sample') {
+    flags.push('-I', RUNTIME_DIR);
+    /* **收集器自己不能被插桩**：`omni_prof.c` 里那对钩子一旦也带上 `-finstrument-functions`，
+     * 进入钩子又触发钩子 —— 量到的就是当场 `Segmentation fault: 11`（栈爆）。所以它
+     * 单独先编成一个 `.o`（不带那面开关），再和用户那份一起链。 */
+    const pobj = join(dirname(exe), 'omni_prof.o');
+    const prc = spawn(cc, ['-O2', '-g', '-I', RUNTIME_DIR, '-c',
+      join(RUNTIME_DIR, 'omni_prof.c'), '-o', pobj], 'c')[0];
+    if (prc !== 0) throw new OmniError(`${cc} 编不过收集器 omni_prof.c（退出码 ${prc}）`);
+    objs.push(pobj);
+    if (mode === 'cc') flags.push('-finstrument-functions');
+    if (mode === 'sample') {
+      /* 采样那条栈是靠**帧指针**往上走的（`ucontext` 拿到 fp 再一格格串）—— `-O2` 默认
+       * 会省掉它，省掉就只剩最外那一帧。这一格明着要回来。 */
+      flags.push('-fno-omit-frame-pointer');
+      /* 采样那一档要有人在启动时叫一句 `omni_prof_env_init()` —— 用户的 `main` 不是我们的，
+       * 所以发一格只有构造器的 TU（gcc/clang 都认这个属性；`--cc self` 那一路走不到这儿）。 */
+      const shim = join(dirname(exe), 'omni_prof_boot.c');
+      writeText(shim, 'void omni_prof_env_init(void);\n'
+        + '__attribute__((constructor)) static void omni_prof_boot(void) { omni_prof_env_init(); }\n');
+      const sobj = join(dirname(exe), 'omni_prof_boot.o');
+      const src = spawn(cc, ['-O2', '-c', shim, '-o', sobj], 'c')[0];
+      if (src !== 0) throw new OmniError(`${cc} 编不过采样启动那一格（退出码 ${src}）`);
+      objs.push(sobj);
+    }
+  }
+  /* `-lm`：数学库在 Linux 上是单独一份（macOS 上并进 libSystem，多给这一格也无害）。
+   * `.c` 输入里 `sqrt`/`pow` 太常见，少这一格会在链接那一步倒。 */
+  const args = [...flags, path, ...objs, '-o', exe, '-lm'];
+  const rc = spawn(cc, args, 'c')[0];
+  vStep(`${cc} ${mode === null ? '' : `--profile ${mode} `}${path} -> ${exe}`);
+  if (rc !== 0) throw new OmniError(`${cc} 编不过 ${path}（退出码 ${rc}）`);
+  return exe;
+}
+
 function runCFile(path, argv) {
   const ai = argv.indexOf('--arch');
   const si = argv.indexOf('--os');
@@ -2834,15 +2940,20 @@ function runCFile(path, argv) {
   const obj = join(dir, `${basename(path, '.c')}.o`);
   const exe = join(dir, basename(path, '.c'));
   const { flags, prog } = cSplitArgs(argv);
-  cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
-  vStep(`c front end + codegen  ${path} -> ${obj}`);
-  const rc = subMain(['c', 'link', obj, '-o', exe,
-    '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
-  if (rc !== 0) return rc;
-  /* tcc 在 `tcc_output_file` 里给可执行文件补执行位（chmod 0777）—— 我们自己写字节，
-   * 所以这一格得自己补，不然只能看着 `Permission denied`。 */
-  if (os !== 'win32') spawn('chmod', ['+x', exe], 'c');
-  vStep(`link  ${exe}`);
+  /* `--cc`（以及 `--profile`）先说话：给了外部编译器就整趟交给它 —— 从前这两个开关
+   * 在这条腿上被悄悄忽略（见 `cFileViaCc` 头上那段量到的原话）。 */
+  const via = cFileViaCc(path, argv, exe);
+  if (via === null) {
+    cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
+    vStep(`c front end + codegen  ${path} -> ${obj}`);
+    const rc = subMain(['c', 'link', obj, '-o', exe,
+      '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
+    if (rc !== 0) return rc;
+    /* tcc 在 `tcc_output_file` 里给可执行文件补执行位（chmod 0777）—— 我们自己写字节，
+     * 所以这一格得自己补，不然只能看着 `Permission denied`。 */
+    if (os !== 'win32') spawn('chmod', ['+x', exe], 'c');
+    vStep(`link  ${exe}`);
+  }
   const st = spawn(exe, prog, 'i')[0];
   vStep(`exec ${exe}  exit=${st}`);
   return st;
@@ -2866,13 +2977,16 @@ function buildCFile(path, rest) {
   const { flags } = cSplitArgs(rest);
   const obj = join(workDirFor('build-c', hash16(path)), `${basename(path, '.c')}.o`);
   mkdirAll(dirname(obj));
-  cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
-  vStep(`c front end + codegen  ${path} -> ${obj}`);
-  const rc = subMain(['c', 'link', obj, '-o', out,
-    '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
-  if (rc !== 0) return rc;
-  if (os !== 'win32') spawn('chmod', ['+x', out], 'c');
-  stderr(`omni: built ${out} via 自带的 C 前端 + ${fmt} 链接器\n`);
+  const via = cFileViaCc(path, rest, out);
+  if (via === null) {
+    cObj(path, obj, arch, incDirs(flags), defArgs(flags), 'elf', os, sysIncDirs(flags));
+    vStep(`c front end + codegen  ${path} -> ${obj}`);
+    const rc = subMain(['c', 'link', obj, '-o', out,
+      '-f', fmt, '--arch', arch, '--os', os, '--stdlib', '-q']);
+    if (rc !== 0) return rc;
+    if (os !== 'win32') spawn('chmod', ['+x', out], 'c');
+  }
+  stderr(`omni: built ${out} via ${via === null ? `自带的 C 前端 + ${fmt} 链接器` : ccPick()}\n`);
   return 0;
 }
 
@@ -3009,8 +3123,11 @@ function main(argv) {
       const oi = rest.indexOf('--profile-out');
       PROF = { mode, hz: Number.isFinite(hz) ? hz : 0, out: oi < 0 ? null : rest[oi + 1] };
       /* **认腿**（第一百四十七片第四格）：后端不只有 C 一条，而三档各只在有那台机制的腿上
-       * 成立。不成立就当场报（`profCheckLeg` 里那几句），不许收下开关然后印一张空表。 */
-      PROF.leg = profLeg(node.key, cpath, rest);
+       * 成立。不成立就当场报（`profCheckLeg` 里那几句），不许收下开关然后印一张空表。
+       * 第二个实参是**源文件**（`srcArg`）—— 从前这儿错传了 `cpath`（那是**命令**路径，
+       * 像 `['run']`），于是 `.c` 那条腿一次都没认出来：量到的原话是
+       * `run x.c --profile sample --cc clang` 报「js 这条腿上没有这台机器」。 */
+      PROF.leg = profLeg(node.key, srcArg(node, rest), rest);
       profCheckLeg(mode, PROF.leg);
       /* `--profile-out x.svg`：**火焰图**。运行时那一层只会写折叠栈（它在信号里，不该
        * 干渲染这种事），所以这儿把落点换成 `x.svg.folded`，收尾时再摊成 SVG

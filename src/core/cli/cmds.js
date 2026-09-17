@@ -74,8 +74,9 @@ const F_SYSROOT = {
  */
 const F_PROFILE = {
   name: '--profile', arity: 1, value: 'MODE',
-  brief: 'cc（C 腿，-finstrument-functions）| stub（C + js 两条，我们插的桩）'
-    + ' | sample[:hz]（C 腿，定时器采样）—— 认腿，对不上当场报',
+  brief: 'cc（C 腿 / .c 输入，-finstrument-functions）| stub（C + js 两条，我们插的桩）'
+    + ' | sample[:hz]（C 腿 / .c 输入，定时器采样）—— 认腿，对不上当场报；'
+    + '`.c` 输入那两档要 --cc clang',
 };
 const F_PROFILE_OUT = {
   name: '--profile-out', arity: 1, value: 'FILE',
