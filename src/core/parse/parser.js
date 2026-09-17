@@ -258,6 +258,7 @@ class Parser {
     if (this.at('class')) return this.parseAggregate('class');
     if (this.at('enum')) return this.parseEnum();
     if (this.at('var') || this.at('let')) return this.parseInferredDecl(true);
+    if (this.atTemplateDecl()) return this.parseTemplate();
     const head = this.tryDeclHead();
     if (head) {
       if (this.at('(')) return this.parseFuncRest(head.type, head.nameTok, null);
@@ -286,9 +287,40 @@ class Parser {
     return { kind: 'Import', path: t.value, pathSpan: t.span, span: this.spanFrom(start) };
   }
 
+  /**
+   * `template 名(形参…) { 体 }` —— 卫生模板（ADR-0037 事情一）。展开在 hir/template.js。
+   *
+   * `template` 是**软关键字**：没进 KEYWORDS 表，判据是三个 token 连在一起
+   * （`template` 名字 `(`）。所以别处的 `template` 还是个普通名字，这一格对现有语料中性。
+   *
+   * 形参只有名字、没有类型：那几个是**语法的洞**，替进去的是一棵树，不是一个值。
+   */
+  atTemplateDecl() {
+    const t = this.peek();
+    if (t.kind !== 'ident' || t.value !== 'template') return false;
+    return this.peek(1).kind === 'ident' && this.at('(', 2);
+  }
+
+  parseTemplate() {
+    const start = this.next();          // 'template'
+    const nameTok = this.next();
+    this.expect('(');
+    const params = [];
+    while (!this.at(')') && !this.atEof()) {
+      const p = this.peek();
+      if (p.kind !== 'ident') { this.error(p.span, '模板的形参只能是一个名字（那是语法的洞，没有类型）'); break; }
+      this.next();
+      if (params.some((q) => q.name === p.value)) this.error(p.span, `形参 '${p.value}' 重复`);
+      params.push({ name: p.value, span: p.span });
+      if (!this.eat(',')) break;
+    }
+    this.expect(')');
+    const body = this.parseBlock();
+    return { kind: 'TemplateDecl', name: nameTok.value, params, body, span: this.spanFrom(start) };
+  }
+
   /** struct 与 class 的语法相同；差别在语义（值语义 vs 引用语义 + 方法） */
-  parseAggregate(keyword) {
-    const start = this.expect(keyword);
+  parseAggregate(keyword) {    const start = this.expect(keyword);
     const nameTok = this.peek();
     let name = '<error>';
     if (nameTok.kind === 'ident') name = this.next().value;

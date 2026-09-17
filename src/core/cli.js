@@ -2095,7 +2095,7 @@ function asyModsFast(path, dir) {
  */
 function compileProgram(path, text, mode) {
   const diags = new Diagnostics();
-  const { decls, imports, files, modPath } = loadProgram({ path, text, mode, diags });
+  const { decls, imports, files, modPath } = loadProgram({ path, text, mode, diags, templates: LANG_DIRECTIVE });
   diags.throwIfErrors();
   vStep(`front end  ${path}  mode ${mode}, ${files.length} files, ${decls.length} decls, ${imports.size} imports`);
   const program = { kind: 'Program', decls, imports };

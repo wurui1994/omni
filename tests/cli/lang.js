@@ -214,5 +214,97 @@ const tplFile = sample('hygiene.sx', TPL);
   } else bad('没有模板的 .sx 该中性', `rc=${a.status}/${b.status}`);
 }
 
+/* ---- 七、卫生模板落在 **omni 主语言** 上（ADR-0037 §4.1）
+ *
+ * 上面第五、六两节判的是**中间格式**（`.sx`）那一份；这一节判给人写的那一格：
+ * `template 名(形参) { 体 }`，调用点与函数调用同形。三条性质与 `.sx` 那份一字不差地对应，
+ * 只是写成 omni 的语法 —— 一份文件三条一起跑，输出对上就三条都成立。 */
+const OTPL = 'var counter = 0;\n\n'
+  + 'template dbl(x) { let t = x; print(t + t); }\n'
+  /* 体里写的是普通的 `counter` —— 定义期那一趟自己把它认成模块级那一格。 */
+  + 'template bump() { counter = counter + 1; print(counter); }\n'
+  + 'template swap2(a, b) { let t = a; a = b; b = t; }\n\n'
+  + 'let t = 5;\ndbl(t);\nprint(t);\n'
+  + 'bump();\nprint(counter);\n'
+  + 'let p = 1;\nlet q = 2;\nswap2(p, q);\nprint(p);\nprint(q);\n';
+const otplFile = sample('hygiene.omni', OTPL);
+{
+  const r = omni(['run', otplFile, '--lang-directive']);
+  const out = (r.stdout || '').trim().split('\n');
+  const want = ['10', '5', '1', '1', '2', '1'];
+  if (r.status === 0 && out.join(',') === want.join(',')) {
+    ok('omni 主语言那一份卫生三条：局部不捕获（10 / 5）、模块级变量（1 / 1）、swap（2 / 1）');
+  } else bad('omni 的卫生三条', `rc=${r.status} 出来的是 ${out.join(',')}\n    ${both(r).slice(-400)}`);
+}
+{
+  const r = omni(['run', otplFile]);
+  const s = both(r);
+  if (r.status !== 0 && s.includes('默认关着') && s.includes('--lang-directive')) {
+    ok('`template …` 与 #lang 同一格开关：关着时当场报 + 给开法');
+  } else bad('omni 的模板该跟 #lang 同一格开关', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  /* 同一个模板展开两次，两次的局部名必须不同（Nim 的 `instID`）。 */
+  const p = sample('twice.omni', 'template dbl(x) { let t = x; print(t + t); }\ndbl(3);\ndbl(4);\n');
+  const run = omni(['run', p, '--lang-directive']);
+  const js = omni(['emit', 'js', p, '--lang-directive']);
+  const names = [...new Set(((js.stdout || '').match(/t_gensym[0-9]+/g) ?? []))];
+  if (run.status === 0 && (run.stdout || '').trim() === '6\n8' && names.length === 2) {
+    ok(`omni 那一份展开两次两个号：${names.join(' / ')}（6 / 8 也对）`);
+  } else bad('omni 两次展开该是两个号', `rc=${run.status} 名字=${names.join(',')}`);
+}
+
+/* ---- 八、omni 那一份的四处拒绝：每一处都要说到原因上
+ *
+ * 头一处是**这条腿与 `.sx` 那条腿不一样的地方**，所以判得细一点：调用处有局部与模板体绑到的
+ * 模块级变量同名时，`.sx` 那份靠改写成 `(gvar …)` 做到不遮，而这一份**报**——
+ * 检查器给遮蔽的声明不改名（`check.js` 的 `Scope.declare` 原名入表），靠改名做不到。
+ * 判据钉在"报了、而且说清为什么"上，不钉在"能过"上。 */{
+  const p = sample('shadow.omni', 'var counter = 0;\n'
+    + 'template bump() { counter = counter + 1; print(counter); }\n'
+    + '{\n  let counter = 100;\n  bump();\n}\n');
+  const r = omni(['run', p, '--lang-directive']);
+  const s = both(r);
+  if (r.status !== 0 && s.includes("调用处有一个局部 'counter'") && s.includes('还没接')) {
+    ok('调用处遮住模板绑到的模块级变量：报 + 说清"还没接"与出路（不静默取错那一个）');
+  } else bad('遮蔽该报', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  const p = sample('free.omni', 'template bad() { print(nope); }\nbad();\n');
+  const r = omni(['run', p, '--lang-directive']);
+  const s = both(r);
+  if (r.status !== 0 && s.includes("引用了 'nope'") && s.includes('定义处')) {
+    ok('omni：体里的自由名字查不到，说清"要在定义处就查得到"');
+  } else bad('omni 的自由名字该报', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  const p = sample('expr.omni', 'template dbl(x) { let t = x; print(t + t); }\nprint(1 + dbl(2));\n');
+  const r = omni(['run', p, '--lang-directive']);
+  const s = both(r);
+  if (r.status !== 0 && s.includes('语句位置')) {
+    ok('表达式位置上的模板调用：报"体是一串语句，塞不进表达式"（不是一句语法错）');
+  } else bad('表达式位置该报', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  const p = sample('infn.omni', 'var counter = 0;\n'
+    + 'template bump() { counter = counter + 1; print(counter); }\n'
+    + 'void f() { bump(); }\nf();\n');
+  const r = omni(['run', p, '--lang-directive']);
+  const s = both(r);
+  if (r.status !== 0 && s.includes('函数体看不见')) {
+    ok('模板体引用模块级变量、调用点在函数体里：报清 omni 的顶层语句是入口函数的局部');
+  } else bad('函数体里那一格该报', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  /* **中性**：一份没有模板的 `.omni`，开着开关与不开跑出来一模一样（`expandTemplates` 一进门
+     没见到 `TemplateDecl` 就原样把那棵树交回去，一次遍历都不做）。 */
+  const p = join(ROOT, 'bench', 'fib.omni');
+  const a = omni(['run', p]);
+  const b = omni(['run', p, '--lang-directive']);
+  if (a.status === 0 && b.status === 0 && a.stdout === b.stdout) {
+    ok('中性：没有模板的 .omni，开关开与不开输出逐字节相同');
+  } else bad('没有模板的 .omni 该中性', `rc=${a.status}/${b.status}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

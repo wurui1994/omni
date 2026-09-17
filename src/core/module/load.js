@@ -17,11 +17,12 @@
 //   - 相对路径不能逃出包根：../../ 爬到包外面就不再是这个包的一部分了
 //   - 禁止环：报出整条环路径，而不是给一个半初始化的模块
 
-import { readText, exists, realPath, readDir, installDir } from '../host/native.js';
+import { readText, exists, realPath, readDir, installDir, env } from '../host/native.js';
 import { join, dirname, resolve, relative, isAbsolute, basename } from '../host/path.js';
 import { dataDir } from '../host/data.js';
 import { SourceFile, OmniError } from '../source/diag.js';
 import { parse } from '../parse/parser.js';
+import { expandTemplates } from '../hir/template.js';
 
 /* `std` 那个包的根。按**布局**找（host/data.js 那串候选根）：
  *   从源码跑    src/lib
@@ -150,7 +151,7 @@ function resolveSpec(spec, from) {
  *   state 非空表示这是一次**增量**加载（REPL 的一批输入）：见 newLoadState。
  * @returns {{decls: any[], imports: Map<number, Set<number>>, files: string[]}}
  */
-export function loadProgram({ path, text, mode, diags, state }) {
+export function loadProgram({ path, text, mode, diags, state, templates }) {
   /** @type {Map<string, number>} realpath -> 模块 id（完成加载的） */
   const done = state === undefined ? new Map() : state.done;
   /** @type {Map<number, Set<number>>} 模块 id -> 它直接导入的模块 id */
@@ -180,6 +181,13 @@ export function loadProgram({ path, text, mode, diags, state }) {
     let src = file;
     if (src === undefined || src === null) src = new SourceFile(display(real), readText(real));
     const ast = parse(src, diags);
+    /* 卫生模板（ADR-0037 §4.1）在这儿展开：**每份文件各展开自己的**（模板不跨模块，
+     * 也就不必管加载次序），而且检查器一个 `TemplateDecl` 都见不到。没有模板的文件
+     * 原样过 —— 这一格对现有语料中性。
+     * 开关那一格：`--lang-directive` 由调用方（cli.js 的 `compileProgram`）传进来，
+     * 环境那一格在这儿自己读 —— 这样 REPL 与直接调 `loadProgram` 的那几处也认它。 */
+    const on = templates === true || env('OMNI_LANG_DIRECTIVE') === '1';
+    const expanded = expandTemplates(ast, diags, on);
     // id 不写成三元里的 `nextId++`：自举那条腿要求"惰性求值位置里不许藏副作用"（ADR-0011）
     let id = forceId;
     if (id === undefined) {
@@ -195,7 +203,7 @@ export function loadProgram({ path, text, mode, diags, state }) {
     modPath.set(id, real);
     const dir = dirname(real);
 
-    for (const d of ast.decls) {
+    for (const d of expanded.decls) {
       if (d.kind !== 'Import') continue;
       let r;
       try {
@@ -208,7 +216,7 @@ export function loadProgram({ path, text, mode, diags, state }) {
       mine.add(visit(r.path, r.root, d.path, null, modeOfPath(r.path)));
     }
 
-    for (const d of ast.decls) {
+    for (const d of expanded.decls) {
       if (d.kind === 'Import') continue;
       d.mod = id;
       d.mode = fileMode;
