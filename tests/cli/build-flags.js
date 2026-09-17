@@ -163,6 +163,13 @@ rmSync(join(WORK, 'lin'), { force: true });
   if (s.includes('AST') && s.includes('OIR') && s.includes('最胀的一层')) {
     ok('run --stat：源码 -> AST -> OIR -> 目标文本 四层都在，且指出最胀的一层');
   } else bad('run --stat 的层要齐', s.split('\n').slice(-8).join('\n    '));
+  /* **按 kind 的分布**：与图那条腿的「按 op 的分布」同一种读法 —— 只报总数看不出胀在哪儿。
+   * 次序要确定（数量降序），所以榜首那一格是可判的。 */
+  const ka = /AST 按 kind 的分布（(\d+) 种 \/ (\d+) 格/.exec(s);
+  const ko = /OIR 按 kind 的分布（(\d+) 种 \/ (\d+) 格/.exec(s);
+  if (ka !== null && ko !== null && Number(ka[2]) > 0 && Number(ko[2]) > 0) {
+    ok(`run --stat：AST ${ka[1]} 种 / ${ka[2]} 格、OIR ${ko[1]} 种 / ${ko[2]} 格（老那几条腿也按 kind 数得出来了）`);
+  } else bad('run --stat 要有按 kind 的分布', s.split('\n').slice(-12).join('\n    '));
 }
 {
   /* graph 那台机器上是同一张表（层名不同：那儿的中间层就是「图」）—— 统一那件事的判据。 */

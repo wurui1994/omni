@@ -85,6 +85,48 @@ export function countNodes(x, depth = 0) {
 }
 
 /**
+ * 一层上**按 kind 的分布**（`graph/stat.js` 那张「按 op 的分布」的孪生）。
+ *
+ * 为什么要它：只报「这一层多少格」看不出胀在哪儿 —— 图那条腿上早就是按 op 数的
+ * （`-2 const · -2 prim:concat` 那种账），而老那几条腿的中间层（AST / OIR）从前只有总数。
+ * 有了这一格，**同一种读法**落到两台机器上：哪一类节点最多、一个 pass 减掉了哪几类。
+ *
+ * 次序：数量降序、同数按名字 —— 与 `graph/stat.js` 同一条（输出要确定，不然两张表没法比）。
+ */
+export function kindStat(x) {
+  const kinds = new Map();
+  const walk = (y, depth) => {
+    if (y === null || y === undefined || depth > 200) return;
+    if (Array.isArray(y)) {
+      for (const z of y) walk(z, depth + 1);
+      return;
+    }
+    if (typeof y !== 'object') return;
+    if (typeof y.kind === 'string') kinds.set(y.kind, (kinds.get(y.kind) ?? 0) + 1);
+    for (const k of Object.keys(y)) {
+      if (k === 'span' || k === 'loc' || k === 'type' || k === 'parent') continue;
+      walk(y[k], depth + 1);
+    }
+  };
+  walk(x, 0);
+  let total = 0;
+  for (const v of kinds.values()) total += v;
+  return { kinds, total };
+}
+
+/** 那张分布印出来（`top` 是印几行；0 = 全印）。 */
+export function kindTable(name, s, top = 8) {
+  const rows = [...s.kinds.entries()].sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : 1));
+  const lim = top > 0 && rows.length > top ? top : rows.length;
+  const out = [`  ${name} 按 kind 的分布（${rows.length} 种 / ${s.total} 格，印前 ${lim}）`];
+  for (let i = 0; i < lim; i++) {
+    const pct = s.total > 0 ? (rows[i][1] * 100) / s.total : 0;
+    out.push(`    ${String(rows[i][1]).padStart(6)} ${pct.toFixed(1).padStart(5)}%  ${rows[i][0]}`);
+  }
+  return `${out.join('\n')}\n`;
+}
+
+/**
  * 时间去哪儿了（`--stat` 的另一半）：把 `vStep` 攒的那串步骤排成一张表。
  *
  * 印**执行顺序**而不是排序后的次序：这条流水线是一串因果，谁在谁后面本身就是信息；

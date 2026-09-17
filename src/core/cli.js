@@ -27,7 +27,7 @@ import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
 import { foldedToSvg } from './cli/flame.js';
 import { statModel, statTable, statDot, statJson } from './cli/statgraph.js';
-import { layerModel, layerTable, countNodes, stepTable } from './cli/layers.js';
+import { layerModel, layerTable, countNodes, stepTable, kindStat, kindTable } from './cli/layers.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { genArm64Module as genArm64 } from './arm64/from_mir.js';
@@ -710,6 +710,10 @@ function statLayers(cr) {
   }
   if (layers.length === 0 || chars === 0) return;
   stderr(layerTable(layerModel({ bytes: chars, lines }, layers)));
+  /* **按 kind 的分布**（与图那条腿的「按 op 的分布」同一种读法）：只报总数看不出胀在哪儿。
+   * 老那几条腿的中间层从前只有总数，这两张表是「统一支持」的落点。 */
+  if (cr.ast !== undefined && cr.ast !== null) stderr(kindTable('AST', kindStat(cr.ast.decls)));
+  if (cr.mod !== undefined && cr.mod !== null) stderr(kindTable('OIR', kindStat(cr.mod.funcs)));
 }
 
 function statReport(cr) {
