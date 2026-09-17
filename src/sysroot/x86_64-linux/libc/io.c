@@ -102,3 +102,10 @@ unsigned long __libc_chunk(unsigned long least, unsigned long *got) {
   *got = top - base;
   return base;
 }
+
+/* 收场（`exit_group` 才是「整个进程退」，`exit` 只退当前线程）。公用的 stdio.c 里
+ * 那个 `exit` 跑完 atexit 之后调这一条 —— 号是这台目标的，所以住在这儿。 */
+void _exit(int code) {
+  __omni_syscall(SYS_exit_group, code);
+  for (;;) __omni_syscall(SYS_exit, code);
+}

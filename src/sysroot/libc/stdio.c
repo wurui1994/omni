@@ -394,11 +394,6 @@ int puts(const char *s) {
 /* 无缓冲（每次 write 都是 syscall），所以这一条本来就没事可做。 */
 int fflush(FILE *f) { (void)f; return 0; }
 
-void _exit(int code) {
-  __omni_syscall(SYS_exit_group, code);
-  for (;;) __omni_syscall(SYS_exit, code);
-}
-
 /* `atexit` 注册的那些在这儿倒着跑（表在 `misc.c` 上）。 */
 void exit(int code) {
   __libc_run_atexit();

@@ -2956,10 +2956,12 @@ function main(argv) {
       const libcSelf = rest.indexOf('--libc') >= 0
         && rest[rest.indexOf('--libc') + 1] === 'self';
       if (libcSelf) {
-        if (cmd !== 'elf-link') {
-          throw new OmniError('--libc self 现在只有 ELF（linux）那条腿有');
+        if (cmd !== 'elf-link' && cmd !== 'macho-link') {
+          throw new OmniError('--libc self 现在有 ELF（linux）与 Mach-O（osx）两条腿');
         }
         if (sysroot === null) throw new OmniError('--libc self 要配 --sysroot');
+        const selfOs = cmd === 'macho-link' ? 'osx' : 'linux';
+        const selfFmt = cmd === 'macho-link' ? 'macho' : 'elf';
         const libcDir = join(sysroot, 'libc');
         if (!isDir(libcDir)) throw new OmniError(`--libc self: 找不到 ${libcDir}`);
         /* 公用那一半（第一百四十片第五格）：`src/sysroot/libc/` —— string/math/strtox/
@@ -2977,16 +2979,26 @@ function main(argv) {
         }
         srcs.sort();
         const objs = [];
+        const selfArch = CROSS === null ? hostArch() : CROSS.arch;
         for (const src of srcs) {
           const base = basename(src).replace(/\.c$/, '');
-          const o = join(workDirFor('libc-self', hash16(src)), base + '.o');
-          cObj(src, o, CROSS === null ? hostArch() : CROSS.arch, incs, [], 'elf',
-            'linux', [cap('c.sysInclude')()[0], ...incs]);
+          /* `.o` 的**容器一律是 ELF**（`omni c link` 读 ELF、写 macho/pe，见
+           * `buildSelf` 头上那三条）。按 macho 编的 `.o` 交给它，报的是
+           * 「macho: 还不会给 0 号架构写可执行文件」—— 那个 0 是把 Mach-O 的头当
+           * ELF 的 `e_machine` 读出来的。第一版这儿真按 `macho` 编了，量到的就是那句。
+           * 目标只由 `arch`/`os` 说（它们管 ABI 与预定义宏）。 */
+          const o = join(workDirFor('libc-self', hash16(`${selfFmt}|${selfArch}|${selfOs}|${src}`)),
+            base + '.o');
+          cObj(src, o, selfArch, incs, [], 'elf',
+            selfOs, [cap('c.sysInclude')()[0], ...incs]);
           if (base === 'start') objs.unshift(o); else objs.push(o);
         }
         files.unshift(...objs.filter((o) => o.endsWith('start.o')));
         files.push(...objs.filter((o) => !o.endsWith('start.o')));
-        if (!rest.includes('-e')) rest.push('-e', '_start');
+        /* 入口的**符号名**两条腿不一样：Mach-O 的 C 符号带一条前导下划线，所以
+         * C 里的 `_start` 在那边是 `__start`（ELF 上就是 `_start`）。
+         * `macho_exe` 的默认入口是 `_main`（见它的文件头），不改就找不着。 */
+        if (!rest.includes('-e')) rest.push('-e', selfFmt === 'macho' ? '__start' : '_start');
       } else if (sysroot !== null) {
         /* sysroot/lib 里的 `.def` 当成库的来源。格式不同，走法不同：
          *   ELF：`-L DIR/lib -lc -lm …`，findLibElf 认 `lib%s.def`

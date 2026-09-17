@@ -88,6 +88,43 @@ MIR 说「要什么」，摆法归后端。
 - `sigaction` 回 `ENOSYS`（要 `SA_RESTORER` 那个跳板，得等汇编器）；
   `backtrace` 回 0；`dlopen` 一族调到就崩（假句柄比崩坏）。
 
+## 两个目标各自的那一半（第一百四十片第五格）
+
+```
+src/sysroot/libc/                公用：一行 syscall 都没有的七份
+                                 string math strtox stdio file malloc pure + libc.h
+src/sysroot/x86_64-linux/libc/   syscall.h io.c misc.c start.c
+src/sysroot/arm64-osx/libc/      同上四份，内容各不同
+```
+
+差在哪儿（都是量出来的）：
+
+- **摆法**：Linux 号进 x8 + `svc #0`；Darwin 号进 **x16** + `svc #0x80`，而且号要带
+  类别位（BSD 是 `2 << 24`）。这一格归后端（`arm64/from_mir.js` 看 `mod.os`）。
+- **出错**：Linux 回 `-errno`；Darwin **置进位标志**、x0 里是**正的** errno。
+  op 的约定只有一条「回负数就是 -errno」，所以 Darwin 那一支后端多发一条
+  `cneg x0, x0, cs`。少了它 `open("/nope")` 回的 2 与 fd 2 分不开。
+- **入口**：Linux 的 `_start` 从栈上捞 argc/argv（`__builtin_frame_address(0)` +
+  偏移）；macOS 的 `LC_MAIN` 入口是**像 main 一样被调用的**（argc 在 x0、argv 在 x1、
+  envp 在 x2）。按栈上捞那一版在 macOS 上量到的是 `argc=0`。
+- **要内存**：Linux 是 `brk`；Darwin **没有 brk**，只能 `mmap`（页 16K）。所以公用的
+  malloc 只跟目标要 `__libc_chunk`，**不假设两次要来的地方连着**。
+- **目录**：`getdents64` 与 `getdirentries64` 的记录不一样 —— 名字一个在第 19 字节、
+  一个在第 21（Darwin 多一格 `d_namlen`）。
+- **macOS 上还欠 `fork`**：Darwin 的 `fork` 有**两个**返回值（x0 = pid、**x1 = 是不是
+  子进程**），而 `SYSCALL` 现在只交回 x0。只看 x0 的话父子都以为自己是父 —— 量到过：
+  探子的后四行印了两遍。所以 `fork`/`system`/`pipe` 在那条腿上**明着崩**，不假装成功。
+  要还这一格得给 op 一个「第二个返回值写到哪儿」的变体。
+- **macOS 上还欠 `setjmp`**：arm64 的 `SETJMP`/`LONGJMP` 还没实现（要存 x19-x28 与
+  d8-d15），所以 JSON 那两段在那条腿上还不能用。
+
+量到的（都是本机 arm64 macOS 上直接跑，不进容器）：
+
+- `argc/argv`：`./a-osx one two three` -> `argc=4`、四行 argv 全对、rc=4
+- 「系统那一半」（`tests/x64/libc-sys-probe.c`，14 行）：与 Apple 的 libc **逐行相同**
+- libm 对账（120 个采样）：最大相对误差 **2.18e-12**，与 Linux 那一趟同一个数
+  （math.c 是同一份文件）
+
 `libc/*.c` 只吃 `libc/syscall.h` 与 `libc/libc.h`，**看不见** `include/` 里那份给用户
 程序的头 —— 那边的 `FILE` 是 glibc 的形状，与我们的 `struct __FILE` 是两回事。
 内部符号一律 `__libc_` 前缀，不许用 `__omni_`：那个前缀是**线性内存那条腿的宿主接口**，

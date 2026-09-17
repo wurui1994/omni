@@ -1207,7 +1207,15 @@ class FnGen {
         buf.emit(addImm(1, TMP1, TMP1, step), strU(3, TMP1, TMP0, 0));
         return this.def(i, RES);
       }
-      MLOAD_EMIT[typeKind(t) === T_I32 ? 'i32s' : arm64WidthKey(t)](buf, RES, TMP1);
+      /* 偏移那一格**必须显式给 0**（第一百四十片第五格找出来的一个真错）：
+       * `MLOAD_EMIT` 那几条是 `(buf, dst, base, off)`，少给第四个就是 `undefined`，
+       * 于是 `ldrU` 里那句「偏移是不是宽度的倍数」判成 `undefined % 8`，编译当场
+       * 报「偏移 undefined 不是 8 的倍数」。
+       *
+       * 为什么一直没露头：这条腿上**从来没有人编过带 `va_arg` 的函数** ——
+       * 我们生成的 C 只**调**变参（printf），不定义变参；tcc 那把尺子比的是解释器
+       * 那条腿。这一格是自带 libc 的 `sscanf`/`strftime` 第一次踩上来。 */
+      MLOAD_EMIT[typeKind(t) === T_I32 ? 'i32s' : arm64WidthKey(t)](buf, RES, TMP1, 0);
       buf.emit(addImm(1, TMP1, TMP1, 8), strU(3, TMP1, TMP0, 0));
       return this.def(i, RES);
     }
