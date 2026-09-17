@@ -534,6 +534,83 @@ function freeRefs(x, bound, out) {
 }
 
 /**
+ * **数值窄化**（`docs/design/node-graph-shrink.md` 第五节第 3 条）：这一个函数体里，
+ * 哪几格局部量**从头到尾只装数**。它们落成 C 的 `double` 而不是 16 字节的 `gv`，
+ * 于是那一族 `g_num(g_d(…))` 的往返跟着消掉。
+ *
+ * 判断只用图上现成的东西，一格新声明都不加：
+ *   - 名字由这个体里的 `bind` 绑，初值**是数**；
+ *   - 这个体里对它的每一次 `set` 也**是数**；
+ *   - 「是数」= 数字常量 / `len` / `conv int|float`（这三样怎么算都出数）
+ *     / `+ - * / % ^` 且实参都是数（`+` 只有在实参都是数时才是加法 —— 串接那一路不算）
+ *     / `ref` 一格**同样窄了**的名字（所以要转几轮，见下面的不动点）。
+ *
+ * 四处保守，每一处都有理由：
+ *   1. **同名绑两次就不窄**：C 那侧两次 `bind` 落在两层块里各是一格声明，而这儿只有一张
+ *      按名字的表 —— 分不开就不动。
+ *   2. **形参不窄**：它是 `gv` 形参（调用方可能递任何东西）。
+ *   3. **不进嵌套 `func` 的体**：那一层是另一个 C 函数；读外层局部量这条路本来就报缺口
+ *      （`liftFunc` 里的 `freeRefs`），所以窄化不会把一格捕获的量弄坏。
+ *   4. 一轮下来只**去掉**候选，不加 —— 于是必然停（最多名字个数那么多轮）。
+ */
+const NUM_PRIMS = ['+', '-', '*', '/', '%', '^'];
+function numLocals(list) {
+  const seen = new Set();
+  const count = new Map();
+  const inits = new Map();
+  const writes = [];
+  const scan = (x) => {
+    if (x === null || x === undefined) return;
+    if (Array.isArray(x)) { for (const y of x) scan(y); return; }
+    if (x.op === undefined) return;
+    if (seen.has(x.id)) return;
+    seen.add(x.id);
+    if (x.op === 'func') return;                 /* 保守第 3 条：不进另一个 C 函数 */
+    if (x.op === 'bind') {
+      const n = x.attrs.name;
+      count.set(n, (count.get(n) ?? 0) + 1);
+      inits.set(n, x.ins.init);
+      scan(x.ins.init);
+      return;
+    }
+    if (x.op === 'set') {
+      writes.push([x.attrs.name, x.ins.value]);
+      scan(x.ins.value);
+      return;
+    }
+    const ins = x.ins ?? {};
+    for (const k of Object.keys(ins)) scan(ins[k]);
+  };
+  scan(list);
+  const cands = new Set();
+  for (const [n, c] of count) {
+    const init = inits.get(n);
+    if (c === 1 && init !== null && init !== undefined && init.op !== 'func') cands.add(n);
+  }
+  const numish = (x) => {
+    if (x === null || x === undefined || Array.isArray(x)) return false;
+    if (constNum(x) !== null) return true;
+    if (x.op === 'ref') return cands.has(x.attrs.name);
+    if (x.op === 'conv') return x.attrs.to === 'int' || x.attrs.to === 'float';
+    if (x.op !== 'prim') return false;
+    if (x.attrs.name === 'len') return true;
+    if (!NUM_PRIMS.includes(x.attrs.name)) return false;
+    const args = asList(x.ins.args).filter((y) => y !== undefined);
+    return args.length > 0 && args.every(numish);
+  };
+  for (let round = 0; round < cands.size + 1; round++) {
+    let dropped = false;
+    for (const n of [...cands]) {
+      const ok = numish(inits.get(n))
+        && writes.every(([w, v]) => w !== n || numish(v));
+      if (!ok) { cands.delete(n); dropped = true; }
+    }
+    if (!dropped) break;
+  }
+  return cands;
+}
+
+/**
  * 一格 C 的 double 字面量。**要能一位不差地读回来**：整数写 `3.0`，别的写 17 位有效数字
  * （IEEE 754 双精度的往返位数）。无穷与 NaN 用 `1.0/0.0` 这一族写 —— C 里没有它们的
  * 字面量，而 `<math.h>` 的 `INFINITY` 要 `#include`（这份产物一个头都不 include）。
@@ -572,6 +649,41 @@ class CGen {
     this.frames = [];
     /** 现在嵌在几层条件/循环里 —— scope-exit 只认「区域自己那一层」注册的。 */
     this.cond = 0;
+    /**
+     * 这一个函数体里**窄成 `double` 的那几格名字**（`numLocals` 算的）。
+     * 一进一出一格函数体就换一张（见 `liftFunc` 与 `emitC`）—— 名字是按体算的。
+     */
+    this.num = new Set();
+  }
+
+  /**
+   * 一格节点的**不装箱的 double 形态**，没有就回 `null`。
+   *
+   * 这是窄化那一半的落点：`ref` 一格窄了的名字直接是那个 C 变量，常量直接是字面量，
+   * 算术是把两边的 double 形态拼起来。拼不出来的（调用、字段、串…）回 `null`，
+   * 调用方再退回 `g_d(<装箱的那份>)`。
+   *
+   * **只拼 `+ - * /`**：`^` 那格有一条「指数不是整数就报缺口」的规矩（见 `prim`），
+   * 从这儿绕过去就把那条规矩丢了；`%` 与 `len` 交给退路，多一趟 `g_d` 不值得再抄一遍语义。
+   * 这里也**不发语句** —— 认得的这几样都是纯表达式，所以不会漏掉谁的副作用。
+   */
+  dOf(x) {
+    if (x === null || x === undefined || Array.isArray(x)) return null;
+    const k = constNum(x);
+    if (k !== null) return cNum(k);
+    if (x.op === 'ref' && this.num.has(x.attrs.name)) return cName(x.attrs.name);
+    if (x.op !== 'prim') return null;
+    const nm = x.attrs.name;
+    if (nm !== '+' && nm !== '-' && nm !== '*' && nm !== '/') return null;
+    const args = asList(x.ins.args).filter((y) => y !== undefined).map((y) => this.dOf(y));
+    if (args.length === 0 || args.some((d) => d === null)) return null;
+    if (nm === '-' && args.length === 1) return `(-${args[0]})`;
+    return args.reduce((a, b) => `(${a} ${nm} ${b})`);
+  }
+
+  /** 一格节点的 double 形态，拼不出来就退回「装箱的那份再拆一次」。 */
+  dVal(x) {
+    return this.dOf(x) ?? `g_d(${this.valOf(x)})`;
   }
 
   /** 开一层区域。 */
@@ -648,9 +760,12 @@ class CGen {
     }
     const outer = this.lines;
     const outerDepth = this.depth;
+    const outerNum = this.num;
     this.lines = [];
     this.depth = 1;
     this.inFn += 1;
+    /* 窄化是**按函数体**算的（形参不窄：调用方可能递任何东西）。 */
+    this.num = numLocals(asList(x.ins.body));
     const t = this.fresh();
     this.emit(`gv ${t} = g_nil();`);
     this.pushFrame('fn');
@@ -661,6 +776,7 @@ class CGen {
     const lines = this.lines;
     this.lines = outer;
     this.depth = outerDepth;
+    this.num = outerNum;
     this.fns.push({ cname, params: params.map(cName), lines });
     return cname;
   }
@@ -693,7 +809,10 @@ class CGen {
     if (x.lit !== undefined) return this.lit(x.lit);
     this.chk(x.op);
     if (x.op === 'const') return this.lit(x.attrs.value ?? null);
-    if (x.op === 'ref') return cName(x.attrs.name);
+    /* 窄成 `double` 的那几格：值位置上要**装回去**（这一格就是窄化的全部代价）。 */
+    if (x.op === 'ref') {
+      return this.num.has(x.attrs.name) ? `g_num(${cName(x.attrs.name)})` : cName(x.attrs.name);
+    }
     if (x.op === 'prim') return this.prim(x);
     if (x.op === 'call') return this.callOf(x);
     if (x.op === 'list-new') {
@@ -824,10 +943,7 @@ class CGen {
      * 见这份序言里的 `g_num` / `g_d`）。所以这一格不动语义，只少一趟往返。
      * 只管**常量**：变量那一侧要少这趟往返得先把局部量窄成 `double`，那是另一刀。
      */
-    const dArg = (i) => {
-      const k = constNum(raw[i]);
-      return k === null ? `g_d(${args[i]})` : cNum(k);
-    };
+    const dArg = (i) => this.dOf(raw[i]) ?? `g_d(${args[i]})`;
     const num2 = (op) => args.map((_, i) => dArg(i)).reduce((a, b) => `g_num(${a} ${op} ${b})`);
     const rel = (op) => `g_bool(g_cmp(${args[0]}, ${args[1]}) ${op})`;
     if (name === '+') return args.length === 0 ? 'g_num(0.0)' : args.reduce((a, b) => `g_add(${a}, ${b})`);
@@ -872,10 +988,19 @@ class CGen {
         this.liftFunc(x.ins.init, x.attrs.name);
         return;
       }
+      /* 窄了的那几格落 `double`（判据 3）：值一路都是 double，只在被人当值用时才装回去。 */
+      if (this.num.has(x.attrs.name)) {
+        this.emit(`double ${cName(x.attrs.name)} = ${this.dVal(x.ins.init)};`);
+        return;
+      }
       this.emit(`gv ${cName(x.attrs.name)} = ${this.valOf(x.ins.init)};`);
       return;
     }
     if (x.op === 'set') {
+      if (this.num.has(x.attrs.name)) {
+        this.emit(`${cName(x.attrs.name)} = ${this.dVal(x.ins.value)};`);
+        return;
+      }
       this.emit(`${cName(x.attrs.name)} = ${this.valOf(x.ins.value)};`);
       return;
     }
@@ -1017,6 +1142,7 @@ export function emitC(g) {
   const gen = new CGen();
   const top = asList(g !== null && g.kind === 'graph' ? g.body : g);
   gen.plan(top);
+  gen.num = numLocals(top);
   gen.pushFrame('fn');
   gen.body(top, null);
   gen.popFrame();
