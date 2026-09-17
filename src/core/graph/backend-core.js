@@ -42,6 +42,8 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   /* 记录与列表两族（第二刀）：方言里本来就有 `(struct …)`/`(fld …)` 与 `(arr T)`/`(aget …)`，
      所以这两族不必动方言，只是**把类型算出来**（图上没有类型，见文件头）。 */
   'record-new', 'field-get', 'field-set', 'list-new', 'index-get', 'index-set',
+  /* 切片：方言里没有，走 `nodes.js` 写着的消去规则（新建 + 一圈 apush，见 `bindSlice`）。 */
+  'slice',
   /* 表示转换：方言里是 `(toreal …)`/`(toint …)`/`(tostr …)` 三格 —— 图上那一格的 `to`
      说了要哪一侧，源那一侧得我们自己算（`typeOf`）。 */
   'conv']);
@@ -193,6 +195,7 @@ function expr(x, env, ctx) {
     }
     case 'record-new': gap('记录出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'list-new': gap('列表出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+    case 'slice': gap('切片出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'conv': {
       /* **已经在那一侧的什么都不做** —— 与 wat 那条腿同一句话（`backend-wat.js` 的 conv）。
        * 方言里 int 与 real 不隐式混算，所以这一格必须落准：多补一格 `(toreal …)` 会
@@ -301,6 +304,7 @@ function stmt(x, env, ctx) {
       if (isNode(init) && init.op === 'func') gap('函数值（非顶层的 func）');
       if (isNode(init) && init.op === 'record-new') return bindRecord(nm, init, env, ctx);
       if (isNode(init) && init.op === 'list-new') return bindList(nm, init, env, ctx);
+      if (isNode(init) && init.op === 'slice') return bindSlice(nm, init, env, ctx);
       const t = typeOf(init, env, ctx);
       env.set(nm, t);
       return [`(let ${nm} ${t} ${expr(init, env, ctx)})`];
@@ -395,6 +399,33 @@ function bindRecord(nm, rec, env, ctx) {
 }
 
 /**
+ * `let ys = xs[1:3]` —— 方言里**没有列表切片**，所以这一格走 `nodes.js` 上写着的那条
+ * **消去规则**（"`list-new` -> 一格存储 + 一串写"的同一条）：新建一格空数组，再拿一圈
+ * `while` 把 `[from, to)` 逐格 `apush` 过去。
+ *
+ * 图上的规矩这儿照抄：**上界不含、下标 0 起**（nim 那个含上界的差由 nim 自己的映射 +1）。
+ * 计数器的名字带一格序号（`slice_iN`），所以嵌两层切片也不会撞名。
+ */
+function bindSlice(nm, sl, env, ctx) {
+  const obj = sl.ins.obj;
+  const at = typeOf(obj, env, ctx);
+  const et = elemType(at);
+  if (et === null) gap('在一格说不清形状的东西上切片（这一刀只接 list-new 绑出来的那格）');
+  const src = objText(obj, env, ctx);
+  const from = sl.ins.from === undefined || sl.ins.from === null ? '(int 0)' : expr(sl.ins.from, env, ctx);
+  const to = sl.ins.to === undefined || sl.ins.to === null ? `(alen ${src})` : expr(sl.ins.to, env, ctx);
+  ctx.tmp = ctx.tmp + 1;
+  const i = `slice_i${ctx.tmp}`;
+  env.set(nm, at);
+  return [
+    `(let ${nm} ${at} (anew ${at} (int 0)))`,
+    `(do (let ${i} int ${from})`
+      + ` (while (bin "<" (var ${i}) ${to})`
+      + ` (do (apush (var ${nm}) (aget ${src} (var ${i}))) (set ${i} (bin "+" (var ${i}) (int 1))))))`,
+  ];
+}
+
+/**
  * `let xs = [1,2,3]` —— 方言里是 `(anew (arr T) 长度)` 再逐格 `(aset …)`。
  * 元素类型从第一格元素推，剩下的必须一致（不一致当场报 —— 方言的数组是单态的）。
  */
@@ -439,7 +470,7 @@ export function emitCore(g) {
   const env = new Map();
   /* 整份产物共用的登记处：`byKey` 按"字段名单 + 类型"去重、`shapes` 按标签查、
      `decls` 是要印在模块头上的那几句 `(struct …)`。 */
-  const ctx = { byKey: new Map(), shapes: new Map(), decls: [] };
+  const ctx = { byKey: new Map(), shapes: new Map(), decls: [], tmp: 0 };
   /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
   const fns = [];
   const rest = [];
