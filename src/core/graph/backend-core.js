@@ -19,6 +19,9 @@
 //   多值    落成一格合成结构体 `(struct mN (v0 …) (v1 …))` —— 方言的函数只交一格回来，
 //           而结构体是值语义的，那正好就是 `return a, b` 的语义
 //   形参    从**调用点**收（图上没有类型）：函数体走两趟，第一趟只收实参类型，第二趟出文本
+//   内层函数 **提到顶层**（lambda 提升，`liftBody`）：借来的那几格变成多出来的形参，
+//           每处调用补上实参。只当被调者用时提升与闭包同义 —— 跑出调用点那一格另有账
+//   模块级   函数体里的自由名字落成 `(global 名 类型)` + main 里一句 `(set …)`（`bindLine`）
 //   隐式返回 末尾那一格是**一个值**（`isValueish`：region 往里问一层、两支躺着语句的
 //           branch 不算、print 不算）时，**在图上**把它换成一格 `ret`（`retWrap`）——
 //           换在图上而不是文本上，defer / 物化 / 块作用域那几趟才照常生效
@@ -235,8 +238,9 @@ function freeInFns(fns, env) {
       if (n.op === 'func') for (const p of n.attrs.params ?? []) bound.add(String(p));
     });
     walkCore(f.body, (n) => {
-      if (n.op !== 'ref') return;
-      const nm = n.attrs.name;
+      /* 写也算（同 `capsOf` 那条）：只 `set` 不读的那一格也得落成 `(global …)`。 */
+      const nm = n.op === 'set' ? n.attrs.name : (n.op === 'ref' ? n.attrs.name : null);
+      if (nm === null) return;
       if (!bound.has(nm) && !env.has(`fn:${nm}`)) out.add(nm);
     });
   }
@@ -921,6 +925,149 @@ function bindList(nm, lst, env, ctx) {
 
 
 /**
+ * **lambda 提升**：函数体里 `bind` 出来的那格 `func`（chez 的内层 `define`）提到顶层去，
+ * 它借的那几格外面的名字变成**多出来的形参**，每处调用补上那几个实参。
+ *
+ * 为什么是提升而不是闭包：这一档的内层函数**只当被调者用**（`(go 1 0)`），没跑出去当值 ——
+ * 那时提升与闭包同义，而提升不必碰方言的 `(cfn …)`/`(mkclo …)`（那一格留给真闭包）。
+ *
+ * 三处validate，都报不猜：
+ *   * 那个名字**跑出调用点**（当实参 / 当返回值）—— 那是真函数值，提升办不到
+ *   * 里层**改**了借来的那格（`set`）—— 按值传进去改不回外面，语义不同
+ *   * 借来的那格是外层的形参或局部才算捕获；模块级那几格不算（它们落 `(global …)`）
+ *
+ * @param bodyList 这一层的语句序
+ * @param owner 这一层是谁的体（提上去的名字撞了就拿它当前缀）
+ * @param known 不算捕获的那些名字（顶层函数名 + 顶层绑定的名字）
+ * @param taken 已经占了的顶层名字
+ */
+function liftBody(bodyList, owner, known, taken) {
+  const arr = asArr(bodyList);
+  const out = [];
+  const lifted = [];
+  const fixes = [];
+  for (const s of arr) {
+    if (!(isNode(s) && s.op === 'bind' && isNode(s.ins.init) && s.ins.init.op === 'func')) {
+      out.push(s);
+      continue;
+    }
+    const nm = s.attrs.name;
+    const inner = s.ins.init;
+    const ps = (inner.attrs.params ?? []).map((p) => String(p));
+    /* 里层还套着里层：先把它们提上来（提完的名字也算"已知"）。 */
+    const sub = liftBody(inner.ins.body, nm, known, taken);
+    const subKnown = new Set([...known, ...sub.lifted.map((g) => g.name)]);
+    const caps = capsOf(sub.body, new Set([...ps, nm]), subKnown);
+    for (const c of caps) {
+      if (setsName(sub.body, c)) {
+        gap(`内层函数 '${nm}' 改了它借来的 '${c}' —— 提升是按值传进去的，改不回外面`);
+      }
+    }
+    escapes(arr, nm);
+    escapes(sub.body, nm);
+    const name = taken.has(nm) ? `${owner}$${nm}` : nm;
+    taken.add(name);
+    /* 调用点补实参：**自己那一份先应到自己身上**（递归调用），别的等这一趟走完再统一应
+     * —— 同一份 fix 应两遍会把实参补两回。 */
+    const my = fixes.length;
+    fixes.push((x) => addCaps(x, nm, name, caps));
+    const mine = { name: name, params: [...ps, ...caps], body: fixes[my](sub.body), my: my };
+    for (const g of sub.lifted) lifted.push(g);
+    lifted.push(mine);
+    /* 这一格 bind 本身没了 —— 函数提到顶层去了。 */
+  }
+  let body = out;
+  for (const fx of fixes) body = body.map(fx);
+  for (const g of lifted) {
+    for (let i = 0; i < fixes.length; i++) if (i !== g.my) g.body = fixes[i](g.body);
+  }
+  return { body: body, lifted: lifted };
+}
+
+/** 提升之后每处调用补上捕获那几格实参（顺带把名字换成提上去之后的那个）。 */
+function addCaps(x, from, to, caps) {
+  return mapNodes(x, (n) => {
+    if (n.op !== 'call') return undefined;
+    const f = n.ins.fn;
+    if (!(isNode(f) && f.op === 'ref' && f.attrs.name === from)) return undefined;
+    const args = argList(n, 'args').map((a) => addCaps(a, from, to, caps));
+    const extra = caps.map((c) => ({ op: 'ref', ins: {}, attrs: { name: c }, id: -1 }));
+    return {
+      ...n,
+      ins: { ...n.ins, fn: { ...f, attrs: { ...f.attrs, name: to } }, args: [...args, ...extra] },
+    };
+  });
+}
+
+/** 一棵树重建式地改写：`f(n)` 回替换品（回 undefined 就往孩子里走）。 */
+function mapNodes(x, f) {
+  if (Array.isArray(x)) return x.map((y) => mapNodes(y, f));
+  if (!isNode(x) || x.op === undefined) return x;
+  const rep = f(x);
+  if (rep !== undefined) return rep;
+  const ins = {};
+  for (const k of Object.keys(x.ins ?? {})) ins[k] = mapNodes(x.ins[k], f);
+  return { ...x, ins: ins };
+}
+
+/** 这一段里借了哪几格外面的名字（排序过 —— 同一张图两遍要一样）。 */
+function capsOf(body, own, known) {
+  const bound = new Set(own);
+  walkCore(body, (n) => {
+    if (n.op === 'bind') bound.add(n.attrs.name);
+    if (n.op === 'func') for (const p of n.attrs.params ?? []) bound.add(String(p));
+  });
+  const out = new Set();
+  walkCore(body, (n) => {
+    /* **写也算借**：`(set 名 …)` 的名字在 attrs 上，不是一格 `ref` —— 只数 ref 的话
+     * "只写不读"的那一格就漏了，落出来是一句引用不存在的名字（当场量到过：内层只
+     * `set k` 时提上去的函数里那个 `k` 谁都不认识）。 */
+    if (n.op === 'set') {
+      const nm0 = n.attrs.name;
+      if (!bound.has(nm0) && !known.has(nm0)) out.add(nm0);
+      return;
+    }
+    if (n.op !== 'ref') return;
+    const nm = n.attrs.name;
+    if (!bound.has(nm) && !known.has(nm)) out.add(nm);
+  });
+  return [...out].sort();
+}
+
+/** 这一段里有没有给这个名字赋值。 */
+function setsName(body, nm) {
+  let found = false;
+  walkCore(body, (n) => { if (n.op === 'set' && n.attrs.name === nm) found = true; });
+  return found;
+}
+
+/** 这个名字有没有**跑出调用点**（当实参、当返回值那种）—— 那是真函数值，提升办不到。 */
+function escapes(body, nm) {
+  const seek = (x) => {
+    if (Array.isArray(x)) {
+      for (const y of x) seek(y);
+      return;
+    }
+    if (!isNode(x) || x.op === undefined) return;
+    if (x.op === 'ref') {
+      if (x.attrs.name === nm) {
+        gap(`内层函数 '${nm}' 跑出了调用点（当实参 / 当返回值那种）—— 那是真函数值，`
+          + '方言里要 `(cfn …)`/`(mkclo …)`，这一刀还没接');
+      }
+      return;
+    }
+    if (x.op === 'call') {
+      const f = x.ins.fn;
+      if (!(isNode(f) && f.op === 'ref' && f.attrs.name === nm)) seek(f);
+      seek(x.ins.args);
+      return;
+    }
+    for (const k of Object.keys(x.ins ?? {})) seek(x.ins[k]);
+  };
+  seek(body);
+}
+
+/**
  * 把一格 `values` 拼成那格合成结构体：零值 + 逐个 `fldset`。回"那几句 + 临时量的名字"。
  */
 function buildValues(v, env, ctx) {
@@ -992,14 +1139,40 @@ export function emitCore(g) {
     defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [], collect: false,
     globals: new Set(), fnEnv: null,
   };
-  /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
-  const fns = [];
-  const rest = [];
+  /* 一、分两拨，并把**内层函数提到顶层**（lambda 提升，见 `liftBody`）。 */
+  const raw = [];
+  const rest0 = [];
   for (const it of list) {
     if (isNode(it) && it.op === 'bind' && isNode(it.ins.init) && it.ins.init.op === 'func') {
       const f = it.ins.init;
-      const params = (f.attrs.params ?? []).map((p) => String(p));
-      fns.push({ name: it.attrs.name, params: params, body: f.ins.body });
+      raw.push({
+        name: it.attrs.name,
+        params: (f.attrs.params ?? []).map((p) => String(p)),
+        body: f.ins.body,
+      });
+      continue;
+    }
+    rest0.push(it);
+  }
+  const taken = new Set(raw.map((f) => f.name));
+  const modNames = new Set();
+  for (const it of rest0) if (isNode(it) && it.op === 'bind') modNames.add(it.attrs.name);
+  /* 不算捕获的那些：顶层函数名 + 顶层绑定的名字（后者落 `(global …)`，见 `bindLine`）。 */
+  const known = new Set([...taken, ...modNames]);
+  const fns = [];
+  for (const f of raw) {
+    const r = liftBody(f.body, f.name, known, taken);
+    for (const g of r.lifted) fns.push(g);
+    fns.push({ name: f.name, params: f.params, body: r.body });
+  }
+  const topLift = liftBody(rest0, 'main', known, taken);
+  for (const g of topLift.lifted) fns.push(g);
+  const rest = topLift.body;
+  /* 二、每格函数的返回类型与隐式返回 —— 互相递归（`fact` 调自己）要先登记上。 */
+  for (const it of fns) {
+    {
+      const f = { ins: { body: it.body }, attrs: { params: it.params } };
+      const params = it.params;
       /* 体里一格 `ret` 都没有：那可能是**一格 void 函数**（go / V 的 `main` 就是），
        * 也可能是**隐式返回**（chez / sbcl 那两门体末尾那个值就是返回值）。两者在图上同形，
        * 分不开 —— 所以这儿一律记成 `void`，等**调用点**说话：它被当值用了才报缺口
@@ -1023,15 +1196,13 @@ export function emitCore(g) {
         else if (rt === null) rt = t;
         else if (rt === 'void') impl = null;      // void 函数末尾那个值不是返回值
         else if (rt !== t) {
-          gap(`函数 '${it.attrs.name}' 的显式 ret 交的是 ${rt}，体末尾那个值是 ${t}`
+          gap(`函数 '${it.name}' 的显式 ret 交的是 ${rt}，体末尾那个值是 ${t}`
             + '（这一刀不做合一）');
         }
       }
-      fns[fns.length - 1].impl = rt === null ? null : impl;
-      env.set(`fn:${it.attrs.name}`, rt ?? 'void');
-      continue;
+      it.impl = rt === null ? null : impl;
+      env.set(`fn:${it.name}`, rt ?? 'void');
     }
-    rest.push(it);
   }
   /* **函数体看得见的只有函数名**（外加它自己的形参）：`env` 走一趟 main 之后会带上 main
    * 的局部（那是这一刀"先落 main"的副作用），而方言的函数看不见调用方的局部 —— 所以先
@@ -1239,10 +1410,36 @@ export function coreCan(op) {
  */
 export const CORE_SHAPES = [
   {
-    what: '函数值 / 闭包',
-    why: '非顶层的 `func` 还没接（方言里那是 `(cfn …)`）',
+    what: '内层函数跑出调用点（真函数值）',
+    why: '内层函数**只当被调者用**时提升就够（`liftBody`）；一旦它当实参 / 当返回值跑出去，'
+      + '那就是一格真函数值 —— 方言里要 `(cfn …)`/`(mkclo …)`/`(fnty …)`，这一刀还没接',
     witness: () => program([node('bind', {
-      init: node('func', { body: [node('bind', { init: node('func', { body: [] }, { params: [] }) }, { name: 'inner' })] }, { params: [] }),
+      init: node('func', {
+        body: [
+          node('bind', { init: node('func', { body: [] }, { params: [] }) }, { name: 'inner' }),
+          node('prim', { args: [node('ref', {}, { name: 'inner' })] }, { name: 'print' }),
+        ],
+      }, { params: [] }),
+    }, { name: 'outer' })]),
+  },
+  {
+    what: '内层函数改了它借来的那格',
+    why: '提升是把借来的那几格**按值**当形参传进去的 —— 里层改了改不回外面，语义不同。'
+      + '要接得给那一格装个盒子（方言里是 `(cfn …)` 的捕获，或者一格 `(arr T)` 当盒子）',
+    /* 证物要**嵌一层**：顶层那格 `k` 会落成 `(global …)`（那时里层改它是对的），
+       所以借来的那格必须是外层函数自己的局部。 */
+    witness: () => program([node('bind', {
+      init: node('func', {
+        body: [
+          node('bind', { init: litNode(0) }, { name: 'k' }),
+          node('bind', {
+            init: node('func', {
+              body: [node('set', { value: litNode(1) }, { name: 'k' })],
+            }, { params: [] }),
+          }, { name: 'inner' }),
+          node('call', { fn: node('ref', {}, { name: 'inner' }), args: [] }),
+        ],
+      }, { params: [] }),
     }, { name: 'outer' })]),
   },
   {
