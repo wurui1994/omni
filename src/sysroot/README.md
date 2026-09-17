@@ -71,7 +71,10 @@ MIR 说「要什么」，摆法归后端。
 - `strtox.c`  `strtol` 一族 + `strtod`（**正确舍入**：两个大整数的商 + 一次长除法，
               见下面「`strtod`」那一节）
 - `dec.c`     基 10^9 的大整数 —— 浮点的两头（打印与解析）共用这一份
-- `file.c`    `FILE *` 那一层：无缓冲，`FILE` 就是一个 fd 加两位状态
+- `file.c`    `FILE *` 那一层：无缓冲，`FILE` 就是一个 fd 加两位状态、再加一格
+              `ungetc` 的退回位；`fscanf` 借公用的 `__libc_vsscanf`（它回「吃了多少
+              字符」）把文件位置退回去。判据 `tests/c/libc-stdio.js`（26 行，两条腿
+              都与平台 libc 一行不差）
 - `math.c`    自己那份 libm：exp/log 用 Cody-Waite 归约 + 泰勒，sqrt 牛顿六次，
               sin/cos 折进 π/4（π/2 拆**三段**；|x| > 2^45 走 **Payne-Hanek** ——
               拿 400 位的 π 去除，而那 400 位是用 Machin 级数**自己算**的，

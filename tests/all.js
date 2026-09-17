@@ -81,7 +81,7 @@ const SUITES = [
   // 自己跑，还要 codesign），别的机器上它们自己跳过 —— 不是靠这儿挑。
   { s: 'c/libc-malloc.js' }, { s: 'c/libc-self.js' },
   { s: 'c/libc-float.js' }, { s: 'c/libc-strtod.js' }, { s: 'c/libc-libm.js' },
-  { s: 'c/libc-str.js' },
+  { s: 'c/libc-str.js' }, { s: 'c/libc-stdio.js' },
   { s: 'llvm/run.js', group: 'jit' }, { s: 'sexpr/run.js' }, { s: 'asy/run.js' },
   { s: 'jnc/run.js' }, { s: 'jit/run.js', group: 'jit' },
   { s: 'gpu/run.js' },

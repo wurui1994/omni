@@ -152,9 +152,9 @@ unsigned long strftime(char *buf, unsigned long cap, const char *fmt, const stru
 }
 
 /* ---- `sscanf`：只认 `%d %ld %lld %u %x %f %lf %s %c` 与格式串里的字面量/空白。 */
-int sscanf(const char *src, const char *fmt, ...) {
-  __builtin_va_list ap;
-  __builtin_va_start(ap, fmt);
+/* 解析那一趟的**真身**：`used` 回「吃掉了多少个字符」——`fscanf` 靠它把文件位置退回去
+ * （第一百四十片第十三格）。`sscanf` 与 `fscanf` 都只是它的一层皮。 */
+int __libc_vsscanf(const char *src, const char *fmt, __builtin_va_list ap, int *used) {
   const char *s = src;
   const char *f = fmt;
   int got = 0;
@@ -206,6 +206,14 @@ int sscanf(const char *src, const char *fmt, ...) {
       got++;
     } else break;
   }
+  if (used != (int *)0) *used = (int)(s - src);
+  return got;
+}
+
+int sscanf(const char *src, const char *fmt, ...) {
+  __builtin_va_list ap;
+  __builtin_va_start(ap, fmt);
+  int got = __libc_vsscanf(src, fmt, ap, (int *)0);
   __builtin_va_end(ap);
   return got;
 }

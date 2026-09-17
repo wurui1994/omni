@@ -15,9 +15,9 @@
  * 这个指针符号，Darwin 认 `__stdoutp`（SDK 的 `<stdio.h>` 里 `#define stdout __stdoutp`）。
  * 所以对象在这儿摆一份、导出出去，Darwin 那三个名字在 `arm64-osx/libc/io.c` 里
  * 指向同一份 —— 两条腿上都不会出现「两个 stdout 各攒一半」。 */
-FILE __libc_stdin_f  = { 0, 0, 0 };
-FILE __libc_stdout_f = { 1, 0, 0 };
-FILE __libc_stderr_f = { 2, 0, 0 };
+FILE __libc_stdin_f  = { 0, 0, 0, -1 };
+FILE __libc_stdout_f = { 1, 0, 0, -1 };
+FILE __libc_stderr_f = { 2, 0, 0, -1 };
 FILE *stdin  = &__libc_stdin_f;
 FILE *stdout = &__libc_stdout_f;
 FILE *stderr = &__libc_stderr_f;

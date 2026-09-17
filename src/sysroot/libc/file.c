@@ -26,7 +26,7 @@ FILE *fopen(const char *path, const char *mode) {
   if (fd < 0) return (FILE *)0;
   FILE *f = (FILE *)malloc(sizeof(FILE));
   if (f == (FILE *)0) { close(fd); return (FILE *)0; }
-  f->fd = fd; f->eof = 0; f->err = 0;
+  f->fd = fd; f->eof = 0; f->err = 0; f->back = -1;
   return f;
 }
 
@@ -34,7 +34,7 @@ FILE *fdopen(int fd, const char *mode) {
   (void)mode;
   FILE *f = (FILE *)malloc(sizeof(FILE));
   if (f == (FILE *)0) return (FILE *)0;
-  f->fd = fd; f->eof = 0; f->err = 0;
+  f->fd = fd; f->eof = 0; f->err = 0; f->back = -1;
   return f;
 }
 
@@ -52,6 +52,8 @@ unsigned long fread(void *buf, unsigned long size, unsigned long n, FILE *f) {
   if (total == 0) return 0;
   unsigned char *p = (unsigned char *)buf;
   unsigned long got = 0;
+  /* `ungetc` 退回来的那一个字节先给（不然 `ungetc` 之后走 fread 就丢了）。 */
+  if (f->back >= 0) { p[0] = (unsigned char)f->back; f->back = -1; got = 1; }
   while (got < total) {
     long r = read(f->fd, p + got, total - got);
     if (r < 0) { f->err = 1; break; }
@@ -77,12 +79,19 @@ unsigned long fwrite(const void *buf, unsigned long size, unsigned long n, FILE 
 int fseek(FILE *f, long off, int whence) {
   if (lseek(f->fd, off, whence) < 0) { f->err = 1; return -1; }
   f->eof = 0;
+  f->back = -1;                      /* 挪了位置，退回来的那一个字节作废 */
   return 0;
 }
-long ftell(FILE *f) { return lseek(f->fd, 0, 1 /* SEEK_CUR */); }
-void rewind(FILE *f) { lseek(f->fd, 0, 0); f->eof = 0; f->err = 0; }
+/* 有一个字节退回来没读时，位置要往前算一格（glibc 也是这么报的）。 */
+long ftell(FILE *f) {
+  long p = lseek(f->fd, 0, 1 /* SEEK_CUR */);
+  if (p >= 0 && f->back >= 0) p--;
+  return p;
+}
+void rewind(FILE *f) { lseek(f->fd, 0, 0); f->eof = 0; f->err = 0; f->back = -1; }
 
 int fgetc(FILE *f) {
+  if (f->back >= 0) { int c = f->back; f->back = -1; return c; }
   unsigned char c;
   long r = read(f->fd, &c, 1);
   if (r == 0) { f->eof = 1; return -1; }
@@ -90,6 +99,15 @@ int fgetc(FILE *f) {
   return (int)c;
 }
 int getc(FILE *f) { return fgetc(f); }
+
+/* `ungetc`：一格。C11 7.21.7.10 只保证一格，我们就给一格（多给的话
+ * `fseek` 之后那一串状态要另记，而没有第二个用户）。回的是那个字节自己。 */
+int ungetc(int c, FILE *f) {
+  if (c < 0 || f->back >= 0) return -1;
+  f->back = c & 0xff;
+  f->eof = 0;
+  return f->back;
+}
 
 char *fgets(char *buf, int n, FILE *f) {
   if (n <= 0) return (char *)0;
@@ -114,3 +132,27 @@ int setvbuf(FILE *f, char *buf, int mode, unsigned long size) {
   return 0;
 }
 void setbuf(FILE *f, char *buf) { (void)f; (void)buf; }
+
+/* `fscanf`（第一百四十片第十三格）：解析那一套在公用的 `pure.c` 里
+ * （`__libc_vsscanf`，它回「吃了多少个字符」），这儿只管**把文件位置退回去** ——
+ * 先读一块，解析完按吃掉的字符数重新定位。
+ *
+ * 明说这一份的限制：一次 `fscanf` 只看当前位置起的 512 字节（一条记录再长就得
+ * 另一套带缓冲的 FILE）。`fseek` 回不去的流（管道）上因此也不成立 —— 那两条路
+ * 现在都没有用户，有了再说。 */
+int __libc_vsscanf(const char *src, const char *fmt, __builtin_va_list ap, int *used);
+
+int fscanf(FILE *f, const char *fmt, ...) {
+  char buf[512];
+  long start = ftell(f);
+  unsigned long n = fread(buf, 1, sizeof(buf) - 1, f);
+  buf[n] = 0;
+  __builtin_va_list ap;
+  __builtin_va_start(ap, fmt);
+  int used = 0;
+  int got = __libc_vsscanf(buf, fmt, ap, &used);
+  __builtin_va_end(ap);
+  if (start >= 0) fseek(f, start + used, 0);
+  if (n == 0) f->eof = 1;
+  return n == 0 ? -1 : got;
+}

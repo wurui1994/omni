@@ -18,12 +18,14 @@
 
 #include "syscall.h"
 
-/* `FILE`：一个 fd 加「读到头了没有」「出过错没有」两位。**无缓冲** ——
- * 每次读写都是一条 syscall。慢，但少一整套刷新的账，而且 `fflush` 是空操作。 */
+/* `FILE`：一个 fd 加「读到头了没有」「出过错没有」两位，再加一格 `ungetc` 的退回位。
+ * **无缓冲** —— 每次读写都是一条 syscall。慢，但少一整套刷新的账，`fflush` 是空操作。
+ * `back` 是 -1 表示空（C11 只保证一格退回，我们就给一格）。 */
 struct __FILE {
   int fd;
   int eof;
   int err;
+  int back;
 };
 typedef struct __FILE FILE;
 
