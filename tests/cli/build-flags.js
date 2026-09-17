@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { statModel, statTable, statDot, statJson } from '../../src/core/cli/statgraph.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
@@ -104,6 +105,38 @@ rmSync(join(WORK, 'lin'), { force: true });
   const msg = `${r.stdout || ''}${r.stderr || ''}`;
   if (r.status !== 0 && msg.includes('--libc self 要配 --sysroot')) ok('c link 那一层不推 sysroot（还是要写明白）');
   else bad('c link 那一层不推 sysroot', `rc=${r.status} ${msg.slice(0, 200)}`);
+}
+
+/* 6. `--stat` / `--stat-out`（第一百四十七片第二格）：构建统计与依赖图。
+ *
+ * 两层各判一遍：纯计算那一层（喂一张合成的三模块图，判边数/最长链/dot 的形状），
+ * 与端到端那一层（`07_json.omni` **确定**是「2 个模块、1 条边、最长链 2 层」）。 */
+{
+  const modPath = new Map([[0, '/x/a.omni'], [1, '/x/b.omni'], [2, '/x/c.omni']]);
+  const imports = new Map([[0, new Set([1, 2])], [1, new Set([2])], [2, new Set()]]);
+  const model = statModel({ modPath, imports, funcs: [{ mod: 1 }, { mod: 1 }, { mod: 2 }] });
+  const table = statTable(model);
+  if (model.edges === 3 && model.longest.length === 3) ok('statModel：3 条边、最长链 3 层（a -> b -> c）');
+  else bad('statModel 的边与最长链', `edges=${model.edges} longest=${model.longest.length}`);
+  if (table.includes('2 次  c.omni') && table.includes('2 fn  b.omni')) {
+    ok('statTable：入度与函数数都在表上（c 被依赖 2 次、b 留下 2 个函数）');
+  } else bad('statTable 的内容', table);
+  const dot = statDot(model);
+  if (dot.includes('n0 -> n1;') && dot.includes('n1 -> n2;')) ok('statDot：边印成 graphviz');
+  else bad('statDot 的边', dot);
+  if (statJson(model) === statJson(model)) ok('statJson 两次出来一样（次序按 id）');
+  else bad('statJson 要确定', '两次不同');
+}
+{
+  const dot = join(WORK, 'deps.dot');
+  rmSync(dot, { force: true });
+  const r = omni(['build', join(ROOT, 'tests', 'cases', '07_json.omni'), '-o', join(WORK, 'j'),
+    '--cc', 'clang', '--stat', '--stat-out', dot]);
+  const s = r.stderr || '';
+  const dotOk = existsSync(dot) && readFileSync(dot, 'utf8').includes('->');
+  if (s.includes('模块 2 个、依赖边 1 条、最长链 2 层') && dotOk) {
+    ok('build --stat --stat-out x.dot：表对得上，dot 里有边');
+  } else bad('build --stat', `dot=${dotOk} ${s.split('\n').slice(-6).join('\n    ')}`);
 }
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);

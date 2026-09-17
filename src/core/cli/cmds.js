@@ -78,7 +78,23 @@ const F_PROFILE = {
 };
 const F_PROFILE_OUT = {
   name: '--profile-out', arity: 1, value: 'FILE',
-  brief: '折叠栈写到 FILE（火焰图 / gprof2dot 吃它）',
+  brief: '折叠栈写到 FILE（火焰图 / gprof2dot 吃它）；`.svg` 直接出火焰图',
+};
+/**
+ * 构建统计与依赖图（第一百四十七片第二格）。
+ *
+ * **与 `--stats` 是两格不同的东西**（名字只差一个 s，所以这儿说清楚）：
+ *   `--stats`  按**源文件**的产出分布（哪份源码发了多少字节的 C）
+ *   `--stat`   **模块依赖图** + 构建统计（谁 import 谁、最长链、被依赖最多、产出最大）
+ * 前者回答「谁大」，后者回答「谁把谁带进来的」——合在一起才看得见该动哪儿。
+ */
+const F_STAT = {
+  name: '--stat', arity: 0,
+  brief: '印构建统计与依赖图（--stats 是另一格：按源文件的产出分布）',
+};
+const F_STAT_OUT = {
+  name: '--stat-out', arity: 1, value: 'FILE',
+  brief: '依赖图写到 FILE —— `.dot`（graphviz）/ `.json` 按后缀定',
 };
 
 /* ---- C 前端那几格（`-I` 这种只在这儿出现，不在顶层）。 */
@@ -313,7 +329,7 @@ ${graphEngineHelp()}
   omni build ext/lua/examples/intmath.lua --engine graph -o intmath.wasm   （二进制，V8 直接吃）`,
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
         ...C_TARGET_FLAGS,
-        F_SYSROOT, F_LIBC, F_CC, F_PROFILE, F_PROFILE_OUT,
+        F_SYSROOT, F_LIBC, F_CC, F_PROFILE, F_PROFILE_OUT, F_STAT, F_STAT_OUT,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
         { name: '--lang', arity: 1, value: 'L',

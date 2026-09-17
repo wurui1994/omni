@@ -26,6 +26,7 @@ import { planForC } from './cli/plan-c.js';
 import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
 import { foldedToSvg } from './cli/flame.js';
+import { statModel, statTable, statDot, statJson } from './cli/statgraph.js';
 import { linkJs } from './frontend-js/link.js';
 import { lowerJs } from './frontend-js/lower.js';import { lowerWat } from './frontend-wat/lower.js';
 import { genArm64Module as genArm64 } from './arm64/from_mir.js';
@@ -556,8 +557,47 @@ function profSvgFinish() {
    `--fat` 是逃生门：把所有语言都编进核心（一份不用装插件的胖二进制）。 */
 let LANGS_FAT = false;
 let STATS = false;
+/**
+ * `--stat` / `--stat-out FILE`（第一百四十七片第二格）：构建统计与模块依赖图。
+ * **与 `--stats` 是两件事**（那一格是按源文件的产出分布）—— 理由写在 `cmds.js` 的 F_STAT 上。
+ * `null` = 不要。
+ */
+let STAT = null;
+/** cgen 回的那份「按源文件的产出分布」—— `--stat` 那张表要它（理由见 buildNative 里那一段）。 */
+let LAST_CGEN_STATS = null;
 let vMark = 0;
 let vRss = 0;
+
+/**
+ * `--stat` / `--stat-out` 的落地（第一百四十七片第二格）：模块依赖图 + 构建统计。
+ *
+ * 数据来自两处，**都是已经算出来的**，这一层只是把它们对在一起：
+ *   模块图   `compileProgram` 回的 `modPath`（id -> 路径）与 `ast.imports`（id -> 依赖 id）
+ *   产出分布 cgen 回的 `stats`（源文件 -> 字节 / 行 / 函数）
+ * 算与印分开：算在 `cli/statgraph.js`（纯计算、可判据），印在这儿。
+ *
+ * 拿不到模块图时**说清楚**（别的语言前端还没交出这一格），不假装印一张空表。
+ */
+function statReport(cr) {
+  if (STAT === null) return;
+  const modPath = cr === undefined || cr === null ? undefined : cr.modPath;
+  if (modPath === undefined || modPath === null || modPath.size === 0) {
+    stderr('omni: --stat：这门语言的前端还没交出模块图（只有核心方言 .omni 那条腿有）\n');
+    return;
+  }
+  const model = statModel({
+    modPath, imports: cr.ast.imports, stats: LAST_CGEN_STATS,
+    funcs: cr.mod === undefined ? undefined : cr.mod.funcs,
+  });
+  const out = STAT.out === undefined ? null : STAT.out;
+  if (out !== null && out !== undefined) {
+    const text = out.endsWith('.json') ? statJson(model) : statDot(model);
+    writeText(out, text);
+    stderr(`omni: 依赖图 -> ${out}（${out.endsWith('.json') ? 'json' : 'dot：dot -Tsvg 出图'}）\n`);
+  }
+  /* 落了盘也照样印那张表：一张图不看的时候，表就是答案。 */
+  stderr(statTable(model));
+}
 
 /** 字节数印成 1.5G / 12.8M / 900K —— 只给人看，所以一位小数就够。
     M 那一档带小数是要紧的：追膨胀时"12M -> 12M"什么都没说，而 12.8M -> 11.6M 说了。 */
@@ -1590,14 +1630,17 @@ function asyModsFast(path, dir) {
  */
 function compileProgram(path, text, mode) {
   const diags = new Diagnostics();
-  const { decls, imports, files } = loadProgram({ path, text, mode, diags });
+  const { decls, imports, files, modPath } = loadProgram({ path, text, mode, diags });
   diags.throwIfErrors();
   vStep(`front end  ${path}  mode ${mode}, ${files.length} files, ${decls.length} decls, ${imports.size} imports`);
   const program = { kind: 'Program', decls, imports };
   const mod = check(program, diags, mode);
   diags.throwIfErrors();
   vStep(`check -> OIR  ${mod.funcs.length} funcs, ${mod.structs.length} structs`);
-  return { ast: program, mod, diags };
+  /* `files` 带出去（第一百四十七片第二格）：`--stat` 要「模块 id -> 名字」才画得出依赖图。
+   * 摆在返回值上而不是塞进 `program`：`program` 是**语言那一层的形状**（检查器吃它），
+   * 而模块清单是构建那一层的账 —— 两件事，别混。 */
+  return { ast: program, mod, diags, files, modPath };
 }
 
 /** 生成的 C 交给谁：`--cc` 先说，没给才看 `OMNI_CC`（两处都没给 = `self`）。 */
@@ -2054,6 +2097,10 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
     profile: PROF !== null && PROF.mode === 'stub',
   });
   writeText(cPath, cText);
+  /* `--stat` 要「每个模块发了多少 C」，而那份分布只有这儿有（cgen 回的）。摆成一格状态
+   * 而不是改三处返回值：`buildNative` 有两条出口（self / 外部 cc），`buildSelf` 又是一条 ——
+   * 加一格状态改一处，改返回形状要改三处。 */
+  LAST_CGEN_STATS = stats;
   const tGen = nowMs() - tGen0;
   vStep(`backend c  ${cText.length} bytes -> ${cPath}`);
   vStats(cText, stats);
@@ -2823,6 +2870,13 @@ function main(argv) {
       if (mode === 'sample') setEnv('OMNI_PROF', hz > 0 ? `sample:${hz}` : 'sample');
       if (PROF.out !== null && PROF.out !== undefined) setEnv('OMNI_PROF_OUT', PROF.out);
     }
+    /* `--stat`（第一百四十七片第二格）：构建统计与模块依赖图。 */
+    STAT = rest.includes('--stat') ? { out: null } : null;
+    const si2 = rest.indexOf('--stat-out');
+    if (si2 >= 0) {
+      if (STAT === null) STAT = {};
+      STAT.out = rest[si2 + 1];
+    }
   }
   /* 发现插件摆在这儿而不是模块作用域：一来 `-v` 刚解析出来，装了哪几格才印得出来；
      二来插件装不上是**响错**，那句话得走 main 的错误出口（模块作用域抛出来的话，
@@ -3463,7 +3517,8 @@ function main(argv) {
     }
     case 'build': {
       const tFe0 = nowMs();
-      const { mod } = compile(path, rest);
+      const cr = compile(path, rest);
+      const { mod } = cr;
       FE_MS = nowMs() - tFe0;
       const oi = rest.indexOf('-o');
       const out = oi >= 0 ? rest[oi + 1] : basename(path).replace(/\.(omni|omnis|omnid|js)$/, '');
@@ -3494,6 +3549,7 @@ function main(argv) {
          一条进程做齐两件事不只是少打一行命令 —— 流水账要的是"核心 + 插件一共多少 C"，
          跨进程那个数只能拼，拼出来的数迟早对不上。 */
       if (rest.includes('--plugins')) buildPluginSet(out, join(dirname(out), 'plugins'), null, rest);
+      statReport(cr);
       vTally();
       return 0;
     }

@@ -158,6 +158,11 @@ export function loadProgram({ path, text, mode, diags, state }) {
   /** @type {{real: string, spec: string}[]} DFS 栈，用来报环 */
   const stack = [];
   const files = [];
+  /** @type {Map<number, string>} 模块 id -> realpath。
+   * 为什么不拿 `files` 顶这一格：`files` 是**后序**推进去的（被依赖的先落），而 id 是
+   * **前序**发的 —— 两个次序对不上，按下标取名字会张冠李戴。`--stat` 那张依赖图要的正是
+   * 「id -> 名字」，所以这儿单独记一格（第一百四十七片第二格）。 */
+  const modPath = new Map();
   const decls = [];
   let nextId = state === undefined ? 0 : state.nextId;
 
@@ -187,6 +192,7 @@ export function loadProgram({ path, text, mode, diags, state }) {
       mine = new Set();
       imports.set(id, mine);
     }
+    modPath.set(id, real);
     const dir = dirname(real);
 
     for (const d of ast.decls) {
@@ -225,7 +231,7 @@ export function loadProgram({ path, text, mode, diags, state }) {
   if (sessionRoot && nextId === 0) nextId = 1;
   visit(real, root, path, entryFile, mode ?? modeOfPath(path), sessionRoot ? 0 : undefined);
   if (state !== undefined) state.nextId = nextId;
-  return { decls, imports, files };
+  return { decls, imports, files, modPath };
 }
 
 /**
