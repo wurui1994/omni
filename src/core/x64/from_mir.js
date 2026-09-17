@@ -753,6 +753,13 @@ class x64FnGen {
       buf.emit(syscallInstr());
       return this.def(i, X64_RES);
     }
+    /* `FPGET`（第一百四十片第二格）：帧指针自己。x86_64 上序言一律是
+     * `push rbp; mov rbp, rsp`（见文件头「一、帧靠 rbp」），所以这一条就是一句
+     * `mov reg, rbp` —— tcc 那边是 `lea (%rbp), %rax`，同一个值，少一个字节。 */
+    if (op === OP.FPGET) {
+      buf.emit(movRR(8, X64_RES, BP));
+      return this.def(i, X64_RES);
+    }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 一样是一条 RIP 相对的 `lea`，
      * 只是符号在 `__TEXT` 里。 */
     if (op === OP.FADDR) {

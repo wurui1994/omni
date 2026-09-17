@@ -1,19 +1,17 @@
 /* crt1.c — 最小的 `_start`，替代 glibc 的 crt1.o。
  *
- * 内核把控制权交到 `_start` 时栈上的布局（x86_64 SysV ABI）：
- *   [rsp]   = argc
- *   [rsp+8] = argv[0]
- *   ...
+ * 内核把控制权交到 `_start` 时 argc/argv 躺在栈上（`[rsp]` 是 argc），**没有返回地址**
+ * —— 内核是跳过来的，不是 call 过来的。我们的序言一律 `push rbp; mov rbp, rsp`
+ * （见 `x64/from_mir.js` 文件头「一、帧靠 rbp」），推那一格之后 rbp 指着它，于是
+ * `[rbp+8]` 是 argc、`rbp+16` 是 argv 的第一格。
  *
- * 我们只要做一件事：调 `__libc_start_main(main, argc, argv, 0, 0, 0, 0)`
- * （后四个参数在 glibc 2.34+ 被忽略，但 ABI 上还得给）。
+ * `__builtin_frame_address(0)` 就是 rbp（tcc 那边也是：`tccgen.c:5867` 的
+ * `vset(&type, VT_LOCAL, 0)`），所以这一份**用纯 C 就把 argc/argv 找回来了**
+ * —— 不欠汇编器（第一百四十片第二格；在这之前它传的是 `0` / `NULL`）。
  *
- * 写成 C 而不是汇编：我们的 C 前端 + x86_64 代码生成能出这个 `.o`，
- * 于是交叉编译时完全不需要拷贝目标平台的二进制。
- *
- * `_start` 不能声明成普通函数（它没有返回地址）—— 但在**我们的代码生成**里
- * 这一格不要紧：入口符号由链接器的 `-e` 指，而 `__libc_start_main` 不会返回
- * （它在 `main` 返回之后自己调 `exit`）。 */
+ * 后四个实参 glibc 2.34+ 忽略，但 ABI 上还得给。写成 C 而不是汇编：我们的 C 前端
+ * 加 x86_64 代码生成能出这个 `.o`，于是交叉编译时不需要拷贝目标平台的二进制。
+ */
 extern int main(int argc, char **argv);
 extern int __libc_start_main(
   int (*main)(int, char **),
@@ -25,13 +23,8 @@ extern int __libc_start_main(
   void *stack_end);
 
 void _start(void) {
-  /* 这一段**取不到真的 argc/argv**：C 函数的 prologue 已经动了 rsp。
-   * 实际做法是用内联汇编或直接发机器码 —— 但我们的 C 前端不支持内联汇编。
-   *
-   * 所以这一份只是一个**占位**：编出来的 `.o` 提供 `_start` 这个符号，
-   * 里头调 `__libc_start_main`；但 argc/argv 的取法需要汇编。
-   *
-   * **真正的解决**是在链接器那一层自己发那几条指令（与 `__dso_handle` 同一个手法：
-   * 链接器合成的符号）。但这一步先让流程跑通。 */
-  __libc_start_main(main, 0, (char **)0, 0, 0, 0, 0);
+  char *fp = (char *)__builtin_frame_address(0);
+  int argc = *(int *)(fp + 8);
+  char **argv = (char **)(fp + 16);
+  __libc_start_main(main, argc, argv, 0, 0, 0, 0);
 }

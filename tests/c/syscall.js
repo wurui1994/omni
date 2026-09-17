@@ -74,6 +74,23 @@ eq('x86_64：一条 rcx 的 mov 都没有', X4.includes('48 c7 c1'), false);
 const A = textHex(WRITE, 'arm64');
 has('arm64：一条 svc #0（01 00 00 d4）', A, '01 00 00 d4');
 
+/* ---- `__builtin_frame_address(0)`（第二格）：x86_64 上就是 rbp 那一个字。
+ * crt 靠它把内核放在栈上的 argc/argv 找回来（`[rbp+8]` 是 argc）—— 所以这儿钉
+ * 「真的读了 rbp」而不是别的寄存器。 */
+const FA = textHex(`
+void *f(void) {
+  return __builtin_frame_address(0);
+}
+`, 'x86_64');
+has('x86_64：frame_address 就是一句 mov rax, rbp', FA, '48 89 e8');
+
+/* 层数 > 0 与非常量都明着报错（tcc 那边爬得上去，我们只有 crt 一个用户）。 */
+let lvErr = '';
+try {
+  textHex('void *f(void) { return __builtin_frame_address(1); }', 'x86_64');
+} catch (e) { lvErr = String(e.message ?? e); }
+has('层数不是 0 就报错', lvErr, '只认 0');
+
 /* ---- 目标是 macOS 时不给（那边 BSD 的约定是另一件事：号带类别位、出错看进位标志）。 */
 let osxErr = '';
 try {

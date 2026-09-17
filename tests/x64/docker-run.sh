@@ -94,10 +94,22 @@
 #         —— `DT_NEEDED` 一条都没有，glibc 一个字节都不沾。跑出来五格全对：
 #         `hello 42 world` / `malloc: AAAAAAAAAA` / `strlen: 6` / `strcmp: 0` /
 #         `memcpy: hello` / `all ok`，`rc=0`。
-#      **还欠的**（明说，别当已完成）：`_start` 取不到真的 argc/argv（那要动 rsp，
-#      得等自带汇编器、或者链接器自己合成那几条指令），所以现在是 `main(0, 0)`；
-#      `%f` 那一族、`atexit` 的回调、线程、`dlopen`、目录遍历都还没有 ——
-#      整份编译器自举到这份 libc 上还差这些。
+#      **还欠的**（明说，别当已完成）：`%f` 那一族、`atexit` 的回调、线程、`dlopen`、
+#      目录遍历都还没有 —— 整份编译器自举到这份 libc 上还差这些。
+#   9. **`_start` 拿到真的 argc/argv 了**（第一百四十片第二格）。从前两份 crt 都传
+#      `0` / `NULL`，理由是「argc 躺在进函数那一刻的栈上，而序言已经动过 rsp」。
+#      还法不是汇编，是一条 op：`__builtin_frame_address(0)`（tcc 的 `tccgen.c:5867`
+#      也是这么给的）-> `OP.FPGET` -> 一句 `mov rax, rbp`。序言一律
+#      `push rbp; mov rbp, rsp`，于是 `[rbp+8]` 是 argc、`rbp+16` 是 argv 的第一格。
+#      两条腿都量过（容器里）：
+#        --libc self ：`./argsbin one two three` -> argc=4、argv[0..3] 全对、rc=4
+#                      （29317 字节、16 节、8 段、入口 0x402230）
+#        --sysroot   ：`./argsglibc a bb ccc`    -> argc=4、argv[0..3] 全对、rc=4
+#                      （3884 字节、18 节、8 段，NEEDED 四条：libc/libm/libpthread/libdl）
+#      顺带回归：交叉编的 `bench/fib.omni`（1.6M、19 节、8 段、入口 0x478a2f）照旧
+#      `196418` / `999794999321`、rc=0。
+#      arm64 那条腿上 `FPGET` **明着报错** —— 那边帧基址按「这个函数动不动栈顶」在
+#      x28 与 sp 之间选，x86_64 的 rbp 那条死规矩不成立，猜一个的后果是读到垃圾 argv。
 set -euo pipefail
 
 IMAGE="${OMNI_X64_IMAGE:-arch_llvm:latest}"

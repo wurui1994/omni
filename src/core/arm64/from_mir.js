@@ -1089,6 +1089,14 @@ class FnGen {
       buf.emit(svcArm64(0));
       return this.def(i, 0);
     }
+    /* `FPGET`（第一百四十片第二格）：明着报错。这一条的用途是「把内核放在进函数那一刻
+     * 栈上的 argc/argv 找回来」，而它成立靠的是 x86_64 那条死规矩
+     * （`push rbp; mov rbp, rsp` 之后 `[rbp+8]` 就是第一格）。这条腿上帧基址按
+     * 「这个函数动不动栈顶」在 x28 与 sp 之间选（见 `FB` 那一段），没有同一句话
+     * 说得清的「帧指针」—— 猜一个的后果是 crt 读到垃圾 argv，所以宁可不给。 */
+    if (op === OP.FPGET) {
+      arm64Nyi('FPGET（这条腿上帧基址按函数选，x86_64 的 rbp 那条规矩不成立）');
+    }
     /* 一个函数的**地址**（第二十七片）：与 `GADDR` 同一对指令，只是符号在 `__TEXT` 里。 */
     if (op === OP.FADDR) {
       const d = this.dest(i);

@@ -288,6 +288,14 @@ function checkIndex(mod, f, i, op, v, bad, k) {
     if (n > 6) bad(i, `SYSCALL 有 ${n} 个实参，内核 ABI 只有六格`);
     return;
   }
+  /* 帧指针（第一百四十片第二格）：只有 native 有真的帧可谈，回的是一个地址。
+   * 「x86_64 才有」那一格由后端报（arm64 那边帧基址按函数在 x28 与 sp 之间选，
+   * 见那份后端的 `FB`）—— 这一层只管「这条 op 出现在对的腿上、类型对」。 */
+  if (op === OP.FPGET) {
+    if (!mod.native) { bad(i, 'FPGET：只有 native 这条腿上有真的帧指针'); return; }
+    if (f.t[i] !== T_I64) bad(i, `FPGET 的 t 是 ${typeText(f.t[i])}，地址只能是 i64`);
+    return;
+  }
   /* 函数的地址（第二十七片）：号要在表里、`t` 只能是 i64、而且只有 native 有真地址可谈   * （解释器那条腿上函数指针是「号 + 1」，不是地址）。 */
   if (op === OP.FADDR) {
     if (mod.funcs[v] === undefined) { bad(i, `函数号 ${v} 越界`); return; }

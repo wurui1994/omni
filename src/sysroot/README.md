@@ -102,13 +102,25 @@ stdout DATA 8              ; 数据符号：ELF 上要 copy 重定位，得知�
 结构体的字节数与字段偏移都是**量出来的**（`src/sysroot/offsets.c`，在目标机器上
 `gcc -o offsets offsets.c && ./offsets`），不是照文档抄。
 
-## 还欠的一格
+## `_start` 怎么拿到 argc/argv（第一百四十片第二格，已还）
 
-`lib/crt1.c` 里那个 `_start` **取不到真的 argc/argv**：内核把它们放在栈上
-（`[rsp]` 是 argc），而 C 函数的 prologue 已经动过 rsp，纯 C 读不回来。我们的 C 前端
-还不支持非空的 `__asm__` 模板（`tccgen.js`：「第八刀：非空的 __asm__ 模板还没到」），
-所以这一份先传 `0` / `NULL`。
+内核跳到 `_start` 时 argc/argv 躺在栈上（`[rsp]` 是 argc），**没有返回地址** ——
+内核是跳过来的，不是 call 过来的。序言一律 `push rbp; mov rbp, rsp`，推那一格之后
+rbp 指着它，于是 `[rbp+8]` 是 argc、`rbp+16` 是 argv 的第一格。
 
-后果：交叉编译出来的程序**读不到命令行参数**。不读 argv 的程序（`bench/fib.omni`
-这种）跑得对；要读的还欠着。真正的解法与 `__dso_handle` 同一个手法 ——
-让链接器自己发那几条指令，那要先有汇编器那一格。
+`__builtin_frame_address(0)` 就是 rbp（tcc 那边也是：`tccgen.c:5867` 的
+`vset(&type, VT_LOCAL, 0)`），我们把它降成一条 `OP.FPGET`。于是 `lib/crt1.c` 与
+`libc/start.c` 都用**纯 C** 写得出来 —— 不欠汇编器，也不欠链接器合成代码。
+
+量到的（容器里）：
+
+```
+./argsbin one two three   # --libc self
+argc=4 / argv[0]=./argsbin / argv[1]=one / argv[2]=two / argv[3]=three   rc=4
+./argsglibc a bb ccc      # --sysroot（glibc 那条）
+argc=4 / argv[0]=./argsglibc / argv[1]=a / argv[2]=bb / argv[3]=ccc      rc=4
+```
+
+这一格只有 x86_64：arm64 那边帧基址按「这个函数动不动栈顶」在 x28 与 sp 之间选，
+「帧指针」不是一句话说得清的东西，所以那条腿上 `FPGET` 明着报错（猜一个的后果是
+crt 读到垃圾 argv）。

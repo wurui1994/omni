@@ -3528,6 +3528,13 @@ export class CGen {  /**
       const hit = this.funcs.get(name);
       if (hit === undefined || !hit.defined) return this.syscallBuiltin();
     }
+    /* `__builtin_frame_address(0)`（第一百四十片第二格，`tccgen.c:5867`）。
+     * tcc 那边它是 `vset(&type, VT_LOCAL, 0)` —— 「本地帧，偏移 0」，x86_64 上就是
+     * `rbp`。我们降成一条 `OP.FPGET`。用途只有一个：crt 拿它把内核放在栈上的
+     * argc/argv 找回来（见 sysroot 里那份 `libc/start.c`）。 */
+    if (name === '__builtin_frame_address') {
+      return this.frameAddressBuiltin();
+    }
     const info = this.funcSym(name);
     info.used = true;
     const a = this.callArgs(`function '${name}'`, info.params, info.variadic, info.ret,
@@ -3615,6 +3622,29 @@ export class CGen {  /**
     }
     return this.postfix(sVal(TY_LLONG,
       this.f.emit(OP.SYSCALL, T_I64, no, this.f.pushArgs(refs), 0)));
+  }
+
+  /**
+   * `__builtin_frame_address(层数)` -> 一条 `OP.FPGET`（第一百四十片第二格）。
+   *
+   * 只认 `0`。tcc 的层数 > 0 是「顺着栈上存着的旧帧指针往上爬」（`indir()` 一次一层），
+   * 那要「旧 rbp 就躺在 [rbp] 上」这条额外的约定 —— 我们现在只有一个用户（crt 取
+   * argc/argv），给了也没人用，而给错的后果是读到垃圾地址。所以先只给这一格。
+   */
+  frameAddressBuiltin() {
+    if (!this.native) {
+      this.err('__builtin_frame_address 只有 native 那两条腿有（线性内存那边没有机器帧）');
+    }
+    this.skip(LPAR);
+    /* 层数是**常量表达式**（tcc 那边也是 `expr_const()`）—— 走那个只认常量的小求值器，
+     * 于是这一格一条指令都不发。 */
+    const lv = Number(this.constExpr());
+    this.skip(RPAR);
+    if (lv !== 0) {
+      this.err(`__builtin_frame_address 现在只认 0（给的是 ${lv}）`);
+    }
+    return this.postfix(sVal(mkPointer(TY_VOID), this.f.emit(OP.FPGET, T_I64, REF_NONE,
+      REF_NONE, 0)));
   }
 
   /**
