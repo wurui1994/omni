@@ -71,6 +71,17 @@ export const MUT = ['1', '3'];
  */
 export const VARDECL = ['15', '1', '3', '6', '5', '2'];
 /**
+ * match：**`match` 落一条 branch 链**（V 独一份）—— 与 go 的 switch 同一件事，多压一样：
+ * match **既是语句也是表达式**，两者在图上不同形（语句那一路主语落一格 bind、体是 region；
+ * 表达式那一路每支交出一个值、主语抄进每格比较、必须有 else）。
+ */
+export const MATCH = ['10', '20', '30', '200'];
+/**
+ * forin：**`for … in` 落一格计数循环**（V 独一份）—— **一个名字给的是元素**（与 go 正相反）、
+ * 两个名字才是"下标 + 元素"、`0..4` 是区间（上界不含、终点只算一次）、嵌一层换号。
+ */
+export const FORIN = ['60', '80', '6', '9'];
+/**
  * unary：**一元那三格**（lua 与 awk）—— `prim -`（一个实参就是取负）· `prim not` ·
  * `prim len`。这一族是 `tests/graph/deadcase.js` 找出来的：两份映射里那格 `case 'un'`
  * 是死代码（两门的语法给一元算子各自一条产生式），于是 `-x` / `not x` 一格都落不成图。
@@ -193,6 +204,11 @@ export const CASES = [
   // 它是**另一格判据**（`tests/graph/deadcase.js`）算出来的：那两门的 `case 'un'` 接的
   // 标签语法出不来，所以 `-x` / `not x` / `#s` 从来没落成过图。有了这一族才押得住。
   ...fam('unary', UNARY, ['lua', 'awk']),
+  // 第二十五、二十六个家族：**match** 与 **for … in**（V 独一份）。与 go 那两刀是同一个
+  // 形状（branch 链 / counted），差别正是"归语言的那几条"：match 还是**表达式**、
+  // `for x in xs` 里 x 是**元素**不是下标、`0..4` 是区间。
+  ...fam('match', MATCH, ['vlang']),
+  ...fam('forin', FORIN, ['vlang']),
 ];
 
 /**

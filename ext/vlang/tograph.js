@@ -13,7 +13,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   tag, kids, leaf, part, threePart, elseOf,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, counted, partKids,
   recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, destructure,
   mapNew, mapGet, mapSet, mapHas, mapNames, isList,
 } from '../../src/core/graph/fromtree.js';
@@ -103,6 +103,162 @@ function funcOf(x, name, self) {
   const blk = kids(x).find((y) => tag(y) === 'block');
   return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
     { params: self === undefined ? params : [self, ...params], name });
+}
+
+/**
+ * **`match` 落一条 branch 链**（与 go 的 `switch` 同一件事 —— V 也没有隐式贯穿）。
+ *
+ * V 的 match **既是语句也是表达式**，而这两件事在图上不同形，所以这一格收一个 `asStmt`：
+ *   * **语句位置**：主语落一格 `bind` 到 `__mtN`（只算一次），各支的体是一格 region；
+ *   * **表达式位置**：每一支要交出一个**值**，而 `bind` 摆不进表达式位置 ——
+ *     所以那一路**把主语原样抄进每一格比较**，并且只接主语是名字或常量的那种
+ *     （别的当场报："主语要算好几遍"）。每一支的体必须正好是一格表达式，
+ *     而且**必须有 `else`** —— 不然掉出去那一路没有值。
+ *
+ * 分支左边是**类型**的那一族（sum type 的 match：`[]int` / `map[string]int` / `&T`）
+ * 当场报：分开它们要的正是类型那一层。`.foo` 那种枚举短写法走 toNode 的兜底
+ * （枚举声明整格丢掉了，所以那个名字没有出处 —— 明说在文件末尾）。
+ */
+let MT_DEPTH = 0;
+
+function armConds(a, subjText) {
+  return partKids(a, 'items').map((it) => {
+    if (tag(it) === 'array' || tag(it) === 'map' || tag(it) === 'ref') {
+      throw new Error(`v->graph: match 的分支左边是类型（${tag(it)}）—— sum type 那一族`
+        + '要类型才分得开，这一批不猜');
+    }
+    return binOf('==', subjText(), toNode(it), OPS, { lang: 'v' });
+  });
+}
+
+function matchOf(x, asStmt) {
+  const all = kids(x);
+  let subj = all[0];
+  if (tag(subj) === 'mut') subj = kids(subj)[0];      // `match mut x` —— mut 只拆不检查
+  const holder = `__mt${MT_DEPTH}`;
+  const bindSubj = asStmt;
+  if (!asStmt && tag(subj) !== 'name' && tag(subj) !== 'num' && tag(subj) !== 'str') {
+    throw new Error('v->graph: 表达式位置上的 match 主语要算好几遍 —— 那儿摆不进一格临时量，'
+      + '这一批只接主语是名字或常量的');
+  }
+  const subjText = () => (bindSubj ? node('ref', {}, { name: holder }) : toNode(subj));
+  const arms = [];
+  let dflt;
+  MT_DEPTH += 1;
+  try {
+    for (const a of all.slice(1)) {
+      if (tag(a) === 'else') {
+        if (dflt !== undefined) throw new Error('v->graph: 一格 match 里两个 else');
+        dflt = armValue(a, asStmt);
+        continue;
+      }
+      if (tag(a) !== 'arm') throw new Error(`v->graph: match 里不该有 ${tag(a)}`);
+      const conds = armConds(a, subjText);
+      if (conds.length === 0) throw new Error('v->graph: match 的分支左边一个值都没有');
+      arms.push([conds.reduce((p, q) => lazyOr(p, q)), armValue(a, asStmt)]);
+    }
+  } finally {
+    MT_DEPTH -= 1;
+  }
+  if (!asStmt && dflt === undefined) {
+    throw new Error('v->graph: 表达式位置上的 match 没有 else —— 掉出去那一路没有值');
+  }
+  let chain = dflt;
+  for (let i = arms.length - 1; i >= 0; i -= 1) chain = branchOf(arms[i][0], arms[i][1], chain);
+  if (chain === undefined) return [];
+  if (!bindSubj) return chain;
+  return node('region', {
+    body: [node('bind', { init: toNode(subj) }, { name: holder }), chain],
+  });
+}
+
+/** 一支的体：语句位置上是一格 region；表达式位置上必须正好是一格表达式。 */
+function armValue(a, asStmt) {
+  const blk = kids(a).find((y) => tag(y) === 'block');
+  const stmts = blk === undefined ? [] : kids(blk);
+  if (asStmt) return node('region', { body: many(stmts) });
+  if (stmts.length !== 1 || tag(stmts[0]) !== 'expr') {
+    throw new Error('v->graph: 表达式位置上的 match，每一支的体要正好是一格表达式');
+  }
+  return toNode(stmts[0]);
+}
+
+/**
+ * **`for x in …` 落一格计数循环**（`counted` —— 与 go 的 `range` 同一格 loop）。
+ *
+ * 两条 V 自己的规矩：
+ *   * **一个名字给的是元素**（`for x in xs` 里 x 是元素），两个名字才是"下标 + 元素" ——
+ *     这一格与 go 正相反（go 的 `for i := range xs` 里 i 是**下标**）。写法归语言。
+ *   * `for i in 0..n` 是**区间**（`(range a b)`）：那一路没有序列，i 直接从 a 走到 b；
+ *     终点只算一次（落一格 bind），上界**不含**。
+ *
+ * `range` 一格 map 当场报（要按键遍历，图上没有那一格）。串与通道判不出来 ——
+ * 沿用 `MAPS` 那条既有约定（没登记成 map 的当序列），明说在文件末尾。
+ */
+let FI_DEPTH = 0;
+
+function forInOf(x) {
+  const nms = part(x, 'names');
+  const vals = part(x, 'values');
+  const blk = kids(x).find((y) => tag(y) === 'block');
+  if (nms === undefined || vals === undefined) {
+    throw new Error('v->graph: for-in 里没有 (names …) 或 (values …)');
+  }
+  const names = kids(nms).map(nameOf);
+  if (names.length > 2) throw new Error(`v->graph: for-in 左边最多两格，给了 ${names.length}`);
+  const subj = kids(vals)[0];
+  const at = (n) => node('ref', {}, { name: n });
+  const seq = `__in${FI_DEPTH}`;
+  const idx = `__ix${FI_DEPTH}`;
+  const cnt = `__nc${FI_DEPTH}`;
+  FI_DEPTH += 1;
+  let inner;
+  try {
+    inner = blk === undefined ? [] : many(kids(blk));
+  } finally {
+    FI_DEPTH -= 1;
+  }
+  // 区间：`for i in 0..n` —— 没有序列，那格名字就是计数量本身
+  if (tag(subj) === 'range') {
+    if (names.length !== 1) {
+      throw new Error('v->graph: 区间那一路只能有一格名字（`for i in a..b`）');
+    }
+    const [lo, hi] = kids(subj);
+    return node('region', {
+      body: [
+        node('bind', { init: toNode(hi) }, { name: cnt }),
+        counted({
+          name: names[0],
+          from: toNode(lo),
+          cond: bin('<', at(names[0]), at(cnt)),
+          body: [node('region', { body: inner })],
+        }),
+      ],
+    });
+  }
+  if (isMap(subj)) {
+    throw new Error('v->graph: `for … in` 一格 map 要按键遍历 —— 图上还没有那一格');
+  }
+  const head = [];
+  const elem = indexGet(at(seq), at(idx));
+  if (names.length === 1) {
+    if (names[0] !== '_') head.push(node('bind', { init: elem }, { name: names[0] }));
+  } else {
+    if (names[0] !== '_') head.push(node('bind', { init: at(idx) }, { name: names[0] }));
+    if (names[1] !== '_') head.push(node('bind', { init: elem }, { name: names[1] }));
+  }
+  return node('region', {
+    body: [
+      node('bind', { init: toNode(subj) }, { name: seq }),
+      node('bind', { init: node('prim', { args: [at(seq)] }, { name: 'len' }) }, { name: cnt }),
+      counted({
+        name: idx,
+        from: lit(0),
+        cond: bin('<', at(idx), at(cnt)),
+        body: [node('region', { body: [...head, ...inner] })],
+      }),
+    ],
+  });
 }
 
 function toNode(x) {
@@ -229,7 +385,15 @@ function toNode(x) {
     case 'return': return retOf(many(kids(x)));
     case 'break': return loopExit('break');
     case 'continue': return loopExit('continue');
-    case 'expr': return toNode(kids(x)[0]);
+    case 'expr': {
+      // `match` **既是语句也是表达式**，而两者在图上不同形（语句那一路的体是 region、
+      // 表达式那一路每支要交出一个值）。这儿是唯一知道"它在语句位置上"的地方。
+      const inner = kids(x)[0];
+      if (tag(inner) === 'match') return matchOf(inner, true);
+      return toNode(inner);
+    }
+    case 'match': return matchOf(x, false);
+    case 'for-in': return forInOf(x);
     // `defer { … }` / `defer: …` -> scope-exit（与 go 的 defer、CL 的 unwind-protect
     // **同一格节点**：逆序、早退也跑，八家共用那一格）
     case 'defer': return node('scope-exit', { action: many(kids(x)) });
@@ -312,6 +476,11 @@ export function vlangImports(tree) {
 //   1. option/result（`?T` / `!T` / `or {}` / `!` 传播）不在这一批 —— 它是
 //      **错误出端口 + 切段**，排在 `multi-value` 那一步（`ext/vlang/SPEC.md` §五第 1 项）。
 //   2. `mut` 只拆不检查（它是一格不产生代码的检查特性）。
+//   2b. `for … in` 那一格**判不出来的两种**沿用 `MAPS` 那条既有约定（没登记成 map 的当
+//      序列），所以串与通道会落成"按下标走"而不报。map 与区间判得出来：前者当场报、
+//      后者落 counted。
+//   2c. `match` 的分支左边是**类型**的那一族（sum type）当场报；`.foo` 那种枚举短写法
+//      走兜底（枚举声明整格丢掉了，那个名字没有出处 —— 见下面第 3 条）。
 //   3. struct / enum / interface / `type X = …` 的**声明**都丢掉（字段名从字面量那儿来
 //      —— record-new 不要求类型存在）；match / spawn / chan 都不在这一批。
 //      **enum 丢掉是有代价的**：`.red` / `Color.red` 那种引用还没有出处（这一格还在墙上）。
