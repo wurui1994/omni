@@ -395,5 +395,31 @@ const FIB_CALLS = '635621';
   } else bad('omni flame 要渲出 svg', `rc=${r.status} ${s.slice(0, 300)}`);
 }
 
+/* `omni flame` 的另外两种读法（第一百四十九片）：那五张表、以及**两份对照**。
+ * 对照那一格是优化循环里最有用的一张：绝对差答"省了多少"、占比差（百分点）答
+ * "这一刀有没有把它从热路径上挪走" —— 两趟总时间不同时只看一栏必得错结论。 */
+{
+  const f = join(WORK, 'views.folded2');
+  writeFileSync(f, 'main;hot 900\nmain;cold 100\n');
+  const r = omni(['flame', f, '--table']);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0 && s.includes('热路径') && s.includes('帧数') && s.includes('main > hot')) {
+    ok('flame --table：产物自己落的折叠栈也看得见热路径（按帧数）');
+  } else bad('flame --table 该印五张', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  const a = join(WORK, 'diff-a.folded');
+  const b = join(WORK, 'diff-b.folded');
+  writeFileSync(a, 'main;hot 900\nmain;cold 100\n');
+  writeFileSync(b, 'main;hot 300\nmain;cold 120\nmain;new 80\n');
+  const r = omni(['flame', b, '--diff', a]);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  /* hot：900 -> 300（-600，占比 90% -> 60% = -30pp）；new 是新出现的那格（0 -> 16%）。 */
+  if (r.status === 0 && s.includes('-600') && s.includes('-30.00pp')
+    && s.includes('+16.00pp') && s.includes('1000 -> 500')) {
+    ok('flame --diff：Δ自用 -600、Δ占比 -30pp、新出现的那格也在表里');
+  } else bad('flame --diff 该给出两栏差', `rc=${r.status} ${s.slice(0, 400)}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

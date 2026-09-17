@@ -27,6 +27,7 @@ import { planForOmni } from './cli/plan-omni.js';
 import { tccTranslate } from './cli/cmd-tcc.js';
 import {
   foldedToSvg, cpuProfileToFolded, foldedTable, foldedSummary, foldedPaths, foldedTree, foldedEdges,
+  foldedDiff,
 } from './cli/flame.js';
 import { statModel, statTable, statDot, statJson } from './cli/statgraph.js';
 import { layerModel, layerTable, countNodes, stepTable, kindStat, kindTable } from './cli/layers.js';
@@ -3761,18 +3762,42 @@ function main(argv) {
   if (cmd === 'flame') {
     if (path === undefined || path === null) throw new OmniError('flame 要一份折叠栈文件');
     if (!exists(path)) throw new OmniError(`flame: 找不到 ${path}`);
-    const oi = rest.indexOf('-o');
-    const out = oi >= 0 ? rest[oi + 1] : `${path.replace(/\.folded$/, '')}.svg`;
     const folded = readText(path);
     const lines = folded.split('\n').filter((l) => l.trim() !== '');
     if (lines.length === 0) throw new OmniError(`flame: ${path} 里一条栈都没有`);
+    /**
+     * **单位由用户说**（第一百四十九片）：折叠栈这个格式自己不声明单位 —— 我们运行时落的是
+     * 采样帧数，node 的 V8 采样器落的是微秒。默认按帧（`OMNI_PROF=sample` 那一路是
+     * 这个门最常见的来源），`--unit us` 换成微秒。猜单位比要一格开关糟：差三个数量级。
+     */
+    const ui = rest.indexOf('--unit');
+    const unit = ui >= 0 && rest[ui + 1] === 'us' ? 'us' : 'frames';
+    /* `--diff 基线.folded`：**两份对照**（优化循环里最有用的一张）—— 这一趟是"新"，
+     * 给的那份是"基线"。只印表，不出图：图是给一份看的，对照要的是数。 */
+    const di = rest.indexOf('--diff');
+    if (di >= 0) {
+      const base = rest[di + 1];
+      if (base === undefined) throw new OmniError('flame --diff 要一份基线折叠栈');
+      if (!exists(base)) throw new OmniError(`flame --diff: 找不到 ${base}`);
+      stderr(`\nomni prof 对照（基线 ${base} -> 新 ${path}）\n`);
+      stderr(foldedDiff(readText(base), folded, '', 20, unit));
+      return 0;
+    }
+    /* `--table`：把那五张读法印出来（产物自己写下来的折叠栈也该看得见热路径）。 */
+    if (rest.includes('--table')) {
+      profViews(folded, `omni prof（${path}）`, unit);
+      return 0;
+    }
+    const oi = rest.indexOf('-o');
+    const out = oi >= 0 ? rest[oi + 1] : `${path.replace(/\.folded$/, '')}.svg`;
     let total = 0;
     for (const l of lines) {
       const n = Number(l.slice(l.lastIndexOf(' ') + 1));
       if (Number.isFinite(n)) total = total + n;
     }
     writeText(out, foldedToSvg(folded, `omni profile —— ${total} 帧 / ${lines.length} 条栈`));
-    stderr(`omni: 火焰图 -> ${out}（${lines.length} 条栈、${total} 帧）\n`);
+    stderr(`omni: 火焰图 -> ${out}（${lines.length} 条栈、${total} 帧`
+      + '；要表就加 `--table`，要对照就 `--diff 基线.folded`）\n');
     return 0;
   }
   if (cmd === 'plugins') {

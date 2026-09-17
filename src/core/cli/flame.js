@@ -216,8 +216,8 @@ const cap = (title) => (title === undefined || title === '' ? '' : `${title} · 
  * 所以单位由**调用方**说，这一层只按它换算与起表头。百分比与单位无关，两种都一样。
  */
 const unitOf = (unit) => (unit === 'frames'
-  ? { w: 10, head: '        帧数', of: (v) => `${v}` }
-  : { w: 10, head: '       ms', of: ms });
+  ? { head: '      帧数', of: (v) => `${v}` }
+  : { head: '        ms', of: ms });
 
 /**
  * **一行摘要**：这一趟总共量到多少、栈有多深、有没有递归。
@@ -362,6 +362,52 @@ export function foldedTree(text, title, maxDepth = 8, minPct = 1.0, unit) {
     }
   };
   walk(root, 1, '');
+  return `${out.join('\n')}\n`;
+}
+
+/**
+ * **两份 profile 的对照**（优化循环里最有用的那一张）：`基线 -> 新` 每格函数的自用变化。
+ *
+ * 为什么绝对值与占比两栏都要：两趟的总时间一般不一样（机器忙、输入不同、这一刀就是要让
+ * 总时间变小），绝对差回答"省了多少"，占比差（**百分点**）回答"这一刀有没有把这格
+ * 从热路径上挪走"。只看一栏都会得出错的结论 —— 总时间掉一半时每格的绝对值都在降，
+ * 而占比会告诉你**谁**其实变得更热了。
+ *
+ * 排序按 |Δ占比| —— 那才是"形状变了没有"。新出现 / 消失的函数照样进表（基线或新那一栏是 0）。
+ */
+export function foldedDiff(aText, bText, title, top = 20, unit) {
+  const u = unitOf(unit);
+  const selfOf = (text) => {
+    const { rows, total } = foldedRows(text);
+    const self = new Map();
+    for (const { frames, w } of rows) {
+      const leaf = frames[frames.length - 1];
+      self.set(leaf, (self.get(leaf) ?? 0) + w);
+    }
+    return { self, total };
+  };
+  const A = selfOf(aText);
+  const B = selfOf(bText);
+  const names = [...new Set([...A.self.keys(), ...B.self.keys()])];
+  const row = (n) => {
+    const a = A.self.get(n) ?? 0;
+    const b = B.self.get(n) ?? 0;
+    const pa = A.total > 0 ? (a / A.total) * 100 : 0;
+    const pb = B.total > 0 ? (b / B.total) * 100 : 0;
+    return { n, a, b, d: b - a, dp: pb - pa, pa, pb };
+  };
+  const rows = names.map(row).sort((x, y) => Math.abs(y.dp) - Math.abs(x.dp)
+    || Math.abs(y.d) - Math.abs(x.d) || (x.n < y.n ? -1 : 1));
+  const sign = (v, f) => `${v > 0 ? '+' : ''}${f(v)}`;
+  const out = [`\n${cap(title)}对照（基线 -> 新，按 |Δ占比| 排前 ${top}）`];
+  out.push(`  合计 ${u.of(A.total)} -> ${u.of(B.total)}`
+    + `（${sign(B.total - A.total, u.of)}，${A.total > 0 ? sign(((B.total - A.total) / A.total) * 100, (v) => v.toFixed(1)) : '—'}%）`);
+  out.push('     Δ自用     Δ占比      基线%       新%  函数');
+  for (const r of rows.slice(0, top)) {
+    out.push(`  ${sign(r.d, u.of).padStart(9)}  ${`${sign(r.dp, (v) => v.toFixed(2))}pp`.padStart(9)}`
+      + `  ${`${r.pa.toFixed(2)}%`.padStart(8)}  ${`${r.pb.toFixed(2)}%`.padStart(8)}  ${r.n}`);
+  }
+  if (rows.length > top) out.push(`  …还有 ${rows.length - top} 格`);
   return `${out.join('\n')}\n`;
 }
 
