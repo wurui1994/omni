@@ -121,5 +121,25 @@ for (const [stem, src] of CASES) {
   } else bad('--no-trim 该是整份', `${fib.full.length} vs ${fib.trim.length}`);
 }
 
+/* ---- 五、**C 腿上的同一把刀**（第一百四十八片第四格）
+ *
+ * 按名字调 op 那格派发器（`omni_js_call_op`）在 C 腿上也是无条件发的，量出来
+ * 50697 字节 = 那份产物全部函数字节的 52%。判据两头都要压：
+ *   普通程序里它**不在**（一次都不会被调到），而
+ *   解释器/编译器自己那份里它**还在**（op 名字是运行期的值 —— 删了就断）。 */
+{
+  const c = omni(['emit', 'c', FIB]).stdout ?? '';
+  if (c.length > 0 && !c.includes('omni_js_call_op(')) {
+    ok(`fib.js 的 C：${c.length} 字节，按名字调 op 那格派发器不在（没人走那扇门）`);
+  } else bad('C 腿也该裁掉那格派发器', `${c.length} 字节，含派发器：${c.includes('omni_js_call_op(')}`);
+}
+{
+  /* 反面：编译器自己那份 C（解释器在里头）**必须**留着它。 */
+  const c = omni(['emit', 'c', join(ROOT, 'src', 'cli.js')]).stdout ?? '';
+  if (c.includes('static omni_dyn omni_js_call_op(')) {
+    ok('编译器自己那份 C 里派发器还在（解释器按名字调 op —— 删了就断）');
+  } else bad('该留的没留', `含派发器：${c.includes('omni_js_call_op(')}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

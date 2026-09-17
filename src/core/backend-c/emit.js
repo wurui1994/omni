@@ -594,8 +594,10 @@ class CEmitter {
       this.useFn(this.mod.entry);
       this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${strHookReg}${pmReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
     }
-    this.out[this.s16At] = this.s16PoolLines().join('\n');
-    this.out[this.protoAt] = this.protoLines().join('\n');
+    /* 那格按名字调 op 的派发器：**这份程序真用到才填**（见 `callOpAt` 头上那段账）。
+     * 要在 s16 池之前 —— 填它的时候可能还会往池里加字面量。 */
+    this.fillCallOp();
+    this.out[this.s16At] = this.s16PoolLines().join('\n');    this.out[this.protoAt] = this.protoLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
     this.out[this.vecAt] = this.vecLines().concat(this.bufLines()).concat(this.arrLines()).join('\n');
@@ -1010,8 +1012,33 @@ class CEmitter {
       // 成员派发器：调的全是上面这些宏摊出来的 static 函数，所以只能在这之后生成
       this.memberDispatch();
       this.protoMembers();
-      this.callOpDispatch();
+      /**
+       * **按名字调 op 那格派发器留一个坑，最后再填**（第一百四十八片第四格）。
+       *
+       * 量到的账（`bench/fib.js` 823 字节源码 -> 156424 字节 C，190x）：这一格自己
+       * **50697 字节 = 那份产物全部函数字节的 52%**，而它的用户只有一个 —— 解释器
+       * （op 名字是运行期的值）。一份普通程序里它一次都不会被调到。
+       *
+       * 为什么是"留坑"而不是"先判断"：判据是「这份程序里有没有 `omni_js_call_op(`」，
+       * 而那要等函数体全发完才知道。这棵树里已经有三处同样的手法（`s16At` / `protoAt` /
+       * `vecAt`）—— 同一个办法，不新造一种。js 腿那边是整份摇树（`trimJsRuntime`），
+       * 这一格是它在 C 腿上的对应刀（用户那句话：优化方法是统一的）。
+       */
+      this.callOpAt = this.out.length;
+      this.out.push('');
     }
+  }
+
+  /** 那个坑：这份程序真按名字调过 op 才把派发器填进去（见 `callOpAt` 那段账）。 */
+  fillCallOp() {
+    if (this.callOpAt === undefined || this.callOpAt === null) return;
+    if (!this.out.join('\n').includes('omni_js_call_op(')) return;
+    const outer = this.out;
+    this.out = [];
+    this.callOpDispatch();
+    const lines = this.out;
+    this.out = outer;
+    this.out[this.callOpAt] = lines.join('\n');
   }
 
   /**
