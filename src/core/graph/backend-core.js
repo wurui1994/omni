@@ -435,6 +435,14 @@ function argText(fname, i, a, env, ctx) {
   const t = typeOf(a, env, ctx);
   const key = `${fname}#${i}`;
   const had = ctx.args.get(key);
+  /* **收类型那两遍不算冲突**：那时被调者的形参还按 int（默认值），所以"一处 int、一处
+   * 记录"说明的是"这一格还没收全"，不是两处真的不一样 —— 取具体的那一个。真冲突留给
+   * 第三遍（出文本那一遍）报。 */
+  if (ctx.collect === true) {
+    if (had === undefined || (had === 'int' && t !== 'int')) ctx.args.set(key, t);
+    if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return `(var ${a.attrs.name})`;
+    return expr(a, env, ctx);
+  }
   if (had !== undefined && had !== t) {
     gap(`'${fname}' 第 ${i + 1} 格实参在两处的类型不一样（${had} 与 ${t}）—— 方言的形参是单态的`);
   }
@@ -867,7 +875,7 @@ export function emitCore(g) {
      `decls` 是要印在模块头上的那几句 `(struct …)`、`args` 是调用点记下的实参类型。 */
   const ctx = {
     byKey: new Map(), shapes: new Map(), decls: [], tmp: 0,
-    defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [],
+    defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [], collect: false,
   };
   /* 先把顶层函数的名字与返回类型都登记上 —— 互相递归（`fact` 调自己）要它。 */
   const fns = [];
@@ -915,13 +923,20 @@ export function emitCore(g) {
    * 已经从 `ctx.args` 上拿到了，可那格形状要等调用者落到才登记。回滚过一版，症状正是
    * "在一格说不清形状的东西上取字段"。代价是第一趟可能多登记一格用不上的 struct —— 
    * 那是一句声明，不影响答案。 */
-  for (const f of fns) {
-    try {
-      emitFn(f, fnEnv, env, ctx);
-    } catch (err) {
-      if (!(err instanceof Gap)) throw err;
+  ctx.collect = true;
+  /* 走两遍：第一遍里被调者的形参还按 int，于是**调用者自己的形参**也只能按 int 记；
+   * 第二遍那几格已经有具体类型了，往下传一层就对了（`go+method` 的 `scaled` -> `total`
+   * 正是这种两层）。两遍够不够：够不够都不出错 —— 记不上的那一格照旧按 int，然后报缺口。 */
+  for (let round = 0; round < 2; round++) {
+    for (const f of fns) {
+      try {
+        emitFn(f, fnEnv, env, ctx);
+      } catch (err) {
+        if (!(err instanceof Gap)) throw err;
+      }
     }
   }
+  ctx.collect = false;
   const body = fns.map((f) => emitFn(f, fnEnv, env, ctx));
   /* **落完再核一遍**：函数体里的调用点也会往 `ctx.args` 上记类型，而那时被调的那个函数
    * 可能已经落过了（形参按当时知道的类型发的）。对不上就报缺口 —— 交出去等着方言报
