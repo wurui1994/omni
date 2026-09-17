@@ -19,8 +19,9 @@
 //   多值    落成一格合成结构体 `(struct mN (v0 …) (v1 …))` —— 方言的函数只交一格回来，
 //           而结构体是值语义的，那正好就是 `return a, b` 的语义
 //   形参    从**调用点**收（图上没有类型）：函数体走两趟，第一趟只收实参类型，第二趟出文本
-//   隐式返回 体里一格 ret 都没有、末尾又是**一个值**（`isValueish`）时，改写成 `(ret …)`；
-//           分支把 ret 沉到两支里去。两支里躺的是语句（cpp 的析构器）就不算值 —— 那是 void
+//   隐式返回 末尾那一格是**一个值**（`isValueish`：region 往里问一层、两支躺着语句的
+//           branch 不算、print 不算）时，**在图上**把它换成一格 `ret`（`retWrap`）——
+//           换在图上而不是文本上，defer / 物化 / 块作用域那几趟才照常生效
 //   defer   方言里没有出口钩子，所以走一趟变换：注册处落动作、这一层末尾逆序放一份、
 //           每条 ret 前放**全部**层、`brk`/`cont` 前放**到那个循环为止**那几层
 //           （带值的 ret 先把值算进临时量 —— go 的次序）。一层套一层的 region 各管自己那层
@@ -327,7 +328,8 @@ function expr(x, env, ctx) {
       const t = typeOf(x.ins.then, env, ctx);
       const t2 = typeOf(els, env, ctx);
       if (t !== t2) gap(`表达式位置上的 branch 两支不同型（${t} 与 ${t2}）`);
-      if (!isScalar(t)) gap(`表达式位置上的 branch 交出来的不是标量（${t}）`);
+      /* 标量或**一格形状**（sbcl 的 `(if c (values …) (values …))` 就是后者）都接得住 */
+      if (!isScalar(t) && !ctx.shapes.has(t)) gap(`表达式位置上的 branch 交出来的不是标量（${t}）`);
       ctx.tmp = ctx.tmp + 1;
       const nm = `if_tmp${ctx.tmp}`;
       const arm = (e) => {
@@ -345,7 +347,7 @@ function expr(x, env, ctx) {
       const cond = condText(x.ins.cond, env, ctx);
       const a = arm(x.ins.then);
       const b = arm(els);
-      ctx.pre.push(`(let ${nm} ${t} ${zeroText(t)})`);
+      ctx.pre.push(`(let ${nm} ${t} ${ctx.shapes.has(t) ? `(new ${t})` : zeroText(t)})`);
       ctx.pre.push(`(if ${cond} ${a} ${b})`);
       return `(var ${nm})`;
     }
@@ -1046,9 +1048,12 @@ function emitFn(f, fnEnv, env, ctx) {
   /* 隐式返回那一档：末尾那个值改写成 `(ret …)`（分支就把 ret 沉到两支里去 ——
      方言的 `if` 是语句，这样就不必有块表达式）。 */
   const arr = Array.isArray(f.body) ? f.body : (f.body === undefined || f.body === null ? [] : [f.body]);
+  /* 隐式返回那一档：**在图上**把末尾那个值换成一格 `ret`，再照常落。
+   * 为什么不在文本上特判：换成图之后 defer、物化、`(do …)` 那几趟全都照常生效 ——
+   * 在文本上特判过一版（那时叫 `retify`）走不进 `stmtList`，region 里的出口动作就漏了。 */
   const fbody = f.impl === null || f.impl === undefined
     ? stmtList(f.body, fenv, ctx)
-    : [...stmtList(arr.slice(0, -1), fenv, ctx), ...tailRet(arr[arr.length - 1], fenv, ctx)];
+    : stmtList([...arr.slice(0, -1), retWrap(arr[arr.length - 1])], fenv, ctx);
   /* **掉到函数尾**这件事不许糊：方言要求非 void 的函数每条路都有 `ret`，而图上"体末尾那个
    * 值就是返回值"（chez / sbcl 那两门）是合法的。补一格 `(ret 0)` 交上去 = 悄悄给错答案
    * —— 矩阵上量到过两次（chez+intmath 印 0/0、sbcl+blockret 末行印 0）。
@@ -1081,6 +1086,12 @@ function implicitRet(body) {
  */
 function isValueish(x) {
   if (!isNode(x)) return false;
+  /* **一格 region 的值就是它末尾那一格的值**（sbcl 的 `(defun sumto (n) (let …) acc)`
+   * 落出来是 region -> region -> … -> `(ref acc)`）。所以往里问一层。 */
+  if (x.op === 'region') {
+    const arr = asArr(x.ins.body);
+    return arr.length > 0 && isValueish(arr[arr.length - 1]);
+  }
   if (declOf(x.op).sort !== 'expr') return false;
   if (x.op === 'prim' && x.attrs.name === 'print') return false;
   if (x.op === 'branch') {
@@ -1091,39 +1102,24 @@ function isValueish(x) {
 }
 
 /**
- * 末尾那一格的 `(ret …)`：**自带一只物化的筐**。`retify` 不是从 `stmt` 里叫起来的
- * （它是 `emitCore` 直接叫的），所以那时 `ctx.pre` 还是空的 —— 少了这一格，末尾是一格
- * 表达式位置的 branch 时就报"没地方摆物化的那两句"。
+ * 把"末尾那个值"改写成一格 `ret` 节点（**图上**的改写，不是文本上的）。
+ *
+ * 末尾是一格 `region` 时往里走一层：region 的值就是它末尾那一格的值，所以换的是**里面**
+ * 那一格 —— 这样 region 自己那层的出口动作、块作用域、物化都照常走 `stmtList` 那一趟。
  */
-function tailRet(x, env, ctx) {
-  const outer = ctx.pre;
-  const pre = [];
-  ctx.pre = pre;
-  let out;
-  try {
-    out = retify(x, env, ctx);
-  } finally {
-    ctx.pre = outer;
+function retWrap(x) {
+  if (isNode(x) && x.op === 'region') {
+    const arr = asArr(x.ins.body);
+    const body = [...arr.slice(0, -1), retWrap(arr[arr.length - 1])];
+    return { ...x, ins: { ...x.ins, body: body } };
   }
-  return [...pre, ...out];
+  return { op: 'ret', ins: { value: x }, attrs: {}, id: -1 };
 }
 
-/**
- * 把一格值改写成 `(ret …)`。**分支要把 ret 沉到两支里**（`(if c (do (ret a)) (do (ret b)))`）
- * —— 方言的 `if` 是语句，这么写就不必有块表达式，那正是 chez 的 `(if c a b)` 当函数体的形状。
- */
-function retify(x, env, ctx) {
-  /* 体末尾就是一格多值（chez 的 `(values 3 7)`）：先拼那格结构体，再交回去。 */
-  if (isNode(x) && x.op === 'values') {
-    const b = buildValues(x, env, ctx);
-    return [...b.out, `(ret (var ${b.name}))`];
-  }
-  if (isNode(x) && x.op === 'branch' && x.ins.else !== undefined && x.ins.else !== null) {
-    return [`(if ${condText(x.ins.cond, env, ctx)}`
-      + ` (do ${retify(x.ins.then, env, ctx).join(' ')})`
-      + ` (do ${retify(x.ins.else, env, ctx).join(' ')}))`];
-  }
-  return [`(ret ${expr(x, env, ctx)})`];
+/** 一格 `body` 端口收成数组（一格与一串两种写法都有）。 */
+function asArr(x) {
+  if (Array.isArray(x)) return x;
+  return x === undefined || x === null ? [] : [x];
 }
 
 /**
