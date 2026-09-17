@@ -3226,6 +3226,99 @@ function armRunTimeout(rest) {
 }
 
 /**
+ * **量自己**（第一百五十片）：`omni --profile sample glr …` —— 开关摆在**动词前面**
+ * 就是「量这一趟 omni 自己」，摆在动词后面还是「量被跑的那个程序」。
+ * 读法与 `node --cpu-prof script.js` 一致：谁在前面就量谁。
+ *
+ * 这一格回 `{ mode, hz, out, rest }`（`rest` 是剥掉前缀之后的真 argv），
+ * 没有前缀就回 `null` —— 那时一个字节都不改，老路照走。
+ *
+ * 只认三格：`--profile MODE`、`--profile-out FILE`、`--profile-with WHO`。
+ * 别的开关（`-v` 之类）**不剥** —— 它们是那个动词的话，不是这一格的。
+ */
+function selfProfPrefix(argv) {
+  let i = 0;
+  let mode = null;
+  let out = null;
+  let who = null;
+  while (i < argv.length) {
+    const a = argv[i];
+    if (a === '--profile') { mode = argv[i + 1] ?? 'sample'; i += 2; continue; }
+    if (a === '--profile-out') { out = argv[i + 1] ?? null; i += 2; continue; }
+    if (a === '--profile-with') { who = argv[i + 1] ?? null; i += 2; continue; }
+    break;
+  }
+  if (mode === null && out === null && who === null) return null;
+  const colon = mode === null ? -1 : mode.indexOf(':');
+  const hz = colon < 0 ? 0 : Number(mode.slice(colon + 1));
+  return {
+    mode: mode === null ? 'sample' : (colon < 0 ? mode : mode.slice(0, colon)),
+    hz: Number.isFinite(hz) ? hz : 0,
+    out,
+    who: who ?? 'builtin',
+    rest: argv.slice(i),
+  };
+}
+
+/**
+ * 量自己那一趟怎么落地 —— **两条腿两个答案，理由都在"采样器什么时候能开"上**：
+ *
+ *   node 腿   V8 的采样器**只能在进程启动时**开（`--cpu-prof`），所以把自己**重新 exec
+ *             一遍**：`node --cpu-prof … src/cli.js <原样 argv>`。一次都不用编。
+ *   native 腿 `dist/omni` 里**已经链着我们自己那台采样器**（量出来的：
+ *             `nm dist/omni | grep omni_prof` = 4 格），而它的定时器**任何时刻都能开** ——
+ *             所以那条腿的正解是「当场开」，连子进程都不必多开，更不必重编自己。
+ *             这一格现在还差一根线：`omni_prof_sample_start` 还没进 C ABI 表
+ *             （`hir/c_abi.js`）—— 那是任务 #46。在它接上之前，这儿明说那条**不用重编**
+ *             的等价写法：`OMNI_PROF=sample:hz ./dist/omni …`。
+ *
+ * 防递归：给孩子带一格 `OMNI_PROF_SELF=1`，孩子看见就不再 re-exec（照常干活）。
+ */
+function runSelfProfile(p) {
+  if (p.who !== 'builtin') {
+    throw new OmniError(`--profile-with ${p.who}：现在只有 builtin（我们自己那台）。`
+      + '系统那几台（macOS 的 /usr/bin/sample、Linux 的 perf、Instruments 的 xctrace）'
+      + '不用重编就能 attach，但要一格转换器把它们的输出摊成折叠栈 —— 记在任务 #47');
+  }
+  if (!hasJsEngine()) {
+    throw new OmniError('这一代（原生构建）量自己还差一根线：采样器**已经在这个二进制里**'
+      + '（不用重编），但把它当场打开那一格 op 还没进 C ABI（任务 #46）。'
+      + `现在用等价的写法，一次都不用编：OMNI_PROF=sample${p.hz > 0 ? `:${p.hz}` : ''}`
+      + ` OMNI_PROF_OUT=/tmp/omni.folded <这个二进制> ${p.rest.join(' ')}`
+      + '，回来 `omni flame /tmp/omni.folded --table`');
+  }
+  if (p.mode !== 'sample') {
+    throw new OmniError(`--profile ${p.mode}（量自己）：node 腿上只有 sample —— `
+      + 'cc 要外部 C 编译器插桩（那是量生成的 C 用的），stub 是我们发射期插的那一对'
+      + '（量被编译的程序用的）。量自己就 `--profile sample[:hz]`');
+  }
+  const dir = workDirFor('prof-self', hash16(p.rest.join(' ')));
+  mkdirAll(dir);
+  const file = join(dir, 'self.cpuprofile');
+  if (exists(file)) writeText(file, '');
+  const us = p.hz > 0 ? Math.max(1, Math.round(1000000 / p.hz)) : 0;
+  const pre = ['--cpu-prof', '--cpu-prof-dir', dir, '--cpu-prof-name', 'self.cpuprofile',
+    ...(us > 0 ? ['--cpu-prof-interval', `${us}`] : [])];
+  const script = join(installDir(), '..', 'cli.js');
+  setEnv('OMNI_PROF_SELF', '1');
+  const st = spawn('node', [...pre, script, ...p.rest], 'i')[0];
+  vStep(`node --cpu-prof ${script} ${p.rest.join(' ')}  exit=${st}（量自己那一趟）`);
+  const raw = exists(file) ? readText(file) : '';
+  if (raw === '') {
+    stderr('omni: 量自己：node 没落下 .cpuprofile —— 这个 node 版本没有 --cpu-prof？\n');
+    return st;
+  }
+  const folded = cpuProfileToFolded(raw);
+  if (p.out !== null) {
+    writeText(p.out, folded);
+    stderr(`omni: 折叠栈 -> ${p.out}（量自己 · node 腿 · V8 采样器）\n`);
+    return st;
+  }
+  profViews(folded, `omni prof（量自己：${p.rest.join(' ')}）`, 'us');
+  return st;
+}
+
+/**
  * 回到这一层了：到点了就是被时限打断的那一趟（子进程那一路）。印那句话、回 124。
  *
  * 本进程那一路走不到这儿 —— 看门狗那一枪之后没有"之后"，那句话由它自己印。
@@ -3252,6 +3345,19 @@ function subMain(argv) {
 }
 
 function main(argv) {
+  /**
+   * **量自己那一格摆在最前面**（第一百五十片）：`omni --profile sample glr …` ——
+   * 开关在动词**前面**就是「量这一趟 omni 自己」。要在 `findCmd` 之前剥掉它，
+   * 因为命令树是按「第一个词是不是动词」走的，前缀里那几格开关会把它拦在门口。
+   *
+   * 孩子那一趟（带着 `OMNI_PROF_SELF=1`）**只剥不量**：它就是被量的那个进程，
+   * 再量一次就是无限递归。
+   */
+  const selfP = selfProfPrefix(argv);
+  if (selfP !== null) {
+    if (env('OMNI_PROF_SELF') === '1') return main(selfP.rest);
+    return runSelfProfile(selfP);
+  }
   /* 分派走命令树（ADR-0018 决策四）：走到哪个节点、那个节点认识哪些带值开关，都由
    * `cli/cmds.js` 那份数据说 —— 顶层不再认识 `--image-base` / `-isystem` 这种语言与格式
    * 特有的东西。从前这儿有一坨 26 个 `||` 在列举全程序每一个带值开关，那就是耦合的

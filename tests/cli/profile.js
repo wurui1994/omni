@@ -533,5 +533,40 @@ const FIB_CALLS = '635621';
   } else bad('stub·c 该指路', `rc=${r.status} ${s.slice(-300)}`);
 }
 
+/* ---- 五、**量自己**（第一百五十片）：开关摆在动词前面就是量这一趟 omni 自己
+ *
+ * 读法与 `node --cpu-prof script.js` 一致：谁在前面就量谁。node 腿上办法是把自己
+ * 重新 exec 一遍（V8 采样器只能在启动时开），孩子带一格 `OMNI_PROF_SELF=1` 防递归。 */
+{
+  const r = omni(['--profile', 'sample', 'emit', 'c', join(ROOT, 'bench', 'fib.js')]);
+  const s = `${r.stderr || ''}`;
+  const out = `${r.stdout || ''}`;
+  /* 三件事一起判：量的是**自己**（表头那句）、五张表在、**孩子的产物没被吃掉**。 */
+  if (r.status === 0 && s.includes('量自己') && s.includes('函数表') && s.includes('热路径')
+    && out.includes('#include "omni.h"')) {
+    ok('omni --profile sample emit c …：量自己，五张表在，产物照旧从 stdout 出');
+  } else bad('量自己那一格', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+{
+  /* `--profile-out` 那一趟只落折叠栈（与量别人那一路同一条规矩）。 */
+  const out = join(WORK, 'self.folded');
+  rmSync(out, { force: true });
+  const r = omni(['--profile', 'sample', '--profile-out', out, 'emit', 'c',
+    join(ROOT, 'bench', 'fib.js')]);
+  const s = `${r.stderr || ''}`;
+  if (r.status === 0 && existsSync(out) && readFileSync(out, 'utf8').includes(';')
+    && !s.includes('热路径')) {
+    ok('量自己 + --profile-out：只落折叠栈（回头 `omni flame --table` 去看）');
+  } else bad('量自己的 --profile-out', `rc=${r.status} ${s.slice(0, 200)}`);
+}
+{
+  /* 量自己那一格 node 腿上只有 sample —— cc/stub 是量**被编译的程序**用的，明着说。 */
+  const r = omni(['--profile', 'cc', 'emit', 'c', join(ROOT, 'bench', 'fib.js')]);
+  const s = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status !== 0 && s.includes('量自己') && s.includes('sample')) {
+    ok('量自己 --profile cc：说清那一档是量被编译的程序用的');
+  } else bad('量自己该只认 sample', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);
