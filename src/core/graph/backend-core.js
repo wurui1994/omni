@@ -753,6 +753,10 @@ function stmtIn(x, env, ctx) {
     case 'ret': {
       const v = x.ins.value;
       const pend = pendingDefers(ctx);
+      /* **这个函数是 void**（返回值在整张图上一处都没当值用过 —— 见 `emitCore` 里
+         `valueCalled` 那一段）：早退那一格 `ret x` 落成光秃秃的 `(ret)`，值丢掉。
+         "值是纯的"那一条在 `emitCore` 里已经检过，这儿只管落。 */
+      if (ctx.voidFn === true) return [...pend, '(ret)'];
       /* 多值：先把那格合成结构体拼出来（零值 + 逐个 fldset），再交回去。 */
       if (isNode(v) && v.op === 'values') {
         const b = buildValues(v, env, ctx);
@@ -1200,6 +1204,47 @@ function isPure(x) {
 }
 
 /**
+ * 哪几个函数名**被当值用过**（有一处调用站在值的位置上）。
+ *
+ * 位置是**端口的求值语义**说的（`nodes.js` 的 `SEM`）：`body` 那几格里躺着语句，别的
+ * （`value` / `lazy`）里躺着值。所以 `(call main)` 摆在 region 的 body 里 = 语句位置，
+ * 而 `(print (call f))` 里那格 = 值位置。
+ */
+function valueCalled(root) {
+  const out = new Set();
+  const walk = (x, isValue) => {
+    if (Array.isArray(x)) { for (const y of x) walk(y, isValue); return; }
+    if (!isNode(x)) return;
+    if (isValue && x.op === 'call') {
+      const f = x.ins.fn;
+      if (isNode(f) && f.op === 'ref') out.add(f.attrs.name);
+    }
+    for (const p of declOf(x.op).ins ?? []) {
+      const kid = x.ins[p.name];
+      if (kid === undefined || kid === null) continue;
+      walk(kid, p.sem !== 'body');
+    }
+  };
+  walk(root, false);
+  return out;
+}
+
+/** 这格函数体里每一处 `ret` 交出去的值都是纯的吗（里层函数不算 —— 那是它自己的事）。 */
+function retsPure(body) {
+  const seek = (x) => {
+    if (Array.isArray(x)) return x.every(seek);
+    if (!isNode(x)) return true;
+    if (x.op === 'func') return true;
+    if (x.op === 'ret') {
+      const v = x.ins.value;
+      return v === undefined || v === null || isPure(v);
+    }
+    return Object.values(x.ins).every(seek);
+  };
+  return seek(body);
+}
+
+/**
  * 一格多值印成一句：`(tostr v0) + " " + (tostr v1) …`。
  *
  * 为什么敢拿 `tostr` 顶 `print`：这门方言里两处印的是同一份字符串（量过 int / real /
@@ -1279,6 +1324,9 @@ export function emitCore(g) {
   for (const g of topLift.lifted) fns.push(g);
   const rest = topLift.body;
   /* 二、每格函数的返回类型与隐式返回 —— 互相递归（`fact` 调自己）要先登记上。 */
+  /* 哪几个函数的返回值**被当值用过** —— 下面那格"没人要就是 void"要它（一次数清，
+     两拨都要看：函数体里的调用点与顶层那几句）。 */
+  const valueUsed = valueCalled([...fns.map((f) => f.body), rest]);
   for (const it of fns) {
     {
       const f = { ins: { body: it.body }, attrs: { params: it.params } };
@@ -1311,6 +1359,23 @@ export function emitCore(g) {
         }
       }
       it.impl = rt === null ? null : impl;
+      /* **掉到函数尾、而返回值一处都没当值用过 ⇒ 这个函数在方言里就是 void。**
+       *
+       * V 的 `fn main()` 里 `c := get(4)!` 落出来一格早退的 `ret c`，于是 `retTypeOf` 把
+       * main 说成返回 int —— 可 V 的 main 本来不返回东西（图上 `(call main)` 站在**语句**
+       * 位置）。那时 `emitFn` 会报"体末尾不是 ret"，因为方言要求非 void 的每条路都有 ret。
+       *
+       * 这一格是**读出来的**，不是猜：`valueCalled` 按端口的求值语义数"哪几个函数被当值
+       * 用过"（`nodes.js` 的 SEM），没人要那格值就丢得掉。三道闸门一个都不少：
+       *   * 只治**现在会报缺口的那一种**（末尾不是 ret、也不是隐式返回那一格值）——
+       *     别的照旧，产物一个字节不动；
+       *   * 返回值在整张图上一处都没当值用过；
+       *   * 每一处 `ret` 交出去的值都是**纯的**（有副作用就得算出来，那要另一刀）。 */
+      if (rt !== null && rt !== 'void' && impl === null
+        && !endsWithRet(it.body) && !valueUsed.has(it.name) && retsPure(it.body)) {
+        rt = 'void';
+        it.void = true;
+      }
       env.set(`fn:${it.name}`, rt ?? 'void');
     }
   }
@@ -1380,9 +1445,18 @@ function emitFn(f, fnEnv, env, ctx) {
   /* 隐式返回那一档：**在图上**把末尾那个值换成一格 `ret`，再照常落。
    * 为什么不在文本上特判：换成图之后 defer、物化、`(do …)` 那几趟全都照常生效 ——
    * 在文本上特判过一版（那时叫 `retify`）走不进 `stmtList`，region 里的出口动作就漏了。 */
-  const fbody = f.impl === null || f.impl === undefined
-    ? stmtList(f.body, fenv, ctx)
-    : stmtList([...arr.slice(0, -1), retWrap(arr[arr.length - 1])], fenv, ctx);
+  /* **返回值没人要的那个函数**（`f.void`，见 `emitCore` 里 `valueCalled` 那一段）：
+     体里那几格 `ret x` 落成光秃秃的 `(ret)`。这一格进体之前挂上、出来还原。 */
+  const outerVoid = ctx.voidFn;
+  ctx.voidFn = f.void === true;
+  let fbody;
+  try {
+    fbody = f.impl === null || f.impl === undefined
+      ? stmtList(f.body, fenv, ctx)
+      : stmtList([...arr.slice(0, -1), retWrap(arr[arr.length - 1])], fenv, ctx);
+  } finally {
+    ctx.voidFn = outerVoid;
+  }
   /* **掉到函数尾**这件事不许糊：方言要求非 void 的函数每条路都有 `ret`，而图上"体末尾那个
    * 值就是返回值"（chez / sbcl 那两门）是合法的。补一格 `(ret 0)` 交上去 = 悄悄给错答案
    * —— 矩阵上量到过两次（chez+intmath 印 0/0、sbcl+blockret 末行印 0）。
