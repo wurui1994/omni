@@ -1032,6 +1032,19 @@ class JsEmitter {
       // 这两个不是函数调用，单列；其余一律走 JS_ABI 表，加 op 不用改这里。
       case 'js_undef': return 'undefined';
       case 'js_ofFn': return a[0];
+      // ---- 算子特化（task #41 第一刀）：compile-time 常量 op 直接发对应的函数 --------
+      // $js_arith("-", a, b) -> $js_sub(a, b)；消灭运行期的 switch(op) 与 $js_prim/$js_tonum
+      // 那一圈类型检查（对数值类操作数那一圈检查在特化函数里仍旧有 —— 消灭的是 dispatch）。
+      case 'js_arith': {
+        const OP_FN = { '-': '$js_sub', '*': '$js_mul', '/': '$js_div', '%': '$js_mod', 'p': '$js_pow' };
+        const fn = OP_FN[e.op];
+        return fn !== undefined ? `${fn}(${a.join(', ')})` : `$js_arith(${JSON.stringify(e.op)}, ${a.join(', ')})`;
+      }
+      case 'js_cmp': {
+        const CMP_FN = { '<': '$js_lt', '>': '$js_gt', 'l': '$js_le', 'g': '$js_ge' };
+        const fn = CMP_FN[e.op];
+        return fn !== undefined ? `${fn}(${a.join(', ')})` : `$js_cmp(${JSON.stringify(e.op)}, ${a.join(', ')})`;
+      }
       default: {
         const abi = JS_ALL[e.name];
         if (!abi) throw new Error(`js.builtin: ${e.name}`);

@@ -1097,6 +1097,56 @@ function $js_arith(op, a, b) {
     default: $rt_error("unknown arithmetic op '" + op + "'");
   }
 }
+/* **算子特化那一族**（task #41 第一刀）。$js_arith("-", a, b) 里的 op 是**编译期常量**，
+   所以发射期就该选定那一格；留到运行期会在热路径上多一次 switch(op) 与四次小函数调用
+   （量过：$js_arith 2.85% + $js_num2 5.15% + $js_prim 4.23% + $js_tonum 2.58%）。
+
+   **两份语义不许漂**：这一族每一格都是"**快路 + 转手**"——只认"两个都是 number"那一种
+   （JS 里 typeof 检查是最便宜的一格），别的一律转给 $js_arith / $js_cmp 那**唯一**
+   一份实现。所以规范语义只写在一处，特化只是抄近道。
+
+   快路为什么与慢路等价（对两个 number）：$js_prim 对 number 是恒等、$js_tonum 也是、
+   $js_num2 两个 "real" 一定过、$dynTag(number) 是 "real" 所以走的是不回卷那一支。
+   % 那一格慢路是 $fmod(a, b)，而它的正文就是 a % b。
+   （这一段里不许出现反引号：整份 prelude 是一个 String.raw 模板。） */
+function $js_sub(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  return $js_arith("-", a, b);
+}
+function $js_mul(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a * b;
+  return $js_arith("*", a, b);
+}
+function $js_div(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a / b;
+  return $js_arith("/", a, b);
+}
+function $js_mod(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a % b;
+  return $js_arith("%", a, b);
+}
+function $js_pow(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a ** b;
+  return $js_arith("p", a, b);
+}
+/* 比较那四格：两个 number 时 NaN 上一切关系比较都 false，而 JS 的 < 本来就是这样 ——
+   所以快路直接用宿主的算子（慢路那一段 Number.isNaN(x) ? false 是同一件事）。 */
+function $js_lt(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a < b;
+  return $js_cmp("<", a, b);
+}
+function $js_gt(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a > b;
+  return $js_cmp(">", a, b);
+}
+function $js_le(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a <= b;
+  return $js_cmp("l", a, b);
+}
+function $js_ge(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a >= b;
+  return $js_cmp("g", a, b);
+}
 /* ++ / -- （规范 13.4.4.1 的 ApplyStringOrNumericBinaryOperator 之前那一步）：
    **先 ToNumeric，再按那个数值类型加/减 1** —— int（我们这儿的 bigint）走 int 的回卷加法，
    别的先 ToNumber 再 +/-1。所以 "5"++ 是 6（不是 "51"），而 bigint 上不会撞
