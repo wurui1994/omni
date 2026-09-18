@@ -267,9 +267,13 @@ export function spawnIn(cmd, argv, mode, input) {
  * 约定），本进程那一路只能 SIGKILL（137）—— 被杀的进程没有机会再设自己的退出码。
  *
  * worker 那把枪比时限晚 GRACE 毫秒：子进程那一路到点先返回，那段窗口留给上面那层
- * 印字与退出，不然两边会抢着说话。
+ * 印字与退出，不然两边会抢着说话。**这段窗口现在还多担一件事**（第一百五十五片）：
+ * 超时那一趟的 profile 也要印出来（`profFoldedFinish` 那五张表），所以从 500ms 抬到
+ * 1500ms —— 抬的理由写在这儿，不是随手调的数。
  */
-const TIMEOUT_GRACE_MS = 500;
+const TIMEOUT_GRACE_MS = 1500;
+/** TERM 与 KILL 之间的宽限：被杀的那一方拿这段时间把 profile 写完（见 runTimeout）。 */
+const TIMEOUT_KILL_GRACE_MS = 2000;
 let DEADLINE_MS = 0;
 
 export function runTimeout(ms, msg) {
@@ -281,14 +285,26 @@ export function runTimeout(ms, msg) {
   /* worker 的源码里不能用 `require`（父这边是 ESM，eval 出来的 worker 也是），
    * 所以两处都走 `process.getBuiltinModule` —— 与这个文件顶上的 `node()` 同一条路。
    * 直接 `writeSync(2, …)` 而不是 `console.error`：写的是真的那个 fd，不过 worker
-   * 自己那条转发到父进程的管子（枪响之后没人再去抽它）。 */
+   * 自己那条转发到父进程的管子（枪响之后没人再去抽它）。
+   *
+   * **先 TERM、后 KILL**（第一百五十五片）：SIGKILL 内核不给接，于是"超时那一趟"的
+   * profile 一个字节都落不下来 —— 而那正是最需要它的一趟（卡在哪儿只有它看得见）。
+   * SIGTERM 接得住：我们自己的运行时会把折叠栈写完再走（`omni_prof.c` 的 `pf_on_term`），
+   * node 这一侧在**事件循环转得动**的时候也能接。宽限到了还没死才补 KILL 那一枪 ——
+   * JS 死循环里处理函数进不来（单线程），所以那一枪必须留着。 */
   const src = "const d = process.getBuiltinModule('node:worker_threads').workerData;"
     + 'setTimeout(() => {'
     + "process.getBuiltinModule('node:fs').writeSync(2, d.msg);"
-    + "process.kill(process.pid, 'SIGKILL');"
+    + "try { process.kill(process.pid, 'SIGTERM'); } catch (e) { /* 已经走了 */ }"
+    + 'setTimeout(() => {'
+    + "try { process.kill(process.pid, 'SIGKILL'); } catch (e) { /* 已经走了 */ }"
+    + '}, d.grace);'
     + '}, d.ms);';
   const { Worker } = node('node:worker_threads');
-  const w = new Worker(src, { eval: true, workerData: { ms: ms + TIMEOUT_GRACE_MS, msg } });
+  const w = new Worker(src, {
+    eval: true,
+    workerData: { ms: ms + TIMEOUT_GRACE_MS, msg, grace: TIMEOUT_KILL_GRACE_MS },
+  });
   /* unref 只是"别拿它吊着父进程的事件循环"——线程照跑，定时器照响。 */
   w.unref();
   return undefined;
@@ -308,7 +324,10 @@ function spawnRun(cmd, argv, mode, feed) {
   if (DEADLINE_MS > 0) {
     const left = DEADLINE_MS - Date.now();
     opts.timeout = left > 0 ? left : 1;
-    opts.killSignal = 'SIGKILL';
+    /* **SIGTERM 而不是 SIGKILL**（第一百五十五片）：孩子若是我们自己的产物，它接得住这一枪
+     * 并且会把 profile 写完（`omni_prof.c` 的 `pf_on_term`）。不接的（外来的 cc、别人的
+     * 程序）由 worker 那把 KILL 兜底 —— 那一枪照旧在，只是晚了一格宽限。 */
+    opts.killSignal = 'SIGTERM';
   }
   const r = node('node:child_process').spawnSync(cmd, argv, opts);
   if (r.error !== undefined && r.error !== null) {

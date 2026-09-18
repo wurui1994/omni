@@ -198,6 +198,7 @@ static void pf_warm(void) {
 }
 
 void omni_prof_report(void);
+static void pf_trap_signals(void);
 
 /**
  * 开始采样。`hz` 是每秒几次（0 或负数按 200 算）。
@@ -231,6 +232,45 @@ void omni_prof_sample_start(int hz) {
     pf_sampling = 2;
   }
   if (pf_sampling && !pf_on) { pf_on = 1; atexit(omni_prof_report); }
+  pf_trap_signals();
+}
+
+/**
+ * **被强制结束也要把账交出来**（第一百五十五片）。
+ *
+ * 量到的原话（用户那一趟）：`OMNI_PROF=sample OMNI_PROF_OUT=/tmp/omni.folded dist/omni
+ * run … -v` 撞上时限，印的只有「超时 —— 已中止」，折叠栈那份文件**一个字节都没有** ——
+ * 而那一趟正是最需要它的一趟：卡在哪儿只有采样看得见。根因是两条：时限那一枪走的是
+ * `_exit(124)`（跳过 atexit），外面送来的 SIGTERM 又没人接（默认动作直接死）。
+ *
+ * 所以这儿把三样都接上：SIGTERM（别人杀）、SIGINT（Ctrl-C）、SIGQUIT。处理函数里只做
+ * 两件事：报告（`omni_prof_report` 自己保证只印一遍）、`_exit(128 + sig)`。
+ * **SIGKILL 接不了**（内核不给），所以我们自己那把枪改成先 SIGTERM（`omni_js_host.c`
+ * 的 `host_timeout_alarm`）—— 接得住的那一枪才有意义。
+ *
+ * 为什么敢在信号处理函数里 fopen/fprintf：这一趟是**要死的那一趟**，再没有别人会用那把
+ * FILE*；tcc 的 `-b` 与 gprof 的 `_mcleanup` 在同一个位置做同一件事。代价写在明处：
+ * 极小概率撞上正在 malloc 的那一刻（那时报告会挂住），换来的是「挂起的现场看得见」。
+ */
+static void pf_on_term(int sig) {
+  omni_prof_report();
+  /* `_Exit` 而不是 `_exit`：前者是 C99 的（stdlib.h，这份文件本来就 include 了），
+     后者要 POSIX 的 unistd.h —— 我们自己那台 C 前端按 `-std=c99` 编，少那一句就是
+     "隐式声明"（clang 从 C99 起当错误报）。两者做的是同一件事：不跑 atexit 直接走。 */
+  _Exit(128 + sig);
+}
+
+/** 把那三个"要死了"的信号接过来（装过就不再装）。采样与插桩两档都要。 */
+static void pf_trap_signals(void) {
+  static int done = 0;
+  if (done) return;
+  done = 1;
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = pf_on_term;
+  sigaction(SIGTERM, &sa, 0);
+  sigaction(SIGINT, &sa, 0);
+  sigaction(SIGQUIT, &sa, 0);
 }
 
 /* ---- `cc` 档：编译器插的那一对（`-finstrument-functions`）。
@@ -242,7 +282,7 @@ void __cyg_profile_func_exit(void *this_fn, void *call_site);
 
 void __cyg_profile_func_enter(void *this_fn, void *call_site) {
   (void)call_site;
-  if (!pf_on) { pf_on = 1; atexit(omni_prof_report); }
+  if (!pf_on) { pf_on = 1; atexit(omni_prof_report); pf_trap_signals(); }
   pf_fn *e = pf_fn_slot(this_fn);
   if (e) e->calls++;
   if (pf_sp < PF_STK) {
@@ -363,6 +403,13 @@ static void pf_write_folded(const char *path) {
 }
 
 void omni_prof_report(void) {
+  /* **只印一遍**（第一百五十五片）：现在有三个人会叫它 —— atexit、时限那一枪
+     （`omni_js_host.c` 的 `host_timeout_alarm`）、外面送来的 SIGTERM/SIGINT。
+     哪一条先到都算，后到的那几条直接回。挂起时的那一趟正是最要紧的那一趟：
+     死循环与超时的现场只有它看得见。 */
+  static volatile int pf_reported = 0;
+  if (pf_reported) return;
+  pf_reported = 1;
   if (pf_sampling) {
     struct itimerval off;
     memset(&off, 0, sizeof off);

@@ -2007,6 +2007,26 @@ class CEmitter {
       + `${a.items.length}, ${a.items.length} })`;
   }
 
+  /**
+   * 一格 `Box(ListLit)`（装成 dyn 的实参 list）落成**栈上**那一份。不是这个形状回 null。
+   *
+   * 与 `stackArgs` 同一条不变量（见那儿）：实参 list 不逃逸，所以 C99 的复合字面量够用 ——
+   * 它在**这个块**上有自动存储期，覆盖整个调用表达式。空 list 也走这一条：
+   * `_from(NULL, 0)` 会为"空"分配一个 struct，而空的那一格是最常见的一格（`this.next()`）。
+   * @returns {string | null}
+   */
+  stackArgList(arg) {
+    if (!arg || arg.kind !== 'Box') return null;
+    const a = arg.expr;
+    if (!a || a.kind !== 'ListLit') return null;
+    const n = cTypeName(a.type);
+    const dyn = `omni_dyn_of_ref((void *)&(struct ${n}_s)`;
+    if (a.items.length === 0) return `${dyn}{ NULL, 0, 0 }, OMNI_DYN_LIST)`;
+    const items = a.items.map((x) => this.expr(x)).join(', ');
+    return `${dyn}{ (${cTypeName(a.type.elem)}[]){${items}}, `
+      + `${a.items.length}, ${a.items.length} }, OMNI_DYN_LIST)`;
+  }
+
   /** 容器字面量用复合字面量传数组，避免为了构造值而引入语句表达式 */
   listLit(e) {    const n = cTypeName(e.type);
     if (!e.items.length) return `${n}_from(NULL, 0)`;
@@ -2087,6 +2107,28 @@ class CEmitter {
   }
 
   builtin(e) {
+    /* **调用点那条实参 list 上栈**（第一百五十五片；`stackArgs` 那一条的另一半）。
+     *
+     * 量出来的：`OMNI_PROF=sample dist/omni run tests/cases/01_basics.omni --timeout 10`
+     * 里 **55% 的帧落在 `omni_list_dynamic_from`**，栈是
+     * `… CGen_next > Cpp_next > Cpp_nextNomacro > Cpp_parseComment > Cpp_peekc >
+     * omni_list_dynamic_from` —— 预处理器每读一个字符都要为 `this.peekc()` 那一次调用
+     * 堆分配一条实参 list（空的那一条也要！`_from(NULL, 0)` 照样分配一个 struct）。
+     * 同一份活在 node 腿上 833ms，在自举出来的原生腿上 60s 都没跑完。
+     *
+     * `stackArgs` 早就为**直接调用**做了这件事（那儿写着"什么时候能上栈：**总是**"——
+     * 实参 list 不逃逸是处处成立的不变量：绑形参走只读的 `js_arr_get`、rest 走拷一份的
+     * `js_arr_slice`、`arguments` 自己拷）。可**间接调用**（`js_call` / `js_call_this`，
+     * 也就是所有方法调用）走的是通用 builtin 那条路，一直没沾上。不变量与被调者是谁无关，
+     * 所以这儿补齐：那一格实参从 `Box(ListLit)` 落成 C99 的复合字面量。 */
+    if (e.name === 'js_call' || e.name === 'js_call_this') {
+      const at = e.name === 'js_call' ? 1 : 2;
+      const st = this.stackArgList(e.args[at]);
+      if (st !== null) {
+        const a2 = e.args.map((x, i) => (i === at ? st : this.expr(x)));
+        return `${JS_ALL[e.name].c}(${a2.join(', ')})`;
+      }
+    }
     const a = e.args.map((x) => this.expr(x));
     const recv = e.recvType;
     // real 上的数学函数：`rmath_sqrt` -> `omni_r_sqrt`（runtime/omni_math.c 里转手 libm）。

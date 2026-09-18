@@ -514,22 +514,37 @@ omni_dyn omni_js_max_rss(void) {
 /* ---- 一趟"跑"的墙上时限（`omni run --timeout`，node 那侧是 host/native.js 的 runTimeout）
 
    这一侧只有一把闹钟，两种"跑"都靠它：
-     - 本进程那一路（解释器）：处理函数把那句话写进 fd 2，然后 _exit(124)。
-       不 fflush —— 信号处理函数里能用的只有异步信号安全的那几个（write 是，fflush 不是）。
-     - 子进程那一路：正在 wait 的孩子记在 host_timeout_child 里，处理函数把**它**杀掉就
-       回来 —— waitpid 会拿到 EINTR 之后重进，于是 omni_host_spawn 正常返回，那句话由
-       上面那层（cli.js 的 runTimedOut）去印。两边都印就说两遍了。
+     - 本进程那一路（解释器）：处理函数把那句话写进 fd 2，**先把 profile 的账交出来**，
+       然后 _exit(124)。不 fflush —— 信号处理函数里能用的只有异步信号安全的那几个
+       （write 是，fflush 不是）。
+     - 子进程那一路：正在 wait 的孩子记在 host_timeout_child 里，处理函数**先送 SIGTERM**
+       （孩子若是我们自己的产物，它接得住、会把 profile 写完）、再挂一格宽限；宽限到了还
+       没死才 SIGKILL。waitpid 会拿到 EINTR 之后重进，于是 omni_host_spawn 正常返回，
+       那句话由上面那层（cli.js 的 runTimedOut）去印。两边都印就说两遍了。
+
+   **为什么不直接 SIGKILL**（第一百五十五片）：SIGKILL 内核不给接，于是"超时那一趟"的
+   profile 一个字节都落不下来 —— 而那正是最需要它的一趟（卡在哪儿只有采样看得见）。
+   接得住的那一枪才有意义，所以先 TERM、后 KILL。
 
    闹钟的分辨率是秒，所以时限向上取整到秒；node 那侧是毫秒。差别写在明处，不假装一致。 */
 
 static volatile pid_t host_timeout_child = -1;
 static char host_timeout_msg[256];
 static size_t host_timeout_msg_len = 0;
+/** 宽限秒数：TERM 送出去之后等这么久还没死就 KILL。 */
+#define HOST_TIMEOUT_GRACE 2
 
 static void host_timeout_alarm(int sig) {
   (void)sig;
+  static volatile int termed = 0;
   pid_t kid = host_timeout_child;
   if (kid > 0) {
+    if (!termed) {
+      termed = 1;
+      kill(kid, SIGTERM);
+      alarm(HOST_TIMEOUT_GRACE);              /* 宽限：让它把 profile 写完 */
+      return;
+    }
     kill(kid, SIGKILL);
     return;
   }
@@ -537,6 +552,9 @@ static void host_timeout_alarm(int sig) {
     ssize_t ignored = write(2, host_timeout_msg, host_timeout_msg_len);
     (void)ignored;
   }
+  /* **超时也要把 profile 交出来**：`_exit` 跳过 atexit，所以这儿自己叫一声
+     （`omni_prof_report` 自己保证只印一遍）。没开 profile 时它是一次空转。 */
+  omni_prof_report();
   _exit(124);
 }
 
