@@ -173,9 +173,19 @@ function corpusOf(lang) {
   const sh = conf.selfhost;
   if (sh === undefined) return null;
   const tree = refDirIf(sh.tree, sh.env ?? null);
-  if (tree === null) return { root: null, files: [] };
+  if (tree === null) return { root: null, files: [], pkgFiles: null };
   const root = sh.sub === undefined ? tree : join(tree, sh.sub);
-  return { root: root, files: filesUnder(root, sh.ext, []) };
+  /* **跨包查找的范围可以比分母宽**（2026-09-19）。`pkgroot` 指向一棵更大的子树（如整棵
+   * `src/`），解析出来的树只喂给 `opts.pkgs`，不参与"多少份落成图"的分母计算。
+   * go 的编译器 import 了标准库（fmt / strings / bytes / …），声明全在 `cmd/compile` 之外
+   * —— 不把那些树放进 pkgs，"声明不在语料里"那堵墙（208 / 615 = 33.8%）就永远在。
+   * 分母不变、只是查得到更多声明，这一格不改尺子的口径。 */
+  let pkgFiles = null;
+  if (sh.pkgroot !== undefined) {
+    const pkgDir = join(tree, sh.pkgroot);
+    pkgFiles = filesUnder(pkgDir, sh.ext, []);
+  }
+  return { root: root, files: filesUnder(root, sh.ext, []), pkgFiles: pkgFiles };
 }
 
 /**
@@ -289,6 +299,26 @@ function measure(lang) {
     all.push(trees);
   }
   const pkgs = all.flatMap((ts) => ts.map((t) => t.tree));
+  /* **标准库那一批**（pkgroot 比 selfhost.sub 宽的那些文件）只进 pkgs，不进分母。
+   * 解析失败的静静跳过——那些是尺子管不到的文件（testdata、汇编、cgo、build tag 排除掉
+   * 的那几份）。这一趟的代价是时间（go 约 +90s）和内存（+几 GB），内存这台机器付得起、
+   * 时间每门语言只付一次。 */
+  if (got.pkgFiles !== null && got.pkgFiles !== undefined) {
+    const selfRoot = got.root;
+    for (const p of got.pkgFiles) {
+      if (p.startsWith(selfRoot)) continue;      // selfhost 里已经在了
+      let tree = null;
+      try {
+        const text = readFileSync(p, 'utf8');
+        const diags = new Diagnostics();
+        const toks = lexText(tb.grammar.lex, new SourceFile(p, text), diags);
+        if (toks !== null && !diags.hasErrors()) tree = glrParse(tb, toks, diags);
+      } catch {
+        // 静默：testdata / 汇编 / cgo 标签排除的那些
+      }
+      if (tree !== null) pkgs.push(tree);
+    }
+  }
   for (const trees of all) {
     const also = trees.map((t) => t.tree);
     for (const t of trees) {
