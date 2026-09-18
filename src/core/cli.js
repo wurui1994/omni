@@ -787,11 +787,60 @@ function profViews(folded, title, unit) {
  * 只在**没给 `--profile-out`** 时走（那时候 `tmpOut` 才有值）：给了的话那一趟的产出就是
  * 那份文件，表由 `omni flame` 或者下一趟不带 `--profile-out` 去看。
  */
+/**
+ * 折叠栈里的裸地址翻回名字。`PROF.map` 指着 `writeLinkMap` 落下的那份文件。
+ *
+ * 认两种形状：`[0x50cdec]`（glibc 的 `backtrace_symbols` 在没有符号时给的那一格，
+ * 被 `pf_name_of` 当成"名字"取走了）与 `0x50cdec`（`omni_prof.c` 自己的兜底）。
+ * 翻法是"落在哪一格之后"——按地址升序二分，取**最后一个不大于它**的符号。
+ * 翻不出来的原样留着（那说明那一帧在 libc 里，不是我们的代码）。
+ */
+function profMapResolve(folded) {
+  if (PROF === null || PROF.map === undefined || PROF.map === null) return folded;
+  if (!exists(PROF.map)) return folded;
+  const addrs = [];
+  const names = [];
+  for (const ln of readText(PROF.map).split('\n')) {
+    const sp = ln.indexOf(' ');
+    if (sp <= 0) continue;
+    const a = Number.parseInt(ln.slice(0, sp), 16);
+    if (!Number.isFinite(a)) continue;
+    addrs.push(a);
+    names.push(ln.slice(sp + 1));
+  }
+  if (addrs.length === 0) return folded;
+  const at = (a) => {
+    let lo = 0;
+    let hi = addrs.length - 1;
+    let best = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (addrs[mid] <= a) { best = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return best < 0 ? null : names[best];
+  };
+  const one = (frame) => {
+    const m = /^\[?0x([0-9a-fA-F]+)\]?$/.exec(frame);
+    if (m === null) return frame;
+    const nm = at(Number.parseInt(m[1], 16));
+    return nm === null ? frame : nm;
+  };
+  const out = [];
+  for (const ln of folded.split('\n')) {
+    if (ln === '') { out.push(ln); continue; }
+    const sp = ln.lastIndexOf(' ');
+    if (sp < 0) { out.push(ln); continue; }
+    const stack = ln.slice(0, sp).split(';').map(one).join(';');
+    out.push(`${stack}${ln.slice(sp)}`);
+  }
+  return out.join('\n');
+}
+
 function profFoldedFinish() {
   if (PROF === null || PROF.tmpOut === undefined || PROF.tmpOut === null) return;
   const f = PROF.tmpOut;
   PROF.tmpOut = null;
-  const folded = exists(f) ? readText(f) : '';
+  const folded = profMapResolve(exists(f) ? readText(f) : '');
   /* 单位跟着档走（与 `omni_prof.c` 的 `pf_write_folded` 是同一句话）：采样落的是帧数，
    * 插桩落的是**微秒**的自用时间。折叠栈这个格式自己不带单位，两边说的必须一致。 */
   const unit = PROF.mode === 'sample' ? 'frames' : 'us';
@@ -1465,6 +1514,23 @@ function srcStamp() {
  * 搬进仓库之后随机名就等于每跑一趟多一个目录。同一个 kind + key 的下一趟原地盖掉。
  * 代价写在明处：**并发跑同一个输入会撞**（同一份源码同时编两遍本来也会争缓存那一格）。
  */
+/**
+ * 链接图（`c link --map <文件>`）：一行一格 `0x<地址> 0x<长度> <名字>`，按地址升序。
+ *
+ * 为什么要它：ELF 可执行文件里我们**不写 `.symtab`**（见 elf_exe.js 那句注释），于是
+ * profile 那一侧没有任何地方能把地址翻成名字。地址 -> 名字这一步只有链接器答得出来。
+ *
+ * **长度那一格是必须的**（第一百六十五片量到的教训）：`omni_prof.c` 查表时要判
+ * 「这个地址真落在这个符号里头吗」。没有长度就只能拿"下一格的地址"当界，而表的最后
+ * 一格没有下一格 —— 那一格会把它后面所有 libc 的地址都吞掉（量到过：`atexit` /
+ * `_end` / `__TMC_END__` 这种假名字）。confidently wrong 比只印地址坏得多。
+ */
+function writeLinkMap(path, syms) {
+  if (path === undefined || path === null || path === '' || !Array.isArray(syms)) return;
+  const lines = syms.map((s) => `0x${s.addr.toString(16)} 0x${(s.size ?? 0).toString(16)} ${s.name}`);
+  writeText(path, `${lines.join('\n')}\n`);
+}
+
 function workDirFor(kind, key) {
   const dir = join(cacheRoot(), 'work', key === '' ? kind : `${kind}-${key}`);
   mkdirAll(dir);
@@ -2760,8 +2826,21 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   /* `--stdlib` 一个词把「默认 libc + crt + 入口 `_start`」都带上（见 `c-link` 那一段）；
    * 共享库那一路它自己夹掉 crt。 */
   const rc = subMain(['c', 'link', obj, ...rt, '-o', outPath,
-    '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...sysArgs, ...libs, '-q']);
+    '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...sysArgs, ...libs, '-q',
+    /* `--profile` 这一趟顺手落一份链接图：Linux 上 profile 的每一格否则只是裸地址
+       （见 writeLinkMap / profMapResolve）。不开 profile 时一个字节都不多写。 */
+    ...(PROF === null ? [] : ['--map', `${outPath}.map`])]);
   if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（C 留在 ${cPath}）`);
+  if (PROF !== null) {
+    PROF.map = `${outPath}.map`;
+    /* 告诉子进程：你那份二进制的地址 -> 名字在这。子进程（链好的可执行文件）在报告期
+       读这份图，用它翻 `backtrace` 拿到的裸地址。两侧都做翻名字的原因是：
+       - 子进程（`omni_prof.c`）自己翻：`cc` 那一档的**标准输出**（`按自用排前 20 行`）
+         就在子进程里印，那一段看不见 CLI 的事后翻。
+       - CLI 事后翻（`profMapResolve`）：折叠栈落到了文件里，CLI 读回来再过五张表，
+         那一段子进程已经退了。两遍翻是独立的：哪一遍先跑都行，都能改善结果。 */
+    setEnv('OMNI_PROF_MAP', PROF.map);
+  }
   /* 执行位（tcc 在 `tcc_output_file` 里 chmod 0777；我们自己写字节，所以自己补一句 ——
    * 少了它只能看着 `Permission denied`）。 */
   spawn('chmod', ['+x', outPath], 'c');
@@ -4955,6 +5034,7 @@ function main(argv) {
         archives,
       });
       writeBinary(out, r.bytes);
+      writeLinkMap(valOf('--map'), r.syms);
       stdout(`${out} (${r.bytes.length} 字节，${r.shnum} 节，${r.phnum} 段，`
         + `入口 0x${r.entry.toString(16)})\n`);
       return 0;

@@ -222,6 +222,9 @@ const LINK_PE_ONLY = [
   { name: '--stack', arity: 1, value: 'N', brief: '（-f pe）' },
   { name: '--section-align', arity: 1, value: 'HEX', brief: '（-f pe）' },
   { name: '--file-align', arity: 1, value: 'HEX', brief: '（-f pe）' },
+  /* 链接图：一行 `0x<地址> <名字>`。profile 的每一帧靠它从裸地址翻回名字 ——
+     ELF 可执行文件里我们不写 `.symtab`，glibc 的 backtrace 于是只给地址。 */
+  { name: '--map', arity: 1, value: 'FILE', brief: '落一份地址->名字的链接图' },
 ];
 
 /* ---- 「哪条腿」那两格。`--backend` 之外还留着的两个旧写法，实现里现在还在读它们

@@ -33,6 +33,13 @@
  * 名字为什么都带 `pf_` 前缀：生成的那份 C 里有一套 `omni_prof_*` 的 **static**
  * （`stub` 档），同名会撞成 `static declaration follows non-static declaration`。
  */
+/* `dladdr` / `Dl_info` 是 GNU 扩展（POSIX 里没有），glibc 要 `_GNU_SOURCE` 才露出来。
+   必须在**任何头文件之前**定义 —— 后置的话 features.h 已经把口子定死了。
+   Darwin 不需要（`dlfcn.h` 一律给），而那一侧我们也不走这条路。 */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include "omni.h"
 
 #include <stdio.h>
@@ -42,6 +49,13 @@
 #include <signal.h>
 #include <sys/time.h>
 #include <execinfo.h>
+#ifndef __APPLE__
+#include <dlfcn.h>    /* dladdr —— 翻外部模块（libc 之类）里的地址 */
+#endif
+#ifdef __linux__
+#include <link.h>     /* dl_iterate_phdr + ElfW —— 自己走每个模块的符号表 */
+#include <elf.h>
+#endif
 
 #define PF_SLOTS  8192          /* 表长（按 2 的幂，开放寻址） */
 #define PF_STK    65536         /* 影子栈：算自用时间要减掉子调用 */
@@ -181,12 +195,24 @@ static void pf_tick(int sig, void *info, void *uc) {
   (void)info;
   void *fr[PF_BT + 4];
   int got = backtrace(fr, PF_BT + 4);
-  /* 第 0 格是「处理函数要返回到哪儿」（内核那个跳板里），对谁都一样，跳掉。 */
-  int skip = got > 1 ? 1 : 0;
   void *st[PF_BT];
   int m = 0;
   void *pc = pf_pc_of(uc);
+  /* **跳掉信号那三格**（第一百六十一片，量出来的）。信号处理函数里 `backtrace()` 回来的
+   * 头几格是：
+   *   fr[0] 本函数（`pf_tick`）里的返回地址
+   *   fr[1] **内核跳板**（glibc 是 `__restore_rt`，Darwin 是 `_sigtramp`）
+   *   fr[2] 被打断的那个函数里的返回地址
+   * 而 `pf_pc_of(uc)` 给的就是被打断的那一格 PC —— 比 fr[2] 更准（叶子函数可能连帧都没建）。
+   * 从前只 `skip = 1`，于是每一条栈都长成 `被打断的 > 跳板 > 被打断的 > 调用者…`：
+   * 跳板混在中间，被打断的那一格还重复了一次。量到的原话（Linux 上 `--profile sample`）：
+   *   `u_sumTo > /usr/lib/libc.so.6 > u_sumTo`、`omni_mod > /usr/lib/libc.so.6 > omni_mod`
+   * —— 那格 libc 不是真的调用关系，是 `__restore_rt` 被 `backtrace_symbols` 报成了库名。
+   * macOS 上同一个形状叫 `_sigtramp`（折叠栈里一直看得见）。
+   * 拿得到 pc 就跳三格（跳板 + 那一格重复），拿不到就跳两格（只跳跳板）。 */
   if (pc) st[m++] = pc;
+  int skip = pc ? 3 : 2;
+  if (skip > got) skip = got > 1 ? 1 : got;
   for (int i = skip; i < got && m < PF_BT; i++) st[m++] = fr[i];
   pf_samples++;
   pf_stack_add(st, m, 1);
@@ -332,7 +358,333 @@ void __cyg_profile_func_exit(void *this_fn, void *call_site) {
  * （读自己的符号表是另一件事，见 sysroot 的 README）—— 那时就印地址，由 CLI 那一层
  * 拿着二进制的符号表翻。所以这一层的输出**一律带地址**：有名字时是「名字 0x地址」，
  * 没名字时只有地址。翻名字的人在外面，格式不因为在哪条腿上跑而变。 */
+/* ---- 链接图（`OMNI_PROF_MAP`）：一行 `0x<地址> <名字>`，按地址升序，由 `c link --map` 落下。
+ *
+ * 为什么必须有它：ELF 可执行文件里我们**不写 `.symtab`**，而 glibc 的 `backtrace_symbols`
+ * 走 `dladdr` 只看 `.dynsym` —— 于是 Linux 上这张表里每一格都是裸地址。地址 -> 名字这件事
+ * 只有链接器答得出来，所以由它落一份文件、这儿读回来。macOS 上 `create_symtab` 本来就写，
+ * `dladdr` 认得出来，可 `static` 函数照样进不去 —— 那一侧这份图同样有用。
+ * 只在**报告期**读（不在信号处理函数里），所以用 stdio 与 malloc 都是安全的。 */
+static struct pf_sym { size_t addr; size_t size; char *name; } *pf_map = 0;
+static int pf_map_n = 0;
+static int pf_map_cap = 0;
+static size_t pf_map_hi = 0;
+static size_t pf_map_base = 0;    /* PIE 修正：运行时地址 = 文件地址 + base */
+
+/* 往图里加一格（名字自己留一份）。表里存的**一律是运行时地址**，
+   谁往里加谁负责把模块的加载基址算进去 —— 这样查表只有一种口径，不必再猜。 */
+static void pf_map_add(size_t addr, size_t sz, const char *name, size_t nlen) {
+  if (addr == 0 || nlen == 0) return;
+  if (pf_map_n == pf_map_cap) {
+    int c2 = pf_map_cap == 0 ? 512 : pf_map_cap * 2;
+    void *q = realloc(pf_map, sizeof *pf_map * (size_t)c2);
+    if (q == 0) return;
+    pf_map = (struct pf_sym *)q;
+    pf_map_cap = c2;
+  }
+  char *copy = (char *)malloc(nlen + 1);
+  if (copy == 0) return;
+  memcpy(copy, name, nlen);
+  copy[nlen] = 0;
+  pf_map[pf_map_n].addr = addr;
+  pf_map[pf_map_n].size = sz;
+  pf_map[pf_map_n].name = copy;
+  pf_map_n++;
+}
+
+static int pf_sym_cmp(const void *a, const void *b) {
+  const struct pf_sym *x = (const struct pf_sym *)a;
+  const struct pf_sym *y = (const struct pf_sym *)b;
+  if (x->addr != y->addr) return x->addr < y->addr ? -1 : 1;
+  return 0;
+}
+
+#ifdef __linux__
+/* ---- 每个已加载模块的符号表，自己走一遍（第一百六十五片）。
+ *
+ * 为什么不能只靠 `dladdr`：它只看 `.dynsym`（**导出**的那些）。glibc 里
+ * `start_thread` / `__libc_start_call_main` 这类是**局部符号**，`.dynsym` 里没有，
+ * 于是那几帧只能印成 `libc.so.6+0x980a2`。而名字其实在两个地方可能有：
+ *   1. 模块自己的 `.symtab`（没被 strip 的话；clang/gcc 编出来的默认都有）
+ *   2. 被 strip 掉时，分离的 debug 文件里 —— 按 `.gnu_debuglink` 与 build-id 两条老规矩找：
+ *        /usr/lib/debug/<模块所在目录>/<debuglink 名>
+ *        /usr/lib/debug/.build-id/<前2位>/<其余>.debug
+ *      （这两条路径就是 gdb / perf 找 debuginfo 的地方）
+ * 所以这一段把每个模块的表都读进来，**连局部符号一起**，一次性建成一张按运行时地址
+ * 排序的大表。读文件、malloc 都在报告期，信号安全不是问题。
+ *
+ * 量到的边界（这台 docker 镜像）：Arch 的 libc 被 strip 了（`nm` 回 "no symbols"），
+ * 而 `glibc-debug` 没装、也没有 debuginfod —— 那 `start_thread` 的名字在这台机器上
+ * **确实不存在**，退回 `libc.so.6+偏移`（perf/gdb 同样条件下印的也是这个）。
+ * 装上 debug 包之后这一段会自动把它认出来，不用改代码。 */
+
+/* 一个 ELF 文件里的 `.symtab`（没有就 `.dynsym`）搬进图里。`base` 是模块的加载基址。 */
+static int pf_scan_elf(const char *path, size_t base, int want_debuglink);
+
+/* `.gnu_debuglink` / build-id 指到的那份 debug 文件，按 gdb 的老规矩找。 */
+static void pf_scan_debug_of(const char *path, size_t base,
+                             const char *link, const unsigned char *bid, size_t bidn) {
+  char buf[1024];
+  if (bid != 0 && bidn >= 2) {
+    /* /usr/lib/debug/.build-id/ab/cdef….debug */
+    size_t k = 0;
+    static const char hx[] = "0123456789abcdef";
+    const char *pre = "/usr/lib/debug/.build-id/";
+    size_t pn = strlen(pre);
+    if (pn + bidn * 2 + 8 < sizeof buf) {
+      memcpy(buf, pre, pn);
+      k = pn;
+      buf[k++] = hx[bid[0] >> 4];
+      buf[k++] = hx[bid[0] & 15];
+      buf[k++] = '/';
+      for (size_t i = 1; i < bidn; i++) {
+        buf[k++] = hx[bid[i] >> 4];
+        buf[k++] = hx[bid[i] & 15];
+      }
+      memcpy(buf + k, ".debug", 7);
+      if (pf_scan_elf(buf, base, 0)) return;
+    }
+  }
+  if (link != 0 && link[0] != 0) {
+    /* /usr/lib/debug/<模块目录>/<link> 与 <模块目录>/.debug/<link> */
+    const char *slash = strrchr(path, '/');
+    size_t dn = slash == 0 ? 0 : (size_t)(slash - path);
+    if (dn + strlen(link) + 24 < sizeof buf) {
+      snprintf(buf, sizeof buf, "/usr/lib/debug%.*s/%s", (int)dn, path, link);
+      if (pf_scan_elf(buf, base, 0)) return;
+      snprintf(buf, sizeof buf, "%.*s/.debug/%s", (int)dn, path, link);
+      if (pf_scan_elf(buf, base, 0)) return;
+    }
+  }
+}
+
+static int pf_scan_elf(const char *path, size_t base, int want_debuglink) {
+  if (path == 0 || path[0] != '/') return 0;
+  FILE *f = fopen(path, "rb");
+  if (f == 0) return 0;
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+  long sz = ftell(f);
+  if (sz <= (long)sizeof(ElfW(Ehdr)) || sz > (long)(256 << 20)) { fclose(f); return 0; }
+  rewind(f);
+  unsigned char *m = (unsigned char *)malloc((size_t)sz);
+  if (m == 0) { fclose(f); return 0; }
+  size_t got = fread(m, 1, (size_t)sz, f);
+  fclose(f);
+  if (got != (size_t)sz || m[0] != 0x7f || m[1] != 'E' || m[2] != 'L' || m[3] != 'F') {
+    free(m);
+    return 0;
+  }
+  ElfW(Ehdr) *eh = (ElfW(Ehdr) *)m;
+  if (eh->e_shoff == 0 || eh->e_shnum == 0
+    || eh->e_shoff + (size_t)eh->e_shnum * eh->e_shentsize > (size_t)sz) {
+    free(m);
+    return 0;
+  }
+  ElfW(Shdr) *sh = (ElfW(Shdr) *)(m + eh->e_shoff);
+  const char *shstr = eh->e_shstrndx < eh->e_shnum
+    ? (const char *)(m + sh[eh->e_shstrndx].sh_offset) : 0;
+  int symi = -1;
+  int dyni = -1;
+  const char *dlink = 0;
+  const unsigned char *bid = 0;
+  size_t bidn = 0;
+  for (int i = 0; i < eh->e_shnum; i++) {
+    if (sh[i].sh_type == SHT_SYMTAB) symi = i;
+    else if (sh[i].sh_type == SHT_DYNSYM && dyni < 0) dyni = i;
+    else if (shstr != 0 && sh[i].sh_type == SHT_PROGBITS
+      && strcmp(shstr + sh[i].sh_name, ".gnu_debuglink") == 0) {
+      dlink = (const char *)(m + sh[i].sh_offset);
+    } else if (sh[i].sh_type == SHT_NOTE && shstr != 0
+      && strcmp(shstr + sh[i].sh_name, ".note.gnu.build-id") == 0) {
+      /* Nhdr: namesz, descsz, type; 名字 "GNU\0" 之后就是 20 字节的 id */
+      ElfW(Nhdr) *nh = (ElfW(Nhdr) *)(m + sh[i].sh_offset);
+      size_t na = (nh->n_namesz + 3) & ~(size_t)3;
+      bid = (const unsigned char *)(nh + 1) + na;
+      bidn = nh->n_descsz;
+      if (bidn > 64) { bid = 0; bidn = 0; }
+    }
+  }
+  int use = symi >= 0 ? symi : dyni;
+  int added = 0;
+  if (use >= 0 && sh[use].sh_link < eh->e_shnum && sh[use].sh_entsize != 0) {
+    const char *str = (const char *)(m + sh[sh[use].sh_link].sh_offset);
+    size_t nsym = sh[use].sh_size / sh[use].sh_entsize;
+    ElfW(Sym) *sy = (ElfW(Sym) *)(m + sh[use].sh_offset);
+    for (size_t i = 0; i < nsym; i++) {
+      if (ELF32_ST_TYPE(sy[i].st_info) != STT_FUNC) continue;
+      if (sy[i].st_value == 0 || sy[i].st_shndx == SHN_UNDEF) continue;
+      const char *nm = str + sy[i].st_name;
+      size_t nl = strlen(nm);
+      if (nl == 0) continue;
+      pf_map_add(base + (size_t)sy[i].st_value, (size_t)sy[i].st_size, nm, nl);
+      added++;
+    }
+  }
+  /* `.symtab` 不在（被 strip 了）就去找分离的 debug 文件 —— 那才是局部符号的家。 */
+  if (want_debuglink && symi < 0) pf_scan_debug_of(path, base, dlink, bid, bidn);
+  free(m);
+  return added > 0;
+}
+
+static int pf_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
+  (void)size;
+  (void)data;
+  const char *p = info->dlpi_name;
+  /* 主程序那一格 `dlpi_name` 是空串 —— 用 /proc/self/exe 去读它自己。 */
+  if (p == 0 || p[0] == 0) pf_scan_elf("/proc/self/exe", (size_t)info->dlpi_addr, 1);
+  else pf_scan_elf(p, (size_t)info->dlpi_addr, 1);
+  return 0;
+}
+#endif
+
+/* 拿到自己这份可执行文件的加载基地址（Linux 上是 `/proc/self/maps` 的第一行，
+   macOS 上 `_dyld_get_image_vmaddr_slide(0)` 但这条路上用不到它——Darwin 的 symtab
+   天然带虚拟地址）。只在报告期调一次；信号安全不是问题。 */
+static size_t pf_load_base(void) {
+#ifdef __linux__
+  FILE *f = fopen("/proc/self/maps", "r");
+  if (f == 0) return 0;
+  char line[512];
+  if (fgets(line, (int)sizeof line, f) != 0) {
+    /* 第一行形如 "55a3c8e00000-55a3c9200000 r--p 00000000 …"
+       取第一段的低地址就是 load base。 */
+    size_t a = (size_t)strtoull(line, 0, 16);
+    fclose(f);
+    return a;
+  }
+  fclose(f);
+#endif
+  return 0;
+}
+
+static void pf_map_load(void) {
+  static int done = 0;
+  if (done) return;
+  done = 1;
+  pf_map_base = pf_load_base();
+#ifdef __linux__
+  /* **先把每个已加载模块的符号表读进来**（主程序 + libc + 各个 .so）——
+     连局部符号一起，所以 `start_thread` 这类只要文件里有就认得出来。
+     表里存的是**运行时地址**（模块基址 + st_value），与 `backtrace()` 给的同一口径。 */
+  dl_iterate_phdr(pf_phdr_cb, 0);
+#endif
+  /* 再叠上 `c link --map` 那一份（我们自己那台链接器不写 `.symtab`，只有它知道名字）。
+     那份图里落的是**最终虚拟地址**（非 PIE），与运行时地址相同，直接进表。 */
+  const char *path = getenv("OMNI_PROF_MAP");
+  FILE *f = path == 0 || *path == 0 ? 0 : fopen(path, "rb");
+  if (f != 0) {
+    char line[512];
+    while (fgets(line, (int)sizeof line, f) != 0) {
+      /* `0x<地址> 0x<长度> <名字>`。长度那一格是后加的，缺了也认（当 0）—— 旧的
+         两段式 map 还读得动，只是那时候界只能靠"下一格"。 */
+      char *p = line;
+      size_t a = (size_t)strtoull(p, &p, 16);
+      if (p == line) continue;
+      while (*p == ' ' || *p == '\t') p++;
+      size_t sz = 0;
+      if (p[0] == '0' && p[1] == 'x') {
+        char *q = p;
+        sz = (size_t)strtoull(p, &q, 16);
+        if (q != p) { p = q; while (*p == ' ' || *p == '\t') p++; }
+      }
+      size_t n = strlen(p);
+      while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r')) p[--n] = 0;
+      pf_map_add(a, sz, p, n);
+    }
+    fclose(f);
+  }
+  /* 两份并到一起，按地址排好 —— 查表要的是有序（`pf_map_at` 是二分）。 */
+  if (pf_map_n > 1) qsort(pf_map, (size_t)pf_map_n, sizeof *pf_map, pf_sym_cmp);
+  if (pf_map_n > 0) pf_map_hi = pf_map[pf_map_n - 1].addr;
+}
+
+/* 在图里二分：最后一个不大于 a 的那一格，**而且 a 要真落在它里头**。
+ *
+ * 那句"真落在它里头"是必须的（第一百六十五片量出来的教训）。libc 被 strip 之后
+ * 只剩 `.dynsym`（导出的那 2891 个），条目之间隔着几百上千字节的局部函数。
+ * 光取"最近的前一个"会把 `start_thread`（0x980a2）报成 `pthread_condattr_setpshared`
+ * ——那是 1458 字节之前的**另一个**函数。第一版就是这么错的，量到过一串假名字：
+ * `erand48_r` / `timer_settime` / `__pthread_get_minstack` / `vfprintf`。
+ * **confidently wrong 比 `libc.so.6+偏移` 坏得多**：前者会把人带到完全无关的函数上。
+ *
+ * 界怎么定：符号自己的 `st_size` 优先（ELF 里函数的长度）；`st_size == 0` 的
+ * （汇编写的桩、我们自己那份 `--map` 里的条目）用**下一格的地址**当界 —— 表是密的，
+ * 那个界就是对的。两个都没有就退 4 KiB，宁可少认不要认错。 */
+static const char *pf_map_at(size_t a) {
+  if (pf_map_n == 0 || a < pf_map[0].addr) return 0;
+  int lo = 0;
+  int hi = pf_map_n - 1;
+  int best = -1;
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    if (pf_map[mid].addr <= a) { best = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  if (best < 0) return 0;
+  size_t end;
+  if (pf_map[best].size != 0) end = pf_map[best].addr + pf_map[best].size;
+  else if (best + 1 < pf_map_n) end = pf_map[best + 1].addr;
+  else end = pf_map[best].addr + 4096;
+  return a < end ? pf_map[best].name : 0;
+}
+
+/* 一个地址翻成名字。
+ *
+ * **两种图都要认，而且不能靠猜是哪一种**（第一百六十三片量出来的）：
+ *   - 我们自己那台链接器出的是**非 PIE**，`c link --map` 里落的是最终虚拟地址
+ *     （`0x50cd60 u_fib`）——`backtrace()` 给的就是它，直接查。
+ *   - 外部 cc（clang/gcc）默认出 **PIE**，`nm -n` 落的是**文件地址**（`0x3910 u_fib`），
+ *     而运行时地址是它加上加载基地址。量到过：不修正的话 `--cc clang` 那一趟整张表
+ *     全是 `a.out+0x3970` 这种，名字一个都翻不出来。
+ * 所以**先按原样查一遍，不中再减掉 base 查一遍**：哪一种图命中哪一条，不必事先判断，
+ * 也不会因为判错而把非 PIE 的地址减坏。 */
+static const char *pf_map_name(void *p) {
+  if (pf_map_n == 0) return 0;
+  size_t a = (size_t)p;
+  const char *m = pf_map_at(a);
+  if (m) return m;
+  if (pf_map_base != 0 && a >= pf_map_base) return pf_map_at(a - pf_map_base);
+  return 0;
+}
+
 static const char *pf_name_of(void *fn, char **syms, int nsym, int i) {
+  /* 链接图优先：它是**链接器自己说的**，比 `backtrace_symbols` 猜得准（static 函数也在）。 */
+  {
+    const char *m = pf_map_name(fn);
+    if (m) return m;
+  }
+#ifndef __APPLE__
+  /* **外部模块（libc 之类）里的地址：问 `dladdr`**（第一百六十四片）。
+   *
+   * `backtrace_symbols` 在拿不到名字时只给 `路径(+偏移)`，而 `dladdr` 答的是两格：
+   * 这个地址属于哪个模块（`dli_fname`）、模块里最近的那个符号（`dli_sname` / `dli_saddr`）。
+   * 于是同一个地址能印成 `pthread_condattr_setpshared+0x42` 而不是 `libc.so.6+0x980a2` ——
+   * 名字是 `.dynsym` 里真有的那一个，偏移是"离它多远"。
+   *
+   * **为什么有些还是只有偏移**：这台机器上 `nm /usr/lib/libc.so.6` 回的是 "no symbols"
+   * —— Arch 把 libc **strip 了**，`.symtab` 整节不在，只剩 `.dynsym`（导出的那些）。
+   * `start_thread`、`__libc_start_call_main` 这类是**局部符号**，两张表都没有它们，
+   * 文件里根本不存在那个名字（`.gnu_debuglink` 指着 `libc.so.6.debug`，那是
+   * `glibc-debug` 包里的东西，没装）。这种情况 perf / gdb 印的也是
+   * `libc.so.6[+0x980a2]` —— 这是系统上能拿到的全部信息，不是我们少做了一步。
+   * 所以这一支的口径是：**`.dynsym` 里有最近的符号就用「符号+偏移」，没有才退回「模块+偏移」**。 */
+  {
+    Dl_info di;
+    if (dladdr(fn, &di) != 0 && di.dli_sname != 0 && di.dli_sname[0] != 0) {
+      static char dbuf[256];
+      size_t off = di.dli_saddr != 0 && (size_t)fn >= (size_t)di.dli_saddr
+        ? (size_t)fn - (size_t)di.dli_saddr : 0;
+      if (off == 0) {
+        size_t n = strlen(di.dli_sname);
+        if (n > sizeof(dbuf) - 1) n = sizeof(dbuf) - 1;
+        memcpy(dbuf, di.dli_sname, n);
+        dbuf[n] = 0;
+      } else {
+        snprintf(dbuf, sizeof dbuf, "%s+0x%llx", di.dli_sname, (unsigned long long)off);
+      }
+      return dbuf;
+    }
+  }
+#endif
   if (syms == 0 || i >= nsym || syms[i] == 0) return 0;
   /* `backtrace_symbols` 那一行长这样（Darwin）：
    *   "3   omni   0x0000000100a24f98 omni_js_arr_of + 52"
@@ -346,6 +698,41 @@ static const char *pf_name_of(void *fn, char **syms, int nsym, int i) {
   const char *beg = end;
   while (beg > s && beg[-1] != ' ' && beg[-1] != '\t' && beg[-1] != '(') beg--;
   if (end <= beg) return 0;
+  /* **路径不是函数名**（第一百六十三片，量出来的）。没有符号可查时 glibc 给的是
+     `/路径/a.out(+0x10cdec) [0x50cdec]` —— 上面那几句削完剩下的是**那个路径**。
+     认下来的后果最难看：`--cc clang` 那一趟（外部编译器链的，我们没落 `--map`）
+     整张表五行全是同一个字符串 `/omni/.omni-cache/work/…/a.out`，调用树里每一层
+     也都是它 —— 看着像"插桩没做好"，其实插桩的计数（635621 / 2000000 / 1）全是对的，
+     坏的只是翻名字这一步。
+     改成印 `文件名+偏移`（`a.out+0x10cdec` / `libc.so.6+0x89e40`）：至少**每个地址
+     不一样**，栈能读、能拿去 addr2line；而真有符号的那一路（`libc.so.6(printf+0x5f)`）
+     取到的是 `printf`，不带 `/`，这一支碰不到它。 */
+  if (memchr(beg, '/', (size_t)(end - beg)) != 0) {
+    static char pbuf[256];
+    const char *base = end;
+    while (base > beg && base[-1] != '/') base--;
+    size_t bn = (size_t)(end - base);
+    if (bn > sizeof(pbuf) - 24) bn = sizeof(pbuf) - 24;
+    memcpy(pbuf, base, bn);
+    pbuf[bn] = 0;
+    /* `(+0x…)` 里那个偏移：有就接上，没有（Darwin 那种格式）就只留文件名。 */
+    if (plus && plus[1] == '0' && plus[2] == 'x') {
+      size_t k = bn;
+      pbuf[k++] = '+';
+      for (const char *q = plus + 1; *q && *q != ')' && *q != ' ' && k < sizeof(pbuf) - 1; q++) {
+        pbuf[k++] = *q;
+      }
+      pbuf[k] = 0;
+    }
+    return pbuf;
+  }
+  /* **`[0x…]` 不是名字**。glibc 在没有符号可查时给的是 `./a.out(+0x10cdec) [0x50cdec]`：
+     最后一个 `+` 之前那个词是 `./a.out(`，被上面那几句削成空，于是退到 `[0x50cdec]`
+     这一格上 —— 它看着像名字，实际是同一个地址换了个写法。认下来的后果是 CLI 那一层
+     （它按"裸地址就去查链接图"翻名字）根本认不出这是地址，于是 Linux 上 `--profile cc`
+     与 `--profile sample` 印出来的每一格都是 `[0x50cdec]`（量到过，五个函数全是）。
+     这一句把它挡掉，让这一帧退回"只有地址"，翻名字的事交给外面那张 `--map`。 */
+  if (*beg == '[' || (beg[0] == '0' && beg[1] == 'x')) return 0;
   static char buf[256];
   size_t n = (size_t)(end - beg);
   if (n > sizeof(buf) - 1) n = sizeof(buf) - 1;
@@ -415,6 +802,10 @@ void omni_prof_report(void) {
     memset(&off, 0, sizeof off);
     setitimer(pf_sampling == 1 ? ITIMER_PROF : ITIMER_REAL, &off, 0);
   }
+  /* **先停表，再读链接图**。反了的话 `pf_map_load` 自己的 `fopen`/`fgets` 会被采进去
+     （量到过：`omni_prof_report > pf_map_load > fgets` 真出现在热路径里）—— 收集器
+     不该出现在自己的报告里。 */
+  pf_map_load();
   const char *out = getenv("OMNI_PROF_OUT");
   if (out && out[0]) pf_write_folded(out);
   /**
@@ -432,6 +823,20 @@ void omni_prof_report(void) {
     fprintf(stderr, "\nomni prof（采样 %s，%llu 帧、%d 条栈%s）：按帧数排前 20 个函数\n",
       pf_sampling == 2 ? "墙上时间" : "CPU 时间", pf_samples, pf_stacks_used,
       pf_lost ? "，有丢帧" : "");
+    /* **帧数少就把误差说出来**（第一百六十二片）。占比是从 n 帧里估的比例，2σ 约
+       `1/sqrt(n)`：46 帧上 ±15%，240 帧上 ±6.5%，1000 帧上 ±3%。不说的话那张表看着
+       和精确计数一样可信 —— 量到过一趟 46 帧的报告被当成"采样实现得不准"，而同一份
+       程序采到 240 帧时与墙上时间的账对得上（fib 那一半 11.25% vs 墙上 8.8%）。
+       门槛定在 400：再往上 2σ 就进 5% 以内了。 */
+    if (pf_samples > 0 && pf_samples < 400) {
+      /* 整数开方，不拉 `math.h`/`-lm` 进来（运行时这一份要能给 tcc 与我们自己那台
+         C 前端编，少一个依赖少一处麻烦）。n < 400 所以最多转 19 圈。 */
+      unsigned long long r = 1;
+      while ((r + 1) * (r + 1) <= pf_samples) r++;
+      fprintf(stderr, "  注：只有 %llu 帧，每个占比的 2σ 误差约 ±%llu%% —— "
+        "要更细就提频率（`--profile sample:9973`）或者加大工作量\n",
+        pf_samples, 100ull / r);
+    }
 #define PF_TOPN 256
     static char pf_top_name[PF_TOPN][128];
     static unsigned long long pf_top_hits[PF_TOPN];
@@ -490,6 +895,21 @@ void omni_prof_report(void) {
       if (!nm) fprintf(stderr, "0x%llx", (unsigned long long)(size_t)e->fn);
       fprintf(stderr, "\n");
       if (syms) free(syms);
+    }
+    /* **观察者效应要说出来**（第一百六十二片，量出来的）。这一档每次进/出都调两个钩子，
+       量到的单次成本约 600ns —— 对一个函数体只有几纳秒的小函数，"自用时间"里几乎全是
+       钩子。同一份程序（fib(32) + sumTo(2e7)）：不插桩 205ms，插桩之后 11515ms，**56 倍**；
+       `u_fib` 报 4270ms / 7049155 次 = 606ns 一次，正好是钩子的价钱。
+       墙上时间的对账（两半分开跑）说的是 fib 占 8.8%，而 sample 那一档报 11.25% —— 对得上；
+       这一档报 37%，对不上。所以「调用次数大」的那几行要按这一句读。 */
+    {
+      unsigned long long mx = 0;
+      for (int i = 0; i < lim; i++) if (sorted[i].calls > mx) mx = sorted[i].calls;
+      if (mx >= 100000ull) {
+        fprintf(stderr, "  注：这一档每次调用插两个钩子（量到约 600ns 一次）。"
+          "上面调用次数大的那几行，自用时间里**主要是钩子**，不是函数体 —— "
+          "要看真实占比用 `--profile sample`\n");
+      }
     }
   }
   if (out && out[0]) fprintf(stderr, "  折叠栈写到了 %s\n", out);

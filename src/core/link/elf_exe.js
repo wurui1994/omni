@@ -2012,6 +2012,11 @@ export function elfExeImage(inp) {
     machine, secs, out, backmap, phdrs, phnum, shnum, entry, nameOff, fileOffset, dyn,
     c32: conf.c32,
     eflags: st.eflags ?? 0,
+    /* 最终地址那张表（`--map` 用）。ELF 可执行文件里我们**不写 `.symtab`**，而 glibc 的
+       `backtrace_symbols` 走 `dladdr` 只看 `.dynsym` —— 于是 Linux 上 `--profile cc/sample`
+       印出来的每一格都是 `[0x50cdec]` 这种裸地址（量到过）。地址 -> 名字这一步只有链接器
+       答得出来，所以这儿把它交出去，由 cli 落成一份 `.map`，读 profile 时再翻回名字。 */
+    syms,
   };
 }
 
@@ -2129,5 +2134,20 @@ export function elfExe(inp) {
     if (s.type === EE_SHT_NOBITS || s.shsize === 0) continue;
     b.set(s.bytes.subarray(0, s.shsize), s.off);
   }
-  return { bytes: b, machine: r.machine, entry: r.entry, shnum, phnum };
+  return {
+    bytes: b, machine: r.machine, entry: r.entry, shnum, phnum,
+    /* 地址 -> 名字（`--map`）：`syms[].value` 是**节内偏移**（`relocate_syms` 只把
+       `.dynsym` 那一份加了节地址，见 1728 行），所以这儿照 1596 行那条公式补上
+       `secs[shndx].addr`。少了这一句，map 里落的是 `0x980a2` 这种偏移，翻出来的名字
+       全是错的（量到过：每一帧都变成 `pf_stk_child` / `sorted`）。
+       **只要 FUNC**（`info % 16 == 2`）：profile 翻的是代码地址，而 `_end` / `_edata`
+       这类链接器造的数据符号落在镜像末尾、又没有长度，会把后面所有 libc 的地址都
+       吞成 `_end`（量到过）。 */
+    syms: (r.syms ?? [])
+      .filter((s) => s.name !== '' && s.shndx !== EE_SHN_UNDEF && s.shndx < SHN_LORESERVE
+        && r.secs[s.shndx] !== undefined && s.info % 16 === 2)
+      .map((s) => ({ name: s.name, addr: r.secs[s.shndx].addr + s.value, size: s.size ?? 0 }))
+      .filter((s) => s.addr > 0)
+      .sort((x, y) => x.addr - y.addr),
+  };
 }
