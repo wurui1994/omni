@@ -897,7 +897,10 @@ function isLitNull(x) {
   return isNode(x) && x.op === 'const' && x.attrs.value === null;
 }
 
-/** `null` 那一格的类型从**第一处赋值**上取。找不着就报缺口，不猜。 */
+/** `null` 那一格的类型从**第一处赋值**上取。找不着就**再看 `==` 的另一边** ——
+ * V 的 `y := ?int(none)` 接着 `if y == none` 是只比了一下就再也不碰的那一族，
+ * 整格函数体里 `y` 没有一处 `set`，可比较的另一边（`none` -> null）说明这一格是 int。
+ * 再找不着就报缺口，不猜。 */
 function nullHint(nm, ctx, env) {
   const seek = (x) => {
     if (Array.isArray(x)) {
@@ -907,6 +910,15 @@ function nullHint(nm, ctx, env) {
     if (!isNode(x)) return null;
     if (x.op === 'set' && x.attrs.name === nm && !isLitNull(x.ins.value)) {
       return typeOf(x.ins.value, env, ctx);
+    }
+    /* **比较的另一边**：`(prim "=" [ref y, null])` —— y 与 null 在比，
+       说明 y 的用法是"有没有值"，类型是 int（null -> `(int 0)`，比较是 `== 0`）。 */
+    if (x.op === 'prim' && (x.attrs.name === '=' || x.attrs.name === '!=')) {
+      const args = argList(x, 'args');
+      if (args.length === 2) {
+        if (isNode(args[0]) && args[0].op === 'ref' && args[0].attrs.name === nm && isLitNull(args[1])) return 'int';
+        if (isNode(args[1]) && args[1].op === 'ref' && args[1].attrs.name === nm && isLitNull(args[0])) return 'int';
+      }
     }
     for (const k of Object.values(x.ins)) { const r = seek(k); if (r !== null) return r; }
     return null;
