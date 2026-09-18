@@ -59,6 +59,9 @@ import { runGraphFile, buildGraphFile } from './graph/run.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
+import { cffiNeeded, cffiSource } from './backend-js/cffi.js';
+import { flatImage } from './link/flat_image.js';
+import { dlopenAddon, publishCffi, hasAddonLoader } from './host/ffi_host.js';
 import {
   target, registerTarget, registerLang, lang, registerRunner, runner, noteUnloadable,
   registerCap, cap, langNames, langByName, declareProvider,
@@ -3000,8 +3003,188 @@ function findClang() {
   throw new OmniError('no clang found for the llvm backend (override with OMNI_CLANG)');
 }
 
-function buildLlvm(mod, outPath, workDir) {
-  const mir = lowerToMir(mod);
+/**
+ * node 那条腿上的 FFI 扩展（ADR-0038）：把 `cffiSource(mod)` 发出来那份 C 编成一格 `.node`。
+ *
+ * **这是备选那条路**（`OMNI_FFI=cc`）—— 默认走注入（`ffiInject`）。留着它的理由是它
+ * 更通用：谁的 cc 都行、什么 C 都吃得下，而注入那条路只吃我们自己那台 C 前端认得的 C。
+ *
+ * 内容寻址（生成的 C + 链接命令 + 编译器 → `hash16`），落在 `.omni-cache/ffi/<key>/`。
+ * 内容寻址没有失效问题：声明改一个字、库换一个路径、编译器换一个，键就变。
+ *
+ * 与插件那格共用同一套开关：`-fPIC -shared`，macOS 上再加 `-undefined dynamic_lookup`
+ * —— N-API 那几个符号在**宿主进程**（node 自己）里，不在任何库里，所以链接时必须允许
+ * 未定义符号。ELF 上默认就允许，什么都不用加（那一格从前踩过：把 ld64 的开关递给
+ * GNU ld，报的是 `cannot find dynamic_lookup`）。
+ *
+ * 编不过是**硬错误**（与 `glPlugin` 那格"编不过就走 CPU 光栅器"不同）：这份程序里有
+ * `(ccall …)`，没有这个扩展它一句都跑不了，回落成一句"符号不可用"是把原因藏起来。
+ */
+function ffiAddon(mod) {
+  const src = cffiSource(mod);
+  const cc = findClang();
+  const libs = libLinkArgs(mod.libs);
+  const key = hash16([cc, src, libs.join(' ')].join('|'));
+  const dir = join(cacheRoot(), 'ffi', key);
+  const addon = join(dir, 'omni_ffi.node');
+  if (exists(addon)) return addon;
+  const stage = workDirFor('ffi-stage', key);
+  const cPath = join(stage, 'omni_ffi.c');
+  writeText(cPath, src);
+  const staged = join(stage, 'omni_ffi.node');
+  const shared = ['-fPIC', '-shared']
+    .concat(hostIsDarwin() ? ['-undefined', 'dynamic_lookup'] : []);
+  const args = ['-O2', '-w', ...shared, '-I', RUNTIME_DIR, cPath, '-o', staged, ...libs];
+  const r = spawn(cc, args, 'o');
+  if (r[0] !== 0) {
+    throw new OmniError(`node ffi：那份发出来的 N-API 扩展 ${cc} 编不过（ADR-0038）：\n${r[2]}\n`
+      + `（那份 C 留在 ${cPath}）`);
+  }
+  mkdirAll(join(cacheRoot(), 'ffi'));
+  if (!exists(dir)) rename(stage, dir);
+  const out = exists(addon) ? addon : staged;
+  vStep(`node ffi  ${src.length} 字节 C + ${libs.join(' ')} -> ${out}`);
+  return out;
+}
+
+/**
+ * 那格**固定的**注入宿主（ADR-0038 第二刀）：与被注入的程序无关，所以整台机器上只编一次。
+ *
+ * 内容寻址的键是它自己那两份源码 + 编译器。装进来之后回它的 exports
+ * （`page` / `mem` / `protect` / `dlopen` / `sym` / `init` 六个口子）。
+ *
+ * 这一格还是要一次外部 cc —— 但**只有一次、而且与程序无关**，所以它不在每次运行的账上
+ * （与 `buildJitHost` 同一个立场）。将来可以随发行版预编好。
+ */
+let FFI_HOST = null;
+function ffiHost() {
+  if (FFI_HOST !== null) return FFI_HOST;
+  const src = join(JIT_DIR, 'omni_ffi_host.c');
+  const hdr = join(RUNTIME_DIR, 'omni_napi.h');
+  if (!exists(src)) throw new OmniError(`node ffi：注入宿主的源码不见了：${src}`);
+  const cc = findClang();
+  const key = hash16([cc, readText(src), readText(hdr)].join('|'));
+  const dir = join(cacheRoot(), 'ffi-host', key);
+  const node = join(dir, 'omni_ffi_host.node');
+  if (!exists(node)) {
+    const stage = workDirFor('ffi-host', key);
+    const staged = join(stage, 'omni_ffi_host.node');
+    const shared = ['-fPIC', '-shared']
+      .concat(hostIsDarwin() ? ['-undefined', 'dynamic_lookup'] : []);
+    const r = spawn(cc, ['-O2', '-w', ...shared, '-I', RUNTIME_DIR, src, '-o', staged], 'o');
+    if (r[0] !== 0) {
+      throw new OmniError(`node ffi：注入宿主 ${cc} 编不过（ADR-0038）：\n${r[2]}`);
+    }
+    mkdirAll(join(cacheRoot(), 'ffi-host'));
+    if (!exists(dir)) rename(stage, dir);
+    if (!exists(node)) {
+      FFI_HOST = dlopenAddon(staged);
+      vStep(`ffi host  ${staged}`);
+      return FFI_HOST;
+    }
+  }
+  FFI_HOST = dlopenAddon(node);
+  vStep(`ffi host  ${node}`);
+  return FFI_HOST;
+}
+
+/**
+ * 那份 C 编成一格**可重定位**的 `.o`（我们自己那台 C 前端，`-f elf`）。
+ *
+ * 内容寻址（就是那份 C 的内容 + 目标）。**这一格必须缓存**：注入那条路每次运行都要
+ * 重新铺映像，而"编"那一步是纯函数 —— 不缓存的话热路径上它比 cc 那条路更慢
+ * （量过：编一趟 47ms，而 cc 那条路热的时候只剩一次 1.85ms 的 dlopen）。
+ *
+ * 为什么是 ELF 而不是 Mach-O：`link/elf_merge.js` 的 `linkObjects` 吃的是 ELF ——
+ * 我们那台 C 前端的 `-f` 与目标是**分开拨**的两格（tcc 的 `-c` 在所有目标上都写 ELF）。
+ */
+function ffiObject(mod) {
+  const src = cffiSource(mod);
+  const arch = hostArch();
+  const os = hostOs();
+  const key = hash16([src, arch, os].join('|'));
+  const dir = join(cacheRoot(), 'ffi-obj');
+  const objPath = join(dir, `${key}.o`);
+  /* `readBinary` 回的是 latin1 的串（宿主那一层就这么定的），链接器要按字节看
+     —— 与 `elf-r` 那一支里的 `bytesOf` 是同一句话。 */
+  const bytesOf = (p) => {
+    const s = readBinary(p);
+    const b = new Uint8Array(s.length);
+    for (let k = 0; k < s.length; k++) b[k] = s.charCodeAt(k);
+    return b;
+  };
+  if (exists(objPath)) return bytesOf(objPath);
+  const stage = workDirFor('ffi-obj', key);
+  const cPath = join(stage, 'omni_ffi.c');
+  writeText(cPath, src);
+  const staged = join(stage, 'omni_ffi.o');
+  cObj(cPath, staged, arch, [RUNTIME_DIR], [], 'elf', os, undefined, false);
+  mkdirAll(dir);
+  /* 先落临时名再 rename：两个进程同时跑同一份程序时，谁都不会读到半个 `.o`。 */
+  if (!exists(objPath)) rename(staged, objPath);
+  return bytesOf(exists(objPath) ? objPath : staged);
+}
+
+/**
+ * **注入**（默认那条路，ADR-0038 第二刀）：那份 C -> 机器码 -> 这个进程里的一块内存。
+ *
+ * 五步，次序不能动（错了就是 SIGBUS 或者跑到旧字节上）：
+ *   1. `(lib …)` 里**不是预登记系统库**的那些先 `dlopen(RTLD_GLOBAL)` —— 系统库本来就
+ *      在这个进程里（`sym('printf')` 在一次 dlopen 都没做的时候就查得着，量过）；
+ *   2. 铺映像（`flatImage`）：布局、GOT、桩子、重定位，装载地址由 `mem()` 给；
+ *   3. 字节写进那块内存（宿主给的是 external ArrayBuffer，所以是**零拷贝**的一次 set）；
+ *   4. 一段一段 `protect` —— `.text` 那段 `rx` 并刷指令缓存；
+ *   5. `init` 跳进 `napi_register_module_v1`，拿它回的那格对象。
+ *
+ * osx 上那个**前缀下划线**是平台事实（`cObj` 里 `prefix: os === 'osx' ? '_' : ''`），
+ * 而 `dlsym` 要的是不带的 —— 这一格归调用方剥，`flatImage` 不认识平台。
+ */
+function ffiInject(mod) {
+  const h = ffiHost();
+  for (const lib of mod.libs ?? []) {
+    if (cSysLib(lib) !== null) continue;
+    const p = lib.endsWith('.framework') ? frameworkPath(lib) : lib;
+    if (h.dlopen(p) !== true) throw new OmniError(`node ffi：装不上那个库：${p}`);
+  }
+  const obj = ffiObject(mod);
+  let mem = null;
+  const img = flatImage({
+    objs: [obj],
+    page: h.page(),
+    reserve: (n) => { mem = h.mem(n); return Number(mem.addr); },
+    resolve: (name) => {
+      const a = h.sym(name.startsWith('_') ? name.slice(1) : name);
+      return a === 0n ? null : Number(a);
+    },
+  });
+  new Uint8Array(mem.buf).set(img.bytes, 0);
+  for (const r of img.ranges) h.protect(r.addr, r.len, r.mode);
+  const entry = img.syms.get('_napi_register_module_v1')
+    ?? img.syms.get('napi_register_module_v1');
+  if (entry === undefined) {
+    throw new OmniError('node ffi：铺出来的映像里找不着 napi_register_module_v1');
+  }
+  vStep(`ffi inject  ${img.size} 字节铺在 0x${img.base.toString(16)}，`
+    + `${img.ranges.length} 段（${obj.length} 字节 .o，我们自己那台 C 前端编的）`);
+  return h.init(entry);
+}
+
+/**
+ * 这一趟的 `$cffi` 从哪儿来：**默认注入**，`OMNI_FFI=cc` 走编到文件那条备选。
+ *
+ * 注入那条路要一个装得动 addon 的宿主（node）；装不动就自动退到 cc 那条 ——
+ * 那不是"降级"，是那条路本来就更通用。
+ */
+function ffiPrepare(mod) {
+  const how = env('OMNI_FFI');
+  if (how !== 'cc' && hasAddonLoader()) {
+    publishCffi(ffiInject(mod));
+    return;
+  }
+  setEnv('OMNI_FFI_ADDON', ffiAddon(mod));
+}
+
+function buildLlvm(mod, outPath, workDir) {  const mir = lowerToMir(mod);
   const errs = verifyMir(mir);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
   const ir = target('llvm').emit(mir);
@@ -4470,6 +4653,10 @@ function main(argv) {
          * （`chunk: true` 就是那个形态）。多发一趟只在 `--stat` 那一趟里发生。 */
         if (STAT !== null) LAST_EMIT_PROG = target('js').emit(mod, { chunk: true }).length;
         vStep(`backend js  ${js.length} bytes`);
+        /* 这份程序里有 `(ccall …)` 的话，先把那格 `$cffi` 备好（ADR-0038）：
+           **默认注入**（我们自己那台 C 前端造机器码，铺进本进程），
+           `OMNI_FFI=cc` 走编到文件那条备选（更通用，要一个外部 cc）。 */
+        if (cffiNeeded(mod)) ffiPrepare(mod);
         if (cacheable) jsCachePut(path, js, cap('asy.deps')());
         /**
          * `--profile sample`：**采样器只能在 node 启动时开**，所以这一档不能在本进程里

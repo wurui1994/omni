@@ -330,9 +330,12 @@ if (existsSync(sysDir)) {
 {
   const glfw = '/opt/homebrew/lib/libglfw.dylib';
   const seen = [];
-  /* 三条**原生**腿都要跑（interp 那条不在这儿：它没有 `(ccall …)`）。
+  /* 三条**原生**腿 + **node 那条腿**都要跑（interp 那条不在这儿：它没有 `(ccall …)`）。
      从前只跑 JIT，于是 AOT 那两条上「`(lib …)` 没接到链接命令」这件事一直没人发现 ——
-     同一份源码在两条腿上要么都行要么都不行，这种不对称本身就是错。 */
+     同一份源码在两条腿上要么都行要么都不行，这种不对称本身就是错。
+     `run` 就是 node 那条腿（发 JS 在本进程里 eval）：它的 `(ccall …)` 走我们自己发的
+     那份 N-API 扩展（ADR-0038）。它压住的四格与原生腿一样 —— f32 的调用约定、
+     串实参、出参（C 直接写 JS 那块 ArrayBuffer）、以及 `(lib …)` 变成链接命令。 */
   for (const [name, args] of [['glfw-tri.sx', []],
     ['glfw-tri.jnc', ['-I', '/opt/homebrew/include']]]) {
     const src = join(here, 'cabi', name);
@@ -340,7 +343,7 @@ if (existsSync(sysDir)) {
       process.stdout.write(`  skip ${name}：这台机器上没有 glfw\n`);
       continue;
     }
-    for (const leg of ['run-jit', 'run-llvm', 'run-c']) {
+    for (const leg of ['run-jit', 'run-llvm', 'run-c', 'run']) {
       /* `.jnc` 那一份走旧降级（宿主面那一族，见 `OLD_JNC` 那一段）。 */
       const r = run([leg, src, ...args], 180000, name.endsWith('.jnc') ? OLD_JNC : undefined);
       const m = /^framebuffer: ([1-9][0-9]*) ([1-9][0-9]*)\nframes: 120\n$/.exec(r.out ?? '');
@@ -357,13 +360,44 @@ if (existsSync(sysDir)) {
       else ok(`${name} @ ${leg} [GLFW 开窗 + legacy GL 画 120 帧：framebuffer ${m[1]}x${m[2]}]`);
     }
   }
-  /* 六次的字节要全一样 —— 那才说明"从头文件收来的签名"与"手写的签名"是同一件事，
-     而且三条原生腿对同一个 C ABI 的理解没有分叉。 */
-  if (seen.length === 6) {
+  /* 八次的字节要全一样 —— 那才说明"从头文件收来的签名"与"手写的签名"是同一件事，
+     而且四条腿（三条原生 + node）对同一个 C ABI 的理解没有分叉。 */
+  if (seen.length === 8) {
     let same = true;
     for (const s of seen) if (s !== seen[0]) same = false;
-    if (same) ok('glfw-tri [两份源码 × 三条原生腿：六次输出逐字节相同]');
-    else bad('glfw-tri 六次不一致', `    ${seen.map((s) => JSON.stringify(s)).join('\n    ')}`);
+    if (same) ok('glfw-tri [两份源码 × 四条腿（三条原生 + node ffi）：八次输出逐字节相同]');
+    else bad('glfw-tri 八次不一致', `    ${seen.map((s) => JSON.stringify(s)).join('\n    ')}`);
+  }
+}
+
+// ------------------------------------------------- 8. 变参那一段（ADR-0038 的第二格判据）
+//
+// `glfw-tri` 那两份里的 `printf` 在 jancy 那一侧被降成了我们自己的 `print`，所以**变参那条路
+// 一格都没走到**。而它是 node 那条腿上唯一需要"按形状分派"的地方：定参按声明，`...` 之后
+// 按 C 的默认实参提升（整数类一律 int64_t、浮点一律 double）。三条腿印的都是 libc 自己的
+// printf，所以那几行字必须逐字节相同 —— 不同就说明谁的提升或者分界错了。
+//
+// node 那条腿跑**两遍**：默认那条是**注入**（我们自己那台 C 前端造机器码铺进本进程），
+// `OMNI_FFI=cc` 那条是编到文件（外部 cc + dlopen，ADR-0038 第二刀）。两条发的是同一份 C，
+// 所以字节也必须一样 —— 不一样就说明有一条自己在解释那份声明。
+{
+  const src = join(here, 'cabi', 'va-printf.sx');
+  const want = 'n=42 r=1.500 s=hi\nnone\n1 2 3 4 5 6\nret=12\n';
+  if (!existsSync(src)) {
+    process.stdout.write('  skip va-printf：缺 tests/llvm/cabi/va-printf.sx\n');
+  } else {
+    for (const [leg, envx] of [['run-jit', undefined], ['run-c', undefined],
+      ['run', undefined], ['run', { OMNI_FFI: 'cc' }]]) {
+      const tag = envx === undefined ? leg : `${leg} (OMNI_FFI=cc)`;
+      const r = run([leg, src], 180000, envx);
+      if (r.code !== 0) {
+        bad(`va-printf @ ${tag}`, `    exit=${r.code}\n      ${(r.err ?? '').trim().split('\n').slice(0, 3).join('\n      ')}`);
+      } else if ((r.out ?? '') !== want) {
+        bad(`va-printf @ ${tag}`, `    want ${JSON.stringify(want)}\n    got  ${JSON.stringify(r.out)}`);
+      } else {
+        ok(`va-printf @ ${tag} [(cabi printf i32 (ptr ...))：0/3/6 格变参 + i32 回值]`);
+      }
+    }
   }
 }
 

@@ -1,0 +1,23 @@
+;; 变参那一段（ADR-0038 的判据之一）：一条 `(cabi printf i32 (ptr ...))`，三种实参各一格。
+;;
+;; 为什么要单独一份：`glfw-tri` 那两份里的 `printf` 在 jancy 那一侧被降成了我们自己的
+;; `print`（格式化留在语言里），于是**变参那条路一格都没走到**。而变参是这条腿上唯一
+;; 需要"按形状分派"的地方：定参按声明，`...` 之后按 C 的默认实参提升（整数类一律
+;; int64_t、浮点一律 double）。分界或者提升错了，那一端 `va_arg` 取到的就不是这几个数。
+;;
+;; 三条腿（jit / c / node）的输出必须逐字节相同 —— 印的是 libc 自己的 printf，
+;; 所以那几行字是同一份格式化代码出来的。
+(module
+  (lib "libc")
+  (cabi printf i32 (ptr ...))
+
+  (main
+    ;; 整数 · 浮点 · 串各一格（串交给 C 的是地址，那一端按 `%s` 读到结尾的零）
+    (expr (ccall printf (str "n=%lld r=%.3f s=%s\n") (int 42) (real 1.5) (str "hi")))
+    ;; 一格变参都没有：`kn = 0` 那一支
+    (expr (ccall printf (str "none\n")))
+    ;; 六格：这条腿上分派表的上界（再多一格要报一句真话，不许静默算错）
+    (let n int (ccall printf (str "%lld %lld %lld %lld %lld %lld\n")
+      (int 1) (int 2) (int 3) (int 4) (int 5) (int 6)))
+    ;; printf 的回值是写出去的字节数 —— 它证明那一格 i32 回值也过来了
+    (print (bin "+" (str "ret=") (tostr (var n))))))

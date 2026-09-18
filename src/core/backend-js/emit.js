@@ -13,6 +13,7 @@
 //              **一律 BigInt**（$dynTag 靠 typeof 分 int 与 real），装箱那条边界上转
 
 import { JS_PRELUDE, JS_PROF_RT } from './prelude.js';
+import { cffiGlue } from './cffi.js';
 import { typeKey, loopLabelNeeds } from '../hir/types.js';
 import { JS_ABI, JS_ALL, JS_MEMBERS } from '../hir/js_abi.js';
 import { C_ABI } from '../hir/c_abi.js';
@@ -192,6 +193,8 @@ class JsEmitter {
     // REPL（--engine js）里被提成模块级 var 的那几条 Local，按语句对象的身份记；
     // 不在 REPL 模式下一直是 null（见 hoistTop）
     this.hoisted = null;
+    // `case 'CCall'` 里有没有人真走了 `cCall` —— 有的话在 prelude 后面拼 cffiGlue
+    this.cffiUsed = false;
   }
 
   /** 进循环前：要标签就发一行 `L:`，并把名字压栈；回一个 null 表示这层没标签 */
@@ -318,10 +321,15 @@ class JsEmitter {
     this.line('$js_check_uncaught();');
     this.line('$flush();');
     const prog = this.out.join('\n');
+    /* FFI 前段（ADR-0038）：有 cCall 才拼，没有的时候一个字都不留。
+       必须在 prelude 之后、程序段之前 —— 它引用 `$mem`/`$rt_error`（prelude 的），
+       而程序段里的 `$cffi.xxx` 引用它声明的那几个名字。
+       **裁运行时的时候要把它算进"用到的名字"**：`$mem` 有可能只有这一段提到。 */
+    const ffi = this.cffiUsed ? cffiGlue() : '';
     /* 运行时那一段按这份程序用到的名字裁（`trimJsRuntime`）。`trim: false` 是逃生门：
      * 出了事要能一句话切回"整份都带"，好把"是不是摇树摇掉了什么"当场分清。 */
-    const rt = this.trim === false ? head : trimJsRuntime(head, prog);
-    return `${rt}\n${prog}\n`;
+    const rt = this.trim === false ? head : trimJsRuntime(head, ffi + prog);
+    return `${rt}\n${ffi}${prog}\n`;
   }
 
   /**
@@ -817,9 +825,13 @@ class JsEmitter {
       case 'Call':
         return `${e.func}(${e.args.map((a) => this.rvalue(a, a.type)).join(', ')})`;
       case 'Builtin': return this.builtin(e);
-      // 外部 C 符号（ADR-0014 决策 4）：JS 后端上没有 C 调用约定，发一条当场报错的。
-      // 仍然要把实参发出来 —— 它们可能有副作用，而且这样这份 JS 依然是可读的。
+      /* 外部 C 符号。**声明在源码里的那些（`raw`，ADR-0022 的 J4b）落成一次真的 C 调用**
+         —— 桥是我们自己发的那份 N-API 扩展（ADR-0038）。封闭表那一族（`hir/c_abi.js`
+         的 8 条 libc，实参是 dynamic 装箱值）照旧发一条当场报错的：它的语义是
+         `C_IN`/`C_OUT` 那对 marshaler，与这条路的"机器值直通"不是同一件事。
+         报错那一支仍然把实参发出来 —— 它们可能有副作用，而且那样这份 JS 依然可读。 */
       case 'CCall': {
+        if (e.raw === true && e.sig !== undefined && e.sig !== null) return this.cCall(e);
         const args = e.args.map((a) => this.rvalue(a, a.type)).join(', ');
         /* 名字：构建期封闭表里的那些用表上的**真符号名**（`c_strlen` -> `strlen`），
            源码里声明的那些（`(cabi …)`，ADR-0022 的 J4b）名字本身就是符号名 ——
@@ -831,6 +843,51 @@ class JsEmitter {
       }
       default: throw new Error(`js.expr: ${e.kind}`);
     }
+  }
+
+  /**
+   * `(ccall …)` -> `$cffi.<符号>(…)`（ADR-0038）。
+   *
+   * 三件事在这儿定：**定参按声明的那一格 C 类型摆**、**地址在这一侧算**（偏移加基址，
+   * 见 prelude 那侧的 `$fp`/`$ft`/`$fs`/`$fa`）、**变参按 C 的默认实参提升**（整数类
+   * 一律 BigInt、浮点一律 number，并把那个形状拼成一格 kinds 串递过去）。
+   *
+   * 回值：`i64`/`ptr` 从 C 回来是 BigInt，进方言之前过一次 `$CN`（方言的 `int` 是
+   * "能用 number 就 number"那种规范形）。别的几格本来就是 JS 的原生值。
+   */
+  cCall(e) {
+    this.cffiUsed = true;
+    const ps = e.sig.params;
+    const kinds = [];
+    const as = [];
+    for (let i = 0; i < e.args.length; i++) {
+      const a = e.args[i];
+      const code = this.rvalue(a, a.type);
+      const k = a.type === null || a.type === undefined ? '?' : a.type.k;
+      /* 地址那一族（`ptr` 形参，或者变参那一段里的串与指针）：JS 这一侧换算成机器地址。
+         `int` 当地址用是 `long win = glfwCreateWindow(…)` 那一格 —— 它本来就是地址。 */
+      const addr = k === 'string' ? `$fs(${code})`
+        : k === 'ptr' ? `$fp(${code})`
+          : k === 'tptr' ? `$ft(${code})` : null;
+      if (i < ps.length) {
+        const w = ps[i];
+        if (w === 'ptr') { as.push(addr === null ? `$fa(${code})` : addr); continue; }
+        if (w === 'i32') { as.push(`Number(${code}) | 0`); continue; }
+        if (w === 'i64') { as.push(`BigInt(${code})`); continue; }
+        as.push(code);            // f64 / f32 / bool 本来就是 JS 的原生值
+        continue;
+      }
+      /* 变参那一段（`...` 之后）：`(cabi …)` 那一侧已经把可以摆的几种挡过一遍
+         （整数、real、串、指针），所以这儿只分"整数类还是浮点"。 */
+      if (addr !== null) { kinds.push('i'); as.push(addr); continue; }
+      if (k === 'real') { kinds.push('d'); as.push(code); continue; }
+      kinds.push('i');
+      as.push(`BigInt(${code})`);
+    }
+    if (e.sig.variadic === true) as.unshift(JSON.stringify(kinds.join('')));
+    const call = `$cffi.${e.entry}(${as.join(', ')})`;
+    const rw = e.sig.ret;
+    return (rw === 'i64' || rw === 'ptr') ? `$CN(${call})` : call;
   }
 
   bin(e) {
