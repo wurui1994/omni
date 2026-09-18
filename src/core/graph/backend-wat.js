@@ -511,11 +511,11 @@ const watKind = (t) => (t === 'string' ? 'str' : (t === 'real' ? 'real' : 'int')
  * 从 `emitWat` 里提到顶层是为了**能被判据问**（原来它是闭包，外头问不着，
  * 于是"三处说同一句话"那条判据落不下来）。`gk` 就是那张全局量的种类表。
  */
-export function watKindOf(x, sc, gk, rk) {
+export function watKindOf(x, sc, gk, rk, fk) {
   if (x === null || x === undefined) return 'int';
   if (Array.isArray(x)) {
     const l = watItems(x);
-    return l.length === 0 ? 'int' : watKindOf(l[l.length - 1], sc, gk, rk);
+    return l.length === 0 ? 'int' : watKindOf(l[l.length - 1], sc, gk, rk, fk);
   }
   if (x.lit !== undefined) return watKind(litType(x.lit));
   switch (x.op) {
@@ -524,16 +524,20 @@ export function watKindOf(x, sc, gk, rk) {
       const nm = x.attrs.name;
       return sc.lookup(nm) !== null ? sc.kindOf(nm) : (gk.get(nm) ?? 'int');
     }
-    case 'region': return watKindOf(x.ins.body, sc, gk, rk);
+    case 'region': return watKindOf(x.ins.body, sc, gk, rk, fk);
     /* **一段以 `return X` 结尾的体，种类就是 X 的**。没这一档的时候它落到 default 答
      * 'int'，于是"每支都 return 一格串"的 case 链（nim 的 `grade`）在 `fnBody` 那儿
      * 先被记成返回 int、里头那几条 ret 再记成 str，自己跟自己打起来报 mix。 */
-    case 'ret': return watKindOf(x.ins.value, sc, gk, rk);
+    case 'ret': return watKindOf(x.ins.value, sc, gk, rk, fk);
     /* **调一格函数：种类由被调的那一格答**（`rk` 就是那张表，emitWat 的定点算出来的）。
      * 没这一档的时候这儿一律答 'int'，于是"返回一格串"的函数在调用点上就变成了一个数，
      * 而它的值是那块内存的地址 —— 印出来是个大整数。所以从前 `onlyInt('返回值')`
      * 那道缺口是**必须**的；现在种类能跨函数边界了，那道缺口才付得掉。 */
     case 'call': return rk === undefined ? 'int' : (rk.get(x.ins.fn?.attrs?.name) ?? 'int');
+    /* **记录的字段：种类按字段名查**（`fk`）。键是名字而不是"哪一格记录的哪一格字段" ——
+     * 这条腿的槽位表本来就是按名字排的、管整个模块（文件头"布局"那一段），种类跟着
+     * 同一条粗化走。查不着按数算：那正是**没往里装过串**的字段。 */
+    case 'field-get': return fk === undefined ? 'int' : (fk.get(x.attrs.field) ?? 'int');
     // 表示转换：目标那一栏（`to`）就是答案 —— 这一格是"两种数值类型"的入口。
     // **不走覆盖层的 `convTo`**：那一格对 `to=bool` 报缺口（方言里没有 tobool），
     // 而 wat 这边 bool 就是 i64，接得住 —— 这是腿的事，不是类型的事。
@@ -548,11 +552,11 @@ export function watKindOf(x, sc, gk, rk) {
       const args = watItems(x.ins.args);
       if (nm === 'concat') return 'str';
       if (!WAT_ARITH.has(nm)) return 'int';
-      if (nm === '+' && args.some((a) => watKindOf(a, sc, gk, rk) === 'str')) return 'str';
-      return args.some((a) => watKindOf(a, sc, gk, rk) === 'real') ? 'real' : 'int';
+      if (nm === '+' && args.some((a) => watKindOf(a, sc, gk, rk, fk) === 'str')) return 'str';
+      return args.some((a) => watKindOf(a, sc, gk, rk, fk) === 'real') ? 'real' : 'int';
     }
     case 'branch': {
-      const a = watKindOf(x.ins.then, sc, gk, rk); const b = watKindOf(x.ins.else, sc, gk, rk);
+      const a = watKindOf(x.ins.then, sc, gk, rk, fk); const b = watKindOf(x.ins.else, sc, gk, rk, fk);
       return a === b ? a : 'mix';
     }
     default: return 'int';
@@ -624,7 +628,7 @@ function topFuncs(items) {
  * 出一份 WAT。**跑两遍**：第一遍只为把"哪个函数出值"数出来（语句位置的调用要不要
  * `drop` 取决于它），第二遍拿着那张表出正式的文本。图都很小，两遍比猜便宜。
  */
-function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
+function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
   const items = watItems(graph.kind === 'graph' ? graph.body : graph);
   const mod = new Mod();
   const fns = topFuncs(items);
@@ -727,7 +731,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
   /* 这一格值装的是数 / 实数 / 串 —— 问的是**顶层那一份**（`watKindOf`，见文件末），
      这儿把两张表绑上去：全局量装的是什么、以及**每个函数返回的是什么**（`kindOfFn`，
      由 emitWat 的定点算出来 —— 与 `retOf` / `multiOf` 同一趟）。 */
-  const kindOf = (x, sc) => watKindOf(x, sc, globalKinds, kindOfFn);
+  const kindOf = (x, sc) => watKindOf(x, sc, globalKinds, kindOfFn, carried.fields);
 
   /** 串只许待在"绑给局部量"、"打印"与"整格返回"这三处。别的地方接住了就是给错答案。 */
   function onlyInt(x, sc, where) {
@@ -760,7 +764,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
   }
 
   /**
-   * **实参那一格**（直接调用那条路）：串放行 —— 形参的种类由 `paramKinds` 带过去
+   * **实参那一格**（直接调用那条路）：串放行 —— 形参的种类由 `carried.params` 带过去
    * （emitWat 那趟定点从**所有调用点**收上来的）。同一格形参一处传串一处传数就报缺口：
    * wasm 的局部量只有一种类型。间接调用（`call_indirect`）不走这儿：那儿没有名字，
    * 查不着表，所以照旧 `onlyInt`。
@@ -783,9 +787,29 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
    * 实参种类得留给下一遍。表只会从 int 变 str 变 mix，单调，所以重跑不会来回摆。
    */
   const noteCallArgs = (name, ks) => {
-    const had = paramKinds.get(name);
-    paramKinds.set(name, had === undefined ? ks : ks.map((k, i) => (had[i] === k ? k : 'mix')));
+    const had = carried.params.get(name);
+    carried.params.set(name, had === undefined ? ks : ks.map((k, i) => (had[i] === k ? k : 'mix')));
   };
+
+  /**
+   * **记录的字段那一格**：串接得住 —— 字段的种类按**字段名**记（`carried.fields`）。
+   *
+   * 为什么键是字段名而不是"哪一格记录的哪一格字段"：这条腿的槽位表（`slots`）本来就是
+   * 按名字排的、管整个模块 —— `x` 在任何记录里都落同一格偏移（文件头"布局"那一段）。
+   * 字段的种类跟着同一条粗化走，两处才不会各说一套。同一个字段名一处装串一处装数
+   * 记 'mix'，读它的时候报缺口。
+   */
+  function noteField(field, y, sc) {
+    const k = kindOf(y, sc);
+    if (k === 'mix') {
+      throw new Gap('记录的字段上还接不住字符串（wasm 上它是内存里的一块地址，要类型层才认得出）');
+    }
+    if (k === 'real') {
+      throw new Gap('记录的字段上还接不住实数（内存里的一格是 i64，要按类型排的布局）');
+    }
+    const had = carried.fields.get(field);
+    carried.fields.set(field, had === undefined || had === k ? k : 'mix');
+  }
 
   /**
    * map 的键怎么比：**编译期就知道**（种类那一趟追踪的另一个用处）。
@@ -1092,7 +1116,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
         const size = 8 * (names.length === 0 ? 1 : 1 + Math.max(...names.map(slotOf)));
         const a = alloc(size, sc, pre);
         names.forEach((k, i) => {
-          onlyInt(vals[i], sc, '记录的字段');
+          noteField(k, vals[i], sc);
           const v = expr(vals[i], sc, pre);
           pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * slotOf(k)})) ${v})`);
         });
@@ -1288,7 +1312,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
       return `(call_indirect (type ${sig})${args.length === 0 ? '' : ` ${args.join(' ')}`} (i32.wrap_i64 (local.get ${t})))`;
     }
     const args = watItems(x.ins.args).map((a) => {
-      // 直接调用：串放行（形参的种类走 paramKinds 那张表）。
+      // 直接调用：串放行（形参的种类走 carried.params 那张表）。
       // `lift` 那条照旧只收整数 —— 提升上来的函数的形参表里混着捕获来的名字，
       // 而那些名字本来就必须是整数（见 liftFunc 里那道检查），别把两件事搅在一起。
       if (kind === 'direct') noteArg(a, sc); else onlyInt(a, sc, '实参');
@@ -1369,7 +1393,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
       }
       case 'field-set': {
         needMem = true;
-        onlyInt(x.ins.value, sc, '记录的字段');
+        noteField(x.attrs.field, x.ins.value, sc);
         const o = expr(x.ins.obj, sc, pre);
         const v = expr(x.ins.value, sc, pre);
         return [...pre, `(i64.store (i32.add ${addr(o)} (i32.const ${8 * slotOf(x.attrs.field)})) ${v})`];
@@ -1702,7 +1726,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
   /* **一格函数体报了缺口也把这一遍走完**（缺口攒着，末尾再抛）。
    *
    * 为什么：形参的种类是从**调用点**收上来的，而调用点在别的函数体里。`kind` 排在
-   * `main` 前面（源码次序），第一遍进 `kind` 时 `paramKinds` 还空着 —— 那句"串与串比"
+   * `main` 前面（源码次序），第一遍进 `kind` 时那张表还空着 —— 那句"串与串比"
    * 当场抛，于是 `main` 里那两处 `kind(\`e\`)` 一辈子也走不到，表永远长不起来。
    * 走完这一遍之后表就有了，emitWat 那边看见"表长了"就再来一遍（见那儿的注释）。
    * 抛出去的还是**第一个**缺口 —— 报的理由与从前一字不差。 */
@@ -1721,10 +1745,10 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
       const params = (fnode.attrs.params ?? []).map((p) => String(p));
       const f = mod.fn(fns.get(it.attrs.name), params, it.attrs.name);
       const sc = new WatScope(f);
-      // 形参带上种类：**从所有调用点收上来的那一份**（`paramKinds`，emitWat 的定点）。
+      // 形参带上种类：**从所有调用点收上来的那一份**（`carried.params`，emitWat 的定点）。
       // 没这一步的时候形参一律按数算，于是 `fn kind(c string)` 里的 `c` 与串比较时
       // 报"一格是串一格不是" —— V 那份 charlit 卡的就是这儿。
-      const pk = paramKinds.get(it.attrs.name) ?? [];
+      const pk = carried.params.get(it.attrs.name) ?? [];
       params.forEach((p, i) => {
         sc.names.set(p, wname(p));
         sc.kinds.set(p, pk[i] ?? 'int');
@@ -1754,7 +1778,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
     entry.body = [...entryMarks.map((m) => `(local.set ${m.flag} (i64.const 0))`),
       ...entry.body, ...runExits(entryMarks)];
   }
-  // 攒下来的第一个缺口在这儿交上去 —— 这一遍已经走完，`paramKinds` 该收的都收了
+  // 攒下来的第一个缺口在这儿交上去 —— 这一遍已经走完，跨遍那两张表该收的都收了
   if (firstGap !== null) throw firstGap;
 
   const lines = ['(module', '  (import "omni" "print_i64" (func $print (param i64)))'];
@@ -1815,7 +1839,6 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
     // 每个函数返回的是数还是串 —— 调用点的种类靠它（`watKindOf` 的 `call` 那一档）
     kinds: new Map([...mod.fns.values()].map((f) => [f.src, f.rkind ?? 'int'])),
     // 每格形参装的是数还是串 —— 从所有调用点收上来的（下一遍进函数体的时候用）
-    pkinds: paramKinds,
   };
 }
 
@@ -1836,19 +1859,20 @@ export function emitWat(graph) {
   let rets = new Map();
   let multis = new Map();
   let kinds = new Map();
-  /* 形参种类那张表**跨遍活着**（emitOnce 就地往里写）：这一遍可能在中途抛 Gap ——
-   * `fn kind(c string)` 的体里那句"串与串比"在形参还没带上种类的第一遍必抛 —— 而那时
-   * `main` 里那几处调用还没走到，表是空的。抛出来的那一遍照样留下了它收到的那几处，
+  /* 形参与字段那两张种类表**跨遍活着**（emitOnce 就地往里写）：这一遍可能在中途抛 Gap
+   * —— `fn kind(c string)` 的体里那句"串与串比"在形参还没带上种类的第一遍必抛 —— 而那时
+   * `main` 里那几处调用还没走到，表是空的。抛出来的那一遍照样留下了它收到的那几处
+   * （见 emitOnce 里 `keepGoing` 那一段：一格函数体报了缺口也把这一遍走完），
    * 所以**只要表还在长就再试一遍**；长不动了才把 Gap 交上去（那才是真的接不住）。 */
-  const pkinds = new Map();
-  const snap = () => JSON.stringify([...pkinds].sort());
+  const carried = { params: new Map(), fields: new Map() };
+  const snap = () => JSON.stringify([[...carried.params].sort(), [...carried.fields].sort()]);
   let last = null;
   let prevArgs = null;
   for (let i = 0; i < 8; i++) {
     const before = snap();
     let out = null;
     try {
-      out = emitOnce(graph, rets, multis, kinds, pkinds);
+      out = emitOnce(graph, rets, multis, kinds, carried);
     } catch (e) {
       if (!(e instanceof Gap) || snap() === before) throw e;
       continue;    // 表长了 —— 拿着新的那一份再来一遍
@@ -1859,7 +1883,7 @@ export function emitWat(graph) {
       // 返回种类那张表也得算进"不动"：它与 rets 互相喂（末尾那格调用出不出串要问被调的）
       && out.kinds.size === kinds.size
       && [...out.kinds].every(([k, v]) => kinds.get(k) === v)
-      // 形参种类同理：调用点的实参种类要问被调函数的返回种类，绕回来了
+      // 形参 / 字段那两张同理：调用点的实参种类要问被调函数的返回种类，绕回来了
       && prevArgs === snap();
     rets = out.rets;
     multis = out.multis;
