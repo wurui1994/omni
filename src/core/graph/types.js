@@ -82,6 +82,27 @@ export function dictOf(t) {
   return { key: two[0], val: two[1] };
 }
 
+/**
+ * `(fnty (形参…) 返回)` 的**返回类型**。不是函数类型回 null。
+ *
+ * 为什么要按括号数着走而不是 `split(' ')`：形参里可以有带括号的类型
+ * （`(fnty ((dict string dyn)) int)` —— lua 的方法就是这个签名），一格空格切开就散了。
+ */
+export function fnRetOf(t) {
+  if (typeof t !== 'string' || !t.startsWith('(fnty ')) return null;
+  let i = 6;
+  let depth = 0;
+  for (; i < t.length; i++) {
+    if (t[i] === '(') depth += 1;
+    else if (t[i] === ')') {
+      depth -= 1;
+      if (depth === 0) { i += 1; break; }
+    }
+  }
+  const rest = t.slice(i, t.length - 1).trim();
+  return rest === '' ? null : rest;
+}
+
 /** 这一格类型是不是标量（记录 / 列表 / 字典的元素只收这四格）。 */
 export const isScalar = (t) => t === 'int' || t === 'real' || t === 'bool' || t === 'string';
 
@@ -164,7 +185,14 @@ export function inferType(x, env, ctx) {
   if (x.op === 'call') {
     const f = x.ins.fn;
     const nm = isNode(f) && f.op === 'ref' ? f.attrs.name : null;
-    return (nm !== null ? env.get(`fn:${nm}`) : null) ?? UNKNOWN;
+    /* 被调的**不是一格名字**：那是从字典里取出来的函数（lua 的 `p:total()`）。签名图上
+       没有，得问后端（`ctx.dynFnType` —— 它按键查整张图，见 `backend-core.js` 的 dyn 那段），
+       返回类型就是签名里最后那一格。问不着就 unknown，不猜。 */
+    if (nm === null) {
+      const ft = ctx.dynInside === undefined ? null : ctx.dynInside(f, env);
+      return (ft === null ? null : fnRetOf(ft)) ?? UNKNOWN;
+    }
+    return env.get(`fn:${nm}`) ?? UNKNOWN;
   }
   if (x.op === 'branch') return inferType(x.ins.then, env, ctx);
   /* `ret` **交出去的就是它那格值的类型**。这一格本来落到末尾的 UNKNOWN，而 wat 那条腿
@@ -182,7 +210,13 @@ export function inferType(x, env, ctx) {
   if (x.op === 'field-get') return fieldType(x, env, ctx);
   if (x.op === 'index-get') return elemType(inferType(x.ins.obj, env, ctx)) ?? UNKNOWN;
   if (x.op === 'map-get') {
-    const d = dictOf(inferType(x.ins.obj, env, ctx));
+    /* 宿主自己可能是一格 **dyn**（lua 的 `a.__meta.__close` 头一跳取出来的就是箱子）——
+       先问后端"箱子里装的是什么"（`ctx.dynInside`，按键查整张图）再取值类型。 */
+    let ht = inferType(x.ins.obj, env, ctx);
+    if (ht === 'dyn' && ctx.dynInside !== undefined) {
+      ht = ctx.dynInside(x.ins.obj, env) ?? ht;
+    }
+    const d = dictOf(ht);
     return d === null ? UNKNOWN : d.val;
   }
   if (x.op === 'map-has') return 'bool';

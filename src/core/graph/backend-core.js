@@ -16,10 +16,14 @@
 //   标量    字面量按值推（整 `int`、带小数点 `real`、串 `string`、真假 `bool`）
 //   记录    按"字段名单 + 字段类型"登记成一格 `(struct rN …)`，同形的共用一格
 //   列表    按第一格元素推成 `(arr T)`；切片走消去规则（新建 + 一圈 apush）
-//   字典    按键值推成 `(dict K V)`；空字典从**同层第一处 map-set** 上取（lua / awk 那一档）
+//   字典    按键值推成 `(dict K V)`；空字典从**这一层里所有的写**上取（lua / awk 那一档）。
+//           值混着（这个键是数、那个键是函数、另一个键是表）时值类型是 **dyn** ——
+//           `(dict string dyn)` + `(dyn E)` 装箱、`(asint …)`/`(asfn T …)`/`(asdict T …)`
+//           按键拆箱（真动态那一段；lua 的元表就是这个形状）
 //   多值    落成一格合成结构体 `(struct mN (v0 …) (v1 …))` —— 方言的函数只交一格回来，
 //           而结构体是值语义的，那正好就是 `return a, b` 的语义
-//   形参    从**调用点**收（图上没有类型）：函数体走两趟，第一趟只收实参类型，第二趟出文本
+//   形参    从**调用点**收（图上没有类型）：main 与函数体各先空跑一趟只收类型，再出文本。
+//           从字典里取出来的函数没有名字，那时**按键**记到"这个键上装着的那几格函数"头上
 //   内层函数 **提到顶层**（lambda 提升，`liftBody`）：借来的那几格变成多出来的形参，
 //           每处调用补上实参。只当被调者用时提升与闭包同义 —— 跑出调用点那一格另有账
 //   模块级   函数体里的自由名字落成 `(global 名 类型)` + main 里一句 `(set …)`（`bindLine`）
@@ -34,10 +38,11 @@
 //
 // 形参与返回**默认 int**，推不出来就当场报（不猜）。
 //
-// **聚合只能从字段 / 下标 / 键那三条路走**：一格记录 / 列表 / 字典整格当值用（当实参、被
-// print、被 return）一律报缺口 —— 这一刀的函数形参与返回都是 int，跑出去就说不清类型了。
-// 同一条纪律在 `backend-c` 那边是 `recPlan` 的三个条件，这儿靠"谁来拼文本"落实
-// （`objText` 一处把门）。剩下的账全是**形状上的**（见 `CORE_SHAPES`，各带一份证物）。
+// **聚合走的是"引用"那一条**：一格记录 / 列表 / 字典当实参、当 `ret` 的值、装进一格 dyn
+// 都行（三处都拼名字：`(var …)` / `(ptr rN)` —— 与图上一样是同一格），而**当值印出来、
+// 当值算术**那种一律报缺口：那时说不清类型。同一条纪律在 `backend-c` 那边是 `recPlan` 的
+// 三个条件，这儿靠"谁来拼文本"落实（`objText` 与 `refOrExpr` 两处把门）。
+// 剩下的账全是**形状上的**（见 `CORE_SHAPES`，各带一份证物）。
 
 import { Gap } from './backend-wat.js';
 import { declOf } from './nodes.js';
@@ -143,7 +148,17 @@ function shapeOf(names, types, multi, ctx) {
 function bindLine(nm, t, initText, env, ctx) {
   env.set(nm, t);
   if (!ctx.globals.has(nm)) return `(let ${nm} ${t} ${initText})`;
-  ctx.decls.push(`  (global ${nm} ${t})`);
+  /* **一格 global 只声明一次**：main 要走两趟（空跑那一趟收模块级变量的类型与
+     `ctx.rets`，见 `emitCore`），而 `(global …)` 是印在模块头上的一句声明 ——
+     两趟各推一句就是"模块级变量重复定义"。记下它落在 `decls` 的**第几格**，
+     第二趟原地改写：两趟推断出来的类型可能不同（第二趟才知道函数交回来的是个字典）。 */
+  const at = ctx.declared.get(nm);
+  if (at === undefined) {
+    ctx.declared.set(nm, ctx.decls.length);
+    ctx.decls.push(`  (global ${nm} ${t})`);
+  } else {
+    ctx.decls[at] = `  (global ${nm} ${t})`;
+  }
   ctx.fnEnv.set(nm, t);
   return `(set ${nm} ${initText})`;
 }
@@ -271,7 +286,9 @@ function expr(x, env, ctx) {
     }
     case 'call': {
       const f = x.ins.fn;
-      if (!isNode(f) || f.op !== 'ref') gap('调一格不是名字的东西（函数值那一档）');
+      /* 被调的不是一格名字：**从字典里取出来的函数**那一档由 `callText` 接（按键查签名 +
+         `(callfn (asfn …) …)`），别的（真函数值）还是报缺口。 */
+      if (!isNode(f) || f.op !== 'ref') return callText(x, env, ctx);
       /* 被调的那格没有返回值（体里一格 ret 都没有）却出现在**值**的位置上 ——
        * 那正是"隐式返回"（chez / sbcl 体末尾那个值）。有名有姓地报，不糊。 */
       if (env.get(`fn:${f.attrs.name}`) === 'void') {
@@ -309,15 +326,14 @@ function expr(x, env, ctx) {
       return `(var ${b.name})`;
     }
     case 'map-get': {
-      const dt = typeOf(x.ins.obj, env, ctx);
-      const d = dictOf(dt);
-      if (d === null) gap('map-get 的宿主不是字典');
+      const d = hostDict(x.ins.obj, env, ctx);
+      if (d === null) gap(`map-get 的宿主不是字典（量到的是 ${typeOf(x.ins.obj, env, ctx)}）`);
+      /* 异质字典：取出来是 dyn。**这一层不拆**——用它的地方（算术 / 被调者 / 宿主）各管各的。 */
       return `(dget ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)})`;
     }
     case 'map-has': {
-      const dt = typeOf(x.ins.obj, env, ctx);
-      const d = dictOf(dt);
-      if (d === null) gap('map-has 的宿主不是字典');
+      const d = hostDict(x.ins.obj, env, ctx);
+      if (d === null) gap(`map-has 的宿主不是字典（量到的是 ${typeOf(x.ins.obj, env, ctx)}）`);
       return `(dhas ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)})`;
     }
     case 'slice': gap('切片出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
@@ -366,8 +382,10 @@ function expr(x, env, ctx) {
       const t = typeOf(x.ins.then, env, ctx);
       const t2 = typeOf(els, env, ctx);
       if (t !== t2) gap(`表达式位置上的 branch 两支不同型（${t} 与 ${t2}）`);
-      /* 标量或**一格形状**（sbcl 的 `(if c (values …) (values …))` 就是后者）都接得住 */
-      if (!isScalar(t) && shapeAt(t, ctx) === undefined) gap(`表达式位置上的 branch 交出来的不是标量（${t}）`);
+      /* 标量或**一格形状**（sbcl 的 `(if c (values …) (values …))` 就是后者）都接得住；
+         **dyn 也接得住**（lua 的 `p:total()` 里"自己有没有这个键"那一格三目交的就是它 ——
+         临时量装着箱子，到用它的地方再拆）。 */
+      if (!isScalar(t) && t !== 'dyn' && shapeAt(t, ctx) === undefined) gap(`表达式位置上的 branch 交出来的不是标量（${t}）`);
       ctx.tmp = ctx.tmp + 1;
       const nm = `if_tmp${ctx.tmp}`;
       const arm = (e) => {
@@ -402,13 +420,15 @@ function expr(x, env, ctx) {
  * 方言直接报"两边要同型"。抬不上去（真假与数混算那种）就报缺口，不猜。
  */
 function binText(nm, args, env, ctx) {
-  const ts = args.map((a) => typeOf(a, env, ctx));
+  /* **dyn 在这儿拆箱**（拆在用它的地方，见 dyn 那一段）：`seenType` 按键查出箱子里装的是
+     什么，`one` 落文本时套一层 `(asint …)` 那一族。查不出来就报缺口（`unboxTo` 那一句）。 */
+  const ts = args.map((a) => seenType(a, env, ctx));
   let want = 'int';
   if (ts.some((t) => t === 'string')) want = 'string';
   else if (ts.some((t) => t === 'real')) want = 'real';
   else if (ts.every((t) => t === 'bool')) want = 'bool';
   const one = (a, t) => {
-    const v = expr(a, env, ctx);
+    const v = typeOf(a, env, ctx) === 'dyn' ? unboxTo(expr(a, env, ctx), t) : expr(a, env, ctx);
     if (t === want) return v;
     if (want === 'string') return `(tostr ${v})`;
     if (want === 'real' && t === 'int') return `(toreal ${v})`;
@@ -514,7 +534,16 @@ function objText(obj, env, ctx) {
       return fldText(obj.ins.obj, obj.attrs.field, env, ctx);
     }
   }
-  if (!isNode(obj) || obj.op !== 'ref') gap('字段 / 下标的宿主不是一个名字（嵌套那一档还没接）');
+  if (!isNode(obj) || obj.op !== 'ref') {
+    /* **嵌套的宿主**：lua 的 `a.__meta.__close` 头一跳交出来的是一格 dyn，按键查出它装着
+       `(dict string dyn)` 就拆出来当宿主用（拆在用它的地方，见 dyn 那一段）。 */
+    const et = typeOf(obj, env, ctx);
+    if (et === 'dyn') {
+      const inner = dynTypeOf(obj, env, ctx);
+      if (inner !== null && dictOf(inner) !== null) return unboxTo(expr(obj, env, ctx), inner);
+    }
+    gap('字段 / 下标的宿主不是一个名字（嵌套那一档还没接）');
+  }
   const t = env.get(obj.attrs.name);
   if (shapeAt(t, ctx) === undefined && elemType(t) === null && dictOf(t) === null) {
     gap(`'${obj.attrs.name}' 说不清形状（这一刀只认 \`bind\` 一格记录 / 列表 / 字典绑出来的名字）`);
@@ -526,7 +555,27 @@ function objText(obj, env, ctx) {
 /** `(call 名 实参…)` 的文本（"当值用"那道检查在 `expr` 里，语句位置上不查）。 */
 function callText(x, env, ctx) {
   const f = x.ins.fn;
-  if (!isNode(f) || f.op !== 'ref') gap('调一格不是名字的东西（函数值那一档）');
+  /* **被调的是一格从字典里取出来的函数**（lua 的 `p:total()`、`a.__meta.__close(a)`）：
+     先按键查出签名、拆箱成 `(fnty …)`，再走 `(callfn …)`。
+     那几格函数的**形参类型**也在这儿记 —— 调用点是唯一知道实参类型的地方，而这一处调用
+     没有名字，所以按键记到"这个键上装着的那几格函数"头上（`dynFnNames`）。 */
+  if (!isNode(f) || f.op !== 'ref') {
+    const ft0 = dynTypeOf(f, env, ctx);
+    if (ft0 === null || !ft0.startsWith('(fnty ')) {
+      gap('调一格不是名字的东西（函数值那一档）');
+    }
+    const names = dynFnNames(f, env, ctx);
+    const vargs = argList(x, 'args').map((a, i) => {
+      const t = seenType(a, env, ctx);
+      for (const n of names) noteArgType(n, i, t, ctx);
+      return refOrExpr(a, env, ctx);
+    });
+    /* **记完实参类型再问一遍签名**：签名里的形参正是这几格，而上面那一问发生在记之前
+       （`(asfn (fnty (int) int) …)` 那种错签名就是这么来的 —— 量到过）。 */
+    const ft = dynTypeOf(f, env, ctx) ?? ft0;
+    const callee = unboxTo(expr(f, env, ctx), ft);
+    return `(callfn ${callee}${vargs.length === 0 ? '' : ` ${vargs.join(' ')}`})`;
+  }
   /* **被调的是一格函数值**（形参 / 局部，类型是 `(fnty …)`）—— 方言里那是 `(callfn …)`。
      实参的类型不往 `ctx.args` 上记：那张表是按**函数名**记的，而这儿被调的是一格值。 */
   const vt = env.get(f.attrs.name);
@@ -536,6 +585,33 @@ function callText(x, env, ctx) {
   }
   const args = argList(x, 'args').map((a, i) => argText(f.attrs.name, i, a, env, ctx));
   return `(call ${f.attrs.name}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
+}
+
+/** 这格被调表达式里按键能取出哪几格**函数**（按键拆箱那一套，见 dyn 那一段）。 */
+function dynFnNames(f, env, ctx) {
+  const out = new Set();
+  walkCore(f, (n) => {
+    if (n.op !== 'map-get') return;
+    const k = keyLitOf(n.ins.key);
+    if (k === null) return;
+    for (const v of ctx.dynSites.get(k) ?? []) {
+      if (isNode(v) && v.op === 'ref' && fnTypeOf(v, env, ctx) !== null) out.add(v.attrs.name);
+    }
+  });
+  return [...out];
+}
+
+/**
+ * 往 `ctx.args` 上记一格形参类型（**不查冲突**）。
+ *
+ * 与 `argText` 那几句的区别：这儿是"按键记到那几格函数头上"，同一个键上装着两格签名
+ * 不同的函数时**不在这里报** —— 那时 `dynKeyType` 本来就答不出一致的类型，缺口报在
+ * 拆箱那一处（措辞说得清是"按键查不到一致的类型"）。
+ */
+function noteArgType(fname, i, t, ctx) {
+  const key = `${fname}#${i}`;
+  const had = ctx.args.get(key);
+  if (had === undefined || (had === 'int' && t !== 'int')) ctx.args.set(key, t);
 }
 
 /**
@@ -654,7 +730,168 @@ function zeroText(t) {
   if (t === 'real') return '(real 0.0)';
   if (t === 'bool') return '(bool false)';
   if (t === 'string') return '(str "")';
+  /* **dyn 的零值是"箱子里先装个 0"**：值位置上的 branch 要一格先声明后赋值的临时量
+     （见 `expr` 的 branch 那一支），而 dyn 也会走到那儿 —— lua 的 `p:total()` 里
+     "自己有没有这个键"那一格三目交出来的就是一格 dyn。 */
+  if (t === 'dyn') return '(dyn (int 0))';
   return '(int 0)';
+}
+
+/* ---------------------------------------------------------------- 真动态（dyn）
+ *
+ * **异质字典**：图上一格 map 的值可以"这个键是数、那个键是函数、另一个键是另一格表"
+ * —— lua 的元表就是这个形状，而方言的字典是**单态**的。对得上的那一格是
+ * `(dict string dyn)`：值是带标签的联合值，装箱 `(dyn E)`、拆箱 `(asint …)` /
+ * `(asfn T …)` / `(asdict T …)`（`tests/sexpr/cases/48-dyn.sx` 与 `49-dyn-fn.sx`
+ * 钉着这一族，后者的判据 4 与 5 就是照这两个例子的形状写的）。
+ *
+ * 拆箱得知道"箱子里装的是什么"，而图上没有类型。这一刀的答案是**按键查整张图**：
+ * 凡是往这个键上写过的那几处值，类型一致就是它（`dynKeyType`），不一致、或者一处都
+ * 没写过，就报缺口 —— 不猜。
+ *
+ * 为什么这是**事实**而不是猜：键在两边都是字面量（`map-set(Point, "total", …)` 与
+ * `map-get(p, "total")`），所以"这个键上装的是什么"整张图上就写着。同一个键上真装两种
+ * 东西时这一格答 null，落出来是一句有名有姓的缺口，而不是一个静默的错答案。
+ *
+ * 拆在**用它的地方**（算术的两边 · 被调者 · 字典的宿主），不是拆在 `dget` 那一刻：
+ * 值位置上的 branch 要一格临时量，而 `(fnty …)` 那种类型没有零值可以初始化 ——
+ * 让临时量装着 dyn、到用的时候再拆，两边都落得下去。
+ */
+
+/** 装进 dyn 的字典只有这一种（方言的 `boxable` 只认它 —— 别的值类型要按元素深装箱）。 */
+const DYN_DICT = '(dict string dyn)';
+
+/** 这一格类型能不能装进 dyn（四格标量 + 函数 + `(dict string dyn)`）。 */
+const isBoxable = (t) => isScalar(t) || t === DYN_DICT
+  || (typeof t === 'string' && t.startsWith('(fnty '));
+
+/** 一格键字面量的文本（不是字面量回 null —— 那时按键查不了，报缺口）。 */
+function keyLitOf(k) {
+  if (isLit(k) && typeof k.lit === 'string') return k.lit;
+  if (isNode(k) && k.op === 'const' && typeof k.attrs.value === 'string') return k.attrs.value;
+  return null;
+}
+
+/** 一格值**装进 dyn 之后**箱子里那格的类型（函数看签名、字典一律 `(dict string dyn)`）。 */
+function boxedTypeOf(v, env, ctx) {
+  const ft = fnTypeOf(v, env, ctx);
+  if (ft !== null) return ft;
+  if (isNode(v) && v.op === 'map-new') return DYN_DICT;
+  const t = typeOf(v, env, ctx);
+  return dictOf(t) !== null ? DYN_DICT : t;
+}
+
+/** 这个键上装的是什么（整张图上凡是往它写过的那几处都问一遍）。说不清回 null。 */
+function dynKeyType(k, env, ctx) {
+  const sites = ctx.dynSites.get(k);
+  if (sites === undefined || sites.length === 0) return null;
+  let out = null;
+  for (const v of sites) {
+    const t = boxedTypeOf(v, env, ctx);
+    if (!isBoxable(t)) return null;
+    if (out === null) out = t;
+    else if (out !== t) return null;
+  }
+  return out;
+}
+
+/** 一格 dyn 表达式里装的是什么：`map-get` 按键查，branch 两支同型才算。 */
+function dynTypeOf(x, env, ctx) {
+  if (!isNode(x)) return null;
+  if (x.op === 'branch') {
+    const a = dynTypeOf(x.ins.then, env, ctx);
+    const b = dynTypeOf(x.ins.else, env, ctx);
+    return a !== null && a === b ? a : null;
+  }
+  if (x.op !== 'map-get') return null;
+  const k = keyLitOf(x.ins.key);
+  return k === null ? null : dynKeyType(k, env, ctx);
+}
+
+/** 一格表达式"看得见的类型"：dyn 的按键查出装的是什么（查不出还是 dyn）。 */
+function seenType(a, env, ctx) {
+  const t = typeOf(a, env, ctx);
+  if (t !== 'dyn') return t;
+  return dynTypeOf(a, env, ctx) ?? 'dyn';
+}
+
+/** 拆箱：`(asint …)` 那一族。`want` 还是 dyn 说明按键查不出来 —— 报缺口，不猜。 */
+function unboxTo(text, want) {
+  if (want === 'int') return `(asint ${text})`;
+  if (want === 'real') return `(asreal ${text})`;
+  if (want === 'bool') return `(asbool ${text})`;
+  if (want === 'string') return `(asstr ${text})`;
+  if (dictOf(want) !== null) return `(asdict ${want} ${text})`;
+  if (typeof want === 'string' && want.startsWith('(fnty ')) return `(asfn ${want} ${text})`;
+  return gap('说不清这格 dyn 里装的是什么（按键查不到一致的类型）—— 拆箱得知道拆成什么');
+}
+
+/**
+ * 一格值当**引用**用时的文本（函数名 `(fnref …)`、聚合 `(var …)`、别的照 `expr`）。
+ * 三处要它：装箱进 dyn、`ret` 交一格聚合回去、实参那一格（`argText` 自己那份等价的）。
+ */
+function refOrExpr(a, env, ctx) {
+  const ft = fnTypeOf(a, env, ctx);
+  if (ft !== null) return `(fnref ${a.attrs.name})`;
+  const t = typeOf(a, env, ctx);
+  if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return `(var ${a.attrs.name})`;
+  return expr(a, env, ctx);
+}
+
+/** 装箱：`(dyn E)`。装不进去的当场报（哪一格装不进也说清）。 */
+function boxText(v, env, ctx) {
+  const t = boxedTypeOf(v, env, ctx);
+  if (!isBoxable(t)) {
+    gap(`这一格装不进 dyn（量到的是 ${t}）—— 方言只收四格标量、函数与 ${DYN_DICT}`);
+  }
+  const inner = refOrExpr(v, env, ctx);
+  /* 物化过的那一格（`(var map_tmp1)`）真实类型在 env 上 —— 字典字面量装箱要查这一句：
+     `(dict string int)` 装不进 dyn（方言的 boxable 只认 `(dict string dyn)`）。 */
+  const m = /^\(var ([A-Za-z_][\w$]*)\)$/.exec(inner);
+  const at = m !== null ? (env.get(m[1]) ?? t) : t;
+  if (dictOf(at) !== null && at !== DYN_DICT) {
+    gap(`装进 dyn 的字典只收 ${DYN_DICT}（量到的是 ${at}）`);
+  }
+  return `(dyn ${inner})`;
+}
+
+/** 整张图上"往哪个键写过什么"（键 -> 那几处值节点）。按键拆箱靠它。 */
+function collectDynSites(list) {
+  const out = new Map();
+  const add = (k, v) => {
+    if (k === null || v === undefined || v === null) return;
+    if (!out.has(k)) out.set(k, []);
+    out.get(k).push(v);
+  };
+  walkCore(list, (n) => {
+    if (n.op === 'map-set') add(keyLitOf(n.ins.key), n.ins.value);
+    if (n.op === 'map-new') {
+      const ks = argList(n, 'keys');
+      const vs = argList(n, 'vals');
+      for (let i = 0; i < ks.length && i < vs.length; i++) add(keyLitOf(ks[i]), vs[i]);
+    }
+  });
+  return out;
+}
+
+/** 一格字典的值类型：全是同一格标量就是它，别的（混着、函数、字典）一律 dyn。 */
+function mapValType(vals, env, ctx) {
+  if (vals.length === 0) return null;
+  const ts = vals.map((v) => boxedTypeOf(v, env, ctx));
+  return ts.every((t) => t === ts[0] && isScalar(t)) ? ts[0] : 'dyn';
+}
+
+/**
+ * 宿主那一格的字典类型（`{key, val}`）。**dyn 的先按键看穿一层** ——
+ * lua 的 `a.__meta.__close` 头一跳取出来是一格箱子，里头装着另一格表。不是字典回 null。
+ */
+function hostDict(obj, env, ctx) {
+  const t = typeOf(obj, env, ctx);
+  const d = dictOf(t);
+  if (d !== null) return d;
+  if (t !== 'dyn') return null;
+  const inner = dynTypeOf(obj, env, ctx);
+  return inner === null ? null : dictOf(inner);
 }
 
 /** 一格字面量的方言写法。 */
@@ -836,10 +1073,13 @@ function stmtIn(x, env, ctx) {
       return [`(aset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.index, env, ctx)} ${expr(x.ins.value, env, ctx)})`];
     }
     case 'map-set': {
-      if (dictOf(typeOf(x.ins.obj, env, ctx)) === null) {
+      const d = hostDict(x.ins.obj, env, ctx);
+      if (d === null) {
         gap('往一格说不清形状的东西里按键写（这一刀只接 map-new 绑出来的那格）');
       }
-      return [`(dset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)} ${expr(x.ins.value, env, ctx)})`];
+      /* 异质字典（`(dict string dyn)`）：写进去的值**逐格装箱**。 */
+      const v = d.val === 'dyn' ? boxText(x.ins.value, env, ctx) : expr(x.ins.value, env, ctx);
+      return [`(dset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)} ${v})`];
     }
     case 'region': {
       /* **一格 region 就是一层作用域** —— 方言里那是 `(do …)`。摊平过一版，`nim+blockscope`
@@ -896,13 +1136,22 @@ function stmtIn(x, env, ctx) {
          `valueCalled` 那一段）：早退那一格 `ret x` 落成光秃秃的 `(ret)`，值丢掉。
          "值是纯的"那一条在 `emitCore` 里已经检过，这儿只管落。 */
       if (ctx.voidFn === true) return [...pend, '(ret)'];
+      /* **交回去的是一格聚合 / dyn 就记一笔**（`ctx.rets`，给 `emitCore` 那一句用）：
+         `retTypeOf` 跑得早，`ret (var p)` 那种它只能当 int —— 而这儿 env 上有 p 的真类型。 */
+      if (ctx.fnName !== null && ctx.fnName !== undefined && v !== undefined && v !== null) {
+        const rt0 = seenType(v, env, ctx);
+        if (isAggregate(rt0, ctx) || rt0 === 'dyn') ctx.rets.set(ctx.fnName, rt0);
+      }
       /* 多值：先把那格合成结构体拼出来（零值 + 逐个 fldset），再交回去。 */
       if (isNode(v) && v.op === 'values') {
         const b = buildValues(v, env, ctx);
         return [...b.out, ...pend, `(ret (var ${b.name})`.concat(')')];
       }
       if (pend.length === 0) {
-        return [v === undefined || v === null ? '(ret)' : `(ret ${expr(v, env, ctx)})`];
+        /* **交一格聚合回去**（lua 的 `Point.new` 返回它刚建的那格表）：与实参那一格同一条
+           规矩 —— 图上是引用，方言里也是（字典/数组是句柄、记录是 `(ptr rN)`），所以走
+           `refOrExpr` 绕过 `expr` 那道"整格当值用"的门。 */
+        return [v === undefined || v === null ? '(ret)' : `(ret ${refOrExpr(v, env, ctx)})`];
       }
       if (v === undefined || v === null) return [...pend, '(ret)'];
       /* **先把要交回去的值算掉，再跑出口动作** —— go 的语义就是这个次序（出口动作改了
@@ -1016,22 +1265,27 @@ function bindMap(nm, mp, env, ctx) {
     gap(`映射的键给了 ${keys.length} 格、值给了 ${vals.length} 格`);
   }
   let kt = keys.length > 0 ? typeOf(keys[0], env, ctx) : null;
-  let vt = vals.length > 0 ? typeOf(vals[0], env, ctx) : null;
+  let vt = keys.length > 0 ? mapValType(vals, env, ctx) : null;
   if (kt === null) {
     const hint = mapHint(nm, ctx, env);
     kt = hint.key;
     vt = hint.val;
   }
   if (kt !== 'int' && kt !== 'string') gap(`字典的键只能是 int 或 string（量到的是 ${kt}）`);
-  if (!isScalar(vt)) gap(`字典的值只能是标量（量到的是 ${vt}）`);
+  if (!isScalar(vt) && vt !== 'dyn') gap(`字典的值只能是标量或 dyn（量到的是 ${vt}）`);
   for (let i = 0; i < keys.length; i++) {
     if (typeOf(keys[i], env, ctx) !== kt) gap('字典字面量里的键类型不一样 —— 方言的字典是单态的');
-    if (typeOf(vals[i], env, ctx) !== vt) gap('字典字面量里的值类型不一样 —— 方言的字典是单态的');
+    /* **值只在不是 dyn 时查同型**：dyn 那一档本来就是"这个键装数、那个键装函数"
+       （异质字典，见上面 dyn 那一段）—— 逐格装箱，不必同型。 */
+    if (vt !== 'dyn' && typeOf(vals[i], env, ctx) !== vt) {
+      gap('字典字面量里的值类型不一样 —— 方言的字典是单态的');
+    }
   }
   const dt = `(dict ${kt} ${vt})`;
   const out = [bindLine(nm, dt, `(dnew ${dt})`, env, ctx)];
   for (let i = 0; i < keys.length; i++) {
-    out.push(`(dset (var ${nm}) ${expr(keys[i], env, ctx)} ${expr(vals[i], env, ctx)})`);
+    const v = vt === 'dyn' ? boxText(vals[i], env, ctx) : expr(vals[i], env, ctx);
+    out.push(`(dset (var ${nm}) ${expr(keys[i], env, ctx)} ${v})`);
   }
   return out;
 }
@@ -1076,26 +1330,41 @@ function nullHint(nm, ctx, env) {
   return t;
 }
 
-/** 空字典的类型从**第一处写**上取（lua / awk 那一档）。找不着就报缺口，不猜。 */
+/**
+ * 空字典的类型从**这一层里所有的写**上取（lua / awk 那一档）。找不着就报缺口，不猜。
+ *
+ * **要看全部、不能只看第一处**：lua 的 `Point = {}` 接着 `Point.__index = Point` /
+ * `function Point:total() …` —— 第一处写进去的是一格字典、后面几处是函数。只看第一处
+ * 就会把这格字典说成 `(dict string (dict string dyn))`，然后在第二处写的地方硬错。
+ * 全看一遍，混着就是 `dyn`（异质字典，见 dyn 那一段）。
+ */
 function mapHint(nm, ctx, env) {
+  const keys = [];
+  const vals = [];
   const seek = (x) => {
     if (Array.isArray(x)) {
-      for (const y of x) { const r = seek(y); if (r !== null) return r; }
-      return null;
+      for (const y of x) seek(y);
+      return;
     }
-    if (!isNode(x)) return null;
+    if (!isNode(x)) return;
     if (x.op === 'map-set' && isNode(x.ins.obj) && x.ins.obj.op === 'ref'
       && x.ins.obj.attrs.name === nm) {
-      return { key: typeOf(x.ins.key, env, ctx), val: typeOf(x.ins.value, env, ctx) };
+      keys.push(x.ins.key);
+      vals.push(x.ins.value);
     }
-    for (const k of Object.values(x.ins)) { const r = seek(k); if (r !== null) return r; }
-    return null;
+    for (const k of Object.values(x.ins)) seek(k);
   };
-  const got = seek(ctx.scope);
-  if (got === null) {
+  seek(ctx.scope);
+  if (keys.length === 0) {
     gap(`空字典 '${nm}' 的键值类型推不出来（这一层里没有一处 map-set —— 图上没有类型）`);
   }
-  return got;
+  const kt = typeOf(keys[0], env, ctx);
+  for (const k of keys) {
+    if (typeOf(k, env, ctx) !== kt) {
+      gap(`空字典 '${nm}' 上几处写的键类型不一样 —— 方言的字典键是单态的`);
+    }
+  }
+  return { key: kt, val: mapValType(vals, env, ctx) };
 }
 
 /**
@@ -1335,12 +1604,17 @@ export function emitCore(g) {
   const ctx = {
     byKey: new Map(), shapes: new Map(), decls: [], tmp: 0,
     defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [], collect: false,
-    globals: new Set(), fnEnv: null, fnParams: new Map(),
+    globals: new Set(), fnEnv: null, fnParams: new Map(), dynSites: new Map(), rets: new Map(),
+    declared: new Map(),
   };
   /* 覆盖层（`types.js`）要问的那两件**后端自己的事**（见文件头那段 import 的注）：
      登记一格形状（顺带往模块头上印 `(struct rN …)`）、报一格有名有姓的缺口。 */
   ctx.shapeOf = (names, types, multi) => shapeOf(names, types, multi, ctx);
   ctx.gap = gap;
+  /* 覆盖层问不了的第三件事（dyn 那一刀加的）：**一格 dyn 里装的是什么**。
+     那是"按键查整张图"的事（后端自己的索引），覆盖层拿它答两处：`call` 的返回类型
+     （被调的不是名字时）与 `map-get` 的宿主是一格箱子时。 */
+  ctx.dynInside = (f, e) => dynTypeOf(f, e, ctx);
   /* 一、分两拨，并把**内层函数提到顶层**（lambda 提升，见 `liftBody`）。 */
   const raw = [];
   const rest0 = [];
@@ -1371,6 +1645,9 @@ export function emitCore(g) {
   for (const g of topLift.lifted) fns.push(g);
   /* **函数值那一趟**：值位置上的匿名 `func` 提到顶层，原地换成一格 `ref`（见 `liftFnVals`）。 */
   const rest = liftFnVals(fns, topLift.body, known, taken);
+  /* **按键装箱那张表**（见 dyn 那一段）：提升完了才收 —— 提升会把值位置上的 `func`
+     换成一格 `ref`，而"这个键上装的是哪几格函数"要的正是换完之后那个名字。 */
+  ctx.dynSites = collectDynSites([...fns.map((f) => f.body), rest]);
   /* 二、每格函数的返回类型与隐式返回 —— 互相递归（`fact` 调自己）要先登记上。 */
   /* 哪几个函数的返回值**被当值用过** —— 下面那格"没人要就是 void"要它（一次数清，
      两拨都要看：函数体里的调用点与顶层那几句）。 */
@@ -1437,7 +1714,19 @@ export function emitCore(g) {
   ctx.fnEnv = fnEnv;
   /* 哪几格顶层绑定要落成**模块级变量**：函数体里的自由名字（见 `freeInFns` / `bindLine`）。 */
   ctx.globals = freeInFns(fns, env);
-  const mainStmts = stmtList(rest, env, ctx);
+  /* **main 也先空跑一趟**（缺口忽略、文本丢掉）。两件事只有跑过一趟才知道：
+   *   一、模块级变量的类型进 `ctx.fnEnv`（`bindLine` 那一句）—— 函数体里要用；
+   *   二、`ctx.rets`：**一格函数交回来的是不是聚合**。`retTypeOf` 只看得懂字面量与固定
+   *       那几格（它跑得早，问不了 env），`ret (var p)` 那种一律当 int —— 而 lua 的
+   *       `Point.new` 交回来的是它刚建的那格表。谁调它谁就得知道那是个字典，而调用点
+   *       多半在 main 里，所以这一趟得排在 main 出真文本之前。
+   * 临时量的编号在这一趟之后**归零** —— 那样出来的文本与没有这一趟时逐字节相同。 */
+  ctx.collect = true;
+  try {
+    stmtList(rest, new Map(env), ctx);
+  } catch (err) {
+    if (!(err instanceof Gap)) throw err;
+  }
   /* **函数体走两趟**。第一趟只为收实参类型：一个函数体里的调用点也会给别的函数的形参定型
    * （cpp 的析构器 `__destruct_Say(this)` 就是从另一个函数体里调的，而它在图上排在前面），
    * 而那时 `ctx.args` 还没记上。所以先空跑一趟（缺口忽略 —— 这一趟不出文本），把登记处
@@ -1448,7 +1737,6 @@ export function emitCore(g) {
    * 已经从 `ctx.args` 上拿到了，可那格形状要等调用者落到才登记。回滚过一版，症状正是
    * "在一格说不清形状的东西上取字段"。代价是第一趟可能多登记一格用不上的 struct —— 
    * 那是一句声明，不影响答案。 */
-  ctx.collect = true;
   /* 走两遍：第一遍里被调者的形参还按 int，于是**调用者自己的形参**也只能按 int 记；
    * 第二遍那几格已经有具体类型了，往下传一层就对了（`go+method` 的 `scaled` -> `total`
    * 正是这种两层）。两遍够不够：够不够都不出错 —— 记不上的那一格照旧按 int，然后报缺口。 */
@@ -1462,6 +1750,17 @@ export function emitCore(g) {
     }
   }
   ctx.collect = false;
+  /* 空跑那几趟量出来的返回类型**应到 `fn:` 上** —— 调用点靠它定型（`inferType` 的 call）。
+     只应聚合与 dyn 那几档：标量那几格 `retTypeOf` 早就答对了，覆盖不覆盖都一样。 */
+  for (const f of fns) {
+    const t = ctx.rets.get(f.name);
+    if (t === undefined || t === 'void') continue;
+    if (!(isAggregate(t, ctx) || t === 'dyn')) continue;
+    env.set(`fn:${f.name}`, t);
+    fnEnv.set(`fn:${f.name}`, t);
+  }
+  ctx.tmp = 0;
+  const mainStmts = stmtList(rest, env, ctx);
   const body = fns.map((f) => emitFn(f, fnEnv, env, ctx));
   /* **落完再核一遍**：函数体里的调用点也会往 `ctx.args` 上记类型，而那时被调的那个函数
    * 可能已经落过了（形参按当时知道的类型发的）。对不上就报缺口 —— 交出去等着方言报
@@ -1488,8 +1787,7 @@ function emitFn(f, fnEnv, env, ctx) {
   const pts = f.params.map((p, i) => ctx.args.get(`${f.name}#${i}`) ?? 'int');
   for (let i = 0; i < f.params.length; i++) fenv.set(f.params[i], pts[i]);
   const ps = f.params.map((p, i) => `(${p} ${pts[i]})`).join(' ');
-  const ret = env.get(`fn:${f.name}`) ?? 'int';
-  /* 隐式返回那一档：末尾那个值改写成 `(ret …)`（分支就把 ret 沉到两支里去 ——
+  const ret = env.get(`fn:${f.name}`) ?? 'int';  /* 隐式返回那一档：末尾那个值改写成 `(ret …)`（分支就把 ret 沉到两支里去 ——
      方言的 `if` 是语句，这样就不必有块表达式）。 */
   const arr = Array.isArray(f.body) ? f.body : (f.body === undefined || f.body === null ? [] : [f.body]);
   /* 隐式返回那一档：**在图上**把末尾那个值换成一格 `ret`，再照常落。
@@ -1498,7 +1796,10 @@ function emitFn(f, fnEnv, env, ctx) {
   /* **返回值没人要的那个函数**（`f.void`，见 `emitCore` 里 `valueCalled` 那一段）：
      体里那几格 `ret x` 落成光秃秃的 `(ret)`。这一格进体之前挂上、出来还原。 */
   const outerVoid = ctx.voidFn;
+  const outerName = ctx.fnName;
   ctx.voidFn = f.void === true;
+  /* 现在落的是谁的体（`ret` 那一格要往 `ctx.rets` 上记一笔 —— 见那儿的注）。 */
+  ctx.fnName = f.name;
   let fbody;
   try {
     fbody = f.impl === null || f.impl === undefined
@@ -1506,6 +1807,7 @@ function emitFn(f, fnEnv, env, ctx) {
       : stmtList([...arr.slice(0, -1), retWrap(arr[arr.length - 1])], fenv, ctx);
   } finally {
     ctx.voidFn = outerVoid;
+    ctx.fnName = outerName;
   }
   /* **掉到函数尾**这件事不许糊：方言要求非 void 的函数每条路都有 `ret`，而图上"体末尾那个
    * 值就是返回值"（chez / sbcl 那两门）是合法的。补一格 `(ret 0)` 交上去 = 悄悄给错答案
@@ -1689,12 +1991,35 @@ export const CORE_SHAPES = [
   },
   {
     what: '记录 / 列表 / 字典整格当值用',
-    why: '这一刀的函数形参与返回都是 int，聚合一跑出去（当实参、被 print、被 return）'
-      + '就说不清类型了 —— 只接字段 / 下标 / 键那三条路（`objText` 一处把门）',
+    why: '聚合走的是"引用"那一条：当实参、当 `ret` 的值、装进一格 dyn 都行（三处都拼名字），'
+      + '而**被 print、当值算术**那种说不清类型 —— 那时既没有目标类型也没有键可以查'
+      + '（`objText` 与 `refOrExpr` 两处把门）',
     witness: () => program([
       node('bind', { init: node('record-new', { fields: [litNode(1)] }, { names: ['x'] }) }, { name: 'p' }),
       node('prim', { args: [node('ref', {}, { name: 'p' })] }, { name: 'print' }),
     ]),
+  },
+  {
+    what: '同一个键上装着两种东西（按键拆箱查不到一致的类型）',
+    why: '异质字典拆箱靠"按键查整张图"（见 dyn 那一段）—— 同一个键一处装数、一处装串时'
+      + '这一问答不出来。**报缺口而不是挑一个**：挑一个就是把另一处静静地算错。'
+      + '要接得在图上带着"这一格装的是什么"（那是映射那一侧的事，不是这份翻译的）',
+    witness: () => {
+      const dict = (v) => node('map-new', {
+        keys: [litNode('k'), litNode('j')], vals: [v, node('func', { body: [] }, { params: [] })],
+      });
+      return program([
+        /* 两格异质字典（值混着 -> `(dict string dyn)`），同一个键 `k` 一处装数、一处装串 */
+        node('bind', { init: dict(litNode(1)) }, { name: 'm' }),
+        node('bind', { init: dict(litNode('s')) }, { name: 'n' }),
+        node('prim', {
+          args: [node('prim', {
+            args: [node('map-get', { obj: node('ref', {}, { name: 'm' }), key: litNode('k') }),
+              litNode(1)],
+          }, { name: '+' })],
+        }, { name: 'print' }),
+      ]);
+    },
   },
   {
     what: '表达式位置上的多值里有带副作用的实参',
