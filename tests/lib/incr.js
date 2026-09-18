@@ -196,8 +196,12 @@ export class RunCache {
     this.runs.push({ args, ms });
     for (const d of r.deps) this.touched.add(d);
     /* **超时不入册**：那不是这份输入的"结果"，是这台机器这一刻的状态（别的轴在并行、
-       机器在换页）。记下来就会把一次偶然的卡顿钉成永久的红。 */
-    if (!this.off && r.timedOut !== true) {
+       机器在换页）。记下来就会把一次偶然的卡顿钉成永久的红。
+       **非零退出码不入册**（task #55）：失败可能是暂态的（并行竞态、磁盘满、OOM），
+       如果记下来就会**粘在缓存里**——之后每次跑都从缓存拿那个失败（"命中 147、真跑 0"
+       却报两格红），NOCACHE=1 只是不读不写治不了，得 FORCE=1 才刷。
+       一格假红粘在缓存里比一格真红更坏（真红你会去看，假红你会开始不信判据）。 */
+    if (!this.off && r.timedOut !== true && r.code === 0) {
       this.db.set(key, {
         deps: r.deps,
         depsHash: hashList(r.deps),

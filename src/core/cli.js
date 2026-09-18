@@ -2607,7 +2607,9 @@ function runtimeObjects(cc) {
   }
 
   // 先编进暂存目录再整体 rename：中断不会留下半个缓存
-  const stage = workDirFor('rt-stage', key);
+  // **每个进程自己一个暂存目录**（key + 时间戳）：同一刻两个进程各建各的，不会撞文件名。
+  // 与 `runtimeObjectsSelf` 那一份同一条纪律（task #55）。
+  const stage = workDirFor('rt-stage', `${key}-${hash16(String(nowMs()))}`);
   const staged = srcs.map((p) => join(stage, `${basename(p, '.c')}.o`));
   const rs = spawnPar(srcs.map((p, i) => [cc, ...flags, '-c', '-o', staged[i], p]));
   for (let i = 0; i < rs.length; i++) {
