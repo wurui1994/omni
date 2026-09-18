@@ -966,6 +966,9 @@ function $js_asFn(v) {
   return v;
 }
 function $js_truthy(v) {
+  // 快路：number 与 bool 是热路径上的两种（条件里几乎只有它们）
+  if (typeof v === "number") return !(v === 0 || Number.isNaN(v));
+  if (typeof v === "boolean") return v;
   switch ($dynTag(v)) {
     case "undefined": case "null": return false;
     case "bool": return v;
@@ -1032,6 +1035,9 @@ function $js_num2(op, a, b) {
   if (ta !== tb) $rt_error("cannot mix bigint and number in '" + op + "'");
 }
 function $js_add(a, b) {
+  // 两个 number 时直接加——这是热路径上最常见的一种（profile 30%），而且对 number 来说
+  // $js_prim / $js_tonum / $js_num2 / $dynTag 全是恒等。串拼接那条路在慢路里走。
+  if (typeof a === "number" && typeof b === "number") return a + b;
   // 对象与数组先 ToPrimitive（规范 ApplyStringOrNumericBinaryOperator 第 1 步）。
   // 从前这个值域里没有"能转成原始值的东西"，所以这一格空着（ADR-0020 P1）。
   a = $js_prim("d", a);
@@ -1151,8 +1157,14 @@ function $js_ge(a, b) {
    **先 ToNumeric，再按那个数值类型加/减 1** —— int（我们这儿的 bigint）走 int 的回卷加法，
    别的先 ToNumber 再 +/-1。所以 "5"++ 是 6（不是 "51"），而 bigint 上不会撞
    "cannot mix bigint and number"。 */
-function $js_inc(x) { return $dynTag(x) === "int" ? $iadd(x, 1n) : $js_num_of(x) + 1; }
-function $js_dec(x) { return $dynTag(x) === "int" ? $isub(x, 1n) : $js_num_of(x) - 1; }
+function $js_inc(x) {
+  if (typeof x === "number") return x + 1;      // 快路：$js_num_of 对 number 是恒等
+  return $dynTag(x) === "int" ? $iadd(x, 1n) : $js_num_of(x) + 1;
+}
+function $js_dec(x) {
+  if (typeof x === "number") return x - 1;
+  return $dynTag(x) === "int" ? $isub(x, 1n) : $js_num_of(x) - 1;
+}
 function $js_neg(a) {
   const t = $dynTag(a);
   if (t === "int") return $DW(-a);
