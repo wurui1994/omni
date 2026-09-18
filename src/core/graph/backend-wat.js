@@ -834,6 +834,16 @@ function emitOnce(graph, retOf, multiOf) {
       case 'prim': {
         const args = watItems(x.ins.args);
         const name = x.attrs.name;
+        /* **len**：长度存在偏移 0 的那一格 —— 列表与**字符串共用同一份布局**
+           （`list-new` 与 `strAddr` 两处注释说的是同一句话），所以这一格两种都接，
+           一条 `i64.load` 就够。串上数的是**字节**（ADR-0026），而偏移 0 那格存的
+           正是字节数，所以 lua 的 `#s` 与 awk 的 `length(s)` 在这儿是同一条指令。
+           **它得排在下面那道"实参里有串就报缺口"的关卡前面**：那道关卡管的是算术与
+           比较（串上没意义），而 len 出的是一格 int —— 种类到这儿就落地了，不再往下流。 */
+        if (name === 'len' && args.length === 1) {
+          needMem = true;
+          return `(i64.load ${addr(expr(args[0], sc, pre))})`;
+        }
         // **串接**：`concat` 与落在串上的 `+` 都在这儿 —— 新分配一块、两段字节拷进去
         // （`$__str_cat`）。混了数的串接报缺口：那要先有"数 -> 串"，与打印多值是同一台机器
         if (kindOf(x, sc) === 'str') {
@@ -846,11 +856,16 @@ function emitOnce(graph, retOf, multiOf) {
             asStr(args[0], sc, pre),
           );
         }
-        // 串上别的算符本身就是错的（比较要按字节比、算术没意义）—— 明说
-        for (const a of args) {
-          const ka = kindOf(a, sc);
-          if (ka === 'str' || ka === 'mix') {
-            throw new Gap(`${name} 落在字符串上 —— wasm 这一批只有数的算术（串只有 + 与 concat）`);
+        /* 串上别的算符本身就是错的（比较要按字节比、算术没意义）—— 明说。
+           **这道关卡只管算术与比较那一族**：容器那几格（`fill` / `contains`）自己报，
+           因为它们接不住串的**理由不是"串上没有算术"** —— 拿一句不对的理由解释一件事，
+           清单就开始说假话（`len` 已经从这儿放出去了：它与列表共用同一份布局）。 */
+        if (name !== 'fill' && name !== 'contains') {
+          for (const a of args) {
+            const ka = kindOf(a, sc);
+            if (ka === 'str' || ka === 'mix') {
+              throw new Gap(`${name} 落在字符串上 —— wasm 这一批只有数的算术（串只有 + 与 concat）`);
+            }
           }
         }
         // **有一边是实数，整个算式就在 f64 上做**（整数那一边补一格 convert）——
@@ -903,21 +918,18 @@ function emitOnce(graph, retOf, multiOf) {
         if (name === 'bnot' && args.length === 1) {
           return `(i64.xor ${expr(args[0], sc, pre)} (i64.const -1))`;
         }
-        /* **len（列表的长度）**：存在偏移 0 的那一格（`list-new` 那条注释的原话）。
-           串上的 len（`slen`）走 `$__str_len`（宿主面函数），这条路只接列表。 */
-        if (name === 'len' && args.length === 1) {
-          if (kindOf(args[0], sc) === 'str') throw new Gap('len 落在字符串上 —— wasm 这一批只有数的算术（串只有 + 与 concat）');
-          needMem = true;
-          return `(i64.load ${addr(expr(args[0], sc, pre))})`;
-        }
         /* **push**：语句那一层专门处理（需要写回原变量），所以这儿只是语句落的时候拦一下
            就走不到这里。如果真走到了就是有人把 push 当表达式用了 —— 报缺口。 */
         if (name === 'push') {
           throw new Gap('push 在表达式位置上（wasm 这一批里 push 只接语句位置）');
         }
         /* **fill**：按长度造一格新列表，每格都是同一个值。分配 (n+1)*8，偏移 0 存长度，
-           之后是一圈 store。与 `list-new` 那一块同一套布局。 */
+           之后是一圈 store。与 `list-new` 那一块同一套布局 —— **元素那一格的约束也同一条**
+           （`onlyInt`）：串进得去（一格地址），可 `index-get` 读回来时种类已经追不着了，
+           印出来会是那个地址。所以这儿按"列表的元素"报，而不是让上面那道算术关卡
+           拿"串上没有算术"来解释一件跟算术无关的事。 */
         if (name === 'fill' && args.length === 2) {
+          onlyInt(args[1], sc, '列表的元素');
           needMem = true;
           const n = tmp(sc); pre.push(`(local.set ${n} ${expr(args[0], sc, pre)})`);
           const v = expr(args[1], sc, pre);
@@ -931,8 +943,17 @@ function emitOnce(graph, retOf, multiOf) {
             + ` (local.set ${i} (i64.add (local.get ${i}) (i64.const 1))) (br ${lab}))))`);
           return `(local.get ${a})`;
         }
-        /* **contains（线性查找）**：遍历列表找一格等于目标的元素，找到 1、到头 0。 */
+        /* **contains（线性查找）**：遍历列表找一格等于目标的元素，找到 1、到头 0。
+           串上接不住的理由是**它比的是地址**（`i64.eq`），不是字节：两串内容相同、
+           地址不同就会答错。字面量在 `strAddr` 里是去重的，所以这个错只在运行期造出来的
+           串上现形 —— 一个**只有有时候才错**的答案比报缺口糟得多。 */
         if (name === 'contains' && args.length === 2) {
+          for (const a of args) {
+            const ka = kindOf(a, sc);
+            if (ka === 'str' || ka === 'mix') {
+              throw new Gap('contains 落在字符串上 —— 这条路比的是地址（i64.eq），内容相同而地址不同就答错');
+            }
+          }
           needMem = true;
           const o = tmp(sc); pre.push(`(local.set ${o} ${expr(args[0], sc, pre)})`);
           const cv = tmp(sc); pre.push(`(local.set ${cv} ${expr(args[1], sc, pre)})`);
