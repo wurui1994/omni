@@ -153,6 +153,34 @@ function corpusOf(lang) {
   return { root: root, files: filesUnder(root, sh.ext, []) };
 }
 
+/**
+ * **"落成图"不等于"落成能跑的图"** —— 这一格数的是图里有多少处 `call` 的被调者是一格
+ * `field-get`（`x.M(…)` 里 M 没登记成方法时那条兜底："取字段再调它"）。
+ *
+ * 为什么要单独数它：**两门语言在这一处的口径不一样**。V 的映射走兜底（落得出图），
+ * go 的映射当场报（"这一批只接 fmt.Print* 与声明过的方法"，475 份卡在墙上）。于是
+ * 两栏的百分比**不是一件事** —— 量出来 V 有 423/1310 份（32.3%）靠这条兜底。
+ * 对**方法**调用来说那条兜底跑不通（记录上没有那个字段），所以这一栏是"分子里的虚数"。
+ *
+ * 不改任何一门的映射：先把账印出来。要合口径是一次设计决定（要么给图一格"按名字派发"，
+ * 要么两门一起当场报），而账印出来之后那个决定才有分母。
+ */
+function softCallsIn(x, seen) {
+  if (x === null || x === undefined) return 0;
+  if (Array.isArray(x)) return x.reduce((a, y) => a + softCallsIn(y, seen), 0);
+  if (x.kind === 'graph') return softCallsIn(x.body, seen);
+  if (x.op === undefined) return 0;
+  if (seen.has(x)) return 0;       // 图是 DAG，一格共享的节点只算一次
+  seen.add(x);
+  let n = 0;
+  if (x.op === 'call') {
+    const f = x.ins.fn;
+    if (f !== null && f !== undefined && f.op === 'field-get') n += 1;
+  }
+  for (const k of Object.values(x.ins ?? {})) n += softCallsIn(k, seen);
+  return n;
+}
+
 /** 一门语言跑一遍：解析 -> 落图，两层各自的过与没过，加一张墙的清单。 */
 function measure(lang) {
   const got = corpusOf(lang);
@@ -164,6 +192,7 @@ function measure(lang) {
   const { tb } = loadGrammarTable(join(ROOT, lang.grammar));
   const row = {
     root: got.root, files: files.length, parsed: 0, graphed: 0, bytes: 0, ms: 0,
+    softFiles: 0, softSites: 0,
   };
   const walls = new Map();
   const classes = new Map();
@@ -212,8 +241,11 @@ function measure(lang) {
     const also = trees.map((t) => t.tree);
     for (const t of trees) {
       try {
-        lang.toGraph(t.tree, { also: also });
+        const g = lang.toGraph(t.tree, { also: also });
         row.graphed += 1;
+        /* 顺带数一格账：这份图里有多少处"取字段再调它"（见 `softCallsIn` 那一段）。 */
+        const soft = softCallsIn(g, new Set());
+        if (soft > 0) { row.softFiles += 1; row.softSites += soft; }
       } catch (err) {
         bump(err.message, t.path);
       }
@@ -246,13 +278,25 @@ for (const lang of names) {
 if (rows.length === 0) {
   process.stdout.write('一门都没量到（`selfhost` 那一格只有 go / nim / vlang 三门有）。\n');
 } else {
-  process.stdout.write('语言      文件    解析过        落成图         字节    用时  子树\n');
+  process.stdout.write('语言      文件    解析过        落成图      取字段调       字节    用时  子树\n');
   for (const [lang, r] of rows) {
     process.stdout.write(`${lang.name.padEnd(9)}${String(r.files).padStart(5)}`
       + `${String(r.parsed).padStart(7)} ${pct(r.parsed, r.files).padStart(6)}`
       + `${String(r.graphed).padStart(7)} ${pct(r.graphed, r.parsed).padStart(6)}`
+      + `${String(r.softFiles).padStart(7)} ${pct(r.softFiles, r.graphed).padStart(6)}`
       + `${mb(r.bytes).padStart(9)}${`${(r.ms / 1000).toFixed(1)}s`.padStart(8)}`
       + `  ${relative(ROOT, r.root)}\n`);
+  }
+  /* **"取字段调"那一栏是分子里的虚数**（见 `softCallsIn` 那一段）—— 印在表里，不藏。 */
+  {
+    const sf = rows.reduce((a, [, r]) => a + r.softFiles, 0);
+    const ss = rows.reduce((a, [, r]) => a + r.softSites, 0);
+    if (sf > 0) {
+      process.stdout.write(`  ——「取字段调」= 落成了图，可里头有 \`call\` 的被调者是一格 field-get`
+        + `（\`x.M(…)\` 里 M 没登记成方法时那条兜底）：${sf} 份 / ${ss} 处。\n`
+        + '     对**方法**调用那条兜底运行期跑不通（记录上没有那个字段）。'
+        + '**两门的口径不一样**：V 走兜底、go 当场报 —— 所以两栏的百分比不是一件事。\n');
+    }
   }
   /* **按族的那一栏印在前面** —— 那是"下一刀该做什么"看的那一栏（逐条的话在它下面）。 */
   const tot = new Map();
