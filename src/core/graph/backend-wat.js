@@ -1485,6 +1485,15 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
            也是 0）。记成"是数"的话后面那句 `tag = "ok"` 就成了一量两型 —— 而它一辈子
            只装过串。见 WatScope.merge 那一段。 */
         const k = isNullLit(x.ins.init) ? 'nil' : kindOf(x.ins.init, sc);
+        /* **`bind y = x` 要把"那格 map 的键是什么"一起带过去**（第三十批）。
+           `for k in m` 的降级里序列只算一次 —— 落成 `bind __rg0 = ref m` 再对 `__rg0`
+           取键。键的种类记在 `m` 上（`noteMapKey` 是 map-get/set/has 顺手记的），
+           不跟着这一跳走的话 `map-keys` 那一格就查不着，于是报一句假的缺口。
+           与 `carried.fields` 那条"按名字粗化"同一条纪律：别名也是那个名字的一份。 */
+        if (x.ins.init?.op === 'ref') {
+          const src = carried.mapKeys.get(x.ins.init.attrs.name);
+          if (src !== undefined) noteMapKey({ op: 'ref', attrs: { name: x.attrs.name } }, src);
+        }
         const v = expr(x.ins.init, sc, pre);
         // 顶层的名字落全局量（别的函数要看得见它）；函数体里的还是局部量
         const g = sc === entryScope ? globals.get(x.attrs.name) : undefined;
