@@ -10,7 +10,8 @@
 // ## 这一刀接哪几档：**28 格全接**（节点级缺口 0）
 //
 // 图上**没有类型**（`nodes.js` 文件头第一条：type 不是节点），而核心方言是**有类型的**。
-// 这中间那一格差是这条腿的全部难处 —— 所以这一份里最多的代码是**把类型算出来**：
+// 这中间那一格差是这条腿的全部难处 —— 那套推断现在**住在 `types.js`**（类型覆盖层，#40），
+// 这条腿是它第一个用户；下面这张表说的是**推出来的东西怎么落成方言**：
 //
 //   标量    字面量按值推（整 `int`、带小数点 `real`、串 `string`、真假 `bool`）
 //   记录    按"字段名单 + 字段类型"登记成一格 `(struct rN …)`，同形的共用一格
@@ -40,6 +41,15 @@
 
 import { Gap } from './backend-wat.js';
 import { declOf } from './nodes.js';
+/* **类型是覆盖层的事**（#40 第一步）：这一份原来自己写了一套 `typeOf`/`elemType`/…，
+   现在整套住在 `types.js` 里 —— 这条腿只是**第一个用户**。搬那一步的验收标准是
+   "产出逐字节相同"，所以那一份里一行新逻辑都没有（连"查不到当 int"都照旧）。
+   这儿仍旧留着的两样是**后端自己的事**：`shapeOf`（要往产物头上印 `(struct rN …)`）
+   与 `gap`（措辞里带着"哪条腿"）—— 它们经 `ctx` 交给覆盖层。 */
+import {
+  isNode, isLit, argList, litType, primFixedType, elemType, dictOf, isScalar,
+  convTo, typeOf, multiShape, fieldType, litLeaningType, retTypeOf,
+} from './types.js';
 /* 证物那五份是**手搭的小图** —— 所以要 `node()` / `lit()` / `program()`（`node` 顺带查五栏）。 */
 import { node, lit as litNode, program } from './graph.js';
 import { sxTextToMod } from '../lang/sx.js';
@@ -84,25 +94,6 @@ const PRIMS_OK = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=
   /* 位运算那六格（`bnot` 拼成 `bxor -1` —— 方言的 `bin` 是二元的）。 */
   'band', 'bor', 'bxor', 'bnot', 'shl', 'shr']);
 
-/**
- * **与实参无关的那几格内建的类型**（比较出 bool、`len` 出 int、`concat` 出串、
- * `push` 是语句所以 null）。别的内建（算术）要看实参，不在这张表里 —— 回 undefined。
- *
- * 为什么单抽一格：这张表原来在 `typeOf` 与 `retTypeOf` 里**各写了一份**，而后者写漏了
- * （只有"比较出 bool、别的出 int"），于是"函数返回一格 `concat`"被说成返回 int ——
- * go 的 `fmt.Sprintf` 那一族撞出来的。`retTypeOf` 不能直接调 `typeOf`：它**跑得早**
- * （形状还没登记全），问算术那一档会报缺口。所以两处共用的是这张**只管固定那几格**的表。
- */
-function primFixedType(nm) {
-  if (nm === '<' || nm === '>' || nm === '<=' || nm === '>=' || nm === '=' || nm === '!=' || nm === 'not') return 'bool';
-  if (nm === 'len') return 'int';
-  if (nm === 'band' || nm === 'bor' || nm === 'bxor' || nm === 'bnot'
-    || nm === 'shl' || nm === 'shr') return 'int';   // 位运算只对整数，答案也是整数
-  if (nm === 'concat') return 'string';
-  if (nm === 'push') return null;      // 语句，没有值
-  return undefined;                    // 要看实参
-}
-
 /** 方言里那几个算符的名字与图上的**一一对应**（`=` / `!=` 是两边唯一不同的两格）。 */
 const BINOP = {
   '+': '+', '-': '-', '*': '*', '/': '/', '%': '%', '^': '^',
@@ -112,91 +103,8 @@ const BINOP = {
   band: '&', bor: '|', bxor: '^', shl: '<<', shr: '>>',
 };
 
-const isNode = (x) => x !== null && x !== undefined && x.op !== undefined;
-const isLit = (x) => x !== null && x !== undefined && x.lit !== undefined;
-
-/** 一格字面量的方言类型。推不出来回 null（调用方报缺口）。 */
-function litType(v) {
-  if (typeof v === 'boolean') return 'bool';
-  if (typeof v === 'string') return 'string';
-  if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'real';
-  return null;
-}
-
 /** 一格串字面量在方言里的写法（转义按 s-expr 的读法：只有这两个要转）。 */
 const strLit = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-
-/**
- * 一格**表达式**的类型（够这一刀用的那一档：字面量、名字、算子的结果、字段与元素）。
- * 名字的类型从 `env`（名字 -> 类型）里查；查不到当 `int` —— 形参默认 int 就是这一条。
- *
- * `ctx` 是**整份产物共用的一格登记处**（记录的形状表 + 要印在模块头上的 `(struct …)`）——
- * 它不能住在 `env` 里：`env` 逢作用域就 `new Map(env)` 复制一份，而 struct 声明是模块级的。
- */
-function typeOf(x, env, ctx) {
-  if (isLit(x)) return litType(x.lit) ?? 'int';
-  if (!isNode(x)) return 'int';
-  if (x.op === 'const') return litType(x.attrs.value) ?? 'int';
-  if (x.op === 'ref') return env.get(x.attrs.name) ?? 'int';
-  if (x.op === 'prim') {
-    const nm = x.attrs.name;
-    const fixed = primFixedType(nm);
-    if (fixed !== undefined) return fixed;
-    /* 算术：串在一起是 `string`、任一边是 real 就 real（方言里 int 与 real 不隐式混算 ——
-       混着写它当场报，那正是我们要的：与 ADR-0031 §1 那一格"位宽写在类型上"同一条纪律）。 */
-    const ts = argList(x, 'args').map((a) => typeOf(a, env, ctx));
-    if (ts.some((t) => t === 'string')) return 'string';
-    if (ts.some((t) => t === 'real')) return 'real';
-    return 'int';
-  }
-  if (x.op === 'call') {
-    const f = x.ins.fn;
-    const nm = isNode(f) && f.op === 'ref' ? f.attrs.name : null;
-    return (nm !== null ? env.get(`fn:${nm}`) : null) ?? 'int';
-  }
-  if (x.op === 'branch') return typeOf(x.ins.then, env, ctx);
-  if (x.op === 'field-get') return fieldType(x, env, ctx);
-  if (x.op === 'index-get') return elemType(typeOf(x.ins.obj, env, ctx)) ?? 'int';
-  if (x.op === 'map-get') {
-    const d = dictOf(typeOf(x.ins.obj, env, ctx));
-    return d === null ? 'int' : d.val;
-  }
-  if (x.op === 'map-has') return 'bool';
-  if (x.op === 'values') return multiShape(argList(x, 'args'), env, ctx).tag;
-  if (x.op === 'pick') {
-    const shape = ctx.shapes.get(typeOf(x.ins.from, env, ctx));
-    if (shape === undefined) return 'int';
-    return shape.types.get(`v${Number(x.attrs.index ?? 0)}`) ?? 'int';
-  }
-  if (x.op === 'conv') return convTo(x);
-  return 'int';
-}
-
-/** 一格 `conv` 的目标在方言里是哪个类型。不认的那一格当场报。 */
-function convTo(x) {
-  const to = x.attrs.to;
-  if (to === 'int') return 'int';
-  if (to === 'float') return 'real';
-  if (to === 'str') return 'string';
-  return gap(`这格表示转换还没接：to=${to}`);
-}
-
-/** `(arr T)` 的元素类型。不是数组回 null。 */
-function elemType(t) {
-  if (typeof t !== 'string' || !t.startsWith('(arr ')) return null;
-  return t.slice(5, -1);
-}
-
-/** `(dict K V)` 的键与值。不是字典回 null。 */
-function dictOf(t) {
-  if (typeof t !== 'string' || !t.startsWith('(dict ')) return null;
-  const two = t.slice(6, -1).split(' ');
-  if (two.length !== 2) return null;
-  return { key: two[0], val: two[1] };
-}
-
-/** 这一格类型是不是方言的标量（记录 / 列表 / 字典的元素只收这四格）。 */
-const isScalar = (t) => t === 'int' || t === 'real' || t === 'bool' || t === 'string';
 
 /**
  * 一格形状（记录或多值）在登记处里的那一份。同形的两格共用一格 `(struct …)`，
@@ -217,29 +125,6 @@ function shapeOf(names, types, multi, ctx) {
   ctx.shapes.set(shape.tag, shape);
   ctx.decls.push(`  (struct ${shape.tag} ${names.map((n, i) => `(${n} ${types[i]})`).join(' ')})`);
   return shape;
-}
-
-/**
- * 一格 `values`（`return a, b`）落成的那格结构体：字段就叫 `v0` / `v1` …
- *
- * 为什么是结构体而不是别的：方言的函数**只交一格回来**，而结构体是**值语义**的
- * （赋值/传参/返回都复制，见 tests/sexpr/cases/06-structs.sx）—— 那正好就是多值的语义。
- * 用全局变量当第二个出口是错的：中间再调一次同一个函数就串味了。
- */
-function multiShape(vals, env, ctx) {
-  const types = vals.map((v) => typeOf(v, env, ctx));
-  for (const t of types) if (!isScalar(t)) gap(`多值里有一格不是标量（量到的是 ${t}）`);
-  return shapeOf(types.map((_, i) => `v${i}`), types, true, ctx);
-}
-
-/** 一格 `field-get` 交出来的类型：宿主的形状表里查那个字段。查不到当场报。 */
-function fieldType(x, env, ctx) {
-  const t = typeOf(x.ins.obj, env, ctx);
-  const shape = ctx.shapes.get(t);
-  if (shape === undefined) gap(`在一格说不清形状的东西上取字段 '${x.attrs.field}'`);
-  const ft = shape.types.get(x.attrs.field);
-  if (ft === undefined) gap(`记录 ${t} 上没有字段 '${x.attrs.field}'`);
-  return ft;
 }
 
 /**
@@ -290,13 +175,6 @@ function walkCore(x, f) {
   if (!isNode(x) || x.op === undefined) return;
   f(x);
   for (const k of Object.values(x.ins ?? {})) walkCore(k, f);
-}
-
-/** 一格 `rest` 端口收成数组（图上一格与一串两种写法都有）。 */
-function argList(n, port) {
-  const x = n.ins[port];
-  if (x === undefined || x === null) return [];
-  return Array.isArray(x) ? x : [x];
 }
 
 const gap = (why) => { throw new Gap(`core 这条腿还没接：${why}`); };
@@ -408,7 +286,7 @@ function expr(x, env, ctx) {
       /* **已经在那一侧的什么都不做** —— 与 wat 那条腿同一句话（`backend-wat.js` 的 conv）。
        * 方言里 int 与 real 不隐式混算，所以这一格必须落准：多补一格 `(toreal …)` 会
        * 把整数除法变成实数除法。 */
-      const to = convTo(x);
+      const to = convTo(x, ctx);
       const from = typeOf(x.ins.value, env, ctx);
       const v = expr(x.ins.value, env, ctx);
       if (to === from) return v;
@@ -1210,6 +1088,10 @@ export function emitCore(g) {
     defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [], collect: false,
     globals: new Set(), fnEnv: null,
   };
+  /* 覆盖层（`types.js`）要问的那两件**后端自己的事**（见文件头那段 import 的注）：
+     登记一格形状（顺带往模块头上印 `(struct rN …)`）、报一格有名有姓的缺口。 */
+  ctx.shapeOf = (names, types, multi) => shapeOf(names, types, multi, ctx);
+  ctx.gap = gap;
   /* 一、分两拨，并把**内层函数提到顶层**（lambda 提升，见 `liftBody`）。 */
   const raw = [];
   const rest0 = [];
@@ -1427,67 +1309,6 @@ function endsWithRet(body) {
     return last.ins.else !== undefined && endsWithRet(last.ins.then) && endsWithRet(last.ins.else);
   }
   return false;
-}
-
-/**
- * **只看字面量的那一档类型**（`retTypeOf` 用它 —— 那一趟跑得早，问不了 env 与形状）。
- *
- * 为什么要它：V 与 go 的**串接也写成 `+`**（`'a' + 'b'`、`@STRUCT + '.' + @FN`），
- * 而 `+` 的类型"要看实参"。原来这一趟一律当 int，于是"函数返回一格串接"被说成返回 int，
- * 方言当场骂"要返回 int，给的是 string" —— 那是**一句错误，不是一格有名有姓的缺口**。
- * 这张表只顺着字面量与固定那几格往下看（不查名字，所以早跑也安全）：推不出来回 null。
- */
-function litLeaningType(x) {
-  if (isLit(x)) return litType(x.lit);
-  if (!isNode(x)) return null;
-  if (x.op === 'const') return litType(x.attrs.value);
-  /* **表达式位置上的 branch**（V 的 `match` 当表达式用就落成它）：两支同型，看一支就够。
-     漏了这一条的代价量过：`fn kind(c) string { return match c { … } }` 被说成返回 int，
-     方言当场骂"要返回 int，给的是 string" —— 又是一句错误而不是一格有名有姓的缺口。 */
-  if (x.op === 'branch') return litLeaningType(x.ins.then);
-  if (x.op !== 'prim') return null;
-  const fixed = primFixedType(x.attrs.name);
-  if (fixed !== undefined) return fixed;
-  const ts = argList(x, 'args').map(litLeaningType);
-  if (ts.some((t) => t === 'string')) return 'string';
-  if (ts.some((t) => t === 'real')) return 'real';
-  return null;
-}
-
-/** 一格函数体里 `ret` 交出来的类型（只看第一处 —— 这一刀不做合一）。一格都没有回 null。 */
-function retTypeOf(body, env, ctx) {
-  const seek = (x) => {
-    if (Array.isArray(x)) {
-      for (const y of x) { const t = seek(y); if (t !== null) return t; }
-      return null;
-    }
-    if (!isNode(x)) return null;
-    if (x.op === 'ret') {
-      const v = x.ins.value;
-      if (v === undefined || v === null) return 'void';
-      if (isLit(v)) return litType(v.lit);
-      if (isNode(v) && v.op === 'const') return litType(v.attrs.value);
-      /* 多值：交回去的是那格合成结构体（登记在这儿 —— 调用点要靠它定型）。 */
-      if (isNode(v) && v.op === 'values') return multiShape(argList(v, 'args'), env, ctx).tag;
-      /* 先问那张"只看字面量"的表（prim 之外还认 branch —— 见 litLeaningType）。 */
-      {
-        const t = litLeaningType(v);
-        if (t !== null) return t;
-      }
-      if (isNode(v) && v.op === 'prim') {
-        /* 与实参无关的那几格查**共用的那张表**（`primFixedType`）—— 原来这儿重抄了一份
-           且写漏了 `concat`，于是"函数返回一格 concat"被说成返回 int（go 的 `fmt.Sprintf`
-           那一族撞出来的）。**不能直接调 `typeOf`**：这一趟跑得早，形状还没登记全，
-           问算术那一档会报缺口（method 那一族当场红过）。要看实参的走 `litLeaningType`
-           （只顺着字面量看 —— V 的 `'a' + 'b'` 那一族撞出来的，见那一格的注）。 */
-        return litLeaningType(v) ?? 'int';
-      }
-      return 'int';
-    }
-    for (const k of Object.values(x.ins)) { const t = seek(k); if (t !== null) return t; }
-    return null;
-  };
-  return seek(body);
 }
 
 /**

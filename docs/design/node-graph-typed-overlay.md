@@ -100,8 +100,14 @@ c 只问"是不是数"。它们各自都对，可**同一格节点问三次会�
 
 ## 六、落地次序（一步一量，每步都能停）
 
-1. **抽**：把 core 的 `typeOf` 那一套原样搬进 `types.js`，core 改成调它 ——
-   **产出必须逐字节相同**（`tests/graph/run.js` 的 core 那一栏一格不许动）。零风险，先消一份重复。
+1. **抽**（**已落**，2026-09-18）：把 core 的 `typeOf` 那一套原样搬进 `types.js`，core 改成调它 ——
+   **产出逐字节相同**已经量过：把 142 份例子的 core 产物文本各印一遍，改前改后 `diff` 一格不差；
+   `tests/graph/run.js` 851/0/51、core 那一栏照旧 122/142，`stat`/`delete`/`shape`/`iface` 四条判据全绿。
+   搬过去的是 `litType` / `primFixedType` / `elemType` / `dictOf` / `isScalar` / `convTo` / `typeOf` /
+   `multiShape` / `fieldType` / `litLeaningType` / `retTypeOf`（顺带 `isNode` / `isLit` / `argList`）。
+   **留在 core 的两样是后端自己的事**：`shapeOf`（要往产物头上印 `(struct rN …)`）与 `gap`
+   （措辞里带着"哪条腿"）—— 两样经 `ctx.shapeOf` / `ctx.gap` 交给覆盖层，所以那一层不认识"core"这个词。
+   这一步**一行新逻辑都没有**：连判据三要治的那 9 处 `?? 'int'` 都照旧留着（一次只动一件事）。
 2. **判**：写 `tests/graph/types.js`（判据一 + 判据三的反向证物）。
 3. **核**：让 wat 的 `kindOf` 也问它，两处答案对不上就当场红。
 4. **喂**：给映射加 `hints`（`STRUCTS` / `METHODS` / `MAPS` 三张现成的表），
