@@ -41,6 +41,9 @@ import { declOf } from './nodes.js';
 import { node } from './graph.js';
 import { PRIMS } from './prims.js';
 import { Gap } from './backend-wat.js';
+/* **lambda 提升那一份与 core 共用**（`src/core/graph/lift.js`）：内层函数提到顶层、
+   捕获当多出来的形参、每处调用补实参。C 里没有嵌套函数，这一趟是必须的。 */
+import { liftBody } from './lift.js';
 
 /** 这一刀接得住的节点。别的一律有名有姓地报缺口（`can` 那一问）。 */
 const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'loop-exit',
@@ -1657,10 +1660,53 @@ class CGen {
   }
 }
 
+/**
+ * **提升那一趟**（与 core 共用一份，见 `lift.js`）：把函数体里 `bind` 出来的那格 `func`
+ * 提到顶层 —— 借的那几格名字变成多出来的形参、每处调用补上实参。
+ *
+ * 分两拨与 core 那侧一字不差：顶层的 `bind`+`func` 是"已经在顶层了"（只提它们的**体**），
+ * 别的顶层语句当一层（`owner` 叫 `main`）。不算捕获的名字 = 顶层函数名 + 顶层绑定的名字
+ * （后者在 C 里落成模块级 `static`，见 `plan` 的 `topBinds`）。
+ *
+ * 回来的是一张**新的顶层清单**：提上来的那几格排在前头（函数定义没有次序问题 ——
+ * `plan` 先把名字全派好），顶层语句照原样在后。
+ */
+function liftTop(top0) {
+  const gapC = (why) => { throw new Gap(`c 后端：${why}`); };
+  const raw = [];
+  const rest0 = [];
+  for (const it of top0) {
+    if (it !== null && it !== undefined && it.op === 'bind'
+      && it.ins.init !== undefined && it.ins.init !== null && it.ins.init.op === 'func') {
+      raw.push(it);
+    } else rest0.push(it);
+  }
+  const taken = new Set(raw.map((f) => f.attrs.name));
+  const modNames = new Set();
+  for (const it of rest0) {
+    if (it !== null && it !== undefined && it.op === 'bind') modNames.add(it.attrs.name);
+  }
+  const known = new Set([...taken, ...modNames]);
+  const liftedAll = [];
+  const tops = [];
+  for (const it of raw) {
+    const fn = it.ins.init;
+    const r = liftBody(fn.ins.body, it.attrs.name, known, taken, gapC);
+    for (const gg of r.lifted) liftedAll.push(gg);
+    tops.push({ name: it.attrs.name, params: (fn.attrs.params ?? []).map((q) => String(q)), body: r.body });
+  }
+  const rt = liftBody(rest0, 'main', known, taken, gapC);
+  for (const gg of rt.lifted) liftedAll.push(gg);
+  const mk = (f) => node('bind', {
+    init: node('func', { body: f.body }, { params: f.params, name: f.name }),
+  }, { name: f.name });
+  return [...liftedAll.map(mk), ...tops.map(mk), ...rt.body];
+}
+
 /** 一张图 -> 一份自足的 `.c`。顶层那一块落成 `main`，`func` 一律提到顶层。 */
 export function emitC(g) {
   const gen = new CGen();
-  const top = asList(g !== null && g.kind === 'graph' ? g.body : g);
+  const top = liftTop(asList(g !== null && g.kind === 'graph' ? g.body : g));
   gen.plan(top);
   gen.np = numPlan(top);
   gen.rp = recPlan(top);
