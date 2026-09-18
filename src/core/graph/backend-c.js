@@ -51,7 +51,7 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
 
 /** 这一刀接得住的内建。`prims.js` 里现有 24 格，全在这儿。 */
 const C_PRIMS = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
-  'not', 'concat', 'len', 'print', 'push', 'contains',
+  'not', 'concat', 'len', 'print', 'push', 'contains', 'fill',
   /* 位运算那六格（C 里就是 `& | ^ ~ << >>`，不需要 BigInt 那层转译）。 */
   'band', 'bor', 'bxor', 'bnot', 'shl', 'shr']);
 
@@ -354,6 +354,16 @@ static gv g_push(gv xs, gv x) {
   L->v[L->n] = x;
   L->n = L->n + 1;
   return g_nil();
+}
+
+/* g_fill: make([]T, n) -- n slots, each set to v (scalar only). */
+static gv g_fill(gv n, gv v) {
+  long long k = (long long)g_d(n);
+  if (k < 0) g_die("fill: len must be >= 0");
+  gv out = g_list_new((gv *)0, 0);
+  long long i = 0;
+  while (i < k) { g_push(out, v); i = i + 1; }
+  return out;
 }
 
 /* 成员是不是在里头：列表**找元素**（线性扫，用 g_eq —— 与 map 的键比同一条）。
@@ -1345,6 +1355,7 @@ class CGen {
     if (name === 'len') return `g_len(${args[0]})`;
     if (name === 'push') return `g_push(${args[0]}, ${args[1]})`;
     if (name === 'contains') return `g_contains(${args[0]}, ${args[1]})`;
+    if (name === 'fill') return `g_fill(${args[0]}, ${args[1]})`;
     /* 位运算那六格：**值先取成 double 再折成 long long**（这一层的值是 `gv`，
        数那一格里装的是 double —— 与别的算术走同一条路），算完再包回 `g_num`。
        头一版直接把 `gv` 当 long long 转，C 那侧当场报"cannot convert 'struct gv'"。 */

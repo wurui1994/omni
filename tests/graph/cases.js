@@ -182,6 +182,14 @@ export const CTIF = ['lin', 'notwin', 'both', 'flagoff'];
  * 这一族顺带在 core 那条腿上撞出**第二个** `retTypeOf` 的洞（match 当表达式落成 branch）。
  */
 export const CHARLIT = ['true', 'false', 'x', 'vowel', 'other'];
+/**
+ * makelen：**`make([]T, n)` 落一格内建 `fill`**（go 独一份）—— 照 `push` / `contains`
+ * 的分类：两格实参都是普通的值（长度、每格的初值），列表上的一个库函数，不是节点。
+ * 元素的零值走 `zeroOf`（`vardecl` 那一刀定的那张表）。**只接标量初值** ——
+ * js 的 `Array(n).fill(obj)` 是 n 格指向同一格，而具名结构体的零值在映射那层本来就报，
+ * 所以两边的约束是对上的。wat 与 core 按名欠着（要一格循环）。
+ */
+export const MAKELEN = ['4', '0', '7', '2'];
 
 
 
@@ -421,6 +429,8 @@ export const CASES = [
   ...fam('ctif', CTIF, ['vlang', 'nim']),
   // 第四十五个家族：**字符字面量**（V 独一份）。落成单字符的串 —— 语料里 99.2% 是比较。
   ...fam('charlit', CHARLIT, ['vlang']),
+  // 第四十六个家族：**按长度造一格列表**（go 独一份）。第 25 格内建 `fill`。
+  ...fam('makelen', MAKELEN, ['go']),
 ];
 
 

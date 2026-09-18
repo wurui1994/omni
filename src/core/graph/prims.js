@@ -120,6 +120,27 @@ export const PRIMS = new Map([
     },
     (a) => `((${a[0]}).some((__v) => __v === (${a[1]})))`),
 
+  // ---- 按长度造一格列表：**pure**（造一格新的，不改别人）--------------------------
+  //
+  // `make([]T, n)`（go）/ `[]T{len: n}`（V）—— 账上算出来的（go 那一栏 16 份）。
+  // 与 `push` / `contains` 同一类：**列表上的一个库函数 -> 内建**，不是节点。
+  //
+  // 两格实参都是普通的值：**长度**与**每一格的初值**。初值是**元素类型的零值**，由映射
+  // 那一层算（`zeroOf` 早就有那一格）—— 这一格只管"造 n 格，每格都是它"。
+  //
+  // **初值是一格聚合时不许共享**：js 的 `Array(n).fill(obj)` 是 n 格指向同一格对象，
+  // 而 go 的 `make([]T, n)` 给的是 n 格各自的零值。这一格只接**标量初值**（数 / 串 /
+  // bool / nil）—— 具名结构体的零值在映射那一层本来就当场报（`vardecl` 那一刀定的），
+  // 所以这条约束在两边是对上的。
+  P('fill', 2, [],
+    (a) => {
+      const n = Math.trunc(Number(a[0]));
+      if (!(n >= 0)) throw new Error(`fill: 长度要 >= 0，给的是 ${a[0]}`);
+      if (a[1] !== null && typeof a[1] === 'object') throw new Error('fill: 初值是一格聚合 —— 那样 n 格会指向同一格');
+      return new Array(n).fill(a[1]);
+    },
+    (a) => `new Array(Math.trunc(Number(${a[0]}))).fill(${a[1]})`),
+
   // ---- 外部 IO：**writes**。`print` 就在这儿 —— 它不是节点（见 nodes.js 文件头）----
   P('print', -1, ['writes'],
     (a, io) => { io.out.push(a.map((v) => show(v, io.show)).join(' ')); return null; },

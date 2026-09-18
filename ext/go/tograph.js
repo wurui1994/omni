@@ -541,8 +541,10 @@ function makeOf(args) {
     const n = args[1];
     if (n === undefined) return listNew([]);
     if (tag(n) === 'num' && Number(leaf(kids(n)[0])) === 0) return listNew([]);
-    throw new Error('go->graph: `make([]T, n)`（长度不是 0）要一格"按长度造"的节点 ——'
-      + ' 图上的 list-new 收的是元素表，这一批没有那一格');
+    /* `make([]T, n)` —— 落一格内建 `fill(n, T 的零值)`（列表上的一个库函数 -> 内建，
+       与 `push` / `contains` 同一类）。零值走的还是 `zeroOf` 那一格：**具名结构体的零值
+       在那儿本来就当场报**，所以"初值是一格聚合"那条约束在两边是对上的。 */
+    return node('prim', { args: [toNode(n), zeroOf(kids(ty)[0])] }, { name: 'fill' });
   }
   throw new Error(`go->graph: make 的第一格是 ${tag(ty)} —— 这一批只接 map 与切片`);
 }
@@ -647,6 +649,12 @@ function toNode(x) {
     // `[]byte(s)` / `(*T)(p)` / `map[K]V(m)` 那一族是**表示层的转换**：字节表示、
     // 指针重解释、底层类型的换名。`conv` 那格节点只管四种值的类型（int/float/str/bool）——
     // 表示层要类型才说得清（`byte` 在图上没有那一格），所以这一条留着等类型覆盖层。
+    /* `x.(T)` 是**类型断言** —— 树上的标签叫 `assert`（与图上那格断言节点同名，
+       两件事毫无关系）。单值那一种在 go 里断言不成立就 panic、双值那一种交出一格 bool ——
+       两种都要"这格值到底是什么类型"，而这一层没有类型。所以这一条留着等类型覆盖层。 */
+    case 'assert':
+      throw new Error('go->graph: `x.(T)` 是**类型断言**（树上的标签与图上那格 assert 同名，'
+        + '两件事无关）—— 断言成不成立要类型，这一格要类型覆盖层');
     case 'conv':
       throw new Error('go->graph: `[]byte(s)` / `(*T)(p)` 这一族是**表示层的转换**（字节'
         + '表示 / 指针重解释）—— `conv` 那格只管 int / float / str / bool 四种，'
