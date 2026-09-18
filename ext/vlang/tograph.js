@@ -1282,6 +1282,17 @@ function toNode(x) {
     // （283 份卡在这儿，与 go 那份 `var-decl` / `const-decl` 是同一个错）。
     case 'module': case 'import': case 'struct': case 'enum':
     case 'typedecl': case 'interface': case 'union': return [];
+    /**
+     * `#flag -lm` / `#include <stdio.h>` / `#pkgconfig gtk+-3.0` —— **给 C 后端的搭建指令**，
+     * 不产生一行运行期代码（V 自己把它们交给 cc 与链接器）。所以这一格与 `import` 同一类：
+     * **丢掉**。
+     *
+     * 为什么丢掉不算"藏账"：一份文件真要用那些 C 名字得写 `C.foo(…)`，而 `C` 不是
+     * import 进来的模块，也没有登记成方法 —— 严格档那儿当场报"收不了 .foo"、松的那一档
+     * 落成兜底并被「取字段调」那一栏数着。**指令丢掉了，用它的那一处仍旧在账上。**
+     * 43 份文件卡在这一格上（V 那一栏第四高的墙）。
+     */
+    case 'cdirective': return [];
     // `pub` 是可见性、`attrs` 是属性表 —— 两样都**不产生代码**（与 `mut` 同一类），
     // 拆一层接着走。`(attributed (attrs …) (module …))` 那一路拆完落到 module，也就是空。
     case 'pub': return toNode(kids(x)[0]);
