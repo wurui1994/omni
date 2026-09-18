@@ -39,16 +39,25 @@ function walkStrings(x, hit, seen) {
     /**
      * **只把有可能出字符串的那些格子压栈**（数与布尔一律不进）。
      *
-     * 量到的账（`node --cpu-prof src/cli.js emit c src/cli.js`）：这一格自用
-     * 236.744ms = 整趟的 11.44%，是全程序里自用最高的一格函数。而 OIR 的节点上
-     * 半数以上的字段是 span 的行列号、arity、那几个布尔标志 —— 它们压进去、弹出来、
-     * 各走一次 `typeof`，全是白工。`Object.values` 换掉 `Object.keys` + `v[k]`：
-     * 同样一次数组分配，少 N 次按串取属性。
+     * 量到的账（2026-09-19，`OMNI_PRUNE_STAT=1` 量 `emit js src/cli.js`）：这一趟走
+     * **311 万个对象**（90.9 万数组 + 220.7 万字典）、875 万格、357 万个字符串，
+     * 而**标量只有 22 万格（2.5%）** —— 上一版注释里那句"半数以上的字段是 span 的行列号、
+     * arity、布尔标志"在这一版已经不成立了（OIR 中间变过）。所以"跳过标量"省不出什么来。
      *
-     * 两样都留在自举那条腿的子集里（`for…in` 整棵树一处都没用过 —— 那不是巧合）。
+     * 真正的成本是**那 220.7 万次 `Object.values()`**：每次分配一个用完就扔的数组，
+     * 它同时是 GC 压力（整趟 13.4%）的一个直接来源。`for…in` 不分配 —— 而它现在
+     * **在自举那条腿的子集里**（ADR-0020 P3 接上了，见 `frontend-js/lower.js` 的 for-in
+     * 那一段）。数组那一支照旧直接 `for…of`（数组上它本来不分配）。
      */
-    const vals = Array.isArray(v) ? v : Object.values(v);
-    for (const y of vals) {
+    if (Array.isArray(v)) {
+      for (const y of v) {
+        if (typeof y === 'string') { hit(y); continue; }
+        if (y !== null && typeof y === 'object') stack.push(y);
+      }
+      continue;
+    }
+    for (const k in v) {
+      const y = v[k];
       if (typeof y === 'string') { hit(y); continue; }
       if (y !== null && typeof y === 'object') stack.push(y);
     }
