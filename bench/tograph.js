@@ -21,6 +21,13 @@
 //   node bench/tograph.js --limit 200  每门最多跑这么多份（改映射的时候快看一眼）
 //   node bench/tograph.js --walls 20   墙那一栏印前几条
 //   node bench/tograph.js --nc         逐条那一栏里只印**没归类**的（"上面那张表漏了什么"）
+//   node bench/tograph.js --strict-calls  **把"取字段再调它"那条兜底也当成墙**
+//
+// **两个口径都要看**（2026-09-18 量出来的那笔账）：默认那一档里，`x.M(…)` 的 M 没登记成方法
+// 时落的是"取字段再调它" —— 对**方法**调用那条兜底运行期跑不通。表里「取字段调」那一栏数的
+// 就是它（V 423/1310 = 32.3%、nim 6/9、go 0 —— go 在同一处当场报）。加上 `--strict-calls`
+// 之后 V 那一栏是 **916 / 42.3%**（掉了 394 份），剩下的 29 份是真的"字段里装着函数值"。
+// 默认留松的那一档只为了与账上历史的数可比；**要与 go 比就用 `--strict-calls`**。
 //
 // 印出来的第一栏是**按族的账**（`CLASSES`）。那一栏才是"下一刀该做什么"看的 ——
 // "还差多少"这句话的答案不是"一百条不同的话"，是**十几族决定**。
@@ -48,6 +55,12 @@ const VALUED = new Set(['--limit', '--walls']);
 const only = argv.filter((a, i) => !a.startsWith('-') && !VALUED.has(argv[i - 1]));
 const LIMIT = numArg('--limit', 0);
 const WALLS = numArg('--walls', 8);
+/**
+ * `--strict-calls`：**把"取字段再调它"那条兜底也当成一堵墙**（见 `softCallsIn` 那一段）。
+ * 默认不开 —— 开了 V 那一栏会掉下来，而"掉多少"本身就是那笔账的第二半。
+ * 这一格经 `opts.strictCalls` 交给映射（今天只有 V 那一份认它）。
+ */
+const STRICT_CALLS = argv.includes('--strict-calls');
 
 /** 递归收一棵目录树里的某个后缀（与 grammars.js 那一份同形）。 */
 function filesUnder(dir, ext, out) {
@@ -241,7 +254,7 @@ function measure(lang) {
     const also = trees.map((t) => t.tree);
     for (const t of trees) {
       try {
-        const g = lang.toGraph(t.tree, { also: also });
+        const g = lang.toGraph(t.tree, { also: also, strictCalls: STRICT_CALLS });
         row.graphed += 1;
         /* 顺带数一格账：这份图里有多少处"取字段再调它"（见 `softCallsIn` 那一段）。 */
         const soft = softCallsIn(g, new Set());

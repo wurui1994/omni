@@ -84,6 +84,24 @@ const METHODS = new Map();
 const STRUCTS = new Map();
 
 /**
+ * **声明过的字段名**（所有 struct 的字段名摊平成一个集合）与**严格档的开关**。
+ *
+ * 这两格是给 `--strict-calls` 那一档用的（`bench/tograph.js` 的同名开关传进来）。
+ * 由来是一笔量出来的账：`x.M(…)` 里 M 没登记成方法时，这一份的兜底是"**取字段再调它**"
+ * ——而那条兜底对**方法**调用运行期跑不通（记录上没有那个字段）。量出来 V 的 1310 份里
+ * **423 份（32.3%）**含这种调用（3133 处，点得最多的是 `.contains` / `.join_path` /
+ * `.execute` / `.str`，全是标准库里的方法）。**go 那一份在同一个形状上当场报**
+ * （475 份卡在墙上）—— 两门的口径不一样，于是两栏的百分比不是一件事。
+ *
+ * 严格档的判据：选择子**要么是声明过的方法**（那条路已经在了），**要么是声明过的字段**
+ * （那时"取字段再调它"是真的：字段里装着一格函数值）；两样都不是就当场报，
+ * 措辞与 go 那一份对齐。默认**不开** —— 开了 V 那一栏会掉下来，而"掉多少"本身是一笔账
+ * （见 ADR-0037 §5.1a）。
+ */
+const FIELDS = new Set();
+let STRICT_CALLS = false;
+
+/**
  * **枚举**：`枚举名.变体名 -> 值`，加一张"变体名出现在几个枚举里"的账。
  *
  * 枚举的**声明在图上是丢掉的**（类型不进图），可 `.red` / `Color.red` 这两种写法要拿到**值**
@@ -123,6 +141,7 @@ function collectDecls(x, shapesOnly) {
         else if (tag(f) === 'embed') embedded = true;
       }
       STRUCTS.set(nm, embedded ? null : fs);
+      for (const f of fs) FIELDS.add(f);      // 声明过的字段名（`--strict-calls` 那一档要它）
     }
   }
   if (tag(x) === 'enum') {
@@ -1145,6 +1164,13 @@ function toNode(x) {
           args: [toNode(kids(fn)[0]), ...argNodes],
         });
       }
+      /* **严格档**（`--strict-calls`）：选择子既不是声明过的方法、也不是声明过的字段，
+         那"取字段再调它"就是一格跑不通的调用 —— 报，措辞与 go 那一份对齐。
+         见 `FIELDS` / `STRICT_CALLS` 那一段（默认不开）。 */
+      if (STRICT_CALLS && tag(fn) === 'sel' && !FIELDS.has(leaf(kids(fn)[1]))) {
+        throw new Error('v->graph: 这一批只接声明过的方法与声明过的字段，收不了 '
+          + `.${leaf(kids(fn)[1])} —— 跨模块的方法要类型那一层`);
+      }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
     // 顶层的这几样在这一批里没有对应物 —— 丢掉，不猜。
@@ -1175,6 +1201,8 @@ export function vlangToGraph(tree, opts) {
   // 再扫一遍**声明过的方法名**（接收者的类型写在声明里 —— 单态分派，不查表）
   METHODS.clear();
   STRUCTS.clear();
+  FIELDS.clear();
+  STRICT_CALLS = opts !== undefined && opts.strictCalls === true;
   ENUMS.clear();
   EVARIANTS.clear();
   /**
