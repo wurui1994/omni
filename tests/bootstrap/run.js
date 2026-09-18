@@ -264,7 +264,7 @@ if (c1 && !quick) {
     else ok(`N1 interp --mir cases/01_basics == C0  ${ref.stdout.length} bytes`);
 
     // 非 ASCII 那条路单列一条：UTF-8 的编解码在 `interp/builtin.js` 里是手写的
-    // （TextEncoder 不在封闭 ABI 里），而它整段只有非 ASCII 才走到 —— 上面那份用例
+    // （两头都是字节的 list，见那儿的说明），而它整段只有非 ASCII 才走到 —— 上面那份用例
     // 一个字节都碰不到它。切在多字节字符中间是刻意的：非法序列的落法也要两代一致。
     const u8 = join(dir, 'utf8.omni');
     writeFileSync(u8, 'string s = "héllo 中文 😀";\nprint(s.length);\nprint(s);\nprint(s.byteAt(1));\nprint(s.substr(6, 3));\n');

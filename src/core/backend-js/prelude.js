@@ -887,6 +887,7 @@ function $dynTag(v) {
       if (v instanceof $JsRe) return "regexp";
       if (v instanceof $JsBytes) return "bytes";
       if (v instanceof $JsTextEnc) return "TextEncoder";
+      if (v instanceof $JsTextDec) return "TextDecoder";
       // ADR-0020 P1 的两格新值：真对象与 Symbol。摆在 "function" 兜底**之前** ——
       // 兜底认的是闭包记录 { fp, … }，而这两格都不是可调用的东西。
       if (v instanceof $JSObj) return "object";
@@ -4595,7 +4596,7 @@ function $js_instanceof_p(v, proto) {
   let cur = null;
   if (t === "object") cur = $js_obj_proto_get(v);
   else if (t === "list" || t === "dict" || t === "Map" || t === "Set" || t === "regexp"
-    || t === "bytes" || t === "function" || t === "TextEncoder") cur = $js_proto_of_prim(v);
+    || t === "bytes" || t === "function" || t === "TextEncoder" || t === "TextDecoder") cur = $js_proto_of_prim(v);
   else return false;
   /* 每一跳都走 $js_obj_proto_get，代理身上的 getPrototypeOf 陷阱才算得上 ——
      从前直接读 .pr，带 getPrototypeOf 陷阱的代理 instanceof Array 静静地给 false。 */
@@ -5692,6 +5693,7 @@ function $js_type_tag(v) {
       if (v instanceof $JsRe) return "regexp";
       if (v instanceof $JsBytes) return "bytes";
       if (v instanceof $JsTextEnc) return "TextEncoder";
+      if (v instanceof $JsTextDec) return "TextDecoder";
       return "function";
   }
 }
@@ -5968,6 +5970,7 @@ class $JsBytes {
   }
 }
 class $JsTextEnc {}
+class $JsTextDec {}
 /* Uint8Array 上的几格数组方法：先摊成字节的数组，再走 list 那一格。只收**结果是原始值**
    的那几个（join / at / indexOf / includes）—— map / filter / slice 在 JS 里交出的是
    TypedArray，摊成 list 会在打印与 JSON 上撒谎，所以照旧当场报错。 */
@@ -6139,6 +6142,42 @@ function $js_text_encode(e, s) {
     $rt_error(".encode expects a TextEncoder, found " + $dynTag(e));
   }
   return new $JsBytes(new TextEncoder().encode($js_asS16(s)));
+}
+/* TextDecoder 也无状态（只有 utf-8 那一档），照 TextEncoder 各分一格。
+   坏字节的替换口径就是宿主 TextDecoder 的那一份 —— omni_js.c 里那个状态机是照它写的。
+   标签只认 utf-8 那一族：别的编码当场报错，不是悄悄按 utf-8 解。 */
+function $js_text_dec_label_ok(t) {
+  /* 规范去掉的是 **ASCII** 空白那五个（宿主的 trim 还会去 \v 与 Unicode 空白），
+     大小写也只按 ASCII 折 —— 这两条都要与 omni_js.c 的 text_dec_utf8_label 相同 */
+  const ws = " \t\n\r\f";
+  let a = 0;
+  let z = t.length;
+  while (a < z && ws.includes(t[a])) a++;
+  while (z > a && ws.includes(t[z - 1])) z--;
+  let s = "";
+  for (let i = a; i < z; i++) {
+    const c = t[i];
+    s += (c >= "A" && c <= "Z") ? c.toLowerCase() : c;
+  }
+  return s === "utf-8" || s === "utf8" || s === "unicode-1-1-utf-8" || s === "unicode11utf8"
+    || s === "unicode20utf8" || s === "x-unicode20utf8";
+}
+function $js_text_dec_new(label) {
+  if (label !== undefined && label !== null) {
+    const t = $js_asS16(label);
+    if (!$js_text_dec_label_ok(t)) {
+      $rt_error("new TextDecoder: only the utf-8 labels are supported, found '" + t + "'");
+    }
+  }
+  return new $JsTextDec();
+}
+function $js_text_decode(d, b) {
+  if ($dynTag(d) !== "TextDecoder") {
+    $rt_error(".decode expects a TextDecoder, found " + $dynTag(d));
+  }
+  // dec.decode() 是空串：缺席的实参补的是 undefined（成员派发器是定长的）
+  if (b === undefined || b === null) return "";
+  return new TextDecoder().decode($js_bytes(b, ".decode").u8);
 }
 function $js_re_test(pat, flags_, s) {
   const flags = $js_asS16(flags_);

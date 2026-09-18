@@ -343,15 +343,20 @@ a 正好在 arena 顶上时直接往后追加，以及一条**累加缓存**（�
   不可区分）。**画出来的边界**：`exec` 的结果是一格 list，而 JS 那边它还挂着
   `index` / `input` —— 那两个仍然取不到。**理由变了**：不再是「list 带不了属性」（那条已经
   没了，见决策 19 的旁表），而是没人量到过用它们的地方，所以不去挂 —— 要用的那天挂上即可。
-- **字节缓冲那一族**（`ArrayBuffer` / `Uint8Array` / `DataView` / `TextEncoder`）。三者在这个
-  值域里是**同一种值**：一个 `{p, len}` 视图（`omni.h` 的 `OMNI_DYN_BYTES`），区别只在
+- **字节缓冲那一族**（`ArrayBuffer` / `Uint8Array` / `DataView` / `TextEncoder` / `TextDecoder`）。
+  前三个在这个值域里是**同一种值**：一个 `{p, len}` 视图（`omni.h` 的 `OMNI_DYN_BYTES`），区别只在
   off/len 怎么截 —— 别名关系于是天然成立，而 `interp/builtin.js` 拿一块 arena 模拟指针内存
   （ADR-0016）靠的正是它。读写一律**显式按字节拼**，不 memcpy 一个 int64/double 下去：
   这样与宿主的 `DataView` 逐位相同、不看机器的字节序，`le` 那个实参两种都真支持。
-  `.set` 走 memmove —— 两个视图可能落在同一块内存上并且重叠。`TextEncoder` 另占一格
-  （`OMNI_DYN_TEXTENC`）而不是拿 bytes 塞个哨兵：哨兵一漏就是悄悄算错。
+  `.set` 走 memmove —— 两个视图可能落在同一块内存上并且重叠。`TextEncoder` 与 `TextDecoder`
+  各占一格（`OMNI_DYN_TEXTENC` / `OMNI_DYN_TEXTDEC`）而不是拿 bytes 塞个哨兵：哨兵一漏
+  就是悄悄算错。解码那一格里 **WHATWG 的解码器状态机是自己写的一遍**
+  （`omni_js.c` 的 `text_dec_utf8`），不借 `omni_s16_of_utf8`：那一份是「一个坏字节一个
+  U+FFFD」，与宿主在截断 / 过长 / 代理项三处静静地差一两个码元（三条判据都在
+  `tests/oir/run.js` 的 `text/dec-*` 里）。
   **画出来的边界**：`.buffer` 没有 —— 带偏移的视图取不回整块内存，硬给一个就是悄悄算错；
-  要整块就把整块自己传下去。
+  要整块就把整块自己传下去。`TextDecoder` 只认 utf-8 那一族标签（别的当场报，不悄悄按
+  utf-8 解），第二个实参（`{fatal, ignoreBOM}`）没有 —— 认下来再忽略就是悄悄算错。
 - **`new Map(m)` / `new Set(s)`：初值也收同类容器**（浅拷贝）。这不是补一个便利用法：
   这套编译器自己「存一层作用域」几乎全靠它（`hir/check.js`、`frontend-asy/lower.js`、
   `sexpr/lower.js` 里三十多处 `new Map(x)` / `new Set(x)`）。从前初值只收「成对的列表」，

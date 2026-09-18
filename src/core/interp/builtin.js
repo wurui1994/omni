@@ -183,8 +183,10 @@ function truncReal(x) {
 
 /* ---------------------------------------------------------------- 字符串
  * Omni 的 string 是 **UTF-8 字节序列**（ADR-0005）：len / byteAt / substr 都按字节。
- * 宿主的字符串是 UTF-16，所以过一层编码。刻意不用 TextEncoder —— 这份文件要能被降级成 C，
- * 而 TextEncoder 不在封闭 ABI 里；手写编码在两个宿主上是同一份代码。
+ * 宿主的字符串是 UTF-16，所以过一层编码。刻意不用 TextEncoder / TextDecoder —— 它们**在**
+ * 封闭 ABI 里（js_text_enc_new / js_text_dec_new），但收发的是字节**视图**，而这里两头都是
+ * 字节的 list（解释器的表示），套进视图再摊回来是白搭两趟拷贝。替换口径与 TextDecoder
+ * 一致（下面那张续字节区间表就是照它写的），手写这一份在两个宿主上也是同一份代码。
  */
 function encodeUtf8(s) {
   const out = [];

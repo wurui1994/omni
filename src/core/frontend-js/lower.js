@@ -3669,7 +3669,8 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     // 字节缓冲那一族（ADR-0011）：ArrayBuffer 与它上面的 Uint8Array / DataView 在这个
     // 值域里是**同一种值**（一个视图），三者共享同一块内存 —— interp/builtin.js 模拟
     // 指针内存靠的就是这个别名关系。TextEncoder 无状态，但 .encode 是第二步，所以也得有值。
-    if ((n === 'ArrayBuffer' || n === 'Uint8Array' || n === 'DataView' || n === 'TextEncoder')
+    if ((n === 'ArrayBuffer' || n === 'Uint8Array' || n === 'DataView' || n === 'TextEncoder'
+      || n === 'TextDecoder')
       && !this.lookup(n) && !this.classes.has(n)) {
       const sp = e.args.find((a) => a.type === 'Spread');
       if (sp !== undefined) {
@@ -3680,6 +3681,16 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
       if (n === 'TextEncoder') {
         if (as.length !== 0) this.err(e.span, 'new TextEncoder() takes no arguments');
         return op('js_text_enc_new', []);
+      }
+      /* new TextDecoder([label])：标签留到运行期查（只认 utf-8 那一族）—— 编译期挡的话
+       * `new TextDecoder(enc)` 这种写法连"能不能跑"都答不了。第二个实参（{fatal, ignoreBOM}）
+       * 没有实现：认下来再忽略就是悄悄算错，所以当场报。 */
+      if (n === 'TextDecoder') {
+        if (as.length > 1) {
+          this.err(e.span, 'new TextDecoder(label, options) is not supported (only the label)');
+          return undefExpr();
+        }
+        return op('js_text_dec_new', [as[0] ?? undefExpr()]);
       }
       if (n === 'ArrayBuffer') {
         if (as.length !== 1) {
@@ -4116,7 +4127,7 @@ const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number'
 /* `new X(...)` 认的内建构造器（newExpr 里一支支写着）。这张表只给 `typeof X` 用 ——
  * 它们在 JS 里都是函数值，而这个值域里还不能把它们当值传，所以答案是编译期定死的。 */
 const CTOR_NAMES = new Set(['Map', 'Set', 'WeakMap', 'WeakSet', 'Array', 'ArrayBuffer',
-  'Uint8Array', 'DataView', 'TextEncoder', 'RegExp', 'Promise', 'Proxy', 'Date']);
+  'Uint8Array', 'DataView', 'TextEncoder', 'TextDecoder', 'RegExp', 'Promise', 'Proxy', 'Date']);
 
 const STATIC_CALLS = {
   /* `len` 那一列：这个名字**当值用**时的 `fn.length`（照规范/qjs 量的），标了才允许

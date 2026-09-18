@@ -588,6 +588,10 @@ export const JS_ABI = {
   // 有个值。单独一个标签而不是拿 bytes 塞个哨兵 —— 哨兵一漏就是悄悄算错。
   js_text_enc_new: { js: '$js_text_enc_new', c: 'omni_js_text_enc_new', arity: 0 },
   js_text_encode: { js: '$js_text_encode', c: 'omni_js_text_encode', arity: 2 },
+  /* TextDecoder 同理。标签是**运行期**实参（缺席时是 undefined）：只认 utf-8 那一族，
+     别的当场报错 —— 编译期挡的话 `new TextDecoder(enc)` 这种写法会连"能不能跑"都答不了。 */
+  js_text_dec_new: { js: '$js_text_dec_new', c: 'omni_js_text_dec_new', arity: 1 },
+  js_text_decode: { js: '$js_text_decode', c: 'omni_js_text_decode', arity: 2 },
 
   // -------------------------------------------------- 字符串/数组的其余缺口
   // 都是量出来的：split 的字符串分隔符形式 4 处（'/' 与 '\n'，都不带 limit），
@@ -773,6 +777,7 @@ export const JS_TAG_C = {
   regexp: 'OMNI_DYN_RE',
   bytes: 'OMNI_DYN_BYTES',
   TextEncoder: 'OMNI_DYN_TEXTENC',
+  TextDecoder: 'OMNI_DYN_TEXTDEC',
   int: 'OMNI_DYN_INT',
   bool: 'OMNI_DYN_BOOL',
   /* uint 只有 C 那一侧有（决策 19 的 OMNI_DYN_UINT：asUintN 的结果可能落在 [2^63, 2^64)）。
@@ -889,6 +894,7 @@ export const JS_METHODS = {
   getFloat64: { on: { bytes: 'js_buf_get_f64' } },
   setFloat64: { on: { bytes: 'js_buf_set_f64' } },
   encode: { on: { TextEncoder: 'js_text_encode' } },
+  decode: { on: { TextDecoder: 'js_text_decode' } },
   join: { on: { list: 'js_arr_join', bytes: 'js_buf_join' } },
   map: { on: { list: 'js_arr_map' } },
   filter: { on: { list: 'js_arr_filter' } },

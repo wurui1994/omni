@@ -62,6 +62,7 @@ omni_dyn omni_js_type_tag(omni_dyn v) {
     case OMNI_DYN_RE: n = "regexp"; break;
     case OMNI_DYN_BYTES: n = "bytes"; break;
     case OMNI_DYN_TEXTENC: n = "TextEncoder"; break;
+    case OMNI_DYN_TEXTDEC: n = "TextDecoder"; break;
     case OMNI_DYN_SYM: n = "symbol"; break;
     /* 真对象（ADR-0020 P1-c）：解释器的成员派发靠这个名字认接收者，与 prelude 的
        $js_type_tag 对 $JSObj 给的 "object" 逐字一致 —— 默认那一支是 "function"，
@@ -1144,6 +1145,121 @@ omni_dyn omni_js_text_encode(omni_dyn e, omni_dyn s) {
   p = (uint8_t *)omni_alloc((size_t)(u.len == 0 ? 1 : u.len));
   if (u.len > 0) memcpy(p, u.p, (size_t)u.len);
   return bytes_wrap(p, u.len);
+}
+
+/* WHATWG 的 utf-8 解码器状态机（encoding 规范 §6.2）。**不能**拿 omni_s16_of_utf8 顶替：
+   那一份是"一个坏字节一个 U+FFFD"，与宿主在三处不齐（拿 node 量的）——
+   [E4 B8] 截断我们出两个 FFFD、宿主出一个；[C0 80] 过长序列我们给 U+0000、宿主两个 FFFD；
+   [ED A0 80] 代理项我们一个 FFFD、宿主三个。都是静默算错，所以照状态机重写一遍。 */
+static omni_s16 text_dec_utf8(const uint8_t *p, int64_t len) {
+  /* 上界：每个码元至少吃掉一个字节（4 字节序列出 2 个码元，但它占了 4 个字节），
+     结尾那一个 FFFD 也落在已经吃掉、没出货的那些字节上 —— 所以 n <= len */
+  uint16_t *out = (uint16_t *)omni_alloc((size_t)(len <= 0 ? 1 : len) * sizeof(uint16_t));
+  int64_t n = 0, i = 0;
+  uint32_t cp = 0;
+  int needed = 0, seen = 0;
+  unsigned lower = 0x80, upper = 0xbf;
+  while (i < len) {
+    unsigned b = p[i];
+    if (needed == 0) {
+      i++;
+      seen = 0;
+      if (b <= 0x7f) { out[n++] = (uint16_t)b; continue; }
+      if (b >= 0xc2 && b <= 0xdf) { needed = 1; cp = b & 0x1fu; continue; }
+      if (b >= 0xe0 && b <= 0xef) {
+        if (b == 0xe0) lower = 0xa0;   /* 过长的三字节序列 */
+        if (b == 0xed) upper = 0x9f;   /* 代理项那一段 */
+        needed = 2; cp = b & 0x0fu;
+        continue;
+      }
+      if (b >= 0xf0 && b <= 0xf4) {
+        if (b == 0xf0) lower = 0x90;   /* 过长的四字节序列 */
+        if (b == 0xf4) upper = 0x8f;   /* > U+10FFFF */
+        needed = 3; cp = b & 0x07u;
+        continue;
+      }
+      out[n++] = 0xfffd;               /* C0/C1、F5..FF，以及落单的续字节 */
+      continue;
+    }
+    if (b < lower || b > upper) {
+      /* 这个字节**不消费** —— 它可能是下一个序列的头（[E4 41] 要出 FFFD 再出 'A'） */
+      needed = 0; seen = 0; cp = 0; lower = 0x80; upper = 0xbf;
+      out[n++] = 0xfffd;
+      continue;
+    }
+    lower = 0x80; upper = 0xbf;
+    cp = (cp << 6) | (b & 0x3fu);
+    seen++;
+    i++;
+    if (seen < needed) continue;
+    if (cp <= 0xffff) {
+      out[n++] = (uint16_t)cp;
+    } else {
+      cp -= 0x10000;
+      out[n++] = (uint16_t)(0xd800 + (cp >> 10));
+      out[n++] = (uint16_t)(0xdc00 + (cp & 0x3ff));
+    }
+    needed = 0; seen = 0; cp = 0;
+  }
+  if (needed != 0) out[n++] = 0xfffd;  /* 结尾截断：整段坏前缀只出一个 */
+  /* 没给 ignoreBOM 时**去掉开头那一个** U+FEFF（两个 BOM 只去一个，拿 node 量过） */
+  if (n > 0 && out[0] == 0xfeff) return omni_s16_of_units(out + 1, n - 1);
+  return omni_s16_of_units(out, n);
+}
+
+/* 标签只认 utf-8 那一族（WHATWG encoding 的 index 里给 UTF-8 的那几个别名）。
+   别的编码当场报错，不是悄悄按 utf-8 解 —— 那会把 latin1 的字节静静地译错。 */
+static bool text_dec_utf8_label(omni_str s) {
+  static const char *ok[] = { "utf-8", "utf8", "unicode-1-1-utf-8", "unicode11utf8",
+    "unicode20utf8", "x-unicode20utf8" };
+  int64_t a = 0, z = s.len;
+  size_t k;
+  /* 规范先去掉两头的 ASCII 空白，再按大小写不敏感比 */
+  while (a < z && (s.p[a] == ' ' || s.p[a] == '\t' || s.p[a] == '\n' || s.p[a] == '\r'
+    || s.p[a] == '\f')) a++;
+  while (z > a && (s.p[z - 1] == ' ' || s.p[z - 1] == '\t' || s.p[z - 1] == '\n'
+    || s.p[z - 1] == '\r' || s.p[z - 1] == '\f')) z--;
+  for (k = 0; k < sizeof(ok) / sizeof(ok[0]); k++) {
+    int64_t m = (int64_t)strlen(ok[k]);
+    int64_t j;
+    if (z - a != m) continue;
+    for (j = 0; j < m; j++) {
+      char c = s.p[a + j];
+      if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+      if (c != ok[k][j]) break;
+    }
+    if (j == m) return true;
+  }
+  return false;
+}
+
+/* TextDecoder 也无状态（只有 utf-8 这一档），照 TextEncoder 各分一格 */
+omni_dyn omni_js_text_dec_new(omni_dyn label) {
+  uint8_t *tag;
+  if (label.tag != OMNI_DYN_UNDEF && label.tag != OMNI_DYN_NULL) {
+    omni_str t = omni_s16_to_utf8(omni_js_as_s16(label));
+    if (!text_dec_utf8_label(t)) {
+      omni_errorf("new TextDecoder: only the utf-8 labels are supported, found '%.*s'",
+        (int)t.len, t.p);
+    }
+  }
+  tag = (uint8_t *)omni_alloc(1);
+  *tag = 0;
+  return omni_dyn_of_ref((void *)tag, OMNI_DYN_TEXTDEC);
+}
+
+omni_dyn omni_js_text_decode(omni_dyn d, omni_dyn b) {
+  omni_js_bytes *v;
+  if (d.tag != OMNI_DYN_TEXTDEC) {
+    omni_errorf(".decode expects a TextDecoder, found %s", omni_dyn_tag_name(d.tag));
+  }
+  /* `dec.decode()` 是空串（缺席的实参补的是 undefined），与宿主一样 */
+  if (b.tag == OMNI_DYN_UNDEF || b.tag == OMNI_DYN_NULL) {
+    static const uint16_t none = 0;
+    return omni_dyn_of_s16(omni_s16_of_units(&none, 0));
+  }
+  v = want_bytes(b, ".decode");
+  return omni_dyn_of_s16(text_dec_utf8(v->p, v->len));
 }
 
 

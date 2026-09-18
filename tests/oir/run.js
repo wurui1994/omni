@@ -761,6 +761,47 @@ c('text/enc-lone-surrogate', BSTR(ENC('\ud800'), 0, 3),
 c('text/enc-then-view', BLEN(VIEW(ENC('中a'), 1, 2)),
   `new Uint8Array(${RENC('"中a"')}.buffer, 1, 2).length`);
 
+/* TextDecoder：也是无状态的一格，但**坏字节的替换口径**不是随便挑的 —— 拿
+   omni_s16_of_utf8（"一个坏字节一个 U+FFFD"）顶替，会在截断 / 过长 / 代理项三处
+   与宿主静静地少一个或多两个 FFFD。所以逐例比，而且比的是 JSON.stringify 之后的文本：
+   落单的代理项与 FFFD 在管道上看不出区别，转义了才看得出是哪一个码元。 */
+const U8L = (...bs) => js('js_buf_of_list', [arr(...bs.map(real))]);
+const RU8L = (...bs) => `new Uint8Array([${bs.join(', ')}])`;
+const DEC = (b, label) => js('js_text_decode',
+  [js('js_text_dec_new', [label === undefined ? undef : str(label)]), b]);
+const DJ = (...bs) => J(DEC(U8L(...bs)));
+const RDJ = (...bs) => `JSON.stringify(new TextDecoder().decode(${RU8L(...bs)}))`;
+c('text/dec-typeof', js('js_typeof', [js('js_text_dec_new', [undef])]), 'typeof new TextDecoder()');
+c('text/dec-ascii', DJ(65, 90), RDJ(65, 90));
+c('text/dec-empty', DJ(), RDJ());
+c('text/dec-no-arg', J(js('js_text_decode', [js('js_text_dec_new', [undef]), undef])),
+  'JSON.stringify(new TextDecoder().decode())');
+c('text/dec-cjk', DJ(0xe4, 0xb8, 0xad), RDJ(0xe4, 0xb8, 0xad));
+c('text/dec-astral', DJ(0xf0, 0x9f, 0x98, 0x80), RDJ(0xf0, 0x9f, 0x98, 0x80));
+c('text/dec-max', DJ(0xf4, 0x8f, 0xbf, 0xbf), RDJ(0xf4, 0x8f, 0xbf, 0xbf));
+// BOM：没给 ignoreBOM 时去掉**开头那一个**（两个只去一个，中间那个照旧是 U+FEFF）
+c('text/dec-bom', DJ(0xef, 0xbb, 0xbf, 0x41), RDJ(0xef, 0xbb, 0xbf, 0x41));
+c('text/dec-bom-twice', DJ(0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf),
+  RDJ(0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf));
+c('text/dec-bom-mid', DJ(0x41, 0xef, 0xbb, 0xbf, 0x41), RDJ(0x41, 0xef, 0xbb, 0xbf, 0x41));
+// 坏字节那五类：截断、落单的续字节、非法头、过长、代理项、超出 U+10FFFF
+c('text/dec-trunc', DJ(0xe4, 0xb8), RDJ(0xe4, 0xb8));
+c('text/dec-trunc-c2', DJ(0xc2), RDJ(0xc2));
+c('text/dec-cont-alone', DJ(0x80, 0x41), RDJ(0x80, 0x41));
+c('text/dec-bad-lead', DJ(0xff, 0x41), RDJ(0xff, 0x41));
+c('text/dec-f5', DJ(0xf5, 0x41), RDJ(0xf5, 0x41));
+c('text/dec-overlong-2', DJ(0xc0, 0x80), RDJ(0xc0, 0x80));
+c('text/dec-overlong-3', DJ(0xe0, 0x80, 0x80), RDJ(0xe0, 0x80, 0x80));
+c('text/dec-surrogate', DJ(0xed, 0xa0, 0x80), RDJ(0xed, 0xa0, 0x80));
+c('text/dec-too-big', DJ(0xf4, 0x90, 0x80, 0x80), RDJ(0xf4, 0x90, 0x80, 0x80));
+// 坏序列后面那个头字节**不能被吞掉**（[E4 41] 要出 FFFD 再出 'A'）
+c('text/dec-resync', DJ(0xe4, 0x41, 0x42), RDJ(0xe4, 0x41, 0x42));
+// 标签：utf-8 那一族按大小写不敏感认，两头的 ASCII 空白先去掉
+c('text/dec-label', J(DEC(U8L(0xe4, 0xb8, 0xad), 'UTF-8')),
+  'JSON.stringify(new TextDecoder("UTF-8").decode(new Uint8Array([228, 184, 173])))');
+c('text/dec-label-alias', J(DEC(U8L(65), ' utf8 ')),
+  'JSON.stringify(new TextDecoder(" utf8 ").decode(new Uint8Array([65])))');
+
 // ---------------------------------------------------------------- node 宿主面
 // 三个进程（ref.mjs / out.mjs / a.out）是**顺序**跑的，cwd 都是仓库根，所以
 // "同一个固定路径先写后读"这种跨用例的状态是各自独立且一致的。

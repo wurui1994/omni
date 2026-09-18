@@ -95,7 +95,11 @@ enum {
      真对象只在**要原型或要属性位**的地方出现 —— Object.create、类的实例、访问器。
      两种表示并存是有意的：dict 那条路是热路径（取字段最常见），不该为原型链付账。
      新标签排在**末尾**：前面那些的号是产物里到处写着的。 */
-  OMNI_DYN_OBJ
+  OMNI_DYN_OBJ,
+  /* TextDecoder（ADR-0011 的字节缓冲那一族）。与 TextEncoder 一样无状态（我们只认 utf-8
+     这一档），但 `new TextDecoder().decode(b)` 是两步，所以那一格也得有个值，而且 ===
+     比的是同一性 —— 于是各占一格标签。排在**末尾**：见上一条。 */
+  OMNI_DYN_TEXTDEC
 };
 
 /* Symbol 的载荷。`has_d` 分开记：`Symbol()` 的描述是 undefined，而 `Symbol("")` 是空串，
@@ -747,6 +751,11 @@ omni_dyn omni_js_buf_get_f64(omni_dyn b, omni_dyn at, omni_dyn le);
 void omni_js_buf_set_f64(omni_dyn b, omni_dyn at, omni_dyn v, omni_dyn le);
 omni_dyn omni_js_text_enc_new(void);
 omni_dyn omni_js_text_encode(omni_dyn e, omni_dyn s);
+/* TextDecoder：只有 utf-8 那一档（别的标签当场报错，不是悄悄按 utf-8 解）。
+   坏字节的替换口径照 WHATWG 的解码器状态机，与宿主逐个码元相同 —— 不能用
+   omni_s16_of_utf8，那一份是"一个坏字节一个 U+FFFD"，与宿主在截断/过长/代理三处不齐。 */
+omni_dyn omni_js_text_dec_new(omni_dyn label);
+omni_dyn omni_js_text_decode(omni_dyn d, omni_dyn b);
 bool omni_js_re_test(omni_dyn pattern, omni_dyn flags, omni_dyn s);
 
 /* omni_js_num.c —— JS 的 Number / Math / BigInt。

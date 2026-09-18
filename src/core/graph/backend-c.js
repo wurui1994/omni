@@ -1997,9 +1997,13 @@ export function runC(text) {
   /* **攒下来的是字节，不是文本**：C 那一路的串在解释器里是"一个字符一个字节"
    * （`interp/builtin.js` 的 printBytes / outIsBytes 那两格），落宿主 stdout 时按 latin1
    * 写出去 —— 而 `setOutSink` 把那一步接走了，所以这儿要自己把 UTF-8 读回来。
-   * 不读的话 `café` 会变成 `cafÃ©`：字节没错，只是当文本比的时候少了一趟解码。 */
-  const outText = new TextDecoder('utf-8', { fatal: true })
-    .decode(Uint8Array.from(buf, (ch) => ch.charCodeAt(0) & 0xff));
+   * 不读的话 `café` 会变成 `cafÃ©`：字节没错，只是当文本比的时候少了一趟解码。
+   *
+   * `TextDecoder` 与 `Uint8Array` 都在封闭 ABI 里（ADR-0011 决策 2）—— 这个文件自己
+   * 也要被降级，所以这一行同时是那两格的判据（`check:self` / `build:native`）。 */
+  const bytes = [];
+  for (let k = 0; k < buf.length; k++) bytes.push(buf.charCodeAt(k) % 256);
+  const outText = new TextDecoder().decode(new Uint8Array(bytes));
   for (const line of outText.split('\n')) if (line !== '') out.push(line);
   return { value: null, out };
 }

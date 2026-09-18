@@ -21,6 +21,8 @@ const char *omni_dyn_tag_name(int t) {
     "symbol",
     /* 真对象（ADR-0020 P1-c）：typeof 是 "object"，错误消息里也这么叫 */
     "object",
+    /* TextDecoder（ADR-0011）：与 TextEncoder 一样各占一格 */
+    "TextDecoder",
   };
   return names[t];
 }
