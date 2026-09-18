@@ -1287,12 +1287,25 @@ class FnGen {
       buf.emit(ldrU(3, TMP1, TMP0, 0));
       /* aux > 0：这一格里躺着一个 struct（第三十九片）。回的是**这一格的地址**，
        * 游标往前走 `align8(n)` —— 与写的那一侧（`argPlaces` 里的 `ARGMEM`）同一条规则。
-       * 内容一个字节都不动：拷不拷由前端那边的赋值决定。 */
+       * 内容一个字节都不动：拷不拷由前端那边的赋值决定。
+       *
+       * **B.3 那一档例外**（第一百五十四片量出来的一个真错）：非 HFA 且 >16 字节的聚合，
+       * 变参区里躺着的不是内容，是**一个指针**（指向调用方现做的那份拷贝）——
+       * 写的那一侧本来就是这么摆的（`pcsPlaces` 的 `ptr` 那一支），读的这一侧却一直按
+       * 「内容摊在格子里」算，于是 24 字节的 struct 过一趟 `va_arg` 读到的是垃圾，
+       * 而且每趟不同（读的是拷贝那块之后的栈）。tcc 的 `gen_va_arg` 是同一条：
+       * `n = size > 16 ? 8 : align8(size)`，再补一条 `ldr x(r1),[x(r1)]`
+       * （`arm64-gen.c:1464` 与 `:1492`）。 */
       if (f.aux[i] !== 0) {
-        const n = memArgSize(f.aux[i]);
-        const step = n + (n % 8 === 0 ? 0 : 8 - (n % 8));
+        const mem = memInfoOf(f.aux[i], false);
+        const n = mem.size;
+        const indirect = mem.hfa === null && n > 16;
+        const step = indirect ? 8 : n + (n % 8 === 0 ? 0 : 8 - (n % 8));
         if (step > 4095) return arm64Nyi(`va_arg 取 ${n} 字节的 struct（一条 add 的立即数装不下）`);
+        /* 值 = 这一格的地址；间接那一档要再读一层（那格里装的是指针）。
+           两条都在动游标之前发 —— TMP1 就是游标。 */
         buf.emit(movReg(1, RES, TMP1));
+        if (indirect) buf.emit(ldrU(3, RES, TMP1, 0));
         buf.emit(addImm(1, TMP1, TMP1, step), strU(3, TMP1, TMP0, 0));
         return this.def(i, RES);
       }

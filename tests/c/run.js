@@ -660,7 +660,7 @@ function abiCase(dir, arch) {
       return;
     }
   }
-  ok(`${name} [8 种形状 × 3 种混法]`);
+  ok(`${name} [9 种形状（含变参里的聚合）× 3 种混法]`);
 }
 
 if (CC === null) {

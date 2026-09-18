@@ -12,6 +12,12 @@
  *   I12  12 字节        **不是 8 的整数倍**：末格不满，读写都不许越过那一块
  *   C5   5 字节         同上，更窄
  *   mix  掺着来          两串寄存器各自数、放不下的落栈 —— 「串位」只在这一条上露出来
+ *
+ * 第九格是**变参里的聚合**（第一百五十四片）：`...` 后面的 struct 与固定形参那一套不是
+ * 同一条路。arm64 上 >16 字节的聚合在变参区里放的是**一个指针**（B.3 照旧生效），≤16 的
+ * 摊在格子里；SysV 上一律摊在栈上。读的那一侧（`va_arg`）必须与写的那一侧同一条规则 ——
+ * 而「两头用同一套错约定」是自洽的，所以这一条也得放到"与 cc 对账"这张桌子上来。
+ * 量出来的：`va_arg` 那一侧从前一律按"内容摊在格子里"算，24 字节的 struct 读到的是垃圾。
  */
 typedef struct { long long a; } S8;
 typedef struct { long long a, b; } S16;
@@ -29,6 +35,8 @@ double takeF3(F3 f);
 long long takeI12(I12 v);
 long long takeC5(C5 v);
 long long mix(long long z, S16 s, double d, D2 dd, S24 big, int t);
+/* 变参那一格：一趟里把 >16、≤16、HFA、标量四种都过一遍（次序刻意掺着）。 */
+long long vamix(int n, ...);
 
 S8 mk8(long long a);
 S16 mk16(long long a, long long b);

@@ -14,6 +14,27 @@ long long mix(long long z, S16 s, double d, D2 dd, S24 big, int t) {
     + big.a + big.b + big.c + t;
 }
 
+/* 变参那一格（见 abi.h 第九条）：每个成员都乘一个不同的权重再加起来 ——
+   哪一格读串位了，答案就一定不同（少读一个成员的话可能碰巧不显形）。 */
+long long vamix(int n, ...) {
+  __builtin_va_list ap;
+  long long acc = 0;
+  int i;
+  __builtin_va_start(ap, n);
+  for (i = 0; i < n; i++) {
+    S24 big = __builtin_va_arg(ap, S24);        /* >16：arm64 上格子里是个指针 */
+    S16 two = __builtin_va_arg(ap, S16);        /* ≤16：摊在格子里 */
+    double d = __builtin_va_arg(ap, double);
+    D2 dd = __builtin_va_arg(ap, D2);           /* HFA，可变参里照旧走栈 */
+    int t = __builtin_va_arg(ap, int);
+    acc += big.a * 1000000 + big.b * 100000 + big.c * 10000
+      + two.a * 1000 + two.b * 100
+      + (long long)d * 10 + (long long)dd.x * 3 + (long long)dd.y * 5 + t;
+  }
+  __builtin_va_end(ap);
+  return acc;
+}
+
 S8 mk8(long long a) { S8 s; s.a = a; return s; }
 S16 mk16(long long a, long long b) { S16 s; s.a = a; s.b = b; return s; }
 S24 mk24(long long a, long long b, long long c) { S24 s; s.a = a; s.b = b; s.c = c; return s; }
