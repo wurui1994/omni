@@ -488,8 +488,10 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
    *   2. 探号**从记着的那个序号接着走**，不是每次都从 2 重来。从前同一个名字第 k 次要探
    *      k 遍（整体 O(n²)）；`v_i` / `v_t` 这一族在整份编译器里各有上千次。
    *
-   * 出的名字**一格不变**：序号表只是个起点，`while` 照旧在 —— 别的路子直接塞进 `used` 的
-   * 名字（`omni_clo_N` 那种）仍旧会被让开。所以产物逐字节相同，这是这一刀的判据。
+   * 名字**唯一性不变**：序号表只是个起点，`while` 照旧在 —— 别的路子直接塞进 `used` 的
+   * 名字（`omni_clo_N` 那种）仍旧会被让开。但**出的名字会变**（探号接着走，不从 2 重来），
+   * 所以产物**不是**逐字节相同，判据是语义那一套（check:self、js-exec、js-trim）与
+   * `fix:self`（同一版编译器自己编自己，那一条仍旧逐字节相同）。
    */
   mangle(prefix, name) {
     const base = `${prefix}${cSafe(name)}`;
@@ -833,15 +835,25 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
      * 原型链之后它就该翻过来了 —— 量出来的分叉：类方法里造的对象字面量，它自己的方法
      * `get2()` 里 this 是**外层实例**而不是那个字面量（qjs 给 9，这边给 1）。
      * 提到 this 才发这一句：每个函数都发就是每次调用多一次 op，而量过的源码里绝大多数
-     * 函数根本不提它。加进 captured 是为了内层箭头能把它当 cell 捕获下去。 */
+     * 函数根本不提它。加进 captured 是为了内层箭头能把它当 cell 捕获下去。
+     *
+     * **形参的默认值也要扫**（与上面 `capturedNames(params)` 同一类漏）：`bodyStmts` 只是
+     * **体**，`m(s, f = () => this.val(s))` 里那个箭头不在里头 —— 于是入口那一句
+     * `js_this_take` 不发、cell 也不装，箭头里的 `this` 是 undefined。四行可复现
+     * （`class K { go(s, f = () => this.val(s)) { return f(); } }`：qjs/node 给 8，
+     * 这边报 `cannot read property 'val' of undefined`）。判据是这份编译器自己 ——
+     * `Lower.forOf(s, seqOf = () => op(…, [this.expr(s.right)]))` 正是这个形状，
+     * 于是 `fix:self`（原生腿 `emit c src/cli.js`）在它上面栽了。 */
     if (!opts.isArrow && !opts.isCtor
-      && (opts.wantThis === true || bodyStmts.some((s) => mentionsThis(s)))) {
+      && (opts.wantThis === true || bodyStmts.some((s) => mentionsThis(s))
+        || params.some((p) => mentionsThis(p)))) {
       /* **只有真被箭头捕获时才装 cell**（第一百五十五片）：cell 是一格 1 元素的 list，
          装它就是每次调用一次堆分配。绝大多数方法体里连箭头都没有 —— 那时候一格普通
          局部量就够（`readEntry` 两种都认）。`wantThis` 那一档（`$init` 之类，字段初值里
          可能有箭头，而那些初值不在 `bodyStmts` 上）照旧装，宁可多分配不许少一格 cell。
          量出来的：这一格从前占采样榜第一名（45% 的帧在 `omni_list_dynamic_from`）。 */
-      if (opts.wantThis === true || bodyStmts.some((s) => arrowMentionsThis(s))) {
+      if (opts.wantThis === true || bodyStmts.some((s) => arrowMentionsThis(s))
+        || params.some((p) => arrowMentionsThis(p))) {
         this.fn.captured.add('this');
       }
       const self = this.declare('this');
