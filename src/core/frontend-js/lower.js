@@ -436,6 +436,67 @@ function isPendingCheck(st) {
     && st.cond.kind === 'Builtin' && st.cond.name === 'js_pending';
 }
 
+/**
+ * 这个回值"读一下就好"吗 —— **纯、而且不会往 pending 槽里放东西**。
+ * 只认明摆着的那几种（局部量的读、null、字面量、undefined）；拿不准的一律算不纯
+ * （`JsGlobal` 也不认：词法全局的 TDZ 检查会抛）。
+ */
+function pureRet(v) {
+  if (v === null || v === undefined) return true;
+  if (typeof v !== 'object') return false;
+  if (v.kind === 'VarRef' || v.kind === 'DynNull' || v.kind === 'Const') return true;
+  if (v.kind === 'Box') return pureRet(v.expr);
+  if (v.kind === 'Builtin' && v.name === 'js_undef') return true;
+  return false;
+}
+
+/** 这个块就一句 `Return` 吗（pending 检查的退出句是 Return 而不是 Break 才安全） */
+function onlyReturn(b) {
+  return b !== null && b !== undefined && b.kind === 'Block'
+    && Array.isArray(b.stmts) && b.stmts.length === 1 && b.stmts[0].kind === 'Return';
+}
+
+/**
+ * **摘掉恒等价的 pending 检查**（task #41，量出来的）。
+ *
+ * 形状只有一种，而且是**词法**可判的：
+ *
+ *     if (js_pending()) return;      <- 退出句是 Return（不是 Break：那要落到 catch 前）
+ *     return <纯读>;                 <- 下一句就是 Return，回值纯且不会抛
+ *
+ * 为什么等价：pending 置上时老代码回 undefined、新代码回那个纯值 —— 而**调用方在每次
+ * 调用之后都会自己查一次 pending**（`withCheck` 保证），置上时那个回值当场被丢掉。
+ * 入口那一层也一样：`js_check_uncaught` 报错、回值没人看。pending 没置上时两边一模一样。
+ *
+ * `funcOf` 在体尾追加的那句 `Return undefined` 让"函数体最后那次检查"自动落进这个形状。
+ *
+ * 量（自举那份 JS，79888 次检查）：这一刀摘掉 **7816 次 = 9.8%**
+ * （1428 次是体尾那一格、6388 次是 `return 局部量/null/字面量`）。
+ * 省下来的不只是字节：五条腿每次都要真的去问一次 pending。
+ *
+ * **拿不准的一律留着**：回值里有调用、有成员取值、有 `JsGlobal`，都算不纯。
+ */
+function dropDeadChecks(stmts) {
+  for (const s of stmts) {
+    if (s === null || typeof s !== 'object') continue;
+    for (const k of Object.keys(s)) {
+      const v = s[k];
+      if (v !== null && typeof v === 'object' && v.kind === 'Block' && Array.isArray(v.stmts)) {
+        v.stmts = dropDeadChecks(v.stmts);
+      }
+    }
+  }
+  const out = [];
+  for (let i = 0; i < stmts.length; i++) {
+    const s = stmts[i];
+    const n = stmts[i + 1];
+    if (isPendingCheck(s) && onlyReturn(s.then) && n !== null && n !== undefined
+      && n.kind === 'Return' && pureRet(n.value)) continue;
+    out.push(s);
+  }
+  return out;
+}
+
 class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
   constructor(diags) {
     this.diags = diags;
@@ -897,7 +958,7 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
       ret: D,
       params: [{ name: 'args', type: listType(D) }],
       // JS 的函数走到底没 return 就是 undefined；OIR 要求非 void 的函数有返回值
-      body: block([...this.fn.prelude, ...stmts, { kind: 'Return', value: undefExpr() }]),
+      body: block(dropDeadChecks([...this.fn.prelude, ...stmts, { kind: 'Return', value: undefExpr() }])),
     };
     const uses = this.fn.uses;
     const capScope = opts.outerScopes ? this.fn.scopes[0] : null;
