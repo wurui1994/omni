@@ -190,6 +190,14 @@ export const CHARLIT = ['true', 'false', 'x', 'vowel', 'other'];
  * 所以两边的约束是对上的。wat 与 core 按名欠着（要一格循环）。
  */
 export const MAKELEN = ['4', '0', '7', '2'];
+/**
+ * method2：**两个类型上的同名方法**（V 独一份）—— `docs/design/cross-file-methods.md`
+ * 那条 A 路的判据。方法名按接收者类型压平（`Point__total` / `Box__total`），
+ * 于是"重名要类型才分得开"那条墙不再是墙（V 那栏"类型才分得开"93 -> 50）。
+ * **接收者的类型从哪儿来**也在这儿判着：`b := Box{…}` 那句写着的、形参上写着的 ——
+ * 只收语法上写着的那一档（`VARTYPE`），不做推断。删掉 mangle 那一步，第二行就不是 12。
+ */
+export const METHOD2 = ['3', '12', '30', '7'];
 
 
 
@@ -431,6 +439,9 @@ export const CASES = [
   ...fam('charlit', CHARLIT, ['vlang']),
   // 第四十六个家族：**按长度造一格列表**（go 独一份）。第 25 格内建 `fill`。
   ...fam('makelen', MAKELEN, ['go']),
+  // 第四十七个家族：**两个类型上的同名方法**（V 独一份）。方法名按接收者类型压平 ——
+  // 图上一格新节点也没加（还是"多一格实参的普通函数"），改的只是那个函数**叫什么**。
+  ...fam('method2', METHOD2, ['vlang']),
 ];
 
 

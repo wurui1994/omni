@@ -115,6 +115,46 @@ let STRICT_CALLS = false;
 const IMPORTS = new Set();
 
 /**
+ * **方法名按接收者类型压平**（`docs/design/cross-file-methods.md` 那条 A 路）。
+ *
+ * `MSET` 收的是 **`类型.方法名`**（`Ship.instance`），`mangle()` 把它压成图上一格函数名
+ * （`Ship__instance`）。为什么这一格值得做：
+ *
+ *   * **撞名不再是墙**：`Ship.instance` 与 `GameObject.instance` 压出来是两个名字。
+ *     原来那张平表（名字 -> 接收者类型）一撞就当场报，而"整目录一起收"会把撞名放大
+ *     （量过：vlang 1044 -> 338）—— 那条死路的根就是**平表**，不是"收得太多"。
+ *   * **跨文件的方法接得住了**：`MSET` 连 `opts.also` 那几份也收（按 `类型.名字` 存不会撞），
+ *     于是"方法声明在同一模块的别的文件里"这一档能落成一格有名有姓的调用。
+ *
+ * **接收者的类型从哪儿来**：`VARTYPE`（名字 -> 具名类型），只收**语法上写着的**那三处 ——
+ * 方法的接收者、带具名类型的形参、`x := T{…}` / `x := &T{…}`。
+ * **这不是类型推断**（没有合一、没有传播）：写着就收，没写就不知道，不知道就走老路。
+ * 真正的推断归覆盖层（#40），而覆盖层今天答的是"长什么样"不是"叫什么名字"。
+ */
+const MSET = new Set();
+const VARTYPE = new Map();
+const mangle = (owner, name) => `${String(owner).replace(/\./g, '__')}__${name}`;
+
+/** 一格**类型**节点里的具名类型（`&T` / `?T` / `!T` / `mut T` 那几层剥掉）。别的回 null。 */
+function namedType(t) {
+  if (t === undefined || t === null || !isList(t)) return null;
+  const g = tag(t);
+  if (g === 'tname') return tnameText(t);
+  if (g === 'ref' || g === 'ptr' || g === 'option' || g === 'result'
+    || g === 'shared' || g === 'atomic') return namedType(kids(t)[0]);
+  return null;      // 数组 / map / fntype / tinst 那几格不是具名类型
+}
+
+/** `T{…}` / `&T{…}` 那格**结构字面量**的具名类型（别的形状回 null —— 不猜）。 */
+function litTypeName(r) {
+  if (r === undefined || r === null || !isList(r)) return null;
+  const g = tag(r);
+  if (g === 'addr' || g === 'paren' || g === 'mut') return litTypeName(kids(r)[0]);
+  if (g !== 'lit') return null;
+  return namedType(kids(r)[0]);
+}
+
+/**
  * **枚举**：`枚举名.变体名 -> 值`，加一张"变体名出现在几个枚举里"的账。
  *
  * 枚举的**声明在图上是丢掉的**（类型不进图），可 `.red` / `Color.red` 这两种写法要拿到**值**
@@ -170,17 +210,20 @@ function collectDecls(x, shapesOnly) {
       next += 1;
     }
   }
-  if (tag(x) === 'method' && shapesOnly !== true) {
+  if (tag(x) === 'method') {
     const [recv, nm] = kids(x);
     const name = leaf(nm);
     const ty = part(kids(recv)[0], 'tname');
     const owner = ty === undefined ? '?' : leaf(kids(ty)[0]);
-    const had = METHODS.get(name);
-    if (had !== undefined && had !== owner) {
-      throw new Error(`v->graph: ${had} 与 ${owner} 都声明了方法 ${name} —— `
-        + '重名要类型才分得开，这一批不猜');
+    /* **按 `类型.名字` 收**（`opts.also` 那几份也收 —— 这样存不会撞名，见 `MSET` 那一段）。 */
+    MSET.add(`${owner}.${name}`);
+    if (shapesOnly !== true) {
+      /* 平表仍旧留着：接收者的类型**看不出来**时靠它（那时只认"这个名字只有一个主人"）。
+         撞名**不再当场报** —— 压平之后两格方法是两个名字，声明这一步没有冲突；
+         报不报要等**调用点**（那儿才知道接收者的类型知不知道）。 */
+      const had = METHODS.get(name);
+      METHODS.set(name, had === undefined || had === owner ? owner : null);
     }
-    METHODS.set(name, owner);
   }
   for (const k of kids(x)) collectDecls(k, shapesOnly);
 }
@@ -462,21 +505,36 @@ function nameOf(x) {
   return leaf(x);
 }
 
-function funcOf(x, name, self, typeName) {
+function funcOf(x, name, self, typeName, srcName) {
   const ps = part(x, 'params');
   const params = ps === undefined ? [] : kids(ps).map((p) => leaf(kids(p)[0]));
   const blk = kids(x).find((y) => tag(y) === 'block');
   // `@FN` / `@METHOD` / `@STRUCT` 问的就是"我在谁里头" —— 落一格常量串要这两格上下文
   const savedFn = CUR_FN;
   const savedType = CUR_TYPE;
-  CUR_FN = name;
+  CUR_FN = srcName ?? name;
   CUR_TYPE = typeName ?? null;
+  /* **形参与接收者的具名类型收进 `VARTYPE`**（只收语法上写着的那一档，见那一段）。
+     一格函数一层：进来存一份、出去还原 —— 内层函数不许把外层的表改脏。 */
+  const savedVars = new Map(VARTYPE);
+  if (self !== undefined && typeName !== undefined && typeName !== null) {
+    VARTYPE.set(self, typeName);
+  }
+  if (ps !== undefined) {
+    for (const p of kids(ps)) {
+      const pn = leaf(kids(p)[0]);
+      const t = namedType(kids(p)[1]);
+      if (t !== null) VARTYPE.set(pn, t);
+    }
+  }
   try {
     return node('func', { body: blk === undefined ? [] : stmts(kids(blk)) },
       { params: self === undefined ? params : [self, ...params], name });
   } finally {
     CUR_FN = savedFn;
     CUR_TYPE = savedType;
+    VARTYPE.clear();
+    for (const [k, v] of savedVars) VARTYPE.set(k, v);
   }
 }
 
@@ -984,17 +1042,20 @@ function toNode(x) {
       return funcOf(x, `__fn${FN_N++}`);
     }
     // `fn (p Point) total() int { … }` -> 与 `fn` **同一格 bind + func**，
-    // 差的只有"接收者当第一格形参"（go 那份一字不差 —— 接收者在声明里，分派是单态的）
+    // 差的只有"接收者当第一格形参"（go 那份一字不差 —— 接收者在声明里，分派是单态的）。
+    // **方法名按接收者类型压平**（见 `MSET` / `mangle` 那一段）。
     case 'method': {
       const [recv, nm] = kids(x);
-      const name = leaf(nm);
+      const srcName = leaf(nm);                           // 源码里的名字（`@FN` 用它）
       const self = kids(kids(recv)[0])[0];
       if (self === undefined) {
-        throw new Error(`v->graph: ${name} 的接收者没有名字 —— 匿名接收者这一批没接`);
+        throw new Error(`v->graph: ${srcName} 的接收者没有名字 —— 匿名接收者这一批没接`);
       }
+      const ownerTn = tnameText(kids(kids(recv)[0])[1]);
+      const graphName = ownerTn !== null ? mangle(ownerTn, srcName) : srcName;
       return node('bind', {
-        init: funcOf(x, name, leaf(self), tnameText(kids(kids(recv)[0])[1])),
-      }, { name });
+        init: funcOf(x, graphName, leaf(self), ownerTn, srcName),
+      }, { name: graphName });
     }
     case 'block': return node('region', { body: stmts(kids(x)) });
     case 'define': case 'assign': {
@@ -1014,6 +1075,12 @@ function toNode(x) {
       }
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
+        /* `x := T{…}` / `x := &T{…}` —— **语法上写着的具名类型**，收进 VARTYPE
+           （方法调用要拿它挑主人，见 `MSET` 那一段）。别的右值一律不收：不猜。 */
+        if (isDef && rhs[i] !== undefined && tag(t) !== 'sel' && tag(t) !== 'index') {
+          const tn = litTypeName(rhs[i]);
+          if (tn !== null) VARTYPE.set(nameOf(t), tn);
+        }
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set
         if (tag(t) === 'sel') return fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v);
         if (tag(t) === 'index') {
@@ -1171,26 +1238,41 @@ function toNode(x) {
       }
       // `p.total()` -> `total(p)`：接收者是**第一格实参**（声明里写着是哪个类型，
       // 所以这一步是纯改写）。名字没登记成方法就仍然是"取字段再调它" —— 判据在声明里。
-      if (tag(fn) === 'sel' && METHODS.has(leaf(kids(fn)[1]))) {
-        return node('call', {
-          fn: node('ref', {}, { name: leaf(kids(fn)[1]) }),
-          args: [toNode(kids(fn)[0]), ...argNodes],
-        });
-      }
-      /* **严格档**（`--strict-calls`）：选择子既不是声明过的方法、也不是声明过的字段，
-         那"取字段再调它"就是一格跑不通的调用 —— 报，措辞与 go 那一份对齐。
-         见 `FIELDS` / `STRICT_CALLS` 那一段（默认不开）。
-         **两族分开说**：接收者是 import 进来的模块名时那是**标准库里的函数**
-         （尺子的下一层），别的才是"方法声明在别的目录里"（见 `IMPORTS` 那一段）。 */
-      if (STRICT_CALLS && tag(fn) === 'sel' && !FIELDS.has(leaf(kids(fn)[1]))) {
+      // `p.total()` -> 方法调用 —— **三条路**（见 `docs/design/cross-file-methods.md`）：
+      //   1. 接收者的类型**知道**（`VARTYPE` 里有 · 或 `MSET` 里只有一个主人）：mangle
+      //   2. 接收者的类型**不知道**但名字只有一个主人（`METHODS` 值不是 null）：走老路（当第一个实参）
+      //   3. 两样都不知道：严格档当场报、松的那一档走兜底（"取字段再调它"）
+      if (tag(fn) === 'sel') {
+        const selName = leaf(kids(fn)[1]);
         const recv = kids(fn)[0];
-        const mod = tag(recv) === 'name' ? leaf(kids(recv)[0]) : null;
-        if (mod !== null && IMPORTS.has(mod)) {
-          throw new Error(`v->graph: 库函数 ${mod}.${leaf(kids(fn)[1])} 声明在标准库里`
-            + '（这棵源码树里没有它）—— 那是尺子的下一层，不是这一层的欠账');
+        const recvName = tag(recv) === 'name' ? leaf(kids(recv)[0]) : null;
+        // 路 1：从 VARTYPE 查接收者的具名类型
+        const ownerFromVar = recvName !== null ? VARTYPE.get(recvName) : null;
+        // 路 1b：从 MSET 查 —— 如果 `类型.名字` 只有一个（没撞名就只有一个主人）
+        const ownerFromMethods = METHODS.get(selName);
+        const owner = ownerFromVar ?? (ownerFromMethods !== null ? ownerFromMethods : null);
+        if (owner !== null && owner !== undefined && MSET.has(`${owner}.${selName}`)) {
+          return node('call', {
+            fn: node('ref', {}, { name: mangle(owner, selName) }),
+            args: [toNode(recv), ...argNodes],
+          });
         }
-        throw new Error('v->graph: 这一批只接声明过的方法与声明过的字段，收不了 '
-          + `.${leaf(kids(fn)[1])} —— 跨模块的方法要类型那一层`);
+        /* 路 2：平表里有且只有一个主人（值不是 null）—— 走老路 */
+        if (ownerFromMethods !== undefined && ownerFromMethods !== null) {
+          return node('call', {
+            fn: node('ref', {}, { name: mangle(ownerFromMethods, selName) }),
+            args: [toNode(recv), ...argNodes],
+          });
+        }
+        /* 路 3：都不知道 —— 严格档报、松的走兜底 */
+        if (STRICT_CALLS && !FIELDS.has(selName)) {
+          if (recvName !== null && IMPORTS.has(recvName)) {
+            throw new Error(`v->graph: 库函数 ${recvName}.${selName} 声明在标准库里`
+              + '（这棵源码树里没有它）—— 那是尺子的下一层，不是这一层的欠账');
+          }
+          throw new Error('v->graph: 这一批只接声明过的方法与声明过的字段，收不了 '
+            + `.${selName} —— 跨模块的方法要类型那一层`);
+        }
       }
       return node('call', { fn: toNode(fn), args: argNodes });
     }
@@ -1223,6 +1305,8 @@ export function vlangToGraph(tree, opts) {
   METHODS.clear();
   STRUCTS.clear();
   FIELDS.clear();
+  MSET.clear();
+  VARTYPE.clear();
   STRICT_CALLS = opts !== undefined && opts.strictCalls === true;
   /* import 进来的模块名（严格档里要拿它分"库函数"与"别的目录里的方法"两族）。
      `import v.ast` 的名字是最后那一段；`import x as y` 用别名。 */
