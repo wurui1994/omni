@@ -563,6 +563,17 @@ function freeRefs(x, bound, out) {
     return;
   }
   if (x.op === 'bind') {
+    /* **绑一格函数的时候名字先坐下**：函数看得见自己（那就是"递归"这个词的意思）——
+       Scheme 的内层 `define`、go/V 的具名函数都是。`chez` 那份 basics 的
+       `(define (go i acc) … (go (+ i 1) …))` 就是这个形状：`go` 在自己体里不是捕获。
+       原来一律"先递归进 init、再把名字记上"，于是 `go` 被数成了自由名字，
+       `sumto` 当场报"捕获了外层的名字（go）—— 真闭包要一格环境对象"。
+       **别的初值照旧后记**：`let x = x + 1` 里那个 `x` 是外层那一格。 */
+    if (x.ins.init !== undefined && x.ins.init !== null && x.ins.init.op === 'func') {
+      bound.push(x.attrs.name);
+      freeRefs(x.ins.init, bound, out);
+      return;
+    }
     freeRefs(x.ins.init, bound, out);
     bound.push(x.attrs.name);
     return;
