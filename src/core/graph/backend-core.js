@@ -466,6 +466,29 @@ function callText(x, env, ctx) {
  *       形参）—— 所以这儿绕过 `expr` 那道"整格当值用"的门，自己拼名字。
  */
 function argText(fname, i, a, env, ctx) {
+  /* **一格聚合字面量当实参**：记录（V 的"命名实参"就是那格参数结构体的字面量 ——
+     `total(x: 2, y: 3)` 等于 `total(Point{x: 2, y: 3})`）、列表（go 的 `firstOf([]int{9,1})`）、
+     字典。这三格在表达式位置上落不下去，所以先物化成一格临时名再递 `(var …)` 进去 ——
+     记录是值语义（递的是副本，与 V / go 一致）、数组与字典是句柄（递的是同一格，也一致：
+     那是一格现造的临时值，外面看不见）。摆不下物化那几句（没有 `ctx.pre`）就报，不硬拼。 */
+  const mk = isNode(a) ? MATERIALIZE[a.op] : undefined;
+  if (mk !== undefined) {
+    if (ctx.pre === null || ctx.pre === undefined) {
+      gap(`一格${a.op === 'record-new' ? '记录' : (a.op === 'list-new' ? '列表' : '字典')}当实参，`
+        + '可这一处摆不下物化那几句');
+    }
+    ctx.tmp = ctx.tmp + 1;
+    const tn = `arg_tmp${ctx.tmp}`;
+    for (const line of mk(tn, a, env, ctx)) ctx.pre.push(line);
+    const at = env.get(tn);
+    const akey = `${fname}#${i}`;
+    const ahad = ctx.args.get(akey);
+    if (ctx.collect !== true && ahad !== undefined && ahad !== at) {
+      gap(`'${fname}' 第 ${i + 1} 格实参在两处的类型不一样（${ahad} 与 ${at}）—— 方言的形参是单态的`);
+    }
+    if (ctx.collect !== true || ahad === undefined || ahad === 'int') ctx.args.set(akey, at);
+    return `(var ${tn})`;
+  }
   const t = typeOf(a, env, ctx);
   const key = `${fname}#${i}`;
   const had = ctx.args.get(key);
@@ -487,6 +510,16 @@ function argText(fname, i, a, env, ctx) {
 
 /** 这一格类型是不是聚合（记录 / 列表 / 字典 / 多值）。 */
 const isAggregate = (t, ctx) => ctx.shapes.has(t) || elemType(t) !== null || dictOf(t) !== null;
+
+/**
+ * 哪几格节点能**物化**成一格临时名（绑定那一侧现成的三个落法）。
+ * 实参位置上要它：那三格在表达式位置上落不下去，可当实参是对的。
+ */
+const MATERIALIZE = {
+  'record-new': (nm, x, env, ctx) => bindRecord(nm, x, env, ctx),
+  'list-new': (nm, x, env, ctx) => bindList(nm, x, env, ctx),
+  'map-new': (nm, x, env, ctx) => bindMap(nm, x, env, ctx),
+};
 
 /** 一格标量的零值（物化那一格要它 —— `(let tmp T 零值)` 之后两支各赋值）。 */
 function zeroText(t) {
