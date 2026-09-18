@@ -163,6 +163,9 @@ const CONV = convs({
   float32: 'float', float64: 'float', '$': 'str',
 });
 const PRINTS = new Set(['echo', 'write', 'stdout']);
+/** set 的代数（并 / 差 / 交 / 子集）—— 在 set 上这些是集合算，而图上没有那一族节点，
+ *  落成算术是**静默的错答案**。用来在 `binOf` 之前挡一道。 */
+const SET_ALG = new Set(['+', '-', '*', '<=', '>=', '<']);
 
 const many = (xs) => xs.map(toNode).flat();
 
@@ -204,12 +207,34 @@ function toNode(x) {
     case 'bin': {
       const [op, a, b] = kids(x);
       const o = leaf(op);
-      // `x in xs` / `x notin xs` —— **两边要换个位置**（`contains(容器, 元素)`），
-      // 所以走不了 `binOf` 那条查表的路。那格内建**只找列表里的元素**：nim 的 `x in s`
-      // （串）要 char 那一格，而 char 还没接。判据 `ext/nim/examples/member.nim`。
+      /**
+       * `x in xs` / `x notin xs` —— **两边要换个位置**（`contains(容器, 元素)`），
+       * 所以走不了 `binOf` 那条查表的路。那格内建**只找列表里的元素**：nim 的 `x in s`
+       * （串）要 char 那一格，而 char 还没接。判据 `ext/nim/examples/member.nim`。
+       *
+       * **右边就写着 set 字面量时走 `map-has`**：set 落成的是 key → true 的 map，
+       * 而 `contains` 找的是**元素**（值），拿它去问一个 map 得到的是错答案。
+       * 语料里最常见的形状正是这一个（`n.kind in {nkIdent, nkSym}`）。
+       * 右边是 set **变量**时这一层看不出它是 set 还是序列 —— 那一格照旧发 `contains`，
+       * 是明说的不足第 6 条。
+       */
       if (o === 'in' || o === 'notin') {
-        const yes = node('prim', { args: [toNode(b), toNode(a)] }, { name: 'contains' });
+        const yes = tag(b) === 'set-lit'
+          ? mapHas(toNode(b), toNode(a))
+          : node('prim', { args: [toNode(b), toNode(a)] }, { name: 'contains' });
         return o === 'in' ? yes : un('not', yes);
+      }
+      /**
+       * **set 的代数不许悄悄变成算术**：nim 里 `a + b` / `a - b` / `a * b` / `a <= b`
+       * 在 set 上是并 / 差 / 交 / 子集，而 `binOf` 会把它们映到 `add` / `sub` / `mul` /
+       * `le` —— 那是**静默的错答案**，比报错坏得多。
+       *
+       * 这一层没有类型，能认出来的只有"操作数就写着 set 字面量"这一种（语料里 177 处）。
+       * 两边都是 set 变量的那种（`x.flags - y.flags`）认不出来 —— 明说的不足第 7 条。
+       */
+      if (SET_ALG.has(o) && (tag(a) === 'set-lit' || tag(b) === 'set-lit')) {
+        throw new Error(`nim->graph: \`${o}\` 的一边是 set 字面量 —— set 上它是并/差/交/子集，`
+          + '图上没有那一族节点，落成算术是错答案');
       }
       // `&` 是 nim 的串连接 —— 表里映到 `concat` 那格内建，与算符走同一条路
       return binOf(o, toNode(a), toNode(b), OPS, { lang: 'nim', and: ['and'], or: ['or'] });
@@ -410,9 +435,41 @@ function toNode(x) {
         : inner;
       return node('const', {}, { value: ch });
     }
-    // `{1, 3, 5}` —— nim 的 set 字面量。图上没有 set，**当场报**。
-    case 'set-lit':
-      throw new Error('nim->graph: set 字面量（`{1, 3, 5}`）图上没有那格节点 —— 这一批不猜');
+    /**
+     * `{1, 3, 5}` —— nim 的 **set 字面量**。`{k: v}` 带 kv 的那种是 table 构造。
+     *
+     * **落到 `map-new`**：set 是 key → true 的 map（`x in s` 已经落到 `contains`，
+     * 那一格就是 `mapHas`），table 的 kv 直接落 mapNew(pairs)。
+     *
+     * **区间**（`{a .. b}`）也在这一层：nim 的 set 里 `..` 是"从 a 到 b 的连续值"，
+     * 静态展开需要类型信息（set[char] 与 set[int] 的宽度不同），我们在这一层没有类型
+     * —— 直接报。`{a .. b}` 在语料里是 175 处，但 **set-lit 只是包它的壳**，
+     * 区间在树上就是一格 `bin` children `[.., a, b]`。我们按孩子逐个走：kv 走 pair、
+     * bin `..`/`..<` 报、裸表达式走 key → true。
+     */
+    case 'set-lit': {
+      const ch = kids(x);
+      if (ch.length === 0) return mapNew();
+      /* 全是 kv -> table 构造（与 toTable 同一格）。 */
+      if (ch.every((c) => tag(c) === 'kv')) {
+        return mapNew(ch.map((c) => [toNode(kids(c)[0]), toNode(kids(c)[1])]));
+      }
+      /* 有 kv 也有裸值 -> 混合形状，不猜 */
+      if (ch.some((c) => tag(c) === 'kv')) {
+        throw new Error('nim->graph: set 字面量里混着 kv 与裸值 —— 这一批不猜');
+      }
+      /* 裸值里有区间 `a .. b` / `a ..< b` 就报（静态展开要类型） */
+      for (const c of ch) {
+        if (tag(c) === 'bin' && kids(c).length > 0) {
+          const o = leaf(kids(c)[0]);
+          if (o === '..' || o === '..<') {
+            throw new Error('nim->graph: set 字面量里的区间（`a .. b`）要类型才展得开 —— 这一批不猜');
+          }
+        }
+      }
+      /* 裸元素 -> key:true 的 map */
+      return mapNew(ch.map((c) => [toNode(c), lit(true)]));
+    }
     // `from system import nil` / `export symbol` —— 另两种导入写法，丢掉
     case 'from': case 'export': return [];
     // `discard f()` / `discard` —— **算掉、把值扔了**。带作用的那一格（调用）要留下，
@@ -685,3 +742,13 @@ export function nimImports(tree) {
 //   5. 方法（第二十四批）：`p.total()` 是 UFCS，纯改写成 `total(p)`。**不带括号**的
 //      `p.total` 仍落 field-get（那是取字段还是无参调用，要形参表以外的一句话），
 //      泛型 proc、`var` 接收者、`method`（真的动态分派）都不在这一批。
+//   6. **set 落成 key → true 的 map**（2026-09-19）。两处是明说的偏差：
+//      - 迭代次序：nim 的 set 按 ordinal 走，`map-new` 是插入序。只做成员判断时看不出来。
+//      - `x in s` 里 `s` 是 set **变量**时这一层不知道它是 set 还是序列，照旧发
+//        `contains`（找元素）而不是 `map-has`（找键）—— 右边**写着** set 字面量的
+//        那一种才发 `map-has`。语料里最常见的 `n.kind in {nkIdent, nkSym}` 属于后者。
+//   7. **set 的代数只挡得住一半**：`+` / `-` / `*` / `<=` 在 set 上是并/差/交/子集，
+//      落成算术是静默的错答案，所以有一边**写着** set 字面量就当场报（`SET_ALG`，
+//      语料里 177 处）。两边都是 set **变量**（`x.flags - y.flags`）这一层认不出来 ——
+//      要真治得给图加一族 set 节点（或者第 40 条那层类型）。这一条是**已知的残留风险**，
+//      不是"已经解决"。

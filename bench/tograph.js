@@ -106,7 +106,7 @@ const CLASSES = [
   ['函数值与闭包（fnlit）', /fnlit|闭包|函数值/],
   ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%|!\&|\.\.<?|\.\.\^)/],
   ['集合与字符（set-lit / char / rune / array / imag / 复数）',
-    /set 字面量|char 是自己一格类型|还没接：char|还没接：rune|还没接：imag|还没接：array$|要复数那一格/],
+    /set 字面量|char 是自己一格类型|还没接：char|还没接：rune|还没接：imag|还没接：array$|要复数那一格|set 上它是并|set 字面量里的区间/],
   ['类型层的算子（typeof / sizeof / is / as / x.(T)）',
     /typeof|sizeof|isreftype|还没接：is$|还没接：not-is|还没接：as$|还没接：tswitch|还没接：assert$|登记过的类型|还没接：if-is|类型断言/],
   // **这一族是"没归类"那一栏第二回指出来的**（2026-09-18）：内嵌字段的名字要从被嵌的那格
