@@ -85,6 +85,32 @@ export function dictOf(t) {
 /** 这一格类型是不是标量（记录 / 列表 / 字典的元素只收这四格）。 */
 export const isScalar = (t) => t === 'int' || t === 'real' || t === 'bool' || t === 'string';
 
+/**
+ * **一格形状在变量 / 形参 / 字段上写成什么类型。**
+ *
+ * 多值（`mN`）原样 —— 那是值语义，与"函数只交一格回来"正好对上。
+ * **记录（`rN`）写成 `(ptr rN)`**：图上记录是**引用**（`eval.js` 那一格是普通的 JS 对象 ——
+ * 两个名字绑上去指同一格、传进函数里改了外面看得见），而方言的结构体是**值语义**
+ * （赋值 / 传参都复制，见 `tests/sexpr/cases/06-structs.sx`）—— 拿结构体去顶会静静地把
+ * "改 q 也改 p"变成"只改 q"。方言里对得上的那一格是**指针**（`(ptr T)` + `pnew` /
+ * `pfield` / `pload` / `pstore`，见 `tests/sexpr/cases/25-pointers.sx`）：指针复制 =
+ * 两个名字指同一格，与图逐格重合。
+ */
+export const shapeType = (shape) => (shape.multi === true ? shape.tag : `(ptr ${shape.tag})`);
+
+/** 反过来：一格类型文本是哪格形状（`mN` 与 `(ptr rN)` 两种写法都认）。不是形状回 undefined。 */
+export function shapeAt(t, ctx) {
+  if (typeof t !== 'string') return undefined;
+  const m = /^\(ptr (r\d+)\)$/.exec(t);
+  return ctx.shapes.get(m === null ? t : m[1]);
+}
+
+/** 这一格类型是不是**记录**（指针那一档，不是多值）。 */
+export function isRecType(t, ctx) {
+  const sh = shapeAt(t, ctx);
+  return sh !== undefined && sh.multi !== true;
+}
+
 /** 一格 `conv` 的目标是哪个类型。不认的那一格当场报。 */
 export function convTo(x, ctx) {
   const to = x.attrs.to;
@@ -150,7 +176,7 @@ export function inferType(x, env, ctx) {
   if (x.op === 'map-has') return 'bool';
   if (x.op === 'values') return multiShape(argList(x, 'args'), env, ctx).tag;
   if (x.op === 'pick') {
-    const shape = ctx.shapes.get(typeOf(x.ins.from, env, ctx));
+    const shape = shapeAt(typeOf(x.ins.from, env, ctx), ctx);
     if (shape === undefined) return UNKNOWN;
     return shape.types.get(`v${Number(x.attrs.index ?? 0)}`) ?? UNKNOWN;
   }
@@ -185,7 +211,7 @@ export function multiShape(vals, env, ctx) {
 /** 一格 `field-get` 交出来的类型：宿主的形状表里查那个字段。查不到当场报。 */
 export function fieldType(x, env, ctx) {
   const t = typeOf(x.ins.obj, env, ctx);
-  const shape = ctx.shapes.get(t);
+  const shape = shapeAt(t, ctx);
   if (shape === undefined) ctx.gap(`在一格说不清形状的东西上取字段 '${x.attrs.field}'`);
   const ft = shape.types.get(x.attrs.field);
   if (ft === undefined) ctx.gap(`记录 ${t} 上没有字段 '${x.attrs.field}'`);

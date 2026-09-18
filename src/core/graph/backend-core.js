@@ -49,6 +49,7 @@ import { declOf } from './nodes.js';
 import {
   isNode, isLit, argList, litType, primFixedType, elemType, dictOf, isScalar,
   convTo, typeOf, multiShape, fieldType, litLeaningType, retTypeOf,
+  shapeType, shapeAt, isRecType,
 } from './types.js';
 /* 证物那五份是**手搭的小图** —— 所以要 `node()` / `lit()` / `program()`（`node` 顺带查五栏）。 */
 import { node, lit as litNode, program } from './graph.js';
@@ -192,7 +193,7 @@ function expr(x, env, ctx) {
        * 那两条路自己拼文本（不经过这儿），于是这儿一律报缺口 —— 与 backend-c 的
        * `recPlan` 那三条同一个道理，只是我们靠"谁来拼"而不是靠一趟预扫描。 */
       const t = env.get(x.attrs.name);
-      if (ctx.shapes.has(t)) gap(`把记录 '${x.attrs.name}' 整格当值用（这一刀只接字段读写）`);
+      if (isRecType(t, ctx)) gap(`把记录 '${x.attrs.name}' 整格当值用（这一刀只接字段读写）`);
       if (elemType(t) !== null) gap(`把列表 '${x.attrs.name}' 整格当值用（这一刀只接下标读写与 len）`);
       if (dictOf(t) !== null) gap(`把字典 '${x.attrs.name}' 整格当值用（这一刀只接按键读写与 len）`);
       return `(var ${x.attrs.name})`;
@@ -270,7 +271,7 @@ function expr(x, env, ctx) {
       }
       return callText(x, env, ctx);
     }
-    case 'field-get': return `(fld ${objText(x.ins.obj, env, ctx)} ${x.attrs.field})`;
+    case 'field-get': return fldText(x.ins.obj, x.attrs.field, env, ctx);
     case 'index-get': {
       const t = typeOf(x.ins.obj, env, ctx);
       if (elemType(t) === null) gap('在一格说不清形状的东西上取下标（这一刀只接 list-new 绑出来的那格）');
@@ -280,7 +281,7 @@ function expr(x, env, ctx) {
     case 'list-new': gap('列表出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'pick': {
       const t = typeOf(x.ins.from, env, ctx);
-      const shape = ctx.shapes.get(t);
+      const shape = shapeAt(t, ctx);
       if (shape === undefined || shape.multi !== true) gap('pick 的来源不是一格多值');
       const i = Number(x.attrs.index ?? 0);
       if (i < 0 || i >= shape.names.length) gap(`pick 的第 ${i} 格超出了这格多值的宽度`);
@@ -344,7 +345,7 @@ function expr(x, env, ctx) {
       const t2 = typeOf(els, env, ctx);
       if (t !== t2) gap(`表达式位置上的 branch 两支不同型（${t} 与 ${t2}）`);
       /* 标量或**一格形状**（sbcl 的 `(if c (values …) (values …))` 就是后者）都接得住 */
-      if (!isScalar(t) && !ctx.shapes.has(t)) gap(`表达式位置上的 branch 交出来的不是标量（${t}）`);
+      if (!isScalar(t) && shapeAt(t, ctx) === undefined) gap(`表达式位置上的 branch 交出来的不是标量（${t}）`);
       ctx.tmp = ctx.tmp + 1;
       const nm = `if_tmp${ctx.tmp}`;
       const arm = (e) => {
@@ -362,7 +363,7 @@ function expr(x, env, ctx) {
       const cond = condText(x.ins.cond, env, ctx);
       const a = arm(x.ins.then);
       const b = arm(els);
-      ctx.pre.push(`(let ${nm} ${t} ${ctx.shapes.has(t) ? `(new ${t})` : zeroText(t)})`);
+      ctx.pre.push(`(let ${nm} ${t} ${newOfType(t, ctx)})`);
       ctx.pre.push(`(if ${cond} ${a} ${b})`);
       return `(var ${nm})`;
     }
@@ -483,16 +484,17 @@ function lenText(a, env, ctx) {
  */
 function objText(obj, env, ctx) {
   /* 嵌套的宿主：里层是一格 `field-get` 且它交出来的就是一格形状。为什么读这一路是准的：
-     方言的结构体是值语义，可 `(fld (fld …))` 是**就地**读那块字节，不复制。 */
+     记录在方言里是**指针**（`types.js` 的 `shapeType`），所以往里套的是 `pfield` ——
+     `(pload (pfield (pload (pfield (var q) a)) y))`：一层层就地读，不复制。 */
   if (isNode(obj) && obj.op === 'field-get') {
     const inner = typeOf(obj, env, ctx);
-    if (ctx.shapes.has(inner) || elemType(inner) !== null || dictOf(inner) !== null) {
-      return `(fld ${objText(obj.ins.obj, env, ctx)} ${obj.attrs.field})`;
+    if (shapeAt(inner, ctx) !== undefined || elemType(inner) !== null || dictOf(inner) !== null) {
+      return fldText(obj.ins.obj, obj.attrs.field, env, ctx);
     }
   }
   if (!isNode(obj) || obj.op !== 'ref') gap('字段 / 下标的宿主不是一个名字（嵌套那一档还没接）');
   const t = env.get(obj.attrs.name);
-  if (!ctx.shapes.has(t) && elemType(t) === null && dictOf(t) === null) {
+  if (shapeAt(t, ctx) === undefined && elemType(t) === null && dictOf(t) === null) {
     gap(`'${obj.attrs.name}' 说不清形状（这一刀只认 \`bind\` 一格记录 / 列表 / 字典绑出来的名字）`);
   }
   return `(var ${obj.attrs.name})`;
@@ -510,15 +512,16 @@ function callText(x, env, ctx) {
 /**
  * 一格实参。两件事：
  *   一、**把类型记进 `ctx.args`** —— 形参就是靠这一格定型的（图上没有类型，只有调用点知道）；
- *   二、聚合在实参位置上**是允许的**（方言的结构体是值语义、数组与字典是句柄，三样都能当
- *       形参）—— 所以这儿绕过 `expr` 那道"整格当值用"的门，自己拼名字。
+ *   二、聚合在实参位置上**是允许的**，而且三样都是**引用**（记录是 `(ptr rN)`、数组与字典
+ *       是句柄）—— 与图上一样，所以这儿绕过 `expr` 那道"整格当值用"的门，自己拼名字。
+ *       `bump(p)` 里头改了外头看得见，靠的就是这一条。
  */
 function argText(fname, i, a, env, ctx) {
   /* **一格聚合字面量当实参**：记录（V 的"命名实参"就是那格参数结构体的字面量 ——
      `total(x: 2, y: 3)` 等于 `total(Point{x: 2, y: 3})`）、列表（go 的 `firstOf([]int{9,1})`）、
      字典。这三格在表达式位置上落不下去，所以先物化成一格临时名再递 `(var …)` 进去 ——
-     记录是值语义（递的是副本，与 V / go 一致）、数组与字典是句柄（递的是同一格，也一致：
-     那是一格现造的临时值，外面看不见）。摆不下物化那几句（没有 `ctx.pre`）就报，不硬拼。 */
+     三样递进去的都是**同一格**（记录是指针、数组与字典是句柄）—— 与图上一样。
+     摆不下物化那几句（没有 `ctx.pre`）就报，不硬拼。 */
   const mk = isNode(a) ? MATERIALIZE[a.op] : undefined;
   if (mk !== undefined) {
     if (ctx.pre === null || ctx.pre === undefined) {
@@ -557,7 +560,25 @@ function argText(fname, i, a, env, ctx) {
 }
 
 /** 这一格类型是不是聚合（记录 / 列表 / 字典 / 多值）。 */
-const isAggregate = (t, ctx) => ctx.shapes.has(t) || elemType(t) !== null || dictOf(t) !== null;
+const isAggregate = (t, ctx) => isRecType(t, ctx) || elemType(t) !== null || dictOf(t) !== null;
+
+/**
+ * 取一格字段的文本。**记录是指针**（`types.js` 的 `shapeType`），所以那一档走
+ * `(pload (pfield …))`；多值（`mN`）是真结构体，照旧 `(fld …)`。
+ */
+function fldText(obj, field, env, ctx) {
+  const host = objText(obj, env, ctx);
+  if (isRecType(typeOf(obj, env, ctx), ctx)) return `(pload (pfield ${host} ${field}))`;
+  return `(fld ${host} ${field})`;
+}
+
+/** 一格形状 / 标量的"新建"文本：记录 `pnew` 一格、多值 `new`、标量给零值。 */
+function newOfType(t, ctx) {
+  const sh = shapeAt(t, ctx);
+  if (sh === undefined) return zeroText(t);
+  if (sh.multi === true) return `(new ${sh.tag})`;
+  return `(pnew (ptr ${sh.tag}) (int 1))`;
+}
 
 /**
  * 哪几格节点能**物化**成一格临时名（绑定那一侧现成的三个落法）。
@@ -722,22 +743,26 @@ function stmtIn(x, env, ctx) {
         return [bindLine(nm, t0, zeroText(t0), env, ctx)];
       }
       const t = typeOf(init, env, ctx);
-      /* **把一格数组 / 字典绑到另一个名字上**（`__in := xs`，`for-in` 那一族落出来的）——
-       * 方言里数组与字典是**句柄**（`(let ys (arr int) (var xs))` 之后两个名字指同一格），
-       * 与图上一样。所以这一格直接拼名字，不走 `expr` 那道"整格当值用"的门。
-       *
-       * **记录不在这一档里**：方言的结构体是**值语义**（赋值就复制，见
-       * `tests/sexpr/cases/06-structs.sx`），而图上记录是引用 —— 放过去会静静地把
-       * "改 q 也改 r"变成"只改 q"。那一格照旧报缺口（要它得先有引用类型）。 */
-      if (isNode(init) && init.op === 'ref' && (elemType(t) !== null || dictOf(t) !== null)) {
+      /* **把一格聚合绑到另一个名字上**（`q := p`、`__in := xs`）—— 图上那三样都是**引用**
+       * （两个名字指同一格），方言里也都是：数组与字典是句柄，**记录是 `(ptr rN)`**
+       * （`types.js` 的 `shapeType`：结构体值语义顶不了引用，指针才对得上）。
+       * 于是这一格直接拼名字（`(let q (ptr r1) (var p))`），不走 `expr` 那道"整格当值用"的门。 */
+      if (isNode(init) && init.op === 'ref' && isAggregate(t, ctx)) {
         return [bindLine(nm, t, `(var ${init.attrs.name})`, env, ctx)];
       }
       const initText = expr(init, env, ctx);
       return [bindLine(nm, t, initText, env, ctx)];
     }
     case 'set': return [`(set ${x.attrs.name} ${expr(x.ins.value, env, ctx)})`];
-    case 'field-set':
-      return [`(fldset ${objText(x.ins.obj, env, ctx)} ${x.attrs.field} ${expr(x.ins.value, env, ctx)})`];
+    case 'field-set': {
+      const host = objText(x.ins.obj, env, ctx);
+      const v = expr(x.ins.value, env, ctx);
+      /* 记录是指针（见 `fldText`）—— 写一格字段是 `(pstore (pfield …) …)`。 */
+      if (isRecType(typeOf(x.ins.obj, env, ctx), ctx)) {
+        return [`(pstore (pfield ${host} ${x.attrs.field}) ${v})`];
+      }
+      return [`(fldset ${host} ${x.attrs.field} ${v})`];
+    }
     case 'index-set': {
       if (elemType(typeOf(x.ins.obj, env, ctx)) === null) {
         gap('往一格说不清形状的东西里按下标写（这一刀只接 list-new 绑出来的那格）');
@@ -849,7 +874,7 @@ function stmtIn(x, env, ctx) {
       if (args.length !== 1) gap(`print 收了 ${args.length} 格实参（方言的 print 只收一格）`);
       /* **一格多值直接印**（go 的 `fmt.Println(minmax(1, 2))` 印 "1 2"）：图上那条 arity 契约
        * 是"列表里最后一格展开"，落到方言这边就是把那几格拼成一句（空格分隔）。 */
-      const shape = ctx.shapes.get(typeOf(args[0], env, ctx));
+      const shape = shapeAt(typeOf(args[0], env, ctx), ctx);
       if (shape !== undefined && shape.multi === true) return printMulti(args[0], shape, env, ctx);
       return [`(print ${expr(args[0], env, ctx)})`];
     }
@@ -862,7 +887,7 @@ function stmtIn(x, env, ctx) {
 }
 
 /**
- * `let p = R{…}` —— 方言里是**两步**：`(new 形状)` 拿零值，再逐个字段 `(fldset …)`。
+ * `let p = R{…}` —— 方言里是**两步**：`pnew` 出一格（零初始化的）指针，再逐个字段 `pstore`。
  *
  * 形状按**字段名单 + 字段类型**去重（同形的两格记录共用一格 `(struct …)`），名字是
  * `r1` / `r2` … 按登记顺序发 —— 所以同一张图落两遍逐字节相同。字段类型从**初值**推
@@ -876,9 +901,9 @@ function bindRecord(nm, rec, env, ctx) {
     gap(`记录的字段名单是 ${names.length} 格，值给了 ${vals.length} 格`);
   }
   /* **字段里又是一格记录**（go 的 `var q Pair`，Pair 里装着 Point）：方言收得住
-     （`sexpr/lower.js` 的 structDec 第十七刀"结构体套结构体"），可 `(fldset …)` 那一格要的是
-     一个**值**，而 record-new 在表达式位置上落不下去。所以先把里头那格物化成一格临时名，
-     再把它整格 `fldset` 进去 —— 方言的结构体是值语义，搬进去的是副本，与 go 的零值一致。
+     （structDec 那一刀的 `(ptr T)` 字段），可 `(pstore …)` 那一格要的是一个**值**，
+     而 record-new 在表达式位置上落不下去。所以先把里头那格物化成一格临时名，再把那格
+     **指针**存进字段 —— 里外指同一格，与图上"记录是引用"一致。
      递归是这儿展开的（`rec_tmpN` 逐层各一格），套几层都一样。
      列表 / 字典当字段**仍旧不接**：那两样在方言里是句柄（引用语义），"里头改了外头看得见"
      这件事得先有判据再说。 */
@@ -901,9 +926,11 @@ function bindRecord(nm, rec, env, ctx) {
     return t;
   });
   const shape = shapeOf(names, types, false, ctx);
-  const out = [...pre, bindLine(nm, shape.tag, `(new ${shape.tag})`, env, ctx)];
+  /* 记录落**一格指针**（`types.js` 的 `shapeType`）：`pnew` 出一格零初始化的，再逐个
+     `(pstore (pfield …) …)`。指针复制 = 两个名字指同一格 —— 那正是图上记录的语义。 */
+  const out = [...pre, bindLine(nm, shapeType(shape), `(pnew (ptr ${shape.tag}) (int 1))`, env, ctx)];
   for (let i = 0; i < names.length; i++) {
-    out.push(`(fldset (var ${nm}) ${names[i]} ${fieldText[i] ?? expr(vals[i], env, ctx)})`);
+    out.push(`(pstore (pfield (var ${nm}) ${names[i]}) ${fieldText[i] ?? expr(vals[i], env, ctx)})`);
   }
   return out;
 }
@@ -1398,7 +1425,7 @@ export function emitCore(g) {
         for (const p of params) penv.set(p, 'int');
         const t = typeOf(impl, penv, ctx);
         /* 标量或**一格形状**（chez 的 `(values 3 7)` 当函数体就是后者）都算 */
-        if (t === 'void' || !(isScalar(t) || ctx.shapes.has(t))) impl = null;
+        if (t === 'void' || !(isScalar(t) || shapeAt(t, ctx) !== undefined)) impl = null;
         else if (rt === null) rt = t;
         else if (rt === 'void') impl = null;      // void 函数末尾那个值不是返回值
         else if (rt !== t) {
@@ -1711,7 +1738,7 @@ export const CORE_SHAPES = [
   },
   {
     what: '表达式位置上的记录 / 列表',
-    why: '方言里建一格记录是**两步**（`(new …)` 再逐个 `(fldset …)`），塞不进表达式 ——'
+    why: '方言里建一格记录是**两步**（`pnew` 再逐个 `pstore`），塞不进表达式 ——'
       + '所以只接 `bind` 的初值那一格（要接得先有临时量那一刀）',
     witness: () => program([node('prim', {
       args: [node('record-new', { fields: [litNode(1)] }, { names: ['x'] })],

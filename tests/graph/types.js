@@ -120,9 +120,11 @@ const said = (label, x, want, env = new Map()) => {
 // 为什么拿整棵图问（而不是只问值位置那几格）：这一条要抓的是"多编了一个词出来"，
 // 那种事在哪一格上都可能发生。语句位置上的节点答 `unknown` 是**对的**（它没有值）。
 const SCALARS = new Set(['int', 'real', 'string', 'bool', UNKNOWN]);
+/* `(ptr rN)` 是**记录**那一格的写法（`types.js` 的 `shapeType`：图上记录是引用，方言里
+   对得上的是指针）—— 它与 `mN` 一样是词汇表里的一个词，不是"多编出来的"。 */
 const inVocab = (t) => (typeof t === 'string'
   && (SCALARS.has(t) || t.startsWith('(arr ') || t.startsWith('(dict ')
-    || /^[rm][0-9]+$/.test(t) || t === null));
+    || /^[rm][0-9]+$/.test(t) || /^\(ptr r[0-9]+\)$/.test(t) || t === null));
 {
   const tally = new Map();
   const bump = (k) => tally.set(k, (tally.get(k) ?? 0) + 1);
