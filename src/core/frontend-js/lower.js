@@ -455,6 +455,7 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     /** 初始化式是正则字面量的模块级 const：名字 -> {body, flags}（ADR-0011 决策 10） */
     this.regexConsts = new Map();
     this.used = new Set();
+    this.mangleNext = new Map();   // base -> 下一个探号（见 mangle）
     /** 顶层类声明：名字 -> {mangled, node}（降成一个"造实例"的函数，ADR-0011 决策 13） */
     this.classes = new Map();
     /** 原生宿主面：名字 -> ABI op（由链接器给出，见 frontend-js/link.js） */
@@ -476,10 +477,33 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
     this.diags.error(span ?? null, msg);
   }
 
+  /**
+   * 名字压成 C 安全的符号。撞上就在后头缀 `__2` / `__3` …
+   *
+   * **两处都是量出来的**（2026-09-19，`emit js src/cli.js` 的 --cpu-prof：`mangle` 自用
+   * 196ms = 5.7%、`cSafe` 另算 82ms = 2.4%，整趟 3.42s）：
+   *
+   *   1. `cSafe(name)` 从前在 `while` 里头 —— 同一个名字撞第 k 次就白算 k 遍。
+   *      它是 name 的纯函数，提到循环外。
+   *   2. 探号**从记着的那个序号接着走**，不是每次都从 2 重来。从前同一个名字第 k 次要探
+   *      k 遍（整体 O(n²)）；`v_i` / `v_t` 这一族在整份编译器里各有上千次。
+   *
+   * 出的名字**一格不变**：序号表只是个起点，`while` 照旧在 —— 别的路子直接塞进 `used` 的
+   * 名字（`omni_clo_N` 那种）仍旧会被让开。所以产物逐字节相同，这是这一刀的判据。
+   */
   mangle(prefix, name) {
-    let m = `${prefix}${cSafe(name)}`;
-    let i = 2;
-    while (this.used.has(m)) m = `${prefix}${cSafe(name)}__${i++}`;
+    const base = `${prefix}${cSafe(name)}`;
+    if (!this.used.has(base)) {
+      this.used.add(base);
+      return base;
+    }
+    let i = this.mangleNext.get(base) ?? 2;
+    let m = `${base}__${i}`;
+    while (this.used.has(m)) {
+      i += 1;
+      m = `${base}__${i}`;
+    }
+    this.mangleNext.set(base, i + 1);
     this.used.add(m);
     return m;
   }
