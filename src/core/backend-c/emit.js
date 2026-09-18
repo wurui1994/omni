@@ -597,6 +597,7 @@ class CEmitter {
     /* 那格按名字调 op 的派发器：**这份程序真用到才填**（见 `callOpAt` 头上那段账）。
      * 要在 s16 池之前 —— 填它的时候可能还会往池里加字面量。 */
     this.fillCallOp();
+    this.fillMembers();
     this.out[this.s16At] = this.s16PoolLines().join('\n');    this.out[this.protoAt] = this.protoLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
@@ -1010,8 +1011,12 @@ class CEmitter {
       this.line('static void omni_js_prim_hook_init_(void) { omni_js_prim_hook_set(omni_js_prim_v); }');
       this.dynSegs = true;
       // 成员派发器：调的全是上面这些宏摊出来的 static 函数，所以只能在这之后生成
-      this.memberDispatch();
-      this.protoMembers();
+      // **留坑**（task #42）：和 callOpAt 同一个手法——先留空行，等函数体发完后扫
+      // 哪些 `omni_js_m_*` / `omni_js_p_*` 真被调到了，只生成那几个。
+      this.memberAt = this.out.length;
+      this.out.push('');
+      this.pmAt = this.out.length;
+      this.out.push('');
     /**
        * **按名字调 op 那格派发器留一个坑，最后再填**（第一百四十八片第四格）。
        *
@@ -1124,14 +1129,55 @@ class CEmitter {
   }
 
   /**
+   * 成员派发器 + protoMembers 的留坑回填（task #42，与 `fillCallOp` 同一个手法）。
+   *
+   * 扫一遍已发出的所有行，收集**真出现的** `omni_js_m_*` / `omni_js_p_*` 函数名。
+   * 只生成被引用到的那几个。`protoMembers` 的那张表和 `pm_call_impl` 也只含这些。
+   *
+   * 量到的账（`bench/fib.js`，58523 字节 C）：112 个派发器占 33723 字节 = **57.6%**，
+   * 而 fib 一个都不直接调。留到 `protoMembers` 那边用的有 93 个（`pm_call_impl` 的
+   * switch），但 fib 连 proto 取值那条路也没走到 —— 所以全部可以省。
+   */
+  fillMembers() {
+    if (this.memberAt === undefined) return;
+    const used = new Set();
+    const rx = /omni_js_[mp]_[A-Za-z_0-9]+/g;
+    let proto = false;
+    for (const ln of this.out) {
+      if (typeof ln !== 'string') continue;
+      let m;
+      while ((m = rx.exec(ln)) !== null) used.add(m[0]);
+      if (!proto && ln.includes('omni_js_realm_proto(')) proto = true;
+    }
+    if (proto) {
+      const TAG_PROTO = {
+        list: 1, string: 1, real: 1, int: 1, uint: 1, bool: 1, Map: 1, Set: 1, regexp: 1,
+      };
+      for (const d of Object.values(JS_MEMBERS)) {
+        if (d.noC === true || d.member.kind === 'prop') continue;
+        if (Object.keys(d.member.on).some((t) => TAG_PROTO[t] !== undefined)) used.add(d.c);
+      }
+    }
+    const outer = this.out;
+    this.out = [];
+    this.memberDispatch(used);
+    outer[this.memberAt] = this.out.join('\n');
+    this.out = [];
+    this.protoMembers(used);
+    outer[this.pmAt] = this.out.join('\n');
+    this.out = outer;
+  }
+
+  /**
    * 成员派发器（ADR-0011 第 9 节）。表在 hir/js_abi.js，这里只按表生成 —— 发射器里
    * 不出现任何成员名。JS 后端 backend-js/emit.js 的 memberDispatch 是逐行的孪生。
+   *
+   * `used` 给了就只发那几个（task #42 的留坑回填）；不给就全发。
    */
-  memberDispatch() {
+  memberDispatch(used = null) {
     for (const d of Object.values(JS_MEMBERS)) {
-      // 每条分支都只有 JS 侧实现的成员（js_abi 里传播上来的 noC）：这一格在 C 上整个不生成，
-      // 用到它的程序在 builtin 那儿就被拒 —— 不生成一句调用不存在的符号再让 clang 去骂
       if (d.noC === true) continue;
+      if (used !== null && !used.has(d.c)) continue;
       const m = d.member;
       const ps = ['r'];
       for (let i = 0; i < m.argc; i++) ps.push(`a${i}`);
@@ -1183,7 +1229,7 @@ class CEmitter {
    * 一个成员可能挂在几个原型上（`slice` 在 Array 与 String 上都有），那就是表里几行、
    * 同一个号 —— 按接收者标签分派是那个 static 函数自己的事。
    */
-  protoMembers() {
+  protoMembers(used = null) {
     const TAG_PROTO = {
       list: 'Array', string: 'String', real: 'Number', int: 'Number', uint: 'Number',
       bool: 'Boolean', Map: 'Map', Set: 'Set', regexp: 'RegExp',
@@ -1206,6 +1252,8 @@ class CEmitter {
         for (const pr of protos) rows.push({ pr, nm: m.name, argc: m.argc, ix: -2 });
         continue;
       }
+      /* task #42 裁减：没被用到的成员不进 pm_call_impl 的 switch。 */
+      if (used !== null && !used.has(d.c)) continue;
       const ix = cases.length;
       const args = [];
       for (let i = 0; i < m.argc; i++) args.push(`omni_js_pm_arg_(args, ${i})`);
