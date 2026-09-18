@@ -186,6 +186,102 @@ const tnameText = (tn) => (tn !== undefined && tag(tn) === 'tname'
   ? kids(tn).map(leaf).join('.') : null);
 
 /**
+ * **跨模块的声明表**（`opts.pkgs` = 语料里所有的树，与 go 那一份 `XPKG` 同形）。
+ *
+ * V 里一个**目录**就是一个模块，而 `opts.also` 只递同一个目录。账上"跨文件才知道的事"
+ * 那 93 份里两族都是跨**模块**的：
+ *   * `.c` / `.tcc` 那种**枚举的短写法**（~57 份）—— 那个枚举声明在 `pref` 之类的模块里；
+ *   * `VecN{1, 2}` 那种**位置型结构字面量**（~36 份）—— 字段名与顺序在那个模块里。
+ *
+ * 键按模块分开存（`mod.Type` / `mod.变体`），查的时候**只查这份文件 import 过的模块** ——
+ * 不然整棵树里同名的变体一大把，"唯一"那条判据就废了。
+ */
+const XNONE = { mods: new Set(), structs: new Map(), evar: new Map() };
+let XMOD = XNONE;
+const XCACHE = new WeakMap();
+
+/** 一棵树里**属于模块 `m`** 的 struct 与 enum（键都带模块限定）。 */
+function collectMod(x, m, X) {
+  if (!isList(x)) return;
+  const g = tag(x);
+  if (g === 'struct' || g === 'union') {
+    const nm = tnameText(kids(x)[0]);
+    if (nm !== null) {
+      const fs = [];
+      let embedded = false;
+      for (const f of kids(x).slice(1)) {
+        if (tag(f) === 'f') fs.push(leaf(kids(f)[0]));
+        else if (tag(f) === 'embed') embedded = true;
+      }
+      X.structs.set(`${m}.${nm}`, embedded ? null : fs);
+    }
+  }
+  if (g === 'enum') {
+    let next = 0;
+    for (const v of kids(x).slice(1)) {
+      if (tag(v) !== 'v') continue;
+      const vn = leaf(kids(v)[0]);
+      const explicit = kids(v).find((y) => tag(y) === 'num');
+      if (explicit !== undefined) next = Number(leaf(kids(explicit)[0]));
+      const k = `${m}.${vn}`;
+      /* 同一个模块里两个枚举撞了变体名就存 null —— 与本文件那张表同一条规矩。 */
+      X.evar.set(k, X.evar.has(k) ? null : next);
+      next += 1;
+    }
+  }
+  for (const k of kids(x)) collectMod(k, m, X);
+}
+
+/** 换上这一批树的跨模块表（没递就是空表 —— 那时行为与从前逐字相同）。 */
+function useXmod(trees) {
+  if (trees === undefined || trees === null) {
+    XMOD = XNONE;
+    return;
+  }
+  let X = XCACHE.get(trees);
+  if (X === undefined) {
+    X = { mods: new Set(), structs: new Map(), evar: new Map() };
+    for (const t of trees) {
+      if (!isList(t) || tag(t) !== 'file') continue;
+      const md = kids(t).find((y) => isList(y) && tag(y) === 'module');
+      const m = md === undefined ? null : leaf(kids(md)[0]);
+      if (m === null) continue;
+      X.mods.add(m);
+      for (const it of kids(t)) collectMod(it, m, X);
+    }
+    XCACHE.set(trees, X);
+  }
+  XMOD = X;
+}
+
+/**
+ * **这份文件 import 过的模块里，哪几格有这个变体**（`.c` 那种短写法）。
+ * 回 `[模块名, 值]` 的表 —— 空表 = 一格都没有，多于一格 = 分不开（两种都当场报）。
+ */
+function xEvariants(vn) {
+  const out = [];
+  for (const m of IMPORTS) {
+    const v = XMOD.evar.get(`${m}.${vn}`);
+    if (v !== undefined) out.push([m, v]);
+  }
+  return out;
+}
+
+/**
+ * **这份文件 import 过的模块里，哪格有这个 struct**（位置型字面量查字段名用）。
+ * `ast.Type` 那种限定名直接查；光名字要到 import 过的模块里逐个试。
+ * 一格都没有回 undefined。
+ */
+function xStruct(nm) {
+  if (nm.includes('.')) return XMOD.structs.get(nm);
+  for (const m of IMPORTS) {
+    const fs = XMOD.structs.get(`${m}.${nm}`);
+    if (fs !== undefined) return fs;
+  }
+  return undefined;
+}
+
+/**
  * 扫一遍顶层：登记每个方法的接收者类型，以及每个 struct 的字段名与顺序。
  *
  * `shapesOnly` 那一格是**旁边那几份文件**用的（`opts.also`）：只收"这个类型长什么样"
@@ -788,7 +884,22 @@ function toNode(x) {
     case 'evariant': {
       const vn = leaf(kids(x)[0]);
       if (!EVARIANTS.has(vn)) {
-        throw new Error(`v->graph: .${vn} 是枚举的短写法，而这份文件里没见过那个枚举的声明`);
+        /* 本模块里没有 —— 到**这份文件 import 过的模块**里找（跨模块表，见 `XNONE` 那段）。
+           找到正好一格就用它；一格都没有 / 好几格都有，两种都当场报。 */
+        const cands = xEvariants(vn);
+        if (cands.length === 1 && cands[0][1] !== null) {
+          return node('const', {}, { value: cands[0][1] });
+        }
+        if (cands.length > 1) {
+          throw new Error(`v->graph: .${vn} 在 import 进来的 ${cands.length} 格模块里都有`
+            + `（${cands.map(([m]) => m).join(' · ')}）—— 分开它们要类型那一层，这一批不猜`);
+        }
+        if (cands.length === 1) {
+          throw new Error(`v->graph: .${vn} 在模块 ${cands[0][0]} 里的两个枚举里都有 ——`
+            + ' 分开它们要类型那一层，这一批不猜');
+        }
+        throw new Error(`v->graph: .${vn} 是枚举的短写法，而这份文件与它 import 过的模块里`
+          + '都没见过那个枚举的声明（标准库 / 语料树外的模块）');
       }
       const val = EVARIANTS.get(vn);
       if (val === null) {
@@ -843,10 +954,14 @@ function toNode(x) {
           throw new Error('v->graph: 结构字面量里位置与字段名混着 —— V 也不许这么写');
         }
         const nm = tnameText(kids(x)[0]);
-        const fs = nm === null ? undefined : STRUCTS.get(nm);
+        /* 本模块那张表里没有时到**跨模块表**里找一次（`mod.Type` 那种限定名直接查，
+           光名字要到 import 过的模块里逐个试 —— 找到正好一格才算）。 */
+        let fs = nm === null ? undefined : STRUCTS.get(nm);
+        if (fs === undefined && nm !== null) fs = xStruct(nm);
         if (fs === undefined) {
-          throw new Error(`v->graph: 位置型结构字面量要字段名与顺序，而 ${nm ?? '这个类型'} 的`
-            + '声明不在这一份文件里');
+          throw new Error('v->graph: 位置型结构字面量要字段名与顺序，而 '
+            + `${nm ?? `这一格类型的形状是 ${tag(kids(x)[0])}（不是具名类型）`} 的`
+            + '声明不在这一份文件、也不在 import 过的模块里');
         }
         if (fs === null) {
           throw new Error(`v->graph: ${nm} 有嵌入字段 —— 它在构造顺序里占几格要展开被嵌类型`
@@ -1373,6 +1488,9 @@ export function vlangToGraph(tree, opts) {
   }
   ENUMS.clear();
   EVARIANTS.clear();
+  /* **跨模块那张表**（`opts.pkgs` = 语料里所有的树，见 `XNONE` 那一段）：只建一次，
+     按数组的身份缓存。没递这一格时它是空表 —— 那时行为与从前逐字相同。 */
+  useXmod(opts?.pkgs);
   /**
    * **同一格模块里别的文件先扫**（`opts.also`）：V 里同一个目录就是同一个模块，
    * `Point{1, 2}` 的字段名与顺序**可能声明在旁边那份文件里**。这一趟只收声明
