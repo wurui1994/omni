@@ -97,7 +97,7 @@ const CLASSES = [
   // 新那两句话里没有 `addr` / `deref` 这两个词，所以"指针那一格"也要在名单里
   // （落地那一刻忘了加，"没归类"当场从 41 涨到 199 —— 那一栏又一次自己举了手）。
   ['指针（真别名：`&x` · 光秃秃的 `*p`）',
-    /addr|deref|这个算子还没接：&(?!&)|（解引用）|指针那一格/],
+    /addr|deref|这个算子还没接：&(?!&)|（解引用）|指针那一格|还没接：ptr/],
   // `体里的 err` 那一条也归这一族（Option 那一刀之后剩下的最大一块 —— 错误消息不在图上）
   ['option / result（or-block · 传播 · ?T · `or { … }` 体里的 err）',
     /or-block|propagate|option|Option \/ Result/],
@@ -107,7 +107,7 @@ const CLASSES = [
   ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%)/],
   ['集合与字符（set-lit / char / rune）', /set 字面量|char 是自己一格类型|还没接：char|还没接：rune/],
   ['类型层的算子（typeof / sizeof / is / as / x.(T)）',
-    /typeof|sizeof|isreftype|还没接：is$|还没接：not-is|还没接：as$|还没接：tswitch|还没接：assert$|登记过的类型|还没接：if-is/],
+    /typeof|sizeof|isreftype|还没接：is$|还没接：not-is|还没接：as$|还没接：tswitch|还没接：assert$|登记过的类型|还没接：if-is|类型断言/],
   // **这一族是"没归类"那一栏第二回指出来的**（2026-09-18）：内嵌字段的名字要从被嵌的那格
   // 类型来、泛型实例化 `Foo[int]{…}` 也要类型、"两个类型都声明了同名方法"更是非类型不能分。
   // 三条都不是"哪一格还没接"，是**这一层看不见类型** —— 与"跨文件才知道的事"是邻居。
@@ -119,7 +119,9 @@ const CLASSES = [
   ['成员是不是在里头（数组的 `in`）', /只接 map（数组的 in|还没接：in$/],
   // 表达式位置上的 match 那两条也是**明说过的**（没有 else 就没有值 · 一支只准一格表达式）
   ['明说过的形状限制（主语要算好几遍 · 匿名接收者 · 格式动词 …）',
-    /要算好几遍|匿名接收者|格式动词|不是字面量|要 N 是整数字面量|只接 map 与切片|混着|没有 else|正好是一格表达式|声明了 N 格字段/],
+    /要算好几遍|匿名接收者|格式动词|不是字面量|要 N 是整数字面量|只接 map 与切片|混着|没有 else|正好是一格表达式|声明了 N 格字段|\[N\]T 的零值/],
+  ['集合与字符（set-lit / char / rune / array / imag）',
+    /set 字面量|char 是自己一格类型|还没接：char|还没接：rune|还没接：imag|还没接：array$/],
   ['并发与异常（chan / spawn / try / yield / select · lock）',
     /chan|spawn|select|try|yield|raise|throw|还没接：r?lock|还没接：send|还没接：recv|还没接：go$/],
   ['跨文件才知道的事（跨模块的类型 / 库函数）',
