@@ -33,6 +33,10 @@
 #define OMNI_JS_CTOR_SEL 2000
 /* Date.prototype 上那四十格取值面（外加 [Symbol.toPrimitive] 一格）的起点。摆在 CTOR 那段
    之前是够的：一共 41 格，离 OMNI_JS_PM_SEL 还差得远。 */
+/* 属性键放栈上那一条的缓冲区（见 `omni_js_pkey_buf_`）。63 个字节装得下属性名与下标
+   这两类真实的键；再长的照旧走 `omni_js_key_tag_`，不为极少数情况开大栈帧。 */
+#define OMNI_JS_PKEY_BUF 64
+
 #define OMNI_JS_DATE_SEL 100
 #define OMNI_JS_DATE_N 41
 
@@ -633,6 +637,60 @@ static omni_str omni_js_pkey_(omni_dyn k) { \
   if (k.tag == OMNI_DYN_SYM) return omni_str_fmt("y%p", k.u.ref); \
   return omni_js_key_tag_('s', omni_s16_to_utf8(omni_js_as_s16(omni_js_str(k)))); \
 } \
+/* 属性键**放栈上**那一条（第一百五十六片量出来的）。与 `getp_k` 里那一格同一个理由，
+   只是这儿的键是一格 dyn：查槽只**读**键（算哈希 + memcmp），不留它 —— 留下来的只有
+   插入那一路（`def_data_`），而那一路拿的是 dyn 键、自己再编一份。
+   两种最常见的形态走这条快路：
+     - 短的 ASCII 串（属性名）：省掉 s16 -> utf8 那一趟（一次分配）；
+     - 小整数（`o[i] = v`）：**不走 `omni_js_str`** —— 那是 double 格式化，而整数的 JS
+       文本就是它的十进制（与 `omni_js_str` 逐字一致：-0 也印 "0"）。
+   别的（Symbol / 非 ASCII / 长串 / 非整实数 / 超范围）回 false，调用方照旧走 `pkey_`。
+   量出来的：改前 `omni_js_key_tag_` 吃掉采样的 **37%**（第一名），来路是 setp 137 帧 +
+   getp 76 帧 —— 全是 `this.x = v` 与 `o[i]` 这两种最平常的写法。 */ \
+static bool omni_js_pkey_buf_(omni_dyn k, char *buf, omni_str *out) { \
+  if (k.tag == OMNI_DYN_STR16) { \
+    omni_s16 s = k.u.s16; \
+    if (s.len + 1 > OMNI_JS_PKEY_BUF) return false; \
+    buf[0] = 's'; \
+    for (int64_t i = 0; i < s.len; i++) { \
+      if (s.p[i] >= 0x80) return false;   /* 非 ASCII：编码归通用那条 */ \
+      buf[1 + i] = (char)s.p[i]; \
+    } \
+    out->p = buf; \
+    out->len = s.len + 1; \
+    return true; \
+  } \
+  if (k.tag == OMNI_DYN_STRING) { \
+    if (k.u.s.len + 1 > OMNI_JS_PKEY_BUF) return false; \
+    buf[0] = 's'; \
+    if (k.u.s.len > 0) memcpy(buf + 1, k.u.s.p, (size_t)k.u.s.len); \
+    out->p = buf; \
+    out->len = k.u.s.len + 1; \
+    return true; \
+  } \
+  if (k.tag == OMNI_DYN_REAL) { \
+    double d = k.u.r; \
+    int64_t v; \
+    char tmp[20]; \
+    int n = 0; \
+    bool neg; \
+    uint64_t m; \
+    int64_t len = 0; \
+    if (!(d > -1e15 && d < 1e15)) return false; \
+    v = (int64_t)d; \
+    if ((double)v != d) return false;     /* 非整数：文本形态复杂，走通用那条 */ \
+    neg = v < 0; \
+    m = neg ? (uint64_t)(-(v + 1)) + 1u : (uint64_t)v; \
+    do { tmp[n++] = (char)('0' + (int)(m % 10)); m /= 10; } while (m); \
+    buf[len++] = 's'; \
+    if (neg) buf[len++] = '-'; \
+    while (n > 0) buf[len++] = tmp[--n]; \
+    out->p = buf; \
+    out->len = len; \
+    return true; \
+  } \
+  return false; \
+} \
 static DT omni_js_ps_(omni_dyn o) { return (DT)((omni_js_objv *)o.u.ref)->ps; } \
 /* 一格 ASCII 名字当属性键。omni_js_s16_lit 住在 JSON 那一段（比这一段后展开），
    所以这儿自己转一次 —— 只在 defineProperty 与 instanceof 那两条冷路上用。 */ \
@@ -762,7 +820,11 @@ static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv) { \
     if (f.tag == OMNI_DYN_UNDEF) return omni_js_getp(omni_js_px_target_(o), k, self); \
     return omni_js_px_call_(f, ((omni_js_objv *)o.u.ref)->px_h, omni_js_px_target_(o), k, self, 3); \
   } \
-  LT sl = omni_js_find_slot_(o, omni_js_pkey_(k), NULL); \
+  char kbuf[OMNI_JS_PKEY_BUF]; \
+  omni_str gkey; \
+  LT sl; \
+  if (!omni_js_pkey_buf_(k, kbuf, &gkey)) gkey = omni_js_pkey_(k); \
+  sl = omni_js_find_slot_(o, gkey, NULL); \
   if (sl == NULL) { \
     omni_dyn tail = omni_js_proto_tail_(o); \
     /* 链的尾巴可能是一格 dict（`Object.create({…})`）：dict 挂不了符号键，所以符号在那儿
@@ -830,8 +892,11 @@ static omni_dyn omni_js_setp(omni_dyn o, omni_dyn k, omni_dyn v, omni_dyn recv) 
     omni_js_px_call_(f, ((omni_js_objv *)o.u.ref)->px_h, omni_js_px_target_(o), k, v, 3); \
     return v; \
   } \
-  omni_str key = omni_js_pkey_(k); \
-  LT sl = omni_js_find_slot_(o, key, NULL); \
+  char kbuf[OMNI_JS_PKEY_BUF]; \
+  omni_str key; \
+  LT sl; \
+  if (!omni_js_pkey_buf_(k, kbuf, &key)) key = omni_js_pkey_(k); \
+  sl = omni_js_find_slot_(o, key, NULL); \
   if (sl != NULL && sl->items[1].u.b) { \
     if (sl->items[3].tag != OMNI_DYN_FN) return v; \
     LT args = LT##_new(); \

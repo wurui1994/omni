@@ -242,6 +242,30 @@ function mentionsThis(node) {
   return hit;
 }
 
+/**
+ * 体里有没有**箭头**提到 `this` —— 只有那时候 `this` 才必须装进一格 cell。
+ *
+ * 为什么要单独问这一句（第一百五十五片，量出来的）：入口那一句从前一律
+ * `captured.add('this')`，于是每个方法的第一行都是
+ * `v_this = list_from((omni_dyn[]){ js_this_take() }, 1)` —— **每次调用一次堆分配**，
+ * 只为了"内层箭头也许要捕获它"。采样榜上这一格是第一名：`OMNI_PROF=sample dist/omni run
+ * tests/cases/01_basics.omni --timeout 10` 里 45% 的帧落在 `omni_list_dynamic_from`，
+ * 最大的一份来自预处理器的 `peekc`（每读一个字符调一次的一行方法，体里连箭头都没有）。
+ *
+ * 挡的那几类与 `mentionsThis` 一样：普通函数 / 类 / 对象字面量里的方法各有自己的接收者，
+ * 它们提到 `this` 与外层这一格无关。箭头则相反 —— 它的 `this` 就是外层这一个。
+ */
+function arrowMentionsThis(node) {
+  if (!node || typeof node !== 'object') return false;
+  if (node.type === 'FuncExpr' || node.type === 'FuncDecl' || node.type === 'ClassDecl'
+    || node.type === 'ClassExpr') return false;
+  if (node.method === true) return false;
+  if (node.type === 'Arrow') return mentionsThis(node);
+  let hit = false;
+  eachChild(node, (x) => { if (!hit) hit = arrowMentionsThis(x); });
+  return hit;
+}
+
 /** 这个函数体里提到 `new.target` 了吗（钻箭头，不钻普通函数 —— 与 mentionsThis 同理） */
 function mentionsNewTarget(node) {
   if (!node || typeof node !== 'object') return false;
@@ -771,7 +795,14 @@ class Lower {  /** @param {import('../source/diag.js').Diagnostics} diags */
      * 函数根本不提它。加进 captured 是为了内层箭头能把它当 cell 捕获下去。 */
     if (!opts.isArrow && !opts.isCtor
       && (opts.wantThis === true || bodyStmts.some((s) => mentionsThis(s)))) {
-      this.fn.captured.add('this');
+      /* **只有真被箭头捕获时才装 cell**（第一百五十五片）：cell 是一格 1 元素的 list，
+         装它就是每次调用一次堆分配。绝大多数方法体里连箭头都没有 —— 那时候一格普通
+         局部量就够（`readEntry` 两种都认）。`wantThis` 那一档（`$init` 之类，字段初值里
+         可能有箭头，而那些初值不在 `bodyStmts` 上）照旧装，宁可多分配不许少一格 cell。
+         量出来的：这一格从前占采样榜第一名（45% 的帧在 `omni_list_dynamic_from`）。 */
+      if (opts.wantThis === true || bodyStmts.some((s) => arrowMentionsThis(s))) {
+        this.fn.captured.add('this');
+      }
       const self = this.declare('this');
       stmts.push(this.declStmt(self, op('js_this_take', [])));
     }
