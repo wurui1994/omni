@@ -23,6 +23,7 @@ import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { readText } from '../../src/core/host/native.js';
 import { node, lit } from '../../src/core/graph/graph.js';
 import { Gap } from '../../src/core/graph/backend-wat.js';
+import { watKindOf } from '../../src/core/graph/backend-wat.js';
 import { inferType, typeOf, UNKNOWN } from '../../src/core/graph/types.js';
 import { CASES } from './cases.js';
 
@@ -206,5 +207,101 @@ const inVocab = (t) => (typeof t === 'string'
   else no('core 那条腿', `期望 ${CORE_WANT} 处，数出来 ${leaked} 处 —— 变了就得说清`);
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed（类型覆盖层：推不出来就说不知道 · 词汇闭合）\n`);
+// ---- 5) 判据一 · 三处必须说同一句话（这一步只落 wat 那一处）------------------------
+//
+// 设计第四节判据一的原话：「wat 那三档是覆盖层的粗化：`string`->str、`real`->real、
+// 别的 ->int」。第三步把 wat 的 `kindOf` 提到了顶层（`watKindOf`）—— 于是这一条**问得着**了。
+//
+// 比法：拿每份例子的每一格节点，两边各问一次（都用空的名字表 —— 名字那一档两边的存法
+// 本来就不同形：wat 是作用域链、覆盖层是一张平表，那是**粗化的边界**不是分叉）。
+// 对不上的必须落进下面这几类**写下来的**差里；落不进就是有一处错，当场红。
+{
+  const ARITH = new Set(['+', '-', '*', '/', '%', '^']);
+  const coarse = (t) => (t === 'string' ? 'str' : (t === 'real' ? 'real' : 'int'));
+  const emptySc = { lookup: () => null, kindOf: () => 'int' };
+  const emptyGk = new Map();
+  /** 写下来的那几类差（每一类一句为什么）。回 null = 说不清 = 当场红。 */
+  const classifyOwn = (x, watAns, ovAns) => {
+    if (ovAns === '<缺口>') return 'conv/字段那几格覆盖层报缺口（方言接不住，wat 当 i64 接得住）';
+    if (x.op === 'branch' && watAns === 'mix') return 'branch 两支不同型：wat 要答 mix（wasm 的值类型只有一种），覆盖层没有这一档';
+    if (x.op === 'prim' && !ARITH.has(x.attrs.name) && x.attrs.name !== 'concat') {
+      return '非算术内建：wat 一律当 i64（那一格的值不往外流），覆盖层照实参说';
+    }
+    return null;
+  };
+  /**
+   * **顺着"透传"那几格往上传的差**：`branch` 与 `region` 交出来的就是里头那一格的类型，
+   * 所以里头那一格的差会原样冒上来（量到的就是它：`match` 的一支里有一格非算术内建，
+   * 于是 wat 说 int、覆盖层说 str）。只顺**透传**那几条边往下找 —— 别的边不传类型，
+   * 顺着它们找就等于把这条判据放水。
+   */
+  const throughs = (x) => (x.op === 'branch' ? [x.ins.then, x.ins.else]
+    : (x.op === 'region' ? [x.ins.body] : []));
+  const fromBelow = (x) => {
+    for (let kid of throughs(x)) {
+      if (Array.isArray(kid)) kid = kid[kid.length - 1];
+      if (kid === null || kid === undefined || typeof kid !== 'object') continue;
+      if (kid.op === undefined) continue;
+      let ov;
+      try {
+        ov = coarse(inferType(kid, new Map(), mkCtx()));
+      } catch {
+        ov = '<缺口>';
+      }
+      const wat = watKindOf(kid, emptySc, emptyGk);
+      if (ov !== wat && (classifyOwn(kid, wat, ov) !== null || fromBelow(kid))) return true;
+    }
+    return false;
+  };
+  const classify = (x, watAns, ovAns) => classifyOwn(x, watAns, ovAns)
+    ?? (fromBelow(x) ? '透传那几格（branch / region）把里头那一格的差原样冒上来' : null);
+  const tally = new Map();
+  const bump = (k) => tally.set(k, (tally.get(k) ?? 0) + 1);
+  const unexplained = [];
+  let compared = 0;
+  const walk = (x, ctx) => {
+    if (x === null || x === undefined) return;
+    if (Array.isArray(x)) { for (const y of x) walk(y, ctx); return; }
+    if (x.kind === 'graph') { walk(x.body, ctx); return; }
+    if (x.lit === undefined && x.op === undefined) return;
+    let ov;
+    try {
+      ov = coarse(inferType(x, new Map(), ctx));
+    } catch (err) {
+      if (!(err instanceof Gap)) throw err;
+      ov = '<缺口>';
+    }
+    const wat = watKindOf(x, emptySc, emptyGk);
+    compared++;
+    if (ov === wat) bump(`一致 ${wat}`);
+    else {
+      const why = classify(x, wat, ov);
+      if (why === null) unexplained.push(`${x.op ?? '字面量'}: wat ${wat} / 覆盖层 ${ov}`);
+      else bump(`差〔${why.slice(0, 12)}…〕`);
+    }
+    for (const k of Object.values(x.ins ?? {})) walk(k, ctx);
+  };
+  for (const c of CASES) {
+    let g = null;
+    try {
+      const { tb } = loadGrammarTable(`${ROOT}${c.grammar}`);
+      const text = readText(`${ROOT}${c.file}`);
+      const diags = new Diagnostics();
+      const toks = lexText(tb.grammar.lex, new SourceFile(c.file, text), diags);
+      const tree = glrParse(tb, toks, diags);
+      g = c.toGraph(tree);
+    } catch {
+      continue;   // 建图炸了那一格上面第 3 节已经红过，不重复记
+    }
+    walk(g, mkCtx());
+  }
+  const account = [...tally].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(' · ');
+  if (unexplained.length === 0) ok(`判据一〔wat 与覆盖层比了 ${compared} 格〕[${account}]`);
+  else {
+    no('判据一〔wat 与覆盖层〕', `这几格对不上，而且不属于写下来的任何一类差：\n       `
+      + unexplained.slice(0, 8).join('\n       '));
+  }
+}
+
+process.stdout.write(`\n${pass} passed, ${fail} failed（类型覆盖层：推不出来就说不知道 · 词汇闭合 · 与 wat 同一句话）\n`);
 if (fail > 0) process.exit(1);

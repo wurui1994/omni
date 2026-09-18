@@ -49,6 +49,8 @@
 import { NODES } from './nodes.js';
 // 五份"形状上的账"各带一份证物，证物是**手搭的小图** —— 所以要 node()（它顺带查五栏声明）
 import { node, lit } from './graph.js';
+// 类型覆盖层（#40）：字面量那一档的口径归它，这条腿只做一格粗化（见 `watKind`）
+import { litType } from './types.js';
 // 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
 import { PRIMS } from './prims.js';
 // 字符串常量要发成一段字节 —— 与 C / LLVM 两条腿共用同一份编码（宿主的 TextEncoder 不用）
@@ -479,6 +481,68 @@ class WatScope {
 const watItems = (x) => (x === undefined || x === null ? [] : (Array.isArray(x) ? x : [x]));
 
 /**
+ * 覆盖层那张词汇表在 wat 这边的**粗化**：这条腿只分三档 —— `int`（i64）、`real`（f64）、
+ * `str`（一格地址）。`bool` 与 `unknown` 都是 i64，所以都落 `int`。
+ * 这一格就是设计文档判据一里那句"wat 那三档是覆盖层的粗化"。
+ */
+const watKind = (t) => (t === 'string' ? 'str' : (t === 'real' ? 'real' : 'int'));
+
+/**
+ * 这一格值装的是**数**（`int`）、**实数**（`real`）还是**串**（`str`，一格地址）。
+ * 图那一层没有类型，所以只能静态追这几格；追不到的一律按 `int` ——
+ * 而"串 / 实数流到追不着的地方"这件事在各个消费点上报缺口（见 onlyInt），
+ * 所以答案不会悄悄错：要么是数，要么明说接不住。
+ *
+ * **字面量那一档问覆盖层**（`litType`，#40 第三步）：原来这儿另写了一格 `litKind`
+ * （"是串 / 不是整的数 / 别的"），与覆盖层同一份知识抄两遍。现在只剩一份 + 一格粗化。
+ * `ref` / `region` / `branch` 那三档仍旧在这儿：wat 的名字是**作用域链**上的
+ * （`sc.lookup`），而覆盖层的 `env` 是一张平的表；`branch` 两支不同型时 wat 要答 `mix`
+ * （那是 wasm 的事：两支得落成同一个值类型），覆盖层没有这一档。
+ * 这两处不同**不是分叉，是粗化的边界** —— `tests/graph/types.js` 判据一按这个口径比。
+ *
+ * 从 `emitWat` 里提到顶层是为了**能被判据问**（原来它是闭包，外头问不着，
+ * 于是"三处说同一句话"那条判据落不下来）。`gk` 就是那张全局量的种类表。
+ */
+export function watKindOf(x, sc, gk) {
+  if (x === null || x === undefined) return 'int';
+  if (Array.isArray(x)) {
+    const l = watItems(x);
+    return l.length === 0 ? 'int' : watKindOf(l[l.length - 1], sc, gk);
+  }
+  if (x.lit !== undefined) return watKind(litType(x.lit));
+  switch (x.op) {
+    case 'const': return watKind(litType(x.attrs.value));
+    case 'ref': {
+      const nm = x.attrs.name;
+      return sc.lookup(nm) !== null ? sc.kindOf(nm) : (gk.get(nm) ?? 'int');
+    }
+    case 'region': return watKindOf(x.ins.body, sc, gk);
+    // 表示转换：目标那一栏（`to`）就是答案 —— 这一格是"两种数值类型"的入口。
+    // **不走覆盖层的 `convTo`**：那一格对 `to=bool` 报缺口（方言里没有 tobool），
+    // 而 wat 这边 bool 就是 i64，接得住 —— 这是腿的事，不是类型的事。
+    case 'conv': {
+      if (x.attrs.to === 'str') return 'str';
+      return x.attrs.to === 'float' ? 'real' : 'int';
+    }
+    // 算术：**有一边是实数，结果就是实数**（比较出的是真假，算 int）。
+    // 串接（`concat` 与落在串上的 `+`）出的是**串** —— 那一格在 `$__str_cat` 里
+    case 'prim': {
+      const nm = x.attrs.name;
+      const args = watItems(x.ins.args);
+      if (nm === 'concat') return 'str';
+      if (!WAT_ARITH.has(nm)) return 'int';
+      if (nm === '+' && args.some((a) => watKindOf(a, sc, gk) === 'str')) return 'str';
+      return args.some((a) => watKindOf(a, sc, gk) === 'real') ? 'real' : 'int';
+    }
+    case 'branch': {
+      const a = watKindOf(x.ins.then, sc, gk); const b = watKindOf(x.ins.else, sc, gk);
+      return a === b ? a : 'mix';
+    }
+    default: return 'int';
+  }
+}
+
+/**
  * 一块图里出现的名字：读到的（`ref` / `set`）与绑住的（`bind` / `func` 的形参）。
  * **lambda 提升**要它：自由名字 = 读到的 - 绑住的。
  * 这是一趟纯结构的走查（按端口走，不认识任何具体节点）—— 加新节点不用改它。
@@ -645,55 +709,9 @@ function emitOnce(graph, retOf, multiOf) {
     }
   }
 
-  /**
-   * 这一格值装的是**数**（`int`）、**实数**（`real`）还是**串**（`str`，一格地址）。
-   * 图那一层没有类型，所以只能静态追这几格；追不到的一律按 `int` ——
-   * 而"串 / 实数流到追不着的地方"这件事在各个消费点上报缺口（见 onlyInt），
-   * 所以答案不会悄悄错：要么是数，要么明说接不住。
-   */
-  function kindOf(x, sc) {
-    if (x === null || x === undefined) return 'int';
-    if (Array.isArray(x)) {
-      const l = watItems(x);
-      return l.length === 0 ? 'int' : kindOf(l[l.length - 1], sc);
-    }
-    if (x.lit !== undefined) return litKind(x.lit);
-    switch (x.op) {
-      case 'const': return litKind(x.attrs.value);
-      case 'ref': {
-        const nm = x.attrs.name;
-        return sc.lookup(nm) !== null ? sc.kindOf(nm) : (globalKinds.get(nm) ?? 'int');
-      }
-      case 'region': return kindOf(x.ins.body, sc);
-      // 表示转换：目标那一栏（`to`）就是答案 —— 这一格是"两种数值类型"的入口
-      case 'conv': {
-        if (x.attrs.to === 'str') return 'str';
-        return x.attrs.to === 'float' ? 'real' : 'int';
-      }
-      // 算术：**有一边是实数，结果就是实数**（比较出的是真假，算 int）。
-      // 串接（`concat` 与落在串上的 `+`）出的是**串** —— 那一格在 `$__str_cat` 里
-      case 'prim': {
-        const nm = x.attrs.name;
-        const args = watItems(x.ins.args);
-        if (nm === 'concat') return 'str';
-        if (!WAT_ARITH.has(nm)) return 'int';
-        if (nm === '+' && args.some((a) => kindOf(a, sc) === 'str')) return 'str';
-        return args.some((a) => kindOf(a, sc) === 'real') ? 'real' : 'int';
-      }
-      case 'branch': {
-        const a = kindOf(x.ins.then, sc); const b = kindOf(x.ins.else, sc);
-        return a === b ? a : 'mix';
-      }
-      default: return 'int';
-    }
-  }
-
-  /** 一格字面量的种类。**整数与实数在图上都是 number**，判据只有"是不是整"这一条。 */
-  const litKind = (v) => {
-    if (typeof v === 'string') return 'str';
-    if (typeof v === 'number' && !Number.isInteger(v)) return 'real';
-    return 'int';
-  };
+  /* 这一格值装的是数 / 实数 / 串 —— 问的是**顶层那一份**（`watKindOf`，见文件末），
+     这儿只把"全局量装的是什么"那张表绑上去。 */
+  const kindOf = (x, sc) => watKindOf(x, sc, globalKinds);
 
   /** 串只许待在"绑给局部量"与"打印"这两处。别的地方接住了就是给错答案，所以报缺口。 */
   function onlyInt(x, sc, where) {
