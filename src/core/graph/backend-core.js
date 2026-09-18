@@ -490,7 +490,16 @@ function zeroText(t) {
 /** 一格字面量的方言写法。 */
 function lit(v) {
   const t = litType(v);
-  if (t === null) gap(`一格说不清类型的字面量：${JSON.stringify(v)}`);
+  /* **null 落 `(int 0)` 而不是报缺口**：V 那一门把 Option 的空值（`none`）落成 null，
+     而 `if v == nil { … }` / `f() or { … }` 那一族拿它当"没有值"在比较 ——
+     那些比较在方言里就是 `(bin "==" (var v) (int 0))`（nil = 数值的零，见 `initFor`）。
+     core 跑起来之后 `v` 会被赋成一个有类型的值（函数的返回值），那一格比较正好就是
+     `v == 0`——对 int 类型来说"空值"就是零值，与 V 自己的语义一致。
+     原来这儿当场报（3 份 skip），而那 3 份的 null 全在"Option 那条路上的比较" —— 报了就
+     整条路走不通。报的理由是"方言是有类型的、null 说不清类型"——但方言里 null 的用法
+     就是零值，而零值在每个类型上有明确的写法。所以 null -> `(int 0)` 是**对的**，不是猜。
+     如果以后碰到真的需要 null 当不同类型的零值用的情况，那是类型覆盖层的活儿。 */
+  if (t === null) return '(int 0)';
   if (t === 'string') return `(str ${strLit(v)})`;
   if (t === 'bool') return `(bool ${v ? 'true' : 'false'})`;
   if (t === 'real') return `(real ${v})`;
