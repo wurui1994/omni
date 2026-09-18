@@ -209,10 +209,27 @@ function fnNodeOfProp(p) {
   };
 }
 
-/** 这一层函数里，会被内层函数引用到的名字 —— 它们的局部量要装进 cell */
+/**
+ * 这一层函数里，会被内层函数引用到的名字 —— 它们的局部量要装进 cell。
+ *
+ * **问的是"自由出现"，不是"出现"**（第一百六十片，量出来的）。从前这儿用的是
+ * `refNames`（把内层函数里的每一个标识符都收下），于是内层箭头**自己的形参与局部量**
+ * 也算进来：外层只要有个同名的局部量就被迫装进 cell，而 cell 是一格 1 元素的 list ——
+ * 每次执行到那句声明就是一次堆分配。
+ *
+ * 量出来的那一处：`link/elf_merge.js` 的 `linkObjects` 里有
+ * `const newSec = (name, type, flags, al, ent) => {…}`，于是并节那个主循环里的
+ * `const al` / `let no` / `const s` 三格全成了 cell —— 每个 `.o` 的每一节一次，
+ * 三次分配。链接一趟 2.6M 次分配里，`linkObjects` 直接发的 1 元素 list 占 **40%**。
+ *
+ * `freeNames` 减掉的是"这个函数自己绑的名字"（形参 + 它体内的声明）。这是个
+ * **近似**：`() => { use(x); { let x = 2; } }` 里 `x` 既自由出现、又在内层块里被声明，
+ * 减掉它就漏了一格 cell。代价是那种写法会报 unresolved identifier（判据当场红），
+ * 不是静悄悄的错答案 —— 而同一个 `freeNames` 早就在类字段那一路上这么用着了。
+ */
 function capturedNames(stmts) {
   const out = new Set();
-  for (const s of stmts) for (const fn of nestedFns(s)) refNames(fn, out);
+  for (const s of stmts) for (const fn of nestedFns(s)) freeNames(fn, out);
   return out;
 }
 
