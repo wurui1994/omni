@@ -7,12 +7,15 @@
 ;;   * `(dtag E)` / `(asint E)` 那一族 -> 现成的 `Builtin`（主语言的 `dyn()` 与 `as*` 用的
 ;;     就是它们），所以 run / run-c / interp / interp --mir 四条腿一行没改就通了。
 ;;
-;; 五条判据：
+;; 六条判据：
 ;;   1. 四档都装得进、拆得出（int / real / bool / string），值一个不差。
 ;;   2. **标签问得出来**（`dtag`）—— 那是"运行期才知道装的是什么"这句话的可观测面。
 ;;   3. 一格 dyn 的**局部量**能重新赋成另一档：静态类型不许这样，dyn 就是为它来的。
 ;;   4. dyn 能当**形参与返回值**过函数边界（那是异质容器的前置：值得先走得动）。
 ;;   5. 再装一次是恒等（`(dyn (dyn E))`），不套两层箱。
+;;   6. **异质字典**（`(dict string dyn)`）：同一格字典里一格装数一格装串 —— 那正是
+;;      lua 的元表要的形状，也是图那一轴最后 4 格的目标。这一格**一行没多写就通了**：
+;;      `(dict K V)` 的 V 是从 BASE_TYPES 里读的，`dyn` 进了那张表它就认。
 ;;
 ;; 拆箱**带检查**：标签不对当场报运行期错误（那一路在 rt/ 里，不在这儿）。
 
@@ -54,5 +57,15 @@
 
     ;; 判据 5：再装一次是恒等 —— 不套两层箱，标签还是 int
     (print (dtag (dyn (dyn (int 9)))))
+
+    ;; 判据 6：**异质字典** —— 同一格字典里一格数一格串，各自的标签与值都对
+    (let m (dict string dyn) (dnew (dict string dyn)))
+    (dset (var m) (str "n") (dyn (int 7)))
+    (dset (var m) (str "s") (dyn (str "hi")))
+    (print (dlen (var m)))
+    (print (dtag (dget (var m) (str "n"))))
+    (print (asint (dget (var m) (str "n"))))
+    (print (dtag (dget (var m) (str "s"))))
+    (print (asstr (dget (var m) (str "s"))))
   )
 )
