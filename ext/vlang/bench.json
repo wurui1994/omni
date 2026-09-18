@@ -13,6 +13,8 @@
     "env": "V_SRC",
     "sub": "vlib/v",
     "ext": ".v",
-    "doc": "V 自己的编译器（V 写的，vlib/v 底下 —— 词法/语法/检查/生成都在这儿）。"
+    "doc": "V 自己的编译器（V 写的，vlib/v 底下 —— 词法/语法/检查/生成都在这儿）。",
+    "pkgroot": "vlib",
+    "pkgroot_doc": "跨模块查找的范围比分母宽（与 go 的那一格同一个机制）：selfhost 只量 vlib/v，但那些文件 import 了 vlib 底下别的模块（os / strings / arrays / datatypes / term …）。pkgroot 指向整棵 vlib/，XMOD 里就有那些模块的声明，\"语料外的声明\"那一族（34 份）就消了。分母不变。"
   }
 }
