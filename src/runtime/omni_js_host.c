@@ -60,7 +60,8 @@ int omni_host_exit_code(void) { return host_exit_code; }
    （ADR-0022 J4d）。
 
    所以顺序反过来：**先问主线程的栈够不够大**。够（我们链接时给了
-   `-Wl,-stack_size`，见 cli.js 的 ccFlags/宿主链接）就留在主线程上，两个条件一起满足；
+   `-Wl,-stack_size`，见 cli.js 的 ccFlags/宿主链接；自己那台链接器写的是 `LC_MAIN`
+   里的 `stacksize`，`--stack-size` 那一格）就留在主线程上，两个条件一起满足；
    不够才开线程 —— 那时栈的余量比 GUI 更要紧，而这条腿上本来也没有 GUI。
    开不出线程就退回直接调用。 */
 static void (*run_entry_fn)(void);

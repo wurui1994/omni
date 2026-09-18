@@ -740,7 +740,8 @@ function loadInputs(inp) {
  * 把几个 Mach-O 目标文件链成一个可执行文件（`macho_output_file` 的 EXE 那一路），
  * 或者一份 dylib（`-shared`，第九刀第六十三片）。
  *
- * @param inp `{objs, entryName, dylibs, archives, shared, outName, installName, openDylib, rpath}`；
+ * @param inp `{objs, entryName, dylibs, archives, shared, outName, installName, openDylib, rpath,
+ *            stackSize}`；
  *            `entryName` 默认 `_main`（Mach-O 的名字带下划线），`dylibs` 每条要么是一份
  *            `.tbd` 的文本、要么是一份真的 `.dylib` 二进制（`{name, bytes}`），
  *            `archives` 是几份静态库的字节（按需取用，`libtcc1.a` 与 `-lfoo` 找到的
@@ -1230,7 +1231,17 @@ export function machoExe(inp) {
     ilocalsym: 0, nlocalsym: 0, iextdefsym: 0, nextdefsym: 0, iundefsym: 0, nundefsym: 0,
     indirectsymoff: 0, nindirectsyms: 0,
   };
-  const mainLc = { entryoff: 4096, stacksize: 0 };
+  /* `LC_MAIN` 的第二格是**主线程的栈有多大**（`entry_point_command.stacksize`）——
+   * Mach-O 上主线程栈的大小是**链接期**定死的，运行期改不了，`ld` 的 `-stack_size`
+   * 写的就是这一格。0 = 按系统默认（8MB）。
+   *
+   * 为什么这一格非有不可（量出来的）：`omni_run_entry` 先问一句"主线程的栈够不够大"，
+   * 不够就把入口挪到一条自己开的 512MB 线程上。而 macOS 上 AppKit 只能在**真主线程**
+   * 上首次初始化 —— 于是 `glfwInit` 在那条线程上是一个 `EXC_BREAKPOINT`
+   * （`NSUpdateCycle was already initialized.`）。外部 cc 那一路一直给着
+   * `-Wl,-stack_size,0x20000000`（cli.js 的 `stackFlags`），我们自己这台链接器从前
+   * 一直写 0 —— 同一份源码于是在 clang 那一支跑得好、在自己这一支 SIGTRAP。 */
+  const mainLc = { entryoff: 4096, stacksize: inp.stackSize ?? 0 };
   /* `LC_ID_DYLIB` 排在段头之后、链式修正之前，名字是**输出的文件名**
    * （`s1->install_name ? s1->install_name : filename`）。 */
   if (shared) {

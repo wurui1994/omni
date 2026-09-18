@@ -2456,6 +2456,41 @@ function libLinkArgs(libs) {
   return out;
 }
 
+/**
+ * 同一份 `(lib …)`，摆到**我们自己那台链接器**的命令行上（`omni c link`）。
+ *
+ * 与 `libLinkArgs`（外部 cc 那一路）差的只有"怎么说"：`c link` 的位置实参是**目标文件**，
+ * 所以库不能原样写上去（会报 `elf: 这不是一个 ELF 文件`），要过 `--dylib`；
+ * framework 走 `-framework`（那一支自己去 SDK 里找 `.tbd` stub）。
+ *
+ * 为什么要这一份而不是让 `c link` 也认裸路径：位置实参的含义**只能有一个** ——
+ * 目标文件与库混在一处，"这份 `.o` 写错了扩展名"与"这份库不是这个架构"就分不出来了。
+ */
+function selfLibArgs(libs) {
+  const out = [];
+  const seen = new Set();
+  for (const l of libs ?? []) {
+    if (seen.has(l)) continue;
+    seen.add(l);
+    const sys = cSysLib(l);
+    if (sys !== null) {
+      if (sys.link !== null) out.push(sys.link);
+      continue;
+    }
+    if (l.endsWith('.framework')) {
+      if (!hostIsDarwin()) {
+        throw new OmniError(`(lib "${l}")：framework 是 macOS 的东西，这台机器不是`);
+      }
+      out.push('-framework');
+      out.push(l.slice(0, l.length - '.framework'.length));
+      continue;
+    }
+    out.push('--dylib');
+    out.push(l);
+  }
+  return out;
+}
+
 /** `Foo.framework` 在磁盘上的那个二进制（JIT 那侧 `dlopen` 要一个路径）。 */
 function frameworkPath(l) {
   const n = l.slice(0, l.length - '.framework'.length);
@@ -2722,8 +2757,18 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   const libs = cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`);
   /* **自带的那台 C 编译器是默认**（第一百四十一片）：生成的 C 交给我们自己的 C 前端 +
    * 链接器，一个外部 cc 都不借。要走外部 cc 就给 `OMNI_CC=clang`（或 tcc/gcc/cc/路径）。
-   * 岔口只有这一处，摆在 `libs` 之后、外部 cc 那一串开关之前。 */
-  if (selfCC()) return buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms);
+   * 岔口只有这一处，摆在 `libs` 之后、外部 cc 那一串开关之前。
+   *
+   * **`(lib …)` 那几格也要递下去**（llvm 轴的 glfw-tri @ run-c 那两格红）：从前只递了
+   * `libs`（cabi 那一族的 `-lm` 之类），而源码里 `(lib "…/libglfw.dylib")` 与
+   * `(lib "OpenGL.framework")` 说的那些**一格都没到我们的链接器**——于是同一份源码
+   * 在 clang 那一支链得上、在我们自己这一支是一串 undefined symbol。两条腿不对称本身就是错
+   * （`libLinkArgs` 头上那段注释说的正是这件事，只是那时只落在外部 cc 那一路上）。
+   * 摆到命令行上的说法两支不同，见 `selfLibArgs`。 */
+  if (selfCC()) {
+    return buildSelf(mod, outPath, cPath, plugin, [...libs, ...selfLibArgs(mod.libs)],
+      cText, tGen, extern, syms);
+  }
   const cc = findCC();
   /* 插件是一格动态库，两处与可执行文件不同：
    *   - **不链运行时的 .o**：状态住在核心里（ADR-0021 的 S1），链进自己那一份就等于自带
@@ -2829,9 +2874,16 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   const sh = plugin === undefined ? []
     : ['--shared', fmt === 'macho' ? '--install-name' : '--soname', basename(outPath)];
   /* `--stdlib` 一个词把「默认 libc + crt + 入口 `_start`」都带上（见 `c-link` 那一段）；
-   * 共享库那一路它自己夹掉 crt。 */
+   * 共享库那一路它自己夹掉 crt。
+   *
+   * **主线程的栈也要给**（Mach-O 可执行文件那一格）：外部 cc 那一路一直递着
+   * `-Wl,-stack_size,0x20000000`（`stackFlags`），我们自己这台链接器从前一直写 0 ——
+   * 于是 `omni_run_entry` 判定"栈不够"，把入口挪到自己开的那条线程上，而 macOS 上
+   * AppKit 只能在真主线程上首次初始化：`glfwInit` 当场 SIGTRAP，一个字节的输出都没有
+   * （llvm 轴 glfw-tri @ run-c 那两格红就是它）。dylib 没有 `LC_MAIN`，所以只给可执行文件。 */
+  const stk = fmt === 'macho' && plugin === undefined ? ['--stack-size', String(0x20000000)] : [];
   const rc = subMain(['c', 'link', obj, ...rt, '-o', outPath,
-    '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...sysArgs, ...libs, '-q',
+    '--arch', arch, '--os', os, '-f', fmt, ...sh, '--stdlib', ...stk, ...sysArgs, ...libs, '-q',
     /* `--profile` 这一趟顺手落一份链接图：Linux 上 profile 的每一格否则只是裸地址
        （见 writeLinkMap / profMapResolve）。不开 profile 时一个字节都不多写。 */
     ...(PROF === null ? [] : ['--map', `${outPath}.map`])]);
@@ -5303,6 +5355,26 @@ function main(argv) {
         let name = null;
         if (a === '-l' && k + 1 < rest.length) name = rest[k + 1];
         else if (a.startsWith('-l') && a.length > 2) name = a.slice(2);
+        /* `-framework Foo`：macOS 的 framework。SDK 里有 `.tbd` stub，走 `takeLib` 装进去
+         * 就能给 macho_exe 那边提供符号名与安装名。JIT 那一侧 `dlopen` 走的是另一条路
+         * （`frameworkPath`，见 cli.js 的那一段）；这儿是 AOT 链接。 */
+        if (a === '-framework' && k + 1 < rest.length) {
+          k++;
+          const fw = rest[k];
+          const sdkBase = sdkLib !== null ? sdkLib.replace(/\/usr\/lib$/, '') : null;
+          const tryPaths = sdkBase === null ? []
+            : [`${sdkBase}/System/Library/Frameworks/${fw}.framework/${fw}.tbd`,
+              `${sdkBase}/System/Library/Frameworks/${fw}.framework/Versions/A/${fw}.tbd`];
+          let found = false;
+          for (const p of tryPaths) {
+            if (exists(p)) { takeLib(p); found = true; break; }
+          }
+          if (!found) {
+            throw new OmniError(`framework '${fw}' not found（SDK 里没有 .tbd；`
+              + `试了 ${tryPaths.join(' 与 ')}）`);
+          }
+          continue;
+        }
         if (name === null) continue;
         const p = findLib(name);
         if (p === null) throw new OmniError(`library '${name}' not found`);
@@ -5315,6 +5387,9 @@ function main(argv) {
         if (rest[k] === '--rpath') rp.push(rest[k + 1]);
       }
       const dwi = rest.indexOf('--dwarf');
+      /* `--stack-size N`：主线程的栈（`LC_MAIN.stacksize`，`ld` 的 `-stack_size`）。
+       * 十六进制也认 —— 那一路的值一向写成 `0x20000000`。 */
+      const ssi = rest.indexOf('--stack-size');
       const r = machoExe({
         objs: files.map(bytesOf),
         entryName,
@@ -5322,6 +5397,7 @@ function main(argv) {
         /* `-g`：stabs 那一路（`--dwarf` 没给）或者 dwarf 那一路。 */
         debug: rest.includes('-g'),
         dwarf: dwi >= 0 ? Number(rest[dwi + 1]) : 0,
+        stackSize: ssi >= 0 ? Number(rest[ssi + 1]) : 0,
         rpath: rp.length === 0 ? undefined : rp.join(':'),
         openDylib: (n) => (exists(n) ? bytesOf(n) : null),
         archives,

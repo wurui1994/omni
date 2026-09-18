@@ -214,6 +214,13 @@ const LINK_MACHO_ONLY = [
   { name: '--dylib', arity: 1, value: 'PATH', brief: '（-f macho）libc.tbd' },
   { name: '--libtcc1', arity: 1, value: 'PATH', brief: '（-f macho）' },
   { name: '--install-name', arity: 1, value: 'NAME', brief: '（-f macho）LC_ID_DYLIB' },
+  /* `-framework Foo`：与 clang 同名同形（`(lib "Foo.framework")` 落到这儿）。
+     实现是"到 SDK 里找那份 `.tbd` stub 再按 --dylib 装"——framework 的二进制在 dyld
+     的共享缓存里、磁盘上没有那个文件，只有 stub 有符号表。 */
+  { name: '-framework', arity: 1, value: 'NAME', brief: '（-f macho）链一个 macOS framework' },
+  /* `--stack-size`：主线程栈的大小写进 `LC_MAIN`（ld 的 `-stack_size`）。macOS 上这个
+     大小是链接期定死的，而入口留不留在主线程要看它 —— 见 macho_exe 那段说明。 */
+  { name: '--stack-size', arity: 1, value: 'N', brief: '（-f macho）主线程的栈 = LC_MAIN.stacksize' },
 ];
 const LINK_PE_ONLY = [
   { name: '--target', arity: 1, value: 'T', brief: '（-f pe）x86_64-win32|arm64-win32|…' },
