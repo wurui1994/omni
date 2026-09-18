@@ -104,7 +104,7 @@ export function registerLang(exts, name, compile) {
    抓到过：dist/plugins 里放一格插件，omni.mjs 一启动就抛，而它跟那门语言半点关系没有。 */
 const UNLOADABLE = [];
 
-/** @param name 语言名（从 `omni-lang-<名字>.dylib` 的文件名里取） */
+/** @param name 语言名（从 `omni-lang-<名字>.<平台后缀>` 的文件名里取） */
 export function noteUnloadable(name) {
   if (!UNLOADABLE.includes(name)) UNLOADABLE.push(name);
 }

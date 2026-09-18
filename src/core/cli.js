@@ -1248,9 +1248,14 @@ function pluginsDir() {
 function discoverPlugins() {
   const dir = pluginsDir();
   if (dir === null) return;
+  /* **只认本平台那个后缀**（上面文件头说的就是这一条，而代码从前两个都收）。
+     为什么要紧：同一个仓库先在 macOS 编一遍、再在 Linux 容器里编一遍，`dist/plugins`
+     里就同时躺着 `.dylib` 与 `.so` —— 两个都收的话，macOS 这一趟会去 dlopen 那份 ELF，
+     `pluginLoad` 当场报"装不上"，而那格插件根本不是给这台机器的。 */
+  const ext = dsoExt(hostOs());
   for (const f of readDir(dir)) {
     const named = f.startsWith('omni-lang-') || f.startsWith('omni-target-');
-    if (!named || !(f.endsWith('.dylib') || f.endsWith('.so'))) continue;
+    if (!named || !f.endsWith(ext)) continue;
     /* 这条腿装不动（node / JS 腿没有 dlopen）：记下名字，等真用到那门语言才响 ——
        理由与那句话本身都在 plugin.js 的 UNLOADABLE 那一段。 */
     if (!pluginsOk()) {
@@ -2303,6 +2308,20 @@ function fmtOfOs(os) {
   return 'elf';
 }
 
+/**
+ * 共享库在这个平台上的后缀。**插件的文件名按它拼**（`omni plugins` 与自举链两处都是）。
+ *
+ * 为什么值得单独一格：从前那个名字写死 `.dylib`，而链接时「加不加 Mach-O 那两个开关」
+ * 又是**看名字**决定的 —— 于是 Linux 上 `OMNI_CC=gcc` 编插件时把 `-undefined
+ * dynamic_lookup` 递给了 GNU ld，报的是 `cannot find dynamic_lookup: No such file or
+ * directory`（它把 `dynamic_lookup` 当成了一份输入文件）。名字与开关都该问平台。
+ */
+function dsoExt(os) {
+  if (os === 'osx') return '.dylib';
+  if (os === 'win32') return '.dll';
+  return '.so';
+}
+
 function mainStackFlags(cc) {
   if (isTcc(cc) || !hostIsDarwin()) return [];
   return ['-Wl,-stack_size,0x20000000'];
@@ -2586,10 +2605,13 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   /* 插件是一格动态库，两处与可执行文件不同：
    *   - **不链运行时的 .o**：状态住在核心里（ADR-0021 的 S1），链进自己那一份就等于自带
    *     一套 realm / xprops / this 槽 —— 那正是要避开的坑。符号靠动态解析过去。
-   *   - 平台看**输出的名字**：`.dylib` 要 `-undefined dynamic_lookup`（Mach-O 默认不许留
-   *     未定义符号），`.so` 留着就行。名字里已经说了是哪个平台，不必再猜一遍。 */
-  const dylib = outPath.endsWith('.dylib');
-  const shared = ['-fPIC', '-shared'].concat(dylib ? ['-undefined', 'dynamic_lookup'] : []);
+   *   - 平台看**这台机器**（`hostOs()`），不看输出的名字：Mach-O 默认不许留未定义符号，
+   *     所以要 `-undefined dynamic_lookup`；ELF 留着就行。从前这一格问的是「名字是不是
+   *     以 .dylib 结尾」—— 而那个名字从前在 Linux 上也是 `.dylib`，于是 `OMNI_CC=gcc`
+   *     那一趟把 ld64 的开关递给了 GNU ld：`cannot find dynamic_lookup: No such file
+   *     or directory`（它把开关的值当成输入文件了）。 */
+  const shared = ['-fPIC', '-shared']
+    .concat(hostOs() === 'osx' ? ['-undefined', 'dynamic_lookup'] : []);
   /* `--extern` 的可执行文件要把符号**导出**给插件解析（否则插件只能自带一份）：
      macOS / Linux 的 clang 都认 -Wl,-export_dynamic。 */
   const ex = extern === true ? ['-Wl,-export_dynamic'] : [];
@@ -2675,12 +2697,14 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
     PROF !== null && PROF.mode === 'cc');
   vStep(`c obj（我们自己那台 C 前端）  ${cPath} -> ${obj}  ${fileSize(obj)} bytes`);
   /* 插件与可执行文件在链接这一步只差三样：`--shared`、**不链运行时的 .o**（状态住在核心里，
-   * ADR-0021 的 S1）、`--install-name`（Mach-O 的 `LC_ID_DYLIB`；不给这一格 macho_exe
-   * 会喊「造 dylib 要知道输出的文件名」）。核心里那些符号留成未定义 —— 造共享库时
-   * `relocate_syms` 那道筛子整个撤掉（`tccelf.c`：`|| s1->output_type != TCC_OUTPUT_EXE`），
-   * 由 `dlopen` 在平坦命名空间里解析。 */
+   * ADR-0021 的 S1）、以及**那个库自己的名字**（Mach-O 是 `--install-name` 写 `LC_ID_DYLIB`，
+   * 不给这一格 macho_exe 会喊「造 dylib 要知道输出的文件名」；ELF 是 `--soname` 写
+   * `DT_SONAME` —— 两个格式各认自己那一个，给错的那个会被静静地忽略）。核心里那些符号
+   * 留成未定义 —— 造共享库时 `relocate_syms` 那道筛子整个撤掉（`tccelf.c`：
+   * `|| s1->output_type != TCC_OUTPUT_EXE`），由 `dlopen` 在平坦命名空间里解析。 */
   const rt = plugin === undefined ? runtimeObjectsSelf(arch, os) : [];
-  const sh = plugin === undefined ? [] : ['--shared', '--install-name', basename(outPath)];
+  const sh = plugin === undefined ? []
+    : ['--shared', fmt === 'macho' ? '--install-name' : '--soname', basename(outPath)];
   /* `--stdlib` 一个词把「默认 libc + crt + 入口 `_start`」都带上（见 `c-link` 那一段）；
    * 共享库那一路它自己夹掉 crt。 */
   const rc = subMain(['c', 'link', obj, ...rt, '-o', outPath,
@@ -2732,7 +2756,7 @@ function buildPluginSet(core, dir, want, argv) {
   let tot = 0;
   for (const p of PLUGIN_SET) {
     if (want !== null && !want.includes(p.name)) continue;
-    const out = join(dir, `omni-${p.name}.dylib`);
+    const out = join(dir, `omni-${p.name}${dsoExt(hostOs())}`);
     const tFe0 = nowMs();
     const { mod } = compile(join(srcDir, `${p.name}.js`), [...argv, '--plugin', pluginRegName(p.name)]);
     FE_MS = nowMs() - tFe0;
