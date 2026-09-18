@@ -632,6 +632,16 @@ function stmtIn(x, env, ctx) {
         return [bindLine(nm, t0, zeroText(t0), env, ctx)];
       }
       const t = typeOf(init, env, ctx);
+      /* **把一格数组 / 字典绑到另一个名字上**（`__in := xs`，`for-in` 那一族落出来的）——
+       * 方言里数组与字典是**句柄**（`(let ys (arr int) (var xs))` 之后两个名字指同一格），
+       * 与图上一样。所以这一格直接拼名字，不走 `expr` 那道"整格当值用"的门。
+       *
+       * **记录不在这一档里**：方言的结构体是**值语义**（赋值就复制，见
+       * `tests/sexpr/cases/06-structs.sx`），而图上记录是引用 —— 放过去会静静地把
+       * "改 q 也改 r"变成"只改 q"。那一格照旧报缺口（要它得先有引用类型）。 */
+      if (isNode(init) && init.op === 'ref' && (elemType(t) !== null || dictOf(t) !== null)) {
+        return [bindLine(nm, t, `(var ${init.attrs.name})`, env, ctx)];
+      }
       const initText = expr(init, env, ctx);
       return [bindLine(nm, t, initText, env, ctx)];
     }
