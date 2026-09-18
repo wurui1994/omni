@@ -171,8 +171,8 @@ function collectPkg(x, p, X) {
   }
   if (g === 'method') {
     const [recv, nm] = kids(x);
-    const ty = part(kids(recv)[0], 'tname');
-    if (ty !== undefined) X.mset.add(`${p}.${leaf(kids(ty)[0])}.${leaf(nm)}`);
+    const owner = recvOwner(recv);
+    if (owner !== null) X.mset.add(`${p}.${owner}.${leaf(nm)}`);
   }
   if (g === 'fn') X.funcs.add(`${p}.${leaf(kids(x)[0])}`);
   for (const k of kids(x)) collectPkg(k, p, X);
@@ -237,8 +237,22 @@ function namedTypeOf(t) {
   return null;
 }
 
-/** `T{…}` / `&T{…}` 那格**复合字面量**的具名类型（别的形状回 null —— 不猜）。 */
-function litTypeNameOf(r) {
+/**
+ * **接收者那一格的具名类型**（`(recv (p (ptr (tname P)) (name p)))` -> `P`）。
+ *
+ * 这一格从前在两处**各写了一遍，而且写得不一样**：`method` 那一处剥指针（`namedTypeOf`），
+ * 登记那一处只认 `(tname …)`（`part(…, 'tname')`）。于是**指针接收者** —— go 里的大多数 ——
+ * 登记成主人 `'?'`，而声明发出来的名字是 `P__Bump`：调用点落 `ref ?__Bump`，
+ * 一格**指向不存在的函数**的引用。图落得出来，跑起来才炸（尺子数的是"落成图"，它不问这个）。
+ * 所以这一格现在只有一份，两处都调它。
+ */
+function recvOwner(recv) {
+  const p0 = kids(recv)[0];
+  if (p0 === undefined) return null;
+  return namedTypeOf(kids(p0).find((y) => tag(y) !== 'name'));
+}
+
+/** `T{…}` / `&T{…}` 那格**复合字面量**的具名类型（别的形状回 null —— 不猜）。 */function litTypeNameOf(r) {
   if (r === undefined || r === null || !isList(r)) return null;
   const g = tag(r);
   if (g === 'addr' || g === 'paren') return litTypeNameOf(kids(r)[0]);
@@ -294,15 +308,19 @@ function collectDecls(x, shapesOnly) {
   if (tag(x) === 'method') {
     const [recv, nm] = kids(x);
     const name = leaf(nm);
-    const ty = part(kids(recv)[0], 'tname');
-    const owner = ty === undefined ? '?' : leaf(kids(ty)[0]);
-    /* **按 `类型.名字` 收**（`opts.also` 那几份也收 —— 这样存不会撞名，见 `MSET` 那一段）。 */
-    MSET.add(`${owner}.${name}`);
-    if (shapesOnly !== true) {
-      /* 平表仍旧留着：接收者的类型看不出来时靠它（只认"这个名字只有一个主人"）。
-         撞名**不再当场报** —— 压平之后声明这一步没有冲突，报不报要等调用点。 */
-      const had = METHODS.get(name);
-      METHODS.set(name, had === undefined || had === owner ? owner : null);
+    const owner = recvOwner(recv);
+    /* **主人认不出来（泛型接收者 `(tinst …)`）时一格都不登记**：那时 `method` 那一处发的
+       是**光名字**，登记成 `?.名字` 只会让调用点落一格 `ref ?__名字`（指向不存在的函数）。
+       不登记，调用点就落成一句**有名有姓的墙**（`selWall` 的第 4 条）—— 不猜。 */
+    if (owner !== null) {
+      /* **按 `类型.名字` 收**（`opts.also` 那几份也收 —— 这样存不会撞名，见 `MSET` 那一段）。 */
+      MSET.add(`${owner}.${name}`);
+      if (shapesOnly !== true) {
+        /* 平表仍旧留着：接收者的类型看不出来时靠它（只认"这个名字只有一个主人"）。
+           撞名**不再当场报** —— 压平之后声明这一步没有冲突，报不报要等调用点。 */
+        const had = METHODS.get(name);
+        METHODS.set(name, had === undefined || had === owner ? owner : null);
+      }
     }
   }
   for (const k of kids(x)) collectDecls(k, shapesOnly);
