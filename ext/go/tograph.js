@@ -180,10 +180,18 @@ function collectDecls(x, shapesOnly) {
     }
   }
   if (tag(x) === 'spec') for (const n of specMapNames(x)) MAPS.add(n);
-  /* `shapesOnly` 是**同一包里别的文件**那一趟用的（`opts.also`）：类型与字段名要收，
-     **方法名不收** —— 那张表是"名字 -> 接收者类型"的单态分派，一个包摊开看重名到处都是
-     （`Error` / `String` / `Format` …）。量过：整包一起收方法名，go 那一栏从 81 掉到 47。
-     跨文件的方法调用因此仍旧走"取字段再调它" —— 那条墙留着，它要的正是类型那一层。 */
+  /* `shapesOnly` 原来是**同一包里别的文件**那一趟用的（`opts.also`）：类型与字段名收、
+     **方法名不收**。当时的理由是"一个包摊开看重名到处都是（`Error`/`String`/`Format`…）"，
+     量出来的数是"整包一起收方法名，go 那一栏从 81 掉到 47"。
+
+     **那个数过期了 —— 2026-09-18 重量：106 -> 114（+8 份）。** 翻过来的原因是后来变了两处：
+     `opts.also` 改成**按目录分组**（一个目录 = 一个 go 包，`bench/tograph.js` 的 `byDir`），
+     方法又按 `类型.名字` 收进了 `MSET` —— 于是"同名不同主人"不再一律作废：接收者的类型
+     知道时照旧 mangle 得出来。撞名的那些落成一句**有名有姓**的墙（`好几个类型都声明了
+     方法 String，而接收者的类型这一层看不出来`，14 份），那句话指着的正是下一个真决定。
+
+     所以现在**收方法名**（`opts.also` 那一趟也传 false）。参数留着：将来要是有
+     "不按包分组"的调用方，这一格还有用。 */
   if (tag(x) === 'method') {
     const [recv, nm] = kids(x);
     const name = leaf(nm);
@@ -1014,7 +1022,7 @@ export function goToGraph(tree, opts) {
   for (const t of opts?.also ?? []) {
     if (t === tree) continue;
     for (const nm of mapNames(t, mapBindName)) MAPS.add(nm);
-    collectDecls(t, true);   // shapesOnly：类型与字段名要，方法名不要（重名太多）
+    collectDecls(t, false);   // 方法名也收（量过 +8 份，见 collectDecls 头上那段）
   }
   collectDecls(tree);
   FN_N = 0;                                   // 匿名 func 的编号按文件重来（图要可重现）
