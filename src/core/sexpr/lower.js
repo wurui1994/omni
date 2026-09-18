@@ -37,7 +37,7 @@
  *         | (splat TYPE E) | (vlit TYPE E...) | (lane E N) | (hsum E)
  *         | (bnew TYPE E) | (bget E E) | (blen E) | (gid)
  *         | (anew TYPE E) | (aget E E) | (alen E) | (apop E)
- *         | (dnew TYPE) | (dget E E) | (dhas E E) | (dlen E) | (dkeys E)
+ *         | (dnew TYPE) | (dget E E) | (dhas E E) | (dlen E)
  *         | (new NAME) | (fld E 字段) | (cnew NAME)
  *         | (fnref NAME) | (mkclo NAME E...) | (cap NAME) | (callfn E E...)
  *         | (dyn E) | (dtag E) | (asint E) | (asreal E) | (asbool E) | (asstr E)
@@ -2580,7 +2580,7 @@ class CoreLowerer {
       || h === 'pisnull' || h === 'pfield' || h === 'pthin' || h === 'pelem'
       || h === 'pcast' || h === 'peq') return this.ptrExpr(n, h);
     if (h === 'anew' || h === 'aget' || h === 'alen' || h === 'apop') return this.arrExpr(n, h);
-    if (h === 'dnew' || h === 'dget' || h === 'dhas' || h === 'dlen' || h === 'dkeys') return this.dictExpr(n, h);
+    if (h === 'dnew' || h === 'dget' || h === 'dhas' || h === 'dlen') return this.dictExpr(n, h);
     // 结构体的两条读侧（写侧是语句 fldset）：`(new Point)` 零值，`(fld p x)` 读字段。
     // 没有"结构体字面量"：字段一多，字面量就要么按顺序（改字段顺序会静默改语义）、
     // 要么带名字（那是命名实参那套东西，属于各语言的前端）。零值 + 逐个 fldset 少一条路。
@@ -2887,13 +2887,6 @@ class CoreLowerer {
       return this.err(n, `${h} 的第一个实参要是字典，这里是 ${coreTypeText(d.type)}`);
     }
     if (h === 'dlen') return { kind: 'Builtin', name: 'len', args: [d], recvType: d.type, type: INT };
-    /* `(dkeys d)` 要的那个列表容器（`list K`）已经在上面 dict 注册的地方顺手做了
-       （`this.useContainer(listType(k))` 在 dict 类型解析的最后一步），所以这儿不用再叫。 */
-    if (h === 'dkeys') {
-      return {
-        kind: 'Builtin', name: 'keys', args: [d], recvType: d.type, type: listType(d.type.key),
-      };
-    }
     const k = this.expr(n.items[2]);
     if (k === null) return null;
     if (!sameCoreType(k.type, d.type.key)) {

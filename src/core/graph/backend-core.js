@@ -339,19 +339,20 @@ function expr(x, env, ctx) {
       if (d === null) gap(`map-has 的宿主不是字典（量到的是 ${typeOf(x.ins.obj, env, ctx)}）`);
       return `(dhas ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)})`;
     }
-    /* `map-keys`（第三十批）：方言的 `(dkeys …)` 交出来的是**主语言的 `list<K>`**，
-       而这条腿上"图的列表"一律是方言的 `(arr T)`（`list-new` 落 `anew` + 一圈 `apush`）。
-       两者在六条腿上是**两种真表示**（`omni_list_*` vs `omni_arr_*`、JS 里 `[]` vs `$anew`），
-       所以不能拿一个当另一个用 —— 那是类型上的谎。
+    /* `map-keys`（第三十批）：**方言里没有能装下"一格 map 的键"的东西**，所以这一格欠着。
+       查过一遍才敢这么写：方言只有一种序列类型 `(arr T)`，而它的 `list`（主语言那一格）
+       **一个操作都没有** —— `aget`/`alen`/`apush` 三格都只认 `arr`，`let` 的类型表里
+       也没有 `(list T)`。于是 `dict.keys()` 那一格内建的结果在方言里是个**用不了的值**
+       （试过：加一句 `(dkeys E)` 进去，量到的就是"变量是 arr<string>、初值是 list<string>"）。
+       `list` 与 `arr` 在六条腿上是两种真表示（C 里 `omni_list_*` vs `omni_arr_*`、
+       JS 里 `[]` vs `$anew`），拿一个当另一个用是类型上的谎。
 
-       真正欠的一格：**方言里没有 `(list T)` 这一格类型**（`let` 的类型表里没有它，
-       `aget`/`alen` 也只认 `arr`）。补法有两条，都要先做选择：
-         · 给方言加 `(list T)` 与它那几格操作；
-         · 或者让 `(dkeys …)` 就地造一格 `arr`（新建 + 一圈 apush，与 `bindSlice` 同形）。
-       所以这一格按名有姓地欠着，不硬拼。 */
+       补法两条，**都是一次语言决定**，所以不在这一刀里做：
+         · 给方言加 `(list T)` 与它那几格操作 —— 代价是"两种序列类型"这个概念重复；
+         · 或者加一格"按位置取第 i 个键"（那样连列表都不用造，直接在 counted 里走）。 */
     case 'map-keys':
-      gap('按键遍历的那格键列表在方言里落不下来：`(dkeys …)` 出的是 `list<K>`，'
-        + '而这条腿的列表是 `(arr T)` —— 方言里还没有 `(list T)` 这一格类型');
+      gap('按键遍历：方言里没有能装下那格键列表的类型（只有 `(arr T)`，而 `keys` 出的是 '
+        + '`list<K>`，它在方言里一个操作都没有）—— 要先给方言加一格，是一次语言决定');
       return '';
     case 'slice': gap('切片出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     /* **表达式位置上的映射**：先物化成一格临时名，再把那个名字交出去。
