@@ -112,6 +112,41 @@ const STRUCTS = new Map();
  */
 const UNDER = new Map();
 
+/**
+ * **方法名按接收者类型压平**（`docs/design/cross-file-methods.md` 那条 A 路，V 那一份先落的）。
+ *
+ * `MSET` 收 **`类型.方法名`**（`Value.String`），`mangle()` 压成图上一格函数名
+ * （`Value__String`）。为什么值得做（两条都是量出来的）：
+ *   * **撞名不再是墙**：一个包摊开看 `Error` / `String` / `Format` 重名到处都是，
+ *     而平表（名字 -> 接收者类型）一撞就当场报；
+ *   * **`opts.also` 那几份的方法名现在可以收**（按 `类型.名字` 存不会撞）——
+ *     原来只收字段名，量过"整包收方法名"会把 go 从 81 打到 47，那条死路的根是平表。
+ *
+ * **接收者的类型从哪儿来**：`VARTYPE`（名字 -> 具名类型），只收**语法上写着的**三处 ——
+ * 方法的接收者、带具名类型的形参、`x := T{…}` / `x := &T{…}`。不是推断。
+ */
+const MSET = new Set();
+const VARTYPE = new Map();
+const mangle = (owner, name) => `${String(owner).replace(/\./g, '__')}__${name}`;
+
+/** 一格**类型**节点里的具名类型（`*T` 那一层剥掉）。切片 / map / 函数类型回 null。 */
+function namedTypeOf(t) {
+  if (t === undefined || t === null || !isList(t)) return null;
+  const g = tag(t);
+  if (g === 'tname') return kids(t).map(leaf).join('.');
+  if (g === 'ptr') return namedTypeOf(kids(t)[0]);
+  return null;
+}
+
+/** `T{…}` / `&T{…}` 那格**复合字面量**的具名类型（别的形状回 null —— 不猜）。 */
+function litTypeNameOf(r) {
+  if (r === undefined || r === null || !isList(r)) return null;
+  const g = tag(r);
+  if (g === 'addr' || g === 'paren') return litTypeNameOf(kids(r)[0]);
+  if (g !== 'lit') return null;
+  return namedTypeOf(kids(r)[0]);
+}
+
 /** `(struct (f (names x y) 类型) …)` -> `[[名, 类型], …]`（一格 `f` 里能有好几个名字）。 */
 function fieldsOf(st) {
   const out = [];
@@ -149,17 +184,19 @@ function collectDecls(x, shapesOnly) {
      **方法名不收** —— 那张表是"名字 -> 接收者类型"的单态分派，一个包摊开看重名到处都是
      （`Error` / `String` / `Format` …）。量过：整包一起收方法名，go 那一栏从 81 掉到 47。
      跨文件的方法调用因此仍旧走"取字段再调它" —— 那条墙留着，它要的正是类型那一层。 */
-  if (tag(x) === 'method' && shapesOnly !== true) {
+  if (tag(x) === 'method') {
     const [recv, nm] = kids(x);
     const name = leaf(nm);
     const ty = part(kids(recv)[0], 'tname');
     const owner = ty === undefined ? '?' : leaf(kids(ty)[0]);
-    const had = METHODS.get(name);
-    if (had !== undefined && had !== owner) {
-      throw new Error(`go->graph: ${had} 与 ${owner} 都声明了方法 ${name} —— `
-        + '重名要类型才分得开，这一批不猜');
+    /* **按 `类型.名字` 收**（`opts.also` 那几份也收 —— 这样存不会撞名，见 `MSET` 那一段）。 */
+    MSET.add(`${owner}.${name}`);
+    if (shapesOnly !== true) {
+      /* 平表仍旧留着：接收者的类型看不出来时靠它（只认"这个名字只有一个主人"）。
+         撞名**不再当场报** —— 压平之后声明这一步没有冲突，报不报要等调用点。 */
+      const had = METHODS.get(name);
+      METHODS.set(name, had === undefined || had === owner ? owner : null);
     }
-    METHODS.set(name, owner);
   }
   for (const k of kids(x)) collectDecls(k, shapesOnly);
 }
@@ -338,13 +375,31 @@ function unwrapDeref(x) {
 /** 匿名 `func(){…}` 的名字（`func` 那一格的 name 是附属，可它得有一个）。 */
 let FN_N = 0;
 
-function funcOf(sig, blk, name, self) {
+function funcOf(sig, blk, name, self, selfType) {
   const params = partKids(sig, 'in').map((p) => {
     const nm = part(p, 'name');
     return nm === undefined ? null : leaf(kids(nm)[0]);
   }).filter((n) => n !== null);
-  return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
-    { params: self === undefined ? params : [self, ...params], name });
+  /* **形参与接收者的具名类型收进 `VARTYPE`**（只收语法上写着的那一档，见那一段）。
+     一格函数一层：进来存一份、出去还原 —— 内层函数不许把外层的表改脏。 */
+  const savedVars = new Map(VARTYPE);
+  if (self !== undefined && selfType !== undefined && selfType !== null) {
+    VARTYPE.set(self, selfType);
+  }
+  for (const p of partKids(sig, 'in')) {
+    const nm = part(p, 'name');
+    if (nm === undefined) continue;
+    const ty = kids(p).find((y) => tag(y) !== 'name');
+    const t = namedTypeOf(ty);
+    if (t !== null) VARTYPE.set(leaf(kids(nm)[0]), t);
+  }
+  try {
+    return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
+      { params: self === undefined ? params : [self, ...params], name });
+  } finally {
+    VARTYPE.clear();
+    for (const [k, v] of savedVars) VARTYPE.set(k, v);
+  }
 }
 
 /**
@@ -705,7 +760,13 @@ function toNode(x) {
       if (self === undefined) {
         throw new Error(`go->graph: ${name} 的接收者没有名字 —— 匿名接收者这一批没接`);
       }
-      return node('bind', { init: funcOf(sig, blk, name, leaf(kids(self)[0])) }, { name });
+      /* **方法名按接收者类型压平**（见 `MSET` / `mangle` 那一段）。 */
+      const recvTy = kids(kids(recv)[0]).find((y) => tag(y) !== 'name');
+      const ownerTn = namedTypeOf(recvTy);
+      const graphName = ownerTn !== null ? mangle(ownerTn, name) : name;
+      return node('bind', {
+        init: funcOf(sig, blk, graphName, leaf(kids(self)[0]), ownerTn),
+      }, { name: graphName });
     }
     case 'block': return node('region', { body: many(kids(x)) });
     case 'define': case 'assign': {
@@ -837,13 +898,32 @@ function toNode(x) {
         // 所以这一步是纯改写，不查表、不加节点）。
         // `Point.total(p)`（方法表达式）是**同一件事的另一种写法** —— 左边是登记过的
         // 类型名时，接收者已经在实参里了，不再补。
-        if (METHODS.has(m)) {
-          const obj = kids(fn)[0];
-          const onType = tag(obj) === 'name' && TYPES.has(leaf(kids(obj)[0]));
+        /* `p.total()` -> 方法调用 —— **三条路**（与 V 那一份同一条，见
+           `docs/design/cross-file-methods.md`）：
+             1. 接收者的类型**知道**（`VARTYPE` 里有 · 或平表里只有一个主人）：mangle
+             2. `Point.total(p)`（方法表达式）：接收者已经在实参里，不再补
+             3. 都不知道：当场报（这一门一直是这个口径 —— 不走"取字段再调它"那条兜底） */
+        const obj = kids(fn)[0];
+        const onType = tag(obj) === 'name' && TYPES.has(leaf(kids(obj)[0]));
+        const recvName = tag(obj) === 'name' ? leaf(kids(obj)[0]) : null;
+        const fromVar = recvName !== null ? VARTYPE.get(recvName) : undefined;
+        const flat = METHODS.get(m);
+        const owner = fromVar ?? (flat === null ? undefined : flat);
+        if (owner !== undefined && MSET.has(`${owner}.${m}`)) {
           return node('call', {
-            fn: node('ref', {}, { name: m }),
+            fn: node('ref', {}, { name: mangle(owner, m) }),
             args: onType ? argNodes : [toNode(obj), ...argNodes],
           });
+        }
+        if (flat !== undefined && flat !== null) {
+          return node('call', {
+            fn: node('ref', {}, { name: mangle(flat, m) }),
+            args: onType ? argNodes : [toNode(obj), ...argNodes],
+          });
+        }
+        if (flat === null) {
+          throw new Error(`go->graph: 好几个类型都声明了方法 ${m}，而接收者的类型这一层`
+            + '看不出来 —— 要类型那一层（`VARTYPE` 只收语法上写着的那一档）');
         }
         throw new Error(`go->graph: 这一批只接 fmt.Print* 与声明过的方法，收不了 .${m}`);
       }
@@ -893,6 +973,8 @@ export function goToGraph(tree, opts) {
   TYPES.clear();
   STRUCTS.clear();
   UNDER.clear();
+  MSET.clear();
+  VARTYPE.clear();
   /* **同一包里别的文件先扫**（`opts.also`）：go 的一个包摊在好几份文件上，
      `var x SomeType` 的零值、`T{…}` 的字段名都可能声明在旁边那份里。
      这一趟只收声明，不落节点；**旁边的先扫、自己的后扫**（同名时自己这一份说了算）。 */
