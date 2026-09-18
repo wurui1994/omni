@@ -119,24 +119,31 @@ const CLASSES = [
   ['命名实参 / 变参展开', /还没接：named|还没接：spread|命名实参|还没接：kv/],
   ['成员是不是在里头（数组的 `in`）', /只接 map（数组的 in|还没接：in$/],
   // 表达式位置上的 match 那两条也是**明说过的**（没有 else 就没有值 · 一支只准一格表达式）
+  /* `\]T 的零值` 这一格**故意不写成 `\[N\]T`**：`[5]T 的零值这一批只接 0..1024 格` 那句话里
+     方括号中间是**真数字**（归一成 `[N]` 是印出来那一步的事，而 `classOf` 认的是原话）。
+     写成 `\[N\]T` 时它落进"没归类" —— 那一栏又一次自己举了手。 */
   ['明说过的形状限制（主语要算好几遍 · 匿名接收者 · 格式动词 …）',
-    /要算好几遍|匿名接收者|格式动词|不是字面量|要 N 是整数字面量|只接 map 与切片|混着|没有 else|正好是一格表达式|声明了 N 格字段|\[N\]T 的零值/],
+    /要算好几遍|匿名接收者|格式动词|不是字面量|要 N 是整数字面量|只接 map 与切片|混着|没有 else|正好是一格表达式|声明了 N 格字段|\]T 的零值/],
   ['并发与异常（chan / spawn / try / yield / select · lock）',
     /chan|spawn|select|try|yield|raise|throw|还没接：r?lock|还没接：send|还没接：recv|还没接：go$/],
+  /* **这一族排在"跨文件"前头**（`docs/design/cross-file-methods.md` §5）：
+     `os.join_path(…)` 那种的声明在**标准库**里、`cmd/internal/src` 那种在**语料树外**，
+     而尺子的分母是"那门编译器自己的源码" —— 两样都不在里头。所以它们不是这一层的欠账，
+     是尺子的**下一层**（ADR-0037 §5.1a 的 ① 档）。混进"跨文件"那一族会让人以为
+     接着写映射就能收（V 那 599 份里绝大多数是这一族）。
+     **排在前头**是因为"包不在语料里"比"跨文件"更具体：两条正则都认得那句话，
+     而 `classOf` 取先中的那一条。 */
+  ['语料外的声明（标准库 · 语料树外的包）',
+    /库函数 .* 声明在标准库里|不在语料里/],
   ['跨文件才知道的事（跨模块的类型 / 库函数）',
     /跨模块|声明不在这一份文件里|这份文件里没见过|只接 fmt\.Print|零值还没接：tname|带包限定的类型/],
-  /* **这一族与上面那一族是两件事**（`docs/design/cross-file-methods.md` §5）：
-     `os.join_path(…)` 那种的声明在**标准库**里，而尺子的分母是"那门编译器自己的源码" ——
-     标准库不在里头。所以它不是这一层的欠账，是尺子的**下一层**（ADR-0037 §5.1a 的 ① 档）。
-     混在一句话里量出来会让"跨文件"那一族看着像映射的活儿（V 那 599 份里绝大多数是这一族）。 */
-  ['标准库里的声明（模块限定的库函数 `os.…`）', /库函数 .* 声明在标准库里/],
   ['要一格"按长度造"的节点', /按长度造|list-new 收的是元素表/],
   ['要一格"按键遍历"的节点（map 的 for-in）', /按键遍历/],
   /* 这两族是"没归类"那一栏第三回指出来的（2026-09-18）：都不是"缺一格内建"，
      是**这一层的降级形状接不住**（fallthrough 要带标签的块、标签本身要一格附属），
      以及**表示层的转换要类型**（`[]byte(s)` / `(*T)(p)`）。 */
-  ['落成 branch 链接不住的那两格（fallthrough / 带标签的语句）',
-    /fallthrough|带标签的语句/],
+  ['落成 branch 链接不住的那两格（fallthrough / 带标签的语句 / goto / switch-break）',
+    /fallthrough|带标签的语句|跳出 switch|还没接：goto/],
   ['表示层的转换（`[]byte(s)` / `(*T)(p)` / range 表达式 / 具名类型 tname / cast）',
     /表示层的转换|还没接：range|还没接：tname|还没接：cast|还没接：undefined$/],
 ];
@@ -240,6 +247,18 @@ function measure(lang) {
     if (!byDir.has(d)) byDir.set(d, []);
     byDir.get(d).push(p);
   }
+  /**
+   * **先把整棵语料解析完，再逐份映射**（2026-09-18）。为什么要多这一趟：账上最大的一族是
+   * "跨文件才知道的事"（go 435 份 / 68.3%），而它里头最大的一半**跨的是包**不是文件 ——
+   * `syntax.Type` 的零值、`ir.NewNilExpr(…)` 那格调用都要**另一个包**的声明。所以除了
+   * `opts.also`（同一个目录 = 同一个包）之外，再递一格 `opts.pkgs` = **语料里所有的树**；
+   * 每棵树自己的 `package` 那一句说它属于哪个包，索引由那门语言自己建（尺子不认识 go 的树）。
+   *
+   * 代价是**整棵树都得留在内存里**：量过 go 的 751 棵是 1.3GB 堆（`--expose-gc` 之后）。
+   * 换成"解析两趟、第一趟只留摘要"能省这一格，但要多花一趟解析（go 那门 +50s）——
+   * 时间是每次都付的，内存这台机器付得起，所以留住树。
+   */
+  const all = [];
   for (const [, ps] of byDir) {
     const trees = [];
     for (const p of ps) {
@@ -257,10 +276,14 @@ function measure(lang) {
       row.parsed += 1;
       trees.push({ path: p, tree: tree });
     }
+    all.push(trees);
+  }
+  const pkgs = all.flatMap((ts) => ts.map((t) => t.tree));
+  for (const trees of all) {
     const also = trees.map((t) => t.tree);
     for (const t of trees) {
       try {
-        const g = lang.toGraph(t.tree, { also: also, strictCalls: STRICT_CALLS });
+        const g = lang.toGraph(t.tree, { also: also, pkgs: pkgs, strictCalls: STRICT_CALLS });
         row.graphed += 1;
         /* 顺带数一格账：这份图里有多少处"取字段再调它"（见 `softCallsIn` 那一段）。 */
         const soft = softCallsIn(g, new Set());

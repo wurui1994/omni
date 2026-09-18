@@ -129,6 +129,102 @@ const MSET = new Set();
 const VARTYPE = new Map();
 const mangle = (owner, name) => `${String(owner).replace(/\./g, '__')}__${name}`;
 
+/**
+ * **跨包的符号表**（`opts.pkgs` = 语料里**所有**的树）。
+ *
+ * 为什么要这一张：尺子上最大的一族是"跨文件才知道的事"（go 435 份 / 68.3%），而
+ * `opts.also` 只递**同一个目录**（= 同一个 go 包）。`syntax.Type` 的零值、`ir.NewNilExpr(…)`
+ * 这一格调用、`t.Pos()` 里接收者是 `syntax.Type` 的那一档 —— 三样都要**另一个包的声明**。
+ *
+ * 键是**限定名**（`syntax.Type` / `ir.NewNilExpr` / `syntax.Type.Pos`），所以它与本文件那几张
+ * 表（`STRUCTS` / `MSET` / …，键是光名字）**井水不犯河水** —— 不必按 import 拷进来，
+ * 查的时候多问一层就是。包名从每棵树自己的 `package` 那一句来（`(file 包名 …)`）。
+ *
+ * **只收我们真消费的四样**：具名类型、struct 的字段表、别的具名类型的底子、方法名、
+ * 顶层函数名。收得多了没人查，还白占内存（量过：751 棵树全留住是 1.3GB 堆）。
+ *
+ * 这一张表**不改"落成图"的口径**：图仍是一份文件一张，跨包的被调者只落一格 `ref`
+ * （名字 mangle 过），它的**体不在这张图里** —— 与 `opts.also` 那几份的方法一直是同一条
+ * 纪律（这把尺子量的是"映射写全了没有"，链接是下一层的事）。
+ */
+const XNONE = {
+  types: new Set(), structs: new Map(), under: new Map(), mset: new Set(), funcs: new Set(),
+};
+let XPKG = XNONE;
+/** 按 `opts.pkgs` 那个数组的身份缓存（尺子对同一门语言递的是同一个数组，只建一次）。 */
+const XCACHE = new WeakMap();
+
+/** 一棵树里**属于包 `p`** 的那几样声明（键都带包限定 —— 见 `XNONE` 那一段）。 */
+function collectPkg(x, p, X) {
+  if (!isList(x)) return;
+  const g = tag(x);
+  if (g === 'tspec' || g === 'talias') {
+    const n = `${p}.${leaf(kids(x)[0])}`;
+    X.types.add(n);
+    const body = kids(x).find((y) => tag(y) === 'struct');
+    if (body !== undefined) X.structs.set(n, fieldsOf(body));
+    else {
+      const und = kids(x)[1];
+      if (und !== undefined && isList(und)) X.under.set(n, und);
+    }
+  }
+  if (g === 'method') {
+    const [recv, nm] = kids(x);
+    const ty = part(kids(recv)[0], 'tname');
+    if (ty !== undefined) X.mset.add(`${p}.${leaf(kids(ty)[0])}.${leaf(nm)}`);
+  }
+  if (g === 'fn') X.funcs.add(`${p}.${leaf(kids(x)[0])}`);
+  for (const k of kids(x)) collectPkg(k, p, X);
+}
+
+/** 换上这一批树的跨包表（没递就是空表 —— 那时行为与从前逐字相同）。 */
+function useXpkg(trees) {
+  if (trees === undefined || trees === null) {
+    XPKG = XNONE;
+    return;
+  }
+  let X = XCACHE.get(trees);
+  if (X === undefined) {
+    X = {
+      types: new Set(), structs: new Map(), under: new Map(), mset: new Set(), funcs: new Set(),
+    };
+    for (const t of trees) {
+      if (!isList(t) || tag(t) !== 'file') continue;
+      const p = leaf(kids(t)[0]);
+      if (p === null) continue;
+      for (const it of kids(t).slice(1)) collectPkg(it, p, X);
+    }
+    XCACHE.set(trees, X);
+  }
+  XPKG = X;
+}
+
+/**
+ * **这一份文件里哪些名字是包名**（`import` 那几句说的）。
+ *
+ * 为什么要这一格而不是"名字在跨包表里就算"：`types.NewPtr(…)` 与一格**叫 types 的局部变量**
+ * 在树上同形，而这一层没有作用域表。以 import 为闸，猜错的那一半就没了 ——
+ * 没 import 过的名字一律照旧当接收者。别名（`import xyz "…"`）用别名，
+ * 没别名就取路径最后一段（go 里那两样绝大多数相同；不同的那些查不着，照旧落成墙）。
+ */
+const IMPORTS = new Set();
+function collectImports(tree) {
+  for (const it of kids(tree).slice(1)) {
+    if (!isList(it) || tag(it) !== 'import') continue;
+    for (const sp of kids(it)) {
+      if (!isList(sp) || tag(sp) !== 'path') continue;
+      const as = part(sp, 'as');
+      const alias = as === undefined ? null : leaf(kids(as)[0]);
+      if (alias === '_' || alias === '.') continue;
+      if (alias !== null) { IMPORTS.add(alias); continue; }
+      const s = kids(sp)[0];
+      if (s === undefined || s.kind !== 'string') continue;
+      const segs = String(s.value).split('/');
+      IMPORTS.add(segs[segs.length - 1]);
+    }
+  }
+}
+
 /** 一格**类型**节点里的具名类型（`*T` 那一层剥掉）。切片 / map / 函数类型回 null。 */
 function namedTypeOf(t) {
   if (t === undefined || t === null || !isList(t)) return null;
@@ -249,12 +345,12 @@ const NIL_TYPES = new Set(['ptr', 'slice', 'map', 'chan', 'chan-send', 'chan-rec
   'fntype', 'interface']);
 const NIL_NAMES = new Set(['error', 'any']);
 
-function zeroOf(ty, name) {
+function zeroOf(ty, name, pkg) {
   if (ty === undefined) {
     throw new Error(`go->graph: ${name} 既没类型也没初值 —— go 不许这么写`);
   }
   const t = tag(ty);
-  if (t === 'paren') return zeroOf(kids(ty)[0], name);
+  if (t === 'paren') return zeroOf(kids(ty)[0], name, pkg);
   if (NIL_TYPES.has(t)) return lit(null);
   // `[N]T` 的零值是**N 格元素零值**（数组是值语义的，不是切片）——
   // N 得是个整数字面量、元素也得有零值，两样缺一样就当场报。
@@ -269,7 +365,7 @@ function zeroOf(ty, name) {
     }
     /* **每格各算一遍**（不是复制同一格）：`lit(0)` 出的是 `{lit: 0}` 而不是一格节点，
        复制那条路要分两种形状 —— 而"再算一遍"本来就更直白，零值也没有作用。 */
-    return listNew(Array.from({ length: cnt }, () => zeroOf(el, name)));
+    return listNew(Array.from({ length: cnt }, () => zeroOf(el, name, pkg)));
   }
   // 匿名 struct（`var x struct{ n int }`）的零值 = 每个字段各自的零值
   if (t === 'struct') {
@@ -277,7 +373,7 @@ function zeroOf(ty, name) {
     if (fs === null) {
       throw new Error(`go->graph: ${name} 那格 struct 有嵌入字段 —— 零值这一批不猜`);
     }
-    return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${name}.${fn}`)]));
+    return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${name}.${fn}`, pkg)]));
   }
   if (t === 'tname' && kids(ty).length === 1) {
     const n = leaf(kids(ty)[0]);
@@ -286,6 +382,10 @@ function zeroOf(ty, name) {
     if (n === 'string') return lit('');
     if (n === 'bool') return lit(false);
     if (NIL_NAMES.has(n)) return lit(null);
+    /* **`pkg` 有值 = 这一格光名字属于另一个包**（`syntax.Type` 那格 struct 里的字段
+       写的是 `Pos`，指的是 `syntax.Pos`）。那时本文件那两张表**一眼都不能看** ——
+       名字空间不是这一个，看了就是"另一个类型的字段表"，答案错而不报。 */
+    if (pkg !== undefined) return xzeroOf(`${pkg}.${n}`, name);
     // **具名 struct**：字段名与顺序从声明来（`STRUCTS` 那段），每个字段各算一遍零值。
     // 声明不在这一份文件里、或者那个 struct 有嵌入字段，都当场报 —— 不猜。
     if (STRUCTS.has(n)) {
@@ -302,15 +402,37 @@ function zeroOf(ty, name) {
   }
   /* **带包限定的类型名**（`ast.Node` / `types.Type` …）：`tname` 底下不止一格名字。
      单说一句"零值还没接：tname"是**把话说错了** —— 光秃秃的 `tname` 上面那一段全接了
-     （内建标量、同一包里的 struct、`type Level int` 那种底子），欠的只有"包限定"这一种：
-     它的声明在**另一个模块**里，而 `opts.also` 只递同一个目录（= 同一个 go 包）。
-     所以这一句要把限定名与真原因都说出来 —— 那 37 份卡的是跨模块，不是 tname。 */
+     （内建标量、同一包里的 struct、`type Level int` 那种底子），欠的只有"包限定"这一种。
+     2026-09-18 接上了：跨包表（`XPKG`）里查得着就照那个包的声明算，查不着的照旧落成墙
+     —— 而那句话现在分得出**是不在语料里**（标准库 / `cmd/internal/…`）还是别的。 */
   if (t === 'tname') {
-    const qual = kids(ty).map((y) => (isList(y) ? leaf(kids(y)[0]) : leaf(y))).join('.');
+    const segs = kids(ty).map((y) => (isList(y) ? leaf(kids(y)[0]) : leaf(y)));
+    const qual = segs.join('.');
+    if (segs.length === 2 && IMPORTS.has(segs[0])) return xzeroOf(qual, name);
     throw new Error(`go->graph: 带包限定的类型 ${qual} 的零值要那个包的声明 ——`
-      + ' 跨模块（`opts.also` 只递同一个目录里那几份）');
+      + ' 那个名字这一份文件没 import 过（点导入 / 别名对不上）');
   }
   throw new Error(`go->graph: 这一格的零值还没接：${t}`);
+}
+
+/**
+ * **另一个包里那个具名类型的零值**（键是限定名 `syntax.Pos`）。
+ *
+ * 与本包那一段是同一条规矩，只是两张表换成跨包的那两张，而且**递归时把包名带下去** ——
+ * 字段的类型写在那个包里，光名字指的是那个包的东西。
+ */
+function xzeroOf(qual, name) {
+  const p = qual.slice(0, qual.indexOf('.'));
+  if (XPKG.structs.has(qual)) {
+    const fs = XPKG.structs.get(qual);
+    if (fs === null) {
+      throw new Error(`go->graph: ${qual} 有嵌入字段 —— 它在零值里占几格要展开被嵌类型才知道`);
+    }
+    return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${qual}.${fn}`, p)]));
+  }
+  if (XPKG.under.has(qual)) return zeroOf(XPKG.under.get(qual), `${name}:${qual}`, p);
+  throw new Error(`go->graph: 带包限定的类型 ${qual} 的零值要那个包的声明，`
+    + `而包 ${p} 的声明不在语料里（标准库 / 语料树外的包）`);
 }
 
 /**
@@ -960,11 +1082,21 @@ function toNode(x) {
         const fromVar = recvName !== null ? VARTYPE.get(recvName) : undefined;
         const flat = METHODS.get(m);
         const owner = fromVar ?? (flat === null ? undefined : flat);
-        if (owner !== undefined && MSET.has(`${owner}.${m}`)) {
+        /* 接收者的类型**带包限定**时（`func f(t syntax.Type)` 那一档，`VARTYPE` 收的就是
+           `syntax.Type`），方法的声明在那个包里 —— 跨包表里查得着就照样 mangle。 */
+        if (owner !== undefined && (MSET.has(`${owner}.${m}`) || XPKG.mset.has(`${owner}.${m}`))) {
           return node('call', {
             fn: node('ref', {}, { name: mangle(owner, m) }),
             args: onType ? argNodes : [toNode(obj), ...argNodes],
           });
+        }
+        /* **`pkg.Func(…)`：包名点函数**（`ir.NewNilExpr(…)` / `types.NewPtr(…)`）。
+           它与"取字段再调它"在树上同形，分开靠两道闸：这个名字**是这份文件 import 的包**，
+           且那个包里**真声明了这格顶层函数**。接收者不补 —— 包名不是值。
+           `fromVar` 有值时不走这条：那时它是一格类型写着的变量，方法优先。 */
+        if (recvName !== null && fromVar === undefined && IMPORTS.has(recvName)
+          && XPKG.funcs.has(`${recvName}.${m}`)) {
+          return node('call', { fn: node('ref', {}, { name: mangle(recvName, m) }), args: argNodes });
         }
         if (flat !== undefined && flat !== null) {
           return node('call', {
@@ -1026,6 +1158,11 @@ export function goToGraph(tree, opts) {
   UNDER.clear();
   MSET.clear();
   VARTYPE.clear();
+  IMPORTS.clear();
+  collectImports(tree);
+  /* **跨包那一张表**（`opts.pkgs` = 语料里所有的树，见 `XNONE` 那一段）：只建一次，
+     按数组的身份缓存。没递这一格时它是空表 —— 那时行为与从前逐字相同。 */
+  useXpkg(opts?.pkgs);
   /* **同一包里别的文件先扫**（`opts.also`）：go 的一个包摊在好几份文件上，
      `var x SomeType` 的零值、`T{…}` 的字段名都可能声明在旁边那份里。
      这一趟只收声明，不落节点；**旁边的先扫、自己的后扫**（同名时自己这一份说了算）。 */
