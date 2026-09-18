@@ -148,6 +148,7 @@ const mangle = (owner, name) => `${String(owner).replace(/\./g, '__')}__${name}`
  * 纪律（这把尺子量的是"映射写全了没有"，链接是下一层的事）。
  */
 const XNONE = {
+  pkgs: new Set(),
   types: new Set(), structs: new Map(), under: new Map(), mset: new Set(), funcs: new Set(),
 };
 let XPKG = XNONE;
@@ -186,12 +187,14 @@ function useXpkg(trees) {
   let X = XCACHE.get(trees);
   if (X === undefined) {
     X = {
+      pkgs: new Set(),
       types: new Set(), structs: new Map(), under: new Map(), mset: new Set(), funcs: new Set(),
     };
     for (const t of trees) {
       if (!isList(t) || tag(t) !== 'file') continue;
       const p = leaf(kids(t)[0]);
       if (p === null) continue;
+      X.pkgs.add(p);
       for (const it of kids(t).slice(1)) collectPkg(it, p, X);
     }
     XCACHE.set(trees, X);
@@ -330,6 +333,45 @@ const PRINTS = new Set(['Println', 'Print', 'println', 'print']);
 const FORMATS = new Set(['Sprintf', 'Errorf', 'Printf']);
 
 const many = (xs) => xs.map(toNode).flat();
+
+/**
+ * **`x.M(…)` 收不下时，那堵墙该说哪句话**（2026-09-18 拆出来的）。
+ *
+ * 原来这一处只有一句话：`这一批只接 fmt.Print* 与声明过的方法，收不了 .M` —— 366 份
+ * （剩下 627 份里的 58%）全落在它上头，而它**把至少四件事混成了一句**。混着的代价不是
+ * 不好看：账上"跨文件"那一族因此虚高，看账的人会以为"接着写映射"就能收，而真正的下一刀
+ * 其实是**类型覆盖层**（第 40 条）。
+ *
+ * 四条岔路，按"我们到底缺什么"分：
+ *   1. `x` 是这份文件 import 的**包**，而那个包在语料里 —— 那它就不是顶层函数，
+ *      是**包级变量上的方法**（`base.Ctxt.Lookup(…)` 那一族）：要那个变量的类型。
+ *   2. `x` 是 import 的包，而那个包**不在语料里**（标准库 / `cmd/internal/…`）：
+ *      这是尺子的下一层，不是这一层的欠账。
+ *   3. `x` 的类型**语法上写着**（`VARTYPE` 有），可那个类型上没声明这格方法 ——
+ *      go 里这几乎总是**嵌入字段**带来的方法：要展开被嵌类型。
+ *   4. 都不是：接收者的类型这一层看不出来 —— 要类型那一层。
+ */
+function selWall(recvName, m, fromVar) {
+  if (recvName !== null && IMPORTS.has(recvName) && fromVar === undefined) {
+    if (XPKG.pkgs.has(recvName)) {
+      return new Error(`go->graph: 包 ${recvName} 里没有顶层函数 ${m} —— 那是包级变量上的方法，`
+        + '要那个变量的类型（要类型那一层）');
+    }
+    return new Error(`go->graph: ${recvName}.${m}(…) 的声明不在语料里`
+      + '（标准库 / 语料树外的包）');
+  }
+  if (fromVar !== undefined) {
+    const p = fromVar.indexOf('.') < 0 ? null : fromVar.slice(0, fromVar.indexOf('.'));
+    if (p !== null && !XPKG.pkgs.has(p)) {
+      return new Error(`go->graph: ${fromVar} 上的方法 ${m} 的声明不在语料里`
+        + '（标准库 / 语料树外的包）');
+    }
+    return new Error(`go->graph: 类型 ${fromVar} 上没有声明方法 ${m} —— 十有八九是嵌入字段`
+      + '带来的，要展开被嵌类型（要类型那一层）');
+  }
+  return new Error(`go->graph: .${m} 的接收者的类型这一层看不出来 —— 要类型那一层`
+    + '（`VARTYPE` 只收语法上写着的那一档）');
+}
 
 /**
  * `var x int` 那一格的**零值**：go 里"什么都没写时它是几"。
@@ -1108,7 +1150,7 @@ function toNode(x) {
           throw new Error(`go->graph: 好几个类型都声明了方法 ${m}，而接收者的类型这一层`
             + '看不出来 —— 要类型那一层（`VARTYPE` 只收语法上写着的那一档）');
         }
-        throw new Error(`go->graph: 这一批只接 fmt.Print* 与声明过的方法，收不了 .${m}`);
+        throw selWall(recvName, m, fromVar);
       }
       const callee = tag(fn) === 'name' ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
