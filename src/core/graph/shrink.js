@@ -34,6 +34,7 @@
 import { node } from './graph.js';
 import { isPure } from './nodes.js';
 import { primOf } from './prims.js';
+import { litType } from './types.js';
 import { valTruthy, showValue } from './eval.js';
 
 /** 是不是一格节点（与 `stat.js` 那格同一条判断 —— 字面量与数组都不是）。 */
@@ -114,6 +115,13 @@ function rewrite(x, ctx) {
       /* 算不出来（除零、类型对不上…）就**不折**：折叠不许把运行期的错搬到编译期。 */
       try {
         const v = primOf(out.attrs.name).kernel(cs.map((c) => c.v), PURE_IO);
+        /* **折出来的必须是图上说得出的一格字面量**（int / real / bool / string）。
+           `fill` / `slice` 那几格实参全是常量时算出来的是一格**聚合**（`new Array(2).fill('')`），
+           而聚合不是字面量：落成 `(const …)` 之后 core 那条腿印出 `(int 0)`（null 那一档），
+           方言当场骂"(slen …) 的第一个参数要是 string，这里是 int" —— `go+makelen × core`
+           量出来的。还有一层：`memo` 让同一格 `const` 被**共享**，而 n 格元素指向同一格聚合
+           正是 `fill` 的 kernel 自己拦着的那件事。所以这一格只折标量。 */
+        if (litType(v) === null) throw new Error('折出来的不是一格标量字面量');
         out = node('const', {}, { value: v, span: x.span });
         ctx.folded += 1;
       } catch (err) { /* 保持原样 —— 这一格留给运行期去报 */ }

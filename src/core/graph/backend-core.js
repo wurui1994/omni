@@ -429,10 +429,19 @@ function lenText(a, env, ctx) {
 }
 
 /**
- * 字段 / 下标那一格**宿主**的文本。只认一个名字（`(var p)`）——
- * 嵌套（`p.q.x`、`xs[0][1]`）要类型再往里推一层，这一刀不接。
+ * 字段 / 下标那一格**宿主**的文本。认一个名字（`(var p)`），也认**里头那格记录**
+ * （`q.a.y` -> `(fld (fld (var q) a) y)`）—— 后者要里层自己说得清形状。
+ * 别的（`xs[0].f`、`f().f`）这一刀不接。
  */
 function objText(obj, env, ctx) {
+  /* 嵌套的宿主：里层是一格 `field-get` 且它交出来的就是一格形状。为什么读这一路是准的：
+     方言的结构体是值语义，可 `(fld (fld …))` 是**就地**读那块字节，不复制。 */
+  if (isNode(obj) && obj.op === 'field-get') {
+    const inner = typeOf(obj, env, ctx);
+    if (ctx.shapes.has(inner) || elemType(inner) !== null || dictOf(inner) !== null) {
+      return `(fld ${objText(obj.ins.obj, env, ctx)} ${obj.attrs.field})`;
+    }
+  }
   if (!isNode(obj) || obj.op !== 'ref') gap('字段 / 下标的宿主不是一个名字（嵌套那一档还没接）');
   const t = env.get(obj.attrs.name);
   if (!ctx.shapes.has(t) && elemType(t) === null && dictOf(t) === null) {
@@ -781,17 +790,35 @@ function bindRecord(nm, rec, env, ctx) {
   if (vals.length !== names.length) {
     gap(`记录的字段名单是 ${names.length} 格，值给了 ${vals.length} 格`);
   }
+  /* **字段里又是一格记录**（go 的 `var q Pair`，Pair 里装着 Point）：方言收得住
+     （`sexpr/lower.js` 的 structDec 第十七刀"结构体套结构体"），可 `(fldset …)` 那一格要的是
+     一个**值**，而 record-new 在表达式位置上落不下去。所以先把里头那格物化成一格临时名，
+     再把它整格 `fldset` 进去 —— 方言的结构体是值语义，搬进去的是副本，与 go 的零值一致。
+     递归是这儿展开的（`rec_tmpN` 逐层各一格），套几层都一样。
+     列表 / 字典当字段**仍旧不接**：那两样在方言里是句柄（引用语义），"里头改了外头看得见"
+     这件事得先有判据再说。 */
+  const pre = [];
+  const fieldText = [];
   const types = names.map((_, i) => {
-    const t = typeOf(vals[i], env, ctx);
-    if (t !== 'int' && t !== 'real' && t !== 'bool' && t !== 'string') {
-      gap(`记录的字段 '${names[i]}' 不是标量（方言的字段这一刀只收标量）`);
+    const v = vals[i];
+    if (isNode(v) && v.op === 'record-new') {
+      ctx.tmp = ctx.tmp + 1;
+      const tn = `rec_tmp${ctx.tmp}`;
+      pre.push(...bindRecord(tn, v, env, ctx));
+      fieldText.push(`(var ${tn})`);
+      return env.get(tn);
     }
+    const t = typeOf(v, env, ctx);
+    if (t !== 'int' && t !== 'real' && t !== 'bool' && t !== 'string') {
+      gap(`记录的字段 '${names[i]}' 不是标量（方言的字段这一刀只收标量与另一格记录）`);
+    }
+    fieldText.push(null);
     return t;
   });
   const shape = shapeOf(names, types, false, ctx);
-  const out = [bindLine(nm, shape.tag, `(new ${shape.tag})`, env, ctx)];
+  const out = [...pre, bindLine(nm, shape.tag, `(new ${shape.tag})`, env, ctx)];
   for (let i = 0; i < names.length; i++) {
-    out.push(`(fldset (var ${nm}) ${names[i]} ${expr(vals[i], env, ctx)})`);
+    out.push(`(fldset (var ${nm}) ${names[i]} ${fieldText[i] ?? expr(vals[i], env, ctx)})`);
   }
   return out;
 }

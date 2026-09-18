@@ -102,6 +102,24 @@ const outOf = (g) => evalGraph(g).out.join('|');
   eq('删〔连初值一起走：节点只剩 print 与它的常量〕', graphStat(r.graph).nodes, 2);
 }
 
+/* **折出来的必须是一格标量字面量**：`fill(2, "")` 两格实参都是常量、`fill` 自己也 pure，
+   所以前两道门都放它过 —— 可算出来的是一格**聚合**（`['','']`），而聚合不是图上的字面量。
+   折了的代价量过：core 那条腿把 `(const ['',''])` 印成 `(int 0)`（null 那一档），方言当场骂
+   "(slen …) 的第一个参数要是 string，这里是 int"（`go+makelen × core`）。
+   还有一层：`memo` 让同一格 `const` 被共享，而"n 格元素指向同一格聚合"正是 `fill` 的 kernel
+   自己拦着的那件事。 */
+{
+  const g = program([
+    node('bind', { init: prim('fill', [num(2), node('const', {}, { value: '' })]) }, { name: 'ss' }),
+    prim('print', [prim('len', [node('ref', {}, { name: 'ss' })])]),
+  ]);
+  const before = outOf(g);
+  const r = shrink(g);
+  eq('不折〔fill 折出来是一格聚合：折 0〕', r.folded, 0);
+  eq('不折〔fill 那一格还是 prim〕', r.graph.body[0].ins.init.op, 'prim');
+  eq('不折〔输出一字不变〕', outOf(r.graph), before);
+}
+
 /* 活着的绑定不删（哪怕只被读一次）。 */
 {
   const g = program([
