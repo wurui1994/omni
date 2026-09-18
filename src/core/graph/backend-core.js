@@ -333,6 +333,11 @@ function expr(x, env, ctx) {
        * 把 `(set …)` 之外的东西提到 `if` 前面是错的：那两支里可能有副作用（chez 的
        * `sum-go` 两支各是一次递归调用，提出去就无限递归了）。 */
       if (ctx.pre === null || ctx.pre === undefined) gap('branch 出现在表达式位置上，而这一处没地方摆物化的那两句');
+      /* **`c and X or Y`** 先折成一格普通的三目（见 `luaTernary`）—— 折得动就照折出来的走。 */
+      {
+        const folded = luaTernary(x, env, ctx);
+        if (folded !== null) return expr(folded, env, ctx);
+      }
       const els = x.ins.else;
       if (els === undefined || els === null) gap('表达式位置上的 branch 少了 else 那一支');
       const t = typeOf(x.ins.then, env, ctx);
@@ -408,6 +413,12 @@ function concatText(args, env, ctx) {
  * 所以这儿不替谁做主：不是 bool 就**报**，不擅自补 `!= 0`。补了在 C 家族里对、在 lua 里
  * 错（那门语言 0 是真），而这一份翻译看不见自己在给哪门语言干活 —— 那正是会给出静默错
  * 答案的形状。
+ *
+ * **lua 的 `and`/`or` 是一处例外**（`keepValue: true`）：交出来的不是真假，是值。
+ * 覆盖层对 branch 的答案是 `then` 支的类型（值类型），可当条件用的时候"决定真假"的是
+ * cond 链最里层那一格。所以**一层 branch 的条件那一侧还是一格 branch 时，递归看它的
+ * cond**——直到不是 branch 为止。这不是猜：lua 的 `(a > b) and a or b` 在图上就是
+ * `branch(cond: branch(cond: (> a b), …), …)`，决定真假的正是 `(> a b)` 那格 bool。
  */
 function condText(c, env, ctx) {
   const t = typeOf(c, env, ctx);
@@ -416,6 +427,43 @@ function condText(c, env, ctx) {
       + '那一侧的事（该由那门语言的映射补成一格比较，不该由这份翻译替它猜）');
   }
   return expr(c, env, ctx);
+}
+
+/**
+ * **`c and X or Y`（lua 的三目写法）折成一格普通的三目。**
+ *
+ * 图上那两格长这样（`fromtree.js` 的 `lazyAnd` / `lazyOr`，`keepValue: true` ——
+ * lua 的 and / or 交出来的是**值**不是真假，`ext/lua/SPEC.md` L-007）：
+ *
+ *     OR  = branch{cond: N, then: N,  else: Y}     // cond 与 then 是**同一格节点**
+ *     N   = branch{cond: C, then: X,  else: C}     // cond 与 else 是**同一格节点**
+ *
+ * 两格合起来的值按定义是：`C` 真且 `X` 真 ⇒ `X`；否则 `Y`。
+ * `X` 是一格**纯的、非 bool 的标量**时"`X` 真"**恒成立** —— 那是图自己的真值观
+ * （`eval.js` 的 `valTruthy`：只有 `false` / `nil` 为假，所以任何数、任何串都真）。
+ * 于是整格就是 `branch{cond: C, then: X, else: Y}` —— **推出来的，不是猜**。
+ *
+ * 不折的话 core 走不下去：`N` 站在值的位置上时两支是 int（`X`）与 bool（`C`），
+ * 方言当场骂"'if_tmp8' 是 int，赋的值是 bool"。而那一支**在那个位置上根本到不了**
+ * （OR 的 cond 已经把"N 为真"筛过了）—— 这一刀就是把那件事写在结构上。
+ *
+ * 认不出这个形状就回 null（照旧走原来的路）。
+ */
+function luaTernary(x, env, ctx) {
+  const N = x.ins.cond;
+  const Y = x.ins.else;
+  if (!isNode(N) || N.op !== 'branch' || N !== x.ins.then) return null;
+  if (Y === undefined || Y === null) return null;
+  const C = N.ins.cond;
+  const X = N.ins.then;
+  if (C === undefined || C === null || N.ins.else !== C) return null;
+  /* `C` 得是一格真假（不然条件那一格照旧说不清 —— 交给 `condText` 报）。 */
+  if (typeOf(C, env, ctx) !== 'bool') return null;
+  /* `X` 恒真的那一条：纯 + 非 bool 的标量。`X` 是 bool 时 `false and X or Y` 的答案
+     是 `Y` 而不是 `X`，折了就错 —— 所以那一档不接。 */
+  const tx = typeOf(X, env, ctx);
+  if (tx === 'bool' || !isScalar(tx) || !isPure(X)) return null;
+  return node('branch', { cond: C, then: X, else: Y });
 }
 
 /** `len`：串问 `slen`、列表问 `alen`、字典问 `dlen`（图上是同一格内建，方言里是三个）。 */

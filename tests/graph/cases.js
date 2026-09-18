@@ -6,6 +6,7 @@
 // 抄两份的话，加一门语言就要改两处，而其中一处一定会忘。
 
 import { node, lit, program, bin } from '../../src/core/graph/graph.js';
+import { lazyAnd, lazyOr } from '../../src/core/graph/fromtree.js';
 // 语言的登记处（语法 · 映射 · 后缀）。这一份**只挑家族**，不再自己抄一张语言表
 import { LANGS } from '../../src/core/graph/langs.js';
 
@@ -541,5 +542,25 @@ export const HAND = [
         args: [node('values', { args: [lit(-5), lit(0), lit(42)] })],
       }, { name: 'print' }),
     ]),
+  },
+  {
+    // **lua 的 `c and X or Y` 折成三目**（core 的 `luaTernary`）。
+    // 不写成语言例子的理由：lua 那份 basics 里已经压着这个写法（`max2`），这一条是
+    // **反向钉住折出来的那张图跑出同一个答案**。手搭是因为要用 `lazyAnd` / `lazyOr`
+    // 直接说图的形状，而不是先过 lua 的映射再指望那边落的恰好就是这个形状。
+    // `(3 > 7) and 3 or 7` -> 3 假 -> 取 else -> 7。
+    // `(7 > 3) and 7 or 3` -> (> 7 3) 真、7 恒真 -> 取 7。
+    name: 'hand+lua-ternary',
+    expect: ['7', '7'],
+    graph: () => {
+      const cmp1 = bin('>', lit(3), lit(7));
+      const cmp2 = bin('>', lit(7), lit(3));
+      const or1 = lazyOr(lazyAnd(cmp1, lit(3), { keepValue: true }), lit(7), { keepValue: true });
+      const or2 = lazyOr(lazyAnd(cmp2, lit(7), { keepValue: true }), lit(3), { keepValue: true });
+      return program([
+        node('prim', { args: [or1] }, { name: 'print' }),
+        node('prim', { args: [or2] }, { name: 'print' }),
+      ]);
+    },
   },
 ];
