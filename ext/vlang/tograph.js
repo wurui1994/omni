@@ -102,6 +102,19 @@ const FIELDS = new Set();
 let STRICT_CALLS = false;
 
 /**
+ * **这份文件 import 了哪几格模块**（名字那一段：`import os` -> `os`、
+ * `import v.ast` -> `ast`、`import x as y` -> `y`）。
+ *
+ * 为什么要它：严格档里那句话得分得清**两件不同的事**（`docs/design/cross-file-methods.md` §5）：
+ *   * `os.join_path(…)` / `os.getenv(…)` —— **模块限定的库函数**，声明在**标准库**里
+ *     （`vlib/os`）。尺子的分母是"那门编译器自己的源码"，标准库不在里头 ——
+ *     这一族要等"真的编 stdlib"那一层（ADR-0037 §5.1a 的 ① 档），**不是**这一层的欠账；
+ *   * `x.M(…)` 里 M 声明在**同一棵源码树的别的目录**里 —— 那一族才是 mangle 那一刀要治的。
+ * 两族混在一句话里，"下一刀该做什么"就看不出来了（量出来 599 份里绝大多数是前者）。
+ */
+const IMPORTS = new Set();
+
+/**
  * **枚举**：`枚举名.变体名 -> 值`，加一张"变体名出现在几个枚举里"的账。
  *
  * 枚举的**声明在图上是丢掉的**（类型不进图），可 `.red` / `Color.red` 这两种写法要拿到**值**
@@ -1166,8 +1179,16 @@ function toNode(x) {
       }
       /* **严格档**（`--strict-calls`）：选择子既不是声明过的方法、也不是声明过的字段，
          那"取字段再调它"就是一格跑不通的调用 —— 报，措辞与 go 那一份对齐。
-         见 `FIELDS` / `STRICT_CALLS` 那一段（默认不开）。 */
+         见 `FIELDS` / `STRICT_CALLS` 那一段（默认不开）。
+         **两族分开说**：接收者是 import 进来的模块名时那是**标准库里的函数**
+         （尺子的下一层），别的才是"方法声明在别的目录里"（见 `IMPORTS` 那一段）。 */
       if (STRICT_CALLS && tag(fn) === 'sel' && !FIELDS.has(leaf(kids(fn)[1]))) {
+        const recv = kids(fn)[0];
+        const mod = tag(recv) === 'name' ? leaf(kids(recv)[0]) : null;
+        if (mod !== null && IMPORTS.has(mod)) {
+          throw new Error(`v->graph: 库函数 ${mod}.${leaf(kids(fn)[1])} 声明在标准库里`
+            + '（这棵源码树里没有它）—— 那是尺子的下一层，不是这一层的欠账');
+        }
         throw new Error('v->graph: 这一批只接声明过的方法与声明过的字段，收不了 '
           + `.${leaf(kids(fn)[1])} —— 跨模块的方法要类型那一层`);
       }
@@ -1203,6 +1224,18 @@ export function vlangToGraph(tree, opts) {
   STRUCTS.clear();
   FIELDS.clear();
   STRICT_CALLS = opts !== undefined && opts.strictCalls === true;
+  /* import 进来的模块名（严格档里要拿它分"库函数"与"别的目录里的方法"两族）。
+     `import v.ast` 的名字是最后那一段；`import x as y` 用别名。 */
+  IMPORTS.clear();
+  for (const spec of vlangImports(tree)) {
+    const segs = String(spec).split('.');
+    IMPORTS.add(segs[segs.length - 1]);
+  }
+  for (const it of kids(tree)) {
+    if (!isList(it) || tag(it) !== 'import') continue;
+    const al = kids(it).find((y) => isList(y) && tag(y) === 'as');
+    if (al !== undefined) IMPORTS.add(leaf(kids(al)[0]));
+  }
   ENUMS.clear();
   EVARIANTS.clear();
   /**
