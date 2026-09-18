@@ -906,6 +906,40 @@ function emitOnce(graph, retOf, multiOf) {
         if (name === 'bnot' && args.length === 1) {
           return `(i64.xor ${expr(args[0], sc, pre)} (i64.const -1))`;
         }
+        /* **len（列表的长度）**：存在偏移 0 的那一格（`list-new` 那条注释的原话）。
+           串上的 len（`slen`）走 `$__str_len`（宿主面函数），这条路只接列表。 */
+        if (name === 'len' && args.length === 1) {
+          if (kindOf(args[0], sc) === 'str') throw new Gap('len 落在字符串上 —— wasm 这一批只有数的算术（串只有 + 与 concat）');
+          needMem = true;
+          return `(i64.load ${addr(expr(args[0], sc, pre))})`;
+        }
+        /* **push**：语句那一层专门处理（需要写回原变量），所以这儿只是语句落的时候拦一下
+           就走不到这里。如果真走到了就是有人把 push 当表达式用了 —— 报缺口。 */
+        if (name === 'push') {
+          throw new Gap('push 在表达式位置上（wasm 这一批里 push 只接语句位置）');
+        }
+        /* **fill**：按长度造一格新列表，每格都是同一个值。分配 (n+1)*8，偏移 0 存长度，
+           之后是一圈 store。与 `list-new` 那一块同一套布局。 */
+        if (name === 'fill' && args.length === 2) {
+          needMem = true;
+          const n = tmp(sc); pre.push(`(local.set ${n} ${expr(args[0], sc, pre)})`);
+          const v = expr(args[1], sc, pre);
+          const a = alloc(`${addr(`(i64.mul (i64.add (local.get ${n}) (i64.const 1)) (i64.const 8))`)}`, sc, pre);
+          pre.push(`(i64.store ${addr(`(local.get ${a})`)} (local.get ${n}))`);
+          const i = tmp(sc);
+          const lab = `$F${++loopSeq}`;
+          pre.push(`(local.set ${i} (i64.const 0))`);
+          pre.push(`(loop ${lab} (if (i64.lt_s (local.get ${i}) (local.get ${n})) (then`
+            + ` (i64.store (i32.add ${addr(`(local.get ${a})`)} ${addr(`(i64.mul (i64.add (local.get ${i}) (i64.const 1)) (i64.const 8))`)}) ${v})`
+            + ` (local.set ${i} (i64.add (local.get ${i}) (i64.const 1))) (br ${lab}))))`);
+          return `(local.get ${a})`;
+        }
+        /* **contains（线性查找）**：遍历列表找一格等于目标的元素。
+           **打印 bool 还没接**：wat 把 true/false 当 1/0 存，可别的腿印 "true"/"false" ——
+           在我们有 `print_bool` 之前先跳过（那是形状上的一条账，不是这格内建本身的事）。 */
+        if (name === 'contains') {
+          throw new Gap('contains 的结果是 bool —— 打印 bool 在 wasm 上还没接（印 1/0 不等于 true/false）');
+        }
         throw new Gap(`这格内建还没接：${name}`);
       }
       case 'call': return callOf(x, sc, pre);
@@ -1326,6 +1360,42 @@ function emitOnce(graph, retOf, multiOf) {
       }
       case 'prim': {
         if (x.attrs.name !== 'print') {
+          /* **push 在语句位置上**：新分配一块（旧长度 + 1）、旧的拷过去、尾上加一格，
+             然后把新地址**写回那个变量**。不就地扩容的理由与 `index-set` 那条一样 ——
+             列表可能被别的名字引着，搬了地址两边就散了。 */
+          if (x.attrs.name === 'push') {
+            needMem = true;
+            const pArgs = watItems(x.ins.args);
+            if (pArgs.length !== 2) throw new Gap(`push 收到 ${pArgs.length} 格实参`);
+            const list = pArgs[0];
+            const val = pArgs[1];
+            if (list === null || list === undefined || list.op !== 'ref') throw new Gap('push 的第一格实参不是一个名字');
+            const listId = sc.lookup(list.attrs.name);
+            const isGlobal = listId === null;
+            const listGet = isGlobal ? `(global.get ${globals.get(list.attrs.name)})` : `(local.get ${listId})`;
+            const listSet = (v) => isGlobal ? `(global.set ${globals.get(list.attrs.name)} ${v})` : `(local.set ${listId} ${v})`;
+
+            const o = tmp(sc); pre.push(`(local.set ${o} ${listGet})`);
+            const vv = expr(val, sc, pre);
+            const n = tmp(sc); pre.push(`(local.set ${n} (i64.load ${addr(`(local.get ${o})`)}))`);
+            const newLen = `(i64.add (local.get ${n}) (i64.const 1))`;
+            const a = alloc(`${addr(`(i64.mul (i64.add ${newLen} (i64.const 1)) (i64.const 8))`)}`, sc, pre);
+            pre.push(`(i64.store ${addr(`(local.get ${a})`)} ${newLen})`);
+            {
+              const i = tmp(sc);
+              const lab = `$P${++loopSeq}`;
+              pre.push(`(local.set ${i} (i64.const 0))`);
+              pre.push(`(loop ${lab} (if (i64.lt_s (local.get ${i}) (local.get ${n})) (then`
+                + ` (i64.store (i32.add ${addr(`(local.get ${a})`)}`
+                + ` ${addr(`(i64.mul (i64.add (local.get ${i}) (i64.const 1)) (i64.const 8))`)})`
+                + ` (i64.load (i32.add ${addr(`(local.get ${o})`)}`
+                + ` ${addr(`(i64.mul (i64.add (local.get ${i}) (i64.const 1)) (i64.const 8))`)})))`
+                + ` (local.set ${i} (i64.add (local.get ${i}) (i64.const 1))) (br ${lab}))))`);
+            }
+            pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} ${addr(`(i64.mul ${newLen} (i64.const 8))`)}) ${vv})`);
+            pre.push(listSet(`(local.get ${a})`));
+            return pre;
+          }
           const v = expr(x, sc, pre);
           return [...pre, `(drop ${v})`];
         }
@@ -1578,10 +1648,28 @@ function emitOnce(graph, retOf, multiOf) {
  * 图 -> WAT 文本。接不住的形状抛 `Gap`（上层把它变成"这一格跳过，理由如下"）。
  */
 export function emitWat(graph) {
-  // 第一遍只为了那两张表（哪个函数出值 / 出几格多值），第二遍拿着它们出正式的文本。
-  // 图都很小，两遍比猜便宜。
-  const first = emitOnce(graph, new Map(), new Map());
-  return emitOnce(graph, first.rets, first.multis).text;
+  /* 头几遍只为了那两张表（哪个函数出值 / 出几格多值），最后一遍拿着它们出正式的文本。
+   *
+   * **为什么不是两遍而是"转到不动"**：那两张表**互相喂**——"这个函数出不出值"要看它体末尾
+   * 那一格算不算一个值，而末尾要是一格**调用**，那就得先知道**被调的那个**出不出值
+   * （`isVoidish` 查的正是 `retOf`）。于是第一遍里 `retOf` 空着、末尾那格调用被当成
+   * void，`main` 记成"不出值"；第二遍里被调的那个已经记上了、`main` 于是长出
+   * `(result i64)`——可顶层那句 `(call $f_main)` 用的还是第一遍的表，没补 `(drop …)`，
+   * wat 前端当场骂 "this call returns i64 and nothing consumes it"。
+   * `nim+casefor` 量出来的（那一格 main 的末尾正是一句调用）。转到表不动为止就对了；
+   * 上限 4 是防手抖，不是语义（每一遍只可能把"不出值"翻成"出值"，单调，一定会停）。 */
+  let rets = new Map();
+  let multis = new Map();
+  let last = emitOnce(graph, rets, multis);
+  for (let i = 0; i < 4; i++) {
+    const same = last.rets.size === rets.size
+      && [...last.rets].every(([k, v]) => rets.get(k) === v);
+    rets = last.rets;
+    multis = last.multis;
+    if (same) break;
+    last = emitOnce(graph, rets, multis);
+  }
+  return last.text;
 }
 
 export { Gap };
