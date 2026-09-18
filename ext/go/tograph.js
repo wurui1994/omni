@@ -846,6 +846,12 @@ function toNode(x) {
     // ---- 叶子 --------------------------------------------------------------
     case 'num': return node('const', {}, { value: Number(leaf(kids(x)[0])) });
     case 'str': return node('const', {}, { value: leaf(kids(x)[0]) });
+    // `'A'` 在 go 里是 rune 字面量（Unicode 码点），在图上落成**单字符的串** ——
+    // 与 V 那一份 `charlit` 同一条纪律：语料里 99% 的用途是比较。
+    case 'rune': {
+      const raw = leaf(kids(x)[0]);
+      return node('const', {}, { value: raw });
+    }
     case 'name': {
       const n = leaf(kids(x)[0]);
       if (n === 'true') return node('const', {}, { value: true });
@@ -1296,5 +1302,13 @@ export function goImports(tree) {
 //      （`ext/go/SPEC.md` §五那张顺序表说了它们各排在哪一步）。
 //   3. 选择器（`a.b`）落 `field-get`（第四批），但**只当它是取字段** ——
 //      `fmt.Println` 那种"包名点方法"仍在 `call` 那一格特判，因为它不是取字段。
-//   4. 方法：接收者提到形参表第一格（第二十四批）。**指针接收者、接口、方法值**都不在这一批 ——
+//   4. 方法：接收者提到形参表第一格（第二十四批）。**指针接收者**接了（`recvOwner` 那一份，
+//      判据 `examples/ptrmethod.go`）；**接口、方法值**都不在这一批 ——
 //      重名的方法（两个类型各有一个 `total`）当场报：分开它们要的正是类型那一层。
+//   5. **rune 字面量落成单字符的串**（与 V 的 `charlit` 同一条纪律）。go 的 `'A'` 按规范是
+//      **无类型整数常量**（65），所以这一条有两个角落是**答案错而不报**，两边各错一个，
+//      这儿明说选了哪一个：
+//        * 我们错的：`println('A')` 真 go 印 65，我们印 `A`；`'a' + 1` 真 go 是 98。
+//        * 落成整数会错的：`string(r)` 真 go 给 `"A"`，那时会给 `"65"`（`conv str` 不认码点）。
+//      选串是因为语料里压倒多数是**比较**（V 那边量过 508 : 4），而比较两边同时落成串就对；
+//      要两个角落都对得靠类型覆盖层分出"这格值是 rune 还是 int"。
