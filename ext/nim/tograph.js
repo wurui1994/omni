@@ -88,6 +88,65 @@ function mapBindName(x) {
 const OPS = ops({
   div: '/', mod: '%', '&': 'concat', shl: 'shl', shr: 'shr',
 });
+
+/**
+ * **声明过的编译期环境**（`when defined(x)`）—— 与 `ext/vlang/tograph.js` 那一份同一条口径：
+ * 定死一个**参考目标**（linux · x64 · gcc），不看跑在哪台机器上（**尺子要可重现**）。
+ *
+ * `defined(名字)`：名字在表里就用表里的答案。**不在表里当场报** —— nim 里 `defined()`
+ * 对没定义的名字回 false，可那是"编译器知道全部 -d 标志"的前提下；我们这一层看不见
+ * 命令行，猜 false 就会静静丢掉一段代码。
+ *
+ * `nimvm` 那一格是 **false**：它问的是"这会儿在编译期虚拟机里跑吗"，而我们落的是运行期
+ * 的图 —— 这一格不是猜，是这一层的事实。
+ */
+const NIM_CT_ENV = new Map(Object.entries({
+  linux: true, posix: true, unix: true, gcc: true, cpu64: true, littleEndian: true,
+  windows: false, macosx: false, macos: false, osx: false, bsd: false, freebsd: false,
+  openbsd: false, netbsd: false, android: false, ios: false, haiku: false, genode: false,
+  js: false, nimscript: false, nimvm: false, cpp: false, objc: false, emscripten: false,
+  release: false, danger: false, debug: true, useMalloc: false, gcArc: false, gcOrc: false,
+  windowsHasEnvironmentVariables: false, cpu32: false, bigEndian: false, clang: false,
+  vcc: false, tcc: false, icl: false, nimHasStyleChecks: true,
+}));
+
+/** `when` 的条件求值。认不出来的形状**当场报**（与 V 那一份同一条纪律：不猜）。 */
+function whenCond(c) {
+  const t = tag(c);
+  if (t === 'paren') return whenCond(kids(c)[0]);
+  if (t === 'un' && (leaf(kids(c)[0]) === 'not' || leaf(kids(c)[0]) === '!')) {
+    return !whenCond(kids(c)[1]);
+  }
+  if (t === 'bin') {
+    const o = leaf(kids(c)[0]);
+    if (o === 'and' || o === '&&') return whenCond(kids(c)[1]) && whenCond(kids(c)[2]);
+    if (o === 'or' || o === '||') return whenCond(kids(c)[1]) || whenCond(kids(c)[2]);
+  }
+  if (t === 'name') {
+    const nm = leaf(kids(c)[0]);
+    if (nm === 'true') return true;
+    if (nm === 'false') return false;
+    if (NIM_CT_ENV.has(nm)) return NIM_CT_ENV.get(nm) === true;   // `when nimvm:` 那种裸名字
+    throw new Error(`nim->graph: \`when\` 的条件里有 \`${nm}\` —— 不在声明过的那张表里`
+      + '（NIM_CT_ENV），这一层不猜');
+  }
+  /* `defined(x)` —— 树上是一格调用。 */
+  if (t === 'call' || t === 'command') {
+    const fn = kids(c)[0];
+    const args = part(c, 'args');
+    if (tag(fn) === 'name' && leaf(kids(fn)[0]) === 'defined' && args !== undefined) {
+      const a = kids(args)[0];
+      if (a !== undefined && tag(a) === 'name') {
+        const nm = leaf(kids(a)[0]);
+        if (NIM_CT_ENV.has(nm)) return NIM_CT_ENV.get(nm) === true;
+        throw new Error(`nim->graph: \`defined(${nm})\` 不在声明过的那张表里（NIM_CT_ENV）`
+          + ' —— 这一层看不见命令行上的 -d，猜 false 就会静静丢掉一段代码');
+      }
+    }
+  }
+  throw new Error(`nim->graph: \`when\` 的条件是 \`${t}\` 这个形状 —— 只接 defined() 与`
+    + ' and / or / not 拼起来的那几种（`sizeof(int) == 8` 那类要类型与布局）');
+}
 const CONV = convs({
   int8: 'int', int16: 'int', int32: 'int', int64: 'int',
   uint: 'int', uint8: 'int', uint32: 'int', uint64: 'int',
@@ -497,9 +556,25 @@ function toNode(x) {
     // 顶层的 `when` 里还装着声明 —— 丢了就是"答案错而不报"。落成运行期 branch 也不对：
     // 没走的那一支在 nim 里根本不要求编得过。这一格要的是**编译期求值**（ADR-0037 §7
     // 第 9 步那一刀），所以它留在墙上。
-    case 'when':
-      throw new Error('nim->graph: `when` 是编译期分支 —— 丢掉会少一段代码、落成运行期'
-        + ' branch 又不对（没走的那一支不要求编得过）。这一格等编译期求值那一刀');
+    /**
+     * `when 条件: … elif … else …` —— **编译期分支**：按声明过的那张环境表求值，
+     * 走中的那一支摊开、**没走的那一支整格丢掉**（nim 明说没走的那支不要求编得过）。
+     * 图上一格新节点也没加 —— 这一格根本不该落成运行期的 branch。
+     */
+    case 'when': {
+      const body = part(x, 'body');
+      if (whenCond(kids(x)[0])) return body === undefined ? [] : many(kids(body));
+      for (const e of kids(part(x, 'elifs') ?? { kind: 'list', items: [] })) {
+        if (tag(e) !== 'elif') continue;
+        if (!whenCond(kids(e)[0])) continue;
+        const eb = part(e, 'body');
+        return eb === undefined ? [] : many(kids(eb));
+      }
+      const els = part(x, 'else');
+      if (els === undefined) return [];
+      const eb = part(els, 'body') ?? kids(els)[0];
+      return eb === undefined ? [] : many(kids(eb));
+    }
     case 'import': case 'include': case 'type-section': case 'pragma': return [];
     default:
       throw new Error(`nim->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);

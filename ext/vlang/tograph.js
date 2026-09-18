@@ -176,6 +176,59 @@ const freshOpt = () => `__opt${OPT_N++}`;
 let FN_N = 0;
 
 /**
+ * **声明过的编译期环境**（`$if windows` / `$if linux` 那一族）。
+ *
+ * 为什么是"声明"而不是"看这台机器"：**尺子要可重现**。同一份源码在 macOS 上与在 linux 上
+ * 落出的图必须是同一张，不然 `bench/tograph.js` 的数就跟着机器变。所以这儿定死一个
+ * **参考目标**（linux · x64 · gcc），跑在哪台机器上都按它算。
+ *
+ * 三条规矩，两条来自 V 自己：
+ *   * `$if 名字`（不带 `?`）—— 名字必须在这张表里，**不在就当场报**（猜一支就少一段代码
+ *     或者多一段，两种都是静默的错答案）；
+ *   * `$if 名字 ?` —— V 说这一种"没定义也不报"（树上是 `(propagate (name …))`），
+ *     所以**没声明就是 false**：这是那门语言的默认，不是我们猜的；
+ *   * `$if T is $struct` / `$if field.typ is int` —— 要类型才说得清，照旧报（类型那一层）。
+ */
+const CT_ENV = new Map(Object.entries({
+  // 参考目标：linux / x64 / gcc
+  linux: true, x64: true, gcc: true, native: true, little_endian: true,
+  // 别的平台与位宽
+  windows: false, macos: false, darwin: false, ios: false, android: false, termux: false,
+  freebsd: false, openbsd: false, netbsd: false, dragonfly: false, solaris: false,
+  serenity: false, plan9: false, haiku: false, qnx: false, vinix: false, wasm32: false,
+  x32: false, i386: false, arm64: false, arm32: false, rv64: false, rv32: false,
+  s390x: false, ppc64le: false, loongarch64: false, big_endian: false,
+  // 编译器与档
+  msvc: false, tinyc: false, clang: false, mingw: false, cross: false,
+  debug: false, prod: false, test: false, js: false, js_node: false, js_browser: false,
+}));
+
+/** 编译期条件求值。认不出来的形状**当场报** —— 这一格不许猜（见 `CT_ENV` 那一段）。 */
+function ctimeCond(c) {
+  const t = tag(c);
+  if (t === 'paren') return ctimeCond(kids(c)[0]);
+  if (t === 'bool') return leaf(kids(c)[0]) === 'true';
+  if (t === 'un' && leaf(kids(c)[0]) === '!') return !ctimeCond(kids(c)[1]);
+  if (t === 'bin') {
+    const o = leaf(kids(c)[0]);
+    if (o === '&&') return ctimeCond(kids(c)[1]) && ctimeCond(kids(c)[2]);
+    if (o === '||') return ctimeCond(kids(c)[1]) || ctimeCond(kids(c)[2]);
+  }
+  /* `$if flag ?` —— 树上与错误传播**同一个标签**（`(propagate (name flag))`）。 */
+  if (t === 'propagate' && tag(kids(c)[0]) === 'name') {
+    return CT_ENV.get(leaf(kids(kids(c)[0])[0])) === true;
+  }
+  if (t === 'name') {
+    const nm = leaf(kids(c)[0]);
+    if (CT_ENV.has(nm)) return CT_ENV.get(nm) === true;
+    throw new Error(`v->graph: 编译期条件里的 \`${nm}\` 不在**声明过的那张表**里（CT_ENV）`
+      + ' —— 这一层不猜（猜一支就少一段代码或者多一段）');
+  }
+  throw new Error(`v->graph: 编译期条件是 \`${t}\` 这个形状 —— 类型层的那几种`
+    + '（`T is $struct` / `field.typ is int`）要类型才说得清');
+}
+
+/**
  * **表达式位置上的临时量（"物化"）**：`g(f() or { 0 })` 那一族。
  *
  * `or-block` / `f()!` 落出来的是**一串语句**（绑一格 + 一格 branch），塞不进表达式位置。
@@ -626,6 +679,27 @@ function toNode(x) {
     // 但语法给 `none` 一条**自己的产生式**，与 `(bool …)` 是同一种错）。
     // 注意它与三段 for 里那个空格子**同一个标签**：那几处在 `for` 那一格上先滤掉了。
     case 'none': return lit(null);
+    /**
+     * `$if 条件 { … } $else { … }` —— **编译期分支**：按声明过的那张环境表求值，
+     * 走中的那一支**摊开**、没走的那一支**整格丢掉**（V 也不要求它编得过）。
+     * 图上一格新节点也没加 —— 这一格根本不该落成运行期的 branch。
+     *
+     * 交出来的东西看那一支有几条：正好一条就交那一格（`x := $if windows { 1 } $else { 2 }`
+     * 那种表达式位置要的是一格值），几条就交一串语句。
+     */
+    case 'ctime': {
+      if (leaf(kids(x)[0]) !== '$if') {
+        throw new Error(`v->graph: 编译期那一格是 ${leaf(kids(x)[0])} —— 只接 \`$if\``);
+      }
+      const chosen = ctimeCond(kids(x)[1]) ? kids(x)[2] : (() => {
+        const els = kids(x)[3];
+        return els === undefined ? null : kids(els)[0];
+      })();
+      if (chosen === null) return [];
+      if (tag(chosen) === 'ctime') return toNode(chosen);      // `$else $if …`
+      const out = stmts(kids(chosen));
+      return out.length === 1 ? out[0] : out;
+    }
     // ---- `@FN` 那一族：**"我在谁里头"落一格常量串** ------------------------------
     //
     // V 的编译期常量分两类，这一格只接**第一类**：
