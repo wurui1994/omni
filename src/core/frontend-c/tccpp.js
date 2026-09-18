@@ -111,8 +111,6 @@ function isIdNum(c) {
     || c === 95 || c >= 0x80;
 }
 
-/** `preprocessSkip` 行中那一跳的兴趣点（`#` 不在里头 —— 不在行首它不是指令）。 */
-const SKIP_MID = /[\n"'/\\]/g;
 function toup(c) {
   return c >= 97 && c <= 122 ? c - 32 : c;
 }
@@ -759,21 +757,30 @@ export class Cpp {
   }
 
   /**
+   * `PARSE2`（`tccpp.c:2882`）：`x` 与 `x=`（或 `xx`）两种，最长匹配。
+   *
+   * **是方法不是箭头**（第一百五十七片，量出来的）：从前它写成 `lexOperator` 体里
+   * 一句 `const two = (nc, t, fallback) => {…}`，于是每读一个运算符字符都要造一个
+   * 闭包 —— 一格环境 + 一格 `this` cell，两次堆分配。采样榜上
+   * `l_Cpp_lexOperator -> omni_list_dynamic_from` 独占 12% 的帧里的 136/223。
+   */
+  lexTwo(nc, t, fallback) {
+    this.file.pos++;
+    if (this.peekc() === nc) this.simple(t, 1);
+    else this.simple(fallback, 0);
+  }
+
+  /**
    * 运算符。多字符的那些按「最长匹配」展开写，顺序照 `tccpp.c:2792-2930`。
    * 回 false = 这个字符不是运算符。
    */
   lexOperator(c) {
-    const two = (nc, t, fallback) => {
-      this.file.pos++;
-      if (this.peekc() === nc) this.simple(t, 1);
-      else this.simple(fallback, 0);
-    };
     switch (c) {
       case 60: { // '<'
         this.file.pos++;
         const c2 = this.peekc();
         if (c2 === 61) this.simple(TOK_LE, 1);
-        else if (c2 === 60) two(61, TOK_A_SHL, TOK_SHL);
+        else if (c2 === 60) this.lexTwo(61, TOK_A_SHL, TOK_SHL);
         else this.simple(TOK_LT, 0);
         return true;
       }
@@ -781,7 +788,7 @@ export class Cpp {
         this.file.pos++;
         const c2 = this.peekc();
         if (c2 === 61) this.simple(TOK_GE, 1);
-        else if (c2 === 62) two(61, TOK_A_SAR, TOK_SAR);
+        else if (c2 === 62) this.lexTwo(61, TOK_A_SAR, TOK_SAR);
         else this.simple(TOK_GT, 0);
         return true;
       }
@@ -819,11 +826,11 @@ export class Cpp {
         return true;
       }
       // PARSE2（`tccpp.c:2882-2886`）：`x` 与 `x=` 两种
-      case 33: two(61, TOK_NE, 33); return true; // !
-      case 61: two(61, TOK_EQ, 61); return true; // =
-      case 42: two(61, TOK_A_MUL, 42); return true; // *
-      case 37: two(61, TOK_A_MOD, 37); return true; // %
-      case 94: two(61, TOK_A_XOR, 94); return true; // ^
+      case 33: this.lexTwo(61, TOK_NE, 33); return true; // !
+      case 61: this.lexTwo(61, TOK_EQ, 61); return true; // =
+      case 42: this.lexTwo(61, TOK_A_MUL, 42); return true; // *
+      case 37: this.lexTwo(61, TOK_A_MOD, 37); return true; // %
+      case 94: this.lexTwo(61, TOK_A_XOR, 94); return true; // ^
       // 单字符（`tccpp.c:2916-2930`）
       case 40: case 41: case 91: case 93: case 123: case 125:
       case 44: case 59: case 58: case 63: case 126: case 64:
@@ -1627,13 +1634,25 @@ export class Cpp {
         startOfLine = false;
         continue;
       }
-      /* 不关心的字符：一跳跳到下一个兴趣点（`lastIndex` 从 pos+1 起 —— 当前这个已经看过了）。
-       * 找不着就跳到尽头，交给上面 `CH_EOF` 那一支去喊 `#endif expected`。 */
+      /* 不关心的字符：一跳跳到下一个兴趣点（从 pos+1 起 —— 当前这个已经看过了）。
+       * 找不着就跳到尽头，交给上面 `CH_EOF` 那一支去喊 `#endif expected`。
+       *
+       * **从前这儿是 `SKIP_MID.exec`**（一条 /[\n"'/\\]/g）。换成逐字符是量出来的：
+       * `exec` 每跳一次要造一个完整的匹配结果对象（数组 + index + input + groups），
+       * 而这儿只用 `m.index` 一个数。`OMNI_MEM_DEBUG=4` 里 `omni_js_re_result` 那一族
+       * 摊在十来条栈上，合起来约占全部分配的 6%，来路全是这一跳。
+       * 当年写正则的理由是"V8 里 exec 比 JS 循环快"——但那时候的循环是**逐字符调
+       * `peekc()`**（它要处理 `\<换行>` 拼接），与这儿五次 `charCodeAt` 比较不是一回事。 */
       startOfLine = false;
       const f = this.file;
-      SKIP_MID.lastIndex = f.pos + 1;
-      const m = SKIP_MID.exec(f.text);
-      f.pos = m === null ? f.text.length : m.index;
+      const s = f.text;
+      const n = s.length;
+      let p = f.pos + 1;
+      for (; p < n; p++) {
+        const ch = s.charCodeAt(p);
+        if (ch === LF || ch === 34 || ch === 39 || ch === 47 || ch === 92) break;
+      }
+      f.pos = p;
     }
   }
 

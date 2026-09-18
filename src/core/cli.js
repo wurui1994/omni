@@ -1245,6 +1245,16 @@ function pluginsDir() {
   return cands.find((d) => isDir(d)) ?? null;
 }
 
+/**
+ * 已经装上的插件（绝对路径）。
+ *
+ * 为什么要这一格：`buildSelf` 链那一步走的是 `subMain(['c','link', …])`，而 `subMain`
+ * 会再跑一遍 `discoverPlugins()` —— 于是原生腿上 `-v` 会看到**十二行 plugin 印两遍**，
+ * 中间那一遍纯属白做（同一批 `.dylib` 重新 dlopen 一次，量到 674ms）。
+ * dlopen 本身是幂等的（同一个句柄），可我们这一侧的注册表不是，重复注册也没有意义。
+ */
+const PLUGINS_LOADED = new Set();
+
 function discoverPlugins() {
   const dir = pluginsDir();
   if (dir === null) return;
@@ -1264,8 +1274,11 @@ function discoverPlugins() {
       noteUnloadable(f.slice(head, dot < 0 ? f.length : dot));
       continue;
     }
+    const p = join(dir, f);
+    if (PLUGINS_LOADED.has(p)) continue;   // 嵌套那一趟（c link）不再装一遍
+    PLUGINS_LOADED.add(p);
     vStep(`plugin ${f}`);
-    pluginLoad(join(dir, f), pluginApi());
+    pluginLoad(p, pluginApi());
   }
 }
 
@@ -1499,7 +1512,7 @@ function jsCachePut(path, js, deps) {
 
 /**
  * 原生那一路的产物缓存（第一百〇五刀）：**链好的可执行文件**按同一把印记躺在
- * `.omni-cache/asy-exe` 里，源码与它引的库都没动就直接 exec。
+ * `.omni-cache/run-exe` 里，源码与它引的库都没动就直接 exec。
  *
  * 为什么必须有这一条：node 上那一路（模块产物 / 整份 JS）早就有缓存了，而自举出来的
  * 原生二进制一趟都没有 —— 量出来 `run tests/asy/cases/03-quotes.asy` **每趟 12s**
@@ -1511,7 +1524,11 @@ function jsCachePut(path, js, deps) {
  * `OMNI_NO_EXECACHE=1` 关掉（对照用）。
  */
 function exeCacheDir() {
-  return join(cacheRoot(), 'asy-exe');
+  /* 名字是 `run-exe` 而不是从前的 `asy-exe`：这一格是**所有** `omni run` 走 C 那条腿时
+     的产物缓存（.omni / .js / .sx / .asy 都进它），叫 asy 只是它最早为 .asy 加的。
+     那个旧名字让 `-v` 的日志自相矛盾 —— 跑一份 `.omni` 却看到
+     `c link -> …/asy-exe/e-….bin`，读的人第一反应是"路径串了"。 */
+  return join(cacheRoot(), 'run-exe');
 }
 function exeCacheStamp(cc) {
   // 编译器与**它的 flags** 都在印记里：`OMNI_OPT=2` 与默认 -O0 是两个可执行文件。
@@ -1555,7 +1572,11 @@ function exeCachePut(path, cc, deps) {
 function exeCachePath(path) {
   if (env('OMNI_NO_EXECACHE') === '1') return null;
   mkdirAll(exeCacheDir());
-  return join(exeCacheDir(), `e-${hash16(path)}.bin`);
+  /* `<hash>.out`，不是从前的 `e-<hash>.bin`：生成的 C 与目标文件的名字都跟着产物走
+     （`buildNative` 里 `${basename(outPath)}.c`），于是旧名字让日志里出现
+     `e-….bin.c` / `e-….bin.c.o` 这种东西 —— 同一份源码在 `run-c` 那条路上叫
+     `a.out.c`。`.out` 与那边同形，看一眼就知道是"一个可执行文件"。 */
+  return join(exeCacheDir(), `${hash16(path)}.out`);
 }
 
 
@@ -2488,14 +2509,26 @@ function spawnPar(jobs) {
  * 未命中那一路**并行编**：20 个翻译单元串行量出来 3.0s，而它们互相无关。
  * 改运行时头文件时全表失效，所以这一路在开发循环里天天走。
  */
+/**
+ * 运行时那几十份源码的**内容**印记。
+ *
+ * 为什么是内容而不是 `mtime:size`（这一条是量出来的，两处 `runtimeObjects*` 共用）：
+ * `RUNTIME_DIR` 在两种布局里是**两个目录** —— node 那条腿看 `src/runtime`，
+ * `dist/omni` 看 `dist/share/runtime`（`build` 把源码抄过去，抄出来的 mtime 是新的）。
+ * 于是 `mtime:size` 让两条腿的 key 永远不同：`npm run build:native` 刚编好的那 21 个
+ * `.o` 明明就在 `.omni-cache/rt` 里，`dist/omni run` 也看同一个根，却一格都命中不了，
+ * 只好自己重编 —— 每格约 2s，21 格四十多秒，任何 `--timeout` 都撑不住。
+ * 内容相同就是同一份编译输入，所以印记只认字节。代价是每趟多读约 1 MB（几毫秒）。
+ */
+function runtimeDeps() {
+  return readDir(RUNTIME_DIR).filter((f) => /\.[ch]$/.test(f)).sort()
+    .map((f) => `${f}:${hash16(readText(join(RUNTIME_DIR, f)))}`);
+}
+
 function runtimeObjects(cc) {
   const flags = ccFlags(cc);
   const srcs = runtimeSources();
-  const deps = readDir(RUNTIME_DIR).filter((f) => /\.[ch]$/.test(f)).sort()
-    .map((f) => {
-      const p = join(RUNTIME_DIR, f);
-      return `${f}:${mtimeMs(p)}:${fileSize(p)}`;
-    });
+  const deps = runtimeDeps();
   const key = hash16([cc, ...flags, ...deps].join('|'));
   const dir = join(cacheRoot(), 'rt', key);
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
@@ -2533,11 +2566,7 @@ function runtimeObjects(cc) {
  */
 function runtimeObjectsSelf(arch, os) {
   const srcs = runtimeSources();
-  const deps = readDir(RUNTIME_DIR).filter((f) => /\.[ch]$/.test(f)).sort()
-    .map((f) => {
-      const p = join(RUNTIME_DIR, f);
-      return `${f}:${mtimeMs(p)}:${fileSize(p)}`;
-    });
+  const deps = runtimeDeps();
   const key = hash16(['self', arch, os, CROSS === null ? '' : CROSS.sysroot, ...deps].join('|'));
   const dir = join(cacheRoot(), 'rt', key);
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
@@ -2545,17 +2574,40 @@ function runtimeObjectsSelf(arch, os) {
     vStep(`runtime .o  ${objs.length} objects, cache hit ${dir}`);
     return objs;
   }
-  const stage = workDirFor('rt-stage', key);
-  const staged = srcs.map((p) => join(stage, `${basename(p, '.c')}.o`));
+  /* **一格一格地搬进暖存**，不是等 21 格全编完再整目录 rename 一次。
+   *
+   * 从前是后者，那就有一个不会自己好的坑：这 21 格过我们自己那台 C 前端每格约 2s，
+   * 一共四十几秒；只要这一趟被 `--timeout` 掐掉（或者被 Ctrl-C、被 OOM 杀掉），
+   * `rename` 就没走到，**已经编好的几格全扔了**。下一趟从零开始，再掐掉，再从零开始 ——
+   * 在外面看就是"这条命令永远跑不完"，而且加大 timeout 也治不了（第一趟就得撑满全程）。
+   * 量出来的：同一个 `OMNI_CACHE_DIR` 连跑三趟 `--timeout 10`，每趟都只到第 5 个 `.o`。
+   *
+   * 改成逐格 rename 之后：每一趟都把自己挣到的那几格留下，下一趟接着往后编（上面那句
+   * `exists(objs[i])` 就是接力棒），几趟之后自然收敛；之后所有趟都走 cache hit。
+   * 同一个卷上的 rename 是原子的，所以别的进程要么看见完整的 `.o`、要么看不见 ——
+   * 顺带把「整目录 rename 的并发竞态」也一起消了。 */
+  mkdirAll(dir);
+  const stage = workDirFor('rt-stage', `${key}-${hash16(String(nowMs()))}`);
   /* 交叉编译那一趟的头也从 sysroot 里取（与 `buildSelf` 同一格状态）。 */
   const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
+  let made = 0;
   for (let i = 0; i < srcs.length; i++) {
-    cObj(srcs[i], staged[i], arch, [RUNTIME_DIR], [], 'elf', os, sysIncs);
+    if (exists(objs[i])) continue;   // 上一趟（也许被掐掉了）留下的，接着往下编
+    const tmp = join(stage, `${basename(srcs[i], '.c')}.o`);
+    const t0 = nowMs();
+    cObj(srcs[i], tmp, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs);
+    rename(tmp, objs[i]);
+    made++;
+    /* **一格一行**。这一段从前一个字都不印：`buildSelf` 里那句 `c obj` 印的是**用户
+       那一份**，运行时这 21 格走的是 cObj 自己（它不 vStep），而本函数的 vStep 在循环
+       之后。于是 `-v` 看到的是"c obj 用户文件 [1994ms]"然后**四十秒的静默**，最后
+       `超时`。那副样子指向"卡在某个没输出的地方"，谁看都会先去猜死循环。 */
+    vStep(`runtime .o  [${i + 1}/${srcs.length}] ${basename(srcs[i])} -> ${fileSize(objs[i])} bytes`
+      + `  ${Math.round(nowMs() - t0)}ms`);
   }
-  mkdirAll(join(cacheRoot(), 'rt'));
-  if (!exists(dir)) rename(stage, dir);
-  vStep(`runtime .o  ${srcs.length} objects compiled with 我们自己那台 C 前端`);
-  return objs.every((o) => exists(o)) ? objs : staged;
+  vStep(`runtime .o  ${srcs.length} objects（这一趟编了 ${made} 格）`
+    + '，用我们自己那台 C 前端');
+  return objs;
 }
 
 /**
@@ -4304,7 +4356,7 @@ function main(argv) {
         }
       }
       // 原生那一路的产物缓存（第一百〇五刀）：**链好的可执行文件**按同一把印记躺在
-      // `.omni-cache/asy-exe` 里，源码与它引的库都没动就只剩 exec。
+      // `.omni-cache/run-exe` 里，源码与它引的库都没动就只剩 exec。
       // 量出来（自举出来的二进制，03-quotes.asy）：那 12.6s 里 AST 读回来 3.4s、
       // 前端 5.0s、发 C 2.5s、clang 0.5s，而输入一个字节都没变。
       // 这一格必须在 compile **之前**问 —— 大头全在前端。

@@ -277,27 +277,38 @@ export function linkObjects(objs) {
   for (const o of objs) {
     if (o.arch !== arch) throw new OmniError(`link: ${arch} 与 ${o.arch} 不能并在一起`);
   }
-  const textParts = [];
-  const dataParts = [];
+  /* **一次分配 + set，不逐字节 push**（第一百五十八片量出来的）。
+   *
+   * 从前是 `const textParts = []; for (const byte of o.text) textParts.push(byte);`
+   * 然后 `new Uint8Array(textParts)`。21 个 `.o` 的 text 加起来约 700 KB，就是 70 万次
+   * `push`（在原生腿上就是 70 万次 `omni_list_dynamic_push`，每次可能触发一次 `grow`）。
+   * 采样榜上这一格独占 **53.5%**，是链接那 3.6s 的大头。
+   *
+   * 改成先算总长再 `Uint8Array.set`：每个 `.o` 一次 memcpy（运行时里它是 `memcpy`），
+   * 与 tcc 原版同一条路。 */
   let textLen = 0;
   let dataLen = 0;
+  /* 第一遍：算各段偏移 */
+  const bases = [];
+  for (const o of objs) {
+    const tBase = align(textLen, 4);
+    textLen = tBase + o.text.length;
+    const dBase = align(dataLen, 8);
+    dataLen = dBase + o.data.length;
+    bases.push({ tBase, dBase });
+  }
+  const text = new Uint8Array(textLen);
+  const data = new Uint8Array(dataLen);
   const defs = [];
   const defAt = new Map();
-  const shifted = [];   // [{relocs, textBase}]
+  const shifted = [];
 
-  for (const o of objs) {
-    /* 每个文件的代码从一个 4 的边界起 —— arm64 的指令必须对齐，x86 的不必但也无害。 */
-    textLen = align(textLen, 4);
-    while (textParts.length < textLen) textParts.push(0);
-    const textBase = textLen;
-    for (const byte of o.text) textParts.push(byte);
-    textLen += o.text.length;
-
-    dataLen = align(dataLen, 8);
-    while (dataParts.length < dataLen) dataParts.push(0);
-    const dataBase = dataLen;
-    for (const byte of o.data) dataParts.push(byte);
-    dataLen += o.data.length;
+  for (let k = 0; k < objs.length; k++) {
+    const o = objs[k];
+    const textBase = bases[k].tBase;
+    const dataBase = bases[k].dBase;
+    text.set(o.text, textBase);
+    data.set(o.data, dataBase);
 
     for (const d of o.defs) {
       if (defAt.has(d.name)) throw new OmniError(`link: 符号 ${d.name} 定义了两次`);
@@ -308,7 +319,6 @@ export function linkObjects(objs) {
     shifted.push({ relocs: o.relocs, textBase });
   }
 
-  const text = new Uint8Array(textParts);
   /** 这一族是「同一节内的相对跳转」—— 各架构一条。 */
   const BRANCH = arch === 'arm64' ? RELOC_ARM64.BRANCH26 : XRELOC.BRANCH;
   const relocs = [];
@@ -328,5 +338,5 @@ export function linkObjects(objs) {
       relocs.push({ at: site, kind: rl.kind, sym: rl.sym });
     }
   }
-  return { arch, text, data: new Uint8Array(dataParts), defs, relocs, filled };
+  return { arch, text, data, defs, relocs, filled };
 }

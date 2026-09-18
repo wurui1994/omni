@@ -81,6 +81,19 @@ static bool NAME##_contains(NAME a, T v) { \
    emit-c 一趟 35.6s -> 36.2s、用户 CPU 25.9 -> 25.5s，全在噪声里 —— `find` 那 2917 个
    采样是 -O0 下探测循环**本身**（没有寄存器分配、每个 static inline 都是真调用），不是比较。
    而它每个 dict 多要 icap*8 字节，正压在真正的瓶颈上，所以撤了。记在这儿免得再试一次。 */ \
+/* **小表不建索引**（第一百五十八片，量出来的）：`n <= OMNI_DICT_SMALL` 时 idx 一格都不分配，
+   查找就是顺着 keys 线性扫。理由有三条，都是实测的：
+     1. 一格 idx 表要一次 omni_alloc + 一趟清零，而**第一次插入**就会触发它
+        （`(0+1)*2 > 0`）—— AST 的每个节点、每个 token、每个 span、每个对象的属性槽表
+        都是一格 dict，绝大多数只有二到五格；
+     2. 走索引要先算 `HASH(k)`，而字符串哈希**要走完整个串**。四格的表上「四次长度比较 +
+        至多一次 memcmp」比一次整串哈希便宜；
+     3. 4 格以上还要再 rebuild 一次（icap 8 -> 16），那一趟把所有键重新哈希一遍。
+   量出来：单文件那一趟（`dist/omni c obj src/runtime/omni_hash.c`）里 rebuild 自时间
+   14.3% 是榜首，memmove 14.0% 里也有它的一份。
+   插入序不变（keys/vals 仍然按插入顺序追加），所以迭代与 `_keys` 的输出逐字节相同。 */
+#define OMNI_DICT_SMALL 8
+
 #define OMNI_DICT_BODY(NAME, KT, VT) \
 struct NAME##_s { \
   KT *keys; VT *vals; bool *live; \
@@ -100,7 +113,11 @@ static NAME NAME##_new(void) { \
 /* 哈希已经算好的那一份入口：键是编译期字面量时（backend-c 的 constKey 那条特化）
    哈希也是编译期常量，于是连 HASH(k) 都不必再走一趟。 */ \
 static int64_t NAME##_find_h(NAME d, KT k, uint64_t hv) { \
-  if (d->icap == 0) return -1; \
+  if (d->icap == 0) { \
+    /* 小表那一档：线性扫，连 hv 都不看（见 OMNI_DICT_SMALL 那段） */ \
+    for (int64_t i = 0; i < d->n; i++) if (d->live[i] && EQ(d->keys[i], k)) return i; \
+    return -1; \
+  } \
   uint64_t mask = (uint64_t)d->icap - 1; \
   uint64_t h = hv & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \
@@ -112,7 +129,7 @@ static int64_t NAME##_find_h(NAME d, KT k, uint64_t hv) { \
   return -1; \
 } \
 static int64_t NAME##_find(NAME d, KT k) { \
-  if (d->icap == 0) return -1; \
+  if (d->icap == 0) return NAME##_find_h(d, k, 0);   /* 小表上不算哈希 */ \
   return NAME##_find_h(d, k, (uint64_t)HASH(k)); \
 } \
 static void NAME##_rebuild(NAME d) { \
@@ -147,7 +164,15 @@ static VT NAME##_set_h(NAME d, KT k, VT v, uint64_t hv) { \
     d->live = (bool *)omni_grow(d->live, sizeof(bool) * (size_t)d->cap, sizeof(bool) * (size_t)c); \
     d->cap = c; \
   } \
-  if ((d->n + 1) * 2 > d->icap) NAME##_rebuild(d); \
+  if ((d->n + 1) * 2 > d->icap) { \
+    /* 小表那一档：索引一格都不建（见 OMNI_DICT_SMALL 那段） */ \
+    if (d->icap == 0 && d->n + 1 <= OMNI_DICT_SMALL) { \
+      int64_t s0 = d->n++; \
+      d->keys[s0] = k; d->vals[s0] = v; d->live[s0] = true; d->count++; \
+      return v; \
+    } \
+    NAME##_rebuild(d); \
+  } \
   int64_t slot = d->n++; \
   d->keys[slot] = k; d->vals[slot] = v; d->live[slot] = true; d->count++; \
   uint64_t mask = (uint64_t)d->icap - 1; \
@@ -156,14 +181,25 @@ static VT NAME##_set_h(NAME d, KT k, VT v, uint64_t hv) { \
   d->idx[h] = (int32_t)(slot + 1); \
   return v; \
 } \
-static VT NAME##_set(NAME d, KT k, VT v) { return NAME##_set_h(d, k, v, (uint64_t)HASH(k)); } \
+/* 小表上连 `HASH(k)` 都不算 —— 那个值只有建索引时才用得上（字符串哈希要走完整个串）。
+   这一句的判断与 set_h 里那一支必须同口径，否则跨过门槛的那一次会拿 hv=0 去插索引。 */ \
+static VT NAME##_set(NAME d, KT k, VT v) { \
+  bool small = d->icap == 0 && d->n + 1 <= OMNI_DICT_SMALL; \
+  return NAME##_set_h(d, k, v, small ? 0 : (uint64_t)HASH(k)); \
+} \
 static VT NAME##_get(NAME d, KT k) { \
   int64_t e = NAME##_find(d, k); \
   if (e < 0) { omni_str ks = KSTR(k); omni_errorf("key not found: %.*s", (int)ks.len, ks.p); } \
   return d->vals[e < 0 ? 0 : e]; \
 } \
 static bool NAME##_remove(NAME d, KT k) { \
-  if (d->icap == 0) return false; \
+  if (d->icap == 0) { \
+    /* 小表：没有索引，也就没有墓碑要维护 —— 找到就把 live 灭掉 */ \
+    int64_t e = NAME##_find_h(d, k, 0); \
+    if (e < 0) return false; \
+    d->live[e] = false; d->count--; \
+    return true; \
+  } \
   uint64_t mask = (uint64_t)d->icap - 1; \
   uint64_t h = (uint64_t)HASH(k) & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \
@@ -204,7 +240,11 @@ static NAME NAME##_new(void) { \
   return d; \
 } \
 static int64_t NAME##_find(NAME d, T k) { \
-  if (d->icap == 0) return -1; \
+  if (d->icap == 0) { \
+    /* 小表：线性扫，不算哈希（见 OMNI_DICT_SMALL 那段） */ \
+    for (int64_t i = 0; i < d->n; i++) if (d->live[i] && EQ(d->keys[i], k)) return i; \
+    return -1; \
+  } \
   uint64_t mask = (uint64_t)d->icap - 1; \
   uint64_t h = (uint64_t)HASH(k) & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \
@@ -245,7 +285,14 @@ static void NAME##_add(NAME d, T k) { \
     d->live = (bool *)omni_grow(d->live, sizeof(bool) * (size_t)d->cap, sizeof(bool) * (size_t)c); \
     d->cap = c; \
   } \
-  if ((d->n + 1) * 2 > d->icap) NAME##_rebuild(d); \
+  if ((d->n + 1) * 2 > d->icap) { \
+    if (d->icap == 0 && d->n + 1 <= OMNI_DICT_SMALL) { \
+      int64_t s0 = d->n++; \
+      d->keys[s0] = k; d->live[s0] = true; d->count++; \
+      return; \
+    } \
+    NAME##_rebuild(d); \
+  } \
   int64_t slot = d->n++; \
   d->keys[slot] = k; d->live[slot] = true; d->count++; \
   uint64_t mask = (uint64_t)d->icap - 1; \
@@ -254,7 +301,12 @@ static void NAME##_add(NAME d, T k) { \
   d->idx[h] = (int32_t)(slot + 1); \
 } \
 static bool NAME##_remove(NAME d, T k) { \
-  if (d->icap == 0) return false; \
+  if (d->icap == 0) { \
+    int64_t e = NAME##_find(d, k); \
+    if (e < 0) return false; \
+    d->live[e] = false; d->count--; \
+    return true; \
+  } \
   uint64_t mask = (uint64_t)d->icap - 1; \
   uint64_t h = (uint64_t)HASH(k) & mask; \
   for (int64_t probe = 0; probe < d->icap; probe++) { \

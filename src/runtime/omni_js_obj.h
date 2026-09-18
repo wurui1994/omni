@@ -101,6 +101,65 @@ static omni_str omni_js_key(omni_dyn k) { \
   } \
 } \
 static omni_str omni_js_prop(omni_dyn k) { return omni_s16_to_utf8(omni_js_as_s16(k)); } \
+/* 同一个键**放栈上**那一条（第一百五十九片，量出来的）。与 `omni_js_pkey_buf_` 同一个
+   道理，只是这儿的编码是 `omni_js_key` 那一套标签（'s' 串 / 'i' 整数 / 'o' 地址）——
+   两套编码不能混，所以是两个函数而不是一个。
+   能这么干是因为 `DT##_find` / `_contains` / `_remove` 只**读**键（算哈希、memcmp、
+   打墓碑），留住键的只有 `DT##_set` 那一路 —— 那一路照旧走会分配的 `omni_js_key`。
+   量出来的（`OMNI_MEM_DEBUG=4`，单文件那一趟共 996115 次分配）：**第一名**就是
+   `l_Cpp_tokAlloc` 的 `Map.get`，`omni_js_key_tag_` 在那儿分配了约 46400 次、占 4.7%；
+   连上别的几处 map_get，这一族一共约 7%。
+   回 false = 这一格键编不进栈缓冲（非 ASCII / 太长 / 非整实数），调用方照旧走 `omni_js_key`。 */ \
+static bool omni_js_key_buf_(omni_dyn k, char *buf, omni_str *out) { \
+  switch (k.tag) { \
+    case OMNI_DYN_STR16: { \
+      omni_s16 s = k.u.s16; \
+      if (s.len + 1 > OMNI_JS_PKEY_BUF) return false; \
+      buf[0] = 's'; \
+      for (int64_t i = 0; i < s.len; i++) { \
+        if (s.p[i] >= 0x80) return false; \
+        buf[1 + i] = (char)s.p[i]; \
+      } \
+      out->p = buf; out->len = s.len + 1; \
+      return true; \
+    } \
+    case OMNI_DYN_STRING: { \
+      if (k.u.s.len + 1 > OMNI_JS_PKEY_BUF) return false; \
+      buf[0] = 's'; \
+      if (k.u.s.len > 0) memcpy(buf + 1, k.u.s.p, (size_t)k.u.s.len); \
+      out->p = buf; out->len = k.u.s.len + 1; \
+      return true; \
+    } \
+    case OMNI_DYN_INT: case OMNI_DYN_UINT: { \
+      uint64_t m; \
+      bool neg = false; \
+      char tmp[20]; \
+      int n = 0; \
+      int64_t len = 0; \
+      if (k.tag == OMNI_DYN_UINT) m = omni_dyn_u64(k); \
+      else { neg = k.u.i < 0; m = neg ? (uint64_t)(-(k.u.i + 1)) + 1u : (uint64_t)k.u.i; } \
+      do { tmp[n++] = (char)('0' + (int)(m % 10)); m /= 10; } while (m); \
+      buf[len++] = 'i'; \
+      if (neg) buf[len++] = '-'; \
+      while (n > 0) buf[len++] = tmp[--n]; \
+      out->p = buf; out->len = len; \
+      return true; \
+    } \
+    /* 实数与布尔/null/undefined 不走这条：前者的文本形态复杂（`omni_js_str`），
+       后者本来就是不分配的字面量，省不下什么。 */ \
+    case OMNI_DYN_REAL: case OMNI_DYN_BOOL: case OMNI_DYN_NULL: case OMNI_DYN_UNDEF: \
+      return false; \
+    default: { \
+      /* 地址键：逐字与 omni_js_key_ptr_ 相同（'o' + "0x" + 16 位小写十六进制） */ \
+      static const char hx[] = "0123456789abcdef"; \
+      uint64_t v = (uint64_t)(uintptr_t)k.u.ref; \
+      buf[0] = 'o'; buf[1] = '0'; buf[2] = 'x'; \
+      for (int i = 0; i < 16; i++) buf[3 + i] = hx[(v >> (60 - i * 4)) & 0xf]; \
+      out->p = buf; out->len = 19; \
+      return true; \
+    } \
+  } \
+} \
 /* 真对象那一族（ADR-0020 P1-c 的第十步）：定义在这一段的后半（那儿 obj_get / obj_set 都
    已经摊开了），这儿先声明 —— 同一个翻译单元里静态函数先声明后定义是合法的。 */ \
 static omni_dyn omni_js_getp(omni_dyn o, omni_dyn k, omni_dyn recv); \
@@ -2967,12 +3026,21 @@ static omni_dyn omni_js_map_new(void) { return omni_js_map_wrap(DT##_new()); } \
 static omni_dyn omni_js_map_size(omni_dyn m) { \
   return omni_dyn_of_real((double)omni_js_map_of(m)->count); \
 } \
+/* has / get / delete 只**读**键，所以键放栈上（见 omni_js_key_buf_）。add / set 留住键，
+   照旧走会分配的 omni_js_key。 */ \
 static bool omni_js_map_has(omni_dyn m, omni_dyn k) { \
-  return DT##_contains(omni_js_map_of(m), omni_js_key(k)); \
+  char kb[OMNI_JS_PKEY_BUF]; \
+  omni_str key; \
+  if (!omni_js_key_buf_(k, kb, &key)) key = omni_js_key(k); \
+  return DT##_contains(omni_js_map_of(m), key); \
 } \
 static omni_dyn omni_js_map_get(omni_dyn m, omni_dyn k) { \
   DT d = omni_js_map_of(m); \
-  int64_t e = DT##_find(d, omni_js_key(k)); \
+  char kb[OMNI_JS_PKEY_BUF]; \
+  omni_str key; \
+  int64_t e; \
+  if (!omni_js_key_buf_(k, kb, &key)) key = omni_js_key(k); \
+  e = DT##_find(d, key); \
   if (e < 0) return omni_dyn_undef(); \
   return ((LT)d->vals[e].u.ref)->items[1]; \
 } \
@@ -2986,7 +3054,10 @@ static omni_dyn omni_js_map_set(omni_dyn m, omni_dyn k, omni_dyn v) { \
   return m; \
 } \
 static bool omni_js_map_delete(omni_dyn m, omni_dyn k) { \
-  return DT##_remove(omni_js_map_of(m), omni_js_key(k)); \
+  char kb[OMNI_JS_PKEY_BUF]; \
+  omni_str key; \
+  if (!omni_js_key_buf_(k, kb, &key)) key = omni_js_key(k); \
+  return DT##_remove(omni_js_map_of(m), key); \
 } \
 /* clear：逐格摘掉（容器模板里没有 clear）。槽位留着、live 置假，与 delete 同一形状 */ \
 static void omni_js_map_clear(omni_dyn m) { \
@@ -3041,14 +3112,20 @@ static omni_dyn omni_js_set_size(omni_dyn s) { \
   return omni_dyn_of_real((double)omni_js_set_of(s)->count); \
 } \
 static bool omni_js_set_has(omni_dyn s, omni_dyn v) { \
-  return DT##_contains(omni_js_set_of(s), omni_js_key(v)); \
+  char kb[OMNI_JS_PKEY_BUF]; \
+  omni_str key; \
+  if (!omni_js_key_buf_(v, kb, &key)) key = omni_js_key(v); \
+  return DT##_contains(omni_js_set_of(s), key); \
 } \
 static omni_dyn omni_js_set_add(omni_dyn s, omni_dyn v) { \
   DT##_set(omni_js_set_of(s), omni_js_key(v), v); \
   return s; \
 } \
 static bool omni_js_set_delete(omni_dyn s, omni_dyn v) { \
-  return DT##_remove(omni_js_set_of(s), omni_js_key(v)); \
+  char kb[OMNI_JS_PKEY_BUF]; \
+  omni_str key; \
+  if (!omni_js_key_buf_(v, kb, &key)) key = omni_js_key(v); \
+  return DT##_remove(omni_js_set_of(s), key); \
 } \
 static void omni_js_set_clear(omni_dyn s) { \
   DT d = omni_js_set_of(s); \
