@@ -94,49 +94,79 @@ export function convTo(x, ctx) {
 }
 
 /**
- * 一格**表达式**的类型（够这一刀用的那一档：字面量、名字、算子的结果、字段与元素）。
- * 名字的类型从 `env`（名字 -> 类型）里查；查不到当 `int` —— 形参默认 int 就是这一条。
+ * **"不知道"那一格**（设计里判据三的核心）。推不出来就是它 —— 不是 int。
  *
- * `ctx` 是那格登记处（形状表 + `shapeOf` + `gap`，见文件头）——
- * 它不能住在 `env` 里：`env` 逢作用域就 `new Map(env)` 复制一份，而形状是模块级的。
+ * 为什么要有名字：原来这一份里有 **9 处** `?? 'int'`（字面量 · const · ref · 调用的返回 ·
+ * 下标的元素 · pick 的第 k 格 · map-get 的值 · 兜底那一格 · 形参），查不到就当 int。
+ * 那是**猜**，而且咬过两次（`retTypeOf` 把串接说成 int、把 match 说成 int，两次都是
+ * 下游当场骂一句错误，而不是一格有名有姓的缺口）。现在那 9 处一律答 `unknown`，
+ * 而"当 int"**只剩 `typeOf` 里那一处**（那一处是 core 这条腿今天的口径，还没治 ——
+ * 但它从"到处都在猜"变成了"一处在猜"，而且有判据数着，见 `tests/graph/types.js`）。
  */
-export function typeOf(x, env, ctx) {
-  if (isLit(x)) return litType(x.lit) ?? 'int';
-  if (!isNode(x)) return 'int';
-  if (x.op === 'const') return litType(x.attrs.value) ?? 'int';
-  if (x.op === 'ref') return env.get(x.attrs.name) ?? 'int';
+export const UNKNOWN = 'unknown';
+
+/**
+ * 一格**表达式**的类型 —— **推不出来就答 `unknown`**（不猜）。
+ *
+ * 名字的类型从 `env`（名字 -> 类型）里查。`ctx` 是那格登记处（形状表 + `shapeOf` + `gap`，
+ * 见文件头）—— 它不能住在 `env` 里：`env` 逢作用域就 `new Map(env)` 复制一份，
+ * 而形状是模块级的。
+ *
+ * 三处**故意不往下传 `unknown`**（都用下面那个"当 int"的 `typeOf`）：`values` 的元素类型
+ * （要拿它登记形状、印进产物文本）、`field-get`（形状查不着要报缺口）、`pick` 的宿主
+ * （拿它去形状表里查）。这三处要的是"落成什么"，不是"推出什么"。
+ */
+export function inferType(x, env, ctx) {
+  if (isLit(x)) return litType(x.lit) ?? UNKNOWN;
+  if (!isNode(x)) return UNKNOWN;
+  if (x.op === 'const') return litType(x.attrs.value) ?? UNKNOWN;
+  if (x.op === 'ref') return env.get(x.attrs.name) ?? UNKNOWN;
   if (x.op === 'prim') {
     const nm = x.attrs.name;
     const fixed = primFixedType(nm);
     if (fixed !== undefined) return fixed;
     /* 算术：串在一起是 `string`、任一边是 real 就 real（方言里 int 与 real 不隐式混算 ——
-       混着写它当场报，那正是我们要的：与 ADR-0031 §1 那一格"位宽写在类型上"同一条纪律）。 */
-    const ts = argList(x, 'args').map((a) => typeOf(a, env, ctx));
+       混着写它当场报，那正是我们要的：与 ADR-0031 §1 那一格"位宽写在类型上"同一条纪律）。
+       有一边推不出来，结果就**也推不出来** —— 原来这儿一律当 int。 */
+    const ts = argList(x, 'args').map((a) => inferType(a, env, ctx));
     if (ts.some((t) => t === 'string')) return 'string';
     if (ts.some((t) => t === 'real')) return 'real';
+    if (ts.some((t) => t === UNKNOWN)) return UNKNOWN;
     return 'int';
   }
   if (x.op === 'call') {
     const f = x.ins.fn;
     const nm = isNode(f) && f.op === 'ref' ? f.attrs.name : null;
-    return (nm !== null ? env.get(`fn:${nm}`) : null) ?? 'int';
+    return (nm !== null ? env.get(`fn:${nm}`) : null) ?? UNKNOWN;
   }
-  if (x.op === 'branch') return typeOf(x.ins.then, env, ctx);
+  if (x.op === 'branch') return inferType(x.ins.then, env, ctx);
   if (x.op === 'field-get') return fieldType(x, env, ctx);
-  if (x.op === 'index-get') return elemType(typeOf(x.ins.obj, env, ctx)) ?? 'int';
+  if (x.op === 'index-get') return elemType(inferType(x.ins.obj, env, ctx)) ?? UNKNOWN;
   if (x.op === 'map-get') {
-    const d = dictOf(typeOf(x.ins.obj, env, ctx));
-    return d === null ? 'int' : d.val;
+    const d = dictOf(inferType(x.ins.obj, env, ctx));
+    return d === null ? UNKNOWN : d.val;
   }
   if (x.op === 'map-has') return 'bool';
   if (x.op === 'values') return multiShape(argList(x, 'args'), env, ctx).tag;
   if (x.op === 'pick') {
     const shape = ctx.shapes.get(typeOf(x.ins.from, env, ctx));
-    if (shape === undefined) return 'int';
-    return shape.types.get(`v${Number(x.attrs.index ?? 0)}`) ?? 'int';
+    if (shape === undefined) return UNKNOWN;
+    return shape.types.get(`v${Number(x.attrs.index ?? 0)}`) ?? UNKNOWN;
   }
   if (x.op === 'conv') return convTo(x, ctx);
-  return 'int';
+  return UNKNOWN;
+}
+
+/**
+ * 同一问，**答案里不许有 `unknown`**：推不出来的一律当 `int`。
+ *
+ * 这一处就是判据三还没治的那**一格猜**（原来是 9 处）。为什么这一批不治：改它会动
+ * core 那条腿的产物（"形参默认 int"是它今天的口径），而这一步的验收标准是**逐字节相同**。
+ * 治它的次序写在 `docs/design/node-graph-typed-overlay.md` 第六节第五步。
+ */
+export function typeOf(x, env, ctx) {
+  const t = inferType(x, env, ctx);
+  return t === UNKNOWN ? 'int' : t;
 }
 
 /**
