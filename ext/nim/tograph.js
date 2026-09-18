@@ -87,6 +87,12 @@ function mapBindName(x) {
    `&` 是串接（nim 自己的规矩），所以它在这张 delta 里盖掉公共表那一格。 */
 const OPS = ops({
   div: '/', mod: '%', '&': 'concat', shl: 'shl', shr: 'shr',
+  /* `..^`（半开区间 `a ..^ b` = 从 a 到 b-1）：在树上是一格 `bin`，和 `..<` 同义，
+     但那是独立的算符名。两个只在 `for` 和 `case` 那几处有区别，这一层映到同一格 bin 节点
+     —— `binOf` 会原样保留不认识的名字，所以加进 OPS 就行。
+     **语义**：与 `..<` 等价（走 `< b`），区别只是 `..<` 是中缀、`..^` 是后缀，
+     但在 nim 的真 parser 里它们都降成 `system.`..<`(a, b)`。我们在图上不区分。 */
+  '..^': '..<',
 });
 
 /**
@@ -342,6 +348,47 @@ function toNode(x) {
         body === undefined ? [] : many(kids(body)),
         els === undefined ? undefined : many(kids(els)),
       );
+    }
+    /**
+     * `if cond: a elif cond2: b else: c` 在**表达式位置** -> 与 `if` 语句同一格 branch。
+     *
+     * 树形不同：`(ifexpr cond a (elifs (elif cond2 b)) (else c))` —— cond 与 a 直接是
+     * 子节点（第 1 个和第 2 个），而不是 `(body …)` 包装。elif 那一串和 else 照旧有标签。
+     * 最后一个 else 必须有（表达式 if 必须有值）—— 不在的话走兜底那一句。
+     */
+    case 'ifexpr': {
+      const [cond, thenExpr] = kids(x);
+      const elifs = part(x, 'elifs');
+      const els = part(x, 'else');
+      let chain = els === undefined ? undefined : toNode(kids(els)[0]);
+      if (elifs !== undefined) {
+        const es = kids(elifs).filter((e) => tag(e) === 'elif');
+        for (let i = es.length - 1; i >= 0; i -= 1) {
+          chain = branchOf(toNode(kids(es[i])[0]), toNode(kids(es[i])[1]), chain);
+        }
+      }
+      return branchOf(toNode(cond), toNode(thenExpr), chain);
+    }
+    /**
+     * `when cond: a elif … else: c` 在**表达式位置** —— 编译期分支的表达式形态。
+     *
+     * 与 `when`（语句那一支）逻辑相同：按 NIM_CT_ENV 求值，中的那支摊开、别的丢掉。
+     * 区别只是子节点是**单个表达式**（不是 `(body …)` 包装的多行语句）。
+     */
+    case 'whenexpr': {
+      const [condNode, thenExpr] = kids(x);
+      if (whenCond(condNode)) return toNode(thenExpr);
+      const elifs = part(x, 'elifs');
+      if (elifs !== undefined) {
+        for (const e of kids(elifs)) {
+          if (tag(e) !== 'elif') continue;
+          if (!whenCond(kids(e)[0])) continue;
+          return toNode(kids(e)[1]);
+        }
+      }
+      const els = part(x, 'else');
+      if (els === undefined) return [];
+      return toNode(kids(els)[0]);
     }
     case 'return': return retOf(many(kids(x)));
     // 命令式调用与括号调用是**同一格节点**（语法两条产生式，图上一格）
