@@ -1441,6 +1441,10 @@ function litLeaningType(x) {
   if (isLit(x)) return litType(x.lit);
   if (!isNode(x)) return null;
   if (x.op === 'const') return litType(x.attrs.value);
+  /* **表达式位置上的 branch**（V 的 `match` 当表达式用就落成它）：两支同型，看一支就够。
+     漏了这一条的代价量过：`fn kind(c) string { return match c { … } }` 被说成返回 int，
+     方言当场骂"要返回 int，给的是 string" —— 又是一句错误而不是一格有名有姓的缺口。 */
+  if (x.op === 'branch') return litLeaningType(x.ins.then);
   if (x.op !== 'prim') return null;
   const fixed = primFixedType(x.attrs.name);
   if (fixed !== undefined) return fixed;
@@ -1465,6 +1469,11 @@ function retTypeOf(body, env, ctx) {
       if (isNode(v) && v.op === 'const') return litType(v.attrs.value);
       /* 多值：交回去的是那格合成结构体（登记在这儿 —— 调用点要靠它定型）。 */
       if (isNode(v) && v.op === 'values') return multiShape(argList(v, 'args'), env, ctx).tag;
+      /* 先问那张"只看字面量"的表（prim 之外还认 branch —— 见 litLeaningType）。 */
+      {
+        const t = litLeaningType(v);
+        if (t !== null) return t;
+      }
       if (isNode(v) && v.op === 'prim') {
         /* 与实参无关的那几格查**共用的那张表**（`primFixedType`）—— 原来这儿重抄了一份
            且写漏了 `concat`，于是"函数返回一格 concat"被说成返回 int（go 的 `fmt.Sprintf`

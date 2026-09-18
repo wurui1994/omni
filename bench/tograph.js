@@ -89,7 +89,7 @@ const CLASSES = [
   ['option / result（or-block · 传播 · ?T · `or { … }` 体里的 err）',
     /or-block|propagate|option|Option \/ Result/],
 
-  ['编译期求值（when / \$if / ctconst）', /编译期|ctime|ctconst|comptime/],
+  ['编译期求值（when / \$if / \$for / ctconst）', /编译期|ctime|ctconst|comptime|\$for/],
   ['函数值与闭包（fnlit）', /fnlit|闭包|函数值/],
   ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%)/],
   ['集合与字符（set-lit / char / rune）', /set 字面量|char 是自己一格类型|还没接：char|还没接：rune/],

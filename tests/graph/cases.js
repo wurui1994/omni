@@ -174,6 +174,14 @@ export const HOIST = ['12', '14', '108'];
  * 是**那门语言自己的规矩**，不是猜。
  */
 export const CTIF = ['lin', 'notwin', 'both', 'flagoff'];
+/**
+ * charlit：**字符字面量落一格单字符的串**（V 独一份）—— 图上没有 char 那一格。
+ * 这一格是**语料量出来的**：`` c == `e` `` 508 处 vs `` c + `0` `` 4 处（99.2% 是比较）。
+ * 两端的 backtick 要去掉（记号里带着它们 —— 头一版漏了，`println(`x`)` 印出了 `` `x` ``）。
+ * 算术那 4 处与 V 的 `s[i]`（按字节取）照旧在墙上：要类型层。
+ * 这一族顺带在 core 那条腿上撞出**第二个** `retTypeOf` 的洞（match 当表达式落成 branch）。
+ */
+export const CHARLIT = ['true', 'false', 'x', 'vowel', 'other'];
 
 
 
@@ -411,6 +419,8 @@ export const CASES = [
   // 第四十四个家族：**编译期分支**（V 的 `$if` 与 nim 的 `when`）。账上第二大的一族，
   // 落地靠的是"环境是声明出来的"那一条 —— 不看机器，所以尺子在哪台机器上都是同一个数。
   ...fam('ctif', CTIF, ['vlang', 'nim']),
+  // 第四十五个家族：**字符字面量**（V 独一份）。落成单字符的串 —— 语料里 99.2% 是比较。
+  ...fam('charlit', CHARLIT, ['vlang']),
 ];
 
 
