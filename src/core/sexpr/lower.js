@@ -20,7 +20,7 @@
  *         | (class NAME (字段 TYPE)...)             类（引用语义）
  *         | (global NAME TYPE)                      模块级变量（零初始化，跨函数共享）
  *         | (main STMT...)                          入口体
- *   TYPE  = int | real | bool | string | void | (vec int|real 2|4|8) | (buf int|real)
+ *   TYPE  = int | real | bool | string | void | dyn | (vec int|real 2|4|8) | (buf int|real)
  *         | (arr T) | (dict int|string T) | (fnty (TYPE...) TYPE) | 结构体名 | 类名
  *   STMT  = (let NAME TYPE E) | (set NAME E) | (do STMT...)
  *         | (if E (do ...) [(do ...)]) | (while E (do ...))
@@ -40,6 +40,7 @@
  *         | (dnew TYPE) | (dget E E) | (dhas E E) | (dlen E)
  *         | (new NAME) | (fld E 字段) | (cnew NAME)
  *         | (fnref NAME) | (mkclo NAME E...) | (cap NAME) | (callfn E E...)
+ *         | (dyn E) | (dtag E) | (asint E) | (asreal E) | (asbool E) | (asstr E)
  *
  * 向量那四条是 ADR-0014 门槛 6 的第一阶段，见 vecExpr 的注释；
  * 缓冲与 kernel/dispatch 是门槛 7 的第一阶段，见 bufExpr 与 dispatch 的注释；
@@ -57,7 +58,7 @@
  * 而"什么能悄悄转成什么"是语言设计决定，不该由汇聚层替某门语言定。
  */
 
-import { INT, REAL, BOOL, STRING, VOID, vecType, bufType, arrType, structType, classType, fnType, typeKey, zeroValue,
+import { INT, REAL, BOOL, STRING, VOID, DYNAMIC, vecType, bufType, arrType, structType, classType, fnType, typeKey, zeroValue,
   ptrType, tptrType, ptrTargetOk, blkType, structLayout, sizeOf, dictType, listType } from '../hir/types.js';
 import { readSexpr, isList, isAtom, isStr, head } from './read.js';
 import { expandTemplates } from './template.js';
@@ -66,7 +67,22 @@ import { utf8Bytes } from '../host/utf8.js';
 
 /** 方言里那几个**基本类型**的名字。不叫 `TYPES`：`src/lang/jnc/syntax.js` 里那格
  *  （jnc 的类型关键字表）是另一件事，而拼成一个程序之后模块级名字共用一个空间。 */
-const BASE_TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID]]);
+const BASE_TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['string', STRING], ['void', VOID],
+  // **真动态**（第…刀）：一格里装什么运行期才知道。装箱要写明（`(dyn E)`），
+  // 拆箱带检查（`(asint E)` 那一族）—— 见 expr 里 dyn 那一段。
+  ['dyn', DYNAMIC]]);
+
+/** `(dyn E)` 这一刀装得下的那几档（容器与函数那几样欠着，理由在 dyn 那一段）。 */
+const DYN_BOXABLE = new Set(['int', 'real', 'bool', 'string']);
+
+/** 拆箱那四条：方言里的写法 -> OIR 那格 `Builtin` 的名字与出来的类型。 */
+const DYN_UNBOX = new Map([
+  ['asint', { op: 'asInt', type: INT }],
+  ['asreal', { op: 'asReal', type: REAL }],
+  ['asbool', { op: 'asBool', type: BOOL }],
+  ['asstr', { op: 'asString', type: STRING }],
+]);
+
 
 /* 外部 C 符号的类型词汇（`(cabi …)` / `(ccall …)`，ADR-0022 的 J4b）-> 方言里的核心类型。
  *
@@ -1998,6 +2014,42 @@ class CoreLowerer {
         return this.err(n.items[1], `(refid) 的参数要是数组，这里是 ${coreTypeText(v.type)}`);
       }
       return { kind: 'Builtin', name: 'refid', args: [v], type: INT, argType: v.type };
+    }
+    /* ---------------------------------------------------------- 真动态那一族（dyn）
+     *
+     * 方言到这一刀之前**只有静态类型**，于是 lua / awk / Python 那一族语言里"一格里装什么
+     * 运行期才知道"的东西在汇聚层落不下去（图那一轴最后 4 格跳过的根就是它：lua 的元表
+     * 同时装字典与函数）。补的是**方言这一层的入口**，底下的机器一格都不用加：
+     *   * 装箱在 OIR 里本来就是一格显式 op（`Box`，ADR-0006 第 2 节）；
+     *   * MIR 那侧是 `CVT ... CVT_BOX` 到 `T_DYN`（`from_oir.js` 的 Box 那一行）；
+     *   * 拆箱与问标签是现成的 `Builtin`（`tag` / `asInt` / `asReal` / `asBool` / `asString`
+     *     —— 主语言的 `dyn()` 与那几格 `as*` 用的就是它们）。
+     *
+     * **不插隐式装箱**（与这一层"类型不推导，只检查"同一条）：要 dyn 就写 `(dyn E)`。
+     * 拆箱是**带检查**的：标签不对当场报运行期错误，不给个错答案。
+     */
+    if (h === 'dyn') {
+      if (n.items.length !== 2) return this.err(n, '(dyn E) 要 1 个参数');
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type.k === 'dynamic') return v;      // 已经是 dyn 了，装箱是恒等
+      if (!DYN_BOXABLE.has(v.type.k)) {
+        return this.err(n.items[1], `(dyn E) 这一刀只装得下 int / real / bool / string，这里是 ${coreTypeText(v.type)}`);
+      }
+      return { kind: 'Box', type: DYNAMIC, from: v.type, expr: v };
+    }
+    if (h === 'dtag' || DYN_UNBOX.has(h)) {
+      if (n.items.length !== 2) return this.err(n, `(${h} E) 要 1 个参数`);
+      const v = this.expr(n.items[1]);
+      if (v === null) return null;
+      if (v.type.k !== 'dynamic') {
+        return this.err(n.items[1], `(${h} E) 的参数要是 dyn，这里是 ${coreTypeText(v.type)}`);
+      }
+      if (h === 'dtag') {
+        return { kind: 'Builtin', name: 'tag', args: [v], recvType: DYNAMIC, type: STRING };
+      }
+      const u = DYN_UNBOX.get(h);
+      return { kind: 'Builtin', name: u.op, args: [v], recvType: DYNAMIC, type: u.type };
     }
     // 字符串上的三条：长度、子串、找子串。OIR 侧三个 `Builtin` 早就在（Omni 自己的
     // `s.length` / `s.substr(i,n)` / `s.indexOf(t)` 就是它们），所以 run / run-c /

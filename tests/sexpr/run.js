@@ -101,11 +101,24 @@ const AGREE = LEGS.length === ALL_LEGS.length ? '五方一致' : LEGS.map((l) =>
  * 那比红更坏。
  */
 const CANT = {
+  // `cases/` 与 `rt/` 两处都认这张表（bad/ 只用 `run` 一条腿，用不着）。
   '44-dicts': {
     legs: ['run-llvm'],
     why: 'LLVM 后端不支持聚合容器（dict / list / set）。**主语言也一样** ——'
       + '`dict<string,int> m;` 走 run-llvm 报「llvm 后端目前不支持聚合 dict」，'
       + '所以这是后端那一侧的既有缺口，不是方言这一格新欠的',
+  },
+  '48-dyn': {
+    legs: ['run-llvm'],
+    why: 'LLVM 后端不支持 dyn（24 字节，clang 走间接传：入参 ptr、返回 sret —— '
+      + '那份账写在 backend-llvm/emit.js 的文件头上）。**主语言也一样** ——'
+      + '`string t(dynamic v)` 走 run-llvm 报的是同一句「llvm 后端目前不支持 dyn：参数 v」，'
+      + '所以这是后端那一侧的既有缺口，不是方言这一格新欠的',
+  },
+  'dyn-wrong-tag': {
+    legs: ['run-llvm'],
+    why: '同 48-dyn：LLVM 后端连一格 dyn 的槽位都落不下去，它报的是'
+      + '「llvm 后端目前不支持 dyn：槽位 d」，不是这份用例要钉的那句拆箱错误',
   },
 };
 
@@ -151,7 +164,9 @@ function agree(sx, expected, legs = LEGS) {
   }
   for (const f of readdirSync(join(here, 'rt')).filter((x) => x.endsWith('.sx')).sort()) {
     if (!want(f)) continue;
-    for (const leg of LEGS) argLists.push([cli, ...leg.args(join(here, 'rt', f))]);
+    for (const leg of legsFor(basename(f, '.sx')).legs) {
+      argLists.push([cli, ...leg.args(join(here, 'rt', f))]);
+    }
   }
   for (const f of readdirSync(join(here, 'bad')).filter((x) => x.endsWith('.sx')).sort()) {
     if (!want(f)) continue;
@@ -250,14 +265,17 @@ for (const f of readdirSync(join(here, 'rt')).filter((x) => x.endsWith('.sx')).s
   const exp = read(join(here, 'rt', `${name}.expected`));
   if (exp === null) { no(`rt/${name}`, `    缺 ${name}.expected`); continue; }
   const bad = [];
-  for (const leg of LEGS) {
+  // `rt/` 也认那张"跑不了哪条腿"的表（`CANT`）：一格形状在某条后端上根本落不下去，
+  // 那条腿报的就是"这个后端还不支持 X"，不是这份用例要钉的那句运行期错误。
+  const pick = legsFor(name);
+  for (const leg of pick.legs) {
     const r = cmd(leg.args(join(here, 'rt', f)));
     if (r.code === 0) { bad.push(`    ${leg.tag} 居然跑完了 —— 这里该报运行期错误`); continue; }
     if (!r.err.includes(exp.trim())) {
       bad.push(`    ${leg.tag} 的消息不对\n      want: ${JSON.stringify(exp.trim())}\n      got:  ${JSON.stringify(r.err.trim())}`);
     }
   }
-  if (bad.length === 0) ok(`rt/${name} [${LEGS.length} 条腿同一句：${exp.trim()}]`);
+  if (bad.length === 0) ok(`rt/${name} [${pick.legs.length} 条腿同一句：${exp.trim()}${pick.note}]`);
   else no(`rt/${name}`, bad.join('\n'));
 }
 

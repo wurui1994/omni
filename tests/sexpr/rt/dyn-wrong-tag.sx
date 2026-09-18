@@ -1,0 +1,8 @@
+;; 拆箱是**带检查**的：标签不对当场报，不给个错答案。
+;; 装进去的是串，按 int 拆 —— 那是运行期才知道的错，所以在 rt/ 而不是 bad/。
+;; 这一句在几条腿上各有一份实现（C 侧 omni_dyn_as_int、JS 侧 $dynAs、解释器侧 dynAs），
+;; 而它是"真动态"这一族里唯一还能观测到的分叉面。
+(module
+  (main
+    (let d dyn (dyn (str "not a number")))
+    (print (asint (var d)))))

@@ -1,0 +1,58 @@
+;; tests/sexpr/cases/48-dyn.sx —— **真动态那一族**（方言的第…刀）
+;;
+;; 方言到这一刀之前只有静态类型，于是 lua / awk / Python 那一族里"一格里装什么运行期
+;; 才知道"的东西在汇聚层落不下去 —— 图那一轴最后 4 格跳过的根就是它（lua 的元表同时
+;; 装字典与函数）。这一份钉住的是**方言这一层的入口**，底下的机器一格都没加：
+;;   * `(dyn E)` -> OIR 里那格显式 `Box`（ADR-0006 第 2 节）-> MIR 的 `CVT_BOX` / `T_DYN`
+;;   * `(dtag E)` / `(asint E)` 那一族 -> 现成的 `Builtin`（主语言的 `dyn()` 与 `as*` 用的
+;;     就是它们），所以 run / run-c / interp / interp --mir 四条腿一行没改就通了。
+;;
+;; 五条判据：
+;;   1. 四档都装得进、拆得出（int / real / bool / string），值一个不差。
+;;   2. **标签问得出来**（`dtag`）—— 那是"运行期才知道装的是什么"这句话的可观测面。
+;;   3. 一格 dyn 的**局部量**能重新赋成另一档：静态类型不许这样，dyn 就是为它来的。
+;;   4. dyn 能当**形参与返回值**过函数边界（那是异质容器的前置：值得先走得动）。
+;;   5. 再装一次是恒等（`(dyn (dyn E))`），不套两层箱。
+;;
+;; 拆箱**带检查**：标签不对当场报运行期错误（那一路在 rt/ 里，不在这儿）。
+
+(module
+  ;; 判据 4：dyn 过函数边界 —— 收一格 dyn，答它的标签
+  (fn tagof ((v dyn)) string
+    (ret (dtag (var v))))
+
+  ;; 收一格 dyn 再交回去（恒等），钉住返回值那一侧
+  (fn echo ((v dyn)) dyn
+    (ret (var v)))
+
+  (main
+    ;; 判据 1 + 2：四档各装一次，标签与值都对
+    (let i dyn (dyn (int 42)))
+    (print (dtag (var i)))
+    (print (asint (var i)))
+
+    (let r dyn (dyn (real 1.5)))
+    (print (dtag (var r)))
+    (print (asreal (var r)))
+
+    (let b dyn (dyn (bool true)))
+    (print (dtag (var b)))
+    (print (asbool (var b)))
+
+    (let s dyn (dyn (str "ok")))
+    (print (dtag (var s)))
+    (print (asstr (var s)))
+
+    ;; 判据 3：同一格 dyn 换一档装 —— 这是静态类型给不了的那件事
+    (set i (dyn (str "now a string")))
+    (print (dtag (var i)))
+    (print (asstr (var i)))
+
+    ;; 判据 4：过函数边界（当实参、当返回值）
+    (print (call tagof (dyn (int 7))))
+    (print (asint (call echo (dyn (int 7)))))
+
+    ;; 判据 5：再装一次是恒等 —— 不套两层箱，标签还是 int
+    (print (dtag (dyn (dyn (int 9)))))
+  )
+)
