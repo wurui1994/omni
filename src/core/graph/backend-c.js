@@ -1178,7 +1178,27 @@ class CGen {
   /** 值位置。回一段 C 表达式（要发语句的先发，再回那格临时量的名字）。 */
   valOf(x) {
     if (x === null || x === undefined) return 'g_nil()';
-    if (Array.isArray(x)) throw new Gap('c 后端：值位置上摆着一串节点');
+    if (Array.isArray(x)) {
+      /* **值位置上摆着一串节点**：前面几格是语句、**末尾那格是值**。
+         那条规矩不是这儿新编的 —— `fnBody` 的"掉到函数尾也是一条出口"、core 的 `arm`
+         （表达式位置上的 branch 两支各赋值）说的都是同一句话。图上会长出这个形状是因为
+         `branch` 的 `then`/`else` 是 `lazy` 端口：那两格里躺的可能是一串语句
+         （nim / mojo / freebasic 的 `if` 当值用就是）。
+         空的一串没有值 —— `g_nil()`。末尾那格要真是一句话（`print` 那种），
+         后面 `valOf` 自己会报一格有名有姓的缺口。 */
+      const list = x.filter((y) => y !== undefined && y !== null);
+      if (list.length === 0) return 'g_nil()';
+      const last = list[list.length - 1];
+      /* **末尾那格是 `ret`**：这一支根本不交值出来 —— 它从整个函数里走了
+         （nim / mojo 的 `if c: return a else: return b` 当值用就是这个形状）。
+         所以整串都当语句发，回一格 `g_nil()` 占位 —— 那一格赋值**到不了**。 */
+      if (last !== null && last.op === 'ret') {
+        for (const y of list) this.stmt(y);
+        return 'g_nil()';
+      }
+      for (const y of list.slice(0, -1)) this.stmt(y);
+      return this.valOf(last);
+    }
     if (x.lit !== undefined) return this.lit(x.lit);
     this.chk(x.op);
     if (x.op === 'const') return this.lit(x.attrs.value ?? null);
