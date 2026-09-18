@@ -480,9 +480,38 @@ function matchOf(x, asStmt) {
   if (tag(subj) === 'mut') subj = kids(subj)[0];      // `match mut x` —— mut 只拆不检查
   const holder = `__mt${MT_DEPTH}`;
   const bindSubj = asStmt;
-  if (!asStmt && tag(subj) !== 'name' && tag(subj) !== 'num' && tag(subj) !== 'str') {
-    throw new Error('v->graph: 表达式位置上的 match 主语要算好几遍 —— 那儿摆不进一格临时量，'
-      + '这一批只接主语是名字或常量的');
+  if (!asStmt && tag(subj) !== 'name' && tag(subj) !== 'num' && tag(subj) !== 'str'
+    && tag(subj) !== 'bool') {
+    /* 还有一条路：主语可以**物化** —— 提一格临时量到语句前面，这儿只放一格 ref。
+       前提是 safeToHoist 通过（前面没有带副作用的东西改次序）。 */
+    if (!safeToHoist(CUR_STMT, x)) {
+      throw new Error('v->graph: 表达式位置上的 match 主语要算好几遍 —— 那儿摆不进一格临时量，'
+        + '这一批只接主语是名字或常量的');
+    }
+    /* 物化：把主语 bind 到 __mtN，提到当前语句前面。 */
+    const nm = holder;
+    HOIST.push(node('bind', { init: toNode(subj) }, { name: nm }));
+    const subjRef = () => node('ref', {}, { name: nm });
+    const arms2 = [];
+    let dflt2;
+    MT_DEPTH += 1;
+    try {
+      for (const a of all.slice(1)) {
+        if (tag(a) === 'else') { dflt2 = armValue(a, false); continue; }
+        if (tag(a) !== 'arm') throw new Error(`v->graph: match 里不该有 ${tag(a)}`);
+        const conds = armConds(a, subjRef);
+        if (conds.length === 0) throw new Error('v->graph: match 的分支左边一个值都没有');
+        arms2.push([conds.reduce((p, q) => lazyOr(p, q)), armValue(a, false)]);
+      }
+    } finally {
+      MT_DEPTH -= 1;
+    }
+    if (dflt2 === undefined) {
+      throw new Error('v->graph: 表达式位置上的 match 没有 else —— 掉出去那一路没有值');
+    }
+    let chain2 = dflt2;
+    for (let i = arms2.length - 1; i >= 0; i -= 1) chain2 = branchOf(arms2[i][0], arms2[i][1], chain2);
+    return chain2;
   }
   const subjText = () => (bindSubj ? node('ref', {}, { name: holder }) : toNode(subj));
   const arms = [];
