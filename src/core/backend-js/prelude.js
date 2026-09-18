@@ -1275,6 +1275,14 @@ function $js_eq(strict, a, b) {  const ta = $dynTag(a), tb = $dynTag(b);
   if (ta === "undefined" || ta === "null") return true;
   return a === b;
 }
+/* **$js_eq 的两格特化**（strict 也是编译期常量 —— 与 op 那一族同一条理由）。
+   严格那格就是宿主的三等号，这不是近似而是**恒等**：$js_eq(true,…) 的正文是
+   "标签不同就 false，否则 a === b"，而标签是值的函数 —— 两个值严格相等时标签必然相同，
+   标签不同时宿主的三等号也必然 false（1 与 1n 正是这一格）。undefined/null 那两句捷径
+   与宿主三等号同值。所以严格那一支连快路都不必写。宽松那格转手给那唯一一份实现。
+   （这一段里不许出现反引号：整份 prelude 是一个 String.raw 模板。） */
+function $js_seq(a, b) { return a === b; }
+function $js_leq(a, b) { return $js_eq(false, a, b); }
 
 // ------------------------------------------------- JS 的 String 方法（ADR-0011）
 // JS 后端这边宿主的 String 本来就是 UTF-16 码元序列，所以这些几乎都是一行；

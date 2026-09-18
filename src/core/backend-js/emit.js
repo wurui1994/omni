@@ -1035,6 +1035,11 @@ class JsEmitter {
       // ---- 算子特化（task #41 第一刀）：compile-time 常量 op 直接发对应的函数 --------
       // $js_arith("-", a, b) -> $js_sub(a, b)；消灭运行期的 switch(op) 与 $js_prim/$js_tonum
       // 那一圈类型检查（对数值类操作数那一圈检查在特化函数里仍旧有 —— 消灭的是 dispatch）。
+      case 'js_eq': {
+        // strict === / loose == 两种。消灭 strict 参数的运行期分支。
+        const fn = e.strict === true ? '$js_seq' : '$js_leq';
+        return `${fn}(${a.join(', ')})`;
+      }
       case 'js_arith': {
         const OP_FN = { '-': '$js_sub', '*': '$js_mul', '/': '$js_div', '%': '$js_mod', 'p': '$js_pow' };
         const fn = OP_FN[e.op];
