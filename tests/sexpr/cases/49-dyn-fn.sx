@@ -15,6 +15,11 @@
 ;;   3. 取出来的函数值能**先绑给一格局部量**再调（不是只能一口气写完）。
 ;;   4. 元表那个形状走一遍：一格"类"字典里放方法，一格"实例"字典里放字段，
 ;;      取方法、把实例当第一个实参递进去 —— 那就是 `p:total()` 的全部。
+;;   5. **字典套字典**（`(asdict …)`）：一格 dyn 里装着另一格字典，取出来再按键读。
+;;      那是 lua 的 `local a <close> = setmetatable({}, { __close = … })` 的全部 ——
+;;      `a.__meta.__close` 两跳，头一跳出来是字典、第二跳出来是函数。
+;;      装字典进 dyn **只收 `(dict string dyn)`**：底下那一层（`boxable`）只认这一种，
+;;      别的值类型要按元素深装箱，那是另一件事。
 
 (module
   (fn inc ((x int)) int
@@ -56,5 +61,17 @@
     ;; `p:total()` = 从"类"里取方法，把 p 当第一个实参递进去
     (print (callfn (asfn (fnty ((dict string dyn)) int) (dget (var cls) (str "total")))
                    (var p)))
+
+    ;; 判据 5：字典套字典 —— `a.__meta.__close` 两跳（lua 的 `<close>` 就是这个形状）
+    (let meta (dict string dyn) (dnew (dict string dyn)))
+    (dset (var meta) (str "__close") (dyn (fnref total)))
+    (let obj (dict string dyn) (dnew (dict string dyn)))
+    (dset (var obj) (str "x") (dyn (int 10)))
+    (dset (var obj) (str "y") (dyn (int 20)))
+    (dset (var obj) (str "__meta") (dyn (var meta)))
+    (let mt (dict string dyn) (asdict (dict string dyn) (dget (var obj) (str "__meta"))))
+    (print (dtag (dget (var mt) (str "__close"))))
+    (print (callfn (asfn (fnty ((dict string dyn)) int) (dget (var mt) (str "__close")))
+                   (var obj)))
   )
 )

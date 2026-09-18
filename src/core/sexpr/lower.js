@@ -42,6 +42,7 @@
  *         | (fnref NAME) | (mkclo NAME E...) | (cap NAME) | (callfn E E...)
  *         | (dyn E) | (dtag E) | (asint E) | (asreal E) | (asbool E) | (asstr E)
  *         | (asfn (fnty (TYPE...) TYPE) E)
+ *         | (asdict (dict TYPE TYPE) E)
  *
  * 向量那四条是 ADR-0014 门槛 6 的第一阶段，见 vecExpr 的注释；
  * 缓冲与 kernel/dispatch 是门槛 7 的第一阶段，见 bufExpr 与 dispatch 的注释；
@@ -74,7 +75,11 @@ const BASE_TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['stri
   ['dyn', DYNAMIC]]);
 
 /** `(dyn E)` 这一刀装得下的那几档（容器与函数那几样欠着，理由在 dyn 那一段）。 */
-const DYN_BOXABLE = new Set(['int', 'real', 'bool', 'string', 'fn']);
+/* `(dyn E)` 这一刀装得下的那几档。
+   `dict` 只在值本身已经是 dyn 时才装得下（`hir/types.js` 的 `boxable`：
+   `(dict string dynamic)` 才行）—— 那一格检查在下面 `(dyn E)` 那儿。
+   列表那一档还没接：等有判据要它的时候再放（现在放了就是没判据的代码）。 */
+const DYN_BOXABLE = new Set(['int', 'real', 'bool', 'string', 'fn', 'dict']);
 
 /** 拆箱那四条：方言里的写法 -> OIR 那格 `Builtin` 的名字与出来的类型。 */
 const DYN_UNBOX = new Map([
@@ -2035,7 +2040,15 @@ class CoreLowerer {
       if (v === null) return null;
       if (v.type.k === 'dynamic') return v;      // 已经是 dyn 了，装箱是恒等
       if (!DYN_BOXABLE.has(v.type.k)) {
-        return this.err(n.items[1], `(dyn E) 这一刀只装得下 int / real / bool / string，这里是 ${coreTypeText(v.type)}`);
+        return this.err(n.items[1],
+          `(dyn E) 这一刀只装得下 int / real / bool / string / 函数 / 字典，这里是 ${coreTypeText(v.type)}`);
+      }
+      /* 字典进 dyn **只收值本身已经是 dyn 的那种**：底下那一层（`hir/types.js` 的
+         `boxable`）只认 `(dict string dynamic)` —— 别的值类型要按元素深装箱，
+         而那是另一件事（C 侧要按类型生成一份转换函数，见 backend-c 的 boxDeep）。 */
+      if (v.type.k === 'dict' && (v.type.key.k !== 'string' || v.type.val.k !== 'dynamic')) {
+        return this.err(n.items[1],
+          `(dyn E) 装字典只收 (dict string dyn)，这里是 ${coreTypeText(v.type)}`);
       }
       return { kind: 'Box', type: DYNAMIC, from: v.type, expr: v };
     }
@@ -2043,6 +2056,22 @@ class CoreLowerer {
        "这是个函数"，记不住签名（C 那侧就是一个 `omni_fn`），而 `(callfn …)` 要按签名发调用。
        签名写错了是**调用方的责任**，与 `(unsafe …)` 那一族同一条：这一层能查的是
        "标签对不对"（那是运行期那一问），查不了"签名对不对"。 */
+    /* `(asdict TYPE E)`：把一格 dyn 拆回字典。与 `asfn` 同一条 —— 箱子里只记着
+       "这是个字典"，记不住键值类型，所以类型要写出来。 */
+    if (h === 'asdict') {
+      if (n.items.length !== 3) return this.err(n, '(asdict TYPE E) 要 2 个参数');
+      const dt = this.ty(n.items[1], 'asdict 的类型');
+      if (dt === null) return null;
+      if (dt.k !== 'dict') {
+        return this.err(n.items[1], `(asdict TYPE E) 的 TYPE 要是 (dict …)，这里是 ${coreTypeText(dt)}`);
+      }
+      const dv = this.expr(n.items[2]);
+      if (dv === null) return null;
+      if (dv.type.k !== 'dynamic') {
+        return this.err(n.items[2], `(asdict TYPE E) 的 E 要是 dyn，这里是 ${coreTypeText(dv.type)}`);
+      }
+      return { kind: 'Builtin', name: 'asDict', args: [dv], recvType: DYNAMIC, type: dt };
+    }
     if (h === 'asfn') {
       if (n.items.length !== 3) return this.err(n, '(asfn TYPE E) 要 2 个参数');
       const t = this.ty(n.items[1], 'asfn 的类型');
