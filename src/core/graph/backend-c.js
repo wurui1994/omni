@@ -558,6 +558,25 @@ function constNum(x) {
  *
  * `bound` 用数组而不是 Set：这一格要能被我们自己编出来的编译器编（ADR-0011 的封闭子集）。
  */
+/**
+ * 一块图里出现的**每一格 `func`**（多深都算）。纯结构的走查：按端口往下走，
+ * 不认识任何具体节点 —— 加新节点不用改它。
+ *
+ * 为什么要它：`plan` 要知道"哪几格顶层变量被函数体读到"，而函数**不只挂在 bind 的初值上**
+ * （lua 的 `function Point.new(…)` 挂在一格 `map-set` 的值上）。
+ */
+function allFuncs(x, out = []) {
+  if (x === null || x === undefined) return out;
+  if (Array.isArray(x)) {
+    for (const y of x) allFuncs(y, out);
+    return out;
+  }
+  if (typeof x !== 'object' || x.ins === undefined) return out;
+  if (x.op === 'func') out.push(x);
+  for (const k of Object.keys(x.ins)) allFuncs(x.ins[k], out);
+  return out;
+}
+
 function freeRefs(x, bound, out) {
   if (x === null || x === undefined) return;
   if (Array.isArray(x)) {
@@ -1090,12 +1109,15 @@ class CGen {
     }
     /* **哪几格顶层变量真被函数体读到** —— 只有那几格要落成模块级 `static`。
        C 里 `main` 的局部量别的函数看不见，而图上顶层 `bind` 与函数体里的 `bind` 是**同一格
-       节点**（落法分两种只因为 C 的作用域分两层，与 wat 那侧 `(global …)` 同一条）。 */
-    for (const x of list) {
-      if (x === null || x === undefined || x.op !== 'bind') continue;
-      if (x.ins.init === undefined || x.ins.init === null || x.ins.init.op !== 'func') continue;
+       节点**（落法分两种只因为 C 的作用域分两层，与 wat 那侧 `(global …)` 同一条）。
+
+       **要看遍所有的 `func`，不是只看 `bind` 的初值**：lua 的 `function Point.new(x, y)`
+       落的是 `map-set(Point, "new", func …)` —— 那格 func 不挂在任何一格 bind 上，
+       而它的体里读着 `Point`。只看 bind 初值的话 `Point` 不进 `hoisted`，
+       提升出来的那个函数里就冒出一句 `v_Point undeclared`（lua+method 量出来的）。 */
+    for (const f of allFuncs(list)) {
       const free = [];
-      freeRefs(x.ins.init.ins.body, (x.ins.init.attrs.params ?? []).slice(), free);
+      freeRefs(f.ins.body, (f.attrs.params ?? []).slice(), free);
       for (const n of free) if (this.topBinds.has(n)) this.hoisted.add(n);
     }
   }
@@ -1192,14 +1214,18 @@ class CGen {
     if (fn !== undefined && fn !== null && fn.op === 'func') {
       return `${this.liftFunc(fn, undefined)}(${args.join(', ')})`;
     }
-    /* **按值调用**：被调的是一格**值**（形参 / 局部里装着 `g_fn(下标)`）——
-       走那格按元数分的派发器 `g_callN`（emitC 末尾按用到的元数各发一格）。
-       与 wat 那条腿的 `call_indirect` 是同一件事，只是这边用 switch 代替函数表指令。 */
-    if (fn !== undefined && fn !== null && fn.op === 'ref') {
+    /* **按值调用**：被调的是一格**值** —— 形参 / 局部里装着 `g_fn(下标)`，或者
+       一格从字典 / 列表里取出来的 `gv`（lua 的 `p:total()` 就是后者：
+       `call(map-get(…, "total"), [p])`）。走那格按元数分的派发器 `g_callN`
+       （emitC 末尾按用到的元数各发一格）。与 wat 那条腿的 `call_indirect` 是同一件事，
+       只是这边用 switch 代替函数表指令。
+       **不挑被调者的形状**：`valOf` 能把任何一格表达式算成 `gv`，而派发器头一句就查
+       `f.t != GT_FN` —— 装的不是函数值时报一句人话，不是猜一个下标。 */
+    if (fn !== undefined && fn !== null) {
       this.callArities.add(args.length);
       return `g_call${args.length}(${this.valOf(fn)}${args.length === 0 ? '' : `, ${args.join(', ')}`})`;
     }
-    throw new Gap('c 后端：调一格既不是名字也不是当场摆着的 func');
+    throw new Gap('c 后端：调用点上没有被调者');
   }
 
   lit(v) {
@@ -1924,25 +1950,6 @@ export const C_SHAPES = [
           }, { params: [] }),
         }, { name: 'outer' }),
         node('call', { fn: node('ref', {}, { name: 'outer' }), args: [] }),
-      ],
-    }),
-  },
-  {
-    what: '调一格**既不是名字也不是当场摆着的 func**',
-    why: '按值调用（一格变量里装着 `g_fn(下标)`）已经接上了 —— 走那格按元数分的派发器。'
-      + '剩下的是被调者**更复杂**的那几种：从字典里取出来再调（lua 的元表分派就是 '
-      + '`(call (map-get …))`）。那要先把"函数装进容器"那一格接上，与 core 那侧欠的是同一格',
-    /* 证物：被调的是一格**下标取出来的东西**（不是名字、也不是当场摆着的 func）。 */
-    witness: () => ({
-      kind: 'graph',
-      body: [
-        node('bind', { init: node('list-new', { items: [{ lit: 1 }] }) }, { name: 'g' }),
-        node('prim', {
-          args: [node('call', {
-            fn: node('index-get', { obj: node('ref', {}, { name: 'g' }), index: { lit: 0 } }),
-            args: [],
-          })],
-        }, { name: 'print' }),
       ],
     }),
   },
