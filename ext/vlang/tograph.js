@@ -376,6 +376,14 @@ function optOf(r, target) {
   }
   const blk = kids(r)[1];
   if (mentionsErr(blk)) {
+    /* **`err` 在 or-block 的体里出现** —— 这一批一律报，96 份卡在这一条上（V 那一栏最大的
+       单条墙）。为什么不放松：试过一版"体以 panic / return 收尾就把 err 当 nil 放过去"
+       （量到 1291 -> 1357，+66 份），可那样 `or { panic(err.msg()) }` 落出来的程序是
+       **在 nil 上调 msg()**：V 印一行错误消息，我们这条腿当场炸在别的地方 ——
+       用"分子涨 66"换一处**可观察的行为差**，那不是这把尺子要的东西，所以退掉了。
+       真要接住这一族得先把**错误值本身**放进图（Option / Result 现在只剩"有没有" ——
+       `error('x')` 落的是 nil，见 `case 'call'` 那一处）。那是一格设计决定：
+       Result 变成两格（值 + 错），而不是一格 nil。记在 ADR-0037 §5.1a 上。 */
     throw new Error('v->graph: `or { … }` 的体里用了 `err` —— 这一批把 Option / Result'
       + '丢成了"有没有值"，错误消息不在图上，补个 nil 上去是静默的错答案');
   }
