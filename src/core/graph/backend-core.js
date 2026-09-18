@@ -339,13 +339,20 @@ function expr(x, env, ctx) {
       if (d === null) gap(`map-has 的宿主不是字典（量到的是 ${typeOf(x.ins.obj, env, ctx)}）`);
       return `(dhas ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)})`;
     }
-    /* `map-keys`（第三十批）：方言里是 `(dkeys …)` —— 主语言的 `dict.keys()` 那一格，
-       回一格 `(list K)`，键按插入序。遍历那一圈由映射用现成的 counted 走，这儿只出键。 */
-    case 'map-keys': {
-      const d = hostDict(x.ins.obj, env, ctx);
-      if (d === null) gap(`map-keys 的宿主不是字典（量到的是 ${typeOf(x.ins.obj, env, ctx)}）`);
-      return `(dkeys ${objText(x.ins.obj, env, ctx)})`;
-    }
+    /* `map-keys`（第三十批）：方言的 `(dkeys …)` 交出来的是**主语言的 `list<K>`**，
+       而这条腿上"图的列表"一律是方言的 `(arr T)`（`list-new` 落 `anew` + 一圈 `apush`）。
+       两者在六条腿上是**两种真表示**（`omni_list_*` vs `omni_arr_*`、JS 里 `[]` vs `$anew`），
+       所以不能拿一个当另一个用 —— 那是类型上的谎。
+
+       真正欠的一格：**方言里没有 `(list T)` 这一格类型**（`let` 的类型表里没有它，
+       `aget`/`alen` 也只认 `arr`）。补法有两条，都要先做选择：
+         · 给方言加 `(list T)` 与它那几格操作；
+         · 或者让 `(dkeys …)` 就地造一格 `arr`（新建 + 一圈 apush，与 `bindSlice` 同形）。
+       所以这一格按名有姓地欠着，不硬拼。 */
+    case 'map-keys':
+      gap('按键遍历的那格键列表在方言里落不下来：`(dkeys …)` 出的是 `list<K>`，'
+        + '而这条腿的列表是 `(arr T)` —— 方言里还没有 `(list T)` 这一格类型');
+      return '';
     case 'slice': gap('切片出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     /* **表达式位置上的映射**：先物化成一格临时名，再把那个名字交出去。
      * 与实参位置上那三格聚合走的是**同一张表**（`MATERIALIZE`）与同一条理由：方言里

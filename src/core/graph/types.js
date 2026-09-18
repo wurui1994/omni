@@ -220,6 +220,12 @@ export function inferType(x, env, ctx) {
     return d === null ? UNKNOWN : d.val;
   }
   if (x.op === 'map-has') return 'bool';
+  /* `map-keys` —— 键排成一格列表，所以类型是 `(arr K)`（K 就是那格字典的键类型）。
+     宿主推不出来是字典就 unknown，不猜：猜错的症状是下游按错的元素类型取下标。 */
+  if (x.op === 'map-keys') {
+    const d = dictOf(inferType(x.ins.obj, env, ctx));
+    return d === null ? UNKNOWN : `(arr ${d.key})`;
+  }
   if (x.op === 'values') return multiShape(argList(x, 'args'), env, ctx).tag;
   if (x.op === 'pick') {
     const shape = shapeAt(typeOf(x.ins.from, env, ctx), ctx);
