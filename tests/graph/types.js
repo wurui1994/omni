@@ -198,13 +198,16 @@ const inVocab = (t) => (typeof t === 'string'
     no('吞掉 unknown 的地方', `数出来 ${got} 处，这一行写着 ${WANT} 处 —— `
       + '要么是又多了一处猜（那得说清为什么），要么是治好了一处（那就把这个数改小）');
   }
-  /* **core 后端那两处不算覆盖层的猜**：它们查的是 `ctx.args`（从调用点收上来的实参类型）
+  /* **core 后端那三处不算覆盖层的猜**：它们查的是 `ctx.args`（从调用点收上来的实参类型）
      和 `env['fn:…']`（从函数体里 retTypeOf 推出来的返回类型）。两样都是 core **自己那条
      两趟收集链**的产物 —— 收不到的落回 int 是"方言的形参默认 int"那条口径，
-     不是类型推断层的猜。那两处归下一步治（hints 喂进来之后就不用收了）。 */
+     不是类型推断层的猜。那几处归下一步治（hints 喂进来之后就不用收了）。
+     **第三处是函数值那一刀加的**：`fnTypeOf` 拼 `(fnty (形参…) 返回)` 时也要查同一张
+     `ctx.args`（一格函数名当值用时，它的形参类型只有调用点知道）—— 同一条收集链、
+     同一条口径，所以归同一档。 */
   const core = readText(`${ROOT}src/core/graph/backend-core.js`);
   const leaked = (core.match(/ \?\? 'int'/g) ?? []).length;
-  const CORE_WANT = 2;
+  const CORE_WANT = 3;
   if (leaked === CORE_WANT) ok(`core 那条腿里 ${leaked} 处收集链默认值（不是覆盖层的猜）`);
   else no('core 那条腿', `期望 ${CORE_WANT} 处，数出来 ${leaked} 处 —— 变了就得说清`);
 }

@@ -193,6 +193,11 @@ function expr(x, env, ctx) {
        * 那两条路自己拼文本（不经过这儿），于是这儿一律报缺口 —— 与 backend-c 的
        * `recPlan` 那三条同一个道理，只是我们靠"谁来拼"而不是靠一趟预扫描。 */
       const t = env.get(x.attrs.name);
+      /* **一格函数名当值用** —— 方言里那是 `(fnref 名)`（`tests/sexpr/cases/15-fnvalues.sx`）。
+         `t === undefined` 那一条是关键：同名的局部变量优先（函数名只在没被遮住时才是函数）。 */
+      if (t === undefined && env.get(`fn:${x.attrs.name}`) !== undefined) {
+        return `(fnref ${x.attrs.name})`;
+      }
       if (isRecType(t, ctx)) gap(`把记录 '${x.attrs.name}' 整格当值用（这一刀只接字段读写）`);
       if (elemType(t) !== null) gap(`把列表 '${x.attrs.name}' 整格当值用（这一刀只接下标读写与 len）`);
       if (dictOf(t) !== null) gap(`把字典 '${x.attrs.name}' 整格当值用（这一刀只接按键读写与 len）`);
@@ -505,6 +510,13 @@ function objText(obj, env, ctx) {
 function callText(x, env, ctx) {
   const f = x.ins.fn;
   if (!isNode(f) || f.op !== 'ref') gap('调一格不是名字的东西（函数值那一档）');
+  /* **被调的是一格函数值**（形参 / 局部，类型是 `(fnty …)`）—— 方言里那是 `(callfn …)`。
+     实参的类型不往 `ctx.args` 上记：那张表是按**函数名**记的，而这儿被调的是一格值。 */
+  const vt = env.get(f.attrs.name);
+  if (typeof vt === 'string' && vt.startsWith('(fnty ')) {
+    const vargs = argList(x, 'args').map((a) => expr(a, env, ctx));
+    return `(callfn (var ${f.attrs.name})${vargs.length === 0 ? '' : ` ${vargs.join(' ')}`})`;
+  }
   const args = argList(x, 'args').map((a, i) => argText(f.attrs.name, i, a, env, ctx));
   return `(call ${f.attrs.name}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
 }
@@ -522,6 +534,20 @@ function argText(fname, i, a, env, ctx) {
      字典。这三格在表达式位置上落不下去，所以先物化成一格临时名再递 `(var …)` 进去 ——
      三样递进去的都是**同一格**（记录是指针、数组与字典是句柄）—— 与图上一样。
      摆不下物化那几句（没有 `ctx.pre`）就报，不硬拼。 */
+  /* **一格函数名当实参**（go 的 `apply(inc, 4)`、提上来的匿名 func 也走这儿）：
+     类型是 `(fnty …)`、文本是 `(fnref 名)`。 */
+  {
+    const ft = fnTypeOf(a, env, ctx);
+    if (ft !== null) {
+      const fkey = `${fname}#${i}`;
+      const fhad = ctx.args.get(fkey);
+      if (ctx.collect !== true && fhad !== undefined && fhad !== ft) {
+        gap(`'${fname}' 第 ${i + 1} 格实参在两处的类型不一样（${fhad} 与 ${ft}）—— 方言的形参是单态的`);
+      }
+      if (ctx.collect !== true || fhad === undefined || fhad === 'int') ctx.args.set(fkey, ft);
+      return `(fnref ${a.attrs.name})`;
+    }
+  }
   const mk = isNode(a) ? MATERIALIZE[a.op] : undefined;
   if (mk !== undefined) {
     if (ctx.pre === null || ctx.pre === undefined) {
@@ -557,6 +583,22 @@ function argText(fname, i, a, env, ctx) {
   ctx.args.set(key, t);
   if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return `(var ${a.attrs.name})`;
   return expr(a, env, ctx);
+}
+
+/**
+ * 一格**函数名**当值用时的类型：`(fnty (形参类型…) 返回类型)`。
+ * 不是函数名（或者被同名的局部遮住了）回 null。
+ */
+function fnTypeOf(a, env, ctx) {
+  if (!isNode(a) || a.op !== 'ref') return null;
+  const nm = a.attrs.name;
+  if (env.get(nm) !== undefined) return null;
+  const rt = env.get(`fn:${nm}`);
+  if (rt === undefined) return null;
+  const f = (ctx.fnParams ?? new Map()).get(nm);
+  if (f === undefined) return null;
+  const pts = f.map((_, i) => ctx.args.get(`${nm}#${i}`) ?? 'int');
+  return `(fnty (${pts.join(' ')}) ${rt === 'void' ? 'void' : rt})`;
 }
 
 /** 这一格类型是不是聚合（记录 / 列表 / 字典 / 多值）。 */
@@ -1110,6 +1152,55 @@ function bindFill(nm, pr, env, ctx) {
 
 
 /**
+ * **函数值那一族**：`func` 站在**值**的位置上（当实参、当场就调那种）。
+ *
+ * 方言里有这一格 —— `(fnty (T…) R)` 的类型、`(fnref 名)` 把一个普通函数当值、
+ * `(callfn E a…)` 间接调（`tests/sexpr/cases/15-fnvalues.sx` 钉着这一族）。所以这一刀
+ * 只做一件事：把那几格匿名 `func` **提到顶层**，原地换成一格 `ref` ——
+ * 后面 `expr` 的 `ref` 那一支看见"这名字是个顶层函数"就发 `(fnref …)`，
+ * `callText` 看见"被调的是一格 fnty 的名字"就发 `(callfn …)`。
+ *
+ * **只提捕获为空的那种**：借了外层名字的要真闭包（`(cfn …)` + `(mkclo …)`），那是另一刀 ——
+ * 这儿原样留着，后面照旧报一格有名有姓的缺口。
+ *
+ * `bind` 位置上的那种不走这儿：那一格 `liftBody` 早就接了（提升 = 闭包，见它的注）。
+ */
+function liftFnVals(fns, rest, known, taken) {
+  const extra = [];
+  /* **没有 `func` 就一个字都不动。**`mapNodes` 是**重建**式的改写，而重建会把图上
+     **共享的那一格**拆成两格（`lazyAnd`/`lazyOr` 的 `cond` 与 `then` 本来是同一格节点，
+     `luaTernary` 认的正是那个恒等）—— 白跑一趟的代价量过：`gsl-shell` 与
+     `hand+lua-ternary` 当场从 ok 变 skip。 */
+  const hasFunc = (body) => {
+    let found = false;
+    walkCore(body, (n) => { if (n.op === 'func') found = true; });
+    return found;
+  };
+  const doOne = (body) => (hasFunc(body) ? mapNodes(body, (n) => {
+    if (n.op !== 'func') return undefined;
+    const ps = (n.attrs.params ?? []).map((q) => String(q));
+    if (capsOf(n.ins.body, new Set(ps), known).length > 0) return undefined;
+    let nm = n.attrs.name === undefined || n.attrs.name === null
+      ? `__fnval${extra.length}` : String(n.attrs.name);
+    while (taken.has(nm)) nm = `${nm}$`;
+    taken.add(nm);
+    known.add(nm);
+    extra.push({ name: nm, params: ps, body: n.ins.body });
+    return { op: 'ref', ins: {}, attrs: { name: nm }, id: -1 };
+  }) : body);
+  for (const f of fns) f.body = doOne(f.body);
+  const out = doOne(rest);
+  /* 提上来的那几格体里可能还套着一层 —— 转到不动为止（上限是防手抖，不是语义）。 */
+  for (let i = 0; i < 8; i++) {
+    const before = extra.length;
+    for (const g of extra.slice()) g.body = doOne(g.body);
+    if (extra.length === before) break;
+  }
+  for (const g of extra) fns.push(g);
+  return out;
+}
+
+/**
  * **lambda 提升**：函数体里 `bind` 出来的那格 `func`（chez 的内层 `define`）提到顶层去，
  * 它借的那几格外面的名字变成**多出来的形参**，每处调用补上那几个实参。
  *
@@ -1363,7 +1454,7 @@ export function emitCore(g) {
   const ctx = {
     byKey: new Map(), shapes: new Map(), decls: [], tmp: 0,
     defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [], collect: false,
-    globals: new Set(), fnEnv: null,
+    globals: new Set(), fnEnv: null, fnParams: new Map(),
   };
   /* 覆盖层（`types.js`）要问的那两件**后端自己的事**（见文件头那段 import 的注）：
      登记一格形状（顺带往模块头上印 `(struct rN …)`）、报一格有名有姓的缺口。 */
@@ -1397,11 +1488,14 @@ export function emitCore(g) {
   }
   const topLift = liftBody(rest0, 'main', known, taken);
   for (const g of topLift.lifted) fns.push(g);
-  const rest = topLift.body;
+  /* **函数值那一趟**：值位置上的匿名 `func` 提到顶层，原地换成一格 `ref`（见 `liftFnVals`）。 */
+  const rest = liftFnVals(fns, topLift.body, known, taken);
   /* 二、每格函数的返回类型与隐式返回 —— 互相递归（`fact` 调自己）要先登记上。 */
   /* 哪几个函数的返回值**被当值用过** —— 下面那格"没人要就是 void"要它（一次数清，
      两拨都要看：函数体里的调用点与顶层那几句）。 */
   const valueUsed = valueCalled([...fns.map((f) => f.body), rest]);
+  /* 函数名 -> 形参名单（`fnTypeOf` 拿它拼 `(fnty …)`）。 */
+  for (const f of fns) ctx.fnParams.set(f.name, f.params);
   for (const it of fns) {
     {
       const f = { ins: { body: it.body }, attrs: { params: it.params } };
