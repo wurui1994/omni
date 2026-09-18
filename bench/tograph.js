@@ -104,7 +104,7 @@ const CLASSES = [
 
   ['编译期求值（when / \$if / \$for / ctconst）', /编译期|ctime|ctconst|comptime|\$for|whenexpr/],
   ['函数值与闭包（fnlit）', /fnlit|闭包|函数值/],
-  ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%|!&|\.\.<?|\.\.\^)/],
+  ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%|!\&|\.\.<?|\.\.\^)/],
   ['集合与字符（set-lit / char / rune / array / imag / 复数）',
     /set 字面量|char 是自己一格类型|还没接：char|还没接：rune|还没接：imag|还没接：array$|要复数那一格/],
   ['类型层的算子（typeof / sizeof / is / as / x.(T)）',
@@ -221,13 +221,24 @@ function measure(lang) {
   };
   const walls = new Map();
   const classes = new Map();
+  /**
+   * **没归类的那几条按原话记**（键是归一之后那句，值是**第一次见到的原话 + 出处**）。
+   *
+   * 为什么不在印的时候现算：`classOf` 认的是**原话**，而印出来那一栏是**归一过**的
+   * （名字抹成 `'…'`、数字抹成 `N`）—— 两者不是同一个串，于是"按归一的串再判一遍"会
+   * 与账上的数**不一致**。2026-09-18 踩过：账上说"没归类 1 份"，`--nc` 一条都印不出来，
+   * 真凶是 `[5]T 的零值` 归一成 `[N]T` 之后反倒**认得出来**了。
+   */
+  const nocls = new Map();
   const bump = (msg, path) => {
     const k = wallOf(msg);
     const w = walls.get(k) ?? { n: 0, first: path };
     w.n = w.n + 1;
     walls.set(k, w);
-    const c = classOf(msg) ?? '没归类（这一栏涨了就是上面那张表漏了一族）';
-    classes.set(c, (classes.get(c) ?? 0) + 1);
+    const c = classOf(msg);
+    if (c === null && !nocls.has(k)) nocls.set(k, { msg: String(msg), path: path });
+    classes.set(c ?? '没归类（这一栏涨了就是上面那张表漏了一族）',
+      (classes.get(c ?? '没归类（这一栏涨了就是上面那张表漏了一族）') ?? 0) + 1);
   };
   const t0 = Date.now();
   /**
@@ -295,6 +306,7 @@ function measure(lang) {
   row.ms = Date.now() - t0;
   row.walls = [...walls.entries()].sort((a, b) => b[1].n - a[1].n);
   row.classes = [...classes.entries()].sort((a, b) => b[1] - a[1]);
+  row.nocls = [...nocls.entries()].map(([k, v]) => [k, v.msg, v.path]);
   return row;
 }
 
@@ -361,13 +373,15 @@ if (rows.length === 0) {
     for (const [msg, w] of shown) {
       process.stdout.write(`  ${String(w.n).padStart(5)}  ${msg}\n`);
     }
-    /* `--nc` 只印**没归类**的那几条 —— 那是"上面那张表漏了什么"的清单。 */
+    /* `--nc` 只印**没归类**的那几条 —— 那是"上面那张表漏了什么"的清单。
+       **用原话判**（`r.nocls`）：归一过的串可能落成另一族（2026-09-18 踩过），
+       而原话在 `bump` 那一步就记好了，这儿只管印。 */
     if (argv.includes('--nc')) {
-      const nc = r.walls.filter(([m]) => classOf(m) === null).slice(0, WALLS);
+      const nc = (r.nocls ?? []).slice(0, WALLS);
       if (nc.length > 0) {
-        process.stdout.write(`  ——（没归类的前 ${nc.length} 条）\n`);
-        for (const [msg, w] of nc) {
-          process.stdout.write(`  ${String(w.n).padStart(5)}  ${msg}\n`);
+        process.stdout.write(`  ——（没归类的前 ${nc.length} 条，按原话）\n`);
+        for (const [, msg] of nc) {
+          process.stdout.write(`        ${msg.slice(0, 120)}\n`);
         }
       }
     }
