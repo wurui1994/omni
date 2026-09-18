@@ -50,7 +50,7 @@ import { NODES } from './nodes.js';
 // 五份"形状上的账"各带一份证物，证物是**手搭的小图** —— 所以要 node()（它顺带查五栏声明）
 import { node, lit } from './graph.js';
 // 类型覆盖层（#40）：字面量那一档的口径归它，这条腿只做一格粗化（见 `watKind`）
-import { litType } from './types.js';
+import { litType, primFixedType } from './types.js';
 // 变参内建（`+ - * /`）的 arity 与折法归这张表 —— 两处各写一套就是两套语义
 import { PRIMS } from './prims.js';
 // 字符串常量要发成一段字节 —— 与 C / LLVM 两条腿共用同一份编码（宿主的 TextEncoder 不用）
@@ -934,11 +934,23 @@ function emitOnce(graph, retOf, multiOf) {
             + ` (local.set ${i} (i64.add (local.get ${i}) (i64.const 1))) (br ${lab}))))`);
           return `(local.get ${a})`;
         }
-        /* **contains（线性查找）**：遍历列表找一格等于目标的元素。
-           **打印 bool 还没接**：wat 把 true/false 当 1/0 存，可别的腿印 "true"/"false" ——
-           在我们有 `print_bool` 之前先跳过（那是形状上的一条账，不是这格内建本身的事）。 */
-        if (name === 'contains') {
-          throw new Gap('contains 的结果是 bool —— 打印 bool 在 wasm 上还没接（印 1/0 不等于 true/false）');
+        /* **contains（线性查找）**：遍历列表找一格等于目标的元素，找到 1、到头 0。 */
+        if (name === 'contains' && args.length === 2) {
+          needMem = true;
+          const o = tmp(sc); pre.push(`(local.set ${o} ${expr(args[0], sc, pre)})`);
+          const cv = tmp(sc); pre.push(`(local.set ${cv} ${expr(args[1], sc, pre)})`);
+          const cn = tmp(sc); pre.push(`(local.set ${cn} (i64.load ${addr(`(local.get ${o})`)}))`);
+          const ci = tmp(sc);
+          const cr = tmp(sc);
+          const clab = `$H${++loopSeq}`;
+          pre.push(`(local.set ${cr} (i64.const 0))`);
+          pre.push(`(local.set ${ci} (i64.const 0))`);
+          pre.push(`(loop ${clab} (if (i64.lt_s (local.get ${ci}) (local.get ${cn})) (then`
+            + ` (if (i64.eq (i64.load (i32.add ${addr(`(local.get ${o})`)}`
+            + ` ${addr(`(i64.mul (i64.add (local.get ${ci}) (i64.const 1)) (i64.const 8))`)})) (local.get ${cv}))`
+            + ` (then (local.set ${cr} (i64.const 1)))`
+            + ` (else (local.set ${ci} (i64.add (local.get ${ci}) (i64.const 1))) (br ${clab}))))))`);
+          return `(local.get ${cr})`;
         }
         throw new Gap(`这格内建还没接：${name}`);
       }
@@ -1417,9 +1429,20 @@ function emitOnce(graph, retOf, multiOf) {
         }
         // 数走 `print_i64`，串走 `print_str`（宿主面那格导入认"长度 + 字节"那块内存）。
         // 既装串又装数的量在这儿报缺口 —— 印一格地址是错答案。
+        /* **bool 走 print_str**（"true" / "false" 两段数据）——
+           别的腿印的是 "true"/"false"，我们不能印 "1"/"0"。两段串在 data 段里，
+           strAddr 会去重（"true" 可能已经有了）。 */
+        const isBoolPrim = one !== null && one !== undefined && one.op === 'prim'
+          && (primFixedType(one.attrs.name) === 'bool');
         const k = kindOf(one, sc);
         if (k === 'mix') throw new Gap('这一格量既装过串也装过数 —— 打印要知道是哪一种（要类型层）');
         const v = expr(one, sc, pre);
+        if (isBoolPrim) {
+          needStr = true;
+          const t = strAddr('true');
+          const f = strAddr('false');
+          return [...pre, `(if (i64.eqz ${v}) (then (call $print_str (i32.const ${f}))) (else (call $print_str (i32.const ${t}))))`];
+        }
         if (k === 'str') {
           needStr = true;
           return [...pre, `(call $print_str ${addr(v)})`];
