@@ -503,11 +503,11 @@ const watKind = (t) => (t === 'string' ? 'str' : (t === 'real' ? 'real' : 'int')
  * 从 `emitWat` 里提到顶层是为了**能被判据问**（原来它是闭包，外头问不着，
  * 于是"三处说同一句话"那条判据落不下来）。`gk` 就是那张全局量的种类表。
  */
-export function watKindOf(x, sc, gk) {
+export function watKindOf(x, sc, gk, rk) {
   if (x === null || x === undefined) return 'int';
   if (Array.isArray(x)) {
     const l = watItems(x);
-    return l.length === 0 ? 'int' : watKindOf(l[l.length - 1], sc, gk);
+    return l.length === 0 ? 'int' : watKindOf(l[l.length - 1], sc, gk, rk);
   }
   if (x.lit !== undefined) return watKind(litType(x.lit));
   switch (x.op) {
@@ -516,7 +516,16 @@ export function watKindOf(x, sc, gk) {
       const nm = x.attrs.name;
       return sc.lookup(nm) !== null ? sc.kindOf(nm) : (gk.get(nm) ?? 'int');
     }
-    case 'region': return watKindOf(x.ins.body, sc, gk);
+    case 'region': return watKindOf(x.ins.body, sc, gk, rk);
+    /* **一段以 `return X` 结尾的体，种类就是 X 的**。没这一档的时候它落到 default 答
+     * 'int'，于是"每支都 return 一格串"的 case 链（nim 的 `grade`）在 `fnBody` 那儿
+     * 先被记成返回 int、里头那几条 ret 再记成 str，自己跟自己打起来报 mix。 */
+    case 'ret': return watKindOf(x.ins.value, sc, gk, rk);
+    /* **调一格函数：种类由被调的那一格答**（`rk` 就是那张表，emitWat 的定点算出来的）。
+     * 没这一档的时候这儿一律答 'int'，于是"返回一格串"的函数在调用点上就变成了一个数，
+     * 而它的值是那块内存的地址 —— 印出来是个大整数。所以从前 `onlyInt('返回值')`
+     * 那道缺口是**必须**的；现在种类能跨函数边界了，那道缺口才付得掉。 */
+    case 'call': return rk === undefined ? 'int' : (rk.get(x.ins.fn?.attrs?.name) ?? 'int');
     // 表示转换：目标那一栏（`to`）就是答案 —— 这一格是"两种数值类型"的入口。
     // **不走覆盖层的 `convTo`**：那一格对 `to=bool` 报缺口（方言里没有 tobool），
     // 而 wat 这边 bool 就是 i64，接得住 —— 这是腿的事，不是类型的事。
@@ -531,11 +540,11 @@ export function watKindOf(x, sc, gk) {
       const args = watItems(x.ins.args);
       if (nm === 'concat') return 'str';
       if (!WAT_ARITH.has(nm)) return 'int';
-      if (nm === '+' && args.some((a) => watKindOf(a, sc, gk) === 'str')) return 'str';
-      return args.some((a) => watKindOf(a, sc, gk) === 'real') ? 'real' : 'int';
+      if (nm === '+' && args.some((a) => watKindOf(a, sc, gk, rk) === 'str')) return 'str';
+      return args.some((a) => watKindOf(a, sc, gk, rk) === 'real') ? 'real' : 'int';
     }
     case 'branch': {
-      const a = watKindOf(x.ins.then, sc, gk); const b = watKindOf(x.ins.else, sc, gk);
+      const a = watKindOf(x.ins.then, sc, gk, rk); const b = watKindOf(x.ins.else, sc, gk, rk);
       return a === b ? a : 'mix';
     }
     default: return 'int';
@@ -607,7 +616,7 @@ function topFuncs(items) {
  * 出一份 WAT。**跑两遍**：第一遍只为把"哪个函数出值"数出来（语句位置的调用要不要
  * `drop` 取决于它），第二遍拿着那张表出正式的文本。图都很小，两遍比猜便宜。
  */
-function emitOnce(graph, retOf, multiOf) {
+function emitOnce(graph, retOf, multiOf, kindOfFn) {
   const items = watItems(graph.kind === 'graph' ? graph.body : graph);
   const mod = new Mod();
   const fns = topFuncs(items);
@@ -707,10 +716,11 @@ function emitOnce(graph, retOf, multiOf) {
   }
 
   /* 这一格值装的是数 / 实数 / 串 —— 问的是**顶层那一份**（`watKindOf`，见文件末），
-     这儿只把"全局量装的是什么"那张表绑上去。 */
-  const kindOf = (x, sc) => watKindOf(x, sc, globalKinds);
+     这儿把两张表绑上去：全局量装的是什么、以及**每个函数返回的是什么**（`kindOfFn`，
+     由 emitWat 的定点算出来 —— 与 `retOf` / `multiOf` 同一趟）。 */
+  const kindOf = (x, sc) => watKindOf(x, sc, globalKinds, kindOfFn);
 
-  /** 串只许待在"绑给局部量"与"打印"这两处。别的地方接住了就是给错答案，所以报缺口。 */
+  /** 串只许待在"绑给局部量"、"打印"与"整格返回"这三处。别的地方接住了就是给错答案。 */
   function onlyInt(x, sc, where) {
     const k = kindOf(x, sc);
     if (k === 'str' || k === 'mix') {
@@ -718,6 +728,25 @@ function emitOnce(graph, retOf, multiOf) {
     }
     if (k === 'real') {
       throw new Gap(`${where}上还接不住实数（内存里的一格是 i64，要按类型排的布局）`);
+    }
+  }
+
+  /**
+   * **返回值那一格**：串接得住（wasm 上它就是一格 i64 地址，签名一个字都不用改），
+   * 记下来给调用点问（`f.rkind` -> emitWat 的那张表）。两条 `return` 一格出串一格出数
+   * 就报缺口 —— wasm 的返回值只有一种类型，猜一个必错一半。实数照旧欠着。
+   */
+  function noteRet(y, sc, f) {
+    const k = kindOf(y, sc);
+    if (k === 'mix') {
+      throw new Gap('返回值上还接不住字符串（wasm 上它是内存里的一块地址，要类型层才认得出）');
+    }
+    if (k === 'real') {
+      throw new Gap('返回值上还接不住实数（内存里的一格是 i64，要按类型排的布局）');
+    }
+    if (f.rkind === undefined) f.rkind = k;
+    else if (f.rkind !== k) {
+      throw new Gap('同一格函数两条 return 一格出串一格出数 —— wasm 的返回值只有一种类型');
     }
   }
 
@@ -1377,7 +1406,7 @@ function emitOnce(graph, retOf, multiOf) {
           const n = watItems(x.ins.value.ins.args).length;
           f.multi = (f.multi === 0 || f.multi === n) ? n : 'mix';
         }
-        onlyInt(x.ins.value, sc, '返回值');
+        noteRet(x.ins.value, sc, f);
         const v = expr(x.ins.value, sc, pre);
         f.ret = true;
         // 早退也要经过途中每一格 region 的出口（从里往外）。
@@ -1582,7 +1611,7 @@ function emitOnce(graph, retOf, multiOf) {
       && (last.lit !== undefined || (last.op !== undefined && (NODES.get(last.op)?.outs.length ?? 0) > 0));
     if (!hasValue) return [...head, ...stmt(last, sc, f)];
     const pre = [];
-    onlyInt(last, sc, '返回值');
+    noteRet(last, sc, f);
     const v = expr(last, sc, pre);
     f.ret = true;
     // **落到函数末尾也是一条出口**：这儿走的是"最后一格就是返回值"那条路，所以出口动作
@@ -1682,6 +1711,8 @@ function emitOnce(graph, retOf, multiOf) {
     // `forced` 要算进"出不出值"：进了表的函数被迫出值，直接调用点也得跟着 drop
     rets: new Map([...mod.fns.values()].map((f) => [f.src, f.ret || forced.has(f.name)])),
     multis: new Map([...mod.fns.values()].map((f) => [f.src, f.multi])),
+    // 每个函数返回的是数还是串 —— 调用点的种类靠它（`watKindOf` 的 `call` 那一档）
+    kinds: new Map([...mod.fns.values()].map((f) => [f.src, f.rkind ?? 'int'])),
   };
 }
 
@@ -1701,14 +1732,19 @@ export function emitWat(graph) {
    * 上限 4 是防手抖，不是语义（每一遍只可能把"不出值"翻成"出值"，单调，一定会停）。 */
   let rets = new Map();
   let multis = new Map();
-  let last = emitOnce(graph, rets, multis);
+  let kinds = new Map();
+  let last = emitOnce(graph, rets, multis, kinds);
   for (let i = 0; i < 4; i++) {
     const same = last.rets.size === rets.size
-      && [...last.rets].every(([k, v]) => rets.get(k) === v);
+      && [...last.rets].every(([k, v]) => rets.get(k) === v)
+      // 返回种类那张表也得算进"不动"：它与 rets 互相喂（末尾那格调用出不出串要问被调的）
+      && last.kinds.size === kinds.size
+      && [...last.kinds].every(([k, v]) => kinds.get(k) === v);
     rets = last.rets;
     multis = last.multis;
+    kinds = last.kinds;
     if (same) break;
-    last = emitOnce(graph, rets, multis);
+    last = emitOnce(graph, rets, multis, kinds);
   }
   return last.text;
 }

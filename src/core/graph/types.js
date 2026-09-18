@@ -167,6 +167,18 @@ export function inferType(x, env, ctx) {
     return (nm !== null ? env.get(`fn:${nm}`) : null) ?? UNKNOWN;
   }
   if (x.op === 'branch') return inferType(x.ins.then, env, ctx);
+  /* `ret` **交出去的就是它那格值的类型**。这一格本来落到末尾的 UNKNOWN，而 wat 那条腿
+     要靠它认出"每支都 return 一格串"的 case 链（`backend-wat.js` 的 watKindOf）——
+     两边说同一句话是 `tests/graph/types.js` 判据一钉着的。 */
+  if (x.op === 'ret') {
+    return x.ins.value === undefined ? UNKNOWN : inferType(x.ins.value, env, ctx);
+  }
+  /* `region` 也是透传：**体里最后那一格就是它的值**（CL 的 `(let (…) … acc)`）。
+     env 用的是外头那一份 —— 体里绑的名字在这张平表上查不着，答 unknown 而不是答错。 */
+  if (x.op === 'region') {
+    const body = argList(x, 'body');
+    return body.length === 0 ? UNKNOWN : inferType(body[body.length - 1], env, ctx);
+  }
   if (x.op === 'field-get') return fieldType(x, env, ctx);
   if (x.op === 'index-get') return elemType(inferType(x.ins.obj, env, ctx)) ?? UNKNOWN;
   if (x.op === 'map-get') {
