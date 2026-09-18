@@ -1202,6 +1202,29 @@ function $js_bitop(op, a, b) {
     default: $rt_error("unknown bitwise op '" + op + "'");
   }
 }
+/* 位运算特化（与算术那一族同一条纪律）。
+   JS 的位运算在 number 上是 ToInt32 再算（规范 13.15.3）——两个 number 时直接用宿主的算子。
+   bigint 那一支与混合类型那一支转给 $js_bitop。 */
+function $js_band(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a & b;
+  return $js_bitop("&", a, b);
+}
+function $js_bor(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a | b;
+  return $js_bitop("|", a, b);
+}
+function $js_bxor(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a ^ b;
+  return $js_bitop("^", a, b);
+}
+function $js_bshl(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a << (b & 31);
+  return $js_bitop("<", a, b);
+}
+function $js_bshr(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a >> (b & 31);
+  return $js_bitop(">", a, b);
+}
 // 一元 ~ 单独一个 op：ABI 里所有 op 的实参个数是定的，不做可变长
 function $js_bitnot(a) {
   if ($dynTag(a) !== "int") return ~$js_toi32(a);

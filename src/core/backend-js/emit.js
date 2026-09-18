@@ -1050,6 +1050,11 @@ class JsEmitter {
         const fn = CMP_FN[e.op];
         return fn !== undefined ? `${fn}(${a.join(', ')})` : `$js_cmp(${JSON.stringify(e.op)}, ${a.join(', ')})`;
       }
+      case 'js_bitop': {
+        const BIT_FN = { '&': '$js_band', '|': '$js_bor', '^': '$js_bxor', '<': '$js_bshl', '>': '$js_bshr' };
+        const fn = BIT_FN[e.op];
+        return fn !== undefined ? `${fn}(${a.join(', ')})` : `$js_bitop(${JSON.stringify(e.op)}, ${a.join(', ')})`;
+      }
       default: {
         const abi = JS_ALL[e.name];
         if (!abi) throw new Error(`js.builtin: ${e.name}`);
