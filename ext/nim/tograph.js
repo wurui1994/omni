@@ -108,6 +108,16 @@ const NIM_CT_ENV = new Map(Object.entries({
   release: false, danger: false, debug: true, useMalloc: false, gcArc: false, gcOrc: false,
   windowsHasEnvironmentVariables: false, cpu32: false, bigEndian: false, clang: false,
   vcc: false, tcc: false, icl: false, nimHasStyleChecks: true,
+  /* **-d 开关那一族**（原来这几个不在表里，24 份卡在 `defined(nimPreviewSlimSystem)` 上）。
+     `nimPreviewSlimSystem` 是"不自动 import 那些旧的符号"，新的 nim 编译器自己用它 ——
+     声明为 true（那门编译器自己选的开关，当 true 不会丢代码，当 false 会少 import 一批
+     但不影响编译 —— 这一格的理由是"漏了"，不是"两边都有理"）。
+     `hasThreads` 是 `compileOption("threads")`：参考目标上默认关。
+     `useRef` 在 Nim 2.x 的 GC 里：参考目标上默认关。 */
+  nimPreviewSlimSystem: true, hasThreads: false, useRef: false,
+  /* 第二批补：`isDebug` 是 `compileOption("assertions")`（参考目标 debug 模式 -> true），
+     `hasRstdin` 是 Nim 自己那门编译器的检查（`-d:hasRstdin`，默认不带 -> false）。 */
+  isDebug: true, hasRstdin: false,
 }));
 
 /** `when` 的条件求值。认不出来的形状**当场报**（与 V 那一份同一条纪律：不猜）。 */

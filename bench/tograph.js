@@ -97,14 +97,14 @@ const CLASSES = [
   // 新那两句话里没有 `addr` / `deref` 这两个词，所以"指针那一格"也要在名单里
   // （落地那一刻忘了加，"没归类"当场从 41 涨到 199 —— 那一栏又一次自己举了手）。
   ['指针（真别名：`&x` · 光秃秃的 `*p`）',
-    /addr|deref|这个算子还没接：&(?!&)|（解引用）|指针那一格|还没接：ptr/],
+    /addr|deref|这个算子还没接：&(?!&)|（解引用）|指针那一格|还没接：ptr|p\[\] 图上没有指针/],
   // `体里的 err` 那一条也归这一族（Option 那一刀之后剩下的最大一块 —— 错误消息不在图上）
   ['option / result（or-block · 传播 · ?T · `or { … }` 体里的 err）',
     /or-block|propagate|option|Option \/ Result/],
 
-  ['编译期求值（when / \$if / \$for / ctconst）', /编译期|ctime|ctconst|comptime|\$for/],
+  ['编译期求值（when / \$if / \$for / ctconst）', /编译期|ctime|ctconst|comptime|\$for|whenexpr/],
   ['函数值与闭包（fnlit）', /fnlit|闭包|函数值/],
-  ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%)/],
+  ['位运算（<< >> & | ^ shl）', /这个算子还没接：(<<|>>|\||\^|shl|shr|&\^|\+%|!&|\.\.<?|\.\.\^)/],
   ['集合与字符（set-lit / char / rune / array / imag）',
     /set 字面量|char 是自己一格类型|还没接：char|还没接：rune|还没接：imag|还没接：array$/],
   ['类型层的算子（typeof / sizeof / is / as / x.(T)）',
@@ -116,7 +116,7 @@ const CLASSES = [
     /是 embed|还没接：tinst|重名要类型才分得开|好几个类型都声明了方法|sum type 那一族要类型|有嵌入字段|两个枚举里都有/],
   ['C 指令与外部声明（#flag / $c）', /cdirective/],
   ['语句头上的绑定（V 的 `if x := …`）', /还没接：if-bind/],
-  ['命名实参 / 变参展开', /还没接：named|还没接：spread|命名实参/],
+  ['命名实参 / 变参展开', /还没接：named|还没接：spread|命名实参|还没接：kv/],
   ['成员是不是在里头（数组的 `in`）', /只接 map（数组的 in|还没接：in$/],
   // 表达式位置上的 match 那两条也是**明说过的**（没有 else 就没有值 · 一支只准一格表达式）
   ['明说过的形状限制（主语要算好几遍 · 匿名接收者 · 格式动词 …）',
@@ -137,8 +137,8 @@ const CLASSES = [
      以及**表示层的转换要类型**（`[]byte(s)` / `(*T)(p)`）。 */
   ['落成 branch 链接不住的那两格（fallthrough / 带标签的语句）',
     /fallthrough|带标签的语句/],
-  ['表示层的转换（`[]byte(s)` / `(*T)(p)` / range 表达式 / 具名类型 tname）',
-    /表示层的转换|还没接：range|还没接：tname/],
+  ['表示层的转换（`[]byte(s)` / `(*T)(p)` / range 表达式 / 具名类型 tname / cast）',
+    /表示层的转换|还没接：range|还没接：tname|还没接：cast|还没接：undefined$/],
 ];
 
 /** 一堵墙归到哪一族（认不出来回 null —— 那时它进"没归类"，印出来）。 */
