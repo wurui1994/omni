@@ -954,13 +954,18 @@ function toNode(x) {
           throw new Error('v->graph: 结构字面量里位置与字段名混着 —— V 也不许这么写');
         }
         const nm = tnameText(kids(x)[0]);
+        /* **类型那一格不是具名类型**（量出来 30 份全是 `tinst` —— `Foo[int]{1, 2}` 那种
+           泛型实例化）：字段名与顺序要**实例化之后**的那个类型，与"声明在哪份文件里"
+           无关。所以这一条不是跨文件那一族，是类型那一层（第 40 条）。 */
+        if (nm === null) {
+          throw new Error('v->graph: 位置型结构字面量的类型是泛型实例化'
+            + `（${tag(kids(x)[0])}）—— 字段名与顺序要实例化之后的类型（要类型那一层）`);
+        }
         /* 本模块那张表里没有时到**跨模块表**里找一次（`mod.Type` 那种限定名直接查，
            光名字要到 import 过的模块里逐个试 —— 找到正好一格才算）。 */
-        let fs = nm === null ? undefined : STRUCTS.get(nm);
-        if (fs === undefined && nm !== null) fs = xStruct(nm);
+        const fs = STRUCTS.has(nm) ? STRUCTS.get(nm) : xStruct(nm);
         if (fs === undefined) {
-          throw new Error('v->graph: 位置型结构字面量要字段名与顺序，而 '
-            + `${nm ?? `这一格类型的形状是 ${tag(kids(x)[0])}（不是具名类型）`} 的`
+          throw new Error(`v->graph: 位置型结构字面量要字段名与顺序，而 ${nm} 的`
             + '声明不在这一份文件、也不在 import 过的模块里');
         }
         if (fs === null) {
