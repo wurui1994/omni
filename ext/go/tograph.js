@@ -548,9 +548,10 @@ function forRangeOf(x) {
  *
  * 接两种，别的当场报：
  *   * `make(map[K]V)` -> 一格空 map（容量那格提示丢掉 —— 图上没有容量）；
- *   * `make([]T, 0[, cap])` -> 一格空列表。**长度不是 0 的那种接不了**：
- *     `make([]T, n)` 要的是"一格长度为 n 的新列表"，而图上的 `list-new` 收的是**元素表**
- *     —— 那是另一格节点（动态长度的构造），不在这一批。
+ *   * `make([]T, n[, cap])` -> 一格内建 `fill(n, T 的零值)`。**长度 0 那种也走这一条**：
+ *     从前它落一格空 `list-new`，而空列表**把元素类型丢了** —— core 那条腿当场报
+ *     "一格空列表（元素类型推不出来）"，可 go 的声明里那个 T 写得清清楚楚。
+ *     `fill(0, T 的零值)` 交出来的值一模一样（空列表），多留下的正是那格类型。
  */
 /**
  * **格式串落成一格 `concat`**（`fmt.Sprintf` / `Errorf` / `Printf`）。
@@ -594,12 +595,13 @@ function makeOf(args) {
   if (tag(ty) === 'map') return mapNew([]);
   if (tag(ty) === 'slice') {
     const n = args[1];
-    if (n === undefined) return listNew([]);
-    if (tag(n) === 'num' && Number(leaf(kids(n)[0])) === 0) return listNew([]);
     /* `make([]T, n)` —— 落一格内建 `fill(n, T 的零值)`（列表上的一个库函数 -> 内建，
        与 `push` / `contains` 同一类）。零值走的还是 `zeroOf` 那一格：**具名结构体的零值
-       在那儿本来就当场报**，所以"初值是一格聚合"那条约束在两边是对上的。 */
-    return node('prim', { args: [toNode(n), zeroOf(kids(ty)[0])] }, { name: 'fill' });
+       在那儿本来就当场报**，所以"初值是一格聚合"那条约束在两边是对上的。
+       **长度省掉或者是 0 也走这一条**（见上面那段）：空 `list-new` 会把元素类型丢掉。 */
+    return node('prim', {
+      args: [n === undefined ? lit(0) : toNode(n), zeroOf(kids(ty)[0])],
+    }, { name: 'fill' });
   }
   throw new Error(`go->graph: make 的第一格是 ${tag(ty)} —— 这一批只接 map 与切片`);
 }
