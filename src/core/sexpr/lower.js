@@ -73,7 +73,7 @@ const BASE_TYPES = new Map([['int', INT], ['real', REAL], ['bool', BOOL], ['stri
   ['dyn', DYNAMIC]]);
 
 /** `(dyn E)` 这一刀装得下的那几档（容器与函数那几样欠着，理由在 dyn 那一段）。 */
-const DYN_BOXABLE = new Set(['int', 'real', 'bool', 'string']);
+const DYN_BOXABLE = new Set(['int', 'real', 'bool', 'string', 'fn']);
 
 /** 拆箱那四条：方言里的写法 -> OIR 那格 `Builtin` 的名字与出来的类型。 */
 const DYN_UNBOX = new Map([

@@ -16,6 +16,10 @@
 ;;   6. **异质字典**（`(dict string dyn)`）：同一格字典里一格装数一格装串 —— 那正是
 ;;      lua 的元表要的形状，也是图那一轴最后 4 格的目标。这一格**一行没多写就通了**：
 ;;      `(dict K V)` 的 V 是从 BASE_TYPES 里读的，`dyn` 进了那张表它就认。
+;;   7. **函数也装得进 dyn**，标签是 `"function"`，四条腿一个字不差 —— C 侧那张标签名表
+;;      与 JS 的 `typeof` 撞上了同一个词，不是我们凑的。**还拆不出来**（要一格中立的
+;;      `asFn`：`js_asFn` 是 JS 域的 op，带着那边的 pending 协议，不能拖进汇聚层）——
+;;      所以这一格只钉"装得进 + 认得出是函数"，`(asfn …)` 是下一刀。
 ;;
 ;; 拆箱**带检查**：标签不对当场报运行期错误（那一路在 rt/ 里，不在这儿）。
 
@@ -67,5 +71,11 @@
     (print (asint (dget (var m) (str "n"))))
     (print (dtag (dget (var m) (str "s"))))
     (print (asstr (dget (var m) (str "s"))))
+
+    ;; 判据 7：函数装进 dyn —— 直接装一格，再进那格异质字典里躺一趟，标签都是 function
+    (print (dtag (dyn (fnref tagof))))
+    (dset (var m) (str "f") (dyn (fnref tagof)))
+    (print (dlen (var m)))
+    (print (dtag (dget (var m) (str "f"))))
   )
 )

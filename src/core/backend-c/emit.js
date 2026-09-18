@@ -1745,6 +1745,11 @@ class CEmitter {
       case 'list': case 'dict': return `omni_dyn_of_ref((void *)(${code}), ${DYN_TAG[from.k]})`;
       case 'dynamic': return code;
       case 'null': return 'omni_dyn_null()';
+      /* 函数进 dyn：标签与构造子运行时里本来就有（`OMNI_DYN_FN` / `omni_dyn_of_fn`，
+         ADR-0011 那条 JS 互操作路上留下的），四条腿问出来的标签也都是 "function"
+         （C 侧那张名字表与 JS 的 typeof 撞上了同一个词）。所以这一格只是把那条路
+         接到"静态的函数值"上 —— 方言里 `(dyn (fnref f))` 走的就是它。 */
+      case 'fn': return `omni_dyn_of_fn((omni_fn)(${code}))`;
       default: throw new Error(`c.box: ${from.k}`);
     }
   }
