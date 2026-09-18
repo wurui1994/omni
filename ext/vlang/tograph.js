@@ -145,6 +145,18 @@ function namedType(t) {
   return null;      // 数组 / map / fntype / tinst 那几格不是具名类型
 }
 
+/**
+ * **接收者那一格的具名类型**（V 的树形状：`(recv (p c (tname Counter) mut))`）。
+ *
+ * 那一格里**名字与 `mut` 都是记号**（不是子表），所以"按标签挑"挑不出来 ——
+ * 直接拿 `namedType` 逐个问，第一个答得出名字的就是它（记号一律回 null）。
+ */
+function recvOwner(recv) {
+  const inner = kids(recv)[0];
+  if (inner === undefined) return null;
+  return kids(inner).map(namedType).find((t) => t !== null) ?? null;
+}
+
 /** `T{…}` / `&T{…}` 那格**结构字面量**的具名类型（别的形状回 null —— 不猜）。 */
 function litTypeName(r) {
   if (r === undefined || r === null || !isList(r)) return null;
@@ -213,16 +225,14 @@ function collectDecls(x, shapesOnly) {
   if (tag(x) === 'method') {
     const [recv, nm] = kids(x);
     const name = leaf(nm);
-    const ty = part(kids(recv)[0], 'tname');
-    const owner = ty === undefined ? '?' : leaf(kids(ty)[0]);
-    /* **按 `类型.名字` 收**（`opts.also` 那几份也收 —— 这样存不会撞名，见 `MSET` 那一段）。 */
-    MSET.add(`${owner}.${name}`);
-    if (shapesOnly !== true) {
-      /* 平表仍旧留着：接收者的类型**看不出来**时靠它（那时只认"这个名字只有一个主人"）。
-         撞名**不再当场报** —— 压平之后两格方法是两个名字，声明这一步没有冲突；
-         报不报要等**调用点**（那儿才知道接收者的类型知不知道）。 */
-      const had = METHODS.get(name);
-      METHODS.set(name, had === undefined || had === owner ? owner : null);
+    const owner = recvOwner(recv);
+    /* **主人认不出来时不登记**（与 go 那一份同一条纪律 —— 见 `recvOwner` 那段）。 */
+    if (owner !== null) {
+      MSET.add(`${owner}.${name}`);
+      if (shapesOnly !== true) {
+        const had = METHODS.get(name);
+        METHODS.set(name, had === undefined || had === owner ? owner : null);
+      }
     }
   }
   for (const k of kids(x)) collectDecls(k, shapesOnly);
@@ -1078,7 +1088,10 @@ function toNode(x) {
       if (self === undefined) {
         throw new Error(`v->graph: ${srcName} 的接收者没有名字 —— 匿名接收者这一批没接`);
       }
-      const ownerTn = tnameText(kids(kids(recv)[0])[1]);
+      /* **与登记那一处同一个算法**（`recvOwner`）：从前这儿按位置取 `[1]`，
+         而登记那儿用 `part(…, 'tname')` —— `&Counter` / `mut Counter` 两种接收者
+         在两处的答案不一样，调用点就落一格指向不存在的函数的 `ref`（go 那边同一个坑）。 */
+      const ownerTn = recvOwner(recv);
       const graphName = ownerTn !== null ? mangle(ownerTn, srcName) : srcName;
       return node('bind', {
         init: funcOf(x, graphName, leaf(self), ownerTn, srcName),
@@ -1369,7 +1382,14 @@ export function vlangToGraph(tree, opts) {
   for (const t of opts?.also ?? []) {
     if (t === tree) continue;
     for (const nm of mapNames(t, mapBindName)) MAPS.add(nm);
-    collectDecls(t, true);   // shapesOnly: struct / enum 要，方法名不要（重名太多）
+    /* **平表也收**（`shapesOnly` 传 false，与 go 那一份对齐 —— 2026-09-18 量出来的）。
+       这道闸管的只有**平表** `METHODS`（`MSET` 那张按 `类型.名字` 存的表在闸外头，
+       本来就收 `opts.also` 那几份）。量的是「取字段调」那一栏（分子里的虚数）：
+         * 平表不收旁边那几份：**485 份**（`flat === undefined` 就走兜底）
+         * 平表也收：            **468 份**（少 17 份）
+       "撞名会多"这一半是真的，可撞名本来也走兜底 —— 而"这名字只声明在旁边那份里"
+       那一半从前**一律**走兜底。两边相抵之后收着更好。落成图的数两种都是 1389。 */
+    collectDecls(t, false);
   }
   collectDecls(tree);
   /* 匿名 fn 与 Option 那格临时名的编号**按文件重来** —— 同一份源码要落出同一张图
