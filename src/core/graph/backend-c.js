@@ -91,6 +91,10 @@ typedef struct gv { long long t; long long b; } gv;
 #define GT_REC 5
 #define GT_MAP 6
 #define GT_VALS 7
+/* 函数值（ADR-0017 第五刀那一半在 C 上的样子）：载荷里躺的是它**在函数表里的下标**。
+   与 wat 那条腿一字同理（那边是一格表下标 + call_indirect）——
+   一格数带不了捕获，所以真闭包照旧当场报，这一格只管"函数当值用 + 按值调用"。 */
+#define GT_FN 8
 
 /* 骂一句再退。**不悄悄给错答案**：越界、缺键、没定的格式都走这儿 —— 与调度器那侧
  * 「当场报」同一条（eval.js 里那几处 throw）。 */
@@ -114,6 +118,7 @@ static gv g_num(double d) { gv v; v.t = GT_NUM; memcpy(&v.b, &d, 8); return v; }
 static double g_d(gv v) { double d; memcpy(&d, &v.b, 8); return d; }
 static gv g_str(const char *s) { gv v; v.t = GT_STR; memcpy(&v.b, &s, 8); return v; }
 static const char *g_s(gv v) { const char *s; memcpy(&s, &v.b, 8); return s; }
+static gv g_fn(long long i) { gv v; v.t = GT_FN; v.b = i; return v; }
 
 static glist *g_L(gv v) { glist *p; memcpy(&p, &v.b, 8); return p; }
 static grec *g_R(gv v) { grec *p; memcpy(&p, &v.b, 8); return p; }
@@ -900,6 +905,10 @@ class CGen {
     /** 顶层的 `bind`（不是函数的那些）名字集合——它们在 C 里是模块级 `static gv`，
         函数提升时不算捕获（任何函数都看得见）。 */
     this.topBinds = new Set();
+    /** **函数表**：下标 -> C 函数名（`g_fn(下标)` 就是那格函数值）。按名字去重。 */
+    this.table = [];
+    /** 按值调用用到了哪几种元数（每种发一格 `g_callN` 派发器）。 */
+    this.callArities = new Set();
     /** 那里头**真被某个顶层函数体读到**的那几格 —— 只有它们要落成模块级 static
         （别的照旧当 `main` 的局部量，产物一个字节不动）。 */
     this.hoisted = new Set();
@@ -1161,7 +1170,15 @@ class CGen {
     return cname;
   }
 
-  /** 一格调用。名字指向顶层函数、或者当场摆着一格 `func` —— 别的（按值调用）报缺口。 */
+  /** 这格 C 函数在函数表里的下标（没进过表就添一格）。 */
+  tableSlot(cname) {
+    const i = this.table.indexOf(cname);
+    if (i >= 0) return i;
+    this.table.push(cname);
+    return this.table.length - 1;
+  }
+
+  /** 一格调用。名字指向顶层函数、当场摆着一格 `func`、或者**按值调用**（走函数表）。 */
   callOf(x) {
     const raw = asList(x.ins.args).filter((y) => y !== undefined);
     const fn = x.ins.fn;
@@ -1175,7 +1192,14 @@ class CGen {
     if (fn !== undefined && fn !== null && fn.op === 'func') {
       return `${this.liftFunc(fn, undefined)}(${args.join(', ')})`;
     }
-    throw new Gap('c 后端：按值调用（函数从一格变量里来）还没接 —— 要一格函数指针表');
+    /* **按值调用**：被调的是一格**值**（形参 / 局部里装着 `g_fn(下标)`）——
+       走那格按元数分的派发器 `g_callN`（emitC 末尾按用到的元数各发一格）。
+       与 wat 那条腿的 `call_indirect` 是同一件事，只是这边用 switch 代替函数表指令。 */
+    if (fn !== undefined && fn !== null && fn.op === 'ref') {
+      this.callArities.add(args.length);
+      return `g_call${args.length}(${this.valOf(fn)}${args.length === 0 ? '' : `, ${args.join(', ')}`})`;
+    }
+    throw new Gap('c 后端：调一格既不是名字也不是当场摆着的 func');
   }
 
   lit(v) {
@@ -1246,6 +1270,11 @@ class CGen {
     if (x.op === 'const') return this.lit(x.attrs.value ?? null);
     /* 窄成 `double` 的那几格：值位置上要**装回去**（这一格就是窄化的全部代价）。 */
     if (x.op === 'ref') {
+      /* **一格顶层函数名当值用** ⇒ `g_fn(表下标)`。局部量没有与函数同名的（提升时那个名字
+         就占住了顶层，见 `liftTop` 的 `taken`），所以这一问在前头是安全的。 */
+      if (this.num.has(x.attrs.name) === false && this.fnOf.has(x.attrs.name)) {
+        return `g_fn(${this.tableSlot(this.fnOf.get(x.attrs.name))})`;
+      }
       return this.num.has(x.attrs.name) ? `g_num(${cName(x.attrs.name)})` : cName(x.attrs.name);
     }
     if (x.op === 'prim') return this.prim(x);
@@ -1326,7 +1355,9 @@ class CGen {
       return `g_slice(${o}, ${a}, ${b})`;
     }
     if (x.op === 'func') {
-      throw new Gap('c 后端：`func` 当值用（不是当场调用、也不是绑给一个名字）还没接');
+      /* **`func` 当值用** = 提到顶层 + 一格表下标（与 wat 那条腿的 `funcValue` 同一条）。
+         捕获照旧在 `liftFunc` 那儿当场报 —— 一格数带不了环境。 */
+      return `g_fn(${this.tableSlot(this.liftFunc(x, undefined))})`;
     }
     if (x.op === 'branch') {
       /* 两边都发不出语句 -> 一格三目（省下「声明 + 两次赋值」那五行）。 */
@@ -1733,13 +1764,40 @@ export function emitC(g) {
   const rty = (f) => (f.rnum === true ? 'double' : 'gv');
   const protos = gen.fns.map((f) => `static ${rty(f)} ${f.cname}(${sig(f)});`);
   const bodies = gen.fns.map((f) => `static ${rty(f)} ${f.cname}(${sig(f)}) {\n${f.lines.join('\n')}\n}\n`);
+  /* **按元数分的派发器**（`g_callN`）—— 函数表那一半。为什么按元数分：C 里
+     "元数不同的函数指针"不是一个类型，而图上的 `call` 只说"被调者 + 实参若干"。
+     窄了的那几个在这儿**装回去**：形参窄了就 `g_d(aK)`、返回值窄了就 `g_num(…)` ——
+     那正是窄化那一刀的代价落在哪儿（判据 3 的原话："只在被人当值用时才装回去"）。 */
+  const byName = new Map(gen.fns.map((f) => [f.cname, f]));
+  const dispatch = [...gen.callArities].sort((a, b) => a - b).map((n) => {
+    const ps = Array.from({ length: n }, (_, i) => `gv a${i}`);
+    const head = `static gv g_call${n}(gv f${ps.length === 0 ? '' : `, ${ps.join(', ')}`})`;
+    const arms = [];
+    for (let i = 0; i < gen.table.length; i++) {
+      const f = byName.get(gen.table[i]);
+      if (f === undefined || f.params.length !== n) continue;
+      const as = Array.from({ length: n }, (_, k) => (f.pnum === true ? `g_d(a${k})` : `a${k}`));
+      const call = `${f.cname}(${as.join(', ')})`;
+      arms.push(`  case ${i}: return ${f.rnum === true ? `g_num(${call})` : call};`);
+    }
+    return `${head} {\n`
+      + `  if (f.t != GT_FN) g_die("按值调用：不是一格函数值");\n`
+      + `  switch ((int)f.b) {\n${arms.join('\n')}\n  }\n`
+      + `  g_die("按值调用：函数表里没有这一格元数");\n  return g_nil();\n}\n`;
+  });
+  const dprotos = [...gen.callArities].sort((a, b) => a - b).map((n) => {
+    const ps = Array.from({ length: n }, (_, i) => `gv a${i}`);
+    return `static gv g_call${n}(gv f${ps.length === 0 ? '' : `, ${ps.join(', ')}`});`;
+  });
   const prog = `/* ---- 编译期就知道的那几格常量 */
 ${gen.decls.join('\n')}
 
 /* ---- 提到顶层的那些函数 */
 ${protos.join('\n')}
+${dprotos.join('\n')}
 
 ${bodies.join('\n')}
+${dispatch.join('\n')}
 /* ---- 顶层那一块 */
 int main(void) {
 ${gen.lines.join('\n')}
@@ -1870,15 +1928,21 @@ export const C_SHAPES = [
     }),
   },
   {
-    what: '**按值调用**（函数从一格变量里来，不是当场摆着也不是一个顶层名字）',
-    why: '要一格函数指针表 + 按元数分的签名。与上一条同一格能力的另一半：'
-      + '有了环境对象与间接调用，这一条跟着就通',
+    what: '调一格**既不是名字也不是当场摆着的 func**',
+    why: '按值调用（一格变量里装着 `g_fn(下标)`）已经接上了 —— 走那格按元数分的派发器。'
+      + '剩下的是被调者**更复杂**的那几种：从字典里取出来再调（lua 的元表分派就是 '
+      + '`(call (map-get …))`）。那要先把"函数装进容器"那一格接上，与 core 那侧欠的是同一格',
+    /* 证物：被调的是一格**下标取出来的东西**（不是名字、也不是当场摆着的 func）。 */
     witness: () => ({
       kind: 'graph',
       body: [
         node('bind', { init: node('list-new', { items: [{ lit: 1 }] }) }, { name: 'g' }),
-        node('prim', { args: [node('call', { fn: node('ref', {}, { name: 'g' }), args: [] })] },
-          { name: 'print' }),
+        node('prim', {
+          args: [node('call', {
+            fn: node('index-get', { obj: node('ref', {}, { name: 'g' }), index: { lit: 0 } }),
+            args: [],
+          })],
+        }, { name: 'print' }),
       ],
     }),
   },
