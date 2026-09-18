@@ -221,20 +221,13 @@ const wname = (n) => `$${String(n).replace(/[^A-Za-z0-9_]/g, '_')}`;
 const wty = (kind) => (kind === 'real' ? 'f64' : 'i64');
 
 /**
- * **map 在线性内存里的样子**（`needMap` 时按需发这一组）。
+ * **两串按字节比**（`needStrEq` 或 `needMap` 时发）。
  *
- * 布局分两层，第二层是**必须的**：
- *   * **句柄**（`map-new` 出的那格值）= 一格 8 字节，里面装当前表的地址；
- *   * **表** = `[cap][count][k0][v0][k1][v1]…`，键值各 8 字节。
- * 为什么要句柄：表满了要换一块更大的（bump 分配器不能原地长），而 `map-set` 只拿得到
- * 那格值 —— 没有句柄就没法把新地址告诉别的持有者。这一格就是"运行期长出一格新键"
- * （`map-set` 的 `allocates` 效应）在 wasm 上的落法。
- *
- * 键怎么比：**编译期就知道是数还是串**（kindOf），所以 `mode` 是一格实参 ——
- * 0 = i64 直接比，1 = 串按"长度 + 字节"比（与 `print_str` 的布局同一份约定）。
- * 混着用报缺口，不猜。
+ * 单独一格而不是缩在 MAP_HELPERS 里：它有**两个消费者** —— map 的键（mode 1）与
+ * 落在串上的 `=` / `!=`。缩在那一组里就等于"要比两个串必须先用一格 map"。
+ * 先比长度再逐字节，与 `print_str` 的布局同一份约定（长度在偏移 0、正文从 +8 起）。
  */
-const MAP_HELPERS = `  (func $__str_eq (param $a i64) (param $b i64) (result i64)
+const STR_EQ = `  (func $__str_eq (param $a i64) (param $b i64) (result i64)
     (local $la i64) (local $i i64)
     (local.set $la (i64.load (i32.wrap_i64 (local.get $a))))
     (if (i64.ne (local.get $la) (i64.load (i32.wrap_i64 (local.get $b))))
@@ -250,7 +243,22 @@ const MAP_HELPERS = `  (func $__str_eq (param $a i64) (param $b i64) (result i64
       (br $each)))
     (i64.const 1)
   )
-  (func $__map_new (result i64)
+`;
+
+/**
+ * **map 在线性内存里的样子**（`needMap` 时按需发这一组）。
+ *
+ * 布局分两层，第二层是**必须的**：
+ *   * **句柄**（`map-new` 出的那格值）= 一格 8 字节，里面装当前表的地址；
+ *   * **表** = `[cap][count][k0][v0][k1][v1]…`，键值各 8 字节。
+ * 为什么要句柄：表满了要换一块更大的（bump 分配器不能原地长），而 `map-set` 只拿得到
+ * 那格值 —— 没有句柄就没法把新地址告诉别的持有者。这一格就是"运行期长出一格新键"
+ * （`map-set` 的 `allocates` 效应）在 wasm 上的落法。
+ *
+ * 键怎么比：**编译期就知道是数还是串**（kindOf），所以 `mode` 是一格实参 ——
+ * 0 = i64 直接比，1 = 串按"长度 + 字节"比（走上面那格 `$__str_eq`）。混着用报缺口，不猜。
+ */
+const MAP_HELPERS = `  (func $__map_new (result i64)
     (local $h i32) (local $t i32)
     (local.set $h (global.get $hp))
     (global.set $hp (i32.add (global.get $hp) (i32.const 8)))
@@ -616,7 +624,7 @@ function topFuncs(items) {
  * 出一份 WAT。**跑两遍**：第一遍只为把"哪个函数出值"数出来（语句位置的调用要不要
  * `drop` 取决于它），第二遍拿着那张表出正式的文本。图都很小，两遍比猜便宜。
  */
-function emitOnce(graph, retOf, multiOf, kindOfFn) {
+function emitOnce(graph, retOf, multiOf, kindOfFn, paramKinds) {
   const items = watItems(graph.kind === 'graph' ? graph.body : graph);
   const mod = new Mod();
   const fns = topFuncs(items);
@@ -662,6 +670,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn) {
   let needF64 = false;    // 用到实数了吗（宿主面那格 `print_f64` 按需发）
   let needJoin = false;   // 要不要那格运行期造串的辅助函数（打印多值）
   let needMap = false;    // 要不要 map 那一组辅助函数（句柄 + 表 + 键比较）
+  let needStrEq = false;  // 要不要那格"两串按字节比"（map 的键 mode 1 与串上的 = 共用）
   let needCat = false;    // 要不要那格串接（新分配一块 + 两段字节拷过去）
   /* ------------------------------------------------ 函数表（ADR-0017 第五刀）------
    * **`func` 当值用 = 一格表下标**。表在这条腿上是常量：只在这儿往里加，运行期不改
@@ -749,6 +758,34 @@ function emitOnce(graph, retOf, multiOf, kindOfFn) {
       throw new Gap('同一格函数两条 return 一格出串一格出数 —— wasm 的返回值只有一种类型');
     }
   }
+
+  /**
+   * **实参那一格**（直接调用那条路）：串放行 —— 形参的种类由 `paramKinds` 带过去
+   * （emitWat 那趟定点从**所有调用点**收上来的）。同一格形参一处传串一处传数就报缺口：
+   * wasm 的局部量只有一种类型。间接调用（`call_indirect`）不走这儿：那儿没有名字，
+   * 查不着表，所以照旧 `onlyInt`。
+   */
+  function noteArg(a, sc) {
+    const k = kindOf(a, sc);
+    if (k === 'mix') {
+      throw new Gap('实参上还接不住字符串（wasm 上它是内存里的一块地址，要类型层才认得出）');
+    }
+    if (k === 'real') {
+      throw new Gap('实参上还接不住实数（内存里的一格是 i64，要按类型排的布局）');
+    }
+  }
+
+  /**
+   * 从各个调用点收上来的实参种类（图上的函数名 -> 每格形参一个种类；不一致记 'mix'）。
+   *
+   * **就地写进传进来的那张表**（不是另建一份最后交出去）：这一遍可能在中途抛 `Gap`
+   * —— 比如形参还没带上种类、体里那句"串与串比"当场报 —— 而那时已经收到的那几处
+   * 实参种类得留给下一遍。表只会从 int 变 str 变 mix，单调，所以重跑不会来回摆。
+   */
+  const noteCallArgs = (name, ks) => {
+    const had = paramKinds.get(name);
+    paramKinds.set(name, had === undefined ? ks : ks.map((k, i) => (had[i] === k ? k : 'mix')));
+  };
 
   /**
    * map 的键怎么比：**编译期就知道**（种类那一趟追踪的另一个用处）。
@@ -872,6 +909,23 @@ function emitOnce(graph, retOf, multiOf, kindOfFn) {
         if (name === 'len' && args.length === 1) {
           needMem = true;
           return `(i64.load ${addr(expr(args[0], sc, pre))})`;
+        }
+        /* **落在串上的 `=` / `!=`：按字节比**（`$__str_eq`）—— 那格函数 map 的键早就在用
+           （mode 1），两个消费者共一份。也排在下面那道关卡前面：出的是真假，一格 int。
+           **不许拿 `i64.eq` 比地址**：字面量在 strAddr 里去重，所以那样只在运行期造出来的
+           串上错 —— 一个只有有时候才错的答案最难查。两边一格串一格数就报缺口，不猜。 */
+        if ((name === '=' || name === '!=') && args.length === 2) {
+          const ka = kindOf(args[0], sc);
+          const kb = kindOf(args[1], sc);
+          if (ka === 'str' || kb === 'str' || ka === 'mix' || kb === 'mix') {
+            if (ka !== 'str' || kb !== 'str') {
+              throw new Gap(`${name} 的两边一格是串一格不是 —— 这一层没有"数转串再比"那一步`);
+            }
+            needStrEq = true;
+            needMem = true;
+            const e = `(call $__str_eq ${expr(args[0], sc, pre)} ${expr(args[1], sc, pre)})`;
+            return name === '=' ? e : `(i64.extend_i32_s (i64.eqz ${e}))`;
+          }
         }
         // **串接**：`concat` 与落在串上的 `+` 都在这儿 —— 新分配一块、两段字节拷进去
         // （`$__str_cat`）。混了数的串接报缺口：那要先有"数 -> 串"，与打印多值是同一台机器
@@ -1234,9 +1288,16 @@ function emitOnce(graph, retOf, multiOf, kindOfFn) {
       return `(call_indirect (type ${sig})${args.length === 0 ? '' : ` ${args.join(' ')}`} (i32.wrap_i64 (local.get ${t})))`;
     }
     const args = watItems(x.ins.args).map((a) => {
-      onlyInt(a, sc, '实参');   // 串传进函数就追不着了（形参没有种类）—— 明说接不住
+      // 直接调用：串放行（形参的种类走 paramKinds 那张表）。
+      // `lift` 那条照旧只收整数 —— 提升上来的函数的形参表里混着捕获来的名字，
+      // 而那些名字本来就必须是整数（见 liftFunc 里那道检查），别把两件事搅在一起。
+      if (kind === 'direct') noteArg(a, sc); else onlyInt(a, sc, '实参');
       return expr(a, sc, pre);
     });
+    // 直接调用那条路：把这一处的实参种类记进表里，下一遍形参就带着它
+    if (kind === 'direct' && name !== null) {
+      noteCallArgs(name, watItems(x.ins.args).map((a) => kindOf(a, sc)));
+    }
     // 提升上来的那些：捕获来的名字当**多出来的实参**，排在原来的形参前面
     if (kind === 'lift') {
       const lift = sc.lookupLift(name);
@@ -1478,9 +1539,18 @@ function emitOnce(graph, retOf, multiOf, kindOfFn) {
         // 既装串又装数的量在这儿报缺口 —— 印一格地址是错答案。
         /* **bool 走 print_str**（"true" / "false" 两段数据）——
            别的腿印的是 "true"/"false"，我们不能印 "1"/"0"。两段串在 data 段里，
-           strAddr 会去重（"true" 可能已经有了）。 */
-        const isBoolPrim = one !== null && one !== undefined && one.op === 'prim'
-          && (primFixedType(one.attrs.name) === 'bool');
+           strAddr 会去重（"true" 可能已经有了）。
+           **看得见的 bool 常量也算**（`(lit true)` / `(const true)`）：`shrink` 那一趟
+           会把 `"h" == "h"` 折成一格常量，折完就不再是那格 prim 了 —— 只认 prim 的话
+           缩前印 "true"、缩后印 "1"。这个错是 `tests/graph/shrink.js` 抓出来的
+           （"缩前后输出一字不变"那条判据）。 */
+        const boolOf = (y) => {
+          if (y === null || y === undefined) return false;
+          if (y.lit !== undefined) return litType(y.lit) === 'bool';
+          if (y.op === 'const') return litType(y.attrs.value) === 'bool';
+          return y.op === 'prim' && primFixedType(y.attrs.name) === 'bool';
+        };
+        const isBoolPrim = boolOf(one);
         const k = kindOf(one, sc);
         if (k === 'mix') throw new Gap('这一格量既装过串也装过数 —— 打印要知道是哪一种（要类型层）');
         const v = expr(one, sc, pre);
@@ -1629,26 +1699,54 @@ function emitOnce(graph, retOf, multiOf, kindOfFn) {
   const entryScope = new WatScope(entry);
   const entryMarks = [];
   regions.push(entryMarks);          // 顶层那一段也是一格 region
+  /* **一格函数体报了缺口也把这一遍走完**（缺口攒着，末尾再抛）。
+   *
+   * 为什么：形参的种类是从**调用点**收上来的，而调用点在别的函数体里。`kind` 排在
+   * `main` 前面（源码次序），第一遍进 `kind` 时 `paramKinds` 还空着 —— 那句"串与串比"
+   * 当场抛，于是 `main` 里那两处 `kind(\`e\`)` 一辈子也走不到，表永远长不起来。
+   * 走完这一遍之后表就有了，emitWat 那边看见"表长了"就再来一遍（见那儿的注释）。
+   * 抛出去的还是**第一个**缺口 —— 报的理由与从前一字不差。 */
+  let firstGap = null;
+  const keepGoing = (thunk) => {
+    try {
+      thunk();
+    } catch (e) {
+      if (!(e instanceof Gap)) throw e;
+      if (firstGap === null) firstGap = e;
+    }
+  };
   for (const it of items) {
     if (it?.op === 'bind' && it.ins?.init?.op === 'func') {
       const fnode = it.ins.init;
       const params = (fnode.attrs.params ?? []).map((p) => String(p));
       const f = mod.fn(fns.get(it.attrs.name), params, it.attrs.name);
       const sc = new WatScope(f);
-      params.forEach((p) => sc.names.set(p, wname(p)));
+      // 形参带上种类：**从所有调用点收上来的那一份**（`paramKinds`，emitWat 的定点）。
+      // 没这一步的时候形参一律按数算，于是 `fn kind(c string)` 里的 `c` 与串比较时
+      // 报"一格是串一格不是" —— V 那份 charlit 卡的就是这儿。
+      const pk = paramKinds.get(it.attrs.name) ?? [];
+      params.forEach((p, i) => {
+        sc.names.set(p, wname(p));
+        sc.kinds.set(p, pk[i] ?? 'int');
+      });
       // **函数体本身就是一格 region**（与调度器那侧 `new Env(fn.env, { region: true })`
       // 同一条）—— go / V / nim 的 defer 就挂在这一层上。
       const marks = [];
+      const depth = regions.length;
       regions.push(marks);
-      f.body = fnBody(fnode.ins.body, sc, f);
-      regions.pop();
+      keepGoing(() => {
+        f.body = fnBody(fnode.ins.body, sc, f);
+      });
+      regions.length = depth;      // 中途抛了的话 push 过的那几格也要还回来
       if (marks.length !== 0) {
         f.body = [...marks.map((m) => `(local.set ${m.flag} (i64.const 0))`),
           ...f.body, ...(f.unwound === true ? [] : runExits(marks))];
       }
       continue;
     }
-    entry.body.push(...stmt(it, entryScope, entry));
+    const depth = regions.length;
+    keepGoing(() => { entry.body.push(...stmt(it, entryScope, entry)); });
+    regions.length = depth;
   }
 
   regions.pop();
@@ -1656,6 +1754,8 @@ function emitOnce(graph, retOf, multiOf, kindOfFn) {
     entry.body = [...entryMarks.map((m) => `(local.set ${m.flag} (i64.const 0))`),
       ...entry.body, ...runExits(entryMarks)];
   }
+  // 攒下来的第一个缺口在这儿交上去 —— 这一遍已经走完，`paramKinds` 该收的都收了
+  if (firstGap !== null) throw firstGap;
 
   const lines = ['(module', '  (import "omni" "print_i64" (func $print (param i64)))'];
   // 串的那格导入只在**真用到**的时候发（它要读内存，没有 memory 段前端会当场拒）
@@ -1671,6 +1771,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn) {
     }
   }
   if (needJoin) lines.push(STR_JOIN);
+  if (needMap || needStrEq) lines.push(STR_EQ);
   if (needMap) lines.push(MAP_HELPERS);
   if (needCat) lines.push(STR_CAT);
   // 函数表：每个用到的元数一格签名（形参一律 i64、一律出值），表按下标列全
@@ -1713,6 +1814,8 @@ function emitOnce(graph, retOf, multiOf, kindOfFn) {
     multis: new Map([...mod.fns.values()].map((f) => [f.src, f.multi])),
     // 每个函数返回的是数还是串 —— 调用点的种类靠它（`watKindOf` 的 `call` 那一档）
     kinds: new Map([...mod.fns.values()].map((f) => [f.src, f.rkind ?? 'int'])),
+    // 每格形参装的是数还是串 —— 从所有调用点收上来的（下一遍进函数体的时候用）
+    pkinds: paramKinds,
   };
 }
 
@@ -1733,19 +1836,39 @@ export function emitWat(graph) {
   let rets = new Map();
   let multis = new Map();
   let kinds = new Map();
-  let last = emitOnce(graph, rets, multis, kinds);
-  for (let i = 0; i < 4; i++) {
-    const same = last.rets.size === rets.size
-      && [...last.rets].every(([k, v]) => rets.get(k) === v)
+  /* 形参种类那张表**跨遍活着**（emitOnce 就地往里写）：这一遍可能在中途抛 Gap ——
+   * `fn kind(c string)` 的体里那句"串与串比"在形参还没带上种类的第一遍必抛 —— 而那时
+   * `main` 里那几处调用还没走到，表是空的。抛出来的那一遍照样留下了它收到的那几处，
+   * 所以**只要表还在长就再试一遍**；长不动了才把 Gap 交上去（那才是真的接不住）。 */
+  const pkinds = new Map();
+  const snap = () => JSON.stringify([...pkinds].sort());
+  let last = null;
+  let prevArgs = null;
+  for (let i = 0; i < 8; i++) {
+    const before = snap();
+    let out = null;
+    try {
+      out = emitOnce(graph, rets, multis, kinds, pkinds);
+    } catch (e) {
+      if (!(e instanceof Gap) || snap() === before) throw e;
+      continue;    // 表长了 —— 拿着新的那一份再来一遍
+    }
+    const same = last !== null
+      && out.rets.size === rets.size
+      && [...out.rets].every(([k, v]) => rets.get(k) === v)
       // 返回种类那张表也得算进"不动"：它与 rets 互相喂（末尾那格调用出不出串要问被调的）
-      && last.kinds.size === kinds.size
-      && [...last.kinds].every(([k, v]) => kinds.get(k) === v);
-    rets = last.rets;
-    multis = last.multis;
-    kinds = last.kinds;
+      && out.kinds.size === kinds.size
+      && [...out.kinds].every(([k, v]) => kinds.get(k) === v)
+      // 形参种类同理：调用点的实参种类要问被调函数的返回种类，绕回来了
+      && prevArgs === snap();
+    rets = out.rets;
+    multis = out.multis;
+    kinds = out.kinds;
+    prevArgs = snap();
+    last = out;
     if (same) break;
-    last = emitOnce(graph, rets, multis, kinds);
   }
+  if (last === null) throw new Gap('形参/返回值的种类转不到不动点（这条腿的账没记全）');
   return last.text;
 }
 
