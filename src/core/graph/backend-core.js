@@ -321,7 +321,21 @@ function expr(x, env, ctx) {
       return `(dhas ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)})`;
     }
     case 'slice': gap('切片出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
-    case 'map-new': gap('映射出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+    /* **表达式位置上的映射**：先物化成一格临时名，再把那个名字交出去。
+     * 与实参位置上那三格聚合走的是**同一张表**（`MATERIALIZE`）与同一条理由：方言里
+     * `(dnew …)` 是一句语句、字典是一格句柄，所以"值"就是那个名字。
+     * lua 的 `setmetatable({}, { __close = … })` 里层那格表字面量就是这个形状 ——
+     * 它落成 `map-set` 的值，不是实参，所以从前走不到 argText 那条路上。
+     * 摆不下物化那几句（没有 `ctx.pre`）才报缺口，不硬拼。 */
+    case 'map-new': {
+      if (ctx.pre === null || ctx.pre === undefined) {
+        gap('映射出现在一处摆不下物化那几句的表达式位置上');
+      }
+      ctx.tmp = ctx.tmp + 1;
+      const mn = `map_tmp${ctx.tmp}`;
+      for (const line of bindMap(mn, x, env, ctx)) ctx.pre.push(line);
+      return `(var ${mn})`;
+    }
     case 'conv': {
       /* **已经在那一侧的什么都不做** —— 与 wat 那条腿同一句话（`backend-wat.js` 的 conv）。
        * 方言里 int 与 real 不隐式混算，所以这一格必须落准：多补一格 `(toreal …)` 会
