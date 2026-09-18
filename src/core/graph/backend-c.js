@@ -883,6 +883,14 @@ class CGen {
     this.fns = [];
     /** 图上的名字 -> 顶层 C 函数名。 */
     this.fnOf = new Map();
+    /** 顶层的 `bind`（不是函数的那些）名字集合——它们在 C 里是模块级 `static gv`，
+        函数提升时不算捕获（任何函数都看得见）。 */
+    this.topBinds = new Set();
+    /** 那里头**真被某个顶层函数体读到**的那几格 —— 只有它们要落成模块级 static
+        （别的照旧当 `main` 的局部量，产物一个字节不动）。 */
+    this.hoisted = new Set();
+    /** 现在落的是顶层那一块吗（`hoisted` 那几格的声明与赋值要分开只在这一层）。 */
+    this.atTop = false;
     /** 正在生成的是**函数体**吗（`ret` 要回值，而 `main` 里 `ret` 回退出码 0）。 */
     this.inFn = 0;
     /** 文件级的那几行（记录的键那种编译期常量数组）。 */
@@ -1047,11 +1055,25 @@ class CGen {
    */
   plan(list) {
     for (const x of list) {
-      if (x !== null && x !== undefined && x.op === 'bind'
-        && x.ins.init !== undefined && x.ins.init !== null && x.ins.init.op === 'func') {
-        this.n += 1;
-        this.fnOf.set(x.attrs.name, `fn${this.n}_${cName(x.attrs.name).slice(2)}`);
+      if (x !== null && x !== undefined && x.op === 'bind') {
+        if (x.ins.init !== undefined && x.ins.init !== null && x.ins.init.op === 'func') {
+          this.n += 1;
+          this.fnOf.set(x.attrs.name, `fn${this.n}_${cName(x.attrs.name).slice(2)}`);
+        } else {
+          /* 顶层的非函数 bind —— 登记进 `topBinds`（提升时不算捕获）。 */
+          this.topBinds.add(x.attrs.name);
+        }
       }
+    }
+    /* **哪几格顶层变量真被函数体读到** —— 只有那几格要落成模块级 `static`。
+       C 里 `main` 的局部量别的函数看不见，而图上顶层 `bind` 与函数体里的 `bind` 是**同一格
+       节点**（落法分两种只因为 C 的作用域分两层，与 wat 那侧 `(global …)` 同一条）。 */
+    for (const x of list) {
+      if (x === null || x === undefined || x.op !== 'bind') continue;
+      if (x.ins.init === undefined || x.ins.init === null || x.ins.init.op !== 'func') continue;
+      const free = [];
+      freeRefs(x.ins.init.ins.body, (x.ins.init.attrs.params ?? []).slice(), free);
+      for (const n of free) if (this.topBinds.has(n)) this.hoisted.add(n);
     }
   }
 
@@ -1077,7 +1099,13 @@ class CGen {
     const rnum = this.np.rets.has(this.np.nameOfBody.get(x.id));
     const free = [];
     freeRefs(x.ins.body, params.slice(), free);
-    const cap = free.filter((n) => !this.fnOf.has(n));
+    /* 不算捕获的那些：**顶层函数**（已经在 `fnOf` 里了）**和顶层的 `bind`**（它们在 C 里
+       是**模块级 static 变量**——不在这格函数的形参里、可在全局名字空间看得见）。
+       `go+vardecl` 的 `var start = 10; func firstOf[T any](xs []T) T { return xs[0] }`
+       就是这个形状：`start` 不是 `firstOf` 的形参，而是模块级变量，C 那边 `static gv g_start;`
+       任何函数都看得见。`freeRefs` 把它数成了自由名字（因为它不在形参列表里），
+       可它不是捕获 —— 不需要环境对象。 */
+    const cap = free.filter((n) => !this.fnOf.has(n) && !this.topBinds.has(n));
     if (cap.length > 0) {
       throw new Gap(`c 后端：这格 func 捕获了外层的名字（${cap.join('、')}）—— 真闭包要一格环境对象`);
     }
@@ -1419,8 +1447,15 @@ class CGen {
         this.liftFunc(x.ins.init, x.attrs.name);
         return;
       }
+      /* **模块级那几格**（顶层、且真被某个函数体读到）：声明摆到模块头上、这儿只赋值。 */
+      const hoist = this.atTop && this.hoisted.has(x.attrs.name);
       /* 窄了的那几格落 `double`（判据 3）：值一路都是 double，只在被人当值用时才装回去。 */
       if (this.num.has(x.attrs.name)) {
+        if (hoist) {
+          this.decls.push(`static double ${cName(x.attrs.name)};`);
+          this.emit(`${cName(x.attrs.name)} = ${this.dVal(x.ins.init)};`);
+          return;
+        }
         this.emit(`double ${cName(x.attrs.name)} = ${this.dVal(x.ins.init)};`);
         return;
       }
@@ -1430,10 +1465,16 @@ class CGen {
       const shape = this.rec.get(x.attrs.name);
       if (shape !== undefined) {
         const vals = asList(x.ins.init.ins.fields).filter((y) => y !== undefined);
-        this.emit(`struct ${shape.tag} ${cName(x.attrs.name)};`);
+        if (hoist) this.decls.push(`static struct ${shape.tag} ${cName(x.attrs.name)};`);
+        else this.emit(`struct ${shape.tag} ${cName(x.attrs.name)};`);
         for (let i = 0; i < shape.names.length; i++) {
           this.emit(`${cName(x.attrs.name)}.${cField(shape.names[i])} = ${this.valOf(vals[i])};`);
         }
+        return;
+      }
+      if (hoist) {
+        this.decls.push(`static gv ${cName(x.attrs.name)};`);
+        this.emit(`${cName(x.attrs.name)} = ${this.valOf(x.ins.init)};`);
         return;
       }
       this.emit(`gv ${cName(x.attrs.name)} = ${this.valOf(x.ins.init)};`);
@@ -1618,9 +1659,14 @@ export function emitC(g) {
   for (const [names, tag] of gen.rp.shapes) {
     gen.decls.push(`struct ${tag} { ${names.split('|').map((f) => `gv ${cField(f)};`).join(' ')} };`);
   }
-  gen.num = new Set(gen.np.locals.get('top') ?? []);
+  /* **落成模块级的那几格不窄化**：窄化（`gv` -> `double`）是**一层作用域里**的账
+     （`numPlan` 数的是 'top' 那一层的读写），可这几格现在要给别的函数读，那边看见的是 `gv`。
+     两处对不上的代价量过：`cannot assign 'double' to 'struct gv'`（`vlang+decls`）。 */
+  gen.num = new Set([...(gen.np.locals.get('top') ?? [])].filter((n) => !gen.hoisted.has(n)));
   gen.pushFrame('fn');
+  gen.atTop = true;
   gen.body(top, null);
+  gen.atTop = false;
   gen.popFrame();
   /* 原型先摆一遍：这样「A 调后面定义的 B」与互相递归都不必管定义次序。
    * 形参窄了的那几个收 `double`（`numPlan` 证过每个调用点递的都是数）。 */
@@ -1737,18 +1783,32 @@ export const C_SHAPES = [
   },
   {
     what: '`func` **捕获了外层的名字**（真闭包）',
-    why: '函数一律提到顶层，C 那侧看得见的只有形参与别的顶层函数；读一格外层的局部量要一格'
-      + '环境对象 + 一格间接调用。`wat` 那侧第一条形状账是同一件事 —— 两条腿欠的是同一格能力',
+    why: '函数一律提到顶层，C 那侧看得见的只有形参、别的顶层函数**与模块级那几格变量**；'
+      + '读一格**外层函数的局部量**要一格环境对象 + 一格间接调用。'
+      + '`wat` 那侧第一条形状账是同一件事 —— 两条腿欠的是同一格能力',
+    /* **证物得借一格"外层函数的局部量"**，不能借顶层那一格：顶层的 `bind` 在 C 里落成
+       模块级 `static`（`hoisted` 那一刀），任何函数都看得见 —— 那不是捕获。
+       原来这份证物借的就是顶层的 `a`，于是那一刀落地之后它**不报了**，判据当场说
+       "这条账已经不欠了" —— 那正是这一格该做的事（证物过期得被抓住）。 */
     witness: () => ({
       kind: 'graph',
       body: [
-        node('bind', { init: { lit: 1 } }, { name: 'a' }),
-        node('prim', {
-          args: [node('call', {
-            fn: node('func', { body: [node('ret', { value: node('ref', {}, { name: 'a' }) })] }, { params: [] }),
-            args: [],
-          })],
-        }, { name: 'print' }),
+        node('bind', {
+          init: node('func', {
+            body: [
+              node('bind', { init: { lit: 1 } }, { name: 'a' }),
+              node('prim', {
+                args: [node('call', {
+                  fn: node('func', {
+                    body: [node('ret', { value: node('ref', {}, { name: 'a' }) })],
+                  }, { params: [] }),
+                  args: [],
+                })],
+              }, { name: 'print' }),
+            ],
+          }, { params: [] }),
+        }, { name: 'outer' }),
+        node('call', { fn: node('ref', {}, { name: 'outer' }), args: [] }),
       ],
     }),
   },
