@@ -90,7 +90,7 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
 
 /** 这一刀接得住的内建（`prims.js` 里 16 格中的 15 格；只有多实参 print 还欠着）。 */
 const PRIMS_OK = new Set(['+', '-', '*', '/', '%', '^', '<', '>', '<=', '>=', '=', '!=',
-  'not', 'len', 'print', 'concat', 'push',
+  'not', 'len', 'print', 'concat', 'push', 'contains',
   /* 位运算那六格（`bnot` 拼成 `bxor -1` —— 方言的 `bin` 是二元的）。 */
   'band', 'bor', 'bxor', 'bnot', 'shl', 'shr']);
 
@@ -214,6 +214,18 @@ function expr(x, env, ctx) {
       if (nm === 'print') gap('print 出现在表达式位置上');
       if (nm === 'push') gap('push 出现在表达式位置上（方言里 apush 是一条语句）');
       if (nm === 'concat') return concatText(args, env, ctx);
+      /* **contains（线性找元素）**：方言里没有现成的一句话，落成一格调用表达式 ——
+         展开成循环需要一个名字绑上去（函数调用那一趟 + 返回值），而 `contains` 用在
+         布尔表达式里（`if x in xs` -> `contains(xs, x)`），所以这儿发一格**调用**
+         到 `g_contains` 那个预定义函数上（C 后端的 `g_contains` 已经在了）。
+         方言那一侧走 `(call g_contains …)` 这一格。 */
+      if (nm === 'contains') {
+        if (args.length !== 2) gap(`contains 收了 ${args.length} 格实参（要两格）`);
+        const at = typeOf(args[0], env, ctx);
+        const et = elemType(at);
+        if (et === null) gap('contains 的第一格实参不是列表');
+        return `(call g_contains (var ${objText(args[0], env, ctx).replace(/^\(var /, '').replace(/\)$/, '')}) ${expr(args[1], env, ctx)})`;
+      }
       /* **bnot 是一元的**：方言里没有一元的 `~`，用 `(bin "^" x (int -1))` 拼
          （二补数的按位取反 = 与 -1 做 xor）。 */
       if (nm === 'bnot' && args.length === 1) {
@@ -577,6 +589,12 @@ function stmtIn(x, env, ctx) {
       if (isNode(init) && init.op === 'record-new') return bindRecord(nm, init, env, ctx);
       if (isNode(init) && init.op === 'list-new') return bindList(nm, init, env, ctx);
       if (isNode(init) && init.op === 'slice') return bindSlice(nm, init, env, ctx);
+      /* `xs := fill(n, 零值)`（第 25 格内建）—— 与 `slice` 那一格**同一条消去规则**：
+         方言里没有"按长度造"，所以落成"新建一格空数组 + 一圈 apush"。
+         只接**绑定位置**（`bind`）：表达式位置上摆不进一圈循环，那时照旧报缺口。 */
+      if (isNode(init) && init.op === 'prim' && init.attrs.name === 'fill') {
+        return bindFill(nm, init, env, ctx);
+      }
       if (isNode(init) && init.op === 'map-new') return bindMap(nm, init, env, ctx);
       /* **awk 的"没赋过值的变量"**：映射把它落成 `bind n = null`（`ext/awk/tograph.js`
        * 的 bodyOf）。方言是有类型的，所以这一格照**第一次赋值**定型，值给那个类型的零值 ——
@@ -852,10 +870,39 @@ function bindSlice(nm, sl, env, ctx) {
 }
 
 /**
+ * `let xs = fill(n, 零值)` —— **按长度造一格列表**（第 25 格内建）。
+ *
+ * 方言里没有它，所以走与 `slice` **同一条消去规则**：新建一格空数组 + 一圈 `apush`。
+ * 元素类型从那格初值推（只接标量 —— `prims.js` 里 `fill` 本来就不许拿聚合当初值：
+ * 那样 n 格会指向同一格）。长度可以是任意表达式（`(alen …)` / 变量都行）。
+ *
+ * 只接**绑定位置**：表达式位置上摆不进一圈循环 —— 那时 `expr` 那边照旧报缺口
+ * （`PRIMS_OK` 里没有 `fill`，所以那一格是有名有姓的）。
+ */
+function bindFill(nm, pr, env, ctx) {
+  const args = argList(pr, 'args');
+  if (args.length !== 2) gap(`内建 fill 收了 ${args.length} 格实参（要两格）`);
+  const et = typeOf(args[1], env, ctx);
+  if (!isScalar(et)) gap(`fill 的初值不是标量（量到的是 ${et}）—— 聚合初值会让 n 格指向同一格`);
+  const at = `(arr ${et})`;
+  const n = expr(args[0], env, ctx);
+  const v = expr(args[1], env, ctx);
+  ctx.tmp = ctx.tmp + 1;
+  const i = `fill_i${ctx.tmp}`;
+  const cnt = `fill_n${ctx.tmp}`;
+  return [
+    bindLine(nm, at, `(anew ${at} (int 0))`, env, ctx),
+    /* 长度**只算一次**（`n` 可能是一格调用）—— 与 `for-in` 那一格同一条纪律。 */
+    `(do (let ${cnt} int ${n}) (let ${i} int (int 0))`
+      + ` (while (bin "<" (var ${i}) (var ${cnt}))`
+      + ` (do (apush (var ${nm}) ${v}) (set ${i} (bin "+" (var ${i}) (int 1))))))`,
+  ];
+}
+
+/**
  * `let xs = [1,2,3]` —— 方言里是 `(anew (arr T) 长度)` 再逐格 `(aset …)`。
  * 元素类型从第一格元素推，剩下的必须一致（不一致当场报 —— 方言的数组是单态的）。
- */
-function bindList(nm, lst, env, ctx) {
+ */function bindList(nm, lst, env, ctx) {
   const items = argList(lst, 'items');
   if (items.length === 0) gap('一格空列表（元素类型推不出来）');
   const ts = items.map((it) => typeOf(it, env, ctx));
