@@ -847,8 +847,8 @@ function toNode(x) {
         : node('prim', { args: [toNode(o), toNode(k)] }, { name: 'contains' });
       return tag(x) === 'in' ? yes : un('not', yes);
     }
-    // `xs[1..3]` -> slice（V 的上界也**不含**）
-    case 'slice': {
+    // `xs[1..3]` / `xs#[1..3]`（安全切片）-> slice —— V 的上界**不含**，与 go 同一个节点
+    case 'slice': case 'slice-safe': {
       const [o, a, b] = kids(x);
       return sliceOf(toNode(o), a === undefined ? undefined : toNode(a),
         b === undefined ? undefined : toNode(b));
@@ -1093,7 +1093,7 @@ function toNode(x) {
     // 而类型不进图。树上的标签是 `typedecl` 不是 `type-decl` —— 原来写的那一格是**死代码**
     // （283 份卡在这儿，与 go 那份 `var-decl` / `const-decl` 是同一个错）。
     case 'module': case 'import': case 'struct': case 'enum':
-    case 'typedecl': case 'interface': return [];
+    case 'typedecl': case 'interface': case 'union': return [];
     // `pub` 是可见性、`attrs` 是属性表 —— 两样都**不产生代码**（与 `mut` 同一类），
     // 拆一层接着走。`(attributed (attrs …) (module …))` 那一路拆完落到 module，也就是空。
     case 'pub': return toNode(kids(x)[0]);
