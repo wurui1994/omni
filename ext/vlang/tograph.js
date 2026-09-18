@@ -203,6 +203,49 @@ const CT_ENV = new Map(Object.entries({
   debug: false, prod: false, test: false, js: false, js_node: false, js_browser: false,
 }));
 
+/**
+ * **声明过的那几格路径与目标**（`@VEXE` 那一族）。
+ *
+ * 与 `CT_ENV` 同一条理由、同一条纪律：这几格问的是"**编译这一趟**跑在什么环境里"
+ * （V 的可执行文件在哪、目标操作系统是什么、用哪个 C 编译器）。看本机就不可重现，
+ * 所以**声明**一个参考环境 —— 与交叉编译给一个 sysroot 是同一件事。
+ *
+ * 代价说清：落进图的是这几个**声明过的串**。程序若拿 `@VEXE` 去 exec，跑的就是这个
+ * 声明的路径 —— 那正是"按声明的环境编"的含义，不是我们猜出来的某台机器。
+ *
+ * **不进这张表的三格**：`@VHASH`（那次构建的 git 哈希）· `@BUILD_TIMESTAMP`（构建时刻）·
+ * `@VMOD_FILE`（那份 v.mod 的**内容**）—— 它们是"某一次构建"的产物，声明一个值等于编一个，
+ * 所以照旧当场报。
+ */
+const CT_PATHS = new Map(Object.entries({
+  '@VEXE': '/usr/local/bin/v',
+  '@VEXEROOT': '/usr/local/lib/v',
+  '@VROOT': '/usr/local/lib/v',          // 老名字，V 里与 @VEXEROOT 同义
+  '@VMODROOT': '/usr/local/lib/v',
+  '@OS': 'linux',                        // 参考目标（与 CT_ENV 那一行对齐）
+  '@CCOMPILER': 'gcc',
+  '@BACKEND': 'c',
+}));
+
+/**
+ * **这一格节点在源码里的位置**（`@FILE` / `@DIR` / `@LINE` / `@COLUMN` 那一族要它）。
+ *
+ * 位置本来就在树上：每格节点带一格 `span`（`{file, start, end}`，`glr/driver.js` 发的），
+ * 而 `SourceFile.lineCol(offset)` 就是行列。**落的路径是我们收到的那一个** ——
+ * 不绝对化：绝对路径跟机器走，而这把尺子要可重现（与 `CT_ENV` 同一条理由）。
+ * 没有 span 的（模板拼出来的节点）回 null，调用方照旧报缺口。
+ */
+function locOf(x) {
+  const sp = x === null || x === undefined ? null : x.span;
+  if (sp === null || sp === undefined) return null;
+  const f = sp.file;
+  if (f === null || f === undefined || typeof f.lineCol !== 'function') return null;
+  const path = String(f.path);
+  const cut = path.lastIndexOf('/');
+  const { line, col } = f.lineCol(sp.start);
+  return { path: path, dir: cut < 0 ? '.' : path.slice(0, cut), line: line, col: col };
+}
+
 /** 编译期条件求值。认不出来的形状**当场报** —— 这一格不许猜（见 `CT_ENV` 那一段）。 */
 function ctimeCond(c) {
   const t = tag(c);
@@ -737,8 +780,12 @@ function toNode(x) {
     // V 的编译期常量分两类，这一格只接**第一类**：
     //   * `@FN` / `@METHOD` / `@STRUCT` / `@MOD` —— 答案就在这棵树里（当前函数 / 接收者的
     //     类型 / 模块名），落一格 const 串是**准确的**，不是猜；
-    //   * `@FILE` / `@LINE` / `@DIR` / `@LOCATION`（位置信息 —— 这一层的树上没有行号）与
-    //     `@VEXE` / `@VEXEROOT` / `@VMODROOT` / `@VROOT` / `@OS` / `@CCOMPILER`
+    //   * `@FILE` / `@DIR` / `@LINE` / `@COLUMN` / `@FILE_LINE` / `@LOCATION` —— **答案也在
+    //     树里**：每格节点带着 `span`（`{file, start, end}`），而 `SourceFile.lineCol()` 就是
+    //     行列（`src/core/source/diag.js`）。原来这儿写"这一层的树上没有行号"，**那句话是错的**
+    //     —— 只 grep 了 tograph 这一份，没去看 span 那一格。落的路径是**我们收到的那一个**
+    //     （不绝对化：绝对路径跟机器走，而尺子要可重现）；
+    //   * `@VEXE` / `@VEXEROOT` / `@VMODROOT` / `@VROOT` / `@OS` / `@CCOMPILER`
     //     （**编译那台机器**上的路径与目标平台）—— 当场报。编个串上去就是静默的错答案。
     case 'ctconst': {
       const w = leaf(kids(x)[0]);
@@ -748,10 +795,25 @@ function toNode(x) {
       if (w === '@METHOD' && CUR_TYPE !== null && CUR_FN !== null) {
         return lit(`${CUR_TYPE}.${CUR_FN}`);
       }
+      const loc = locOf(x);
+      if (loc !== null) {
+        if (w === '@FILE') return lit(loc.path);
+        if (w === '@DIR') return lit(loc.dir);
+        if (w === '@LINE') return lit(String(loc.line));     // V 里这几格都是**串**
+        if (w === '@COLUMN') return lit(String(loc.col));
+        if (w === '@FILE_LINE') return lit(`${loc.path}:${loc.line}`);
+        /* `@LOCATION` 是 `文件:行:函数()` —— 函数名不知道就照旧报（不编） */
+        if (w === '@LOCATION' && CUR_FN !== null) {
+          const fn = CUR_TYPE === null ? CUR_FN : `${CUR_TYPE}.${CUR_FN}`;
+          return lit(`${loc.path}:${loc.line}:${fn}()`);
+        }
+      }
+      /* 声明过的那几格（`@VEXE` / `@OS` / …）—— 见 `CT_PATHS` 那一段。 */
+      if (CT_PATHS.has(w)) return lit(CT_PATHS.get(w));
       throw new Error(`v->graph: 编译期常量 ${w} 这一格答不出来 —— `
-        + '`@FN` / `@METHOD` / `@STRUCT` / `@MOD` 要在函数（方法）里头才有答案，'
-        + '位置那一族（`@FILE` / `@LINE` / `@DIR` / `@LOCATION`）这一层的树上没有行号，'
-        + '`@VEXE` 那一族是编译那台机器上的事');
+        + '`@FN` / `@METHOD` / `@STRUCT` / `@MOD` / `@LOCATION` 要在函数（方法）里头才有答案，'
+        + '`@VHASH` / `@BUILD_TIMESTAMP` / `@VMOD_FILE` 是某一次构建的产物（声明一个值等于编一个），'
+        + '`$tmpl` / `$embed_file` / `$d` 要在编译期读一份别的文件');
     }
 
     // ---- 指针：只接**与图的语义正好重合**的那一半（与 go 那一门同一条口径）--------
