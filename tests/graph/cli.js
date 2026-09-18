@@ -117,9 +117,17 @@ check('--lang gsl-shell 读 lua 的例子（继承那份语法 = 基语言一个
 }
 
 // ---- 3) 缺口不是失败：有名有姓，退出码 3（与"程序自己跑错了"分开）
-check('awk × wat 是一格有名有姓的缺口（退出码 3）',
-  ['run', 'ext/awk/examples/basics.awk', '--engine', 'graph', '--backend', 'wat'],
-  { code: 3, says: '接不住' });
+//
+// 原来这一格用的是 `awk × wat`（那时它欠着"一格量既装过串也装过数"）。种类那一趟
+// 补上"`nil` 是还没定、不是是数"之后 awk 那份通了 —— **wat 那条腿的语言例子全绿**，
+// 于是这条判据得另找一格真欠着的形状。挑"实数 -> 串"（WAT_SHAPES 第四条，f64 的
+// 十进制是另一件事），临时写一份最小的源文件 —— 例子目录里没有欠着的了。
+{
+  const rf = join(tmpdir(), 'omni-real-cat.lua');
+  writeFileSync(rf, 'print("x=" .. 1.5)\n');
+  check('实数转串在 wat 上是一格有名有姓的缺口（退出码 3）',
+    ['run', rf, '--engine', 'graph', '--backend', 'wat'], { code: 3, says: '接不住' });
+}
 
 // ---- 4) 开关本身错了也要有一句人话
 check('--backend 打错就报那四条', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'llvm'],

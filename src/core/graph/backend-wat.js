@@ -470,16 +470,29 @@ class WatScope {
 
   /** 那个名字装的是什么。没登记过（形参、追不到的）按数算。 */
   kindOf(name) {
-    for (let s = this; s !== null; s = s.parent) if (s.names.has(name)) return s.kinds.get(name) ?? 'int';
+    for (let s = this; s !== null; s = s.parent) {
+      if (s.names.has(name)) {
+        const k = s.kinds.get(name) ?? 'int';
+        // `nil`（还没定）对**读它的人**就是 i64 一格 0 —— 只有 `merge` 看得见那一档
+        return k === 'nil' ? 'int' : k;
+      }
+    }
     return 'int';
   }
 
-  /** 赋值：种类不一致就是 `mix`（打印那一步会因此报缺口，而不是印出一格地址）。 */
+  /**
+   * 赋值：种类不一致就是 `mix`（打印那一步会因此报缺口，而不是印出一格地址）。
+   *
+   * **`nil` 那一档是"还没定"，不是"是数"**：awk 没有声明，映射自己在 region 顶上补一格
+   * `bind x = null`（那门语言的未初始化变量既是 `""` 也是 0）。把它当成"是数"的话
+   * `tag = "ok"` 就成了一量两型 —— 而它其实一辈子只装过串。所以 `nil` 遇上谁就是谁。
+   */
   merge(name, kind) {
     for (let s = this; s !== null; s = s.parent) {
       if (s.names.has(name)) {
         const had = s.kinds.get(name) ?? 'int';
-        if (had !== kind) s.kinds.set(name, 'mix');
+        if (had === 'nil') s.kinds.set(name, kind);
+        else if (had !== kind) s.kinds.set(name, 'mix');
         return;
       }
     }
@@ -489,6 +502,13 @@ class WatScope {
 /** 一格入端口摊成数组（一格就是一格、空就是空）。**与 fromtree.js 的 `asList` 不是一回事**：
  *  那一格是"这棵 datum 是 list 吗"（不是就回 null），所以这儿不许叫同一个名字。 */
 const watItems = (x) => (x === undefined || x === null ? [] : (Array.isArray(x) ? x : [x]));
+
+/** 看得见的 `null` 常量吗（`(lit null)` / `(const null)`）—— 那是"还没定"，不是"是数"。 */
+const isNullLit = (x) => {
+  if (x === null || x === undefined) return false;
+  if (x.lit !== undefined) return x.lit === null;
+  return x.op === 'const' && x.attrs.value === null;
+};
 
 /**
  * 覆盖层那张词汇表在 wat 这边的**粗化**：这条腿只分三档 —— `int`（i64）、`real`（f64）、
@@ -1385,7 +1405,11 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
       case 'bind': {
         // **嵌套的函数走 lambda 提升**（不是闭包对象）：见 liftFunc
         if (x.ins.init?.op === 'func') return liftFunc(x, sc);
-        const k = kindOf(x.ins.init, sc);
+        /* 初值是 `null` 的话种类记 **`nil`（还没定）**，不是"是数"：awk 没有声明，
+           映射自己在 region 顶上补一格 `bind x = null`（那门语言的未初始化变量既是 ""
+           也是 0）。记成"是数"的话后面那句 `tag = "ok"` 就成了一量两型 —— 而它一辈子
+           只装过串。见 WatScope.merge 那一段。 */
+        const k = isNullLit(x.ins.init) ? 'nil' : kindOf(x.ins.init, sc);
         const v = expr(x.ins.init, sc, pre);
         // 顶层的名字落全局量（别的函数要看得见它）；函数体里的还是局部量
         const g = sc === entryScope ? globals.get(x.attrs.name) : undefined;
