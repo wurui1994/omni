@@ -10,7 +10,10 @@
 //   * 改一格字段要 `mut`（`mut p := &Point{…}`）—— `mut` 那一格不产生代码，拆一层就走；
 //   * 传给函数写成 `bump(mut p)`（go 那边是 `bump(p)`）。
 //
-// 两处当场报的与 go 那份一样：`&x`（名字的地址）与光秃秃的 `*p` 当值用。
+// **`&x` 里 x 已经是一格 struct 的那一半后来也接上了**（末两行判着）：图上的记录就是引用，
+// 所以 `s := &r` 之后 `s.x = 9` 改的就是 r 那一格 —— 与 `&T{…}` 逐字同理。
+//
+// 仍旧当场报的与 go 那份一样：`&x` 里 x 是标量 / 类型没写在语法上，与光秃秃的 `*p` 当值用。
 
 module main
 
@@ -36,4 +39,11 @@ fn main() {
 	println(p.x)
 	println(p.other)
 	println(q.x)
+	mut r := Point{
+		x: 7
+		other: 1
+	}
+	mut s := &r
+	s.x = 9
+	println(r.x)
 }

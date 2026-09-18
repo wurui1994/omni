@@ -638,8 +638,17 @@ function toNode(x) {
     case 'addr': {
       const a = kids(x)[0];
       if (tag(a) === 'lit') return toNode(a);
-      throw new Error('go->graph: `&` 只接"刚造出来的那一格聚合"（`&T{…}`）——'
-        + '一个名字的地址是真别名，图上没有指针那一格');
+      /* **`&x` 里 x 是一格已知的 struct** —— 图上的记录就是引用（`q := &p` 之后 `q.f = 5`
+         改的是同一格，与 go 一样），所以 `&x` **就是 x**。不是近似，是重合 ——
+         与 `&T{…}` 那一半逐字同理。"知道 x 是不是 struct"是 mangle 那一刀顺带带来的
+         （`VARTYPE` + `STRUCTS`）。类型没写在语法上的（`&f()`）仍旧报。 */
+      if (tag(a) === 'name') {
+        const t = VARTYPE.get(leaf(kids(a)[0]));
+        if (t !== undefined && STRUCTS.has(t)) return toNode(a);
+      }
+      throw new Error('go->graph: `&` 只接"刚造出来的那一格聚合"（`&T{…}`）'
+        + '与"已经是一格 struct 的名字"——别的（标量 / 类型没写在语法上）是真别名，'
+        + '图上没有指针那一格');
     }
     case 'deref':
       throw new Error('go->graph: `*p` 只接"当对象用"那一处（`(*p).f` / `(*p)[i]`）——'
@@ -794,6 +803,12 @@ function toNode(x) {
       }
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
+        /* `x := T{…}` / `x := &T{…}` —— **语法上写着的具名类型**，收进 VARTYPE
+           （方法调用要拿它挑主人 + `&x` 那一半要它，见 `MSET` 那一段）。 */
+        if (isDef && rhs[i] !== undefined && tag(t) !== 'sel' && tag(t) !== 'index') {
+          const tn = litTypeNameOf(rhs[i]);
+          if (tn !== null) VARTYPE.set(nameOf(t), tn);
+        }
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set；
         // `set` 只认名字
         if (tag(t) === 'sel') return fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v);

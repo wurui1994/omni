@@ -974,8 +974,23 @@ function toNode(x) {
     case 'addr': {
       const a = kids(x)[0];
       if (AGG.has(tag(a))) return toNode(a);
-      throw new Error('v->graph: `&` 只接"刚造出来的那一格聚合"（`&T{…}` / `&[…]`）——'
-        + '一个名字的地址是真别名，图上没有指针那一格');
+      /**
+       * **`&x` 里 x 已经是一格聚合**（`VARTYPE` 说它是登记过的 struct）—— 那 `&x` **就是 x**。
+       *
+       * 理由与 `&T{…}` 那一半**逐字相同**：图上的记录本来就是引用（`q := &p` 之后
+       * `q.f = 5` 改的是同一格记录，与 V 一样）。这不是近似，是重合 ——
+       * 而"知道 x 是不是 struct"这件事是 mangle 那一刀顺带带来的（`VARTYPE` + `STRUCTS`）。
+       *
+       * **仍旧报的那一半**：类型没写在语法上的、或者是标量（`&int`）—— 前者要类型层，
+       * 后者是真别名（`*p = v` 那种写回，图上没有那一格）。
+       */
+      if (tag(a) === 'name') {
+        const t = VARTYPE.get(leaf(kids(a)[0]));
+        if (t !== undefined && STRUCTS.has(t)) return toNode(a);
+      }
+      throw new Error('v->graph: `&` 只接"刚造出来的那一格聚合"（`&T{…}` / `&[…]`）'
+        + '与"已经是一格 struct 的名字"——别的（标量 / 类型没写在语法上）是真别名，'
+        + '图上没有指针那一格');
     }
     case 'deref':
       throw new Error('v->graph: `*p` 只接"当对象用"那一处（`(*p).f` / `(*p)[i]`）——'

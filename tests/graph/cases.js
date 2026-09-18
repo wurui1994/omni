@@ -114,7 +114,7 @@ export const MEMBER = ['true', 'false', 'true', 'false'];
  * 两个名字指同一格、`(*p).f` 剥掉那一层。**当场报的两处不在这儿**（判据只判走得通的路）：
  * `&x`（名字的地址）与光秃秃的 `*p` 当值用 —— 那两处要真的指针。
  */
-export const POINTER = ['11', '20', '5', '20'];
+export const POINTER = ['11', '20', '5', '20', '9'];
 /**
  * optres：**Option / Result 落成"有没有值 + 一支垫底"**（V 独一份）—— 一格新节点也没加。
  * 四种写法各落一串现成的节点：`or { 垫底 }`（`if x == nil { set x = … }`）、
