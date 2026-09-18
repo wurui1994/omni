@@ -60,6 +60,7 @@ export function litType(v) {
 export function primFixedType(nm) {
   if (nm === '<' || nm === '>' || nm === '<=' || nm === '>=' || nm === '=' || nm === '!=' || nm === 'not') return 'bool';
   if (nm === 'len') return 'int';
+  if (nm === 'contains') return 'bool';   // 找元素出真假 —— 放在固定那张表里（不看实参）
   if (nm === 'band' || nm === 'bor' || nm === 'bxor' || nm === 'bnot'
     || nm === 'shl' || nm === 'shr') return 'int';   // 位运算只对整数，答案也是整数
   if (nm === 'concat') return 'string';

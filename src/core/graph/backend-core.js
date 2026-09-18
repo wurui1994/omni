@@ -214,17 +214,36 @@ function expr(x, env, ctx) {
       if (nm === 'print') gap('print 出现在表达式位置上');
       if (nm === 'push') gap('push 出现在表达式位置上（方言里 apush 是一条语句）');
       if (nm === 'concat') return concatText(args, env, ctx);
-      /* **contains（线性找元素）**：方言里没有现成的一句话，落成一格调用表达式 ——
-         展开成循环需要一个名字绑上去（函数调用那一趟 + 返回值），而 `contains` 用在
-         布尔表达式里（`if x in xs` -> `contains(xs, x)`），所以这儿发一格**调用**
-         到 `g_contains` 那个预定义函数上（C 后端的 `g_contains` 已经在了）。
-         方言那一侧走 `(call g_contains …)` 这一格。 */
+      /* **contains（线性找元素）**：方言里没有 `ahas`，所以发一格**内联的辅助函数**
+         到模块头上（`g_contains_T`，T 是元素类型），每种元素类型发一份。
+         调用点落成 `(call g_contains_T arr val)` —— 一格普通的函数调用。 */
       if (nm === 'contains') {
         if (args.length !== 2) gap(`contains 收了 ${args.length} 格实参（要两格）`);
         const at = typeOf(args[0], env, ctx);
         const et = elemType(at);
         if (et === null) gap('contains 的第一格实参不是列表');
-        return `(call g_contains (var ${objText(args[0], env, ctx).replace(/^\(var /, '').replace(/\)$/, '')}) ${expr(args[1], env, ctx)})`;
+        const fname = `g_contains_${et}`;
+        if (!ctx.containsFns) ctx.containsFns = new Set();
+        if (!ctx.containsFns.has(et)) {
+          ctx.containsFns.add(et);
+          /* 一格 `(fn g_contains_T ((a (arr T)) (v T)) bool
+                (do (let i int (int 0))
+                    (while (bin "<" (var i) (alen (var a)))
+                      (do (if (bin "==" (aget (var a) (var i)) (var v)) (ret (bool true)))
+                          (set i (bin "+" (var i) (int 1)))))
+                    (ret (bool false))))` */
+          /* **`if` 的体必须是一格块**（`(do …)`）：方言那一侧 `scope(b)` 读的是 `b.stmts` ——
+             直接给一句 `(ret …)` 会在**走进那一支的时候**炸（`b.stmts is not iterable`）。
+             这一处头一版就是那么写的，而第一次试的时候数组里恰好没有要找的元素、
+             那一支没走进去，所以"跑过了" —— **测试过了不等于对**。 */
+          ctx.decls.push(`  (fn ${fname} ((a ${at}) (v ${et})) bool`
+            + ' (do (let i int (int 0))'
+            + ' (while (bin "<" (var i) (alen (var a)))'
+            + ' (do (if (bin "==" (aget (var a) (var i)) (var v)) (do (ret (bool true))))'
+            + ' (set i (bin "+" (var i) (int 1)))))'
+            + ' (ret (bool false))))');
+        }
+        return `(call ${fname} ${objText(args[0], env, ctx)} ${expr(args[1], env, ctx)})`;
       }
       /* **bnot 是一元的**：方言里没有一元的 `~`，用 `(bin "^" x (int -1))` 拼
          （二补数的按位取反 = 与 -1 做 xor）。 */
