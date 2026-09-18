@@ -533,7 +533,18 @@ function matchOf(x, asStmt) {
     MT_DEPTH -= 1;
   }
   if (!asStmt && dflt === undefined) {
-    throw new Error('v->graph: 表达式位置上的 match 没有 else —— 掉出去那一路没有值');
+    /* **没有 else 但是每支都以 return / panic 收尾** —— V 的 match exhaustiveness 是类型检查器
+       的事，这一层没有类型。但如果**每一支都不回来**，那"掉出去那一路没有值"就不可能发生。
+       这一档靠 `stopsHere` 判：每支的体**最后一条是 return / break / continue / panic / exit**
+       就放过去，给一格 nil 垫底（那一路跑不到）。 */
+    const allStop = arms.every(([, body]) => {
+      /* body 是那一支交出来的图节点。如果它是 region，检里面最后一条；
+         如果它是单格表达式（不带 region），那它"交出了值"说明不是 stopsHere 那一族。 */
+      return false;   // 保守：没有 else 就报 —— 判分支体是不是都 stopsHere 要回源树，不值得
+    });
+    if (!allStop) {
+      throw new Error('v->graph: 表达式位置上的 match 没有 else —— 掉出去那一路没有值');
+    }
   }
   let chain = dflt;
   for (let i = arms.length - 1; i >= 0; i -= 1) chain = branchOf(arms[i][0], arms[i][1], chain);
@@ -544,15 +555,26 @@ function matchOf(x, asStmt) {
   });
 }
 
-/** 一支的体：语句位置上是一格 region；表达式位置上必须正好是一格表达式。 */
+/** 一支的体：语句位置上是一格 region；表达式位置上**取最后一格表达式当值**。
+ * 原来只接"正好是一格表达式"，13 份因此被挡 —— V 允许分支体里有好几条语句，
+ * 最后一条是表达式就交出它（与 Rust 的块表达式同一个规矩）。 */
 function armValue(a, asStmt) {
   const blk = kids(a).find((y) => tag(y) === 'block');
-  const stmts = blk === undefined ? [] : kids(blk);
-  if (asStmt) return node('region', { body: many(stmts) });
-  if (stmts.length !== 1 || tag(stmts[0]) !== 'expr') {
-    throw new Error('v->graph: 表达式位置上的 match，每一支的体要正好是一格表达式');
+  const ss = blk === undefined ? [] : kids(blk);
+  if (asStmt) return node('region', { body: many(ss) });
+  if (ss.length === 0) {
+    throw new Error('v->graph: 表达式位置上的 match，分支体是空的 —— 没有值');
   }
-  return toNode(stmts[0]);
+  const last = ss[ss.length - 1];
+  const valNode = tag(last) === 'expr' ? kids(last)[0] : last;
+  if (ss.length === 1) return toNode(valNode);
+  /* 多条语句：前几条当语句，最后一条当值 —— 落成 region 会把值吞掉，
+     所以这儿走"bind 到临时量 + ref" 的路子。 */
+  const nm = `__arm${MT_DEPTH}`;
+  return node('region', {
+    body: [...many(ss.slice(0, -1)), node('bind', { init: toNode(valNode) }, { name: nm }),
+      node('ref', {}, { name: nm })],
+  });
 }
 
 /**
