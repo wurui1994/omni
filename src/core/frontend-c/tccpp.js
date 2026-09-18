@@ -94,7 +94,7 @@ function isSpaceCh(c) {
   return c === SPC || c === TAB || c === 11 || c === 12 || c === 13;
 }
 function isIdCh(c) {
-  return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c >= 0x80;
+  return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c === 36 || c >= 0x80;
 }
 function isNumCh(c) {
   return c >= 48 && c <= 57;
@@ -105,10 +105,15 @@ function isOctCh(c) {
 /* 摊平成一串比较，而不是 `isIdCh(c) || isNumCh(c)` —— 它在标识符扫描的内圈里，
  * 一个字符省两次函数调用。（照 tcc 的 `isidnum_table` 换成 Uint8Array 查表也试过：
  * 462ms vs 441ms，**没有更快**，所以没留 —— 那张表在 C 里省的是分支，在 V8 里
- * 换来的是一次可能带 NaN 下标的类型化数组访问。） */
+ * 换来的是一次可能带 NaN 下标的类型化数组访问。）
+ *
+ * **`$`（0x24）算标识符字符**（task 的 llvm 轴那两格红）：C 标准里它不是，可 gcc /
+ * clang / tcc **三家都当扩展收**（tcc 的 `isidnum_table` 里 '$' 那一格是 1）。
+ * 而我们自己的 sx 前端会发 `v_$gid` 这种名字（`(kernel …)` 的隐式参数），于是
+ * "我们发的 C 我们自己编不了"——那是比不合标准更坏的一格。收下它，与那三家对齐。 */
 function isIdNum(c) {
   return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)
-    || c === 95 || c >= 0x80;
+    || c === 95 || c === 36 || c >= 0x80;
 }
 
 function toup(c) {
