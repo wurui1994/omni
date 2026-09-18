@@ -124,7 +124,7 @@ const CLASSES = [
   ['并发与异常（chan / spawn / try / yield / select · lock）',
     /chan|spawn|select|try|yield|raise|throw|还没接：r?lock|还没接：send|还没接：recv|还没接：go$/],
   ['跨文件才知道的事（跨模块的类型 / 库函数）',
-    /跨模块|声明不在这一份文件里|这份文件里没见过|只接 fmt\.Print|零值还没接：tname/],
+    /跨模块|声明不在这一份文件里|这份文件里没见过|只接 fmt\.Print|零值还没接：tname|带包限定的类型/],
   /* **这一族与上面那一族是两件事**（`docs/design/cross-file-methods.md` §5）：
      `os.join_path(…)` 那种的声明在**标准库**里，而尺子的分母是"那门编译器自己的源码" ——
      标准库不在里头。所以它不是这一层的欠账，是尺子的**下一层**（ADR-0037 §5.1a 的 ① 档）。

@@ -300,6 +300,16 @@ function zeroOf(ty, name) {
     throw new Error(`go->graph: ${n} 的零值还没接 —— 这份文件里没见过它的声明`
       + '（跨模块的类型在这一格上）');
   }
+  /* **带包限定的类型名**（`ast.Node` / `types.Type` …）：`tname` 底下不止一格名字。
+     单说一句"零值还没接：tname"是**把话说错了** —— 光秃秃的 `tname` 上面那一段全接了
+     （内建标量、同一包里的 struct、`type Level int` 那种底子），欠的只有"包限定"这一种：
+     它的声明在**另一个模块**里，而 `opts.also` 只递同一个目录（= 同一个 go 包）。
+     所以这一句要把限定名与真原因都说出来 —— 那 37 份卡的是跨模块，不是 tname。 */
+  if (t === 'tname') {
+    const qual = kids(ty).map((y) => (isList(y) ? leaf(kids(y)[0]) : leaf(y))).join('.');
+    throw new Error(`go->graph: 带包限定的类型 ${qual} 的零值要那个包的声明 ——`
+      + ' 跨模块（`opts.also` 只递同一个目录里那几份）');
+  }
   throw new Error(`go->graph: 这一格的零值还没接：${t}`);
 }
 
