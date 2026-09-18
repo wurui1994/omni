@@ -699,7 +699,14 @@ function stmtList(list, env, ctx) {
   return out;
 }
 
-function stmtListIn(arr, env, ctx) {
+function stmtListIn(arr0, env, ctx) {
+  /* **先把嵌套的数组摊平**：一格数组在语句位置上是**分组**，不是一层作用域
+     （作用域在图上是显式的 `region`）。lua 的 `local a <close> = …` 落的就是一格
+     `[bind, scope-exit]` 两件一组 —— 不摊平的话那格 scope-exit 掉进 `stmtIn` 的
+     数组分支里，绕过下面这一整套出口动作的账，报"不在一层语句序上"。
+     摊平之后它与外层的 bind 并排，出口动作也就落在**外层**那一层的末尾 ——
+     那正是 lua 的语义（出了这个块才关，不是这一组结束就关）。 */
+  const arr = arr0.flatMap((s) => (Array.isArray(s) ? s : [s]));
   const isExit = (s) => isNode(s) && s.op === 'scope-exit';
   /* 里层的 `region` **自己管自己那一层的出口动作**（它也走这一趟），所以这儿不必往里查 ——
    * 落到别处（分支 / 循环体的语句序上）的那几格由 `stmtIn` 的 `case 'scope-exit'` 兜住。
