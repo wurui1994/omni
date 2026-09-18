@@ -563,4 +563,27 @@ export const HAND = [
       ]);
     },
   },
+  {
+    // **非 ASCII 的串在六条腿上是同一串字节**。四格宽度各一行：1 / 2 / 3 / 4 字节。
+    //
+    // 不写成语言例子的理由：这一格要压的是**编码**而不是哪门语言的语法，而语言例子里
+    // 带非 ASCII 的（V 与 mojo 的 assert 消息）在成立那一路上根本不印 —— 字节写进了
+    // data 段却没人读，等于没判。
+    //
+    // 这一格钉住两处刚改的：wat 后端不再拦 ≥ 0x80 的字节（`strAddr`），而宿主面那格
+    // `print_str` 把内存里的 UTF-8 **按码位组装回来**（`frontend-wat/lower.js` 的
+    // strHelper）—— 逐字节 `chr` 会把 0xE4 当成 U+00E4 再编两个字节，印出来是乱码。
+    // 第四行还顺带钉住 `chr` 收的是码位不是 UTF-16 码元（interp 的 chrOf）。
+    //
+    // 字面量写成显式转义而不是直接敲字符：源文件被编辑器归一化过就量不出真东西了
+    // （与 tests/oracle/string_bytes.py 同一条理由）。
+    name: 'hand+utf8-str',
+    expect: ['ok', 'caf\u00e9', '\u4e16\u754c', '\u{1d11e}'],
+    graph: () => program([
+      node('prim', { args: [lit('ok')] }, { name: 'print' }),
+      node('prim', { args: [lit('caf\u00e9')] }, { name: 'print' }),
+      node('prim', { args: [lit('\u4e16\u754c')] }, { name: 'print' }),
+      node('prim', { args: [lit('\u{1d11e}')] }, { name: 'print' }),
+    ]),
+  },
 ];

@@ -1494,10 +1494,17 @@ class LowerWat {
  * 合成那格「内存 -> 串」的 OIR 函数（`print_str` 用）。
  *
  * 约定与图那侧的 wat 后端共用一份：**地址处 8 字节是长度，正文从 +8 起，一字节一格**。
- * 这里不是"读一个字符串类型"，而是逐字节 `chr` 拼 —— OIR 没有"内存里的串"这种东西，
- * 而这条路径要跑在四个执行器上，所以只能用最小的那几格（mload / chr / 串拼接）搭。
+ * 这里不是"读一个字符串类型"，而是**把内存里那串 UTF-8 字节按码位组装回来**、一格一格
+ * `chr` 拼 —— OIR 没有"内存里的串"这种东西，而这条路径要跑在四个执行器上，所以只能用
+ * 最小的那几格（mload / 位运算 / chr / 串拼接）搭。
  *
- * `>= 0x80` 当场 `fail`：多字节 UTF-8 要按码位组装，硬拼会印出乱码。宁可报错。
+ * **为什么不能逐字节 chr**（原来那一版就是，非 ASCII 上当场 fail）：`chr` 收的是**码位**、
+ * 出的是那个码位的 UTF-8 字节（`interp/builtin.js` 的 chrOf）—— 逐字节喂进去，`0xE4`
+ * 会被当成 U+00E4 编成两个字节，印出来是乱码。所以先按首字节定长度、把续字节的低 6 位
+ * 拼成码位，再交给 `chr`。
+ *
+ * 首字节不合法（`0x80..0xC1`）与序列被截断都 `fail`：这一格是"读我们自己写出去的那块
+ * 内存"，读到不合法的字节说明写的那一侧错了 —— 印出乱码比报错糟得多。
  */
 function strHelper() {
   const v = (name, type) => ({ kind: 'VarRef', name, type });
@@ -1507,23 +1514,53 @@ function strHelper() {
     kind: 'ExprStmt',
     expr: { kind: 'Assign', target: v(name, type), value, type },
   });
+  /** 正文里第 `i + k` 个字节。 */
+  const at = (k) => load('i8u', ibin('+', ibin('+', ibin('+', v('a', INT), iconst(8)), v('i', INT)), iconst(k)));
+  /** 续字节：低 6 位，左移到位。 */
+  const cont = (k, shift) => ibin('<<', ibin('&', at(k), iconst(0x3f)), iconst(shift));
+  const failWith = (msg) => ({
+    kind: 'ExprStmt',
+    expr: { kind: 'Builtin', name: 'fail', args: [sconst(msg)], type: VOID },
+  });
+  /** 一支：码位怎么算、往前走几格。 */
+  const arm = (cp, adv) => oirBlock([setv('cp', INT, cp), setv('adv', INT, iconst(adv))]);
   const body = [
-    { kind: 'Local', name: 'b', type: INT, init: load('i8u', ibin('+', ibin('+', v('a', INT), iconst(8)), v('i', INT))) },
+    { kind: 'Local', name: 'b', type: INT, init: at(0) },
+    { kind: 'Local', name: 'cp', type: INT, init: iconst(0) },
+    { kind: 'Local', name: 'adv', type: INT, init: iconst(1) },
     {
       kind: 'If',
-      cond: cmp('>=', INT, v('b', INT), iconst(0x80)),
-      then: oirBlock([{
-        kind: 'ExprStmt',
-        expr: { kind: 'Builtin', name: 'fail', args: [sconst('omni.print_str: only ASCII bytes are supported (a byte >= 0x80 needs real UTF-8 decoding)')], type: VOID },
+      cond: cmp('<', INT, v('b', INT), iconst(0x80)),
+      then: arm(v('b', INT), 1),
+      otherwise: oirBlock([{
+        kind: 'If',
+        cond: cmp('<', INT, v('b', INT), iconst(0xc2)),
+        then: oirBlock([failWith('omni.print_str: not valid UTF-8 in memory (a lead byte in 0x80..0xC1)')]),
+        otherwise: oirBlock([{
+          kind: 'If',
+          cond: cmp('<', INT, v('b', INT), iconst(0xe0)),
+          then: arm(ibin('|', ibin('<<', ibin('&', v('b', INT), iconst(0x1f)), iconst(6)), cont(1, 0)), 2),
+          otherwise: oirBlock([{
+            kind: 'If',
+            cond: cmp('<', INT, v('b', INT), iconst(0xf0)),
+            then: arm(ibin('|', ibin('|', ibin('<<', ibin('&', v('b', INT), iconst(0x0f)), iconst(12)), cont(1, 6)), cont(2, 0)), 3),
+            otherwise: arm(ibin('|', ibin('|', ibin('|', ibin('<<', ibin('&', v('b', INT), iconst(0x07)), iconst(18)), cont(1, 12)), cont(2, 6)), cont(3, 0)), 4),
+          }]),
+        }]),
       }]),
+    },
+    {
+      kind: 'If',
+      cond: cmp('>', INT, ibin('+', v('i', INT), v('adv', INT)), v('n', INT)),
+      then: oirBlock([failWith('omni.print_str: not valid UTF-8 in memory (the sequence runs past the length)')]),
       otherwise: null,
     },
     setv('s', STRING, {
       kind: 'Bin', op: '+', opType: STRING, type: STRING,
       left: v('s', STRING),
-      right: { kind: 'Builtin', name: 'chr', args: [v('b', INT)], type: STRING, argType: INT },
+      right: { kind: 'Builtin', name: 'chr', args: [v('cp', INT)], type: STRING, argType: INT },
     }),
-    setv('i', INT, ibin('+', v('i', INT), iconst(1))),
+    setv('i', INT, ibin('+', v('i', INT), v('adv', INT))),
   ];
   return {
     name: STR_HELPER,

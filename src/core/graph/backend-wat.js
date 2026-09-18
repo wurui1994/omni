@@ -643,8 +643,8 @@ function emitOnce(graph, retOf, multiOf) {
    * 布局与宿主面那格 `print_str` 的约定**共用一份**（tests/wat/cases/05-print-str.wat
    * 钉的是同一句话）：**前 8 字节是长度，正文从 +8 起，一字节一格**。
    * 常量的地址是编译期就定下的 —— 所以字符串不走 bump 分配器，`$hp` 从它们后面起步。
-   * 只认 ASCII：≥ 0x80 的字节报缺口（前端那侧也是当场 fail），理由同一条 ——
-   * 拼字节印出乱码比报错糟得多。
+   * 字节就是 **UTF-8 的字节**（与 C / LLVM 两条腿共用 `utf8Bytes`）：宿主面那侧按码位
+   * 组装回来（`frontend-wat/lower.js` 的 strHelper），所以非 ASCII 原样进出。
    */
   const strs = new Map();     // 文本 -> 地址
   const data = [];            // [{ off, bytes }]
@@ -681,9 +681,6 @@ function emitOnce(graph, retOf, multiOf) {
   function strAddr(s) {
     if (strs.has(s)) return strs.get(s);
     const bytes = utf8Bytes(s);
-    for (const b of bytes) {
-      if (b >= 0x80) throw new Gap('非 ASCII 的字符串还没接：宿主面那格 print_str 只认 ASCII 字节');
-    }
     needMem = true;
     const at = dataEnd;
     const len = [];

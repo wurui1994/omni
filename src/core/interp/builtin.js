@@ -326,7 +326,10 @@ function indexOfStr(s, needle) {
 function chrOf(code) {
   const n = Number(code);
   if (n < 0 || n > 0x10ffff) rtError('chr: code point out of range: ' + n);
-  return decodeUtf8(encodeUtf8(String.fromCharCode(n)));
+  // **fromCodePoint 而不是 fromCharCode**：后者只取低 16 位，`chr(0x1D11E)` 会静静地
+  // 变成 U+D11E。另外两条腿（`$chr` 与 `omni_chr`）收的都是**码位**，这一格要跟它们一样。
+  // 外面再套一层编解码：孤立代理在这一趟里折成 U+FFFD —— 那也是 omni_chr 的口径。
+  return decodeUtf8(encodeUtf8(String.fromCodePoint(n)));
 }
 
 /** `(supper S)`：**只**把 ASCII 的 a-z 换成大写。与 omni_str_upper / $str_upper 同一份。 */

@@ -45,13 +45,10 @@ function hostOf(out) {
   const str = (addr) => {
     const view = new DataView(box.mem.buffer);
     const len = Number(view.getBigUint64(addr, true));
-    let s = '';
-    for (let k = 0; k < len; k++) {
-      const b = view.getUint8(addr + 8 + k);
-      if (b >= 0x80) throw new Error('print_str: 非 ASCII 字节（宿主面只认 ASCII）');
-      s += String.fromCharCode(b);
-    }
-    return s;
+    // 正文是 **UTF-8 的字节**（后端用 utf8Bytes 写出去的）—— 按码位读回来，
+    // 逐字节 fromCharCode 会把非 ASCII 读成乱码。
+    const bytes = new Uint8Array(box.mem.buffer, addr + 8, len);
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   };
   return {
     box,

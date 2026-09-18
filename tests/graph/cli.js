@@ -165,9 +165,7 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
       const str = (addr) => {
         const view = new DataView(mem.m.buffer);
         const len = Number(view.getBigUint64(addr, true));
-        let s = '';
-        for (let k = 0; k < len; k++) s += String.fromCharCode(view.getUint8(addr + 8 + k));
-        return s;
+        return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(mem.m.buffer, addr + 8, len));
       };
       const inst = new WebAssembly.Instance(new WebAssembly.Module(watToWasm(text)), {
         omni: {
@@ -208,9 +206,7 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
       const str = (addr) => {
         const view = new DataView(box.m.buffer);
         const len = Number(view.getBigUint64(addr, true));
-        let s = '';
-        for (let k = 0; k < len; k++) s += String.fromCharCode(view.getUint8(addr + 8 + k));
-        return s;
+        return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(box.m.buffer, addr + 8, len));
       };
       const inst = new WebAssembly.Instance(new WebAssembly.Module(bin), {
         omni: {
