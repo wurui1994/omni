@@ -594,6 +594,39 @@ class JsEmitter {
     this.indent--;
   }
 
+  /**
+   * `return` 那一句的文本。
+   *
+   * **回值就是 `undefined` 时只写 `return;`**（task #41，量出来的）：自举那份 JS 里
+   * `return undefined;` 有 87697 处（2.20MB），其中 78635 处是 pending 检查的退出句。
+   * OIR 那边不能把它换成 `value: null` —— C 那条腿的函数回的是 `omni_dyn`，非 void
+   * 的函数必须有回值。所以这一格只在**发射**这一层收：两者在 JS 里逐字等价。
+   *
+   * 为什么敢按文本认：这份产物里所有用户名字都带前缀（`v_` / `g_` / `u_` / `$`），
+   * `undefined` 一定是全局那一个，不可能被遮住。
+   */
+  returnLine(s) {
+    if (!s.value) return 'return;';
+    const v = this.rvalue(s.value, s.value.type);
+    return v === 'undefined' ? 'return;' : `return ${v};`;
+  }
+
+  /**
+   * 这条语句**恒定只占一行**吗 —— 是就给出那一行（不带缩进），不是就给 null。
+   *
+   * 只有 `If` 的"单句 then、没有 else"那一格用它（见那一支）。名单是**白名单**而不是
+   * 黑名单：多一种进来就是多一处"以为一行、其实多行"的风险，而那会发出错的 JS。
+   *   - `Local`（`let v_x = …;`）**不在**名单里：`if (c) let v_x = 1;` 是语法错。
+   *   - `Block` / `While` / `For` / `Try` / `Switch` 本来就是多行。
+   */
+  oneLineStmt(s) {
+    if (s.kind === 'ExprStmt') return `${this.expr(s.expr)};`;
+    if (s.kind === 'Return') return this.returnLine(s);
+    if (s.kind === 'Break') return this.jump(s, 'break');
+    if (s.kind === 'Continue') return this.jump(s, 'continue');
+    return null;
+  }
+
   stmt(s) {
     switch (s.kind) {
       case 'Block':
@@ -611,8 +644,21 @@ class JsEmitter {
       case 'ExprStmt':
         this.line(`${this.expr(s.expr)};`);
         break;
-      case 'If':
-        this.line(`if (${this.expr(s.cond)}) {`);
+      case 'If': {
+        const c = this.expr(s.cond);
+        /* 单句的 then、没有 else -> **不发花括号**，整句一行（task #41，量出来的）：
+         * 自举那份 `emit js src/cli.js` 里最大的一族就是这个形状 —— 78635 处
+         * `if ($js_pending()) { return undefined; }` 摊成三行，合计 4.7MB / 20.8MB = 23%。
+         * 一行之后省的是两行的缩进 + 花括号 + 两个换行。
+         *
+         * 能省的只有**恒定一行**的那几种语句（`oneLineStmt`）：`Local` 不行 ——
+         * `if (c) let v_x = 1;` 在 JS 里是语法错（单句位置不许词法声明）；块/循环/try
+         * 本来就是多行。热路径上真正在乎的是 V8 得先把这 20MB 解析一遍（量到 55.8%）。 */
+        if (s.otherwise === null || s.otherwise === undefined) {
+          const one = s.then.stmts.length === 1 ? this.oneLineStmt(s.then.stmts[0]) : null;
+          if (one !== null) { this.line(`if (${c}) ${one}`); break; }
+        }
+        this.line(`if (${c}) {`);
         this.body(s.then.stmts);
         if (s.otherwise) {
           this.line('} else {');
@@ -620,6 +666,7 @@ class JsEmitter {
         }
         this.line('}');
         break;
+      }
       case 'While':
         this.pushLoop(s);
         this.line(`while (${this.expr(s.cond)}) {`);
@@ -655,7 +702,7 @@ class JsEmitter {
         break;
       }
       case 'Return':
-        this.line(s.value ? `return ${this.rvalue(s.value, s.value.type)};` : 'return;');
+        this.line(this.returnLine(s));
         break;
       case 'Break': this.line(this.jump(s, 'break')); break;
       case 'Continue': this.line(this.jump(s, 'continue')); break;
