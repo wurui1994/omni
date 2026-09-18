@@ -12,6 +12,24 @@
 #ifndef OMNI_H
 #define OMNI_H
 
+/* ---------------------------------------------------------------- 特性宏
+ *
+ * **必须排在任何一个系统头前面**，所以放在这儿 —— `omni.h` 是每一份运行时 .c 的第一个
+ * include（21 份都是），生成出来的 C 也只 include 这一个头。
+ *
+ * 为什么要它：我们按 `-std=c99` 编（`cli.js` 那一行），而那是**严格 ISO** —— glibc 见了
+ * `__STRICT_ANSI__` 就把 POSIX 那一批藏起来，于是 `st_mtim`（struct stat 的字段）、
+ * `mkdtemp` / `realpath` / `setenv` 全都没有声明，Linux 上 gcc 与 clang 各报 5 条。
+ * macOS 的 libc 默认全开，所以这个洞在本机一次都没露过 —— docker 里跑 linux/amd64 才看见。
+ *
+ * `_DEFAULT_SOURCE` 是 glibc 的那一格总开关（含 POSIX.1-2008 + BSD 那几样）。
+ * **只在 Linux 上开**：macOS 上定义 `_POSIX_C_SOURCE` 一类的宏反而会**收窄**命名空间
+ * （把 `mkdtemp` 那种 BSD 出身的藏起来），而它本来就全开着，不必动。
+ */
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE 1
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
