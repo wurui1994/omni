@@ -32,8 +32,10 @@
 //     （越界落 `unreachable` —— 那是 `index-get` 与 `field-get` 分两格的理由之一）。
 //   * **字符串在 data 段里**，布局与宿主面那格 `print_str` 的约定共用一份：
 //     前 8 字节长度、正文从 +8 起、一字节一格。常量的地址编译期就定下，`$hp` 从它们后面起步。
-//     "这一格装的是数还是串"没有类型可问，所以做一格最小的静态追踪（见 kindOf）：
-//     串只许待在"绑给局部量"与"打印"两处，流到别处一律报缺口。
+//     "这一格装的是数还是串"没有类型可问，所以做一格最小的静态追踪（见 `watKindOf`）。
+//     那一趟顺着**五处**往下传：名字（作用域链）· 函数的返回值 · 形参（从调用点收）·
+//     记录的字段（按字段名）· 列表的元素（全是串的列表自成一档 `strlist`）。
+//     后四处各有一张表，由 `emitWat` 那趟定点算出来 —— 追不着的地方一律报缺口，不猜。
 //   * **map 是一格句柄 + 一张表**（`[cap][count][k0][v0]…`，线性扫描）。句柄那一层是必须的：
 //     表满了要换一块更大的，而 `map-set` 只拿得到那格值 —— 见 MAP_HELPERS 的注释。
 //
@@ -538,6 +540,19 @@ export function watKindOf(x, sc, gk, rk, fk) {
      * 这条腿的槽位表本来就是按名字排的、管整个模块（文件头"布局"那一段），种类跟着
      * 同一条粗化走。查不着按数算：那正是**没往里装过串**的字段。 */
     case 'field-get': return fk === undefined ? 'int' : (fk.get(x.attrs.field) ?? 'int');
+    /* **一列串是自己的一档**（`strlist`）。为什么不另开一张"元素种类表"：列表没有名字
+     * 可当键（记录有字段名），而"元素装的是什么"这件事**跟着那格列表的值走** ——
+     * 让它当种类本身，既有的那台机器（`bind` 记种类、`merge` 记 mix、`onlyInt` 拦）
+     * 就一格都不用改。`concat` 出 'str' 走的正是同一条路。
+     * 内存布局与一列数**一模一样**（`wty` 也还是 i64）：变的只是"读回来那一格是什么"。 */
+    case 'list-new': {
+      const items = watItems(x.ins.items);
+      if (items.length === 0) return 'int';
+      const ks = items.map((y) => watKindOf(y, sc, gk, rk, fk));
+      return ks.every((k) => k === 'str') ? 'strlist' : 'int';
+    }
+    case 'index-get':
+      return watKindOf(x.ins.obj, sc, gk, rk, fk) === 'strlist' ? 'str' : 'int';
     // 表示转换：目标那一栏（`to`）就是答案 —— 这一格是"两种数值类型"的入口。
     // **不走覆盖层的 `convTo`**：那一格对 `to=bool` 报缺口（方言里没有 tobool），
     // 而 wat 这边 bool 就是 i64，接得住 —— 这是腿的事，不是类型的事。
@@ -551,6 +566,10 @@ export function watKindOf(x, sc, gk, rk, fk) {
       const nm = x.attrs.name;
       const args = watItems(x.ins.args);
       if (nm === 'concat') return 'str';
+      // `fill(n, 零值)`：元素是串就是**一列串**（见 list-new 那一档的注释）
+      if (nm === 'fill') {
+        return watKindOf(args[1], sc, gk, rk, fk) === 'str' ? 'strlist' : 'int';
+      }
       if (!WAT_ARITH.has(nm)) return 'int';
       if (nm === '+' && args.some((a) => watKindOf(a, sc, gk, rk, fk) === 'str')) return 'str';
       return args.some((a) => watKindOf(a, sc, gk, rk, fk) === 'real') ? 'real' : 'int';
@@ -736,11 +755,34 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
   /** 串只许待在"绑给局部量"、"打印"与"整格返回"这三处。别的地方接住了就是给错答案。 */
   function onlyInt(x, sc, where) {
     const k = kindOf(x, sc);
+    if (k === 'strlist') {
+      throw new Gap(`${where}上还接不住"一列串"（那一档种类只跟着那格值走，流到这儿就追不着了）`);
+    }
     if (k === 'str' || k === 'mix') {
       throw new Gap(`${where}上还接不住字符串（wasm 上它是内存里的一块地址，要类型层才认得出）`);
     }
     if (k === 'real') {
       throw new Gap(`${where}上还接不住实数（内存里的一格是 i64，要按类型排的布局）`);
+    }
+  }
+
+  /**
+   * **列表的元素那一格**：整格列表**要么全是串要么全是数** —— 全是串的那一格出 `strlist`
+   * （见 `watKindOf` 的 list-new 那一档），读回来才认得出是串。混着装就报缺口：
+   * 那种列表读出来的一格该按哪种算，编译期答不出来。
+   */
+  function noteElem(ys, sc, listKind) {
+    for (const y of ys) {
+      const k = kindOf(y, sc);
+      if (k === 'real') {
+        throw new Gap('列表的元素上还接不住实数（内存里的一格是 i64，要按类型排的布局）');
+      }
+      if (k === 'strlist') {
+        throw new Gap('列表的元素上还接不住"一列串"（列表套列表要一层元素种类，这一批没有）');
+      }
+      if (k === 'mix' || (k === 'str') !== (listKind === 'strlist')) {
+        throw new Gap('列表的元素上还接不住字符串（整格列表要么全是串要么全是数）');
+      }
     }
   }
 
@@ -970,7 +1012,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
         if (name !== 'fill' && name !== 'contains') {
           for (const a of args) {
             const ka = kindOf(a, sc);
-            if (ka === 'str' || ka === 'mix') {
+            if (ka === 'str' || ka === 'mix' || ka === 'strlist') {
               throw new Gap(`${name} 落在字符串上 —— wasm 这一批只有数的算术（串只有 + 与 concat）`);
             }
           }
@@ -1036,7 +1078,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
            印出来会是那个地址。所以这儿按"列表的元素"报，而不是让上面那道算术关卡
            拿"串上没有算术"来解释一件跟算术无关的事。 */
         if (name === 'fill' && args.length === 2) {
-          onlyInt(args[1], sc, '列表的元素');
+          noteElem([args[1]], sc, kindOf(x, sc));
           needMem = true;
           const n = tmp(sc); pre.push(`(local.set ${n} ${expr(args[0], sc, pre)})`);
           const v = expr(args[1], sc, pre);
@@ -1057,7 +1099,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
         if (name === 'contains' && args.length === 2) {
           for (const a of args) {
             const ka = kindOf(a, sc);
-            if (ka === 'str' || ka === 'mix') {
+            if (ka === 'str' || ka === 'mix' || ka === 'strlist') {
               throw new Gap('contains 落在字符串上 —— 这条路比的是地址（i64.eq），内容相同而地址不同就答错');
             }
           }
@@ -1130,10 +1172,10 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
       // 列表：**长度存在偏移 0，元素从 8 起** —— 边界检查因此有地方读
       case 'list-new': {
         const items = watItems(x.ins.items);
+        noteElem(items, sc, kindOf(x, sc));
         const a = alloc(8 * (items.length + 1), sc, pre);
         pre.push(`(i64.store ${addr(`(local.get ${a})`)} (i64.const ${items.length}))`);
         items.forEach((y, i) => {
-          onlyInt(y, sc, '列表的元素');
           const v = expr(y, sc, pre);
           pre.push(`(i64.store (i32.add ${addr(`(local.get ${a})`)} (i32.const ${8 * (i + 1)})) ${v})`);
         });
@@ -1400,7 +1442,8 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
       }
       case 'index-set': {
         needMem = true;
-        onlyInt(x.ins.value, sc, '列表的元素');
+        // 往哪一格列表里塞：那格列表的种类说了元素该是什么（`strlist` 就得塞串）
+        noteElem([x.ins.value], sc, kindOf(x.ins.obj, sc));
         const o = tmp(sc); pre.push(`(local.set ${o} ${expr(x.ins.obj, sc, pre)})`);
         const i = tmp(sc); pre.push(`(local.set ${i} ${expr(x.ins.index, sc, pre)})`);
         guard(o, i, pre);
