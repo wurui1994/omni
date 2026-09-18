@@ -116,6 +116,8 @@ const __mapGet = (obj, k) => {
 
 const __mapSet = (obj, k, value) => { __asMap(obj, 'map-set').set(k, value); return null; };
 const __mapHas = (obj, k) => __asMap(obj, 'map-has').has(k);
+/* 键按**插入序**（宿主的 Map 天然如此）。拷一份是明说的语义 —— 见 nodes.js 的 map-keys。 */
+const __mapKeys = (obj) => [...__asMap(obj, 'map-keys').keys()];
 
 /* 切片：上界不含、0 起，越界报。转换：int 是**截断**（向零），别的答案归语言的映射。 */
 const __slice = (obj, from, to) => {
@@ -159,5 +161,5 @@ export function jsModuleText(source, note) {
   return `// ${note}\n// 自足产物：node 直接跑（钩子摊在下面，见 src/core/graph/js_rt.js）\n`
     + `${GRAPH_JS_RT}\nconst __main = ${source};\n`
     + '__main(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex,\n'
-    + '  __conv, __slice, __mapNew, __mapGet, __mapSet, __mapHas, __assert);\n';
+    + '  __conv, __slice, __mapNew, __mapGet, __mapSet, __mapHas, __mapKeys, __assert);\n';
 }

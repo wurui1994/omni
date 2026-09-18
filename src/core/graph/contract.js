@@ -17,7 +17,7 @@
 import { NODES, declOf } from './nodes.js';
 import {
   evalGraph, showValue, valTruthy, valPick, field, setField, index, setIndex, convert, valSlice,
-  valMapNew, valMapGet, valMapSet, valMapHas, AssertFailed,
+  valMapNew, valMapGet, valMapSet, valMapHas, valMapKeys, AssertFailed,
 } from './eval.js';
 import { toSx, fromSx } from './graph.js';
 import { PRIMS } from './prims.js';
@@ -256,6 +256,7 @@ function jsExpr(x) {
     }
     case 'map-get': return `__mapGet(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.key)})`;
     case 'map-has': return `__mapHas(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.key)})`;
+    case 'map-keys': return `__mapKeys(${jsExpr(x.ins.obj)})`;
     case 'conv': return `__conv(${jsExpr(x.ins.value)}, ${JSON.stringify(x.attrs.to)})`;
     case 'slice': return `__slice(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.from)}, ${jsExpr(x.ins.to)})`;
     default: return `(() => { ${jsStmt(x)} })()`;
@@ -348,7 +349,7 @@ function jsStmt(x) {
 function jsLower(g) {
   const body = withExits(asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n'));
   const source = '(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex, __conv, __slice,'
-    + ' __mapNew, __mapGet, __mapSet, __mapHas, __assert) => {'
+    + ' __mapNew, __mapGet, __mapSet, __mapHas, __mapKeys, __assert) => {'
     + `\n${body}\n}`;
   return {
     text: source,
@@ -388,7 +389,7 @@ function jsLower(g) {
       try {
         f(out, showValue, valTruthy, valPick, field, setField, index, setIndex,
           (v, to) => convert(v, to, { show: showValue }), valSlice,
-          valMapNew, valMapGet, valMapSet, valMapHas, jsAssert);
+          valMapNew, valMapGet, valMapSet, valMapHas, valMapKeys, jsAssert);
       } catch (err) {
         if (!(err instanceof AssertFailed)) throw err;
         return { value: null, out, failed: err.text };

@@ -74,6 +74,9 @@ const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'l
   /* 映射四格：方言第一百五十三片给了 `(dict K V)` 与 `dnew/dget/dset/dhas`，所以这一族
      也不必动 OIR（那几格就是主语言 `dict<K,V>` 走的 NewContainer / IndexGet / …）。 */
   'map-new', 'map-get', 'map-set', 'map-has',
+  /* `map-keys`（第三十批）：方言新加的 `(dkeys …)` —— 主语言 `dict.keys()` 那一格内建，
+     OIR 一个新节点都没加。遍历那一圈由映射用现成的 counted 走，这一层只出键。 */
+  'map-keys',
   /* 多值（go 的 `return a, b`）：方言的函数只交一格回来，所以这一族落成**一格合成的结构体**
      （值语义，方言里返回结构体本来就是复制）—— `values` 是构造、`pick` 是取第 k 个字段。 */
   'values', 'pick',
@@ -335,6 +338,13 @@ function expr(x, env, ctx) {
       const d = hostDict(x.ins.obj, env, ctx);
       if (d === null) gap(`map-has 的宿主不是字典（量到的是 ${typeOf(x.ins.obj, env, ctx)}）`);
       return `(dhas ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)})`;
+    }
+    /* `map-keys`（第三十批）：方言里是 `(dkeys …)` —— 主语言的 `dict.keys()` 那一格，
+       回一格 `(list K)`，键按插入序。遍历那一圈由映射用现成的 counted 走，这儿只出键。 */
+    case 'map-keys': {
+      const d = hostDict(x.ins.obj, env, ctx);
+      if (d === null) gap(`map-keys 的宿主不是字典（量到的是 ${typeOf(x.ins.obj, env, ctx)}）`);
+      return `(dkeys ${objText(x.ins.obj, env, ctx)})`;
     }
     case 'slice': gap('切片出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     /* **表达式位置上的映射**：先物化成一格临时名，再把那个名字交出去。

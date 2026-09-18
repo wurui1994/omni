@@ -49,7 +49,7 @@ import { liftBody } from './lift.js';
 const OPS = new Set(['const', 'ref', 'bind', 'set', 'prim', 'branch', 'loop', 'loop-exit',
   'region', 'ret', 'func', 'call',
   'list-new', 'index-get', 'index-set', 'record-new', 'field-get', 'field-set',
-  'map-new', 'map-get', 'map-set', 'map-has', 'values', 'pick', 'conv', 'slice',
+  'map-new', 'map-get', 'map-set', 'map-has', 'map-keys', 'values', 'pick', 'conv', 'slice',
   'scope-exit', 'assert']);
 
 /** 这一刀接得住的内建。`prims.js` 里现有 24 格，全在这儿。 */
@@ -481,6 +481,14 @@ static gv g_map_get(gv o, gv k) {
 }
 
 static gv g_map_has(gv o, gv k) { return g_bool(g_map_find(o, k) >= 0 ? 1 : 0); }
+
+/* 键排成一格列表（\`map-keys\`）。这张表是**按尾追加**的（g_map_set 里那几句），
+ * 所以从头扫一遍就是**插入序** —— 与别的腿同一个次序（那是判据，见 nodes.js）。 */
+static gv g_map_keys(gv o) {
+  if (o.t != GT_MAP) g_die("map-keys: 不是一格映射");
+  gmap *M = g_M(o);
+  return g_list_new(M->k, M->n);
+}
 
 /* ---- 表示转换（conv）。目标只有四种，与 eval.js 的 convert 一条一条对：
  *   int  截断（向零）· float 就是数 · str 走 g_show · bool 走真值观。
@@ -1256,6 +1264,7 @@ class CGen {
     if (op === 'index-get' || op === 'map-get' || op === 'map-has') {
       return this.noEmit(x.ins.obj) && this.noEmit(x.ins.index ?? x.ins.key);
     }
+    if (op === 'map-keys') return this.noEmit(x.ins.obj);
     if (op === 'slice') {
       return this.noEmit(x.ins.obj) && this.noEmit(x.ins.from) && this.noEmit(x.ins.to);
     }
@@ -1357,6 +1366,7 @@ class CGen {
     }
     if (x.op === 'map-get') return `g_map_get(${this.valOf(x.ins.obj)}, ${this.valOf(x.ins.key)})`;
     if (x.op === 'map-has') return `g_map_has(${this.valOf(x.ins.obj)}, ${this.valOf(x.ins.key)})`;
+    if (x.op === 'map-keys') return `g_map_keys(${this.valOf(x.ins.obj)})`;
     if (x.op === 'values') {
       const items = asList(x.ins.args).filter((y) => y !== undefined).map((y) => this.valOf(y));
       const a = `w${this.fresh()}`;

@@ -17,7 +17,7 @@ import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, counted,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, deferNow,
-  mapNew, mapGet, mapSet, mapHas, mapNames, isList,
+  mapNew, mapGet, mapSet, mapHas, mapNames, mapForIn, isList,
 } from '../../src/core/graph/fromtree.js';
 
 /**
@@ -501,10 +501,6 @@ function forRangeOf(x) {
   const blk = kids(x).find((y) => tag(y) === 'block');
   if (vals === undefined) throw new Error('go->graph: for-range 里没有 (values …)');
   const subj = kids(vals)[0];
-  if (isMap(subj)) {
-    throw new Error('go->graph: range 一格 map 要按键遍历 —— 图上还没有那一格'
-      + '（次序在 go 里本来也是不定的，不能拿列表下标充）');
-  }
   if (tag(subj) === 'num') {
     throw new Error('go->graph: range 一格整数（go 1.22 起）这一批还没接');
   }
@@ -525,6 +521,26 @@ function forRangeOf(x) {
   const mk = (n, v) => (isDef
     ? node('bind', { init: v }, { name: n })
     : node('set', { value: v }, { name: n }));
+  /* 一格 map：**按键遍历**（第三十批）。go 的 `range m` 里第一格是**键**、第二格是值 ——
+     与 range 一格切片（第一格是下标）不是一件事，所以这一支单走 `mapForIn`。
+     go 的规范说 map 的迭代次序是**不定**的，所以"插入序"是它的一个合法实现（见 nodes.js
+     里 map-keys 那段）；`=` 那一路（名字在循环外面就有了）这一批还没接，照实报。 */
+  if (isMap(subj)) {
+    if (!isDef) {
+      throw new Error('go->graph: `for k, v = range m`（`=` 而不是 `:=`）这一批还没接'
+        + ' —— 按键遍历那一路现在只发 bind');
+    }
+    return mapForIn({
+      subject: toNode(subj),
+      keyName: names.length > 0 ? names[0] : null,
+      valName: names.length > 1 ? names[1] : null,
+      body: inner,
+      mapVar: seq,
+      keysVar: `__rk${RG_DEPTH}`,
+      idxVar: idx,
+      cntVar: cnt,
+    });
+  }
   const head = [];
   if (names.length > 0 && names[0] !== '_') head.push(mk(names[0], at(idx)));
   if (names.length > 1 && names[1] !== '_') head.push(mk(names[1], indexGet(at(seq), at(idx))));

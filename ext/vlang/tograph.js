@@ -15,7 +15,7 @@ import {
   tag, kids, leaf, part, threePart, elseOf,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, counted, partKids,
   recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, destructure,
-  mapNew, mapGet, mapSet, mapHas, mapNames, isList, assertOf,
+  mapNew, mapGet, mapSet, mapHas, mapNames, mapForIn, isList, assertOf,
 } from '../../src/core/graph/fromtree.js';
 
 /** 装 map 的那些名字（`vlangToGraph` 里一趟扫查填好）—— 与 go 那一份同一条办法。 */
@@ -720,8 +720,20 @@ function forInOf(x) {
       ],
     });
   }
+  /* 一格 map：**按键遍历**（第三十批）。V 的规矩是"第一格键、第二格值" ——
+     与列表那一格（一个名字给的是元素）不同，所以这一支单走 `mapForIn`。
+     那一份三门共用：先要一格键的列表（`map-keys`），再走同一格 counted。 */
   if (isMap(subj)) {
-    throw new Error('v->graph: `for … in` 一格 map 要按键遍历 —— 图上还没有那一格');
+    return mapForIn({
+      subject: toNode(subj),
+      keyName: names[0],
+      valName: names.length > 1 ? names[1] : null,
+      body: inner,
+      mapVar: seq,
+      keysVar: `__mk${FI_DEPTH}`,
+      idxVar: idx,
+      cntVar: cnt,
+    });
   }
   const head = [];
   const elem = indexGet(at(seq), at(idx));

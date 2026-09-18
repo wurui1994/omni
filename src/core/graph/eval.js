@@ -214,6 +214,14 @@ export const valMapSet = (obj, k, value) => {
 export const valMapHas = (obj, k) => asMap(obj, 'map-has').has(k);
 
 /**
+ * 一格 map 的键，**按插入序**排成一格列表（`map-keys`，第三十批）。
+ *
+ * 宿主的 `Map` 天然保插入序，所以这一句就是全部。**拷一份**是明说的语义
+ * （见 `nodes.js` 里 `map-keys` 那段）：遍历中改表不反映到这份拷贝上。
+ */
+export const valMapKeys = (obj) => [...asMap(obj, 'map-keys').keys()];
+
+/**
  * 切片：**一段范围复制成一格新列表**。上界不含、下标 0 起（各语言的差别由映射摆平）。
  * 两个后端共用（js 后端里那句 `__slice`）。
  */export const valSlice = (obj, from, to) => {
@@ -346,6 +354,7 @@ function run(n, env, io) {
     case 'map-get': return valMapGet(arg('obj'), arg('key'));
     case 'map-set': return valMapSet(arg('obj'), arg('key'), arg('value'));
     case 'map-has': return valMapHas(arg('obj'), arg('key'));
+    case 'map-keys': return valMapKeys(arg('obj'));
     // 表示转换：目标在附属 `to` 上。**四家的写法不同，落的是同一格**
     case 'conv': return convert(arg('value'), n.attrs.to, io);
     case 'slice': return valSlice(arg('obj'), arg('from'), arg('to'));

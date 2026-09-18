@@ -77,7 +77,7 @@ const CAN = new Map([
   ['conv', true],
   // map 那一族：线性内存里一格**句柄 + 一张表**（键值各 8 字节，线性扫描），
   // 键按编译期知道的种类比（数直接比、串按"长度 + 字节"比），满了换一块更大的
-  ['map-new', true], ['map-get', true], ['map-set', true], ['map-has', true],
+  ['map-new', true], ['map-get', true], ['map-set', true], ['map-has', true], ['map-keys', true],
   ['slice', true],
   ['scope-exit', true],
   ['loop-exit', true],
@@ -336,6 +336,29 @@ const MAP_HELPERS = `  (func $__map_new (result i64)
   (func $__map_has (param $h i64) (param $k i64) (param $mode i64) (result i64)
     (i64.extend_i32_s (i64.ne
       (call $__map_find (local.get $h) (local.get $k) (local.get $mode)) (i64.const -1)))
+  )
+  ;; 键排成一格列表（\`map-keys\`）。表是 [cap][count][k0][v0]… 按尾追加的，
+  ;; 所以从头扫一遍隔一格取就是**插入序** —— 与别的腿同一个次序（那是判据，见 nodes.js）。
+  ;; 出来的布局与 \`list-new\` 逐字节同形：[len][e0][e1]…
+  (func $__map_keys (param $h i64) (result i64)
+    (local $t i32) (local $n i64) (local $i i64) (local $out i32)
+    (local.set $t (i32.wrap_i64 (i64.load (i32.wrap_i64 (local.get $h)))))
+    (local.set $n (i64.load (i32.add (local.get $t) (i32.const 8))))
+    (local.set $out (global.get $hp))
+    (global.set $hp (i32.add (global.get $hp)
+      (i32.add (i32.const 8) (i32.wrap_i64 (i64.mul (local.get $n) (i64.const 8))))))
+    (i64.store (local.get $out) (local.get $n))
+    (local.set $i (i64.const 0))
+    (block $done (loop $each
+      (if (i64.ge_s (local.get $i) (local.get $n)) (then (br $done)))
+      (i64.store
+        (i32.add (local.get $out)
+          (i32.add (i32.const 8) (i32.wrap_i64 (i64.mul (local.get $i) (i64.const 8)))))
+        (i64.load (i32.add (local.get $t)
+          (i32.add (i32.const 16) (i32.wrap_i64 (i64.mul (local.get $i) (i64.const 16)))))))
+      (local.set $i (i64.add (local.get $i) (i64.const 1)))
+      (br $each)))
+    (i64.extend_i32_u (local.get $out))
   )`;
 
 /**
@@ -533,11 +556,11 @@ const watKind = (t) => (t === 'string' ? 'str' : (t === 'real' ? 'real' : 'int')
  * 从 `emitWat` 里提到顶层是为了**能被判据问**（原来它是闭包，外头问不着，
  * 于是"三处说同一句话"那条判据落不下来）。`gk` 就是那张全局量的种类表。
  */
-export function watKindOf(x, sc, gk, rk, fk) {
+export function watKindOf(x, sc, gk, rk, fk, mk) {
   if (x === null || x === undefined) return 'int';
   if (Array.isArray(x)) {
     const l = watItems(x);
-    return l.length === 0 ? 'int' : watKindOf(l[l.length - 1], sc, gk, rk, fk);
+    return l.length === 0 ? 'int' : watKindOf(l[l.length - 1], sc, gk, rk, fk, mk);
   }
   if (x.lit !== undefined) return watKind(litType(x.lit));
   switch (x.op) {
@@ -546,11 +569,11 @@ export function watKindOf(x, sc, gk, rk, fk) {
       const nm = x.attrs.name;
       return sc.lookup(nm) !== null ? sc.kindOf(nm) : (gk.get(nm) ?? 'int');
     }
-    case 'region': return watKindOf(x.ins.body, sc, gk, rk, fk);
+    case 'region': return watKindOf(x.ins.body, sc, gk, rk, fk, mk);
     /* **一段以 `return X` 结尾的体，种类就是 X 的**。没这一档的时候它落到 default 答
      * 'int'，于是"每支都 return 一格串"的 case 链（nim 的 `grade`）在 `fnBody` 那儿
      * 先被记成返回 int、里头那几条 ret 再记成 str，自己跟自己打起来报 mix。 */
-    case 'ret': return watKindOf(x.ins.value, sc, gk, rk, fk);
+    case 'ret': return watKindOf(x.ins.value, sc, gk, rk, fk, mk);
     /* **调一格函数：种类由被调的那一格答**（`rk` 就是那张表，emitWat 的定点算出来的）。
      * 没这一档的时候这儿一律答 'int'，于是"返回一格串"的函数在调用点上就变成了一个数，
      * 而它的值是那块内存的地址 —— 印出来是个大整数。所以从前 `onlyInt('返回值')`
@@ -568,11 +591,29 @@ export function watKindOf(x, sc, gk, rk, fk) {
     case 'list-new': {
       const items = watItems(x.ins.items);
       if (items.length === 0) return 'int';
-      const ks = items.map((y) => watKindOf(y, sc, gk, rk, fk));
+      const ks = items.map((y) => watKindOf(y, sc, gk, rk, fk, mk));
       return ks.every((k) => k === 'str') ? 'strlist' : 'int';
     }
     case 'index-get':
-      return watKindOf(x.ins.obj, sc, gk, rk, fk) === 'strlist' ? 'str' : 'int';
+      return watKindOf(x.ins.obj, sc, gk, rk, fk, mk) === 'strlist' ? 'str' : 'int';
+    /**
+     * `map-keys`：键是串就出**一列串**，键是数就出一列数 —— 与 `list-new` 那一档同一条规矩。
+     *
+     * 判据从哪儿来：**那格 map 的名字**（`mk`，`carried.mapKeys`）。键的种类在别处已经
+     * 判过一遍了 —— `keyMode` 每次碰到 `map-get`/`map-set`/`map-has` 都要判"键怎么比"，
+     * 那一格顺手记进这张表；`map-new` 的字面量键在 `bind` 那一步记。
+     *
+     * 判不出来（一次都没碰过键的空 map）就**报缺口**，不给 'int' 兜底：兜错了的症状是
+     * 把串的地址当数印出来（`8 / 24 / 40`），而那种错在输出上看不出是错。
+     */
+    case 'map-keys': {
+      const nm = x.ins.obj?.op === 'ref' ? x.ins.obj.attrs.name : null;
+      const kk = nm === null || mk === undefined ? undefined : mk.get(nm);
+      if (kk === 'str') return 'strlist';
+      if (kk === 'int') return 'int';
+      throw new Gap('还判不出这格 map 的键是串还是数（键一次都没被碰过）'
+        + ' —— 按键遍历要那一格才知道印出来的是串还是数');
+    }
     // 表示转换：目标那一栏（`to`）就是答案 —— 这一格是"两种数值类型"的入口。
     // **不走覆盖层的 `convTo`**：那一格对 `to=bool` 报缺口（方言里没有 tobool），
     // 而 wat 这边 bool 就是 i64，接得住 —— 这是腿的事，不是类型的事。
@@ -588,14 +629,14 @@ export function watKindOf(x, sc, gk, rk, fk) {
       if (nm === 'concat') return 'str';
       // `fill(n, 零值)`：元素是串就是**一列串**（见 list-new 那一档的注释）
       if (nm === 'fill') {
-        return watKindOf(args[1], sc, gk, rk, fk) === 'str' ? 'strlist' : 'int';
+        return watKindOf(args[1], sc, gk, rk, fk, mk) === 'str' ? 'strlist' : 'int';
       }
       if (!WAT_ARITH.has(nm)) return 'int';
-      if (nm === '+' && args.some((a) => watKindOf(a, sc, gk, rk, fk) === 'str')) return 'str';
-      return args.some((a) => watKindOf(a, sc, gk, rk, fk) === 'real') ? 'real' : 'int';
+      if (nm === '+' && args.some((a) => watKindOf(a, sc, gk, rk, fk, mk) === 'str')) return 'str';
+      return args.some((a) => watKindOf(a, sc, gk, rk, fk, mk) === 'real') ? 'real' : 'int';
     }
     case 'branch': {
-      const a = watKindOf(x.ins.then, sc, gk, rk, fk); const b = watKindOf(x.ins.else, sc, gk, rk, fk);
+      const a = watKindOf(x.ins.then, sc, gk, rk, fk, mk); const b = watKindOf(x.ins.else, sc, gk, rk, fk, mk);
       return a === b ? a : 'mix';
     }
     default: return 'int';
@@ -768,9 +809,28 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
   }
 
   /* 这一格值装的是数 / 实数 / 串 —— 问的是**顶层那一份**（`watKindOf`，见文件末），
-     这儿把两张表绑上去：全局量装的是什么、以及**每个函数返回的是什么**（`kindOfFn`，
-     由 emitWat 的定点算出来 —— 与 `retOf` / `multiOf` 同一趟）。 */
-  const kindOf = (x, sc) => watKindOf(x, sc, globalKinds, kindOfFn, carried.fields);
+     这儿把三张表绑上去：全局量装的是什么、**每个函数返回的是什么**（`kindOfFn`，
+     由 emitWat 的定点算出来 —— 与 `retOf` / `multiOf` 同一趟）、以及
+     **每格 map 的键是什么**（`carried.mapKeys`，按键遍历那一格要它）。 */
+  const kindOf = (x, sc) => watKindOf(x, sc, globalKinds, kindOfFn, carried.fields, carried.mapKeys);
+
+  /**
+   * **那格 map 的键是串还是数**，按 map 的名字记（`carried.mapKeys`）。
+   *
+   * 为什么要单记一张表：`map-keys` 出来的是一格列表，而"那列里装的是串还是数"这件事
+   * 在节点上看不出来 —— 它在**键**上。键的种类每次碰 `map-get`/`map-set`/`map-has`
+   * 都判过一遍（`keyMode`），所以顺手记下来就够，不必另跑一趟分析。
+   *
+   * 键是名字而不是"哪一格 map"：与 `carried.fields` 同一条粗化（那儿是字段名）。
+   * 同一个名字一处装串一处装数记 'mix'，`map-keys` 读到它就报缺口。
+   */
+  function noteMapKey(obj, kind) {
+    if (obj === null || obj === undefined || obj.op !== 'ref') return;
+    if (kind !== 'int' && kind !== 'str') return;
+    const nm = obj.attrs.name;
+    const had = carried.mapKeys.get(nm);
+    carried.mapKeys.set(nm, had === undefined || had === kind ? kind : 'mix');
+  }
 
   /** 串只许待在"绑给局部量"、"打印"与"整格返回"这三处。别的地方接住了就是给错答案。 */
   function onlyInt(x, sc, where) {
@@ -877,8 +937,16 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
    * map 的键怎么比：**编译期就知道**（种类那一趟追踪的另一个用处）。
    * 0 = i64 直接比 · 1 = 串按"长度 + 字节"比。既装串又装数的键报缺口 —— 不猜。
    */
-  function keyMode(k, sc) {
+  /**
+   * map 的键怎么比：**编译期就知道**（种类那一趟追踪的另一个用处）。
+   * 0 = i64 直接比 · 1 = 串按"长度 + 字节"比。既装串又装数的键报缺口 —— 不猜。
+   *
+   * `obj` 给了的话顺手把"这格 map 的键是什么"记进 `carried.mapKeys`（`noteMapKey`）——
+   * 按键遍历（`map-keys`）要的正是那一格，而这儿本来就已经判出来了。
+   */
+  function keyMode(k, sc, obj) {
     const kind = kindOf(k, sc);
+    if (kind === 'int' || kind === 'str') noteMapKey(obj, kind);
     if (kind === 'int') return 0;
     if (kind === 'str') return 1;
     throw new Gap(`map 的键既装过串也装过数（或是实数）—— 键怎么比就定不下来（要类型层）`);
@@ -1280,14 +1348,21 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
       case 'map-get': {
         needMap = true;
         needMem = true;
-        const m = keyMode(x.ins.key, sc);
+        const m = keyMode(x.ins.key, sc, x.ins.obj);
         return `(call $__map_get ${expr(x.ins.obj, sc, pre)} ${expr(x.ins.key, sc, pre)} (i64.const ${m}))`;
       }
       case 'map-has': {
         needMap = true;
         needMem = true;
-        const m = keyMode(x.ins.key, sc);
+        const m = keyMode(x.ins.key, sc, x.ins.obj);
         return `(call $__map_has ${expr(x.ins.obj, sc, pre)} ${expr(x.ins.key, sc, pre)} (i64.const ${m}))`;
+      }
+      /* `map-keys`：一格列表（与 `list-new` 同一套布局），键按插入序。
+         键的种类这儿**不用问** —— 拷的是那 8 个字节本身，串就是串的地址。 */
+      case 'map-keys': {
+        needMap = true;
+        needMem = true;
+        return `(call $__map_keys ${expr(x.ins.obj, sc, pre)})`;
       }
       default: throw why(x.op, '值位置');
     }
@@ -1478,7 +1553,7 @@ function emitOnce(graph, retOf, multiOf, kindOfFn, carried) {
       case 'map-set': {
         needMap = true;
         needMem = true;
-        const m = keyMode(x.ins.key, sc);
+        const m = keyMode(x.ins.key, sc, x.ins.obj);
         onlyInt(x.ins.value, sc, 'map 的值');
         const o = expr(x.ins.obj, sc, pre);
         const k = expr(x.ins.key, sc, pre);
@@ -1931,8 +2006,11 @@ export function emitWat(graph) {
    * `main` 里那几处调用还没走到，表是空的。抛出来的那一遍照样留下了它收到的那几处
    * （见 emitOnce 里 `keepGoing` 那一段：一格函数体报了缺口也把这一遍走完），
    * 所以**只要表还在长就再试一遍**；长不动了才把 Gap 交上去（那才是真的接不住）。 */
-  const carried = { params: new Map(), fields: new Map() };
-  const snap = () => JSON.stringify([[...carried.params].sort(), [...carried.fields].sort()]);
+  /* `mapKeys`：每格 map 的**键**是串还是数（按 map 的名字记）。按键遍历那一格要它 ——
+     见 `noteMapKey` 头上那段。与另外两张表同一趟定点（表只会长，不会缩）。 */
+  const carried = { params: new Map(), fields: new Map(), mapKeys: new Map() };
+  const snap = () => JSON.stringify([[...carried.params].sort(), [...carried.fields].sort(),
+    [...carried.mapKeys].sort()]);
   let last = null;
   let prevArgs = null;
   for (let i = 0; i < 8; i++) {

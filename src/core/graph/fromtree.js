@@ -279,6 +279,54 @@ export const mapNew = (pairs = []) => node('map-new', {
 });
 export const mapGet = (obj, key) => node('map-get', { obj, key });
 export const mapSet = (obj, key, value) => node('map-set', { obj, key, value });
+/** 键排成一格列表（**插入序**）—— `for k in m` 那一族的降级靠它，见 `mapForIn`。 */
+export const mapKeys = (obj) => node('map-keys', { obj });
+
+/**
+ * **`for k[, v] in 一格 map` 落成现成的 counted**（第三十批，三门共用这一份）。
+ *
+ * 一格新的循环节点都不加：先要一格**键的列表**（`map-keys`），再走列表那条路 ——
+ * 于是"遍历"这件事在这一层只有一份降级代码（列表的 for-each 也是 counted）。
+ *
+ * 三门语言的差别只在**名字给的是什么**，那一格由调用方递进来：
+ *   * V   `for k, v in m` —— 第一格键、第二格值（`for k in m` 只有键）；
+ *   * go  `for k := range m` / `for k, v := range m` —— 同上；
+ *   * nim `for k in t` / `for k, v in t.pairs` —— 同上。
+ * 也就是说三门在这一格上**恰好同形**（与列表那一格 go/V 相反不同）—— 所以合成一份。
+ *
+ * 值那一格走 `map-get`（键一定在，所以缺键报错那条规矩碰不到）。
+ * `_` 的那一格不绑名字（三门都用 `_` 表示"不要"）。
+ *
+ * @param opts `{ subject, keyName, valName, body, mapVar, keysVar, idxVar, cntVar }`
+ */
+export function mapForIn(opts) {
+  const at = (n) => node('ref', {}, { name: n });
+  const head = [];
+  if (opts.keyName !== undefined && opts.keyName !== null && opts.keyName !== '_') {
+    head.push(node('bind', { init: indexGet(at(opts.keysVar), at(opts.idxVar)) },
+      { name: opts.keyName }));
+  }
+  if (opts.valName !== undefined && opts.valName !== null && opts.valName !== '_') {
+    /* 值要按**键**取，而键那一格可能没绑名字（`for _, v in m`）—— 所以这儿一律
+       从键的列表上现取一次，不依赖 `keyName` 绑上了没有。 */
+    head.push(node('bind', { init: node('map-get', { obj: at(opts.mapVar), key: indexGet(at(opts.keysVar), at(opts.idxVar)) }) },
+      { name: opts.valName }));
+  }
+  return node('region', {
+    body: [
+      node('bind', { init: opts.subject }, { name: opts.mapVar }),
+      node('bind', { init: mapKeys(at(opts.mapVar)) }, { name: opts.keysVar }),
+      node('bind', { init: node('prim', { args: [at(opts.keysVar)] }, { name: 'len' }) },
+        { name: opts.cntVar }),
+      counted({
+        name: opts.idxVar,
+        from: node('const', {}, { value: 0 }),
+        cond: node('prim', { args: [at(opts.idxVar), at(opts.cntVar)] }, { name: '<' }),
+        body: [node('region', { body: [...head, ...(opts.body ?? [])] })],
+      }),
+    ],
+  });
+}
 export const mapHas = (obj, key) => node('map-has', { obj, key });
 
 /**

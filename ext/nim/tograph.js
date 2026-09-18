@@ -16,7 +16,7 @@ import {
   isList, tag, kids, leaf, part, groupItems, unquote,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, lazyAnd, counted,
   recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, destructure,
-  mapNew, mapGet, mapSet, mapHas, mapNames,
+  mapNew, mapGet, mapSet, mapHas, mapNames, mapForIn,
 } from '../../src/core/graph/fromtree.js';
 
 /**
@@ -495,9 +495,20 @@ function toNode(x) {
           });
         }
       }
-      // 集合遍历
+      /* 一格 `Table`：**按键遍历**（第三十批）。nim 的 `for k in t` 给的是键、
+         `for k, v in t` 是键与值（`t.pairs` 那种写法在树上已经落成同一个形状）。
+         三门在这一格上恰好同形，所以走共用的那一份 `mapForIn`。 */
       if (isMap(subj)) {
-        throw new Error('nim->graph: `for k in table:` 要按键遍历 —— 图上还没有那一格');
+        return mapForIn({
+          subject: toNode(subj),
+          keyName: names.length > 0 ? names[0] : null,
+          valName: names.length > 1 ? names[1] : null,
+          body: inner,
+          mapVar: '__nm0',
+          keysVar: '__nk0',
+          idxVar: '__ni0',
+          cntVar: '__nn0',
+        });
       }
       // 一般集合（seq / array）
       const seq = '__ns0';
