@@ -370,11 +370,18 @@ const many = (xs) => xs.map(toNode).flat();
  *   4. 都不是：接收者的类型这一层看不出来 —— 要类型那一层。
  */
 function selWall(recvName, m, fromVar) {
+  /* **`pkg.Func(…)` 或 `pkg.Method(…)` 的接收者是 import 的包** */
   if (recvName !== null && IMPORTS.has(recvName) && fromVar === undefined) {
     if (XPKG.pkgs.has(recvName)) {
+      /* 包在语料里，但不是顶层函数。两种可能：
+         a) 包级变量上的方法（`base.Ctxt.Lookup(…)` 那一族）—— 要类型
+         b) 那个包里声明的方法，接收者的类型写在 VARTYPE 里但查不到
+            —— 这一支在上面 `owner` 那条路已经走过了，到这儿的都是 (a) */
       return new Error(`go->graph: 包 ${recvName} 里没有顶层函数 ${m} —— 那是包级变量上的方法，`
         + '要那个变量的类型（要类型那一层）');
     }
+    /* 包不在语料里 —— 但如果接收者的类型写在 VARTYPE 里（`func f(t *testing.T)`），
+       而那个类型也不在语料里，那真正的原因是**方法声明不在** —— 标准库。 */
     return new Error(`go->graph: ${recvName}.${m}(…) 的声明不在语料里`
       + '（标准库 / 语料树外的包）');
   }
@@ -387,6 +394,9 @@ function selWall(recvName, m, fromVar) {
     return new Error(`go->graph: 类型 ${fromVar} 上没有声明方法 ${m} —— 十有八九是嵌入字段`
       + '带来的，要展开被嵌类型（要类型那一层）');
   }
+  /* **接收者的类型完全看不出来** —— 但如果左边是包名且那个包不在语料里，
+     错误消息应当指向"语料外"而不是"类型看不出来"。这一段在上面那条分支已经处理了，
+     到这儿的是**真的看不出来**：局部变量没写类型、不是包名。 */
   return new Error(`go->graph: .${m} 的接收者的类型这一层看不出来 —— 要类型那一层`
     + '（`VARTYPE` 只收语法上写着的那一档）');
 }
@@ -404,6 +414,8 @@ const INT_TYPES = new Set(['int', 'int8', 'int16', 'int32', 'int64', 'rune', 'by
 const NIL_TYPES = new Set(['ptr', 'slice', 'map', 'chan', 'chan-send', 'chan-recv',
   'fntype', 'interface']);
 const NIL_NAMES = new Set(['error', 'any']);
+/** 复数那两格的零值是 `0`（go 里 complex 的零值是 `0+0i`，图上只落实部 —— 虚部是 0）。 */
+const COMPLEX_TYPES = new Set(['complex64', 'complex128']);
 
 function zeroOf(ty, name, pkg) {
   if (ty === undefined) {
@@ -442,6 +454,13 @@ function zeroOf(ty, name, pkg) {
     if (n === 'string') return lit('');
     if (n === 'bool') return lit(false);
     if (NIL_NAMES.has(n)) return lit(null);
+    /* **复数不落成实部**：`complex128` 的零值是 `0+0i`，落一格 `conv float 0` 只对
+       "从没用过虚部"的程序成立 —— 而 `c + c` 会静静落成实数加法（**答案错而不报**）。
+       图上没有复数那一格，所以这儿当场报，与 `imag` / `complex(…)` 那两处口径一致。 */
+    if (COMPLEX_TYPES.has(n)) {
+      throw new Error(`go->graph: ${n} 的零值要复数那一格 —— 图上没有它`
+        + '（落成实部会让 `c + c` 静静落成实数加法）');
+    }
     /* **`pkg` 有值 = 这一格光名字属于另一个包**（`syntax.Type` 那格 struct 里的字段
        写的是 `Pos`，指的是 `syntax.Pos`）。那时本文件那两张表**一眼都不能看** ——
        名字空间不是这一个，看了就是"另一个类型的字段表"，答案错而不报。 */
