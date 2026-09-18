@@ -949,6 +949,8 @@ class JsEmitter {
       case 'asReal': return `$dynAs(${a[0]}, "real")`;
       case 'asBool': return `$dynAs(${a[0]}, "bool")`;
       case 'asString': return `$dynAs(${a[0]}, "string")`;
+      // 拆回一格函数值：这一侧的函数值就是宿主的函数，查过标签直接交回去
+      case 'asFn': return `$dynAs(${a[0]}, "function")`;
       case 'asList': return `$dynAs(${a[0]}, "list")`;
       case 'asDict': return `$dynAs(${a[0]}, "dict")`;
       case 'dynGet': return `$dynGet(${a[0]}, ${a[1]})`;

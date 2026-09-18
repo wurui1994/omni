@@ -1,0 +1,60 @@
+;; tests/sexpr/cases/49-dyn-fn.sx —— **函数存在字典里，按键取出来调掉**
+;;
+;; 这一份是图那一轴最后 4 格（`lua+method` / `lua+defer` × core、c）的**最小形状**：
+;; lua 的 `function Point:total()` 落的就是 `map-set(Point, "total", func …)`，
+;; 而 `p:total()` 落的是 `call(map-get(…, "total"), [p])` —— 一格运行期取出来的函数。
+;; 方言到这一刀之前落不下去：字典的值只有一格具体类型，装不了"有时是数有时是函数"。
+;;
+;; 拆箱那一格（`asfn`）**比别的多一个类型实参**：箱子里只记着"这是个函数"，记不住签名
+;; （C 那侧就是一个 `omni_fn`），而 `(callfn …)` 要按签名发调用。签名写错是调用方的责任
+;; —— 这一层查得了"标签对不对"（rt/dyn-asfn-wrong-tag 判的就是它），查不了"签名对不对"。
+;;
+;; 四条判据：
+;;   1. 同一格 `(dict string dyn)` 里装两个不同的函数，按键取出来各调一次。
+;;   2. **同一格字典里函数与数混着装** —— 那才是元表的真形状（`__index` 是表、`total` 是函数）。
+;;   3. 取出来的函数值能**先绑给一格局部量**再调（不是只能一口气写完）。
+;;   4. 元表那个形状走一遍：一格"类"字典里放方法，一格"实例"字典里放字段，
+;;      取方法、把实例当第一个实参递进去 —— 那就是 `p:total()` 的全部。
+
+(module
+  (fn inc ((x int)) int
+    (ret (bin "+" (var x) (int 1))))
+
+  (fn dbl ((x int)) int
+    (ret (bin "*" (var x) (int 2))))
+
+  ;; 判据 4 的那格"方法"：接收者是第一个实参（与另外四门 method 一字不差）
+  (fn total ((self (dict string dyn))) int
+    (ret (bin "+" (asint (dget (var self) (str "x")))
+                  (asint (dget (var self) (str "y"))))))
+
+  (main
+    ;; 判据 1：两个函数进同一格字典，按键取出来各调一次
+    (let fns (dict string dyn) (dnew (dict string dyn)))
+    (dset (var fns) (str "inc") (dyn (fnref inc)))
+    (dset (var fns) (str "dbl") (dyn (fnref dbl)))
+    (print (callfn (asfn (fnty (int) int) (dget (var fns) (str "inc"))) (int 41)))
+    (print (callfn (asfn (fnty (int) int) (dget (var fns) (str "dbl"))) (int 21)))
+
+    ;; 判据 2：函数与数混着装 —— 标签各是各的
+    (dset (var fns) (str "n") (dyn (int 7)))
+    (print (dlen (var fns)))
+    (print (dtag (dget (var fns) (str "n"))))
+    (print (dtag (dget (var fns) (str "inc"))))
+    (print (asint (dget (var fns) (str "n"))))
+
+    ;; 判据 3：取出来先绑给一格局部量，再调
+    (let f (fnty (int) int) (asfn (fnty (int) int) (dget (var fns) (str "dbl"))))
+    (print (callfn (var f) (int 50)))
+
+    ;; 判据 4：元表那个形状 —— "类"字典放方法，"实例"字典放字段
+    (let cls (dict string dyn) (dnew (dict string dyn)))
+    (dset (var cls) (str "total") (dyn (fnref total)))
+    (let p (dict string dyn) (dnew (dict string dyn)))
+    (dset (var p) (str "x") (dyn (int 1)))
+    (dset (var p) (str "y") (dyn (int 2)))
+    ;; `p:total()` = 从"类"里取方法，把 p 当第一个实参递进去
+    (print (callfn (asfn (fnty ((dict string dyn)) int) (dget (var cls) (str "total")))
+                   (var p)))
+  )
+)

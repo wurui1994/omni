@@ -41,6 +41,7 @@
  *         | (new NAME) | (fld E 字段) | (cnew NAME)
  *         | (fnref NAME) | (mkclo NAME E...) | (cap NAME) | (callfn E E...)
  *         | (dyn E) | (dtag E) | (asint E) | (asreal E) | (asbool E) | (asstr E)
+ *         | (asfn (fnty (TYPE...) TYPE) E)
  *
  * 向量那四条是 ADR-0014 门槛 6 的第一阶段，见 vecExpr 的注释；
  * 缓冲与 kernel/dispatch 是门槛 7 的第一阶段，见 bufExpr 与 dispatch 的注释；
@@ -2037,6 +2038,24 @@ class CoreLowerer {
         return this.err(n.items[1], `(dyn E) 这一刀只装得下 int / real / bool / string，这里是 ${coreTypeText(v.type)}`);
       }
       return { kind: 'Box', type: DYNAMIC, from: v.type, expr: v };
+    }
+    /* `(asfn TYPE E)`：拆回一格函数值。**比别的拆箱多一个类型实参** —— 箱子里只记着
+       "这是个函数"，记不住签名（C 那侧就是一个 `omni_fn`），而 `(callfn …)` 要按签名发调用。
+       签名写错了是**调用方的责任**，与 `(unsafe …)` 那一族同一条：这一层能查的是
+       "标签对不对"（那是运行期那一问），查不了"签名对不对"。 */
+    if (h === 'asfn') {
+      if (n.items.length !== 3) return this.err(n, '(asfn TYPE E) 要 2 个参数');
+      const t = this.ty(n.items[1], 'asfn 的类型');
+      if (t === null) return null;
+      if (t.k !== 'fn') {
+        return this.err(n.items[1], `(asfn TYPE E) 的 TYPE 要是 (fnty …)，这里是 ${coreTypeText(t)}`);
+      }
+      const fv = this.expr(n.items[2]);
+      if (fv === null) return null;
+      if (fv.type.k !== 'dynamic') {
+        return this.err(n.items[2], `(asfn TYPE E) 的 E 要是 dyn，这里是 ${coreTypeText(fv.type)}`);
+      }
+      return { kind: 'Builtin', name: 'asFn', args: [fv], recvType: DYNAMIC, type: t };
     }
     if (h === 'dtag' || DYN_UNBOX.has(h)) {
       if (n.items.length !== 2) return this.err(n, `(${h} E) 要 1 个参数`);

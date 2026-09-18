@@ -1215,6 +1215,7 @@ export function applyBuiltin(I, e, a) {
     case 'asReal': return dynAs(a[0], 'real');
     case 'asBool': return dynAs(a[0], 'bool');
     case 'asString': return dynAs(a[0], 'string');
+    case 'asFn': return dynAs(a[0], 'function');
     case 'asList': return dynAs(a[0], 'list');
     case 'asDict': return dynAs(a[0], 'dict');
     // 深装箱在这里是恒等：dynamic 就是原生值，list<int> 本来就是一个数组（ADR-0008）

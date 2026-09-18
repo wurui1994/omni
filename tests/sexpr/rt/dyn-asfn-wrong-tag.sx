@@ -1,0 +1,8 @@
+;; `asfn` 也带检查：箱子里装的是数，按函数拆 —— 报的是与别的 `as*` 同一句话。
+;; C 那侧特意新加了 `omni_dyn_as_fn`（走 `omni_dyn_want`）而不是借 `omni_js_as_fn`：
+;; 后者报的是 JS 自己的口径（`X is not a function`），四条腿就对不上了。
+(module
+  (fn inc ((x int)) int (ret (bin "+" (var x) (int 1))))
+  (main
+    (let d dyn (dyn (int 7)))
+    (print (callfn (asfn (fnty (int) int) (var d)) (int 1)))))

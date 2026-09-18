@@ -945,6 +945,15 @@ static inline int64_t omni_dyn_as_int(omni_dyn v) { omni_dyn_want(v, OMNI_DYN_IN
 static inline double omni_dyn_as_real(omni_dyn v) { omni_dyn_want(v, OMNI_DYN_REAL); return v.u.r; }
 static inline omni_str omni_dyn_as_string(omni_dyn v) { omni_dyn_want(v, OMNI_DYN_STRING); return v.u.s; }
 static inline void *omni_dyn_as_ref(omni_dyn v, int tag) { omni_dyn_want(v, tag); return v.u.ref; }
+/* 从 dynamic 取回一个函数值。**与 omni_js_as_fn 只差报的那句话**：这一格走
+   `omni_dyn_want`，出来的是与别的 `as*` 同一句「dynamic value is X, expected function」
+   —— 那句话在四条腿上各有一份实现，也是它们唯一的可观测面（tests/sexpr/rt 判的就是它）。
+   `omni_js_as_fn` 留给 JS 前端：那边的消息是 JS 自己的口径（`X is not a function`）。 */
+static inline omni_fn omni_dyn_as_fn(omni_dyn v) {
+  omni_dyn_want(v, OMNI_DYN_FN);
+  return (omni_fn)v.u.ref;
+}
+
 
 /* --- 函数值：调用前的空值检查（两个后端消息一致，不让 C 侧退化成段错误） --- */
 static inline omni_fn omni_fn_ck(omni_fn f) {

@@ -115,6 +115,15 @@ const CANT = {
       + '`string t(dynamic v)` 走 run-llvm 报的是同一句「llvm 后端目前不支持 dyn：参数 v」，'
       + '所以这是后端那一侧的既有缺口，不是方言这一格新欠的',
   },
+  '49-dyn-fn': {
+    legs: ['run-llvm'],
+    why: '同 48-dyn：LLVM 后端不支持 dyn，主语言也一样 —— 这一格还多一层'
+      + '（函数装进 dyn），可挡住它的还是同一条',
+  },
+  'dyn-asfn-wrong-tag': {
+    legs: ['run-llvm'],
+    why: '同 48-dyn：LLVM 后端连一格 dyn 的槽位都落不下去，报的不是这份用例要钉的那句',
+  },
   'dyn-wrong-tag': {
     legs: ['run-llvm'],
     why: '同 48-dyn：LLVM 后端连一格 dyn 的槽位都落不下去，它报的是'

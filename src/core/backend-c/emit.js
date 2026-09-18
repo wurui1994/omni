@@ -2152,6 +2152,10 @@ class CEmitter {
       case 'asReal': return `omni_dyn_as_real(${a[0]})`;
       case 'asBool': return `omni_dyn_as_bool(${a[0]})`;
       case 'asString': return `omni_dyn_as_string(${a[0]})`;
+      /* 拆回一格函数值。**要那一格强转**（与 asList / asDict 同一条）：运行时那一格
+         答的是通用的 `omni_fn`，而这一侧手里有真签名 —— 转过去之后 `(callfn …)`
+         发的就是一句普通的间接调用。 */
+      case 'asFn': return `(${cTypeName(e.type)})omni_dyn_as_fn(${a[0]})`;
       case 'asList': return `(${cTypeName(e.type)})omni_dyn_as_ref(${a[0]}, OMNI_DYN_LIST)`;
       case 'asDict': return `(${cTypeName(e.type)})omni_dyn_as_ref(${a[0]}, OMNI_DYN_DICT)`;
       case 'dynGet': return `omni_dyn_get(${a[0]}, ${a[1]})`;
