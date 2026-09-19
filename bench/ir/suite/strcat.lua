@@ -1,0 +1,6 @@
+local n = 20000
+local s = ""
+for i = 1, n do
+  s = s .. "x"
+end
+print(#s)
