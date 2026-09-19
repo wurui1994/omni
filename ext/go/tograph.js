@@ -996,11 +996,24 @@ function forRangeOf(x) {
     });
   }
   const head = [];
-  if (names.length > 0 && names[0] !== '_') head.push(mk(names[0], at(idx)));
-  if (names.length > 1 && names[1] !== '_') head.push(mk(names[1], indexGet(at(seq), at(idx))));
+  /* **`for v := range ch`**（通道）与 **`for i := range s`**（切片）在树上同形。
+     区别：切片的 1 名字是下标，通道的 1 名字是值。没有类型信息分不开。
+     解法：把 subject 包一层 `__goChanDrain`——对数组是 no-op，对通道是取出缓冲。
+     同时把 1-name 的语义改成"绑值不绑下标"：`v = seq[i]` 而不是 `v = i`。
+     这对切片的 `for i := range s`（只取下标）不精确，但对通道和常见的 `for _, v := range` 正确。 */
+  const drainedSubj = node('call', {
+    fn: node('ref', {}, { name: '__goChanDrain' }),
+    args: [toNode(subj)],
+  });
+  if (names.length === 1 && names[0] !== '_') {
+    head.push(mk(names[0], indexGet(at(seq), at(idx))));
+  } else {
+    if (names.length > 0 && names[0] !== '_') head.push(mk(names[0], at(idx)));
+    if (names.length > 1 && names[1] !== '_') head.push(mk(names[1], indexGet(at(seq), at(idx))));
+  }
   return node('region', {
     body: [
-      node('bind', { init: toNode(subj) }, { name: seq }),
+      node('bind', { init: drainedSubj }, { name: seq }),
       node('bind', { init: node('prim', { args: [at(seq)] }, { name: 'len' }) }, { name: cnt }),
       counted({
         name: idx,

@@ -20,6 +20,24 @@ import {
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
   mapNew, mapGet, mapSet, mapHas, mapNames,
 } from '../../src/core/graph/fromtree.js';
+import { loadMapping, applyRule } from '../../src/core/graph/mapping.js';
+import { rewriteGraph, checkRules } from '../../src/core/graph/rewrite.js';
+import { readText } from '../../src/core/host/native.js';
+
+/** .mapping 规则表（懒加载，只读一次） */
+let LUA_RULES = null;
+function luaRules() {
+  if (LUA_RULES !== null) return LUA_RULES;
+  try {
+    const url = new URL('./lua.mapping', import.meta.url);
+    const text = readText(url.pathname);
+    const m = loadMapping(text);
+    LUA_RULES = m.rules;
+  } catch {
+    LUA_RULES = new Map();
+  }
+  return LUA_RULES;
+}
 
 /**
  * 装 map 的那些名字。**lua 的 table 既是数组又是字典**，所以这门语言的判据只能是
@@ -172,8 +190,29 @@ function numOf(text) {
   return node('const', {}, { value: v });
 }
 
+/** lua mapping 的安全子集——这些标签走 .mapping 声明式规则，不走 switch case。 */
+const MAPPING_SAFE = new Set([
+  'num', 'str', 'nil', 'true', 'false', 'name', 'paren',
+  'neg', 'not', 'len',
+  'block', 'break', 'return', 'while',
+  'localfn', 'globalfn',
+  'fn',
+  'dot',   // 第一层无条件落 field-get，第二层查 MAPS 改写
+  'call',  // 第一层无条件落 call，第二层查 PRIM 改写
+]);
+
+/** mapping 解释器的上下文 */
+const MAPPING_CTX = { OPS, binOpts: { lang: 'lua', and: ['and'], or: ['or'], keepValue: true } };
+
 function toNode(x) {
-  switch (tag(x)) {
+  const t = tag(x);
+  /* 安全子集走 .mapping 声明式规则 */
+  if (MAPPING_SAFE.has(t)) {
+    const mapped = applyRule(x, luaRules(), toNode, MAPPING_CTX);
+    if (mapped !== null) return mapped;
+  }
+  /* 其余走 native case */
+  switch (t) {
     // ---- 叶子 --------------------------------------------------------------
     case 'num': return numOf(atomText(kids(x)[0]));
     case 'str': return node('const', {}, { value: atomText(kids(x)[0]) });
@@ -383,6 +422,36 @@ function toNode(x) {
   }
 }
 
+/**
+ * **第二层：图 → 图的改写规则**（引擎在 `src/core/graph/rewrite.js`）。
+ *
+ * 第一层（`lua.mapping`）无条件地把 CST 标签落成图节点 —— `t.a` 一律落 `field-get`、
+ * `f(x)` 一律落 `call`。查上下文的那一半在这儿：
+ *
+ *   * `field-get` 的 obj 是**被当字典用过的名字** → 改成 `map-get`
+ *     （lua 的 `t.a` 与 `t["a"]` 是同一件事，而图上"按名字的字段"与"按键取值"是两格）
+ *   * `call` 的被调者是**内建的名字** → 改成 `prim`
+ *     （`print` 是副作用那一格唯一的出口，不是一个叫 print 的函数）
+ *
+ * 每条规则的 `why` 是判据（`checkRules` 会查）：没有理由的改写不许存在。
+ */
+const LUA_REWRITES = checkRules([
+  {
+    op: 'field-get',
+    why: 'lua 的 t.a 与 t["a"] 是同一件事；图上"按名字的字段"与"按键取值"是两格节点。'
+      + '被当字典用过的名字（MAPS）落后者 —— 元表那台机器要的正是这一条',
+    when: (n) => n.ins.obj?.op === 'ref' && MAPS.has(n.ins.obj.attrs.name),
+    make: (n) => mapGet(n.ins.obj, lit(n.attrs.field)),
+  },
+  {
+    op: 'call',
+    why: '内建不是"一个叫 print 的函数"——它是 prim 那一格（副作用在图上唯一的出口）。'
+      + '第一层无条件落 call，这儿按名字表改写；表在 PRIM 里，不在这条规则里',
+    when: (n) => n.ins.fn?.op === 'ref' && PRIM.has(n.ins.fn.attrs.name),
+    make: (n) => node('prim', { args: n.ins.args ?? [] }, { name: PRIM.get(n.ins.fn.attrs.name) }),
+  },
+]);
+
 /** 一棵 lua 的 GLR 树（`(block stat…)`）-> 一张图。 */
 export function luaToGraph(tree) {
   if (tag(tree) !== 'block') throw new Error('lua->graph: 这不是 (block …)');
@@ -392,7 +461,10 @@ export function luaToGraph(tree) {
   for (const use of MAP_USES) {
     for (const nm of mapNames(tree, use)) if (nm !== null) MAPS.add(nm);
   }
-  return program(many(kids(tree)).flat());
+  // 一·第一层：CST → 图（`lua.mapping` 的纯规则 + 还留在 switch 里的那几格）
+  const g = program(many(kids(tree)).flat());
+  // 二·第二层：图 → 图（查 MAPS / PRIM 改写）
+  return rewriteGraph(g, LUA_REWRITES, { MAPS, PRIM });
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------

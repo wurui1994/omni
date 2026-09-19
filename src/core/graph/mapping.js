@@ -9,7 +9,8 @@
 // `(native …)` 留在 tograph.js 里 —— 那是逃逸口，不是这台机器的事。
 // 判据在 `tests/lib/mapping-check.js`。
 
-import { node, lit } from './graph.js';
+import { node, lit, un } from './graph.js';
+import { NODES } from './nodes.js';
 import {
   tag, kids, leaf, part, partKids,
   binOf, retOf, branchOf, loopExit, sliceOf, deferNow,
@@ -173,51 +174,10 @@ function evalConstruct(c, bindings, toNode, ctx) {
   // (nil) → 空
   if (h === 'nil') return [];
 
-  // (const (@ value ...)) → 图的 const 节点
-  if (h === 'const') {
-    const val = evalAttr(c[1], bindings, toNode, ctx);
-    return node('const', {}, { value: val });
-  }
-
-  // (ref (@ name ...)) → 图的 ref 节点
-  if (h === 'ref') {
-    const val = evalAttr(c[1], bindings, toNode, ctx);
-    return node('ref', {}, { name: val });
-  }
-
-  // (branch :cond C :then T :else E) → branchOf
-  if (h === 'branch') {
-    const ports = parsePorts(c, bindings, toNode, ctx);
-    return branchOf(ports.cond, ports.then, ports.else);
-  }
-
-  // (region :body ...) → region 节点
-  if (h === 'region') {
-    const ports = parsePorts(c, bindings, toNode, ctx);
-    const body = Array.isArray(ports.body) ? ports.body : [ports.body];
-    return node('region', { body: body.flat() });
-  }
-
-  // (loop :init I :cond C :post P :body B)
-  if (h === 'loop') {
-    const ports = parsePorts(c, bindings, toNode, ctx);
-    // 用现有的 threePart 或直接造 loop
-    return node('loop', {
-      init: ports.init ?? [],
-      cond: ports.cond,
-      post: ports.post ?? [],
-      body: ports.body ?? [],
-    });
-  }
-
-  // (ret :value V) → retOf
-  if (h === 'ret') {
-    const ports = parsePorts(c, bindings, toNode, ctx);
-    return retOf(ports.value);
-  }
-
-  // (set (@ name N) :value V) → set 节点
-  if (h === 'set') {
+  // ---- 通用节点构造：读 NODES 声明表 ----
+  // 如果 h 是 NODES 里声明的 op 名字，按声明的入端口和附属自动构造。
+  // 不需要为每种节点写一段 if-else。
+  if (NODES.has(h)) {
     const attrs = {};
     const ins = {};
     for (let i = 1; i < c.length; i++) {
@@ -228,40 +188,22 @@ function evalConstruct(c, bindings, toNode, ctx) {
         i++;
       }
     }
-    return node('set', ins, attrs);
+    return node(h, ins, attrs);
   }
 
-  // (loop-exit (@ kind K)) → loopExit
-  if (h === 'loop-exit') {
-    const kind = evalAttr(c[1], bindings, toNode, ctx);
-    return loopExit(kind);
-  }
-
-  // (scope-exit :body B) → deferNow
-  if (h === 'scope-exit') {
-    const ports = parsePorts(c, bindings, toNode, ctx);
-    return deferNow(ports.body);
-  }
-
-  // (slice :list L :from F :to T)
-  if (h === 'slice') {
-    const ports = parsePorts(c, bindings, toNode, ctx);
-    return sliceOf(ports.list, ports.from, ports.to);
-  }
-
-  // (binop op a b) → binOf
+  // (binop op a b) → binOf（组合器，不是节点名）
   if (h === 'binop') {
     const op = evalConstruct(c[1], bindings, toNode, ctx);
     const a = evalConstruct(c[2], bindings, toNode, ctx);
     const b = evalConstruct(c[3], bindings, toNode, ctx);
-    return binOf(op, a, b, ctx.OPS ?? new Map(), { lang: 'go' });
+    return binOf(op, a, b, ctx.OPS ?? new Map(), ctx.binOpts ?? { lang: 'go' });
   }
 
   // (unop op a) → un
   if (h === 'unop') {
     const op = evalConstruct(c[1], bindings, toNode, ctx);
     const a = evalConstruct(c[2], bindings, toNode, ctx);
-    return unNode(op, a);
+    return un(op, a);
   }
 
   // (! name args...) → prim

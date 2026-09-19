@@ -110,7 +110,12 @@
   (map ((or ptr array tname tinst chan struct) $*1) (const (@ value nil)))
 
   ;; ================================================================
-  ;; 内建函数（builtin）—— go 的 23 格内建，模式化的那些
+  ;; 内建函数（builtin）—— 裸名字调用，go 的 23 格内建
+  ;;
+  ;; 分三类（见 docs/design/go-builtins-io.md）：
+  ;;   纯函数：落 prim 或 runtime call
+  ;;   IO：落 prim print（effect 边标记 writes，IO 的执行在后端）
+  ;;   造值：落 const / 运行时构造
   ;; ================================================================
   (builtin len    (! len $1))
   (builtin cap    (! len $1))                  ;; 图上没有 capacity，降成 len
@@ -118,14 +123,30 @@
   (builtin copy   (rt __goCopy $1 $2))
   (builtin delete (rt __goDelete $1 $2))
   (builtin close  (rt __goChanClose $1))
-  (builtin panic  (! print $1))                ;; 降成 print + 假装正常返回
-  (builtin print  (! print $*1))
-  (builtin println (! print $*1))
   (builtin new    (const (@ value nil)))
   (builtin min    (! min $*1))
   (builtin max    (! max $*1))
   (builtin imag   (const (@ value 0)))
   (builtin real   $1)
+  ;; IO 那三格：唯一的副作用出口是 `prim print`
+  (builtin panic   (! print $1))               ;; 降成 print + 假装正常返回
+  (builtin print   (! print $*1))
+  (builtin println (! print $*1))
+
+  ;; ================================================================
+  ;; 包方法内建（method-builtin）—— `pkg.Method(…)` 形式
+  ;;
+  ;; 格式化**不在图层展开**：`fmt.Sprintf` 落成一格运行时调用（纯的），
+  ;; `fmt.Printf` 是 `prim print [运行时调用]` —— IO 走那一格唯一的出口。
+  ;; ================================================================
+  (method-builtin fmt.Sprintf   (rt __goSprintf $*1))
+  (method-builtin fmt.Errorf    (rt __goSprintf $*1))
+  (method-builtin fmt.Printf    (! print (rt __goSprintf $*1)))
+  (method-builtin fmt.Fprintf   (! print (rt __goSprintf $*1)))
+  (method-builtin fmt.Println   (! print $*1))
+  (method-builtin fmt.Print     (! print $*1))
+  (method-builtin fmt.Fprintln  (! print $*1))
+  (method-builtin fmt.Fprint    (! print $*1))
 
   ;; 类型转换（CONV 表）：定宽整数收 int、浮点收 float、string 收 str
   (conv int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 → int)
