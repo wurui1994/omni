@@ -108,21 +108,35 @@ export function deadcode(fn, _mod) {
     }
   }
 
-  let dead = 0;
-  for (let pc = 0; pc < n; pc++) if (!live[pc]) dead++;
-  if (dead === 0) return 0;
+  const doomed = new Set();
+  for (let pc = 0; pc < n; pc++) if (!live[pc]) doomed.add(pc);
+  return removeInsns(fn, doomed);
+}
+
+/**
+ * 按下标集合删指令：重编号 + 重建那五个平行数组 + 按角色改 ref。回删了几条。
+ *
+ * **别的通道要删指令一律走这儿**（`dead auto elim`、`elim unread autos`、`dse`…）：
+ * MIR 里没有 NOP，Go 那边是把删掉的 store 改写成 `OpCopy(内存实参)` 再等 deadcode 收尸，
+ * 我们没有内存 SSA 链可以接，所以直接在这一处删。
+ *
+ * 删了还有人引用的指令 = 调用方的 bug，`mapRef` 当场炸（这就是那道自检）。
+ */
+export function removeInsns(fn, doomed) {
+  if (!doomed || doomed.size === 0) return 0;
+  const n = fn.op.length;
 
   /* ---- 二、重编号：老下标 -> 新下标（-1 = 删了） */
   const map = [];
   let k = 0;
   for (let pc = 0; pc < n; pc++) {
-    if (live[pc]) { map.push(k); k++; } else map.push(-1);
+    if (doomed.has(pc)) map.push(-1); else { map.push(k); k++; }
   }
 
   /* ---- 三、重建那五个平行数组 */
   const op = [], t = [], a = [], b = [], aux = [];
   for (let pc = 0; pc < n; pc++) {
-    if (!live[pc]) continue;
+    if (doomed.has(pc)) continue;
     op.push(fn.op[pc]);
     t.push(fn.t[pc]);
     a.push(fn.a[pc]);
@@ -151,7 +165,7 @@ export function deadcode(fn, _mod) {
     }
   }
 
-  return dead;
+  return doomed.size;
 }
 
 /** 通道表里八格 `*deadcode` 都是同一个函数（Go 那边也是同一个 `deadcode` 挂多格）。 */
