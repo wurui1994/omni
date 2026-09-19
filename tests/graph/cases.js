@@ -231,6 +231,15 @@ export const PTRMETHOD = ['1', '5', '5'];
  */
 export const TOKENTEST = ['EOF', 'name', 'literal', 'break', 'var', 'unknown', 'true', 'false'];
 
+/**
+ * postest：**从 go 编译器的 Pos / PosBase 摘出的位置编码**（go 独一份）。
+ *
+ * 与 tokentest 同一条性质（期望输出由 `go run` 给）：struct 造 + 字段读、
+ * 常量位运算（`1 << 30`）、饱和截断、`Sprintf("%s:%d:%d")` 三格动词。
+ */
+export const POSTEST = ['1073741824', '1073741824', '100', 'test.go',
+  '10', '20', 'true', 'false', 'test.go:10:20'];
+
 
 
 
@@ -487,6 +496,9 @@ export const CASES = [
   // 摘出的 token 枚举 + 字符串化。它与前面那些家族的性质不同：**不是为压某一格节点写的**，
   // 是为了回答"生成的 JS 跑起来对不对" —— 期望输出由 `go run` 给（不是我们自己编的）。
   ...fam('tokentest', TOKENTEST, ['go']),
+  // 第五十一个家族：**Pos / PosBase**（go 独一份）。从 `cmd/compile/internal/syntax/pos.go`
+  // 摘出的位置编码——struct 造 + 字段读、常量位运算、饱和截断、Sprintf。
+  ...fam('postest', POSTEST, ['go']),
 ];
 
 
