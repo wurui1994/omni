@@ -109,8 +109,71 @@ function graphOf(path, argv) {
   /** `--pkgs DIR,DIR,...`：按拓扑序编多个包目录到一张图。
    * 每个目录按 --pkg 的规则收齐文件，按目录顺序拼到 mods **前面**（依赖在前）。 */
   const pkgsRaw = (() => { const i = argv.indexOf('--pkgs'); return i >= 0 ? argv[i + 1] : null; })();
+  /** `--pkgs-root DIR`：扫主包的 import 路径，最后一段匹配 DIR 下子目录的自动当 dep。
+   * go 的 `import "cmd/compile/internal/syntax"` → 最后一段 `syntax` → `DIR/syntax/`。
+   * 递归：每个 dep 的 import 也扫。只走一层子目录，不搜 stdlib。 */
+  const pkgsRoot = cliArg(argv, '--pkgs-root');
+  const autoResolvedDirs = new Set();
+  if (pkgsRoot !== null && lang.exts.includes('go')) {
+    /* 从主包文件和 --pkgs 里的文件扫 import，广度优先解析。
+       只解析路径的**倒数第二段**与 pkgsRoot 的 basename 相同的 import——
+       `"cmd/compile/internal/syntax"` 里 `internal` 对上 pkgsRoot 的末段 `internal`
+       才解析为 `pkgsRoot/syntax/`；`"go/token"` 里 `go` 不匹配就跳过。 */
+    const rootBase = pkgsRoot.replace(/\/$/, '').split('/').pop();
+    const pendingScan = [path];
+    /* 收集 --pkg 模式下同目录所有 .go 文件 */
+    if (doPkg) {
+      const mainDir = (path.lastIndexOf('/') >= 0 ? path.slice(0, path.lastIndexOf('/')) : '.');
+      try {
+        for (const n of readDir(mainDir)) {
+          if (n.endsWith('.go') && !n.endsWith('_test.go')) pendingScan.push(`${mainDir}/${n}`);
+        }
+      } catch { /* ignore */ }
+    }
+    const scannedDirs = new Set();
+    while (pendingScan.length > 0) {
+      const f = pendingScan.pop();
+      const fDir = f.lastIndexOf('/') >= 0 ? f.slice(0, f.lastIndexOf('/')) : '.';
+      if (scannedDirs.has(fDir)) continue;
+      scannedDirs.add(fDir);
+      /* 扫这个目录下所有 .go 文件的 import */
+      let dirFiles;
+      try { dirFiles = readDir(fDir); } catch { continue; }
+      for (const n of dirFiles) {
+        if (!n.endsWith('.go') || n.endsWith('_test.go')) continue;
+        const full = `${fDir}/${n}`;
+        let src;
+        try { src = readText(full); } catch { continue; }
+        /* 快速正则抽 import 路径最后一段 */
+        for (const m of src.matchAll(/^\t"([^"]+)"/gm)) {
+          const segs = m[1].split('/');
+          if (segs.length < 2) continue;
+          if (segs[segs.length - 2] !== rootBase) continue;
+          const last = segs[segs.length - 1];
+          const candDir = `${pkgsRoot}/${last}`;
+          if (autoResolvedDirs.has(candDir) || scannedDirs.has(candDir)) continue;
+          try { readDir(candDir); } catch { continue; } // 不存在就跳过
+          autoResolvedDirs.add(candDir);
+          /* 把新发现的目录也加入待扫队列 */
+          try {
+            for (const n2 of readDir(candDir)) {
+              if (n2.endsWith('.go') && !n2.endsWith('_test.go')) {
+                pendingScan.push(`${candDir}/${n2}`);
+              }
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    }
+  }
+  /* 合并手写的 --pkgs 和自动发现的 --pkgs-root 目录 */
+  const allPkgDirs = [];
   if (pkgsRaw !== null) {
-    for (const d of pkgsRaw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    for (const d of pkgsRaw.split(',').map((s) => s.trim()).filter(Boolean)) allPkgDirs.push(d);
+  }
+  for (const d of autoResolvedDirs) allPkgDirs.push(d);
+  if (allPkgDirs.length > 0) {
+    for (const d of allPkgDirs) {
       let names;
       try { names = readDir(d); } catch { stderr(`omni: --pkgs 读不了 ${d}\n`); continue; }
       for (const n of names.sort()) {
@@ -256,8 +319,7 @@ function graphOf(path, argv) {
     /* **跨包：--pkgs 里的每个目录是一个独立的 go 包**。
        两趟：第一趟把依赖包的声明 + 包 record 放进 body，第二趟放主包。
        这样 `call main`（在主包末尾）跑的时候 `v_util` 已经绑好了。 */
-    const pkgDirs = pkgsRaw !== null
-      ? pkgsRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    const pkgDirs = allPkgDirs.length > 0 ? allPkgDirs : [];
     const dirOfFile = (p) => (p.lastIndexOf('/') >= 0 ? p.slice(0, p.lastIndexOf('/')) : '.');
     const depFiles = all.filter((f) => pkgDirs.includes(dirOfFile(f.path)));
     const ownFiles = all.filter((f) => !pkgDirs.includes(dirOfFile(f.path)));
