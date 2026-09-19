@@ -178,9 +178,11 @@ const __assert = (cond, msg) => {
  * @param source `jsLower` 出的那格函数表达式（`(__out, __show, …) => { … }`）
  * @param note 头一行注释里写清"这是谁生成的"（源文件 + 语言）
  */
-export function jsModuleText(source, note) {
+export function jsModuleText(source, note, extraRuntime) {
   return `// ${note}\n// 自足产物：node 直接跑（钩子摊在下面，见 src/core/graph/js_rt.js）\n`
-    + `${GRAPH_JS_RT}\nconst __main = ${source};\n`
+    + `${GRAPH_JS_RT}\n`
+    + (extraRuntime ? `${extraRuntime}\n` : '')
+    + `const __main = ${source};\n`
     + '__main(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex,\n'
     + '  __conv, __slice, __mapNew, __mapGet, __mapSet, __mapHas, __mapKeys, __assert);\n';
 }

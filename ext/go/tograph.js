@@ -1081,8 +1081,12 @@ function makeOf(args) {
       args: [n === undefined ? lit(0) : toNode(n), zeroOf(kids(ty)[0])],
     }, { name: 'fill' });
   }
-  /* `make(name, …)` / `make(chan T, n)` / `make(sel, …)` / `make(index, …)`：
-     类型别名 / chan / 复杂类型表达式在树上不是 slice/map。统一降成空列表占位。 */
+  /* `make(chan T)` / `make(chan T, n)` → `call __goChanMake(cap)`。
+     `make(name, …)` 类型别名降成空列表占位。 */
+  if (tag(ty) === 'chan' || tag(ty) === 'chan-send' || tag(ty) === 'chan-recv') {
+    const cap = args.length > 1 ? toNode(args[1]) : lit(0);
+    return node('call', { fn: node('ref', {}, { name: '__goChanMake' }), args: [cap] });
+  }
   return listNew(args.length > 1 ? [toNode(args[1])] : []);
 }
 
@@ -1570,25 +1574,31 @@ function toNode(x) {
       if (callee === 'new' && argNodes.length === 1) {
         return mapNew();
       }
-      /* **`append(s, x...)` / `append(s, x)` -> `push`**（列表上的内建）。
-         go 的 append 返回新切片，图上 push 原地改——在编译器自己的代码里
-         `s = append(s, x)` 这种写法等价（s 指向同一个底层数组）。 */
+      /* **`append(s, x...)` / `append(s, x)` -> `call __goAppend`**。
+         go 的 append 返回新切片，`__goAppend` 做 push 并返回数组本身。 */
       if (callee === 'append' && argNodes.length >= 2) {
-        return node('prim', { args: [argNodes[0], argNodes[1]] }, { name: 'push' });
+        return node('call', {
+          fn: node('ref', {}, { name: '__goAppend' }),
+          args: [argNodes[0], argNodes[1]],
+        });
       }
       /* **`cap(x)` -> `len(x)`**：图上没有 capacity 的概念，降成 len 近似。 */
       if (callee === 'cap' && argNodes.length === 1) {
         return node('prim', { args: argNodes }, { name: 'len' });
       }
-      /* **`copy(dst, src)` -> 内建**：把 src 的元素逐个覆盖到 dst 前面。
-         图上没有 copy 内建，降成返回 src 的长度（go 的 copy 返回拷贝的元素数）。 */
+      /* **`copy(dst, src)` -> `call __goCopy`**：真正逐元素拷贝。 */
       if (callee === 'copy' && argNodes.length === 2) {
-        return node('prim', { args: [argNodes[1]] }, { name: 'len' });
+        return node('call', {
+          fn: node('ref', {}, { name: '__goCopy' }),
+          args: [argNodes[0], argNodes[1]],
+        });
       }
-      /* **`delete(m, k)` -> `map-set m k nil`**：图上没有 delete 内建，
-         近似为把键的值设成 nil（不精确但不中断——has 查出来仍然是 true）。 */
+      /* **`delete(m, k)` -> `call __goDelete`**：真正从 map 删键。 */
       if (callee === 'delete' && argNodes.length === 2) {
-        return mapSet(argNodes[0], argNodes[1], lit(null));
+        return node('call', {
+          fn: node('ref', {}, { name: '__goDelete' }),
+          args: [argNodes[0], argNodes[1]],
+        });
       }
       /* **`panic(msg)` / `print(…)` / `println(…)`**：go 的内建。
          panic 降成 print + 假装正常返回（不中断图的执行）。
@@ -1652,11 +1662,26 @@ function toNode(x) {
       return lit(null);
     /* **通道操作**（`ch <- v` 发送、`select { … }` 多路选择）—— 图上没有通道那一格。
        chan-send 降成空语句、select 降成它第一支的体（近似：总走第一支）。 */
-    /* `<-ch`（通道接收表达式）—— 图上没有通道，降成 null。 */
-    case 'recv': return lit(null);
-    /* `ch <- v`（通道发送）—— 语句位置。降成空语句。 */
-    case 'send': return [];
-    case 'chan-send': return [];
+    /* `<-ch`（通道接收表达式）→ `call __goChanRecv(ch)`。 */
+    case 'recv': {
+      const ch = kids(x)[0];
+      return ch !== undefined
+        ? node('call', { fn: node('ref', {}, { name: '__goChanRecv' }), args: [toNode(ch)] })
+        : lit(null);
+    }
+    /* `ch <- v`（通道发送）→ `call __goChanSend(ch, v)`。 */
+    case 'send': {
+      const [ch, v] = kids(x);
+      return ch !== undefined && v !== undefined
+        ? node('call', { fn: node('ref', {}, { name: '__goChanSend' }), args: [toNode(ch), toNode(v)] })
+        : [];
+    }
+    case 'chan-send': {
+      const [ch, v] = kids(x);
+      return ch !== undefined && v !== undefined
+        ? node('call', { fn: node('ref', {}, { name: '__goChanSend' }), args: [toNode(ch), toNode(v)] })
+        : [];
+    }
     case 'select': {
       const first = kids(x).find((y) => tag(y) === 'case' || tag(y) === 'default');
       return first === undefined ? [] : node('region', { body: many(partKids(first, 'body')) });

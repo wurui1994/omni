@@ -201,8 +201,13 @@ registerBackend({
 // 加一格内建要改两处。现在改一行。
 
 /** 名字要能当 JS 标识符用（Scheme 的 `max2`、`string-append` 那种带横杠的名字）。 */
-const jsName = (n) => `v_${String(n).replace(/[^A-Za-z0-9_]/g, (c) => `$${c.charCodeAt(0).toString(16)}`)}`;
-
+const jsName = (n) => {
+  const s = String(n);
+  /* __go / __Go 开头的名字是运行时函数（go-rt.js），不加 v_ 前缀——
+     它们在产物里是全局的，与图里的用户变量不在同一个命名空间。 */
+  if (s.startsWith('__go') || s.startsWith('__Go')) return s;
+  return `v_${s.replace(/[^A-Za-z0-9_]/g, (c) => `$${c.charCodeAt(0).toString(16)}`)}`;
+};
 function jsExpr(x) {
   if (x === null || x === undefined) return 'null';
   if (Array.isArray(x)) return `(() => { ${jsFnBody(x)} })()`;
@@ -385,6 +390,7 @@ function jsStmt(x) {
 }
 
 function jsLower(g) {
+  const extraRt = g.jsRuntime ?? null;
   const stmts = asStmts(g.kind === 'graph' ? g.body : g);
   /* **顶层 bind 提升为 var**：go 的包级变量/常量/函数没有声明顺序要求，
      但 JS 的 `let` 有 TDZ（temporal dead zone）。把顶层的 `bind` 从 `let` 改成 `var`
@@ -410,7 +416,7 @@ function jsLower(g) {
      * 要外面喂十几个运行时钩子"。那句话现在只剩前半句是事实 —— 钩子有文本版了
      * （`js_rt.js` 的 `GRAPH_JS_RT`），所以拒绝没有理由了。
      */
-    module: (note) => jsModuleText(source, note),
+    module: (note) => jsModuleText(source, note, extraRt),
     run: () => {
       const out = [];
       /* **走宿主那格 `evalJs`，不写 `new Function`**（ADR-0011 决策 2 的原话：

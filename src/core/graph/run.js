@@ -468,6 +468,7 @@ export function runGraphFile(path, argv) {
   if (got.code !== undefined) return got.code;
   const { lang } = got;
   const graph = shrinkOf(got.graph, argv);
+  if (lang.jsRuntime) graph.jsRuntime = lang.jsRuntime;
   const st = statOf(graph, argv, path);
 
   // ---- 图 -> 那条腿。缺口与"跑错了"分开记
@@ -538,6 +539,7 @@ export function buildGraphFile(path, argv) {
     const got = graphOf(path, argv);
     if (got.code !== undefined) return got.code;
     const graph = shrinkOf(got.graph, argv);
+    if (got.lang && got.lang.jsRuntime) graph.jsRuntime = got.lang.jsRuntime;
     statOf(graph, argv, path);
     const base = path.lastIndexOf('/') >= 0 ? path.slice(path.lastIndexOf('/') + 1) : path;
     const stem = base.lastIndexOf('.') > 0 ? base.slice(0, base.lastIndexOf('.')) : base;
@@ -550,8 +552,8 @@ export function buildGraphFile(path, argv) {
   const got = graphOf(path, argv);
   if (got.code !== undefined) return got.code;
   const graph = shrinkOf(got.graph, argv);
-  statOf(graph, argv, path);
-  const dot = path.lastIndexOf('/') >= 0 ? path.slice(path.lastIndexOf('/') + 1) : path;
+  if (got.lang && got.lang.jsRuntime) graph.jsRuntime = got.lang.jsRuntime;
+  statOf(graph, argv, path);  const dot = path.lastIndexOf('/') >= 0 ? path.slice(path.lastIndexOf('/') + 1) : path;
   const stem = dot.lastIndexOf('.') > 0 ? dot.slice(0, dot.lastIndexOf('.')) : dot;
   /* js 那条腿的默认后缀是 `.mjs`（第一百五十一片）：产物离开这个仓库之后，`.js` 还要靠
    * package.json 的 `"type": "module"` 才被当模块，而 `.mjs` 在哪儿都是模块。 */
