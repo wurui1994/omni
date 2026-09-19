@@ -126,8 +126,16 @@ function __goSelect(cases) {
 }
 
 // ============================================================
-// Go type switch
+// Go type switch + type checking
 // ============================================================
+function __goTypeOf(obj) {
+  if (obj === null || obj === undefined) return 'nil';
+  if (typeof obj === 'object' && obj.__type !== undefined) return obj.__type;
+  if (Array.isArray(obj)) return 'slice';
+  if (obj instanceof Map) return 'map';
+  return typeof obj;
+}
+function __goTypeIs(obj, typeName) { return __goTypeOf(obj) === typeName; }
 function __goTypeSwitch(obj, cases) {
   const tn = (obj !== null && obj !== undefined && typeof obj === 'object') ? obj.__type : null;
   for (const [typeName, handler] of cases) {

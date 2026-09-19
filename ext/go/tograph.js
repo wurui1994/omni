@@ -1509,6 +1509,8 @@ function toNode(x) {
        `bind` 那格（`switch v := x.(type)`）透传 x（与 assert 同理）。
        init 语句（`switch s; x.(type)`）照旧先执行。 */
     case 'tswitch': {
+      /* **类型 switch**：`switch v := s.(type) { case Circle: … case Rect: … }`
+         每支的条件用 `__goTypeIs(v, "TypeName")`，绑定变量名和被 switch 的值相同。 */
       const all = kids(x);
       const ini = all.find((y) => tag(y) === 'init');
       const subj = all.find((y) => tag(y) === 'subject');
@@ -1516,16 +1518,43 @@ function toNode(x) {
       const cs = all.filter((y) => tag(y) === 'case' || tag(y) === 'default');
       const body = [];
       if (ini !== undefined) body.push(...many(kids(ini)));
-      if (bind !== undefined && subj !== undefined) {
-        body.push(node('bind', { init: toNode(kids(subj)[0]) }, { name: leaf(kids(bind)[0]) }));
+      /* `switch v := s.(type)` → bind v = s */
+      const varName = bind !== undefined ? leaf(kids(bind)[0]) : null;
+      const subjExpr = subj !== undefined ? toNode(kids(subj)[0]) : lit(null);
+      if (varName !== null) {
+        body.push(node('bind', { init: subjExpr }, { name: varName }));
       }
       let chain;
       let dflt;
       const arms = [];
       for (const c of cs) {
         if (tag(c) === 'default') { dflt = armOf(c); continue; }
-        // 每支的条件用 `true`——类型信息丢掉了
-        arms.push([lit(true), armOf(c)]);
+        /* 每支的 items 是类型名（tname / name），取出来做 __goTypeIs 判断 */
+        const items = partKids(c, 'items');
+        const typeNames = items.map((it) => {
+          if (tag(it) === 'tname' || tag(it) === 'name') return leaf(kids(it)[0]);
+          return null;
+        }).filter(Boolean);
+        let cond;
+        if (typeNames.length === 0) {
+          cond = lit(true);
+        } else if (typeNames.length === 1) {
+          cond = node('call', {
+            fn: node('ref', {}, { name: '__goTypeIs' }),
+            args: [varName !== null ? node('ref', {}, { name: varName }) : subjExpr, lit(typeNames[0])],
+          });
+        } else {
+          /* 多类型 case：`case Circle, Rect:` → typeIs(v,"Circle") || typeIs(v,"Rect") */
+          const ref = varName !== null ? node('ref', {}, { name: varName }) : subjExpr;
+          cond = typeNames.reduce((acc, tn, i) => {
+            const check = node('call', {
+              fn: node('ref', {}, { name: '__goTypeIs' }),
+              args: [ref, lit(tn)],
+            });
+            return i === 0 ? check : lazyOr(acc, check);
+          }, null);
+        }
+        arms.push([cond, armOf(c)]);
       }
       chain = dflt;
       for (let i = arms.length - 1; i >= 0; i -= 1) chain = branchOf(arms[i][0], arms[i][1], chain);
