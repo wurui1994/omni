@@ -52,8 +52,10 @@ const MAX_PARSES = 400;
 /** 一格记号上最多归约多少次 —— 只防"语法里有空环"导致的挂死，不是歧义的判据 */
 const MAX_REDUCE_WORK = 100000;
 
-const isTemplateHole = (n) => n.kind === 'atom' && /^\$[0-9]+$/.test(n.value);
-const isSpliceHole = (n) => n.kind === 'atom' && /^\$\*[0-9]+$/.test(n.value);
+const isTemplateHole = (n) => n.kind === 'atom' && n.value.charCodeAt(0) === 36 /* $ */
+  && n.value.length > 1 && n.value.charCodeAt(1) >= 48 && n.value.charCodeAt(1) <= 57;
+const isSpliceHole = (n) => n.kind === 'atom' && n.value.charCodeAt(0) === 36 /* $ */
+  && n.value.charCodeAt(1) === 42 /* * */ && n.value.length > 2;
 
 /** 两个 s-expr 值是否逐节点相同（不看 span） */
 function sameValue(a, b) {
