@@ -32,7 +32,7 @@ import { loadGrammarTable } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
-import { readText, writeText, writeBinary, stdout, stderr, exists } from '../host/native.js';
+import { readText, writeText, writeBinary, stdout, stderr, exists, readDir } from '../host/native.js';
 import { backends, Gap } from './contract.js';
 import { program } from './graph.js';
 import {
@@ -93,6 +93,29 @@ function graphOf(path, argv) {
   const seen = new Set([path]);
   const mods = [];
   const dirOf = (p) => (p.lastIndexOf('/') >= 0 ? p.slice(0, p.lastIndexOf('/')) : '.');
+  /**
+   * **`--pkg` 开关：把同目录下所有同语言文件一起编**（go 的包 = 一个目录）。
+   * 不用 import 解析——go 的一个包就是一个目录下所有 `.go`（排除 `_test.go`）。
+   * 这是跨包链接之前的第一步：先让同一个包里 16 个文件能组装到一起。
+   */
+  const doPkg = argv.includes('--pkg');
+  if (doPkg) {
+    const dir = dirOf(path);
+    for (const e of lang.exts) {
+      let names;
+      try { names = readDir(dir); } catch { break; }
+      for (const n of names) {
+        if (!n.endsWith(`.${e}`)) continue;
+        if (n.endsWith(`_test.${e}`)) continue;
+        const full = `${dir}/${n}`;
+        if (seen.has(full)) continue;
+        seen.add(full);
+        const sub = treeOf(full);
+        if (sub === null || diags.hasErrors()) return { code: 1 };
+        mods.push({ path: full, tree: sub });
+      }
+    }
+  }
   const load = (p, t) => {
     if (lang.imports === undefined) return true;
     for (const spec of lang.imports(t)) {

@@ -371,6 +371,8 @@ ${graphEngineHelp()}
           brief: 'omni（默认：前端 -> OIR -> 后端）| graph（节点图 + 契约五问）' },
         { name: '--lang', arity: 1, value: 'L',
           brief: '（graph）这份源码归哪门语言，**优先于文件名后缀**' },
+        { name: '--pkg', arity: 0,
+          brief: '（graph）把同目录下所有同语言文件一起编（go 的包 = 一个目录）' },
         { name: '--format', alias: '-f', arity: 1, value: 'FMT',
           brief: '（asy）出图格式 eps|svg；不给就看 -o 的后缀' },
         { name: '--timeout', arity: 1, value: 'SEC',
