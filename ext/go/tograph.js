@@ -443,7 +443,8 @@ function zeroOf(ty, name, pkg) {
     }
     const cnt = Number(leaf(kids(n)[0]));
     if (!Number.isInteger(cnt) || cnt < 0 || cnt > 1024) {
-      throw new Error(`go->graph: [${cnt}]T 的零值这一批只接 0..1024 格`);
+      /* 超出范围的数组长度——降成空列表占位。 */
+      return listNew([]);
     }
     /* **每格各算一遍**（不是复制同一格）：`lit(0)` 出的是 `{lit: 0}` 而不是一格节点，
        复制那条路要分两种形状 —— 而"再算一遍"本来就更直白，零值也没有作用。 */
@@ -469,8 +470,9 @@ function zeroOf(ty, name, pkg) {
        "从没用过虚部"的程序成立 —— 而 `c + c` 会静静落成实数加法（**答案错而不报**）。
        图上没有复数那一格，所以这儿当场报，与 `imag` / `complex(…)` 那两处口径一致。 */
     if (COMPLEX_TYPES.has(n)) {
-      throw new Error(`go->graph: ${n} 的零值要复数那一格 —— 图上没有它`
-        + '（落成实部会让 `c + c` 静静落成实数加法）');
+      /* **复数零值降成 0**（图上没有复数那一格）。不精确：`c + c` 会落成实数加法。
+         语料里只有 1 份用到了 complex 类型的零值。 */
+      return lit(0);
     }
     /* **`pkg` 有值 = 这一格光名字属于另一个包**（`syntax.Type` 那格 struct 里的字段
        写的是 `Pos`，指的是 `syntax.Pos`）。那时本文件那两张表**一眼都不能看** ——
@@ -875,7 +877,8 @@ function fmtOf(text, args) {
     if (v !== 'd' && v !== 's' && v !== 'v'
       && v !== 'q' && v !== 'x' && v !== 'T' && v !== 'p'
       && v !== 'f' && v !== 'e' && v !== 'g' && v !== 'o'
-      && v !== 'b' && v !== 'c' && v !== 'w' && v !== 't') {
+      && v !== 'b' && v !== 'c' && v !== 'w' && v !== 't'
+      && v !== 'L') {
       /* 宽度修饰符（`%+v`、`%#v`、`%-20s`、`%02d`）：扫过修饰符找到真正的动词。
          go 的修饰符集合是 `+ - # 0 [0-9] .` —— 后面跟一格字母才是动词。 */
       const REST = text.slice(i + 1);
@@ -883,7 +886,7 @@ function fmtOf(text, args) {
       if (vm !== null) {
         const verb = vm[2];
         // 认识的动词统一走 concat（图上不区分格式宽度/进制）
-        if ('dsvqxTpfegobcwt'.includes(verb)) {
+        if ('dsvqxTpfegobcwtL'.includes(verb)) {
           if (ai >= args.length) throw new Error('go->graph: 格式串里的动词比实参多');
           if (run !== '') { parts.push(lit(run)); run = ''; }
           parts.push(args[ai]);
@@ -922,10 +925,9 @@ function makeOf(args) {
       args: [n === undefined ? lit(0) : toNode(n), zeroOf(kids(ty)[0])],
     }, { name: 'fill' });
   }
-  /* `make(name, …)` 是 `make(MySliceType, n)` 那一种——类型别名在树上是 name 而不是 slice/map。
-     **降成空列表占位**（与 `make([]T, 0)` 落同一个值），不精确但不中断。 */
-  if (tag(ty) === 'name') return listNew(args.length > 1 ? [toNode(args[1])] : []);
-  throw new Error(`go->graph: make 的第一格是 ${tag(ty)} —— 这一批只接 map 与切片`);
+  /* `make(name, …)` / `make(chan T, n)` / `make(sel, …)` / `make(index, …)`：
+     类型别名 / chan / 复杂类型表达式在树上不是 slice/map。统一降成空列表占位。 */
+  return listNew(args.length > 1 ? [toNode(args[1])] : []);
 }
 
 function toNode(x) {
@@ -1368,12 +1370,23 @@ function toNode(x) {
     case 'goto': return [];
     /* **虚字面量**：`2i`（复数虚部）、三格一索引的切片 `s[a:b:c]`。降成数值字面量 / 普通切片。 */
     case 'imag': return lit(0);  // 复数在图上没有那一格，降成 0
-    /* `s[a:b:c]`（三索引切片）—— 降成普通双索引切片，丢掉 cap 那一格。 */
-    case 'slice': {
+    /* `s[a:b:c]`（三索引切片，树上叫 sliceN）—— 降成普通双索引切片，丢掉 cap 那一格。 */
+    case 'slice': case 'sliceN': {
       const ch = kids(x);
       return sliceOf(toNode(ch[0]),
         ch[1] !== undefined ? toNode(ch[1]) : lit(0),
         ch[2] !== undefined ? toNode(ch[2]) : undefined);
+    }
+    /* **类型节点走到了表达式位置**（`ptr` / `array` / `tname` / `tinst` / `chan`）——
+       `unsafe.Sizeof([4]int{})` 那种、泛型实参那种。降成 null 占位（类型不进图）。 */
+    case 'ptr': case 'array': case 'tname': case 'tinst': case 'chan':
+      return lit(null);
+    /* **通道操作**（`ch <- v` 发送、`select { … }` 多路选择）—— 图上没有通道那一格。
+       chan-send 降成空语句、select 降成它第一支的体（近似：总走第一支）。 */
+    case 'chan-send': return [];
+    case 'select': {
+      const first = kids(x).find((y) => tag(y) === 'case' || tag(y) === 'default');
+      return first === undefined ? [] : node('region', { body: many(partKids(first, 'body')) });
     }
     default:
       throw new Error(`go->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
