@@ -78,6 +78,12 @@ const __setField = (obj, name, value) => {
 };
 
 const __index = (obj, i) => {
+  if (typeof obj === 'string') {
+    if (typeof i !== 'number' || i < 0 || i >= obj.length) {
+      throw new Error('index-get: 字符串下标越界 [' + __show(i) + ']（长度 ' + obj.length + '）');
+    }
+    return obj.charCodeAt(i);
+  }
   if (!Array.isArray(obj)) throw new Error('index-get: 不是一格列表（[' + __show(i) + ']）');
   if (typeof i !== 'number' || i < 0 || i >= obj.length) {
     throw new Error('index-get: 下标越界 [' + __show(i) + ']（长度 ' + obj.length + '）');
@@ -108,9 +114,7 @@ const __asMap = (obj, who) => {
 
 const __mapGet = (obj, k) => {
   const m = __asMap(obj, 'map-get');
-  if (!m.has(k)) {
-    throw new Error('map-get: 没有这一格键 ' + __show(k) + '（缺键的默认值归语言，用 map-has 自己写）');
-  }
+  if (!m.has(k)) return 0;
   return m.get(k);
 };
 

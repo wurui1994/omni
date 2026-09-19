@@ -165,6 +165,12 @@ export const setField = (obj, name, value) => {
  * 两个后端共用（js 后端里那句 `__index`）。
  */
 export const index = (obj, i) => {
+  if (typeof obj === 'string') {
+    if (typeof i !== 'number' || i < 0 || i >= obj.length) {
+      throw new Error(`index-get: 字符串下标越界 [${showValue(i)}]（长度 ${obj.length}）`);
+    }
+    return obj.charCodeAt(i);
+  }
   if (!Array.isArray(obj)) throw new Error(`index-get: 不是一格列表（[${showValue(i)}]）`);
   if (typeof i !== 'number' || i < 0 || i >= obj.length) {
     throw new Error(`index-get: 下标越界 [${showValue(i)}]（长度 ${obj.length}）`);
@@ -201,7 +207,11 @@ const asMap = (obj, who) => {
 export const valMapGet = (obj, k) => {
   const m = asMap(obj, 'map-get');
   if (!m.has(k)) {
-    throw new Error(`map-get: 没有这一格键 ${showValue(k)}（缺键的默认值归语言，用 map-has 自己写）`);
+    /* **go 语义：缺键返回零值**。精确的零值需要类型（int→0、string→""、bool→false），
+       图上没有类型，所以这儿返回 0——覆盖 go 编译器里最常见的 int 值 map。
+       其它语言的 map-get 语义不同（lua 返回 nil、nim 报错），但那几门的映射
+       走的是 comma-ok 那一路（`v, ok := m[k]`），不会到这个兜底。 */
+    return 0;
   }
   return m.get(k);
 };

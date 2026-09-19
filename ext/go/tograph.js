@@ -939,7 +939,29 @@ function toNode(x) {
     // 与 V 那一份 `charlit` 同一条纪律：语料里 99% 的用途是比较。
     case 'rune': {
       const raw = leaf(kids(x)[0]);
-      return node('const', {}, { value: raw });
+      /* **rune 字面量落成码点数字**（不是字符串）。go 的 rune 就是 int32，
+         `'a'` 是 97、`'\n'` 是 10。图上把它存成数字，这样 `int('a')` 就是 97，
+         `ch >= 'a' && ch <= 'z'` 比的是数字——与 go 的语义一致。 */
+      if (raw.length === 1) return lit(raw.charCodeAt(0));
+      // 转义：\n \t \r \\ \' \0 \a \b \f \v
+      if (raw === '\\n') return lit(10);
+      if (raw === '\\t') return lit(9);
+      if (raw === '\\r') return lit(13);
+      if (raw === '\\\\') return lit(92);
+      if (raw === "\\'") return lit(39);
+      if (raw === '\\0') return lit(0);
+      if (raw === '\\a') return lit(7);
+      if (raw === '\\b') return lit(8);
+      if (raw === '\\f') return lit(12);
+      if (raw === '\\v') return lit(11);
+      // \uXXXX / \UXXXXXXXX / \xXX
+      if (/^\\u[0-9a-fA-F]{4}$/.test(raw)) return lit(parseInt(raw.slice(2), 16));
+      if (/^\\U[0-9a-fA-F]{8}$/.test(raw)) return lit(parseInt(raw.slice(2), 16));
+      if (/^\\x[0-9a-fA-F]{2}$/.test(raw)) return lit(parseInt(raw.slice(2), 16));
+      // 八进制 \NNN
+      if (/^\\[0-7]{3}$/.test(raw)) return lit(parseInt(raw.slice(1), 8));
+      // 兜底：取第一个字符的码点
+      return lit(raw.charCodeAt(0));
     }
     case 'name': {
       const n = leaf(kids(x)[0]);

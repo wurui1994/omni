@@ -240,6 +240,16 @@ export const TOKENTEST = ['EOF', 'name', 'literal', 'break', 'var', 'unknown', '
 export const POSTEST = ['1073741824', '1073741824', '100', 'test.go',
   '10', '20', 'true', 'false', 'test.go:10:20'];
 
+/**
+ * scanutil：**从 go 编译器的 source.go / scanner.go 摘出的扫描器工具函数**（go 独一份）。
+ *
+ * 位运算缓冲区增长、字符分类（isLetter/isDigit）、关键字 map 查表、
+ * 字符串遍历切标识符。期望输出由 `go run` 给。
+ */
+export const SCANUTIL = ['4096', '8192', '2097152', '3145728',
+  'true', 'false', 'true', 'true', 'false', 'true',
+  'break', 'for', '22', '0'];
+
 
 
 
@@ -499,6 +509,9 @@ export const CASES = [
   // 第五十一个家族：**Pos / PosBase**（go 独一份）。从 `cmd/compile/internal/syntax/pos.go`
   // 摘出的位置编码——struct 造 + 字段读、常量位运算、饱和截断、Sprintf。
   ...fam('postest', POSTEST, ['go']),
+  // 第五十二个家族：**scanner 工具函数**（go 独一份）。从 `source.go` / `scanner.go` 摘出的
+  // 缓冲区增长、字符分类、关键字 map 查表、字符串索引切标识符。
+  ...fam('scanutil', SCANUTIL, ['go']),
 ];
 
 

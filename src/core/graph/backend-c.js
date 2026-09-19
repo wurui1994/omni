@@ -476,7 +476,7 @@ static void g_map_set(gv o, gv k, gv x) {
 
 static gv g_map_get(gv o, gv k) {
   long long at = g_map_find(o, k);
-  if (at < 0) g_die("map-get: 没有这一格键");
+  if (at < 0) return g_num(0);
   return g_M(o)->v[at];
 }
 
