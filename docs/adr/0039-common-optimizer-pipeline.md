@@ -189,5 +189,47 @@ runtime、类型元数据、GC 位图）。可达到的判据是三级：
 
 - **不引入 LLVM/MLIR**（MLIR 那条腿已废弃，只当对照）
 - **不迭代到不动点**：每格一遍，顺序固定 —— 这是"编译快"的唯一来源
+  （注：`opt` 那一格**自己**迭代到不动点，Go 的 `applyRewrite` 也是这样；
+  "不迭代"说的是通道**之间**）
 - **不在单语言后端继续做窥孔**：`src/core/lua/jit-a64.c` 那边冻结在现状
   （Tier 1 已到顶的证据见 `memory/project_lua_vm_jit.md` 第 19~30 条）
+
+## 8. 现状（2026-09-20）
+
+落了 16 格（`level 1` 跑 15 格）：`early phielim and copyelim`（mem2reg）、
+八格 `*deadcode`、`opt`/`middle opt`/`late opt`、`zero arg cse`/`generic cse`/`lowered cse`、
+`elim unread autos`。代码在 `src/core/mir/opt/`：
+
+- `pass.js` 56 格的表 + `PASS_ORDER` 自检 + 档位；`index.js` 一处 import 全部通道
+- `edit.js` **改图只有这一份实现**（`replaceRef` / `removeInsns`）
+- `region.js` **词法作用域**（MIR 的"支配"，见下面第 2 条坑）
+- `cfg.js` 基本块 / 支配树 / 支配边界（`BRTABLE` 的边在里头）
+
+接线：`OMNI_MIR_OPT=1..3` 开（缺省 0 = 一格不跑），`OMNI_MIR_OPT_STATS=1` 印账，
+`OMNI_MIR_OPT_ONLY=通道名` 单格 A/B 与二分；挂在 `lang/c.js` 的 `cMir`/`cMirNative`，
+跑完再 `verifyMir` 一遍。
+
+量出来的（真产物）：`src/runtime/omni_r3.c` 147 个函数，指令 26002 -> 23545（-9.4%）；
+一个 fib 例子解释器腿 -17.6%、原生腿 `.o` 960 -> 912 字节。
+判据 `node tests/mir/opt.js`（24s，在 `tests/all.js` 里）：六个单格判据 +
+**L1：`tests/c/gen/*.c` 那 85 份开与不开管线 stdout 与退出码逐字节相同**。
+
+### 落地时踩的三个坑（都是真产物/判据抓的，不是想出来的）
+
+1. **MIR 里没有 NOP**。把消掉的指令改写成 `END` 会当场把控制流改坏（`END` 关掉最近一个
+   未闭合的区域）。所以变换只改引用，删指令集中在 `edit.js` 的 `removeInsns` ——
+   这也正是 Go 的表在每个变换后面都跟一格 deadcode 的理由。
+2. **"支配"在这一层是词法作用域，不是 CFG 支配树**。`verify.js:124 checkRef` 判的是
+   "定义它的那层区域还在栈上吗"。循环之前的块**确实**支配循环之后的块，但 `LOOP…END`
+   一关那个值就不可见（wasm 那条腿上它就是求值栈上一格）。CSE 第一版用支配树，
+   在 `omni_r3.c` 的 `r3_num` 上被骂「%38 定义在一个已经关掉的区域里」。
+3. **`buildCfg` 原来不认 `BRTABLE`**：switch 的目标块拿不到入边、还多一条"顺序落下去"的边。
+   mem2reg 于是按错的"单前驱"传了值（`tests/c/gen/10-switch.c`：s=7457 变 7557）。
+   顺带一笔：折浮点常量时 `String(-0)` 是 `"0"`，负零要特判（`15-float.c` 抓的）。
+
+### 下一格
+
+按表往下：`decompose user`（小聚合拆成标量槽，`MaxStruct = 4`）——
+它是"对象不落堆"三步里的第二步，也是 `dead auto elim` 那一格现在无活可干的原因
+（C 前端在线性内存腿上把那一块的基址当场 `GSTORE` 进了 `$sp`，照 Go 的判据答"留着"）。
+
