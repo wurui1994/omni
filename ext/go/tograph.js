@@ -683,14 +683,22 @@ function unwrapDeref(x) {
 /** 匿名 `func(){…}` 的名字（`func` 那一格的 name 是附属，可它得有一个）。 */
 let FN_N = 0;
 
+/**
+ * **函数体里见过的名字**（用来判断 `:=` 里哪些是新声明、哪些是重用）。
+ * 每进一个函数体就存一份、出来还原。
+ */
+let SEEN_NAMES = new Set();
+
 function funcOf(sig, blk, name, self, selfType) {
   const params = partKids(sig, 'in').map((p) => {
     const nm = part(p, 'name');
     return nm === undefined ? null : leaf(kids(nm)[0]);
   }).filter((n) => n !== null);
-  /* **形参与接收者的具名类型收进 `VARTYPE`**（只收语法上写着的那一档，见那一段）。
-     一格函数一层：进来存一份、出去还原 —— 内层函数不许把外层的表改脏。 */
   const savedVars = new Map(VARTYPE);
+  const savedSeen = new Set(SEEN_NAMES);
+  // 形参进 SEEN_NAMES
+  for (const p of params) SEEN_NAMES.add(p);
+  if (self !== undefined) SEEN_NAMES.add(self);
   if (self !== undefined && selfType !== undefined && selfType !== null) {
     VARTYPE.set(self, selfType);
   }
@@ -707,6 +715,7 @@ function funcOf(sig, blk, name, self, selfType) {
   } finally {
     VARTYPE.clear();
     for (const [k, v] of savedVars) VARTYPE.set(k, v);
+    SEEN_NAMES = savedSeen;
   }
 }
 
@@ -1206,6 +1215,13 @@ function toNode(x) {
     case 'define': case 'assign': {
       // `a, b := 1, 2` 与 `a = 1`。`define` 出 bind、`assign` 出 set —— 一格之差，
       // 正是"decl 就是 bind"那句话（没有 decl 节点）。
+      //
+      // **go 的 `:=` 不全是声明**：左边只需要**至少一个新名字**，已有的名字是赋值。
+      // `v, err := f()` 后面 `w, err := g()` 里 err 是 set 不是 bind。
+      // 判据：这个名字在当前函数的形参或之前的 bind 里出现过 → set。
+      // 这一层没有真正的作用域分析，所以用 `SEEN_NAMES` 近似：
+      // 顶层 + 函数体内看见的名字。不精确（嵌套 block 里的同名应该是新的），
+      // 但 go 编译器自己的代码里这种嵌套极少。
       const isDef = tag(x) === 'define';
       const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
       const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
@@ -1241,9 +1257,15 @@ function toNode(x) {
           const [o, i] = kids(t);
           return isMap(o) ? mapSet(toNode(o), toNode(i), v) : indexSet(toNode(o), toNode(i), v);
         }
-        return isDef
-          ? node('bind', { init: v }, { name: nameOf(t) })
-          : node('set', { value: v }, { name: nameOf(t) });
+        const n = nameOf(t);
+        /* **`:=` 的重用语义**：go 的 `:=` 在"至少有一个新名字"时重用已有名字。
+           `v, err := f()` 后面 `w, err := g()` 的 err 是赋值不是声明。
+           判据：这个名字已经在当前函数的形参或之前的 bind 里出现过 → set。 */
+        const isNew = isDef && !SEEN_NAMES.has(n);
+        if (isNew) SEEN_NAMES.add(n);
+        return isNew
+          ? node('bind', { init: v }, { name: n })
+          : node('set', { value: v }, { name: n });
       });
     }
     case 'inc': case 'dec': return node('set', {
