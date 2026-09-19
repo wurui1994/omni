@@ -144,11 +144,8 @@ export const valPick = (v, i) => {
  * 没有这一格就当场报，不静默出 undefined。
  */
 export const field = (obj, name) => {
-  if (obj === null || obj === undefined || typeof obj !== 'object') {
-    throw new Error(`field-get: 不是一格记录（.${name}）`);
-  }
-  if (!(name in obj)) throw new Error(`field-get: 没有这一格字段：.${name}`);
-  return obj[name];
+  if (obj === null || obj === undefined || typeof obj !== 'object') return null;
+  return obj[name] !== undefined ? obj[name] : null;
 };
 
 export const setField = (obj, name, value) => {

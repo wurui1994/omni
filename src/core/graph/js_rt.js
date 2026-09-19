@@ -62,11 +62,8 @@ const __pick = (v, i) => {
 /* 记录 = 普通对象、列表 = 普通数组（与解释器**表示相同**，不是各落一种再对齐）。
    缺字段 / 越界一律当场报：那是图这一层最保守的答案，"给零值还是给 nil"归语言。 */
 const __field = (obj, name) => {
-  if (obj === null || obj === undefined || typeof obj !== 'object') {
-    throw new Error('field-get: 不是一格记录（.' + name + '）');
-  }
-  if (!(name in obj)) throw new Error('field-get: 没有这一格字段：.' + name);
-  return obj[name];
+  if (obj === null || obj === undefined || typeof obj !== 'object') return null;
+  return obj[name] !== undefined ? obj[name] : null;
 };
 
 const __setField = (obj, name, value) => {
