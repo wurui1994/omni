@@ -1228,19 +1228,42 @@ function toNode(x) {
       // `x, y := f()` / `x, ok = m[k]`：N 个名字对 1 个右值 ⇒ 多值的消费侧
       if (lhs.length > 1 && rhs.length === 1) {
         // **`v, ok := m[k]` 不是多值**：go 在这儿给的是"值 + 在不在"，落 map-get + map-has。
-        // `_` 那一格跳过取值 —— 缺键在图上是错误（默认值归语言），而 comma-ok 的用处
-        // 正是"键可能不在"，所以问在不在的那种写法不许去取值。
         if (lhs.length === 2 && tag(rhs[0]) === 'index' && isMap(kids(rhs[0])[0])) {
           const [o, k] = kids(rhs[0]);
-          const mk = (t, init) => (isDef
-            ? node('bind', { init }, { name: nameOf(t) })
-            : node('set', { value: init }, { name: nameOf(t) }));
+          const mk = (t, init) => {
+            const n = nameOf(t);
+            if (isDef && !SEEN_NAMES.has(n)) { SEEN_NAMES.add(n); return node('bind', { init }, { name: n }); }
+            return node('set', { value: init }, { name: n });
+          };
           const out = [];
           if (nameOf(lhs[0]) !== '_') out.push(mk(lhs[0], mapGet(toNode(o), toNode(k))));
           out.push(mk(lhs[1], mapHas(toNode(o), toNode(k))));
           return out;
         }
-        return destructure(lhs.map(nameOf), toNode(rhs[0]), { declare: isDef });
+        /* **多值 destructure 也要 SEEN_NAMES**：`v, err := f()` 后面
+           `w, err := g()` 的 err 是已有名字。destructure 总是 bind（declare=true），
+           所以这儿要把已有名字从 declare=true 改成 declare=false。 */
+        const names = lhs.map(nameOf);
+        const declareFlags = names.map((n) => {
+          if (!isDef) return false;
+          if (SEEN_NAMES.has(n)) return false;
+          SEEN_NAMES.add(n);
+          return true;
+        });
+        // 如果全是 declare 或全不是，走原来的 destructure
+        if (declareFlags.every((d) => d === declareFlags[0])) {
+          return destructure(names, toNode(rhs[0]), { declare: declareFlags[0] });
+        }
+        // 混合情况：手动拆
+        const holder = `__mv${names.join('$')}`;
+        const out = [node('bind', { init: toNode(rhs[0]) }, { name: holder, keepMulti: true })];
+        names.forEach((nm, idx) => {
+          const got = node('pick', { from: node('ref', {}, { name: holder }) }, { index: idx });
+          out.push(declareFlags[idx]
+            ? node('bind', { init: got }, { name: nm })
+            : node('set', { value: got }, { name: nm }));
+        });
+        return out;
       }
       return lhs.map((t, i) => {
         const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
