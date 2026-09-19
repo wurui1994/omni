@@ -18,6 +18,7 @@ import './ssa.js';       // early phielim and copyelim
 import './deadcode.js';  // 八格 *deadcode
 import './rewrite.js';   // opt / middle opt / late opt
 import './cse.js';       // zero arg cse / generic cse / lowered cse
+import './dse.js';       // dse
 import './autos.js';     // elim unread autos
 
 export { passStatus, checkPassTable };

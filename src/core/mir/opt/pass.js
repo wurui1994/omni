@@ -102,6 +102,12 @@ export const PASS_ORDER = [
   ['prove', 'generic deadcode'],
   ['prove', 'divisible'],
   ['divisible', 'divmod'],
+  /* `generic cse` 必须在 `dse` 之前（`compile.go:506`）。这一条在我们这儿**尤其**要紧：
+     dse 判"同一处"靠的是地址**同一个 ref**，而 `t[0]=1; t[0]=n;` 这两处的地址是
+     两串一样的 `MUL`+`ADD` —— 不先 CSE 掉，dse 一条都删不掉（判据 dse.test.js 量到过）。 */
+  ['generic cse', 'dse'],
+  ['generic cse', 'nilcheckelim'],
+  ['generic cse', 'tighten'],
   ['dse', 'lower'],
   ['expand calls', 'decompose builtin'],
   ['decompose builtin', 'lower'],

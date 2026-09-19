@@ -14,6 +14,7 @@ import '../ssa.js';        // 注册 early phielim and copyelim
 import '../deadcode.js';   // 注册八格 *deadcode
 import '../rewrite.js';    // 注册 opt / middle opt / late opt
 import '../cse.js';        // 注册 zero arg cse / generic cse / lowered cse
+import '../dse.js';        // 注册 dse
 import '../autos.js';      // 注册 elim unread autos
 import { runMirModule } from '../../interp.js';
 import { cMir } from '../../../lang/c.js';
