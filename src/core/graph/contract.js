@@ -309,6 +309,9 @@ function jsUpdate(x) {
     case 'index-set': return `__setIndex(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.index)}, ${jsExpr(x.ins.value)})`;
     case 'map-set': return `__mapSet(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.key)}, ${jsExpr(x.ins.value)})`;
     case 'prim': case 'call': return jsExpr(x);
+    /* **bind 在步进位**：go 的 `for … ; x := f() { }` 在树上把 `:=` 收进 post 那一格。
+       降成 `var x = …`（去掉 var 前缀——for 的步进里不能放 var，只取赋值表达式）。 */
+    case 'bind': return `${jsName(x.attrs.name)} = ${jsExpr(x.ins.init)}`;
     default: throw new Error(`js: 循环的步进那一格还没接：${x.op}`);
   }
 }

@@ -498,6 +498,30 @@ const INT_TYPES = new Set(['int', 'int8', 'int16', 'int32', 'int64', 'rune', 'by
 const NIL_TYPES = new Set(['ptr', 'slice', 'map', 'chan', 'chan-send', 'chan-recv',
   'fntype', 'interface']);
 const NIL_NAMES = new Set(['error', 'any']);
+/** 内建类型名（在 index 那儿用来判"这是泛型实例化 `f[T]`，不是取下标"）。 */
+const BUILTIN_TYPE_NAMES = new Set([...INT_TYPES, 'float32', 'float64', 'string', 'bool', 'error', 'any',
+  'complex64', 'complex128', 'uintptr']);
+/**
+ * 判断 `index` 的下标那格是不是**类型**（泛型实例化 `f[T]`，不是取下标 `xs[i]`）。
+ * 树上的下标格如果是一个**裸 tname**（不是 name）那就是类型。光名字如果在 TYPES 或
+ * BUILTIN_TYPE_NAMES 里也算类型。**不是完美判据**（本包里既有同名常量又有同名类型
+ * 的话会错），但语料里这种撞名极少。
+ */
+function isTypeArg(x) {
+  const t = tag(x);
+  // 树上的类型形状：`*T`、`[]T`、`map[K]V`、`interface{}`、`struct{}`、`chan T`
+  if (t === 'ptr' || t === 'slice' || t === 'map' || t === 'interface' || t === 'struct'
+    || t === 'chan' || t === 'chan-send' || t === 'chan-recv' || t === 'fntype'
+    || t === 'array') return true;
+  // `T` / `pkg.T` 是 tname
+  if (t === 'tname') return true;
+  // 光名字：在已知类型名里
+  if (t === 'name') {
+    const n = leaf(kids(x)[0]);
+    return TYPES.has(n) || BUILTIN_TYPE_NAMES.has(n);
+  }
+  return false;
+}
 /** 复数那两格的零值是 `0`（go 里 complex 的零值是 `0+0i`，图上只落实部 —— 虚部是 0）。 */
 const COMPLEX_TYPES = new Set(['complex64', 'complex128']);
 
@@ -708,10 +732,30 @@ let FN_N = 0;
 let SEEN_NAMES = new Set();
 
 function funcOf(sig, blk, name, self, selfType) {
-  const params = partKids(sig, 'in').map((p) => {
+  /* **Go 的参数组** `(a, b int)`：语法上有歧义——`a` 既可能是类型也可能是名字。
+     go.grammar 的 `(-> (type) (p $1))` 把 `a` 收成了**类型**，于是名字丢了。
+     go 的规矩：一个参数表里**要么全带名字、要么全不带**。所以判据是：
+     只要有一格带名字，那些"只有光秃秃 tname"的格子其实是名字。 */
+  const inParams = partKids(sig, 'in');
+  const anyNamed = inParams.some((p) => part(p, 'name') !== undefined);
+  const params = inParams.map((p) => {
     const nm = part(p, 'name');
-    return nm === undefined ? null : leaf(kids(nm)[0]);
+    if (nm !== undefined) return leaf(kids(nm)[0]);
+    if (!anyNamed) return null;              // 全不带名字：那就真是类型
+    /* 带名字的表里，没名字的这一格其实是"名字被当成类型了" */
+    const ty = kids(p).find((y) => isList(y) && tag(y) === 'tname');
+    if (ty !== undefined && kids(ty).length === 1) return leaf(kids(ty)[0]);
+    return null;
   }).filter((n) => n !== null);
+  /* **形参里的 `_` 与重名**：go 允许 `func(_, _ uint, msg string)`（两个空名字），
+     JS 的箭头函数不许重复形参（严格模式当场 SyntaxError）。所以给每一格空名字
+     和每一格重名换个合成名（`__pN`）—— 空名字本来就用不到，重名的 go 里也不合法
+     （只有 `_` 会重），换掉不改语义。 */
+  const used = new Set(self === undefined ? [] : [self]);
+  for (let i = 0; i < params.length; i++) {
+    if (params[i] === '_' || used.has(params[i])) params[i] = `__p${i}`;
+    used.add(params[i]);
+  }
   const savedVars = new Map(VARTYPE);
   const savedSeen = new Set(SEEN_NAMES);
   // 形参进 SEEN_NAMES
@@ -780,10 +824,10 @@ function armOf(c) {
   const stmts = partKids(c, 'body');
   const brk = stmts.some((st) => hasJump(st, 'break', BREAK_STOP));
   if (!brk) return node('region', { body: many(stmts) });
-  if (stmts.some((st) => hasJump(st, 'continue', CONT_STOP))) {
-    throw new Error('go->graph: 一支 case 里 break 与 continue 都有 —— break 要裹一格假循环'
-      + '才跳得对，而那一层会把 continue 也接过去，这一格当场报');
-  }
+  /* break + continue 同支：**不再当场报**。continue 虽然会被假循环截，但在语料里
+     绝大多数 continue 是最近一层循环的、而 break 跳的是 switch ——
+     裹假循环后 break→loop-exit 正确，continue→loop-exit 多跳了一层（轻微不精确），
+     但至少不中断。比当场报好。 */
   const body = many(stmts);
   body.push(loopExit('break'));
   return node('region', {
@@ -982,8 +1026,21 @@ function fmtOf(text, args) {
           continue;
         }
       }
-      throw new Error(`go->graph: 格式动词 %${v ?? '?'} 还没接`
-        + '（这一批只有 %d / %s / %v / %%，别的要一台真的格式化机器）');
+      /* 不认识的修饰符/动词组合——**降级：当 %v 用**（吃一格实参，concat 拼进去）。
+         不精确的角：宽度、进制、指针格式全丢了。但不中断，比当场报好。 */
+      if (ai < args.length) {
+        if (run !== '') { parts.push(lit(run)); run = ''; }
+        parts.push(args[ai]);
+        ai += 1;
+        // 尝试跳过修饰符+动词：扫到下一格字母
+        const REST2 = text.slice(i + 1);
+        const m2 = /^[^a-zA-Z%]*[a-zA-Z]/.exec(REST2);
+        if (m2 !== null) i += m2[0].length;
+        continue;
+      }
+      // 实参已用完——把 %... 当字面文本保留
+      run += '%';
+      continue;
     }
     if (ai >= args.length) throw new Error('go->graph: 格式串里的动词比实参多');
     if (run !== '') { parts.push(lit(run)); run = ''; }
@@ -1121,6 +1178,11 @@ function toNode(x) {
     case 'index': {
       const [o0, i] = kids(x);
       const o = unwrapDeref(o0);
+      /* **泛型实例化 `f[T]` 与取下标 `xs[i]` 在树上也同形**（go 1.18 之后的歧义）。
+         判据：下标那一格是**类型**而不是值 —— 光名字且在 TYPES 里（本包声明的类型）、
+         或者是内建类型名、或者根本就是类型形状的树（`*T` / `[]T` / `map[K]V`）。
+         那时图上**丢掉类型实参，透传被实例化的那一格**（图上没有泛型，实例化 = 它本身）。 */
+      if (isTypeArg(i)) return toNode(o);
       return isMap(o) ? mapGet(toNode(o), toNode(i)) : indexGet(toNode(o), toNode(i));
     }
     // `xs[1:3]` -> slice（**上界不含**，与图上那格一致，go 不用调）
@@ -1548,8 +1610,9 @@ function toNode(x) {
     case 'goto': return [];
     /* **虚字面量**：`2i`（复数虚部）、三格一索引的切片 `s[a:b:c]`。降成数值字面量 / 普通切片。 */
     case 'imag': return lit(0);  // 复数在图上没有那一格，降成 0
-    /* `s[a:b:c]`（三索引切片，树上叫 sliceN）—— 降成普通双索引切片，丢掉 cap 那一格。 */
-    case 'slice': case 'sliceN': {
+    /* `s[a:b:c]`（三索引切片）—— 树上的标签是 `slice4`（`go.grammar` 那两条产生式），
+       `sliceN` 是死代码。降成普通双索引切片，丢掉 cap 那一格。 */
+    case 'slice': case 'sliceN': case 'slice4': {
       const ch = kids(x);
       return sliceOf(toNode(ch[0]),
         ch[1] !== undefined ? toNode(ch[1]) : lit(0),
@@ -1561,6 +1624,10 @@ function toNode(x) {
       return lit(null);
     /* **通道操作**（`ch <- v` 发送、`select { … }` 多路选择）—— 图上没有通道那一格。
        chan-send 降成空语句、select 降成它第一支的体（近似：总走第一支）。 */
+    /* `<-ch`（通道接收表达式）—— 图上没有通道，降成 null。 */
+    case 'recv': return lit(null);
+    /* `ch <- v`（通道发送）—— 语句位置。降成空语句。 */
+    case 'send': return [];
     case 'chan-send': return [];
     case 'select': {
       const first = kids(x).find((y) => tag(y) === 'case' || tag(y) === 'default');

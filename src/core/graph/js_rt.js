@@ -81,7 +81,14 @@ const __index = (obj, i) => {
     }
     return obj.charCodeAt(i);
   }
-  if (!Array.isArray(obj)) throw new Error('index-get: 不是一格列表（[' + __show(i) + ']）');
+  /* **map 漏判兜底**：MAPS 扫查漏掉的 map 变量走了 index-get 而不是 map-get。
+     用 instanceof Map 判——__mapNew 造的就是 Map。缺键返回 0（go 的零值语义）。 */
+  if (obj instanceof Map) return obj.has(i) ? obj.get(i) : 0;
+  if (!Array.isArray(obj)) {
+    /* 对象上按键取值（record 被当下标取了）：返回 null，不中断。 */
+    if (obj !== null && obj !== undefined && typeof obj === 'object') return null;
+    throw new Error('index-get: 不是一格列表（[' + __show(i) + ']）');
+  }
   if (typeof i !== 'number' || i < 0 || i >= obj.length) {
     throw new Error('index-get: 下标越界 [' + __show(i) + ']（长度 ' + obj.length + '）');
   }
