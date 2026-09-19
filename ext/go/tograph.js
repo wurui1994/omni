@@ -1621,6 +1621,7 @@ function toNode(x) {
     /* **类型节点走到了表达式位置**（`ptr` / `array` / `tname` / `tinst` / `chan`）——
        `unsafe.Sizeof([4]int{})` 那种、泛型实参那种。降成 null 占位（类型不进图）。 */
     case 'ptr': case 'array': case 'tname': case 'tinst': case 'chan':
+    case 'struct':   // `struct{}{}` 匿名空结构体字面量的类型部分也可能走到这儿
       return lit(null);
     /* **通道操作**（`ch <- v` 发送、`select { … }` 多路选择）—— 图上没有通道那一格。
        chan-send 降成空语句、select 降成它第一支的体（近似：总走第一支）。 */
