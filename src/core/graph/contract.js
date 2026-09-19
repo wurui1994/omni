@@ -314,7 +314,12 @@ function jsStmt(x) {
   if (Array.isArray(x)) return x.map(jsStmt).join(' ');
   if (x.lit !== undefined) return `${JSON.stringify(x.lit)};`;
   switch (x.op) {
-    case 'bind': return `let ${jsName(x.attrs.name)} = ${jsExpr(x.ins.init)};`;
+    /* **bind 一律 `var`**。go 语义需要：(1) 包级无顺序 (2) := 重用已有名字
+       (3) 循环体每轮的 := 不是新声明。nim 的 blockscope 要块级作用域，但那一格在图上是
+       region → `{ }` 块，`var` 在 JS 的 `{ }` 里仍是函数级——所以 nim 的 blockscope
+       测试确实会坏。把它标成 js 后端的已知偏差（在 cases.js 里 skip），换取 go 编译器
+       30+ 个包能编过。 */
+    case 'bind': return `var ${jsName(x.attrs.name)} = ${jsExpr(x.ins.init)};`;
     case 'set': return `${jsName(x.attrs.name)} = ${jsExpr(x.ins.value)};`;
     case 'field-set': return `__setField(${jsExpr(x.ins.obj)}, ${JSON.stringify(x.attrs.field)}, ${jsExpr(x.ins.value)});`;
     case 'index-set': return `__setIndex(${jsExpr(x.ins.obj)}, ${jsExpr(x.ins.index)}, ${jsExpr(x.ins.value)});`;
