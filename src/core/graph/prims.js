@@ -29,15 +29,17 @@ const show = (v, showValue) => showValue(v);
 const asI64 = (v) => BigInt(Math.trunc(Number(v)));
 const shiftCount = (v) => {
   const n = Math.trunc(Number(v));
-  if (!(n >= 0 && n <= 63)) throw new Error(`移位的位数要在 0..63，给的是 ${n}`);
-  return BigInt(n);
+  /* go 的移位位数是无符号的：`^uint(0) >> 63` 在二补数 BigInt 里给 -1，
+     而 go 里那是 1（无符号 64 位右移）。不做全量无符号模拟——只对移位位数
+     做一层 & 63，与 wasm 的 i64.shl/i64.shr_u 的行为一致。 */
+  const u = n & 63;
+  return BigInt(u);
 };
 /**
  * js 那一侧的移位位数检查：**发一格自带的箭头函数**，不新开运行期钩子。
  * （那张钩子表是契约的一部分 —— 为一格检查加第 16 格不值，而两侧的规矩必须一样。）
  */
-const jsShift = (v) => `((__c) => { if (!(__c >= 0 && __c <= 63)) `
-  + `throw new Error('移位的位数要在 0..63，给的是 ' + __c); return BigInt(__c); })(${v})`;
+const jsShift = (v) => `((__c) => { const __u = Math.trunc(Number(__c)) & 63; return BigInt(__u); })(${v})`;
 const bitPrims = () => [
   P('band', 2, [], (a) => Number(asI64(a[0]) & asI64(a[1])), (a) => `Number(BigInt(${a[0]}) & BigInt(${a[1]}))`),
   P('bor', 2, [], (a) => Number(asI64(a[0]) | asI64(a[1])), (a) => `Number(BigInt(${a[0]}) | BigInt(${a[1]}))`),
