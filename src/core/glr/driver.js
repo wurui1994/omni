@@ -195,6 +195,13 @@ export function glrParse(tb, toks, diags) {
   const NO_TYPES = new Set();
   let tops = [mk(0, null, null, 0, NO_TYPES)];
 
+  /** 两字段 -> 数字 key。`to` < state 数，`id` < nextId。只要乘数足够大就无碰撞。
+   *  用 `(to + 1) * (nextId + 65536) + base.id + 1` 保证不同的 (to, base.id) 不碰。
+   *  但 nextId 在增长——所以这里用一个**充分大的固定乘数**（2^21 = 2M，状态数 < 2K、id < 百万级够了）。 */
+  const MK = 0x200000; // 2^21
+  const mergeKey2 = (a, b) => a * MK + b + 1;
+  const mergeKey3 = (a, b, c) => (a * MK + b + 1) * MK + c + 1;
+
   for (let i = 0; i <= toks.length; i++) {
     const tk = i < toks.length ? toks[i] : { type: '$end', node: null, span: i > 0 ? toks[i - 1].span : null };
 
@@ -203,7 +210,7 @@ export function glrParse(tb, toks, diags) {
     const canShift = [];
     const accepted = [];
     const work = [...tops];
-    for (const n of tops) merged.set(`${n.state}#${n.pred === null ? -1 : n.pred.id}#${n.id}`, n);
+    for (const n of tops) merged.set(mergeKey3(n.state, n.pred === null ? 0 : n.pred.id + 1, n.id), n);
     while (work.length > 0) {
       const n = work.pop();
       const acts = states[n.state].actions.get(tk.type);
@@ -249,12 +256,12 @@ export function glrParse(tb, toks, diags) {
         const pref = n.pref + r.prefer;
         // 合并：状态、前驱、值三者都一样才算同一支。值不同就看偏好 —— 严格低的那支现在就丢，
         // 反正它在接受点也要输（见文件头）。没声明过偏好时两边都是 0，谁也不丢，照旧两支都留。
-        const key = `${to}#${base.id}`;
+        const key = mergeKey2(to, base.id);
         const prev = merged.get(key);
         if (prev !== undefined && sameValue(prev.value, value)) continue;
         if (prev !== undefined && pref < prev.pref) continue;
         const nn = mk(to, base, value, pref, types);
-        merged.set(prev === undefined ? key : `${key}#${nn.id}`, nn);
+        merged.set(prev === undefined ? key : mergeKey3(to, base.id, nn.id), nn);
         work.push(nn);
         if (merged.size > MAX_REDUCE_WORK) {
           /* 这一格是**挂死的兜底**，不是歧义的判据（见 MAX_PARSES 那一段）。
@@ -275,7 +282,7 @@ export function glrParse(tb, toks, diags) {
     let live = canShift;
     let liveAccepted = accepted;
     const nodes = [...merged.values()];
-    const groupOf = (n) => `${n.state}#${n.pred === null ? -1 : n.pred.id}`;
+    const groupOf = (n) => mergeKey2(n.state, n.pred === null ? 0 : n.pred.id + 1);
     const bestOf = new Map();
     for (const n of nodes) {
       const b = bestOf.get(groupOf(n));
