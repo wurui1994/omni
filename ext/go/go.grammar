@@ -55,6 +55,11 @@
     (token FLOAT (+ digit) "." (* digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
     (token FLOAT (+ digit) (or "e" "E") (? (or "+" "-")) (+ digit))
     (token FLOAT "." (+ digit) (? (or "e" "E") (? (or "+" "-")) (+ digit)))
+    ;; 十六进制浮点（go 1.13 起）：`0x1p-1022` / `0x1.fp10`。**要排在十六进制整数前面**
+    ;; —— 不然 `0x1` 先被 INT 收掉，剩下的 `p-1022` 落成标识符加减法。
+    (token FLOAT "0" (or "x" "X") (+ (or hex "_")) "." (* (or hex "_")) (or "p" "P") (? (or "+" "-")) (+ digit))
+    (token FLOAT "0" (or "x" "X") "." (+ (or hex "_")) (or "p" "P") (? (or "+" "-")) (+ digit))
+    (token FLOAT "0" (or "x" "X") (+ (or hex "_")) (or "p" "P") (? (or "+" "-")) (+ digit))
     (token INT "0" (or "x" "X") (+ (or hex "_")))
     (token INT "0" (or "b" "B") (+ (set "01_")))
     (token INT "0" (or "o" "O") (+ (set "01234567_")))
@@ -308,6 +313,8 @@
     (-> (simple) $1)
     (-> (block) $1)
     (-> (IDENT ":" stmt) (label $1 $3))
+    ;; `badloop: ;` —— 标签后面跟空语句（go 的 goto target 经常这么写）
+    (-> (IDENT ":") (label $1))
     (-> ("go" expr) (go $2))
     (-> ("defer" expr) (defer $2))
     (-> ("return") (return))
