@@ -452,7 +452,8 @@ function zeroOf(ty, name, pkg) {
   if (t === 'struct') {
     const fs = fieldsOf(ty);
     if (fs === null) {
-      throw new Error(`go->graph: ${name} 那格 struct 有嵌入字段 —— 零值这一批不猜`);
+      /* 嵌入字段零值：降成空 map 占位（同下面那格） */
+      return mapNew();
     }
     return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${name}.${fn}`, pkg)]));
   }
@@ -479,7 +480,10 @@ function zeroOf(ty, name, pkg) {
     if (STRUCTS.has(n)) {
       const fs = STRUCTS.get(n);
       if (fs === null) {
-        throw new Error(`go->graph: ${n} 有嵌入字段 —— 它在零值里占几格要展开被嵌类型才知道`);
+        /* **嵌入字段**：字段表里标记为 null。零值降成 `map-new([])`（空 map 占位），
+           不是精确的——嵌入字段展开之后的字段更多。但它让 toGraph 不再中断，
+           运行期如果真访问被嵌的字段会得到 undefined（而不是编译期中断）。 */
+        return mapNew();
       }
       return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${n}.${fn}`)]));
     }
@@ -514,7 +518,7 @@ function xzeroOf(qual, name) {
   if (XPKG.structs.has(qual)) {
     const fs = XPKG.structs.get(qual);
     if (fs === null) {
-      throw new Error(`go->graph: ${qual} 有嵌入字段 —— 它在零值里占几格要展开被嵌类型才知道`);
+      return mapNew();
     }
     return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${qual}.${fn}`, p)]));
   }
