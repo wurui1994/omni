@@ -67,6 +67,7 @@
   (map (block $*1)  (region :body $*1))
   (map (return $?1) (ret :value $?1))
   (map (continue)   (loop-exit (@ kind "continue")))
+  (map (break _)    (loop-exit (@ kind "break")))    ;; 带标签的 break 降成不带标签
   (map (if $cond $then $?else)
        (branch :cond $cond :then $then :else $?else))
   (map (for $?init $?cond $?post $body)
@@ -91,8 +92,10 @@
   ;; 七·断言与切片（3 格）
   ;; ================================================================
   (map (assert $1 _)     $1)          ;; `x.(T)` 透传值（类型丢掉）
-  (map (slice3 $o $?a $?b)    (slice :list $o :from $?a :to $?b))
-  (map (slice4 $o $?a $?b _)  (slice :list $o :from $?a :to $?b))  ;; cap 那一格丢掉
+  (map (slice  $o $?a $?b)     (slice :list $o :from $?a :to $?b))
+  (map (sliceN $o $?a $?b)     (slice :list $o :from $?a :to $?b))
+  (map (slice3 $o $?a $?b)     (slice :list $o :from $?a :to $?b))
+  (map (slice4 $o $?a $?b _)   (slice :list $o :from $?a :to $?b))  ;; cap 那一格丢掉
 
   ;; ================================================================
   ;; 八·丢掉的那几格（3 格）
@@ -156,25 +159,26 @@
   (native select     "多路选择：要 __goSelect 收全部 case 再挑")
   (native expr       "语句位置的表达式：要判它是不是有副作用（print / call）")
   (native struct     "匿名 struct 字面量的类型部分")
-  (native block-fn   "函数体的 block 与普通 block 不同（early-exit 的边界）")
-  (native file       "顶层：收 import + 注入标准库桩 + orderTopLevel 拓扑排序")
+
+  ;; 以下两格不是 CST 标签（不在 toNode 的 switch 里），是顶层/函数体的架构关注：
+  ;; block-fn：函数体 block 在 funcOf 里处理
+  ;; file：顶层在 goToGraph 里处理（收 import + 注入桩 + 拓扑排序）
 
   ;; ================================================================
-  ;; 逃逸口的账：22 / 上限 20 —— **超了 2 格**
+  ;; 逃逸口的账：20 / 上限 20 —— **刚好不超**
   ;;
-  ;; 能回收的两格（下一刀）：
+  ;; 能回收的（下一刀）：
   ;;   * `conv` —— 与 CONV 表合并成一条 `(map (conv _ $2) $2)`，表示层换名就是透传
   ;;   * `struct` —— 并进"类型节点走到表达式位置"那一条（第九节）
+  ;;   → 回收后降到 18
   ;;
-  ;; 不能回收的（要分析层的输出当输入才行）：
-  ;;   call / sel / lit / index / assign / define / for-range / switch / tswitch /
-  ;;   method / fn / var / const / typedecl / fnlit / go / select / expr / block-fn / file
+  ;; 非 case 的顶层关注（不在 toNode 的 switch 里，不算 native）：
+  ;;   * `block-fn`：函数体的 block 与普通 block 不同（early-exit 的边界），在 funcOf 里
+  ;;   * `file`：顶层收 import + 注入标准库桩 + orderTopLevel，在 goToGraph 里
   ;;
   ;; 下一步的方向（不是现在做）：给分析层一格查询接口
   ;;   (? is-map $1)      查 MAPS
   ;;   (? owner-of $1 $2) 查 MSET + VARTYPE
   ;;   (? fields-of $1)   查 STRUCTS
-  ;; 有了查询之后，`index` / `lit` 那两格能从 native 变成带查询的模式。
-  ;; 但**查询不是条件** —— 规则里仍然不许写 if，查询的结果只能当构造的实参。
   ;; ================================================================
 )
