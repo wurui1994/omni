@@ -1049,9 +1049,9 @@ function fmtOf(text, args) {
     i += 1;
   }
   if (run !== '') parts.push(lit(run));
-  if (ai !== args.length) {
-    throw new Error(`go->graph: 格式串里 ${ai} 个动词，实参给了 ${args.length} 个`);
-  }
+  /* **多余的实参当 %v 用**（go 的 Printf 在格式串动词不够时会打 `%!(EXTRA type=value)`，
+     我们把多余的实参追加到 concat 末尾——不精确但不中断）。 */
+  while (ai < args.length) { parts.push(args[ai]); ai += 1; }
   return node('prim', { args: parts.length === 0 ? [lit('')] : parts }, { name: 'concat' });
 }
 
