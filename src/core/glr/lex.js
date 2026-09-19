@@ -302,7 +302,7 @@ export function readLexSpec(node, diags) {
       if (!isStr(open) || !isStr(close)) { diags.error(it.span, '(block-comment OPEN CLOSE) needs two strings'); continue; }
       const nest = isAtom(it.items[3]) && it.items[3].value === 'nest';
       if (it.items.length > 3 && !nest) diags.error(it.span, "the only flag after (block-comment OPEN CLOSE) is 'nest'");
-      blocks.push({ open: open.value, close: close.value, nest });
+      blocks.push({ open: open.value, close: close.value, nest, openC0: open.value.charCodeAt(0) });
       continue;
     }
     if (h === 'indent') {
@@ -642,6 +642,8 @@ export function lexText(spec, file, diags) {
          （Nim 的 locks.nim 就死在 `noop's` 那个撇号上）。块注释的开头更长更具体，
          所以它先。空白与块注释的开头不重叠，这么排不影响别的语言。 */
       for (const b of spec.blocks) {
+        /* 短路：块注释开头的第一个字符不匹配就跳——比 startsWith 快一个量级。 */
+        if (src.charCodeAt(i) !== b.openC0) continue;
         if (!src.startsWith(b.open, i)) continue;
         const start = i;
         let d = 1;
