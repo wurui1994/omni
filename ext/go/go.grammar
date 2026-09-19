@@ -577,7 +577,11 @@
     (-> ("(" nx-type ")") (paren $2))
     (-> (func-lit) $1)
     (-> (composite) $1)
-    (-> (conv-type "(" expr opt-comma ")") (conv $1 $3)))
+    (-> (conv-type "(" expr opt-comma ")") (conv $1 $3))
+    ;; `([]byte)(s)` —— 括号包住的切片/数组/map 类型转换。conv-type 已经列了
+    ;; `[]T` / `[N]T` / `map[K]V` 等，但**被括号包住**时 GLR 会歧义（conv vs call）。
+    ;; 给 conv 那一支加 `(prefer 1)`：go 里 `([]byte)(x)` 就是转换，不是函数调用。
+    (-> ("(" conv-type ")" "(" expr opt-comma ")") (prefer 1) (conv $2 $5)))
 
   (rule func-lit
     (-> ("func" signature block) (fnlit $2 $3)))
