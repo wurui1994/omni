@@ -65,7 +65,13 @@ const __pick = (v, i) => {
    缺字段 / 越界一律当场报：那是图这一层最保守的答案，"给零值还是给 nil"归语言。 */
 const __field = (obj, name) => {
   if (obj === null || obj === undefined || typeof obj !== 'object') return null;
-  return obj[name] !== undefined ? obj[name] : null;
+  if (obj[name] !== undefined) return obj[name];
+  /* Go 方法分派：struct 带 __type 标签时，在方法表里查 Type.Method */
+  if (obj.__type !== undefined && typeof __goMethods !== 'undefined') {
+    const fn = __goMethods[obj.__type + '.' + name];
+    if (typeof fn === 'function') return (...args) => fn(obj, ...args);
+  }
+  return null;
 };
 
 const __setField = (obj, name, value) => {

@@ -1218,8 +1218,16 @@ function toNode(x) {
           return [toNode(k), toNode(v)];     // 键是**值**（不是名字）—— 与记录正相反
         }));
       }
+      /* **具名 struct 字面量带 `__type` 标签**：接口方法分派要它。
+         `Circle{R:5}` → `{__type:"Circle", R:5}`，然后 `s.Area()` 在运行时
+         查 `__goMethodTable["Circle.Area"]` 找到 `Circle__Area`。 */
+      const tyName = tag(ty) === 'tname' ? leaf(kids(ty)[0])
+        : tag(ty) === 'name' ? leaf(kids(ty)[0]) : null;
+      const withType = (pairs) => (tyName !== null && STRUCTS.has(tyName)
+        ? recordNew([['__type', lit(tyName)], ...pairs])
+        : recordNew(pairs));
       if (elems.length > 0 && elems.every((e) => tag(e) === 'kv')) {
-        return recordNew(elems.map((e) => {
+        return withType(elems.map((e) => {
           const [k, v] = kids(e);
           return [nameOf(k), toNode(v)];
         }));
@@ -1229,12 +1237,11 @@ function toNode(x) {
       }
       /* **位置式 struct 字面量**：`Circle{5.0}` 在树上是 `(lit (tname Circle) 5.0)`，
          元素没有 kv 标签。如果类型名在 STRUCTS 里有字段表，按顺序配对生成记录。 */
-      const litTypeName = tag(ty) === 'tname' ? leaf(kids(ty)[0])
-        : tag(ty) === 'name' ? leaf(kids(ty)[0]) : null;
+      const litTypeName = tyName;
       if (litTypeName !== null && STRUCTS.has(litTypeName) && elems.length > 0) {
         const fs = STRUCTS.get(litTypeName);
         if (fs !== null && fs.length >= elems.length) {
-          return recordNew(elems.map((e, i) => [fs[i][0], toNode(e)]));
+          return withType(elems.map((e, i) => [fs[i][0], toNode(e)]));
         }
       }
       /* **切片字面量**（`[]int{1,2,3}`）或 struct 不在 STRUCTS 里 → 落数组。 */
@@ -1339,23 +1346,22 @@ function toNode(x) {
       const blk = kids(x).find((y) => tag(y) === 'block');
       const name = leaf(nm);
       const self = part(kids(recv)[0], 'name');
-      if (self === undefined) {
-        /* **匿名接收者** (`func (_ *T) M()`)：接收者没有名字，给它一个合成的 `__self`。
-           go 允许这么写（接收者不在方法体里被引用时），图上的函数总需要一个形参名字。 */
-        const recvTy = kids(kids(recv)[0]).find((y) => tag(y) !== 'name');
-        const ownerTn = namedTypeOf(recvTy);
-        const graphName = ownerTn !== null ? mangle(ownerTn, name) : name;
-        return node('bind', {
-          init: funcOf(sig, blk, graphName, '__self', ownerTn),
-        }, { name: graphName });
-      }
-      /* **方法名按接收者类型压平**（见 `MSET` / `mangle` 那一段）。 */
       const recvTy = kids(kids(recv)[0]).find((y) => tag(y) !== 'name');
       const ownerTn = namedTypeOf(recvTy);
+      const selfName = self === undefined ? '__self' : leaf(kids(self)[0]);
       const graphName = ownerTn !== null ? mangle(ownerTn, name) : name;
-      return node('bind', {
-        init: funcOf(sig, blk, graphName, leaf(kids(self)[0]), ownerTn),
+      const bindNode = node('bind', {
+        init: funcOf(sig, blk, graphName, selfName, ownerTn),
       }, { name: graphName });
+      /* **注册到方法表**：`__goRegMethod("Circle.Area", Circle__Area)` —— 接口分派要它。 */
+      if (ownerTn !== null) {
+        const regNode = node('call', {
+          fn: node('ref', {}, { name: '__goRegMethod' }),
+          args: [lit(`${ownerTn}.${name}`), node('ref', {}, { name: graphName })],
+        });
+        return [bindNode, regNode];
+      }
+      return bindNode;
     }
     case 'block': return node('region', { body: many(kids(x)) });
     case 'define': case 'assign': {
