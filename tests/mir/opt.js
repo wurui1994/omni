@@ -58,7 +58,23 @@ for (const c of cases) {
   if (a.stdout === b.stdout && a.status === b.status) { same++; continue; }
   bad(`L1 ${c}`, `退出码 ${a.status} vs ${b.status}\n--- 不开\n${a.stdout}\n--- 开\n${b.stdout}`);
 }
-if (same > 0) ok(`L1 行为一致：${same}/${cases.filter((c) => keep(c)).length} 份 .c 逐字节相同`);
+if (same > 0) ok(`L1 行为一致（解释器腿）：${same}/${cases.filter((c) => keep(c)).length} 份 .c 逐字节相同`);
+
+/* ---- 三、L1：**原生腿**（真机器码，走我们自己的汇编器与链接器）也要一致。
+ * 这条与上面那条不是一回事：`omni c run` 走 MIR 解释器，`omni c tcc -run` 走
+ * `cMirNative` -> arm64/x86_64 的 from_mir -> 我们自己的链接器 -> 真的跑。
+ * 优化改出来的新形状（比如转发之后地址计算没人用了）只有在这条腿上才会碰到后端。 */
+let nsame = 0;
+for (const c of cases) {
+  if (!keep(c)) continue;
+  const path = join(gen, c);
+  const a = spawnSync(process.execPath, [cli, 'c', 'tcc', '-run', path], { encoding: 'utf8' });
+  const b = spawnSync(process.execPath, [cli, 'c', 'tcc', '-run', path],
+    { encoding: 'utf8', env: Object.assign({}, process.env, { OMNI_MIR_OPT: '1' }) });
+  if (a.stdout === b.stdout && a.status === b.status) { nsame++; continue; }
+  bad(`L1-native ${c}`, `退出码 ${a.status} vs ${b.status}\n--- 不开\n${a.stdout}\n--- 开\n${b.stdout}`);
+}
+if (nsame > 0) ok(`L1 行为一致（原生腿）：${nsame}/${cases.filter((c) => keep(c)).length} 份 .c 逐字节相同`);
 
 /* ------------------------------------------------------------------ 收尾 */
 process.stdout.write(`\n${pass} ok, ${fail} failed\n`);
