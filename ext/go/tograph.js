@@ -1117,6 +1117,36 @@ function toNode(x) {
     case 'return': return retOf(many(kids(x)));
     case 'for-range': return forRangeOf(x);
     case 'switch': return switchOf(x);
+    /* `switch x.(type) { case int: … }` —— 类型选择。**降成普通 switch（丢掉类型信息）**：
+       每支的条件变成 `true`（总命中），体照常走——编译器里 tswitch 的每支体通常是独立的
+       赋值/调用链，丢掉"这格值在这支里是 int"这一件事，体内的代码**在图的动态语义下**
+       照旧能跑（它操作的还是同一个值，只是不知道类型了）。
+       `bind` 那格（`switch v := x.(type)`）透传 x（与 assert 同理）。
+       init 语句（`switch s; x.(type)`）照旧先执行。 */
+    case 'tswitch': {
+      const all = kids(x);
+      const ini = all.find((y) => tag(y) === 'init');
+      const subj = all.find((y) => tag(y) === 'subject');
+      const bind = all.find((y) => tag(y) === 'bind');
+      const cs = all.filter((y) => tag(y) === 'case' || tag(y) === 'default');
+      const body = [];
+      if (ini !== undefined) body.push(...many(kids(ini)));
+      if (bind !== undefined && subj !== undefined) {
+        body.push(node('bind', { init: toNode(kids(subj)[0]) }, { name: leaf(kids(bind)[0]) }));
+      }
+      let chain;
+      let dflt;
+      const arms = [];
+      for (const c of cs) {
+        if (tag(c) === 'default') { dflt = armOf(c); continue; }
+        // 每支的条件用 `true`——类型信息丢掉了
+        arms.push([lit(true), armOf(c)]);
+      }
+      chain = dflt;
+      for (let i = arms.length - 1; i >= 0; i -= 1) chain = branchOf(arms[i][0], arms[i][1], chain);
+      if (chain !== undefined) body.push(chain);
+      return body.length === 0 ? [] : node('region', { body });
+    }
     // `break` / `continue` -> **同一格节点**，差的只有一格附属 kind。
     // **带标签的那两个当场报**：`break L` 跳的是 L 那一层，而图上这一格跳的是最近一层 ——
     // 原来把标签直接丢了，那是"答案错而不报"。
@@ -1201,11 +1231,15 @@ function toNode(x) {
             args: onType ? argNodes : [toNode(obj), ...argNodes],
           });
         }
-        if (flat === null) {
-          throw new Error(`go->graph: 好几个类型都声明了方法 ${m}，而接收者的类型这一层`
-            + '看不出来 —— 要类型那一层（`VARTYPE` 只收语法上写着的那一档）');
-        }
-        throw selWall(recvName, m, fromVar);
+        /* **兜底：field-get 再调它**（与 V 同一个口径）。
+           方法重名（`flat === null`：两个类型各声明了一个同名方法）、嵌入字段带来的方法、
+           接收者类型完全看不出来——全落成"取字段再当函数调"。这是动态语义下的**近似**，
+           不是精确的静态分派。但它让 toGraph 不再因为这几族当场报，图跑起来之后
+           方法在运行期总会找到（只要 field-get 的兜底分派表里有它）。 */
+        return node('call', {
+          fn: fieldGet(toNode(obj), m),
+          args: argNodes,
+        });
       }
       const callee = tag(fn) === 'name' ? leaf(kids(fn)[0]) : null;
       if (callee !== null && PRINTS.has(callee)) return node('prim', { args: argNodes }, { name: 'print' });
