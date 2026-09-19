@@ -111,7 +111,16 @@ function matchSeq(items, from, src, pos) {
 }
 
 function matchTerm(t, src, pos) {
-  if (isStr(t)) return src.startsWith(t.value, pos) ? pos + t.value.length : -1;
+  if (isStr(t)) {
+    /* **单字符串用 charCodeAt 而不是 startsWith**。go 语法里 80% 的字面量是 1~2 字符的
+       标点/关键字首字符。`charCodeAt` 比 `startsWith` 便宜（不查长度，不建切片）。 */
+    const v = t.value;
+    const vl = v.length;
+    if (vl === 1) return src.charCodeAt(pos) === v.charCodeAt(0) ? pos + 1 : -1;
+    if (vl === 2) return src.charCodeAt(pos) === v.charCodeAt(0)
+      && src.charCodeAt(pos + 1) === v.charCodeAt(1) ? pos + 2 : -1;
+    return src.startsWith(v, pos) ? pos + vl : -1;
+  }
   if (isAtom(t)) {
     if (pos >= src.length) return -1;
     return inClass(t.value, src.charCodeAt(pos)) ? pos + 1 : -1;
@@ -119,7 +128,7 @@ function matchTerm(t, src, pos) {
   const h = head(t);
   if (h === 'set' || h === 'not') {
     if (pos >= src.length) return -1;
-    const hit = t.items[1].value.includes(src.slice(pos, pos + 1));
+    const hit = t.items[1].value.indexOf(src[pos]) >= 0;
     return hit === (h === 'set') ? pos + 1 : -1;
   }
   if (h === 'seq') return matchSeq(t.items, 1, src, pos);
