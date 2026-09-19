@@ -144,15 +144,36 @@ function graphOf(path, argv) {
      * 读进来了却看不见，那是这一格落地时漏掉的一半。现在把**这一趟所有的树**一起交给
      * 每一次映射：那几张表先按旁边那几份填一遍，再按自己这一份填（同名时自己说了算）。
      */
-    const also = [tree, ...mods.map((m) => m.tree)];
-    const main = lang.toGraph(tree, { also });
-    if (mods.length === 0) return { lang, graph: main };
-    /* 拼一张图：**被导入的在前**（那些是声明，`ref` 要看得见它们），主文件在后。 */
+    /* **`--pkg` 模式下所有文件平等**（go 包的语义）。主入口与 mods 拼在一起，
+       全部走 toGraph 后合并 body。主入口不特殊——go 包里所有文件都是同一级。
+       拼的顺序就是文件名排序（readDir 给的），主入口在字母序里的位置不动。 */
+    const all = doPkg
+      ? [{ path, tree }, ...mods]
+      : [{ path, tree, isMain: true }, ...mods.map((m) => ({ ...m }))];
+    const also = all.map((f) => f.tree);
+    if (!doPkg && mods.length === 0) {
+      const main = lang.toGraph(tree, { also });
+      return { lang, graph: main };
+    }
     const body = [];
-    for (const m of mods) body.push(...lang.toGraph(m.tree, { asModule: true, also }).body);
-    body.push(...main.body);
-    stderr(`omni: ${mods.length} 份 import 进来的同语言文件：`
-      + `${mods.map((m) => m.path).join(' ')}\n`);
+    for (const f of all) {
+      const g = lang.toGraph(f.tree, {
+        also,
+        asModule: doPkg ? true : (f.isMain !== true),
+      });
+      body.push(...g.body);
+    }
+    /* `--pkg` 模式下末尾不补 call main——go 包的声明只是声明，不带入口。
+       主入口那一份的 goToGraph 已经补了 call main（asModule: true 时不补）。
+       所以 `--pkg` 时全部 asModule: true，我们在末尾显式补一格 call main。 */
+    if (doPkg) {
+      const mainCall = { op: 'call', ins: { fn: { op: 'ref', ins: {}, attrs: { name: 'main' } }, args: [] }, attrs: {} };
+      body.push(mainCall);
+    }
+    if (mods.length > 0 || doPkg) {
+      stderr(`omni: ${all.length} 份同包文件一起编：`
+        + `${all.map((f) => f.path).join(' ')}\n`);
+    }
     return { lang, graph: program(body) };
   } catch (err) {
     throw new OmniError(`${path}: ${lang.name} 的映射说不通 —— ${err.message}`);
