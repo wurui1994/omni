@@ -162,6 +162,64 @@ function wallOf(msg) {
     .slice(0, 110);
 }
 
+/**
+ * **跨包的声明索引，只用正则扫文本、不走 GLR**（2026-09-19，pkgroot 的第二版）。
+ *
+ * 第一版把 `pkgroot` 底下每一份都**解析**一遍，go 那门是 8245 份 × 51.8ms = **+430s**。
+ * 量出来的事实：`XPKG` 那张表里真正被"语料外的声明"那一族用到的只有**名字集合**
+ * （`pkgs` / `funcs` / `mset` / `types`）—— `fmt.Fprintf(…)` 缺的是"fmt 里有没有 Fprintf
+ * 这个函数"，一句话就能答。要树的只有 `structs` / `under` 两格（零值要字段表），
+ * 那两格照旧留在墙上（明说：这一批只收名字，不收字段表）。
+ *
+ * 正则扫一遍 8245 份是 **1.2s**（0.15ms/文件）—— 比解析快 **350 倍**。
+ *
+ * 认声明的写法由 `bench.json` 的 `pkgscan` 说（语言知识留在那门自己的配置里）：
+ *   - `"go"`：`package p` / `func F(` / `func (r *T) M(` / `type T`
+ *   - `"v"` ：`module m` / `fn f(` / `fn (r T) m(` / `struct S` / `enum E`
+ *
+ * 出来的键与那门 `tograph.js` 自己建表时**逐字相同**（`p.Name` / `p.Owner.Method`），
+ * 所以两条路填的是同一张表 —— 这是"两条路一个口径"那条纪律。
+ */
+function declIndex(files, kind) {
+  if (kind !== 'go' && kind !== 'v') return null;
+  const ix = { pkgs: [], funcs: [], mset: [], types: [] };
+  const P = new Set();
+  const F = new Set();
+  const M = new Set();
+  const T = new Set();
+  const RX = kind === 'go' ? {
+    pkg: /^package\s+([A-Za-z_]\w*)/m,
+    fn: /^func\s+([A-Za-z_]\w*)\s*[[(]/gm,
+    method: /^func\s*\(\s*\w+\s+\*?\[?\]?([A-Za-z_]\w*)[^)]*\)\s*([A-Za-z_]\w*)\s*[[(]/gm,
+    type: /^type\s+([A-Za-z_]\w*)[\s[]/gm,
+  } : {
+    pkg: /^module\s+([A-Za-z_]\w*)/m,
+    fn: /^(?:pub\s+)?fn\s+([A-Za-z_]\w*)\s*[[(]/gm,
+    method: /^(?:pub\s+)?fn\s*\(\s*\w+\s+&?(?:mut\s+)?([A-Za-z_]\w*)\s*\)\s*([A-Za-z_]\w*)\s*[[(]/gm,
+    type: /^(?:pub\s+)?(?:struct|enum|interface|type)\s+([A-Za-z_]\w*)/gm,
+  };
+  for (const p of files) {
+    let text = '';
+    try {
+      text = readFileSync(p, 'utf8');
+    } catch {
+      continue;
+    }
+    const pm = RX.pkg.exec(text);
+    if (pm === null) continue;
+    const pkg = pm[1];
+    P.add(pkg);
+    for (const m of text.matchAll(RX.fn)) F.add(`${pkg}.${m[1]}`);
+    for (const m of text.matchAll(RX.method)) M.add(`${pkg}.${m[1]}.${m[2]}`);
+    for (const m of text.matchAll(RX.type)) T.add(`${pkg}.${m[1]}`);
+  }
+  ix.pkgs = [...P];
+  ix.funcs = [...F];
+  ix.mset = [...M];
+  ix.types = [...T];
+  return ix;
+}
+
 /** 这门语言的 `selfhost` 语料（`ext/<语言>/bench.json`）。没那一格或树不在就回 null。 */
 function corpusOf(lang) {
   let conf = null;
@@ -175,17 +233,20 @@ function corpusOf(lang) {
   const tree = refDirIf(sh.tree, sh.env ?? null);
   if (tree === null) return { root: null, files: [], pkgFiles: null };
   const root = sh.sub === undefined ? tree : join(tree, sh.sub);
-  /* **跨包查找的范围可以比分母宽**（2026-09-19）。`pkgroot` 指向一棵更大的子树（如整棵
-   * `src/`），解析出来的树只喂给 `opts.pkgs`，不参与"多少份落成图"的分母计算。
-   * go 的编译器 import 了标准库（fmt / strings / bytes / …），声明全在 `cmd/compile` 之外
-   * —— 不把那些树放进 pkgs，"声明不在语料里"那堵墙（208 / 615 = 33.8%）就永远在。
-   * 分母不变、只是查得到更多声明，这一格不改尺子的口径。 */
+  /* **跨包查找用正则扫文本，不走 GLR**（第二版）。
+   * XPKG 要的是名字集合，不需要完整的 CST。正则扫 8245 份 = 1.2s，GLR 解析 = 430s。 */
   let pkgFiles = null;
+  let declIx = null;
   if (sh.pkgroot !== undefined) {
     const pkgDir = join(tree, sh.pkgroot);
-    pkgFiles = filesUnder(pkgDir, sh.ext, []);
+    const allPkgFiles = filesUnder(pkgDir, sh.ext, []);
+    declIx = declIndex(allPkgFiles, sh.pkgscan ?? null);
+    if (declIx === null) {
+      // 没有 pkgscan 就退回全量 GLR 解析（兼容旧行为）
+      pkgFiles = allPkgFiles;
+    }
   }
-  return { root: root, files: filesUnder(root, sh.ext, []), pkgFiles: pkgFiles };
+  return { root: root, files: filesUnder(root, sh.ext, []), pkgFiles: pkgFiles, declIx: declIx };
 }
 
 /**
@@ -299,14 +360,17 @@ function measure(lang) {
     all.push(trees);
   }
   const pkgs = all.flatMap((ts) => ts.map((t) => t.tree));
-  /* **标准库那一批**（pkgroot 比 selfhost.sub 宽的那些文件）只进 pkgs，不进分母。
-   * 解析失败的静静跳过——那些是尺子管不到的文件（testdata、汇编、cgo、build tag 排除掉
-   * 的那几份）。这一趟的代价是时间（go 约 +90s）和内存（+几 GB），内存这台机器付得起、
-   * 时间每门语言只付一次。 */
-  if (got.pkgFiles !== null && got.pkgFiles !== undefined) {
+  /* **跨包声明索引**（第二版）：有 declIx 就直接填名字集合，不解析那几千份文件。
+   * 没有 declIx 的（旧配置 / 没配 pkgscan 的门）照旧走 GLR 解析（兼容旧行为）。
+   *
+   * `opts.declIx` 是新通道：toGraph 收到它之后，useXpkg 把这些名字**追加**到
+   * 从 selfhost 树建的跨包表上。这样 selfhost 之间的跨文件查找（`opts.also` 那一路）
+   * 一个字不变，只是多了标准库的名字。 */
+  const declIx = got.declIx;
+  if (got.pkgFiles !== null && got.pkgFiles !== undefined && declIx === null) {
     const selfRoot = got.root;
     for (const p of got.pkgFiles) {
-      if (p.startsWith(selfRoot)) continue;      // selfhost 里已经在了
+      if (p.startsWith(selfRoot)) continue;
       let tree = null;
       try {
         const text = readFileSync(p, 'utf8');
@@ -314,7 +378,7 @@ function measure(lang) {
         const toks = lexText(tb.grammar.lex, new SourceFile(p, text), diags);
         if (toks !== null && !diags.hasErrors()) tree = glrParse(tb, toks, diags);
       } catch {
-        // 静默：testdata / 汇编 / cgo 标签排除的那些
+        // 静默
       }
       if (tree !== null) pkgs.push(tree);
     }
@@ -323,7 +387,9 @@ function measure(lang) {
     const also = trees.map((t) => t.tree);
     for (const t of trees) {
       try {
-        const g = lang.toGraph(t.tree, { also: also, pkgs: pkgs, strictCalls: STRICT_CALLS });
+        const g = lang.toGraph(t.tree, {
+          also: also, pkgs: pkgs, declIx: declIx, strictCalls: STRICT_CALLS,
+        });
         row.graphed += 1;
         /* 顺带数一格账：这份图里有多少处"取字段再调它"（见 `softCallsIn` 那一段）。 */
         const soft = softCallsIn(g, new Set());

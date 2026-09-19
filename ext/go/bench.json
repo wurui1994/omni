@@ -23,6 +23,7 @@
     "ext": ".go",
     "doc": "go 自己的编译器（Go 写的）—— ADR-0037 §5.1a 那把尺子的分母。选 src/cmd/compile 而不是整棵 src：那把尺子问的是\"能不能编它自己\"，标准库是另一件事（那一格在 corpus 那一栏上）。",
     "pkgroot": "src",
-    "pkgroot_doc": "跨包查找的范围比分母宽：selfhost 只量 cmd/compile，但那些文件 import 了标准库——fmt / strings / bytes / io / os / sort 等等。pkgroot 指向整棵 src/，pkgs 里就有标准库的声明，\"声明不在语料里\"那堵墙就消了。分母不变：\"多少份落成图\"只算 selfhost.sub 框住的那些。"
+    "pkgscan": "go",
+    "pkgroot_doc": "跨包查找用正则扫文本（pkgscan=go），不走 GLR。8245 份 1.2s，比解析快 350 倍。"
   }
 }

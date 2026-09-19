@@ -179,27 +179,36 @@ function collectPkg(x, p, X) {
 }
 
 /** 换上这一批树的跨包表（没递就是空表 —— 那时行为与从前逐字相同）。 */
-function useXpkg(trees) {
+function useXpkg(trees, declIx) {
   if (trees === undefined || trees === null) {
     XPKG = XNONE;
-    return;
-  }
-  let X = XCACHE.get(trees);
-  if (X === undefined) {
-    X = {
-      pkgs: new Set(),
-      types: new Set(), structs: new Map(), under: new Map(), mset: new Set(), funcs: new Set(),
-    };
-    for (const t of trees) {
-      if (!isList(t) || tag(t) !== 'file') continue;
-      const p = leaf(kids(t)[0]);
-      if (p === null) continue;
-      X.pkgs.add(p);
-      for (const it of kids(t).slice(1)) collectPkg(it, p, X);
+  } else {
+    let X = XCACHE.get(trees);
+    if (X === undefined) {
+      X = {
+        pkgs: new Set(),
+        types: new Set(), structs: new Map(), under: new Map(), mset: new Set(), funcs: new Set(),
+      };
+      for (const t of trees) {
+        if (!isList(t) || tag(t) !== 'file') continue;
+        const p = leaf(kids(t)[0]);
+        if (p === null) continue;
+        X.pkgs.add(p);
+        for (const it of kids(t).slice(1)) collectPkg(it, p, X);
+      }
+      XCACHE.set(trees, X);
     }
-    XCACHE.set(trees, X);
+    XPKG = X;
   }
-  XPKG = X;
+  /* **正则扫出来的声明索引**（2026-09-19 第二版）：追加到 XPKG 上，
+   * 键与 collectPkg 写的**逐字相同**（`pkg.Name` / `pkg.Owner.Method`）。
+   * structs / under 不在——那两格要字段表，正则扫不出来，留在墙上。 */
+  if (declIx !== null && declIx !== undefined) {
+    for (const p of declIx.pkgs) XPKG.pkgs.add(p);
+    for (const f of declIx.funcs) XPKG.funcs.add(f);
+    for (const m of declIx.mset) XPKG.mset.add(m);
+    for (const t of declIx.types) XPKG.types.add(t);
+  }
 }
 
 /**
@@ -1247,7 +1256,7 @@ export function goToGraph(tree, opts) {
   collectImports(tree);
   /* **跨包那一张表**（`opts.pkgs` = 语料里所有的树，见 `XNONE` 那一段）：只建一次，
      按数组的身份缓存。没递这一格时它是空表 —— 那时行为与从前逐字相同。 */
-  useXpkg(opts?.pkgs);
+  useXpkg(opts?.pkgs, opts?.declIx);
   /* **同一包里别的文件先扫**（`opts.also`）：go 的一个包摊在好几份文件上，
      `var x SomeType` 的零值、`T{…}` 的字段名都可能声明在旁边那份里。
      这一趟只收声明，不落节点；**旁边的先扫、自己的后扫**（同名时自己这一份说了算）。 */
