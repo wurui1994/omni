@@ -99,6 +99,25 @@ function graphOf(path, argv) {
    * 这是跨包链接之前的第一步：先让同一个包里 16 个文件能组装到一起。
    */
   const doPkg = argv.includes('--pkg');
+  /** `--pkgs DIR,DIR,...`：按拓扑序编多个包目录到一张图。
+   * 每个目录按 --pkg 的规则收齐文件，按目录顺序拼到 mods **前面**（依赖在前）。 */
+  const pkgsRaw = (() => { const i = argv.indexOf('--pkgs'); return i >= 0 ? argv[i + 1] : null; })();
+  if (pkgsRaw !== null) {
+    for (const d of pkgsRaw.split(',').map((s) => s.trim()).filter(Boolean)) {
+      let names;
+      try { names = readDir(d); } catch { stderr(`omni: --pkgs 读不了 ${d}\n`); continue; }
+      for (const n of names.sort()) {
+        let ok = false;
+        for (const e of lang.exts) if (n.endsWith(`.${e}`) && !n.endsWith(`_test.${e}`)) ok = true;
+        if (!ok) continue;
+        const full = `${d}/${n}`;
+        if (seen.has(full)) continue;
+        seen.add(full);
+        const sub = treeOf(full);
+        if (sub !== null && !diags.hasErrors()) mods.push({ path: full, tree: sub });
+      }
+    }
+  }
   if (doPkg) {
     const dir = dirOf(path);
     for (const e of lang.exts) {
@@ -156,7 +175,51 @@ function graphOf(path, argv) {
       return { lang, graph: main };
     }
     const body = [];
-    for (const f of all) {
+    /* **跨包：--pkgs 里的每个目录是一个独立的 go 包**。
+       两趟：第一趟把依赖包的声明 + 包 record 放进 body，第二趟放主包。
+       这样 `call main`（在主包末尾）跑的时候 `v_util` 已经绑好了。 */
+    const pkgDirs = pkgsRaw !== null
+      ? pkgsRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    const dirOfFile = (p) => (p.lastIndexOf('/') >= 0 ? p.slice(0, p.lastIndexOf('/')) : '.');
+    const depFiles = all.filter((f) => pkgDirs.includes(dirOfFile(f.path)));
+    const ownFiles = all.filter((f) => !pkgDirs.includes(dirOfFile(f.path)));
+    /* 第一趟：依赖包，按包名分组 */
+    const byPkg = new Map();
+    for (const f of depFiles) {
+      const g = lang.toGraph(f.tree, { also, asModule: true });
+      const dir = dirOfFile(f.path);
+      const pkgName = dir.slice(dir.lastIndexOf('/') + 1);
+      if (!byPkg.has(pkgName)) byPkg.set(pkgName, []);
+      byPkg.get(pkgName).push(...g.body);
+    }
+    for (const [pkgName, pkgBody] of byPkg) {
+      const fields = [];
+      for (const stmt of pkgBody) {
+        body.push(stmt);
+        if (stmt !== null && stmt !== undefined && !Array.isArray(stmt)
+          && stmt.op === 'bind' && stmt.attrs && stmt.attrs.name) {
+          const n = stmt.attrs.name;
+          if (n.length > 0 && n[0] >= 'A' && n[0] <= 'Z') {
+            fields.push([n, { op: 'ref', ins: {}, attrs: { name: n } }]);
+          }
+        }
+      }
+      if (fields.length > 0) {
+        body.push({
+          op: 'bind',
+          ins: {
+            init: {
+              op: 'record-new',
+              ins: { fields: fields.map(([, v]) => v) },
+              attrs: { names: fields.map(([k]) => k) },
+            },
+          },
+          attrs: { name: pkgName },
+        });
+      }
+    }
+    /* 第二趟：主包（含 call main） */
+    for (const f of ownFiles) {
       const g = lang.toGraph(f.tree, {
         also,
         asModule: doPkg ? true : (f.isMain !== true),
