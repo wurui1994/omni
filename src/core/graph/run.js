@@ -166,9 +166,21 @@ function graphOf(path, argv) {
     /* `--pkg` 模式下末尾不补 call main——go 包的声明只是声明，不带入口。
        主入口那一份的 goToGraph 已经补了 call main（asModule: true 时不补）。
        所以 `--pkg` 时全部 asModule: true，我们在末尾显式补一格 call main。 */
+    /* `--pkg` 模式下末尾补 call main——**但只在真有 main 时补**。
+       go 的库包（`package syntax`）没有 main，补了就报 `v_main is not defined`。
+       判据：body 里有没有一格 `bind` 的名字是 `main`。 */
     if (doPkg) {
-      const mainCall = { op: 'call', ins: { fn: { op: 'ref', ins: {}, attrs: { name: 'main' } }, args: [] }, attrs: {} };
-      body.push(mainCall);
+      const hasMain = body.some((s) => s !== null && s !== undefined && !Array.isArray(s)
+        && s.op === 'bind' && s.attrs !== undefined && s.attrs.name === 'main');
+      if (hasMain) {
+        body.push({
+          op: 'call',
+          ins: { fn: { op: 'ref', ins: {}, attrs: { name: 'main' } }, args: [] },
+          attrs: {},
+        });
+      } else {
+        stderr('omni: 这个包没有 main（库包）—— 只跑顶层声明，不补入口\n');
+      }
     }
     if (mods.length > 0 || doPkg) {
       stderr(`omni: ${all.length} 份同包文件一起编：`

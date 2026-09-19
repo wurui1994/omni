@@ -354,10 +354,67 @@ const CONV = convs({
  * **答案错而不报** —— `fmt.Printf("x=%d\n", 3)` 会印成 `x=%d\n 3`。
  * 它走 `fmtOf` 那一路（见下面）。
  */
-const PRINTS = new Set(['Println', 'Print', 'println', 'print']);
+const PRINTS = new Set(['Println', 'Print', 'println', 'print', 'Fprintln', 'Fprint']);
 
 /** 这三格带格式串：`Sprintf` / `Errorf` 交一格串，`Printf` 印出去。 */
-const FORMATS = new Set(['Sprintf', 'Errorf', 'Printf']);
+const FORMATS = new Set(['Sprintf', 'Errorf', 'Printf', 'Fprintf']);
+
+/**
+ * **标准库包名 -> 一格 JS 对象（桩）**。
+ *
+ * go 编译器 import 了十几个标准库包（`fmt` / `unicode/utf8` / `strings` / `strconv` / …），
+ * 图上没有标准库那一层，所以这些 import 在 tograph 时被丢掉了——到了 JS 后端执行时
+ * `utf8.RuneSelf` 就是 `v_utf8.RuneSelf`，而 `v_utf8` 不存在。
+ *
+ * 解法：**在图的最前面注入一串桩变量**（bind）。每个桩是一格记录（record-new），
+ * 字段名 = 真正用到的常量/函数名，值 = JS 里的近似实现。
+ *
+ * 这不是"完整实现标准库"——只做 syntax 包实际用到的那几个符号。
+ */
+const GO_STDLIB_STUBS = {
+  utf8: {
+    RuneSelf: 128,       // 0x80
+    UTFMax: 4,
+    RuneError: 0xFFFD,
+  },
+  unicode: {
+    IsUpper: '__go_unicode_IsUpper',
+    IsLetter: '__go_unicode_IsLetter',
+    IsDigit: '__go_unicode_IsDigit',
+  },
+  strconv: {
+    FormatInt: '__go_strconv_FormatInt',
+    Atoi: '__go_strconv_Atoi',
+    Itoa: '__go_strconv_Itoa',
+  },
+  strings: {
+    Count: '__go_strings_Count',
+    HasPrefix: '__go_strings_HasPrefix',
+    TrimPrefix: '__go_strings_TrimPrefix',
+    Contains: '__go_strings_Contains',
+    Replace: '__go_strings_Replace',
+    Repeat: '__go_strings_Repeat',
+    Builder: '__go_strings_Builder',
+  },
+  io: {
+    EOF: '__go_io_EOF',
+    ErrNoProgress: '__go_io_ErrNoProgress',
+    Reader: '__go_io_Reader',
+    Discard: '__go_io_Discard',
+  },
+  os: {
+    Open: '__go_os_Open',
+    Stdout: '__go_os_Stdout',
+    Stderr: '__go_os_Stderr',
+  },
+  filepath: {
+    Join: '__go_filepath_Join',
+  },
+  reflect: {},
+  regexp: {},
+  sort: {},
+  constraint: {},
+};
 
 const many = (xs) => xs.map(toNode).flat();
 
@@ -1473,6 +1530,22 @@ export function goToGraph(tree, opts) {
   VARTYPE.clear();
   IMPORTS.clear();
   collectImports(tree);
+  /* **标准库桩注入**：为 IMPORTS 里每个在 GO_STDLIB_STUBS 中有定义的包名，
+     生成一格 `bind <pkgName> = record-new { 常量字段… }`，让后端跑到
+     `utf8.RuneSelf` 时能找到 `v_utf8` 这个变量。 */
+  const stubBinds = [];
+  for (const pkg of IMPORTS) {
+    if (GO_STDLIB_STUBS[pkg] !== undefined) {
+      const fields = Object.entries(GO_STDLIB_STUBS[pkg]);
+      const rec = recordNew(fields.map(([k, v]) => {
+        if (typeof v === 'number') return [k, lit(v)];
+        if (typeof v === 'string') return [k, lit(v)];
+        if (typeof v === 'boolean') return [k, lit(v)];
+        return [k, lit(null)];
+      }));
+      stubBinds.push(node('bind', { init: rec }, { name: pkg }));
+    }
+  }
   /* **跨包那一张表**（`opts.pkgs` = 语料里所有的树，见 `XNONE` 那一段）：只建一次，
      按数组的身份缓存。没递这一格时它是空表 —— 那时行为与从前逐字相同。 */
   useXpkg(opts?.pkgs, opts?.declIx);
@@ -1487,7 +1560,7 @@ export function goToGraph(tree, opts) {
   collectDecls(tree);
   FN_N = 0;                                   // 匿名 func 的编号按文件重来（图要可重现）
   const items = kids(tree).slice(1);          // 第一格是包名
-  const body = items.map(toNode).flat();
+  const body = [...stubBinds, ...items.map(toNode).flat()];
   if (opts !== undefined && opts.asModule === true) return program(body);
   return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
 }
