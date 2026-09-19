@@ -143,14 +143,7 @@ function graphOf(path, argv) {
         if (buildIgnored(full)) continue;
         seen.add(full);
         const sub = treeOf(full);
-        if (sub === null || diags.hasErrors()) {
-          /* **`--pkg` 模式下某个文件解析失败不中断**：跳过这一份，继续收别的。
-             go 编译器 ssa 包有 97 个文件，其中 5 个用了我们的语法还不接的写法
-             （十六进制浮点 `0x1p-1022`、`[]byte(s)` 类型转换等）——跳过它们
-             不影响其他 92 个文件，跳过总比整包退出好。 */
-          diags.items = diags.items.filter(d => d.severity !== 'error');
-          continue;
-        }
+        if (sub === null || diags.hasErrors()) return { code: 1 };
         mods.push({ path: full, tree: sub });
       }
     }
