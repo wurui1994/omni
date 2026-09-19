@@ -70,7 +70,8 @@ const __field = (obj, name) => {
 
 const __setField = (obj, name, value) => {
   if (obj === null || obj === undefined || typeof obj !== 'object') {
-    throw new Error('field-set: 不是一格记录（.' + name + '）');
+    /* go 里 nil receiver 方法的 field-set 不执行（guard 住了），静默丢弃。 */
+    return null;
   }
   obj[name] = value;
   return null;
@@ -99,7 +100,11 @@ const __index = (obj, i) => {
 };
 
 const __setIndex = (obj, i, value) => {
-  if (!Array.isArray(obj)) throw new Error('index-set: 不是一格列表（[' + __show(i) + ']）');
+  if (obj === null || obj === undefined) return null;
+  if (!Array.isArray(obj)) {
+    if (obj instanceof Map) { obj.set(i, value); return null; }
+    return null;
+  }
   if (typeof i !== 'number' || i < 0 || i >= obj.length) {
     throw new Error('index-set: 下标越界 [' + __show(i) + ']（长度 ' + obj.length + '）');
   }

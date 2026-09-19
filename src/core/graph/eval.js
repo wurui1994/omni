@@ -151,9 +151,7 @@ export const field = (obj, name) => {
 };
 
 export const setField = (obj, name, value) => {
-  if (obj === null || obj === undefined || typeof obj !== 'object') {
-    throw new Error(`field-set: 不是一格记录（.${name}）`);
-  }
+  if (obj === null || obj === undefined || typeof obj !== 'object') return null;
   obj[name] = value;
   return null;
 };
