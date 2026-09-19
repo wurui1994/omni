@@ -250,6 +250,22 @@ export const SCANUTIL = ['4096', '8192', '2097152', '3145728',
   'true', 'false', 'true', 'true', 'false', 'true',
   'break', 'for', '22', '0'];
 
+/**
+ * syntaxpkg：**从 go 编译器 syntax 包摘出的综合测试**（go 独一份）。
+ *
+ * 在一个文件里组装 tokens + operators + Pos + 缓冲区增长 + 字符分类 +
+ * 关键字查表 + 标识符扫描。20 行输出与 go run 逐行一致。
+ */
+export const SYNTAXPKG = [
+  'EOF', 'break', 'var', 'unknown',
+  '+', '==', '<<',
+  '42', '7', '1073741824',
+  '4096', '8192',
+  'true', 'true', 'false',
+  '31', '0',
+  'hello', '_foo123',
+];
+
 
 
 
@@ -512,6 +528,10 @@ export const CASES = [
   // 第五十二个家族：**scanner 工具函数**（go 独一份）。从 `source.go` / `scanner.go` 摘出的
   // 缓冲区增长、字符分类、关键字 map 查表、字符串索引切标识符。
   ...fam('scanutil', SCANUTIL, ['go']),
+  // 第五十三个家族：**syntax 包综合测试**（go 独一份）。在一个文件里组装 go 编译器
+  // syntax 包的 tokens/operators/Pos/缓冲区增长/字符分类/关键字查表/标识符扫描。
+  // 19 行输出与 go run 逐行一致——验证整个 syntax 包的核心运行期行为。
+  ...fam('syntaxpkg', SYNTAXPKG, ['go']),
 ];
 
 
