@@ -175,6 +175,64 @@ function graphOf(path, argv) {
       return { lang, graph: main };
     }
     const body = [];
+    /**
+     * **顶层声明按依赖排序**（go 的包级初始化顺序是**按依赖**定的，不是按文件名）。
+     *
+     * 一个包里 `var stopset = 1<<_Break | …`（branches.go）用的 `_Break` 是
+     * tokens.go 里的 iota 常量 —— 字母序里 branches 在 tokens 前面，于是照文件序拼出来的
+     * JS 里 `v_stopset` 先算，`v__Break` 还是 undefined。go 自己不会这样：它先解依赖。
+     *
+     * 判据（三条，都不猜）：
+     *   * 一格 bind 的 init **就是 func** —— 它没有初始化期依赖（函数体后面才跑），排最前；
+     *   * 别的 bind：依赖 = init 里**除函数体之外**引到的顶层 bind 名字；
+     *   * 有环就退回原序（go 里包级初始化的环是编译错，我们这儿不报，照原序摆）。
+     */
+    const orderTopLevel = (stmts) => {
+      const isNode = (s) => s !== null && s !== undefined && !Array.isArray(s)
+        && typeof s === 'object' && typeof s.op === 'string';
+      /* 名字 -> 它那一格 bind 在 stmts 里的下标（同名取最后一格，与 var 的语义一致） */
+      const at = new Map();
+      stmts.forEach((s, i) => {
+        if (isNode(s) && s.op === 'bind' && s.attrs !== undefined
+          && typeof s.attrs.name === 'string') at.set(s.attrs.name, i);
+      });
+      /** init 里引到的名字（**不进函数体** —— 那是后面才跑的）。 */
+      const refsOf = (x, out) => {
+        if (x === null || x === undefined) return out;
+        if (Array.isArray(x)) { for (const y of x) refsOf(y, out); return out; }
+        if (typeof x !== 'object') return out;
+        if (x.lit !== undefined) return out;
+        if (typeof x.op !== 'string') return out;
+        if (x.op === 'func') return out;                   // 函数体不算初始化期依赖
+        if (x.op === 'ref' && x.attrs !== undefined
+          && typeof x.attrs.name === 'string') out.add(x.attrs.name);
+        if (x.ins !== undefined) for (const k of Object.keys(x.ins)) refsOf(x.ins[k], out);
+        return out;
+      };
+      const deps = stmts.map((s) => {
+        if (!isNode(s) || s.op !== 'bind') return [];
+        const init = s.ins === undefined ? undefined : s.ins.init;
+        if (isNode(init) && init.op === 'func') return [];  // 函数绑定：无依赖
+        const names = refsOf(init, new Set());
+        const out = [];
+        for (const n of names) {
+          const j = at.get(n);
+          if (j !== undefined) out.push(j);
+        }
+        return out;
+      });
+      const mark = new Uint8Array(stmts.length);           // 0 未访 / 1 在栈 / 2 已出
+      const out = [];
+      const visit = (i) => {
+        if (mark[i] !== 0) return;
+        mark[i] = 1;
+        for (const j of deps[i]) if (j !== i && mark[j] === 0) visit(j);
+        mark[i] = 2;
+        out.push(stmts[i]);
+      };
+      for (let i = 0; i < stmts.length; i++) visit(i);
+      return out;
+    };
     /* **跨包：--pkgs 里的每个目录是一个独立的 go 包**。
        两趟：第一趟把依赖包的声明 + 包 record 放进 body，第二趟放主包。
        这样 `call main`（在主包末尾）跑的时候 `v_util` 已经绑好了。 */
@@ -249,7 +307,7 @@ function graphOf(path, argv) {
       stderr(`omni: ${all.length} 份同包文件一起编：`
         + `${all.map((f) => f.path).join(' ')}\n`);
     }
-    return { lang, graph: program(body) };
+    return { lang, graph: program(doPkg ? orderTopLevel(body) : body) };
   } catch (err) {
     throw new OmniError(`${path}: ${lang.name} 的映射说不通 —— ${err.message}`);
   }

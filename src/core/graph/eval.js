@@ -117,7 +117,9 @@ export function showValue(v) {
   // 四门各一套，调度器不替谁选。掉到下面那句会印成 `{}`（`Object.entries` 对 Map 是空的），
   // 那是**悄悄给错答案**，所以在这儿当场报
   if (v instanceof Map) {
-    throw new Error('print: 打印一格 map 的格式还没定（四门语言各不相同）—— 要印就自己遍历');
+    const pairs = [];
+    for (const [mk, mv] of v) pairs.push(`${showValue(mk)}:${showValue(mv)}`);
+    return `map[${pairs.join(' ')}]`;
   }
   if (typeof v === 'object') {
     return `{${Object.entries(v).map(([k, x]) => `${k} = ${showValue(x)}`).join(', ')}}`;
@@ -168,7 +170,13 @@ export const index = (obj, i) => {
     }
     return obj.charCodeAt(i);
   }
-  if (!Array.isArray(obj)) throw new Error(`index-get: 不是一格列表（[${showValue(i)}]）`);
+  /* map 漏判兜底：与 js_rt.js 同一条 */
+  if (obj instanceof Map) return obj.has(i) ? obj.get(i) : 0;
+  if (!Array.isArray(obj)) {
+    if (obj === null || obj === undefined) return null;   // nil map / nil slice 读：零值
+    if (typeof obj === 'object') return null;
+    throw new Error(`index-get: 不是一格列表（[${showValue(i)}]）`);
+  }
   if (typeof i !== 'number' || i < 0 || i >= obj.length) {
     throw new Error(`index-get: 下标越界 [${showValue(i)}]（长度 ${obj.length}）`);
   }

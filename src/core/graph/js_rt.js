@@ -46,7 +46,9 @@ function __show(v) {
   if (typeof v === 'function') return '<fn ' + (v.name === '' ? '?' : v.name) + '>';
   if (Array.isArray(v)) return '[' + v.map(__show).join(', ') + ']';
   if (v instanceof Map) {
-    throw new Error('print: 打印一格 map 的格式还没定（四门语言各不相同）—— 要印就自己遍历');
+    const pairs = [];
+    for (const [mk, mv] of v) pairs.push(__show(mk) + ':' + __show(mv));
+    return 'map[' + pairs.join(' ') + ']';
   }
   if (typeof v === 'object') {
     return '{' + Object.entries(v).map(([k, x]) => k + ' = ' + __show(x)).join(', ') + '}';
@@ -85,8 +87,9 @@ const __index = (obj, i) => {
      用 instanceof Map 判——__mapNew 造的就是 Map。缺键返回 0（go 的零值语义）。 */
   if (obj instanceof Map) return obj.has(i) ? obj.get(i) : 0;
   if (!Array.isArray(obj)) {
-    /* 对象上按键取值（record 被当下标取了）：返回 null，不中断。 */
-    if (obj !== null && obj !== undefined && typeof obj === 'object') return null;
+    /* 对象/null/undefined 上按键取值（record 被当下标取了，或 nil slice/map）：返回 null，不中断。 */
+    if (obj === null || obj === undefined) return null;
+    if (typeof obj === 'object') return null;
     throw new Error('index-get: 不是一格列表（[' + __show(i) + ']）');
   }
   if (typeof i !== 'number' || i < 0 || i >= obj.length) {
