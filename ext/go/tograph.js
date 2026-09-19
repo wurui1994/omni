@@ -1613,7 +1613,22 @@ function toNode(x) {
     // 顶层的这几样在这一批里没有对应物（包、导入、类型声明）—— 丢掉，不猜。
     // `typedecl` 那格：**struct 的字段表不进图**（record-new 的字段名从字面量那儿来），
     // 树上的标签是 `typedecl` 不是 `type-decl` —— 原来写错了一格，record 那份例子量出来的。
-    case 'import': case 'typedecl': return [];
+    case 'import': return [];
+    case 'typedecl': {
+      /* `typedecl` 的字段表不进图——但**类型名需要一格绑定**（`bind name = null`），
+         因为方法表达式 `(*T).Method` 在树上是 `sel(deref(name("T")), name("Method"))`，
+         如果 T 没绑定就是 ReferenceError。给它绑 null：`__field(null, "Method")` 返 null，
+         方法值变成 null——与"函数指针还没接"的降级一致。 */
+      const ch = kids(x);
+      const nameNode = ch.find((y) => isList(y) && tag(y) === 'name') ?? ch[0];
+      if (nameNode !== undefined) {
+        const n = isList(nameNode) ? leaf(kids(nameNode)[0]) : leaf(nameNode);
+        if (n !== undefined && typeof n === 'string' && n.length > 0) {
+          return [{ op: 'bind', ins: { init: lit(null) }, attrs: { name: n } }];
+        }
+      }
+      return [];
+    }
     /* `go func()` —— **并发启动**。图上没有 goroutine 那一格，降成**普通调用**
        （同步执行体内逻辑）。不精确的角：并发访问 / 通道通讯在图上看不出来。 */
     case 'go': return toNode(kids(x)[0]);
