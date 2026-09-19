@@ -347,7 +347,19 @@ function jsStmt(x) {
 }
 
 function jsLower(g) {
-  const body = withExits(asStmts(g.kind === 'graph' ? g.body : g).map(jsStmt).join('\n'));
+  const stmts = asStmts(g.kind === 'graph' ? g.body : g);
+  /* **顶层 bind 提升为 var**：go 的包级变量/常量/函数没有声明顺序要求，
+     但 JS 的 `let` 有 TDZ（temporal dead zone）。把顶层的 `bind` 从 `let` 改成 `var`
+     就能跨文件任意引用（`var` 会被提升到作用域顶部，初值在原位赋）。
+     只改顶层——函数体里的 `let` 不动（函数体内的执行顺序是有保证的）。 */
+  const jsStmtTop = (x) => {
+    if (x !== null && x !== undefined && !Array.isArray(x)
+      && x.op === 'bind' && x.attrs !== undefined && x.attrs.name !== undefined) {
+      return `var ${jsName(x.attrs.name)} = ${jsExpr(x.ins.init)};`;
+    }
+    return jsStmt(x);
+  };
+  const body = withExits(stmts.map(jsStmtTop).join('\n'));
   const source = '(__out, __show, __truthy, __pick, __field, __setField, __index, __setIndex, __conv, __slice,'
     + ' __mapNew, __mapGet, __mapSet, __mapHas, __mapKeys, __assert) => {'
     + `\n${body}\n}`;
