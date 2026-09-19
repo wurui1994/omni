@@ -93,6 +93,13 @@ function graphOf(path, argv) {
   const seen = new Set([path]);
   const mods = [];
   const dirOf = (p) => (p.lastIndexOf('/') >= 0 ? p.slice(0, p.lastIndexOf('/')) : '.');
+  /** `//go:build ignore` 检查（头 200 字节） */
+  const buildIgnored = (full) => {
+    try {
+      const head = readText(full).slice(0, 200);
+      return /\/\/go:build\s+ignore\b/.test(head) || /\/\/\s*\+build\s+ignore\b/.test(head);
+    } catch { return false; }
+  };
   /**
    * **`--pkg` 开关：把同目录下所有同语言文件一起编**（go 的包 = 一个目录）。
    * 不用 import 解析——go 的一个包就是一个目录下所有 `.go`（排除 `_test.go`）。
@@ -112,6 +119,10 @@ function graphOf(path, argv) {
         if (!ok) continue;
         const full = `${d}/${n}`;
         if (seen.has(full)) continue;
+        /* **`//go:build ignore`**（go 的构建约束）：那份文件不属于这个包。
+           mknode.go / mkbuiltin.go 之类的代码生成器用它，包声明写的是 `package main`。
+           跳过它——读进来会把 `func main` 覆盖掉真正的入口。 */
+        if (buildIgnored(full)) continue;
         seen.add(full);
         const sub = treeOf(full);
         if (sub !== null && !diags.hasErrors()) mods.push({ path: full, tree: sub });
@@ -128,6 +139,8 @@ function graphOf(path, argv) {
         if (n.endsWith(`_test.${e}`)) continue;
         const full = `${dir}/${n}`;
         if (seen.has(full)) continue;
+        /* **`//go:build ignore`**：代码生成器（mknode.go），不属于本包。 */
+        if (buildIgnored(full)) continue;
         seen.add(full);
         const sub = treeOf(full);
         if (sub === null || diags.hasErrors()) return { code: 1 };
