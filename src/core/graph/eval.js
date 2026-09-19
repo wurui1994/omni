@@ -225,6 +225,11 @@ export const valMapKeys = (obj) => [...asMap(obj, 'map-keys').keys()];
  * 切片：**一段范围复制成一格新列表**。上界不含、下标 0 起（各语言的差别由映射摆平）。
  * 两个后端共用（js 后端里那句 `__slice`）。
  */export const valSlice = (obj, from, to) => {
+  if (typeof obj === 'string') {
+    const a = from === undefined || from === null ? 0 : Number(from);
+    const b = to === undefined || to === null ? obj.length : Number(to);
+    return obj.slice(a, b);
+  }
   if (!Array.isArray(obj)) throw new Error('slice: 不是一格列表');
   const a = from === undefined || from === null ? 0 : Number(from);
   const b = to === undefined || to === null ? obj.length : Number(to);

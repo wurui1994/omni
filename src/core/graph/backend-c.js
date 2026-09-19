@@ -511,6 +511,19 @@ static gv g_conv_int(gv v) {
 
 /* ---- 切片。**只切列表**（eval.js 那侧对非列表直接报），范围越界当场骂。 */
 static gv g_slice(gv o, gv from, gv to) {
+  if (o.t == GT_STR) {
+    const char *s = g_S(o);
+    long long slen = 0;
+    while (s[slen]) slen++;
+    long long a = from.t == GT_NIL ? 0 : (long long)g_tonum(from);
+    long long b = to.t == GT_NIL ? slen : (long long)g_tonum(to);
+    if (a < 0 || b > slen || a > b) g_die("slice: 范围越界");
+    long long n = b - a;
+    char *r = (char *)g_alloc(n + 1);
+    for (long long i = 0; i < n; i++) r[i] = s[a + i];
+    r[n] = 0;
+    return g_str(r);
+  }
   if (o.t != GT_LIST) g_die("slice: 不是一格列表");
   glist *L = g_L(o);
   long long a = from.t == GT_NIL ? 0 : (long long)g_tonum(from);

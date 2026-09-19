@@ -121,7 +121,12 @@ const __mapKeys = (obj) => [...__asMap(obj, 'map-keys').keys()];
 
 /* 切片：上界不含、0 起，越界报。转换：int 是**截断**（向零），别的答案归语言的映射。 */
 const __slice = (obj, from, to) => {
-  if (!Array.isArray(obj)) throw new Error('slice: 不是一格列表');
+  if (typeof obj === 'string') {
+    const a = from === undefined || from === null ? 0 : Number(from);
+    const b = to === undefined || to === null ? obj.length : Number(to);
+    return obj.slice(a, b);
+  }
+  if (!Array.isArray(obj)) throw new Error('slice: 不是一格列表或字符串');
   const a = from === undefined || from === null ? 0 : Number(from);
   const b = to === undefined || to === null ? obj.length : Number(to);
   if (a < 0 || b > obj.length || a > b) throw new Error('slice: 范围越界 [' + a + ', ' + b + ')');

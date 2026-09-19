@@ -223,6 +223,14 @@ export const MAPITER = ['a', 'b', 'c', '3', '9'];
  */
 export const PTRMETHOD = ['1', '5', '5'];
 
+/**
+ * tokentest：**从 go 编译器摘出的 token 枚举 + 字符串化**（go 独一份）。
+ *
+ * 验的是"真实 go 代码能编到 JS 并正确运行"：47 格 iota 常量、切片索引表查字符串、
+ * 位运算做集合判定。期望输出与 `go run` 逐行一致。
+ */
+export const TOKENTEST = ['EOF', 'name', 'literal', 'break', 'var', 'unknown', 'true', 'false'];
+
 
 
 
@@ -475,6 +483,10 @@ export const CASES = [
   // 于是调用点落一格指向不存在的函数的 `ref`。图落得出来、尺子数得上，跑起来才炸 ——
   // 所以这一族压的是"两处必须是同一个算法"，第三行还压住"指针接收者里的改看得见"。
   ...fam('ptrmethod', PTRMETHOD, ['go']),
+  // 第五十个家族：**真实 go 代码**（go 独一份）。从 `cmd/compile/internal/syntax/tokens.go`
+  // 摘出的 token 枚举 + 字符串化。它与前面那些家族的性质不同：**不是为压某一格节点写的**，
+  // 是为了回答"生成的 JS 跑起来对不对" —— 期望输出由 `go run` 给（不是我们自己编的）。
+  ...fam('tokentest', TOKENTEST, ['go']),
 ];
 
 
