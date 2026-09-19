@@ -402,6 +402,8 @@ ${graphEngineHelp()}
           brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
         { name: '--lang', arity: 1, value: 'L',
           brief: '（graph）这份源码归哪门语言，**优先于文件名后缀**' },
+        { name: '--pkg', arity: 0,
+          brief: '（graph）把同目录下所有同语言文件一起编（go 的包 = 一个目录）' },
         { name: '--plugin', arity: 1, value: 'NAME', brief: '出一格插件动态库，NAME 是它的 register 函数' },
         { name: '--fat', arity: 0, brief: '把所有语言都编进核心（默认是薄核心 + plugins/）' },
         { name: '--extern', arity: 0, brief: '生成的函数用外部链接并导出（插件要能绑到它）' },
