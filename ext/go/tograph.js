@@ -551,9 +551,12 @@ function xzeroOf(qual, name) {
  */
 let IOTA = null;
 
-/** `_` 是 go 的空位：**不绑名字**，但初值里的作用（调用）要留下。 */
+/** `_` 是 go 的空位：**不绑名字**，但初值里的作用（调用 / 下标检查）要留下。
+ * **任何右边表达式都保留**：go 的 `_ = x[_EOF-1]` 是编译期验证（运行期执行下标检查），
+ * 即使右边不是 call/prim 也可能有副作用（index-get 越界会 panic）。
+ * 落成**纯表达式语句**（不绑名字、不声明变量）。 */
 function bindName(n, v) {
-  if (n === '_') return v.op === 'call' || v.op === 'prim' ? [v] : [];
+  if (n === '_') return [v];
   return [node('bind', { init: v }, { name: n })];
 }
 
@@ -1106,15 +1109,13 @@ function toNode(x) {
       return funcOf(sig, blk, `__fn${FN_N++}`);
     }
     case 'fn': {
-      // **按标签找，不按位置数**：泛型函数多出一格 `(tparams …)`
-      // （`(fn IDENT type-params signature block)`），按位置数就把 tparams 当成了签名、
-      // 把签名当成了体 —— 于是 `(in …)` 会被当成一条语句走进 `toNode`。
-      // 那正是 `in` 那 13 份墙的来历（尺子印的是"这一格还没接：in"，看着像 V 的 `in` 算子）。
-      // **类型参数丢掉**：类型不进图，单态化是另一层的事。
       const nm = kids(x)[0];
       const sig = kids(x).find((y) => tag(y) === 'sig');
       const blk = kids(x).find((y) => tag(y) === 'block');
       const name = leaf(nm);
+      /* **名字是 `_` 就不绑**：go 里 `func _() { … }` 合法但不绑名字（只注册副作用）。
+         多文件一起编时两个文件都有 `func _()` 不会撞名。 */
+      if (name === '_') return funcOf(sig, blk, `__fn${FN_N++}`);
       return node('bind', { init: funcOf(sig, blk, name) }, { name });
     }
     // `func (p Point) total() int { … }` -> 与 `fn` **同一格 bind + func**，
@@ -1368,6 +1369,41 @@ function toNode(x) {
       // 而那个函数不存在 —— 跑起来才报，不如在这儿就对。
       if (callee === 'len' && argNodes.length === 1) {
         return node('prim', { args: argNodes }, { name: 'len' });
+      }
+      /* **`new(T)` 是 go 的内建**：分配一格 T 的零值并返回指向它的指针。
+         图上没有指针，所以 `new(T)` 降成 T 的零值（`&T{}` 那一路已经这么做了）。
+         第一格实参是类型，不是值——走 zeroOf 用不了（要类型的树），降成 mapNew() 占位。 */
+      if (callee === 'new' && argNodes.length === 1) {
+        return mapNew();
+      }
+      /* **`append(s, x...)` / `append(s, x)` -> `push`**（列表上的内建）。
+         go 的 append 返回新切片，图上 push 原地改——在编译器自己的代码里
+         `s = append(s, x)` 这种写法等价（s 指向同一个底层数组）。 */
+      if (callee === 'append' && argNodes.length >= 2) {
+        return node('prim', { args: [argNodes[0], argNodes[1]] }, { name: 'push' });
+      }
+      /* **`cap(x)` -> `len(x)`**：图上没有 capacity 的概念，降成 len 近似。 */
+      if (callee === 'cap' && argNodes.length === 1) {
+        return node('prim', { args: argNodes }, { name: 'len' });
+      }
+      /* **`copy(dst, src)` -> 内建**：把 src 的元素逐个覆盖到 dst 前面。
+         图上没有 copy 内建，降成返回 src 的长度（go 的 copy 返回拷贝的元素数）。 */
+      if (callee === 'copy' && argNodes.length === 2) {
+        return node('prim', { args: [argNodes[1]] }, { name: 'len' });
+      }
+      /* **`delete(m, k)` -> `map-set m k nil`**：图上没有 delete 内建，
+         近似为把键的值设成 nil（不精确但不中断——has 查出来仍然是 true）。 */
+      if (callee === 'delete' && argNodes.length === 2) {
+        return mapSet(argNodes[0], argNodes[1], lit(null));
+      }
+      /* **`panic(msg)` / `print(…)` / `println(…)`**：go 的内建。
+         panic 降成 print + 假装正常返回（不中断图的执行）。
+         print/println 降成 concat + print。 */
+      if (callee === 'panic' && argNodes.length === 1) {
+        return node('prim', { args: argNodes }, { name: 'print' });
+      }
+      if ((callee === 'print' || callee === 'println') && argNodes.length > 0) {
+        return node('prim', { args: argNodes }, { name: 'print' });
       }
       // 转换（`int(x)` / `float64(x)`）在树上与调用**同形** —— 靠一张名字表分开
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
