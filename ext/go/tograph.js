@@ -413,6 +413,10 @@ const GO_STDLIB_STUBS = {
   objabi: {},
   bio: {},
   src: {},
+  // cmd/internal/obj/<arch>：汇编后端的寄存器/指令常量表。
+  // 名字与 cmd/compile/internal/<arch> 重合（import 只取路径最后一段），
+  // --pkgs 供了真包时那格 record 排在桩后面、会盖掉它。
+  arm: {}, arm64: {}, loong64: {}, mips: {}, ppc64: {}, riscv: {}, s390x: {}, wasm: {}, x86: {},
   // ssa subpackages
   ssaop: {},
   ssabase: {},
