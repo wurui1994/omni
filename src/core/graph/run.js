@@ -154,14 +154,8 @@ function graphOf(path, argv) {
           if (autoResolvedDirs.has(candDir) || scannedDirs.has(candDir)) continue;
           try { readDir(candDir); } catch { continue; } // 不存在就跳过
           autoResolvedDirs.add(candDir);
-          /* 把新发现的目录也加入待扫队列 */
-          try {
-            for (const n2 of readDir(candDir)) {
-              if (n2.endsWith('.go') && !n2.endsWith('_test.go')) {
-                pendingScan.push(`${candDir}/${n2}`);
-              }
-            }
-          } catch { /* ignore */ }
+          /* 不递归：只扫主包的直接 import。传递闭包会拉入太多包，
+             dep 包的顶层初始化可能引用它们自己的 dep 而失败。 */
         }
       }
     }
