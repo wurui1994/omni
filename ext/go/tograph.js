@@ -19,6 +19,23 @@ import {
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, deferNow,
   mapNew, mapGet, mapSet, mapHas, mapNames, mapForIn, isList,
 } from '../../src/core/graph/fromtree.js';
+import { loadMapping, applyRule } from '../../src/core/graph/mapping.js';
+import { readText } from '../../src/core/host/native.js';
+
+/** .mapping 规则表（懒加载，只读一次） */
+let GO_RULES = null;
+function goRules() {
+  if (GO_RULES !== null) return GO_RULES;
+  try {
+    const url = new URL('./go.mapping', import.meta.url);
+    const text = readText(url.pathname);
+    const m = loadMapping(text);
+    GO_RULES = m.rules;
+  } catch {
+    GO_RULES = new Map();
+  }
+  return GO_RULES;
+}
 
 /**
  * 装 map 的那些名字（一趟扫查填好，见 goToGraph）。
@@ -1098,8 +1115,22 @@ function makeOf(args) {
   return listNew(args.length > 1 ? [toNode(args[1])] : []);
 }
 
+/** 只走 mapping 规则的**安全子集**（没有特殊 case 的那些标签）。
+ *  其余留在 switch 里。随着 mapping 解释器成熟，这张表会扩大。 */
+const MAPPING_SAFE = new Set([
+  'none', 'paren', 'addr', 'deref', 'goto', 'import', 'fallthrough', 'imag',
+  'ptr', 'array', 'tname', 'tinst', 'chan', 'struct',  // 类型占位
+]);
+
 function toNode(x) {
-  switch (tag(x)) {
+  const t = tag(x);
+  /* 安全子集走 .mapping 声明式规则 */
+  if (MAPPING_SAFE.has(t)) {
+    const mapped = applyRule(x, goRules(), toNode, { OPS });
+    if (mapped !== null) return mapped;
+  }
+  /* 其余走 native case */
+  switch (t) {
     // ---- 叶子 --------------------------------------------------------------
     case 'num': return node('const', {}, { value: Number(leaf(kids(x)[0])) });
     case 'str': return node('const', {}, { value: leaf(kids(x)[0]) });
