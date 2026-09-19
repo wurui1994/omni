@@ -350,9 +350,29 @@ function jsStmt(x) {
       return `__assert(${jsExpr(x.ins.cond)}, ${m});`;
     }
     case 'branch': {
-      const t = `{ ${asStmts(x.ins.then).map(jsStmt).join(' ')} }`;
-      const e = x.ins.else === undefined ? '' : ` else { ${asStmts(x.ins.else).map(jsStmt).join(' ')} }`;
-      return `if (__truthy(${jsExpr(x.ins.cond)})) ${t}${e}`;
+      /* **else 链迭代着走，不递归**。go 的 `switch` 落成的是右嵌套的 branch 链：
+         一格 8409 个 case 的 switch（`ssa/rewriteAMD64.go`）就是 8409 层嵌套，
+         照着 `jsStmt(else)` 递归下去必然爆栈。这儿改成 while 循环平铺成
+         `if … else if … else if …`，深度就只在生成的文本里，不在我们的调用栈上。 */
+      const parts = [];
+      let cur = x;
+      for (;;) {
+        parts.push(`if (__truthy(${jsExpr(cur.ins.cond)})) `);
+        parts.push(`{ ${asStmts(cur.ins.then).map(jsStmt).join(' ')} }`);
+        const el = cur.ins.else;
+        if (el === undefined) break;
+        /* else 那一格**恰好只装一格 branch** 时接着平铺；别的形状照旧收成一个块。 */
+        const els = asStmts(el);
+        if (els.length === 1 && els[0] !== null && els[0] !== undefined
+          && !Array.isArray(els[0]) && els[0].op === 'branch') {
+          parts.push(' else ');
+          cur = els[0];
+          continue;
+        }
+        parts.push(` else { ${els.map(jsStmt).join(' ')} }`);
+        break;
+      }
+      return parts.join('');
     }
     default: return `${jsExpr(x)};`;
   }
