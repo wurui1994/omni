@@ -19,8 +19,9 @@
  * 结构化标记，删块要同时补平区域的配对 —— 那是 `trim`/`layout` 那一族的活，另开一格。
  */
 
-import { OP, OP_MODES, OP_NAMES, REF_BIAS, REF_NONE } from '../ir.js';
+import { OP, OP_NAMES, REF_BIAS, REF_NONE } from '../ir.js';
 import { registerPass } from './pass.js';
+import { operandRefs, removeInsns } from './edit.js';
 
 /* 能删的那些 op：**产一个值、没有副作用、不会报运行期错误**。
  *
@@ -57,33 +58,6 @@ for (const name of REMOVABLE_NAMES) {
   REMOVABLE.add(OP[name]);
 }
 
-/** 这条指令读的那些 ref（只看角色是 'r' 的字段，加角色是 'p' 的实参池）。
- *  'j' 是层数表、'n' 是字面量、's' 是槽位号 —— 一律不许当 ref 碰。 */
-function operandRefs(fn, pc) {
-  const m = OP_MODES[fn.op[pc]];
-  const out = [];
-  if (m[0] === 'r') out.push(fn.a[pc]);
-  if (m[1] === 'r') out.push(fn.b[pc]);
-  if (m[1] === 'p') {
-    const at = fn.b[pc];
-    const n = fn.args[at];
-    for (let i = 0; i < n; i++) out.push(fn.args[at + 1 + i]);
-  }
-  return out;
-}
-
-/** 老 ref -> 新 ref。常量与 REF_NONE 原样过；指向被删指令的一律是 bug，当场炸。 */
-function mapRef(fn, ref, map) {
-  if (ref === REF_NONE) return ref;
-  if (ref < REF_BIAS) return ref;
-  const i = ref - REF_BIAS;
-  const j = map[i];
-  if (j === undefined || j < 0) {
-    throw new Error(`mir/opt/deadcode: ${fn.name} 里 %${i} 被删了却还有人引用`);
-  }
-  return j + REF_BIAS;
-}
-
 /**
  * 就地 deadcode。回删了几条指令。
  */
@@ -114,59 +88,9 @@ export function deadcode(fn, _mod) {
 }
 
 /**
- * 按下标集合删指令：重编号 + 重建那五个平行数组 + 按角色改 ref。回删了几条。
- *
- * **别的通道要删指令一律走这儿**（`dead auto elim`、`elim unread autos`、`dse`…）：
- * MIR 里没有 NOP，Go 那边是把删掉的 store 改写成 `OpCopy(内存实参)` 再等 deadcode 收尸，
- * 我们没有内存 SSA 链可以接，所以直接在这一处删。
- *
- * 删了还有人引用的指令 = 调用方的 bug，`mapRef` 当场炸（这就是那道自检）。
+ * 按下标集合删指令的那一步在 `edit.js` 的 `removeInsns` 里 —— 凡是要删指令的通道
+ * （`elim unread autos`、`dse`…）都走同一处，因为 MIR 里没有 NOP。
  */
-export function removeInsns(fn, doomed) {
-  if (!doomed || doomed.size === 0) return 0;
-  const n = fn.op.length;
-
-  /* ---- 二、重编号：老下标 -> 新下标（-1 = 删了） */
-  const map = [];
-  let k = 0;
-  for (let pc = 0; pc < n; pc++) {
-    if (doomed.has(pc)) map.push(-1); else { map.push(k); k++; }
-  }
-
-  /* ---- 三、重建那五个平行数组 */
-  const op = [], t = [], a = [], b = [], aux = [];
-  for (let pc = 0; pc < n; pc++) {
-    if (doomed.has(pc)) continue;
-    op.push(fn.op[pc]);
-    t.push(fn.t[pc]);
-    a.push(fn.a[pc]);
-    b.push(fn.b[pc]);
-    aux.push(fn.aux[pc]);
-  }
-  fn.op = op; fn.t = t; fn.a = a; fn.b = b; fn.aux = aux;
-
-  /* ---- 四、按角色改 ref。
-     实参池**不压缩**：起点存在 b 上，压缩了就得同时改 b，而池里可能还有别的东西
-     指着它。池里死掉的那几格是垃圾，不占语义、不进后端（后端只从起点读 n 格）。
-     同一个起点只改一遍 —— 映射是"老 -> 新"且新 <= 老，改两遍会再往下跌一次。 */
-  const donePools = new Set();
-  for (let pc = 0; pc < fn.op.length; pc++) {
-    const m = OP_MODES[fn.op[pc]];
-    if (m[0] === 'r') fn.a[pc] = mapRef(fn, fn.a[pc], map);
-    if (m[1] === 'r') fn.b[pc] = mapRef(fn, fn.b[pc], map);
-    if (m[1] === 'p') {
-      const at = fn.b[pc];
-      if (donePools.has(at)) continue;
-      donePools.add(at);
-      const cnt = fn.args[at];
-      for (let i = 0; i < cnt; i++) {
-        fn.args[at + 1 + i] = mapRef(fn, fn.args[at + 1 + i], map);
-      }
-    }
-  }
-
-  return doomed.size;
-}
 
 /** 通道表里八格 `*deadcode` 都是同一个函数（Go 那边也是同一个 `deadcode` 挂多格）。 */
 const SLOTS = [

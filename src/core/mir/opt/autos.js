@@ -23,7 +23,7 @@
 
 import { OP } from '../ir.js';
 import { registerPass } from './pass.js';
-import { removeInsns } from './deadcode.js';
+import { removeInsns } from './edit.js';
 
 /**
  * 就地删"没人读的槽"的 STORE。回删了几条。

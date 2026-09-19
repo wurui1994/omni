@@ -1,0 +1,303 @@
+/**
+ * opt —— Go 的 `applyRewrite(f, rewriteBlockgeneric, rewriteValuegeneric)` 那一格
+ * （`ssa/rewrite.go` + `_gen/generic.rules`）。常量折叠 + 代数化简。
+ *
+ * 两条纪律，都是照 Go 抄的：
+ *
+ * 1. **通道表里这一格只跑一遍，但这一格自己迭代到不动点** —— Go 的 `applyRewrite` 就是
+ *    `for { changed := false; ...; if !changed { break } }`。"不迭代"说的是**通道之间**，
+ *    不是一条规则集内部。我们这儿每条指令最多改一次（改过的记在 `done` 里），所以
+ *    轮数天然有界。
+ *
+ * 2. **规则一条一条从 `generic.rules` 抄，每条注明行号**。不自己想规则 —— 想出来的规则
+ *    要么是错的（`x+0.0 => x` 在 x = -0.0 上不成立），要么是别人早写过的。
+ *
+ * 这一版的规则全是两种形状之一：**折成一个常量**，或者**换成一个已有的 ref**。
+ * 两种都只改"谁引用谁"（`replaceRef`），一条指令都不新增、不改 op ——
+ * 于是这一格改不坏控制流，被换掉的那条指令由紧跟的 `opt deadcode` 收走。
+ * 要新增指令的那几族（`Not(Eq x y) => Neq x y`、`Mul x 2^k => Lsh`）留给后面的格子：
+ * 前者要改内层指令的 op 并数使用次数，后者 Go 自己也挡在 `opt` 之外
+ * （`generic.rules:1155` 的 `v.Block.Func.Pass.Name != "opt"`）。
+ */
+
+import {
+  OP, REF_BIAS, REF_NONE, T_BOOL, T_F32,
+  isCmp, isIntType, isFloatType, intBits, typeLanes,
+} from '../ir.js';
+import { replaceRef } from './edit.js';
+import { registerPass } from './pass.js';
+
+/** 取一个 ref 的常量池条目；不是常量回 null。 */
+function constOf(mod, ref) {
+  if (ref === REF_NONE || ref >= REF_BIAS) return null;
+  return mod.consts.items[ref];
+}
+function intOf(c) { return c !== null && c.kind === 'int' ? BigInt(c.text) : null; }
+function realOf(c) {
+  if (c === null || c.kind !== 'real') return null;
+  if (c.text === 'inf' || c.text === '-inf' || c.text === 'nan') return null;  // 非有限的不折
+  return Number(c.text);
+}
+function boolOf(c) { return c !== null && c.kind === 'bool' ? c.text === 'true' : null; }
+
+/** 整数的规范形：i32 符号扩展到 32 位，i64 到 64 位（见 ir.js 的 T_I32）。 */
+function wrapInt(v, bits) { return bits === 32 ? BigInt.asIntN(32, v) : BigInt.asIntN(64, v); }
+/** 同一个值的无符号读法（USHR/UDIV/ULT 那一族要它）。 */
+function asUint(v, bits) { return bits === 32 ? BigInt.asUintN(32, v) : BigInt.asUintN(64, v); }
+
+function mkInt(mod, t, v) { return mod.consts.intern(t, 'int', String(wrapInt(v, intBits(t)))); }
+function mkBool(mod, v) { return mod.consts.bool(v); }
+/** 浮点常量：f32 先 fround（见 ir.js 的 T_F32）。非有限的一律不折，回 -1。 */
+function mkReal(mod, t, x) {
+  const v = t === T_F32 ? Math.fround(x) : x;
+  if (!Number.isFinite(v)) return -1;
+  return mod.consts.intern(t, 'real', String(v));
+}
+
+/** 标量（不是向量）的整数/浮点类型 —— 折叠只在这两类上做。 */
+function scalarInt(t) { return typeLanes(t) === 1 && isIntType(t); }
+function scalarFloat(t) { return typeLanes(t) === 1 && isFloatType(t); }
+
+/**
+ * 两个整数常量的折叠。回 BigInt（还没规范化）或 null（这一条不折）。
+ *
+ * 照 `generic.rules`：`:140 (Add64 (Const64 [c]) (Const64 [d])) => (Const64 [c+d])`
+ * 那一族；除法那两条带 `&& d != 0`（`:201`、`:244`）。
+ * 移位只在 `0 <= d < 位宽` 折：超出位宽在 C 里是未定义行为，我们不替语言做决定。
+ */
+function foldIntBin(op, bits, x, y) {
+  if (op === OP.ADD) return x + y;                                   // :140
+  if (op === OP.SUB) return x - y;                                   // :149
+  if (op === OP.MUL) return x * y;                                   // :156
+  if (op === OP.BAND) return x & y;                                  // :175
+  if (op === OP.BOR) return x | y;                                   // :181
+  if (op === OP.BXOR) return x ^ y;                                  // :186
+  if (op === OP.DIV || op === OP.MOD) {                              // :201 / :244
+    if (y === 0n) return null;
+    /* 最小负数 / -1 在 C 里是未定义行为（x86 上会发 #DE），不折。 */
+    const min = bits === 32 ? -2147483648n : -(2n ** 63n);
+    if (x === min && y === -1n) return null;
+    return op === OP.DIV ? x / y : x % y;
+  }
+  if (op === OP.SHL || op === OP.SHR) {                               // :251 / :252
+    if (y < 0n || y >= BigInt(bits)) return null;
+    return op === OP.SHL ? x << y : x >> y;
+  }
+  /* 无符号那几条（ADR-0016 第六十一刀的 op）：按无符号读法算，再回规范形。 */
+  if (op === OP.UDIV || op === OP.UMOD) {
+    if (y === 0n) return null;
+    const ux = asUint(x, bits), uy = asUint(y, bits);
+    return op === OP.UDIV ? ux / uy : ux % uy;
+  }
+  if (op === OP.USHR) {
+    if (y < 0n || y >= BigInt(bits)) return null;
+    return asUint(x, bits) >> y;
+  }
+  return null;
+}
+
+/** 两个浮点常量的折叠。回 number 或 null。`generic.rules:142/151/158/207`。 */
+function foldFloatBin(op, x, y) {
+  if (op === OP.ADD) return x + y;
+  if (op === OP.SUB) return x - y;
+  if (op === OP.MUL) return x * y;
+  if (op === OP.DIV) return x / y;   // 0 除在 IEEE 里有定义（inf/nan），mkReal 会挡住非有限的
+  return null;
+}
+
+/** 比较的折叠。`x`/`y` 是同类的宿主值；回 boolean 或 null。`generic.rules:900..945` 那一段。 */
+function foldCmp(op, x, y) {
+  if (op === OP.EQ) return x === y;
+  if (op === OP.NE) return x !== y;
+  if (op === OP.LT || op === OP.ULT) return x < y;
+  if (op === OP.LE || op === OP.ULE) return x <= y;
+  if (op === OP.GT || op === OP.UGT) return x > y;
+  if (op === OP.GE || op === OP.UGE) return x >= y;
+  return null;
+}
+
+/**
+ * 一条指令的重写。回「换成哪个 ref」，或 -1（这条不动）。
+ */
+function rewriteValue(fn, mod, pc) {
+  const op = fn.op[pc];
+  const t = fn.t[pc];
+  const A = fn.a[pc], B = fn.b[pc];
+  const ca = constOf(mod, A), cb = constOf(mod, B);
+
+  /* ---------------------------------------------------------- 一、常量折叠 */
+  if (isCmp(op)) {
+    /* 比较的 `t` 是**操作数**的类型（ir.js 的 typeOf 那段），结果永远是 bool。 */
+    if (scalarInt(t)) {
+      const x = intOf(ca), y = intOf(cb);
+      if (x !== null && y !== null) {
+        const bits = intBits(t);
+        const unsigned = op >= OP.ULT && op <= OP.UGT;
+        const r = unsigned ? foldCmp(op, asUint(x, bits), asUint(y, bits)) : foldCmp(op, x, y);
+        if (r !== null) return mkBool(mod, r);
+      }
+    } else if (scalarFloat(t)) {
+      const x = realOf(ca), y = realOf(cb);
+      if (x !== null && y !== null) {
+        const r = foldCmp(op, x, y);
+        if (r !== null) return mkBool(mod, r);
+      }
+    } else if (t === T_BOOL) {
+      const x = boolOf(ca), y = boolOf(cb);
+      if (x !== null && y !== null) {
+        const r = foldCmp(op, x, y);
+        if (r !== null) return mkBool(mod, r);
+      }
+      /* `(EqB (ConstBool [true]) x) => x`、`(NeqB (ConstBool [false]) x) => x`
+         —— generic.rules:309 / :314（交换律，两边都试）。 */
+      if (op === OP.EQ) {
+        if (x === true) return B;
+        if (y === true) return A;
+      }
+      if (op === OP.NE) {
+        if (x === false) return B;
+        if (y === false) return A;
+      }
+    }
+    return -1;
+  }
+
+  if (scalarInt(t)) {
+    const bits = intBits(t);
+    const x = intOf(ca), y = intOf(cb);
+    if (x !== null && y !== null) {
+      const r = foldIntBin(op, bits, x, y);
+      if (r !== null) return mkInt(mod, t, r);
+    }
+    if (op === OP.NEG && x !== null) return mkInt(mod, t, -x);          // :133
+    if (op === OP.BNOT && x !== null) return mkInt(mod, t, ~x);         // :690
+    const r = intIdentity(fn, mod, pc, op, t, A, B, x, y);
+    if (r !== -1) return r;
+    return -1;
+  }
+
+  if (scalarFloat(t)) {
+    const x = realOf(ca), y = realOf(cb);
+    if (x !== null && y !== null) {
+      const r = foldFloatBin(op, x, y);
+      if (r !== null) {
+        const k = mkReal(mod, t, r);
+        if (k >= 0) return k;
+      }
+    }
+    if (op === OP.NEG && x !== null) {
+      const k = mkReal(mod, t, -x);
+      if (k >= 0) return k;
+    }
+    /* `(Mul(32|64)F x (Const(32|64)F [1])) => x` —— generic.rules:1370。
+       **只有乘 1 这一条**：`x + 0.0` 在 x = -0.0 上不成立，Go 也没有那条规则。 */
+    if (op === OP.MUL) {
+      if (y === 1) return A;
+      if (x === 1) return B;
+    }
+    return -1;
+  }
+
+  /* `(Not (ConstBool [c])) => (ConstBool [!c])` —— generic.rules:210 */
+  if (op === OP.NOT) {
+    const x = boolOf(ca);
+    if (x !== null) return mkBool(mod, !x);
+    /* `(Not (Not x)) => x`：Go 那边这一条是靠 `Com(Com x)`（:689）与
+       `Not` 折进比较（:430-436）两族覆盖的，我们只留这一条同形的。 */
+    if (A >= REF_BIAS && A !== REF_NONE && fn.op[A - REF_BIAS] === OP.NOT) return fn.a[A - REF_BIAS];
+    return -1;
+  }
+
+  return -1;
+}
+
+/** 整数的代数化简。回 ref 或 -1。**每条都注了 `generic.rules` 的行号。**
+ *  交换律的 op（ADD/MUL/BAND/BOR/BXOR）两种次序都试 —— Go 的 rulegen 对
+ *  `commutative` 的 op 会自动展开两种匹配，所以它的规则里只写一种。
+ *  我们**不改操作数的次序**：改次序会动到后端发出来的形状，而这一格的纪律是只改引用。 */
+function intIdentity(fn, mod, pc, op, t, A, B, x, y) {
+  const zero = 0n, one = 1n, neg1 = -1n;
+
+  if (op === OP.ADD) {
+    if (y === zero) return A;                                          // :684
+    if (x === zero) return B;                                          // :684（换个次序）
+  }
+  if (op === OP.MUL) {
+    if (y === one) return A;                                           // :218
+    if (x === one) return B;                                           // :218
+    if (y === zero || x === zero) return mkInt(mod, t, zero);          // :686
+  }
+  if (op === OP.BOR) {
+    if (y === zero) return A;                                          // :667
+    if (x === zero) return B;                                          // :667
+    if (y === neg1 || x === neg1) return mkInt(mod, t, neg1);          // :668
+    if (A === B) return A;                                             // :666
+  }
+  if (op === OP.BAND) {
+    if (y === neg1) return A;                                          // :674
+    if (x === neg1) return B;                                          // :674
+    if (y === zero || x === zero) return mkInt(mod, t, zero);          // :675
+    if (A === B) return A;                                             // :673
+  }
+  if (op === OP.BXOR) {
+    if (y === zero) return A;                                          // :681
+    if (x === zero) return B;                                          // :681
+    if (A === B) return mkInt(mod, t, zero);                           // :680
+  }
+  if (op === OP.SUB) {
+    if (A === B) return mkInt(mod, t, zero);                           // :685
+    if (y === zero) return A;                                          // 与 :684 对称（x-0）
+    /* `(Sub64 (Add64 x y) y) => x` —— :816。加法有交换律，所以两个实参都要比。 */
+    if (A >= REF_BIAS && A !== REF_NONE) {
+      const d = A - REF_BIAS;
+      if (fn.op[d] === OP.ADD && fn.t[d] === t) {
+        if (fn.b[d] === B) return fn.a[d];
+        if (fn.a[d] === B) return fn.b[d];
+      }
+    }
+  }
+  if (op === OP.SHL || op === OP.SHR || op === OP.USHR) {
+    if (y === zero) return A;                                          // :505 / :506 / :507
+  }
+  if (op === OP.NEG && A >= REF_BIAS && A !== REF_NONE) {
+    if (fn.op[A - REF_BIAS] === OP.NEG) return fn.a[A - REF_BIAS];      // :720
+  }
+  if (op === OP.BNOT && A >= REF_BIAS && A !== REF_NONE) {
+    if (fn.op[A - REF_BIAS] === OP.BNOT) return fn.a[A - REF_BIAS];     // :689
+  }
+  return -1;
+}
+
+/**
+ * 跑 opt。回改了几条指令。
+ *
+ * 迭代到不动点（Go 的 `applyRewrite` 同形），但**每条指令最多改一次** ——
+ * 改过的记在 `done` 里，于是轮数有界（最多 = 指令条数），不会来回抖。
+ */
+export function opt(fn, mod) {
+  if (!fn || fn.op.length === 0) return 0;
+  const done = new Set();
+  let total = 0;
+  for (let round = 0; round < fn.op.length + 1; round++) {
+    let changed = 0;
+    for (let pc = 0; pc < fn.op.length; pc++) {
+      if (done.has(pc)) continue;
+      const to = rewriteValue(fn, mod, pc);
+      if (to === -1) continue;
+      const self = REF_BIAS + pc;
+      if (to === self) continue;
+      done.add(pc);
+      replaceRef(fn, self, to);
+      changed++;
+    }
+    if (changed === 0) break;
+    total += changed;
+  }
+  return total;
+}
+
+/* 通道表里 `opt` / `middle opt` / `late opt` 是同一套规则跑三遍（Go 也是同一个
+ * `rewriteValuegeneric`，差别在它前后有哪些格子跑过）。 */
+registerPass('opt', opt);
+registerPass('middle opt', opt);
+registerPass('late opt', opt);

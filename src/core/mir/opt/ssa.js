@@ -18,8 +18,9 @@
  * 注册到 `early phielim and copyelim` —— Go 通道表里这是第一格有用的通道，位置对得上。
  */
 
-import { OP, REF_BIAS, REF_NONE as MIR_REF_NONE } from '../ir.js';
+import { OP, REF_BIAS } from '../ir.js';
 import { buildCfg, reachable } from './cfg.js';
+import { replaceRef } from './edit.js';
 import { registerPass } from './pass.js';
 
 /** 有 FRAME 出现的函数里保守地把所有 slot 标为地址已取。
@@ -121,17 +122,6 @@ export function mem2reg(fn, _mod) {
   return changed;
 }
 
-/** 把 fn 里**所有** a/b/实参池里引用 oldRef 的地方换成 newRef。回换了几处。 */
-function replaceRef(fn, oldRef, newRef) {
-  let n = 0;
-  for (let i = 0; i < fn.a.length; i++) {
-    if (fn.a[i] === oldRef) { fn.a[i] = newRef; n++; }
-    if (fn.b[i] === oldRef) { fn.b[i] = newRef; n++; }
-  }
-  for (let i = 0; i < fn.args.length; i++) {
-    if (fn.args[i] === oldRef) { fn.args[i] = newRef; n++; }
-  }
-  return n;
-}
+/** 把 fn 里**所有** a/b/实参池里引用 oldRef 的地方换成 newRef —— 见 `edit.js`。 */
 
 registerPass('early phielim and copyelim', mem2reg);

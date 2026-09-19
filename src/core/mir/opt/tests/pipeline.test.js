@@ -12,6 +12,7 @@
 import { runPasses, checkPassTable, passStatus, PASSES } from '../pass.js';
 import '../ssa.js';        // 注册 early phielim and copyelim
 import '../deadcode.js';   // 注册八格 *deadcode
+import '../rewrite.js';    // 注册 opt / middle opt / late opt
 import '../autos.js';      // 注册 elim unread autos
 import { runMirModule } from '../../interp.js';
 import { cMir } from '../../../lang/c.js';
