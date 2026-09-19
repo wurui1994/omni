@@ -226,7 +226,12 @@ function jsExpr(x) {
       return `(__truthy(${jsExpr(x.ins.cond)}) ? ${jsExpr(x.ins.then)} : ${e})`;
     }
     case 'func': {
-      const ps = (x.attrs.params ?? []).map(jsName).join(', ');
+      const allPs = x.attrs.params ?? [];
+      const rest = x.attrs.restParam;
+      const ps = allPs.map((p, i) => {
+        const n = jsName(p);
+        return (rest !== undefined && p === rest) ? `...${n}` : n;
+      }).join(', ');
       return `((${ps}) => { ${withExits(jsFnBody(x.ins.body))} })`;
     }
     case 'call': {

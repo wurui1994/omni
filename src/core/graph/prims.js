@@ -26,7 +26,7 @@ const show = (v, showValue) => showValue(v);
  * kernel 那一侧算在 **BigInt** 上再折回 Number（js 的位运算是 32 位的），
  * js 那一侧发出去的代码也一样 —— 两侧同一套算法，不许一侧 32 位一侧 64 位。
  */
-const asI64 = (v) => BigInt(Math.trunc(Number(v)));
+const asI64 = (v) => BigInt(Math.trunc(Number(v ?? 0)));
 const shiftCount = (v) => {
   const n = Math.trunc(Number(v));
   /* go 的移位位数是无符号的：`^uint(0) >> 63` 在二补数 BigInt 里给 -1，
@@ -41,12 +41,12 @@ const shiftCount = (v) => {
  */
 const jsShift = (v) => `((__c) => { const __u = Math.trunc(Number(__c)) & 63; return BigInt(__u); })(${v})`;
 const bitPrims = () => [
-  P('band', 2, [], (a) => Number(asI64(a[0]) & asI64(a[1])), (a) => `Number(BigInt(${a[0]}) & BigInt(${a[1]}))`),
-  P('bor', 2, [], (a) => Number(asI64(a[0]) | asI64(a[1])), (a) => `Number(BigInt(${a[0]}) | BigInt(${a[1]}))`),
-  P('bxor', 2, [], (a) => Number(asI64(a[0]) ^ asI64(a[1])), (a) => `Number(BigInt(${a[0]}) ^ BigInt(${a[1]}))`),
-  P('bnot', 1, [], (a) => Number(~asI64(a[0])), (a) => `Number(~BigInt(${a[0]}))`),
-  P('shl', 2, [], (a) => Number(asI64(a[0]) << shiftCount(a[1])), (a) => `Number(BigInt(${a[0]}) << ${jsShift(a[1])})`),
-  P('shr', 2, [], (a) => Number(asI64(a[0]) >> shiftCount(a[1])), (a) => `Number(BigInt(${a[0]}) >> ${jsShift(a[1])})`),
+  P('band', 2, [], (a) => Number(asI64(a[0]) & asI64(a[1])), (a) => `Number(BigInt(${a[0]} ?? 0) & BigInt(${a[1]} ?? 0))`),
+  P('bor', 2, [], (a) => Number(asI64(a[0]) | asI64(a[1])), (a) => `Number(BigInt(${a[0]} ?? 0) | BigInt(${a[1]} ?? 0))`),
+  P('bxor', 2, [], (a) => Number(asI64(a[0]) ^ asI64(a[1])), (a) => `Number(BigInt(${a[0]} ?? 0) ^ BigInt(${a[1]} ?? 0))`),
+  P('bnot', 1, [], (a) => Number(~asI64(a[0])), (a) => `Number(~BigInt(${a[0]} ?? 0))`),
+  P('shl', 2, [], (a) => Number(asI64(a[0]) << shiftCount(a[1])), (a) => `Number(BigInt(${a[0]} ?? 0) << ${jsShift(a[1])})`),
+  P('shr', 2, [], (a) => Number(asI64(a[0]) >> shiftCount(a[1])), (a) => `Number(BigInt(${a[0]} ?? 0) >> ${jsShift(a[1])})`),
 ];
 
 

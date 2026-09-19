@@ -159,7 +159,7 @@ export const NODES = new Map([
   // ---- 函数与出口（3 格）------------------------------------------------------
   // 形参表是**附属**（元数分派不是新节点 —— chez 的 case-lambda 那一条）。
   N('func', 'expr', [{ name: 'body', sem: SEM.body }], {
-    attrs: ['params', 'name'], lifetime: 'owns',
+    attrs: ['params', 'name', 'restParam'], lifetime: 'owns',
     doc: 'chez case-lambda（函数只有这一种形式）/ 十门全有',
     providers: { spec: TEN, why: {} },
   }),

@@ -768,6 +768,13 @@ function funcOf(sig, blk, name, self, selfType) {
     if (params[i] === '_' || used.has(params[i])) params[i] = `__p${i}`;
     used.add(params[i]);
   }
+  /* **变参** `func f(xs ...int)`：语法上那一格 `p` 带 `variadic` 标记。
+     图上记成 `restParam`（最后一格形参的名字），js 后端发 `...name` 的 rest 形参。
+     那时函数体里 `xs` 就是一格真数组 —— `len(xs)` / `range xs` 都对。 */
+  const lastIn = inParams[inParams.length - 1];
+  const isVariadic = lastIn !== undefined
+    && kids(lastIn).some((y) => (isList(y) ? tag(y) : leaf(y)) === 'variadic');
+  const restParam = (isVariadic && params.length > 0) ? params[params.length - 1] : undefined;
   const savedVars = new Map(VARTYPE);
   const savedSeen = new Set(SEEN_NAMES);
   // 形参进 SEEN_NAMES
@@ -785,7 +792,8 @@ function funcOf(sig, blk, name, self, selfType) {
   }
   try {
     return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
-      { params: self === undefined ? params : [self, ...params], name });
+      { params: self === undefined ? params : [self, ...params], name,
+        ...(restParam !== undefined ? { restParam } : {}) });
   } finally {
     VARTYPE.clear();
     for (const [k, v] of savedVars) VARTYPE.set(k, v);
@@ -1188,6 +1196,17 @@ function toNode(x) {
       if (elems.some((e) => tag(e) === 'kv')) {
         throw new Error('go->graph: 这一批不接"字段名与位置混着"的复合字面量');
       }
+      /* **位置式 struct 字面量**：`Circle{5.0}` 在树上是 `(lit (tname Circle) 5.0)`，
+         元素没有 kv 标签。如果类型名在 STRUCTS 里有字段表，按顺序配对生成记录。 */
+      const litTypeName = tag(ty) === 'tname' ? leaf(kids(ty)[0])
+        : tag(ty) === 'name' ? leaf(kids(ty)[0]) : null;
+      if (litTypeName !== null && STRUCTS.has(litTypeName) && elems.length > 0) {
+        const fs = STRUCTS.get(litTypeName);
+        if (fs !== null && fs.length >= elems.length) {
+          return recordNew(elems.map((e, i) => [fs[i][0], toNode(e)]));
+        }
+      }
+      /* **切片字面量**（`[]int{1,2,3}`）或 struct 不在 STRUCTS 里 → 落数组。 */
       return listNew(many(elems));
     }
     // `m[k]` 与 `xs[i]` 在树上同形，差别在**那个名字装的是什么**（`MAPS` 那一趟扫查）
@@ -1319,6 +1338,14 @@ function toNode(x) {
       // 顶层 + 函数体内看见的名字。不精确（嵌套 block 里的同名应该是新的），
       // 但 go 编译器自己的代码里这种嵌套极少。
       const isDef = tag(x) === 'define';
+      /* **复合赋值** `x += y`：语法上 `(assign "+=" (lhs x) (rhs y))`，
+         第一格子节点是算子。展开成 `x = x + y`（图上没有复合赋值那一格）。
+         `&^=` 是 go 独有的 and-not，拼成 `band(x, bnot(y))`。 */
+      const opTok = kids(x).find((y) => !isList(y) || (tag(y) !== 'lhs' && tag(y) !== 'rhs'));
+      const opStr = opTok === undefined ? '=' : String(isList(opTok) ? leaf(kids(opTok)[0]) : leaf(opTok));
+      const compoundOp = (opStr.length > 1 && opStr.endsWith('=')
+        && opStr !== '==' && opStr !== '!=' && opStr !== '<=' && opStr !== '>=')
+        ? opStr.slice(0, -1) : null;
       const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
       const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
       // `x, y := f()` / `x, ok = m[k]`：N 个名字对 1 个右值 ⇒ 多值的消费侧
@@ -1362,7 +1389,17 @@ function toNode(x) {
         return out;
       }
       return lhs.map((t, i) => {
-        const v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
+        let v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
+        /* **复合赋值展开**：`total += n` → `total = total + n`。
+           左边的名字再算一次（ref）与右边做二元运算。 */
+        if (compoundOp !== null && lhs.length === 1 && rhs.length === 1) {
+          const lRef = toNode(t);
+          if (compoundOp === '&^') {
+            v = node('prim', { args: [lRef, un('bnot', v)] }, { name: 'band' });
+          } else {
+            v = binOf(compoundOp, lRef, v, OPS, { lang: 'go' });
+          }
+        }
         /* `x := T{…}` / `x := &T{…}` —— **语法上写着的具名类型**，收进 VARTYPE
            （方法调用要拿它挑主人 + `&x` 那一半要它，见 `MSET` 那一段）。 */
         if (isDef && rhs[i] !== undefined && tag(t) !== 'sel' && tag(t) !== 'index') {
