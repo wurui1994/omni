@@ -182,7 +182,11 @@ export const index = (obj, i) => {
 };
 
 export const setIndex = (obj, i, value) => {
-  if (!Array.isArray(obj)) throw new Error(`index-set: 不是一格列表（[${showValue(i)}]）`);
+  if (obj === null || obj === undefined) return null;
+  if (!Array.isArray(obj)) {
+    if (obj instanceof Map) { obj.set(i, value); return null; }
+    return null;
+  }
   if (typeof i !== 'number' || i < 0 || i >= obj.length) {
     throw new Error(`index-set: 下标越界 [${showValue(i)}]（长度 ${obj.length}）`);
   }

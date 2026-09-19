@@ -271,8 +271,9 @@ function graphOf(path, argv) {
       byPkg.get(pkgName).push(...g.body);
     }
     for (const [pkgName, pkgBody] of byPkg) {
+      const ordered = orderTopLevel(pkgBody);
       const fields = [];
-      for (const stmt of pkgBody) {
+      for (const stmt of ordered) {
         body.push(stmt);
         if (stmt !== null && stmt !== undefined && !Array.isArray(stmt)
           && stmt.op === 'bind' && stmt.attrs && stmt.attrs.name) {
