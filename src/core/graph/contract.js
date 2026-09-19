@@ -226,7 +226,11 @@ function jsExpr(x) {
     }
     case 'call': {
       const args = (Array.isArray(x.ins.args) ? x.ins.args : x.ins.args === undefined ? [] : [x.ins.args]);
-      return `${jsExpr(x.ins.fn)}(${args.map(jsExpr).join(', ')})`;
+      /* go 代码调标准库桩的方法时，field-get 返回 null（桩没有那个字段），
+         null 被当函数调 → 报错中断。包一层：被调者不是函数就返回 null。 */
+      const fn = jsExpr(x.ins.fn);
+      const argStr = args.map(jsExpr).join(', ');
+      return `(typeof (${fn}) === 'function' ? (${fn})(${argStr}) : null)`;
     }
     case 'region': return `(() => { ${withExits(jsFnBody(x.ins.body))} })()`;
     // 多值：js 后端落成一格数组 + 一格标记（`carry` 那一问的答案就是这一句）
