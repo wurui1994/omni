@@ -65,7 +65,7 @@ export const PRIMS = new Map([
   // 真值观是**一格能力**（四家答案不同，见 eval.js 里那段）—— 这儿只给最保守的那一档
   P('not', 1, [], (a, io) => !io.truthy(a[0]), (a) => `(!__truthy(${a[0]}))`),
   P('concat', -1, [], (a, io) => a.map((v) => show(v, io.show)).join(''), (a) => `[${a.join(', ')}].map(__show).join('')`),
-  P('len', 1, [], (a) => (a[0] === null || a[0] === undefined ? 0 : a[0].length), (a) => `(${a[0]}).length`),
+  P('len', 1, [], (a) => (a[0] === null || a[0] === undefined ? 0 : a[0].length), (a) => `(${a[0]} == null ? 0 : (${a[0]}).length)`),
 
   // ---- 位运算那六格：**pure**，只对整数 ------------------------------------------
   //
