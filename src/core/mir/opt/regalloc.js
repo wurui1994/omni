@@ -14,11 +14,17 @@
  *   - 循环里定义的值在下一轮会重新定义，而区间只到本轮的最后一次使用
  * 所以不必先跑一整遍活跃性数据流（Go 那边要，因为它的块是任意 CFG）。
  *
- * 出的是**颜色**，不是机器寄存器号：`{cls, color}`，`cls` 是 'x'（整数/指针那一类）
- * 或 'v'（浮点）。哪个颜色落到哪个真寄存器由后端定 —— arm64 与 x86_64 的
- * 被调用者保存集不是一回事，而"这两个值不能住同一个寄存器"这件事与架构无关。
+ * 出的是**颜色**（一个小整数），不是机器寄存器号：哪个颜色落到哪个真寄存器由后端定 ——
+ * arm64 与 x86_64 的被调用者保存集不是一回事，而"这两个值不能住同一个寄存器"这件事
+ * 与架构无关。
  *
- * **只分配单字的标量**：i32/i64/bool/f32/f64。胖指针（T_PTR，三个字）、聚合、
+ * **只有一类颜色**（不分整数/浮点）。这不是偷懒，是量过两条后端的事实：
+ * `arm64/from_mir.js` 与 `x64/from_mir.js` 都把**每个值当成一个八字节的位模式**
+ * 放在通用寄存器/栈位上，浮点是用 `fmov`/`movq` 在算的时候搬进 FP 寄存器再搬回来
+ * （`toFp`/`fromFp`、`movqToXmm`/`movqFromXmm`）。所以"一个值一个通用寄存器"就够，
+ * 分两类反而会让两类的颜色在同一批真寄存器上撞。
+ *
+ * **只分配单字的标量**：i32/i64/bool/f32/f64/thin 指针。胖指针（T_PTR，三个字）、聚合、
  * 串、dyn、向量一律不碰 —— 它们在后端不是"一个寄存器"。
  */
 
@@ -29,12 +35,11 @@ import {
 } from '../ir.js';
 import { registerPass } from './pass.js';
 
-/** 这个类型能住一个寄存器吗；能就回 'x'/'v'，不能回 null。 */
-function classOfType(t) {
-  if (typeLanes(t) !== 1) return null;          // 向量不是一个寄存器
-  if (t === T_I32 || t === T_I64 || t === T_BOOL || t === T_TPTR) return 'x';
-  if (t === T_F32 || t === T_F64) return 'v';
-  return null;                                   // T_PTR(三个字)/T_AGG/T_STR/T_DYN…
+/** 这个类型住得下一个通用寄存器吗（浮点也算 —— 后端拿它当八字节位模式，见文件头）。 */
+function fitsOneWord(t) {
+  if (typeLanes(t) !== 1) return false;          // 向量不是一个寄存器
+  return t === T_I32 || t === T_I64 || t === T_BOOL || t === T_TPTR
+      || t === T_F32 || t === T_F64;
 }
 
 /** 一条指令产出的值的类型（比较的结果是 bool，不是操作数的类型）。 */
@@ -121,20 +126,20 @@ function extendForLoops(fn, last) {
   return last;
 }
 
-/** 这一类有几个颜色可用。两条腿的被调用者保存集：arm64 是 x19-x27 与 v8-v15，
- *  x86_64 是 rbx/rbp/r12-r15（少得多）—— 取**两边都够**的那个数，于是同一份分配
- *  在两条腿上都落得下。后端自己把颜色映到真寄存器。
+/** 有几个颜色可用。取的是**两条腿都够**的那个数：
+ *  arm64 的被调用者保存通用寄存器是 x19-x28（x28 被这一层当帧基址用掉），
+ *  x86_64 是 rbx/rbp/r12-r15（rbp 当帧指针用掉）—— 于是 5 个。
  *
  * ⚠️ **与后端的约定**：颜色必须映到**被调用者保存**的寄存器。
  * 这一层给出的区间会**跨过调用点**（一个值定义在调用之前、用在调用之后是常事），
  * 而这一层刻意不在调用点上把它们切开 —— 那样就要发溢出/恢复，是另一格的事。
  * 后端把颜色映到调用者保存的寄存器 = 一次调用之后读到垃圾。序言里存、收场里取，
  * 这笔账归后端。 */
-export const COLORS = { x: 5, v: 6 };
+export const COLORS = 5;
 
 /**
  * 跑 regalloc。**不改一条指令** —— 只往 `fn.regHint` 上挂一张
- * `下标 -> {cls, color}` 的表（`Map`），由后端消费。
+ * `下标 -> 颜色` 的表（`Map`），由后端消费。
  *
  * `regHint` 是**标注**，与 `MirFunc.local`/`globalRo` 那些同一种性质：
  * 不进 `bytes.js` 的哈希（那边按字段来，认不出多出来的属性）、不进 verifier、
@@ -146,37 +151,31 @@ export function regalloc(fn, _mod) {
   if (!fn || fn.op.length === 0) return 0;
   const last = extendForLoops(fn, lastUses(fn));
 
-  /* 待分配的区间：按定义的 pc 升序（指令数组本身就是这个序，所以不用排） */
   const hint = new Map();
-  /* 每一类各一份"活着的"清单：{end, color}；颜色池用一个布尔数组 */
-  const active = { x: [], v: [] };
-  const free = { x: [], v: [] };
-  for (const cls of ['x', 'v']) {
-    for (let i = 0; i < COLORS[cls]; i++) free[cls].push(i);
-  }
+  let active = [];                 // 活着的区间：{end, color}
+  const free = [];
+  for (let i = 0; i < COLORS; i++) free.push(i);
 
   let n = 0;
   for (let pc = 0; pc < fn.op.length; pc++) {
     /* 一、到期的先还回池子（`end < pc` 的那些）—— 线性扫描的 expire 那一步 */
-    for (const cls of ['x', 'v']) {
-      const keep = [];
-      for (const it of active[cls]) {
-        if (it.end < pc) free[cls].push(it.color); else keep.push(it);
-      }
-      active[cls] = keep;
+    const keep = [];
+    for (const it of active) {
+      if (it.end < pc) free.push(it.color); else keep.push(it);
     }
+    active = keep;
 
     /* 二、这条指令产的值要不要一个寄存器 */
     const t = resultType(fn, pc);
     if (t === T_VOID) continue;
     const end = last[pc];
     if (end < 0) continue;                       // 没人用（deadcode 会收走）
-    const cls = classOfType(t);
-    if (cls === null) continue;                  // 不是单字标量
-    if (free[cls].length === 0) continue;        // 用光了 ⇒ 这个值照旧住栈位（= 溢出）
-    const color = free[cls].shift();             // 取最小的那个颜色：同一份输入两次编译一样
-    hint.set(pc, { cls, color });
-    active[cls].push({ end, color });
+    if (!fitsOneWord(t)) continue;
+    if (free.length === 0) continue;             // 用光了 ⇒ 这个值照旧住栈位（= 溢出）
+    free.sort((x, y) => x - y);                  // 取最小的颜色：两次编译要一样
+    const color = free.shift();
+    hint.set(pc, color);
+    active.push({ end, color });
     n++;
   }
 
@@ -197,15 +196,15 @@ export function checkRegHint(fn) {
   if (!fn.regHint || fn.regHint.size === 0) return errs;
   const last = extendForLoops(fn, lastUses(fn));
   const items = [];
-  for (const [pc, r] of fn.regHint) items.push({ pc, end: last[pc], cls: r.cls, color: r.color });
+  for (const [pc, color] of fn.regHint) items.push({ pc, end: last[pc], color });
   for (let i = 0; i < items.length; i++) {
     for (let j = i + 1; j < items.length; j++) {
       const a = items[i], b = items[j];
-      if (a.cls !== b.cls || a.color !== b.color) continue;
+      if (a.color !== b.color) continue;
       const overlap = a.pc <= b.end && b.pc <= a.end;
       if (overlap) {
         errs.push(`${fn.name}: %${a.pc}[${a.pc}..${a.end}] 与 %${b.pc}[${b.pc}..${b.end}]`
-          + ` 区间相交却同色（${a.cls}${a.color}）`);
+          + ` 区间相交却同色（${a.color}）`);
       }
     }
   }

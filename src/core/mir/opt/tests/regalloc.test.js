@@ -62,13 +62,9 @@ for (const fn of mod.funcs) {
   const n = regalloc(fn, mod) || 0;
   total += n;
   for (const e of checkRegHint(fn)) errs.push(e);
-  if (n > 0) {
-    let xs = 0, vs = 0;
-    for (const r of fn.regHint.values()) { if (r.cls === 'x') xs++; else vs++; }
-    rows.push(`${fn.name}: ${fn.op.length} 条指令里分了 ${n} 个（x ${xs} / v ${vs}）`);
-  }
+  if (n > 0) rows.push(`${fn.name}: ${fn.op.length} 条指令里分了 ${n} 个`);
 }
-console.log(`== 分配（每类的颜色数：x ${COLORS.x} / v ${COLORS.v}）`);
+console.log(`== 分配（${COLORS} 个颜色）`);
 for (const r of rows) console.log('  ' + r);
 ok(total > 0, `一共分了 ${total} 个值`);
 ok(errs.length === 0, '分配表自洽：区间相交的不同色' + (errs.length ? '：' + errs.slice(0, 3).join(' / ') : ''));
@@ -86,18 +82,15 @@ for (let i = 0; i < mod.funcs.length; i++) {
   regalloc(mod2.funcs[i], mod2);
   const a = mod.funcs[i].regHint, b = mod2.funcs[i].regHint;
   if (a.size !== b.size) { same = false; break; }
-  for (const [pc, r] of a) {
-    const r2 = b.get(pc);
-    if (r2 === undefined || r2.cls !== r.cls || r2.color !== r.color) { same = false; break; }
+  for (const [pc, c] of a) {
+    if (b.get(pc) !== c) { same = false; break; }
   }
 }
 ok(same, '同一份输入两次分配逐格相同');
 
-/* ---- 浮点与整数各走各的池子 ---- */
+/* ---- 浮点也进同一个池子（两条后端都把值当八字节位模式放通用寄存器，见 regalloc.js 文件头） ---- */
 const mixf = mod.funcs.find((f) => f.name === 'mixf');
-let hasV = false;
-for (const r of mixf.regHint.values()) if (r.cls === 'v') hasV = true;
-ok(hasV, 'mixf 里有值落在浮点那一类（v）');
+ok(mixf.regHint.size > 0, `mixf（全是 double）也分到了寄存器（${mixf.regHint.size} 个）`);
 
 console.log('');
 if (fails > 0) { console.log(`✗ ${fails} 条不过`); process.exit(1); }
