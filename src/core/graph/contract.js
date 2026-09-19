@@ -227,9 +227,15 @@ function jsExpr(x) {
     case 'call': {
       const args = (Array.isArray(x.ins.args) ? x.ins.args : x.ins.args === undefined ? [] : [x.ins.args]);
       /* go 代码调标准库桩的方法时，field-get 返回 null（桩没有那个字段），
-         null 被当函数调 → 报错中断。包一层：被调者不是函数就返回 null。 */
+         null 被当函数调 → 报错中断。包一层：被调者不是函数就返回 null。
+         **特例**：单实参调用且被调者不是函数 → 返回那格实参（go 的 `T(x)` 类型转换，
+         在图上没有类型信息，解析器把 `CPUfeatures(0)` 当 call 而不是 conv）。 */
       const fn = jsExpr(x.ins.fn);
       const argStr = args.map(jsExpr).join(', ');
+      if (args.length === 1) {
+        const a0 = jsExpr(args[0]);
+        return `(typeof (${fn}) === 'function' ? (${fn})(${argStr}) : ${a0})`;
+      }
       return `(typeof (${fn}) === 'function' ? (${fn})(${argStr}) : null)`;
     }
     case 'region': return `(() => { ${withExits(jsFnBody(x.ins.body))} })()`;
