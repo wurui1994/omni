@@ -90,6 +90,11 @@ export function removeInsns(fn, doomed) {
   }
   fn.op = op; fn.t = t; fn.a = a; fn.b = b; fn.aux = aux;
 
+  /* 删过指令之后，按**下标**记的那些标注全废了 —— `regalloc` 的 `regHint` 就是一张
+     `下标 -> 颜色` 的表。清掉而不是重编号：通道表里 regalloc 在倒数第三格，它之后
+     只剩 `trim`，而"先分配、再删指令"本来就该重新分配一次。 */
+  if (fn.regHint !== undefined) fn.regHint = undefined;
+
   /* 三、按角色改 ref。
      实参池**不压缩**：起点存在 b 上，压缩了就得同时改 b，而池里可能还有别的东西
      指着它。池里死掉的那几格是垃圾，不占语义、不进后端（后端只从起点读 n 格）。

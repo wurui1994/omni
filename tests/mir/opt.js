@@ -35,7 +35,7 @@ const bad = (label, detail) => {
 };
 
 /* ---------------------------------------------------- 一、每一格自己的判据 */
-const UNITS = ['cfg', 'mem2reg', 'deadcode', 'rewrite', 'cse', 'dse', 'pipeline'];
+const UNITS = ['cfg', 'mem2reg', 'deadcode', 'rewrite', 'cse', 'dse', 'regalloc', 'pipeline'];
 for (const u of UNITS) {
   if (!keep(u)) continue;
   const r = spawnSync(process.execPath, [join(root, `src/core/mir/opt/tests/${u}.test.js`)],
