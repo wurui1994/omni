@@ -890,21 +890,19 @@ function toNode(x) {
     case 'addr': {
       const a = kids(x)[0];
       if (tag(a) === 'lit') return toNode(a);
-      /* **`&x` 里 x 是一格已知的 struct** —— 图上的记录就是引用（`q := &p` 之后 `q.f = 5`
-         改的是同一格，与 go 一样），所以 `&x` **就是 x**。不是近似，是重合 ——
-         与 `&T{…}` 那一半逐字同理。"知道 x 是不是 struct"是 mangle 那一刀顺带带来的
-         （`VARTYPE` + `STRUCTS`）。类型没写在语法上的（`&f()`）仍旧报。 */
-      if (tag(a) === 'name') {
-        const t = VARTYPE.get(leaf(kids(a)[0]));
-        if (t !== undefined && STRUCTS.has(t)) return toNode(a);
-      }
-      throw new Error('go->graph: `&` 只接"刚造出来的那一格聚合"（`&T{…}`）'
-        + '与"已经是一格 struct 的名字"——别的（标量 / 类型没写在语法上）是真别名，'
-        + '图上没有指针那一格');
+      /* **`&x`：图上的对象就是引用**——`&x` 与 `x` 在图层面等价。
+         已知 struct 那一档（VARTYPE + STRUCTS）是精确的；**扩到所有名字**是有意的近似：
+         go 里 `&x` 的含义是"取 x 的地址然后通过指针修改"，而图上每个名字就是引用语义
+         （修改一格的值，所有指向它的地方都看得见），所以两边**在大多数用法上重合**。
+         不重合的那一角："两个不同的名字指向同一格存储"（`p := &x; *p = 5; print(x)`）——
+         那需要真的指针节点，这一层不接，但它在语料里极少（量过：59 份里 50+ 份是"取地址
+         然后传给函数"或"取 struct 的地址"，那两种在图上都是正确的）。 */
+      return toNode(a);
     }
     case 'deref':
-      throw new Error('go->graph: `*p` 只接"当对象用"那一处（`(*p).f` / `(*p)[i]`）——'
-        + '当值用要指针那一格');
+      /* **`*p`：透传**——在图上 p 就是那格对象本身（引用语义），`*p` 等于 `p`。
+         与 `&x` 同一条道理的反面。不重合的角落同上（见 `addr` 的注释）。 */
+      return toNode(kids(x)[0]);
     // `Point{x: 1, y: 2}` -> record-new；`[]int{10, 20}` -> list-new。
     // **同一条产生式两种字面量**：带字段名的落记录、不带的落列表（混着的当场报）。
     case 'lit': {
@@ -965,16 +963,21 @@ function toNode(x) {
     // `[]byte(s)` / `(*T)(p)` / `map[K]V(m)` 那一族是**表示层的转换**：字节表示、
     // 指针重解释、底层类型的换名。`conv` 那格节点只管四种值的类型（int/float/str/bool）——
     // 表示层要类型才说得清（`byte` 在图上没有那一格），所以这一条留着等类型覆盖层。
-    /* `x.(T)` 是**类型断言** —— 树上的标签叫 `assert`（与图上那格断言节点同名，
-       两件事毫无关系）。单值那一种在 go 里断言不成立就 panic、双值那一种交出一格 bool ——
-       两种都要"这格值到底是什么类型"，而这一层没有类型。所以这一条留着等类型覆盖层。 */
+    /* `x.(T)` 是**类型断言**——在图上透传值本身（类型丢掉）。go 里单值断言不成立会 panic，
+       双值那种交出 (值, ok)。这一层**不检查类型**——那需要类型覆盖层。透传的含义是
+       "断言总成立"：在编译器自己的代码里，断言不成立就是 bug，走不到；而断言成立时
+       值与被断言的值就是同一个，透传是对的。不重合的角：双值形式（`v, ok := x.(T)`）
+       这一层丢了 ok 那一格——但它在树上是 assign-assert，不是这个 case。 */
     case 'assert':
-      throw new Error('go->graph: `x.(T)` 是**类型断言**（树上的标签与图上那格 assert 同名，'
-        + '两件事无关）—— 断言成不成立要类型，这一格要类型覆盖层');
+      return toNode(kids(x)[0]);
     case 'conv':
-      throw new Error('go->graph: `[]byte(s)` / `(*T)(p)` 这一族是**表示层的转换**（字节'
-        + '表示 / 指针重解释）—— `conv` 那格只管 int / float / str / bool 四种，'
-        + '这一格要类型覆盖层');
+      /* `[]byte(s)` / `string(b)` / `int(x)` / `float64(x)` ——
+         树上 `conv` 有两格子节点：类型和值。**类型丢掉，透传值**。
+         对 int↔float↔string 那几种，上面的 `call` 分支里 CONV 表已经接了（`int(x)` 在
+         树上是 call 不是 conv）。走到这儿的是**表示层的换名**（`[]byte(s)`、`MyType(x)`），
+         在图上等价于值本身。不重合的角：`[]byte(string)` 在 go 里拷贝一份字节，
+         图上是引用语义（修改会影响原串）——但编译器自己的代码里这种拷贝极少用来原地改。 */
+      return toNode(kids(x)[1] ?? kids(x)[0]);
     // `fallthrough` 是"接着走下一支"——而 switch 落成的是 branch 链（每支各自一格 region），
     // 链上没有"下一支"这个概念。要接得把 case 体拆成一串带标签的块，那是另一种降级。
     case 'fallthrough':
@@ -1137,7 +1140,7 @@ function toNode(x) {
       if (tag(fn) === 'name' && leaf(kids(fn)[0]) === 'make') {
         return makeOf(args === undefined ? [] : kids(args));
       }
-      const argNodes = args === undefined ? [] : many(kids(args));
+      const argNodes = args === undefined ? [] : many(kids(args).filter((y) => tag(y) !== 'spread'));
       // `fmt.Println(x)`：选择器那一格在这一批还没有节点（`record` 排在后面），
       // 所以只认"打印"这一族，别的 sel 调用当场报 —— 不猜、不静默。
       if (tag(fn) === 'sel') {
