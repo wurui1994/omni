@@ -25,6 +25,8 @@ import {
   isCmp, isIntType, isFloatType, intBits, typeLanes,
 } from '../ir.js';
 import { replaceRef } from './edit.js';
+import { buildCfg } from './cfg.js';
+import { mayWriteMemory, sameCell, cellOf, disjoint, sameSpot } from './memory.js';
 import { registerPass } from './pass.js';
 
 /** 取一个 ref 的常量池条目；不是常量、或者压根不是 ref（角色 'n'/'s'/'j'）回 null。
@@ -284,6 +286,60 @@ function intIdentity(fn, mod, pc, op, t, A, B, x, y) {
 }
 
 /**
+ * 存储转发：`MLOAD p (… MSTORE p x …)` ⇒ `x`。
+ * 照 `generic.rules:839`「Load of store of same address, with compatibly typed value
+ * and same size」那一族（它靠内存 SSA 链往回看，最多穿四条 store，每条要
+ * `Disjoint`）。我们没有那条链，所以**块内往回走**，一遇到证不了的就停：
+ *
+ *   - 同一个地址 ref + `sameCell`（同偏移、同字节数、全宽访问）⇒ 换成那条 store 的值
+ *   - **一定不相交**的 `MSTORE`（同基址、两个常量偏移的区间不叠，见 `memory.js` 的
+ *     `disjoint`）⇒ 接着往前找。`t[0]=x; t[1]=y; … t[0]` 这一族靠它才转发得了
+ *   - 相交或者证不了 ⇒ **停**
+ *   - 任何可能写内存的指令（调用、syscall、PSTORE…）⇒ 停
+ *   - 读内存的指令（别的 MLOAD）不打断 —— 读不改值
+ *
+ * 这是 C 那条腿上最值钱的一格：影子栈上的局部量（数组、取过地址的变量）每次读写都是
+ * 一条 MLOAD/MSTORE，转发之后它们变回普通的值。
+ */
+function forwardLoads(fn, mod) {
+  const cfg = buildCfg(fn);
+  if (cfg.blocks.length === 0) return 0;
+  let n = 0;
+  for (const bb of cfg.blocks) {
+    for (let pc = bb.from; pc <= bb.to; pc++) {
+      if (fn.op[pc] !== OP.MLOAD) continue;
+      const v = lookBackStore(fn, mod, bb.from, pc);
+      if (v < 0) continue;
+      /* 换成那条 store 的值。MLOAD 本身留着（没人引用了，紧跟的 deadcode 会删）。
+         值的可见性不用另外问：那条 store 与这条 load 在同一个块里，而块整个落在
+         同一层区域里，所以 store 的值在这儿一定看得见。 */
+      replaceRef(fn, REF_BIAS + pc, v);
+      n++;
+    }
+  }
+  return n;
+}
+
+/** 往回找"写同一处"的那条 MSTORE 的值 ref；找不到/证不了回 -1。 */
+function lookBackStore(fn, mod, from, pcLoad) {
+  const want = cellOf(fn, mod, pcLoad, true);
+  for (let pc = pcLoad - 1; pc >= from; pc--) {
+    const op = fn.op[pc];
+    if (op === OP.MSTORE) {
+      const got = cellOf(fn, mod, pc, false);
+      if (sameSpot(want, got)) {
+        /* 同一个格子：还要问"读回来就是写进去那个值"吗（窄访问不行，见 sameCell）。 */
+        return sameCell(fn, pcLoad, pc) ? fn.b[pc] : -1;
+      }
+      if (disjoint(want, got)) continue;   // 一定不相交（Go 的 Disjoint）⇒ 接着往前找
+      return -1;                           // 证不了 ⇒ 停
+    }
+    if (mayWriteMemory(op)) return -1;
+  }
+  return -1;
+}
+
+/**
  * 跑 opt。回改了几条指令。
  *
  * 迭代到不动点（Go 的 `applyRewrite` 同形），但**每条指令最多改一次** ——
@@ -307,6 +363,22 @@ export function opt(fn, mod) {
     }
     if (changed === 0) break;
     total += changed;
+  }
+  /* 存储转发放在逐条重写**之后**：转发出来的值还要再被折一遍常量
+     （`MSTORE p k1; MLOAD p` -> k1，然后 `ADD k1 k2` 才折得掉），所以再跑一轮重写。 */
+  const fwd = forwardLoads(fn, mod);
+  if (fwd > 0) {
+    total += fwd;
+    for (let pc = 0; pc < fn.op.length; pc++) {
+      if (done.has(pc)) continue;
+      const to = rewriteValue(fn, mod, pc);
+      if (to === -1) continue;
+      const self = REF_BIAS + pc;
+      if (to === self) continue;
+      done.add(pc);
+      replaceRef(fn, self, to);
+      total++;
+    }
   }
   return total;
 }

@@ -43,9 +43,14 @@ int addsub(int n) { return (n + 3) - 3; }        /* :816 Sub (Add x y) y => x */
 int negneg(int n) { return -(-n); }              /* :720 Neg (Neg x) => x */
 int notnot(int n) { return ~(~n); }              /* :689 Com (Com x) => x */
 double fmul(double x) { return x * 1.0; }        /* :1370 MulF x 1 => x */
+
+/* 存储转发（:839 Load of store of same address）。t[1] 那一条写在中间，
+   与 t[0] **一定不相交**（同基址、两个常量偏移），所以往回找不许被它挡住。 */
+int fwd(int n) { int t[2]; t[0] = n + 1; t[1] = 7; return t[0]; }
+
 int main(void) {
   int s = ident(7) + zeros(9) + addsub(11) + negneg(13) + notnot(15);
-  return s + (int)fmul(2.0);
+  return s + (int)fmul(2.0) + fwd(20);
 }
 `;
 
@@ -91,6 +96,8 @@ const tn = opCount(mod.funcs.find((f) => f.name === 'notnot'));
 ok((tn.BNOT || 0) === 0, 'notnot 里的两条 BNOT 都没了');
 const fm = opCount(mod.funcs.find((f) => f.name === 'fmul'));
 ok((fm.MUL || 0) === 0, 'fmul 里的浮点乘 1 没了');
+const fw = opCount(mod.funcs.find((f) => f.name === 'fwd'));
+ok((fw.MLOAD || 0) === 0, `fwd 里的 MLOAD 被转发掉了（得 ${fw.MLOAD || 0}）`);
 
 const errs = verifyMir(mod);
 ok(errs.length === 0, 'verifyMir 干净' + (errs.length ? '：' + errs.slice(0, 4).join(' / ') : ''));
