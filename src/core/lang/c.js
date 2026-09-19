@@ -14,6 +14,7 @@ import { C_INCLUDE_DIR } from '../runtime/c_runtime.js';
 import { lowerC, lowerCNative, declsOfC } from '../frontend-c/tccgen.js';
 import { Cpp } from '../frontend-c/tccpp.js';
 import { verifyMir } from '../mir/verify.js';
+import { mirOptLevel, optimizeMir } from '../mir/opt/index.js';
 
 /* SDK 根找一次就记住（一趟里 spawn xcrun 那一下是几十毫秒，而系统头每个文件都要问一遍）。
    跟着 sdkRoot 一起住在这儿：它是这门语言"上哪找系统头"的状态，不是驱动的状态。 */
@@ -182,7 +183,34 @@ export function cMir(path, incs, defs, args, sysIncs, tgt) {
   for (const w of warnings) stderr(`${w}\n`);
   const errs = verifyMir(mod);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
+  optMir(mod, path);
   return mod;
+}
+
+/**
+ * 公共优化管线那一格（ADR-0039）。`OMNI_MIR_OPT=1..3` 才跑，缺省不跑 ——
+ * 理由见 `mir/opt/index.js`：四条后端腿现在都有"同一份输入两次编译逐字节相同"的判据。
+ *
+ * 跑完**再验一遍**：通道改坏了图要在这儿被骂，而不是等到后端发出一堆没法读的汇编。
+ * `OMNI_MIR_OPT_STATS=1` 印一行账（几个函数、指令从多少降到多少）。
+ */
+function optMir(mod, path) {
+  const level = mirOptLevel(env('OMNI_MIR_OPT'));
+  if (level <= 0) return;
+  /* `OMNI_MIR_OPT_ONLY=名字[,名字…]`：只跑这几格。做单格 A/B 与二分用 ——
+     真产物上出的第一个错（`r3_num:%154 CALL: %37 定义在一个已经关掉的区域里`）
+     就是这么定位到哪一格的。 */
+  const onlyText = env('OMNI_MIR_OPT_ONLY');
+  const only = onlyText === undefined || onlyText === '' ? undefined : onlyText.split(',');
+  const st = optimizeMir(mod, { level, only });
+  const errs = verifyMir(mod);
+  if (errs.length > 0) {
+    throw new OmniError(`mir/opt(-O${level}) 之后不再良构:\n  ${errs.join('\n  ')}`);
+  }
+  if (env('OMNI_MIR_OPT_STATS') === '1') {
+    const pct = st.before === 0 ? 0 : ((1 - st.after / st.before) * 100).toFixed(1);
+    stderr(`mir/opt -O${level} ${path}: ${st.funcs} 个函数，指令 ${st.before} -> ${st.after}（-${pct}%）\n`);
+  }
 }
 
 /**
@@ -252,7 +280,7 @@ export function cppText(path, incs, defs, dflag, pflag, deps, sysIncs, incls, ve
  * 读文件、预处理、降级都在这一门语言里 —— 驱动只递参数、拿 `{ mod, warnings }`。
  */
 export function cMirNative(path, opts, defs) {
-  return lowerCNative(path, readText(path), {
+  const r = lowerCNative(path, readText(path), {
     readFile: readOrNull,
     includeDirs: opts.includeDirs,
     sysIncludeDirs: opts.sysIncludeDirs,
@@ -266,6 +294,10 @@ export function cMirNative(path, opts, defs) {
      * 于是 `.c` 输入上「精确的调用次数与自用时间」不再要外部编译器。 */
     instrument: opts.instrument === true,
   }, defs.map(([name, body]) => ({ name, body })));
+  /* 原生那条腿也过同一格管线（ADR-0039）。`{mod, warnings}` 这个形状是 lowerCNative
+     自己的约定，所以取里头那个 mod。 */
+  if (r !== null && r !== undefined && r.mod !== undefined) optMir(r.mod, path);
+  return r;
 }
 
 /**

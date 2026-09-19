@@ -25,7 +25,7 @@
  */
 
 import { OP, OP_MODES, OP_NAMES, REF_BIAS, REF_NONE } from '../ir.js';
-import { buildCfg, dominators } from './cfg.js';
+import { inScope, regionScope } from './region.js';
 import { replaceRef } from './edit.js';
 import { registerPass } from './pass.js';
 
@@ -71,21 +71,18 @@ function refineKey(fn, cls, pc) {
 }
 
 /**
- * 支配：`pcA` 的定义支配 `pcB` 吗。同块看先后，跨块爬支配树（Go 的 `IsAncestorEq`）。
+ * 支配：`pcA` 定义的值在 `pcB` 处**还用得上吗**。
+ *
+ * ⚠️ 这儿**不能用 CFG 的支配树**。第一版用了，在 `src/runtime/omni_r3.c` 上当场被
+ * verifier 抓住：`r3_num:%156 CALL: %38 定义在一个已经关掉的区域里`。
+ * 循环之前的块在支配树上确实是循环之后那块的祖先，但 MIR 的规矩是**词法作用域**
+ * （`verify.js:124 checkRef`）—— `LOOP … END` 一关，里头（与外头跨过 END）的值就不可见。
+ * 判据因此是 `region.js` 的 `inScope`：先后次序 + 定义那层区域还开着。
+ *
+ * 换掉 w 的**全部**使用是安全的：w 的每个使用点都满足"w 那层区域还开着"，
+ * 而 v 那层是 w 那层的祖先，于是 v 在那些点上也开着。
  */
-function domin(cfg, idom, pcA, pcB) {
-  const ba = cfg.pcBlock[pcA], bb = cfg.pcBlock[pcB];
-  if (ba === undefined || bb === undefined) return false;
-  if (ba === bb) return pcA < pcB;
-  let b = bb;
-  for (let guard = 0; guard < cfg.blocks.length + 1; guard++) {
-    const p = idom[b];
-    if (p === undefined || p < 0 || p === b) return false;
-    if (p === ba) return true;
-    b = p;
-  }
-  return false;
-}
+function domin(sc, pcA, pcB) { return inScope(sc, pcA, pcB); }
 
 /**
  * 跑 cse。回「改了多少处引用」。**一条指令都不删** —— 后面那格 deadcode 收尸。
@@ -148,8 +145,7 @@ export function cse(fn, mod, opts) {
   }
 
   /* ---- 三、每个类里挑支配者，把被支配的那些的使用改过去 */
-  const cfg = buildCfg(fn);
-  const idom = dominators(cfg);
+  const sc = regionScope(fn);
   let moved = 0;
   for (const e of parts) {
     /* 按下标升序：靠前的更可能支配靠后的（Go 按 DomOrder 排，同一个用意） */
@@ -161,7 +157,7 @@ export function cse(fn, mod, opts) {
       for (let j = i + 1; j < list.length; j++) {
         const w = list[j];
         if (gone.has(w)) continue;
-        if (!domin(cfg, idom, v, w)) continue;
+        if (!domin(sc, v, w)) continue;
         moved += replaceRef(fn, REF_BIAS + w, REF_BIAS + v);
         gone.add(w);
       }

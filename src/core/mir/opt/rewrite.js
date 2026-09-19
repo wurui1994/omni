@@ -21,16 +21,27 @@
  */
 
 import {
-  OP, REF_BIAS, REF_NONE, T_BOOL, T_F32,
+  OP, OP_MODES, REF_BIAS, REF_NONE, T_BOOL, T_F32,
   isCmp, isIntType, isFloatType, intBits, typeLanes,
 } from '../ir.js';
 import { replaceRef } from './edit.js';
 import { registerPass } from './pass.js';
 
-/** 取一个 ref 的常量池条目；不是常量回 null。 */
+/** 取一个 ref 的常量池条目；不是常量、或者压根不是 ref（角色 'n'/'s'/'j'）回 null。
+ *
+ * ⚠️ **必须按角色问**：`CALL` 的 a 是函数表下标、`BR` 的 aux 是层数 —— 都是小整数，
+ * 拿去查常量池会查到一条**别人的常量**（或者 undefined）。第一版没按角色问，
+ * `omni c run` 上当场炸在 `c.kind`（fib 那个例子里 a 是函数号 3）。 */
 function constOf(mod, ref) {
   if (ref === REF_NONE || ref >= REF_BIAS) return null;
-  return mod.consts.items[ref];
+  const c = mod.consts.items[ref];
+  return c === undefined ? null : c;
+}
+/** 角色是 'r' 的那一格才当 ref 读。 */
+function constArg(fn, mod, pc, which) {
+  const m = OP_MODES[fn.op[pc]];
+  if (m[which] !== 'r') return null;
+  return constOf(mod, which === 0 ? fn.a[pc] : fn.b[pc]);
 }
 function intOf(c) { return c !== null && c.kind === 'int' ? BigInt(c.text) : null; }
 function realOf(c) {
@@ -47,11 +58,15 @@ function asUint(v, bits) { return bits === 32 ? BigInt.asUintN(32, v) : BigInt.a
 
 function mkInt(mod, t, v) { return mod.consts.intern(t, 'int', String(wrapInt(v, intBits(t)))); }
 function mkBool(mod, v) { return mod.consts.bool(v); }
-/** 浮点常量：f32 先 fround（见 ir.js 的 T_F32）。非有限的一律不折，回 -1。 */
+/** 浮点常量：f32 先 fround（见 ir.js 的 T_F32）。非有限的一律不折，回 -1。
+ *
+ * **负零要特判**：`String(-0)` 是 `"0"`，直接用它会把 `-0.0` 折成 `0.0` ——
+ * `tests/c/gen/15-float.c` 上量到过（`-0.000000` 印成了 `0.000000`）。 */
 function mkReal(mod, t, x) {
   const v = t === T_F32 ? Math.fround(x) : x;
   if (!Number.isFinite(v)) return -1;
-  return mod.consts.intern(t, 'real', String(v));
+  const text = Object.is(v, -0) ? '-0' : String(v);
+  return mod.consts.intern(t, 'real', text);
 }
 
 /** 标量（不是向量）的整数/浮点类型 —— 折叠只在这两类上做。 */
@@ -123,7 +138,7 @@ function rewriteValue(fn, mod, pc) {
   const op = fn.op[pc];
   const t = fn.t[pc];
   const A = fn.a[pc], B = fn.b[pc];
-  const ca = constOf(mod, A), cb = constOf(mod, B);
+  const ca = constArg(fn, mod, pc, 0), cb = constArg(fn, mod, pc, 1);
 
   /* ---------------------------------------------------------- 一、常量折叠 */
   if (isCmp(op)) {

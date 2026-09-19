@@ -20,8 +20,15 @@
 
 import { OP, REF_BIAS } from '../ir.js';
 import { buildCfg, reachable } from './cfg.js';
+import { inScope, regionScope } from './region.js';
 import { replaceRef } from './edit.js';
 import { registerPass } from './pass.js';
+
+/** 这个 ref 在 `pc` 那儿看得见吗（常量永远看得见；指令要问词法作用域）。 */
+function usableHere(sc, fn, ref, pc) {
+  if (ref < REF_BIAS) return true;
+  return inScope(sc, ref - REF_BIAS, pc);
+}
 
 /** 有 FRAME 出现的函数里保守地把所有 slot 标为地址已取。
  *  更精确的：追 FRAME → MLOAD/MSTORE 的定义-使用链，只标真被取过地址的。第二批再做。 */
@@ -59,6 +66,10 @@ export function mem2reg(fn, _mod) {
   const cfg = buildCfg(fn);
   if (cfg.blocks.length === 0) return 0;
   const reach = reachable(cfg);
+  /* 词法作用域（`region.js`）：跨块传值的时候必须问一句"那个定义在这儿还看得见吗"。
+     少这一问的后果见 cse.js 里那段 —— 循环之前定义的值传到循环之后去用，
+     verifier 骂「定义在一个已经关掉的区域里」。 */
+  const sc = regionScope(fn);
 
   /* 每个块入口时各 slot 的值。`UNKNOWN` = 还不知道 ⇒ LOAD 留着不动，走 SLOT。
      ⚠️ 这里存的是 **ref**（`REF_BIAS + 指令下标` 或常量号），不是裸的 pc ——
@@ -99,7 +110,7 @@ export function mem2reg(fn, _mod) {
       if (op === OP.LOAD && promotable.has(fn.aux[pc])) {
         const v = cur[fn.aux[pc]];
         const myRef = REF_BIAS + pc;          // 这条 LOAD 的结果的 ref
-        if (v !== UNKNOWN && v !== myRef) {
+        if (v !== UNKNOWN && v !== myRef && usableHere(sc, fn, v, pc)) {
           /* 块内有定义 ⇒ 把所有引用 %pc 的地方改成引用 v。
              LOAD 本身留着（没人引用了，deadcode 那格会删）。 */
           changed += replaceRef(fn, myRef, v);
@@ -110,9 +121,13 @@ export function mem2reg(fn, _mod) {
       }
     }
 
-    /* 把 cur 传给唯一前驱的后继（安全：单前驱的块入口值 = 前驱出口值） */
+    /* 把 cur 传给"唯一前驱就是我"的后继。
+       ⚠️ 必须同时问 `pred[0] === bb.id`：只问"前驱只有一个"会在 CFG 少一条边的时候
+       把值传到一个其实另有来路的块里 —— `tests/c/gen/10-switch.c` 上量到过
+       （那时 buildCfg 还不认 BRTABLE，switch 的目标块看起来都只有一个前驱，s=7457 变 7557）。 */
     for (const sid of cfg.blocks[bb.id].succ) {
-      if (cfg.blocks[sid].pred.length === 1) {
+      const sp = cfg.blocks[sid].pred;
+      if (sp.length === 1 && sp[0] === bb.id) {
         for (const s of promotable) {
           if (cur[s] !== UNKNOWN) entryCur[sid][s] = cur[s];
         }

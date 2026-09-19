@@ -18,10 +18,13 @@
 
 import { OP, OP_NAMES, opensRegion } from '../ir.js';
 
-/** 一条指令是不是控制流的终结子（它之后必然开一个新块）。 */
+/** 一条指令是不是控制流的终结子（它之后必然开一个新块）。
+ *  `BRTABLE` 也在里头 —— 少了它，`switch` 的 CFG 就是**错的**：
+ *  表里那些目标拿不到入边、BRTABLE 那一块还多出一条"顺序落下去"的边。
+ *  这个洞是 `tests/c/gen/10-switch.c` 抓出来的（mem2reg 按错的单前驱传了值，s=7457 变 7557）。 */
 function isTerm(op) {
   return op === OP.BR || op === OP.BRIF || op === OP.RET
-      || op === OP.IF || op === OP.ELSE;
+      || op === OP.IF || op === OP.ELSE || op === OP.BRTABLE;
 }
 
 /**
@@ -83,6 +86,8 @@ export function buildCfg(fn) {
   // jmpB[pc] = 条件为假时去哪儿（-1 = 顺序执行下一条）
   const jmpA = new Array(n).fill(-1);
   const jmpB = new Array(n).fill(-1);
+  /* jmpT[pc] = 跳表的全部目标（含兜底）。只有 BRTABLE 有，别人是 null。 */
+  const jmpT = new Array(n).fill(null);
   const isLeader = new Array(n + 1).fill(false);
   isLeader[0] = true;
 
@@ -106,6 +111,13 @@ export function buildCfg(fn) {
       jmpA[pc] = endOf[open] + 1;
     } else if (op === OP.RET) {
       jmpA[pc] = n;                                        // n = 出口
+    } else if (op === OP.BRTABLE) {
+      /* 跳表（ADR-0017 第三刀）：b 是层数池（**层数，不是 ref**），aux 是兜底层数。 */
+      const outs = [];
+      for (const lv of fn.levelsOf(fn.b[pc])) outs.push(brTarget(fn, openStack, lv, endOf, pc));
+      outs.push(brTarget(fn, openStack, fn.aux[pc], endOf, pc));
+      jmpT[pc] = outs;
+      for (const t of outs) isLeader[t <= n ? t : n] = true;
     }
 
     if (jmpA[pc] >= 0) isLeader[jmpA[pc] <= n ? jmpA[pc] : n] = true;
@@ -141,12 +153,16 @@ export function buildCfg(fn) {
     const last = bb.to;
     const op = fn.op[last];
     if (op === OP.RET) continue;                       // 到出口，没有后继
+    if (jmpT[last] !== null) {                         // 跳表：只有表里那些目标
+      for (const t of jmpT[last]) addEdge(bb.id, t);
+      continue;
+    }
     if (jmpA[last] >= 0) addEdge(bb.id, jmpA[last]);
     if (jmpB[last] >= 0) addEdge(bb.id, jmpB[last]);
     if (jmpA[last] < 0 && jmpB[last] < 0) addEdge(bb.id, last + 1);   // 顺序落下去
   }
 
-  return { blocks, entry: 0, pcBlock, jmpA, jmpB, endOf, elseOf };
+  return { blocks, entry: 0, pcBlock, jmpA, jmpB, jmpT, endOf, elseOf };
 }
 
 /** 从入口能到的块（不可达的块后面 deadcode 那格会删）。 */

@@ -77,6 +77,11 @@ const SUITES = [
   { s: 'oracle/run.js' },
   { s: 'oir/run.js' },
   { s: 'cabi/run.js' }, { s: 'wat/run.js' }, { s: 'glr/run.js' }, { s: 'mir/run.js' },
+  /* 公共优化管线（ADR-0039）：每一格自己的判据 + **L1 行为一致** ——
+     `tests/c/gen/*.c` 那 85 份，`omni c run` 开与不开 `OMNI_MIR_OPT=1` 的 stdout
+     与退出码逐字节相同。抓出过两个真 bug：buildCfg 不认 BRTABLE（switch 的 CFG 是错的）、
+     `String(-0)` 是 `"0"`（把 -0.0 折成了 0.0）。 */
+  { s: 'mir/opt.js' },
   /* 闭环那一条（第一百三十五片）：`.omni` -> 生成的 C -> **我们自己那台 C 前端**的
    * `.o` -> **我们自己的链接器**的可执行文件 -> 输出与解释器逐字节相同。
    * 一个外部工具都不用，所以它守的是「整条自己的路」而不是某一格。 */
