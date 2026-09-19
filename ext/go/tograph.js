@@ -1597,24 +1597,26 @@ function toNode(x) {
         if (FORMATS.has(m)) {
           const raw = args === undefined ? [] : kids(args);
           if (raw.length === 0 || tag(raw[0]) !== 'str') {
-            /* **格式串不是字面量**（变量、函数返回值等）—— 这一层读不出它的动词。
-               降成 concat(所有实参)：不精确（丢了格式信息），但不中断。 */
             return node('prim', { args: argNodes }, { name: 'concat' });
           }
           let text = leaf(kids(raw[0])[0]);
           const rest = argNodes.slice(1);
-          if (m !== 'Printf') return fmtOf(text, rest);
-          /* `Printf` **自己不换行**，而图上那格 `print` 换行 —— 所以格式串以 `\n` 收尾时
-             把它去掉（两边正好对上）；不以 `\n` 收尾的这一批接不了：图上没有"不换行的印"。 */
-          if (!text.endsWith('\n')) {
-            /* **`Printf` 不以 `\n` 收尾** —— 图上那格 `print` 自带换行，
-               所以降成"print(concat(…) + '')"（不加换行的印 = 把结果当表达式扔掉）。
-               但 Printf 本身是语句，丢掉就少了一次副作用。折中：**降成 print**，
-               尾部补空串占位 —— 运行期多印一个空行（偏差已记在案），但语义链条不断。 */
-            return node('prim', { args: [fmtOf(text, rest)] }, { name: 'print' });
+          /* **Sprintf / Errorf → 运行时 __goSprintf**（支持 %4.2f 等格式宽度）。
+             Printf / Fprintf → 先 __goSprintf 再 print。 */
+          if (m === 'Sprintf' || m === 'Errorf') {
+            return node('call', {
+              fn: node('ref', {}, { name: '__goSprintf' }),
+              args: [lit(text), ...rest],
+            });
           }
-          text = text.slice(0, -1);
-          return node('prim', { args: [fmtOf(text, rest)] }, { name: 'print' });
+          /* Printf / Fprintf → print(__goSprintf(fmt, args...)) */
+          if (text.endsWith('\n')) text = text.slice(0, -1);
+          return node('prim', { args: [
+            node('call', {
+              fn: node('ref', {}, { name: '__goSprintf' }),
+              args: [lit(text), ...rest],
+            }),
+          ] }, { name: 'print' });
         }
         // `p.total()` -> `total(p)`：接收者是**第一格实参**（声明里写着是哪个类型，
         // 所以这一步是纯改写，不查表、不加节点）。
