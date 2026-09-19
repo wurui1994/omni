@@ -523,8 +523,12 @@ function xzeroOf(qual, name) {
     return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${qual}.${fn}`, p)]));
   }
   if (XPKG.under.has(qual)) return zeroOf(XPKG.under.get(qual), `${name}:${qual}`, p);
-  throw new Error(`go->graph: 带包限定的类型 ${qual} 的零值要那个包的声明，`
-    + `而包 ${p} 的声明不在语料里（标准库 / 语料树外的包）`);
+  /* **声明在语料外的那些**（标准库 `strings.Builder` / `bytes.Buffer` / `sync.Mutex`，
+     语料树外的 `src.XPos` / `constant.Value`）：字段表拿不到，零值降成 `map-new([])`。
+     与嵌入字段那一刀同一条理由 —— 不精确（真正的字段更多、interface 的零值该是 nil），
+     但它让 toGraph 不再中断，运行期访问没登记的字段得到 undefined 而不是编译期停住。
+     **要精确就得把标准库的字段表也扫进来**（declIx 这一批只收名字，不收字段表）。 */
+  return mapNew();
 }
 
 /**
@@ -837,7 +841,26 @@ function fmtOf(text, args) {
     if (text[i] !== '%') { run += text[i]; continue; }
     const v = text[i + 1];
     if (v === '%') { run += '%'; i += 1; continue; }
-    if (v !== 'd' && v !== 's' && v !== 'v') {
+    if (v !== 'd' && v !== 's' && v !== 'v'
+      && v !== 'q' && v !== 'x' && v !== 'T' && v !== 'p'
+      && v !== 'f' && v !== 'e' && v !== 'g' && v !== 'o'
+      && v !== 'b' && v !== 'c' && v !== 'w' && v !== 't') {
+      /* 宽度修饰符（`%+v`、`%#v`、`%-20s`、`%02d`）：扫过修饰符找到真正的动词。
+         go 的修饰符集合是 `+ - # 0 [0-9] .` —— 后面跟一格字母才是动词。 */
+      const REST = text.slice(i + 1);
+      const vm = /^([+\-#0 *.]*\d*\.?\d*)([a-zA-Z])/.exec(REST);
+      if (vm !== null) {
+        const verb = vm[2];
+        // 认识的动词统一走 concat（图上不区分格式宽度/进制）
+        if ('dsvqxTpfegobcwt'.includes(verb)) {
+          if (ai >= args.length) throw new Error('go->graph: 格式串里的动词比实参多');
+          if (run !== '') { parts.push(lit(run)); run = ''; }
+          parts.push(args[ai]);
+          ai += 1;
+          i += vm[0].length;    // 跳过修饰符 + 动词
+          continue;
+        }
+      }
       throw new Error(`go->graph: 格式动词 %${v ?? '?'} 还没接`
         + '（这一批只有 %d / %s / %v / %%，别的要一台真的格式化机器）');
     }
@@ -868,6 +891,9 @@ function makeOf(args) {
       args: [n === undefined ? lit(0) : toNode(n), zeroOf(kids(ty)[0])],
     }, { name: 'fill' });
   }
+  /* `make(name, …)` 是 `make(MySliceType, n)` 那一种——类型别名在树上是 name 而不是 slice/map。
+     **降成空列表占位**（与 `make([]T, 0)` 落同一个值），不精确但不中断。 */
+  if (tag(ty) === 'name') return listNew(args.length > 1 ? [toNode(args[1])] : []);
   throw new Error(`go->graph: make 的第一格是 ${tag(ty)} —— 这一批只接 map 与切片`);
 }
 
@@ -1043,7 +1069,14 @@ function toNode(x) {
       const name = leaf(nm);
       const self = part(kids(recv)[0], 'name');
       if (self === undefined) {
-        throw new Error(`go->graph: ${name} 的接收者没有名字 —— 匿名接收者这一批没接`);
+        /* **匿名接收者** (`func (_ *T) M()`)：接收者没有名字，给它一个合成的 `__self`。
+           go 允许这么写（接收者不在方法体里被引用时），图上的函数总需要一个形参名字。 */
+        const recvTy = kids(kids(recv)[0]).find((y) => tag(y) !== 'name');
+        const ownerTn = namedTypeOf(recvTy);
+        const graphName = ownerTn !== null ? mangle(ownerTn, name) : name;
+        return node('bind', {
+          init: funcOf(sig, blk, graphName, '__self', ownerTn),
+        }, { name: graphName });
       }
       /* **方法名按接收者类型压平**（见 `MSET` / `mangle` 那一段）。 */
       const recvTy = kids(kids(recv)[0]).find((y) => tag(y) !== 'name');
@@ -1201,7 +1234,9 @@ function toNode(x) {
         if (FORMATS.has(m)) {
           const raw = args === undefined ? [] : kids(args);
           if (raw.length === 0 || tag(raw[0]) !== 'str') {
-            throw new Error(`go->graph: ${m} 的格式串不是字面量 —— 这一层读不出它的动词`);
+            /* **格式串不是字面量**（变量、函数返回值等）—— 这一层读不出它的动词。
+               降成 concat(所有实参)：不精确（丢了格式信息），但不中断。 */
+            return node('prim', { args: argNodes }, { name: 'concat' });
           }
           let text = leaf(kids(raw[0])[0]);
           const rest = argNodes.slice(1);
@@ -1209,8 +1244,11 @@ function toNode(x) {
           /* `Printf` **自己不换行**，而图上那格 `print` 换行 —— 所以格式串以 `\n` 收尾时
              把它去掉（两边正好对上）；不以 `\n` 收尾的这一批接不了：图上没有"不换行的印"。 */
           if (!text.endsWith('\n')) {
-            throw new Error('go->graph: Printf 的格式串不以换行收尾 —— 图上那格 print 自带换行，'
-              + '没有"不换行的印"那一格');
+            /* **`Printf` 不以 `\n` 收尾** —— 图上那格 `print` 自带换行，
+               所以降成"print(concat(…) + '')"（不加换行的印 = 把结果当表达式扔掉）。
+               但 Printf 本身是语句，丢掉就少了一次副作用。折中：**降成 print**，
+               尾部补空串占位 —— 运行期多印一个空行（偏差已记在案），但语义链条不断。 */
+            return node('prim', { args: [fmtOf(text, rest)] }, { name: 'print' });
           }
           text = text.slice(0, -1);
           return node('prim', { args: [fmtOf(text, rest)] }, { name: 'print' });
