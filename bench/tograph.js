@@ -32,7 +32,9 @@
 // 印出来的第一栏是**按族的账**（`CLASSES`）。那一栏才是"下一刀该做什么"看的 ——
 // "还差多少"这句话的答案不是"一百条不同的话"，是**十几族决定**。
 
-import { readFileSync, readdirSync } from 'node:fs';
+import {
+  readFileSync, readdirSync, writeFileSync, appendFileSync, mkdirSync,
+} from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadGrammarTable } from '../src/core/glr/load.js';
@@ -41,6 +43,7 @@ import { glrParse } from '../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../src/core/source/diag.js';
 import { LANGS } from '../src/core/graph/langs.js';
 import { refDirIf } from '../tests/lib/refsrc.js';
+import { cacheRoot } from '../src/core/host/cache.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -484,5 +487,32 @@ if (rows.length === 0) {
   }
   process.stdout.write('\n这一份量的是**映射写全了没有**（改的是 ext/<语言>/tograph.js）；'
     + '语法那一层的账在 bench/grammars.js 上。\n');
+}
+
+/* ---- **自动日志**：每次跑完把结果写进 .omni-cache/tograph-log/<语言>-latest.json ----
+ * 同时追加一行到 <语言>-history.jsonl（带时间戳），方便看趋势而不用每次重跑。
+ * 日志路径跟 cacheRoot（不往 $HOME 里写）。 */
+{
+  const logDir = join(cacheRoot(), 'tograph-log');
+  try { mkdirSync(logDir, { recursive: true }); } catch { /* 已存在 */ }
+  const ts = new Date().toISOString();
+  for (const [lang, r] of rows) {
+    const entry = {
+      ts, lang: lang.name,
+      files: r.files, parsed: r.parsed, graphed: r.graphed,
+      softFiles: r.softFiles, softSites: r.softSites,
+      bytes: r.bytes, ms: r.ms,
+      wallCount: r.walls.length,
+      walls: r.walls.slice(0, 20).map(([msg, w]) => ({ msg, n: w.n })),
+      classes: r.classes,
+    };
+    const json = JSON.stringify(entry, null, 2);
+    try {
+      writeFileSync(join(logDir, `${lang.name}-latest.json`), json + '\n');
+    } catch { /* 静默 */ }
+    try {
+      appendFileSync(join(logDir, `${lang.name}-history.jsonl`), JSON.stringify(entry) + '\n');
+    } catch { /* 静默 */ }
+  }
 }
 

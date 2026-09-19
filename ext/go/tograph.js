@@ -652,23 +652,40 @@ function funcOf(sig, blk, name, self, selfType) {
  */
 let SW_DEPTH = 0;
 
-/** case 体里不许有 `break`（进不去内层的循环 / switch / 函数 —— 那几格各管自己）。 */
+/** case 体里的 `break`（进不去内层的循环 / switch / 函数 —— 那几格各管自己）。 */
 const BREAK_STOP = new Set(['for', 'switch', 'tswitch', 'select', 'fn', 'fnlit', 'method']);
-function noBreak(x) {
-  if (!isList(x)) return;
-  if (tag(x) === 'break') {
-    throw new Error('go->graph: switch 里的 break 是跳出 switch —— 落成 branch 链会变成'
-      + '跳出循环，这一格当场报');
-  }
-  if (BREAK_STOP.has(tag(x))) return;
-  for (const k of kids(x)) noBreak(k);
+/** `continue` 只被**循环**和函数拦下（switch 不拦它 —— go 里 switch 里的 continue 走外层循环）。 */
+const CONT_STOP = new Set(['for', 'fn', 'fnlit', 'method']);
+function hasJump(x, want, stop) {
+  if (!isList(x)) return false;
+  if (tag(x) === want) return true;
+  if (stop.has(tag(x))) return false;
+  return kids(x).some((k) => hasJump(k, want, stop));
 }
 
-/** 一格分支的体：`(body 语句…)` -> 一格 region（go 的 case 体自带一层作用域）。 */
+/**
+ * **一格分支的体**：`(body 语句…)` -> 一格 region（go 的 case 体自带一层作用域）。
+ *
+ * 体里有 `break` 那一支要多一层：switch 落成的是 branch 链，`break` 落成 `loop-exit`
+ * 会跳出**外层循环**（答案错而不报）。办法是把这一支的体裹进一格**跑一趟就出的循环**
+ * （`for ;; { 体; break }`）—— 于是 `loop-exit` 跳出的正是这格假循环 = 跳出 switch。
+ *
+ * **`continue` 与这一刀冲突**：它本该走外层那个真循环，裹一层之后会走假的。
+ * 所以这两个同时出现在一支里就照实报（编译器自己的代码里这种写法极少）。
+ */
 function armOf(c) {
   const stmts = partKids(c, 'body');
-  for (const st of stmts) noBreak(st);
-  return node('region', { body: many(stmts) });
+  const brk = stmts.some((st) => hasJump(st, 'break', BREAK_STOP));
+  if (!brk) return node('region', { body: many(stmts) });
+  if (stmts.some((st) => hasJump(st, 'continue', CONT_STOP))) {
+    throw new Error('go->graph: 一支 case 里 break 与 continue 都有 —— break 要裹一格假循环'
+      + '才跳得对，而那一层会把 continue 也接过去，这一格当场报');
+  }
+  const body = many(stmts);
+  body.push(loopExit('break'));
+  return node('region', {
+    body: [threePart({ init: [], cond: undefined, post: [], body })],
+  });
 }
 
 function switchOf(x) {
