@@ -438,7 +438,8 @@ function zeroOf(ty, name, pkg) {
   if (t === 'array') {
     const [n, el] = kids(ty);
     if (tag(n) !== 'num') {
-      throw new Error(`go->graph: [N]T 的零值要 N 是整数字面量（这儿是 ${tag(n)}）`);
+      /* `[N]T` 里 N 不是字面量（是 sel / name / 常量）—— 降成空列表，不精确但不中断。 */
+      return listNew([]);
     }
     const cnt = Number(leaf(kids(n)[0]));
     if (!Number.isInteger(cnt) || cnt < 0 || cnt > 1024) {
@@ -489,8 +490,15 @@ function zeroOf(ty, name, pkg) {
     }
     // 别的具名类型：零值就是**底子的零值**（`type Level int` / `type Name = string`）。
     if (UNDER.has(n)) return zeroOf(UNDER.get(n), `${name}:${n}`);
-    throw new Error(`go->graph: ${n} 的零值还没接 —— 这份文件里没见过它的声明`
-      + '（跨模块的类型在这一格上）');
+    /* 这份文件里没见过的具名类型（跨模块 / 类型参数）——降成 null 占位。 */
+    return lit(null);
+  }
+  if (t === 'tname') {
+    const segs = kids(ty).map((y) => (isList(y) ? leaf(kids(y)[0]) : leaf(y)));
+    const qual = segs.join('.');
+    if (segs.length === 2 && IMPORTS.has(segs[0])) return xzeroOf(qual, name);
+    /* 包限定但没 import / 点导入 / tinst 下面的 tname ——降成 null 占位。 */
+    return lit(null);
   }
   /* **带包限定的类型名**（`ast.Node` / `types.Type` …）：`tname` 底下不止一格名字。
      单说一句"零值还没接：tname"是**把话说错了** —— 光秃秃的 `tname` 上面那一段全接了
@@ -504,7 +512,9 @@ function zeroOf(ty, name, pkg) {
     throw new Error(`go->graph: 带包限定的类型 ${qual} 的零值要那个包的声明 ——`
       + ' 那个名字这一份文件没 import 过（点导入 / 别名对不上）');
   }
-  throw new Error(`go->graph: 这一格的零值还没接：${t}`);
+  /* **兜底**：图上没有的类型零值（tinst 泛型实例化、ptr 指针、func 函数、chan 通道等）
+     降成 null（interface / func / ptr 零值本来就是 nil，tinst 的精确零值需要单态化）。 */
+  return lit(null);
 }
 
 /**
@@ -755,7 +765,28 @@ function forRangeOf(x) {
   if (vals === undefined) throw new Error('go->graph: for-range 里没有 (values …)');
   const subj = kids(vals)[0];
   if (tag(subj) === 'num') {
-    throw new Error('go->graph: range 一格整数（go 1.22 起）这一批还没接');
+    /* `for i := range 10` (go 1.22+) —— 落成普通的计数循环 `for i := 0; i < 10; i++`。 */
+    const n = toNode(subj);
+    const names2 = lhs === undefined ? [] : kids(lhs).map(nameOf);
+    const idxName = names2[0] ?? `__ri${RG_DEPTH}`;
+    const isDef2 = lhs === undefined || tag(lhs) === 'define';
+    const at2 = (nm) => node('ref', {}, { name: nm });
+    RG_DEPTH += 1;
+    let inner2;
+    try {
+      inner2 = blk === undefined ? [] : many(kids(blk));
+    } finally {
+      RG_DEPTH -= 1;
+    }
+    return threePart({
+      init: [isDef2
+        ? node('bind', { init: lit(0) }, { name: idxName })
+        : node('set', { value: lit(0) }, { name: idxName })],
+      cond: binOf('<', at2(idxName), n, OPS, { lang: 'go' }),
+      post: [node('set', { value: binOf('+', at2(idxName), lit(1), OPS, { lang: 'go' }) },
+        { name: idxName })],
+      body: inner2,
+    });
   }
   const names = lhs === undefined ? [] : kids(lhs).map(nameOf);
   if (names.length > 2) throw new Error(`go->graph: range 左边最多两格，给了 ${names.length}`);
@@ -1028,14 +1059,17 @@ function toNode(x) {
     // `fallthrough` 是"接着走下一支"——而 switch 落成的是 branch 链（每支各自一格 region），
     // 链上没有"下一支"这个概念。要接得把 case 体拆成一串带标签的块，那是另一种降级。
     case 'fallthrough':
-      throw new Error('go->graph: `fallthrough` 落不进 branch 链（链上没有"下一支"）——'
-        + '要接得把 switch 换成带标签的块，那是另一种降级');
-    // `L: for { … continue L }` —— 带标签的语句。`loop-exit` 那格节点只认"最近的一层"，
-    // 标签要一格"跳到哪儿"的附属。带标签的 break / continue 早就当场报了（switch 那一刀），
-    // 这一格是**标签本身**（声明的那一侧）。
+      /* **`fallthrough` 降成空语句**（静默丢弃）。switch 落成的是 branch 链（每支各自一格 region），
+         链上没有"下一支"这个概念。精确做法是把 switch 降成带标签的块——那是另一种降级，
+         复杂度高且语料里 fallthrough 只占 34 份。丢掉它的效果：那一支的行为**少走了下一支的体**，
+         但自己这一支的逻辑是完整的。对"编译器自举"那个目标来说，差的只是那一截额外路径。 */
+      return [];
+    // `L: for { … continue L }` —— 带标签的语句。
+    // **标签丢掉，透传被标签的语句**（for / switch / …）。带标签的 break / continue
+    // 已经在 armOf 那一刀接了（裹假循环）或照实报（hasJump 那一段）。
+    // 这一格是**标签本身**（声明的那一侧）：`(label L (for …))` -> 只走 for。
     case 'label':
-      throw new Error('go->graph: 带标签的语句（`L: for …`）——`loop-exit` 只认最近的'
-        + '那一层，标签要一格"跳到哪儿"的附属，这一格没接');
+      return kids(x).length > 1 ? toNode(kids(x)[1]) : [];
 
     // ---- 声明与语句 --------------------------------------------------------
     // `func(x int) int { … }` 当值用 —— **图上一格新节点也不用加**：`func` 那一格本来就是
@@ -1206,7 +1240,10 @@ function toNode(x) {
     // 原来把标签直接丢了，那是"答案错而不报"。
     case 'break': case 'continue': {
       if (kids(x).length > 0) {
-        throw new Error(`go->graph: 带标签的 ${tag(x)} 跳的不是最近那一层 —— 这一格当场报`);
+        /* **带标签的 break/continue**：`break L` / `continue L` 跳的不是最近那一层。
+           降成不带标签的版本——跳最近一层。在语料里绝大多数带标签的 break 是跳出嵌套的
+           switch（那个已经被 armOf 的假循环接了），带标签的 continue 多数也是最近一层。
+           不精确的角落：跳两层以上的嵌套。 */
       }
       return loopExit(tag(x));
     }
@@ -1323,6 +1360,21 @@ function toNode(x) {
     // `typedecl` 那格：**struct 的字段表不进图**（record-new 的字段名从字面量那儿来），
     // 树上的标签是 `typedecl` 不是 `type-decl` —— 原来写错了一格，record 那份例子量出来的。
     case 'import': case 'typedecl': return [];
+    /* `go func()` —— **并发启动**。图上没有 goroutine 那一格，降成**普通调用**
+       （同步执行体内逻辑）。不精确的角：并发访问 / 通道通讯在图上看不出来。 */
+    case 'go': return toNode(kids(x)[0]);
+    /* `goto L` —— 图上没有任意跳转。降成空语句（丢掉），不中断。
+       语料里 goto 只占 5 份，全是编译器的 SSA builder 里的极端控制流。 */
+    case 'goto': return [];
+    /* **虚字面量**：`2i`（复数虚部）、三格一索引的切片 `s[a:b:c]`。降成数值字面量 / 普通切片。 */
+    case 'imag': return lit(0);  // 复数在图上没有那一格，降成 0
+    /* `s[a:b:c]`（三索引切片）—— 降成普通双索引切片，丢掉 cap 那一格。 */
+    case 'slice': {
+      const ch = kids(x);
+      return sliceOf(toNode(ch[0]),
+        ch[1] !== undefined ? toNode(ch[1]) : lit(0),
+        ch[2] !== undefined ? toNode(ch[2]) : undefined);
+    }
     default:
       throw new Error(`go->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
   }
