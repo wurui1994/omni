@@ -59,6 +59,43 @@ export const PASSES = [
   { name: 'middle opt',                batch: BATCH_1,   req: true,  fn: null },
   { name: 'known bits',                batch: BATCH_3,   req: false, fn: null },
   { name: 'early fuse',                batch: BATCH_2,   req: false, fn: null },
+  /**
+   * **`expand calls`（Go 的 `ssacompile/expand_calls.go`）—— 还空着，但设计定了。**
+   *
+   * Go 在那个文件开头把要做的四件事列清了：
+   *   1. 每个**聚合实参**变成"拆开聚合、把零件传过去"
+   *   2. 每个**聚合返回值**变成"从零件装配回来"
+   *   3. 每个**多值出口**变成"拆开、分别返回零件"
+   *   4. 进来的**聚合实参**变成"把零件装配起来"
+   *
+   * 为什么它是剩下最值钱的一格（量出来的，见 `sroa.js` 的 `OMNI_SROA_STAT` 与
+   * `arm64/from_mir.js` 的 `OMNI_EMIT_STAT`）：
+   *   - 后端每条 MIR op 只摊 1.1~1.6 条机器指令，寄存器分配覆盖率 99.3% ⇒ **后端没余量了**
+   *   - smallpt 的 `radiance` 里 405 条访存，**321 条落在同一个帧块上** ——
+   *     就是那份按值收进来的 `Ray`（48 字节、6 个 double）。它的地址交给了两个调用
+   *     （递归的 `radiance` 与 `intersect`），于是 `sroa.js` 判整块逃逸、一条都不换
+   *   - go 的同一个函数里聚合访存是 **0**：`Ray` 的 6 个 double 住 F0-F5
+   *
+   * **落点是这一格而不是前端**（HFA 那次栽过一回，记在 `tccgen.js` 的 `inRegs` 上）：
+   * 前端的 `callArgs(what, params, variadic, ret, old)` 手上只有类型、没有被调的链接信息，
+   * 所以调用方与被调方会各自按类型做决定 —— 一旦两边判据不同就串位。
+   * 而这一格拿得到**整个模块**（`optimizeMir(mod)`），可以**同时**改被调的形参表与所有
+   * 调用点，两侧一定一致。
+   *
+   * 做法（第 1 + 4 件，不需要给 MIR 加多值返回，先做这一半）：
+   *   - 候选：被调 `g` 不是 `extern`/`decl`、不变参、**没有 `FADDR` 取它的地址**
+   *     （取了地址就可能被模块外经指针调用，签名不能动）；
+   *   - `g` 的某个形参是按值收的聚合（调用点在那一格传 `ARGMEM`），
+   *     而且它在 `g` 里的访问能摊成 ≤ K 个标量格子（照 `sroa.js` 的 `scanBase` 那套
+   *     判据取格子的偏移与类型，Go 的 `MaxStruct = 4`，我们要到 6 才够 `Ray`）；
+   *   - 改写 `g`：那一格形参换成 N 个标量形参；在 `g` 的开头划一个同样大小的帧块、
+   *     把 N 个形参存进去、让原来那个形参槽装这一块的地址 —— **函数体一个字都不用改**，
+   *     而这一块的地址从此不出 `g`，`sroa.js` 与槽位提升随后就能动它；
+   *   - 改写每个调用点：`ARGMEM addr` 那一格换成 N 个标量实参，各自是 `MLOAD addr+off`。
+   *
+   * 第 2/3 件（聚合返回值、多值出口）要先给 MIR 加**多值返回**（Go 的 `OpSelectN`），
+   * 那是另一格的事 —— 顺序上也该在第 1/4 件之后，与 Go 的注释同序。
+   */
   { name: 'expand calls',              batch: BATCH_1,   req: true,  fn: null },
   { name: 'decompose builtin',         batch: BATCH_1,   req: true,  fn: null },
   { name: 'softfloat',                 batch: BATCH_NO,  req: true,  fn: null },
