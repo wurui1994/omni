@@ -11,6 +11,7 @@
 
 import { node, lit, un } from './graph.js';
 import { NODES } from './nodes.js';
+import { installDir, readText } from '../host/native.js';
 import {
   tag, kids, leaf, part, partKids,
   binOf, retOf, branchOf, loopExit, sliceOf, deferNow,
@@ -72,7 +73,7 @@ const hd = (x) => (isL(x) && typeof x[0] === 'string') ? x[0] : null;
 export function loadMapping(text) {
   const forms = readForms(text);
   const top = forms.find((f) => hd(f) === 'mapping');
-  if (!top) throw new Error(`mapping: ${path} 没有 (mapping <lang> …)`);
+  if (!top) throw new Error('mapping: 这份文本里没有 (mapping <lang> …)');
 
   const rules = new Map();
   const builtins = new Map();
@@ -107,6 +108,32 @@ export function loadMapping(text) {
     }
   }
   return { rules, builtins };
+}
+
+/**
+ * 读 `ext/<lang>/<lang>.mapping` 并解释它。找不着/读不出来就回**空表**
+ * （调用方于是整棵树走 native 那条路，行为与从前一样）。
+ *
+ * 为什么这一格住在这儿而不是各门语言的 tograph.js 里：从前那两份自己拼路径，用的是
+ * `new URL('./go.mapping', import.meta.url)` —— 而 `import.meta` **不在这门语言的子集里**
+ * （`lower.js` 当场报 `import.meta is not supported`），`URL` 也不是宿主 ABI 的一格，
+ * 于是 `tests/mir` 的 `lower/cli.js` 一直是红的。这条路照 `graph/langs.js` 的
+ * `treeRoot()` 那段账走：**"镜像在哪儿"由宿主的 `js_install_dir` 答**，两代产物都说得通。
+ *
+ * 不从 `langs.js` 借 `treeRoot()` 是因为环：`langs.js` import 每一门语言的 tograph.js，
+ * 而 tograph.js 要 import 这一格。
+ */
+export function loadMappingFor(lang) {
+  try {
+    const parts = installDir().split('/');
+    parts.pop();            // host
+    parts.pop();            // core
+    parts.pop();            // src
+    const root = parts.join('/');
+    return loadMapping(readText(`${root}/ext/${lang}/${lang}.mapping`));
+  } catch {
+    return { rules: new Map(), builtins: new Map() };
+  }
 }
 
 /**

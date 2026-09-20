@@ -5732,6 +5732,11 @@ function $js_run_timeout(ms, msg) {
 }
 function $js_os_tmpdir() { return $node("node:os").tmpdir(); }
 function $js_now_ms() { return Date.now(); }
+// performance.now()：单调毫秒（带小数）。老一点的宿主没有 performance，退回墙上时钟 ——
+// 调用方要的是两次之差，退回之后差值仍然对，只是精度掉到毫秒。
+function $js_now_hr() {
+  return typeof performance === 'object' && performance !== null ? performance.now() : Date.now();
+}
 // 峰值常驻内存，**字节**。node 的 maxRSS 是 KB（它自己归一过），C 那侧 getrusage 在
 // macOS 上是字节、Linux 上是 KB —— 两边都在自己那一侧换成字节，见 host/native.js。
 function $js_max_rss() { return process.resourceUsage().maxRSS * 1024; }

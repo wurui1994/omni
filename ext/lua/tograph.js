@@ -20,22 +20,14 @@ import {
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet,
   mapNew, mapGet, mapSet, mapHas, mapNames,
 } from '../../src/core/graph/fromtree.js';
-import { loadMapping, applyRule } from '../../src/core/graph/mapping.js';
+import { loadMappingFor, applyRule } from '../../src/core/graph/mapping.js';
 import { rewriteGraph, checkRules } from '../../src/core/graph/rewrite.js';
-import { readText } from '../../src/core/host/native.js';
 
 /** .mapping 规则表（懒加载，只读一次） */
 let LUA_RULES = null;
 function luaRules() {
   if (LUA_RULES !== null) return LUA_RULES;
-  try {
-    const url = new URL('./lua.mapping', import.meta.url);
-    const text = readText(url.pathname);
-    const m = loadMapping(text);
-    LUA_RULES = m.rules;
-  } catch {
-    LUA_RULES = new Map();
-  }
+  LUA_RULES = loadMappingFor('lua').rules;
   return LUA_RULES;
 }
 

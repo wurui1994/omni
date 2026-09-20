@@ -27,16 +27,34 @@
  * 地址那几条 `ADD` 随后没人引用，紧跟的 deadcode 收走。一条指令都不插、不删，
  * 所以这一格改不坏控制流（与 `opt` 那一格同一条纪律）。
  *
- * 判"不逃逸"的白名单（**名单之外一律放弃整个 base**）
- * -------------------------------------------------
+ * 判"不逃逸"的白名单
+ * -----------------
  *   - 当 `MLOAD`/`MSTORE` 的**地址**用（`a` 那一格）
  *   - 当 `ADD(base, 整数常量)` 的操作数用（那还是个地址，接着往下查）
- * 别的（进实参池、被存进内存、当返回值…）一律算逃逸。
+ *   - 当 `ARGMEM`/`ARGSRET` 的地址用：**逃逸的只是它盖住的那几个字节**（见下面那一段）
+ * 别的（进实参池当裸指针、被存进内存、当返回值…）说不清盖住哪儿，一律放弃整个 base。
+ *
+ * 粒度是**格子**，不是整块（这一格是第二版的要点）
+ * ---------------------------------------------
+ * `aliasId` 把一个 `FRAME` 帧块当成一个分组 —— 可一个帧块里摆着**一堆互不相干的局部量**
+ * （smallpt 的 `radiance` 只有 87 个帧块，而 0 号那块 1568 字节）。第一版里
+ * 任何一处逃逸、任何一个格子上的类型/宽度冲突，都让**整块**放弃：`radiance` 里
+ * 那条 `ARGMEM %0 48`（把自己那份 `Ray` 传给 `intersect`）于是把 `nr`/`x`/`n`/`f`
+ * 这些与那次调用毫无关系的局部量一起摁死，321 条访存一条也收不掉。
+ *
+ * Go 的 auto 本来就**一个变量一格**（`decompose user` 拆的是单个 SSA 值），所以
+ * "按格子判"才是与它对得上的粒度。这一版：
+ *   - `ARGMEM`/`ARGSRET` 的字节数是写在 aux 里的（`memArgSize`），于是逃逸记成**一段区间**，
+ *     只有**压在那段上**的格子不换，别的照换；
+ *   - 格子上的类型冲突、两种读/写宽、只读没写过、读写宽度对不上、与别人部分重叠 ——
+ *     统统只让**那一个格子**不换。
+ * 只有"说不清盖住哪几个字节"的逃逸（裸指针进实参池、地址被存进内存…）才还是放弃整块 ——
+ * 那种情况下块里哪个格子都可能被碰到。
  */
 
 import {
   OP, OP_MODES, OP_NAMES, REF_BIAS, REF_NONE,
-  MLOAD_BYTES, MSTORE_BYTES, MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
+  MLOAD_BYTES, MSTORE_BYTES, MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff, memArgSize,
 } from '../ir.js';
 import { addrOf, constOffset } from './memory.js';
 import { registerPass } from './pass.js';
@@ -65,19 +83,26 @@ export function useSites(fn) {
 
 /**
  * 查一个 base：它派生出来的地址都只当访存的地址用吗。
- * 回 `{ok, cells}`；`cells` 是 `Map(键 -> {lo, hi, t, kind, pcs})`，键是 `lo|hi`。
+ *
+ * 格子记进 `cells`（`Map(键 -> {lo, hi, t, loadKind, storeKind, pcs, bad})`，键是 `lo|hi`），
+ * "盖住哪几个字节是知道的"那种逃逸记进 `escapes`（`{lo, hi}`）—— 两个都是**整堆共用**的，
+ * 因为同一块内存在一个函数里会有好几个 base ref（见 `aliasId`）。
+ *
+ * 回 `true` = 这个 base 上没有"说不清范围"的逃逸。回 `false` = 放弃整堆。
  */
-function scanBase(fn, mod, base, sites, unreadSlots) {
-  const cells = new Map();
+function scanBase(fn, mod, base, sites, unreadSlots, cells, escapes) {
   const seen = new Set();
   const work = [base];
+  const stat = process.env.OMNI_SROA_STAT === '1';
   /* `OMNI_SROA_STAT=1`：**为什么放弃这一块**。逃逸判据是这一格唯一的闸，判紧一处
    * 整块访存就都收不掉，所以要能一眼看见原因（量过再改，别猜）。 */
   const no = (why) => {
-    if (process.env.OMNI_SROA_STAT === '1') {
-      process.stderr.write(`[sroa] ${fn.name}: 放弃 %${base - REF_BIAS}（${why}）\n`);
-    }
-    return { ok: false };
+    if (stat) process.stderr.write(`[sroa] ${fn.name}: 放弃 %${base - REF_BIAS}（${why}）\n`);
+    return false;
+  };
+  const badCell = (c, why) => {
+    if (stat && !c.bad) process.stderr.write(`[sroa] ${fn.name}: 格子 ${c.lo}|${c.hi} 不换（${why}）\n`);
+    c.bad = true;
   };
   while (work.length > 0) {
     const ref = work.pop();
@@ -98,12 +123,14 @@ function scanBase(fn, mod, base, sites, unreadSlots) {
         const key = `${lo}|${hi}`;
         let c = cells.get(key);
         if (c === undefined) {
-          c = { lo, hi, t: fn.t[u.pc], loadKind: -1, storeKind: -1, pcs: [] };
+          c = { lo, hi, t: fn.t[u.pc], loadKind: -1, storeKind: -1, pcs: [], bad: false };
           cells.set(key, c);
         }
-        if (c.t !== fn.t[u.pc]) return no(`格子 ${key} 上两种类型`);
-        if (isLoad) { if (c.loadKind >= 0 && c.loadKind !== k) return no(`格子 ${key} 两种读宽`); c.loadKind = k; }
-        else { if (c.storeKind >= 0 && c.storeKind !== k) return no(`格子 ${key} 两种写宽`); c.storeKind = k; }
+        /* 这三道从前是"放弃整块"，现在只判**这一个格子** —— 一块里摆着一堆
+           互不相干的局部量，一个格子上的冲突说明不了别的格子的事。 */
+        if (c.t !== fn.t[u.pc]) badCell(c, '同一格上两种类型');
+        if (isLoad) { if (c.loadKind >= 0 && c.loadKind !== k) badCell(c, '两种读宽'); c.loadKind = k; }
+        else { if (c.storeKind >= 0 && c.storeKind !== k) badCell(c, '两种写宽'); c.storeKind = k; }
         c.pcs.push(u.pc);
         continue;
       }
@@ -115,7 +142,18 @@ function scanBase(fn, mod, base, sites, unreadSlots) {
         if (constOffset(fn, mod, other) !== null) { work.push(REF_BIAS + u.pc); continue; }
         return no(`%${u.pc} 加的是个变量`);
       }
-      /* 三、`STORE 这个地址 -> 一个从头到尾没人 LOAD 的槽`：**不算逃逸**。
+      /* 三、`ARGMEM`/`ARGSRET` 的地址 —— **逃逸的只是它盖住的那几个字节**。
+         字节数就写在 aux 里（`memArgSize`，见 ir.js 的 MEMARG 那一段），所以这一种
+         不必放弃整块：压在那段区间上的格子不换，别的照换。
+         `radiance` 里那条 `ARGMEM %0 48` 从前一个人摁死 0 号帧块的全部 321 条访存。 */
+      if ((op === OP.ARGMEM || op === OP.ARGSRET) && u.role === 'a') {
+        const a = addrOf(fn, mod, fn.a[u.pc]);
+        const size = memArgSize(fn.aux[u.pc]);
+        if (a.base !== base || size <= 0) return no(`%${u.pc} ${OP_NAMES[op]} 盖住哪几个字节说不清`);
+        escapes.push({ lo: a.off, hi: a.off + size });
+        continue;
+      }
+      /* 四、`STORE 这个地址 -> 一个从头到尾没人 LOAD 的槽`：**不算逃逸**。
          那条 STORE 写进去的东西观察不到，地址没跑出去。
          为什么非认这一种不可（量出来的）：`inline` 把 `RET v` 铺成
          `STORE v -> 结果槽; BR`，结果槽被 mem2reg 提升之后那条 STORE 还在，
@@ -126,11 +164,11 @@ function scanBase(fn, mod, base, sites, unreadSlots) {
         return no(`%${u.pc} 把地址存进了还有人读的 slot${fn.aux[u.pc]}`);
       }
       if (op === OP.STORE && u.role === 'a') continue;
-      /* 别的一律算逃逸 */
+      /* 别的一律算"说不清范围的逃逸" —— 放弃整块 */
       return no(`%${u.pc} ${OP_NAMES[op]} 的 ${u.role}`);
     }
   }
-  return { ok: true, cells };
+  return true;
 }
 
 /** 两个格子部分重叠吗（完全相同不算）。 */
@@ -202,23 +240,15 @@ export function sroa(fn, mod) {
   if (groups.size === 0) return 0;
 
   let changed = 0;
+  const stat = process.env.OMNI_SROA_STAT === '1';
   for (const bases of groups.values()) {
-    /* 这一堆里每个 base 各扫一遍，格子并起来。任何一个 base 上有逃逸 ⇒ 整堆放弃。 */
+    /* 这一堆里每个 base 各扫一遍，格子与逃逸区间都并进同两个容器。
+       只有"说不清盖住哪儿"的逃逸才放弃整堆。 */
     const all = new Map();
+    const escapes = [];
     let ok = true;
     for (const base of bases) {
-      const r = scanBase(fn, mod, base, sites, unread);
-      if (!r.ok) { ok = false; break; }
-      for (const [key, c] of r.cells) {
-        const got = all.get(key);
-        if (got === undefined) { all.set(key, c); continue; }
-        /* 同一个格子从两个 base ref 上访问：并起来，类型/宽度要一致 */
-        if (got.t !== c.t) { ok = false; break; }
-        if (c.loadKind >= 0) { if (got.loadKind >= 0 && got.loadKind !== c.loadKind) { ok = false; break; } got.loadKind = c.loadKind; }
-        if (c.storeKind >= 0) { if (got.storeKind >= 0 && got.storeKind !== c.storeKind) { ok = false; break; } got.storeKind = c.storeKind; }
-        for (const pc of c.pcs) got.pcs.push(pc);
-      }
-      if (!ok) break;
+      if (!scanBase(fn, mod, base, sites, unread, all, escapes)) { ok = false; break; }
     }
     if (!ok) continue;
     const cells = [];
@@ -226,31 +256,43 @@ export function sroa(fn, mod) {
     if (cells.length === 0) continue;
     /* 后面这几道的放弃也要能看见（`OMNI_SROA_STAT=1`）—— 从前只有 `scanBase` 里那几条
      * 会印，于是"321 条访存在 FRAME 块上、可 scanBase 只拒了 2 个"这件事查不下去。 */
-    const stat = process.env.OMNI_SROA_STAT === '1';
-    const nope = (why) => { if (stat) process.stderr.write(`[sroa] ${fn.name}: 放弃一堆（${why}）\n`); };
-    /* 部分重叠的格子（`char` view 一个 `int` 那种）一律放弃这一堆 */
-    let bad = false;
-    for (let i = 0; i < cells.length && !bad; i++) {
-      for (let j = i + 1; j < cells.length && !bad; j++) {
-        if (partialOverlap(cells[i], cells[j])) { bad = true; nope(`格子部分重叠 ${cells[i].lo}|${cells[i].hi} 与 ${cells[j].lo}|${cells[j].hi}`); }
+    const drop = (c, why) => {
+      if (stat && !c.bad) process.stderr.write(`[sroa] ${fn.name}: 格子 ${c.lo}|${c.hi} 不换（${why}）\n`);
+      c.bad = true;
+    };
+    /* 一、压在逃逸区间上的格子不换（被调方能碰到那几个字节） */
+    for (const c of cells) {
+      for (const e of escapes) {
+        if (c.lo < e.hi && e.lo < c.hi) { drop(c, `落在逃逸区间 ${e.lo}|${e.hi} 上`); break; }
       }
     }
-    if (bad) continue;
-    /* 每个格子还要过两道（少一道就会悄悄改语义）：
+    /* 二、部分重叠的两格都不换（`char` view 一个 `int` 那种）。
+       按 lo 排好序只比"还压得上的那几个"，免得在大帧块上退化成 O(n²)。 */
+    cells.sort((x, y) => (x.lo - y.lo) || (x.hi - y.hi));
+    for (let i = 0; i < cells.length; i++) {
+      for (let j = i + 1; j < cells.length && cells[j].lo < cells[i].hi; j++) {
+        if (partialOverlap(cells[i], cells[j])) {
+          drop(cells[i], `与 ${cells[j].lo}|${cells[j].hi} 部分重叠`);
+          drop(cells[j], `与 ${cells[i].lo}|${cells[i].hi} 部分重叠`);
+        }
+      }
+    }
+    /* 三、每个格子还要过两道（少一道就会悄悄改语义）：
        1. **读写必须同宽、而且是那个类型的全宽**：存 i32 再按 `i8s` 读回来是"那个字节的
           符号扩展"，槽位装不出这件事（与 `memory.js` 的 `sameCell` 同一条判据）；
        2. **必须至少写过一次**：只读的格子读的是没初始化的内存（C 里是未定义行为），
-          换成槽位之后读到的是槽位的初值 —— 两者可能不同，所以这种 base 整个放弃。 */
+          换成槽位之后读到的是槽位的初值 —— 两者可能不同。 */
     for (const c of cells) {
-      if (c.storeKind < 0) { bad = true; nope(`格子 ${c.lo}|${c.hi} 只读没写过`); break; }
+      if (c.bad) continue;
+      if (c.storeKind < 0) { drop(c, '只读没写过'); continue; }
       if (c.loadKind >= 0 && !kindPairOk(c.loadKind, c.storeKind)) {
-        bad = true; nope(`格子 ${c.lo}|${c.hi} 的读写宽度对不上（读 ${c.loadKind} 写 ${c.storeKind}）`); break;
+        drop(c, `读写宽度对不上（读 ${c.loadKind} 写 ${c.storeKind}）`);
       }
     }
-    if (bad) continue;
 
-    /* 二、一个格子一个槽，然后就地换 op */
+    /* 四、一个格子一个槽，然后就地换 op */
     for (const c of cells) {
+      if (c.bad) continue;
       const no = fn.slot(`sroa@${c.lo}`, c.t);
       for (const pc of c.pcs) {
         if (fn.op[pc] === OP.MLOAD) {

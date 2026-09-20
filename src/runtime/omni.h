@@ -831,6 +831,9 @@ bool omni_js_proc_stdin_is_tty(void);
 omni_dyn omni_js_proc_read_line(void);
 omni_dyn omni_js_os_tmpdir(void);
 omni_dyn omni_js_now_ms(void);
+/* `performance.now()`：单调时钟毫秒（带小数），起点是进程第一次调用它的时刻。
+   量"这一趟花了几毫秒"要这一条，不要上面那条墙上时钟。 */
+omni_dyn omni_js_now_hr(void);
 /* 到此刻为止的峰值常驻内存，**字节**（单位在宿主这一侧归一：macOS 的 ru_maxrss 是字节、
    Linux 是 KB、node 的 maxRSS 是 KB）。这条腿上墙上时间的大头常常是内存压力而不是 CPU。 */
 omni_dyn omni_js_max_rss(void);

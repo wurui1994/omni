@@ -497,6 +497,19 @@ omni_dyn omni_js_now_ms(void) {
   return omni_dyn_of_real((double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6);
 }
 
+/* `performance.now()`：**单调**时钟毫秒（带小数）。与上面那格的差别是刻意的 ——
+   `Date.now()` 是墙上时钟（会被 NTP 往回拨、只到毫秒），量"这一趟花了几毫秒"要的是
+   单调、亚毫秒的那一种。node 那边 `performance.now()` 的起点是进程启动，所以这儿也
+   减掉第一次调用的时刻，两侧的量级对得上（差值才是有意义的量，起点无所谓）。 */
+omni_dyn omni_js_now_hr(void) {
+  static double base = -1.0;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  double ms = (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+  if (base < 0.0) base = ms;
+  return omni_dyn_of_real(ms - base);
+}
+
 /* 到此刻为止的**峰值**常驻内存，**字节**。
    单位必须在这一侧归一：`ru_maxrss` 在 macOS 上是字节、在 Linux 上是 KB（POSIX 没规定），
    而 node 那侧的 `resourceUsage().maxRSS` 一律是 KB。两个宿主各自换成字节，调用方不必

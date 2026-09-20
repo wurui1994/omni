@@ -19,21 +19,13 @@ import {
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, deferNow,
   mapNew, mapGet, mapSet, mapHas, mapNames, mapForIn, isList,
 } from '../../src/core/graph/fromtree.js';
-import { loadMapping, applyRule } from '../../src/core/graph/mapping.js';
-import { readText } from '../../src/core/host/native.js';
+import { loadMappingFor, applyRule } from '../../src/core/graph/mapping.js';
 
 /** .mapping 规则表（懒加载，只读一次） */
 let GO_RULES = null;
 function goRules() {
   if (GO_RULES !== null) return GO_RULES;
-  try {
-    const url = new URL('./go.mapping', import.meta.url);
-    const text = readText(url.pathname);
-    const m = loadMapping(text);
-    GO_RULES = m.rules;
-  } catch {
-    GO_RULES = new Map();
-  }
+  GO_RULES = loadMappingFor('go').rules;
   return GO_RULES;
 }
 

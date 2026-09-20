@@ -4260,6 +4260,8 @@ const STATIC_NS = new Set(['JSON', 'Math', 'Object', 'Array', 'String', 'Number'
   'Symbol', 'Reflect',
   // ADR-0020 P4：Date.now()
   'Date',
+  // performance.now()（单调毫秒）—— 管线里量每一格耗时的那些插桩用它
+  'performance',
   // ADR-0020 P2：Promise.resolve / reject / all / allSettled / any / race / try
   'Promise',
   // ES2024 的 Map.groupBy（`new Map(...)` 那条路不经过这儿，见 newExpr）
@@ -4387,6 +4389,9 @@ const STATIC_CALLS = {
   'Number.parseFloat': { op: 'js_num_parse_float', argc: 1, len: 1 },
   // Date.now()：就是宿主时钟那一格 op，不必造一格 Date 对象
   'Date.now': { op: 'js_now_ms', argc: 0, len: 0 },
+  /* performance.now()：单调毫秒（带小数）。量一格通道跑了多久要这一条，不是 Date.now()
+     —— 墙上时钟会往回拨、而且只到毫秒（`OMNI_OPT_STAT` 那些插桩量的是零点几毫秒）。 */
+  'performance.now': { op: 'js_now_hr', argc: 0, len: 0 },
   // Date.parse(串)：交出毫秒（认不出来是 NaN）。new Date(串) 走的是同一条解析
   'Date.parse': { op: 'js_date_parse', argc: 1, len: 1 },
   // Date.UTC：按 UTC 算的那一格（js_date_parts 是本地时区那一格）。缺席的实参由降级器
