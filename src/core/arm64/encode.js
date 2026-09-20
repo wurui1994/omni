@@ -565,6 +565,43 @@ function fp1(dbl, opcode, rn, rd) {
 }
 
 export const fmovFp = (dbl, rd, rn) => fp1(dbl, 0x00, rn, rd);
+
+/* FMOV（scalar, immediate）：
+ *   0 0 0 1 1 1 1 0 type 1 imm8(8) 1 0 0 0 0 0 0 0 Rd
+ * `fmov d0, #1.0` = 0x1e6e1000（imm8 = 0x70），与 clang 发的逐字节相同。
+ *
+ * 为什么要它（量出来的，`bench/go/vec.go`）：一个 f64 常量原先是
+ * `mov x10,#…` + 一到三条 `movk` + `fmov d,x10`，**每轮循环重发一遍**。
+ * 那个循环体 172 条指令里 `fmov` 48 条、`movk` 16 条，真的浮点运算只有 21 条。
+ */
+export const fmovImm = (dbl, rd, imm8) => u32(0x1e * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22
+  + 2 ** 21 + chkU(imm8, 8, 'imm8') * 2 ** 13 + 4 * 2 ** 10 + arm64ChkReg(rd));
+
+/**
+ * 这个数能用 `fmov` 的 8 位立即数表示吗 —— 能就回 imm8，不能回 -1。
+ *
+ * 那 8 位是手册里的 `VFPExpandImm`：sign(1) + 指数 −3..4 + 步长 1/16 的尾数 1.0..1.9375，
+ * 也就是 ±0.125 .. ±31 之间的 512 个值（`1.0`/`2.0`/`0.5` 都在，`2^-8` 不在）。
+ * 这儿不照手册去拼位，而是把 256 个 imm8 各自**解**成数值建一张表 —— 少一次写错的机会，
+ * 而且两种精度共用一张表（`VFPExpandImm` 给的是同一个数值）。
+ */
+let FMOV_IMM = null;
+export function fmovImm8Of(x) {
+  if (FMOV_IMM === null) {
+    FMOV_IMM = new Map();
+    for (let i = 0; i < 256; i++) {
+      const b = (i >> 6) & 1;
+      /* 指数域 11 位：bit10 = ~b、bits9..2 = b 重复八次（= 0x3fc）、bits1..0 = cd */
+      const biased = (1 - b) * 1024 + (b === 1 ? 0x3fc : 0) + ((i >> 4) & 3);
+      const v = (1 + (i & 15) / 16) * 2 ** (biased - 1023);
+      const s = ((i >> 7) & 1) === 1 ? -v : v;
+      if (!FMOV_IMM.has(s)) FMOV_IMM.set(s, i);
+    }
+  }
+  const got = FMOV_IMM.get(x);
+  return got === undefined ? -1 : got;
+}
+
 export const fabsFp = (dbl, rd, rn) => fp1(dbl, 0x01, rn, rd);
 export const fneg = (dbl, rd, rn) => fp1(dbl, 0x02, rn, rd);
 export const fsqrt = (dbl, rd, rn) => fp1(dbl, 0x03, rn, rd);

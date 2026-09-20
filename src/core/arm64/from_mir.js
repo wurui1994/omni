@@ -40,7 +40,7 @@ import {
   ldpPost, ldrFpU, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz,
   msub, mul,
   mvn, neg, orrImm, orrReg,
-  cneg, fmovFp, retArm64, scvtf, sdiv, stp, ldp, stpFp, ldpFp, stpPre, strFpU, strU, strRegOff, subImm, subReg, svcArm64, sxtb,
+  cneg, fmovFp, fmovImm, fmovImm8Of, retArm64, scvtf, sdiv, stp, ldp, stpFp, ldpFp, stpPre, strFpU, strU, strRegOff, subImm, subReg, svcArm64, sxtb,
   sxth, sxtw,
   ucvtf, udiv
 } from './encode.js';
@@ -861,6 +861,13 @@ class FnGen {
     if (k.kind === 'int') return BigInt(k.text);
     if (k.kind === 'bool') return k.text === 'true' ? 1n : 0n;
     return null;
+  }
+
+  /** 这个 ref 是个浮点常量吗 —— 是就回它的数值，不是回 null。 */
+  realConst(ref) {
+    if (ref === REF_NONE || !isConstRef(ref)) return null;
+    const k = this.mod.consts.get(ref);
+    return k.kind === 'real' ? Number(k.text) : null;
   }
 
   /**
@@ -1965,6 +1972,17 @@ class FnGen {
   fRefReg(ref, ftmp, dbl) {
     const fsk = this.fstickyRef(ref);
     if (fsk >= 0) return fsk;
+    /* **浮点常量落在 `fmov` 的 8 位立即数里 ⇒ 一条指令**（原先是 `mov` + 一到三条 `movk`
+       + `fmov d,x` 三四条，而且在循环里每轮重发）。`1.0`/`2.0`/`0.5`/`3.0` 这些都在。
+       只走 f64：f32 常量的文本按 f32 定过，而 `VFPExpandImm` 两种精度给的是同一个数值，
+       本来也能收 —— 但 f32 在这条腿上量不到，不给它开没验过的路。 */
+    if (dbl) {
+      const cv = this.realConst(ref);
+      if (cv !== null) {
+        const im = fmovImm8Of(cv);
+        if (im >= 0) { this.buf.emit(fmovImm(true, ftmp, im)); return ftmp; }
+      }
+    }
     const gp = ftmp === FTMP1 ? TMP1 : TMP0;
     if (dbl && ref !== REF_NONE && !isConstRef(ref)) {
       const vi = this.f.at(ref);
