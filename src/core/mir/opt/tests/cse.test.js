@@ -81,11 +81,9 @@ ok((dup.MUL || 0) === 1, `dup 里只剩一条 MUL（得 ${dup.MUL || 0}）`);
 const comm = opCount(mod.funcs.find((f) => f.name === 'comm'));
 ok((comm.MUL || 0) === 1, `comm 里只剩一条 MUL（交换律，得 ${comm.MUL || 0}）`);
 const cross = opCount(mod.funcs.find((f) => f.name === 'cross'));
-/* 三条 ADD：`(a+b)*2` 那一条、if 里那一条 `r + (a+b)`、还有 if 里那份 a+b。
-   **合不掉**是成本模型的结果（`cost.js`）：mem2reg 不再把 a/b 的 LOAD 跨屏障转发进
-   if 那一块，于是两处的 a+b 用的是两对不同的 LOAD ref，cse 认不出它们是同一个值。
-   量出来的账在 cost.js 里：跨屏障的合并在这两条后端上是净亏。 */
-ok((cross.ADD || 0) === 3, `cross 里剩三条 ADD（跨屏障不合并，得 ${cross.ADD || 0}）`);
+/* 两条 ADD：`(a+b)*2` 那一条与 if 里那条 `r + (a+b)` —— if 里那份 a+b 被合掉了
+   （mem2reg 把 a/b 的 LOAD 转发进 if 那一块，cse 于是认出两处是同一个值）。 */
+ok((cross.ADD || 0) === 2, `cross 里剩两条 ADD（if 里那份 a+b 合掉了，得 ${cross.ADD || 0}）`);
 const nm = opCount(mod.funcs.find((f) => f.name === 'nomerge'));
 ok((nm.ADD || 0) === 4, `nomerge 里四条 ADD 一条不许少（得 ${nm.ADD || 0}）`);
 

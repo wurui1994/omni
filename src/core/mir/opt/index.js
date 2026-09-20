@@ -21,6 +21,7 @@ import './cse.js';       // zero arg cse / generic cse / lowered cse
 import './dse.js';       // dse
 import './inline.js';    // inline（我们加的那一格）
 import './sroa.js';      // decompose user（SROA）
+import './addr.js';      // addressing modes
 import './regalloc.js';  // regalloc（只挂 fn.regHint，不改指令）
 import './autos.js';     // elim unread autos
 

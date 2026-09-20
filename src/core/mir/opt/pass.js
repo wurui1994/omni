@@ -73,7 +73,7 @@ export const PASSES = [
   { name: 'memcombine',                batch: BATCH_3,   req: false, fn: null },
   { name: 'writebarrier',              batch: BATCH_NO,  req: true,  fn: null },
   { name: 'lower',                     batch: BATCH_1,   req: true,  fn: null },
-  { name: 'addressing modes',          batch: BATCH_2,   req: false, fn: null },
+  { name: 'addressing modes',          batch: BATCH_1,   req: false, fn: null },
   { name: 'late lower',                batch: BATCH_2,   req: true,  fn: null },
   { name: 'pair',                      batch: BATCH_3,   req: false, fn: null },
   { name: 'lowered deadcode for cse',  batch: BATCH_1,   req: false, fn: null },

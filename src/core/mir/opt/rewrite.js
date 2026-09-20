@@ -27,7 +27,6 @@ import {
 import { replaceRef } from './edit.js';
 import { buildCfg } from './cfg.js';
 import { mayWriteMemory, sameCell, cellOf, disjoint, sameSpot } from './memory.js';
-import { barrierBetween } from './cost.js';
 import { registerPass } from './pass.js';
 
 /** 取一个 ref 的常量池条目；不是常量、或者压根不是 ref（角色 'n'/'s'/'j'）回 null。
@@ -329,13 +328,8 @@ function lookBackStore(fn, mod, from, pcLoad) {
     if (op === OP.MSTORE) {
       const got = cellOf(fn, mod, pc, false);
       if (sameSpot(want, got)) {
-        /* 同一个格子：还要问两件事 ——
-           1. "读回来就是写进去那个值"吗（窄访问不行，见 sameCell）
-           2. **中间有没有屏障**（`cost.js`）：有的话转发反而亏 ——
-              那个值的区间会跨过屏障，后端要多一对 str+ldr，而省下的只是一条 ldr。 */
-        if (!sameCell(fn, pcLoad, pc)) return -1;
-        if (barrierBetween(fn, pc, pcLoad)) return -1;
-        return fn.b[pc];
+        /* 同一个格子：还要问"读回来就是写进去那个值"吗（窄访问不行，见 sameCell）。 */
+        return sameCell(fn, pcLoad, pc) ? fn.b[pc] : -1;
       }
       if (disjoint(want, got)) continue;   // 一定不相交（Go 的 Disjoint）⇒ 接着往前找
       return -1;                           // 证不了 ⇒ 停

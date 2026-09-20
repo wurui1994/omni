@@ -23,7 +23,6 @@ import { buildCfg, reachable } from './cfg.js';
 import { inScope, regionScope } from './region.js';
 import { replaceRef } from './edit.js';
 import { registerPass } from './pass.js';
-import { barrierBetween } from './cost.js';
 
 /** 这个 ref 在 `pc` 那儿看得见吗（常量永远看得见；指令要问词法作用域）。 */
 function usableHere(sc, fn, ref, pc) {
@@ -111,8 +110,7 @@ export function mem2reg(fn, _mod) {
       if (op === OP.LOAD && promotable.has(fn.aux[pc])) {
         const v = cur[fn.aux[pc]];
         const myRef = REF_BIAS + pc;          // 这条 LOAD 的结果的 ref
-        if (v !== UNKNOWN && v !== myRef && usableHere(sc, fn, v, pc)
-            && !(v >= REF_BIAS && barrierBetween(fn, v - REF_BIAS, pc))) {
+        if (v !== UNKNOWN && v !== myRef && usableHere(sc, fn, v, pc)) {
           /* 块内有定义 ⇒ 把所有引用 %pc 的地方改成引用 v。
              LOAD 本身留着（没人引用了，deadcode 那格会删）。 */
           changed += replaceRef(fn, myRef, v);

@@ -89,7 +89,9 @@ export function inlineCalls(fn, mod) {
   /* ---- 二、一趟重建 */
   const old = { op: fn.op, t: fn.t, a: fn.a, b: fn.b, aux: fn.aux };
   const n = old.op.length;
-  const map = [];                   // 老下标 -> 新下标（调用点映到那条 LOAD/END）
+  /* 老下标 -> **新的 ref**（不是下标）：尾返回那一路调用点可能直接映到一个**常量**，
+     而常量没有下标。-1 = 还没定。 */
+  const map = [];
   for (let i = 0; i < n; i++) map.push(-1);
   const op = [], t = [], a = [], b = [], aux = [];
   /* 内联进来的指令：`{from}` 记它是被调的第几条（第二遍按它改 ref） */
@@ -102,7 +104,7 @@ export function inlineCalls(fn, mod) {
   for (let pc = 0; pc < n; pc++) {
     const callee = sites.get(pc);
     if (callee === undefined) {
-      map[pc] = emit(old.op[pc], old.t[pc], old.a[pc], old.b[pc], old.aux[pc]);
+      map[pc] = REF_BIAS + emit(old.op[pc], old.t[pc], old.a[pc], old.b[pc], old.aux[pc]);
       continue;
     }
     /* 2.1 给被调的槽位与帧块在调用者里各开一份 */
@@ -132,10 +134,11 @@ export function inlineCalls(fn, mod) {
     }
     /* 2.3 结果槽（void 就不要） */
     const resSlot = callee.ret === T_VOID ? -1 : fn.slot(`${callee.name}$ret`, callee.ret);
-    /* 2.4 包一层 BLOCK，把被调的函数体抄进来 */
-    emit(OP.BLOCK, T_VOID, REF_NONE, REF_NONE, 0);
     const ctx = { callee, slotBase, frameBase, cmap: [] };
     for (let q = 0; q < callee.op.length; q++) ctx.cmap.push(-1);
+
+    /* 2.4 包一层 BLOCK，`RET` 翻成"存结果 + 跳出去" */
+    emit(OP.BLOCK, T_VOID, REF_NONE, REF_NONE, 0);
     let depth = 0;                  // 被调体内当时开着几层
     for (let q = 0; q < callee.op.length; q++) {
       const cop = callee.op[q];
@@ -153,9 +156,9 @@ export function inlineCalls(fn, mod) {
     }
     emit(OP.END, T_VOID, REF_NONE, REF_NONE, 0);
     /* 2.5 顶替原来那条 CALL：读结果槽（void 的话就映到那条 END） */
-    map[pc] = resSlot >= 0
+    map[pc] = REF_BIAS + (resSlot >= 0
       ? emit(OP.LOAD, callee.ret, REF_NONE, REF_NONE, resSlot)
-      : op.length - 1;
+      : op.length - 1);
   }
 
   fn.op = op; fn.t = t; fn.a = a; fn.b = b; fn.aux = aux;
@@ -169,6 +172,20 @@ export function inlineCalls(fn, mod) {
 /** 通道表里 `inline` 那一格（**我们加的，Go 的表里没有** —— 它在 SSA 之前就内联完了）。
  *  位置在 `decompose user` 之前，`PASS_ORDER` 上有这一对约束。 */
 registerPass('inline', inlineCalls);
+
+/* 试过、量过、**退回来**的两样（记在这儿，别再重来一遍）：
+ *
+ * 一、**尾返回不包 BLOCK**。被调只有一个返回点且在末尾时，可以不包那层 BLOCK、不要结果槽，
+ *     把调用点直接映到"被调返回的那个 ref"。指令少了（smallpt 4901 -> 4257 条），
+ *     可**时间反而差**：890ms -> 985ms（×0.82 变 ×0.91）。原因与 `cost.js` 里那条同一个 ——
+ *     没了那层 BLOCK，整段内联体成了一大段直线代码，值的活跃区间全拉长，后端那五个
+ *     调用者保存的寄存器（`POOL`）反复写回栈位。**包着那层 BLOCK 反而快。**
+ *
+ * 二、**展开完紧跟一遍 mem2reg + deadcode**（"先内联、再建 SSA"那个直觉）。
+ *     量出来一点不动（985ms vs 984ms）。形参那几条 `STORE 槽` 与被调体之间隔着那层 BLOCK
+ *     （是个屏障），mem2reg 照 `cost.js` 的判据本来就不肯转发。
+ *
+ * 这两条合起来说明一件事：**这一层的收益已经卡在后端的寄存器分配上**，不在"再合并一点"。 */
 
 /** 读一个实参池里那一串 ref（池是自描述的，见 ir.js）。 */
 function argRefs(fn, at) {
@@ -190,7 +207,7 @@ function fixRefs(fn, map, inFrom, mod) {
     if (ref === REF_NONE || ref < REF_BIAS) return ref;
     const j = map[ref - REF_BIAS];
     if (j < 0) throw new Error(`mir/opt/inline: 调用者的 %${ref - REF_BIAS} 没有落点`);
-    return j + REF_BIAS;
+    return j;                          // map 里存的已经是 ref（可能是个常量）
   };
   const mapCallee = (ref, ctx) => {
     if (ref === REF_NONE || ref < REF_BIAS) return ref;
