@@ -26,6 +26,8 @@ import {
   CVT_I2F, CVT_F2I, CVT_BOX, CVT_U2F,
   MLOAD_KINDS, MSTORE_KINDS, memDesc,
 } from './ir.js';
+import { mirOptLevel, optimizeMir } from './opt/index.js';
+import { env } from '../host/native.js';
 
 /** real 的规范文本。哈希要稳定，所以整数值统一写成 `1.0` 这种形状。 */
 function realText(v) {
@@ -41,8 +43,23 @@ function realText(v) {
   return /^-?[0-9]+$/.test(s) ? `${s}.0` : s;
 }
 
+/**
+ * OIR -> MIR。**优化管线也在这儿挂**（`OMNI_MIR_OPT` 开档，缺省 0 = 不跑）。
+ *
+ * 为什么挂在这一处：`lowerToMir` 是 OIR 那一侧**唯一**的入口（cli.js 七处、interp.js
+ * 一处都走它），而 go / nim / vlang / omni / sx 全都先编到 OIR（ADR 的 B 路）。
+ * 所以这一行就把公共优化管线接到了**所有非 C 的前端**上 —— 不必给 go 另写一条
+ * go→MIR：那条路已经存在（OIR→MIR 就是它），缺的只是这一次调用。
+ *
+ * C 那条腿不从这儿走（它有自己的 `cMirNative`，在 `lang/c.js` 里调同一个
+ * `optimizeMir`）。两条腿共用**同一份通道表**，这正是 ADR-0039 想要的东西：
+ * 优化是 MIR 上的，与"前端是哪门语言"无关。
+ */
 export function lowerToMir(oir) {
-  return new ToMir(oir).run();
+  const mod = new ToMir(oir).run();
+  const level = mirOptLevel(env('OMNI_MIR_OPT'));
+  if (level > 0) optimizeMir(mod, { level });
+  return mod;
 }
 
 class ToMir {
