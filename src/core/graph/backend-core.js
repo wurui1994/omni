@@ -243,8 +243,8 @@ function expr(x, env, ctx) {
       if (nm === 'fill') {
         const fa = argList(x, 'args');
         if (fa.length === 2 && isZeroValueNode(fa[1])) {
-          const et = typeOf(fa[1], env, ctx);
-          const rec = isRecType(et, ctx) && !isPtrRec(et, ctx);
+          const et = elemTypeOfNode(fa[1], env, ctx);
+          const rec = et !== null && isRecType(et, ctx) && !isPtrRec(et, ctx);
           if (rec || et === 'int' || et === 'real' || et === 'bool' || et === 'string') {
             return `(anew (arr ${et}) ${expr(fa[0], env, ctx)})`;
           }
@@ -1464,6 +1464,19 @@ function bindSlice(nm, sl, env, ctx) {
 }
 
 /**
+ * **数组元素那一格的类型**（`fill` 与 `list-new` 两处共用）。
+ *
+ * ⚠️ `typeOf` **认不出一格 `record-new`**（`graph/types.js` 的 `inferType` 里没有它那一支），
+ * 回的是 UNKNOWN = `int`。于是 `make([]V, n)` 从前静静地落成 `(arr int)`，
+ * 后面 `s := vs[0]` 就成了 int —— 报「在一格说不清形状的东西上取字段 'X'」。
+ * 记录的类型要问 `recordTypeOfNode`（它算形状但不发文本，算不出来回 null）。
+ */
+function elemTypeOfNode(x, env, ctx) {
+  if (isNode(x) && x.op === 'record-new') return recordTypeOfNode(x, env, ctx);
+  return typeOf(x, env, ctx);
+}
+
+/**
  * **这一格是"某个类型的零值"吗**（`fill` 的快路与 `bindFill` 都问它）。
  *
  * 只认结构上摆明的零：零字面量、套在 `conv` 里的零、字段全是零的记录、空列表。
@@ -1505,8 +1518,8 @@ function isZeroValueNode(x) {
 function bindFill(nm, pr, env, ctx) {
   const args = argList(pr, 'args');
   if (args.length !== 2) gap(`内建 fill 收了 ${args.length} 格实参（要两格）`);
-  const et = typeOf(args[1], env, ctx);
-  const recElem = isRecType(et, ctx) && !isPtrRec(et, ctx);
+  const et = elemTypeOfNode(args[1], env, ctx);
+  const recElem = et !== null && isRecType(et, ctx) && !isPtrRec(et, ctx);
   /* **零值的聚合初值现在收了**：`(anew T N)` 的 N 份零值互不共享（`arrNew` 按元素的
      拷贝器逐格拷，`tests/sexpr/cases/50-arrstruct.sx` 钉着）—— 从前那句"聚合初值会让
      n 格指向同一格"正是拷贝器那一刀解掉的。非零的聚合初值照旧不收：那要真发一圈拷贝。 */
@@ -1560,8 +1573,8 @@ function isZeroText(t, v) {
   if (items.length === 0 && (decl === undefined || decl === null)) {
     gap(`一格空列表（元素类型推不出来、也没有声明的元素类型）—— 绑给 '${nm}'`);
   }
-  const ts = items.map((it) => typeOf(it, env, ctx));
-  const et = items.length === 0 ? typeOf(decl, env, ctx) : ts[0];
+  const ts = items.map((it) => elemTypeOfNode(it, env, ctx));
+  const et = items.length === 0 ? elemTypeOfNode(decl, env, ctx) : ts[0];
   const recElem = isRecType(et, ctx) && !isPtrRec(et, ctx);
   if (!recElem && et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
     gap(`列表的元素不是标量、也不是值语义的记录（量到的是 ${et}）`);
