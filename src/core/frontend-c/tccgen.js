@@ -216,6 +216,64 @@ const SK_F80 = 6;
 const COPY_MK = { 1: MK_I8U, 2: MK_I16U, 4: MK_I32S, 8: MK_I64 };
 const COPY_SK = { 1: SK_I8, 2: SK_I16, 4: SK_I32, 8: SK_I64 };
 
+/** 逐字段拷贝最多摊几片（见 `scalarLeaves`）。超了就退回按字搬 —— 那种大 struct
+ *  多半是数组/缓冲区，摊开只是把指令数吹大，优化管线也不会去拆它。 */
+const COPY_MAX_LEAVES = 16;
+
+/**
+ * 把一个聚合类型摊成**标量叶子**：`[{off, ty}]`，`off` 是相对这块起点的字节偏移。
+ * 摊不开就回 null（调用方退回按字搬）。
+ *
+ * 为什么要有这一步（ADR-0039 那条路上的一刀，量出来的）
+ * --------------------------------------------------
+ * `structCopy` 从前一律按 8 字节整数搬。于是同一个 8 字节格子被写成 `MSTORE i64`
+ * （拷贝那一步）、读成 `MLOAD f64`（取字段），而 `mir/opt/sroa.js` 的 `scanBase` 判
+ * 「同一格两种类型 ⇒ 整块放弃」。`OMNI_SROA_STAT=1` 量到 smallpt 的 `radiance` 里
+ * **8 处放弃全是这一条原因**，于是那 218 条 `MSTORE i64` 一条都收不掉。
+ *
+ * 照字段自己的类型发（`Vec` 的三个 double 就是三条 `f64`）之后：
+ *   - SROA 判得动那一块 ⇒ 格子换成槽位 ⇒ `regalloc` 的槽位提升让它住寄存器；
+ *   - 后端直接 `ldr d`/`str d`，不再「读进整数寄存器再 `fmov` 过去」。
+ *
+ * Go 那边这件事在更早一层：它的前端本来就把不逃逸的小 struct 做成 SSA 值，
+ * `decompose user`（`MaxStruct = 4`）按字段拆开。我们没有 struct 值这一层，
+ * 同一件事就落在"拷贝按字段发"上 —— **判据一样：按字段的类型，不按字节**。
+ *
+ * 摊不开的那几种（都是"判不准就别摊"）：
+ *   - union（两个字段同一块字节，摊开等于挑了一种解释）
+ *   - 位域（不是整字节的格子）
+ *   - 长度未知/柔性的数组
+ *   - f80 的 long double（一个格子装不下）
+ *   - 叶子太多（见 `COPY_MAX_LEAVES`）
+ */
+function scalarLeaves(ty, base, out) {
+  if (out.length > COPY_MAX_LEAVES) return null;
+  if (isArray(ty.t)) {
+    if (!(ty.count >= 0) || ty.ref === null) return null;
+    const sz = typeSize(ty.ref).size;
+    if (sz <= 0) return null;
+    for (let i = 0; i < ty.count; i++) {
+      if (scalarLeaves(ty.ref, base + i * sz, out) === null) return null;
+    }
+    return out;
+  }
+  if (isStruct(ty.t)) {
+    if (isUnion(ty.t)) return null;
+    const fs = ty.ref === null ? null : ty.ref.fields;
+    if (fs === null) return null;
+    for (const fd of fs) {
+      if (bitSizeOf(fd.ty.t) !== 0) return null;
+      if (scalarLeaves(fd.ty, base + fd.off, out) === null) return null;
+    }
+    return out;
+  }
+  const b = btype(ty.t);
+  if (b === VT_VOID || b === VT_FUNC || b === VT_STRUCT) return null;
+  if (b === VT_LDOUBLE && ldoubleSize() === 16) return null;
+  out.push({ off: base, ty });
+  return out.length > COPY_MAX_LEAVES ? null : out;
+}
+
 /**
  * 从内存里读一个这种类型的值，用哪个宽度符号。
  *
@@ -1728,6 +1786,36 @@ export class CGen {  /**
     }
     const size = typeSize(target.ty).size;
     const f = this.f;
+    /* 一、**按字段发**（能摊开就走这条，见 `scalarLeaves`）。没覆盖到的字节
+     *    （padding）照旧按字搬 —— C 不规定 padding 里是什么，但两条腿的判据是
+     *    「同一份输入逐字节相同」，少搬一个字节就会让那道判据红。 */
+    const leaves = scalarLeaves(target.ty, 0, []);
+    if (leaves !== null && leaves.length > 0) {
+      const covered = new Uint8Array(size);
+      for (const lf of leaves) {
+        const sz = typeSize(lf.ty).size;
+        const mt = mirTypeOf(lf.ty);
+        const r = f.emit(OP.MLOAD, mt, v.mem.addr, REF_NONE,
+          memDesc(loadKindOf(lf.ty), v.mem.off + lf.off));
+        f.emit(OP.MSTORE, mt, target.mem.addr, r,
+          memDesc(storeKindOf(lf.ty), target.mem.off + lf.off));
+        for (let k = 0; k < sz; k++) covered[lf.off + k] = 1;
+      }
+      for (let done = 0; done < size;) {
+        if (covered[done] === 1) { done += 1; continue; }
+        let run = 0;
+        while (done + run < size && covered[done + run] === 0) run += 1;
+        const w = run >= 8 ? 8 : run >= 4 ? 4 : run >= 2 ? 2 : 1;
+        const mt = w === 8 ? T_I64 : T_I32;
+        const r = f.emit(OP.MLOAD, mt, v.mem.addr, REF_NONE,
+          memDesc(COPY_MK[w], v.mem.off + done));
+        f.emit(OP.MSTORE, mt, target.mem.addr, r,
+          memDesc(COPY_SK[w], target.mem.off + done));
+        done += w;
+      }
+      return target;
+    }
+    /* 二、摊不开的（union、位域、太大…）：照旧 8/4/2/1 字节一步走 */
     for (let done = 0; done < size;) {
       const left = size - done;
       const w = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;

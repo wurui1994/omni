@@ -35,7 +35,7 @@
  */
 
 import {
-  OP, OP_MODES, REF_BIAS, REF_NONE,
+  OP, OP_MODES, OP_NAMES, REF_BIAS, REF_NONE,
   MLOAD_BYTES, MSTORE_BYTES, MLOAD_KINDS, MSTORE_KINDS, memKindNo, memOff,
 } from '../ir.js';
 import { addrOf, constOffset } from './memory.js';
@@ -71,6 +71,14 @@ function scanBase(fn, mod, base, sites, unreadSlots) {
   const cells = new Map();
   const seen = new Set();
   const work = [base];
+  /* `OMNI_SROA_STAT=1`：**为什么放弃这一块**。逃逸判据是这一格唯一的闸，判紧一处
+   * 整块访存就都收不掉，所以要能一眼看见原因（量过再改，别猜）。 */
+  const no = (why) => {
+    if (process.env.OMNI_SROA_STAT === '1') {
+      process.stderr.write(`[sroa] ${fn.name}: 放弃 %${base - REF_BIAS}（${why}）\n`);
+    }
+    return { ok: false };
+  };
   while (work.length > 0) {
     const ref = work.pop();
     if (seen.has(ref)) continue;
@@ -83,7 +91,7 @@ function scanBase(fn, mod, base, sites, unreadSlots) {
       if ((op === OP.MLOAD || op === OP.MSTORE) && u.role === 'a') {
         const isLoad = op === OP.MLOAD;
         const a = addrOf(fn, mod, fn.a[u.pc]);
-        if (a.base !== base) return { ok: false };      // 派生链上有非常量偏移
+        if (a.base !== base) return no(`%${u.pc} 的派生链上有非常量偏移`);
         const k = memKindNo(fn.aux[u.pc]);
         const lo = a.off + memOff(fn.aux[u.pc]);
         const hi = lo + (isLoad ? MLOAD_BYTES[k] : MSTORE_BYTES[k]);
@@ -93,9 +101,9 @@ function scanBase(fn, mod, base, sites, unreadSlots) {
           c = { lo, hi, t: fn.t[u.pc], loadKind: -1, storeKind: -1, pcs: [] };
           cells.set(key, c);
         }
-        if (c.t !== fn.t[u.pc]) return { ok: false };    // 同一格两种类型：不碰
-        if (isLoad) { if (c.loadKind >= 0 && c.loadKind !== k) return { ok: false }; c.loadKind = k; }
-        else { if (c.storeKind >= 0 && c.storeKind !== k) return { ok: false }; c.storeKind = k; }
+        if (c.t !== fn.t[u.pc]) return no(`格子 ${key} 上两种类型`);
+        if (isLoad) { if (c.loadKind >= 0 && c.loadKind !== k) return no(`格子 ${key} 两种读宽`); c.loadKind = k; }
+        else { if (c.storeKind >= 0 && c.storeKind !== k) return no(`格子 ${key} 两种写宽`); c.storeKind = k; }
         c.pcs.push(u.pc);
         continue;
       }
@@ -105,7 +113,7 @@ function scanBase(fn, mod, base, sites, unreadSlots) {
         /* 另一边得是个**编译期常数**（可以是一棵小树：`MUL(k0,k4)` 那种，见
            `memory.js` 的 `constOffset`）。是变量下标就说不清碰了哪个格子。 */
         if (constOffset(fn, mod, other) !== null) { work.push(REF_BIAS + u.pc); continue; }
-        return { ok: false };                            // 加的是个变量 ⇒ 格子说不清
+        return no(`%${u.pc} 加的是个变量`);
       }
       /* 三、`STORE 这个地址 -> 一个从头到尾没人 LOAD 的槽`：**不算逃逸**。
          那条 STORE 写进去的东西观察不到，地址没跑出去。
@@ -115,11 +123,11 @@ function scanBase(fn, mod, base, sites, unreadSlots) {
          不认这一种，`sph_intersect` 里按值收的那份 `Ray` 拷贝就永远拆不开 ——
          它的地址正好被那么一条死 STORE 攥着。 */
       if (op === OP.STORE && u.role === 'a' && !unreadSlots.has(fn.aux[u.pc])) {
-        return { ok: false };
+        return no(`%${u.pc} 把地址存进了还有人读的 slot${fn.aux[u.pc]}`);
       }
       if (op === OP.STORE && u.role === 'a') continue;
       /* 别的一律算逃逸 */
-      return { ok: false };
+      return no(`%${u.pc} ${OP_NAMES[op]} 的 ${u.role}`);
     }
   }
   return { ok: true, cells };

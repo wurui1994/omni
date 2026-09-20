@@ -238,6 +238,30 @@ export const COLORS = 9;
 export const COLORS_F = 8;
 
 /**
+ * **浮点那一类还有多少个"只在不跨调用时能用"的颜色** —— arm64 有 32 个 FP 寄存器，
+ * d8-d15 是被调用者保存的（上面 `COLORS_F`），**d16-d31 与 d0-d7 是调用者保存的**：
+ * 一个活跃区间只要不跨过任何调用点，住在它们里头完全安全，而且序言/收场一个字都不用发。
+ *
+ * 为什么非加这一档不可（量出来的）：把 struct 拷贝改成按字段发之后，`Vec` 的分量不再
+ * 以 i64 位模式流转、而是真的 f64 —— 于是**几乎所有值都要 FP 颜色**。
+ * `radiance` 里该有寄存器的 550 个值中 429 个是浮点，而 FP 只有 8 个颜色：
+ * 指令数从 1613 掉到 1283（-20%），时间却从 219ms 涨到 301ms。少的是搬运、多的是溢出。
+ *
+ * Go 的 `regalloc.go` 本来就分这两档（`regspec` 里每条指令的 `clobbers` 加
+ * `s.freeUseRecords` 那一套）：跨调用的值它也只放被调用者保存的寄存器里。
+ * 颜色的编号约定：`0 .. COLORS_F-1` 是被调用者保存的那 8 个，
+ * `COLORS_F .. COLORS_F+COLORS_F_SCRATCH-1` 是草稿那一档 —— 后端按这个下标去 `STICKY_F`
+ * 取真寄存器，**只有前 8 个要在序言里存**。
+ */
+export const COLORS_F_SCRATCH = 13;
+
+/** 这条指令会踩掉调用者保存的寄存器吗（区间跨过它就不能住草稿那一档）。 */
+function isCallOp(op) {
+  return op === OP.CALL || op === OP.CALLI || op === OP.CCALL || op === OP.CALLFN
+      || op === OP.SYSCALL;
+}
+
+/**
  * 跑 regalloc。**不改一条指令** —— 只往 `fn.regHint`（通用那一类）与 `fn.regHintF`
  * （浮点那一类）上各挂一张 `下标 -> 颜色` 的表（`Map`），由后端消费。
  *
@@ -263,22 +287,46 @@ export function regalloc(fn, mod) {
     slotsAt.get(k).push(no);
   }
 
-  /* 两个独立的池子：`cls[0]` 是通用、`cls[1]` 是浮点。 */
+  /* 两个独立的池子：`cls[0]` 是通用、`cls[1]` 是浮点。
+   * 浮点那一类的 `scratch` 是"只给不跨调用的区间"的那一档（见 `COLORS_F_SCRATCH`）。 */
   const cls = [
-    { hint: new Map(), slotHint: new Map(), active: [], free: [] },
-    { hint: new Map(), slotHint: new Map(), active: [], free: [] },
+    { hint: new Map(), slotHint: new Map(), active: [], free: [], scratch: [] },
+    { hint: new Map(), slotHint: new Map(), active: [], free: [], scratch: [] },
   ];
   for (let i = 0; i < COLORS; i++) cls[0].free.push(i);
   for (let i = 0; i < COLORS_F; i++) cls[1].free.push(i);
+  for (let i = 0; i < COLORS_F_SCRATCH; i++) cls[1].scratch.push(COLORS_F + i);
+
+  /* 每条指令之前有几个调用点（前缀和）—— 区间 [s,e] 跨调用 ⇔ 这两端的计数不同。 */
+  const callsBefore = [];
+  {
+    let c = 0;
+    for (let pc = 0; pc < fn.op.length; pc++) { callsBefore.push(c); if (isCallOp(fn.op[pc])) c++; }
+    callsBefore.push(c);
+  }
+  const crossesCall = (s, e) => {
+    const a = callsBefore[s < 0 ? 0 : s];
+    const b = callsBefore[e + 1 >= callsBefore.length ? callsBefore.length - 1 : e + 1];
+    return b !== a;
+  };
 
   /** 给一个区间要个颜色。要不到就抢一个**值**（槽位不当牺牲品：它的住处是全函数
    *  一个决定，中途换人后端没法表达）。回真给了没有。 */
-  const grant = (c, key, end, isSlot, operandOf) => {
+  const grant = (c, key, end, isSlot, operandOf, start) => {
+    /* 不跨调用的先吃草稿那一档（调用者保存的寄存器，序言一个字都不用发）。 */
+    if (c.scratch.length > 0 && !crossesCall(start, end)) {
+      c.scratch.sort((x, y) => x - y);
+      const color = c.scratch.shift();
+      (isSlot ? c.slotHint : c.hint).set(key, color);
+      c.active.push({ pc: key, end, color, slot: isSlot, scratch: true });
+      return true;
+    }
     if (c.free.length === 0) {
       let worst = -1, worstEnd = isSlot ? -1 : end;
       for (let k = 0; k < c.active.length; k++) {
         const it = c.active[k];
         if (it.slot === true) continue;                   // 槽位不许被抢
+        if (it.scratch === true) continue;                // 草稿那一档不参与（它没占 free）
         if (operandOf !== null && operandOf.has(it.pc)) continue;
         if (it.end > worstEnd) { worstEnd = it.end; worst = k; }
       }
@@ -302,7 +350,7 @@ export function regalloc(fn, mod) {
     if (list === undefined) return;
     for (const no of list) {
       const e = slotIv.get(no);
-      grant(cls[e.float ? 1 : 0], no, e.end, true, null);
+      grant(cls[e.float ? 1 : 0], no, e.end, true, null, e.start);
     }
   };
 
@@ -313,7 +361,8 @@ export function regalloc(fn, mod) {
     for (const c of cls) {
       const keep = [];
       for (const it of c.active) {
-        if (it.end < pc) c.free.push(it.color); else keep.push(it);
+        if (it.end < pc) (it.scratch === true ? c.scratch : c.free).push(it.color);
+        else keep.push(it);
       }
       c.active = keep;
     }
@@ -351,7 +400,7 @@ export function regalloc(fn, mod) {
      * `scene` 同时活着 19 个、我们只有 9+8=17 个颜色，覆盖率只有 79.9% ——
      * 先到先得会让一个横跨整个函数的长区间白占一个颜色，挤掉后面十几个短命但在热循环里的值。
      */
-    if (grant(c, pc, end, false, operandOf) && c.hint.has(pc)) n++;
+    if (grant(c, pc, end, false, operandOf, pc) && c.hint.has(pc)) n++;
   }
 
   fn.regHint = cls[0].hint;

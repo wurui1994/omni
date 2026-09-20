@@ -118,8 +118,20 @@ const STICKY = [19, 20, 21, 22, 23, 24, 25, 26, 27];
  * 而真的浮点运算只有 115 条。给浮点值一个真的 FP 住处，那一整类搬运就没了。
  *
  * 与 `FTMP0`(16)/`FTMP1`(17)/`FRES`(18) 以及传参用的 d0-d7 都不重叠。
+ *
+ * **后半段（d19-d31）是调用者保存的草稿档**（`regalloc.js` 的 `COLORS_F_SCRATCH`）：
+ * 上一层只把**不跨任何调用点**的区间涂成这些颜色，所以序言/收场一个字都不用发
+ * （`fstickySpill` 只存前 `STICKY_F_SAVED` 个）。
+ *
+ * 为什么要有这半段（量出来的）：struct 拷贝改成按字段发之后，`Vec` 的分量不再以 i64
+ * 位模式流转而是真 f64 —— `radiance` 里该有寄存器的 550 个值中 429 个要 FP 颜色，
+ * 而只有 8 个。指令从 1613 掉到 1283（-20%），时间却从 219ms 涨到 301ms：
+ * 少的是搬运、多的是溢出。arm64 有 32 个 FP 寄存器，不用是白扔。
  */
-const STICKY_F = [8, 9, 10, 11, 12, 13, 14, 15];
+const STICKY_F = [8, 9, 10, 11, 12, 13, 14, 15,
+  19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
+/** 前几个颜色是被调用者保存的（要在序言里存）—— 与 `regalloc.js` 的 `COLORS_F` 对齐。 */
+const STICKY_F_SAVED = 8;
 const FRES = 18;
 /**
  * **native 这条腿上没有线性内存。**
@@ -529,7 +541,9 @@ class FnGen {
       if (this.hintF !== null) for (const c of this.hintF.values()) if (seen.indexOf(c) < 0) seen.push(c);
       if (this.slotHintF !== null) for (const c of this.slotHintF.values()) if (seen.indexOf(c) < 0) seen.push(c);
       seen.sort((a, b) => a - b);
-      for (const c of seen) if (c >= 0 && c < STICKY_F.length) this.fstickyColors.push(c);
+      /* **只存被调用者保存的那几个**（前 `STICKY_F_SAVED` 个颜色）。草稿那一档
+       * （d19-d31）是调用者保存的，上一层保证涂成它们的区间不跨调用点 ⇒ 不用存。 */
+      for (const c of seen) if (c >= 0 && c < STICKY_F_SAVED) this.fstickyColors.push(c);
     }
     this.fstickySave = -1;
     if (this.fstickyColors.length > 0) {
