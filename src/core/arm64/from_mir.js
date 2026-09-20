@@ -133,6 +133,25 @@ const STICKY_F = [8, 9, 10, 11, 12, 13, 14, 15,
 /** 前几个颜色是被调用者保存的（要在序言里存）—— 与 `regalloc.js` 的 `COLORS_F` 对齐。 */
 const STICKY_F_SAVED = 8;
 const FRES = 18;
+
+/** `OMNI_EMIT_STAT=1` 的账本：MIR op 名 -> `{n: 机器指令条数, k: 这种 op 出现几次}`。
+ *  关着的时候是 `null`，一条判断都不多做。印出来的地方在 `emitStatDump`。 */
+export const EMIT_STAT = process.env.OMNI_EMIT_STAT === '1' ? new Map() : null;
+
+/** 把 `EMIT_STAT` 印出来（按条数从多到少）。**要看的是最后那一列"每条 op 摊几条指令"** ——
+ *  一条 `MSTORE` 理应是一条 `str`，摊到 2.5 就说明操作数没在寄存器里。 */
+export function emitStatDump() {
+  if (EMIT_STAT === null) return [];
+  let total = 0;
+  for (const v of EMIT_STAT.values()) total += v.n;
+  const rows = [...EMIT_STAT].sort((a, b) => b[1].n - a[1].n);
+  const out = [`[emit] 一共 ${total} 条机器指令，按 MIR op 分：`];
+  for (const [nm, v] of rows.slice(0, 16)) {
+    out.push(`  ${String(v.n).padStart(7)} 条（${(100 * v.n / Math.max(1, total)).toFixed(1)}%）`
+      + `  ${nm} × ${v.k}，每条摊 ${(v.n / Math.max(1, v.k)).toFixed(2)}`);
+  }
+  return out;
+}
 /**
  * **native 这条腿上没有线性内存。**
  *
@@ -1145,7 +1164,20 @@ class FnGen {
       this.putSlot(p.slot, place.x);
     }
 
-    for (let i = 0; i < f.count(); i++) this.one(i);
+    for (let i = 0; i < f.count(); i++) {
+      /* `OMNI_EMIT_STAT=1`：**每条 MIR op 各发了多少条机器指令**。
+       * 加这张表是吃过教训的：光看 `objdump` 里 `ldr` 的总数，判不出那些 `ldr` 是
+       * `MLOAD`（真访存）、`LOAD`（槽位）还是值溢出回读 —— 少了它，连着六个假设
+       * 全被自己的测量否掉。量过再改。 */
+      if (EMIT_STAT === null) { this.one(i); continue; }
+      const n0 = buf.words.length;
+      this.one(i);
+      const nm = OP_NAMES[f.op[i]];
+      let e = EMIT_STAT.get(nm);
+      if (e === undefined) { e = { n: 0, k: 0 }; EMIT_STAT.set(nm, e); }
+      e.n += buf.words.length - n0;
+      e.k += 1;
+    }
 
     buf.place(this.retLabel);
     /* 粘住的那几个（见 `STICKY`）：取回调用者的那几个。要在 `FB` 还有效、`sp` 还没收回去
