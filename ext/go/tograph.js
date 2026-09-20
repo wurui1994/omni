@@ -1773,9 +1773,32 @@ let IOTA = null;
  * **任何右边表达式都保留**：go 的 `_ = x[_EOF-1]` 是编译期验证（运行期执行下标检查），
  * 即使右边不是 call/prim 也可能有副作用（index-get 越界会 panic）。
  * 落成**纯表达式语句**（不绑名字、不声明变量）。 */
-function bindName(n, v) {
+function bindName(n, v, tzero) {
   if (n === '_') return [v];
-  return [node('bind', { init: v }, { name: n })];
+  return [node('bind', { init: v },
+    (tzero === undefined || tzero === null) ? { name: n } : { name: n, tzero })];
+}
+
+/**
+ * `var x T` 里 T 是**引用类型**（接口 / `*具名结构体`）时那一格的"声明的零值"
+ * （只作类型用，见 `bind` 的 `tzero`）。别的类型回 null —— 那时照旧落真零值。
+ *
+ * 与 `nilFieldZero` 差一处：字段那边**只认接口**（`*T` 字段有代码靠"那格记录一上来
+ * 就在"），而**局部/包级变量**这边 `*T` 也认 —— `var p *T` 之后不先赋值就取字段在 go 里
+ * 是一次 panic，没有哪份代码能靠着它。
+ */
+function nilVarZero(ty) {
+  if (ty === undefined || ty === null) return null;
+  const ifn = ifaceNameOf(ty);
+  if (ifn !== null) return ifaceZero(ifn);
+  if (tag(ty) === 'paren') return nilVarZero(kids(ty)[0]);
+  if (tag(ty) === 'ptr') {
+    const tn = namedTypeOf(kids(ty).find((y) => isList(y)));
+    if (tn !== null && STRUCTS.get(tn) !== undefined && STRUCTS.get(tn) !== null) {
+      return structZero(tn);
+    }
+  }
+  return null;
 }
 
 /** 一格 spec 的名字表对初值表：数目相等就逐个绑，N 对 1 是多值，没初值就落零值。 */
@@ -1783,7 +1806,14 @@ function specBinds(names, exprs, ty) {
   /* 声明写着类型时留一份**类型节点**（`tyOfExpr` 要它：`var xs []Shape` 的元素类型、
      `var s Shape` 的接口分派）。 */
   if (ty !== undefined) for (const n of names) VARTY.set(n, ty);
-  if (exprs === null) return names.flatMap((n) => bindName(n, zeroOf(ty, n)));
+  if (exprs === null) {
+    /* **没初值、而声明的是引用类型**（`var p *T` / `var s Shape`）：go 的零值是 nil。
+       值落空引用、类型走 `bind` 的 `tzero`（见 `nilFieldZero` 与 nodes.js 那两段账）——
+       落"那个类型的零值记录"的代价是 `p == nil` 恒为假。 */
+    const nz = nilVarZero(ty);
+    if (nz !== null) return names.flatMap((n) => bindName(n, lit(null), nz));
+    return names.flatMap((n) => bindName(n, zeroOf(ty, n)));
+  }
   if (names.length > 1 && exprs.length === 1) {
     return destructure(names, toNode(exprs[0]), { declare: true });
   }
@@ -2622,13 +2652,27 @@ function toNode(x) {
         }
       }
       if (elems.length > 0 && elems.every((e) => tag(e) === 'kv')) {
-        /* 字段声明成浮点时把值转过去（见 `fieldValue` 那段账）。 */
-        const ftab = new Map((tyName !== null && STRUCTS.get(tyName)) || []);
+        const fs0 = (tyName !== null && STRUCTS.get(tyName)) || null;
+        const given = new Map(elems.map((e) => [nameOf(kids(e)[0]), kids(e)[1]]));
+        /* **按声明的次序铺满**（字段表认得出来的时候）：go 里没写到的字段就是零值，而方言
+           按"字段名单 + 字段类型"去重形状 —— 只铺写到的那几格，`&N{V:3}` 与 `var p *N`
+           就是两格形状（量出来的：`'p' 是 r2，赋的值是 r4`）。次序也得照声明来：
+           `Hit{Shape: s, T: 1}` 与 `Hit{T: 1, Shape: s}` 在 go 里是同一个值。
+           字段表查不到（嵌入、外部包）就照写到的那几格来 —— 与从前一样。 */
+        const list = fs0 !== null
+          ? [...fs0, ...[...given.keys()].filter((k) => !fs0.some(([f]) => f === k))
+            .map((k) => [k, undefined])]
+          : [...given.keys()].map((k) => [k, undefined]);
         const fz = [];
-        const pairs = elems.map((e) => {
-          const [k, v0] = kids(e);
-          const fn2 = nameOf(k);
-          const ft = ftab.get(fn2);
+        const pairs = list.map(([fn2, ft]) => {
+          const v0 = given.get(fn2);
+          /* 没写到的那几格：接口落空引用 + `fzero`，别的落真零值。 */
+          if (v0 === undefined) {
+            const nz = nilFieldZero(ft, lit(null));
+            fz.push(nz);
+            return [fn2, nz === null ? zeroOf(ft, `${tyName ?? '?'}.${fn2}`) : lit(null)];
+          }
+          /* 字段声明成浮点时把值转过去（见 `fieldValue` 那段账）。 */
           const v = fillElidedTy(v0, ft);
           const vn = toNode(v);
           /* **写着 `nil` 的接口字段**：值落空引用、类型走 `fzero`（见 `nilFieldZero`）。 */
@@ -2648,12 +2692,20 @@ function toNode(x) {
         const fs = STRUCTS.get(litTypeName);
         if (fs !== null && fs.length >= elems.length) {
           const fz = [];
-          const pairs = elems.map((e0, i) => {
-            const e = fillElidedTy(e0, fs[i][1]);
+          /* 位置式也要**铺满**（与上面 kv 那一支同一条账）：go 的位置式字面量必须写全，
+             所以正常情况下 `fs.length === elems.length`；少写了就按零值补，形状才唯一。 */
+          const pairs = fs.map(([fn2, ft], i) => {
+            const e0 = elems[i];
+            if (e0 === undefined) {
+              const nz = nilFieldZero(ft, lit(null));
+              fz.push(nz);
+              return [fn2, nz === null ? zeroOf(ft, `${litTypeName}.${fn2}`) : lit(null)];
+            }
+            const e = fillElidedTy(e0, ft);
             const en = toNode(e);
-            const fzi = nilFieldZero(fs[i][1], en);
+            const fzi = nilFieldZero(ft, en);
             fz.push(fzi);
-            return [fs[i][0], fzi === null ? fieldValue(fs[i][1], en, e) : lit(null)];
+            return [fn2, fzi === null ? fieldValue(ft, en, e) : lit(null)];
           });
           return withType(pairs, fz);
         }

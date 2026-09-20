@@ -98,7 +98,11 @@ export const NODES = new Map([
   N('bind', 'decl', [{ name: 'init', sem: SEM.value }], {
     // `keepMulti` 是一格**附属**：绑的是整格多值（`destructure` 那格临时量），不是第一格。
     // 没有它的话 `local x = f()` 与"装住多值"两件事分不开 —— lua 的规矩是前者只取第一格。
-    attrs: ['name', 'keepMulti'], effects: ['writes'], lifetime: 'owns', outs: [],
+    /* `tzero` —— **声明的零值**（类型覆盖层 #40，与 `record-new.fzero` 同一格账）。
+       只有 init 是**空引用**时才问它：`var p *T` / `var s Shape` 在 go 里是 nil，可
+       空引用自己说不出类型。落"那个类型的零值记录"的代价是 `p == nil` 恒为假
+       （答案静默地错）；落 `lit(null)` 而不带 tzero 的代价是类型只能从第一处赋值猜。 */
+    attrs: ['name', 'keepMulti', 'tzero'], effects: ['writes'], lifetime: 'owns', outs: [],
     doc: 'decl 就是这一格：sbcl let / go OAS / lua local / nim let',
     providers: { spec: TEN, why: {} },
   }),

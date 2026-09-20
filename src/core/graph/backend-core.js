@@ -1380,6 +1380,16 @@ function stmtIn(x, env, ctx) {
        * 的 bodyOf）。方言是有类型的，所以这一格照**第一次赋值**定型，值给那个类型的零值 ——
        * 与 awk 的语义对得上（那门语言里没赋过值的变量当数是 0、当串是 ""，正好都是零值）。 */
       if (isLitNull(init)) {
+        /* **声明写着引用类型**（go 的 `var p *T` / `var s Shape`）：值是一格空引用，
+           类型从 `tzero`（声明的零值）来 —— 见 nodes.js 上 `bind` 的那段账。
+           这一支要在 `nullHint` 之前：那一格是"从第一处赋值猜"，声明摆在眼前时不该猜。 */
+        const tz = x.attrs.tzero;
+        if (tz !== undefined && tz !== null) {
+          const tt = declTypeOfNode(tz, env, ctx);
+          if (tt !== null && (isPtrRec(tt, ctx) || elemType(tt) !== null)) {
+            return [bindLine(nm, tt, `(null ${tt})`, env, ctx)];
+          }
+        }
         const t0 = nullHint(nm, ctx, env);
         return [bindLine(nm, t0, zeroText(t0), env, ctx)];
       }
