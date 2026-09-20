@@ -218,6 +218,25 @@ export function regalloc(fn, _mod) {
 
   fn.regHint = cls[0].hint;
   fn.regHintF = cls[1].hint;
+  /* `OMNI_RA_STAT=1`：印出这一格的覆盖率与压力 —— 「同时活着最多几个」决定了
+   * 加寄存器还不还得起，「分到几个」决定了抢占策略有没有用。量过再改，别猜。 */
+  if (process.env.OMNI_RA_STAT === '1' && fn.op.length >= 200) {
+    let want = 0, maxLive = 0, live = 0;
+    const evt = [];
+    for (let pc = 0; pc < fn.op.length; pc++) {
+      if (last[pc] < 0) continue;
+      const t = resultType(fn, pc);
+      if (t === T_VOID || !fitsOneWord(t)) continue;
+      want++;
+      evt.push([pc, 1], [last[pc] + 1, -1]);
+    }
+    evt.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    for (const [, d] of evt) { live += d; if (live > maxLive) maxLive = live; }
+    const got = cls[0].hint.size + cls[1].hint.size;
+    process.stderr.write(`[ra] ${fn.name}: ${fn.op.length} 条指令，该有寄存器的值 ${want} 个，`
+      + `分到 ${cls[0].hint.size}+${cls[1].hint.size}=${got}`
+      + `（${(100 * got / Math.max(1, want)).toFixed(1)}%），同时活着最多 ${maxLive} 个\n`);
+  }
   return n;
 }
 

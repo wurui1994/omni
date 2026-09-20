@@ -42,7 +42,7 @@ import { addrOf, constOffset } from './memory.js';
 import { registerPass } from './pass.js';
 
 /** 每个 ref 被哪些 (pc, 角色) 用着。角色：'a'/'b'/'p'（实参池里）。 */
-function useSites(fn) {
+export function useSites(fn) {
   const sites = new Map();      // ref -> [{pc, role}]
   const add = (ref, pc, role) => {
     if (ref === REF_NONE || ref < REF_BIAS) return;

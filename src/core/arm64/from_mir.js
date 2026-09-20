@@ -2017,6 +2017,21 @@ class FnGen {
      * 连一条 `add` 都不发。折不进才走 `memAddr` 把真址算出来。 */
     const off = memOff(f.aux[i]);
     const fold = foldOff(off, MLOAD_SIZE[kind]);
+    /**
+     * **f64 且结果住 FP 寄存器**：一条 `ldr d, [p, #off]` 直接读进它的家。
+     *
+     * 这一条是指令级对账里 `fmov` 那 566 条的大头：从前这一路发的是
+     *   `ldr x9, [x22, #8]` + `fmov d11, x9`
+     * —— 一条真访存后面跟一条纯搬运。Go 那边同一件事是 `FLDPD`（还一次读两个）。
+     * 只认 f64：f32 的栈位按 8 字节写、`str s` 只动低 4 字节（见 `fRefReg` 那一段）。
+     */
+    const fsk = this.fstickyAt(i);
+    if (fsk >= 0 && kind === 'f64') {
+      const p = fold ? this.refReg(f.a[i], TMP0) : this.memAddr(TMP0, f.a[i], off);
+      this.buf.emit(ldrFpU(3, fsk, p, fold ? off : 0));
+      this.pending = -1;
+      return;
+    }
     const p = fold ? this.refReg(f.a[i], TMP0) : this.memAddr(TMP0, f.a[i], off);
     const d = this.dest(i, p);
     ld(this.buf, d, p, fold ? off : 0);
@@ -2029,11 +2044,19 @@ class FnGen {
     const kind = MSTORE_KINDS[memKindNo(f.aux[i])];
     const size = MSTORE_SIZE[kind];
     if (size === undefined) return arm64Nyi(`MSTORE 的宽度 ${kind}`);
+    const off = memOff(f.aux[i]);
+    const fold = foldOff(off, size);
+    /* **f64 且值住 FP 寄存器**：一条 `str d, [p, #off]`，省掉那条 `fmov x, d`
+     * （与 `mload` 那一段同一笔账）。 */
+    const fv = kind === 'f64' ? this.fstickyRef(f.b[i]) : -1;
+    if (fv >= 0) {
+      const p = fold ? this.refReg(f.a[i], TMP0) : this.memAddr(TMP0, f.a[i], off);
+      this.buf.emit(strFpU(3, fv, p, fold ? off : 0));
+      return;
+    }
     /* 先取值再算地址：`memAddr` 在偏移大的时候要借 TMP1，所以值落在 RES 上。
      * 值在池寄存器里的话 `refReg` 一个字都不发（从前这儿是 `ldr` + `mov` 两条）。 */
     const v = this.refReg(f.b[i], RES);
-    const off = memOff(f.aux[i]);
-    const fold = foldOff(off, size);
     const p = fold ? this.refReg(f.a[i], TMP0) : this.memAddr(TMP0, f.a[i], off);
     this.buf.emit(strU(size, v, p, fold ? off : 0));
   }

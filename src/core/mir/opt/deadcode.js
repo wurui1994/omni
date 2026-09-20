@@ -60,6 +60,16 @@ const REMOVABLE_NAMES = [
   'VSPLAT', 'VINS', 'VEXT',
   // 地址（算地址不访问内存）
   'FRAME', 'GADDR', 'FADDR', 'PNULL', 'PISNULL', 'PTHIN', 'PADD',
+  /* **按值收发 struct 的那两个记号**（第二格加的）。`ARGMEM p n` / `ARGSRET p n`
+   * 只是"这一块在 p、n 个字节"的说明，自己**不访问内存、没有副作用** ——
+   * 它们的意义全在被哪条 `CALL` 的实参池引用着。
+   *
+   * 为什么非删不可：`inline` 把一条 CALL 换成它的函数体之后，那条 CALL 的
+   * `ARGMEM`/`ARGSRET` 就没人引用了，可它们还**攥着那个帧块的地址**。
+   * 于是 `copyfwd.js` 的 `localFrame` 与 `sroa.js` 的 `scanBase` 都判那一块逃逸，
+   * 两格都不敢动 —— 量出来的代价是 `sph_intersect`（smallpt 自时间的 47%）里
+   * 88 条访存一条都收不掉。 */
+  'ARGMEM', 'ARGSRET',
 ];
 
 /** 名字 -> opcode，顺手自检（表里写错一个名字就当场炸，不静悄悄少删一族）。 */

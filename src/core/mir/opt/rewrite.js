@@ -28,6 +28,7 @@ import {
 import { replaceRef } from './edit.js';
 import { buildCfg } from './cfg.js';
 import { mayWriteMemory, sameCell, cellOf, disjoint, sameSpot } from './memory.js';
+import { forwardCopiedLoads } from './copyfwd.js';
 import { registerPass } from './pass.js';
 
 /** 取一个 ref 的常量池条目；不是常量、或者压根不是 ref（角色 'n'/'s'/'j'）回 null。
@@ -407,7 +408,7 @@ export function opt(fn, mod) {
   }
   /* 存储转发放在逐条重写**之后**：转发出来的值还要再被折一遍常量
      （`MSTORE p k1; MLOAD p` -> k1，然后 `ADD k1 k2` 才折得掉），所以再跑一轮重写。 */
-  const fwd = forwardLoads(fn, mod);
+  const fwd = forwardLoads(fn, mod) + forwardCopiedLoads(fn, mod);
   if (fwd > 0) {
     total += fwd;
     for (let pc = 0; pc < fn.op.length; pc++) {

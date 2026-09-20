@@ -30,16 +30,26 @@ function usableHere(sc, fn, ref, pc) {
   return inScope(sc, ref - REF_BIAS, pc);
 }
 
-/** 有 FRAME 出现的函数里保守地把所有 slot 标为地址已取。
- *  更精确的：追 FRAME → MLOAD/MSTORE 的定义-使用链，只标真被取过地址的。第二批再做。 */
-function addressTakenSlots(fn) {
-  const taken = new Set();
-  let hasFrame = false;
-  for (let pc = 0; pc < fn.op.length; pc++) {
-    if (fn.op[pc] === OP.FRAME) hasFrame = true;
-  }
-  if (hasFrame) for (let i = 0; i < fn.slots.length; i++) taken.add(i);
-  return taken;
+/**
+ * 哪些 slot **不能**提升（地址被取过）。
+ *
+ * 答案是**一个都没有**，而这不是乐观，是 MIR 的角色表定的事实：
+ * 整张 `OP_MODES` 里带 `'s'`（槽号）角色的只有两条 —— `LOAD` 与 `STORE`。
+ * **没有任何一条 op 能拿到一个槽的地址**。取过地址的局部量由 C 前端放进
+ * `FRAME` 块（另一片存储，靠 `MLOAD`/`MSTORE` 访问），压根不占槽。
+ *
+ * 曾经这儿是「函数里只要出现过一条 `FRAME`，就把**所有**槽标成地址已取」，
+ * 注释写着"第二批再做精确的"。那一刀的代价是量出来的：`sph_intersect`
+ * （smallpt 自时间的 47%）里有一条 `FRAME`（按值收的 `Ray r` 那份拷贝），
+ * 于是 **mem2reg 在它身上整个是个空操作** —— 内联进来的 `vsub$a`/`vsub$b`/`$sret`
+ * 那些槽一个都没提升，帧块的地址经过槽兜了一圈，`copyfwd.js` 与 `sroa.js`
+ * 两格都判它逃逸、都不敢动。smallpt 的整条热路径都栽在这一行上。
+ *
+ * 留这个函数（而不是把调用点删了）是为了这段说明有个落脚处：将来 MIR 真加了
+ * 「取槽地址」那一条 op，这儿就是该改的地方。
+ */
+function addressTakenSlots(_fn) {
+  return new Set();
 }
 
 /**
@@ -93,6 +103,65 @@ export function mem2reg(fn, _mod) {
   }
 
   let changed = 0;
+  /**
+   * ---- 一、**先把每个块的出口值算到不动点**（这就是 Go 的 `phielim`）。
+   *
+   * `ssacompile/phielim.go`：「A phi is redundant if its arguments are all equal.」
+   * 我们没有 phi，等价的说法是：**一个块的多个前驱在某个 slot 上给出同一个 ref**，
+   * 那这个块入口处这个 slot 就是那个 ref。前驱们给的不一样、或者哪个还不知道，
+   * 就是 `UNKNOWN`（那条 LOAD 留着）。
+   *
+   * 为什么非要这一步：内联把 `RET v` 铺成 `STORE v -> 结果槽; BR ^depth`，一条 `RET`
+   * 就是一个前驱。`vsub` 那种单出口函数内联进来之后结果槽有两条一模一样的 STORE
+   * （尾部那一段复制出来的），两个前驱写的是同一个 ref —— 少了这一问，
+   * `LOAD 结果槽` 就永远提升不掉，帧块的地址于是经过槽兜一圈，
+   * `copyfwd.js`/`sroa.js` 判它逃逸（量出来：sph_intersect 的 88 条访存一条都收不掉）。
+   *
+   * 起点一律 `UNKNOWN`、`meet(UNKNOWN, x) = UNKNOWN`：这是**悲观**起点，所以回边
+   * （循环）上永远停在 UNKNOWN，不会把一个乐观的值传出循环去。安全。
+   */
+  const exitCur = [];
+  for (let i = 0; i < cfg.blocks.length; i++) exitCur.push(null);
+  const runBlock = (bb, cur) => {
+    for (let pc = bb.from; pc <= bb.to; pc++) {
+      const op = fn.op[pc];
+      if (op === OP.STORE && promotable.has(fn.aux[pc])) { cur[fn.aux[pc]] = fn.a[pc]; continue; }
+      if (op === OP.LOAD && promotable.has(fn.aux[pc])) {
+        if (cur[fn.aux[pc]] === UNKNOWN) cur[fn.aux[pc]] = REF_BIAS + pc;
+        continue;
+      }
+    }
+    return cur;
+  };
+  for (let round = 0; round < cfg.blocks.length + 1; round++) {
+    let moved = false;
+    for (const bb of cfg.blocks) {
+      if (!reach.has(bb.id)) continue;
+      exitCur[bb.id] = runBlock(bb, Object.assign({}, entryCur[bb.id]));
+    }
+    for (const bb of cfg.blocks) {
+      if (!reach.has(bb.id)) continue;
+      const preds = cfg.blocks[bb.id].pred;
+      if (preds.length === 0) continue;
+      for (const s of promotable) {
+        let v = UNKNOWN;
+        let first = true;
+        for (const p of preds) {
+          /* **到不了的前驱不算**：它的出口值永远是 null，算进来会把 meet 毒成 UNKNOWN。
+             内联把尾部复制了一份（`STORE 结果槽; BR` 两遍），后一份就是到不了的那种。 */
+          if (!reach.has(p)) continue;
+          const e = exitCur[p];
+          const pv = (e === undefined || e === null) ? UNKNOWN : e[s];
+          if (first) { v = pv; first = false; continue; }
+          if (pv !== v) v = UNKNOWN;
+        }
+        if (v !== UNKNOWN && entryCur[bb.id][s] !== v) { entryCur[bb.id][s] = v; moved = true; }
+      }
+    }
+    if (!moved) break;
+  }
+
+  /* ---- 二、按算好的入口值改引用 */
   for (const bb of cfg.blocks) {
     if (!reach.has(bb.id)) continue;
     const cur = Object.assign({}, entryCur[bb.id]);
@@ -111,26 +180,13 @@ export function mem2reg(fn, _mod) {
         const v = cur[fn.aux[pc]];
         const myRef = REF_BIAS + pc;          // 这条 LOAD 的结果的 ref
         if (v !== UNKNOWN && v !== myRef && usableHere(sc, fn, v, pc)) {
-          /* 块内有定义 ⇒ 把所有引用 %pc 的地方改成引用 v。
+          /* 有定义且在这儿看得见 ⇒ 把所有引用 %pc 的地方改成引用 v。
              LOAD 本身留着（没人引用了，deadcode 那格会删）。 */
           changed += replaceRef(fn, myRef, v);
         }
-        /* v === REF_NONE：块入口没定义 ⇒ 这条 LOAD 就是这个 slot 在本块的第一个定义 */
+        /* v === UNKNOWN：入口没定义 ⇒ 这条 LOAD 就是这个 slot 在本块的第一个定义 */
         if (v === UNKNOWN) cur[fn.aux[pc]] = myRef;
         continue;
-      }
-    }
-
-    /* 把 cur 传给"唯一前驱就是我"的后继。
-       ⚠️ 必须同时问 `pred[0] === bb.id`：只问"前驱只有一个"会在 CFG 少一条边的时候
-       把值传到一个其实另有来路的块里 —— `tests/c/gen/10-switch.c` 上量到过
-       （那时 buildCfg 还不认 BRTABLE，switch 的目标块看起来都只有一个前驱，s=7457 变 7557）。 */
-    for (const sid of cfg.blocks[bb.id].succ) {
-      const sp = cfg.blocks[sid].pred;
-      if (sp.length === 1 && sp[0] === bb.id) {
-        for (const s of promotable) {
-          if (cur[s] !== UNKNOWN) entryCur[sid][s] = cur[s];
-        }
       }
     }
   }

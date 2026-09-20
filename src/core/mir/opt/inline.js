@@ -37,6 +37,7 @@
  */
 
 import { OP, OP_MODES, REF_BIAS, REF_NONE, T_VOID } from '../ir.js';
+import { mem2reg } from './ssa.js';
 import { registerPass } from './pass.js';
 
 /** 预算：被调的指令条数上限。Go 那边是 `inlineMaxBudget = 80`（`inline/inl.go`）——
@@ -167,6 +168,20 @@ export function inlineCalls(fn, mod) {
   /* 分配表按下标记的，已经作废 */
   if (fn.regHint !== undefined) fn.regHint = undefined;
   if (fn.regHintF !== undefined) fn.regHintF = undefined;
+  /**
+   * ---- 四、**把新造的那些槽位再提升一遍**（`mem2reg`）。
+   *
+   * 这不是多加一格优化，是补上 Go 免费拿到的那一步：Go 在 SSA **之前**内联
+   * （`internal/inline.InlineDecls`），所以它建 SSA 的时候看见的已经是内联完的函数体，
+   * 被内联进来的形参/局部/返回值在那一步就成了值。我们在 MIR 上内联、而 mem2reg
+   * （通道表第二格 `early phielim and copyelim`）早就跑过了，不补这一步的话
+   * 上面 `emit(OP.STORE, …)` 给每个形参造的槽位一个都提升不掉。
+   *
+   * 代价是量出来的：不补时 `sph_intersect`（smallpt 自时间 47%）里的
+   * `%46 ADD %21 k4` -> `STORE slot9` 让那个帧块看起来"逃逸"了，
+   * `copyfwd.js` 与 `sroa.js` 两格都不敢动它。
+   */
+  mem2reg(fn, mod);
   return sites.size;
 }
 
