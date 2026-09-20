@@ -82,6 +82,80 @@ export function useSites(fn) {
 }
 
 /**
+ * 从 `ref`（它指向"本块偏移 `off` 处"）往下走，把**通过它访问到的字节区间**记进 `out`。
+ * 回 `false` = 有一处说不清（那就只能当"整块逃逸"）。
+ *
+ * 与 `scanBase` 的第一、二条同一套判据，差别只在：这儿的偏移是**相对给定的 off**，
+ * 而且不记格子（只记区间）—— 因为这些字节要留在内存上，拆不了。
+ */
+function relCells(fn, mod, ref, off, sites, out, seen) {
+  if (seen.has(ref)) return true;
+  seen.add(ref);
+  const list = sites.get(ref);
+  if (list === undefined) return true;             // 没人用
+  for (const u of list) {
+    const op = fn.op[u.pc];
+    if ((op === OP.MLOAD || op === OP.MSTORE) && u.role === 'a') {
+      const k = memKindNo(fn.aux[u.pc]);
+      const lo = off + memOff(fn.aux[u.pc]);
+      out.push({ lo, hi: lo + (op === OP.MLOAD ? MLOAD_BYTES[k] : MSTORE_BYTES[k]) });
+      continue;
+    }
+    if (op === OP.ADD && (u.role === 'a' || u.role === 'b')) {
+      const other = u.role === 'a' ? fn.b[u.pc] : fn.a[u.pc];
+      const k = constOffset(fn, mod, other);
+      if (k === null) return false;
+      if (!relCells(fn, mod, REF_BIAS + u.pc, off + k, sites, out, seen)) return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+/**
+ * `STORE 本块里的一个地址 -> slot`，而那个槽**还有人读**。这一条从前是"放弃整块"，
+ * 现在先试着**把它盖住的字节算出来**：算得出来就只让那几个格子不换。
+ *
+ * 为什么非要这一格（量出来的，radiance）：C 前端给三目运算的左值开一个**指针临时槽**
+ * （`$selN`）—— `Vec nl = vdot(n, r.d) < 0 ? n : vmul(n, -1);` 两支各
+ * `STORE ADD(%0,k) -> $sel20`，`END` 之后再 `LOAD $sel20` 去 MLOAD。那条 LOAD 跨了区域
+ * 边界，而两支存的地址不同 —— MIR 没有 phi，mem2reg 转发不了（`region.js` 的词法作用域
+ * 那条规矩），于是 0 号帧块里 393 条访存全留在内存上。
+ *
+ * 能算出来的条件（都要）：
+ *   - 存进这个槽的**每一个**值都是"本块 + 常量偏移"（拿到的是那几个 `k_i`）；
+ *   - `LOAD 这个槽`的结果**只**当访存地址用（顺着 `ADD(·, 常量)` 走，拿到 `(o_j, w_j)`）。
+ * 那么被碰到的字节就是 `{[k_i+o_j, k_i+o_j+w_j)}` 这个叉乘 —— 别的格子照拆。
+ *
+ * 回 `null` = 算不出来（调用方放弃整块）。
+ */
+function slotEscapes(fn, mod, base, slot, sites) {
+  const ks = [];
+  for (let pc = 0; pc < fn.op.length; pc++) {
+    if (fn.op[pc] !== OP.STORE || fn.aux[pc] !== slot) continue;
+    const v = fn.a[pc];
+    if (v === REF_NONE || v < REF_BIAS) return null;      // 往里存的不是个地址
+    const a = addrOf(fn, mod, v);
+    if (a.base !== base) return null;                     // 存的是别处的地址：说不清
+    ks.push(a.off);
+  }
+  if (ks.length === 0) return null;
+  const rel = [];
+  for (let pc = 0; pc < fn.op.length; pc++) {
+    if (fn.op[pc] !== OP.LOAD || fn.aux[pc] !== slot) continue;
+    if (!relCells(fn, mod, REF_BIAS + pc, 0, sites, rel, new Set())) return null;
+  }
+  const out = [];
+  /* 叉乘要封顶：`ks × rel` 还要再喂给后面 `cells × escapes` 那一趟，大帧块上很容易上十万级
+     —— 裸指针实参那一版就是在这儿把判据跑卡死的。超了就当"算不出来"，放弃整块。 */
+  if (ks.length * rel.length > 1024) return null;
+  for (const k of ks) for (const r of rel) out.push({ lo: k + r.lo, hi: k + r.hi });
+  return out;
+}
+
+
+/**
  * 查一个 base：它派生出来的地址都只当访存的地址用吗。
  *
  * 格子记进 `cells`（`Map(键 -> {lo, hi, t, loadKind, storeKind, pcs, bad})`，键是 `lo|hi`），
@@ -161,10 +235,42 @@ function scanBase(fn, mod, base, sites, unreadSlots, cells, escapes) {
          不认这一种，`sph_intersect` 里按值收的那份 `Ray` 拷贝就永远拆不开 ——
          它的地址正好被那么一条死 STORE 攥着。 */
       if (op === OP.STORE && u.role === 'a' && !unreadSlots.has(fn.aux[u.pc])) {
-        return no(`%${u.pc} 把地址存进了还有人读的 slot${fn.aux[u.pc]}`);
+        /* 还有人读那个槽 ⇒ 先试着把"它能碰到哪几个字节"算出来（见 `slotEscapes`）。
+           算出来了就只让那几个格子不换，块里别的照拆。 */
+        const es = slotEscapes(fn, mod, base, fn.aux[u.pc], sites);
+        if (es !== null) { for (const e of es) escapes.push(e); continue; }
+        /* `OMNI_SROA_STAT=1` 时把那个槽的读处与写处一并印出来 —— 这一条是最难查的一道闸，
+           只报槽号看不出是"跨了区域边界的 phi"还是"真把地址交出去了"。 */
+        let why = `%${u.pc} 把地址存进了还有人读的 slot${fn.aux[u.pc]}`;
+        if (stat) {
+          const rd = [];
+          for (let q = 0; q < fn.op.length; q++) {
+            if (fn.op[q] === OP.LOAD && fn.aux[q] === fn.aux[u.pc]) rd.push(`%${q}`);
+          }
+          why += `（读它的：${rd.slice(0, 8).join(' ')}${rd.length > 8 ? ' …' : ''}`;
+          const wr = [];
+          for (let q = 0; q < fn.op.length; q++) {
+            if (fn.op[q] === OP.STORE && fn.aux[q] === fn.aux[u.pc]) {
+              const v = fn.a[q];
+              wr.push(`%${q}<-${v >= REF_BIAS ? `%${v - REF_BIAS} ${OP_NAMES[fn.op[v - REF_BIAS]]}` : `k${v}`}`);
+            }
+          }
+          why += `；写它的：${wr.slice(0, 8).join(' ')}${wr.length > 8 ? ' …' : ''}）`;
+        }
+        return no(why);
       }
       if (op === OP.STORE && u.role === 'a') continue;
-      /* 别的一律算"说不清范围的逃逸" —— 放弃整块 */
+      /* 别的一律算"说不清范围的逃逸" —— 放弃整块。
+       *
+       * ⚠️ **裸指针实参（`CALL f(…, 这个地址, …)`）试过一刀，撤了**：想法是问被调
+       * "你通过那个形参碰哪几个字节"（`intersect(r, &t)` 里的 `&t` 只有 8 个字节，
+       * 从前它一个人摁死 0 号帧块另外三百多条访存）。写出来之后 `tests/mir/opt.js`
+       * **卡死**（判据跑不完），所以按纪律撤回 —— 没量过的一刀不许留在主干上。
+       * 下次要做的话，先把两处会爆的地方定住：
+       *   - `slotEscapes` / 跨函数那一版都在做**叉乘**（每个存进去的偏移 × 每个访问的偏移），
+       *     再加上后面 `cells × escapes` 那一趟，radiance 的 0 号帧块上就是几十万级；
+       *   - `paramRange` 的缓存要按"被调的指令条数"判过期（管线跑两遍 SROA，被调会变）。
+       */
       return no(`%${u.pc} ${OP_NAMES[op]} 的 ${u.role}`);
     }
   }
@@ -217,10 +323,14 @@ function aliasId(fn, mod, ref) {
 export function sroa(fn, mod) {
   if (!fn || fn.op.length === 0) return 0;
   const sites = useSites(fn);
-  /* 哪些槽**从头到尾没人 LOAD** —— 往那种槽里写什么都观察不到（见 `scanBase` 第三条）。 */
+  /* 哪些槽**从头到尾没人真读** —— 往那种槽里写什么都观察不到（见 `scanBase` 第四条）。
+     判据是"有没有一条 LOAD 的**结果被人引用**"，不是"有没有一条 LOAD 指令"：
+     mem2reg 只改引用、**一条指令都不删**（见 ssa.js 顶上那段），所以它转发掉的那些
+     LOAD 还摆在指令数组里，等紧跟的 deadcode 收。按"指令在不在"判就会把一个
+     已经没人读的槽当成"还有人读"，整块访存于是白白留在内存上。 */
   const loaded = new Set();
   for (let pc = 0; pc < fn.op.length; pc++) {
-    if (fn.op[pc] === OP.LOAD) loaded.add(fn.aux[pc]);
+    if (fn.op[pc] === OP.LOAD && sites.has(REF_BIAS + pc)) loaded.add(fn.aux[pc]);
   }
   const unread = new Set();
   for (let i = 0; i < fn.slots.length; i++) if (!loaded.has(i)) unread.add(i);

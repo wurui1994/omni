@@ -81,15 +81,52 @@ export function mem2reg(fn, _mod) {
      verifier 骂「定义在一个已经关掉的区域里」。 */
   const sc = regionScope(fn);
 
-  /* 每个块入口时各 slot 的值。`UNKNOWN` = 还不知道 ⇒ LOAD 留着不动，走 SLOT。
+  /* 每个块入口时各 slot 的值。三档格：
+       `TOP`     = 还没有任何前驱给出信息（**乐观**起点，只出现在没跑到的那几轮里）
+       一个 ref  = 所有前驱在这儿都给同一个值
+       `UNKNOWN` = 说不清（前驱给的不一样、或者它就是个没定义的起点）⇒ LOAD 留着，走 SLOT
      ⚠️ 这里存的是 **ref**（`REF_BIAS + 指令下标` 或常量号），不是裸的 pc ——
-     第一版把 `pc` 和 ref 混用了，于是 replaceRef 找不到任何一处（改写 0 处、白跑一趟）。 */
+     第一版把 `pc` 和 ref 混用了，于是 replaceRef 找不到任何一处（改写 0 处、白跑一趟）。
+
+     为什么要 `TOP` 这一档（这一格是第二版的要点，量出来的）：第一版起点一律 `UNKNOWN`
+     且 `meet(UNKNOWN, x) = UNKNOWN`，于是**回边上永远停在 UNKNOWN** —— 循环里的
+     `LOAD 形参槽` 一条也提升不掉。`radiance` 里 `intersect` 内联进来带着那个九个球的
+     `for`，`sph_intersect` 的形参槽（装的是帧块地址）就在循环体里读，于是
+     `sroa.js` 一路判"地址存进了还有人读的 slot"，0 号帧块的 321 条访存全收不掉。
+     乐观起点 + 单调下降的不动点是标准做法，也正是 Go 的 `phielim` 那句
+     「A phi is redundant if its arguments are all equal」在没有 phi 的图上的说法：
+     循环里没人写这个槽 ⇒ 回边给出的出口值就等于入口值 ⇒ 不动点上两边一致，安全。 */
+  const TOP = -2;
   const UNKNOWN = -1;
   const REF_NONE = UNKNOWN;
+  /* **用定长数组而不是对象**：这一格是按"块 × 槽"做的不动点，radiance 是
+     73 块 × 791 槽 —— 拿 `{}` 存、每轮 `Object.assign` 复制一遍，光属性写就五万八千次，
+     量出来这两格（early/late phielim）占到管线的 40%。换成定长数组之后复制是一次
+     `slice()`，读写是下标。装的都是小整数（TOP=-2、UNKNOWN=-1、ref ≥ 0），
+     V8 会按 packed-SMI 存，和定型数组一个量级 —— 而 `Int32Array` **不在这门语言的子集里**
+     （`tests/mir` 的 `lower/cli.js` 当场报 unresolved identifier），所以用普通数组。 */
+  const NS = fn.slots.length;
+  const isProm = new Uint8Array(NS);
+  const proms = [];
+  /* **只有"至少被 LOAD 过一次"的槽要参加这个不动点**。这一格只改 LOAD 的用处，
+     从没人读的槽算它的入口值纯是白算 —— radiance 有 791 个槽（SROA 与内联各造了一堆），
+     真被读的只是一小把，量出来这一筛把两格 phielim 从 112ms 压到十几 ms。 */
+  const anyLoad = new Uint8Array(NS);
+  for (let pc = 0; pc < fn.op.length; pc++) {
+    if (fn.op[pc] === OP.LOAD) anyLoad[fn.aux[pc]] = 1;
+  }
+  for (const s of promotable) {
+    if (anyLoad[s] !== 1) continue;
+    isProm[s] = 1; proms.push(s);
+  }
+  if (proms.length === 0) return 0;
+  const nb = cfg.blocks.length;
   const entryCur = [];
-  for (let i = 0; i < cfg.blocks.length; i++) {
-    const m = {};
-    for (const s of promotable) m[s] = UNKNOWN;
+  for (let i = 0; i < nb; i++) {
+    /* 没有前驱的块（函数入口、以及到不了的那几个）：它的入口值是"说不清" ——
+       形参与没初始化的槽都属于这一类。别的块从 `TOP` 起，靠前驱往下压。 */
+    const m = new Array(NS);
+    m.fill(cfg.blocks[i].pred.length > 0 ? TOP : UNKNOWN);
     entryCur.push(m);
   }
   /* 形参初始化（形参是入口块开始时各 slot 的初始定义）*/
@@ -121,71 +158,86 @@ export function mem2reg(fn, _mod) {
    * （循环）上永远停在 UNKNOWN，不会把一个乐观的值传出循环去。安全。
    */
   const exitCur = [];
-  for (let i = 0; i < cfg.blocks.length; i++) exitCur.push(null);
+  for (let i = 0; i < nb; i++) exitCur.push(null);
   const runBlock = (bb, cur) => {
     for (let pc = bb.from; pc <= bb.to; pc++) {
       const op = fn.op[pc];
-      if (op === OP.STORE && promotable.has(fn.aux[pc])) { cur[fn.aux[pc]] = fn.a[pc]; continue; }
-      if (op === OP.LOAD && promotable.has(fn.aux[pc])) {
+      if (op === OP.STORE && isProm[fn.aux[pc]] === 1) { cur[fn.aux[pc]] = fn.a[pc]; continue; }
+      if (op === OP.LOAD && isProm[fn.aux[pc]] === 1) {
+        /* 入口是 `UNKNOWN`（真的说不清）⇒ 这条 LOAD 就是这个槽在本块的第一个定义。
+           入口还是 `TOP`（这一轮还没算到）⇒ 什么都不定，留给下一轮。 */
         if (cur[fn.aux[pc]] === UNKNOWN) cur[fn.aux[pc]] = REF_BIAS + pc;
         continue;
       }
     }
     return cur;
   };
-  for (let round = 0; round < cfg.blocks.length + 1; round++) {
+  /* 只重算**入口变过**的那些块（`dirty`）—— 不动点的轮数上界与块数同阶，
+     每轮都把全部块跑一遍是纯浪费。 */
+  const dirty = new Uint8Array(nb).fill(1);
+  const order = [];
+  for (const bb of cfg.blocks) if (reach.has(bb.id)) order.push(bb);
+  for (let round = 0; round < 2 * nb + 2; round++) {
     let moved = false;
-    for (const bb of cfg.blocks) {
-      if (!reach.has(bb.id)) continue;
-      exitCur[bb.id] = runBlock(bb, Object.assign({}, entryCur[bb.id]));
+    for (const bb of order) {
+      if (dirty[bb.id] === 0 && exitCur[bb.id] !== null) continue;
+      exitCur[bb.id] = runBlock(bb, entryCur[bb.id].slice());
+      dirty[bb.id] = 0;
     }
-    for (const bb of cfg.blocks) {
-      if (!reach.has(bb.id)) continue;
+    for (const bb of order) {
       const preds = cfg.blocks[bb.id].pred;
       if (preds.length === 0) continue;
-      for (const s of promotable) {
-        let v = UNKNOWN;
-        let first = true;
+      const mine = entryCur[bb.id];
+      for (let i = 0; i < proms.length; i++) {
+        const s = proms[i];
+        let v = TOP;
         for (const p of preds) {
           /* **到不了的前驱不算**：它的出口值永远是 null，算进来会把 meet 毒成 UNKNOWN。
              内联把尾部复制了一份（`STORE 结果槽; BR` 两遍），后一份就是到不了的那种。 */
           if (!reach.has(p)) continue;
           const e = exitCur[p];
-          const pv = (e === undefined || e === null) ? UNKNOWN : e[s];
-          if (first) { v = pv; first = false; continue; }
-          if (pv !== v) v = UNKNOWN;
+          const pv = (e === null) ? TOP : e[s];
+          if (pv === TOP) continue;              // 这个前驱这一轮还没给出信息
+          if (v === TOP) { v = pv; continue; }
+          if (pv !== v) { v = UNKNOWN; break; }
         }
-        if (v !== UNKNOWN && entryCur[bb.id][s] !== v) { entryCur[bb.id][s] = v; moved = true; }
+        if (v === TOP) continue;                 // 一个前驱都还没给出信息 ⇒ 留着 TOP
+        const ov = mine[s];
+        /* **只许往下走**（TOP -> ref -> UNKNOWN）。这一条保证不动点一定收，
+           也保证回边上算出来的那个乐观值最后要么被确认、要么塌成 UNKNOWN。 */
+        if (ov !== TOP && ov !== v) v = UNKNOWN;
+        if (v !== ov) { mine[s] = v; moved = true; dirty[bb.id] = 1; }
       }
     }
     if (!moved) break;
   }
 
   /* ---- 二、按算好的入口值改引用 */
-  for (const bb of cfg.blocks) {
-    if (!reach.has(bb.id)) continue;
-    const cur = Object.assign({}, entryCur[bb.id]);
+  for (const bb of order) {
+    const cur = entryCur[bb.id].slice();
 
     for (let pc = bb.from; pc <= bb.to; pc++) {
       const op = fn.op[pc];
 
-      if (op === OP.STORE && promotable.has(fn.aux[pc])) {
+      if (op === OP.STORE && isProm[fn.aux[pc]] === 1) {
         /* 写：只记下"这个 slot 现在是哪个值"。**STORE 一条不动** ——
            要删它得先证明这个 slot 再也没人读，那是 dse / dead auto elim 的活。 */
         cur[fn.aux[pc]] = fn.a[pc];
         continue;
       }
 
-      if (op === OP.LOAD && promotable.has(fn.aux[pc])) {
+      if (op === OP.LOAD && isProm[fn.aux[pc]] === 1) {
         const v = cur[fn.aux[pc]];
         const myRef = REF_BIAS + pc;          // 这条 LOAD 的结果的 ref
-        if (v !== UNKNOWN && v !== myRef && usableHere(sc, fn, v, pc)) {
+        if (v !== UNKNOWN && v !== TOP && v !== myRef && usableHere(sc, fn, v, pc)) {
           /* 有定义且在这儿看得见 ⇒ 把所有引用 %pc 的地方改成引用 v。
              LOAD 本身留着（没人引用了，deadcode 那格会删）。 */
           changed += replaceRef(fn, myRef, v);
         }
-        /* v === UNKNOWN：入口没定义 ⇒ 这条 LOAD 就是这个 slot 在本块的第一个定义 */
-        if (v === UNKNOWN) cur[fn.aux[pc]] = myRef;
+        /* v === UNKNOWN：入口没定义 ⇒ 这条 LOAD 就是这个 slot 在本块的第一个定义。
+           v === TOP：不动点上不该还有这一档（到得了的块都被前驱压下来了），
+           真碰上就当"说不清"—— LOAD 留着，正确但不优化。 */
+        if (v === UNKNOWN || v === TOP) cur[fn.aux[pc]] = myRef;
         continue;
       }
     }

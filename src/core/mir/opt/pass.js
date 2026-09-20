@@ -36,14 +36,22 @@ export const BATCH_NO = 9;    // 我们不要的（softfloat / writebarrier / �
  */
 export const PASSES = [
   { name: 'number lines',              batch: BATCH_NO,  req: true,  fn: null },
+  /* `inline` —— **这一格是我们加的，Go 的表里没有**：Go 在 SSA 之前就内联完了
+   * （`internal/inline.InlineDecls`，前端的活），然后**才**建 SSA。我们没有那一层，
+   * 所以它落在 MIR 上，位置照它在 Go 里的位置摆：**整张表的最前面**。
+   *
+   * 从前它排在 `decompose user` 紧前面（理由只写了"在 SROA 之前就行"），代价是量出来的：
+   * 内联把按值实参铺成「`STORE 那一块的地址 -> 形参槽`」，紧跟着被调体里一条
+   * `LOAD 形参槽`。而这两条之间**没有任何一格 mem2reg** —— `early phielim and copyelim`
+   * 在它前面、`late phielim and copyelim` 在一百格之后。于是 `decompose user` 一路判
+   * "地址存进了还有人读的 slot"就放弃整块：`radiance` 里 0 号帧块那 447 条访存一条都收不掉。
+   * 挪到最前面之后，`early phielim` 正好就是"内联完再建一次 SSA"，与 Go 的次序反而对上了。
+   *
+   * 依赖仍然记在 PASS_ORDER 里（必须在 `decompose user` 之前）。 */
+  { name: 'inline',                    batch: BATCH_1,   req: false, fn: null },
   { name: 'early phielim and copyelim',batch: BATCH_1,   req: false, fn: null },
   { name: 'early deadcode',            batch: BATCH_1,   req: false, fn: null },
   { name: 'short circuit',             batch: BATCH_2,   req: false, fn: null },
-  /* `inline` —— **这一格是我们加的，Go 的表里没有**：它在 SSA 之前就内联完了
-   * （`internal/inline.InlineDecls`，前端的活）。我们没有那一层，所以落在 MIR 上，
-   * 位置按它的依赖定：必须在 `decompose user`（SROA）**之前** —— 内联把被调的局部块
-   * 搬进调用者，SROA 才有东西可拆（ADR-0039 第 3 节那条三步流水的次序）。 */
-  { name: 'inline',                    batch: BATCH_1,   req: false, fn: null },
   { name: 'decompose user',            batch: BATCH_1,   req: true,  fn: null },
   { name: 'pre-opt deadcode',          batch: BATCH_1,   req: false, fn: null },
   { name: 'opt',                       batch: BATCH_1,   req: true,  fn: null },
