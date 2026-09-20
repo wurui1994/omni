@@ -135,6 +135,10 @@ const UNDER = new Map();
  * 方法的接收者、带具名类型的形参、`x := T{…}` / `x := &T{…}`。不是推断。
  */
 const MSET = new Set();
+
+/** **这个模块真的需要方法表吗**（= 有没有发过一处动态分派）。见 `funcdecl` 那一格的账。
+ *  今天一处都没置上 —— 方法调用全是静态定下来的。做接口分派时在发分派点处置上。 */
+const NEEDS_MTABLE = false;
 const VARTYPE = new Map();
 const mangle = (owner, name) => `${String(owner).replace(/\./g, '__')}__${name}`;
 
@@ -1435,8 +1439,21 @@ function toNode(x) {
       const bindNode = node('bind', {
         init: funcOf(sig, blk, graphName, selfName, ownerTn),
       }, { name: graphName });
-      /* **注册到方法表**：`__goRegMethod("Circle.Area", Circle__Area)` —— 接口分派要它。 */
-      if (ownerTn !== null) {
+      /* **注册到方法表**：`__goRegMethod("Circle.Area", Circle__Area)`。
+       *
+       * **只在真有动态分派时才发**（`NEEDS_MTABLE`）。今天这个标志一处都没置上 ——
+       * 因为这一版的方法调用**全是静态定下来的**（见下面 `sel` 那一格：靠接收者的类型名
+       * 在 `MSET` 里查主人，直接落 `Owner__Method`），`go-rt.js` 里那个 `__goDispatch`
+       * 压根没人发。于是这几句注册是**死重量**，而且有代价（量出来的）：
+       *   - core 那条腿报 `'__goRegMethod' 第 2 格实参在两处的类型不一样` ——
+       *     一格运行时函数收各种签名的函数值，而方言的形参是单态的（pt 的 33 份里 12 份卡这儿）；
+       *   - sx/core 那条腿压根没有 `__goRegMethod` 这个符号，链到最后才报"未声明的函数"。
+       *
+       * 什么时候要把它打开：真做接口分派的时候。两条路都要先定（Go 用 itab + unsafe.Pointer）——
+       *   a. 图上**去虚化**：`s.Area()` 换成按 `__type` 分派到直接调用（实现类型的集合前端有）；
+       *   b. 接口值落成方言的**动态值**（`T_DYN` / `omni_dyn` 那台机器已经在了）。
+       * 那时把 `NEEDS_MTABLE` 在发分派点的地方置上，这几句就自动回来。 */
+      if (ownerTn !== null && NEEDS_MTABLE) {
         const regNode = node('call', {
           fn: node('ref', {}, { name: '__goRegMethod' }),
           args: [lit(`${ownerTn}.${name}`), node('ref', {}, { name: graphName })],
