@@ -36,7 +36,7 @@ import {
   eorImm,
   eorReg, fadd,
   fcmpArm64, fcvtDS, fcvtSD, fcvtzs, fcvtzu, fdiv, fmovFromInt, fmovToInt, fmul, fneg, fsub,
-  fmadd, fmsub, fnmsub,
+  fmadd, fmsub, fnmsub, fsqrt, fabsFp,
   ldpPost, ldrFpU, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz,
   msub, mul,
   mvn, neg, orrImm, orrReg,
@@ -1369,6 +1369,8 @@ class FnGen {
      * 次序要紧：flush 摆在实参之后 —— 实参正好是刚算出来的那几个值，那时它们还在
      * 寄存器里，一条 `ldr` 都省了。 */
     if (op === OP.CALL) {
+      const g = this.mod.funcs[f.a[i]];
+      if (this.mathIntrinsic(i, t, g === undefined ? '' : g.name, g)) return;
       if (this.callLabels === null) arm64Nyi('单个函数里的 CALL（要按整个模块生成才有落点）');
       const sret = this.callArgs(f.argsOf(f.b[i]), -1);
       this.flush();
@@ -1385,6 +1387,7 @@ class FnGen {
     if (op === OP.CCALL) {
       const name = this.mod.cabi[f.a[i]];
       if (name === undefined) throw new OmniError(`arm64: 没有 ${f.a[i]} 号 C 入口`);
+      if (this.mathIntrinsic(i, t, name, null)) return;
       /* aux 是变参分界（第二十二片）：0 = 不是变参调用，否则固定实参个数 + 1。
        * 高位那一格（`CALL_LDRET`）是 x86_64 的事，这条腿上前端不会点它。 */
       const sret = this.callArgs(f.argsOf(f.b[i]), callVaFixed(f.aux[i]));
@@ -1795,6 +1798,38 @@ class FnGen {
     if (op === OP.CVT) return this.cvt(i);
 
     return arm64Nyi(`MIR 指令 ${OP_NAMES[op]}`);
+  }
+
+  /**
+   * **数学函数的内建**（Go 的 `ssagen/intrinsics.go:744` + `ARM64.rules:54`）：
+   *     addF("math", "sqrt", → OpSqrt)      (Sqrt ...) => (FSQRTD ...)
+   * go 的 `sqrt` 就是一条 `FSQRTD`，我们原来是一条 `bl` 到 libm —— 而它在
+   * `intersect` 的内层循环上（每个球的求交都要一次），采样里 libm 的 sqrt 占 5%。
+   * 除了省掉调用本身，还省掉 `flush()`（每条 `bl` 之前要把攥着的值写回栈位）。
+   *
+   * 认的判据（都是"判不准就照旧发调用"）：
+   *   - 名字正好是这几个之一，**而且本模块里没有同名的定义**（`extern`/`decl`）——
+   *     程序自己写一个 `double sqrt(double)` 是合法的，那时必须调它自己那个；
+   *   - 一个实参、实参与结果都是 f64（`sqrtf` 那一族另算，这儿不认）。
+   *
+   * **已知的偏离**：C 在 `-fmath-errno` 那一档要求 `sqrt(-1)` 设 `errno = EDOM`，
+   * 而 `fsqrt` 只给 NaN、不动 errno。clang 在 `-fno-math-errno` 下发的也是裸的
+   * `fsqrt`，go 压根没有 errno 这回事 —— 我们跟 go 一致。
+   */
+  mathIntrinsic(i, t, name, g) {
+    if (name !== 'sqrt' && name !== 'fabs') return false;
+    /* 本模块里自己定义的同名函数不算内建（`g` 为 null = C ABI 的外部符号，一定是外部的）。 */
+    if (g !== null && g.extern !== true && g.decl !== true) return false;
+    if (typeKind(t) !== T_F64) return false;
+    const f = this.f;
+    const args = f.argsOf(f.b[i]);
+    if (args.length !== 1) return false;
+    if (typeKind(this.typeOfRef(args[0])) !== T_F64) return false;
+    const x = this.fRefReg(args[0], FTMP0, true);
+    const d = this.fDest(i);
+    this.buf.emit(name === 'sqrt' ? fsqrt(true, d, x) : fabsFp(true, d, x));
+    this.fDef(i, d, true);
+    return true;
   }
 
   /**
