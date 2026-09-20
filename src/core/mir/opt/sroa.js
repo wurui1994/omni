@@ -224,11 +224,15 @@ export function sroa(fn, mod) {
     const cells = [];
     for (const c of all.values()) cells.push(c);
     if (cells.length === 0) continue;
+    /* 后面这几道的放弃也要能看见（`OMNI_SROA_STAT=1`）—— 从前只有 `scanBase` 里那几条
+     * 会印，于是"321 条访存在 FRAME 块上、可 scanBase 只拒了 2 个"这件事查不下去。 */
+    const stat = process.env.OMNI_SROA_STAT === '1';
+    const nope = (why) => { if (stat) process.stderr.write(`[sroa] ${fn.name}: 放弃一堆（${why}）\n`); };
     /* 部分重叠的格子（`char` view 一个 `int` 那种）一律放弃这一堆 */
     let bad = false;
     for (let i = 0; i < cells.length && !bad; i++) {
       for (let j = i + 1; j < cells.length && !bad; j++) {
-        if (partialOverlap(cells[i], cells[j])) bad = true;
+        if (partialOverlap(cells[i], cells[j])) { bad = true; nope(`格子部分重叠 ${cells[i].lo}|${cells[i].hi} 与 ${cells[j].lo}|${cells[j].hi}`); }
       }
     }
     if (bad) continue;
@@ -238,8 +242,10 @@ export function sroa(fn, mod) {
        2. **必须至少写过一次**：只读的格子读的是没初始化的内存（C 里是未定义行为），
           换成槽位之后读到的是槽位的初值 —— 两者可能不同，所以这种 base 整个放弃。 */
     for (const c of cells) {
-      if (c.storeKind < 0) { bad = true; break; }
-      if (c.loadKind >= 0 && !kindPairOk(c.loadKind, c.storeKind)) { bad = true; break; }
+      if (c.storeKind < 0) { bad = true; nope(`格子 ${c.lo}|${c.hi} 只读没写过`); break; }
+      if (c.loadKind >= 0 && !kindPairOk(c.loadKind, c.storeKind)) {
+        bad = true; nope(`格子 ${c.lo}|${c.hi} 的读写宽度对不上（读 ${c.loadKind} 写 ${c.storeKind}）`); break;
+      }
     }
     if (bad) continue;
 
