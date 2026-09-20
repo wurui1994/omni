@@ -91,17 +91,17 @@ static struct {
   omni_g *runqhead, *runqtail;    /* 全局运行队列（gQueue） */
   int32_t runqsize;
   omni_p *pidle;                  /* 空闲 P 链（pidleput / pidleget） */
-  _Atomic int32_t npidle;
-  _Atomic int32_t nmspinning;
+  int32_t npidle;             /* 原子字段（omni_atomic_*） */
+  int32_t nmspinning;         /* 原子字段 */
   omni_g *gfree;                  /* 死了的 g 回收链（gfput / gfget） */
-  _Atomic int64_t goidgen;
+  int64_t goidgen;            /* 原子字段 */
 } sched;
 
 static omni_p **allp;
 static int32_t gomaxprocs;
 static _Thread_local omni_g *tls_g;      /* Go 把 g 摆在一个寄存器里，我们用 TLS */
 static omni_g *maing;                    /* 主 goroutine（它一结束整个程序就结束） */
-static _Atomic int mainDone;
+static int32_t mainDone;      /* 原子字段 */
 static omni_note mainDoneNote;           /* 主 g 结束时叫醒 omni_sched_main 那条线程 */
 static int32_t numcpu_cached;
 
@@ -122,12 +122,12 @@ static void throwf(const char *s) {
 
 /* ---- g 的状态读写（proc.go 的 readgstatus / casgstatus） ---- */
 static uint32_t readgstatus(omni_g *gp) {
-  return atomic_load_explicit(&gp->atomicstatus, memory_order_relaxed);
+  return omni_atomic_load32_relaxed(&gp->atomicstatus);
 }
 static void casgstatus(omni_g *gp, uint32_t old, uint32_t new_) {
-  uint32_t o = old;
-  if (!atomic_compare_exchange_strong(&gp->atomicstatus, &o, new_)) {
-    fprintf(stderr, "omni sched: casgstatus 想把 %u 换成 %u，实际是 %u\n", old, new_, o);
+  if (!omni_atomic_cas32(&gp->atomicstatus, old, new_)) {
+    /* CAS 的 old 是传值的，失败时再读一遍当前值来报（Go 的 casgstatus 也是读 gp.atomicstatus） */
+    fprintf(stderr, "omni sched: casgstatus 想把 %u 换成 %u，实际是 %u\n", old, new_, readgstatus(gp));
     abort();
   }
 }
@@ -186,10 +186,10 @@ static omni_g *globrunqget(omni_p *pp, int32_t max);
 static int runqempty(omni_p *pp) {
   /* Go 的 runqempty 要按 head/tail/runnext 的顺序读两遍才作数（注释里那段竞态）。 */
   for (;;) {
-    uint32_t head = atomic_load_explicit(&pp->runqhead, memory_order_acquire);
-    uint32_t tail = atomic_load_explicit(&pp->runqtail, memory_order_acquire);
-    omni_g *rn = atomic_load_explicit(&pp->runnext, memory_order_acquire);
-    if (tail == atomic_load_explicit(&pp->runqtail, memory_order_acquire)) {
+    uint32_t head = omni_atomic_load32_acq(&pp->runqhead);
+    uint32_t tail = omni_atomic_load32_acq(&pp->runqtail);
+    omni_g *rn = (omni_g *)omni_atomic_loadp_acq((void *volatile *)&pp->runnext);
+    if (tail == omni_atomic_load32_acq(&pp->runqtail)) {
       return head == tail && rn == NULL;
     }
   }
@@ -200,9 +200,7 @@ static int runqputslow(omni_p *pp, omni_g *gp, uint32_t h, uint32_t t) {
   uint32_t n = (t - h) / 2;
   if (n != (uint32_t)(OMNI_RUNQ_SIZE / 2)) throwf("runqputslow: queue is not full");
   for (uint32_t i = 0; i < n; i++) batch[i] = pp->runq[(h + i) % OMNI_RUNQ_SIZE];
-  uint32_t hh = h;
-  if (!atomic_compare_exchange_strong_explicit(&pp->runqhead, &hh, h + n,
-        memory_order_release, memory_order_relaxed)) return 0;
+  if (!omni_atomic_cas32_rel(&pp->runqhead, h, h + n)) return 0;
   batch[n] = gp;
   for (uint32_t i = 0; i < n; i++) batch[i]->schedlink = batch[i + 1];
   pthread_mutex_lock(&sched.lock);
@@ -217,8 +215,8 @@ static void runqput(omni_p *pp, omni_g *gp, int next) {
   if (!OMNI_HAVE_SYSMON && next) next = 0;
   if (next) {
     for (;;) {
-      omni_g *oldnext = atomic_load_explicit(&pp->runnext, memory_order_relaxed);
-      if (atomic_compare_exchange_strong(&pp->runnext, &oldnext, gp)) {
+      omni_g *oldnext = (omni_g *)omni_atomic_loadp_relaxed((void *volatile *)&pp->runnext);
+      if (omni_atomic_casp((void *volatile *)&pp->runnext, oldnext, gp)) {
         if (oldnext == NULL) return;
         gp = oldnext;                 /* 把旧的那个挤进普通队列 */
         break;
@@ -226,11 +224,11 @@ static void runqput(omni_p *pp, omni_g *gp, int next) {
     }
   }
   for (;;) {
-    uint32_t h = atomic_load_explicit(&pp->runqhead, memory_order_acquire);
-    uint32_t t = atomic_load_explicit(&pp->runqtail, memory_order_relaxed);
+    uint32_t h = omni_atomic_load32_acq(&pp->runqhead);
+    uint32_t t = omni_atomic_load32_relaxed(&pp->runqtail);
     if (t - h < (uint32_t)OMNI_RUNQ_SIZE) {
       pp->runq[t % OMNI_RUNQ_SIZE] = gp;
-      atomic_store_explicit(&pp->runqtail, t + 1, memory_order_release);
+      omni_atomic_store32_rel(&pp->runqtail, t + 1);
       return;
     }
     if (runqputslow(pp, gp, h, t)) return;
@@ -238,19 +236,17 @@ static void runqput(omni_p *pp, omni_g *gp, int next) {
 }
 
 static omni_g *runqget(omni_p *pp, int *inheritTime) {
-  omni_g *next = atomic_load_explicit(&pp->runnext, memory_order_relaxed);
-  if (next != NULL && atomic_compare_exchange_strong(&pp->runnext, &next, (omni_g *)NULL)) {
+  omni_g *next = (omni_g *)omni_atomic_loadp_relaxed((void *volatile *)&pp->runnext);
+  if (next != NULL && omni_atomic_casp((void *volatile *)&pp->runnext, next, NULL)) {
     *inheritTime = 1;
     return next;
   }
   for (;;) {
-    uint32_t h = atomic_load_explicit(&pp->runqhead, memory_order_acquire);
-    uint32_t t = atomic_load_explicit(&pp->runqtail, memory_order_relaxed);
+    uint32_t h = omni_atomic_load32_acq(&pp->runqhead);
+    uint32_t t = omni_atomic_load32_relaxed(&pp->runqtail);
     if (t == h) { *inheritTime = 0; return NULL; }
     omni_g *gp = pp->runq[h % OMNI_RUNQ_SIZE];
-    uint32_t hh = h;
-    if (atomic_compare_exchange_strong_explicit(&pp->runqhead, &hh, h + 1,
-          memory_order_release, memory_order_relaxed)) {
+    if (omni_atomic_cas32_rel(&pp->runqhead, h, h + 1)) {
       *inheritTime = 0;
       return gp;
     }
@@ -279,15 +275,15 @@ static omni_g *globrunqget(omni_p *pp, int32_t max) {
    一个窗口，免得把人家马上要跑的那条抢走 —— 照抄。 */
 static uint32_t runqgrab(omni_p *pp, omni_g **batch, uint32_t batchHead, int stealRunNextG) {
   for (;;) {
-    uint32_t h = atomic_load_explicit(&pp->runqhead, memory_order_acquire);
-    uint32_t t = atomic_load_explicit(&pp->runqtail, memory_order_acquire);
+    uint32_t h = omni_atomic_load32_acq(&pp->runqhead);
+    uint32_t t = omni_atomic_load32_acq(&pp->runqtail);
     uint32_t n = t - h;
     n = n - n / 2;
     if (n == 0) {
       if (stealRunNextG) {
-        omni_g *next = atomic_load_explicit(&pp->runnext, memory_order_relaxed);
+        omni_g *next = (omni_g *)omni_atomic_loadp_relaxed((void *volatile *)&pp->runnext);
         if (next != NULL) {
-          if (atomic_load_explicit(&pp->status, memory_order_relaxed) == OMNI_PRUNNING) {
+          if (omni_atomic_load32_relaxed(&pp->status) == OMNI_PRUNNING) {
             omni_m *mp = pp->m;
             if (mp != NULL) {
               omni_g *cg = mp->curg;
@@ -295,7 +291,7 @@ static uint32_t runqgrab(omni_p *pp, omni_g **batch, uint32_t batchHead, int ste
             }
           }
           omni_g *nn = next;
-          if (!atomic_compare_exchange_strong(&pp->runnext, &nn, (omni_g *)NULL)) continue;
+          if (!omni_atomic_casp((void *volatile *)&pp->runnext, nn, NULL)) continue;
           batch[batchHead % OMNI_RUNQ_SIZE] = next;
           return 1;
         }
@@ -306,22 +302,20 @@ static uint32_t runqgrab(omni_p *pp, omni_g **batch, uint32_t batchHead, int ste
     for (uint32_t i = 0; i < n; i++) {
       batch[(batchHead + i) % OMNI_RUNQ_SIZE] = pp->runq[(h + i) % OMNI_RUNQ_SIZE];
     }
-    uint32_t hh = h;
-    if (atomic_compare_exchange_strong_explicit(&pp->runqhead, &hh, h + n,
-          memory_order_release, memory_order_relaxed)) return n;
+    if (omni_atomic_cas32_rel(&pp->runqhead, h, h + n)) return n;
   }
 }
 
 static omni_g *runqsteal(omni_p *pp, omni_p *p2, int stealRunNextG) {
-  uint32_t t = atomic_load_explicit(&pp->runqtail, memory_order_relaxed);
+  uint32_t t = omni_atomic_load32_relaxed(&pp->runqtail);
   uint32_t n = runqgrab(p2, pp->runq, t, stealRunNextG);
   if (n == 0) return NULL;
   n--;
   omni_g *gp = pp->runq[(t + n) % OMNI_RUNQ_SIZE];
   if (n == 0) return gp;
-  uint32_t h = atomic_load_explicit(&pp->runqhead, memory_order_acquire);
+  uint32_t h = omni_atomic_load32_acq(&pp->runqhead);
   if (t - h + n >= (uint32_t)OMNI_RUNQ_SIZE) throwf("runqsteal: runq overflow");
-  atomic_store_explicit(&pp->runqtail, t + n, memory_order_release);
+  omni_atomic_store32_rel(&pp->runqtail, t + n);
   return gp;
 }
 
@@ -330,14 +324,14 @@ static void pidleput(omni_p *pp) {
   if (!runqempty(pp)) throwf("pidleput: P has non-empty run queue");
   pp->link = sched.pidle;
   sched.pidle = pp;
-  atomic_fetch_add(&sched.npidle, 1);
+  omni_atomic_xadd32(&sched.npidle, 1);
 }
 static omni_p *pidleget(void) {
   omni_p *pp = sched.pidle;
   if (pp != NULL) {
     sched.pidle = pp->link;
     pp->link = NULL;
-    atomic_fetch_add(&sched.npidle, -1);
+    omni_atomic_xadd32(&sched.npidle, -1);
   }
   return pp;
 }
@@ -356,19 +350,19 @@ static omni_m *mget(void) {
 static void acquirep(omni_m *mp, omni_p *pp) {
   if (pp == NULL) throwf("acquirep: NULL p");
   if (pp->m != NULL) throwf("acquirep: p->m != nil");
-  if (atomic_load_explicit(&pp->status, memory_order_relaxed) != OMNI_PIDLE) {
+  if (omni_atomic_load32_relaxed(&pp->status) != OMNI_PIDLE) {
     throwf("acquirep: invalid p state");
   }
   mp->p = pp;
   pp->m = mp;
-  atomic_store_explicit(&pp->status, OMNI_PRUNNING, memory_order_relaxed);
+  omni_atomic_store32_relaxed(&pp->status, OMNI_PRUNNING);
 }
 static omni_p *releasep(omni_m *mp) {
   omni_p *pp = mp->p;
   if (pp == NULL) throwf("releasep: invalid arg");
   mp->p = NULL;
   pp->m = NULL;
-  atomic_store_explicit(&pp->status, OMNI_PIDLE, memory_order_relaxed);
+  omni_atomic_store32_relaxed(&pp->status, OMNI_PIDLE);
   return pp;
 }
 static void dropg(omni_m *mp) {
@@ -388,7 +382,7 @@ static void newm(int spinning, omni_p *pp, int32_t id) {
   pthread_cond_init(&mp->park.cv, NULL);
   mp->g0 = (omni_g *)calloc(1, sizeof(omni_g));
   mp->g0->m = mp;
-  atomic_store(&mp->g0->atomicstatus, OMNI_GRUNNING);
+  omni_atomic_store32(&mp->g0->atomicstatus, OMNI_GRUNNING);
   mp->nextp = pp;
   pthread_attr_t at;
   pthread_attr_init(&at);
@@ -438,13 +432,12 @@ static void startm(omni_p *pp, int spinning) {
 
 /* wakep（proc.go）：有活了，看要不要再拉一条 M 起来转。 */
 static void wakep(void) {
-  int32_t zero = 0;
-  if (atomic_load(&sched.nmspinning) != 0
-      || !atomic_compare_exchange_strong(&sched.nmspinning, &zero, 1)) return;
+  if (omni_atomic_loadi32(&sched.nmspinning) != 0
+      || !omni_atomic_casi32(&sched.nmspinning, 0, 1)) return;
   pthread_mutex_lock(&sched.lock);
   omni_p *pp = pidleget();
   if (pp == NULL) {
-    if (atomic_fetch_add(&sched.nmspinning, -1) - 1 < 0) throwf("wakep: negative nmspinning");
+    if (omni_atomic_xadd32(&sched.nmspinning, -1) - 1 < 0) throwf("wakep: negative nmspinning");
     pthread_mutex_unlock(&sched.lock);
     return;
   }
@@ -471,14 +464,14 @@ static omni_g *stealWork(omni_m *mp, int *inheritTime) {
 /* becomeSpinning / resetspinning（proc.go） */
 static void becomeSpinning(omni_m *mp) {
   mp->spinning = 1;
-  atomic_fetch_add(&sched.nmspinning, 1);
+  omni_atomic_xadd32(&sched.nmspinning, 1);
 }
 static void resetspinning(omni_m *mp) {
   if (!mp->spinning) throwf("resetspinning: not a spinning m");
   mp->spinning = 0;
-  if (atomic_fetch_add(&sched.nmspinning, -1) - 1 < 0) throwf("findRunnable: negative nmspinning");
+  if (omni_atomic_xadd32(&sched.nmspinning, -1) - 1 < 0) throwf("findRunnable: negative nmspinning");
   /* M 醒着而有空闲 P ⇒ 再拉一条起来（Go 在这儿就是这一句） */
-  if (atomic_load(&sched.npidle) > 0) wakep();
+  if (omni_atomic_loadi32(&sched.npidle) > 0) wakep();
 }
 
 /* findRunnable（proc.go）：顺序照抄，GC / trace / netpoll / timer 那几支我们没有（见 .h 偏差 3）。 */
@@ -486,9 +479,9 @@ static omni_g *findRunnable(omni_m *mp, int *inheritTime) {
 top:;
   omni_p *pp = mp->p;
   if (mp->spinning
-      && (atomic_load_explicit(&pp->runnext, memory_order_relaxed) != NULL
-          || atomic_load_explicit(&pp->runqhead, memory_order_relaxed)
-             != atomic_load_explicit(&pp->runqtail, memory_order_relaxed))) {
+      && ((omni_g *)omni_atomic_loadp_relaxed((void *volatile *)&pp->runnext) != NULL
+          || omni_atomic_load32_relaxed(&pp->runqhead)
+             != omni_atomic_load32_relaxed(&pp->runqtail))) {
     throwf("schedule: spinning with local work");
   }
   /* 每 61 次调度看一眼全局队列 —— 不然本地队列忙起来会把全局那些饿死。 */
@@ -506,13 +499,13 @@ top:;
     if (gp != NULL) { *inheritTime = 0; return gp; }
   }
   if (mp->spinning
-      || 2 * atomic_load(&sched.nmspinning) < gomaxprocs - atomic_load(&sched.npidle)) {
+      || 2 * omni_atomic_loadi32(&sched.nmspinning) < gomaxprocs - omni_atomic_loadi32(&sched.npidle)) {
     if (!mp->spinning) becomeSpinning(mp);
     omni_g *gp = stealWork(mp, inheritTime);
     if (gp != NULL) return gp;
   }
   /* 真没活了：放掉 P、把自己停下来。醒了从头再找。 */
-  if (atomic_load(&mainDone)) return NULL;
+  if (omni_atomic_loadi32(&mainDone)) return NULL;
   pthread_mutex_lock(&sched.lock);
   if (sched.runqsize != 0) {
     omni_g *gp = globrunqget(pp, 0);
@@ -523,7 +516,7 @@ top:;
   }
   if (mp->spinning) {
     mp->spinning = 0;
-    if (atomic_fetch_add(&sched.nmspinning, -1) - 1 < 0) throwf("findRunnable: negative nmspinning");
+    if (omni_atomic_xadd32(&sched.nmspinning, -1) - 1 < 0) throwf("findRunnable: negative nmspinning");
   }
   pthread_mutex_lock(&sched.lock);
   omni_p *rp = releasep(mp);
@@ -546,12 +539,12 @@ static omni_g *gfget(void) {
   if (posix_memalign(&st, 16, OMNI_G_STACK) != 0) throwf("gfget: 栈分不出来");
   gp->stack = (char *)st;
   gp->stacksize = OMNI_G_STACK;
-  atomic_store(&gp->atomicstatus, OMNI_GIDLE);
+  omni_atomic_store32(&gp->atomicstatus, OMNI_GIDLE);
   return gp;
 }
 static void gfput(omni_g *gp) {
   gp->fnptr = NULL; gp->arg = NULL; gp->waiting = NULL; gp->param = NULL;
-  atomic_store(&gp->selectDone, 0);
+  omni_atomic_store32(&gp->selectDone, 0);
   pthread_mutex_lock(&sched.lock);
   gp->schedlink = sched.gfree;
   sched.gfree = gp;
@@ -604,7 +597,7 @@ static void goexit0(omni_m *mp, omni_g *gp) {
   int isMain = (gp == maing);
   gfput(gp);
   if (isMain) {
-    atomic_store(&mainDone, 1);
+    omni_atomic_storei32(&mainDone, 1);
     omni_notewakeup(&mainDoneNote);
   }
 }
@@ -630,7 +623,7 @@ static void schedule(omni_m *mp) {
       case OMNI_SW_DEAD:  goexit0(mp, gp); break;
       default: throwf("schedule: 从 g 切回来的理由不明");
     }
-    if (atomic_load(&mainDone)) return;
+    if (omni_atomic_loadi32(&mainDone)) return;
   }
 }
 
@@ -648,7 +641,7 @@ static omni_g *newproc1(void (*fn)(void *), void *arg) {
   omni_g *newg = gfget();
   newg->fnptr = fn;
   newg->arg = arg;
-  newg->goid = atomic_fetch_add(&sched.goidgen, 1) + 1;
+  newg->goid = omni_atomic_xadd64(&sched.goidgen, 1) + 1;
   /* 假保存帧：偏移照上面那段 asm —— x19 在 +0x00、x30(lr) 在 +0x58。 */
   char *top = newg->stack + newg->stacksize;
   top -= 0xa0;
@@ -656,7 +649,7 @@ static omni_g *newproc1(void (*fn)(void *), void *arg) {
   ((void **)top)[0] = newg;                        /* x19 槽：g 自己 */
   ((void **)top)[11] = (void *)omni_g_entry;       /* x30 槽：第一次 ret 落到跳板 */
   newg->sched.sp = top;
-  atomic_store(&newg->atomicstatus, OMNI_GRUNNABLE);
+  omni_atomic_store32(&newg->atomicstatus, OMNI_GRUNNABLE);
   return newg;
 }
 
@@ -759,7 +752,7 @@ void omni_sched_init(int32_t nprocs) {
   for (int32_t i = 0; i < nprocs; i++) {
     omni_p *pp = (omni_p *)calloc(1, sizeof(omni_p));
     pp->id = i;
-    atomic_store(&pp->status, OMNI_PIDLE);
+    omni_atomic_store32(&pp->status, OMNI_PIDLE);
     allp[i] = pp;
   }
   stealOrderReset((uint32_t)nprocs);
@@ -771,7 +764,7 @@ void omni_sched_init(int32_t nprocs) {
   pthread_cond_init(&m0->park.cv, NULL);
   m0->g0 = (omni_g *)calloc(1, sizeof(omni_g));
   m0->g0->m = m0;
-  atomic_store(&m0->g0->atomicstatus, OMNI_GRUNNING);
+  omni_atomic_store32(&m0->g0->atomicstatus, OMNI_GRUNNING);
   tls_g = m0->g0;
   /* **全部 P 一上来都挂在 pidle 上**，m0 不占 P。见下面 omni_sched_main 那段账。 */
   for (int32_t i = 0; i < nprocs; i++) pidleput(allp[i]);

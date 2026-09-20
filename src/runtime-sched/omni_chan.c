@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
+#include "omni_atomic.h"
 #include <alloca.h>
 
 static void chanthrow(const char *s) {
@@ -33,8 +33,8 @@ static omni_sudog *waitq_dequeue(omni_waitq *q) {
     /* select 的那一格：被别的 case 叫醒过的话这条 g 已经不算在队列里了 —— 
        靠 g.selectDone 的 CAS 抢，抢不到就跳过（chan.go 里那段注释的同一件事）。 */
     if (sgp->isSelect) {
-      uint32_t zero = 0;
-      if (!atomic_compare_exchange_strong(&sgp->g->selectDone, &zero, 1)) continue;
+      /* CAS 的 old 传值（见 omni_atomic.h）—— 不再需要一格 zero 变量 */
+      if (!omni_atomic_cas32(&sgp->g->selectDone, 0, 1)) continue;
     }
     return sgp;
   }
@@ -181,7 +181,7 @@ int omni_chanrecv(omni_hchan *c, void *ep, int block, int *received) {
   }
   /* 不阻塞那一路的快判（chan.go 里那段两次读 closed 的账：先看空、再看关） */
   if (!block && chan_empty(c)) {
-    if (atomic_load((_Atomic uint32_t *)&c->closed) == 0) return 0;
+    if (omni_atomic_load32(&c->closed) == 0) return 0;
     if (chan_empty(c)) {
       if (ep != NULL && c->elemsize > 0) memset(ep, 0, c->elemsize);
       return 1;
@@ -440,7 +440,7 @@ int omni_selectgo(omni_scase *cases, int ncases, int *recvOK) {
     prev = c;
   }
   omni_sudog *winner = (omni_sudog *)gp->param;
-  atomic_store(&gp->selectDone, 0);
+  omni_atomic_store32(&gp->selectDone, 0);
   int casi = -1;
   int ok = 0;
   omni_sudog *sglist = gp->waiting;

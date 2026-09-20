@@ -2,11 +2,19 @@
  *
  * **为什么住在 `src/runtime-sched/` 而不是 `src/runtime/`**（与 `jit/`、`runtime-gl/`
  * 同一条理由，写在 `core/runtime/c_runtime.js` 顶上）：`runtimeSources()` 把
- * `src/runtime/` 下**每一个 .c** 都喂给 cc，混进去就等于**所有腿强制依赖**它 —— 而这一份要
- * `<stdatomic.h>` 与 `<pthread.h>`，我们自己那台 C 前端还没有这两份头。量到的症状：
- * 一放进 `src/runtime/`，连 `println(n)` 那种程序都编不出来
- * （`omni_sched.h:28: error: include file 'stdatomic.h' not found`）。
- * 所以它单独一格目录，用到并发的程序才编它。补那两份头是另一笔账。
+ * `src/runtime/` 下**每一个 .c** 都喂给 cc，混进去就等于**所有腿强制依赖**它 ——
+ * 而这一份我们自己那台 C 前端还编不过。所以它单独一格目录，用到并发的程序才编它。
+ *
+ * **还差什么才能搬进 `src/runtime/`（#76）**，2026-09-20 量出来的账：
+ *   * ~~`<stdatomic.h>`~~ —— **已经不欠了**：换成了 `omni_atomic.h`（照 Go 的
+ *     `runtime/internal/atomic`：字段是普通字段、要原子就显式调那几个函数）。
+ *     `omni c mir` 现在能过那一段。
+ *   * `<pthread.h>` —— 我们的 sysroot 里**本来就有**（各目标的 `include/pthread.h`）。
+ *   * **剩下的那一堵**：`omni_sctx_sw` 那段 arm64 的 `__asm__`。现在报的是
+ *     `第八刀：非空的 __asm__ 模板还没到（等自带汇编器）`。Go 那边这一段也是汇编
+ *     （`asm_arm64.s` 的 `gogo` / `mcall`），所以这不是"简化"，是我们那台前端还欠一格内联汇编。
+ *   * `__atomic_*` 那几个内建也还没验过（头解析得过，真调到时会不会报另一句 ——
+ *     被 `__asm__` 那一句挡在前面，量不到）。
  *
  * 对应关系（一格一格对着抄的，不是照着想法写的）：
  *   runtime2.go  g / m / p / schedt / sudog、_G* 与 _P* 那两串 iota 常量
@@ -33,7 +41,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdatomic.h>
+#include "omni_atomic.h"
 #include <pthread.h>
 
 /* ---- g 的状态（runtime2.go:37 起的那串 iota，值必须一样） ---- */
@@ -86,7 +94,7 @@ struct omni_g {
   omni_gobuf sched;
   char *stack;                    /* malloc 出来的那一块（低地址端） */
   size_t stacksize;
-  _Atomic uint32_t atomicstatus;
+  uint32_t atomicstatus;      /* 原子字段：读写都走 omni_atomic_*（与 Go 一样是普通字段） */
   omni_g *schedlink;              /* 队列里的下一条（runq 用数组，全局队列用这个） */
   omni_m *m;                      /* 正在跑它的 M（不跑的时候是 NULL） */
   void (*fnptr)(void *);          /* goroutine 体 */
@@ -94,7 +102,7 @@ struct omni_g {
   omni_sudog *waiting;            /* 这条 g 正挂在哪几个 channel 上（chan.go 用） */
   void *param;                    /* 唤醒方递过来的东西（ready 之前设） */
   int64_t goid;
-  _Atomic uint32_t selectDone;    /* select 抢唤醒用（sudog.isSelect 那一路） */
+  uint32_t selectDone;        /* select 抢唤醒用（sudog.isSelect 那一路）；原子字段 */
 };
 
 struct omni_m {
@@ -127,14 +135,14 @@ struct omni_m {
 
 struct omni_p {
   int32_t id;
-  _Atomic uint32_t status;
+  uint32_t status;            /* 原子字段 */
   omni_m *m;
   uint32_t schedtick;             /* 每次非 inheritTime 的 execute 加一（findRunnable 的 %61） */
   /* 本地运行队列：**无锁环**，头尾各自的内存序照 proc.go 抄（LoadAcq / StoreRel / CasRel） */
-  _Atomic uint32_t runqhead;
-  _Atomic uint32_t runqtail;
+  uint32_t runqhead;          /* 原子字段 */
+  uint32_t runqtail;          /* 原子字段 */
   omni_g *runq[OMNI_RUNQ_SIZE];
-  _Atomic(omni_g *) runnext;
+  omni_g *runnext;            /* 原子字段（指针） */
   omni_p *link;                   /* sched.pidle 链 */
 };
 
