@@ -1754,12 +1754,15 @@ class FnGen {
     const buf = this.buf;
     const mode = f.aux[i];
     const src = this.typeOfRef(f.a[i]);
-    this.loadRef(TMP0, f.a[i]);
-    /* 位重解释在这一层是**一条 mov**：栈位里躺的本来就是位模式。 */
+    /* 位重解释在这一层**一个字都不必发**：栈位里躺的本来就是位模式，`def` 收任何
+     * 通用寄存器。从前那条路是 `loadRef(TMP0) + mov RES, TMP0 + def`，
+     * 前两条全是白绕 —— 值多半已经住在某个粘住的寄存器里（`refReg` 直接回它），
+     * 而 `def` 自己会把它 `fmov` 进结果的 d 寄存器。
+     * 量出来的：`intersect` 的循环体里这一族出现六次，每次省两条。 */
     if (mode === CVT_BITCAST) {
-      buf.emit(movReg(1, RES, TMP0));
-      return this.def(i, RES);
+      return this.def(i, this.refReg(f.a[i], TMP0));
     }
+    this.loadRef(TMP0, f.a[i]);
     if (mode === CVT_I2F || mode === CVT_U2F) {
       const sf = intBits(src) === 64 ? 1 : 0;
       const d = this.fDest(i);
