@@ -873,8 +873,15 @@ function placeText(x, env, ctx) {
     const inner = placeText(x.ins.obj, env, ctx);
     if (inner === null) return null;
     /* 只有"字段自己也是一格记录"才继续往下串 —— 标量字段没有地址可言（它就是个值）。 */
-    if (shapeAt(typeOf(x, env, ctx), ctx) === undefined) return null;
-    return `(pfield ${inner} ${x.attrs.field})`;
+    const ft = typeOf(x, env, ctx);
+    if (shapeAt(ft, ctx) === undefined) return null;
+    /* **两档**：字段是**内嵌的值语义结构体**时，它的地址就是 `(pfield …)`；
+       字段是**一格指针**（go 的 `In *Inner`）时，那一格里装的才是地址 ——
+       要先 `pload` 出来。少了这一分，`o.In.A` 落成
+       `(pfield (pfield (var o) In) A)`，方言报「(pfield p 字段名) 的 p 要是结构体指针，
+       这里是 r1**」（量出来的）。 */
+    const at = `(pfield ${inner} ${x.attrs.field})`;
+    return isPtrRec(ft, ctx) ? `(pload ${at})` : at;
   }
   return isPtrRec(typeOf(x, env, ctx), ctx) ? objText(x, env, ctx) : null;
 }
@@ -1431,6 +1438,16 @@ function bindRecord(nm, rec, env, ctx) {
       return env.get(tn);
     }
     const t = typeOf(v, env, ctx);
+    /* **字段值是一格"已经躺在某个名字里的记录"**（go 的 `Outer{&in, 3}` / `Outer{in, 3}`）：
+       与上面那一支同一件事，只是不用先物化 —— 直接把那一格交进去（`objText` 是"记录当
+       宿主用"的那条路，`expr` 在这儿会报"把记录整格当值用"）。存法交给 `storeInto`：
+       引用语义的存一格指针、值语义的逐字段抄。
+       量出来的必要性：pt 的 `Triangle{Material: &material, …}` 与任何
+       `type Outer struct{ In *Inner }` 都落在这一支上，从前报"字段不是标量"。 */
+    if (isRecType(t, ctx)) {
+      fieldText.push(objText(v, env, ctx));
+      return t;
+    }
     if (t !== 'int' && t !== 'real' && t !== 'bool' && t !== 'string') {
       gap(`记录的字段 '${names[i]}' 不是标量（方言的字段这一刀只收标量与另一格记录）`);
     }

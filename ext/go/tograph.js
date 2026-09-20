@@ -431,6 +431,23 @@ function recvIsPtr(recv) {
  * 的类型极少，而"指针方法改不动东西"是**每次都错**。
  */
 const PTRRECV = new Set();
+/**
+ * **被 `*T` 指过的那些具名类型**（`collectDecls` 那一趟收候选，扫完与 `STRUCTS` 求交
+ * 再并进 `PTRRECV`）。
+ *
+ * 为什么与"有指针接收者方法"合成同一格：两者要的是同一件事 —— **引用语义**。
+ * 量出来的必要性：pt 的 `Triangle` 有一格 `Material *Material` 字段，而 `zeroOf` 对
+ * `(ptr …)` 一律回 `lit(null)` ⇒ `structZero('Triangle')` 里那一格说不清类型 ⇒
+ * `pzero` 立不起来 ⇒ `func (t *Triangle) …` 的体里 `t.V1` 报
+ * 「在一格说不清形状的东西上取字段 'V1'（变量 t 推出来是 int）」。pt 整包就卡在这一句。
+ * 现在 `*T` 的零值是 **T 的零值记录**（引用语义那一档），字段于是有类型。
+ *
+ * 语料里这一条**不会把值语义的那些带坏**：pt 里一处 `*Vector` / `*Color` 都没有
+ * （量过：被指的是 Mesh / Triangle / Scene / Volume … 那一族，它们本来就有指针接收者）。
+ */
+const PTRED = new Set();
+/** 正在算零值的那几个具名类型（自引用 / 互相引用要截住 —— 不然无限递归）。 */
+const ZEROING = new Set();
 /** 这格具名类型的记录要不要值语义（`recordNew` 的第二个实参）。 */
 const byValFor = (n) => !(typeof n === 'string' && PTRRECV.has(n));
 
@@ -480,6 +497,11 @@ function collectDecls(x, shapesOnly) {
       const und = kids(x)[1];
       if (und !== undefined && isList(und)) UNDER.set(leaf(kids(x)[0]), und);
     }
+  }
+  /* 见 `PTRED` 那段账：`*T` 里的 T 要引用语义（扫完再与 `STRUCTS` 求交）。 */
+  if (tag(x) === 'ptr') {
+    const tn0 = namedTypeOf(kids(x).find((y) => isList(y)));
+    if (tn0 !== null) PTRED.add(tn0);
   }
   if (tag(x) === 'spec') for (const n of specMapNames(x)) MAPS.add(n);
   /* 见 `CHANS` 那段账：装通道的名字要认得出来（`len(ch)` 与 `range ch` 两处要）。
@@ -765,7 +787,16 @@ function typeTagged() { return NEEDS_TYPETAG || NEEDS_MTABLE; }
 function structZero(n) {
   const fs = STRUCTS.get(n);
   if (fs === undefined || fs === null) return null;
-  const body = fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)]);
+  /* **自引用 / 互相引用截在这儿**（`*Node` 里躺着 `*Node`）：正在算它的零值就回 null，
+     那一格字段于是落回"说不清类型"—— 与从前一样，不会无限递归。 */
+  if (ZEROING.has(n)) return null;
+  ZEROING.add(n);
+  let body;
+  try {
+    body = fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)]);
+  } finally {
+    ZEROING.delete(n);
+  }
   return recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, byValFor(n));
 }
 
@@ -888,6 +919,16 @@ function zeroOf(ty, name, pkg) {
      go 的 nil channel 也正是 0 —— 差的只有一处：go 里在它上面收发是**永久阻塞**，
      而 `omni_go_chan_send` 会报一句话再 abort（永久阻塞在我们这儿查不出来，
      一句话比挂死好）。落 `null` 的代价是下游当场报「'ch' 是一格 null」。 */
+  /* **`*T` 里 T 是具名结构体时，零值是 T 的零值记录**（见 `PTRED` 那段账）：
+     记录在方言里本来就是一格指针（引用语义那一档），所以这既有类型又不改语义。
+     T 不是结构体（`*int` / `*任何接口`）、或者正在算它自己的零值（自引用）时落回 null。 */
+  if (t === 'ptr') {
+    const tn = namedTypeOf(kids(ty).find((y) => isList(y)));
+    if (tn !== null && STRUCTS.get(tn) !== undefined && STRUCTS.get(tn) !== null) {
+      const z = structZero(tn);
+      if (z !== null) return z;
+    }
+  }
   if (t === 'chan' || t === 'chan-send' || t === 'chan-recv') return lit(0);
   if (NIL_TYPES.has(t)) return lit(null);
   // `[N]T` 的零值是**N 格元素零值**（数组是值语义的，不是切片）——
@@ -2413,12 +2454,39 @@ function toNode(x) {
          于是 `(fnref …)` 照样发得出来。**借了外层局部量**的那些提不上去，落成一句
          有名有姓的墙（`crtCall` 里那句"要一个具名函数"）—— 捕获要抄进新 g，那是另一刀。 */
       const isLit = tag(gfn) === 'fnlit';
-      if (tag(gfn) !== 'name' && !isLit) {
-        throw new Error('go->graph: `go` 的体只接具名函数与匿名函数'
-          + `（这儿是 ${tag(gfn)} —— 方法值那一档还没接）`);
+      const isSel = tag(gfn) === 'sel';
+      if (tag(gfn) !== 'name' && !isLit && !isSel) {
+        throw new Error('go->graph: `go` 的体只接具名函数、匿名函数与方法值'
+          + `（这儿是 ${tag(gfn)}）`);
+      }
+      const raw = gargs === undefined ? [] : kids(gargs).filter((y) => tag(y) !== 'spread');
+      /* **方法值那一档**（`go obj.M(a)`，pt 的 renderer.go 用的就是它）：包成一格
+         **零参的匿名函数**再 spawn —— 那一格由 `liftFnVals` 落成方言的闭包，接收者与实参
+         就成了**按值抄一份的捕获**（`mkclo` 在 `go` 这一句上求值），正是 go 的语义
+         （实参在 `go` 那一刻求值）。
+         所以要求接收者与实参都是**光名字或字面量**：别的（`f(g())` 那种）在 go 里
+         也要在这一句上算，而包进闭包里就成了在新 g 里算 —— 那是静默的差别，报。 */
+      if (isSel) {
+        /* "光名字或字面量"：`&x` 与 `(x)` 剥一层也算 —— 图上没有指针那一格，`&记录`
+           本来就是**读那个名字**（见 `addr` 那一支），所以按值抄一份与 go 一致。
+           pt 的 `go r.writeImage(path, buf, ColorChannel, &wg)` 就靠这一条。 */
+        const plain = (y) => {
+          if (!isList(y)) return false;
+          const g = tag(y);
+          if (g === 'addr' || g === 'paren') return plain(kids(y)[0]);
+          return g === 'name' || g === 'num' || g === 'str' || g === 'rune' || g === 'sel';
+        };
+        if (!plain(kids(gfn)[0]) || !raw.every(plain)) {
+          throw new Error('go->graph: `go 接收者.方法(…)` 的接收者与实参这一刀只接光名字、'
+            + '取字段与字面量 —— 别的要在 `go` 那一句上先算出来，包进闭包里就成了在新 g 里算');
+        }
+        const wrap = node('func', { body: [toNode(c)] },
+          { params: [], name: `__gom${FN_N++}` });
+        return node('call', {
+          fn: node('ref', {}, { name: '__goSpawn0' }), args: [wrap],
+        });
       }
       const gname = isLit ? null : leaf(kids(gfn)[0]);
-      const raw = gargs === undefined ? [] : kids(gargs).filter((y) => tag(y) !== 'spread');
       if (raw.length > 3) {
         throw new Error(`go->graph: \`go ${gname ?? 'func(…)'}(…)\` 有 ${raw.length} 格实参 —— `
           + '这一刀的门面只到 3 格（实参要在 C 那侧打包，见 omni_go.h）');
@@ -2502,6 +2570,8 @@ export function goToGraph(tree, opts) {
   MSET.clear();
   FSIG.clear();
   PTRRECV.clear();
+  PTRED.clear();
+  ZEROING.clear();
   NEEDS_TYPETAG = false;
   NEEDS_SCHED = false;
   VARTYPE.clear();
@@ -2535,6 +2605,11 @@ export function goToGraph(tree, opts) {
     collectDecls(t, false);   // 方法名也收（量过 +8 份，见 collectDecls 头上那段）
   }
   collectDecls(tree);
+  /* 见 `PTRED` 那段账：被 `*T` 指过、而 T 又真是个结构体的，一律引用语义。
+     求交要等扫完 —— `STRUCTS` 与 `PTRED` 是同一趟里填的。 */
+  for (const n of PTRED) {
+    if (STRUCTS.get(n) !== undefined && STRUCTS.get(n) !== null) PTRRECV.add(n);
+  }
   FN_N = 0;                                   // 匿名 func 的编号按文件重来（图要可重现）
   const items = kids(tree).slice(1);          // 第一格是包名
   const body = [...stubBinds, ...items.map(toNode).flat()];
