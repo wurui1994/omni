@@ -131,11 +131,14 @@ const strLit = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}
  * 一格形状（记录或多值）在登记处里的那一份。同形的两格共用一格 `(struct …)`，
  * 标签按登记顺序发（记录 `rN`、多值 `mN`）—— 所以同一张图落两遍逐字节相同。
  */
+/** 形状的去重键（`shapeOf` 与自引用那一格的"补登记"共用一份 —— 两处算法必须相同）。 */
+const shapeKey = (names, types, multi, byval) => `${multi ? 'm' : (byval === true ? 'v' : 'r')}`
+  + `|${names.map((n, i) => `${n}:${types[i]}`).join('|')}`;
+
 function shapeOf(names, types, multi, ctx, byval) {
   /* **byval 进键**：同样的字段名与类型，值语义与引用语义是**两格**不同的形状
      （前者落 `(new rN)`、后者落 `(pnew (ptr rN))`），不能共用一格。 */
-  const key = `${multi ? 'm' : (byval === true ? 'v' : 'r')}`
-    + `|${names.map((n, i) => `${n}:${types[i]}`).join('|')}`;
+  const key = shapeKey(names, types, multi, byval);
   let shape = ctx.byKey.get(key);
   if (shape !== undefined) return shape;
   shape = {
@@ -621,6 +624,17 @@ function objText(obj, env, ctx) {
       const it = typeOf(obj, env, ctx);
       if (shapeAt(it, ctx) !== undefined || elemType(it) !== null || dictOf(it) !== null) {
         return `(aget ${objText(obj.ins.obj, env, ctx)} ${expr(obj.ins.index, env, ctx)})`;
+      }
+    }
+    /* **宿主是一次调用**（`m.Tex.Pow(3).Sample(…)` —— 链式那一族）：交出来的是一格记录，
+       先物化成一格临时名再当宿主用。摆不下物化那几句（没有 `ctx.pre`）就照旧往下报。 */
+    if (isNode(obj) && obj.op === 'call' && ctx.pre !== null && ctx.pre !== undefined) {
+      const ct = typeOf(obj, env, ctx);
+      if (isRecType(ct, ctx)) {
+        ctx.tmp = ctx.tmp + 1;
+        const tn = `obj_tmp${ctx.tmp}`;
+        ctx.pre.push(bindLine(tn, ct, expr(obj, env, ctx), env, ctx));
+        return `(var ${tn})`;
       }
     }
     /* **嵌套的宿主**：lua 的 `a.__meta.__close` 头一跳交出来的是一格 dyn，按键查出它装着
@@ -1302,6 +1316,18 @@ function stmtIn(x, env, ctx) {
     case 'set': return [`(set ${x.attrs.name} ${expr(x.ins.value, env, ctx)})`];
     case 'field-set': {
       const host = objText(x.ins.obj, env, ctx);
+      /* **写进去的是一整格值语义的记录**（go 的 `m.Tex = &ColorTexture{2}` —— 接口装箱
+         交回来的就是这一档，ADR-0040）：方言里整块写还没做，得**逐字段抄**。
+         先把右边物化成一格临时名（它多半是一次调用），再交给 `storeInto` —— 那一份本来
+         就会按"值语义就逐字段、引用语义就一格指针"分流（零值初始化走的正是它）。 */
+      const vt = typeOf(x.ins.value, env, ctx);
+      if (isRecType(vt, ctx) && !isPtrRec(vt, ctx)
+        && isPtrRec(typeOf(x.ins.obj, env, ctx), ctx)) {
+        ctx.tmp = ctx.tmp + 1;
+        const tn = `set_tmp${ctx.tmp}`;
+        const pre = [bindLine(tn, vt, expr(x.ins.value, env, ctx), env, ctx)];
+        return [...pre, ...storeInto(`(pfield ${host} ${x.attrs.field})`, vt, `(var ${tn})`, ctx)];
+      }
       const v = expr(x.ins.value, env, ctx);
       /* 记录是指针（见 `fldText`）—— 写一格字段是 `(pstore (pfield …) …)`。 */
       if (isPtrRec(typeOf(x.ins.obj, env, ctx), ctx)) {
@@ -2013,7 +2039,7 @@ export function emitCore(g) {
     /* 闭包那一族（`liftFnVals` 的第二刀）：`clos` 是"这个提上来的名字借了哪几格"，
        `capTypes` 是那几格的类型（只有 `mkclo` 那一处知道，见 `fnValText`），
        `caps` 是"现在正在落哪一格 cfn 的体"（体里读借来的东西要发 `(cap 名)`）。 */
-    clos: new Map(), capTypes: new Map(), caps: null, byCopy: new Set(),
+    clos: new Map(), capTypes: new Map(), caps: null, byCopy: new Set(), recPend: new Set(),
   };
   /* **运行时那几个 C 符号的返回类型**先摆进 env：调用点的 `inferType` 查的是 `fn:名字`，
      而它们在这份产物里没有函数体（体在 `libomnigo` 里），不走 `ctx.rets` 那一趟。 */
@@ -2222,6 +2248,16 @@ export function emitCore(g) {
 }
 
 /**
+ * **自引用那一格的占位串**（go 的 `type Texture interface{ Pow(float64) Texture }`）。
+ *
+ * 一格记录的字段类型里提到**它自己**时，那格形状的标签得先有名字才说得出字段类型 ——
+ * 典型的不动点。这儿的办法是：里层再进来时先回这个占位串，等外层把标签定下来
+ * （`shapeOf`），再把字段类型与产物里那句 `(struct …)` 上的占位串换成真标签。
+ * 只在**真的自引用**时走这一步（占位串不出现就一个字都不动），所以对别的语言是中性的。
+ */
+const SELF_TY = '__selfrec__';
+
+/**
  * 一格 `record-new` 的**类型**（只算类型、不出文本）—— `paramTypes` 用它把前端声明的
  * 形参类型算出来。字段的判据与 `bindRecord` 那份一样（标量或另一格记录），
  * 差别是这儿**不报缺口**：算不出来就回 null，让调用方退回"从调用点推"。
@@ -2231,6 +2267,40 @@ function recordTypeOfNode(rec, env, ctx) {
   if (!Array.isArray(names) || names.length === 0) return null;
   const vals = argList(rec, 'fields');
   if (vals.length !== names.length) return null;
+  const byval = rec.attrs.byval === true;
+  /* **自引用**（见 `SELF_TY`）：按"字段名单 + 值/引用"认 —— 同一格接口的零值记录处处同形，
+     而里层那一格的字段值压根不用看（这儿就回了）。 */
+  const nkey = `${byval ? 'v' : 'r'}|${names.join('|')}`;
+  if (ctx.recPend.has(nkey)) return SELF_TY;
+  ctx.recPend.add(nkey);
+  let types = [];
+  try {
+    types = fieldTypesOfNode(names, vals, env, ctx);
+  } finally {
+    ctx.recPend.delete(nkey);
+  }
+  if (types === null) return null;
+  if (!types.some((t) => typeof t === 'string' && t.includes(SELF_TY))) {
+    return shapeType(shapeOf(names, types, false, ctx, byval));
+  }
+  /* 先按带占位串的字段类型登记一格形状（要的只是它的标签），再原地把占位串换掉：
+     `shape.types`（下游查字段类型靠它）与 `ctx.decls` 里那句 `(struct …)` 两处都要换。 */
+  const at = ctx.decls.length;
+  const shape = shapeOf(names, types, false, ctx, byval);
+  const self = shapeType(shape);
+  const fixed = types.map((t) => String(t).split(SELF_TY).join(self));
+  for (let i = 0; i < names.length; i++) shape.types.set(names[i], fixed[i]);
+  const line = `  (struct ${shape.tag} ${names.map((n, i) => `(${n} ${fixed[i]})`).join(' ')})`;
+  if (ctx.decls[at] !== undefined) ctx.decls[at] = line;
+  /* **换过之后的键也登记一份**：别处（`bindRecord` 走的是**提上顶层之后**那几格闭包的
+     `fnTypeOf`）算出来的字段类型里已经是真标签了 —— 不补这一笔，同一个接口在图上会多出
+     一格内容完全相同的形状（量出来的：r1 与 r3），随后就是"形参在两处的类型不一样"。 */
+  ctx.byKey.set(shapeKey(names, fixed, false, byval), shape);
+  return self;
+}
+
+/** `recordTypeOfNode` 的字段那一趟（拆出来是为了让自引用那一格的 try/finally 读得清）。 */
+function fieldTypesOfNode(names, vals, env, ctx) {
   const types = [];
   for (let i = 0; i < names.length; i++) {
     const v = vals[i];
@@ -2254,7 +2324,7 @@ function recordTypeOfNode(rec, env, ctx) {
     if (t !== 'int' && t !== 'real' && t !== 'bool' && t !== 'string') return null;
     types.push(t);
   }
-  return shapeType(shapeOf(names, types, false, ctx, rec.attrs.byval === true));
+  return types;
 }
 
 /**

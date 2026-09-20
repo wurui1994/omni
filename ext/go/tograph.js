@@ -468,6 +468,8 @@ const byValFor = (n) => !(typeof n === 'string' && PTRRECV.has(n));
 const IFACES = new Map();
 /** 造好的装箱函数（键 `具体类型|接口名` -> 一格顶层 bind 节点）。一对只造一份。 */
 const BOXFNS = new Map();
+/** 造好的 `__nilof_接口名`（接口名 -> 一格顶层 bind 节点；null = 正在造）。 */
+const NILFNS = new Map();
 /** 正在造装箱函数的那几对（互相引用要截住）。 */
 const BOXING = new Set();
 /** 顶层函数/方法名 -> **声明的单返回类型节点**（`ret` 那一处要按它装箱）。 */
@@ -541,11 +543,26 @@ function ifaceMethods(n, seen) {
  * 这儿要的正好相反 —— 只要**元数与类型**，名字自己编。
  */
 function ifaceParams(sig) {
-  return partKids(sig, 'in').map((p, i) => {
+  const ins = partKids(sig, 'in');
+  const anyNamed = ins.some((p) => part(p, 'name') !== undefined);
+  const out = ins.map((p, i) => {
     const nm = part(p, 'name');
-    const ty = kids(p).find((y) => tag(y) !== 'name' && tag(y) !== 'variadic');
+    let ty = kids(p).find((y) => tag(y) !== 'name' && tag(y) !== 'variadic');
+    /* **参数组里"名字被当成类型"那一格**（与 `paramInfo` 同一条规矩）：
+       `Sample(u, v float64)` 在树上是 `p(u)` + `p(v float64)`，头一格的 `u` 收成了类型。 */
+    if (nm === undefined && anyNamed && isList(ty) && tag(ty) === 'tname' && kids(ty).length === 1) {
+      return { nm: leaf(kids(ty)[0]), ty: undefined };
+    }
+    if (ty === undefined) ty = undefined;
     return { nm: nm === undefined ? `__a${i}` : leaf(kids(nm)[0]), ty };
   });
+  /* **参数组共享类型**：从后往前补（`(a, b int)` 一组共用后面那个类型）。 */
+  let lastTy;
+  for (let i = out.length - 1; i >= 0; i--) {
+    if (out[i].ty === undefined) out[i].ty = lastTy;
+    else lastTy = out[i].ty;
+  }
+  return out;
 }
 
 /** 这格具名类型上**有没有**这个方法（本包 + 跨包两张表）。 */
@@ -651,37 +668,78 @@ const tnOfExpr = (x) => namedTypeOf(tyOfExpr(x));
  * 起来 ⇒ core 那侧 `s` 默认成 int ⇒ 一取字段就报"在一格说不清形状的东西上取字段 'Name'"。
  * pt 的 `Material` 有四格 `Texture` 字段，整包就卡在同一句上。
  *
- * 有一格方法的返回类型说不清（返回的又是接口、又互相引用）就整个回 null —— 那时行为与
- * 从前逐字相同。
+ * 有一格方法的返回类型说不清（返回的是**另一个**接口、两个接口互相引用）就整个回 null ——
+ * 那时行为与从前逐字相同。
+ *
+ * **返回自己那一族**（`type Texture interface{ Pow(float64) Texture }`，pt 里就有）：
+ *   - 类型那一侧把 `rzero` 指回**这格记录自己**（节点图上一个环）：后端算形状时
+ *     `recPend` 上有同一份字段名单，于是直接回自引用那个占位串，不会转下去
+ *     （见 `backend-core.js` 的 `SELF_TY`）。**不能拿一格"字段是 null 的占位记录"代替** ——
+ *     那一格一旦在 `recPend` 空着的时候被问到类型，就会照 null 算出 `(Sample int)`，
+ *     于是同一个接口在图上多出两三种形状（量出来的：r1/r2/r4/r6 四格）。
+ *   - 值那一侧交 `__nilof_接口名()` —— 一格**顶层函数**，体里造这格零值记录。不能就地
+ *     再铺一份：那是无限深的节点树。
  */
 function ifaceZero(ifn) {
   const ms = ifaceMethods(ifn);
   if (ms.length === 0) return null;
-  if (ZEROING.has(`if:${ifn}`)) return null;
-  ZEROING.add(`if:${ifn}`);
-  try {
-    const fields = [];
-    for (const [m, sig] of ms) {
-      const ps = ifaceParams(sig);
-      const outs = partKids(sig, 'out');
-      if (outs.length > 1) return null;              // 多返回那一档还没接
-      const pz = ps.map((p) => zeroOfParam(p.ty));
-      if (pz.some((z) => z === null)) return null;
-      const rz = outs.length === 1 ? zeroOfParam(outs[0]) : null;
-      if (outs.length === 1 && rz === null) return null;
-      const body = [assertOf(lit(false), `在一格 nil 的 ${ifn} 上调了 ${m}`)];
-      if (rz !== null) body.push(retOf([rz]));
-      fields.push([m, node('func', { body }, {
-        params: ps.map((p) => p.nm),
-        name: `__nil_${ifn}__${m}`,
-        ...(pz.length > 0 ? { pzero: pz } : {}),
-        ...(rz !== null ? { rzero: rz } : {}),
-      })]);
+  /* 先把记录建出来（字段暂时是 null），下面逐格填 —— "返回自己"的 `rzero` 要指回它。 */
+  const rec = recordNew(ms.map(([m]) => [m, lit(null)]), true);
+  for (let k = 0; k < ms.length; k++) {
+    const [m, sig] = ms[k];
+    const ps = ifaceParams(sig);
+    const outs = partKids(sig, 'out');
+    if (outs.length > 1) return null;              // 多返回那一档还没接
+    const pz = ps.map((p) => zeroOfParam(p.ty));
+    if (pz.some((z) => z === null)) return null;
+    let rz = null;
+    let rv = null;
+    if (outs.length === 1) {
+      const rIf = ifaceNameOf(outs[0]);
+      if (rIf === ifn) {
+        rz = rec;                                  // 指回自己（见上面那段账）
+        rv = node('call', { fn: gref(ensureNilFn(rIf)), args: [] });
+      } else if (rIf !== null) {
+        rz = ifaceZero(rIf);
+        rv = node('call', { fn: gref(ensureNilFn(rIf)), args: [] });
+      } else {
+        rz = zeroOfParam(outs[0]);
+        rv = rz;
+      }
+      if (rz === null) return null;
     }
-    return recordNew(fields, true);
-  } finally {
-    ZEROING.delete(`if:${ifn}`);
+    const body = [assertOf(lit(false), lit(`在一格 nil 的 ${ifn} 上调了 ${m}`))];
+    if (rv !== null) body.push(retOf([rv]));
+    rec.ins.fields[k] = node('func', { body }, {
+      params: ps.map((p) => p.nm),
+      name: `__nil_${ifn}__${m}`,
+      ...(pz.length > 0 ? { pzero: pz } : {}),
+      ...(rz !== null ? { rzero: rz } : {}),
+    });
   }
+  return rec;
+}
+
+/** `__nilof_接口名` —— 造这格接口零值的顶层函数（一格接口一份）。 */
+const nilFnName = (ifn) => `__nilof_${String(ifn).replace(/\./g, '__')}`;
+
+/**
+ * 保证 `__nilof_接口名` 存在，回它的名字。
+ *
+ * **先占位再造体**：体里那几格"返回自己"的桩会再问一次这个名字，占位让它拿得到名字而
+ * 不再造一遍（不然是无限递归）。
+ */
+function ensureNilFn(ifn) {
+  if (NILFNS.has(ifn)) return nilFnName(ifn);
+  NILFNS.set(ifn, null);
+  const rec = ifaceZero(ifn);
+  if (rec === null) return nilFnName(ifn);
+  NILFNS.set(ifn, node('bind', {
+    init: node('func', {
+      body: [node('bind', { init: rec }, { name: '__z' }), retOf([gref('__z')])],
+    }, { params: [], name: nilFnName(ifn), rzero: ifaceZero(ifn) }),
+  }, { name: nilFnName(ifn) }));
+  return nilFnName(ifn);
 }
 
 /** 装箱函数的名字（`__box_具体类型__接口名`）。 */
@@ -1141,7 +1199,6 @@ function structZero(n) {
   }
   return recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, byValFor(n));
 }
-
 /** 一格类型节点**剥到光名字**（`paren` 透传、具名类型跟着 `UNDER` 走一层）。不是光名字回 null。 */
 function scalarNameOf(ty) {
   if (ty === undefined || ty === null) return null;
@@ -2465,11 +2522,12 @@ function toNode(x) {
           const rt = tyOfExpr(rhs[i]);
           if (rt !== null) VARTY.set(nameOf(t), rt);
         }
-        /* **赋给一格接口类型的名字/字段**（`one = &Rect{2,2}`，ADR-0040）：装箱。
-           目标的声明类型从 `tyOfExpr` 来（名字走 `VARTY`、字段走 `STRUCTS`）。 */
+        /* **照目标的声明类型转一遍**（与 `fieldValue` 那段账同一条）：浮点字段收整字面量要
+           转（`m.Gloss = 4`），声明成接口的要装箱（`one = &Rect{2,2}`，ADR-0040）。
+           目标的类型从 `tyOfExpr` 来（名字走 `VARTY`、字段走 `STRUCTS`）。 */
         if (compoundOp === null && rhs[i] !== undefined) {
-          const tIf = ifaceNameOf(tyOfExpr(t));
-          if (tIf !== null) v = boxInto(tIf, tnOfExpr(rhs[i]), v);
+          const tTy = tyOfExpr(t);
+          if (tTy !== null) v = fieldValue(tTy, v, rhs[i]);
         }
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set；
         // `set` 只认名字
@@ -3001,6 +3059,7 @@ export function goToGraph(tree, opts) {
   FRET.clear();
   BOXFNS.clear();
   BOXING.clear();
+  NILFNS.clear();
   VARTY.clear();
   CUR_RET = null;
   IMPORTS.clear();
@@ -3051,7 +3110,7 @@ export function goToGraph(tree, opts) {
      现造），所以得等 `mapped` 算完才齐 —— 但**摆的位置要在前面**：core 那条腿按次序推
      类型，`var one Shape = __box_Sq__Shape(…)` 要先见过那格函数才知道它交出来的是记录
      （不然 `one` 默认成 int，一取字段就报"说不清形状"）。 */
-  const body = [...stubBinds, ...BOXFNS.values(), ...mapped];
+  const body = [...stubBinds, ...BOXFNS.values(), ...[...NILFNS.values()].filter((v) => v !== null), ...mapped];
   if (opts !== undefined && opts.asModule === true) return program(body);
   /* 入口那一句。**用到并发的那些包一层**（`NEEDS_SCHED`）：`func main()` 要跑成
      主 g，不然第一次在无缓冲 channel 上发送就是"park 一个不存在的 g"。 */
