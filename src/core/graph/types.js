@@ -197,6 +197,15 @@ export function inferType(x, env, ctx) {
        没有，得问后端（`ctx.dynFnType` —— 它按键查整张图，见 `backend-core.js` 的 dyn 那段），
        返回类型就是签名里最后那一格。问不着就 unknown，不猜。 */
     if (nm === null) {
+      /* **被调的是一格记录字段**（go 的接口分派，ADR-0040）：字段的类型就是 `(fnty …)`，
+         返回类型是它最后那一格。这一条要排在"按键查整张图"前头 —— 字段名编译期就定了，
+         不必走 dyn 那条路。 */
+      if (isNode(f) && f.op === 'field-get') {
+        let ft0 = null;
+        try { ft0 = fieldType(f, env, ctx); } catch { ft0 = null; }
+        const r0 = typeof ft0 === 'string' ? fnRetOf(ft0) : null;
+        if (r0 !== null && r0 !== undefined) return r0;
+      }
       const ft = ctx.dynInside === undefined ? null : ctx.dynInside(f, env);
       return (ft === null ? null : fnRetOf(ft)) ?? UNKNOWN;
     }

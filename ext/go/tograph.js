@@ -17,7 +17,7 @@ import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
   ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, counted,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, deferNow,
-  mapNew, mapGet, mapSet, mapHas, mapNames, mapForIn, isList,
+  mapNew, mapGet, mapSet, mapHas, mapNames, mapForIn, isList, assertOf,
 } from '../../src/core/graph/fromtree.js';
 import { loadMappingFor, applyRule } from '../../src/core/graph/mapping.js';
 
@@ -451,6 +451,327 @@ const ZEROING = new Set();
 /** 这格具名类型的记录要不要值语义（`recordNew` 的第二个实参）。 */
 const byValFor = (n) => !(typeof n === 'string' && PTRRECV.has(n));
 
+/* ---- 接口（ADR-0040）------------------------------------------------------
+ *
+ * **接口值 = 一格方法闭包的记录**（引用语义 ⇒ 一个字，装得进单态数组）：
+ *     type Shape interface { Area() float64 }
+ *  => 一格 `record-new`（`byval` 不置上）每个接口方法一格字段，值是**抓住了接收者**
+ *     的闭包（图上一格 `func`，`backend-core.js` 的 `liftFnVals` 把它提成 `(cfn …)`）。
+ * 分派 = 取字段再按值调 —— 正是 `case 'call'` 那条既有的兜底路（`fieldGet` 再 `call`）。
+ *
+ * 为什么不是 `dyn`、不是"标签+地址"、不是单态化：三条的账在 ADR-0040 里。
+ * 这一条用的全是方言里已经有判据的东西（类的引用语义、`fnty` 字段、`mkclo`/`callfn`），
+ * **一格方言节点都不用加**。
+ */
+
+/** 接口名 -> 声明里那几格 `(m 名 签名)` 的原树（嵌入的**没**摊平，`ifaceMethods` 摊）。 */
+const IFACES = new Map();
+/** 造好的装箱函数（键 `具体类型|接口名` -> 一格顶层 bind 节点）。一对只造一份。 */
+const BOXFNS = new Map();
+/** 正在造装箱函数的那几对（互相引用要截住）。 */
+const BOXING = new Set();
+/** 顶层函数/方法名 -> **声明的单返回类型节点**（`ret` 那一处要按它装箱）。 */
+const FRET = new Map();
+/** 名字 -> 它的**声明类型节点**（形参与 `var x T`；`VARTYPE` 只存名字，这张存树）。 */
+let VARTY = new Map();
+/** 正在走的那格函数**声明的单返回类型节点**（`ret` 那一处按它装箱）。 */
+let CUR_RET = null;
+
+/** 这格类型节点是**有方法的接口**吗 —— 是就回接口名。`interface{}` 回 null（没方法可分派）。 */
+function ifaceNameOf(ty) {
+  if (ty === undefined || ty === null || !isList(ty)) return null;
+  const t = tag(ty);
+  if (t === 'paren') return ifaceNameOf(kids(ty)[0]);
+  if (t === 'tname' && kids(ty).length === 1) {
+    const n = leaf(kids(ty)[0]);
+    if (!IFACES.has(n)) return null;
+    return ifaceMethods(n).length === 0 ? null : n;
+  }
+  return null;
+}
+
+/** `[]T` / `[N]T` 的元素类型节点（别的形状回 null）。 */
+function elemTyOf(ty) {
+  if (ty === undefined || ty === null || !isList(ty)) return null;
+  const t = tag(ty);
+  if (t === 'paren') return elemTyOf(kids(ty)[0]);
+  if (t === 'slice') return kids(ty).find((y) => tag(y) !== 'none') ?? null;
+  if (t === 'array') return kids(ty)[1] ?? null;
+  return null;
+}
+
+/**
+ * 接口的方法表：`[[名, 签名节点], …]`，**嵌入的接口一路摊平**。
+ *
+ * 树上嵌入写成 `(constraint 类型)`（`go.grammar` 的 `ifitem -> type-set`）——
+ * 那格类型是另一个接口名时把它的方法并进来，别的（真正的类型集约束 `~int | ~string`）
+ * 跳过：泛型约束不是方法集。
+ */
+function ifaceMethods(n, seen) {
+  const decl = IFACES.get(n);
+  if (decl === undefined) return [];
+  const guard = seen ?? new Set();
+  if (guard.has(n)) return [];
+  guard.add(n);
+  const out = [];
+  const have = new Set();
+  const push = (m, sig) => { if (!have.has(m)) { have.add(m); out.push([m, sig]); } };
+  for (const it of decl) {
+    if (tag(it) === 'm') {
+      const nm = leaf(kids(it)[0]);
+      const sig = kids(it).find((y) => isList(y) && tag(y) === 'sig');
+      if (nm !== undefined && sig !== undefined) push(nm, sig);
+      continue;
+    }
+    if (tag(it) === 'constraint') {
+      const inner = namedTypeOf(kids(it)[0]);
+      if (inner !== null && IFACES.has(inner)) {
+        for (const [m, s] of ifaceMethods(inner, guard)) push(m, s);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 一格**接口方法签名**的形参 `[{nm, ty}]`。
+ *
+ * 为什么不用 `paramInfo`：接口里的签名几乎都**不带名字**（`Intersect(Ray) Hit`），而
+ * `paramInfo` 专门为"参数组共享类型"那条歧义写的，一格名字都没有时它回空表。
+ * 这儿要的正好相反 —— 只要**元数与类型**，名字自己编。
+ */
+function ifaceParams(sig) {
+  return partKids(sig, 'in').map((p, i) => {
+    const nm = part(p, 'name');
+    const ty = kids(p).find((y) => tag(y) !== 'name' && tag(y) !== 'variadic');
+    return { nm: nm === undefined ? `__a${i}` : leaf(kids(nm)[0]), ty };
+  });
+}
+
+/** 这格具名类型上**有没有**这个方法（本包 + 跨包两张表）。 */
+const hasMethod = (tn, m) => MSET.has(`${tn}.${m}`) || XPKG.mset.has(`${tn}.${m}`);
+
+/** 这格具名类型**满足这个接口吗**（方法一个不缺；嵌入带来的提升走 `promoteVia`）。 */
+function implementsIface(tn, ifn) {
+  if (typeof tn !== 'string' || tn.length === 0) return false;
+  const ms = ifaceMethods(ifn);
+  if (ms.length === 0) return false;
+  return ms.every(([m]) => hasMethod(tn, m) || promoteVia(tn, m) !== null);
+}
+
+/**
+ * 这个方法是**从哪格嵌入字段提升**上来的（回那格字段名，没有就 null）。
+ *
+ * 只认"嵌入的是**接口**"这一档（pt 的 `TransformedShape{ Shape; … }` 就是它）：
+ * 那时转发就是"取那格字段里的闭包再调"，运行期总对。嵌入具体结构体那一档还没接。
+ */
+function promoteVia(tn, m) {
+  const emb = EMBEDS.get(tn);
+  if (emb === undefined) return null;
+  for (const [fname, ety] of emb) {
+    const ifn = ifaceNameOf(ety);
+    if (ifn === null) continue;
+    if (ifaceMethods(ifn).some(([mm]) => mm === m)) return fname;
+  }
+  return null;
+}
+
+/** 具名结构体 -> 它的**嵌入字段**（`[[字段名, 类型节点], …]`）。 */
+const EMBEDS = new Map();
+
+/**
+ * 一格表达式的**声明类型节点**（查不出来回 null —— 不猜、不报）。
+ *
+ * 这是这门语言里第一处"往回看类型"的地方，刻意只认**语法上写着的**那几条路：
+ * 字面量 `T{…}`、名字（`VARTY`：形参与带类型的 `var`）、下标（容器的元素类型）、
+ * 取字段（`STRUCTS` 里的字段类型）、调用（`FRET` 里声明的返回类型，含接口方法）。
+ * 装箱点与分派点两处都问它 —— 两处要的是同一个知识，各写一遍就会不一致。
+ */
+function tyOfExpr(x, depth) {
+  if (x === undefined || x === null || !isList(x)) return null;
+  const d = depth ?? 0;
+  if (d > 8) return null;                       // 链太长就不追了（环也在这儿截住）
+  const g = tag(x);
+  if (g === 'paren' || g === 'addr' || g === 'deref') return tyOfExpr(kids(x)[0], d + 1);
+  if (g === 'lit') return kids(x)[0] ?? null;
+  if (g === 'name') return VARTY.get(leaf(kids(x)[0])) ?? null;
+  if (g === 'index') return elemTyOf(tyOfExpr(kids(x)[0], d + 1));
+  if (g === 'sel') {
+    const on = namedTypeOf(tyOfExpr(kids(x)[0], d + 1));
+    if (on === null) return null;
+    const fname = leaf(kids(x)[1]);
+    const fs = STRUCTS.get(on);
+    if (fs !== undefined && fs !== null) {
+      const hit = fs.find(([f2]) => f2 === fname);
+      if (hit !== undefined) return hit[1];
+    }
+    const emb = EMBEDS.get(on);
+    if (emb !== undefined) {
+      const e = emb.find(([f2]) => f2 === fname);
+      if (e !== undefined) return e[1];
+    }
+    return null;
+  }
+  if (g === 'call') {
+    const f = kids(x)[0];
+    if (f === undefined) return null;
+    if (tag(f) === 'name') return FRET.get(leaf(kids(f)[0])) ?? null;
+    if (tag(f) === 'sel') {
+      const on = namedTypeOf(tyOfExpr(kids(f)[0], d + 1));
+      const m = leaf(kids(f)[1]);
+      if (on === null || m === null) return null;
+      const t = FRET.get(mangle(on, m));
+      if (t !== undefined) return t;
+      if (IFACES.has(on)) {
+        const hit = ifaceMethods(on).find(([mm]) => mm === m);
+        if (hit !== undefined) {
+          const o = partKids(hit[1], 'out');
+          if (o.length === 1) return o[0];
+        }
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
+/** 这格表达式的**具名类型名**（`tyOfExpr` 再剥一层）。 */
+const tnOfExpr = (x) => namedTypeOf(tyOfExpr(x));
+
+
+/**
+ * **一格接口的零值记录**（go 的 nil 接口值，ADR-0040）。
+ *
+ * 字段名与字段类型**只从接口声明来** —— 与装箱出来的那格记录同形（方言按"字段名单 + 字段
+ * 类型"去重形状，所以两处必须逐字相同）。每格方法是一格**当场炸的桩**：`assert false`
+ * 加上返回那个类型的零值。为什么要炸而不是安静地返回零值：在 nil 接口上调方法在 go 里是
+ * 一次 panic，安静返回就是"答案静默地错"。
+ *
+ * 为什么非要这一格（量出来的）：`func describe(s Shape)` 的形参没有零值 ⇒ `pzero` 立不
+ * 起来 ⇒ core 那侧 `s` 默认成 int ⇒ 一取字段就报"在一格说不清形状的东西上取字段 'Name'"。
+ * pt 的 `Material` 有四格 `Texture` 字段，整包就卡在同一句上。
+ *
+ * 有一格方法的返回类型说不清（返回的又是接口、又互相引用）就整个回 null —— 那时行为与
+ * 从前逐字相同。
+ */
+function ifaceZero(ifn) {
+  const ms = ifaceMethods(ifn);
+  if (ms.length === 0) return null;
+  if (ZEROING.has(`if:${ifn}`)) return null;
+  ZEROING.add(`if:${ifn}`);
+  try {
+    const fields = [];
+    for (const [m, sig] of ms) {
+      const ps = ifaceParams(sig);
+      const outs = partKids(sig, 'out');
+      if (outs.length > 1) return null;              // 多返回那一档还没接
+      const pz = ps.map((p) => zeroOfParam(p.ty));
+      if (pz.some((z) => z === null)) return null;
+      const rz = outs.length === 1 ? zeroOfParam(outs[0]) : null;
+      if (outs.length === 1 && rz === null) return null;
+      const body = [assertOf(lit(false), `在一格 nil 的 ${ifn} 上调了 ${m}`)];
+      if (rz !== null) body.push(retOf([rz]));
+      fields.push([m, node('func', { body }, {
+        params: ps.map((p) => p.nm),
+        name: `__nil_${ifn}__${m}`,
+        ...(pz.length > 0 ? { pzero: pz } : {}),
+        ...(rz !== null ? { rzero: rz } : {}),
+      })]);
+    }
+    return recordNew(fields, true);
+  } finally {
+    ZEROING.delete(`if:${ifn}`);
+  }
+}
+
+/** 装箱函数的名字（`__box_具体类型__接口名`）。 */
+const boxFnName = (tn, ifn) => `__box_${tn.replace(/\./g, '__')}__${ifn.replace(/\./g, '__')}`;
+
+const gref = (n) => node('ref', {}, { name: n });
+
+/**
+ * 造一格**装箱函数**（照 ADR-0040）：`__box_Sq__Shape(self)` 交出一格方法闭包的记录。
+ *
+ * 为什么是"一格顶层函数"而不是在装箱点就地铺开：闭包要抓住接收者，而"抓住"在图上
+ * 就是**引用外层的一格名字** —— 顶层函数的形参正好是那格名字。装箱点于是只剩一次
+ * 普通调用（`call __box_Sq__Shape(值)`），表达式位置上不用造临时绑定。
+ *
+ * 一对（具体类型, 接口）只造一份（`BOXFNS`）；造的时候登记在案，所以互相引用截得住。
+ */
+function ensureBoxFn(tn, ifn) {
+  const key = `${tn}|${ifn}`;
+  if (BOXFNS.has(key)) return boxFnName(tn, ifn);
+  if (BOXING.has(key)) return boxFnName(tn, ifn);
+  BOXING.add(key);
+  const self = '__self';
+  const fields = [];
+  try {
+    for (const [m, sig] of ifaceMethods(ifn)) {
+      const ps = ifaceParams(sig);
+      const outs = partKids(sig, 'out');
+      /* 调谁：本类型自己有这个方法就直接调它；从嵌入的接口提升上来的**当场取字段再调**
+         （不是装箱那一刻把闭包抄过来 —— 嵌入的那格事后被改也对）。 */
+      const via = hasMethod(tn, m) ? null : promoteVia(tn, m);
+      const inner = via === null
+        ? node('call', { fn: gref(mangle(tn, m)), args: [gref(self), ...ps.map((p) => gref(p.nm))] })
+        : node('call', { fn: fieldGet(fieldGet(gref(self), via), m), args: ps.map((p) => gref(p.nm)) });
+      const pz = ps.map((p) => zeroOfParam(p.ty));
+      const rz = outs.length === 1 ? zeroOfParam(outs[0]) : null;
+      fields.push([m, node('func', { body: outs.length === 0 ? [inner] : [retOf([inner])] }, {
+        params: ps.map((p) => p.nm),
+        name: `${boxFnName(tn, ifn)}__${m}`,
+        /* **接收者是按值抄一份的**：go 里 `var s Shape = Sq{2}` 装进接口的正是 Sq 那一格
+           值的副本。默认的闭包规矩不许借值语义的结构体（那一条是为 go 的**词法**闭包写的，
+           它按引用捕获），所以这儿明着标一格 `bycopy`。 */
+        bycopy: true,
+        ...(pz.some((z) => z !== null) ? { pzero: pz } : {}),
+        ...(rz !== null ? { rzero: rz } : {}),
+      })]);
+    }
+  } finally {
+    BOXING.delete(key);
+  }
+  /* **值语义**（`byval` 置上）：接口值在 go 里本来就是**按值抄**的两个字（类型描述符 +
+     数据指针），抄的是那两个字、不是被指的那格数据 —— 我们这格记录里装的全是闭包句柄，
+     抄它们的语义与 go 完全一致（接收者仍旧共享）。
+     为什么不用引用语义：方言的 `(arr 元素)` 收结构体名与类名，**不收 `(ptr rN)`** ——
+     而后端把引用语义的记录发成 `(ptr rN)`，于是 `[]Shape` 落不下去。
+     体分两句（先绑一格局部量再交回去）：`record-new` 在**表达式位置**上落不下去
+     （见 `backend-core.js` 的 `bindRecord` 那段账），`ret (record-new …)` 会当场报缺口，
+     而那一报是在空跑那一趟里被吞掉的 —— 症状是调用点把它当 int。 */
+  const fn = node('func', {
+    body: [
+      node('bind', { init: recordNew(fields, true) }, { name: '__b' }),
+      retOf([gref('__b')]),
+    ],
+  }, {
+    params: [self],
+    name: boxFnName(tn, ifn),
+    /* **声明的返回类型**（`rzero`）：就是这格接口的零值记录 —— 与装箱出来的那格**同形**。
+       为什么非要它：`retTypeOf` 跑在最前头，`ret (var __b)` 那种它只能当 int，于是
+       `describe(box(…))` 在空跑那一趟把形参记成 int，出真文本那一趟再报"两处的类型
+       不一样（int 与 (ptr r4)）"。`rzero` 是**在那之前**就读的（见 backend-core 的
+       `declRet`）。 */
+    ...(ifaceZero(ifn) !== null ? { rzero: ifaceZero(ifn) } : {}),
+    ...(zeroOfNamed(tn) !== null ? { pzero: [zeroOfNamed(tn)] } : {}),
+  });
+  BOXFNS.set(key, node('bind', { init: fn }, { name: boxFnName(tn, ifn) }));
+  return boxFnName(tn, ifn);
+}
+
+/**
+ * **把一格值装进接口**：认得出具体类型就包一次 `__box_…`，认不出就原样交回。
+ *
+ * 认不出时**不报**：那时下游看到的与从前一样（这一刀只往上加，不往下拆）。已经是
+ * 接口值的（`tn` 就是接口名、或者 `tn` 是 null）也原样交回 —— 接口赋给同族接口就是搬一个字。
+ */
+function boxInto(ifn, tn, valNode) {
+  if (ifn === null || tn === null || tn === undefined) return valNode;
+  if (IFACES.has(tn)) return valNode;
+  if (!implementsIface(tn, ifn)) return valNode;
+  return node('call', { fn: gref(ensureBoxFn(tn, ifn)), args: [valNode] });
+}
+
 /** `T{…}` / `&T{…}` 那格**复合字面量**的具名类型（别的形状回 null —— 不猜）。 */function litTypeNameOf(r) {
   if (r === undefined || r === null || !isList(r)) return null;
   const g = tag(r);
@@ -487,11 +808,24 @@ function collectDecls(x, shapesOnly) {
   }
   if (tag(x) === 'tspec' || tag(x) === 'talias') {
     TYPES.add(leaf(kids(x)[0]));
+    /* 见 ADR-0040：`type X interface{…}` 的方法表要登记（装箱与分派两处都读它）。 */
+    const iff = kids(x).find((y) => isList(y) && tag(y) === 'interface');
+    if (iff !== undefined) IFACES.set(leaf(kids(x)[0]), kids(iff));
     const body = kids(x).find((y) => tag(y) === 'struct');
     if (body !== undefined) {
       const fs = fieldsOf(body);
       /* 收不齐（有嵌入字段）就存 null —— 那时零值当场报，不猜嵌入的那一格占几格。 */
       STRUCTS.set(leaf(kids(x)[0]), fs);
+      /* **嵌入字段单收一份**（方法提升要它，见 `promoteVia`）：`(embed 类型)`。
+         字段名在 go 里就是**类型的名字**（`*T` 也叫 T）—— 记 `[字段名, 类型节点]`。 */
+      const emb = [];
+      for (const f of kids(body)) {
+        if (tag(f) !== 'embed') continue;
+        const et = kids(f).find((y) => isList(y));
+        const en = namedTypeOf(et);
+        if (en !== null) emb.push([en, et]);
+      }
+      if (emb.length > 0) EMBEDS.set(leaf(kids(x)[0]), emb);
     } else {
       /* 别的具名类型：记下它的**底子**（零值就是底子的零值 —— 一层间接，不是新语义）。 */
       const und = kids(x)[1];
@@ -533,7 +867,13 @@ function collectDecls(x, shapesOnly) {
   if (tag(x) === 'fn') {
     const sig0 = kids(x).find((y) => tag(y) === 'sig');
     const nm0 = leaf(kids(x)[0]);
-    if (sig0 !== undefined && nm0 !== '_') FSIG.set(nm0, paramInfo(sig0).map((p) => p.ty));
+    if (sig0 !== undefined && nm0 !== '_') {
+      FSIG.set(nm0, paramInfo(sig0).map((p) => p.ty));
+      /* **声明的返回类型**（`FRET`，见 ADR-0040）：`ret` 那一处要按它装箱，调用点也要靠它
+         认出"这格调用交出来的是接口值"。只收单返回 —— 多返回在图上是一格多值。 */
+      const o0 = partKids(sig0, 'out');
+      if (o0.length === 1) FRET.set(nm0, o0[0]);
+    }
   }
   /* `shapesOnly` 原来是**同一包里别的文件**那一趟用的（`opts.also`）：类型与字段名收、
      **方法名不收**。当时的理由是"一个包摊开看重名到处都是（`Error`/`String`/`Format`…）"，
@@ -561,6 +901,8 @@ function collectDecls(x, shapesOnly) {
       const sigM = kids(x).find((y) => tag(y) === 'sig');
       if (sigM !== undefined) {
         FSIG.set(mangle(owner, name), [undefined, ...paramInfo(sigM).map((p) => p.ty)]);
+        const oM = partKids(sigM, 'out');
+        if (oM.length === 1) FRET.set(mangle(owner, name), oM[0]);
       }
       /* **按 `类型.名字` 收**（`opts.also` 那几份也收 —— 这样存不会撞名，见 `MSET` 那一段）。 */
       MSET.add(`${owner}.${name}`);
@@ -820,10 +1162,15 @@ function scalarNameOf(ty) {
  * 在图上算出**两个形状**（`(ptr r1)` 与 `(ptr r2)`），core 那侧报
  * `'Vec__Dot' 第 1 格实参在两处的类型不一样`。
  * 无条件转是对的：go 里能摆进 float64 字段的值本来就可赋给 float64，转一下对浮点是空操作。
+ *
+ * **第二件事（ADR-0040）**：字段/形参声明成**接口**时，把值装箱（`boxInto`）。那一步要
+ * 知道值的具体类型，所以第三个实参是**原树**（没递就只做浮点那一转，与从前一样）。
  */
-function fieldValue(ft, v) {
+function fieldValue(ft, v, ast) {
   const n = scalarNameOf(ft);
-  return (n === 'float32' || n === 'float64') ? convOf('float', v) : v;
+  const v2 = (n === 'float32' || n === 'float64') ? convOf('float', v) : v;
+  const ifn = ifaceNameOf(ft);
+  return ifn === null || ast === undefined ? v2 : boxInto(ifn, tnOfExpr(ast), v2);
 }
 
 /**
@@ -842,13 +1189,13 @@ const FSIG = new Map();
  * go 的规矩是**无类型常量按形参的声明类型转** —— 声明就在 `FSIG` 里，照着转即可；
  * 对本来就是浮点的实参这一转是空操作（与 `fieldValue` 那段账同理）。
  */
-function argsByDecl(name, nodes, skip) {
+function argsByDecl(name, nodes, skip, asts) {
   const tys = FSIG.get(name);
   if (tys === undefined) return nodes;
   const off = skip === true ? 1 : 0;
   return nodes.map((a, i) => {
     const ty = tys[i + off];
-    return ty === undefined ? a : fieldValue(ty, a);
+    return ty === undefined ? a : fieldValue(ty, a, asts === undefined ? undefined : asts[i]);
   });
 }
 
@@ -930,6 +1277,16 @@ function zeroOf(ty, name, pkg) {
     }
   }
   if (t === 'chan' || t === 'chan-send' || t === 'chan-recv') return lit(0);
+  /* **接口的零值是那格方法闭包记录的"全是桩"版**（ADR-0040，见 `ifaceZero` 那段账）：
+     落 `lit(null)` 的代价是形参/字段说不清类型 —— 那正是 pt 整包卡住的那一句。
+     算不出来（方法的返回类型又是接口、互相引用）时照旧落回下面的 `lit(null)`。 */
+  {
+    const ifn = ifaceNameOf(ty);
+    if (ifn !== null) {
+      const z = ifaceZero(ifn);
+      if (z !== null) return z;
+    }
+  }
   if (NIL_TYPES.has(t)) return lit(null);
   // `[N]T` 的零值是**N 格元素零值**（数组是值语义的，不是切片）——
   // N 得是个整数字面量、元素也得有零值，两样缺一样就当场报。
@@ -1063,6 +1420,9 @@ function bindName(n, v) {
 
 /** 一格 spec 的名字表对初值表：数目相等就逐个绑，N 对 1 是多值，没初值就落零值。 */
 function specBinds(names, exprs, ty) {
+  /* 声明写着类型时留一份**类型节点**（`tyOfExpr` 要它：`var xs []Shape` 的元素类型、
+     `var s Shape` 的接口分派）。 */
+  if (ty !== undefined) for (const n of names) VARTY.set(n, ty);
   if (exprs === null) return names.flatMap((n) => bindName(n, zeroOf(ty, n)));
   if (names.length > 1 && exprs.length === 1) {
     return destructure(names, toNode(exprs[0]), { declare: true });
@@ -1070,7 +1430,10 @@ function specBinds(names, exprs, ty) {
   if (names.length !== exprs.length) {
     throw new Error(`go->graph: ${names.length} 个名字对 ${exprs.length} 个初值 —— 这一批不猜`);
   }
-  return names.flatMap((n, i) => bindName(n, toNode(exprs[i])));
+  /* `var s Shape = Sq{2}`：声明的类型是接口就在这儿装箱（ADR-0040）。 */
+  const ifn = ifaceNameOf(ty);
+  return names.flatMap((n, i) => bindName(n, ifn === null ? toNode(exprs[i])
+    : boxInto(ifn, tnOfExpr(exprs[i]), toNode(exprs[i]))));
 }
 
 /**
@@ -1206,6 +1569,7 @@ function funcOf(sig, blk, name, self, selfType) {
     && kids(lastIn).some((y) => (isList(y) ? tag(y) : leaf(y)) === 'variadic');
   const restParam = (isVariadic && params.length > 0) ? params[params.length - 1] : undefined;
   const savedVars = new Map(VARTYPE);
+  const savedTys = new Map(VARTY);
   const savedScopes = SCOPES;
   /* 函数体自己是一层块，形参就声明在这一层（go 的规矩把形参表算进函数体那个块）。 */
   SCOPES = [new Set()];
@@ -1220,6 +1584,14 @@ function funcOf(sig, blk, name, self, selfType) {
     const ty = kids(p).find((y) => tag(y) !== 'name');
     const t = namedTypeOf(ty);
     if (t !== null) VARTYPE.set(leaf(kids(nm)[0]), t);
+    /* 形参的**类型节点**也留一份（`tyOfExpr` 要它：`[]Shape` 的元素类型、接口分派）。 */
+    if (ty !== undefined) VARTY.set(leaf(kids(nm)[0]), ty);
+  }
+  /* 当前函数**声明的返回类型**（`ret` 那一处按它装箱）。 */
+  const savedRet = CUR_RET;
+  {
+    const o = partKids(sig, 'out');
+    CUR_RET = o.length === 1 ? o[0] : null;
   }
   try {
     /* **有类型覆盖层（#40）的第一格真货**：把每一格形参的**声明类型**以"它的零值"
@@ -1252,6 +1624,9 @@ function funcOf(sig, blk, name, self, selfType) {
   } finally {
     VARTYPE.clear();
     for (const [k, v] of savedVars) VARTYPE.set(k, v);
+    VARTY.clear();
+    for (const [k, v] of savedTys) VARTY.set(k, v);
+    CUR_RET = savedRet;
     SCOPES = savedScopes;
   }
 }
@@ -1821,7 +2196,7 @@ function toNode(x) {
         return withType(elems.map((e) => {
           const [k, v] = kids(e);
           const fn2 = nameOf(k);
-          return [fn2, fieldValue(ftab.get(fn2), toNode(v))];
+          return [fn2, fieldValue(ftab.get(fn2), toNode(v), v)];
         }));
       }
       if (elems.some((e) => tag(e) === 'kv')) {
@@ -1833,7 +2208,18 @@ function toNode(x) {
       if (litTypeName !== null && STRUCTS.has(litTypeName) && elems.length > 0) {
         const fs = STRUCTS.get(litTypeName);
         if (fs !== null && fs.length >= elems.length) {
-          return withType(elems.map((e, i) => [fs[i][0], fieldValue(fs[i][1], toNode(e))]));
+          return withType(elems.map((e, i) => [fs[i][0], fieldValue(fs[i][1], toNode(e), e)]));
+        }
+      }
+      /* **切片/数组字面量的元素声明成接口**（`[]Shape{Sq{2}, &Rect{3,4}}`，ADR-0040）：
+         逐格装箱，于是列表是**单态**的（异质那一族的墙就在这一句）。元素类型也一并带上
+         （`elem`），空表那一路才有类型可推。 */
+      {
+        const elT = elemTyOf(ty);
+        const ifn = ifaceNameOf(elT);
+        if (ifn !== null) {
+          const items = elems.map((e) => boxInto(ifn, tnOfExpr(e), toNode(e)));
+          return listNew(items);
         }
       }
       /* **切片字面量**（`[]int{1,2,3}`）或 struct 不在 STRUCTS 里 → 落数组。 */
@@ -2074,6 +2460,16 @@ function toNode(x) {
         if (isDef && rhs[i] !== undefined && tag(t) !== 'sel' && tag(t) !== 'index') {
           const tn = litTypeNameOf(rhs[i]);
           if (tn !== null) VARTYPE.set(nameOf(t), tn);
+          /* `xs := []Shape{…}` / `s := NewSphere(…)` 那一族：把**右边的声明类型**也记一份
+             （`tyOfExpr` 靠它往下追元素类型与接口分派）。 */
+          const rt = tyOfExpr(rhs[i]);
+          if (rt !== null) VARTY.set(nameOf(t), rt);
+        }
+        /* **赋给一格接口类型的名字/字段**（`one = &Rect{2,2}`，ADR-0040）：装箱。
+           目标的声明类型从 `tyOfExpr` 来（名字走 `VARTY`、字段走 `STRUCTS`）。 */
+        if (compoundOp === null && rhs[i] !== undefined) {
+          const tIf = ifaceNameOf(tyOfExpr(t));
+          if (tIf !== null) v = boxInto(tIf, tnOfExpr(rhs[i]), v);
         }
         // 左边是一格字段（`p.y = 5`）或一格下标（`xs[1] = 5`）⇒ field-set / index-set；
         // `set` 只认名字
@@ -2138,7 +2534,16 @@ function toNode(x) {
       // 那一格 init 声明的名字**只活在这条 if 链里**，所以连 init 一起进一层作用域。
       return ini === undefined ? build() : inScope(build);
     }
-    case 'return': return retOf(many(kids(x)));
+    /* 返回值：声明的返回类型是**接口**时在这一句装箱（ADR-0040）。
+       `CUR_RET` 是 `funcOf` 存下的那格声明类型（只有单返回那一档）。 */
+    case 'return': {
+      const vs = kids(x);
+      const ifn = ifaceNameOf(CUR_RET);
+      if (ifn !== null && vs.length === 1) {
+        return retOf([boxInto(ifn, tnOfExpr(vs[0]), toNode(vs[0]))]);
+      }
+      return retOf(many(vs));
+    }
     // range 头上绑的名字、switch 头上 init/tag 绑的名字都只活在这一格里 —— 各进一层
     case 'for-range': return inScope(() => forRangeOf(x));
     case 'switch': return inScope(() => switchOf(x));
@@ -2228,6 +2633,8 @@ function toNode(x) {
         return makeOf(args === undefined ? [] : kids(args));
       }
       const argNodes = args === undefined ? [] : many(kids(args).filter((y) => tag(y) !== 'spread'));
+      /* 实参的**原树**（与 `argNodes` 同序）：装箱那一步要问"这格值的具体类型是什么"。 */
+      const argAsts = args === undefined ? [] : kids(args).filter((y) => tag(y) !== 'spread');
       // `fmt.Println(x)`：选择器那一格在这一批还没有节点（`record` 排在后面），
       // 所以只认"打印"这一族，别的 sel 调用当场报 —— 不猜、不静默。
       if (tag(fn) === 'sel') {
@@ -2273,14 +2680,27 @@ function toNode(x) {
         const fromVar = recvName !== null ? VARTYPE.get(recvName) : undefined;
         const flat = METHODS.get(m);
         const owner = fromVar ?? (flat === null ? undefined : flat);
+        /* **接收者是接口值**（ADR-0040）：那就**必须**取字段再调它 —— 静态 mangle 会把
+           `s.Area()` 钉在某一个具体类型上（`METHODS` 里只有一个主人时尤其），
+           而接口的全部意思正是"运行期才知道装了谁"。**这一条要排在 mangle 前面。** */
+        if (!onType) {
+          const rIf = ifaceNameOf(tyOfExpr(obj));
+          if (rIf !== null && ifaceMethods(rIf).some(([mm]) => mm === m)) {
+            const ms = ifaceMethods(rIf).find(([mm]) => mm === m);
+            const ps = ifaceParams(ms[1]);
+            const boxed = argNodes.map((a, i) => (ps[i] === undefined ? a
+              : fieldValue(ps[i].ty, a, argAsts[i])));
+            return node('call', { fn: fieldGet(toNode(obj), m), args: boxed });
+          }
+        }
         /* 接收者的类型**带包限定**时（`func f(t syntax.Type)` 那一档，`VARTYPE` 收的就是
            `syntax.Type`），方法的声明在那个包里 —— 跨包表里查得着就照样 mangle。 */
         if (owner !== undefined && (MSET.has(`${owner}.${m}`) || XPKG.mset.has(`${owner}.${m}`))) {
           return node('call', {
             fn: node('ref', {}, { name: mangle(owner, m) }),
             args: onType
-              ? argsByDecl(mangle(owner, m), argNodes, false)
-              : [toNode(obj), ...argsByDecl(mangle(owner, m), argNodes, true)],
+              ? argsByDecl(mangle(owner, m), argNodes, false, argAsts)
+              : [toNode(obj), ...argsByDecl(mangle(owner, m), argNodes, true, argAsts)],
           });
         }
         /* **`pkg.Func(…)`：包名点函数**（`ir.NewNilExpr(…)` / `types.NewPtr(…)`）。
@@ -2295,8 +2715,8 @@ function toNode(x) {
           return node('call', {
             fn: node('ref', {}, { name: mangle(flat, m) }),
             args: onType
-              ? argsByDecl(mangle(flat, m), argNodes, false)
-              : [toNode(obj), ...argsByDecl(mangle(flat, m), argNodes, true)],
+              ? argsByDecl(mangle(flat, m), argNodes, false, argAsts)
+              : [toNode(obj), ...argsByDecl(mangle(flat, m), argNodes, true, argAsts)],
           });
         }
         /* **兜底：field-get 再调它**（与 V 同一个口径）。
@@ -2374,7 +2794,7 @@ function toNode(x) {
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
         return convOf(CONV.get(callee), argNodes[0]);
       }
-      return node('call', { fn: toNode(fn), args: callee === null ? argNodes : argsByDecl(callee, argNodes, false) });
+      return node('call', { fn: toNode(fn), args: callee === null ? argNodes : argsByDecl(callee, argNodes, false, argAsts) });
     }
     // `var` / `const` 落**一串 bind**（顶层与语句里同一格 —— go 两处都写得下）。
     // 树上的标签是 `var` / `const`（`go.grammar` 的 const-decl / var-decl 两条产生式
@@ -2575,6 +2995,14 @@ export function goToGraph(tree, opts) {
   NEEDS_TYPETAG = false;
   NEEDS_SCHED = false;
   VARTYPE.clear();
+  /* 接口那一套（ADR-0040）也按文件重来 —— 图要可重现。 */
+  IFACES.clear();
+  EMBEDS.clear();
+  FRET.clear();
+  BOXFNS.clear();
+  BOXING.clear();
+  VARTY.clear();
+  CUR_RET = null;
   IMPORTS.clear();
   collectImports(tree);
   /* **标准库桩注入**：为 IMPORTS 里每个在 GO_STDLIB_STUBS 中有定义的包名，
@@ -2584,6 +3012,12 @@ export function goToGraph(tree, opts) {
   for (const pkg of IMPORTS) {
     if (GO_STDLIB_STUBS[pkg] !== undefined) {
       const fields = Object.entries(GO_STDLIB_STUBS[pkg]);
+      /* **一格常量都没有的桩不发**（`fmt` / `sort` / `strings` … 都是空表）：
+         落出来是一格**没有字段名单的记录**，而方言里没有"空结构体"这回事 ——
+         core 那条腿当场报「一格没有字段名单的记录」。量出来的账：`import "fmt"` 的
+         go 文件从此过不了 core，而那个绑定本来就没人读（`fmt.Println` 在 `call`
+         那一格特判，压根不走取字段）。 */
+      if (fields.length === 0) continue;
       const rec = recordNew(fields.map(([k, v]) => {
         if (typeof v === 'number') return [k, lit(v)];
         if (typeof v === 'string') return [k, lit(v)];
@@ -2612,7 +3046,12 @@ export function goToGraph(tree, opts) {
   }
   FN_N = 0;                                   // 匿名 func 的编号按文件重来（图要可重现）
   const items = kids(tree).slice(1);          // 第一格是包名
-  const body = [...stubBinds, ...items.map(toNode).flat()];
+  const mapped = items.map(toNode).flat();
+  /* **装箱函数摆在前面**（ADR-0040）：它们是走这一趟的**副产物**（`ensureBoxFn` 在装箱点
+     现造），所以得等 `mapped` 算完才齐 —— 但**摆的位置要在前面**：core 那条腿按次序推
+     类型，`var one Shape = __box_Sq__Shape(…)` 要先见过那格函数才知道它交出来的是记录
+     （不然 `one` 默认成 int，一取字段就报"说不清形状"）。 */
+  const body = [...stubBinds, ...BOXFNS.values(), ...mapped];
   if (opts !== undefined && opts.asModule === true) return program(body);
   /* 入口那一句。**用到并发的那些包一层**（`NEEDS_SCHED`）：`func main()` 要跑成
      主 g，不然第一次在无缓冲 channel 上发送就是"park 一个不存在的 g"。 */

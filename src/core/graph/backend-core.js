@@ -614,6 +614,15 @@ function objText(obj, env, ctx) {
     }
   }
   if (!isNode(obj) || obj.op !== 'ref') {
+    /* **宿主是一格下标**（`xs[i].Area()` —— go 的 `[]Shape` 那一族，ADR-0040）：
+       `(aget …)` 交出来的那一格就能当宿主用 —— 值语义的记录走 `(fld …)`、引用语义的
+       是个指针走 `(pload (pfield …))`，两档由 `fldText` / `placeText` 自己分。 */
+    if (isNode(obj) && obj.op === 'index-get') {
+      const it = typeOf(obj, env, ctx);
+      if (shapeAt(it, ctx) !== undefined || elemType(it) !== null || dictOf(it) !== null) {
+        return `(aget ${objText(obj.ins.obj, env, ctx)} ${expr(obj.ins.index, env, ctx)})`;
+      }
+    }
     /* **嵌套的宿主**：lua 的 `a.__meta.__close` 头一跳交出来的是一格 dyn，按键查出它装着
        `(dict string dyn)` 就拆出来当宿主用（拆在用它的地方，见 dyn 那一段）。 */
     const et = typeOf(obj, env, ctx);
@@ -627,7 +636,8 @@ function objText(obj, env, ctx) {
   if (shapeAt(t, ctx) === undefined && elemType(t) === null && dictOf(t) === null) {
     gap(`'${obj.attrs.name}' 说不清形状（这一刀只认 \`bind\` 一格记录 / 列表 / 字典绑出来的名字）`);
   }
-  return `(var ${obj.attrs.name})`;
+  /* **这格宿主是当前 `cfn` 借来的**（接口装箱的 `__self` 就是它，ADR-0040）。 */
+  return varOrCap(obj.attrs.name, ctx);
 }
 
 
@@ -717,6 +727,16 @@ function callText(x, env, ctx) {
      那几格函数的**形参类型**也在这儿记 —— 调用点是唯一知道实参类型的地方，而这一处调用
      没有名字，所以按键记到"这个键上装着的那几格函数"头上（`dynFnNames`）。 */
   if (!isNode(f) || f.op !== 'ref') {
+    /* **被调的是一格记录字段里装着的函数值**（go 的接口分派，ADR-0040）：
+       字段的类型就是 `(fnty …)`，所以取出来直接 `(callfn …)` —— 不经按键拆箱那一套
+       （那是 lua 的字典路，键是运行期的串；这儿的字段名编译期就定了）。 */
+    if (isNode(f) && f.op === 'field-get') {
+      const ft1 = typeOf(f, env, ctx);
+      if (typeof ft1 === 'string' && ft1.startsWith('(fnty ')) {
+        const vargs = argList(x, 'args').map((a) => expr(a, env, ctx));
+        return `(callfn ${expr(f, env, ctx)}${vargs.length === 0 ? '' : ` ${vargs.join(' ')}`})`;
+      }
+    }
     const ft0 = dynTypeOf(f, env, ctx);
     if (ft0 === null || !ft0.startsWith('(fnty ')) {
       gap('调一格不是名字的东西（函数值那一档）');
@@ -739,6 +759,13 @@ function callText(x, env, ctx) {
   if (typeof vt === 'string' && vt.startsWith('(fnty ')) {
     const vargs = argList(x, 'args').map((a) => expr(a, env, ctx));
     return `(callfn (var ${f.attrs.name})${vargs.length === 0 ? '' : ` ${vargs.join(' ')}`})`;
+  }
+  /* **这层里压根没有这格函数**（go 的 `__goSprintf` 那一族 —— 体在 js 那条腿的运行时里）：
+     报一格**有名有姓的缺口**，而不是发一句 `(call 不存在的名字 …)` 让方言去骂
+     「未声明的函数」。两者的差别是判据上"跳过"与"红"的差别，而这一格确实是还没接的东西。
+     空跑那两趟不查（那时 `fn:` 还没收全）。 */
+  if (ctx.collect !== true && env.get(`fn:${f.attrs.name}`) === undefined) {
+    gap(`调一格这一层里没有的函数 '${f.attrs.name}'`);
   }
   const args = argList(x, 'args').map((a, i) => argText(f.attrs.name, i, a, env, ctx));
   return `(call ${f.attrs.name}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
@@ -824,15 +851,27 @@ function argText(fname, i, a, env, ctx) {
    * 第三遍（出文本那一遍）报。 */
   if (ctx.collect === true) {
     if (had === undefined || (had === 'int' && t !== 'int')) ctx.args.set(key, t);
-    if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return `(var ${a.attrs.name})`;
+    if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return varOrCap(a.attrs.name, ctx);
     return expr(a, env, ctx);
   }
   if (had !== undefined && had !== t) {
     gap(`'${fname}' 第 ${i + 1} 格实参在两处的类型不一样（${had} 与 ${t}）—— 方言的形参是单态的`);
   }
   ctx.args.set(key, t);
-  if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return `(var ${a.attrs.name})`;
+  if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return varOrCap(a.attrs.name, ctx);
   return expr(a, env, ctx);
+}
+
+/**
+ * 读一格名字：当前 `cfn` **借来的**发 `(cap 名)`，别的发 `(var 名)`。
+ *
+ * 为什么要单拎一格：聚合（记录 / 列表）不走 `expr` 的 `ref` 那一支（那儿会报"把记录整格
+ * 当值用"），而是各处自己拼 `(var …)` —— 于是"借来的聚合"在每一处都得再判一遍。
+ * 接口装箱的 `__self` 正是这一格（ADR-0040）：漏了它方言报"未声明的变量 '__self'"。
+ */
+function varOrCap(name, ctx) {
+  if (ctx.caps !== null && ctx.caps !== undefined && ctx.caps.has(name)) return `(cap ${name})`;
+  return `(var ${name})`;
 }
 
 /**
@@ -1437,6 +1476,16 @@ function bindRecord(nm, rec, env, ctx) {
       fieldText.push(`(var ${tn})`);
       return env.get(tn);
     }
+    /* **字段里装着一格函数值**（go 的接口分派，ADR-0040；asy 的 `fill2 fill2;` 也是它）：
+       类型是 `(fnty …)`，值是 `(fnref …)` / `(mkclo …)`。`typeOf` 对"函数名当值用"答不出来
+       （env 上函数记在 `fn:` 那一格），所以要先问 `fnTypeOf`。 */
+    {
+      const ftv = fnTypeOf(v, env, ctx);
+      if (ftv !== null) {
+        fieldText.push(fnValText(v.attrs.name, env, ctx));
+        return ftv;
+      }
+    }
     const t = typeOf(v, env, ctx);
     /* **字段值是一格"已经躺在某个名字里的记录"**（go 的 `Outer{&in, 3}` / `Outer{in, 3}`）：
        与上面那一支同一件事，只是不用先物化 —— 直接把那一格交进去（`objText` 是"记录当
@@ -1728,9 +1777,11 @@ function isZeroText(t, v) {
   }
   const ts = items.map((it) => elemTypeOfNode(it, env, ctx));
   const et = items.length === 0 ? elemTypeOfNode(decl, env, ctx) : ts[0];
-  const recElem = isRecType(et, ctx) && !isPtrRec(et, ctx);
+  /* 元素可以是标量、**值语义的记录**（`(arr rN)`，一格一整块），也可以是**引用语义的
+     记录**（`(arr (ptr rN))`，一格一个指针 —— go 的 `[]Shape` 与 `[]*Mesh` 那一族）。 */
+  const recElem = isRecType(et, ctx);
   if (!recElem && et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
-    gap(`列表的元素不是标量、也不是值语义的记录（量到的是 ${et}）`);
+    gap(`列表的元素不是标量、也不是记录（量到的是 ${et}）`);
   }
   if (ts.some((t) => t !== et)) gap(`列表里的元素类型不一样（${ts.join(' / ')}）—— 方言的数组是单态的`);
   const at = `(arr ${et})`;
@@ -1761,7 +1812,7 @@ function fnValText(nm, env, ctx) {
       /* 聚合按值抄一份在方言里就是抄那一格**句柄/指针**（`(ptr rN)` / `(arr T)` 都是
          一个字），所以"里头改了外头看得见"仍旧成立 —— go 的切片与指针正是这个语义。
          真正对不上的是**值语义的结构体**（byval）：那时抄的是一整格值。 */
-      if (isRecType(t, ctx) && !isPtrRec(t, ctx)) {
+      if (isRecType(t, ctx) && !isPtrRec(t, ctx) && !ctx.byCopy.has(nm)) {
         gap(`闭包 '${nm}' 借了一格值语义的结构体 '${c}'（按值抄一份与 go 的按引用捕获对不上）`);
       }
     }
@@ -1816,8 +1867,18 @@ function liftFnVals(fns, rest, known, taken, ctx) {
     while (taken.has(nm)) nm = `${nm}$`;
     taken.add(nm);
     known.add(nm);
-    extra.push({ name: nm, params: ps, body: n.ins.body, ...(caps.length > 0 ? { caps } : {}) });
+    /* `pzero` / `rzero` 跟着提上来（有类型覆盖层，见 `nodes.js` 的 func 那一格）：
+       提上顶层之后这格函数就**没有调用点了**（它只当值用），形参与返回全靠声明。
+       接口装箱那一族（ADR-0040）缺了它就报"要返回 int，给的是 real"。 */
+    extra.push({ name: nm, params: ps, body: n.ins.body,
+      ...(Array.isArray(n.attrs.pzero) ? { pzero: n.attrs.pzero } : {}),
+      ...(n.attrs.rzero !== undefined ? { rzero: n.attrs.rzero } : {}),
+      ...(caps.length > 0 ? { caps } : {}) });
     if (caps.length > 0) ctx.clos.set(nm, caps);
+    /* `bycopy`（有类型覆盖层那一族的附属，见 `nodes.js` 上 `func` 那格）：前端明说
+       "这一格闭包**就是要按值抄一份**"。go 的接口装箱（ADR-0040）正是这个语义 ——
+       `var s Shape = Sq{2}` 在 go 里把 Sq 抄进接口值。 */
+    if (n.attrs.bycopy === true) ctx.byCopy.add(nm);
     return { op: 'ref', ins: {}, attrs: { name: nm }, id: -1 };
   }) : body);
   for (const f of fns) f.body = doOne(f.body);
@@ -1952,7 +2013,7 @@ export function emitCore(g) {
     /* 闭包那一族（`liftFnVals` 的第二刀）：`clos` 是"这个提上来的名字借了哪几格"，
        `capTypes` 是那几格的类型（只有 `mkclo` 那一处知道，见 `fnValText`），
        `caps` 是"现在正在落哪一格 cfn 的体"（体里读借来的东西要发 `(cap 名)`）。 */
-    clos: new Map(), capTypes: new Map(), caps: null,
+    clos: new Map(), capTypes: new Map(), caps: null, byCopy: new Set(),
   };
   /* **运行时那几个 C 符号的返回类型**先摆进 env：调用点的 `inferType` 查的是 `fn:名字`，
      而它们在这份产物里没有函数体（体在 `libomnigo` 里），不走 `ctx.rets` 那一趟。 */
@@ -2024,12 +2085,7 @@ export function emitCore(g) {
          算不出来 / 算出来是 `int`（= 说不清）就当没有。 */
       let declRet = null;
       if (it.rzero !== undefined && it.rzero !== null) {
-        let dt = null;
-        if (isNode(it.rzero) && it.rzero.op === 'record-new') {
-          try { dt = recordTypeOfNode(it.rzero, env, ctx); } catch { dt = null; }
-        } else {
-          try { dt = typeOf(it.rzero, env, ctx); } catch { dt = null; }
-        }
+        const dt = declTypeOfNode(it.rzero, env, ctx);
         if (dt !== null && dt !== 'int') declRet = dt;
       }
 
@@ -2185,11 +2241,43 @@ function recordTypeOfNode(rec, env, ctx) {
       continue;
     }
     let t = null;
+    /* **字段里装着一格函数值**（接口的零值记录，ADR-0040）：`pzero` 这一路**没经过
+       `liftFnVals`**，所以这儿看到的还是一格 `func` 节点 —— 签名从它自己的
+       `pzero` / `rzero` 上算（与 `resolveParamTypes` 同一份规矩）。 */
+    if (isNode(v) && v.op === 'func') {
+      const ft = fnTypeOfFuncNode(v, env, ctx);
+      if (ft === null) return null;
+      types.push(ft);
+      continue;
+    }
     try { t = typeOf(v, env, ctx); } catch { return null; }
     if (t !== 'int' && t !== 'real' && t !== 'bool' && t !== 'string') return null;
     types.push(t);
   }
   return shapeType(shapeOf(names, types, false, ctx, rec.attrs.byval === true));
+}
+
+/**
+ * 一格**没提上顶层的 `func` 节点**的 `(fnty …)`：形参类型从 `pzero`、返回类型从 `rzero`。
+ *
+ * 只有"类型层"那一路会看到没提上去的 `func`（`pzero` / `rzero` 是**属性**，`liftFnVals`
+ * 不走属性）。算不出来回 null —— 那时上一层退回"说不清"，不猜。
+ */
+function fnTypeOfFuncNode(n, env, ctx) {
+  const pz = Array.isArray(n.attrs.pzero) ? n.attrs.pzero : [];
+  const ps = (n.attrs.params ?? []).map((_, i) => {
+    const z = pz[i];
+    if (z === undefined || z === null) return null;
+    return declTypeOfNode(z, env, ctx);
+  });
+  if (ps.some((p) => p === null)) return null;
+  const rz = n.attrs.rzero;
+  let rt = 'void';
+  if (rz !== undefined && rz !== null) {
+    rt = declTypeOfNode(rz, env, ctx);
+    if (rt === null) return null;
+  }
+  return `(fnty (${ps.join(' ')}) ${rt})`;
 }
 
 /**
@@ -2215,17 +2303,34 @@ function paramTypes(f, env, ctx) {
  *  两处必须给出**同一个**答案，不然 `__goRegMethod` 那种"同一个形参收好几个函数值"的
  *  调用点就会报"两处的类型不一样"（量出来的：一处 `(fnty (int) int)`、
  *  另一处 `(fnty ((ptr r3)) int)`，差的正是这一份有没有看 `pzero`）。 */
+/**
+ * **一格 `pzero` / `rzero` 节点说的是什么类型**（算不出来回 null）。
+ *
+ * 三档：记录走 `recordTypeOfNode`（顺带登记形状）、列表走"元素的类型再包一层 `(arr …)`"
+ * （`typeOf` 对 `list-new` 答不出来 —— `[]Shape` 那一族的形参就卡在这儿）、
+ * 别的走 `typeOf`。
+ */
+function declTypeOfNode(z, env, ctx) {
+  if (z === null || z === undefined) return null;
+  if (isNode(z) && z.op === 'record-new') {
+    try { return recordTypeOfNode(z, env, ctx); } catch { return null; }
+  }
+  if (isNode(z) && z.op === 'list-new') {
+    const items = argList(z, 'items');
+    const el = items.length > 0 ? items[0] : (z.attrs === undefined ? null : z.attrs.elem);
+    const et = declTypeOfNode(el, env, ctx);
+    return et === null ? null : `(arr ${et})`;
+  }
+  if (isNode(z) && z.op === 'func') return fnTypeOfFuncNode(z, env, ctx);
+  try { return typeOf(z, env, ctx); } catch { return null; }
+}
+
 function resolveParamTypes(name, params, pzero, env, ctx) {
   const pz = Array.isArray(pzero) ? pzero : null;
   return params.map((p, i) => {
     const z = pz === null ? null : pz[i];
     if (z !== null && z !== undefined) {
-      let t = null;
-      if (isNode(z) && z.op === 'record-new') {
-        try { t = recordTypeOfNode(z, env, ctx); } catch { t = null; }
-      } else {
-        try { t = typeOf(z, env, ctx); } catch { t = null; }
-      }
+      const t = declTypeOfNode(z, env, ctx);
       if (t !== null && t !== 'int') return t;
     }
     return ctx.args.get(`${name}#${i}`) ?? 'int';

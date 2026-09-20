@@ -178,8 +178,11 @@ export const NODES = new Map([
        为什么是零值而不是类型名：图上没有类型词汇表，而 `graph/types.js` 已经会给
        `record-new` / `list-new` / 字面量定型并登记形状 —— 递零值过去，那一层照现成的路推。
        为什么非要它：core 那条腿的形参一直是**从调用点推**的，而 Go 的方法一旦只经接口
-       分派就没有调用点，形参于是默认成 `int`，一取字段就报"说不清形状"。 */
-    attrs: ['params', 'name', 'restParam', 'pzero', 'rzero'], lifetime: 'owns',
+       分派就没有调用点，形参于是默认成 `int`，一取字段就报"说不清形状"。
+       `bycopy` —— 同一族的另一格：前端明说"这一格闭包**就是要按值抄一份**"。默认是
+       **不许**借值语义的结构体（go 的闭包按引用捕获，抄一份就是静默的错答案）；而接口
+       装箱（ADR-0040）里抄一份正是 go 的语义（`var s Shape = Sq{2}` 抄的是 Sq 那一格值）。 */
+    attrs: ['params', 'name', 'restParam', 'pzero', 'rzero', 'bycopy'], lifetime: 'owns',
     doc: 'chez case-lambda（函数只有这一种形式）/ 十门全有',
     providers: { spec: TEN, why: {} },
   }),
