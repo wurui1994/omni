@@ -1,0 +1,24 @@
+;; **`if` / `while` 的分支写成一句话**（不裹 `(do …)`）与**类引用跟 `nil` 比**。
+;;
+;; 两件事都是手写 `.sx` 时最容易撞上的形状（生成出来的一律带 `(do …)`）：
+;;   - 从前 `(if c (print …))` 让 backend-c 崩在 `s.then.stmts is not iterable` 上 ——
+;;     一个原始 TypeError，不是诊断。现在 `lower.js` 的 `asBlock` 裹一层：
+;;     一句话与"只有一句话的块"在语义上是同一件事。
+;;   - `(null r1)` 与 `(bin "==" …)`：类是引用类型，空引用与它的比较方言本来就有。
+;;     这一格把它**钉住**：go 那条腿的 `p == nil` / `iface != nil` 要靠它
+;;     （见任务 #88 —— 欠的不是这台机器，是"值是 null、类型从声明来"那一层）。
+(module
+  (class Node (V int))
+
+  (fn count () int
+    (let i int (int 0))
+    (while (bin "<" (var i) (int 3)) (set i (bin "+" (var i) (int 1))))
+    (ret (var i)))
+
+  (main
+    (let p Node (null Node))
+    (if (bin "==" (var p) (null Node)) (print (str "nil")) (print (str "有")))
+    (set p (cnew Node))
+    (fldset (var p) V (int 7))
+    (if (bin "!=" (var p) (null Node)) (print (fld (var p) V)) (print (int 0)))
+    (print (call count))))

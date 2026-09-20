@@ -123,6 +123,17 @@ const COMPARE = new Set(['==', '!=', '<', '<=', '>', '>=']);
 const LOGIC = new Set(['&&', '||']);
 
 /**
+ * `if` / `while` 的分支**在 OIR 里必须是一格块**（后端直接读 `.stmts`）。
+ *
+ * 写成一句话的 `(if c (print (int 1)))` 从前会让 backend-c 崩在
+ * `s.then.stmts is not iterable` 上 —— 一个原始 TypeError，不是诊断。手写 `.sx` 时
+ * 很容易这么写（生成出来的一律带 `(do …)`），所以这儿**裹一层**而不是报错：
+ * 一句话与"只有一句话的块"在语义上是同一件事。
+ */
+const asBlock = (s) => ((s === null || s === undefined || s.kind === 'Block')
+  ? s : { kind: 'Block', stmts: [s] });
+
+/**
  * 无符号那一半（ADR-0016 第六十一刀）。方言只有**一格**整数、规范形是有符号 64 位；
  * 无符号性挂在**算子**上而不是类型上 —— 与 LLVM 的 `udiv`/`sdiv`、`icmp ult`/`icmp slt`
  * 同一条路子，也与方言里早就有的 `(sbase E 进制)`（那一条明写着"E 的位当无符号 64 位读"）
@@ -1458,16 +1469,16 @@ class CoreLowerer {
     if (h === 'if') {
       const c = this.cond(n.items[1]);
       if (c === null) return null;
-      const then = this.stmt(n.items[2], ret);
+      const then = asBlock(this.stmt(n.items[2], ret));
       if (then === null) return null;
-      const els = n.items[3] === undefined ? null : this.stmt(n.items[3], ret);
+      const els = n.items[3] === undefined ? null : asBlock(this.stmt(n.items[3], ret));
       return { kind: 'If', cond: c, then: then, otherwise: els };
     }
     if (h === 'while') {
       const c = this.cond(n.items[1]);
       if (c === null) return null;
       this.loopDepth++;
-      const body = this.stmt(n.items[2], ret);
+      const body = asBlock(this.stmt(n.items[2], ret));
       this.loopDepth--;
       if (body === null) return null;
       return { kind: 'While', cond: c, body: body };
