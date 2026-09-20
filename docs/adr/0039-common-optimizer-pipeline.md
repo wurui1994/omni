@@ -196,14 +196,17 @@ runtime、类型元数据、GC 位图）。可达到的判据是三级：
 
 ## 8. 现状（2026-09-20）
 
-落了 16 格（`level 1` 跑 15 格）：`early phielim and copyelim`（mem2reg）、
+落了 17 格（`level 1` 跑 16 格）：`early phielim and copyelim`（mem2reg）、
 八格 `*deadcode`、`opt`/`middle opt`/`late opt`、`zero arg cse`/`generic cse`/`lowered cse`、
-`elim unread autos`。代码在 `src/core/mir/opt/`：
+`dse`、`elim unread autos`、`regalloc`。代码在 `src/core/mir/opt/`：
 
 - `pass.js` 56 格的表 + `PASS_ORDER` 自检 + 档位；`index.js` 一处 import 全部通道
 - `edit.js` **改图只有这一份实现**（`replaceRef` / `removeInsns`）
 - `region.js` **词法作用域**（MIR 的"支配"，见下面第 2 条坑）
+- `cost.js` **唯一的成本模型**（跨屏障的合并不做，见第 8 节末尾那两轮量）
+- `memory.js` 线性内存那一片（读/写白名单、地址 = 基址 + 静态偏移、区间是否相交）
 - `cfg.js` 基本块 / 支配树 / 支配边界（`BRTABLE` 的边在里头）
+- `regalloc.js` 线性扫描，出**颜色**不出寄存器号；arm64 那边映到 x19-x23（`STICKY`）
 
 接线：`OMNI_MIR_OPT=1..3` 开（缺省 0 = 一格不跑），`OMNI_MIR_OPT_STATS=1` 印账，
 `OMNI_MIR_OPT_ONLY=通道名` 单格 A/B 与二分；挂在 `lang/c.js` 的 `cMir`/`cMirNative`，
@@ -227,29 +230,44 @@ runtime、类型元数据、GC 位图）。可达到的判据是三级：
    mem2reg 于是按错的"单前驱"传了值（`tests/c/gen/10-switch.c`：s=7457 变 7557）。
    顺带一笔：折浮点常量时 `String(-0)` 是 `"0"`，负零要特判（`15-float.c` 抓的）。
 
-### 下一格：**regalloc**，不是更多与机器无关的通道
+### 下一格：**SROA**（让 struct 别落影子栈），不是更多值层面的通道
 
-L2 那一档量了（smallpt 64×64、6 帧、校验和 243367 四份逐位相同；三趟取最小）：
+L2 那一档量了两轮。**第一轮**（smallpt 64×64、6 帧、校验和 243367 四份逐位相同）：
 
-- `clang -O2`      169 ms  = **1.0x**
-- `clang -O0`      641 ms  = 3.8x
-- 我们（原生 C 腿，`omni c tcc`）MIR-opt **关**  1211 ms = **7.0x**
-- 我们 + MIR-opt **开**（指令 -5.6%）            1245 ms = 7.2x —— **时间没动**
+- `clang -O2`      112 ms  = **1.0x**
+- `clang -O0`      512 ms  = 4.6x
+- 我们（原生 C 腿，`omni c tcc`）              1082 ms = **9.7x**
+- 我们 + 整条管线（指令 -5.6%）                1083 ms = 9.7x —— **时间没动**
 
-这条账把话说死了：**与机器无关的通道再加也不会动这个数**。原因在
-`src/core/arm64/from_mir.js` 自己的文件头上：「每个 MIR 值一个栈位，算之前 `ldr` 进来、
-算完 `str` 回去，寄存器只用 x8/x9/x10 三个当草稿」，加第一百四十三片那五个缓存
-（x11-x15，用"还要用几次"这一个数决定，不算活跃区间）。于是热路径上每条运算都夹着一对
-内存访问 —— 少 5% 的指令条数换不出时间来。
+**第二轮**换一个 call-heavy 的整数例子（fib(27) × 3）：我们 7.0ms、clang -O0 6.2ms、
+`-O2` 3.3ms —— 也就是说**在这一类上我们本来就在 -O0 那一档**，7~10x 只出现在
+struct/浮点那一类。量法要紧：`bash 循环 + python3 取时间戳`每样本白加 30ms 以上，而
+fib 自己才 5ms —— 换成交错取最小（`/tmp/abx.mjs`）之后数才稳。
 
-所以按第 6 节的第 4 步走：**下一格是 regalloc**（线性扫描）。MIR 这一层做它有个便宜：
-值的活跃区间**就是 pc 区间**且一定连续（区域作用域保证"跨过 END 就不可见"，见上面第 2 条坑），
-所以不需要先建活跃区间的那一整遍数据流。做完之前，别再拿"指令条数降了多少"当性能判据。
+两轮合起来把话说死了：
 
-（与机器无关的那几格仍有它们的价值：解释器腿上一条指令就是一次分派，而
-`decompose user` 那一格是"对象不落堆"三步里的第二步 —— 但它们都不在这条 7.0x 的主路上。）
+1. **regalloc 不是那个杠杆。** 后端本来就有一个一遍过的值缓存（`POOL`，五个调用者保存的
+   寄存器），短命临时量它本来就管住了。我们照 `regHint` 把跨屏障的值钉在 x19-x23 上
+   （第一百五十二片），smallpt **持平**、fib **慢 15%**（序言/收场那对访存按调用次数付）。
+2. **这一层的每次"合并"都有成本**，而且在 call-heavy 的代码上能压过收益：
+   只跑 mem2reg + deadcode 的 fib 是 ×1.31。根因是把活跃区间拉长到跨过屏障，
+   后端就得多一对 `str`+`ldr`。于是有了 `opt/cost.js` —— 这一层唯一的成本模型：
+   **跨屏障的合并一律不做**（屏障 = 区域标记/跳转/返回/所有调用）。
+   代价是跨块的 CSE 基本不再发生（`cse.test.js` 的 `cross` 从两条 ADD 变三条），
+   这是**有意**的：那条 `ldr` 留着就是重算（Go 的 `rematerializeable` 同一手）。
+3. **真正的杠杆是访存本身。** `radiance` 过完整条管线还有 562 条指令，其中
+   `MLOAD 89 + MSTORE 84 + LOAD 50 + STORE 49 = 272`（**48%**）是访存，而
+   `ADD 79 / MUL 16 / DIV 5` 才是活。C 前端把每个 `Vec`（按值传的 struct）都摆在影子栈上，
+   于是每次取字段、每次赋值都是一条 MLOAD/MSTORE；clang -O2 把它们全放进寄存器。
+
+所以下一格是 **SROA**：影子栈上那一块，如果地址**从不逃逸**（只被
+`MLOAD`/`MSTORE` 按常量偏移碰过，没进过任何调用的实参、没被存进别处），就把它拆成
+若干个**槽位**（或直接拆成值）。那正是 ADR-0039 第 3 节三步流水的第一步与第二步
+（Go 的 escape + `decompose user`），也是唯一能把那 48% 打下来的办法。
+做完之后 mem2reg 与 regalloc 才有真正的用武之地 —— 那时再重新量成本模型那一格。
 
 `dead auto elim` 那一格现在无活可干的理由另记一笔：C 前端在线性内存腿上把那一块的
 基址当场 `GSTORE` 进了 `$sp`，照 Go 的判据答"留着"（见 `opt/autos.js` 末尾）。
+SROA 落地之后它会自然有活干。
 
 
