@@ -43,8 +43,9 @@ import { registerPass } from './pass.js';
 /** 预算：被调的指令条数上限。Go 那边是 `inlineMaxBudget = 80`（`inline/inl.go`）——
  *  它数的是 AST 的"复杂度分"，我们数 MIR 指令条数，取同一个量级。 */
 export const INLINE_MAX = 80;
-/** 一个函数最多展开多少处（免得一趟把函数吹成几千条）。 */
-export const INLINE_MAX_SITES = 24;
+/** 一趟最多展开多少处。Go **没有这个闸**（它只看被调的成本），这儿留一个大数只为
+ *  「一趟别抄出个几万条」的兜底 —— 真正的闸是 `inlinePass` 那一层的长胖倍数。 */
+export const INLINE_MAX_SITES = 4096;
 
 /** 被调里有这些 op 就不内联 —— 它们的意义绑在"那个函数自己的帧/ABI"上。 */
 function bodyOk(fn) {
@@ -247,8 +248,38 @@ export function inlineCalls(fn, mod) {
 }
 
 /** 通道表里 `inline` 那一格（**我们加的，Go 的表里没有** —— 它在 SSA 之前就内联完了）。
- *  位置在 `decompose user` 之前，`PASS_ORDER` 上有这一对约束。 */
-registerPass('inline', inlineCalls);
+ *  位置在 `decompose user` 之前，`PASS_ORDER` 上有这一对约束。
+ *
+ * **跑到不动点**，因为 Go 就是那样：它按调用图**自底向上**内联
+ * （`inline.InlineDecls` 先处理被调、再处理调用者），所以 `radiance` 内联 `vnorm` 时
+ * 抄进来的那一份**里头的 `vsub`/`vdot` 已经是展开好的**。我们一趟只展开当前函数体里
+ * 看得见的那些调用点，抄进来的被调体里还留着它自己的调用 —— 不再跑一趟就停在半路。
+ *
+ * 闸也照 Go：**唯一的硬闸是被调的成本**（`inlineMaxBudget = 80`，见 `INLINE_MAX`），
+ * 不是"一个函数最多展开几处"。从前 `INLINE_MAX_SITES = 24` 那个闸量出来正好把
+ * `radiance` 卡在半路：可内联的调用点展开了 24 个，剩下
+ * `vmul×8 vadd×4 vdot×4 vsub×3 vmult×3 vnorm×1` 共 23 处 —— 每一处都拖着一个
+ * `ARGMEM`/`ARGSRET` 帧块，而帧块的地址被取了，`sroa.js` 与 `copyfwd.js` 两格
+ * 就都判它逃逸、一条访存都收不掉。radiance 因此留着 156 条 `MSTORE i64`
+ * （按字节搬 struct），而 go 的同一个函数一条访存都没有（三个分量住 F 寄存器）。
+ *
+ * 轮数的闸是**长胖多少**（`INLINE_MAX_GROWTH` 倍）：一趟没长就停，长过头也停。 */
+export const INLINE_MAX_GROWTH = 12;
+
+function inlinePass(fn, mod) {
+  if (!fn || fn.op.length === 0) return 0;
+  const start = fn.op.length;
+  let total = 0;
+  for (;;) {
+    const k = inlineCalls(fn, mod);
+    if (k === 0) break;
+    total += k;
+    if (fn.op.length > start * INLINE_MAX_GROWTH) break;
+  }
+  return total;
+}
+
+registerPass('inline', inlinePass);
 
 /* 试过、量过、**退回来**的那一样（记在这儿，别再重来一遍）：
  *
