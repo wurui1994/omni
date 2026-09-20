@@ -384,7 +384,9 @@ func sample(root *Tree, r Ray, depth int, rnd *Rand) Vector {
 
 // ---- 场景 + 渲染（goroutine + channel）------------------------------------
 func scene() []Shape {
-	shapes := []Shape{}
+	// `make([]Shape, 0)`（从前这儿只能写 `[]Shape{}` —— 那是绕开任务 #85 的写法：
+	// 零值那一份的形状与装箱那一份算不到一起。4cbff38c 之后两支同形，绕法收了）
+	shapes := make([]Shape, 0)
 	mats := []Material{
 		{Vector{0.9, 0.3, 0.3}, 0.0, 0.0},
 		{Vector{0.3, 0.9, 0.4}, 0.0, 0.2},
