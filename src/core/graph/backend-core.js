@@ -305,21 +305,24 @@ function expr(x, env, ctx) {
       if (elemType(t) === null) gap('在一格说不清形状的东西上取下标（这一刀只接 list-new 绑出来的那格）');
       return `(aget ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.index, env, ctx)})`;
     }
-    /* **表达式位置上的记录**：路数与 `map-new` 那一格一样（先物化成一格临时名，
-     * 再把名字交出去 —— 记录在方言里是一格指针，所以"值"就是那个名字）。
+    /* **表达式位置上的记录**：与 `map-new` 那一格**同一条路数** —— 先物化成一格临时名，
+     * 再把那个名字交出去。记录在方言里是**一格指针**（`types.js` 的 `shapeType`），
+     * 所以"值"就是那个名字，语义与图上"记录是引用"一致。
+     * go 的 `return Vec{a.X+b.X, …}` 与 `f(Vec{…})` 都落在这儿。
      *
-     * ⚠️ **试过一刀，撤了**：写完 `tests/graph` 从 808 passed / 50 failed / 42 skipped
-     * 掉到 807 / 51 / 40 —— 有一格从"有名有姓的缺口"变成了"接错了"，而我没量清是哪一格。
-     * 按纪律撤回（没量过的一刀不许留在主干上）。
-     * 撤回前量到的两件事，下次照着做：
-     *   - 物化本身是对的：`return Vec{…}` 与 `a.Add(b)` 当实参都落下去了，
-     *     go 的 `tests/go/cases/03` 从这一格往前走到了下一格；
-     *   - 下一格是**记录的形状该从声明的字段类型来**，不是从字面量的值类型来：
-     *     `Vec{1,2,3}`（整字面量）与 `var v Vec`（float64 零值）算出两个形状
-     *     （`(ptr r1)` 与 `(ptr r2)`），core 于是报"'Vec__Dot' 第 1 格实参在两处的类型不一样"。
-     *     治法是给 `record-new` 加一格 `ftypes`（前端手里有），`bindRecord` /
-     *     `recordTypeOfNode` 按它定形状 —— 与 `pzero` / `rzero` 同一套路数。 */
-    case 'record-new': gap('记录出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+     * 这一刀**试过一次、撤过一次**：那时 `Vec{1,2,3}` 与 `var v Vec` 算出两个形状，
+     * 物化之后把冲突往后推了一格，judge 从 808 掉到 807。形状那一格治好之后
+     * （前端按声明的字段类型转值，见 `ext/go/tograph.js` 的 `fieldValue`）才重新上。
+     * 摆不下物化那几句（没有 `ctx.pre`）才报缺口，不硬拼。 */
+    case 'record-new': {
+      if (ctx.pre === null || ctx.pre === undefined) {
+        gap('记录出现在一处摆不下物化那几句的表达式位置上');
+      }
+      ctx.tmp = ctx.tmp + 1;
+      const rn = `rec_tmp${ctx.tmp}`;
+      for (const line of bindRecord(rn, x, env, ctx)) ctx.pre.push(line);
+      return `(var ${rn})`;
+    }
     case 'list-new': gap('列表出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'pick': {
       const t = typeOf(x.ins.from, env, ctx);
@@ -2162,11 +2165,15 @@ export const CORE_SHAPES = [
     ]),
   },
   {
-    what: '表达式位置上的记录 / 列表',
-    why: '方言里建一格记录是**两步**（`pnew` 再逐个 `pstore`），塞不进表达式 ——'
-      + '所以只接 `bind` 的初值那一格（要接得先有临时量那一刀）',
+    /* **记录那一半已经不欠了**（见 `expr` 的 `case 'record-new'`：物化成一格临时名）——
+       这条账现在只剩列表。证物跟着换成 `list-new`，不然判据会说
+       "证物**没**报缺口 —— 这条账已经不欠了，删掉它"（那正是它该说的话）。 */
+    what: '表达式位置上的列表',
+    why: '方言里建一格列表是**两步**（`anew` 再逐格 `aset`），塞不进表达式 ——'
+      + '所以只接 `bind` 的初值那一格。记录那一半已经用"物化成临时名"接上了，'
+      + '列表还欠着：它在方言里是句柄（引用语义），"里头改了外头看得见"要先有判据',
     witness: () => program([node('prim', {
-      args: [node('record-new', { fields: [litNode(1)] }, { names: ['x'] })],
+      args: [node('list-new', { items: [litNode(1)] })],
     }, { name: 'print' })]),
   },
 ];
