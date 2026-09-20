@@ -263,7 +263,15 @@ export function typeOf(x, env, ctx) {
  * （赋值/传参/返回都复制，见 tests/sexpr/cases/06-structs.sx）—— 那正好就是多值的语义。
  */
 export function multiShape(vals, env, ctx) {
-  const types = vals.map((v) => typeOf(v, env, ctx));
+  /* **`record-new` 的类型要问后端那一格**（`ctx.valueTypeOf`）：`inferType` 里没有
+     `record-new` 这一支，回的是 UNKNOWN=int。判据是 `tests/go/cases/04-multi-return.go`
+     的 `return P{x,y}, true` —— 从前多值那格结构体的第一个字段成了 int，
+     于是 `p.X` 报「在一格说不清形状的东西上取字段 'X'（变量 p 推出来是 int）」。
+     后端没挂这一格时退回 `typeOf`（别的后端的产物照旧）。 */
+  const typeOf1 = (v) => (typeof ctx.valueTypeOf === 'function'
+    ? (ctx.valueTypeOf(v, env) ?? typeOf(v, env, ctx))
+    : typeOf(v, env, ctx));
+  const types = vals.map(typeOf1);
   /* **记录也收**：记录在方言里就是**一格指针**（见 `shapeType`），摆进多值那格结构体里
      与 `bindRecord` 把记录当字段存的是同一件事（那儿存的也是指针）。
      从前这儿只收标量，go 的 `return hit, shape`（一个 struct 一个接口）就落不下去 ——

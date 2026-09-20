@@ -1755,6 +1755,12 @@ export function emitCore(g) {
   /* 覆盖层（`types.js`）要问的那两件**后端自己的事**（见文件头那段 import 的注）：
      登记一格形状（顺带往模块头上印 `(struct rN …)`）、报一格有名有姓的缺口。 */
   ctx.shapeOf = (names, types, multi) => shapeOf(names, types, multi, ctx);
+  /* **一格值的类型，`record-new` 也认**（`types.js` 的 `inferType` 里没有它那一支，
+     回的是 UNKNOWN=int）。`multiShape` 要靠它才看得见 `return P{…}, true` 里
+     第一格是个记录 —— 不然多值那格结构体的字段就成了 int，后面 `p.X` 报
+     「在一格说不清形状的东西上取字段 'X'」。挂在 ctx 上是因为 `recordTypeOfNode`
+     住在后端这一层（它要 `shapeOf` 去登记形状），而 `types.js` 不许反过来 import 它。 */
+  ctx.valueTypeOf = (x, env) => elemTypeOfNode(x, env, ctx);
   ctx.gap = gap;
   /* 覆盖层问不了的第三件事（dyn 那一刀加的）：**一格 dyn 里装的是什么**。
      那是"按键查整张图"的事（后端自己的索引），覆盖层拿它答两处：`call` 的返回类型
