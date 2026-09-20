@@ -153,6 +153,29 @@ function rewriteValue(fn, mod, pc) {
   const A = fn.a[pc], B = fn.b[pc];
   const ca = constArg(fn, mod, pc, 0), cb = constArg(fn, mod, pc, 1);
 
+  /**
+   * ---------------------------------------------------- 零、两次按位重解释互相抵消
+   *
+   * `CVT_BITCAST(CVT_BITCAST(x))` ⇒ `x`。与 `(Com (Com x)) => x`（generic.rules:689）
+   * 同一类恒等式。要这一条是因为 `copyfwd.js` 把「按字拷贝的聚合」那条链一档一档转发成了
+   * 一串 `CVT_BITCAST`，两两抵消之后剩下的才是最初那个寄存器里的值。
+   *
+   * 判据：里层那条的**操作数类型**得与我们的结果类型一样（宽度一样、读法一样）。
+   *
+   * ⚠️ **必须摆在类型分派之前**。放在后面（`scalarFloat(t)` 那一块里）等于永远不跑：
+   * 那一块末尾一律 `return -1`，`t` 是 f64 的 CVT 压根到不了后面。
+   * 这个位置是量出来的：放错地方时 `sph_intersect` 里每个 `vsub` 的结果都要
+   *     fmov x9,d10 / mov x21,x9 … mov x9,x21 / mov x8,x9 / fmov d8,x8
+   * 六条指令把一个 double 从 d10 搬到 d8。
+   */
+  if (op === OP.CVT && fn.aux[pc] === CVT_BITCAST && A >= REF_BIAS && A !== REF_NONE) {
+    const ip = A - REF_BIAS;
+    if (fn.op[ip] === OP.CVT && fn.aux[ip] === CVT_BITCAST) {
+      const inner = fn.a[ip];
+      if (inner !== REF_NONE && fn.typeOf(inner, mod.consts) === t) return inner;
+    }
+  }
+
   /* ---------------------------------------------------------- 一、常量折叠 */
   if (isCmp(op)) {
     /* 比较的 `t` 是**操作数**的类型（ir.js 的 typeOf 那段），结果永远是 bool。 */
@@ -253,24 +276,6 @@ function rewriteValue(fn, mod, pc) {
       if (x === 1) return B;
     }
     return -1;
-  }
-
-  /**
-   * `CVT_BITCAST(CVT_BITCAST(x))` ⇒ `x`（两次按位重解释互相抵消）。
-   *
-   * 与 `(Com (Com x)) => x`（generic.rules:689）同一类恒等式。要这一条是因为
-   * `copyfwd.js` 把「按字拷贝的聚合」那条链一档一档转发成了一串 `CVT_BITCAST`，
-   * 两两抵消之后剩下的才是最初那个寄存器里的值。
-   *
-   * 判据：里层那条的**操作数类型**得与我们的结果类型一样（宽度一样、读法一样），
-   * 不然抵消不掉（f32 <-> i64 那种根本不会配上，宽度就不同）。
-   */
-  if (op === OP.CVT && fn.aux[pc] === CVT_BITCAST && A >= REF_BIAS && A !== REF_NONE) {
-    const ip = A - REF_BIAS;
-    if (fn.op[ip] === OP.CVT && fn.aux[ip] === CVT_BITCAST) {
-      const inner = fn.a[ip];
-      if (inner !== REF_NONE && fn.typeOf(inner, mod.consts) === t) return inner;
-    }
   }
 
   /* `(Not (ConstBool [c])) => (ConstBool [!c])` —— generic.rules:210 */
