@@ -251,10 +251,12 @@ export const branchOf = (cond, then, els) => node('branch', {
  *
  * @param {Array<[string, any]>} pairs 字段名 × 已经出好的值节点
  */
-export const recordNew = (pairs) => node(
+export const recordNew = (pairs, byval) => node(
   'record-new',
   { fields: pairs.map(([, v]) => v) },
-  { names: pairs.map(([k]) => k) },
+  byval === true
+    ? { names: pairs.map(([k]) => k), byval: true }
+    : { names: pairs.map(([k]) => k) },
 );
 export const fieldGet = (obj, name) => node('field-get', { obj }, { field: name });
 export const fieldSet = (obj, name, value) => node('field-set', { obj, value }, { field: name });

@@ -557,7 +557,7 @@ const COMPLEX_TYPES = new Set(['complex64', 'complex128']);
 function structZero(n) {
   const fs = STRUCTS.get(n);
   if (fs === undefined || fs === null) return null;
-  return recordNew([['__type', lit(n)], ...fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)])]);
+  return recordNew([['__type', lit(n)], ...fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)])], true);
 }
 
 /** 一格类型节点**剥到光名字**（`paren` 透传、具名类型跟着 `UNDER` 走一层）。不是光名字回 null。 */
@@ -633,7 +633,7 @@ function zeroOf(ty, name, pkg) {
       /* 嵌入字段零值：降成空 map 占位（同下面那格） */
       return mapNew();
     }
-    return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${name}.${fn}`, pkg)]));
+    return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${name}.${fn}`, pkg)]), true);
   }
   if (t === 'tname' && kids(ty).length === 1) {
     const n = leaf(kids(ty)[0]);
@@ -1324,9 +1324,10 @@ function toNode(x) {
          查 `__goMethodTable["Circle.Area"]` 找到 `Circle__Area`。 */
       const tyName = tag(ty) === 'tname' ? leaf(kids(ty)[0])
         : tag(ty) === 'name' ? leaf(kids(ty)[0]) : null;
+      /* **go 的 struct 是值语义**（赋值/传参/返回都复制）—— 第二个实参就是那一格。 */
       const withType = (pairs) => (tyName !== null && STRUCTS.has(tyName)
-        ? recordNew([['__type', lit(tyName)], ...pairs])
-        : recordNew(pairs));
+        ? recordNew([['__type', lit(tyName)], ...pairs], true)
+        : recordNew(pairs, true));
       /* **`T{}`（一格元素都不给）**：go 的语义是"那个类型的零值"。从前这一格落到下面
          "切片字面量"那一支去了，出来是一格 `list-new([])` —— core 那侧当场报
          "一格空列表（元素类型推不出来）—— 绑给 'tr'"（量出来的，`Triangle{}` 那一行）。

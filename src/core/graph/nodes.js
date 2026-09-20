@@ -259,7 +259,13 @@ export const NODES = new Map([
   // 为什么不合成一格"按键取值"（index-get）：字段名在**编译期已知**、下标是运行期算的，
   // 两者的 `lower` 不同（前者是偏移量，后者要边界检查）。合成一格会把这个差别丢掉。
   N('record-new', 'expr', [{ name: 'fields', sem: SEM.value, rest: true }], {
-    attrs: ['names'], effects: ['allocates'], lifetime: 'owns',
+    /* `byval` —— **这一格记录是值语义还是引用语义**（有类型覆盖层，#40）。
+       go 的 struct 是**值**（赋值/传参/返回都复制），lua/js 的表是**引用**。
+       图上原来只有引用那一种，于是 go 的 `Vec{…}` 每一格都落成一次堆分配
+       （`pnew`）—— 量出来 ×126 于 go 原生，全花在 malloc 上。
+       值语义那一档落成方言的**真结构体**（`(new rN)` + `(fld …)` / `(fldset …)`），
+       不进堆，MIR 那边的 SROA/mem2reg 才提得进寄存器。 */
+    attrs: ['names', 'byval'], effects: ['allocates'], lifetime: 'owns',
     doc: 'go `T{…}` / lua `{x=1}` / V `T{…}` / nim `T(x: 1)` / CL defstruct',
     // 规格里九门有记录（awk 只有关联数组，没有"按名字的字段"）。**九门全接上了**：
     // chez / sbcl 是"一句话生成一族名字"、freebasic 是"字段表在类型上、没有字面量"、

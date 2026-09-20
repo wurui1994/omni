@@ -117,7 +117,15 @@ export const isScalar = (t) => t === 'int' || t === 'real' || t === 'bool' || t 
  * `pfield` / `pload` / `pstore`，见 `tests/sexpr/cases/25-pointers.sx`）：指针复制 =
  * 两个名字指同一格，与图逐格重合。
  */
-export const shapeType = (shape) => (shape.multi === true ? shape.tag : `(ptr ${shape.tag})`);
+export const shapeType = (shape) => (
+  (shape.multi === true || shape.byval === true) ? shape.tag : `(ptr ${shape.tag})`);
+
+/** 这一格类型是**指针那一档的记录**吗（= 是记录、而且不是值语义）。
+ *  字段的读写与"新建"三处都按它分流（`backend-core.js` 的 fldText / field-set / newOfType）。 */
+export const isPtrRec = (t, ctx) => {
+  const sh = shapeAt(t, ctx);
+  return sh !== undefined && sh.multi !== true && sh.byval !== true;
+};
 
 /** 反过来：一格类型文本是哪格形状（`mN` 与 `(ptr rN)` 两种写法都认）。不是形状回 undefined。 */
 export function shapeAt(t, ctx) {

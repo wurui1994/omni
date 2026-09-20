@@ -54,7 +54,7 @@ import { declOf } from './nodes.js';
 import {
   isNode, isLit, argList, litType, primFixedType, elemType, dictOf, isScalar,
   convTo, typeOf, multiShape, fieldType, litLeaningType, retTypeOf,
-  shapeType, shapeAt, isRecType,
+  shapeType, shapeAt, isRecType, isPtrRec,
 } from './types.js';
 /* 证物那五份是**手搭的小图** —— 所以要 `node()` / `lit()` / `program()`（`node` 顺带查五栏）。 */
 import { node, lit as litNode, program } from './graph.js';
@@ -122,8 +122,11 @@ const strLit = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}
  * 一格形状（记录或多值）在登记处里的那一份。同形的两格共用一格 `(struct …)`，
  * 标签按登记顺序发（记录 `rN`、多值 `mN`）—— 所以同一张图落两遍逐字节相同。
  */
-function shapeOf(names, types, multi, ctx) {
-  const key = `${multi ? 'm' : 'r'}|${names.map((n, i) => `${n}:${types[i]}`).join('|')}`;
+function shapeOf(names, types, multi, ctx, byval) {
+  /* **byval 进键**：同样的字段名与类型，值语义与引用语义是**两格**不同的形状
+     （前者落 `(new rN)`、后者落 `(pnew (ptr rN))`），不能共用一格。 */
+  const key = `${multi ? 'm' : (byval === true ? 'v' : 'r')}`
+    + `|${names.map((n, i) => `${n}:${types[i]}`).join('|')}`;
   let shape = ctx.byKey.get(key);
   if (shape !== undefined) return shape;
   shape = {
@@ -131,6 +134,7 @@ function shapeOf(names, types, multi, ctx) {
     names: names,
     types: new Map(),
     multi: multi,
+    byval: byval === true,
   };
   for (let i = 0; i < names.length; i++) shape.types.set(names[i], types[i]);
   ctx.byKey.set(key, shape);
@@ -739,7 +743,7 @@ const isAggregate = (t, ctx) => isRecType(t, ctx) || elemType(t) !== null || dic
  */
 function fldText(obj, field, env, ctx) {
   const host = objText(obj, env, ctx);
-  if (isRecType(typeOf(obj, env, ctx), ctx)) return `(pload (pfield ${host} ${field}))`;
+  if (isPtrRec(typeOf(obj, env, ctx), ctx)) return `(pload (pfield ${host} ${field}))`;
   return `(fld ${host} ${field})`;
 }
 
@@ -747,7 +751,7 @@ function fldText(obj, field, env, ctx) {
 function newOfType(t, ctx) {
   const sh = shapeAt(t, ctx);
   if (sh === undefined) return zeroText(t);
-  if (sh.multi === true) return `(new ${sh.tag})`;
+  if (sh.multi === true || sh.byval === true) return `(new ${sh.tag})`;
   return `(pnew (ptr ${sh.tag}) (int 1))`;
 }
 
@@ -1097,7 +1101,7 @@ function stmtIn(x, env, ctx) {
       const host = objText(x.ins.obj, env, ctx);
       const v = expr(x.ins.value, env, ctx);
       /* 记录是指针（见 `fldText`）—— 写一格字段是 `(pstore (pfield …) …)`。 */
-      if (isRecType(typeOf(x.ins.obj, env, ctx), ctx)) {
+      if (isPtrRec(typeOf(x.ins.obj, env, ctx), ctx)) {
         return [`(pstore (pfield ${host} ${x.attrs.field}) ${v})`];
       }
       return [`(fldset ${host} ${x.attrs.field} ${v})`];
@@ -1276,12 +1280,22 @@ function bindRecord(nm, rec, env, ctx) {
     fieldText.push(null);
     return t;
   });
-  const shape = shapeOf(names, types, false, ctx);
-  /* 记录落**一格指针**（`types.js` 的 `shapeType`）：`pnew` 出一格零初始化的，再逐个
-     `(pstore (pfield …) …)`。指针复制 = 两个名字指同一格 —— 那正是图上记录的语义。 */
-  const out = [...pre, bindLine(nm, shapeType(shape), `(pnew (ptr ${shape.tag}) (int 1))`, env, ctx)];
+  const byval = rec.attrs.byval === true;
+  const shape = shapeOf(names, types, false, ctx, byval);
+  /* **两档**（`nodes.js` 的 `byval` 那一格）：
+     - 引用语义（lua/js 的表）：落一格指针 —— `pnew` 出一格零初始化的，再逐个
+       `(pstore (pfield …) …)`。指针复制 = 两个名字指同一格，那正是图上记录的语义；
+     - **值语义**（go 的 struct）：落方言的**真结构体** —— `(new rN)` + `(fldset …)`，
+       **不进堆**。量出来的理由：go 的 `Vec{…}` 走指针那一档是每格一次 malloc，
+       60M 次迭代 13.9s vs go 原生 0.11s（×126），全花在分配上。 */
+  const out = byval
+    ? [...pre, bindLine(nm, shape.tag, `(new ${shape.tag})`, env, ctx)]
+    : [...pre, bindLine(nm, shapeType(shape), `(pnew (ptr ${shape.tag}) (int 1))`, env, ctx)];
   for (let i = 0; i < names.length; i++) {
-    out.push(`(pstore (pfield (var ${nm}) ${names[i]}) ${fieldText[i] ?? expr(vals[i], env, ctx)})`);
+    const v = fieldText[i] ?? expr(vals[i], env, ctx);
+    out.push(byval
+      ? `(fldset (var ${nm}) ${names[i]} ${v})`
+      : `(pstore (pfield (var ${nm}) ${names[i]}) ${v})`);
   }
   return out;
 }
@@ -1866,7 +1880,7 @@ function recordTypeOfNode(rec, env, ctx) {
     if (t !== 'int' && t !== 'real' && t !== 'bool' && t !== 'string') return null;
     types.push(t);
   }
-  return shapeType(shapeOf(names, types, false, ctx));
+  return shapeType(shapeOf(names, types, false, ctx, rec.attrs.byval === true));
 }
 
 /**
