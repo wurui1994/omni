@@ -2120,20 +2120,26 @@ function toNode(x) {
         throw new Error(`go->graph: go 后面不是一次调用（是 ${tag(c)}）`);
       }
       const [gfn, gargs] = kids(c);
-      if (tag(gfn) !== 'name') {
-        throw new Error('go->graph: `go` 的体只接**具名函数**'
-          + '（闭包要把捕获的那几格抄进新 g，那一层还没接）');
+      /* 体可以是**具名函数**，也可以是一格**匿名函数**（`go func(i int){ … }(i)`，
+         pt 的 renderer.go 用的就是它）。后者交给图那一层的 lambda 提升
+         （`backend-core.js` 的 `liftFnVals`）：捕获为空就提到顶层、原地换成一格 `ref`，
+         于是 `(fnref …)` 照样发得出来。**借了外层局部量**的那些提不上去，落成一句
+         有名有姓的墙（`crtCall` 里那句"要一个具名函数"）—— 捕获要抄进新 g，那是另一刀。 */
+      const isLit = tag(gfn) === 'fnlit';
+      if (tag(gfn) !== 'name' && !isLit) {
+        throw new Error('go->graph: `go` 的体只接具名函数与匿名函数'
+          + `（这儿是 ${tag(gfn)} —— 方法值那一档还没接）`);
       }
-      const gname = leaf(kids(gfn)[0]);
+      const gname = isLit ? null : leaf(kids(gfn)[0]);
       const raw = gargs === undefined ? [] : kids(gargs).filter((y) => tag(y) !== 'spread');
       if (raw.length > 1) {
-        throw new Error(`go->graph: \`go ${gname}(…)\` 有 ${raw.length} 格实参 —— `
+        throw new Error(`go->graph: \`go ${gname ?? 'func(…)'}(…)\` 有 ${raw.length} 格实参 —— `
           + '这一刀的门面只收 0 格或 1 格（实参要在 C 那侧打包，见 omni_go.h）');
       }
-      const gargNodes = argsByDecl(gname, many(raw), false);
+      const gargNodes = gname === null ? many(raw) : argsByDecl(gname, many(raw), false);
       return node('call', {
         fn: node('ref', {}, { name: raw.length === 0 ? '__goSpawn0' : '__goSpawn' }),
-        args: [node('ref', {}, { name: gname }), ...gargNodes],
+        args: [isLit ? toNode(gfn) : node('ref', {}, { name: gname }), ...gargNodes],
       });
     }
     /* `goto L` —— 图上没有任意跳转。降成空语句（丢掉），不中断。

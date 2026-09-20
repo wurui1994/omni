@@ -1904,8 +1904,11 @@ export function emitCore(g) {
   const taken = new Set(raw.map((f) => f.name));
   const modNames = new Set();
   for (const it of rest0) if (isNode(it) && it.op === 'bind') modNames.add(it.attrs.name);
-  /* 不算捕获的那些：顶层函数名 + 顶层绑定的名字（后者落 `(global …)`，见 `bindLine`）。 */
-  const known = new Set([...taken, ...modNames]);
+  /* 不算捕获的那些：顶层函数名 + 顶层绑定的名字（后者落 `(global …)`，见 `bindLine`）
+     + **运行时那几个 C 符号**（`C_RT`）。少了最后一批，一格 `go func(){ ch <- k }(i)`
+     的体里那句 `ref __goChanSend` 会被当成"借了外层的名字"，于是 lambda 提升不动它，
+     后面报"要一个具名函数" —— 量出来的（`/tmp/goclo.go` 那一份）。 */
+  const known = new Set([...taken, ...modNames, ...C_RT.keys()]);
   const fns = [];
   for (const f of raw) {
     const r = liftOne(f.body, f.name, known, taken, gap);
