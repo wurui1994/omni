@@ -16,8 +16,6 @@ const out = join(root, '.omni-cache', 'go-e2e');
 mkdirSync(out, { recursive: true });
 
 let pass = 0, fail = 0, skip = 0;
-const cli = (args) => execFileSync('node', [join(root, 'src', 'cli.js'), ...args],
-  { cwd: root, encoding: 'utf8', timeout: 300000, stdio: 'pipe' });
 
 const files = readdirSync(cases).filter((f) => f.endsWith('.go')).sort();
 for (const f of files) {
@@ -34,26 +32,19 @@ for (const f of files) {
     skip++;
     continue;
   }
-  const sx = join(out, `${stem}.sx`);
   const exe = join(out, stem);
+  /* 一条命令：`.go` 是前端，cli 自己译成核心方言再往下编（ADR-0041）。
+     从前这儿是两步（先 `--backend core -o x.sx`、再 `build x.sx`），两个 catch 各写一遍。
+     **有名有姓的缺口算 skip**，与 `tests/graph` 一条规矩：那是"还没接"，不是"接错了"。 */
   try {
-    cli(['build', '--engine', 'graph', '--lang', 'go', '--backend', 'core', src, '-o', sx]);
-  } catch (e) {
-    const all = String(e.stderr || e.stdout || e.message);
-    const why = all.split('\n').filter((x) => x.trim()).pop();
-    /* **有名有姓的缺口算 skip**，与 `tests/graph` 一条规矩：那是"还没接"，不是"接错了"。 */
-    if (/还没接/.test(all)) { console.log(`  skip ${f}（缺口：${why?.slice(0, 96)}）`); skip++; continue; }
-    console.log(`  FAIL ${f} 落方言：${why?.slice(0, 110)}`);
-    fail++;
-    continue;
-  }
-  try {
-    execFileSync('node', [join(root, 'src', 'cli.js'), 'build', sx, '-o', exe],
+    execFileSync('node', [join(root, 'src', 'cli.js'), 'build', src, '-o', exe],
       { cwd: root, encoding: 'utf8', timeout: 300000, stdio: 'pipe',
         env: { ...process.env, OMNI_MIR_OPT: '1' } });
   } catch (e) {
-    const why = String(e.stderr || e.stdout || e.message).split('\n').filter((x) => x.trim())[0];
-    console.log(`  FAIL ${f} 编原生：${why?.slice(0, 110)}`);
+    const all = String(e.stderr || e.stdout || e.message);
+    const why = all.split('\n').filter((x) => x.trim()).pop();
+    if (/还没接/.test(all)) { console.log(`  skip ${f}（缺口：${why?.slice(0, 96)}）`); skip++; continue; }
+    console.log(`  FAIL ${f} 编不出来：${why?.slice(0, 110)}`);
     fail++;
     continue;
   }
