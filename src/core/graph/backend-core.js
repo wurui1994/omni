@@ -1642,6 +1642,9 @@ export function emitCore(g) {
       raw.push({
         name: it.attrs.name,
         params: (f.attrs.params ?? []).map((p) => String(p)),
+        /* `pzero` 要跟着一路带下来（有类型覆盖层，见 `nodes.js` 的 func 那一格）——
+           `emitFn` 拿到的是这份记录，不是图上那个节点。 */
+        ...(Array.isArray(f.attrs.pzero) ? { pzero: f.attrs.pzero } : {}),
         body: f.ins.body,
       });
       continue;
@@ -1657,7 +1660,7 @@ export function emitCore(g) {
   for (const f of raw) {
     const r = liftOne(f.body, f.name, known, taken, gap);
     for (const g of r.lifted) fns.push(g);
-    fns.push({ name: f.name, params: f.params, body: r.body });
+    fns.push({ name: f.name, params: f.params, ...(f.pzero ? { pzero: f.pzero } : {}), body: r.body });
   }
   const topLift = liftOne(rest0, 'main', known, taken, gap);
   for (const g of topLift.lifted) fns.push(g);
@@ -1799,10 +1802,69 @@ export function emitCore(g) {
   return `${['(module', ...ctx.decls, ...body].join('\n')}\n`;
 }
 
+/**
+ * 一格 `record-new` 的**类型**（只算类型、不出文本）—— `paramTypes` 用它把前端声明的
+ * 形参类型算出来。字段的判据与 `bindRecord` 那份一样（标量或另一格记录），
+ * 差别是这儿**不报缺口**：算不出来就回 null，让调用方退回"从调用点推"。
+ */
+function recordTypeOfNode(rec, env, ctx) {
+  const names = rec.attrs.names;
+  if (!Array.isArray(names) || names.length === 0) return null;
+  const vals = argList(rec, 'fields');
+  if (vals.length !== names.length) return null;
+  const types = [];
+  for (let i = 0; i < names.length; i++) {
+    const v = vals[i];
+    if (isNode(v) && v.op === 'record-new') {
+      const t = recordTypeOfNode(v, env, ctx);
+      if (t === null) return null;
+      types.push(t);
+      continue;
+    }
+    let t = null;
+    try { t = typeOf(v, env, ctx); } catch { return null; }
+    if (t !== 'int' && t !== 'real' && t !== 'bool' && t !== 'string') return null;
+    types.push(t);
+  }
+  return shapeType(shapeOf(names, types, false, ctx));
+}
+
+/**
+ * 一格函数的形参类型。
+ *
+ * **声明的优先，推出来的兜底**（有类型覆盖层，#40 的第一格真货）：
+ *   1. `f.pzero[i]` —— 前端递过来的"这一格形参的零值"（只有 go 这条腿在发，见
+ *      `ext/go/tograph.js` 的 `funcOf`）。记录走 `recordTypeOfNode`（顺带把
+ *      `(struct rN …)` 登记进 `ctx`），别的走 `typeOf`。
+ *   2. `ctx.args` —— 从**调用点**推（图上没有类型，这一直是这条腿唯一的来源）。
+ *   3. 都没有：`int`（这条腿今天的口径）。
+ *
+ * 为什么 1 只在"算出来不是 int"时才作数：Go 的 `*T` 形参零值是 `null`，推出来就是
+ * `int`（= 说不清），而那时调用点那儿是个真记录，第 2 条更准。反过来，方法只经接口分派
+ * 调用时压根没有调用点，第 1 条是唯一的来源 —— pt 整包就卡在这一格上
+ * （"在一格说不清形状的东西上取字段 'V1'（变量 t 推出来是 int）"，t 是 `*Triangle` 接收者）。
+ */
+function paramTypes(f, env, ctx) {
+  const pz = Array.isArray(f.pzero) ? f.pzero : null;
+  return f.params.map((p, i) => {
+    const z = pz === null ? null : pz[i];
+    if (z !== null && z !== undefined) {
+      let t = null;
+      if (isNode(z) && z.op === 'record-new') {
+        try { t = recordTypeOfNode(z, env, ctx); } catch { t = null; }
+      } else {
+        try { t = typeOf(z, env, ctx); } catch { t = null; }
+      }
+      if (t !== null && t !== 'int') return t;
+    }
+    return ctx.args.get(`${f.name}#${i}`) ?? 'int';
+  });
+}
+
 /** 一格 `(fn …)` 的文本。走两趟（见 `emitCore` 里那段），所以单独拎出来。 */
 function emitFn(f, fnEnv, env, ctx) {
   const fenv = new Map(fnEnv);
-  const pts = f.params.map((p, i) => ctx.args.get(`${f.name}#${i}`) ?? 'int');
+  const pts = paramTypes(f, env, ctx);
   for (let i = 0; i < f.params.length; i++) fenv.set(f.params[i], pts[i]);
   const ps = f.params.map((p, i) => `(${p} ${pts[i]})`).join(' ');
   const ret = env.get(`fn:${f.name}`) ?? 'int';  /* 隐式返回那一档：末尾那个值改写成 `(ret …)`（分支就把 ret 沉到两支里去 ——

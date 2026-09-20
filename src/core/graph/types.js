@@ -264,7 +264,15 @@ export function multiShape(vals, env, ctx) {
 export function fieldType(x, env, ctx) {
   const t = typeOf(x.ins.obj, env, ctx);
   const shape = shapeAt(t, ctx);
-  if (shape === undefined) ctx.gap(`在一格说不清形状的东西上取字段 '${x.attrs.field}'`);
+  if (shape === undefined) {
+    /* 措辞里带上**推出来是什么**与**那格东西长什么样** —— 只报字段名的话查不下去
+       （pt 整包卡在 'V1' 上那一次，光靠字段名分不清是形参没定型还是别的）。 */
+    const obj = x.ins.obj;
+    const what = (obj && (obj.op === 'ref' || obj.op === 'name'))
+      ? `变量 ${obj.attrs && obj.attrs.name}`
+      : (obj && obj.op ? `一格 ${obj.op}` : '一格值');
+    ctx.gap(`在一格说不清形状的东西上取字段 '${x.attrs.field}'（${what} 推出来是 ${t}）`);
+  }
   const ft = shape.types.get(x.attrs.field);
   if (ft === undefined) ctx.gap(`记录 ${t} 上没有字段 '${x.attrs.field}'`);
   return ft;

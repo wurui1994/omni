@@ -546,6 +546,23 @@ function isTypeArg(x) {
 /** 复数那两格的零值是 `0`（go 里 complex 的零值是 `0+0i`，图上只落实部 —— 虚部是 0）。 */
 const COMPLEX_TYPES = new Set(['complex64', 'complex128']);
 
+/** 一格形参的**零值节点**（有类型覆盖层用）。说不清就回 null —— 不中断。 */
+function zeroOfParam(ty) {
+  if (ty === undefined) return null;
+  try { const z = zeroOf(ty, 'param'); return z === undefined ? null : z; } catch { return null; }
+}
+
+/** 一格**具名类型**的零值节点（方法的接收者走这条 —— 指针接收者剥过一层之后就是个名字）。 */
+function zeroOfNamed(n) {
+  if (typeof n !== 'string' || n.length === 0) return null;
+  const fs = STRUCTS.get(n);
+  if (fs !== undefined && fs !== null) {
+    try { return recordNew(fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)])); } catch { return null; }
+  }
+  if (UNDER.has(n)) { try { return zeroOf(UNDER.get(n), n); } catch { return null; } }
+  return null;
+}
+
 function zeroOf(ty, name, pkg) {
   if (ty === undefined) {
     throw new Error(`go->graph: ${name} 既没类型也没初值 —— go 不许这么写`);
@@ -759,15 +776,28 @@ function funcOf(sig, blk, name, self, selfType) {
      只要有一格带名字，那些"只有光秃秃 tname"的格子其实是名字。 */
   const inParams = partKids(sig, 'in');
   const anyNamed = inParams.some((p) => part(p, 'name') !== undefined);
-  const params = inParams.map((p) => {
+  /* 每一格先收成 `{nm, ty}`，**名字与类型一起**留着 —— 下面 `pzero` 那一格要按同一条
+     规则过滤，不然两个数组会错位。 */
+  const pinfo = inParams.map((p) => {
     const nm = part(p, 'name');
-    if (nm !== undefined) return leaf(kids(nm)[0]);
-    if (!anyNamed) return null;              // 全不带名字：那就真是类型
+    const ty = kids(p).find((y) => tag(y) !== 'name');
+    if (nm !== undefined) return { nm: leaf(kids(nm)[0]), ty };
+    if (!anyNamed) return { nm: null, ty };      // 全不带名字：那就真是类型
     /* 带名字的表里，没名字的这一格其实是"名字被当成类型了" */
-    const ty = kids(p).find((y) => isList(y) && tag(y) === 'tname');
-    if (ty !== undefined && kids(ty).length === 1) return leaf(kids(ty)[0]);
-    return null;
-  }).filter((n) => n !== null);
+    const tn = kids(p).find((y) => isList(y) && tag(y) === 'tname');
+    if (tn !== undefined && kids(tn).length === 1) return { nm: leaf(kids(tn)[0]), ty: undefined };
+    return { nm: null, ty };
+  }).filter((x) => x.nm !== null);
+  /* **参数组共享类型**：`(a, b int)` 在树上是 `p(a)`（名字被当成类型、于是没自己的类型）
+     加 `p(b int)`。go 的规矩是一组共用后面那个类型，所以从后往前补。 */
+  {
+    let lastTy;
+    for (let i = pinfo.length - 1; i >= 0; i--) {
+      if (pinfo[i].ty === undefined) pinfo[i].ty = lastTy;
+      else lastTy = pinfo[i].ty;
+    }
+  }
+  const params = pinfo.map((x) => x.nm);
   /* **形参里的 `_` 与重名**：go 允许 `func(_, _ uint, msg string)`（两个空名字），
      JS 的箭头函数不许重复形参（严格模式当场 SyntaxError）。所以给每一格空名字
      和每一格重名换个合成名（`__pN`）—— 空名字本来就用不到，重名的 go 里也不合法
@@ -800,8 +830,25 @@ function funcOf(sig, blk, name, self, selfType) {
     if (t !== null) VARTYPE.set(leaf(kids(nm)[0]), t);
   }
   try {
+    /* **有类型覆盖层（#40）的第一格真货**：把每一格形参的**声明类型**以"它的零值"
+     * 的形状交给图。为什么是零值而不是类型名：图上没有类型词汇表，而 `graph/types.js`
+     * 已经会给 `record-new` / `list-new` / 字面量定型并登记形状 —— 递一格零值过去，
+     * 那一层照现成的路推就行，不必新造一套类型语言。
+     *
+     * 为什么非要这一格（量出来的）：core 那条腿的形参是靠**调用点**定型的
+     * （`backend-core.js` 里 `ctx.args`，查不到就默认 `int`）。而 Go 的方法一旦只
+     * 经接口分派（`__goRegMethod` 那张表）调用，就没有直接调用点 —— 形参于是成了 `int`，
+     * 随后一取字段就报"在一格说不清形状的东西上取字段 'V1'"。pt 整包编到最后就卡在这一句。
+     * 声明的类型本来就在前端手里（`STRUCTS` / `UNDER` / 形参的类型节点），递过去而已。
+     *
+     * 只有**至少一格推得出来**时才挂这个属性 —— 别的语言不发它，图与它们的产物照旧。 */
+    const pz = [];
+    if (self !== undefined) pz.push(zeroOfNamed(selfType));
+    for (const x of pinfo) pz.push(zeroOfParam(x.ty));
+    const anyZero = pz.some((z) => z !== null);
     return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
       { params: self === undefined ? params : [self, ...params], name,
+        ...(anyZero ? { pzero: pz } : {}),
         ...(restParam !== undefined ? { restParam } : {}) });
   } finally {
     VARTYPE.clear();
@@ -1735,16 +1782,39 @@ function toNode(x) {
     // 树上的标签是 `typedecl` 不是 `type-decl` —— 原来写错了一格，record 那份例子量出来的。
     case 'import': return [];
     case 'typedecl': {
-      /* `typedecl` 的字段表不进图——但**类型名需要一格绑定**（`bind name = null`），
-         因为方法表达式 `(*T).Method` 在树上是 `sel(deref(name("T")), name("Method"))`，
-         如果 T 没绑定就是 ReferenceError。给它绑 null：`__field(null, "Method")` 返 null，
-         方法值变成 null——与"函数指针还没接"的降级一致。 */
+      /* `typedecl` 的字段表不作为**独立的一格**进图，但**类型名要有一格绑定**：
+         方法表达式 `(*T).Method` 在树上是 `sel(deref(name("T")), name("Method"))`，
+         T 没绑定就是 ReferenceError。
+
+         **绑什么**（这一格量出来改过一次）：从前一律绑 `null`。代价是量到的 ——
+         `core` 那条腿（方言**是有类型的**）对着一格 null 的全局说不清类型，
+         pt 的 33 份 .go 里 **22 份**卡在同一句话上：
+           "'Vector' 是一格 null（没赋过值），而这一层里找不到一处给它赋标量的地方"。
+         而字段表本来就在 `STRUCTS` 里 —— 声明的形状**不进图**才是那 22 份的根因。
+         所以具名 struct 绑成**它的零值记录**（字段名与顺序从声明来，与 `zeroOf` 同一份
+         逻辑）：图上多一格没人读的全局，换来 core 那侧有类型可推。
+         别的具名类型（`type Level int` / 接口 / 泛型）仍旧绑 null —— 那几种没有字段表。 */
       const ch = kids(x);
       const nameNode = ch.find((y) => isList(y) && tag(y) === 'name') ?? ch[0];
       if (nameNode !== undefined) {
         const n = isList(nameNode) ? leaf(kids(nameNode)[0]) : leaf(nameNode);
         if (n !== undefined && typeof n === 'string' && n.length > 0) {
-          return [{ op: 'bind', ins: { init: lit(null) }, attrs: { name: n } }];
+          let init = lit(null);
+          const fs = STRUCTS.get(n);
+          if (fs !== undefined && fs !== null) {
+            /* zeroOf 对说不清的类型会当场报（那是它的纪律）—— 这一格报了就退回 null，
+               因为"类型名有个绑定"是刚需，"它有类型"是加分。 */
+            try { init = recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${n}.${fn}`)])); }
+            catch { init = lit(null); }
+          } else if (UNDER.has(n)) {
+            /* `type Axis int` / `type Channel int` 这一族：零值就是**底子的零值**
+               （与 `zeroOf` 里 `UNDER.has(n)` 那一行同一条）。量出来的账：
+               不给它，pt 里 axis.go / buffer.go / sampler.go 那几份还是卡在
+               "'Axis' 是一格 null"上。接口与函数类型没有标量零值，仍旧 null。 */
+            try { init = zeroOf(UNDER.get(n), n); }
+            catch { init = lit(null); }
+          }
+          return [{ op: 'bind', ins: { init }, attrs: { name: n } }];
         }
       }
       return [];

@@ -159,7 +159,13 @@ export const NODES = new Map([
   // ---- 函数与出口（3 格）------------------------------------------------------
   // 形参表是**附属**（元数分派不是新节点 —— chez 的 case-lambda 那一条）。
   N('func', 'expr', [{ name: 'body', sem: SEM.body }], {
-    attrs: ['params', 'name', 'restParam'], lifetime: 'owns',
+    /* `pzero` —— **有类型覆盖层的第一格**（#40）：每一格形参的"零值节点"，由前端按
+       它手里的**声明类型**造（只有 go 这条腿在发，见 `ext/go/tograph.js` 的 `funcOf`）。
+       为什么是零值而不是类型名：图上没有类型词汇表，而 `graph/types.js` 已经会给
+       `record-new` / `list-new` / 字面量定型并登记形状 —— 递零值过去，那一层照现成的路推。
+       为什么非要它：core 那条腿的形参一直是**从调用点推**的，而 Go 的方法一旦只经接口
+       分派就没有调用点，形参于是默认成 `int`，一取字段就报"说不清形状"。 */
+    attrs: ['params', 'name', 'restParam', 'pzero'], lifetime: 'owns',
     doc: 'chez case-lambda（函数只有这一种形式）/ 十门全有',
     providers: { spec: TEN, why: {} },
   }),
