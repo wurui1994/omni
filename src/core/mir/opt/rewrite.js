@@ -23,6 +23,7 @@
 
 import {
   OP, OP_MODES, REF_BIAS, REF_NONE, T_BOOL, T_F32, CVT_BITCAST,
+  CVT_I2F, CVT_U2F, CVT_FCVT, CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
   isCmp, isIntType, isFloatType, intBits, typeLanes, negCmp,
 } from '../ir.js';
 import { replaceRef } from './edit.js';
@@ -173,6 +174,47 @@ function rewriteValue(fn, mod, pc) {
     if (fn.op[ip] === OP.CVT && fn.aux[ip] === CVT_BITCAST) {
       const inner = fn.a[ip];
       if (inner !== REF_NONE && fn.typeOf(inner, mod.consts) === t) return inner;
+    }
+  }
+
+  /**
+   * ---------------------------------------- 零点五、**转换的常量折叠**
+   *
+   * `(Cvt64to64F (Const64 [c])) => (Const64F [float64(c)])` 一族 —— generic.rules:47-56，
+   * 加整数变宽/变窄那几条（`(SignExt32to64 (Const32 [c])) => (Const64 …)`）。
+   *
+   * 为什么非要这一格（量出来的，`bench/go/vec.go`）：`f + 1` 里那个 `1` 是**整**字面量，
+   * 于是每一轮循环都发一遍
+   *     mov x9, #0x1 / scvtf d18, x9 / str d18,[帧] / ldr d16,[帧]
+   * 四条指令把一个编译期就知道的 1.0 算出来。五个这样的常量 = 二十条。
+   *
+   * **F2I 那一条不收**：越界时 C 说是未定义的，Go 那边也带着范围条件（:55-56）；
+   * 我们这一层拿不到那个条件就别猜。
+   */
+  if (op === OP.CVT && ca !== null) {
+    const mode = fn.aux[pc];
+    if (mode === CVT_I2F || mode === CVT_U2F) {
+      const x = intOf(ca);
+      const st = A === REF_NONE ? -1 : fn.typeOf(A, mod.consts);
+      if (x !== null && scalarFloat(t) && scalarInt(st)) {
+        return mkReal(mod, t, Number(mode === CVT_U2F ? asUint(x, intBits(st)) : x));
+      }
+    }
+    if (mode === CVT_FCVT) {
+      const x = realOf(ca);
+      if (x !== null && scalarFloat(t)) return mkReal(mod, t, x);
+    }
+    if (mode === CVT_SEXT || mode === CVT_ZEXT || mode === CVT_TRUNC
+      || mode === CVT_SEXT8 || mode === CVT_SEXT16) {
+      const x = intOf(ca);
+      if (x !== null && scalarInt(t)) {
+        /* 变窄/变宽都只看**源那一侧要读多少位**；写进去的规范形由 `mkInt` 收口。 */
+        if (mode === CVT_SEXT) return mkInt(mod, t, BigInt.asIntN(32, x));
+        if (mode === CVT_ZEXT) return mkInt(mod, t, BigInt.asUintN(32, x));
+        if (mode === CVT_SEXT8) return mkInt(mod, t, BigInt.asIntN(8, x));
+        if (mode === CVT_SEXT16) return mkInt(mod, t, BigInt.asIntN(16, x));
+        return mkInt(mod, t, x);                      // TRUNC：`mkInt` 按 t 回绕
+      }
     }
   }
 
