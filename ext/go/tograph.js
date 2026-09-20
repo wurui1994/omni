@@ -330,6 +330,15 @@ function collectDecls(x, shapesOnly) {
     }
   }
   if (tag(x) === 'spec') for (const n of specMapNames(x)) MAPS.add(n);
+  /* **声明的形参类型**（`FSIG`）：调用点要照它转实参（见 `argsByDecl`）。
+     在这一趟收是因为 go 不管声明顺序 —— `main` 里的 `mk(3, 4)` 在 `mk` 之前就落下去了。
+     存的是**类型节点**而不是名字：`scalarNameOf` 要跟着 `UNDER` 走一层，而 `UNDER`
+     也是这一趟才填满的（`type Real = float64` 写在函数后面时名字这会儿还查不着）。 */
+  if (tag(x) === 'fn') {
+    const sig0 = kids(x).find((y) => tag(y) === 'sig');
+    const nm0 = leaf(kids(x)[0]);
+    if (sig0 !== undefined && nm0 !== '_') FSIG.set(nm0, paramInfo(sig0).map((p) => p.ty));
+  }
   /* `shapesOnly` 原来是**同一包里别的文件**那一趟用的（`opts.also`）：类型与字段名收、
      **方法名不收**。当时的理由是"一个包摊开看重名到处都是（`Error`/`String`/`Format`…）"，
      量出来的数是"整包一起收方法名，go 那一栏从 81 掉到 47"。
@@ -350,6 +359,11 @@ function collectDecls(x, shapesOnly) {
        是**光名字**，登记成 `?.名字` 只会让调用点落一格 `ref ?__名字`（指向不存在的函数）。
        不登记，调用点就落成一句**有名有姓的墙**（`selWall` 的第 4 条）—— 不猜。 */
     if (owner !== null) {
+      /* 方法的形参表也收（键是 mangle 过的名字，第 0 格空着留给接收者）。 */
+      const sigM = kids(x).find((y) => tag(y) === 'sig');
+      if (sigM !== undefined) {
+        FSIG.set(mangle(owner, name), [undefined, ...paramInfo(sigM).map((p) => p.ty)]);
+      }
       /* **按 `类型.名字` 收**（`opts.also` 那几份也收 —— 这样存不会撞名，见 `MSET` 那一段）。 */
       MSET.add(`${owner}.${name}`);
       if (shapesOnly !== true) {
@@ -603,6 +617,32 @@ function scalarNameOf(ty) {
 function fieldValue(ft, v) {
   const n = scalarNameOf(ft);
   return (n === 'float32' || n === 'float64') ? convOf('float', v) : v;
+}
+
+/**
+ * 每个顶层函数/方法**声明的形参类型节点**（`collectDecls` 里收，`argsByDecl` 拿来用）。
+ * 键：函数名，或方法的 `Owner__Method`（那时第 0 格是接收者，存 undefined）。
+ */
+const FSIG = new Map();
+
+/**
+ * 一串实参**按声明的形参类型转一遍**（今天只有浮点那一格，与 `fieldValue` 同一条规矩）。
+ *
+ * 为什么非要它（量出来的，`tests/go/cases/04-multi-return.go`）：`mk(3, 4)` 给
+ * `func mk(x, y float64)` 递的是**整字面量**，而 core 那条腿的形参是靠调用点定型的 ——
+ * 同一个形参在一处是 real（`P{x,y}` 那侧推出来的）、在另一处是 int，于是报
+ * 「'mk' 第 1 格形参落成了 real，可后面有一处调用给的是 int」。
+ * go 的规矩是**无类型常量按形参的声明类型转** —— 声明就在 `FSIG` 里，照着转即可；
+ * 对本来就是浮点的实参这一转是空操作（与 `fieldValue` 那段账同理）。
+ */
+function argsByDecl(name, nodes, skip) {
+  const tys = FSIG.get(name);
+  if (tys === undefined) return nodes;
+  const off = skip === true ? 1 : 0;
+  return nodes.map((a, i) => {
+    const ty = tys[i + off];
+    return ty === undefined ? a : fieldValue(ty, a);
+  });
 }
 
 /**
@@ -870,7 +910,14 @@ function inScope(f) {
   try { return f(); } finally { SCOPES.pop(); }
 }
 
-function funcOf(sig, blk, name, self, selfType) {
+/**
+ * 一格签名的形参表收成 `[{nm, ty}, …]`（**只收带名字的那些**）。
+ *
+ * 从 `funcOf` 里抽出来是因为 `collectDecls` 也要它：调用点要按**声明的形参类型**
+ * 转实参（`FSIG`，见 `argsByDecl`），那张表必须与 `funcOf` 算出的形参**同一条规则、
+ * 同一个顺序** —— 两处各写一遍就会错位。
+ */
+function paramInfo(sig) {
   /* **Go 的参数组** `(a, b int)`：语法上有歧义——`a` 既可能是类型也可能是名字。
      go.grammar 的 `(-> (type) (p $1))` 把 `a` 收成了**类型**，于是名字丢了。
      go 的规矩：一个参数表里**要么全带名字、要么全不带**。所以判据是：
@@ -898,6 +945,12 @@ function funcOf(sig, blk, name, self, selfType) {
       else lastTy = pinfo[i].ty;
     }
   }
+  return pinfo;
+}
+
+function funcOf(sig, blk, name, self, selfType) {
+  const inParams = partKids(sig, 'in');
+  const pinfo = paramInfo(sig);
   const params = pinfo.map((x) => x.nm);
   /* **形参里的 `_` 与重名**：go 允许 `func(_, _ uint, msg string)`（两个空名字），
      JS 的箭头函数不许重复形参（严格模式当场 SyntaxError）。所以给每一格空名字
@@ -1848,7 +1901,9 @@ function toNode(x) {
         if (owner !== undefined && (MSET.has(`${owner}.${m}`) || XPKG.mset.has(`${owner}.${m}`))) {
           return node('call', {
             fn: node('ref', {}, { name: mangle(owner, m) }),
-            args: onType ? argNodes : [toNode(obj), ...argNodes],
+            args: onType
+              ? argsByDecl(mangle(owner, m), argNodes, false)
+              : [toNode(obj), ...argsByDecl(mangle(owner, m), argNodes, true)],
           });
         }
         /* **`pkg.Func(…)`：包名点函数**（`ir.NewNilExpr(…)` / `types.NewPtr(…)`）。
@@ -1862,7 +1917,9 @@ function toNode(x) {
         if (flat !== undefined && flat !== null) {
           return node('call', {
             fn: node('ref', {}, { name: mangle(flat, m) }),
-            args: onType ? argNodes : [toNode(obj), ...argNodes],
+            args: onType
+              ? argsByDecl(mangle(flat, m), argNodes, false)
+              : [toNode(obj), ...argsByDecl(mangle(flat, m), argNodes, true)],
           });
         }
         /* **兜底：field-get 再调它**（与 V 同一个口径）。
@@ -1928,7 +1985,7 @@ function toNode(x) {
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
         return convOf(CONV.get(callee), argNodes[0]);
       }
-      return node('call', { fn: toNode(fn), args: argNodes });
+      return node('call', { fn: toNode(fn), args: callee === null ? argNodes : argsByDecl(callee, argNodes, false) });
     }
     // `var` / `const` 落**一串 bind**（顶层与语句里同一格 —— go 两处都写得下）。
     // 树上的标签是 `var` / `const`（`go.grammar` 的 const-decl / var-decl 两条产生式
@@ -2048,6 +2105,7 @@ export function goToGraph(tree, opts) {
   STRUCTS.clear();
   UNDER.clear();
   MSET.clear();
+  FSIG.clear();
   NEEDS_TYPETAG = false;
   VARTYPE.clear();
   IMPORTS.clear();
