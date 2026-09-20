@@ -39,7 +39,7 @@ import {
   ldpPost, ldrFpU, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz,
   msub, mul,
   mvn, neg, orrImm, orrReg,
-  cneg, retArm64, scvtf, sdiv, stp, ldp, stpFp, ldpFp, stpPre, strFpU, strU, strRegOff, subImm, subReg, svcArm64, sxtb,
+  cneg, fmovFp, retArm64, scvtf, sdiv, stp, ldp, stpFp, ldpFp, stpPre, strFpU, strU, strRegOff, subImm, subReg, svcArm64, sxtb,
   sxth, sxtw,
   ucvtf, udiv
 } from './encode.js';
@@ -1684,8 +1684,12 @@ class FnGen {
       fb(buf, dbl, d, x, y);
       return this.fDef(i, d, dbl);
     }
-    buf.emit(fcmpArm64(dbl, x, y), cset(1, RES, fc));
-    return this.def(i, RES);
+    /* 比较的结果是 bool（通用那一类）：**直接 cset 进它该待的寄存器**，
+     * 省掉 `def` 里那条 `mov 粘住, RES`。操作数在 d 寄存器里，与 GP 的避让无关，
+     * 所以 `dest` 的 a/b 传 -1。 */
+    const dc = this.dest(i, -1, -1);
+    buf.emit(fcmpArm64(dbl, x, y), cset(1, dc, fc));
+    return this.def(i, dc);
   }
 
   /**
@@ -1938,6 +1942,16 @@ class FnGen {
     }
     if (typeKind(t) === T_VOID) return;
     if (isFloatType(t)) {
+      /* 返回值住 FP 寄存器（`STICKY_F`）⇒ **一条 `fmov d,d`** 直接从 d0 搬过去。
+       * 从前走 `fromFp(RES, 0)` 再让 `def` 的 FP 钩子搬回去是**两条** `fmov`
+       * （d0 -> x8 -> d粘住），中间白绕一趟通用寄存器。
+       * `radiance` 里 41 条 `bl`，返回 double 的是大头。 */
+      const fsk = this.fstickyAt(i);
+      if (fsk >= 0) {
+        if (fsk !== 0) this.buf.emit(fmovFp(typeKind(t) === T_F64, fsk, 0));
+        this.pending = -1;
+        return;
+      }
       this.fromFp(RES, 0, typeKind(t) === T_F64);
       return this.def(i, RES);
     }
