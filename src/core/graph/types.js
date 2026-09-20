@@ -44,7 +44,16 @@ export function argList(n, port) {
 export function litType(v) {
   if (typeof v === 'boolean') return 'bool';
   if (typeof v === 'string') return 'string';
-  if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'real';
+  /* **整数值但装不进 int64 的算 real**：`Number.isInteger(1.7976931348623157e308)` 在 JS 里
+     为真，只看 `isInteger` 的话 `math.MaxFloat64` 会被说成 int —— 而它本来就不在整数域里，
+     方言的 `(int …)` 也只收十进制整数（读取器当场骂 `(int 十进制整数)`）。
+     界是 **2^63**（int64 的范围），**不是** `isSafeInteger` 的 2^53：`6364136223846793005`
+     （PCG 的乘数，`tests/go/cases/10-unsigned.go` 里那一格）过不了 double 的精确表示，
+     但它是个正经的 int64 —— 那一档由 `const` 的 `exact` 附属带着源码里那串数字过去。
+     用 2^53 当界量到过：那个乘数被说成 real，`h.s * 乘数` 于是把左边抬成 real。 */
+  if (typeof v === 'number') {
+    return (Number.isInteger(v) && Math.abs(v) < 2 ** 63) ? 'int' : 'real';
+  }
   return null;
 }
 

@@ -509,6 +509,90 @@ const NILFNS = new Map();
 const BOXING = new Set();
 /** 顶层函数/方法名 -> **声明的单返回类型节点**（`ret` 那一处要按它装箱）。 */
 const FRET = new Map();
+/**
+ * **`math.F(…)` 怎么落**（go 的名字 -> 方言 `(rmath "f" …)` 里那个 C 的名字）。
+ *
+ * 图上仍旧只是"调一个名字"：这儿发 `call __goMath_f(…)`，`backend-core.js` 的
+ * `GO_RMATH` 认出名字落 `(rmath "f" …)`。为什么不给图加一族 prim：见那儿的注。
+ *
+ * **不在这张表里的三格**另走：`Max`/`Min` 落成一格生成的辅助函数（`ensureMathMinMax`
+ * —— 用 branch 会把实参复制一遍，那在 `math.Max(f(), g())` 上是两次求值）、
+ * `Modf` 落在**语句**那一层（`assign` 里那一段 —— 多返回的辅助函数在 `retTypeOf`
+ * 那一趟定不了型）、`Pi`/`E` 那一族是常量（`GO_STDLIB_STUBS.math`）。
+ */
+const GO_MATH_RMATH = new Map([
+  ['Sqrt', 'sqrt'], ['Abs', 'fabs'], ['Floor', 'floor'], ['Ceil', 'ceil'], ['Round', 'round'],
+  ['Pow', 'pow'], ['Mod', 'fmod'], ['Hypot', 'hypot'], ['Atan2', 'atan2'],
+  ['Sin', 'sin'], ['Cos', 'cos'], ['Tan', 'tan'],
+  ['Asin', 'asin'], ['Acos', 'acos'], ['Atan', 'atan'],
+  ['Sinh', 'sinh'], ['Cosh', 'cosh'], ['Tanh', 'tanh'],
+  ['Asinh', 'asinh'], ['Acosh', 'acosh'], ['Atanh', 'atanh'],
+  ['Exp', 'exp'], ['Expm1', 'expm1'], ['Log', 'log'], ['Log10', 'log10'],
+  ['Log1p', 'log1p'], ['Cbrt', 'cbrt'],
+]);
+/** 生成出来的 math 辅助函数（名字 -> `func` 节点），一趟一份，附在模块体前头。 */
+const MATHFNS = new Map();
+/** 一格 `float64` 的类型节点（生成的辅助函数要拿它当 `pzero` / `rzero` / `FRET`）。 */
+const F64TY = { kind: 'list', items: [{ kind: 'atom', value: 'tname' }, { kind: 'atom', value: 'float64' }] };
+const f64Zero = () => zeroOf(F64TY, 'math 辅助');
+const rmathCall = (rm, args) => node('call', {
+  fn: node('ref', {}, { name: `__goMath_${rm}` }), args,
+});
+
+/**
+ * `math.Max` / `math.Min` —— 方言的 `rmath` 里没有 `fmax`/`fmin`，所以生成一格
+ * **go 级的辅助函数**：`func __goMathMax(a, b float64) float64 { if a > b { return a }; return b }`。
+ *
+ * 为什么不直接落 `branch (a>b) a b`：那会把两个实参各复制一遍，
+ * `math.Max(f(), g())` 于是变成四次调用（其中两次的副作用多跑一遍）。
+ *
+ * **与 go 的差**：go 的 `math.Max` 在 NaN / ±0 上有明文规矩（有 NaN 就回 NaN、
+ * `Max(+0,-0)` 回 +0），这一格的比较给不出那两条。pt 用不到，记在这儿。
+ */
+function ensureMathMinMax(which) {
+  const nm = `__goMath${which}`;
+  if (MATHFNS.has(nm)) return nm;
+  MATHFNS.set(nm, null);
+  const a = node('ref', {}, { name: '__ma' });
+  const b = node('ref', {}, { name: '__mb' });
+  const z = f64Zero();
+  MATHFNS.set(nm, node('func', {
+    body: [
+      branchOf(binOf(which === 'Max' ? '>' : '<', a, b, OPS, { lang: 'go' }),
+        node('region', { body: [retOf([a])] })),
+      retOf([b]),
+    ],
+  }, { params: ['__ma', '__mb'], name: nm, pzero: [z, z], rzero: z }));
+  FRET.set(nm, F64TY);
+  return nm;
+}
+
+/** `math.Modf` 落在语句那一层（见 `assign` 里那一段）用的序号 —— 嵌套也不撞名。 */
+let MODF_N = 0;
+
+/** 这一处调用是不是 `math.<名字>(…)`（`math` 被局部量遮住就不算）。 */
+function isMathCallOf(x, name) {
+  if (x === undefined || !isList(x) || tag(x) !== 'call') return false;
+  const f = kids(x)[0];
+  if (f === undefined || !isList(f) || tag(f) !== 'sel') return false;
+  const o = kids(f)[0];
+  return isList(o) && tag(o) === 'name' && leaf(kids(o)[0]) === 'math'
+    && VARTYPE.get('math') === undefined && leaf(kids(f)[1]) === name;
+}
+
+/**
+ * 一处 `math.F(…)`：认得出来就落，认不出来回 null（照旧走下面那几条路，最后报）。
+ * `math` 被局部量遮住时不走这儿（`VARTYPE` 有那个名字就是遮住了）。
+ */
+function goMathCall(m, argNodes) {
+  const rm = GO_MATH_RMATH.get(m);
+  if (rm !== undefined) return rmathCall(rm, argNodes);
+  if ((m === 'Max' || m === 'Min') && argNodes.length === 2) {
+    return node('call', { fn: node('ref', {}, { name: ensureMathMinMax(m) }), args: argNodes });
+  }
+  return null;
+}
+
 /** 名字 -> 它的**声明类型节点**（形参与 `var x T`；`VARTYPE` 只存名字，这张存树）。 */
 let VARTY = new Map();
 /** 正在走的那格函数**声明的单返回类型节点**（`ret` 那一处按它装箱）。 */
@@ -1104,6 +1188,8 @@ const FORMATS = new Set(['Sprintf', 'Errorf', 'Printf', 'Fprintf']);
  *
  * 这不是"完整实现标准库"——只做 syntax 包实际用到的那几个符号。
  */
+/** 常量桩里`这一格是 real`的标记（见 `math` 那一行的注）。 */
+const R = (x) => ({ __real: x });
 const GO_STDLIB_STUBS = {
   utf8: { RuneSelf: 128, UTFMax: 4, RuneError: 0xFFFD },
   unicode: {},
@@ -1121,7 +1207,12 @@ const GO_STDLIB_STUBS = {
   log: {},
   bytes: {},
   sync: {},
-  math: { MaxInt32: 2147483647, MinInt32: -2147483648, MaxInt64: 9007199254740991, MaxFloat64: 1.7976931348623157e308 },
+  /* **浮点常量要标记成 real**（`R(…)`）：`1.7976931348623157e308` 在 JS 里
+     `Number.isInteger` 为真，不标记就落成 `(int 1.79e+308)` —— 方言的读取器当场骂
+     `(int 十进制整数)`。整数常量照旧写裸数。 */
+  math: { MaxInt32: 2147483647, MinInt32: -2147483648, MaxInt64: 9007199254740991,
+    MaxFloat64: R(1.7976931348623157e308), SmallestNonzeroFloat64: R(5e-324),
+    Pi: R(Math.PI), E: R(Math.E), Sqrt2: R(Math.SQRT2), Ln2: R(Math.LN2), Log2E: R(Math.LOG2E) },
   flag: {},
   encoding: {},
   json: {},
@@ -2623,6 +2714,36 @@ function toNode(x) {
       const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
       // `x, y := f()` / `x, ok = m[k]`：N 个名字对 1 个右值 ⇒ 多值的消费侧
       if (lhs.length > 1 && rhs.length === 1) {
+        /* **`i, f := math.Modf(e)`** —— `rmath` 里没有 modf，而 go 的整数部分是
+           **往零截断**（与 f 同号），`floor` 只对非负数是它。落成三句：
+             bind __mfN = e        // e 只求一次值
+             i = e < 0 ? -floor(-e) : floor(e)
+             f = __mfN - i
+           为什么摆在**语句这一层**而不是包一格辅助函数：多返回的辅助函数在
+           `retTypeOf` 那一趟定不了型（那时形参还没类型，两格都成了 int），
+           落出来是"要返回 m1，给的是 m3"。表达式位置上的 `math.Modf(…)` 照旧报缺口。 */
+        if (lhs.length === 2 && isMathCallOf(rhs[0], 'Modf')) {
+          const mk = (n, init) => {
+            if (isDef && !seenHere(n)) { declHere(n); return node('bind', { init }, { name: n }); }
+            return node('set', { value: init }, { name: n });
+          };
+          const as = kids(rhs[0]).find((y) => tag(y) === 'args');
+          const a0 = as === undefined ? undefined : kids(as)[0];
+          if (a0 === undefined) throw new Error('go->graph: math.Modf 一格实参都没有');
+          MODF_N += 1;
+          const tv = `__modf${MODF_N}`;
+          const at = () => node('ref', {}, { name: tv });
+          const neg = (v) => binOf('-', f64Zero(), v, OPS, { lang: 'go' });
+          const trunc = branchOf(binOf('<', at(), f64Zero(), OPS, { lang: 'go' }),
+            neg(rmathCall('floor', [neg(at())])), rmathCall('floor', [at()]));
+          const iNm = nameOf(lhs[0]) === '_' ? `${tv}i` : nameOf(lhs[0]);
+          const out = [node('bind', { init: toNode(a0) }, { name: tv }), mk(iNm, trunc)];
+          if (nameOf(lhs[1]) !== '_') {
+            out.push(mk(nameOf(lhs[1]),
+              binOf('-', at(), node('ref', {}, { name: iNm }), OPS, { lang: 'go' })));
+          }
+          return out;
+        }
         // **`v, ok := m[k]` 不是多值**：go 在这儿给的是"值 + 在不在"，落 map-get + map-has。
         if (lhs.length === 2 && tag(rhs[0]) === 'index' && isMap(kids(rhs[0])[0])) {
           const [o, k] = kids(rhs[0]);
@@ -2934,6 +3055,12 @@ function toNode(x) {
         const obj = kids(fn)[0];
         const onType = tag(obj) === 'name' && TYPES.has(leaf(kids(obj)[0]));
         const recvName = tag(obj) === 'name' ? leaf(kids(obj)[0]) : null;
+        /* **`math.F(…)`**（见 `GO_MATH_RMATH`）：`math` 是包名而不是值，所以要排在
+           "接收者是接口"与 mangle 前头。被局部量遮住（`VARTYPE` 里有这个名字）就不走。 */
+        if (recvName === 'math' && VARTYPE.get('math') === undefined) {
+          const mc = goMathCall(m, argNodes);
+          if (mc !== null) return mc;
+        }
         const fromVar = recvName !== null ? VARTYPE.get(recvName) : undefined;
         const flat = METHODS.get(m);
         /* **接收者不是光名字**（`shapes[0].BoundingBox()` / `m.tree.Intersect(r)`）时也要
@@ -3242,6 +3369,7 @@ export function goToGraph(tree, opts) {
   // —— `m[k]` 与 `xs[i]` 同形那笔账，在 go 上不需要驱动器回问类型。
   MAPS.clear();
   MAPTY.clear();
+  MATHFNS.clear();
   CHANS.clear();
   UNS.clear();
   for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
@@ -3284,6 +3412,9 @@ export function goToGraph(tree, opts) {
          那一格特判，压根不走取字段）。 */
       if (fields.length === 0) continue;
       const rec = recordNew(fields.map(([k, v]) => {
+        if (v !== null && typeof v === 'object' && '__real' in v) {
+          return [k, convOf('float', lit(v.__real))];
+        }
         if (typeof v === 'number') return [k, lit(v)];
         if (typeof v === 'string') return [k, lit(v)];
         if (typeof v === 'boolean') return [k, lit(v)];
@@ -3316,7 +3447,9 @@ export function goToGraph(tree, opts) {
      现造），所以得等 `mapped` 算完才齐 —— 但**摆的位置要在前面**：core 那条腿按次序推
      类型，`var one Shape = __box_Sq__Shape(…)` 要先见过那格函数才知道它交出来的是记录
      （不然 `one` 默认成 int，一取字段就报"说不清形状"）。 */
-  const body = [...stubBinds, ...BOXFNS.values(), ...[...NILFNS.values()].filter((v) => v !== null), ...mapped];
+  const body = [...stubBinds, ...BOXFNS.values(),
+    ...[...MATHFNS.values()].filter((v) => v !== null),
+    ...[...NILFNS.values()].filter((v) => v !== null), ...mapped];
   if (opts !== undefined && opts.asModule === true) return program(body);
   /* 入口那一句。**用到并发的那些包一层**（`NEEDS_SCHED`）：`func main()` 要跑成
      主 g，不然第一次在无缓冲 channel 上发送就是"park 一个不存在的 g"。 */

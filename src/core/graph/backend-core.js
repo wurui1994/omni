@@ -724,8 +724,32 @@ const C_RT = new Map([
   ['__goSelOK', { sym: 'omni_go_sel_ok', ret: 'i64', dty: 'int', ps: [] }],
 ]);
 
-/** `C_RT` 那张表里 `ps` 的一格 -> `(cabi …)` 里写的那个词。 */
-const CRT_CABI = { fn: 'ptr', ptr: 'ptr', i64: 'i64' };
+/**
+ * **go 的 `math.F(…)` -> 方言的 `(rmath "f" …)`**（前端发 `call __goMath_f(…)`）。
+ *
+ * 为什么走这条路而不是给图加一族 `prim`：方言这侧 `(rmath …)` 本来就有、六条腿都认
+ * （`sexpr/lower.js` 的 `RMATH`，C99 math.h ∩ ECMA-262 Math），而给图加 prim 要动
+ * `prims.js` 的清单 + 六个后端 + 提供者表。与 `C_RT` 那张表同一条路数：图上仍旧只是
+ * "调一个名字"。
+ *
+ * 键是**方言里 rmath 的名字**（也就是 C 的名字），值是实参个数。go 那侧的名字
+ * （`Sqrt` / `Abs` / …）由 `ext/go/tograph.js` 映到这儿 —— 那是那门语言的事。
+ *
+ * **不在这张表里的**（go 有、rmath 没有）由前端自己拼：`math.Max`/`math.Min` 落成
+ * 一格生成的 go 级辅助函数（一次求值，别用 branch 复制实参）、`math.Pi` 是常量桩。
+ */
+const GO_RMATH = new Map([
+  ['sqrt', 1], ['fabs', 1], ['floor', 1], ['ceil', 1], ['round', 1],
+  ['pow', 2], ['fmod', 2], ['hypot', 2], ['atan2', 2],
+  ['sin', 1], ['cos', 1], ['tan', 1], ['asin', 1], ['acos', 1], ['atan', 1],
+  ['sinh', 1], ['cosh', 1], ['tanh', 1], ['asinh', 1], ['acosh', 1], ['atanh', 1],
+  ['exp', 1], ['expm1', 1], ['log', 1], ['log10', 1], ['log1p', 1], ['cbrt', 1],
+]);
+/** 前端发的那个名字（`__goMath_sqrt`）-> rmath 的名字。 */
+const goRmathOf = (nm) => (typeof nm === 'string' && nm.startsWith('__goMath_')
+  && GO_RMATH.has(nm.slice(9)) ? nm.slice(9) : null);
+
+/** `C_RT` 那张表里 `ps` 的一格 -> `(cabi …)` 里写的那个词。 */const CRT_CABI = { fn: 'ptr', ptr: 'ptr', i64: 'i64' };
 /** 并发那一档的体在哪个库里（逻辑名，cli.js 的 `resolveLib` 认它）。 */
 const C_RT_LIB = 'libomnigo';
 
@@ -764,6 +788,23 @@ function callText(x, env, ctx) {
      没有函数体（体在 `libomnigo` 里）。 */
   if (isNode(f) && f.op === 'ref' && C_RT.has(f.attrs.name)) {
     return crtCall(C_RT.get(f.attrs.name), x, env, ctx);
+  }
+  /* **go 的 `math.F(…)`**（见 `GO_RMATH`）：落成 `(rmath "f" …)`。实参一律抬成 real ——
+     方言的 rmath 收的是 real，而 go 那侧 `math.Sqrt(2)` 的实参可能是个整数字面量。 */
+  {
+    const rm = isNode(f) && f.op === 'ref' ? goRmathOf(f.attrs.name) : null;
+    if (rm !== null) {
+      const as = argList(x, 'args');
+      const want = GO_RMATH.get(rm);
+      if (as.length !== want) {
+        gap(`'math.${rm}' 要 ${want} 个实参，图上给的是 ${as.length} 个`);
+      }
+      const vs = as.map((a) => {
+        const v = expr(a, env, ctx);
+        return typeOf(a, env, ctx) === 'real' ? v : `(toreal ${v})`;
+      });
+      return `(rmath "${rm}" ${vs.join(' ')})`;
+    }
   }
   /* **被调的是一格从字典里取出来的函数**（lua 的 `p:total()`、`a.__meta.__close(a)`）：
      先按键查出签名、拆箱成 `(fnty …)`，再走 `(callfn …)`。
@@ -2112,6 +2153,8 @@ export function emitCore(g) {
   /* **运行时那几个 C 符号的返回类型**先摆进 env：调用点的 `inferType` 查的是 `fn:名字`，
      而它们在这份产物里没有函数体（体在 `libomnigo` 里），不走 `ctx.rets` 那一趟。 */
   for (const [nm, d] of C_RT) env.set(`fn:${nm}`, d.dty);
+  /* go 的 `math.F(…)`（`GO_RMATH`）交出来的一律是 real。 */
+  for (const nm of GO_RMATH.keys()) env.set(`fn:__goMath_${nm}`, 'real');
   /* 覆盖层（`types.js`）要问的那两件**后端自己的事**（见文件头那段 import 的注）：
      登记一格形状（顺带往模块头上印 `(struct rN …)`）、报一格有名有姓的缺口。 */
   ctx.shapeOf = (names, types, multi) => shapeOf(names, types, multi, ctx);
@@ -2152,7 +2195,8 @@ export function emitCore(g) {
      + **运行时那几个 C 符号**（`C_RT`）。少了最后一批，一格 `go func(){ ch <- k }(i)`
      的体里那句 `ref __goChanSend` 会被当成"借了外层的名字"，于是 lambda 提升不动它，
      后面报"要一个具名函数" —— 量出来的（`/tmp/goclo.go` 那一份）。 */
-  const known = new Set([...taken, ...modNames, ...C_RT.keys()]);
+  const known = new Set([...taken, ...modNames, ...C_RT.keys(),
+    ...[...GO_RMATH.keys()].map((n) => `__goMath_${n}`)]);
   const fns = [];
   for (const f of raw) {
     const r = liftOne(f.body, f.name, known, taken, gap);
