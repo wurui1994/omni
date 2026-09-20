@@ -133,10 +133,71 @@ export function inlineCalls(fn, mod) {
       }
       emit(OP.STORE, p.t, v, REF_NONE, slotBase + p.slot);
     }
-    /* 2.3 结果槽（void 就不要） */
-    const resSlot = callee.ret === T_VOID ? -1 : fn.slot(`${callee.name}$ret`, callee.ret);
+    /* 2.3 结果槽（void 就不要；尾返回那一路也不要 —— 见下面 `tailRet`） */
     const ctx = { callee, slotBase, frameBase, cmap: [] };
     for (let q = 0; q < callee.op.length; q++) ctx.cmap.push(-1);
+
+    /**
+     * **尾返回：不包 BLOCK、不要结果槽。**
+     *
+     * 条件（三条都要）：被调只有一条 `RET`、它在**最后一条**、而且那儿**没开着任何区域**。
+     * `vsub`/`vdot`/`V` 这种一句 return 的函数全满足。
+     *
+     * 为什么这一刀现在值钱了（之前量过一次是**负收益**，注释留在文件末尾）：
+     * 那时 `ssa.js` 的 `addressTakenSlots` 有一行「函数里有 FRAME 就把所有槽标成地址已取」，
+     * **mem2reg 在这些函数上整个是空操作**，所以包不包 BLOCK 只影响后端那五个 POOL 寄存器
+     * 的活跃区间，包着反而好。那一行改掉之后账翻过来了：包着 BLOCK 的话
+     *   `STORE 结果 -> 槽`（在 BLOCK 里）+ `LOAD 槽`（在 END 之后）
+     * 跨了区域边界，MIR 没有 phi、`region.js` 那条词法作用域的规矩下 mem2reg **提升不掉** ——
+     * 每个内联的 `vsub` 都留下一对访存。不包就没有那道边界。
+     */
+    let tailRet = -1;
+    {
+      /* 从末尾往前吃连着的 `RET`，同时算它们那儿开着几层区域。
+         C 前端常在末尾铺**两条一样的 `RET`**（一条来自源码里的 return、一条是兜底的），
+         后一条到不了 —— 所以判据不是"只有一条 RET"，而是**所有 RET 连成一个后缀、
+         都在 0 层、而且带的是同一个值**。那样第一条就是唯一会执行的那条。 */
+      const depthAt = [];
+      let d = 0;
+      for (let q = 0; q < callee.op.length; q++) {
+        const cop = callee.op[q];
+        if (cop === OP.END) d--;
+        depthAt.push(d);
+        if (cop === OP.BLOCK || cop === OP.LOOP || cop === OP.IF) d++;
+      }
+      let q = callee.op.length;
+      while (q > 0 && callee.op[q - 1] === OP.RET && depthAt[q - 1] === 0) q--;
+      if (q > 0 && q < callee.op.length) {
+        let same = true;
+        for (let k = q; k < callee.op.length; k++) {
+          if (callee.a[k] !== callee.a[q]) { same = false; break; }
+          if (callee.op[k] !== OP.RET) { same = false; break; }
+        }
+        /* 中间不能还有别的 `RET`（那种是真的多出口，得包 BLOCK） */
+        for (let k = 0; k < q; k++) if (callee.op[k] === OP.RET) { same = false; break; }
+        if (same) tailRet = q;
+      }
+    }
+    const resSlot = (callee.ret === T_VOID || tailRet >= 0)
+      ? -1 : fn.slot(`${callee.name}$ret`, callee.ret);
+
+    if (tailRet >= 0) {
+      /* 2.4a 尾返回：整段直接铺进来，那条 `RET` 一个字都不发 */
+      for (let q = 0; q < tailRet; q++) {
+        ctx.cmap[q] = emit(callee.op[q], callee.t[q], callee.a[q], callee.b[q], callee.aux[q],
+          { ctx, oldPc: q, ret: false });
+      }
+      /* 2.5a 顶替那条 CALL：就是 `RET` 带的那个值（void 的就映到最后一条） */
+      const rv = callee.a[tailRet];
+      if (callee.ret === T_VOID || rv === REF_NONE) {
+        map[pc] = REF_BIAS + (op.length - 1);
+      } else if (rv < REF_BIAS) {
+        map[pc] = rv;                                  // 常量：照原样
+      } else {
+        map[pc] = REF_BIAS + ctx.cmap[rv - REF_BIAS];  // 被调体里那条指令的新下标
+      }
+      continue;
+    }
 
     /* 2.4 包一层 BLOCK，`RET` 翻成"存结果 + 跳出去" */
     emit(OP.BLOCK, T_VOID, REF_NONE, REF_NONE, 0);
