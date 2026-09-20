@@ -817,7 +817,7 @@ function callText(x, env, ctx) {
     if (isNode(f) && f.op === 'field-get') {
       const ft1 = typeOf(f, env, ctx);
       if (typeof ft1 === 'string' && ft1.startsWith('(fnty ')) {
-        const vargs = argList(x, 'args').map((a) => expr(a, env, ctx));
+        const vargs = argList(x, 'args').map((a) => aggValText(a, env, ctx));
         return `(callfn ${expr(f, env, ctx)}${vargs.length === 0 ? '' : ` ${vargs.join(' ')}`})`;
       }
     }
@@ -1489,7 +1489,7 @@ function stmtIn(x, env, ctx) {
         if (elemType(typeOf(ps[0], env, ctx)) === null) {
           gap('push 的第一格推不出是列表（方言的数组是单态的，元素类型得知道）');
         }
-        return [`(apush ${objText(ps[0], env, ctx)} ${expr(ps[1], env, ctx)})`];
+        return [`(apush ${objText(ps[0], env, ctx)} ${aggValText(ps[1], env, ctx)})`];
       }
       if (x.attrs.name !== 'print') return [`(expr ${expr(x, env, ctx)})`];
       const args = argList(x, 'args');
@@ -1554,6 +1554,17 @@ function bindRecord(nm, rec, env, ctx) {
       pre.push(...MATERIALIZE[v.op](tn, v, env, ctx));
       fieldText.push(`(var ${tn})`);
       return env.get(tn) ?? at0;
+    }
+    /* **字段里是 `make([]T, n)`**（图上是 `prim fill`）：与上面那一支同一条 —— 先物化
+       （`bindFill`），再把句柄存进字段。`typeOf` 对 `prim fill` 走的是算术那一档、答 int，
+       于是 `&T{make([]N, 0), 7}` 里 `Nodes` 落成 int，`t.Nodes[0].Axis` 报
+       "在一格说不清形状的东西上取字段 'Axis'（一格 index-get 推出来是 int）"（量到过）。 */
+    if (isNode(v) && v.op === 'prim' && v.attrs.name === 'fill') {
+      ctx.tmp = ctx.tmp + 1;
+      const tn = `agg_tmp${ctx.tmp}`;
+      pre.push(...bindFill(tn, v, env, ctx));
+      fieldText.push(`(var ${tn})`);
+      return env.get(tn);
     }
     /* **字段里装着一格函数值**（go 的接口分派，ADR-0040；asy 的 `fill2 fill2;` 也是它）：
        类型是 `(fnty …)`，值是 `(fnref …)` / `(mkclo …)`。`typeOf` 对"函数名当值用"答不出来
@@ -2436,7 +2447,10 @@ function fieldTypesOfNode(names, vals, env, ctx) {
     let t = null;
     /* **字段里是一格数组 / 字典**（`Mesh.Triangles []*Triangle`）：句柄一个字，`(arr T)`
        这格类型 `typeOf` 答不出来（`list-new` 回 UNKNOWN=int），走 `declTypeOfNode`。 */
-    if (isNode(v) && (v.op === 'list-new' || v.op === 'map-new')) {
+    /* `prim fill` 也算（`make([]T, n)` 当字段的初值 —— `&T{make([]N, 0), 7}`）：
+       `typeOf` 对它走的是算术那一档，答 int。 */
+    if (isNode(v) && (v.op === 'list-new' || v.op === 'map-new'
+      || (v.op === 'prim' && v.attrs.name === 'fill'))) {
       const at = declTypeOfNode(v, env, ctx);
       if (at === null) return null;
       types.push(at);
@@ -2521,6 +2535,19 @@ function declTypeOfNode(z, env, ctx) {
     const el = items.length > 0 ? items[0] : (z.attrs === undefined ? null : z.attrs.elem);
     const et = declTypeOfNode(el, env, ctx);
     return et === null ? null : `(arr ${et})`;
+  }
+  /* **`make([]T, n)`**（图上是 `prim fill(n, T 的零值)`）：类型是 `(arr T)`。
+     少这一条的代价量到过：`&T{make([]N, 0), 7}` 里 `Nodes` 落成 **int**（`typeOf` 对
+     `prim fill` 走的是算术那一档），于是 `t.Nodes[0].Axis` 报"在一格说不清形状的东西上
+     取字段"、或者同一个 go 结构体算出两格形状。 */
+  if (isNode(z) && z.op === 'prim' && z.attrs.name === 'fill') {
+    const fa = argList(z, 'args');
+    if (fa.length === 2) {
+      try {
+        const et = declTypeOfNode(fa[1], env, ctx);
+        if (et !== null) return `(arr ${et})`;
+      } catch { /* 说不清就往下走 */ }
+    }
   }
   if (isNode(z) && z.op === 'func') return fnTypeOfFuncNode(z, env, ctx);
   try { return typeOf(z, env, ctx); } catch { return null; }
