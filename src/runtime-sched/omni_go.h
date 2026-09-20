@@ -1,0 +1,35 @@
+/* omni_go.h —— 前端那一侧的门面：把 `go f(x)` 与 channel 收成**几个 C 符号**。
+ *
+ * 为什么要这一层（而不是让前端直接 ccall omni_newproc / omni_chansend）：
+ *   1. `omni_chansend(c, ep, block)` 的第二格是**元素的地址**，而方言那一层的实参
+ *      已经是机器值了，没有地方摆一格栈上的临时量 —— 这儿按值收，地址在这一侧取。
+ *   2. `omni_newproc(void (*)(void *), void *)` 要一格 C 函数指针，而前端手里是
+ *      **方言的函数值**（闭包对象）。那一次改写（打包实参 + 蹦床）也放在这儿。
+ *   3. 主 goroutine 必须跑在 `omni_sched_main` 里（park 要能切走），所以整个
+ *      `func main()` 的体是**递进来的一格函数值**，不是普通调用。
+ *
+ * 方言只有一格整数，所以这儿一律 `int64_t` 与不透明地址（`ptr` 在 `CABI_CORE` 里
+ * 也落在 int 上）—— 见 `src/core/sexpr/lower.js` 的 CABI_CORE 那段注。
+ */
+#ifndef OMNI_GO_H
+#define OMNI_GO_H
+
+#include <stdint.h>
+
+/* `func main()` 跑成**主 g**：调度器在这一句里起、主 g 一回来整个调度器收摊
+   （与 Go 的 main 一样）。`fnv` 是方言的函数值，签名 `fn() -> void`。 */
+void omni_go_run(void *fnv);
+
+/* `go f(x)`：`fnv` 的签名是 `fn(int) -> void`。实参在这一侧打包（堆上一格，
+   蹦床跑完就还）。 */
+void omni_go_spawn(void *fnv, int64_t arg);
+
+/* `make(chan T, n)` —— 元素一律 8 字节（方言只有一格整数）。回的是 hchan 的地址。 */
+void *omni_go_chan_new(int64_t cap);
+/* `c <- v` / `<-c` / `close(c)` / `len(c)` */
+void omni_go_chan_send(void *c, int64_t v);
+int64_t omni_go_chan_recv(void *c);
+void omni_go_chan_close(void *c);
+int64_t omni_go_chan_len(void *c);
+
+#endif /* OMNI_GO_H */

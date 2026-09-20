@@ -71,5 +71,21 @@ try {
   else bad('channel / select', `第 ${good + 1} 趟就挂了：\n${last}`);
 } catch (e) { bad('channel / select', String(e.stderr || e.message)); }
 
+/* 五、前端那一侧的门面（`omni_go.*`）：go 前端递进来的是**方言的函数值**
+ *    （首字段是代码地址的闭包对象），这一格验的正是那条接缝 + 主 g 的起法。
+ *    三档缓冲各跑 5 趟 —— 无缓冲那一档走的是 sendq/recvq 直接交接那条路。 */
+try {
+  const ge = join(out, 'go');
+  cc('go.c', ge, '-O1', ['omni_go.c', 'omni_chan.c']);
+  let good = 0, last = '';
+  const runs = [];
+  for (const cap of [0, 1, 8]) for (let i = 0; i < 5; i++) runs.push(cap);
+  for (const cap of runs) {
+    try { last = run(ge, ['300', String(cap)]); good++; } catch (e) { last = String(e.stdout || e.message); break; }
+  }
+  if (good === runs.length) ok('go f(x) / channel 的门面', `${runs.length} 趟全过（${last}）`);
+  else bad('go f(x) / channel 的门面', `第 ${good + 1} 趟就挂了：\n${last}`);
+} catch (e) { bad('go f(x) / channel 的门面', String(e.stderr || e.message)); }
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
