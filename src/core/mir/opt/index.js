@@ -19,6 +19,7 @@ import './deadcode.js';  // 八格 *deadcode
 import './rewrite.js';   // opt / middle opt / late opt
 import './cse.js';       // zero arg cse / generic cse / lowered cse
 import './dse.js';       // dse
+import './sroa.js';      // decompose user（SROA）
 import './regalloc.js';  // regalloc（只挂 fn.regHint，不改指令）
 import './autos.js';     // elim unread autos
 

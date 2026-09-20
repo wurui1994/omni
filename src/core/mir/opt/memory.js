@@ -4,7 +4,8 @@
  * MIR 里"内存"分三个互不相干的空间，这一格只管**线性内存**（`MLOAD`/`MSTORE`）：
  *   - 槽位（`LOAD`/`STORE`，角色 's'）：没有任何 op 能取它的地址，连调用都读不到
  *   - 模块级的"一格"（`GLOAD`/`GSTORE`）：wasm 的 `(global …)`，也不在线性内存上
- *   - 线性内存（`MLOAD`/`MSTORE`，还有 C 的影子栈与全局量的字节）
+ *   - **按地址读写**（`MLOAD`/`MSTORE`）：原生腿上地址就是真地址（局部量那一块是 `FRAME`、
+ *     全局量是 `GADDR`）；线性内存与那个 `$sp` 影子栈是 **wasm/js/解释器**那几条腿的事
  * 所以 `STORE`/`GSTORE` 既不读也不写线性内存 —— 这不是偷懒，是 ir.js 里那三条 op 的定义。
  *
  * 两个白名单的方向都是**保守**的：名单之外一律算"会读/会写"。加一条新 op 而忘了登记，
@@ -104,8 +105,8 @@ export function addrOf(fn, mod, ref) {
     if (base < REF_BIAS || base === REF_NONE) break;
     const pc = base - REF_BIAS;
     if (fn.op[pc] !== OP.ADD) break;
-    const ka = constInt(mod, fn.a[pc]);
-    const kb = constInt(mod, fn.b[pc]);
+    const ka = constVal(fn, mod, fn.a[pc], 0);
+    const kb = constVal(fn, mod, fn.b[pc], 0);
     if (kb !== null && fn.a[pc] >= REF_BIAS) { off += kb; base = fn.a[pc]; continue; }
     if (ka !== null && fn.b[pc] >= REF_BIAS) { off += ka; base = fn.b[pc]; continue; }
     break;
@@ -113,12 +114,49 @@ export function addrOf(fn, mod, ref) {
   return { base, off };
 }
 
-function constInt(mod, ref) {
-  if (ref === REF_NONE || ref >= REF_BIAS) return null;
-  const c = mod.consts.items[ref];
-  if (c === undefined || c.kind !== 'int') return null;
-  const v = Number(BigInt(c.text));
-  return Number.isSafeInteger(v) ? v : null;
+/**
+ * 这个 ref 是个**编译期常数**吗（是就回那个数，不是回 null）。
+ *
+ * 不只认常量池里的一条 —— 还认「几个常量算出来的那棵小树」（`ADD`/`SUB`/`MUL`/`SHL`/`NEG`）。
+ * 为什么要这一层：C 前端的数组下标是 `ADD(base, MUL(下标, 元素宽))`，`t[0]` 于是是
+ * `ADD(base, MUL(k0, k4))` —— 那个 `MUL` 要等 `opt` 那一格才折成常量，而通道表里
+ * `decompose user`（SROA）**在 `opt` 之前**（Go 的前端出的是 `OffPtr [常量]`，没有这一步）。
+ * 不认这棵小树的话数组一格都拆不了 —— 判据 `sroa.test.js` 的 `plain` 量到过：
+ * 三条 MLOAD 一条没动，而同一份里 struct 的字段（偏移直接是常量）拆得干干净净。
+ *
+ * 中间用 Number 算但每步都查 `isSafeInteger`；深度有界（4 层）。
+ */
+export function constOffset(fn, mod, ref) { return constVal(fn, mod, ref, 0); }
+
+function constVal(fn, mod, ref, depth) {
+  if (ref === REF_NONE) return null;
+  if (ref < REF_BIAS) {
+    const c = mod.consts.items[ref];
+    if (c === undefined || c.kind !== 'int') return null;
+    const v = Number(BigInt(c.text));
+    return Number.isSafeInteger(v) ? v : null;
+  }
+  if (depth >= 4) return null;
+  const pc = ref - REF_BIAS;
+  const op = fn.op[pc];
+  if (op === OP.NEG) {
+    const a = constVal(fn, mod, fn.a[pc], depth + 1);
+    return a === null ? null : -a;
+  }
+  if (op !== OP.ADD && op !== OP.SUB && op !== OP.MUL && op !== OP.SHL) return null;
+  const a = constVal(fn, mod, fn.a[pc], depth + 1);
+  if (a === null) return null;
+  const b = constVal(fn, mod, fn.b[pc], depth + 1);
+  if (b === null) return null;
+  let r = 0;
+  if (op === OP.ADD) r = a + b;
+  else if (op === OP.SUB) r = a - b;
+  else if (op === OP.MUL) r = a * b;
+  else {
+    if (b < 0 || b > 31) return null;
+    r = a * Math.pow(2, b);
+  }
+  return Number.isSafeInteger(r) ? r : null;
 }
 
 /** 一条 MLOAD/MSTORE 访问的**字节区间**：`{base, lo, hi, kind}`（hi 不含）。 */

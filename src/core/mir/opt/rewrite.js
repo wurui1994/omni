@@ -299,7 +299,7 @@ function intIdentity(fn, mod, pc, op, t, A, B, x, y) {
  *   - 任何可能写内存的指令（调用、syscall、PSTORE…）⇒ 停
  *   - 读内存的指令（别的 MLOAD）不打断 —— 读不改值
  *
- * 这是 C 那条腿上最值钱的一格：影子栈上的局部量（数组、取过地址的变量）每次读写都是
+ * 这是 C 那条腿上最值钱的一格：取过地址的局部量（数组、struct）每次读写都是
  * 一条 MLOAD/MSTORE，转发之后它们变回普通的值。
  */
 function forwardLoads(fn, mod) {
