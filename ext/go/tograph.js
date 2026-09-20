@@ -1360,6 +1360,22 @@ function zeroOf(ty, name, pkg) {
       if (z !== null) return z;
     }
   }
+  /* **map 的零值**：值是标量时落一格空字典（不是 `null`）—— 与上头切片那一格同一条
+     理由：落 `null` 的话下游连键值类型都不知道（core 报「'm' 是一格 null（没赋过值）」）。
+     与 go 的差：go 的 nil map **写进去要 panic**、`== nil` 为真；读 / `len` / `range`
+     两边一样。
+     **值不是标量时照旧落 `null`**：方言的 `(dict K V)` 的 V 只收 int/real/bool/string
+     （判据：`(let m (dict string r1) …)` 当场骂"值只能是 int / real / bool / string"），
+     落一格空字典只会把缺口从"是一格 null"换成"键值类型推不出来"，一样过不去。
+     pt 的 `var textures map[string]Texture` 就在后一档上。 */
+  if (t === 'map') {
+    const vt = kids(ty)[1];
+    let vz = null;
+    try { vz = vt === undefined ? null : zeroOf(vt, `${name}[k]`, pkg); } catch { vz = null; }
+    const scalar = vz !== null && vz !== undefined && typeof vz === 'object'
+      && vz.op === undefined && 'lit' in vz && vz.lit !== null;
+    if (scalar) return mapNew([]);
+  }
   if (NIL_TYPES.has(t)) return lit(null);
   // `[N]T` 的零值是**N 格元素零值**（数组是值语义的，不是切片）——
   // N 得是个整数字面量、元素也得有零值，两样缺一样就当场报。
