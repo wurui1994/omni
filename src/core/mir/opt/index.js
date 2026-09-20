@@ -49,6 +49,13 @@ export function optimizeMir(mod, opts) {
   const level = o.level === undefined ? 0 : o.level;
   if (level <= 0) return { funcs: 0, before: 0, after: 0, log: [] };
   const log = o.log === undefined ? null : o.log;
+  /* **内联的预算按"这个函数原本多大"算，不按它现在多大** —— Go 的 `fn.Inl.Cost` 就是在
+   * 内联之前算好存下来的。管线是逐函数跑的：等 `radiance` 轮到时 `vnorm` 早已把自己的
+   * `vsub`/`vdot` 展开、长了一倍多，拿现在的长度去比 `INLINE_MAX` 就把它判成"太大"，
+   * 于是一趟展不完（量出来 ×1.51 -> ×1.64）。所以在任何一格跑之前先记下原始长度。
+   *
+   * 这是"一趟不迭代"能成立的前提 —— 迭代的那一版卡死过判据，见 `inline.js` 末尾。 */
+  for (const fn of mod.funcs) fn.inlCost = fn.op.length;
   let before = 0, after = 0, n = 0;
   for (const fn of mod.funcs) {
     if (fn.extern === true || fn.decl === true) continue;

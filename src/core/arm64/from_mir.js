@@ -289,7 +289,12 @@ function pcsPlaces(descs, nfixed) {
      * （≤16 字节：值从 x0/x1 或 v0-v3 回来，调用方自己写进去）。tcc 的 `arm64_pcs`
      * 把它当 `a[0]` 单独算，这儿同一个道理：不动 nx/nv/ns 三个游标。 */
     if (mem !== null && mem.sret) {
-      at.push(mem.size > 16 ? { sret: mem, x8: true } : { sret: mem });
+      /* **HFA 永远不走 x8**（AAPCS64 §6.9 —— B.2 那条在返回值上的镜像）：
+       * `struct {double a,b,c;}` 是 24 字节的 HFA，回在 d0-d2。从前只按字节数判，
+       * 于是 24 字节的 Vec 走了 x8 那条隐藏实参 —— 与 clang/tcc 不兼容，
+       * 而且那一块的地址进了实参池 ⇒ SROA 整块放弃（见 `tccgen.js` 的 `inRegs`）。 */
+      const indirect = mem.hfa === null && mem.size > 16;
+      at.push(indirect ? { sret: mem, x8: true } : { sret: mem });
       continue;
     }
     /* 苹果的 arm64 上变参一律走栈（AAPCS64 的苹果改动）：tcc 是
@@ -1259,7 +1264,9 @@ class FnGen {
          *
          * 那一块前端补齐到了至少 16 字节，所以满 8 字节地读，不按 5/6/7 分岔。 */
         const rs = f.retStruct;
-        if (rs !== 0 && memArgSize(rs) <= 16) {
+        /* HFA 与 ≤16 字节走同一条路：值装进 v0-v(n-1) / x0-x1。
+         * HFA 不看字节数（24 字节的 `Vec` 回在 d0-d2），见 `pcsPlaces` 里那一段。 */
+        if (rs !== 0 && (memArgHfa(rs) !== null || memArgSize(rs) <= 16)) {
           this.loadRef(TMP0, f.a[i]);
           const hfa = memArgHfa(rs);
           if (hfa !== null) {
