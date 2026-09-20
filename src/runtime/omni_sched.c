@@ -712,6 +712,31 @@ static void *m_thread(void *arg) {
   return NULL;
 }
 
+/* ---- sudog 的取还（proc.go 的 acquireSudog / releaseSudog；Go 是每个 P 一格缓存
+ *      加一条全局链，我们先只做全局那条） ---- */
+static omni_sudog *sudogfree;
+omni_sudog *omni_acquireSudog(void) {
+  pthread_mutex_lock(&sched.lock);
+  omni_sudog *s = sudogfree;
+  if (s != NULL) sudogfree = s->next;
+  pthread_mutex_unlock(&sched.lock);
+  if (s == NULL) s = (omni_sudog *)calloc(1, sizeof(omni_sudog));
+  else memset(s, 0, sizeof(omni_sudog));
+  return s;
+}
+void omni_releaseSudog(omni_sudog *s) {
+  if (s->elem != NULL) throwf("runtime: sudog with non-nil elem");
+  if (s->isSelect) throwf("runtime: sudog with non-false isSelect");
+  if (s->next != NULL || s->prev != NULL) throwf("runtime: sudog with non-nil next/prev");
+  if (s->c != NULL) throwf("runtime: sudog with non-nil c");
+  if (s->g == NULL) throwf("runtime: sudog with nil g");
+  s->g = NULL;
+  pthread_mutex_lock(&sched.lock);
+  s->next = sudogfree;
+  sudogfree = s;
+  pthread_mutex_unlock(&sched.lock);
+}
+
 /* ---- 起摊子（proc.go 的 schedinit + procresize） ---- */
 int32_t omni_numcpu(void) {
   if (numcpu_cached == 0) {
@@ -766,6 +791,7 @@ void omni_sched_init(int32_t nprocs) {
  */
 void omni_sched_main(void (*fn)(void *), void *arg) {
   if (allp == NULL) omni_sched_init(0);
+  if (maing != NULL) throwf("omni_sched_main 只能调一次（主 g 一结束整个调度器就收摊，与 Go 的 main 一样）");
   omni_g *newg = newproc1(fn, arg);
   maing = newg;
   pthread_mutex_lock(&sched.lock);

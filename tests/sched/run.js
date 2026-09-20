@@ -17,10 +17,11 @@ let pass = 0, fail = 0;
 const ok = (name, detail) => { pass++; console.log(`  ok   ${name} [${detail}]`); };
 const bad = (name, why) => { fail++; console.log(`  FAIL ${name}\n       ${why}`); };
 
-const cc = (src, exe, opt) => {
+const cc = (src, exe, opt, extra) => {
   execFileSync('clang', [opt || '-O1', '-Wall', '-Wextra', '-Werror',
     '-I', join(root, 'src', 'runtime'), '-o', exe,
-    join(here, src), join(root, 'src', 'runtime', 'omni_sched.c'), '-lpthread'],
+    join(here, src), ...(extra || []).map((f) => join(root, 'src', 'runtime', f)),
+    join(root, 'src', 'runtime', 'omni_sched.c'), '-lpthread'],
     { stdio: 'pipe' });
 };
 const run = (exe, args, env) => execFileSync(exe, args || [], {
@@ -56,6 +57,19 @@ try {
   if (t1 / t4 > 1.5) ok('M:N 并行', `P=1 ${t1}ms、P=4 ${t4}ms（×${(t1 / t4).toFixed(2)}）`);
   else bad('M:N 并行', `P=1 ${t1}ms、P=4 ${t4}ms —— 没看出并行`);
 } catch (e) { bad('M:N 并行', String(e.stderr || e.message)); }
+
+/* 四、channel 与 select（照 chan.go / select.go）。跑 20 趟 —— 这一层全是竞态，
+ *    一趟过了说明不了什么。 */
+try {
+  const ce = join(out, 'chan');
+  cc('chan.c', ce, '-O1', ['omni_chan.c']);
+  let good = 0, last = '';
+  for (let i = 0; i < 20; i++) {
+    try { last = run(ce); good++; } catch (e) { last = String(e.stdout || e.message); break; }
+  }
+  if (good === 20) ok('channel / select', `20 趟全过（${last.split('\n').length - 1} 格判据）`);
+  else bad('channel / select', `第 ${good + 1} 趟就挂了：\n${last}`);
+} catch (e) { bad('channel / select', String(e.stderr || e.message)); }
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

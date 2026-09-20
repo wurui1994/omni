@@ -130,6 +130,23 @@ struct omni_p {
   omni_p *link;                   /* sched.pidle 链 */
 };
 
+/* sudog（runtime2.go）—— "一条 g 挂在某个等待队列上"的那一格。
+ * 一条 g 可能同时挂在好几个 channel 上（select），所以它与 g 是多对一，
+ * 不能把这些字段直接摆进 g 里 —— 这是 Go 那段注释给的理由，照搬。 */
+struct omni_sudog {
+  omni_g *g;
+  omni_sudog *next, *prev;
+  void *elem;                     /* 要收/要发的那个值的地址（可能在 g 的栈上） */
+  int isSelect;                   /* 这条 g 正在 select ⇒ 唤醒要靠 selectDone 抢 */
+  int success;                    /* 1 = 真收发到了；0 = 是被 close 叫醒的 */
+  omni_sudog *waitlink;           /* g.waiting 那条链（select 把几格串起来） */
+  void *c;                        /* 挂在哪个 channel 上（omni_hchan *） */
+  uint16_t caseIndex;             /* select 里这是第几格 case */
+};
+
+omni_sudog *omni_acquireSudog(void);
+void omni_releaseSudog(omni_sudog *s);
+
 /* ---- 对外那几个口（前端/运行时别处只看这些） ---- */
 void omni_sched_init(int32_t nprocs);   /* nprocs <= 0 = 按核数 */
 void omni_newproc(void (*fn)(void *), void *arg);   /* = go f(arg) */
