@@ -358,7 +358,15 @@ ${graphEngineHelp()}
 
   omni run ext/lua/examples/basics.lua --engine graph
   omni run x.lua --engine graph --lang gsl-shell        （--lang 盖过后缀）
-  omni run ext/cpp/examples/basics.cpp --engine graph --backend wat`,
+  omni run ext/cpp/examples/basics.cpp --engine graph --backend wat
+
+**.go / .nim / .v 不用给 --engine**：它们与 .c 一样，就是这条链的一个前端 ——
+译成核心方言（.sx，落在 .omni-cache/src-sx/<内容哈希>/）之后走的是和 .sx 输入
+一模一样的那条路，所以 --backend / --cc / --profile / 摇树 / 暖存全都照旧管用：
+  omni run bench/go/fib.go                      跑掉（默认 js 那条腿）
+  omni build bench/go/pt.go -o pt               原生二进制（一条命令，不用先落 .sx）
+  omni emit c bench/go/pt.go                    看生成的 C
+给了 --engine graph 才切到图那一层的后端（那儿的 --backend 是另一套名字）。`,
       flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT,
         /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，
          * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格

@@ -32,15 +32,16 @@ for (const f of readdirSync(here).filter((x) => x.endsWith('.go')).sort()) {
   const ref = join(out, `${stem}_go`);
   const ours = join(out, `${stem}_ours`);
   const cl = join(out, `${stem}_clang`);
-  const sx = join(out, `${stem}.sx`);
   const omni = (args, env) => execFileSync('node', [join(root, 'src', 'cli.js'), ...args],
     { cwd: root, stdio: 'pipe', timeout: 300000, env: { ...process.env, ...env } });
   /* 编不过就报一行、接着量下一份 —— 尺子不该因为一处缺口整趟垮掉。 */
   try {
     execFileSync('go', ['build', '-o', ref, src], { timeout: 300000 });
-    omni(['build', '--engine', 'graph', '--lang', 'go', '--backend', 'core', src, '-o', sx]);
-    omni(['build', sx, '-o', ours], { OMNI_MIR_OPT: '1' });
-    omni(['build', sx, '-o', cl, '--cc', 'clang'], { OMNI_OPT: '2' });
+    /* `.go` 直接喂 `build`（cli 自己译成核心方言再往下走）—— 从前这儿是手动两步：
+       先 `--backend core -o x.sx`，再 `build x.sx`。那两步只存在于这个文件里，
+       命令行上没有一条路能从 `.go` 走到二进制，等于尺子量的是别人量不到的东西。 */
+    omni(['build', src, '-o', ours], { OMNI_MIR_OPT: '1' });
+    omni(['build', src, '-o', cl, '--cc', 'clang'], { OMNI_OPT: '2' });
   } catch (e) {
     const all = `${e.stdout || ''}${e.stderr || ''}${e.message || ''}`;
     const why = all.split('\n').filter((x) => x.trim()).pop();

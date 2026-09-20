@@ -462,6 +462,28 @@ function statLayersGraph(path, s, textLen, argv) {
   stderr(layerTable(layerModel({ bytes: src.length, lines: src.split('\n').length }, layers)));
 }
 
+/**
+ * 源码 -> 核心方言文本（`.sx`）。
+ *
+ * 这一格是给 `cli.js` 用的：`.go` 这类文件与 `.c` 一样，**就是这条链的一个前端** ——
+ * 译成 `.sx` 之后走的是与 `.sx` 输入一模一样的那条路（lower -> OIR -> MIR -> 原生 /
+ * js / llvm，还有 `--cc` / `OMNI_MIR_OPT` / 摇树 / profile），所以下游一行都不用再写。
+ * 从前这条线只存在于 `bench/go/run.js` 里的两条命令，手敲两步才走得通。
+ *
+ * 回 null = 语法或映射说不通（诊断已经印过了）。缺口按 `OmniError` 抛（有名有姓）。
+ */
+export function coreSxText(path, argv) {
+  const got = graphOf(path, argv);
+  if (got.code !== undefined) return null;
+  const back = backends().find((b) => b.name === 'core');
+  try {
+    return back.lower(shrinkOf(got.graph, argv)).text;
+  } catch (err) {
+    if (err instanceof Gap) throw new OmniError(`${path}：这一格还没接住 —— ${err.message}`);
+    throw err;
+  }
+}
+
 export function runGraphFile(path, argv) {
   const back = pickBackend('run', argv, 'interp');
   const got = graphOf(path, argv);
