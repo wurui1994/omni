@@ -207,12 +207,57 @@ export function regalloc(fn, _mod) {
     const end = last[pc];
     if (end < 0) continue;                       // 没人用（deadcode 会收走）
     if (!fitsOneWord(t)) continue;
+    /* 这条指令的操作数是哪几条指令产的（抢占时要避开，见下面那段）。 */
+    const operandOf = new Set();
+    {
+      const m = OP_MODES[fn.op[pc]];
+      const add = (ref) => { if (ref !== REF_NONE && ref >= REF_BIAS) operandOf.add(ref - REF_BIAS); };
+      if (m[0] === 'r') add(fn.a[pc]);
+      if (m[1] === 'r') add(fn.b[pc]);
+      if (m[1] === 'p') {
+        const at = fn.b[pc];
+        const cnt = fn.args[at];
+        for (let i = 0; i < cnt; i++) add(fn.args[at + 1 + i]);
+      }
+    }
     const c = cls[isFloatT(t) ? 1 : 0];
-    if (c.free.length === 0) continue;           // 用光了 ⇒ 这个值照旧住栈位（= 溢出）
+    if (c.free.length === 0) {
+      /**
+       * **池子用光了 ⇒ 抢一个**（Go 的 `ssa/regalloc.go` 文件头：
+       * 「spills registers only when necessary, and spills the value whose next use is
+       * farthest in the future」）。
+       *
+       * 在这一层"下次使用最远"就是**区间的右端最远**（我们的区间是 `[定义, 最后一次使用]`、
+       * 连续，见文件头）。所以：活着的里头找右端最大的那个，比我这个还远就把颜色让给我，
+       * 被抢的那个**从表里摘掉**（没颜色 = 照旧住栈位，这一层的"溢出"就是这么便宜 ——
+       * 颜色只是建议，摘掉不用发任何溢出/恢复指令）。
+       *
+       * 为什么非要这一条：从前是"先到先得、用光就不给了"。量出来的
+       * （`OMNI_RA_STAT=1`）：`scene` 同时活着 19 个、我们只有 9+8=17 个颜色，
+       * 覆盖率只有 79.9% —— 而先到先得会让一个横跨整个函数的长区间白占一个颜色，
+       * 挤掉后面十几个短命但在热循环里的值。
+       */
+      let worst = -1, worstEnd = end;
+      for (let k = 0; k < c.active.length; k++) {
+        /* **不许抢这条指令自己的操作数**。后端读操作数是靠 `refReg`（住在粘住寄存器里的
+         * 直接用那一个，一个字都不发），随后 `dest` 把结果算进同一个寄存器 ——
+         * `MOD` 那两条（`sdiv d,x,y` 接 `msub d,d,y,x`）里 d 撞上 x 或 y 就算错了。
+         * `dest` 本来有 `a`/`b` 要避开的参数，可粘住那一路是提前返回的、不看它。 */
+        if (operandOf.has(c.active[k].pc)) continue;
+        if (c.active[k].end > worstEnd) { worstEnd = c.active[k].end; worst = k; }
+      }
+      if (worst < 0) continue;                   // 我自己就是最远的那个 ⇒ 住栈位
+      const victim = c.active[worst];
+      c.hint.delete(victim.pc);
+      c.active.splice(worst, 1);
+      c.hint.set(pc, victim.color);
+      c.active.push({ pc, end, color: victim.color });
+      continue;                                  // n 不变：一个进来、一个出去
+    }
     c.free.sort((x, y) => x - y);                // 取最小的颜色：两次编译要一样
     const color = c.free.shift();
     c.hint.set(pc, color);
-    c.active.push({ end, color });
+    c.active.push({ pc, end, color });
     n++;
   }
 

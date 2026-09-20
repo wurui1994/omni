@@ -39,7 +39,7 @@ import {
   ldpPost, ldrFpU, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz,
   msub, mul,
   mvn, neg, orrImm, orrReg,
-  cneg, retArm64, scvtf, sdiv, stpPre, strFpU, strU, strRegOff, subImm, subReg, svcArm64, sxtb,
+  cneg, retArm64, scvtf, sdiv, stp, ldp, stpFp, ldpFp, stpPre, strFpU, strU, strRegOff, subImm, subReg, svcArm64, sxtb,
   sxth, sxtw,
   ucvtf, udiv
 } from './encode.js';
@@ -795,10 +795,21 @@ class FnGen {
 
   /** 序言里存下调用者的那几个 / 收场里取回来。只动真用到的那几格。 */
   stickySpill(save) {
-    for (let k = 0; k < this.stickyColors.length; k++) {
-      const reg = STICKY[this.stickyColors[k]];
-      const off = this.stickySave + k * 8;
-      if (save) this.frameStore(reg, off); else this.frameLoad(reg, off);
+    const n = this.stickyColors.length;
+    if (n === 0) return;
+    /* **成对存取**（`stp`/`ldp`）：一条顶两条。它的偏移是按 8 缩放的 7 位有符号
+     * （±512 字节），而 `stickySave` 常在几千（`omni_r3.c` 的帧上万），所以先用一条
+     * `add` 把近的基址算到草稿里 —— 六对少发六条，那一条 `add` 划得来。
+     * 草稿用 `TMP0`：序言里还没人用它，收场里返回值在 x0/d0、它也空着。 */
+    this.addOff(TMP0, this.base, this.stickySave);
+    let k = 0;
+    for (; k + 1 < n; k += 2) {
+      const a = STICKY[this.stickyColors[k]], b = STICKY[this.stickyColors[k + 1]];
+      this.buf.emit(save ? stp(1, a, b, TMP0, k * 8) : ldp(1, a, b, TMP0, k * 8));
+    }
+    if (k < n) {
+      const a = STICKY[this.stickyColors[k]];
+      this.buf.emit(save ? strU(3, a, TMP0, k * 8) : ldrU(3, a, TMP0, k * 8));
     }
   }
 
@@ -828,14 +839,18 @@ class FnGen {
    *  用 FP load/store 一条指令 `str d, [base, #off]` / `ldr d, [base, #off]` 搞定，
    *  比从前走 `fmov + str/ldr + fmov` 省两条。 */
   fstickySpill(save) {
-    for (let k = 0; k < this.fstickyColors.length; k++) {
-      const reg = STICKY_F[this.fstickyColors[k]];
-      const off = this.fstickySave + k * 8;
-      if (save) {
-        this.buf.emit(strFpU(3, reg, this.base, off));
-      } else {
-        this.buf.emit(ldrFpU(3, reg, this.base, off));
-      }
+    const n = this.fstickyColors.length;
+    if (n === 0) return;
+    /* 与 `stickySpill` 同一套：`stp d,d` / `ldp d,d`（Go 那边发的就是 FSTPD/FLDPD）。 */
+    this.addOff(TMP0, this.base, this.fstickySave);
+    let k = 0;
+    for (; k + 1 < n; k += 2) {
+      const a = STICKY_F[this.fstickyColors[k]], b = STICKY_F[this.fstickyColors[k + 1]];
+      this.buf.emit(save ? stpFp(a, b, TMP0, k * 8) : ldpFp(a, b, TMP0, k * 8));
+    }
+    if (k < n) {
+      const a = STICKY_F[this.fstickyColors[k]];
+      this.buf.emit(save ? strFpU(3, a, TMP0, k * 8) : ldrFpU(3, a, TMP0, k * 8));
     }
   }
 
@@ -1694,8 +1709,13 @@ class FnGen {
         return ftmp;
       }
     }
-    this.loadRef(gp, ref);
-    this.toFp(ftmp, gp, dbl);
+    /* 值住在某个通用寄存器里（粘住的或 POOL 里攥着的）⇒ **直接从那一个 `fmov` 过去**。
+     * 从前走 `loadRef` 是先 `mov 草稿, 那个寄存器`、再 `fmov d, 草稿` —— 中间那条纯废，
+     * 而 `fmov` 的整数那一侧收任何通用寄存器。
+     * 量出来的：`radiance` 1780 条指令里 `mov` 有 413 条，这一族是大头
+     * （涂色覆盖率上到 99.4% 之后，几乎每个浮点操作数都是"住在通用寄存器里"）。 */
+    const x = this.refReg(ref, gp);
+    this.toFp(ftmp, x, dbl);
     return ftmp;
   }
 

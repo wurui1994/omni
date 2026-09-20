@@ -275,6 +275,19 @@ export const ldp = (sf, rt, rt2, rn, off) => ldstPair(sf ? 2 : 0, 2, 1, pairOff(
 export const stpPre = (sf, rt, rt2, rn, off) => ldstPair(sf ? 2 : 0, 3, 0, pairOff(off, sf), rt2, rn, rt);
 export const ldpPost = (sf, rt, rt2, rn, off) => ldstPair(sf ? 2 : 0, 1, 1, pairOff(off, sf), rt2, rn, rt);
 
+/* **FP/SIMD 那一族的成对存取**：与上面只差 bit 26（V）置 1，而 `opc` 是 01 而不是 10
+ * （d 寄存器那一档）。于是 `0x14 << 25`（V=0）变成 `0x16 << 25`，opc 传 1。
+ * `stp d8, d9, [x9, #0]` —— 序言里存调用者的 d8-d15 时一条顶两条（Go 那边发的就是 FSTPD）。 */
+function ldstPairFp(opc, idx, L, imm7, rt2, rn, rt) {
+  return u32(opc * 2 ** 30 + 0x16 * 2 ** 25 + idx * 2 ** 23 + L * 2 ** 22
+    + chkS(imm7, 7, 'imm7') * 2 ** 15 + arm64ChkReg(rt2) * 2 ** 10
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rt));
+}
+/** `stp d, d, [rn, #off]`（偏移按 8 缩放的 7 位有符号 ⇒ ±512 字节）。 */
+export const stpFp = (rt, rt2, rn, off) => ldstPairFp(1, 2, 0, pairOff(off, true), rt2, rn, rt);
+/** `ldp d, d, [rn, #off]`。 */
+export const ldpFp = (rt, rt2, rn, off) => ldstPairFp(1, 2, 1, pairOff(off, true), rt2, rn, rt);
+
 /* ---------------------------------------------------------------- 跳转
  * C4.1.6 Unconditional branch (immediate)：op 0 0 1 0 1 imm26
  * 立即数是**指令数**（字节偏移除以 4），相对这条指令自己。 */
