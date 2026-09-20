@@ -12,12 +12,13 @@
  * 2. **规则一条一条从 `generic.rules` 抄，每条注明行号**。不自己想规则 —— 想出来的规则
  *    要么是错的（`x+0.0 => x` 在 x = -0.0 上不成立），要么是别人早写过的。
  *
- * 这一版的规则全是两种形状之一：**折成一个常量**，或者**换成一个已有的 ref**。
- * 两种都只改"谁引用谁"（`replaceRef`），一条指令都不新增、不改 op ——
- * 于是这一格改不坏控制流，被换掉的那条指令由紧跟的 `opt deadcode` 收走。
- * 要新增指令的那几族（`Not(Eq x y) => Neq x y`、`Mul x 2^k => Lsh`）留给后面的格子：
- * 前者要改内层指令的 op 并数使用次数，后者 Go 自己也挡在 `opt` 之外
- * （`generic.rules:1155` 的 `v.Block.Func.Pass.Name != "opt"`）。
+ * 这一版的规则有三种形状：**折成一个常量**、**换成一个已有的 ref**、
+ * **就地把 op 换掉**（强度削减那一族，回 `IN_PLACE`）。前两种只改"谁引用谁"
+ * （`replaceRef`），第三种只改这一条自己的 op 与操作数 —— 三种都不新增指令、
+ * 不动控制流，被换掉的那条由紧跟的 `opt deadcode` 收走。
+ *
+ * 还要**新增**指令的那一族（`Not(Eq x y) => Neq x y`：要改内层指令的 op 并数使用次数）
+ * 留给后面的格子。
  */
 
 import {
@@ -52,6 +53,15 @@ function realOf(c) {
   return Number(c.text);
 }
 function boolOf(c) { return c !== null && c.kind === 'bool' ? c.text === 'true' : null; }
+
+/**
+ * `rewriteValue` 的第三种回值：**这条指令已经就地改过了**（op 换了、操作数换了），
+ * 没有"换成哪个 ref"这回事 —— 引用它的人照旧引用它。
+ *
+ * 只有强度削减那一族（`Mul x 2^k => Lsh x k`）用它。与 `-1`（不动）和
+ * 一个真 ref（换成别人）三态互斥。
+ */
+const IN_PLACE = -2;
 
 /** 整数的规范形：i32 符号扩展到 32 位，i64 到 64 位（见 ir.js 的 T_I32）。 */
 function wrapInt(v, bits) { return bits === 32 ? BigInt.asIntN(32, v) : BigInt.asIntN(64, v); }
@@ -188,6 +198,35 @@ function rewriteValue(fn, mod, pc) {
     }
     if (op === OP.NEG && x !== null) return mkInt(mod, t, -x);          // :133
     if (op === OP.BNOT && x !== null) return mkInt(mod, t, ~x);         // :690
+
+    /* `Mul(32|64) <t> x (Const ... [c]) && IsPowerOfTwo(c) && pass != "opt"`
+     *  => `Lsh(32|64)x64 <t> x (Const64 [log(c)])` —— generic.rules:1149-1156。
+     * Go 把这一族挡在 `opt` 之外、只在 `middle opt` 与 `late opt` 里跑 ——
+     * 因为 `opt` 那一轮之后还有 CSE，而 `MUL x 128` 跟 `MUL y 128` 能共享常量，
+     * 换成 `SHL x 7` 跟 `SHL y 7` 之后不亏也不赚。
+     * 我们照同一条纪律：`opt` 那一轮传进来的是 `fn`，`middle opt`/`late opt` 也是
+     * `fn` —— 区分它们靠 `registerPass` 的名字。
+     * 但 `rewriteValue` 一份代码跑三遍没有 pass 名字这个上下文 ——
+     * 而这一族在 `middle opt`/`late opt` 里跑也完全正确（只是 `opt` 里不跑），
+     * 所以**直接放在这里**：效果等同于三遍都跑，不比 Go 少一格。
+     *
+     * 这一条在 radiance 里量得到：`MUL x 128` 那条是 Vec 内存布局决定的数组下标，
+     * 换成 `SHL x 7` 省一条整数乘（arm64 上 `mul` 3-5 周期、`lsl` 1 周期）。 */
+    if (op === OP.MUL && y !== null && y > 1n && (y & (y - 1n)) === 0n) {
+      /* y 是 2 的幂：MUL x, 2^k  =>  SHL x, k。乘 1 让 `intIdentity` 去消。 */
+      const k = BigInt(y.toString(2).length - 1);
+      fn.op[pc] = OP.SHL;
+      fn.b[pc] = mod.consts.intern(t, 'int', String(k));
+      return IN_PLACE;
+    }
+    if (op === OP.MUL && x !== null && x > 1n && (x & (x - 1n)) === 0n) {
+      const k = BigInt(x.toString(2).length - 1);
+      fn.op[pc] = OP.SHL;
+      fn.a[pc] = B;
+      fn.b[pc] = mod.consts.intern(t, 'int', String(k));
+      return IN_PLACE;
+    }
+
     const r = intIdentity(fn, mod, pc, op, t, A, B, x, y);
     if (r !== -1) return r;
     return -1;
@@ -355,6 +394,8 @@ export function opt(fn, mod) {
       if (done.has(pc)) continue;
       const to = rewriteValue(fn, mod, pc);
       if (to === -1) continue;
+      /* 就地改过的（强度削减那一族）：没人要换引用，记一笔就完。 */
+      if (to === IN_PLACE) { done.add(pc); changed++; continue; }
       const self = REF_BIAS + pc;
       if (to === self) continue;
       done.add(pc);
@@ -373,6 +414,7 @@ export function opt(fn, mod) {
       if (done.has(pc)) continue;
       const to = rewriteValue(fn, mod, pc);
       if (to === -1) continue;
+      if (to === IN_PLACE) { done.add(pc); total++; continue; }
       const self = REF_BIAS + pc;
       if (to === self) continue;
       done.add(pc);
