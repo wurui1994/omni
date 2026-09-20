@@ -60,7 +60,7 @@ import {
 import { node, lit as litNode, program } from './graph.js';
 /* **lambda 提升那一份两条腿共用**（`src/core/graph/lift.js`）—— c 那条腿也要它。
    `gap` 传进去：措辞里带着"哪条腿"，而算法一份。 */
-import { liftBody as liftOne, capsOf, mapNodes } from './lift.js';
+import { liftBody as liftOne, capsOf, mapNodes, setsNameIn } from './lift.js';
 import { sxTextToMod } from '../lang/sx.js';
 import { interpret } from '../interp/eval.js';
 import { setOutSink } from '../interp/builtin.js';
@@ -217,6 +217,11 @@ function expr(x, env, ctx) {
     case 'const':
       return typeof x.attrs.exact === 'string' ? `(int ${x.attrs.exact})` : lit(x.attrs.value);
     case 'ref': {
+      /* **这个名字是这格 `cfn` 借来的**（`ctx.caps`，见 `liftFnVals` 那段账）：
+         方言里读一格捕获是 `(cap 名)`，不是 `(var 名)`。 */
+      if (ctx.caps !== null && ctx.caps !== undefined && ctx.caps.has(x.attrs.name)) {
+        return `(cap ${x.attrs.name})`;
+      }
       /* 聚合（记录 / 列表）**只能从字段与下标那两条路走**：这一刀的函数形参与返回一律 int，
        * 所以一格记录一旦跑到别处（当实参、被 print、被 return）就说不清类型了。
        * 那两条路自己拼文本（不经过这儿），于是这儿一律报缺口 —— 与 backend-c 的
@@ -225,7 +230,7 @@ function expr(x, env, ctx) {
       /* **一格函数名当值用** —— 方言里那是 `(fnref 名)`（`tests/sexpr/cases/15-fnvalues.sx`）。
          `t === undefined` 那一条是关键：同名的局部变量优先（函数名只在没被遮住时才是函数）。 */
       if (t === undefined && env.get(`fn:${x.attrs.name}`) !== undefined) {
-        return `(fnref ${x.attrs.name})`;
+        return fnValText(x.attrs.name, env, ctx);
       }
       if (isRecType(t, ctx)) gap(`把记录 '${x.attrs.name}' 整格当值用（这一刀只接字段读写）`);
       if (elemType(t) !== null) gap(`把列表 '${x.attrs.name}' 整格当值用（这一刀只接下标读写与 len）`);
@@ -667,12 +672,12 @@ function crtCall(d, x, env, ctx) {
   }
   const args = as.map((a, i) => {
     if (d.ps[i] !== 'fn') return expr(a, env, ctx);
-    /* 函数值那一格：图上必须是一格**指向具名函数的 ref**。闭包（`go func(){…}()`）
-       在这一刀上是一句有名有姓的缺口 —— 捕获那一层还没接（见任务 #78 的后半）。 */
-    if (!isNode(a) || a.op !== 'ref') {
-      gap(`'${d.sym}' 的第 ${i + 1} 格要一个具名函数（闭包那一档还没接）`);
+    /* 函数值那一格：图上必须是一格**指向函数的 ref**（匿名的那些由 `liftFnVals` 提到顶层
+       之后就是一格 ref）。`fnValText` 分两档 —— 普通函数 `(fnref …)`、闭包 `(mkclo …)`。 */
+    if (!isNode(a) || a.op !== 'ref' || env.get(`fn:${a.attrs.name}`) === undefined) {
+      gap(`'${d.sym}' 的第 ${i + 1} 格要一个函数（提不上顶层的那些还没接）`);
     }
-    return `(fnref ${a.attrs.name})`;
+    return fnValText(a.attrs.name, env, ctx);
   });
   return `(ccall ${d.sym}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
 }
@@ -1699,6 +1704,35 @@ function isZeroText(t, v) {
 
 
 /**
+ * **一格函数名当值用**：普通函数是 `(fnref 名)`，**闭包**是 `(mkclo 名 借来的那几格…)`。
+ *
+ * 借来的那几格的**类型**只有这儿知道（它们是外层那个函数的局部量），而 `(cfn …)` 的
+ * 声明落在别处（`emitFn`）—— 所以顺手记到 `ctx.capTypes` 上。两趟空跑（`ctx.collect`）
+ * 排在真落之前，于是 `emitFn` 那时查得着；查不着就退回 int（与形参那一格同一条规矩）。
+ */
+function fnValText(nm, env, ctx) {
+  const caps = ctx.clos.get(nm);
+  if (caps === undefined) return `(fnref ${nm})`;
+  const as = caps.map((c, i) => {
+    const t = env.get(c);
+    if (t === undefined) {
+      gap(`闭包 '${nm}' 借的 '${c}' 在这一层看不见（借的是另一层的局部量）`);
+    }
+    if (isRecType(t, ctx) || elemType(t) !== null || dictOf(t) !== null) {
+      /* 聚合按值抄一份在方言里就是抄那一格**句柄/指针**（`(ptr rN)` / `(arr T)` 都是
+         一个字），所以"里头改了外头看得见"仍旧成立 —— go 的切片与指针正是这个语义。
+         真正对不上的是**值语义的结构体**（byval）：那时抄的是一整格值。 */
+      if (isRecType(t, ctx) && !isPtrRec(t, ctx)) {
+        gap(`闭包 '${nm}' 借了一格值语义的结构体 '${c}'（按值抄一份与 go 的按引用捕获对不上）`);
+      }
+    }
+    ctx.capTypes.set(`${nm}#${i}`, t);
+    return `(var ${c})`;
+  });
+  return `(mkclo ${nm}${as.length === 0 ? '' : ` ${as.join(' ')}`})`;
+}
+
+/**
  * **函数值那一族**：`func` 站在**值**的位置上（当实参、当场就调那种）。
  *
  * 方言里有这一格 —— `(fnty (T…) R)` 的类型、`(fnref 名)` 把一个普通函数当值、
@@ -1707,12 +1741,17 @@ function isZeroText(t, v) {
  * 后面 `expr` 的 `ref` 那一支看见"这名字是个顶层函数"就发 `(fnref …)`，
  * `callText` 看见"被调的是一格 fnty 的名字"就发 `(callfn …)`。
  *
- * **只提捕获为空的那种**：借了外层名字的要真闭包（`(cfn …)` + `(mkclo …)`），那是另一刀 ——
- * 这儿原样留着，后面照旧报一格有名有姓的缺口。
+ * **借了外层名字的也提**（第二刀）：那几格落成方言的**闭包** ——
+ * `(cfn 名 (借来的…) (形参…) 返回类型 体)` 加用处那一格 `(mkclo 名 值…)`，体里读一格
+ * 借来的东西是 `(cap 名)`。借的那几格**按值抄一份**：切片 / 指针 / 记录在方言里都是
+ * 一个句柄，所以"里头改了外头看得见"仍旧成立（go 的切片与 `*T` 正是这个语义）；
+ * 值语义的结构体与"外层后来又改了那格标量"两种对不上 go 的按引用捕获，
+ * 前者当场报（`fnValText`），后者是**明写的不精确**（与 go 1.22 把循环变量改成每轮一格
+ * 是同一类取舍）。
  *
  * `bind` 位置上的那种不走这儿：那一格 `liftBody` 早就接了（提升 = 闭包，见它的注）。
  */
-function liftFnVals(fns, rest, known, taken) {
+function liftFnVals(fns, rest, known, taken, ctx) {
   const extra = [];
   /* **没有 `func` 就一个字都不动。**`mapNodes` 是**重建**式的改写，而重建会把图上
      **共享的那一格**拆成两格（`lazyAnd`/`lazyOr` 的 `cond` 与 `then` 本来是同一格节点，
@@ -1726,13 +1765,20 @@ function liftFnVals(fns, rest, known, taken) {
   const doOne = (body) => (hasFunc(body) ? mapNodes(body, (n) => {
     if (n.op !== 'func') return undefined;
     const ps = (n.attrs.params ?? []).map((q) => String(q));
-    if (capsOf(n.ins.body, new Set(ps), known).length > 0) return undefined;
+    const caps = capsOf(n.ins.body, new Set(ps), known);
+    /* **写一格借来的东西**：按值抄一份的捕获写不回去，落下去就是静默的错答案。 */
+    for (const c of caps) {
+      if (setsNameIn(n.ins.body, c)) {
+        gap(`内层函数往借来的 '${c}' 上写（按值抄一份的捕获写不回去）`);
+      }
+    }
     let nm = n.attrs.name === undefined || n.attrs.name === null
       ? `__fnval${extra.length}` : String(n.attrs.name);
     while (taken.has(nm)) nm = `${nm}$`;
     taken.add(nm);
     known.add(nm);
-    extra.push({ name: nm, params: ps, body: n.ins.body });
+    extra.push({ name: nm, params: ps, body: n.ins.body, ...(caps.length > 0 ? { caps } : {}) });
+    if (caps.length > 0) ctx.clos.set(nm, caps);
     return { op: 'ref', ins: {}, attrs: { name: nm }, id: -1 };
   }) : body);
   for (const f of fns) f.body = doOne(f.body);
@@ -1864,6 +1910,10 @@ export function emitCore(g) {
        与 `decls` 分开是因为次序：这几句要排在 `(struct …)` **前面**（读起来是"先说外面
        有什么，再说自己有什么"），而 `decls` 是落语句的时候一句一句长出来的。 */
     cdecls: [], cused: new Set(),
+    /* 闭包那一族（`liftFnVals` 的第二刀）：`clos` 是"这个提上来的名字借了哪几格"，
+       `capTypes` 是那几格的类型（只有 `mkclo` 那一处知道，见 `fnValText`），
+       `caps` 是"现在正在落哪一格 cfn 的体"（体里读借来的东西要发 `(cap 名)`）。 */
+    clos: new Map(), capTypes: new Map(), caps: null,
   };
   /* **运行时那几个 C 符号的返回类型**先摆进 env：调用点的 `inferType` 查的是 `fn:名字`，
      而它们在这份产物里没有函数体（体在 `libomnigo` 里），不走 `ctx.rets` 那一趟。 */
@@ -1919,7 +1969,7 @@ export function emitCore(g) {
   const topLift = liftOne(rest0, 'main', known, taken, gap);
   for (const g of topLift.lifted) fns.push(g);
   /* **函数值那一趟**：值位置上的匿名 `func` 提到顶层，原地换成一格 `ref`（见 `liftFnVals`）。 */
-  const rest = liftFnVals(fns, topLift.body, known, taken);
+  const rest = liftFnVals(fns, topLift.body, known, taken, ctx);
   /* **按键装箱那张表**（见 dyn 那一段）：提升完了才收 —— 提升会把值位置上的 `func`
      换成一格 `ref`，而"这个键上装的是哪几格函数"要的正是换完之后那个名字。 */
   ctx.dynSites = collectDynSites([...fns.map((f) => f.body), rest]);
@@ -2149,6 +2199,12 @@ function emitFn(f, fnEnv, env, ctx) {
   const pts = paramTypes(f, env, ctx);
   for (let i = 0; i < f.params.length; i++) fenv.set(f.params[i], pts[i]);
   const ps = f.params.map((p, i) => `(${p} ${pts[i]})`).join(' ');
+  /* **借来的那几格**（闭包，见 `liftFnVals` 的第二刀）：类型从 `ctx.capTypes` 拿
+     （`mkclo` 那一处记的），查不着退回 int —— 与形参那一格同一条规矩。
+     体里读它们要发 `(cap 名)`，所以进体之前把名单挂到 `ctx.caps` 上。 */
+  const caps = Array.isArray(f.caps) ? f.caps : null;
+  const cts = caps === null ? [] : caps.map((_, i) => ctx.capTypes.get(`${f.name}#${i}`) ?? 'int');
+  if (caps !== null) for (let i = 0; i < caps.length; i++) fenv.set(caps[i], cts[i]);
   const ret = env.get(`fn:${f.name}`) ?? 'int';  /* 隐式返回那一档：末尾那个值改写成 `(ret …)`（分支就把 ret 沉到两支里去 ——
      方言的 `if` 是语句，这样就不必有块表达式）。 */
   const arr = Array.isArray(f.body) ? f.body : (f.body === undefined || f.body === null ? [] : [f.body]);
@@ -2159,7 +2215,9 @@ function emitFn(f, fnEnv, env, ctx) {
      体里那几格 `ret x` 落成光秃秃的 `(ret)`。这一格进体之前挂上、出来还原。 */
   const outerVoid = ctx.voidFn;
   const outerName = ctx.fnName;
+  const outerCaps = ctx.caps;
   ctx.voidFn = f.void === true;
+  ctx.caps = caps === null ? null : new Set(caps);
   /* 现在落的是谁的体（`ret` 那一格要往 `ctx.rets` 上记一笔 —— 见那儿的注）。 */
   ctx.fnName = f.name;
   let fbody;
@@ -2170,6 +2228,7 @@ function emitFn(f, fnEnv, env, ctx) {
   } finally {
     ctx.voidFn = outerVoid;
     ctx.fnName = outerName;
+    ctx.caps = outerCaps;
   }
   /* **掉到函数尾**这件事不许糊：方言要求非 void 的函数每条路都有 `ret`，而图上"体末尾那个
    * 值就是返回值"（chez / sbcl 那两门）是合法的。补一格 `(ret 0)` 交上去 = 悄悄给错答案
@@ -2179,6 +2238,10 @@ function emitFn(f, fnEnv, env, ctx) {
     gap(`函数 '${f.name}' 的体末尾不是 ret（隐式返回那一档 —— 补零值会给错答案）`);
   }
   for (let i = 0; i < f.params.length; i++) ctx.args.set(`emitted:${f.name}#${i}`, pts[i]);
+  if (caps !== null) {
+    const cs = caps.map((c, i) => `(${c} ${cts[i]})`).join(' ');
+    return `  (cfn ${f.name} (${cs}) (${ps}) ${ret} ${fbody.join(' ')})`;
+  }
   return `  (fn ${f.name} (${ps}) ${ret} ${fbody.join(' ')})`;
 }
 
