@@ -142,16 +142,23 @@ func renderRow(y int) {
 	}
 }
 
+/* 通道摆在包级、goroutine 的体是一格**具名函数** —— pt 的 renderer.go 那儿用的是闭包
+   （`go func(i int){ … }(i)`），而闭包要捕获 `main` 的局部量，那是另一格账（#78 的后半）。
+   这一档先把"每条扫描线一个 goroutine + 一格通道收齐"这件事量出来，形状是一样的。 */
+var ch chan int
+
+func renderAndReport(y int) {
+	renderRow(y)
+	ch <- y
+}
+
 func main() {
 	setup()
 	rows = make([]Vec, width*height)
 	/* 照 pt 的 renderer.go：容量 = 行数的 channel，每行一个 goroutine，主 g 收 h 次。 */
-	ch := make(chan int, height)
+	ch = make(chan int, height)
 	for y := 0; y < height; y++ {
-		go func(y int) {
-			renderRow(y)
-			ch <- y
-		}(y)
+		go renderAndReport(y)
 	}
 	for i := 0; i < height; i++ {
 		<-ch
