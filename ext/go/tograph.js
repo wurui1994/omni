@@ -865,7 +865,19 @@ function tyOfExpr(x, depth) {
   if (g === 'call') {
     const f = kids(x)[0];
     if (f === undefined) return null;
-    if (tag(f) === 'name') return FRET.get(leaf(kids(f)[0])) ?? null;
+    if (tag(f) === 'name') {
+      const fn0 = leaf(kids(f)[0]);
+      /* **`make(T, …)` / `new(T)` 的类型就写在第一格实参上**。少了这一格，
+         `a := make([]Shape, 3)` 的 `a` 在 VARTY 里是空的，于是 `a[0] = &Sq{…}`
+         那一句不知道目标是接口、**不装箱** —— 方言当场报"这个数组装 class，写进去的是 r2"。
+         （`*T` 与 T 在这一层不分：上面 addr/deref 也是透明的，`namedTypeOf` 会剥。） */
+      if (fn0 === 'make' || fn0 === 'new') {
+        const as = kids(x)[1];
+        const t0 = as === undefined ? undefined : kids(as)[0];
+        if (t0 !== undefined) return t0;
+      }
+      return FRET.get(fn0) ?? null;
+    }
     if (tag(f) === 'sel') {
       const on = namedTypeOf(tyOfExpr(kids(f)[0], d + 1));
       const m = leaf(kids(f)[1]);

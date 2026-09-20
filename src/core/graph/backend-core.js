@@ -521,6 +521,14 @@ function expr(x, env, ctx) {
  * 方言直接报"两边要同型"。抬不上去（真假与数混算那种）就报缺口，不猜。
  */
 function binText(nm, args, env, ctx, uns) {
+  /* **与 nil 比**（go 的 `p == nil` / `hit.Shape != nil`，pt 里到处是）：方言那侧的机器
+     是齐的 —— `(bin "==" (var p) (null r1))` 量过，类 / 函数 / 数组都收
+     （`sexpr/lower.js` 的 `null` 那一格）。**可这一刀不能只补这儿**：go 前端今天把
+     `var p *T` 与接口的零值落成一格**真记录**（`zeroOf` 的 ptr 那一支、`ifaceZero`），
+     为的是让下游知道类型 —— 于是 `p == nil` 编得过、答案却恒为假（**静默地错**，
+     比报缺口坏）。要把它接上得先把"值是 null、类型从声明来"那一层补齐
+     （`bind` 的 tzero / `record-new` 的 fzero，类型覆盖层 #40 那一族）。
+     所以这儿照旧落到下面那句缺口上，不猜。 */
   /* **dyn 在这儿拆箱**（拆在用它的地方，见 dyn 那一段）：`seenType` 按键查出箱子里装的是
      什么，`one` 落文本时套一层 `(asint …)` 那一族。查不出来就报缺口（`unboxTo` 那一句）。 */
   const ts = args.map((a) => seenType(a, env, ctx));
@@ -939,11 +947,28 @@ function argText(fname, i, a, env, ctx) {
     return expr(a, env, ctx);
   }
   if (had !== undefined && had !== t) {
-    gap(`'${fname}' 第 ${i + 1} 格实参在两处的类型不一样（${had} 与 ${t}）—— 方言的形参是单态的`);
+    gap(`'${fname}' 第 ${i + 1} 格实参在两处的类型不一样（${had}${shapeNote(had, ctx)} 与 `
+      + `${t}${shapeNote(t, ctx)}）—— 方言的形参是单态的`);
   }
   ctx.args.set(key, t);
   if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return varOrCap(a.attrs.name, ctx);
   return expr(a, env, ctx);
+}
+
+/**
+ * 一格类型后面跟着的**字段清单** —— 光看 "(arr r3) 与 (arr r1)" 没法判断差在哪儿。
+ *
+ * 为什么值得留在产品代码里：这条缺口（同一个接口算出两格形状）查起来第一步总是
+ * "那两格记录到底哪儿不一样"，而那一步从前要临时加打印。记录之外（int / 列表）回空串。
+ */
+function shapeNote(t, ctx) {
+  const m = /^\(arr (.+)\)$/.exec(String(t));
+  const nm = m === null ? String(t) : m[1];
+  const sh = shapeAt(nm, ctx);
+  if (sh === undefined || sh === null || sh.types === undefined) return '';
+  const fs = [];
+  for (const [k, v] of sh.types) fs.push(`${k}: ${v}`);
+  return ` ${nm}{${fs.join('、')}}`;
 }
 
 /**
@@ -2474,6 +2499,16 @@ function fieldTypesOfNode(names, vals, env, ctx) {
       const ft = fnTypeOfFuncNode(v, env, ctx);
       if (ft === null) return null;
       types.push(ft);
+      continue;
+    }
+    /* **字段里装着一格已经提上顶层的函数**（`ref 名字`）：`liftFnVals` 把接口零值记录里
+       那几格桩提了上去，留在字段上的是一格 `ref` —— 而 `typeOf` 对"函数名当值用"答的是
+       UNKNOWN=int。少了这一格，同一个接口就会算出两格形状：装箱那一份（没提上去，走上面
+       那一支）是 `r1{Area: (fnty () int)}`，零值那一份是 `r3{Area: int}`，
+       于是 `make([]Shape, n)` 与 `[]Shape{…}` 递给同一个函数就报"两处的类型不一样"。 */
+    const fr = fnTypeOf(v, env, ctx);
+    if (fr !== null) {
+      types.push(fr);
       continue;
     }
     try { t = typeOf(v, env, ctx); } catch { return null; }
