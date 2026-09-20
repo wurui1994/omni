@@ -230,6 +230,26 @@ function expr(x, env, ctx) {
     }
     case 'prim': {
       const nm = x.attrs.name;
+      /**
+       * **`fill(n, 零值)` 在表达式位置上也能落**（`make([]T, n)` 就是这一种）：
+       * 初值正好是那格类型的零值时它就是方言里一句 `(anew (arr T) n)` ——
+       * 而 `anew` 的语义本来就是"长度 N 的零数组"，N 份零值**互不共享**
+       * （`arrNew` 按元素的拷贝器逐格拷，见 `tests/sexpr/cases/50-arrstruct.sx`）。
+       *
+       * 为什么非要这一格：go 的 `spheres = make([]Sphere, 9)` 是**赋值**不是绑定，
+       * 走不到 `bindFill` 那条（那条要发一圈 `apush`，摆不进表达式位置）。
+       * 初值不是零值的那一档照旧只在绑定位置上接。
+       */
+      if (nm === 'fill') {
+        const fa = argList(x, 'args');
+        if (fa.length === 2 && isZeroValueNode(fa[1])) {
+          const et = typeOf(fa[1], env, ctx);
+          const rec = isRecType(et, ctx) && !isPtrRec(et, ctx);
+          if (rec || et === 'int' || et === 'real' || et === 'bool' || et === 'string') {
+            return `(anew (arr ${et}) ${expr(fa[0], env, ctx)})`;
+          }
+        }
+      }
       if (!PRIMS_OK.has(nm)) gap(`内建 ${nm}`);
       const args = argList(x, 'args');
       /* 方言里的逻辑非是 **`(un "!" …)`**，不是 `(not …)`（`sexpr/lower.js:2894`）——
@@ -1444,6 +1464,30 @@ function bindSlice(nm, sl, env, ctx) {
 }
 
 /**
+ * **这一格是"某个类型的零值"吗**（`fill` 的快路与 `bindFill` 都问它）。
+ *
+ * 只认结构上摆明的零：零字面量、套在 `conv` 里的零、字段全是零的记录、空列表。
+ * 认不出来一律回 false —— 那时照旧走"一圈 apush"那条慢路，不会答错。
+ */
+function isZeroValueNode(x) {
+  if (x === undefined || x === null) return false;
+  /* 字面量是 `{ lit: 值 }`（`graph.js` 的 `lit`），不是一格节点 —— 先认它。 */
+  if (!isNode(x)) {
+    if (typeof x !== 'object' || !('lit' in x)) return false;
+    const v = x.lit;
+    return v === 0 || v === 0n || v === false || v === '';
+  }
+  if (x.op === 'const') {
+    const v = x.attrs.value;
+    return v === 0 || v === 0n || v === false || v === '';
+  }
+  if (x.op === 'conv') return isZeroValueNode(x.ins.value);
+  if (x.op === 'record-new') return argList(x, 'fields').every(isZeroValueNode);
+  if (x.op === 'list-new') return argList(x, 'items').length === 0;
+  return false;
+}
+
+/**
  * `let xs = fill(n, 零值)` —— **按长度造一格列表**（第 25 格内建）。
  *
  * **初值正好是那格类型的零值**时一句 `(anew T N)` 就够 —— 方言的 `anew` 本来就是
@@ -1494,14 +1538,20 @@ function isZeroText(t, v) {
  * `let xs = [1,2,3]` —— 方言里是 `(anew (arr T) 长度)` 再逐格 `(aset …)`。
  * 元素类型从第一格元素推，剩下的必须一致（不一致当场报 —— 方言的数组是单态的）。
  *
+ * **空列表**（`var xs []T`）的元素类型只能从 `elem` 那一格来（声明的类型，
+ * 见 nodes.js 上 `list-new` 的那段话）；没有 `elem` 就照旧报缺口。
+ *
  * 元素可以是**标量**，也可以是**值语义的记录**（byval，落成 `(arr rN)`）——
  * go 的 `[]Sphere` / pt 的 `[]Shape`、`Buffer.Pixels` 全是后者。引用语义的记录
  * （`(ptr rN)`）不收：方言里没有 `(arr (ptr rN))` 这一形。
  */function bindList(nm, lst, env, ctx) {
   const items = argList(lst, 'items');
-  if (items.length === 0) gap(`一格空列表（元素类型推不出来）—— 绑给 '${nm}'`);
+  const decl = lst.attrs === undefined ? undefined : lst.attrs.elem;
+  if (items.length === 0 && (decl === undefined || decl === null)) {
+    gap(`一格空列表（元素类型推不出来、也没有声明的元素类型）—— 绑给 '${nm}'`);
+  }
   const ts = items.map((it) => typeOf(it, env, ctx));
-  const et = ts[0];
+  const et = items.length === 0 ? typeOf(decl, env, ctx) : ts[0];
   const recElem = isRecType(et, ctx) && !isPtrRec(et, ctx);
   if (!recElem && et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
     gap(`列表的元素不是标量、也不是值语义的记录（量到的是 ${et}）`);

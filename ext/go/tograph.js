@@ -640,6 +640,19 @@ function zeroOf(ty, name, pkg) {
   }
   const t = tag(ty);
   if (t === 'paren') return zeroOf(kids(ty)[0], name, pkg);
+  /* `[]T` 的零值：**一格带着声明的元素类型的空列表**，不是 `null`。
+     go 里 nil 切片与空切片在 `== nil` 上不同，但 `len` / `append` / 取下标是一样的，
+     而图上压根没有"nil 切片"这个概念 —— 落 `null` 的代价是下游连元素类型都不知道
+     （core 那侧报「'spheres' 是一格 null（没赋过值）」）。`elem` 那一格见
+     `graph/nodes.js` 上 `list-new` 的那段话。元素自己没有零值（接口 / 函数类型套进来）
+     时退回 `null`：那时下游报的还是原来那句，不多也不少。 */
+  if (t === 'slice') {
+    const el = kids(ty).find((y) => tag(y) !== 'none');
+    if (el === undefined) return lit(null);
+    let ez = null;
+    try { ez = zeroOf(el, `${name}[]`, pkg); } catch { ez = null; }
+    return ez === null || ez === undefined ? lit(null) : listNew([], ez);
+  }
   if (NIL_TYPES.has(t)) return lit(null);
   // `[N]T` 的零值是**N 格元素零值**（数组是值语义的，不是切片）——
   // N 得是个整数字面量、元素也得有零值，两样缺一样就当场报。

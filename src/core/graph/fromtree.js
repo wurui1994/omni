@@ -264,8 +264,15 @@ export const fieldSet = (obj, name, value) => node('field-set', { obj, value }, 
 /**
  * **列表与下标那三格的搭法**（go / lua / V / nim 四门共用）。
  * `index` 交进来时**已经是 0 起的**（lua 减那一格由 lua 的映射自己做）。
+ *
+ * `listNew` 的第二个实参 `elem` 是**声明的元素类型**，拿"它的零值"那格节点带着 ——
+ * 空列表（`var xs []T`）的元素类型只能从声明来，见 nodes.js 上 `list-new` 那段话。
  */
-export const listNew = (items) => node('list-new', { items });
+export const listNew = (items, elem) => node(
+  'list-new',
+  { items },
+  elem === undefined || elem === null ? {} : { elem },
+);
 export const indexGet = (obj, idx) => node('index-get', { obj, index: idx });
 export const indexSet = (obj, idx, value) => node('index-set', { obj, index: idx, value });
 

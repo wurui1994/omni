@@ -302,6 +302,12 @@ export const NODES = new Map([
   // V 的返回 option —— 效应那一栏不同就是另一格节点（§3 那条"不许合并"的判据）。
   N('list-new', 'expr', [{ name: 'items', sem: SEM.value, rest: true }], {
     effects: ['allocates'], lifetime: 'owns',
+    /* `elem`（有类型覆盖层那一格，#40）：**声明的元素类型**，拿"它的零值"那格节点带着。
+       为什么非要它：`var xs []T` 是**一格空列表**，元素类型从元素推不出来 ——
+       从前 core 那侧只能报「一格空列表（元素类型推不出来）」。而声明的类型本来就在
+       前端手里。与 `pzero` / `rzero` / `byval` 同一条纪律：**声明的优先、推出来的兜底**，
+       别的语言不发它、它们的产物照旧。 */
+    attrs: ['elem'],
     doc: 'lua `{1,2}` / go `[]int{…}` / V `[…]` / nim `@[…]` —— 九门有列表字面量',
     // 规格里九门有列表字面量（awk 只有关联数组）。**九门全接上了** ——
     // freebasic 那一条是最后补的：它的字面量绑在声明上（`Dim a(2) As Integer = {…}`），
