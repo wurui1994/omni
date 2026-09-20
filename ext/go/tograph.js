@@ -2082,27 +2082,40 @@ function toNode(x) {
          而字段表本来就在 `STRUCTS` 里 —— 声明的形状**不进图**才是那 22 份的根因。
          所以具名 struct 绑成**它的零值记录**（字段名与顺序从声明来，与 `zeroOf` 同一份
          逻辑）：图上多一格没人读的全局，换来 core 那侧有类型可推。
-         别的具名类型（`type Level int` / 接口 / 泛型）仍旧绑 null —— 那几种没有字段表。 */
+         别的具名类型（`type Level int` / 接口 / 泛型）仍旧绑 null —— 那几种没有字段表。
+
+         **说不清零值的那些干脆不绑**（2026-09-20）：接口、函数类型、泛型、带嵌入字段的
+         结构体都落在这一档。绑一格 null 的代价是 core 那侧当场报"'Shape' 是一格 null"，
+         而那个绑定本来就没人读 —— 一个 `type Shape interface{…}` 在真代码里只当**类型**用。
+         万一真有人把它当值用（`(*T).Method` 那种），那时报的是"这个名字没声明"——
+         一句指着那一处的话，比一格说不清类型的全局好。 */
       const ch = kids(x);
       const nameNode = ch.find((y) => isList(y) && tag(y) === 'name') ?? ch[0];
       if (nameNode !== undefined) {
         const n = isList(nameNode) ? leaf(kids(nameNode)[0]) : leaf(nameNode);
         if (n !== undefined && typeof n === 'string' && n.length > 0) {
-          let init = lit(null);
+          let init = null;
           const fs = STRUCTS.get(n);
           if (fs !== undefined && fs !== null) {
-            /* zeroOf 对说不清的类型会当场报（那是它的纪律）—— 这一格报了就退回 null，
-               因为"类型名有个绑定"是刚需，"它有类型"是加分。 */
-            try { init = structZero(n); if (init === null) init = lit(null); }
-            catch { init = lit(null); }
+            /* zeroOf 对说不清的类型会当场报（那是它的纪律）—— 这一格报了就不绑，
+               因为"它有类型"是刚需（见上面那段账），而"类型名有个绑定"只有
+               方法表达式那一处要。 */
+            try { init = structZero(n); } catch { init = null; }
           } else if (UNDER.has(n)) {
             /* `type Axis int` / `type Channel int` 这一族：零值就是**底子的零值**
                （与 `zeroOf` 里 `UNDER.has(n)` 那一行同一条）。量出来的账：
                不给它，pt 里 axis.go / buffer.go / sampler.go 那几份还是卡在
-               "'Axis' 是一格 null"上。接口与函数类型没有标量零值，仍旧 null。 */
-            try { init = zeroOf(UNDER.get(n), n); }
-            catch { init = lit(null); }
+               "'Axis' 是一格 null"上。接口与函数类型没有标量零值，那时不绑。 */
+            try { init = zeroOf(UNDER.get(n), n); } catch { init = null; }
           }
+          /* **零值是一格 null 就等于没有零值**（接口 / 函数类型 / 泛型都落在这儿）——
+             `zeroOf` 对它们回的是 `lit(null)`，不报。图上的字面量是一格 `{lit: v}`
+             （不是 `const` 节点，见 `fromtree.js` 的 `lit`），所以判据是 `.lit`。 */
+          if (init !== null && init !== undefined && typeof init === 'object'
+            && init.lit === null && init.op === undefined) {
+            init = null;
+          }
+          if (init === null || init === undefined) return [];
           return [{ op: 'bind', ins: { init }, attrs: { name: n } }];
         }
       }
