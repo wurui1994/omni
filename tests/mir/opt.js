@@ -6,7 +6,8 @@
 //   1. **每一格自己的判据**（`src/core/mir/opt/tests/*.test.js`）：真 .c 出的 MIR，
 //      改完过 verifier、解释器答案逐字不变、指令条数真的降。
 //   2. **L1 行为一致**（ADR-0039 第 5 节的第一档）：`tests/c/gen/*.c` 那 85 份，
-//      `omni c run` 开与不开 `OMNI_MIR_OPT=1` 的 **stdout + 退出码必须逐字节相同**。
+//      `omni c run` 开与不开 `OMNI_MIR_OPT=1` 的 **stdout + 退出码必须逐字节相同**；
+//      再加 `bench/ir/suite` 里的**真程序**一档（只走原生腿，理由见第四节）。
 //
 // 为什么第 2 条要用真的 CLI 跑：管线是挂在 `lang/c.js` 的 `cMir` 上的，只在库里调
 // 通道函数证不了"那条命令真的走了这一格"。这条轴抓出过两个真 bug：
@@ -75,6 +76,36 @@ for (const c of cases) {
   bad(`L1-native ${c}`, `退出码 ${a.status} vs ${b.status}\n--- 不开\n${a.stdout}\n--- 开\n${b.stdout}`);
 }
 if (nsame > 0) ok(`L1 行为一致（原生腿）：${nsame}/${cases.filter((c) => keep(c)).length} 份 .c 逐字节相同`);
+
+/* ---- 四、L1：**真程序**那一档（`bench/ir/suite` 里的 .c）。
+ *
+ * 为什么非要加这一档（量出来的，2026-09-20）：`tests/c/gen` 那 85 份是按 C 的**语法面**
+ * 铺的，里头**没有一处**"值在外面算好、`if` 里才写进局部变量"的形状。
+ * regalloc 的槽位合流第一版漏了"中间不许有控制流"这条前提 —— 85 份两条腿全过，
+ * 而 smallpt 的输出当场不同（`md5` 5e907073… vs 82fcfb8c…）。
+ *
+ * 只走原生腿：这一档是真程序（smallpt 十几毫秒），解释器腿跑起来是分钟级，
+ * 而这一类差都要在后端的寄存器/发码上才露头。 */
+const suite = join(root, 'bench/ir/suite');
+const real = [];
+for (const d of readdirSync(suite, { withFileTypes: true })) {
+  if (!d.isDirectory()) continue;
+  for (const f of readdirSync(join(suite, d.name))) {
+    if (f.endsWith('.c')) real.push(join(suite, d.name, f));
+  }
+}
+real.sort();
+let rsame = 0;
+for (const p of real) {
+  if (!keep(p)) continue;
+  const a = spawnSync(process.execPath, [cli, 'c', 'tcc', '-run', p], { encoding: 'utf8' });
+  const b = spawnSync(process.execPath, [cli, 'c', 'tcc', '-run', p],
+    { encoding: 'utf8', env: Object.assign({}, process.env, { OMNI_MIR_OPT: '1' }) });
+  if (a.stdout === b.stdout && a.status === b.status) { rsame++; continue; }
+  bad(`L1-real ${p}`, `退出码 ${a.status} vs ${b.status}\n--- 不开\n${a.stdout.slice(0, 400)}`
+    + `\n--- 开\n${b.stdout.slice(0, 400)}`);
+}
+if (rsame > 0) ok(`L1 行为一致（真程序 · 原生腿）：${rsame}/${real.filter((p) => keep(p)).length} 份逐字节相同`);
 
 /* ------------------------------------------------------------------ 收尾 */
 process.stdout.write(`\n${pass} ok, ${fail} failed\n`);

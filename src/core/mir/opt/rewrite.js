@@ -17,13 +17,13 @@
  * （`replaceRef`），第三种只改这一条自己的 op 与操作数 —— 三种都不新增指令、
  * 不动控制流，被换掉的那条由紧跟的 `opt deadcode` 收走。
  *
- * 还要**新增**指令的那一族（`Not(Eq x y) => Neq x y`：要改内层指令的 op 并数使用次数）
- * 留给后面的格子。
+ * `Not(Less x y) => Leq y x` 那一族（generic.rules:397-403）走的也是第三种：
+ * **改写 `Not` 自己那一条**，不碰内层那条比较 —— 于是既不新增指令、也不必数使用次数。
  */
 
 import {
   OP, OP_MODES, REF_BIAS, REF_NONE, T_BOOL, T_F32, CVT_BITCAST,
-  isCmp, isIntType, isFloatType, intBits, typeLanes,
+  isCmp, isIntType, isFloatType, intBits, typeLanes, negCmp,
 } from '../ir.js';
 import { replaceRef } from './edit.js';
 import { buildCfg } from './cfg.js';
@@ -285,6 +285,35 @@ function rewriteValue(fn, mod, pc) {
     /* `(Not (Not x)) => x`：Go 那边这一条是靠 `Com(Com x)`（:689）与
        `Not` 折进比较（:430-436）两族覆盖的，我们只留这一条同形的。 */
     if (A >= REF_BIAS && A !== REF_NONE && fn.op[A - REF_BIAS] === OP.NOT) return fn.a[A - REF_BIAS];
+    /**
+     * `(Not (Less x y)) => (Leq y x)` 那一族 —— generic.rules:397-403。
+     *
+     * 我们的比较是**连号成对**的（`negCmp` = `op ^ 1`，见 ir.js 那张表），所以不必换
+     * 操作数次序：`!(a < b)` 就是 `a >= b`。就地把这一条 `NOT` 改写成取反的比较，
+     * 原来那条比较没人用了自然由 deadcode 收走 —— 于是**不必数使用次数**
+     * （文件头上原先说这一族"要改内层指令并数使用次数"，改写自己这一条就绕开了）。
+     *
+     * **浮点只收 EQ/NE**：Go 的 :397/:398 收了 `64F`/`32F`，而 :400-403 那四条
+     * 只列整数宽度 —— 有 NaN 时 `!(a < b)` 不等于 `a >= b`（两边都假）。
+     *
+     * 量出来的账（`bench/go/loop.go` 的内层循环，arm64）：原先
+     *     cmp x21,x10 / cset x22,lt / eor x23,x22,#1 / cbnz x23,出口
+     * 那条 `eor` 就是这一格 NOT。
+     */
+    if (A >= REF_BIAS && A !== REF_NONE) {
+      const ip = A - REF_BIAS;
+      const cop = fn.op[ip];
+      const ct = fn.t[ip];
+      const eqne = cop === OP.EQ || cop === OP.NE;
+      if (isCmp(cop) && (eqne || !scalarFloat(ct))) {
+        fn.op[pc] = negCmp(cop);
+        fn.a[pc] = fn.a[ip];
+        fn.b[pc] = fn.b[ip];
+        fn.t[pc] = ct;
+        fn.aux[pc] = fn.aux[ip];
+        return IN_PLACE;
+      }
+    }
     return -1;
   }
 

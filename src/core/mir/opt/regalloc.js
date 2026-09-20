@@ -407,6 +407,10 @@ export function regalloc(fn, mod) {
   fn.regHintF = cls[1].hint;
   fn.slotHint = cls[0].slotHint;
   fn.slotHintF = cls[1].slotHint;
+  const coal = [new Map(), new Map()];
+  n += coalesceWithSlots(fn, slotIv, last, cls, coal);
+  fn.regCoal = coal[0];
+  fn.regCoalF = coal[1];
   /* `OMNI_RA_STAT=1`：印出这一格的覆盖率与压力 —— 「同时活着最多几个」决定了
    * 加寄存器还不还得起，「分到几个」决定了抢占策略有没有用。量过再改，别猜。 */
   if (process.env.OMNI_RA_STAT === '1' && fn.op.length >= 200) {
@@ -432,35 +436,161 @@ export function regalloc(fn, mod) {
 registerPass('regalloc', regalloc);
 
 /**
+ * `from` 与 `to` 之间**一定顺着走过来**吗（中间没有任何控制流的岔口或区域边界）。
+ *
+ * ⚠️ 这一条是 STORE 那一侧的**正确性前提**，量出来的（smallpt 逐字节不同）：
+ *     %5 = ADD …
+ *     IF cond
+ *       STORE %5 slotN
+ *     END
+ * 把 `%5` 合到槽的寄存器上，等于**在 pc 5 就无条件写了那个槽** —— 条件不成立的那条路上
+ * 槽本该保持原值。同理"定义在循环外、STORE 在循环里"：循环跑 0 趟时也被写了。
+ */
+function straightLine(fn, from, to) {
+  for (let p = from + 1; p < to; p++) {
+    const o = fn.op[p];
+    if (o === OP.BLOCK || o === OP.LOOP || o === OP.IF || o === OP.ELSE || o === OP.END
+      || o === OP.BR || o === OP.BRIF || o === OP.BRTABLE || o === OP.RET
+      || o === OP.SETJMP || o === OP.LONGJMP) return false;
+  }
+  return true;
+}
+
+/**
+ * **与槽位合流**（Go 的 `regalloc.go` 里那套 desired-register / `copyelim` 干的事）。
+ *
+ * 涂过色的槽的权威副本就是一个寄存器，所以后端把
+ *   `%v = LOAD slotN`   发成 `mov 值的寄存器, 槽的寄存器`
+ *   `STORE %v slotN`    发成 `mov 槽的寄存器, 值的寄存器`
+ * 两条纯搬运。让**值与槽同色**，这两条就各自一个字都不发（`arm64/from_mir.js` 的
+ * `def` 与 STORE 那一支本来就写着 `if (reg !== sk)`）。
+ *
+ * 量出来的账（`bench/go/loop.go` 的内层循环，13 条指令里）：
+ *     mov x21,x20 / … / mov x19,x24 / mov x20,x22   —— 四条全是这一类。
+ *
+ * 安全判据（**不放宽"相交的值不许同色"那条硬约束**，只是承认"值与它合流的那个槽
+ * 装的是同一个东西"）：
+ *   - LOAD：窗口 `(pc, 最后一次使用]` 里**没人写过这个槽**；
+ *   - STORE：值只此一处用（`last[pv] === pc`），且窗口 `(pv, pc]` 里**没人读过这个槽**；
+ *   - 两种都要求值的区间落在**槽的区间之内** —— 槽一到期颜色就还回池子给别人了；
+ *   - 同一个槽上合流的几段**互不相交**（相交就是真冲突，`checkRegHint` 也会骂）。
+ *
+ * 回合了几格。合流的登记在 `fn.regCoal` / `fn.regCoalF`（pc -> 槽号），
+ * `checkRegHint` 靠它把"值与它自己那个槽同色"这一对放过，别的照旧判。
+ */
+function coalesceWithSlots(fn, slotIv, last, cls, coal) {
+  if (slotIv.size === 0) return 0;
+  /* 每个槽的读点与写点（按 pc 升序）—— 窗口里有没有人动过这个槽要问它。 */
+  const loadsOf = new Map(), storesOf = new Map();
+  for (let pc = 0; pc < fn.op.length; pc++) {
+    const o = fn.op[pc];
+    if (o !== OP.LOAD && o !== OP.STORE) continue;
+    const no = fn.aux[pc];
+    if (!slotIv.has(no)) continue;
+    const m = o === OP.LOAD ? loadsOf : storesOf;
+    if (!m.has(no)) m.set(no, []);
+    m.get(no).push(pc);
+  }
+  /** 有落在 `(lo, hi]` 里的吗。 */
+  const anyIn = (list, lo, hi) => {
+    if (list === undefined) return false;
+    for (const p of list) { if (p > lo && p <= hi) return true; }
+    return false;
+  };
+  const taken = new Map();
+  const fits = (no, s, e) => {
+    const list = taken.get(no);
+    if (list === undefined) return true;
+    for (const it of list) { if (e >= it.s && it.e >= s) return false; }
+    return true;
+  };
+  const mark = (no, s, e) => {
+    if (!taken.has(no)) taken.set(no, []);
+    taken.get(no).push({ s, e });
+  };
+  let got = 0;
+  for (let pc = 0; pc < fn.op.length; pc++) {
+    const o = fn.op[pc];
+    if (o !== OP.LOAD && o !== OP.STORE) continue;
+    const no = fn.aux[pc];
+    const iv = slotIv.get(no);
+    if (iv === undefined) continue;
+    const k = iv.float ? 1 : 0;
+    const color = cls[k].slotHint.get(no);
+    if (color === undefined) continue;
+    if (o === OP.LOAD) {
+      const e = last[pc];
+      if (e < 0) continue;                                  // 没人用它
+      if (iv.start > pc || iv.end < e) continue;
+      if (anyIn(storesOf.get(no), pc, e)) continue;
+      if (!fits(no, pc, e)) continue;
+      cls[k].hint.set(pc, color);
+      coal[k].set(pc, no);
+      mark(no, pc, e);
+      got++;
+      continue;
+    }
+    const a = fn.a[pc];
+    if (a === REF_NONE || a < REF_BIAS) continue;           // 存的是常量：没有值可合
+    const pv = a - REF_BIAS;
+    if (last[pv] !== pc) continue;
+    if (!straightLine(fn, pv, pc)) continue;
+    if (iv.start > pv || iv.end < pc) continue;
+    if (anyIn(loadsOf.get(no), pv, pc)) continue;
+    if (!fits(no, pv, pc)) continue;
+    cls[k].hint.set(pv, color);
+    coal[k].set(pv, no);
+    mark(no, pv, pc);
+    got++;
+  }
+  return got;
+}
+
+/**
  * 判据用：这两张分配表**自洽**吗。回一串错（空 = 干净）。
  *
  * 判的就是寄存器分配唯一的那条硬约束：**两个区间相交的值不许同色**。
  * 区间 = `[定义的 pc, 最后一次使用的 pc]`，这一层的正确性全靠它连续（见文件头）。
  * 两类各自判：通用与浮点是两套物理寄存器，跨类同色不冲突。
+ *
+ * **与槽位合流的那一对例外**（`fn.regCoal`，见 `coalesceWithSlots`）：值与它合流的那个槽
+ * 装的就是同一个东西，同色是这一刀的目的。**只放过这一对** —— 值与**别的**槽、
+ * 值与值、槽与槽照旧判。
  */
 export function checkRegHint(fn, mod) {
   const errs = [];
   const last = extendForLoops(fn, lastUses(fn));
   const { openLoops, endOf } = scanRegions(fn);
   const slotIv = slotIntervals(fn, mod, openLoops, endOf);
-  for (const [cls, hint, sh] of [['通用', fn.regHint, fn.slotHint], ['浮点', fn.regHintF, fn.slotHintF]]) {
+  const legs = [
+    ['通用', fn.regHint, fn.slotHint, fn.regCoal],
+    ['浮点', fn.regHintF, fn.slotHintF, fn.regCoalF],
+  ];
+  for (const [cls, hint, sh, co] of legs) {
     const items = [];
     if (hint && hint.size > 0) {
-      for (const [pc, color] of hint) items.push({ what: `%${pc}`, pc, end: last[pc], color });
+      for (const [pc, color] of hint) items.push({ what: `%${pc}`, pc, end: last[pc], color, val: pc });
     }
     if (sh && sh.size > 0) {
       for (const [no, color] of sh) {
         const e = slotIv.get(no);
         if (e === undefined) { errs.push(`${fn.name}（${cls}）: slot${no} 涂了色可是没有区间`); continue; }
-        items.push({ what: `slot${no}`, pc: e.start, end: e.end, color });
+        items.push({ what: `slot${no}`, pc: e.start, end: e.end, color, slot: no });
       }
     }
+    /** 这一对是"值与它自己合流的那个槽"吗。 */
+    const paired = (a, b) => {
+      if (co === undefined || co === null) return false;
+      if (a.val !== undefined && b.slot !== undefined) return co.get(a.val) === b.slot;
+      if (b.val !== undefined && a.slot !== undefined) return co.get(b.val) === a.slot;
+      return false;
+    };
     for (let i = 0; i < items.length; i++) {
       for (let j = i + 1; j < items.length; j++) {
         const a = items[i], b = items[j];
         if (a.color !== b.color) continue;
         const overlap = a.pc <= b.end && b.pc <= a.end;
-        if (overlap) {
+        if (overlap && !paired(a, b)) {
           errs.push(`${fn.name}（${cls}）: ${a.what}[${a.pc}..${a.end}] 与`
             + ` ${b.what}[${b.pc}..${b.end}] 区间相交却同色（${a.color}）`);
         }

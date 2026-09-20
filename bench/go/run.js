@@ -2,6 +2,12 @@
 //
 // 为什么要它：正确性有 `tests/go`，但这条路的目标是**逼近 go 原生**，那只能量。
 // 参考是官方 go 编出来的二进制（同一台机器、同一份源码），所以这把尺子不是我们自己的复述。
+//
+// **第三列是"同一份 C 交给 clang -O2"**（`--cc clang` + `OMNI_OPT=2`）。它把差分成两段：
+//   go → clang 那一段是**我们发出来的 C 的形状**（前端 / 图 / 方言那一路）；
+//   clang → self 那一段是**我们自己那个后端的发码**（公共优化管线，ADR-0039）。
+// 没有这一列就只能猜该改哪头 —— 量过一次就知道：slice 那格 self 89ms、clang 30ms、
+// go 39ms，也就是形状已经够好、欠的全在后端。
 // 用法：node bench/go/run.js [次数]（交错跑、各取最小 —— 这台机器单次墙上时间抖 ±40%）
 import { execFileSync } from 'node:child_process';
 import { readdirSync, mkdirSync } from 'node:fs';
@@ -25,21 +31,41 @@ for (const f of readdirSync(here).filter((x) => x.endsWith('.go')).sort()) {
   const stem = f.slice(0, -3);
   const ref = join(out, `${stem}_go`);
   const ours = join(out, `${stem}_ours`);
+  const cl = join(out, `${stem}_clang`);
   const sx = join(out, `${stem}.sx`);
+  const omni = (args, env) => execFileSync('node', [join(root, 'src', 'cli.js'), ...args],
+    { cwd: root, stdio: 'pipe', timeout: 300000, env: { ...process.env, ...env } });
   /* 编不过就报一行、接着量下一份 —— 尺子不该因为一处缺口整趟垮掉。 */
   try {
     execFileSync('go', ['build', '-o', ref, src], { timeout: 300000 });
-    execFileSync('node', [join(root, 'src', 'cli.js'), 'build', '--engine', 'graph',
-      '--lang', 'go', '--backend', 'core', src, '-o', sx], { cwd: root, stdio: 'pipe', timeout: 300000 });
-    execFileSync('node', [join(root, 'src', 'cli.js'), 'build', sx, '-o', ours],
-      { cwd: root, stdio: 'pipe', timeout: 300000, env: { ...process.env, OMNI_MIR_OPT: '1' } });
+    omni(['build', '--engine', 'graph', '--lang', 'go', '--backend', 'core', src, '-o', sx]);
+    omni(['build', sx, '-o', ours], { OMNI_MIR_OPT: '1' });
+    omni(['build', sx, '-o', cl, '--cc', 'clang'], { OMNI_OPT: '2' });
   } catch (e) {
     const all = `${e.stdout || ''}${e.stderr || ''}${e.message || ''}`;
     const why = all.split('\n').filter((x) => x.trim()).pop();
     console.log(`${f.padEnd(16)} 编不出来：${String(why).slice(0, 96)}`);
     continue;
   }
-  let bg = Infinity, bo = Infinity;
-  for (let i = 0; i < N; i++) { bg = Math.min(bg, wall(ref)); bo = Math.min(bo, wall(ours)); }
-  console.log(`${f.padEnd(16)} go ${bg.toFixed(0)}ms   我们 ${bo.toFixed(0)}ms   ×${(bo / bg).toFixed(2)}`);
+  /* **先比答案再比时间**。为什么这一条不能省（量出来的，2026-09-20）：regalloc 的
+     槽位合流第一版发出了错的码，smallpt 快了 9.25 倍 —— 因为它算的不是那件事。
+     一把不验答案的性能尺子会把"算错了所以快"报成进步。
+     go 的 `println` 写的是 **stderr**，所以两边都要合流取。 */
+  const say = (bin) => execFileSync('sh', ['-c', `${JSON.stringify(bin)} 2>&1`],
+    { encoding: 'utf8', timeout: 600000 });
+  const want = say(ref);
+  for (const [who, bin] of [['我们', ours], ['clang', cl]]) {
+    const got = say(bin);
+    if (got !== want) {
+      console.log(`${f.padEnd(16)} 答案不对（${who}）：go 给 ${JSON.stringify(want.slice(0, 60))}`
+        + `，它给 ${JSON.stringify(got.slice(0, 60))}`);
+    }
+  }
+  let bg = Infinity, bo = Infinity, bc = Infinity;
+  for (let i = 0; i < N; i++) {
+    bg = Math.min(bg, wall(ref)); bo = Math.min(bo, wall(ours)); bc = Math.min(bc, wall(cl));
+  }
+  console.log(`${f.padEnd(16)} go ${bg.toFixed(0)}ms`
+    + `   我们 ${bo.toFixed(0)}ms ×${(bo / bg).toFixed(2)}`
+    + `   同一份 C 交给 clang ${bc.toFixed(0)}ms ×${(bc / bg).toFixed(2)}`);
 }

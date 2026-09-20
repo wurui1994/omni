@@ -701,14 +701,20 @@ export const isCmp = (op) => (op >= OP.EQ && op <= OP.GT) || (op >= OP.ULT && op
 
 /**
  * 取反比较：靠编号算术，不用 switch（LuaJIT `lj_ir.h:154..158` 的做法）。
- * 它那边是 `op ^ 1`，这里只能是「偶数 +1、奇数 -1」—— 同一件事，理由见 mkType。
+ *
+ * 两段各自**从段首起算**成对（EQ↔NE、LT↔GE、LE↔GT；ULT↔UGE、ULE↔UGT），
+ * 所以偏移量的奇偶是段内的事，**与这两段落在表的第几行无关**。
+ *
+ * ⚠️ 原先照 LuaJIT 写成"偶数 +1、奇数 -1"，那要求段首自己落在偶数号上 ——
+ * 而 `OP.EQ` 是 25（奇），于是 `negCmp(LT)` 给出 `NE`、`negCmp(EQ)` 给出 `NOT`。
+ * 一直没人调它所以没露头；第一次真用（`Not(Less x y) => Leq y x`）时
+ * `bench/go/loop.go` 当场印出 0 —— `i < 200000000` 取反成了 `i != 200000000`。
  */
 export function negCmp(op) {
   if (!isCmp(op)) throw new Error(`negCmp: ${OP_NAMES[op]} 不是比较`);
-  // 两段都是连号的偶奇对，所以同一句算术管两段 —— 前提是 ULT 落在偶数上，
-  // 而它落在哪儿由表尾的位置定，所以这儿断言一下，别让以后加 op 的人踩着。
-  if (op >= OP.ULT && OP.ULT % 2 !== 0) throw new Error('negCmp: ULT 要落在偶数号上');
-  return op % 2 === 0 ? op + 1 : op - 1;
+  const base = op >= OP.ULT ? OP.ULT : OP.EQ;
+  const k = op - base;
+  return base + (k % 2 === 0 ? k + 1 : k - 1);
 }
 
 /** 开一个区域的 op（要配一条 END）。 */
