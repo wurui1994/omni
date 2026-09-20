@@ -22,7 +22,7 @@
  */
 
 import {
-  OP, OP_MODES, REF_BIAS, REF_NONE, T_BOOL, T_F32,
+  OP, OP_MODES, REF_BIAS, REF_NONE, T_BOOL, T_F32, CVT_BITCAST,
   isCmp, isIntType, isFloatType, intBits, typeLanes,
 } from '../ir.js';
 import { replaceRef } from './edit.js';
@@ -253,6 +253,24 @@ function rewriteValue(fn, mod, pc) {
       if (x === 1) return B;
     }
     return -1;
+  }
+
+  /**
+   * `CVT_BITCAST(CVT_BITCAST(x))` ⇒ `x`（两次按位重解释互相抵消）。
+   *
+   * 与 `(Com (Com x)) => x`（generic.rules:689）同一类恒等式。要这一条是因为
+   * `copyfwd.js` 把「按字拷贝的聚合」那条链一档一档转发成了一串 `CVT_BITCAST`，
+   * 两两抵消之后剩下的才是最初那个寄存器里的值。
+   *
+   * 判据：里层那条的**操作数类型**得与我们的结果类型一样（宽度一样、读法一样），
+   * 不然抵消不掉（f32 <-> i64 那种根本不会配上，宽度就不同）。
+   */
+  if (op === OP.CVT && fn.aux[pc] === CVT_BITCAST && A >= REF_BIAS && A !== REF_NONE) {
+    const ip = A - REF_BIAS;
+    if (fn.op[ip] === OP.CVT && fn.aux[ip] === CVT_BITCAST) {
+      const inner = fn.a[ip];
+      if (inner !== REF_NONE && fn.typeOf(inner, mod.consts) === t) return inner;
+    }
   }
 
   /* `(Not (ConstBool [c])) => (ConstBool [!c])` —— generic.rules:210 */

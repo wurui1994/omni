@@ -43,10 +43,21 @@ import {
   OP, OP_MODES, REF_BIAS, REF_NONE,
   memDesc, memKindNo, memOff,
   MLOAD_KINDS, MSTORE_KINDS, MLOAD_BYTES, MSTORE_BYTES,
+  CVT_BITCAST,
 } from '../ir.js';
 import { addrOf, cellOf, sameSpot, disjoint, mayWriteMemory, constOffset } from './memory.js';
 import { buildCfg } from './cfg.js';
 import { useSites } from './sroa.js';
+
+/** 两个宽度符号**盖的字节数一样**，但一个是整数、一个是浮点（`MLOAD` 那边 / `MSTORE` 那边）。 */
+function sameWidthDifferentKind(kl, ks) {
+  if (MLOAD_BYTES[kl] !== MSTORE_BYTES[ks]) return false;
+  const ln = MLOAD_KINDS[kl], sn = MSTORE_KINDS[ks];
+  if (ln === undefined || sn === undefined) return false;
+  const lf = ln === 'f32' || ln === 'f64' || ln === 'f80';
+  const sf = sn === 'f32' || sn === 'f64' || sn === 'f80';
+  return lf !== sf;
+}
 
 /** 哪些槽被**读过**（有 `LOAD`）。没人读的槽，往里写什么都观察不到。 */
 function loadedSlots(fn) {
@@ -167,22 +178,53 @@ export function forwardCopiedLoads(fn, mod) {
       /* 二、往回找写这一处的那条拷贝 */
       const pcS = lookBackCopy(fn, mod, bb.from, pc, want);
       if (pcS < 0) continue;
-      /* 三、写进去的值本身得是一条 MLOAD（那才叫"拷过来的"），而且同宽 */
-      const v = fn.b[pcS];
-      if (v === REF_NONE || v < REF_BIAS) continue;
-      const pcSrc = v - REF_BIAS;
-      if (fn.op[pcSrc] !== OP.MLOAD) continue;
-      if (pcSrc < bb.from) continue;                    // 源头的地址在这儿未必看得见
       const kl = memKindNo(fn.aux[pc]);
       const ks = memKindNo(fn.aux[pcS]);
-      const kr = memKindNo(fn.aux[pcSrc]);
       if (MLOAD_BYTES[kl] !== MSTORE_BYTES[ks]) continue;
-      if (MLOAD_BYTES[kl] !== MLOAD_BYTES[kr]) continue;
-      /* 四、源头那一段没被动过 */
-      if (!srcIntact(fn, mod, pcSrc, pc, want.base)) continue;
-      /* 五、改地址：换成源头的地址 + 源头的静态偏移，**宽度符号照我们自己的** */
-      fn.a[pc] = fn.a[pcSrc];
-      fn.aux[pc] = memDesc(kl, memOff(fn.aux[pcSrc]));
+      /* 三、写进去的值本身是一条 MLOAD ⇒ 那才叫"拷过来的"，改成直接读源头（最省） */
+      const v = fn.b[pcS];
+      if (v !== REF_NONE && v >= REF_BIAS && fn.op[v - REF_BIAS] === OP.MLOAD
+          && (v - REF_BIAS) >= bb.from) {
+        const pcSrc = v - REF_BIAS;
+        const kr = memKindNo(fn.aux[pcSrc]);
+        if (MLOAD_BYTES[kl] === MLOAD_BYTES[kr]
+            && srcIntact(fn, mod, pcSrc, pc, want.base)) {
+          /* 改地址：换成源头的地址 + 源头的静态偏移，**宽度符号照我们自己的** */
+          fn.a[pc] = fn.a[pcSrc];
+          fn.aux[pc] = memDesc(kl, memOff(fn.aux[pcSrc]));
+          n++;
+          continue;
+        }
+      }
+      /**
+       * 四、**位宽一样、只是整数/浮点那一位不同** ⇒ 这条 MLOAD 就地变成
+       * 「把写进去那个值按位重解释」（`CVT` 的 `CVT_BITCAST`）。
+       *
+       * 这是 `generic.rules:839` 那一族
+       *     (Load <t1> p1 (Store {t2} p2 x _)) && IsSamePtr && copyCompatibleType(t1, x.Type)
+       * 的**放宽一档**：Go 的 `copyCompatibleType`（`generic_helpers.go:95`）要求
+       * 整数配整数、指针配指针、别的类型完全相等，所以它**不**转发 i64 存 / f64 读。
+       * Go 不需要那一档，是因为它的 struct 在 SSA 里是**值**，`decomposeUser` 在任何
+       * 内存出现之前就按字段类型拆完了；而我们的 C 前端按值拷贝是**按字**拷的
+       * （`MSTORE i64`），字段类型的信息在那一步就丢了。
+       *
+       * 放宽这一档是**语义精确**的，不是猜：两边覆盖同一段字节、同样宽，
+       * 位模式一模一样，`CVT_BITCAST` 正是"同一串位换个读法"。
+       *
+       * 量出来的形状（`sph_intersect` 里 `op = vsub(...)` 之后那一段）：
+       *     str d10,[x22]              ← 结果本来就在寄存器里
+       *     ldr x23,[x22] / str x23,[sp,#0x138]   ┐ 十五条访存
+       *     ldr x22,[sp,#0x138] / str x22,[x19,#0x48] ┘ 只为把三个 double 搬到另一处
+       *     ldr d8,[x19,#0x30]         ← 再读回来
+       * 一档一档转发下去之后整条链都变成 `CVT_BITCAST`，而两个宽度相同的 BITCAST
+       * 互相抵消（`rewrite.js` 里那一条恒等式），最后剩下的就是那个寄存器里的值。
+       */
+      if (!sameWidthDifferentKind(kl, ks)) continue;
+      if (v === REF_NONE) continue;
+      fn.op[pc] = OP.CVT;
+      fn.a[pc] = v;
+      fn.b[pc] = REF_NONE;
+      fn.aux[pc] = CVT_BITCAST;
       n++;
     }
   }
