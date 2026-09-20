@@ -1,0 +1,37 @@
+;; **数组的元素是结构体**（值语义）。与 `(vec T N)` 同一档：格子里就地躺内容，
+;; 运行时那份 blob 只管长度与增长（`esz` 一格字节数），元素的读写由各条腿自己 load/store。
+;; go 的 `[]Sphere` / pt 的 `[]Shape`、`Buffer.Pixels` 全是这一族。
+;;
+;; 这一格从前是 `bad/arr-elem-struct.sx`，理由是"JS 与解释器的 arrCopy 是**类型擦除**的"
+;; —— 它只认 `Array.isArray`，普通对象原样返回，于是几个格子共用同一个对象。
+;; 放开的办法是把那个布尔换成**按类型生成的拷贝器**（`backend-js` 的 `jsElemCopy` 给出
+;; `$cp_S…`、解释器的 `elemCopier` 给出一格闭包），于是嵌套的结构体字段跟着深拷、
+;; 而嵌套的类句柄照旧原样 —— 这两件事在宿主里都是普通对象，布尔分不出来。
+;;
+;; **判据的要点是别名**：`aset` 之后再改源值，读回来的那一格不许跟着变；
+;; 嵌套一层（`P.c` 是 `V`）是为了钉住"深拷"而不只是一层浅拷。
+(module
+  (struct V (x real) (y real))
+  (struct P (c V) (r real))
+  (fn main () void
+    (let ps (arr P) (anew (arr P) (int 3)))
+    (let p P (new P))
+    (fldset (fld (var p) c) x (real 1.5))
+    (fldset (var p) r (real 7.0))
+    (aset (var ps) (int 0) (var p))
+    ;; 存完再改源值：上面那一格不许跟着动
+    (fldset (fld (var p) c) x (real 9.0))
+    (fldset (var p) r (real 99.0))
+    (let q P (aget (var ps) (int 0)))
+    (print (fld (fld (var q) c) x))
+    (print (fld (var q) r))
+    ;; 另外两格还是零值（`anew` 的零值铺 N 份，**每份各一个对象**，不许共享）
+    (aset (var ps) (int 1) (var p))
+    (print (fld (fld (aget (var ps) (int 2)) c) x))
+    (print (fld (fld (aget (var ps) (int 1)) c) x))
+    ;; push 一格：与 aset 同一条拷贝规矩
+    (apush (var ps) (var p))
+    (fldset (fld (var p) c) x (real -1.0))
+    (print (fld (fld (aget (var ps) (int 3)) c) x))
+    (print (alen (var ps))))
+  (main (expr (call main))))

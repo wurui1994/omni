@@ -399,7 +399,12 @@ function $bset(a, i, v) {
 // 多维数组那一刀之后"元素在 JS 侧是数组"有两种意思了 —— 向量（值语义，要拷）与**行**
 // （引用语义，不能拷）。量过：按 Array.isArray 猜的话 a.push(row) 会存进一份副本，
 // 于是 C/LLVM 说"两处是同一条"、JS 说"两条"，一句静默的分叉。
-function $acopy(v, cp) { return cp === true && Array.isArray(v) ? v.slice() : v; }
+// cp 三档：false 原样（标量 / 类 / 行 / 函数值）、true 切一刀（向量 —— 道都是标量，
+// 一层浅拷贝就是深拷贝）、**一格函数**（结构体 / 枚举，由发射端按类型给出 $cp_S…）。
+// 从前只有前两档而且是按 Array.isArray 猜的，于是结构体元素拷不动 —— 宿主里结构体与
+// 类都是普通对象，光看值分不出"值语义要拷"和"引用语义不许拷"。
+// false 摆在最前面：数组里绝大多数是标量元素，热路上只剩一次比。
+function $acopy(v, cp) { return cp === false ? v : (cp === true ? v.slice() : cp(v)); }
 function $anew(n, zero, cp) {
   const len = Number(n);
   if (len < 0) $rt_error("array length cannot be negative: " + len);
@@ -438,18 +443,18 @@ function $agetslow(a, i) {
 function $aset(a, i, v, cp) {
   if (a === null) $rt_error("null reference");
   if (a[i] === undefined) return $asetslow(a, i, v, cp);
-  a[i] = cp === true && Array.isArray(v) ? v.slice() : v;
+  a[i] = cp === false ? v : (cp === true ? v.slice() : cp(v));
   return v;
 }
 function $asetslow(a, i, v, cp) {
   const n = typeof i === "number" ? i : Number(i);
   if (n < 0 || n >= a.length) $rt_error("array index out of range: " + n + " (length " + a.length + ")");
-  a[n] = cp === true && Array.isArray(v) ? v.slice() : v;
+  a[n] = cp === false ? v : (cp === true ? v.slice() : cp(v));
   return v;
 }
 function $apush(a, v, cp) {
   if (a === null) $rt_error("null reference");
-  a.push(cp === true && Array.isArray(v) ? v.slice() : v);
+  a.push(cp === false ? v : (cp === true ? v.slice() : cp(v)));
   return v;
 }
 

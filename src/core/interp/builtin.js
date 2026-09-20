@@ -713,12 +713,17 @@ export function arrNew(n, zero, cp) {
   return out;
 }
 
-/** 向量元素存进数组前要拷一份：向量是值类型，C/LLVM 那两条腿存的是 16 字节副本，
- *  而 JS 侧一个向量就是一个 JS 数组，直接存进去是别名。
- *  拷不拷由**调用方按元素的静态类型**给（`cp`）—— 多维数组那一刀之后"元素在 JS 侧是数组"
- *  有两种意思了：向量（值语义，要拷）与行（引用语义，拷了就与 C/LLVM 分叉）。
- *  名字带 arr 前缀：模块级名字全仓唯一。 */
-export function arrCopy(v, cp) { return cp === true && Array.isArray(v) ? v.slice() : v; }
+/** 值语义的元素存进数组前要拷一份：向量与**结构体**都是值类型，C/LLVM 那两条腿存的是
+ *  一份副本，而 JS 侧一个向量是 JS 数组、一个结构体是 JS 对象，直接存进去是别名。
+ *
+ *  `cp` 三档：`false`/`null` 原样、`true` 切一刀（向量 —— 道都是标量，一层浅拷贝就是深拷贝，
+ *  热路上少一次调用）、**一格函数**（结构体 / 枚举，调用方按元素的静态类型给）。
+ *  ⚠️ 从前这儿是个布尔（`cp === true && Array.isArray(v) ? v.slice() : v`）——**类型擦除**，
+ *  于是结构体元素拷不动（普通对象），而"嵌套结构体要深拷、嵌套类句柄不许拷"这两件事
+ *  在宿主里都是普通对象，布尔分不出来。判据：`(aset ps 0 p)` 之后改 `p.x`，
+ *  读回来的 `ps[0].x` 跟着变了。现在函数由 `eval.js` 的 `copyOf` 按类型造，
+ *  那一份本来就递归处理 struct / enum / vec、而 class 原样。 */
+export function arrCopy(v, cp) { return cp === true ? v.slice() : (typeof cp === 'function' ? cp(v) : v); }
 
 /** 数组句柄可以是 null —— 多维数组的行（`(anew (arr (arr T)) 3)` 之后每行都还没构造）。
  *  五条腿都要在这里冒同一句话：C 侧是 omni_arr.c 每个操作开头的 omni_nullck，

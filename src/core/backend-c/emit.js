@@ -158,6 +158,7 @@ class CEmitter {
     // 没有装箱桥），一个形状要发的就是几个 static inline，边遇边记最省事。
     this.vecs = new Map();
     this.vecAt = -1;
+    this.arrAt = -1;
     // 用到的缓冲形状（门槛 7 第一阶段）。和向量共用那个回填位：两者都是"按 (元素) 生成
     // 一小段定义"，分两个位置只会多一处要对齐的顺序。
     this.bufs = new Map();
@@ -445,6 +446,13 @@ class CEmitter {
       else this.enumBody(a.t);
     }
     for (const c of classes) this.classBody(c);
+    /* **聚合元素的数组**那一段的落点：必须在结构体/枚举的**本体**之后 ——
+       `omni_arr_SP_new` 里有 `sizeof(s_P)`、`*(s_P *)…` 这些要**完整类型**的东西。
+       向量那一段（`vecAt`）反过来要在聚合体之前（struct 里能按值嵌套向量），
+       所以这是两个落点，不是一个。判据：`(arr 结构体名)` 那格从前发在 `vecAt` 上，
+       clang 当场报 `declaration expected`（结构体还没定义）。 */
+    this.arrAt = this.out.length;
+    this.line();
     for (const t of containers) this.containerBody(t);
     this.line();
     for (const t of containers) this.containerDefine(t);
@@ -601,7 +609,8 @@ class CEmitter {
     this.out[this.s16At] = this.s16PoolLines().join('\n');    this.out[this.protoAt] = this.protoLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
-    this.out[this.vecAt] = this.vecLines().concat(this.bufLines()).concat(this.arrLines()).join('\n');
+    this.out[this.vecAt] = this.vecLines().concat(this.bufLines()).join('\n');
+    this.out[this.arrAt] = this.arrLines().join('\n');
     return this.out.join('\n') + '\n';
   }
 

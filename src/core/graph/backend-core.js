@@ -1493,13 +1493,18 @@ function isZeroText(t, v) {
 /**
  * `let xs = [1,2,3]` —— 方言里是 `(anew (arr T) 长度)` 再逐格 `(aset …)`。
  * 元素类型从第一格元素推，剩下的必须一致（不一致当场报 —— 方言的数组是单态的）。
+ *
+ * 元素可以是**标量**，也可以是**值语义的记录**（byval，落成 `(arr rN)`）——
+ * go 的 `[]Sphere` / pt 的 `[]Shape`、`Buffer.Pixels` 全是后者。引用语义的记录
+ * （`(ptr rN)`）不收：方言里没有 `(arr (ptr rN))` 这一形。
  */function bindList(nm, lst, env, ctx) {
   const items = argList(lst, 'items');
   if (items.length === 0) gap(`一格空列表（元素类型推不出来）—— 绑给 '${nm}'`);
   const ts = items.map((it) => typeOf(it, env, ctx));
   const et = ts[0];
-  if (et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
-    gap(`列表的元素不是标量（这一刀只接标量元素，量到的是 ${et}）`);
+  const recElem = isRecType(et, ctx) && !isPtrRec(et, ctx);
+  if (!recElem && et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
+    gap(`列表的元素不是标量、也不是值语义的记录（量到的是 ${et}）`);
   }
   if (ts.some((t) => t !== et)) gap(`列表里的元素类型不一样（${ts.join(' / ')}）—— 方言的数组是单态的`);
   const at = `(arr ${et})`;

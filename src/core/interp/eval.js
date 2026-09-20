@@ -261,6 +261,28 @@ class Interp {
     return v;
   }
 
+  /**
+   * 数组元素的**拷贝器**：值语义的元素（向量 / 结构体 / 枚举）回一格拷贝函数，
+   * 别的（标量、类、行、函数值）回 null = 原样存。
+   *
+   * 为什么是"一格函数"而不是一个布尔：宿主里向量是数组、结构体与类都是普通对象 ——
+   * 光看值分不出"值语义要拷"与"引用语义不许拷"。判据是那格别名用例
+   * （`(aset ps 0 p)` 之后改 p 的字段，读回来不许变）。
+   *
+   * **按类型记一份**：数组写在热路上，每次求值造一个闭包等于每轮一次分配。
+   */
+  elemCopier(t) {
+    if (t === undefined || t === null) return null;
+    if (t.k === 'vec') return true;            // 宿主里是数组，`slice` 一刀就够（热路少一次调用）
+    if (t.k !== 'struct' && t.k !== 'enum') return null;
+    if (this.copiers === undefined) this.copiers = new Map();
+    const got = this.copiers.get(t);
+    if (got !== undefined) return got;
+    const fn = (v) => this.copyOf(t, v);
+    this.copiers.set(t, fn);
+    return fn;
+  }
+
   eval(e, env, frame) {
     switch (e.kind) {
       case 'Const':
@@ -329,19 +351,21 @@ class Interp {
         return bufSet(b, i, this.eval(e.value, env, frame));
       }
       // 数组六条（门槛 2 第四刀）。也是普通数组、也是引用语义，copyOf 同样不动它。
-      // 末位那个布尔是"元素是值语义、存进去要拷一份"（只有向量），按**静态类型**给 ——
-      // 多维数组那一刀之后 Array.isArray 分不开向量与行（见 builtin.js 的 arrCopy）。
-      case 'ArrNew': return arrNew(this.eval(e.count, env, frame), this.eval(e.zero, env, frame), e.type.elem.k === 'vec');
+      // 末位那一格是**元素的拷贝器**（`elemCopier`）：元素是值语义（向量 / 结构体 /
+      // 枚举）时存进去要拷一份，按**静态类型**给。从前这儿是个布尔，而
+      // `Array.isArray` 分不开"向量（值语义，要拷）"与"行 / 普通对象"—— 见
+      // builtin.js 的 arrCopy 那段话。
+      case 'ArrNew': return arrNew(this.eval(e.count, env, frame), this.eval(e.zero, env, frame), this.elemCopier(e.type.elem));
       case 'ArrLen': return arrLen(this.eval(e.arr, env, frame));
       case 'ArrGet': return arrGet(this.eval(e.arr, env, frame), this.eval(e.index, env, frame));
       case 'ArrSet': {
         const a = this.eval(e.arr, env, frame);
         const i = this.eval(e.index, env, frame);
-        return arrSet(a, i, this.eval(e.value, env, frame), e.arr.type.elem.k === 'vec');
+        return arrSet(a, i, this.eval(e.value, env, frame), this.elemCopier(e.arr.type.elem));
       }
       case 'ArrPush': {
         const a = this.eval(e.arr, env, frame);
-        return arrPush(a, this.eval(e.value, env, frame), e.arr.type.elem.k === 'vec');
+        return arrPush(a, this.eval(e.value, env, frame), this.elemCopier(e.arr.type.elem));
       }
       case 'ArrPop': return arrPop(this.eval(e.arr, env, frame));
       // 指针（ADR-0016）。这条腿与 backend-js 共用同一套模拟：宿主表示 fat = [addr, base, end]、

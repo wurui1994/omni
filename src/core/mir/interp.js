@@ -301,10 +301,21 @@ class MirInterp {
 
   /** 数组类型号 -> 元素是不是向量（"存进去要拷一份"的唯一一种）。类型池的 oir 上挂着
    *  元素的完整类型；8 位类型码分不出向量与行，所以这一问必须走池子。 */
-  elemIsVec(n) {
+  elemCopier(n) {
     const ty = this.mir.types[n];
     if (ty === undefined || ty.kind !== 'arr') return false;
-    return ty.oir.elem.k === 'vec';
+    const t = ty.oir.elem;
+    if (t.k === 'vec') return true;            // 宿主里是数组，`slice` 一刀就够
+    if (t.k !== 'struct' && t.k !== 'enum') return false;
+    /* 结构体 / 枚举元素是**值语义**：存进去要按类型深拷（嵌套的结构体字段跟着拷、
+       嵌套的类句柄原样）。与 `interp/eval.js` 的 `elemCopier` 同一套，理由写在那儿。
+       按类型号记一份 —— 数组写在热路上，每次求值造一个闭包等于每轮一次分配。 */
+    if (this.copiers === undefined) this.copiers = new Map();
+    const got = this.copiers.get(n);
+    if (got !== undefined) return got;
+    const fn = (v) => this.copyOf(t, v);
+    this.copiers.set(n, fn);
+    return fn;
   }
 
   /** 一个指针操作数是 thin 还是 fat：看它那条指令的 `t`（ADR-0016 把胖瘦放在类型码上，
@@ -762,13 +773,14 @@ class MirInterp {
       }
       // 数组六条。同样走 interp/builtin.js 那一份 —— 两个解释器共用一份实现，
       // 而它的消息文本又与 omni_arr.c 逐字对齐，于是五条腿只有一个字符串。
-      // 末位那个布尔是"元素是值语义、存进去要拷一份"（只有向量）。它从 aux 上那个
-      // **数组类型号**问出来（类型池的 oir 挂着元素的完整类型）—— 8 位类型码分不出
-      // 向量与行，而多维数组那一刀之后两者在 JS 侧都是数组（见 builtin.js 的 arrCopy）。
+      // 末位那一格是**元素的拷贝器**（`elemCopier`）：值语义的元素存进去要拷一份。
+      // 它从 aux 上那个**数组类型号**问出来（类型池的 oir 挂着元素的完整类型）——
+      // 8 位类型码分不出向量与行、更分不出结构体与类，而它们在 JS 侧都是数组或普通对象
+      // （见 builtin.js 的 arrCopy）。
       case OP.ANEW: {
         const c = rd(f.a[i]);
         const z = rd(f.b[i]);
-        const cp = this.elemIsVec(f.aux[i]);
+        const cp = this.elemCopier(f.aux[i]);
         return (F) => { F.v[i] = arrNew(c(F), z(F), cp); return next; };
       }
       case OP.ALEN: {
@@ -783,13 +795,13 @@ class MirInterp {
       case OP.ASET: {
         const a = rd(f.a[i]);
         const args = rdArgs(f.b[i]);
-        const cp = this.elemIsVec(f.aux[i]);
+        const cp = this.elemCopier(f.aux[i]);
         return (F) => { F.v[i] = arrSet(a(F), args[0](F), args[1](F), cp); return next; };
       }
       case OP.APUSH: {
         const a = rd(f.a[i]);
         const v = rd(f.b[i]);
-        const cp = this.elemIsVec(f.aux[i]);
+        const cp = this.elemCopier(f.aux[i]);
         return (F) => { F.v[i] = arrPush(a(F), v(F), cp); return next; };
       }
       case OP.APOP: {

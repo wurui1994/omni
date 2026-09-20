@@ -385,7 +385,8 @@ export function cTypeName(t) {
  *  数组元素是多维数组那一刀加的（asy 的 `real[][]`：真 base 里到处是它 —— 量过，
  *  220 个 examples 里 163 个第一个撞的就是它）。 */
 export function arrIsBlob(elem) {
-  return elem.k === 'vec' || elem.k === 'class' || elem.k === 'arr' || elem.k === 'fn';
+  return elem.k === 'vec' || elem.k === 'class' || elem.k === 'arr' || elem.k === 'fn'
+      || elem.k === 'struct' || elem.k === 'enum';
 }
 
 /**

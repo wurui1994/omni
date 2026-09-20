@@ -329,13 +329,15 @@ class CoreLowerer {
       }
       const nm = isAtom(en) ? en.value : null;
       if (nm !== null && this.classes.has(nm)) return arrType(this.classes.get(nm));
-      if (nm !== null && this.structs.has(nm)) {
-        return this.err(node, `${what}：数组的元素是结构体 '${nm}'（值语义）这一刀还不收 ——`
-          + ` 类（引用语义）可以，见 sexpr/lower.js 的 ty`);
-      }
+      /* **结构体元素**（值语义）：与 `(vec T N)` **同一档** —— 格子里就地躺内容，
+         运行时那份 blob 只管长度与增长（`esz` 一格字节数），元素的读写由各条腿自己
+         load/store。go 的 `[]Sphere` / pt 的 `[]Shape`、`Buffer.Pixels` 全是这一族。
+         原先不收的理由是"JS 与解释器的 arrCopy 是类型擦除的"—— 那一格已经换成
+         **按类型生成的拷贝器**了（见 backend-js 的 jsElemCopy 与 interp 的 elemCopier）。 */
+      if (nm !== null && this.structs.has(nm)) return arrType(this.structs.get(nm));
       const e = nm === null ? undefined : BASE_TYPES.get(nm);
       if (e === undefined || e === VOID) {
-        return this.err(node, `${what}：(arr 元素) 的元素只能是 int / real / bool / string / (vec T N) / 类名`);
+        return this.err(node, `${what}：(arr 元素) 的元素只能是 int / real / bool / string / (vec T N) / 类名 / 结构体名`);
       }
       return arrType(e);
     }

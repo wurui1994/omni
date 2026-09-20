@@ -25,10 +25,22 @@ function jsIntLit(v) {
   return (b <= I_SAFE && b >= -I_SAFE) ? b.toString() : `${b}n`;
 }
 
-/** 数组的元素存进去要不要先拷一份（$anew/$aset/$apush 的末位实参）。只有向量要 ——
- *  它是值语义，而 C 与 LLVM 两条腿存的是副本。类与**数组**元素是引用语义，拷了就分叉
- *  （多维数组那一刀量出来的：`a.push(row)` 拷一份之后，"两处是同一条"在五条腿上不一致）。 */
-const jsElemCopy = (t) => (t.elem.k === 'vec' ? 'true' : 'false');
+/**
+ * 数组元素**存进去要不要拷、怎么拷**（`$acopy` 的第三档，见 prelude 里那段话）。
+ *   `'false'` 原样：标量 / 类 / 行 / 函数值（引用语义，拷了就与 C/LLVM 分叉 ——
+ *             多维数组那一刀量出来的：`a.push(row)` 拷一份之后"两处是同一条"五条腿不一致）
+ *   `'true'`  切一刀：向量（道都是标量，一层浅拷贝就是深拷贝）—— 热路上手展开的那一档
+ *   `$cp_S…` / `$cp_E…`：结构体 / 枚举，**按类型生成的那份拷贝器**（每个结构体都发一份，
+ *             见 `$cp_S${s.name}`），它自己递归处理嵌套的值语义字段。
+ * 为什么不能只是布尔：宿主里结构体与类都是普通对象，`Array.isArray` 分不出来。
+ */
+const jsElemCopy = (t) => {
+  const e = t.elem;
+  if (e.k === 'vec') return 'true';
+  if (e.k === 'struct') return `$cp_S${e.name}`;
+  if (e.k === 'enum') return `$cp_E${e.name}`;
+  return 'false';
+};
 
 /**
  * **产物按这份程序用到的那几族裁**（与 C 腿同一个办法 —— `graph/backend-c.js` 的
