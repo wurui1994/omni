@@ -569,6 +569,8 @@ function ensureMathMinMax(which) {
 
 /** `math.Modf` 落在语句那一层（见 `assign` 里那一段）用的序号 —— 嵌套也不撞名。 */
 let MODF_N = 0;
+/** `copy(dst, src)` 落成一圈逐格写时用的序号（嵌套也不撞名）。 */
+let CP_N = 0;
 
 /** 这一处调用是不是 `math.<名字>(…)`（`math` 被局部量遮住就不算）。 */
 function isMathCallOf(x, name) {
@@ -3157,12 +3159,34 @@ function toNode(x) {
       if (callee === 'cap' && argNodes.length === 1) {
         return node('prim', { args: argNodes }, { name: 'len' });
       }
-      /* **`copy(dst, src)` -> `call __goCopy`**：真正逐元素拷贝。 */
+      /* **`copy(dst, src)`** —— 落成**一圈逐格写**（`region` + `counted`），不是调一个
+         运行时函数：`__goCopy` 只在 js 那条腿有体（`ext/go/go-rt.js`），core 上报
+         "调一格这一层里没有的函数 '__goCopy'"。拷几格照 go 的规矩取两边长度的小的那个。
+         **两边各只求一次值**（先绑出来）—— `copy(f(), g())` 在 go 里也只求一次。
+         go 的 `copy` **交出拷了几格**；这一格落在语句位置上时那个值没人要，摆在表达式
+         位置上会落一格 region 进表达式 —— 那一档照旧由下游报，不静静答错。 */
       if (callee === 'copy' && argNodes.length === 2) {
-        return node('call', {
-          fn: node('ref', {}, { name: '__goCopy' }),
-          args: [argNodes[0], argNodes[1]],
-        });
+        CP_N += 1;
+        const d = `__cpd${CP_N}`;
+        const sc = `__cps${CP_N}`;
+        const n = `__cpn${CP_N}`;
+        const i = `__cpi${CP_N}`;
+        const at = (nm) => node('ref', {}, { name: nm });
+        const lenOf = (v) => node('prim', { args: [v] }, { name: 'len' });
+        return node('region', { body: [
+          node('bind', { init: argNodes[0] }, { name: d }),
+          node('bind', { init: argNodes[1] }, { name: sc }),
+          node('bind', {
+            init: branchOf(binOf('<', lenOf(at(d)), lenOf(at(sc)), OPS, { lang: 'go' }),
+              lenOf(at(d)), lenOf(at(sc))),
+          }, { name: n }),
+          counted({
+            name: i,
+            from: lit(0),
+            cond: binOf('<', at(i), at(n), OPS, { lang: 'go' }),
+            body: [indexSet(at(d), at(i), indexGet(at(sc), at(i)))],
+          }),
+        ] });
       }
       /* **`delete(m, k)` -> `call __goDelete`**：真正从 map 删键。 */
       if (callee === 'delete' && argNodes.length === 2) {

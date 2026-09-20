@@ -1371,7 +1371,7 @@ function stmtIn(x, env, ctx) {
       }
       /* 别的一律一句 `fldset` —— 记录（类与结构体两档）、数组、字典、标量同形，
          **整格写**在方言里现成（判据：`(fldset (var t) v (var w))` 在类上成立）。 */
-      return [`(fldset ${host} ${x.attrs.field} ${expr(x.ins.value, env, ctx)})`];
+      return [`(fldset ${host} ${x.attrs.field} ${aggValText(x.ins.value, env, ctx)})`];
     }
     case 'index-set': {
       if (elemType(typeOf(x.ins.obj, env, ctx)) === null) {
@@ -1856,7 +1856,13 @@ function bindFill(nm, pr, env, ctx) {
      n 格指向同一格"正是拷贝器那一刀解掉的。非零的聚合初值照旧不收：那要真发一圈拷贝。 */
   if (recElem) {
     arrElemOk(et, ctx);
-    if (!isZeroValueNode(args[1])) {
+    /* **元素是引用语义的记录（类）时不问初值**：`(anew (arr rN) n)` 铺的是 n 格**空引用**
+       （见 `sexpr/lower.js` 的 arrExpr —— 行的零值是空引用，空引用没法共享），而 go 的
+       `make([]*T, n)` / `make([]Shape, n)` 给的正是 n 格 nil。值语义那一档才要问初值：
+       那时格子里就地躺一整块，`(anew T n)` 按元素的拷贝器逐格拷，非零的初值要真发一圈拷贝。
+       量出来的：pt 的 `make([]Shape, len(m.Triangles))` —— 接口的零值是"全是桩的记录"，
+       结构上不是零，可它在 `(arr 类名)` 上根本用不着。 */
+    if (!isPtrRec(et, ctx) && !isZeroValueNode(args[1])) {
       gap(`fill 的初值是一格**非零**的记录（这一刀只接零值的聚合初值）`);
     }
     return [bindLine(nm, `(arr ${et})`, `(anew (arr ${et}) ${expr(args[0], env, ctx)})`, env, ctx)];
