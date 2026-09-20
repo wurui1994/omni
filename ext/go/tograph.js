@@ -1535,6 +1535,36 @@ function valSpecs(x) {
 const nameOf = (x) => (tag(x) === 'name' ? leaf(kids(x)[0]) : leaf(x));
 
 /**
+ * **两格左值是同一个地方吗**（只认光名字与一串取字段 —— 别的一律回 false，不猜）。
+ * `s = append(s, v)` 那一格特判要它（见 `case 'assign'`）。
+ */
+function sameLValue(a, b) {
+  if (a === undefined || b === undefined || a === null || b === null) return false;
+  if (tag(a) === 'paren') return sameLValue(kids(a)[0], b);
+  if (tag(b) === 'paren') return sameLValue(a, kids(b)[0]);
+  if (tag(a) === 'name' && tag(b) === 'name') return nameOf(a) === nameOf(b);
+  if (tag(a) === 'sel' && tag(b) === 'sel') {
+    return leaf(kids(a)[1]) === leaf(kids(b)[1]) && sameLValue(kids(a)[0], kids(b)[0]);
+  }
+  return false;
+}
+
+/**
+ * `s = append(s, v…)` 里**要推进去的那几格**（不是这个形状就回 null）。
+ * 带 spread 的（`append(a, b...)`）回 null —— 那一档不是"推几格"。
+ */
+function appendSelfItems(lv, rv) {
+  if (rv === undefined || rv === null || !isList(rv) || tag(rv) !== 'call') return null;
+  const [fn, args] = kids(rv);
+  if (fn === undefined || tag(fn) !== 'name' || nameOf(fn) !== 'append') return null;
+  if (args === undefined) return null;
+  const as = kids(args);
+  if (as.length < 2 || as.some((y) => tag(y) === 'spread')) return null;
+  if (!sameLValue(lv, as[0])) return null;
+  return as.slice(1);
+}
+
+/**
  * `(*p).f` / `(*p)[i]` 里的那一层 `deref` **剥掉**（`(paren …)` 也一并剥）。
  * 只在"当对象用"那几处调它 —— 光秃秃的 `*p` 仍旧当场报（见 `case 'deref'`）。
  */
@@ -2268,19 +2298,20 @@ function toNode(x) {
           return withType(elems.map((e, i) => [fs[i][0], fieldValue(fs[i][1], toNode(e), e)]));
         }
       }
-      /* **切片/数组字面量的元素声明成接口**（`[]Shape{Sq{2}, &Rect{3,4}}`，ADR-0040）：
-         逐格装箱，于是列表是**单态**的（异质那一族的墙就在这一句）。元素类型也一并带上
-         （`elem`），空表那一路才有类型可推。 */
+      /* **切片/数组字面量**：元素类型从声明带上（`elem`）—— 空表（`[]float64{}`，后面靠
+         `append` 填）的元素类型只能从声明来，不带就报"一格空列表（元素类型推不出来）"。
+         元素声明成**接口**时还要逐格装箱（`[]Shape{Sq{2}, &Rect{3,4}}`，ADR-0040），
+         于是列表是**单态**的 —— 异质那一族的墙就在这一句。 */
       {
         const elT = elemTyOf(ty);
         const ifn = ifaceNameOf(elT);
-        if (ifn !== null) {
-          const items = elems.map((e) => boxInto(ifn, tnOfExpr(e), toNode(e)));
-          return listNew(items);
-        }
+        let ez = null;
+        if (elT !== null) { try { ez = zeroOf(elT, 'elem'); } catch { ez = null; } }
+        if (ez !== null && typeof ez === 'object' && ez.lit === null && ez.op === undefined) ez = null;
+        const items = ifn === null ? many(elems)
+          : elems.map((e) => boxInto(ifn, tnOfExpr(e), toNode(e)));
+        return ez === null ? listNew(items) : listNew(items, ez);
       }
-      /* **切片字面量**（`[]int{1,2,3}`）或 struct 不在 STRUCTS 里 → 落数组。 */
-      return listNew(many(elems));
     }
     // `m[k]` 与 `xs[i]` 在树上同形，差别在**那个名字装的是什么**（`MAPS` 那一趟扫查）
     case 'index': {
@@ -2499,6 +2530,22 @@ function toNode(x) {
             : node('set', { value: got }, { name: nm }));
         });
         return out;
+      }
+      /* **`s = append(s, v…)` 落成一串 `push`**（go 里最常见的那一格）。
+         为什么值得特判：`append` 交出来的是"新切片"，图上没有那一格，所以从前一律落成
+         `call __goAppend` —— 而那个函数的体在 **js 那条腿的运行时**里，core 上压根没有。
+         而 `s = append(s, v)` 这个惯用法与"往 s 上推一格"是同一件事，方言里现成的一句
+         `(apush …)`（图上是 `prim push`，一条**语句**）。
+         判据收得紧：一个左值、一个右值、右边是 `append`、第一格实参**与左值同形**、
+         没有 spread（`append(a, b...)` 那一档照旧走 `__goAppend`）。 */
+      if (lhs.length === 1 && rhs.length === 1 && compoundOp === null) {
+        const items = appendSelfItems(lhs[0], rhs[0]);
+        if (items !== null) {
+          const elT = elemTyOf(tyOfExpr(lhs[0]));
+          return items.map((it) => node('prim', {
+            args: [toNode(lhs[0]), elT === null ? toNode(it) : fieldValue(elT, toNode(it), it)],
+          }, { name: 'push' }));
+        }
       }
       return lhs.map((t, i) => {
         let v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);
