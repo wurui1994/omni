@@ -1413,7 +1413,15 @@ function fieldValue(ft, v, ast) {
   const n = scalarNameOf(ft);
   const v2 = (n === 'float32' || n === 'float64') ? convOf('float', v) : v;
   const ifn = ifaceNameOf(ft);
-  return ifn === null || ast === undefined ? v2 : boxInto(ifn, tnOfExpr(ast), v2);
+  if (ifn === null) return v2;
+  /* **接口字段写 `nil`**（`Hit{0.0, nil}`）：落成那格接口的**零值记录**，不是 `lit(null)`。
+     落 null 的代价是**同一个 go 结构体算出两格形状**：声明那一侧的 `Hit.Shape` 是接口记录、
+     字面量那一侧是 int，于是 `要返回 r9，给的是 r16`（量出来的，bench/go/pt.go）。 */
+  if (v2 !== null && typeof v2 === 'object' && v2.op === undefined && 'lit' in v2 && v2.lit === null) {
+    const z = ifaceZero(ifn);
+    if (z !== null) return z;
+  }
+  return ast === undefined ? v2 : boxInto(ifn, tnOfExpr(ast), v2);
 }
 
 /**

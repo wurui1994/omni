@@ -384,7 +384,7 @@ func sample(root *Tree, r Ray, depth int, rnd *Rand) Vector {
 
 // ---- 场景 + 渲染（goroutine + channel）------------------------------------
 func scene() []Shape {
-	shapes := make([]Shape, 0)
+	shapes := []Shape{}
 	mats := []Material{
 		{Vector{0.9, 0.3, 0.3}, 0.0, 0.0},
 		{Vector{0.3, 0.9, 0.4}, 0.0, 0.2},
