@@ -36,7 +36,7 @@ import {
   eorImm,
   eorReg, fadd,
   fcmpArm64, fcvtDS, fcvtSD, fcvtzs, fcvtzu, fdiv, fmovFromInt, fmovToInt, fmul, fneg, fsub,
-  fmadd, fmsub, fnmsub, fsqrt, fabsFp,
+  fmadd, fmsub, fnmsub, fsqrt, fabsFp, frintn, frintp, frintm, frintz, frinta,
   ldpPost, ldrFpU, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz,
   msub, mul,
   mvn, neg, orrImm, orrReg,
@@ -134,6 +134,33 @@ const STICKY_F = [8, 9, 10, 11, 12, 13, 14, 15,
 /** 前几个颜色是被调用者保存的（要在序言里存）—— 与 `regalloc.js` 的 `COLORS_F` 对齐。 */
 const STICKY_F_SAVED = 8;
 const FRES = 18;
+
+/**
+ * **一元数学函数 -> 一条机器指令**（Go 的 `ssagen/intrinsics.go:744-777` 那一段
+ * 配 `ARM64.rules:53-59`）。键是 C 库里的名字，值是发码的那个编码器。
+ *
+ *   sqrt  -> FSQRTD      Go: (Sqrt)        => (FSQRTD)
+ *   fabs  -> FABSD       Go: (Abs)         => (FABSD)
+ *   ceil  -> FRINTPD     Go: (Ceil)        => (FRINTPD)
+ *   floor -> FRINTMD     Go: (Floor)       => (FRINTMD)
+ *   trunc -> FRINTZD     Go: (Trunc)       => (FRINTZD)
+ *   round -> FRINTAD     Go: (Round)       => (FRINTAD)   离零取整
+ *   rint / nearbyint -> FRINTND            Go: (RoundToEven) => (FRINTND)
+ *
+ * `round` 那一格要小心：C 的 `round` 是"离零取整"（0.5 往远离零的方向），
+ * 正好是 `FRINTA`（ties away from zero）；而 `rint`/`nearbyint` 是"就近偶数"，
+ * 是 `FRINTN`。两者不可互换 —— Go 也是分成 `Round` 与 `RoundToEven` 两格。
+ */
+const MATH1 = {
+  sqrt: fsqrt,
+  fabs: fabsFp,
+  ceil: frintp,
+  floor: frintm,
+  trunc: frintz,
+  round: frinta,
+  rint: frintn,
+  nearbyint: frintn,
+};
 
 /** `OMNI_EMIT_STAT=1` 的账本：MIR op 名 -> `{n: 机器指令条数, k: 这种 op 出现几次}`。
  *  关着的时候是 `null`，一条判断都不多做。印出来的地方在 `emitStatDump`。 */
@@ -1817,7 +1844,8 @@ class FnGen {
    * `fsqrt`，go 压根没有 errno 这回事 —— 我们跟 go 一致。
    */
   mathIntrinsic(i, t, name, g) {
-    if (name !== 'sqrt' && name !== 'fabs') return false;
+    const enc = MATH1[name];
+    if (enc === undefined) return false;
     /* 本模块里自己定义的同名函数不算内建（`g` 为 null = C ABI 的外部符号，一定是外部的）。 */
     if (g !== null && g.extern !== true && g.decl !== true) return false;
     if (typeKind(t) !== T_F64) return false;
@@ -1827,7 +1855,7 @@ class FnGen {
     if (typeKind(this.typeOfRef(args[0])) !== T_F64) return false;
     const x = this.fRefReg(args[0], FTMP0, true);
     const d = this.fDest(i);
-    this.buf.emit(name === 'sqrt' ? fsqrt(true, d, x) : fabsFp(true, d, x));
+    this.buf.emit(enc(true, d, x));
     this.fDef(i, d, true);
     return true;
   }

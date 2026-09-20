@@ -568,6 +568,16 @@ export const fmovFp = (dbl, rd, rn) => fp1(dbl, 0x00, rn, rd);
 export const fabsFp = (dbl, rd, rn) => fp1(dbl, 0x01, rn, rd);
 export const fneg = (dbl, rd, rn) => fp1(dbl, 0x02, rn, rd);
 export const fsqrt = (dbl, rd, rn) => fp1(dbl, 0x03, rn, rd);
+/* 取整那一族（`FRINTx`）。opcode 就是 ARMv8 表里那几格，五条都拿 clang 对过
+ * （`__builtin_floor` 等，d0 -> d0）：
+ *   frintp 1e64c000 / frintm 1e654000 / frintz 1e65c000 / frinta 1e664000 / frinti 1e67c000
+ * 与 Go 的 `ARM64.rules:55-59` 一一对应：
+ *   Ceil->FRINTPD  Floor->FRINTMD  Trunc->FRINTZD  Round->FRINTAD  RoundToEven->FRINTND */
+export const frintn = (dbl, rd, rn) => fp1(dbl, 0x08, rn, rd);
+export const frintp = (dbl, rd, rn) => fp1(dbl, 0x09, rn, rd);
+export const frintm = (dbl, rd, rn) => fp1(dbl, 0x0a, rn, rd);
+export const frintz = (dbl, rd, rn) => fp1(dbl, 0x0b, rn, rd);
+export const frinta = (dbl, rd, rn) => fp1(dbl, 0x0c, rn, rd);
 
 /* C4.1.9 Floating-point data-processing (**3 source**)：
  *   0 0 0 1 1 1 1 1 type o1 Rm o0 Ra Rn Rd
