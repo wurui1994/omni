@@ -219,7 +219,14 @@ function walkCore(x, f) {
   for (const k of Object.values(x.ins ?? {})) walkCore(k, f);
 }
 
-const gap = (why) => { throw new Gap(`core 这条腿还没接：${why}`); };
+const gap = (why) => {
+  const g = new Gap(`core 这条腿还没接：${why}`);
+  /* 缺口的**措辞**常常查不到源头：同一句话能从三四处发出来（`retTypeOf` 早跑那一趟发的
+     和主趟发的长得一模一样）。pt 整包卡在 'V1' 上那一次就是这样找到的 ——
+     真正的发话人是 `retTypeOf → multiShape`，不是主趟。 */
+  if (process.env.OMNI_GAP_TRACE === '1') process.stderr.write(`${g.stack}\n`);
+  throw g;
+};
 
 /** 一格**表达式** -> 方言的文本。 */
 function expr(x, env, ctx) {
@@ -372,7 +379,17 @@ function expr(x, env, ctx) {
       for (const line of bindRecord(rn, x, env, ctx)) ctx.pre.push(line);
       return `(var ${rn})`;
     }
-    case 'list-new': gap('列表出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+    /* 列表在表达式位置上：与上头的 record-new 同一招 —— 物化成一格临时变量。
+       go 的 `f([]int{1,2,3})` / `Mesh{Triangles: []*Triangle{…}}` 那一族撞出来的。 */
+    case 'list-new': {
+      if (ctx.pre === null || ctx.pre === undefined) {
+        gap('列表出现在一处摆不下物化那几句的表达式位置上');
+      }
+      ctx.tmp = ctx.tmp + 1;
+      const ln = `lst_tmp${ctx.tmp}`;
+      for (const line of bindList(ln, x, env, ctx)) ctx.pre.push(line);
+      return `(var ${ln})`;
+    }
     case 'pick': {
       const t = typeOf(x.ins.from, env, ctx);
       const shape = shapeAt(t, ctx);
@@ -2137,7 +2154,11 @@ export function emitCore(g) {
       if (impl !== null) {
         const penv = new Map(env);
         for (const p of params) penv.set(p, 'int');
-        const t = typeOf(impl, penv, ctx);
+        /* **探针不许报缺口**：`penv` 把每个形参都当 int（这一趟还不知道真类型），
+           于是体末尾是 `t.V1` 那种时 `typeOf` 会骂"int 上没有字段" —— 那不是缺口，
+           是探针自己问错了。问不出来就当"末尾那格不是返回值"。 */
+        let t;
+        try { t = typeOf(impl, penv, ctx); } catch { t = 'void'; }
         /* 标量或**一格形状**（chez 的 `(values 3 7)` 当函数体就是后者）都算 */
         if (t === 'void' || !(isScalar(t) || shapeAt(t, ctx) !== undefined)) impl = null;
         else if (rt === null) rt = t;
@@ -2685,18 +2706,6 @@ export const CORE_SHAPES = [
         })],
       }, { name: 'print' }),
     ]),
-  },
-  {
-    /* **记录那一半已经不欠了**（见 `expr` 的 `case 'record-new'`：物化成一格临时名）——
-       这条账现在只剩列表。证物跟着换成 `list-new`，不然判据会说
-       "证物**没**报缺口 —— 这条账已经不欠了，删掉它"（那正是它该说的话）。 */
-    what: '表达式位置上的列表',
-    why: '方言里建一格列表是**两步**（`anew` 再逐格 `aset`），塞不进表达式 ——'
-      + '所以只接 `bind` 的初值那一格。记录那一半已经用"物化成临时名"接上了，'
-      + '列表还欠着：它在方言里是句柄（引用语义），"里头改了外头看得见"要先有判据',
-    witness: () => program([node('prim', {
-      args: [node('list-new', { items: [litNode(1)] })],
-    }, { name: 'print' })]),
   },
 ];
 

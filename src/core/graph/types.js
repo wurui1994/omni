@@ -299,17 +299,20 @@ export function multiShape(vals, env, ctx) {
 export function fieldType(x, env, ctx) {
   const t = typeOf(x.ins.obj, env, ctx);
   const shape = shapeAt(t, ctx);
+  /* 缺口的措辞里带上**在哪个函数的体里** —— 同一个字段名能从好几处发出来，
+     光有字段名分不清是哪一趟（pt 卡在 'V1' 上那一次）。 */
+  const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
   if (shape === undefined) {
     /* 措辞里带上**推出来是什么**与**那格东西长什么样** —— 只报字段名的话查不下去
-       （pt 整包卡在 'V1' 上那一次，光靠字段名分不清是形参没定型还是别的）。 */
+       （光靠字段名分不清是形参没定型还是别的）。 */
     const obj = x.ins.obj;
     const what = (obj && (obj.op === 'ref' || obj.op === 'name'))
       ? `变量 ${obj.attrs && obj.attrs.name}`
       : (obj && obj.op ? `一格 ${obj.op}` : '一格值');
-    ctx.gap(`在一格说不清形状的东西上取字段 '${x.attrs.field}'（${what} 推出来是 ${t}）`);
+    ctx.gap(`在一格说不清形状的东西上取字段 '${x.attrs.field}'（${what} 推出来是 ${t}）${wh}`);
   }
   const ft = shape.types.get(x.attrs.field);
-  if (ft === undefined) ctx.gap(`记录 ${t} 上没有字段 '${x.attrs.field}'`);
+  if (ft === undefined) ctx.gap(`记录 ${t} 上没有字段 '${x.attrs.field}'${wh}`);
   return ft;
 }
 
@@ -351,8 +354,15 @@ export function retTypeOf(body, env, ctx) {
       if (v === undefined || v === null) return 'void';
       if (isLit(v)) return litType(v.lit);
       if (isNode(v) && v.op === 'const') return litType(v.attrs.value);
-      /* 多值：交回去的是那格合成结构体（登记在这儿 —— 调用点要靠它定型）。 */
-      if (isNode(v) && v.op === 'values') return multiShape(argList(v, 'args'), env, ctx).tag;
+      /* 多值：交回去的是那格合成结构体（登记在这儿 —— 调用点要靠它定型）。
+         **这一趟不许报缺口**：它跑在 env 有形参 / 局部类型之前，`multiShape` 里的
+         `typeOf` 于是把每一格都量成 int，字段名对不上就当场骂。pt 的
+         `func (t *Triangle) Vertices() (Vector, Vector, Vector) { return t.V1, t.V2, t.V3 }`
+         撞出来的：报的是"记录上没有字段 'V1'"，可 V1 明明在。
+         推不出来就交回 null —— 后面 `ctx.rets` 那一趟会补上。 */
+      if (isNode(v) && v.op === 'values') {
+        try { return multiShape(argList(v, 'args'), env, ctx).tag; } catch { return null; }
+      }
       /* 先问那张"只看字面量"的表（prim 之外还认 branch —— 见 litLeaningType）。 */
       {
         const t = litLeaningType(v);
