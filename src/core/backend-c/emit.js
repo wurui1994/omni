@@ -568,8 +568,11 @@ class CEmitter {
     // fn.name / fn.length 那张表（见 fnMetaTable）：登记一次，之后 `f.name` 就按 fp 查它
     const fnMetaReg = fnMetaN > 0 ? ` omni_js_fnmeta_set(omni_js_fnmeta_tbl, ${fnMetaN});` : '';
     const strHookReg = this.dynSegs === true ? ' omni_js_prim_hook_init_();' : '';
-    // 内建原型上那 93 格成员的表（见 protoMembers）：登记一次，之后读成员就查它
-    const pmReg = this.protoMemberN > 0 ? ' omni_js_pm_init_();' : '';
+    // 内建原型上那 93 格成员的表（见 protoMembers）：登记一次，之后读成员就查它。
+    // **这一句要等 fillMembers 之后才知道发不发**（表是留坑回填的），所以先留一格标记，
+    // 在下面 `fillMembers()` 之后换掉 —— 见那儿的账。
+    const pmReg = '/*@pm@*/';
+    let mainAt = -1;    // main 那一行落在 out 的哪一格（下面回填 pmReg 用）
     if (this.plugin !== null) {
       /* 插件那一支：**不发 main**，也不做宿主初始化 —— `omni_host_init` 与那几格 hook
        * 核心早做过了，重做一遍会把共享的运行时状态（realm / 原型那两张表）重新播一遍种，
@@ -601,11 +604,22 @@ class CEmitter {
     } else {
       this.useFn(this.mod.entry);
       this.line(`int main(int argc, char **argv) { omni_host_init(argc, argv);${profReg}${fnMetaReg}${strHookReg}${pmReg}${memInit} omni_run_entry(${this.mod.entry}); omni_js_check_uncaught(); fflush(stdout); return omni_host_exit_code(); }`);
+      mainAt = this.out.length - 1;
     }
     /* 那格按名字调 op 的派发器：**这份程序真用到才填**（见 `callOpAt` 头上那段账）。
      * 要在 s16 池之前 —— 填它的时候可能还会往池里加字面量。 */
     this.fillCallOp();
     this.fillMembers();
+    /* main 里那句 `omni_js_pm_init_()` —— **发不发要等 fillMembers 之后才知道**：
+     * 那张表是留坑回填的（task #42），`protoMemberN` 在上面攒 main 那一刻必然还是 0。
+     * 从前就在那儿判，于是这句登记**一次也没发出来**，`omni_js_pm_find_g` 永远是 NULL，
+     * 读一格原型上没有的成员（`a["foo"]`、`a[-1]`）就撞在 omni_js_obj.h:1766 的
+     * "还没搬到 C 那条腿"上 —— 而规范的答案是 undefined（node 与解释器腿都给 undefined）。
+     * 量出来的：`npm run fix:self` 在原生腿上停在 `reading '-1' off Array.prototype`。 */
+    if (mainAt >= 0) {
+      this.out[mainAt] = this.out[mainAt]
+        .replace('/*@pm@*/', this.protoMemberN > 0 ? ' omni_js_pm_init_();' : '');
+    }
     this.out[this.s16At] = this.s16PoolLines().join('\n');    this.out[this.protoAt] = this.protoLines().join('\n');
     // 三段各自 concat 一次：封闭 ABI 里 `concat` 的 arity 是 2（js_abi.js），
     // 写成 `concat(a, b)` 两个实参在自举出来的编译器上不是同一件事
@@ -1149,14 +1163,22 @@ class CEmitter {
    */
   fillMembers() {
     if (this.memberAt === undefined) return;
+    let proto = false;
     const used = new Set();
     const rx = /omni_js_[mp]_[A-Za-z_0-9]+/g;
-    let proto = false;
     for (const ln of this.out) {
       if (typeof ln !== 'string') continue;
       let m;
       while ((m = rx.exec(ln)) !== null) used.add(m[0]);
-      if (!proto && ln.includes('omni_js_realm_proto(')) proto = true;
+      /* 原型那一族什么时候要进表：**这份程序里有没有"按名字读成员"那条路**。
+       * `omni_js_realm_proto(` 是显式拿原型；`omni_js_obj_getk` / `obj_get` / `getp` /
+       * `idx_get` 是 `xs.at` / `xs[k]` 落下来的那几个 —— 读出来的那格值靠成员表算
+       * （omni_js_obj.h 的 pm_find），而那张表只含 `used` 里的名字。
+       * 从前只认 realm_proto 一条，于是 `typeof xs.at` 在 C 腿上是 undefined 而
+       * node / js 腿给 function（tests/js-exec 的 44-proto-member-values）。 */
+      if (!proto && (ln.includes('omni_js_realm_proto(') || ln.includes('omni_js_obj_getk(')
+        || ln.includes('omni_js_obj_get(') || ln.includes('omni_js_getp(')
+        || ln.includes('omni_js_idx_get('))) proto = true;
     }
     if (proto) {
       const TAG_PROTO = {
