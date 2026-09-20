@@ -605,6 +605,19 @@ function fieldValue(ft, v) {
   return (n === 'float32' || n === 'float64') ? convOf('float', v) : v;
 }
 
+/**
+ * **这串数字字面量在 go 眼里是浮点吗**（只看写法）。
+ *
+ * go 的规矩：带小数点或指数的就是浮点常量（默认 float64）。十六进制那一档不一样 ——
+ * `0x1F` 是整数，只有带 `p` 指数的 `0x1p-2` 才是浮点。
+ */
+function isGoFloatTok(s) {
+  if (s.length > 1 && s[0] === '0' && (s[1] === 'x' || s[1] === 'X')) {
+    return s.includes('p') || s.includes('P');
+  }
+  return s.includes('.') || s.includes('e') || s.includes('E');
+}
+
 /** 一格形参的**零值节点**（有类型覆盖层用）。说不清就回 null —— 不中断。 */
 function zeroOfParam(ty) {
   if (ty === undefined) return null;
@@ -825,10 +838,24 @@ function unwrapDeref(x) {
 let FN_N = 0;
 
 /**
- * **函数体里见过的名字**（用来判断 `:=` 里哪些是新声明、哪些是重用）。
- * 每进一个函数体就存一份、出来还原。
+ * **作用域栈**（用来判断 `:=` 里哪些是新声明、哪些是重用）。
+ *
+ * 判据照 go 的规矩：短声明只在**同一个块**里重声明才算赋值
+ * （"provided they were originally declared earlier in the same block"）；
+ * 外层块里的同名是**遮蔽**，那是一格新声明。
+ *
+ * 为什么必须分层（量出来的）：`for i := 0 …{}` 两趟连着写时，头一趟的 `i` 落在
+ * 那一格 `(do (let i …) (while …))` 里边，出了那格就没了。拿一个平的集合判，
+ * 第二趟的 `i := 0` 会被当成重用发 `set` —— 方言当场报"未声明的变量 'i'"。
  */
-let SEEN_NAMES = new Set();
+let SCOPES = [new Set()];
+const declHere = (n) => SCOPES[SCOPES.length - 1].add(n);
+const seenHere = (n) => SCOPES[SCOPES.length - 1].has(n);
+/** 进一层块：回调里发生的声明出了这一层就不算了。 */
+function inScope(f) {
+  SCOPES.push(new Set());
+  try { return f(); } finally { SCOPES.pop(); }
+}
 
 function funcOf(sig, blk, name, self, selfType) {
   /* **Go 的参数组** `(a, b int)`：语法上有歧义——`a` 既可能是类型也可能是名字。
@@ -876,10 +903,11 @@ function funcOf(sig, blk, name, self, selfType) {
     && kids(lastIn).some((y) => (isList(y) ? tag(y) : leaf(y)) === 'variadic');
   const restParam = (isVariadic && params.length > 0) ? params[params.length - 1] : undefined;
   const savedVars = new Map(VARTYPE);
-  const savedSeen = new Set(SEEN_NAMES);
-  // 形参进 SEEN_NAMES
-  for (const p of params) SEEN_NAMES.add(p);
-  if (self !== undefined) SEEN_NAMES.add(self);
+  const savedScopes = SCOPES;
+  /* 函数体自己是一层块，形参就声明在这一层（go 的规矩把形参表算进函数体那个块）。 */
+  SCOPES = [new Set()];
+  for (const p of params) declHere(p);
+  if (self !== undefined) declHere(self);
   if (self !== undefined && selfType !== undefined && selfType !== null) {
     VARTYPE.set(self, selfType);
   }
@@ -921,7 +949,7 @@ function funcOf(sig, blk, name, self, selfType) {
   } finally {
     VARTYPE.clear();
     for (const [k, v] of savedVars) VARTYPE.set(k, v);
-    SEEN_NAMES = savedSeen;
+    SCOPES = savedScopes;
   }
 }
 
@@ -965,6 +993,11 @@ function hasJump(x, want, stop) {
  * 所以这两个同时出现在一支里就照实报（编译器自己的代码里这种写法极少）。
  */
 function armOf(c) {
+  /* 每一支自己是一层隐式块（go 的规矩），所以两支各写 `v := …` 是两格新声明。 */
+  return inScope(() => armBodyOf(c));
+}
+
+function armBodyOf(c) {
   const stmts = partKids(c, 'body');
   const brk = stmts.some((st) => hasJump(st, 'break', BREAK_STOP));
   if (!brk) return node('region', { body: many(stmts) });
@@ -1252,7 +1285,17 @@ function toNode(x) {
   /* 其余走 native case */
   switch (t) {
     // ---- 叶子 --------------------------------------------------------------
-    case 'num': return node('const', {}, { value: Number(leaf(kids(x)[0])) });
+    case 'num': {
+      /* **`0.0` 是浮点，不是 0**：go 的规矩是"带小数点或指数的无类型常量，默认类型是
+         float64"。`Number("0.0")` 在 JS 里就是整数 0，图那一层于是把它定成 int ——
+         `s := 0.0` 落出 `(let s int (int 0))`，随后 `s += xs[i]` 当场报类型不合。
+         判据只看**写法**（源码里那串字符），不看算出来的值；已经不是整数的值图自己
+         就会定成 real，不必多包一层。 */
+      const txt = String(leaf(kids(x)[0]));
+      const v = Number(txt);
+      const c = node('const', {}, { value: v });
+      return (Number.isInteger(v) && isGoFloatTok(txt)) ? convOf('float', c) : c;
+    }
     case 'str': return node('const', {}, { value: leaf(kids(x)[0]) });
     // `'A'` 在 go 里是 rune 字面量（Unicode 码点），在图上落成**单字符的串** ——
     // 与 V 那一份 `charlit` 同一条纪律：语料里 99% 的用途是比较。
@@ -1511,17 +1554,15 @@ function toNode(x) {
       }
       return bindNode;
     }
-    case 'block': return node('region', { body: many(kids(x)) });
+    case 'block': return inScope(() => node('region', { body: many(kids(x)) }));
     case 'define': case 'assign': {
       // `a, b := 1, 2` 与 `a = 1`。`define` 出 bind、`assign` 出 set —— 一格之差，
       // 正是"decl 就是 bind"那句话（没有 decl 节点）。
       //
       // **go 的 `:=` 不全是声明**：左边只需要**至少一个新名字**，已有的名字是赋值。
       // `v, err := f()` 后面 `w, err := g()` 里 err 是 set 不是 bind。
-      // 判据：这个名字在当前函数的形参或之前的 bind 里出现过 → set。
-      // 这一层没有真正的作用域分析，所以用 `SEEN_NAMES` 近似：
-      // 顶层 + 函数体内看见的名字。不精确（嵌套 block 里的同名应该是新的），
-      // 但 go 编译器自己的代码里这种嵌套极少。
+      // 判据：这个名字在**当前这一层块**的形参或之前的 bind 里出现过 → set。
+      // 分层那件事在 `SCOPES` 那段话里 —— 外层块的同名是遮蔽，照 go 的规矩算新声明。
       const isDef = tag(x) === 'define';
       /* **复合赋值** `x += y`：语法上 `(assign "+=" (lhs x) (rhs y))`，
          第一格子节点是算子。展开成 `x = x + y`（图上没有复合赋值那一格）。
@@ -1540,7 +1581,7 @@ function toNode(x) {
           const [o, k] = kids(rhs[0]);
           const mk = (t, init) => {
             const n = nameOf(t);
-            if (isDef && !SEEN_NAMES.has(n)) { SEEN_NAMES.add(n); return node('bind', { init }, { name: n }); }
+            if (isDef && !seenHere(n)) { declHere(n); return node('bind', { init }, { name: n }); }
             return node('set', { value: init }, { name: n });
           };
           const out = [];
@@ -1548,14 +1589,14 @@ function toNode(x) {
           out.push(mk(lhs[1], mapHas(toNode(o), toNode(k))));
           return out;
         }
-        /* **多值 destructure 也要 SEEN_NAMES**：`v, err := f()` 后面
+        /* **多值 destructure 也要看作用域**：`v, err := f()` 后面
            `w, err := g()` 的 err 是已有名字。destructure 总是 bind（declare=true），
            所以这儿要把已有名字从 declare=true 改成 declare=false。 */
         const names = lhs.map(nameOf);
         const declareFlags = names.map((n) => {
           if (!isDef) return false;
-          if (SEEN_NAMES.has(n)) return false;
-          SEEN_NAMES.add(n);
+          if (seenHere(n)) return false;
+          declHere(n);
           return true;
         });
         // 如果全是 declare 或全不是，走原来的 destructure
@@ -1601,9 +1642,9 @@ function toNode(x) {
         const n = nameOf(t);
         /* **`:=` 的重用语义**：go 的 `:=` 在"至少有一个新名字"时重用已有名字。
            `v, err := f()` 后面 `w, err := g()` 的 err 是赋值不是声明。
-           判据：这个名字已经在当前函数的形参或之前的 bind 里出现过 → set。 */
-        const isNew = isDef && !SEEN_NAMES.has(n);
-        if (isNew) SEEN_NAMES.add(n);
+           判据只看**当前这一层块**（外层的同名是遮蔽，那就是新声明）—— 见 SCOPES 那段话。 */
+        const isNew = isDef && !seenHere(n);
+        if (isNew) declHere(n);
         return isNew
           ? node('bind', { init: v }, { name: n })
           : node('set', { value: v }, { name: n });
@@ -1615,6 +1656,9 @@ function toNode(x) {
     case 'for': {
       // 三种 `for` 落成同一格 loop（**不给它开节点**）。形状与 vlang / awk 一模一样，
       // 所以那句话只写一遍 —— `threePart` 在 `src/core/graph/fromtree.js` 里。
+      //
+      // 头上那三段（init/cond/post）自己是一层块 —— `for i := 0 …` 的 `i` 出了这个
+      // for 就没了，所以要 `inScope` 包住；体是 `block`，它再开自己那一层。
       const init = part(x, 'init');
       const cond = part(x, 'cond');
       const post = part(x, 'post');
@@ -1626,12 +1670,12 @@ function toNode(x) {
         const c = cond === undefined ? undefined : kids(cond)[0];
         return c === undefined || tag(c) === 'none' ? undefined : toNode(c);
       };
-      return threePart({
+      return inScope(() => threePart({
         init: slot(init),
         cond: condOf(),
         post: slot(post),
         body: blk === undefined ? [] : many(kids(blk)),
-      });
+      }));
     }
     case 'if': {
       const all = kids(x);
@@ -1639,17 +1683,22 @@ function toNode(x) {
       // （else 里也看得见 `v`）。所以它落成一格 region 包着 branch，
       // 不是把那句话挪到 if 外面去：挪出去就多活了一层作用域。
       const ini = all.length > 0 && tag(all[0]) === 'init' ? all[0] : undefined;
-      const parts = ini === undefined ? all : all.slice(1);
-      // `else` 那一格是个包装（`(else (block …))` 或 `(else (if …))` —— else-if 链）
-      const els = elseOf(parts[2]);
-      const br = branchOf(toNode(parts[0]), toNode(parts[1]),
-        els === undefined ? undefined : toNode(els));
-      if (ini === undefined) return br;
-      return node('region', { body: [...many(kids(ini).filter((k) => tag(k) !== 'none')), br] });
+      const build = () => {
+        const parts = ini === undefined ? all : all.slice(1);
+        // `else` 那一格是个包装（`(else (block …))` 或 `(else (if …))` —— else-if 链）
+        const els = elseOf(parts[2]);
+        const br = branchOf(toNode(parts[0]), toNode(parts[1]),
+          els === undefined ? undefined : toNode(els));
+        if (ini === undefined) return br;
+        return node('region', { body: [...many(kids(ini).filter((k) => tag(k) !== 'none')), br] });
+      };
+      // 那一格 init 声明的名字**只活在这条 if 链里**，所以连 init 一起进一层作用域。
+      return ini === undefined ? build() : inScope(build);
     }
     case 'return': return retOf(many(kids(x)));
-    case 'for-range': return forRangeOf(x);
-    case 'switch': return switchOf(x);
+    // range 头上绑的名字、switch 头上 init/tag 绑的名字都只活在这一格里 —— 各进一层
+    case 'for-range': return inScope(() => forRangeOf(x));
+    case 'switch': return inScope(() => switchOf(x));
     /* `switch x.(type) { case int: … }` —— 类型选择。**降成普通 switch（丢掉类型信息）**：
        每支的条件变成 `true`（总命中），体照常走——编译器里 tswitch 的每支体通常是独立的
        赋值/调用链，丢掉"这格值在这支里是 int"这一件事，体内的代码**在图的动态语义下**

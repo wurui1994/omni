@@ -1446,7 +1446,12 @@ function bindSlice(nm, sl, env, ctx) {
 /**
  * `let xs = fill(n, 零值)` —— **按长度造一格列表**（第 25 格内建）。
  *
- * 方言里没有它，所以走与 `slice` **同一条消去规则**：新建一格空数组 + 一圈 `apush`。
+ * **初值正好是那格类型的零值**时一句 `(anew T N)` 就够 —— 方言的 `anew` 本来就是
+ * "新建长度 N 的零数组"。go 的 `make([]float64, n)` 就是这一种，pt 里所有的像素缓冲
+ * 也都是。为什么要单挑这一档（量出来的）：4M 格走 `apush` 是 4M 次调用加十几趟扩容
+ * 拷贝，而 `anew` 是一次分配。
+ *
+ * 初值**不是**零值时才走与 `slice` 同一条消去规则：新建一格空数组 + 一圈 `apush`。
  * 元素类型从那格初值推（只接标量 —— `prims.js` 里 `fill` 本来就不许拿聚合当初值：
  * 那样 n 格会指向同一格）。长度可以是任意表达式（`(alen …)` / 变量都行）。
  *
@@ -1461,6 +1466,7 @@ function bindFill(nm, pr, env, ctx) {
   const at = `(arr ${et})`;
   const n = expr(args[0], env, ctx);
   const v = expr(args[1], env, ctx);
+  if (isZeroText(et, v)) return [bindLine(nm, at, `(anew ${at} ${n})`, env, ctx)];
   ctx.tmp = ctx.tmp + 1;
   const i = `fill_i${ctx.tmp}`;
   const cnt = `fill_n${ctx.tmp}`;
@@ -1471,6 +1477,17 @@ function bindFill(nm, pr, env, ctx) {
       + ` (while (bin "<" (var ${i}) (var ${cnt}))`
       + ` (do (apush (var ${nm}) ${v}) (set ${i} (bin "+" (var ${i}) (int 1))))))`,
   ];
+}
+
+/**
+ * **这句方言文本是不是那格类型的零值**（`bindFill` 的快路判据）。
+ *
+ * 除了 `zeroText` 给的那一句，还认**转一层的零**：go 的 `make([]float64, n)` 里
+ * 那格零值在图上是 `conv('float', 0)`，落出来是 `(toreal (int 0))`。
+ */
+function isZeroText(t, v) {
+  if (v === zeroText(t)) return true;
+  return t === 'real' && (v === '(toreal (int 0))' || v === '(real 0)');
 }
 
 /**

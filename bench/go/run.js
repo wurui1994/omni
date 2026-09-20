@@ -26,11 +26,19 @@ for (const f of readdirSync(here).filter((x) => x.endsWith('.go')).sort()) {
   const ref = join(out, `${stem}_go`);
   const ours = join(out, `${stem}_ours`);
   const sx = join(out, `${stem}.sx`);
-  execFileSync('go', ['build', '-o', ref, src], { timeout: 300000 });
-  execFileSync('node', [join(root, 'src', 'cli.js'), 'build', '--engine', 'graph',
-    '--lang', 'go', '--backend', 'core', src, '-o', sx], { cwd: root, stdio: 'pipe', timeout: 300000 });
-  execFileSync('node', [join(root, 'src', 'cli.js'), 'build', sx, '-o', ours],
-    { cwd: root, stdio: 'pipe', timeout: 300000, env: { ...process.env, OMNI_MIR_OPT: '1' } });
+  /* 编不过就报一行、接着量下一份 —— 尺子不该因为一处缺口整趟垮掉。 */
+  try {
+    execFileSync('go', ['build', '-o', ref, src], { timeout: 300000 });
+    execFileSync('node', [join(root, 'src', 'cli.js'), 'build', '--engine', 'graph',
+      '--lang', 'go', '--backend', 'core', src, '-o', sx], { cwd: root, stdio: 'pipe', timeout: 300000 });
+    execFileSync('node', [join(root, 'src', 'cli.js'), 'build', sx, '-o', ours],
+      { cwd: root, stdio: 'pipe', timeout: 300000, env: { ...process.env, OMNI_MIR_OPT: '1' } });
+  } catch (e) {
+    const all = `${e.stdout || ''}${e.stderr || ''}${e.message || ''}`;
+    const why = all.split('\n').filter((x) => x.trim()).pop();
+    console.log(`${f.padEnd(16)} 编不出来：${String(why).slice(0, 96)}`);
+    continue;
+  }
   let bg = Infinity, bo = Infinity;
   for (let i = 0; i < N; i++) { bg = Math.min(bg, wall(ref)); bo = Math.min(bo, wall(ours)); }
   console.log(`${f.padEnd(16)} go ${bg.toFixed(0)}ms   我们 ${bo.toFixed(0)}ms   ×${(bo / bg).toFixed(2)}`);
