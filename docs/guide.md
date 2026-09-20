@@ -31,6 +31,8 @@ omni check FILE     只走前端与检查器
 - `.jnc` —— Jancy（C 兼容 ABI、指针）
 - `.c` —— C（自带预处理 + 代码生成 + 汇编器 + 链接器）
 - `.frag` / `.glsl` —— GLSL 片元着色器（软件光栅）
+- `.go` / `.nim` / `.v` —— **借来的语言，接在主路上**（ADR-0041）：它们与 `.c` 同一条规矩，
+  译成核心方言之后走的就是上面那条路，所以 `--backend` / `--cc` / `--profile` 全都照旧
 
 `--mode` 覆盖类型模式，`--lang` 覆盖前端。
 
@@ -91,6 +93,28 @@ node src/cli.js run /tmp/s.frag -o /tmp/s.png --size 512 \
 一帧一张 PNG，所以 `-o` 是必给的。`--set NAME=v,v` 给 uniform（可重复，没给的按 0）。
 两条腿：**快路**是 GLSL → LLVM IR（8 道 SoA，照 llvmpipe 的 `lp_exec_mask`）在 JIT 宿主里渲；
 **参考腿**是 GLSL → 核心方言 → 那五条腿，一个像素一趟。两边的像素在门里是对齐的。
+
+### 借来的语言（Go / Nim / V / Lua / C++ …）
+
+一份语法 + 一份映射就接进来一门（`ext/<lang>/`，怎么加见 [`EXTENSIONS.md`](EXTENSIONS.md)）。
+`.go` / `.nim` / `.v` 已经接在主路上 —— 不用给 `--engine`，和 `.c` 一样按后缀选前端：
+
+```bash
+node src/cli.js run   bench/go/fib.go              # 跑掉
+node src/cli.js build bench/go/pt.go -o /tmp/pt    # 原生二进制，一条命令
+OMNI_MIR_OPT=1 node src/cli.js build x.go -o out   # 带公共优化管线（ADR-0039）
+node src/cli.js emit c ext/nim/examples/intmath.nim # 看生成的 C
+```
+
+中间那份核心方言落在 `.omni-cache/src-sx/<内容哈希>/`，改一个字就换一格目录。
+
+其余那几门（Lua / C++ / Scheme / Common Lisp / awk / FreeBASIC / Mojo）现在还走
+`--engine graph`，那一层有自己的后端名单（interp / js / wat / c / sx）：
+
+```bash
+node src/cli.js run ext/lua/examples/basics.lua --engine graph
+node src/cli.js run ext/cpp/examples/basics.cpp --engine graph --backend wat
+```
 
 ### 其余
 
