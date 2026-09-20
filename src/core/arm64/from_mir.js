@@ -633,6 +633,10 @@ class FnGen {
     /* 寄存器缓存的三张表（见 `POOL`）。全是定长数组 —— 这一格要能被我们自己编出来的
      * 编译器编（ADR-0011 的封闭子集），Map 的迭代器不在里头。 */
     this.uses = countUses(f);
+    /* **NZCV 里攥着的那一格比较**（融合比较与跳转，见 `one` 里 IF 那一支的注）：
+       `flagCmp` 是那条比较的指令下标、`flagCond` 是它的条件码。-1 = 现在没攥着。 */
+    this.flagCmp = -1;
+    this.flagCond = 0;
     /**
      * **乘加融合**（`lower` 那一族，照 Go 的 `ARM64.rules:1824-1834`）：
      *     (FADDD a (FMULD  x y)) => (FMADDD  a x y)
@@ -1268,6 +1272,10 @@ class FnGen {
     const buf = this.buf;
     const op = f.op[i];
     const t = f.t[i];
+    /* **NZCV 里攥着的那格比较，读一次就清**：只有紧跟在比较后面的那条 IF/BRIF 算数，
+       别的指令一律当它没了（这一层不去逐条判"这条会不会动标志位"，那是猜）。 */
+    const flagCmp = this.flagCmp;
+    this.flagCmp = -1;
 
     /* 到不了的就不发（见构造器里的 `dead`）。区域指令照旧走 —— 它们钉的标签是「活过来」
      * 的唯一入口，跳过的话 END 那一格的落点就没了。 */
@@ -1294,6 +1302,26 @@ class FnGen {
       return;
     }
     if (op === OP.IF) {
+      /**
+       * **比较与跳转融合**（Go 的 `ARM64.rules`：`(If (LessThan cmp) yes no) => (BLT cmp …)`
+       * 加 `flagalloc` 那一格）。紧挨着的那条比较把结果留在 NZCV 里、而且**只有这一处用它**
+       * 时，`cset` + `cbz` 两条并成一条 `b.<反条件>`。
+       *
+       * 为什么中间那趟 `flush()` 不会把标志位弄丢（这是这一刀唯一要证的事）：
+       * `flush` 只发 `str`（`strU` / `movz|movk` + `strRegOff`），一条都不动 NZCV。
+       * 只融合**整数**那一族 —— 浮点的条件反过来不等价（NaN 是无序的，`b.ge` 的反面
+       * 不是 `b.lt`）。
+       *
+       * 反条件就是条件码的最低位取反（ARM 的约定：eq/ne、ge/lt、gt/le、cs/cc、hi/ls
+       * 都是成对排的），所以 `cond ^ 1` 是精确的，不是近似。
+       */
+      if (flagCmp >= 0 && !isConstRef(f.a[i]) && f.at(f.a[i]) === flagCmp) {
+        this.flush();
+        const elseLabel = buf.label();
+        buf.bcond(this.flagCond ^ 1, elseLabel);
+        this.regions.push({ kind: 'if', endLabel: buf.label(), elseLabel, elseDone: false });
+        return;
+      }
       const c = this.refReg(f.a[i], TMP0);
       this.flush();
       const elseLabel = buf.label();
@@ -1326,6 +1354,12 @@ class FnGen {
       return;
     }
     if (op === OP.BRIF) {
+      /* 与 IF 那一支同一条（那儿有整段账）：融合得上就一条 `b.<条件>`。 */
+      if (flagCmp >= 0 && !isConstRef(f.a[i]) && f.at(f.a[i]) === flagCmp) {
+        this.flush();
+        buf.bcond(this.flagCond, this.brTarget(f.aux[i]));
+        return;
+      }
       const c = this.refReg(f.a[i], TMP0);
       this.flush();
       buf.cbnz(1, c, this.brTarget(f.aux[i]));
@@ -1821,6 +1855,16 @@ class FnGen {
       } else {
         y = this.refReg(f.b[i], TMP1);
         buf.emit(cmpReg(sf, x, y));
+      }
+      /* **紧跟着就是一条 IF/BRIF、而且只有它用这格结果** ⇒ 结果留在 NZCV 里，
+         `cset` 与目标寄存器一条都不发（见 IF 那一支的账）。 */
+      const nx = i + 1;
+      if (this.uses[i] === 1 && nx < f.count()
+        && (f.op[nx] === OP.IF || f.op[nx] === OP.BRIF)
+        && !isConstRef(f.a[nx]) && f.at(f.a[nx]) === i) {
+        this.flagCmp = i;
+        this.flagCond = cond;
+        return;
       }
       /* `dest` 一个字都不发，所以标志位在这中间不会被动 —— `cset` 紧接着读它。 */
       const d = this.dest(i, x, y);
