@@ -85,7 +85,19 @@ ok(errs.length === 0, 'verifyMir 干净' + (errs.length ? '：' + errs.slice(0, 
 
 const got = runMirModule(OIR0, mod);
 ok(String(got) === String(want), `答案逐字相同（${got} == ${want}）`);
-ok(n1 < n0, `指令总数 ${n0} → ${n1}（少了 ${n0 - n1} 条，${((1 - n1 / n0) * 100).toFixed(1)}%）`);
+
+/* 指令总数**不是**这一条轴的判据 —— `inline` 那一格是拿代码大小换掉一次调用，
+   所以总数会涨（`main` 把 add3/sum/unread/chain/arr 全吃进去了）。
+   这儿判的是"与机器无关的那几格确实在缩"：没被内联进别人的那几个函数各自变小。 */
+let shrank = 0, grew = 0;
+for (let i = 0; i < mod.funcs.length; i++) {
+  const x = base.funcs[i].op.length, y = mod.funcs[i].op.length;
+  if (y < x) shrank++;
+  if (y > x) grew++;
+}
+console.log(`  指令总数 ${n0} → ${n1}（${n1 > n0 ? '涨' : '降'}了 ${Math.abs(n1 - n0)} 条 ——`
+  + ` ${shrank} 个函数变小、${grew} 个因为内联变大）`);
+ok(shrank >= 3, `至少三个函数变小（实得 ${shrank}）`);
 
 /* 逐函数的账（看得见是哪一类函数在受益） */
 for (let i = 0; i < mod.funcs.length; i++) {

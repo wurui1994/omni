@@ -208,8 +208,8 @@ function optMir(mod, path) {
     throw new OmniError(`mir/opt(-O${level}) 之后不再良构:\n  ${errs.join('\n  ')}`);
   }
   if (env('OMNI_MIR_OPT_STATS') === '1') {
-    const pct = st.before === 0 ? 0 : ((1 - st.after / st.before) * 100).toFixed(1);
-    stderr(`mir/opt -O${level} ${path}: ${st.funcs} 个函数，指令 ${st.before} -> ${st.after}（-${pct}%）\n`);
+    const pct = st.before === 0 ? 0 : ((st.after / st.before - 1) * 100).toFixed(1);
+    stderr(`mir/opt -O${level} ${path}: ${st.funcs} 个函数，指令 ${st.before} -> ${st.after}（${pct >= 0 ? "+" : ""}${pct}%）\n`);
   }
 }
 

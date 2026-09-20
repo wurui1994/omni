@@ -39,6 +39,11 @@ export const PASSES = [
   { name: 'early phielim and copyelim',batch: BATCH_1,   req: false, fn: null },
   { name: 'early deadcode',            batch: BATCH_1,   req: false, fn: null },
   { name: 'short circuit',             batch: BATCH_2,   req: false, fn: null },
+  /* `inline` —— **这一格是我们加的，Go 的表里没有**：它在 SSA 之前就内联完了
+   * （`internal/inline.InlineDecls`，前端的活）。我们没有那一层，所以落在 MIR 上，
+   * 位置按它的依赖定：必须在 `decompose user`（SROA）**之前** —— 内联把被调的局部块
+   * 搬进调用者，SROA 才有东西可拆（ADR-0039 第 3 节那条三步流水的次序）。 */
+  { name: 'inline',                    batch: BATCH_1,   req: false, fn: null },
   { name: 'decompose user',            batch: BATCH_1,   req: true,  fn: null },
   { name: 'pre-opt deadcode',          batch: BATCH_1,   req: false, fn: null },
   { name: 'opt',                       batch: BATCH_1,   req: true,  fn: null },
@@ -108,6 +113,8 @@ export const PASS_ORDER = [
   ['generic cse', 'dse'],
   ['generic cse', 'nilcheckelim'],
   ['generic cse', 'tighten'],
+  /* 我们自己加的那一格（`inline`）的依赖：内联把被调的局部块搬进调用者，SROA 才有东西可拆。 */
+  ['inline', 'decompose user'],
   ['dse', 'lower'],
   ['expand calls', 'decompose builtin'],
   ['decompose builtin', 'lower'],
