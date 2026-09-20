@@ -24,7 +24,9 @@ let fails = 0;
 const ok = (c, m) => { if (c) console.log('  ✓ ' + m); else { console.log('  ✗ ' + m); fails++; } };
 
 const SRC = `
-/* 直线代码：一串短命的临时量，颜色该反复回收 */
+double sink(double x);
+
+/* 直线代码、没有循环 ⇒ **一个都不该涂**（成本模型：序言/收场那对访存摊不掉） */
 int straight(int a, int b, int c, int d) {
   int x = a + b; int y = c + d; int z = x * y; int w = z - a;
   return x + y + z + w;
@@ -38,12 +40,17 @@ int loops(int n, int base) {
   return acc;
 }
 
-/* 浮点那一类（'v' 色）与整数那一类互不相干 */
-double mixf(double p, double q, int k) {
-  double s = p * q; double r = s + p; return r * (double)k;
+/* 浮点也进同一个池子（两条后端都把值当八字节位模式放通用寄存器，见 regalloc.js 文件头）。
+   要在**循环里**、而且**跨过屏障**（这儿是一次调用）才涂色 —— 两条都是量出来的成本模型
+   （见 cost.js 与 regalloc.js 的 hasLoop）。 */
+double loopf(double p, int n) {
+  double s = 0;
+  for (int i = 0; i < n; i++) { s = s + sink(p); }
+  return s * p;
 }
 
-int main(void) { return straight(1, 2, 3, 4) + loops(5, 7) + (int)mixf(1.5, 2.5, 3); }
+int main(void) { return straight(1, 2, 3, 4) + loops(5, 7) + (int)loopf(1.5, 3); }
+double sink(double x) { return x + 1.0; }
 `;
 
 const path = '/tmp/omni-mir-regalloc-test.c';
@@ -88,9 +95,13 @@ for (let i = 0; i < mod.funcs.length; i++) {
 }
 ok(same, '同一份输入两次分配逐格相同');
 
-/* ---- 浮点也进同一个池子（两条后端都把值当八字节位模式放通用寄存器，见 regalloc.js 文件头） ---- */
-const mixf = mod.funcs.find((f) => f.name === 'mixf');
-ok(mixf.regHint.size > 0, `mixf（全是 double）也分到了寄存器（${mixf.regHint.size} 个）`);
+/* ---- 浮点也进同一个池子（要在循环里且跨屏障） ---- */
+const loopf = mod.funcs.find((f) => f.name === 'loopf');
+ok(loopf.regHint.size > 0, `loopf（double + 循环 + 调用）分到了 ${loopf.regHint.size} 个`);
+
+/* ---- 成本模型：没有循环的函数一个都不涂 ---- */
+const straight = mod.funcs.find((f) => f.name === 'straight');
+ok(straight.regHint.size === 0, '没有循环的 straight 一个都没涂（序言那对访存摊不掉）');
 
 console.log('');
 if (fails > 0) { console.log(`✗ ${fails} 条不过`); process.exit(1); }

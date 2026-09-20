@@ -88,6 +88,25 @@ const FB = 28;
  * 收场里取，而这一层根本不需要跨调用留住任何东西。 */
 const FTMP0 = 16;
 const FTMP1 = 17;
+/**
+ * **粘住的那几个寄存器**（第一百五十二片）：x19-x23，被调用者保存。
+ *
+ * 与 `POOL` 那五个的区别是**谁决定住哪儿**：`POOL` 是发码时一遍过的缓存，靠
+ * "还要用几次"抢位子，控制流一分岔、一条 `bl` 之前就全写回栈位（`flush`）。
+ * 这五个是**上一层算好的**：`mir/opt/regalloc.js` 按线性扫描给一部分值涂了颜色
+ * （`fn.regHint`：下标 -> 颜色），一个颜色一个寄存器，从定义到最后一次使用一直住着 ——
+ * 于是那些值**一次访存都不发**，`flush` 也不碰它们。
+ *
+ * 为什么必须是被调用者保存的：上一层给的区间会跨过调用点（它刻意不在调用点切开）。
+ * x19-x23 在 AAPCS 里是被调用者保存的，所以一条 `bl` 过去它们还在；代价是本函数要在
+ * 序言里存、收场里取（只存真用到的那几个）。
+ *
+ * 为什么与 `POOL` 不重叠也不与草稿重叠：这一层里 x8(RES)/x9/x10(草稿)/x11-x15(POOL)/
+ * x28(FB)/x29/x30 各有主，x19-x23 谁都不碰 —— 与 `POOL` 当初挑 x11-x15 同一条理由。
+ *
+ * 个数要与 `regalloc.js` 的 `COLORS` 对上（那边取的就是"两条腿都够"的 5）。
+ */
+const STICKY = [19, 20, 21, 22, 23];
 const FRES = 18;
 /**
  * **native 这条腿上没有线性内存。**
@@ -462,6 +481,24 @@ class FnGen {
       bytes = bytes + pad + need;
     }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
+    /* 粘住的那几个（见 `STICKY`）：上一层涂了几个颜色，这儿就要在帧里留几格存
+     * 调用者的那几个 x19-x23。`regHint` 不在的话（没跑优化管线）这一格整条不存在，
+     * 于是**一个字节都不变** —— 那 88 条编码对账的用例照旧成立。 */
+    this.hint = (f.regHint !== undefined && f.regHint !== null && f.regHint.size > 0)
+      ? f.regHint : null;
+    this.stickyColors = [];
+    if (this.hint !== null) {
+      const seen = [];
+      for (const c of this.hint.values()) if (seen.indexOf(c) < 0) seen.push(c);
+      seen.sort((a, b) => a - b);
+      for (const c of seen) if (c >= 0 && c < STICKY.length) this.stickyColors.push(c);
+    }
+    this.stickySave = -1;
+    if (this.stickyColors.length > 0) {
+      this.stickySave = this.frame;
+      const need = 8 * this.stickyColors.length;
+      this.frame += need + (need % 16 === 0 ? 0 : 16 - (need % 16));
+    }
     /* 会动栈顶的函数（第三十六片）：帧最上面留一格存调用者的 x28，往后一律按 `FB`
      * 寻址。留在**最上面**是为了让下面所有偏移都不变 —— 那样「不会动栈顶」的那一路
      * 一条指令都不改。 */
@@ -606,6 +643,13 @@ class FnGen {
     /* 在池寄存器里（见 `POOL`）就一条 `mov` —— 省的是一次访存。真正省下一整条指令的是
      * `refReg`：那条连 `mov` 都不发。 */
     const vi = this.f.at(ref);
+    /* 粘住的那几个（见 `STICKY`）：一条 `mov`，而且**没有任何簿记** ——
+     * 它从定义到最后一次使用一直住在那儿，读几次都不用减什么计数。 */
+    const sk = this.stickyAt(vi);
+    if (sk >= 0) {
+      this.buf.emit(movReg(1, reg, sk));
+      return;
+    }
     const s = this.valReg[vi];
     if (s >= 0) {
       this.cacheLeft[s] -= 1;
@@ -677,6 +721,31 @@ class FnGen {
     return false;
   }
 
+  /* ------------------------------------------- 粘住的那几个（见 `STICKY`） */
+
+  /** 这个值下标住在哪个粘住的寄存器里（-1 = 不住，照旧走栈位/POOL）。 */
+  stickyAt(i) {
+    if (this.hint === null) return -1;
+    const c = this.hint.get(i);
+    if (c === undefined || c < 0 || c >= STICKY.length) return -1;
+    return STICKY[c];
+  }
+
+  /** 这个 ref 住在哪个粘住的寄存器里（常量与 REF_NONE 一律 -1）。 */
+  stickyRef(ref) {
+    if (this.hint === null || ref === REF_NONE || isConstRef(ref)) return -1;
+    return this.stickyAt(this.f.at(ref));
+  }
+
+  /** 序言里存下调用者的那几个 / 收场里取回来。只动真用到的那几格。 */
+  stickySpill(save) {
+    for (let k = 0; k < this.stickyColors.length; k++) {
+      const reg = STICKY[this.stickyColors[k]];
+      const off = this.stickySave + k * 8;
+      if (save) this.frameStore(reg, off); else this.frameLoad(reg, off);
+    }
+  }
+
   /* ------------------------------------------------- 寄存器缓存（见 `POOL`） */
 
   /** 池里的一个位置：先要空的，没空的就收一个用光了的。都没有回 -1。
@@ -707,6 +776,12 @@ class FnGen {
    *     里 d 撞上 x 或 y 就算错了。
    */
   dest(i, a, b) {
+    /* 粘住的那几个（见 `STICKY`）：上一层已经给这个值定了住处，**直接算进去** ——
+     * 连 `def` 里那条 `mov` 都省了。不会撞上还活着的操作数：分配器在 pc 处只让
+     * `end < pc` 的区间到期（`regalloc.js` 的 expire 那一步），所以这条指令的操作数
+     * 若在这儿还要用，它的颜色此刻不在空闲池里。 */
+    const sk = this.stickyAt(i);
+    if (sk >= 0) return sk;
     if (this.uses[i] === 0) return RES;
     const s = this.takeSlot(a, b);
     if (s < 0) return RES;
@@ -723,6 +798,9 @@ class FnGen {
    */
   refReg(ref, fallback) {
     if (ref !== REF_NONE && !isConstRef(ref)) {
+      /* 粘住的那几个先问（见 `STICKY`）：一个字都不发。 */
+      const sk = this.stickyAt(this.f.at(ref));
+      if (sk >= 0) return sk;
       const s = this.valReg[this.f.at(ref)];
       if (s >= 0) {
         this.cacheLeft[s] -= 1;
@@ -820,6 +898,9 @@ class FnGen {
     if (this.dynStack) {
       buf.emit(strU(3, FB, SP, this.fbSave), movSp(1, FB, SP));
     }
+    /* 粘住的那几个（见 `STICKY`）：存下调用者的那几个 x19-x23。摆在 `FB` 成立之后 ——
+     * 会动栈顶的函数里这几格按 `FB` 寻址。 */
+    if (this.stickyColors.length > 0) this.stickySpill(true);
     /* 形参：AAPCS 把整数与浮点**分成两串**数（x0-x7 与 v0-v7 各自从 0 起），
      * 所以两个计数器。放不下的从**入参区**读（第二十三片）：调用方摆在它自己的
      * 出参区里，也就是我们这一层 `fp + 16` 起的地方（`fp`/`lr` 那一对占了前 16）。
@@ -890,6 +971,9 @@ class FnGen {
     for (let i = 0; i < f.count(); i++) this.one(i);
 
     buf.place(this.retLabel);
+    /* 粘住的那几个（见 `STICKY`）：取回调用者的那几个。要在 `FB` 还有效、`sp` 还没收回去
+     * 的时候发 —— 下面那两行会把两样都毁掉。 */
+    if (this.stickyColors.length > 0) this.stickySpill(false);
     /* 会动栈顶的函数：先把调用者的 x28 取回来（这一条得在 `FB` 还有效的时候发），
      * 再按 `x29` 把 `sp` 收回去 —— `sp` 这会儿可能停在某个变长数组下面。 */
     if (this.dynStack) buf.emit(ldrU(3, FB, FB, this.fbSave));
@@ -1817,6 +1901,15 @@ class FnGen {
    */
   def(i, reg, w) {
     if (w === 32) this.buf.emit(sxtw(reg, reg));
+    /* 粘住的那几个（见 `STICKY`）：结果要落在它那一个里。`dest` 已经直接算进去的话
+     * 这儿一个字都不发；别处算好的（`RES` 那一路）就一条 `mov`。
+     * **不进 POOL、不写栈位**：它从这儿一直住到最后一次使用，`flush` 也不碰它。 */
+    const sk = this.stickyAt(i);
+    if (sk >= 0) {
+      if (reg !== sk) this.buf.emit(movReg(1, sk, reg));
+      this.pending = -1;
+      return;
+    }
     const n = this.uses[i];
     const p = this.pending;
     this.pending = -1;

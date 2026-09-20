@@ -34,6 +34,7 @@ import {
   typeLanes, isCmp,
 } from '../ir.js';
 import { registerPass } from './pass.js';
+import { crossesBarrier } from './cost.js';
 
 /** 这个类型住得下一个通用寄存器吗（浮点也算 —— 后端拿它当八字节位模式，见文件头）。 */
 function fitsOneWord(t) {
@@ -137,6 +138,27 @@ function extendForLoops(fn, last) {
  * 这笔账归后端。 */
 export const COLORS = 5;
 
+/* 只给"活过一次屏障"的值涂色：短命的临时量后端的 `POOL` 本来就能管，
+ * 给它们涂色是白花钱（多两条序言/收场的访存）。判据见 `cost.js`。 */
+/**
+ * **只在带循环的函数里涂色。**
+ *
+ * 后端为这几个被调用者保存的寄存器要在序言里存、收场里取（一格一对访存）。这笔开销
+ * 是**按调用次数**付的，而省下来的是按"值被读几次"省的 —— 于是在叶子式的小函数里
+ * 它是净亏。量出来的（`/tmp/abx.mjs` 交错 12 趟取最小，fib(27) × 3）：
+ *
+ *   不涂色 7.1ms、涂色 **9.4ms（×1.33，明显更慢）**；clang -O0 6.2ms、-O2 3.3ms
+ *
+ * `fib` 是一次调用几条指令、被调四十万次的那种函数：多的两条访存加上每帧多出来的
+ * 16 字节（缓存足迹）压过了省下的那一条。带循环的函数里这笔开销摊在迭代上，才划得来。
+ *
+ * 这是**唯一一处成本模型**，所以写在这儿而不是后端：后端那一层只管"颜色映到哪个寄存器"。
+ */
+function hasLoop(fn) {
+  for (let pc = 0; pc < fn.op.length; pc++) if (fn.op[pc] === OP.LOOP) return true;
+  return false;
+}
+
 /**
  * 跑 regalloc。**不改一条指令** —— 只往 `fn.regHint` 上挂一张
  * `下标 -> 颜色` 的表（`Map`），由后端消费。
@@ -149,6 +171,7 @@ export const COLORS = 5;
  */
 export function regalloc(fn, _mod) {
   if (!fn || fn.op.length === 0) return 0;
+  if (!hasLoop(fn)) { fn.regHint = new Map(); return 0; }   // 见 hasLoop 那段的账
   const last = extendForLoops(fn, lastUses(fn));
 
   const hint = new Map();
@@ -171,6 +194,7 @@ export function regalloc(fn, _mod) {
     const end = last[pc];
     if (end < 0) continue;                       // 没人用（deadcode 会收走）
     if (!fitsOneWord(t)) continue;
+    if (!crossesBarrier(fn, pc, end)) continue;  // POOL 本来就能管，见 isBarrier 那段
     if (free.length === 0) continue;             // 用光了 ⇒ 这个值照旧住栈位（= 溢出）
     free.sort((x, y) => x - y);                  // 取最小的颜色：两次编译要一样
     const color = free.shift();
