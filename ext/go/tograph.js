@@ -492,6 +492,22 @@ function ifaceNameOf(ty) {
   return null;
 }
 
+/**
+ * **省掉类型的嵌套字面量**（`[][]int{{1},{2}}` 里那两格）：树上是 `(elit 元素…)`。
+ * 把外层算出来的元素类型补回去，就成了一格正常的 `(lit 类型 元素…)`。
+ *
+ * 为什么不让语法直接发 `lit`：`lit` 的第一格孩子**是类型**，省掉之后第一个元素
+ * 会被当类型吃掉 —— `{1,2}` 静静落成 `[2]`（**答案错而不报**），`{}` 则报
+ * "一格空列表（元素类型推不出来）"。pt 的 `triangleTable` 那张表撞出来的。
+ *
+ * 补不出类型（外层自己也说不清）时原样交回去 —— 让后面那一支照旧报缺口。
+ */
+function fillElidedTy(e, tyNode) {
+  if (e === undefined || e === null || tag(e) !== 'elit') return e;
+  if (tyNode === undefined || tyNode === null) return e;
+  return { kind: 'list', items: [{ kind: 'atom', value: 'lit' }, tyNode, ...kids(e)] };
+}
+
 /** `[]T` / `[N]T` 的元素类型节点（别的形状回 null）。 */
 function elemTyOf(ty) {
   if (ty === undefined || ty === null || !isList(ty)) return null;
@@ -2251,9 +2267,11 @@ function toNode(x) {
       // 所以"这名字是不是 map"不用回问驱动器（那笔账在 map 这一格上是不必的）。
       // 判据要在"全是 kv"之前：记录字面量的 kv 也长这样，差的正是类型那一格。
       if (tag(ty) === 'map') {
+        const vT = kids(ty)[1] ?? null;
         return mapNew(elems.map((e) => {
           const [k, v] = kids(e);
-          return [toNode(k), toNode(v)];     // 键是**值**（不是名字）—— 与记录正相反
+          // 键是**值**（不是名字）—— 与记录正相反。值那边可能是省了类型的嵌套字面量。
+          return [toNode(k), toNode(fillElidedTy(v, vT))];
         }));
       }
       /* **具名 struct 字面量带 `__type` 标签**：接口方法分派要它。
@@ -2281,8 +2299,9 @@ function toNode(x) {
         /* 字段声明成浮点时把值转过去（见 `fieldValue` 那段账）。 */
         const ftab = new Map((tyName !== null && STRUCTS.get(tyName)) || []);
         return withType(elems.map((e) => {
-          const [k, v] = kids(e);
+          const [k, v0] = kids(e);
           const fn2 = nameOf(k);
+          const v = fillElidedTy(v0, ftab.get(fn2));
           return [fn2, fieldValue(ftab.get(fn2), toNode(v), v)];
         }));
       }
@@ -2295,7 +2314,10 @@ function toNode(x) {
       if (litTypeName !== null && STRUCTS.has(litTypeName) && elems.length > 0) {
         const fs = STRUCTS.get(litTypeName);
         if (fs !== null && fs.length >= elems.length) {
-          return withType(elems.map((e, i) => [fs[i][0], fieldValue(fs[i][1], toNode(e), e)]));
+          return withType(elems.map((e0, i) => {
+            const e = fillElidedTy(e0, fs[i][1]);
+            return [fs[i][0], fieldValue(fs[i][1], toNode(e), e)];
+          }));
         }
       }
       /* **切片/数组字面量**：元素类型从声明带上（`elem`）—— 空表（`[]float64{}`，后面靠
@@ -2305,11 +2327,13 @@ function toNode(x) {
       {
         const elT = elemTyOf(ty);
         const ifn = ifaceNameOf(elT);
+        /* 元素里省了类型的那几格（`[][]int{{1},{2}}`）在这儿把外层的元素类型补回去。 */
+        const els = elems.map((e) => fillElidedTy(e, elT));
         let ez = null;
         if (elT !== null) { try { ez = zeroOf(elT, 'elem'); } catch { ez = null; } }
         if (ez !== null && typeof ez === 'object' && ez.lit === null && ez.op === undefined) ez = null;
-        const items = ifn === null ? many(elems)
-          : elems.map((e) => boxInto(ifn, tnOfExpr(e), toNode(e)));
+        const items = ifn === null ? many(els)
+          : els.map((e) => boxInto(ifn, tnOfExpr(e), toNode(e)));
         return ez === null ? listNew(items) : listNew(items, ez);
       }
     }

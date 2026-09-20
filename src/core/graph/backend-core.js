@@ -1702,6 +1702,18 @@ function bindSlice(nm, sl, env, ctx) {
  */
 function elemTypeOfNode(x, env, ctx) {
   if (isNode(x) && x.op === 'record-new') return recordTypeOfNode(x, env, ctx);
+  /* **元素自己是一格列表**（`[][]int{…}`）：`typeOf` 答不出 `list-new` 的类型（回
+     UNKNOWN=int），于是 `(arr (arr int))` 会静静落成 `(arr int)` —— **元素类型错而
+     不报**。照 `declTypeOfNode` 的同一条规矩往里问一层：有元素看第一格，空表看
+     声明的 `elem`。 */
+  if (isNode(x) && x.op === 'list-new') {
+    const items = argList(x, 'items');
+    const el = items.length > 0 ? items[0] : (x.attrs === undefined ? null : x.attrs.elem);
+    if (el === null || el === undefined) {
+      gap('一格空列表当另一格列表的元素（元素类型推不出来、也没有声明的元素类型）');
+    }
+    return `(arr ${elemTypeOfNode(el, env, ctx)})`;
+  }
   return typeOf(x, env, ctx);
 }
 
@@ -1817,7 +1829,8 @@ function isZeroText(t, v) {
   const items = argList(lst, 'items');
   const decl = lst.attrs === undefined ? undefined : lst.attrs.elem;
   if (items.length === 0 && (decl === undefined || decl === null)) {
-    gap(`一格空列表（元素类型推不出来、也没有声明的元素类型）—— 绑给 '${nm}'`);
+    const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
+    gap(`一格空列表（元素类型推不出来、也没有声明的元素类型）—— 绑给 '${nm}'${wh}`);
   }
   const ts = items.map((it) => elemTypeOfNode(it, env, ctx));
   const et = items.length === 0 ? elemTypeOfNode(decl, env, ctx) : ts[0];
@@ -1825,8 +1838,11 @@ function isZeroText(t, v) {
      记录**（`(arr (ptr rN))`，一格一个指针 —— go 的 `[]Shape` 与 `[]*Mesh` 那一族）。 */
   const recElem = isRecType(et, ctx);
   if (recElem) arrElemOk(et, ctx);
-  if (!recElem && et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
-    gap(`列表的元素不是标量、也不是记录（量到的是 ${et}）`);
+  /* 元素也可以**再是一格数组**（`[][]int` / `[][]float64`）—— 方言的 `(arr (arr int))`
+     现成（判据：`(aget (aget …) …)` 与 `(alen (aget …))` 都成立）。 */
+  const arrElem = typeof et === 'string' && et.startsWith('(arr ');
+  if (!recElem && !arrElem && et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
+    gap(`列表的元素不是标量、也不是记录或数组（量到的是 ${et}）`);
   }
   if (ts.some((t) => t !== et)) gap(`列表里的元素类型不一样（${ts.join(' / ')}）—— 方言的数组是单态的`);
   const at = `(arr ${et})`;
