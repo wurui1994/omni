@@ -312,7 +312,12 @@ export function fieldType(x, env, ctx) {
     ctx.gap(`在一格说不清形状的东西上取字段 '${x.attrs.field}'（${what} 推出来是 ${t}）${wh}`);
   }
   const ft = shape.types.get(x.attrs.field);
-  if (ft === undefined) ctx.gap(`记录 ${t} 上没有字段 '${x.attrs.field}'${wh}`);
+  /* 措辞里把**这格形状有哪些字段**列出来 —— "没有字段 'Max'" 光看这一句分不清是
+     "字段名写错了"还是"这根本不是那个类型的形状"（同一个 go 结构体算出两格形状那一族）。 */
+  if (ft === undefined) {
+    const has = [...shape.types.keys()].join(' ');
+    ctx.gap(`记录 ${t} 上没有字段 '${x.attrs.field}'（它有的是：${has}）${wh}`);
+  }
   return ft;
 }
 

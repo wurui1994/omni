@@ -777,7 +777,7 @@ function ifaceZero(ifn) {
   const ms = ifaceMethods(ifn);
   if (ms.length === 0) return null;
   /* 先把记录建出来（字段暂时是 null），下面逐格填 —— "返回自己"的 `rzero` 要指回它。 */
-  const rec = recordNew(ms.map(([m]) => [m, lit(null)]), true);
+  const rec = recordNew(ms.map(([m]) => [m, lit(null)]), false);
   for (let k = 0; k < ms.length; k++) {
     const [m, sig] = ms[k];
     const ps = ifaceParams(sig);
@@ -892,7 +892,7 @@ function ensureBoxFn(tn, ifn) {
      而那一报是在空跑那一趟里被吞掉的 —— 症状是调用点把它当 int。 */
   const fn = node('func', {
     body: [
-      node('bind', { init: recordNew(fields, true) }, { name: '__b' }),
+      node('bind', { init: recordNew(fields, false) }, { name: '__b' }),
       retOf([gref('__b')]),
     ],
   }, {
@@ -1773,6 +1773,14 @@ function funcOf(sig, blk, name, self, selfType) {
   if (self !== undefined) declHere(self);
   if (self !== undefined && selfType !== undefined && selfType !== null) {
     VARTYPE.set(self, selfType);
+    /* **接收者的类型节点也留一份**（`VARTY`）：`tyOfExpr` 靠它往下追 ——
+       `func (a Box) Anchor(…) { return a.Min.Add(…) }` 里 `a.Min` 的类型要先知道
+       `a` 是 Box。少这一格，`a.Min.Add(…)` 会落到"取字段再调它"的兜底上，
+       core 那侧报"记录 r1 上没有字段 'Add'"（pt 的 `Box__Anchor` 撞的就是它）。
+       手里只有类型**名字**（指针接收者已经剥过一层），所以现搭一格 `(tname X)`。 */
+    VARTY.set(self, { kind: 'list', items: [
+      { kind: 'atom', value: 'tname' }, { kind: 'atom', value: selfType },
+    ] });
   }
   for (const p of partKids(sig, 'in')) {
     const nm = part(p, 'name');
@@ -2068,10 +2076,33 @@ function forRangeOf(x) {
   const at = (n) => node('ref', {}, { name: n });
   RG_DEPTH += 1;
   let inner;
+  /* **range 的值变量也要登记类型**（`VARTY` / `VARTYPE`）—— 体里 `shape.BoundingBox()`
+     那一族靠它才 mangle 得出静态调用。元素类型从主语的声明类型来
+     （`for _, shape := range shapes`，`shapes` 声明成 `[]*Triangle` 就是 `*Triangle`）。
+     量出来的：pt 的 `BoxForShapes`（`[]Shape`）与 `BoxForTriangles`（`[]*Triangle`）
+     里那两格 `shape` 同名不同型 —— 不登记就双双落到"取字段再调它"的兜底上，
+     core 那侧报"'Box__Extend' 第 2 格实参在两处的类型不一样（r2 与 int）"。
+     **只在 `:=` 那一档登记**（`=` 那种名字是外层的，类型不归这儿说）。 */
+  const savedRgVars = new Map(VARTYPE);
+  const savedRgTys = new Map(VARTY);
+  if (isDef) {
+    const elT = elemTyOf(tyOfExpr(subj));
+    /* 一格名字时这一份把它当**值**（见下面那段账里"1-name 在序列上绑值"那一条）。 */
+    const vn = names.length === 1 ? names[0] : (names.length > 1 ? names[1] : null);
+    if (elT !== null && vn !== null && vn !== '_') {
+      VARTY.set(vn, elT);
+      const tn = namedTypeOf(elT);
+      if (tn !== null) VARTYPE.set(vn, tn);
+    }
+  }
   try {
     inner = blk === undefined ? [] : many(kids(blk));
   } finally {
     RG_DEPTH -= 1;
+    VARTYPE.clear();
+    for (const [k, v] of savedRgVars) VARTYPE.set(k, v);
+    VARTY.clear();
+    for (const [k, v] of savedRgTys) VARTY.set(k, v);
   }
   const mk = (n, v) => (isDef
     ? node('bind', { init: v }, { name: n })
@@ -2905,7 +2936,13 @@ function toNode(x) {
         const recvName = tag(obj) === 'name' ? leaf(kids(obj)[0]) : null;
         const fromVar = recvName !== null ? VARTYPE.get(recvName) : undefined;
         const flat = METHODS.get(m);
-        const owner = fromVar ?? (flat === null ? undefined : flat);
+        /* **接收者不是光名字**（`shapes[0].BoundingBox()` / `m.tree.Intersect(r)`）时也要
+           认得出类型：`tnOfExpr` 顺着"下标 / 取字段 / 调用 / 字面量"往回看声明的类型。
+           没有它就落到最底下那条"取字段再调它"的兜底上，而 core 这条腿上那是一句缺口
+           （pt 的 `BoxForTriangles` 报的正是"记录 r21 上没有字段 'BoundingBox'"）。
+           排在 `flat` 前面：`flat` 是"平表里只有一个主人"那一档的猜测，这一格是声明。 */
+        const fromExpr = (!onType && fromVar === undefined) ? tnOfExpr(obj) : null;
+        const owner = fromVar ?? fromExpr ?? (flat === null ? undefined : flat);
         /* **接收者是接口值**（ADR-0040）：那就**必须**取字段再调它 —— 静态 mangle 会把
            `s.Area()` 钉在某一个具体类型上（`METHODS` 里只有一个主人时尤其），
            而接口的全部意思正是"运行期才知道装了谁"。**这一条要排在 mangle 前面。** */
