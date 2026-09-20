@@ -31,7 +31,7 @@
  */
 
 import {
-  OP, OP_MODES, REF_BIAS, REF_NONE,
+  OP, OP_MODES, REF_BIAS, REF_NONE, isConstRef,
   T_VOID, T_BOOL, T_I32, T_I64, T_F32, T_F64, T_TPTR,
   typeLanes, isCmp,
 } from '../ir.js';
@@ -96,9 +96,25 @@ function lastUses(fn) {
  */
 function extendForLoops(fn, last) {
   const n = fn.op.length;
-  /* 一遍扫出：每条指令处**开着的 LOOP** 有哪些（栈，外层在前），与每个区域的 END 在哪儿 */
+  const { openLoops, endOf } = scanRegions(fn);
+
+  for (let d = 0; d < n; d++) {
+    const u = last[d];
+    if (u < 0) continue;
+    let ext = -1;
+    for (const lp of openLoops[u]) {
+      if (lp > d && endOf[lp] > ext) ext = endOf[lp];   // 定义在这个循环之前 ⇒ 要延
+    }
+    if (ext > last[d]) last[d] = ext;
+  }
+  return last;
+}
+
+/** 一遍扫出：每条指令处**开着的 LOOP** 有哪些（栈，外层在前），与每个区域的 END 在哪儿。 */
+function scanRegions(fn) {
+  const n = fn.op.length;
   const stack = [];                 // {pc, op}
-  const openLoops = [];             // openLoops[pc] = 开着的 LOOP 的 pc 数组（共享同一份的拷贝）
+  const openLoops = [];             // openLoops[pc] = 开着的 LOOP 的 pc 数组
   const endOf = [];
   for (let i = 0; i < n; i++) endOf.push(-1);
   const pending = [];
@@ -120,17 +136,73 @@ function extendForLoops(fn, last) {
       pending.push(pc);
     }
   }
+  return { openLoops, endOf };
+}
 
-  for (let d = 0; d < n; d++) {
-    const u = last[d];
-    if (u < 0) continue;
-    let ext = -1;
-    for (const lp of openLoops[u]) {
-      if (lp > d && endOf[lp] > ext) ext = endOf[lp];   // 定义在这个循环之前 ⇒ 要延
+/**
+ * **把标量槽位本身也涂色**（"槽位提升"）。
+ *
+ * 为什么这一格比再多涂几个值都值钱：MIR 里没有 phi，所以 mem2reg 在两条路汇合处
+ * （`END`）只能取交 —— 循环携带的局部变量（归纳变量 `i`、累加器 `t`…）永远收不进
+ * 值里，每一轮都是 `ldr` 进来、算完 `str` 回去。那对 `str`/`ldr` 是**跨迭代的内存
+ * 依赖**（存转发要四五个周期，而且串行），比它多出来的两条指令贵得多。
+ * 量出来的：`intersect` 的循环头每轮一条 `ldr x19,[sp,#0x20]`，而 go 的同一个循环
+ * 把 `i` 放在 R0 里。
+ *
+ * 寄存器本身**就是汇合点** —— 所以这件事不需要 phi：只要一个槽的全部访问都是
+ * `LOAD`/`STORE`（角色表里 `'s'` 只出现在这两条上，见 `ir.js` 的 `OP_MODES`），
+ * 把它们换成寄存器读写，语义逐字相同。
+ *
+ * 资格（都是"判不准就不提升"）：
+ *   - 槽的类型住得下一个寄存器（`fitsOneWord`）；
+ *   - 每条 `LOAD` 的结果类型、每条 `STORE` 的值类型都**正好是槽的类型** ——
+ *     宽度或整/浮不一致时寄存器里躺的位模式与栈位里的不是一回事；
+ *   - 函数里没有 `SETJMP`：`longjmp` 会把被调用者保存的寄存器还原成 `setjmp` 那一刻的值，
+ *     于是提升过的局部变量会莫名回退（C 说那是未定义的，但没必要自己踩）。
+ *
+ * 区间：`[第一次访问, 最后一次访问]`，再按"有访问落在某个循环里 ⇒ 整个循环都算活着"
+ * 往外撑（值流过回边，见 `extendForLoops` 里那个判据的镜像）。形参的槽从 **-1** 开始 ——
+ * 序言就把入参写进去了。
+ */
+function slotIntervals(fn, mod, openLoops, endOf) {
+  const ns = fn.slots === undefined ? 0 : fn.slots.length;
+  if (ns === 0) return new Map();
+  const n = fn.op.length;
+  const iv = new Map();
+  const bad = new Set();
+  const consts = (mod !== undefined && mod !== null && mod.consts !== undefined) ? mod.consts : null;
+  for (let pc = 0; pc < n; pc++) {
+    const o = fn.op[pc];
+    if (o === OP.SETJMP) return new Map();
+    if (o !== OP.LOAD && o !== OP.STORE) continue;
+    const no = fn.aux[pc];
+    if (!(no >= 0 && no < ns)) continue;
+    const st = fn.slots[no].t;
+    if (!fitsOneWord(st)) { bad.add(no); continue; }
+    /* `STORE` 的值类型要真问一遍（`fn.t[pc]` 在 STORE 上有时是 void）。拿不到常量表时
+     * （判据里有不带 mod 调这一格的）常量那一路就判不准 —— 判不准就不提升。 */
+    let vt = null;
+    if (o === OP.LOAD) vt = fn.t[pc];
+    else if (consts !== null || !isConstRef(fn.a[pc])) vt = fn.typeOf(fn.a[pc], consts);
+    if (vt !== st) { bad.add(no); continue; }
+    let e = iv.get(no);
+    if (e === undefined) { e = { start: pc, end: pc, float: isFloatT(st) }; iv.set(no, e); }
+    e.end = pc;
+    /* 有访问落在循环里 ⇒ 整个循环都算活着（回边会把值送回循环头） */
+    for (const lp of openLoops[pc]) {
+      if (lp < e.start) e.start = lp;
+      if (endOf[lp] > e.end) e.end = endOf[lp];
     }
-    if (ext > last[d]) last[d] = ext;
   }
-  return last;
+  for (const no of bad) iv.delete(no);
+  /* 形参的槽：序言就写进去了，从 -1 起算 */
+  if (fn.params !== undefined) {
+    for (const p of fn.params) {
+      const e = iv.get(p.slot);
+      if (e !== undefined) e.start = -1;
+    }
+  }
+  return iv;
 }
 
 /** 有几个颜色可用。取的是**哪条腿最多**那个数：arm64 的被调用者保存通用寄存器是
@@ -178,19 +250,64 @@ export const COLORS_F = 8;
  *
  * 回分到了几个值（两类之和）。
  */
-export function regalloc(fn, _mod) {
+export function regalloc(fn, mod) {
   if (!fn || fn.op.length === 0) return 0;
   const last = extendForLoops(fn, lastUses(fn));
+  const { openLoops, endOf } = scanRegions(fn);
+  const slotIv = slotIntervals(fn, mod, openLoops, endOf);
+  /* 槽位按区间起点分桶：到那个 pc 就跟值抢同一个池子（起点 -1 的在进循环之前先发）。 */
+  const slotsAt = new Map();
+  for (const [no, e] of slotIv) {
+    const k = e.start;
+    if (!slotsAt.has(k)) slotsAt.set(k, []);
+    slotsAt.get(k).push(no);
+  }
 
   /* 两个独立的池子：`cls[0]` 是通用、`cls[1]` 是浮点。 */
   const cls = [
-    { hint: new Map(), active: [], free: [] },
-    { hint: new Map(), active: [], free: [] },
+    { hint: new Map(), slotHint: new Map(), active: [], free: [] },
+    { hint: new Map(), slotHint: new Map(), active: [], free: [] },
   ];
   for (let i = 0; i < COLORS; i++) cls[0].free.push(i);
   for (let i = 0; i < COLORS_F; i++) cls[1].free.push(i);
 
+  /** 给一个区间要个颜色。要不到就抢一个**值**（槽位不当牺牲品：它的住处是全函数
+   *  一个决定，中途换人后端没法表达）。回真给了没有。 */
+  const grant = (c, key, end, isSlot, operandOf) => {
+    if (c.free.length === 0) {
+      let worst = -1, worstEnd = isSlot ? -1 : end;
+      for (let k = 0; k < c.active.length; k++) {
+        const it = c.active[k];
+        if (it.slot === true) continue;                   // 槽位不许被抢
+        if (operandOf !== null && operandOf.has(it.pc)) continue;
+        if (it.end > worstEnd) { worstEnd = it.end; worst = k; }
+      }
+      if (worst < 0) return false;
+      const victim = c.active[worst];
+      c.hint.delete(victim.pc);
+      c.active.splice(worst, 1);
+      (isSlot ? c.slotHint : c.hint).set(key, victim.color);
+      c.active.push({ pc: key, end, color: victim.color, slot: isSlot });
+      return true;
+    }
+    c.free.sort((x, y) => x - y);                // 取最小的颜色：两次编译要一样
+    const color = c.free.shift();
+    (isSlot ? c.slotHint : c.hint).set(key, color);
+    c.active.push({ pc: key, end, color, slot: isSlot });
+    return true;
+  };
+
+  const grantSlots = (pc) => {
+    const list = slotsAt.get(pc);
+    if (list === undefined) return;
+    for (const no of list) {
+      const e = slotIv.get(no);
+      grant(cls[e.float ? 1 : 0], no, e.end, true, null);
+    }
+  };
+
   let n = 0;
+  grantSlots(-1);
   for (let pc = 0; pc < fn.op.length; pc++) {
     /* 一、到期的先还回各自的池子（`end < pc` 的那些）—— 线性扫描的 expire 那一步 */
     for (const c of cls) {
@@ -200,14 +317,16 @@ export function regalloc(fn, _mod) {
       }
       c.active = keep;
     }
+    /* 二、这个 pc 起活的槽位先要（它们的区间最长、在循环里，比单个值值钱） */
+    grantSlots(pc);
 
-    /* 二、这条指令产的值要不要一个寄存器 */
+    /* 三、这条指令产的值要不要一个寄存器 */
     const t = resultType(fn, pc);
     if (t === T_VOID) continue;
     const end = last[pc];
     if (end < 0) continue;                       // 没人用（deadcode 会收走）
     if (!fitsOneWord(t)) continue;
-    /* 这条指令的操作数是哪几条指令产的（抢占时要避开，见下面那段）。 */
+    /* 这条指令的操作数是哪几条指令产的（抢占时要避开，见 `grant`）。 */
     const operandOf = new Set();
     {
       const m = OP_MODES[fn.op[pc]];
@@ -221,48 +340,24 @@ export function regalloc(fn, _mod) {
       }
     }
     const c = cls[isFloatT(t) ? 1 : 0];
-    if (c.free.length === 0) {
-      /**
-       * **池子用光了 ⇒ 抢一个**（Go 的 `ssa/regalloc.go` 文件头：
-       * 「spills registers only when necessary, and spills the value whose next use is
-       * farthest in the future」）。
-       *
-       * 在这一层"下次使用最远"就是**区间的右端最远**（我们的区间是 `[定义, 最后一次使用]`、
-       * 连续，见文件头）。所以：活着的里头找右端最大的那个，比我这个还远就把颜色让给我，
-       * 被抢的那个**从表里摘掉**（没颜色 = 照旧住栈位，这一层的"溢出"就是这么便宜 ——
-       * 颜色只是建议，摘掉不用发任何溢出/恢复指令）。
-       *
-       * 为什么非要这一条：从前是"先到先得、用光就不给了"。量出来的
-       * （`OMNI_RA_STAT=1`）：`scene` 同时活着 19 个、我们只有 9+8=17 个颜色，
-       * 覆盖率只有 79.9% —— 而先到先得会让一个横跨整个函数的长区间白占一个颜色，
-       * 挤掉后面十几个短命但在热循环里的值。
-       */
-      let worst = -1, worstEnd = end;
-      for (let k = 0; k < c.active.length; k++) {
-        /* **不许抢这条指令自己的操作数**。后端读操作数是靠 `refReg`（住在粘住寄存器里的
-         * 直接用那一个，一个字都不发），随后 `dest` 把结果算进同一个寄存器 ——
-         * `MOD` 那两条（`sdiv d,x,y` 接 `msub d,d,y,x`）里 d 撞上 x 或 y 就算错了。
-         * `dest` 本来有 `a`/`b` 要避开的参数，可粘住那一路是提前返回的、不看它。 */
-        if (operandOf.has(c.active[k].pc)) continue;
-        if (c.active[k].end > worstEnd) { worstEnd = c.active[k].end; worst = k; }
-      }
-      if (worst < 0) continue;                   // 我自己就是最远的那个 ⇒ 住栈位
-      const victim = c.active[worst];
-      c.hint.delete(victim.pc);
-      c.active.splice(worst, 1);
-      c.hint.set(pc, victim.color);
-      c.active.push({ pc, end, color: victim.color });
-      continue;                                  // n 不变：一个进来、一个出去
-    }
-    c.free.sort((x, y) => x - y);                // 取最小的颜色：两次编译要一样
-    const color = c.free.shift();
-    c.hint.set(pc, color);
-    c.active.push({ pc, end, color });
-    n++;
+    /**
+     * **池子用光了 ⇒ 抢一个**（Go 的 `ssa/regalloc.go` 文件头：
+     * 「spills registers only when necessary, and spills the value whose next use is
+     * farthest in the future」）。在这一层"下次使用最远"就是**区间的右端最远**
+     * （我们的区间是 `[定义, 最后一次使用]`、连续，见文件头）。被抢的那个从表里摘掉
+     * （没颜色 = 照旧住栈位，这一层的"溢出"就是这么便宜）。
+     *
+     * 为什么非要这一条：从前是"先到先得、用光就不给了"。量出来的（`OMNI_RA_STAT=1`）：
+     * `scene` 同时活着 19 个、我们只有 9+8=17 个颜色，覆盖率只有 79.9% ——
+     * 先到先得会让一个横跨整个函数的长区间白占一个颜色，挤掉后面十几个短命但在热循环里的值。
+     */
+    if (grant(c, pc, end, false, operandOf) && c.hint.has(pc)) n++;
   }
 
   fn.regHint = cls[0].hint;
   fn.regHintF = cls[1].hint;
+  fn.slotHint = cls[0].slotHint;
+  fn.slotHintF = cls[1].slotHint;
   /* `OMNI_RA_STAT=1`：印出这一格的覆盖率与压力 —— 「同时活着最多几个」决定了
    * 加寄存器还不还得起，「分到几个」决定了抢占策略有没有用。量过再改，别猜。 */
   if (process.env.OMNI_RA_STAT === '1' && fn.op.length >= 200) {
@@ -294,21 +389,31 @@ registerPass('regalloc', regalloc);
  * 区间 = `[定义的 pc, 最后一次使用的 pc]`，这一层的正确性全靠它连续（见文件头）。
  * 两类各自判：通用与浮点是两套物理寄存器，跨类同色不冲突。
  */
-export function checkRegHint(fn) {
+export function checkRegHint(fn, mod) {
   const errs = [];
   const last = extendForLoops(fn, lastUses(fn));
-  for (const [cls, hint] of [['通用', fn.regHint], ['浮点', fn.regHintF]]) {
-    if (!hint || hint.size === 0) continue;
+  const { openLoops, endOf } = scanRegions(fn);
+  const slotIv = slotIntervals(fn, mod, openLoops, endOf);
+  for (const [cls, hint, sh] of [['通用', fn.regHint, fn.slotHint], ['浮点', fn.regHintF, fn.slotHintF]]) {
     const items = [];
-    for (const [pc, color] of hint) items.push({ pc, end: last[pc], color });
+    if (hint && hint.size > 0) {
+      for (const [pc, color] of hint) items.push({ what: `%${pc}`, pc, end: last[pc], color });
+    }
+    if (sh && sh.size > 0) {
+      for (const [no, color] of sh) {
+        const e = slotIv.get(no);
+        if (e === undefined) { errs.push(`${fn.name}（${cls}）: slot${no} 涂了色可是没有区间`); continue; }
+        items.push({ what: `slot${no}`, pc: e.start, end: e.end, color });
+      }
+    }
     for (let i = 0; i < items.length; i++) {
       for (let j = i + 1; j < items.length; j++) {
         const a = items[i], b = items[j];
         if (a.color !== b.color) continue;
         const overlap = a.pc <= b.end && b.pc <= a.end;
         if (overlap) {
-          errs.push(`${fn.name}（${cls}）: %${a.pc}[${a.pc}..${a.end}] 与`
-            + ` %${b.pc}[${b.pc}..${b.end}] 区间相交却同色（${a.color}）`);
+          errs.push(`${fn.name}（${cls}）: ${a.what}[${a.pc}..${a.end}] 与`
+            + ` ${b.what}[${b.pc}..${b.end}] 区间相交却同色（${a.color}）`);
         }
       }
     }

@@ -499,10 +499,18 @@ class FnGen {
      * 于是**一个字节都不变** —— 那 88 条编码对账的用例照旧成立。 */
     this.hint = (f.regHint !== undefined && f.regHint !== null && f.regHint.size > 0)
       ? f.regHint : null;
+    /* **槽位提升**（`regalloc.js` 的 `slotIntervals`）：这两张表的键是槽号，
+     * 涂过色的槽**权威副本就是那个寄存器**，栈位从头到尾没人碰。颜色与值的是同一套
+     * （同一个池子分出来的），所以存调用者的那一步要把它们一起算进去。 */
+    this.slotHint = (f.slotHint !== undefined && f.slotHint !== null && f.slotHint.size > 0)
+      ? f.slotHint : null;
+    this.slotHintF = (f.slotHintF !== undefined && f.slotHintF !== null && f.slotHintF.size > 0)
+      ? f.slotHintF : null;
     this.stickyColors = [];
-    if (this.hint !== null) {
+    if (this.hint !== null || this.slotHint !== null) {
       const seen = [];
-      for (const c of this.hint.values()) if (seen.indexOf(c) < 0) seen.push(c);
+      if (this.hint !== null) for (const c of this.hint.values()) if (seen.indexOf(c) < 0) seen.push(c);
+      if (this.slotHint !== null) for (const c of this.slotHint.values()) if (seen.indexOf(c) < 0) seen.push(c);
       seen.sort((a, b) => a - b);
       for (const c of seen) if (c >= 0 && c < STICKY.length) this.stickyColors.push(c);
     }
@@ -516,9 +524,10 @@ class FnGen {
     this.hintF = (f.regHintF !== undefined && f.regHintF !== null && f.regHintF.size > 0)
       ? f.regHintF : null;
     this.fstickyColors = [];
-    if (this.hintF !== null) {
+    if (this.hintF !== null || this.slotHintF !== null) {
       const seen = [];
-      for (const c of this.hintF.values()) if (seen.indexOf(c) < 0) seen.push(c);
+      if (this.hintF !== null) for (const c of this.hintF.values()) if (seen.indexOf(c) < 0) seen.push(c);
+      if (this.slotHintF !== null) for (const c of this.slotHintF.values()) if (seen.indexOf(c) < 0) seen.push(c);
       seen.sort((a, b) => a - b);
       for (const c of seen) if (c >= 0 && c < STICKY_F.length) this.fstickyColors.push(c);
     }
@@ -581,6 +590,41 @@ class FnGen {
       throw new OmniError(`arm64: 槽号 ${no} 越界`);
     }
     return this.slotBase + no * 8;
+  }
+
+  /* ------------------------------------------------- 提升到寄存器的槽位 */
+
+  /** 这个槽住在哪个通用寄存器里（-1 = 照旧住栈位）。见 `regalloc.js` 的 `slotIntervals`。 */
+  slotSticky(no) {
+    if (this.slotHint === null) return -1;
+    const c = this.slotHint.get(no);
+    if (c === undefined || c < 0 || c >= STICKY.length) return -1;
+    return STICKY[c];
+  }
+
+  /** 这个槽住在哪个 FP 寄存器里（-1 = 不住）。 */
+  slotStickyF(no) {
+    if (this.slotHintF === null) return -1;
+    const c = this.slotHintF.get(no);
+    if (c === undefined || c < 0 || c >= STICKY_F.length) return -1;
+    return STICKY_F[c];
+  }
+
+  /** 这个槽是 f64 吗（f32 提升时 `fmov` 要用 s 系）。 */
+  slotDbl(no) {
+    return typeKind(this.f.slots[no].t) !== T_F32;
+  }
+
+  /**
+   * 把一个**通用寄存器里的位模式**写进槽 —— 序言里给形参落位、`STORE` 走同一条。
+   * 涂过色的进那个寄存器（一条 `mov`/`fmov`），没涂色的照旧一条 `str`。
+   */
+  putSlot(no, greg) {
+    const fs = this.slotStickyF(no);
+    if (fs >= 0) { this.toFp(fs, greg, this.slotDbl(no)); return; }
+    const s = this.slotSticky(no);
+    if (s >= 0) { if (s !== greg) this.buf.emit(movReg(1, s, greg)); return; }
+    this.frameStore(greg, this.slotOff(no));
   }
 
   valOff(i) {
@@ -1041,7 +1085,7 @@ class FnGen {
       pi++;
       /* 隐藏的返回值指针（>16 字节那条路）：它在 **x8** 里，不在 x0 里。 */
       if (place.sret !== undefined) {
-        this.frameStore(8, this.slotOff(p.slot));
+        this.putSlot(p.slot, 8);
         continue;
       }
       /* HFA 进来在 v 寄存器里（C.2）：落进 `blk` 那一块，槽里放它的地址。
@@ -1054,7 +1098,7 @@ class FnGen {
           this.fromFp(TMP0, place.v + j, dbl);
           buf.emit(strU(dbl ? 3 : 2, TMP0, TMP1, j * place.hfa.size));
         }
-        this.frameStore(TMP1, this.slotOff(p.slot));
+        this.putSlot(p.slot, TMP1);
         continue;
       }
       /* 聚合摊在几个整数寄存器里（C.10）：同上，落进 `blk`。 */
@@ -1063,28 +1107,28 @@ class FnGen {
         for (let j = 0; j < place.xn; j++) {
           buf.emit(strU(3, place.x + j, TMP1, j * 8));
         }
-        this.frameStore(TMP1, this.slotOff(p.slot));
+        this.putSlot(p.slot, TMP1);
         continue;
       }
       /* 入参区里的一整块（C.13）：**不用拷** —— 地址就是它待着的地方，而「形参是实参的
        * 一份可改的拷贝」那次拷贝是前端发的（`structCopy`），不是这一层的事。 */
       if (place.off !== undefined && place.bytes !== undefined && place.ptr !== true) {
         this.addOff(TMP0, 29, 16 + place.off);
-        this.frameStore(TMP0, this.slotOff(p.slot));
+        this.putSlot(p.slot, TMP0);
         continue;
       }
       /* 入参区里的一格（标量、或 B.3 换成的那个指针）。 */
       if (place.off !== undefined) {
         buf.emit(ldrU(3, TMP0, 29, 16 + place.off));
-        this.frameStore(TMP0, this.slotOff(p.slot));
+        this.putSlot(p.slot, TMP0);
         continue;
       }
       if (place.v !== undefined) {
         this.fromFp(TMP0, place.v, typeKind(p.t) === T_F64);
-        this.frameStore(TMP0, this.slotOff(p.slot));
+        this.putSlot(p.slot, TMP0);
         continue;
       }
-      this.frameStore(place.x, this.slotOff(p.slot));
+      this.putSlot(p.slot, place.x);
     }
 
     for (let i = 0; i < f.count(); i++) this.one(i);
@@ -1421,15 +1465,36 @@ class FnGen {
       return this.def(i, d);
     }
 
-    /* ---- 槽位 */
+    /* ---- 槽位。**涂过色的槽**（`regalloc.js` 的 `slotIntervals`）权威副本就是那个
+     * 寄存器，栈位从头到尾没人碰 —— 于是一条 `ldr`/`str` 换成一条 `mov`/`fmov`，
+     * 而循环携带的局部变量（`i`、`t`…）不再每轮走一趟内存。 */
     if (op === OP.LOAD) {
+      const no = f.aux[i];
+      const fs = this.slotStickyF(no);
+      if (fs >= 0) return this.fMove(i, fs, this.slotDbl(no));
+      const sk = this.slotSticky(no);
+      if (sk >= 0) return this.def(i, sk);
       const d = this.dest(i);
-      this.frameLoad(d, this.slotOff(f.aux[i]));
+      this.frameLoad(d, this.slotOff(no));
       return this.def(i, d);
     }
     if (op === OP.STORE) {
+      const no = f.aux[i];
+      const fs = this.slotStickyF(no);
+      if (fs >= 0) {
+        const dbl = this.slotDbl(no);
+        const x = this.fRefReg(f.a[i], FTMP0, dbl);
+        if (x !== fs) buf.emit(fmovFp(dbl, fs, x));
+        return;
+      }
+      const sk = this.slotSticky(no);
+      if (sk >= 0) {
+        const v = this.refReg(f.a[i], sk);
+        if (v !== sk) buf.emit(movReg(1, sk, v));
+        return;
+      }
       const v = this.refReg(f.a[i], RES);
-      this.frameStore(v, this.slotOff(f.aux[i]));
+      this.frameStore(v, this.slotOff(no));
       return;
     }
 
@@ -1746,6 +1811,21 @@ class FnGen {
     }
     this.fromFp(RES, freg, dbl);
     return this.def(i, RES);
+  }
+
+  /**
+   * 交出一个**已经躺在别处 d 寄存器里**的浮点值（提升过的槽的 `LOAD` 走这条）。
+   * 与 `fDef` 的差别只在第一条：`fDef` 假定值就是算在自己那个 d 寄存器里的、一个字都
+   * 不发，这儿得真搬一次。
+   */
+  fMove(i, freg, dbl) {
+    const fsk = this.fstickyAt(i);
+    if (fsk >= 0) {
+      if (fsk !== freg) this.buf.emit(fmovFp(dbl, fsk, freg));
+      this.pending = -1;
+      return;
+    }
+    return this.fDef(i, freg, dbl);
   }
 
   /** 结果是浮点的那几种 CVT。 */

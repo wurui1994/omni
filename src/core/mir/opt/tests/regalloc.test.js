@@ -66,7 +66,7 @@ const rows = [];
 for (const fn of mod.funcs) {
   const n = regalloc(fn, mod) || 0;
   total += n;
-  for (const e of checkRegHint(fn)) errs.push(e);
+  for (const e of checkRegHint(fn, mod)) errs.push(e);
   if (n > 0) rows.push(`${fn.name}: ${fn.op.length} 条指令里分了 ${n} 个`);
 }
 console.log(`== 分配（${COLORS} 个颜色）`);
@@ -78,7 +78,7 @@ ok(errs.length === 0, '分配表自洽：区间相交的不同色' + (errs.lengt
        量 loops 里"跨整个循环体"的那些值真的被算成活着） ---- */
 const loops = mod.funcs.find((f) => f.name === 'loops');
 ok(loops !== undefined && loops.regHint.size > 0, 'loops 里也分到了寄存器');
-ok(checkRegHint(loops).length === 0, 'loops 的分配表自洽（循环那一刀生效）');
+ok(checkRegHint(loops, mod).length === 0, 'loops 的分配表自洽（循环那一刀生效）');
 
 /* ---- 确定性：再走一遍同一条路，分配逐格相同 ---- */
 const mod2 = prep();
@@ -100,7 +100,7 @@ ok(loopf.regHint.size > 0, `loopf（double + 循环 + 调用）分到了 ${loopf
 /* ---- 直线代码也照分（Go 的 regalloc 不问"值不值得"，没有循环这道闸） ---- */
 const straight = mod.funcs.find((f) => f.name === 'straight');
 ok(straight.regHint.size > 0, `没有循环的 straight 也分到了 ${straight.regHint.size} 个`);
-ok(checkRegHint(straight).length === 0, 'straight 的分配表自洽');
+ok(checkRegHint(straight, mod).length === 0, 'straight 的分配表自洽');
 
 console.log('');
 if (fails > 0) { console.log(`✗ ${fails} 条不过`); process.exit(1); }

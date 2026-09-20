@@ -92,9 +92,13 @@ export function removeInsns(fn, doomed) {
 
   /* 删过指令之后，按**下标**记的那些标注全废了 —— `regalloc` 的 `regHint`/`regHintF`
      就是两张 `下标 -> 颜色` 的表。清掉而不是重编号：通道表里 regalloc 在倒数第三格，
-     它之后只剩 `trim`，而"先分配、再删指令"本来就该重新分配一次。 */
+     它之后只剩 `trim`，而"先分配、再删指令"本来就该重新分配一次。
+     `slotHint`/`slotHintF` 的键是槽号（删指令不改槽号），可它们的**区间**是按 pc 算的，
+     与值的颜色是同一个池子分出来的 —— 只清一半会留下相交却同色的一对。所以四张一起清。 */
   if (fn.regHint !== undefined) fn.regHint = undefined;
   if (fn.regHintF !== undefined) fn.regHintF = undefined;
+  if (fn.slotHint !== undefined) fn.slotHint = undefined;
+  if (fn.slotHintF !== undefined) fn.slotHintF = undefined;
 
   /* 三、按角色改 ref。
      实参池**不压缩**：起点存在 b 上，压缩了就得同时改 b，而池里可能还有别的东西
