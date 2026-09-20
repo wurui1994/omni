@@ -38,24 +38,29 @@
  * 第 2/3 件（聚合返回值、多值出口）要先给 MIR 加多值返回（Go 的 `OpSelectN`），
  * 顺序与 Go 的注释同序，那是另一格。
  *
- * ⚠️ **还是一次都不触发，但卡点已经不是判据了 —— 是候选压根没被枚举到。**
+ * ⚠️ **查清了：这一格在 smallpt 上不该触发 —— 我的前提（那次拷贝是多余的）本身是错的。**
  *
- * 跨函数的 mod 分析不动点（`paramModSet`）已经做好了：初值全假设"不写"，发现真写
- * （`MSTORE` 走这个地址）、地址存进槽位/全局、或者传给一个"会写"的位置就翻过来，
- * 单调所以一定收敛，递归靠初值自然处理。`intersect` 的第 0 个形参判成"不写"，判据 4 过。
+ * 判据都齐了（跨函数 mod 分析不动点 `paramModSet` 也做好了），每个候选现在都印为什么不换。
+ * 印出来的答案是：
  *
- * `OMNI_EXPAND_STAT=1` 现在每个候选都印为什么不换，量出来是这样：
- *   - 印出来的"不换"**全是递归 radiance 那七个调用**，理由都是"不是逐格照抄" ——
- *     这是对的：它们传的是**新造的** Ray（`%404`/`%485`/…），不是 `%0` 的拷贝；
- *   - 可真正想改的那个候选（`CALL intersect` 的 `ARGMEM base=%0`）**既没成功也没被拒**，
- *     说明它没进 `useOf`；而 `sroa.js` 在这一格前后都还在报 `放弃 %0（%16 ARGMEM 的 a）`。
+ *     [expand] radiance: %16 不换（%131 MSTORE 又写了它）
  *
- * 下一步就查这一条：第 62 格跑的时候 radiance 的 `CALL intersect` 实参池里到底是什么。
- * 两个已知的可疑点：
- *   - 印出来的 pc（1041/1065）**大于最终 MIR 的 862 条**，说明这一格看到的是中间态；
- *     `inline`（第 46 格）在前，中间态里那条调用的形状可能还没定下来；
- *   - `useOf` 只认 `OP.CALL`。若那时它还是别的形态（或实参池的起点被别的格子挪过），
- *     就会整条漏掉。
+ * 也就是说 `radiance` 那个帧块在拷贝之后**又被写了**。查 C 源码：radiance 从不写 `r.o`/
+ * `r.d`（它写的是另一个局部 `nr.o`/`nr.d`）—— 可这两个局部**在同一个帧块里**。
+ * 量出来：radiance 有 87 个帧块，而**第 0 号就有 1568 字节**，聚合局部量是挤在一起的。
+ *
+ * 于是链条是这样的（与我先前记的"321 条全是那份 Ray 拷贝"**不同**，那句要作废）：
+ *   - `sroa.js` 按**帧块身份**分组（`aliasId` 回 `F<块号>`）；
+ *   - 那一块里只要有**一个**用法逃逸（这儿是 `ARGMEM` 把它传给 `intersect`），
+ *     整块的所有局部量一起被放弃 —— 包括与那次调用毫无关系的 `nr`/`x`/`n`/`f`；
+ *   - 所以 radiance 的 321 条访存不是"一份 Ray 拷贝"，是**一整块里所有聚合局部量**。
+ *
+ * 所以下一刀不在这一格，而在**粒度**上，两条路（都与 Go 对得上）：
+ *   - `sroa.js` 改成**按格子**判逃逸而不是按整块：一个 `ARGMEM` 只能说明"它盖住的那几个
+ *     格子"逃逸了，块里别的格子照样可以拆。Go 的 auto 本来就是一个变量一个，
+ *     这一条等于把我们的粒度补到与它一样；
+ *   - 或者前端给每个聚合局部量单独开一个帧块（`frameAlloc` 那一层），从源头上分开。
+ * 前者不动前端、判据也更一般（对别的语言同样成立），应该先做前者。
  *
  * 在查清之前这一格**只发诊断、不改图**（已 cmp 验证产物逐字节不变）。
  */
@@ -204,6 +209,29 @@ export function expandCalls(fn, mod) {
       useOf.set(r - REF_BIAS, { callPc: pc, pos: k });
     }
   }
+  if (process.env.OMNI_EXPAND_STAT === '1') {
+    let ncall = 0;
+    const shapes = [];
+    for (let pc = 0; pc < fn.op.length; pc++) {
+      const o = fn.op[pc];
+      if (o !== OP.CALL && o !== OP.CCALL && o !== OP.CALLI) continue;
+      ncall++;
+      if (o !== OP.CALL) { shapes.push(`%${pc}:${o === OP.CCALL ? 'CCALL' : 'CALLI'}`); continue; }
+      const g2 = mod.funcs[fn.a[pc]];
+      const at = fn.b[pc];
+      const n = fn.args[at];
+      const ps = [];
+      for (let k = 0; k < n; k++) {
+        const r = fn.args[at + 1 + k];
+        if (r === REF_NONE || r < REF_BIAS) { ps.push('k'); continue; }
+        const rp = r - REF_BIAS;
+        ps.push(fn.op[rp] === OP.ARGMEM ? 'ARGMEM' : fn.op[rp] === OP.ARGSRET ? 'ARGSRET' : 'v');
+      }
+      shapes.push(`%${pc}:${g2 ? g2.name : '?'}(${ps.join(',')})`);
+    }
+    process.stderr.write(`[expand] ${fn.name}: ${fn.op.length} 条指令、${ncall} 个调用、`
+      + `${useOf.size} 个 ARGMEM 候选 —— ${shapes.slice(0, 12).join(' ')}\n`);
+  }
   if (useOf.size === 0) return 0;
 
   let changed = 0;
@@ -213,6 +241,7 @@ export function expandCalls(fn, mod) {
     return false;
   };
   for (const [amPc, u] of useOf) {
+    if (stat) process.stderr.write(`[expand] ${fn.name}: 看候选 %${amPc}\n`);
     const blk = fn.a[amPc];                       // 那一块的地址（`FRAME` 或派生）
     const size = memArgSize(fn.aux[amPc]);
     if (!(size > 0) || size % 8 !== 0) { no(amPc, `字节数 ${size} 不是 8 的倍数`); continue; }
@@ -275,11 +304,12 @@ export function expandCalls(fn, mod) {
      *
      * 扫**整个函数**而不是 `[lastStore, amPc)`：那条 `ARGMEM` 可能在循环里，
      * 而回边会把"文本上在它之后"的写带到下一轮它的前面。 */
+    let badWhy = '拷贝之后 blk 或 src 还被碰';
     for (let pc = lastStore + 1; pc < fn.op.length && !bad; pc++) {
       const o = fn.op[pc];
       if (o === OP.MSTORE) {
         const a = addrOf(fn, mod, fn.a[pc]);
-        if (a.base === blk || a.base === src) bad = true;
+        if (a.base === blk || a.base === src) { bad = true; badWhy = `%${pc} MSTORE 又写了它`; }
         continue;
       }
       if (o === OP.CALL || o === OP.CCALL || o === OP.CALLI) {
@@ -299,16 +329,21 @@ export function expandCalls(fn, mod) {
           const inner = fn.op[rp] === OP.ARGMEM ? fn.a[rp] : r;
           if (inner === blk || inner === src) {
             if (o !== OP.CALL || cg === undefined || taken.has(fn.a[pc])
-                || writes(fn.a[pc], cpos)) bad = true;
+                || writes(fn.a[pc], cpos)) {
+              bad = true;
+              badWhy = `%${pc} 把它传给 ${cg ? cg.name : '?'} 的第 ${cpos} 格，而那一格会写`;
+            }
           }
           cpos++;
         }
         continue;
       }
       /* 地址被存进槽位/全局 ⇒ 可能从别处拿到，说不清 */
-      if ((o === OP.STORE || o === OP.GSTORE) && (fn.a[pc] === blk || fn.a[pc] === src)) bad = true;
+      if ((o === OP.STORE || o === OP.GSTORE) && (fn.a[pc] === blk || fn.a[pc] === src)) {
+        bad = true; badWhy = `%${pc} 把地址存进了槽位/全局`;
+      }
     }
-    if (bad) continue;
+    if (bad) { no(amPc, badWhy); continue; }
     /* 判据 3：`blk` 在 `amPc` 之前只被那次拷贝写过 —— 上面那一遍已经把所有写 `blk` 的
        `MSTORE` 都验过了（不合形状就 `bad`），所以这儿不必再查一遍。 */
 
