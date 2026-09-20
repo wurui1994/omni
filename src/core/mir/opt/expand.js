@@ -38,20 +38,26 @@
  * 第 2/3 件（聚合返回值、多值出口）要先给 MIR 加多值返回（Go 的 `OpSelectN`），
  * 顺序与 Go 的注释同序，那是另一格。
  *
- * ⚠️ **现在这一版在 smallpt 上一次都不触发，差的是 `paramWritten` 要做成跨函数不动点。**
+ * ⚠️ **还是一次都不触发，但卡点已经不是判据了 —— 是候选压根没被枚举到。**
  *
- * 量出来的卡点（`OMNI_EXPAND_STAT=1` + `OMNI_SROA_STAT=1`）：radiance 那份 `Ray` 拷贝
- * 被传给**两个**调用（`intersect` 与递归的 `radiance`）。判据 2 要求"收到这一块的被调都
- * 不写它"，而 `paramWritten` 现在是**一层**的：它看见 `ARGMEM 那个形参的地址` 就答
- * "会写"（保守），于是 `paramWritten(radiance, 0)` = true —— radiance 把自己的形参地址
- * 往下传了，哪怕下面那个也只读。
+ * 跨函数的 mod 分析不动点（`paramModSet`）已经做好了：初值全假设"不写"，发现真写
+ * （`MSTORE` 走这个地址）、地址存进槽位/全局、或者传给一个"会写"的位置就翻过来，
+ * 单调所以一定收敛，递归靠初值自然处理。`intersect` 的第 0 个形参判成"不写"，判据 4 过。
  *
- * 要做对得把它改成**不动点**（标准的跨函数 mod 分析）：
- *   - 初值：所有 `(函数, 形参)` 假设"不写"；
- *   - 一遍遍扫：只要发现一条真写（`MSTORE` 走这个地址）或者传给了一个"会写"的位置，
- *     就把它翻成"会写"，直到不再变化；
- *   - 递归（radiance 调自己）靠这个初值自然收敛，不必特判。
- * 这一步没做之前，这一格是**只发诊断、不改图**的（已 cmp 验证产物逐字节不变）。
+ * `OMNI_EXPAND_STAT=1` 现在每个候选都印为什么不换，量出来是这样：
+ *   - 印出来的"不换"**全是递归 radiance 那七个调用**，理由都是"不是逐格照抄" ——
+ *     这是对的：它们传的是**新造的** Ray（`%404`/`%485`/…），不是 `%0` 的拷贝；
+ *   - 可真正想改的那个候选（`CALL intersect` 的 `ARGMEM base=%0`）**既没成功也没被拒**，
+ *     说明它没进 `useOf`；而 `sroa.js` 在这一格前后都还在报 `放弃 %0（%16 ARGMEM 的 a）`。
+ *
+ * 下一步就查这一条：第 62 格跑的时候 radiance 的 `CALL intersect` 实参池里到底是什么。
+ * 两个已知的可疑点：
+ *   - 印出来的 pc（1041/1065）**大于最终 MIR 的 862 条**，说明这一格看到的是中间态；
+ *     `inline`（第 46 格）在前，中间态里那条调用的形状可能还没定下来；
+ *   - `useOf` 只认 `OP.CALL`。若那时它还是别的形态（或实参池的起点被别的格子挪过），
+ *     就会整条漏掉。
+ *
+ * 在查清之前这一格**只发诊断、不改图**（已 cmp 验证产物逐字节不变）。
  */
 
 import { OP, REF_BIAS, REF_NONE, memArgSize, memKindNo, memOff, MSTORE_BYTES, MSTORE_KINDS, MLOAD_KINDS } from '../ir.js';
@@ -71,42 +77,97 @@ function addrTakenFuncs(mod) {
 }
 
 /**
- * **被调函数会写它的第 p 个形参指着的那一块吗**（判据 4）。
+ * **跨函数的 mod 分析（不动点）**：`(函数, 形参) -> 它指着的那一块会被写吗`。
  *
- * 形参在 MIR 里是"槽里装着那一块的地址"，所以问的是：有没有一条 `MSTORE` 的地址是
- * 从 `LOAD 那个形参槽` 派生出来的。派生只认 `ADD(地址, 常量)`（`addrOf` 就是干这个的）。
+ * 为什么必须是不动点而不是一层：C 的按值形参是"可改的拷贝"，而一个函数常常把自己
+ * 形参的地址**再往下传**（radiance 把那份 `Ray` 既给 `intersect` 又给递归的自己）。
+ * 一层的判据只能保守地答"会写"，于是这一格一次都不触发（量过）。
  *
- * 保守的三处：地址被存进别处、被当实参传给别的调用、或者派生链上有变量偏移 —— 一律算"会写"。
+ * 标准做法，三步：
+ *   - **初值全假设"不写"**。这一条让递归自然收敛：radiance 调自己时读到的是"不写"，
+ *     只有真找到一条写才会翻过来，翻了再传播一轮。
+ *   - 每一轮对每个 `(g, p)` 重算一次：真写（`MSTORE` 走这个地址）、地址存进槽位/全局、
+ *     或者传给一个"会写"的位置 —— 三者之一成立就是"会写"。
+ *   - 翻过来的只会从"不写"变"会写"（单调），所以轮数有界、一定停。
+ *
+ * 保守的几处（一律算"会写"）：`extern`/`decl` 的被调、`CCALL`/`CALLI`（看不到是谁）、
+ * 取过地址的函数（可能被经指针调用）、派生链上有变量偏移（`addrOf` 跟不动）。
  */
-function paramWritten(g, mod, p) {
-  if (g === undefined || g.extern === true || g.decl === true) return true;
-  if (g.params === undefined || p >= g.params.length) return true;
-  const slot = g.params[p].slot;
-  /* 那个形参槽被 LOAD 出来的那些 ref（就是"这一块的地址"） */
-  const addrs = new Set();
-  for (let pc = 0; pc < g.op.length; pc++) {
-    if (g.op[pc] === OP.LOAD && g.aux[pc] === slot) addrs.add(REF_BIAS + pc);
-  }
-  if (addrs.size === 0) return false;             // 压根没读过这个形参 ⇒ 不会写
-  for (let pc = 0; pc < g.op.length; pc++) {
-    const o = g.op[pc];
-    if (o === OP.MSTORE) {
-      const a = addrOf(g, mod, g.a[pc]);
-      if (addrs.has(a.base)) return true;
-      continue;
+function paramModSet(mod, taken) {
+  const write = new Set();                      // `${fi}:${p}` 在里头 = 会写
+  const key = (fi, p) => `${fi}:${p}`;
+  /* 形参位置 -> 被调的形参下标：调用点第一格可能是 `ARGSRET`（返回值那一块不占位置）。 */
+  const calleeParamPos = (fn, callPc, k) => {
+    const at = fn.b[callPc];
+    let pos = k;
+    const r0 = fn.args[at + 1];
+    if (r0 !== REF_NONE && r0 >= REF_BIAS && fn.op[r0 - REF_BIAS] === OP.ARGSRET) pos -= 1;
+    return pos;
+  };
+  for (let round = 0; round < mod.funcs.length + 2; round++) {
+    let changed = false;
+    for (let fi = 0; fi < mod.funcs.length; fi++) {
+      const g = mod.funcs[fi];
+      if (g === undefined || g.op === undefined || g.op.length === 0) continue;
+      if (g.params === undefined) continue;
+      for (let p = 0; p < g.params.length; p++) {
+        if (write.has(key(fi, p))) continue;    // 已经是"会写"了，单调不回头
+        const slot = g.params[p].slot;
+        const addrs = new Set();
+        for (let pc = 0; pc < g.op.length; pc++) {
+          if (g.op[pc] === OP.LOAD && g.aux[pc] === slot) addrs.add(REF_BIAS + pc);
+        }
+        if (addrs.size === 0) continue;         // 压根没读过 ⇒ 不会写
+        let w = false;
+        for (let pc = 0; pc < g.op.length && !w; pc++) {
+          const o = g.op[pc];
+          if (o === OP.MSTORE) {
+            if (addrs.has(addrOf(g, mod, g.a[pc]).base)) w = true;
+            continue;
+          }
+          if (o === OP.MLOAD || o === OP.ADD || o === OP.LOAD) continue;
+          /* 地址被存进槽位或全局 ⇒ 别处能拿到它，说不清 */
+          if ((o === OP.STORE || o === OP.GSTORE) && addrs.has(g.a[pc])) { w = true; continue; }
+          if (o === OP.CALL || o === OP.CCALL || o === OP.CALLI) {
+            const at = g.b[pc];
+            const n = g.args[at];
+            for (let k = 0; k < n && !w; k++) {
+              const r = g.args[at + 1 + k];
+              if (r === REF_NONE || r < REF_BIAS) continue;
+              const rp = r - REF_BIAS;
+              const inner = (g.op[rp] === OP.ARGMEM || g.op[rp] === OP.ARGSRET) ? g.a[rp] : r;
+              if (!addrs.has(inner)) continue;
+              if (o !== OP.CALL) { w = true; break; }          // 看不到被调是谁
+              const hi = g.a[pc];
+              if (taken.has(hi) || mod.funcs[hi] === undefined) { w = true; break; }
+              const h = mod.funcs[hi];
+              if (h.extern === true || h.decl === true) { w = true; break; }
+              if (write.has(key(hi, calleeParamPos(g, pc, k)))) w = true;
+            }
+            continue;
+          }
+          /* 别的 op 碰到这个地址（当返回值、进别的什么池…）⇒ 说不清 */
+          if (addrs.has(g.a[pc]) || addrs.has(g.b[pc])) w = true;
+        }
+        if (w) { write.add(key(fi, p)); changed = true; }
+      }
     }
-    /* 地址流去了别处（存进内存、进实参池、当返回值…）⇒ 说不清，算"会写" */
-    if (o === OP.MLOAD) continue;                 // 读不算
-    if (o === OP.ADD) continue;                   // 算地址，`addrOf` 会跟
-    if (o === OP.LOAD || o === OP.STORE) continue; // 槽位另一套空间
-    for (const r of [g.a[pc], g.b[pc]]) if (addrs.has(r)) return true;
-    if (o === OP.CALL || o === OP.CCALL || o === OP.CALLI) {
-      const at = g.b[pc];
-      const n = g.args[at];
-      for (let k = 0; k < n; k++) if (addrs.has(g.args[at + 1 + k])) return true;
-    }
+    if (!changed) break;
   }
-  return false;
+  return write;
+}
+
+/** `paramModSet` 的结果按模块缓存 —— 这一格每个函数都会被调一次，而它是模块级的分析。
+ *  缓存键带上"全模块指令总数"：任何一次改图都会让它变，于是不会读到过期的结果。 */
+const MOD_CACHE = new WeakMap();
+function paramWrittenSet(mod, taken) {
+  let total = 0;
+  for (const f of mod.funcs) total += (f.op === undefined ? 0 : f.op.length);
+  const hit = MOD_CACHE.get(mod);
+  if (hit !== undefined && hit.total === total) return hit.write;
+  const write = paramModSet(mod, taken);
+  MOD_CACHE.set(mod, { total, write });
+  return write;
 }
 
 /** `MSTORE` 的宽度符号与 `MLOAD` 的是"同一个格子的全宽读写"吗（与 `sroa.js` 的 `kindPairOk` 同四对）。 */
@@ -122,6 +183,13 @@ function pairOk(loadKind, storeKind) {
 export function expandCalls(fn, mod) {
   if (!fn || fn.op.length === 0 || mod === undefined) return 0;
   const taken = addrTakenFuncs(mod);
+  const written = paramWrittenSet(mod, taken);
+  const writes = (fi, p) => {
+    const g = mod.funcs[fi];
+    if (g === undefined || g.extern === true || g.decl === true) return true;
+    if (g.params === undefined || p < 0 || p >= g.params.length) return true;
+    return written.has(`${fi}:${p}`);
+  };
   /* 一、这个函数里每条 `ARGMEM` 被哪个调用的第几格用着 */
   const useOf = new Map();          // ARGMEM 的 pc -> {callPc, pos}
   for (let pc = 0; pc < fn.op.length; pc++) {
@@ -139,10 +207,15 @@ export function expandCalls(fn, mod) {
   if (useOf.size === 0) return 0;
 
   let changed = 0;
+  const stat = process.env.OMNI_EXPAND_STAT === '1';
+  const no = (amPc, why) => {
+    if (stat) process.stderr.write(`[expand] ${fn.name}: %${amPc} 不换（${why}）\n`);
+    return false;
+  };
   for (const [amPc, u] of useOf) {
     const blk = fn.a[amPc];                       // 那一块的地址（`FRAME` 或派生）
     const size = memArgSize(fn.aux[amPc]);
-    if (!(size > 0) || size % 8 !== 0) continue;
+    if (!(size > 0) || size % 8 !== 0) { no(amPc, `字节数 ${size} 不是 8 的倍数`); continue; }
     /* 判据 4 先查（最便宜的否定）：被调会写这一块就别动。
        `pos` 要减掉前面那一格 `ARGSRET`（返回值那一块不占形参的位置）。 */
     const g = mod.funcs[fn.a[u.callPc]];
@@ -156,9 +229,9 @@ export function expandCalls(fn, mod) {
         pos -= 1;
       }
     }
-    if (pos < 0) continue;
-    if (g === undefined || taken.has(fn.a[u.callPc])) continue;
-    if (paramWritten(g, mod, pos)) continue;
+    if (pos < 0) { no(amPc, '形参位置算不出来'); continue; }
+    if (g === undefined || taken.has(fn.a[u.callPc])) { no(amPc, '被调看不见或取过地址'); continue; }
+    if (writes(fn.a[u.callPc], pos)) { no(amPc, `被调 ${g.name} 会写第 ${pos} 个形参`); continue; }
 
     /* 判据 1：`blk` 的每个格子都由「照抄 src 同一偏移」写成，而且盖满 size 个字节。 */
     const cover = new Uint8Array(size);
@@ -187,10 +260,10 @@ export function expandCalls(fn, mod) {
       for (let q = 0; q < w; q++) cover[off + q] = 1;
       if (pc > lastStore) lastStore = pc;
     }
-    if (bad || src === REF_NONE || lastStore < 0) continue;
+    if (bad || src === REF_NONE || lastStore < 0) { no(amPc, '不是逐格照抄'); continue; }
     let full = true;
     for (let q = 0; q < size; q++) if (cover[q] === 0) { full = false; break; }
-    if (!full) continue;
+    if (!full) { no(amPc, '拷贝没盖满'); continue; }
     /* 判据 2：拷贝做完之后，`blk` 与 `src` 指着的那两块**都不许再被写**。
      *
      * 判的不是"中间有没有写内存的指令"（那条太紧：这条 `ARGMEM` 可能在一千条之后、
@@ -225,7 +298,8 @@ export function expandCalls(fn, mod) {
           if (fn.op[rp] === OP.ARGSRET) continue;     // 返回值那一块不占形参的位置
           const inner = fn.op[rp] === OP.ARGMEM ? fn.a[rp] : r;
           if (inner === blk || inner === src) {
-            if (cg === undefined || taken.has(fn.a[pc]) || paramWritten(cg, mod, cpos)) bad = true;
+            if (o !== OP.CALL || cg === undefined || taken.has(fn.a[pc])
+                || writes(fn.a[pc], cpos)) bad = true;
           }
           cpos++;
         }
