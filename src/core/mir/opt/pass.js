@@ -174,9 +174,10 @@ export function runPasses(fn, mod, opts) {
       continue;
     }
     const before = fn.op.length;
+    const t0 = log === null ? 0 : performance.now();
     p.fn(fn, mod);
     const after = fn.op.length;
-    if (log !== null) log.push({ name: p.name, todo: false, before, after });
+    if (log !== null) log.push({ name: p.name, todo: false, before, after, ms: performance.now() - t0 });
     if (dump === '*' || dump === p.name) {
       // 打印交给调用方（这一层不 import print.js，免得循环依赖）
       if (o.onDump) o.onDump(p.name, fn, mod);

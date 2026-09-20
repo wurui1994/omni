@@ -375,9 +375,15 @@ function forwardLoads(fn, mod) {
       if (v < 0) continue;
       /* 换成那条 store 的值。MLOAD 本身留着（没人引用了，紧跟的 deadcode 会删）。
          值的可见性不用另外问：那条 store 与这条 load 在同一个块里，而块整个落在
-         同一层区域里，所以 store 的值在这儿一定看得见。 */
-      replaceRef(fn, REF_BIAS + pc, v);
-      n++;
+         同一层区域里，所以 store 的值在这儿一定看得见。
+
+         **只数真换掉的那几处**（`replaceRef` 回的就是这个数）。从前是无条件 `n++`：
+         MLOAD 留在数组里，下一轮 `lookBackStore` 又找到同一条 store、又"转发"一次 ——
+         这一次一处都没换，可 `n` 还是加一，于是 `opt` 里那个不动点循环**永远数不到 0**，
+         每次都把 `fn.op.length + 1` 轮跑满。量出来的：sp.c 上 66 次 `opt` 共跑了
+         **7345 轮**、3251ms（整条管线 3412ms 的 95%），而逐条重写那一半只要 6ms。 */
+      const k = replaceRef(fn, REF_BIAS + pc, v);
+      if (k > 0) n++;
     }
   }
   return n;
@@ -402,6 +408,13 @@ function lookBackStore(fn, mod, from, pcLoad) {
   return -1;
 }
 
+/* `OMNI_OPT_STAT=1` 的账本：这一格的时间花在"逐条重写"还是"存储转发"上。 */
+export const OPT_STAT = {
+  calls: 0, insns: 0,
+  rewriteMs: 0, rewriteRounds: 0,
+  fwdMs: 0, fwdRounds: 0, loadsMs: 0, copyMs: 0,
+};
+
 /**
  * 跑 opt。回改了几条指令。
  *
@@ -410,9 +423,13 @@ function lookBackStore(fn, mod, from, pcLoad) {
  */
 export function opt(fn, mod) {
   if (!fn || fn.op.length === 0) return 0;
+  const stat = process.env.OMNI_OPT_STAT === '1' ? OPT_STAT : null;
   const done = new Set();
   let total = 0;
+  let t0 = stat === null ? 0 : performance.now();
+  let rounds = 0;
   for (let round = 0; round < fn.op.length + 1; round++) {
+    rounds++;
     let changed = 0;
     for (let pc = 0; pc < fn.op.length; pc++) {
       if (done.has(pc)) continue;
@@ -429,16 +446,30 @@ export function opt(fn, mod) {
     if (changed === 0) break;
     total += changed;
   }
+  if (stat !== null) { stat.rewriteMs += performance.now() - t0; stat.rewriteRounds += rounds; }
   /* 存储转发放在逐条重写**之后**：转发出来的值还要再被折一遍常量
      （`MSTORE p k1; MLOAD p` -> k1，然后 `ADD k1 k2` 才折得掉），所以再跑一轮重写。
      **转发自己也要迭代到不动点**（Go 的 `applyRewrite` 就是整套规则一起迭代）：
      一条拷贝链是一档一档往上转的，`A<-B<-C` 要走两轮才到头。
      量出来的：`sph_intersect` 上第一轮改 13 处、第二轮还能改 8 处。 */
   let fwd = 0;
+  t0 = stat === null ? 0 : performance.now();
+  let fr = 0, fl = 0, fc = 0;
   for (let round = 0; round < fn.op.length + 1; round++) {
-    const k = forwardLoads(fn, mod) + forwardCopiedLoads(fn, mod);
+    fr++;
+    let ta = stat === null ? 0 : performance.now();
+    const k1 = forwardLoads(fn, mod);
+    if (stat !== null) { fl += performance.now() - ta; ta = performance.now(); }
+    const k2 = forwardCopiedLoads(fn, mod);
+    if (stat !== null) fc += performance.now() - ta;
+    const k = k1 + k2;
     if (k === 0) break;
     fwd += k;
+  }
+  if (stat !== null) {
+    stat.fwdMs += performance.now() - t0; stat.fwdRounds += fr;
+    stat.loadsMs += fl; stat.copyMs += fc; stat.calls++;
+    stat.insns += fn.op.length;
   }
   if (fwd > 0) {
     total += fwd;
