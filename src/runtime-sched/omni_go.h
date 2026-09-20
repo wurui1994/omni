@@ -27,6 +27,11 @@ void omni_go_spawn(void *fnv, int64_t arg);
    `fp(self, arg)` 去调一格 `fp(self)` 的函数是**对不上的函数指针类型**，多出来那格
    实参在哪个寄存器/栈位上是平台的事，不是我们说得准的。 */
 void omni_go_spawn0(void *fnv);
+/* `go f(a, b)` / `go f(a, b, c)`：**每个实参个数一格入口**，不拿变参凑 ——
+   蹦床那一侧要按真签名的函数指针类型去调，个数说不准就是读错寄存器。
+   实参一律 int64（通道/切片/指针在方言里都是一个字；`real` 那一档还没接）。 */
+void omni_go_spawn2(void *fnv, int64_t a, int64_t b);
+void omni_go_spawn3(void *fnv, int64_t a, int64_t b, int64_t c);
 
 /* `make(chan T, n)` —— 元素一律 8 字节（方言只有一格整数）。回的是 hchan 的地址。 */
 void *omni_go_chan_new(int64_t cap);

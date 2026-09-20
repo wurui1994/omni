@@ -17,6 +17,8 @@ typedef struct { void (*fp)(void); } omni_goclos;
 
 typedef void (*omni_go_fn0)(void *);
 typedef void (*omni_go_fn1)(void *, int64_t);
+typedef void (*omni_go_fn2)(void *, int64_t, int64_t);
+typedef void (*omni_go_fn3)(void *, int64_t, int64_t, int64_t);
 
 static void die(const char *what) {
   fprintf(stderr, "omni_go: %s\n", what);
@@ -42,7 +44,6 @@ void omni_go_run(void *fnv) {
 /* 一格 goroutine 的实参包。`omni_newproc` 只递一格 `void *`，所以函数值与实参
    要装在一起 —— 蹦床跑完就还（Go 那边是把实参抄到新 g 的栈上，同一件事）。 */
 typedef struct { void *fnv; int64_t arg; } omni_gopack;
-
 static void runSpawned(void *p) {
   omni_gopack pack = *(omni_gopack *)p;   /* 先抄出来再还，体里不再碰这块堆 */
   free(p);
@@ -68,6 +69,42 @@ static void runSpawned0(void *fnv) {
 void omni_go_spawn0(void *fnv) {
   if (fnv == NULL) die("go 的那一格函数值是空的");
   omni_newproc(runSpawned0, fnv);
+}
+
+/* 两格与三格实参：包与蹦床各一份。**不拿变参凑** —— 蹦床要按真签名的函数指针类型去调，
+   个数说不准就是读错寄存器（见 `omni_go.h` 上 `spawn0` 那段同一条理由）。 */
+typedef struct { void *fnv; int64_t a, b, c; } omni_gopack3;
+
+static void runSpawned2(void *p) {
+  omni_gopack3 pk = *(omni_gopack3 *)p;
+  free(p);
+  ((omni_go_fn2)((omni_goclos *)pk.fnv)->fp)(pk.fnv, pk.a, pk.b);
+}
+
+static void runSpawned3(void *p) {
+  omni_gopack3 pk = *(omni_gopack3 *)p;
+  free(p);
+  ((omni_go_fn3)((omni_goclos *)pk.fnv)->fp)(pk.fnv, pk.a, pk.b, pk.c);
+}
+
+static omni_gopack3 *pack3(void *fnv, int64_t a, int64_t b, int64_t c) {
+  omni_gopack3 *p;
+  if (fnv == NULL) die("go 的那一格函数值是空的");
+  p = (omni_gopack3 *)malloc(sizeof(omni_gopack3));
+  if (p == NULL) die("实参包分不出来");
+  p->fnv = fnv;
+  p->a = a;
+  p->b = b;
+  p->c = c;
+  return p;
+}
+
+void omni_go_spawn2(void *fnv, int64_t a, int64_t b) {
+  omni_newproc(runSpawned2, pack3(fnv, a, b, 0));
+}
+
+void omni_go_spawn3(void *fnv, int64_t a, int64_t b, int64_t c) {
+  omni_newproc(runSpawned3, pack3(fnv, a, b, c));
 }
 
 /* ---- channel ---- */

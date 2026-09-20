@@ -89,6 +89,42 @@ function specMapNames(x) {
 
 
 /**
+ * **装着通道的那些名字**（与 `MAPS` 同一条路数：扫查得的上下文）。
+ *
+ * 两处要它，都是"树上同形、差别在那个名字装的是什么"：
+ *   * `len(ch)` —— 通道上它是 `omni_go_chan_len`，切片上才是 `prim len`；
+ *   * `for v := range ch` —— 通道上是"收到关为止"，切片上是按下标走。后者还没接，
+ *     所以这一格是为了**报得出那句话**（从前两种一律当切片，通道那种给的是错答案）。
+ *
+ * 收三处：`var ch chan T`（类型写着）、`ch := make(chan T, n)`（右边是 make chan）、
+ * 形参 `func f(ch chan T)`。字段与从函数回来的那些不收 —— 那时落回"当切片"，
+ * 与 `MAPS` 的口径一样（没登记的就当序列）。
+ */
+const CHANS = new Set();
+/** 这格类型是不是通道（三种方向都算）。 */
+const isChanTy = (ty) => ty !== undefined && ty !== null && isList(ty)
+  && (tag(ty) === 'chan' || tag(ty) === 'chan-send' || tag(ty) === 'chan-recv');
+/** 一格 `spec` 里**装通道的名字**（照 `specMapNames` 的样子写）。 */
+function specChanNames(x) {
+  const nm = part(x, 'names');
+  if (nm === undefined) return [];
+  const names = kids(nm).map(leaf);
+  const ty = kids(x).find((y) => tag(y) !== 'names' && tag(y) !== 'init');
+  if (isChanTy(ty)) return names;
+  const ini = part(x, 'init');
+  if (ini === undefined) return [];
+  const rhs = kids(ini);
+  return names.filter((n, i) => isMakeChan(rhs[i]));
+}
+/** 这格右值是不是 `make(chan T, …)`。 */
+function isMakeChan(r) {
+  if (r === undefined || r === null || !isList(r) || tag(r) !== 'call') return false;
+  const [f, as] = kids(r);
+  if (f === undefined || tag(f) !== 'name' || leaf(kids(f)[0]) !== 'make') return false;
+  return as !== undefined && isChanTy(kids(as)[0]);
+}
+
+/**
  * **方法名 -> 它声明的接收者类型名**，以及**登记过的类型名**。
  *
  * 两张表都是一趟扫查得的（见 goToGraph），存在的理由是同一句话：
@@ -377,6 +413,22 @@ function collectDecls(x, shapesOnly) {
     }
   }
   if (tag(x) === 'spec') for (const n of specMapNames(x)) MAPS.add(n);
+  /* 见 `CHANS` 那段账：装通道的名字要认得出来（`len(ch)` 与 `range ch` 两处要）。
+     三处来源：`var ch chan T` / `ch := make(chan T, n)` / 形参 `func f(ch chan T)`。 */
+  if (tag(x) === 'spec') for (const n of specChanNames(x)) CHANS.add(n);
+  if (tag(x) === 'define' || tag(x) === 'assign') {
+    const lhs0 = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
+    const rhs0 = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
+    for (let i = 0; i < lhs0.length; i++) {
+      if (tag(lhs0[i]) === 'name' && isMakeChan(rhs0[i])) CHANS.add(leaf(kids(lhs0[i])[0]));
+    }
+  }
+  if (tag(x) === 'fn' || tag(x) === 'method') {
+    const sigC = kids(x).find((y) => tag(y) === 'sig');
+    if (sigC !== undefined) {
+      for (const p of paramInfo(sigC)) if (isChanTy(p.ty)) CHANS.add(p.nm);
+    }
+  }
   /* **声明的形参类型**（`FSIG`）：调用点要照它转实参（见 `argsByDecl`）。
      在这一趟收是因为 go 不管声明顺序 —— `main` 里的 `mk(3, 4)` 在 `mk` 之前就落下去了。
      存的是**类型节点**而不是名字：`scalarNameOf` 要跟着 `UNDER` 走一层，而 `UNDER`
@@ -1272,14 +1324,20 @@ function forRangeOf(x) {
   }
   const head = [];
   /* **`for v := range ch`**（通道）与 **`for i := range s`**（切片）在树上同形。
-     区别：切片的 1 名字是下标，通道的 1 名字是值。没有类型信息分不开。
-     解法：把 subject 包一层 `__goChanDrain`——对数组是 no-op，对通道是取出缓冲。
-     同时把 1-name 的语义改成"绑值不绑下标"：`v = seq[i]` 而不是 `v = i`。
-     这对切片的 `for i := range s`（只取下标）不精确，但对通道和常见的 `for _, v := range` 正确。 */
-  const drainedSubj = node('call', {
-    fn: node('ref', {}, { name: '__goChanDrain' }),
-    args: [toNode(subj)],
-  });
+     区别：切片的 1 名字是下标，通道的 1 名字是值。
+     从前这儿把主语包一层 `__goChanDrain`（"对数组是 no-op、对通道取出缓冲"）——
+     **那个函数从来就没有过**（整个仓库里只有这两行提到它），所以那是一次调用不存在的
+     名字；真通道那一路给的还是错答案。现在按 `CHANS` 分开：
+       * 登记成通道的 —— 一句**有名有姓的墙**（`range` 一格通道要"收到关为止"，
+         那是 `crecv` 循环 + 关掉才退出，还没接）；
+       * 别的 —— 照旧当序列（`MAPS` 那条既有约定：没登记的就当序列），主语不再包壳。
+     1-name 的语义仍旧是"绑值不绑下标"：那对 `for i := range s`（只取下标）不精确，
+     但对常见的 `for _, v := range` 正确。 */
+  if (tag(subj) === 'name' && CHANS.has(leaf(kids(subj)[0]))) {
+    throw new Error('go->graph: `range` 一格通道还没接 —— 那是"收到关为止"'
+      + '（`crecv` 循环 + 关掉才退出），与按下标走的序列不是一回事');
+  }
+  const drainedSubj = toNode(subj);
   if (names.length === 1 && names[0] !== '_') {
     head.push(mk(names[0], indexGet(at(seq), at(idx))));
   } else {
@@ -2012,6 +2070,12 @@ function toNode(x) {
       // V 的 `.len` **同一格节点**（写法归语言）。原来它落成"调一个叫 len 的函数"，
       // 而那个函数不存在 —— 跑起来才报，不如在这儿就对。
       if (callee === 'len' && argNodes.length === 1) {
+        /* **通道上的 `len` 是另一回事**（`CHANS` 那段账）：它问的是"环里现在有几个"，
+           落 `omni_go_chan_len`。没登记成通道的照旧 `prim len`。 */
+        const a0 = args === undefined ? undefined : kids(args)[0];
+        if (a0 !== undefined && tag(a0) === 'name' && CHANS.has(leaf(kids(a0)[0]))) {
+          return node('call', { fn: node('ref', {}, { name: '__goChanLen' }), args: argNodes });
+        }
         return node('prim', { args: argNodes }, { name: 'len' });
       }
       /* **`new(T)` 是 go 的内建**：分配一格 T 的零值并返回指向它的指针。
@@ -2027,6 +2091,12 @@ function toNode(x) {
           fn: node('ref', {}, { name: '__goAppend' }),
           args: [argNodes[0], argNodes[1]],
         });
+      }
+      /* **`close(ch)` -> `call __goChanClose`**（`go.mapping` 第 125 行说的那一格）。
+         从前 tograph 里没有这一支 —— 于是它落成"调一个叫 close 的函数"，而那个函数
+         不存在：方言那侧报「未声明的函数 'close'」，跑起来才知道。 */
+      if (callee === 'close' && argNodes.length === 1) {
+        return node('call', { fn: node('ref', {}, { name: '__goChanClose' }), args: argNodes });
       }
       /* **`cap(x)` -> `len(x)`**：图上没有 capacity 的概念，降成 len 近似。 */
       if (callee === 'cap' && argNodes.length === 1) {
@@ -2145,13 +2215,14 @@ function toNode(x) {
       }
       const gname = isLit ? null : leaf(kids(gfn)[0]);
       const raw = gargs === undefined ? [] : kids(gargs).filter((y) => tag(y) !== 'spread');
-      if (raw.length > 1) {
+      if (raw.length > 3) {
         throw new Error(`go->graph: \`go ${gname ?? 'func(…)'}(…)\` 有 ${raw.length} 格实参 —— `
-          + '这一刀的门面只收 0 格或 1 格（实参要在 C 那侧打包，见 omni_go.h）');
+          + '这一刀的门面只到 3 格（实参要在 C 那侧打包，见 omni_go.h）');
       }
       const gargNodes = gname === null ? many(raw) : argsByDecl(gname, many(raw), false);
+      const SPAWN = ['__goSpawn0', '__goSpawn', '__goSpawn2', '__goSpawn3'];
       return node('call', {
-        fn: node('ref', {}, { name: raw.length === 0 ? '__goSpawn0' : '__goSpawn' }),
+        fn: node('ref', {}, { name: SPAWN[raw.length] }),
         args: [isLit ? toNode(gfn) : node('ref', {}, { name: gname }), ...gargNodes],
       });
     }
@@ -2215,6 +2286,7 @@ export function goToGraph(tree, opts) {
   // **先扫一遍哪些名字装 map**：`m := map[K]V{…}` 在树上自带标记，所以这一趟就够了
   // —— `m[k]` 与 `xs[i]` 同形那笔账，在 go 上不需要驱动器回问类型。
   MAPS.clear();
+  CHANS.clear();
   for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
   // 再扫一遍**声明过的方法名与类型名**：go 的接收者写在声明里，所以这一趟就够了 ——
   // 方法在图上是"多一格实参的普通函数"，不需要运行期查表（见 METHODS 那段）。

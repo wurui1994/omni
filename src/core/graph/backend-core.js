@@ -642,6 +642,8 @@ const C_RT = new Map([
   ['__goRun', { sym: 'omni_go_run', ret: 'void', dty: 'void', ps: ['fn'] }],
   ['__goSpawn', { sym: 'omni_go_spawn', ret: 'void', dty: 'void', ps: ['fn', 'i64'] }],
   ['__goSpawn0', { sym: 'omni_go_spawn0', ret: 'void', dty: 'void', ps: ['fn'] }],
+  ['__goSpawn2', { sym: 'omni_go_spawn2', ret: 'void', dty: 'void', ps: ['fn', 'i64', 'i64'] }],
+  ['__goSpawn3', { sym: 'omni_go_spawn3', ret: 'void', dty: 'void', ps: ['fn', 'i64', 'i64', 'i64'] }],
   ['__goChanMake', { sym: 'omni_go_chan_new', ret: 'ptr', dty: 'int', ps: ['i64'] }],
   ['__goChanSend', { sym: 'omni_go_chan_send', ret: 'void', dty: 'void', ps: ['ptr', 'i64'] }],
   ['__goChanRecv', { sym: 'omni_go_chan_recv', ret: 'i64', dty: 'int', ps: ['ptr'] }],

@@ -70,60 +70,42 @@ function __goDelete(m, k) {
 }
 
 // ============================================================
-// Go channel（简单同步队列）
+// Go channel / goroutine
+//
+// **这几格在非原生腿上是一句有名有姓的墙，不是一份近似**（2026-09-20 改）。
+//
+// 从前这儿是一个"同步队列"：send 往数组里推、recv 空了就回 null、__goSpawn 当场
+// 同步调用那个函数。那不是 goroutine —— 一个 "for i { go w(i) }" 再 "for i { <-ch }"
+// 的程序在它上头**跑得通而且给错答案**（收到的全是 null），而在 go 上那是真并发。
+// 静默的错答案是最坏的一种，所以现在一律当场报。
+//
+// 真货在原生那三条腿上：图落 "call __goChanSend(…)" -> backend-core 的 C_RT 认出
+// 名字 -> "(ccall omni_go_chan_send …)" -> libomnigo（照 go 的 proc.go/chan.go 写的
+// G/M/P 调度器）。js / 解释器这两条腿要接得先有协程（CPS 或 generator），那是另一刀。
+// 口径与 tests/cabi 那一条轴一样：**非原生腿明着拒**，而不是给一份看起来能跑的近似。
+//
+// 注：这一份是 String.raw 模板（见文件头），所以注里**不能有反引号、也不能有 $ 加花括号**
+// —— 前者提前收了模板、后者会在装载这个模块时就求值。这一格踩过三次了。
 // ============================================================
-class __GoChan {
-  constructor(cap) { this.buf = []; this.cap = cap || 0; this.closed = false; }
-  send(v) { if (this.closed) throw new Error('send on closed channel'); this.buf.push(v); }
-  recv() { return this.buf.length > 0 ? { value: this.buf.shift(), ok: true } : { value: null, ok: !this.closed }; }
-  close() { this.closed = true; }
-  get length() { return this.buf.length; }
+function __goNoConc(what) {
+  throw new Error(what + ' is only available in a native build'
+    + '（channel 与 goroutine 在 js / 解释器这两条腿上还没有协程可用）');
 }
-
-function __goChanMake(cap) { return new __GoChan(cap || 0); }
-function __goChanSend(ch, v) { if (ch instanceof __GoChan) ch.send(v); return null; }
-function __goChanRecv(ch) {
-  if (ch instanceof __GoChan) { const r = ch.recv(); return r.value; }
-  return null;
-}
-function __goChanRecv2(ch) {
-  if (ch instanceof __GoChan) { const r = ch.recv(); return { __vals: [r.value, r.ok] }; }
-  return { __vals: [null, false] };
-}
-function __goChanClose(ch) { if (ch instanceof __GoChan) ch.close(); return null; }
-
-// range over channel：收集所有已缓冲的值
-function __goChanRange(ch) {
-  if (!(ch instanceof __GoChan)) return [];
-  const result = [];
-  while (ch.buf.length > 0) result.push(ch.buf.shift());
-  return result;
-}
-
-// ============================================================
-// Go goroutine（phase 1: 同步调用）
-// ============================================================
-function __goSpawn(fn) { if (typeof fn === 'function') fn(); return null; }
+function __goChanMake() { return __goNoConc('make(chan T)'); }
+function __goChanSend() { return __goNoConc('ch <- v'); }
+function __goChanRecv() { return __goNoConc('<-ch'); }
+function __goChanRecv2() { return __goNoConc('v, ok := <-ch'); }
+function __goChanClose() { return __goNoConc('close(ch)'); }
+function __goChanLen() { return __goNoConc('len(ch)'); }
+function __goSpawn() { return __goNoConc('go f(x)'); }
+function __goSpawn0() { return __goNoConc('go f()'); }
+function __goRun() { return __goNoConc('并发那一档的主 goroutine'); }
 
 // ============================================================
-// Go select（phase 1: 取第一个非空 case）
+// Go select —— 与上面那几格同一条：非原生腿明着拒。
+// 原生腿上它还没接（omni_selectgo 在 omni_chan.c 里，前端那一侧的门面还没发）。
 // ============================================================
-function __goSelect(cases) {
-  // cases = [[ch, 'recv'], [ch, 'send', val], ['default']]
-  for (const c of cases) {
-    if (c[0] === 'default') return { idx: cases.indexOf(c), value: null };
-    const ch = c[0];
-    if (c[1] === 'recv' && ch instanceof __GoChan && ch.buf.length > 0) {
-      return { idx: cases.indexOf(c), value: ch.recv().value };
-    }
-    if (c[1] === 'send' && ch instanceof __GoChan && (ch.cap === 0 || ch.buf.length < ch.cap)) {
-      ch.send(c[2]);
-      return { idx: cases.indexOf(c), value: null };
-    }
-  }
-  // 没有 default 且全部阻塞 → 死锁（简化处理：返回 -1）
-  return { idx: -1, value: null };
-}
+function __goSelect() { return __goNoConc('select'); }
 
 // ============================================================
 // Go type switch + type checking
