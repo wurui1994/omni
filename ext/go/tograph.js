@@ -546,6 +546,16 @@ function isTypeArg(x) {
 /** 复数那两格的零值是 `0`（go 里 complex 的零值是 `0+0i`，图上只落实部 —— 虚部是 0）。 */
 const COMPLEX_TYPES = new Set(['complex64', 'complex128']);
 
+/** 一格**具名 struct 的零值记录**。三处共用（`zeroOf` 的 STRUCTS 那支、形参/接收者的
+ *  声明类型、`T{}` 字面量）—— 字段名单必须**逐字相同**，不然 core 那侧会当成两个形状
+ *  （量出来：`(ptr r3)` 与 `(ptr r4)`，报"两处的类型不一样"）。
+ *  带 `__type` 是刻意的：go 里 `var x T` 的零值确实是那个类型，方法分派认得它。 */
+function structZero(n) {
+  const fs = STRUCTS.get(n);
+  if (fs === undefined || fs === null) return null;
+  return recordNew([['__type', lit(n)], ...fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)])]);
+}
+
 /** 一格形参的**零值节点**（有类型覆盖层用）。说不清就回 null —— 不中断。 */
 function zeroOfParam(ty) {
   if (ty === undefined) return null;
@@ -555,9 +565,8 @@ function zeroOfParam(ty) {
 /** 一格**具名类型**的零值节点（方法的接收者走这条 —— 指针接收者剥过一层之后就是个名字）。 */
 function zeroOfNamed(n) {
   if (typeof n !== 'string' || n.length === 0) return null;
-  const fs = STRUCTS.get(n);
-  if (fs !== undefined && fs !== null) {
-    try { return recordNew(fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)])); } catch { return null; }
+  if (STRUCTS.get(n) !== undefined && STRUCTS.get(n) !== null) {
+    try { return structZero(n); } catch { return null; }
   }
   if (UNDER.has(n)) { try { return zeroOf(UNDER.get(n), n); } catch { return null; } }
   return null;
@@ -625,7 +634,10 @@ function zeroOf(ty, name, pkg) {
            运行期如果真访问被嵌的字段会得到 undefined（而不是编译期中断）。 */
         return mapNew();
       }
-      return recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${n}.${fn}`)]));
+      /* **零值也带 `__type`**： 那条路（`lit` 里 `withType`）是带的，这儿不带就成了
+         两个不同的形状（量出来：`(ptr r2)` 与 `(ptr r3)`，core 当场报两处类型不一样）。
+         带上也更对：go 里 `var x T` 的零值确实是那个类型，方法分派认得它。 */
+      return structZero(n);
     }
     // 别的具名类型：零值就是**底子的零值**（`type Level int` / `type Name = string`）。
     if (UNDER.has(n)) return zeroOf(UNDER.get(n), `${name}:${n}`);
@@ -1278,6 +1290,17 @@ function toNode(x) {
       const withType = (pairs) => (tyName !== null && STRUCTS.has(tyName)
         ? recordNew([['__type', lit(tyName)], ...pairs])
         : recordNew(pairs));
+      /* **`T{}`（一格元素都不给）**：go 的语义是"那个类型的零值"。从前这一格落到下面
+         "切片字面量"那一支去了，出来是一格 `list-new([])` —— core 那侧当场报
+         "一格空列表（元素类型推不出来）—— 绑给 'tr'"（量出来的，`Triangle{}` 那一行）。
+         字段表就在 `STRUCTS` 里，照 `zeroOf` 的同一份逻辑铺出零值记录。 */
+      if (elems.length === 0 && tyName !== null && STRUCTS.has(tyName)) {
+        const fs = STRUCTS.get(tyName);
+        if (fs !== null && fs !== undefined) {
+          try { const z = structZero(tyName); if (z !== null) return z; }
+          catch { /* 说不清就照旧往下走 */ }
+        }
+      }
       if (elems.length > 0 && elems.every((e) => tag(e) === 'kv')) {
         return withType(elems.map((e) => {
           const [k, v] = kids(e);
@@ -1804,7 +1827,7 @@ function toNode(x) {
           if (fs !== undefined && fs !== null) {
             /* zeroOf 对说不清的类型会当场报（那是它的纪律）—— 这一格报了就退回 null，
                因为"类型名有个绑定"是刚需，"它有类型"是加分。 */
-            try { init = recordNew(fs.map(([fn, ft]) => [fn, zeroOf(ft, `${n}.${fn}`)])); }
+            try { init = structZero(n); if (init === null) init = lit(null); }
             catch { init = lit(null); }
           } else if (UNDER.has(n)) {
             /* `type Axis int` / `type Channel int` 这一族：零值就是**底子的零值**

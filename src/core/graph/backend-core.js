@@ -708,7 +708,8 @@ function fnTypeOf(a, env, ctx) {
   if (rt === undefined) return null;
   const f = (ctx.fnParams ?? new Map()).get(nm);
   if (f === undefined) return null;
-  const pts = f.map((_, i) => ctx.args.get(`${nm}#${i}`) ?? 'int');
+  /* 形参类型走与 `emitFn` **同一份**（`resolveParamTypes`）—— 见那儿的注释。 */
+  const pts = resolveParamTypes(nm, f, (ctx.fnPzero ?? new Map()).get(nm), env, ctx);
   return `(fnty (${pts.join(' ')}) ${rt === 'void' ? 'void' : rt})`;
 }
 
@@ -1446,7 +1447,7 @@ function bindFill(nm, pr, env, ctx) {
  * 元素类型从第一格元素推，剩下的必须一致（不一致当场报 —— 方言的数组是单态的）。
  */function bindList(nm, lst, env, ctx) {
   const items = argList(lst, 'items');
-  if (items.length === 0) gap('一格空列表（元素类型推不出来）');
+  if (items.length === 0) gap(`一格空列表（元素类型推不出来）—— 绑给 '${nm}'`);
   const ts = items.map((it) => typeOf(it, env, ctx));
   const et = ts[0];
   if (et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
@@ -1622,7 +1623,7 @@ export function emitCore(g) {
   const ctx = {
     byKey: new Map(), shapes: new Map(), decls: [], tmp: 0,
     defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [], collect: false,
-    globals: new Set(), fnEnv: null, fnParams: new Map(), dynSites: new Map(), rets: new Map(),
+    globals: new Set(), fnEnv: null, fnParams: new Map(), fnPzero: new Map(), dynSites: new Map(), rets: new Map(),
     declared: new Map(),
   };
   /* 覆盖层（`types.js`）要问的那两件**后端自己的事**（见文件头那段 import 的注）：
@@ -1675,6 +1676,7 @@ export function emitCore(g) {
   const valueUsed = valueCalled([...fns.map((f) => f.body), rest]);
   /* 函数名 -> 形参名单（`fnTypeOf` 拿它拼 `(fnty …)`）。 */
   for (const f of fns) ctx.fnParams.set(f.name, f.params);
+  for (const f of fns) if (Array.isArray(f.pzero)) ctx.fnPzero.set(f.name, f.pzero);
   for (const it of fns) {
     {
       const f = { ins: { body: it.body }, attrs: { params: it.params } };
@@ -1845,8 +1847,16 @@ function recordTypeOfNode(rec, env, ctx) {
  * （"在一格说不清形状的东西上取字段 'V1'（变量 t 推出来是 int）"，t 是 `*Triangle` 接收者）。
  */
 function paramTypes(f, env, ctx) {
-  const pz = Array.isArray(f.pzero) ? f.pzero : null;
-  return f.params.map((p, i) => {
+  return resolveParamTypes(f.name, f.params, f.pzero, env, ctx);
+}
+
+/** `paramTypes` 的本体。`fnTypeOf`（函数名当值用时的 `(fnty …)`）也走这一份 ——
+ *  两处必须给出**同一个**答案，不然 `__goRegMethod` 那种"同一个形参收好几个函数值"的
+ *  调用点就会报"两处的类型不一样"（量出来的：一处 `(fnty (int) int)`、
+ *  另一处 `(fnty ((ptr r3)) int)`，差的正是这一份有没有看 `pzero`）。 */
+function resolveParamTypes(name, params, pzero, env, ctx) {
+  const pz = Array.isArray(pzero) ? pzero : null;
+  return params.map((p, i) => {
     const z = pz === null ? null : pz[i];
     if (z !== null && z !== undefined) {
       let t = null;
@@ -1857,7 +1867,7 @@ function paramTypes(f, env, ctx) {
       }
       if (t !== null && t !== 'int') return t;
     }
-    return ctx.args.get(`${f.name}#${i}`) ?? 'int';
+    return ctx.args.get(`${name}#${i}`) ?? 'int';
   });
 }
 
