@@ -480,9 +480,18 @@ function expr(x, env, ctx) {
       }
       const els = x.ins.else;
       if (els === undefined || els === null) gap('表达式位置上的 branch 少了 else 那一支');
-      const t = typeOf(x.ins.then, env, ctx);
+      const t0 = typeOf(x.ins.then, env, ctx);
       const t2 = typeOf(els, env, ctx);
-      if (t !== t2) gap(`表达式位置上的 branch 两支不同型（${t} 与 ${t2}）`);
+      /* **有一支是 `nil`**（go 的 `m[k]` 缺键给引用类型的零值就是这个形状：
+         `branch (map-has m k) (map-get m k) nil`）：空引用自己说不出类型（`typeOf` 答
+         UNKNOWN=int），照**另一支**的类型算，那一支落 `(null rN)`。 */
+      const refOf = (ty) => (isPtrRec(ty, ctx) || elemType(ty) !== null);
+      const nilThen = isLitNull(x.ins.then) && refOf(t2);
+      const nilEls = isLitNull(els) && refOf(t0);
+      const t = nilThen ? t2 : t0;
+      if (!nilThen && !nilEls && t !== t2) {
+        gap(`表达式位置上的 branch 两支不同型（${t} 与 ${t2}）`);
+      }
       /* 标量或**一格形状**（sbcl 的 `(if c (values …) (values …))` 就是后者）都接得住；
          **dyn 也接得住**（lua 的 `p:total()` 里"自己有没有这个键"那一格三目交的就是它 ——
          临时量装着箱子，到用它的地方再拆）。 */
@@ -495,7 +504,7 @@ function expr(x, env, ctx) {
         ctx.pre = p;
         let v;
         try {
-          v = expr(e, env, ctx);
+          v = (isLitNull(e) && refOf(t)) ? `(null ${t})` : expr(e, env, ctx);
         } finally {
           ctx.pre = outer;
         }
@@ -504,7 +513,9 @@ function expr(x, env, ctx) {
       const cond = condText(x.ins.cond, env, ctx);
       const a = arm(x.ins.then);
       const b = arm(els);
-      ctx.pre.push(`(let ${nm} ${t} ${newOfType(t, ctx)})`);
+      /* 引用语义那一档的初值用**空引用**（不是 `(cnew …)`）：两支都会覆盖它，白造一格对象
+         在 pt 那种热路径上是白花的分配。 */
+      ctx.pre.push(`(let ${nm} ${t} ${refOf(t) ? `(null ${t})` : newOfType(t, ctx)})`);
       ctx.pre.push(`(if ${cond} ${a} ${b})`);
       return `(var ${nm})`;
     }

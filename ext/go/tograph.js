@@ -690,6 +690,10 @@ function elemTyOf(ty) {
   if (t === 'paren') return elemTyOf(kids(ty)[0]);
   if (t === 'slice') return kids(ty).find((y) => tag(y) !== 'none') ?? null;
   if (t === 'array') return kids(ty)[1] ?? null;
+  /* **`map[K]V` 的"下标读出来那一格"是 V**。少了这一支，`t := m["a"]` 的 `t` 在 VARTY
+     里是空的，于是 `t.At(2)` 认不出 t 是接口 —— 落成对 `Solid__At` 的**直接调用**，
+     报"'Solid__At' 第 1 格形参落成了 r1，可后面有一处调用给的是 r2"（任务 #83）。 */
+  if (t === 'map') return kids(ty)[1] ?? null;
   return null;
 }
 
@@ -717,18 +721,22 @@ function mapZeros(ty, name, pkg) {
  * **与 go 的差**：go 的 `mapaccess` 一次查表两样都回，我们查两次（`dhas` 再 `dget`）——
  * 那是性能上的差，不是答案上的。
  *
- * **只在值是标量时这么落**。理由不是省事：`map[K]*T` / `map[K]接口` 在 go 里的零值是
- * **nil**，而图上没有 nil 记录，`structZero` 给的是一格**新的零值记录** —— 拿它当缺键的
- * 答案就是**静默的错答案**（go 里那一格会在 `n.F` 上 panic）。值类型说不清的那一档同理：
- * 两档都照旧只发 `map-get`，缺键仍旧在运行期报一句话，不静静答错。
+ * **值是引用类型时零值就是 `lit(null)`**（`map[K]*T` / `map[K]接口`）：go 里那正是 nil，
+ * 而 core 那侧 branch 的一支认得出空引用（照另一支的类型落 `(null rN)`）。
+ * 从前这一档只发 `map-get`、缺键在运行期报一句话 —— 理由是"图上没有 nil 记录"，
+ * 那条理由 2026-09-21 之后作废了（`record-new.fzero` / `bind.tzero` 那一刀）。
+ * 值类型说不清的那一档照旧只发 `map-get`：不静静答错。
  */
 function mapGetZero(oTree, oNode, kNode) {
   const g = mapGet(oNode, kNode);
   const nm = tag(oTree) === 'name' ? leaf(kids(oTree)[0]) : null;
   const ty = nm === null ? undefined : MAPTY.get(nm);
   if (ty === undefined) return g;
+  const vT = kids(ty)[1];
+  /* 引用类型（接口 / `*具名结构体`）：零值是空引用。 */
+  if (nilFieldZero(vT, lit(null)) !== null) return branchOf(mapHas(oNode, kNode), g, lit(null));
   let z = null;
-  try { z = zeroOf(kids(ty)[1], `${nm} 的值`); } catch { z = null; }
+  try { z = zeroOf(vT, `${nm} 的值`); } catch { z = null; }
   const scalar = z !== null && z !== undefined && typeof z === 'object'
     && z.op === undefined && 'lit' in z && z.lit !== null;
   if (!scalar) return g;
@@ -2950,7 +2958,13 @@ function toNode(x) {
             return node('set', { value: init }, { name: n });
           };
           const out = [];
-          if (nameOf(lhs[0]) !== '_') out.push(mk(lhs[0], mapGetZero(o, toNode(o), toNode(k))));
+          if (nameOf(lhs[0]) !== '_') {
+            /* 值那个名字的**类型**也要留一份（`tyOfExpr` 的 index 那一支算得出来）——
+               少了它 `u, ok := m[k]` 之后的 `u.At(…)` 认不出 u 是接口，落成直接调用。 */
+            const vt0 = tyOfExpr(rhs[0]);
+            if (vt0 !== null) VARTY.set(nameOf(lhs[0]), vt0);
+            out.push(mk(lhs[0], mapGetZero(o, toNode(o), toNode(k))));
+          }
           out.push(mk(lhs[1], mapHas(toNode(o), toNode(k))));
           return out;
         }
