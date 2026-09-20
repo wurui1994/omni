@@ -378,17 +378,23 @@ OMNI_ARR_DECL(str, omni_str)
   if (!omni__a) omni_err_null(); \
   omni__a->len; }))
 
+/* **越界判据写成一次无符号比较**（Go 的 `IsInBounds` 就是这么降的：`CMP` + 无符号
+   分支）。`i < 0` 那一半是白给的 —— 负数转成 uint64 是个大数，一次 `>=` 就把两侧都判了。
+   为什么非改不可（量出来的，2026-09-20）：`||` 在我们的 C 前端落成
+   「临时槽 + IF/ELSE 各存 0/1 + 读回来再比 0」（`tccgen.js` 的 `exprLandor`），
+   `bench/go/slice.go` 内层循环 47 条指令里这一摊占 16 条。长度是按构造非负的，
+   所以这两种写法在**这一族容器上**等价。 */
 #define OMNI__AGET(HT, a, i) (__extension__({ \
   HT omni__a = (a); int64_t omni__i = (i); \
   if (!omni__a) omni_err_null(); \
-  if (omni__i < 0 || omni__i >= omni__a->len) omni_err_range(omni__i, omni__a->len); \
+  if ((uint64_t)omni__i >= (uint64_t)omni__a->len) omni_err_range(omni__i, omni__a->len); \
   omni__a->items[omni__i]; }))
 
 /* 值那一格收成变参：`omni_str` 之类的复合字面量里有逗号，而花括号在预处理器眼里不括逗号 */
 #define OMNI__ASET(HT, ET, a, i, ...) (__extension__({ \
   HT omni__a = (a); int64_t omni__i = (i); ET omni__v = (__VA_ARGS__); \
   if (!omni__a) omni_err_null(); \
-  if (omni__i < 0 || omni__i >= omni__a->len) omni_err_range(omni__i, omni__a->len); \
+  if ((uint64_t)omni__i >= (uint64_t)omni__a->len) omni_err_range(omni__i, omni__a->len); \
   omni__a->items[omni__i] = omni__v; omni__v; }))
 
 #ifndef OMNI_ARR_IMPL_TU
@@ -432,7 +438,7 @@ OMNI_NORETURN void omni_err_range(int64_t i, int64_t len);
 #define omni_arr_blob_at_i(a, i) (__extension__({ \
   omni_arr_blob omni__a = (a); int64_t omni__i = (i); \
   if (!omni__a) omni_err_null(); \
-  if (omni__i < 0 || omni__i >= omni__a->len) omni_err_range(omni__i, omni__a->len); \
+  if ((uint64_t)omni__i >= (uint64_t)omni__a->len) omni_err_range(omni__i, omni__a->len); \
   (void *)(omni__a->items + omni__a->esz * omni__i); }))
 
 omni_arr_blob omni_arr_blob_new(int64_t n, int64_t esz, const void *zero);

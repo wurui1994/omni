@@ -110,6 +110,39 @@ function extendForLoops(fn, last) {
   return last;
 }
 
+/**
+ * 每个值**被用在哪几条指令上**（按 pc 升序）。
+ *
+ * 为什么要它而不是只要"最后一次"：抢占的判据是 Go 说的
+ * 「spills the value whose **next use** is farthest in the future」——
+ * *下一次*使用，不是区间的右端。拿右端当判据会把"横跨整个函数、但在热循环里每轮都用"
+ * 的那个值第一个赶走（量出来的：`bench/go/slice.go` 里那个数组句柄被挤到栈上，
+ * 内层循环每轮四条 `ldr x9,[sp,#0x78]`）。
+ */
+function useLists(fn) {
+  const us = [];
+  for (let i = 0; i < fn.op.length; i++) us.push(null);
+  const see = (ref, at) => {
+    if (ref === REF_NONE || ref < REF_BIAS) return;
+    const d = ref - REF_BIAS;
+    if (d < 0 || d >= us.length) return;
+    if (us[d] === null) us[d] = [];
+    const l = us[d];
+    if (l.length === 0 || l[l.length - 1] !== at) l.push(at);
+  };
+  for (let pc = 0; pc < fn.op.length; pc++) {
+    const m = OP_MODES[fn.op[pc]];
+    if (m[0] === 'r') see(fn.a[pc], pc);
+    if (m[1] === 'r') see(fn.b[pc], pc);
+    if (m[1] === 'p') {
+      const at = fn.b[pc];
+      const n = fn.args[at];
+      for (let i = 0; i < n; i++) see(fn.args[at + 1 + i], pc);
+    }
+  }
+  return us;
+}
+
 /** 一遍扫出：每条指令处**开着的 LOOP** 有哪些（栈，外层在前），与每个区域的 END 在哪儿。 */
 function scanRegions(fn) {
   const n = fn.op.length;
@@ -277,6 +310,7 @@ function isCallOp(op) {
 export function regalloc(fn, mod) {
   if (!fn || fn.op.length === 0) return 0;
   const last = extendForLoops(fn, lastUses(fn));
+  const uses = useLists(fn);
   const { openLoops, endOf } = scanRegions(fn);
   const slotIv = slotIntervals(fn, mod, openLoops, endOf);
   /* 槽位按区间起点分桶：到那个 pc 就跟值抢同一个池子（起点 -1 的在进循环之前先发）。 */
@@ -310,6 +344,15 @@ export function regalloc(fn, mod) {
     return b !== a;
   };
 
+  /** 一个值在 `at` 之后**下一次**被用在哪儿（越大越该被赶走）。
+   *  `at` 之后没有使用、可它还活着（靠回边）⇒ 算"下一轮的第一次"（加一整趟的长度）。 */
+  const nextUse = (vpc, at) => {
+    const l = uses[vpc];
+    if (l === null || l === undefined || l.length === 0) return Infinity;
+    for (const u of l) if (u > at) return u;
+    return l[0] + fn.op.length;
+  };
+
   /** 给一个区间要个颜色。要不到就抢一个**值**（槽位不当牺牲品：它的住处是全函数
    *  一个决定，中途换人后端没法表达）。回真给了没有。 */
   const grant = (c, key, end, isSlot, operandOf, start) => {
@@ -322,13 +365,18 @@ export function regalloc(fn, mod) {
       return true;
     }
     if (c.free.length === 0) {
-      let worst = -1, worstEnd = isSlot ? -1 : end;
+      const at = start < 0 ? 0 : start;
+      /* 门槛是**要地方的这一个自己**的下一次使用：谁都不比它远就谁也不抢
+         （它照旧住栈位）。槽位没有"下一次使用"这回事，用 -1 = 一律抢。 */
+      let worst = -1;
+      let worstNext = isSlot ? -1 : nextUse(key, at);
       for (let k = 0; k < c.active.length; k++) {
         const it = c.active[k];
         if (it.slot === true) continue;                   // 槽位不许被抢
         if (it.scratch === true) continue;                // 草稿那一档不参与（它没占 free）
         if (operandOf !== null && operandOf.has(it.pc)) continue;
-        if (it.end > worstEnd) { worstEnd = it.end; worst = k; }
+        const nu = nextUse(it.pc, at);
+        if (nu > worstNext) { worstNext = nu; worst = k; }
       }
       if (worst < 0) return false;
       const victim = c.active[worst];
@@ -392,13 +440,17 @@ export function regalloc(fn, mod) {
     /**
      * **池子用光了 ⇒ 抢一个**（Go 的 `ssa/regalloc.go` 文件头：
      * 「spills registers only when necessary, and spills the value whose next use is
-     * farthest in the future」）。在这一层"下次使用最远"就是**区间的右端最远**
-     * （我们的区间是 `[定义, 最后一次使用]`、连续，见文件头）。被抢的那个从表里摘掉
+     * farthest in the future」）。判据就照这句话取：**下一次使用最远**的那个
+     * （`nextUse`，不是区间的右端）。被抢的那个从表里摘掉
      * （没颜色 = 照旧住栈位，这一层的"溢出"就是这么便宜）。
      *
      * 为什么非要这一条：从前是"先到先得、用光就不给了"。量出来的（`OMNI_RA_STAT=1`）：
      * `scene` 同时活着 19 个、我们只有 9+8=17 个颜色，覆盖率只有 79.9% ——
      * 先到先得会让一个横跨整个函数的长区间白占一个颜色，挤掉后面十几个短命但在热循环里的值。
+     *
+     * ⚠️ 判据**从"右端最远"改成"下一次使用最远"**（2026-09-20，量出来的）：拿右端当判据
+     * 会把"横跨整个函数、可在热循环里每轮都用"的值第一个赶走 —— `bench/go/slice.go` 的
+     * 数组句柄就是这样被挤到栈上的，内层循环每轮四条 `ldr x9,[sp,#0x78]`。
      */
     if (grant(c, pc, end, false, operandOf, pc) && c.hint.has(pc)) n++;
   }
