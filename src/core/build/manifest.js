@@ -196,8 +196,11 @@ class Parser {
     if (t.t !== T.NEWLINE && t.t !== T.EOF) throw this.lex.errorAt(`文件名后面多了 ${t.t}`);
     const readFile = this.opts.readFile;
     if (readFile === undefined) throw this.lex.errorAt('这一趟没给 readFile，读不了别的 manifest');
-    /* **subninja 开新作用域**（父是当前那层），include 不开 —— 这是两者唯一的区别。 */
-    const env = newScope ? new BindingEnv(this.env) : this.env;
+    /* **subninja 开新作用域**（父是当前那层），include 不开 —— 这是两者唯一的区别。
+       写成两行而不是一个三元：我们自己那台编译器不收"惰性位置上的临时量"，它会指出来
+       让你抬成语句（ARC 记账那条规矩）。这份文件要过 `check:self`，所以照它说的写。 */
+    let env = this.env;
+    if (newScope) env = new BindingEnv(this.env);
     parseManifest(this.state, readFile(path), path, { readFile, env });
   }
 

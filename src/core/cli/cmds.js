@@ -519,6 +519,30 @@ ${graphEngineHelp()}
       brief: '把整条链建进一个目录并查四条不动点',
       flags: [F_OUT, { name: '--quick', alias: '-q', arity: 0, brief: '跳过 C 那一路' }],
     },
+    {
+      name: 'ninja', key: 'ninja', usage: '[目标…]',
+      brief: '按一张依赖图把该做的做完（吃 .ninja 与 build.js）',
+      help: `入口不给 -f 时按次序找：**build.ninja → build.js**。两种描述造出来的是同一张图
+（设计写在 docs/design/build-system.md；为什么描述用 build.js 而不是另一门 DSL 见 §7）。
+
+  omni ninja                     做完 default 那些目标
+  omni ninja app -j 4            只做 app
+  omni ninja -n                  只印要跑什么，不跑（dry run）
+  omni ninja --emit-ninja        把图印成一份 .ninja（build.js -> manifest 的单向桥）
+  omni ninja -t dirty            印每条边脏不脏 —— "它为什么又要重编"看这个
+  omni ninja -t commands|targets|graph|clean
+
+**build.js 是普通 ESM**：想 import 什么、算什么都行，我们不限制它做什么 ——
+"只造图、不动磁盘"是约定（脚本自己动的那部分就在依赖图外面，增量与并行不管它）。
+上一趟的命令哈希与耗时记在 ./.omni_log；命令哈希里掺了**编译器自己的指纹**，
+所以改了后端、命令字面量没变，该重编的还是会重编。`,
+      flags: [{ name: '-f', alias: '--file', arity: 1, value: 'FILE', brief: '入口（.ninja 或 .js）' },
+        { name: '-j', arity: 1, value: 'N', brief: '并发上限（现在一次一条，见设计 §9）' },
+        { name: '-n', arity: 0, brief: '只印不跑' },
+        { name: '-k', arity: 0, brief: '一条失败了接着跑别的' },
+        { name: '-t', arity: 1, value: 'TOOL', brief: 'commands|targets|graph|clean|dirty' },
+        { name: '--emit-ninja', arity: 0, brief: '把图印成 .ninja' }],
+    },
     { name: 'help', key: 'help', usage: '[legacy]', brief: '印用法；omni help legacy 是旧名对照表' },
 
     /* ---- 旧的扁平名：静默别名（决策六）。

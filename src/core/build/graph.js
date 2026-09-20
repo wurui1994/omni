@@ -150,6 +150,17 @@ export class Edge {
     return this.outputs.slice(0, this.outputs.length - this.implicitOuts);
   }
 
+  /** `inputs[i]` 是仅次序的那一段吗（脏判定要跳过它们）。 */
+  isOrderOnlyIndex(i) {
+    return i >= this.inputs.length - this.orderOnlyDeps;
+  }
+
+  /** `inputs[i]` 是隐式的那一段吗（进脏判定，但不进 `$in`）。 */
+  isImplicitIndex(i) {
+    return !this.isOrderOnlyIndex(i)
+      && i >= this.inputs.length - this.orderOnlyDeps - this.implicitDeps;
+  }
+
   isPhony() { return this.rule !== null && this.rule.name === 'phony'; }
   useConsole() { return this.pool === CONSOLE_POOL; }
 

@@ -56,6 +56,9 @@ import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
  * 要紧了，正解是把 graph 这台机器登记成一格 lang / plugin（`lang/builtin.js` 那一套），
  * 不是在这儿加一句 `await import`（这份文件里 44 个 import 全是静态的，只有一套规矩）。 */
 import { runGraphFile, buildGraphFile, coreSxText, borrowedExts } from './graph/run.js';
+/* 构建引擎（`omni ninja`）：依赖图 + 脏判定 + 调度，不认识语言 —— 设计见
+ * `docs/design/build-system.md`，模型照 ninja 复刻。 */
+import { ninjaCmd } from './build/cli.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -4630,6 +4633,9 @@ function main(argv) {
     vTally();
     return 0;
   }
+  /* `omni ninja`：按一张依赖图把该做的做完（`build/cli.js`）。摆在这儿的理由与
+   * bootstrap 一样 —— 它**没有源文件参数**，目标是图里的名字，别掉进下面按扩展名分派那套。 */
+  if (cmd === 'ninja') return ninjaCmd(rest);
   // 自举也没有源文件参数（默认就是编译器自己）。整条链与四条门槛见 bootstrap.js
   if (cmd === 'bootstrap') {
     const oi = rest.indexOf('-o');

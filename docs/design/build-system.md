@@ -166,22 +166,31 @@ Go 的"编译器版本进哈希"这一条我们必须有：我们改后端的频
   "字面量片段 + 变量引用"的序列（`eval_env.h`）
 
 **二、我们自己的格式。** `.ninja` 是**生成物**，人不该手写它；而我们要的是"人和 agent
-都能读的、语言感知的"描述。形状照 Zig 的念头：**构建描述是一份 omni 程序**，
-不是第三门 DSL。它调的 API 就是中层那几个函数：
+都能读的"描述。形状照 Zig 的念头：**描述就是一段普通程序**，不是第三门 DSL ——
+现在落的是 **`build.js`**（普通 ESM，想 import 什么、算什么都行）：
 
+```js
+// build.js
+export default function (b) {
+  b.set('cflags', '-O2');
+  b.rule('cc', { command: 'cc $cflags -c $in -o $out', description: 'CC $out' });
+  b.rule('link', { command: 'cc $in -o $out' });
+  for (const s of ['a', 'b']) b.build(`${s}.o`, 'cc', `${s}.c`);
+  b.build('app', 'link', ['a.o', 'b.o']);
+  b.default('app');
+}
 ```
-// build.omni（草案，形状先定、语法随主语言走）
-let app = exe("app", srcs("src/*.go"))     // 语言按后缀认，依赖从源码里读
-app.opt = 1                                 // 等于 OMNI_MIR_OPT=1
-app.cc = "self"                             // 默认就是 self，写出来是为了可复现
-test("go-e2e", cmd("node tests/go/run.js"), needs = [app])
-```
 
-两条硬规矩：**描述里不许有命令字符串以外的副作用**（它只造图，不动磁盘），
-**同一份描述两次求值必须出同一张图**（这是"可复现"的最小要求，也是判据）。
+**我们不限制脚本做什么** —— 与 zig 一样，"只造图、不动磁盘"是**约定**而不是围栏。
+拦也拦不住（脚本能 import 任何东西），拦了还得给每种需求开口子。约定的代价写在明处：
+脚本自己动的那部分在依赖图外面，增量与并行都不管它；`-n` 与 `--emit-ninja` 也只对
+图里那部分有意义。
 
-`omni build --emit-ninja` 把图印成 `.ninja` —— 于是我们的格式与生态之间只有一座单向桥，
-不必维护第二套语义。
+`b` 的动作与 `.ninja` 的语句一一对应（rule / build / pool / default / 三种输入），
+所以两种入口造出来的是**同一张图**，判据里有一条往返：`build.js → --emit-ninja →
+再解析`，两边的命令逐条相同。`omni ninja --emit-ninja` 就是那座**单向桥**，
+CMake 那侧的生态因此白得。
+
 
 ## 8. 三层缓存怎么并成一套
 
@@ -198,23 +207,25 @@ test("go-e2e", cmd("node tests/go/run.js"), needs = [app])
 
 ## 9. 落地顺序与判据
 
-1. **底层引擎（这一刀）**：`src/core/build/` 下复刻 ninja —— 词法 + manifest 解析、
-   图、脏判定、Plan、进程池、两份日志、`-t` 里那几个真有用的工具（`graph`、`query`、
-   `deps`、`commands`、`clean`）。
-   *判据*：把 ninja 自己那批测试的用例搬成我们的判据（`manifest_parser_test.cc` 1200 行、
-   `graph_test.cc` 1257 行、`build_test.cc` 4639 行里挑出与我们模型一致的那些）；
-   再拿真 ninja 当尺子：同一份 `.ninja`，两边"跑了哪些命令、什么次序、第二次跑几条"
-   必须一样。
+1. **底层引擎（已落地第一刀）**：`src/core/build/` —— 词法 + manifest 解析、图、脏判定、
+   Plan、`omni ninja` 入口、`.omni_log`。判据 `tests/build/run.js`（磁盘与执行器都是注入的，
+   一个进程都不起）+ 外面那把尺子：`omni ninja --emit-ninja` 出来的 manifest 喂给真 ninja，
+   两边跑同一批命令、第二趟都"没什么要做"。
+   **还欠**：真并行（现在一次一条 —— 宿主那侧只有同步 spawn，要么加一格异步宿主原语、
+   要么按批交给 `sh` 的 `&`/`wait`）、`.omni_deps` 与 depfile（动态依赖）、dyndep、
+   rspfile、`-t deps/missingdeps`。
 2. **中层规则生成**：先把今天 `omni build x.go -o prog` 那条路生成成图（而不是顺序执行），
    `--emit-ninja` 能印出来，跑起来与今天逐字节相同的产物。
    *判据*：`tests/go` 28/28 不变、`bench/go` 六份的比值不变、`fix:self` 绿。
 3. **动作缓存 + 工具指纹**：改一行后端必须触发该重编的那些、且**只有**那些。
+   （工具指纹这一格已经在命令哈希里：`OMNI_BUILD_FINGERPRINT` 或入口文件的 mtime。）
    *判据*：一份计数断言（改 `backend-c/emit.js` 一行 → 重编 N 个动作，N 是算出来的）。
 4. **去掉 weak 与环**：链接器那几处弱未定义的兜底改成"报缺了谁、谁要的"。
    *判据*：现有各腿全绿，且故意删一个符号时报的是人话。
 5. **`.sx` 退回调试通道**：借来语言那条路改成在内存里过图，`--emit-sx` 才落盘。
    *判据*：`tests/go` 不变、`.omni-cache/src-sx/` 不再被默认写。
 6. **bootstrap 走同一台引擎**：四道不动点门槛变成图里的四条 validation 边。
+
 
 ## 10. 不做什么
 
