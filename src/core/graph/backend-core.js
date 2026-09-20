@@ -1646,6 +1646,7 @@ export function emitCore(g) {
         /* `pzero` 要跟着一路带下来（有类型覆盖层，见 `nodes.js` 的 func 那一格）——
            `emitFn` 拿到的是这份记录，不是图上那个节点。 */
         ...(Array.isArray(f.attrs.pzero) ? { pzero: f.attrs.pzero } : {}),
+        ...(f.attrs.rzero !== undefined ? { rzero: f.attrs.rzero } : {}),
         body: f.ins.body,
       });
       continue;
@@ -1661,7 +1662,8 @@ export function emitCore(g) {
   for (const f of raw) {
     const r = liftOne(f.body, f.name, known, taken, gap);
     for (const g of r.lifted) fns.push(g);
-    fns.push({ name: f.name, params: f.params, ...(f.pzero ? { pzero: f.pzero } : {}), body: r.body });
+    fns.push({ name: f.name, params: f.params, ...(f.pzero ? { pzero: f.pzero } : {}),
+      ...(f.rzero !== undefined ? { rzero: f.rzero } : {}), body: r.body });
   }
   const topLift = liftOne(rest0, 'main', known, taken, gap);
   for (const g of topLift.lifted) fns.push(g);
@@ -1678,6 +1680,19 @@ export function emitCore(g) {
   for (const f of fns) ctx.fnParams.set(f.name, f.params);
   for (const f of fns) if (Array.isArray(f.pzero)) ctx.fnPzero.set(f.name, f.pzero);
   for (const it of fns) {
+      /* 前端声明的返回类型（`rzero` 是"那个类型的零值"，与 `pzero` 同一套路数）。
+         算不出来 / 算出来是 `int`（= 说不清）就当没有。 */
+      let declRet = null;
+      if (it.rzero !== undefined && it.rzero !== null) {
+        let dt = null;
+        if (isNode(it.rzero) && it.rzero.op === 'record-new') {
+          try { dt = recordTypeOfNode(it.rzero, env, ctx); } catch { dt = null; }
+        } else {
+          try { dt = typeOf(it.rzero, env, ctx); } catch { dt = null; }
+        }
+        if (dt !== null && dt !== 'int') declRet = dt;
+      }
+
     {
       const f = { ins: { body: it.body }, attrs: { params: it.params } };
       const params = it.params;
@@ -1722,11 +1737,17 @@ export function emitCore(g) {
        *   * 返回值在整张图上一处都没当值用过；
        *   * 每一处 `ret` 交出去的值都是**纯的**（有副作用就得算出来，那要另一刀）。 */
       if (rt !== null && rt !== 'void' && impl === null
-        && !endsWithRet(it.body) && !valueUsed.has(it.name) && retsPure(it.body)) {
+        && !endsWithRet(it.body) && !valueUsed.has(it.name) && retsPure(it.body)
+        && declRet === null) {
         rt = 'void';
         it.void = true;
       }
-      env.set(`fn:${it.name}`, rt ?? 'void');
+      /* **声明的返回类型最后说话**（`rzero`，见 `nodes.js` 的 func 那一格）。
+       * 量出来的症状：`func (t *Triangle) SumX() float64` 的体里返回的是几个字段相加，
+       * 而 `retTypeOf` 只看字面量、给出 `int` —— 方言当场报"要返回 int，给的是 real"。
+       * 与形参那一格同一条纪律：**声明的优先、推出来的兜底**（算出来是 `int` 就让位，
+       * 因为 `int` 既可能是真 int 也可能是"说不清"）。 */
+      env.set(`fn:${it.name}`, declRet ?? rt ?? 'void');
     }
   }
   /* **函数体看得见的只有函数名**（外加它自己的形参）：`env` 走一趟 main 之后会带上 main

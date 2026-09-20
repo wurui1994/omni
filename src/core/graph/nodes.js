@@ -165,7 +165,7 @@ export const NODES = new Map([
        `record-new` / `list-new` / 字面量定型并登记形状 —— 递零值过去，那一层照现成的路推。
        为什么非要它：core 那条腿的形参一直是**从调用点推**的，而 Go 的方法一旦只经接口
        分派就没有调用点，形参于是默认成 `int`，一取字段就报"说不清形状"。 */
-    attrs: ['params', 'name', 'restParam', 'pzero'], lifetime: 'owns',
+    attrs: ['params', 'name', 'restParam', 'pzero', 'rzero'], lifetime: 'owns',
     doc: 'chez case-lambda（函数只有这一种形式）/ 十门全有',
     providers: { spec: TEN, why: {} },
   }),

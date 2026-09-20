@@ -858,9 +858,16 @@ function funcOf(sig, blk, name, self, selfType) {
     if (self !== undefined) pz.push(zeroOfNamed(selfType));
     for (const x of pinfo) pz.push(zeroOfParam(x.ty));
     const anyZero = pz.some((z) => z !== null);
+    /* **返回类型也是声明的**（`rzero`）：`(sig (in …) (out T))`。只发**单返回**那一种 ——
+       多返回在图上是一格多值（`values`），那一档由 `multiShape` 管，不必这儿插手。
+       为什么非要它（量出来的）：`retTypeOf` 只看字面量，`func (t *Triangle) SumX() float64`
+       的体里返回的是字段相加，它给出 `int`，于是方言当场报"要返回 int，给的是 real"。 */
+    const outs = partKids(sig, 'out');
+    const rz = outs.length === 1 ? zeroOfParam(outs[0]) : null;
     return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
       { params: self === undefined ? params : [self, ...params], name,
         ...(anyZero ? { pzero: pz } : {}),
+        ...(rz !== null ? { rzero: rz } : {}),
         ...(restParam !== undefined ? { restParam } : {}) });
   } finally {
     VARTYPE.clear();
