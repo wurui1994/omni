@@ -72,7 +72,7 @@ import {
 import { registerBuiltins } from './lang/builtin.js';
 import { builtinAlt } from './lang/builtin-pick.js';
 import { PLUGIN_SET, pluginRegName, CORE_DATA } from './plugin-set.js';
-import { RUNTIME_DIR, JIT_DIR, GL_DIR, runtimeSources } from './runtime/c_runtime.js';
+import { RUNTIME_DIR, JIT_DIR, GL_DIR, SCHED_DIR, runtimeSources } from './runtime/c_runtime.js';
 import { loadProgram, MODE_BY_EXT } from './module/load.js';
 import { startRepl } from './repl.js';
 import { interpret } from './interp/eval.js';
@@ -2431,9 +2431,10 @@ function mainStackFlags(cc) {
 function libLinkArgs(libs) {
   const out = [];
   const seen = new Set();
-  for (const l of libs ?? []) {
-    if (seen.has(l)) continue;
-    seen.add(l);
+  for (const raw of libs ?? []) {
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    const l = resolveLib(raw);
     const sys = cSysLib(l);
     if (sys !== null) {
       if (sys.link !== null) out.push(sys.link);
@@ -2469,9 +2470,10 @@ function libLinkArgs(libs) {
 function selfLibArgs(libs) {
   const out = [];
   const seen = new Set();
-  for (const l of libs ?? []) {
-    if (seen.has(l)) continue;
-    seen.add(l);
+  for (const raw of libs ?? []) {
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    const l = resolveLib(raw);
     const sys = cSysLib(l);
     if (sys !== null) {
       if (sys.link !== null) out.push(sys.link);
@@ -2496,6 +2498,64 @@ function frameworkPath(l) {
   const n = l.slice(0, l.length - '.framework'.length);
   return `/System/Library/Frameworks/${n}.framework/${n}`;
 }
+
+/** `(lib "libomnigo")` 这个**逻辑名**（并发那一档，见 `goLib`）。 */
+const GO_LIB_NAME = 'libomnigo';
+
+/**
+ * **并发那一档的动态库**（`libomnigo`）：G/M/P 调度器 + channel + `go f(x)` 的门面。
+ *
+ * 与 `glPlugin` 差两处，都是有意的：
+ *   - 这一格**编不出来就是硬错误**。GL 那边找不到库回落 CPU 光栅器（答案一样、只是慢），
+ *     而一个 `go f()` 的程序没有调度器**没有回落** —— 悄悄同步跑就是错答案。
+ *   - 它是源码里 `(lib "libomnigo")` 指的那个库，所以不走 dlopen 的默认路径，
+ *     而是由 `resolveLib` 把这个**逻辑名**换成下面这个绝对路径（emit 的时候还不知道
+ *     缓存目录在哪儿，所以名字必须是机器无关的）。
+ *
+ * 缓存键 = 那几份源码的 mtime/大小 + 编译器，产物落在 `.omni-cache/go/<key>/`。
+ */
+function goLib() {
+  if (!isDir(SCHED_DIR)) throw new OmniError(`(lib "${GO_LIB_NAME}")：找不到 ${SCHED_DIR}`);
+  const srcs = ['omni_sched.c', 'omni_chan.c', 'omni_go.c'].map((f) => join(SCHED_DIR, f));
+  const hdrs = ['omni_sched.h', 'omni_chan.h', 'omni_go.h', 'omni_atomic.h']
+    .map((f) => join(SCHED_DIR, f));
+  for (const f of [...srcs, ...hdrs]) {
+    if (!exists(f)) throw new OmniError(`(lib "${GO_LIB_NAME}")：缺 ${f}`);
+  }
+  const cc = findClang();
+  const ext = hostIsDarwin() ? 'dylib' : 'so';
+  const key = hash16([cc, ext, ...[...srcs, ...hdrs]
+    .map((f) => `${f}:${mtimeMs(f)}:${fileSize(f)}`)].join('|'));
+  const dir = join(cacheRoot(), 'go', key);
+  const lib = join(dir, `${GO_LIB_NAME}.${ext}`);
+  if (exists(lib)) return lib;
+  const stage = workDirFor('go-stage', key);
+  const staged = join(stage, `${GO_LIB_NAME}.${ext}`);
+  /* **`-install_name` 要写成"落定之后"那个路径**（量出来的）：macOS 默认把 `-o` 的
+     那个路径写进库自己的 `LC_ID_DYLIB`，于是链上它的程序一跑就是
+     `Library not loaded: …/work/go-stage-…/libomnigo.dylib` —— 暖存盘用完就没了。
+     GL 那条腿不撞这一格是因为它走 dlopen（按路径装），不进链接命令。 */
+  const r = spawn(cc, ['-O2', '-w', hostIsDarwin() ? '-dynamiclib' : '-shared',
+    ...(hostIsDarwin() ? ['-install_name', lib] : []),
+    '-fPIC', '-o', staged, ...srcs, '-I', SCHED_DIR, '-lpthread'], 'c');
+  if (r[0] !== 0) {
+    throw new OmniError(`(lib "${GO_LIB_NAME}")：${cc} 编不过并发那一档的运行时`);
+  }
+  mkdirAll(join(cacheRoot(), 'go'));
+  if (!exists(dir)) rename(stage, dir);
+  const got = exists(lib) ? lib : staged;
+  vStep(`go rt     ${got}`);
+  return got;
+}
+
+/**
+ * 一句 `(lib …)` 里的名字**落到这台机器上的那个东西**。
+ *
+ * 今天只有一格要换：`libomnigo` 是**我们自己的**运行时，它的路径是缓存目录里算出来的，
+ * 而 emit 的那一刻还不知道（产物要机器无关，不然一份 `.sx` 换台机器就链不上）。
+ * 别的名字原样回 —— 预登记的系统库与 framework 各有各的那一支，在下面几处认。
+ */
+function resolveLib(l) { return l === GO_LIB_NAME ? goLib() : l; }
 
 /**
  * 三维那一档的 **OpenGL 后端插件**（`libomnigl`）。照 asy 自己的分法：它的
@@ -3195,7 +3255,8 @@ function ffiObject(mod) {
  */
 function ffiInject(mod) {
   const h = ffiHost();
-  for (const lib of mod.libs ?? []) {
+  for (const raw of mod.libs ?? []) {
+    const lib = resolveLib(raw);
     if (cSysLib(lib) !== null) continue;
     const p = lib.endsWith('.framework') ? frameworkPath(lib) : lib;
     if (h.dlopen(p) !== true) throw new OmniError(`node ffi：装不上那个库：${p}`);
@@ -3356,7 +3417,8 @@ function runViaJit(mod, argv, srcPath) {
      别的按路径 `--lib`。宿主那侧默认是**关**的，所以这几个开关一个都不能少（决策 2）。 */
   const jitArgs = [llPath];
   let wantDl = false;
-  for (const lib of mir.libs ?? []) {
+  for (const raw of mir.libs ?? []) {
+    const lib = resolveLib(raw);
     const sys = cSysLib(lib);
     if (sys !== null) { wantDl = true; continue; }
     /* framework 那一格（`(lib "OpenGL.framework")`）：链接期是 `-framework OpenGL`，

@@ -1,0 +1,45 @@
+;; 并发那一档在**核心方言**这一侧的写法（任务 #78）。go 前端落下来的就是这个形状。
+;;
+;; 三件事在这一份里各占一格：
+;;   `omni_go_run(main)`   —— `func main()` 跑成**主 g**（调度器在这一句里起）
+;;   `omni_go_spawn(f, i)` —— `go f(i)`，递过去的是**方言的函数值**（`(fnref …)`）
+;;   channel 那四格         —— 元素一律 8 字节，值按值收发（地址在 C 那一侧取）
+;;
+;; 形状照 bench/go/raytrace.go：撒 N 条 goroutine、每条往 channel 上发一格、主 g 收 N 次。
+;; 答案是 0..N-1 的平方和，与并发的次序无关 —— 所以它可以逐字节比。
+(module
+  (lib "libomnigo")
+
+  (cabi omni_go_run void (ptr))
+  (cabi omni_go_spawn void (ptr i64))
+  (cabi omni_go_chan_new ptr (i64))
+  (cabi omni_go_chan_send void (ptr i64))
+  (cabi omni_go_chan_recv i64 (ptr))
+  (cabi omni_go_chan_close void (ptr))
+  (cabi omni_go_chan_len i64 (ptr))
+
+  (global ch int)
+  (global n int)
+
+  ;; 一条 goroutine 的体。形参那一格就是 `omni_go_spawn` 递回来的 `arg`。
+  (fn worker ((i int)) void
+    (expr (ccall omni_go_chan_send (var ch) (bin "*" (var i) (var i)))))
+
+  (fn gomain () void
+    (let s int (int 0))
+    (do (let k int (int 0))
+        (while (bin "<" (var k) (var n))
+          (do (expr (ccall omni_go_spawn (fnref worker) (var k)))
+              (set k (bin "+" (var k) (int 1))))))
+    (do (let k int (int 0))
+        (while (bin "<" (var k) (var n))
+          (do (set s (bin "+" (var s) (ccall omni_go_chan_recv (var ch))))
+              (set k (bin "+" (var k) (int 1))))))
+    (expr (ccall omni_go_chan_close (var ch)))
+    (print (var s))
+    (print (ccall omni_go_chan_len (var ch))))
+
+  (main
+    (set n (int 300))
+    (set ch (ccall omni_go_chan_new (int 0)))
+    (expr (ccall omni_go_run (fnref gomain)))))

@@ -2009,6 +2009,10 @@ class CEmitter {
                `(tptr T)`（thin）本来就是一个裸指针，直接转。 */
             if (k === 'ptr') return `(void *)((${this.expr(a)}).a)`;
             if (k === 'tptr') return `(void *)(${this.expr(a)})`;
+            /* **函数值**：C 这一侧就是 `omni_fn`（一格闭包对象的地址），原样转过去。
+               收的人按 `fp(self, 实参…)` 调它（`omni_call_*` 发的就是那一句）——
+               `src/runtime-sched/omni_go.c` 的 `omni_goclos` 是这条约定的另一端。 */
+            if (k === 'fn') return `(void *)(${this.expr(a)})`;
             if (i < ps.length) return `(${C_TYPE[ps[i]]})(${this.expr(a)})`;
             /* 变参那一段（`...` 之后）没有声明的类型可用 —— 按**实参自己**那一格来，
                这正是 C 的默认实参提升：整数一律 int64_t、`real` 一律 double。

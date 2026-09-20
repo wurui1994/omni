@@ -87,5 +87,28 @@ try {
   else bad('go f(x) / channel 的门面', `第 ${good + 1} 趟就挂了：\n${last}`);
 } catch (e) { bad('go f(x) / channel 的门面', String(e.stderr || e.message)); }
 
+/* 六、**方言那一侧**（`go.sx`）：`(lib "libomnigo")` + `(cabi …)` + `(ccall …)` +
+ *    `(fnref …)` 一路走到两条原生腿。这一格钉的是"把一格方言的函数值交给 C 去跑"
+ *    那条接缝在真编译链上也成立 —— 上面那一格是手写 C 造的闭包对象，这一格是编译器造的。
+ *    答案（0..299 的平方和）与并发次序无关，所以可以逐字节比。 */
+try {
+  const cli = join(root, 'src', 'cli.js');
+  const sx = join(here, 'go.sx');
+  const want = '8955050\n0\n';
+  const legs = [['self', []], ['clang', ['--cc', 'clang']]];
+  const bad2 = [];
+  for (const [leg, extra] of legs) {
+    const exe = join(out, `gosx-${leg}`);
+    execFileSync('node', [cli, 'build', sx, '-o', exe, ...extra],
+      { cwd: root, stdio: 'pipe', timeout: 300000 });
+    for (let i = 0; i < 3; i++) {
+      const got = execFileSync(exe, [], { encoding: 'utf8', timeout: 120000 });
+      if (got !== want) bad2.push(`${leg} 第 ${i + 1} 趟给的是 ${JSON.stringify(got)}`);
+    }
+  }
+  if (bad2.length === 0) ok('go.sx 走两条原生腿', `self / clang × 3 趟，都是 ${JSON.stringify(want)}`);
+  else bad('go.sx 走两条原生腿', bad2.join('\n       '));
+} catch (e) { bad('go.sx 走两条原生腿', String(e.stderr || e.message)); }
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

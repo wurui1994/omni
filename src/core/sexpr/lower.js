@@ -590,6 +590,14 @@ class CoreLowerer {
       if (head(f) !== 'global') continue;
       const nm = isAtom(f.items[1]) ? f.items[1].value : null;
       if (nm === null) { this.err(f, '(global 名字 类型)'); continue; }
+      /* **多写的那几格当场报**：`(global n int (int 300))` 从前是**静默忽略**那个初值 ——
+         模块级变量按设计零初始化（见文件头那段），于是程序看见的是 0 而不是 300。
+         写的人得不到任何提示，只能靠输出不对再回来找（量出来的：找了十分钟）。 */
+      if (f.items.length > 3) {
+        this.err(f, `模块级变量 '${nm}' 后面多了 ${f.items.length - 3} 格 —— `
+          + '`(global 名字 类型)` **没有初值**（按设计零初始化），初值要在入口里 `(set …)`');
+        continue;
+      }
       if (this.globals.has(nm)) { this.err(f, `模块级变量 '${nm}' 重复定义`); continue; }
       const t = this.ty(f.items[2], `模块级变量 ${nm}`);
       if (t === null) continue;
@@ -2474,14 +2482,22 @@ class CoreLowerer {
            - `string`：后端在调用点抽胖指针的第 0 格（见 cabiArg）。字面量**带结尾的零**
              （池子每条多发一个 `i8 0`），所以 C 那边读得停下来；算出来的串没有那个保证，
              那是用的人要负的责。
-           - `(ptr T)` / `(tptr T)`：这个方言里它本来就是一个地址（native 腿上是真地址）。 */
+           - `(ptr T)` / `(tptr T)`：这个方言里它本来就是一个地址（native 腿上是真地址）。
+           - **函数值**（`(fnref f)` / `(mkclo …)`）：它在这一端就是一格闭包对象的地址
+             （`src/runtime/omni.h` 的 `struct omni_closure_s`，第 0 格是代码地址），
+             调用约定是 `fp(self, 实参…)`（`backend-c/emit.js` 的 `omni_call_*`）。
+             量出来的必要性：`omni_go_spawn(f, i)`（`go f(i)`）与 `omni_go_run(main)`
+             要把**方言的一格函数**交给运行时去跑，而 C 那侧只能收一个地址。
+             递过去的是闭包对象，不是裸代码地址 —— 捕获的那几格还在里头，收的人
+             照上面那条约定调它。 */
         const at = args[ci].type;
-        const isAddr = at !== null && at !== undefined && (at.k === 'ptr' || at.k === 'tptr');
+        const isAddr = at !== null && at !== undefined
+          && (at.k === 'ptr' || at.k === 'tptr' || at.k === 'fn');
         const ok = sameCoreType(at, want)
           || (w === 'ptr' && (sameCoreType(at, STRING) || isAddr));
         if (!ok) {
           return this.err(n, `'${nm}' 的第 ${ci + 1} 个形参声明成 ${w}`
-            + `（这一端是 ${coreTypeText(want)}${w === 'ptr' ? '、string 或指针' : ''}），`
+            + `（这一端是 ${coreTypeText(want)}${w === 'ptr' ? '、string、指针或函数值' : ''}），`
             + `给的是 ${coreTypeText(at)}`);
         }
         ci++;

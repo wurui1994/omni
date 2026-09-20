@@ -34,6 +34,16 @@ export const JIT_DIR = dataDir('jit', 'omni_jit.c') ?? join(installDir(), '..', 
 export const GL_DIR = dataDir('runtime-gl', 'omni_gl.h') ?? join(installDir(), '..', '..', 'runtime-gl');
 
 /**
+ * **并发那一档**（G/M/P 调度器 + channel + `go f(x)` 的门面）的源码目录。
+ * 与 GL_DIR 同样是单独一格，但理由不同：这一堆要 `pthread` 与**非空的 `__asm__` 模板**
+ * （`omni_sctx_sw` 那次上下文切换），而我们自己那台 C 前端还编不了后者（任务 #76）——
+ * 并进 `runtimeSources()` 就等于让二进制对齐那把尺子当场断。
+ * cli.js 单独把它编成一个动态库；源码里 `(lib "libomnigo")` 指的就是它。
+ */
+export const SCHED_DIR = dataDir('runtime-sched', 'omni_sched.h')
+  ?? join(installDir(), '..', '..', 'runtime-sched');
+
+/**
  * **我们自己那台 C 前端自带的那几份头**（`stdbool.h`/`stddef.h`/`stdarg.h`/`float.h`）——
  * tcc 的 `{B}/include`。和运行时一样是**数据**，所以同一条规矩按布局找。
  * 摆在这儿而不是 lang/c.js 里，是因为**两处要它**：`cSysInclude()` 要拿它当第一条搜索路径，
