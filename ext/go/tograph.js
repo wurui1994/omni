@@ -560,6 +560,32 @@ function structZero(n) {
   return recordNew([['__type', lit(n)], ...fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)])]);
 }
 
+/** 一格类型节点**剥到光名字**（`paren` 透传、具名类型跟着 `UNDER` 走一层）。不是光名字回 null。 */
+function scalarNameOf(ty) {
+  if (ty === undefined || ty === null) return null;
+  if (tag(ty) === 'paren') return scalarNameOf(kids(ty)[0]);
+  if (tag(ty) === 'tname' && kids(ty).length === 1) {
+    const n = leaf(kids(ty)[0]);
+    if (UNDER.has(n)) return scalarNameOf(UNDER.get(n));
+    return n;
+  }
+  return null;
+}
+
+/**
+ * 一格 struct 字面量里**某个字段的值**：字段声明成浮点时把值转成浮点。
+ *
+ * 为什么非要这一格（量出来的）：`Vec{1, 2, 3}` 的三个值是**整字面量**，而
+ * `var v Vec`（走 `zeroOf`）出来的是 `convOf('float', lit(0))` —— 于是同一个 `Vec`
+ * 在图上算出**两个形状**（`(ptr r1)` 与 `(ptr r2)`），core 那侧报
+ * `'Vec__Dot' 第 1 格实参在两处的类型不一样`。
+ * 无条件转是对的：go 里能摆进 float64 字段的值本来就可赋给 float64，转一下对浮点是空操作。
+ */
+function fieldValue(ft, v) {
+  const n = scalarNameOf(ft);
+  return (n === 'float32' || n === 'float64') ? convOf('float', v) : v;
+}
+
 /** 一格形参的**零值节点**（有类型覆盖层用）。说不清就回 null —— 不中断。 */
 function zeroOfParam(ty) {
   if (ty === undefined) return null;
@@ -1313,9 +1339,12 @@ function toNode(x) {
         }
       }
       if (elems.length > 0 && elems.every((e) => tag(e) === 'kv')) {
+        /* 字段声明成浮点时把值转过去（见 `fieldValue` 那段账）。 */
+        const ftab = new Map((tyName !== null && STRUCTS.get(tyName)) || []);
         return withType(elems.map((e) => {
           const [k, v] = kids(e);
-          return [nameOf(k), toNode(v)];
+          const fn2 = nameOf(k);
+          return [fn2, fieldValue(ftab.get(fn2), toNode(v))];
         }));
       }
       if (elems.some((e) => tag(e) === 'kv')) {
@@ -1327,7 +1356,7 @@ function toNode(x) {
       if (litTypeName !== null && STRUCTS.has(litTypeName) && elems.length > 0) {
         const fs = STRUCTS.get(litTypeName);
         if (fs !== null && fs.length >= elems.length) {
-          return withType(elems.map((e, i) => [fs[i][0], toNode(e)]));
+          return withType(elems.map((e, i) => [fs[i][0], fieldValue(fs[i][1], toNode(e))]));
         }
       }
       /* **切片字面量**（`[]int{1,2,3}`）或 struct 不在 STRUCTS 里 → 落数组。 */
