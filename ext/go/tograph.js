@@ -532,6 +532,60 @@ const GO_MATH_RMATH = new Map([
 ]);
 /** 生成出来的 math 辅助函数（名字 -> `func` 节点），一趟一份，附在模块体前头。 */
 const MATHFNS = new Map();
+/**
+ * 这一格是 go 的 `nil` 吗。**两种形状都要认**：`nil` 落成 `(const value=null)`
+ * （见 `case 'name'` 那一支），而 `zeroOf` 那一路落的是字面量 `{lit: null}`。
+ * 只认一种的代价量到过：`Hit{0.0, nil}` 的接口字段没换成零值记录，于是同一个 go
+ * 结构体算出两格形状（`要返回 r9，给的是 r16`）。
+ */
+function isNilNode(v) {
+  if (v === null || v === undefined || typeof v !== 'object') return false;
+  if (v.op === 'const') return (v.attrs === undefined ? undefined : v.attrs.value) === null;
+  return v.op === undefined && 'lit' in v && v.lit === null;
+}
+
+/** 一格左值的**根名字**（`a` / `a.f` / `a[i]` / `*a` 都算 `a`）。说不清回 null。 */
+function rootNameOf(x) {
+  if (x === undefined || x === null || !isList(x)) return null;
+  const g = tag(x);
+  if (g === 'name') return leaf(kids(x)[0]);
+  if (g === 'sel' || g === 'index' || g === 'paren' || g === 'deref' || g === 'addr') {
+    return rootNameOf(kids(x)[0]);
+  }
+  return null;
+}
+
+/** 这棵树里出现过的所有**名字**。 */
+function namesIn(x, out) {
+  const acc = out ?? new Set();
+  if (x === undefined || x === null || !isList(x)) return acc;
+  if (tag(x) === 'name') { const n = leaf(kids(x)[0]); if (n !== null) acc.add(n); }
+  for (const k of kids(x)) namesIn(k, acc);
+  return acc;
+}
+
+/**
+ * **`a, b = b, a` 这一族要先把右边全算出来**（go 的规矩：所有右值先求值，再逐格赋）。
+ *
+ * 逐格顺着赋是**静默的错答案**：`x, y = y, x` 落成 `x = y; y = x` 就是 9/9 而不是 9/7
+ * （量到过；pt 那个 BVH 的就地分区 `t.Shapes[i], t.Shapes[j] = t.Shapes[j], t.Shapes[i]`
+ * 因此分错，13 个节点变成 33 个、校验和跟着错）。
+ *
+ * **只在真会互相打架时才加临时量**：左边写的那几个根名字里有一个出现在右边。这样
+ * `a, b := 1, 2` 那一族的产物一个字节不动。
+ */
+function needsParallel(lhs, rhs) {
+  const written = new Set();
+  for (const t of lhs) { const n = rootNameOf(t); if (n !== null && n !== '_') written.add(n); }
+  if (written.size === 0) return false;
+  for (const r of rhs) {
+    for (const n of namesIn(r)) if (written.has(n)) return true;
+  }
+  return false;
+}
+/** `a, b = b, a` 那一族的临时量序号（嵌套也不撞名）。 */
+let ASN_N = 0;
+
 /** 一格 `float64` 的类型节点（生成的辅助函数要拿它当 `pzero` / `rzero` / `FRET`）。 */
 const F64TY = { kind: 'list', items: [{ kind: 'atom', value: 'tname' }, { kind: 'atom', value: 'float64' }] };
 const f64Zero = () => zeroOf(F64TY, 'math 辅助');
@@ -1417,7 +1471,7 @@ function fieldValue(ft, v, ast) {
   /* **接口字段写 `nil`**（`Hit{0.0, nil}`）：落成那格接口的**零值记录**，不是 `lit(null)`。
      落 null 的代价是**同一个 go 结构体算出两格形状**：声明那一侧的 `Hit.Shape` 是接口记录、
      字面量那一侧是 int，于是 `要返回 r9，给的是 r16`（量出来的，bench/go/pt.go）。 */
-  if (v2 !== null && typeof v2 === 'object' && v2.op === undefined && 'lit' in v2 && v2.lit === null) {
+  if (isNilNode(v2)) {
     const z = ifaceZero(ifn);
     if (z !== null) return z;
   }
@@ -2829,6 +2883,43 @@ function toNode(x) {
             args: [toNode(lhs[0]), elT === null ? toNode(it) : fieldValue(elT, toNode(it), it)],
           }, { name: 'push' }));
         }
+      }
+      /* **右值先全算出来那一档**（`a, b = b, a`）—— 见 `needsParallel` 那段账。 */
+      if (compoundOp === null && lhs.length > 1 && rhs.length === lhs.length
+        && needsParallel(lhs, rhs)) {
+        ASN_N += 1;
+        const pre = [];
+        const tmps = [];
+        for (let i = 0; i < rhs.length; i++) {
+          let v = toNode(rhs[i]);
+          const tTy = tyOfExpr(lhs[i]);
+          if (tTy !== null) v = fieldValue(tTy, v, rhs[i]);
+          const nm = `__asn${ASN_N}_${i}`;
+          pre.push(node('bind', { init: v }, { name: nm }));
+          tmps.push(nm);
+        }
+        const outs = [];
+        for (let i = 0; i < lhs.length; i++) {
+          const t = lhs[i];
+          const v = node('ref', {}, { name: tmps[i] });
+          if (tag(t) === 'sel') {
+            outs.push(fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v));
+            continue;
+          }
+          if (tag(t) === 'index') {
+            const [o, ix] = kids(t);
+            outs.push(isMap(o) ? mapSet(toNode(o), toNode(ix), v)
+              : indexSet(toNode(o), toNode(ix), v));
+            continue;
+          }
+          const n = nameOf(t);
+          if (n === '_') continue;
+          const isNew2 = isDef && !seenHere(n);
+          if (isNew2) declHere(n);
+          outs.push(isNew2 ? node('bind', { init: v }, { name: n })
+            : node('set', { value: v }, { name: n }));
+        }
+        return [...pre, ...outs];
       }
       return lhs.map((t, i) => {
         let v = rhs[i] === undefined ? lit(null) : toNode(rhs[i]);

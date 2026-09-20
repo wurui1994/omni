@@ -992,6 +992,11 @@ function fnTypeOf(a, env, ctx) {
 
 /** 这一格类型是不是聚合（记录 / 列表 / 字典 / 多值）。 */
 const isAggregate = (t, ctx) => isRecType(t, ctx) || elemType(t) !== null || dictOf(t) !== null;
+/** 这一格类型是**多值那格合成结构体**吗（`isRecType` 刻意把它排在外头）。 */
+const isMultiShape = (t, ctx) => {
+  const sh = shapeAt(t, ctx);
+  return sh !== undefined && sh.multi === true;
+};
 
 /**
  * 取一格字段的文本。**记录一律是 `(fld 宿主 字段名)`**（引用语义那一档是类、值语义那一档
@@ -1447,7 +1452,13 @@ function stmtIn(x, env, ctx) {
          `retTypeOf` 跑得早，`ret (var p)` 那种它只能当 int —— 而这儿 env 上有 p 的真类型。 */
       if (ctx.fnName !== null && ctx.fnName !== undefined && v !== undefined && v !== null) {
         const rt0 = seenType(v, env, ctx);
-        if (isAggregate(rt0, ctx) || rt0 === 'dyn') ctx.rets.set(ctx.fnName, rt0);
+        /* **多值那一格也要记**（`isAggregate` 把 `mN` 排在外头）：`retTypeOf` 跑在形参有
+           类型之前，`return tmin, tmax` 两格局部量都被量成 int，于是函数**声明**成
+           `m6=(int,int)` 而体里交出来的是 `m15=(real,real)` —— 方言当场骂
+           "要返回 m6，给的是 m15"（pt 的 `Box.Intersect` 撞出来的）。这儿 env 上有真类型。 */
+        if (isAggregate(rt0, ctx) || rt0 === 'dyn' || isMultiShape(rt0, ctx)) {
+          ctx.rets.set(ctx.fnName, rt0);
+        }
       }
       /* 多值：先把那格合成结构体拼出来（零值 + 逐个 fldset），再交回去。 */
       if (isNode(v) && v.op === 'values') {
@@ -2354,7 +2365,7 @@ export function emitCore(g) {
   for (const f of fns) {
     const t = ctx.rets.get(f.name);
     if (t === undefined || t === 'void') continue;
-    if (!(isAggregate(t, ctx) || t === 'dyn')) continue;
+    if (!(isAggregate(t, ctx) || t === 'dyn' || isMultiShape(t, ctx))) continue;
     env.set(`fn:${f.name}`, t);
     fnEnv.set(`fn:${f.name}`, t);
   }

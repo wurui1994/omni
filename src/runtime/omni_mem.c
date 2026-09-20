@@ -51,9 +51,11 @@ typedef struct omni_arena_block {
   char *base;
 } omni_arena_block;
 
-static omni_arena_block *omni_arena_head = NULL;
-char *omni_arena_ptr = NULL;
-char *omni_arena_end = NULL;
+/* 三格都按线程分（见 omni.h 上 `OMNI_TLS` 那段账）：每条线程自己一条块链、自己一格
+   bump 指针，于是不必加锁。块仍旧从线程的 TLS 可达，LeakSanitizer 不会报泄漏。 */
+static OMNI_TLS omni_arena_block *omni_arena_head = NULL;
+OMNI_TLS char *omni_arena_ptr = NULL;
+OMNI_TLS char *omni_arena_end = NULL;
 
 #define OMNI_BLOCK_MIN ((size_t)1 << 20)  /* 1 MiB：小到不浪费，大到几乎不触发慢路径 */
 
@@ -266,9 +268,10 @@ typedef struct {
   char *end;
 } omni_arena_savepoint;
 
+/* mark/release 也按线程分：它记的是**这条线程**的 arena 位置。 */
 #define OMNI_MARK_MAX 64
-static omni_arena_savepoint omni_marks[OMNI_MARK_MAX];
-static int omni_nmark = 0;
+static OMNI_TLS omni_arena_savepoint omni_marks[OMNI_MARK_MAX];
+static OMNI_TLS int omni_nmark = 0;
 
 int64_t omni_arena_mark(void) {
   if (omni_nmark >= OMNI_MARK_MAX) return -1;

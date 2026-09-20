@@ -217,8 +217,21 @@ int64_t omni_arena_release(int64_t mark);
 void *omni_alloc(size_t n);
 char *omni_alloc_bytes(int64_t n);
 #else
-extern char *omni_arena_ptr;
-extern char *omni_arena_end;
+/* **arena 的那两格指针是线程局部的**（`OMNI_TLS`）：它是一格 bump 指针，两条线程
+   同时 bump 同一格就会把**同一块内存发给两边** —— 量到过：go 的路径追踪基准
+   （`bench/go/pt.go`，4 个 goroutine）在 `-O` 之后答案每跑一次都不一样，而 1 个
+   goroutine 时逐字节稳定。bump 分配器天生适合按线程分：只分不单独释放，所以每条线程
+   自己一条块链就够，不必加锁（慢路径上的统计计数仍是全局的 —— 那只是诊断）。
+   `OMNI_NO_TLS` 留一个后门给不支持 `_Thread_local` 的目标（那时退回从前的行为）。 */
+#ifndef OMNI_TLS
+#  ifdef OMNI_NO_TLS
+#    define OMNI_TLS
+#  else
+#    define OMNI_TLS _Thread_local
+#  endif
+#endif
+extern OMNI_TLS char *omni_arena_ptr;
+extern OMNI_TLS char *omni_arena_end;
 void *omni_alloc_slow(size_t n);
 char *omni_alloc_bytes_slow(int64_t n);
 
