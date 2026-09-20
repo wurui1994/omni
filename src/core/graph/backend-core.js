@@ -305,6 +305,20 @@ function expr(x, env, ctx) {
       if (elemType(t) === null) gap('在一格说不清形状的东西上取下标（这一刀只接 list-new 绑出来的那格）');
       return `(aget ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.index, env, ctx)})`;
     }
+    /* **表达式位置上的记录**：路数与 `map-new` 那一格一样（先物化成一格临时名，
+     * 再把名字交出去 —— 记录在方言里是一格指针，所以"值"就是那个名字）。
+     *
+     * ⚠️ **试过一刀，撤了**：写完 `tests/graph` 从 808 passed / 50 failed / 42 skipped
+     * 掉到 807 / 51 / 40 —— 有一格从"有名有姓的缺口"变成了"接错了"，而我没量清是哪一格。
+     * 按纪律撤回（没量过的一刀不许留在主干上）。
+     * 撤回前量到的两件事，下次照着做：
+     *   - 物化本身是对的：`return Vec{…}` 与 `a.Add(b)` 当实参都落下去了，
+     *     go 的 `tests/go/cases/03` 从这一格往前走到了下一格；
+     *   - 下一格是**记录的形状该从声明的字段类型来**，不是从字面量的值类型来：
+     *     `Vec{1,2,3}`（整字面量）与 `var v Vec`（float64 零值）算出两个形状
+     *     （`(ptr r1)` 与 `(ptr r2)`），core 于是报"'Vec__Dot' 第 1 格实参在两处的类型不一样"。
+     *     治法是给 `record-new` 加一格 `ftypes`（前端手里有），`bindRecord` /
+     *     `recordTypeOfNode` 按它定形状 —— 与 `pzero` / `rzero` 同一套路数。 */
     case 'record-new': gap('记录出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'list-new': gap('列表出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
     case 'pick': {
