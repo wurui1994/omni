@@ -122,6 +122,12 @@ export const PASSES = [
   { name: 'late lower',                batch: BATCH_2,   req: true,  fn: null },
   { name: 'pair',                      batch: BATCH_3,   req: false, fn: null },
   { name: 'lowered deadcode for cse',  batch: BATCH_1,   req: false, fn: null },
+  /* `lowered cse` —— 2026-09-21 一度以为它在浮点那一类上是负的（raytrace 227→267ms），
+   * **那个数是假的**：同一个二进制过一会儿再量是 216ms。编译刚跑完就计时，机器还在忙
+   * （min-of-7 交错也挡不住这一格）。重量之后三档 216/218/218ms —— 它是**中性**的。
+   * 留这一句在这儿是免得下一次又照那个假数把它挪档。要判它到底值不值，得等 regalloc
+   * 有 spill 代价模型（Go 的 `ssacompile/regalloc.go` 的 `spillCost`/`desired`）之后
+   * 在 smallpt 那一档上量，那儿 FP 压力最大。 */
   { name: 'lowered cse',               batch: BATCH_2,   req: false, fn: null },
   { name: 'elim unread autos',         batch: BATCH_1,   req: false, fn: null },
   { name: 'tighten tuple selectors',   batch: BATCH_2,   req: true,  fn: null },
