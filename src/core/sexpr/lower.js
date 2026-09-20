@@ -292,12 +292,16 @@ class CoreLowerer {
       const kn = isAtom(node.items[1]) ? node.items[1].value : null;
       const vn = isAtom(node.items[2]) ? node.items[2].value : null;
       const k = kn === null ? undefined : BASE_TYPES.get(kn);
-      const v = vn === null ? undefined : BASE_TYPES.get(vn);
+      let v = vn === null ? undefined : BASE_TYPES.get(vn);
+      /* **值是一格类**（引用语义的记录）：格子里躺一个句柄，与标量同宽 —— 与
+         `(arr 类名)` 那一格同一档。go 的 `map[string]*Mesh` 那一族靠这一条。
+         值语义的结构体还不收（格子要就地躺一整块，那要动运行时那份表的步长）。 */
+      if (v === undefined && vn !== null && this.classes.has(vn)) v = this.classes.get(vn);
       if (k !== INT && k !== STRING) {
         return this.err(node, `${what}：(dict K V) 的键只能是 int 或 string`);
       }
       if (v === undefined || v === VOID) {
-        return this.err(node, `${what}：(dict K V) 的值只能是 int / real / bool / string`);
+        return this.err(node, `${what}：(dict K V) 的值只能是 int / real / bool / string / 类名`);
       }
       const t = dictType(k, v);
       this.useContainer(t);

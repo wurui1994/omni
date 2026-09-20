@@ -281,10 +281,16 @@ export const indexSet = (obj, idx, value) => node('index-set', { obj, index: idx
  * 键与值各一格 rest 端口 —— 交替表要靠"偶数格是键"这种约定，而约定不是端口。
  *
  * @param {Array<[any, any]>} pairs 键 × 值（都已经是出好的节点）
+ * @param {any} [kzero] 声明的**键**类型（拿它的零值那格节点带着）
+ * @param {any} [vzero] 声明的**值**类型（同上）—— 空字典的类型只能从声明来，
+ *   见 nodes.js 上 `map-new` 那段话。与 `listNew` 的 `elem` 是同一条规矩。
  */
-export const mapNew = (pairs = []) => node('map-new', {
+export const mapNew = (pairs = [], kzero, vzero) => node('map-new', {
   keys: pairs.map(([k]) => k),
   vals: pairs.map(([, v]) => v),
+}, {
+  ...(kzero === undefined || kzero === null ? {} : { kzero }),
+  ...(vzero === undefined || vzero === null ? {} : { vzero }),
 });
 export const mapGet = (obj, key) => node('map-get', { obj, key });
 export const mapSet = (obj, key, value) => node('map-set', { obj, key, value });

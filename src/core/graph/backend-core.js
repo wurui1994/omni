@@ -918,6 +918,21 @@ function varOrCap(name, ctx) {
 }
 
 /**
+ * **一格值摆进容器里**（`(aset …)` / `(dset …)` 的值那一格）。
+ *
+ * `expr` 的 ref 那一支对聚合一律报缺口，那条规矩是对的（这一刀的形参与返回一律 int，
+ * 一格记录跑到别处就说不清类型）。可容器的值那一格**是有类型的**（数组的元素类型、
+ * 字典的值类型都登记着），所以这儿与 `argText` 同一招：光名字发 `(var …)` / `(cap …)`。
+ * 别的（字面量、算式）照旧交给 `expr` —— 物化的临时名由它自己起，产物一个字节不动。
+ */
+function aggValText(v, env, ctx) {
+  if (isNode(v) && v.op === 'ref' && isAggregate(typeOf(v, env, ctx), ctx)) {
+    return varOrCap(v.attrs.name, ctx);
+  }
+  return expr(v, env, ctx);
+}
+
+/**
  * 一格**函数名**当值用时的类型：`(fnty (形参类型…) 返回类型)`。
  * 不是函数名（或者被同名的局部遮住了）回 null。
  */
@@ -1321,7 +1336,7 @@ function stmtIn(x, env, ctx) {
       if (elemType(typeOf(x.ins.obj, env, ctx)) === null) {
         gap('往一格说不清形状的东西里按下标写（这一刀只接 list-new 绑出来的那格）');
       }
-      return [`(aset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.index, env, ctx)} ${expr(x.ins.value, env, ctx)})`];
+      return [`(aset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.index, env, ctx)} ${aggValText(x.ins.value, env, ctx)})`];
     }
     case 'map-set': {
       const d = hostDict(x.ins.obj, env, ctx);
@@ -1329,7 +1344,7 @@ function stmtIn(x, env, ctx) {
         gap('往一格说不清形状的东西里按键写（这一刀只接 map-new 绑出来的那格）');
       }
       /* 异质字典（`(dict string dyn)`）：写进去的值**逐格装箱**。 */
-      const v = d.val === 'dyn' ? boxText(x.ins.value, env, ctx) : expr(x.ins.value, env, ctx);
+      const v = d.val === 'dyn' ? boxText(x.ins.value, env, ctx) : aggValText(x.ins.value, env, ctx);
       return [`(dset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.key, env, ctx)} ${v})`];
     }
     case 'region': {
@@ -1565,13 +1580,31 @@ function bindMap(nm, mp, env, ctx) {
   }
   let kt = keys.length > 0 ? typeOf(keys[0], env, ctx) : null;
   let vt = keys.length > 0 ? mapValType(vals, env, ctx) : null;
+  /* **声明的键值类型优先**（`kzero` / `vzero`，有类型覆盖层 #40）：空字典的类型从
+     字面量推不出来，而"往这一层里找第一处 map-set"找不到模块级那些（写在别的函数体里）。
+     go 的 `var reg = map[string]*Node{}` 撞出来的。 */
+  if (kt === null) {
+    const kz = mp.attrs === undefined ? undefined : mp.attrs.kzero;
+    const vz = mp.attrs === undefined ? undefined : mp.attrs.vzero;
+    if (kz !== undefined && kz !== null && vz !== undefined && vz !== null) {
+      kt = declTypeOfNode(kz, env, ctx);
+      vt = declTypeOfNode(vz, env, ctx);
+    }
+  }
   if (kt === null) {
     const hint = mapHint(nm, ctx, env);
     kt = hint.key;
     vt = hint.val;
   }
   if (kt !== 'int' && kt !== 'string') gap(`字典的键只能是 int 或 string（量到的是 ${kt}）`);
-  if (!isScalar(vt) && vt !== 'dyn') gap(`字典的值只能是标量或 dyn（量到的是 ${vt}）`);
+  /* 值可以是标量、`dyn`，也可以是一格**引用语义的记录**（方言的类 —— 格子里躺一个句柄，
+     与 `(arr 类名)` 那一格同一档）。go 的 `map[string]*Mesh` 那一族靠这一条。
+     **值语义的结构体不收**：那要格子里就地躺一整块，而三条腿现在对不上（run-c 是拷贝、
+     interp 与 js 是别名）—— 任务 #83。 */
+  const clsVal = isPtrRec(vt, ctx);
+  if (!clsVal && !isScalar(vt) && vt !== 'dyn') {
+    gap(`字典的值只能是标量、dyn 或引用语义的记录（量到的是 ${vt}）`);
+  }
   for (let i = 0; i < keys.length; i++) {
     if (typeOf(keys[i], env, ctx) !== kt) gap('字典字面量里的键类型不一样 —— 方言的字典是单态的');
     /* **值只在不是 dyn 时查同型**：dyn 那一档本来就是"这个键装数、那个键装函数"

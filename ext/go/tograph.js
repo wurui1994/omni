@@ -519,6 +519,20 @@ function elemTyOf(ty) {
 }
 
 /**
+ * `map[K]V` 的**键零值与值零值**那两格节点（`map-new` 的 `kzero` / `vzero`，#40）。
+ * 算不出来那一格给 null —— 下游照旧退回"往这一层里找第一处 map-set"。
+ */
+function mapZeros(ty, name, pkg) {
+  if (ty === undefined || ty === null || !isList(ty) || tag(ty) !== 'map') return [null, null];
+  const z = (t) => {
+    if (t === undefined || t === null) return null;
+    try { const r = zeroOf(t, `${name ?? 'map'} 的键值`, pkg); return r === undefined ? null : r; }
+    catch { return null; }
+  };
+  return [z(kids(ty)[0]), z(kids(ty)[1])];
+}
+
+/**
  * 接口的方法表：`[[名, 签名节点], …]`，**嵌入的接口一路摊平**。
  *
  * 树上嵌入写成 `(constraint 类型)`（`go.grammar` 的 `ifitem -> type-set`）——
@@ -1364,17 +1378,17 @@ function zeroOf(ty, name, pkg) {
      理由：落 `null` 的话下游连键值类型都不知道（core 报「'm' 是一格 null（没赋过值）」）。
      与 go 的差：go 的 nil map **写进去要 panic**、`== nil` 为真；读 / `len` / `range`
      两边一样。
-     **值不是标量时照旧落 `null`**：方言的 `(dict K V)` 的 V 只收 int/real/bool/string
-     （判据：`(let m (dict string r1) …)` 当场骂"值只能是 int / real / bool / string"），
-     落一格空字典只会把缺口从"是一格 null"换成"键值类型推不出来"，一样过不去。
-     pt 的 `var textures map[string]Texture` 就在后一档上。 */
+     **值语义的结构体（byval）不收**：方言的 `(dict K V)` 的 V 现在收
+     int/real/bool/string **与类**（引用语义的记录，格子里躺一个句柄）—— 值语义那档
+     要格子里就地躺一整块，而三条腿现在对不上（run-c 是拷贝、interp 与 js 是别名），
+     那是任务 #83。pt 的 `var textures map[string]Texture`（接口 = byval 记录）
+     就在后一档上，所以它照旧落 `null`。 */
   if (t === 'map') {
-    const vt = kids(ty)[1];
-    let vz = null;
-    try { vz = vt === undefined ? null : zeroOf(vt, `${name}[k]`, pkg); } catch { vz = null; }
-    const scalar = vz !== null && vz !== undefined && typeof vz === 'object'
-      && vz.op === undefined && 'lit' in vz && vz.lit !== null;
-    if (scalar) return mapNew([]);
+    const [kz, vz] = mapZeros(ty, name, pkg);
+    const ok = (z) => z !== null && z !== undefined && typeof z === 'object'
+      && ((z.op === undefined && 'lit' in z && z.lit !== null)
+        || (z.op === 'record-new' && (z.attrs === undefined || z.attrs.byval !== true)));
+    if (ok(kz) && ok(vz)) return mapNew([], kz, vz);
   }
   if (NIL_TYPES.has(t)) return lit(null);
   // `[N]T` 的零值是**N 格元素零值**（数组是值语义的，不是切片）——
@@ -2151,7 +2165,10 @@ function fmtOf(text, args) {
 function makeOf(args) {
   if (args.length === 0) throw new Error('go->graph: make() 一格实参都没有');
   const ty = args[0];
-  if (tag(ty) === 'map') return mapNew([]);
+  if (tag(ty) === 'map') {
+    const [kz, vz] = mapZeros(ty, 'make(map…)');
+    return mapNew([], kz, vz);
+  }
   if (tag(ty) === 'slice') {
     const n = args[1];
     /* `make([]T, n)` —— 落一格内建 `fill(n, T 的零值)`（列表上的一个库函数 -> 内建，
@@ -2284,11 +2301,12 @@ function toNode(x) {
       // 判据要在"全是 kv"之前：记录字面量的 kv 也长这样，差的正是类型那一格。
       if (tag(ty) === 'map') {
         const vT = kids(ty)[1] ?? null;
+        const [kz, vz] = mapZeros(ty, 'map 字面量');
         return mapNew(elems.map((e) => {
           const [k, v] = kids(e);
           // 键是**值**（不是名字）—— 与记录正相反。值那边可能是省了类型的嵌套字面量。
           return [toNode(k), toNode(fillElidedTy(v, vT))];
-        }));
+        }), kz, vz);
       }
       /* **具名 struct 字面量带 `__type` 标签**：接口方法分派要它。
          `Circle{R:5}` → `{__type:"Circle", R:5}`，然后 `s.Area()` 在运行时

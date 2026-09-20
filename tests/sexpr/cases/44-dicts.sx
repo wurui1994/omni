@@ -10,6 +10,12 @@
 ;; 所以 lower.js 把用到的容器类型登记进 mod.containers —— 少登记一格，C 那边就是
 ;; 一个没声明的类型名。这一份两种键（string / int）各压一格，正是为了钉住那个登记。
 (module
+  ;; 值是一格**类**（引用语义的记录）：格子里躺一个句柄，与标量同宽 —— 与 `(arr 类名)`
+  ;; 那一格同一档。go 的 `map[string]*Mesh` 那一族靠它。
+  ;; **值语义的结构体还不收**：那要格子里就地躺一整块，而三条腿现在对不上
+  ;; （`(let w s1 (dget …))` 之后改 w，run-c 是拷贝、interp 与 js 是别名）—— 任务 #83。
+  (class c1 (a int) (b real))
+
   ;; 字典穿过函数：引用语义（句柄），就地写，回来调用方看得见
   (fn bump ((d (dict string int)) (k string)) void
     (dset (var d) (var k) (bin "+" (dget (var d) (var k)) (int 1))))
@@ -73,4 +79,17 @@
     (let b (dict string bool) (dnew (dict string bool)))
     (dset (var b) (str "no") (bool false))
     (print (dhas (var b) (str "no")))
-    (print (dget (var b) (str "no")))))
+    (print (dget (var b) (str "no")))
+
+    ;; 值是一格类：存的是句柄，所以**写完再改源头，字典里那一格跟着变**（引用语义）
+    (let g (dict string c1) (dnew (dict string c1)))
+    (let v c1 (cnew c1))
+    (fldset (var v) a (int 7))
+    (fldset (var v) b (real 1.5))
+    (dset (var g) (str "k") (var v))
+    (print (fld (dget (var g) (str "k")) a))
+    (print (fld (dget (var g) (str "k")) b))
+    (fldset (var v) a (int 99))
+    (print (fld (dget (var g) (str "k")) a))
+    (print (dhas (var g) (str "z")))
+    (print (dlen (var g)))))

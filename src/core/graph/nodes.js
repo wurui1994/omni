@@ -371,6 +371,12 @@ export const NODES = new Map([
     { name: 'vals', sem: SEM.value, rest: true },
   ], {
     effects: ['allocates'], lifetime: 'owns',
+    /* `kzero` / `vzero`（有类型覆盖层那一格，#40）：**声明的键与值类型**，拿"它的零值"
+       那格节点带着 —— 与 `list-new` 的 `elem` 是同一条规矩。
+       为什么非要它：`var m map[K]V` 是**一格空字典**，类型从字面量推不出来。core 那侧
+       原来只能往**这一层的语句序**里找第一处 `map-set`，于是模块级的那些（写在别的函数
+       体里）一律报「空字典 'm' 的键值类型推不出来」。声明的类型本来就在前端手里。 */
+    attrs: ['kzero', 'vzero'],
     doc: 'go/V `map[K]V{…}` / lua `{}` / nim `initTable` / awk 的关联数组（隐式）'
       + ' / Scheme `make-eqv-hashtable` / CL `make-hash-table` / mojo `Dict[K, V]()`',
     // 规格里数出来**九门**（十门里只有 freebasic 没有：FB 的语言里没有字典这一格）。
