@@ -256,7 +256,14 @@ export function typeOf(x, env, ctx) {
  */
 export function multiShape(vals, env, ctx) {
   const types = vals.map((v) => typeOf(v, env, ctx));
-  for (const t of types) if (!isScalar(t)) ctx.gap(`多值里有一格不是标量（量到的是 ${t}）`);
+  /* **记录也收**：记录在方言里就是**一格指针**（见 `shapeType`），摆进多值那格结构体里
+     与 `bindRecord` 把记录当字段存的是同一件事（那儿存的也是指针）。
+     从前这儿只收标量，go 的 `return hit, shape`（一个 struct 一个接口）就落不下去 ——
+     pt 整包编到最后卡的正是这一句（`多值里有一格不是标量（量到的是 (ptr r6)）`）。
+     列表 / 字典仍旧不收：那两样是句柄，"里头改了外头看得见"要先有判据。 */
+  for (const t of types) {
+    if (!isScalar(t) && !isRecType(t, ctx)) ctx.gap(`多值里有一格不是标量也不是记录（量到的是 ${t}）`);
+  }
   return ctx.shapeOf(types.map((_, i) => `v${i}`), types, true);
 }
 
