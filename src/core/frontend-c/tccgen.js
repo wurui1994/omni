@@ -7881,14 +7881,7 @@ export class CGen {  /**
     this.sretRef = REF_NONE;
     if (isStruct(ret.t)) {
       const size = typeSize(ret).size;
-      /* **HFA 也在寄存器里回**（AAPCS64 §6.9，B.2 那条在返回值上的镜像）：
-       * `struct {double a,b,c;}` 是 24 字节的 HFA，回在 d0-d2，**没有隐藏形参**。
-       * 从前只按 16 字节分界，于是 24 字节的 Vec 走了 x8 那条路 —— 量过 clang：
-       * 它的 `Vec use(void){return mk(1,2,3);}` 只发 `fmov d0/d1/d2` 然后尾调，
-       * 压根没有 x8。两件事一起错：**与 clang/tcc 的 ABI 不兼容**，而且那一块的地址
-       * 进了调用的实参池（`ARGSRET`），`mir/opt/sroa.js` 于是判它逃逸、整块放弃
-       * （`OMNI_SROA_STAT=1` 量到 smallpt 里 21 处放弃都是这一条）。 */
-      const inRegs = this.native && size > 0 && (size <= 16 || hfaOf(ret) !== null);
+      const inRegs = this.native && size > 0 && size <= 16;
       if (this.native && size > 0) f.retStruct = this.memArgAuxOf(ret);
       if (inRegs) {
         const pad = Math.max(0, 16 - size);

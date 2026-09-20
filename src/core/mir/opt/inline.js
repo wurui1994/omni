@@ -44,7 +44,7 @@ import { registerPass } from './pass.js';
  *  它数的是 AST 的"复杂度分"，我们数 MIR 指令条数，取同一个量级。 */
 export const INLINE_MAX = 80;
 /** 一趟最多展开多少处。Go **没有这个闸**（它只看被调的成本），这儿留一个大数只为
- *  「一趟别抄出个几万条」的兜底 —— 真正的闸是被调的成本 `INLINE_MAX`。 */
+ *  「一趟别抄出个几万条」的兜底 —— 真正的闸是 `inlinePass` 那一层的长胖倍数。 */
 export const INLINE_MAX_SITES = 4096;
 
 /** 被调里有这些 op 就不内联 —— 它们的意义绑在"那个函数自己的帧/ABI"上。 */
@@ -63,32 +63,8 @@ function callable(callee, caller) {
   if (callee === undefined || callee === caller) return false;
   if (callee.extern === true || callee.decl === true) return false;
   if (callee.variadic === true) return false;
-  /* **预算按它原本多大算**（`fn.inlCost`，管线开跑前记的）—— 照 Go 的 `fn.Inl.Cost`。
-   * 用 `callee.op.length` 的话，一个已经把自己的被调展开过的函数会因为"长胖了"而被判成
-   * 不可内联（`vnorm` 就是这样），于是一趟展不完。`inlCost` 不在就退回当前长度。 */
-  const cost = callee.inlCost === undefined ? callee.op.length : callee.inlCost;
-  if (callee.op.length === 0 || cost > INLINE_MAX) return false;
+  if (callee.op.length === 0 || callee.op.length > INLINE_MAX) return false;
   return bodyOk(callee);
-}
-
-/**
- * 调用点多出来的那一格 `ARGSRET`（**按值返回 struct 且值在寄存器里回**那条路）。
- *
- * 调用方一律把「返回值那一块的地址」当 `ARGSRET` 交出去（后端要它才知道把 x0/x1 或
- * d0-d3 写到哪儿），可被调那一侧**没有 `$sret` 形参** —— 值从寄存器回去。于是实参比
- * 形参多一格，positional 的对应关系整体错一位。回 1 表示"第一格是这种 ARGSRET，跳过它"。
- *
- * 不跳的后果是量出来的：HFA 改成在寄存器里回之后 `Vec` 也走这条路，
- * `args.length !== callee.params.length` 于是把**所有 Vec 辅助函数都判成不可内联** ——
- * `radiance` 的 CALL 从 18 条涨到 52 条、时间 189ms -> 820ms。
- */
-function sretSkip(fn, callee, args) {
-  if (args.length !== callee.params.length + 1) return 0;
-  const p0 = callee.params.length > 0 ? callee.params[0] : null;
-  if (p0 !== null && p0.sret === true) return 0;
-  const a0 = args[0];
-  if (a0 === REF_NONE || a0 < REF_BIAS) return 0;
-  return fn.op[a0 - REF_BIAS] === OP.ARGSRET ? 1 : 0;
 }
 
 /**
@@ -107,7 +83,7 @@ export function inlineCalls(fn, mod) {
     const callee = mod.funcs[fn.a[pc]];
     if (!callable(callee, fn)) continue;
     const args = argRefs(fn, fn.b[pc]);
-    if (args.length - sretSkip(fn, callee, args) !== callee.params.length) continue;
+    if (args.length !== callee.params.length) continue;
     sites.set(pc, callee);
   }
   if (sites.size === 0) return 0;
@@ -149,9 +125,8 @@ export function inlineCalls(fn, mod) {
      * 那一块本来就是调用方为"形参是实参的一份可改的拷贝"造的临时块（前端的
      * `structCopy`），所以被调者照旧可以随便改它。 */
     const args = argRefs(fn, old.b[pc]);
-    const skip = sretSkip({ op: old.op }, callee, args);
-    for (let i = skip; i < args.length; i++) {
-      const p = callee.params[i - skip];
+    for (let i = 0; i < args.length; i++) {
+      const p = callee.params[i];
       let v = args[i];
       if (v !== REF_NONE && v >= REF_BIAS) {
         const vop = old.op[v - REF_BIAS];
@@ -288,22 +263,23 @@ export function inlineCalls(fn, mod) {
  * 就都判它逃逸、一条访存都收不掉。radiance 因此留着 156 条 `MSTORE i64`
  * （按字节搬 struct），而 go 的同一个函数一条访存都没有（三个分量住 F 寄存器）。
  *
- * **一趟，不迭代 —— Go 就是一趟。**
- *
- * `inline.InlineDecls` 按调用图**自底向上**走：处理到 `A` 的时候它的被调 `B` 已经内联完了，
- * 抄进来的那份就是"全展开"的，所以一趟足够。我们的管线按 `mod.funcs` 的顺序逐函数跑，
- * 而 C 里被调一般定义在调用者之前 —— 天然就是那个次序。
- *
- * 曾经在这儿套过一层不动点循环（想补"一趟没展完"），**当场卡死**：被调自己是递归的时候
- * `callable` 只拦得住「被调 === 调用者」，把自递归的 `B` 展进 `A` 会把 `B` 里对 `B` 的调用
- * 也抄进来，下一轮接着展；每轮长胖得又少，"长胖多少"那个闸迟迟不触发。判据里 L1 那
- * 85 份 .c 于是跑不完。**编译时间爆炸就是设计错了** —— Go 压根不迭代。
- * 真正需要的只是"一趟里别设处数上限"（`INLINE_MAX_SITES`），那个才是从前把 `radiance`
- * 卡在半路的闸。
- *
- * 于是闸只剩一个，与 Go 同一条：**被调的成本**（`inlineMaxBudget = 80`，见 `INLINE_MAX`）。
- */
-registerPass('inline', inlineCalls);
+ * 轮数的闸是**长胖多少**（`INLINE_MAX_GROWTH` 倍）：一趟没长就停，长过头也停。 */
+export const INLINE_MAX_GROWTH = 12;
+
+function inlinePass(fn, mod) {
+  if (!fn || fn.op.length === 0) return 0;
+  const start = fn.op.length;
+  let total = 0;
+  for (;;) {
+    const k = inlineCalls(fn, mod);
+    if (k === 0) break;
+    total += k;
+    if (fn.op.length > start * INLINE_MAX_GROWTH) break;
+  }
+  return total;
+}
+
+registerPass('inline', inlinePass);
 
 /* 试过、量过、**退回来**的那一样（记在这儿，别再重来一遍）：
  *
