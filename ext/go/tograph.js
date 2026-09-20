@@ -1444,13 +1444,40 @@ function structZero(n) {
   if (ZEROING.has(n)) return null;
   ZEROING.add(n);
   let body;
+  let fz;
   try {
-    body = fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)]);
+    /* **声明成接口的字段，零值是空引用**（go 的 `var h Hit` 里 `h.Shape` 就是 nil）。
+       值落 `lit(null)`、类型走 `fzero` —— 落那格"全是桩的零值记录"的代价是
+       `h.Shape != nil` 恒为真（答案静默地错）。见 `nilFieldZero` 那段账。 */
+    fz = fs.map(([, ft]) => {
+      const ifn = ifaceNameOf(ft);
+      return ifn === null ? null : ifaceZero(ifn);
+    });
+    body = fs.map(([fn2, ft], i) => [fn2,
+      fz[i] === null ? zeroOf(ft, `${n}.${fn2}`) : lit(null)]);
   } finally {
     ZEROING.delete(n);
   }
-  return recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, byValFor(n));
+  return recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, byValFor(n),
+    typeTagged() ? [null, ...fz] : fz);
 }
+/**
+ * 字段写着 `nil`、而它**声明成接口**时，那一格的"声明的零值"（只作类型用，见
+ * `graph/nodes.js` 上 `record-new` 的 `fzero`）。别的情形回 null —— 那时照旧走
+ * `fieldValue`（浮点转、装箱那些）。
+ *
+ * 为什么只认接口、不认 `*T`：`*T` 字段的零值今天落的是 T 的零值记录（`zeroOf` 的 ptr
+ * 那一支），有代码靠"字段上那格记录一上来就在"（`p.In.V = 3` 不先分配）。换成空引用是
+ * 另一刀（任务 #88 的第二步），要连着 `p.In` 的读写一起量。
+ */
+function nilFieldZero(ft, valNode) {
+  if (ft === undefined || ft === null) return null;
+  if (!isNilNode(valNode)) return null;
+  const ifn = ifaceNameOf(ft);
+  if (ifn === null) return null;
+  return ifaceZero(ifn);
+}
+
 /** 一格类型节点**剥到光名字**（`paren` 透传、具名类型跟着 `UNDER` 走一层）。不是光名字回 null。 */
 function scalarNameOf(ty) {
   if (ty === undefined || ty === null) return null;
@@ -2576,9 +2603,13 @@ function toNode(x) {
         : tag(ty) === 'name' ? leaf(kids(ty)[0]) : null;
       /* **go 的 struct 是值语义**（赋值/传参/返回都复制）—— 第二个实参就是那一格。
          例外是"有指针接收者方法"的那些类型（`PTRRECV`），它们要引用语义。 */
-      const withType = (pairs) => ((tyName !== null && STRUCTS.has(tyName) && typeTagged())
-        ? recordNew([['__type', lit(tyName)], ...pairs], byValFor(tyName))
-        : recordNew(pairs, byValFor(tyName)));
+      const withType = (pairs, fz) => {
+        const named = tyName !== null && STRUCTS.has(tyName) && typeTagged();
+        return named
+          ? recordNew([['__type', lit(tyName)], ...pairs], byValFor(tyName),
+            Array.isArray(fz) ? [null, ...fz] : undefined)
+          : recordNew(pairs, byValFor(tyName), fz);
+      };
       /* **`T{}`（一格元素都不给）**：go 的语义是"那个类型的零值"。从前这一格落到下面
          "切片字面量"那一支去了，出来是一格 `list-new([])` —— core 那侧当场报
          "一格空列表（元素类型推不出来）—— 绑给 'tr'"（量出来的，`Triangle{}` 那一行）。
@@ -2593,12 +2624,19 @@ function toNode(x) {
       if (elems.length > 0 && elems.every((e) => tag(e) === 'kv')) {
         /* 字段声明成浮点时把值转过去（见 `fieldValue` 那段账）。 */
         const ftab = new Map((tyName !== null && STRUCTS.get(tyName)) || []);
-        return withType(elems.map((e) => {
+        const fz = [];
+        const pairs = elems.map((e) => {
           const [k, v0] = kids(e);
           const fn2 = nameOf(k);
-          const v = fillElidedTy(v0, ftab.get(fn2));
-          return [fn2, fieldValue(ftab.get(fn2), toNode(v), v)];
-        }));
+          const ft = ftab.get(fn2);
+          const v = fillElidedTy(v0, ft);
+          const vn = toNode(v);
+          /* **写着 `nil` 的接口字段**：值落空引用、类型走 `fzero`（见 `nilFieldZero`）。 */
+          const fzi = nilFieldZero(ft, vn);
+          fz.push(fzi);
+          return [fn2, fzi === null ? fieldValue(ft, vn, v) : lit(null)];
+        });
+        return withType(pairs, fz);
       }
       if (elems.some((e) => tag(e) === 'kv')) {
         throw new Error('go->graph: 这一批不接"字段名与位置混着"的复合字面量');
@@ -2609,10 +2647,15 @@ function toNode(x) {
       if (litTypeName !== null && STRUCTS.has(litTypeName) && elems.length > 0) {
         const fs = STRUCTS.get(litTypeName);
         if (fs !== null && fs.length >= elems.length) {
-          return withType(elems.map((e0, i) => {
+          const fz = [];
+          const pairs = elems.map((e0, i) => {
             const e = fillElidedTy(e0, fs[i][1]);
-            return [fs[i][0], fieldValue(fs[i][1], toNode(e), e)];
-          }));
+            const en = toNode(e);
+            const fzi = nilFieldZero(fs[i][1], en);
+            fz.push(fzi);
+            return [fs[i][0], fzi === null ? fieldValue(fs[i][1], en, e) : lit(null)];
+          });
+          return withType(pairs, fz);
         }
       }
       /* **切片/数组字面量**：元素类型从声明带上（`elem`）—— 空表（`[]float64{}`，后面靠

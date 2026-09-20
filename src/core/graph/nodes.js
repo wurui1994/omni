@@ -281,8 +281,14 @@ export const NODES = new Map([
        图上原来只有引用那一种，于是 go 的 `Vec{…}` 每一格都落成一次堆分配
        （`pnew`）—— 量出来 ×126 于 go 原生，全花在 malloc 上。
        值语义那一档落成方言的**真结构体**（`(new rN)` + `(fld …)` / `(fldset …)`），
-       不进堆，MIR 那边的 SROA/mem2reg 才提得进寄存器。 */
-    attrs: ['names', 'byval'], effects: ['allocates'], lifetime: 'owns',
+       不进堆，MIR 那边的 SROA/mem2reg 才提得进寄存器。
+
+       `fzero` —— **每格字段"声明的零值"**（同一格覆盖层）。只有那一格的值是**空引用**
+       时才问它：空引用自己说不出类型，而 go 的 `Material{…, nil}` 里那个 nil 是一格
+       接口。少了它只有两条路，两条都不对：落 `lit(null)` 则字段类型成 int（同一个
+       结构体算出两格形状），落"零值记录"则 `!= nil` 恒为真（答案静默地错）。
+       与 `func.pzero`/`rzero`、`list-new.elem`、`map-new.kzero`/`vzero` 是同一个手法。 */
+    attrs: ['names', 'byval', 'fzero'], effects: ['allocates'], lifetime: 'owns',
     doc: 'go `T{…}` / lua `{x=1}` / V `T{…}` / nim `T(x: 1)` / CL defstruct',
     // 规格里九门有记录（awk 只有关联数组，没有"按名字的字段"）。**九门全接上了**：
     // chez / sbcl 是"一句话生成一族名字"、freebasic 是"字段表在类型上、没有字面量"、

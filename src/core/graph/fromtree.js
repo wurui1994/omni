@@ -250,13 +250,21 @@ export const branchOf = (cond, then, els) => node('branch', {
  * 所以建节点这一句四门语言完全相同，各语言只剩"我的树里哪个标签是字段访问"要自己说。
  *
  * @param {Array<[string, any]>} pairs 字段名 × 已经出好的值节点
+ * @param {boolean} [byval] 值语义（go 的 struct）还是引用语义（lua/js 的表）
+ * @param {Array<any>} [fzero] 每格字段**声明的零值**（类型覆盖层 #40）。只在那一格的值是
+ *   **空引用**时才用得上 —— 空引用自己说不出类型，而 go 的 `Material{…, nil}` 里那个
+ *   nil 是一格接口，后端要靠它算字段类型（`(fnty …)` 那张表），不然同一个结构体会算出
+ *   两格形状。不需要的那几格给 `null`；整份都不需要就别传（attrs 上也不出现）。
  */
-export const recordNew = (pairs, byval) => node(
+export const recordNew = (pairs, byval, fzero) => node(
   'record-new',
   { fields: pairs.map(([, v]) => v) },
-  byval === true
-    ? { names: pairs.map(([k]) => k), byval: true }
-    : { names: pairs.map(([k]) => k) },
+  {
+    names: pairs.map(([k]) => k),
+    ...(byval === true ? { byval: true } : {}),
+    ...(Array.isArray(fzero) && fzero.some((z) => z !== null && z !== undefined)
+      ? { fzero } : {}),
+  },
 );
 export const fieldGet = (obj, name) => node('field-get', { obj }, { field: name });
 export const fieldSet = (obj, name, value) => node('field-set', { obj, value }, { field: name });

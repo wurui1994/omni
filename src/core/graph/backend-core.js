@@ -521,14 +521,25 @@ function expr(x, env, ctx) {
  * 方言直接报"两边要同型"。抬不上去（真假与数混算那种）就报缺口，不猜。
  */
 function binText(nm, args, env, ctx, uns) {
-  /* **与 nil 比**（go 的 `p == nil` / `hit.Shape != nil`，pt 里到处是）：方言那侧的机器
-     是齐的 —— `(bin "==" (var p) (null r1))` 量过，类 / 函数 / 数组都收
-     （`sexpr/lower.js` 的 `null` 那一格）。**可这一刀不能只补这儿**：go 前端今天把
-     `var p *T` 与接口的零值落成一格**真记录**（`zeroOf` 的 ptr 那一支、`ifaceZero`），
-     为的是让下游知道类型 —— 于是 `p == nil` 编得过、答案却恒为假（**静默地错**，
-     比报缺口坏）。要把它接上得先把"值是 null、类型从声明来"那一层补齐
-     （`bind` 的 tzero / `record-new` 的 fzero，类型覆盖层 #40 那一族）。
-     所以这儿照旧落到下面那句缺口上，不猜。 */
+  /* **与 nil 比**（go 的 `hit.Shape != nil`）：一边是空引用字面量、另一边是引用语义的
+     记录（方言的类）或数组 —— 落 `(bin "==" X (null rN))`（`sexpr/lower.js` 的 `null`
+     那一格收类 / 函数 / 数组，判据在 tests/sexpr 的 51-if-onestmt-null）。
+     `expr` 对"把记录整格当值用"一律报缺口（那条规矩对），所以这一格走 `aggValText`。
+
+     **前提是那一边真的可能是空引用**：接口字段与接口的零值现在落 `(null rN)`
+     （`record-new` 的 `fzero`，见 nodes.js）。`var p *T` 还落着 T 的零值记录 ——
+     那一格的 `p == nil` 仍旧恒为假，所以**没接**（任务 #88 的第二步），
+     它落不到这儿：`zeroOf` 给的是记录，不是 `lit(null)`。 */
+  if ((nm === '=' || nm === '!=') && args.length === 2) {
+    const li = isLitNull(args[0]) ? 0 : (isLitNull(args[1]) ? 1 : -1);
+    if (li >= 0) {
+      const other = args[1 - li];
+      const ot = typeOf(other, env, ctx);
+      if (isPtrRec(ot, ctx) || elemType(ot) !== null) {
+        return `(bin "${BINOP[nm]}" ${aggValText(other, env, ctx)} (null ${ot}))`;
+      }
+    }
+  }
   /* **dyn 在这儿拆箱**（拆在用它的地方，见 dyn 那一段）：`seenType` 按键查出箱子里装的是
      什么，`one` 落文本时套一层 `(asint …)` 那一族。查不出来就报缺口（`unboxTo` 那一句）。 */
   const ts = args.map((a) => seenType(a, env, ctx));
@@ -1569,8 +1580,20 @@ function bindRecord(nm, rec, env, ctx) {
      `for _, t := range m.Triangles` 里的 `t` 成了 int（pt 整包的墙就是它）。 */
   const pre = [];
   const fieldText = [];
+  const fzero = rec.attrs.fzero;
   const types = names.map((_, i) => {
     const v = vals[i];
+    /* **字段写着 nil**（`Material{…, nil}` / `Hit{0, nil}`）：值是一格**空引用**，
+       类型从 `fzero`（声明的零值）来 —— 见 nodes.js 上 `record-new` 的那段账。
+       落 `(null rN)` 而不是那格"全是桩的零值记录"：后者让 `!= nil` 恒为真。 */
+    const fz = Array.isArray(fzero) ? fzero[i] : undefined;
+    if (isLitNull(v) && fz !== undefined && fz !== null) {
+      const ft0 = declTypeOfNode(fz, env, ctx);
+      if (ft0 !== null) {
+        fieldText.push(`(null ${ft0})`);
+        return ft0;
+      }
+    }
     if (isNode(v) && v.op === 'record-new') {
       ctx.tmp = ctx.tmp + 1;
       const tn = `rec_tmp${ctx.tmp}`;
@@ -2444,7 +2467,7 @@ function recordTypeOfNode(rec, env, ctx) {
   ctx.recPend.add(nkey);
   let types = [];
   try {
-    types = fieldTypesOfNode(names, vals, env, ctx);
+    types = fieldTypesOfNode(names, vals, env, ctx, rec.attrs.fzero);
   } finally {
     ctx.recPend.delete(nkey);
   }
@@ -2470,10 +2493,21 @@ function recordTypeOfNode(rec, env, ctx) {
 }
 
 /** `recordTypeOfNode` 的字段那一趟（拆出来是为了让自引用那一格的 try/finally 读得清）。 */
-function fieldTypesOfNode(names, vals, env, ctx) {
+function fieldTypesOfNode(names, vals, env, ctx, fzero) {
   const types = [];
   for (let i = 0; i < names.length; i++) {
     const v = vals[i];
+    /* **字段写着 nil**（`Material{…, nil}`）：空引用自己说不出类型，类型从**声明**来
+       —— `record-new` 的 `fzero` 那一格（见 nodes.js 上那段账）。要摆在最前头：
+       `typeOf(lit null)` 答的是 UNKNOWN=int，而那会让同一个结构体算出两格形状。 */
+    const fz = Array.isArray(fzero) ? fzero[i] : undefined;
+    if (isLitNull(v) && fz !== undefined && fz !== null) {
+      const ft0 = declTypeOfNode(fz, env, ctx);
+      if (ft0 !== null) {
+        types.push(ft0);
+        continue;
+      }
+    }
     if (isNode(v) && v.op === 'record-new') {
       const t = recordTypeOfNode(v, env, ctx);
       if (t === null) return null;
