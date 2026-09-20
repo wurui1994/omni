@@ -211,7 +211,11 @@ function expr(x, env, ctx) {
   if (!isNode(x)) gap(`空的表达式（${JSON.stringify(x)}）`);
   if (!OPS.has(x.op)) gap(x.op);
   switch (x.op) {
-    case 'const': return lit(x.attrs.value);
+    /* `exact`（`nodes.js` 上 `const` 那段注）：整数字面量过不了 double 时前端带上了
+       源码里那串数字。方言这条腿的 int 是**真 64 位**，所以照它发 —— 别的腿的 int 是
+       一格 double，那一格它们看不看都一样。 */
+    case 'const':
+      return typeof x.attrs.exact === 'string' ? `(int ${x.attrs.exact})` : lit(x.attrs.value);
     case 'ref': {
       /* 聚合（记录 / 列表）**只能从字段与下标那两条路走**：这一刀的函数形参与返回一律 int，
        * 所以一格记录一旦跑到别处（当实参、被 print、被 return）就说不清类型了。
@@ -828,13 +832,52 @@ const isAggregate = (t, ctx) => isRecType(t, ctx) || elemType(t) !== null || dic
  * 取一格字段的文本。**记录是指针**（`types.js` 的 `shapeType`），所以那一档走
  * `(pload (pfield …))`；多值（`mN`）是真结构体，照旧 `(fld …)`。
  */
-function fldText(obj, field, env, ctx) {
-  const host = objText(obj, env, ctx);
-  if (isPtrRec(typeOf(obj, env, ctx), ctx)) return `(pload (pfield ${host} ${field}))`;
-  return `(fld ${host} ${field})`;
+/**
+ * 一格记录的**地址**（`(ptr rN)` 那一档的表达式），取不到回 null。
+ *
+ * 为什么要它：**值语义的记录嵌在引用语义的记录里**时（go 的
+ * `type Triangle struct{ V1, V2, V3 Vector }` 加一格 `func (t *Triangle) …`），
+ * `t.V1.X` 从前落成 `(fld (pload (pfield (var t) V1)) X)` —— 那是"把 V1 整块读出来"，
+ * 而方言里整块读还没做（它当场报）。对的落法是**一路 `pfield` 下去、只在最后读那一格
+ * 标量**：`(pload (pfield (pfield (var t) V1) X))`。
+ */
+function placeText(x, env, ctx) {
+  if (isNode(x) && x.op === 'field-get') {
+    const inner = placeText(x.ins.obj, env, ctx);
+    if (inner === null) return null;
+    /* 只有"字段自己也是一格记录"才继续往下串 —— 标量字段没有地址可言（它就是个值）。 */
+    if (shapeAt(typeOf(x, env, ctx), ctx) === undefined) return null;
+    return `(pfield ${inner} ${x.attrs.field})`;
+  }
+  return isPtrRec(typeOf(x, env, ctx), ctx) ? objText(x, env, ctx) : null;
 }
 
-/** 一格形状 / 标量的"新建"文本：记录 `pnew` 一格、多值 `new`、标量给零值。 */
+function fldText(obj, field, env, ctx) {
+  const at = placeText(obj, env, ctx);
+  if (at !== null) return `(pload (pfield ${at} ${field}))`;
+  return `(fld ${objText(obj, env, ctx)} ${field})`;
+}
+
+/**
+ * 往一格**地址**里写一个值，落成的语句表。
+ *
+ * 标量（与引用语义的记录，那也是一格指针）就一句 `pstore`。**值语义的记录**要
+ * **逐字段拆开写** —— 方言里"整块写"还没做（`(pstore p v)` 的 p 指向结构体时它当场报），
+ * 而这一格在 go 上是常事：`type Triangle struct{ V1 Vector }` 加一格指针接收者方法，
+ * `Triangle{}` 就是"往 `(ptr r2)` 的 V1 里写一整格 r1"。嵌套多层就一层层拆下去。
+ */
+function storeInto(place, t, src, ctx) {
+  const sh = shapeAt(t, ctx);
+  if (sh === undefined || sh.byval !== true) return [`(pstore ${place} ${src})`];
+  const out = [];
+  for (const f of sh.names) {
+    out.push(...storeInto(`(pfield ${place} ${f})`, sh.types.get(f), `(fld ${src} ${f})`, ctx));
+  }
+  return out;
+}
+
+/**
+ * 一格形状 / 标量的"新建"文本：记录 `pnew` 一格、多值 `new`、标量给零值。 */
 function newOfType(t, ctx) {
   const sh = shapeAt(t, ctx);
   if (sh === undefined) return zeroText(t);
@@ -1380,9 +1423,8 @@ function bindRecord(nm, rec, env, ctx) {
     : [...pre, bindLine(nm, shapeType(shape), `(pnew (ptr ${shape.tag}) (int 1))`, env, ctx)];
   for (let i = 0; i < names.length; i++) {
     const v = fieldText[i] ?? expr(vals[i], env, ctx);
-    out.push(byval
-      ? `(fldset (var ${nm}) ${names[i]} ${v})`
-      : `(pstore (pfield (var ${nm}) ${names[i]}) ${v})`);
+    if (byval) { out.push(`(fldset (var ${nm}) ${names[i]} ${v})`); continue; }
+    out.push(...storeInto(`(pfield (var ${nm}) ${names[i]})`, types[i], v, ctx));
   }
   return out;
 }

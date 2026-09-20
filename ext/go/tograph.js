@@ -300,6 +300,35 @@ function recvOwner(recv) {
   return namedTypeOf(kids(p0).find((y) => tag(y) !== 'name'));
 }
 
+/** 这格接收者是**指针接收者**吗（`func (r *Rng) …`）—— 见 `PTRRECV`。 */
+function recvIsPtr(recv) {
+  const p0 = kids(recv)[0];
+  if (p0 === undefined) return false;
+  let t = kids(p0).find((y) => tag(y) !== 'name');
+  while (t !== undefined && isList(t) && tag(t) === 'paren') t = kids(t)[0];
+  return t !== undefined && isList(t) && tag(t) === 'ptr';
+}
+
+/**
+ * **至少有一格指针接收者方法的那些类型**（`collectDecls` 那一趟收）。
+ *
+ * 它们的记录落成**引用语义**（`byval` 不置上，于是 `shapeType` 给的是 `(ptr rN)`），
+ * 别的结构体照旧是值语义。
+ *
+ * 为什么非要这一格（量出来的，raytrace 的 LCG）：`func (r *Rng) next()` 里那句
+ * `r.s = …` 是要**改调用者那一格**的，而值语义的形参是一份拷贝 —— `next()` 于是每次
+ * 都从同一个种子算，六次调用回的是同一个数（go 给六个不同的数）。图落得出来、跑得动，
+ * 答案静默地错。
+ *
+ * **不精确的角，明写在这儿**：go 里 `Rng` 本身仍是值语义（`a := b` 要复制），而这一刀
+ * 把整个类型转成了引用 —— 一个类型只有一格形状，值与引用两档同时要是另一件事
+ * （每处用法各自定形，那要先有"用法级的类型"）。语料里"既有指针方法、又靠赋值复制"
+ * 的类型极少，而"指针方法改不动东西"是**每次都错**。
+ */
+const PTRRECV = new Set();
+/** 这格具名类型的记录要不要值语义（`recordNew` 的第二个实参）。 */
+const byValFor = (n) => !(typeof n === 'string' && PTRRECV.has(n));
+
 /** `T{…}` / `&T{…}` 那格**复合字面量**的具名类型（别的形状回 null —— 不猜）。 */function litTypeNameOf(r) {
   if (r === undefined || r === null || !isList(r)) return null;
   const g = tag(r);
@@ -377,6 +406,8 @@ function collectDecls(x, shapesOnly) {
        是**光名字**，登记成 `?.名字` 只会让调用点落一格 `ref ?__名字`（指向不存在的函数）。
        不登记，调用点就落成一句**有名有姓的墙**（`selWall` 的第 4 条）—— 不猜。 */
     if (owner !== null) {
+      /* 见 `PTRRECV` 那段账：指针接收者的主人落成引用语义。 */
+      if (recvIsPtr(recv)) PTRRECV.add(owner);
       /* 方法的形参表也收（键是 mangle 过的名字，第 0 格空着留给接收者）。 */
       const sigM = kids(x).find((y) => tag(y) === 'sig');
       if (sigM !== undefined) {
@@ -608,7 +639,7 @@ function structZero(n) {
   const fs = STRUCTS.get(n);
   if (fs === undefined || fs === null) return null;
   const body = fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)]);
-  return recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, true);
+  return recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, byValFor(n));
 }
 
 /** 一格类型节点**剥到光名字**（`paren` 透传、具名类型跟着 `UNDER` 走一层）。不是光名字回 null。 */
@@ -674,6 +705,20 @@ function isGoFloatTok(s) {
     return s.includes('p') || s.includes('P');
   }
   return s.includes('.') || s.includes('e') || s.includes('E');
+}
+
+/**
+ * **这串整数字面量过得了 JS 的 double 吗** —— 过不了就把原文带上（`const` 的 `exact`）。
+ *
+ * 判据是"回写一遍还是同一串数字吗"：`BigInt(txt)` 认十进制、`0x`/`0o`/`0b` 与
+ * go 的下划线分隔（先剥掉），而 `BigInt(v)` 只在 v 是整数时成立。
+ * 浮点写法（带小数点或指数）不在这一格 —— 那本来就是双精度，没有"原文更准"这回事。
+ */
+function exactOf(txt, v) {
+  if (!Number.isInteger(v) || isGoFloatTok(txt)) return {};
+  let big;
+  try { big = BigInt(txt.replace(/_/g, '')); } catch { return {}; }
+  return String(big) === String(BigInt(v)) ? {} : { exact: String(big) };
 }
 
 /** 一格形参的**零值节点**（有类型覆盖层用）。说不清就回 null —— 不中断。 */
@@ -1383,7 +1428,11 @@ function toNode(x) {
          就会定成 real，不必多包一层。 */
       const txt = String(leaf(kids(x)[0]));
       const v = Number(txt);
-      const c = node('const', {}, { value: v });
+      /* **过不了 double 的整字面量把原文带上**（`nodes.js` 上 `const` 的 `exact`）。
+         量出来的：`raytrace.go` 的 LCG 常数 6364136223846793005 经 `Number` 掉成
+         …3000，整条随机流于是不同 —— 而且没有任何提示。判据是"回写一遍还是同一串
+         数字吗"，所以十六进制 / 下划线那几种写法也都过（`BigInt` 认它们）。 */
+      const c = node('const', {}, { value: v, ...exactOf(txt, v) });
       return (Number.isInteger(v) && isGoFloatTok(txt)) ? convOf('float', c) : c;
     }
     case 'str': return node('const', {}, { value: leaf(kids(x)[0]) });
@@ -1476,10 +1525,11 @@ function toNode(x) {
          查 `__goMethodTable["Circle.Area"]` 找到 `Circle__Area`。 */
       const tyName = tag(ty) === 'tname' ? leaf(kids(ty)[0])
         : tag(ty) === 'name' ? leaf(kids(ty)[0]) : null;
-      /* **go 的 struct 是值语义**（赋值/传参/返回都复制）—— 第二个实参就是那一格。 */
+      /* **go 的 struct 是值语义**（赋值/传参/返回都复制）—— 第二个实参就是那一格。
+         例外是"有指针接收者方法"的那些类型（`PTRRECV`），它们要引用语义。 */
       const withType = (pairs) => ((tyName !== null && STRUCTS.has(tyName) && typeTagged())
-        ? recordNew([['__type', lit(tyName)], ...pairs], true)
-        : recordNew(pairs, true));
+        ? recordNew([['__type', lit(tyName)], ...pairs], byValFor(tyName))
+        : recordNew(pairs, byValFor(tyName)));
       /* **`T{}`（一格元素都不给）**：go 的语义是"那个类型的零值"。从前这一格落到下面
          "切片字面量"那一支去了，出来是一格 `list-new([])` —— core 那侧当场报
          "一格空列表（元素类型推不出来）—— 绑给 'tr'"（量出来的，`Triangle{}` 那一行）。
@@ -2155,6 +2205,7 @@ export function goToGraph(tree, opts) {
   UNDER.clear();
   MSET.clear();
   FSIG.clear();
+  PTRRECV.clear();
   NEEDS_TYPETAG = false;
   NEEDS_SCHED = false;
   VARTYPE.clear();

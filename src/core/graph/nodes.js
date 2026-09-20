@@ -83,7 +83,12 @@ const TEN = ['go', 'vlang', 'nim', 'lua', 'mojo', 'cpp', 'awk', 'freebasic', 'ch
 export const NODES = new Map([
   // ---- 值与名字（4 格）--------------------------------------------------------
   N('const', 'expr', [], {
-    attrs: ['value'], doc: 'chez quote / go OLITERAL / 十门全有',
+    /* `exact` 是一格**附属**（有类型覆盖层那一路的规矩：声明的优先、推出来的兜底）：
+       整数字面量**过不了 JS 的 double** 时，前端把源码里那串十进制数字原样带上。
+       量出来的必要性：go 的 LCG 常数 6364136223846793005 经 `Number` 掉成 …3000，
+       整条随机流于是不同 —— 而且是**静默的**。今天只有方言那条腿看它（它是真 64 位），
+       别的腿的 int 就是一格 double，那是它们各自的账，不在这一格上治。 */
+    attrs: ['value', 'exact'], doc: 'chez quote / go OLITERAL / 十门全有',
     providers: { spec: TEN, why: {} },
   }),
   N('ref', 'expr', [], {
