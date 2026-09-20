@@ -222,7 +222,18 @@ char *omni_alloc_bytes(int64_t n);
    （`bench/go/pt.go`，4 个 goroutine）在 `-O` 之后答案每跑一次都不一样，而 1 个
    goroutine 时逐字节稳定。bump 分配器天生适合按线程分：只分不单独释放，所以每条线程
    自己一条块链就够，不必加锁（慢路径上的统计计数仍是全局的 —— 那只是诊断）。
-   `OMNI_NO_TLS` 留一个后门给不支持 `_Thread_local` 的目标（那时退回从前的行为）。 */
+
+   **我们自己这条腿还不认 `_Thread_local`**：C 前端把这个关键字吃掉（tccgen.js 的
+   `TOK_THREAD_LOCAL` 那一格），于是"按线程分"在这儿悄悄退回成全局 —— 量出来的：
+   `nm -m` 看得见 `_omni_arena_ptr` 落在 `__DATA,__data`，一个 TLV 都没有，而 pt
+   在 `OMNI_MIR_OPT=1` 下 20 趟里有 3 趟答案不同（clang 那一列同一份 C 稳定）。
+   所以这条腿走"按线程查一次"的取法：`omni_arena_slot()` 在 omni_mem.c 里按 pthread
+   的 TSD 查，每次分配多一次调用。要快路径零开销就得后端真认 `_Thread_local`
+   （Mach-O 的 TLV / ELF 的 TLS 段 + 相应重定位），那是另一件事。
+   `OMNI_NO_TLS` 也留着手动开这条路。 */
+#if !defined(OMNI_NO_TLS) && defined(__TINYC__)
+#  define OMNI_NO_TLS 1
+#endif
 #ifndef OMNI_TLS
 #  ifdef OMNI_NO_TLS
 #    define OMNI_TLS
@@ -230,8 +241,26 @@ char *omni_alloc_bytes(int64_t n);
 #    define OMNI_TLS _Thread_local
 #  endif
 #endif
+
+#ifdef OMNI_NO_TLS
+/* 一条线程的 arena 位置。头一格是 bump 指针、第二格是这一块的尽头 —— 与下面
+   `omni_arena_ptr` / `omni_arena_end` 那两个老名字一一对应。 */
+typedef struct { char *ptr; char *end; } omni_arena_tp;
+omni_arena_tp *omni_arena_slot(void);
+/* 老名字留着：别处（omni_str.c 的原地追加、omni_grow、mark/release）照旧写
+   `omni_arena_ptr`。热路径（omni_alloc）自己取一次存进局部，不走这两个宏。 */
+#define omni_arena_ptr (omni_arena_slot()->ptr)
+#define omni_arena_end (omni_arena_slot()->end)
+#define OMNI_ARENA_TAKE omni_arena_tp *a_ = omni_arena_slot();
+#define OMNI_A_PTR (a_->ptr)
+#define OMNI_A_END (a_->end)
+#else
 extern OMNI_TLS char *omni_arena_ptr;
 extern OMNI_TLS char *omni_arena_end;
+#define OMNI_ARENA_TAKE
+#define OMNI_A_PTR omni_arena_ptr
+#define OMNI_A_END omni_arena_end
+#endif
 void *omni_alloc_slow(size_t n);
 char *omni_alloc_bytes_slow(int64_t n);
 
@@ -246,21 +275,23 @@ void omni_mem_note(size_t n);
 
 /* 对齐的分配，给结构体和容器用 */
 static inline void *omni_alloc(size_t n) {
+  OMNI_ARENA_TAKE
   if (omni_mem_count_on) omni_mem_note(n);
-  char *p = (char *)(((uintptr_t)omni_arena_ptr + (OMNI_ALIGN - 1)) & ~(uintptr_t)(OMNI_ALIGN - 1));
-  if (p > omni_arena_end || n > (size_t)(omni_arena_end - p)) return omni_alloc_slow(n);
-  omni_arena_ptr = p + n;
+  char *p = (char *)(((uintptr_t)OMNI_A_PTR + (OMNI_ALIGN - 1)) & ~(uintptr_t)(OMNI_ALIGN - 1));
+  if (p > OMNI_A_END || n > (size_t)(OMNI_A_END - p)) return omni_alloc_slow(n);
+  OMNI_A_PTR = p + n;
   return p;
 }
 
 /* 不对齐的分配，给字符串用：字符串是字节序列，不需要对齐，而且不对齐才能让
    omni_str_cat 的"在 arena 顶上原地追加"命中（见 omni_str.c） */
 static inline char *omni_alloc_bytes(int64_t n) {
+  OMNI_ARENA_TAKE
   if (n < 0) omni_error("negative allocation");
   if (omni_mem_count_on) omni_mem_note((size_t)n);
-  if ((size_t)n > (size_t)(omni_arena_end - omni_arena_ptr)) return omni_alloc_bytes_slow(n);
-  char *p = omni_arena_ptr;
-  omni_arena_ptr = p + n;
+  if ((size_t)n > (size_t)(OMNI_A_END - OMNI_A_PTR)) return omni_alloc_bytes_slow(n);
+  char *p = OMNI_A_PTR;
+  OMNI_A_PTR = p + n;
   return p;
 }
 #endif

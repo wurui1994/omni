@@ -51,11 +51,63 @@ typedef struct omni_arena_block {
   char *base;
 } omni_arena_block;
 
-/* 三格都按线程分（见 omni.h 上 `OMNI_TLS` 那段账）：每条线程自己一条块链、自己一格
-   bump 指针，于是不必加锁。块仍旧从线程的 TLS 可达，LeakSanitizer 不会报泄漏。 */
-static OMNI_TLS omni_arena_block *omni_arena_head = NULL;
+/* mark/release 的存档点。定义提到这儿来，因为按线程分的那一份状态里要摆一摞。 */
+#define OMNI_MARK_MAX 64
+typedef struct {
+  omni_arena_block *head;
+  char *ptr;
+  char *end;
+} omni_arena_savepoint;
+
+/* 四格都按线程分（见 omni.h 上 `OMNI_TLS` 那段账）：每条线程自己一条块链、自己一格
+   bump 指针、自己一摞存档点，于是不必加锁。块仍旧从线程那一份状态可达，
+   LeakSanitizer 不会报泄漏。 */
+#ifdef OMNI_NO_TLS
+/* 不认 `_Thread_local` 的编译器（我们自己的 C 前端、tcc）走 pthread 的 TSD。 */
+#include <pthread.h>
+
+typedef struct {
+  omni_arena_tp tp;                          /* 头一格：omni_arena_slot 回的就是它 */
+  omni_arena_block *head;
+  omni_arena_savepoint marks[OMNI_MARK_MAX];
+  int nmark;
+} omni_arena_state;
+
+/* 键只建一次。**没有用 pthread_once**：我们自己那条腿的 sysroot 里还没有它那格
+   不透明类型，而这儿的窗口只有"进程里第一次分配"那一瞬 —— 那时只有一条线程在跑
+   （go 这条腿的 worker 是 `omni_sched_init` 之后才起的，而 main 早就分配过了）。
+   万一真撞上，后果是有一条线程的那份状态被丢掉重建（漏一块，不会把同一块内存
+   发给两边），不是错答案。 */
+static pthread_key_t omni_arena_key;
+static int omni_arena_keyed = 0;
+
+static omni_arena_state *omni_arena_get(void) {
+  if (!omni_arena_keyed) {
+    if (pthread_key_create(&omni_arena_key, NULL) != 0) omni_error("out of memory");
+    omni_arena_keyed = 1;
+  }
+  omni_arena_state *s = (omni_arena_state *)pthread_getspecific(omni_arena_key);
+  if (s == NULL) {
+    s = (omni_arena_state *)calloc(1, sizeof *s);
+    if (s == NULL) omni_error("out of memory");
+    pthread_setspecific(omni_arena_key, s);
+  }
+  return s;
+}
+
+omni_arena_tp *omni_arena_slot(void) { return &omni_arena_get()->tp; }
+#define OMNI_AHEAD (omni_arena_get()->head)
+#define OMNI_AMARKS (omni_arena_get()->marks)
+#define OMNI_ANMARK (omni_arena_get()->nmark)
+#else
 OMNI_TLS char *omni_arena_ptr = NULL;
 OMNI_TLS char *omni_arena_end = NULL;
+static OMNI_TLS omni_arena_block *omni_arena_head = NULL;static OMNI_TLS omni_arena_savepoint omni_marks[OMNI_MARK_MAX];
+static OMNI_TLS int omni_nmark = 0;
+#define OMNI_AHEAD omni_arena_head
+#define OMNI_AMARKS omni_marks
+#define OMNI_ANMARK omni_nmark
+#endif
 
 #define OMNI_BLOCK_MIN ((size_t)1 << 20)  /* 1 MiB：小到不浪费，大到几乎不触发慢路径 */
 
@@ -218,8 +270,8 @@ static void omni_arena_new_block(size_t n) {
   omni_arena_block *b = (omni_arena_block *)malloc(sizeof *b);
   if (!b) omni_error("out of memory");
   b->base = base;
-  b->next = omni_arena_head;
-  omni_arena_head = b;  /* 保持全局可达，LeakSanitizer 才不会把它当泄漏 */
+  b->next = OMNI_AHEAD;
+  OMNI_AHEAD = b;  /* 保持全局可达，LeakSanitizer 才不会把它当泄漏 */
   omni_arena_ptr = base;
   omni_arena_end = base + cap;
   if (omni_arena_nblock == 0 && getenv("OMNI_MEM_DEBUG")) {
@@ -261,38 +313,31 @@ void *omni_alloc_slow(size_t n) {
  * BezierPatch 上堆到 32 GiB 被 OOM 杀掉，而同一份代码在 JS 腿上有 GC 就没事。
  * 所以开一格"作用域"：mark 记下当前位置，release 把之后开的块整块还回去。
  * **契约**：release 之后，那一段里分配的东西一律不能再碰 —— 只用在"回标量"的地方
- * （asy__sbound 回一个 real，什么都不逃逸）。嵌套用栈，满了就退化成"不回收"（回 -1）。*/
-typedef struct {
-  omni_arena_block *head;
-  char *ptr;
-  char *end;
-} omni_arena_savepoint;
-
-/* mark/release 也按线程分：它记的是**这条线程**的 arena 位置。 */
-#define OMNI_MARK_MAX 64
-static OMNI_TLS omni_arena_savepoint omni_marks[OMNI_MARK_MAX];
-static OMNI_TLS int omni_nmark = 0;
-
+ * （asy__sbound 回一个 real，什么都不逃逸）。嵌套用栈，满了就退化成"不回收"（回 -1）。
+ * mark/release 也按线程分：它记的是**这条线程**的 arena 位置（存档点的类型与那一摞
+ * 在文件头上按线程分那一段里）。 */
 int64_t omni_arena_mark(void) {
-  if (omni_nmark >= OMNI_MARK_MAX) return -1;
-  omni_marks[omni_nmark].head = omni_arena_head;
-  omni_marks[omni_nmark].ptr = omni_arena_ptr;
-  omni_marks[omni_nmark].end = omni_arena_end;
-  return (int64_t)(omni_nmark++);
+  if (OMNI_ANMARK >= OMNI_MARK_MAX) return -1;
+  int i = OMNI_ANMARK;
+  OMNI_AMARKS[i].head = OMNI_AHEAD;
+  OMNI_AMARKS[i].ptr = omni_arena_ptr;
+  OMNI_AMARKS[i].end = omni_arena_end;
+  OMNI_ANMARK = i + 1;
+  return (int64_t)i;
 }
 
 int64_t omni_arena_release(int64_t m) {
-  if (m < 0 || m >= (int64_t)omni_nmark) return 0;
-  omni_arena_savepoint *k = &omni_marks[(int)m];
-  while (omni_arena_head != k->head) {
-    omni_arena_block *b = omni_arena_head;
-    omni_arena_head = b->next;
+  if (m < 0 || m >= (int64_t)OMNI_ANMARK) return 0;
+  omni_arena_savepoint *k = &OMNI_AMARKS[(int)m];
+  while (OMNI_AHEAD != k->head) {
+    omni_arena_block *b = OMNI_AHEAD;
+    OMNI_AHEAD = b->next;
     free(b->base);
     free(b);
   }
   omni_arena_ptr = k->ptr;
   omni_arena_end = k->end;
-  omni_nmark = (int)m;
+  OMNI_ANMARK = (int)m;
   return 0;
 }
 

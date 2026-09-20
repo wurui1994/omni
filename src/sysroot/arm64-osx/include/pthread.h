@@ -24,4 +24,13 @@ pthread_t pthread_self(void);
 int pthread_main_np(void);
 size_t pthread_get_stacksize_np(pthread_t th);
 
+/* 按线程存一格东西（TSD）。arena 走这条：我们自己的 C 前端还不认 `_Thread_local`
+   （把这个关键字吃掉了），于是 bump 指针那一份状态按线程查 —— 账在 omni.h 上。
+   量到 sizeof(pthread_key_t)=**8**（Linux 上 4）。 */
+typedef unsigned long pthread_key_t;
+int pthread_key_create(pthread_key_t *key, void (*dtor)(void *));
+int pthread_key_delete(pthread_key_t key);
+void *pthread_getspecific(pthread_key_t key);
+int pthread_setspecific(pthread_key_t key, const void *val);
+
 #endif

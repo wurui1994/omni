@@ -113,9 +113,18 @@ const omni_jit_sym OMNI_JIT_SYMS[] = {
   /* ---- 运行时的**变量**：要的是那格存储的地址，不是它现在的值。arena 的两个游标就是
          这一类（`omni_alloc` 的快路径在 IR 里原地重建，于是它直接读写这两格）。
          jancy 那边这一类走 mapVariable、与 mapFunction 分成两个口子，理由正是
-         这个"地址 vs 值"。 ---- */
+         这个"地址 vs 值"。
+
+         **两格都是线程局部的**（omni.h 的 `OMNI_TLS`），这儿填的是"建表这条线程"
+         那一份的地址 —— JIT 出来的码只在这条线程上跑，所以成立。编译器不认
+         `_Thread_local` 的那条腿（`OMNI_NO_TLS`）根本没有这两个符号：那时状态按
+         线程查（`omni_arena_slot`），IR 里要重建快路径就得先调它。 ---- */
+#ifdef OMNI_NO_TLS
+  { "omni_arena_slot", (void *)omni_arena_slot },
+#else
   { "omni_arena_ptr", (void *)&omni_arena_ptr },
   { "omni_arena_end", (void *)&omni_arena_end },
+#endif
 
   /* ---- libc：IR 里**直接** declare 的那两个 ---- */
   { "fflush", (void *)fflush },
