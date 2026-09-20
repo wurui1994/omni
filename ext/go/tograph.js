@@ -1440,42 +1440,68 @@ function structZero(n) {
   const fs = STRUCTS.get(n);
   if (fs === undefined || fs === null) return null;
   /* **自引用 / 互相引用截在这儿**（`*Node` 里躺着 `*Node`）：正在算它的零值就回 null，
-     那一格字段于是落回"说不清类型"—— 与从前一样，不会无限递归。 */
+     那一格字段于是落回"说不清类型"—— 与从前一样，不会无限递归。
+     直接的自引用（`Node` 里的 `*Node`）不走这条路，见下面 `selfAt`。 */
   if (ZEROING.has(n)) return null;
   ZEROING.add(n);
   let body;
   let fz;
+  let selfAt;
   try {
+    /* **直接自引用的那一格**（`Left *Node` 在 Node 自己里）：值落空引用，类型在 `fzero`
+       上**指回这格记录自己** —— 环只在 attrs 上（`walkCore` / `mapNodes` 只走 `ins`），
+       与 ADR-0040 里接口 `rzero` 指回自己同一个手法，后端靠 `recPend` / `SELF_TY` 收敛。
+       从前这一格落成 int（`ZEROING` 那道闸回 null），于是 `n.Left.X` 报
+       "两处的类型不一样（r7 与 int）"（任务 #84）。 */
+    selfAt = fs.map(([, ft]) => selfPtrName(ft) === n);
     /* **声明成接口的字段，零值是空引用**（go 的 `var h Hit` 里 `h.Shape` 就是 nil）。
        值落 `lit(null)`、类型走 `fzero` —— 落那格"全是桩的零值记录"的代价是
        `h.Shape != nil` 恒为真（答案静默地错）。见 `nilFieldZero` 那段账。 */
-    fz = fs.map(([, ft]) => {
-      const ifn = ifaceNameOf(ft);
-      return ifn === null ? null : ifaceZero(ifn);
+    fz = fs.map(([, ft], i) => {
+      if (selfAt[i]) return lit(null);            // 占位，下面换成 rec 自己
+      return nilFieldZero(ft, lit(null));
     });
     body = fs.map(([fn2, ft], i) => [fn2,
       fz[i] === null ? zeroOf(ft, `${n}.${fn2}`) : lit(null)]);
   } finally {
     ZEROING.delete(n);
   }
-  return recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, byValFor(n),
+  const rec = recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, byValFor(n),
     typeTagged() ? [null, ...fz] : fz);
+  const off = typeTagged() ? 1 : 0;
+  for (let i = 0; i < selfAt.length; i++) {
+    if (selfAt[i] && Array.isArray(rec.attrs.fzero)) rec.attrs.fzero[off + i] = rec;
+  }
+  return rec;
+}
+
+/** `*T` 里那个 T 的具名类型名（T 得是这份里登记过的 struct）。不是那个形状回 null。 */
+function selfPtrName(ty) {
+  if (ty === undefined || ty === null || !isList(ty)) return null;
+  if (tag(ty) === 'paren') return selfPtrName(kids(ty)[0]);
+  if (tag(ty) !== 'ptr') return null;
+  const tn = namedTypeOf(kids(ty).find((y) => isList(y)));
+  if (tn === null || STRUCTS.get(tn) === undefined || STRUCTS.get(tn) === null) return null;
+  return tn;
 }
 /**
- * 字段写着 `nil`、而它**声明成接口**时，那一格的"声明的零值"（只作类型用，见
- * `graph/nodes.js` 上 `record-new` 的 `fzero`）。别的情形回 null —— 那时照旧走
- * `fieldValue`（浮点转、装箱那些）。
+ * 字段写着 `nil`（或者压根没写）、而它声明成**引用类型**（接口 / `*具名结构体`）时，
+ * 那一格的"声明的零值"（只作类型用，见 `graph/nodes.js` 上 `record-new` 的 `fzero`）。
+ * 别的情形回 null —— 那时照旧走 `fieldValue`（浮点转、装箱那些）或真零值。
  *
- * 为什么只认接口、不认 `*T`：`*T` 字段的零值今天落的是 T 的零值记录（`zeroOf` 的 ptr
- * 那一支），有代码靠"字段上那格记录一上来就在"（`p.In.V = 3` 不先分配）。换成空引用是
- * 另一刀（任务 #88 的第二步），要连着 `p.In` 的读写一起量。
+ * 为什么 `*T` 也要（2026-09-21 补的）：`&Node{V: 2}` 里没写到的 `Left *Node` 从前落
+ * `structZero(Node)` —— 一格**真记录**，于是 `root.Left.Left == nil` 是假（go 里是真）。
+ * 那是"答案静默地错"。代价是 `p.In.V = 3` 这种"靠零值把嵌套那格先造出来"的写法会当场
+ * 空引用 —— 而它在 go 里本来就是一次 panic。
  */
 function nilFieldZero(ft, valNode) {
   if (ft === undefined || ft === null) return null;
   if (!isNilNode(valNode)) return null;
   const ifn = ifaceNameOf(ft);
-  if (ifn === null) return null;
-  return ifaceZero(ifn);
+  if (ifn !== null) return ifaceZero(ifn);
+  const tn = selfPtrName(ft);
+  if (tn !== null) return structZero(tn);      // 正在算它自己时回 null，照旧退回去
+  return null;
 }
 
 /** 一格类型节点**剥到光名字**（`paren` 透传、具名类型跟着 `UNDER` 走一层）。不是光名字回 null。 */
