@@ -598,6 +598,14 @@ function lenText(a, env, ctx) {
     if (elemType(t) !== null) return `(alen (var ${a.attrs.name}))`;
     if (dictOf(t) !== null) return `(dlen (var ${a.attrs.name}))`;
   }
+  /* **不只认光名字**：`len(m.Triangles)`（数组当结构体字段那一族）在图上是一格
+     `field-get`，问类型就够了 —— 原来这儿一律落 `slen`，方言当场骂"第一个参数要是 string"。 */
+  if (isNode(a) && a.op !== 'ref') {
+    let t = null;
+    try { t = typeOf(a, env, ctx); } catch { t = null; }
+    if (elemType(t) !== null) return `(alen ${expr(a, env, ctx)})`;
+    if (dictOf(t) !== null) return `(dlen ${expr(a, env, ctx)})`;
+  }
   return `(slen ${expr(a, env, ctx)})`;
 }
 
@@ -1316,13 +1324,25 @@ function stmtIn(x, env, ctx) {
     case 'set': return [`(set ${x.attrs.name} ${expr(x.ins.value, env, ctx)})`];
     case 'field-set': {
       const host = objText(x.ins.obj, env, ctx);
-      /* **写进去的是一整格值语义的记录**（go 的 `m.Tex = &ColorTexture{2}` —— 接口装箱
-         交回来的就是这一档，ADR-0040）：方言里整块写还没做，得**逐字段抄**。
-         先把右边物化成一格临时名（它多半是一次调用），再交给 `storeInto` —— 那一份本来
-         就会按"值语义就逐字段、引用语义就一格指针"分流（零值初始化走的正是它）。 */
+      const onPtr = isPtrRec(typeOf(x.ins.obj, env, ctx), ctx);
+      /* **写进去的是一格聚合字面量**（`m.Triangles = make([]*Tri, 2)` / `m.Tex = &T{…}`）：
+         那几格在**表达式位置**上落不下去（记录要 `pnew` + 逐字段、数组要 `anew` + 一圈
+         `apush`），所以先物化成一格临时名，再把它交给 `storeInto` —— 那一份按"值语义就
+         逐字段抄、别的就一格句柄"分流（零值初始化走的正是它）。 */
+      const mk = isNode(x.ins.value) ? MATERIALIZE[x.ins.value.op] : undefined;
+      const isFill = isNode(x.ins.value) && x.ins.value.op === 'prim'
+        && x.ins.value.attrs.name === 'fill';
+      if (onPtr && (mk !== undefined || isFill)) {
+        ctx.tmp = ctx.tmp + 1;
+        const tn = `set_tmp${ctx.tmp}`;
+        const pre = isFill ? bindFill(tn, x.ins.value, env, ctx)
+          : mk(tn, x.ins.value, env, ctx);
+        return [...pre, ...storeInto(`(pfield ${host} ${x.attrs.field})`, env.get(tn), `(var ${tn})`, ctx)];
+      }
+      /* **写进去的是一整格值语义的记录**（接口装箱交回来的就是这一档，ADR-0040）：
+         方言里整块写还没做，得逐字段抄。右边多半是一次调用，先物化。 */
       const vt = typeOf(x.ins.value, env, ctx);
-      if (isRecType(vt, ctx) && !isPtrRec(vt, ctx)
-        && isPtrRec(typeOf(x.ins.obj, env, ctx), ctx)) {
+      if (onPtr && isRecType(vt, ctx) && !isPtrRec(vt, ctx)) {
         ctx.tmp = ctx.tmp + 1;
         const tn = `set_tmp${ctx.tmp}`;
         const pre = [bindLine(tn, vt, expr(x.ins.value, env, ctx), env, ctx)];
@@ -1330,9 +1350,7 @@ function stmtIn(x, env, ctx) {
       }
       const v = expr(x.ins.value, env, ctx);
       /* 记录是指针（见 `fldText`）—— 写一格字段是 `(pstore (pfield …) …)`。 */
-      if (isPtrRec(typeOf(x.ins.obj, env, ctx), ctx)) {
-        return [`(pstore (pfield ${host} ${x.attrs.field}) ${v})`];
-      }
+      if (onPtr) return [`(pstore (pfield ${host} ${x.attrs.field}) ${v})`];
       return [`(fldset ${host} ${x.attrs.field} ${v})`];
     }
     case 'index-set': {
@@ -1489,8 +1507,11 @@ function bindRecord(nm, rec, env, ctx) {
      而 record-new 在表达式位置上落不下去。所以先把里头那格物化成一格临时名，再把那格
      **指针**存进字段 —— 里外指同一格，与图上"记录是引用"一致。
      递归是这儿展开的（`rec_tmpN` 逐层各一格），套几层都一样。
-     列表 / 字典当字段**仍旧不接**：那两样在方言里是句柄（引用语义），"里头改了外头看得见"
-     这件事得先有判据再说。 */
+     **数组 / 字典当字段也是这一档**（go 的 `Mesh.Triangles []*Triangle`、`Buffer.Pixels`）：
+     方言里它们是**句柄**（一个字），`(struct rN (f (arr T)))` 收得住（判据：`(class Box
+     (items (arr int)) (ps (arr P)))` 在五条腿上都跑得动）。从前这一族**不报缺口、却给了
+     错类型**：`typeOf(list-new)` 回 UNKNOWN=`int`，静静通过了"是不是标量"那道闸，于是
+     `for _, t := range m.Triangles` 里的 `t` 成了 int（pt 整包的墙就是它）。 */
   const pre = [];
   const fieldText = [];
   const types = names.map((_, i) => {
@@ -1501,6 +1522,19 @@ function bindRecord(nm, rec, env, ctx) {
       pre.push(...bindRecord(tn, v, env, ctx));
       fieldText.push(`(var ${tn})`);
       return env.get(tn);
+    }
+    /* **字段里是一格数组 / 字典字面量**：与上面那一支同一条 —— 先物化，再把句柄存进字段。
+       类型走 `declTypeOfNode`（`typeOf` 对 `list-new` / `map-new` 答不出来）。 */
+    if (isNode(v) && (v.op === 'list-new' || v.op === 'map-new')) {
+      const at0 = declTypeOfNode(v, env, ctx);
+      if (at0 === null) {
+        gap(`记录的字段 '${names[i]}' 是一格${v.op === 'list-new' ? '列表' : '字典'}，可它的类型推不出来`);
+      }
+      ctx.tmp = ctx.tmp + 1;
+      const tn = `agg_tmp${ctx.tmp}`;
+      pre.push(...MATERIALIZE[v.op](tn, v, env, ctx));
+      fieldText.push(`(var ${tn})`);
+      return env.get(tn) ?? at0;
     }
     /* **字段里装着一格函数值**（go 的接口分派，ADR-0040；asy 的 `fill2 fill2;` 也是它）：
        类型是 `(fnty …)`，值是 `(fnref …)` / `(mkclo …)`。`typeOf` 对"函数名当值用"答不出来
@@ -1520,6 +1554,11 @@ function bindRecord(nm, rec, env, ctx) {
        量出来的必要性：pt 的 `Triangle{Material: &material, …}` 与任何
        `type Outer struct{ In *Inner }` 都落在这一支上，从前报"字段不是标量"。 */
     if (isRecType(t, ctx)) {
+      fieldText.push(objText(v, env, ctx));
+      return t;
+    }
+    /* **字段值是一格已经躺在某个名字里的数组 / 字典**：与记录那一支同一条（句柄一个字）。 */
+    if (elemType(t) !== null || dictOf(t) !== null) {
       fieldText.push(objText(v, env, ctx));
       return t;
     }
@@ -1743,15 +1782,32 @@ function isZeroValueNode(x) {
  * 只接**绑定位置**：表达式位置上摆不进一圈循环 —— 那时 `expr` 那边照旧报缺口
  * （`PRIMS_OK` 里没有 `fill`，所以那一格是有名有姓的）。
  */
+/**
+ * **这格类型当数组元素，方言收得住吗** —— 收不住就报一格有名有姓的缺口。
+ *
+ * 方言的 `(arr 元素)` 收 int / real / bool / string / `(vec T N)` / 类名 / 结构体名 /
+ * `(arr …)` / `(fnty …)`（`sexpr/lower.js` 的 `ty` 那一格）—— **不收 `(ptr rN)`**。
+ * 而后端把**引用语义**的记录发成 `(ptr rN)`，于是 go 的 `[]*Triangle` 落不下去。
+ * 不在这儿拦的话交出去的是一份方言当场骂的 sx（那是"红"，而这确实是还没接的东西）。
+ */
+function arrElemOk(et, ctx) {
+  if (isPtrRec(et, ctx)) {
+    gap(`数组的元素是一格引用语义的记录（${et}）—— 方言的 \`(arr 元素)\` 还不收 \`(ptr rN)\``);
+  }
+}
+
 function bindFill(nm, pr, env, ctx) {
   const args = argList(pr, 'args');
   if (args.length !== 2) gap(`内建 fill 收了 ${args.length} 格实参（要两格）`);
   const et = elemTypeOfNode(args[1], env, ctx);
-  const recElem = et !== null && isRecType(et, ctx) && !isPtrRec(et, ctx);
+  /* 元素是记录 —— **值语义与引用语义都收**：前者 `(anew (arr rN) N)` 就地铺 N 格零结构体、
+     后者铺 N 格空指针，两样都正是 go 的 `make([]T, n)` / `make([]*T, n)`。 */
+  const recElem = et !== null && isRecType(et, ctx);
   /* **零值的聚合初值现在收了**：`(anew T N)` 的 N 份零值互不共享（`arrNew` 按元素的
      拷贝器逐格拷，`tests/sexpr/cases/50-arrstruct.sx` 钉着）—— 从前那句"聚合初值会让
      n 格指向同一格"正是拷贝器那一刀解掉的。非零的聚合初值照旧不收：那要真发一圈拷贝。 */
   if (recElem) {
+    arrElemOk(et, ctx);
     if (!isZeroValueNode(args[1])) {
       gap(`fill 的初值是一格**非零**的记录（这一刀只接零值的聚合初值）`);
     }
@@ -1806,6 +1862,7 @@ function isZeroText(t, v) {
   /* 元素可以是标量、**值语义的记录**（`(arr rN)`，一格一整块），也可以是**引用语义的
      记录**（`(arr (ptr rN))`，一格一个指针 —— go 的 `[]Shape` 与 `[]*Mesh` 那一族）。 */
   const recElem = isRecType(et, ctx);
+  if (recElem) arrElemOk(et, ctx);
   if (!recElem && et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
     gap(`列表的元素不是标量、也不是记录（量到的是 ${et}）`);
   }
@@ -2311,6 +2368,14 @@ function fieldTypesOfNode(names, vals, env, ctx) {
       continue;
     }
     let t = null;
+    /* **字段里是一格数组 / 字典**（`Mesh.Triangles []*Triangle`）：句柄一个字，`(arr T)`
+       这格类型 `typeOf` 答不出来（`list-new` 回 UNKNOWN=int），走 `declTypeOfNode`。 */
+    if (isNode(v) && (v.op === 'list-new' || v.op === 'map-new')) {
+      const at = declTypeOfNode(v, env, ctx);
+      if (at === null) return null;
+      types.push(at);
+      continue;
+    }
     /* **字段里装着一格函数值**（接口的零值记录，ADR-0040）：`pzero` 这一路**没经过
        `liftFnVals`**，所以这儿看到的还是一格 `func` 节点 —— 签名从它自己的
        `pzero` / `rzero` 上算（与 `resolveParamTypes` 同一份规矩）。 */
