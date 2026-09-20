@@ -139,6 +139,19 @@ const MSET = new Set();
 /** **这个模块真的需要方法表吗**（= 有没有发过一处动态分派）。见 `funcdecl` 那一格的账。
  *  今天一处都没置上 —— 方法调用全是静态定下来的。做接口分派时在发分派点处置上。 */
 const NEEDS_MTABLE = false;
+
+/**
+ * **这个模块真的需要 `__type` 那格类型标签吗**。
+ *
+ * 只有**类型 switch**（`switch v := x.(type)`，落成 `__goTypeIs(v, "T")`）与方法表分派
+ * 会读它。都没有的时候它是**死重量**，而代价是量出来的：每格结构体多一格串字段
+ * ——`Vec{…}` 那份 60M 次迭代里就是 3.6 亿次多余的串存 + 每格结构体多 8 字节。
+ *
+ * 为什么用**预扫描**而不是"边走边置"：零值与字面量可能在看到 `tswitch` **之前**就落出来了，
+ * 那时标志还没置上，同一个 struct 就会出两种形状（带标签的与不带的）——
+ * 那正是这一趟被 `(ptr r2)` / `(ptr r3)` 咬过的那个坑。`collectDecls` 本来就走整棵树。
+ */
+let NEEDS_TYPETAG = false;
 const VARTYPE = new Map();
 const mangle = (owner, name) => `${String(owner).replace(/\./g, '__')}__${name}`;
 
@@ -301,6 +314,8 @@ function fieldsOf(st) {
  */
 function collectDecls(x, shapesOnly) {
   if (!isList(x)) return;
+  /* 见 `NEEDS_TYPETAG` 那段账：整棵树里有一处类型 switch，结构体就要带 `__type`。 */
+  if (tag(x) === 'tswitch') NEEDS_TYPETAG = true;
   if (tag(x) === 'tspec' || tag(x) === 'talias') {
     TYPES.add(leaf(kids(x)[0]));
     const body = kids(x).find((y) => tag(y) === 'struct');
@@ -554,10 +569,14 @@ const COMPLEX_TYPES = new Set(['complex64', 'complex128']);
  *  声明类型、`T{}` 字面量）—— 字段名单必须**逐字相同**，不然 core 那侧会当成两个形状
  *  （量出来：`(ptr r3)` 与 `(ptr r4)`，报"两处的类型不一样"）。
  *  带 `__type` 是刻意的：go 里 `var x T` 的零值确实是那个类型，方法分派认得它。 */
+/** 结构体要不要带 `__type`（见 `NEEDS_TYPETAG` 那段账）。 */
+function typeTagged() { return NEEDS_TYPETAG || NEEDS_MTABLE; }
+
 function structZero(n) {
   const fs = STRUCTS.get(n);
   if (fs === undefined || fs === null) return null;
-  return recordNew([['__type', lit(n)], ...fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)])], true);
+  const body = fs.map(([fn2, ft]) => [fn2, zeroOf(ft, `${n}.${fn2}`)]);
+  return recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, true);
 }
 
 /** 一格类型节点**剥到光名字**（`paren` 透传、具名类型跟着 `UNDER` 走一层）。不是光名字回 null。 */
@@ -1325,7 +1344,7 @@ function toNode(x) {
       const tyName = tag(ty) === 'tname' ? leaf(kids(ty)[0])
         : tag(ty) === 'name' ? leaf(kids(ty)[0]) : null;
       /* **go 的 struct 是值语义**（赋值/传参/返回都复制）—— 第二个实参就是那一格。 */
-      const withType = (pairs) => (tyName !== null && STRUCTS.has(tyName)
+      const withType = (pairs) => ((tyName !== null && STRUCTS.has(tyName) && typeTagged())
         ? recordNew([['__type', lit(tyName)], ...pairs], true)
         : recordNew(pairs, true));
       /* **`T{}`（一格元素都不给）**：go 的语义是"那个类型的零值"。从前这一格落到下面
@@ -1967,6 +1986,7 @@ export function goToGraph(tree, opts) {
   STRUCTS.clear();
   UNDER.clear();
   MSET.clear();
+  NEEDS_TYPETAG = false;
   VARTYPE.clear();
   IMPORTS.clear();
   collectImports(tree);
