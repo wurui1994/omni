@@ -568,6 +568,32 @@ export const fmovFp = (dbl, rd, rn) => fp1(dbl, 0x00, rn, rd);
 export const fabsFp = (dbl, rd, rn) => fp1(dbl, 0x01, rn, rd);
 export const fneg = (dbl, rd, rn) => fp1(dbl, 0x02, rn, rd);
 export const fsqrt = (dbl, rd, rn) => fp1(dbl, 0x03, rn, rd);
+
+/* C4.1.9 Floating-point data-processing (**3 source**)：
+ *   0 0 0 1 1 1 1 1 type o1 Rm o0 Ra Rn Rd
+ * 注意 bit 24 是 **1**（两源那一族是 0）—— 写成 0x1e 的话编出来的是另一条指令。
+ *
+ * 语义（`Ra` 是那个加数）：
+ *   FMADD  Rd = Ra + Rn*Rm     o1=0 o0=0
+ *   FMSUB  Rd = Ra - Rn*Rm     o1=0 o0=1
+ *   FNMSUB Rd = -Ra + Rn*Rm    o1=1 o0=1
+ * 三条都拿 clang 对过（`-ffp-contract=fast`，d0=Rd/Ra、d1=Rn、d2=Rm）：
+ *   fmadd  d0,d1,d2,d0 = 0x1f420020
+ *   fmsub  d0,d1,d2,d0 = 0x1f428020
+ *   fnmsub d0,d1,d2,d0 = 0x1f628020 */
+function fp3(dbl, o1, o0, rd, rn, rm, ra) {
+  return u32(0x1f * 2 ** 24 + (dbl ? 1 : 0) * 2 ** 22 + (o1 ? 1 : 0) * 2 ** 21
+    + arm64ChkReg(rm) * 2 ** 16 + (o0 ? 1 : 0) * 2 ** 15 + arm64ChkReg(ra) * 2 ** 10
+    + arm64ChkReg(rn) * 2 ** 5 + arm64ChkReg(rd));
+}
+
+/** `rd = ra + rn*rm` */
+export const fmadd = (dbl, rd, rn, rm, ra) => fp3(dbl, 0, 0, rd, rn, rm, ra);
+/** `rd = ra - rn*rm` */
+export const fmsub = (dbl, rd, rn, rm, ra) => fp3(dbl, 0, 1, rd, rn, rm, ra);
+/** `rd = rn*rm - ra` */
+export const fnmsub = (dbl, rd, rn, rm, ra) => fp3(dbl, 1, 1, rd, rn, rm, ra);
+
 /** `fcvt d, s`：源的宽度进 `type`、目标的宽度进 opcode 的低两位（00=S、01=D）。 */
 export const fcvtSD = (rd, rn) => fp1(false, 0x05, rn, rd);   // s -> d
 export const fcvtDS = (rd, rn) => fp1(true, 0x04, rn, rd);    // d -> s

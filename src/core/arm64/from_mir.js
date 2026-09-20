@@ -36,6 +36,7 @@ import {
   eorImm,
   eorReg, fadd,
   fcmpArm64, fcvtDS, fcvtSD, fcvtzs, fcvtzu, fdiv, fmovFromInt, fmovToInt, fmul, fneg, fsub,
+  fmadd, fmsub, fnmsub,
   ldpPost, ldrFpU, ldrU, ldrsU, ldrRegOff, lslv, lslImm, lsrv, lsrImm, movReg, movSp, movk, movz,
   msub, mul,
   mvn, neg, orrImm, orrReg,
@@ -45,7 +46,7 @@ import {
 } from './encode.js';
 import { Arm64CodeBuf } from './asm.js';
 import {
-  OP, REF_NONE, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
+  OP, REF_NONE, REF_BIAS, isConstRef, T_I32, T_I64, T_BOOL, T_VOID, T_F32, T_F64,
   typeKind, isFloatType, intBits, memKindNo, memOff, MLOAD_KINDS, MSTORE_KINDS,
   CVT_SEXT, CVT_ZEXT, CVT_TRUNC, CVT_SEXT8, CVT_SEXT16,
   CVT_I2F, CVT_U2F, CVT_F2I, CVT_F2U, CVT_FCVT, CVT_BITCAST, OP_NAMES, OP_MODES, hexBytes, memArgSize,
@@ -605,6 +606,40 @@ class FnGen {
     /* 寄存器缓存的三张表（见 `POOL`）。全是定长数组 —— 这一格要能被我们自己编出来的
      * 编译器编（ADR-0011 的封闭子集），Map 的迭代器不在里头。 */
     this.uses = countUses(f);
+    /**
+     * **乘加融合**（`lower` 那一族，照 Go 的 `ARM64.rules:1824-1834`）：
+     *     (FADDD a (FMULD  x y)) => (FMADDD  a x y)
+     *     (FSUBD a (FMULD  x y)) => (FMSUBD  a x y)
+     *     (FSUBD (FMULD x y) a)  => (FNMSUBD a x y)
+     * 这张集合记的是**被吃掉的那条 MUL 的 pc** —— 到它的时候一个字都不发，
+     * 由紧跟的 ADD/SUB 发一条三源指令。
+     *
+     * 为什么值得做：go 的 `radiance` 里 `FMADDD` 46 条 + `FMSUBD` 18 条，我们一条都没有；
+     * 除了少 64 条指令，点积那种链子的深度也从 5 降到 3（是延迟瓶颈，不是吞吐瓶颈）。
+     *
+     * 两条刻意收紧的：
+     *   - **那条 MUL 必须紧挨在 ADD/SUB 前面**（`pc-1`）。隔着别的指令就要问"跳过它之后
+     *     它的操作数还活着吗"，而隔着区域边界（`IF`/`END`）更是把一次乘法挪出了分支。
+     *     表达式树本来就编成相邻的两条，够用。
+     *   - **那条 MUL 只能有一个使用者**（就是这条 ADD/SUB）。多于一个的话它的结果还有
+     *     别人要，吃掉就错了。
+     */
+    this.fused = null;
+    {
+      const fu = new Set();
+      for (let pc = 1; pc < f.op.length; pc++) {
+        const o = f.op[pc];
+        if (o !== OP.ADD && o !== OP.SUB) continue;
+        if (!isFloatType(f.t[pc])) continue;
+        const m = pc - 1;
+        if (f.op[m] !== OP.MUL || f.t[m] !== f.t[pc]) continue;
+        if (this.uses[m] !== 1) continue;
+        const mref = REF_BIAS + m;
+        if (f.a[pc] !== mref && f.b[pc] !== mref) continue;
+        fu.add(m);
+      }
+      if (fu.size > 0) this.fused = fu;
+    }
     /** 第 s 个池寄存器现在装着哪个值（-1 = 空）。 */
     this.cacheIdx = [-1, -1, -1, -1, -1];
     /** 那个值还剩几次要用（<= 0 = 用光了，寄存器可以让出去）。 */
@@ -1763,6 +1798,41 @@ class FnGen {
   }
 
   /**
+   * 发一条三源的乘加（`ARM64.rules:1824-1834`）。发成了回 undefined，
+   * **草稿不够就回 `false`**（调用方退回去照常发乘法与加法）。
+   *
+   * 三个操作数：那条 MUL 的 x、y，与这条 ADD/SUB 的另一个操作数（加数 `a`）。
+   * FP 草稿只有 FTMP0/FTMP1 两个，所以「要草稿的操作数」最多两个 ——
+   * 涂过色的（`fstickyRef >= 0`）不占草稿。
+   */
+  fma(i, dbl) {
+    const f = this.f;
+    const m = i - 1;
+    const mref = REF_BIAS + m;
+    const aref = f.a[i] === mref ? f.b[i] : f.a[i];
+    const refs = [f.a[m], f.b[m], aref];
+    let need = 0;
+    for (const r of refs) if (this.fstickyRef(r) < 0) need++;
+    if (need > 2) return false;
+    const tmps = [FTMP0, FTMP1];
+    let ti = 0;
+    const get = (r) => {
+      const sk = this.fstickyRef(r);
+      if (sk >= 0) return sk;
+      return this.fRefReg(r, tmps[ti++], dbl);
+    };
+    const x = get(f.a[m]);
+    const y = get(f.b[m]);
+    const a = get(aref);
+    const d = this.fDest(i);
+    /* `SUB` 的两种次序要分开：`a - x*y` 是 FMSUB，`x*y - a` 是 FNMSUB。 */
+    if (f.op[i] === OP.ADD) this.buf.emit(fmadd(dbl, d, x, y, a));
+    else if (f.a[i] === mref) this.buf.emit(fnmsub(dbl, d, x, y, a));
+    else this.buf.emit(fmsub(dbl, d, x, y, a));
+    return this.fDef(i, d, dbl);
+  }
+
+  /**
    * `t` 是浮点的那些指令。
    *
    * 两条路：
@@ -1777,6 +1847,22 @@ class FnGen {
     const op = f.op[i];
     const dbl = typeKind(f.t[i]) === T_F64;
     if (op === OP.CVT) return this.cvtToFloat(i, dbl);
+    /* 这条 MUL 被后一条 ADD/SUB 吃掉了（见构造里的 `fused`）：一个字都不发。
+     * `pending` 要清 —— 它是 `dest` 留给"结果算进池寄存器"的约，这儿没结果。 */
+    if (this.fused !== null && this.fused.has(i)) { this.pending = -1; return; }
+    /* 乘加融合（`ARM64.rules:1824-1834`）：紧挨在前面那条 MUL 已经跳过了，这儿发三源的。 */
+    if ((op === OP.ADD || op === OP.SUB) && this.fused !== null && this.fused.has(i - 1)) {
+      const r = this.fma(i, dbl);
+      if (r !== false) return r;
+      /* 三个操作数要三个草稿、而 FP 草稿只有两个（FTMP0/FTMP1）⇒ 退回去照常发。
+         那条 MUL 已经跳过了，所以这儿得**自己把乘法补上**。 */
+      const m = i - 1;
+      const mx = this.fRefReg(f.a[m], FTMP0, dbl);
+      const my = this.fRefReg(f.b[m], FTMP1, dbl);
+      const md = this.fDest(m);
+      buf.emit(fmul(dbl, md, mx, my));
+      this.fDef(m, md, dbl);
+    }
     if (op === OP.NEG) {
       const x = this.fRefReg(f.a[i], FTMP0, dbl);
       const d = this.fDest(i);
