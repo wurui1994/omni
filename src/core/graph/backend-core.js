@@ -1506,7 +1506,17 @@ function bindFill(nm, pr, env, ctx) {
   const args = argList(pr, 'args');
   if (args.length !== 2) gap(`内建 fill 收了 ${args.length} 格实参（要两格）`);
   const et = typeOf(args[1], env, ctx);
-  if (!isScalar(et)) gap(`fill 的初值不是标量（量到的是 ${et}）—— 聚合初值会让 n 格指向同一格`);
+  const recElem = isRecType(et, ctx) && !isPtrRec(et, ctx);
+  /* **零值的聚合初值现在收了**：`(anew T N)` 的 N 份零值互不共享（`arrNew` 按元素的
+     拷贝器逐格拷，`tests/sexpr/cases/50-arrstruct.sx` 钉着）—— 从前那句"聚合初值会让
+     n 格指向同一格"正是拷贝器那一刀解掉的。非零的聚合初值照旧不收：那要真发一圈拷贝。 */
+  if (recElem) {
+    if (!isZeroValueNode(args[1])) {
+      gap(`fill 的初值是一格**非零**的记录（这一刀只接零值的聚合初值）`);
+    }
+    return [bindLine(nm, `(arr ${et})`, `(anew (arr ${et}) ${expr(args[0], env, ctx)})`, env, ctx)];
+  }
+  if (!isScalar(et)) gap(`fill 的初值不是标量、也不是值语义的记录（量到的是 ${et}）`);
   const at = `(arr ${et})`;
   const n = expr(args[0], env, ctx);
   const v = expr(args[1], env, ctx);
