@@ -24,6 +24,8 @@ import './sroa.js';      // decompose user（SROA）
 import './addr.js';      // addressing modes
 import './regalloc.js';  // regalloc（只挂 fn.regHint，不改指令）
 import './autos.js';     // elim unread autos
+import './deadauto.js';  // dead auto elim（Go 的 elimDeadAutosGeneric）
+import './copyfwd.js';   // generic.rules:865（不占格，由 rewrite.js 的三遍 opt 调）
 
 export { passStatus, checkPassTable };
 

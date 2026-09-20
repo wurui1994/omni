@@ -196,3 +196,17 @@ export function mem2reg(fn, _mod) {
 /** 把 fn 里**所有** a/b/实参池里引用 oldRef 的地方换成 newRef —— 见 `edit.js`。 */
 
 registerPass('early phielim and copyelim', mem2reg);
+/**
+ * **通道表里 `late phielim and copyelim` 那一格**（Go 的表里本来就有这一行，
+ * 我们之前是 `fn: null`）—— 它是 `decompose user` 的必要配套。
+ *
+ * 为什么：`decompose user`（SROA，第 12 与第 28 格）把不逃逸的聚合块拆成**槽位**，
+ * 而 mem2reg 只在第 2 格（`early phielim and copyelim`）跑过一遍 —— 拆出来的那些槽
+ * 一个都没被提升成值，于是每一格还是一条 `LOAD` 一条 `STORE`。
+ * 量出来的（`sph_intersect`，smallpt 自时间的大头）：ldr 57 + str 41 = 98 条访存，
+ * 而 Go 的同一个函数一共只有 5 条（FLDPD 2 + FSTPD 3）。
+ *
+ * Go 没有这个问题是因为它的 `decomposeUser` 拆的是**SSA 值**（struct 类型的值直接
+ * 拆成几个标量值），压根不落地；我们的 SROA 只能拆到槽位，所以要再建一次 SSA。
+ */
+registerPass('late phielim and copyelim', mem2reg);

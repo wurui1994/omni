@@ -67,7 +67,7 @@ export function useSites(fn) {
  * 查一个 base：它派生出来的地址都只当访存的地址用吗。
  * 回 `{ok, cells}`；`cells` 是 `Map(键 -> {lo, hi, t, kind, pcs})`，键是 `lo|hi`。
  */
-function scanBase(fn, mod, base, sites) {
+function scanBase(fn, mod, base, sites, unreadSlots) {
   const cells = new Map();
   const seen = new Set();
   const work = [base];
@@ -107,6 +107,17 @@ function scanBase(fn, mod, base, sites) {
         if (constOffset(fn, mod, other) !== null) { work.push(REF_BIAS + u.pc); continue; }
         return { ok: false };                            // 加的是个变量 ⇒ 格子说不清
       }
+      /* 三、`STORE 这个地址 -> 一个从头到尾没人 LOAD 的槽`：**不算逃逸**。
+         那条 STORE 写进去的东西观察不到，地址没跑出去。
+         为什么非认这一种不可（量出来的）：`inline` 把 `RET v` 铺成
+         `STORE v -> 结果槽; BR`，结果槽被 mem2reg 提升之后那条 STORE 还在，
+         而收它的 `elim unread autos` 在通道表里排在这一格**后面**（第 46 格 vs 第 12/28 格）。
+         不认这一种，`sph_intersect` 里按值收的那份 `Ray` 拷贝就永远拆不开 ——
+         它的地址正好被那么一条死 STORE 攥着。 */
+      if (op === OP.STORE && u.role === 'a' && !unreadSlots.has(fn.aux[u.pc])) {
+        return { ok: false };
+      }
+      if (op === OP.STORE && u.role === 'a') continue;
       /* 别的一律算逃逸 */
       return { ok: false };
     }
@@ -160,6 +171,13 @@ function aliasId(fn, mod, ref) {
 export function sroa(fn, mod) {
   if (!fn || fn.op.length === 0) return 0;
   const sites = useSites(fn);
+  /* 哪些槽**从头到尾没人 LOAD** —— 往那种槽里写什么都观察不到（见 `scanBase` 第三条）。 */
+  const loaded = new Set();
+  for (let pc = 0; pc < fn.op.length; pc++) {
+    if (fn.op[pc] === OP.LOAD) loaded.add(fn.aux[pc]);
+  }
+  const unread = new Set();
+  for (let i = 0; i < fn.slots.length; i++) if (!loaded.has(i)) unread.add(i);
 
   /* 一、把所有访存的 base 按**别名身份**归堆（见 `aliasId`） */
   const groups = new Map();      // 身份 -> [base ref…]
@@ -181,7 +199,7 @@ export function sroa(fn, mod) {
     const all = new Map();
     let ok = true;
     for (const base of bases) {
-      const r = scanBase(fn, mod, base, sites);
+      const r = scanBase(fn, mod, base, sites, unread);
       if (!r.ok) { ok = false; break; }
       for (const [key, c] of r.cells) {
         const got = all.get(key);
@@ -239,3 +257,22 @@ export function sroa(fn, mod) {
 }
 
 registerPass('decompose user', sroa);
+/**
+ * **再跑一遍** —— 照 Go 的 `ssacompile/expand_calls.go:20`：
+ *
+ *     func postExpandCallsDecompose(f *ssa.Func) {
+ *       decomposeUser(f)    // redo user decompose to cleanup after expand calls
+ *       decomposeBuiltin(f) // handles both regular decomposition and cleanup.
+ *     }
+ *
+ * 那是 `expand calls` 那一格自己收尾时调的，位置就在通道表 `expand calls` /
+ * `decompose builtin` 这两行上。**Go 的 `decomposeUser` 确实跑两遍**，不是我们加的。
+ *
+ * 为什么这一遍能拆掉第一遍拆不掉的（量出来的）：第一遍在 `opt` 之前，那时按值实参的
+ * 临时块上「同一格存的是 i64、读的是 f64」（C 前端的拷贝按字拷，不看字段类型），
+ * `scanBase` 在「同一格两种类型：不碰」那一行就退了。`opt`/`middle opt` 里的
+ * `copyfwd.js`（`generic.rules:865`）把那些 f64 读改成直接读源头之后，
+ * 块上只剩清一色的 i64 存取 —— 这一遍就拆得动了，拆出来的槽没人读，
+ * 交给 `dead auto elim` 与 `elim unread autos` 收。
+ */
+registerPass('decompose builtin', sroa);
