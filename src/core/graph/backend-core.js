@@ -137,7 +137,8 @@ const shapeKey = (names, types, multi, byval) => `${multi ? 'm' : (byval === tru
 
 function shapeOf(names, types, multi, ctx, byval) {
   /* **byval 进键**：同样的字段名与类型，值语义与引用语义是**两格**不同的形状
-     （前者落 `(new rN)`、后者落 `(pnew (ptr rN))`），不能共用一格。 */
+     （前者发 `(struct rN …)` + `(new rN)`、后者发 `(class rN …)` + `(cnew rN)`），
+     不能共用一格。 */
   const key = shapeKey(names, types, multi, byval);
   let shape = ctx.byKey.get(key);
   if (shape !== undefined) return shape;
@@ -151,7 +152,10 @@ function shapeOf(names, types, multi, ctx, byval) {
   for (let i = 0; i < names.length; i++) shape.types.set(names[i], types[i]);
   ctx.byKey.set(key, shape);
   ctx.shapes.set(shape.tag, shape);
-  ctx.decls.push(`  (struct ${shape.tag} ${names.map((n, i) => `(${n} ${types[i]})`).join(' ')})`);
+  /* **引用语义发 `class`、值语义（与多值）发 `struct`**（见 `types.js` 的 `shapeType`）：
+     方言里类正是"两个名字指同一格"，而它**本来就能当数组元素与字段**。 */
+  const kw = (multi || byval === true) ? 'struct' : 'class';
+  ctx.decls.push(`  (${kw} ${shape.tag} ${names.map((n, i) => `(${n} ${types[i]})`).join(' ')})`);
   return shape;
 }
 
@@ -615,9 +619,9 @@ function lenText(a, env, ctx) {
  * 别的（`xs[0].f`、`f().f`）这一刀不接。
  */
 function objText(obj, env, ctx) {
-  /* 嵌套的宿主：里层是一格 `field-get` 且它交出来的就是一格形状。为什么读这一路是准的：
-     记录在方言里是**指针**（`types.js` 的 `shapeType`），所以往里套的是 `pfield` ——
-     `(pload (pfield (pload (pfield (var q) a)) y))`：一层层就地读，不复制。 */
+  /* 嵌套的宿主：里层是一格 `field-get` 且它交出来的就是一格形状 —— 一层层 `(fld …)` 套
+     下去（`(fld (fld (var q) a) y)`）。引用语义那一档是**类**，值语义那一档是结构体，
+     两边在方言里同形，而且**都是左值链**（判据见 `types.js` 的 `shapeType`）。 */
   if (isNode(obj) && obj.op === 'field-get') {
     const inner = typeOf(obj, env, ctx);
     if (shapeAt(inner, ctx) !== undefined || elemType(inner) !== null || dictOf(inner) !== null) {
@@ -917,67 +921,22 @@ function fnTypeOf(a, env, ctx) {
 const isAggregate = (t, ctx) => isRecType(t, ctx) || elemType(t) !== null || dictOf(t) !== null;
 
 /**
- * 取一格字段的文本。**记录是指针**（`types.js` 的 `shapeType`），所以那一档走
- * `(pload (pfield …))`；多值（`mN`）是真结构体，照旧 `(fld …)`。
+ * 取一格字段的文本。**记录一律是 `(fld 宿主 字段名)`**（引用语义那一档是类、值语义那一档
+ * 是结构体，两边的字段访问在方言里同形）——`pfield` / `pload` 那一套 2026-09-20 撤了，
+ * 理由在 `types.js` 的 `shapeType` 上：内嵌的值语义结构体在类上是**现成的左值链**
+ * （`(fldset (fld o v) x …)`），不用再自己串地址。
  */
-/**
- * 一格记录的**地址**（`(ptr rN)` 那一档的表达式），取不到回 null。
- *
- * 为什么要它：**值语义的记录嵌在引用语义的记录里**时（go 的
- * `type Triangle struct{ V1, V2, V3 Vector }` 加一格 `func (t *Triangle) …`），
- * `t.V1.X` 从前落成 `(fld (pload (pfield (var t) V1)) X)` —— 那是"把 V1 整块读出来"，
- * 而方言里整块读还没做（它当场报）。对的落法是**一路 `pfield` 下去、只在最后读那一格
- * 标量**：`(pload (pfield (pfield (var t) V1) X))`。
- */
-function placeText(x, env, ctx) {
-  if (isNode(x) && x.op === 'field-get') {
-    const inner = placeText(x.ins.obj, env, ctx);
-    if (inner === null) return null;
-    /* 只有"字段自己也是一格记录"才继续往下串 —— 标量字段没有地址可言（它就是个值）。 */
-    const ft = typeOf(x, env, ctx);
-    if (shapeAt(ft, ctx) === undefined) return null;
-    /* **两档**：字段是**内嵌的值语义结构体**时，它的地址就是 `(pfield …)`；
-       字段是**一格指针**（go 的 `In *Inner`）时，那一格里装的才是地址 ——
-       要先 `pload` 出来。少了这一分，`o.In.A` 落成
-       `(pfield (pfield (var o) In) A)`，方言报「(pfield p 字段名) 的 p 要是结构体指针，
-       这里是 r1**」（量出来的）。 */
-    const at = `(pfield ${inner} ${x.attrs.field})`;
-    return isPtrRec(ft, ctx) ? `(pload ${at})` : at;
-  }
-  return isPtrRec(typeOf(x, env, ctx), ctx) ? objText(x, env, ctx) : null;
-}
-
 function fldText(obj, field, env, ctx) {
-  const at = placeText(obj, env, ctx);
-  if (at !== null) return `(pload (pfield ${at} ${field}))`;
   return `(fld ${objText(obj, env, ctx)} ${field})`;
 }
 
 /**
- * 往一格**地址**里写一个值，落成的语句表。
- *
- * 标量（与引用语义的记录，那也是一格指针）就一句 `pstore`。**值语义的记录**要
- * **逐字段拆开写** —— 方言里"整块写"还没做（`(pstore p v)` 的 p 指向结构体时它当场报），
- * 而这一格在 go 上是常事：`type Triangle struct{ V1 Vector }` 加一格指针接收者方法，
- * `Triangle{}` 就是"往 `(ptr r2)` 的 V1 里写一整格 r1"。嵌套多层就一层层拆下去。
- */
-function storeInto(place, t, src, ctx) {
-  const sh = shapeAt(t, ctx);
-  if (sh === undefined || sh.byval !== true) return [`(pstore ${place} ${src})`];
-  const out = [];
-  for (const f of sh.names) {
-    out.push(...storeInto(`(pfield ${place} ${f})`, sh.types.get(f), `(fld ${src} ${f})`, ctx));
-  }
-  return out;
-}
-
-/**
- * 一格形状 / 标量的"新建"文本：记录 `pnew` 一格、多值 `new`、标量给零值。 */
+ * 一格形状 / 标量的"新建"文本：引用语义的记录 `cnew`、值语义与多值 `new`、标量给零值。 */
 function newOfType(t, ctx) {
   const sh = shapeAt(t, ctx);
   if (sh === undefined) return zeroText(t);
   if (sh.multi === true || sh.byval === true) return `(new ${sh.tag})`;
-  return `(pnew (ptr ${sh.tag}) (int 1))`;
+  return `(cnew ${sh.tag})`;
 }
 
 /**
@@ -1324,34 +1283,22 @@ function stmtIn(x, env, ctx) {
     case 'set': return [`(set ${x.attrs.name} ${expr(x.ins.value, env, ctx)})`];
     case 'field-set': {
       const host = objText(x.ins.obj, env, ctx);
-      const onPtr = isPtrRec(typeOf(x.ins.obj, env, ctx), ctx);
-      /* **写进去的是一格聚合字面量**（`m.Triangles = make([]*Tri, 2)` / `m.Tex = &T{…}`）：
-         那几格在**表达式位置**上落不下去（记录要 `pnew` + 逐字段、数组要 `anew` + 一圈
-         `apush`），所以先物化成一格临时名，再把它交给 `storeInto` —— 那一份按"值语义就
-         逐字段抄、别的就一格句柄"分流（零值初始化走的正是它）。 */
+      /* **写进去的是一格聚合字面量**（`m.Triangles = make([]Tri, 2)` / `m.In = &Inner{…}`）：
+         那几格在**表达式位置**上落不下去（记录要 `cnew` + 逐字段、数组要 `anew` + 一圈
+         `apush`），所以先物化成一格临时名，再一句 `fldset` 把它交进去。 */
       const mk = isNode(x.ins.value) ? MATERIALIZE[x.ins.value.op] : undefined;
       const isFill = isNode(x.ins.value) && x.ins.value.op === 'prim'
         && x.ins.value.attrs.name === 'fill';
-      if (onPtr && (mk !== undefined || isFill)) {
+      if (mk !== undefined || isFill) {
         ctx.tmp = ctx.tmp + 1;
         const tn = `set_tmp${ctx.tmp}`;
         const pre = isFill ? bindFill(tn, x.ins.value, env, ctx)
           : mk(tn, x.ins.value, env, ctx);
-        return [...pre, ...storeInto(`(pfield ${host} ${x.attrs.field})`, env.get(tn), `(var ${tn})`, ctx)];
+        return [...pre, `(fldset ${host} ${x.attrs.field} (var ${tn}))`];
       }
-      /* **写进去的是一整格值语义的记录**（接口装箱交回来的就是这一档，ADR-0040）：
-         方言里整块写还没做，得逐字段抄。右边多半是一次调用，先物化。 */
-      const vt = typeOf(x.ins.value, env, ctx);
-      if (onPtr && isRecType(vt, ctx) && !isPtrRec(vt, ctx)) {
-        ctx.tmp = ctx.tmp + 1;
-        const tn = `set_tmp${ctx.tmp}`;
-        const pre = [bindLine(tn, vt, expr(x.ins.value, env, ctx), env, ctx)];
-        return [...pre, ...storeInto(`(pfield ${host} ${x.attrs.field})`, vt, `(var ${tn})`, ctx)];
-      }
-      const v = expr(x.ins.value, env, ctx);
-      /* 记录是指针（见 `fldText`）—— 写一格字段是 `(pstore (pfield …) …)`。 */
-      if (onPtr) return [`(pstore (pfield ${host} ${x.attrs.field}) ${v})`];
-      return [`(fldset ${host} ${x.attrs.field} ${v})`];
+      /* 别的一律一句 `fldset` —— 记录（类与结构体两档）、数组、字典、标量同形，
+         **整格写**在方言里现成（判据：`(fldset (var t) v (var w))` 在类上成立）。 */
+      return [`(fldset ${host} ${x.attrs.field} ${expr(x.ins.value, env, ctx)})`];
     }
     case 'index-set': {
       if (elemType(typeOf(x.ins.obj, env, ctx)) === null) {
@@ -1503,9 +1450,8 @@ function bindRecord(nm, rec, env, ctx) {
     gap(`记录的字段名单是 ${names.length} 格，值给了 ${vals.length} 格`);
   }
   /* **字段里又是一格记录**（go 的 `var q Pair`，Pair 里装着 Point）：方言收得住
-     （structDec 那一刀的 `(ptr T)` 字段），可 `(pstore …)` 那一格要的是一个**值**，
-     而 record-new 在表达式位置上落不下去。所以先把里头那格物化成一格临时名，再把那格
-     **指针**存进字段 —— 里外指同一格，与图上"记录是引用"一致。
+     （类字段与结构体字段两档都收），可 `record-new` 在表达式位置上落不下去，所以先把里头
+     那格物化成一格临时名，再一句 `fldset` 交进去。
      递归是这儿展开的（`rec_tmpN` 逐层各一格），套几层都一样。
      **数组 / 字典当字段也是这一档**（go 的 `Mesh.Triangles []*Triangle`、`Buffer.Pixels`）：
      方言里它们是**句柄**（一个字），`(struct rN (f (arr T)))` 收得住（判据：`(class Box
@@ -1549,8 +1495,8 @@ function bindRecord(nm, rec, env, ctx) {
     const t = typeOf(v, env, ctx);
     /* **字段值是一格"已经躺在某个名字里的记录"**（go 的 `Outer{&in, 3}` / `Outer{in, 3}`）：
        与上面那一支同一件事，只是不用先物化 —— 直接把那一格交进去（`objText` 是"记录当
-       宿主用"的那条路，`expr` 在这儿会报"把记录整格当值用"）。存法交给 `storeInto`：
-       引用语义的存一格指针、值语义的逐字段抄。
+       宿主用"的那条路，`expr` 在这儿会报"把记录整格当值用"）。一句 `fldset` 就够：
+       引用语义的交一格句柄、值语义的整格抄，两档在方言里同形。
        量出来的必要性：pt 的 `Triangle{Material: &material, …}` 与任何
        `type Outer struct{ In *Inner }` 都落在这一支上，从前报"字段不是标量"。 */
     if (isRecType(t, ctx)) {
@@ -1571,18 +1517,17 @@ function bindRecord(nm, rec, env, ctx) {
   const byval = rec.attrs.byval === true;
   const shape = shapeOf(names, types, false, ctx, byval);
   /* **两档**（`nodes.js` 的 `byval` 那一格）：
-     - 引用语义（lua/js 的表）：落一格指针 —— `pnew` 出一格零初始化的，再逐个
-       `(pstore (pfield …) …)`。指针复制 = 两个名字指同一格，那正是图上记录的语义；
-     - **值语义**（go 的 struct）：落方言的**真结构体** —— `(new rN)` + `(fldset …)`，
-       **不进堆**。量出来的理由：go 的 `Vec{…}` 走指针那一档是每格一次 malloc，
-       60M 次迭代 13.9s vs go 原生 0.11s（×126），全花在分配上。 */
-  const out = byval
-    ? [...pre, bindLine(nm, shape.tag, `(new ${shape.tag})`, env, ctx)]
-    : [...pre, bindLine(nm, shapeType(shape), `(pnew (ptr ${shape.tag}) (int 1))`, env, ctx)];
+     - 引用语义（lua/js 的表、go 里有指针接收者的那些）：方言的**类** —— `(cnew rN)`。
+       类的复制 = 两个名字指同一格，那正是图上记录的语义；
+     - **值语义**（go 的 struct）：方言的**真结构体** —— `(new rN)`，**不进堆**。
+       量出来的理由：go 的 `Vec{…}` 走引用那一档是每格一次 malloc，60M 次迭代
+       13.9s vs go 原生 0.11s（×126），全花在分配上。
+     两档的**字段写法同形**（`(fldset …)`）—— `pnew`/`pfield`/`pstore` 那一套撤了，
+     见 `types.js` 的 `shapeType`。 */
+  const out = [...pre, bindLine(nm, shape.tag,
+    byval ? `(new ${shape.tag})` : `(cnew ${shape.tag})`, env, ctx)];
   for (let i = 0; i < names.length; i++) {
-    const v = fieldText[i] ?? expr(vals[i], env, ctx);
-    if (byval) { out.push(`(fldset (var ${nm}) ${names[i]} ${v})`); continue; }
-    out.push(...storeInto(`(pfield (var ${nm}) ${names[i]})`, types[i], v, ctx));
+    out.push(`(fldset (var ${nm}) ${names[i]} ${fieldText[i] ?? expr(vals[i], env, ctx)})`);
   }
   return out;
 }
@@ -1783,16 +1728,16 @@ function isZeroValueNode(x) {
  * （`PRIMS_OK` 里没有 `fill`，所以那一格是有名有姓的）。
  */
 /**
- * **这格类型当数组元素，方言收得住吗** —— 收不住就报一格有名有姓的缺口。
+ * **这格类型当数组元素，方言收得住吗**。
  *
- * 方言的 `(arr 元素)` 收 int / real / bool / string / `(vec T N)` / 类名 / 结构体名 /
- * `(arr …)` / `(fnty …)`（`sexpr/lower.js` 的 `ty` 那一格）—— **不收 `(ptr rN)`**。
- * 而后端把**引用语义**的记录发成 `(ptr rN)`，于是 go 的 `[]*Triangle` 落不下去。
- * 不在这儿拦的话交出去的是一份方言当场骂的 sx（那是"红"，而这确实是还没接的东西）。
+ * 方言的 `(arr 元素)` 收 int / real / bool / string / `(vec T N)` / **类名** / 结构体名 /
+ * `(arr …)` / `(fnty …)`（`sexpr/lower.js` 的 `ty` 那一格）—— 引用语义的记录现在发成
+ * **类**（见 `types.js` 的 `shapeType`），所以 `[]*Triangle` 那一族就是 `(arr rN)`，收得住。
+ * 留着这一格是为了：万一哪天又冒出一种别的表示，报的是一句有名有姓的话而不是坏 sx。
  */
 function arrElemOk(et, ctx) {
-  if (isPtrRec(et, ctx)) {
-    gap(`数组的元素是一格引用语义的记录（${et}）—— 方言的 \`(arr 元素)\` 还不收 \`(ptr rN)\``);
+  if (typeof et === 'string' && et.startsWith('(ptr ')) {
+    gap(`数组的元素是 ${et} —— 方言的 \`(arr 元素)\` 不收 \`(ptr …)\``);
   }
 }
 
@@ -2347,7 +2292,8 @@ function recordTypeOfNode(rec, env, ctx) {
   const self = shapeType(shape);
   const fixed = types.map((t) => String(t).split(SELF_TY).join(self));
   for (let i = 0; i < names.length; i++) shape.types.set(names[i], fixed[i]);
-  const line = `  (struct ${shape.tag} ${names.map((n, i) => `(${n} ${fixed[i]})`).join(' ')})`;
+  const kw = byval ? 'struct' : 'class';
+  const line = `  (${kw} ${shape.tag} ${names.map((n, i) => `(${n} ${fixed[i]})`).join(' ')})`;
   if (ctx.decls[at] !== undefined) ctx.decls[at] = line;
   /* **换过之后的键也登记一份**：别处（`bindRecord` 走的是**提上顶层之后**那几格闭包的
      `fnTypeOf`）算出来的字段类型里已经是真标签了 —— 不补这一笔，同一个接口在图上会多出

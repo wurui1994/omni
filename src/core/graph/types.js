@@ -110,24 +110,27 @@ export const isScalar = (t) => t === 'int' || t === 'real' || t === 'bool' || t 
  * **一格形状在变量 / 形参 / 字段上写成什么类型。**
  *
  * 多值（`mN`）原样 —— 那是值语义，与"函数只交一格回来"正好对上。
- * **记录（`rN`）写成 `(ptr rN)`**：图上记录是**引用**（`eval.js` 那一格是普通的 JS 对象 ——
- * 两个名字绑上去指同一格、传进函数里改了外面看得见），而方言的结构体是**值语义**
- * （赋值 / 传参都复制，见 `tests/sexpr/cases/06-structs.sx`）—— 拿结构体去顶会静静地把
- * "改 q 也改 p"变成"只改 q"。方言里对得上的那一格是**指针**（`(ptr T)` + `pnew` /
- * `pfield` / `pload` / `pstore`，见 `tests/sexpr/cases/25-pointers.sx`）：指针复制 =
- * 两个名字指同一格，与图逐格重合。
+ *
+ * **记录一律写成它的标签 `rN`**，引用语义与值语义的差别落在**那句声明**上：
+ * 引用语义发 `(class rN …)`、值语义发 `(struct rN …)`（见 `backend-core.js` 的 `shapeOf`）。
+ * 为什么不是 `(ptr rN)`（2026-09-20 换过来的）：图上记录是**引用**（`eval.js` 那一格是
+ * 普通的 JS 对象 —— 两个名字绑上去指同一格、传进函数里改了外面看得见），而方言的
+ * **类**正是这个语义，且类**本来就能当数组元素与字段**。原来用 `(ptr rN)` 顶，代价是
+ *   - `(arr (ptr rN))` 方言不收 ⇒ go 的 `[]*Triangle` 落不下去（pt 整包的墙）；
+ *   - 读写要 `pfield` / `pload` / `pstore` 三件套，内嵌的值语义结构体还得一路串地址
+ *     （那一族在类上是**现成的左值链**：`(fldset (fld o v) x …)` 判据钉着）；
+ *   - "整块写"在指针上没有，在类字段上有。
  */
-export const shapeType = (shape) => (
-  (shape.multi === true || shape.byval === true) ? shape.tag : `(ptr ${shape.tag})`);
+export const shapeType = (shape) => shape.tag;
 
-/** 这一格类型是**指针那一档的记录**吗（= 是记录、而且不是值语义）。
- *  字段的读写与"新建"三处都按它分流（`backend-core.js` 的 fldText / field-set / newOfType）。 */
+/** 这一格类型是**引用语义那一档的记录**吗（= 是记录、而且不是值语义）。
+ *  声明发 `class` 还是 `struct`、新建发 `cnew` 还是 `new`，两处按它分流。 */
 export const isPtrRec = (t, ctx) => {
   const sh = shapeAt(t, ctx);
   return sh !== undefined && sh.multi !== true && sh.byval !== true;
 };
 
-/** 反过来：一格类型文本是哪格形状（`mN` 与 `(ptr rN)` 两种写法都认）。不是形状回 undefined。 */
+/** 反过来：一格类型文本是哪格形状（`mN` / `rN` 都认；`(ptr rN)` 那种老写法也还认）。 */
 export function shapeAt(t, ctx) {
   if (typeof t !== 'string') return undefined;
   const m = /^\(ptr (r\d+)\)$/.exec(t);
