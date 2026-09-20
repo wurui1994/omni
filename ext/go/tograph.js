@@ -125,6 +125,75 @@ function isMakeChan(r) {
 }
 
 /**
+ * **装着无符号整数的那些名字**（与 `MAPS` / `CHANS` 同一条路数：扫查得的上下文）。
+ *
+ * 干什么用：`x >> k` / `x / y` / `x % y` / 四个大小比较在**无符号**上与有符号不是
+ * 一件事（右移补零还是补符号位、商与余数的符号、比较的次序）。图上只有一族算符，
+ * 所以那一格落成 `prim` 上的一位 `uns`（见 `graph/nodes.js` 上 `prim` 的注），
+ * 方言那侧发 `u>>` / `u/` / `u%` / `u<` 那一族。
+ *
+ * 量出来的必要性：`raytrace.go` 的 LCG 是 `(r.s>>11)&1048575`，`r.s` 声明成 `uint64`。
+ * 那一份**没被咬到**是因为紧跟着的 `& 1048575` 把高位全抹了（低 20 位两种移法一样）——
+ * 换一个不带掩码的哈希就是静默的错答案。
+ *
+ * 收四处：`var x uint64` / `x := uint64(…)` / 形参 / **结构体字段**（靠接收者或变量的
+ * 具名类型去 `STRUCTS` 里查）。查不出来就当有符号 —— 与 `MAPS` 的口径一样（没登记的
+ * 按常态走），那一格是**已知的不精确**，不是猜。
+ */
+const UNS = new Set();
+/** 这几个是 go 的无符号整数类型名（`uintptr` 也算 —— 它就是个地址）。 */
+const UINT_TYPES = new Set(['uint', 'uint8', 'uint16', 'uint32', 'uint64', 'uintptr', 'byte']);
+/** 一格类型节点是不是无符号整数（具名类型跟着 `UNDER` 走一层）。 */
+const isUnsTy = (ty) => {
+  const n = scalarNameOf(ty);
+  return n !== null && UINT_TYPES.has(n);
+};
+/** 一格 `spec` 里**装无符号整数的名字**（照 `specMapNames` 的样子写）。 */
+function specUnsNames(x) {
+  const nm = part(x, 'names');
+  if (nm === undefined) return [];
+  const names = kids(nm).map(leaf);
+  const ty = kids(x).find((y) => tag(y) !== 'names' && tag(y) !== 'init');
+  if (isUnsTy(ty)) return names;
+  const ini = part(x, 'init');
+  if (ini === undefined) return [];
+  const rhs = kids(ini);
+  return names.filter((n, i) => isUnsConv(rhs[i]));
+}
+/** 这格右值是不是 `uint64(…)` 那一族的转换。 */
+function isUnsConv(r) {
+  if (r === undefined || r === null || !isList(r) || tag(r) !== 'call') return false;
+  const f = kids(r)[0];
+  return f !== undefined && tag(f) === 'name' && UINT_TYPES.has(leaf(kids(f)[0]));
+}
+/**
+ * **这格表达式是无符号的吗**（只认说得清的那几种，别的一律当有符号）。
+ * `sel` 那一支是关键：`r.s` 要靠 `r` 的具名类型去 `STRUCTS` 里查字段的声明类型。
+ */
+function isUnsExpr(x) {
+  if (x === undefined || x === null || !isList(x)) return false;
+  const g = tag(x);
+  if (g === 'paren') return isUnsExpr(kids(x)[0]);
+  if (g === 'name') return UNS.has(leaf(kids(x)[0]));
+  if (g === 'call') return isUnsConv(x);
+  if (g === 'bin') return isUnsExpr(kids(x)[1]);      // `(a>>1) >> 2`：看左边那一半
+  if (g === 'sel') {
+    const obj = kids(x)[0];
+    const fld = kids(x)[1];
+    if (obj === undefined || fld === undefined || tag(obj) !== 'name') return false;
+    const own = VARTYPE.get(leaf(kids(obj)[0]));
+    const fs = own === undefined ? undefined : STRUCTS.get(own);
+    if (fs === undefined || fs === null) return false;
+    const want = leaf(fld);
+    for (const [fn2, ft] of fs) if (fn2 === want) return isUnsTy(ft);
+    return false;
+  }
+  return false;
+}
+/** 哪几个算符有"无符号的那一半"（与 `backend-core.js` 的 `UBINOP` 逐字对应）。 */
+const UOPS = new Set(['>>', '/', '%', '<', '<=', '>', '>=']);
+
+/**
  * **方法名 -> 它声明的接收者类型名**，以及**登记过的类型名**。
  *
  * 两张表都是一趟扫查得的（见 goToGraph），存在的理由是同一句话：
@@ -416,17 +485,23 @@ function collectDecls(x, shapesOnly) {
   /* 见 `CHANS` 那段账：装通道的名字要认得出来（`len(ch)` 与 `range ch` 两处要）。
      三处来源：`var ch chan T` / `ch := make(chan T, n)` / 形参 `func f(ch chan T)`。 */
   if (tag(x) === 'spec') for (const n of specChanNames(x)) CHANS.add(n);
+  /* 见 `UNS` 那段账：无符号那几个算符与有符号不是一件事。 */
+  if (tag(x) === 'spec') for (const n of specUnsNames(x)) UNS.add(n);
   if (tag(x) === 'define' || tag(x) === 'assign') {
     const lhs0 = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
     const rhs0 = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
     for (let i = 0; i < lhs0.length; i++) {
       if (tag(lhs0[i]) === 'name' && isMakeChan(rhs0[i])) CHANS.add(leaf(kids(lhs0[i])[0]));
+      if (tag(lhs0[i]) === 'name' && isUnsConv(rhs0[i])) UNS.add(leaf(kids(lhs0[i])[0]));
     }
   }
   if (tag(x) === 'fn' || tag(x) === 'method') {
     const sigC = kids(x).find((y) => tag(y) === 'sig');
     if (sigC !== undefined) {
-      for (const p of paramInfo(sigC)) if (isChanTy(p.ty)) CHANS.add(p.nm);
+      for (const p of paramInfo(sigC)) {
+        if (isChanTy(p.ty)) CHANS.add(p.nm);
+        if (isUnsTy(p.ty)) UNS.add(p.nm);
+      }
     }
   }
   /* **声明的形参类型**（`FSIG`）：调用点要照它转实参（见 `argsByDecl`）。
@@ -1748,7 +1823,14 @@ function toNode(x) {
       if (leaf(op) === '&^') {
         return node('prim', { args: [toNode(a), un('bnot', toNode(b))] }, { name: 'band' });
       }
-      return binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'go' });
+      const nd = binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'go' });
+      /* **无符号那一位**（`UNS` 那段账）：左边那一半声明成 uint 时，右移 / 除 / 取余 /
+         四个大小比较要走"无符号的那一半"。只往 `prim` 上点一位 —— 图上仍旧只有一族算符。 */
+      if (UOPS.has(leaf(op)) && isUnsExpr(a)
+        && nd !== null && typeof nd === 'object' && nd.op === 'prim') {
+        nd.attrs = { ...nd.attrs, uns: true };
+      }
+      return nd;
     }
     case 'un': {
       const [op, a] = kids(x);
@@ -2409,6 +2491,7 @@ export function goToGraph(tree, opts) {
   // —— `m[k]` 与 `xs[i]` 同形那笔账，在 go 上不需要驱动器回问类型。
   MAPS.clear();
   CHANS.clear();
+  UNS.clear();
   for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
   // 再扫一遍**声明过的方法名与类型名**：go 的接收者写在声明里，所以这一趟就够了 ——
   // 方法在图上是"多一格实参的普通函数"，不需要运行期查表（见 METHODS 那段）。

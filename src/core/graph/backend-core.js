@@ -115,6 +115,15 @@ const BINOP = {
   band: '&', bor: '|', bxor: '^', shl: '<<', shr: '>>',
 };
 
+/**
+ * **无符号那一半**（`nodes.js` 上 `prim` 的 `uns`，ADR-0016 第六十一刀）。
+ * 只有这七个要分开 —— 补码下 `+ - * & | ^ << == !=` 两种读法算出来的位一模一样。
+ */
+const UBINOP = {
+  '/': 'u/', '%': 'u%', shr: 'u>>',
+  '<': 'u<', '>': 'u>', '<=': 'u<=', '>=': 'u>=',
+};
+
 /** 一格串字面量在方言里的写法（转义按 s-expr 的读法：只有这两个要转）。 */
 const strLit = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
@@ -318,7 +327,7 @@ function expr(x, env, ctx) {
       if (args.length > 2 && nm !== '+' && nm !== '*') {
         gap(`${nm} 收了 ${args.length} 格实参（这一刀只接两格）`);
       }
-      return binText(nm, args, env, ctx);
+      return binText(nm, args, env, ctx, x.attrs.uns === true);
     }
     case 'call': {
       const f = x.ins.fn;
@@ -487,7 +496,7 @@ function expr(x, env, ctx) {
  * 这是 `go+conv` 那一族当场量出来的：`float64(7) / 2` 落出来是 `(bin "/" (toreal …) (int 2))`，
  * 方言直接报"两边要同型"。抬不上去（真假与数混算那种）就报缺口，不猜。
  */
-function binText(nm, args, env, ctx) {
+function binText(nm, args, env, ctx, uns) {
   /* **dyn 在这儿拆箱**（拆在用它的地方，见 dyn 那一段）：`seenType` 按键查出箱子里装的是
      什么，`one` 落文本时套一层 `(asint …)` 那一族。查不出来就报缺口（`unboxTo` 那一句）。 */
   const ts = args.map((a) => seenType(a, env, ctx));
@@ -502,7 +511,9 @@ function binText(nm, args, env, ctx) {
     if (want === 'real' && t === 'int') return `(toreal ${v})`;
     return gap(`'${nm}' 的两边说不到一起（${t} 与 ${want}）`);
   };
-  return args.slice(1).reduce((acc, a, i) => `(bin "${BINOP[nm]}" ${acc} ${one(a, ts[i + 1])})`,
+  /* 无符号那一格（`uns`）：只有那七个算符有另一半，别的原样发。 */
+  const opTxt = (uns === true && UBINOP[nm] !== undefined) ? UBINOP[nm] : BINOP[nm];
+  return args.slice(1).reduce((acc, a, i) => `(bin "${opTxt}" ${acc} ${one(a, ts[i + 1])})`,
     one(args[0], ts[0]));
 }
 

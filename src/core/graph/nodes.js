@@ -123,7 +123,16 @@ export const NODES = new Map([
     providers: { spec: TEN, why: {} },
   }),
   N('prim', 'expr', [{ name: 'args', sem: SEM.value, rest: true }], {
-    attrs: ['name'], effects: ['reads', 'writes'],
+    /* `uns` 是一格**附属**（有类型覆盖层那一路，与 `const` 的 `exact` 同一条纪律）：
+       这一格算的是**无符号**的。图上只有一格整数、也只有一族算符 —— 补码下
+       `+ - * & | ^ << == !=` 两种读法**算出来的位一模一样**，真正分岔的只有
+       除、取余、右移与四个大小比较（与 LLVM 的 `udiv`/`sdiv`、方言的 `u/` / `u>>`
+       同一条路子：位是一份，怎么读是算子的事）。
+       量出来的必要性：go 的 `(r.s>>11)` 里 `r.s` 是 `uint64`，发有符号右移就是补符号位，
+       状态一过 2^63 整条随机流就不同 —— 而且是静默的。
+       只有方言那条腿看这一格（它的 int 是真 64 位）；别的腿的 int 是一格 double，
+       无符号在那儿本来就表示不出来，那是它们各自的账。 */
+    attrs: ['name', 'uns'], effects: ['reads', 'writes'],
     doc: 'chez pr（prims.ss）/ go 19+7+23 格 / awk builtin / freebasic 那一批语句。'
       + '效应那一栏**逐格内建**地查 prims.js —— 这儿写的是"最坏情况"的默认值',
     providers: { spec: TEN, why: {} },
