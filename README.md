@@ -1,11 +1,36 @@
 # Omni
 
-Omni 是一个**语言平台**。它不替你选语言，也不要求你的语言先变成它 —— 它提供一层可对接的
-契约，让不同语言的程序落在同一套中间表示上，从此共享同一批优化、同一批后端、同一套工具。
-愿景是**融合**：把散在各门语言里的东西（语法、类型、内存模型、并发、代码生成）变成可以
-拆开重组的部件，而不是再造一门要求所有人迁移的新语言。远期目标是把这层契约做成一台
-**形式化引擎** —— 程序的意义用可检查的形式写下来，翻译、优化、发码都是它上面可验证的变换，
-而不是一堆互相信任的字符串处理。
+Omni 是一个语言平台。语法归语言自己，执行归平台，中间用一层契约接住。一门语言接上这层契约，
+写出来的程序就能被解释着跑、编成 JavaScript、编成 C、编成一个自足的原生二进制 —— 复用的是
+同一套代码生成器、同一条优化管线、同一个链接器。
+
+接上的成本有多大，这棵树里有现成的数：Scheme 是 153 行语法加 232 行映射，Common Lisp 是
+125 加 279。Go 那种体量的语言映射要 3780 行 —— 成本跟着语言的复杂度走，不跟着平台走。
+已经这样接进来 11 门，目前大部分只支持了基本语法和特性：Go、Nim、V、Lua、C++ 子集、Scheme、Common Lisp、awk、FreeBASIC、Mojo。
+所以"发明一门自己的语言"在这里不是一个项目，是一个下午。
+
+不要求谁变成谁，是故意的。让所有人改用同一门语言这件事，历史上试过很多次，每次的结果都是
+世界上又多了一门语言。Omni 赌的是另一边：各自留着自己的样子，但都能连上。
+
+愿景是融合。语法、类型、内存模型、并发、发码，这些能力现在被各门语言分别锁在自己院子里；
+把它们拆成能重新拼的部件，比再造第十二门语言有意思。
+
+远期是一台形式化引擎：程序的意思用可检查的形式写下来，翻译、优化、发码都变成那上面能验证的
+变换，而不是一串互相信任的字符串处理。这一步还远，但每一格判据都是照那个方向挑的。
+
+## 能用它做什么
+
+- **发明一门语言。** 语法一份、映射一份，后面那一整条链（IR、优化、各条后端、调试与性能
+  工具）白得。从 `ext/chez/` 抄起，那是这里最小的一门。
+- **让语言之间互相借东西。** 一份源码里可以用 `#lang` 切到另一门语言的读法；主语言本身就是
+  这么长出来的（语法骨架借 Asymptote 与 Jancy，UFCS 借 Nim）。借的是语法与语义，不是复制
+  一份运行时（[ADR-0037](docs/adr/0037-lang-directive-and-cross-language-borrowing.md)）。
+- **一条命令把源码变成二进制，机器上什么都不用装。** C 前端、汇编器、ELF/Mach-O/PE
+  链接器都在这棵树里，只要一个 Node —— 没有外部编译器，没有链接器依赖。
+- **把语言剖开看。** `emit ast|oir|mir|sx|c|llvm|spirv` 印出每一层中间形态，`-v` 印出每一步
+  的毫秒数。"我这行代码最后变成了什么"，一条命令就看得见。
+- **AI 在这棵树上改东西，能自己验。** 零构建步骤，改一行即刻生效；每一步都能单独印出来；
+  每条结论都对应一条可复跑的命令；报错是一句人话，不是栈回溯。
 
 ## 哲学
 
@@ -21,29 +46,31 @@ Omni 是一个**语言平台**。它不替你选语言，也不要求你的语�
 
 ## 三十秒上手
 
-只要 **Node ≥ 20**，没有构建步骤，改一行即刻生效。
+只要 **Node ≥ 20**。没有构建步骤，改一行即刻生效。
 
 ```bash
-node src/cli.js run   x.go              # 一条命令：源码 → 核心方言 → IR → 原生，跑掉
-node src/cli.js build x.go -o prog      # 出一个自足的二进制（自带代码生成与链接器）
-node src/cli.js run   x.c               # C：自带预处理 + 发码 + 汇编 + 链接
-node src/cli.js run   x.asy -f svg      # Asymptote：出图
-node src/cli.js emit  c x.go            # 看任一中间形态：ast|oir|mir|sx|asy|js|c|llvm|spirv
+node src/cli.js run   x.go              # 跑一份 Go 源码（机器上不用装 go）
+node src/cli.js build x.go -o prog      # 变成一个自足的二进制（不借外部编译器与链接器）
+node src/cli.js run   x.c               # C 也一样：预处理、发码、汇编、链接全在树里
+node src/cli.js run   x.asy -f svg      # 画张图（Asymptote）
+node src/cli.js emit  c x.go            # 剖开看：ast|oir|mir|sx|asy|js|c|llvm|spirv
 node src/cli.js --help                  # 命令树，每一级都有自己的 --help
 ```
 
-**前端由扩展名选，后端由 `--backend` 选。** 同一份源码可以落到多条腿上，而它们的输出
-必须一致（解释器 / JS / C / LLVM / 原生）—— 那是判据，不是愿望。上手细节在
-[`docs/guide.md`](docs/guide.md)。
+**前端由扩展名选，后端由 `--backend` 选。** 同一份源码可以落到多条腿上，而它们的输出必须
+一致（解释器 / JS / C / LLVM / 原生）—— 那是判据，不是愿望。
+
+想加一门自己的语言：`ext/chez/` 是最小的样板，约定写在
+[`docs/EXTENSIONS.md`](docs/EXTENSIONS.md)，上手命令在 [`docs/guide.md`](docs/guide.md)。
 
 ## 现在能连上什么
 
 - **自带前端**：Omni 主语言（`.omni/.omnid/.omnis` 三种类型模式）、核心方言 `.sx`、
   C、JS 子集、WebAssembly 文本、Jancy、Asymptote、GLSL 片元着色器。
 - **借语法接进来的**（`ext/` 下 11 格登记）：Go、Nim、V、Lua（含 gsl-shell 方言）、
-  C++ 子集、Scheme、Common Lisp、awk、FreeBASIC、Mojo。其中 `.go` / `.nim` / `.v`
-  已经接在主路上，与 `.c` 同一条规矩，一条命令到二进制
-  （[ADR-0041](docs/adr/0041-one-pipeline-per-source.md)）。
+  C++ 子集、Scheme、Common Lisp、awk、FreeBASIC、Mojo。**都按后缀走主路**，
+  一条命令到二进制（[ADR-0041](docs/adr/0041-one-pipeline-per-source.md)）；
+  `.lua` 有一台更全的自带读入器，所以仍归那一条。
 - **后端**：解释器、JavaScript、C 源码、LLVM IR、原生（arm64 / x86-64，自带
   ELF / Mach-O / PE 链接器）、SPIR-V、wasm。
 

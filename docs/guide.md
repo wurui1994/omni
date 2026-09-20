@@ -94,22 +94,24 @@ node src/cli.js run /tmp/s.frag -o /tmp/s.png --size 512 \
 两条腿：**快路**是 GLSL → LLVM IR（8 道 SoA，照 llvmpipe 的 `lp_exec_mask`）在 JIT 宿主里渲；
 **参考腿**是 GLSL → 核心方言 → 那五条腿，一个像素一趟。两边的像素在门里是对齐的。
 
-### 借来的语言（Go / Nim / V / Lua / C++ …）
+### 借来的语言（Go / Nim / V / Scheme / C++ …）
 
 一份语法 + 一份映射就接进来一门（`ext/<lang>/`，怎么加见 [`EXTENSIONS.md`](EXTENSIONS.md)）。
-`.go` / `.nim` / `.v` 已经接在主路上 —— 不用给 `--engine`，和 `.c` 一样按后缀选前端：
+接上之后**不用给 `--engine`**，和 `.c` 一样按后缀选前端：
 
 ```bash
-node src/cli.js run   bench/go/fib.go              # 跑掉
-node src/cli.js build bench/go/pt.go -o /tmp/pt    # 原生二进制，一条命令
-OMNI_MIR_OPT=1 node src/cli.js build x.go -o out   # 带公共优化管线（ADR-0039）
-node src/cli.js emit c ext/nim/examples/intmath.nim # 看生成的 C
+node src/cli.js run   bench/go/fib.go                # 跑掉
+node src/cli.js build bench/go/pt.go -o /tmp/pt      # 原生二进制，一条命令
+node src/cli.js build ext/chez/examples/basics.ss -o /tmp/s   # Scheme 也一样
+OMNI_MIR_OPT=1 node src/cli.js build x.go -o out     # 带公共优化管线（ADR-0039）
+node src/cli.js emit c ext/nim/examples/intmath.nim  # 看生成的 C
 ```
 
 中间那份核心方言落在 `.omni-cache/src-sx/<内容哈希>/`，改一个字就换一格目录。
+后缀名单是从 `graph/langs.js` 那张表算出来的，**已经有主的后缀不抢**：`.lua` 有一台自带的
+读入器（比映射那份全），所以 `run x.lua` 还是走它。
 
-其余那几门（Lua / C++ / Scheme / Common Lisp / awk / FreeBASIC / Mojo）现在还走
-`--engine graph`，那一层有自己的后端名单（interp / js / wat / c / sx）：
+`--engine graph` 仍然在，那是点名要图那一层的后端（interp / js / wat / c / sx）：
 
 ```bash
 node src/cli.js run ext/lua/examples/basics.lua --engine graph

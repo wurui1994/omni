@@ -360,12 +360,14 @@ ${graphEngineHelp()}
   omni run x.lua --engine graph --lang gsl-shell        （--lang 盖过后缀）
   omni run ext/cpp/examples/basics.cpp --engine graph --backend wat
 
-**.go / .nim / .v 不用给 --engine**：它们与 .c 一样，就是这条链的一个前端 ——
+**借来的那些语言不用给 --engine**：它们与 .c 一样按后缀选前端 ——
 译成核心方言（.sx，落在 .omni-cache/src-sx/<内容哈希>/）之后走的是和 .sx 输入
 一模一样的那条路，所以 --backend / --cc / --profile / 摇树 / 暖存全都照旧管用：
   omni run bench/go/fib.go                      跑掉（默认 js 那条腿）
   omni build bench/go/pt.go -o pt               原生二进制（一条命令，不用先落 .sx）
+  omni build ext/chez/examples/basics.ss -o s   Scheme 也一样
   omni emit c bench/go/pt.go                    看生成的 C
+后缀名单从 graph/langs.js 那张表算；**已经有主的后缀不抢**（.lua 归它自带的读入器）。
 给了 --engine graph 才切到图那一层的后端（那儿的 --backend 是另一套名字）。`,
       flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT,
         /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，

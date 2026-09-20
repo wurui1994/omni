@@ -463,6 +463,22 @@ function statLayersGraph(path, s, textLen, argv) {
 }
 
 /**
+ * 借来的那些语言的扩展名（`.go` / `.nim` / `.ss` / …），带点。
+ *
+ * **一张表，不是两处清单**：`cli.js` 要知道"哪些后缀该先译成核心方言"，而那份名单就是
+ * `langs.js` 里登记的那些。手抄一份的后果是加一门语言要改两处，第二处一定会漏。
+ * `guess: false` 的那几格不算（`.lua` 归 lua，gsl-shell 只能 `--lang` 点名）。
+ */
+export function borrowedExts() {
+  const out = new Set();
+  for (const [, d] of LANGS) {
+    if (d.guess === false) continue;
+    for (const e of d.exts) out.add(`.${e}`);
+  }
+  return [...out];
+}
+
+/**
  * 源码 -> 核心方言文本（`.sx`）。
  *
  * 这一格是给 `cli.js` 用的：`.go` 这类文件与 `.c` 一样，**就是这条链的一个前端** ——

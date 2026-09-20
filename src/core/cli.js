@@ -55,7 +55,7 @@ import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
  * 那条路是反着的。现在这么写是因为那十份都是纯 JS、小、且没有别的依赖；哪天核心大小
  * 要紧了，正解是把 graph 这台机器登记成一格 lang / plugin（`lang/builtin.js` 那一套），
  * 不是在这儿加一句 `await import`（这份文件里 44 个 import 全是静态的，只有一套规矩）。 */
-import { runGraphFile, buildGraphFile, coreSxText } from './graph/run.js';
+import { runGraphFile, buildGraphFile, coreSxText, borrowedExts } from './graph/run.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -4210,20 +4210,32 @@ function main(argv) {
    * （`node.key`）—— 一条腿都不能漏，漏掉的那条就是「按了 --timeout 却还在挂着」。 */
   if (node.key === 'run') armRunTimeout(rest);
   /**
-   * **`.go` / `.nim` / `.v` 就是这条链的一格前端**，与 `.c` 同一条规矩（前端按扩展名选）。
+   * **借来的那些语言也是这条链的前端**，与 `.c` 同一条规矩（前端按扩展名选）。
    *
-   * 这几门的前端出来的是**核心方言**（`.sx`），而 `.sx` 这条输入下游什么都齐了：
+   * 它们的前端出来的是**核心方言**（`.sx`），而 `.sx` 这条输入下游什么都齐了：
    * lower -> OIR -> MIR -> 原生 / js / llvm，加上 `--cc`、`OMNI_MIR_OPT`、摇树、
    * profile、增量暖存。所以这儿只做一件事：译出那份 `.sx`、落进暖存、把 `path` 换成它，
    * 剩下的照 `.sx` 原样走 —— 下游一行都不用再写一遍。
    *
+   * 后缀名单**从 `langs.js` 那张表算**（`borrowedExts()`），不在这儿手抄：加一门语言
+   * 只改登记那一处。映射还没接住的形状照旧报"这一格还没接"（有名有姓，退出码 1）。
+   *
+   * **已经有主的后缀不抢**（`lang(path) !== null`）：`.lua` 有一台自己的读入器
+   * （`lua.toSx` 那格插件，比这边的映射全），抢过来就是把一条已经通的路换成一条有缺口的路。
+   * 量到过：`run ext/lua/examples/basics.lua` 从"跑出答案"变成"这一格还没接：sumto"。
+   *
    * 从前这条线只存在于 `bench/go/run.js` 里的两条命令（先 `--backend core -o x.sx`，
    * 再 `build x.sx`）：命令行上没有任何一条路能从 `.go` 走到二进制。
+   *
+   * **只在"编这份源码"那几个动词上接管**（run / build / emit / check）。`glr parse x.ss`、
+   * `c obj x.c` 那些动词吃的是**这份文件本身**，把 `path` 换掉就等于换了它们的输入 ——
+   * 量到过：不加这条判断，`glr` 与 `sexpr` 两套判据整套翻红。
    *
    * `--engine graph` 给了就不接管 —— 那是点名要另一层的后端（interp/js/wat/c/sx）。
    */
   if (path !== undefined && path !== null && !rest.includes('--engine')
-      && ['.go', '.nim', '.v'].some((e) => path.endsWith(e))) {
+      && ['run', 'build', 'emit', 'check'].includes(node.key)
+      && lang(path) === null && borrowedExts().some((e) => path.endsWith(e))) {
     const sx = coreSxText(path, rest);
     if (sx === null) return 1;
     /* 内容定址：同一份源码只译一次，改一个字就换一格目录 —— 陈旧产物不会被误用。

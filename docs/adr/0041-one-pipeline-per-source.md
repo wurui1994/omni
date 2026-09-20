@@ -1,4 +1,4 @@
-# ADR-0041 一份源码一条路：`.go` / `.nim` / `.v` 就是这条链的前端
+# ADR-0041 一份源码一条路：借来的那些语言就是这条链的前端
 
 日期 2026-09-21 · 状态 已落地
 
@@ -20,9 +20,21 @@
 
 ## 决定
 
-`.go` / `.nim` / `.v` 与 `.c` **同一条规矩：前端按扩展名选**。`cli.js` 在动词分派之前把
-这几种源码译成核心方言（`coreSxText`），落到 `.omni-cache/src-sx/<内容哈希>/x.sx`，
-再把 `path` 换成那份 `.sx` —— 下游一个字都不改。
+借来的那些语言与 `.c` **同一条规矩：前端按扩展名选**。`cli.js` 在动词分派之前把这些源码
+译成核心方言（`coreSxText`），落到 `.omni-cache/src-sx/<内容哈希>/x.sx`，再把 `path`
+换成那份 `.sx` —— 下游一个字都不改。
+
+后缀名单**从 `graph/langs.js` 那张表算**（`borrowedExts()`），不在 cli 里手抄一份：
+加一门语言只改登记那一处。三条边界，每条都有量出来的理由：
+
+- **只在"编这份源码"那几个动词上接管**：run / build / emit / check。`glr parse x.ss`、
+  `c obj x.c` 吃的是这份文件本身，换掉 `path` 就等于换掉它们的输入 —— 不加这一条，
+  `glr` 与 `sexpr` 两套判据整套翻红（量过：6/18 → 4/18）。
+- **已经有主的后缀不抢**（`lang(path) !== null`）。`.lua` 有一台自带读入器（`lua.toSx`），
+  比映射那份全；抢过来量到的后果是 `run ext/lua/examples/basics.lua` 从"跑出答案"
+  变成"这一格还没接：sumto"。
+- 映射没接住的形状照旧报一句有名有姓的话（"这一格还没接"），不是崩，也不是静默降级。
+
 
 于是这些全都白得，因为它们本来就长在 `.sx` 那条输入上：
 
@@ -46,11 +58,14 @@
 
 - `omni build bench/go/pt.go -o pt` 出二进制，输出与 `go run` 相同（`938480769`；
   go 的 `println` 写 stderr，两边都要合流取）。
+- 六门借来的语言按后缀直接跑通同一份例子（`15/120/7/ok`）：Scheme、Common Lisp、awk、
+  C++ 子集、Mojo、FreeBASIC；其中 Scheme 与 C++ 还验了 `build -o` 出的原生二进制。
+- `.lua` 仍走它自带的读入器（`run ext/lua/examples/basics.lua` 照旧出答案）。
 - `node bench/go/run.js` 六份全过，答案先验再计时（fib ×1.19 / loop ×0.85 /
   pt ×1.81 / raytrace ×1.20 / slice ×1.62 / vec ×1.43，与两步手动路径同一档）。
-- `node tests/go/run.js` 28/28 与 `go run` 逐字节相同（这套仍走 `--engine graph`，
-  因为它比的是前端那一层）。
-- `npm run check:self` 绿。
+- `node tests/go/run.js` 28/28 与 `go run` 逐字节相同。
+- `npm run check:self` / `npm run fix:self` 绿。
+
 
 ## 顺带记下来的两笔账
 
