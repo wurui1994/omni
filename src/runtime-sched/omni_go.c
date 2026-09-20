@@ -151,3 +151,67 @@ void omni_go_chan_close(void *c) {  if (c == NULL) die("close 一格空 channel"
 int64_t omni_go_chan_len(void *c) {
   return c == NULL ? 0 : (int64_t)omni_chanlen((omni_hchan *)c);
 }
+
+/* ---- select（见 `omni_go.h` 上那段账） ---- */
+
+static _Thread_local omni_scase tls_scase[OMNI_GO_SEL_MAX];
+static _Thread_local int64_t tls_selval[OMNI_GO_SEL_MAX];
+static _Thread_local int tls_ncase;
+static _Thread_local int64_t tls_selVal;
+static _Thread_local int64_t tls_selOK;
+
+void omni_go_sel_begin(void) { tls_ncase = 0; }
+
+static omni_scase *selSlot(void) {
+  if (tls_ncase >= OMNI_GO_SEL_MAX) die("select 的 case 太多了（上限见 OMNI_GO_SEL_MAX）");
+  tls_selval[tls_ncase] = 0;
+  return &tls_scase[tls_ncase++];
+}
+
+void omni_go_sel_recv(void *c) {
+  omni_scase *s;
+  if (c == NULL) die("select 里有一格空 channel（go 里那一路永远不会被选中）");
+  s = selSlot();
+  s->c = (omni_hchan *)c;
+  s->elem = NULL;                 /* 真地址在 `sel_go` 里指到自己栈上 */
+  s->kind = OMNI_SELECT_RECV;
+}
+
+void omni_go_sel_send(void *c, int64_t v) {
+  omni_scase *s;
+  if (c == NULL) die("select 里有一格空 channel（go 里那一路永远不会被选中）");
+  s = selSlot();
+  s->c = (omni_hchan *)c;
+  s->elem = NULL;
+  s->kind = OMNI_SELECT_SEND;
+  tls_selval[tls_ncase - 1] = v;  /* 要发的值在这一刻就求好了（与 go 的求值次序一致） */
+}
+
+void omni_go_sel_default(void) {
+  omni_scase *s = selSlot();
+  s->c = NULL;
+  s->elem = NULL;
+  s->kind = OMNI_SELECT_DEFAULT;
+}
+
+int64_t omni_go_sel_go(void) {
+  /* **抄到自己栈上再进去**：park 之后 g 可能换 M，而 `omni_selectgo` 往 `elem` 里写的
+     那一格必须跟着 g 走 —— g 的栈跟着 g，TLS 不跟着。 */
+  omni_scase cs[OMNI_GO_SEL_MAX];
+  int64_t vals[OMNI_GO_SEL_MAX];
+  int n = tls_ncase;
+  int i, ok = 0, idx;
+  for (i = 0; i < n; i++) {
+    cs[i] = tls_scase[i];
+    vals[i] = tls_selval[i];
+    if (cs[i].kind != OMNI_SELECT_DEFAULT) cs[i].elem = &vals[i];
+  }
+  idx = omni_selectgo(cs, n, &ok);
+  tls_ncase = 0;
+  tls_selOK = ok != 0 ? 1 : 0;
+  tls_selVal = (idx >= 0 && idx < n) ? vals[idx] : 0;
+  return (int64_t)idx;
+}
+
+int64_t omni_go_sel_val(void) { return tls_selVal; }
+int64_t omni_go_sel_ok(void) { return tls_selOK; }

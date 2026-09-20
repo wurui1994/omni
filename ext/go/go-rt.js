@@ -107,6 +107,13 @@ function __goRun() { return __goNoConc('并发那一档的主 goroutine'); }
 // 原生腿上它还没接（omni_selectgo 在 omni_chan.c 里，前端那一侧的门面还没发）。
 // ============================================================
 function __goSelect() { return __goNoConc('select'); }
+function __goSelBegin() { return __goNoConc('select'); }
+function __goSelRecv() { return __goNoConc('select'); }
+function __goSelSend() { return __goNoConc('select'); }
+function __goSelDefault() { return __goNoConc('select'); }
+function __goSelGo() { return __goNoConc('select'); }
+function __goSelVal() { return __goNoConc('select'); }
+function __goSelOK() { return __goNoConc('select'); }
 
 // ============================================================
 // Go type switch + type checking

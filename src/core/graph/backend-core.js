@@ -651,6 +651,13 @@ const C_RT = new Map([
   ['__goChanOK', { sym: 'omni_go_chan_ok', ret: 'i64', dty: 'int', ps: [] }],
   ['__goChanClose', { sym: 'omni_go_chan_close', ret: 'void', dty: 'void', ps: ['ptr'] }],
   ['__goChanLen', { sym: 'omni_go_chan_len', ret: 'i64', dty: 'int', ps: ['ptr'] }],
+  ['__goSelBegin', { sym: 'omni_go_sel_begin', ret: 'void', dty: 'void', ps: [] }],
+  ['__goSelRecv', { sym: 'omni_go_sel_recv', ret: 'void', dty: 'void', ps: ['ptr'] }],
+  ['__goSelSend', { sym: 'omni_go_sel_send', ret: 'void', dty: 'void', ps: ['ptr', 'i64'] }],
+  ['__goSelDefault', { sym: 'omni_go_sel_default', ret: 'void', dty: 'void', ps: [] }],
+  ['__goSelGo', { sym: 'omni_go_sel_go', ret: 'i64', dty: 'int', ps: [] }],
+  ['__goSelVal', { sym: 'omni_go_sel_val', ret: 'i64', dty: 'int', ps: [] }],
+  ['__goSelOK', { sym: 'omni_go_sel_ok', ret: 'i64', dty: 'int', ps: [] }],
 ]);
 
 /** `C_RT` 那张表里 `ps` 的一格 -> `(cabi …)` 里写的那个词。 */

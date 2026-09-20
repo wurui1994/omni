@@ -1199,8 +1199,95 @@ function armBodyOf(c) {
   });
 }
 
-function switchOf(x) {
-  const all = kids(x);
+/** `select` 那几格用的小工具：调一格运行时的名字。 */
+const rtCall = (nm, as) => node('call', { fn: node('ref', {}, { name: nm }), args: as ?? [] });
+
+/** `select` 里的深度（临时名要唯一 —— select 能套 select）。 */
+let SEL_DEPTH = 0;
+
+/**
+ * **`select { case … }`** 落成三段（照 go 规范里它的语义，见 `omni_go.h` 上那段账）：
+ *   1. 把每一格 case **报上去**（`__goSelBegin` + 一串 `__goSelRecv`/`__goSelSend`/
+ *      `__goSelDefault`）—— 发那一路要发的值**在这一刻就求好**，与 go 的求值次序一致；
+ *   2. `idx = __goSelGo()` 真选（没有 default 且全阻塞就 park）；
+ *   3. 按 `idx` 落一条 if 链，收那一路的体里先把 `v` / `ok` 从 `__goSelVal` / `__goSelOK`
+ *      绑出来。
+ *
+ * 从前这一格是"取第一个 case 的体、无条件跑" —— 编得出来、跑得动、**答案静默地错**。
+ *
+ * 接四种 comm（别的当场报）：`v := <-ch` / `v, ok := <-ch` / `<-ch` / `ch <- v`。
+ * 每一格 case 自己是一层块（go 的规矩），所以体走 `armOf`（它顺带管 `break`）。
+ */
+function selectOf(x) {
+  const comms = kids(x).filter((y) => tag(y) === 'case' || tag(y) === 'default');
+  if (comms.length === 0) {
+    /* `select {}`：go 里那是**永久阻塞**。图上没有"停在这儿"那一格，报。 */
+    throw new Error('go->graph: 空的 `select {}` 是永久阻塞 —— 图上没有那一格');
+  }
+  const idxName = `__sel${SEL_DEPTH}`;
+  const pre = [rtCall('__goSelBegin')];
+  const arms = [];
+  SEL_DEPTH += 1;
+  try {
+    comms.forEach((c) => {
+      if (tag(c) === 'default') {
+        pre.push(rtCall('__goSelDefault'));
+        arms.push({ body: armOf(c) });
+        return;
+      }
+      const s0 = kids(c)[0];
+      /* 光一句 `<-ch` 在树上裹着一层 `expr`（语句位置上的表达式）。 */
+      const s = (isList(s0) && tag(s0) === 'expr') ? kids(s0)[0] : s0;
+      /* 三种"收"与一种"发"。`simple` 那一格在树上就是一句普通语句。 */
+      if (tag(s) === 'send' || tag(s) === 'chan-send') {
+        const [chn, v] = kids(s);
+        pre.push(rtCall('__goSelSend', [toNode(chn), toNode(v)]));
+        arms.push({ body: armOf(c) });
+        return;
+      }
+      if (tag(s) === 'recv') {
+        pre.push(rtCall('__goSelRecv', [toNode(kids(s)[0])]));
+        arms.push({ body: armOf(c) });
+        return;
+      }
+      if (tag(s) === 'define' || tag(s) === 'assign') {
+        const lhs = kids(s).filter((y) => tag(y) === 'lhs').flatMap(kids);
+        const rhs = kids(s).filter((y) => tag(y) === 'rhs').flatMap(kids);
+        if (rhs.length === 1 && tag(rhs[0]) === 'recv' && lhs.length >= 1 && lhs.length <= 2) {
+          pre.push(rtCall('__goSelRecv', [toNode(kids(rhs[0])[0])]));
+          /* 体的最前面把 `v`（与 `ok`）绑出来 —— 与 `v, ok := <-ch` 同一条路数。 */
+          const isDef = tag(s) === 'define';
+          const mk = (t, init) => (isDef
+            ? node('bind', { init }, { name: nameOf(t) })
+            : node('set', { value: init }, { name: nameOf(t) }));
+          const head = [];
+          if (nameOf(lhs[0]) !== '_') head.push(mk(lhs[0], rtCall('__goSelVal')));
+          if (lhs.length > 1 && nameOf(lhs[1]) !== '_') {
+            head.push(mk(lhs[1], binOf('!=', rtCall('__goSelOK'), lit(0), OPS, { lang: 'go' })));
+          }
+          arms.push({ body: node('region', { body: [...head, armOf(c)] }) });
+          return;
+        }
+      }
+      throw new Error(`go->graph: select 的 case 只接 \`v := <-ch\` / \`v, ok := <-ch\``
+        + ` / \`<-ch\` / \`ch <- v\`（这儿是 ${tag(s)}）`);
+    });
+  } finally {
+    SEL_DEPTH -= 1;
+  }
+  pre.push(node('bind', { init: rtCall('__goSelGo') }, { name: idxName }));
+  /* 按下标落 if 链（从后往前串，与 `switchOf` 同一条）。 */
+  let chain;
+  for (let i = arms.length - 1; i >= 0; i -= 1) {
+    chain = branchOf(
+      binOf('==', node('ref', {}, { name: idxName }), lit(i), OPS, { lang: 'go' }),
+      arms[i].body, chain,
+    );
+  }
+  return node('region', { body: [...pre, chain] });
+}
+
+function switchOf(x) {  const all = kids(x);
   const ini = all.length > 0 && tag(all[0]) === 'init' ? all[0] : undefined;
   const rest = ini === undefined ? all : all.slice(1);
   const subj = rest.length > 0 && tag(rest[0]) === 'tag' ? kids(rest[0])[0] : undefined;
@@ -2301,10 +2388,10 @@ function toNode(x) {
         ? node('call', { fn: node('ref', {}, { name: '__goChanSend' }), args: [toNode(ch), toNode(v)] })
         : [];
     }
-    case 'select': {
-      const first = kids(x).find((y) => tag(y) === 'case' || tag(y) === 'default');
-      return first === undefined ? [] : node('region', { body: many(partKids(first, 'body')) });
-    }
+    /* **`select { … }`** —— 照 go 规范摊成"先把 case 表报上去、再选、再按下标分支"
+       （`omni_go_sel_*`，见 `src/runtime-sched/omni_go.h` 上那段账）。
+       从前这一格是 `取第一个 case 的体、无条件跑` —— 那是**静默的错答案**。 */
+    case 'select': return selectOf(x);
     default:
       throw new Error(`go->graph: 这一格还没接：${tag(x) ?? String(JSON.stringify(x)).slice(0, 40)}`);
   }

@@ -49,4 +49,27 @@ int64_t omni_go_chan_ok(void);
 void omni_go_chan_close(void *c);
 int64_t omni_go_chan_len(void *c);
 
+/* ---- select（照 go 的 select.go，`omni_selectgo`） ----
+ *
+ * 方言那一层递不了"一个结构体数组 + 一格出参"，所以摊成**一串调用**：
+ *   omni_go_sel_begin()            清空这一趟的 case 表
+ *   omni_go_sel_recv(c)            加一格"收"
+ *   omni_go_sel_send(c, v)         加一格"发"（v 在这儿就求好了，与 go 的求值次序一致）
+ *   omni_go_sel_default()          加一格 default
+ *   idx = omni_go_sel_go()         真选（回选中的下标，没有 default 且全阻塞就 park）
+ *   omni_go_sel_val() / _ok()      收那一路的值与 ok
+ *
+ * case 表摆在**这条 M 的 TLS** 里，而 `sel_go` 进去之前先把它抄到**自己栈上**的局部量
+ * —— park 之后 g 可能换 M，`omni_selectgo` 往 `elem` 里写的那一格必须跟着 g 走
+ * （g 的栈跟着 g，TLS 不跟着）。这一格是这条路上唯一的真陷阱。
+ */
+#define OMNI_GO_SEL_MAX 16
+void omni_go_sel_begin(void);
+void omni_go_sel_recv(void *c);
+void omni_go_sel_send(void *c, int64_t v);
+void omni_go_sel_default(void);
+int64_t omni_go_sel_go(void);
+int64_t omni_go_sel_val(void);
+int64_t omni_go_sel_ok(void);
+
 #endif /* OMNI_GO_H */
