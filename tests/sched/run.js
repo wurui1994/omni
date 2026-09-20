@@ -19,9 +19,9 @@ const bad = (name, why) => { fail++; console.log(`  FAIL ${name}\n       ${why}`
 
 const cc = (src, exe, opt, extra) => {
   execFileSync('clang', [opt || '-O1', '-Wall', '-Wextra', '-Werror',
-    '-I', join(root, 'src', 'runtime'), '-o', exe,
-    join(here, src), ...(extra || []).map((f) => join(root, 'src', 'runtime', f)),
-    join(root, 'src', 'runtime', 'omni_sched.c'), '-lpthread'],
+    '-I', join(root, 'src', 'runtime-sched'), '-o', exe,
+    join(here, src), ...(extra || []).map((f) => join(root, 'src', 'runtime-sched', f)),
+    join(root, 'src', 'runtime-sched', 'omni_sched.c'), '-lpthread'],
     { stdio: 'pipe' });
 };
 const run = (exe, args, env) => execFileSync(exe, args || [], {

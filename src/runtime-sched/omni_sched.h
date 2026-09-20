@@ -1,5 +1,13 @@
 /* omni_sched.h —— G/M/P 的 M:N 调度器，**照 go/src/runtime 严格实现**。
  *
+ * **为什么住在 `src/runtime-sched/` 而不是 `src/runtime/`**（与 `jit/`、`runtime-gl/`
+ * 同一条理由，写在 `core/runtime/c_runtime.js` 顶上）：`runtimeSources()` 把
+ * `src/runtime/` 下**每一个 .c** 都喂给 cc，混进去就等于**所有腿强制依赖**它 —— 而这一份要
+ * `<stdatomic.h>` 与 `<pthread.h>`，我们自己那台 C 前端还没有这两份头。量到的症状：
+ * 一放进 `src/runtime/`，连 `println(n)` 那种程序都编不出来
+ * （`omni_sched.h:28: error: include file 'stdatomic.h' not found`）。
+ * 所以它单独一格目录，用到并发的程序才编它。补那两份头是另一笔账。
+ *
  * 对应关系（一格一格对着抄的，不是照着想法写的）：
  *   runtime2.go  g / m / p / schedt / sudog、_G* 与 _P* 那两串 iota 常量
  *   proc.go      newproc / runqput / runqputslow / runqget / runqgrab / runqsteal /
