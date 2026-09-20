@@ -128,8 +128,23 @@ int64_t omni_go_chan_recv(void *c) {
   return got == 0 ? 0 : v;
 }
 
-void omni_go_chan_close(void *c) {
-  if (c == NULL) die("close 一格空 channel");
+/* `v, ok := <-c` 那两句（见 `omni_go.h` 上那段账）。ok 摆在**这条 M 的 TLS** 里 ——
+   两句之间没有 park，所以 g 不会换 M，读到的一定是自己刚写的那一格。
+   与 `omni_sched.c` 的 `tls_g` 同一条路数（Go 把 g 摆在寄存器里，我们用 TLS）。 */
+static _Thread_local int64_t tls_recvOK;
+
+int64_t omni_go_chan_recv2(void *c) {
+  int64_t v = 0;
+  int got = 0;
+  if (c == NULL) die("从一格空 channel 上收（go 里那是永久阻塞）");
+  omni_chanrecv((omni_hchan *)c, &v, 1, &got);
+  tls_recvOK = got == 0 ? 0 : 1;
+  return got == 0 ? 0 : v;
+}
+
+int64_t omni_go_chan_ok(void) { return tls_recvOK; }
+
+void omni_go_chan_close(void *c) {  if (c == NULL) die("close 一格空 channel");
   omni_closechan((omni_hchan *)c);
 }
 

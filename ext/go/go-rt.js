@@ -95,6 +95,7 @@ function __goChanMake() { return __goNoConc('make(chan T)'); }
 function __goChanSend() { return __goNoConc('ch <- v'); }
 function __goChanRecv() { return __goNoConc('<-ch'); }
 function __goChanRecv2() { return __goNoConc('v, ok := <-ch'); }
+function __goChanOK() { return __goNoConc('v, ok := <-ch'); }
 function __goChanClose() { return __goNoConc('close(ch)'); }
 function __goChanLen() { return __goNoConc('len(ch)'); }
 function __goSpawn() { return __goNoConc('go f(x)'); }

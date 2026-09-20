@@ -1326,16 +1326,29 @@ function forRangeOf(x) {
   /* **`for v := range ch`**（通道）与 **`for i := range s`**（切片）在树上同形。
      区别：切片的 1 名字是下标，通道的 1 名字是值。
      从前这儿把主语包一层 `__goChanDrain`（"对数组是 no-op、对通道取出缓冲"）——
-     **那个函数从来就没有过**（整个仓库里只有这两行提到它），所以那是一次调用不存在的
+     **那个函数从来就没有过**（整个仓库里只有那两行提到它），所以那是一次调用不存在的
      名字；真通道那一路给的还是错答案。现在按 `CHANS` 分开：
-       * 登记成通道的 —— 一句**有名有姓的墙**（`range` 一格通道要"收到关为止"，
-         那是 `crecv` 循环 + 关掉才退出，还没接）；
+       * 登记成通道的 —— 落成 go 规范里它的**定义**：`for { v, ok := <-ch; if !ok { break }; … }`
+         （`omni_go_chan_recv2` + `omni_go_chan_ok`，见 `omni_go.h` 那段账）；
        * 别的 —— 照旧当序列（`MAPS` 那条既有约定：没登记的就当序列），主语不再包壳。
-     1-name 的语义仍旧是"绑值不绑下标"：那对 `for i := range s`（只取下标）不精确，
-     但对常见的 `for _, v := range` 正确。 */
+     1-name 在序列上的语义仍旧是"绑值不绑下标"：那对 `for i := range s`（只取下标）
+     不精确，但对常见的 `for _, v := range` 正确。 */
   if (tag(subj) === 'name' && CHANS.has(leaf(kids(subj)[0]))) {
-    throw new Error('go->graph: `range` 一格通道还没接 —— 那是"收到关为止"'
-      + '（`crecv` 循环 + 关掉才退出），与按下标走的序列不是一回事');
+    const vName = names.length > 0 && names[0] !== '_' ? names[0] : `__rv${RG_DEPTH}`;
+    const okName = `__rok${RG_DEPTH}`;
+    const recv2 = node('call', {
+      fn: node('ref', {}, { name: '__goChanRecv2' }), args: [toNode(subj)],
+    });
+    const okCall = node('call', { fn: node('ref', {}, { name: '__goChanOK' }), args: [] });
+    const loopBody = [
+      node('bind', { init: recv2 }, { name: vName }),
+      node('bind', { init: binOf('!=', okCall, lit(0), OPS, { lang: 'go' }) }, { name: okName }),
+      branchOf(un('not', at(okName)), node('region', { body: [loopExit('break')] })),
+      ...inner,
+    ];
+    return node('region', {
+      body: [threePart({ init: [], cond: undefined, post: [], body: loopBody })],
+    });
   }
   const drainedSubj = toNode(subj);
   if (names.length === 1 && names[0] !== '_') {
@@ -1785,6 +1798,28 @@ function toNode(x) {
           const out = [];
           if (nameOf(lhs[0]) !== '_') out.push(mk(lhs[0], mapGet(toNode(o), toNode(k))));
           out.push(mk(lhs[1], mapHas(toNode(o), toNode(k))));
+          return out;
+        }
+        /* **`v, ok := <-ch`** —— 与上面 `v, ok := m[k]` 同一个形状，落法也同一条路数：
+           两句（`omni_go_chan_recv2` 收一格并把 ok 记在 TLS 里、`omni_go_chan_ok` 取它）。
+           为什么不是一格多值：方言那一层一次调用只回一格值，而"取局部量的地址"在图上
+           没有那一格 —— 那两句之间没有 park，所以 TLS 是准的（见 `omni_go.h` 的账）。
+           次序要紧：**先 recv2 再 ok**。 */
+        if (rhs.length === 1 && lhs.length === 2 && tag(rhs[0]) === 'recv') {
+          const mk2 = (t, init) => {
+            const n = nameOf(t);
+            if (isDef && !seenHere(n)) { declHere(n); return node('bind', { init }, { name: n }); }
+            return node('set', { value: init }, { name: n });
+          };
+          const chv = toNode(kids(rhs[0])[0]);
+          const recvCall = node('call', { fn: node('ref', {}, { name: '__goChanRecv2' }), args: [chv] });
+          const okCall = node('call', { fn: node('ref', {}, { name: '__goChanOK' }), args: [] });
+          const out = [];
+          /* `_` 那一格**不绑名字，但这一次收必须发生**（`_, ok := <-ch` 要的正是 ok）。 */
+          out.push(nameOf(lhs[0]) === '_' ? recvCall : mk2(lhs[0], recvCall));
+          if (nameOf(lhs[1]) !== '_') {
+            out.push(mk2(lhs[1], binOf('!=', okCall, lit(0), OPS, { lang: 'go' })));
+          }
           return out;
         }
         /* **多值 destructure 也要看作用域**：`v, err := f()` 后面

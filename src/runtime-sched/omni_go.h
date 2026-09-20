@@ -38,6 +38,14 @@ void *omni_go_chan_new(int64_t cap);
 /* `c <- v` / `<-c` / `close(c)` / `len(c)` */
 void omni_go_chan_send(void *c, int64_t v);
 int64_t omni_go_chan_recv(void *c);
+/* `v, ok := <-c` —— 方言那一层一次调用只回**一格**值，所以拆成两句：
+     `omni_go_chan_recv2(c)`  收一格，并把 ok 记在**当前这条 M 的 TLS** 里；
+     `omni_go_chan_ok()`      把刚才那个 ok 取出来。
+   为什么这么做是对的：两句之间**没有 park**（`recv2` 已经收完了才回），
+   而 g 只在 park 那一刻才会换 M —— 所以读到的一定是自己刚写的那一格。
+   这也是唯一不用"取局部量的地址"就能过的办法：方言的实参已经是机器值了。 */
+int64_t omni_go_chan_recv2(void *c);
+int64_t omni_go_chan_ok(void);
 void omni_go_chan_close(void *c);
 int64_t omni_go_chan_len(void *c);
 

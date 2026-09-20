@@ -647,6 +647,8 @@ const C_RT = new Map([
   ['__goChanMake', { sym: 'omni_go_chan_new', ret: 'ptr', dty: 'int', ps: ['i64'] }],
   ['__goChanSend', { sym: 'omni_go_chan_send', ret: 'void', dty: 'void', ps: ['ptr', 'i64'] }],
   ['__goChanRecv', { sym: 'omni_go_chan_recv', ret: 'i64', dty: 'int', ps: ['ptr'] }],
+  ['__goChanRecv2', { sym: 'omni_go_chan_recv2', ret: 'i64', dty: 'int', ps: ['ptr'] }],
+  ['__goChanOK', { sym: 'omni_go_chan_ok', ret: 'i64', dty: 'int', ps: [] }],
   ['__goChanClose', { sym: 'omni_go_chan_close', ret: 'void', dty: 'void', ps: ['ptr'] }],
   ['__goChanLen', { sym: 'omni_go_chan_len', ret: 'i64', dty: 'int', ps: ['ptr'] }],
 ]);
