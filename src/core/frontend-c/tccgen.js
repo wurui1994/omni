@@ -2342,7 +2342,17 @@ export class CGen {  /**
      * `(` 后面不是类型名就把它放回去 —— 那是 `struct S x = (b);` 那一种。 */
     if (this.tok === LPAR && (isArray(ty.t) || isStruct(ty.t))) {
       this.next();
-      if (this.isTypeStart(this.tok)) {
+      /* `(__extension__({ … }))` 不是复合字面量。`__extension__` 在我们这儿是个
+       * **类型起始记号**（`isTypeStart` —— 声明说明符里真有它：`__extension__ typedef …`），
+       * 所以不先分岔就会拐进 `typeName()`，然后撞在 `{` 上报 `')' expected`。
+       * 与 `unary()` 的 LPAR 那一支是同一条账（见那儿的注），只是那儿是**吃掉**、
+       * 这儿是**放回去**：下面按表达式走，`unary()` 到时会吃掉它。
+       *
+       * 量出来的：`omni_str s = omni_arr_str_get(a, i);`（`OMNI__AGET` 展开成
+       * `(__extension__({ … }))`，值是**结构体**所以走的是这个分支）—— go 的
+       * `for _, c := range []string{…}` 编原生时撞的就是它。标量那一档从来没撞上，
+       * 因为 `isStruct/isArray` 这道闸把它们挡在外头。 */
+      if (this.tok !== TOK_EXTENSION && this.isTypeStart(this.tok)) {
         const lty = this.typeName();
         this.skip(RPAR);
         if (this.tok !== LBRACE || !sameType(lty, ty)) {

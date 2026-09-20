@@ -35,6 +35,16 @@ function goRules() {
  */
 const MAPS = new Set();
 const isMap = (x) => tag(x) === 'name' && MAPS.has(leaf(kids(x)[0]));
+/**
+ * **那些名字装的是哪一种 map**（名字 -> `(map K V)` 这格类型节点）。
+ *
+ * 为什么要它：go 的 `m[k]` 在**缺键时给零值**，而方言的 `dget` 缺键是**运行期错误**
+ * （`nodes.js` 上 `map-get` 那句"缺键是错误，默认值归语言"）。所以 `m[k]` 要落成
+ * `branch (map-has …) (map-get …) 零值` —— 而"零值"得知道值类型。
+ * 量出来的代价：从前 `v, ok := m["不在的键"]` 与 `m["不在的键"]` 都是 **abort**，
+ * go 给的是 `0` / `false`。这一格与 MAPS 同一趟扫查填好（名字不分作用域，与 MAPS 同）。
+ */
+const MAPTY = new Map();
 
 /** 一格 `(define (lhs (name m)) (rhs (lit (map …) …)))` -> `'m'`（不是就给 null）。 */
 function mapBindName(x) {
@@ -42,9 +52,29 @@ function mapBindName(x) {
   const lhs = kids(x).filter((y) => tag(y) === 'lhs').flatMap(kids);
   const rhs = kids(x).filter((y) => tag(y) === 'rhs').flatMap(kids);
   for (let i = 0; i < lhs.length; i++) {
-    if (isMapCtor(rhs[i]) && tag(lhs[i]) === 'name') return leaf(kids(lhs[i])[0]);
+    if (isMapCtor(rhs[i]) && tag(lhs[i]) === 'name') {
+      const nm = leaf(kids(lhs[i])[0]);
+      /* 顺手记下那格 `(map K V)`（见 `MAPTY` 那段账）：字面量的类型在第一格孩子上，
+         `make(map[K]V)` 的在第一格实参上。 */
+      const ty = mapCtorTy(rhs[i]);
+      if (ty !== null && !MAPTY.has(nm)) MAPTY.set(nm, ty);
+      return nm;
+    }
   }
   return null;
+}
+
+/** 一格"造 map"的右值里那格 `(map K V)` 类型节点（说不清给 null）。 */
+function mapCtorTy(r) {
+  if (r === undefined || r === null || !isList(r)) return null;
+  if (tag(r) === 'lit') {
+    const t = kids(r)[0];
+    return t !== undefined && isList(t) && tag(t) === 'map' ? t : null;
+  }
+  if (tag(r) !== 'call') return null;
+  const as = kids(r).find((y) => tag(y) === 'args');
+  const a0 = as === undefined ? undefined : kids(as)[0];
+  return a0 !== undefined && isList(a0) && tag(a0) === 'map' ? a0 : null;
 }
 
 /**
@@ -77,13 +107,18 @@ function specMapNames(x) {
   if (nm === undefined) return [];
   const names = kids(nm).map(leaf);
   const ty = kids(x).find((y) => tag(y) !== 'names' && tag(y) !== 'init');
-  if (ty !== undefined && tag(ty) === 'map') return names;
+  if (ty !== undefined && tag(ty) === 'map') {
+    for (const n of names) if (!MAPTY.has(n)) MAPTY.set(n, ty);   // 见 MAPTY 那段账
+    return names;
+  }
   const ini = part(x, 'init');
   if (ini === undefined) return [];
   const rhs = kids(ini);
   return names.filter((n, i) => {
     const r = rhs[i];
-    return r !== undefined && tag(r) === 'lit' && tag(kids(r)[0]) === 'map';
+    if (r === undefined || tag(r) !== 'lit' || tag(kids(r)[0]) !== 'map') return false;
+    if (!MAPTY.has(n)) MAPTY.set(n, kids(r)[0]);
+    return true;
   });
 }
 
@@ -530,6 +565,34 @@ function mapZeros(ty, name, pkg) {
     catch { return null; }
   };
   return [z(kids(ty)[0]), z(kids(ty)[1])];
+}
+
+/**
+ * **`m[k]` 的读**：go 缺键给零值，方言的 `dget` 缺键是运行期错误 —— 落成
+ * `branch (map-has m k) (map-get m k) 零值`。
+ *
+ * 量出来的必要性：从前 `m["不在的键"]` 与 `v, ok := m["不在的键"]` 都 **abort**，
+ * 而 go 给 `0` / `false`。
+ *
+ * **与 go 的差**：go 的 `mapaccess` 一次查表两样都回，我们查两次（`dhas` 再 `dget`）——
+ * 那是性能上的差，不是答案上的。
+ *
+ * **只在值是标量时这么落**。理由不是省事：`map[K]*T` / `map[K]接口` 在 go 里的零值是
+ * **nil**，而图上没有 nil 记录，`structZero` 给的是一格**新的零值记录** —— 拿它当缺键的
+ * 答案就是**静默的错答案**（go 里那一格会在 `n.F` 上 panic）。值类型说不清的那一档同理：
+ * 两档都照旧只发 `map-get`，缺键仍旧在运行期报一句话，不静静答错。
+ */
+function mapGetZero(oTree, oNode, kNode) {
+  const g = mapGet(oNode, kNode);
+  const nm = tag(oTree) === 'name' ? leaf(kids(oTree)[0]) : null;
+  const ty = nm === null ? undefined : MAPTY.get(nm);
+  if (ty === undefined) return g;
+  let z = null;
+  try { z = zeroOf(kids(ty)[1], `${nm} 的值`); } catch { z = null; }
+  const scalar = z !== null && z !== undefined && typeof z === 'object'
+    && z.op === undefined && 'lit' in z && z.lit !== null;
+  if (!scalar) return g;
+  return branchOf(mapHas(oNode, kNode), g, z);
 }
 
 /**
@@ -2380,7 +2443,7 @@ function toNode(x) {
          或者是内建类型名、或者根本就是类型形状的树（`*T` / `[]T` / `map[K]V`）。
          那时图上**丢掉类型实参，透传被实例化的那一格**（图上没有泛型，实例化 = 它本身）。 */
       if (isTypeArg(i)) return toNode(o);
-      return isMap(o) ? mapGet(toNode(o), toNode(i)) : indexGet(toNode(o), toNode(i));
+      return isMap(o) ? mapGetZero(o, toNode(o), toNode(i)) : indexGet(toNode(o), toNode(i));
     }
     // `xs[1:3]` -> slice（**上界不含**，与图上那格一致，go 不用调）
     case 'slice3': {
@@ -2538,7 +2601,7 @@ function toNode(x) {
             return node('set', { value: init }, { name: n });
           };
           const out = [];
-          if (nameOf(lhs[0]) !== '_') out.push(mk(lhs[0], mapGet(toNode(o), toNode(k))));
+          if (nameOf(lhs[0]) !== '_') out.push(mk(lhs[0], mapGetZero(o, toNode(o), toNode(k))));
           out.push(mk(lhs[1], mapHas(toNode(o), toNode(k))));
           return out;
         }
@@ -3141,6 +3204,7 @@ export function goToGraph(tree, opts) {
   // **先扫一遍哪些名字装 map**：`m := map[K]V{…}` 在树上自带标记，所以这一趟就够了
   // —— `m[k]` 与 `xs[i]` 同形那笔账，在 go 上不需要驱动器回问类型。
   MAPS.clear();
+  MAPTY.clear();
   CHANS.clear();
   UNS.clear();
   for (const nm of mapNames(tree, mapBindName)) MAPS.add(nm);
