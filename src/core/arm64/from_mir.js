@@ -109,6 +109,17 @@ const FTMP1 = 17;
  * 认不下的颜色照旧住栈位，而那永远是对的（见 regalloc.js 文件头）。
  */
 const STICKY = [19, 20, 21, 22, 23, 24, 25, 26, 27];
+/**
+ * **浮点那一套粘住的寄存器**：d8-d15，AAPCS 里被调用者保存（只保低 64 位，
+ * 而这一层的浮点值最宽就是一个 double ⇒ 够）。对的是 `regalloc.js` 的 `regHintF`。
+ *
+ * 为什么要有这一套（指令级对账指出来的）：浮点值从前一律当**八字节位模式**住在通用
+ * 寄存器/栈位上，算之前 `fmov` 进 FP、算完 `fmov` 回来 —— radiance 里 `fmov` 511 条，
+ * 而真的浮点运算只有 115 条。给浮点值一个真的 FP 住处，那一整类搬运就没了。
+ *
+ * 与 `FTMP0`(16)/`FTMP1`(17)/`FRES`(18) 以及传参用的 d0-d7 都不重叠。
+ */
+const STICKY_F = [8, 9, 10, 11, 12, 13, 14, 15];
 const FRES = 18;
 /**
  * **native 这条腿上没有线性内存。**
@@ -501,6 +512,22 @@ class FnGen {
       const need = 8 * this.stickyColors.length;
       this.frame += need + (need % 16 === 0 ? 0 : 16 - (need % 16));
     }
+    /* 浮点那一类同一套账（见 `STICKY_F`）：上一层的 `regHintF` 是另一张表、另一套颜色。 */
+    this.hintF = (f.regHintF !== undefined && f.regHintF !== null && f.regHintF.size > 0)
+      ? f.regHintF : null;
+    this.fstickyColors = [];
+    if (this.hintF !== null) {
+      const seen = [];
+      for (const c of this.hintF.values()) if (seen.indexOf(c) < 0) seen.push(c);
+      seen.sort((a, b) => a - b);
+      for (const c of seen) if (c >= 0 && c < STICKY_F.length) this.fstickyColors.push(c);
+    }
+    this.fstickySave = -1;
+    if (this.fstickyColors.length > 0) {
+      this.fstickySave = this.frame;
+      const need = 8 * this.fstickyColors.length;
+      this.frame += need + (need % 16 === 0 ? 0 : 16 - (need % 16));
+    }
     /* 会动栈顶的函数（第三十六片）：帧最上面留一格存调用者的 x28，往后一律按 `FB`
      * 寻址。留在**最上面**是为了让下面所有偏移都不变 —— 那样「不会动栈顶」的那一路
      * 一条指令都不改。 */
@@ -595,6 +622,26 @@ class FnGen {
   }
 
   /**
+   * 同一个格子，但**直接对 FP 寄存器**读写（`ldr d, [base,#off]` / `str d, [base,#off]`）。
+   * 省的是那条 `fmov`：一个 double 在栈位与 d 寄存器之间从前要两条。
+   *
+   * 偏移超出那 12 位缩放立即数（8 字节宽时 0..32760）就回 false —— 调用方退回
+   * 「整数那一族 + `fmov`」那条老路。FP 那一族没有"基址 + 寄存器"形的编码器，
+   * 而 32KB 以上的帧只有 `omni_r3.c` 那一个（见 `frameLoad`）。
+   */
+  frameLoadF(freg, off) {
+    if (off > 32760) return false;
+    this.buf.emit(ldrFpU(3, freg, this.base, off));
+    return true;
+  }
+
+  frameStoreF(freg, off) {
+    if (off > 32760) return false;
+    this.buf.emit(strFpU(3, freg, this.base, off));
+    return true;
+  }
+
+  /**
    * `rd = base + off`（第一百三十一片：按值收发 struct 要「某一块在哪儿」这个地址）。
    *
    * 拆成「多少个 4096」+「余下的」两条**立即数形式**的 add，而不是造个立即数再走
@@ -650,6 +697,13 @@ class FnGen {
     const sk = this.stickyAt(vi);
     if (sk >= 0) {
       this.buf.emit(movReg(1, reg, sk));
+      return;
+    }
+    /* 浮点那一套粘住的（见 `STICKY_F`）：权威副本在 d 寄存器里，一条 `fmov` 搬出位模式。
+     * 这比从前那条 `ldr` 还省 —— 它连内存都不碰。 */
+    const fsk = this.fstickyAt(vi);
+    if (fsk >= 0) {
+      this.fromFp(reg, fsk, typeKind(this.f.t[vi]) !== T_F32);
       return;
     }
     const s = this.valReg[vi];
@@ -748,6 +802,43 @@ class FnGen {
     }
   }
 
+  /* ---------------------------------------- 浮点那一套粘住的（见 `STICKY_F`） */
+
+  /**
+   * 这个值下标住在哪个 FP 寄存器里（-1 = 不住）。
+   *
+   * 住在这儿的值**权威副本就是那个 d 寄存器** —— 栈位从头到尾没人写过。所以每一条
+   * 读路径都得先问这一条：`loadRef`/`refReg`（要位模式的，一条 `fmov` 搬出来）、
+   * `float`/`cvtToFloat`（要浮点的，直接用）。写路径只有 `def` 一处（`fmov` 搬进来）。
+   */
+  fstickyAt(i) {
+    if (this.hintF === null) return -1;
+    const c = this.hintF.get(i);
+    if (c === undefined || c < 0 || c >= STICKY_F.length) return -1;
+    return STICKY_F[c];
+  }
+
+  /** 这个 ref 住在哪个 FP 寄存器里（常量与 REF_NONE 一律 -1）。 */
+  fstickyRef(ref) {
+    if (this.hintF === null || ref === REF_NONE || isConstRef(ref)) return -1;
+    return this.fstickyAt(this.f.at(ref));
+  }
+
+  /** 序言里存下调用者的 d8-d15 / 收场里取回来。只动真用到的那几格。
+   *  用 FP load/store 一条指令 `str d, [base, #off]` / `ldr d, [base, #off]` 搞定，
+   *  比从前走 `fmov + str/ldr + fmov` 省两条。 */
+  fstickySpill(save) {
+    for (let k = 0; k < this.fstickyColors.length; k++) {
+      const reg = STICKY_F[this.fstickyColors[k]];
+      const off = this.fstickySave + k * 8;
+      if (save) {
+        this.buf.emit(strFpU(3, reg, this.base, off));
+      } else {
+        this.buf.emit(ldrFpU(3, reg, this.base, off));
+      }
+    }
+  }
+
   /* ------------------------------------------------- 寄存器缓存（见 `POOL`） */
 
   /** 池里的一个位置：先要空的，没空的就收一个用光了的。都没有回 -1。
@@ -784,6 +875,9 @@ class FnGen {
      * 若在这儿还要用，它的颜色此刻不在空闲池里。 */
     const sk = this.stickyAt(i);
     if (sk >= 0) return sk;
+    /* 浮点那一套（见 `STICKY_F`）：`def` 会从这个寄存器 `fmov` 进它的 d 寄存器，
+     * 所以不必占 POOL 的位子 —— 占了也白占（`def` 那一路不认领）。 */
+    if (this.fstickyAt(i) >= 0) return RES;
     if (this.uses[i] === 0) return RES;
     const s = this.takeSlot(a, b);
     if (s < 0) return RES;
@@ -803,6 +897,11 @@ class FnGen {
       /* 粘住的那几个先问（见 `STICKY`）：一个字都不发。 */
       const sk = this.stickyAt(this.f.at(ref));
       if (sk >= 0) return sk;
+      /* 浮点那一套（见 `STICKY_F`）：得搬出位模式，一条 `fmov`（照旧不碰内存）。 */
+      if (this.fstickyRef(ref) >= 0) {
+        this.loadRef(fallback, ref);
+        return fallback;
+      }
       const s = this.valReg[this.f.at(ref)];
       if (s >= 0) {
         this.cacheLeft[s] -= 1;
@@ -903,6 +1002,9 @@ class FnGen {
     /* 粘住的那几个（见 `STICKY`）：存下调用者的那几个 x19-x23。摆在 `FB` 成立之后 ——
      * 会动栈顶的函数里这几格按 `FB` 寻址。 */
     if (this.stickyColors.length > 0) this.stickySpill(true);
+    /* 浮点那一套（见 `STICKY_F`）：同一笔账，存下调用者的 d8-d15。
+     * 必须在形参落位**之前** —— 形参落位会走 `def`，而 `def` 已经会往 d 寄存器里写。 */
+    if (this.fstickyColors.length > 0) this.fstickySpill(true);
     /* 形参：AAPCS 把整数与浮点**分成两串**数（x0-x7 与 v0-v7 各自从 0 起），
      * 所以两个计数器。放不下的从**入参区**读（第二十三片）：调用方摆在它自己的
      * 出参区里，也就是我们这一层 `fp + 16` 起的地方（`fp`/`lr` 那一对占了前 16）。
@@ -976,6 +1078,9 @@ class FnGen {
     /* 粘住的那几个（见 `STICKY`）：取回调用者的那几个。要在 `FB` 还有效、`sp` 还没收回去
      * 的时候发 —— 下面那两行会把两样都毁掉。 */
     if (this.stickyColors.length > 0) this.stickySpill(false);
+    /* 浮点那一套（见 `STICKY_F`）：同一处取回。用的草稿是 `TMP0` 与 d8-d15，
+     * 都不碰返回值（x0 / d0），所以摆在这儿是安全的。 */
+    if (this.fstickyColors.length > 0) this.fstickySpill(false);
     /* 会动栈顶的函数：先把调用者的 x28 取回来（这一条得在 `FB` 还有效的时候发），
      * 再按 `x29` 把 `sp` 收回去 —— `sp` 这会儿可能停在某个变长数组下面。 */
     if (this.dynStack) buf.emit(ldrU(3, FB, FB, this.fbSave));
@@ -1534,9 +1639,11 @@ class FnGen {
   /**
    * `t` 是浮点的那些指令。
    *
-   * 值照旧躺在 8 字节的栈位里（躺的是**位模式**），进 FP 寄存器一条 `fmov`、出来
-   * 再一条。于是取值/回写那一整套一个字都不用改，多出来的只是每条运算两三条 `fmov`。
-   * 这与「全落栈」是同一个取舍：先把「哪条 MIR 对哪条 arm64」钉死，省指令是窥孔的事。
+   * 两条路：
+   *   - 值住在 FP 寄存器里的（`regHintF` 涂过色，见 `STICKY_F`）—— 操作数直接读那个
+   *     d 寄存器、结果直接算进它自己的 d 寄存器，**一条 `fmov` 一次访存都不发**；
+   *   - 没涂上色的照旧：值躺在 8 字节栈位里（躺的是**位模式**），进 FP 一条 `fmov`、
+   *     出来再一条。
    */
   float(i) {
     const f = this.f;
@@ -1545,25 +1652,75 @@ class FnGen {
     const dbl = typeKind(f.t[i]) === T_F64;
     if (op === OP.CVT) return this.cvtToFloat(i, dbl);
     if (op === OP.NEG) {
-      this.loadRef(TMP0, f.a[i]);
-      this.toFp(FTMP0, TMP0, dbl);
-      buf.emit(fneg(dbl, FRES, FTMP0));
-      this.fromFp(RES, FRES, dbl);
-      return this.def(i, RES);
+      const x = this.fRefReg(f.a[i], FTMP0, dbl);
+      const d = this.fDest(i);
+      buf.emit(fneg(dbl, d, x));
+      return this.fDef(i, d, dbl);
     }
     const fb = FBIN[op];
     const fc = ARM64_FCMP[op];
     if (fb === undefined && fc === undefined) return arm64Nyi(`浮点的 ${OP_NAMES[op]}`);
-    this.loadRef(TMP0, f.a[i]);
-    this.loadRef(TMP1, f.b[i]);
-    this.toFp(FTMP0, TMP0, dbl);
-    this.toFp(FTMP1, TMP1, dbl);
+    /* 比较那一路 `f.t[i]` 存的就是**操作数**的类型（结果是 bool，见 `isCmp`），
+     * 所以 `dbl` 对两路都成立 —— 从前那一版也是这么用的。 */
+    const x = this.fRefReg(f.a[i], FTMP0, dbl);
+    const y = this.fRefReg(f.b[i], FTMP1, dbl);
     if (fb !== undefined) {
-      fb(buf, dbl, FRES, FTMP0, FTMP1);
-      this.fromFp(RES, FRES, dbl);
-      return this.def(i, RES);
+      const d = this.fDest(i);
+      fb(buf, dbl, d, x, y);
+      return this.fDef(i, d, dbl);
     }
-    buf.emit(fcmpArm64(dbl, FTMP0, FTMP1), cset(1, RES, fc));
+    buf.emit(fcmpArm64(dbl, x, y), cset(1, RES, fc));
+    return this.def(i, RES);
+  }
+
+  /**
+   * **这个 ref 的浮点值弄到哪个 d 寄存器里**：
+   *   1. 涂过色的（`STICKY_F`）直接回它那一个 —— 一个字都不发；
+   *   2. 住在栈位里的 double 一条 `ldr d, [base,#off]` 读进 `ftmp`（省掉那条 `fmov`）；
+   *   3. 别的（常量、在 POOL 里攥着的、f32）照旧：位模式进草稿、`fmov` 进 `ftmp`。
+   *
+   * 为什么第 2 条只认 f64：f32 的栈位是按 8 字节写的（高 4 字节是零），
+   * 用 `str s` 回写只动低 4 字节会留下脏的高位，而别处有按 8 字节读同一格的路。
+   * f32 的量太小，不值得为它把「一个值一个 8 字节栈位」那条不变式改了。
+   */
+  fRefReg(ref, ftmp, dbl) {
+    const fsk = this.fstickyRef(ref);
+    if (fsk >= 0) return fsk;
+    const gp = ftmp === FTMP1 ? TMP1 : TMP0;
+    if (dbl && ref !== REF_NONE && !isConstRef(ref)) {
+      const vi = this.f.at(ref);
+      if (this.stickyAt(vi) < 0 && this.valReg[vi] < 0
+          && this.frameLoadF(ftmp, this.valOff(vi))) {
+        return ftmp;
+      }
+    }
+    this.loadRef(gp, ref);
+    this.toFp(ftmp, gp, dbl);
+    return ftmp;
+  }
+
+  /** 这条浮点指令的结果**直接算进哪个 d 寄存器**：涂过色的就它自己那一个，否则 `FRES`。 */
+  fDest(i) {
+    const fsk = this.fstickyAt(i);
+    return fsk >= 0 ? fsk : FRES;
+  }
+
+  /**
+   * 交出一条浮点指令的结果。三条路，与 `fRefReg` 对称：
+   *   1. 算在它自己的 d 寄存器里的 —— 一个字都不用发；
+   *   2. 没人要的（`uses` 为 0）—— 也不用发；
+   *   3. 是个 double 且要落栈位的 —— 一条 `str d, [base,#off]`（省掉那条 `fmov`）。
+   *      这一路**绕过 POOL**：值的家就是栈位，往后 `loadRef` 从那儿读位模式，对得上。
+   *   4. 剩下的（f32、偏移太大）照旧 `fmov` 出位模式走 `def`。
+   */
+  fDef(i, freg, dbl) {
+    if (this.fstickyAt(i) >= 0) return;          // 已经在家了
+    if (this.uses[i] === 0) { this.pending = -1; return; }
+    if (dbl && this.frameStoreF(freg, this.valOff(i))) {
+      this.pending = -1;
+      return;
+    }
+    this.fromFp(RES, freg, dbl);
     return this.def(i, RES);
   }
 
@@ -1581,19 +1738,18 @@ class FnGen {
     }
     if (mode === CVT_I2F || mode === CVT_U2F) {
       const sf = intBits(src) === 64 ? 1 : 0;
-      this.buf.emit(mode === CVT_I2F ? scvtf(sf, dbl, FRES, TMP0)
-        : ucvtf(sf, dbl, FRES, TMP0));
-      this.fromFp(RES, FRES, dbl);
-      return this.def(i, RES);
+      const d = this.fDest(i);
+      this.buf.emit(mode === CVT_I2F ? scvtf(sf, dbl, d, TMP0) : ucvtf(sf, dbl, d, TMP0));
+      return this.fDef(i, d, dbl);
     }
     if (mode === CVT_FCVT) {
       /* 源的宽度与目标的宽度一定相反（同宽的 fcvt 没有意义，MIR 也不该发）。 */
       const srcDbl = typeKind(src) === T_F64;
       if (srcDbl === dbl) return arm64Nyi('同宽的 CVT_FCVT');
+      const d = this.fDest(i);
       this.toFp(FTMP0, TMP0, srcDbl);
-      buf.emit(dbl ? fcvtSD(FRES, FTMP0) : fcvtDS(FRES, FTMP0));
-      this.fromFp(RES, FRES, dbl);
-      return this.def(i, RES);
+      buf.emit(dbl ? fcvtSD(d, FTMP0) : fcvtDS(d, FTMP0));
+      return this.fDef(i, d, dbl);
     }
     return arm64Nyi(`结果是浮点的 CVT 模式 ${mode}`);
   }
@@ -1882,19 +2038,6 @@ class FnGen {
     this.buf.emit(strU(size, v, p, fold ? off : 0));
   }
 
-  /** `MSTORE`。六种宽度只管「把低若干位拍进内存」，没有符号可言（与 wasm 同）。 */
-  mstore(i) {
-    const f = this.f;
-    const kind = MSTORE_KINDS[memKindNo(f.aux[i])];
-    const size = MSTORE_SIZE[kind];
-    if (size === undefined) return arm64Nyi(`MSTORE 的宽度 ${kind}`);
-    /* 先取值再算地址：`memAddr` 在偏移大的时候要借 TMP1，所以值落在 RES 上。
-     * 值在池寄存器里的话 `refReg` 一个字都不发（从前这儿是 `ldr` + `mov` 两条）。 */
-    const v = this.refReg(f.b[i], RES);
-    const p = this.memAddr(TMP0, f.a[i], memOff(f.aux[i]));
-    this.buf.emit(strU(size, v, p, 0));
-  }
-
   /**
    * 把结果交出去。32 位的结果先按 i32 的规范形符号扩展。
    *
@@ -1902,6 +2045,16 @@ class FnGen {
    * 用它的指令直接读那个寄存器；池满了才写回栈位 —— 那是从前唯一的一条路。
    */
   def(i, reg, w) {
+    /* 浮点那一套粘住的（见 `STICKY_F`）：结果的家是那个 d 寄存器，一条 `fmov` 搬进去。
+     * **不进 POOL、不写栈位、不做符号扩展**（浮点没有 32 位规范形那回事）。
+     * 这一条摆在最前面，于是「凡是产浮点值的指令」都不必各自认领 —— LOAD / MLOAD /
+     * CALL 的返回值 / SELECT 一律走 `def`，都在这儿收口。 */
+    const fsk = this.fstickyAt(i);
+    if (fsk >= 0) {
+      this.toFp(fsk, reg, typeKind(this.f.t[i]) !== T_F32);
+      this.pending = -1;
+      return;
+    }
     if (w === 32) this.buf.emit(sxtw(reg, reg));
     /* 粘住的那几个（见 `STICKY`）：结果要落在它那一个里。`dest` 已经直接算进去的话
      * 这儿一个字都不发；别处算好的（`RES` 那一路）就一条 `mov`。

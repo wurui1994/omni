@@ -18,11 +18,13 @@
  * arm64 与 x86_64 的被调用者保存集不是一回事，而"这两个值不能住同一个寄存器"这件事
  * 与架构无关。
  *
- * **只有一类颜色**（不分整数/浮点）。这不是偷懒，是量过两条后端的事实：
- * `arm64/from_mir.js` 与 `x64/from_mir.js` 都把**每个值当成一个八字节的位模式**
- * 放在通用寄存器/栈位上，浮点是用 `fmov`/`movq` 在算的时候搬进 FP 寄存器再搬回来
- * （`toFp`/`fromFp`、`movqToXmm`/`movqFromXmm`）。所以"一个值一个通用寄存器"就够，
- * 分两类反而会让两类的颜色在同一批真寄存器上撞。
+ * **两类颜色**（通用 / 浮点），照 Go 的 `ssacompile/regalloc.go:885 compatRegs`：
+ * `t.IsFloat()` 的进 FpRegMask、别的进 GpRegMask。两套物理寄存器文件、两个独立的池子，
+ * 出两张表（`fn.regHint` / `fn.regHintF`）。
+ *
+ * 曾经只有一类（"后端把每个值当八字节位模式放通用寄存器"），那是照着后端当时的实现写的，
+ * 不是照 Go 写的 —— 代价在指令级对账里看得见：radiance 里 `fmov` 511 条、
+ * 真的浮点运算只有 115 条，全是"搬进 FP 算完搬回来"。
  *
  * **只分配单字的标量**：i32/i64/bool/f32/f64/thin 指针。胖指针（T_PTR，三个字）、聚合、
  * 串、dyn、向量一律不碰 —— 它们在后端不是"一个寄存器"。
@@ -35,11 +37,16 @@ import {
 } from '../ir.js';
 import { registerPass } from './pass.js';
 
-/** 这个类型住得下一个通用寄存器吗（浮点也算 —— 后端拿它当八字节位模式，见文件头）。 */
+/** 这个类型住得下一个寄存器吗（浮点也算 —— 它进的是另一套文件，见 `isFloatT`）。 */
 function fitsOneWord(t) {
   if (typeLanes(t) !== 1) return false;          // 向量不是一个寄存器
   return t === T_I32 || t === T_I64 || t === T_BOOL || t === T_TPTR
       || t === T_F32 || t === T_F64;
+}
+
+/** 这个值该进**浮点那套寄存器文件**吗（照 Go 的 `compatRegs`：`t.IsFloat()`）。 */
+function isFloatT(t) {
+  return t === T_F32 || t === T_F64;
 }
 
 /** 一条指令产出的值的类型（比较的结果是 bool，不是操作数的类型）。 */
@@ -141,32 +148,58 @@ function extendForLoops(fn, last) {
 export const COLORS = 9;
 
 /**
- * 跑 regalloc。**不改一条指令** —— 只往 `fn.regHint` 上挂一张
- * `下标 -> 颜色` 的表（`Map`），由后端消费。
+ * **浮点那一类有几个颜色** —— arm64 的 d8-d15 在 AAPCS 里是被调用者保存的（低 64 位），
+ * 一个都没别人占 ⇒ 8 个。
  *
- * `regHint` 是**标注**，与 `MirFunc.local`/`globalRo` 那些同一种性质：
+ * 为什么要分两类（照 Go 的 `ssacompile/regalloc.go:885 compatRegs`）：
+ *     if t.IsFloat() || t == types.TypeInt128 { m = s.f.Config.FpRegMask }
+ *     else                                    { m = s.f.Config.GpRegMask }
+ * 两个寄存器文件是两套物理寄存器，一个值该住哪套由**它的类型**定，不该挤在一个池子里抢。
+ *
+ * 这一刀的杠杆是指令级对账量出来的（radiance 3983 条指令）：
+ *     mov 1047 / ldr 968 / str 748 / fmov 511 / add 442  —— 91.5% 是搬运
+ *     真的浮点运算只有 fmul 67 + fadd 20 + fsub 20 + fdiv 8 = 115 条
+ * 那 511 条 `fmov` 就是"浮点值住在通用寄存器里、算之前搬进 FP、算完搬回来"的账。
+ * Go 那边同一个函数 FMOVD 只有 115 条，而且它的 FMOVD 连访存一起算在内 ——
+ * 因为 Vec 的六个分量从头到尾住在 F0-F5 里。
+ */
+export const COLORS_F = 8;
+
+/**
+ * 跑 regalloc。**不改一条指令** —— 只往 `fn.regHint`（通用那一类）与 `fn.regHintF`
+ * （浮点那一类）上各挂一张 `下标 -> 颜色` 的表（`Map`），由后端消费。
+ *
+ * 两张表**各自一套颜色**（`COLORS` / `COLORS_F`），因为它们映到两套物理寄存器文件。
+ * 照 Go 的 `compatRegs`：类型是浮点的进 FpRegMask，别的进 GpRegMask。
+ *
+ * `regHint`/`regHintF` 是**标注**，与 `MirFunc.local`/`globalRo` 那些同一种性质：
  * 不进 `bytes.js` 的哈希（那边按字段来，认不出多出来的属性）、不进 verifier、
  * 解释器一眼都不看。后端拿不到它就照旧「每个值一个栈位」，所以这一格永远是安全的。
  *
- * 回分到了几个值。
+ * 回分到了几个值（两类之和）。
  */
 export function regalloc(fn, _mod) {
   if (!fn || fn.op.length === 0) return 0;
   const last = extendForLoops(fn, lastUses(fn));
 
-  const hint = new Map();
-  let active = [];                 // 活着的区间：{end, color}
-  const free = [];
-  for (let i = 0; i < COLORS; i++) free.push(i);
+  /* 两个独立的池子：`cls[0]` 是通用、`cls[1]` 是浮点。 */
+  const cls = [
+    { hint: new Map(), active: [], free: [] },
+    { hint: new Map(), active: [], free: [] },
+  ];
+  for (let i = 0; i < COLORS; i++) cls[0].free.push(i);
+  for (let i = 0; i < COLORS_F; i++) cls[1].free.push(i);
 
   let n = 0;
   for (let pc = 0; pc < fn.op.length; pc++) {
-    /* 一、到期的先还回池子（`end < pc` 的那些）—— 线性扫描的 expire 那一步 */
-    const keep = [];
-    for (const it of active) {
-      if (it.end < pc) free.push(it.color); else keep.push(it);
+    /* 一、到期的先还回各自的池子（`end < pc` 的那些）—— 线性扫描的 expire 那一步 */
+    for (const c of cls) {
+      const keep = [];
+      for (const it of c.active) {
+        if (it.end < pc) c.free.push(it.color); else keep.push(it);
+      }
+      c.active = keep;
     }
-    active = keep;
 
     /* 二、这条指令产的值要不要一个寄存器 */
     const t = resultType(fn, pc);
@@ -174,40 +207,45 @@ export function regalloc(fn, _mod) {
     const end = last[pc];
     if (end < 0) continue;                       // 没人用（deadcode 会收走）
     if (!fitsOneWord(t)) continue;
-    if (free.length === 0) continue;             // 用光了 ⇒ 这个值照旧住栈位（= 溢出）
-    free.sort((x, y) => x - y);                  // 取最小的颜色：两次编译要一样
-    const color = free.shift();
-    hint.set(pc, color);
-    active.push({ end, color });
+    const c = cls[isFloatT(t) ? 1 : 0];
+    if (c.free.length === 0) continue;           // 用光了 ⇒ 这个值照旧住栈位（= 溢出）
+    c.free.sort((x, y) => x - y);                // 取最小的颜色：两次编译要一样
+    const color = c.free.shift();
+    c.hint.set(pc, color);
+    c.active.push({ end, color });
     n++;
   }
 
-  fn.regHint = hint;
+  fn.regHint = cls[0].hint;
+  fn.regHintF = cls[1].hint;
   return n;
 }
 
 registerPass('regalloc', regalloc);
 
 /**
- * 判据用：这张分配表**自洽**吗。回一串错（空 = 干净）。
+ * 判据用：这两张分配表**自洽**吗。回一串错（空 = 干净）。
  *
  * 判的就是寄存器分配唯一的那条硬约束：**两个区间相交的值不许同色**。
  * 区间 = `[定义的 pc, 最后一次使用的 pc]`，这一层的正确性全靠它连续（见文件头）。
+ * 两类各自判：通用与浮点是两套物理寄存器，跨类同色不冲突。
  */
 export function checkRegHint(fn) {
   const errs = [];
-  if (!fn.regHint || fn.regHint.size === 0) return errs;
   const last = extendForLoops(fn, lastUses(fn));
-  const items = [];
-  for (const [pc, color] of fn.regHint) items.push({ pc, end: last[pc], color });
-  for (let i = 0; i < items.length; i++) {
-    for (let j = i + 1; j < items.length; j++) {
-      const a = items[i], b = items[j];
-      if (a.color !== b.color) continue;
-      const overlap = a.pc <= b.end && b.pc <= a.end;
-      if (overlap) {
-        errs.push(`${fn.name}: %${a.pc}[${a.pc}..${a.end}] 与 %${b.pc}[${b.pc}..${b.end}]`
-          + ` 区间相交却同色（${a.color}）`);
+  for (const [cls, hint] of [['通用', fn.regHint], ['浮点', fn.regHintF]]) {
+    if (!hint || hint.size === 0) continue;
+    const items = [];
+    for (const [pc, color] of hint) items.push({ pc, end: last[pc], color });
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        const a = items[i], b = items[j];
+        if (a.color !== b.color) continue;
+        const overlap = a.pc <= b.end && b.pc <= a.end;
+        if (overlap) {
+          errs.push(`${fn.name}（${cls}）: %${a.pc}[${a.pc}..${a.end}] 与`
+            + ` %${b.pc}[${b.pc}..${b.end}] 区间相交却同色（${a.color}）`);
+        }
       }
     }
   }

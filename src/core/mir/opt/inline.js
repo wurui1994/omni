@@ -166,6 +166,7 @@ export function inlineCalls(fn, mod) {
   fixRefs(fn, map, inFrom, mod);
   /* 分配表按下标记的，已经作废 */
   if (fn.regHint !== undefined) fn.regHint = undefined;
+  if (fn.regHintF !== undefined) fn.regHintF = undefined;
   return sites.size;
 }
 
