@@ -425,8 +425,16 @@ export function opt(fn, mod) {
     total += changed;
   }
   /* 存储转发放在逐条重写**之后**：转发出来的值还要再被折一遍常量
-     （`MSTORE p k1; MLOAD p` -> k1，然后 `ADD k1 k2` 才折得掉），所以再跑一轮重写。 */
-  const fwd = forwardLoads(fn, mod) + forwardCopiedLoads(fn, mod);
+     （`MSTORE p k1; MLOAD p` -> k1，然后 `ADD k1 k2` 才折得掉），所以再跑一轮重写。
+     **转发自己也要迭代到不动点**（Go 的 `applyRewrite` 就是整套规则一起迭代）：
+     一条拷贝链是一档一档往上转的，`A<-B<-C` 要走两轮才到头。
+     量出来的：`sph_intersect` 上第一轮改 13 处、第二轮还能改 8 处。 */
+  let fwd = 0;
+  for (let round = 0; round < fn.op.length + 1; round++) {
+    const k = forwardLoads(fn, mod) + forwardCopiedLoads(fn, mod);
+    if (k === 0) break;
+    fwd += k;
+  }
   if (fwd > 0) {
     total += fwd;
     for (let pc = 0; pc < fn.op.length; pc++) {

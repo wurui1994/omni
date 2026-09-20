@@ -57,18 +57,53 @@ export function deadAutoElim(fn, mod) {
   }
   if (!any) return 0;
 
-  /* ---- 二、顺着 `ADD(地址, 常量)` 传到不动点 */
+  /* ---- 二、顺着 `ADD(地址, 常量)` 与**槽**（`STORE 地址->槽s` / `LOAD 槽s`）传到不动点。
+     槽这一条是精确的：槽取不到地址，所以"地址进了槽又读出来"还是同一个块的地址
+     （与 `copyfwd.js` 的 `localFrame` 同一条判据）。
+     不追槽这一步的代价是量出来的：`inline` 把内层 sret 指针存进槽、出了区域再读回来，
+     于是整块判"地址跑出去了"，入口那份按值拷贝一条都收不掉。 */
+  const loadsOf = new Map();            // 槽号 -> [LOAD 的 pc]
+  for (let pc = 0; pc < n; pc++) {
+    if (fn.op[pc] !== OP.LOAD) continue;
+    let l = loadsOf.get(fn.aux[pc]);
+    if (l === undefined) { l = []; loadsOf.set(fn.aux[pc], l); }
+    l.push(pc);
+  }
+  const viaSlot = new Set();            // 哪些 STORE 是"把块地址存进槽"（第三步不算它逃逸）
+  /**
+   * 经过槽兜一圈的那些 ref，**偏移得跟着走**。
+   *
+   * `addrOf` 只会把 `ADD(base, 常量)` 拆回 `{base, off}` —— 地址进了槽再读出来，
+   * 它看见的 base 就是那条 `LOAD` 本身、off 归零。于是
+   * `STORE (B+0x48) -> 槽; LOAD 槽; MSTORE @0` 会被算成"写 B+0"，**记到错的格子上**。
+   * 量到过：smallpt 的校验和从 243367 变成 0（活着的存储被删了）。
+   *
+   * 所以这儿另记一张 `ref -> 它离块头多远`。
+   */
+  const slotOff = new Map();
+  /** 同一个 ref 被两个块（或同一块的两个偏移）喂到 ⇒ **都留着**。照 Go 的
+   *  `elimDeadAutosGeneric`：`if addr[v] != node { usedAdd(node) }`（它那句注释写的是
+   *  "This doesn't happen in practice, but catch it just in case"）。 */
+  const conflict = new Set();
+  const feed = (ref, block, off) => {
+    const had = addr.get(ref);
+    if (had === undefined) { addr.set(ref, block); slotOff.set(ref, off); return true; }
+    if (had !== block || slotOff.get(ref) !== off) { conflict.add(had); conflict.add(block); }
+    return false;
+  };
   for (let round = 0; round < n + 1; round++) {
     let moved = false;
     for (let pc = 0; pc < n; pc++) {
-      if (fn.op[pc] !== OP.ADD) continue;
-      const me = REF_BIAS + pc;
-      if (addr.has(me)) continue;
-      const A = fn.a[pc], B = fn.b[pc];
-      let block = -1;
-      if (addr.has(A) && constOffset(fn, mod, B) !== null) block = addr.get(A);
-      else if (addr.has(B) && constOffset(fn, mod, A) !== null) block = addr.get(B);
-      if (block >= 0) { addr.set(me, block); moved = true; }
+      const op = fn.op[pc];
+      if (op !== OP.STORE) continue;
+      const a = addrOf(fn, mod, fn.a[pc]);
+      if (!addr.has(a.base)) continue;
+      if (!viaSlot.has(pc)) { viaSlot.add(pc); moved = true; }
+      const block = addr.get(a.base);
+      const off = (slotOff.get(a.base) || 0) + a.off;
+      for (const lp of (loadsOf.get(fn.aux[pc]) || [])) {
+        if (feed(REF_BIAS + lp, block, off)) moved = true;
+      }
     }
     if (!moved) break;
   }
@@ -82,7 +117,8 @@ export function deadAutoElim(fn, mod) {
     const a = addrOf(fn, mod, fn.a[pc]);
     if (!addr.has(a.base)) return null;
     const k = memKindNo(fn.aux[pc]);
-    const lo = a.off + memOff(fn.aux[pc]);
+    /* `slotOff` 是这个 base 自己离块头多远（经过槽那一路才不是 0，见上面那段）。 */
+    const lo = (slotOff.get(a.base) || 0) + a.off + memOff(fn.aux[pc]);
     const bytes = isLoad ? MLOAD_BYTES[k] : MSTORE_BYTES[k];
     return { block: addr.get(a.base), lo, hi: lo + bytes };
   };
@@ -106,6 +142,7 @@ export function deadAutoElim(fn, mod) {
       continue;
     }
     if (op === OP.ADD && addr.has(REF_BIAS + pc)) continue;   // 纯地址算术，已经传过了
+    if (op === OP.STORE && viaSlot.has(pc)) continue;         // 地址进槽，第二步追过了
     /* 别的任何用法：地址跑出去了 ⇒ 留着。按角色问，'n'/'s'/'j' 那几格不是 ref。 */
     if (m[0] === 'r') keep(fn.a[pc]);
     if (m[1] === 'r') keep(fn.b[pc]);
@@ -130,7 +167,7 @@ export function deadAutoElim(fn, mod) {
    */
   const doomed = new Set();
   for (const [pc, c] of elim) {
-    if (kept.has(c.block)) continue;
+    if (kept.has(c.block) || conflict.has(c.block)) continue;
     const reads = readCells.get(c.block);
     let hit = false;
     if (reads !== undefined) {
