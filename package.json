@@ -44,7 +44,8 @@
     "test:all": "node tests/all.js",
     "bench": "node bench/compare.js",
     "bench:grammars": "node bench/grammars.js",
-    "lint": "tsc --noEmit -p jsconfig.json"
+    "lint": "tsc --noEmit -p jsconfig.json",
+    "test:sched": "node tests/sched/run.js"
   },
   "engines": {
     "node": ">=20"
