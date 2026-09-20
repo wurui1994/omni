@@ -59,6 +59,17 @@ void omni_go_spawn(void *fnv, int64_t arg) {
   omni_newproc(runSpawned, p);
 }
 
+/* 不带实参那一格：函数值本身就够当 `arg`，不用打包（也就不用还）。 */
+static void runSpawned0(void *fnv) {
+  omni_goclos *c = (omni_goclos *)fnv;
+  ((omni_go_fn0)c->fp)(fnv);
+}
+
+void omni_go_spawn0(void *fnv) {
+  if (fnv == NULL) die("go 的那一格函数值是空的");
+  omni_newproc(runSpawned0, fnv);
+}
+
 /* ---- channel ---- */
 
 void *omni_go_chan_new(int64_t cap) {

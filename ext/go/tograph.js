@@ -152,6 +152,19 @@ const NEEDS_MTABLE = false;
  * 那正是这一趟被 `(ptr r2)` / `(ptr r3)` 咬过的那个坑。`collectDecls` 本来就走整棵树。
  */
 let NEEDS_TYPETAG = false;
+/**
+ * **这份程序要调度器吗**（`collectDecls` 那一趟置上）。
+ *
+ * 置上了，`func main()` 的体就得跑成**主 g**（`call __goRun(main)`，落到方言里是
+ * `(ccall omni_go_run (fnref main))`）而不是一次普通调用。为什么非要这一格：
+ * `omni_chansend` 阻塞时要 park 当前那条 g 再切走，而 `main` 那条线程本身不是 g ——
+ * 少了这一层包，一个无缓冲 channel 上的第一次发送就是"park 一个不存在的 g"。
+ *
+ * 判据是**语法上看得见的三样**：`go` 语句、`chan` 那三种类型、发送语句。
+ * 收得宽一点不亏：包一层对不用并发的程序也是对的（只多一次函数调用），
+ * 而漏了就是运行期挂掉。
+ */
+let NEEDS_SCHED = false;
 const VARTYPE = new Map();
 const mangle = (owner, name) => `${String(owner).replace(/\./g, '__')}__${name}`;
 
@@ -316,6 +329,11 @@ function collectDecls(x, shapesOnly) {
   if (!isList(x)) return;
   /* 见 `NEEDS_TYPETAG` 那段账：整棵树里有一处类型 switch，结构体就要带 `__type`。 */
   if (tag(x) === 'tswitch') NEEDS_TYPETAG = true;
+  /* 见 `NEEDS_SCHED` 那段账：语法上看得见并发，`main` 就要跑成主 g。 */
+  if (tag(x) === 'go' || tag(x) === 'send'
+    || tag(x) === 'chan' || tag(x) === 'chan-send' || tag(x) === 'chan-recv') {
+    NEEDS_SCHED = true;
+  }
   if (tag(x) === 'tspec' || tag(x) === 'talias') {
     TYPES.add(leaf(kids(x)[0]));
     const body = kids(x).find((y) => tag(y) === 'struct');
@@ -693,6 +711,12 @@ function zeroOf(ty, name, pkg) {
     try { ez = zeroOf(el, `${name}[]`, pkg); } catch { ez = null; }
     return ez === null || ez === undefined ? lit(null) : listNew([], ez);
   }
+  /* **通道的零值是 0**（不是 `null`）：channel 在这条路上是 `libomnigo` 里那格 `hchan`
+     的**地址**，而方言里地址就是一个整数（见 `backend-core.js` 的 `C_RT`）。
+     go 的 nil channel 也正是 0 —— 差的只有一处：go 里在它上面收发是**永久阻塞**，
+     而 `omni_go_chan_send` 会报一句话再 abort（永久阻塞在我们这儿查不出来，
+     一句话比挂死好）。落 `null` 的代价是下游当场报「'ch' 是一格 null」。 */
+  if (t === 'chan' || t === 'chan-send' || t === 'chan-recv') return lit(0);
   if (NIL_TYPES.has(t)) return lit(null);
   // `[N]T` 的零值是**N 格元素零值**（数组是值语义的，不是切片）——
   // N 得是个整数字面量、元素也得有零值，两样缺一样就当场报。
@@ -2034,9 +2058,34 @@ function toNode(x) {
       }
       return [];
     }
-    /* `go func()` —— **并发启动**。图上没有 goroutine 那一格，降成**普通调用**
-       （同步执行体内逻辑）。不精确的角：并发访问 / 通道通讯在图上看不出来。 */
-    case 'go': return toNode(kids(x)[0]);
+    /* `go f(x)` —— **真的撒一条 goroutine**：落成 `call __goSpawn(f, x)`，那一格在
+       `backend-core` 里变成 `(ccall omni_go_spawn (fnref f) x)`，体在 `libomnigo`
+       里（G/M/P 调度器，照 go 的 proc.go 写的）。
+       两种形状收：`go f()` 与 `go f(一格实参)`。别的（闭包、方法、两格以上实参）落成
+       一句**有名有姓的墙** —— 从前这儿是 `return toNode(kids(x)[0])`（降成普通调用、
+       同步跑），那是**静默的错答案**：`ch <- v` 在同一条 g 上就是死锁，而它却"跑通"了。 */
+    case 'go': {
+      const c = kids(x)[0];
+      if (tag(c) !== 'call') {
+        throw new Error(`go->graph: go 后面不是一次调用（是 ${tag(c)}）`);
+      }
+      const [gfn, gargs] = kids(c);
+      if (tag(gfn) !== 'name') {
+        throw new Error('go->graph: `go` 的体只接**具名函数**'
+          + '（闭包要把捕获的那几格抄进新 g，那一层还没接）');
+      }
+      const gname = leaf(kids(gfn)[0]);
+      const raw = gargs === undefined ? [] : kids(gargs).filter((y) => tag(y) !== 'spread');
+      if (raw.length > 1) {
+        throw new Error(`go->graph: \`go ${gname}(…)\` 有 ${raw.length} 格实参 —— `
+          + '这一刀的门面只收 0 格或 1 格（实参要在 C 那侧打包，见 omni_go.h）');
+      }
+      const gargNodes = argsByDecl(gname, many(raw), false);
+      return node('call', {
+        fn: node('ref', {}, { name: raw.length === 0 ? '__goSpawn0' : '__goSpawn' }),
+        args: [node('ref', {}, { name: gname }), ...gargNodes],
+      });
+    }
     /* `goto L` —— 图上没有任意跳转。降成空语句（丢掉），不中断。
        语料里 goto 只占 5 份，全是编译器的 SSA builder 里的极端控制流。 */
     case 'goto': return [];
@@ -2107,6 +2156,7 @@ export function goToGraph(tree, opts) {
   MSET.clear();
   FSIG.clear();
   NEEDS_TYPETAG = false;
+  NEEDS_SCHED = false;
   VARTYPE.clear();
   IMPORTS.clear();
   collectImports(tree);
@@ -2142,7 +2192,13 @@ export function goToGraph(tree, opts) {
   const items = kids(tree).slice(1);          // 第一格是包名
   const body = [...stubBinds, ...items.map(toNode).flat()];
   if (opts !== undefined && opts.asModule === true) return program(body);
-  return program([...body, node('call', { fn: node('ref', {}, { name: 'main' }), args: [] })]);
+  /* 入口那一句。**用到并发的那些包一层**（`NEEDS_SCHED`）：`func main()` 要跑成
+     主 g，不然第一次在无缓冲 channel 上发送就是"park 一个不存在的 g"。 */
+  const entry = NEEDS_SCHED
+    ? node('call', { fn: node('ref', {}, { name: '__goRun' }),
+      args: [node('ref', {}, { name: 'main' })] })
+    : node('call', { fn: node('ref', {}, { name: 'main' }), args: [] });
+  return program([...body, entry]);
 }
 
 /**

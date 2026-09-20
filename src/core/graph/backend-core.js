@@ -612,8 +612,75 @@ function objText(obj, env, ctx) {
 
 
 /** `(call 名 实参…)` 的文本（"当值用"那道检查在 `expr` 里，语句位置上不查）。 */
+/**
+ * **运行时那几个 C 符号**（并发那一档，任务 #78）。
+ *
+ * 为什么是这条路而不是给图加 `chan` 那一族节点：channel 与 `go f()` 底下那台机器
+ * （G/M/P 调度器）**本来就在 C 里**（`src/runtime-sched/`，照 go 的 proc.go/chan.go 写的），
+ * 而方言已经有一条正经的"调外部 C 符号"的路（`(lib …)` + `(cabi …)` + `(ccall …)`，
+ * ADR-0022 的 J4b）。于是图上还是"调一个名字"、OIR 一个新节点都不加 —— 前端发
+ * `call __goChanSend(ch, v)`，这一层认出名字就落成 `(ccall omni_go_chan_send …)`。
+ *
+ * 键是**前端发的那个名字**（`ext/go/go-rt.js` 里的同名函数就是 js 那条腿的那一份）。
+ * `ps` 里的 `fn` 是"这一格要递一个**函数值**"（`(fnref 名字)`，cabi 上仍是 `ptr`）——
+ * `go f(i)` 与 `func main()` 都靠它把一格方言的函数交给运行时去跑。
+ * `ret` 是 `(cabi …)` 那一句里写的词（**那一端的 C 是怎么声明的**），`dty` 是**这一端**
+ * 看到的类型（`inferType` 查 `fn:名字` 要它）。两格必须分开：`omni_go_chan_new` 回的是
+ * 地址（`ptr`，方言这侧是 int），而 `omni_go_chan_recv` 回的是**一格值**（`i64`）——
+ * 合成一格的那一版把后者也写成了 `ptr`，那是在调用点白套一次指针到整数的转换。
+ */
+const C_RT = new Map([
+  ['__goRun', { sym: 'omni_go_run', ret: 'void', dty: 'void', ps: ['fn'] }],
+  ['__goSpawn', { sym: 'omni_go_spawn', ret: 'void', dty: 'void', ps: ['fn', 'i64'] }],
+  ['__goSpawn0', { sym: 'omni_go_spawn0', ret: 'void', dty: 'void', ps: ['fn'] }],
+  ['__goChanMake', { sym: 'omni_go_chan_new', ret: 'ptr', dty: 'int', ps: ['i64'] }],
+  ['__goChanSend', { sym: 'omni_go_chan_send', ret: 'void', dty: 'void', ps: ['ptr', 'i64'] }],
+  ['__goChanRecv', { sym: 'omni_go_chan_recv', ret: 'i64', dty: 'int', ps: ['ptr'] }],
+  ['__goChanClose', { sym: 'omni_go_chan_close', ret: 'void', dty: 'void', ps: ['ptr'] }],
+  ['__goChanLen', { sym: 'omni_go_chan_len', ret: 'i64', dty: 'int', ps: ['ptr'] }],
+]);
+
+/** `C_RT` 那张表里 `ps` 的一格 -> `(cabi …)` 里写的那个词。 */
+const CRT_CABI = { fn: 'ptr', ptr: 'ptr', i64: 'i64' };
+/** 并发那一档的体在哪个库里（逻辑名，cli.js 的 `resolveLib` 认它）。 */
+const C_RT_LIB = 'libomnigo';
+
+/**
+ * 落一格 `(ccall …)`，并把它要的那两句（`(lib …)` / `(cabi …)`）记到模块头上。
+ *
+ * 头上那几句**按用到的顺序发、去重**：一份图落两遍要逐字节相同（整条链的老规矩）。
+ */
+function crtCall(d, x, env, ctx) {
+  if (!ctx.cused.has(d.sym)) {
+    if (ctx.cused.size === 0) ctx.cdecls.push(`  (lib "${C_RT_LIB}")`);
+    ctx.cused.add(d.sym);
+    const ps = d.ps.map((p) => CRT_CABI[p]).join(' ');
+    ctx.cdecls.push(`  (cabi ${d.sym} ${d.ret} (${ps}))`);
+  }
+  const as = argList(x, 'args');
+  if (as.length !== d.ps.length) {
+    gap(`'${d.sym}' 要 ${d.ps.length} 个实参，图上给的是 ${as.length} 个`);
+  }
+  const args = as.map((a, i) => {
+    if (d.ps[i] !== 'fn') return expr(a, env, ctx);
+    /* 函数值那一格：图上必须是一格**指向具名函数的 ref**。闭包（`go func(){…}()`）
+       在这一刀上是一句有名有姓的缺口 —— 捕获那一层还没接（见任务 #78 的后半）。 */
+    if (!isNode(a) || a.op !== 'ref') {
+      gap(`'${d.sym}' 的第 ${i + 1} 格要一个具名函数（闭包那一档还没接）`);
+    }
+    return `(fnref ${a.attrs.name})`;
+  });
+  return `(ccall ${d.sym}${args.length === 0 ? '' : ` ${args.join(' ')}`})`;
+}
+
 function callText(x, env, ctx) {
   const f = x.ins.fn;
+  /* **运行时那几个 C 符号**（并发那一档，见 `C_RT`）：落成 `(ccall …)` 而不是 `(call …)`。
+     这一格要排在所有别的判据前头 —— 图上它们就是"调一个名字"，而那个名字在这份产物里
+     没有函数体（体在 `libomnigo` 里）。 */
+  if (isNode(f) && f.op === 'ref' && C_RT.has(f.attrs.name)) {
+    return crtCall(C_RT.get(f.attrs.name), x, env, ctx);
+  }
   /* **被调的是一格从字典里取出来的函数**（lua 的 `p:total()`、`a.__meta.__close(a)`）：
      先按键查出签名、拆箱成 `(fnty …)`，再走 `(callfn …)`。
      那几格函数的**形参类型**也在这儿记 —— 调用点是唯一知道实参类型的地方，而这一处调用
@@ -1751,7 +1818,14 @@ export function emitCore(g) {
     defers: [], scope: [], post: [], args: new Map(), pre: null, loopBase: [], collect: false,
     globals: new Set(), fnEnv: null, fnParams: new Map(), fnPzero: new Map(), dynSites: new Map(), rets: new Map(),
     declared: new Map(),
+    /* 并发那一档要往模块头上加的那几句（`(lib …)` / `(cabi …)`，见 `crtCall`）。
+       与 `decls` 分开是因为次序：这几句要排在 `(struct …)` **前面**（读起来是"先说外面
+       有什么，再说自己有什么"），而 `decls` 是落语句的时候一句一句长出来的。 */
+    cdecls: [], cused: new Set(),
   };
+  /* **运行时那几个 C 符号的返回类型**先摆进 env：调用点的 `inferType` 查的是 `fn:名字`，
+     而它们在这份产物里没有函数体（体在 `libomnigo` 里），不走 `ctx.rets` 那一趟。 */
+  for (const [nm, d] of C_RT) env.set(`fn:${nm}`, d.dty);
   /* 覆盖层（`types.js`）要问的那两件**后端自己的事**（见文件头那段 import 的注）：
      登记一格形状（顺带往模块头上印 `(struct rN …)`）、报一格有名有姓的缺口。 */
   ctx.shapeOf = (names, types, multi) => shapeOf(names, types, multi, ctx);
@@ -1954,7 +2028,7 @@ export function emitCore(g) {
   body.push(`  (main ${mainStmts.join(' ')}))`);
   /* `(struct …)` 要印在**用到它的东西前头**，而形状是落语句的时候才登记上的 ——
      所以这几句最后拼（次序：模块头、struct 那几句、函数、main）。 */
-  return `${['(module', ...ctx.decls, ...body].join('\n')}\n`;
+  return `${['(module', ...ctx.cdecls, ...ctx.decls, ...body].join('\n')}\n`;
 }
 
 /**

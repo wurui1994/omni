@@ -23,6 +23,10 @@ void omni_go_run(void *fnv);
 /* `go f(x)`：`fnv` 的签名是 `fn(int) -> void`。实参在这一侧打包（堆上一格，
    蹦床跑完就还）。 */
 void omni_go_spawn(void *fnv, int64_t arg);
+/* `go f()`：**不带实参**那一格单列。为什么不拿 `omni_go_spawn(f, 0)` 凑：那时按
+   `fp(self, arg)` 去调一格 `fp(self)` 的函数是**对不上的函数指针类型**，多出来那格
+   实参在哪个寄存器/栈位上是平台的事，不是我们说得准的。 */
+void omni_go_spawn0(void *fnv);
 
 /* `make(chan T, n)` —— 元素一律 8 字节（方言只有一格整数）。回的是 hchan 的地址。 */
 void *omni_go_chan_new(int64_t cap);
