@@ -1728,18 +1728,36 @@ function exeCacheStamp(cc) {
   const profFlag = PROF !== null && PROF.mode !== 'sample' ? `|prof:${PROF.mode}` : '';
   return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}${profEnv}${profFlag}`;
 }
+/** 这一趟由谁编（印记里那格）。**Get 与 Put 必须同口径** —— `buildSelf` 交的是 `'self'`，
+    而这儿从前问的是 `findCC()`（外部 cc 的名字），于是自带那台 C 前端那一路**永远不命中**。 */
+function exeCC() {
+  return selfCC() ? 'self' : findCC();
+}
+
 function exeCacheGet(path, cc) {
   if (env('OMNI_NO_EXECACHE') === '1') return null;
   const key = `e-${hash16(path)}`;
   const dep = join(exeCacheDir(), `${key}.dep`);
-  const exe = join(exeCacheDir(), `${key}.bin`);
-  if (!exists(dep) || !exists(exe)) return null;
+  /* 可执行文件的落点是 `exeCachePath`（`<程序名>-<8 位>.out`），**不是 `${key}.bin`** ——
+     这两处从前不是同一个名字，于是 `exists(exe)` 永远为假：清单写得好好的，缓存
+     一次也没命中过（量出来：连跑两趟，第二趟照旧把前端 + 发射 + 链接全做一遍）。 */
+  const exe = exeCachePath(path);
+  if (!exists(dep) || exe === null || !exists(exe)) {
+    vStep(`run exe cache  未命中（${!exists(dep) ? '没有清单' : '没有那份二进制'}）`);
+    return null;
+  }
   const lines = readText(dep).split('\n');
-  if (lines[0] !== exeCacheStamp(cc)) return null;
+  if (lines[0] !== exeCacheStamp(cc)) {
+    vStep('run exe cache  未命中（印记不同：编译器源码 / cwd / cc / flags 里有一格变了）');
+    return null;
+  }
   for (let i = 1; i < lines.length; i++) {
     if (lines[i] === '') continue;
     const f = lines[i].split('\t');
-    if (!exists(f[0]) || `${mtimeMs(f[0])}` !== f[1] || `${fileSize(f[0])}` !== f[2]) return null;
+    if (!exists(f[0]) || `${mtimeMs(f[0])}` !== f[1] || `${fileSize(f[0])}` !== f[2]) {
+      vStep(`run exe cache  未命中（${f[0]} 变了）`);
+      return null;
+    }
   }
   return exe;
 }
@@ -4976,6 +4994,30 @@ function main(argv) {
    * `--backend c` 会把 `run` 换成 `run-c` 那条 case，摆在 case 里就看不见了 ——
    * 量出来是"设了 PRUNE_OFF 却照旧 `prune 1195 -> 264`"。
    * 解释器那两档（`--interp` / `--mir`）照旧摇：它们不出 `.o`，摇了只是跑得快些。 */
+  /* 产物缓存（链好的可执行文件）：**输入一个字节没变就只剩 exec**。
+   *
+   * 门开在 switch **之前**：`--backend c` 会把 `run` 换成 `run-c` 那条 case，而"用户说的
+   * 是把它跑起来"这件事只有 `node.key` 知道。从前这格条件里有 `!hasJsEngine()`
+   * （只有自举出来的二进制上才查）—— 于是 node 上 `run --backend c` 每趟把整条前端 +
+   * 发射 + 链接重做一遍：量出来暖态 1.5s 里 asy_builtins 的词法 125ms、settings 141ms、
+   * 前端 234ms、发 C 202ms、链 394ms，而输入没变。宿主是谁与"输入变没变"没有关系。
+   *
+   * 只对 `.asy` 开：依赖清单来自 `cap('asy.deps')()`，别的语言那一格还没有 —— 拿上一趟
+   * asy 的清单当自己的会让"改了源码却沿用旧二进制"，那是答案静默地错。 */
+  if (node.key === 'run' && path !== undefined && path.endsWith('.asy')
+    && !rest.includes('--interp') && !rest.includes('--mir') && !rest.includes('--work')) {
+    const bi2 = rest.indexOf('--backend');
+    const toC = !hasJsEngine() || (bi2 >= 0 && rest[bi2 + 1] === 'c');
+    if (toC) {
+      const exe = exeCacheGet(path, exeCC());
+      if (exe !== null) {
+        vStep(`run exe cache  ${fileSize(exe)} bytes  ${exe}`);
+        const st = spawn(exe, [], 'i')[0];
+        vStep(`exec ${exe}  exit=${st}`);
+        return st;
+      }
+    }
+  }
   PRUNE_OFF = (node.key === 'run' || node.key === 'build')
     && !rest.includes('--interp') && !rest.includes('--mir')
     && perModuleArgv(rest);
@@ -5026,21 +5068,6 @@ function main(argv) {
           evalJs(hit);
           vStep('exec in-process (node host, indirect eval)');
           return 0;
-        }
-      }
-      // 原生那一路的产物缓存（第一百〇五刀）：**链好的可执行文件**按同一把印记躺在
-      // `.omni-cache/run-exe` 里，源码与它引的库都没动就只剩 exec。
-      // 量出来（自举出来的二进制，03-quotes.asy）：那 12.6s 里 AST 读回来 3.4s、
-      // 前端 5.0s、发 C 2.5s、clang 0.5s，而输入一个字节都没变。
-      // 这一格必须在 compile **之前**问 —— 大头全在前端。
-      if (path.endsWith('.asy') && !hasJsEngine() && !rest.includes('--interp')
-        && !rest.includes('--mir') && !rest.includes('--work')) {
-        const exe = exeCacheGet(path, findCC());
-        if (exe !== null) {
-          vStep(`asy exe cache  ${fileSize(exe)} bytes  ${exe}`);
-          const st = spawn(exe, [], 'i')[0];
-          vStep(`exec ${exe}  exit=${st}`);
-          return st;
         }
       }
       const cr = compile(path, rest);
@@ -5224,9 +5251,10 @@ function main(argv) {
     }
     case 'run-c': {
       const { mod } = compile(path, rest);
-      // `run-c` 是"明说要走 C 这条腿"（测试轴的一条），所以**不吃产物缓存**：
-      // 那条缓存是给 `run`（"把我的程序跑起来"）的，见 exeCacheGet。
-      return runViaC(mod, rest, path, false);
+      /* 吃不吃产物缓存看**用户敲的是哪个动词**：`omni run x.asy --backend c` 是
+       * "把它跑起来"（吃），`omni run-c x.asy` 是测试轴明说要走这条腿（不吃）。
+       * 两者在这儿是同一条 case —— `--backend c` 把 `run` 改写成了 `run-c`。 */
+      return runViaC(mod, rest, path, node.key === 'run' && path.endsWith('.asy'));
     }
     // LLVM 路径（ADR-0014 决策 3，第一阶段 = AOT via 文本 IR）
     case 'emit-llvm': {
