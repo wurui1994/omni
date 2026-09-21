@@ -1851,6 +1851,27 @@ const ASY_WK_SEP = ';;--';
  * 量出来的账：13 个库的 asyBodyPass 是 368ms（整个前端 645ms 的一半多），而它降出来的
  * 东西逐字节等于盘上那份 —— 这一刀省的就是它。声明遍那 221ms 省不掉：入口要那些表。
  */
+/**
+ * 读一份产物旁边那格 `.stamp` —— **只有这一处解析它**（ADR-0042 的第 0 步）。
+ *
+ * 从前 `load` / `mrec` / 清单里那格 `w|` 各自 `split('|')` 解一遍同一种文本：
+ * 三处解析一种格式，换格式必漏一处，而漏了的症状是**静默复用旧产物**
+ * （那三个 bug 的现场记在下面几段注释里）。所以先把读法收成一处，
+ * 再换实现（索引 + 一格键）时就只动这一个函数。
+ *
+ * 回 `{text, cs, fields, mainTag}`；文件不在回 null。
+ * `fields` 是去掉头一格（编译器印记）之后的那些，`mainTag` 是 `main:…` 那一格（没有就 null）。
+ */
+function stampRead(dir, name) {
+  const p = join(dir, `${name}.stamp`);
+  if (!exists(p)) return null;
+  const text = readText(p);
+  const all = text.split('|');
+  let mainTag = null;
+  for (const f of all) if (f.startsWith('main:')) mainTag = f;
+  return { text, cs: all[0], fields: all.slice(1), mainTag };
+}
+
 function asyModsSkip(dir, cs, mainTag) {
   const extras = new Map();          // 产物名 -> {name, key, sigs, weak}
   // 一份产物旁边那格 `.dep`：`key|源文件`、`need|要跟着进来的产物名`
@@ -1867,14 +1888,13 @@ function asyModsSkip(dir, cs, mainTag) {
   };
   // 一份产物的四格（`.stamp` 对上、`.js`/`.sec`/`.wk`/`.dep` 都在）都齐了才回它的内容
   const load = (nm) => {
-    const st = join(dir, `${nm}.stamp`);
     const secP = join(dir, `${nm}.sec`);
     const wkP = join(dir, `${nm}.wk`);
-    if (!exists(st) || !exists(join(dir, `${nm}.js`)) || !exists(secP) || !exists(wkP)) return null;
-    const fs = readText(st).split('|');
-    if (fs[0] !== cs) return null;
-    for (let i = 1; i < fs.length; i++) {
-      const f = fs[i];
+    const st = stampRead(dir, nm);
+    if (st === null || !exists(join(dir, `${nm}.js`)) || !exists(secP) || !exists(wkP)) return null;
+    if (st.cs !== cs) return null;
+    for (let i = 0; i < st.fields.length; i++) {
+      const f = st.fields[i];
       if (f === '-') continue;                 // 没有源文件的那种依赖（omni_weak）
       if (f.startsWith('t')) return null;      // 按文本哈希记的那种（omni_weak 自己）：不复用
       // 「这一份的正文里有主文件的基名」那一格（见 asyModsBuild 的 stampOf）：换了入口就不复用
@@ -2154,10 +2174,9 @@ function asyModsBuild(path, dir) {
   // 换个入口跑就会被原地盖掉 —— 清单只核源文件的话，A 的快路会拿起 B 刚写下的那一份。
   // 与 `w|` 那一格是同一类问题（同一个共用目录、同一个名字、内容却按程序变）。
   const mrec = (nm) => {
-    const st = join(dir, `${nm}.stamp`);
-    if (!exists(st)) return '-';
-    for (const f of readText(st).split('|')) if (f.startsWith('main:')) return f;
-    return '-';
+    const st = stampRead(dir, nm);
+    if (st === null || st.mainTag === null) return '-';
+    return st.mainTag;
   };
   const man = [asyModsEnv(), cs, r.entry];
   for (const u of r.units) man.push(`u|${u.name}|${u.key}|${fstamp(u.key)}|${mrec(u.name)}`);
@@ -2167,8 +2186,8 @@ function asyModsBuild(path, dir) {
   // 记下这一趟那份的印记，下一趟对不上就老老实实重来。
   // 量出来的样子（没有这一格时）：`run tri`、`run curve`、再 `run tri` —— 第三趟命中清单，
   // 拿的却是 curve 那份 weak，报 `s_…_shipout__d0_2_3_4_5_6_7_8_9` 不是它的导出。
-  const wst = join(dir, `${r.weak}.stamp`);
-  if (exists(wst)) man.push(`w|${readText(wst)}`);
+  const wstamp = stampRead(dir, r.weak);
+  if (wstamp !== null) man.push(`w|${wstamp.text}`);
   writeText(join(dir, `main-${r.entry}.dep`), `${man.join('\n')}\n`);
   vStep(`asy units      -> ${dir}`);
   return mainPath;
