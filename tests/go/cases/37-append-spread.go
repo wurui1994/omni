@@ -62,4 +62,11 @@ func main() {
 		ts += tris[i].A + tris[i].B
 	}
 	println(ts) // 3+7+11 = 21
+
+	// **字段的初值是一次调用、而它交出来的是一格切片**（`&Mesh{polys(2)}`）：
+	// 从前报"字段 / 下标的宿主不是一个名字" —— 那一格句柄要先物化成一格临时名。
+	m3 := &Mesh{polys(4)}
+	m3.Add(m1)
+	println(len(m3.Triangles)) // 4+3 = 7
+	println(m3.Triangles[3].B) // 6
 }

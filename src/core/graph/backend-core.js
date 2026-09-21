@@ -712,10 +712,12 @@ function objText(obj, env, ctx) {
       }
     }
     /* **宿主是一次调用**（`m.Tex.Pow(3).Sample(…)` —— 链式那一族）：交出来的是一格记录，
-       先物化成一格临时名再当宿主用。摆不下物化那几句（没有 `ctx.pre`）就照旧往下报。 */
+       先物化成一格临时名再当宿主用。摆不下物化那几句（没有 `ctx.pre`）就照旧往下报。
+       **数组 / 字典也走这一条**（`&Mesh{polys(2)}` 那一格字段的值）：交出来的是一个句柄，
+       物化一格名字与记录同理。从前只放记录过，于是那一格报"字段 / 下标的宿主不是一个名字"。 */
     if (isNode(obj) && obj.op === 'call' && ctx.pre !== null && ctx.pre !== undefined) {
       const ct = typeOf(obj, env, ctx);
-      if (isRecType(ct, ctx)) {
+      if (isRecType(ct, ctx) || elemType(ct) !== null || dictOf(ct) !== null) {
         ctx.tmp = ctx.tmp + 1;
         const tn = `obj_tmp${ctx.tmp}`;
         ctx.pre.push(bindLine(tn, ct, expr(obj, env, ctx), env, ctx));
