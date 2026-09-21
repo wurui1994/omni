@@ -3336,9 +3336,16 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
    *
    * 先编进暂存再 rename 进暖存：两个进程同时编同一份时，读到的不会是半个文件。
    *
+   * ⚠️ **编译器指纹（`srcStamp()`）也在键里**（2026-09-22 补上的一个真错）：从前键里只有
+   * 生成的 C 与目标，于是**改了 MIR 优化管线或后端这一格照旧命中** —— 重编一趟，跑的还是
+   * 上一版编出来的 `.o`。查 `GP_IN_F`（`regalloc.js`）时被它骗了很久：`-o gf_pt` 编了四趟，
+   * 后三趟全是第一趟那个有 bug 的 object（段错误一模一样），而只要换个输出名就"好了"——
+   * 文件名里有 `progName`，换名字等于换一格。与 `srcStamp` 那一段记的 asy 那次同一类错：
+   * **一个会跑错程序的缓存是 bug，不是性能优化**。代价是改一次编译器、下一趟重编一份 C。
+   *
    * 这是"C 也要标准模块化"的第一步：等发射按单元切开（每个单元一份 `.c` + 自动生成的 `.h`），
    * 每一份各自走这同一格暖存，改一个单元就只重编它那一格。现在还是**整程序一份**。 */
-  const objKey = hash16([cText, arch, os, fmt, LIBC === null ? '' : LIBC,
+  const objKey = hash16([srcStamp(), cText, arch, os, fmt, LIBC === null ? '' : LIBC,
     CROSS === null ? '' : CROSS.sysroot, extern === true ? 'x' : '',
     plugin === undefined || plugin === null ? '' : 'p',
     PROF !== null && PROF.mode === 'cc' ? 'prof' : ''].join('|'));
