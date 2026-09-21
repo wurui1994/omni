@@ -1566,6 +1566,21 @@ function workName(p) {
   return safe === '' ? 'anon' : safe;
 }
 
+/**
+ * 一份程序该叫什么：**源文件的主干**（`01-arith.asy` -> `01-arith`）。
+ *
+ * 从前这些地方一律叫 `a.out`：`work/run-01-arith.asy/a.out`、`run-ll/…/a.out`、
+ * 暖存里 `<哈希>.out`。那个名字一个字都没说 —— 一棵 `work/` 底下十几个 `a.out`，
+ * 谁是谁只能靠上一层目录猜，日志里印出来更是看不出在跑哪个程序。
+ * （`c obj`/`c link` 那两条**照旧**默认 `a.out`：那是 cc 的约定，是给人用的接口，不是缓存名。）
+ */
+function progName(p) {
+  const base = workName(p);
+  const dot = base.lastIndexOf('.');
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  return stem === '' ? 'prog' : stem;
+}
+
 /** 人看的大小。 */
 function mbOf(bytes) {
   if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)} MB`;
@@ -1736,11 +1751,11 @@ function exeCachePut(path, cc, deps) {
 function exeCachePath(path) {
   if (env('OMNI_NO_EXECACHE') === '1') return null;
   mkdirAll(exeCacheDir());
-  /* `<hash>.out`，不是从前的 `e-<hash>.bin`：生成的 C 与目标文件的名字都跟着产物走
-     （`buildNative` 里 `${basename(outPath)}.c`），于是旧名字让日志里出现
-     `e-….bin.c` / `e-….bin.c.o` 这种东西 —— 同一份源码在 `run-c` 那条路上叫
-     `a.out.c`。`.out` 与那边同形，看一眼就知道是"一个可执行文件"。 */
-  return join(exeCacheDir(), `${hash16(path)}.out`);
+  /* 名字是 **`<程序名>-<8 位>.out`**：前半截人看得懂（日志里印的是它），后半截把
+     "同名不同目录"分开。生成的 C 与目标文件的名字都跟着产物走（`buildNative` 里
+     `${basename(outPath)}.c`），所以这一格起好名字，`01-arith-1f2e3d4c.out.c` 这种
+     也就看得出是谁。从前叫 `<哈希>.out`，一整棵暖存里全是十六进制。 */
+  return join(exeCacheDir(), `${progName(path)}-${hash16(path).slice(0, 8)}.out`);
 }
 
 
@@ -3149,7 +3164,7 @@ function runViaC(mod, argv, srcPath, cache) {
   const cached = wi >= 0 || cache !== true ? null : exeCachePath(srcPath);
   const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run', workName(srcPath));
   if (wi >= 0) mkdirAll(dir);
-  const exe = cached === null ? join(dir, 'a.out') : cached;
+  const exe = cached === null ? join(dir, progName(srcPath)) : cached;
   const built = buildNative(mod, exe, wi >= 0 ? dir : undefined);
   if (cached !== null) exeCachePut(srcPath, built.cc, cap('asy.deps')());
   /* 三维那一档的 GL 插件：顺手编一下、把**绝对路径**放进环境，子进程 dlopen 它。
@@ -3391,7 +3406,7 @@ function runViaLlvm(mod, argv, srcPath) {
   const wi = argv.indexOf('--work');
   const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run-ll', workName(srcPath));
   if (wi >= 0) mkdirAll(dir);
-  const exe = join(dir, 'a.out');
+  const exe = join(dir, progName(srcPath));
   buildLlvm(mod, exe, wi >= 0 ? dir : undefined);
   const code = spawn(exe, [], 'i')[0];
   vStep(`exec ${exe}  exit=${code}`);
