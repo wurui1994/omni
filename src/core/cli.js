@@ -2402,6 +2402,7 @@ function asyCModsBuild(path, outPath) {
   names.sort();
   const objDir = join(cacheRoot(), 'modules', 'c');
   const objs = [];
+  const objOf = new Map();          // 模块名 -> 它那格 `.o`（打动态库时要按名字挑）
   let cc = 0;
   const ccRows = [];
   for (const nm of names) {
@@ -2420,6 +2421,7 @@ function asyCModsBuild(path, outPath) {
       LIBC === null ? '' : LIBC, CROSS === null ? '' : CROSS.sysroot].join('|'));
     const obj = join(objDir, `${nm}-${k.slice(0, 8)}.o`);
     objs.push(obj);
+    objOf.set(nm, obj);
     if (exists(obj)) continue;
     const tmp = join(dir, `${nm}.o`);
     const t0 = nowMs();
@@ -2462,11 +2464,51 @@ function asyCModsBuild(path, outPath) {
   const exe = outPath === undefined ? join(dir, `${progName(path)}.out`) : outPath;
   const stk = fmt === 'macho' ? ['--stack-size', String(0x20000000)] : [];
   const rtObjs = runtimeObjectsSelf(arch, os);
+  /* ---- 库那几份 + 运行时打成**一份动态库**（`run` 默认开，`OMNI_ASY_DYLIB=0` 关）
+   *
+   * 量出来的账（07-cond，都减掉 node 启动那 0.17s）：
+   *   全静态链（4 份模块 + 21 格运行时）      ~400ms
+   *   去掉 asy_builtins 那一份再链            ~140ms   <- 3.96 MB 的那一份就是大头
+   *   库那些全进 dylib、只链入口 + main       ~20~60ms
+   * 造一次 dylib 0.7s + `codesign` 30ms，之后**所有程序共用** —— 键是成员清单
+   * （每格 `.o` 的名字里带内容哈希），与"谁是入口"无关。程序启动量不出差别（都 < 10ms）。
+   *
+   * 三处不开，各有理由：
+   *   - `build -o` 那条路：用户要的是**能拿走的一份产物**，而它会 `LC_LOAD_DYLIB` 一条
+   *     暖存里的绝对路径。`run` 是就地跑，没这个问题。
+   *   - 交叉编译：dylib 得在**目标机**上找得到。
+   *   - `-f elf`：ELF 那侧要 `--soname` + `--rpath`，这台机器上没法验 —— 没验过的不设默认。
+   * macOS 上 dylib **非签不可**（`missing code signature`，量到过；可执行文件不签也跑得动）。 */
+  const libWant = fmt === 'macho' && CROSS === null && outPath === undefined
+    && env('OMNI_ASY_DYLIB') !== '0';
+  let linkObjs = [...objs, ...rtObjs];
+  let libArgs = [];
+  if (libWant) {
+    const members = [...names.filter((n) => n !== r.entry).map((n) => objOf.get(n)), ...rtObjs];
+    const lbk = hash16([...members, arch, os, fmt,
+      LIBC === null ? '' : LIBC].join('|'));
+    const libPath = join(objDir, `libomniasy-${lbk.slice(0, 8)}.dylib`);
+    if (exists(libPath)) {
+      vStep(`asy 动态库     复用 ${libPath}  ${fileSize(libPath)} bytes`);
+    } else {
+      mkdirAll(objDir);
+      const rcl = subMain(['c', 'link', ...members, '-o', libPath,
+        '--arch', arch, '--os', os, '-f', fmt, '--shared',
+        '--install-name', libPath, '--stdlib',
+        ...(LIBC === null ? [] : ['--libc', LIBC]), '-q']);
+      if (rcl !== 0) throw new OmniError(`asy c 模块：动态库没链上（成员 ${members.length} 格）`);
+      /* 签名是 dyld 的硬要求，不是可选项（arm64 macOS）。tcc 自己也是 `system("codesign …")`。 */
+      if (hostIsDarwin()) spawn('codesign', ['-f', '-s', '-', libPath], 'c');
+      vStep(`asy 动态库     新造 ${libPath}  ${fileSize(libPath)} bytes（${members.length} 格）`);
+    }
+    linkObjs = [objOf.get(r.entry), mainObj];
+    libArgs = ['--dylib', libPath];
+  }
   /* **链接也要有一格键**：`.o` 的名字里带内容哈希，所以"同一串 `.o` + 同一组开关"链出来
      一定是同一个二进制 —— 没改任何东西的一趟里重链一遍是纯浪费（量出来 309~475ms，
      比这条路上别的任何一段都贵）。键落在 `<程序>.out.link` 里、二进制**名字不变**：
      按键起名的话改一个字符就多一份 3.5 MB 的产物，一天下来全是垃圾。 */
-  const lk = hash16([...objs, ...rtObjs, arch, os, fmt, ...stk,
+  const lk = hash16([...linkObjs, ...libArgs, arch, os, fmt, ...stk,
     LIBC === null ? '' : LIBC, CROSS === null ? '' : CROSS.sysroot].join('|'));
   /* 只在自己那个目录里记这一格键：用户指定的 `-o` 旁边不该多一份 `.link`。 */
   const lkPath = outPath === undefined ? `${exe}.link` : null;
@@ -2474,14 +2516,15 @@ function asyCModsBuild(path, outPath) {
     vStep(`c link         复用 ${exe}  ${fileSize(exe)} bytes`);
     return exe;
   }
-  const rc = subMain(['c', 'link', ...objs, ...rtObjs, '-o', exe,
+  const rc = subMain(['c', 'link', ...linkObjs, ...libArgs, '-o', exe,
     '--arch', arch, '--os', os, '-f', fmt, '--stdlib', ...stk,
     ...(CROSS === null ? [] : ['--sysroot', CROSS.sysroot]),
     ...(LIBC === null ? [] : ['--libc', LIBC]), '-q']);
   if (rc !== 0) throw new OmniError(`asy c 模块：链接没过（各模块的 C 留在 ${dir}）`);
   spawn('chmod', ['+x', exe], 'c');
   if (lkPath !== null) writeText(lkPath, lk);
-  vStep(`c link         ${objs.length} 个 .o -> ${exe}  ${fileSize(exe)} bytes`);
+  vStep(`c link         ${linkObjs.length} 个 .o${libArgs.length > 0 ? ' + 1 份动态库' : ''}`
+    + ` -> ${exe}  ${fileSize(exe)} bytes`);
   return exe;
 }
 

@@ -4,7 +4,7 @@
 // 这一份判的是**拒绝**：边界的价值全在"说不通的时候说人话"，所以每条都核那句话本身。
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -235,6 +235,31 @@ console.log('\nsexpr/modules（C 那条腿：头按依赖切）');
   ok('只改用它的那一份：只重发一份，答案跟着变',
     /asy c 模块\s+新编 1 份/.test(log3) && (third.stdout ?? '').trim() === '63\n8',
     `${(/asy c 模块.*/.exec(log3) ?? ['<没有这一行>'])[0]}；输出 ${JSON.stringify((third.stdout ?? '').trim())}`);
+}
+
+/* **库那几份进动态库**（`run` 默认开，`OMNI_ASY_DYLIB=0` 关）：一份 3.6 MB 的 dylib
+ * 所有程序共用，可执行文件因此只剩自己那一份 —— 链接从 ~400ms 降到 ~45ms。
+ * 判三件事：默认那趟的产物**小**、关掉之后**大**、两趟**答案一样**。
+ * 只在 macOS 上判：ELF 那侧要 `--soname` + `--rpath`，没验过的不设默认（cli.js 里同一句）。 */
+if (process.platform === 'darwin') {
+  const w = mkdtempSync(join(tmpdir(), 'omni-dylib-'));
+  const p = join(w, 'dy.asy');
+  writeFileSync(p, 'int a = 6, b = 7;\nwrite(a * b);\n');
+  const run = (dy) => spawnSync('node', [cli, 'run', p, '--backend', 'c'],
+    { encoding: 'utf8', timeout: 180000, env: { ...process.env, OMNI_ASY_DYLIB: dy } });
+  const dyn = run('1');
+  const sta = run('0');
+  const size = (f) => { try { return statSync(f).size; } catch { return -1; } };
+  const exe = join(dirname(fileURLToPath(import.meta.url)), '..', '..',
+    '.omni-cache', 'modules', 'c-asy', 'dy.out');
+  ok('动态库那趟：答案对', dyn.status === 0 && (dyn.stdout ?? '').trim() === '42',
+    `${dyn.status}：${JSON.stringify((dyn.stdout ?? '').slice(0, 40))}`);
+  ok('动态库那趟与静态那趟同一个答案', dyn.stdout === sta.stdout,
+    `动态 ${JSON.stringify(dyn.stdout)}；静态 ${JSON.stringify(sta.stdout)}`);
+  /* 最后跑的是静态那趟，所以盘上那份 `.out` 现在是**大的**；重跑一次动态的再量。 */
+  run('1');
+  ok('动态库那趟的可执行文件只剩自己那一份（< 1 MB）', size(exe) > 0 && size(exe) < 1000000,
+    `${exe} 是 ${size(exe)} 字节`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
