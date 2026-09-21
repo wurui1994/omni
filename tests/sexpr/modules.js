@@ -176,5 +176,36 @@ console.log('\nsexpr/modules（C 那条腿：头按依赖切）');
   ok('自足模块过我们自己的 C 前端', o.status === 0, (o.stderr ?? '').trim().split('\n').slice(-1)[0]);
 }
 
+/* **改一个字符不许有大量浪费**：asy 的方言本来就是按文件的模块 —— 改自己那一份只该重降
+ * **自己**，不该把库重新词法一遍、也不该再发一整棵树（量到过：改一个字符照旧
+ * `asy front end … 1657174 bytes`）。
+ *
+ * 判据就用 `-v` 那几行（它本来是给人看的账，拿它当判据不必另造插桩）：
+ *   - `核心方言 N bytes`：N 是**自己那一份**的量级（几 KB），不是整棵树（1.6 MB）
+ *   - `asy c 模块 新编 1 份`：只有自己那一份重发
+ *   - `c obj 这一趟编了 1 格`：只有自己那一份重编
+ *   - 库的 `.asy` 一份都不再词法
+ * 这几条里破一条，就是"每趟重做一遍整棵树"回来了。 */
+{
+  const p = join(dir, 'waste.asy');
+  const run = (v) => spawnSync('node', [cli, 'run', p, ...(v ? ['-v'] : [])],
+    { encoding: 'utf8', timeout: 180000, env: { ...process.env, OMNI_ASY_CMODS: '1' } });
+  writeFileSync(p, 'int a = 17, b = 5;\nwrite(a + b);\n');
+  const warm = run(false);              // 暖机：库那几份落进缓存
+  writeFileSync(p, 'int a = 19, b = 5;\nwrite(a + b);\n');
+  const r = run(true);
+  const log = `${r.stderr ?? ''}${r.stdout ?? ''}`;
+  const line = (re) => (re.exec(log) ?? ['<没有这一行>'])[0];
+  ok('改一个字符：答案还对', r.status === 0 && (r.stdout ?? '').trim() === '24',
+    `暖机 ${warm.status}；这趟 ${r.status}：${JSON.stringify((r.stdout ?? '').slice(0, 60))}`);
+  const fe = /核心方言 (\d+) bytes/.exec(log);
+  ok('改一个字符：只降自己那一份的方言', fe !== null && Number(fe[1]) < 100000,
+    `发了 ${fe === null ? '?' : fe[1]} bytes（要几 KB 的量级）`);
+  ok('改一个字符：只重发一份模块', /asy c 模块\s+新编 1 份/.test(log), line(/asy c 模块.*/));
+  ok('改一个字符：只重编一格 .o', /这一趟编了 1 格/.test(log), line(/c obj.*/));
+  ok('改一个字符：库不再词法一遍', !/asy lexer.*src\/lib\/asy/.test(log),
+    line(/asy lexer.*src\/lib\/asy.*/));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exitCode = 1;
