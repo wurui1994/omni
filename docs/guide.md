@@ -157,8 +157,10 @@ node src/cli.js bootstrap -o dist              # 建整条自举链并查四条�
 ```
 
 缓存都在 `.omni-cache/` 下（按内容寻址，删掉只影响速度不影响结果）：
-`asy-ast/` 与 `asy-mods/` 是 asy 那两级（AST 与每个源文件一份 ESM）、`incr/` 函数级、
+`modules/js-<配置>/` 是「一份源码 -> 一目录 ESM 模块」的产物（一个模块一份 `.js` +
+一份接口 `.d.sx`，外加一份索引 `index.log` 与内容身份的预检表 `ids.log`）、`incr/` 函数级、
 `glr/` 解析表、`glsl-host/` 与 `jit/` 是 JIT 宿主、`rt/` 运行时对象、`test/` 门留下的现场。
+`epsref/` 不是缓存而是**判据**（真 asy 出的参考图），`omni cache gc` 一律不碰它。
 
 自举那条链本身有专门一份：[`bootstrap-build.md`](bootstrap-build.md)（四条门槛与产物长什么样）。
 

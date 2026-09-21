@@ -1769,7 +1769,7 @@ function stampSame(a, b) {
  * 不必再在每张清单里问一遍"环境变没变"。名字里不带语言：编到 JS 是通用构建。
  */
 function jsModulesDir() {
-  return moduleDir(cacheRoot(), 'modules', `js-${hash16(asyModsEnv())}`);
+  return moduleDir(cacheRoot(), 'modules', `js-${hash16(jsModulesConfig())}`);
 }
 
 /**
@@ -1976,7 +1976,7 @@ function asyModsSkip(dir, cs) {
  * 等价于按 SCC 整块算一个指纹。
  */
 function asyFps(all, cs, mainPath) {
-  const ev = asyModsEnv(mainPath);
+  const ev = jsModulesConfig(mainPath);
   const nameOfKey = new Map();
   for (const u of all) if (u.key !== '') nameOfKey.set(u.key, u.name);
   const self = new Map();
@@ -2157,8 +2157,9 @@ function asyModsBuild(path, dir) {
 }
 
 /**
- * 影响"同一个名字解析到哪个文件"的环境。清单里带上它 —— 换了 ASYMPTOTE_DIR
- * 或者换了当前目录（模块是**按当前目录**找的，量过），同一份清单就不再作数。
+ * 影响"同一个名字解析到哪个文件"的那几样 —— 它是**产物目录的配置键**
+ * （`jsModulesDir`）：换了 ASYMPTOTE_DIR 或者换了当前目录（模块是**按当前目录**找的，
+ * 量过），产物就落到另一格目录，两边互不相干。
  *
  * 还带上**主文件的名字**：TeX 那条路上 `_mainname()` 把它降成了字面量（dvips 会把
  * dvi 的文件名写进产物正文，`TeXDict begin … (equilateral_.dvi)` 那一行），而单元那一级
@@ -2166,7 +2167,7 @@ function asyModsBuild(path, dir) {
  * 例子照旧复用，名字就是上一个例子的。量出来过：equilateral 之后跑 fano，产物里写着
  * `(equilateral_.dvi)`。
  */
-function asyModsEnv(path) {
+function jsModulesConfig(path) {
   const d = env('ASYMPTOTE_DIR');
   const b = env('OMNI_ASY_BUILTINS');
   const m = path === undefined ? '' : cap('asy.fileUnitName')(path);
