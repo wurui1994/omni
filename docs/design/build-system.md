@@ -165,31 +165,39 @@ Go 的"编译器版本进哈希"这一条我们必须有：我们改后端的频
 - 求值作用域：全局 → subninja → rule → edge（edge 级最强），`EvalString` 是
   "字面量片段 + 变量引用"的序列（`eval_env.h`）
 
-**二、我们自己的格式。** `.ninja` 是**生成物**，人不该手写它；而我们要的是"人和 agent
-都能读的"描述。形状照 Zig 的念头：**描述就是一段普通程序**，不是第三门 DSL ——
-现在落的是 **`build.js`**（普通 ESM，想 import 什么、算什么都行）：
+**二、我们自己的格式：没有格式 —— 描述是一份正常的 JS。** `.ninja` 是**生成物**，
+人不该手写；而"我们自己的 DSL"根本不该存在。落的是 **`build.js`**：一份能被
+`node build.js` 直接跑的普通 ESM，它从 omni 这个包里 import 构建能力：
 
 ```js
-// build.js
-export default function (b) {
-  b.set('cflags', '-O2');
-  b.rule('cc', { command: 'cc $cflags -c $in -o $out', description: 'CC $out' });
-  b.rule('link', { command: 'cc $in -o $out' });
-  for (const s of ['a', 'b']) b.build(`${s}.o`, 'cc', `${s}.c`);
-  b.build('app', 'link', ['a.o', 'b.o']);
-  b.default('app');
-}
+// build.js —— 别人的项目里，omni 只是一个 npm 包
+import { Build } from 'omni-lang/build';
+
+const b = new Build();
+b.set('cflags', '-O2');
+b.rule('cc', { command: 'cc $cflags -c $in -o $out', description: 'CC $out' });
+b.rule('link', { command: 'cc $in -o $out' });
+for (const s of ['a', 'b']) b.build(`${s}.o`, 'cc', `${s}.c`);
+b.build('app', 'link', ['a.o', 'b.o']);
+b.default('app');
+b.run(process.argv.slice(2));       // 认 -n / -j / -k / -t / --emit-ninja
 ```
 
-**我们不限制脚本做什么** —— 与 zig 一样，"只造图、不动磁盘"是**约定**而不是围栏。
-拦也拦不住（脚本能 import 任何东西），拦了还得给每种需求开口子。约定的代价写在明处：
-脚本自己动的那部分在依赖图外面，增量与并行都不管它；`-n` 与 `--emit-ninja` 也只对
-图里那部分有意义。
+两种用法**地位相同**，而且是同一段实现（`build/engine.js`）：
+
+- `node build.js` —— 那个项目里可以完全没有 omni 这个命令（`npm i omni-lang` 就够）；
+- `omni ninja` —— 没有 `build.ninja` 时它**转交**给 `node build.js`（开关与目标原样递过去，
+  退出码原样带回来）。不是"我们把脚本 import 进来求值"：那份脚本是别人的程序，
+  它的依赖、node 版本、自己的参数都归它自己。
+
+包的出口在 `package.json` 的 `exports`：`omni-lang/build` → `src/core/build/api.js`。
+那一份导出 `Build`（造图的动作 + `run` + `toNinja`）与底层几件（`State`、`parseManifest`、
+`build`、`FakeDisk`）—— 想自己拼调度的人拿底层，想直接用的人拿 `Build`。
 
 `b` 的动作与 `.ninja` 的语句一一对应（rule / build / pool / default / 三种输入），
-所以两种入口造出来的是**同一张图**，判据里有一条往返：`build.js → --emit-ninja →
-再解析`，两边的命令逐条相同。`omni ninja --emit-ninja` 就是那座**单向桥**，
-CMake 那侧的生态因此白得。
+所以两种入口造出来的是**同一张图**；判据里有一条往返：`build.js → --emit-ninja → 再解析`，
+两边命令逐条相同。`--emit-ninja` 就是通向 CMake 那侧生态的**单向桥**。
+
 
 
 ## 8. 三层缓存怎么并成一套

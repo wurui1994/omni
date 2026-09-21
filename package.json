@@ -8,6 +8,10 @@
   "bin": {
     "omni": "./src/cli.js"
   },
+  "exports": {
+    ".": "./src/cli.js",
+    "./build": "./src/core/build/api.js"
+  },
   "scripts": {
     "omni": "node src/cli.js",
     "native": "sh -c '[ -x dist/omni ] || npm run --silent build:native; exec ./dist/omni \"$@\"' --",

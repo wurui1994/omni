@@ -7,6 +7,9 @@
 // 外面那把尺子在另一处：`omni ninja --emit-ninja` 出来的 manifest 喂给真 ninja，
 // 两边跑同一批命令（手动验过，见提交说明）。
 
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { State } from '../../src/core/build/graph.js';
 import { parseManifest } from '../../src/core/build/manifest.js';
 import { FakeDisk } from '../../src/core/build/plan.js';
@@ -184,6 +187,21 @@ throws('两条边造同一格：当场报', () => run([CC,
   const cmds = (s) => s.edges.map((e) => e.command());
   eq('build.js 与它印出的 manifest 是同一批命令', cmds(st2), cmds(b.state));
   eq('边级绑定过了这座桥还在', cmds(st2)[0], 'cc -O0 -c a.c -o a.o');
+}
+
+/* 十二、**`node build.js` 真的能跑**（它是一份正常的 JS，不是我们的配置文件）。
+   这一条起一个进程 —— 唯一的一条，因为要判的正是"别人用 node 跑它"这件事。
+   `-t commands` 只印不跑，所以不碰磁盘。 */
+{
+  const here = dirname(fileURLToPath(import.meta.url));
+  const r = spawnSync('node', [join(here, 'fixture', 'build.js'), '-t', 'commands'],
+    { encoding: 'utf8', timeout: 60000 });
+  eq('node build.js -t commands', (r.stdout ?? '').trim().split('\n'), [
+    'cc -O2 -c a.c -o a.o',
+    'cc -O2 -c b.c -o b.o',
+    'cc a.o b.o -o app',
+  ]);
+  eq('node build.js 的退出码', r.status, 0);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

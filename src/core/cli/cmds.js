@@ -522,20 +522,29 @@ ${graphEngineHelp()}
     {
       name: 'ninja', key: 'ninja', usage: '[目标…]',
       brief: '按一张依赖图把该做的做完（吃 .ninja 与 build.js）',
-      help: `入口不给 -f 时按次序找：**build.ninja → build.js**。两种描述造出来的是同一张图
-（设计写在 docs/design/build-system.md；为什么描述用 build.js 而不是另一门 DSL 见 §7）。
+      help: `入口不给 -f 时按次序找：**build.ninja → build.js**，两者地位不同：
+  .ninja  我们自己读，然后跑
+  .js     **转交给 node 跑它**（node build.js …，开关与目标原样递过去，退出码带回来）
+
+**build.js 就是一份正常的 JS**：\`node build.js\` 直接能跑，omni 在那个项目里只是一个包 ——
+  import { Build } from 'omni-lang/build';
+  const b = new Build();
+  b.rule('cc', { command: 'cc -c $in -o $out' });
+  b.build('a.o', 'cc', 'a.c'); b.default('a.o');
+  b.run(process.argv.slice(2));
+两种用法是同一段实现（build/engine.js），所以开关与行为一致：
 
   omni ninja                     做完 default 那些目标
   omni ninja app -j 4            只做 app
   omni ninja -n                  只印要跑什么，不跑（dry run）
-  omni ninja --emit-ninja        把图印成一份 .ninja（build.js -> manifest 的单向桥）
+  omni ninja --emit-ninja        把图印成一份 .ninja（通向 cmake 那侧生态的单向桥）
   omni ninja -t dirty            印每条边脏不脏 —— "它为什么又要重编"看这个
   omni ninja -t commands|targets|graph|clean
 
-**build.js 是普通 ESM**：想 import 什么、算什么都行，我们不限制它做什么 ——
-"只造图、不动磁盘"是约定（脚本自己动的那部分就在依赖图外面，增量与并行不管它）。
-上一趟的命令哈希与耗时记在 ./.omni_log；命令哈希里掺了**编译器自己的指纹**，
-所以改了后端、命令字面量没变，该重编的还是会重编。`,
+上一趟的命令哈希与耗时记在 ./.omni_log；命令哈希里掺了**编译器自己的指纹**
+（OMNI_BUILD_FINGERPRINT 可以指定），所以改了后端、命令字面量没变，该重编的还是会重编。
+设计写在 docs/design/build-system.md。`,
+
       flags: [{ name: '-f', alias: '--file', arity: 1, value: 'FILE', brief: '入口（.ninja 或 .js）' },
         { name: '-j', arity: 1, value: 'N', brief: '并发上限（现在一次一条，见设计 §9）' },
         { name: '-n', arity: 0, brief: '只印不跑' },

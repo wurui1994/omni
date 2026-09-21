@@ -7,14 +7,8 @@
 //   - 只造图的脚本，`omni ninja -n`（不跑）与 `--emit-ninja`（印 manifest）才有意义；
 //   - 脚本自己去动磁盘，那部分就在依赖图外面，增量与并行都不管它。
 //
-// 用法（`build.js`）：
-//
-//   export default function (b) {
-//     b.rule('cc', { command: 'cc -c $in -o $out', description: 'CC $out' });
-//     b.build('a.o', 'cc', 'a.c', { implicit: ['common.h'] });
-//     b.build('app', 'link', ['a.o'], {});
-//     b.default('app');
-//   }
+// 用法：这份 `Builder` 是**库**，`build.js` 从 `api.js` 拿 `Build`（它继承这儿的动作）
+// 自己造图、自己跑 —— 见 `api.js` 的头。这一份只管"怎么造图"与"怎么印成 manifest"。
 //
 // 名字与语义**与 `.ninja` 一一对应**（rule / build / pool / default / 三种输入），
 // 所以 `b` 造出来的图与吃一份 manifest 造出来的图是同一种东西 —— 一层引擎，两种入口。
@@ -62,7 +56,10 @@ const asList = (x) => (x === undefined || x === null ? [] : (Array.isArray(x) ? 
 /** 传给 `build.js` 的那个 `b`。**只有这几个动作** —— 与 `.ninja` 的语句一一对应。 */
 export class Builder {
   constructor(state) {
-    this.state = state ?? new State();
+    /* 两行而不是 `??`：惰性位置上的临时量我们自己那台编译器不收（它让你抬成语句）。 */
+    let st = state;
+    if (st === undefined || st === null) st = new State();
+    this.state = st;
   }
 
   /** 全局变量（`cflags = -O2`）。 */
@@ -202,25 +199,4 @@ function ninjaEscape(es) {
   let s = '';
   for (const [k, v] of es.parts) s += k === 'lit' ? v : `\${${v}}`;
   return s;
-}
-
-/**
- * 读一份 `build.js` 出一张图。
- *
- * 脚本的默认导出收 `b`（`Builder`）。**我们不限制它做什么** —— 它是普通的 ESM 模块，
- * 想 import 什么、算什么都行；"只造图"是约定（见文件头）。
- *
- * @param {string} absPath 绝对路径（`import()` 要它）
- * @param {(p:string)=>Promise<any>} [imp] 注入 import（判据里换成假的）
- */
-export async function loadBuildScript(absPath, imp) {
-  const load = imp ?? ((p) => import(p));
-  const mod = await load(absPath.startsWith('/') ? `file://${absPath}` : absPath);
-  const fn = mod.default ?? mod.build;
-  if (typeof fn !== 'function') {
-    throw new Error(`${absPath}: 要一个默认导出的函数（收一个 b，往上头造规则与任务）`);
-  }
-  const b = new Builder();
-  await fn(b);
-  return b.state;
 }
