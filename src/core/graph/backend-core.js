@@ -2004,7 +2004,23 @@ function isZeroText(t, v) {
     gap(`一格空列表（元素类型推不出来、也没有声明的元素类型）—— 绑给 '${nm}'${wh}`);
   }
   const ts = items.map((it) => elemTypeOfNode(it, env, ctx));
-  const et = items.length === 0 ? elemTypeOfNode(decl, env, ctx) : ts[0];
+  let et = items.length === 0 ? elemTypeOfNode(decl, env, ctx) : ts[0];
+  /**
+   * **无类型整数常量在 real 的上下文里就是 real**（go 语言规范的无类型常量规则；
+   * 与下面 `numWant` 给 `bin` 做的"把矮的那边抬上去"是同一条）。两处来源：
+   *   - **声明的元素类型**：`[128]float64{0, 1.7290404664e-09, …}` 第一格写成 `0`；
+   *   - **别的元素**：没有声明时，只要有一格是 real，整张表就是 real。
+   *
+   * 为什么非补这一条不可（量出来的）：真 go 标准库的 `math/rand` 里 `normal.go` / `exp.go`
+   * 那几张 128/256 格的表全是这个写法，于是 `--pkgs $GOROOT/src/math/rand` 编到这儿一律
+   * `列表里的元素类型不一样（int / real / real / …）—— 方言的数组是单态的`。
+   */
+  if (items.length > 0 && decl !== undefined && decl !== null) {
+    if (elemTypeOfNode(decl, env, ctx) === 'real') et = 'real';
+  }
+  if (et === 'int' && ts.some((t) => t === 'real')) et = 'real';
+  /** 这一格是"抬上去"的那一格吗（int 的值进 real 的表）。 */
+  const lift = (i) => et === 'real' && ts[i] === 'int';
   /* 元素可以是标量、**值语义的记录**（`(arr rN)`，一格一整块），也可以是**引用语义的
      记录**（`(arr (ptr rN))`，一格一个指针 —— go 的 `[]Shape` 与 `[]*Mesh` 那一族）。 */
   const recElem = isRecType(et, ctx);
@@ -2015,11 +2031,14 @@ function isZeroText(t, v) {
   if (!recElem && !arrElem && et !== 'int' && et !== 'real' && et !== 'bool' && et !== 'string') {
     gap(`列表的元素不是标量、也不是记录或数组（量到的是 ${et}）`);
   }
-  if (ts.some((t) => t !== et)) gap(`列表里的元素类型不一样（${ts.join(' / ')}）—— 方言的数组是单态的`);
+  if (ts.some((t, i) => t !== et && !lift(i))) {
+    gap(`列表里的元素类型不一样（${ts.join(' / ')}）—— 方言的数组是单态的`);
+  }
   const at = `(arr ${et})`;
   const out = [bindLine(nm, at, `(anew ${at} (int ${items.length}))`, env, ctx)];
   for (let i = 0; i < items.length; i++) {
-    out.push(`(aset (var ${nm}) (int ${i}) ${expr(items[i], env, ctx)})`);
+    const v = expr(items[i], env, ctx);
+    out.push(`(aset (var ${nm}) (int ${i}) ${lift(i) ? `(toreal ${v})` : v})`);
   }
   return out;
 }
