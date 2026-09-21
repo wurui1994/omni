@@ -3092,6 +3092,11 @@ class AsyLower {
     const ex = this.tailExit === true ? this.exitCall() : null;
     if (ex !== null) body.push(`    ${ex}`);
     this.sections.tail = ex === null ? '' : ex;
+    /* `(main …)` 也要带**它自己那格归属**（入口那一份）：少了这一句，markUnits 的状态机
+       让它继承上一个标记（拼装的最后一轮是某个库的 wraps）—— 于是**用户程序的模块级
+       初始化语句落进了库那一份 `.c`**，库的产物跟着程序变，跨程序一格都命中不了。
+       量出来的样子：`asy_builtins.c` 里有 12 处 `g_asy__g0_s = …`。 */
+    out.push(uMark(0));
     out.push(`  (main${body.length === 0 ? '' : `\n${body.join('\n')}`}))`);
     // 下一批的顶层项从这一批之后接着数
     this.atOff = this.atOff + root.rs.length;
