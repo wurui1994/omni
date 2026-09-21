@@ -164,34 +164,114 @@ export function asyUnitModules(sections, nameOf, tail) {
     for (const x of s.fns) put(mod, x);
     for (const x of s.wraps) put(mod, x);
   }
-  // ---- 一·五、生成物：**一项一份**（见 genMod 那一段账） ----
-  // 单元在前、生成物在后：要先知道入口定义了哪些名字，才判得出"这一项提到了入口"。
+  // ---- 一·五、生成物归谁 ----
   //
-  // 按名字去重：同一个内容决定名字的项，盘上拿回来的那份与这一趟生的那份是同一段代码，
-  // 留先来的那一份就行。
-  const genSeen = new Set();
+  // 生成物是"谁都可能生、名字只由内容决定"的那些项（HELPERS、数组工厂、`Map_K_V` 那一族
+  // 实例、内建数学包装）。两条规矩，其余都是它们的推论：
+  //
+  //   **A. 库那几份产物必须与程序无关。** 一份库的 `.js` 只装它自己的声明 —— 谁引它都是同一份，
+  //      于是并发跑两个例子时两边写下的字节一样，互相盖也没事。把生成物折进"归属库"里试过，
+  //      那一刀让库的产物跟着程序变（哪几项被折进去取决于这个程序要什么），
+  //      症状是整套判据**偶发**地红一格（并发跑时 129-array-cyclic 的 `cyclic` 查错登记处、
+  //      besselJ 整个不出数）—— 那正是 weak 当年的毛病换了个样子。
+  //
+  //   **B. 也不该一项一份文件。** 那样一个例子的目录里就是三百个几行的模块
+  //      （量过 290 份 `g_asy__…js`）。
+  //
+  // 所以：**这一趟要发的生成物合成一份模块，名字按内容算**（`gen_<哈希>`）。内容定址 =>
+  // 不可变、谁都能复用、谁也盖不了谁；两个程序要的集合一样时就是同一份文件。
+  // 已经被谁提供了的项（这一趟别的单元、或者盘上复用回来那几份产物的**接口**里已有）
+  // 一律不再发一份 —— 那一格是"两份定义各自一个登记处"的唯一入口。
+  //
+  // 库不要的那一族归入口（见下面 `libWant` 那段的账）。
   const kindOf = (f) => `${f.head === 'class' || f.head === 'struct' ? 't' : 'v'}|${f.name}`;
-  const entryGen = [];
+  // 这一趟先攒齐所有要发的项（去重之后），再决定每一项的家 —— 因为"库要不要它"
+  // 得把项与项之间的引用也算进去（数组工厂里调 helper）。
+  const gen = [];
+  const genSeen = new Set();
+  const textSeen = new Set();
+  const byName = new Map();     // 项名 -> 它那段正文
   for (const t of sections.weak) {
     const fs = formsOf(t);
-    let all = fs.length > 0;
-    for (const f of fs) if (!genSeen.has(kindOf(f))) all = false;
-    if (all) continue;   // 每一条都已经有了：整段是重复的
-    for (const f of fs) genSeen.add(kindOf(f));
-    // **提到了入口的那几项归入口**：它们的内容跟着入口变（默认实参的包装就是这一类），
-    // 不是"名字由内容定"的那种，所以不能自己成一份 —— 那样换个入口就互相盖。
-    let toEntry = false;
-    for (const r of refsOf(t, new Set())) {
-      for (const d of [tdef.get(r), vdef.get(r)]) if (d !== undefined && d.mod === entryMod) toEntry = true;
+    // **一条形式都认不出来的那种也得发**（formsOf 只认 fn/cfn/class/struct/global/kernel）。
+    // 漏掉它的症状是链接时报"未声明的变量 `asy__p3292`"—— 量出来过，118-code-quote 不出图。
+    // 没有名字就没法按名字去重，改按**正文**去重。
+    if (fs.length === 0) {
+      if (textSeen.has(t)) continue;
+      textSeen.add(t);
+      gen.push(t);
+      continue;
     }
-    if (toEntry) { entryGen.push(t); put(entryMod, t); continue; }
-    put(genMod(fs[0].name), t);
+    /* 同一个名字（内容决定名字）只发一份 —— 两处都得看：
+     *   `genSeen`  这一趟已经收下的项；
+     *   `tdef`/`vdef`  这一趟别的单元、**以及盘上复用回来那几份产物的接口**里已有的名字。
+     *
+     * 后一处是必须的：一份库被复用时它自己那几项**就在它的产物里**（这一刀把项放进了
+     * 归属单元），这一趟的降级照旧会把它们再生一遍 —— 不拦就成了两份定义，各自一个
+     * 登记处。量出来的症状不是报错而是**答案不对**：129-array-cyclic 先跑一个别的例子
+     * 暖上缓存之后，第一行从 `true` 变成 `false`（`cyclic` 查的是另一份登记处）。 */
+    let all = true;
+    for (const f of fs) {
+      const d = f.head === 'class' || f.head === 'struct' ? tdef.get(f.name) : vdef.get(f.name);
+      if (!genSeen.has(kindOf(f)) && d === undefined) all = false;
+    }
+    if (all) continue;
+    for (const f of fs) genSeen.add(kindOf(f));
+    for (const f of fs) byName.set(f.name, t);
+    gen.push(t);
   }
-  // 归了入口的那几项放**最前面**：它们里头有类，入口自己的项可能在初始化时就用到
+  /* **库要哪些项**：库的正文里提到的，加上那些项自己又提到的（闭包到不动点）。
+   *
+   * 这一问决定"能不能归入口"：库要的项**绝不能**住在入口里 —— 入口的名字只有入口自己能引
+   * （见下面那段），所以库那一份发不出它的签名，链接时报"未声明"。量出来过：把
+   * `asy__cycis_arr_code` 判给了入口，asy_builtins 整片报未声明、118-code-quote 不出图。
+   * 这与从前 weak 那一套的判据是同一条（那边叫 `libWant`），只是落点从"一份共用文件"
+   * 改成了"归属单元 / 一份内容定址的共用模块"。 */
+  const libWant = new Set();
+  for (const [mod, list] of items) {
+    if (mod === entryMod) continue;
+    for (const r of refsOf(list.join('\n'), new Set())) if (byName.has(r)) libWant.add(r);
+  }
+  {
+    const wave = [...libWant];
+    while (wave.length > 0) {
+      const t = byName.get(wave.pop());
+      if (t === undefined) continue;
+      for (const r of refsOf(t, new Set())) {
+        if (byName.has(r) && !libWant.has(r)) { libWant.add(r); wave.push(r); }
+      }
+    }
+  }
+  const shared = [];            // 库要的那些（-> 一份内容定址的共用模块）
+  const entryGen = [];          // 库不要的那些（-> 归入口）
+  for (const t of gen) {
+    const fs = formsOf(t);
+    /* **库要不要它**是唯一的分界（与从前 weak 那一套同一条判据）：
+     *   要 -> 进那份共用模块（库那几份发 `(sig "gen_…" …)` 引它）；
+     *   不要 -> 归入口。
+     *
+     * 为什么不能按"提到了入口"来判：`libWant` 是**闭包**过的（库要的项自己引的也算库要的），
+     * 所以"库不要"的那一族只会引到库要的项或者彼此 —— 整族一起进入口，族内的引用就都在
+     * 入口里。按"提到入口"分的话同一族会被劈开：引用方进了共用那份、被引方进了入口，而
+     * **入口的名字只有入口自己能引**，于是共用那份发不出签名 —— 量出来的样子是
+     * asy_builtins 整片报 `未声明的函数 'asy__cycis_arr_code'`、118-code-quote 不出图。
+     *
+     * 一条形式都认不出来的那种（没有名字）也算"库不要"：与从前那一套一致。 */
+    let wanted = false;
+    for (const f of fs) if (libWant.has(f.name)) wanted = true;
+    (wanted ? shared : entryGen).push(t);
+  }
+  for (const t of entryGen) put(entryMod, t);
+  // 归了入口的那几项放它正文**最前面**：里头有类，入口自己的项可能在初始化时就用到
   if (entryGen.length > 0) {
     const el = items.get(entryMod);
     const cut = el.length - entryGen.length;
     items.set(entryMod, [...el.slice(cut), ...el.slice(0, cut)]);
+  }
+  // 共用那一份：名字按内容算，所以两个程序要的集合一样时就是同一份文件
+  if (shared.length > 0) {
+    const nm = `gen_${hash16(shared.join('\n'))}`;
+    for (const t of shared) put(nm, t);
   }
   // ---- 二、每一份的正文 + 它要引的签名 ----
   // 一份产物被复用时还得跟着进来的那几份：它自己引的那些（入口与自己除外）。
