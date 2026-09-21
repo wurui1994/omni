@@ -116,6 +116,15 @@ const FTMP1 = 17;
  * 认不下的颜色照旧住栈位，而那永远是对的（见 regalloc.js 文件头）。
  */
 const STICKY = [19, 20, 21, 22, 23, 24, 25, 26, 27,
+  /* **第 10 个：x28**。它在 AAPCS 里也是被调用者保存的，这一层只在**会动栈顶**的函数里
+   * 拿它当帧基址（`FB`）—— 而那种函数（变长数组 / `alloca`）少之又少。所以不动栈顶的
+   * 函数里它整个闲着，白扔一个跨调用能用的寄存器。
+   * `stickyAt`/`slotSticky` 里那道闸：`dynStack` 的函数一律不认这个颜色（照旧住栈位，
+   * 而"认不下的颜色回 -1"永远是对的）。
+   * 为什么这一格对：`Tree__search` 的 13 个同时活着的整数值**全都跨调用**
+   * （`OMNI_RA_STAT=1` 现在把峰值拆成"跨调用＋不跨"），而跨调用的只能住被调用者保存的
+   * 那几个 —— 加调用者保存的颜色（`COLORS_SCRATCH`）对它一点用都没有，加这一个才有。 */
+  28,
   /* **草稿那一档**（`regalloc.js` 的 `COLORS_SCRATCH`）：x11-x15，与 `POOL` 是同一批。
    * 只有 `fn.noPool` 为真的函数才会用到这五个颜色 —— 那时 `POOL` 整个关掉，
    * 这批寄存器的唯一主人就是上一层的分配表（两套机制并成一套，见 `noPool`）。
@@ -123,7 +132,9 @@ const STICKY = [19, 20, 21, 22, 23, 24, 25, 26, 27,
    * 序言/收场一个字都不用发（`stickySpill` 只存前 `STICKY_SAVED` 个）。 */
   11, 12, 13, 14, 15];
 /** 前几个颜色是被调用者保存的（要在序言里存）—— 与 `regalloc.js` 的 `COLORS` 对齐。 */
-const STICKY_SAVED = 9;
+const STICKY_SAVED = 10;
+/** 第 10 个颜色（x28）只有不动栈顶的函数才认 —— 那种函数里它是帧基址 `FB`。 */
+const STICKY_FB_COLOR = 9;
 /**
  * **浮点那一套粘住的寄存器**：d8-d15，AAPCS 里被调用者保存（只保低 64 位，
  * 而这一层的浮点值最宽就是一个 double ⇒ 够）。对的是 `regalloc.js` 的 `regHintF`。
@@ -567,6 +578,9 @@ class FnGen {
       bytes = bytes + pad + need;
     }
     this.frame = bytes + (bytes % 16 === 0 ? 0 : 16 - (bytes % 16));
+    /** 会动栈顶的函数（第三十六片）：变长数组 / `alloca`。**要摆在分配表之前** ——
+     *  第 10 个颜色（x28 = `FB`）只有不动栈顶的函数才认（见 `stickyAt`）。 */
+    this.dynStack = hasDynStack(f);
     /* 粘住的那几个（见 `STICKY`）：上一层涂了几个颜色，这儿就要在帧里留几格存
      * 调用者的那几个 x19-x23。`regHint` 不在的话（没跑优化管线）这一格整条不存在，
      * 于是**一个字节都不变** —— 那 88 条编码对账的用例照旧成立。 */
@@ -587,7 +601,11 @@ class FnGen {
       seen.sort((a, b) => a - b);
       /* **只存被调用者保存的那几个**（前 `STICKY_SAVED` 个颜色）。草稿那一档（x11-x15）
        * 是调用者保存的，上一层保证涂成它们的区间不跨调用点 ⇒ 不用存。 */
-      for (const c of seen) if (c >= 0 && c < STICKY_SAVED) this.stickyColors.push(c);
+      for (const c of seen) {
+        if (c < 0 || c >= STICKY_SAVED) continue;
+        if (c === STICKY_FB_COLOR && this.dynStack) continue;   // 这个函数不认它（见 `stickyAt`）
+        this.stickyColors.push(c);
+      }
     }
     /**
      * **这个函数关掉 `POOL` 了吗**（`regalloc.js` 的 `noPool`）：上一层判这个函数的通用
@@ -631,8 +649,7 @@ class FnGen {
     }
     /* 会动栈顶的函数（第三十六片）：帧最上面留一格存调用者的 x28，往后一律按 `FB`
      * 寻址。留在**最上面**是为了让下面所有偏移都不变 —— 那样「不会动栈顶」的那一路
-     * 一条指令都不改。 */
-    this.dynStack = hasDynStack(f);
+     * 一条指令都不改。（`this.dynStack` 在上面算过了 —— 分配表那一段要用它。） */
     this.fbSave = -1;
     if (this.dynStack) {
       this.fbSave = this.frame;
@@ -729,7 +746,8 @@ class FnGen {
     if (this.slotHint === null) return -1;
     const c = this.slotHint.get(no);
     if (c === undefined || c < 0 || c >= STICKY.length) return -1;
-    if (c >= STICKY_SAVED && !this.noPool) return -1;      // 见 `stickyAt` 那一条
+    if (c >= STICKY_SAVED && !this.noPool) return -1;      // 见 `stickyAt` 那两条
+    if (c === STICKY_FB_COLOR && this.dynStack) return -1;
     return STICKY[c];
   }
 
@@ -977,6 +995,8 @@ class FnGen {
      * 上一层只在开了 `COLORS_SCRATCH` 时才发这些颜色，而它开的时候一定也置了 `noPool` ——
      * 这一条是把那个约定钉在消费的这一头。 */
     if (c >= STICKY_SAVED && !this.noPool) return -1;
+    /* 第 10 个颜色是 x28：会动栈顶的函数里它是帧基址 `FB`，不能给值住。 */
+    if (c === STICKY_FB_COLOR && this.dynStack) return -1;
     return STICKY[c];
   }
 

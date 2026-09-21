@@ -239,18 +239,28 @@ function slotIntervals(fn, mod, openLoops, endOf) {
 }
 
 /** 有几个颜色可用。取的是**哪条腿最多**那个数：arm64 的被调用者保存通用寄存器是
- *  x19-x28，x28 被后端当帧基址用掉 ⇒ 9 个。x86_64 那条腿目前根本不消费 `regHint`，
+ *  x19-x28 ⇒ **10 个**。x86_64 那条腿目前根本不消费 `regHint`，
  *  将来消费时它只有 rbx/r12-r15 5 个 —— 那边**认前 5 个颜色就够**，
  *  认不下的照旧住栈位（`stickyAt` 里 `c >= STICKY.length` 回 -1）。
  *
  *  所以这个数不是"两条腿的交集"：颜色是**上限**不是契约，后端少认几个永远是对的。
  *
+ * **第 10 个是 x28**（2026-09-22 加的）：后端只在**会动栈顶**的函数里拿它当帧基址
+ * （`FB`，变长数组 / `alloca`），别的函数里它整个闲着 —— 白扔一个跨调用能用的寄存器。
+ * 那种函数里后端自己把这个颜色回 -1（`stickyAt` 那道闸），照旧住栈位。
+ * 为什么要的是**被调用者保存**的这一个、而不是再加几个调用者保存的：`OMNI_RA_STAT=1`
+ * 现在把通用峰值拆成"跨调用＋不跨"，`bench/go/pt.go` 的 `s_Tree__search` 是
+ * **13 ＝ 跨调用 13 ＋ 不跨 3** —— 同时活着的那 13 个全跨调用，草稿档（`COLORS_SCRATCH`）
+ * 对它们一点用都没有。量出来：那个函数帧访存 100 → 97、指令 469 → 467；
+ * 全程序（pt）指令 137212 → 137170、帧访存 18161 → 18117。
+ *
  * ⚠️ **与后端的约定**：颜色必须映到**被调用者保存**的寄存器。
  * 这一层给出的区间会**跨过调用点**（一个值定义在调用之前、用在调用之后是常事），
- * 而这一层刻意不在调用点上把它们切开 —— 那样就要发溢出/恢复，是另一格的事。
+ * 而这一层刻意不在调用点上把它们切开 —— 那样就要发溢出/恢复，是另一格的事
+ * （而按上面那个"13 全跨调用"，那一格才是这条路上真正欠的）。
  * 后端把颜色映到调用者保存的寄存器 = 一次调用之后读到垃圾。序言里存、收场里取，
  * 这笔账归后端。 */
-export const COLORS = 9;
+export const COLORS = 10;
 
 /**
  * **通用那一类有几个"只在不跨调用时能用"的颜色** —— **0，而这是量完之后的结论，不是忘了**。
@@ -596,6 +606,13 @@ export function regalloc(fn, mod) {
        `Tree__search` 那一格 72.2% 里缺的 30 个到底是整数还是浮点，决定了下一刀是
        "给通用那一类也开草稿档"还是"压活跃区间"。两类的压力也各算一条。 */
     let wantG = 0, wantF = 0, maxG = 0, maxF = 0;
+    /* **通用那一类里跨调用的 / 不跨调用的各自峰值**（2026-09-22 补）：这一条决定
+       "多给几个颜色"到底还有没有用 —— 跨调用的只能住被调用者保存的那 9 个
+       （`grant` 里那条），不跨调用的才吃得下草稿档。跨调用的峰值 > 9 ⇒ 光加颜色没用，
+       得先有"在调用点上溢出/恢复"那一格（`COLORS_SCRATCH` 第四段量到的那面墙）。 */
+    let maxGx = 0, maxGn = 0;
+    const evtGx = [];
+    const evtGn = [];
     const evt = [];
     const evtG = [];
     const evtF = [];
@@ -606,7 +623,12 @@ export function regalloc(fn, mod) {
       want++;
       evt.push([pc, 1], [last[pc] + 1, -1]);
       if (isFloatT(t)) { wantF++; evtF.push([pc, 1], [last[pc] + 1, -1]); }
-      else { wantG++; evtG.push([pc, 1], [last[pc] + 1, -1]); }
+      else {
+        wantG++;
+        evtG.push([pc, 1], [last[pc] + 1, -1]);
+        const es = crossesCall(pc, last[pc]) ? evtGx : evtGn;
+        es.push([pc, 1], [last[pc] + 1, -1]);
+      }
     }
     const peak = (es) => {
       es.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -617,6 +639,8 @@ export function regalloc(fn, mod) {
     maxLive = peak(evt);
     maxG = peak(evtG);
     maxF = peak(evtF);
+    maxGx = peak(evtGx);
+    maxGn = peak(evtGn);
     const got = cls[0].hint.size + cls[1].hint.size + gfHint.size;
     /* **没分到颜色的那些是哪几种 op**（2026-09-22 补）：这一条决定下一刀是哪一格 ——
        常量与地址计算多 ⇒ 该做**重物化**（Go 的 `rematerializeable`，溢出不如现算）；
@@ -636,7 +660,8 @@ export function regalloc(fn, mod) {
       + `分到 ${cls[0].hint.size}+${cls[1].hint.size}+${gfHint.size}=${got}`
       + `（${(100 * got / Math.max(1, want)).toFixed(1)}%），同时活着最多 ${maxLive} 个`
       + `｜通用 ${cls[0].hint.size}+${gfHint.size}/${wantG}`
-      + `（峰值 ${maxG}，颜色 ${COLORS}+${COLORS_SCRATCH}，寄到 FP 里 ${gfHint.size} 个）`
+      + `（峰值 ${maxG}＝跨调用 ${maxGx}＋不跨 ${maxGn}，颜色 ${COLORS}+${COLORS_SCRATCH}，`
+      + `寄到 FP 里 ${gfHint.size} 个）`
       + ` 浮点 ${cls[1].hint.size}/${wantF}（峰值 ${maxF}，颜色 ${COLORS_F}+${COLORS_F_SCRATCH}）`
       + (missText === '' ? '' : `｜没分到的：${missText}`) + '\n');
   }
