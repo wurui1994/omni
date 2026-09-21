@@ -211,6 +211,27 @@ export function slotDone(slot) {
 }
 
 /**
+ * 这一格要**一格一格地填**（每格填完就 rename 进来，被掐掉时下一趟接着填）时，
+ * 开工前问一句：**已经在这儿的那几格，是这一趟的吗**。
+ *
+ * 判据是 `stamp.try`（这一趟的身份）：同一个身份才算"半成品"，能当接力棒；身份变了，
+ * 这儿留着的是**上一个身份**的产物，一格都不能认。
+ *
+ * 这一条是从一个真坑里长出来的（运行时那 21 个 `.o`）：那儿只判"文件在不在"，于是改了
+ * 一行运行时源码之后旧的 `.o` 被当成接力棒原样沿用 —— 表现是链接期
+ * `符号 '_omni_js_frozen_tbl_g' 没有定义`，而更坏的一种是**答案静默地错**（新的 `.c`
+ * 配旧的运行时）。所以"接力"必须绑在身份上。
+ *
+ * @returns {boolean} 这儿留着的那几格能接着用吗（false = 调用方当成空的重填）
+ */
+export function slotRelay(slot) {
+  const p = join(slot.dir, 'stamp.try');
+  const ok = exists(p) && readText(p) === `${slot.stamp}\n`;
+  if (!ok) writeText(p, `${slot.stamp}\n`);
+  return ok;
+}
+
+/**
  * 把**隐式图**（源码里的 import 关系）摊成"谁要重编"。
  *
  * 这一格刻意不碰调度：语言前端多数时候就是照拓扑序一趟走完，用不着 ready 队列。

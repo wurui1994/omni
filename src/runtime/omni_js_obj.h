@@ -320,7 +320,6 @@ static DT omni_js_xprops_(omni_dyn o, bool make) { \
    发的那个（地址），这个运行时不搬对象也不回收，所以地址在一趟里就是同一性。
    三档是包含关系：冻住 ⊂ 封住 ⊂ 不可扩展。原始值照规范：冻住、封住都算，不可扩展。
    与 prelude 的 $FROZEN / $SEALED / $NOEXT 逐条对齐。 */ \
-static DT omni_js_frozen_tbl_, omni_js_sealed_tbl_, omni_js_noext_tbl_; \
 static bool omni_js_lockable_(omni_dyn o) { \
   return o.tag == OMNI_DYN_LIST || o.tag == OMNI_DYN_DICT || o.tag == OMNI_DYN_MAP \
     || o.tag == OMNI_DYN_SET || o.tag == OMNI_DYN_BYTES; \
@@ -328,12 +327,14 @@ static bool omni_js_lockable_(omni_dyn o) { \
 static bool omni_js_lk_has_(DT t, omni_dyn o) { \
   return t != NULL && DT##_find(t, omni_js_key(o)) >= 0; \
 } \
-static void omni_js_lk_add_(DT *t, omni_dyn o) { \
-  if (*t == NULL) *t = DT##_new(); \
-  DT##_set(*t, omni_js_key(o), omni_dyn_of_bool(true)); \
+/* 表本身住在运行时里（`void *`，类型是每份程序生成的，那一层看不见它 —— 见 omni.h
+   那段注释）：切文件时这一族模板会复制进每个 TU，而"谁被冻住了"只能有一份。 */ \
+static void omni_js_lk_add_(void **t, omni_dyn o) { \
+  if (*t == NULL) *t = (void *)DT##_new(); \
+  DT##_set((DT)*t, omni_js_key(o), omni_dyn_of_bool(true)); \
 } \
-static bool omni_js_frozen_(omni_dyn a) { return omni_js_lk_has_(omni_js_frozen_tbl_, a); } \
-static bool omni_js_noext_(omni_dyn a) { return omni_js_lk_has_(omni_js_noext_tbl_, a); } \
+static bool omni_js_frozen_(omni_dyn a) { return omni_js_lk_has_((DT)omni_js_frozen_tbl_g, a); } \
+static bool omni_js_noext_(omni_dyn a) { return omni_js_lk_has_((DT)omni_js_noext_tbl_g, a); } \
 /* lk_* 交出"拦下来了吗"，拦下时放一格**能 catch** 的 TypeError（消息与 prelude 逐字相同）。
    调用点必须写成"拦下来就 return"的形状，让那格错走出去。 */ \
 static bool omni_js_lk_ext(omni_dyn a) { \
@@ -342,7 +343,7 @@ static bool omni_js_lk_ext(omni_dyn a) { \
   return true; \
 } \
 static bool omni_js_lk_del(omni_dyn a) { \
-  if (!omni_js_lk_has_(omni_js_sealed_tbl_, a)) return false; \
+  if (!omni_js_lk_has_((DT)omni_js_sealed_tbl_g, a)) return false; \
   omni_js_type_err_c("could not delete property"); \
   return true; \
 } \
@@ -387,23 +388,23 @@ static bool omni_js_obj_locked_o_(omni_dyn o, bool need_write) { \
 static omni_dyn omni_js_obj_freeze(omni_dyn o) { \
   if (o.tag == OMNI_DYN_OBJ) { omni_js_obj_lock_o_(o, true); return o; } \
   if (omni_js_lockable_(o)) { \
-    omni_js_lk_add_(&omni_js_frozen_tbl_, o); \
-    omni_js_lk_add_(&omni_js_sealed_tbl_, o); \
-    omni_js_lk_add_(&omni_js_noext_tbl_, o); \
+    omni_js_lk_add_(&omni_js_frozen_tbl_g, o); \
+    omni_js_lk_add_(&omni_js_sealed_tbl_g, o); \
+    omni_js_lk_add_(&omni_js_noext_tbl_g, o); \
   } \
   return o; \
 } \
 static omni_dyn omni_js_obj_seal(omni_dyn o) { \
   if (o.tag == OMNI_DYN_OBJ) { omni_js_obj_lock_o_(o, false); return o; } \
   if (omni_js_lockable_(o)) { \
-    omni_js_lk_add_(&omni_js_sealed_tbl_, o); \
-    omni_js_lk_add_(&omni_js_noext_tbl_, o); \
+    omni_js_lk_add_(&omni_js_sealed_tbl_g, o); \
+    omni_js_lk_add_(&omni_js_noext_tbl_g, o); \
   } \
   return o; \
 } \
 static omni_dyn omni_js_obj_prevent_ext(omni_dyn o) { \
   if (o.tag == OMNI_DYN_OBJ) { ((omni_js_objv *)o.u.ref)->ex = false; return o; } \
-  if (omni_js_lockable_(o)) omni_js_lk_add_(&omni_js_noext_tbl_, o); \
+  if (omni_js_lockable_(o)) omni_js_lk_add_(&omni_js_noext_tbl_g, o); \
   return o; \
 } \
 static bool omni_js_obj_is_frozen(omni_dyn o) { \
@@ -412,7 +413,7 @@ static bool omni_js_obj_is_frozen(omni_dyn o) { \
 } \
 static bool omni_js_obj_is_sealed(omni_dyn o) { \
   if (o.tag == OMNI_DYN_OBJ) return omni_js_obj_locked_o_(o, false); \
-  return !omni_js_lockable_(o) || omni_js_lk_has_(omni_js_sealed_tbl_, o); \
+  return !omni_js_lockable_(o) || omni_js_lk_has_((DT)omni_js_sealed_tbl_g, o); \
 } \
 static bool omni_js_obj_is_ext(omni_dyn o) { \
   if (o.tag == OMNI_DYN_OBJ) return ((omni_js_objv *)o.u.ref)->ex; \
@@ -629,7 +630,7 @@ static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
     int64_t hi = omni_js_dec_index(key); \
     /* 封住 / 冻住的那格根本删不掉：照实交 false，一格洞也不会出现（非严格 delete 的口径），
        所以下面那句"表达不出洞"的报错不该拦在前面 */ \
-    if (omni_js_lk_has_(omni_js_sealed_tbl_, o)) return false; \
+    if (omni_js_lk_has_((DT)omni_js_sealed_tbl_g, o)) return false; \
     if (hi >= 0 && hi < ((LT)o.u.ref)->len) { \
       omni_errorf("delete of an array index would leave a hole; use splice(%lld, 1)", \
                   (long long) hi); \
@@ -637,7 +638,7 @@ static bool omni_js_obj_deletek(omni_dyn o, omni_str key) { \
     DT d = omni_js_xprops_(o, false); \
     return d == NULL ? true : DT##_remove(d, key); \
   } \
-  if (omni_js_lk_has_(omni_js_sealed_tbl_, o)) return false; \
+  if (omni_js_lk_has_((DT)omni_js_sealed_tbl_g, o)) return false; \
   return DT##_remove(omni_js_dict_of(o), key); \
 } \
 /* get / set / has / delete 的键是同一个口径：规范先 ToPropertyKey，**数按串形算**

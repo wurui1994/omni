@@ -1119,6 +1119,11 @@ extern int64_t omni_js_jobq_at_g;
    模板里强转回来 —— 类型是每份程序自己生成的，这一层看不见它。 */
 extern void *omni_js_fnproto_tbl_g;
 extern void *omni_js_xprops_tbl_g;
+/* 三档锁（Object.freeze / seal / preventExtensions）记在这三张表里。住在运行时而不是
+   模板里：切文件时模板会复制进每个 TU，"谁被冻住了"复制一份就是每个 TU 一套答案。 */
+extern void *omni_js_frozen_tbl_g;
+extern void *omni_js_sealed_tbl_g;
+extern void *omni_js_noext_tbl_g;
 extern void *omni_js_jobq_g;
 extern void *omni_js_pm_find_g;
 extern void *omni_js_pm_call_g;

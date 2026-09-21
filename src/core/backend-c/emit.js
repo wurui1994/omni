@@ -467,7 +467,13 @@ class CEmitter {
     for (const t of containers) this.containerBody(t);
     this.line();
     for (const t of containers) this.containerDefine(t);
+    /* dyn 桥与 JS 那一族模板（含三格派发器的坑）**整段归 omni_gen**：它们要的具体类型是
+     * `list<dynamic>` 与 `dict<string,dynamic>`，与用户类型无关，名字完全由内容定。
+     * 状态不在模板里（三张锁表已经搬进运行时，见 omni_js_obj.h），所以每个 TU 一份 static
+     * 副本是无害的 —— 没被引用的 static 一个字节都不生成。 */
+    this.dynAt0 = this.out.length;
     this.dynBridge(containers);
+    this.dynAt1 = this.out.length;
     // 深装箱助手（print(list<int>) 之类，ADR-0008）：先全部前置声明，再出函数体 ——
     // 嵌套容器的内外顺序不用管，交给前置声明
     const boxDeeps = this.mod.boxDeeps ?? [];
@@ -528,7 +534,9 @@ class CEmitter {
       this.closureMake(c);
       this.noteSym(c.make, cf);
     }
+    const fnMetaAt0 = this.out.length;
     const fnMetaN = this.fnMetaTable(closures);
+    this.fnMetaRange = [fnMetaAt0, this.out.length];
     /* 按源文件记一笔产出（P1）：每个函数发了多少行、多少字节。
      * `--stats` 靠它印"42 万行是哪几个源文件撑起来的" —— 单体构建里这件事从前压根看不见，
      * 而它同时也是 P2 分文件发射的分组依据（`f.file` 来自 lower.js 的 fileOfSpan）。
@@ -854,19 +862,14 @@ class CEmitter {
    */
   headers() {
     if (!this.split) throw new Error('c.headers: 只有 split 模式能切');
-    /* JS 那一族模板（`OMNI_JS_ARR` …）自带静态状态（realm / 原型那两张表），复制一份就是
-     * 每个 TU 一套对象模型。要把它们搬进 `omni_gen.c` 得先给那些宏加存储类参数
-     * （ADR-0021 的 P2a）—— 还没做，所以这一档**响着拒**，不悄悄出错。 */
-    if (this.dynSegs === true) {
-      throw new OmniError('emit c --split：这份程序用到了 JS 那一族运行时模板（dyn 桥），'
-        + '它们自带静态状态、还不能按 TU 切（ADR-0021 P2a：宏要先加存储类参数）');
-    }
     if (this.prof) throw new OmniError('emit c --split：计时表还不能按 TU 切（--profile 与 --split 先别一起用）');
     const { order, home } = this.aggHomes();
     const classes = this.mod.classes ?? [];
     const closures = this.mod.closures ?? [];
     const jsG = this.mod.jsGlobals ?? [];
     const units = new Map();
+    /* 闭包的 make 名 -> 它的家（`useFn` 记下的名字里有它，而它不在 `knownFuncs` 里）。 */
+    const makeHome = new Map();
     const unit = (nm) => {
       let u = units.get(nm);
       if (u === undefined) {
@@ -883,8 +886,7 @@ class CEmitter {
       for (const [k, v] of map) if (this.homeOfGen(v) === nm) m.set(k, v);
       return m;
     };
-    const within = (nm, fn) => {
-      const sa = this.arrs; const sv = this.vecs; const sb = this.bufs;
+    const within = (nm, fn) => {      const sa = this.arrs; const sv = this.vecs; const sb = this.bufs;
       this.arrs = pick(sa, nm); this.vecs = pick(sv, nm); this.bufs = pick(sb, nm);
       const got = fn();
       this.arrs = sa; this.vecs = sv; this.bufs = sb;
@@ -923,6 +925,14 @@ class CEmitter {
       u.types.push(`OMNI_REF_DECL(${cTypeName(t)})`);
       for (const s of this.capture(() => { this.containerBody(t); this.containerDefine(t); })) u.types.push(s);
     }
+    /* dyn 桥 + JS 那一族模板 + 三格派发器：**整段**归 omni_gen（见 emit 里那段账）。
+     * 这一段是 emit 那一趟发好的原文（三格坑已经回填过），照搬 —— 它不是"按单元切出来的
+     * 一块"，而是一个整体，而且它的内容只由"这份程序用到哪些模板"决定。 */
+    if (this.dynAt1 > this.dynAt0) {
+      for (const s of this.out.slice(this.dynAt0, this.dynAt1)) unit(GEN_UNIT).types.push(s);
+    }
+    /* `fn.name` / `fn.length` 那张按 fp 索引的表（只有 JS 前端会填）：它**引用各家的函数**，
+     * 所以不能归 gen（gen 不回头引任何单元）—— 见下面归入口那一家的地方。 */
     for (const t of this.mod.boxDeeps ?? []) {
       const u = unit(this.homeOfGen(t));
       u.types.push(`static omni_dyn omni_box_${cTypeName(t)}(${cTypeName(t)} a);`);
@@ -948,6 +958,7 @@ class CEmitter {
      * 单例闭包里那个 `static omni_fn one` 是状态，复制它 `f == f` 就假了。 */
     for (const c of closures) {
       const u = unit(modUnitName(this.fileOfMangled(c.mangled)));
+      makeHome.set(c.make, u.name);
       for (const s of this.capture(() => this.closureBody(c))) u.types.push(s);
       u.decls.push(`${this.closureProto(c)};`);
       for (const s of this.capture(() => this.closureMake(c))) u.funcs.push(s);
@@ -994,14 +1005,61 @@ class CEmitter {
     for (const [mangled, used] of this.fnUses) {
       const u = unit(modUnitName(this.fileOfMangled(mangled)));
       for (const nm of used) {
-        const h = modUnitName(this.fileOfMangled(nm));
-        if (this.fileOfMangled(nm) !== undefined && h !== u.name) u.needC.add(h);
+        /* 我们发的函数看 `f.file`，闭包的 make 看 makeHome；其余（运行时的符号）跳过 —— 
+           它们的声明在 omni.h 里，不是哪一家的接口。 */
+        const h = this.knownFuncs.has(nm) ? modUnitName(this.fileOfMangled(nm)) : makeHome.get(nm);
+        if (h !== undefined && h !== u.name) u.needC.add(h);
       }
     }
     /* `main`（或插件那格 init）与线性内存的 data 段归**入口那一家**。 */
     const entryUnit = modUnitName(this.fileOfMangled(this.mod.entry));
-    for (const s of this.out.slice(this.markC, this.out.length)) unit(entryUnit).funcs.push(s);
-    unit(entryUnit).needC.add(GEN_UNIT);
+    const eu = unit(entryUnit);
+    /* `fn.name` / `fn.length` 那张按 fp 索引的表：表里每条都拿一个函数指针，所以它**引用
+     * 各家的函数** —— 归入口那一家的 `.c`，并把表里点到的那几家加进它的 include。
+     * （从前塞进 gen.h，clang 当场骂 `use of undeclared identifier 'a_twice'`：
+     * gen 在依赖的最底层，它回头引单元就是把依赖方向弄反了。） */
+    if (Array.isArray(this.fnMetaRange) && this.fnMetaRange[1] > this.fnMetaRange[0]) {
+      const txt = this.out.slice(this.fnMetaRange[0], this.fnMetaRange[1]).join('\n');
+      eu.funcs.push(txt);
+      const mark = '(omni_fnptr)';
+      let i = txt.indexOf(mark);
+      while (i >= 0) {
+        let k = i + mark.length;
+        while (k < txt.length && /[A-Za-z0-9_]/.test(txt[k])) k++;
+        const nm = txt.slice(i + mark.length, k);
+        /* 判据是"**是我们发的函数**"（`knownFuncs`），不是"它有源文件" —— 闭包体那一族
+         * 记录上没有 `file`，它们落在 `unknown` 那一家，照样得 include 进来。 */
+        if (this.knownFuncs.has(nm)) {
+          const h = modUnitName(this.fileOfMangled(nm));
+          if (h !== entryUnit) eu.needC.add(h);
+        }
+        i = txt.indexOf(mark, k);
+      }
+    }
+    for (const s of this.out.slice(this.markC, this.out.length)) eu.funcs.push(s);
+    eu.needC.add(GEN_UNIT);
+    /* 引到别家的**模块级变量**也是一条 include 边（`g_tag` 定义在 b 那一家，a 读它）。
+     * 扫一遍正文：全局在 C 里就是 `g_<名字>`，而发射处没有一个统一的钩子能记这件事
+     * （读、写、取地址散在十几处）。判前一个字符不是标识符字符，免得 `omni_g_x` 撞进来。 */
+    const gUnit = new Map();
+    for (const g of jsG) gUnit.set(`g_${g.name}`, modUnitName(g.file));
+    for (const g of this.mod.globals ?? []) gUnit.set(`g_${g.name}`, modUnitName(g.file));
+    if (gUnit.size > 0) {
+      for (const [nm, u] of units) {
+        const txt = u.funcs.join('\n');
+        let i = txt.indexOf('g_');
+        while (i >= 0) {
+          let k = i;
+          while (k < txt.length && /[A-Za-z0-9_]/.test(txt[k])) k++;
+          const pre = i === 0 ? ' ' : txt[i - 1];
+          if (!/[A-Za-z0-9_]/.test(pre)) {
+            const h = gUnit.get(txt.slice(i, k));
+            if (h !== undefined && h !== nm && h !== GEN_UNIT) u.needC.add(h);
+          }
+          i = txt.indexOf('g_', k > i ? k : i + 1);
+        }
+      }
+    }
     /* 环：`#include` 解不了按值嵌套成环（那是 C 的语义），响着报。 */
     for (const [nm, u] of units) {
       for (const d of u.needH) {
@@ -2122,7 +2180,13 @@ class CEmitter {
       case 'NullLit': case 'NullRef': case 'NullFn': return 'NULL';
       case 'DynNull': return 'omni_dyn_null()';
       case 'NewObject': return `omni_new_C_${e.type.name}()`;
-      case 'MakeClosure': return `${e.make}(${e.args.map((x) => this.expr(x)).join(', ')})`;
+      case 'MakeClosure': {
+        /* 造闭包也是"叫到了谁"（切文件时 `<单元>.c` 要 include 那格 make 的家）：
+           量出来的 —— 漏了这一笔，a 里 `[..].map(twice)` 那句撞
+           `call to undeclared function 'omni_mk_a_twice'`。 */
+        this.useFn(e.make);
+        return `${e.make}(${e.args.map((x) => this.expr(x)).join(', ')})`;
+      }
       case 'CaptureRef': return `self->c_${e.name}`;
       case 'CallFn':
         return `omni_call_${typeKey(e.fnType)}(${[this.expr(e.callee), ...e.args.map((a) => this.expr(a))].join(', ')})`;

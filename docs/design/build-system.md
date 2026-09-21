@@ -393,3 +393,32 @@ A 的字段里按值放着 B 的结构体，那就是 `A.h` 里 `#include "B.h"`
 `headers()`，**从模型直接生成**：类型用 `sortAggregates()` 的序 + 它记下来的嵌套边、
 原型用 `proto(f)`、全局用 `cTypeName(g.type)`，每一样都已经有现成的方法。`units()` 那几段里
 只留"函数体 + 这一家的全局定义"。
+
+### JS 那一族模板怎么切：**状态外提，函数照旧复制**（2026-09-21 验过）
+
+ADR-0021 的 P2a 原来写的是"给那些宏加存储类参数"（声明进 `.h`、定义进一个 TU）。
+**不用那么做**，代价也不对：那一族宏里有几百个函数，要为它们手写一份原型清单。
+
+真正的约束只有一条：**函数可以每个 TU 一份副本，状态不行**。量出来的：
+整族展开只 3391 行，clang 编一个 TU 0.11s、产物 512 字节（没被引用的 `static` 一个字节
+都不生成）；我们自己那台 C 前端 0.65s。所以"复制函数"的代价是每 TU 一个固定小额，
+而"改一个文件只重编一个 TU"省下的是整份 700KB 的 C。
+
+于是这一刀只做状态那一格：`Object.freeze` / `seal` / `preventExtensions` 那三张表
+从模板里的 `static DT ..._tbl_` 搬成运行时的 `void *omni_js_..._tbl_g`
+（与早先 `omni_js_xprops_tbl_g` 同一手法，omni.h + omni_js.c 各一行）。JSON 那格
+`jmp_buf` 留在模板里：setjmp 与 longjmp 都在同一族内、同一个 TU 里闭合。
+
+两格归属上的硬规矩（都是撞出来的）：
+- dyn 桥 + JS 模板 + 三格派发器整段归 `omni_gen`（与用户类型无关）。
+- `fn.name`/`fn.length` 那张按 fp 索引的表**不能**归 gen —— 它引用各家的函数，
+  gen 回头引单元就把依赖方向弄反了（clang 当场 `use of undeclared identifier 'a_twice'`）。
+  它归**入口那一家**的 `.c`，表里点到谁就 include 谁。
+
+`.c` 的 include 边一共三种来源，少一种就编不过：
+叫到的函数（`useFn`，**含闭包的 make** —— `MakeClosure` 那一处从前没记）、
+引到的模块级变量（正文里扫 `g_<名字>`，发射处没有统一钩子）、
+签名与字段里出现的类型（`aggsIn`）。
+
+验过的一格：`/tmp/mjs/{a,b}.js`（import + `map(twice)` + 跨模块全局 + `Object.freeze`）
+切出 3 个 TU，各自编、链起来输出与单体腿逐字节相同。

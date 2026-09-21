@@ -608,7 +608,7 @@ static omni_dyn omni_js_obj_desc(omni_dyn o, omni_dyn k) { \
   } \
   omni_str key = omni_js_prop_k(k); \
   bool w = !omni_js_frozen_(o); \
-  bool c = !omni_js_lk_has_(omni_js_sealed_tbl_, o); \
+  bool c = !omni_js_lk_has_((DT)omni_js_sealed_tbl_g, o); \
   bool len_key = key.len == 6 && memcmp(key.p, "length", 6) == 0; \
   int64_t idx = omni_js_dec_index(key); \
   if (o.tag == OMNI_DYN_STR16) { \

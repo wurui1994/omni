@@ -64,7 +64,7 @@ import { ninjaCmd } from './build/cli.js';
 import {
   UnitIndex, moduleDir, declRead, declWrite, launcherText,
 } from './build/modules.js';
-import { cacheSlot, slotDone } from './build/modcache.js';
+import { cacheSlot, slotDone, slotRelay } from './build/modcache.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -2835,9 +2835,13 @@ function runtimeObjectsSelf(arch, os) {
   const stage = scratchDir('rt-stage-self');
   /* 交叉编译那一趟的头也从 sysroot 里取（与 `buildSelf` 同一格状态）。 */
   const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
+  /* **接力棒绑在身份上**（见 slotRelay）：同一个 stamp 才是这一趟的半成品。
+     从前这儿只判 `exists(objs[i])`，于是改了一行运行时源码之后旧的 `.o` 照旧沿用 ——
+     量出来是链接期 `符号 '_omni_js_frozen_tbl_g' 没有定义`（更坏的一种是答案静默地错）。 */
+  const relay = slotRelay(slot);
   let made = 0;
   for (let i = 0; i < srcs.length; i++) {
-    if (exists(objs[i])) continue;   // 上一趟（也许被掐掉了）留下的，接着往下编
+    if (relay && exists(objs[i])) continue;   // 上一趟（也许被掐掉了）留下的，接着往下编
     const tmp = join(stage, `${basename(srcs[i], '.c')}.o`);
     const t0 = nowMs();
     cObj(srcs[i], tmp, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs);
@@ -2852,6 +2856,7 @@ function runtimeObjectsSelf(arch, os) {
   }
   vStep(`runtime .o  ${srcs.length} objects（这一趟编了 ${made} 格）`
     + '，用我们自己那台 C 前端');
+  slotDone(slot);               // 这一格齐了：下一趟按 stamp 直接命中
   dropScratch(stage);           // 每格都 rename 走了，这儿只剩一个空目录
   return objs;
 }
