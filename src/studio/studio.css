@@ -283,9 +283,24 @@ body {
   .tree { position: fixed; top: var(--bar-h); left: 0; bottom: 0; width: 280px;
     z-index: 30; transform: translateX(-100%); transition: transform var(--dur);
     border-radius: 0; border-right: 1px solid var(--line-2);
+    box-shadow: 8px 0 24px rgba(0,0,0,.14);
   }
   .tree.open { transform: translateX(0); }
   .only-narrow { display: grid; }
   .out { grid-row: 2; }
   [data-mode="show"] .code-body { pointer-events: auto; }
+  /* 手指点的目标要够大（Apple HIG 是 44pt）—— 目录行与那几格图标一起抬。 */
+  .row { min-height: 40px; font-size: 15px; }
+  .row .caret { width: 26px; height: 26px; }
+  .row .caret svg { width: 13px; height: 13px; }
+  .icon-btn { width: 38px; height: 38px; }
+  .icon-btn.sm { width: 32px; height: 32px; }
+  .hl, #edit { font-size: 13.5px; padding: 12px 10px; }
+  /* 抽屉开着的时候点别处要能关掉它（`#tree-mask` 由 studio.js 挂）。 */
+  .mask { position: fixed; inset: var(--bar-h) 0 0 0; z-index: 29; background: rgba(0,0,0,.25); }
+}
+
+/* 谁把动画关了就别动（`prefers-reduced-motion`）。 */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
 }

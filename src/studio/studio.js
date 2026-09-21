@@ -284,7 +284,7 @@ async function openFile(path, row) {
   paint(f.text);
   $('#view').scrollTop = 0; $('#edit').scrollTop = 0;
   $('#btn-run').disabled = !RUNNABLE.has(f.lang);
-  $('#tree').classList.remove('open');
+  closeDrawer();
   setStatus(f.dirty === true ? '改过' : '', '');
   $('#stdout').textContent = ''; $('#stderr').textContent = '';
   $('#stages').textContent = '';
@@ -306,6 +306,13 @@ async function stash() {
 const RUNNABLE = new Set(['omni', 'sx', 'go', 'c', 'asy', 'js', 'lua', 'nim', 'v', 'mojo',
   'cpp', 'awk', 'scheme', 'lisp', 'basic', 'jancy', 'wat']);
 
+/** 关掉窄屏那个抽屉（连遮罩一起）。`main` 里把遮罩挂上来。 */
+let DRAWER_MASK = null;
+function closeDrawer() {
+  $('#tree').classList.remove('open');
+  if (DRAWER_MASK !== null) DRAWER_MASK.style.display = 'none';
+}
+
 function setStatus(txt, kind) {
   const b = $('#status');
   b.textContent = txt;
@@ -320,23 +327,28 @@ function setStatus(txt, kind) {
  * **改过的源码怎么跑**：body 里带 `text`，服务落一格暂存再跑（不动仓库里的文件）。
  * 没改过就只递 path —— 那时连暂存都不用。
  */
+/**
+ * 跑当前这份文件。
+ *
+ * 三条要紧的：
+ *
+ * 1. **不因为"上一趟还在跑"就不跑**。从前这儿 `if (S.busy) return` —— 实时模式下
+ *    上一趟在路上时最后那几下键就被丢了，表现成"改了没有效果"。现在照发，
+ *    靠 `S.seq` 丢掉旧回包（"只认最后一趟"本来就是这一层的规矩）。
+ * 2. **改过的源码只走一趟往返**。`body.text` 递过去，服务那侧顺手就把它写进虚拟文件系统
+ *    （`serve.js` 的 `putEdit`）—— 不必先 PUT 再 POST。实时模式下那省掉的是一半延迟。
+ * 3. 状态栏印 `ms` 与 `via`（warm/cold）—— "实时"这件事得**看得见**。
+ */
 async function run() {
-  if (S.path === null || S.busy) return;
+  if (S.path === null) return;
   const my = ++S.seq;
   S.busy = true;
   $('#btn-run').disabled = true;
   setStatus('跑…', '');
   const t0 = performance.now();
-  const dirty = $('#edit').value !== S.text;
+  const currentText = $('#edit').value;
+  const dirty = currentText !== S.text;
   try {
-    /* **跑之前先保存**：编辑过的内容落进虚拟文件系统（`PUT /api/file`），于是切走再回来还在。
-       不另写一格"save" —— "跑一趟"本身就是一次保存，用户不用操心两件事。 */
-    const currentText = $('#edit').value;
-    if (dirty && S.path !== null) {
-      try { await put('/api/file', { path: S.path, text: currentText }); }
-      catch { /* 保存失败不阻塞跑 —— 下面 body.text 那一支会递过去 */ }
-      S.text = currentText;
-    }
     const r = await post('/api/run', {
       path: S.path,
       text: dirty ? currentText : undefined,
@@ -345,11 +357,14 @@ async function run() {
     });
     /* **只认最后一趟**：实时模式下旧的回包要丢掉，不然结果会往回跳。 */
     if (my !== S.seq) return;
+    /* 递过去的那一份服务已经存住了 —— 这儿跟上，于是下一趟不必再递。 */
+    if (dirty) S.text = currentText;
     const ms = Math.round(performance.now() - t0);
     $('#stdout').textContent = r.stdout ?? '';
     $('#stderr').textContent = r.stderr ?? '';
     renderStages(r.stages, r.stderr ?? '', ms);
-    setStatus(`${r.code === 0 ? 'ok' : `exit ${r.code}`} · ${ms}ms`, r.code === 0 ? 'ok' : 'bad');
+    const via = r.via === 'warm' ? '' : ' · 冷';
+    setStatus(`${r.code === 0 ? 'ok' : `exit ${r.code}`} · ${ms}ms${via}`, r.code === 0 ? 'ok' : 'bad');
   } catch (e) {
     if (my === S.seq) { $('#stderr').textContent = String(e.message ?? e); setStatus('失败', 'bad'); }
   } finally {
@@ -517,7 +532,16 @@ async function main() {
   initTabs();
   initEditor();
   $('#btn-run').onclick = run;
-  $('#btn-tree').onclick = () => $('#tree').classList.toggle('open');
+  /* 抽屉：开的时候盖一层遮罩，点它就关（不然窄屏上只能再摸那个按钮）。 */
+  const mask = el('div', 'mask');
+  mask.style.display = 'none';
+  mask.onclick = closeDrawer;
+  document.body.append(mask);
+  DRAWER_MASK = mask;
+  $('#btn-tree').onclick = () => {
+    const open = $('#tree').classList.toggle('open');
+    mask.style.display = open ? 'block' : 'none';
+  };
   $('#filter').oninput = (e) => applyFilter(e.target.value);
   /* **新建文件**：原生 prompt 就够（modal 会带来一堆状态）。填相对仓库根的路径，
      写进虚拟文件系统（仓库里一个字节不动），树重建，打开它。 */
