@@ -310,6 +310,19 @@ let NEEDS_TYPETAG = false;
  */
 const NARROW = new Set();
 /**
+ * **这份程序里有"两边都不是字面量"的 `==` / `!=` 吗**（`collectDecls` 那一趟置上）。
+ *
+ * 它是**装箱记忆**那几格隐藏字段的闸（见 `addBoxMemoFields`）：接口值在 go 里只能与
+ * 另一格接口值或 `nil` 比，而 `nil` 那一边是字面量（那条路走 `(null rN)`，不需要记忆）——
+ * 所以"两边都不是字面量"是"可能在比两格接口"的**必要条件**。
+ * 比 int 的 `a == b` 也会让它成立（过宽，但便宜且说得清）；`i == 0` / `f != 1` 那一族不会。
+ *
+ * 为什么非要这道闸：记忆那一格字段会让**每个**实现了接口的结构体多一格，而那会把下游的
+ * 编译时间拖上去 —— 量出来的：`tests/go/cases/32-rand.go`（`math/rand` 三份桩一起编，
+ * 105KB 的 C）本来就要 200s+ 过我们自己那台 C 前端，多这一格就越过套件 300s 的线。
+ */
+let NEEDS_IBOX = false;
+/**
  * **这份程序要调度器吗**（`collectDecls` 那一趟置上）。
  *
  * 置上了，`func main()` 的体就得跑成**主 g**（`call __goRun(main)`，落到方言里是
@@ -1097,6 +1110,58 @@ function fillIfaceZero(ifn, ms, rec) {
 /** 降回去那格方法的字段名（`__as_具体类型`，见 `NARROW` 那段账）。 */
 const downName = (tn) => `__as_${String(tn).replace(/\./g, '__')}`;
 
+/** 装箱记忆那格隐藏字段的名字（`__boxof_接口名`，见 `addBoxMemoFields`）。 */
+const boxMemoName = (ifn) => `__boxof_${String(ifn).replace(/\./g, '__')}`;
+
+/** 合成一格 `(tname 名字)` 类型节点（语法树的形状：`{kind:'list', items:[atom…]}`）。 */
+const tnameNode = (n) => ({
+  kind: 'list',
+  items: [{ kind: 'atom', value: 'tname' }, { kind: 'atom', value: String(n) }],
+});
+
+/**
+ * **把装箱记忆在接收者上**（ADR-0040 的第二刀）：给每个"有指针接收者、而且实现了某个接口"的
+ * 结构体加一格隐藏字段 `__boxof_接口名`；装箱函数先看它、没有再造（见 `ensureBoxFn`）。
+ *
+ * 两件事一起收：
+ *  一、**接口之间的 `==` 变成句柄比较**，与 go 的"（动态类型, 数据）相等"对齐。不记忆的话
+ *     `__box_T__I(x)` 每调一次造一格新箱子，同一个接收者装出来的两格句柄不同，于是
+ *     `hit.Shape != light`（pt 的 `DefaultSampler.sampleLight`）恒为真 —— 答案静默地错；
+ *  二、**省一次分配**：pt 的内层循环每次相交都在 `Hit{s, t, nil}` 里装箱。
+ *
+ * **只给指针接收者那一族**（引用语义的记录）：值语义的结构体每份副本都自带一格记忆，
+ * `Shape(a)` 之后改 a 再 `Shape(a)` 会交回同一格旧快照 —— 那才是答案静默地错。
+ * 值类型的接口相等在 go 里是逐字段比，那是另一件事（没接）。
+ *
+ * 次序按名字排（图要可重现）。这一趟**不许调 `ifaceZero` / `structZero`** ——
+ * 那时字段表还没加完，造出来的记录（`NILFNS` 是记着的）会少一格，形状就对不上了。
+ */
+function addBoxMemoFields() {
+  if (!NEEDS_IBOX || IFACES.size === 0) return;
+  for (const tn of [...STRUCTS.keys()].sort()) {
+    if (!PTRRECV.has(tn)) continue;
+    const fs = STRUCTS.get(tn);
+    if (fs === undefined || fs === null) continue;
+    for (const ifn of [...IFACES.keys()].sort()) {
+      const ms = ifaceMethods(ifn);
+      if (ms.length === 0) continue;
+      if (!ms.every(([m]) => hasMethod(tn, m) || promoteVia(tn, m) !== null)) continue;
+      const nm = boxMemoName(ifn);
+      if (fs.some(([f]) => f === nm)) continue;
+      fs.push([nm, tnameNode(ifn)]);
+    }
+  }
+}
+
+/** 这格（具体类型, 接口）对有没有装箱记忆那一格字段。 */
+function boxMemoOf(tn, ifn) {
+  if (!PTRRECV.has(tn)) return null;
+  const fs = STRUCTS.get(tn);
+  if (fs === undefined || fs === null) return null;
+  const nm = boxMemoName(ifn);
+  return fs.some(([f]) => f === nm) ? nm : null;
+}
+
 /**
  * 一格接口要带哪几格"降回去"的方法（名字 -> 那个具体类型）。
  *
@@ -1209,11 +1274,24 @@ function ensureBoxFn(tn, ifn) {
   const fnFields = typeTagged()
     ? [['__type', lit(tn)], ...fields]
     : fields;
+  /* **装箱记忆**（见 `addBoxMemoFields`）：接收者上有那一格就先看它 ——
+     同一个接收者永远交回**同一格箱子**，于是接口之间的 `==` 是句柄比较（与 go 对齐），
+     而且内层循环里那次分配省掉了。 */
+  const memo = boxMemoOf(tn, ifn);
+  const mkBody = [
+    node('bind', { init: recordNew(fnFields, false) }, { name: '__b' }),
+    ...(memo === null ? [] : [fieldSet(gref(self), memo, gref('__b'))]),
+    retOf([gref('__b')]),
+  ];
+  const fnBody = memo === null ? mkBody : [
+    branchOf(
+      binOf('!=', fieldGet(gref(self), memo), lit(null), OPS, { lang: 'go' }),
+      node('region', { body: [retOf([fieldGet(gref(self), memo)])] }),
+    ),
+    ...mkBody,
+  ];
   const fn = node('func', {
-    body: [
-      node('bind', { init: recordNew(fnFields, false) }, { name: '__b' }),
-      retOf([gref('__b')]),
-    ],
+    body: fnBody,
   }, {
     params: [self],
     name: boxFnName(tn, ifn),
@@ -1280,6 +1358,15 @@ function collectDecls(x, shapesOnly) {
         const tn = namedTypeOf(items[0]);
         if (tn !== null && tn !== 'nil') NARROW.add(tn);
       }
+    }
+  }
+  /* 见 `NEEDS_IBOX` 那段账：有"两边都不是字面量"的 `==` / `!=` 才加装箱记忆那几格字段。 */
+  if (!NEEDS_IBOX && tag(x) === 'bin') {
+    const bop = leaf(kids(x)[0]);
+    if (bop === '==' || bop === '!=') {
+      const litish = (y) => tag(y) === 'num' || tag(y) === 'str'
+        || (tag(y) === 'name' && leaf(kids(y)[0]) === 'nil');
+      if (!litish(kids(x)[1]) && !litish(kids(x)[2])) NEEDS_IBOX = true;
     }
   }
   /* 见 `NEEDS_SCHED` 那段账：语法上看得见并发，`main` 就要跑成主 g。 */
@@ -4237,6 +4324,7 @@ export function goToGraph(tree, opts) {
   IFPEND.clear();
   IFLENT.clear();
   NARROW.clear();
+  NEEDS_IBOX = false;
   TSW_N = 0;
   SPREAD_N = 0;
   NEEDS_TYPETAG = false;
@@ -4302,6 +4390,9 @@ export function goToGraph(tree, opts) {
   for (const n of PTRED) {
     if (STRUCTS.get(n) !== undefined && STRUCTS.get(n) !== null) PTRRECV.add(n);
   }
+  /* 装箱记忆那几格隐藏字段（见 `addBoxMemoFields`）：要在**落任何节点之前**加完 ——
+     结构体字面量与零值都按 `STRUCTS` 的字段表铺。 */
+  addBoxMemoFields();
   FN_N = 0;                                   // 匿名 func 的编号按文件重来（图要可重现）
   const items = kids(tree).slice(1);          // 第一格是包名
   const mapped = items.map(toNode).flat();

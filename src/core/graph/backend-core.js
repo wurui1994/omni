@@ -577,6 +577,19 @@ function binText(nm, args, env, ctx, uns) {
       }
     }
   }
+  /* **两格引用比身份**（`(bin "==" a b)` 也就是 asy 的 `alias`，方言早就有 —— 见
+     `sexpr/lower.js` 的 `refid` 那段注释）：go 的接口之间 `==` 落在这儿
+     （`hit.Shape != light`，pt 的 `DefaultSampler.sampleLight`）。
+     判据收得紧：**两边同一格类**（引用语义的记录）。值语义的结构体不接 —— `==` 那一条
+     对它是"按值比整格"，C 那条腿上编不过，而 go 对值类型的接口相等是逐字段比，
+     那是另一件事（要接再单开一刀）。数组也不接：go 里切片压根不可比。 */
+  if ((nm === '=' || nm === '!=') && args.length === 2) {
+    const at = typeOf(args[0], env, ctx);
+    const bt = typeOf(args[1], env, ctx);
+    if (at === bt && isPtrRec(at, ctx)) {
+      return `(bin "${BINOP[nm]}" ${aggValText(args[0], env, ctx)} ${aggValText(args[1], env, ctx)})`;
+    }
+  }
   /* **dyn 在这儿拆箱**（拆在用它的地方，见 dyn 那一段）：`seenType` 按键查出箱子里装的是
      什么，`one` 落文本时套一层 `(asint …)` 那一族。查不出来就报缺口（`unboxTo` 那一句）。 */
   const ts = args.map((a) => seenType(a, env, ctx));
