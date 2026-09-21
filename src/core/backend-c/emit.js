@@ -903,9 +903,49 @@ class CEmitter {
     const H = [`#ifndef ${gu}`, `#define ${gu}`, '', RUNTIME_INCLUDE, ''];
     for (const f of [...froms].sort()) H.push(`#include "${f}.h"`);
     if (froms.size > 0) H.push('');
-    for (const t of containers) for (const l of dg(cTypeName(t), `OMNI_REF_DECL(${cTypeName(t)})`)) H.push(l);
-    for (const c of classes) for (const l of dg(`ct_${c.name}`, `OMNI_REF_DECL(ct_${c.name})`)) H.push(l);
-    for (const l of this.vecLines().concat(this.bufLines())) if (l !== '') H.push(l);
+    /* **指针 typedef 要发全**（不只本家定义的那些）：`.h` 之间会**互相包含**
+     * （库调生成物、生成物用库的类型），include guard 让第二次包含变成空 —— 那时对方的
+     * 类型还没展开完。量出来的样子是 `gen_….h:312: ';' expected (got 's_asy__new_transform')`
+     * （`ct_transform` 在 asy_builtins.h 里，可那一份正卡在"include 我"这一行上）。
+     * `typedef struct X_s *X;` 不需要完整定义，谁都能发，各带一格 guard 就不会重复。 */
+    const refs = new Set();
+    for (const t of containers) refs.add(cTypeName(t));
+    for (const c of classes) refs.add(`ct_${c.name}`);
+    {
+      const ts = new Set();
+      for (const f of this.mod.funcs) {
+        this.aggsIn(f.ret, ts);
+        for (const pp of f.params) this.aggsIn(pp.type, ts);
+      }
+      for (const g of this.mod.globals ?? []) this.aggsIn(g.type, ts);
+      for (const a of aggs) for (const d of this.aggDeps(a)) ts.add(d);
+      for (const c of classes) for (const f of c.fields) this.aggsIn(f.type, ts);
+      for (const k of ts) if (k.startsWith('class:')) refs.add(`ct_${k.slice(6)}`);
+    }
+    for (const nm of [...refs].sort()) for (const l of dg(nm, `OMNI_REF_DECL(${nm})`)) H.push(l);
+    /* 向量 / 缓冲那一族也各带一格 guard：两家都用 `pair` 时两份 `.h` 里都有那一行
+       typedef 与它的 inline 族，而 C 里重复 typedef / 重复定义都不行。量出来的样子是
+       `typedef 'omni_vec_real_2' redefined with a different type`。 */
+    const dgs = (nm, lines) => {
+      if (lines.length === 0) return;
+      H.push(`#ifndef OMNI_D_${nm}`, `#define OMNI_D_${nm}`);
+      for (const l of lines) H.push(l);
+      H.push('#endif');
+    };
+    for (const [k, t] of this.vecs) {
+      const sv = this.vecs;
+      this.vecs = new Map([[k, t]]);
+      const ls = this.vecLines().filter((l) => l !== '');
+      this.vecs = sv;
+      dgs(cTypeName(t), ls);
+    }
+    for (const [k, t] of this.bufs) {
+      const sb = this.bufs;
+      this.bufs = new Map([[k, t]]);
+      const ls = this.bufLines().filter((l) => l !== '');
+      this.bufs = sb;
+      dgs(cTypeName(t), ls);
+    }
     for (const a of aggs) {
       for (const l of this.capture(() => (a.k === 'struct' ? this.structBody(a.t) : this.enumBody(a.t)))) H.push(l);
     }
