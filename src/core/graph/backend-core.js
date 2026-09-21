@@ -1460,7 +1460,14 @@ function stmtIn(x, env, ctx) {
       const initText = expr(init, env, ctx);
       return [bindLine(nm, t, initText, env, ctx)];
     }
-    case 'set': return [`(set ${x.attrs.name} ${expr(x.ins.value, env, ctx)})`];
+    /* **右边是一格聚合**（`n, f = n.Min(f), n.Max(f)` 落出来的 `n = __asn10_0`）：
+     * 走 `aggValText` 而不是 `expr` —— 后者对"把记录整格当值用"一律报缺口，而那条规矩
+     * 在**赋值**这一处是过严的：方言的 `(set x (var y))` 在两档上都已经是 go 要的语义，
+     * 四条腿全量过（`tests/sexpr/cases/60-setagg.sx`）：
+     *   - 值语义的结构体：**整格拷**（赋完再改源值，目标那一格不跟着变）—— go 的值赋值；
+     *   - 引用语义的类：**拷句柄**（别名）—— go 的 `p = q`（`*T`）。
+     * 所以这儿不必物化、不必逐字段抄，一句 `set` 就对。 */
+    case 'set': return [`(set ${x.attrs.name} ${aggValText(x.ins.value, env, ctx)})`];
     case 'field-set': {
       const host = objText(x.ins.obj, env, ctx);
       /* **写进去的是一格聚合字面量**（`m.Triangles = make([]Tri, 2)` / `m.In = &Inner{…}`）：

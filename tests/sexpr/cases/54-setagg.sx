@@ -1,0 +1,34 @@
+;; **赋值（`set`）对聚合类型**：把 `(set x (var y))` 在两档上都量一遍。
+;; go 的 `n, f = n.Min(f), n.Max(f)` 落出来就是这个形状 —— pt 整包卡在这一句
+;; （backend-core 的 `case 'set'` 从前过 `expr`，一见记录就报"整格当值用"）。
+;;
+;; 两种形状各一组（全量出来了）：
+;;   struct（值语义）：赋完再改源值，目标不许跟着变（四条腿全 "1 / 77"）。
+;;   class（引用语义）：赋完是别名（四条腿全 "77 / 77"）。
+(module
+  (struct V (x real) (y real))
+  (class  C (x real))
+  ;; 值语义
+  (fn ts () void
+    (let a V (new V))
+    (let b V (new V))
+    (fldset (var a) x (real 1.0))
+    (fldset (var b) x (real 9.0))
+    (set b (var a))
+    (fldset (var a) x (real 77.0))
+    (print (fld (var b) x))
+    (print (fld (var a) x)))
+  ;; 引用语义
+  (fn tc () void
+    (let a C (cnew C))
+    (let b C (cnew C))
+    (fldset (var a) x (real 1.0))
+    (fldset (var b) x (real 9.0))
+    (set b (var a))
+    (fldset (var a) x (real 77.0))
+    (print (fld (var b) x))
+    (print (fld (var a) x)))
+  (fn main () void
+    (expr (call ts))
+    (expr (call tc)))
+  (main (expr (call main))))
