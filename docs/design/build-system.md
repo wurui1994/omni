@@ -415,6 +415,42 @@ C 腿改成走 `asy.unitTexts`（每个源文件一段 `.sx`），与 JS 腿共�
 `run.js` 三层早就在），而是**上游的工件粒度**——只要 C 腿收到的还是"一棵合并过的树"，
 无论谁来调度都得把整棵树重做一遍。
 
+### 方言的模块化是**跨文件**的（定案）—— 合并文本那条路作废
+
+"asy 前端交一份 1.65MB 的合并文本、里头用 `(unit …)` 标记假装分开"是错的实现。
+**方言本身已经是模块化的**：`asy.unitTexts` 每个源文件一段，JS 腿早就按它一份模块一份
+`.js`。C 腿要走**同一条**路，一个字都不用新造：
+
+    const cs = srcStamp();
+    const r = cap('asy.unitTexts')(path, asyModsSkip(dir, cs, 'c'));  // 'c' = 判 .c 在不在
+    for (const u of r.units) {                     // r.reused 那几份**连正文都不降**
+      const mod  = cap('sx.textToMod')(u.name, u.text, `omni_init_${sym(u.name)}`);
+      const cTxt = cap('cgen.stats')(mod, { own: [u.key], extern: true }).text;
+      writeText(join(dir, `${u.name}.c`), cTxt);
+      declWrite(dir, u.name, u.sec, u.iface);      // 它的接口（别家降级时只吃这个）
+      unitIndex(dir).set(u.name, row, cs);
+    }
+    // 每份 .c 各自走已落地的 .o 暖存；入口那一份的 main 按序调各家 omni_init_*
+    // （形状与 JS 腿的 launcherText 一一对应）
+
+要复用的零件与它们现在的位置：
+
+- `asyModsSkip(dir, cs)`（cli.js:1939）—— 把判后缀那一格参数化（`.js` -> `.c`）就能共用。
+  它答的是"这一份产物齐不齐 + 它要带的那几份齐不齐"，齐了前端连源码都不读（`iface`）。
+- `cap('sx.textToMod')(name, text, entry)`（JS 腿 cli.js:2165 用的就是它）—— 一段方言
+  独立降成 OIR。别家的声明来自 `.d.sx`（`declRead` + sigOnly），这一格 JS 腿已经在跑。
+- `own` / `extern`（backend-c/emit.js 的 `emitsSym`）—— "只发这一家的定义，别家只留原型"。
+  这正是分离编译要的语义，早就为插件那条路做好了。
+- 每份 `.c` 的 `.o` 暖存、链接那一步（`buildSelfModules` 里那两段）照用。
+
+判据（三条，缺一条都说明还没真独立）：
+1. 只改入口那一份 -> `-v` 里**没有** `asy lexer asy_builtins`、没有 `asy front end` 的
+   整树时间；`asy units 新编 1 份、复用 N 份`。
+2. 同一份源文件在两个程序里出来的 `.c` 逐字节相同，`.o` 全命中。
+3. 输出与单体那条路逐字节相同（`--one-file` 是对照腿）。
+
+`(unit "…")` 那格标记到那时删掉 —— 它只是"合并之后再找回来"的补丁。
+
 
 ### §12 第 1 步已落地的那一半，与 emit.js 还欠的那一半（2026-09-21）
 
