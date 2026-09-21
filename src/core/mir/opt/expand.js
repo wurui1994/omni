@@ -65,7 +65,8 @@
  * 在查清之前这一格**只发诊断、不改图**（已 cmp 验证产物逐字节不变）。
  */
 
-import { OP, REF_BIAS, REF_NONE, memArgSize, memKindNo, memOff, MSTORE_BYTES, MSTORE_KINDS, MLOAD_KINDS } from '../ir.js';
+import { OP, OP_NAMES, REF_BIAS, REF_NONE, memArgSize, memKindNo, memOff, MSTORE_BYTES,
+  MSTORE_KINDS, MLOAD_KINDS } from '../ir.js';
 import { addrOf, mayWriteMemory } from './memory.js';
 import { registerPass } from './pass.js';
 
@@ -267,6 +268,10 @@ export function expandCalls(fn, mod) {
     let src = REF_NONE;
     let lastStore = -1;
     let bad = false;
+    /* **说清是哪一条不成立**（`OMNI_EXPAND_STAT=1`）：这七个出口从前共用一句
+       "不是逐格照抄"，于是下一步该往哪儿看全靠猜。判据是七条，报出来就得是七种。 */
+    let why1 = '';
+    const bad1 = (w2) => { bad = true; why1 = w2; };
     for (let pc = 0; pc < amPc && !bad; pc++) {
       if (fn.op[pc] !== OP.MSTORE) continue;
       const a = addrOf(fn, mod, fn.a[pc]);
@@ -274,22 +279,25 @@ export function expandCalls(fn, mod) {
       const sk = memKindNo(fn.aux[pc]);
       const off = a.off + memOff(fn.aux[pc]);
       const w = MSTORE_BYTES[sk];
-      if (!(off >= 0 && off + w <= size)) { bad = true; break; }
+      if (!(off >= 0 && off + w <= size)) { bad1(`%${pc} 写的 ${off}|${off + w} 出了 0|${size}`); break; }
       /* 值必须是「从 src 的同一偏移读来的」 */
       const v = fn.b[pc];
-      if (v === REF_NONE || v < REF_BIAS) { bad = true; break; }
+      if (v === REF_NONE || v < REF_BIAS) { bad1(`%${pc} 写进去的是常量/空`); break; }
       const vp = v - REF_BIAS;
-      if (fn.op[vp] !== OP.MLOAD) { bad = true; break; }
+      if (fn.op[vp] !== OP.MLOAD) { bad1(`%${pc} 写进去的不是 MLOAD（是 ${OP_NAMES[fn.op[vp]]}）`); break; }
       const la = addrOf(fn, mod, fn.a[vp]);
       const lk = memKindNo(fn.aux[vp]);
-      if (la.off + memOff(fn.aux[vp]) !== off) { bad = true; break; }
-      if (!pairOk(lk, sk)) { bad = true; break; }
+      if (la.off + memOff(fn.aux[vp]) !== off) {
+        bad1(`%${pc} 读的偏移 ${la.off + memOff(fn.aux[vp])} 与写的 ${off} 不同`); break;
+      }
+      if (!pairOk(lk, sk)) { bad1(`%${pc} 读写的宽度/符号不成对`); break; }
       if (src === REF_NONE) src = la.base;
-      else if (src !== la.base) { bad = true; break; }
+      else if (src !== la.base) { bad1(`%${pc} 读的是另一个源头`); break; }
       for (let q = 0; q < w; q++) cover[off + q] = 1;
       if (pc > lastStore) lastStore = pc;
     }
-    if (bad || src === REF_NONE || lastStore < 0) { no(amPc, '不是逐格照抄'); continue; }
+    if (bad) { no(amPc, `不是逐格照抄（${why1}）`); continue; }
+    if (src === REF_NONE || lastStore < 0) { no(amPc, '这一块在调用前没有任何照抄的写'); continue; }
     let full = true;
     for (let q = 0; q < size; q++) if (cover[q] === 0) { full = false; break; }
     if (!full) { no(amPc, '拷贝没盖满'); continue; }
