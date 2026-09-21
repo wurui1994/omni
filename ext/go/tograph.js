@@ -15,7 +15,7 @@ import {
 } from '../../src/core/graph/graph.js';
 import {
   tag, kids, leaf, part, partKids, threePart, elseOf,
-  ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, counted,
+  ops, convs, convOf, binOf, retOf, branchOf, loopExit, lazyOr, lazyAnd, counted,
   destructure, recordNew, fieldGet, fieldSet, listNew, indexGet, indexSet, sliceOf, deferNow,
   mapNew, mapGet, mapSet, mapHas, mapNames, mapForIn, isList, assertOf,
 } from '../../src/core/graph/fromtree.js';
@@ -980,8 +980,13 @@ const tnOfExpr = (x) => namedTypeOf(tyOfExpr(x));
 function ifaceZero(ifn) {
   const ms = ifaceMethods(ifn);
   if (ms.length === 0) return null;
-  /* 先把记录建出来（字段暂时是 null），下面逐格填 —— "返回自己"的 `rzero` 要指回它。 */
-  const rec = recordNew(ms.map(([m]) => [m, lit(null)]), false);
+  /* 先把记录建出来（字段暂时是 null），下面逐格填 —— "返回自己"的 `rzero` 要指回它。
+   * **带 `__type`**：类型 switch 比的就是这格字段。零值记录的 `__type` 是 `""` —— 哪一支
+   * 都不命中，与 go 的"nil 接口不匹配任何 case"完全对齐。而装箱函数那一份带的是
+   * 具体类型名 —— 靠 `typeTagged()` 那一格保证。 */
+  const fieldPairs = typeTagged() ? [['__type', lit('')], ...ms.map(([m]) => [m, lit(null)])]
+    : ms.map(([m]) => [m, lit(null)]);
+  const rec = recordNew(fieldPairs, false);
   for (let k = 0; k < ms.length; k++) {
     const [m, sig] = ms[k];
     const ps = ifaceParams(sig);
@@ -1007,7 +1012,8 @@ function ifaceZero(ifn) {
     }
     const body = [assertOf(lit(false), lit(`在一格 nil 的 ${ifn} 上调了 ${m}`))];
     if (rv !== null) body.push(retOf([rv]));
-    rec.ins.fields[k] = node('func', { body }, {
+    const fi = typeTagged() ? k + 1 : k;           /* 偏移过 `__type` 那一格 */
+    rec.ins.fields[fi] = node('func', { body }, {
       params: ps.map((p) => p.nm),
       name: `__nil_${ifn}__${m}`,
       ...(pz.length > 0 ? { pzero: pz } : {}),
@@ -1093,10 +1099,15 @@ function ensureBoxFn(tn, ifn) {
      而后端把引用语义的记录发成 `(ptr rN)`，于是 `[]Shape` 落不下去。
      体分两句（先绑一格局部量再交回去）：`record-new` 在**表达式位置**上落不下去
      （见 `backend-core.js` 的 `bindRecord` 那段账），`ret (record-new …)` 会当场报缺口，
-     而那一报是在空跑那一趟里被吞掉的 —— 症状是调用点把它当 int。 */
+     而那一报是在空跑那一趟里被吞掉的 —— 症状是调用点把它当 int。
+     **带 `__type`**（有类型 switch 的程序）：`tn` 就是具体类型名。与零值记录那格 `""` 配套，
+     类型 switch 比 `__type` 就能分出来。 */
+  const fnFields = typeTagged()
+    ? [['__type', lit(tn)], ...fields]
+    : fields;
   const fn = node('func', {
     body: [
-      node('bind', { init: recordNew(fields, false) }, { name: '__b' }),
+      node('bind', { init: recordNew(fnFields, false) }, { name: '__b' }),
       retOf([gref('__b')]),
     ],
   }, {
@@ -1610,13 +1621,14 @@ function fieldValue(ft, v, ast) {
   const v2 = (n === 'float32' || n === 'float64') ? convOf('float', v) : v;
   const ifn = ifaceNameOf(ft);
   if (ifn === null) return v2;
-  /* **接口字段写 `nil`**（`Hit{0.0, nil}`）：落成那格接口的**零值记录**，不是 `lit(null)`。
-     落 null 的代价是**同一个 go 结构体算出两格形状**：声明那一侧的 `Hit.Shape` 是接口记录、
-     字面量那一侧是 int，于是 `要返回 r9，给的是 r16`（量出来的，bench/go/pt.go）。 */
-  if (isNilNode(v2)) {
-    const z = ifaceZero(ifn);
-    if (z !== null) return z;
-  }
+  /* **接口位置上写 `nil`**（`f(nil)`）：值就落 `lit(null)`。
+     从前这儿落"那格接口的零值记录"，理由是形状 —— 而那条理由 2026-09-21 之后作废了
+     （`record-new.fzero` / `bind.tzero` / `func.pzero` 那一刀：值是 null、类型从声明来）。
+     再落零值记录的代价是**答案静默地错**：那格记录不是 null，于是
+     `switch s.(type) { case nil: }` 与 `s == nil` 在 `f(nil)` 这一趟上全不成立
+     （量出来的：`nilKind(nil)` 印 0，go 印 100）。结构体字面量那一侧走的是
+     `nilFieldZero` + `lit(null)`，与这儿同一条规矩。 */
+  if (isNilNode(v2)) return v2;
   return ast === undefined ? v2 : boxInto(ifn, tnOfExpr(ast), v2);
 }
 
@@ -3475,30 +3487,61 @@ function toNode(x) {
       const arms = [];
       for (const c of cs) {
         if (tag(c) === 'default') { dflt = armOf(c); continue; }
-        /* 每支的 items 是类型名（tname / name），取出来做 __goTypeIs 判断 */
+        /* 每支的 items 是类型名，取出来做 `__goTypeIs` 判断。
+         *
+         * **走 `namedTypeOf` 而不是只认 `tname`/`name`**：`case *B:` 的 item 是
+         * `(ptr (tname B))`，tag 是 `ptr` —— 只认那两种的话它被 `filter(Boolean)` 丢掉，
+         * 于是 `typeNames.length === 0`，条件落成 `lit(true)`：**这一支永远命中**。
+         * 那是"答案静默地错"最坏的形状（图落得出来、跑得动、数字是错的）：
+         * pt 的 `switch shape.(type) { case *Volume, *SDFShape, *SphericalHarmonic: … }`
+         * 三支全是指针类型，于是 `inside` 永远走错那一边。量出来：一格 28 印成 128。
+         *
+         * `namedTypeOf` 剥掉 `ptr`、顺手把包限定收成平名字 —— 与 `__goTypeIs` 比的那个
+         * `__type` 标签（`&A{}` 的标签是 `"A"`）正好对得上。 */
         const items = partKids(c, 'items');
-        const typeNames = items.map((it) => {
-          if (tag(it) === 'tname' || tag(it) === 'name') return leaf(kids(it)[0]);
-          return null;
-        }).filter(Boolean);
+        const typeNames = [];
+        let sawNil = false;
+        let unnamed = false;
+        for (const it of items) {
+          /* `case nil:` —— 在 go 里它比的是"这格接口本身是不是 nil"，不是某个类型。 */
+          if ((tag(it) === 'tname' || tag(it) === 'name') && leaf(kids(it)[0]) === 'nil') {
+            sawNil = true;
+            continue;
+          }
+          const tn = namedTypeOf(it);
+          if (tn === null) { unnamed = true; continue; }
+          typeNames.push(tn);
+        }
+        /* **说不出名字的那一支不许当 `true`**（切片 / map / 函数类型、泛型实例化…）。
+           从前那样落，整支就永远命中 —— 宁可有名有姓地停下。 */
+        if (unnamed) {
+          throw new Error('go->graph: 类型 switch 里有一支的类型说不出名字'
+            + '（切片 / map / 函数 / 泛型那几种）—— 落成"永远命中"会把答案静默地弄错');
+        }
+        const subjRef = () => (varName !== null ? node('ref', {}, { name: varName }) : subjExpr);
+        /**
+         * 一支的类型判断：**直接比 `__type` 字段**，不调运行期函数。
+         *
+         * 从前落 `__goTypeIs(v, "T")`，而那个名字只在 `ext/go/go-rt.js`（js 那条腿的
+         * 运行时）里有定义 —— core 那条腿上它是个**没人定义的名字**，返回类型推成 int，
+         * 于是报"条件不是 bool"。比字段这一招三条腿都成立、不欠运行时、而且更快：
+         * `NEEDS_TYPETAG` 正是"整棵树里有类型 switch"，所以那一格 `__type` 一定带着
+         * （见 `typeTagged()`）。
+         *
+         * **nil 要先挡**：go 里 `case T:` 在接口是 nil 时不命中，而在 nil 上取字段会当场
+         * 空引用。所以落 `v != nil && v.__type == "T"`。
+         */
+        const typeIs = (tn) => lazyAnd(
+          binOf('!=', subjRef(), lit(null), OPS, { lang: 'go' }),
+          binOf('==', fieldGet(subjRef(), '__type'), lit(tn), OPS, { lang: 'go' }),
+        );
+        const nilIs = () => binOf('==', subjRef(), lit(null), OPS, { lang: 'go' });
+        const checks = [...(sawNil ? [nilIs()] : []), ...typeNames.map(typeIs)];
         let cond;
-        if (typeNames.length === 0) {
-          cond = lit(true);
-        } else if (typeNames.length === 1) {
-          cond = node('call', {
-            fn: node('ref', {}, { name: '__goTypeIs' }),
-            args: [varName !== null ? node('ref', {}, { name: varName }) : subjExpr, lit(typeNames[0])],
-          });
+        if (checks.length === 0) {
+          cond = lit(true);                       /* `case:` 空的那一支（go 里写不出来） */
         } else {
-          /* 多类型 case：`case Circle, Rect:` → typeIs(v,"Circle") || typeIs(v,"Rect") */
-          const ref = varName !== null ? node('ref', {}, { name: varName }) : subjExpr;
-          cond = typeNames.reduce((acc, tn, i) => {
-            const check = node('call', {
-              fn: node('ref', {}, { name: '__goTypeIs' }),
-              args: [ref, lit(tn)],
-            });
-            return i === 0 ? check : lazyOr(acc, check);
-          }, null);
+          cond = checks.reduce((acc, ch, i) => (i === 0 ? ch : lazyOr(acc, ch)), null);
         }
         arms.push([cond, armOf(c)]);
       }

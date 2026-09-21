@@ -1005,6 +1005,20 @@ function argText(fname, i, a, env, ctx) {
     if (ctx.collect !== true || ahad === undefined || ahad === 'int') ctx.args.set(akey, at);
     return `(var ${tn})`;
   }
+  /* **一格 `null` 当实参**：它对"这格形参是什么类型"什么都没说 —— null 在方言里对记录、
+     列表、字典都成立，而 `typeOf` 对它只能答 `int`。既记进 `ctx.args` 又拿它去比的代价是
+     把"一处 null、一处记录"报成"两处的类型不一样"（量出来的：go 的 `f(nil)` 与 `f(s)`
+     两个调用点，`'nilKind' 第 1 格实参…（r2 与 int）`）。
+     类型从**声明**（`pzero`，与 `resolveParamTypes` 第一条同一份）来；是引用类型就落
+     `(null rN)`，不然照常（`(int 0)`）—— 后者那一格方言本来就把 null 当 0。 */
+  if (isLitNull(a)) {
+    const pz = (ctx.fnPzero ?? new Map()).get(fname);
+    const z = Array.isArray(pz) ? pz[i] : undefined;
+    let pt = (z === null || z === undefined) ? null : declTypeOfNode(z, env, ctx);
+    if (pt === null || pt === 'int') pt = ctx.args.get(`${fname}#${i}`) ?? null;
+    if (pt !== null && (isPtrRec(pt, ctx) || elemType(pt) !== null)) return `(null ${pt})`;
+    return expr(a, env, ctx);
+  }
   const t = typeOf(a, env, ctx);
   const key = `${fname}#${i}`;
   const had = ctx.args.get(key);
