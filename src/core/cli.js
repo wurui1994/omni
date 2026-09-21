@@ -2998,12 +2998,34 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
     ...(LIBC === null ? [] : ['--libc', LIBC]),
   ];
   const t0 = nowMs();
-  const obj = `${cPath}.o`;
-  /* `--profile cc` 那一趟：**生成的这一份**要插桩（第一百五十片第三格）。运行时那二十份
-   * 走 `runtimeObjectsSelf`，一份都不插 —— 收集器（`omni_prof.c`）也在里头，插它就是栈爆。 */
-  cObj(cPath, obj, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs,
-    PROF !== null && PROF.mode === 'cc');
-  vStep(`c obj（我们自己那台 C 前端）  ${cPath} -> ${obj}  ${fileSize(obj)} bytes`);
+  /* 生成的那一份 C 的 `.o` **进暖存**（`modules/c/<程序名>-<8 位>.o`）。
+   *
+   * 键就是这一份 `.o` 的全部输入：生成的 C 正文、目标（arch/os/格式）、sysroot/libc 那几格、
+   * 以及"这一趟插不插桩"。同一份程序连跑两趟，第二趟一格都不用编 —— 量出来这一步是
+   * 581ms~1166ms（696KB 的 C），从前每趟都白编一次。
+   *
+   * 先编进暂存再 rename 进暖存：两个进程同时编同一份时，读到的不会是半个文件。
+   *
+   * 这是"C 也要标准模块化"的第一步：等发射按单元切开（每个单元一份 `.c` + 自动生成的 `.h`），
+   * 每一份各自走这同一格暖存，改一个单元就只重编它那一格。现在还是**整程序一份**。 */
+  const objKey = hash16([cText, arch, os, fmt, LIBC === null ? '' : LIBC,
+    CROSS === null ? '' : CROSS.sysroot, extern === true ? 'x' : '',
+    plugin === undefined || plugin === null ? '' : 'p',
+    PROF !== null && PROF.mode === 'cc' ? 'prof' : ''].join('|'));
+  const objDir = join(cacheRoot(), 'modules', 'c');
+  const obj = join(objDir, `${progName(outPath)}-${objKey.slice(0, 8)}.o`);
+  if (exists(obj)) {
+    vStep(`c obj 命中暖存  ${obj}  ${fileSize(obj)} bytes`);
+  } else {
+    /* `--profile cc` 那一趟：**生成的这一份**要插桩（第一百五十片第三格）。运行时那二十份
+     * 走 `runtimeObjectsSelf`，一份都不插 —— 收集器（`omni_prof.c`）也在里头，插它就是栈爆。 */
+    const tmp = `${cPath}.o`;
+    cObj(cPath, tmp, arch, [RUNTIME_DIR], [], 'elf', os, sysIncs,
+      PROF !== null && PROF.mode === 'cc');
+    mkdirAll(objDir);
+    rename(tmp, obj);
+    vStep(`c obj（我们自己那台 C 前端）  ${cPath} -> ${obj}  ${fileSize(obj)} bytes`);
+  }
   /* 插件与可执行文件在链接这一步只差三样：`--shared`、**不链运行时的 .o**（状态住在核心里，
    * ADR-0021 的 S1）、以及**那个库自己的名字**（Mach-O 是 `--install-name` 写 `LC_ID_DYLIB`，
    * 不给这一格 macho_exe 会喊「造 dylib 要知道输出的文件名」；ELF 是 `--soname` 写
