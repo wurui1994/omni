@@ -1716,7 +1716,7 @@ function exeCacheDir() {
      `c link -> …/asy-exe/e-….bin`，读的人第一反应是"路径串了"。 */
   return join(cacheRoot(), 'run-exe');
 }
-function exeCacheStamp(cc, perMod) {
+function exeCacheStamp(cc, mode) {
   // 编译器与**它的 flags** 都在印记里：`OMNI_OPT=2` 与默认 -O0 是两个可执行文件。
   // **`OMNI_PROFILE` 也得在**：它改的是生成的 C（插桩），不是 flags；不进印记的话
   // 开过一次 profile 之后，后面不带开关的运行会命中缓存、复用那份**带插桩**的二进制，
@@ -1726,12 +1726,12 @@ function exeCacheStamp(cc, perMod) {
   // 让「同一份二进制，采一趟、再不采一趟」白编两遍。
   const profEnv = env('OMNI_PROFILE') === '1' ? '|prof' : '';
   const profFlag = PROF !== null && PROF.mode !== 'sample' ? `|prof:${PROF.mode}` : '';
-  /* **按模块 / 单体也得在印记里**：那是两份不同的二进制（`--one-file` 拿到按模块那份
-     缓存的话，这个开关在外面看就是"没生效"）。
+  /* **哪条路出来的二进制也得在印记里**（`one` 单体 / `mod` 一棵树切开 / `cmods` 每模块
+     独立）：那是几份不同的二进制，串了在外面看就是"这个开关没生效"。
      这一格是**参数**不是全局：`buildSelfModules` 链接时走 `subMain(['c','link',…])`，
      内层 main 会把 `PER_MODULE_C` 重算成 false —— 于是 Put 时读到的是"单体"，
      清单里写下 `one`、下一趟按 `mod` 查，**永远不命中**（量出来就是这个）。 */
-  const modeC = perMod === true ? '|mod' : '|one';
+  const modeC = `|${mode}`;
   return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}${profEnv}${profFlag}${modeC}`;
 }
 /** 这一趟由谁编（印记里那格）。**Get 与 Put 必须同口径** —— `buildSelf` 交的是 `'self'`，
@@ -1740,7 +1740,7 @@ function exeCC() {
   return selfCC() ? 'self' : findCC();
 }
 
-function exeCacheGet(path, cc, perMod) {
+function exeCacheGet(path, cc, mode) {
   if (env('OMNI_NO_EXECACHE') === '1') return null;
   const key = `e-${hash16(path)}`;
   const dep = join(exeCacheDir(), `${key}.dep`);
@@ -1753,11 +1753,11 @@ function exeCacheGet(path, cc, perMod) {
     return null;
   }
   const lines = readText(dep).split('\n');
-  if (lines[0] !== exeCacheStamp(cc, perMod)) {
+  if (lines[0] !== exeCacheStamp(cc, mode)) {
     /* **把两份印记都印出来**：光说"印记不同"找不到是哪一格（那一格可能是每趟都变的
        东西，那就是个 bug 而不是"你改了编译器"）。 */
     vStep('run exe cache  未命中（印记不同）');
-    vStep(`  这一趟：${exeCacheStamp(cc, perMod)}`);
+    vStep(`  这一趟：${exeCacheStamp(cc, mode)}`);
     vStep(`  清单里：${lines[0]}`);
     return null;
   }
@@ -1771,10 +1771,10 @@ function exeCacheGet(path, cc, perMod) {
   }
   return exe;
 }
-function exeCachePut(path, cc, deps, perMod) {
+function exeCachePut(path, cc, deps, mode) {
   if (env('OMNI_NO_EXECACHE') === '1' || deps.length === 0) return;
   const key = `e-${hash16(path)}`;
-  const lines = [exeCacheStamp(cc, perMod)];
+  const lines = [exeCacheStamp(cc, mode)];
   for (const p of deps) {
     if (exists(p)) lines.push(`${p}\t${mtimeMs(p)}\t${fileSize(p)}`);
   }
@@ -2312,12 +2312,17 @@ function asyCModsBuild(path) {
   let cc = 0;
   for (const nm of names) {
     const cPath = join(dir, `${nm}.c`);
-    const hTxt = exists(join(dir, `${nm}.h`)) ? readText(join(dir, `${nm}.h`)) : '';
-    /* **编译器指纹必须在键里**（`cs`）：`.o` 的输入不止那份 `.c` —— 我们自己那台 C 前端
-       也是输入。少了这一格，改了后端 / C 前端之后旧的 `.o` 照旧命中，那是**答案静默地错**
-       （量到过：改了 emit 的零值构造那一段，日志写着"新编 4 份"而 `c obj 编了 0 格"，
-       链接期 `符号 '_omni_new_C_box' 没有定义` —— 用的是上一版的 `.o`）。 */
-    const k = hash16([cs, readText(cPath), hTxt, arch, os, fmt,
+    /* 键是**那一份在索引里的键**，不是它正文的哈希：索引那一行已经把"这份 `.c` 是什么"
+       说全了（自己的源文件 + `include` 摊进来的那些 + 依赖单元的键 + 编译器指纹 `cs`），
+       而正文是它们的函数。读 4 MB 的 C 再哈一遍是白花的 —— 量出来是没改任何东西的一趟里
+       `c obj` 还要 294~346ms，而那一趟一格都没编。
+
+       **编译器指纹必须在键里**（`cs` 已在行键里，这儿再挂一次是为了看得见）：`.o` 的输入
+       不止那份 `.c` —— 我们自己那台 C 前端也是输入。少了这一格，改了后端 / C 前端之后旧的
+       `.o` 照旧命中，那是**答案静默地错**（量到过：改了 emit 的零值构造那一段，日志写着
+       "新编 4 份"而 `c obj 编了 0 格`，链接期 `符号 '_omni_new_C_box' 没有定义`）。 */
+    const uk = unitIndex(dir).row(nm);
+    const k = hash16([cs, uk === null ? readText(cPath) : uk.key, arch, os, fmt,
       LIBC === null ? '' : LIBC, CROSS === null ? '' : CROSS.sysroot].join('|'));
     const obj = join(objDir, `${nm}-${k.slice(0, 8)}.o`);
     objs.push(obj);
@@ -2354,12 +2359,25 @@ function asyCModsBuild(path) {
   objs.push(mainObj);
   const exe = join(dir, `${progName(path)}.out`);
   const stk = fmt === 'macho' ? ['--stack-size', String(0x20000000)] : [];
-  const rc = subMain(['c', 'link', ...objs, ...runtimeObjectsSelf(arch, os), '-o', exe,
+  const rtObjs = runtimeObjectsSelf(arch, os);
+  /* **链接也要有一格键**：`.o` 的名字里带内容哈希，所以"同一串 `.o` + 同一组开关"链出来
+     一定是同一个二进制 —— 没改任何东西的一趟里重链一遍是纯浪费（量出来 309~475ms，
+     比这条路上别的任何一段都贵）。键落在 `<程序>.out.link` 里、二进制**名字不变**：
+     按键起名的话改一个字符就多一份 3.5 MB 的产物，一天下来全是垃圾。 */
+  const lk = hash16([...objs, ...rtObjs, arch, os, fmt, ...stk,
+    LIBC === null ? '' : LIBC, CROSS === null ? '' : CROSS.sysroot].join('|'));
+  const lkPath = `${exe}.link`;
+  if (exists(exe) && exists(lkPath) && readText(lkPath) === lk) {
+    vStep(`c link         复用 ${exe}  ${fileSize(exe)} bytes`);
+    return exe;
+  }
+  const rc = subMain(['c', 'link', ...objs, ...rtObjs, '-o', exe,
     '--arch', arch, '--os', os, '-f', fmt, '--stdlib', ...stk,
     ...(CROSS === null ? [] : ['--sysroot', CROSS.sysroot]),
     ...(LIBC === null ? [] : ['--libc', LIBC]), '-q']);
   if (rc !== 0) throw new OmniError(`asy c 模块：链接没过（各模块的 C 留在 ${dir}）`);
   spawn('chmod', ['+x', exe], 'c');
+  writeText(lkPath, lk);
   vStep(`c link         ${objs.length} 个 .o -> ${exe}  ${fileSize(exe)} bytes`);
   return exe;
 }
@@ -3474,7 +3492,7 @@ function runViaC(mod, argv, srcPath, cache) {
      哈希就多一个 `work/c-02-strings-1633f663.out/`，里头那份 `.c` 也叫
      `02-strings-1633f663.out.c` —— 目录攒垃圾、名字也读不出是谁。 */
   const built = buildNative(mod, exe, dir);
-  if (cached !== null) exeCachePut(srcPath, built.cc, cap('asy.deps')(), perMod);
+  if (cached !== null) exeCachePut(srcPath, built.cc, cap('asy.deps')(), perMod ? 'mod' : 'one');
   /* 三维那一档的 GL 插件：顺手编一下、把**绝对路径**放进环境，子进程 dlopen 它。
      `OMNI_GL_LIB` 已经给了就不动（标定时要能指别的库）；编不出来就什么都不设，
      运行时那侧找不到库自然走 CPU 光栅器。 */
@@ -5171,7 +5189,7 @@ function main(argv) {
     const bi2 = rest.indexOf('--backend');
     const toC = !hasJsEngine() || (bi2 >= 0 && rest[bi2 + 1] === 'c');
     if (toC) {
-      const exe = exeCacheGet(path, exeCC(), PER_MODULE_C);
+      const exe = exeCacheGet(path, exeCC(), PER_MODULE_C ? 'mod' : 'one');
       if (exe !== null) {
         vStep(`run exe cache  ${fileSize(exe)} bytes  ${exe}`);
         const st = spawn(exe, [], 'i')[0];
