@@ -1716,7 +1716,7 @@ function exeCacheDir() {
      `c link -> …/asy-exe/e-….bin`，读的人第一反应是"路径串了"。 */
   return join(cacheRoot(), 'run-exe');
 }
-function exeCacheStamp(cc) {
+function exeCacheStamp(cc, perMod) {
   // 编译器与**它的 flags** 都在印记里：`OMNI_OPT=2` 与默认 -O0 是两个可执行文件。
   // **`OMNI_PROFILE` 也得在**：它改的是生成的 C（插桩），不是 flags；不进印记的话
   // 开过一次 profile 之后，后面不带开关的运行会命中缓存、复用那份**带插桩**的二进制，
@@ -1727,8 +1727,11 @@ function exeCacheStamp(cc) {
   const profEnv = env('OMNI_PROFILE') === '1' ? '|prof' : '';
   const profFlag = PROF !== null && PROF.mode !== 'sample' ? `|prof:${PROF.mode}` : '';
   /* **按模块 / 单体也得在印记里**：那是两份不同的二进制（`--one-file` 拿到按模块那份
-     缓存的话，这个开关在外面看就是"没生效"）。 */
-  const modeC = PER_MODULE_C ? '|mod' : '|one';
+     缓存的话，这个开关在外面看就是"没生效"）。
+     这一格是**参数**不是全局：`buildSelfModules` 链接时走 `subMain(['c','link',…])`，
+     内层 main 会把 `PER_MODULE_C` 重算成 false —— 于是 Put 时读到的是"单体"，
+     清单里写下 `one`、下一趟按 `mod` 查，**永远不命中**（量出来就是这个）。 */
+  const modeC = perMod === true ? '|mod' : '|one';
   return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}${profEnv}${profFlag}${modeC}`;
 }
 /** 这一趟由谁编（印记里那格）。**Get 与 Put 必须同口径** —— `buildSelf` 交的是 `'self'`，
@@ -1737,7 +1740,7 @@ function exeCC() {
   return selfCC() ? 'self' : findCC();
 }
 
-function exeCacheGet(path, cc) {
+function exeCacheGet(path, cc, perMod) {
   if (env('OMNI_NO_EXECACHE') === '1') return null;
   const key = `e-${hash16(path)}`;
   const dep = join(exeCacheDir(), `${key}.dep`);
@@ -1750,8 +1753,12 @@ function exeCacheGet(path, cc) {
     return null;
   }
   const lines = readText(dep).split('\n');
-  if (lines[0] !== exeCacheStamp(cc)) {
-    vStep('run exe cache  未命中（印记不同：编译器源码 / cwd / cc / flags 里有一格变了）');
+  if (lines[0] !== exeCacheStamp(cc, perMod)) {
+    /* **把两份印记都印出来**：光说"印记不同"找不到是哪一格（那一格可能是每趟都变的
+       东西，那就是个 bug 而不是"你改了编译器"）。 */
+    vStep('run exe cache  未命中（印记不同）');
+    vStep(`  这一趟：${exeCacheStamp(cc, perMod)}`);
+    vStep(`  清单里：${lines[0]}`);
     return null;
   }
   for (let i = 1; i < lines.length; i++) {
@@ -1764,10 +1771,10 @@ function exeCacheGet(path, cc) {
   }
   return exe;
 }
-function exeCachePut(path, cc, deps) {
+function exeCachePut(path, cc, deps, perMod) {
   if (env('OMNI_NO_EXECACHE') === '1' || deps.length === 0) return;
   const key = `e-${hash16(path)}`;
-  const lines = [exeCacheStamp(cc)];
+  const lines = [exeCacheStamp(cc, perMod)];
   for (const p of deps) {
     if (exists(p)) lines.push(`${p}\t${mtimeMs(p)}\t${fileSize(p)}`);
   }
@@ -3333,6 +3340,9 @@ function runInterpMir(mod) {
  * @param cache 吃不吃可执行文件缓存。`run` 吃，`run-c`（明说要走这条腿）不吃。
  */
 function runViaC(mod, argv, srcPath, cache) {
+  /* 这一趟按模块吗 —— **进来就取快照**：底下链接那一步走 `subMain`，内层 main 会把
+   * 这格全局重算掉（见 exeCacheStamp 里那段账）。 */
+  const perMod = PER_MODULE_C;
   const wi = argv.indexOf('--work');
   // `--work` 给了就照它办（要的是"留在那儿"）；否则**直接链进产物缓存那一格** ——
   // 下一趟同一份源码进来，exeCacheGet 命中就只剩 exec（第一百〇五刀）。
@@ -3345,7 +3355,7 @@ function runViaC(mod, argv, srcPath, cache) {
      哈希就多一个 `work/c-02-strings-1633f663.out/`，里头那份 `.c` 也叫
      `02-strings-1633f663.out.c` —— 目录攒垃圾、名字也读不出是谁。 */
   const built = buildNative(mod, exe, dir);
-  if (cached !== null) exeCachePut(srcPath, built.cc, cap('asy.deps')());
+  if (cached !== null) exeCachePut(srcPath, built.cc, cap('asy.deps')(), perMod);
   /* 三维那一档的 GL 插件：顺手编一下、把**绝对路径**放进环境，子进程 dlopen 它。
      `OMNI_GL_LIB` 已经给了就不动（标定时要能指别的库）；编不出来就什么都不设，
      运行时那侧找不到库自然走 CPU 光栅器。 */
@@ -4208,9 +4218,15 @@ function runTimedOut() {
  */
 function subMain(argv) {
   MAIN_NEST++;
+  /* 内层是**另一条命令**（`c link` / `c obj`），它算出来的这两格与外层无关 ——
+   * 不存不还原就会把外层的判断改掉（那一格已经害过产物缓存一次）。 */
+  const savedPerMod = PER_MODULE_C;
+  const savedPruneOff = PRUNE_OFF;
   /* 内层抛出去的时候这个计数就不还原了 —— 那一趟整个是要失败退出的，
    * 而 `main` 没有 try/finally（这一层不为「反正要退出」的路径加结构）。 */
   const rc = main(argv);
+  PER_MODULE_C = savedPerMod;
+  PRUNE_OFF = savedPruneOff;
   MAIN_NEST--;
   return rc;
 }
@@ -5027,7 +5043,7 @@ function main(argv) {
     const bi2 = rest.indexOf('--backend');
     const toC = !hasJsEngine() || (bi2 >= 0 && rest[bi2 + 1] === 'c');
     if (toC) {
-      const exe = exeCacheGet(path, exeCC());
+      const exe = exeCacheGet(path, exeCC(), PER_MODULE_C);
       if (exe !== null) {
         vStep(`run exe cache  ${fileSize(exe)} bytes  ${exe}`);
         const st = spawn(exe, [], 'i')[0];
