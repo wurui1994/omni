@@ -224,6 +224,9 @@ class CoreLowerer {
     // 同上，结构体那一份（第十七刀）。它还兼着"这个名字是自己/后面那个"这一问 ——
     // 直接内嵌看它（零值会无限递归），隔一层指针不看（指针是三个字，与目标布局无关）。
     this.preStruct = new Set();
+    /* 声明名 -> 它的家（`g:<名字>` 模块级变量、`s:<名字>` 结构体）。函数有记录对象可以挂
+       （`file`），这两样只有"名字 -> 类型"一格，所以另记一张。C 那条腿按单元切文件要它。 */
+    this.declUnit = new Map();
     // 函数值（`(fnty …)` / `(cfn …)` / `(mkclo …)` / `(callfn …)`）。OIR 那边这一套早就有
     // （ADR-0010：闭包记录是 `{fp, c_*}`，第一个实参是记录自己），方言这边只是说得出来。
     // closures 是**闭包记录**表（名字 -> {id, mangled, make, captures}），lifted 是它们的
@@ -621,6 +624,8 @@ class CoreLowerer {
         continue;
       }
       this.globals.set(nm, t);
+      /* 它的家（C 侧按单元切文件要它；模块级变量只有"名字 -> 类型"一格，挂不上，另记一张表） */
+      if (typeof f.unit === 'string') this.declUnit.set(`g:${nm}`, f.unit);
     }
     // 第二遍半：线性内存与 data 段（ADR-0017 第二刀）。要在函数体之前收，因为
     // `(mload …)` 的合法性取决于"这份模块有没有内存"。
@@ -943,6 +948,7 @@ class CoreLowerer {
     if (kind === 'struct') {
       if (pre !== null) { for (const f of fields) pre.fields.push(f); this.preStruct.delete(nm); }
       else this.structs.set(nm, structType(nm, fields));
+      if (typeof n.unit === 'string') this.declUnit.set(`s:${nm}`, n.unit);
     } else if (pre !== null) for (const f of fields) pre.fields.push(f);   // 原地填那一格
     else this.classes.set(nm, classType(nm, fields));
     return null;
@@ -1146,7 +1152,10 @@ class CoreLowerer {
     const structs = [];
     let si = 0;
     for (const s of this.structs.values()) {
-      if (si++ >= base.structs && !this.sigOnly.aggs.has(s.name)) structs.push(s);
+      if (si++ >= base.structs && !this.sigOnly.aggs.has(s.name)) {
+        if (s.file === undefined) s.file = this.declUnit.get(`s:${s.name}`) ?? '';
+        structs.push(s);
+      }
     }
     const classes = [];
     let ci = 0;
@@ -1173,7 +1182,8 @@ class CoreLowerer {
         }
         continue;
       }
-      globals.push({ name: nm, mangled: `g_${nm}`, type: t, shared: session });
+      globals.push({ name: nm, mangled: `g_${nm}`, type: t, shared: session,
+        file: this.declUnit.get(`g:${nm}`) ?? '' });
     }
     /* 会话里前几批定义、这一批**调过**的那些函数（ADR-0022 的 J6 第二件事）：只发一句
        声明。判据是"名字在表里、但这一批没定义它" —— 函数表是跨批留着的，而 `funcs`
