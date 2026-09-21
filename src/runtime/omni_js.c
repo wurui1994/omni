@@ -454,17 +454,27 @@ bool omni_js_is_object(omni_dyn v) {
 /* 函数值的 name / length 那张按 fp 索引的表（见 omni.h 上的那段说明）。生成的代码在 main 里
    登记一次，这儿只存指针 —— 表是静态的、活得比程序里任何一格闭包都长。
    查表是线性的：读 `f.name` 是冷路径（造闭包才是热路径，而那条路一点没动）。 */
-static const omni_js_fn_meta *js_fnmeta = NULL;
-static int64_t js_fnmeta_n = 0;
+/* **一段一格**（切文件之后这张表是分片的）：表里每条都要拿一个函数指针，而取一个
+   *别的翻译单元*里的函数的地址要一条重定位 —— 我们的后端在 CALL 上有、取地址还没有
+   （tcc 的 `adrp+add` 那一对）。所以每个 TU 登记自己那一段，`set` 是**追加**不是覆盖。
+   64 段是上限：一份程序的单元数超过它就只是查不到 name/length（不崩、不错答案）。 */
+#define OMNI_JS_FNMETA_SEGS 64
+static const omni_js_fn_meta *js_fnmeta_t[OMNI_JS_FNMETA_SEGS];
+static int64_t js_fnmeta_c[OMNI_JS_FNMETA_SEGS];
+static int js_fnmeta_ns = 0;
 
 void omni_js_fnmeta_set(const omni_js_fn_meta *t, int64_t n) {
-  js_fnmeta = t;
-  js_fnmeta_n = n;
+  if (js_fnmeta_ns >= OMNI_JS_FNMETA_SEGS) return;
+  js_fnmeta_t[js_fnmeta_ns] = t;
+  js_fnmeta_c[js_fnmeta_ns] = n;
+  js_fnmeta_ns++;
 }
 
 const omni_js_fn_meta *omni_js_fnmeta_find(const void *fp) {
-  for (int64_t i = 0; i < js_fnmeta_n; i++) {
-    if (js_fnmeta[i].fp == fp) return &js_fnmeta[i];
+  for (int s = 0; s < js_fnmeta_ns; s++) {
+    for (int64_t i = 0; i < js_fnmeta_c[s]; i++) {
+      if (js_fnmeta_t[s][i].fp == fp) return &js_fnmeta_t[s][i];
+    }
   }
   return NULL;
 }

@@ -2874,6 +2874,13 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
      不建的话 ld 报的是 `open() failed, errno=2 for 'dist/omni'`（量到过），
      那句话把人往"编译器坏了"上带。 */
   mkdirAll(dirname(outPath));
+  /* **按模块切**是自带那台 C 前端上的默认（§12）：一个源文件一份 `.c`/`.h`、各自一格 `.o`
+   * 暖存，改一个模块只重编它那一格。插件那几路（绑定 / 剪枝 / 计时表）照旧走单体，
+   * 理由在 buildSelfSplit 的头上。`OMNI_SPLIT_C=0` 退回单体（出了问题好二分）。 */
+  if (selfCC() && plugin === undefined && extern !== true && own === undefined
+    && bind === undefined && PROF === null && env('OMNI_SPLIT_C') !== '0') {
+    return buildSelfSplit(mod, outPath, dir);
+  }
   const cPath = join(dir, `${basename(outPath)}.c`);
   const tGen0 = nowMs();
   const { text: cText, stats, syms } = cap('cgen.stats')(mod, {
@@ -3080,6 +3087,93 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   }
   tally(basename(outPath), plugin !== undefined, cText, fileSize(outPath), tGen, nowMs() - t0);
   return { cPath, cc: 'self' };
+}
+
+/**
+ * 同一件事，但**按模块切**（docs/design/build-system.md §12）：一个源文件一份 `.c` +
+ * 一份同名 `.h`，各自走 `.o` 暖存，最后一起链。改一个模块就只重编它那一格 ——
+ * 从前是整程序一份 696KB 的 `.c`，改一个字符要全编一遍。
+ *
+ * `.o` 的键是**这一份的全部编译输入**：它自己的正文 + 它 include 到的那几家 `.h` 的正文
+ * （传递闭包）+ 目标那几格。少算一条边就是"改了签名却沿用旧的 `.o`" —— 那是答案静默地错，
+ * 不是编译失败（运行时那 21 格刚踩过一次，见 modcache 的 slotRelay）。
+ *
+ * 插件 / `--extern` / `--own` / `--bind` / `--profile` 那几路照旧走单体：它们要的是
+ * "整份产物的符号表"那一层的东西（绑定、剪枝、计时表），与按 TU 切是两件事。
+ */
+function buildSelfSplit(mod, outPath, dir) {
+  const arch = CROSS === null ? hostArch() : CROSS.arch;
+  const os = CROSS === null ? (hostIsDarwin() ? 'osx' : 'linux') : CROSS.os;
+  const fmt = fmtOfOs(os);
+  const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
+  const sysArgs = [
+    ...(CROSS === null ? [] : ['--sysroot', CROSS.sysroot]),
+    ...(LIBC === null ? [] : ['--libc', LIBC]),
+  ];
+  mkdirAll(dirname(outPath));
+  mkdirAll(dir);
+  const tGen0 = nowMs();
+  const u = cap('cgen.units')(mod);
+  const tGen = nowMs() - tGen0;
+  LAST_CGEN_STATS = u.stats;
+  const all = [u.gen, ...u.units];
+  const byName = new Map();
+  for (const x of all) byName.set(x.name, x);
+  let bytes = 0;
+  for (const x of all) {
+    writeText(join(dir, `${x.name}.h`), x.h);
+    writeText(join(dir, `${x.name}.c`), x.c);
+    bytes += x.h.length + x.c.length;
+  }
+  LAST_EMIT_BYTES = bytes;
+  {
+    let sum = 0;
+    for (const r of u.stats.values()) sum += r.bytes;
+    LAST_EMIT_PROG = sum;
+  }
+  vStep(`backend c（按模块切）  ${all.length} 个 TU，${bytes} bytes -> ${dir}`);
+  const t0 = nowMs();
+  const objDir = join(cacheRoot(), 'modules', 'c');
+  const objs = [];
+  let made = 0;
+  for (const x of all) {
+    /* 这一份的编译输入：正文 + 传递闭包上那几家的 `.h`。 */
+    const parts = [x.c];
+    const seen = new Set();
+    const todo = [...x.deps];
+    while (todo.length > 0) {
+      const d = todo.pop();
+      if (seen.has(d)) continue;
+      seen.add(d);
+      const y = byName.get(d);
+      if (y === undefined) continue;
+      parts.push(y.h);
+      for (const e of y.deps) todo.push(e);
+    }
+    const key = hash16([...parts, arch, os, fmt, LIBC === null ? '' : LIBC,
+      CROSS === null ? '' : CROSS.sysroot].join('|'));
+    const obj = join(objDir, `${x.name}-${key.slice(0, 8)}.o`);
+    objs.push(obj);
+    if (exists(obj)) continue;
+    const tmp = join(dir, `${x.name}.o`);
+    cObj(join(dir, `${x.name}.c`), tmp, arch, [RUNTIME_DIR, dir], [], 'elf', os, sysIncs);
+    mkdirAll(objDir);
+    rename(tmp, obj);
+    made++;
+  }
+  vStep(`c obj  ${objs.length} 个 TU（这一趟编了 ${made} 格）`);
+  const rt = runtimeObjectsSelf(arch, os);
+  const stk = fmt === 'macho' ? ['--stack-size', String(0x20000000)] : [];
+  const rc = subMain(['c', 'link', ...objs, ...rt, '-o', outPath,
+    '--arch', arch, '--os', os, '-f', fmt, '--stdlib', ...stk, ...sysArgs,
+    ...cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`), ...selfLibArgs(mod.libs), '-q']);
+  if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（切开的 C 留在 ${dir}）`);
+  spawn('chmod', ['+x', outPath], 'c');
+  vStep(`c link（我们自己的链接器）  ${objs.length + rt.length} 个 .o -> ${outPath}`
+    + `  ${fileSize(outPath)} bytes`);
+  tally(basename(outPath), false, all.map((x) => x.c).join('\n'), fileSize(outPath), tGen,
+    nowMs() - t0);
+  return { cPath: join(dir, 'omni_gen.c'), cc: 'self' };
 }
 
 /**
