@@ -17,12 +17,19 @@
 import { exists, readText, writeText } from '../host/native.js';
 import { join } from '../host/path.js';
 import {
-  ContentIds, Index, decodeRow, encodeRow, rowKey, rowFresh, modCacheDir,
+  ContentIds, Index, decodeRow, encodeRow, rowKey, rowFresh,
 } from './modcache.js';
 
-/** 产物目录：`<root>/<kind>/<配置>`。影响"名字解析到哪个文件"的东西进配置，不进文件名。 */
-export function moduleDir(root, kind, configKey) {
-  return modCacheDir(root, kind, configKey);
+/**
+ * 产物目录：`<root>/modules/<语言>`。**名字里不带哈希** —— 一台机器上这一格只存在一份。
+ *
+ * 那"配置"（当前目录、找库的路径、内建面那一档）去哪儿了：它们要么已经在**单元名**里
+ * （名字带源文件路径的哈希，换个 ASYMPTOTE_DIR 就是另一份库、另一个名字），要么该进
+ * **那一行的键**（`extras`，与源文件一样是输入）。放进目录名只会攒出一堆
+ * `js-e6c8dc752b614998` 这种没人看得懂、也没人清的世代。
+ */
+export function moduleDir(root, lang) {
+  return join(root, 'modules', lang);
 }
 
 /**

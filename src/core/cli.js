@@ -64,6 +64,7 @@ import { ninjaCmd } from './build/cli.js';
 import {
   UnitIndex, moduleDir, declRead, declWrite, launcherText,
 } from './build/modules.js';
+import { cacheSlot, slotDone } from './build/modcache.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -1770,12 +1771,12 @@ function stampSame(a, b) {
 /**
  * 「一份源码 -> 一目录 ESM 模块」的产物落点：`modules/js-<配置哈希>/`。
  *
- * **一种配置一格**（`modCacheDir`）：影响"同一个名字解析到哪个文件"的那几样
- * （当前目录、`ASYMPTOTE_DIR`、内建面）进**目录名**，于是换了配置就是另一格目录 ——
- * 不必再在每张清单里问一遍"环境变没变"。名字里不带语言：编到 JS 是通用构建。
+ * **名字里不带哈希**：一台机器上这一格只存在一份。找库的路径（`ASYMPTOTE_DIR`、
+ * 当前目录）已经在**单元名**里（名字带源文件路径的哈希），内建面那一档进**每一行的键**
+ * （见 rowOf 的 `extras`）—— 两样都不该变成目录名里的一串十六进制。
  */
 function jsModulesDir() {
-  return moduleDir(cacheRoot(), 'modules', `js-${hash16(jsModulesConfig())}`);
+  return moduleDir(cacheRoot(), 'js');
 }
 
 /**
@@ -2065,6 +2066,10 @@ function asyModsBuild(path, dir) {
       if (k !== undefined && k !== '') deps.push(k);
     }
     const extras = [];
+    // 内建面那一档（`OMNI_ASY_BUILTINS`）换了，同一个源文件编出来的是另一份产物 ——
+    // 它是这一份的**输入**，所以进键，不进目录名。
+    const ab = env('OMNI_ASY_BUILTINS');
+    if (ab !== undefined && ab !== '') extras.push(`builtins:${ab}`);
     if (u.key === '') extras.push(`text:${hash16(u.text)}`);
     return {
       key: '',
@@ -2618,11 +2623,12 @@ function glPlugin() {
   const hdr = join(GL_DIR, 'omni_gl.h');
   if (!exists(src) || !exists(hdr)) return null;
   const cc = findClang();
-  const key = hash16([cc, `${mtimeMs(src)}:${fileSize(src)}`,
-    `${mtimeMs(hdr)}:${fileSize(hdr)}`].join('|'));
-  const dir = join(cacheRoot(), 'gl', key);
+  const slot = cacheSlot(cacheRoot(), 'gl', basename(cc),
+    hash16([cc, `${mtimeMs(src)}:${fileSize(src)}`, `${mtimeMs(hdr)}:${fileSize(hdr)}`].join('|')));
+  const dir = slot.dir;
+  const key = slot.stamp;
   const lib = join(dir, 'libomnigl.dylib');
-  if (exists(lib)) return lib;
+  if (slot.fresh && exists(lib)) return lib;
   const stage = workDirFor('gl-stage', key);
   const staged = join(stage, 'libomnigl.dylib');
   const r = spawn(cc, ['-O2', '-w', '-dynamiclib', '-o', staged, src,
@@ -2631,8 +2637,9 @@ function glPlugin() {
     vStep(`gl plugin  ${cc} 编不过，这一趟走 CPU 光栅器`);
     return null;
   }
-  mkdirAll(join(cacheRoot(), 'gl'));
-  if (!exists(dir)) rename(stage, dir);
+  mkdirAll(dir);
+  rename(staged, lib);
+  slotDone(slot);
   vStep(`gl plugin  ${exists(lib) ? lib : staged}`);
   return exists(lib) ? lib : staged;
 }
@@ -2737,10 +2744,14 @@ function runtimeObjects(cc) {
   const flags = ccFlags(cc);
   const srcs = runtimeSources();
   const deps = runtimeDeps();
-  const key = hash16([cc, ...flags, ...deps].join('|'));
-  const dir = join(cacheRoot(), 'rt', key);
+  /* 一格**按名字**的暖存（`rt/host-cc`），身份写在里头那份 `stamp` 里 —— 见 cacheSlot。
+     从前是拿 `hash16(cc|flags|deps)` 当目录名：一台机器上永远只有一份，那串十六进制
+     买不到东西，配置真变了的时候旧的那一格还留着没人清。 */
+  const slot = cacheSlot(cacheRoot(), 'rt', `host-${basename(cc)}`,
+    hash16([cc, ...flags, ...deps].join('|')));
+  const dir = slot.dir;
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
-  if (objs.every((o) => exists(o))) {
+  if (slot.fresh && objs.every((o) => exists(o))) {
     vStep(`runtime .o  ${objs.length} objects, cache hit ${dir}`);
     return objs;
   }
@@ -2758,9 +2769,12 @@ function runtimeObjects(cc) {
   }
   // 目标已存在 = 别人先建好了，下面那句会用它（rename 到一个非空目录在两个宿主上都是硬错，
   // 而宿主的错误不是可以 catch 的异常，所以先看一眼）。父目录得先在，rename 才有地方落。
-  mkdirAll(join(cacheRoot(), 'rt'));
+  /* 一份一份搬进那一格（**原地**：这一格的名字是固定的，旧的那几份就该被盖掉），
+     搬完才写 stamp —— 中断了下一趟发现 stamp 对不上，重来。 */
+  mkdirAll(dir);
   let kept = staged;
-  if (!exists(dir)) rename(stage, dir);
+  for (let i = 0; i < staged.length; i++) rename(staged[i], objs[i]);
+  slotDone(slot);
   vStep(`runtime .o  ${srcs.length} objects compiled with ${cc}, ${jobCount()} jobs`);
   if (objs.every((o) => exists(o))) {
     /* 缓存那一份已经落地 -> 暂存里剩下的没人要了（`rename` 成功时它已经不在了，
@@ -2784,10 +2798,11 @@ function runtimeObjects(cc) {
 function runtimeObjectsSelf(arch, os) {
   const srcs = runtimeSources();
   const deps = runtimeDeps();
-  const key = hash16(['self', arch, os, CROSS === null ? '' : CROSS.sysroot, ...deps].join('|'));
-  const dir = join(cacheRoot(), 'rt', key);
+  const slot = cacheSlot(cacheRoot(), 'rt', `self-${arch}-${os}`,
+    hash16(['self', arch, os, CROSS === null ? '' : CROSS.sysroot, ...deps].join('|')));
+  const dir = slot.dir;
   const objs = srcs.map((p) => join(dir, `${basename(p, '.c')}.o`));
-  if (objs.every((o) => exists(o))) {
+  if (slot.fresh && objs.every((o) => exists(o))) {
     vStep(`runtime .o  ${objs.length} objects, cache hit ${dir}`);
     return objs;
   }

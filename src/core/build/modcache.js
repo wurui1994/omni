@@ -186,14 +186,28 @@ export class Index {
 }
 
 /**
- * 缓存目录：**一种配置一格**。
+ * 一格缓存：**目录按它是什么起名**，"还算不算数"看目录里那份 `stamp`。
  *
- * 从前是一个平目录，靠把配置哈希塞进文件名来分开（`01-arith__40bea4bf.js`），
- * 于是"旧世代"是散在里头的一堆文件、没人认得。一种配置一格目录之后，旧世代是一整格，
- * `omni cache gc` 认得它，人也看得懂。
+ * 从前是把配置哈希当目录名（`rt/efc6a12c…`、`gl/21aa6c09…`、`modules/js-e6c8dc75…`）。
+ * 那个名字买不到东西：实际上每种活**只存在一格**（一台机器一个 cc、一棵源码），
+ * 于是目录里永远只有一份，而名字变成了一串没人看得懂的十六进制；配置真变了的时候
+ * 旧那一格还留在盘上没人清。
+ *
+ * 现在：名字是 `rt/cc-arm64-osx` 这种**看得懂**的，身份写在 `stamp` 里。对不上就
+ * **原地重建**（旧的那几份被盖掉，不再攒世代）。
+ *
+ * 回 `{dir, fresh}`：`fresh` 为假时调用方自己重建，建完调 `slotDone` 写下 stamp。
  */
-export function modCacheDir(root, kind, configKey) {
-  return join(root, kind, configKey);
+export function cacheSlot(root, kind, name, stamp) {
+  const dir = join(root, kind, name);
+  const p = join(dir, 'stamp');
+  const fresh = exists(p) && readText(p) === `${stamp}\n`;
+  return { dir, stamp, fresh };
+}
+
+/** 这一格建好了：把身份写下来（下一趟靠它认）。 */
+export function slotDone(slot) {
+  writeText(join(slot.dir, 'stamp'), `${slot.stamp}\n`);
 }
 
 /**
