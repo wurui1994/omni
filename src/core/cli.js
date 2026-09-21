@@ -2257,6 +2257,26 @@ function jsModulesConfig(path) {
  * 于是"改一个字符"那一趟里，库的词法、降级、发射、哈希**一格都不做**。
  * `OMNI_ASY_CMODS=1` 开（还在接线，默认走合并树那条路）。
  */
+/**
+ * 这一趟 asy 走**每模块独立**那条路吗（§12 末节）。
+ *
+ * 三件事叠起来：动词对（`run` / `build`）、要的是 C 那条腿、没点那两个逃生口。
+ * `--backend` 没给时的默认腿不一样：`build` 默认就是 C，`run` 只有宿主里没有 JS 引擎时
+ * 才落到 C（见 profLeg 那段注释）。`--work` 给了就还是老路 —— 那条路才认这个开关。
+ */
+function asyCModsWanted(key, path, argv) {
+  if (env('OMNI_ASY_CMODS') === '0') return false;
+  /* `run-c` 是 `run --backend c` 的老拼法（cmds.js 那张表），它自己一格 key ——
+     漏了这一格的样子是"测试套件那条 run-c 腿一声不响地还走老路"。 */
+  if (key !== 'run' && key !== 'run-c' && key !== 'build') return false;
+  if (typeof path !== 'string' || !path.endsWith('.asy')) return false;
+  for (const f of ['--interp', '--mir', '--work']) if (argv.includes(f)) return false;
+  if (!perModuleWanted(argv, path)) return false;
+  if (key === 'run-c') return true;
+  const bi = argv.indexOf('--backend');
+  return bi >= 0 ? argv[bi + 1] === 'c' : (key === 'build' || !hasJsEngine());
+}
+
 function asyCModsBuild(path, outPath) {
   const dir = moduleDir(cacheRoot(), 'c-asy');
   mkdirAll(dir);
@@ -5161,11 +5181,12 @@ function main(argv) {
    * `--backend c` 会把 `run` 换成 `run-c` 那条 case，摆在 case 里就看不见了 ——
    * 量出来是"设了 PRUNE_OFF 却照旧 `prune 1195 -> 264`"。
    * 解释器那两档（`--interp` / `--mir`）照旧摇：它们不出 `.o`，摇了只是跑得快些。 */
-  /* asy 的 C 腿走**每模块独立**那条路（§12 末节）。还在接线，所以是 opt-in：
-   * `OMNI_ASY_CMODS=1`，`run` 与 `build` 两个动词都吃。默认照旧走合并树那条路。 */
-  if (env('OMNI_ASY_CMODS') === '1' && (node.key === 'run' || node.key === 'build')
-    && path !== undefined && path.endsWith('.asy')
-    && !rest.includes('--interp') && !rest.includes('--mir')) {
+  /* asy 的 C 腿**默认**走每模块独立那条路（§12 末节）：`run`（要 C 那条腿时）与 `build`
+   * 两个动词都吃。两个逃生口：
+   *   - `--one-file` / `OMNI_C_ONEFILE=1` —— 单体那条**对照腿**（见 perModuleWanted）
+   *   - `OMNI_ASY_CMODS=0` —— 退回"一棵合并的树切开"那条路（`buildSelfModules`）
+   * 判据：tests/asy/cases 下 180 份有期望值的例子走这条路**全过**（154s，每份 0.85s）。 */
+  if (asyCModsWanted(node.key, path, rest)) {
     if (node.key === 'build') {
       const oi = rest.indexOf('-o');
       const out = oi >= 0 ? rest[oi + 1] : `${progName(path)}.out`;

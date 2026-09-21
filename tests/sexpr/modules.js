@@ -188,8 +188,8 @@ console.log('\nsexpr/modules（C 那条腿：头按依赖切）');
  * 这几条里破一条，就是"每趟重做一遍整棵树"回来了。 */
 {
   const p = join(dir, 'waste.asy');
-  const run = (v) => spawnSync('node', [cli, 'run', p, ...(v ? ['-v'] : [])],
-    { encoding: 'utf8', timeout: 180000, env: { ...process.env, OMNI_ASY_CMODS: '1' } });
+  const run = (v) => spawnSync('node', [cli, 'run', p, '--backend', 'c', ...(v ? ['-v'] : [])],
+    { encoding: 'utf8', timeout: 180000 });
   writeFileSync(p, 'int a = 17, b = 5;\nwrite(a + b);\n');
   const warm = run(false);              // 暖机：库那几份落进缓存
   writeFileSync(p, 'int a = 19, b = 5;\nwrite(a + b);\n');
