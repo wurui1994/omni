@@ -95,6 +95,16 @@ const F_LANG_DIRECTIVE = {
  * 默认它只在内存里传一手：那份文本是中间格式，不是产物 —— 落盘就多出一摊
  * `src-sx/<内容哈希>/` 目录与一格谁都不清的缓存。想看就给这个旗子。
  */
+/* C 那侧走按模块还是单体（§12）。默认只有 asy 按模块（它的库大、用户文件小，收益全在那儿），
+ * 别的语言默认单体 —— 这两格是**显式拨**用的，`run` 与 `build` 都收。 */
+const F_MODULES = {
+  name: '--modules', arity: 0,
+  brief: '（c）一个模块一份 .c/.h，各自一格 .o 暖存（asy 默认就是它）',
+};
+const F_ONE_FILE = {
+  name: '--one-file', arity: 0,
+  brief: '（c）整份程序发成一份 .c（asy 上用它退回单体）',
+};
 const F_EMIT_SX = {
   name: '--emit-sx', arity: 1, value: 'FILE',
   brief: '把译出来的核心方言写到 FILE（默认只在内存里过）',
@@ -383,7 +393,8 @@ ${graphEngineHelp()}
         /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，
          * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格
          * （`--libc self` 那一趟的 sysroot 按本机取自带的，不用给）。 */
-        F_CC, F_LIBC, F_PROFILE, F_PROFILE_OUT, F_NO_TRIM, F_DIRECT, F_LANG_DIRECTIVE,
+        F_CC, F_LIBC, F_MODULES, F_ONE_FILE, F_PROFILE, F_PROFILE_OUT, F_NO_TRIM,
+        F_DIRECT, F_LANG_DIRECTIVE,
         /* `--stat` 在 `run` 上只对 `--engine graph` 那一路有话说（图的形状与结构）——
          * 另一台机器的构建统计要 `build --stat`（那儿才有 cgen 的产出分布）。 */
         F_STAT, F_STAT_OUT, F_STAT_DIFF, F_SHRINK,
@@ -420,7 +431,8 @@ ${graphEngineHelp()}
   omni build ext/lua/examples/intmath.lua --engine graph -o intmath.wasm   （二进制，V8 直接吃）`,
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS, F_EMIT_SX,
         ...C_TARGET_FLAGS,
-        F_SYSROOT, F_LIBC, F_CC, F_PROFILE, F_PROFILE_OUT, F_STAT, F_STAT_OUT, F_STAT_DIFF,
+        F_SYSROOT, F_LIBC, F_CC, F_MODULES, F_ONE_FILE,
+        F_PROFILE, F_PROFILE_OUT, F_STAT, F_STAT_OUT, F_STAT_DIFF,
         F_SHRINK, F_LANG_DIRECTIVE,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },

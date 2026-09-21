@@ -140,5 +140,18 @@ console.log('\nsexpr/modules（C 那条腿：头按依赖切）');
     (has('src_two.c') ?? '').includes('#include "src_one.h"'));
 }
 
+/* 两种模式**输出必须一样**（单体那条路是对照腿，不许废）：`--modules` 与 `--one-file`
+ * 出来的是两份不同的 C、两个不同的二进制，答案得一个字节都不差。 */
+{
+  const src = join(dirname(fileURLToPath(import.meta.url)), 'cases', '53-modtypes.sx');
+  const one = spawnSync('node', [cli, 'run', src, '--backend', 'c', '--one-file'],
+    { encoding: 'utf8', timeout: 120000 });
+  const mod = spawnSync('node', [cli, 'run', src, '--backend', 'c', '--modules'],
+    { encoding: 'utf8', timeout: 120000 });
+  ok('单体与按模块同一个答案', one.status === 0 && mod.status === 0
+    && one.stdout === mod.stdout && (one.stdout ?? '').trim() === '14\n2',
+    `单体 ${one.status}：${JSON.stringify(one.stdout)}；按模块 ${mod.status}：${JSON.stringify(mod.stdout)}`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exitCode = 1;

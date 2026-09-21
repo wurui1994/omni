@@ -597,9 +597,9 @@ let STATS = false;
 let STAT = null;
 /** cgen 回的那份「按源文件的产出分布」—— `--stat` 那张表要它（理由见 buildNative 里那一段）。 */
 let LAST_CGEN_STATS = null;
-/* 这一趟按模块编译吗（`perModuleArgv` 在 run / build 那两处填它）。
- * 一个用处：**不摇树**。摇树看的是"整程序的可达集"，而按模块编译要求
- * 「一份模块的产物不依赖别处改没改」—— 两者直接冲突，不能都要。 */
+/* 这一趟 C 那侧按模块编译吗（`perModuleWanted` 在 switch 之前填它）。
+ * 两个用处：走哪条出口（buildNative）、要不要摇树（PRUNE_OFF）。 */
+let PER_MODULE_C = false;
 let PRUNE_OFF = false;
 /** 最后一趟发出来的目标文本有多大（`--stat` 那张分层的账要它：最后一层就是它）。 */
 let LAST_EMIT_BYTES = 0;
@@ -1726,7 +1726,10 @@ function exeCacheStamp(cc) {
   // 让「同一份二进制，采一趟、再不采一趟」白编两遍。
   const profEnv = env('OMNI_PROFILE') === '1' ? '|prof' : '';
   const profFlag = PROF !== null && PROF.mode !== 'sample' ? `|prof:${PROF.mode}` : '';
-  return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}${profEnv}${profFlag}`;
+  /* **按模块 / 单体也得在印记里**：那是两份不同的二进制（`--one-file` 拿到按模块那份
+     缓存的话，这个开关在外面看就是"没生效"）。 */
+  const modeC = PER_MODULE_C ? '|mod' : '|one';
+  return `e1|${jsCacheStamp()}|cc:${cc}|${ccFlags(cc).join(' ')}${profEnv}${profFlag}${modeC}`;
 }
 /** 这一趟由谁编（印记里那格）。**Get 与 Put 必须同口径** —— `buildSelf` 交的是 `'self'`，
     而这儿从前问的是 `findCC()`（外部 cc 的名字），于是自带那台 C 前端那一路**永远不命中**。 */
@@ -2901,8 +2904,12 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   mkdirAll(dirname(outPath));
   /* **按模块切**是自带那台 C 前端上的默认（§12）：一个源文件一份 `.c`/`.h`、各自一格 `.o`
    * 暖存，改一个模块只重编它那一格。插件那几路（绑定 / 剪枝 / 计时表）照旧走单体，
-   * 理由在 buildSelfModules 的头上。`OMNI_C_ONEFILE=1` 退回单体（出了问题好二分）。 */
-  if (perModuleC(plugin, extern, own, bind)) return buildSelfModules(mod, outPath, dir);
+   * 理由在 buildSelfModules 的头上。这一趟走哪条由 `PER_MODULE_C` 说（见 perModuleWanted）；
+   * 这儿再核一遍那几个参数 —— `buildPluginSet` 那条路不经 switch，状态对它不作数。 */
+  if (PER_MODULE_C && plugin === undefined && extern !== true && own === undefined
+    && bind === undefined) {
+    return buildSelfModules(mod, outPath, dir);
+  }
   const cPath = join(dir, `${basename(outPath)}.c`);
   const tGen0 = nowMs();
   const { text: cText, stats, syms } = cap('cgen.stats')(mod, {
@@ -3115,23 +3122,24 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
  * 这一趟会不会**按模块**走（见 buildSelfModules）。一处判据两个用处：要不要摇树
  * （摇树看的是整程序的可达集，按模块编译不能要它）、以及走哪条出口。
  */
-function perModuleArgv(argv) {
-  if (env('OMNI_C_ONEFILE') === '1' || !selfCC() || PROF !== null) return false;
+/**
+ * C 那侧这一趟走**按模块**还是**单体**。
+ *
+ * 默认只有 **asy** 按模块：它的库大（`asy_builtins` 一份 2MB 的 C）而用户文件小，
+ * 收益全在那儿；别的语言默认照旧单体（它们的判据还没铺齐）。`--modules` / `--one-file`
+ * 显式拨，`run` 与 `build` 都收；`OMNI_C_ONEFILE=1` 是兜底（出了问题好二分）。
+ *
+ * 排除的那几路要的是"整份产物的符号表"那一层的东西（绑定、剪枝、计时表），
+ * 与按模块编译是两件事：插件 / `--extern` / `--own` / `--bind` / `--profile`。
+ */
+function perModuleWanted(argv, path) {
+  if (!selfCC() || PROF !== null) return false;
+  for (const f of ['--plugin', '--extern', '--own', '--bind']) if (argv.includes(f)) return false;
   const b = argv.indexOf('--backend');
   if (b >= 0 && argv[b + 1] !== undefined && argv[b + 1] !== 'c') return false;
-  /* 与 `perModuleC` **必须同口径**：那一处判"走哪条出口"，这一处判"要不要摇树"，
-     两处分家就会出现"摇过的树喂给按模块的出口"（库模块的产物随程序变）。 */
-  for (const f of ['--plugin', '--extern', '--own', '--bind']) if (argv.includes(f)) return false;
-  return true;
-}
-
-function perModuleC(plugin, extern, own, bind) {
-  if (env('OMNI_C_ONEFILE') === '1') return false;
-  if (!selfCC()) return false;
-  /* 插件 / --extern / --own / --bind / --profile 要的是"整份产物的符号表"那一层的
-   * 东西（绑定、剪枝、计时表），与按模块编译是两件事 —— 那几路照旧单体。 */
-  return plugin === undefined && extern !== true && own === undefined
-    && bind === undefined && PROF === null;
+  if (argv.includes('--one-file') || env('OMNI_C_ONEFILE') === '1') return false;
+  if (argv.includes('--modules')) return true;
+  return typeof path === 'string' && path.endsWith('.asy');
 }
 
 /**
@@ -3332,7 +3340,11 @@ function runViaC(mod, argv, srcPath, cache) {
   const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run', workName(srcPath));
   if (wi >= 0) mkdirAll(dir);
   const exe = cached === null ? join(dir, progName(srcPath)) : cached;
-  const built = buildNative(mod, exe, wi >= 0 ? dir : undefined);
+  /* 工作目录**总是按源文件起名**（`work/run-<源名>/`）：产物落进暖存那一格时它的名字带
+     内容哈希（`02-strings-1633f663.out`），从前 buildNative 按产物名算目录，于是每换一个
+     哈希就多一个 `work/c-02-strings-1633f663.out/`，里头那份 `.c` 也叫
+     `02-strings-1633f663.out.c` —— 目录攒垃圾、名字也读不出是谁。 */
+  const built = buildNative(mod, exe, dir);
   if (cached !== null) exeCachePut(srcPath, built.cc, cap('asy.deps')());
   /* 三维那一档的 GL 插件：顺手编一下、把**绝对路径**放进环境，子进程 dlopen 它。
      `OMNI_GL_LIB` 已经给了就不动（标定时要能指别的库）；编不出来就什么都不设，
@@ -4994,6 +5006,12 @@ function main(argv) {
    * `--backend c` 会把 `run` 换成 `run-c` 那条 case，摆在 case 里就看不见了 ——
    * 量出来是"设了 PRUNE_OFF 却照旧 `prune 1195 -> 264`"。
    * 解释器那两档（`--interp` / `--mir`）照旧摇：它们不出 `.o`，摇了只是跑得快些。 */
+  PER_MODULE_C = (node.key === 'run' || node.key === 'build')
+    && !rest.includes('--interp') && !rest.includes('--mir')
+    && perModuleWanted(rest, path);
+  /* 按模块就不摇树（摇树看整程序的可达集，与"模块各自独立"冲突）—— 同一格状态两个用处，
+     分成两处判就会出现"摇过的树喂给按模块的出口"。 */
+  PRUNE_OFF = PER_MODULE_C;
   /* 产物缓存（链好的可执行文件）：**输入一个字节没变就只剩 exec**。
    *
    * 门开在 switch **之前**：`--backend c` 会把 `run` 换成 `run-c` 那条 case，而"用户说的
@@ -5018,9 +5036,7 @@ function main(argv) {
       }
     }
   }
-  PRUNE_OFF = (node.key === 'run' || node.key === 'build')
-    && !rest.includes('--interp') && !rest.includes('--mir')
-    && perModuleArgv(rest);
+
 
   /* 出 JS 产物就得全内建 —— 判据是**改写后的 cmd**，不是用户敲的那个动词。
      上面那一格按 `node.key` 判，于是 `emit js x.js`（新写法，cmd 在 FORMS 那儿才变成
