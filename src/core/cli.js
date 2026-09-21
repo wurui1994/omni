@@ -597,6 +597,10 @@ let STATS = false;
 let STAT = null;
 /** cgen 回的那份「按源文件的产出分布」—— `--stat` 那张表要它（理由见 buildNative 里那一段）。 */
 let LAST_CGEN_STATS = null;
+/* 这一趟按模块编译吗（`perModuleArgv` 在 run / build 那两处填它）。
+ * 一个用处：**不摇树**。摇树看的是"整程序的可达集"，而按模块编译要求
+ * 「一份模块的产物不依赖别处改没改」—— 两者直接冲突，不能都要。 */
+let PRUNE_OFF = false;
 /** 最后一趟发出来的目标文本有多大（`--stat` 那张分层的账要它：最后一层就是它）。 */
 let LAST_EMIT_BYTES = 0;
 /**
@@ -1204,7 +1208,10 @@ function compile(path, argv = []) {
   const r = compileFront(path, argv);
   // 摇树（第一百〇六刀）：所有前端都是"把库整份降下来"，从入口不可达的那些函数一个都不发。
   // `OMNI_PRUNE=0` 关掉 —— 要对比"摇没摇"两份产物时用。
-  if (env('OMNI_PRUNE') !== '0' && r !== undefined && r.mod !== undefined) {
+  /* 按模块编译那一路**不摇**（见 PRUNE_OFF）：摇过的库模块，它的 `.c` 会随"这个程序用到
+     哪几个函数"变，于是同一份源文件在两个程序里出来的产物不同 —— 那就不是分离编译了。
+     死代码交给链接器按节回收（`--gc-sections` 还没有，那是另一刀）。 */
+  if (env('OMNI_PRUNE') !== '0' && !PRUNE_OFF && r !== undefined && r.mod !== undefined) {
     /* `--plugin NAME` 那一支：NAME 是摇树的另一个根（见 prune.js 的根三）。 */
     const pi = argv.indexOf('--plugin');
     const n = pruneFuncs(r.mod, pi >= 0 && argv[pi + 1] !== undefined ? [argv[pi + 1]] : []);
@@ -2876,11 +2883,8 @@ function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
   mkdirAll(dirname(outPath));
   /* **按模块切**是自带那台 C 前端上的默认（§12）：一个源文件一份 `.c`/`.h`、各自一格 `.o`
    * 暖存，改一个模块只重编它那一格。插件那几路（绑定 / 剪枝 / 计时表）照旧走单体，
-   * 理由在 buildSelfSplit 的头上。`OMNI_SPLIT_C=0` 退回单体（出了问题好二分）。 */
-  if (selfCC() && plugin === undefined && extern !== true && own === undefined
-    && bind === undefined && PROF === null && env('OMNI_SPLIT_C') !== '0') {
-    return buildSelfSplit(mod, outPath, dir);
-  }
+   * 理由在 buildSelfModules 的头上。`OMNI_C_ONEFILE=1` 退回单体（出了问题好二分）。 */
+  if (perModuleC(plugin, extern, own, bind)) return buildSelfModules(mod, outPath, dir);
   const cPath = join(dir, `${basename(outPath)}.c`);
   const tGen0 = nowMs();
   const { text: cText, stats, syms } = cap('cgen.stats')(mod, {
@@ -3090,18 +3094,39 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
 }
 
 /**
- * 同一件事，但**按模块切**（docs/design/build-system.md §12）：一个源文件一份 `.c` +
- * 一份同名 `.h`，各自走 `.o` 暖存，最后一起链。改一个模块就只重编它那一格 ——
- * 从前是整程序一份 696KB 的 `.c`，改一个字符要全编一遍。
+ * 这一趟会不会**按模块**走（见 buildSelfModules）。一处判据两个用处：要不要摇树
+ * （摇树看的是整程序的可达集，按模块编译不能要它）、以及走哪条出口。
+ */
+function perModuleArgv(argv) {
+  if (env('OMNI_C_ONEFILE') === '1' || !selfCC() || PROF !== null) return false;
+  const b = argv.indexOf('--backend');
+  if (b >= 0 && argv[b + 1] !== undefined && argv[b + 1] !== 'c') return false;
+  /* 与 `perModuleC` **必须同口径**：那一处判"走哪条出口"，这一处判"要不要摇树"，
+     两处分家就会出现"摇过的树喂给按模块的出口"（库模块的产物随程序变）。 */
+  for (const f of ['--plugin', '--extern', '--own', '--bind']) if (argv.includes(f)) return false;
+  return true;
+}
+
+function perModuleC(plugin, extern, own, bind) {
+  if (env('OMNI_C_ONEFILE') === '1') return false;
+  if (!selfCC()) return false;
+  /* 插件 / --extern / --own / --bind / --profile 要的是"整份产物的符号表"那一层的
+   * 东西（绑定、剪枝、计时表），与按模块编译是两件事 —— 那几路照旧单体。 */
+  return plugin === undefined && extern !== true && own === undefined
+    && bind === undefined && PROF === null;
+}
+
+/**
+ * **按模块**编译（docs/design/build-system.md §12）：一个模块一份 `.c` + 一份同名 `.h`，
+ * 各自走 `.o` 暖存，最后一起链。改一个模块就只重编它那一格 —— 从前是整程序一份 696KB
+ * 的 `.c`，改一个字符要全编一遍。
  *
  * `.o` 的键是**这一份的全部编译输入**：它自己的正文 + 它 include 到的那几家 `.h` 的正文
  * （传递闭包）+ 目标那几格。少算一条边就是"改了签名却沿用旧的 `.o`" —— 那是答案静默地错，
  * 不是编译失败（运行时那 21 格刚踩过一次，见 modcache 的 slotRelay）。
  *
- * 插件 / `--extern` / `--own` / `--bind` / `--profile` 那几路照旧走单体：它们要的是
- * "整份产物的符号表"那一层的东西（绑定、剪枝、计时表），与按 TU 切是两件事。
  */
-function buildSelfSplit(mod, outPath, dir) {
+function buildSelfModules(mod, outPath, dir) {
   const arch = CROSS === null ? hostArch() : CROSS.arch;
   const os = CROSS === null ? (hostIsDarwin() ? 'osx' : 'linux') : CROSS.os;
   const fmt = fmtOfOs(os);
@@ -3131,25 +3156,30 @@ function buildSelfSplit(mod, outPath, dir) {
     for (const r of u.stats.values()) sum += r.bytes;
     LAST_EMIT_PROG = sum;
   }
-  vStep(`backend c（按模块切）  ${all.length} 个 TU，${bytes} bytes -> ${dir}`);
+  vStep(`backend c（按模块）  ${all.length} 份模块，${bytes} bytes -> ${dir}`);
   const t0 = nowMs();
   const objDir = join(cacheRoot(), 'modules', 'c');
   const objs = [];
   let made = 0;
+  /* 每家的 `.h` 先各算一次哈希：键里拼的是**哈希**，不是 `.h` 的正文。
+     拼正文是 O(n²) 字节（155 个单元 × 各自依赖的头全文 = 几个 GB），量出来是
+     `JavaScript heap out of memory`。 */
+  const hOf = new Map();
+  for (const x of all) hOf.set(x.name, hash16(x.h));
   for (const x of all) {
     /* 这一份的编译输入：正文 + 传递闭包上那几家的 `.h`。 */
-    const parts = [x.c];
+    const parts = [hash16(x.c)];
     const seen = new Set();
     const todo = [...x.deps];
     while (todo.length > 0) {
       const d = todo.pop();
       if (seen.has(d)) continue;
       seen.add(d);
+      if (!hOf.has(d)) continue;
       const y = byName.get(d);
-      if (y === undefined) continue;
-      parts.push(y.h);
       for (const e of y.deps) todo.push(e);
     }
+    for (const d of [...seen].sort()) if (hOf.has(d)) parts.push(`${d}:${hOf.get(d)}`);
     const key = hash16([...parts, arch, os, fmt, LIBC === null ? '' : LIBC,
       CROSS === null ? '' : CROSS.sysroot].join('|'));
     const obj = join(objDir, `${x.name}-${key.slice(0, 8)}.o`);
@@ -3161,13 +3191,13 @@ function buildSelfSplit(mod, outPath, dir) {
     rename(tmp, obj);
     made++;
   }
-  vStep(`c obj  ${objs.length} 个 TU（这一趟编了 ${made} 格）`);
+  vStep(`c obj  ${objs.length} 份模块（这一趟编了 ${made} 格）`);
   const rt = runtimeObjectsSelf(arch, os);
   const stk = fmt === 'macho' ? ['--stack-size', String(0x20000000)] : [];
   const rc = subMain(['c', 'link', ...objs, ...rt, '-o', outPath,
     '--arch', arch, '--os', os, '-f', fmt, '--stdlib', ...stk, ...sysArgs,
     ...cAbiLibs(mod.cabi ?? []).map((l) => `-l${l}`), ...selfLibArgs(mod.libs), '-q']);
-  if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（切开的 C 留在 ${dir}）`);
+  if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（各模块的 C 留在 ${dir}）`);
   spawn('chmod', ['+x', outPath], 'c');
   vStep(`c link（我们自己的链接器）  ${objs.length + rt.length} 个 .o -> ${outPath}`
     + `  ${fileSize(outPath)} bytes`);
@@ -4942,6 +4972,13 @@ function main(argv) {
   if (node.key === 'run' && path !== undefined && path.endsWith('.asy')) {
     asyRunSetup(path, rest);
   }
+  /* 这一趟按模块编译吗（要不要摇树，见 PRUNE_OFF）。摆在 switch **之前**：
+   * `--backend c` 会把 `run` 换成 `run-c` 那条 case，摆在 case 里就看不见了 ——
+   * 量出来是"设了 PRUNE_OFF 却照旧 `prune 1195 -> 264`"。
+   * 解释器那两档（`--interp` / `--mir`）照旧摇：它们不出 `.o`，摇了只是跑得快些。 */
+  PRUNE_OFF = (node.key === 'run' || node.key === 'build')
+    && !rest.includes('--interp') && !rest.includes('--mir')
+    && perModuleArgv(rest);
 
   /* 出 JS 产物就得全内建 —— 判据是**改写后的 cmd**，不是用户敲的那个动词。
      上面那一格按 `node.key` 判，于是 `emit js x.js`（新写法，cmd 在 FORMS 那儿才变成
@@ -5073,14 +5110,14 @@ function main(argv) {
     }
     case 'emit-c': {
       const { mod } = compile(path, rest);
-      /* `--split`：按**模块**发射（P2）—— 一个源文件一份 `.c` + 一份同名 `.h`，跟正常的
+      /* `--modules`：按**模块**发射 —— 一个模块一份 `.c` + 一份同名 `.h`，跟正常的
        * C 工程一样。**没有公用头**：头的 include 图严格等于模块的依赖图，改一个类型只让
        * `#include` 到它的那几家重编（docs/design/build-system.md §12 末节的定案）。
        * 与用户类型无关的那一族生成物（字面量池、`list<int>`、JS 模板）落在 `omni_gen.{h,c}`。 */
-      const si = rest.findIndex((a) => a === '--split' || a.startsWith('--split='));
+      const si = rest.findIndex((a) => a === '--modules' || a.startsWith('--modules='));
       if (si >= 0) {
         const wi = rest.indexOf('--work');
-        if (wi < 0) throw new OmniError('emit c --split 要 --work DIR：每个模块的 .c 得有个落点');
+        if (wi < 0) throw new OmniError('emit c --modules 要 --work DIR：每个模块的 .c 得有个落点');
         const dir = rest[wi + 1];
         mkdirAll(dir);
         const u = cap('cgen.units')(mod);
@@ -5093,7 +5130,7 @@ function main(argv) {
           tot += t.c.length + t.h.length;
         }
         const ord = [...u.units].sort((a, b) => b.bytes - a.bytes);
-        stderr(`omni: ${u.units.length} 个模块 TU，合计 ${fmtBytes(tot)}`
+        stderr(`omni: ${u.units.length} 份模块，合计 ${fmtBytes(tot)}`
           + `，${u.gen.name} ${fmtBytes(u.gen.h.length + u.gen.c.length)}\n`);
         for (const t of ord.slice(0, 12)) {
           stderr(`  ${t.name}  ${fmtBytes(t.bytes)}  ${t.funcs} funcs\n`);

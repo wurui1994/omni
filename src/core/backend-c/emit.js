@@ -76,10 +76,10 @@ class CEmitter {
      *   - 三个下标把输出切成"共用前段 / 只发一次的那段 / 每个函数 / 尾巴"
      * 共用前段照抄进每个 TU：没被引用的 static 一份机器码都不生成（量出来 528 字节），
      * 所以复制它只花每个 TU 约 0.46 秒的编译税。带状态的那三样不能复制 —— 见 ADR-0021。 */
-    this.split = opts.split === true;
+    this.perMod = opts.modules === true;
     /* **外部链接**与**切文件**是两件事（ADR-0021 的 S4）：切文件必然要外部链接，
      * 但"核心把符号导出去给插件用"不需要切文件。所以拆成两格开关。 */
-    this.extern = opts.split === true || opts.extern === true;
+    this.extern = opts.modules === true || opts.extern === true;
     /* `own`：这一份产物**只发**这些文件里的函数与全局，别的只留原型（extern）——
      * 分语言独立构建就是这一格：插件只装它自己那几个模块，其余在加载时绑到核心上。
      * 判据是 P1 的 `f.file` 与（刚补的）`g.file`。 */
@@ -404,9 +404,9 @@ class CEmitter {
     for (const [sym, ty] of this.poolExt) out.push(`extern const ${ty} ${sym};`);
     /* 自己发的那些。`--extern` 的产物（核心）里池子要**外部链接** —— 插件按内容哈希绑它。
        底下的 `_u` / `_b` 数组照旧 static：只有描述符会被别人引用，数组是它的初始化式。
-       `--split` 是例外：共用前段会被抄进每个 TU，外部链接就成了重复定义（ld 报 duplicate
+       按模块那一档是例外：模板会抄进每个 TU，外部链接就成了重复定义（ld 报 duplicate
        symbol）。切文件那一档里池子照旧 static —— 没被引用的 static 一份数据都不生成。 */
-    const link = this.extern && !this.split ? '' : 'static ';
+    const link = this.extern && !this.perMod ? '' : 'static ';
     const share = link === '';
     for (const [s, id] of this.s16pool) {
       /* 只发**用过的那一种形态**（见 strLit 那段注释里的量）。两种都没用过的不可能存在：
@@ -537,7 +537,7 @@ class CEmitter {
     /* `fn.name`/`fn.length` 那张表（见 fnMetaTable）：切文件那一档**按单元分片发**
      * （headers 里），因为表里每条都要取一个函数的地址，而取**别的 TU** 里的函数的地址
      * 要一条我们的后端还没有的重定位（CALL 那条有）。所以这儿只留一格坑。 */
-    const fnMetaN = this.split ? 0 : this.fnMetaTable(closures);
+    const fnMetaN = this.perMod ? 0 : this.fnMetaTable(closures);
     /* 按源文件记一笔产出（P1）：每个函数发了多少行、多少字节。
      * `--stats` 靠它印"42 万行是哪几个源文件撑起来的" —— 单体构建里这件事从前压根看不见，
      * 而它同时也是 P2 分文件发射的分组依据（`f.file` 来自 lower.js 的 fileOfSpan）。
@@ -593,7 +593,7 @@ class CEmitter {
     // fn.name / fn.length 那张表（见 fnMetaTable）：登记一次，之后 `f.name` 就按 fp 查它
     /* fn.name / fn.length 那张表的登记：单体一句登记整张；切文件那一档留一格坑，
        `headers()` 把它换成"各单元各自的那一段各登记一次"（见那儿）。 */
-    const fnMetaReg = this.split ? '/*@fnmeta@*/'
+    const fnMetaReg = this.perMod ? '/*@fnmeta@*/'
       : (fnMetaN > 0 ? ` omni_js_fnmeta_set(omni_js_fnmeta_tbl, ${fnMetaN});` : '');
     const strHookReg = this.dynSegs === true ? ' omni_js_prim_hook_init_();' : '';
     // 内建原型上那 93 格成员的表（见 protoMembers）：登记一次，之后读成员就查它。
@@ -865,8 +865,8 @@ class CEmitter {
    * 那几家重编 —— 那是标准 C 的代价，不是我们的债。
    */
   headers() {
-    if (!this.split) throw new Error('c.headers: 只有 split 模式能切');
-    if (this.prof) throw new OmniError('emit c --split：计时表还不能按 TU 切（--profile 与 --split 先别一起用）');
+    if (!this.perMod) throw new Error('c.headers: 只有按模块那一档有头可发');
+    if (this.prof) throw new OmniError('按模块编译：计时表还不能按模块分（--profile 先走单体那一路）');
     const { order, home } = this.aggHomes();
     const classes = this.mod.classes ?? [];
     const closures = this.mod.closures ?? [];
@@ -1093,7 +1093,7 @@ class CEmitter {
       for (const d of u.needH) {
         const other = units.get(d);
         if (other !== undefined && other.needH.has(nm)) {
-          throw new OmniError(`emit c --split：单元 ${nm} 与 ${d} 的类型互相按值嵌套，`
+          throw new OmniError(`按模块编译：模块 ${nm} 与 ${d} 的类型互相按值嵌套，`
             + '头的 include 解不了这种环（C 的语义）—— 两家的类型得先分开');
         }
       }
@@ -2839,12 +2839,12 @@ export function emitCWithStats(mod, opts = {}) {
 }
 
 /**
- * 分文件发射（P2）：**一个模块一份 `.c` + 一份同名 `.h`**，跟正常的 C 工程一样 ——
+ * 按模块发射：**一个模块一份 `.c` + 一份同名 `.h`**，跟正常的 C 工程一样 ——
  * `{ gen: {name, h, c}, units: [{ file, name, funcs, bytes, h, c }], stats }`。
- * 与 `emitC` 是两条路而不是一个开关：单体那条路一个字节都不动（`split` 默认关）。
+ * 与 `emitC` 是两条路而不是一个开关：单体那条路一个字节都不动。
  */
 export function emitCUnits(mod, opts = {}) {
-  const e = new CEmitter(mod, { ...opts, split: true });
+  const e = new CEmitter(mod, { ...opts, modules: true });
   e.emit();
   return { ...e.headers(), stats: e.stats };
 }

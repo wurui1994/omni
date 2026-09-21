@@ -467,7 +467,7 @@ ${graphEngineHelp()}
       brief: '印某个中间/目标形态：ast|oir|mir|sx|asy|js|c|llvm|spirv',
       flags: [F_MODE, F_WORK, F_INC, F_STATS, F_LANG_DIRECTIVE,
         { name: '--amalgamate', arity: 0, brief: '（c）把整份运行时内联进一个文件' },
-        { name: '--split', arity: 0, brief: '（c）按模块分成一个个 .c 落到 --work DIR' },
+        { name: '--modules', arity: 0, brief: '（c）按模块各出一份 .c/.h 落到 --work DIR' },
         { name: '--fat', arity: 0, brief: '把所有语言都编进核心（默认是薄核心 + plugins/）' },
         F_NO_TRIM,
         { name: '--bytes', arity: 0, brief: '（mir）印大小与每个函数的内容哈希' },

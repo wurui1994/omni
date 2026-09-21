@@ -74,9 +74,9 @@ refuses('几个模块但没名字', `(module (fn f () int (ret (int 1))))
 (module (main (print (int 2))))
 `, '每个都要名字');
 
-/* C 那条腿的**头按依赖切**（docs/design/build-system.md §12 末节）。
+/* C 那条腿**按模块编译**（docs/design/build-system.md §12 末节）。
  * 判的是三件机制，不是图也不是字节数：
- *   1. 单元数 = 模块数（归属这一格真落到了每条声明上）
+ *   1. 模块数对（归属这一格真落到了每条声明上）
  *   2. include 图 = 依赖图：`P` 按值嵌了 `V`，所以 shape.h 引 geom.h；
  *      app 只引它真叫到的那两家；一份公用头都没有
  *   3. 每一份 `.c` **单独**过我们自己的 C 前端都编得过（头是自洽的）
@@ -93,7 +93,7 @@ console.log('\nsexpr/modules（C 那条腿：头按依赖切）');
   const here = dirname(fileURLToPath(import.meta.url));
   const src = join(here, 'cases', '53-modtypes.sx');
   const work = join(dir, 'split');
-  const r = spawnSync('node', [cli, 'emit', 'c', src, '--split', '--work', work],
+  const r = spawnSync('node', [cli, 'emit', 'c', src, '--modules', '--work', work],
     { encoding: 'utf8', timeout: 120000 });
   const got = (nm) => { try { return readFileSync(join(work, nm), 'utf8'); } catch { return null; } };
   ok('四个模块各一份 .c/.h', r.status === 0
@@ -114,6 +114,30 @@ console.log('\nsexpr/modules（C 那条腿：头按依赖切）');
       { encoding: 'utf8', timeout: 120000, cwd: join(here, '..', '..') });
     ok(`${n}.c 单独编得过`, o.status === 0, (o.stderr ?? '').trim().split('\n').slice(-1)[0]);
   }
+}
+
+/* `(unit "…")`：归属标记，**不改可见性**（asy 那样名字全局平铺的前端要的就是它）。
+ * 判两件事：跨"单元"直接叫得到（没有 import 也能用），而 C 那条腿按它切成两份。 */
+{
+  const p = join(dir, 'unitmark.sx');
+  writeFileSync(p, `(module
+  (unit "src/one.sx")
+  (fn twice ((x int)) int (ret (bin "*" (var x) (int 2))))
+  (unit "src/two.sx")
+  (main (print (call twice (int 21)))))
+`);
+  const r = spawnSync('node', [cli, 'run', p], { encoding: 'utf8', timeout: 60000 });
+  ok('(unit …) 不改可见性', r.status === 0 && (r.stdout ?? '').trim() === '42',
+    `退出码 ${r.status}：${`${r.stdout ?? ''}${r.stderr ?? ''}`.trim().split('\n')[0]}`);
+  const work2 = join(dir, 'unitsplit');
+  const e = spawnSync('node', [cli, 'emit', 'c', p, '--modules', '--work', work2],
+    { encoding: 'utf8', timeout: 120000 });
+  const has = (nm) => { try { return readFileSync(join(work2, nm), 'utf8'); } catch { return null; } };
+  ok('两份源文件各出一份 .c', e.status === 0 && has('src_one.c') !== null && has('src_two.c') !== null,
+    (e.stderr ?? '').trim().split('\n').slice(-1)[0]);
+  ok('main 归第二家', (has('src_two.c') ?? '').includes('int main('));
+  ok('叫到第一家 -> src_two.c 引 src_one.h',
+    (has('src_two.c') ?? '').includes('#include "src_one.h"'));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
