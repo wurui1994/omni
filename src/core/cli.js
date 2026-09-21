@@ -2135,7 +2135,9 @@ function asyModsBuild(path, dir) {
       kept++;
       continue;
     }
-    writeText(join(dir, `${u.name}.sx`), u.text);
+    // 核心方言那份文本**默认不落盘**（`OMNI_SX_DUMP=1` 才写）：它是调试通道，不是产物 ——
+    // 产物只有 `.js` 与它的接口。留着它等于每份单元多一个文件、每趟多一次写。
+    if (env('OMNI_SX_DUMP') === '1') writeText(join(dir, `${u.name}.sx`), u.text);
     // ADR-0015 第三步：把核心方言**逐条**落进声明存储（`d/<内容哈希>.sx`），
     // 单元旁边一格 `.idx` 记它有哪几条、什么次序。这一步只写不读，判据是"拼回去
     // 逐字节等于 `.sx`" —— 对上了才说明"条"这个粒度切得干净，后面 emit 与接口才能按条走。
