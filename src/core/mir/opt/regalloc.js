@@ -31,7 +31,7 @@
  */
 
 import {
-  OP, OP_MODES, REF_BIAS, REF_NONE, isConstRef,
+  OP, OP_MODES, OP_NAMES, REF_BIAS, REF_NONE, isConstRef,
   T_VOID, T_BOOL, T_I32, T_I64, T_F32, T_F64, T_TPTR,
   typeLanes, isCmp,
 } from '../ir.js';
@@ -540,11 +540,26 @@ export function regalloc(fn, mod) {
     maxG = peak(evtG);
     maxF = peak(evtF);
     const got = cls[0].hint.size + cls[1].hint.size;
+    /* **没分到颜色的那些是哪几种 op**（2026-09-22 补）：这一条决定下一刀是哪一格 ——
+       常量与地址计算多 ⇒ 该做**重物化**（Go 的 `rematerializeable`，溢出不如现算）；
+       长命的普通算术多 ⇒ 该做 `tighten`（把定义挪近使用、压活跃区间）。 */
+    const miss = new Map();
+    for (let pc = 0; pc < fn.op.length; pc++) {
+      if (last[pc] < 0) continue;
+      const t = resultType(fn, pc);
+      if (t === T_VOID || !fitsOneWord(t)) continue;
+      if (cls[0].hint.has(pc) || cls[1].hint.has(pc)) continue;
+      const nm = OP_NAMES[fn.op[pc]] ?? String(fn.op[pc]);
+      miss.set(nm, (miss.get(nm) ?? 0) + 1);
+    }
+    const missText = [...miss.entries()].sort((a, b) => b[1] - a[1])
+      .slice(0, 8).map(([k, v]) => `${k}×${v}`).join(' ');
     process.stderr.write(`[ra] ${fn.name}: ${fn.op.length} 条指令，该有寄存器的值 ${want} 个，`
       + `分到 ${cls[0].hint.size}+${cls[1].hint.size}=${got}`
       + `（${(100 * got / Math.max(1, want)).toFixed(1)}%），同时活着最多 ${maxLive} 个`
       + `｜通用 ${cls[0].hint.size}/${wantG}（峰值 ${maxG}，颜色 ${COLORS}+${COLORS_SCRATCH}）`
-      + ` 浮点 ${cls[1].hint.size}/${wantF}（峰值 ${maxF}，颜色 ${COLORS_F}+${COLORS_F_SCRATCH}）\n`);
+      + ` 浮点 ${cls[1].hint.size}/${wantF}（峰值 ${maxF}，颜色 ${COLORS_F}+${COLORS_F_SCRATCH}）`
+      + (missText === '' ? '' : `｜没分到的：${missText}`) + '\n');
   }
   return n;
 }
