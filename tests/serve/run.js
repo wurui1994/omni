@@ -9,9 +9,12 @@
  * 不装无头浏览器：那会带一整套依赖进来，而网页那一侧能自动查的只有"文件拿得到、
  * JSON 结构对"。UI 的好看与好用靠人看。
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execFile as execFileCb } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFile = promisify(execFileCb);
 import { startServer, shellToArgv, safePath, buildTree } from '../../src/core/serve.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -104,6 +107,15 @@ try {
   ok('/api/shell 认 omni', sh.json.code === 0);
   const bad = await post('/api/shell', { line: 'rm -rf /' });
   ok('/api/shell 拒绝不认的命令', bad.json.code === 127);
+
+  /* ---- --client 那一条：经服务跑与本地跑，stdout 逐字节相同、退出码相同 ---- */
+  {
+    const clientEntry = join(root, 'src', 'client.js');
+    const { stdout: clientOut } = await execFile('node', [clientEntry, s.url, 'run', cse],
+      { cwd: root, encoding: 'utf8', timeout: 120000 });
+    ok('--client 与本地 omni run 逐字节相同', clientOut === local,
+      `${JSON.stringify(clientOut.slice(0, 80))} != ${JSON.stringify(local.slice(0, 80))}`);
+  }
 } finally {
   await s.close();
 }

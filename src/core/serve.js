@@ -248,6 +248,11 @@ function runRequest(root, body, verb, extra) {
   const p = join(root, '.omni-cache', 'work', 'serve-tmp');
   const lang = body.lang ?? extOf(body.path ?? '').slice(1);
   let path = body.path;
+  /* **整条 argv 递过来那一档**（`omni --client …` 走的就是这条）：一个字都不改地跑。
+     这一条是"服务面是同一个编译器的另一个入口"那句话的落点 —— 服务这侧不重拼命令。 */
+  if (Array.isArray(body.argv) && body.argv.length > 0) {
+    return runOmni(root, body.argv, body.timeout ?? 30);
+  }
   if (body.text !== undefined && body.text !== null) {
     /* 改过的源码落暂存（后缀要对 —— 前端按后缀选）。 */
     try { fs.mkdirSync(p, { recursive: true }); } catch { /* 已存在 */ }

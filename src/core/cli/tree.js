@@ -34,6 +34,11 @@ export const GLOBAL_FLAGS = [
   { name: '--verbose', alias: '-v', arity: 0, brief: '把每一步与它的耗时打到 stderr' },
   { name: '--explain', arity: 0, brief: '印出将要走的管线，然后停（不写盘、不执行）' },
   { name: '--help', alias: '-h', arity: 0, brief: '印这一级的用法' },
+  /* 这两格由 `cli.js` 的 `main` 在 `findCmd` **之前**剥掉（命令树按"第一个词是不是
+     动词"走，前缀里的开关会被拦在门口）。摆进这张表只为两件事：`--help` 里列得出来、
+     写在动词后面时 `splitArgv` 不当场骂。见 docs/design/omni-serve-studio.md §3。 */
+  { name: '--client', arity: 0, brief: '把这条命令发给 omni serve 去跑' },
+  { name: '--server', arity: 1, value: 'URL', brief: '默认 http://127.0.0.1:7111 / OMNI_SERVER' },
 ];
 
 /**

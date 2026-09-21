@@ -4579,6 +4579,32 @@ function subMain(argv) {
 
 function main(argv) {
   /**
+   * **`--client` 摆在最前面**（`docs/design/omni-serve-studio.md` §3）：
+   * `omni --client run x.go` 把**同一条命令**发给 `omni serve` 去跑，回来的
+   * stdout / stderr / 退出码原样落地。默认的 omni 仍旧是 CLI —— 这一格是 opt-in。
+   *
+   * 要在 `findCmd` 之前剥：命令树按"第一个词是不是动词"走，前缀里的开关会被拦在门口
+   * （与上面 `--profile` 那一格同一条理由）。
+   *
+   * 服务地址：`--server URL` > `OMNI_SERVER` > `http://127.0.0.1:7111`。
+   *
+   * 走**另一个进程**（`src/client.js`），理由与 `serve` 那一格相同：`fetch` + `await`
+   * 那一族不该进 `check:self` 的静态模块图。
+   */
+  {
+    const ci = argv.indexOf('--client');
+    if (ci >= 0) {
+      const rest = [...argv.slice(0, ci), ...argv.slice(ci + 1)];
+      const si = rest.indexOf('--server');
+      const server = si >= 0 ? rest[si + 1] : (env('OMNI_SERVER') ?? 'http://127.0.0.1:7111');
+      const args = si >= 0 ? [...rest.slice(0, si), ...rest.slice(si + 2)] : rest;
+      const entry = join(installDir(), 'client.js');
+      const [st] = spawn('node',
+        [exists(entry) ? entry : join(cwd(), 'src', 'client.js'), server, ...args], 'i');
+      return st;
+    }
+  }
+  /**
    * **量自己那一格摆在最前面**（第一百五十片）：`omni --profile sample glr …` ——
    * 开关在动词**前面**就是「量这一趟 omni 自己」。要在 `findCmd` 之前剥掉它，
    * 因为命令树是按「第一个词是不是动词」走的，前缀里那几格开关会把它拦在门口。

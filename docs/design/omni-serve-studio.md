@@ -31,43 +31,39 @@
 
 ```
 GET  /                      -> Studio 那一页（HTML）
-GET  /assets/*              -> css / js（原生，零构建）
-GET  /api/health            -> { ok, version, legs, langs }
+GET  /studio.css /studio.js -> css / js（原生，零构建；从 `src/studio/` 直接发）
+GET  /api/health            -> { ok, version, legs }
 GET  /api/tree              -> 虚拟文件树（见 §5.2），一次给全
 GET  /api/file?path=…       -> { path, lang, text }
-POST /api/run               -> { argv } 或 { lang, text, argv }；回 { stdout, stderr, code, stages }
-POST /api/emit              -> 同上，但回某个中间形态（ast/oir/mir/sx/js/c/…）
-POST /api/shell             -> { line, cwd }；一整行命令（含 tcc/go/nim 等效命令），回同上
+POST /api/run               -> { argv } 或 { lang, text, path, pkgs }；回 { stdout, stderr, code }
+POST /api/emit              -> 同上 + `format`（ast/oir/mir/sx/js/c/…）
+POST /api/shell             -> { line }；一整行命令（含 tcc/go/nim 等效命令），回同上
 ```
 
 两条约定：
 
-* **`stages` 是一等公民**。`src/core/cli/stages.js` 已经把"管线是数据"这件事做完了
-  （`newPlan` / `addStage` / `renderStage`），`--explain` 与 `-v` 是同一份数据的两种印法。
-  网页那一栏是**第三种印法** —— 不另算一遍耗时，不在服务里重写一份格式。
+* **阶段耗时不在服务里重算**。请求那趟命令末尾自动加一格 `-v`，`stages.js` 印出来的那几行
+  （`omni: …`）原样进 `stderr`，网页那一栏**照着念**。`src/core/cli/stages.js` 已经把
+  "管线是数据"做完了（`newPlan` / `addStage` / `renderStage`），`--explain` 与 `-v` 是同一份
+  数据的两种印法 —— 网页那栏是**第三种印法**，不另算一遍耗时，不在服务里重写一份格式。
+  （欠账：还没有结构化的 `stages` 字段，前端按行解析。要那一格就让 `-v` 多一种 JSON 印法，
+  仍旧是同一份数据。）
 * **源码可以只在请求里**。`{ lang, text }` 那一档不落盘（落一格暂存目录就够，走
   `host/cache.js` 的 `scratchDir`）—— 网页上改一行就跑一趟，不该在仓库里留垃圾。
 
 ### 编译器怎么被调用
 
-今天 `src/core/cli.js` **不能被 import 而不执行**（模块末尾就 `main(procArgs())`，
-`src/cli.js` 的头注里记着这一格，ADR-0018 分片 3 的欠账）。所以 serve 的第一刀就是补它：
+**每个请求一个子进程**（`node src/cli.js …`）。
 
-* `cli.js` 导出 `main(argv)`；
-* 进程级那几件事（`setExitCode`、profile 收尾、顶层 try/catch）挪到 `src/cli.js`。
-
-之后 serve 里跑一条命令就是**进程内重入** —— 现成的 `subMain(argv)` 已经在了
-（`MAIN_NEST`，内层不重置全局开关）。stdout/stderr 要能捞出来：`host/native.js` 的
-`stdout`/`stderr` 加一格**可替换的收集器**（一格函数指针，默认写进程），这是宿主 ABI 上
-最小的一处改动。
+为什么不是进程内重入：`cli.js` 有一堆模块级全局（`VERBOSE` / `SRC_SX` / `IMPORTS`
+那一族），并发重入会互相串味；子进程还顺手把"时限"与"崩了不影响服务"两件事解决了。
+代价是每趟一次 node 启动（量出来 ~100ms），实时模式那一档（250ms 防抖）吃得下。
 
 ### 时限与并发
 
 * 时限：走已有的那套（`docs/design/dev-deadline.md`）。服务里每个请求**必须**带时限 ——
   一个不收敛的例子不能把服务拖死。默认沿用 `OMNI_TIMEOUT`（30s），请求里可以更小。
-* 并发：第一刀**串行**（一把锁）。理由是编译器有一堆模块级全局（`VERBOSE`/`SRC_SX`/
-  `IMPORTS` 那一族），并行重入会互相串味。要真并行就每请求一个子进程 —— 那是第二刀，
-  有量了再说。
+* 并发：**每请求一个子进程**，所以天然并行，不需要锁。模块级全局互不干扰。
 
 ## 3. `omni --client` —— CLI 连上去
 
@@ -135,9 +131,10 @@ stdout / stderr / 阶段耗时分栏）。同一份数据两种印法 —— 与
 * **柔和的 Apple 风**：大圆角、克制的阴影、`-apple-system` / `SF` 字体栈、
   分层的半透明背景、`prefers-color-scheme` 跟系统深浅。
 * **强调色可调**：一格 CSS 变量（`--accent`）+ 一排色板，选了记在 `localStorage`。
-* **原生 HTML / JS / CSS**，一个依赖都不装、一步构建都不要。编辑器用
-  `contenteditable` + 自己那层高亮（不上 CodeMirror/Monaco —— 那会立刻把"单体 HTML"
-  这件事变成打包工程）。
+* **原生 HTML / JS / CSS**，一个依赖都不装、一步构建都不要。编辑器是**透明 textarea
+  压在高亮层上**（`-webkit-text-fill-color: transparent` + 滚动同步）——
+  不上 CodeMirror/Monaco（那会立刻把"单体 HTML"这件事变成打包工程），也不用
+  `contenteditable`（它的光标与撤销栈要自己重写一遍，textarea 免费带着）。
 
 ## 5. 单体 HTML 模式
 
@@ -191,24 +188,25 @@ stdout / stderr / 阶段耗时分栏）。同一份数据两种印法 —— 与
 
 ## 7. 分片（做的次序）
 
-1. **`cli.js` 导出 `main`**（把进程级那几件事挪到 `src/cli.js`）+ stdout/stderr 可收集。
-   这一刀单独走，因为它动的是所有人的入口。
-2. **`omni serve` 骨架**：`cmds.js` 加动词、`node:http` 起服务、`/api/health` + 静态文件。
-3. **`/api/tree` + `/api/file`**：虚拟文件树（先只读真磁盘）。
-4. **`/api/run` + `/api/emit` + `stages`**：真跑起来。
-5. **Studio 第一版**：目录树 + 只读展示 + 运行 + 阶段耗时（= 展示模式，移动端就绪）。
-6. **IDE 模式**：编辑器 + 高亮 + 虚拟 shell + 实时模式。
-7. **`omni --client`**。
-8. **`host/browser.js` + 打包脚本** -> 单体 HTML。
+1. **`omni serve` 骨架**：`cmds.js` 加动词、`serve.js` 走 `process.getBuiltinModule('node:http')`
+   （不进 check:self 的静态模块图）。`cli.js` 走子进程 `node src/serve.js`（与 `client.js`
+   同一条理由：`fetch`/`await`/`node:http` 不该进 `check:self`）。
+2. **`/api/tree` + `/api/file`**：虚拟文件树（先只读真磁盘）。
+3. **`/api/run` + `/api/emit` + `stages`**：真跑起来。
+4. **Studio 第一版**：目录树 + 只读展示 + 运行 + 阶段耗时（= 展示模式，移动端就绪）。
+5. **IDE 模式**：编辑器 + 高亮 + 虚拟 shell + 实时模式。
+6. **`omni --client`**：`src/client.js`（另一个 node 入口）+ `cli.js` 里 `--client` 块 + `serve.js` 里 `body.argv` 直通。
+7. **`host/browser.js` + 打包脚本** -> 单体 HTML。
 
-1–5 之后已经能用；6–8 是把它做完。
+1–4 之后已经能用；5–7 是把它做完（1–6 已落地，7 在做）。
 
 ## 8. 已知的决策与欠账
 
-* **串行 vs 每请求一进程**：第一刀串行（编译器有模块级全局）。要并行先量"一趟多少毫秒"。
+* **每请求一个子进程**（`spawnSync`）：代价是每趟 ~100ms node 启动；换来的是天然并发、
+  时限、崩了不影响服务三件事。量出来 250ms 防抖的实时模式吃得下。
 * **不上 WebSocket**：第一刀 SSE 都不用；交互式 REPL 要的时候再加。
 * **不上第三方编辑器**：`contenteditable` + 自己的高亮。代价是没有多光标/LSP，
   换来的是"零依赖、能塞进一份 HTML"。
 * **原生那一档在浏览器里做不到** —— 见 §5，这是事实不是欠账。
-* `cli.js` 那个巨型 `switch` 与模块级全局：serve 把它们暴露在了并发这个新维度上。
-  今天用一把锁绕过去，账记在这儿。
+* `cli.js` 那个巨型 `switch` 与模块级全局：子进程那一刀把并发这个维度**绕开了**
+  （每趟一份新的全局）。哪天要进程内重入，账还在这儿。
