@@ -752,6 +752,18 @@ const C_RT = new Map([
   ['__goSelGo', { sym: 'omni_go_sel_go', ret: 'i64', dty: 'int', ps: [] }],
   ['__goSelVal', { sym: 'omni_go_sel_val', ret: 'i64', dty: 'int', ps: [] }],
   ['__goSelOK', { sym: 'omni_go_sel_ok', ret: 'i64', dty: 'int', ps: [] }],
+  /* **宿主那几格**（时钟 / 核数 / 文件，见 `src/runtime-sched/omni_go.h` 末尾那段注）。
+     前端那侧的名字由 `ext/go/tograph.js` 的 `GO_HOST_FNS` 说（`omnihost.Nanotime()`
+     那一族）—— 这张表只管"这个名字落哪个 C 符号、签名是什么"。 */
+  ['__goNanotime', { sym: 'omni_go_nanotime', ret: 'i64', dty: 'int', ps: [] }],
+  ['__goNumCPU', { sym: 'omni_go_numcpu', ret: 'i64', dty: 'int', ps: [] }],
+  ['__goPathReset', { sym: 'omni_go_path_reset', ret: 'void', dty: 'void', ps: [] }],
+  ['__goPathPush', { sym: 'omni_go_path_push', ret: 'void', dty: 'void', ps: ['i64'] }],
+  ['__goOpen', { sym: 'omni_go_open', ret: 'i64', dty: 'int', ps: ['i64'] }],
+  ['__goWrite', { sym: 'omni_go_write', ret: 'void', dty: 'void', ps: ['i64', 'i64'] }],
+  ['__goRead', { sym: 'omni_go_read', ret: 'i64', dty: 'int', ps: ['i64'] }],
+  ['__goClose', { sym: 'omni_go_close', ret: 'void', dty: 'void', ps: ['i64'] }],
+  ['__goOut', { sym: 'omni_go_out', ret: 'void', dty: 'void', ps: ['i64'] }],
 ]);
 
 /**

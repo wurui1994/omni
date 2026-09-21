@@ -116,6 +116,26 @@ function __goSelVal() { return __goNoConc('select'); }
 function __goSelOK() { return __goNoConc('select'); }
 
 // ============================================================
+// 宿主那几格（时钟 / 核数 / 文件 / stdout）—— omnihost.X() 落到这几个名字上。
+// 时钟、核数、stdout 这三格 js 这条腿上是真的（node 自带）；文件那几格**明着拒** ——
+// 与上面 channel 那一批同一个口径（要跑标准库那几份桩就用原生腿）。
+// 注：这一份是 String.raw 模板，注里**不能有反引号**（见文件头那段话）。
+// ============================================================
+function __goNanotime() { return process.hrtime.bigint(); }
+function __goNumCPU() { return 1n; }
+function __goOut(b) { process.stdout.write(String.fromCharCode(Number(b) & 255)); }
+function __goNoFile(what) {
+  throw new Error(what + ' is only available in a native build'
+    + '（文件那几格在 js / 解释器这两条腿上还没接）');
+}
+function __goPathReset() { return __goNoFile('os.Create / os.Open'); }
+function __goPathPush() { return __goNoFile('os.Create / os.Open'); }
+function __goOpen() { return __goNoFile('os.Create / os.Open'); }
+function __goWrite() { return __goNoFile('文件那一格的写'); }
+function __goRead() { return __goNoFile('文件那一格的读'); }
+function __goClose() { return __goNoFile('文件那一格的关'); }
+
+// ============================================================
 // Go type switch + type checking
 // ============================================================
 function __goTypeOf(obj) {

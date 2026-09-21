@@ -215,3 +215,70 @@ int64_t omni_go_sel_go(void) {
 
 int64_t omni_go_sel_val(void) { return tls_selVal; }
 int64_t omni_go_sel_ok(void) { return tls_selOK; }
+
+/* ---- 宿主那几格：时钟 / 核数 / 文件（口与约定见 omni_go.h 的那段注） ---- */
+
+#include <time.h>
+#include <unistd.h>
+
+int64_t omni_go_nanotime(void) {
+  struct timespec ts;
+  /* 单调钟 —— `time.Since(start)` 问的是"过了多久"，而墙上钟会被调。
+     `time.Now().UnixNano()` 拿它当种子也没问题（种子只要变就行）。 */
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+  return (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
+}
+
+int64_t omni_go_numcpu(void) {
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  return n < 1 ? 1 : (int64_t)n;
+}
+
+/* 攒路径的那格缓冲：**一份全局的**（不是每条 M 一份，见头文件那段注）。 */
+#define OMNI_GO_PATH_MAX 4096
+static char go_path[OMNI_GO_PATH_MAX];
+static int go_pathN = 0;
+
+void omni_go_path_reset(void) { go_pathN = 0; go_path[0] = '\0'; }
+
+void omni_go_path_push(int64_t b) {
+  if (go_pathN >= OMNI_GO_PATH_MAX - 1) return;   /* 满了就丢 —— 4095 字节的路径不是真情形 */
+  go_path[go_pathN++] = (char)(b & 0xff);
+  go_path[go_pathN] = '\0';
+}
+
+/* 开着的那几格。槽号就是下标 —— 方言那侧只有整数。 */
+#define OMNI_GO_FILE_MAX 64
+static FILE *go_files[OMNI_GO_FILE_MAX];
+
+int64_t omni_go_open(int64_t mode) {
+  int i;
+  FILE *f = fopen(go_path, mode == 1 ? "wb" : "rb");
+  if (f == NULL) return -1;
+  for (i = 0; i < OMNI_GO_FILE_MAX; i++) {
+    if (go_files[i] == NULL) { go_files[i] = f; return (int64_t)i; }
+  }
+  fclose(f);
+  return -1;                                      /* 槽满了 —— 与"打不开"同一格答案 */
+}
+
+void omni_go_write(int64_t h, int64_t b) {
+  if (h < 0 || h >= OMNI_GO_FILE_MAX || go_files[h] == NULL) return;
+  /* 一次一格字节 —— stdio 自己带缓冲，所以这不是一次系统调用。 */
+  fputc((int)(b & 0xff), go_files[h]);
+}
+
+int64_t omni_go_read(int64_t h) {
+  int c;
+  if (h < 0 || h >= OMNI_GO_FILE_MAX || go_files[h] == NULL) return -1;
+  c = fgetc(go_files[h]);
+  return c == EOF ? -1 : (int64_t)c;
+}
+
+void omni_go_close(int64_t h) {
+  if (h < 0 || h >= OMNI_GO_FILE_MAX || go_files[h] == NULL) return;
+  fclose(go_files[h]);
+  go_files[h] = NULL;
+}
+
+void omni_go_out(int64_t b) { fputc((int)(b & 0xff), stdout); }

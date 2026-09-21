@@ -72,4 +72,30 @@ int64_t omni_go_sel_go(void);
 int64_t omni_go_sel_val(void);
 int64_t omni_go_sel_ok(void);
 
+/* ---- 宿主那几格：时钟 / 核数 / 文件（标准库那几份桩底下的那一层） ----
+ *
+ * 为什么摆在这儿而不是另开一个库：这一组与上面那一批走的是**同一条路**
+ * （`(lib "libomnigo")` + `(cabi …)` + `(ccall …)`，见 backend-core 的 `C_RT`），
+ * 多一个库就多一份 `(lib …)` 与一次 dlopen，而这几格与并发那一批总是一起用的
+ * （`time.Now()` 在 goroutine 里、PNG 在 `go r.writeImage(…)` 里）。
+ *
+ * **路径按字节攒**：方言那一层递不了串（`CABI_CORE` 里没有 `cstr`，见
+ * `src/core/sexpr/lower.js` 的那段注），所以 `os.Create("out.png")` 是
+ * "reset、逐字节 push、open" 三步。攒的那格缓冲是**一份全局的**，不是每条 M 一份
+ * （`_Thread_local` 这条腿不认）—— 所以"攒名字"与"open"之间不能换 goroutine。
+ * go 那侧 `os.Create` 一口气做完，中间没有 park，所以这条约定成立。
+ */
+int64_t omni_go_nanotime(void);
+int64_t omni_go_numcpu(void);
+void omni_go_path_reset(void);
+void omni_go_path_push(int64_t b);
+/* mode: 0 = 读、1 = 写。回**槽号**（>= 0）；打不开回 -1。 */
+int64_t omni_go_open(int64_t mode);
+void omni_go_write(int64_t h, int64_t b);
+/* 回一格字节（0..255）；到头了回 -1。 */
+int64_t omni_go_read(int64_t h);
+void omni_go_close(int64_t h);
+/* 往 stdout 写一格字节（`fmt.Print` 那一族 —— `print` 那格 prim 总带换行）。 */
+void omni_go_out(int64_t b);
+
 #endif /* OMNI_GO_H */

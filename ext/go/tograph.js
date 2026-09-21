@@ -641,10 +641,17 @@ function isMathCallOf(x, name) {
  * `math` 被局部量遮住时不走这儿（`VARTYPE` 有那个名字就是遮住了）。
  */
 function goMathCall(m, argNodes) {
+  /* **`math.F` 的实参里的无类型整数常量就是 float64**（go 的无类型常量规则）。
+     `math.Min(1, red/255)` 那个 `1` 不抬成 real 的话，`__goMathMin` 的第一格形参
+     一处收 real、一处收 int —— 方言的形参是单态的，当场报。
+     只抬**字面量**：真的 int 表达式在 go 那侧本来就是类型错。 */
+  const isIntLit = (a) => a !== null && a !== undefined && typeof a === 'object'
+    && a.op === 'const' && a.attrs !== undefined && Number.isInteger(a.attrs.value);
+  const asF = argNodes.map((a) => (isIntLit(a) ? convOf('float', a) : a));
   const rm = GO_MATH_RMATH.get(m);
-  if (rm !== undefined) return rmathCall(rm, argNodes);
+  if (rm !== undefined) return rmathCall(rm, asF);
   if ((m === 'Max' || m === 'Min') && argNodes.length === 2) {
-    return node('call', { fn: node('ref', {}, { name: ensureMathMinMax(m) }), args: argNodes });
+    return node('call', { fn: node('ref', {}, { name: ensureMathMinMax(m) }), args: asF });
   }
   return null;
 }
@@ -1281,6 +1288,31 @@ const FORMATS = new Set(['Sprintf', 'Errorf', 'Printf', 'Fprintf']);
  */
 /** 常量桩里`这一格是 real`的标记（见 `math` 那一行的注）。 */
 const R = (x) => ({ __real: x });
+/**
+ * **宿主那几格**：`src/lib/go/omnihost` 里那几格**没有体的声明** -> 前端发的名字。
+ *
+ * 为什么要这么一层：标准库那几份桩（`time` / `os` / `image/png` / `fmt`）绝大部分能用
+ * go 自己写，可"现在几点""几个核""往文件写一个字节"这三类**没法用 go 写** —— 它们要
+ * 宿主。方言那一层已经有一条正经的路（`(lib …)` + `(cabi …)` + `(ccall …)`，见
+ * `backend-core.js` 的 `C_RT`），所以这儿只需要一个**从 go 源码进那条路的入口**。
+ *
+ * 入口写成"一格没有体的 go 函数声明"（go 自己的 `runtime.nanotime` 就是这么声明的），
+ * 调用点写成 `omnihost.Nanotime()`。这样：桩仍旧是**能读的 go**，而"哪几格靠宿主"
+ * 一眼数得清 —— 就是这张表。
+ *
+ * 值那一栏的名字必须与 `C_RT`（原生腿）和 `ext/go/go-rt.js`（js 腿）里的**逐字相同**。
+ */
+const GO_HOST_FNS = new Map([
+  ['Nanotime', '__goNanotime'],
+  ['NumCPU', '__goNumCPU'],
+  ['PathReset', '__goPathReset'],
+  ['PathPush', '__goPathPush'],
+  ['Open', '__goOpen'],
+  ['Write', '__goWrite'],
+  ['Read', '__goRead'],
+  ['Close', '__goClose'],
+  ['Out', '__goOut'],
+]);
 const GO_STDLIB_STUBS = {
   utf8: { RuneSelf: 128, UTFMax: 4, RuneError: 0xFFFD },
   unicode: {},
@@ -3024,6 +3056,11 @@ function toNode(x) {
       const sig = kids(x).find((y) => tag(y) === 'sig');
       const blk = kids(x).find((y) => tag(y) === 'block');
       const name = leaf(nm);
+      /* **没有体的声明**（go 里那是"体在汇编/别处"，`func nanotime() int64` 就是这么写的）：
+         一格都不绑。我们用它给 `src/lib/go/omnihost` 那几格宿主入口写签名 ——
+         调用点由 `GO_HOST_FNS` 认出来落成 `__goNanotime` 那一族名字，真的体在
+         `libomnigo` 里（`src/runtime-sched/omni_go.c`）。绑一格空函数反而会盖掉它。 */
+      if (blk === undefined) return [];
       /* **名字是 `_` 就不绑**：go 里 `func _() { … }` 合法但不绑名字（只注册副作用）。
          多文件一起编时两个文件都有 `func _()` 不会撞名。 */
       if (name === '_') return funcOf(sig, blk, `__fn${FN_N++}`);
@@ -3492,6 +3529,18 @@ function toNode(x) {
           const mc = goMathCall(m, argNodes);
           if (mc !== null) return mc;
         }
+        /* **宿主那几格**（`omnihost.Nanotime()` 一族，见 `GO_HOST_FNS`）：落成
+           `call __goNanotime` 之类的名字。`backend-core.js` 的 `C_RT` 认这些名字，
+           在原生腿上落 `(ccall omni_go_nanotime)`；js 那条腿上 `ext/go/go-rt.js`
+           里有同名的一份。表里没有的名字**当场报**（写错了要立刻知道，不许落成兜底）。 */
+        if (recvName === 'omnihost' && VARTYPE.get('omnihost') === undefined) {
+          const hf = GO_HOST_FNS.get(m);
+          if (hf === undefined) {
+            throw new Error(`go->graph: omnihost 上没有 '${m}' 这一格 —— `
+              + `有的是 ${[...GO_HOST_FNS.keys()].join(' / ')}`);
+          }
+          return node('call', { fn: node('ref', {}, { name: hf }), args: argNodes });
+        }
         const fromVar = recvName !== null ? VARTYPE.get(recvName) : undefined;
         const flat = METHODS.get(m);
         /* **接收者不是光名字**（`shapes[0].BoundingBox()` / `m.tree.Intersect(r)`）时也要
@@ -3646,6 +3695,15 @@ function toNode(x) {
       // 转换（`int(x)` / `float64(x)`）在树上与调用**同形** —— 靠一张名字表分开
       if (callee !== null && CONV.has(callee) && argNodes.length === 1) {
         return convOf(CONV.get(callee), argNodes[0]);
+      }
+      /* **转换到一格具名的标量类型**（`Duration(t.ns - u.ns)`、`Channel(i)`）。
+         也与调用同形，靠两道闸分开：这个名字**登记过是类型**（`TYPES`），而且它的底层
+         跟一层是一格标量（`UNDER`）。落的就是底层那一格的转换 —— 图上没有"具名标量类型"
+         这回事，所以 `type Duration int64` 的转换与 `int64(…)` 是同一件事。
+         少了这一格，`time` 那份桩里的 `Duration(…)` 会落成"调一个叫 Duration 的函数"。 */
+      if (callee !== null && argNodes.length === 1 && TYPES.has(callee) && UNDER.has(callee)) {
+        const sn = scalarNameOf(UNDER.get(callee));
+        if (sn !== null && CONV.has(sn)) return convOf(CONV.get(sn), argNodes[0]);
       }
       return node('call', { fn: toNode(fn), args: callee === null ? argNodes : argsByDecl(callee, argNodes, false, argAsts) });
     }
