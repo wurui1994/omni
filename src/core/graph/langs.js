@@ -22,7 +22,7 @@
 
 import { OmniError } from '../source/diag.js';
 /* "镜像在哪儿"这一格由宿主答（封闭 ABI 的 `js_install_dir`）—— 见 `treeRoot()` 那段账。 */
-import { installDir } from '../host/native.js';
+import { installDir, exists } from '../host/native.js';
 import { chezToGraph } from '../../../ext/chez/tograph.js';
 import { luaToGraph } from '../../../ext/lua/tograph.js';
 import { gslShellToGraph } from '../../../ext/gsl-shell/tograph.js';
@@ -46,7 +46,35 @@ import { cppToGraph } from '../../../ext/cpp/tograph.js';
  * 不一样，所以那时候 `ext/*.grammar` 不在这条相对路径上 —— 那是"产物怎么装"的另一笔账
  * （与 runtime/ 和 lib/ 一样），不是这一格的事。
  */
+/**
+ * 这棵树的根。**从宿主那格 `installDir()` 往上找标志文件**（`package.json` / `.git`）——
+ * 从前这儿直接读 `import.meta.url`，而那一格在自编译轴上是一条硬错
+ * （`import.meta is not supported`：它不在这门语言的子集里）。宿主那一格是封闭 ABI 的
+ * `js_install_dir`，两代产物各自答得出来 —— 于是这一份跟着编译器被降级时也说得通。
+ *
+ * **按布局认，不数层数**（2026-09-22 改的一个真错，与 `host/cache.js` 的 `treeRoot()`
+ * 同一条规矩）：从前这儿是"往上 pop 三格"（照 `src/core/host` 数出来的），于是
+ *   node src/cli.js  installDir = <repo>/src/core/host -> <repo>          ✓
+ *   dist/omni        installDir = <repo>/dist          -> <repo> 的上一级 ✗
+ * 症状是原生那一代 `./dist/omni build x.go` 报
+ * `ENOENT: …/Train/ext/go/go.grammar`（少了 `Omni/` 那一节）。往上找标志文件两种布局都停在
+ * `<repo>` 上，于是**在仓库里跑的那份 dist 产物也认得语法文件**。
+ *
+ * 找不着标志文件（真装到 `/usr/local/bin` 的样子）就退回老办法 —— 那一档的语法文件该由
+ * "产物怎么装"那一格摆进 `share/`（与 runtime/ 和 lib/ 一样，见 `host/data.js`），
+ * 不是这儿的事。
+ */
 export function treeRoot() {
+  let d = installDir();
+  for (let i = 0; i < 8; i++) {
+    if (exists(`${d}/package.json`) || exists(`${d}/.git`)) return d;
+    const parts = d.split('/');
+    if (parts.length <= 1) break;
+    parts.pop();
+    const up = parts.join('/');
+    if (up === d || up === '') break;
+    d = up;
+  }
   const parts = installDir().split('/');
   parts.pop();            // host
   parts.pop();            // core
