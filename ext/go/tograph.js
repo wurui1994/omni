@@ -1687,8 +1687,16 @@ function zeroOf(ty, name, pkg) {
   if (t === 'array') {
     const [n, el] = kids(ty);
     if (tag(n) !== 'num') {
-      /* `[N]T` 里 N 不是字面量（是 sel / name / 常量）—— 降成空列表，不精确但不中断。 */
-      return listNew([]);
+      /* `[N]T` 里 N 不是字面量而是**具名常量**（真 go 标准库里到处是：`math/rand` 的
+         `rngSource.vec [_LEN]int64`）—— 落 `fill(N, T 的零值)`：长度按那个常量算，
+         **元素类型跟着零值走**。形状与 `makeOf` 的 `make([]T, n)` 那一支一模一样。
+
+         从前这儿落一格**空 `list-new`**，而空列表把元素类型丢了 —— core 那侧当场报
+         `记录的字段 'vec' 是一格列表，可它的类型推不出来`（`declTypeOfNode` 答 null）。
+         元素自己没有零值（接口 / 函数类型）时照旧退回空列表，那一格由别处报。 */
+      const ez0 = zeroOf(el, name, pkg);
+      if (ez0 === null || ez0 === undefined) return listNew([]);
+      return node('prim', { args: [toNode(n), ez0] }, { name: 'fill' });
     }
     const cnt = Number(leaf(kids(n)[0]));
     if (!Number.isInteger(cnt) || cnt < 0 || cnt > 1024) {
