@@ -1591,6 +1591,12 @@ function collectDecls(x, shapesOnly) {
     const nm0 = leaf(kids(x)[0]);
     if (sig0 !== undefined && nm0 !== '_') {
       FSIG.set(nm0, paramInfo(sig0).map((p) => p.ty));
+      /* **变参**（`func NewUnionSDF(items ...SDF)`）：调用点要把尾巴打成一格列表，
+         见 `packVariadic`。固定形参的格数按 `FSIG` 的下标算。 */
+      {
+        const vt0 = variadicElemTy(sig0);
+        if (vt0 !== null) FVAR.set(nm0, { fixed: paramInfo(sig0).length - 1, el: vt0 });
+      }
       /* **声明的返回类型**（`FRET`，见 ADR-0040）：`ret` 那一处要按它装箱，调用点也要靠它
          认出"这格调用交出来的是接口值"。只收单返回 —— 多返回在图上是一格多值。 */
       const o0 = partKids(sig0, 'out');
@@ -1627,6 +1633,10 @@ function collectDecls(x, shapesOnly) {
       const sigM = kids(x).find((y) => tag(y) === 'sig');
       if (sigM !== undefined) {
         FSIG.set(mangle(owner, name), [undefined, ...paramInfo(sigM).map((p) => p.ty)]);
+        const vtM = variadicElemTy(sigM);
+        if (vtM !== null) {
+          FVAR.set(mangle(owner, name), { fixed: paramInfo(sigM).length, el: vtM });
+        }
         const oM = partKids(sigM, 'out');
         if (oM.length === 1) FRET.set(mangle(owner, name), oM[0]);
         if (oM.length > 1) FOUTS.set(mangle(owner, name), outTypes(sigM));
@@ -1971,6 +1981,14 @@ function scalarNameOf(ty) {
 }
 
 /**
+ * 现搭一格 `[]T` 的类型节点（语法树上没有它的地方要它：变参在函数体里就是 `[]T`）。
+ * 形状与语法发出来的 `(slice T)` 一样，所以 `zeroOf` / `elemTyOf` 照原路走。
+ */
+function sliceTyOf(el) {
+  return { kind: 'list', items: [{ kind: 'atom', value: 'slice' }, el] };
+}
+
+/**
  * 一格类型节点**剥到切片 / 字典**（`paren` 透传、具名类型跟着 `UNDER` 走）。不是这两档回 null。
  * 用处见 `fieldValue`：那两档上写着的 `nil` 要落零值容器而不是 `lit(null)`。
  */
@@ -2046,14 +2064,63 @@ const FSIG = new Map();
  * go 的规矩是**无类型常量按形参的声明类型转** —— 声明就在 `FSIG` 里，照着转即可；
  * 对本来就是浮点的实参这一转是空操作（与 `fieldValue` 那段账同理）。
  */
-function argsByDecl(name, nodes, skip, asts) {
+function argsByDecl(name, nodes, skip, asts, spread) {
   const tys = FSIG.get(name);
   if (tys === undefined) return nodes;
   const off = skip === true ? 1 : 0;
-  return nodes.map((a, i) => {
-    const ty = tys[i + off];
+  const v = FVAR.get(name);
+  const out = nodes.map((a, i) => {
+    let ty = tys[i + off];
+    /* **变参那几格共用同一个声明类型**（`FSIG` 里只摆了一格）：`f(a, b, c)` 打到
+       `...SDF` 上时第 2、3 格也要按 `SDF` 装箱 —— 不然打包出来的列表里元素类型不一样
+       （量出来的：`列表 'arg_tmp6' 里的元素类型不一样（r2 / r3）`）。
+       `f(xs...)` 那一档的末尾是**整格切片**，不按元素类型转。 */
+    if (v !== undefined && i + off >= v.fixed
+      && !(spread === true && i === nodes.length - 1)) ty = v.el;
     return ty === undefined ? a : fieldValue(ty, a, asts === undefined ? undefined : asts[i]);
   });
+  return packVariadic(name, out, off, spread === true);
+}
+
+/**
+ * 每个**变参**函数/方法：固定形参有几格（按 `FSIG` 的下标算，方法的接收者算在内）＋
+ * 变参那一格的**元素类型**。`packVariadic` 拿它把调用点的尾巴打成一格列表。
+ */
+const FVAR = new Map();
+
+/** 这格签名是变参吗？是就回**元素类型**节点（`...SDF` 回 `SDF`），不是回 null。 */
+function variadicElemTy(sig) {
+  const ins = partKids(sig, 'in');
+  const last = ins[ins.length - 1];
+  if (last === undefined) return null;
+  const isV = kids(last).some((y) => (isList(y) ? tag(y) : leaf(y)) === 'variadic');
+  if (!isV) return null;
+  const pi = paramInfo(sig);
+  const lp = pi[pi.length - 1];
+  return lp === undefined || lp.ty === undefined ? null : lp.ty;
+}
+
+/**
+ * **变参调用点：尾巴打成一格列表**（`NewUnionSDF(a, b)` → `NewUnionSDF([]SDF{a, b})`）。
+ *
+ * 为什么在这一层打包（而不是像 js 那样发 rest 形参）：方言的函数是**定元数**的，图上也没有
+ * "剩下的实参"这一格。而函数体里 `items` 本来就当 `[]T` 用（`len` / `range` / 取下标）——
+ * 打包之后**所有后端**看到的都是一格普通的数组形参，`restParam` 那一格就不必了。
+ * 量出来的症状（pt 的 `NewUnionSDF(items ...SDF)`）：不打包时 `UnionSDF.Items` 那一格
+ * 在两处算出两格形状（`(arr r2)` 与 `r2`）。
+ *
+ * `f(xs...)`（带 spread 的那一档）**原样递**：末尾那一格本来就是切片。
+ */
+function packVariadic(name, nodes, off, spread) {
+  const v = FVAR.get(name);
+  if (v === undefined || spread) return nodes;
+  const fixed = v.fixed - off;
+  if (fixed < 0 || nodes.length < fixed) return nodes;
+  let ez = null;
+  try { ez = zeroOf(v.el, `${name} 的变参`); } catch { ez = null; }
+  const tail = nodes.slice(fixed);
+  return [...nodes.slice(0, fixed),
+    ez === null || ez === undefined ? listNew(tail) : listNew(tail, ez)];
 }
 
 /**
@@ -2755,12 +2822,23 @@ function funcOf(sig, blk, name, self, selfType) {
     used.add(params[i]);
   }
   /* **变参** `func f(xs ...int)`：语法上那一格 `p` 带 `variadic` 标记。
-     图上记成 `restParam`（最后一格形参的名字），js 后端发 `...name` 的 rest 形参。
-     那时函数体里 `xs` 就是一格真数组 —— `len(xs)` / `range xs` 都对。 */
+     **打包落在调用点**（`packVariadic`）—— 函数自己就是一格普通的数组形参，不再发
+     `restParam`（js 的 `...name`）。两条理由：方言的函数是定元数的（那一格在 core 上
+     压根落不下去），而 `xs` 在体里本来就当 `[]T` 用，一格真数组对所有后端都成立。 */
   const lastIn = inParams[inParams.length - 1];
   const isVariadic = lastIn !== undefined
     && kids(lastIn).some((y) => (isList(y) ? tag(y) : leaf(y)) === 'variadic');
-  const restParam = (isVariadic && params.length > 0) ? params[params.length - 1] : undefined;
+  /* **变参那一格在函数体里的类型是 `[]T`，不是 `T`**（语法上 `p` 里摆的是元素类型）。
+     少了这一转，`func NewUnionSDF(items ...SDF) SDF { return &UnionSDF{items} }` 里
+     `items` 被当成一格 SDF：`UnionSDF.Items` 那一格于是算出**两格形状**
+     （`(arr r2)` 与 `r2`），core 那侧报 `'__box_UnionSDF__SDF' 第 1 格形参落成了
+     r4{Items: (arr r2)}，可后面有一处调用给的是 r5{Items: r2}`（量出来的，pt 的 UnionSDF）。
+     **只改函数体这一侧**：调用点那边（`FSIG` / `argsByDecl`）要的还是元素类型 ——
+     `NewUnionSDF(a, b)` 的每一格实参都要按 `SDF` 装箱。 */
+  if (isVariadic && pinfo.length > 0) {
+    const last = pinfo[pinfo.length - 1];
+    if (last.ty !== undefined) last.ty = sliceTyOf(last.ty);
+  }
   const savedVars = new Map(VARTYPE);
   const savedTys = new Map(VARTY);
   const savedScopes = SCOPES;
@@ -2786,7 +2864,7 @@ function funcOf(sig, blk, name, self, selfType) {
      主人（`Sub` 在平表里有 `Vector` / `Color` 两个主人），落到"取字段再调它"的兜底上，
      core 那侧报 `'Vector__Normalize' 第 1 格实参在两处的类型不一样（r2 与 int）`。
      `paramInfo` 已经把"名字被当成类型"和"一组共用后面那个类型"两条都摆平了。 */
-  for (const p of paramInfo(sig)) {
+  for (const p of pinfo) {
     const t = namedTypeOf(p.ty);
     if (t !== null) VARTYPE.set(p.nm, t);
     /* 形参的**类型节点**也留一份（`tyOfExpr` 要它：`[]Shape` 的元素类型、接口分派）。 */
@@ -2854,8 +2932,7 @@ function funcOf(sig, blk, name, self, selfType) {
            core 那侧的 `implicitRet` 于是把末尾那一句当成了返回值 —— 量出来是
            `(fn Rand__Seed (…) int (ret (callfn (fld (fld (var r) src) Seed) …)))`，
            方言当场 `要返回 int，给的是 void`。go 这侧本来就知道答案，说一声就行。 */
-        ...(outs.length === 0 ? { noret: true } : {}),
-        ...(restParam !== undefined ? { restParam } : {}) });
+        ...(outs.length === 0 ? { noret: true } : {}) });
   } finally {
     VARTYPE.clear();
     for (const [k, v] of savedVars) VARTYPE.set(k, v);
@@ -4179,6 +4256,8 @@ function toNode(x) {
         return makeOf(args === undefined ? [] : kids(args));
       }
       const argNodes = args === undefined ? [] : many(kids(args).filter((y) => tag(y) !== 'spread'));
+      /* `f(xs...)` 那一档（见 `packVariadic`）：末尾那一格本来就是切片，不再打包。 */
+      const hasSpread = args !== undefined && kids(args).some((y) => tag(y) === 'spread');
       /* 实参的**原树**（与 `argNodes` 同序）：装箱那一步要问"这格值的具体类型是什么"。 */
       const argAsts = args === undefined ? [] : kids(args).filter((y) => tag(y) !== 'spread');
       // `fmt.Println(x)`：选择器那一格在这一批还没有节点（`record` 排在后面），
@@ -4289,7 +4368,7 @@ function toNode(x) {
           if (FSIG.has(m)) {
             return node('call', {
               fn: node('ref', {}, { name: m }),
-              args: argsByDecl(m, argNodes, false, argAsts),
+              args: argsByDecl(m, argNodes, false, argAsts, hasSpread),
             });
           }
           return node('call', { fn: fieldGet(toNode(obj), m), args: argNodes });
@@ -4300,16 +4379,16 @@ function toNode(x) {
           return node('call', {
             fn: node('ref', {}, { name: mangle(owner, m) }),
             args: onType
-              ? argsByDecl(mangle(owner, m), argNodes, false, argAsts)
-              : [toNode(obj), ...argsByDecl(mangle(owner, m), argNodes, true, argAsts)],
+              ? argsByDecl(mangle(owner, m), argNodes, false, argAsts, hasSpread)
+              : [toNode(obj), ...argsByDecl(mangle(owner, m), argNodes, true, argAsts, hasSpread)],
           });
         }
         if (flat !== undefined && flat !== null) {
           return node('call', {
             fn: node('ref', {}, { name: mangle(flat, m) }),
             args: onType
-              ? argsByDecl(mangle(flat, m), argNodes, false, argAsts)
-              : [toNode(obj), ...argsByDecl(mangle(flat, m), argNodes, true, argAsts)],
+              ? argsByDecl(mangle(flat, m), argNodes, false, argAsts, hasSpread)
+              : [toNode(obj), ...argsByDecl(mangle(flat, m), argNodes, true, argAsts, hasSpread)],
           });
         }
         /* **从嵌入的接口提升上来的方法**（pt 的 `type SDFShape struct { SDF; … }` 里
@@ -4429,7 +4508,7 @@ function toNode(x) {
         const sn = scalarNameOf(UNDER.get(callee));
         if (sn !== null && CONV.has(sn)) return convOf(CONV.get(sn), argNodes[0]);
       }
-      return node('call', { fn: toNode(fn), args: callee === null ? argNodes : argsByDecl(callee, argNodes, false, argAsts) });
+      return node('call', { fn: toNode(fn), args: callee === null ? argNodes : argsByDecl(callee, argNodes, false, argAsts, hasSpread) });
     }
     // `var` / `const` 落**一串 bind**（顶层与语句里同一格 —— go 两处都写得下）。
     // 树上的标签是 `var` / `const`（`go.grammar` 的 const-decl / var-decl 两条产生式
@@ -4643,6 +4722,7 @@ export function goToGraph(tree, opts) {
   EMBEDS.clear();
   FRET.clear();
   FOUTS.clear();
+  FVAR.clear();
   BOXFNS.clear();
   BOXING.clear();
   EQFNS.clear();

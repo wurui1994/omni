@@ -2696,7 +2696,8 @@ export function emitCore(g) {
       const want = ctx.args.get(`${f.name}#${i}`);
       const had = ctx.args.get(`emitted:${f.name}#${i}`);
       if (want !== undefined && had !== undefined && want !== had) {
-        gap(`'${f.name}' 第 ${i + 1} 格形参落成了 ${had}，可后面有一处调用给的是 ${want}`
+        gap(`'${f.name}' 第 ${i + 1} 格形参落成了 ${had}${shapeNote(had, ctx)}，`
+          + `可后面有一处调用给的是 ${want}${shapeNote(want, ctx)}`
           + '（那处调用在另一个函数体里 —— 形参的类型这一刀只从 main 里的调用点收）');
       }
     }
