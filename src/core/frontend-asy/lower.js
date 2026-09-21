@@ -3009,12 +3009,43 @@ class AsyLower {
       else sec(w.u).wraps.push(w.t);
     }
     const ids = [...secs.keys()].sort((a, b) => a - b);
+    /* 每段前面留一格**归属标记**（`(unit "<源文件>")`，见 sexpr/lower.js 的 markUnits）：
+     * C 那条腿按它切文件（一个源文件一份 `.c`/`.h`）。asy 的名字是全局平铺的，所以这儿
+     * 不能用 `(module …)` —— 那要逐条 import/export，不是这门语言的语义。
+     * 共用的那一族（`weak`：名字只由内容定的生成物）前面是不带名字的 `(unit)`：摊给谁都不对。 */
+    const keyOfUnit = new Map();
+    for (const u of this.units) keyOfUnit.set(u.id, u.key === undefined ? '' : u.key);
+    const uMark = (id) => {
+      const k = keyOfUnit.get(id);
+      return typeof k === 'string' && k !== '' ? `  (unit ${JSON.stringify(k)})` : '  (unit)';
+    };
     const out = ['(module'];
-    for (const id of ids) for (const x of secs.get(id).cls) out.push(x);
-    for (const id of ids) for (const x of secs.get(id).glb) out.push(x);
+    for (const id of ids) {
+      const g = secs.get(id);
+      if (g.cls.length === 0) continue;
+      out.push(uMark(id));
+      for (const x of g.cls) out.push(x);
+    }
+    for (const id of ids) {
+      const g = secs.get(id);
+      if (g.glb.length === 0) continue;
+      out.push(uMark(id));
+      for (const x of g.glb) out.push(x);
+    }
+    if (weak.length > 0) out.push('  (unit)');
     for (const x of weak) out.push(x);
-    for (const id of ids) for (const x of secs.get(id).fns) out.push(x);
-    for (const id of ids) for (const x of secs.get(id).wraps) out.push(x);
+    for (const id of ids) {
+      const g = secs.get(id);
+      if (g.fns.length === 0) continue;
+      out.push(uMark(id));
+      for (const x of g.fns) out.push(x);
+    }
+    for (const id of ids) {
+      const g = secs.get(id);
+      if (g.wraps.length === 0) continue;
+      out.push(uMark(id));
+      for (const x of g.wraps) out.push(x);
+    }
     // 下一步（按文件名存产物）要的就是这张表：单元 -> 它自己那几段 + 共用的 weak
     const keys = new Map();
     // 库的**接口索引**（第七十八刀）：这一趟真降过的库单元各出一份，落到盘上叫 `.aif`。

@@ -3183,9 +3183,46 @@ export function lowerCoreSexpr(file, diags, entry, opts) {
      再按拓扑序并成一个 —— 只有一个 module 的文件原样穿过去，什么都不变。 */
   const linked = resolveModules(expanded, diags);
   if (linked === null || diags.hasErrors()) return null;
+  /* `(unit "…")`：**归属标记**（这一刀）。摘掉它，把"下面这些声明来自哪一份源文件"
+     记到节点上 —— C 那条腿按它切文件。见 markUnits。 */
+  const marked = markUnits(linked);
   // 入口名默认是 `omni_main`（整个程序）。一个库文件编成一份自己的产物时给它自己的名字
   // （`omni_init_plain` 之类）：那一份的 `(main …)` 就是这个库的初始化函数。
-  return new CoreLowerer(diags).chunk(linked, entry === undefined ? 'omni_main' : entry);
+  return new CoreLowerer(diags).chunk(marked, entry === undefined ? 'omni_main' : entry);
+}
+
+/**
+ * `(unit "<名字>")` —— **归属标记，不是模块**。
+ *
+ * 它只说"接下来这些声明来自哪一份源文件"，一点可见性都不改。为什么要与 `(module …)` 分开：
+ * asy 那样的前端一个程序里有几十份源文件、而名字是**全局平铺**的（asy 自己的语义），
+ * 用 `(module …)` 就得逐条写 import/export —— 那不是那门语言的语义，也不是这一层该管的事。
+ * 归属这件事本身只有一个用处：C 那条腿按它切文件（一个单元一份 `.c`/`.h`，见 §12）。
+ *
+ * 状态机：遇到一格 `(unit X)` 就把后面的声明标成 X，`(unit)` 不带名字就是"回到无归属"
+ * （生成物那一族 —— 名字只由内容定，摊给谁都不对）。
+ */
+function markUnits(nodes) {
+  const strip = (items, start) => {
+    const out = items.slice(0, start);
+    let cur = null;
+    for (const f of items.slice(start)) {
+      if (isList(f) && head(f) === 'unit') {
+        const a = f.items[1];
+        cur = a === undefined ? null : String(a.value);
+        continue;
+      }
+      if (cur !== null && f.unit === undefined) f.unit = cur;
+      out.push(f);
+    }
+    return out;
+  };
+  for (const n of nodes) {
+    if (!isList(n) || head(n) !== 'module') continue;
+    const nameAt = n.items[1];
+    n.items = strip(n.items, nameAt !== undefined && nameAt.kind === 'atom' ? 2 : 1);
+  }
+  return nodes;
 }
 
 /**
