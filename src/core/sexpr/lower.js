@@ -951,6 +951,7 @@ class CoreLowerer {
       if (typeof n.unit === 'string') this.declUnit.set(`s:${nm}`, n.unit);
     } else if (pre !== null) for (const f of fields) pre.fields.push(f);   // 原地填那一格
     else this.classes.set(nm, classType(nm, fields));
+    if (kind !== 'struct' && typeof n.unit === 'string') this.declUnit.set(`c:${nm}`, n.unit);
     return null;
   }
 
@@ -1160,7 +1161,10 @@ class CoreLowerer {
     const classes = [];
     let ci = 0;
     for (const c of this.classes.values()) {
-      if (ci++ >= base.classes && !this.sigOnly.aggs.has(c.name)) classes.push(c);
+      if (ci++ >= base.classes && !this.sigOnly.aggs.has(c.name)) {
+        if (c.file === undefined) c.file = this.declUnit.get(`c:${c.name}`) ?? '';
+        classes.push(c);
+      }
     }
     // 模块级变量按**声明顺序**发出去（Map 记的就是插入序）：MIR 的全局号按这个顺序分配，
     // 所以同一份输入两次编译出来的字节与哈希都一样。

@@ -1,0 +1,38 @@
+;; 跨模块的**类型**与**模块级变量**（ADR-0042 第二步）：类型、全局、函数各自归它的模块。
+;;
+;; 这一份同时是 C 那条腿"头按依赖切"的判据料（docs/design/build-system.md §12 末节）：
+;;   geom 定义 V；shape 的 P 按值嵌了 V —— 于是 shape.h 必须 #include "geom.h"；
+;;   tally 的模块级变量只在 tally.c 里定义一份，别家只见 extern；
+;;   app 只引到 shape 与 tally 的函数，压根不该 #include geom.h 之外的东西。
+;; 判据是"每一份 .c 各自编得过、链起来答案不变"，而不是"看着像模块化"。
+(module app
+  (import shape (area))
+  (import tally (bump hits))
+  (main
+    (expr (call bump))
+    (expr (call bump))
+    (print (call area (real 3.0) (real 4.0)))
+    (print (var hits))))
+
+(module shape
+  (import geom (V mag))
+  (export area P)
+  (struct P (c V) (r real))
+  (fn area ((w real) (h real)) real
+    (let p P (new P))
+    (fldset (fld (var p) c) x (var w))
+    (fldset (fld (var p) c) y (var h))
+    (fldset (var p) r (real 2.0))
+    (ret (bin "*" (fld (var p) r) (call mag (fld (var p) c))))))
+
+(module geom
+  (export V mag)
+  (struct V (x real) (y real))
+  (fn mag ((v V)) real
+    (ret (bin "+" (fld (var v) x) (fld (var v) y)))))
+
+(module tally
+  (export bump hits)
+  (global hits int)
+  (fn bump () void
+    (set hits (bin "+" (var hits) (int 1)))))

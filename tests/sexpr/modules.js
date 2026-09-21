@@ -4,7 +4,7 @@
 // 这一份判的是**拒绝**：边界的价值全在"说不通的时候说人话"，所以每条都核那句话本身。
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,6 +73,48 @@ refuses('两个 main', `(module a (main (print (int 1))))
 refuses('几个模块但没名字', `(module (fn f () int (ret (int 1))))
 (module (main (print (int 2))))
 `, '每个都要名字');
+
+/* C 那条腿的**头按依赖切**（docs/design/build-system.md §12 末节）。
+ * 判的是三件机制，不是图也不是字节数：
+ *   1. 单元数 = 模块数（归属这一格真落到了每条声明上）
+ *   2. include 图 = 依赖图：`P` 按值嵌了 `V`，所以 shape.h 引 geom.h；
+ *      app 只引它真叫到的那两家；一份公用头都没有
+ *   3. 每一份 `.c` **单独**过我们自己的 C 前端都编得过（头是自洽的）
+ * 链起来答案不变那一格验过（同一堆 `.o` + 运行时那 21 份，见文档），这儿不做：
+ * 它要 rt 暖存目录在，那是构建的事、不是这条轴的事。 */
+function ok(name, cond, why = '') {
+  if (cond) { pass++; console.log(`  ok   ${name}`); return; }
+  fail++;
+  console.log(`  FAIL ${name}${why ? `\n       ${why}` : ''}`);
+}
+
+console.log('\nsexpr/modules（C 那条腿：头按依赖切）');
+{
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = join(here, 'cases', '53-modtypes.sx');
+  const work = join(dir, 'split');
+  const r = spawnSync('node', [cli, 'emit', 'c', src, '--split', '--work', work],
+    { encoding: 'utf8', timeout: 120000 });
+  const got = (nm) => { try { return readFileSync(join(work, nm), 'utf8'); } catch { return null; } };
+  ok('四个模块各一份 .c/.h', r.status === 0
+    && ['app', 'shape', 'geom', 'tally'].every((n) => got(`${n}.c`) !== null && got(`${n}.h`) !== null),
+    `退出码 ${r.status}：${(r.stderr ?? '').trim().split('\n').slice(-1)[0]}`);
+  ok('没有公用头', got('_decl.h') === null && got('_shared.c') === null && got('omni_types.h') === null);
+  const sh = got('shape.h') ?? '';
+  const ap = got('app.h') ?? '';
+  const apc = got('app.c') ?? '';
+  ok('按值嵌套 -> shape.h 引 geom.h', sh.includes('#include "geom.h"'));
+  ok('app 只引它叫到的那两家', !ap.includes('geom.h') && apc.includes('shape.h') && apc.includes('tally.h'));
+  ok('模块级变量只定义一份', (got('tally.h') ?? '').includes('extern int64_t g_hits;')
+    && (got('tally.c') ?? '').includes('\nint64_t g_hits;'));
+  ok('main 归入口那一家', apc.includes('int main(int argc, char **argv)'));
+  for (const n of ['omni_gen', 'geom', 'shape', 'tally', 'app']) {
+    const o = spawnSync('node', [cli, 'c', 'obj', join(work, `${n}.c`), '-o', join(work, `${n}.o`),
+      '--arch', 'arm64', '--os', 'osx', '-f', 'elf', '-I', 'src/runtime'],
+      { encoding: 'utf8', timeout: 120000, cwd: join(here, '..', '..') });
+    ok(`${n}.c 单独编得过`, o.status === 0, (o.stderr ?? '').trim().split('\n').slice(-1)[0]);
+  }
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exitCode = 1;

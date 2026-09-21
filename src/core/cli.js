@@ -4974,11 +4974,10 @@ function main(argv) {
     }
     case 'emit-c': {
       const { mod } = compile(path, rest);
-      /* `--split`：按**模块**发射（P2）—— 一个源文件一个 `.c`，跟正常的 C 工程一样，
-       * 外加一份共享段（`_shared.c`：声明 + 只能有一份的那些 + main）。
-       * 现在还编不起来：共享段里的容器 / JS 那一族宏自带静态状态，得先变成"只有声明的头 +
-       * 一个定义 TU"（P2a，见 ADR-0021）。所以这一步先把**分布**摆出来 —— 哪个模块多少行、
-       * 多少字节、多少函数，这是"看得见"的那一半，也是并行与增量的分组依据。 */
+      /* `--split`：按**模块**发射（P2）—— 一个源文件一份 `.c` + 一份同名 `.h`，跟正常的
+       * C 工程一样。**没有公用头**：头的 include 图严格等于模块的依赖图，改一个类型只让
+       * `#include` 到它的那几家重编（docs/design/build-system.md §12 末节的定案）。
+       * 与用户类型无关的那一族生成物（字面量池、`list<int>`、JS 模板）落在 `omni_gen.{h,c}`。 */
       const si = rest.findIndex((a) => a === '--split' || a.startsWith('--split='));
       if (si >= 0) {
         const wi = rest.indexOf('--work');
@@ -4986,19 +4985,17 @@ function main(argv) {
         const dir = rest[wi + 1];
         mkdirAll(dir);
         const u = cap('cgen.units')(mod);
-        /* `_decl.h` 是共用的那一份（类型、容器 / JS 模板、字面量池、全部原型），每个模块
-         * `#include` 它；`_shared.c` 只放"只能有一份"的那些（模块级变量的定义、闭包的 make、
-         * 那两张表）与 main。状态已经不在模板里了（S1），所以模板复制一份是无害的。 */
-        writeText(join(dir, '_decl.h'), `${u.shared}\n`);
-        writeText(join(dir, '_shared.c'), `#include "_decl.h"\n${u.once}\n${u.tail}\n`);
+        writeText(join(dir, `${u.gen.name}.h`), u.gen.h);
+        writeText(join(dir, `${u.gen.name}.c`), u.gen.c);
         let tot = 0;
         for (const t of u.units) {
-          writeText(join(dir, `${t.name}.c`), `#include "_decl.h"\n${t.text}`);
-          tot += t.text.length;
+          writeText(join(dir, `${t.name}.h`), t.h);
+          writeText(join(dir, `${t.name}.c`), t.c);
+          tot += t.c.length + t.h.length;
         }
         const ord = [...u.units].sort((a, b) => b.bytes - a.bytes);
         stderr(`omni: ${u.units.length} 个模块 TU，合计 ${fmtBytes(tot)}`
-          + `，共享段 ${fmtBytes(u.shared.length + u.once.length + u.tail.length)}\n`);
+          + `，${u.gen.name} ${fmtBytes(u.gen.h.length + u.gen.c.length)}\n`);
         for (const t of ord.slice(0, 12)) {
           stderr(`  ${t.name}  ${fmtBytes(t.bytes)}  ${t.funcs} funcs\n`);
         }

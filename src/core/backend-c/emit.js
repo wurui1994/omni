@@ -36,6 +36,11 @@ const INT64_MIN_VALUE = -9223372036854775807n - 1n;
 /** 向量上第一阶段只有这四条（ADR-0014 决策 6）：算符 -> C 侧助手名的后缀 */
 const C_VEC_OPS = [['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div']];
 
+/* 切文件时那一家**内容定址**的生成物（字面量池、`list<int>` 这类内建元素的容器实例化、
+ * JS 模板、派发器）。只装"与用户类型无关"的那些，所以依赖只有一个朝向：
+ * 各单元 -> omni_gen -> 运行时头，它不回头 include 任何单元。 */
+const GEN_UNIT = 'omni_gen';
+
 /* 线性内存的访问描述符 -> [内存里那几个字节的 C 类型, 字节数]（ADR-0017 第二刀）。
  * 符号扩展与零扩展不用写代码：`*(int8_t*)p` 提升到 int64_t 就是符号扩展，
  * `*(uint8_t*)p` 就是零扩展 —— 与 DataView 的 getInt8/getUint8 一一对应。 */
@@ -103,6 +108,12 @@ class CEmitter {
     for (const f of mod.funcs) this.knownFuncs.add(f.mangled);
     /* 这一份的函数体里叫到了哪些函数（原型那一段按它裁，见 protoLines）。 */
     this.usedFns = new Set();
+    /* **按函数**记"叫到了谁"（切文件时 `.c` 的 `#include` 就是它算出来的）：
+     * 一个单元引到哪几家 = 它的函数体里叫到的名字落到定义者的那几家。全局的 `usedFns`
+     * 答不了这件事 —— 它把整份程序的调用并成了一团，而"include 图要严格等于依赖图"
+     * 恰恰要求逐家分开。发函数体时 `curUse` 指向当前这一格。 */
+    this.fnUses = new Map();
+    this.curUse = null;
     this.indent = 0;
     this.tmp = 0;
     // 函数级计时（第八十八刀，见 profTable）：`--profile` 或 `OMNI_PROFILE=1` 打开。
@@ -529,7 +540,12 @@ class CEmitter {
       if (!this.emitsSym(f.mangled, f.file) && !this.isEntry(f)) continue;
       this.noteSym(f.mangled, f.file);
       const i0 = this.out.length;
+      /* 这一格函数叫到了谁：切文件时 `<单元>.c` 的 `#include` 由它算（见 headers）。 */
+      const use = new Set();
+      this.curUse = use;
       this.func(f);
+      this.curUse = null;
+      this.fnUses.set(f.mangled, use);
       let bytes = 0;
       for (let i = i0; i < this.out.length; i++) bytes += this.out[i].length + 1;
       const k = typeof f.file === 'string' && f.file !== '' ? f.file : '(unknown)';
@@ -692,9 +708,10 @@ class CEmitter {
     return out;
   }
 
-  /** 发函数体时记下"叫到了谁"（原型那一段按它裁）。 */
+  /** 发函数体时记下"叫到了谁"（原型那一段按它裁；`curUse` 那一格是切文件算 include 用的）。 */
   useFn(name) {
     if (typeof name === 'string') this.usedFns.add(name);
+    if (typeof name === 'string' && this.curUse !== null) this.curUse.add(name);
   }
 
 
@@ -743,39 +760,288 @@ class CEmitter {
   }
 
   /**
-   * 按**模块**切：一个源文件一个翻译单元一个 `.o`，跟正常的 C 工程一样 ——
-   * 不是把一体的输出按字节装箱塞进 N 个桶（试过，那是在造膨胀：共用前段抄进每一格，
-   * 13 个 TU 就是 104 MB 的 C；而且模块与 TU 不对齐，"改一个文件重编一个 TU"也不成立）。
-   *
-   * 这一格现在只交"每个模块的函数体"和三段边界，**还不能直接编** —— 共享部分得先变成
-   * 一份只有声明的头 + 一个定义 TU（容器 / JS 那一族宏要加存储类参数，见 ADR-0021 的 P2a：
-   * 它们自带静态状态 `realm_tbl_` / `xprops_tbl_` / `ctor_tbl_`，复制一份就是每个 TU
-   * 一套对象模型 —— 量出来是 `TypeError: cannot set property 'items' of undefined`）。
+   * 聚合的**家**与拓扑位次（切文件时算 `#include` 用）。
+   * 位次就是 `sortAggregates()` 的序 —— 模板实例"归依赖序里最晚的那一家"靠它比。
    */
-  units() {
-    if (!this.split) throw new Error('c.units: 只有 split 模式能切');
-    const j = (a, b) => this.out.slice(a, b).join('\n');
-    const byMod = new Map();
-    for (const r of this.fnRanges) {
-      const g = byMod.get(r.file) ?? { bytes: 0, funcs: 0, parts: [] };
-      g.bytes += r.bytes;
-      g.funcs += 1;
-      g.parts.push(j(r.i0, r.i1));
-      byMod.set(r.file, g);
+  aggHomes() {
+    if (this.homesMemo !== undefined) return this.homesMemo;
+    const order = this.sortAggregates();
+    const rank = new Map();
+    const home = new Map();
+    order.forEach((a, i) => {
+      rank.set(`${a.k}:${a.t.name}`, i);
+      home.set(`${a.k}:${a.t.name}`, modUnitName(a.t.file));
+    });
+    /* class 是引用语义（指针 typedef），不进按值嵌套那张序 —— 排在所有 struct/enum 之后：
+     * 它的字段可以按值放 struct，反过来不成立。 */
+    let n = order.length;
+    for (const c of this.mod.classes ?? []) {
+      rank.set(`class:${c.name}`, n++);
+      home.set(`class:${c.name}`, modUnitName(c.file));
     }
-    const units = [];
-    for (const [file, g] of byMod) {
-      units.push({ file, name: modUnitName(file), funcs: g.funcs, bytes: g.bytes, text: `${g.parts.join('\n')}\n` });
+    this.homesMemo = { order, rank, home };
+    return this.homesMemo;
+  }
+
+  /** 一个类型里出现的用户聚合（递归进容器 / 数组 / 定长块 / 指针 / 向量的元素）。 */
+  aggsIn(t, out = new Set()) {
+    if (t === null || typeof t !== 'object') return out;
+    if (t.k === 'struct' || t.k === 'enum' || t.k === 'class') out.add(`${t.k}:${t.name}`);
+    for (const k of ['elem', 'el', 'key', 'val', 'ret', 'to', 'of']) {
+      if (t[k] !== undefined && t[k] !== null) this.aggsIn(t[k], out);
     }
-    return {
-      /* 只有声明的那一份（现在还含定义 —— P2a 之后才真的只剩声明） */
-      shared: j(0, this.markA),
-      /* 只能有一份的那些：模块级变量的定义、闭包的 make、那两张表 */
-      once: j(this.markA, this.markB),
-      /* main 与线性内存的 data 段 */
-      tail: j(this.markC, this.out.length),
-      units,
+    if (Array.isArray(t.params)) for (const p of t.params) this.aggsIn(p, out);
+    return out;
+  }
+
+  /** 一个聚合**自己的字段**里出现的别的聚合（跨家就是一条 `#include` 边）。 */
+  aggDeps(a) {
+    const out = new Set();
+    const self = `${a.k}:${a.t.name}`;
+    const fields = a.k === 'enum'
+      ? (a.t.variants ?? []).flatMap((v) => v.fields)
+      : (a.t.fields ?? []);
+    for (const f of fields) this.aggsIn(f.type, out);
+    out.delete(self);
+    return out;
+  }
+
+  /**
+   * 生成物（容器实例化、聚合元素数组、向量、装箱助手…）落在哪一家：
+   * **它涉及的用户类型的家**，涉及多家就归依赖序里最晚的那一家；不涉及用户类型的归 `omni_gen`。
+   * 这一条是"依赖只有一个朝向"的保证 —— `omni_gen` 因此不必回头 include 任何单元。
+   */
+  homeOfGen(t) {
+    const { rank, home } = this.aggHomes();
+    let best = -1;
+    let unit = GEN_UNIT;
+    for (const key of this.aggsIn(t)) {
+      const r = rank.get(key);
+      if (r === undefined || r <= best) continue;
+      best = r;
+      unit = home.get(key);
+    }
+    return unit;
+  }
+
+  /**
+   * 把一段发射收到独立的缓冲里（`headers()` 从模型生成头时用）。
+   * 只在 `emit()` 跑完之后调：那时向量 / 池子那几个集合已经稳定，重跑一遍只出文本。
+   */
+  capture(fn) {
+    const save = this.out;
+    const ind = this.indent;
+    this.out = [];
+    this.indent = 0;
+    fn();
+    const got = this.out;
+    this.out = save;
+    this.indent = ind;
+    return got;
+  }
+
+  /**
+   * 按**模块**切：一个源文件一份 `.c` + 一份同名 `.h`，跟正常的 C 工程一样，
+   * **没有公用头**（docs/design/build-system.md §12 末节的定案）：
+   *
+   *   `<单元>.h` = guard + `#include "omni_gen.h"` + 它依赖的那几家 `.h`
+   *               + 它的类型 + 它的模板实例 + 它的 `extern` 全局 + 它的函数原型
+   *   `<单元>.c` = `#include "<自己>.h"` + 它引到的那几家 `.h` + 它的全局定义 + 它的函数体
+   *
+   * "按值嵌套要完整类型"这件事交给 `#include` + include guard：跨单元的拓扑序是头之间的
+   * 依赖边，单元内照旧按 `sortAggregates()` 的相对序。于是改一个类型只让 `#include` 到它的
+   * 那几家重编 —— 那是标准 C 的代价，不是我们的债。
+   */
+  headers() {
+    if (!this.split) throw new Error('c.headers: 只有 split 模式能切');
+    /* JS 那一族模板（`OMNI_JS_ARR` …）自带静态状态（realm / 原型那两张表），复制一份就是
+     * 每个 TU 一套对象模型。要把它们搬进 `omni_gen.c` 得先给那些宏加存储类参数
+     * （ADR-0021 的 P2a）—— 还没做，所以这一档**响着拒**，不悄悄出错。 */
+    if (this.dynSegs === true) {
+      throw new OmniError('emit c --split：这份程序用到了 JS 那一族运行时模板（dyn 桥），'
+        + '它们自带静态状态、还不能按 TU 切（ADR-0021 P2a：宏要先加存储类参数）');
+    }
+    if (this.prof) throw new OmniError('emit c --split：计时表还不能按 TU 切（--profile 与 --split 先别一起用）');
+    const { order, home } = this.aggHomes();
+    const classes = this.mod.classes ?? [];
+    const closures = this.mod.closures ?? [];
+    const jsG = this.mod.jsGlobals ?? [];
+    const units = new Map();
+    const unit = (nm) => {
+      let u = units.get(nm);
+      if (u === undefined) {
+        u = { name: nm, types: [], decls: [], gdefs: [], funcs: [], bytes: 0, nfun: 0, needH: new Set(), needC: new Set() };
+        units.set(nm, u);
+      }
+      return u;
     };
+    /* 先把每一家坐下来（函数体那一段的分组就是 P1 的 `f.file`），再逐样往里填。 */
+    for (const r of this.fnRanges) unit(modUnitName(r.file === '(unknown)' ? '' : r.file));
+    for (const nm of home.values()) unit(nm);
+    const pick = (map, nm) => {
+      const m = new Map();
+      for (const [k, v] of map) if (this.homeOfGen(v) === nm) m.set(k, v);
+      return m;
+    };
+    const within = (nm, fn) => {
+      const sa = this.arrs; const sv = this.vecs; const sb = this.bufs;
+      this.arrs = pick(sa, nm); this.vecs = pick(sv, nm); this.bufs = pick(sb, nm);
+      const got = fn();
+      this.arrs = sa; this.vecs = sv; this.bufs = sb;
+      return got;
+    };
+    /* 类型那一段：向量 -> 聚合体 -> class -> 聚合元素的数组 -> 容器 -> 装箱 -> 零值构造。
+     * 这个次序就是单体那条路上的次序（C 的"用前须完整"逼出来的），一家之内照样成立。 */
+    for (const [nm, u] of units) {
+      const vec = within(nm, () => this.vecLines().concat(this.bufLines()).filter((s) => s !== ''));
+      for (const s of vec) u.types.push(s);
+    }
+    for (const a of order) {
+      const u = unit(home.get(`${a.k}:${a.t.name}`));
+      for (const s of this.capture(() => (a.k === 'struct' ? this.structBody(a.t) : this.enumBody(a.t)))) u.types.push(s);
+      for (const d of this.aggDeps(a)) {
+        const h = home.get(d);
+        if (h !== undefined && h !== u.name) u.needH.add(h);
+      }
+    }
+    for (const c of classes) {
+      const u = unit(home.get(`class:${c.name}`));
+      u.types.push(`OMNI_REF_DECL(ct_${c.name})`);
+      for (const s of this.capture(() => this.classBody(c))) u.types.push(s);
+      for (const f of c.fields) {
+        for (const d of this.aggsIn(f.type)) {
+          const h = home.get(d);
+          if (h !== undefined && h !== u.name) u.needH.add(h);
+        }
+      }
+    }
+    for (const [nm, u] of units) {
+      for (const s of within(nm, () => this.arrLines())) u.types.push(s);
+    }
+    for (const t of this.mod.containers ?? []) {
+      const u = unit(this.homeOfGen(t));
+      u.types.push(`OMNI_REF_DECL(${cTypeName(t)})`);
+      for (const s of this.capture(() => { this.containerBody(t); this.containerDefine(t); })) u.types.push(s);
+    }
+    for (const t of this.mod.boxDeeps ?? []) {
+      const u = unit(this.homeOfGen(t));
+      u.types.push(`static omni_dyn omni_box_${cTypeName(t)}(${cTypeName(t)} a);`);
+      for (const s of this.capture(() => this.boxDeepFn(t))) u.types.push(s);
+    }
+    for (const t of this.mod.fnTypes ?? []) {
+      const u = unit(this.homeOfGen(t));
+      for (const s of this.capture(() => this.fnCallHelper(t))) u.types.push(s);
+    }
+    for (const a of order) {
+      const u = unit(home.get(`${a.k}:${a.t.name}`));
+      for (const s of this.capture(() => (a.k === 'struct' ? this.structNew(a.t) : this.enumNew(a.t)))) u.types.push(s);
+    }
+    for (const e of this.mod.enums ?? []) {
+      const u = unit(home.get(`enum:${e.name}`) ?? GEN_UNIT);
+      for (const s of this.capture(() => this.enumMakers(e))) u.types.push(s);
+    }
+    for (const c of classes) {
+      const u = unit(home.get(`class:${c.name}`));
+      for (const s of this.capture(() => this.classNew(c))) u.types.push(s);
+    }
+    /* 闭包记录与它的 make：记录（struct）与原型进这一家的 `.h`，make 的**定义**进 `.c` ——
+     * 单例闭包里那个 `static omni_fn one` 是状态，复制它 `f == f` 就假了。 */
+    for (const c of closures) {
+      const u = unit(modUnitName(this.fileOfMangled(c.mangled)));
+      for (const s of this.capture(() => this.closureBody(c))) u.types.push(s);
+      u.decls.push(`${this.closureProto(c)};`);
+      for (const s of this.capture(() => this.closureMake(c))) u.funcs.push(s);
+      for (const d of this.aggsIn({ params: c.captures.map((f) => f.type) })) {
+        const h = home.get(d);
+        if (h !== undefined && h !== u.name) u.needH.add(h);
+      }
+    }
+    /* 模块级变量：`.h` 里 extern，定义留在它自己那一家的 `.c`。 */
+    for (const g of jsG) {
+      const u = unit(modUnitName(g.file));
+      u.decls.push(`extern omni_dyn g_${g.name};`);
+      u.gdefs.push(`omni_dyn g_${g.name} = { .tag = OMNI_DYN_UNDEF };`);
+    }
+    for (const g of this.mod.globals ?? []) {
+      const u = unit(modUnitName(g.file));
+      u.decls.push(`extern ${cTypeName(g.type)} g_${g.name};`);
+      u.gdefs.push(`${cTypeName(g.type)} g_${g.name};`);
+      for (const d of this.aggsIn(g.type)) {
+        const h = home.get(d);
+        if (h !== undefined && h !== u.name) u.needH.add(h);
+      }
+    }
+    /* 原型进这一家的 `.h`（签名里出现别家的类型就 include 那一家）。 */
+    for (const f of this.mod.funcs) {
+      if (!this.emitsSym(f.mangled, f.file) && !this.isEntry(f)) continue;
+      const u = unit(modUnitName(f.file));
+      u.decls.push(`${this.proto(f)};`);
+      const ts = new Set();
+      this.aggsIn(f.ret, ts);
+      for (const p of f.params) this.aggsIn(p.type, ts);
+      for (const d of ts) {
+        const h = home.get(d);
+        if (h !== undefined && h !== u.name) u.needH.add(h);
+      }
+    }
+    /* 函数体与"它引到谁"（`.c` 的 include 就是它）。 */
+    for (const r of this.fnRanges) {
+      const u = unit(modUnitName(r.file === '(unknown)' ? '' : r.file));
+      u.funcs.push(this.out.slice(r.i0, r.i1).join('\n'));
+      u.bytes += r.bytes;
+      u.nfun += 1;
+    }
+    for (const [mangled, used] of this.fnUses) {
+      const u = unit(modUnitName(this.fileOfMangled(mangled)));
+      for (const nm of used) {
+        const h = modUnitName(this.fileOfMangled(nm));
+        if (this.fileOfMangled(nm) !== undefined && h !== u.name) u.needC.add(h);
+      }
+    }
+    /* `main`（或插件那格 init）与线性内存的 data 段归**入口那一家**。 */
+    const entryUnit = modUnitName(this.fileOfMangled(this.mod.entry));
+    for (const s of this.out.slice(this.markC, this.out.length)) unit(entryUnit).funcs.push(s);
+    unit(entryUnit).needC.add(GEN_UNIT);
+    /* 环：`#include` 解不了按值嵌套成环（那是 C 的语义），响着报。 */
+    for (const [nm, u] of units) {
+      for (const d of u.needH) {
+        const other = units.get(d);
+        if (other !== undefined && other.needH.has(nm)) {
+          throw new OmniError(`emit c --split：单元 ${nm} 与 ${d} 的类型互相按值嵌套，`
+            + '头的 include 解不了这种环（C 的语义）—— 两家的类型得先分开');
+        }
+      }
+    }
+    const gen = units.get(GEN_UNIT) ?? unit(GEN_UNIT);
+    const genH = [
+      `#ifndef OMNI_GEN_H`, `#define OMNI_GEN_H`, '',
+      this.opts.amalgamate ? amalgamate().trim() : RUNTIME_INCLUDE, '',
+      ...this.cAbiExterns(),
+      ...this.s16PoolLines(),
+      ...gen.types, ...gen.decls,
+      '', `#endif`, '',
+    ].join('\n');
+    const genC = [`#include "${GEN_UNIT}.h"`, ...gen.gdefs, ...gen.funcs, ''].join('\n');
+    const out = [];
+    for (const [nm, u] of units) {
+      if (nm === GEN_UNIT) continue;
+      const guard = `OMNI_UNIT_${nm.toUpperCase()}_H`;
+      const h = [
+        `#ifndef ${guard}`, `#define ${guard}`, '',
+        `#include "${GEN_UNIT}.h"`,
+        ...[...u.needH].filter((d) => d !== GEN_UNIT && units.has(d)).map((d) => `#include "${d}.h"`),
+        '', ...u.types, '', ...u.decls,
+        '', `#endif`, '',
+      ].join('\n');
+      const incC = [...u.needC].filter((d) => d !== nm && d !== GEN_UNIT && units.has(d) && !u.needH.has(d));
+      const c = [
+        `#include "${nm}.h"`,
+        ...incC.map((d) => `#include "${d}.h"`),
+        '', ...u.gdefs, '', ...u.funcs, '',
+      ].join('\n');
+      out.push({ file: nm, name: nm, funcs: u.nfun, bytes: u.bytes, h, c });
+    }
+    return { gen: { name: GEN_UNIT, h: genH, c: genC }, units: out };
   }
 
   closureMake(c) {
@@ -2476,12 +2742,12 @@ export function emitCWithStats(mod, opts = {}) {
 }
 
 /**
- * 分文件发射（P2）：**一个模块一个翻译单元**，跟正常的 C 工程一样 ——
- * `{ shared, once, tail, units: [{ file, name, funcs, bytes, text }] }`。
+ * 分文件发射（P2）：**一个模块一份 `.c` + 一份同名 `.h`**，跟正常的 C 工程一样 ——
+ * `{ gen: {name, h, c}, units: [{ file, name, funcs, bytes, h, c }], stats }`。
  * 与 `emitC` 是两条路而不是一个开关：单体那条路一个字节都不动（`split` 默认关）。
  */
 export function emitCUnits(mod, opts = {}) {
   const e = new CEmitter(mod, { ...opts, split: true });
   e.emit();
-  return { ...e.units(), stats: e.stats };
+  return { ...e.headers(), stats: e.stats };
 }
