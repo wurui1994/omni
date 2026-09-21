@@ -230,8 +230,11 @@ b.run(process.argv.slice(2));       // 认 -n / -j / -k / -t / --emit-ninja
    *判据*：一份计数断言（改 `backend-c/emit.js` 一行 → 重编 N 个动作，N 是算出来的）。
 4. **去掉 weak 与环**：链接器那几处弱未定义的兜底改成"报缺了谁、谁要的"。
    *判据*：现有各腿全绿，且故意删一个符号时报的是人话。
-5. **`.sx` 退回调试通道**：借来语言那条路改成在内存里过图，`--emit-sx` 才落盘。
-   *判据*：`tests/go` 不变、`.omni-cache/src-sx/` 不再被默认写。
+5. **`.sx` 退回调试通道（已落地 2026-09-21）**：借来语言那条路译出来的核心方言只在内存里
+   传一手（`SRC_SX`），`--emit-sx FILE` 才落盘。语言前端的契约多一格：`compile(path, argv, text)`
+   —— **源码文本可以直接递进来**，不非得在盘上（`lang/sx.js` 第一个用它）。
+   *量出来*：`tests/go` 28/28、`tests/sexpr` 98/0、`tests/glr` 42/0、`check:self` 绿，
+   `.omni-cache/src-sx/` 再也不出现；`omni build x.go -o prog` 照旧一条命令到二进制。
 6. **bootstrap 走同一台引擎**：四道不动点门槛变成图里的四条 validation 边。
 
 

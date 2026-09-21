@@ -89,6 +89,16 @@ const F_LANG_DIRECTIVE = {
   name: '--lang-directive', arity: 0,
   brief: '认第一行的 `#lang <名字>`（默认不认；等价 OMNI_LANG_DIRECTIVE=1）',
 };
+/**
+ * 借来语言（`.go`/`.nim`/…）译出来的**核心方言**落一份到 FILE（调试通道）。
+ *
+ * 默认它只在内存里传一手：那份文本是中间格式，不是产物 —— 落盘就多出一摊
+ * `src-sx/<内容哈希>/` 目录与一格谁都不清的缓存。想看就给这个旗子。
+ */
+const F_EMIT_SX = {
+  name: '--emit-sx', arity: 1, value: 'FILE',
+  brief: '把译出来的核心方言写到 FILE（默认只在内存里过）',
+};
 const F_PROFILE_OUT = {
   name: '--profile-out', arity: 1, value: 'FILE',
   brief: '折叠栈写到 FILE（火焰图 / gprof2dot 吃它）；`.svg` 直接出火焰图',
@@ -369,7 +379,7 @@ ${graphEngineHelp()}
   omni emit c bench/go/pt.go                    看生成的 C
 后缀名单从 graph/langs.js 那张表算；**已经有主的后缀不抢**（.lua 归它自带的读入器）。
 给了 --engine graph 才切到图那一层的后端（那儿的 --backend 是另一套名字）。`,
-      flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT,
+      flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT, F_EMIT_SX,
         /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，
          * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格
          * （`--libc self` 那一趟的 sysroot 按本机取自带的，不用给）。 */
@@ -408,7 +418,7 @@ ${graphEngineHelp()}
 
   omni build ext/cpp/examples/basics.cpp --engine graph --backend wat -o basics.wat
   omni build ext/lua/examples/intmath.lua --engine graph -o intmath.wasm   （二进制，V8 直接吃）`,
-      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS,
+      flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS, F_EMIT_SX,
         ...C_TARGET_FLAGS,
         F_SYSROOT, F_LIBC, F_CC, F_PROFILE, F_PROFILE_OUT, F_STAT, F_STAT_OUT, F_STAT_DIFF,
         F_SHRINK, F_LANG_DIRECTIVE,

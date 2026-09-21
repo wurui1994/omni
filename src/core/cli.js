@@ -1444,7 +1444,9 @@ function compileFront(path, argv) {
   const { l, why } = pickLang(path, argv);
   if (l !== null) {
     if (why !== '后缀') vStep(`lang  ${basename(path)} 按 ${why} 交给 ${l.name}`);
-    return l.compile(path, argv);
+    /* `SRC_SX`：借来语言那条路译出来的核心方言在内存里 —— 前端的第三个入参就是"文本递进来"
+     * 那一格（见 lang/sx.js）。没有那份文本时是 undefined，各门语言照旧按路径读。 */
+    return l.compile(path, argv, SRC_SX);
   }
   /* 不是核心方言、又没有哪门语言认它：**响着拒**，别拿核心方言去解析。
      量到过（薄核心上跑 `.asy`）：落到核心方言之后报的是 `undefined function 'write'` ——
@@ -1458,7 +1460,8 @@ function compileFront(path, argv) {
       + (have.length === 0 ? '这份 omni 里一门语言都没装' : `这份 omni 带着 ${have.join(' / ')}`)
       + '（语言各自一格 plugins/omni-lang-<名字> 插件）');
   }
-  return compileProgram(path, undefined, modeFor(path, argv));
+  /* 借来语言那条路译出来的核心方言在内存里（见上面那段 `SRC_SX`）：**不经过磁盘**。 */
+  return compileProgram(path, SRC_SX, modeFor(path, argv));
 }
 
 
@@ -1575,6 +1578,9 @@ function mbOf(bytes) {
  * 为什么这一格是命令而不是一句 `rm -rf`：**"该扔什么"是有判据的**（暂存 vs 缓存、
  * 多久没动、总量上限），而写成 shell 就等于每个人自己猜一遍。
  */
+/* 借来语言（`.go`/`.nim`/…）译出来的核心方言：只在内存里传一手，`--emit-sx` 才落盘。 */
+let SRC_SX = undefined;
+
 function cacheCmd(args, argv) {
   const sub = args[0] === undefined ? 'ls' : args[0];
   const root = cacheRoot();
@@ -4284,13 +4290,24 @@ function main(argv) {
       && lang(path) === null && borrowedExts().some((e) => path.endsWith(e))) {
     const sx = coreSxText(path, rest);
     if (sx === null) return 1;
-    /* 内容定址：同一份源码只译一次，改一个字就换一格目录 —— 陈旧产物不会被误用。
-     * 文件名保留原来的主干（`pt.go` -> `pt.sx`），这样 `build` 不给 `-o` 时默认名还是 `pt`。 */
-    const sxDir = join(cacheRoot(), 'src-sx', hash16(sx));
-    mkdirAll(sxDir);
-    const sxPath = join(sxDir, `${basename(path, path.slice(path.lastIndexOf('.')))}.sx`);
-    if (!exists(sxPath)) writeText(sxPath, sx);
-    if (VERBOSE) stderr(`omni: ${path} -> ${sxPath}（核心方言，${sx.length} 字节）\n`);
+    /* 核心方言那份文本**留在内存里**（`SRC_SX`），不落盘。
+     *
+     * 它是这条路的**中间格式**，不是产物：落盘一份的话就多出一摊 `src-sx/<内容哈希>/`
+     * 目录、一格谁也不清的缓存，而下游（compileProgram）本来就收得下文本。
+     * `--emit-sx` 那一档才写出来（调试通道）。
+     *
+     * 名字还是按原来的主干编（`pt.go` -> `pt.sx`）：`build` 不给 `-o` 时默认名还是 `pt`，
+     * 诊断里的路径也还看得出是谁。这个路径**不存在**，只当名字用。 */
+    const sxPath = join(cacheRoot(), 'src-sx', `${basename(path, path.slice(path.lastIndexOf('.')))}.sx`);
+    const ei = rest.indexOf('--emit-sx');
+    if (ei >= 0) {
+      const to = rest[ei + 1] !== undefined && !rest[ei + 1].startsWith('-') ? rest[ei + 1] : sxPath;
+      mkdirAll(dirname(to));
+      writeText(to, sx);
+      stderr(`omni: 核心方言 -> ${to}（${sx.length} 字节）\n`);
+    }
+    if (VERBOSE) stderr(`omni: ${path} -> 核心方言（内存里，${sx.length} 字节）\n`);
+    SRC_SX = sx;
     path = sxPath;
     files[0] = sxPath;
   }
@@ -4711,7 +4728,9 @@ function main(argv) {
     return r.fail > 0 ? 1 : 0;
   }
   if (!path) throw new OmniError(`command '${cmd}' needs a source file`);
-  if (!exists(path)) throw new OmniError(`no such file: ${path}`);
+  /* 借来语言那条路的入口是**内存里那份核心方言**（`SRC_SX`），路径只当名字用 —— 那一格
+   * 本来就不存在，所以这一问跳过它。 */
+  if (SRC_SX === undefined && !exists(path)) throw new OmniError(`no such file: ${path}`);
 
   /* `--explain`（ADR-0018 决策五）：印出将要走的管线然后停 —— **一个字节都不写盘、不执行**。
    * 它看的是与实现同一批开关，所以说得准；表在动手之前就齐，这也是 `-v` 能与它共用同一份
