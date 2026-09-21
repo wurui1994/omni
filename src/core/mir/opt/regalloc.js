@@ -253,6 +253,29 @@ function slotIntervals(fn, mod, openLoops, endOf) {
 export const COLORS = 9;
 
 /**
+ * **通用那一类有几个"只在不跨调用时能用"的颜色** —— **0，而这是量完之后的结论，不是忘了**。
+ *
+ * 一、**没有空寄存器**：arm64 的调用者保存通用寄存器在后端那一层全有主 —— x0-x7 传参、
+ * x8 是 `RES`、x9/x10 是草稿（`TMP0`/`TMP1`）、**x11-x15 是一遍过代码生成器的值缓存**
+ * （`from_mir.js` 的 `POOL`）、x16/x17 是 IP0/IP1（链接器跳板会踩）、x18 在 Darwin 上保留。
+ * 所以"给通用那一类也开草稿档"等价于**从 `POOL` 里割两个给这一层**。
+ *
+ * 二、**割了量过：在噪声里**（2026-09-22）。缺口确实全在这一类（`bench/go/pt.go` 的
+ * `s_Tree__search` 通用峰值 13、颜色 9，82 个整数值只分到 52；浮点 26/26 全分到，
+ * 它有 8+13 个）。割两个之后覆盖率 72.2% → 86.1%，可是：
+ *   - **结构性判据不动**：`Tree__search` 的帧访存 100 → 101 条（那 15 个值本来就住在
+ *     `POOL` 里，不进这一层的账 —— 覆盖率这个数**高估了**收益）；
+ *   - 时间在噪声里：按峰值分档之后 raytrace 三次量到 1.043 / 1.003 / 0.990
+ *     （同一个基线二进制那几趟自己就从 223ms 漂到 321ms），fib / slice / vec 也都 ±1%。
+ * 所以**退回来**了（与 `lowered cse` 那次同一条纪律：靠噪声下的数做的决定要推翻）。
+ *
+ * 真要往下走得先把两套机制并成一套：`POOL` 是一遍过的缓存、这一层是活跃区间上色，
+ * 两者抢同一批物理寄存器而**互相看不见**。并起来（后端只按 `regHint` 发码、`POOL` 只兜
+ * 没上色的值）才谈得上"多给几个颜色"。
+ */
+export const COLORS_SCRATCH = 0;
+
+/**
  * **浮点那一类有几个颜色** —— arm64 的 d8-d15 在 AAPCS 里是被调用者保存的（低 64 位），
  * 一个都没别人占 ⇒ 8 个。
  *
@@ -288,9 +311,27 @@ export const COLORS_F = 8;
  */
 export const COLORS_F_SCRATCH = 13;
 
+/**
+ * **通用那一类同时活着最多几个值**（判"要不要开草稿档"用，见 `COLORS_SCRATCH`）。
+ * 只数"该有寄存器"的那些（住得下一个字、不是 void），浮点那一类另算 —— 它有自己的池子。
+ */
+function gpPeak(fn, last) {
+  const evt = [];
+  for (let pc = 0; pc < fn.op.length; pc++) {
+    if (last[pc] < 0) continue;
+    const t = resultType(fn, pc);
+    if (t === T_VOID || !fitsOneWord(t) || isFloatT(t)) continue;
+    evt.push([pc, 1], [last[pc] + 1, -1]);
+  }
+  evt.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let cur = 0;
+  let mx = 0;
+  for (const [, d] of evt) { cur += d; if (cur > mx) mx = cur; }
+  return mx;
+}
+
 /** 这条指令会踩掉调用者保存的寄存器吗（区间跨过它就不能住草稿那一档）。 */
-function isCallOp(op) {
-  return op === OP.CALL || op === OP.CALLI || op === OP.CCALL || op === OP.CALLFN
+function isCallOp(op) {  return op === OP.CALL || op === OP.CALLI || op === OP.CCALL || op === OP.CALLFN
       || op === OP.SYSCALL;
 }
 
@@ -328,6 +369,12 @@ export function regalloc(fn, mod) {
     { hint: new Map(), slotHint: new Map(), active: [], free: [], scratch: [] },
   ];
   for (let i = 0; i < COLORS; i++) cls[0].free.push(i);
+  /* 通用那一类今天**没有草稿档**（`COLORS_SCRATCH = 0`，那一段写了为什么与量到的账）。
+     这一句留着：真要开的时候只在"通用峰值超过 `COLORS`"的函数上开 —— 峰值没超的函数
+     本来一格都不溢出，割后端 `POOL` 的寄存器是净亏（量出来 fib +3.6%）。 */
+  if (COLORS_SCRATCH > 0 && gpPeak(fn, last) > COLORS) {
+    for (let i = 0; i < COLORS_SCRATCH; i++) cls[0].scratch.push(COLORS + i);
+  }
   for (let i = 0; i < COLORS_F; i++) cls[1].free.push(i);
   for (let i = 0; i < COLORS_F_SCRATCH; i++) cls[1].scratch.push(COLORS_F + i);
 
@@ -467,20 +514,37 @@ export function regalloc(fn, mod) {
    * 加寄存器还不还得起，「分到几个」决定了抢占策略有没有用。量过再改，别猜。 */
   if (process.env.OMNI_RA_STAT === '1' && fn.op.length >= 200) {
     let want = 0, maxLive = 0, live = 0;
+    /* **按类分开数**（2026-09-22 补）：合在一起的覆盖率说不清该往哪一类加寄存器 ——
+       `Tree__search` 那一格 72.2% 里缺的 30 个到底是整数还是浮点，决定了下一刀是
+       "给通用那一类也开草稿档"还是"压活跃区间"。两类的压力也各算一条。 */
+    let wantG = 0, wantF = 0, maxG = 0, maxF = 0;
     const evt = [];
+    const evtG = [];
+    const evtF = [];
     for (let pc = 0; pc < fn.op.length; pc++) {
       if (last[pc] < 0) continue;
       const t = resultType(fn, pc);
       if (t === T_VOID || !fitsOneWord(t)) continue;
       want++;
       evt.push([pc, 1], [last[pc] + 1, -1]);
+      if (isFloatT(t)) { wantF++; evtF.push([pc, 1], [last[pc] + 1, -1]); }
+      else { wantG++; evtG.push([pc, 1], [last[pc] + 1, -1]); }
     }
-    evt.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    for (const [, d] of evt) { live += d; if (live > maxLive) maxLive = live; }
+    const peak = (es) => {
+      es.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      let cur = 0, mx = 0;
+      for (const [, d] of es) { cur += d; if (cur > mx) mx = cur; }
+      return mx;
+    };
+    maxLive = peak(evt);
+    maxG = peak(evtG);
+    maxF = peak(evtF);
     const got = cls[0].hint.size + cls[1].hint.size;
     process.stderr.write(`[ra] ${fn.name}: ${fn.op.length} 条指令，该有寄存器的值 ${want} 个，`
       + `分到 ${cls[0].hint.size}+${cls[1].hint.size}=${got}`
-      + `（${(100 * got / Math.max(1, want)).toFixed(1)}%），同时活着最多 ${maxLive} 个\n`);
+      + `（${(100 * got / Math.max(1, want)).toFixed(1)}%），同时活着最多 ${maxLive} 个`
+      + `｜通用 ${cls[0].hint.size}/${wantG}（峰值 ${maxG}，颜色 ${COLORS}+${COLORS_SCRATCH}）`
+      + ` 浮点 ${cls[1].hint.size}/${wantF}（峰值 ${maxF}，颜色 ${COLORS_F}+${COLORS_F_SCRATCH}）\n`);
   }
   return n;
 }
