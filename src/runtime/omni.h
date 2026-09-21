@@ -887,6 +887,10 @@ omni_dyn omni_js_now_hr(void);
 /* 到此刻为止的峰值常驻内存，**字节**（单位在宿主这一侧归一：macOS 的 ru_maxrss 是字节、
    Linux 是 KB、node 的 maxRSS 是 KB）。这条腿上墙上时间的大头常常是内存压力而不是 CPU。 */
 omni_dyn omni_js_max_rss(void);
+/* 进程起来到此刻，**毫秒**（整数）。起点是 `omni_host_init`（main 的第一行）——
+   这条腿的 pre-main 近似为零，而 node 那侧是 `process.uptime()`（真的进程启动）。
+   `-v` 的总账拿它补上"步骤之和"与外面 `time` 的 `real` 之间那一截。 */
+omni_dyn omni_js_proc_uptime(void);
 /* 插件加载（ADR-0021 S4）：dlopen + dlsym("omni_plugin_init")，插件与核心共用这一份运行时 */
 omni_dyn omni_js_plugin_load(omni_dyn path, omni_dyn api);
 bool omni_js_plugin_ok(void);

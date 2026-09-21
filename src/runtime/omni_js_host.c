@@ -34,8 +34,18 @@
 static int host_argc;
 static char **host_argv;
 static int host_exit_code;
+/* 进程起来的那一刻（单调时钟毫秒）：`process.uptime()` 要的就是"从那时到现在"。
+   在 `omni_host_init` 里取 —— 这条腿上它就是 main 的第一行，pre-main 近似为零。 */
+static double host_up_base_ms = -1.0;
+
+static double host_mono_ms_(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
 
 void omni_host_init(int argc, char **argv) {
+  host_up_base_ms = host_mono_ms_();
   host_argc = argc;
   host_argv = argv;
   /* 采样 profiler 是**运行期**的开关（`OMNI_PROF=sample[:hz]`）：同一份二进制不带
@@ -523,6 +533,15 @@ omni_dyn omni_js_max_rss(void) {
 #else
   return omni_dyn_of_real((double)ru.ru_maxrss * 1024.0);
 #endif
+}
+
+/* 进程起来到此刻，**毫秒**（整数值，类型仍是 real —— 与 node 那侧的 number 同类）。
+   起点在 `omni_host_init`；万一没走那条初始化（插件那一支单测），第一次调用就当起点。 */
+omni_dyn omni_js_proc_uptime(void) {
+  double now = host_mono_ms_();
+  if (host_up_base_ms < 0.0) host_up_base_ms = now;
+  double d = now - host_up_base_ms;
+  return omni_dyn_of_real(d < 0.0 ? 0.0 : (double)(long long)d);
 }
 
 /* ---- 一趟"跑"的墙上时限（`omni run --timeout`，node 那侧是 host/native.js 的 runTimeout）

@@ -5745,6 +5745,8 @@ function $js_now_hr() {
 // 峰值常驻内存，**字节**。node 的 maxRSS 是 KB（它自己归一过），C 那侧 getrusage 在
 // macOS 上是字节、Linux 上是 KB —— 两边都在自己那一侧换成字节，见 host/native.js。
 function $js_max_rss() { return process.resourceUsage().maxRSS * 1024; }
+// 进程起来到此刻，**毫秒**（整数）。node 的 process.uptime() 是秒（带小数）。
+function $js_proc_uptime() { return Math.trunc(process.uptime() * 1000); }
 
 /* 插件加载：JS 这条腿上没有（见 js_abi 的 js_plugin_load）。拒得响 —— 悄悄当成"没装插件"
    会让人以为插件坏了，而真相是这条腿压根没有这条路。 */

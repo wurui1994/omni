@@ -370,6 +370,20 @@ export function maxRssBytes() {
 }
 
 /**
+ * 进程起来到此刻，**毫秒**（整数）。
+ *
+ * 为什么值得占一格宿主 ABI：`-v` 那几行印的是"每一步花了多久"，而外面 `time` 看到的
+ * `real` 总比它们的和大一截 —— 差的就是**宿主自己的启动**（node 加载 + 把整棵编译器
+ * import 进来）。没有这一格，那一截只能猜，于是"哪儿慢"的账永远差一块。
+ *
+ * 两侧的起点刻意不同、也只能不同：node 这边是进程启动（`process.uptime()`），C 那边是
+ * `omni_host_init`（main 的第一行）—— 原生腿的 pre-main 本来就近似为零。
+ */
+export function upMs() {
+  return Math.trunc(process.uptime() * 1000);
+}
+
+/**
  * 插件加载（ADR-0021 的 S4）：**这条腿上没有**。
  *
  * node 没有同步的 ESM import（`import()` 是异步的，而驱动整条是同步的），所以开发时

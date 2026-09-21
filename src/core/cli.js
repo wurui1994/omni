@@ -10,8 +10,11 @@
 
 import {
   writeText, readText, exists, readDir, mtimeMs, fileSize, mkdirAll, rename,
-  args as procArgs, env, setEnv, stdout, stderr, setExitCode, spawn, evalJs, hasJsEngine, nowMs,
-  maxRssBytes,
+  args as procArgs, env, setEnv, stdout, stderr, setExitCode, evalJs, hasJsEngine, nowMs,
+  /* `spawn` 换个名字进来：这一层要给它**包一格计时**（见 spawn 那个包装）。二十来个调用点
+     一个都不用动 —— 包装叫回原来的名字。 */
+  spawn as hostSpawn,
+  maxRssBytes, upMs,
   cwd, installDir, isDir, writeBinary, readBinary, runTimeout, pluginLoad, pluginsOk,
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
@@ -622,6 +625,66 @@ let LAST_EMIT_PROG = 0;
 let STEPS = [];
 let vMark = 0;
 let vRss = 0;
+/* `-v` 的**总账**要的三格（第一百五十六片，用户提的："没有显示子时间相加和总时间，
+   方便和外部 time 时间对比"）：
+     V_N / V_SUM   印过几行、它们的和 —— "步骤加起来"就是这一格
+     V_SPAWN_*     子进程几次、共多久（`c obj` 走的是本进程，`exec` 与 `chmod` 是子进程）
+   启动那一截不在这里：它是 `upMs()` 减掉第一行之前攒的那些（见 vBoot）。 */
+let V_N = 0;
+let V_SUM = 0;
+let V_SPAWN_N = 0;
+let V_SPAWN_MS = 0;
+let V_BOOT = -1;
+
+/**
+ * `spawn` 外面包一格计时（宿主那格叫 `hostSpawn`）。
+ *
+ * 为什么包在这一层而不是宿主里：宿主是**封闭 ABI**（二十来个调用点、三条腿各一份实现），
+ * 而"这一趟起了几个子进程、花了多久"是**驱动**的账 —— 外面 `time` 看到的 `real` 里有这
+ * 一块，不单独列出来就只能猜。
+ */
+function spawn(cmd, argv, mode) {
+  const t0 = nowMs();
+  const r = hostSpawn(cmd, argv, mode);
+  V_SPAWN_N++;
+  V_SPAWN_MS = V_SPAWN_MS + Math.trunc(nowMs() - t0);
+  return r;
+}
+
+/**
+ * `-v` 的**明细行**：挂在上一格步骤下面，不带耗时、也不进 `--stat` 那张表。
+ *
+ * 为什么要它：`4 份模块（这一趟编了 1 格）` 说了"几格"却没说"哪一格" —— 而 `-v` 存在的
+ * 理由正是"哪一格"。步骤行保持一行一格好对齐，具体是谁往下缩一层。
+ */
+function vSay(msg) {
+  if (VERBOSE) stderr(`omni:   ${msg}\n`);
+}
+
+/** 第一行之前那一截（宿主启动 + 把整棵编译器装进来）。只印一次。 */
+function vBoot() {
+  if (V_BOOT >= 0) return;
+  V_BOOT = Math.trunc(upMs());
+  if (!VERBOSE) return;
+  stderr(`omni: 启动         宿主 + 装编译器  [${V_BOOT}ms]\n`);
+}
+
+/**
+ * 一趟的总账（`-v` 最后一行）。回答的是"**外面 `time` 看到的那个数是怎么来的**"：
+ *
+ *   进程内 = 启动 + 步骤之和 + 其余（印表、收尾、没被 vStep 圈进去的零碎）
+ *
+ * `进程内` 直接取 `upMs()`，所以它与 `time` 的 `real` 只差进程退出那一下 —— 从前这张账
+ * 一格都没有，于是"步骤加起来 740ms 而 real 是 1.01s"那 270ms 谁也说不清。
+ */
+function vTotal() {
+  if (!VERBOSE || V_N === 0) return;
+  const all = Math.trunc(upMs());
+  const boot = V_BOOT < 0 ? 0 : V_BOOT;
+  const rest = all - boot - V_SUM;
+  stderr(`omni: 合计         进程内 ${all}ms = 启动 ${boot}ms + 步骤 ${V_SUM}ms（${V_N} 格）`
+    + ` + 其余 ${rest}ms；其中子进程 ${V_SPAWN_N} 次 ${V_SPAWN_MS}ms\n`);
+}
 
 /**
  * **`--profile` 认哪条腿**（第一百四十七片第四格）。三档落在三个不同的**机制**上，
@@ -1122,6 +1185,8 @@ function vStep(msg) {
   const grew = rss > vRss;
   vRss = rss;
   if (STAT !== null) STEPS.push([msg, d, rss]);
+  V_N++;
+  V_SUM = V_SUM + d;
   if (!VERBOSE) return;
   /* 峰值常驻内存**只在它长了的时候**印：它是单调的，每行都印是噪声，而"是哪一步把它顶上去
      的"才是要看的那件事。这一格与耗时同等重要 —— 这条腿上墙上时间的大头常常是内存压力而
@@ -1192,6 +1257,8 @@ function vNext(...verbs) {
     const now = nowMs();
     const d = Math.trunc(now - vMark);
     vMark = now;
+    V_N++;
+    V_SUM = V_SUM + d;
     const line = renderStage(LIVE.plan, LIVE.i, d);
     stderr(`${line}${verbs.length > 1 ? `（这 ${verbs.length} 格一起量）` : ''}\n`);
     LIVE.i++;
@@ -2302,6 +2369,7 @@ function asyCModsBuild(path, outPath) {
   };
   let made = 0;
   let kept = r.reused.length;
+  const madeRows = [];
   for (const u of r.units) {
     const row = rowOf(u);
     const key = unitIndex(dir).keyOf(row, cs);
@@ -2315,9 +2383,14 @@ function asyCModsBuild(path, outPath) {
     if (u.name !== r.entry) declWrite(dir, u.name, u.sec, u.iface);
     unitIndex(dir).set(u.name, row, cs);
     made++;
+    madeRows.push({ nm: u.name, c: fileSize(cPath), h: fileSize(join(dir, `${u.name}.h`)) });
   }
   unitIndex(dir).save();
   vStep(`asy c 模块     新编 ${made} 份、复用 ${kept} 份 -> ${dir}`);
+  /* **哪几份**重发了：只列新编的（复用的那些就是"没动"，一行数量足够）。 */
+  for (const m of madeRows) {
+    vSay(`新编 ${m.nm}.c ${fmtBytes(m.c)} + .h ${fmtBytes(m.h)}`);
+  }
   /* 各家一格 `.o`（键 = 这一份的正文 + 它 include 到的那几家的 `.h` + 目标）。 */
   const names = [];
   const seen = new Set();
@@ -2330,6 +2403,7 @@ function asyCModsBuild(path, outPath) {
   const objDir = join(cacheRoot(), 'modules', 'c');
   const objs = [];
   let cc = 0;
+  const ccRows = [];
   for (const nm of names) {
     const cPath = join(dir, `${nm}.c`);
     /* 键是**那一份在索引里的键**，不是它正文的哈希：索引那一行已经把"这份 `.c` 是什么"
@@ -2348,12 +2422,19 @@ function asyCModsBuild(path, outPath) {
     objs.push(obj);
     if (exists(obj)) continue;
     const tmp = join(dir, `${nm}.o`);
+    const t0 = nowMs();
     cObj(cPath, tmp, arch, [RUNTIME_DIR, dir], [], 'elf', os, sysIncs);
     mkdirAll(objDir);
     rename(tmp, obj);
     cc++;
+    ccRows.push({ nm, obj, c: fileSize(cPath), o: fileSize(obj), ms: Math.trunc(nowMs() - t0) });
   }
   vStep(`c obj          ${objs.length} 份模块（这一趟编了 ${cc} 格）`);
+  /* **编的是哪一份 `.c`**：从前只说"编了 N 格"，于是"哪一份慢"看不出来（用户提的那一格）。
+     命中暖存的那些不逐行印 —— 它们等于"没动"，减法就能得到。 */
+  for (const x of ccRows) {
+    vSay(`编 ${x.nm}.c ${fmtBytes(x.c)} -> ${basename(x.obj)} ${fmtBytes(x.o)}  [${x.ms}ms]`);
+  }
   /* 入口那一份：`main` 在这儿（各家的 `omni_init_*` 只清零，真正的初始化在入口自己的
      init 里 —— 与 JS 腿的启动器一一对应）。 */
   const initOf = (n) => `omni_init_${cap('asy.jsUnitSym')(n)}`;
@@ -4540,7 +4621,12 @@ function main(argv) {
   /* 计时的基准点在这儿起：发现插件是**第一步**，而 vMark 从前是等到进管线才置的 ——
      量出来的：第一行印成 `[1789012444800ms]`（拿 0 当基准，等于整个 epoch）。
      嵌套那几趟不动它：内层这一趟本身就是外层的一个步骤，重置一次外层那一行的耗时就少了。 */
-  if (!nested) vMark = nowMs();
+  if (!nested) {
+    /* 第一行之前那一截（宿主启动 + 装编译器）**也要印出来**：不印它，`-v` 里那些
+       步骤加起来永远比外面 `time` 的 `real` 小一截，而那一截其实是固定成本。 */
+    vBoot();
+    vMark = nowMs();
+  }
   discoverPlugins();
   if (!nested) vMark = nowMs();
   /* `--help` 在**任何一级**都由同一个函数处理：`findCmd` 走到第一个不是子命令名的记号就停，
@@ -6114,6 +6200,9 @@ try {
    * 就不会有「哪条腿忘了渲染」。渲染是纯字符串计算（`cli/flame.js`）。 */
   profFoldedFinish();
   profSvgFinish();
+  /* 总账最后印（`-v`）：它要把上面所有步骤都算进去，所以只能在这儿 —— 与 profile 那两格
+     同一个理由（所有腿唯一的汇合点）。 */
+  vTotal();
   setExitCode(runTimedOut() ? 124 : st);
 } catch (e) {
   if (e instanceof OmniError) {

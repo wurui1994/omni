@@ -145,6 +145,9 @@ const NATIVE_OPS = {
   /* 峰值常驻内存（字节）：这条腿上墙上时间的大头常常是内存压力而不是 CPU，
    * 没这一格"慢"就只能靠猜。两个宿主各自把单位换成字节，见 host/native.js。 */
   maxRssBytes: 'js_max_rss',
+  /* 进程起来到此刻的毫秒数：`-v` 的总账要它 —— 步骤的和加不出外面 `time` 的 `real`，
+   * 差的那一截是宿主自己的启动。见 host/native.js 的 upMs。 */
+  upMs: 'js_proc_uptime',
   /* 插件加载（ADR-0021 S4）：只有 C 那条腿真有，别的腿响着拒 */
   pluginLoad: 'js_plugin_load',
   pluginsOk: 'js_plugin_ok',

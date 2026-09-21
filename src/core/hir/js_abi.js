@@ -690,6 +690,10 @@ export const JS_ABI = {
   // 峰值常驻内存（字节）。单位在**宿主那一侧**归一：node 的 maxRSS 是 KB，C 的 ru_maxrss
   // 在 macOS 上是字节、Linux 上是 KB —— 两边都换成字节，调用方不必知道自己在哪。
   js_max_rss: { js: '$js_max_rss', c: 'omni_js_max_rss', arity: 0 },
+  /* 进程起来到此刻的**毫秒**（整数）。两侧的起点刻意不同：node 是进程启动
+     （`process.uptime()`），C 是 `omni_host_init`（main 的第一行，原生腿的 pre-main
+     近似为零）。`-v` 的总账拿它补上"步骤之和"与外面 `time` 的 `real` 之间那一截。 */
+  js_proc_uptime: { js: '$js_proc_uptime', c: 'omni_js_proc_uptime', arity: 0 },
   /* 插件加载（ADR-0021 S4）：第一个参数是 .dylib 的路径，第二个是核心递过去的那格 api。
      C 那条腿 dlopen + dlsym("omni_plugin_init")；node 与 JS 那两条腿**响着拒** ——
      它们没有这条路（node 没有同步的 ESM import，而驱动是同步的），拒得响比悄悄没插件好。 */
