@@ -61,7 +61,9 @@ import { runGraphFile, buildGraphFile, coreSxText, borrowedExts } from './graph/
 import { ninjaCmd } from './build/cli.js';
 /* 模块产物缓存那套通用机器（一份索引 + 内容身份 + 一格键）：有 import 关系的语言共用它，
  * 不再每门语言手写一份脏判定 —— 见 `docs/design/build-system.md` §10。 */
-import { ContentIds, Index, decodeRow, encodeRow, rowKey, rowFresh } from './build/modcache.js';
+import {
+  ContentIds, Index, decodeRow, encodeRow, rowKey, rowFresh, modCacheDir,
+} from './build/modcache.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -1759,9 +1761,15 @@ function stampSame(a, b) {
   return true;
 }
 
-/** 产物的默认去处。**一个共用目录** —— 复用的就是这里面按文件名躺着的那些 `.js`。 */
-function asyModsDir() {
-  return join(cacheRoot(), 'asy-mods');
+/**
+ * 「一份源码 -> 一目录 ESM 模块」的产物落点：`modules/js-<配置哈希>/`。
+ *
+ * **一种配置一格**（`modCacheDir`）：影响"同一个名字解析到哪个文件"的那几样
+ * （当前目录、`ASYMPTOTE_DIR`、内建面）进**目录名**，于是换了配置就是另一格目录 ——
+ * 不必再在每张清单里问一遍"环境变没变"。名字里不带语言：编到 JS 是通用构建。
+ */
+function jsModulesDir() {
+  return modCacheDir(cacheRoot(), 'modules', `js-${hash16(asyModsEnv())}`);
 }
 
 /**
@@ -1860,7 +1868,7 @@ function inpOk(field) {
 /**
  * asy 那棵库的增量：**用通用那套机器**（`build/modcache.js`），不再手写第二份脏判定。
  *
- * 一份索引 `asy-mods/index.log`（`Index`），一行一个产物、行里自足（`encodeRow`）：
+ * 一份索引 `index.log`（`Index`），一行一个产物、行里自足（`encodeRow`）：
  * 键 + 自己的源文件 + include 摊进来的 + 依赖的源文件 + 复用它时要带上的产物 + 附加标记。
  * 「还新不新」只有一处判（`rowFresh` = 把行里那些输入重新哈一遍，对比行里记的键）——
  * 快路（`asyModsFast`）与慢路（`asyModsSkip.load`）问的是同一个函数，这正是从前四处
@@ -2205,7 +2213,7 @@ function asyModsBuild(path, dir) {
   //
   // 清单里**不抄脏判定** —— "这一份还新不新"由索引那一行自己答（`asyRowFresh`），
   // 快路与慢路问的是同一个函数。清单只答索引答不了的那一件事：这一趟用到了哪几份产物。
-  const man = [asyModsEnv(), cs, r.entry];
+  const man = [cs, r.entry];
   for (const u of r.units) man.push(`u|${u.name}`);
   for (const u of r.reused) man.push(`u|${u.name}`);
   writeText(join(dir, `main-${r.entry}.dep`), `${man.join('\n')}\n`);
@@ -2253,11 +2261,10 @@ function asyModsFast(path, dir) {
   const miss = (why) => { vStep(`asy mods 不命中 ${why}`); return null; };
   if (!exists(depPath) || !exists(mainPath)) return miss('还没有这个入口的清单');
   const lines = readText(depPath).split('\n');
-  if (lines.length < 3) return miss('清单不全');
-  if (lines[0] !== asyModsEnv()) return miss('环境变了（当前目录 / ASYMPTOTE_DIR）');
-  if (lines[1] !== cs) return miss('编译器自己变了');
-  if (lines[2] !== nm) return miss('入口名字对不上');
-  for (let i = 3; i < lines.length; i++) {
+  if (lines.length < 2) return miss('清单不全');
+  if (lines[0] !== cs) return miss('编译器自己变了');
+  if (lines[1] !== nm) return miss('入口名字对不上');
+  for (let i = 2; i < lines.length; i++) {
     const ln = lines[i];
     if (ln === '') continue;
     const parts = ln.split('|');
@@ -2274,7 +2281,7 @@ function asyModsFast(path, dir) {
     }
   }
   if (!exists(join(dir, 'omni_rt.js'))) return miss('运行时那一份没了');
-  vStep(`asy mods 命中   ${lines.length - 3} 份产物一份没动`);
+  vStep(`模块清单命中   ${lines.length - 2} 份产物一份没动`);
   return mainPath;
 }
 
@@ -4875,7 +4882,7 @@ function main(argv) {
       // `OMNI_ASY_MODS=0` 回到"整份程序一份大 JS"那条（对照用）。
       if (path.endsWith('.asy') && hasJsEngine() && !rest.includes('--interp')
         && env('OMNI_ASY_MODS') !== '0') {
-        const dir = asyModsDir();
+        const dir = jsModulesDir();
         // 先问一句"上一趟的清单还成立吗"。成立就一步前端都不走 —— 判断本身只是几十个 stat。
         const hit = asyModsFast(path, dir);
         const mainPath = hit === null ? asyModsBuild(path, dir) : hit;
@@ -5639,11 +5646,11 @@ function main(argv) {
     }
     // 一个源文件一份产物（第七十五刀）：`<名字>.sx` 与 `<名字>.js` 摊在一个目录里，
 
-    // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/asy-mods。
+    // 名字就是源文件自己的名字。`-o 目录` 指定去处，默认 .omni-cache/modules/js-<配置>。
     // 加 `--run` 就直接跑（node 自己按 ESM 的模块图把它们串起来）。
     case 'asy-units': {
       const oi = rest.indexOf('-o');
-      const dir = oi >= 0 ? rest[oi + 1] : asyModsDir();
+      const dir = oi >= 0 ? rest[oi + 1] : jsModulesDir();
       stdout(`${asyModsBuild(path, dir)}\n`);
       return 0;
     }

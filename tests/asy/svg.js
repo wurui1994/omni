@@ -119,7 +119,7 @@ function run(p, n, fmt) {
     { cwd: exDir, env, encoding: 'utf8', timeout: LIMIT, maxBuffer: 1 << 28 });
   const slow = r.signal === 'SIGTERM' || (r.error !== undefined && r.error !== null);
   if (slow) {
-    spawnSync('pkill', ['-f', `${join(ROOT, '.omni-cache', 'asy-mods')}/main-`], { encoding: 'utf8' });
+    spawnSync('pkill', ['-f', `${join(ROOT, '.omni-cache', 'modules')}/main-`], { encoding: 'utf8' });
   }
   return { out: r.stdout ?? '', err: r.stderr ?? '', slow };
 }

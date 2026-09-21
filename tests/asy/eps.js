@@ -398,7 +398,7 @@ function mine(p, budget = LIMIT) {
   // 直接的那个孩子 —— 不收的话每个超时的例子都留一个满载的 node 在后台啃 CPU，
   // 后面的例子于是越跑越慢（这一轴本身就变成了噪声源）。
   if (slow) {
-    spawnSync('pkill', ['-f', `${join(ROOT, '.omni-cache', 'asy-mods')}/main-`],
+    spawnSync('pkill', ['-f', `${join(ROOT, '.omni-cache', 'modules')}/main-`],
       { encoding: 'utf8' });
   }
   // 文件没落下来（abort、或者这条腿还不认这个例子）时退回 stdout：`why()` 要靠
@@ -466,7 +466,7 @@ const names = process.argv.length > 3 ? process.argv.slice(3)
 // 所以这一轴自己先把这个噪声源掐掉：报出来的数只能是干净缓存上跑出来的。
 // 只在"全量 + 不认缓存"这一档清 —— 单独追几个例子时不清（那时要的是快）。
 if (process.env.OMNI_EPS_FRESH === '1' && process.argv.length <= 3) {
-  rmSync(join(ROOT, '.omni-cache', 'asy-mods'), { recursive: true, force: true });
+  rmSync(join(ROOT, '.omni-cache', 'modules'), { recursive: true, force: true });
 }
 
 /** 参考那一份的印记（没有就是 0）。换了参考，旧结论作废。 */

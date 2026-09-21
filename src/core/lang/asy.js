@@ -188,85 +188,18 @@ export function asyFrontEnd() {
   }
   const builtins = parseAsyBuiltins(readText(btab));
   log(`asy builtins   ${builtins.size} 条绑定`);
-  // ---- 解析缓存（第七十二刀）----
-  // 量出来的：一个只带 prelude 的文件跑 836ms，里面 glrParse 120ms + lexText 59ms +
-  // 建树 55ms 是最大的一块（node --cpu-prof），而 prelude 与 base/ 那几十个文件每次跑
-  // 都**一模一样**。所以按「语法表 + 源文本」的哈希把树存到盘上，命中就 JSON.parse 回来。
-  // 键里带语法表的哈希：语法一改，缓存整片失效。`OMNI_NO_ASTCACHE=1` 关掉它（对照用）。
-  // span 里的 `file` 是个带全文与行表的对象，不进 JSON —— 读回来再挂上（astReattach）。
-  const gkey = hash16(readText(gpath));
-  const astDir = env('OMNI_NO_ASTCACHE') === '1' ? null : join(cacheRoot(), 'asy-ast');
-  if (astDir !== null) mkdirAll(astDir);
+  // **没有"把树存下来"这一层**（从前是 `.omni-cache/asy-ast` 的 `.ast` + 一份 `.stamp`）。
+  // 删掉它的理由：一份单元要么**还新**（那就连正文都不降，直接用盘上那份 `.js` 与它的接口），
+  // 要么**变了**（那就非降不可，而降之前的解析只占其中一小段）。中间那层序列化的树
+  // 只在"变了"那一路上省一点，代价是第二套脏判定（它自己那份印记）、一份要与解析器
+  // 同步演化的打包格式、以及量到过 1.3GB 的一棵缓存。增量应该只有一处判据。
   const parseText = (p, text, diags) => {
     const file = new SourceFile(p, text);
-    // 键不哈希全文（量过：哈希 base 那几十个文件要 56ms）——用「路径 + 改动时间 + 字节数」，
-    // 那三样一致就是同一份源码，而 stat 是常数时间。文本不是从盘上来的（REPL、内联）时
-    // 退回哈希那条路。
-    //
-    // 改动时间与语法表的哈希**不在文件名里，在旁边那份 .stamp 里**（第七十四刀）：
-    // 编进文件名的话每改一次源码就多出一条，asy_builtins 那一条 12MB，量过 .omni-cache/asy-ast
-    // 就是这么攒到 1.3GB 的。现在一份源码在盘上**只占一条**，改了就原地盖掉。
-    //
-    // 文件名是**源文件的基名 + 一段路径哈希**，只换后缀：`plain.asy` -> `plain__<8 位>.ast`。
-    // 全哈希的名字看不出在复用谁，所以基名留着。**一层平铺、不分子目录** —— 这份缓存是
-    // 公用的：谁引到 `plain.asy` 都用同一格。
-    // 路径那一段是必须的：只取基名时同名不同目录撞在一格上，两个入口轮流跑就互相盖
-    // （从前的注释说"撞了就是印记不一致，退化成不命中"，那是**错的** —— 见下面 same 那一行）。
-    // 不是从盘上来的文本（REPL、内联）没有名字，按全文哈希起名。
-    let base = '';
-    let inline = false;
-    if (astDir !== null) {
-      if (exists(p)) {
-        const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-        const nm = cut < 0 ? p : p.slice(cut + 1);
-        const dot = nm.lastIndexOf('.');
-        base = `${dot <= 0 ? nm : nm.slice(0, dot)}__${hash16(p).slice(0, 8)}`;
-      } else {
-        inline = true;
-        base = `_inline-${hash16(text)}`;
-      }
-    }
-    const cpath = base === '' ? '' : join(astDir, `${base}.ast`);
-    const spath = base === '' ? '' : join(astDir, `${base}.stamp`);
-    // 这一趟的文本已经在手上，把这份内容的身份记进备忘（下面真要哈希时不用再读一遍文件）
-    /* 备忘是**驱动侧**印记的那一格（srcIdMemo），所以经 api 递过去，前端不碰它。
-       哈希用个 thunk 传：只有真要存的时候才算，与原来"对不上才哈希"一字不差。 */
-    const seed = () => {
-      ASY_API.srcIdNote(p, mtimeMs(p), fileSize(p), () => hash16(text));
-    };
-    if (cpath !== '' && exists(spath) && exists(cpath)) {
-      const fs = readText(spath).split('|');
-      // 印记的身份是**内容哈希**（inline 那种没有文件，名字里已经带着哈希）：touch 一下、
-      // 重新 checkout 一遍都不该让这份树作废。改动时间与字节数只是省一次读的预检 ——
-      // 两样对得上就直接命中，对不上才真去哈希一遍（inpOk）。
-      //
-      // **先核路径**：这一格的文件名只是基名，同名不同目录会撞到一起，而 `inpOk` stat 的是
-      // **印记里记着的**那个路径，不是这一趟要的这个 —— 于是撞了反而"命中"。
-      // 量到的样子：`omni run /tmp/tri2.asy` 解析出来的是 `/tmp/asyfp/tri2.asy` 的树，
-      // 整趟前端都在编另一个程序，输出是一份画图的 EPS（tri2.asy 里一句画图都没有）。
-      const same = inline || inpPath(fs[1]) === p;
-      const r = inline ? { ok: fs[1] === '-', cur: '-' } : inpOk(fs[1] === undefined ? '' : fs[1]);
-      if (fs[0] === gkey && same && r.ok) {
-        const t = astUnpack(readText(cpath), file);
-        if (r.cur !== fs[1]) writeText(spath, `${gkey}|${r.cur}`);   // 刷新预检那两格
-        log(`asy ast cache  ${p}`);
-        return t;
-      }
-    }
     const toks = lexText(tb.grammar.lex, file, diags);
     diags.throwIfErrors();
     log(`asy lexer      ${p} -> ${toks.length} tokens`);
     const t = glrParse(tb, toks, diags);
     diags.throwIfErrors();
-    if (cpath !== '') {
-      const packed = astPack(t, log);
-      // 形状认不出来就不缓存（见 astPack 的注释）。先写树再写印记：印记是"这一条成了"的凭据。
-      if (packed !== null) {
-        if (!inline) seed();
-        writeText(cpath, packed);
-        writeText(spath, `${gkey}|${inline ? '-' : inpField(p)}`);
-      }
-    }
     return t;
   };
   // 模块的找法是量出来的 —— asy 按**当前目录**找，不是按引它的那个文件所在的目录
