@@ -1298,6 +1298,30 @@ function retValText(v, env, ctx) {
   return refOrExpr(v, env, ctx);
 }
 
+/**
+ * 一格**写进去的值**：空引用按**目标那一格的声明类型**落 `(null T)`，别的照 `aggValText`。
+ *
+ * `x = nil` / `p.f = nil` / `xs[i] = nil` 里那个 null 自己说不出类型，而 `expr` 对它答
+ * `(int 0)` —— 于是 `(fldset (var node) Shapes (int 0))`，方言当场报类型不符
+ * （量出来的：pt 的 `node.Shapes = nil`）。目标的类型这一层手上就有：字段从宿主的形状表、
+ * 下标从元素类型、变量从 `env`。
+ */
+function valForText(want, v, env, ctx) {
+  if (isLitNull(v) && want !== undefined && want !== null
+    && (isPtrRec(want, ctx) || elemType(want) !== null)) {
+    return `(null ${want})`;
+  }
+  return aggValText(v, env, ctx);
+}
+
+/** 一格字段的声明类型（宿主的形状表里查）。查不着回 undefined。 */
+function fieldTypeOf(obj, field, env, ctx) {
+  let t = null;
+  try { t = typeOf(obj, env, ctx); } catch { return undefined; }
+  const sh = shapeAt(t, ctx);
+  return sh === undefined ? undefined : sh.types.get(field);
+}
+
 /** 装箱：`(dyn E)`。装不进去的当场报（哪一格装不进也说清）。 */
 function boxText(v, env, ctx) {
   const t = boxedTypeOf(v, env, ctx);
@@ -1533,7 +1557,7 @@ function stmtIn(x, env, ctx) {
      *   - 值语义的结构体：**整格拷**（赋完再改源值，目标那一格不跟着变）—— go 的值赋值；
      *   - 引用语义的类：**拷句柄**（别名）—— go 的 `p = q`（`*T`）。
      * 所以这儿不必物化、不必逐字段抄，一句 `set` 就对。 */
-    case 'set': return [`(set ${x.attrs.name} ${aggValText(x.ins.value, env, ctx)})`];
+    case 'set': return [`(set ${x.attrs.name} ${valForText(env.get(x.attrs.name), x.ins.value, env, ctx)})`];
     case 'field-set': {
       const host = objText(x.ins.obj, env, ctx);
       /* **写进去的是一格聚合字面量**（`m.Triangles = make([]Tri, 2)` / `m.In = &Inner{…}`）：
@@ -1550,14 +1574,15 @@ function stmtIn(x, env, ctx) {
         return [...pre, `(fldset ${host} ${x.attrs.field} (var ${tn}))`];
       }
       /* 别的一律一句 `fldset` —— 记录（类与结构体两档）、数组、字典、标量同形，
-         **整格写**在方言里现成（判据：`(fldset (var t) v (var w))` 在类上成立）。 */
-      return [`(fldset ${host} ${x.attrs.field} ${aggValText(x.ins.value, env, ctx)})`];
+         **整格写**在方言里现成（判据：`(fldset (var t) v (var w))` 在类上成立）。
+         **nil 按目标类型落** `(null T)`（见 `valForText` 那段账）：`node.Shapes = nil`。 */
+      return [`(fldset ${host} ${x.attrs.field} ${valForText(fieldTypeOf(x.ins.obj, x.attrs.field, env, ctx), x.ins.value, env, ctx)})`];
     }
     case 'index-set': {
       if (elemType(typeOf(x.ins.obj, env, ctx)) === null) {
         gap('往一格说不清形状的东西里按下标写（这一刀只接 list-new 绑出来的那格）');
       }
-      return [`(aset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.index, env, ctx)} ${aggValText(x.ins.value, env, ctx)})`];
+      return [`(aset ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.index, env, ctx)} ${valForText(elemType(typeOf(x.ins.obj, env, ctx)), x.ins.value, env, ctx)})`];
     }
     case 'map-set': {
       const d = hostDict(x.ins.obj, env, ctx);

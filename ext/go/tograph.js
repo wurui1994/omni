@@ -1880,6 +1880,22 @@ function scalarNameOf(ty) {
 }
 
 /**
+ * 一格类型节点**剥到切片 / 字典**（`paren` 透传、具名类型跟着 `UNDER` 走）。不是这两档回 null。
+ * 用处见 `fieldValue`：那两档上写着的 `nil` 要落零值容器而不是 `lit(null)`。
+ */
+function containerTyOf(ty) {
+  if (ty === undefined || ty === null) return null;
+  const t = tag(ty);
+  if (t === 'paren') return containerTyOf(kids(ty)[0]);
+  if (t === 'slice' || t === 'map') return ty;
+  if (t === 'tname' && kids(ty).length === 1) {
+    const n = leaf(kids(ty)[0]);
+    if (UNDER.has(n)) return containerTyOf(UNDER.get(n));
+  }
+  return null;
+}
+
+/**
  * 一格 struct 字面量里**某个字段的值**：字段声明成浮点时把值转成浮点。
  *
  * 为什么非要这一格（量出来的）：`Vec{1, 2, 3}` 的三个值是**整字面量**，而
@@ -1894,6 +1910,22 @@ function scalarNameOf(ty) {
 function fieldValue(ft, v, ast) {
   const n = scalarNameOf(ft);
   const v2 = (n === 'float32' || n === 'float64') ? convOf('float', v) : v;
+  /* **切片 / 字典那一格上写着 `nil`**（`node.Shapes = nil`、`&Node{nil, …}`）：落那个类型的
+     **零值容器**（`zeroOf` 交出来的带元素类型的空列表 / 空字典），不是 `lit(null)`。
+     理由与 `zeroOf` 上头那段话是同一条：图上压根没有"nil 切片"这个概念，落 null 的代价是
+     下游连元素类型都不知道 —— 而形状是按字段值的类型去重的，于是同一个 `Node` 算出
+     **两个形状**（写了切片的那趟是 `(arr r1)`、写 nil 的那趟是 int），core 那侧当场报
+     「这个数组装 class，写进去的是 r5」。与 go 的差只有 `== nil`（`len` / `append` /
+     取下标 / `range` 都一样），那正是 `zeroOf` 已经认下的那一处差。 */
+  if (isNilNode(v2)) {
+    const ct = containerTyOf(ft);
+    if (ct !== null) {
+      try {
+        const z = zeroOf(ct, 'nil');
+        if (z !== null && z !== undefined && !isNilNode(z)) return z;
+      } catch { /* 算不出来（元素自己没零值）就照旧往下走 */ }
+    }
+  }
   const ifn = ifaceNameOf(ft);
   if (ifn === null) return v2;
   /* **接口位置上写 `nil`**（`f(nil)`）：值就落 `lit(null)`。
