@@ -156,7 +156,18 @@ function highlight(text, lang) {
 
 const S = { tree: null, path: null, lang: 'text', text: '', busy: false, seq: 0 };
 
+/**
+ * 与"服务"说话的**唯一一处**。
+ *
+ * 两种跑法共用这一格：连着 `omni serve` 时走 `fetch`；单体 HTML 那一份里
+ * `window.__OMNI_LOCAL` 已经挂上了一台"就在本页跑"的服务（`src/studio/browser-main.js`），
+ * 形状与 `/api/*` 逐字相同，于是这份 UI **一行都不用分叉**。
+ * 这一格就是那条边界 —— 别在别处再写 `fetch`。
+ */
 const api = async (p, init) => {
+  if (typeof window !== 'undefined' && window.__OMNI_LOCAL !== undefined) {
+    return window.__OMNI_LOCAL(p, init);
+  }
   const r = await fetch(p, init);
   if (!r.ok) throw new Error(`${p} -> ${r.status}`);
   return r.json();
