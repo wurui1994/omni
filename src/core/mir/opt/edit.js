@@ -94,9 +94,12 @@ export function removeInsns(fn, doomed) {
      就是两张 `下标 -> 颜色` 的表。清掉而不是重编号：通道表里 regalloc 在倒数第三格，
      它之后只剩 `trim`，而"先分配、再删指令"本来就该重新分配一次。
      `slotHint`/`slotHintF` 的键是槽号（删指令不改槽号），可它们的**区间**是按 pc 算的，
-     与值的颜色是同一个池子分出来的 —— 只清一半会留下相交却同色的一对。所以四张一起清。 */
+     与值的颜色是同一个池子分出来的 —— 只清一半会留下相交却同色的一对。所以四张一起清。
+     `regHintGF`（寄放进 FP 的整数值）也是按下标记的，漏掉它会**段错误**：后端认了一张
+     过期的表，值写进 d 寄存器而读的是另一处（pt 上踩过一次）。 */
   if (fn.regHint !== undefined) fn.regHint = undefined;
   if (fn.regHintF !== undefined) fn.regHintF = undefined;
+  if (fn.regHintGF !== undefined) fn.regHintGF = undefined;
   if (fn.slotHint !== undefined) fn.slotHint = undefined;
   if (fn.slotHintF !== undefined) fn.slotHintF = undefined;
 

@@ -238,9 +238,10 @@ export function inlineCalls(fn, mod) {
   fn.op = op; fn.t = t; fn.a = a; fn.b = b; fn.aux = aux;
   /* ---- 三、按角色改 ref / 槽号 / 帧块号；池子该抄的抄 */
   fixRefs(fn, map, inFrom, mod);
-  /* 分配表按下标记的，已经作废 */
+  /* 分配表按下标记的，已经作废（`regHintGF` 一起清 —— 漏掉它是段错误，见 `edit.js`） */
   if (fn.regHint !== undefined) fn.regHint = undefined;
   if (fn.regHintF !== undefined) fn.regHintF = undefined;
+  if (fn.regHintGF !== undefined) fn.regHintGF = undefined;
   /**
    * ---- 四、**把新造的那些槽位再提升一遍**（`mem2reg`）。
    *

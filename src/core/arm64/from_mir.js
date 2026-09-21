@@ -582,11 +582,19 @@ class FnGen {
     /* 浮点那一类同一套账（见 `STICKY_F`）：上一层的 `regHintF` 是另一张表、另一套颜色。 */
     this.hintF = (f.regHintF !== undefined && f.regHintF !== null && f.regHintF.size > 0)
       ? f.regHintF : null;
+    /* **寄放在 FP 寄存器里的整数值**（`regalloc.js` 的 `GP_IN_F`）：要不到通用颜色的
+     * 整数值住进一个 d 寄存器 —— 读 `fmov x,d`、写 `fmov d,x`，一条指令且不碰内存。
+     * 用的是**同一批物理寄存器**，所以这几个颜色也要算进下面存调用者的那一步。
+     * **这一路今天是关着的**（`GP_IN_F = false`，量出来 −19%，那一段写了账）——
+     * 表是空的 ⇒ `hintGF` 是 null ⇒ 这一整族判断一条指令都不影响。 */
+    this.hintGF = (f.regHintGF !== undefined && f.regHintGF !== null && f.regHintGF.size > 0)
+      ? f.regHintGF : null;
     this.fstickyColors = [];
-    if (this.hintF !== null || this.slotHintF !== null) {
+    if (this.hintF !== null || this.slotHintF !== null || this.hintGF !== null) {
       const seen = [];
       if (this.hintF !== null) for (const c of this.hintF.values()) if (seen.indexOf(c) < 0) seen.push(c);
       if (this.slotHintF !== null) for (const c of this.slotHintF.values()) if (seen.indexOf(c) < 0) seen.push(c);
+      if (this.hintGF !== null) for (const c of this.hintGF.values()) if (seen.indexOf(c) < 0) seen.push(c);
       seen.sort((a, b) => a - b);
       /* **只存被调用者保存的那几个**（前 `STICKY_F_SAVED` 个颜色）。草稿那一档
        * （d19-d31）是调用者保存的，上一层保证涂成它们的区间不跨调用点 ⇒ 不用存。 */
@@ -855,6 +863,13 @@ class FnGen {
       this.buf.emit(movReg(1, reg, POOL[s]));
       return;
     }
+    /* 寄放进 FP 的整数值（见 `gfAt`）：一条 `fmov x,d` 取出位模式 —— 顶掉的是那条
+     * `ldr`，而且不碰内存。栈位从头到尾没人写过，所以这一条必须在 `frameLoad` 之前。 */
+    const gf = this.gfAt(vi);
+    if (gf >= 0) {
+      this.fromFp(reg, gf, true);
+      return;
+    }
     this.frameLoad(reg, this.valOff(vi));
   }
 
@@ -985,6 +1000,23 @@ class FnGen {
     return this.fstickyAt(this.f.at(ref));
   }
 
+  /**
+   * 这个**整数**值寄放在哪个 FP 寄存器里（-1 = 没寄放）。见 `regalloc.js` 的 `GP_IN_F`。
+   *
+   * 与 `fstickyAt` 的差别只在"住着的是什么"：那边是真浮点值（`fRefReg` 直接拿去算），
+   * 这边是**位模式** —— 只有三条路认它：`dest`（算进 `RES`）、`def`（一条 `fmov d,x`
+   * 存进去）、`loadRef`（一条 `fmov x,d` 取出来）。`refReg` 不必认：它问不到 POOL
+   * 就转手 `loadRef`。别的地方（浮点那些快路）按 MIR 类型分流，整数值走不到。
+   */
+  gfAt(i) {
+    if (this.hintGF === null) return -1;
+    const c = this.hintGF.get(i);
+    if (c === undefined || c < 0 || c >= STICKY_F.length) return -1;
+    return STICKY_F[c];
+  }
+
+
+
   /** 序言里存下调用者的 d8-d15 / 收场里取回来。只动真用到的那几格。
    *  用 FP load/store 一条指令 `str d, [base, #off]` / `ldr d, [base, #off]` 搞定，
    *  比从前走 `fmov + str/ldr + fmov` 省两条。 */
@@ -1043,6 +1075,9 @@ class FnGen {
     /* 浮点那一套（见 `STICKY_F`）：`def` 会从这个寄存器 `fmov` 进它的 d 寄存器，
      * 所以不必占 POOL 的位子 —— 占了也白占（`def` 那一路不认领）。 */
     if (this.fstickyAt(i) >= 0) return RES;
+    /* 寄放进 FP 的整数值（见 `gfAt`）：`def` 会从 `RES` 一条 `fmov` 搬进去，
+     * 同理不必占 POOL 的位子。 */
+    if (this.gfAt(i) >= 0) return RES;
     if (this.uses[i] === 0) return RES;
     const s = this.takeSlot(a, b);
     if (s < 0) return RES;
@@ -2030,7 +2065,9 @@ class FnGen {
     const gp = ftmp === FTMP1 ? TMP1 : TMP0;
     if (dbl && ref !== REF_NONE && !isConstRef(ref)) {
       const vi = this.f.at(ref);
-      if (this.stickyAt(vi) < 0 && this.valReg[vi] < 0
+      /* `gfAt` 那一路的栈位从头到尾没人写过（见 `gfAt`）—— 从那儿读是读垃圾。
+       * 按类型分流本来就到不了这儿（寄放的只有整数值），这一条是钉住那条不变式。 */
+      if (this.stickyAt(vi) < 0 && this.valReg[vi] < 0 && this.gfAt(vi) < 0
           && this.frameLoadF(ftmp, this.valOff(vi))) {
         return ftmp;
       }
@@ -2453,6 +2490,15 @@ class FnGen {
       return;
     }
     if (w === 32) this.buf.emit(sxtw(reg, reg));
+    /* 寄放进 FP 的整数值（见 `gfAt`）：一条 `fmov d,x` 把位模式搬进它的家。
+     * **摆在符号扩展之后** —— 寄存器里躺的必须是 i32 的规范形，取出来的那一头
+     * （`loadRef` 的 `fmov x,d`）不会再补一次。 */
+    const gf = this.gfAt(i);
+    if (gf >= 0) {
+      this.toFp(gf, reg, true);
+      this.pending = -1;
+      return;
+    }
     /* 粘住的那几个（见 `STICKY`）：结果要落在它那一个里。`dest` 已经直接算进去的话
      * 这儿一个字都不发；别处算好的（`RES` 那一路）就一条 `mov`。
      * **不进 POOL、不写栈位**：它从这儿一直住到最后一次使用，`flush` 也不碰它。 */

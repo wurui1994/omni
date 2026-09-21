@@ -272,6 +272,10 @@ export const COLORS = 9;
  * 真要往下走得先把两套机制并成一套：`POOL` 是一遍过的缓存、这一层是活跃区间上色，
  * 两者抢同一批物理寄存器而**互相看不见**。并起来（后端只按 `regHint` 发码、`POOL` 只兜
  * 没上色的值）才谈得上"多给几个颜色"。
+ *
+ * 三、**"从别处借寄存器"这条路也走过了**：`GP_IN_F`（把整数寄放进闲着的 d 寄存器）
+ * 量出来 −19%。两次的账指向同一件事：**这一层缺的不是"再多几个住处"，而是少几个要住的**
+ * （压活跃区间 / 重物化）。
  */
 export const COLORS_SCRATCH = 0;
 
@@ -310,6 +314,39 @@ export const COLORS_F = 8;
  * 取真寄存器，**只有前 8 个要在序言里存**。
  */
 export const COLORS_F_SCRATCH = 13;
+
+/**
+ * **通用那一类的值寄放进浮点那套物理寄存器里** —— **不做，而这是量完之后的结论**
+ * （2026-09-22）。机制整份留着（`fn.regHintGF` + 后端的 `gfAt`），这一格是它的总闸。
+ *
+ * 一、**动机是真的**：`bench/go/pt.go` 的 `s_Tree__search`（`OMNI_RA_STAT=1`）——
+ *     通用 52/82（峰值 13，颜色 9+0）  浮点 26/26（峰值 2，颜色 8+13）
+ * 两类各占一套池子，于是**一边饿着四个、另一边闲着十九个**。整个函数同时活着最多
+ * 13+2 个值，两套加起来 30 个颜色：缺口不是"寄存器不够"，是分家分错了。
+ * arm64 上一个整数住 d 寄存器：读 `fmov x,d`、写 `fmov d,x`，一条指令且不碰内存。
+ *
+ * 二、**量出来是亏的（−19%，两趟一致）**。`ptbig`（288×216×16，答案 117844440）：
+ *     关 310.8 / 314.8ms   开 368.9 / 374.8ms   开/关 1.187 / 1.190
+ * 结构上也看得见为什么：`Tree__search` 的帧访存 100 → 87（−13 条），可 `fmov`
+ * 19 → 53（+34 条）、指令 469 → 490。**一条 `fmov` 不比一条 `ldr` 便宜**：
+ * 它跨两个寄存器文件、在每一次使用的关键路径上，而溢出的那条 `ldr` 走存转发、
+ * 乱序引擎能把它提前发出去。省内存访问这件事本身不是目的。
+ *
+ * 三、量之前先掉进的两个坑（留着当判据）：
+ *   - 第一版没挑值，把**后端那个一遍过缓存（`POOL`）本来就攥得住的**也寄放了 ——
+ *     `fmov` 一下 +46 条而帧访存只少 13 条。后来加了 `poolCanHold` 才把 23 个收到 17 个，
+ *     可结论没变（这也说明"覆盖率"这个数高估收益：POOL 里的值不进这一层的账）。
+ *   - `coalesceWithSlots` 跑在这一步之后，会给 `LOAD`/`STORE` 的值补一个**通用**颜色，
+ *     于是同一个 pc 同时躺在 `regHint` 与 `regHintGF` 里（19 处）。后端两头的问法次序
+ *     不同（`dest`/`loadRef` 先问通用、`def` 先问 FP）⇒ 值写进 d 寄存器、读的是 x
+ *     寄存器 ⇒ **段错误**。所以合流成功就从寄放表里划掉，`checkRegHint` 也加了这一条。
+ *
+ * 落地的形状（真要再开的话）：颜色从浮点那一类的**同一个池子**里要（`cls[1]`），
+ * 于是"区间相交不许同色"自动成立；记在**第三张表**而不是塞进 `regHintF` —— 后端有七八处
+ * "浮点值的家就是那个 d 寄存器"的快路（`fRefReg`/`mload`/`mstore`/返回值）按 MIR 类型
+ * 分流，混进去会把整数位模式当浮点算。
+ */
+export const GP_IN_F = false;
 
 /**
  * **通用那一类同时活着最多几个值**（判"要不要开草稿档"用，见 `COLORS_SCRATCH`）。
@@ -377,6 +414,8 @@ export function regalloc(fn, mod) {
   }
   for (let i = 0; i < COLORS_F; i++) cls[1].free.push(i);
   for (let i = 0; i < COLORS_F_SCRATCH; i++) cls[1].scratch.push(COLORS_F + i);
+  /** 寄放在浮点那套寄存器里的**整数**值（见 `GP_IN_F`）：pc -> 浮点那一类的颜色。 */
+  const gfHint = new Map();
 
   /* 每条指令之前有几个调用点（前缀和）—— 区间 [s,e] 跨调用 ⇔ 这两端的计数不同。 */
   const callsBefore = [];
@@ -401,14 +440,16 @@ export function regalloc(fn, mod) {
   };
 
   /** 给一个区间要个颜色。要不到就抢一个**值**（槽位不当牺牲品：它的住处是全函数
-   *  一个决定，中途换人后端没法表达）。回真给了没有。 */
-  const grant = (c, key, end, isSlot, operandOf, start) => {
+   *  一个决定，中途换人后端没法表达）。回真给了没有。
+   *  `into` 不为空时颜色记在那张表上（`GP_IN_F` 那一路），池子照旧是 `c` 的。 */
+  const grant = (c, key, end, isSlot, operandOf, start, into) => {
+    const dst = isSlot ? c.slotHint : ((into === undefined || into === null) ? c.hint : into);
     /* 不跨调用的先吃草稿那一档（调用者保存的寄存器，序言一个字都不用发）。 */
     if (c.scratch.length > 0 && !crossesCall(start, end)) {
       c.scratch.sort((x, y) => x - y);
       const color = c.scratch.shift();
-      (isSlot ? c.slotHint : c.hint).set(key, color);
-      c.active.push({ pc: key, end, color, slot: isSlot, scratch: true });
+      dst.set(key, color);
+      c.active.push({ pc: key, end, color, slot: isSlot, scratch: true, map: dst });
       return true;
     }
     if (c.free.length === 0) {
@@ -427,16 +468,16 @@ export function regalloc(fn, mod) {
       }
       if (worst < 0) return false;
       const victim = c.active[worst];
-      c.hint.delete(victim.pc);
+      (victim.map === undefined ? c.hint : victim.map).delete(victim.pc);
       c.active.splice(worst, 1);
-      (isSlot ? c.slotHint : c.hint).set(key, victim.color);
-      c.active.push({ pc: key, end, color: victim.color, slot: isSlot });
+      dst.set(key, victim.color);
+      c.active.push({ pc: key, end, color: victim.color, slot: isSlot, map: dst });
       return true;
     }
     c.free.sort((x, y) => x - y);                // 取最小的颜色：两次编译要一样
     const color = c.free.shift();
-    (isSlot ? c.slotHint : c.hint).set(key, color);
-    c.active.push({ pc: key, end, color, slot: isSlot });
+    dst.set(key, color);
+    c.active.push({ pc: key, end, color, slot: isSlot, map: dst });
     return true;
   };
 
@@ -499,17 +540,31 @@ export function regalloc(fn, mod) {
      * 会把"横跨整个函数、可在热循环里每轮都用"的值第一个赶走 —— `bench/go/slice.go` 的
      * 数组句柄就是这样被挤到栈上的，内层循环每轮四条 `ldr x9,[sp,#0x78]`。
      */
-    if (grant(c, pc, end, false, operandOf, pc) && c.hint.has(pc)) n++;
+    if (grant(c, pc, end, false, operandOf, pc) && c.hint.has(pc)) { n++; continue; }
+    /* **通用那一类要不到 ⇒ 去浮点那套物理寄存器里寄放**（见 `GP_IN_F`）。
+     * 颜色从 `cls[1]` 的同一个池子里要（于是"区间相交不许同色"自动成立），
+     * 只是记在第三张表上 —— 后端按它发 `fmov`，不把这个位模式当 double 用。
+     *
+     * **只寄放后端那个一遍过缓存（`POOL`）攥不住的**（量出来的，见 `poolCanHold`）：
+     * 攥得住的那些在 POOL 里读写一个字都不发，寄放进 FP 反而每次读一条 `fmov`。 */
+    if (GP_IN_F && !isFloatT(t) && !poolCanHold(fn, pc, end)
+      && grant(cls[1], pc, end, false, operandOf, pc, gfHint) && gfHint.has(pc)) n++;
   }
 
   fn.regHint = cls[0].hint;
   fn.regHintF = cls[1].hint;
+  fn.regHintGF = gfHint;
   fn.slotHint = cls[0].slotHint;
   fn.slotHintF = cls[1].slotHint;
   const coal = [new Map(), new Map()];
-  n += coalesceWithSlots(fn, slotIv, last, cls, coal);
+  n += coalesceWithSlots(fn, slotIv, last, cls, coal, gfHint);
   fn.regCoal = coal[0];
   fn.regCoalF = coal[1];
+  /* `OMNI_RA_DBG=1`：把 `checkRegHint` 挂在真程序上跑一遍（判据里只有两个手搭的函数）。
+     查 `GP_IN_F` 那一格时就是它把"一个值两个家"抓出来的 —— 19 处，症状是段错误。 */
+  if (process.env.OMNI_RA_DBG === '1') {
+    for (const e of checkRegHint(fn, mod)) process.stderr.write(`[ra 不自洽] ${e}\n`);
+  }
   /* `OMNI_RA_STAT=1`：印出这一格的覆盖率与压力 —— 「同时活着最多几个」决定了
    * 加寄存器还不还得起，「分到几个」决定了抢占策略有没有用。量过再改，别猜。 */
   if (process.env.OMNI_RA_STAT === '1' && fn.op.length >= 200) {
@@ -539,7 +594,7 @@ export function regalloc(fn, mod) {
     maxLive = peak(evt);
     maxG = peak(evtG);
     maxF = peak(evtF);
-    const got = cls[0].hint.size + cls[1].hint.size;
+    const got = cls[0].hint.size + cls[1].hint.size + gfHint.size;
     /* **没分到颜色的那些是哪几种 op**（2026-09-22 补）：这一条决定下一刀是哪一格 ——
        常量与地址计算多 ⇒ 该做**重物化**（Go 的 `rematerializeable`，溢出不如现算）；
        长命的普通算术多 ⇒ 该做 `tighten`（把定义挪近使用、压活跃区间）。 */
@@ -548,16 +603,17 @@ export function regalloc(fn, mod) {
       if (last[pc] < 0) continue;
       const t = resultType(fn, pc);
       if (t === T_VOID || !fitsOneWord(t)) continue;
-      if (cls[0].hint.has(pc) || cls[1].hint.has(pc)) continue;
+      if (cls[0].hint.has(pc) || cls[1].hint.has(pc) || gfHint.has(pc)) continue;
       const nm = OP_NAMES[fn.op[pc]] ?? String(fn.op[pc]);
       miss.set(nm, (miss.get(nm) ?? 0) + 1);
     }
     const missText = [...miss.entries()].sort((a, b) => b[1] - a[1])
       .slice(0, 8).map(([k, v]) => `${k}×${v}`).join(' ');
     process.stderr.write(`[ra] ${fn.name}: ${fn.op.length} 条指令，该有寄存器的值 ${want} 个，`
-      + `分到 ${cls[0].hint.size}+${cls[1].hint.size}=${got}`
+      + `分到 ${cls[0].hint.size}+${cls[1].hint.size}+${gfHint.size}=${got}`
       + `（${(100 * got / Math.max(1, want)).toFixed(1)}%），同时活着最多 ${maxLive} 个`
-      + `｜通用 ${cls[0].hint.size}/${wantG}（峰值 ${maxG}，颜色 ${COLORS}+${COLORS_SCRATCH}）`
+      + `｜通用 ${cls[0].hint.size}+${gfHint.size}/${wantG}`
+      + `（峰值 ${maxG}，颜色 ${COLORS}+${COLORS_SCRATCH}，寄到 FP 里 ${gfHint.size} 个）`
       + ` 浮点 ${cls[1].hint.size}/${wantF}（峰值 ${maxF}，颜色 ${COLORS_F}+${COLORS_F_SCRATCH}）`
       + (missText === '' ? '' : `｜没分到的：${missText}`) + '\n');
   }
@@ -565,6 +621,33 @@ export function regalloc(fn, mod) {
 }
 
 registerPass('regalloc', regalloc);
+
+/**
+ * 后端那个**一遍过的值缓存**（`arm64/from_mir.js` 的 `POOL`，x11-x15）攥得住这个区间吗。
+ *
+ * 攥得住 = 从定义到最后一次使用之间**没有 flush 点**。后端在三处 flush（那边文件头写着）：
+ * 控制流一分岔或一合并（区域指令、`BR`/`BRIF`/`BRTABLE`/`RET`）、以及**每条调用之前**
+ * （x11-x15 是调用者保存的）。攥得住的话读写它一个字都不发 —— 比寄放进 FP（每次读一条
+ * `fmov`）便宜。
+ *
+ * 为什么要这一条（量出来的）：不看这一格时 `Tree__search` 寄放了 23 个值、`fmov` 从 19 条
+ * 涨到 65 条，而帧访存只从 100 掉到 87 —— 多出来的那四十几条里一大半是"本来住在 POOL 里、
+ * 一个字都不发"的值被换成了两条 `fmov`。与"这一层不该抢 POOL 的寄存器"（`COLORS_SCRATCH`）
+ * 是同一笔账的两面。
+ *
+ * 往**保守**的那边算：池子只有 5 个位子、满了照旧落栈位，所以"攥得住"只是"可能不落内存"。
+ * 判错的代价不对称 —— 该寄放的没寄放只是少赚，不该寄放的寄放了是净亏。
+ */
+function poolCanHold(fn, from, to) {
+  for (let p = from + 1; p <= to; p++) {
+    const o = fn.op[p];
+    if (isCallOp(o)) return false;
+    if (o === OP.BLOCK || o === OP.LOOP || o === OP.IF || o === OP.ELSE || o === OP.END
+      || o === OP.BR || o === OP.BRIF || o === OP.BRTABLE || o === OP.RET
+      || o === OP.SETJMP || o === OP.LONGJMP) return false;
+  }
+  return true;
+}
 
 /**
  * `from` 与 `to` 之间**一定顺着走过来**吗（中间没有任何控制流的岔口或区域边界）。
@@ -608,8 +691,11 @@ function straightLine(fn, from, to) {
  *
  * 回合了几格。合流的登记在 `fn.regCoal` / `fn.regCoalF`（pc -> 槽号），
  * `checkRegHint` 靠它把"值与它自己那个槽同色"这一对放过，别的照旧判。
+ *
+ * `gf` 是"寄放进 FP 的整数值"那张表（`GP_IN_F`）：合流成功就把那个 pc 从里头划掉 ——
+ * 一个值只能有一个家，而合流比寄放更好（一个字都不发）。
  */
-function coalesceWithSlots(fn, slotIv, last, cls, coal) {
+function coalesceWithSlots(fn, slotIv, last, cls, coal, gf) {
   if (slotIv.size === 0) return 0;
   /* 每个槽的读点与写点（按 pc 升序）—— 窗口里有没有人动过这个槽要问它。 */
   const loadsOf = new Map(), storesOf = new Map();
@@ -657,6 +743,7 @@ function coalesceWithSlots(fn, slotIv, last, cls, coal) {
       if (!fits(no, pc, e)) continue;
       cls[k].hint.set(pc, color);
       coal[k].set(pc, no);
+      if (gf !== undefined && gf !== null) gf.delete(pc);
       mark(no, pc, e);
       got++;
       continue;
@@ -671,6 +758,7 @@ function coalesceWithSlots(fn, slotIv, last, cls, coal) {
     if (!fits(no, pv, pc)) continue;
     cls[k].hint.set(pv, color);
     coal[k].set(pv, no);
+    if (gf !== undefined && gf !== null) gf.delete(pv);
     mark(no, pv, pc);
     got++;
   }
@@ -690,17 +778,30 @@ function coalesceWithSlots(fn, slotIv, last, cls, coal) {
  */
 export function checkRegHint(fn, mod) {
   const errs = [];
+  /* **一个值只能有一个家**：寄放进 FP 的那些（`GP_IN_F`）不许同时躺在通用表里 ——
+   * 后端两头问的次序不同，值会写进 d 寄存器而读的是 x 寄存器（pt 上段错误过一次）。 */
+  if (fn.regHintGF !== undefined && fn.regHintGF !== null && fn.regHint) {
+    for (const pc of fn.regHintGF.keys()) {
+      if (fn.regHint.has(pc)) errs.push(`${fn.name}: %${pc} 既记在通用表里又寄放进了 FP（两个家）`);
+      if (fn.regHintF && fn.regHintF.has(pc)) errs.push(`${fn.name}: %${pc} 既是浮点值又被寄放（两个家）`);
+    }
+  }
   const last = extendForLoops(fn, lastUses(fn));
   const { openLoops, endOf } = scanRegions(fn);
   const slotIv = slotIntervals(fn, mod, openLoops, endOf);
   const legs = [
-    ['通用', fn.regHint, fn.slotHint, fn.regCoal],
-    ['浮点', fn.regHintF, fn.slotHintF, fn.regCoalF],
+    ['通用', fn.regHint, fn.slotHint, fn.regCoal, null],
+    /* 浮点那一类的物理寄存器还住着**寄放过来的整数值**（`fn.regHintGF`，见 `GP_IN_F`）——
+       它们与真浮点值抢的是同一批寄存器，所以要摆进同一张相交表里判。 */
+    ['浮点', fn.regHintF, fn.slotHintF, fn.regCoalF, fn.regHintGF],
   ];
-  for (const [cls, hint, sh, co] of legs) {
+  for (const [cls, hint, sh, co, gf] of legs) {
     const items = [];
     if (hint && hint.size > 0) {
       for (const [pc, color] of hint) items.push({ what: `%${pc}`, pc, end: last[pc], color, val: pc });
+    }
+    if (gf && gf.size > 0) {
+      for (const [pc, color] of gf) items.push({ what: `%${pc}(GF)`, pc, end: last[pc], color, val: pc });
     }
     if (sh && sh.size > 0) {
       for (const [no, color] of sh) {
