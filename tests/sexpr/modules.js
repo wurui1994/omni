@@ -207,5 +207,35 @@ console.log('\nsexpr/modules（C 那条腿：头按依赖切）');
     line(/asy lexer.*src\/lib\/asy.*/));
 }
 
+/* **跨文件那一格**（不是"库 + 一份用户文件"，是两份用户文件互相引）：
+ *   改被依赖的那一份 -> 它与用它的那一份都重发（接口可能变了）
+ *   只改用它的那一份 -> 只重发一份
+ * 两次的答案都得跟着变 —— 只数"重发几份"不问答案的判据是假判据。
+ * asy 的模块是按 **CWD** 找的（前端就这么定的），所以这几趟都在那个临时目录里跑。 */
+{
+  const w = mkdtempSync(join(tmpdir(), 'omni-asy2-'));
+  const hp = join(w, 'helper.asy');
+  const mp = join(w, 'mainprog.asy');
+  const run = (v) => spawnSync('node', [cli, 'run', 'mainprog.asy', '--backend', 'c',
+    ...(v ? ['-v'] : [])], { encoding: 'utf8', timeout: 180000, cwd: w });
+  writeFileSync(hp, 'int twice(int x) { return 2*x; }\nint base = 7;\n');
+  writeFileSync(mp, 'access helper;\nwrite(helper.twice(21));\nwrite(helper.base);\n');
+  const first = run(false);
+  ok('两份用户文件：链起来跑得对', first.status === 0 && (first.stdout ?? '').trim() === '42\n7',
+    `${first.status}：${JSON.stringify((first.stdout ?? '').slice(0, 60))}`);
+  writeFileSync(hp, 'int twice(int x) { return 3*x; }\nint base = 7;\n');
+  const second = run(true);
+  const log2 = `${second.stderr ?? ''}${second.stdout ?? ''}`;
+  ok('改被依赖的那一份：两份都重发，答案跟着变',
+    /asy c 模块\s+新编 2 份/.test(log2) && (second.stdout ?? '').trim() === '63\n7',
+    `${(/asy c 模块.*/.exec(log2) ?? ['<没有这一行>'])[0]}；输出 ${JSON.stringify((second.stdout ?? '').trim())}`);
+  writeFileSync(mp, 'access helper;\nwrite(helper.twice(21));\nwrite(helper.base+1);\n');
+  const third = run(true);
+  const log3 = `${third.stderr ?? ''}${third.stdout ?? ''}`;
+  ok('只改用它的那一份：只重发一份，答案跟着变',
+    /asy c 模块\s+新编 1 份/.test(log3) && (third.stdout ?? '').trim() === '63\n8',
+    `${(/asy c 模块.*/.exec(log3) ?? ['<没有这一行>'])[0]}；输出 ${JSON.stringify((third.stdout ?? '').trim())}`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exitCode = 1;
