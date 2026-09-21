@@ -34,14 +34,20 @@ import { readFileSync, writeFileSync, readdirSync, mkdirSync } from 'node:fs';
 const dir = '/Users/wurui/Documents/Lang/reference/pt/pt';
 const OUT = '/tmp/ptcat/ptcore.go';
 const BAD = ['image.', 'png.', 'jpeg.', 'os.', 'bufio.', 'color.', 'binary.',
-  'image.Image', 'gif.', 'path.', 'strings.', 'strconv.'];
+  'image.Image', 'gif.', 'path.', 'strings.', 'strconv.', 'fmt.'];
 /* 手工再剪几格：它们本身不碰那几个包，但**只被**被剪掉的东西用，留着是死代码里的洞。
    `Function` 整个剪掉的理由是 `type Func func(x, y float64) float64`：具名函数类型当
    结构体字段（`Function.Function Func`）时声明类型丢了，推成 int ⇒ 报"调一格不是名字的
-   东西"。那是编译器欠的一格（任务 #94），不是 pt 的事。 */
+   东西"。那是编译器欠的一格（任务 #94），不是 pt 的事。
+   `SmoothNormals*` 与 `poisson*` / `PoissonDisc` 剪掉的理由是 `map[Vector]…` ——
+   **结构体当字典的键**。方言的键只收 int 与 string；那也是编译器欠的一格，而它不在
+   出图那条路上（网格平滑与泊松取样用它），所以这把探针先绕过去。 */
 const EXTRA_DROP = new Set(['init', 'Function', 'NewFunction', 'Function.Compile',
   'Function.BoundingBox', 'Function.Contains', 'Function.Intersect',
-  'Function.MaterialAt', 'Function.NormalAt', 'Function.UV']);
+  'Function.MaterialAt', 'Function.NormalAt', 'Function.UV',
+  'Mesh.SmoothNormals', 'Mesh.SmoothNormalsThreshold', 'smoothNormalsThreshold',
+  'poissonGrid', 'newPoissonGrid', 'poissonGrid.normalize', 'poissonGrid.insert',
+  'PoissonDisc']);
 
 /** 一行是不是某个顶层声明的开头？回它的名字（`T.M` 那种带接收者）或 null。 */
 function declName(ln) {

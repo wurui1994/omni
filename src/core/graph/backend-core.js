@@ -1250,8 +1250,26 @@ function refOrExpr(a, env, ctx) {
   const ft = fnTypeOf(a, env, ctx);
   if (ft !== null) return `(fnref ${a.attrs.name})`;
   const t = typeOf(a, env, ctx);
-  if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return `(var ${a.attrs.name})`;
+  /* **借来的那一格也走 `varOrCap`**：闭包体里那个名字要发 `(cap 名)`，发 `(var 名)` 的话
+     方言当场报"未声明的变量 '__self'"（量出来的：ADR-0040 那格降回去的闭包
+     `__box_Sphere__Shape____as_Sphere` 体里就一句 `ret __self`）。 */
+  if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return varOrCap(a.attrs.name, ctx);
   return expr(a, env, ctx);
+}
+
+/**
+ * `ret` 交回去那一格的文本：与 `refOrExpr` 同一条，外加**空引用按声明的返回类型落**。
+ *
+ * `return nil` 里那个 null 自己说不出类型，而 `expr` 对它答 `(int 0)` —— 于是
+ * `(fn f () r1 (ret (int 0)))`，方言当场报"要返回 r1，给的是 int"（量出来的：ADR-0040 那格
+ * 降回去的方法，别的类型那一份就是 `return nil`）。声明的返回类型在 `env` 的 `fn:名字` 上。
+ */
+function retValText(v, env, ctx) {
+  if (isLitNull(v) && ctx.fnName !== null && ctx.fnName !== undefined) {
+    const rt = env.get(`fn:${ctx.fnName}`);
+    if (rt !== undefined && (isPtrRec(rt, ctx) || elemType(rt) !== null)) return `(null ${rt})`;
+  }
+  return refOrExpr(v, env, ctx);
 }
 
 /** 装箱：`(dyn E)`。装不进去的当场报（哪一格装不进也说清）。 */
@@ -1600,7 +1618,7 @@ function stmtIn(x, env, ctx) {
         /* **交一格聚合回去**（lua 的 `Point.new` 返回它刚建的那格表）：与实参那一格同一条
            规矩 —— 图上是引用，方言里也是（字典/数组是句柄、记录是 `(ptr rN)`），所以走
            `refOrExpr` 绕过 `expr` 那道"整格当值用"的门。 */
-        return [v === undefined || v === null ? '(ret)' : `(ret ${refOrExpr(v, env, ctx)})`];
+        return [v === undefined || v === null ? '(ret)' : `(ret ${retValText(v, env, ctx)})`];
       }
       if (v === undefined || v === null) return [...pend, '(ret)'];
       /* **先把要交回去的值算掉，再跑出口动作** —— go 的语义就是这个次序（出口动作改了

@@ -293,6 +293,23 @@ const NEEDS_MTABLE = false;
  */
 let NEEDS_TYPETAG = false;
 /**
+ * **哪几个具体类型要"从接口里降回去"**（`collectDecls` 那一趟收）。
+ *
+ * `switch t := light.(type) { case *Sphere: t.Radius … }` —— go 在这一支里把 `t` **收窄**成
+ * `*Sphere`。而按 ADR-0040，接口值是**一格方法闭包的记录**：接收者只躺在闭包里，记录上
+ * 压根没有它，于是 `t.Radius` 报"记录 r16 上没有字段 'Radius'（它有的是：__type Compile
+ * BoundingBox …）"（量出来的，pt 的 `DefaultSampler.sampleLight`）。
+ *
+ * 办法是给这几个类型各加**一格降回去的方法**：`__as_Sphere() *Sphere` —— Sphere 自己那一份
+ * 返回 `__self`，别人那一份返回空引用。为什么这样可以：方言按"字段名单 + 字段类型"去重形状，
+ * 而这一格的**名字与类型对同一个接口的所有实现者逐字相同**（所以 `[]Shape` 还是单态的）。
+ * 为什么不把接收者直接摆一格字段：那一格的类型**跟着具体类型变**，同一个接口于是出 N 种形状。
+ *
+ * 只收"这支只有一个类型名、而且带绑定"的那几格 —— go 在"一支收多个类型"里本来也不收窄。
+ * 预扫描的理由与 `NEEDS_TYPETAG` 同一条：零值与装箱可能在看到那处 switch 之前就落出来了。
+ */
+const NARROW = new Set();
+/**
  * **这份程序要调度器吗**（`collectDecls` 那一趟置上）。
  *
  * 置上了，`func main()` 的体就得跑成**主 g**（`call __goRun(main)`，落到方言里是
@@ -995,6 +1012,9 @@ function ifaceZero(ifn) {
    * 具体类型名 —— 靠 `typeTagged()` 那一格保证。 */
   const fieldPairs = typeTagged() ? [['__type', lit('')], ...ms.map(([m]) => [m, lit(null)])]
     : ms.map(([m]) => [m, lit(null)]);
+  /* **降回去那几格**（见 `NARROW`）：摆在方法后面，名字与次序装箱那一份完全一致。 */
+  const downs = downTypesFor(ifn);
+  for (const dn of downs) fieldPairs.push([downName(dn), lit(null)]);
   const rec = recordNew(fieldPairs, false);
   const lentBefore = IFLENT.has(ifn);
   IFPEND.set(ifn, rec);
@@ -1059,7 +1079,39 @@ function fillIfaceZero(ifn, ms, rec) {
       ...(rz !== null ? { rzero: rz } : {}),
     });
   }
+  /* **降回去那几格**（见 `NARROW`）：nil 接口上降下去就是空引用（go 里 `case *T:` 在接口是
+     nil 时压根不命中，所以这一格永远不会被真调到 —— 它在的意义是形状与装箱那一份一致）。 */
+  const downs = downTypesFor(ifn);
+  const base = (typeTagged() ? 1 : 0) + ms.length;
+  for (let j = 0; j < downs.length; j++) {
+    const dz = structZero(downs[j]);
+    rec.ins.fields[base + j] = node('func', { body: [retOf([lit(null)])] }, {
+      name: `__nil_${ifn}__${downName(downs[j])}`,
+      params: [],
+      ...(dz !== null ? { rzero: dz } : {}),
+    });
+  }
   return true;
+}
+
+/** 降回去那格方法的字段名（`__as_具体类型`，见 `NARROW` 那段账）。 */
+const downName = (tn) => `__as_${String(tn).replace(/\./g, '__')}`;
+
+/**
+ * 一格接口要带哪几格"降回去"的方法（名字 -> 那个具体类型）。
+ *
+ * 判据：`NARROW` 里、登记过字段表、而且**实现了这个接口**。三条都按声明算，所以同一个接口的
+ * 每个实现者算出来的名单逐字相同 —— 形状才唯一（见 `NARROW` 那段账）。次序按名字排，
+ * 装箱那一份与零值那一份才对得上。
+ */
+function downTypesFor(ifn) {
+  const out = [];
+  for (const tn of [...NARROW].sort()) {
+    if (STRUCTS.get(tn) === undefined || STRUCTS.get(tn) === null) continue;
+    if (!implementsIface(tn, ifn)) continue;
+    out.push(tn);
+  }
+  return out;
 }
 
 /** `__nilof_接口名` —— 造这格接口零值的顶层函数（一格接口一份）。 */
@@ -1141,6 +1193,19 @@ function ensureBoxFn(tn, ifn) {
      而那一报是在空跑那一趟里被吞掉的 —— 症状是调用点把它当 int。
      **带 `__type`**（有类型 switch 的程序）：`tn` 就是具体类型名。与零值记录那格 `""` 配套，
      类型 switch 比 `__type` 就能分出来。 */
+  /* **降回去那几格**（见 `NARROW`）：自己那一份交回 `__self`，别人那几份交回空引用 ——
+     `case *T:` 命中时降下去拿到的正是那个接收者，于是 `t.Radius` 有地方可取。 */
+  for (const dn of downTypesFor(ifn)) {
+    const dz = structZero(dn);
+    fields.push([downName(dn), node('func', {
+      body: [retOf([dn === tn ? gref(self) : lit(null)])],
+    }, {
+      params: [],
+      name: `${boxFnName(tn, ifn)}__${downName(dn)}`,
+      bycopy: true,
+      ...(dz !== null ? { rzero: dz } : {}),
+    })]);
+  }
   const fnFields = typeTagged()
     ? [['__type', lit(tn)], ...fields]
     : fields;
@@ -1205,7 +1270,18 @@ function fieldsOf(st) {
 function collectDecls(x, shapesOnly) {
   if (!isList(x)) return;
   /* 见 `NEEDS_TYPETAG` 那段账：整棵树里有一处类型 switch，结构体就要带 `__type`。 */
-  if (tag(x) === 'tswitch') NEEDS_TYPETAG = true;
+  if (tag(x) === 'tswitch') {
+    NEEDS_TYPETAG = true;
+    /* 见 `NARROW` 那段账：`switch t := s.(type)` 里"只有一个类型名"的那几支要收窄。 */
+    if (kids(x).some((y) => tag(y) === 'bind')) {
+      for (const c of kids(x).filter((y) => tag(y) === 'case')) {
+        const items = partKids(c, 'items');
+        if (items.length !== 1) continue;
+        const tn = namedTypeOf(items[0]);
+        if (tn !== null && tn !== 'nil') NARROW.add(tn);
+      }
+    }
+  }
   /* 见 `NEEDS_SCHED` 那段账：语法上看得见并发，`main` 就要跑成主 g。 */
   if (tag(x) === 'go' || tag(x) === 'send'
     || tag(x) === 'chan' || tag(x) === 'chan-send' || tag(x) === 'chan-recv') {
@@ -2124,6 +2200,9 @@ function appendSelfSpread(lv, rv) {
 
 /** `s = append(s, xs...)` 那一格摊开用的序号（临时名要各不相同）。 */
 let SPREAD_N = 0;
+
+/** 类型 switch 的序号（主语那格隐藏名要各不相同）。 */
+let TSW_N = 0;
 
 /**
  * `s = append(s, xs...)` 落成**一趟数着的循环 + 一串 push**。
@@ -3577,17 +3656,50 @@ function toNode(x) {
       const cs = all.filter((y) => tag(y) === 'case' || tag(y) === 'default');
       const body = [];
       if (ini !== undefined) body.push(...many(kids(ini)));
-      /* `switch v := s.(type)` → bind v = s */
+      /* `switch v := s.(type)` → 主语先绑一格**隐藏名**，`v` 由每支自己绑（见 `NARROW`）：
+         只有一个类型名的那几支绑**降回去之后**的那一格（`v.Radius` 要它），别的支（多个
+         类型名、`case nil:`、default）照 go 的规矩仍旧绑接口那一格。 */
       const varName = bind !== undefined ? leaf(kids(bind)[0]) : null;
       const subjExpr = subj !== undefined ? toNode(kids(subj)[0]) : lit(null);
-      if (varName !== null) {
-        body.push(node('bind', { init: subjExpr }, { name: varName }));
+      TSW_N += 1;
+      const subjName = varName === null ? null : `__tsw${TSW_N}`;
+      if (subjName !== null) {
+        body.push(node('bind', { init: subjExpr }, { name: subjName }));
       }
+      const subjRef = () => (subjName !== null ? node('ref', {}, { name: subjName }) : subjExpr);
+      /** 一支的体：要绑 `v` 的话先绑（`down` 不是 null 就绑降回去的那一格）。 */
+      const armWith = (c, down, downTy) => {
+        /* **收窄了就把那个名字的声明类型也换掉**：不然 `v.Area()` 还按接口那格记录分派 ——
+           量出来是"记录 r2 上没有字段 'Area'"（收窄之后 v 是 `*Sq`，方法要落成
+           `call Sq__Area(v)`）。出了这一支再还原。 */
+        const hadTy = VARTY.get(varName);
+        const hadTn = VARTYPE.get(varName);
+        if (down !== null) {
+          if (downTy !== undefined) VARTY.set(varName, downTy);
+          VARTYPE.set(varName, down);
+        }
+        let inner;
+        try {
+          inner = armOf(c);
+        } finally {
+          if (down !== null) {
+            if (hadTy === undefined) VARTY.delete(varName); else VARTY.set(varName, hadTy);
+            if (hadTn === undefined) VARTYPE.delete(varName); else VARTYPE.set(varName, hadTn);
+          }
+        }
+        if (varName === null) return inner;
+        const init = down === null
+          ? subjRef()
+          : node('call', { fn: fieldGet(subjRef(), downName(down)), args: [] });
+        return node('region', {
+          body: [node('bind', { init }, { name: varName }), inner],
+        });
+      };
       let chain;
       let dflt;
       const arms = [];
       for (const c of cs) {
-        if (tag(c) === 'default') { dflt = armOf(c); continue; }
+        if (tag(c) === 'default') { dflt = armWith(c, null); continue; }
         /* 每支的 items 是类型名，取出来做 `__goTypeIs` 判断。
          *
          * **走 `namedTypeOf` 而不是只认 `tname`/`name`**：`case *B:` 的 item 是
@@ -3619,7 +3731,7 @@ function toNode(x) {
           throw new Error('go->graph: 类型 switch 里有一支的类型说不出名字'
             + '（切片 / map / 函数 / 泛型那几种）—— 落成"永远命中"会把答案静默地弄错');
         }
-        const subjRef = () => (varName !== null ? node('ref', {}, { name: varName }) : subjExpr);
+        const subjRef2 = subjRef;
         /**
          * 一支的类型判断：**直接比 `__type` 字段**，不调运行期函数。
          *
@@ -3633,10 +3745,10 @@ function toNode(x) {
          * 空引用。所以落 `v != nil && v.__type == "T"`。
          */
         const typeIs = (tn) => lazyAnd(
-          binOf('!=', subjRef(), lit(null), OPS, { lang: 'go' }),
-          binOf('==', fieldGet(subjRef(), '__type'), lit(tn), OPS, { lang: 'go' }),
+          binOf('!=', subjRef2(), lit(null), OPS, { lang: 'go' }),
+          binOf('==', fieldGet(subjRef2(), '__type'), lit(tn), OPS, { lang: 'go' }),
         );
-        const nilIs = () => binOf('==', subjRef(), lit(null), OPS, { lang: 'go' });
+        const nilIs = () => binOf('==', subjRef2(), lit(null), OPS, { lang: 'go' });
         const checks = [...(sawNil ? [nilIs()] : []), ...typeNames.map(typeIs)];
         let cond;
         if (checks.length === 0) {
@@ -3644,7 +3756,12 @@ function toNode(x) {
         } else {
           cond = checks.reduce((acc, ch, i) => (i === 0 ? ch : lazyOr(acc, ch)), null);
         }
-        arms.push([cond, armOf(c)]);
+        /* **这一支要不要收窄**（见 `NARROW`）：只有一个类型名、不是 nil、而且那个类型有
+           降回去的那一格。别的支照 go 的规矩不收窄。 */
+        const down = (typeNames.length === 1 && !sawNil && NARROW.has(typeNames[0])
+          && STRUCTS.get(typeNames[0]) !== undefined && STRUCTS.get(typeNames[0]) !== null)
+          ? typeNames[0] : null;
+        arms.push([cond, armWith(c, down, down === null ? undefined : items[0])]);
       }
       chain = dflt;
       for (let i = arms.length - 1; i >= 0; i -= 1) chain = branchOf(arms[i][0], arms[i][1], chain);
@@ -4119,6 +4236,9 @@ export function goToGraph(tree, opts) {
   SPEND.clear();
   IFPEND.clear();
   IFLENT.clear();
+  NARROW.clear();
+  TSW_N = 0;
+  SPREAD_N = 0;
   NEEDS_TYPETAG = false;
   NEEDS_SCHED = false;
   VARTYPE.clear();
