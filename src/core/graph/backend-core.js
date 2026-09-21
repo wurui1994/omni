@@ -437,7 +437,14 @@ function expr(x, env, ctx) {
       gap('按键遍历：方言里没有能装下那格键列表的类型（只有 `(arr T)`，而 `keys` 出的是 '
         + '`list<K>`，它在方言里一个操作都没有）—— 要先给方言加一格，是一次语言决定');
       return '';
-    case 'slice': gap('切片出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+    case 'slice': {
+      /* **串上的切片是一格表达式**（方言里就有 `(ssub …)`）—— 只有列表那一档
+         要走"新建 + 一圈 apush"的消去规则，那条摆不进表达式位置。 */
+      const st = strSliceText(x, env, ctx);
+      if (st !== null) return st;
+      gap('切片出现在表达式位置上（这一刀只接 `bind` 的初值那一格）');
+      return '';
+    }
     /* **表达式位置上的映射**：先物化成一格临时名，再把那个名字交出去。
      * 与实参位置上那三格聚合走的是**同一张表**（`MATERIALIZE`）与同一条理由：方言里
      * `(dnew …)` 是一句语句、字典是一格句柄，所以"值"就是那个名字。
@@ -1847,6 +1854,27 @@ function mapHint(nm, ctx, env) {
 }
 
 /**
+ * `s[i:j]` —— **串上的切片在方言里本来就有**（`(ssub S 起点 长度)`），所以它是一格
+ * 表达式，不走下面 `bindSlice` 那条"新建 + 一圈 apush"的消去规则。
+ *
+ * 不是串就回 null（列表那一档照旧走消去规则）。上界省掉时要用 `(slen …)` 补，
+ * 那会把源那一格**发两遍** —— 所以只在源是一格名字时允许省（别的形状当场报，
+ * 不静默地多跑一次调用）。
+ */
+function strSliceText(sl, env, ctx) {
+  const obj = sl.ins.obj;
+  if (typeOf(obj, env, ctx) !== 'string') return null;
+  const noTo = sl.ins.to === undefined || sl.ins.to === null;
+  if (noTo && !(isNode(obj) && obj.op === 'ref')) {
+    gap('串上的切片省了上界，可源不是一格名字（补 `(slen …)` 会把它发两遍）');
+  }
+  const src = expr(obj, env, ctx);
+  const from = sl.ins.from === undefined || sl.ins.from === null ? '(int 0)' : expr(sl.ins.from, env, ctx);
+  const to = noTo ? `(slen ${src})` : expr(sl.ins.to, env, ctx);
+  return `(ssub ${src} ${from} (bin "-" ${to} ${from}))`;
+}
+
+/**
  * `let ys = xs[1:3]` —— 方言里**没有列表切片**，所以这一格走 `nodes.js` 上写着的那条
  * **消去规则**（"`list-new` -> 一格存储 + 一串写"的同一条）：新建一格空数组，再拿一圈
  * `while` 把 `[from, to)` 逐格 `apush` 过去。
@@ -1857,6 +1885,11 @@ function mapHint(nm, ctx, env) {
 function bindSlice(nm, sl, env, ctx) {
   const obj = sl.ins.obj;
   const at = typeOf(obj, env, ctx);
+  /* **串上的切片**（`path[i:i+1]`）：一句就够，见 `strSliceText`。 */
+  {
+    const st = strSliceText(sl, env, ctx);
+    if (st !== null) return [bindLine(nm, 'string', st, env, ctx)];
+  }
   const et = elemType(at);
   if (et === null) gap('在一格说不清形状的东西上切片（这一刀只接 list-new 绑出来的那格）');
   const src = objText(obj, env, ctx);
