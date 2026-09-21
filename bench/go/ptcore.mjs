@@ -47,7 +47,16 @@ const EXTRA_DROP = new Set(['init', 'Function', 'NewFunction', 'Function.Compile
   'Function.MaterialAt', 'Function.NormalAt', 'Function.UV',
   'Mesh.SmoothNormals', 'Mesh.SmoothNormalsThreshold', 'smoothNormalsThreshold',
   'poissonGrid', 'newPoissonGrid', 'poissonGrid.normalize', 'poissonGrid.insert',
-  'PoissonDisc']);
+  'PoissonDisc',
+  /* 球谐那一族：`harmonicFunction func(Vector) float64` 是**函数类型当结构体字段**
+     （声明类型丢了，推成 int ⇒ "调一格不是名字的东西"），而驱动只建球和平面，
+     不建球谐。剪掉它不影响出图那条路。 */
+  'SphericalHarmonic', 'NewSphericalHarmonic',
+  'SphericalHarmonic.Compile', 'SphericalHarmonic.BoundingBox',
+  'SphericalHarmonic.Intersect', 'SphericalHarmonic.UV',
+  'SphericalHarmonic.NormalAt', 'SphericalHarmonic.MaterialAt',
+  'SphericalHarmonic.EvaluateHarmonic',
+  'shFunc', 'iFact', 'pLegendre', 'sHarmonic', 'yHarmonic']);
 
 /** 一行是不是某个顶层声明的开头？回它的名字（`T.M` 那种带接收者）或 null。 */
 function declName(ln) {
@@ -89,11 +98,27 @@ function declsOf(src, imports) {
   return out;
 }
 
+/**
+ * **`fmt.*` 那几句整行删掉**（不是把整格声明剪掉）。
+ *
+ * 为什么非这么做：`NewTree` 头两句是 `fmt.Printf("Building k-d tree …")` 与
+ * `defer fmt.Println("OK")`，而 NewTree 是**出图那条路的正中间**（k-d 树）。
+ * 把它按 `fmt.` 剪掉的话级联会连坐 `Mesh.Compile`，而 `SphericalHarmonic.Compile`
+ * 里那句 `s.mesh.Compile()` **不会**跟着走（`.Compile` 有十来个主人，级联刻意不连坐）——
+ * 剪出来的那份于是连 `go vet` 都过不了（`*Mesh has no field or method Compile`）。
+ *
+ * 只删**整句就是一次 fmt 调用**的那几行（含 `defer`）：纯输出，删了不影响像素。
+ * `return fmt.Sprintf(…)` 那种删不掉（值要用），那几格仍旧按 `fmt.` 整格剪。
+ */
+const FMT_LINE = /^[ \t]*(?:defer[ \t]+)?fmt\.[A-Za-z]\w*\([^\n]*\)[ \t]*$/;
+const stripFmt = (text) => text.filter((ln) => !FMT_LINE.test(ln));
+
 const imports = new Set();
 const decls = [];
 for (const f of readdirSync(dir).filter((x) => x.endsWith('.go')).sort()) {
   for (const d of declsOf(readFileSync(`${dir}/${f}`, 'utf8'), imports)) {
-    decls.push({ ...d, file: f, body: d.text.join('\n') });
+    const text = stripFmt(d.text);
+    decls.push({ ...d, text, file: f, body: text.join('\n') });
   }
 }
 

@@ -2957,12 +2957,14 @@ function forRangeOf(x) {
     });
   }
   const drainedSubj = toNode(subj);
-  if (names.length === 1 && names[0] !== '_') {
-    head.push(mk(names[0], indexGet(at(seq), at(idx))));
-  } else {
-    if (names.length > 0 && names[0] !== '_') head.push(mk(names[0], at(idx)));
-    if (names.length > 1 && names[1] !== '_') head.push(mk(names[1], indexGet(at(seq), at(idx))));
-  }
+  /* **一格名字的 `range` 拿的是下标**（go 的规矩：切片 / 数组 / 串上
+     `for i := range s` 里 i 是下标，要值得写 `for _, v := range s`）。
+     从前这儿落"取值" —— 那是**答案静默地错**：`for i := range t.Data { t.Data[i] = … }`
+     （pt 的 `ColorTexture.Pow`）会拿一格 Color 当下标使。
+     通道那一档（`for v := range ch`，一格名字拿的是**值**）在上面就返回了，不走这儿；
+     map 那一档走 `mapForIn`（一格名字拿的是键），也不走这儿。 */
+  if (names.length > 0 && names[0] !== '_') head.push(mk(names[0], at(idx)));
+  if (names.length > 1 && names[1] !== '_') head.push(mk(names[1], indexGet(at(seq), at(idx))));
   return node('region', {
     body: [
       node('bind', { init: drainedSubj }, { name: seq }),
