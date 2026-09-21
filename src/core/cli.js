@@ -4383,6 +4383,13 @@ const RUN_TIMEOUT_DEFAULT_S = 30;
 const BUILD_TIMEOUT_DEFAULT_S = 300;
 /** 跑一个程序的那几个动词（别的都按"编译"算）。 */
 const RUNNING_VERBS = new Set(['run', 'run-c', 'exec', 'interp']);
+/**
+ * **常驻/交互那几个动词一格时限都不装**。
+ *
+ * `serve` 是守护进程、`repl` 是人坐在前面敲 —— 给它们一格 300s 的墙上时限，
+ * 意思就是"用到五分钟自己死"。这两格的"挂住"是**正常状态**，不是要治的毛病。
+ */
+const LONG_VERBS = new Set(['serve', 'repl']);
 let RUN_DEADLINE = 0;
 let RUN_TIMEOUT_MSG = '';
 
@@ -4422,6 +4429,8 @@ function timeoutBudgetS(name, dflt) {
 function armDevDeadline(verb, rest) {
   /* 发布那一档没有时限（生成出来的程序里那一格也由 `--release` 关掉）。 */
   if (rest.includes('--release') || env('OMNI_RELEASE') === '1') return;
+  /* 常驻/交互那几个动词也没有 —— 见 `LONG_VERBS`。 */
+  if (LONG_VERBS.has(verb)) return;
   const running = RUNNING_VERBS.has(verb);
   const i = rest.indexOf('--timeout');
   const raw = i >= 0 ? rest[i + 1] : null;
@@ -5167,6 +5176,22 @@ function main(argv) {
   // `--engine` 选**执行引擎**：interp（OIR 解释器）| js（JS 后端，产物装进同一个全局
   // 作用域）。两条都是增量的 —— 引擎只需要 install/runEntry 这一对口子。
   // asy 要语法表与内建绑定表，那是文件 IO，所以由这里注入（repl.js 不碰盘）。
+  /**
+   * `omni serve` —— 常驻服务 + Omni Studio（`docs/design/omni-serve-studio.md`）。
+   *
+   * **另起一个进程**（`src/serve.js`），理由写在那份文件的头注里：serve 用到
+   * `node:http` / `async` 那一族，而 `check:self` 会把静态 import 到的每一份都编一遍；
+   * 动态 `import()` 我们自己那台 JS 前端还不认。serve 本来就是一个独立的常驻程序。
+   *
+   * stdio 全直通（`'i'`）：日志直接落到终端，Ctrl-C 直接到那个进程。
+   */
+  if (cmd === 'serve') {
+    /* `installDir()` 是"运行中的程序镜像所在目录" —— 也就是 `src/`（`src/cli.js` 的目录）。
+       装出去的那一档（`dist/omni`）旁边没有 `serve.js`，那时回退到 `cwd()/src`。 */
+    const entry = join(installDir(), 'serve.js');
+    const [st] = spawn('node', [exists(entry) ? entry : join(cwd(), 'src', 'serve.js'), ...rest], 'i');
+    return st;
+  }
   if (cmd === 'repl') {
     const li = rest.indexOf('--lang');
     const ei = rest.indexOf('--engine');

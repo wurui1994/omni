@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Omni Studio</title>
+<link rel="stylesheet" href="/studio.css">
+</head>
+<body data-mode="show">
+
+<header class="bar">
+  <button class="icon-btn only-narrow" id="btn-tree" aria-label="目录">
+    <svg viewBox="0 0 20 20"><path d="M3 5h14M3 10h14M3 15h14"/></svg>
+  </button>
+  <div class="brand">
+    <span class="dot"></span>
+    <b>Omni</b><span class="muted">Studio</span>
+  </div>
+
+  <div class="seg" role="tablist" aria-label="模式">
+    <button data-mode="show" class="on">展示</button>
+    <button data-mode="ide">IDE</button>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="swatches" id="swatches" aria-label="强调色"></div>
+  <button class="icon-btn" id="btn-theme" aria-label="深浅">
+    <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="4.2"/><path d="M10 1.6v2.2M10 16.2v2.2M1.6 10h2.2M16.2 10h2.2M4.1 4.1l1.5 1.5M14.4 14.4l1.5 1.5M15.9 4.1l-1.5 1.5M5.6 14.4l-1.5 1.5"/></svg>
+  </button>
+</header>
+
+<main class="shell">
+  <aside class="pane tree" id="tree">
+    <div class="pane-head">
+      <span>目录</span>
+      <input id="filter" type="search" placeholder="过滤…" spellcheck="false">
+    </div>
+    <div class="tree-body" id="tree-body"><div class="hint">正在读目录树…</div></div>
+  </aside>
+
+  <section class="pane code">
+    <div class="pane-head">
+      <span id="cur-path" class="path">选一份文件</span>
+      <span class="tag" id="cur-lang"></span>
+      <div class="spacer"></div>
+      <label class="check" title="改一行就跑一趟"><input type="checkbox" id="live"><span>实时</span></label>
+      <button class="run" id="btn-run"><svg viewBox="0 0 20 20"><path d="M6 4l10 6-10 6z"/></svg>运行</button>
+    </div>
+    <div class="code-body">
+      <pre id="view" class="hl"><code></code></pre>
+      <textarea id="edit" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    </div>
+  </section>
+
+  <section class="pane out">
+    <div class="pane-head">
+      <div class="seg small" id="out-tabs">
+        <button data-tab="stdout" class="on">输出</button>
+        <button data-tab="stages">阶段</button>
+        <button data-tab="shell">Shell</button>
+      </div>
+      <div class="spacer"></div>
+      <span class="badge" id="status"></span>
+    </div>
+    <div class="out-body">
+      <div class="tabp on" data-tab="stdout"><pre id="stdout"></pre><pre id="stderr" class="err"></pre></div>
+      <div class="tabp" data-tab="stages"><div id="stages" class="stages"></div></div>
+      <div class="tabp" data-tab="shell">
+        <div id="sh-log" class="sh-log"></div>
+        <div class="sh-in">
+          <span class="ps1">$</span>
+          <input id="sh" placeholder="omni run … / go run x.go / ls docs" spellcheck="false"
+                 autocapitalize="off" autocomplete="off">
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="/studio.js"></script>
+</body>
+</html>

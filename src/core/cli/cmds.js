@@ -526,6 +526,26 @@ ${graphEngineHelp()}
       ],
     },
     {
+      name: 'serve', key: 'serve', usage: '（不要源文件）',
+      brief: '起常驻服务：HTTP API + Omni Studio 那一页',
+      help: `像 ollama serve：一个常驻进程，对外一套 HTTP JSON API，
+顺带把网页端（Omni Studio）挂在同一个口上。账在 docs/design/omni-serve-studio.md。
+
+  omni serve                    听 127.0.0.1:7111
+  omni serve --port 8080        换个口
+  omni serve --open             起完顺手用浏览器打开
+
+端点：/api/health /api/tree /api/file /api/run /api/emit /api/shell
+
+⚠ 这个服务**没有鉴权**：连得上就能在这台机器上编译并运行代码。所以默认只听
+  127.0.0.1；--host 写成别的地址时会明着警告。`,
+      flags: [
+        { name: '--port', arity: 1, value: 'N', brief: '默认 7111' },
+        { name: '--host', arity: 1, value: 'ADDR', brief: '默认 127.0.0.1（只本机）' },
+        { name: '--open', arity: 0, brief: '起完用浏览器打开' },
+      ],
+    },
+    {
       name: 'repl', key: 'repl', usage: '（不要源文件）',
       brief: '交互会话',
       flags: [F_MODE,
