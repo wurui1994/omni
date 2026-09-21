@@ -399,7 +399,18 @@ function expr(x, env, ctx) {
     case 'pick': {
       const t = typeOf(x.ins.from, env, ctx);
       const shape = shapeAt(t, ctx);
-      if (shape === undefined || shape.multi !== true) gap('pick 的来源不是一格多值');
+      if (shape === undefined || shape.multi !== true) {
+        /* **是哪一格**：`a, b := f(…)` 里 `f` 没被认成多返回时报这一句，而只说
+           "pick 的来源不是一格多值"在 4000 行里找不着。来源是一格调用时把**被调的名字**
+           印出来 —— 那个名字通常就是欠的那格桩（`strconv.ParseFloat` 那一族）。 */
+        const from = x.ins.from;
+        const callee = isNode(from) && from.op === 'call' && isNode(from.ins.fn)
+          && from.ins.fn.op === 'ref' ? from.ins.fn.attrs.name : null;
+        const who = callee === null ? `（来源推出来是 ${t}）` : `（来源是调 '${callee}'，`
+          + '它这一层没被认成多返回 —— 多半是那格桩还没写）';
+        const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
+        gap(`pick 的来源不是一格多值${who}${wh}`);
+      }
       const i = Number(x.attrs.index ?? 0);
       if (i < 0 || i >= shape.names.length) gap(`pick 的第 ${i} 格超出了这格多值的宽度`);
       return `(fld ${objText(x.ins.from, env, ctx)} v${i})`;
@@ -720,7 +731,11 @@ function objText(obj, env, ctx) {
   }
   const t = env.get(obj.attrs.name);
   if (shapeAt(t, ctx) === undefined && elemType(t) === null && dictOf(t) === null) {
-    gap(`'${obj.attrs.name}' 说不清形状（这一刀只认 \`bind\` 一格记录 / 列表 / 字典绑出来的名字）`);
+    /* **是哪一格**：`'c' 说不清形状` 在 4159 行里只能人肉扫。推出来是什么、在谁的体里 ——
+       两样这一层手上都有（与上面 index-get 那一格同一条规矩）。 */
+    const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
+    gap(`'${obj.attrs.name}' 说不清形状（推出来是 ${t}；这一刀只认 \`bind\` 一格记录 / `
+      + `列表 / 字典绑出来的名字）${wh}`);
   }
   /* **这格宿主是当前 `cfn` 借来的**（接口装箱的 `__self` 就是它，ADR-0040）。 */
   return varOrCap(obj.attrs.name, ctx);

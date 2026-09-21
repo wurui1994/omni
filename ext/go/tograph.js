@@ -416,11 +416,33 @@ function collectImports(tree) {
   }
 }
 
-/** 一格**类型**节点里的具名类型（`*T` 那一层剥掉）。切片 / map / 函数类型回 null。 */
+/**
+ * 一格**类型**节点里的具名类型（`*T` 那一层剥掉）。切片 / map / 函数类型回 null。
+ *
+ * **包限定的类型名在这儿收成平名字**（`color.RGBA64` -> `RGBA64`）：`--pkgs` 把每个
+ * 依赖目录的顶层声明摊进**同一个平名字空间**（`graph/run.js` 的 byPkg），所以
+ * `TYPES` / `STRUCTS` / `IFACES` 里住的是 `RGBA64` 那个短名 —— 带着 `color.` 去查
+ * 一定查不着，而查不着的后果是那格变量**静默地推成 int**：
+ * `func (p *Image64) SetRGBA64(x, y int, c color.RGBA64)` 里的 `c.R` 报
+ * "'c' 说不清形状（推出来是 int）"。这是 pt 整包撞上的墙。
+ *
+ * 收的判据有两道，两道都要：**头一段 import 过**（不然 `a.B` 可能是"变量 a 的字段 B"，
+ * 那在树上同形）、**尾一段真是这一层认得的类型**。两样都对才收 —— 猜错比落成墙糟。
+ */
+function flatTyName(n) {
+  if (n === null || n.indexOf('.') < 0) return n;
+  const i = n.indexOf('.');
+  const head = n.slice(0, i);
+  const tail = n.slice(i + 1);
+  if (!IMPORTS.has(head)) return n;
+  if (TYPES.has(tail) || STRUCTS.has(tail) || IFACES.has(tail)) return tail;
+  return n;
+}
+
 function namedTypeOf(t) {
   if (t === undefined || t === null || !isList(t)) return null;
   const g = tag(t);
-  if (g === 'tname') return kids(t).map(leaf).join('.');
+  if (g === 'tname') return flatTyName(kids(t).map(leaf).join('.'));
   if (g === 'ptr') return namedTypeOf(kids(t)[0]);
   return null;
 }
@@ -1805,7 +1827,7 @@ function zeroOf(ty, name, pkg) {
   if (t === 'tname') {
     const segs = kids(ty).map((y) => (isList(y) ? leaf(kids(y)[0]) : leaf(y)));
     const qual = segs.join('.');
-    if (segs.length === 2 && IMPORTS.has(segs[0])) return xzeroOf(qual, name);
+    if (segs.length === 2 && IMPORTS.has(segs[0])) return qualZero(qual, name);
     /* 包限定但没 import / 点导入 / tinst 下面的 tname ——降成 null 占位。 */
     return lit(null);
   }
@@ -1817,13 +1839,40 @@ function zeroOf(ty, name, pkg) {
   if (t === 'tname') {
     const segs = kids(ty).map((y) => (isList(y) ? leaf(kids(y)[0]) : leaf(y)));
     const qual = segs.join('.');
-    if (segs.length === 2 && IMPORTS.has(segs[0])) return xzeroOf(qual, name);
+    if (segs.length === 2 && IMPORTS.has(segs[0])) return qualZero(qual, name);
     throw new Error(`go->graph: 带包限定的类型 ${qual} 的零值要那个包的声明 ——`
       + ' 那个名字这一份文件没 import 过（点导入 / 别名对不上）');
   }
   /* **兜底**：图上没有的类型零值（tinst 泛型实例化、ptr 指针、func 函数、chan 通道等）
      降成 null（interface / func / ptr 零值本来就是 nil，tinst 的精确零值需要单态化）。 */
   return lit(null);
+}
+
+/**
+ * **包限定的类型名的零值**：先按**平名字空间**试，再退到跨包表。
+ *
+ * 两条路，各管一档：
+ *
+ * * `--pkgs`（`src/lib/go/…` 那几份桩、pt 整包）把依赖包的顶层声明摊进**同一个平
+ *   名字空间**（`graph/run.js` 的 byPkg），所以 `color.RGBA64` 的声明就在本地那两张表里
+ *   —— 短名去查就有。这是这一格要救的那一档。
+ * * 语料那条路（go 编译器自己的 780 份）没摊平，`syntax.Pos` 只在 `XPKG` 里。
+ *
+ * 先试平的、再试跨包的：两张表都查不着才落回原来的行为。
+ *
+ * 为什么非要它（量出来的）：`func (p *Image64) SetRGBA64(x, y int, c color.RGBA64)` 的
+ * `c` 拿不到 `pzero` ⇒ 形参只能靠调用点定型 ⇒ 推成 `int` ⇒ `c.R` 报
+ * "'c' 说不清形状"。pt 整包就卡在这一句（它是我们自己那份 image 桩里的）。
+ */
+function qualZero(qual, name) {
+  const tail = qual.slice(qual.indexOf('.') + 1);
+  if (STRUCTS.get(tail) !== undefined && STRUCTS.get(tail) !== null) {
+    try { return structZero(tail); } catch { /* 自引用之类：往下走 */ }
+  }
+  if (UNDER.has(tail)) {
+    try { return zeroOf(UNDER.get(tail), `${name}:${tail}`); } catch { /* 往下走 */ }
+  }
+  return xzeroOf(qual, name);
 }
 
 /**
@@ -2829,8 +2878,14 @@ function toNode(x) {
       }
       /* **具名 struct 字面量带 `__type` 标签**：接口方法分派要它。
          `Circle{R:5}` → `{__type:"Circle", R:5}`，然后 `s.Area()` 在运行时
-         查 `__goMethodTable["Circle.Area"]` 找到 `Circle__Area`。 */
-      const tyName = tag(ty) === 'tname' ? leaf(kids(ty)[0])
+         查 `__goMethodTable["Circle.Area"]` 找到 `Circle__Area`。
+
+         **走 `namedTypeOf` 而不是 `leaf(kids(ty)[0])`**：`(tname color RGBA64)` 底下有
+         **两格**名字，只取头一格拿到的是包名 `color` —— `STRUCTS.has('color')` 当然是假，
+         于是 `color.RGBA64{7,8,9,10}` 掉到下面"切片字面量"那一支，落成 `(arr int)`。
+         那是"答案静默地错"的形状：图落得出来，直到形参对不上才炸（量出来的，pt 整包）。
+         `namedTypeOf` 顺手把包限定收成平名字（见它头上那段）。 */
+      const tyName = tag(ty) === 'tname' ? namedTypeOf(ty)
         : tag(ty) === 'name' ? leaf(kids(ty)[0]) : null;
       /* **go 的 struct 是值语义**（赋值/传参/返回都复制）—— 第二个实参就是那一格。
          例外是"有指针接收者方法"的那些类型（`PTRRECV`），它们要引用语义。 */
