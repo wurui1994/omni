@@ -17,6 +17,9 @@ import { FakeDisk } from '../../src/core/build/plan.js';
 import { build, BuildLog } from '../../src/core/build/run.js';
 import { Builder, toNinja } from '../../src/core/build/script.js';
 import { ContentIds, Index, staleUnits } from '../../src/core/build/modcache.js';
+import {
+  UnitIndex, declRead, declWrite, launcherText,
+} from '../../src/core/build/modules.js';
 
 let pass = 0;
 let fail = 0;
@@ -242,6 +245,61 @@ throws('两条边造同一格：当场报', () => run([CC,
 
   /* 索引读回来还是同一份 */
   eq('modcache：索引往返', Index.parse(ix.text()).keys.get('a'), ix.keys.get('a'));
+}
+
+/* 十四、**一目录模块**（`modules.js`）：索引 / 接口 / 启动器。
+   这一层不认识任何一门语言 —— 判据也就不必跑任何一门语言。 */
+{
+  const here3 = dirname(fileURLToPath(import.meta.url));
+  const dir = join(here3, '..', '..', '.omni-cache', 'test-modules');
+  mkdirSync(dir, { recursive: true });
+  const SRC = join(dir, 'u.src');
+  const INC = join(dir, 'u.inc');
+  writeFileSync(SRC, 'u1');
+  writeFileSync(INC, 'i1');
+  writeFileSync(join(dir, 'index.log'), '# omni module index v1\n');
+  writeFileSync(join(dir, 'ids.log'), '# omni content ids v1\n');
+
+  const row = { key: '', self: SRC, incs: [INC], deps: [], needs: ['dep1'], extras: ['x'] };
+  const ix = new UnitIndex(dir);
+  eq('modules：没编过 -> 不新', ix.fresh('u', 'T1'), null);
+  ix.set('u', row, 'T1');
+  eq('modules：编完就新了', ix.fresh('u', 'T1') !== null, true);
+  eq('modules：needs 原样存回来', ix.fresh('u', 'T1').needs, ['dep1']);
+  eq('modules：换工具指纹 -> 不新', ix.fresh('u', 'T2'), null);
+
+  /* include 变了也要作废 —— 这一格漏掉的症状是**静默复用旧产物** */
+  writeFileSync(INC, 'i2');
+  eq('modules：include 变了 -> 不新', ix.fresh('u', 'T1'), null);
+  writeFileSync(INC, 'i1');
+  eq('modules：改回去 -> 又新了（身份是内容，不是改动时间）', ix.fresh('u', 'T1') !== null, true);
+
+  /* 落盘再读回来：同一份判断 */
+  ix.save();
+  eq('modules：索引落盘后重开还认', new UnitIndex(dir).fresh('u', 'T1') !== null, true);
+
+  /* 接口：一个模块一份，两段各自读得回来 */
+  declWrite(dir, 'u', ['  (fn foo () int)', '  (global g int)'], { v: 3, names: ['foo'] });
+  const d = declRead(dir, 'u');
+  eq('modules：声明里的签名', d.sigs, ['  (fn foo () int)', '  (global g int)']);
+  eq('modules：声明里的 iface 那一段', d.iface.v, 3);
+  declWrite(dir, 'noiface', ['  (fn bar () int)'], null);
+  eq('modules：没有 iface 那一段就是 null', declRead(dir, 'noiface').iface, null);
+  eq('modules：没这份声明回 null', declRead(dir, 'nobody'), null);
+
+  /* 启动器：入口最后跑 */
+  const txt = launcherText('main', ['a', 'b'], (n) => `init_${n}`, ["import './rt.js';"], ['done();']);
+  eq('modules：启动器的形状', txt.split('\n'), [
+    "import './rt.js';",
+    "import { init_a } from './a.js';",
+    "import { init_b } from './b.js';",
+    "import { init_main } from './main.js';",
+    'init_a();',
+    'init_b();',
+    'init_main();',
+    'done();',
+    '',
+  ]);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

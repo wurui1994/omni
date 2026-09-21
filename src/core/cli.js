@@ -62,8 +62,8 @@ import { ninjaCmd } from './build/cli.js';
 /* 模块产物缓存那套通用机器（一份索引 + 内容身份 + 一格键）：有 import 关系的语言共用它，
  * 不再每门语言手写一份脏判定 —— 见 `docs/design/build-system.md` §10。 */
 import {
-  ContentIds, Index, decodeRow, encodeRow, rowKey, rowFresh, modCacheDir,
-} from './build/modcache.js';
+  UnitIndex, moduleDir, declRead, declWrite, launcherText,
+} from './build/modules.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -1769,7 +1769,7 @@ function stampSame(a, b) {
  * 不必再在每张清单里问一遍"环境变没变"。名字里不带语言：编到 JS 是通用构建。
  */
 function jsModulesDir() {
-  return modCacheDir(cacheRoot(), 'modules', `js-${hash16(asyModsEnv())}`);
+  return moduleDir(cacheRoot(), 'modules', `js-${hash16(asyModsEnv())}`);
 }
 
 /**
@@ -1865,115 +1865,18 @@ function inpOk(field) {
  * 量出来的账：13 个库的 asyBodyPass 是 368ms（整个前端 645ms 的一半多），而它降出来的
  * 东西逐字节等于盘上那份 —— 这一刀省的就是它。声明遍那 221ms 省不掉：入口要那些表。
  */
-/**
- * asy 那棵库的增量：**用通用那套机器**（`build/modcache.js`），不再手写第二份脏判定。
+/* 增量、接口、启动器那三样都在 `build/modules.js` 里（那一份不认识任何一门语言）：
+ * 一份 `index.log` 记每个单元的键、一份 `ids.log` 是内容身份的预检表、一个模块一份
+ * `<名字>.d.sx` 是它的接口。下面这些函数只是把 asy 前端交出来的单元清单喂给它。
  *
- * 一份索引 `index.log`（`Index`），一行一个产物、行里自足（`encodeRow`）：
- * 键 + 自己的源文件 + include 摊进来的 + 依赖的源文件 + 复用它时要带上的产物 + 附加标记。
- * 「还新不新」只有一处判（`rowFresh` = 把行里那些输入重新哈一遍，对比行里记的键）——
- * 快路（`asyModsFast`）与慢路（`asyModsSkip.load`）问的是同一个函数，这正是从前四处
- * 各自 `split('|')` 解印记时漏了一处就**静默复用旧产物**的那个坑。
- *
- * 预检那张表（`ids.log`）也存着：常态只 stat，`touch` 一下不重编。
- */
-const ASY_IX_NAME = 'index.log';
-const ASY_IDS_NAME = 'ids.log';
-const asyIxMemo = new Map();      // 目录 -> {ix, ids}
-const asyIxDirty = new Set();
-
-function asyIx(dir) {
-  const had = asyIxMemo.get(dir);
+ * 一趟里索引只开一次（`unitIndex`）：它读两份文件，而"还新不新"要问几百次。 */
+const unitIx = new Map();
+function unitIndex(dir) {
+  const had = unitIx.get(dir);
   if (had !== undefined) return had;
-  const st = {
-    ix: Index.load(join(dir, ASY_IX_NAME)),
-    ids: ContentIds.load(join(dir, ASY_IDS_NAME)),
-  };
-  asyIxMemo.set(dir, st);
-  return st;
-}
-
-/** 落盘（只在真改过时写）。一趟里改完统一写一次 —— 半路崩了就是少几格，下一趟重编。 */
-function asyIxSave(dir) {
-  if (!asyIxDirty.has(dir)) return;
-  asyIxDirty.delete(dir);
-  const st = asyIx(dir);
-  st.ix.save(join(dir, ASY_IX_NAME));
-  st.ids.save(join(dir, ASY_IDS_NAME));
-}
-
-/** 读一行（没有回 null）。 */
-function asyRow(dir, name) {
-  return decodeRow(asyIx(dir).ix.keys.get(name));
-}
-
-/** 记一行：键当场算出来。 */
-function asyRowSet(dir, name, r, cs) {
-  const st = asyIx(dir);
-  const row = { ...r, key: rowKey(st.ids, cs, r) };
-  st.ix.set(name, encodeRow(row));
-  asyIxDirty.add(dir);
-  return row.key;
-}
-
-/**
- * 这一份产物还能用吗 —— 回那一行，不能用回 null。
- *
- * 只有一问：行里那些输入（自己的源文件、include 摊进来的、依赖的源文件、附加标记）
- * 重算出来还是不是同一个键。
- *
- * **没有"这一份属于哪个入口"那一问**：产物与入口无关 —— `_mainname()` 早就是一格运行期
- * 全局（`asy__mainname_v`，入口 main 的第一句给它赋值），不是降成字面量。从前那条
- * "正文里出现过主文件基名就只属于这个入口"的保守规则因此是**净损失**：入口叫 `tri` 时
- * 几乎每份库正文里都有 "tri"（triangle、tripleint…），于是整棵库一份都不共用 ——
- * 量出来的样子是 tri 与 curve 交替跑，每趟"新编 125 份"，而两边的产物逐字节相同。
- */
-function asyRowFresh(dir, name, cs) {
-  const r = asyRow(dir, name);
-  if (r === null) return null;
-  if (!rowFresh(asyIx(dir).ids, cs, r)) return null;
-  return r;
-}
-
-/**
- * 一份产物的**声明文件**：`<名字>.d.sx`，一个模块**一份接口**（TypeScript 的 `.d.ts`
- * 是同一件事）。
- *
- * 从前是两份：`.sec`（链接那一层要的签名清单）与 `.aif`（模块那一层要的名字表与默认值
- * 表达式）。同一件事分两份文件、各一套在不在的判断，"接口一致"就变成了两处都得对 ——
- * 漏一处的症状是静默地拿着旧接口走。
- *
- * 一行一格、制表符分隔（与 `index.log` / `ids.log` 同族）：
- *   `decl \t <一条签名>`   链接层：别人引它要发的那条 `(sig …)`
- *   `iface \t <JSON>`      模块层：名字、签名、默认值表达式（存不下来就没有这一行）
- */
-function declPath(dir, name) {
-  return join(dir, `${name}.d.sx`);
-}
-
-function declWrite(dir, name, sigs, iface) {
-  const lines = ['# omni unit interface v1'];
-  for (const x of sigs) lines.push(`decl\t${x}`);
-  if (iface !== undefined && iface !== null) lines.push(`iface\t${JSON.stringify(iface)}`);
-  lines.push('');
-  writeText(declPath(dir, name), lines.join('\n'));
-}
-
-/** 回 `{sigs, iface}`；没这份文件回 null。`iface` 那一段没有就是 null。 */
-function declRead(dir, name) {
-  const p = declPath(dir, name);
-  if (!exists(p)) return null;
-  const sigs = [];
-  let iface = null;
-  for (const ln of readText(p).split('\n')) {
-    if (ln === '' || ln.startsWith('#')) continue;
-    const at = ln.indexOf('\t');
-    if (at <= 0) continue;
-    const kind = ln.slice(0, at);
-    const body = ln.slice(at + 1);
-    if (kind === 'decl') sigs.push(body);
-    else if (kind === 'iface') iface = JSON.parse(body);
-  }
-  return { sigs, iface };
+  const ix = new UnitIndex(dir);
+  unitIx.set(dir, ix);
+  return ix;
 }
 
 function asyModsSkip(dir, cs) {
@@ -1981,7 +1884,7 @@ function asyModsSkip(dir, cs) {
   // 一份产物齐不齐：索引那一行还成立 + `.js` 与它那份**声明文件**都在。
   // 「要跟着进来的那几份」也在行里（needs）。
   const load = (nm) => {
-    const r = asyRowFresh(dir, nm, cs);
+    const r = unitIndex(dir).fresh(nm, cs);
     if (r === null || !exists(join(dir, `${nm}.js`))) return null;
     const d = declRead(dir, nm);
     if (d === null) return null;
@@ -2173,8 +2076,8 @@ function asyModsBuild(path, dir) {
     const jsPath = join(dir, `${u.name}.js`);
     const row = rowOf(u);
     rows.set(u.name, row);
-    const key = rowKey(asyIx(dir).ids, cs, row);
-    const had = asyRow(dir, u.name);
+    const key = unitIndex(dir).keyOf(row, cs);
+    const had = unitIndex(dir).row(u.name);
     if (had !== null && had.key === key && exists(jsPath)) {
       kept++;
       continue;
@@ -2215,10 +2118,10 @@ function asyModsBuild(path, dir) {
     // `main-label3.js` 里多出一句 `omni_init_cardioid()` —— 量出来的样子就是 label3 与
     // gamma3 在 `$alen` 上炸（跑的是另一个例子的初始化）。入口本来也不该被谁复用。
     if (u.name !== r.entry) declWrite(dir, u.name, u.sec, u.iface);
-    asyRowSet(dir, u.name, row, cs);
+    unitIndex(dir).set(u.name, row, cs);
     made++;
   }
-  asyIxSave(dir);
+  unitIndex(dir).save();
   vStep(`asy units      新编 ${made} 份、复用 ${kept} 份`);
   // 每一份自己的 `(main …)` 只做一件事：把**这一份**的全局清零（第二十四刀那条
   // "零初始化在入口最前面"，现在分到了各家）。所以入口那份 main 先把各家的清零跑一遍，
@@ -2236,25 +2139,19 @@ function asyModsBuild(path, dir) {
     names.push(u.name);
   }
   names.sort();
-  const lines = ["import './omni_rt.js';"];
-  for (const n of names) lines.push(`import { omni_init_${cap('asy.jsUnitSym')(n)} } from './${n}.js';`);
-  lines.push(`import { omni_init_${cap('asy.jsUnitSym')(r.entry)} } from './${r.entry}.js';`);
-  for (const n of names) lines.push(`omni_init_${cap('asy.jsUnitSym')(n)}();`);
-  lines.push(`omni_init_${cap('asy.jsUnitSym')(r.entry)}();`);
-  lines.push('$js_check_uncaught();');
-  lines.push('$flush();');
-  lines.push('');
   // 入口那一份的启动器**按入口起名**：这个目录是共用的，叫 main.js 的话两个入口互相盖
   const mainPath = join(dir, `main-${r.entry}.js`);
-  writeText(mainPath, lines.join('\n'));
+  const initOf = (n) => `omni_init_${cap('asy.jsUnitSym')(n)}`;
+  writeText(mainPath, launcherText(r.entry, names, initOf,
+    ["import './omni_rt.js';"], ['$js_check_uncaught();', '$flush();']));
   // 「这个入口用到哪几份产物」记进**索引里入口那一行**（needs），不再另出一份清单文件。
   //
   // 从前那份 `main-<入口>.dep` 里抄着三样：环境、编译器印记、用到的产物名。前两样现在
   // 各有各的去处 —— 环境在目录名里（jsModulesDir），编译器印记在每一行的键里 ——
   // 剩下的那一样本来就该待在索引里。少一种文件、少一处会抄错的判据。
   const entryRow = rows.get(r.entry);
-  if (entryRow !== undefined) asyRowSet(dir, r.entry, { ...entryRow, needs: names }, cs);
-  asyIxSave(dir);
+  if (entryRow !== undefined) unitIndex(dir).set(r.entry, { ...entryRow, needs: names }, cs);
+  unitIndex(dir).save();
   vStep(`asy units      -> ${dir}`);
   return mainPath;
 }
@@ -2284,7 +2181,7 @@ function asyModsEnv(path) {
  * （把库重新降一遍约 800ms），那发生在"知道产物还能用"**之前**。所以这一问本身必须便宜：
  * 读一份索引 + stat 它提到的那些文件。
  *
- * 问的东西与慢路**是同一个函数**（`asyRowFresh`）：入口那一行新不新、它 needs 里的每一份
+ * 问的东西与慢路**是同一个函数**（`UnitIndex.fresh`）：入口那一行新不新、它 needs 里的每一份
  * 新不新。从前这儿自己抄了一份判据（一份 `main-<入口>.dep` 清单 + 只核"它自己那个源文件"），
  * 于是 include 摊进来的文件在这条路上没人问 —— 慢路会重编、快路却先命中，盘上那份旧代码
  * 照旧被跑。同一件事只该有一处判据。
@@ -2297,11 +2194,11 @@ function asyModsFast(path, dir) {
   // （量出来的样子是「换个入口跑一趟，再跑回来又是满编 0.9s」），而从日志上看不出来。
   const miss = (why) => { vStep(`模块清单不命中 ${why}`); return null; };
   if (!exists(mainPath)) return miss('还没有这个入口的启动器');
-  const entry = asyRowFresh(dir, nm, cs);
+  const entry = unitIndex(dir).fresh(nm, cs);
   if (entry === null) return miss('入口那一份不新了（或者还没编过）');
   for (const n of entry.needs) {
     if (!exists(join(dir, `${n}.js`))) return miss(`产物 ${n}.js 没了`);
-    if (asyRowFresh(dir, n, cs) === null) return miss(`产物 ${n} 不新了（它的源文件或 include 变了）`);
+    if (unitIndex(dir).fresh(n, cs) === null) return miss(`产物 ${n} 不新了（它的源文件或 include 变了）`);
   }
   if (!exists(join(dir, 'omni_rt.js'))) return miss('运行时那一份没了');
   vStep(`模块清单命中   ${entry.needs.length} 份产物一份没动`);
