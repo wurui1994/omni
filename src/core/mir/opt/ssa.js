@@ -24,6 +24,9 @@ import { inScope, regionScope } from './region.js';
 import { replaceRef } from './edit.js';
 import { registerPass } from './pass.js';
 
+/** "块 × 槽"那张表最多这么多格（见 `mem2reg` 里那段账）。四百万格 ≈ 32MB 一张。 */
+export const SSA_TABLE_MAX = 4000000;
+
 /** 这个 ref 在 `pc` 那儿看得见吗（常量永远看得见；指令要问词法作用域）。 */
 function usableHere(sc, fn, ref, pc) {
   if (ref < REF_BIAS) return true;
@@ -121,6 +124,12 @@ export function mem2reg(fn, _mod) {
   }
   if (proms.length === 0) return 0;
   const nb = cfg.blocks.length;
+  /* **"块 × 槽"那张表撑不住就不做这一格。**`entryCur`/`exitCur` 各是 nb 个长 NS 的数组，
+     所以内存是 O(块数 × 槽数)。radiance 那种是 73 × 791（六万格，没问题），而 pt 那份
+     剪过的渲染核心里 `omni_main`（模块初始化 + main 的顶层胶水）有 **11 万条指令** ——
+     块数与槽数各上千，表上千万格，1.8G 堆当场撑爆（`OMNI_MIR_OPT=1` 于是在整份程序上
+     根本跑不完）。这一格是**可选**的优化，撑不住就不做：那种函数是冷胶水，做了也没收益。 */
+  if (nb * NS > SSA_TABLE_MAX) return 0;
   const entryCur = [];
   for (let i = 0; i < nb; i++) {
     /* 没有前驱的块（函数入口、以及到不了的那几个）：它的入口值是"说不清" ——

@@ -78,12 +78,23 @@ export function inlineCalls(fn, mod) {
 
   /* ---- 一、挑调用点 */
   const sites = new Map();          // 调用点 pc -> 被调的 MirFunc
+  /* **这一趟能加多少条也要有闸**（从前只闸"几个调用点"）：4096 个点 × 每个 ≤80 条 =
+     32 万条 —— 一趟就能把一个函数吹到几十万条，而轮间那个 `INLINE_MAX_GROWTH` 闸是
+     **跑完一轮才看**的。量出来的：pt 那份剪过的渲染核心上单跑 `inline` 一格就把
+     1.8G 堆撑爆（`OMNI_MIR_OPT=1` 于是在整份程序上根本跑不完）。
+     闸用同一把尺子（长胖不超过 `INLINE_MAX_GROWTH` 倍），所以小函数照旧全展开 ——
+     radiance 那一格 2000 条的体、47 个调用点，离这个闸差着一个数量级。 */
+  const room = Math.min(INLINE_ADD_MAX,
+    Math.max(INLINE_MAX, fn.op.length * (INLINE_MAX_GROWTH - 1)));
+  let added = 0;
   for (let pc = 0; pc < fn.op.length && sites.size < INLINE_MAX_SITES; pc++) {
     if (fn.op[pc] !== OP.CALL) continue;
     const callee = mod.funcs[fn.a[pc]];
     if (!callable(callee, fn)) continue;
     const args = argRefs(fn, fn.b[pc]);
     if (args.length !== callee.params.length) continue;
+    if (added + callee.op.length > room) break;
+    added += callee.op.length;
     sites.set(pc, callee);
   }
   if (sites.size === 0) return 0;
@@ -266,8 +277,23 @@ export function inlineCalls(fn, mod) {
  * 轮数的闸是**长胖多少**（`INLINE_MAX_GROWTH` 倍）：一趟没长就停，长过头也停。 */
 export const INLINE_MAX_GROWTH = 12;
 
+/**
+ * **体大过这么多条就不往里内联了。**
+ *
+ * 量出来的（pt 那份剪过的渲染核心）：`omni_main` 有 **116329 条** —— 那不是热代码，是
+ * 模块初始化 + main 的顶层胶水（12550 行 C 的那一份）。往它里头展开一趟能加百万条，
+ * 而每条还拖着一格 `inFrom` 的小对象 —— 1.8G 堆当场撑爆，`OMNI_MIR_OPT=1` 在整份程序上
+ * 根本跑不完。内联要的是"热路径上的小函数"，那种函数离两万条差着一个数量级
+ * （smallpt 的 `radiance` 两千条上下）。
+ */
+export const INLINE_MAX_FN = 20000;
+
+/** 一趟最多加这么多条（相对闸之外的绝对闸，理由同上）。 */
+export const INLINE_ADD_MAX = 20000;
+
 function inlinePass(fn, mod) {
   if (!fn || fn.op.length === 0) return 0;
+  if (fn.op.length > INLINE_MAX_FN) return 0;      // 冷胶水不往里展开（见 INLINE_MAX_FN）
   const start = fn.op.length;
   let total = 0;
   for (;;) {
