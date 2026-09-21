@@ -1860,7 +1860,7 @@ function inpOk(field) {
  *
  * 判据与写产物那一刻用的是**同一格印记**：印记里记着「编译器 + 它自己那个源文件 +
  * 它引到的那几个源文件」的 `路径:改动时间:字节数`，这里把每一格反过来 stat 一遍。
- * 全对上、并且 `.js` 与接口（`.sec`）都在，就把签名清单读回来给前端。
+ * 全对上、并且 `.js` 与它那份声明文件都在，就把签名清单读回来给前端。
  *
  * 量出来的账：13 个库的 asyBodyPass 是 368ms（整个前端 645ms 的一半多），而它降出来的
  * 东西逐字节等于盘上那份 —— 这一刀省的就是它。声明遍那 221ms 省不掉：入口要那些表。
@@ -1934,17 +1934,58 @@ function asyRowFresh(dir, name, cs) {
   return r;
 }
 
+/**
+ * 一份产物的**声明文件**：`<名字>.d.sx`，一个模块**一份接口**（TypeScript 的 `.d.ts`
+ * 是同一件事）。
+ *
+ * 从前是两份：`.sec`（链接那一层要的签名清单）与 `.aif`（模块那一层要的名字表与默认值
+ * 表达式）。同一件事分两份文件、各一套在不在的判断，"接口一致"就变成了两处都得对 ——
+ * 漏一处的症状是静默地拿着旧接口走。
+ *
+ * 一行一格、制表符分隔（与 `index.log` / `ids.log` 同族）：
+ *   `decl \t <一条签名>`   链接层：别人引它要发的那条 `(sig …)`
+ *   `iface \t <JSON>`      模块层：名字、签名、默认值表达式（存不下来就没有这一行）
+ */
+function declPath(dir, name) {
+  return join(dir, `${name}.d.sx`);
+}
+
+function declWrite(dir, name, sigs, iface) {
+  const lines = ['# omni unit interface v1'];
+  for (const x of sigs) lines.push(`decl\t${x}`);
+  if (iface !== undefined && iface !== null) lines.push(`iface\t${JSON.stringify(iface)}`);
+  lines.push('');
+  writeText(declPath(dir, name), lines.join('\n'));
+}
+
+/** 回 `{sigs, iface}`；没这份文件回 null。`iface` 那一段没有就是 null。 */
+function declRead(dir, name) {
+  const p = declPath(dir, name);
+  if (!exists(p)) return null;
+  const sigs = [];
+  let iface = null;
+  for (const ln of readText(p).split('\n')) {
+    if (ln === '' || ln.startsWith('#')) continue;
+    const at = ln.indexOf('\t');
+    if (at <= 0) continue;
+    const kind = ln.slice(0, at);
+    const body = ln.slice(at + 1);
+    if (kind === 'decl') sigs.push(body);
+    else if (kind === 'iface') iface = JSON.parse(body);
+  }
+  return { sigs, iface };
+}
+
 function asyModsSkip(dir, cs) {
   const extras = new Map();          // 产物名 -> {name, key, sigs, need}
-  // 一份产物齐不齐：索引那一行还成立 + `.js` 与它的接口（`.sec`）都在。
+  // 一份产物齐不齐：索引那一行还成立 + `.js` 与它那份**声明文件**都在。
   // 「要跟着进来的那几份」也在行里（needs）。
   const load = (nm) => {
-    const secP = join(dir, `${nm}.sec`);
     const r = asyRowFresh(dir, nm, cs);
-    if (r === null || !exists(join(dir, `${nm}.js`)) || !exists(secP)) return null;
-    const sigs = [];
-    for (const ln of readText(secP).split('\n')) if (ln.trim() !== '') sigs.push(ln);
-    return { name: nm, key: r.self, need: r.needs, sigs };
+    if (r === null || !exists(join(dir, `${nm}.js`))) return null;
+    const d = declRead(dir, nm);
+    if (d === null) return null;
+    return { name: nm, key: r.self, need: r.needs, sigs: d.sigs };
   };
   const skipFn = (info) => {
     const nm = cap('asy.unitName')(info);
@@ -1970,8 +2011,9 @@ function asyModsSkip(dir, cs) {
   return {
     extras,
     fn: skipFn,
-    // **接口索引**（第七十八刀）：产物这一套都齐了、旁边又躺着 `.aif` 的话，前端连这个库的
-    // 源码都不读。先过一遍上面那关（印记 + `need` 闭包），过了才认这份索引 —— 判据是同一格。
+    // **接口索引**（第七十八刀）：产物这一套都齐了、声明文件里又有 `iface` 那一段的话，
+    // 前端连这个库的源码都不读。先过一遍上面那关（索引那一行 + `need` 闭包），过了才认
+    // 这一段 —— 判据是同一格。
     //
     // span 上那个 `file` 给一格轻壳：不读源码就没有全文与行表，而这条路上库的声明本来
     // 不该再报诊断（真报了也还有路径与偏移可看）。
@@ -1986,7 +2028,7 @@ function asyModsSkip(dir, cs) {
       //   - `asyIfaceLoad` 从前写死 `obj.v !== 1` 而 dump 写 `v: 2`，整条路是死的 ——
       //     从前"开索引一点不省"那次测量测的是同一条路。
       //   - 产物名里带源文件路径的哈希，而这一格在**加载之前**算名字，`pathOf` 那时回不出
-      //     路径，13 份里只有 2 份找得到 `.aif`（已改成只 stat 的 resolve）。
+      //     路径，13 份里只有 2 份找得到那份声明（已改成只 stat 的 resolve）。
       //   - `access m;` 只建别名不并名字，asyModMerge 一笔不记，读回来 `L.mods` 是空的 ——
       //     默认值里的 `settings.x` 于是报"带点的名字"（101 份→0 份）。
       //   - 读回来的单元不再重新 dump：那个来回是有损的，几代之后名字就找不着了（72→34）。
@@ -1996,10 +2038,10 @@ function asyModsSkip(dir, cs) {
       //   run（编译 + 跑）    关 885/738/623ms   开 551/502/477ms
       if (env('OMNI_ASY_IFACE') !== '1') return null;
       const nm = cap('asy.unitName')(info);
-      const p = join(dir, `${nm}.aif`);
-      if (!exists(p)) { vStep(`asy 接口索引不命中 ${nm} 没有 .aif`); return null; }
+      const d = declRead(dir, nm);
+      if (d === null || d.iface === null) { vStep(`asy 接口索引不命中 ${nm} 声明里没有那一段`); return null; }
       if (skipFn(info) === null) { vStep(`asy 接口索引不命中 ${nm} 产物那一套没齐`); return null; }
-      const obj = JSON.parse(readText(p));
+      const obj = d.iface;
       if (obj === null || obj === undefined) return null;
       // 版本对不上就当没有这一格（盘上那份是旧格式）。这一格与 iface.js 的 asyIfaceLoad
       // **必须同一个数** —— 从前这里认 2、那边写死认 1，接口索引于是整片是死的。
@@ -2160,8 +2202,8 @@ function asyModsBuild(path, dir) {
     }
     const mod = cap('sx.textToMod')(u.name, u.text, `omni_init_${cap('asy.jsUnitSym')(u.name)}`);
     writeText(jsPath, target('js').emit(mod, { esm: true }));
-    // 下一趟要复用这一份时，前端连它的正文都不降 —— 那时靠的只有**它的接口**：
-    // `.sec` 是它定义的名字与签名（别人引它要发的 `(sig …)`），
+    // 下一趟要复用这一份时，前端连它的正文都不降 —— 那时靠的只有**它那份声明文件**
+    // （`<名字>.d.sx`：它定义的名字与签名，外加模块层要的那一段）。
     // 「复用它时还得跟着进来的那几份」在索引行的 `needs` 里。
     //
     // **每一份都出接口**（生成物那几份也出）：少了谁的接口，引到它的那一份就跳不过去 ——
@@ -2172,15 +2214,7 @@ function asyModsBuild(path, dir) {
     // "还要带哪几份"时会把某个生成物里出现的 `f` 认成"cardioid 定义的"，于是
     // `main-label3.js` 里多出一句 `omni_init_cardioid()` —— 量出来的样子就是 label3 与
     // gamma3 在 `$alen` 上炸（跑的是另一个例子的初始化）。入口本来也不该被谁复用。
-    if (u.name !== r.entry) {
-      writeText(join(dir, `${u.name}.sec`), `${u.sec.join('\n')}\n`);
-      // 这一份的**接口索引**（第七十八刀）：下一个例子引到这个库时，靠它认名字与签名，
-      // 源码与树都不再碰。存不下来的那种（碎片打包认不出形状）这一格是 null —— 不写，
-      // 下一趟照旧从源码走。
-      if (u.iface !== undefined && u.iface !== null) {
-        writeText(join(dir, `${u.name}.aif`), JSON.stringify(u.iface));
-      }
-    }
+    if (u.name !== r.entry) declWrite(dir, u.name, u.sec, u.iface);
     asyRowSet(dir, u.name, row, cs);
     made++;
   }
