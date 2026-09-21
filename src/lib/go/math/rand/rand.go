@@ -64,7 +64,12 @@ func (r *Rand) Int63n(n int64) int64 {
 	if n&(n-1) == 0 { // n is power of two, can mask
 		return r.Int63() & (n - 1)
 	}
-	max := int64((1 << 63) - 1 - (1<<63)%uint64(n))
+	/* go 的原文是 `max := int64((1<<63) - 1 - (1<<63)%uint64(n))` —— 那儿的取模是
+	   **uint64** 的，而我们这侧还没有无符号常量（`(1<<63)` 回绕成 INT64_MIN）。
+	   改写成**全 int64**的等价式：令 m = 2^63-1，则 2^63 mod n == (m mod n + 1) mod n，
+	   于是 max == m - (2^63 mod n)。数值与 go 完全一样。 */
+	m := int64(1<<63 - 1)
+	max := m - (m%n+1)%n
 	v := r.Int63()
 	for v > max {
 		v = r.Int63()
@@ -77,7 +82,9 @@ func (r *Rand) Int31n(n int32) int32 {
 	if n&(n-1) == 0 { // n is power of two, can mask
 		return r.Int31() & (n - 1)
 	}
-	max := int32((1 << 31) - 1 - (1<<31)%uint32(n))
+	/* 与 `Int63n` 同一条改写（见那儿的注）：全 int32、不用无符号常量。 */
+	m := int32(1<<31 - 1)
+	max := m - (m%n+1)%n
 	v := r.Int31()
 	for v > max {
 		v = r.Int31()
@@ -94,11 +101,28 @@ func (r *Rand) Intn(n int) int {
 }
 
 // Float64 returns, as a float64, a pseudo-random number in the half-open interval [0.0,1.0).
+//
+// **照 go 的 `rand.go` 抄**：`float64(r.Int63()) / (1 << 63)`，那个 `== 1` 的重抽是
+// Go issue 6721（除出来可能正好圆到 1.0）。go 的原文用 `again:` + `goto`，这儿写等价的
+// `for` —— 数值完全一样。
+//
+// ⚠️ 别再写成 `float64(r.Int63n(1<<53)) / (1 << 53)`：那是**另一个数列**（我第一版写错过，
+// 量出来 `Float64()*1000` 是 172 而 go 是 604；两边的算术逐位相同，错的是这一格的公式）。
 func (r *Rand) Float64() float64 {
-	return float64(r.Int63n(1<<53)) / (1 << 53)
+	for {
+		f := float64(r.Int63()) / (1 << 63)
+		if f != 1 {
+			return f
+		}
+	}
 }
 
 // Float32 returns, as a float32, a pseudo-random number in the half-open interval [0.0,1.0).
 func (r *Rand) Float32() float32 {
-	return float32(r.Float64())
+	for {
+		f := float32(r.Float64())
+		if f != 1 {
+			return f
+		}
+	}
 }

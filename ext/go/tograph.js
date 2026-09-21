@@ -2036,6 +2036,62 @@ function foreverLoop(n) {
   return !breaksOut(n.ins.body);
 }
 
+/**
+ * **无类型常量表达式的任意精度求值**（go 规范 "Constant expressions"）。算不出来回 `null`。
+ *
+ * 只认字面量与算符：`+ - * / % << >> & | ^` 与一元 `-`/`^`。名字、调用、转换一律算不出来
+ * （回 null）—— 宁可不折，也不猜。`/` 与 `%` 按 BigInt 的截断走，与 go 的整型常量一致。
+ */
+/** 这棵常量表达式里有移位吗（只对含移位的折，见 `case 'bin'` 那段账）。 */
+function hasShift(x) {
+  const t = tag(x);
+  if (t === 'bin') {
+    const o = leaf(kids(x)[0]);
+    if (o === '<<' || o === '>>') return true;
+    return hasShift(kids(x)[1]) || hasShift(kids(x)[2]);
+  }
+  if (t === 'paren') return hasShift(kids(x)[0]);
+  if (t === 'un') return hasShift(kids(x)[1]);
+  return false;
+}
+
+function constBig(x) {
+  const t = tag(x);
+  if (t === 'num') {
+    const s0 = String(leaf(kids(x)[0]));
+    if (!/^[0-9]+$/.test(s0)) return null;          // 浮点 / 科学计数不走这条
+    try { return BigInt(s0); } catch { return null; }
+  }
+  if (t === 'paren') return constBig(kids(x)[0]);
+  if (t === 'un') {
+    const o = leaf(kids(x)[0]);
+    const v = constBig(kids(x)[1]);
+    if (v === null) return null;
+    if (o === '-') return -v;
+    if (o === '^') return -v - 1n;                  // go 的一元 `^` 是按位取反
+    if (o === '+') return v;
+    return null;
+  }
+  if (t !== 'bin') return null;
+  const [op, a, b] = kids(x);
+  const av = constBig(a);
+  const bv = constBig(b);
+  if (av === null || bv === null) return null;
+  switch (leaf(op)) {
+    case '+': return av + bv;
+    case '-': return av - bv;
+    case '*': return av * bv;
+    case '/': return bv === 0n ? null : av / bv;
+    case '%': return bv === 0n ? null : av % bv;
+    case '<<': return (bv < 0n || bv > 512n) ? null : av << bv;
+    case '>>': return (bv < 0n || bv > 512n) ? null : av >> bv;
+    case '&': return av & bv;
+    case '|': return av | bv;
+    case '^': return av ^ bv;
+    default: return null;
+  }
+}
+
 function funcOf(sig, blk, name, self, selfType) {
   const inParams = partKids(sig, 'in');
   const pinfo = paramInfo(sig);
@@ -2832,6 +2888,42 @@ function toNode(x) {
       /* `a &^ b` 是 go 独有的 and-not —— 拼成 `band(a, bnot(b))`，不给它开一格内建。 */
       if (leaf(op) === '&^') {
         return node('prim', { args: [toNode(a), un('bnot', toNode(b))] }, { name: 'band' });
+      }
+      /**
+       * **无类型常量表达式按任意精度折**（go 规范 "Constant expressions"：常量是无限精度的）。
+       * 只在**折出来放不进 int64** 时改形（发一格实数）；放得进的照旧原样交给 `binOf` ——
+       * 那条路上的语义（含无符号那一位、字节判据）一个字都不动。
+       *
+       * 为什么非要它（4 行就复现，**答案静默地错**）：
+       *     var v int64 = 5577006791947779410
+       *     println(float64(v) / (1 << 63))
+       *   go 0.6046602879796196、我们 **-0.60466** —— `1 << 63` 回绕成 INT64_MIN，符号反了。
+       * 而真 go 的 `math/rand.Float64` 就是 `float64(r.Int63()) / (1 << 63)`。
+       *
+       * **必须折整个表达式**，不能只折那一格 `<<`：`rngMask = 1<<63 - 1` 是个正经的 int64
+       * 常量（9223372036854775807），只折 `1<<63` 会把它变成 real，`&` 当场骂
+       * `'&' 只对 int 成立，这里是 real`（第一版就是这么错的）。
+       *
+       * 还欠的一格：`(1<<63) % uint64(n)` —— 右边不是常量，整个折不掉，而 go 那儿是
+       * **uint64** 的取模。我们仍会把左边回绕成 INT64_MIN。真 go 的 `Int63n` 慢路走这一句
+       * （`Intn` 收到非二次幂时），要治得先有无符号常量。
+       */
+      const cbig = constBig(x);
+      if (cbig !== null && hasShift(x)) {
+        /* 放不进 int64 ⇒ 只可能是浮点上下文（go 里放进整型是编译错），发实数。 */
+        if (cbig > 9223372036854775807n || cbig < -9223372036854775808n) {
+          return convOf('float', lit(Number(cbig)));
+        }
+        /* 放得进 ⇒ **就地折成一格整数字面量**，别再往下走。
+           非这么做不可：`1<<63 - 1` 整体是 9223372036854775807（放得进），可它的**左子树**
+           `1<<63` 单独看放不进 —— 递归下去那一格会先变成实数，于是整个表达式成了
+           `real - int`，`rngMask` 变实数、`&` 当场骂。折出来的值走 BigInt，不经 Number
+           （2^63-1 过 double 会变成 2^63，那正是"int64 字面量掉精度"那一族）。
+           只在**含移位**的常量表达式上折（`hasShift`）：别的算术照旧原样，图的形状不动。 */
+        /* 只在**过 double 不掉精度**时折（≤ 2^53）：`lit` 收的是 JS 的 number，
+           9223372036854775807 过 double 会变成 2^63 —— 那正是"int64 字面量掉精度"那一族。
+           折不了就原样交给 `binOf`（今天的行为），不猜。 */
+        if (cbig <= 9007199254740992n && cbig >= -9007199254740992n) return lit(Number(cbig));
       }
       const nd = binOf(leaf(op), toNode(a), toNode(b), OPS, { lang: 'go' });
       /* **无符号那一位**（`UNS` 那段账）：左边那一半声明成 uint 时，右移 / 除 / 取余 /
