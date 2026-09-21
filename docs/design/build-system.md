@@ -479,6 +479,21 @@ C 与 JS 在这一格有个**真差别**：JS 只要名字，C 还要**类型**�
 得把桶再分一层：`iface`（只装类型定义）与 `impl`（模板实现）。分完之后
 `moduleFiles(name)` 就是拼装，不含新逻辑。
 
+**外部类型不会重复定义**（从 JS 腿的产物上读出来的证据）：`01-arith__*.js` 从
+`asy_builtins__*.js` import 的是 `$new_Cdrawop`、`$new_Cknot` 这些**构造器**，
+而不是自己再生成一份 —— 说明 `mod.structs` / `mod.classes` 里只有**本家**的类型，
+外部类型在 `mod.imports`（kind `struct`/`class`）。C 腿正好对上：外部类型的完整定义
+从那家的 `.h` 来，本家一个字都不重发。
+
+于是还要改的那两格（都在 emit.js，按 `perMod` 分）：
+
+- **零值构造 / 类的 new（`omni_new_S_X`、`omni_new_C_X`）现在发成 `static`** ——
+  按模块那一档得去掉 `static`（别家会调它，`mod.imports` 里就是那几条），
+  原型进它那一家的 `.h`。
+- **容器 / 向量的 typedef 要各带一格自己的 guard**（`#ifndef OMNI_D_omni_list_int`）：
+  两家都用 `list<int>` 时两份 `.h` 里都会有那一行，而 C99 不允许重复 typedef。
+  这是标准手法，不需要公用头。
+
 判据（一格一格来，每格都能单独验）：
 1. `sx.textToMod` 单独降一段之后，`mod.imports` 非空、`mod.funcs` 里**只有本家的函数**。
 2. 一份模块的 `.h` + `.c` 单独过我们自己的 C 前端编得过。
