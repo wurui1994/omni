@@ -501,7 +501,7 @@ class CEmitter {
     this.line();
     for (const t of containers) this.containerBody(t);
     this.line();
-    for (const t of containers) this.containerDefine(t);
+    for (const t of CEmitter.defineOrder(containers)) this.containerDefine(t);
     /* dyn 桥与 JS 那一族模板（含三格派发器的坑）**整段归 omni_gen**：它们要的具体类型是
      * `list<dynamic>` 与 `dict<string,dynamic>`，与用户类型无关，名字完全由内容定。
      * 状态不在模板里（三张锁表已经搬进运行时，见 omni_js_obj.h），所以每个 TU 一份 static
@@ -1017,7 +1017,7 @@ class CEmitter {
     for (const l of this.cAbiExterns()) C.push(l);
     for (const l of this.s16PoolLines()) C.push(l);
     for (const l of this.arrLines()) C.push(l);
-    for (const t of containers) for (const l of this.capture(() => this.containerDefine(t))) C.push(l);
+    for (const t of CEmitter.defineOrder(containers)) for (const l of this.capture(() => this.containerDefine(t))) C.push(l);
     if (this.dynAt1 > this.dynAt0) for (const l of this.out.slice(this.dynAt0, this.dynAt1)) C.push(l);
     for (const t of this.mod.boxDeeps ?? []) {
       C.push(`static omni_dyn omni_box_${cTypeName(t)}(${cTypeName(t)} a);`);
@@ -1132,7 +1132,7 @@ class CEmitter {
       const u = unit(this.homeOfGen(t));
       for (const s of this.capture(() => this.containerBody(t))) u.cbody.push(s);
     }
-    for (const t of this.mod.containers ?? []) {
+    for (const t of CEmitter.defineOrder(this.mod.containers ?? [])) {
       const u = unit(this.homeOfGen(t));
       for (const s of this.capture(() => this.containerDefine(t))) u.cdef.push(s);
     }
@@ -1506,8 +1506,24 @@ class CEmitter {
     else this.line(`OMNI_SET_BODY(${n}, ${cTypeName(t.elem)})`);
   }
 
-  containerDefine(t) {
-    const n = cTypeName(t);
+  /**
+   * 容器**实例化**（DEFINE）的次序：**表先、字典与集合后**。
+   *
+   * 为什么：`OMNI_DICT_DEFINE(…, omni_list_string)` 的体里会调 `omni_list_string_new`
+   * （keys 交的是一格表），而那个函数是 `OMNI_LIST_DEFINE` 展开出来的。两者同在一个
+   * 翻译单元里，谁在前面就看谁的次序 —— 反了就是"调一个没声明的函数"。
+   * tcc 只当警告（C89 的隐式声明），**clang -O2 是硬错**，于是 `--cc clang` 那一列
+   * 在 pt 上整趟垮掉（量出来的：`call to undeclared function 'omni_list_string_new'`）。
+   * 组内的相对序不动 —— 那一格由 `sortAggregates()` 定。
+   */
+  static defineOrder(containers) {
+    const ls = [];
+    const rest = [];
+    for (const t of containers) (t.k === 'list' ? ls : rest).push(t);
+    return [...ls, ...rest];
+  }
+
+  containerDefine(t) {    const n = cTypeName(t);
     if (t.k === 'list') {
       this.line(`OMNI_LIST_DEFINE(${n}, ${cTypeName(t.elem)})`);
       const eq = EQ_FN[t.elem.k];
