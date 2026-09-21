@@ -1844,7 +1844,7 @@ const ASY_WK_SEP = ';;--';
 /**
  * 「这一份产物还是最新的吗」——是的话前端**连它的正文都不降**（第七十六刀）。
  *
- * 判据与写产物那一刻用的是**同一格印记**：`.stamp` 里记着「编译器 + 它自己那个源文件 +
+ * 判据与写产物那一刻用的是**同一格印记**：印记里记着「编译器 + 它自己那个源文件 +
  * 它引到的那几个源文件」的 `路径:改动时间:字节数`，这里把每一格反过来 stat 一遍。
  * 全对上、并且 `.js`/`.sec`/`.wk` 三样都在，就把签名清单与它引到的 weak 项读回来给前端。
  *
@@ -1852,24 +1852,111 @@ const ASY_WK_SEP = ';;--';
  * 东西逐字节等于盘上那份 —— 这一刀省的就是它。声明遍那 221ms 省不掉：入口要那些表。
  */
 /**
- * 读一份产物旁边那格 `.stamp` —— **只有这一处解析它**（ADR-0042 的第 0 步）。
+ * 印记索引：**整个目录一份** `index.log`，一行 `产物名 \t 印记`（ADR-0042 的第 2 步）。
+ *
+ * 从前是一份产物旁边一个 `.stamp`：一个例子的 asy-mods 里 218 个小文件，
+ * 而每一趟快路都要 stat / 读一遍它们。改成一份的两条理由：
+ *   - 读一次就全在手里（下面那张表），判据与写产物用的还是同一段文本 —— 语义没动；
+ *   - 增量信息与产物分开存，后面按内容哈希换键时只动这一格。
+ *
+ * 旧缓存不作废：目录里没有 `index.log` 而有 `.stamp` 时**先搬进来**（见 stampTable），
+ * 所以换实现的第一趟照旧是"复用 N 份"，不会白重编一棵库。
+ */
+const STAMP_IX_NAME = 'index.log';
+const stampIx = new Map();        // 目录 -> Map(产物名 -> 印记文本)
+const stampIxDirty = new Set();   // 哪几个目录的表还没落盘
+
+function stampTable(dir) {
+  const had = stampIx.get(dir);
+  if (had !== undefined) return had;
+  const t = new Map();
+  stampIx.set(dir, t);
+  const p = join(dir, STAMP_IX_NAME);
+  if (exists(p)) {
+    for (const ln of readText(p).split('\n')) {
+      const i = ln.indexOf('\t');
+      if (i > 0) t.set(ln.slice(0, i), ln.slice(i + 1));
+    }
+    return t;
+  }
+  if (!exists(dir)) return t;
+  // 旧缓存：把那些 `.stamp` 搬进索引，落盘，再把碎文件删掉（谁也不会再读它们）。
+  const old = [];
+  for (const f of readDir(dir)) {
+    if (!f.endsWith('.stamp')) continue;
+    old.push(join(dir, f));
+    t.set(f.slice(0, f.length - '.stamp'.length), readText(join(dir, f)));
+  }
+  if (old.length > 0) {
+    stampIxDirty.add(dir);
+    stampFlush(dir);
+    spawn('rm', ['-f', ...old], 'c');
+    vStep(`asy 印记搬家   ${old.length} 份 .stamp -> ${STAMP_IX_NAME}`);
+  }
+  return t;
+}
+
+/** 把表落盘（只在真改过时写）。名字排序，好 diff。 */
+function stampFlush(dir) {
+  if (!stampIxDirty.has(dir)) return;
+  stampIxDirty.delete(dir);
+  const t = stampIx.get(dir);
+  if (t === undefined) return;
+  const lines = [];
+  for (const n of [...t.keys()].sort()) lines.push(`${n}\t${t.get(n)}`);
+  lines.push('');
+  writeText(join(dir, STAMP_IX_NAME), lines.join('\n'));
+}
+
+/**
+ * 记下一份产物的印记。**不立刻落盘** —— 一趟里改完了统一写一次（asyModsBuild 末尾）。
+ * 半路崩了的后果是索引里少几格，下一趟把那几份重编：往"多编一次"那边倒，不会复用错的。
+ */
+function stampWrite(dir, name, text) {
+  stampTable(dir).set(name, text);
+  stampIxDirty.add(dir);
+}
+
+/**
+ * 读一份产物的印记 —— **只有这一处解析它**（ADR-0042 的第 0 步）。
  *
  * 从前 `load` / `mrec` / 清单里那格 `w|` 各自 `split('|')` 解一遍同一种文本：
  * 三处解析一种格式，换格式必漏一处，而漏了的症状是**静默复用旧产物**
  * （那三个 bug 的现场记在下面几段注释里）。所以先把读法收成一处，
  * 再换实现（索引 + 一格键）时就只动这一个函数。
  *
- * 回 `{text, cs, fields, mainTag}`；文件不在回 null。
+ * 回 `{text, cs, fields, mainTag}`；没这一格回 null。
  * `fields` 是去掉头一格（编译器印记）之后的那些，`mainTag` 是 `main:…` 那一格（没有就 null）。
  */
 function stampRead(dir, name) {
-  const p = join(dir, `${name}.stamp`);
-  if (!exists(p)) return null;
-  const text = readText(p);
+  const text = stampTable(dir).get(name);
+  if (text === undefined) return null;
   const all = text.split('|');
   let mainTag = null;
   for (const f of all) if (f.startsWith('main:')) mainTag = f;
   return { text, cs: all[0], fields: all.slice(1), mainTag };
+}
+
+/**
+ * 印记里那些**输入**现在还成立吗（`main:` 那一格由调用方自己比 —— 它问的不是"输入变没变"，
+ * 是"这份产物属于哪个入口"）。
+ *
+ * 「哪一格是文件」的判据是**里头有没有冒号**，不是"开头是不是 t"。原先那么写踩得到：
+ * 印记里的路径可以是相对的（`tests/asy/cases/01-arith.asy:…` —— 入口那一份就是），
+ * 于是一个真文件被当成"按文本哈希记的那种"。`text` 为真时按文本哈希记的那格算过
+ * （快路上 omni_weak 由清单里那格 `w|` 逐字节钉着），为假时一律不复用。
+ */
+function stampInputsOk(st, text) {
+  for (const f of st.fields) {
+    if (f === '-') continue;                    // 没有源文件的那种依赖
+    if (f.startsWith('main:')) continue;        // 归属那一格，调用方自己比
+    if (f.indexOf(':') < 0) {                   // `t<内容哈希>`（omni_weak 自己）
+      if (!text) return false;
+      continue;
+    }
+    if (!inpOk(f).ok) return false;
+  }
+  return true;
 }
 
 function asyModsSkip(dir, cs, mainTag) {
@@ -1886,21 +1973,16 @@ function asyModsSkip(dir, cs, mainTag) {
     }
     return { key, need };
   };
-  // 一份产物的四格（`.stamp` 对上、`.js`/`.sec`/`.wk`/`.dep` 都在）都齐了才回它的内容
+  // 一份产物的几格（印记对上、`.js`/`.sec`/`.wk`/`.dep` 都在）都齐了才回它的内容
   const load = (nm) => {
     const secP = join(dir, `${nm}.sec`);
     const wkP = join(dir, `${nm}.wk`);
     const st = stampRead(dir, nm);
     if (st === null || !exists(join(dir, `${nm}.js`)) || !exists(secP) || !exists(wkP)) return null;
     if (st.cs !== cs) return null;
-    for (let i = 0; i < st.fields.length; i++) {
-      const f = st.fields[i];
-      if (f === '-') continue;                 // 没有源文件的那种依赖（omni_weak）
-      if (f.startsWith('t')) return null;      // 按文本哈希记的那种（omni_weak 自己）：不复用
-      // 「这一份的正文里有主文件的基名」那一格（见 asyModsBuild 的 stampOf）：换了入口就不复用
-      if (f.startsWith('main:')) { if (f !== mainTag) return null; continue; }
-      if (!inpOk(f).ok) return null;
-    }
+    // 「这一份的正文里有主文件的基名」那一格（见 asyModsBuild 的 stampOf）：换了入口就不复用
+    if (st.mainTag !== null && st.mainTag !== mainTag) return null;
+    if (!stampInputsOk(st, false)) return null;
     const dep = readDep(nm);
     if (dep === null) return null;
     const sigs = [];
@@ -2087,14 +2169,13 @@ function asyModsBuild(path, dir) {
   let kept = r.reused.length;
   for (const u of r.units) {
     const jsPath = join(dir, `${u.name}.js`);
-    const stPath = join(dir, `${u.name}.stamp`);
     const stamp = stampOf(u);
-    if (exists(stPath) && exists(jsPath)) {
-      const old = readText(stPath);
-      if (stampSame(old, stamp)) {
+    const st = stampRead(dir, u.name);
+    if (st !== null && exists(jsPath)) {
+      if (stampSame(st.text, stamp)) {
         kept++;
         // 内容一样、只是改动时间变了（touch / 重新 checkout）：把预检那两格刷新，下一趟连读都不用读
-        if (old !== stamp) writeText(stPath, stamp);
+        if (st.text !== stamp) stampWrite(dir, u.name, stamp);
         continue;
       }
     }
@@ -2142,9 +2223,10 @@ function asyModsBuild(path, dir) {
         writeText(join(dir, `${u.name}.aif`), JSON.stringify(u.iface));
       }
     }
-    writeText(stPath, stamp);
+    stampWrite(dir, u.name, stamp);
     made++;
   }
+  stampFlush(dir);
   vStep(`asy units      新编 ${made} 份、复用 ${kept} 份`);
   // 每一份自己的 `(main …)` 只做一件事：把**这一份**的全局清零（第二十四刀那条
   // "零初始化在入口最前面"，现在分到了各家）。所以入口那份 main 先把各家的清零跑一遍，
@@ -2241,26 +2323,29 @@ function asyModsFast(path, dir) {
     if (ln === '') continue;
     // omni_weak 那一格：它是按程序生成的，换个入口跑就会被盖掉（见 asyModsBuild）
     if (ln.startsWith('w|')) {
-      const wst = join(dir, 'omni_weak.stamp');
-      if (!exists(wst)) return miss('weak 那一份没了');
-      if (readText(wst) !== ln.slice(2)) return miss('weak 那一份被别的入口盖掉了');
+      const wst = stampRead(dir, 'omni_weak');
+      if (wst === null) return miss('weak 那一份没了');
+      if (wst.text !== ln.slice(2)) return miss('weak 那一份被别的入口盖掉了');
       continue;
     }
     const parts = ln.split('|');
     if (parts[0] !== 'u') return miss('清单里有认不出的行');
     if (!exists(join(dir, `${parts[1]}.js`))) return miss(`产物 ${parts[1]}.js 没了`);
-    // 这一格记的是 `路径:改动时间:字节数:h内容哈希`（inpField 那一份），没有源文件的记 `-`。
-    // 改动时间变了但内容哈希一样也算成立（touch / 重新 checkout 不该让整张清单作废）。
-    const want = parts[3] === undefined ? '' : parts[3];
-    if (!inpOk(want).ok) return miss(`源文件 ${parts[1]} 变了`);
+    // 这一份产物的**全部输入**都还成立吗 —— 问的是它自己那格印记（索引里那一行），
+    // 不是清单里抄的那一格源文件。
+    //
+    // 从前这儿只核 `parts[3]`（`fstamp(u.key)`，也就是"它自己那个源文件"），于是
+    // **include 摊进来的那些文件在这条快路上没人问**：改 `base/plain_picture.asy` 而
+    // `plain.asy` 没动时，慢路那边早就会重编（印记里有那一格），可这条快路先命中、
+    // 整个前端一步不走 —— 盘上那份旧代码照旧被跑。印记里本来就记着 include 那几格，
+    // 缺的只是这条路上的一问。
+    const st = stampRead(dir, parts[1]);
+    if (st === null) return miss(`产物 ${parts[1]} 的印记没了`);
+    if (!stampInputsOk(st, true)) return miss(`源文件 ${parts[1]} 变了`);
     // 「这一份是不是带着某个入口的名字」那一格（第一百〇四刀）：库的产物跨入口共用之后，
     // 带 `_mainname()` 的那几份换个入口跑会被盖掉，只核源文件的话就会拿起别人那一份。
     const mwant = parts[4] === undefined ? '-' : parts[4];
-    let mhave = '-';
-    const stp = join(dir, `${parts[1]}.stamp`);
-    if (exists(stp)) {
-      for (const f of readText(stp).split('|')) if (f.startsWith('main:')) mhave = f;
-    }
+    const mhave = st.mainTag === null ? '-' : st.mainTag;
     if (mhave !== mwant) return miss(`产物 ${parts[1]} 是别的入口的那一份`);
   }
   if (!exists(join(dir, 'omni_rt.js'))) return miss('运行时那一份没了');
