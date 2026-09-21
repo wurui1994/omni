@@ -255,9 +255,11 @@ function expr(x, env, ctx) {
       if (t === undefined && env.get(`fn:${x.attrs.name}`) !== undefined) {
         return fnValText(x.attrs.name, env, ctx);
       }
-      if (isRecType(t, ctx)) gap(`把记录 '${x.attrs.name}' 整格当值用（这一刀只接字段读写）`);
-      if (elemType(t) !== null) gap(`把列表 '${x.attrs.name}' 整格当值用（这一刀只接下标读写与 len）`);
-      if (dictOf(t) !== null) gap(`把字典 '${x.attrs.name}' 整格当值用（这一刀只接按键读写与 len）`);
+      /* **在谁的体里**：这三句只说"整格当值用"时，几千行里找那一处只能人肉扫。 */
+      const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
+      if (isRecType(t, ctx)) gap(`把记录 '${x.attrs.name}' 整格当值用（这一刀只接字段读写）${wh}`);
+      if (elemType(t) !== null) gap(`把列表 '${x.attrs.name}' 整格当值用（这一刀只接下标读写与 len）${wh}`);
+      if (dictOf(t) !== null) gap(`把字典 '${x.attrs.name}' 整格当值用（这一刀只接按键读写与 len）${wh}`);
       return `(var ${x.attrs.name})`;
     }
     case 'prim': {
