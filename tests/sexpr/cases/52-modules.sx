@@ -1,0 +1,12 @@
+;; 模块（ADR-0042 第一步）：一份文本里几个 (module 名字 …)，用 import/export 说话。
+;; 拓扑序由 import 定 —— 这儿 app 在前、util 在后，照样能跑（并起来时会重排）。
+(module app
+  (import util (twice thrice))
+  (main
+    (print (call twice (int 21)))
+    (print (call thrice (int 5)))))
+
+(module util
+  (export twice thrice)
+  (fn twice ((x int)) int (ret (bin "*" (var x) (int 2))))
+  (fn thrice ((x int)) int (ret (bin "*" (var x) (int 3)))))

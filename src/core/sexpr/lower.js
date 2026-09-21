@@ -3155,9 +3155,13 @@ export function lowerCoreSexpr(file, diags, entry, opts) {
      再往下就是原来那条路 —— 降级器一个字都不知道模板这回事。没有模板的文件原样穿过去。 */
   const expanded = expandTemplates(nodes, diags, opts !== undefined && opts.templates === true);
   if (diags.hasErrors()) return null;
+  /* 模块（ADR-0042）：一份文本里有好几个 `(module …)` 时，先按 import/export 查一遍、
+     再按拓扑序并成一个 —— 只有一个 module 的文件原样穿过去，什么都不变。 */
+  const linked = resolveModules(expanded, diags);
+  if (linked === null || diags.hasErrors()) return null;
   // 入口名默认是 `omni_main`（整个程序）。一个库文件编成一份自己的产物时给它自己的名字
   // （`omni_init_plain` 之类）：那一份的 `(main …)` 就是这个库的初始化函数。
-  return new CoreLowerer(diags).chunk(expanded, entry === undefined ? 'omni_main' : entry);
+  return new CoreLowerer(diags).chunk(linked, entry === undefined ? 'omni_main' : entry);
 }
 
 /**
@@ -3225,6 +3229,161 @@ export class CoreSession {
     this.lastChecked = delta === null ? 0 : delta.funcs.length;
     return delta;
   }
+}
+
+/**
+ * **模块（ADR-0042 第一步）**：一份文本里可以有好几个 `(module …)`，它们之间用
+ * `(import M (名字…))` 与 `(export 名字…)` 说话。
+ *
+ * 为什么要这一格：方言从前只有 `(module NAME …)` 这个**壳**，没有边界 —— 于是共享的东西
+ * 只能"谁用谁发一份"，靠链接期弱定义取一收场（那就是 weak，以及它拖出来的 `.wk`/`.dep`）。
+ * 有了边界，一个声明只有一个家，别人 `import` 它。
+ *
+ * 这一步**不改发射**：检查完之后按拓扑序把几个模块并成一个 `(module …)`，
+ * `import` 合成 `(sig "M" <M 里那条声明>)` —— 接口是**算出来的**，不是手写的。
+ * 于是下游（三遍、assemble、后端）一个字都不用动。
+ *
+ * 五条检查，每条都报人话：模块重名 · 没有那个模块 · 那个名字没导出（带上它导出了什么）·
+ * 导入的名字与本地声明撞了 · 模块成环（报整条链，与 `module/load.js:175` 同一个格式）。
+ */
+function resolveModules(nodes, diags) {
+  const mods = [];
+  for (const n of nodes) if (head(n) === 'module') mods.push(n);
+  if (mods.length <= 1) return nodes;          // 老样子：一份文件恰好一个 module
+
+  const declName = (f) => {
+    const h = head(f);
+    if (h !== 'fn' && h !== 'global' && h !== 'struct' && h !== 'class' && h !== 'kernel') return null;
+    const a = f.items[1];
+    return a !== undefined && a.kind === 'atom' ? String(a.value) : null;
+  };
+  const err = (node, msg) => diags.error(node === undefined || node === null ? null : node.span, msg);
+
+  /** @type {Map<string, {node:any, forms:any[], exports:Set<string>, imports:{from:string,names:string[],node:any}[], decls:Map<string,any>, hasMain:boolean}>} */
+  const table = new Map();
+  const order = [];
+  for (const m of mods) {
+    /* 名字是**可选的第一格**：形式一律是列表，所以"`items[1]` 是原子"就等于"它是名字"。
+       一份文件只有一个模块时可以不给名字（今天所有 `.sx` 都是那样，一个字都不用改）；
+       好几个模块时必须各有名字，不然 import 无从说起。 */
+    const nameAt = m.items[1];
+    const named = nameAt !== undefined && nameAt.kind === 'atom';
+    const name = named ? String(nameAt.value) : '';
+    if (!named) { err(m, '一份文本里有好几个 (module …) 时，每个都要名字：(module 名字 …)'); continue; }
+    if (table.has(name)) { err(m, `模块 '${name}' 定义了两次`); continue; }
+    const rec = { node: m, forms: [], exports: new Set(), imports: [], decls: new Map(), hasMain: false };
+    for (const f of m.items.slice(2)) {
+      const h = head(f);
+      if (h === 'export') {
+        for (const a of f.items.slice(1)) {
+          if (a.kind !== 'atom') { err(f, '(export 名字 …)：只能是名字'); continue; }
+          rec.exports.add(String(a.value));
+        }
+        continue;
+      }
+      if (h === 'import') {
+        const fromAt = f.items[1];
+        const list = f.items[2];
+        if (fromAt === undefined || fromAt.kind !== 'atom' || !isList(list)) {
+          err(f, '(import 模块 (名字 …))');
+          continue;
+        }
+        const names = [];
+        for (const a of list.items) {
+          if (a.kind !== 'atom') { err(f, '(import 模块 (名字 …))：只能是名字'); continue; }
+          names.push(String(a.value));
+        }
+        rec.imports.push({ from: String(fromAt.value), names, node: f });
+        continue;
+      }
+      if (h === 'main') rec.hasMain = true;
+      const dn = declName(f);
+      if (dn !== null) rec.decls.set(dn, f);
+      rec.forms.push(f);
+    }
+    table.set(name, rec);
+    order.push(name);
+  }
+  if (diags.hasErrors()) return null;
+
+  /* **入口就是那个有 `(main …)` 的模块** —— 不看文件次序（次序由 import 定，不由谁写在前面）。
+     两个 main 是两份入口，那不是"几个模块"，是两个程序：报。一个都没有也行（纯库那一套）。 */
+  const withMain = [];
+  for (const n of order) if (table.get(n).hasMain) withMain.push(n);
+  if (withMain.length > 1) {
+    err(table.get(withMain[1]).node,
+      `有两个模块都写了 (main …)：${withMain.join(' 与 ')} —— 一份程序只有一个入口`);
+  }
+
+  /* 导入面的检查 */
+  for (const n of order) {
+    const rec = table.get(n);
+    for (const im of rec.imports) {
+      const src = table.get(im.from);
+      if (src === undefined) {
+        err(im.node, `没有模块 '${im.from}'（这一份里有 ${order.join(' / ')}）`);
+        continue;
+      }
+      for (const nm of im.names) {
+        if (!src.exports.has(nm)) {
+          const has = [...src.exports].sort().join(' ');
+          err(im.node, `模块 '${im.from}' 没有导出 '${nm}'（它导出的是 ${has === '' ? '（什么都没有）' : has}）`);
+          continue;
+        }
+        if (!src.decls.has(nm)) {
+          err(im.node, `模块 '${im.from}' 导出了 '${nm}'，但里头没有这条声明`);
+          continue;
+        }
+        if (rec.decls.has(nm)) {
+          err(im.node, `'${nm}' 既从 '${im.from}' 导入、又在 '${n}' 里自己声明了一遍 —— 一个声明只能有一个家`);
+        }
+      }
+    }
+  }
+  if (diags.hasErrors()) return null;
+
+  /* 查环：报整条链（`module/load.js:175` 那个格式） */
+  const state = new Map();
+  const stack = [];
+  const walk = (n) => {
+    if (state.get(n) === 2) return true;
+    if (state.get(n) === 1) {
+      const at = stack.indexOf(n);
+      err(table.get(n).node, `模块成环：\n    ${stack.slice(at < 0 ? 0 : at).concat([n]).join('\n -> ')}`);
+      return false;
+    }
+    state.set(n, 1);
+    stack.push(n);
+    for (const im of table.get(n).imports) {
+      if (table.has(im.from) && !walk(im.from)) return false;
+    }
+    stack.pop();
+    state.set(n, 2);
+    return true;
+  };
+  const topo = [];
+  const emit = (n) => {
+    if (topo.includes(n)) return;
+    for (const im of table.get(n).imports) if (table.has(im.from)) emit(im.from);
+    topo.push(n);
+  };
+  for (const n of order) if (!walk(n)) return null;
+  for (const n of order) emit(n);
+
+  /* 并成一个 `(module …)`：import 合成 `(sig "出处" <那条声明>)`，export 到这儿就没用了 */
+  const span = mods[0].span;
+  /* 并出来的那一份**不带名字**：下游今天认的形状是 `(module <形式…>)`（`chunk` 从
+     `items.slice(1)` 开始收），名字只在模块之间说话时有用，并完就没用了。 */
+  const items = [{ kind: 'atom', value: 'module', span: span }];
+  /* **同一份文本里的模块不必合成 sig**：定义本来就在这一份里，import 在这一层的意义是
+     "这个名字我看得见、而且它有主" —— 检查过了就够。合成一条 `(sig …)` 反而与真定义撞
+     （量到过：`'twice' 重复定义`）。等接口从盘上来（ADR-0042 第二步）那条路才需要 sig。 */
+  for (const n of topo) {
+    for (const f of table.get(n).forms) items.push(f);
+  }
+  const out = [{ kind: 'list', items: items, span: span }];
+  for (const n of nodes) if (head(n) !== 'module') out.push(n);
+  return out;
 }
 
 /** `(module …)` 里能出现的顶层项。REPL 的包装靠它区分"声明"与"语句"。 */

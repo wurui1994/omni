@@ -63,6 +63,9 @@ const SUITES = [
   /* 构建引擎（`omni ninja`；设计在 docs/design/build-system.md）：磁盘与执行器都是注入的，
      判的是"跑了哪些命令、什么次序、第二趟跑几条" —— 一个进程都不起，一个计时都没有。 */
   { s: 'build/run.js' },
+  /* 模块（ADR-0042 第一步）报错那一面：边界的价值全在"说不通的时候说人话"。
+     正面那条在 sexpr 的 cases/52-modules.sx（走五条腿比 stdout）。 */
+  { s: 'sexpr/modules.js' },
   /* js 腿的摇树（产物按用到的名字裁）：小了多少 + **裁前裁后逐字节相同**。
      后一条是它唯一讲得通的判据 —— 削掉的必须是没人用的。 */
   { s: 'cli/js-trim.js' },
