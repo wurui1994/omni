@@ -895,7 +895,13 @@ function callText(x, env, ctx) {
     }
     const ft0 = dynTypeOf(f, env, ctx);
     if (ft0 === null || !ft0.startsWith('(fnty ')) {
-      gap('调一格不是名字的东西（函数值那一档）');
+      /* **是哪一格**：只说"不是名字"时几千行里找不着。被调的那一格**长什么样**（op、
+         取的是哪个字段）与"在谁的体里"两样这一层手上都有。 */
+      const what = !isNode(f) ? JSON.stringify(f)
+        : (f.op === 'field-get' ? `取字段 '${f.attrs.field}'（那一格推出来是 ${typeOf(f, env, ctx)}）`
+          : `一格 ${f.op}`);
+      const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
+      gap(`调一格不是名字的东西（函数值那一档）—— 被调的是 ${what}${wh}`);
     }
     const names = dynFnNames(f, env, ctx);
     const vargs = argList(x, 'args').map((a, i) => {
