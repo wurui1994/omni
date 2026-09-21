@@ -10,11 +10,13 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { State } from '../../src/core/build/graph.js';
 import { parseManifest } from '../../src/core/build/manifest.js';
 import { FakeDisk } from '../../src/core/build/plan.js';
 import { build, BuildLog } from '../../src/core/build/run.js';
 import { Builder, toNinja } from '../../src/core/build/script.js';
+import { ContentIds, Index, staleUnits } from '../../src/core/build/modcache.js';
 
 let pass = 0;
 let fail = 0;
@@ -202,6 +204,44 @@ throws('两条边造同一格：当场报', () => run([CC,
     'cc a.o b.o -o app',
   ]);
   eq('node build.js 的退出码', r.status, 0);
+}
+
+/* 十三、**通用的模块缓存**（`modcache.js`）：有 import 关系的语言共用这一份，
+   不是给 asy 写的。判的是"键怎么算、索引怎么读、上游脏了下游跟着脏"。 */
+{
+  const here2 = dirname(fileURLToPath(import.meta.url));
+  const tmp = join(here2, '..', '..', '.omni-cache', 'test-modcache');
+  mkdirSync(tmp, { recursive: true });
+  const A = join(tmp, 'a.src');
+  const B = join(tmp, 'b.src');
+  writeFileSync(A, 'a1');
+  writeFileSync(B, 'b1');
+  const units = [
+    { name: 'a', self: A, deps: [] },
+    { name: 'b', self: B, deps: [A] },      // b import a：隐式图就这一条边
+  ];
+  const ids0 = new ContentIds();
+  const first = staleUnits(ids0, new Index(), 'T1', units);
+  eq('modcache：空索引 -> 全都要编（拓扑序）', first.stale, ['a', 'b']);
+
+  const ix = new Index();
+  for (const n of first.stale) ix.set(n, first.keyOf.get(n));
+  eq('modcache：存完再问 -> 一个都不用编', staleUnits(new ContentIds(), ix, 'T1', units).stale, []);
+
+  /* 改上游 a：a 要重编，**b 跟着重编**（上游的键进了 b 的键，所以这一格不用谁额外写） */
+  writeFileSync(A, 'a2');
+  eq('modcache：上游变了 -> 下游跟着脏', staleUnits(new ContentIds(), ix, 'T1', units).stale, ['a', 'b']);
+
+  /* 只 touch（内容没变）：一个都不用编 —— 身份是内容，不是改动时间 */
+  writeFileSync(A, 'a1');
+  eq('modcache：touch 不触发重编', staleUnits(new ContentIds(), ix, 'T1', units).stale, []);
+
+  /* 换工具指纹：全体重编（改一行后端而命令没变，那一格靠它） */
+  eq('modcache：工具指纹变了 -> 全体重编',
+    staleUnits(new ContentIds(), ix, 'T2', units).stale, ['a', 'b']);
+
+  /* 索引读回来还是同一份 */
+  eq('modcache：索引往返', Index.parse(ix.text()).keys.get('a'), ix.keys.get('a'));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
