@@ -37,17 +37,41 @@ import { buildTable, tableText, tableFromText, TABLE_FORMAT } from './table.js';
  *
  * 写盘是「先写临时文件再 rename」：几条腿并行跑时不会读到半截文件。
  */
+/**
+ * **进程内那一层缓存**（第二层，磁盘那层在下面）。
+ *
+ * 为什么要它：磁盘命中那一趟仍旧要 `readText` 一份几百 KB 的表再 `tableFromText`
+ * 逐格读回来 —— 量出来 go 的语法**每趟 15ms**。一趟 `omni run` 只读一次，所以从前
+ * 看不见；而 `omni serve` 的热工人一趟接一趟地跑，那 15ms 就是**每次切例子的延迟**里
+ * 最大的一格（真编译 + 真跑只要 5~15ms）。
+ *
+ * 键是**语法的正文**（不是路径）：`(extends …)` 展开之后的文本才是这张表的全部输入，
+ * 与磁盘那层的键一模一样。所以"改一个字符就不命中"这条在两层上是同一条。
+ *
+ * 上限 16：这棵树里一共十一门语言，16 是"全装得下 + 不会因为谁循环读而涨"。
+ * 满了就整个清空（不做 LRU —— 十一门全在里头的时候永远满不了，写 LRU 是白写）。
+ */
+const MEM = new Map();
+const MEM_MAX = 16;
+
 export function loadGrammarTable(path) {
   const diags = new Diagnostics();
   const text = grammarTextOf(path, diags);
   diags.throwIfErrors();
+  const key = `${TABLE_FORMAT}|${text}`;
+  const memo = MEM.get(key);
+  if (memo !== undefined) return { ...memo, hit: true };
   const g = readGrammar(readSexpr(new SourceFile(sourceLabel(path), text), diags), diags);
   diags.throwIfErrors();
-  const dir = join(cacheRoot(), 'glr', hash16(`${TABLE_FORMAT}|${text}`));
+  const dir = join(cacheRoot(), 'glr', hash16(key));
   const cpath = join(dir, 'table.txt');
   if (exists(cpath)) {
     const tb = tableFromText(readText(cpath), g);
-    if (tb !== null) return { g, tb, hit: true, cachePath: cpath };
+    if (tb !== null) {
+      if (MEM.size >= MEM_MAX) MEM.clear();
+      MEM.set(key, { g, tb, cachePath: cpath });
+      return { g, tb, hit: true, cachePath: cpath };
+    }
   }
   const tb = buildTable(g);
   mkdirAll(dir);
@@ -55,6 +79,8 @@ export function loadGrammarTable(path) {
   const tmp = join(dir, `table.txt.${hash16(path)}`);
   writeText(tmp, tableText(tb));
   rename(tmp, cpath);
+  if (MEM.size >= MEM_MAX) MEM.clear();
+  MEM.set(key, { g, tb, cachePath: cpath });
   return { g, tb, hit: false, cachePath: cpath };
 }
 

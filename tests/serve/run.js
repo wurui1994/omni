@@ -108,6 +108,60 @@ try {
   const bad = await post('/api/shell', { line: 'rm -rf /' });
   ok('/api/shell 拒绝不认的命令', bad.json.code === 127);
 
+  /* ---- 虚拟文件系统：编辑与新建（`PUT /api/file`）----
+   *
+   * 钉住的是"用户改了有没有效果"那一整条：写得进、读得回、进得了树、**跑的是改过的那一份**。
+   * 从前 `run()` 里 `S.text` 被 input 处理函数顺手改了，于是 dirty 永远为假 ——
+   * 改动根本没递出去。那种 bug 只有"改完再跑，答案跟着变"这一条量得出来。
+   */
+  const put = async (p, b) => {
+    const r = await fetch(s.url + p, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b),
+    });
+    return { code: r.status, json: await r.json() };
+  };
+  const probe = 'ext/go/examples/__probe.go';
+  const src1 = 'package main\n\nfunc main() { println(6 * 7) }\n';
+  const w1 = await put('/api/file', { path: probe, text: src1 });
+  ok('PUT /api/file 新建', w1.code === 200 && w1.json.ok === true);
+
+  const back = JSON.parse((await get(`/api/file?path=${encodeURIComponent(probe)}`)).text);
+  ok('读回来是改过的那一份', back.text === src1 && back.dirty === true);
+
+  const t2 = JSON.parse((await get('/api/tree')).text);
+  const p2 = [];
+  const coll2 = (n) => { if (n.kind === 'file') p2.push(n.path); else (n.children ?? []).forEach(coll2); };
+  t2.roots.forEach(coll2);
+  ok('新建的进了目录树', p2.includes(probe));
+
+  const r1 = await post('/api/run', { path: probe });
+  ok('跑的是改过的那一份', (r1.json.stdout ?? '').trim() === '42', JSON.stringify(r1.json.stdout));
+
+  await put('/api/file', { path: probe, text: 'package main\n\nfunc main() { println(1 + 1) }\n' });
+  const r2 = await post('/api/run', { path: probe });
+  ok('改完再跑答案跟着变', (r2.json.stdout ?? '').trim() === '2', JSON.stringify(r2.json.stdout));
+
+  const r3 = await post('/api/run', { path: probe, text: 'package main\n\nfunc main() { println(9 * 9) }\n' });
+  ok('实时模式那一支（body.text）', (r3.json.stdout ?? '').trim() === '81', JSON.stringify(r3.json.stdout));
+
+  ok('PUT 拦路径穿越', (await put('/api/file', { path: '../evil.txt', text: 'x' })).code === 400);
+
+  /* ---- 热工人：第二趟必须**明显**快（这一层"实时性"的全部）---- */
+  {
+    await post('/api/run', { path: cse });
+    const a1 = Date.now();
+    await post('/api/run', { path: cse });
+    const warm = Date.now() - a1;
+    const h2 = JSON.parse((await get('/api/health')).text);
+    ok('热工人在干活（/api/health 报得出来）',
+      h2.pool !== undefined && h2.pool.served > 0, JSON.stringify(h2.pool));
+    /* 冷那一条量出来 180~300ms（node 启动 110ms + 读语法表 15ms + 真跑）。
+       热的第二趟在这台机器上是 8~19ms —— 判据卡 150ms：既证明"热了"，
+       又不会因为机器忙而假红。 */
+    ok('热的那一趟 < 150ms', warm < 150, `${warm}ms`);
+    ok('热的那一趟走的是工人', r2.json.via === 'warm', String(r2.json.via));
+  }
+
   /* ---- --client 那一条：经服务跑与本地跑，stdout 逐字节相同、退出码相同 ---- */
   {
     const clientEntry = join(root, 'src', 'client.js');

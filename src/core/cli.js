@@ -6340,22 +6340,42 @@ function replacer(key, value) {
   return value;
 }
 
-try {
-  /* 超时那一格摆在这儿（而不是 `run` 那二十来个 return 上）：这是所有腿唯一的汇合点，
-   * 于是「按了 --timeout 却没人报告」不可能漏掉一条。见 armRunTimeout。 */
-  const st = main(procArgs());
-  /* `--profile-out x.svg` 的第二步（第一百四十七片）：把运行时落下的折叠栈摊成火焰图。
-   * **同一个理由摆在这儿** —— run / build / plugins 三条腿都从这儿出去，写在这儿一处
-   * 就不会有「哪条腿忘了渲染」。渲染是纯字符串计算（`cli/flame.js`）。 */
-  profFoldedFinish();
-  profSvgFinish();
-  /* 总账最后印（`-v`）：它要把上面所有步骤都算进去，所以只能在这儿 —— 与 profile 那两格
-     同一个理由（所有腿唯一的汇合点）。 */
-  vTotal();
-  setExitCode(runTimedOut() ? 124 : st);
-} catch (e) {
-  if (e instanceof OmniError) {
-    stderr(e.message + '\n');
-    setExitCode(1);
-  } else throw e;
+/**
+ * 跑一趟命令，回**退出码**（不设进程的退出码 —— 那是进程级的事，见下面那一段）。
+ *
+ * 为什么单开这一格（ADR-0018 分片 3 的欠账，`src/cli.js` 的头注记着）：这一份从前
+ * 既是驱动又是入口（文件末尾自己 `main(procArgs())`），于是**不能被 import 而不执行**。
+ * 收成一格函数之后，`omni serve` 那侧的**热工人**就能在进程内一趟接一趟地跑
+ * （`src/core/studio/worker.js`）—— 省掉每请求 110ms 的 node 启动 + 装编译器。
+ *
+ * 三件收尾摆在这儿而不是 `main` 的二十来个 return 上：这是所有腿唯一的汇合点，
+ * 于是「哪条腿忘了渲染 / 忘了报超时」不可能漏掉一条。
+ */
+export function runCli(argv) {
+  try {
+    const st = main(argv);
+    /* `--profile-out x.svg` 的第二步（第一百四十七片）：把运行时落下的折叠栈摊成火焰图。
+     * 渲染是纯字符串计算（`cli/flame.js`）。 */
+    profFoldedFinish();
+    profSvgFinish();
+    /* 总账最后印（`-v`）：它要把上面所有步骤都算进去。 */
+    vTotal();
+    return runTimedOut() ? 124 : st;
+  } catch (e) {
+    if (e instanceof OmniError) {
+      stderr(`${e.message}\n`);
+      return 1;
+    }
+    throw e;
+  }
+}
+
+/* **当库用的时候不自己跑**（`OMNI_AS_LIB=1`）。
+ *
+ * 为什么是一格环境变量而不是"我是不是入口"那种判断：后者要 `import.meta`，而这一份
+ * 要能被自己编译（`import.meta` 不在那个子集里，量出来是一条硬错）。而且直接
+ * `node src/core/cli.js …` 的调用方有八处（tests/glr、tests/wat、tests/cabi、
+ * tests/bootstrap 那条自举链…）—— 它们一个字都不用改。 */
+if (env('OMNI_AS_LIB') !== '1') {
+  setExitCode(runCli(procArgs()));
 }

@@ -24,7 +24,6 @@ import { langOf, safePath, buildTree, shellToArgv } from '../core/studio/shared.
 import {
   mountFiles, readText, writeText, exists, takeOutput, setArgs, setExitCode, exitCode,
 } from '../core/host/browser.js';
-
 /** 图那一条腿吃得下的后缀（`borrowedExts()` 是权威，不在这儿抄第二张表）。 */
 let GRAPH_EXTS = null;
 function graphExts() {
@@ -82,6 +81,7 @@ function runArgv(argv) {
  */
 async function localApi(path, init) {
   const body = init !== undefined && init.body !== undefined ? JSON.parse(init.body) : {};
+  const method = (init !== undefined && init.method) || 'GET';
   const q = path.indexOf('?');
   const route = q < 0 ? path : path.slice(0, q);
   const params = new URLSearchParams(q < 0 ? '' : path.slice(q + 1));
@@ -90,9 +90,17 @@ async function localApi(path, init) {
     return { ok: true, version: '0.1', legs: ['graph'], standalone: true };
   }
   if (route === '/api/tree') return buildTree('');
+  if (route === '/api/file' && method === 'PUT') {
+    /* **保存 / 新建**：写进内存里那张表。刷新页面就没了 —— 单体 HTML 没有别的落点，
+       而"会话内还在"已经够用（设计文档 §5 的"写是会话内的"那一档）。 */
+    const rel = body.path;
+    if (typeof rel !== 'string' || rel.length === 0) throw new Error('要 path');
+    writeText(rel, body.text ?? '');
+    return { ok: true, path: rel };
+  }
   if (route === '/api/file') {
     const rel = params.get('path');
-    if (safePath('', rel) === null) throw new Error(`${rel} 不在白名单里`);
+    if (safePath('', rel) === null && !exists(rel)) throw new Error(`${rel} 不在白名单里`);
     return { path: rel, lang: langOf(rel), text: readText(rel) };
   }
   if (route === '/api/run' || route === '/api/emit') {

@@ -22,6 +22,7 @@ import { join, dirname } from './host/path.js';
 /* 白名单、后缀表、路径闸、目录树、等效命令 —— 那五样**与单体 HTML 共用**
    （`src/studio/browser-main.js` 从同一份拿），所以住在 `studio/shared.js`。 */
 import { extOf, langOf, safePath, buildTree, shellToArgv, EQUIV } from './studio/shared.js';
+import { Pool, warmable } from './studio/pool.js';
 
 /* 老调用方（`tests/serve/run.js`）照旧从这儿拿这三格：服务是它们的一个入口。 */
 export { safePath, buildTree, shellToArgv };
@@ -84,8 +85,20 @@ function readBody(req) {
   });
 }
 
-/** 跑一条 omni 命令（子进程，带时限）。 */
-function runOmni(root, argv, timeoutS) {
+/**
+ * 跑一条 omni 命令。**先问热工人池，池子接不住再起冷子进程。**
+ *
+ * 账在 `studio/worker.js` 的头注里：一趟 180ms 里 110ms 是 node 启动 + 装编译器，
+ * 与这份源码半点关系都没有。热起来之后同一门语言第二趟 2~11ms。
+ *
+ * 冷那一条一个字都没动 —— 它是**退路**：`build` / `c link` 那几格要 spawn cc、要写盘，
+ * 池子不接；池子起不来时也退到这儿。于是"快"是加法，不是替换。
+ */
+async function runOmni(root, argv, timeoutS, pool) {
+  if (pool !== undefined && pool !== null) {
+    const hot = await pool.run(argv, timeoutS ?? 30);
+    if (hot !== null) return { ...hot, via: 'warm' };
+  }
   const cp = nodeMod('node:child_process');
   const cli = join(root, 'src', 'cli.js');
   try {
@@ -97,42 +110,127 @@ function runOmni(root, argv, timeoutS) {
       stdio: ['ignore', 'pipe', 'pipe'],
       maxBuffer: 10 * 1024 * 1024,
     });
-    return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? (r.signal ? 124 : 1) };
+    return {
+      stdout: r.stdout ?? '',
+      stderr: r.stderr ?? '',
+      code: r.status ?? (r.signal ? 124 : 1),
+      via: 'cold',
+    };
   } catch (e) {
-    return { stdout: '', stderr: String(e.message), code: 1 };
+    return { stdout: '', stderr: String(e.message), code: 1, via: 'cold' };
   }
+}
+
+/* ------------------------------------------------- 虚拟文件系统的"改过的那一层"
+ *
+ * 用户在 Studio 里改过的、以及新建的文件，**留在这一层**（会话内）：切走再切回来还在，
+ * 新建的进目录树。仓库里一个字节都不动 —— 那是别人的工作树，编辑器不该往里写。
+ *
+ * 两处落点，一处是真相、一处是给编译器看的：
+ *   * `EDITS`（内存）：`/api/file` 与 `/api/tree` 读它 —— 用户看到的就是这一份。
+ *   * **镜像目录** `.omni-cache/work/studio-vfs/<同样的相对路径>`：编译器只会读真磁盘，
+ *     所以跑之前把那一格写下去，再让它编镜像里那一份。
+ *
+ * 为什么镜像要**保持相对路径**：`import` 同目录的兄弟文件、`--pkgs` 那几个目录名都按
+ * 路径算。代价写在明处：镜像里只有**改过的**那几份，所以一份改过的文件若 import 了
+ * 没改过的兄弟，那个兄弟在镜像里不在 —— 例子都是单文件，这一条够用；不够用的那天
+ * 就得整棵 copy-on-write，那是另一刀。
+ */
+const EDITS = new Map();
+
+/** 落一格编辑（`PUT /api/file`）。回真正给编译器看的那条绝对路径。 */
+function putEdit(root, rel, text) {
+  const fs = nodeMod('node:fs');
+  EDITS.set(rel, text);
+  const abs = join(root, '.omni-cache', 'work', 'studio-vfs', rel);
+  fs.mkdirSync(abs.slice(0, abs.lastIndexOf('/')), { recursive: true });
+  fs.writeFileSync(abs, text, 'utf8');
+  return abs;
+}
+
+/** 这条路径改过吗？改过就回镜像里那条绝对路径。 */
+function editedAbs(root, rel) {
+  if (!EDITS.has(rel)) return null;
+  return join(root, '.omni-cache', 'work', 'studio-vfs', rel);
+}
+
+/**
+ * 把"新建的那几份"并进目录树。
+ *
+ * 只并**树里还没有的**路径（改过的那些本来就在树上）。并的时候按 `/` 一层层往下找，
+ * 缺哪一层就补一格 `dir` —— 于是新建 `docs/notes/my.md` 时 `notes/` 那一层自己会出现。
+ */
+function mergeEdits(tree) {
+  const known = new Set();
+  const walkKnown = (n) => {
+    if (n.kind === 'file') { known.add(n.path); return; }
+    for (const k of n.children ?? []) walkKnown(k);
+  };
+  tree.roots.forEach(walkKnown);
+  const fresh = [...EDITS.keys()].filter((p) => !known.has(p));
+  if (fresh.length === 0) return tree;
+  /* 深拷一层：并进去的东西不许污染缓存着的那棵树。 */
+  const out = { roots: tree.roots.map((r) => ({ ...r, children: [...(r.children ?? [])] })) };
+  for (const rel of fresh.sort()) {
+    const segs = rel.split('/');
+    /* 头一段决定挂在哪棵根上（`docs` / `ext` / `tests`）；不认的挂到第一棵根下的"新建"。 */
+    let node = out.roots.find((r) => r.path === segs[0]);
+    if (node === undefined) {
+      node = out.roots.find((r) => r.path === '__new');
+      if (node === undefined) {
+        node = { name: '新建', path: '__new', kind: 'dir', children: [] };
+        out.roots.unshift(node);
+      }
+      node.children.push({ name: segs[segs.length - 1], path: rel, kind: 'file', lang: langOf(rel), dirty: true });
+      continue;
+    }
+    for (let i = 1; i < segs.length - 1; i += 1) {
+      const sub = segs.slice(0, i + 1).join('/');
+      let nx = (node.children ?? []).find((c) => c.path === sub && c.kind === 'dir');
+      if (nx === undefined) {
+        nx = { name: segs[i], path: sub, kind: 'dir', children: [] };
+        node.children = [...(node.children ?? []), nx];
+      } else {
+        nx = { ...nx, children: [...(nx.children ?? [])] };
+        node.children = (node.children ?? []).map((c) => (c.path === sub ? nx : c));
+      }
+      node = nx;
+    }
+    node.children = [...(node.children ?? []),
+      { name: segs[segs.length - 1], path: rel, kind: 'file', lang: langOf(rel), dirty: true }];
+  }
+  return out;
 }
 
 /**
  * **跑一趟请求**。
  *
- * 如果 body 里有 `text`（编辑器改过的源码），先落一格暂存文件再编。暂存走
- * `host/cache.js` 的 `scratchDir`：用完就该没了。
+ * 三种来源，按这个次序：
+ *   1. `body.argv` —— 整条命令递过来（`omni --client`）。一个字都不改地跑。
+ *   2. `body.text` —— 编辑器现在的内容。落进 `EDITS` + 镜像，再编镜像里那一份。
+ *      **顺带把它记下来**：于是"跑一趟"本身就是一次保存，切走再回来还在。
+ *   3. `body.path` —— 树里那一份（改过的话走镜像）。
  */
-function runRequest(root, body, verb, extra) {
-  const fs = nodeMod('node:fs');
-  const p = join(root, '.omni-cache', 'work', 'serve-tmp');
+async function runRequest(root, body, verb, extra, pool) {
   const lang = body.lang ?? extOf(body.path ?? '').slice(1);
   let path = body.path;
-  /* **整条 argv 递过来那一档**（`omni --client …` 走的就是这条）：一个字都不改地跑。
-     这一条是"服务面是同一个编译器的另一个入口"那句话的落点 —— 服务这侧不重拼命令。 */
   if (Array.isArray(body.argv) && body.argv.length > 0) {
-    return runOmni(root, body.argv, body.timeout ?? 30);
+    return runOmni(root, body.argv, body.timeout ?? 30, pool);
   }
   if (body.text !== undefined && body.text !== null) {
-    /* 改过的源码落暂存（后缀要对 —— 前端按后缀选）。 */
-    try { fs.mkdirSync(p, { recursive: true }); } catch { /* 已存在 */ }
-    const ext = body.path ? extOf(body.path) : (lang === 'go' ? '.go' : `.${lang}`);
-    const tmp = join(p, `live${ext}`);
-    fs.writeFileSync(tmp, body.text, 'utf8');
-    path = tmp;
+    const rel = body.path && safePath(root, body.path) !== null
+      ? body.path
+      : `__new/live.${lang || 'txt'}`;
+    path = putEdit(root, rel, body.text);
+  } else if (typeof path === 'string') {
+    path = editedAbs(root, path) ?? path;
   }
   if (!path) return { stdout: '', stderr: 'path 和 text 至少给一格', code: 1 };
   const argv = extra !== undefined
     ? [verb, extra, path, '-v']
     : [verb, path, '-v'];
   if (body.pkgs) argv.push('--pkgs', body.pkgs);
-  return runOmni(root, argv, body.timeout ?? 30);
+  return runOmni(root, argv, body.timeout ?? 30, pool);
 }
 
 
@@ -149,7 +247,9 @@ export function startServer(opts) {
   const port = opts.port ?? 0;
   const studioDir = join(root, 'src', 'studio');
   let tree = null;
-  const getTree = () => { if (tree === null) tree = buildTree(root); return tree; };
+  const getTree = () => { if (tree === null) tree = buildTree(root); return mergeEdits(tree); };
+  /** 热工人池（`opts.pool === false` 时不建——判据那一趟是一次性的，不需要热）。 */
+  const pool = opts.pool === false ? null : new Pool(root);
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
@@ -157,13 +257,33 @@ export function startServer(opts) {
     try {
       /* ---- API ---- */
       if (path === '/api/health') {
-        return json(res, 200, { ok: true, version: '0.1', legs: LEGS });
+        return json(res, 200, {
+          ok: true, version: '0.1', legs: LEGS,
+          ...(pool !== null ? { pool: pool.stat() } : {}),
+        });
       }
       if (path === '/api/tree') {
         return json(res, 200, getTree());
       }
+      /* **保存 / 新建**（`PUT /api/file`）：写进虚拟文件系统。
+         这一支要在下面那格 GET 之前 —— 那一格不看 method。 */
+      if (path === '/api/file' && req.method === 'PUT') {
+        const body = JSON.parse(await readBody(req));
+        const rel = body.path;
+        if (typeof rel !== 'string' || rel.length === 0) return json(res, 400, { error: '要 path' });
+        if (rel.startsWith('/') || rel.includes('..') || rel.includes('\0')) {
+          return json(res, 400, { error: '路径不合法' });
+        }
+        putEdit(root, rel, body.text ?? '');
+        tree = null;   /* 下次 getTree 重建（新建的文件要进树）。 */
+        return json(res, 200, { ok: true, path: rel });
+      }
       if (path === '/api/file') {
         const rel = url.searchParams.get('path');
+        /* 改过的那一份优先（用户看到的是自己改过的，不是仓库里的）。 */
+        if (EDITS.has(rel)) {
+          return json(res, 200, { path: rel, lang: langOf(rel), text: EDITS.get(rel), dirty: true });
+        }
         const abs = safePath(root, rel);
         if (abs === null) return json(res, 404, { error: 'not found' });
         const text = readText(abs);
@@ -171,12 +291,12 @@ export function startServer(opts) {
       }
       if (path === '/api/run' && req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
-        const r = runRequest(root, body, 'run');
+        const r = await runRequest(root, body, 'run', undefined, pool);
         return json(res, 200, r);
       }
       if (path === '/api/emit' && req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
-        const r = runRequest(root, body, 'emit', body.format ?? 'ast');
+        const r = await runRequest(root, body, 'emit', body.format ?? 'ast', pool);
         return json(res, 200, r);
       }
       if (path === '/api/shell' && req.method === 'POST') {
@@ -192,14 +312,14 @@ export function startServer(opts) {
             code: 127,
           });
         }
-        const r = runOmni(root, argv, body.timeout ?? 30);
+        const r = await runOmni(root, argv, body.timeout ?? 30, pool);
         return json(res, 200, r);
       }
       /* CORS preflight */
       if (req.method === 'OPTIONS') {
         res.writeHead(204, {
           'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
           'Access-Control-Allow-Headers': 'Content-Type',
         });
         return res.end();
@@ -225,10 +345,15 @@ export function startServer(opts) {
       const addr = server.address();
       ok({
         server,
+        pool,
         port: addr.port,
         host: addr.address,
         url: `http://${addr.address}:${addr.port}`,
-        close: () => new Promise((done) => server.close(done)),
+        /* 停的时候**先收工人**：那几格是子进程，不收的话判据那一趟跑完 node 不肯退。 */
+        close: () => {
+          if (pool !== null) pool.stop();
+          return new Promise((done) => server.close(done));
+        },
       });
     });
   });
@@ -250,6 +375,13 @@ export async function cmdServe(rest) {
   stderr(`omni serve: ${s.url}\n`);
   if (rest.includes('--open')) {
     try { nodeMod('node:child_process').execSync(`open ${s.url}`); } catch { /* */ }
+  }
+  /* **预热**：现在就起一格工人（装编译器那 110ms 现在付，别让第一格请求付）。
+     不 await —— 服务这就该能收请求了，热不热是它自己的事。 */
+  if (s.pool !== null) {
+    s.pool.warm().then(() => {
+      stderr(`omni serve: 热工人就绪（池子 ${s.pool.size} 格；OMNI_STUDIO_WORKERS 可改）\n`);
+    });
   }
   /* 常驻 —— 收到 SIGINT / SIGTERM 时优雅停。 */
   const stop = () => { s.close().then(() => process.exit(0)); };

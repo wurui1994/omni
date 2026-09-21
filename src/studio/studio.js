@@ -175,6 +175,10 @@ const api = async (p, init) => {
 const post = (p, body) => api(p, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
+/** 保存 / 新建走 PUT（服务那侧按 method 分支：GET 是读、PUT 是写）。 */
+const put = (p, body) => api(p, {
+  method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+});
 
 /* ---------------------------------------------------------------- 目录树 */
 
@@ -183,13 +187,26 @@ function countFiles(n) {
   return (n.children ?? []).reduce((a, k) => a + countFiles(k), 0);
 }
 
+/** 展开那个三角形。SVG 而不是 `▸` —— 字形三角在各字体里大小差得离谱，也点不着。 */
+function caretSvg() {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', '0 0 10 10');
+  const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  p.setAttribute('d', 'M3 1.5 L7.5 5 L3 8.5 Z');
+  s.append(p);
+  return s;
+}
+
 function renderNode(n, depth) {
   const box = el('div', 'node');
   if (depth === 0) box.classList.add('open');
-  const row = el('div', `row ${n.kind}`);
-  row.append(el('span', 'caret', n.kind === 'dir' ? '\u25b8' : ''));
+  const row = el('div', `row ${n.kind}${n.dirty === true ? ' dirty' : ''}`);
+  const caret = el('span', 'caret');
+  if (n.kind === 'dir') caret.append(caretSvg());
+  row.append(caret);
   row.append(el('span', 'nm', n.name));
   if (n.kind === 'dir') row.append(el('span', 'cnt', String(countFiles(n))));
+  row.title = n.path;
   box.append(row);
   if (n.kind === 'dir') {
     const kids = el('div', 'kids');
@@ -226,24 +243,63 @@ function applyFilter(q) {
 
 /* ---------------------------------------------------------------- 代码区 */
 
-function paint() {
-  $('#view').firstElementChild.innerHTML = highlight(S.text, S.lang);
+/**
+ * 重画高亮那一层。
+ *
+ * **实参是"现在编辑器里的那份文本"**，不是 `S.text`。两者故意分开：
+ * `S.text` 是"上一次与服务对齐过的内容"，`run()` 拿它判 dirty；高亮要画的是**当下**。
+ * 从前这儿读 `S.text` 而 `input` 处理函数顺手把 `S.text` 也改了 —— 于是 dirty 永远为假，
+ * **用户改了没有效果**（改过的源码根本没递出去）。那是两个 bug 共用一格变量的后果。
+ *
+ * 末尾补一格 `\n`：`<pre>` 会把最后一个换行吞掉，而 textarea 不会 —— 少了它，
+ * 在文件末尾敲回车时高亮层比光标短一行（"输入错位"里最常见的那一种）。
+ */
+function paint(text) {
+  $('#view').firstElementChild.innerHTML = `${highlight(text, S.lang)}\n`;
 }
 
+/**
+ * 打开一份文件。
+ *
+ * **切之前先把当前这份存下来**（改过的话）：用户切走再切回来，改动还在 —— 那是
+ * "虚拟文件系统"这四个字的最低要求。存去哪见 `serve.js` 的 `EDITS`（仓库里一个字节不动）。
+ */
 async function openFile(path, row) {
+  await stash();
   for (const r of $('#tree-body').querySelectorAll('.row.on')) r.classList.remove('on');
   if (row) row.classList.add('on');
-  const f = await api(`/api/file?path=${encodeURIComponent(path)}`);
+  setStatus('读…', '');
+  let f = null;
+  try {
+    f = await api(`/api/file?path=${encodeURIComponent(path)}`);
+  } catch (e) {
+    setStatus('读不到', 'bad');
+    $('#stderr').textContent = `${path}：${e.message ?? e}`;
+    return;
+  }
   S.path = f.path; S.lang = f.lang; S.text = f.text;
   $('#cur-path').textContent = f.path;
   $('#cur-lang').textContent = f.lang === 'text' ? '' : f.lang;
   $('#edit').value = f.text;
-  paint();
+  paint(f.text);
+  $('#view').scrollTop = 0; $('#edit').scrollTop = 0;
   $('#btn-run').disabled = !RUNNABLE.has(f.lang);
   $('#tree').classList.remove('open');
-  setStatus('', '');
+  setStatus(f.dirty === true ? '改过' : '', '');
   $('#stdout').textContent = ''; $('#stderr').textContent = '';
   $('#stages').textContent = '';
+  /* 打开就跑一趟（能跑的那几门）—— 用户要的是"打开新例子就看到结果"。
+     热工人那侧一趟 8~19ms，所以这一下不用犹豫。 */
+  if (RUNNABLE.has(f.lang)) run();
+}
+
+/** 把编辑器里改过的内容存进虚拟文件系统（没改就什么都不做）。 */
+async function stash() {
+  if (S.path === null) return;
+  const now = $('#edit').value;
+  if (now === S.text) return;
+  try { await put('/api/file', { path: S.path, text: now }); S.text = now; }
+  catch { /* 存不上不拦着用户切文件 */ }
 }
 
 /** 能跑的那几门（别的只展示 —— 比如 `.md`）。 */
@@ -273,9 +329,17 @@ async function run() {
   const t0 = performance.now();
   const dirty = $('#edit').value !== S.text;
   try {
+    /* **跑之前先保存**：编辑过的内容落进虚拟文件系统（`PUT /api/file`），于是切走再回来还在。
+       不另写一格"save" —— "跑一趟"本身就是一次保存，用户不用操心两件事。 */
+    const currentText = $('#edit').value;
+    if (dirty && S.path !== null) {
+      try { await put('/api/file', { path: S.path, text: currentText }); }
+      catch { /* 保存失败不阻塞跑 —— 下面 body.text 那一支会递过去 */ }
+      S.text = currentText;
+    }
     const r = await post('/api/run', {
       path: S.path,
-      text: dirty ? $('#edit').value : undefined,
+      text: dirty ? currentText : undefined,
       lang: S.lang,
       verbose: true,
     });
@@ -409,15 +473,21 @@ function initTabs() {
 function initEditor() {
   const ta = $('#edit');
   let timer = null;
+  /** 正在用输入法拼字（中文/日文）—— 那期间别去打扰它。 */
+  let composing = false;
+  ta.addEventListener('compositionstart', () => { composing = true; });
+  ta.addEventListener('compositionend', () => { composing = false; paint(ta.value); });
   ta.addEventListener('input', () => {
-    S.text = ta.value;
-    paint();
-    if (!$('#live').checked) return;
-    /* 防抖 250ms（设计文档 §4.4）。 */
+    /* **画的是 `ta.value`，不是 `S.text`** —— 见 `paint` 的头注。 */
+    paint(ta.value);
+    if (!$('#live').checked || composing) return;
+    /* 防抖 250ms（设计文档 §4.4）。热工人那侧一趟 8~19ms，所以这 250ms 现在是**真的**
+       在等用户停手，而不是在等 node 启动。 */
     clearTimeout(timer);
     timer = setTimeout(run, 250);
   });
-  /* 滚动要同步 —— 高亮那一层与 textarea 是叠在一起的两块。 */
+  /* 滚动要同步 —— 高亮那一层与 textarea 是叠在一起的两块，而**只有 textarea 会滚**
+     （`.code-body` 与 `#view` 都不滚，见 studio.css 里那段账）。 */
   ta.addEventListener('scroll', () => {
     $('#view').scrollTop = ta.scrollTop;
     $('#view').scrollLeft = ta.scrollLeft;
@@ -425,15 +495,21 @@ function initEditor() {
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Tab') { e.preventDefault(); insert(ta, '  '); }
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+    /* **Cmd+S / Ctrl+S**：存进虚拟文件系统。 */
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+      e.preventDefault();
+      stash().then(() => setStatus('已保存', ''));
+    }
   });
+  /* 离开页面之前存一把（切标签、关窗口）。 */
+  window.addEventListener('visibilitychange', () => { if (document.hidden) stash(); });
 }
 
 function insert(ta, s) {
   const a = ta.selectionStart;
   ta.value = ta.value.slice(0, a) + s + ta.value.slice(ta.selectionEnd);
   ta.selectionStart = ta.selectionEnd = a + s.length;
-  S.text = ta.value;
-  paint();
+  paint(ta.value);
 }
 
 async function main() {
@@ -443,6 +519,18 @@ async function main() {
   $('#btn-run').onclick = run;
   $('#btn-tree').onclick = () => $('#tree').classList.toggle('open');
   $('#filter').oninput = (e) => applyFilter(e.target.value);
+  /* **新建文件**：原生 prompt 就够（modal 会带来一堆状态）。填相对仓库根的路径，
+     写进虚拟文件系统（仓库里一个字节不动），树重建，打开它。 */
+  $('#btn-new').onclick = async () => {
+    const p = prompt('新文件路径（相对仓库根，如 docs/notes/my.md 或 my.go）');
+    if (!p || p.startsWith('/') || p.includes('..')) return;
+    try {
+      await put('/api/file', { path: p, text: '' });
+      await loadTree();
+      await openFile(p);
+      $('#edit').focus();
+    } catch (e) { setStatus(`新建失败：${e.message ?? e}`, 'bad'); }
+  };
   $('#sh').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     const v = e.target.value;
