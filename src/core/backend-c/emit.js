@@ -720,6 +720,26 @@ class CEmitter {
     return out;
   }
 
+  /**
+   * 零值构造 / 变体构造 / 类的 new 的**存储类**。
+   *
+   * 按模块那一档不能是 `static`：`mod.imports` 里带着 `struct` / `class` 那几条 ——
+   * 别家构造这个类型时调的就是它们，而 `static` 的跨 TU 调不到（症状是链接期
+   * `符号 'omni_new_S_P' 没有定义`）。单体那条路照旧 `static`（一份文件里自足）。
+   */
+  aggLink() {
+    /* **现在还只能是 `static`**（试过去掉，当场 `elf: 符号 '_omni_new_C_file' 定义了两次`）：
+     * 按模块那一档的产物是"一棵合并的树切开"，模板（零值构造那一族）只发在**类型的家**，
+     * 而别家要调得到 —— 于是它住在那一家的 `.h` 里，靠 `static` 让每个 include 它的 TU
+     * 各有一份无状态的副本。去掉 `static` 就变成"每个 include 它的 TU 一份定义"。
+     *
+     * 真正能去掉它的是**跨文件模块化**那条路（§12 末节）：那时每家自己的 `mod` 里有它
+     * 用到的类型，模板由各家自足发在自己的 `.c` 里、照旧 `static`，而 `.h` 只剩接口。
+     * 也就是说这一格到时候**也不需要非 static** —— 结论是"模板永远 static，
+     * 别把它放进 `.h`"。 */
+    return 'static ';
+  }
+
   /** 发函数体时记下"叫到了谁"（原型那一段按它裁；`curUse` 那一格是切文件算 include 用的）。 */
   useFn(name) {
     if (typeof name === 'string') this.usedFns.add(name);
@@ -1237,7 +1257,7 @@ class CEmitter {
 
   /** 零值 = 第一个变体 + 各载荷字段的零值（与 JS 后端的 $new_E 对齐） */
   enumNew(e) {
-    this.line(`static e_${e.name} omni_new_E_${e.name}(void) {`);
+    this.line(`${this.aggLink()}e_${e.name} omni_new_E_${e.name}(void) {`);
     this.indent++;
     this.line(`e_${e.name} v;`);
     this.line('v.tag = INT64_C(0);');
@@ -1256,7 +1276,7 @@ class CEmitter {
   enumMakers(e) {
     for (const [i, v] of e.variants.entries()) {
       const ps = v.fields.map((f) => `${cTypeName(f.type)} f_${f.name}`);
-      this.line(`static e_${e.name} omni_mk_E_${e.name}_${v.name}(${ps.length ? ps.join(', ') : 'void'}) {`);
+      this.line(`${this.aggLink()}e_${e.name} omni_mk_E_${e.name}_${v.name}(${ps.length ? ps.join(', ') : 'void'}) {`);
       this.indent++;
       this.line(`e_${e.name} v;`);
       this.line(`v.tag = INT64_C(${i});`);
@@ -1695,7 +1715,7 @@ class CEmitter {
 
   /** 零值构造：容器字段必须是**新建的空容器**，不能是 NULL —— 与 JS 后端的 $new_S 对齐 */
   structNew(s) {
-    this.line(`static s_${s.name} omni_new_S_${s.name}(void) {`);
+    this.line(`${this.aggLink()}s_${s.name} omni_new_S_${s.name}(void) {`);
     this.indent++;
     this.line(`s_${s.name} v;`);
     for (const f of s.fields) {
@@ -1721,7 +1741,7 @@ class CEmitter {
   }
 
   classNew(c) {
-    this.line(`static ct_${c.name} omni_new_C_${c.name}(void) {`);
+    this.line(`${this.aggLink()}ct_${c.name} omni_new_C_${c.name}(void) {`);
     this.indent++;
     this.line(`ct_${c.name} o = (ct_${c.name})omni_alloc(sizeof(struct ct_${c.name}_s));`);
     for (const f of c.fields) this.line(`o->f_${f.name} = ${this.zeroExpr(f.type)};`);

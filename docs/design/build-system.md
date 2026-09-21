@@ -485,14 +485,19 @@ C 与 JS 在这一格有个**真差别**：JS 只要名字，C 还要**类型**�
 外部类型在 `mod.imports`（kind `struct`/`class`）。C 腿正好对上：外部类型的完整定义
 从那家的 `.h` 来，本家一个字都不重发。
 
-于是还要改的那两格（都在 emit.js，按 `perMod` 分）：
+**试过一格，结论反过来了（值得记）**：我以为"零值构造那一族按模块那一档要去掉 `static`"，
+改完当场 `elf: 符号 '_omni_new_C_file' 定义了两次` —— 因为现在的产物里那些模板住在
+**`.h`** 里（`asy_builtins.h`），靠 `static` 让每个 include 它的 TU 各有一份无状态副本。
+去掉 `static` 就变成"每个 include 的 TU 一份定义"。
 
-- **零值构造 / 类的 new（`omni_new_S_X`、`omni_new_C_X`）现在发成 `static`** ——
-  按模块那一档得去掉 `static`（别家会调它，`mod.imports` 里就是那几条），
-  原型进它那一家的 `.h`。
-- **容器 / 向量的 typedef 要各带一格自己的 guard**（`#ifndef OMNI_D_omni_list_int`）：
-  两家都用 `list<int>` 时两份 `.h` 里都会有那一行，而 C99 不允许重复 typedef。
-  这是标准手法，不需要公用头。
+而跨文件模块化那条路上**也不需要非 static**：那时每家自己的 `mod` 里有它用到的类型，
+模板由各家自足发在自己的 `.c` 里、照旧 `static`。所以结论是一句话：
+**模板永远 `static`，别把它放进 `.h`** —— `.h` 只装接口（类型 + extern 全局 + 原型）。
+（这一条已经写进 `emit.js` 的 `aggLink()` 注释里，免得下次再试一遍。）
+
+还要改的那一格：**容器 / 向量的 typedef 要各带一格自己的 guard**
+（`#ifndef OMNI_D_omni_list_int`）：两家都用 `list<int>` 时两份 `.h` 里都会有那一行，
+而 C99 不允许重复 typedef。这是标准手法，不需要公用头。
 
 判据（一格一格来，每格都能单独验）：
 1. `sx.textToMod` 单独降一段之后，`mod.imports` 非空、`mod.funcs` 里**只有本家的函数**。
