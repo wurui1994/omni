@@ -1005,6 +1005,7 @@ class CoreLowerer {
     const funcs = [];
     const mainStmts = [];
     let sawMain = false;
+    let mainUnit = '';
     // 模块级变量的零初始化就是 `(main …)` 最前面的几句赋值（第二十四刀）。放在这一层
     // 而不是让六个后端各写一份"这个类型的零长什么样"：零值节点 OIR 里现成（zeroValue），
     // 而后端只要会存取一个全局就够。顺序是声明序，所以两次降级出来的文本一样。
@@ -1038,7 +1039,10 @@ class CoreLowerer {
         // 掉出函数体：非 void 补一个零值 return，与 WAT 前端同一处理（那边也是这样）
         if (d.ret !== VOID) body.push({ kind: 'Return', value: zeroValue(d.ret) });
         else body.push({ kind: 'Return', value: null });
-        funcs.push({ name: d.name, mangled: d.mangled, ret: d.ret, params: d.params, body: { kind: 'Block', stmts: body } });
+        funcs.push({ name: d.name, mangled: d.mangled, ret: d.ret, params: d.params,
+          /* 它来自哪个模块（`resolveModules` 在节点上留的那一格）—— C 那条腿按它切文件。 */
+          file: typeof f.unit === 'string' ? f.unit : '',
+          body: { kind: 'Block', stmts: body } });
         continue;
       }
       if (h === 'kernel') {
@@ -1053,7 +1057,9 @@ class CoreLowerer {
         body.push({ kind: 'Return', value: null });
         // kernel 在 OIR 里就是一个普通 void 函数。`kernel: true` 是给后端的**标注**，
         // 不改语义：SPIR-V 那条腿按它挑要发的函数，其余五条腿完全不看它。
-        funcs.push({ name: d.name, mangled: d.mangled, ret: VOID, params: d.params, kernel: true, body: { kind: 'Block', stmts: body } });
+        funcs.push({ name: d.name, mangled: d.mangled, ret: VOID, params: d.params, kernel: true,
+          file: typeof f.unit === 'string' ? f.unit : '',
+          body: { kind: 'Block', stmts: body } });
         continue;
       }
       if (h === 'cfn') {
@@ -1079,6 +1085,9 @@ class CoreLowerer {
       if (h === 'main') {
         if (sawMain) { this.err(f, '(main ...) 只能有一个'); continue; }
         sawMain = true;
+        /* `main` 归**它所在的那个模块**（入口那一份）—— C 那条腿按单元切文件时它得有家，
+         * 不然它落进一个叫 `unknown` 的单元里（量到过）。 */
+        if (typeof f.unit === 'string') mainUnit = f.unit;
         // REPL：入口的顶层作用域跨批留住（第一批 `(let t …)` 之后第二批还看得见 t）。
         // 运行期那边对应 InterpSession 里那个常驻 Env —— 两边必须一起在。
         if (entryName === 'omni_main') this.scopes = [new Map()];
@@ -1128,7 +1137,8 @@ class CoreLowerer {
     mainStmts.push({ kind: 'Return', value: null });
     funcs.push({
       name: entryName === 'omni_main' ? 'main' : entryName,
-      mangled: entryName, ret: VOID, params: [], body: { kind: 'Block', stmts: mainStmts },
+      mangled: entryName, ret: VOID, params: [], file: mainUnit,
+      body: { kind: 'Block', stmts: mainStmts },
     });
     // 结构体按**声明顺序**发出去：C 后端会按值嵌套关系拓扑排序，但字段里不许再有结构体，
     // 所以这里的顺序就是最终顺序 —— 同一份输入两次降出来的文本因此逐字节相同。
@@ -3378,8 +3388,15 @@ function resolveModules(nodes, diags) {
   /* **同一份文本里的模块不必合成 sig**：定义本来就在这一份里，import 在这一层的意义是
      "这个名字我看得见、而且它有主" —— 检查过了就够。合成一条 `(sig …)` 反而与真定义撞
      （量到过：`'twice' 重复定义`）。等接口从盘上来（ADR-0042 第二步）那条路才需要 sig。 */
+  /* 每条声明**带上它的家**（`unit`）：并完之后下游就看不出"这一条来自哪个模块"了，
+   * 而 C 那条腿要按单元切文件（一个源文件一份 `.c` + 一份同名 `.h`，见
+   * `docs/design/build-system.md` §12）。摆在节点上而不是另记一张表：那一条声明走到
+   * 发射那一层时手上只有它自己。 */
   for (const n of topo) {
-    for (const f of table.get(n).forms) items.push(f);
+    for (const f of table.get(n).forms) {
+      f.unit = n;
+      items.push(f);
+    }
   }
   const out = [{ kind: 'list', items: items, span: span }];
   for (const n of nodes) if (head(n) !== 'module') out.push(n);
