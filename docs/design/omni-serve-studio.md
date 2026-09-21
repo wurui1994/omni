@@ -32,13 +32,31 @@
 ```
 GET  /                      -> Studio 那一页（HTML）
 GET  /studio.css /studio.js -> css / js（原生，零构建；从 `src/studio/` 直接发）
-GET  /api/health            -> { ok, version, legs }
-GET  /api/tree              -> 虚拟文件树（见 §5.2），一次给全
-GET  /api/file?path=…       -> { path, lang, text }
-POST /api/run               -> { argv } 或 { lang, text, path, pkgs }；回 { stdout, stderr, code }
+GET  /api/health            -> { ok, version, legs, pool }
+GET  /api/tree              -> 虚拟文件树（见 §5.2），一次给全；**改过与新建的并在里头**
+GET  /api/file?path=…       -> { path, lang, text, dirty? }（改过的那一份优先）
+PUT  /api/file              -> { path, text }：**保存 / 新建**，写进虚拟文件系统
+POST /api/run               -> { argv } 或 { lang, text, path, pkgs }；回 { stdout, stderr, code, via }
 POST /api/emit              -> 同上 + `format`（ast/oir/mir/sx/js/c/…）
 POST /api/shell             -> { line }；一整行命令（含 tcc/go/nim 等效命令），回同上
 ```
+
+`via` 是 `warm`（热工人）还是 `cold`（子进程）—— Studio 的状态栏印它，"实时"这件事
+得看得见。
+
+### 虚拟文件系统是**可写的**（会话内）
+
+仓库里一个字节都不动 —— 那是别人的工作树，编辑器不该往里写。两处落点：
+
+* **`EDITS`（内存）**：`/api/file` 与 `/api/tree` 读它。用户看到的就是这一份。
+* **镜像目录** `.omni-cache/work/studio-vfs/<同样的相对路径>`：编译器只会读真磁盘，
+  所以跑之前把那一格写下去，再让它编镜像里那一份。
+
+**镜像保持相对路径**，因为 `import` 同目录的兄弟文件与 `--pkgs` 那几个目录名都按路径算。
+代价写在明处：镜像里只有**改过的**那几份，所以一份改过的文件若 import 了没改过的兄弟，
+那个兄弟在镜像里不在 —— 例子都是单文件，这一条够用；不够用的那天要整棵 copy-on-write。
+
+用户不用操心"保存"：切文件之前、`Cmd+S`、跑之前、页面隐藏时各存一把。
 
 两条约定：
 
@@ -53,17 +71,43 @@ POST /api/shell             -> { line }；一整行命令（含 tcc/go/nim 等�
 
 ### 编译器怎么被调用
 
-**每个请求一个子进程**（`node src/cli.js …`）。
+**热工人池** + 冷子进程当退路。
 
-为什么不是进程内重入：`cli.js` 有一堆模块级全局（`VERBOSE` / `SRC_SX` / `IMPORTS`
-那一族），并发重入会互相串味；子进程还顺手把"时限"与"崩了不影响服务"两件事解决了。
-代价是每趟一次 node 启动（量出来 ~100ms），实时模式那一档（250ms 防抖）吃得下。
+先量的账（一趟 `omni run x.go`，磁盘缓存全热，**180ms**）：
+
+* **110ms** 宿主 + 装编译器（node 启动 + import 两百多份 ESM）
+* **15ms** 读语法表（`glr/load.js` 磁盘缓存那一层：读一份几百 KB 的表再逐格解回来）
+* 剩下 ~50ms 才是真编译 + 真跑
+
+也就是说"每请求一个子进程"那一刀，**七成时间花在与这份源码无关的事上** ——
+而实时模式只有 250ms 预算，全被启动吃掉了。
+
+于是四刀（都在 `src/core/studio/`）：
+
+1. `core/cli.js` 导出 **`runCli(argv)`**，自己跑那一句用 `OMNI_AS_LIB=1` 闸掉 ——
+   它现在能被 import 而不执行（ADR-0018 分片 3 的欠账，这一刀还了）。
+   不用"我是不是入口"那种判断：那要 `import.meta`，而它不在自编译的子集里。
+2. `glr/load.js` 加**进程内**那层语法表缓存（键与磁盘那层一样，是语法的正文）。
+   go 每趟 15ms -> **2ms**。
+3. **`studio/worker.js`**（常驻工人）+ **`studio/pool.js`**（池子）：
+   * 协议 NDJSON；**响应走 `writeSync(1, …)`**，绕开被换成收集器的 `process.stdout.write`
+     —— 于是 fd 1 上只有协议帧，编译器与被跑程序的输出一个字节都不掺；
+   * 一个工人一次只干一件事（模块级全局不串味）、跑够 64 趟就换、超时由池子数着直接杀
+     （CLI 自己那格开发期时限在工人里是**关的** —— 它到点会给整个进程一枪，而那是常驻的）；
+   * **只接热得住的动词**（`run` / `emit` / `ast` / `oir` / `sx` / `graph` / `interp`）。
+     `build` / `c link` 要 spawn cc、要写盘，照旧走冷子进程 —— 快是加法，不是替换。
+   * 不用 `worker_threads`：线程里的 `process.stdout` 是转发到父进程的管子，捕获不干净；
+     子进程顺手还有"崩了只崩一个工人"。
+4. `omni serve` 起来就**预热**一格工人。
+
+量出来：第一趟 379ms（含工人启动），之后 **8~19ms**；实时模式连改 6 次每次 8~17ms。
+`OMNI_STUDIO_WORKERS` 改池子大小（默认 `min(4, 核数-1)`）。
 
 ### 时限与并发
 
-* 时限：走已有的那套（`docs/design/dev-deadline.md`）。服务里每个请求**必须**带时限 ——
-  一个不收敛的例子不能把服务拖死。默认沿用 `OMNI_TIMEOUT`（30s），请求里可以更小。
-* 并发：**每请求一个子进程**，所以天然并行，不需要锁。模块级全局互不干扰。
+* 时限：走已有的那套（`docs/design/dev-deadline.md`）。**热工人里 CLI 自己那格时限是关的**
+  （它到点给整个进程一枪），改由池子数着到点杀工人；冷那一条照旧用 `OMNI_TIMEOUT`。
+* 并发：池子里 N 格工人各一条队；一格工人同时只有一格请求，所以模块级全局互不干扰。
 
 ## 3. `omni --client` —— CLI 连上去
 
@@ -182,9 +226,11 @@ stdout / stderr / 阶段耗时分栏）。同一份数据两种印法 —— 与
 |---|---|
 | 服务面 | `tests/serve/`：起服务、打每个端点、比 JSON 形状；**`/api/run` 与本地 `omni run` 的 stdout 逐字节相同** |
 | client | 同一条命令两种跑法，stdout + 退出码相同 |
+| 虚拟文件系统 | `PUT` 写得进、`GET` 读得回（带 `dirty`）、新建的进树、**改完再跑答案跟着变**（那一条是"改了没有效果"唯一量得出来的形状）、`PUT` 拦路径穿越 |
+| 热工人 | `/api/health` 报得出 `pool.served > 0`；**热的那一趟 < 150ms**（冷那一条是 180~300ms）；`via === 'warm'` |
 | 网页 | 不装无头浏览器（那会带一整套依赖）：`tests/serve` 里只查"那一页拿得到、assets 拿得到、树的 JSON 结构对" |
-| 单体 HTML | 拼出来的那份文件里**一个 `node:` 都不许出现**（grep 判据）；再拿 node 当浏览器壳子跑几个例子（`--input-type=module`），输出与 `omni run` 相同 |
-| 时限 | `docs/design/dev-deadline.md` 那一套，服务里每个请求都带 |
+| 单体 HTML | 拼出来的那份文件里**除 prelude 之外没有 `getBuiltinModule`**（prelude 是一大段源码文本，不是代码）；再拿 node 当浏览器壳子跑六门语言，输出与 `omni run --engine graph` 逐字节相同 |
+| 时限 | `docs/design/dev-deadline.md` 那一套；热工人那侧改由池子数（见 §2） |
 
 ## 7. 分片（做的次序）
 
@@ -202,8 +248,17 @@ stdout / stderr / 阶段耗时分栏）。同一份数据两种印法 —— 与
 
 ## 8. 已知的决策与欠账
 
-* **每请求一个子进程**（`spawnSync`）：代价是每趟 ~100ms node 启动；换来的是天然并发、
-  时限、崩了不影响服务三件事。量出来 250ms 防抖的实时模式吃得下。
+* **每请求一个子进程**（`spawnSync`）：**已经换成热工人池了**（见 §2 那段量出来的账）。
+  子进程那一条留着当退路（`build` / `c link` 那几格），所以两条路都在。
+* **编辑器是"透明 textarea 压在高亮层上"**，而那一招有两个必须踩过才知道的坑，
+  都量出来了、都写在代码里：
+  * **只能有一个滚动容器**。`.code-body` / `#view` / textarea 三层都能滚的时候，
+    "哪一层滚了"决定错位多少 —— 表现成**概率性的输入错位**。
+  * **高亮层末尾要补一格 `\n`**：`<pre>` 会吞掉最后那个换行，textarea 不会。
+  * 另加 IME 保护：拼字期间不触发实时跑。
+* **"当前文本"与"上次对齐过的文本"必须是两格变量**。合成一格的代价是
+  `dirty` 永远为假 —— **用户改了没有效果**，而且不报错。这一格只有
+  "改完再跑，答案跟着变"那条判据量得出来。
 * **不上 WebSocket**：第一刀 SSE 都不用；交互式 REPL 要的时候再加。
 * **不上第三方编辑器**：`contenteditable` + 自己的高亮。代价是没有多光标/LSP，
   换来的是"零依赖、能塞进一份 HTML"。
