@@ -339,3 +339,33 @@ b.run(process.argv.slice(2));       // 认 -n / -j / -k / -t / --emit-ninja
 已经验过的一格（这条路不是纸上的）：`emit c --split` 出来的两份 `.c` 用我们自己的 C 前端
 各编成 `.o`、与运行时那 21 份一起链，`01-core.sx` 的输出与预期**逐字节相同**
 （那句"现在还编不起来"的注释是过期的）。
+
+### §12 第 1 步已落地的那一半，与 emit.js 还欠的那一半（2026-09-21）
+
+**归属这一半好了**（`sexpr/lower.js`）：`resolveModules` 并模块时在每条声明的节点上留
+一格 `unit`，出 OIR 时写进 `file` —— 函数挂在记录上，结构体与模块级变量走一张侧表
+（`declUnit`）。`main` 归它所在的那个模块。判据：
+
+    omni emit c tests/sexpr/cases/52-modules.sx --split --work DIR
+    从前 util 2 funcs + **unknown** 1 func；现在 util 2 funcs + **app** 1 func
+
+**emit.js 还欠的那一半**：`units()` 今天只把输出切成四大段 ——
+
+    shared : 0..markA      类型 + 模板 + 字面量池 + **全部原型**（还含定义）
+    once   : markA..markB  模块级变量的定义、闭包的 make、那两张表
+    tail   : markC..end    main 与线性内存的 data 段
+    units  : 按 fnRanges 分好的函数体（**这一段已经按单元切开了**）
+
+要出 `<单元>.h` / `<单元>.c`，`shared` 与 `once` 必须**按声明**带着单元标记发，而不是一整块：
+
+1. 发前言时每写一条声明就记一格 `{unit, i0, i1, kind}`（与 `fnRanges` 同一手法），
+   `kind` 分 `type` / `extern` / `proto` / `def`。
+2. `<单元>.h` = include guard + `#include "omni_gen.h"` + 这个单元的 `type`/`extern`/`proto`。
+3. `<单元>.c` = `#include "<自己>.h"` + 它引到的那几个单元的 `.h` + 它的 `def` 与函数体。
+   "引到谁"照 JS 那侧的办法算（`refsOf` 扫正文里的名字，落到定义它的那个单元）。
+4. `omni_gen.h` / `omni_gen.c` = 字面量池、容器实例化、成员派发器那一族（名字由内容定），
+   落成内容定址的一份，与 JS 那侧的 `gen_<哈希>` 同一条规矩。
+5. 然后每份 `.c` 各自走已经落地的 `.o` 暖存，链接把它们与运行时那 21 份一起交给我们的链接器。
+
+**次序上的硬约束**：第 1 步（标记）不做完，后面四步都没有料。所以下一刀就是给前言那几处
+发射加"一条声明一格标记"。
