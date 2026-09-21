@@ -2257,7 +2257,7 @@ function jsModulesConfig(path) {
  * 于是"改一个字符"那一趟里，库的词法、降级、发射、哈希**一格都不做**。
  * `OMNI_ASY_CMODS=1` 开（还在接线，默认走合并树那条路）。
  */
-function asyCModsBuild(path) {
+function asyCModsBuild(path, outPath) {
   const dir = moduleDir(cacheRoot(), 'c-asy');
   mkdirAll(dir);
   const cs = srcStamp();
@@ -2357,7 +2357,8 @@ function asyCModsBuild(path) {
     rename(tmp, mainObj);
   }
   objs.push(mainObj);
-  const exe = join(dir, `${progName(path)}.out`);
+  /* `-o` 给了就链到那儿（`omni build`），没给就落在模块目录里（`omni run`）。 */
+  const exe = outPath === undefined ? join(dir, `${progName(path)}.out`) : outPath;
   const stk = fmt === 'macho' ? ['--stack-size', String(0x20000000)] : [];
   const rtObjs = runtimeObjectsSelf(arch, os);
   /* **链接也要有一格键**：`.o` 的名字里带内容哈希，所以"同一串 `.o` + 同一组开关"链出来
@@ -2366,8 +2367,9 @@ function asyCModsBuild(path) {
      按键起名的话改一个字符就多一份 3.5 MB 的产物，一天下来全是垃圾。 */
   const lk = hash16([...objs, ...rtObjs, arch, os, fmt, ...stk,
     LIBC === null ? '' : LIBC, CROSS === null ? '' : CROSS.sysroot].join('|'));
-  const lkPath = `${exe}.link`;
-  if (exists(exe) && exists(lkPath) && readText(lkPath) === lk) {
+  /* 只在自己那个目录里记这一格键：用户指定的 `-o` 旁边不该多一份 `.link`。 */
+  const lkPath = outPath === undefined ? `${exe}.link` : null;
+  if (lkPath !== null && exists(exe) && exists(lkPath) && readText(lkPath) === lk) {
     vStep(`c link         复用 ${exe}  ${fileSize(exe)} bytes`);
     return exe;
   }
@@ -2377,7 +2379,7 @@ function asyCModsBuild(path) {
     ...(LIBC === null ? [] : ['--libc', LIBC]), '-q']);
   if (rc !== 0) throw new OmniError(`asy c 模块：链接没过（各模块的 C 留在 ${dir}）`);
   spawn('chmod', ['+x', exe], 'c');
-  writeText(lkPath, lk);
+  if (lkPath !== null) writeText(lkPath, lk);
   vStep(`c link         ${objs.length} 个 .o -> ${exe}  ${fileSize(exe)} bytes`);
   return exe;
 }
@@ -5160,9 +5162,17 @@ function main(argv) {
    * 量出来是"设了 PRUNE_OFF 却照旧 `prune 1195 -> 264`"。
    * 解释器那两档（`--interp` / `--mir`）照旧摇：它们不出 `.o`，摇了只是跑得快些。 */
   /* asy 的 C 腿走**每模块独立**那条路（§12 末节）。还在接线，所以是 opt-in：
-   * `OMNI_ASY_CMODS=1`。默认照旧走合并树那条路。 */
-  if (env('OMNI_ASY_CMODS') === '1' && node.key === 'run' && path !== undefined
-    && path.endsWith('.asy') && !rest.includes('--interp') && !rest.includes('--mir')) {
+   * `OMNI_ASY_CMODS=1`，`run` 与 `build` 两个动词都吃。默认照旧走合并树那条路。 */
+  if (env('OMNI_ASY_CMODS') === '1' && (node.key === 'run' || node.key === 'build')
+    && path !== undefined && path.endsWith('.asy')
+    && !rest.includes('--interp') && !rest.includes('--mir')) {
+    if (node.key === 'build') {
+      const oi = rest.indexOf('-o');
+      const out = oi >= 0 ? rest[oi + 1] : `${progName(path)}.out`;
+      const exe = asyCModsBuild(path, out);
+      stderr(`omni: built ${exe} ${fmtBytes(fileSize(exe))}  按模块（每模块独立）\n`);
+      return 0;
+    }
     const exe = asyCModsBuild(path);
     const st = spawn(exe, [], 'i')[0];
     vStep(`exec ${exe}  exit=${st}`);
