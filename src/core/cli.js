@@ -1936,13 +1936,14 @@ function unitIndex(dir) {
   return ix;
 }
 
-function asyModsSkip(dir, cs) {
+function asyModsSkip(dir, cs, ext = 'js') {
   const extras = new Map();          // 产物名 -> {name, key, sigs, need}
-  // 一份产物齐不齐：索引那一行还成立 + `.js` 与它那份**声明文件**都在。
-  // 「要跟着进来的那几份」也在行里（needs）。
+  // 一份产物齐不齐：索引那一行还成立 + 产物（`.js` / `.c`）与它那份**声明文件**都在。
+  // 「要跟着进来的那几份」也在行里（needs）。后缀是参数：JS 腿与 C 腿是**同一套**增量，
+  // 只有产物的扩展名不同（§12 末节：方言的模块化是跨文件的，两条腿共用它）。
   const load = (nm) => {
     const r = unitIndex(dir).fresh(nm, cs);
-    if (r === null || !exists(join(dir, `${nm}.js`))) return null;
+    if (r === null || !exists(join(dir, `${nm}.${ext}`))) return null;
     const d = declRead(dir, nm);
     if (d === null) return null;
     return { name: nm, key: r.self, need: r.needs, sigs: d.sigs };
@@ -2246,6 +2247,119 @@ function jsModulesConfig(path) {
  * 于是 include 摊进来的文件在这条路上没人问 —— 慢路会重编、快路却先命中，盘上那份旧代码
  * 照旧被跑。同一件事只该有一处判据。
  */
+/**
+ * asy 的 C 腿：**每个源文件一份方言、一份 `.c`/`.h`、一份 `.o`**（§12 末节的定案）。
+ *
+ * 与 JS 腿（`asyModsBuild`）是**同一个形状**：同一份 `asy.unitTexts`、同一套 `UnitIndex`、
+ * 同一格 `.d.sx` 接口、同一条"产物齐了就整段跳过"（`asyModsSkip`）—— 只有"降完之后发什么"
+ * 不同（那边 `.js`，这边 `emitCModule` 的 `{h, c}`）。
+ *
+ * 于是"改一个字符"那一趟里，库的词法、降级、发射、哈希**一格都不做**。
+ * `OMNI_ASY_CMODS=1` 开（还在接线，默认走合并树那条路）。
+ */
+function asyCModsBuild(path) {
+  const dir = moduleDir(cacheRoot(), 'c-asy');
+  mkdirAll(dir);
+  const cs = srcStamp();
+  const r = cap('asy.unitTexts')(path, asyModsSkip(dir, cs, 'c'));
+  const arch = CROSS === null ? hostArch() : CROSS.arch;
+  const os = CROSS === null ? (hostIsDarwin() ? 'osx' : 'linux') : CROSS.os;
+  const fmt = fmtOfOs(os);
+  const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
+  const rowOf = (u) => {
+    const deps = [];
+    const keyOf = new Map();
+    for (const x of [...r.units, ...r.reused]) keyOf.set(x.name, x.key);
+    for (const d of u.deps ?? []) {
+      const k = keyOf.get(d);
+      if (k !== undefined && k !== '') deps.push(k);
+    }
+    const extras = [];
+    const ab = env('OMNI_ASY_BUILTINS');
+    if (ab !== undefined && ab !== '') extras.push(`builtins:${ab}`);
+    if (u.key === '') extras.push(`text:${hash16(u.text)}`);
+    return { key: '', self: u.key, incs: u.inc ?? [], deps, needs: u.need ?? [], extras };
+  };
+  let made = 0;
+  let kept = r.reused.length;
+  for (const u of r.units) {
+    const row = rowOf(u);
+    const key = unitIndex(dir).keyOf(row, cs);
+    const had = unitIndex(dir).row(u.name);
+    const cPath = join(dir, `${u.name}.c`);
+    if (had !== null && had.key === key && exists(cPath)) { kept++; continue; }
+    const mod = cap('sx.textToMod')(u.name, u.text, `omni_init_${cap('asy.jsUnitSym')(u.name)}`);
+    const mf = cap('cgen.module')(mod, u.name);
+    writeText(join(dir, `${u.name}.h`), mf.h);
+    writeText(cPath, mf.c);
+    if (u.name !== r.entry) declWrite(dir, u.name, u.sec, u.iface);
+    unitIndex(dir).set(u.name, row, cs);
+    made++;
+  }
+  unitIndex(dir).save();
+  vStep(`asy c 模块     新编 ${made} 份、复用 ${kept} 份 -> ${dir}`);
+  /* 各家一格 `.o`（键 = 这一份的正文 + 它 include 到的那几家的 `.h` + 目标）。 */
+  const names = [];
+  const seen = new Set();
+  for (const u of [...r.units, ...r.reused]) {
+    if (seen.has(u.name)) continue;
+    seen.add(u.name);
+    names.push(u.name);
+  }
+  names.sort();
+  const objDir = join(cacheRoot(), 'modules', 'c');
+  const objs = [];
+  let cc = 0;
+  for (const nm of names) {
+    const cPath = join(dir, `${nm}.c`);
+    const hTxt = exists(join(dir, `${nm}.h`)) ? readText(join(dir, `${nm}.h`)) : '';
+    const k = hash16([readText(cPath), hTxt, arch, os, fmt,
+      LIBC === null ? '' : LIBC, CROSS === null ? '' : CROSS.sysroot].join('|'));
+    const obj = join(objDir, `${nm}-${k.slice(0, 8)}.o`);
+    objs.push(obj);
+    if (exists(obj)) continue;
+    const tmp = join(dir, `${nm}.o`);
+    cObj(cPath, tmp, arch, [RUNTIME_DIR, dir], [], 'elf', os, sysIncs);
+    mkdirAll(objDir);
+    rename(tmp, obj);
+    cc++;
+  }
+  vStep(`c obj          ${objs.length} 份模块（这一趟编了 ${cc} 格）`);
+  /* 入口那一份：`main` 在这儿（各家的 `omni_init_*` 只清零，真正的初始化在入口自己的
+     init 里 —— 与 JS 腿的启动器一一对应）。 */
+  const initOf = (n) => `omni_init_${cap('asy.jsUnitSym')(n)}`;
+  const lines = ['#include "omni.h"'];
+  for (const nm of names) lines.push(`extern void ${initOf(nm)}(void);`);
+  lines.push(`static void omni_all_init_(void) {`);
+  for (const nm of names) if (nm !== r.entry) lines.push(`  ${initOf(nm)}();`);
+  lines.push(`  ${initOf(r.entry)}();`);
+  lines.push('}');
+  lines.push('int main(int argc, char **argv) { omni_host_init(argc, argv);'
+    + ' omni_run_entry(omni_all_init_); omni_js_check_uncaught(); fflush(stdout);'
+    + ' return omni_host_exit_code(); }');
+  const mainC = join(dir, `main-${r.entry}.c`);
+  writeText(mainC, `${lines.join('\n')}\n`);
+  const mk = hash16([readText(mainC), arch, os, fmt].join('|'));
+  const mainObj = join(objDir, `main-${r.entry}-${mk.slice(0, 8)}.o`);
+  if (!exists(mainObj)) {
+    const tmp = join(dir, `main-${r.entry}.o`);
+    cObj(mainC, tmp, arch, [RUNTIME_DIR, dir], [], 'elf', os, sysIncs);
+    mkdirAll(objDir);
+    rename(tmp, mainObj);
+  }
+  objs.push(mainObj);
+  const exe = join(dir, `${progName(path)}.out`);
+  const stk = fmt === 'macho' ? ['--stack-size', String(0x20000000)] : [];
+  const rc = subMain(['c', 'link', ...objs, ...runtimeObjectsSelf(arch, os), '-o', exe,
+    '--arch', arch, '--os', os, '-f', fmt, '--stdlib', ...stk,
+    ...(CROSS === null ? [] : ['--sysroot', CROSS.sysroot]),
+    ...(LIBC === null ? [] : ['--libc', LIBC]), '-q']);
+  if (rc !== 0) throw new OmniError(`asy c 模块：链接没过（各模块的 C 留在 ${dir}）`);
+  spawn('chmod', ['+x', exe], 'c');
+  vStep(`c link         ${objs.length} 个 .o -> ${exe}  ${fileSize(exe)} bytes`);
+  return exe;
+}
+
 function asyModsFast(path, dir) {
   const nm = cap('asy.fileUnitName')(path);
   const mainPath = join(dir, `main-${nm}.js`);
@@ -5022,6 +5136,15 @@ function main(argv) {
    * `--backend c` 会把 `run` 换成 `run-c` 那条 case，摆在 case 里就看不见了 ——
    * 量出来是"设了 PRUNE_OFF 却照旧 `prune 1195 -> 264`"。
    * 解释器那两档（`--interp` / `--mir`）照旧摇：它们不出 `.o`，摇了只是跑得快些。 */
+  /* asy 的 C 腿走**每模块独立**那条路（§12 末节）。还在接线，所以是 opt-in：
+   * `OMNI_ASY_CMODS=1`。默认照旧走合并树那条路。 */
+  if (env('OMNI_ASY_CMODS') === '1' && node.key === 'run' && path !== undefined
+    && path.endsWith('.asy') && !rest.includes('--interp') && !rest.includes('--mir')) {
+    const exe = asyCModsBuild(path);
+    const st = spawn(exe, [], 'i')[0];
+    vStep(`exec ${exe}  exit=${st}`);
+    return st;
+  }
   PER_MODULE_C = (node.key === 'run' || node.key === 'build')
     && !rest.includes('--interp') && !rest.includes('--mir')
     && perModuleWanted(rest, path);

@@ -895,7 +895,14 @@ class CEmitter {
     /* 每条 typedef 自带一格 guard：两家都用 `list<int>` 时两份 `.h` 里都有那一行，
        而 C99 不允许重复 typedef。标准手法，不需要公用头。 */
     const dg = (nm, line) => [`#ifndef OMNI_D_${nm}`, `#define OMNI_D_${nm}`, line, '#endif'];
+    const froms = new Set();
+    for (const im of this.mod.imports ?? []) froms.add(im.from);
+    /* **接口也依赖接口**：这一份的原型里会出现别家的类型（`ct_spec` 那种），所以
+       `.h` 里也要 include 它引到的那几家 —— 量出来的样子是
+       `01-arith__….h:192: declaration expected`（`ct_spec` 没声明，解析当场错位）。 */
     const H = [`#ifndef ${gu}`, `#define ${gu}`, '', RUNTIME_INCLUDE, ''];
+    for (const f of [...froms].sort()) H.push(`#include "${f}.h"`);
+    if (froms.size > 0) H.push('');
     for (const t of containers) for (const l of dg(cTypeName(t), `OMNI_REF_DECL(${cTypeName(t)})`)) H.push(l);
     for (const c of classes) for (const l of dg(`ct_${c.name}`, `OMNI_REF_DECL(ct_${c.name})`)) H.push(l);
     for (const l of this.vecLines().concat(this.bufLines())) if (l !== '') H.push(l);
@@ -908,11 +915,8 @@ class CEmitter {
     for (const g of this.mod.jsGlobals ?? []) H.push(`extern omni_dyn g_${g.name};`);
     for (const l of this.protoLines()) H.push(l);
     H.push('', '#endif', '');
-    const C = [`#include "${name}.h"`];
-    const froms = new Set();
-    for (const im of this.mod.imports ?? []) froms.add(im.from);
-    for (const f of [...froms].sort()) C.push(`#include "${f}.h"`);
-    C.push('');
+    /* `.c` 只要自己的 `.h`：别家的接口已经由它带进来了（上面那一段）。 */
+    const C = [`#include "${name}.h"`, ''];
     for (const l of this.cAbiExterns()) C.push(l);
     for (const l of this.s16PoolLines()) C.push(l);
     for (const l of this.arrLines()) C.push(l);
