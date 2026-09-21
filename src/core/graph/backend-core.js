@@ -589,7 +589,10 @@ function binText(nm, args, env, ctx, uns) {
     if (t === want) return v;
     if (want === 'string') return `(tostr ${v})`;
     if (want === 'real' && t === 'int') return `(toreal ${v})`;
-    return gap(`'${nm}' 的两边说不到一起（${t} 与 ${want}）`);
+    /* **在谁的体里**：只说"两边说不到一起"时，几千行里找那一处只能人肉扫
+       （与 `bindList` / `argText` 那几句用的是同一格 `ctx.fnName`）。 */
+    const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
+    return gap(`'${nm}' 的两边说不到一起（${t} 与 ${want}）${wh}`);
   };
   /* 无符号那一格（`uns`）：只有那七个算符有另一半，别的原样发。 */
   const opTxt = (uns === true && UBINOP[nm] !== undefined) ? UBINOP[nm] : BINOP[nm];
