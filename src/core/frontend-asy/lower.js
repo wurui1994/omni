@@ -2954,16 +2954,9 @@ class AsyLower {
       });
     }
     const weak = [];
-    // 盘上那几份产物**已经引着**的 weak 项：这一档不能跟着入口走（见 link.js 那一节
-    // "只有入口才引的那些 weak 项"）—— 它们的 `.js` 是上一趟编的，import 写死了
-    // `from './omni_weak.js'`。
-    const weakLib = [];
-    // 跳过正文的那几份：它们的产物里引到的 weak 项从盘上拿回来（`.wk`）。
-    // 不拿的话那几份 `.js` 一 import 就是"未声明"—— 它们的 `(sig "omni_weak" …)`
-    // 是上一趟编出来的，指着的东西这一趟没人生。按名字去重在链接那一层（asyUnitModules）。
-    for (const id of [...skipped.keys()].sort((a, b) => a - b)) {
-      for (const t of skipped.get(id).weak) { weak.push(t); weakLib.push(t); }
-    }
+    // 跳过正文的那几份**不用再把生成物的正文抄一遍**（从前那份 `.wk`）：一项生成物现在
+    // 自己就是一份产物（link.js 的 genMod），盘上那几份 `.js` 引的是它自己那一份，
+    // 复用时顺着索引行里的 needs 一起带进来就行。
     // 记录按**声明顺序**发（字段里不许再有记录，所以这就是最终顺序）
     let ri = 0;
     for (const rec of this.records.values()) {
@@ -3056,7 +3049,7 @@ class AsyLower {
     // 无条件发（上面那格已经保证全局与 getter 都在）：从前这里按 arrGen 有没有那一格分，
     // 而那一格取决于"这一趟有没有重编到调它的那份库"，与例子无关 —— 见上面那段账。
     main.unshift(`(set asy__mainname_v (str ${JSON.stringify(this.rootModName())}))`);
-    this.sections = { ids, secs, weak, weakLib, keys, main, tail: '', skipped, unitWhy };
+    this.sections = { ids, secs, weak, keys, main, tail: '', skipped, unitWhy };
     const body = [];
     for (const s of main) body.push(`    ${s}`);
     // 退出钩子（`atexit(f)` 存下来的那一个）在这里放：main 的最后一句。

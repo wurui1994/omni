@@ -59,6 +59,9 @@ import { runGraphFile, buildGraphFile, coreSxText, borrowedExts } from './graph/
 /* 构建引擎（`omni ninja`）：依赖图 + 脏判定 + 调度，不认识语言 —— 设计见
  * `docs/design/build-system.md`，模型照 ninja 复刻。 */
 import { ninjaCmd } from './build/cli.js';
+/* 模块产物缓存那套通用机器（一份索引 + 内容身份 + 一格键）：有 import 关系的语言共用它，
+ * 不再每门语言手写一份脏判定 —— 见 `docs/design/build-system.md` §10。 */
+import { ContentIds, Index, decodeRow, encodeRow, rowKey, rowFresh } from './build/modcache.js';
 import { check } from './hir/check.js';
 import { pruneFuncs } from './hir/prune.js';
 import { cAbiLibs, cSysLib } from './hir/c_abi.js';
@@ -1844,158 +1847,96 @@ function inpOk(field) {
   return { ok: cur.slice(cur.lastIndexOf(':') + 1) === field.slice(c3 + 1), cur: cur };
 }
 
-/** `.wk` 里一条与一条之间的分界线（项本身缩进两格起，所以顶头这一行不会撞上）。 */
-const ASY_WK_SEP = ';;--';
-
 /**
  * 「这一份产物还是最新的吗」——是的话前端**连它的正文都不降**（第七十六刀）。
  *
  * 判据与写产物那一刻用的是**同一格印记**：印记里记着「编译器 + 它自己那个源文件 +
  * 它引到的那几个源文件」的 `路径:改动时间:字节数`，这里把每一格反过来 stat 一遍。
- * 全对上、并且 `.js`/`.sec`/`.wk` 三样都在，就把签名清单与它引到的 weak 项读回来给前端。
+ * 全对上、并且 `.js` 与接口（`.sec`）都在，就把签名清单读回来给前端。
  *
  * 量出来的账：13 个库的 asyBodyPass 是 368ms（整个前端 645ms 的一半多），而它降出来的
  * 东西逐字节等于盘上那份 —— 这一刀省的就是它。声明遍那 221ms 省不掉：入口要那些表。
  */
 /**
- * 印记索引：**整个目录一份** `index.log`，一行 `产物名 \t 印记`（ADR-0042 的第 2 步）。
+ * asy 那棵库的增量：**用通用那套机器**（`build/modcache.js`），不再手写第二份脏判定。
  *
- * 从前是一份产物旁边一个 `.stamp`：一个例子的 asy-mods 里 218 个小文件，
- * 而每一趟快路都要 stat / 读一遍它们。改成一份的两条理由：
- *   - 读一次就全在手里（下面那张表），判据与写产物用的还是同一段文本 —— 语义没动；
- *   - 增量信息与产物分开存，后面按内容哈希换键时只动这一格。
+ * 一份索引 `asy-mods/index.log`（`Index`），一行一个产物、行里自足（`encodeRow`）：
+ * 键 + 自己的源文件 + include 摊进来的 + 依赖的源文件 + 复用它时要带上的产物 + 附加标记。
+ * 「还新不新」只有一处判（`rowFresh` = 把行里那些输入重新哈一遍，对比行里记的键）——
+ * 快路（`asyModsFast`）与慢路（`asyModsSkip.load`）问的是同一个函数，这正是从前四处
+ * 各自 `split('|')` 解印记时漏了一处就**静默复用旧产物**的那个坑。
  *
- * 旧缓存不作废：目录里没有 `index.log` 而有 `.stamp` 时**先搬进来**（见 stampTable），
- * 所以换实现的第一趟照旧是"复用 N 份"，不会白重编一棵库。
+ * 预检那张表（`ids.log`）也存着：常态只 stat，`touch` 一下不重编。
  */
-const STAMP_IX_NAME = 'index.log';
-const stampIx = new Map();        // 目录 -> Map(产物名 -> 印记文本)
-const stampIxDirty = new Set();   // 哪几个目录的表还没落盘
+const ASY_IX_NAME = 'index.log';
+const ASY_IDS_NAME = 'ids.log';
+const asyIxMemo = new Map();      // 目录 -> {ix, ids}
+const asyIxDirty = new Set();
 
-function stampTable(dir) {
-  const had = stampIx.get(dir);
+function asyIx(dir) {
+  const had = asyIxMemo.get(dir);
   if (had !== undefined) return had;
-  const t = new Map();
-  stampIx.set(dir, t);
-  const p = join(dir, STAMP_IX_NAME);
-  if (exists(p)) {
-    for (const ln of readText(p).split('\n')) {
-      const i = ln.indexOf('\t');
-      if (i > 0) t.set(ln.slice(0, i), ln.slice(i + 1));
-    }
-    return t;
-  }
-  if (!exists(dir)) return t;
-  // 旧缓存：把那些 `.stamp` 搬进索引，落盘，再把碎文件删掉（谁也不会再读它们）。
-  const old = [];
-  for (const f of readDir(dir)) {
-    if (!f.endsWith('.stamp')) continue;
-    old.push(join(dir, f));
-    t.set(f.slice(0, f.length - '.stamp'.length), readText(join(dir, f)));
-  }
-  if (old.length > 0) {
-    stampIxDirty.add(dir);
-    stampFlush(dir);
-    spawn('rm', ['-f', ...old], 'c');
-    vStep(`asy 印记搬家   ${old.length} 份 .stamp -> ${STAMP_IX_NAME}`);
-  }
-  return t;
-}
-
-/** 把表落盘（只在真改过时写）。名字排序，好 diff。 */
-function stampFlush(dir) {
-  if (!stampIxDirty.has(dir)) return;
-  stampIxDirty.delete(dir);
-  const t = stampIx.get(dir);
-  if (t === undefined) return;
-  const lines = [];
-  for (const n of [...t.keys()].sort()) lines.push(`${n}\t${t.get(n)}`);
-  lines.push('');
-  writeText(join(dir, STAMP_IX_NAME), lines.join('\n'));
-}
-
-/**
- * 记下一份产物的印记。**不立刻落盘** —— 一趟里改完了统一写一次（asyModsBuild 末尾）。
- * 半路崩了的后果是索引里少几格，下一趟把那几份重编：往"多编一次"那边倒，不会复用错的。
- */
-function stampWrite(dir, name, text) {
-  stampTable(dir).set(name, text);
-  stampIxDirty.add(dir);
-}
-
-/**
- * 读一份产物的印记 —— **只有这一处解析它**（ADR-0042 的第 0 步）。
- *
- * 从前 `load` / `mrec` / 清单里那格 `w|` 各自 `split('|')` 解一遍同一种文本：
- * 三处解析一种格式，换格式必漏一处，而漏了的症状是**静默复用旧产物**
- * （那三个 bug 的现场记在下面几段注释里）。所以先把读法收成一处，
- * 再换实现（索引 + 一格键）时就只动这一个函数。
- *
- * 回 `{text, cs, fields, mainTag}`；没这一格回 null。
- * `fields` 是去掉头一格（编译器印记）之后的那些，`mainTag` 是 `main:…` 那一格（没有就 null）。
- */
-function stampRead(dir, name) {
-  const text = stampTable(dir).get(name);
-  if (text === undefined) return null;
-  const all = text.split('|');
-  let mainTag = null;
-  for (const f of all) if (f.startsWith('main:')) mainTag = f;
-  return { text, cs: all[0], fields: all.slice(1), mainTag };
-}
-
-/**
- * 印记里那些**输入**现在还成立吗（`main:` 那一格由调用方自己比 —— 它问的不是"输入变没变"，
- * 是"这份产物属于哪个入口"）。
- *
- * 「哪一格是文件」的判据是**里头有没有冒号**，不是"开头是不是 t"。原先那么写踩得到：
- * 印记里的路径可以是相对的（`tests/asy/cases/01-arith.asy:…` —— 入口那一份就是），
- * 于是一个真文件被当成"按文本哈希记的那种"。`text` 为真时按文本哈希记的那格算过
- * （快路上 omni_weak 由清单里那格 `w|` 逐字节钉着），为假时一律不复用。
- */
-function stampInputsOk(st, text) {
-  for (const f of st.fields) {
-    if (f === '-') continue;                    // 没有源文件的那种依赖
-    if (f.startsWith('main:')) continue;        // 归属那一格，调用方自己比
-    if (f.indexOf(':') < 0) {                   // `t<内容哈希>`（omni_weak 自己）
-      if (!text) return false;
-      continue;
-    }
-    if (!inpOk(f).ok) return false;
-  }
-  return true;
-}
-
-function asyModsSkip(dir, cs, mainTag) {
-  const extras = new Map();          // 产物名 -> {name, key, sigs, weak}
-  // 一份产物旁边那格 `.dep`：`key|源文件`、`need|要跟着进来的产物名`
-  const readDep = (nm) => {
-    const p = join(dir, `${nm}.dep`);
-    if (!exists(p)) return null;
-    const need = [];
-    let key = '';
-    for (const ln of readText(p).split('\n')) {
-      if (ln.startsWith('key|')) key = ln.slice(4);
-      else if (ln.startsWith('need|')) need.push(ln.slice(5));
-    }
-    return { key, need };
+  const st = {
+    ix: Index.load(join(dir, ASY_IX_NAME)),
+    ids: ContentIds.load(join(dir, ASY_IDS_NAME)),
   };
-  // 一份产物的几格（印记对上、`.js`/`.sec`/`.wk`/`.dep` 都在）都齐了才回它的内容
+  asyIxMemo.set(dir, st);
+  return st;
+}
+
+/** 落盘（只在真改过时写）。一趟里改完统一写一次 —— 半路崩了就是少几格，下一趟重编。 */
+function asyIxSave(dir) {
+  if (!asyIxDirty.has(dir)) return;
+  asyIxDirty.delete(dir);
+  const st = asyIx(dir);
+  st.ix.save(join(dir, ASY_IX_NAME));
+  st.ids.save(join(dir, ASY_IDS_NAME));
+}
+
+/** 读一行（没有回 null）。 */
+function asyRow(dir, name) {
+  return decodeRow(asyIx(dir).ix.keys.get(name));
+}
+
+/** 记一行：键当场算出来。 */
+function asyRowSet(dir, name, r, cs) {
+  const st = asyIx(dir);
+  const row = { ...r, key: rowKey(st.ids, cs, r) };
+  st.ix.set(name, encodeRow(row));
+  asyIxDirty.add(dir);
+  return row.key;
+}
+
+/**
+ * 这一份产物还能用吗 —— 回那一行，不能用回 null。
+ *
+ * 只有一问：行里那些输入（自己的源文件、include 摊进来的、依赖的源文件、附加标记）
+ * 重算出来还是不是同一个键。
+ *
+ * **没有"这一份属于哪个入口"那一问**：产物与入口无关 —— `_mainname()` 早就是一格运行期
+ * 全局（`asy__mainname_v`，入口 main 的第一句给它赋值），不是降成字面量。从前那条
+ * "正文里出现过主文件基名就只属于这个入口"的保守规则因此是**净损失**：入口叫 `tri` 时
+ * 几乎每份库正文里都有 "tri"（triangle、tripleint…），于是整棵库一份都不共用 ——
+ * 量出来的样子是 tri 与 curve 交替跑，每趟"新编 125 份"，而两边的产物逐字节相同。
+ */
+function asyRowFresh(dir, name, cs) {
+  const r = asyRow(dir, name);
+  if (r === null) return null;
+  if (!rowFresh(asyIx(dir).ids, cs, r)) return null;
+  return r;
+}
+
+function asyModsSkip(dir, cs) {
+  const extras = new Map();          // 产物名 -> {name, key, sigs, need}
+  // 一份产物齐不齐：索引那一行还成立 + `.js` 与它的接口（`.sec`）都在。
+  // 「要跟着进来的那几份」也在行里（needs）。
   const load = (nm) => {
     const secP = join(dir, `${nm}.sec`);
-    const wkP = join(dir, `${nm}.wk`);
-    const st = stampRead(dir, nm);
-    if (st === null || !exists(join(dir, `${nm}.js`)) || !exists(secP) || !exists(wkP)) return null;
-    if (st.cs !== cs) return null;
-    // 「这一份的正文里有主文件的基名」那一格（见 asyModsBuild 的 stampOf）：换了入口就不复用
-    if (st.mainTag !== null && st.mainTag !== mainTag) return null;
-    if (!stampInputsOk(st, false)) return null;
-    const dep = readDep(nm);
-    if (dep === null) return null;
+    const r = asyRowFresh(dir, nm, cs);
+    if (r === null || !exists(join(dir, `${nm}.js`)) || !exists(secP)) return null;
     const sigs = [];
     for (const ln of readText(secP).split('\n')) if (ln.trim() !== '') sigs.push(ln);
-    const weak = [];
-    for (const t of readText(wkP).split(`\n${ASY_WK_SEP}\n`)) if (t.trim() !== '') weak.push(t);
-    return { name: nm, key: dep.key, need: dep.need, sigs, weak };
+    return { name: nm, key: r.self, need: r.needs, sigs };
   };
   const skipFn = (info) => {
     const nm = cap('asy.unitName')(info);
@@ -2016,7 +1957,7 @@ function asyModsSkip(dir, cs, mainTag) {
       for (const d of x.need) if (!seen.has(d)) wave.push(d);
     }
     for (const x of pull) extras.set(x.name, x);
-    return { sigs: me.sigs, weak: me.weak };
+    return { sigs: me.sigs };
   };
   return {
     extras,
@@ -2136,9 +2077,7 @@ function asyModsBuild(path, dir) {
   // 一格都不带，谁都能复用。判据故意**偏保守** —— 正文里恰好出现同名字符串的库会白重编
   // 一次，但绝不会拿着别的例子的名字跑。
   const cs = srcStamp();
-  const mainWord = cap('asy.mainWord')(path);
-  const mainTag = `main:${mainWord}`;
-  const r = cap('asy.unitTexts')(path, asyModsSkip(dir, cs, mainTag));
+  const r = cap('asy.unitTexts')(path, asyModsSkip(dir, cs));
   // ADR-0015 第一步与第二步：指纹与归属先只打印不接线，好验两样都与"入口是谁"无关。
   if (env('OMNI_ASY_FP') === '1') {
     const fps = asyFps([...r.units, ...r.reused], cs);
@@ -2148,42 +2087,45 @@ function asyModsBuild(path, dir) {
     }
   }
   writeText(join(dir, 'omni_rt.js'), cap('jsgen.runtimeModule')());
-  // 一份产物的印记（这一格决定重不重编）：`编译器 | 它自己那个源文件 | 它引到的那几个源文件`，
-  // 每一格是 `路径:改动时间:字节数:h内容哈希`（见 inpField）。**身份是内容哈希** ——
-  // touch 一下、重新 checkout 一遍都不该重编；改动时间与字节数只是省一次读的预检。
-  // 没有源文件的那份（omni_weak：内容由整个程序决定）只能哈希它自己的文本 —— 它小。
-  const fstamp = inpField;
+  // 一份产物在索引里那一行（这一格决定重不重编）：它自己那个源文件、`include` 摊进来的那些、
+  // 依赖单元的源文件，外加几格附加标记。**身份是内容哈希**（`ContentIds`）—— touch 一下、
+  // 重新 checkout 一遍都不该重编；改动时间与字节数只是省一次读的预检。
+  //
+  // `include` 那一格非有不可：正文有一半来自它们，可它们既不是这一份的 key、也不在 deps 里。
+  // 少了这一格，改 base/plain_picture.asy 而 plain.asy 没动时 `plain` 那份产物照旧算"还能用"，
+  // 盘上那份**旧代码**被复用 —— 量出来的样子是往 plain_picture.asy 里加的探针一声不响。
+  //
+  // 没有源文件的那份（omni_weak：内容由整个程序决定）只能哈希它自己的正文 —— 它小。
   const keyOfName = new Map();
   for (const u of r.units) keyOfName.set(u.name, u.key);
   for (const u of r.reused) keyOfName.set(u.name, u.key);
-  const stampOf = (u) => {
-    if (u.key === '') return `${cs}|t${hash16(u.text)}|${u.text.length}`;
-    const ds = [];
-    for (const d of u.deps) ds.push(fstamp(keyOfName.get(d) === undefined ? '' : keyOfName.get(d)));
-    // `include` 摊进来的那几个文件也要进印记（这一刀）：正文有一半来自它们，可它们既不是
-    // 这一份的 key、也不在 deps 里。少了这一格，改 base/plain_picture.asy 而 plain.asy
-    // 没动时 `plain` 那份产物照旧算"还能用"，盘上那份**旧代码**被复用 —— 量出来的样子是
-    // 往 plain_picture.asy 里加的探针在 OMNI_ASY_MODS=1 那一路一声不响。
-    const ic = u.inc === undefined || u.inc === null ? [] : u.inc;
-    for (const p of ic) ds.push(fstamp(p));
-    // 正文里出现过主文件的基名（`_mainname()` 那一格）就把它记进印记的尾巴，别的入口对不上
-    // 就重编；没出现的一格都不带，于是库那几份跨入口共用（见函数头那段账）。
-    const mn = u.text.indexOf(mainWord) >= 0 ? `|${mainTag}` : '';
-    return `${cs}|${fstamp(u.key)}|${ds.join('|')}${mn}`;
+  const rowOf = (u) => {
+    const deps = [];
+    for (const d of u.deps === undefined || u.deps === null ? [] : u.deps) {
+      const k = keyOfName.get(d);
+      if (k !== undefined && k !== '') deps.push(k);
+    }
+    const extras = [];
+    if (u.key === '') extras.push(`text:${hash16(u.text)}`);
+    return {
+      key: '',
+      self: u.key,
+      incs: u.inc === undefined || u.inc === null ? [] : u.inc,
+      deps,
+      needs: u.need === undefined || u.need === null ? [] : u.need,
+      extras,
+    };
   };
   let made = 0;
   let kept = r.reused.length;
   for (const u of r.units) {
     const jsPath = join(dir, `${u.name}.js`);
-    const stamp = stampOf(u);
-    const st = stampRead(dir, u.name);
-    if (st !== null && exists(jsPath)) {
-      if (stampSame(st.text, stamp)) {
-        kept++;
-        // 内容一样、只是改动时间变了（touch / 重新 checkout）：把预检那两格刷新，下一趟连读都不用读
-        if (st.text !== stamp) stampWrite(dir, u.name, stamp);
-        continue;
-      }
+    const row = rowOf(u);
+    const key = rowKey(asyIx(dir).ids, cs, row);
+    const had = asyRow(dir, u.name);
+    if (had !== null && had.key === key && exists(jsPath)) {
+      kept++;
+      continue;
     }
     writeText(join(dir, `${u.name}.sx`), u.text);
     // ADR-0015 第三步：把核心方言**逐条**落进声明存储（`d/<内容哈希>.sx`），
@@ -2206,22 +2148,20 @@ function asyModsBuild(path, dir) {
     }
     const mod = cap('sx.textToMod')(u.name, u.text, `omni_init_${cap('asy.jsUnitSym')(u.name)}`);
     writeText(jsPath, target('js').emit(mod, { esm: true }));
-    // 下一趟要复用这一份时，前端连它的正文都不降 —— 那时靠的就是这三格：
+    // 下一趟要复用这一份时，前端连它的正文都不降 —— 那时靠的只有**它的接口**：
     // `.sec` 是它定义的名字与签名（别人引它要发的 `(sig …)`），
-    // `.wk` 是它引到的那些 weak 项的正文（那一档按程序生成，不生就成了未声明），
-    // `.dep` 是复用它时还得跟着进来的那几份。
+    // 「复用它时还得跟着进来的那几份」在索引行的 `needs` 里。
     //
-    // **入口那一份不出这三格**：入口单元的前缀是空串（id 0），它的顶层名字于是是**裸的**
-    // （`cardioid.asy` 里那个 `real f(real t)` 就叫 `f`）。出了 `.sec` 之后，别的程序在算
-    // "还要带哪几份"时会把某个库 weak 项里出现的 `f` 认成"cardioid 定义的"，于是
+    // **每一份都出接口**（生成物那几份也出）：少了谁的接口，引到它的那一份就跳不过去 ——
+    // 量出来的样子是"290 份新拼、0 份原样留着"（整棵库白降一遍，而产物一份没变）。
+    //
+    // **入口那一份不出**：入口单元的前缀是空串（id 0），它的顶层名字于是是**裸的**
+    // （`cardioid.asy` 里那个 `real f(real t)` 就叫 `f`）。出了接口之后，别的程序在算
+    // "还要带哪几份"时会把某个生成物里出现的 `f` 认成"cardioid 定义的"，于是
     // `main-label3.js` 里多出一句 `omni_init_cardioid()` —— 量出来的样子就是 label3 与
     // gamma3 在 `$alen` 上炸（跑的是另一个例子的初始化）。入口本来也不该被谁复用。
-    if (u.key !== '' && u.name !== r.entry) {
+    if (u.name !== r.entry) {
       writeText(join(dir, `${u.name}.sec`), `${u.sec.join('\n')}\n`);
-      writeText(join(dir, `${u.name}.wk`), u.weak.join(`\n${ASY_WK_SEP}\n`));
-      const dl = [`key|${u.key}`];
-      for (const n of u.need) dl.push(`need|${n}`);
-      writeText(join(dir, `${u.name}.dep`), `${dl.join('\n')}\n`);
       // 这一份的**接口索引**（第七十八刀）：下一个例子引到这个库时，靠它认名字与签名，
       // 源码与树都不再碰。存不下来的那种（碎片打包认不出形状）这一格是 null —— 不写，
       // 下一趟照旧从源码走。
@@ -2229,19 +2169,26 @@ function asyModsBuild(path, dir) {
         writeText(join(dir, `${u.name}.aif`), JSON.stringify(u.iface));
       }
     }
-    stampWrite(dir, u.name, stamp);
+    asyRowSet(dir, u.name, row, cs);
     made++;
   }
-  stampFlush(dir);
+  asyIxSave(dir);
   vStep(`asy units      新编 ${made} 份、复用 ${kept} 份`);
   // 每一份自己的 `(main …)` 只做一件事：把**这一份**的全局清零（第二十四刀那条
   // "零初始化在入口最前面"，现在分到了各家）。所以入口那份 main 先把各家的清零跑一遍，
   // 最后才是入口自己 —— 入口的 `(main …)` 里才是真正的程序（含调各模块的 init）。
   // 少了这一步，别人家的全局是 undefined：量出来的样子是 cyclic 登记处那一格
   // `Cannot read properties of undefined (reading 'length')`。
+  // 名字**去重**：同一份产物可能既在这一趟拼过的那批里、又在复用回来的那批里
+  // （生成物那几份最容易撞上），重了的话启动器里同一个 `omni_init_…` 被 import 两次，
+  // node 报 `Identifier … has already been declared`。
+  const seen = new Set([r.entry]);
   const names = [];
-  for (const u of r.units) if (u.name !== r.entry) names.push(u.name);
-  for (const u of r.reused) if (u.name !== r.entry) names.push(u.name);
+  for (const u of [...r.units, ...r.reused]) {
+    if (seen.has(u.name)) continue;
+    seen.add(u.name);
+    names.push(u.name);
+  }
   names.sort();
   const lines = ["import './omni_rt.js';"];
   for (const n of names) lines.push(`import { omni_init_${cap('asy.jsUnitSym')(n)} } from './${n}.js';`);
@@ -2254,28 +2201,13 @@ function asyModsBuild(path, dir) {
   // 入口那一份的启动器**按入口起名**：这个目录是共用的，叫 main.js 的话两个入口互相盖
   const mainPath = join(dir, `main-${r.entry}.js`);
   writeText(mainPath, lines.join('\n'));
-  // 清单：这个入口用到哪几份产物、每份对应的源文件与它的改动时间/字节数，
-  // 再加一格「这一份的印记里有没有 `main:`」（第一百〇四刀）。
-  // 下一趟只要这张清单还成立，**整个前端一步都不走**（见 asyModsFast）。
+  // 清单：这个入口用到哪几份产物。下一趟只要它还成立，**整个前端一步都不走**（asyModsFast）。
   //
-  // 那一格是必须的：库的产物现在**跨入口共用**了，而带主文件名的那几份（`_mainname()`）
-  // 换个入口跑就会被原地盖掉 —— 清单只核源文件的话，A 的快路会拿起 B 刚写下的那一份。
-  // 与 `w|` 那一格是同一类问题（同一个共用目录、同一个名字、内容却按程序变）。
-  const mrec = (nm) => {
-    const st = stampRead(dir, nm);
-    if (st === null || st.mainTag === null) return '-';
-    return st.mainTag;
-  };
+  // 清单里**不抄脏判定** —— "这一份还新不新"由索引那一行自己答（`asyRowFresh`），
+  // 快路与慢路问的是同一个函数。清单只答索引答不了的那一件事：这一趟用到了哪几份产物。
   const man = [asyModsEnv(), cs, r.entry];
-  for (const u of r.units) man.push(`u|${u.name}|${u.key}|${fstamp(u.key)}|${mrec(u.name)}`);
-  for (const u of r.reused) man.push(`u|${u.name}|${u.key}|${fstamp(u.key)}|${mrec(u.name)}`);
-  // **omni_weak 那一份也要记一格**：它的内容由整个程序决定（名字却必须固定 ——
-  // 库那几份 `.js` 里写死的是 `from './omni_weak.js'`），所以换个入口跑一趟就会把它盖掉。
-  // 记下这一趟那份的印记，下一趟对不上就老老实实重来。
-  // 量出来的样子（没有这一格时）：`run tri`、`run curve`、再 `run tri` —— 第三趟命中清单，
-  // 拿的却是 curve 那份 weak，报 `s_…_shipout__d0_2_3_4_5_6_7_8_9` 不是它的导出。
-  const wstamp = stampRead(dir, r.weak);
-  if (wstamp !== null) man.push(`w|${wstamp.text}`);
+  for (const u of r.units) man.push(`u|${u.name}`);
+  for (const u of r.reused) man.push(`u|${u.name}`);
   writeText(join(dir, `main-${r.entry}.dep`), `${man.join('\n')}\n`);
   vStep(`asy units      -> ${dir}`);
   return mainPath;
@@ -2315,6 +2247,7 @@ function asyModsFast(path, dir) {
   const nm = cap('asy.fileUnitName')(path);
   const mainPath = join(dir, `main-${nm}.js`);
   const depPath = join(dir, `main-${nm}.dep`);
+  const cs = srcStamp();
   // 不成立时**说清是哪一格不成立**：这条快路一旦悄悄失效，整个前端就白跑一趟
   // （量出来的样子是「换个入口跑一趟，再跑回来又是满编 0.9s」），而从日志上看不出来。
   const miss = (why) => { vStep(`asy mods 不命中 ${why}`); return null; };
@@ -2322,37 +2255,23 @@ function asyModsFast(path, dir) {
   const lines = readText(depPath).split('\n');
   if (lines.length < 3) return miss('清单不全');
   if (lines[0] !== asyModsEnv()) return miss('环境变了（当前目录 / ASYMPTOTE_DIR）');
-  if (lines[1] !== srcStamp()) return miss('编译器自己变了');
+  if (lines[1] !== cs) return miss('编译器自己变了');
   if (lines[2] !== nm) return miss('入口名字对不上');
   for (let i = 3; i < lines.length; i++) {
     const ln = lines[i];
     if (ln === '') continue;
-    // omni_weak 那一格：它是按程序生成的，换个入口跑就会被盖掉（见 asyModsBuild）
-    if (ln.startsWith('w|')) {
-      const wst = stampRead(dir, 'omni_weak');
-      if (wst === null) return miss('weak 那一份没了');
-      if (wst.text !== ln.slice(2)) return miss('weak 那一份被别的入口盖掉了');
-      continue;
-    }
     const parts = ln.split('|');
     if (parts[0] !== 'u') return miss('清单里有认不出的行');
     if (!exists(join(dir, `${parts[1]}.js`))) return miss(`产物 ${parts[1]}.js 没了`);
-    // 这一份产物的**全部输入**都还成立吗 —— 问的是它自己那格印记（索引里那一行），
-    // 不是清单里抄的那一格源文件。
+    // 这一份产物还新不新 —— 问的是**索引里那一行**（`asyRowFresh`），与慢路同一个函数。
     //
-    // 从前这儿只核 `parts[3]`（`fstamp(u.key)`，也就是"它自己那个源文件"），于是
+    // 从前这儿自己抄了一份脏判定，只核 `fstamp(u.key)`（"它自己那个源文件"），于是
     // **include 摊进来的那些文件在这条快路上没人问**：改 `base/plain_picture.asy` 而
-    // `plain.asy` 没动时，慢路那边早就会重编（印记里有那一格），可这条快路先命中、
-    // 整个前端一步不走 —— 盘上那份旧代码照旧被跑。印记里本来就记着 include 那几格，
-    // 缺的只是这条路上的一问。
-    const st = stampRead(dir, parts[1]);
-    if (st === null) return miss(`产物 ${parts[1]} 的印记没了`);
-    if (!stampInputsOk(st, true)) return miss(`源文件 ${parts[1]} 变了`);
-    // 「这一份是不是带着某个入口的名字」那一格（第一百〇四刀）：库的产物跨入口共用之后，
-    // 带 `_mainname()` 的那几份换个入口跑会被盖掉，只核源文件的话就会拿起别人那一份。
-    const mwant = parts[4] === undefined ? '-' : parts[4];
-    const mhave = st.mainTag === null ? '-' : st.mainTag;
-    if (mhave !== mwant) return miss(`产物 ${parts[1]} 是别的入口的那一份`);
+    // `plain.asy` 没动时，慢路那边早就会重编，可这条快路先命中、整个前端一步不走 ——
+    // 盘上那份旧代码照旧被跑。同一件事只该有一处判据。
+    if (asyRowFresh(dir, parts[1], cs) === null) {
+      return miss(`产物 ${parts[1]} 不新了（它的源文件或 include 变了）`);
+    }
   }
   if (!exists(join(dir, 'omni_rt.js'))) return miss('运行时那一份没了');
   vStep(`asy mods 命中   ${lines.length - 3} 份产物一份没动`);

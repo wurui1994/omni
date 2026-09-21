@@ -2,17 +2,19 @@
  * 一份程序拆成**每个源文件一份产物**（第七十五刀）。
  *
  * 输入是 lower.js 攒好的分段（`AsyLower.sections`）：每个单元自己的类/全局/函数/包装，
- * 加一桶"谁都可能生、名字只由内容决定"的 weak（HELPERS、数组工厂、cyclic 登记处、
+ * 加一桶"谁都可能生、名字只由内容决定"的生成物（HELPERS、数组工厂、cyclic 登记处、
  * 内建数学包装、隐式构造）。这里把它们拼成**一份份独立的核心方言模块**：
  *
  *   - 每个单元一份：自己的定义照原样发，用到的别人家的名字发成 `(sig "出处" (…))`。
- *   - weak 一份（`omni_weak`）：按程序生成，库那几份从它这里引。
+ *   - 每一项生成物**也是一份**（名字由内容定，见 genMod）：谁引它就发它的签名。
  *   - 入口那一份带 `(main …)`。
  *
  * 「谁定义了这个名字」是从**发出去的文本自己**读出来的，不是另记一张表：每一条顶层项的
  * 第一行就是它的签名（`  (fn NAME (形参) 返回类型` / `  (global NAME 类型)` / `  (class …)`），
  * 所以签名不可能与定义不一致 —— 那是这一层唯一会悄悄出错的地方，用同一份文本就没这问题。
  */
+
+import { hash16 } from '../host/hash.js';
 
 /**
  * 一段项文本里的**每一条顶层形式**：`{head, name, sig}`。
@@ -62,7 +64,24 @@ function refsOf(text, out) {
   return out;
 }
 
-const WEAK = 'omni_weak';
+/**
+ * 一项生成物的**单元名**。
+ *
+ * 生成物是"谁都可能生、名字只由内容决定"的那些项（HELPERS、数组工厂、cyclic 登记处、
+ * `Map_K_V` 那一族实例）。从前它们全挤在一份 `omni_weak` 里 —— 那是**一份共用的可变文件**
+ * （名字固定、内容按整个程序生成），于是换个入口跑就把它整片刷掉，别人的产物跟着作废。
+ * 为了绕开它又长出三样东西：每份产物旁边一份 `.wk`（把它引到的项的正文抄一份）、
+ * "只有入口才引的项跟着入口走"那一段、以及"这一项归谁"的推断规则。三样都是在给一份
+ * 本不该存在的文件打补丁。
+ *
+ * **一项一份**之后：名字由内容定 -> 文件内容与程序无关 -> 谁都能复用、谁也盖不了谁，
+ * 上面三样一起消失，引它的那份发的还是普通的 `(sig "<单元>" …)`。
+ *
+ * 名字里带一段原名的哈希：项名里有 `$` 这类字符，换成 `_` 之后两个不同的项可能撞名。
+ */
+function genMod(name) {
+  return `g_${name.replace(/[^A-Za-z0-9_]/g, '_')}_${hash16(name).slice(0, 6)}`;
+}
 
 /**
  * @param {{ids: number[], secs: Map<number, any>, weak: string[],
@@ -94,7 +113,6 @@ export function asyUnitModules(sections, nameOf, tail) {
   // 「它定义了哪些名字、签名长什么样」登记进来 —— 别人引它时要发的就是这个。
   // 它自己不进 items，所以这一趟不会重新拼它那份模块文本，那份 `.sx`/`.js` 原样留着。
   const reused = [];
-  const extraWeak = [];
   const modOf = new Map();     // 单元号 -> 产物名
   for (const id of sections.ids) modOf.set(id, nameOf(sections.keys.get(id)));
   const entryMod = modOf.get(0);
@@ -106,11 +124,11 @@ export function asyUnitModules(sections, nameOf, tail) {
     skipName.set(id, nm);
     own.add(nm);
   }
-  // 复用一份产物时，**它引到的那几份也得跟着进来**（`.dep` 里的 need）——
+  // 复用一份产物时，**它引到的那几份也得跟着进来**（索引行里的 needs）——
   // 它们可能压根没被这一趟的前端加载过：`plain_scaling.asy:204` 那句
   // `from simplex2 access problem;` 在**函数体里**，而 plain_bounds 的正文这一趟不降，
-  // 于是 simplex2 这个单元根本不存在。cli.js 顺着 `.dep` 把这些"只剩产物"的模块
-  // 也一并交进来（sections.extra），这里只管把它们的签名与 weak 项登记上。
+  // 于是 simplex2 这个单元根本不存在。cli.js 顺着索引把这些"只剩产物"的模块
+  // 也一并交进来（sections.extra），这里只管把它们的签名登记上。
   for (const x of sections.extra ?? []) {
     if (own.has(x.name)) continue;   // 本趟自己就有这一份
     for (const line of x.sigs) {
@@ -119,7 +137,6 @@ export function asyUnitModules(sections, nameOf, tail) {
         where.set(f.name, { mod: x.name, sig: f.sig });
       }
     }
-    for (const t of x.weak) extraWeak.push(t);
     reused.push({ id: -1, name: x.name, key: x.key });
   }
   for (const [id, c] of sections.skipped ?? new Map()) {
@@ -136,27 +153,10 @@ export function asyUnitModules(sections, nameOf, tail) {
       imps: k === undefined || k.imps === undefined ? [] : k.imps,
     });
   }
-  // weak 那一档按**名字**去重：同一个内容决定名字的项，盘上拿回来的那份与这一趟生的那份
-  // 是同一段代码，留先来的那一份就行。
-  const weakSeen = new Set();
-  const weakItems = new Map();   // weak 项的名字 -> 它的正文（写 `.wk` 用）
-  for (const t of [...extraWeak, ...sections.weak]) {
-    const fs = formsOf(t);
-    let all = fs.length > 0;
-    for (const f of fs) {
-      if (!weakSeen.has(`${f.head === 'class' || f.head === 'struct' ? 't' : 'v'}|${f.name}`)) all = false;
-    }
-    if (all) continue;   // 每一条都已经有了：整段是重复的
-    for (const f of fs) {
-      weakSeen.add(`${f.head === 'class' || f.head === 'struct' ? 't' : 'v'}|${f.name}`);
-      weakItems.set(f.name, t);
-    }
-    put(WEAK, t);
-  }
   for (const id of sections.ids) {
     const mod = modOf.get(id);
     // 一个单元哪怕一条顶层项都没有（入口文件常常这样 —— 它的代码全在 `(main …)` 里）
-    // 也要有自己那一份产物：main.js 引的就是它。
+    // 也要有自己那一份产物：启动器引的就是它。
     if (!items.has(mod)) items.set(mod, []);
     const s = sections.secs.get(id);
     for (const x of s.cls) put(mod, x);
@@ -164,90 +164,40 @@ export function asyUnitModules(sections, nameOf, tail) {
     for (const x of s.fns) put(mod, x);
     for (const x of s.wraps) put(mod, x);
   }
-  // ---- 一·五、只有入口才引的那些 weak 项，跟着入口走 ----
-  // `omni_weak` 是**一份共用的可变文件**（名字必须固定：库那几份 `.js` 里写死
-  // `from './omni_weak.js'`）。入口自己那几条包装（默认实参的 wrapper）也进了它，于是
-  // **换个入口跑就把整份刷掉** —— 别的入口的清单跟着作废，前端满编重跑一趟。
+  // ---- 一·五、生成物：**一项一份**（见 genMod 那一段账） ----
+  // 单元在前、生成物在后：要先知道入口定义了哪些名字，才判得出"这一项提到了入口"。
   //
-  // 量出来的样子：tri.asy 与 implicit.asy 依赖完全相同、各只有几行代码，交替跑**每趟**
-  // 都是 0.9s（命中清单时 0.28s），日志上写着 `新编 1 份` —— 那 1 份就是 weak。两份
-  // weak 差 728 字节（176963 vs 176235），差的正是各自那几条包装。把它们放回入口自己
-  // 那一份产物里，共用的那一份就只由**库的集合**决定，交替跑互不相干。
-  {
-    const weakList = items.get(WEAK);
-    if (weakList !== undefined && entryMod !== WEAK) {
-      // 库那边要的 weak 项：复用回来的那些 `.wk`（本来就是库引的），加上这一趟正文
-      // 降了的非入口单元里提到的
-      const libWant = new Set();
-      for (const t of extraWeak) for (const f of formsOf(t)) libWant.add(f.name);
-      for (const t of sections.weakLib ?? []) for (const f of formsOf(t)) libWant.add(f.name);
-      for (const [mod, list] of items) {
-        if (mod === entryMod || mod === WEAK) continue;
-        for (const r of refsOf(list.join('\n'), new Set())) if (weakItems.has(r)) libWant.add(r);
-      }
-      // 闭包到不动点：库要的 weak 项自己引的那些也算库要的
-      const wave = [...libWant];
-      while (wave.length > 0) {
-        const t = weakItems.get(wave.pop());
-        if (t === undefined) continue;
-        for (const r of refsOf(t, new Set())) {
-          if (weakItems.has(r) && !libWant.has(r)) { libWant.add(r); wave.push(r); }
-        }
-      }
-      const keep = [];
-      const moved = [];
-      for (const t of weakList) {
-        let mine = true;
-        for (const f of formsOf(t)) if (libWant.has(f.name)) mine = false;
-        (mine ? moved : keep).push(t);
-      }
-      if (moved.length > 0) {
-        items.set(WEAK, keep);
-        // put 顺带把 tdef/vdef 那两格改指到入口（别人引它时发的 `(sig …)` 才对得上）
-        for (const t of moved) put(entryMod, t);
-        // 挪进来的放**最前面**：它们里头有类，入口自己的项可能在初始化时就用到
-        const el = items.get(entryMod);
-        const cut = el.length - moved.length;
-        items.set(entryMod, [...el.slice(cut), ...el.slice(0, cut)]);
-      }
+  // 按名字去重：同一个内容决定名字的项，盘上拿回来的那份与这一趟生的那份是同一段代码，
+  // 留先来的那一份就行。
+  const genSeen = new Set();
+  const kindOf = (f) => `${f.head === 'class' || f.head === 'struct' ? 't' : 'v'}|${f.name}`;
+  const entryGen = [];
+  for (const t of sections.weak) {
+    const fs = formsOf(t);
+    let all = fs.length > 0;
+    for (const f of fs) if (!genSeen.has(kindOf(f))) all = false;
+    if (all) continue;   // 每一条都已经有了：整段是重复的
+    for (const f of fs) genSeen.add(kindOf(f));
+    // **提到了入口的那几项归入口**：它们的内容跟着入口变（默认实参的包装就是这一类），
+    // 不是"名字由内容定"的那种，所以不能自己成一份 —— 那样换个入口就互相盖。
+    let toEntry = false;
+    for (const r of refsOf(t, new Set())) {
+      for (const d of [tdef.get(r), vdef.get(r)]) if (d !== undefined && d.mod === entryMod) toEntry = true;
     }
+    if (toEntry) { entryGen.push(t); put(entryMod, t); continue; }
+    put(genMod(fs[0].name), t);
   }
-  // ---- 一·五、每一项生成物归谁（ADR-0015 决策 3；这一步只算与暴露，还没落成产物） ----
-  // 规则：一项生成物是从**某条声明**推出来的，就归那条声明所在的单元。判据只看它的正文
-  // 提到了谁 —— 提到的名字都由某一份定义，而"提到谁"是这一项自己的性质，与入口无关：
-  //
-  //   - 只看**库**那些名字里字典序最大的一份。任何用到这一项的程序都必须有它提到的
-  //     全部单元，所以随便挑一个都是对的；挑"字典序最大"只是为了确定。
-  //   - **入口不作候选**：refsOf 是往多了算的（形参名 `f`、`size` 都会被算成"提到了"），
-  //     而入口的顶层名字是裸的，于是"提到入口"这一条会把同一项在 tri 下判给 tri、
-  //     在 cardioid 下判给 cardioid（量出来 439 项里有 2 项、cardioid 那边 37 项）。
-  //     真引到入口的名字会在链接那一层报"未声明"，看得见（ADR-0014 那一条）。
-  //   - 什么库都没提到（HELPERS 那一档、标量数组工厂）-> 归运行时（`''`）。
-  const ownerOfItem = (text) => {
-    let best = '';
-    for (const r of refsOf(text, new Set())) {
-      for (const d of [tdef.get(r), vdef.get(r)]) {
-        if (d === undefined || d.mod === WEAK || d.mod === entryMod) continue;
-        if (d.mod > best) best = d.mod;
-      }
-    }
-    return best;
-  };
-  const owners = new Map();   // 生成物名 -> 归属单元名（'' = 运行时）
-  for (const [nm, t] of weakItems) owners.set(nm, ownerOfItem(t));
+  // 归了入口的那几项放**最前面**：它们里头有类，入口自己的项可能在初始化时就用到
+  if (entryGen.length > 0) {
+    const el = items.get(entryMod);
+    const cut = el.length - entryGen.length;
+    items.set(entryMod, [...el.slice(cut), ...el.slice(0, cut)]);
+  }
   // ---- 二、每一份的正文 + 它要引的签名 ----
-  // 一份产物被复用时还得跟着进来的那几份：它自己引的（deps），加上它那些 weak 项引的。
-  const needOf = (deps, wtext, mod) => {
+  // 一份产物被复用时还得跟着进来的那几份：它自己引的那些（入口与自己除外）。
+  const needOf = (deps, mod) => {
     const need = new Set(deps);
-    for (const t of wtext) {
-      for (const r of refsOf(t, new Set())) {
-        for (const d of [tdef.get(r), vdef.get(r)]) {
-          if (d !== undefined) need.add(d.mod);
-        }
-      }
-    }
-    need.delete(WEAK);   // weak 那一份按程序生成，不是"盘上那一份"
-    need.delete(entryMod);   // 入口那一份没人复用（上面那条"只有入口与 weak 能引它"）
+    need.delete(entryMod);   // 入口那一份没人复用（下面那条"入口的名字只有入口自己能引"）
     need.delete(mod);
     return [...need].sort();
   };
@@ -277,12 +227,11 @@ export function asyUnitModules(sections, nameOf, tail) {
     }
     // **要闭包到不动点**：签名自己也提到别人（`(class autoscaleT (scale scaleT) …)` 里
     // 那个 scaleT 又是一个类），所以补进来的签名要再扫一遍。量出来的：不闭包的话
-    // omni_weak 那一份里 autoscaleT / Map_K_V 的字段类型全认不出，接着刷几百条
+    // 生成物那几份里 autoscaleT / Map_K_V 的字段类型全认不出，接着刷几百条
     // "类 X 没有字段 Y"（字段填不进去，那一格类就是空的）。
     const sigs = [];
     const deps = new Set();
     const done = new Set();
-    const wref = new Set();      // 这一份引到的 weak 项（写 `.wk` 用）
     let wave = [...refs];
     while (wave.length > 0) {
       const next = [];
@@ -293,38 +242,20 @@ export function asyUnitModules(sections, nameOf, tail) {
         // 一个名字可能同时是类型与值（struct 与造它的那个函数），两边都要发
         for (const d of [tdef.get(r), vdef.get(r)]) {
           if (d === undefined || d.mod === mod) continue;
-          // **入口那一份的名字只有入口自己与 weak 能引**：入口单元的前缀是空串，它的顶层
+          // **入口那一份的名字只有入口自己能引**：入口单元的前缀是空串，它的顶层
           // 名字是裸的（`cardioid.asy` 里的 `real f(real t)` 就叫 `f`），而 refsOf 是**往多了
           // 算**的（一个库里随便一个叫 f 的局部量都会被算成"引了它"）。库那一份要是因此
           // 发出 `(sig "cardioid" (fn f …))`，那份产物就跟着入口变了 —— 换个入口跑，
           // 它 import 的东西根本不在。真要引到而被拦掉的话，报的是"未声明"，看得见。
-          if (d.mod === entryMod && mod !== entryMod && mod !== WEAK) continue;
+          if (d.mod === entryMod && mod !== entryMod) continue;
           sigs.push(`  (sig "${d.mod}" ${d.sig})`);
           deps.add(d.mod);
-          if (d.mod === WEAK) wref.add(r);
           refsOf(d.sig, { add: push });
         }
       }
       wave = next;
     }
     sigs.sort();
-    // weak 项自己也可能引别的 weak 项（数组工厂里调 helper），所以要闭包到不动点 ——
-    // `.wk` 少一条，下一趟把这一份复用起来时就是"未声明"。
-    const wtext = [];
-    {
-      const seen = new Set();
-      const stack = [...wref];
-      while (stack.length > 0) {
-        const nm = stack.pop();
-        if (seen.has(nm)) continue;
-        seen.add(nm);
-        const t = weakItems.get(nm);
-        if (t === undefined) continue;
-        wtext.push(t);
-        for (const r of refsOf(t, new Set())) if (weakItems.has(r) && !seen.has(r)) stack.push(r);
-      }
-      wtext.sort();
-    }
     const body = [...sigs, ...list];
     if (isEntry) {
       const ms = [];
@@ -339,18 +270,16 @@ export function asyUnitModules(sections, nameOf, tail) {
       // 这一份**逐条**的正文（ADR-0015 决策 1：增量的粒度是一条顶层项，不是一个文件）。
       // `text` 只是把它们拼起来，所以拼回去必须逐字节相同 —— cli.js 那边就是这么验的。
       parts: body,
-      // 它那个源文件（weak 那份是 ''：它的内容由整个程序决定，没有对应的源文件）
+      // 它那个源文件（生成物那几份是 ''：它们的内容由自己的名字决定，没有对应的源文件）
       key: keyOf.get(mod) === undefined ? '' : keyOf.get(mod),
       // 它 `include` 摊进来的那几个文件：印记要它们（少一格就会复用旧代码，这一刀）
       inc: incOf.get(mod) === undefined ? [] : incOf.get(mod),
       deps: [...deps].sort(),
-      // 这一份定义了哪些名字（`.sec`：下一趟不降它正文时，别人引它靠这张清单）
+      // 这一份定义了哪些名字（接口：下一趟不降它正文时，别人引它靠这张清单）
       sec: formsOf(list.join('\n')).map((f) => `  ${f.sig}`),
-      // 这一份引到的 weak 项的正文（`.wk`：下一趟复用它时，这些项得有人生）
-      weak: wtext,
-      // 下一趟复用它时**还得把哪几份也带上**（`.dep`）：它自己引的那些，加上它那些
-      // weak 项引的那些 —— 后者是 simplex2 那一类"只在别人正文里才会被加载"的模块。
-      need: needOf(deps, wtext, mod),
+      // 下一趟复用它时**还得把哪几份也带上**：它自己引的那些 —— 里头有 simplex2
+      // 那一类"只在别人正文里才会被加载"的模块。
+      need: needOf(deps, mod),
       // 这一份的**接口索引**（`.aif`）：下一个例子引到它时，靠这张表认名字与签名，
       // 源码与树都不碰（见 iface.js）
       iface: ifaceOf.get(mod) === undefined ? null : ifaceOf.get(mod),
@@ -358,9 +287,5 @@ export function asyUnitModules(sections, nameOf, tail) {
       imps: impsOf.get(mod) === undefined ? [] : impsOf.get(mod),
     });
   }
-  return {
-    units: out, reused: reused, entry: modOf.get(0), weak: WEAK,
-    // 每一项生成物算出来的归属（ADR-0015 决策 3 第二步：先只暴露，好验它与入口无关）
-    owners: [...owners].sort((a, b) => (a[0] < b[0] ? -1 : 1)),
-  };
+  return { units: out, reused: reused, entry: modOf.get(0) };
 }

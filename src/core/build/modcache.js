@@ -51,6 +51,70 @@ export class ContentIds {
     this.memo.set(path, { mtime: m, len: n, hash: h });
     return h;
   }
+
+  /**
+   * 把预检那张表**存下来**：`路径 \t 改动时间 \t 字节数 \t 内容哈希`。
+   *
+   * 为什么必须存：`memo` 是**一个进程一份**，所以每趟的第一次 `of(p)` 都要真读、真哈希。
+   * asy 那棵库一趟下来是 1.5 MB 上下 —— 那就是在一条"什么都不用编"的快路上白花十几毫秒。
+   * 存下来之后常态只 stat（mtime 与大小都没动就信这格哈希），语义还是内容哈希。
+   */
+  text() {
+    const out = ['# omni content ids v1'];
+    for (const [p, v] of this.memo) out.push(`${p}\t${v.mtime}\t${v.len}\t${v.hash}`);
+    return `${out.join('\n')}\n`;
+  }
+
+  save(path) { writeText(path, this.text()); }
+
+  static parse(text) {
+    const ids = new ContentIds();
+    if (text === undefined || text === null) return ids;
+    for (const line of text.split('\n')) {
+      if (line === '' || line.startsWith('#')) continue;
+      const f = line.split('\t');
+      if (f.length !== 4) continue;
+      ids.memo.set(f[0], { mtime: Number(f[1]), len: Number(f[2]), hash: f[3] });
+    }
+    return ids;
+  }
+
+  static load(path) {
+    if (!exists(path)) return new ContentIds();
+    return ContentIds.parse(readText(path));
+  }
+}
+
+/**
+ * 索引里一行的**内容**（名字那一格由 `Index` 管）：一个编译单元要重算键时，
+ * 光有键是不够的 —— 跳过那一刻它的源文件、include、依赖都得在手上，**行要自足**。
+ *
+ *   键 \t 自己的源文件 \t include… \t 依赖的源文件… \t 还要带上的单元名… \t 附加标记…
+ *
+ * 后四格都是逗号分隔（空串 = 没有）。`附加标记` 是与源文件无关但进键的东西
+ * （入口名、模式、"内容由整个程序生成"的那种单元的文本哈希）。
+ */
+export function encodeRow(r) {
+  const j = (a) => (a === undefined || a === null ? '' : a.join(','));
+  return [r.key, r.self, j(r.incs), j(r.deps), j(r.needs), j(r.extras)].join('\t');
+}
+
+export function decodeRow(text) {
+  if (text === undefined || text === null) return null;
+  const f = text.split('\t');
+  if (f.length < 6) return null;
+  const s = (x) => (x === '' ? [] : x.split(','));
+  return { key: f[0], self: f[1], incs: s(f[2]), deps: s(f[3]), needs: s(f[4]), extras: s(f[5]) };
+}
+
+/** 一行自己算出来的键（`include` 与依赖的源文件是同一类输入：都是"读进来的文件"）。 */
+export function rowKey(ids, tool, r) {
+  return unitKey(ids, { tool, self: r.self, deps: [...r.deps, ...r.incs], extra: r.extras });
+}
+
+/** 这一行还成立吗 —— **只有这一处判**（快路与慢路问的是同一个函数）。 */
+export function rowFresh(ids, tool, r) {
+  return r !== null && rowKey(ids, tool, r) === r.key;
 }
 
 /**
