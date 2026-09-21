@@ -2126,9 +2126,11 @@ function asyModsBuild(path, dir) {
   };
   let made = 0;
   let kept = r.reused.length;
+  const rows = new Map();   // 产物名 -> 这一趟算出来的那一行（入口那一行末尾还要补 needs）
   for (const u of r.units) {
     const jsPath = join(dir, `${u.name}.js`);
     const row = rowOf(u);
+    rows.set(u.name, row);
     const key = rowKey(asyIx(dir).ids, cs, row);
     const had = asyRow(dir, u.name);
     if (had !== null && had.key === key && exists(jsPath)) {
@@ -2211,14 +2213,14 @@ function asyModsBuild(path, dir) {
   // 入口那一份的启动器**按入口起名**：这个目录是共用的，叫 main.js 的话两个入口互相盖
   const mainPath = join(dir, `main-${r.entry}.js`);
   writeText(mainPath, lines.join('\n'));
-  // 清单：这个入口用到哪几份产物。下一趟只要它还成立，**整个前端一步都不走**（asyModsFast）。
+  // 「这个入口用到哪几份产物」记进**索引里入口那一行**（needs），不再另出一份清单文件。
   //
-  // 清单里**不抄脏判定** —— "这一份还新不新"由索引那一行自己答（`asyRowFresh`），
-  // 快路与慢路问的是同一个函数。清单只答索引答不了的那一件事：这一趟用到了哪几份产物。
-  const man = [cs, r.entry];
-  for (const u of r.units) man.push(`u|${u.name}`);
-  for (const u of r.reused) man.push(`u|${u.name}`);
-  writeText(join(dir, `main-${r.entry}.dep`), `${man.join('\n')}\n`);
+  // 从前那份 `main-<入口>.dep` 里抄着三样：环境、编译器印记、用到的产物名。前两样现在
+  // 各有各的去处 —— 环境在目录名里（jsModulesDir），编译器印记在每一行的键里 ——
+  // 剩下的那一样本来就该待在索引里。少一种文件、少一处会抄错的判据。
+  const entryRow = rows.get(r.entry);
+  if (entryRow !== undefined) asyRowSet(dir, r.entry, { ...entryRow, needs: names }, cs);
+  asyIxSave(dir);
   vStep(`asy units      -> ${dir}`);
   return mainPath;
 }
@@ -2241,49 +2243,34 @@ function asyModsEnv(path) {
 }
 
 /**
- * 上一趟的清单还成立吗？成立就直接回那份启动器的路径 —— 这一趟**不解析、不降级、
- * 不生成**，只剩 node 自己跑。
+ * 上一趟那份启动器还能直接用吗？能就回它的路径 —— 这一趟**不解析、不降级、不生成**，
+ * 只剩 node 自己跑。
  *
- * 为什么这一格是必须的：产物缓存只砍掉"核心方言 -> JS"那一段，而量出来的大头在前端 ——
- * 一趟 1.8s 里 AST 读回来约 250ms、把库重新降级约 800ms，两样都发生在"知道产物还能用"
- * **之前**。所以判断"能不能用"这件事本身必须便宜：只 stat 清单里那几十个文件。
+ * 为什么这一格是必须的：产物缓存只砍掉"核心方言 -> JS"那一段，而量出来的大头在前端
+ * （把库重新降一遍约 800ms），那发生在"知道产物还能用"**之前**。所以这一问本身必须便宜：
+ * 读一份索引 + stat 它提到的那些文件。
  *
- * 这里的每一问都必须与 asyModsBuild 写清单时**一模一样**：从前那边写的是
- * `srcStamp()|main:<入口>`、这边只比 `srcStamp()`，于是这条快路**永远不命中** ——
- * 同一个入口连跑两趟，第二趟照旧满编（量出来 5.9s，日志里那句「asy mods 不命中
- * 编译器自己变了」每趟都在，没人细看）。
+ * 问的东西与慢路**是同一个函数**（`asyRowFresh`）：入口那一行新不新、它 needs 里的每一份
+ * 新不新。从前这儿自己抄了一份判据（一份 `main-<入口>.dep` 清单 + 只核"它自己那个源文件"），
+ * 于是 include 摊进来的文件在这条路上没人问 —— 慢路会重编、快路却先命中，盘上那份旧代码
+ * 照旧被跑。同一件事只该有一处判据。
  */
 function asyModsFast(path, dir) {
   const nm = cap('asy.fileUnitName')(path);
   const mainPath = join(dir, `main-${nm}.js`);
-  const depPath = join(dir, `main-${nm}.dep`);
   const cs = srcStamp();
   // 不成立时**说清是哪一格不成立**：这条快路一旦悄悄失效，整个前端就白跑一趟
   // （量出来的样子是「换个入口跑一趟，再跑回来又是满编 0.9s」），而从日志上看不出来。
-  const miss = (why) => { vStep(`asy mods 不命中 ${why}`); return null; };
-  if (!exists(depPath) || !exists(mainPath)) return miss('还没有这个入口的清单');
-  const lines = readText(depPath).split('\n');
-  if (lines.length < 2) return miss('清单不全');
-  if (lines[0] !== cs) return miss('编译器自己变了');
-  if (lines[1] !== nm) return miss('入口名字对不上');
-  for (let i = 2; i < lines.length; i++) {
-    const ln = lines[i];
-    if (ln === '') continue;
-    const parts = ln.split('|');
-    if (parts[0] !== 'u') return miss('清单里有认不出的行');
-    if (!exists(join(dir, `${parts[1]}.js`))) return miss(`产物 ${parts[1]}.js 没了`);
-    // 这一份产物还新不新 —— 问的是**索引里那一行**（`asyRowFresh`），与慢路同一个函数。
-    //
-    // 从前这儿自己抄了一份脏判定，只核 `fstamp(u.key)`（"它自己那个源文件"），于是
-    // **include 摊进来的那些文件在这条快路上没人问**：改 `base/plain_picture.asy` 而
-    // `plain.asy` 没动时，慢路那边早就会重编，可这条快路先命中、整个前端一步不走 ——
-    // 盘上那份旧代码照旧被跑。同一件事只该有一处判据。
-    if (asyRowFresh(dir, parts[1], cs) === null) {
-      return miss(`产物 ${parts[1]} 不新了（它的源文件或 include 变了）`);
-    }
+  const miss = (why) => { vStep(`模块清单不命中 ${why}`); return null; };
+  if (!exists(mainPath)) return miss('还没有这个入口的启动器');
+  const entry = asyRowFresh(dir, nm, cs);
+  if (entry === null) return miss('入口那一份不新了（或者还没编过）');
+  for (const n of entry.needs) {
+    if (!exists(join(dir, `${n}.js`))) return miss(`产物 ${n}.js 没了`);
+    if (asyRowFresh(dir, n, cs) === null) return miss(`产物 ${n} 不新了（它的源文件或 include 变了）`);
   }
   if (!exists(join(dir, 'omni_rt.js'))) return miss('运行时那一份没了');
-  vStep(`模块清单命中   ${lines.length - 2} 份产物一份没动`);
+  vStep(`模块清单命中   ${entry.needs.length} 份产物一份没动`);
   return mainPath;
 }
 
