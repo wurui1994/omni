@@ -174,6 +174,13 @@ const kept = decls.filter((d) => !dropped.has(d.name));
 process.stderr.write(`剪掉 ${dropped.size} 格，留 ${kept.length} 格\n`);
 process.stderr.write(`剪掉的：${[...dropped].sort().join(' ')}\n`);
 
+/* 驱动那一格的**画幅**：`node bench/go/ptcore.mjs [宽] [高] [spp]`。
+   默认 64×48×8 —— 找缺口够用、编译也快（答案 616378005）。量性能要大一档
+   （比如 320 240 8），不然两边都只有几毫秒，量到的全是进程启动。 */
+const W = Number(process.argv[2] || 64);
+const H = Number(process.argv[3] || 48);
+const SPP = Number(process.argv[4] || 8);
+
 const main = `
 // ---------------- 驱动（不是 pt 的源码）----------------
 type LCG struct{ S int64 }
@@ -201,9 +208,9 @@ func main() {
 	tree := NewTree(shapes)
 
 	rnd := &LCG{12345}
-	w := 64
-	h := 48
-	spp := 8
+	w := ${W}
+	h := ${H}
+	spp := ${SPP}
 	sum := 0
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
