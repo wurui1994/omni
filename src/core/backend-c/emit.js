@@ -873,6 +873,75 @@ class CEmitter {
   }
 
   /**
+   * **自足的一份模块**：`{h, c}` —— 跨文件模块化那条路的发射单位（§12 末节）。
+   *
+   *   `.h` 只装**接口**：带各自 guard 的指针 typedef、向量/缓冲那一族、它定义的聚合体、
+   *        `extern` 全局、它的函数原型。
+   *   `.c` 装**实现**：`#include "<自己>.h"` + `mod.imports` 里每个 `from` 一行 include
+   *        + 模板（字面量池、容器实例化、arr 族、装箱、零值构造、闭包、dyn 桥 —— 全 static，
+   *          由这一份**自足**发）+ 全局定义 + 函数体（+ 入口那一份的 main）。
+   *
+   * 与 `headers()` 的差别：那一份切的是"一棵合并过的树"，模板只能发在类型的家、还得放进
+   * `.h` 让别家看得见（于是 `.h` 里混着实现）。这一份收的是**本来就独立的一段**，模板各家
+   * 自足 —— `.h` 于是真的只有接口，也不需要 `omni_gen` 那份公用头。
+   */
+  moduleFiles(name) {
+    if (!this.perMod) throw new Error('c.moduleFiles: 要按模块那一档（modules: true）');
+    const gu = `OMNI_U_${name.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_H`;
+    const aggs = this.sortAggregates();
+    const classes = this.mod.classes ?? [];
+    const containers = this.mod.containers ?? [];
+    const closures = this.mod.closures ?? [];
+    /* 每条 typedef 自带一格 guard：两家都用 `list<int>` 时两份 `.h` 里都有那一行，
+       而 C99 不允许重复 typedef。标准手法，不需要公用头。 */
+    const dg = (nm, line) => [`#ifndef OMNI_D_${nm}`, `#define OMNI_D_${nm}`, line, '#endif'];
+    const H = [`#ifndef ${gu}`, `#define ${gu}`, '', RUNTIME_INCLUDE, ''];
+    for (const t of containers) for (const l of dg(cTypeName(t), `OMNI_REF_DECL(${cTypeName(t)})`)) H.push(l);
+    for (const c of classes) for (const l of dg(`ct_${c.name}`, `OMNI_REF_DECL(ct_${c.name})`)) H.push(l);
+    for (const l of this.vecLines().concat(this.bufLines())) if (l !== '') H.push(l);
+    for (const a of aggs) {
+      for (const l of this.capture(() => (a.k === 'struct' ? this.structBody(a.t) : this.enumBody(a.t)))) H.push(l);
+    }
+    for (const c of classes) for (const l of this.capture(() => this.classBody(c))) H.push(l);
+    for (const t of containers) for (const l of this.capture(() => this.containerBody(t))) H.push(l);
+    for (const g of this.mod.globals ?? []) H.push(`extern ${cTypeName(g.type)} g_${g.name};`);
+    for (const g of this.mod.jsGlobals ?? []) H.push(`extern omni_dyn g_${g.name};`);
+    for (const l of this.protoLines()) H.push(l);
+    H.push('', '#endif', '');
+    const C = [`#include "${name}.h"`];
+    const froms = new Set();
+    for (const im of this.mod.imports ?? []) froms.add(im.from);
+    for (const f of [...froms].sort()) C.push(`#include "${f}.h"`);
+    C.push('');
+    for (const l of this.cAbiExterns()) C.push(l);
+    for (const l of this.s16PoolLines()) C.push(l);
+    for (const l of this.arrLines()) C.push(l);
+    for (const t of containers) for (const l of this.capture(() => this.containerDefine(t))) C.push(l);
+    if (this.dynAt1 > this.dynAt0) for (const l of this.out.slice(this.dynAt0, this.dynAt1)) C.push(l);
+    for (const t of this.mod.boxDeeps ?? []) {
+      C.push(`static omni_dyn omni_box_${cTypeName(t)}(${cTypeName(t)} a);`);
+      for (const l of this.capture(() => this.boxDeepFn(t))) C.push(l);
+    }
+    for (const t of this.mod.fnTypes ?? []) for (const l of this.capture(() => this.fnCallHelper(t))) C.push(l);
+    for (const a of aggs) {
+      for (const l of this.capture(() => (a.k === 'struct' ? this.structNew(a.t) : this.enumNew(a.t)))) C.push(l);
+    }
+    for (const e of this.mod.enums ?? []) for (const l of this.capture(() => this.enumMakers(e))) C.push(l);
+    for (const c of classes) for (const l of this.capture(() => this.classNew(c))) C.push(l);
+    for (const c of closures) {
+      for (const l of this.capture(() => this.closureBody(c))) C.push(l);
+      C.push(`static ${this.closureProto(c)};`);
+      for (const l of this.capture(() => this.closureMake(c))) C.push(l);
+    }
+    for (const g of this.mod.globals ?? []) C.push(`${cTypeName(g.type)} g_${g.name};`);
+    for (const g of this.mod.jsGlobals ?? []) C.push(`omni_dyn g_${g.name} = { .tag = OMNI_DYN_UNDEF };`);
+    for (const r of this.fnRanges) C.push(this.out.slice(r.i0, r.i1).join('\n'));
+    /* 入口那一份的 main 与线性内存的 data 段（库那几份这一段是空的）。 */
+    for (const l of this.out.slice(this.markC, this.out.length)) C.push(l);
+    return { h: H.join('\n'), c: `${C.join('\n')}\n` };
+  }
+
+  /**
    * 按**模块**切：一个源文件一份 `.c` + 一份同名 `.h`，跟正常的 C 工程一样，
    * **没有公用头**（docs/design/build-system.md §12 末节的定案）：
    *
@@ -2863,6 +2932,16 @@ export function emitCWithStats(mod, opts = {}) {
  * `{ gen: {name, h, c}, units: [{ file, name, funcs, bytes, h, c }], stats }`。
  * 与 `emitC` 是两条路而不是一个开关：单体那条路一个字节都不动。
  */
+/**
+ * **自足的一份模块**（跨文件模块化那条路）：`{ h, c }`。差别见 `moduleFiles` 的头注释 ——
+ * 这一条收的是"本来就独立的一段方言"降出来的 OIR。
+ */
+export function emitCModule(mod, name, opts = {}) {
+  const e = new CEmitter(mod, { ...opts, modules: true });
+  e.emit();
+  return { ...e.moduleFiles(name), stats: e.stats, syms: e.syms };
+}
+
 export function emitCUnits(mod, opts = {}) {
   const e = new CEmitter(mod, { ...opts, modules: true });
   e.emit();

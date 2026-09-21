@@ -153,5 +153,28 @@ console.log('\nsexpr/modules（C 那条腿：头按依赖切）');
     `单体 ${one.status}：${JSON.stringify(one.stdout)}；按模块 ${mod.status}：${JSON.stringify(mod.stdout)}`);
 }
 
+/* **自足的一份模块**（跨文件模块化那条路的发射单位）：`.h` 只有接口、`.c` 装实现。
+ * 这一格先在"整份当一个模块"上验形状 —— 编得过、答案不变，那 iface/impl 这条线就切对了。 */
+{
+  const src = join(dirname(fileURLToPath(import.meta.url)), 'cases', '01-core.sx');
+  const work = join(dir, 'modfile');
+  const e = spawnSync('node', [cli, 'emit', 'c', src, '--module-files', '--work', work],
+    { encoding: 'utf8', timeout: 120000 });
+  const rd = (nm) => { try { return readFileSync(join(work, nm), 'utf8'); } catch { return null; } };
+  const h = rd('01-core.h');
+  const c = rd('01-core.c');
+  ok('自足模块出 .h + .c', e.status === 0 && h !== null && c !== null,
+    (e.stderr ?? '').trim().split('\n').slice(-1)[0]);
+  ok('.h 只有接口（没有模板与函数体）', (h ?? '').includes('#ifndef OMNI_U_')
+    && !(h ?? '').includes('static const uint16_t') && !(h ?? '').includes('omni_new_S_')
+    && !(h ?? '').includes('omni_str_new('));
+  ok('.c 先 include 自己的 .h', (c ?? '').startsWith('#include "01-core.h"'));
+  const o = spawnSync('node', [cli, 'c', 'obj', join(work, '01-core.c'), '-o', join(work, 'm.o'),
+    '--arch', 'arm64', '--os', 'osx', '-f', 'elf', '-I', 'src/runtime', '-I', work],
+    { encoding: 'utf8', timeout: 120000,
+      cwd: join(dirname(fileURLToPath(import.meta.url)), '..', '..') });
+  ok('自足模块过我们自己的 C 前端', o.status === 0, (o.stderr ?? '').trim().split('\n').slice(-1)[0]);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exitCode = 1;

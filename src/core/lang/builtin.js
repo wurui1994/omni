@@ -82,7 +82,7 @@ export const BUILTINS = [
     mod: '../target/c.js',
     reg: 'registerCTarget',
     targets: ['c'],
-    caps: ['cgen.stats', 'cgen.units'],
+    caps: ['cgen.stats', 'cgen.units', 'cgen.module'],
   },
   { name: 'llvm', mod: '../target/llvm.js', reg: 'registerLlvmTarget', targets: ['llvm'] },
   { name: 'spirv', mod: '../target/spirv.js', reg: 'registerSpirvTarget', targets: ['spirv'] },

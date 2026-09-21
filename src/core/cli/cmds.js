@@ -480,6 +480,8 @@ ${graphEngineHelp()}
       flags: [F_MODE, F_WORK, F_INC, F_STATS, F_LANG_DIRECTIVE,
         { name: '--amalgamate', arity: 0, brief: '（c）把整份运行时内联进一个文件' },
         { name: '--modules', arity: 0, brief: '（c）按模块各出一份 .c/.h 落到 --work DIR' },
+        { name: '--module-files', arity: 0,
+          brief: '（c）把这一份当**一个自足的模块**发：.h 只有接口、.c 装实现' },
         { name: '--fat', arity: 0, brief: '把所有语言都编进核心（默认是薄核心 + plugins/）' },
         F_NO_TRIM,
         { name: '--bytes', arity: 0, brief: '（mir）印大小与每个函数的内容哈希' },

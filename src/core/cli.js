@@ -5173,6 +5173,20 @@ function main(argv) {
        * C 工程一样。**没有公用头**：头的 include 图严格等于模块的依赖图，改一个类型只让
        * `#include` 到它的那几家重编（docs/design/build-system.md §12 末节的定案）。
        * 与用户类型无关的那一族生成物（字面量池、`list<int>`、JS 模板）落在 `omni_gen.{h,c}`。 */
+      /* `--module-files`：把这一份当**一个自足的模块**发（跨文件模块化那条路的发射单位）。
+       * 调试与判据用 —— `.h` 里只有接口、`.c` 里是实现，两份一起编就该与单体同一个答案。 */
+      if (rest.includes('--module-files')) {
+        const wj = rest.indexOf('--work');
+        if (wj < 0) throw new OmniError('emit c --module-files 要 --work DIR');
+        const d2 = rest[wj + 1];
+        mkdirAll(d2);
+        const nm2 = progName(path);
+        const mf = cap('cgen.module')(mod, nm2);
+        writeText(join(d2, `${nm2}.h`), mf.h);
+        writeText(join(d2, `${nm2}.c`), mf.c);
+        stderr(`omni: 一份自足模块  ${nm2}.h ${fmtBytes(mf.h.length)} + ${nm2}.c ${fmtBytes(mf.c.length)} -> ${d2}\n`);
+        return 0;
+      }
       const si = rest.findIndex((a) => a === '--modules' || a.startsWith('--modules='));
       if (si >= 0) {
         const wi = rest.indexOf('--work');

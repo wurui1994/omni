@@ -4,7 +4,7 @@
 // 做成动态库之后由 `omni_plugin_init` 调同一个 register。
 // 名字带前缀是自举链的硬约束（模块作用域的名字整份程序里唯一）。
 
-import { emitC, emitCWithStats, emitCUnits } from '../backend-c/emit.js';
+import { emitC, emitCWithStats, emitCUnits, emitCModule } from '../backend-c/emit.js';
 
 /** 登记：`ir` 说它吃哪一层（oir / mir），`emit(ir, opts)` 交一段文本。 */
 export function registerCTarget(api) {
@@ -15,4 +15,6 @@ export function registerCTarget(api) {
      叫 cgen 而不是 c：`c.*` 那一串是 **C 这门语言**（lang/c.js）的，两回事。 */
   api.registerCap('cgen.stats', (m, o) => emitCWithStats(m, o === undefined ? {} : o));
   api.registerCap('cgen.units', (m, o) => emitCUnits(m, o === undefined ? {} : o));
+  /* **自足的一份模块**（跨文件模块化那条路）：`{h, c}`，见 emit.js 的 moduleFiles。 */
+  api.registerCap('cgen.module', (m, nm, o) => emitCModule(m, nm, o === undefined ? {} : o));
 }
