@@ -227,6 +227,22 @@ function scanBase(fn, mod, base, sites, unreadSlots, cells, escapes) {
         escapes.push({ lo: a.off, hi: a.off + size });
         continue;
       }
+      /* 三之二、`RET 这个地址` = **返回一整块 struct**，同样只逃逸它盖住的那几个字节：
+         后端照**返回类型的大小**读一次就完（`from_mir.js` 的 `OP.RET`：arm64 上 ≤16 字节
+         装进 x0/x1 或 d0-d3；>16 字节那条路 RET 带的是调用方给的 x8 缓冲，不是我们的块）。
+         与 `ARGMEM` 那一条同一个判据 —— 字节数由 ABI 定死。
+
+         为什么要这一条（量出来的）：C 前端给一个函数只划**一整块** `$frame`，返回值的临时
+         与别的聚合局部量挤在一起。`Tree__search` 里 `OMNI_SROA_STAT` 报的正是
+         `放弃 %0（%120 RET 的 a）` —— 那一条把整块 47 条候选全摁死，而它真正碰到的
+         只有返回值那 16 个字节。 */
+      if (op === OP.RET && u.role === 'a') {
+        const a = addrOf(fn, mod, fn.a[u.pc]);
+        const size = memArgSize(fn.retStruct);
+        if (a.base !== base || size <= 0) return no(`%${u.pc} RET 盖住哪几个字节说不清`);
+        escapes.push({ lo: a.off, hi: a.off + size });
+        continue;
+      }
       /* 四、`STORE 这个地址 -> 一个从头到尾没人 LOAD 的槽`：**不算逃逸**。
          那条 STORE 写进去的东西观察不到，地址没跑出去。
          为什么非认这一种不可（量出来的）：`inline` 把 `RET v` 铺成
