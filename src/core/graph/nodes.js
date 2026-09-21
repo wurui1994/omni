@@ -186,7 +186,11 @@ export const NODES = new Map([
        `bycopy` —— 同一族的另一格：前端明说"这一格闭包**就是要按值抄一份**"。默认是
        **不许**借值语义的结构体（go 的闭包按引用捕获，抄一份就是静默的错答案）；而接口
        装箱（ADR-0040）里抄一份正是 go 的语义（`var s Shape = Sq{2}` 抄的是 Sq 那一格值）。 */
-    attrs: ['params', 'name', 'restParam', 'pzero', 'rzero', 'bycopy'], lifetime: 'owns',
+    /* `noret`：**这个函数一个返回值都没有**（前端说的）。为什么非要它 ——
+       图上"体里一格 ret 都没有"与"隐式返回（末尾那个值就是返回值）"**同形**，
+       分不开；有这一格的语言（go / V）本来就知道答案，说一声比让后端猜稳。
+       与 `pzero` / `rzero` 同一条纪律：**声明的优先、推出来的兜底**。 */
+    attrs: ['params', 'name', 'restParam', 'pzero', 'rzero', 'bycopy', 'noret'], lifetime: 'owns',
     doc: 'chez case-lambda（函数只有这一种形式）/ 十门全有',
     providers: { spec: TEN, why: {} },
   }),

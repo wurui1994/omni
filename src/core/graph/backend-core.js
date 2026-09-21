@@ -2124,6 +2124,7 @@ function liftFnVals(fns, rest, known, taken, ctx) {
     extra.push({ name: nm, params: ps, body: n.ins.body,
       ...(Array.isArray(n.attrs.pzero) ? { pzero: n.attrs.pzero } : {}),
       ...(n.attrs.rzero !== undefined ? { rzero: n.attrs.rzero } : {}),
+      ...(n.attrs.noret === true ? { noret: true } : {}),
       ...(caps.length > 0 ? { caps } : {}) });
     if (caps.length > 0) ctx.clos.set(nm, caps);
     /* `bycopy`（有类型覆盖层那一族的附属，见 `nodes.js` 上 `func` 那格）：前端明说
@@ -2298,6 +2299,7 @@ export function emitCore(g) {
            `emitFn` 拿到的是这份记录，不是图上那个节点。 */
         ...(Array.isArray(f.attrs.pzero) ? { pzero: f.attrs.pzero } : {}),
         ...(f.attrs.rzero !== undefined ? { rzero: f.attrs.rzero } : {}),
+        ...(f.attrs.noret === true ? { noret: true } : {}),
         body: f.ins.body,
       });
       continue;
@@ -2318,7 +2320,8 @@ export function emitCore(g) {
     const r = liftOne(f.body, f.name, known, taken, gap);
     for (const g of r.lifted) fns.push(g);
     fns.push({ name: f.name, params: f.params, ...(f.pzero ? { pzero: f.pzero } : {}),
-      ...(f.rzero !== undefined ? { rzero: f.rzero } : {}), body: r.body });
+      ...(f.rzero !== undefined ? { rzero: f.rzero } : {}),
+      ...(f.noret === true ? { noret: true } : {}), body: r.body });
   }
   const topLift = liftOne(rest0, 'main', known, taken, gap);
   for (const g of topLift.lifted) fns.push(g);
@@ -2359,7 +2362,11 @@ export function emitCore(g) {
        * **体里有显式 ret 也要问这一句**：sbcl 的 `max2` 是
        * `(if (> a b) (return-from max2 a)) b` —— 前面一格显式 ret、末尾那个值也是返回值。
        * 原先只在"一格 ret 都没有"时问，于是那一格落到"体末尾不是 ret"上报了缺口。 */
-      let impl = implicitRet(f.ins.body);
+      /* **前端说了"一个返回值都没有"就别猜**（`noret`）：图上"体里没有 ret"与"隐式返回"
+       * 同形，分不开 —— 所以只有**没人说**的时候才去问 `implicitRet`。
+       * 量出来的：go 的 `func (r *Rand) Seed(seed int64) { r.src.Seed(seed) }` 被当成
+       * "末尾那个值是返回值"，而那是一格 void 调用 ⇒ `要返回 int，给的是 void`。 */
+      let impl = it.noret === true ? null : implicitRet(f.ins.body);
       if (impl !== null) {
         const penv = new Map(env);
         for (const p of params) penv.set(p, 'int');

@@ -2123,6 +2123,12 @@ function funcOf(sig, blk, name, self, selfType) {
       { params: self === undefined ? params : [self, ...params], name,
         ...(anyZero ? { pzero: pz } : {}),
         ...(rz !== null ? { rzero: rz } : {}),
+        /* **这个函数一个返回值都没有**（go 的 `func (r *Rand) Seed(seed int64)`）。
+           非说出来不可：图上"体里没有 ret"与"隐式返回（末尾那个值就是返回值）"同形，
+           core 那侧的 `implicitRet` 于是把末尾那一句当成了返回值 —— 量出来是
+           `(fn Rand__Seed (…) int (ret (callfn (fld (fld (var r) src) Seed) …)))`，
+           方言当场 `要返回 int，给的是 void`。go 这侧本来就知道答案，说一声就行。 */
+        ...(outs.length === 0 ? { noret: true } : {}),
         ...(restParam !== undefined ? { restParam } : {}) });
   } finally {
     VARTYPE.clear();
