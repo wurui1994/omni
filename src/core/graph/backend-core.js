@@ -358,7 +358,13 @@ function expr(x, env, ctx) {
     case 'field-get': return fldText(x.ins.obj, x.attrs.field, env, ctx);
     case 'index-get': {
       const t = typeOf(x.ins.obj, env, ctx);
-      if (elemType(t) === null) gap('在一格说不清形状的东西上取下标（这一刀只接 list-new 绑出来的那格）');
+      if (elemType(t) === null) {
+        /* **是哪一格**：只说"说不清形状"时，34 份文件里找那一处只能人肉扫 ——
+           名字（宿主是一格 `ref` 时）与当前函数名这一层手上都有。 */
+        const who = isNode(x.ins.obj) && x.ins.obj.op === 'ref' ? `（变量 ${x.ins.obj.attrs.name} 推出来是 ${t}）` : '';
+        const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
+        gap(`在一格说不清形状的东西上取下标（这一刀只接 list-new 绑出来的那格）${who}${wh}`);
+      }
       return `(aget ${objText(x.ins.obj, env, ctx)} ${expr(x.ins.index, env, ctx)})`;
     }
     /* **表达式位置上的记录**：与 `map-new` 那一格**同一条路数** —— 先物化成一格临时名，
@@ -2493,7 +2499,24 @@ export function emitCore(g) {
   /* 走两遍：第一遍里被调者的形参还按 int，于是**调用者自己的形参**也只能按 int 记；
    * 第二遍那几格已经有具体类型了，往下传一层就对了（`go+method` 的 `scaled` -> `total`
    * 正是这种两层）。两遍够不够：够不够都不出错 —— 记不上的那一格照旧按 int，然后报缺口。 */
-  for (let round = 0; round < 2; round++) {
+  /* 走到**不动点**：每一遍里被调者的形参可能刚有了具体类型，于是调用者往下传一层才对
+   * （`go+method` 的 `scaled` -> `total` 是两层）。从前写死两遍，而层数是**程序决定的** ——
+   * `sort.Float64s` -> `quick` -> `insertion` 是三层，第三层的形参于是一直按 int，
+   * 报"在一格说不清形状的东西上取下标"。
+   *
+   * 判据是 `ctx.args`（形参类型那张表）**不再变**：不变就说明再走一遍什么也收不到。
+   * 上界 4 遍：链再长也够（`sort.Float64s` -> `quick` -> `insertion` 是三层），而每一遍
+   * 都是**整份程序走一趟**，放宽到 8 遍量出来是"编一份 `math/rand` 要好几分钟"。
+   * 到了上界就停 —— 收不齐的那一格照旧按 int，然后报缺口，与从前逐字相同。
+   *
+   * 为什么这样改仍旧逐字节相同：两遍就稳的程序里第三遍**收不到新东西**，登记处按形状
+   * 去重，所以那一遍一格新声明都不发。 */
+  const argsSig = () => {
+    const ks = [...ctx.args.keys()].sort();
+    return ks.map((k) => `${k}=${ctx.args.get(k)}`).join('\n');
+  };
+  let sig = argsSig();
+  for (let round = 0; round < 4; round++) {
     for (const f of fns) {
       try {
         emitFn(f, fnEnv, env, ctx);
@@ -2501,6 +2524,9 @@ export function emitCore(g) {
         if (!(err instanceof Gap)) throw err;
       }
     }
+    const next = argsSig();
+    if (round >= 1 && next === sig) break;
+    sig = next;
   }
   ctx.collect = false;
   /* 空跑那几趟量出来的返回类型**应到 `fn:` 上** —— 调用点靠它定型（`inferType` 的 call）。

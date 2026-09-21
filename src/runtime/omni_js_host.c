@@ -44,10 +44,146 @@ static double host_mono_ms_(void) {
   return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
 }
 
+/* ---------------------------------------------------------------- 开发期的时限
+ *
+ * **生成出来的程序自己带一格看门狗**：默认 30 秒到点就写一句话、退 124。
+ * 账写在 `docs/design/dev-deadline.md`，这儿只说三件为什么：
+ *
+ *   1. **为什么在程序里而不只在 `omni run` 里**：`omni run` 早就有 `--timeout`（默认
+ *      30s，见 cli.js 的 armDevDeadline）。可链出来的可执行文件常常**不经 run 跑** ——
+ *      判据脚本直接 `sh -c ./out`、人手敲 `./out001`。那两条路上死循环没人管，
+ *      开发期一次就是十几分钟。这一格补的正是那两条路。
+ *   2. **为什么是 SIGALRM 而不是另起一根线程**：死循环里事件循环与协程调度都不转，
+ *      只有信号能打断它。处理函数里只有 `write` + `_exit`，两个都是异步信号安全的。
+ *   3. **发布那一档一格都不编进去**：`-DOMNI_RELEASE`（cli.js 的 `--release`）
+ *      把整段 `#ifndef` 关掉 —— 发布出去的程序不该因为一个环境变量就自杀。
+ *
+ * 秒数按这个次序问：环境变量 `OMNI_TIMEOUT` -> 当前目录的 `.env` 里那一行 ->
+ * 默认 30。`0` / `off` / `none` = 不限。
+ */
+#ifndef OMNI_RELEASE
+#include <sys/time.h>
+
+#define OMNI_DEADLINE_DEFAULT_S 30.0
+
+/* 一行 `名字=值` 里的值（找不到回 NULL）。只认行首（允许 `export ` 与前导空白）。 */
+static int omni_dl_parse_(const char *txt, const char *key, double *out) {
+  size_t klen = strlen(key);
+  const char *p = txt;
+  while (*p != '\0') {
+    const char *line = p;
+    while (*line == ' ' || *line == '\t') line++;
+    if (strncmp(line, "export ", 7) == 0) line += 7;
+    while (*line == ' ' || *line == '\t') line++;
+    if (strncmp(line, key, klen) == 0) {
+      const char *q = line + klen;
+      while (*q == ' ' || *q == '\t') q++;
+      if (*q == '=') {
+        q++;
+        while (*q == ' ' || *q == '\t' || *q == '"' || *q == '\'') q++;
+        *out = atof(q);
+        return 1;
+      }
+    }
+    while (*p != '\0' && *p != '\n') p++;
+    if (*p == '\n') p++;
+  }
+  return 0;
+}
+
+/* `.env` 里的 `OMNI_TIMEOUT`（读不到就回 0）。只看当前目录 —— 往上找会把"在哪儿跑"
+   变成一件说不清的事，而这一格的全部意思是"手边这个仓库的开发约定"。 */
+static int omni_dl_from_dotenv_(double *out) {
+  char buf[4096];
+  size_t n;
+  FILE *f = fopen(".env", "rb");
+  if (f == NULL) return 0;
+  n = fread(buf, 1, sizeof(buf) - 1, f);
+  fclose(f);
+  buf[n] = '\0';
+  return omni_dl_parse_(buf, "OMNI_TIMEOUT", out);
+}
+
+static void omni_dl_fire_(int sig) {
+  static const char msg[] =
+    "omni: 超时 —— 这一趟跑过了开发期的时限，程序自己停了（退 124）。\n"
+    "omni: 放宽：OMNI_TIMEOUT=120（秒）；关掉：OMNI_TIMEOUT=0；也可以写进 .env。\n"
+    "omni: 发布构建（--release）里没有这一格。\n";
+  (void)sig;
+  (void)!write(2, msg, sizeof(msg) - 1);
+  _exit(124);
+}
+
+/* **备用的那一格：一格外部看门狗**（与 js 那条腿上同一个东西，见
+   `src/core/backend-js/prelude.js` 的 `$dl_arm`）。
+   为什么在已经有 SIGALRM 之后还要它：`SIG_BLOCK` 过 SIGALRM 的代码、把 ITIMER_REAL
+   另作他用的库、`exec` 换掉整个映像的那一趟 —— 三种情形下那一格都会静静失效。
+   外部那一格**不在这个进程里**，所以进程内发生什么都拦不住它：到点先 TERM、
+   再等 5 秒 KILL。它每秒看一眼目标还在不在，没了就自己退（一秒一次 `kill -0`，
+   开销可以忽略）。deadline 比 SIGALRM 晚 2 秒 —— 正常情形下让进程内那一句先说话。 */
+static void omni_dl_spawn_watchdog_(double sec) {
+  char sh[512];
+  long ticks = (long)sec + 2;
+  pid_t me = getpid();
+  pid_t kid;
+  if (ticks < 1) ticks = 1;
+  snprintf(sh, sizeof(sh),
+    "p=%ld; n=0; while [ $n -lt %ld ]; do kill -0 $p 2>/dev/null || exit 0;"
+    " sleep 1; n=$((n+1)); done; kill -0 $p 2>/dev/null || exit 0;"
+    " printf %%s 'omni: 超时 —— 外部看门狗把它停了（进程内那一格没响）。\n' >&2;"
+    " kill -TERM $p 2>/dev/null; m=0; while [ $m -lt 5 ]; do"
+    " kill -0 $p 2>/dev/null || exit 0; sleep 1; m=$((m+1)); done;"
+    " kill -KILL $p 2>/dev/null",
+    (long)me, ticks);
+  kid = fork();
+  if (kid == 0) {
+    /* 子进程：自己开一格会话，这样不跟着父进程的终端信号一起走。 */
+    setsid();
+    execl("/bin/sh", "sh", "-c", sh, (char *)NULL);
+    _exit(127);
+  }
+  /* 父进程不 wait —— 那一格活得比我们久。它自己会在看不到我们之后退掉（孤儿由 init 收）。 */
+}
+
+static void omni_deadline_init_(void) {
+  const char *e = getenv("OMNI_TIMEOUT");
+  double sec = -1.0;
+  struct sigaction sa;
+  struct itimerval it;
+  /* **发布那一档两道闸**：编译期这一整段由 `-DOMNI_RELEASE` 关掉（那一格还没接到
+     `--release` 上）；运行期 `OMNI_RELEASE=1` 也一格都不装 —— 已经发出去的二进制
+     在生产机上不该因为某台机器写了 `OMNI_TIMEOUT` 就自杀。 */
+  const char *rel = getenv("OMNI_RELEASE");
+  if (rel != NULL && strcmp(rel, "1") == 0) return;
+  if (e != NULL && *e != '\0') {
+    if (strcmp(e, "off") == 0 || strcmp(e, "none") == 0) return;
+    sec = atof(e);
+  } else if (!omni_dl_from_dotenv_(&sec)) {
+    sec = OMNI_DEADLINE_DEFAULT_S;
+  }
+  if (!(sec > 0.0)) return;                       /* 0 / 负 / 不是数 = 不限 */
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = omni_dl_fire_;
+  sigemptyset(&sa.sa_mask);
+  if (sigaction(SIGALRM, &sa, NULL) == 0) {
+    memset(&it, 0, sizeof(it));
+    it.it_value.tv_sec = (time_t)sec;
+    it.it_value.tv_usec = (suseconds_t)((sec - (double)(time_t)sec) * 1e6);
+    setitimer(ITIMER_REAL, &it, NULL);
+  }
+  omni_dl_spawn_watchdog_(sec);
+}
+#else
+static void omni_deadline_init_(void) { }
+#endif /* OMNI_RELEASE */
+
 void omni_host_init(int argc, char **argv) {
   host_up_base_ms = host_mono_ms_();
   host_argc = argc;
   host_argv = argv;
+  /* 开发期的时限（见上面那段注）：一格 SIGALRM，默认 30s，发布构建里整段不编进去。
+     摆在最前面 —— 卡住的那一趟里连 `omni_prof_env_init` 都可能走不完。 */
+  omni_deadline_init_();
   /* 采样 profiler 是**运行期**的开关（`OMNI_PROF=sample[:hz]`）：同一份二进制不带
    * 开关跑就是一分钱不花，带上就开始采。摆在这儿而不是 main 里，是因为插件那一支
    * 也走这条初始化。 */

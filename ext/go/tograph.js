@@ -3571,13 +3571,26 @@ function toNode(x) {
 
            两条出路，都不猜：
              * 跨包表里有这格顶层函数 -> mangle（`rand__New`，跨包那一路）；
-             * 没有 -> 取包那格记录的字段再调它（`--pkgs` 摊成同包那一路，包是一格
-               `record-new`，见 `src/core/graph/run.js` 的 byPkg 那一段）。
+             * `FSIG` 里有这格顶层函数的形参表（`--pkgs` 摊成同包那一路，`opts.also`
+               那一趟收的）-> **直接按名字调**；
+             * 都没有 -> 取包那格记录的字段再调它（桩那一族走的是这条）。
            `math.F(…)` 在上面已经先走掉了（`GO_MATH_RMATH`）。 */
         if (recvName !== null && fromVar === undefined && !onType
           && IMPORTS.has(recvName) && VARTY.get(recvName) === undefined) {
           if (XPKG.funcs.has(`${recvName}.${m}`)) {
             return node('call', { fn: node('ref', {}, { name: mangle(recvName, m) }), args: argNodes });
+          }
+          /* **摊成同包那一路：直接按名字调**（不经包那格记录的字段）。
+             `--pkgs` 把依赖包的顶层声明摊进了同一份 body，所以 `path.Split` 与 `Split`
+             是同一格绑定 —— 记录里那个字段装的就是它。两条理由要直接调：
+               * **多返回**：`d, f := path.Split(…)` 经 `callfn` 出来那一格，图上说不清
+                 是多值 —— core 报 `pick 的来源不是一格多值`。按名字调时多值那格形状在。
+               * 顺带省一次间接调用（性能那一栏也要这一格）。 */
+          if (FSIG.has(m)) {
+            return node('call', {
+              fn: node('ref', {}, { name: m }),
+              args: argsByDecl(m, argNodes, false, argAsts),
+            });
           }
           return node('call', { fn: fieldGet(toNode(obj), m), args: argNodes });
         }
@@ -3923,7 +3936,14 @@ export function goToGraph(tree, opts) {
      生成一格 `bind <pkgName> = record-new { 常量字段… }`，让后端跑到
      `utf8.RuneSelf` 时能找到 `v_utf8` 这个变量。 */
   const stubBinds = [];
+  /* **`--pkgs` 供了真包的那几个名字不发桩**：真包那格 `record-new` 与这一格桩是**同名的
+     两格 bind**，而方言里同一层不许重名（量出来是 `'path' 在这一层已经声明过了`）。
+     从前以为"排在后面会盖掉它"——不成立：桩是在**主文件**这一趟注入的，而主文件排在
+     依赖包**后面**，所以盖掉的是真包那一格。 */
+  const havePkgs = new Set(opts === undefined || opts === null || opts.havePkgs === undefined
+    ? [] : opts.havePkgs);
   for (const pkg of IMPORTS) {
+    if (havePkgs.has(pkg)) continue;
     if (GO_STDLIB_STUBS[pkg] !== undefined) {
       const fields = Object.entries(GO_STDLIB_STUBS[pkg]);
       /* **一格常量都没有的桩不发**（`fmt` / `sort` / `strings` … 都是空表）：

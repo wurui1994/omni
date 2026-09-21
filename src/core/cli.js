@@ -4354,37 +4354,91 @@ function buildCFile(path, rest) {
   return 0;
 }
 
-/* ---- `omni run --timeout SEC`（整趟的墙上时限）
+/* ---- 开发期的墙上时限（每一个动词都有，不只 `run`）
  *
- * 默认 **30 秒**：一条会挂住的腿（asy 里一个不收敛的循环、等 stdin 的子进程）从前是
- * 「终端上一直坐着」，而这是**跑**这个动词最该有的一格保护。`--timeout 0` 撤掉它。
+ * 账写在 `docs/design/dev-deadline.md`。这儿三句：
+ *
+ *   * **为什么每个动词都要**：`run` 早就有 30s 的默认时限，可挂住的那一趟常常不是 `run`
+ *     —— `build` 里一个不收敛的定点循环、判据脚本直接跑链出来的可执行文件。
+ *     开发期一次这样的挂住就是十几分钟，而那十几分钟里**一个字节的信息都没有**。
+ *   * **两个预算，一个机制**：`OMNI_TIMEOUT`（跑一个程序，默认 30s）与
+ *     `OMNI_BUILD_TIMEOUT`（编译这一趟，默认 300s）。分开是因为"编一份大东西要五分钟"
+ *     是正常的，而"跑一个例子要五分钟"不是。
+ *   * **哪儿来的数**：`--timeout SEC`（这一趟）> 环境变量 > 仓库根的 `.env` > 默认。
+ *     `0` / `off` / `none` = 不限；`--release` 或 `OMNI_RELEASE=1` 也不限。
  *
  * 时限本身由宿主拿着（`runTimeout`）—— 只有它能中断两种"跑"：子进程那一路是
- * `spawnSync` 的时限，本进程那一路（`evalJs` / 解释器）是另一根线程上的看门狗。
- * 这儿留一份**同样的截止时刻**，用来在回到这一层的时候判断"这一趟是不是被时限打断的"：
- * 子进程被杀之后 `spawn` 是**正常返回**的，退出码分不出"超时"与"程序自己失败了"。
+ * `spawnSync` 的时限，本进程那一路（`evalJs` / 解释器 / 我们自己那台编译器）是另一根
+ * 线程上的看门狗。这儿留一份**同样的截止时刻**，用来在回到这一层的时候判断"这一趟是不是
+ * 被时限打断的"：子进程被杀之后 `spawn` 是**正常返回**的，退出码分不出"超时"与"失败"。
  *
  * 印字的人有两个（子进程那一路是这儿、本进程那一路是看门狗），但那句话只有一份 ——
  * 文本是造好之后交给宿主的，不是两边各写一遍。
+ *
+ * **链出来的可执行文件自己也带一格**（SIGALRM，默认同样 30s，同样读 `OMNI_TIMEOUT` /
+ * `.env`）—— 见 `src/runtime/omni_js_host.c` 的 `omni_deadline_init_`。那一格管的是
+ * "不经 omni 跑"的那条路。
  */
 const RUN_TIMEOUT_DEFAULT_S = 30;
+const BUILD_TIMEOUT_DEFAULT_S = 300;
+/** 跑一个程序的那几个动词（别的都按"编译"算）。 */
+const RUNNING_VERBS = new Set(['run', 'run-c', 'exec', 'interp']);
 let RUN_DEADLINE = 0;
 let RUN_TIMEOUT_MSG = '';
 
-function armRunTimeout(rest) {
+/** 仓库根的 `.env` 里那一行（读不到回 null）。只读一次，缓存。 */
+let DOTENV = null;
+function dotEnv(name) {
+  if (DOTENV === null) {
+    DOTENV = new Map();
+    /* 落点与缓存根同一条规矩（见 host/cache.js 的 treeRoot）：先当前目录，
+       再往上找带标志文件的那一层。读不到就是空表 —— 没有 `.env` 是正常情形。 */
+    for (const p of ['.env', join(cwd(), '.env')]) {
+      try {
+        if (!exists(p)) continue;
+        for (const line of readText(p).split('\n')) {
+          const s = line.trim().replace(/^export\s+/, '');
+          const eq = s.indexOf('=');
+          if (eq <= 0 || s.startsWith('#')) continue;
+          DOTENV.set(s.slice(0, eq).trim(), s.slice(eq + 1).trim().replace(/^["']|["']$/g, ''));
+        }
+        break;
+      } catch { /* 读不动就当没有 */ }
+    }
+  }
+  return DOTENV.has(name) ? DOTENV.get(name) : null;
+}
+
+/** 一格秒数的三级来源：环境变量 -> `.env` -> 默认。`0`/`off`/`none` 回 0（= 不限）。 */
+function timeoutBudgetS(name, dflt) {
+  const raw = env(name) ?? dotEnv(name);
+  if (raw === null || raw === undefined || raw === '') return dflt;
+  if (raw === 'off' || raw === 'none') return 0;
+  const t = String(raw).endsWith('s') ? String(raw).slice(0, -1) : String(raw);
+  const n = Number(t);
+  return (t === '' || !(n >= 0) || n === Infinity) ? dflt : n;
+}
+
+function armDevDeadline(verb, rest) {
+  /* 发布那一档没有时限（生成出来的程序里那一格也由 `--release` 关掉）。 */
+  if (rest.includes('--release') || env('OMNI_RELEASE') === '1') return;
+  const running = RUNNING_VERBS.has(verb);
   const i = rest.indexOf('--timeout');
   const raw = i >= 0 ? rest[i + 1] : null;
-  let sec = RUN_TIMEOUT_DEFAULT_S;
+  let sec = running
+    ? timeoutBudgetS('OMNI_TIMEOUT', RUN_TIMEOUT_DEFAULT_S)
+    : timeoutBudgetS('OMNI_BUILD_TIMEOUT', BUILD_TIMEOUT_DEFAULT_S);
   if (raw !== null && raw !== undefined) {
     /* `30s` 也收：写时限的人十个有九个会带那个单位。 */
     const t = raw.endsWith('s') ? raw.slice(0, -1) : raw;
     sec = Number(t);
     if (t === '' || !(sec >= 0) || sec === Infinity) {
-      throw new OmniError(`run: --timeout 要一个秒数（0 = 不限），拿到的是 '${raw}'`);
+      throw new OmniError(`${verb}: --timeout 要一个秒数（0 = 不限），拿到的是 '${raw}'`);
     }
   }
   if (sec === 0) return;
-  RUN_TIMEOUT_MSG = `omni: 超时 —— 这一趟跑过了 ${sec}s（--timeout），已中止\n`;
+  const knob = running ? 'OMNI_TIMEOUT' : 'OMNI_BUILD_TIMEOUT';
+  RUN_TIMEOUT_MSG = `omni: 超时 —— 这一趟 ${verb} 过了 ${sec}s（--timeout / ${knob} / .env），已中止\n`;
   RUN_DEADLINE = nowMs() + sec * 1000;
   runTimeout(sec * 1000, RUN_TIMEOUT_MSG);
 }
@@ -4770,10 +4824,11 @@ function main(argv) {
       }
     }
   }
-  /* `run` 的时限（默认 30s，见 armRunTimeout）。摆在这儿而不是各条腿里：`--backend` 会
+  /* **每个动词都有时限**（见 armDevDeadline）。摆在这儿而不是各条腿里：`--backend` 会
    * 把 `run` 换成另一条 case（`run-c`/`interp`/`c-run`…），而判据是**用户敲的那个动词**
-   * （`node.key`）—— 一条腿都不能漏，漏掉的那条就是「按了 --timeout 却还在挂着」。 */
-  if (node.key === 'run') armRunTimeout(rest);
+   * （`node.key`）—— 一条腿都不能漏，漏掉的那条就是「挂在终端上，十几分钟一个字节的
+   * 信息都没有」。跑一个程序默认 30s、编译这一趟默认 300s，两个预算分开算。 */
+  armDevDeadline(node.key, rest);
   /**
    * **借来的那些语言也是这条链的前端**，与 `.c` 同一条规矩（前端按扩展名选）。
    *

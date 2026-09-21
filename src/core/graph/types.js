@@ -267,6 +267,10 @@ export function inferType(x, env, ctx) {
     if (shape === undefined) return UNKNOWN;
     return shape.types.get(`v${Number(x.attrs.index ?? 0)}`) ?? UNKNOWN;
   }
+  /* **切片交出来的是同一个类型**：串的子串是串（方言里 `(ssub …)`）、列表的切片还是
+     那格数组。少了这一支，`s[i:i+1] != "b"` 里左边推出来是 int，于是比较那一处给它
+     套一层 `(tostr …)` —— 方言当场骂「(tostr E) 只接受 int / real / bool」。 */
+  if (x.op === 'slice') return inferType(x.ins.obj, env, ctx);
   if (x.op === 'conv') return convTo(x, ctx);
   return UNKNOWN;
 }

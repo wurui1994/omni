@@ -328,6 +328,9 @@ class JsEmitter {
         this.line(`$lin_data(${d.off}, [${d.bytes.join(', ')}]);`);
       }
     }
+    /* 开发期的时限：起一格**外部**看门狗（`$dl_arm`，见 docs/design/dev-deadline.md）。
+       摆在入口**之前** —— 入口里要是个死循环，进去之后就没有第二次机会了。 */
+    this.line('$dl_arm();');
     this.line(`${this.mod.entry}();`);
     // 没人接的错误：和 C 侧的 main 一样，在入口返回之后查一次（ADR-0007 决定 1）
     this.line('$js_check_uncaught();');

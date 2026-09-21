@@ -5,7 +5,7 @@
 // 而真正要的是**跑出来对**，而且是走 MIR 管线那一条（性能账在那儿）。
 // 有官方 go 当参考，所以这一格不必自己写期望值 —— 参考是别人的实现，不是我们的复述。
 import { execFileSync } from 'node:child_process';
-import { readdirSync, mkdirSync } from 'node:fs';
+import { readdirSync, mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -14,6 +14,20 @@ const root = join(here, '..', '..');
 const cases = join(here, 'cases');
 const out = join(root, '.omni-cache', 'go-e2e');
 mkdirSync(out, { recursive: true });
+
+/**
+ * **一格例子要哪几份标准库桩**：源码里写一行 `//omni:pkgs a,b,c`（相对仓库根）。
+ *
+ * 为什么判据长这样：`go run` 用的是**真标准库**，我们用 `src/lib/go/` 下那几份桩 ——
+ * 两边跑同一份源码、比同一串字节，于是"桩写对了没有"这件事有了外部的尺子
+ * （与整条链的老规矩一样：参考是别人的实现，不是我们的复述）。
+ */
+const pkgsOf = (src) => {
+  const line = readFileSync(src, 'utf8').split('\n')
+    .find((l) => l.startsWith('//omni:pkgs'));
+  if (line === undefined) return [];
+  return ['--pkgs', line.slice('//omni:pkgs'.length).trim()];
+};
 
 let pass = 0, fail = 0, skip = 0;
 
@@ -37,7 +51,7 @@ for (const f of files) {
      从前这儿是两步（先 `--backend core -o x.sx`、再 `build x.sx`），两个 catch 各写一遍。
      **有名有姓的缺口算 skip**，与 `tests/graph` 一条规矩：那是"还没接"，不是"接错了"。 */
   try {
-    execFileSync('node', [join(root, 'src', 'cli.js'), 'build', src, '-o', exe],
+    execFileSync('node', [join(root, 'src', 'cli.js'), 'build', src, '-o', exe, ...pkgsOf(src)],
       { cwd: root, encoding: 'utf8', timeout: 300000, stdio: 'pipe',
         env: { ...process.env, OMNI_MIR_OPT: '1' } });
   } catch (e) {

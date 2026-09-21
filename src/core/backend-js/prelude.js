@@ -91,6 +91,61 @@ function $rt_error(msg) {
    翻成 pending 的 Error 值。为什么不在出错点直接 $js_throw：那一族函数往往互相递归、错误点
    十几处，靠宿主自己的 throw 把栈剥到入口最省事，也不必给每个中间返回补一次 pending 检查。
    前提是那个 op 在 ABI 表里标了 throws: true —— 调用点的 pending 检查由它发。 */
+/* ---- 开发期的时限：起一格**外部**看门狗（账写在 docs/design/dev-deadline.md）
+ *
+ * 为什么非要外部进程：紧的 JS 循环把事件循环整个占住，setTimeout 永远不会响 ——
+ * 从进程内部拦不住自己。一格 sh 一秒醒一次，开销可以忽略。
+ *
+ * 那一格干三件事，**不存在"不管它"的情形**：
+ *   1. 每秒看一眼目标还在不在（没了就自己退 —— 程序正常跑完时它跟着走）；
+ *   2. 到点先写一句话再 TERM；
+ *   3. 再等 5 秒还在就 KILL。
+ *
+ * 秒数：环境变量 OMNI_TIMEOUT > 当前目录的 .env > 默认 30。0 / off / none = 不限；
+ * OMNI_RELEASE=1 也不起。granularity 是 1 秒（小数那一档由原生腿的 setitimer 管）。
+ * 原生腿上这一格是**备用**（那儿还有一格 SIGALRM），两边读的是同一个开关。
+ */
+function $dl_dotenv() {
+  try {
+    var t = $node("node:fs").readFileSync(".env", "utf8");
+    var ls = t.split("\n");
+    for (var i = 0; i < ls.length; i++) {
+      var s = ls[i].trim();
+      if (s.indexOf("export ") === 0) s = s.slice(7).trim();
+      if (s.charAt(0) === "#") continue;
+      var eq = s.indexOf("=");
+      if (eq <= 0) continue;
+      if (s.slice(0, eq).trim() !== "OMNI_TIMEOUT") continue;
+      return s.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
+    }
+  } catch (e) { /* 没有 .env 是正常情形 */ }
+  return null;
+}
+function $dl_arm() {
+  try {
+    if (process.env.OMNI_RELEASE === "1") return;
+    var raw = process.env.OMNI_TIMEOUT;
+    if (raw === undefined || raw === "") raw = $dl_dotenv();
+    if (raw === "off" || raw === "none") return;
+    var sec = (raw === null) ? 30 : Number(String(raw).replace(/s$/, ""));
+    if (!(sec > 0)) return;
+    var ticks = Math.max(1, Math.ceil(sec));
+    /* 这一份是 String.raw 模板：反斜杠 n **不是换行**，是两个字符。所以换行交给
+       sh 的 printf（格式里那个 \n 由它解释），这儿一个转义都不写。 */
+    var msg = "omni: 超时 —— 这一趟跑过了开发期的时限（" + ticks
+      + "s），外部看门狗把它停了。放宽 OMNI_TIMEOUT=120，关掉 OMNI_TIMEOUT=0。";
+    var sh = "p=" + process.pid + "; n=0; while [ $n -lt " + ticks + " ]; do"
+      + " kill -0 $p 2>/dev/null || exit 0; sleep 1; n=$((n+1)); done;"
+      + " kill -0 $p 2>/dev/null || exit 0;"
+      + " printf '%s\n' " + JSON.stringify(msg) + " >&2;"
+      + " kill -TERM $p 2>/dev/null; m=0; while [ $m -lt 5 ]; do"
+      + " kill -0 $p 2>/dev/null || exit 0; sleep 1; m=$((m+1)); done;"
+      + " kill -KILL $p 2>/dev/null";
+    var ch = $node("node:child_process").spawn("/bin/sh", ["-c", sh],
+      { detached: true, stdio: ["ignore", "ignore", 2] });
+    ch.unref();
+  } catch (e) { /* 起不来就算了 —— 时限是开发期的便利，不是正确性 */ }
+}
 function $HostBad(m, k) { this.m = m; this.k = k === undefined ? "SyntaxError" : k; }
 function $js_host_err(e) {
   if (!(e instanceof $HostBad)) throw e;

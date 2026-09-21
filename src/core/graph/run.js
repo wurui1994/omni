@@ -341,13 +341,18 @@ function graphOf(path, argv) {
        两趟：第一趟把依赖包的声明 + 包 record 放进 body，第二趟放主包。
        这样 `call main`（在主包末尾）跑的时候 `v_util` 已经绑好了。 */
     const pkgDirs = allPkgDirs.length > 0 ? allPkgDirs : [];
+    /* **`--pkgs` 供了真包的那几个名字**（目录名 = 包名，与 byPkg 那儿同一条规矩）。
+       交给前端是为了让它**别再为这几个名字发标准库桩** —— 桩与真包那格 record 同名，
+       而桩是在主文件那一趟注入的、排在依赖包后面，于是盖掉的是真的那一格
+       （量出来是 `'path' 在这一层已经声明过了`）。 */
+    const havePkgs = pkgDirs.map((d) => d.slice(d.lastIndexOf('/') + 1));
     const dirOfFile = (p) => (p.lastIndexOf('/') >= 0 ? p.slice(0, p.lastIndexOf('/')) : '.');
     const depFiles = all.filter((f) => pkgDirs.includes(dirOfFile(f.path)));
     const ownFiles = all.filter((f) => !pkgDirs.includes(dirOfFile(f.path)));
     /* 第一趟：依赖包，按包名分组 */
     const byPkg = new Map();
     for (const f of depFiles) {
-      const g = lang.toGraph(f.tree, { also, asModule: true });
+      const g = lang.toGraph(f.tree, { also, asModule: true, havePkgs });
       const dir = dirOfFile(f.path);
       const pkgName = dir.slice(dir.lastIndexOf('/') + 1);
       if (!byPkg.has(pkgName)) byPkg.set(pkgName, []);
@@ -385,6 +390,7 @@ function graphOf(path, argv) {
       const g = lang.toGraph(f.tree, {
         also,
         asModule: doPkg ? true : (f.isMain !== true),
+        havePkgs,
       });
       body.push(...g.body);
     }
