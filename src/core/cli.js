@@ -16,7 +16,7 @@ import {
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { installSrcEvalHook } from './host/src_eval.js';
-import { cacheRoot, scratchDir, dropScratch, cacheList, cacheGc } from './host/cache.js';
+import { cacheRoot, scratchDir, dropScratch, cacheList, cacheGc, cacheKept } from './host/cache.js';
 import { dataPath, dataDir } from './host/data.js';
 import { hash16 } from './host/hash.js';
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
@@ -1581,7 +1581,8 @@ function cacheCmd(args, argv) {
     const now = Date.now();
     for (const e of list) {
       const age = e.newest === 0 ? '空' : `${Math.round((now - e.newest) / 86400000)} 天前`;
-      stdout(`  ${e.name.padEnd(14)} ${mbOf(e.bytes).padStart(9)}  最后动过 ${age}\n`);
+      const kept = cacheKept(e.name, false) ? '  ← 判据，gc 不碰' : '';
+      stdout(`  ${e.name.padEnd(14)} ${mbOf(e.bytes).padStart(9)}  最后动过 ${age}${kept}\n`);
     }
     return 0;
   }
@@ -1592,12 +1593,14 @@ function cacheCmd(args, argv) {
       all: sub === 'clean',
       days: di >= 0 ? Number(argv[di + 1]) : 14,
       maxMb: mi >= 0 ? Number(argv[mi + 1]) : undefined,
+      oracle: argv.includes('--oracle'),
     };
     if (argv.includes('-n')) {
       /* 只说不做：把"会扔哪几格"算出来印出来（同一套规矩，只是不动手）。 */
       const now = Date.now();
       let would = 0;
       for (const e of cacheList()) {
+        if (cacheKept(e.name, opts.oracle)) { stdout(`留着 ${e.name}（判据，加 --oracle 才扔）\n`); continue; }
         let hit = opts.all || e.name === 'work';
         if (!hit && opts.days >= 0 && e.newest > 0 && now - e.newest > opts.days * 86400000) hit = true;
         if (!hit) continue;
@@ -1611,6 +1614,9 @@ function cacheCmd(args, argv) {
     let freed = 0;
     for (const e of dropped) freed = freed + e.bytes;
     for (const e of dropped) stderr(`omni cache: 扔了 ${e.name}（${mbOf(e.bytes)}）\n`);
+    for (const e of cacheList()) {
+      if (cacheKept(e.name, opts.oracle)) stderr(`omni cache: 留着 ${e.name}（判据，加 --oracle 才扔）\n`);
+    }
     stderr(`omni cache: 腾出 ${mbOf(freed)}\n`);
     return 0;
   }

@@ -142,6 +142,20 @@ export function cacheList() {
 }
 
 /**
+ * 这一格是**判据**，不是产物 —— 倒垃圾时一律留着。
+ *
+ * 为什么要这么一条：`.omni-cache/epsref` 里躺着近 200 份真 asy 出的图（oracle）。
+ * 它长得像缓存（在缓存根底下、按名字存），可**重做一遍要跑近 200 次真 asy**（量过 5 分多钟），
+ * 而且 `tests/asy/eps.js` 默认**不生成**（要 `OMNI_EPS_GEN=1`）—— 清掉之后那一轴不报错，
+ * 只安静地把每个例子记成"没有参考、不计分"。这件事真发生过一次（2026-09-21 的 `cache gc`
+ * 把它连根扔了，之后 `equilateral` / `cardioid` 全变成不计分），所以规矩写进代码而不是脑子里：
+ * **只有显式 `--oracle` 才动它们。**
+ */
+function isOracle(name) {
+  return name === 'epsref' || name.startsWith('epsref-');
+}
+
+/**
  * 倒垃圾。三条规矩，每条都能单独说清：
  *
  *   1. `work/` **整棵扔掉**（它是暂存，不是缓存）；
@@ -149,6 +163,7 @@ export function cacheList() {
  *   3. 还超 `maxMb` 的话，从**最旧**的开始继续扔，直到降到线下（默认不限）。
  *
  * `all: true` = 整个缓存根扔掉（下一趟全部重算，慢但绝对干净）。
+ * 两种都**不碰 oracle 那几格**（见 isOracle），除非 `oracle: true`。
  * 回一份账：扔了哪几格、各多少字节。
  */
 export function cacheGc(opts) {
@@ -157,12 +172,14 @@ export function cacheGc(opts) {
   const days = o.days === undefined ? 14 : o.days;
   const dropped = [];
   const take = (e) => { dropped.push(e); rmTree(e.path); };
+  const keep = (e) => o.oracle !== true && isOracle(e.name);
   if (o.all === true) {
-    for (const e of cacheList()) take(e);
+    for (const e of cacheList()) if (!keep(e)) take(e);
     return dropped;
   }
   const entries = cacheList();
   for (const e of entries) {
+    if (keep(e)) continue;
     if (e.name === 'work') { take(e); continue; }
     if (days >= 0 && e.newest > 0 && now - e.newest > days * 86400000) take(e);
   }
@@ -172,10 +189,16 @@ export function cacheGc(opts) {
     for (const e of left) total = total + e.bytes;
     for (const e of left) {
       if (total <= o.maxMb * 1048576) break;
+      if (keep(e)) continue;
       take(e);
       total = total - e.bytes;
     }
   }
   return dropped;
+}
+
+/** 这一格会不会被 `gc` / `clean` 留下（`omni cache` 那边印给人看，判据只有一处）。 */
+export function cacheKept(name, oracle) {
+  return oracle !== true && isOracle(name);
 }
 

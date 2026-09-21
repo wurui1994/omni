@@ -525,18 +525,25 @@ ${graphEngineHelp()}
       help: `缓存与暂存是两件事，这条命令把它们分开算：
   缓存（rt/ glr/ incr/ …）  键是内容，命中就省一趟 —— 留着有用
   暂存（work/）             一次性的中间文件 —— **用完就该没了**
+  判据（epsref/ …）         真 asy 出的那些参考图 —— gc **一律不碰**
 
   omni cache ls                 每一格多大、最后动过是什么时候（按大小降序）
   omni cache gc                 倒垃圾：work/ 整棵扔 + 14 天没动过的整格扔
   omni cache gc --days 3        换个天数（--days -1 = 只扔 work/）
   omni cache gc --max-mb 500    还超这个数就从最旧的接着扔
   omni cache clean              整个缓存根扔掉（下一趟全部重算）
+  omni cache gc --oracle        连判据那几格也扔（想清楚再用，见下）
 
 为什么要有它：从前没有任何地方回收，量到过 657 个 work 目录 518 MB，
 名字还都是 \`c-75d7a0838ed4f474\` 这种路径哈希 —— 一格都看不出是谁的。
-现在暂存目录按进程号命名、用完就扔，持久那几格的名字跟着文件名走。`,
+现在暂存目录按进程号命名、用完就扔，持久那几格的名字跟着文件名走。
+
+为什么 epsref 要特殊对待：那是近 200 份真 asy 出的图，重做一遍要跑近 200 次
+asy（5 分多钟），而 tests/asy/eps.js 默认不生成 —— 清掉之后那一轴不报错，
+只安静地把每个例子记成"没有参考、不计分"。这件事真发生过一次。`,
       flags: [{ name: '--days', arity: 1, value: 'N', brief: 'gc：多少天没动就整格扔（默认 14）' },
         { name: '--max-mb', arity: 1, value: 'N', brief: 'gc：总量上限，超了从最旧的接着扔' },
+        { name: '--oracle', arity: 0, brief: 'gc：连判据（epsref/…）也扔' },
         { name: '-n', arity: 0, brief: '只说会扔什么，不动手' }],
     },
     {
