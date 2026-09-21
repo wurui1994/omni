@@ -102,6 +102,9 @@ export function removeInsns(fn, doomed) {
   if (fn.regHintGF !== undefined) fn.regHintGF = undefined;
   if (fn.slotHint !== undefined) fn.slotHint = undefined;
   if (fn.slotHintF !== undefined) fn.slotHintF = undefined;
+  /* `noPool`（后端关掉一遍过缓存、把 x11-x15 让给分配表）**必须与分配表同生共死**：
+     留着一个 true 而表是空的 = 那五个寄存器谁都不用，没涂色的值全落栈位。 */
+  if (fn.noPool !== undefined) fn.noPool = false;
 
   /* 三、按角色改 ref。
      实参池**不压缩**：起点存在 b 上，压缩了就得同时改 b，而池里可能还有别的东西

@@ -77,6 +77,12 @@ const SP = 31;
  * 为什么取 x11-x15：x0-x7 是实参、x8 是 `RES` 兼间接结果、x9/x10 是草稿、x28 是帧基址、
  * x29/x30 是帧与返回地址 —— 这五个是这一层里**谁都不碰**的（量过：整份 from_mir 里
  * 没有一处发到它们身上），所以缓存不需要任何「会不会被踩」的推理。
+ *
+ * **它干的活比看起来多**（2026-09-22 量出来的，`regalloc.js` 的 `COLORS_SCRATCH` 第四段）：
+ * 把这五个整批交给上一层的分配表、这一格整个关掉（`noPool`），`Tree__search` 涂上色的值
+ * 52 → 68，可**帧访存 100 → 128** —— 这一格在每一段直线代码里兜住了所有短命的值，
+ * 而上一层涂不上色的那些（多半是跨调用的）失去它之后每次读都是一条 `ldr`。
+ * 所以"把两套机制并成一套"不是白换：得先有"在调用点上溢出/恢复"那一格。
  */
 const POOL = [11, 12, 13, 14, 15];
 /* 帧基址（第三十六片）：**只有会动栈顶的函数里才用**（变长数组、`alloca`）。
@@ -109,7 +115,15 @@ const FTMP1 = 17;
  * 这边有几个就认几个，`stickyAt` 里 `c >= STICKY.length` 一律回 -1 ——
  * 认不下的颜色照旧住栈位，而那永远是对的（见 regalloc.js 文件头）。
  */
-const STICKY = [19, 20, 21, 22, 23, 24, 25, 26, 27];
+const STICKY = [19, 20, 21, 22, 23, 24, 25, 26, 27,
+  /* **草稿那一档**（`regalloc.js` 的 `COLORS_SCRATCH`）：x11-x15，与 `POOL` 是同一批。
+   * 只有 `fn.noPool` 为真的函数才会用到这五个颜色 —— 那时 `POOL` 整个关掉，
+   * 这批寄存器的唯一主人就是上一层的分配表（两套机制并成一套，见 `noPool`）。
+   * 它们是**调用者保存的**，所以上一层只把"不跨任何调用点"的区间涂成这些颜色，
+   * 序言/收场一个字都不用发（`stickySpill` 只存前 `STICKY_SAVED` 个）。 */
+  11, 12, 13, 14, 15];
+/** 前几个颜色是被调用者保存的（要在序言里存）—— 与 `regalloc.js` 的 `COLORS` 对齐。 */
+const STICKY_SAVED = 9;
 /**
  * **浮点那一套粘住的寄存器**：d8-d15，AAPCS 里被调用者保存（只保低 64 位，
  * 而这一层的浮点值最宽就是一个 double ⇒ 够）。对的是 `regalloc.js` 的 `regHintF`。
@@ -571,8 +585,17 @@ class FnGen {
       if (this.hint !== null) for (const c of this.hint.values()) if (seen.indexOf(c) < 0) seen.push(c);
       if (this.slotHint !== null) for (const c of this.slotHint.values()) if (seen.indexOf(c) < 0) seen.push(c);
       seen.sort((a, b) => a - b);
-      for (const c of seen) if (c >= 0 && c < STICKY.length) this.stickyColors.push(c);
+      /* **只存被调用者保存的那几个**（前 `STICKY_SAVED` 个颜色）。草稿那一档（x11-x15）
+       * 是调用者保存的，上一层保证涂成它们的区间不跨调用点 ⇒ 不用存。 */
+      for (const c of seen) if (c >= 0 && c < STICKY_SAVED) this.stickyColors.push(c);
     }
+    /**
+     * **这个函数关掉 `POOL` 了吗**（`regalloc.js` 的 `noPool`）：上一层判这个函数的通用
+     * 压力超过 9 个颜色时，把 x11-x15 一起交给分配表，于是一遍过的那个缓存必须让位 ——
+     * 两套机制抢同一批物理寄存器而互相看不见，是这一格的根（见 `STICKY` 后半段）。
+     * 关掉之后 `takeSlot` 一律回 -1：没涂色的值照旧住栈位。
+     */
+    this.noPool = f.noPool === true;
     this.stickySave = -1;
     if (this.stickyColors.length > 0) {
       this.stickySave = this.frame;
@@ -706,6 +729,7 @@ class FnGen {
     if (this.slotHint === null) return -1;
     const c = this.slotHint.get(no);
     if (c === undefined || c < 0 || c >= STICKY.length) return -1;
+    if (c >= STICKY_SAVED && !this.noPool) return -1;      // 见 `stickyAt` 那一条
     return STICKY[c];
   }
 
@@ -949,6 +973,10 @@ class FnGen {
     if (this.hint === null) return -1;
     const c = this.hint.get(i);
     if (c === undefined || c < 0 || c >= STICKY.length) return -1;
+    /* 草稿那一档（x11-x15）**只在 `POOL` 关掉的函数里认**：不然同一个寄存器两个主人。
+     * 上一层只在开了 `COLORS_SCRATCH` 时才发这些颜色，而它开的时候一定也置了 `noPool` ——
+     * 这一条是把那个约定钉在消费的这一头。 */
+    if (c >= STICKY_SAVED && !this.noPool) return -1;
     return STICKY[c];
   }
 
@@ -1041,6 +1069,8 @@ class FnGen {
   /** 池里的一个位置：先要空的，没空的就收一个用光了的。都没有回 -1。
    *  `a`/`b` 是要**避开**的寄存器（见 `dest`）。 */
   takeSlot(a, b) {
+    /* `POOL` 关了（见 `noPool`）：那五个寄存器这一趟归上一层的分配表，一个位子都不给。 */
+    if (this.noPool) return -1;
     for (let s = 0; s < 5; s++) {
       if (this.cacheIdx[s] === -1 && POOL[s] !== a && POOL[s] !== b) return s;
     }
