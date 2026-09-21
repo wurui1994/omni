@@ -973,6 +973,26 @@ function tyOfExpr(x, depth) {
           if (o.length === 1) return o[0];
         }
       }
+      /* **从嵌入的接口提升上来的方法**（pt 的 `type SDFShape struct { SDF; … }` 里
+         `box := s.BoundingBox()`）：交出来的类型写在**那个接口**的方法签名上。
+         少了这一格，`box` 在 `VARTYPE` 里是空的，于是下一句 `box.Intersect(ray)` 认不出
+         主人（`Intersect` 在 pt 里有十来个主人，落到"取字段再调它"的兜底上）——
+         报"记录 r5 上没有字段 'Intersect'（它有的是：__type Min Max）"。 */
+      {
+        const via = promoteVia(on, m);
+        if (via !== null) {
+          const emb = EMBEDS.get(on) ?? [];
+          const e = emb.find(([f2]) => f2 === via);
+          const ifn = e === undefined ? null : ifaceNameOf(e[1]);
+          if (ifn !== null) {
+            const hit = ifaceMethods(ifn).find(([mm]) => mm === m);
+            if (hit !== undefined) {
+              const o = partKids(hit[1], 'out');
+              if (o.length === 1) return o[0];
+            }
+          }
+        }
+      }
     }
     return null;
   }
@@ -1332,13 +1352,44 @@ function boxInto(ifn, tn, valNode) {
 function fieldsOf(st) {
   const out = [];
   for (const f of kids(st)) {
-    if (tag(f) !== 'f') return null;          // 嵌入字段（`embed`）这一批不接
+    /* **嵌入一格接口**（pt 的 `type SDFShape struct { SDF; Material Material }`）：
+       在 go 里它就是一格**名字是类型名**的普通字段（`s.SDF` 取得出来），而方法提升那一侧
+       本来就只认这一档（见 `promoteVia`）。所以收成 `[接口名, 类型节点]` 即可。
+       从前整份回 null，于是 `&SDFShape{sdf, material}` 这个**位置式字面量**落不成记录、
+       退到"一格列表"上去了 —— 报"列表里的元素类型不一样（r23 / r10）"。
+       嵌入**具体结构体**那一档仍旧回 null：go 的语义是把那份的字段提上来（`s.X` 直通），
+       只当一格字段会让 `s.X` 找不到 —— 那是另一刀。 */
+    if (tag(f) === 'embed') {
+      const et = kids(f).find((y) => isList(y));
+      const en = namedTypeOf(et);
+      if (en === null || ifaceNameOf(et) === null) return null;
+      out.push([en, et]);
+      continue;
+    }
+    if (tag(f) !== 'f') return null;
     const nms = part(f, 'names');
     const ty = kids(f).find((y) => tag(y) !== 'names' && tag(y) !== 'tag' && tag(y) !== 'attrs');
     if (nms === undefined || ty === undefined) return null;
     for (const n of kids(nms)) out.push([leaf(n), ty]);
   }
   return out;
+}
+
+/**
+ * **接口的方法表先单独扫一遍**（`collectDecls` 之前）。
+ *
+ * 为什么非要这一趟：`fieldsOf` 判"嵌入的是不是接口"要问 `IFACES`，而声明的**次序**是源码
+ * 的事 —— pt 里 `type SDFShape struct { SDF; … }` 在 1735 行、`type SDF interface` 在 1800 行。
+ * 一趟扫的话 `SDFShape` 的字段表在 `SDF` 登记之前就算完了，于是整份回 null，
+ * `&SDFShape{sdf, material}` 退成"一格列表"（量出来：报"列表里的元素类型不一样"）。
+ */
+function collectIfaces(x) {
+  if (!isList(x)) return;
+  if (tag(x) === 'tspec' || tag(x) === 'talias') {
+    const iff = kids(x).find((y) => isList(y) && tag(y) === 'interface');
+    if (iff !== undefined) IFACES.set(leaf(kids(x)[0]), kids(iff));
+  }
+  for (const k of kids(x)) collectIfaces(k);
 }
 
 /**
@@ -4015,6 +4066,17 @@ function toNode(x) {
               : [toNode(obj), ...argsByDecl(mangle(flat, m), argNodes, true, argAsts)],
           });
         }
+        /* **从嵌入的接口提升上来的方法**（pt 的 `type SDFShape struct { SDF; … }` 里
+           `s.BoundingBox()`）：go 的规矩是它等于 `s.SDF.BoundingBox()`。
+           不补这一条就落到下面的兜底（`fieldGet(s, 'BoundingBox')`），而那一格在具体类型的
+           记录上压根不存在 —— 报"记录 r78 上没有字段 'BoundingBox'（它有的是：SDF Material…）"。
+           装箱那一侧本来就走 `promoteVia`（见 `ensureBoxFn`），这儿与它同一条规矩。 */
+        if (owner !== undefined && !onType && !MSET.has(`${owner}.${m}`)) {
+          const via = promoteVia(owner, m);
+          if (via !== null) {
+            return node('call', { fn: fieldGet(fieldGet(toNode(obj), via), m), args: argNodes });
+          }
+        }
         /* **兜底：field-get 再调它**（与 V 同一个口径）。
            方法重名（`flat === null`：两个类型各声明了一个同名方法）、嵌入字段带来的方法、
            接收者类型完全看不出来——全落成"取字段再当函数调"。这是动态语义下的**近似**，
@@ -4379,6 +4441,10 @@ export function goToGraph(tree, opts) {
   /* **同一包里别的文件先扫**（`opts.also`）：go 的一个包摊在好几份文件上，
      `var x SomeType` 的零值、`T{…}` 的字段名都可能声明在旁边那份里。
      这一趟只收声明，不落节点；**旁边的先扫、自己的后扫**（同名时自己这一份说了算）。 */
+  /* 接口的方法表先单独扫一遍（见 `collectIfaces`）：`fieldsOf` 要靠它判"嵌入的是接口"，
+     而声明的次序是源码的事。旁边那几份也一起。 */
+  for (const t of opts?.also ?? []) collectIfaces(t);
+  collectIfaces(tree);
   for (const t of opts?.also ?? []) {
     if (t === tree) continue;
     for (const nm of mapNames(t, mapBindName)) MAPS.add(nm);

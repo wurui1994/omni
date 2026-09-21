@@ -2166,7 +2166,11 @@ function isZeroText(t, v) {
     gap(`列表的元素不是标量、也不是记录或数组（量到的是 ${et}）`);
   }
   if (ts.some((t, i) => t !== et && !lift(i))) {
-    gap(`列表里的元素类型不一样（${ts.join(' / ')}）—— 方言的数组是单态的`);
+    /* **哪一格列表、在谁的体里**：只说两个标签时，几千行里找那一处只能人肉扫
+       （与 `argText` 那句用的是同一格 `ctx.fnName` + `shapeNote`）。 */
+    const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
+    const notes = [...new Set(ts)].map((t) => `${t}${shapeNote(t, ctx)}`).join(' / ');
+    gap(`列表 '${nm}' 里的元素类型不一样（${notes}）—— 方言的数组是单态的${wh}`);
   }
   const at = `(arr ${et})`;
   const out = [bindLine(nm, at, `(anew ${at} (int ${items.length}))`, env, ctx)];
