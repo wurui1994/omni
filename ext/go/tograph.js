@@ -1352,6 +1352,97 @@ function boxInto(ifn, tn, valNode) {
   return node('call', { fn: gref(ensureBoxFn(tn, ifn)), args: [valNode] });
 }
 
+/* 一格具名结构体的**逐字段相等函数**（`__eq_Vector(a, b)`）。造不出来的记一格 null。 */
+const EQFNS = new Map();
+
+/** `__eq_T` 这个名字。 */
+function structEqName(tn) { return `__eq_${tn}`; }
+
+/** 一格类型节点**光名字**（只认 `tname`，`ptr` 不剥 —— 指针在 go 里是按地址比的）。 */
+function bareTyName(ty) {
+  if (ty === undefined || ty === null || !isList(ty)) return null;
+  if (tag(ty) === 'paren') return bareTyName(kids(ty)[0]);
+  return tag(ty) === 'tname' ? namedTypeOf(ty) : null;
+}
+
+/**
+ * 一格字段上的"相等"：结构体字段**递归**造一格 `__eq_内`，标量 / 指针 / 接口 / 通道照
+ * `==` 比。切片 / 字典 / 函数 / 数组回 null —— go 里前三种本来就**不可比**（含它们的结构体
+ * 也不可比，那时整个 `__eq_T` 就不造，照旧报缺口），数组这一刀先不接。
+ */
+function fieldEqNode(ft, an, bn) {
+  const nm = bareTyName(ft);
+  if (nm !== null && STRUCTS.get(nm) !== undefined && STRUCTS.get(nm) !== null) {
+    const f = ensureStructEqFn(nm);
+    return f === null ? null : node('call', { fn: gref(f), args: [an, bn] });
+  }
+  if (scalarNameOf(ft) !== null) return binOf('==', an, bn, OPS, { lang: 'go' });
+  const t = tag(ft) === 'paren' ? tag(kids(ft)[0]) : tag(ft);
+  if (t === 'ptr' || t === 'chan' || t === 'chan-send' || t === 'chan-recv'
+    || ifaceNameOf(ft) !== null) {
+    return binOf('==', an, bn, OPS, { lang: 'go' });
+  }
+  return null;
+}
+
+/**
+ * 造一格**结构体的相等函数**：`func __eq_Vector(a, b) bool { return a.X == b.X && … }`。
+ *
+ * 为什么非要它（pt 的 `Triangle.FixNormals` 里 `t.N1 == zero`）：go 的 struct `==` 是
+ * **逐字段比**，而方言的 `==` 对记录是**句柄比较**（asy 的 `alias`）—— 照原样落出去，
+ * `Vector{0,0,0} == Vector{}` 会答 false（答案静默地错）。后端那一层看不见"这两格是不是
+ * 同一个具名类型"，所以这一刀落在前端：一格类型造一份函数，`a == b` 落成一次调用。
+ *
+ * 一格类型只造一份（`EQFNS`），造的时候先占位所以互相引用截得住。造不出来（有不可比的
+ * 字段、字段表查不到、空结构体）回 null —— 那时照旧走原来那条路（报缺口或句柄比较）。
+ */
+function ensureStructEqFn(tn) {
+  if (EQFNS.has(tn)) return EQFNS.get(tn) === null ? null : structEqName(tn);
+  const fs = STRUCTS.get(tn);
+  if (fs === undefined || fs === null || fs.length === 0) return null;
+  EQFNS.set(tn, null);                       // 先占位：造的过程里再问到它就当"造不出来"
+  const A = '__eqa';
+  const B = '__eqb';
+  let cond = null;
+  for (const [fn2, ft] of fs) {
+    const one = fieldEqNode(ft, fieldGet(gref(A), fn2), fieldGet(gref(B), fn2));
+    if (one === null) { EQFNS.delete(tn); return null; }
+    cond = cond === null ? one : binOf('&&', cond, one, OPS, { lang: 'go' });
+  }
+  const z = structZero(tn);
+  EQFNS.set(tn, node('bind', {
+    init: node('func', { body: [retOf([cond])] }, {
+      params: [A, B],
+      name: structEqName(tn),
+      /* 形参的声明类型（`pzero`）与返回类型（`rzero`）：少了它们，core 那侧的形参
+         靠调用点定型，而这两格的调用点常在别的函数体里 —— 那时形参成 int，一取字段就报
+         "在一格说不清形状的东西上取字段"。 */
+      ...(z !== null ? { pzero: [z, z] } : {}),
+      rzero: lit(false),
+    }),
+  }, { name: structEqName(tn) }));
+  return structEqName(tn);
+}
+
+/**
+ * `a == b` 两边都是**同一个具名结构体的值**时，落成一次 `__eq_T(a, b)`。别的情形回 null
+ * （指针、接口、标量照旧走 `binOf`）。类型从 `tyOfExpr` 来，字面量再问一次 `litTypeNameOf`。
+ */
+function structEqCall(a, b) {
+  const nameOfSide = (e) => {
+    const n = bareTyName(tyOfExpr(e));
+    if (n !== null) return n;
+    const ln = litTypeNameOf(e);
+    return ln;
+  };
+  const tn = nameOfSide(a);
+  if (tn === null || nameOfSide(b) !== tn) return null;
+  if (STRUCTS.get(tn) === undefined || STRUCTS.get(tn) === null) return null;
+  const f = ensureStructEqFn(tn);
+  if (f === null) return null;
+  return node('call', { fn: gref(f), args: [toNode(a), toNode(b)] });
+}
+
 /** `T{…}` / `&T{…}` 那格**复合字面量**的具名类型（别的形状回 null —— 不猜）。 */function litTypeNameOf(r) {
   if (r === undefined || r === null || !isList(r)) return null;
   const g = tag(r);
@@ -3477,6 +3568,12 @@ function toNode(x) {
       if (leaf(op) === '&^') {
         return node('prim', { args: [toNode(a), un('bnot', toNode(b))] }, { name: 'band' });
       }
+      /* **两格结构体值之间的 `==` / `!=`** 落成一次 `__eq_T(a, b)`（见 `ensureStructEqFn`）：
+         go 的 struct `==` 是逐字段比，而方言的 `==` 对记录是句柄比较。认不出来就照旧往下走。 */
+      if (leaf(op) === '==' || leaf(op) === '!=') {
+        const eq = structEqCall(a, b);
+        if (eq !== null) return leaf(op) === '==' ? eq : un('not', eq);
+      }
       /**
        * **无类型常量表达式按任意精度折**（go 规范 "Constant expressions"：常量是无限精度的）。
        * 只在**折出来放不进 int64** 时改形（发一格实数）；放得进的照旧原样交给 `binOf` ——
@@ -4548,6 +4645,7 @@ export function goToGraph(tree, opts) {
   FOUTS.clear();
   BOXFNS.clear();
   BOXING.clear();
+  EQFNS.clear();
   NILFNS.clear();
   VARTY.clear();
   CUR_RET = null;
@@ -4617,6 +4715,7 @@ export function goToGraph(tree, opts) {
      类型，`var one Shape = __box_Sq__Shape(…)` 要先见过那格函数才知道它交出来的是记录
      （不然 `one` 默认成 int，一取字段就报"说不清形状"）。 */
   const body = [...stubBinds, ...BOXFNS.values(),
+    ...[...EQFNS.values()].filter((v) => v !== null),
     ...[...MATHFNS.values()].filter((v) => v !== null),
     ...[...NILFNS.values()].filter((v) => v !== null), ...mapped];
   if (opts !== undefined && opts.asModule === true) return program(body);
