@@ -29,13 +29,13 @@ func split(xs []Shape, at int) (left, right []Shape, n int) {
 	return
 }
 
-// 切片 + map
-func both(xs []int) ([]int, map[int]int) {
-	m := map[int]int{}
-	for i := range xs {
-		m[xs[i]] = i
+// 两格切片（**字典那一档不收** —— 方言的结构体字段不收 `(dict K V)`，见 `multiShape`）
+func both(xs []int) ([]int, []int) {
+	ys := []int{}
+	for i := 0; i < len(xs); i++ {
+		ys = append(ys, xs[i]*2)
 	}
-	return xs, m
+	return xs, ys
 }
 
 func main() {
@@ -48,11 +48,11 @@ func main() {
 	println(r[0].Area()) // 16
 
 	ns := []int{7, 8}
-	s, m := both(ns)
+	s, d := both(ns)
 	println(len(s)) // 2
-	println(m[7])   // 0
-	println(m[8])   // 1
-	// 句柄语义：`both` 交回来的就是同一格切片，改它原来那格跟着变
+	println(d[0])   // 14
+	println(d[1])   // 16
+	// 句柄语义：`both` 交回来的第一格就是同一格切片，改它原来那格跟着变
 	s[0] = 70
 	println(ns[0]) // 70
 }

@@ -1507,7 +1507,7 @@ function collectDecls(x, shapesOnly) {
       /* **多返回那几格的声明类型**（`FOUTS`）：`l, r := f()` 之后 `l` / `r` 的类型只能
          从这儿来。少了它 `l[0].Area()` 认不出 `l` 装的是接口（方法落成静态 mangle，
          报"'Sq__Area' 第 1 格实参在两处的类型不一样"）；pt 的 `NewNode(l)` 也是这一格。 */
-      if (o0.length > 1) FOUTS.set(nm0, o0);
+      if (o0.length > 1) FOUTS.set(nm0, outTypes(sig0));
     }
   }
   /* `shapesOnly` 原来是**同一包里别的文件**那一趟用的（`opts.also`）：类型与字段名收、
@@ -1538,7 +1538,7 @@ function collectDecls(x, shapesOnly) {
         FSIG.set(mangle(owner, name), [undefined, ...paramInfo(sigM).map((p) => p.ty)]);
         const oM = partKids(sigM, 'out');
         if (oM.length === 1) FRET.set(mangle(owner, name), oM[0]);
-        if (oM.length > 1) FOUTS.set(mangle(owner, name), oM);
+        if (oM.length > 1) FOUTS.set(mangle(owner, name), outTypes(sigM));
       }
       /* **按 `类型.名字` 收**（`opts.also` 那几份也收 —— 这样存不会撞名，见 `MSET` 那一段）。 */
       MSET.add(`${owner}.${name}`);
@@ -2488,6 +2488,21 @@ function outInfo(sig) {
     else lastTy = info[i].ty;
   }
   return info.filter((x) => x.ty !== undefined);
+}
+
+/**
+ * 一格签名的**多返回类型节点表**（`FOUTS` 存的就是它）。
+ *
+ * **不能直接用 `partKids(sig, 'out')`**：具名的返回值（`(left, right []Shape, n int)`）
+ * 里 `left` 被语法收成了"类型"，那一格拿去当类型使就是垃圾（量出来：`VARTY` 里
+ * `l` 的类型成了 `(tname left)`，于是 `l[0]` 的元素类型还是说不清）。
+ * 具名那一档走 `outInfo`（它按参数组共享类型补齐），不具名的照旧用原表。
+ */
+function outTypes(sig) {
+  const raw = partKids(sig, 'out');
+  const named = outInfo(sig);
+  if (named.length === raw.length) return named.map((o) => o.ty);
+  return raw;
 }
 
 function paramInfo(sig) {
