@@ -2105,6 +2105,60 @@ function appendSelfItems(lv, rv) {
 }
 
 /**
+ * `s = append(s, xs...)` 里**那一格要摊开的切片**（不是这个形状就回 null）。
+ *
+ * go 的规矩：spread 只能有一格、而且必须在最后。语法树上它是**缀在实参表末尾的一格空标记**
+ * （`(-> (arg-list "...") ($*1 (spread)))`），不是把那个表达式包起来 —— 所以
+ * `append(s, xs...)` 的实参表是 `[s, xs, (spread)]` 三格。
+ */
+function appendSelfSpread(lv, rv) {
+  if (rv === undefined || rv === null || !isList(rv) || tag(rv) !== 'call') return null;
+  const [fn, args] = kids(rv);
+  if (fn === undefined || tag(fn) !== 'name' || nameOf(fn) !== 'append') return null;
+  if (args === undefined) return null;
+  const as = kids(args);
+  if (as.length !== 3 || tag(as[2]) !== 'spread') return null;
+  if (!sameLValue(lv, as[0])) return null;
+  return as[1];
+}
+
+/** `s = append(s, xs...)` 那一格摊开用的序号（临时名要各不相同）。 */
+let SPREAD_N = 0;
+
+/**
+ * `s = append(s, xs...)` 落成**一趟数着的循环 + 一串 push**。
+ *
+ * 为什么不落 `call __goAppend`：那个函数的体在 **js 那条腿的运行时**里，core 上压根没有
+ * （量出来：pt 整包报"调一格这一层里没有的函数 '__goAppend'"）。
+ *
+ * **长度先取一份**（`__spN_n`）：`a = append(a, a...)` 这种自己摊给自己的写法，go 的语义是
+ * "把原来那些接上去"；条件里每趟重算 `len(a)` 的话它会一直长下去。
+ */
+function appendSpreadPush(lv, srcAst) {
+  SPREAD_N += 1;
+  const src = `__sp${SPREAD_N}_s`;
+  const cnt = `__sp${SPREAD_N}_n`;
+  const idx = `__sp${SPREAD_N}_i`;
+  const at = (n) => node('ref', {}, { name: n });
+  const elT = elemTyOf(tyOfExpr(lv));
+  const elem = indexGet(at(src), at(idx));
+  return node('region', {
+    body: [
+      node('bind', { init: toNode(srcAst) }, { name: src }),
+      node('bind', { init: node('prim', { args: [at(src)] }, { name: 'len' }) }, { name: cnt }),
+      counted({
+        name: idx,
+        from: lit(0),
+        cond: bin('<', at(idx), at(cnt)),
+        body: [node('prim', {
+          args: [toNode(lv), elT === null ? elem : fieldValue(elT, elem, undefined)],
+        }, { name: 'push' })],
+      }),
+    ],
+  });
+}
+
+/**
  * `(*p).f` / `(*p)[i]` 里的那一层 `deref` **剥掉**（`(paren …)` 也一并剥）。
  * 只在"当对象用"那几处调它 —— 光秃秃的 `*p` 仍旧当场报（见 `case 'deref'`）。
  */
@@ -3349,6 +3403,9 @@ function toNode(x) {
             args: [toNode(lhs[0]), elT === null ? toNode(it) : fieldValue(elT, toNode(it), it)],
           }, { name: 'push' }));
         }
+        /* **`s = append(s, xs...)`**：摊开成一趟数着的循环（见 `appendSpreadPush`）。 */
+        const spread = appendSelfSpread(lhs[0], rhs[0]);
+        if (spread !== null) return appendSpreadPush(lhs[0], spread);
       }
       /* **右值先全算出来那一档**（`a, b = b, a`）—— 见 `needsParallel` 那段账。 */
       if (compoundOp === null && lhs.length > 1 && rhs.length === lhs.length
