@@ -261,7 +261,7 @@ function graphOf(path, argv) {
      *
      * 判据（三条，都不猜）：
      *   * 一格 bind 的 init **就是 func** —— 它没有初始化期依赖（函数体后面才跑），排最前；
-     *   * 别的 bind：依赖 = init 里**除函数体之外**引到的顶层 bind 名字；
+     *   * 别的 bind：依赖 = init 里引到的顶层 bind 名字，**再顺着那些函数的体传递地收全**（见 `fnRefs`）；
      *   * 有环就退回原序（go 里包级初始化的环是编译错，我们这儿不报，照原序摆）。
      */
     const orderTopLevel = (stmts) => {
@@ -273,24 +273,51 @@ function graphOf(path, argv) {
         if (isNode(s) && s.op === 'bind' && s.attrs !== undefined
           && typeof s.attrs.name === 'string') at.set(s.attrs.name, i);
       });
-      /** init 里引到的名字（**不进函数体** —— 那是后面才跑的）。 */
-      const refsOf = (x, out) => {
+      /** init 里引到的名字。`deep` 为真时**连函数体一起收**（见下面 `fnRefs` 的账）。 */
+      const refsOf = (x, out, deep) => {
         if (x === null || x === undefined) return out;
-        if (Array.isArray(x)) { for (const y of x) refsOf(y, out); return out; }
+        if (Array.isArray(x)) { for (const y of x) refsOf(y, out, deep); return out; }
         if (typeof x !== 'object') return out;
         if (x.lit !== undefined) return out;
         if (typeof x.op !== 'string') return out;
-        if (x.op === 'func') return out;                   // 函数体不算初始化期依赖
+        if (x.op === 'func' && deep !== true) return out;    // 浅那一档：函数体后面才跑
         if (x.op === 'ref' && x.attrs !== undefined
           && typeof x.attrs.name === 'string') out.add(x.attrs.name);
-        if (x.ins !== undefined) for (const k of Object.keys(x.ins)) refsOf(x.ins[k], out);
+        if (x.ins !== undefined) for (const k of Object.keys(x.ins)) refsOf(x.ins[k], out, deep);
         return out;
+      };
+      /**
+       * **函数名 -> 它体里引到的全部名字**（go 的初始化依赖是**穿过函数体**的）。
+       *
+       * go 的规矩（语言规范 Package initialization 那一节）：`x` 的初值或**函数体**里
+       * 引到 `y`，`x` 就依赖 `y`，而且是**传递的**。从前这一层把函数体整个跳过了，于是
+       * `var globalRand = New(NewSource(1))` 排在 `int32max` / `rngLen` 那几格常量**前面**
+       * —— 跑起来 `seed % int32max` 是除以 0（`math/rand` 的包级 RNG 就是这么崩的）。
+       */
+      const fnRefs = new Map();
+      stmts.forEach((s) => {
+        if (!isNode(s) || s.op !== 'bind' || s.attrs === undefined) return;
+        const init = s.ins === undefined ? undefined : s.ins.init;
+        if (!isNode(init) || init.op !== 'func') return;
+        fnRefs.set(s.attrs.name, refsOf(init, new Set(), true));
+      });
+      /** 从这一串名字出发，顺着函数体一路收全（环靠 seen 截住）。 */
+      const closure = (names) => {
+        const seen = new Set(names);
+        const stack = [...names];
+        while (stack.length > 0) {
+          const n = stack.pop();
+          const inner = fnRefs.get(n);
+          if (inner === undefined) continue;
+          for (const m of inner) if (!seen.has(m)) { seen.add(m); stack.push(m); }
+        }
+        return seen;
       };
       const deps = stmts.map((s) => {
         if (!isNode(s) || s.op !== 'bind') return [];
         const init = s.ins === undefined ? undefined : s.ins.init;
         if (isNode(init) && init.op === 'func') return [];  // 函数绑定：无依赖
-        const names = refsOf(init, new Set());
+        const names = closure(refsOf(init, new Set(), false));
         const out = [];
         for (const n of names) {
           const j = at.get(n);

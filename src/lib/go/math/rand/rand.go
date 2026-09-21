@@ -126,3 +126,41 @@ func (r *Rand) Float32() float32 {
 		}
 	}
 }
+
+/* ---------------------------------------------------------------- 包级那一份
+ *
+ * go 1.2x 的包级 RNG 是 `atomic.Pointer[Rand]` + `sync.OnceValue`（泛型 + 原子指针，
+ * 见文件头）；这儿写成**一格普通的包级变量**，种子照 go 1.19 之前的口径固定为 1。
+ *
+ * 为什么非要这几格：pt 的 `RandomUnitVector` 在 `rnd == nil` 那一支上调的是
+ * `rand.Float64()` —— 包级函数。少了它，`rand.Float64()` 在前端那一层没有去处。
+ */
+
+var globalRand = New(NewSource(1))
+
+// Float64 从包级 RNG 取一格 [0.0,1.0)。
+func Float64() float64 { return globalRand.Float64() }
+
+// Float32 从包级 RNG 取一格 [0.0,1.0)。
+func Float32() float32 { return globalRand.Float32() }
+
+// Int63 从包级 RNG 取一格非负 63 位整数。
+func Int63() int64 { return globalRand.Int63() }
+
+// Int31 从包级 RNG 取一格非负 31 位整数。
+func Int31() int32 { return globalRand.Int31() }
+
+// Int 从包级 RNG 取一格非负整数。
+func Int() int { return globalRand.Int() }
+
+// Intn 从包级 RNG 取一格 [0,n)。
+func Intn(n int) int { return globalRand.Intn(n) }
+
+// Int63n 从包级 RNG 取一格 [0,n)。
+func Int63n(n int64) int64 { return globalRand.Int63n(n) }
+
+// Int31n 从包级 RNG 取一格 [0,n)。
+func Int31n(n int32) int32 { return globalRand.Int31n(n) }
+
+// Seed 重设包级 RNG 的种子。
+func Seed(seed int64) { globalRand.Seed(seed) }

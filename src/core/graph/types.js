@@ -52,7 +52,13 @@ export function litType(v) {
      但它是个正经的 int64 —— 那一档由 `const` 的 `exact` 附属带着源码里那串数字过去。
      用 2^53 当界量到过：那个乘数被说成 real，`h.s * 乘数` 于是把左边抬成 real。 */
   if (typeof v === 'number') {
-    return (Number.isInteger(v) && Math.abs(v) < 2 ** 63) ? 'int' : 'real';
+    /* 界上要用 `<=` 而不是 `<`：**int64 的最大值过 double 正好圆到 2^63**
+       （`9223372036854775807` -> `9223372036854775808`），用 `<` 的话它自己被说成 real ——
+       量到过 `rngMask = 9223372036854775807`（go 的 `math/rand`）报
+       `'rngMask' 是 real，赋的值是 int`。能圆到 2^63 的只可能是"≤ int64max 的整数"
+       （再大就出了 int64、go 那边编不过），所以放进来是对的；真正那串数字由 `const` 的
+       `exact` 附属带着走，不靠这个 double。 */
+    return (Number.isInteger(v) && Math.abs(v) <= 2 ** 63) ? 'int' : 'real';
   }
   return null;
 }

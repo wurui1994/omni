@@ -887,9 +887,24 @@ function tyOfExpr(x, depth) {
       return FRET.get(fn0) ?? null;
     }
     if (tag(f) === 'sel') {
-      const on = namedTypeOf(tyOfExpr(kids(f)[0], d + 1));
+      const base = kids(f)[0];
+      const on = namedTypeOf(tyOfExpr(base, d + 1));
       const m = leaf(kids(f)[1]);
-      if (on === null || m === null) return null;
+      if (m === null) return null;
+      /* **`pkg.Func(…)` 交出来的类型**（`r := rand.New(rand.NewSource(42))`）。
+         左边是这份文件 import 的**包名**（不是值），所以上面那一问一定回 null ——
+         而声明就在 `FRET` 里：跨包那一路键是 mangle 过的（`rand__New`），
+         `--pkgs` 摊成同包那一路键是光名字（`New`，`opts.also` 那一趟收的）。
+         少了这一格，`r` 在 `VARTY` 里是空的，于是 `r.Int63()` 认不出主人 ——
+         `Int63` 在平表里有两个主人（`Rand` 与 `rngSource`），落到"取字段再调它"
+         的兜底上，core 这条腿当场报"记录 r2 上没有字段 'Int63'"。 */
+      if (on === null) {
+        if (tag(base) !== 'name') return null;
+        const pn = leaf(kids(base)[0]);
+        if (pn === null || !IMPORTS.has(pn) || VARTY.get(pn) !== undefined
+          || VARTYPE.get(pn) !== undefined) return null;
+        return FRET.get(mangle(pn, m)) ?? FRET.get(m) ?? null;
+      }
       const t = FRET.get(mangle(on, m));
       if (t !== undefined) return t;
       if (IFACES.has(on)) {
@@ -1864,6 +1879,19 @@ function specBinds(names, exprs, ty) {
   }
   /* `var s Shape = Sq{2}`：声明的类型是接口就在这儿装箱（ADR-0040）。 */
   const ifn = ifaceNameOf(ty);
+  /* **`var x = f(…)`（没写类型）也要把右边的声明类型记一份** —— 与 `:=` 那一处
+     （`VARTY.set(nameOf(t), tyOfExpr(rhs))`）是同一件事，只是走的是 `var` 这条语法。
+     少了它，包级的 `var globalRand = New(NewSource(1))` 之后 `globalRand.Int63()`
+     认不出主人：`Int63` 在平表里有两个主人（`Rand` / `rngSource`），于是落到
+     "取字段再调它"上，core 那侧报"记录 r2 上没有字段 'Int63'"。 */
+  if (ty === undefined) {
+    for (let i = 0; i < names.length; i++) {
+      const rt = tyOfExpr(exprs[i]);
+      if (rt !== null) VARTY.set(names[i], rt);
+      const rtn = namedTypeOf(rt);
+      if (rtn !== null) VARTYPE.set(names[i], rtn);
+    }
+  }
   return names.flatMap((n, i) => bindName(n, ifn === null ? toNode(exprs[i])
     : boxInto(ifn, tnOfExpr(exprs[i]), toNode(exprs[i]))));
 }
@@ -2130,14 +2158,18 @@ function funcOf(sig, blk, name, self, selfType) {
       { kind: 'atom', value: 'tname' }, { kind: 'atom', value: selfType },
     ] });
   }
-  for (const p of partKids(sig, 'in')) {
-    const nm = part(p, 'name');
-    if (nm === undefined) continue;
-    const ty = kids(p).find((y) => tag(y) !== 'name');
-    const t = namedTypeOf(ty);
-    if (t !== null) VARTYPE.set(leaf(kids(nm)[0]), t);
+  /* **形参的类型走 `paramInfo`**（不要自己再拆一遍 sig）。
+     `func LookAt(eye, center, up Vector, fovy float64)` 这种**参数组**在树上是
+     `p(eye)` `p(center)` `p(up Vector)` —— 前两格的名字被语法当成了类型，`part(p,'name')`
+     是空的。从前这一处就是那么拆的，于是只有 `up` 进了 `VARTYPE`：`center.Sub(eye)` 认不出
+     主人（`Sub` 在平表里有 `Vector` / `Color` 两个主人），落到"取字段再调它"的兜底上，
+     core 那侧报 `'Vector__Normalize' 第 1 格实参在两处的类型不一样（r2 与 int）`。
+     `paramInfo` 已经把"名字被当成类型"和"一组共用后面那个类型"两条都摆平了。 */
+  for (const p of paramInfo(sig)) {
+    const t = namedTypeOf(p.ty);
+    if (t !== null) VARTYPE.set(p.nm, t);
     /* 形参的**类型节点**也留一份（`tyOfExpr` 要它：`[]Shape` 的元素类型、接口分派）。 */
-    if (ty !== undefined) VARTY.set(leaf(kids(nm)[0]), ty);
+    if (p.ty !== undefined) VARTY.set(p.nm, p.ty);
   }
   /* 当前函数**声明的返回类型**（`ret` 那一处按它装箱）。 */
   const savedRet = CUR_RET;
@@ -3482,6 +3514,24 @@ function toNode(x) {
             return node('call', { fn: fieldGet(toNode(obj), m), args: boxed });
           }
         }
+        /* **左边是一格包名，不是一格值**（`rand.Float64()` / `sort.Float64s(…)`）。
+           这一格**必须排在 mangle 前面**：`flat`（"平表里只有一个主人"那一档）会把
+           `rand.Float64()` 钉成 `Rand__Float64(rand)` —— 把**包那格记录**当接收者递进去。
+           量出来的样子是 `'Rand__Float64' 第 1 格实参在两处的类型不一样（r10{New: …、
+           NewSource: …} 与 int）`：一处是包那格记录，一处是真的 `*Rand`。
+
+           两条出路，都不猜：
+             * 跨包表里有这格顶层函数 -> mangle（`rand__New`，跨包那一路）；
+             * 没有 -> 取包那格记录的字段再调它（`--pkgs` 摊成同包那一路，包是一格
+               `record-new`，见 `src/core/graph/run.js` 的 byPkg 那一段）。
+           `math.F(…)` 在上面已经先走掉了（`GO_MATH_RMATH`）。 */
+        if (recvName !== null && fromVar === undefined && !onType
+          && IMPORTS.has(recvName) && VARTY.get(recvName) === undefined) {
+          if (XPKG.funcs.has(`${recvName}.${m}`)) {
+            return node('call', { fn: node('ref', {}, { name: mangle(recvName, m) }), args: argNodes });
+          }
+          return node('call', { fn: fieldGet(toNode(obj), m), args: argNodes });
+        }
         /* 接收者的类型**带包限定**时（`func f(t syntax.Type)` 那一档，`VARTYPE` 收的就是
            `syntax.Type`），方法的声明在那个包里 —— 跨包表里查得着就照样 mangle。 */
         if (owner !== undefined && (MSET.has(`${owner}.${m}`) || XPKG.mset.has(`${owner}.${m}`))) {
@@ -3491,14 +3541,6 @@ function toNode(x) {
               ? argsByDecl(mangle(owner, m), argNodes, false, argAsts)
               : [toNode(obj), ...argsByDecl(mangle(owner, m), argNodes, true, argAsts)],
           });
-        }
-        /* **`pkg.Func(…)`：包名点函数**（`ir.NewNilExpr(…)` / `types.NewPtr(…)`）。
-           它与"取字段再调它"在树上同形，分开靠两道闸：这个名字**是这份文件 import 的包**，
-           且那个包里**真声明了这格顶层函数**。接收者不补 —— 包名不是值。
-           `fromVar` 有值时不走这条：那时它是一格类型写着的变量，方法优先。 */
-        if (recvName !== null && fromVar === undefined && IMPORTS.has(recvName)
-          && XPKG.funcs.has(`${recvName}.${m}`)) {
-          return node('call', { fn: node('ref', {}, { name: mangle(recvName, m) }), args: argNodes });
         }
         if (flat !== undefined && flat !== null) {
           return node('call', {

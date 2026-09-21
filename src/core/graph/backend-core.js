@@ -969,8 +969,11 @@ function argText(fname, i, a, env, ctx) {
     return expr(a, env, ctx);
   }
   if (had !== undefined && had !== t) {
+    /* **哪个调用点**：只说"两处不一样"时，34 份文件里找那一处只能人肉扫 —— 而这一层
+       手上就有当前函数名（`ctx.fnName`，与 `bindList` 那句用的是同一格）。 */
+    const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
     gap(`'${fname}' 第 ${i + 1} 格实参在两处的类型不一样（${had}${shapeNote(had, ctx)} 与 `
-      + `${t}${shapeNote(t, ctx)}）—— 方言的形参是单态的`);
+      + `${t}${shapeNote(t, ctx)}）—— 方言的形参是单态的${wh}`);
   }
   ctx.args.set(key, t);
   if (isNode(a) && a.op === 'ref' && isAggregate(t, ctx)) return varOrCap(a.attrs.name, ctx);
