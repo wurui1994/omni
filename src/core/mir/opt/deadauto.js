@@ -37,7 +37,8 @@
  * 迭代到不动点（Go 那边写死四轮就放弃；我们的 `ADD` 链是有界的，按指令条数封顶）。
  */
 
-import { OP, OP_MODES, REF_BIAS, REF_NONE, memKindNo, memOff, MLOAD_BYTES, MSTORE_BYTES } from '../ir.js';
+import { OP, OP_MODES, REF_BIAS, REF_NONE, memKindNo, memOff, MLOAD_BYTES, MSTORE_BYTES,
+  memArgSize, OP_NAMES } from '../ir.js';
 import { addrOf, constOffset } from './memory.js';
 import { registerPass } from './pass.js';
 import { removeInsns } from './edit.js';
@@ -95,6 +96,20 @@ export function deadAutoElim(fn, mod) {
     let moved = false;
     for (let pc = 0; pc < n; pc++) {
       const op = fn.op[pc];
+      /* `ADD(块地址, 常量)` 也是块地址（Go 的 `OffPtr`）。**这一条从前漏了**：文件头写着
+       * "顺着 `ADD(地址, 常量)` 往下传"，而第二步只追了槽 —— 于是 `addr` 里永远只有
+       * `FRAME` 本身，下面第三步那句 `if (op === OP.ADD && addr.has(…)) continue` 一次都
+       * 不成立，每条取字段用的 `ADD` 都被当成"地址跑出去了"，**整块留着**。
+       * 量出来的样子：`boxHit(a Box, r Ray)` 里 18 条候选、删 0 条，报的是
+       * `%33 ADD 的 a（常量偏移 128）` —— 而那正是一条正经的取字段。 */
+      if (op === OP.ADD) {
+        const a0 = addrOf(fn, mod, REF_BIAS + pc);
+        if (a0.base !== REF_BIAS + pc && addr.has(a0.base)) {
+          const off = (slotOff.get(a0.base) || 0) + a0.off;
+          if (feed(REF_BIAS + pc, addr.get(a0.base), off)) moved = true;
+        }
+        continue;
+      }
       if (op !== OP.STORE) continue;
       const a = addrOf(fn, mod, fn.a[pc]);
       if (!addr.has(a.base)) continue;
@@ -112,7 +127,17 @@ export function deadAutoElim(fn, mod) {
   const kept = new Set();                 // 块号：地址跑出去了，一条都不敢删
   const readCells = new Map();            // 块号 -> [{lo, hi}]（被 MLOAD 读过的区间）
   const elim = new Map();                 // MSTORE 的 pc -> {block, lo, hi}
-  const keep = (ref) => { if (addr.has(ref)) kept.add(addr.get(ref)); };
+  /* `OMNI_DEADAUTO_STAT=1`：**为什么这一块一条都删不掉**。与 `OMNI_SROA_STAT` 同一个
+     理由 —— 逃逸判据是唯一的闸，判紧一处整块的写就都留着，得能一眼看见是哪条指令判的。 */
+  const stat = process.env.OMNI_DEADAUTO_STAT === '1';
+  const keep = (ref, why) => {
+    if (!addr.has(ref)) return;
+    const b0 = addr.get(ref);
+    if (stat && !kept.has(b0)) {
+      process.stderr.write(`[deadauto] ${fn.name}: 块 ${b0} 逃逸（${why}）\n`);
+    }
+    kept.add(b0);
+  };
   const cellAt = (pc, isLoad) => {
     const a = addrOf(fn, mod, fn.a[pc]);
     if (!addr.has(a.base)) return null;
@@ -128,14 +153,14 @@ export function deadAutoElim(fn, mod) {
     if (op === OP.MSTORE) {
       const c = cellAt(pc, false);
       if (c !== null) elim.set(pc, c);
-      else keep(addrOf(fn, mod, fn.a[pc]).base);   // 偏移说不清 ⇒ 整块留着
+      else keep(addrOf(fn, mod, fn.a[pc]).base, `%${pc} MSTORE 的偏移说不清`);
       /* 值那一格：把一个块的地址写进内存 ⇒ 那个块得留着 */
-      keep(fn.b[pc]);
+      keep(fn.b[pc], `%${pc} MSTORE 把块地址写进了内存`);
       continue;
     }
     if (op === OP.MLOAD) {
       const c = cellAt(pc, true);
-      if (c === null) { keep(addrOf(fn, mod, fn.a[pc]).base); continue; }
+      if (c === null) { keep(addrOf(fn, mod, fn.a[pc]).base, `%${pc} MLOAD 的偏移说不清`); continue; }
       let l = readCells.get(c.block);
       if (l === undefined) { l = []; readCells.set(c.block, l); }
       l.push(c);
@@ -143,13 +168,72 @@ export function deadAutoElim(fn, mod) {
     }
     if (op === OP.ADD && addr.has(REF_BIAS + pc)) continue;   // 纯地址算术，已经传过了
     if (op === OP.STORE && viaSlot.has(pc)) continue;         // 地址进槽，第二步追过了
+    /**
+     * `RET` 带着一块的地址 = **返回一整块 struct**，不是"把地址交出去"：后端从那儿照
+     * **返回类型的大小**读一次就完（arm64 上 ≤16 字节装进 x0/x1 或 d0-d3，见
+     * `from_mir.js` 的 `OP.RET`；>16 字节那条路 RET 带的是调用方给的 x8 缓冲，
+     * 那本来就不是我们的块）。两边都是**有界的一次读**，所以按格子记，
+     * 别把整块判成逃逸。
+     *
+     * 为什么这一格值钱（量出来的）：C 前端给一个函数只划**一整块** `$frame`
+     * （`tccgen.js` 的 `f.frame('$frame', this.frameSize, 16)`），返回值那个临时与按值
+     * 形参的**防御性拷贝**住在同一块里。RET 一判"整块逃逸"，那些拷贝就一条都删不掉 ——
+     *
+     *     func boxHit(a Box, r Ray) (float64, float64)
+     *
+     * 里入口处 24 条 `MSTORE`（两个 48 字节的形参逐字段抄进帧块）**一次都没被读**
+     * （真算的时候读的是源头，`copyfwd.js` 改过的），而 clang 在同一份 C 上把整个函数
+     * 做到 **0 次访存**。同一族在 `pt` 那把尺子上是 `Box__Intersect` 44 条访存 vs
+     * clang 的 0 条、`Tree__search` 301 vs 42。
+     */
+    /**
+     * `ARGSRET %addr`（aux 与 `ARGMEM` 同一套，`memArgSize` 给字节数）= **被调方把它的
+     * 返回值写进这一块**。那是 ABI 定死的一次**有界写**，既不读这一块别的地方、也不会
+     * 把地址留下来（返回值那一块的寿命就是这次调用）。所以按格子记，别把整块判逃逸。
+     *
+     * 为什么要这一条：C 前端把返回值的临时也摆在那一整块 `$frame` 里 —— `boxHit` 里
+     * `omni_new_S_m5()` 的 sret 缓冲就在块里偏移 112 处，于是"整块逃逸"把入口那 24 条
+     * 按值形参的拷贝全留下了（候选 18 条、删 0 条）。
+     *
+     * 与 Go 的差别说在明处：Go 的 `elimDeadAutosGeneric` 对"地址进了调用"一律
+     * `usedAdd(node)`（整个 auto 留着），因为它的 auto 早被 `decomposeUser` 拆成标量、
+     * 一个 auto 就是一个格子，没有"同一块里还有别人"这件事。我们的块是一整帧，
+     * 所以要按格子分开 —— 判据本身没放松：那次写能碰到的字节，ABI 说得死死的。
+     */
+    if (op === OP.ARGSRET) {
+      const sa = addrOf(fn, mod, fn.a[pc]);
+      const sb = memArgSize(fn.aux[pc]);
+      if (addr.has(sa.base) && sb > 0) {
+        const block = addr.get(sa.base);
+        const lo = (slotOff.get(sa.base) || 0) + sa.off;
+        let l = readCells.get(block);
+        if (l === undefined) { l = []; readCells.set(block, l); }
+        l.push({ block, lo, hi: lo + sb });
+        continue;
+      }
+    }
+    if (op === OP.RET && fn.a[pc] !== REF_NONE) {
+      const ra = addrOf(fn, mod, fn.a[pc]);
+      const rb = memArgSize(fn.retStruct);
+      if (addr.has(ra.base) && rb > 0) {
+        const block = addr.get(ra.base);
+        const lo = (slotOff.get(ra.base) || 0) + ra.off;
+        let l = readCells.get(block);
+        if (l === undefined) { l = []; readCells.set(block, l); }
+        l.push({ block, lo, hi: lo + rb });
+        continue;
+      }
+    }
     /* 别的任何用法：地址跑出去了 ⇒ 留着。按角色问，'n'/'s'/'j' 那几格不是 ref。 */
-    if (m[0] === 'r') keep(fn.a[pc]);
-    if (m[1] === 'r') keep(fn.b[pc]);
+    if (m[0] === 'r') {
+      keep(fn.a[pc], `%${pc} ${OP_NAMES[op]} 的 a`
+        + (op === OP.ADD ? `（b=${fn.b[pc]}，常量偏移 ${constOffset(fn, mod, fn.b[pc])}）` : ''));
+    }
+    if (m[1] === 'r') keep(fn.b[pc], `%${pc} ${OP_NAMES[op]} 的 b`);
     if (m[1] === 'p') {
       const at = fn.b[pc];
       const cnt = fn.args[at];
-      for (let i = 0; i < cnt; i++) keep(fn.args[at + 1 + i]);
+      for (let i = 0; i < cnt; i++) keep(fn.args[at + 1 + i], `%${pc} ${OP_NAMES[op]} 的第 ${i} 个实参`);
     }
   }
 
@@ -176,6 +260,13 @@ export function deadAutoElim(fn, mod) {
       }
     }
     if (!hit) doomed.add(pc);
+  }
+  if (stat) {
+    for (const [b0] of readCells) {
+      if (!kept.has(b0)) process.stderr.write(`[deadauto] ${fn.name}: 块 ${b0} 被读过的格子`
+        + ` ${readCells.get(b0).map((r) => `${r.lo}|${r.hi}`).join(' ')}\n`);
+    }
+    process.stderr.write(`[deadauto] ${fn.name}: 候选 ${elim.size} 条、删 ${doomed.size} 条\n`);
   }
   if (doomed.size === 0) return 0;
   /* MSTORE 不产值（t = void），删它不会留下悬空 ref。喂它的那些纯计算没人引用之后
