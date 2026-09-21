@@ -2313,7 +2313,11 @@ function asyCModsBuild(path) {
   for (const nm of names) {
     const cPath = join(dir, `${nm}.c`);
     const hTxt = exists(join(dir, `${nm}.h`)) ? readText(join(dir, `${nm}.h`)) : '';
-    const k = hash16([readText(cPath), hTxt, arch, os, fmt,
+    /* **编译器指纹必须在键里**（`cs`）：`.o` 的输入不止那份 `.c` —— 我们自己那台 C 前端
+       也是输入。少了这一格，改了后端 / C 前端之后旧的 `.o` 照旧命中，那是**答案静默地错**
+       （量到过：改了 emit 的零值构造那一段，日志写着"新编 4 份"而 `c obj 编了 0 格"，
+       链接期 `符号 '_omni_new_C_box' 没有定义` —— 用的是上一版的 `.o`）。 */
+    const k = hash16([cs, readText(cPath), hTxt, arch, os, fmt,
       LIBC === null ? '' : LIBC, CROSS === null ? '' : CROSS.sysroot].join('|'));
     const obj = join(objDir, `${nm}-${k.slice(0, 8)}.o`);
     objs.push(obj);
@@ -3327,7 +3331,8 @@ function buildSelfModules(mod, outPath, dir) {
       for (const e of y.deps) todo.push(e);
     }
     for (const d of [...seen].sort()) if (hOf.has(d)) parts.push(`${d}:${hOf.get(d)}`);
-    const key = hash16([...parts, arch, os, fmt, LIBC === null ? '' : LIBC,
+    /* 同一条规矩：**编译器指纹进键**（见 asyCModsBuild 里那段账）。 */
+    const key = hash16([srcStamp(), ...parts, arch, os, fmt, LIBC === null ? '' : LIBC,
       CROSS === null ? '' : CROSS.sysroot].join('|'));
     const obj = join(objDir, `${x.name}-${key.slice(0, 8)}.o`);
     objs.push(obj);

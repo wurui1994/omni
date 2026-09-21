@@ -77,6 +77,11 @@ class CEmitter {
      * 共用前段照抄进每个 TU：没被引用的 static 一份机器码都不生成（量出来 528 字节），
      * 所以复制它只花每个 TU 约 0.46 秒的编译税。带状态的那三样不能复制 —— 见 ADR-0021。 */
     this.perMod = opts.modules === true;
+    /* **自足的一份模块**（跨文件模块化那条路，§12 末节）：与 `perMod` 正交 ——
+     * `perMod` 说的是"函数外部链接、每家一份 TU"，这一格再说"这一份自己齐全"：
+     * 模板（零值构造那一族）发在自己的 `.c` 里、原型进 `.h`，所以**不是 static**
+     * （见 `aggLink`），而且这一份**不带 main**。 */
+    this.selfMod = opts.selfContained === true;
     /* **外部链接**与**切文件**是两件事（ADR-0021 的 S4）：切文件必然要外部链接，
      * 但"核心把符号导出去给插件用"不需要切文件。所以拆成两格开关。 */
     this.extern = opts.modules === true || opts.extern === true;
@@ -114,6 +119,36 @@ class CEmitter {
      * 恰恰要求逐家分开。发函数体时 `curUse` 指向当前这一格。 */
     this.fnUses = new Map();
     this.curUse = null;
+    /* `mod.imports` 里 kind `'cfn'` 那几条说的是"**这个闭包归别家**"（JS 腿照它 import
+     * `omni_mk_…`）。按模块那一档要跳过它们的**体与 make**：每家各发一份的话链接期就是
+     * `符号 '_omni_clo_ref_asy__quot' 定义了两次`（`(fnref f)` 那族薄适配器，两家都引到
+     * 同一个函数就各造一份）。原型从别家的 `.h` 来。 */
+    this.extClo = new Set();
+    if (opts.modules === true) {
+      const extFn = new Set();
+      for (const im of mod.imports ?? []) {
+        if (im.kind === 'fn') extFn.add(im.name);
+        if (im.kind !== 'cfn') continue;
+        this.extClo.add(`omni_clo_${im.name}`);
+        this.extClo.add(`omni_mk_${im.name}`);
+      }
+      /* `(fnref f)` 的薄适配器（`omni_clo_ref_<f>` + 它的 make）：**每家引到同一个函数就
+       * 各造一份**，而 JS 那侧模块作用域隔离所以不冲突、C 这侧是全局符号空间 —— 量出来是
+       * `符号 '_omni_clo_ref_asy__quot' 定义了两次`。而且不能改成 static：单件语义
+       * （同一个具名函数取出来的值 `f == f` 要真）跨家就假了，那是答案静默地错。
+       *
+       * 归属判据：**被引用的那个函数归谁，这格适配器就归谁** —— `f` 在 `imports` 里
+       * （kind `fn`）就说明它归别家，这一份于是只用它的原型。名字形状是
+       * `omni_clo_ref_<被引用函数>`（那是 lower 定的，见 frontend-asy 的 fnref）。 */
+      const pre = 'omni_clo_ref_';
+      for (const c of mod.closures ?? []) {
+        const nm = typeof c.mangled === 'string' ? c.mangled : '';
+        if (!nm.startsWith(pre)) continue;
+        if (!extFn.has(nm.slice(pre.length))) continue;
+        this.extClo.add(nm);
+        if (typeof c.make === 'string') this.extClo.add(c.make);
+      }
+    }
     this.indent = 0;
     this.tmp = 0;
     // 函数级计时（第八十八刀，见 profTable）：`--profile` 或 `OMNI_PROFILE=1` 打开。
@@ -483,6 +518,11 @@ class CEmitter {
     for (const c of closures) this.closureBody(c);
     for (const t of fnTypes) this.fnCallHelper(t);
     this.line();
+    /* 零值构造那一段的范围（`zeroAt0`..`zeroAt1`）：这一族在发射时会**惰性地**把彼此发出来
+     * （`zeroOf` 里嵌套的那一层），所以自足模块那条路只能**按范围切**，不能用 `capture`
+     * 重发一遍 —— 重发出来的样子是函数头套在自己里面
+     * （`ct_knot omni_new_C_knot(void) { ct_knot omni_new_C_knot(void) {`）。 */
+    this.zeroAt0 = this.out.length;
     // 零值构造按拓扑序发：enum 的零值要调它第一个变体载荷的零值构造，struct 反过来也一样
     for (const a of aggs) {
       if (a.k === 'struct') this.structNew(a.t);
@@ -490,6 +530,7 @@ class CEmitter {
     }
     for (const e of enums) this.enumMakers(e);
     for (const c of classes) this.classNew(c);
+    this.zeroAt1 = this.out.length;
     // JS 前端的模块级变量（ADR-0011）：顶层函数要能互相看见，所以是真全局，
     // 不是 omni_main 的局部量。初值一律 undefined，赋值发生在 omni_main 里。
     /* 分文件时模块级变量是**唯一一格真共享的状态**：共用前段里只发 extern，定义在
@@ -545,6 +586,8 @@ class CEmitter {
      * 所以它们归到 stats 的 '(shared)' 那一行里（见 cli.js 印表那儿）。 */
     this.markB = this.out.length;
     for (const f of this.mod.funcs) {
+      /* 归别家的闭包体：只在那一家发（见构造器里 extClo 那段）。 */
+      if (this.extClo.has(f.mangled)) continue;
       /* 不属于这一份的：原型已经发过（extern 模式下就是外部声明），体不发 —— 加载时绑到核心那一份上 */
       if (!this.emitsSym(f.mangled, f.file) && !this.isEntry(f)) continue;
       this.noteSym(f.mangled, f.file);
@@ -728,16 +771,22 @@ class CEmitter {
    * `符号 'omni_new_S_P' 没有定义`）。单体那条路照旧 `static`（一份文件里自足）。
    */
   aggLink() {
-    /* **现在还只能是 `static`**（试过去掉，当场 `elf: 符号 '_omni_new_C_file' 定义了两次`）：
-     * 按模块那一档的产物是"一棵合并的树切开"，模板（零值构造那一族）只发在**类型的家**，
-     * 而别家要调得到 —— 于是它住在那一家的 `.h` 里，靠 `static` 让每个 include 它的 TU
-     * 各有一份无状态的副本。去掉 `static` 就变成"每个 include 它的 TU 一份定义"。
+    /* 一棵合并的树切开那条路（`headers()`）：**只能是 `static`**（试过去掉，当场
+     * `elf: 符号 '_omni_new_C_file' 定义了两次`）—— 那条路上模板只发在**类型的家**、
+     * 住在那一家的 `.h` 里，靠 `static` 让每个 include 它的 TU 各有一份无状态的副本。
+     * 去掉 `static` 就变成"每个 include 它的 TU 一份定义"。结论：**放进 `.h` 的模板永远
+     * static**。
      *
-     * 真正能去掉它的是**跨文件模块化**那条路（§12 末节）：那时每家自己的 `mod` 里有它
-     * 用到的类型，模板由各家自足发在自己的 `.c` 里、照旧 `static`，而 `.h` 只剩接口。
-     * 也就是说这一格到时候**也不需要非 static** —— 结论是"模板永远 static，
-     * 别把它放进 `.h`"。 */
-    return 'static ';
+     * 自足模块那条路（`moduleFiles()`，§12 末节）反过来：模板发在自己的 `.c` 里、`.h` 只
+     * 带原型，所以**不能 static** —— 别家构造这个类型时调的就是它（`box` 那一格量出来的
+     * 样子是 `implicit declaration of function 'omni_new_C_drawop3'` 加链接期
+     * `macho: 符号 '_omni_new_C_box' 没有定义`：类的家在 asy_builtins，用它的是 gen）。
+     * 这里不能指望"每家自足再发一份"：别家的类只作为**接口**进来（`imports` 里那一条只有
+     * 名字，没有字段），发不出体来。
+     *
+     * 留着的一格风险：同一个 by-value 结构进了两家的 `mod.structs` 就是两份定义。那是
+     * **链接期当场报**（不是答案静默地错），要治就给它定家（`aggHomes()` 那套）。 */
+    return this.selfMod ? '' : 'static ';
   }
 
   /** 发函数体时记下"叫到了谁"（原型那一段按它裁；`curUse` 那一格是切文件算 include 用的）。 */
@@ -954,6 +1003,14 @@ class CEmitter {
     for (const g of this.mod.globals ?? []) H.push(`extern ${cTypeName(g.type)} g_${g.name};`);
     for (const g of this.mod.jsGlobals ?? []) H.push(`extern omni_dyn g_${g.name};`);
     for (const l of this.protoLines()) H.push(l);
+    /* 本家发的那几格闭包 make 也进接口（别家 `(fnref f)` 到同一个函数时调它）。 */
+    for (const c of closures) if (!this.extClo.has(c.make)) H.push(`${this.closureProto(c)};`);
+    /* 零值构造 / 变体构造 / 类的 new 的**原型也进接口**：自足那条路上它们发在自己的 `.c`
+       里且不是 static（见 aggLink 的账），别家构造这个类型时调的就是它们。原型不另写一套
+       签名 —— 直接从发出来那一段的函数头上取（列 0 那几行就是头，体是缩进的）。 */
+    for (const l of this.out.slice(this.zeroAt0, this.zeroAt1)) {
+      if (/^[A-Za-z_][^\n]*\) \{$/.test(l)) H.push(`${l.slice(0, -2)};`);
+    }
     H.push('', '#endif', '');
     /* `.c` 只要自己的 `.h`：别家的接口已经由它带进来了（上面那一段）。 */
     const C = [`#include "${name}.h"`, ''];
@@ -967,21 +1024,22 @@ class CEmitter {
       for (const l of this.capture(() => this.boxDeepFn(t))) C.push(l);
     }
     for (const t of this.mod.fnTypes ?? []) for (const l of this.capture(() => this.fnCallHelper(t))) C.push(l);
-    for (const a of aggs) {
-      for (const l of this.capture(() => (a.k === 'struct' ? this.structNew(a.t) : this.enumNew(a.t)))) C.push(l);
+    /* 零值构造 / 变体构造 / 类的 new：**按范围切**（见 emit 里 zeroAt0 那段账）。 */
+    if (this.zeroAt1 > this.zeroAt0) {
+      for (const l of this.out.slice(this.zeroAt0, this.zeroAt1)) C.push(l);
     }
-    for (const e of this.mod.enums ?? []) for (const l of this.capture(() => this.enumMakers(e))) C.push(l);
-    for (const c of classes) for (const l of this.capture(() => this.classNew(c))) C.push(l);
     for (const c of closures) {
+      if (this.extClo.has(c.make)) continue;   // 归别家（见 extClo）
       for (const l of this.capture(() => this.closureBody(c))) C.push(l);
-      C.push(`static ${this.closureProto(c)};`);
+      C.push(`${this.closureProto(c)};`);
       for (const l of this.capture(() => this.closureMake(c))) C.push(l);
     }
     for (const g of this.mod.globals ?? []) C.push(`${cTypeName(g.type)} g_${g.name};`);
     for (const g of this.mod.jsGlobals ?? []) C.push(`omni_dyn g_${g.name} = { .tag = OMNI_DYN_UNDEF };`);
     for (const r of this.fnRanges) C.push(this.out.slice(r.i0, r.i1).join('\n'));
-    /* 入口那一份的 main 与线性内存的 data 段（库那几份这一段是空的）。 */
-    for (const l of this.out.slice(this.markC, this.out.length)) C.push(l);
+    /* **不带 main**：每一份模块降下来都是"一个程序"，emit 都会给它发一格 main ——
+       搬进来就是 `符号 '_main' 定义了两次`。这条路上 `main` 由入口那一份旁边生成的
+       `main-<入口>.c` 提供（它按序调各家的 `omni_init_*`，见 cli 的 asyCModsBuild）。 */
     return { h: H.join('\n'), c: `${C.join('\n')}\n` };
   }
 
@@ -2981,7 +3039,7 @@ export function emitCWithStats(mod, opts = {}) {
  * 这一条收的是"本来就独立的一段方言"降出来的 OIR。
  */
 export function emitCModule(mod, name, opts = {}) {
-  const e = new CEmitter(mod, { ...opts, modules: true });
+  const e = new CEmitter(mod, { ...opts, modules: true, selfContained: true });
   e.emit();
   return { ...e.moduleFiles(name), stats: e.stats, syms: e.syms };
 }
