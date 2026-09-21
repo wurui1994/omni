@@ -712,6 +712,16 @@ function goMathCall(m, argNodes) {
 let VARTY = new Map();
 /** 正在走的那格函数**声明的单返回类型节点**（`ret` 那一处按它装箱）。 */
 let CUR_RET = null;
+/**
+ * **这个函数具名的返回值**（`func f() (left, right bool)`）—— `funcOf` 存下、
+ * 光秃秃的 `return` 拿它补出返回值（go 的 "bare return"）。
+ *
+ * 为什么非要它：pt 的 `Box.Partition` 就是这个写法（体里只有 `switch` 赋值 + 一句 `return`）。
+ * 不认它的话那句 `return` 落成光秃秃的 `(ret)`，于是整格函数"一格 ret 都没有"，
+ * core 那侧当成隐式返回、报"把 'Box__Partition' 当值用，可它体里一格 ret 都没有"。
+ * 名字与类型一起存（进函数时要按声明的零值绑出来）。
+ */
+let CUR_OUTS = [];
 
 /** 这格类型节点是**有方法的接口**吗 —— 是就回接口名。`interface{}` 回 null（没方法可分派）。 */
 function ifaceNameOf(ty) {
@@ -2415,6 +2425,35 @@ function inScope(f) {
  * 转实参（`FSIG`，见 `argsByDecl`），那张表必须与 `funcOf` 算出的形参**同一条规则、
  * 同一个顺序** —— 两处各写一遍就会错位。
  */
+/**
+ * **具名的返回值**（`func f() (left, right bool)`）：`[{nm, ty}, …]`，没具名回空表。
+ *
+ * `(out …)` 在树上与 `(in …)` 同形，所以判据与 `paramInfo` 逐字一样（`(left, right bool)` 里
+ * `left` 被语法收成了"类型"，只要有一格真带名字，那些光秃秃的 `tname` 其实是名字）。
+ * 单返回不具名的那一档（`func f() bool`）回空表 —— 那时 `return` 本来就带值。
+ */
+function outInfo(sig) {
+  const outs = partKids(sig, 'out');
+  if (outs.length === 0) return [];
+  const anyNamed = outs.some((p) => part(p, 'name') !== undefined);
+  if (!anyNamed) return [];
+  const info = outs.map((p) => {
+    const nm = part(p, 'name');
+    const ty = kids(p).find((y) => tag(y) !== 'name');
+    if (nm !== undefined) return { nm: leaf(kids(nm)[0]), ty };
+    const tn = kids(p).find((y) => isList(y) && tag(y) === 'tname');
+    if (tn !== undefined && kids(tn).length === 1) return { nm: leaf(kids(tn)[0]), ty: undefined };
+    return { nm: null, ty };
+  }).filter((x) => x.nm !== null);
+  /* 一组共享类型，从后往前补（与 `paramInfo` 同一条）。 */
+  let lastTy;
+  for (let i = info.length - 1; i >= 0; i--) {
+    if (info[i].ty === undefined) info[i].ty = lastTy;
+    else lastTy = info[i].ty;
+  }
+  return info.filter((x) => x.ty !== undefined);
+}
+
 function paramInfo(sig) {
   /* **Go 的参数组** `(a, b int)`：语法上有歧义——`a` 既可能是类型也可能是名字。
      go.grammar 的 `(-> (type) (p $1))` 把 `a` 收成了**类型**，于是名字丢了。
@@ -2581,9 +2620,14 @@ function funcOf(sig, blk, name, self, selfType) {
   }
   /* 当前函数**声明的返回类型**（`ret` 那一处按它装箱）。 */
   const savedRet = CUR_RET;
+  const savedOuts = CUR_OUTS;
   {
     const o = partKids(sig, 'out');
     CUR_RET = o.length === 1 ? o[0] : null;
+    /* **具名的返回值**（见 `CUR_OUTS`）：`(out …)` 与 `(in …)` 同形，所以用同一份
+       `paramInfo` 的规矩去认（`(left, right bool)` 里 `left` 被语法当成了类型）。
+       认出名字来才补得出光秃秃的 `return`。 */
+    CUR_OUTS = outInfo(sig);
   }
   try {
     /* **有类型覆盖层（#40）的第一格真货**：把每一格形参的**声明类型**以"它的零值"
@@ -2609,6 +2653,18 @@ function funcOf(sig, blk, name, self, selfType) {
     const outs = partKids(sig, 'out');
     const rz = outs.length === 1 ? zeroOfParam(outs[0]) : null;
     let fbody = blk === undefined ? [] : many(kids(blk));
+    /* **具名的返回值先按声明的零值绑出来**（见 `CUR_OUTS`）：go 里它们进函数就是零值、
+       体里当普通局部量用，光秃秃的 `return` 交回它们当时的值。
+       摆在体的最前面 —— 体里第一句就可能读它。 */
+    if (CUR_OUTS.length > 0) {
+      const decls = CUR_OUTS.map((o) => {
+        const nz = nilVarZero(o.ty);
+        return nz !== null
+          ? node('bind', { init: lit(null) }, { name: o.nm, tzero: nz })
+          : node('bind', { init: zeroOf(o.ty, o.nm) }, { name: o.nm });
+      });
+      fbody = [...decls, ...fbody];
+    }
     /* 终止语句那一条（见 `foreverLoop` 的头注释）：补一格**不可达的** `ret 零值`。
        不可达所以那个值永远看不见 —— 与 core 那句"补零值会给错答案"不矛盾，
        它说的是**会真掉下去**的那一种。多返回的函数这一格还没做（`rz` 只有单返回才算）。 */
@@ -2632,6 +2688,7 @@ function funcOf(sig, blk, name, self, selfType) {
     VARTY.clear();
     for (const [k, v] of savedTys) VARTY.set(k, v);
     CUR_RET = savedRet;
+    CUR_OUTS = savedOuts;
     SCOPES = savedScopes;
   }
 }
@@ -3771,6 +3828,11 @@ function toNode(x) {
        `CUR_RET` 是 `funcOf` 存下的那格声明类型（只有单返回那一档）。 */
     case 'return': {
       const vs = kids(x);
+      /* **光秃秃的 `return` + 具名的返回值**（go 的 bare return，见 `CUR_OUTS`）：
+         交回那几个名字当时的值。不补的话整格函数"一格 ret 都没有"，core 那侧当成隐式返回。 */
+      if (vs.length === 0 && CUR_OUTS.length > 0) {
+        return retOf(CUR_OUTS.map((o) => node('ref', {}, { name: o.nm })));
+      }
       const ifn = ifaceNameOf(CUR_RET);
       if (ifn !== null && vs.length === 1) {
         return retOf([boxInto(ifn, tnOfExpr(vs[0]), toNode(vs[0]))]);

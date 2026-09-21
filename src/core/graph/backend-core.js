@@ -276,10 +276,20 @@ function expr(x, env, ctx) {
        */
       if (nm === 'fill') {
         const fa = argList(x, 'args');
-        if (fa.length === 2 && isZeroValueNode(fa[1])) {
+        if (fa.length === 2) {
           const et = elemTypeOfNode(fa[1], env, ctx);
-          const rec = et !== null && isRecType(et, ctx) && !isPtrRec(et, ctx);
-          if (rec || et === 'int' || et === 'real' || et === 'bool' || et === 'string') {
+          const isRec = et !== null && isRecType(et, ctx);
+          /* **元素是引用语义的记录（类）时不问初值**（与 `bindFill` 逐字同一条规矩）：
+             `(anew (arr rN) n)` 铺的是 n 格空引用，而 go 的 `make([]Shape, n)` 给的正是
+             n 格 nil —— 接口的零值是"全是桩的记录"，结构上不是零，可在 `(arr 类名)` 上
+             根本用不着。少了这一条，`node.Shapes = make([]Shape, n)`（**赋值**位置，
+             走不到 `bindFill`）就报"内建 fill"。 */
+          const ok = isRec
+            ? (isPtrRec(et, ctx) || isZeroValueNode(fa[1]))
+            : ((et === 'int' || et === 'real' || et === 'bool' || et === 'string')
+              && isZeroValueNode(fa[1]));
+          if (ok) {
+            if (isRec) arrElemOk(et, ctx);
             return `(anew (arr ${et}) ${expr(fa[0], env, ctx)})`;
           }
         }

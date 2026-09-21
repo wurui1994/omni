@@ -307,9 +307,15 @@ export function multiShape(vals, env, ctx) {
      与 `bindRecord` 把记录当字段存的是同一件事（那儿存的也是指针）。
      从前这儿只收标量，go 的 `return hit, shape`（一个 struct 一个接口）就落不下去 ——
      pt 整包编到最后卡的正是这一句（`多值里有一格不是标量（量到的是 (ptr r6)）`）。
-     列表 / 字典仍旧不收：那两样是句柄，"里头改了外头看得见"要先有判据。 */
+     **数组与字典也收**（2026-09-22）：那两样在方言里是**句柄**（一格字），摆进结构体里
+     与记录同理；而"里头改了外头看得见"正是 go 的语义（切片返回的是同一块底层数组）。
+     判据：`tests/go/cases/41-multi-slice.go`（`return left, right []Shape` 之后从返回的
+     那两格里改元素，原来那一格跟着变，与 `go run` 逐字节相同）。
+     pt 的 `Node.Partition(size, axis, point) (left, right []Shape)` 就是这一格。 */
   for (const t of types) {
-    if (!isScalar(t) && !isRecType(t, ctx)) ctx.gap(`多值里有一格不是标量也不是记录（量到的是 ${t}）`);
+    if (!isScalar(t) && !isRecType(t, ctx) && elemType(t) === null && dictOf(t) === null) {
+      ctx.gap(`多值里有一格不是标量、记录、数组或字典（量到的是 ${t}）`);
+    }
   }
   return ctx.shapeOf(types.map((_, i) => `v${i}`), types, true);
 }
