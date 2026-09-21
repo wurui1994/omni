@@ -2135,7 +2135,10 @@ function isZeroText(t, v) {
   const at = `(arr ${et})`;
   const out = [bindLine(nm, at, `(anew ${at} (int ${items.length}))`, env, ctx)];
   for (let i = 0; i < items.length; i++) {
-    const v = expr(items[i], env, ctx);
+    /* **一格记录变量当元素**（go 的 `[]Hit{h1, h2}` / `[]Vector{a, b}`）：走 `aggValText`
+       而不是 `expr` —— 后者对"把记录整格当值用"一律报缺口，而那条规矩在这儿不适用：
+       元素类型就在 `(arr rN)` 上写着（与 `index-set` 那一处同一条账，见 `aggValText`）。 */
+    const v = aggValText(items[i], env, ctx);
     out.push(`(aset (var ${nm}) (int ${i}) ${lift(i) ? `(toreal ${v})` : v})`);
   }
   return out;
@@ -2363,7 +2366,8 @@ export function emitCore(g) {
     /* 闭包那一族（`liftFnVals` 的第二刀）：`clos` 是"这个提上来的名字借了哪几格"，
        `capTypes` 是那几格的类型（只有 `mkclo` 那一处知道，见 `fnValText`），
        `caps` 是"现在正在落哪一格 cfn 的体"（体里读借来的东西要发 `(cap 名)`）。 */
-    clos: new Map(), capTypes: new Map(), caps: null, byCopy: new Set(), recPend: new Set(),
+    clos: new Map(), capTypes: new Map(), caps: null, byCopy: new Set(), recPend: new Map(),
+    selfTok: new Map(), recFix: [], tokOf: new Map(), tokUsed: new Set(),
   };
   /* **运行时那几个 C 符号的返回类型**先摆进 env：调用点的 `inferType` 查的是 `fn:名字`，
      而它们在这份产物里没有函数体（体在 `libomnigo` 里），不走 `ctx.rets` 那一趟。 */
@@ -2628,8 +2632,17 @@ function recordTypeOfNode(rec, env, ctx) {
   /* **自引用**（见 `SELF_TY`）：按"字段名单 + 值/引用"认 —— 同一格接口的零值记录处处同形，
      而里层那一格的字段值压根不用看（这儿就回了）。 */
   const nkey = `${byval ? 'v' : 'r'}|${names.join('|')}`;
-  if (ctx.recPend.has(nkey)) return SELF_TY;
-  ctx.recPend.add(nkey);
+  const pend = ctx.recPend.get(nkey);
+  if (pend !== undefined) { ctx.tokUsed.add(nkey); return pend; }
+  /* **一格占位串按"字段名单"起名**（不按遇到的次序编号）：
+     一、互相引用（pt 的 `Hit.Shape Shape` 与 `Shape.Intersect(Ray) Hit`）时环上有**两格**
+         记录，共用一个占位串会把里层那一格换成外层的标签 —— 量出来的是
+         `(struct r1 (Shape r1) (T int))`：Hit 的 Shape 字段落成了 Hit 自己；
+     二、名字**跟着字段名单走**所以处处相同 —— 带占位串的那把键于是也处处相同，
+         `shapeOf` 一查就命中。按次序编号的话同一对环每遇到一次就多出一对形状
+         （量出来：同一个 Hit/Shape 出了七对 r1/r2 … r20/r21）。 */
+  const tok = `${SELF_TY}${nkey}__`;
+  ctx.recPend.set(nkey, tok);
   let types = [];
   try {
     types = fieldTypesOfNode(names, vals, env, ctx, rec.attrs.fzero);
@@ -2637,24 +2650,65 @@ function recordTypeOfNode(rec, env, ctx) {
     ctx.recPend.delete(nkey);
   }
   if (types === null) return null;
-  if (!types.some((t) => typeof t === 'string' && t.includes(SELF_TY))) {
-    return shapeType(shapeOf(names, types, false, ctx, byval));
-  }
-  /* 先按带占位串的字段类型登记一格形状（要的只是它的标签），再原地把占位串换掉：
-     `shape.types`（下游查字段类型靠它）与 `ctx.decls` 里那句 `(struct …)` 两处都要换。 */
+  /* **环上的标签先卷回占位串再当键**（`canonRolled`）：不这么做的话同一对环从哪一格进去
+     算出来的键就不一样（从 Hit 进：`Shape:r2`；从 Shape 进：`Shape:占位串`），于是同一对
+     环每换一个入口就多出一对形状 —— 量出来是 r1/r2、r4/r5、r7/r8 三对，随后
+     `要返回 r5，给的是 r8`。卷回去之后两个入口的键逐字相同。 */
+  const ctypes = canonRolled(types, ctx);
+  /* 先按（可能还带着占位串的）字段类型登记一格形状，要的只是它的标签；随后把**自己**那个
+     占位串定下来，再把环上所有还带着占位串的形状换一遍。 */
   const at = ctx.decls.length;
-  const shape = shapeOf(names, types, false, ctx, byval);
+  const shape = shapeOf(names, ctypes, false, ctx, byval);
   const self = shapeType(shape);
-  const fixed = types.map((t) => String(t).split(SELF_TY).join(self));
-  for (let i = 0; i < names.length; i++) shape.types.set(names[i], fixed[i]);
-  const kw = byval ? 'struct' : 'class';
-  const line = `  (${kw} ${shape.tag} ${names.map((n, i) => `(${n} ${fixed[i]})`).join(' ')})`;
-  if (ctx.decls[at] !== undefined) ctx.decls[at] = line;
-  /* **换过之后的键也登记一份**：别处（`bindRecord` 走的是**提上顶层之后**那几格闭包的
-     `fnTypeOf`）算出来的字段类型里已经是真标签了 —— 不补这一笔，同一个接口在图上会多出
-     一格内容完全相同的形状（量出来的：r1 与 r3），随后就是"形参在两处的类型不一样"。 */
-  ctx.byKey.set(shapeKey(names, fixed, false, byval), shape);
+  ctx.selfTok.set(tok, self);
+  const onCycle = ctypes.some((t) => typeof t === 'string' && t.includes(SELF_TY));
+  /* **我也在环上**（要么我的占位串被借走过、要么我的字段里有别人的占位串）：把
+     「标签 -> 占位串」记一笔，下一个入口进来时好把键卷成同一份。 */
+  if (onCycle || ctx.tokUsed.has(nkey)) ctx.tokOf.set(self, tok);
+  if (onCycle) ctx.recFix.push({ shape, names, at, byval });
+  if (ctx.recFix.length > 0) fixSelfToks(ctx);
   return self;
+}
+
+/**
+ * 把字段类型里**环上那几格的标签**换回它们的占位串（见 `recordTypeOfNode` 里那段账）。
+ * 一趟过（一格合起来的正则 + 回调），所以换出来的占位串不会再被换第二遍。
+ */
+function canonRolled(types, ctx) {
+  if (ctx.tokOf.size === 0) return types;
+  const tags = [...ctx.tokOf.keys()].filter((t) => /^[rm][0-9]+$/.test(t));
+  if (tags.length === 0) return types;
+  const re = new RegExp(`\\b(?:${tags.join('|')})\\b`, 'g');
+  return types.map((t) => (typeof t === 'string' && t.length > 0
+    ? t.replace(re, (m) => ctx.tokOf.get(m)) : t));
+}
+
+/**
+ * 把**已经定下来**的占位串在所有还带着占位串的形状上换掉：`shape.types`（下游查字段类型
+ * 靠它）、`ctx.decls` 里那句 `(struct …)`，再按换过之后的键**补登记一份**
+ * （别处算出来的字段类型里已经是真标签了 —— 不补这一笔，同一个接口在图上会多出一格内容
+ * 完全相同的形状，量出来是 r1 与 r3，随后就是"形参在两处的类型不一样"）。
+ *
+ * 环上每解开一格就跑一趟：互相引用那一族里，里层（接口那格）先落完、而它的字段类型里写着
+ * 外层（结构体那格）的占位串 —— 要等外层定下来才换得完。
+ */
+function fixSelfToks(ctx) {
+  const subst = (t) => {
+    let s = String(t);
+    for (const [k, v] of ctx.selfTok) if (s.includes(k)) s = s.split(k).join(v);
+    return s;
+  };
+  const left = [];
+  for (const e of ctx.recFix) {
+    const fixed = e.names.map((n) => subst(e.shape.types.get(n)));
+    for (let i = 0; i < e.names.length; i++) e.shape.types.set(e.names[i], fixed[i]);
+    const kw = e.byval ? 'struct' : 'class';
+    const line = `  (${kw} ${e.shape.tag} ${e.names.map((n, i) => `(${n} ${fixed[i]})`).join(' ')})`;
+    if (ctx.decls[e.at] !== undefined) ctx.decls[e.at] = line;
+    ctx.byKey.set(shapeKey(e.names, fixed, false, e.byval), e.shape);
+    if (fixed.some((t) => t.includes(SELF_TY))) left.push(e);
+  }
+  ctx.recFix = left;
 }
 
 /** `recordTypeOfNode` 的字段那一趟（拆出来是为了让自引用那一格的 try/finally 读得清）。 */

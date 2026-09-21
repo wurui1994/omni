@@ -503,8 +503,8 @@ const PTRRECV = new Set();
  * （量过：被指的是 Mesh / Triangle / Scene / Volume … 那一族，它们本来就有指针接收者）。
  */
 const PTRED = new Set();
-/** 正在算零值的那几个具名类型（自引用 / 互相引用要截住 —— 不然无限递归）。 */
-const ZEROING = new Set();
+/** 正在造零值记录的具名结构体 -> 那格**还没填完**的记录（`structZero` 的环闸）。 */
+const SPEND = new Map();
 /** 这格具名类型的记录要不要值语义（`recordNew` 的第二个实参）。 */
 const byValFor = (n) => !(typeof n === 'string' && PTRRECV.has(n));
 
@@ -980,6 +980,15 @@ const tnOfExpr = (x) => namedTypeOf(tyOfExpr(x));
 function ifaceZero(ifn) {
   const ms = ifaceMethods(ifn);
   if (ms.length === 0) return null;
+  /* **互相引用截在这儿**（pt 的 `Shape.Intersect(Ray) Hit` 与 `Hit.Shape Shape`）：
+     正在造这格接口的零值时又被问到同一个接口 —— 交回那格**还没填完**的记录。
+     为什么可以交出去：字段是**就地**填的（下面 `rec.ins.fields[fi] = …`），所以等整趟
+     走完它就是完整的那一份；这与"返回自己"那一族（`rz = rec`）是同一个手法。
+     从前这儿只有 `ZEROING` 那道闸（在 `structZero` 里），环一绕回来就回 null，于是
+     `Hit.Shape` 落成 int —— pt 里 `shape := hit.Shape` 报"在一格说不清形状的东西上取
+     字段 'NormalAt'（变量 shape 推出来是 int）"。 */
+  const pend = IFPEND.get(ifn);
+  if (pend !== undefined) { IFLENT.add(ifn); return pend; }
   /* 先把记录建出来（字段暂时是 null），下面逐格填 —— "返回自己"的 `rzero` 要指回它。
    * **带 `__type`**：类型 switch 比的就是这格字段。零值记录的 `__type` 是 `""` —— 哪一支
    * 都不命中，与 go 的"nil 接口不匹配任何 case"完全对齐。而装箱函数那一份带的是
@@ -987,13 +996,43 @@ function ifaceZero(ifn) {
   const fieldPairs = typeTagged() ? [['__type', lit('')], ...ms.map(([m]) => [m, lit(null)])]
     : ms.map(([m]) => [m, lit(null)]);
   const rec = recordNew(fieldPairs, false);
+  const lentBefore = IFLENT.has(ifn);
+  IFPEND.set(ifn, rec);
+  let ok;
+  try {
+    ok = fillIfaceZero(ifn, ms, rec);
+  } finally {
+    IFPEND.delete(ifn);
+  }
+  if (ok) return rec;
+  /* **借出去之后又说不清**：环那一侧已经拿着这格半成品当类型使了，这时回 null 会让
+     同一个接口在图上多出一种形状（字段全是 null ⇒ 每格算成 int）。有名有姓地停下。 */
+  if (!lentBefore && IFLENT.has(ifn)) {
+    IFLENT.delete(ifn);
+    throw new Error(`go->graph: 接口 '${ifn}' 的零值记录里有一格方法的类型说不清，`
+      + '而它自己已经被"互相引用"那条环借走了 —— 再回 null 会让同一个接口在图上多出一种形状');
+  }
+  return null;
+}
+
+/** 正在造零值记录的接口：接口名 -> 那格**还没填完**的记录（`ifaceZero` 的环闸）。 */
+const IFPEND = new Map();
+/** 被环借走过的接口名（见 `ifaceZero` 末尾那一段）。 */
+const IFLENT = new Set();
+
+/**
+ * 把一格接口零值记录的方法桩逐格填进去（`ifaceZero` 的体，拎出来是为了那道环闸 ——
+ * 中途说不清时要走 `finally` 把 `IFPEND` 摘掉，而不是就地 `return null`）。
+ * 回 false = 有一格方法的类型说不清。
+ */
+function fillIfaceZero(ifn, ms, rec) {
   for (let k = 0; k < ms.length; k++) {
     const [m, sig] = ms[k];
     const ps = ifaceParams(sig);
     const outs = partKids(sig, 'out');
-    if (outs.length > 1) return null;              // 多返回那一档还没接
+    if (outs.length > 1) return false;              // 多返回那一档还没接
     const pz = ps.map((p) => zeroOfParam(p.ty));
-    if (pz.some((z) => z === null)) return null;
+    if (pz.some((z) => z === null)) return false;
     let rz = null;
     let rv = null;
     if (outs.length === 1) {
@@ -1008,7 +1047,7 @@ function ifaceZero(ifn) {
         rz = zeroOfParam(outs[0]);
         rv = rz;
       }
-      if (rz === null) return null;
+      if (rz === null) return false;
     }
     const body = [assertOf(lit(false), lit(`在一格 nil 的 ${ifn} 上调了 ${m}`))];
     if (rv !== null) body.push(retOf([rv]));
@@ -1020,7 +1059,7 @@ function ifaceZero(ifn) {
       ...(rz !== null ? { rzero: rz } : {}),
     });
   }
-  return rec;
+  return true;
 }
 
 /** `__nilof_接口名` —— 造这格接口零值的顶层函数（一格接口一份）。 */
@@ -1527,39 +1566,44 @@ function typeTagged() { return NEEDS_TYPETAG || NEEDS_MTABLE; }
 function structZero(n) {
   const fs = STRUCTS.get(n);
   if (fs === undefined || fs === null) return null;
-  /* **自引用 / 互相引用截在这儿**（`*Node` 里躺着 `*Node`）：正在算它的零值就回 null，
-     那一格字段于是落回"说不清类型"—— 与从前一样，不会无限递归。
-     直接的自引用（`Node` 里的 `*Node`）不走这条路，见下面 `selfAt`。 */
-  if (ZEROING.has(n)) return null;
-  ZEROING.add(n);
-  let body;
-  let fz;
-  let selfAt;
+  /* **互相引用截在这儿**（pt：`Shape.Intersect(Ray) Hit` 里的 Hit 有一格 `Shape Shape`）：
+     正在造这格结构体的零值时又被问到它自己 —— 交回那格**还没填完**的记录，而不是 null。
+     从前这道闸（`ZEROING`）回 null，那一格字段于是落成 int，于是 pt 的
+     `shape := hit.Shape` 报"在一格说不清形状的东西上取字段 'NormalAt'"。
+     为什么交半成品是安全的：字段名单在建壳那一刻就是全的（方言按"字段名单 + 字段类型"
+     去重形状），值与 `fzero` 是**就地**填的，整趟走完它就是完整的那一份 ——
+     与 `ifaceZero` 那道环闸、以及下面 `selfAt` 那一手（`fzero` 指回自己）同一个路数。
+     go 里按值的环是写不出来的（无限大的结构体），所以环必经指针或接口 —— 那两种的值
+     都是 `lit(null)`，不需要那一格先填好。 */
+  const pend = SPEND.get(n);
+  if (pend !== undefined) return pend;
+  const off = typeTagged() ? 1 : 0;
+  /* 先建壳（字段名对得上、值先占 null），下面逐格填。 */
+  const shell = fs.map(([fn2]) => [fn2, lit(null)]);
+  const rec = recordNew(typeTagged() ? [['__type', lit(n)], ...shell] : shell, byValFor(n));
+  SPEND.set(n, rec);
+  const fz = fs.map(() => null);
   try {
     /* **直接自引用的那一格**（`Left *Node` 在 Node 自己里）：值落空引用，类型在 `fzero`
        上**指回这格记录自己** —— 环只在 attrs 上（`walkCore` / `mapNodes` 只走 `ins`），
        与 ADR-0040 里接口 `rzero` 指回自己同一个手法，后端靠 `recPend` / `SELF_TY` 收敛。
-       从前这一格落成 int（`ZEROING` 那道闸回 null），于是 `n.Left.X` 报
+       从前这一格落成 int（那道闸回 null），于是 `n.Left.X` 报
        "两处的类型不一样（r7 与 int）"（任务 #84）。 */
-    selfAt = fs.map(([, ft]) => selfPtrName(ft) === n);
+    const selfAt = fs.map(([, ft]) => selfPtrName(ft) === n);
     /* **声明成接口的字段，零值是空引用**（go 的 `var h Hit` 里 `h.Shape` 就是 nil）。
        值落 `lit(null)`、类型走 `fzero` —— 落那格"全是桩的零值记录"的代价是
        `h.Shape != nil` 恒为真（答案静默地错）。见 `nilFieldZero` 那段账。 */
-    fz = fs.map(([, ft], i) => {
-      if (selfAt[i]) return lit(null);            // 占位，下面换成 rec 自己
-      return nilFieldZero(ft, lit(null));
-    });
-    body = fs.map(([fn2, ft], i) => [fn2,
-      fz[i] === null ? zeroOf(ft, `${n}.${fn2}`) : lit(null)]);
+    for (let i = 0; i < fs.length; i++) {
+      const [fn2, ft] = fs[i];
+      if (selfAt[i]) { fz[i] = rec; continue; }    /* 值已经是 lit(null) 了 */
+      fz[i] = nilFieldZero(ft, lit(null));
+      if (fz[i] === null) rec.ins.fields[off + i] = zeroOf(ft, `${n}.${fn2}`);
+    }
   } finally {
-    ZEROING.delete(n);
+    SPEND.delete(n);
   }
-  const rec = recordNew(typeTagged() ? [['__type', lit(n)], ...body] : body, byValFor(n),
-    typeTagged() ? [null, ...fz] : fz);
-  const off = typeTagged() ? 1 : 0;
-  for (let i = 0; i < selfAt.length; i++) {
-    if (selfAt[i] && Array.isArray(rec.attrs.fzero)) rec.attrs.fzero[off + i] = rec;
-  }
+  const fzAll = typeTagged() ? [null, ...fz] : fz;
+  if (fzAll.some((z) => z !== null)) rec.attrs.fzero = fzAll;
   return rec;
 }
 
@@ -4015,7 +4059,9 @@ export function goToGraph(tree, opts) {
   FSIG.clear();
   PTRRECV.clear();
   PTRED.clear();
-  ZEROING.clear();
+  SPEND.clear();
+  IFPEND.clear();
+  IFLENT.clear();
   NEEDS_TYPETAG = false;
   NEEDS_SCHED = false;
   VARTYPE.clear();
