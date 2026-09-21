@@ -2643,8 +2643,34 @@ export function emitCore(g) {
     const ks = [...ctx.args.keys()].sort();
     return ks.map((k) => `${k}=${ctx.args.get(k)}`).join('\n');
   };
-  let sig = argsSig();
-  for (let round = 0; round < 4; round++) {
+  /* 空跑那几趟量出来的返回类型**应到 `fn:` 上** —— 调用点靠它定型（`inferType` 的 call）。
+     只应聚合与 dyn 那几档：标量那几格 `retTypeOf` 早就答对了，覆盖不覆盖都一样。
+
+     **每一遍完就应一次**（从前只在整个不动点之后应一次）：一格函数的体要用到**另一格函数
+     交回来的多值**时，那个类型不在 `ctx.args` 里、也不在 env 上 —— 于是那一遍它按 int 走，
+     `if l` 当场报"条件不是 bool"，那个函数的体整趟被弃掉，连它自己的 `ret` 都没记上
+     （`ctx.rets`）。下一遍还是同一副样子：不动点永远转不到。
+     量出来的（pt 的 `Node.Partition` 里 `l, r := box.Partition(…)`）：`Node__Partition`
+     每一遍都在 `if l` 上折，于是 `fn:Node__Partition` 一直是 int，`Node__Split` 里
+     `l, r := node.Partition(…)` 拿到两格 int，最后报 `'NewNode' 第 1 格实参在两处的类型
+     不一样（(arr r18) 与 int）`。 */
+  const applyRets = () => {
+    for (const f of fns) {
+      const t = ctx.rets.get(f.name);
+      if (t === undefined || t === 'void') continue;
+      if (!(isAggregate(t, ctx) || t === 'dyn' || isMultiShape(t, ctx))) continue;
+      env.set(`fn:${f.name}`, t);
+      fnEnv.set(`fn:${f.name}`, t);
+    }
+  };
+  /* 不动点的判据里**也要有返回类型那张表** —— 少了它，"这一遍只收到了新的返回类型"
+     那种进展会被当成没进展，于是提前收工。 */
+  const retsSig = () => {
+    const ks = [...ctx.rets.keys()].sort();
+    return ks.map((k) => `${k}=>${ctx.rets.get(k)}`).join('\n');
+  };
+  let sig = `${argsSig()}\n--\n${retsSig()}`;
+  for (let round = 0; round < 6; round++) {
     for (const f of fns) {
       try {
         emitFn(f, fnEnv, env, ctx);
@@ -2652,20 +2678,13 @@ export function emitCore(g) {
         if (!(err instanceof Gap)) throw err;
       }
     }
-    const next = argsSig();
+    applyRets();
+    const next = `${argsSig()}\n--\n${retsSig()}`;
     if (round >= 1 && next === sig) break;
     sig = next;
   }
   ctx.collect = false;
-  /* 空跑那几趟量出来的返回类型**应到 `fn:` 上** —— 调用点靠它定型（`inferType` 的 call）。
-     只应聚合与 dyn 那几档：标量那几格 `retTypeOf` 早就答对了，覆盖不覆盖都一样。 */
-  for (const f of fns) {
-    const t = ctx.rets.get(f.name);
-    if (t === undefined || t === 'void') continue;
-    if (!(isAggregate(t, ctx) || t === 'dyn' || isMultiShape(t, ctx))) continue;
-    env.set(`fn:${f.name}`, t);
-    fnEnv.set(`fn:${f.name}`, t);
-  }
+  applyRets();
   ctx.tmp = 0;
   const mainStmts = stmtList(rest, env, ctx);
   const body = fns.map((f) => emitFn(f, fnEnv, env, ctx));
