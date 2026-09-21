@@ -2010,6 +2010,32 @@ function paramInfo(sig) {
   return pinfo;
 }
 
+/**
+ * **go 的终止语句：无条件的 `for`**（规范 "Terminating statements" 第 4 条）——
+ * `for { … }` 而且**没有 break 跳出它**。以这么一句收尾的函数不需要尾随 return，
+ * go 自己也不要求（真 go 的 `math/rand` 里 `Rand.NormFloat64`/`ExpFloat64` 就是这个形状）。
+ *
+ * break 必须按**作用域**算，不能"子树里有 break 就算有"：`NormFloat64` 的外层 `for` 里
+ * 嵌着一个带 break 的**内层** `for`，那个 break 跳的是内层。所以往下走时遇到 `loop`
+ * （以及吃 break 的 `switch` 那一族）就不再看它里头。判不准时一律**算有** ——
+ * 那时只是退回今天的行为（core 报"体末尾不是 ret"），不会给错答案。
+ */
+function breaksOut(n) {
+  if (n === null || n === undefined || typeof n !== 'object') return false;
+  if (Array.isArray(n)) return n.some(breaksOut);
+  if (n.op === 'loop' || n.op === 'switch' || n.op === 'match') return false;
+  if (n.op === 'loop-exit' && n.attrs !== undefined && n.attrs.kind === 'break') return true;
+  return Object.values(n.ins === undefined ? {} : n.ins).some(breaksOut);
+}
+
+/** 这一句是"无条件的 for、且没人 break 出来"吗（`threePart({cond: undefined})` 出来的形状）。 */
+function foreverLoop(n) {
+  if (n === null || n === undefined || typeof n !== 'object' || n.op !== 'loop') return false;
+  const c = n.ins === undefined ? undefined : n.ins.cond;
+  if (c === null || c === undefined || typeof c !== 'object' || c.lit !== true) return false;
+  return !breaksOut(n.ins.body);
+}
+
 function funcOf(sig, blk, name, self, selfType) {
   const inParams = partKids(sig, 'in');
   const pinfo = paramInfo(sig);
@@ -2086,7 +2112,14 @@ function funcOf(sig, blk, name, self, selfType) {
        的体里返回的是字段相加，它给出 `int`，于是方言当场报"要返回 int，给的是 real"。 */
     const outs = partKids(sig, 'out');
     const rz = outs.length === 1 ? zeroOfParam(outs[0]) : null;
-    return node('func', { body: blk === undefined ? [] : many(kids(blk)) },
+    let fbody = blk === undefined ? [] : many(kids(blk));
+    /* 终止语句那一条（见 `foreverLoop` 的头注释）：补一格**不可达的** `ret 零值`。
+       不可达所以那个值永远看不见 —— 与 core 那句"补零值会给错答案"不矛盾，
+       它说的是**会真掉下去**的那一种。多返回的函数这一格还没做（`rz` 只有单返回才算）。 */
+    if (rz !== null && fbody.length > 0 && foreverLoop(fbody[fbody.length - 1])) {
+      fbody = [...fbody, retOf([rz])];
+    }
+    return node('func', { body: fbody },
       { params: self === undefined ? params : [self, ...params], name,
         ...(anyZero ? { pzero: pz } : {}),
         ...(rz !== null ? { rzero: rz } : {}),
@@ -3123,9 +3156,21 @@ function toNode(x) {
           : node('set', { value: v }, { name: n });
       });
     }
-    case 'inc': case 'dec': return node('set', {
-      value: bin(tag(x) === 'inc' ? '+' : '-', toNode(kids(x)[0]), lit(1)),
-    }, { name: nameOf(kids(x)[0]) });
+    case 'inc': case 'dec': {
+      /* **目标可以是字段或下标**，不只是名字（go 里 `rng.tap--` / `xs[i]++` 都合法）。
+         从前这儿一律 `node('set', …, { name: nameOf(t) })`，而 `nameOf` 对 `sel` / `index`
+         答 null —— 落出来是 `(set null …)`，方言当场 `未声明的变量 'null'`。
+         量到的：真 go 的 `math/rand` 里 `rngSource.Uint64` 头两句就是 `rng.tap--`
+         与 `rng.feed--`。三条分支与 `assign` 那一处（`p.y = 5` / `xs[1] = 5`）逐字同形。 */
+      const t = kids(x)[0];
+      const v = bin(tag(x) === 'inc' ? '+' : '-', toNode(t), lit(1));
+      if (tag(t) === 'sel') return fieldSet(toNode(kids(t)[0]), leaf(kids(t)[1]), v);
+      if (tag(t) === 'index') {
+        const [o, i] = kids(t);
+        return isMap(o) ? mapSet(toNode(o), toNode(i), v) : indexSet(toNode(o), toNode(i), v);
+      }
+      return node('set', { value: v }, { name: nameOf(t) });
+    }
     case 'for': {
       // 三种 `for` 落成同一格 loop（**不给它开节点**）。形状与 vlang / awk 一模一样，
       // 所以那句话只写一遍 —— `threePart` 在 `src/core/graph/fromtree.js` 里。

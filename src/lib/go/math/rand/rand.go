@@ -22,7 +22,9 @@ type Source interface {
 
 // NewSource returns a new pseudo-random Source seeded with the given value.
 func NewSource(seed int64) Source {
-	rng := new(rngSource)
+	// go 的原文是 `rng := new(rngSource)`；这儿写等价的 `&rngSource{}` ——
+	// `new(T)` 那一格前端还没接（落出来是"空字典 'rng' 的键值类型推不出来"）。
+	rng := &rngSource{}
 	rng.Seed(seed)
 	return rng
 }
