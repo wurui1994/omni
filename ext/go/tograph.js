@@ -1120,6 +1120,9 @@ function fillIfaceZero(ifn, ms, rec) {
     rec.ins.fields[fi] = node('func', { body }, {
       params: ps.map((p) => p.nm),
       name: `__nil_${ifn}__${m}`,
+      /* **不交值的那几格也要说一声**（与装箱那一份对齐）：一边是 `(fnty () void)`、
+         另一边是 `(fnty () int)` 的话，零值记录与装箱记录就是**两格形状**。 */
+      ...(outs.length === 0 ? { noret: true } : {}),
       ...(pz.length > 0 ? { pzero: pz } : {}),
       ...(rz !== null ? { rzero: rz } : {}),
     });
@@ -1269,6 +1272,12 @@ function ensureBoxFn(tn, ifn) {
       fields.push([m, node('func', { body: outs.length === 0 ? [inner] : [retOf([inner])] }, {
         params: ps.map((p) => p.nm),
         name: `${boxFnName(tn, ifn)}__${m}`,
+        /* **这格方法不交值**（`Compile()`）：明着说一声。图上"体里没有 ret"与"隐式返回
+           （末尾那个值就是返回值）"同形，core 那侧的 `implicitRet` 会把末尾那一句调用
+           当成返回值 —— 量出来是
+           `(cfn __box_TransformedShape__Shape__Compile (…) () int (ret (callfn …)))`，
+           方言当场 `要返回 int，给的是 void`（pt 的 `Compile` 那一族）。 */
+        ...(outs.length === 0 ? { noret: true } : {}),
         /* **接收者是按值抄一份的**：go 里 `var s Shape = Sq{2}` 装进接口的正是 Sq 那一格
            值的副本。默认的闭包规矩不许借值语义的结构体（那一条是为 go 的**词法**闭包写的，
            它按引用捕获），所以这儿明着标一格 `bycopy`。 */
@@ -2880,6 +2889,14 @@ function funcOf(sig, blk, name, self, selfType) {
        `paramInfo` 的规矩去认（`(left, right bool)` 里 `left` 被语法当成了类型）。
        认出名字来才补得出光秃秃的 `return`。 */
     CUR_OUTS = outInfo(sig);
+    /* **具名返回值的类型也进 `VARTY` / `VARTYPE`**（与形参那一处同一条）：体里它们就是普通
+       局部量，`u = 1` 要按声明的 `float64` 转（不然方言报 `'u' 是 real，赋的值是 int`），
+       而 `t.N1 = n` 那种要靠 `VARTYPE` 认主人。量出来的：pt 的 `Triangle.Barycentric`。 */
+    for (const o of CUR_OUTS) {
+      if (o.ty !== undefined) VARTY.set(o.nm, o.ty);
+      const ot = namedTypeOf(o.ty);
+      if (ot !== null) VARTYPE.set(o.nm, ot);
+    }
   }
   try {
     /* **有类型覆盖层（#40）的第一格真货**：把每一格形参的**声明类型**以"它的零值"
@@ -3848,7 +3865,13 @@ function toNode(x) {
           const trunc = branchOf(binOf('<', at(), f64Zero(), OPS, { lang: 'go' }),
             neg(rmathCall('floor', [neg(at())])), rmathCall('floor', [at()]));
           const iNm = nameOf(lhs[0]) === '_' ? `${tv}i` : nameOf(lhs[0]);
-          const out = [node('bind', { init: toNode(a0) }, { name: tv }), mk(iNm, trunc)];
+          /* **整数那一格写的是 `_`** 时那个名字是**我们自己造的**（`__modfNi`），所以一律
+             `bind` —— 照 `mk` 走的话，`_, x = math.Modf(x)`（`=` 不是 `:=`）会落成一句
+             `set`，而那个名字压根没声明过：方言当场报 `未声明的变量 '__modf3i'`
+             （量出来的：pt 的 `Fract`）。 */
+          const iDecl = nameOf(lhs[0]) === '_'
+            ? node('bind', { init: trunc }, { name: iNm }) : mk(iNm, trunc);
+          const out = [node('bind', { init: toNode(a0) }, { name: tv }), iDecl];
           if (nameOf(lhs[1]) !== '_') {
             out.push(mk(nameOf(lhs[1]),
               binOf('-', at(), node('ref', {}, { name: iNm }), OPS, { lang: 'go' })));
@@ -4095,6 +4118,17 @@ function toNode(x) {
       const ifn = ifaceNameOf(CUR_RET);
       if (ifn !== null && vs.length === 1) {
         return retOf([boxInto(ifn, tnOfExpr(vs[0]), toNode(vs[0]))]);
+      }
+      /* **照声明的返回类型转一遍**（与 `fieldValue` 那段账同一条）：`func … float64` 里
+         `return 0` 递的是**整字面量**，而方言不给 `int` 往 `real` 自动升 —— 当场报
+         `要返回 real，给的是 int`（量出来的：pt 的 `Volume.Get` 与 `Vector.Reflectance`）。
+         go 的规矩是无类型常量按声明的类型转，而声明就在 `CUR_RET` 里。 */
+      if (CUR_RET !== null && vs.length === 1) {
+        return retOf([fieldValue(CUR_RET, toNode(vs[0]), vs[0])]);
+      }
+      /* **多返回那几格也照声明转**（`FOUTS` 那一族：`return 0, 1` 落到 `(real, real)` 上）。 */
+      if (CUR_OUTS.length === vs.length && vs.length > 1) {
+        return retOf(vs.map((v, i) => fieldValue(CUR_OUTS[i].ty, toNode(v), v)));
       }
       return retOf(many(vs));
     }

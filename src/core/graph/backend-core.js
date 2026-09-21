@@ -192,20 +192,71 @@ function bindLine(nm, t, initText, env, ctx) {
  */
 function freeInFns(fns, env) {
   const out = new Set();
-  for (const f of fns) {
-    const bound = new Set(f.params);
-    walkCore(f.body, (n) => {
-      if (n.op === 'bind') bound.add(n.attrs.name);
-      if (n.op === 'func') for (const p of n.attrs.params ?? []) bound.add(String(p));
-    });
-    walkCore(f.body, (n) => {
-      /* 写也算（同 `capsOf` 那条）：只 `set` 不读的那一格也得落成 `(global …)`。 */
-      const nm = n.op === 'set' ? n.attrs.name : (n.op === 'ref' ? n.attrs.name : null);
-      if (nm === null) return;
-      if (!bound.has(nm) && !env.has(`fn:${nm}`)) out.add(nm);
-    });
-  }
+  for (const f of fns) for (const nm of freeInOne(f, env)) out.add(nm);
   return out;
+}
+
+/** 一格函数里**绑住的名字**（形参 + 体里所有 `bind`，含内层函数的形参）。 */
+function boundInOne(f) {
+  const bound = new Set(f.params);
+  walkCore(f.body, (n) => {
+    if (n.op === 'bind') bound.add(n.attrs.name);
+    if (n.op === 'func') for (const p of n.attrs.params ?? []) bound.add(String(p));
+  });
+  return bound;
+}
+
+/** 一格函数里的**自由名字**（读或写、而这个函数里没绑过，也不是函数名）。 */
+function freeInOne(f, env) {
+  const bound = boundInOne(f);
+  const out = new Set();
+  walkCore(f.body, (n) => {
+    /* 写也算（同 `capsOf` 那条）：只 `set` 不读的那一格也得落成 `(global …)`。 */
+    const nm = n.op === 'set' ? n.attrs.name : (n.op === 'ref' ? n.attrs.name : null);
+    if (nm === null) return;
+    if (!bound.has(nm) && !env.has(`fn:${nm}`)) out.add(nm);
+  });
+  return out;
+}
+
+/**
+ * **撞名的那些局部量换个名字**：一格名字落成了模块级 `global`（`freeInFns`），而**另一个**
+ * 函数里有个同名的局部量 —— 那个局部量会被 `bindLine` 当成对 global 的赋值，两个互不相干的
+ * 变量于是共用一格存储（还共用一格类型）。
+ *
+ * 量出来的（pt 的 `Triangle.Barycentric`）：`Renderer.run` 里 `w, h := buf.W, buf.H` 被
+ * goroutine 的闭包借走 ⇒ `w` 成了 `(global w int)`；而 `Barycentric` 的**具名返回值**里也有
+ * 一格 `w float64` —— 它落成 `(set w …)`，方言当场报 `m85.v2 是 real，写进去的是 int`。
+ *
+ * 判据收得紧：这个函数**绑过**这个名字、而且它在这个函数里**不自由**（也不是它借来的一格）——
+ * 那就说明这一格与那个 global 无关，换名是纯改写。换的是**这个函数体里**的每一处
+ * （`bind` / `set` / `ref`），就地改，不重建图（重建会把共享的那一格拆开，见 `liftFnVals`）。
+ */
+function renameShadowedGlobals(fns, globals, env, ctx) {
+  if (globals.size === 0) return;
+  for (const f of fns) {
+    const bound = boundInOne(f);
+    const free = freeInOne(f, env);
+    const caps = new Set(f.caps ?? []);
+    /* **东家不换名**：从这个函数体里提出去的闭包借的就是它的局部量（`ctx.hostCaps`）——
+       那几格正是那些 global 的来源，换了名字闭包就找不着了。 */
+    const mine = ctx.hostCaps.get(f.name) ?? new Set();
+    const hit = [...globals].filter((n) => bound.has(n) && !free.has(n)
+      && !caps.has(n) && !mine.has(n));
+    if (hit.length === 0) continue;
+    const map = new Map();
+    for (const n of hit) {
+      let nn = `${n}__loc`;
+      while (bound.has(nn) || globals.has(nn)) nn = `${nn}$`;
+      map.set(n, nn);
+    }
+    walkCore(f.body, (n) => {
+      if (n.op !== 'bind' && n.op !== 'set' && n.op !== 'ref') return;
+      const nn = map.get(n.attrs.name);
+      if (nn !== undefined) n.attrs.name = nn;
+    });
+    f.params = f.params.map((p) => map.get(String(p)) ?? p);
+  }
 }
 
 /** 一棵子图上每一格节点走一遍（只读）。 */
@@ -2279,7 +2330,7 @@ function liftFnVals(fns, rest, known, taken, ctx) {
     walkCore(body, (n) => { if (n.op === 'func') found = true; });
     return found;
   };
-  const doOne = (body) => (hasFunc(body) ? mapNodes(body, (n) => {
+  const doOne = (body, host) => (hasFunc(body) ? mapNodes(body, (n) => {
     if (n.op !== 'func') return undefined;
     const ps = (n.attrs.params ?? []).map((q) => String(q));
     const caps = capsOf(n.ins.body, new Set(ps), known);
@@ -2303,18 +2354,25 @@ function liftFnVals(fns, rest, known, taken, ctx) {
       ...(n.attrs.noret === true ? { noret: true } : {}),
       ...(caps.length > 0 ? { caps } : {}) });
     if (caps.length > 0) ctx.clos.set(nm, caps);
+    /* **这几格借的是谁的局部量**：`renameShadowedGlobals` 要它 —— 提上来的闭包借走的那些
+       名字随后会落成模块级 `global`，而"谁是那格 global 的东家"只有这儿知道。 */
+    if (caps.length > 0 && host !== null && host !== undefined) {
+      const hc = ctx.hostCaps.get(host) ?? new Set();
+      for (const c of caps) hc.add(c);
+      ctx.hostCaps.set(host, hc);
+    }
     /* `bycopy`（有类型覆盖层那一族的附属，见 `nodes.js` 上 `func` 那格）：前端明说
        "这一格闭包**就是要按值抄一份**"。go 的接口装箱（ADR-0040）正是这个语义 ——
        `var s Shape = Sq{2}` 在 go 里把 Sq 抄进接口值。 */
     if (n.attrs.bycopy === true) ctx.byCopy.add(nm);
     return { op: 'ref', ins: {}, attrs: { name: nm }, id: -1 };
   }) : body);
-  for (const f of fns) f.body = doOne(f.body);
-  const out = doOne(rest);
+  for (const f of fns) f.body = doOne(f.body, f.name);
+  const out = doOne(rest, null);
   /* 提上来的那几格体里可能还套着一层 —— 转到不动为止（上限是防手抖，不是语义）。 */
   for (let i = 0; i < 8; i++) {
     const before = extra.length;
-    for (const g of extra.slice()) g.body = doOne(g.body);
+    for (const g of extra.slice()) g.body = doOne(g.body, g.name);
     if (extra.length === before) break;
   }
   for (const g of extra) fns.push(g);
@@ -2446,7 +2504,7 @@ export function emitCore(g) {
     /* 闭包那一族（`liftFnVals` 的第二刀）：`clos` 是"这个提上来的名字借了哪几格"，
        `capTypes` 是那几格的类型（只有 `mkclo` 那一处知道，见 `fnValText`），
        `caps` 是"现在正在落哪一格 cfn 的体"（体里读借来的东西要发 `(cap 名)`）。 */
-    clos: new Map(), capTypes: new Map(), caps: null, byCopy: new Set(), recPend: new Map(),
+    clos: new Map(), hostCaps: new Map(), capTypes: new Map(), caps: null, byCopy: new Set(), recPend: new Map(),
     selfTok: new Map(), recFix: [], tokOf: new Map(), tokUsed: new Set(),
   };
   /* **运行时那几个 C 符号的返回类型**先摆进 env：调用点的 `inferType` 查的是 `fn:名字`，
@@ -2601,6 +2659,9 @@ export function emitCore(g) {
   ctx.fnEnv = fnEnv;
   /* 哪几格顶层绑定要落成**模块级变量**：函数体里的自由名字（见 `freeInFns` / `bindLine`）。 */
   ctx.globals = freeInFns(fns, env);
+  /* 撞名的局部量换个名字（见 `renameShadowedGlobals`）：一格名字成了 global 之后，
+     别的函数里同名的局部量不能再落成对它的赋值。 */
+  renameShadowedGlobals(fns, ctx.globals, env, ctx);
   /* **main 也先空跑一趟**（缺口忽略、文本丢掉）。两件事只有跑过一趟才知道：
    *   一、模块级变量的类型进 `ctx.fnEnv`（`bindLine` 那一句）—— 函数体里要用；
    *   二、`ctx.rets`：**一格函数交回来的是不是聚合**。`retTypeOf` 只看得懂字面量与固定
