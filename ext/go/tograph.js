@@ -4039,6 +4039,14 @@ function toNode(x) {
           return isMap(o) ? mapSet(toNode(o), toNode(i), v) : indexSet(toNode(o), toNode(i), v);
         }
         const n = nameOf(t);
+        /* **左边是 `*p`**（`*addr += delta`）：图上没有"指向标量的指针"这一格 —— `&x` 落成
+           "读那个名字"，所以写不回去。从前这儿 `nameOf` 回 null，落出来是一句
+           `(set null …)`，方言报 `未声明的变量 'null'`（量出来的：我们自己写的
+           `sync/atomic` 桩）。说清楚是哪一格，别让它漏到方言那一层。 */
+        if (n === null || n === undefined) {
+          throw new Error('go->graph: 往 `*p` 里写这一刀还没接'
+            + '（图上没有"指向标量的指针" —— `&x` 递过去的是那一格的值，写不回来）');
+        }
         /* **`:=` 的重用语义**：go 的 `:=` 在"至少有一个新名字"时重用已有名字。
            `v, err := f()` 后面 `w, err := g()` 的 err 是赋值不是声明。
            判据只看**当前这一层块**（外层的同名是遮蔽，那就是新声明）—— 见 SCOPES 那段话。 */

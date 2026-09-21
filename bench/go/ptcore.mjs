@@ -43,6 +43,10 @@ const BAD = ['image.', 'png.', 'jpeg.', 'os.', 'bufio.', 'color.', 'binary.',
    **结构体当字典的键**。方言的键只收 int 与 string；那也是编译器欠的一格，而它不在
    出图那条路上（网格平滑与泊松取样用它），所以这把探针先绕过去。 */
 const EXTRA_DROP = new Set(['init', 'Function', 'NewFunction', 'Function.Compile',
+  /* `Renderer.showProgress` 整格剪掉：它**只印进度条**，而 `fmt.` 那几句被上面
+     `stripFmt` 删掉之后剩下一格 `rps := …` 没人用 —— `go vet` / `go run` 当场
+     `declared and not used: rps`（尺子那一侧编不过，答案就没法比）。 */
+  'Renderer.showProgress',
   'Function.BoundingBox', 'Function.Contains', 'Function.Intersect',
   'Function.MaterialAt', 'Function.NormalAt', 'Function.UV',
   'Mesh.SmoothNormals', 'Mesh.SmoothNormalsThreshold', 'smoothNormalsThreshold',
@@ -111,7 +115,13 @@ function declsOf(src, imports) {
  * `return fmt.Sprintf(…)` 那种删不掉（值要用），那几格仍旧按 `fmt.` 整格剪。
  */
 const FMT_LINE = /^[ \t]*(?:defer[ \t]+)?fmt\.[A-Za-z]\w*\([^\n]*\)[ \t]*$/;
-const stripFmt = (text) => text.filter((ln) => !FMT_LINE.test(ln));
+/* **`atomic.Add*` / `Store*` 那一句也删**（同一条路数：整句就是一次调用、纯计数）。
+ * 理由：那两个函数要**写回调用者那一格标量**（`*addr = *addr + delta`），而我们这条腿上
+ * 没有"指向标量的指针" —— `&s.rays` 递过去的是那一格的**值**。`src/lib/go/sync/atomic`
+ * 于是只给 `Load*`，写那一半干脆不提供（硬写出来是"计数器永远停在 0"那种静默错）。
+ * pt 里就一句 `atomic.AddUint64(&s.rays, 1)`，而 `rays` 只喂进度条（那几句已经剪掉了）。 */
+const ATOMIC_LINE = /^[ \t]*atomic\.(?:Add|Store)[A-Za-z0-9]*\([^\n]*\)[ \t]*$/;
+const stripFmt = (text) => text.filter((ln) => !FMT_LINE.test(ln) && !ATOMIC_LINE.test(ln));
 
 const imports = new Set();
 const decls = [];

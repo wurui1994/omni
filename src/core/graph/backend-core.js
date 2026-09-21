@@ -668,8 +668,14 @@ function binText(nm, args, env, ctx, uns) {
     const wh = (ctx.fnName === null || ctx.fnName === undefined) ? '' : `，在 '${ctx.fnName}' 的体里`;
     return gap(`'${nm}' 的两边说不到一起（${t} 与 ${want}）${wh}`);
   };
-  /* 无符号那一格（`uns`）：只有那七个算符有另一半，别的原样发。 */
-  const opTxt = (uns === true && UBINOP[nm] !== undefined) ? UBINOP[nm] : BINOP[nm];
+  /* 无符号那一格（`uns`）：只有那七个算符有另一半，别的原样发。
+     **算的是 real 就不发无符号那一半**：方言的 `u/` 只对 int 成立（当场报
+     `'u/' 是无符号那一版，只对 int 成立，这里是 real`）。前端那一位是**按名字**点的
+     （`isUnsExpr` 查的 `UNS` 是整份程序的名字表），于是别处有个 `u uint64` 就会把
+     这儿的 real `u` 一起点上 —— 量出来的：pt 的 `Sphere.UV` 里
+     `u = (u + math.Pi) / (2 * math.Pi)`。类型这一层手上就有，按它说话。 */
+  const unsOk = uns === true && !ts.some((t) => t === 'real' || t === 'string');
+  const opTxt = (unsOk && UBINOP[nm] !== undefined) ? UBINOP[nm] : BINOP[nm];
   return args.slice(1).reduce((acc, a, i) => `(bin "${opTxt}" ${acc} ${one(a, ts[i + 1])})`,
     one(args[0], ts[0]));
 }
@@ -1362,7 +1368,21 @@ function valForText(want, v, env, ctx) {
     && (isPtrRec(want, ctx) || elemType(want) !== null)) {
     return `(null ${want})`;
   }
+  /* **整字面量写进 real 那一格**：`coverage = 1`（`coverage := (r*r)/(d*d)` 推出来是 real）。
+     方言里 int 与 real 不隐式混算，所以这儿补一格 `(toreal …)` —— 只对**常量**补：
+     别的形状（变量、调用）该由语言那一侧说清楚，替它猜会盖住真错。
+     两种形状都要认：`lit`（图上的字面量）与 `const`（常量折叠之后那一格）。
+     量出来的：pt 的 `Lights` 那几处 `coverage = 1` / `a = 0` / `x = 1`。 */
+  if (want === 'real' && isIntConstNode(v)) return `(toreal ${expr(v, env, ctx)})`;
   return aggValText(v, env, ctx);
+}
+
+/** 一格**整常量**（`lit 1` 或折出来的 `const 1`）。别的回 false。 */
+function isIntConstNode(v) {
+  if (isLit(v)) return typeof v.lit === 'number' && Number.isInteger(v.lit);
+  if (!isNode(v) || v.op !== 'const') return false;
+  const c = v.attrs === undefined ? undefined : v.attrs.value;
+  return typeof c === 'number' && Number.isInteger(c);
 }
 
 /** 一格字段的声明类型（宿主的形状表里查）。查不着回 undefined。 */
