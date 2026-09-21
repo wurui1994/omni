@@ -451,6 +451,40 @@ C 腿改成走 `asy.unitTexts`（每个源文件一段 `.sx`），与 JS 腿共�
 
 `(unit "…")` 那格标记到那时删掉 —— 它只是"合并之后再找回来"的补丁。
 
+### 最后一块拼图：外部符号从哪来（读 backend-js 的 importLines 之后定的）
+
+一段方言独立降下来之后，**别家的符号不在这一份的 `mod.funcs` 里** —— 它们在
+`mod.imports`（每条 `{from, kind, name}`，kind ∈ `fn`/`global`/`class`/`struct`/`cfn`）。
+JS 后端照它发 `import { … } from './<from>.js'`（backend-js/emit.js:261 的 `importLines`）。
+
+C 与 JS 在这一格有个**真差别**：JS 只要名字，C 还要**类型**。而 `mod.imports` 里没有类型。
+所以 C 腿不能照抄 `importLines`，只能走"每家出一份 `.h`"：
+
+    <模块>.h  = guard + 运行时头 + **只有接口**：
+                它定义的类型（struct/enum/class/容器 typedef/向量 typedef）
+                + `extern` 全局 + 它定义的那些函数的原型
+    <模块>.c  = `#include "<自己>.h"` + `mod.imports` 里每个 `from` 一行 `#include`
+                + 它用到的**模板**（容器实例化、arr/vec 的 inline 族、字面量池、零值构造、
+                  装箱、闭包 make、dyn 桥…）—— 全 `static`，各家各一份
+                + 它的全局定义 + 它的函数体
+
+为什么模板放 `.c` 而不是 `.h`：放 `.h` 的话别家 include 就会把它们抄一遍（合法但膨胀），
+而它们只依赖类型、不含状态（三张锁表已经搬进运行时），各家各一份 static 是最省事又正确的
+摆法 —— 没被引用的 static 一个字节都不生成。于是**不需要 `omni_gen` 这一份公用头**，
+"gen 随程序变"那个问题自动消失。
+
+**emit.js 要改的那一格**：`headers()` 现在把每家的东西装进
+`refs / types / cbody / cdef / post / decls / gdefs / funcs` 八个桶，但**没有区分
+"接口"与"实现"**（类型与模板混在 `types`/`cdef`/`post` 里）。要出上面那两份文件，
+得把桶再分一层：`iface`（只装类型定义）与 `impl`（模板实现）。分完之后
+`moduleFiles(name)` 就是拼装，不含新逻辑。
+
+判据（一格一格来，每格都能单独验）：
+1. `sx.textToMod` 单独降一段之后，`mod.imports` 非空、`mod.funcs` 里**只有本家的函数**。
+2. 一份模块的 `.h` + `.c` 单独过我们自己的 C 前端编得过。
+3. 全部单元各自编、链起来输出与 `--one-file` 逐字节相同。
+4. 只改入口那一份时 `-v` 里没有库的词法与整树降级。
+
 
 ### §12 第 1 步已落地的那一半，与 emit.js 还欠的那一半（2026-09-21）
 
