@@ -126,8 +126,60 @@ export function buildTree(root) {
   return { roots: out };
 }
 
-/* ---- MIME / 静态文件 ---- */
+/**
+ * **别的语言的等效命令**（虚拟 shell 里敲 `go run x.go` 也认）。
+ *
+ * 为什么要这一格：这条链的卖点就是"同一条管线编十几门语言"，而"我平时怎么敲"是
+ * 每门语言的用户唯一记得住的东西。这不是新发明 —— `omni c tcc` 早就把 tcc 那一套
+ * 参数解析翻成 omni 命令了（`src/core/cli/cmd-tcc.js`），这儿照它加一张表。
+ *
+ * 一格 = `(argv 剩下的那几个词) -> omni 的 argv`；回 null = 这条不认。
+ * **一个字都不猜**：认不出来的形状原样交给 `omni`，让它自己说那句话。
+ */
+const EQUIV = {
+  /* go：`go run x.go` / `go build x.go` */
+  go: (a) => (a[0] === 'run' ? ['run', ...a.slice(1)]
+    : (a[0] === 'build' ? ['build', ...a.slice(1)] : null)),
+  /* nim：`nim c x.nim`（编）/ `nim r x.nim`（编完就跑） */
+  nim: (a) => (a[0] === 'r' ? ['run', ...a.slice(1)]
+    : (a[0] === 'c' || a[0] === 'compile' ? ['build', ...a.slice(1)] : null)),
+  /* v：`v run x.v` / `v x.v` */
+  v: (a) => (a[0] === 'run' ? ['run', ...a.slice(1)] : ['build', ...a]),
+  /* tcc / cc / gcc / clang：整套参数交给现成的那一份翻译器 */
+  tcc: (a) => ['c', 'tcc', ...a],
+  cc: (a) => ['c', 'tcc', ...a],
+  gcc: (a) => ['c', 'tcc', ...a],
+  clang: (a) => ['c', 'tcc', ...a],
+  /* 一条命令一份源码那几门：直接 run */
+  lua: (a) => ['run', ...a],
+  node: (a) => ['run', ...a],
+  mojo: (a) => (a[0] === 'run' ? ['run', ...a.slice(1)] : ['run', ...a]),
+  /* awk：`awk -f x.awk`（`-f` 那一格是脚本文件） */
+  awk: (a) => (a[0] === '-f' ? ['run', ...a.slice(1)] : null),
+  /* scheme / lisp */
+  scheme: (a) => ['run', ...a],
+  sbcl: (a) => (a[0] === '--script' ? ['run', ...a.slice(1)] : ['run', ...a]),
+  /* asy（Asymptote） */
+  asy: (a) => ['run', ...a],
+};
 
+/**
+ * 一整行命令 -> omni 的 argv（认不出那一格回 null）。
+ *
+ * `omni …` 剥掉头就是 argv；别的按 `EQUIV` 翻。**不做 shell 的引号与管道** ——
+ * 那是一整台 shell，而这儿要的是"把命令交给编译器"。
+ */
+export function shellToArgv(line) {
+  const parts = line.trim().split(/\s+/).filter((x) => x.length > 0);
+  if (parts.length === 0) return null;
+  const head = parts[0];
+  if (head === 'omni') return parts.slice(1);
+  const f = EQUIV[head];
+  if (f === undefined) return null;
+  return f(parts.slice(1));
+}
+
+/* ---- MIME / 静态文件 ---- */
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -260,9 +312,16 @@ export function startServer(opts) {
         const body = JSON.parse(await readBody(req));
         const line = String(body.line ?? '').trim();
         if (line.length === 0) return json(res, 200, { stdout: '', stderr: '', code: 0 });
-        const parts = line.split(/\s+/);
-        if (parts[0] === 'omni') parts.shift();
-        const r = runOmni(root, parts, body.timeout ?? 30);
+        const argv = shellToArgv(line);
+        if (argv === null) {
+          return json(res, 200, {
+            stdout: '',
+            stderr: `omni: 不认识 '${line.split(/\s+/)[0]}' —— 认的是 omni 与 `
+              + `${[...Object.keys(EQUIV)].join(' / ')}\n`,
+            code: 127,
+          });
+        }
+        const r = runOmni(root, argv, body.timeout ?? 30);
         return json(res, 200, r);
       }
       /* CORS preflight */
