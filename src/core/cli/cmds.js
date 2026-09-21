@@ -520,6 +520,26 @@ ${graphEngineHelp()}
       flags: [F_OUT, { name: '--quick', alias: '-q', arity: 0, brief: '跳过 C 那一路' }],
     },
     {
+      name: 'cache', key: 'cache', usage: 'ls|gc|clean',
+      brief: '暖存与暂存的账：多大、多久没动、倒垃圾',
+      help: `缓存与暂存是两件事，这条命令把它们分开算：
+  缓存（rt/ glr/ incr/ …）  键是内容，命中就省一趟 —— 留着有用
+  暂存（work/）             一次性的中间文件 —— **用完就该没了**
+
+  omni cache ls                 每一格多大、最后动过是什么时候（按大小降序）
+  omni cache gc                 倒垃圾：work/ 整棵扔 + 14 天没动过的整格扔
+  omni cache gc --days 3        换个天数（--days -1 = 只扔 work/）
+  omni cache gc --max-mb 500    还超这个数就从最旧的接着扔
+  omni cache clean              整个缓存根扔掉（下一趟全部重算）
+
+为什么要有它：从前没有任何地方回收，量到过 657 个 work 目录 518 MB，
+名字还都是 \`c-75d7a0838ed4f474\` 这种路径哈希 —— 一格都看不出是谁的。
+现在暂存目录按进程号命名、用完就扔，持久那几格的名字跟着文件名走。`,
+      flags: [{ name: '--days', arity: 1, value: 'N', brief: 'gc：多少天没动就整格扔（默认 14）' },
+        { name: '--max-mb', arity: 1, value: 'N', brief: 'gc：总量上限，超了从最旧的接着扔' },
+        { name: '-n', arity: 0, brief: '只说会扔什么，不动手' }],
+    },
+    {
       name: 'ninja', key: 'ninja', usage: '[目标…]',
       brief: '按一张依赖图把该做的做完（吃 .ninja 与 build.js）',
       help: `入口不给 -f 时按次序找：**build.ninja → build.js**，两者地位不同：

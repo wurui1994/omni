@@ -16,7 +16,7 @@ import {
 } from './host/native.js';
 import { join, basename, dirname, isAbsolute, resolve } from './host/path.js';
 import { installSrcEvalHook } from './host/src_eval.js';
-import { cacheRoot } from './host/cache.js';
+import { cacheRoot, scratchDir, dropScratch, cacheList, cacheGc } from './host/cache.js';
 import { dataPath, dataDir } from './host/data.js';
 import { hash16 } from './host/hash.js';
 import { findCmd, splitArgv, canonicalize, ownsVerbose, renderHelp, renderLegacy } from './cli/tree.js';
@@ -1543,6 +1543,80 @@ function workDirFor(kind, key) {
   return dir;
 }
 
+/**
+ * 暂存目录的名字**要能读**：拿产物/源码的文件名，不拿它的哈希。
+ *
+ * 从前这儿是 `hash16(路径)`：路径与哈希一对一，所以哈希**没有任何去重收益**，
+ * 只是把 `work/c-omni` 变成了 `work/c-75d7a0838ed4f474`。攒起来之后那 657 个目录
+ * 里没有一个看得出是谁的（量过：518 MB，一格都没被回收过）。
+ * 代价照旧写在明处：不同目录下的同名文件共用一格暂存 —— 它是暂存，本来就要被盖掉。
+ */
+function workName(p) {
+  const base = String(p === undefined || p === null ? '' : p).replace(/^.*\//, '');
+  const safe = base.replace(/[^A-Za-z0-9._-]/g, '_');
+  return safe === '' ? 'anon' : safe;
+}
+
+/** 人看的大小。 */
+function mbOf(bytes) {
+  if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
+}
+
+/**
+ * `omni cache ls | gc | clean`。
+ *
+ * 为什么这一格是命令而不是一句 `rm -rf`：**"该扔什么"是有判据的**（暂存 vs 缓存、
+ * 多久没动、总量上限），而写成 shell 就等于每个人自己猜一遍。
+ */
+function cacheCmd(args, argv) {
+  const sub = args[0] === undefined ? 'ls' : args[0];
+  const root = cacheRoot();
+  if (sub === 'ls') {
+    const list = cacheList();
+    let total = 0;
+    for (const e of list) total = total + e.bytes;
+    stdout(`${root}  合计 ${mbOf(total)}\n`);
+    const now = Date.now();
+    for (const e of list) {
+      const age = e.newest === 0 ? '空' : `${Math.round((now - e.newest) / 86400000)} 天前`;
+      stdout(`  ${e.name.padEnd(14)} ${mbOf(e.bytes).padStart(9)}  最后动过 ${age}\n`);
+    }
+    return 0;
+  }
+  if (sub === 'gc' || sub === 'clean') {
+    const di = argv.indexOf('--days');
+    const mi = argv.indexOf('--max-mb');
+    const opts = {
+      all: sub === 'clean',
+      days: di >= 0 ? Number(argv[di + 1]) : 14,
+      maxMb: mi >= 0 ? Number(argv[mi + 1]) : undefined,
+    };
+    if (argv.includes('-n')) {
+      /* 只说不做：把"会扔哪几格"算出来印出来（同一套规矩，只是不动手）。 */
+      const now = Date.now();
+      let would = 0;
+      for (const e of cacheList()) {
+        let hit = opts.all || e.name === 'work';
+        if (!hit && opts.days >= 0 && e.newest > 0 && now - e.newest > opts.days * 86400000) hit = true;
+        if (!hit) continue;
+        would = would + e.bytes;
+        stdout(`会扔 ${e.name}  ${mbOf(e.bytes)}\n`);
+      }
+      stdout(`合计 ${mbOf(would)}（-n：什么都没动）\n`);
+      return 0;
+    }
+    const dropped = cacheGc(opts);
+    let freed = 0;
+    for (const e of dropped) freed = freed + e.bytes;
+    for (const e of dropped) stderr(`omni cache: 扔了 ${e.name}（${mbOf(e.bytes)}）\n`);
+    stderr(`omni cache: 腾出 ${mbOf(freed)}\n`);
+    return 0;
+  }
+  throw new OmniError(`omni cache：没有 '${sub}' 这一格 —— 有 ls / gc / clean`);
+}
+
 function jsCacheDir() {
   return join(cacheRoot(), 'asy-js');
 }
@@ -2643,8 +2717,9 @@ function spawnPar(jobs) {
   if (n <= 1 || jobs.length <= 1) {
     return jobs.map((j) => spawn(j[0], j.slice(1), 'c'));
   }
-  // 键里带一格时刻：同一批命令跑两趟不能捡到上一趟的 rc 文件
-  const dir = workDirFor('par', hash16(`${nowMs()}|${jobs.map((j) => j.join(' ')).join('\n')}`));
+  /* 一批命令的 rc 与日志是**一次性**的：从前拿 `hash16(时刻)` 当键，于是每跑一趟
+     多一个永不命中的目录。现在是暂存目录（进程号命名、建之前清空），末尾扔掉。 */
+  const dir = scratchDir('par');
   const lines = ['#!/bin/sh'];
   for (let i = 0; i < jobs.length; i += n) {
     for (let k = i; k < jobs.length && k < i + n; k++) {
@@ -2658,7 +2733,7 @@ function spawnPar(jobs) {
   const sh = join(dir, 'run.sh');
   writeText(sh, `${lines.join('\n')}\n`);
   const r = spawn('/bin/sh', [sh], 'c');
-  return jobs.map((_, k) => {
+  const out = jobs.map((_, k) => {
     const rc = join(dir, `r${k}`);
     const log = join(dir, `o${k}`);
     // rc 文件不在 = 那一格根本没跑起来（sh 自己都没起来）：把 sh 的话交出去
@@ -2666,6 +2741,9 @@ function spawnPar(jobs) {
     const text = exists(log) ? readText(log) : '';
     return [Number(readText(rc).trim()), text, text];
   });
+  /* 读完就扔：这一格是暂存，留着没有任何人会去看（而攒起来是 518 MB 的那半个来处）。 */
+  dropScratch(dir);
+  return out;
 }
 
 /**
@@ -2705,9 +2783,9 @@ function runtimeObjects(cc) {
   }
 
   // 先编进暂存目录再整体 rename：中断不会留下半个缓存
-  // **每个进程自己一个暂存目录**（key + 时间戳）：同一刻两个进程各建各的，不会撞文件名。
-  // 与 `runtimeObjectsSelf` 那一份同一条纪律（task #55）。
-  const stage = workDirFor('rt-stage', `${key}-${hash16(String(nowMs()))}`);
+  // **每个进程自己一个暂存目录**（`scratchDir` 按进程号命名）：同一刻两个进程各建各的，
+  // 不会撞文件名；而且用完就扔 —— 从前那个时间戳键每趟留一个目录（task #55 的后半截）。
+  const stage = scratchDir('rt-stage');
   const staged = srcs.map((p) => join(stage, `${basename(p, '.c')}.o`));
   const rs = spawnPar(srcs.map((p, i) => [cc, ...flags, '-c', '-o', staged[i], p]));
   for (let i = 0; i < rs.length; i++) {
@@ -2718,9 +2796,16 @@ function runtimeObjects(cc) {
   // 目标已存在 = 别人先建好了，下面那句会用它（rename 到一个非空目录在两个宿主上都是硬错，
   // 而宿主的错误不是可以 catch 的异常，所以先看一眼）。父目录得先在，rename 才有地方落。
   mkdirAll(join(cacheRoot(), 'rt'));
+  let kept = staged;
   if (!exists(dir)) rename(stage, dir);
   vStep(`runtime .o  ${srcs.length} objects compiled with ${cc}, ${jobCount()} jobs`);
-  return objs.every((o) => exists(o)) ? objs : staged;
+  if (objs.every((o) => exists(o))) {
+    /* 缓存那一份已经落地 -> 暂存里剩下的没人要了（`rename` 成功时它已经不在了，
+       这一句管的是"别人先建好了"那一路）。 */
+    dropScratch(stage);
+    kept = objs;
+  }
+  return kept;
 }
 
 /**
@@ -2756,7 +2841,7 @@ function runtimeObjectsSelf(arch, os) {
    * 同一个卷上的 rename 是原子的，所以别的进程要么看见完整的 `.o`、要么看不见 ——
    * 顺带把「整目录 rename 的并发竞态」也一起消了。 */
   mkdirAll(dir);
-  const stage = workDirFor('rt-stage', `${key}-${hash16(String(nowMs()))}`);
+  const stage = scratchDir('rt-stage-self');
   /* 交叉编译那一趟的头也从 sysroot 里取（与 `buildSelf` 同一格状态）。 */
   const sysIncs = CROSS === null ? undefined : sysIncDirs(['--sysroot', CROSS.sysroot]);
   let made = 0;
@@ -2776,6 +2861,7 @@ function runtimeObjectsSelf(arch, os) {
   }
   vStep(`runtime .o  ${srcs.length} objects（这一趟编了 ${made} 格）`
     + '，用我们自己那台 C 前端');
+  dropScratch(stage);           // 每格都 rename 走了，这儿只剩一个空目录
   return objs;
 }
 
@@ -2786,7 +2872,7 @@ function runtimeObjectsSelf(arch, os) {
  * 名字是确定的（从前是 /var/folders 里一个随机名，出了问题捞不着）。
  */
 function buildNative(mod, outPath, workDir, plugin, extern, own, bind) {
-  const dir = workDir === undefined ? workDirFor('c', hash16(outPath)) : workDir;
+  const dir = workDir === undefined ? workDirFor('c', workName(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   /* 产物所在的目录得先有 —— `build -o dist/omni` 是**默认**的写法，而 dist 可能刚被删掉；
      不建的话 ld 报的是 `open() failed, errno=2 for 'dist/omni'`（量到过），
@@ -3083,7 +3169,7 @@ function runViaC(mod, argv, srcPath, cache) {
   // `--work` 给了就照它办（要的是"留在那儿"）；否则**直接链进产物缓存那一格** ——
   // 下一趟同一份源码进来，exeCacheGet 命中就只剩 exec（第一百〇五刀）。
   const cached = wi >= 0 || cache !== true ? null : exeCachePath(srcPath);
-  const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run', hash16(srcPath === undefined ? '' : srcPath));
+  const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run', workName(srcPath));
   if (wi >= 0) mkdirAll(dir);
   const exe = cached === null ? join(dir, 'a.out') : cached;
   const built = buildNative(mod, exe, wi >= 0 ? dir : undefined);
@@ -3306,7 +3392,7 @@ function buildLlvm(mod, outPath, workDir) {  const mir = lowerToMir(mod);
   const errs = verifyMir(mir);
   if (errs.length > 0) throw new OmniError(`mir is not well-formed:\n  ${errs.join('\n  ')}`);
   const ir = target('llvm').emit(mir);
-  const dir = workDir === undefined ? workDirFor('ll', hash16(outPath)) : workDir;
+  const dir = workDir === undefined ? workDirFor('ll', workName(outPath)) : workDir;
   if (workDir !== undefined) mkdirAll(dir);
   const llPath = join(dir, `${basename(outPath)}.ll`);
   writeText(llPath, ir);
@@ -3325,7 +3411,7 @@ function buildLlvm(mod, outPath, workDir) {  const mir = lowerToMir(mod);
 
 function runViaLlvm(mod, argv, srcPath) {
   const wi = argv.indexOf('--work');
-  const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run-ll', hash16(srcPath === undefined ? '' : srcPath));
+  const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run-ll', workName(srcPath));
   if (wi >= 0) mkdirAll(dir);
   const exe = join(dir, 'a.out');
   buildLlvm(mod, exe, wi >= 0 ? dir : undefined);
@@ -3405,7 +3491,7 @@ function buildJitHost() {
 
 function runViaJit(mod, argv, srcPath) {
   const wi = argv.indexOf('--work');
-  const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run-jit', hash16(srcPath === undefined ? '' : srcPath));
+  const dir = wi >= 0 ? argv[wi + 1] : workDirFor('run-jit', workName(srcPath));
   if (wi >= 0) mkdirAll(dir);
   const mir = lowerToMir(mod);
   const errs = verifyMir(mir);
@@ -3570,7 +3656,7 @@ function tccPrepLink(argv) {
   for (const a of argv) {
     if (!a.endsWith('.c')) { out.push(a); continue; }
     /* 目标文件的容器**永远是 ELF**（tcc 的 `-c` 在所有目标上都写 ELF，见 ADR-0017）。 */
-    const obj = join(workDirFor('c-tcc', hash16(a)), `${basename(a, '.c')}.o`);
+    const obj = join(workDirFor('c-tcc', workName(a)), `${basename(a, '.c')}.o`);
     mkdirAll(dirname(obj));
     cObj(a, obj, arch, incDirs(argv), defArgs(argv), 'elf', os, sysIncDirs(argv));
     vStep(`c front end + codegen  ${a} -> ${obj}`);
@@ -3743,7 +3829,7 @@ function runCFile(path, argv) {
   const arch = ai >= 0 ? argv[ai + 1] : hostArch();
   const os = si >= 0 ? argv[si + 1] : hostOs();
   const fmt = fmtOfOs(os);
-  const dir = workDirFor('run-c-exe', hash16(path));
+  const dir = workDirFor('run-c-exe', workName(path));
   mkdirAll(dir);
   const obj = join(dir, `${basename(path, '.c')}.o`);
   const exe = join(dir, basename(path, '.c'));
@@ -3788,7 +3874,7 @@ function buildCFile(path, rest) {
   const oi = rest.indexOf('-o');
   const out = oi >= 0 ? rest[oi + 1] : basename(path, '.c');
   const { flags } = cSplitArgs(rest);
-  const obj = join(workDirFor('build-c', hash16(path)), `${basename(path, '.c')}.o`);
+  const obj = join(workDirFor('build-c', workName(path)), `${basename(path, '.c')}.o`);
   mkdirAll(dirname(obj));
   const via = cFileViaCc(path, rest, out);
   if (via === null) {
@@ -4633,6 +4719,8 @@ function main(argv) {
     vTally();
     return 0;
   }
+  /* `omni cache`：暖存与暂存的账 + 倒垃圾（`host/cache.js`）。没有源文件参数。 */
+  if (cmd === 'cache') return cacheCmd(args, rest);
   /* `omni ninja`：按一张依赖图把该做的做完（`build/cli.js`）。摆在这儿的理由与
    * bootstrap 一样 —— 它**没有源文件参数**，目标是图里的名字，别掉进下面按扩展名分派那套。 */
   if (cmd === 'ninja') return ninjaCmd(rest);

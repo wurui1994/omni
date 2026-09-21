@@ -5,7 +5,7 @@
 // 两处各写一个 `cacheRoot()` 就会被链接器骂 `declared at module scope in both …`。
 // 量到过：`glr/load.js` 刚拆出来时就是这么红的（mir/incr/bootstrap 三条轴一起红）。
 
-import { env, installDir, exists, cwd } from './native.js';
+import { env, installDir, exists, cwd, readDir, isDir, mkdirAll, spawn, fileSize, mtimeMs } from './native.js';
 import { join, dirname } from './path.js';
 
 /**
@@ -55,3 +55,127 @@ export function cacheRoot() {
   const root = treeRoot();
   return join(root === null ? cwd() : root, '.omni-cache');
 }
+
+/* ------------------------------------------------------------------ 暂存与回收
+ *
+ * **缓存与暂存是两件事**，从前混在一格 `work/` 里，于是攒了 657 个目录 518 MB：
+ *
+ *   缓存（`rt/`、`glr/`、`incr/`…）  键是内容，命中就省一趟，**留着有用**
+ *   暂存（编到一半的 `.o`、并行跑的 rc 文件、链接前的 `.c`）  **用完就该没了**
+ *
+ * 从前那些 `work/c-75d7a083…` 是后者：键是**路径的哈希**（一对一、没有去重收益），
+ * 或者干脆是**时间戳的哈希**（必然每趟新建、必然永不命中）。两种都只是把可读的名字
+ * 换成不可读的十六进制，然后堆着。这一组函数把那条路改掉。
+ */
+
+/**
+ * 一格**一次性**的暂存目录：`work/<kind>[-<序号>]`，**建之前先清空**、用完 `dropScratch`。
+ *
+ * 名字里既没有时间戳也没有进程号：有时间戳就每趟多一个目录（那正是要修的毛病），
+ * 而并发那一格由**各自的缓存根**分开（`OMNI_CACHE_DIR`；测试的每条轴就是这么摆的）。
+ * 同一个根上并发跑同一种活会撞 —— 与 `workDirFor` 那句"确定的名字"同一条已知代价。
+ */
+let scratchSeq = 0;
+export function scratchDir(kind) {
+  scratchSeq = scratchSeq + 1;
+  const name = scratchSeq === 1 ? kind : `${kind}-${scratchSeq}`;
+  const dir = join(cacheRoot(), 'work', name);
+  rmTree(dir);
+  mkdirAll(dir);
+  return dir;
+}
+
+/**
+ * 整棵删掉。走 `spawn('rm', ['-rf', …])` 而不是新开一格宿主原语：**封闭 ABI 上多一个口子
+ * 要在每条腿上各实现一遍**（ADR-0011 决策 2），而这件事 `rm` 已经会做，`spawn` 也已经在
+ * ABI 里（`-t clean` 那一处同一条路）。代价写在明处：win32 上要另一条实现。
+ */
+function rmTree(p) {
+  if (p === undefined || p === null || p === '') return;
+  spawn('rm', ['-rf', p], 'c');
+}
+
+/** 扔掉一格暂存目录。**失败不抛** —— 倒垃圾失败不该让构建失败。 */
+export function dropScratch(dir) {
+  if (dir === undefined || dir === null || dir === '') return;
+  if (!dir.includes('/work/')) return;   // 只扔 work/ 底下的，别的一概不碰
+  rmTree(dir);
+}
+
+/** 一棵目录有多大、最后动过是什么时候（`omni cache ls` / `gc` 用）。 */
+function treeStat(p) {
+  let bytes = 0;
+  let newest = 0;
+  const walk = (at) => {
+    let names;
+    try { names = readDir(at); } catch { return; }
+    for (const n of names) {
+      const full = join(at, n);
+      if (isDir(full)) { walk(full); continue; }
+      try {
+        bytes = bytes + fileSize(full);
+        const m = mtimeMs(full);
+        if (m > newest) newest = m;
+      } catch { /* 正被人删 */ }
+    }
+  };
+  if (isDir(p)) walk(p);
+  else {
+    try { bytes = fileSize(p); newest = mtimeMs(p); } catch { /* 没了 */ }
+  }
+  return { bytes, newest };
+}
+
+/** 缓存根底下每一格的账：名字、多大、最后动过。按大小降序。 */
+export function cacheList() {
+  const root = cacheRoot();
+  const out = [];
+  let names;
+  try { names = readDir(root); } catch { return out; }
+  for (const n of names) {
+    if (n.startsWith('.')) continue;
+    const s = treeStat(join(root, n));
+    out.push({ name: n, path: join(root, n), bytes: s.bytes, newest: s.newest });
+  }
+  out.sort((a, b) => b.bytes - a.bytes);
+  return out;
+}
+
+/**
+ * 倒垃圾。三条规矩，每条都能单独说清：
+ *
+ *   1. `work/` **整棵扔掉**（它是暂存，不是缓存）；
+ *   2. 别的格子里，最后动过在 `days` 天之前的**整格**扔掉（默认 14 天）；
+ *   3. 还超 `maxMb` 的话，从**最旧**的开始继续扔，直到降到线下（默认不限）。
+ *
+ * `all: true` = 整个缓存根扔掉（下一趟全部重算，慢但绝对干净）。
+ * 回一份账：扔了哪几格、各多少字节。
+ */
+export function cacheGc(opts) {
+  const o = opts ?? {};
+  const now = o.now ?? Date.now();
+  const days = o.days === undefined ? 14 : o.days;
+  const dropped = [];
+  const take = (e) => { dropped.push(e); rmTree(e.path); };
+  if (o.all === true) {
+    for (const e of cacheList()) take(e);
+    return dropped;
+  }
+  const entries = cacheList();
+  for (const e of entries) {
+    if (e.name === 'work') { take(e); continue; }
+    if (days >= 0 && e.newest > 0 && now - e.newest > days * 86400000) take(e);
+  }
+  if (o.maxMb !== undefined && o.maxMb > 0) {
+    const left = cacheList().sort((a, b) => a.newest - b.newest);
+    let total = 0;
+    for (const e of left) total = total + e.bytes;
+    for (const e of left) {
+      if (total <= o.maxMb * 1048576) break;
+      take(e);
+      total = total - e.bytes;
+    }
+  }
+  return dropped;
+}
+
