@@ -2306,7 +2306,12 @@ function buildValues(v, env, ctx) {
   const name = `mv_tmp${ctx.tmp}`;
   const out = [`(let ${name} ${shape.tag} (new ${shape.tag}))`];
   for (let i = 0; i < vals.length; i++) {
-    out.push(`(fldset (var ${name}) v${i} ${expr(vals[i], env, ctx)})`);
+    /* **聚合那几格走 `aggValText`**（记录 / 列表 / 字典）：`expr` 对"把它整格当值用"
+       一律报缺口，而摆进多值那格结构体里存的正是**一格引用**（记录是指针、列表与字典是
+       句柄）—— 与 `fldset` 把聚合存进字段是同一件事（见 `aggValText` 那段账）。
+       量出来的：pt 的 `Node.Partition` 里 `return left, right`（两格 `[]Shape`）
+       报"把列表 'left' 整格当值用"。 */
+    out.push(`(fldset (var ${name}) v${i} ${aggValText(vals[i], env, ctx)})`);
   }
   return { shape: shape, name: name, out: out };
 }

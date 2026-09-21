@@ -561,6 +561,8 @@ const NILFNS = new Map();
 const BOXING = new Set();
 /** 顶层函数/方法名 -> **声明的单返回类型节点**（`ret` 那一处要按它装箱）。 */
 const FRET = new Map();
+/** 函数 / 方法的**多返回类型节点表**（`l, r := f()` 之后每一格的声明类型）。只存多返回。 */
+const FOUTS = new Map();
 /**
  * **`math.F(…)` 怎么落**（go 的名字 -> 方言 `(rmath "f" …)` 里那个 C 的名字）。
  *
@@ -1502,6 +1504,10 @@ function collectDecls(x, shapesOnly) {
          认出"这格调用交出来的是接口值"。只收单返回 —— 多返回在图上是一格多值。 */
       const o0 = partKids(sig0, 'out');
       if (o0.length === 1) FRET.set(nm0, o0[0]);
+      /* **多返回那几格的声明类型**（`FOUTS`）：`l, r := f()` 之后 `l` / `r` 的类型只能
+         从这儿来。少了它 `l[0].Area()` 认不出 `l` 装的是接口（方法落成静态 mangle，
+         报"'Sq__Area' 第 1 格实参在两处的类型不一样"）；pt 的 `NewNode(l)` 也是这一格。 */
+      if (o0.length > 1) FOUTS.set(nm0, o0);
     }
   }
   /* `shapesOnly` 原来是**同一包里别的文件**那一趟用的（`opts.also`）：类型与字段名收、
@@ -1532,6 +1538,7 @@ function collectDecls(x, shapesOnly) {
         FSIG.set(mangle(owner, name), [undefined, ...paramInfo(sigM).map((p) => p.ty)]);
         const oM = partKids(sigM, 'out');
         if (oM.length === 1) FRET.set(mangle(owner, name), oM[0]);
+        if (oM.length > 1) FOUTS.set(mangle(owner, name), oM);
       }
       /* **按 `类型.名字` 收**（`opts.also` 那几份也收 —— 这样存不会撞名，见 `MSET` 那一段）。 */
       MSET.add(`${owner}.${name}`);
@@ -2220,6 +2227,34 @@ function nilVarZero(ty) {
 }
 
 /** 一格 spec 的名字表对初值表：数目相等就逐个绑，N 对 1 是多值，没初值就落零值。 */
+/**
+ * **多返回那几格的声明类型记进 `VARTY` / `VARTYPE`**（`l, r := f()` / `l, r = f()`）。
+ *
+ * 少了它，`l` 的类型这一层看不出来：`l[0].Area()` 会落成**静态 mangle**（`Area` 在平表里
+ * 只有一个主人时尤其），报"'Sq__Area' 第 1 格实参在两处的类型不一样"；pt 的
+ * `NewNode(l)` 也是这一格（`(arr r18)` 与 int）。类型从 `FOUTS`（声明）来。
+ */
+function noteMultiTypes(names, rhs) {
+  if (rhs === undefined || rhs === null || !isList(rhs) || tag(rhs) !== 'call') return;
+  const fn = kids(rhs)[0];
+  let key = null;
+  if (fn !== undefined && tag(fn) === 'name') key = leaf(kids(fn)[0]);
+  else if (fn !== undefined && tag(fn) === 'sel') {
+    const on = namedTypeOf(tyOfExpr(kids(fn)[0]));
+    const m = leaf(kids(fn)[1]);
+    if (on !== null && m !== null) key = mangle(on, m);
+  }
+  if (key === null) return;
+  const outs = FOUTS.get(key);
+  if (outs === undefined || outs.length !== names.length) return;
+  for (let i = 0; i < names.length; i++) {
+    if (names[i] === '_') continue;
+    VARTY.set(names[i], outs[i]);
+    const tn = namedTypeOf(outs[i]);
+    if (tn !== null) VARTYPE.set(names[i], tn);
+  }
+}
+
 function specBinds(names, exprs, ty) {
   /* 声明写着类型时留一份**类型节点**（`tyOfExpr` 要它：`var xs []Shape` 的元素类型、
      `var s Shape` 的接口分派）。 */
@@ -2233,6 +2268,7 @@ function specBinds(names, exprs, ty) {
     return names.flatMap((n) => bindName(n, zeroOf(ty, n)));
   }
   if (names.length > 1 && exprs.length === 1) {
+    noteMultiTypes(names, exprs[0]);
     return destructure(names, toNode(exprs[0]), { declare: true });
   }
   if (names.length !== exprs.length) {
@@ -3651,8 +3687,10 @@ function toNode(x) {
         });
         // 如果全是 declare 或全不是，走原来的 destructure
         if (declareFlags.every((d) => d === declareFlags[0])) {
+          noteMultiTypes(names, rhs[0]);
           return destructure(names, toNode(rhs[0]), { declare: declareFlags[0] });
         }
+        noteMultiTypes(names, rhs[0]);
         // 混合情况：手动拆
         const holder = `__mv${names.join('$')}`;
         const out = [node('bind', { init: toNode(rhs[0]) }, { name: holder, keepMulti: true })];
@@ -4460,6 +4498,7 @@ export function goToGraph(tree, opts) {
   IFACES.clear();
   EMBEDS.clear();
   FRET.clear();
+  FOUTS.clear();
   BOXFNS.clear();
   BOXING.clear();
   NILFNS.clear();
