@@ -249,6 +249,33 @@ export function drawKindOf(out) {
   return null;
 }
 
+/**
+ * 一趟输出里**有没有图、图是哪几块**（`{ kind, blocks, rest }`）。
+ *
+ * 与 `drawKindOf` 的差别是这一条：**图不一定在开头**。`tests/cases/27_plot.omni` 印的是
+ * `2285` / 一整份 SVG / `2199`（它是判据，顺带把字节数印出来对账）—— 按"开头是不是 `<svg`"
+ * 判的话这一份就"没有图"，而它明明画了一张。所以这儿把 `<svg …</svg>` 整块整块抠出来，
+ * 剩下的文本原样交回去（进日志那一栏）。一趟印好几张图也就跟着白捡。
+ *
+ * EPS 那一族仍然只认"开头是 `%!PS`"：EPS 正文里什么字节都可能有，在里头找边界不可靠。
+ */
+export function drawBlocks(out) {
+  const s = String(out ?? '');
+  if (s.trimStart().startsWith('%!PS')) return { kind: 'eps', blocks: [s], rest: '' };
+  const blocks = [];
+  let rest = '';
+  let i = 0;
+  for (;;) {
+    const a = s.indexOf('<svg', i);
+    const b = a < 0 ? -1 : s.indexOf('</svg>', a);
+    if (a < 0 || b < 0) { rest += s.slice(i); break; }
+    rest += s.slice(i, a);
+    blocks.push(s.slice(a, b + 6));
+    i = b + 6;
+  }
+  return { kind: blocks.length > 0 ? 'svg' : null, blocks, rest };
+}
+
 export function epsToSvg(eps) {
   /* **位图先摘出来**（`image` 那一族）：三维那一族的 EPS 里一条路径都没有，全部内容
      就是一格 PS 的 image 字典 + 一大段十六进制（`asy_builtins.asy` 的 `asy__emitraw`）；

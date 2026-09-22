@@ -22,7 +22,7 @@ import { natCompare, byIdeOrder } from '../../src/core/studio/shared.js';
    GLSL 的源码修修）。它一个 DOM 都不碰，所以在这儿直接 import 就能判 ——
    不必拉一套无头浏览器进来。 */
 import {
-  highlight, mdToHtml, epsToSvg, drawKindOf, psImages, psImageUri,
+  highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, psImages, psImageUri,
   glslSource, glslVertex, glslSizeOf, glslDeclType, GALLERY,
 } from '../../src/studio/render.js';
 
@@ -106,6 +106,25 @@ ok('glslSource 没有 out 时补一格',
     glslDeclType('uniform highp vec2 u_mouse;', MS) === 'vec2');
   ok('glslDeclType 没那一格就回 null',
     glslDeclType(rd('tests/glsl/cases/pretty.frag'), MS) === null);
+
+  /* ---- 图不一定在开头（`drawBlocks`）----
+   *
+   * `drawKindOf` 问的是"这一整趟是不是一张图"（开头那几个字节），控制台的"这一句的值"
+   * 用它正好。**预览那一栏不行**：`tests/cases/27_plot.omni` 印的是字节数 + 一整份 SVG +
+   * 字节数（它是判据，顺带对账），按开头判就成了"没有图"，而它明明画了一张。 */
+  {
+    const two = 'a\n<svg width="1"><rect/></svg>\nb\n<svg width="2"></svg>\nc';
+    const d2 = drawBlocks(two);
+    ok('drawBlocks 抠出两块 SVG，剩下的字照留',
+      d2.kind === 'svg' && d2.blocks.length === 2
+      && d2.blocks[1] === '<svg width="2"></svg>' && d2.rest.replace(/\s+/g, '') === 'abc',
+      JSON.stringify(d2));
+    ok('drawBlocks 没图就回 null', drawBlocks('1\n2\n').kind === null);
+    ok('drawBlocks 的 EPS 那一族仍按开头认',
+      drawBlocks('%!PS-Adobe-3.0\nnewpath\n').kind === 'eps');
+    ok('drawKindOf 与它的分工：夹在中间的图它不认',
+      drawKindOf(two) === null && drawBlocks(two).kind === 'svg');
+  }
 
   /* ---- EPS 里的**位图**（`image` 那一族：三维那一路、以及 `image(…)`）----
    *
@@ -272,6 +291,23 @@ try {
     ok('/api/run 不认的格式当没给（EPS 照旧）',
       rb.json.code === 0 && drawKindOf(rb.json.stdout ?? '') === 'eps',
       `code=${rb.json.code} ${JSON.stringify((rb.json.stdout ?? '').slice(0, 40))}`);
+  }
+
+  /* **一份 `.omni` 印出来的 SVG 也是图**（用户报的那一格：`plot` 的 `show()` 只印 SVG，
+     可预览栏不亮）。从前那一格只问 asy，现在预览按输出判、而且**图不必在开头** ——
+     这一份恰好是"字节数 + SVG + 字节数"，正是那条规矩的证据。 */
+  {
+    const plot = paths.find((p) => p.endsWith('27_plot.omni'));
+    if (plot !== undefined) {
+      const rp = await post('/api/run', { path: plot });
+      const dr = drawBlocks(rp.json.stdout ?? '');
+      ok('一份 .omni 印出来的 SVG 认得出是图（而且图不在开头）',
+        rp.json.code === 0 && dr.kind === 'svg' && dr.blocks.length === 1
+        && dr.blocks[0].startsWith('<svg') && dr.rest.trim() !== ''
+        && drawKindOf(rp.json.stdout ?? '') === null,
+        `code=${rp.json.code} kind=${dr.kind} 块=${dr.blocks.length}`
+        + ` 余=${JSON.stringify(dr.rest.trim().slice(0, 20))}`);
+    }
   }
 
   /* **首页清单没骗人**：`kind: 'asy'` 与 `kind: 'svg'` 那几格真跑一趟，出来的必须是图。

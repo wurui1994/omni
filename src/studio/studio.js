@@ -10,7 +10,7 @@
 /* 纯函数那一半（高亮 / markdown / EPS -> SVG）住在 `render.js` —— 那一份一个 DOM 都不碰，
  * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
 import {
-  highlight, mdToHtml, epsToSvg, drawKindOf, glslSource, glslVertex, glslSizeOf,
+  highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, glslSource, glslVertex, glslSizeOf,
   glslDeclType, GALLERY,
 } from './render.js';
 
@@ -383,9 +383,13 @@ function renderGallery() {
     meta.append(el('b', '', g.title), el('span', 'note', g.note),
       el('span', 'tag', g.kind));
     card.append(meta);
-    card.onclick = () => {
+    card.onclick = async () => {
       setMode('ide');
-      openFile(g.path);
+      await openFile(g.path);
+      /* **点进来就跑一趟**（首页上那张图正是跑出来的）：不跑的话进了 IDE 只剩一屏源码，
+         而刚刚明明看着那张图 —— 那一下最奇怪。md / glsl / html 那三种的预览是源码本身，
+         `openFile` 已经画好了，不必再跑。 */
+      if (g.kind === 'asy' || g.kind === 'svg') run();
     };
     host.append(card);
     jobs.push([card, g]);
@@ -456,11 +460,16 @@ function conEcho(line, cont) {
  */
 function conShow(out) {
   if (out === '') return;
-  const t = out.trim();
-  if (t.startsWith('<svg')) {
+  /* **图不一定是整句**（与预览那一栏同一格 `drawBlocks`）：一行里既印了数又印了图的
+     时候，图进绘图栏、剩下的字进日志 —— 从前只认"整句以 `<svg` 起头"，那种一行就全成了
+     一屏尖括号。一行印好几张图的话最后那张留在栏里（那一栏只有一格）。 */
+  const dr = drawBlocks(out);
+  if (dr.kind === 'svg') {
     const box = $('#con-plot');
-    box.innerHTML = t;
-    conLog('— 出了一张图（右下） —', 'note');
+    box.innerHTML = dr.blocks[dr.blocks.length - 1];
+    const many = dr.blocks.length > 1 ? `（${dr.blocks.length} 张，摆的是最后一张）` : '';
+    conLog(`— 出了一张图${many}（右下） —`, 'note');
+    if (dr.rest.trim() !== '') conLog(dr.rest.replace(/\n{2,}/g, '\n').trim(), 'out');
     return;
   }
   conLog(out, 'out');
@@ -584,8 +593,14 @@ function renderPreview(kind, payload) {
     host.innerHTML = `<div class="svg-wrap">${svg}</div>`;
     return;
   }
-  /* 原生 SVG 出口（`-f svg`）：原样挂。**不经 `epsToSvg`** —— 那一格只认 PS 算子。 */
-  if (kind === 'svg') { host.innerHTML = `<div class="svg-wrap">${payload}</div>`; return; }
+  /* 原生 SVG 出口（`-f svg`）与"stdout 本身就是 SVG"那一族：原样挂。
+     **不经 `epsToSvg`** —— 那一格只认 PS 算子。`payload` 可以是一块，也可以是好几块
+     （一趟印了好几张图）—— 一块一格 `.svg-wrap`，竖着摆。 */
+  if (kind === 'svg') {
+    const blocks = Array.isArray(payload) ? payload : [payload];
+    host.innerHTML = blocks.map((s) => `<div class="svg-wrap">${s}</div>`).join('');
+    return;
+  }
   if (kind === 'html') {
     /* `srcdoc` + `sandbox="allow-scripts"`：脚本照跑（例子里有 canvas 动画），
      * 可它**没有同源身份** —— 碰不到这一页的 DOM、cookie、也不能往上跳转。
@@ -898,14 +913,21 @@ async function run() {
     $('#stderr').textContent = r.stderr ?? '';
     renderStages(r.stages, r.stderr ?? '', ms);
     markStale(false);
-    /* asy：stdout 是图那几份才有图（`draw/` 底下那些）；`cases/` 底下一百多份是算术例子，
-       一张图都不出 —— 那时候**不点亮"预览"栏、也不切过去**。
-       **看输出决定哪一种**（与"看是不是 `%!PS`"同一条纪律）：`<?xml`/`<svg` 起头是原生
-       SVG 出口，原样挂；`%!PS` 是 EPS，由 `epsToSvg` 翻。 */
-    if (S.lang === 'asy') {
-      const kind = drawKindOf(r.stdout ?? '');
-      renderPreview(kind, r.stdout);
-      showPreviewTab(kind !== null);
+    /* **看输出决定预览挂什么 —— 与语言无关**（从前这一格只问 asy）。
+       一份 `.omni` 跑出来 stdout 是一张 SVG（`std/plot.omni` 的 `show()`），那也是图；
+       从首页点进来看到的正是那张图，进了 IDE 却只有一堆尖括号 —— 那才奇怪。
+       图不一定在开头（`tests/cases/27_plot.omni` 印的是字节数 + SVG + 字节数），
+       所以用 `drawBlocks` 整块抠。`cases/` 底下那些算术例子照旧一张图都没有，
+       那时候**不点亮"预览"栏、也不切过去**。 */
+    const dr = drawBlocks(r.stdout ?? '');
+    if (dr.kind !== null) {
+      renderPreview(dr.kind, dr.kind === 'svg' ? dr.blocks : r.stdout);
+      showPreviewTab(true);
+    } else if (previewKind(S.lang) === null) {
+      /* 这一趟没有图，而这门语言的预览也不是"源码本身"（md / glsl / html 那三种是）
+         —— 那就把上一趟留下的图收掉。 */
+      renderPreview(null, '');
+      showPreviewTab(false);
     }
     const via = r.via === 'warm' ? '' : ' · 冷';
     const how = direct ? ' · node' : '';
