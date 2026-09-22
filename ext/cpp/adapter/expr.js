@@ -13,6 +13,17 @@ import {
   INT, REAL, STR, BOOL, arrOf, dictOf, named, typeOf,
 } from '../../../src/core/lower/ty-of.js';
 
+/**
+ * 算子 → **重载后的方法名**（与 `index.js` 的 `OP_NAMES` 是同一张表的两头）。
+ * 只有接收者装的是**用户类**、且那个类真写了这一格 `operator@` 时才改写；
+ * 别的（int / double / 串）照旧走内建 —— 内建不许被抢。
+ */
+const OP_MAP = new Map([
+  ['+', 'op_add'], ['-', 'op_sub'], ['*', 'op_mul'], ['/', 'op_div'], ['%', 'op_mod'],
+  ['==', 'op_eq'], ['!=', 'op_neq'],
+  ['<', 'op_lt'], ['>', 'op_gt'], ['<=', 'op_le'], ['>=', 'op_ge'],
+]);
+
 const OPS = new Map([
   ['+', '+'], ['-', '-'], ['*', '*'], ['/', '/'], ['%', '%'],
   ['<', '<'], ['>', '>'], ['<=', '<='], ['>=', '>='], ['==', '=='], ['!=', '!='],
@@ -114,7 +125,17 @@ export function exprOf(x, C) {
       const n = nameOf(x);
       if (n === 'true') return { kind: 'bool', value: true };
       if (n === 'false') return { kind: 'bool', value: false };
-      return { kind: 'name', name: C.ref(n) };
+      /**
+       * **方法体里裸写的字段名就是 `this->` 那一格**（C++ 的隐式成员访问）：
+       * `int sum() { return a + b; }` 里的 a、b 不是局部量，是接收者的字段。
+       * 顺序是硬的：**局部量与形参先查**（同名的局部量遮住字段，C++ 就是这么定的）。
+       */
+      const flat = C.ref(n);
+      if (C.self !== null && C.tyCtx().env.get(flat) === undefined
+        && (C.tyCtx().fields.get(C.self) ?? []).some((f) => f.name === n)) {
+        return { kind: 'field', obj: { kind: 'name', name: 'this' }, name: n };
+      }
+      return { kind: 'name', name: flat };
     }
     case 'paren': case 'expr': return exprOf(kids(x)[0], C);
     case 'this': return { kind: 'name', name: 'this' };
@@ -125,7 +146,19 @@ export function exprOf(x, C) {
       const [op, a, b] = kids(x);
       const o = OPS.get(String(leaf(op)));
       if (o === undefined) throw new Error(`cpp->IR: 这个算子还没接：${leaf(op)}`);
-      return mkBin(o, exprOf(a, C), exprOf(b, C), C);
+      const la = exprOf(a, C);
+      const lb = exprOf(b, C);
+      /* 接收者装的是用户类、且那个类写了这一格 `operator@` —— 落成方法调用。 */
+      const opn = OP_MAP.get(o);
+      const lt = typeOf(la, C.tyCtx());
+      if (opn !== undefined && lt.kind === 'named' && C.fns.has(`${lt.name}_${opn}`)) {
+        return {
+          kind: 'call',
+          fn: { kind: 'name', name: `${lt.name}_${opn}` },
+          args: [la, lb],
+        };
+      }
+      return mkBin(o, la, lb, C);
     }
     case 'un': {
       const [op, a] = kids(x);
@@ -138,8 +171,23 @@ export function exprOf(x, C) {
       const obj = exprOf(kids(x)[0], C);
       const key = exprOf(kids(x)[1], C);
       const t = typeOf(obj, C.tyCtx());
+      /* 用户类上的 `operator[]`。 */
+      if (t.kind === 'named' && C.fns.has(`${t.name}_op_index`)) {
+        return {
+          kind: 'call',
+          fn: { kind: 'name', name: `${t.name}_op_index` },
+          args: [obj, key],
+        };
+      }
       if (t.kind === 'map') return { kind: 'builtin', name: 'dget', args: [obj, key] };
       return { kind: 'index', obj, index: key };
+    }
+    /* `c ? a : b` —— 公共层的 if-expr 那一格。 */
+    case 'cond': {
+      const [c, a, b] = kids(x);
+      return {
+        kind: 'if-expr', type: null, cond: condOf(c, C), then: exprOf(a, C), else_: exprOf(b, C),
+      };
     }
     /* `(int)e` 与 `static_cast<double>(e)`。 */
     case 'cast': case 'named-cast': {
@@ -184,7 +232,24 @@ function callOf(x, C) {
     if (m === 'push_back' && t.kind === 'arr') {
       return { kind: 'builtin', name: 'apush', args: [obj, exprOf(rawArgs[0], C)] };
     }
-    throw new Error(`cpp->IR: \`.${m}()\` 这一格方法还没接`);
+    /**
+     * **用户类上的方法**：`p.total()` → `(call Point_total (var p) …)`。
+     * 分派是**单态的**（接收者的静态类型定哪一份）—— 虚函数是另一格（还没接）。
+     * 继承来的那几格在第一遍里就按派生类的名字登记过了（见 `index.js` 的 `flatten`），
+     * 所以这儿只查一次，不用往基类走。
+     */
+    if (t.kind === 'named') {
+      const target = `${t.name}_${C.ref(m)}`;
+      if (C.fns.has(target)) {
+        return {
+          kind: 'call',
+          fn: { kind: 'name', name: target },
+          args: [obj, ...rawArgs.map((a) => exprOf(a, C))],
+        };
+      }
+    }
+    throw new Error(`cpp->IR: \`.${m}()\` 这一格方法还没接`
+      + `（接收者装的是 ${t.name ?? t.kind}）`);
   }
   /* `std::make_pair(a, b)` —— 一格两格值的记录（字段叫 first / second）。 */
   if (tag(fn) === 'qual') {
@@ -205,6 +270,18 @@ function callOf(x, C) {
   const args = rawArgs.map((a) => exprOf(a, C));
   if (name === 'printf' || name === 'puts') {
     throw new Error(`cpp->IR: \`${name}\` 在表达式位置上（它不交值）`);
+  }
+  /**
+   * **方法体里裸写的调用就是 `this->` 那一格**（与裸写字段名同一条规矩）：
+   * `int total() { return sum() + c; }` 里的 `sum()` 是成员。
+   * 类里有同名成员时裸写的一定是成员（自由函数要写 `::f()` 才轮到它）。
+   */
+  if (C.self !== null && C.fns.has(`${C.self}_${C.ref(name)}`)) {
+    return {
+      kind: 'call',
+      fn: { kind: 'name', name: `${C.self}_${C.ref(name)}` },
+      args: [{ kind: 'name', name: 'this' }, ...args],
+    };
   }
   return { kind: 'call', fn: { kind: 'name', name: C.ref(name) }, args };
 }
@@ -233,7 +310,19 @@ export function printArgs(name, rawArgs, C) {
   if (specs.length !== 1 || !/\\n$/.test(fmt) || fmt.replace(/%[a-zA-Z]|\\n/g, '') !== '') {
     throw new Error(`cpp->IR: 这个格式串还没接：${fmt}（这一批只接"一格转换 + 换行"）`);
   }
-  return [{ kind: 'print', values: [exprOf(rawArgs[1], C)] }];
+  const v = exprOf(rawArgs[1], C);
+  /* `printf("%d\n", x == y)` —— C++ 里 bool 按 `%d` 印的是 1 / 0，不是 true / false。
+     方言的 `toint` 只吃 real，所以这一格用三目摊开。 */
+  if (/^%[-+ #0]*[0-9]*(?:\.[0-9]+)?[diu]$/.test(specs[0])
+    && typeOf(v, C.tyCtx()).kind === 'bool') {
+    return [{
+      kind: 'print',
+      values: [{
+        kind: 'if-expr', type: INT, cond: v, then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
+      }],
+    }];
+  }
+  return [{ kind: 'print', values: [v] }];
 }
 
 /** 条件位置上的那一格（C++ 里"非零为真"）。 */

@@ -14,6 +14,7 @@ import { tag, kids, leaf, part, unquote } from '../../../src/core/lower/cst.js';
 import {
   INT, REAL, STR, BOOL, arrOf, dictOf, named, typeOf,
 } from '../../../src/core/lower/ty-of.js';
+import { foldIntConst, intLit } from '../../../src/core/lower/cfam.js';
 import { mathConst, mathCall, hostCall } from './stdlib.js';
 
 const OPS = new Map([
@@ -223,7 +224,7 @@ function mkBin(op, a, b, C) {
   /* **无类型常量的算术按任意精度折**（go 的规矩）：`1 << 63` 当 real 用时是
      9223372036854775808.0，当 int 用时才是最小的 int64。两个都记着（`exact` 那一位），
      `coerce` 到 real 时用前者 —— `float64(x) / (1 << 63)` 的符号靠它（量出来的）。 */
-  const folded = foldInts(op, a, b);
+  const folded = foldIntConst(op, a, b);
   if (folded !== null) return folded;
   const ta = typeOf(a, C.tyCtx());
   const tb = typeOf(b, C.tyCtx());
@@ -256,38 +257,6 @@ function mkBin(op, a, b, C) {
   return { kind: 'binop', op, left: l, right: r };
 }
 
-/**
- * 两格整数字面量的**任意精度折叠**。回 null = 折不了（不是两格字面量、或者不是算术算子）。
- * 折出来的那一格同时记两个值：`value` 是截到 int64 的（整数上下文用它），
- * `exact` 是没截过的（`coerce` 到 real 时用它 —— `1 << 63` 在 real 上是正的）。
- */
-function foldInts(op, a, b) {
-  if (a === null || b === null || a.kind !== 'int' || b.kind !== 'int') return null;
-  const x = BigInt(a.exact ?? a.value);
-  const y = BigInt(b.exact ?? b.value);
-  let v;
-  switch (op) {
-    case '+': v = x + y; break;
-    case '-': v = x - y; break;
-    case '*': v = x * y; break;
-    case '/': if (y === 0n) return null; v = x / y; break;
-    case '%': if (y === 0n) return null; v = x % y; break;
-    case '<<': if (y < 0n || y > 512n) return null; v = x << y; break;
-    case '>>': if (y < 0n || y > 512n) return null; v = x >> y; break;
-    case '&': v = x & y; break;
-    case '|': v = x | y; break;
-    case '^': v = x ^ y; break;
-    default: return null;
-  }
-  const wrapped = BigInt.asIntN(64, v);
-  const one = { kind: 'int', value: fitNum(wrapped) };
-  if (wrapped !== v) one.exact = v;
-  return one;
-}
-
-/** 装得进双精度就用 number（`.sx` 里两种都写得出来，number 那一档好读）。 */
-const fitNum = (v) => ((v >= -9007199254740991n && v <= 9007199254740991n) ? Number(v) : v);
-
 /** 有符号 → 无符号的那几格算子（别的（加减乘、相等）两边一样）。 */
 const UOPS = new Map([
   ['>>', 'u>>'], ['/', 'u/'], ['%', 'u%'],
@@ -318,10 +287,9 @@ function constIntOf(tok, C) {
  */
 function numOf(raw) {
   const t = raw.replace(/_/g, '');
-  const hex = /^0[xXbBoO]/.test(t);
-  if (!hex && (t.includes('.') || /[eE]/.test(t))) return { kind: 'real', value: Number(t) };
-  const b = /^0[0-7]+$/.test(t) ? BigInt(`0o${t.slice(1)}`) : BigInt(t);
-  return { kind: 'int', value: (b >= -9007199254740991n && b <= 9007199254740991n) ? Number(b) : b };
+  const based = /^0[xXbBoO]/.test(t);
+  if (!based && (t.includes('.') || /[eE]/.test(t))) return { kind: 'real', value: Number(t) };
+  return intLit(t);
 }
 
 /** 这一格值"照搬着用两遍"要不要先物化（有语句要跑的、或者算两趟不便宜的）。 */

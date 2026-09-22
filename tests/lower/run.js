@@ -26,7 +26,7 @@ import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
-  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH, INHERIT, OPOVER,
 } from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -51,6 +51,7 @@ const FAMILIES = {
   bits: BITS, charlit: CHARLIT, ctconst: CTCONST, decls: DECLS, enumval: ENUMVAL,
   fnval: FNVAL, forin: FORIN, hoist: HOIST, litnone: LITNONE, match: MATCH,
   method2: METHOD2, optres: OPTRES, pointer: POINTER, posinit: POSINIT, push: PUSH,
+  inherit: INHERIT, opover: OPOVER,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -68,9 +69,12 @@ const MIGRATED = {
      按口径拼成 `if !cond then print + fail`）三样是这门语言带进来的。 */
   mojo: ['assertok', 'basics', 'conv', 'defer', 'dict', 'index', 'intmath', 'loopexit',
     'method', 'record', 'slice', 'values'],
-  /* cpp：九个家族。`defer` 在这门语言里是 `~Say()`（RAII，与 freebasic 同一手）；
-     `printf` 只接"一格转换 + 换行"（见 adapter/expr.js 的 printArgs）。 */
-  cpp: ['basics', 'conv', 'defer', 'dict', 'index', 'intmath', 'loopexit', 'record', 'values'],
+  /* cpp：十一个家族。`defer` 在这门语言里是 `~Say()`（RAII，与 freebasic 同一手，
+     出口那一半交给公共层的 `{ kind: 'scope' }`）；`printf` 只接"一格转换 + 换行"
+     （见 adapter/expr.js 的 printArgs）。`inherit` 与 `opover` 两族的期望输出是
+     本机 `c++ -std=c++17` 给的，不是我们自己编的。 */
+  cpp: ['basics', 'conv', 'defer', 'dict', 'index', 'inherit', 'intmath', 'loopexit',
+    'opover', 'record', 'values'],
   /* nim：十九个家族（借来那几门里最多的一格）。这门语言自己带进来的有五样：
      `casefor`（`case` 里能有 `elif` + `for … in` 区间/序列）、`caserange`（`of 0 .. 59:`）、
      `ctif`（`when` 是**编译期**分支：中的那支摊开、别的整格丢掉）、`namedarg`

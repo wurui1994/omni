@@ -2,13 +2,16 @@
 //
 // 替掉 `ext/cpp/tograph.js`（534 行）。这一门的要点：
 //   1. **类型是写着的**（`int` / `double` / `Point` / `std::map<std::string,int>`），`auto` 从初值取；
-//   2. **`~Say()` 是出作用域跑一段**（RAII）—— 与 freebasic 的析构同一手：adapter 在每个
-//      出口按逆序补一遍调用（公共层还没有真正的作用域出口）；
+//   2. **`~Say()` 是出作用域跑一段**（RAII）—— 交给**公共层的作用域出口**
+//      （`{ kind: 'scope', stmts, exits }`，`lower-stmt.js`）：这一份只说"哪几格要销毁、
+//      按什么次序"，"每个出口都补一遍"是公共层的事；
 //   3. `#include` / `namespace` / `template` 的前向声明**丢掉**（这一门不做预处理，
 //      例子里那几行是为了让语法认得 `std::map` 这类名字）；
 //   4. 入口是 `int main()` —— 公共降级器看见名叫 `main` 的函数就发 `(main (expr (call main)))`。
 
-import { tag, kids, leaf, part } from '../../../src/core/lower/cst.js';
+import {
+  tag, kids, leaf, part, isList, groupItems,
+} from '../../../src/core/lower/cst.js';
 import { INT, arrOf, named, typeOf } from '../../../src/core/lower/ty-of.js';
 import {
   exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg,
@@ -16,6 +19,26 @@ import {
 
 /** 析构函数的名字。 */
 const dtorName = (ty) => `__destruct_${String(ty).replace(/[^A-Za-z0-9_]/g, '_')}`;
+
+/**
+ * **`operator@` 的方法名**（与 `expr.js` 的 `OP_MAP` 是同一张表的两头）。
+ * 落法是把重载编成一格**普通方法**（`类名_op_add`）—— 登记、发体、分派全不用另写；
+ * 改写发生在调用点（`a + b` 里 a 装的是有这一格的类才改写）。
+ */
+const OP_NAMES = new Map([
+  ['+', 'op_add'], ['-', 'op_sub'], ['*', 'op_mul'], ['/', 'op_div'], ['%', 'op_mod'],
+  ['==', 'op_eq'], ['!=', 'op_neq'],
+  ['<', 'op_lt'], ['>', 'op_gt'], ['<=', 'op_le'], ['>=', 'op_ge'],
+  ['index', 'op_index'], ['call', 'op_call'],
+]);
+
+/** `(opname "+")` → `op_add`。不认的算子当场报（别静默地编出个怪名字）。 */
+function opMethodName(tok) {
+  const s = String(leaf(kids(tok)[0]));
+  const n = OP_NAMES.get(s);
+  if (n === undefined) throw new Error(`cpp->IR: \`operator${s}\` 这一格重载还没接`);
+  return n;
+}
 
 /** 一棵 cpp 的树（`(unit …)`）→ 标准 IR 的模块。 */
 export function cppToIR(tree) {
@@ -35,6 +58,8 @@ export function cppToIR(tree) {
     fns: new Map(),
     /** 当前函数里那几格带析构的量（出作用域逆序调一遍）。 */
     scoped: [],
+    /** 正在降的这格方法的**接收者类型名**（裸写字段名 = `this->` 那一格靠它）。 */
+    self: null,
     fresh: (p) => { tmpN += 1; return `${p}${tmpN}`; },
     ref: (n) => {
       if (!names.has(n)) {
@@ -89,8 +114,16 @@ export function cppToIR(tree) {
     }
     const cls = kids(specs).find((y) => tag(y) === 'class');
     if (cls === undefined) continue;
-    const nm = kids(cls).find((y) => tag(y) === 'n');
-    const members = part(cls, 'members');
+    /* **带基类的那一档，名字与基类表裹在一格无名表里**（`(class "struct" (· (n …) (bases …)) …)`）
+       —— 无名表的孩子是**全部 items**（`cst.js` 文件头那条教训），所以先摊一层再找。 */
+    const clsKids = kids(cls).flatMap((y) => (tag(y) === null && isList(y) ? groupItems(y) : [y]));
+    const nm = clsKids.find((y) => tag(y) === 'n');
+    /* **继承**：`struct Derived : Base {}` 的 `(bases (b (n "Base")))`。 */
+    const basesTok = clsKids.find((y) => tag(y) === 'bases');
+    const bases = (basesTok === undefined ? [] : kids(basesTok))
+      .map((b) => nameOf(kids(b).find((y) => tag(y) === 'n')))
+      .filter((b) => b !== null && b !== undefined);
+    const members = clsKids.find((y) => tag(y) === 'members');
     const fields = [];
     const methods = [];
     let dtor = null;
@@ -108,11 +141,17 @@ export function cppToIR(tree) {
         const f = part(m, 'fn') ?? kids(m).find((y) => tag(y) === 'fn');
         const head = f === undefined ? undefined : kids(f)[0];
         if (head !== undefined && tag(head) === 'dtor') { dtor = m; continue; }
-        methods.push(m);
+        const mn2 = (head !== undefined && tag(head) === 'opname')
+          ? opMethodName(head) : nameOf(kids(f)[0]);
+        methods.push({ tok: m, name: mn2 });
       }
     }
-    C.records.set(nameOf(nm), { name: nameOf(nm), fields, methods, dtor });
+    C.records.set(nameOf(nm), {
+      name: nameOf(nm), bases, fields, methods, dtor,
+    });
   }
+  /* **把基类摊进派生类**（字段在前、方法按名字继承）—— 见 `flatten`。 */
+  for (const [, rec] of C.records) flatten(rec, C, new Set());
   for (const [, rec] of C.records) {
     recFields.set(C.ref(rec.name), rec.fields);
     decls.push({ kind: 'class', name: C.ref(rec.name), fields: rec.fields });
@@ -141,7 +180,7 @@ export function cppToIR(tree) {
   for (const [, rec] of C.records) {
     const selfType = named(C.ref(rec.name), true);
     for (const m of rec.methods) {
-      const s = sigOf(m, selfType, `${C.ref(rec.name)}_${nameOf(kids(kids(m).find((y) => tag(y) === 'fn'))[0])}`);
+      const s = sigOf(m.tok, selfType, `${C.ref(rec.name)}_${C.ref(m.name)}`);
       C.fns.set(s.name, { params: s.params, ret: s.ret });
     }
     if (rec.dtor !== null) {
@@ -156,8 +195,8 @@ export function cppToIR(tree) {
   for (const [, rec] of C.records) {
     const selfType = named(C.ref(rec.name), true);
     for (const m of rec.methods) {
-      const s = sigOf(m, selfType, `${C.ref(rec.name)}_${nameOf(kids(kids(m).find((y) => tag(y) === 'fn'))[0])}`);
-      decls.push(fnDecl(s, m, C));
+      const s = sigOf(m.tok, selfType, `${C.ref(rec.name)}_${C.ref(m.name)}`);
+      decls.push(fnDecl(s, m.tok, C, C.ref(rec.name)));
     }
     if (rec.dtor !== null) {
       const s = {
@@ -165,7 +204,7 @@ export function cppToIR(tree) {
         params: [{ name: 'this', type: selfType }],
         ret: { kind: 'void' },
       };
-      decls.push(fnDecl(s, rec.dtor, C));
+      decls.push(fnDecl(s, rec.dtor, C, C.ref(rec.name)));
     }
   }
   for (const f of topFns) decls.push(fnDecl(sigOf(f), f, C));
@@ -174,26 +213,69 @@ export function cppToIR(tree) {
   return { kind: 'module', decls };
 }
 
-/** 一格函数（体里 `return` 前要补析构调用）。 */
-function fnDecl(sig, fnTok, C) {
+/**
+ * **把基类摊进派生类**（单继承与多继承都走这一格，按声明次序）。
+ *
+ * 落法是**摊平**：字段表 = 基类的接在自己前面（C++ 的布局也是这样）、
+ * 方法按**名字**继承（派生类自己那一份赢 —— C++ 的隐藏规则）。
+ * 为什么不给方言加"基类"那一格：方言的记录只有一张字段表，摊平之后
+ * `d.基类字段` 与 `d.自己的字段` 在同一格记录上，三条腿一格都不用改。
+ *
+ * 继承来的方法**按派生类再发一份体**（接收者的类型不同，方言那侧是两格类型）——
+ * 字段已经摊平了，所以同一份体在派生类上逐字成立。
+ */
+function flatten(rec, C, seen) {
+  if (rec.flat === true) return;
+  if (seen.has(rec.name)) {
+    throw new Error(`cpp->IR: 继承成环了（${[...seen, rec.name].join(' -> ')}）`);
+  }
+  const next = new Set([...seen, rec.name]);
+  const fields = [];
+  const methods = [];
+  for (const bn of rec.bases ?? []) {
+    const base = C.records.get(bn);
+    if (base === undefined) throw new Error(`cpp->IR: 基类 ${bn} 没有登记过`);
+    flatten(base, C, next);
+    for (const f of base.fields) if (!fields.some((y) => y.name === f.name)) fields.push(f);
+    for (const m of base.methods) methods.push(m);
+  }
+  for (const f of rec.fields) if (!fields.some((y) => y.name === f.name)) fields.push(f);
+  /* 派生类自己那一份**盖掉**同名的基类方法。 */
+  const own = new Set(rec.methods.map((m) => m.name));
+  rec.methods = [...methods.filter((m) => !own.has(m.name)), ...rec.methods];
+  rec.fields = fields;
+  rec.flat = true;
+}
+
+/**
+ * 一格函数。**析构交给公共层的作用域出口**（`{ kind: 'scope', stmts, exits }`）——
+ * 从前这一份自己在"体的末尾"与"每个 `return` 前面"各补一遍，那是六门语言里第六份同样的
+ * 代码，而且漏一个出口（跳出函数的 `break`、`if` 里的 `return`）就是**静默地少跑一段**。
+ * 现在只交两样：体，与那几句出口动作（**逆序** —— 那是 C++ 的规矩，不是公共层的）。
+ */
+function fnDecl(sig, fnTok, C, selfName = null) {
   C.push();
   for (const p of sig.params) C.bind(p.name, p.type);
   const outerScoped = C.scoped;
+  const outerSelf = C.self;
+  C.self = selfName;
   C.scoped = [];
   const body = part(fnTok, 'body');
   const stmts = body === undefined ? [] : kids(body).flatMap((s) => stmtsOf(s, C));
-  const last = stmts[stmts.length - 1];
-  if (C.scoped.length > 0 && (last === undefined || last.kind !== 'return')) {
-    stmts.push(...dtorCalls(C));
-  }
+  const exits = dtorCalls(C);
   C.scoped = outerScoped;
+  C.self = outerSelf;
   C.pop();
   return {
-    kind: 'fn', name: sig.name, params: sig.params, ret: sig.ret, body: stmts,
+    kind: 'fn',
+    name: sig.name,
+    params: sig.params,
+    ret: sig.ret,
+    body: exits.length === 0 ? stmts : [{ kind: 'scope', stmts, exits }],
   };
 }
 
-/** 当前函数里那几格带析构的量 → **逆序**各调一次。 */
+/** 当前函数里那几格带析构的量 → **逆序**各调一次（C++ 的规矩）。 */
 function dtorCalls(C) {
   return [...C.scoped].reverse().map((v) => ({
     kind: 'expr-stmt',
@@ -271,11 +353,9 @@ export function stmtsOf(x, C) {
       return [{ kind: 'for', init, cond, post, body }];
     }
     case 'return': {
+      /* 析构不在这儿补 —— 公共层那一格 `scope` 在**每个**出口上补（见 `fnDecl`）。 */
       const vs = kids(x);
-      return [...dtorCalls(C), {
-        kind: 'return',
-        values: vs.length === 0 ? [] : [exprOf(vs[0], C)],
-      }];
+      return [{ kind: 'return', values: vs.length === 0 ? [] : [exprOf(vs[0], C)] }];
     }
     case 'break': return [{ kind: 'break', label: null }];
     case 'continue': return [{ kind: 'continue', label: null }];
@@ -411,3 +491,5 @@ function declOf(d, specs, C) {
 //   1. 模板、继承、虚函数、运算符重载、异常、lambda 都没接（与从前那条路同一个范围）。
 //   2. `printf` 只接"一格转换 + 换行"与纯文本（见 expr.js 的 printArgs）。
 //   3. 引用（`T&`）当值收（例子里只用它传结构 —— 记录本来就是引用语义）。
+//   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
+//      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。

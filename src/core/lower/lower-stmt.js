@@ -26,6 +26,18 @@ export function lowerStmt(stmt, ctx) {
     case 'assign': return lowerAssign(stmt, ctx);
     case 'expr-stmt': return lowerExprStmt(stmt, ctx);
     case 'block': return lowerBlock(stmt, ctx);
+    /**
+     * **真正的作用域出口**（`{ kind: 'scope', stmts, exits }`）：`exits` 里那几句在
+     * **每一个离开这层的出口**上跑一遍 —— 走到底、`return`、以及跳出这层的 `break`/`continue`。
+     *
+     * 六门语言在做同一件事（C++ 的析构 / go 与 V 的 `defer` / nim 的 `defer:` /
+     * freebasic 的析构 / mojo 的 `with`），从前各自在 adapter 里手写"每个出口逆序补一遍" ——
+     * 那是六份同样的代码，而且漏一个出口就是**静默地少跑一段**。所以它的家在这一层。
+     *
+     * **次序由 adapter 定**（`exits` 照它给的顺序发）：C++ 与 go 都是逆序注册，
+     * 那是那门语言的规矩，不是这一层的。
+     */
+    case 'scope': return lowerScope(stmt, ctx);
     case 'switch': return lowerSwitch(stmt, ctx);
     case 'print': return lowerPrint(stmt, ctx);
     /**
@@ -235,6 +247,62 @@ function lowerBlock(s, ctx) {
   const r = lowerStmts(s.stmts, ctx);
   ctx.scope.pop();
   return r;
+}
+
+/**
+ * 一层带**出口动作**的作用域（见 `lowerStmt` 里 `'scope'` 那一格的说明）。
+ * 一格出口动作都没有就退化成普通的块。
+ */
+function lowerScope(s, ctx) {
+  const exits = s.exits ?? [];
+  if (exits.length === 0) return lowerBlock({ kind: 'block', stmts: s.stmts }, ctx);
+  const body = s.stmts.map((st) => withExits(st, exits, false));
+  ctx.scope.push();
+  const r = lowerStmts([...body, ...exits], ctx);
+  ctx.scope.pop();
+  return r;
+}
+
+/**
+ * 一条语句里**离开本层的那几个跳转**前面补上出口动作。回一棵**新的**语句
+ * （不改 adapter 交来的那棵 IR：同一棵可能被别处引着）。
+ *
+ * `inLoop` 为真 = 这条语句在**本层里头的某一层循环**里 —— 那时 `break`/`continue`
+ * 跳的是那一层，没离开本层，所以不补。`return` 不管在哪一层都是离开。
+ *
+ * **明说的近似**：`return f()` 上出口动作跑在**算完返回值之后**（C++ 的规矩就是这样），
+ * 可这一层是"先发出口动作、再发 `ret`"—— 返回值里读了那几格要销毁的东西时两者有别。
+ * 判据里没有这一格（六门语言从前手写的那一份也是这么落的），明说记着。
+ */
+function withExits(stmt, exits, inLoop) {
+  if (stmt === null || stmt === undefined) return stmt;
+  const mapBody = (st, f) => {
+    const out = { ...st };
+    if (Array.isArray(st.body)) out.body = st.body.map(f);
+    return out;
+  };
+  switch (stmt.kind) {
+    case 'return': return { kind: 'block', stmts: [...exits, stmt] };
+    case 'break': case 'continue':
+      return inLoop ? stmt : { kind: 'block', stmts: [...exits, stmt] };
+    /* 本层里头的循环：它自己的 break/continue 不离开本层，可 return 还是离开。 */
+    case 'while': case 'for': case 'for-range':
+      return mapBody(stmt, (s) => withExits(s, exits, true));
+    case 'if': return {
+      ...stmt,
+      then: stmt.then.map((s) => withExits(s, exits, inLoop)),
+      else_: stmt.else_ ? stmt.else_.map((s) => withExits(s, exits, inLoop)) : stmt.else_,
+    };
+    case 'block': return { ...stmt, stmts: stmt.stmts.map((s) => withExits(s, exits, inLoop)) };
+    /* 里头又一层带出口动作的作用域：它自己那几句由它自己补，这一层只管往下走。 */
+    case 'scope': return { ...stmt, stmts: stmt.stmts.map((s) => withExits(s, exits, inLoop)) };
+    case 'switch': return {
+      ...stmt,
+      cases: stmt.cases.map((c) => ({ ...c, body: c.body.map((s) => withExits(s, exits, inLoop)) })),
+      default_: stmt.default_ ? stmt.default_.map((s) => withExits(s, exits, inLoop)) : stmt.default_,
+    };
+    default: return stmt;
+  }
 }
 
 function lowerSwitch(s, ctx) {

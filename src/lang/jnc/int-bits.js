@@ -12,11 +12,9 @@
 // 出处：jancy 的 `setupStdTypedef`（`jnc_ct_TypeMgr.cpp:1759-1782`）与那几个关键字的 TypeKind。
 // 方言里它们一律是 `int`，宽度只在两处要用：位域怎么挤成一格（见 `emit-agg.js` 那条规则）、
 // 以后的截断规则。
-export const INT_BITS = {
-  char: 8, short: 16, int: 32, long: 64, intptr: 64,
-  int8_t: 8, uint8_t: 8, utf8_t: 8, uchar_t: 8, byte_t: 8,
-  int16_t: 16, uint16_t: 16, utf16_t: 16, ushort_t: 16, word_t: 16,
-  int32_t: 32, uint32_t: 32, utf32_t: 32, dword_t: 32, uint_t: 32,
-  int64_t: 64, uint64_t: 64, ulong_t: 64, qword_t: 64,
-  size_t: 64, intptr_t: 64, uintptr_t: 64,
-};
+// **家搬到公共那一层了**（`src/core/lower/cfam.js` 的 `C_INT_BITS`）：C++ 那侧有一张
+// 一模一样的表，抄两份就是两处会分叉的账。这儿留一格转口（**一格一格写，不许 `export *`**
+// —— 我们自己那个 JS 前端不收星号，见 int-table.js 头上那段）。
+import { C_INT_BITS } from '../../core/lower/cfam.js';
+
+export const INT_BITS = C_INT_BITS;

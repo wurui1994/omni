@@ -345,6 +345,19 @@ export const SWITCH = ['10', '20', '30', '2', '4', '3'];
  */
 export const BLOCKSCOPE = ['5', '1'];
 
+/**
+ * **cpp 的继承**（`ext/cpp/examples/inherit.cpp`）。摊平之后读基类字段、调继承来的方法、
+ * 派生类同名的方法盖掉基类那一份 —— 期望输出是本机 `c++ -std=c++17` 跑出来的那六行。
+ */
+export const INHERIT = ['7', '7', '12', '2', '30', '1'];
+
+/**
+ * **cpp 的运算符重载**（`ext/cpp/examples/opover.cpp`）。前八行是四格重载
+ * （`+` / `-` / `==` / `[]`），最后一行是 `3 + 4` —— 那一格必须还走方言的 `+`。
+ * 期望输出同样是 `c++` 给的（注意 `%d` 印 bool 是 1 / 0）。
+ */
+export const OPOVER = ['11', '22', '9', '18', '1', '0', '1', '2', '7'];
+
 const C = (name, grammar, file, expect) => ({ name, grammar, file, expect });
 
 /**
@@ -530,6 +543,15 @@ export const CASES = [
   // syntax 包的 tokens/operators/Pos/缓冲区增长/字符分类/关键字查表/标识符扫描。
   // 19 行输出与 go run 逐行一致——验证整个 syntax 包的核心运行期行为。
   ...fam('syntaxpkg', SYNTAXPKG, ['go']),
+  // 第五十四个家族：**继承**（cpp 独一份）。落法是**摊平** —— 基类字段接在派生类前面、
+  // 方法按名字继承（派生类同名的赢）。方言的记录只有一张字段表，摊平之后
+  // `d.基类字段` 与自己的字段在同一格记录上，三条腿一格都不用改。
+  // 期望输出由本机 `c++ -std=c++17` 给（不是我们自己编的）。
+  ...fam('inherit', INHERIT, ['cpp']),
+  // 第五十五个家族：**运算符重载**（cpp 独一份）。`operator+` 编成一格普通方法
+  // （`Vec2_op_add`），改写发生在**调用点**：左边装的是有这一格的类才改写 ——
+  // 所以第九行那个 `int + int` 压住"内建不许被抢"。期望输出同样由 `c++` 给。
+  ...fam('opover', OPOVER, ['cpp']),
 ];
 
 
