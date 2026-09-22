@@ -279,6 +279,27 @@ try {
     ok('/api/repl reset 把会话忘掉', re.err.includes('undefined variable'), JSON.stringify(re));
   }
 
+  /* ---- 控制台里用矩阵（`std/matrix.omni`，设计文档阶段 3）----
+   *
+   * 这一格钉的是**那套库在控制台里真能用**：页面上的会话走 `mode: 'mixed'`
+   * （`dynamic` 里 `[[1.0, 2.0], …]` 推不成 `list<list<real>>`，`matOf` 会报没有重载 ——
+   * 量出来的，不是猜的）。算出来的答案另有一整份判据在 `tests/cases/26_matrix.omni`
+   * （那一份是五条腿差分 + 快照）。
+   */
+  {
+    const say = async (line) => (await post('/api/repl',
+      { session: 'judge-mat', line, mode: 'mixed' })).json;
+    await say('import "std/matrix.omni";');
+    await say('Matrix a = matOf([[1.0, 2.0], [3.0, 4.0]]);');
+    const d = await say('a.det()');
+    ok('控制台里 matOf + det 算得出来（-2）', d.out === '-2\n', JSON.stringify(d));
+    const t = await say('a.mul(a).text()');
+    ok('控制台里矩阵乘 + 排版（7 10 / 15 22 右对齐）',
+      t.out === '[  7 10 ]\n[ 15 22 ]\n', JSON.stringify(t.out));
+    const vs = (d.vars ?? []).map((v) => `${v.name}:${v.type}`).join(' ');
+    ok('变量栏认得出矩阵那一格', vs.includes('a:record'), vs);
+  }
+
   /* ---- 虚拟文件系统：编辑与新建（`PUT /api/file`）----
    *
    * 钉住的是"用户改了有没有效果"那一整条：写得进、读得回、进得了树、**跑的是改过的那一份**。

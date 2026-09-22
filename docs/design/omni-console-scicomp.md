@@ -86,9 +86,18 @@
   与展示 / IDE 同一条 `data-mode` 机制，三套互斥。上下键翻历史、`…` 提示符接续行、
   换语言或按那个圈箭头就开一格新会话。变量栏的格式化是纯函数（`formatValue` / `typeName`）。
   **单体 HTML 那一份明着说这一档要 serve** —— 它没拼解释器进去，不假装。
-* **阶段 3 —— 矩阵（L1+L2）**：`matrix.new` / `*` / `+` / 转置 / 切片 / `show`。
-  最小例子：`m = matrix{{1,2},{3,4}}` / `m * m` 印出右对齐的两行。
-  判据：与 gsl-shell 的 `matrix_display_gen` 同样的排版规矩（eps 按平均量级、小整数 `%.0f`）。
+* **阶段 3 —— 矩阵（L1+L2）**（**已落地**：`src/lib/matrix.omni`）：
+  `matZeros` / `matOf` / `matVec` / `matEye` 四个口子，`Matrix` 上
+  `get` / `put` / `add` / `sub` / `mul` / `scale` / `t` / `solve` / `inv` / `det` / `text` / `show`。
+  **用 Omni 自己写**（与 `json.omni` 同一条理由）：gsl-shell 那层是 GSL 的 ffi 绑定，
+  我们没有 GSL，所以乘法与消元自己写 —— 消元带**部分选主元**（不选的话 `[[0 1][1 0]]`
+  一上来就除以 0）。印法照 `matrix_display_gen`：eps 按平均量级、小整数印整数、右对齐。
+  两处刻意与它不同并记在文件头：**下标从 0 起**（这门语言的 `list` 是 0 起，
+  为"matlab 手感"改成 1 起只会与宿主的每处下标打架）、非整数 6 位有效数字（宿主的印法）。
+  判据：`tests/cases/26_matrix.omni`（五条腿差分 + 快照，答案逐个手算核对过）
+  + tests/serve 三格（控制台里 `matOf` / `det` / 乘法排版 / 变量栏认得出它）。
+  **控制台的会话走 `mixed` 模式**：`dynamic` 里 `[[1.0, 2.0], …]` 推不成
+  `list<list<real>>`，`matOf` 当场报"没有匹配的重载"（量出来的）。
 * **阶段 4 —— 绘图（L4 的"出一张图"那一半）**：`plot` / `addline` / `save_svg`。
   页面上就是"绘图区多一张 SVG"。**不做窗口**（我们没有窗口，这一格是白得的）。
   最小例子：`p = plot(); p:addline(...)` 在控制台里出一条曲线。

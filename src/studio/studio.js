@@ -323,9 +323,13 @@ function renderGallery() {
  * 续行那一格照 gsl-shell 的做法：服务说 `incomplete` 就把这一行攒着、提示符换成 `…`
  * （它那边的判据是"语法错且消息结尾是 `'<eof>'`"，我们这边是 `Session.lang.complete()`
  *   —— 两边都是"问编译器"，不是在界面上数括号）。
+ *
+ * **模式是 `mixed`，不是 REPL 默认的 `dynamic`**（量出来的）：控制台的正事是调有类型的
+ * 库函数，而 `dynamic` 里 `[[1.0, 2.0], [3.0, 4.0]]` 这种字面量推不成 `list<list<real>>`，
+ * `matOf(…)` 当场报"没有匹配的重载"。代价是一个名字不能中途换类型（`x = 10` 之后
+ * `x = "s"` 会报）—— 数值控制台上那一条极少用到，而矩阵那一条每句都要。
  */
 const CON = { id: `w${Date.now().toString(36)}`, buf: '', hist: [], at: -1, busy: false };
-
 function conLog(text, cls) {
   const box = $('#con-log');
   if (box === null || text === '') return;
@@ -372,7 +376,7 @@ async function conSend(line) {
   CON.busy = true;
   try {
     const r = await post('/api/repl', {
-      session: CON.id, line: CON.buf, lang: $('#con-lang').value,
+      session: CON.id, line: CON.buf, lang: $('#con-lang').value, mode: 'mixed',
     });
     if (r.incomplete === true && !force) {
       $('#con-ps1').textContent = '…';

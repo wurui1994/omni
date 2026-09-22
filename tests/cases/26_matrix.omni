@@ -1,0 +1,56 @@
+// 矩阵（`std/matrix.omni`）—— 控制台模式那套科学计算的第一层
+//
+// 判的是四样：形状与印法、乘法、解方程（消元 + 选主元）、行列式。
+// **两条关键性质**：
+//   * `A * A⁻¹` 印出来必须是干净的单位矩阵 —— 那考的是"按平均量级反推多小算 0"
+//     那一格（`eps = 平均 |x| * 1e-9`，照 gsl-shell 的 `matrix_display_gen`）。
+//     少了它这一行会印出一堆 `1e-17`。
+//   * 选主元不是装饰：`[[0 1][1 0]]` 这种一上来主元就是 0，不换行直接除以 0。
+import "std/matrix.omni";
+
+Matrix a = matOf([[1.0, 2.0], [3.0, 4.0]]);
+print(a.dim());
+a.show();
+
+// 乘法：[[1 2][3 4]]² = [[7 10][15 22]]
+a.mul(a).show();
+
+// 转置
+a.t().show();
+
+// 加减与数乘
+a.add(a).show();
+a.sub(a).show();
+a.scale(0.5).show();
+
+// 行列式：1*4 - 2*3 = -2
+print(a.det());
+
+// 逆：A * A⁻¹ = I（印出来要干净）
+a.mul(a.inv()).show();
+
+// 解方程：A x = [5, 11] -> x = [1, 2]
+a.solve(matVec([5.0, 11.0])).show();
+
+// **选主元那一格**：主元位置上是 0，必须换行才解得出来
+Matrix s = matOf([[0.0, 1.0], [1.0, 0.0]]);
+s.solve(matVec([2.0, 3.0])).show();
+
+// 向量就是 n×1
+Matrix v = matVec([1.0, 2.0, 3.0]);
+print(v.dim());
+v.t().show();
+
+// 单位矩阵与取元素
+print(matEye(3).dim());
+print(matEye(3).get(1, 1));
+print(matEye(3).get(0, 1));
+Matrix z = matZeros(2, 3);
+z.put(1, 2, 7.5);
+z.show();
+
+// 三阶：det 与解一起
+Matrix c = matOf([[2.0, 1.0, 1.0], [1.0, 3.0, 2.0], [1.0, 0.0, 0.0]]);
+print(c.det());
+c.solve(matVec([4.0, 5.0, 6.0])).show();
+c.mul(c.inv()).show();

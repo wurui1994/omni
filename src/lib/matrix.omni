@@ -1,0 +1,312 @@
+// Omni 标准库 —— 矩阵（控制台模式的科学计算第一层，`docs/design/omni-console-scicomp.md` 阶段 3）
+//
+// **为什么用 Omni 自己写**：与 `json.omni` 同一条理由（ADR-0006）—— 一份实现，五条腿
+// （解释器 / js / c / wat / 原生）行为一致是构造性的，不是靠几份手写运行时对齐。
+// gsl-shell 那边这一层是薄薄一圈 GSL 的 ffi 绑定（`matrix.lua` 的 `gsl_blas_dgemm`、
+// `gsl_linalg_LU_*`）；我们没有 GSL，所以乘法与消元自己写 —— 那正是"做一遍"的意义。
+//
+// 照抄它的三条约定（出处在设计文档 §2）：
+//   * **向量就是 n×1 矩阵**（gsl-shell 没有 vector 这个类型，`matrix.vec` 造的是 n×1）；
+//   * 印法：**按平均量级反推"多小算 0"**（`eps = 平均 |x| * 1e-9`，不是固定阈值）、
+//     小整数印成整数、按最长的那一格右对齐、每行包在 `[ ]` 里（`matrix_display_gen`）；
+//   * `show` 是对象自己的方法（那边是 `m:show()`，这边是 `m.show()`）。
+//
+// **两处刻意与它不同**，都记在这儿：
+//   1. **下标从 0 起**。gsl-shell 是 1 起（因为 Lua 是）；这门语言的 `list` 是 0 起，
+//      为了"matlab 的手感"把这一层改成 1 起，只会让它与宿主语言的每一处下标打架。
+//   2. 非整数印 6 位有效数字（宿主 `string(real)` 的印法），它那边是 `%.8g` ——
+//      那一格是宿主的印法，不在这一层改。
+//
+// 公开的只有 `Matrix` 与四个造矩阵的函数（都带 `mat` 前缀）：名字太通用会泄进每个
+// import 者的作用域（`json.omni` 头上那段账说的就是这件事）。
+
+class Matrix {
+  int rows;
+  int cols;
+  // 按行铺开的稠密存储：`a[i * cols + j]`。
+  list<real> a;
+
+  real get(int i, int j) {
+    if (i < 0 || i >= rows || j < 0 || j >= cols) { fail("matrix: 下标越界（从 0 起）"); }
+    return a[i * cols + j];
+  }
+
+  void put(int i, int j, real v) {
+    if (i < 0 || i >= rows || j < 0 || j >= cols) { fail("matrix: 下标越界（从 0 起）"); }
+    a[i * cols + j] = v;
+  }
+
+  // 形状印成 `2x3`（变量栏与错误消息都用它）。
+  string dim() {
+    return string(rows) + "x" + string(cols);
+  }
+
+  Matrix add(Matrix b) {
+    if (rows != b.rows || cols != b.cols) { fail("matrix: 加法两边形状不同 " + dim() + " 与 " + b.dim()); }
+    Matrix m = matZeros(rows, cols);
+    int k = 0;
+    while (k < a.length) { m.a[k] = a[k] + b.a[k]; k = k + 1; }
+    return m;
+  }
+
+  Matrix sub(Matrix b) {
+    if (rows != b.rows || cols != b.cols) { fail("matrix: 减法两边形状不同 " + dim() + " 与 " + b.dim()); }
+    Matrix m = matZeros(rows, cols);
+    int k = 0;
+    while (k < a.length) { m.a[k] = a[k] - b.a[k]; k = k + 1; }
+    return m;
+  }
+
+  Matrix scale(real c) {
+    Matrix m = matZeros(rows, cols);
+    int k = 0;
+    while (k < a.length) { m.a[k] = a[k] * c; k = k + 1; }
+    return m;
+  }
+
+  Matrix t() {
+    Matrix m = matZeros(cols, rows);
+    int i = 0;
+    while (i < rows) {
+      int j = 0;
+      while (j < cols) { m.put(j, i, get(i, j)); j = j + 1; }
+      i = i + 1;
+    }
+    return m;
+  }
+
+  // 矩阵乘。三重循环，i-k-j 次序（内层顺着走 `b` 的一行，对缓存友好一点）。
+  Matrix mul(Matrix b) {
+    if (cols != b.rows) { fail("matrix: 乘法形状对不上 " + dim() + " 与 " + b.dim()); }
+    Matrix m = matZeros(rows, b.cols);
+    int i = 0;
+    while (i < rows) {
+      int k = 0;
+      while (k < cols) {
+        real v = get(i, k);
+        if (v != 0.0) {
+          int j = 0;
+          while (j < b.cols) {
+            m.a[i * b.cols + j] = m.a[i * b.cols + j] + v * b.a[k * b.cols + j];
+            j = j + 1;
+          }
+        }
+        k = k + 1;
+      }
+      i = i + 1;
+    }
+    return m;
+  }
+
+  // ── 印出来 ────────────────────────────────────────────────────────────────
+  //
+  // 照 `matrix_display_gen`（`matrix.lua:264-297`）那四步：
+  //   1. 扫全矩阵求平均量级，`eps = 平均 * 1e-9`（全零就取 1）—— **不是固定阈值**；
+  //   2. 比 eps 还小的当 0 印（不然一堆 `1e-17` 糊满屏幕）；
+  //   3. 记最长的那一格；
+  //   4. 每格右对齐补空格，每行包在 `[ ]` 里。
+  string text() {
+    real sum = 0.0;
+    int k = 0;
+    while (k < a.length) { sum = sum + matAbs(a[k]); k = k + 1; }
+    real eps = 1.0;
+    if (a.length > 0 && sum > 0.0) { eps = (sum / real(a.length)) * 0.000000001; }
+    list<string> cell = [];
+    int lmax = 0;
+    k = 0;
+    while (k < a.length) {
+      real v = a[k];
+      if (matAbs(v) < eps) { v = 0.0; }
+      string s = string(v);
+      if (s.length > lmax) { lmax = s.length; }
+      cell.push(s);
+      k = k + 1;
+    }
+    string out = "";
+    int i = 0;
+    while (i < rows) {
+      if (i > 0) { out = out + "\n"; }
+      out = out + "[";
+      int j = 0;
+      while (j < cols) {
+        out = out + " " + matPad(cell[i * cols + j], lmax);
+        j = j + 1;
+      }
+      out = out + " ]";
+      i = i + 1;
+    }
+    return out;
+  }
+
+  void show() {
+    print(text());
+  }
+
+  // ── 解方程：高斯消元 + 部分选主元 ──────────────────────────────────────────
+  //
+  // gsl-shell 那边是 `gsl_linalg_LU_decomp` + `LU_solve`（`matrix.lua:916-947`）；
+  // 我们没有 GSL，就照最标准的那一套自己写。**选主元不是装饰**：不选的话
+  // `[[0 1][1 0]]` 这种一上来就除以 0。
+  Matrix solve(Matrix b) {
+    if (rows != cols) { fail("matrix: solve 要方阵，这是 " + dim()); }
+    if (b.rows != rows) { fail("matrix: solve 右边行数不对 " + b.dim()); }
+    int n = rows;
+    int w = b.cols;
+    // 增广矩阵 [A | b]，就地消元（不动调用方的那两格）
+    Matrix m = matZeros(n, n + w);
+    int i = 0;
+    while (i < n) {
+      int j = 0;
+      while (j < n) { m.put(i, j, get(i, j)); j = j + 1; }
+      j = 0;
+      while (j < w) { m.put(i, n + j, b.get(i, j)); j = j + 1; }
+      i = i + 1;
+    }
+    int c = 0;
+    while (c < n) {
+      // 选这一列里绝对值最大的那一行
+      int piv = c;
+      real best = matAbs(m.get(c, c));
+      int r = c + 1;
+      while (r < n) {
+        real v = matAbs(m.get(r, c));
+        if (v > best) { best = v; piv = r; }
+        r = r + 1;
+      }
+      if (best == 0.0) { fail("matrix: 奇异矩阵，解不出来"); }
+      if (piv != c) { matSwapRows(m, piv, c); }
+      real d = m.get(c, c);
+      int j = c;
+      while (j < n + w) { m.put(c, j, m.get(c, j) / d); j = j + 1; }
+      r = 0;
+      while (r < n) {
+        if (r != c) {
+          real f = m.get(r, c);
+          if (f != 0.0) {
+            j = c;
+            while (j < n + w) { m.put(r, j, m.get(r, j) - f * m.get(c, j)); j = j + 1; }
+          }
+        }
+        r = r + 1;
+      }
+      c = c + 1;
+    }
+    Matrix x = matZeros(n, w);
+    i = 0;
+    while (i < n) {
+      int j = 0;
+      while (j < w) { x.put(i, j, m.get(i, n + j)); j = j + 1; }
+      i = i + 1;
+    }
+    return x;
+  }
+
+  Matrix inv() {
+    if (rows != cols) { fail("matrix: inv 要方阵，这是 " + dim()); }
+    return solve(matEye(rows));
+  }
+
+  // 行列式：同一套消元，把主元乘起来（换一次行变一次号）。
+  real det() {
+    if (rows != cols) { fail("matrix: det 要方阵，这是 " + dim()); }
+    int n = rows;
+    Matrix m = matZeros(n, n);
+    int k = 0;
+    while (k < a.length) { m.a[k] = a[k]; k = k + 1; }
+    real acc = 1.0;
+    int c = 0;
+    while (c < n) {
+      int piv = c;
+      real best = matAbs(m.get(c, c));
+      int r = c + 1;
+      while (r < n) {
+        real v = matAbs(m.get(r, c));
+        if (v > best) { best = v; piv = r; }
+        r = r + 1;
+      }
+      if (best == 0.0) { return 0.0; }
+      if (piv != c) { matSwapRows(m, piv, c); acc = -acc; }
+      real d = m.get(c, c);
+      acc = acc * d;
+      r = c + 1;
+      while (r < n) {
+        real f = m.get(r, c) / d;
+        if (f != 0.0) {
+          int j = c;
+          while (j < n) { m.put(r, j, m.get(r, j) - f * m.get(c, j)); j = j + 1; }
+        }
+        r = r + 1;
+      }
+      c = c + 1;
+    }
+    return acc;
+  }
+}
+
+// ── 造矩阵的四个口子 ────────────────────────────────────────────────────────
+
+/** `n1 x n2` 的零矩阵。 */
+Matrix matZeros(int n1, int n2) {
+  if (n1 <= 0 || n2 <= 0) { fail("matrix: 形状要正数，给的是 " + string(n1) + "x" + string(n2)); }
+  Matrix m = new Matrix();
+  m.rows = n1;
+  m.cols = n2;
+  int k = 0;
+  while (k < n1 * n2) { m.a.push(0.0); k = k + 1; }
+  return m;
+}
+
+/** 按行给出来的矩阵：`matOf([[1.0, 2.0], [3.0, 4.0]])`。 */
+Matrix matOf(list<list<real>> rows) {
+  if (rows.length == 0) { fail("matrix: matOf 要至少一行"); }
+  int n2 = rows[0].length;
+  Matrix m = matZeros(rows.length, n2);
+  int i = 0;
+  for (list<real> row in rows) {
+    if (row.length != n2) { fail("matrix: matOf 各行长度要一样"); }
+    int j = 0;
+    for (real v in row) { m.a[i * n2 + j] = v; j = j + 1; }
+    i = i + 1;
+  }
+  return m;
+}
+
+/** **向量就是 n×1 矩阵**（照 gsl-shell 的 `matrix.vec`）。 */
+Matrix matVec(list<real> xs) {
+  if (xs.length == 0) { fail("matrix: matVec 要至少一格"); }
+  Matrix m = matZeros(xs.length, 1);
+  int i = 0;
+  for (real v in xs) { m.a[i] = v; i = i + 1; }
+  return m;
+}
+
+/** `n` 阶单位矩阵。 */
+Matrix matEye(int n) {
+  Matrix m = matZeros(n, n);
+  int i = 0;
+  while (i < n) { m.put(i, i, 1.0); i = i + 1; }
+  return m;
+}
+
+private real matAbs(real x) {
+  if (x < 0.0) { return -x; }
+  return x;
+}
+
+private void matSwapRows(Matrix m, int r1, int r2) {
+  int j = 0;
+  while (j < m.cols) {
+    real t = m.get(r1, j);
+    m.put(r1, j, m.get(r2, j));
+    m.put(r2, j, t);
+    j = j + 1;
+  }
+}
+
+/** 右对齐补空格（`concat_pad`，`matrix.lua:254-262`）。 */
+private string matPad(string s, int w) {
+  string out = s;
+  int k = s.length;
+  while (k < w) { out = " " + out; k = k + 1; }
+  return out;
+}
