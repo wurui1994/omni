@@ -30,6 +30,8 @@ export const SX_ARITY = {
   call: [1, Infinity], callfn: [1, Infinity], ccall: [1, Infinity],
   /* 语句 */
   set: 2, expr: 1, ret: [0, 1], let: 3, if: [2, 3], while: 2, do: [0, Infinity],
+  /* `(fail 串)` —— **停下来**（断言不成立那一路：方言里没有 assert，按口径拼）。 */
+  fail: 1,
   brk: [0, 1], cont: [0, 1], print: 1, write: 1,
   /* 字符串那一族 */
   tostr: 1, slen: 1, sfind: 2, ssub: 3, srep: 2, supper: 1,

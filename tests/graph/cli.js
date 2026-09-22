@@ -69,8 +69,8 @@ check('nim × js', ['run', 'ext/nim/examples/basics.nim', '--engine', 'graph', '
   { code: 0, out: BASICS });
 /* 这一格从前点的是 chez —— 那门语言 2026-09-22 迁到公共降级器之后在图这一层不存在了
    （ADR-0044），所以换成还在图上的一门。判的东西一个字没变：`sx` 那条腿只序列化。 */
-check('mojo × sx（只序列化，第一行是 (graph）',
-  ['run', 'ext/mojo/examples/basics.mojo', '--engine', 'graph', '--backend', 'sx'],
+check('nim × sx（只序列化，第一行是 (graph）',
+  ['run', 'ext/nim/examples/basics.nim', '--engine', 'graph', '--backend', 'sx'],
   { code: 0, head: '(graph' });
 
 // ---- 2) 语言怎么定：后缀是默认，`--lang` 盖过它
@@ -79,8 +79,8 @@ check('go 按后缀', ['run', 'ext/go/examples/intmath.go', '--engine', 'graph']
 /* `--lang` 盖过后缀这条规矩不变，只是找一对**都还在图上**的语言来押它：
    `.mojo` 的文件按 `--lang nim` 读 —— 那份语法读不下去，报的是"语法说不通"。
    （从前这一格是 `.lisp` 当 chez 读，两门都迁走了。） */
-check('--lang 盖过后缀（.mojo 当 nim 读 -> nim 的语法不认它）',
-  ['run', 'ext/mojo/examples/basics.mojo', '--engine', 'graph', '--lang', 'nim'],
+check('--lang 盖过后缀（.cpp 当 nim 读 -> nim 的语法不认它）',
+  ['run', 'ext/cpp/examples/basics.cpp', '--engine', 'graph', '--lang', 'nim'],
   { code: 1 });
 check('后缀不认得就报清单', ['run', 'README.md', '--engine', 'graph'],
   { code: 1, says: '这个后缀不认得' });

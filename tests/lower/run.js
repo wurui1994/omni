@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { LANGS } from '../../src/core/graph/langs.js';
 import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
-  DEFER, BLOCKRET,
+  DEFER, BLOCKRET, METHOD, ASSERTOK,
 } from '../graph/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -43,7 +43,7 @@ const no = (s, why) => { fail++; process.stdout.write(`  FAIL ${s}\n       ${why
 const FAMILIES = {
   basics: BASICS, intmath: INTMATH, loopexit: LOOPEXIT, dict: DICT, unary: UNARY,
   record: RECORD, index: INDEX, slice: SLICE, conv: CONV, values: VALUES, mut: MUT,
-  defer: DEFER, blockret: BLOCKRET,
+  defer: DEFER, blockret: BLOCKRET, method: METHOD, assertok: ASSERTOK,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -56,6 +56,11 @@ const MIGRATED = {
   /* freebasic：七个家族。`defer` 那一族在这门语言里是**析构**（`Declare Destructor`）——
      adapter 在每个出口按逆序补一遍调用（FB 的 RAII），公共层一格新东西都没加。 */
   freebasic: ['basics', 'conv', 'defer', 'index', 'intmath', 'loopexit', 'record'],
+  /* mojo：十二个家族。`method`（struct 的方法 → `<类型>_<方法>` + 接收者当第一格实参）、
+     `with`（`__enter__`/`__exit__` 那一族 = defer）、`assertok`（方言里没有 assert，
+     按口径拼成 `if !cond then print + fail`）三样是这门语言带进来的。 */
+  mojo: ['assertok', 'basics', 'conv', 'defer', 'dict', 'index', 'intmath', 'loopexit',
+    'method', 'record', 'slice', 'values'],
 };
 
 /** 敲一条命令，回 `{ code, out, err }`（out 按行切好，末尾空行去掉）。 */

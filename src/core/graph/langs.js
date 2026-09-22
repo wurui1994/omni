@@ -29,7 +29,6 @@ import { gslShellToGraph } from '../../../ext/gsl-shell/tograph.js';
 import { goToGraph, goImports } from '../../../ext/go/tograph.js';
 import { GO_RT } from '../../../ext/go/go-rt.js';
 import { vlangToGraph, vlangImports } from '../../../ext/vlang/tograph.js';
-import { mojoToGraph } from '../../../ext/mojo/tograph.js';
 import { nimToGraph, nimImports } from '../../../ext/nim/tograph.js';
 import { cppToGraph } from '../../../ext/cpp/tograph.js';
 /* **迁过来的那几门**（ADR-0044）：`toIR` 是 adapter（CST → 标准 IR），语义降级走
@@ -38,6 +37,7 @@ import { awkToIR, AWK_HOOKS } from '../../../ext/awk/adapter.js';
 import { chezToIR } from '../../../ext/chez/adapter/index.js';
 import { sbclToIR } from '../../../ext/sbcl/adapter/index.js';
 import { fbToIR } from '../../../ext/freebasic/adapter/index.js';
+import { mojoToIR } from '../../../ext/mojo/adapter/index.js';
 
 /**
  * 这棵树的根。**从宿主那格 `installDir()` 走上去**（`src/core/host` 往上三层）——
@@ -120,7 +120,7 @@ export const LANGS = new Map([
     grammar: 'ext/awk/awk.grammar', toIR: awkToIR, hooks: AWK_HOOKS, exts: ['awk'],
   }],
   ['freebasic', { grammar: 'ext/freebasic/freebasic.grammar', toIR: fbToIR, exts: ['bas', 'bi'] }],
-  ['mojo', { grammar: 'ext/mojo/mojo.grammar', toGraph: mojoToGraph, exts: ['mojo'] }],
+  ['mojo', { grammar: 'ext/mojo/mojo.grammar', toIR: mojoToIR, exts: ['mojo'] }],
   ['nim', {
     grammar: 'ext/nim/nim.grammar', toGraph: nimToGraph, imports: nimImports, exts: ['nim'],
   }],
