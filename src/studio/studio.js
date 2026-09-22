@@ -9,7 +9,7 @@
 
 /* 纯函数那一半（高亮 / markdown / EPS -> SVG）住在 `render.js` —— 那一份一个 DOM 都不碰，
  * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
-import { highlight, mdToHtml, epsToSvg } from './render.js';
+import { highlight, mdToHtml, epsToSvg, glslSource } from './render.js';
 
 const $ = (s) => document.querySelector(s);
 const el = (t, cls, txt) => {
@@ -60,17 +60,33 @@ function initTheme() {
  * 片元着色器直接在页面上跑（WebGL2，一个全屏三角）。**同一格 canvas 反复用** ——
  * 浏览器对 WebGL 上下文的个数有上限（十来个），每换一份文件新建一格很快就黑屏。
  *
- * 认三套常见的 uniform 名（有就喂）：`u_resolution`/`iResolution`、`u_time`/`iTime`。
- * `#version 330 core` 的那几份自动换成 `300 es` + 一句精度 —— 判据里那 15 份都是桌面 GL 的写法。
+ * 喂的 uniform（有就喂）：`u_resolution`/`iResolution`/`u_res`、`u_time`/`iTime`、
+ * 以及**任何 `sampler2D`** —— 绑一张现造的棋盘格，不然采样的那几份一片黑。
+ * `#version 330 core` 那几份自动换成 `300 es` + 一句精度（判据里那 12 份都是桌面 GL 的写法）。
  */
-const GL = { canvas: null, gl: null, prog: null, raf: 0, t0: 0 };
+const GL = { canvas: null, gl: null, prog: null, raf: 0, t0: 0, tex: null };
 
-function glslSource(src) {
-  let s = src.replace(/^\s*#version[^\n]*\n/, '');
-  const pre = '#version 300 es\nprecision highp float;\n';
-  /* 桌面写法里 `out vec4 名字;` 照收；没有 out 声明的（老 `gl_FragColor` 写法）补一格。 */
-  if (!/\bout\s+vec4\s+\w+\s*;/.test(s)) s = `out vec4 fragColor;\n${s.replace(/\bgl_FragColor\b/g, 'fragColor')}`;
-  return pre + s;
+/** 一张 8×8 的棋盘格（给 `sampler2D` 那几份垫底）。只造一次。 */
+function glslCheckerTex(gl) {
+  if (GL.tex !== null) return GL.tex;
+  const n = 8;
+  const px = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const v = ((x + y) % 2 === 0) ? 230 : 40;
+      const i = (y * n + x) * 4;
+      px[i] = v; px[i + 1] = v; px[i + 2] = v; px[i + 3] = 255;
+    }
+  }
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  GL.tex = t;
+  return t;
 }
 
 function glslRun(src, host) {
@@ -113,8 +129,20 @@ function glslRun(src, host) {
   if (GL.prog !== null) gl.deleteProgram(GL.prog);
   GL.prog = prog;
   gl.useProgram(prog);
-  const uRes = gl.getUniformLocation(prog, 'u_resolution') ?? gl.getUniformLocation(prog, 'iResolution');
-  const uTime = gl.getUniformLocation(prog, 'u_time') ?? gl.getUniformLocation(prog, 'iTime');
+  const uni = (...names) => {
+    for (const n of names) { const l = gl.getUniformLocation(prog, n); if (l !== null) return l; }
+    return null;
+  };
+  const uRes = uni('u_resolution', 'iResolution', 'u_res', 'resolution');
+  const uTime = uni('u_time', 'iTime', 'time');
+  /* `sampler2D` 那几份：绑一张棋盘格。不绑的话默认采样器指着 0 号纹理单元上那张
+     "什么都没有"，整块画成黑的 —— 看着像编译失败，其实只是没喂数据。 */
+  const uTex = uni('u_tex', 'iChannel0', 'tex', 'texture0');
+  if (uTex !== null) {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, glslCheckerTex(gl));
+    gl.uniform1i(uTex, 0);
+  }
   GL.t0 = performance.now();
   const draw = () => {
     const r = host.getBoundingClientRect();
@@ -133,7 +161,8 @@ function glslRun(src, host) {
 
 /* ---------------------------------------------------------------- 预览：派发
  *
- * 三种：markdown 排版、asy 的图（EPS -> SVG）、glsl 的着色器（WebGL）。
+ * 四种：markdown 排版、asy 的图（EPS -> SVG）、glsl 的着色器（WebGL2）、html 的页面
+ * （`<iframe>` —— 那本来就是浏览器自己的活，我们一个字都不用译）。
  * 都没有的时候这一栏空着 —— 但**栏本身不拆**（拆了会让右边整块跳一下，见 `openFile`）。
  */
 function renderPreview(kind, payload) {
@@ -153,14 +182,32 @@ function renderPreview(kind, payload) {
     host.innerHTML = `<div class="svg-wrap">${svg}</div>`;
     return;
   }
+  if (kind === 'html') {
+    /* `srcdoc` + `sandbox="allow-scripts"`：脚本照跑（例子里有 canvas 动画），
+     * 可它**没有同源身份** —— 碰不到这一页的 DOM、cookie、也不能往上跳转。
+     * 这一栏本来就是"给一段 html 一个浏览器"，多一层沙箱是白送的。 */
+    const f = el('iframe', 'html-frame');
+    f.setAttribute('sandbox', 'allow-scripts allow-modals');
+    f.srcdoc = payload;
+    host.textContent = '';
+    host.append(f);
+    return;
+  }
   if (kind === 'glsl') glslRun(payload, host);
 }
 
-/** 这一份文件的预览是哪一种（没有回 null）。 */
+/**
+ * 这一份文件的预览是哪一种（没有回 null）。
+ *
+ * ⚠️ **asy 不在这儿说话**：它到底有没有图要等跑完看 stdout 是不是 EPS ——
+ * `tests/asy/cases` 底下一百多份是**算术例子**，一张图都不出。从前这儿一律回 `eps`，
+ * 于是打开任何 `.asy` 都往"预览"栏切一下、而那栏是空的。现在由 `run()` 收到
+ * `%!PS` 才点亮那一栏（见 `run` 里那一句）。
+ */
 function previewKind(lang) {
   if (lang === 'markdown') return 'md';
   if (lang === 'glsl') return 'glsl';
-  if (lang === 'asy') return 'eps';
+  if (lang === 'html') return 'html';
   return null;
 }
 
@@ -321,9 +368,9 @@ async function openFile(path, row) {
   closeDrawer();
   setStatus(f.dirty === true ? '改过' : '', '');
   const kind = previewKind(f.lang);
-  /* md / glsl 的预览**不用跑**：源码就是全部输入。asy 要等 EPS，所以先留着旧图。 */
-  if (kind === 'md' || kind === 'glsl') renderPreview(kind, f.text);
-  else if (kind === null) renderPreview(null);
+  /* md / glsl / html 的预览**不用跑**：源码就是全部输入，立刻画。
+     asy 不在这儿点亮那一栏 —— 它出不出图要等 stdout（见 `previewKind` 的头注）。 */
+  renderPreview(kind, f.text);
   showPreviewTab(kind !== null);
   if (runnable) {
     markStale(true);
@@ -441,8 +488,13 @@ async function run() {
     $('#stderr').textContent = r.stderr ?? '';
     renderStages(r.stages, r.stderr ?? '', ms);
     markStale(false);
-    /* asy：stdout 就是 EPS 正文，翻成 SVG 画出来（见 `epsToSvg`）。 */
-    if (S.lang === 'asy' && (r.stdout ?? '').includes('%!PS')) renderPreview('eps', r.stdout);
+    /* asy：stdout 是 EPS 正文的那几份才有图（`draw/` 底下那些）；`cases/` 底下一百多份
+       是算术例子，一张图都不出 —— 那时候**不点亮"预览"栏、也不切过去**。 */
+    if (S.lang === 'asy') {
+      const isEps = (r.stdout ?? '').startsWith('%!PS');
+      renderPreview(isEps ? 'eps' : null, r.stdout);
+      showPreviewTab(isEps);
+    }
     const via = r.via === 'warm' ? '' : ' · 冷';
     const how = direct ? ' · node' : '';
     setStatus(`${r.code === 0 ? 'ok' : `exit ${r.code}`} · ${ms}ms${via}${how}`, r.code === 0 ? 'ok' : 'bad');
@@ -583,13 +635,13 @@ function initEditor() {
   ta.addEventListener('input', () => {
     /* **画的是 `ta.value`，不是 `S.text`** —— 见 `paint` 的头注。 */
     paint(ta.value);
-    /* md / glsl 的预览就是源码本身 —— 不必等一趟往返，边敲边跟着变。
-       glsl 那一格自带防抖：编不过的中间状态每敲一下报一次错太吵。 */
+    /* md / glsl / html 的预览就是源码本身 —— 不必等一趟往返，边敲边跟着变。
+       glsl 与 html 自带防抖：编不过 / 半截标签的中间状态每敲一下重画太吵。 */
     const kind = previewKind(S.lang);
     if (kind === 'md') renderPreview('md', ta.value);
-    else if (kind === 'glsl') {
+    else if (kind === 'glsl' || kind === 'html') {
       clearTimeout(glTimer);
-      glTimer = setTimeout(() => renderPreview('glsl', ta.value), 300);
+      glTimer = setTimeout(() => renderPreview(kind, ta.value), 300);
     }
     if (!$('#live').checked || composing) return;
     /* 防抖 250ms（设计文档 §4.4）。热工人那侧一趟 8~19ms，所以这 250ms 现在是**真的**

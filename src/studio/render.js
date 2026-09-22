@@ -34,16 +34,24 @@ export const KW = {
   wat: 'module func param result local global memory data export import i32 i64 f32 f64 call br_if loop block',
   jancy: 'class property construct destruct int char void bool string alias enum',
   glsl: 'void float vec2 vec3 vec4 mat4 uniform varying attribute in out precision',
+  /* html / css 在这一层只要"标签与注释分得清"——关键字表给的是常见标签名与属性名。 */
+  html: 'html head body meta title link script style div span p a img ul ol li table tr td th'
+    + ' form input button select option label canvas svg path circle rect text defs DOCTYPE',
+  css: 'color background margin padding border font display flex grid position width height',
 };
 
 const LINE_COM = {
   go: '//', c: '//', cpp: '//', js: '//', v: '//', jancy: '//', glsl: '//', asy: '//',
   omni: '//', sx: ';', nim: '#', mojo: '#', lua: '--', awk: '#', basic: "'",
   scheme: ';', lisp: ';', wat: ';;',
+  /* html / css / json 没有行注释。**得给一个不可能出现的串** —— 缺省那个 `'//'`
+     会把 `https://…` 后面整行吞成注释，而留空串更糟（`startsWith('')` 恒真，全文变注释）。 */
+  html: '\u0000', css: '\u0000', json: '\u0000', markdown: '\u0000',
 };
 const BLOCK_COM = { go: ['/*', '*/'], c: ['/*', '*/'], cpp: ['/*', '*/'], js: ['/*', '*/'],
   v: ['/*', '*/'], jancy: ['/*', '*/'], glsl: ['/*', '*/'], asy: ['/*', '*/'],
-  omni: ['/*', '*/'], lua: ['--[[', ']]'], sx: null };
+  omni: ['/*', '*/'], lua: ['--[[', ']]'], sx: null,
+  html: ['<!--', '-->'], css: ['/*', '*/'] };
 
 export const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
@@ -308,4 +316,25 @@ export function epsToSvg(eps) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x0} ${y0} ${w} ${h}"`
     + ` width="100%" style="max-height:100%">`
     + `<g transform="translate(0 ${y0 + y1}) scale(1 -1)">${parts.join('')}</g></svg>`;
+}
+
+/* ---------------------------------------------------------------- GLSL 的源码修修
+ *
+ * 桌面 GL 的片元着色器 -> WebGL2（GLSL ES 3.00）。纯字符串活儿，所以住在这一份里（能判）。
+ */
+/**
+ * 桌面 GL 的片元着色器 -> WebGL2（GLSL ES 3.00）。
+ *
+ * ⚠️ **`#version` 那一行可能不在第一行**：判据里 vispy 那几份前头有十来行注释
+ * （桌面编译器容得下"注释在 #version 之前"）。所以这儿**不许只认行首那一处** ——
+ * 从前写的是 `/^\s*#version[^\n]*\n/`，于是原来那句留在正文里，我们又在最前面加了一句，
+ * 浏览器报 `'version' : #version directive must occur before anything else`
+ * （量到的就是 `vispy-disc.frag`）。整份里把它抹掉，再把我们那句放到**第一个字节**。
+ */
+export function glslSource(src) {
+  let s = src.replace(/^[ \t]*#version[^\n]*\r?\n?/gm, '');
+  const pre = '#version 300 es\nprecision highp float;\n';
+  /* 桌面写法里 `out vec4 名字;` 照收；没有 out 声明的（老 `gl_FragColor` 写法）补一格。 */
+  if (!/\bout\s+vec4\s+\w+\s*;/.test(s)) s = `out vec4 fragColor;\n${s.replace(/\bgl_FragColor\b/g, 'fragColor')}`;
+  return pre + s;
 }

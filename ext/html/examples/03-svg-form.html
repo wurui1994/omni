@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<!-- 内联 SVG + 一格表单：**这一份里没有脚本**，纯声明式。
+     放它是为了说清预览那一栏的边界：给 html 的就是一个浏览器，
+     SVG / 表单 / CSS 变量这些"浏览器本来就会"的东西一律照常。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>SVG 与表单</title>
+<style>
+  :root { --ink: #1c1c1e; --line: #d1d1d6; --accent: #0a84ff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #f5f5f7; --line: #3a3a3c; }
+    body { background: #000; }
+  }
+  body { margin: 0; padding: 28px; color: var(--ink);
+         font: 15px/1.6 -apple-system, "SF Pro Text", system-ui, sans-serif; }
+  h1 { font-size: 19px; margin: 0 0 14px; }
+  fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; max-width: 420px; }
+  legend { padding: 0 6px; color: var(--accent); font-size: 13px; }
+  label { display: block; margin: 8px 0 2px; font-size: 13px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  svg { display: block; margin: 18px 0; }
+</style>
+</head>
+<body>
+  <h1>SVG 与表单</h1>
+
+  <svg width="260" height="120" viewBox="0 0 260 120">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#0a84ff"/>
+        <stop offset="1" stop-color="#bf5af2"/>
+      </linearGradient>
+    </defs>
+    <path d="M10 100 C 60 10, 110 110, 160 40 S 230 10, 250 60"
+          fill="none" stroke="url(#g)" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="160" cy="40" r="6" fill="#ff375f"/>
+    <text x="10" y="20" font-size="12" fill="currentColor">一条三次贝塞尔</text>
+  </svg>
+
+  <fieldset>
+    <legend>控件</legend>
+    <label for="a">滑块</label>
+    <input id="a" type="range" min="0" max="100" value="62">
+    <label for="b">下拉</label>
+    <select id="b"><option>一</option><option selected>二</option><option>三</option></select>
+    <label><input type="checkbox" checked> 勾选框</label>
+  </fieldset>
+</body>
+</html>

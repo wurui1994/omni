@@ -21,7 +21,7 @@ import { readText, exists, isDir, stderr } from './host/native.js';
 import { join, dirname } from './host/path.js';
 /* 白名单、后缀表、路径闸、目录树、等效命令 —— 那五样**与单体 HTML 共用**
    （`src/studio/browser-main.js` 从同一份拿），所以住在 `studio/shared.js`。 */
-import { extOf, langOf, safePath, buildTree, shellToArgv, EQUIV } from './studio/shared.js';
+import { extOf, langOf, safePath, buildTree, shellToArgv, EQUIV, byIdeOrder } from './studio/shared.js';
 import { Pool, warmable } from './studio/pool.js';
 
 /* 老调用方（`tests/serve/run.js`）照旧从这儿拿这三格：服务是它们的一个入口。 */
@@ -199,6 +199,14 @@ function mergeEdits(tree) {
     node.children = [...(node.children ?? []),
       { name: segs[segs.length - 1], path: rel, kind: 'file', lang: langOf(rel), dirty: true }];
   }
+  /* 并进来的新建文件也要按 IDE 的次序落位（目录在前、数字按数值）——
+     不排的话它们一律吊在各自那层的末尾。 */
+  const resort = (n) => {
+    if (n.children === undefined || n.children === null) return;
+    n.children.sort(byIdeOrder);
+    for (const k of n.children) resort(k);
+  };
+  out.roots.forEach(resort);
   return out;
 }
 
@@ -370,15 +378,28 @@ export async function cmdServe(rest) {
   const pi = rest.indexOf('--port');
   const hi = rest.indexOf('--host');
   const port = pi >= 0 ? Number(rest[pi + 1]) : 7111;
-  const host = hi >= 0 ? rest[hi + 1] : '127.0.0.1';
+  /* **默认 0.0.0.0**：这是给人展示的工具，得在同一个局域网的手机/平板上也能打开。
+     `--host 127.0.0.1` 回 localhost-only。警告那一段照旧在。 */
+  const host = hi >= 0 ? rest[hi + 1] : '0.0.0.0';
   if (host !== '127.0.0.1' && host !== 'localhost') {
     stderr(`omni serve: ⚠ 正在监听 ${host} —— 这个服务**没有鉴权**，`
       + '连得上就能编译并运行代码。确认这是你想要的。\n');
   }
   const s = await startServer({ port, host });
-  stderr(`omni serve: ${s.url}\n`);
+  /* 印出**真正能用的地址**——`0.0.0.0` 在浏览器里是打不开的。
+     取第一个非回环的 IPv4 地址；取不到就回 `localhost`。 */
+  const os = nodeMod('node:os');
+  let lanIp = 'localhost';
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const i of ifaces) {
+      if (i.family === 'IPv4' && !i.internal) { lanIp = i.address; break; }
+    }
+    if (lanIp !== 'localhost') break;
+  }
+  const showHost = (host === '0.0.0.0' || host === '::') ? lanIp : host;
+  stderr(`omni serve: http://${showHost}:${s.port}  （本机 http://127.0.0.1:${s.port}）\n`);
   if (rest.includes('--open')) {
-    try { nodeMod('node:child_process').execSync(`open ${s.url}`); } catch { /* */ }
+    try { nodeMod('node:child_process').execSync(`open http://127.0.0.1:${s.port}`); } catch { /* */ }
   }
   /* **预热**：现在就起一格工人（装编译器那 110ms 现在付，别让第一格请求付）。
      不 await —— 服务这就该能收请求了，热不热是它自己的事。 */

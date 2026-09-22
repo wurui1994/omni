@@ -24,7 +24,7 @@ import { join } from '../host/path.js';
 export const TREE_ROOTS = [
   { name: '文档', path: 'docs', exts: ['.md'] },
   { name: '例子', path: 'ext', exts: ['.go', '.nim', '.v', '.lua', '.mojo', '.cpp', '.bas',
-    '.awk', '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx'], only: 'examples' },
+    '.awk', '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html'], only: 'examples' },
   { name: '判据', path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag'],
     /* `only` 收一串：`cases` 是各腿的判据例子，**`draw` 是 asy 真出图的那些** ——
        少了它，树上一份能出图的 `.asy` 都没有（`cases` 底下的 asy 全是算术），
@@ -83,7 +83,7 @@ function walk(root, rel, spec, depth) {
     return { name: rel.slice(rel.lastIndexOf('/') + 1), path: rel, kind: 'file', lang: langOf(rel) };
   }
   const kids = [];
-  for (const nm of readDir(abs).sort()) {
+  for (const nm of readDir(abs)) {
     if (nm.startsWith('.')) continue;
     const sub = `${rel}/${nm}`;
     /* `only`：在第二层上只放行那几个名字的目录（`ext/go/examples`、`tests/asy/draw`）。 */
@@ -95,7 +95,44 @@ function walk(root, rel, spec, depth) {
     if (k !== null) kids.push(k);
   }
   if (kids.length === 0) return null;
+  kids.sort(byIdeOrder);
   return { name: rel.slice(rel.lastIndexOf('/') + 1), path: rel, kind: 'dir', children: kids };
+}
+
+/**
+ * **按 IDE 的次序排，不按 `ls` 的次序排**：目录在前、文件在后；名字里的数字**按数值**比。
+ *
+ * `ls` 是逐字节比的字典序，于是 `10-pairs` 排在 `01..09` 后面看着还行，可 `100-local-fn`
+ * 会插到 `10-pairs` 与 `11-…` 之间 —— 判据目录里一百多份编号文件，人眼在那儿永远找不到
+ * 下一个。每个编辑器的文件树都是"自然序"，这一格照它来。
+ *
+ * 实现：把名字切成"数字段 / 非数字段"交替的串，数字段按数值比、别的按小写字典序比
+ * （大小写不敏感是编辑器的另一条习惯：`README` 不该被踢到所有小写名字前头）。
+ */
+export function byIdeOrder(a, b) {
+  if ((a.kind === 'dir') !== (b.kind === 'dir')) return a.kind === 'dir' ? -1 : 1;
+  return natCompare(a.name, b.name);
+}
+
+export function natCompare(x, y) {
+  const ax = String(x).match(/\d+|\D+/g) ?? [];
+  const ay = String(y).match(/\d+|\D+/g) ?? [];
+  for (let i = 0; i < Math.min(ax.length, ay.length); i++) {
+    const p = ax[i];
+    const q = ay[i];
+    const pn = /^\d/.test(p);
+    const qn = /^\d/.test(q);
+    if (pn && qn) {
+      const d = Number(p) - Number(q);
+      if (d !== 0) return d;
+      continue;
+    }
+    const pl = p.toLowerCase();
+    const ql = q.toLowerCase();
+    if (pl !== ql) return pl < ql ? -1 : 1;
+    if (p !== q) return p < q ? -1 : 1;     // 只差大小写：给一个稳定的次序
+  }
+  return ax.length - ay.length;
 }
 
 /** 整棵虚拟文件树（`/api/tree`）。一次给全 —— 一千多格 JSON 也就几百 KB。 */

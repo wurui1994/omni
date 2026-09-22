@@ -16,9 +16,11 @@ import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCb);
 import { startServer, shellToArgv, safePath, buildTree } from '../../src/core/serve.js';
-/* 网页那一侧的**纯函数那一半**（`src/studio/render.js`：高亮 / markdown / EPS -> SVG）。
-   它一个 DOM 都不碰，所以在这儿直接 import 就能判 —— 不必拉一套无头浏览器进来。 */
-import { highlight, mdToHtml, epsToSvg } from '../../src/studio/render.js';
+import { natCompare, byIdeOrder } from '../../src/core/studio/shared.js';
+/* 网页那一侧的**纯函数那一半**（`src/studio/render.js`：高亮 / markdown / EPS -> SVG /
+   GLSL 的源码修修）。它一个 DOM 都不碰，所以在这儿直接 import 就能判 ——
+   不必拉一套无头浏览器进来。 */
+import { highlight, mdToHtml, epsToSvg, glslSource } from '../../src/studio/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -54,6 +56,26 @@ ok('mdToHtml 粗体', h.includes('<b>'));
 ok('mdToHtml 列表', h.includes('<li>'));
 ok('mdToHtml 围栏代码', h.includes('md-code'));
 ok('mdToHtml 代码块里高亮', h.includes('class="kw"'));
+
+/* **GLSL 的 `#version` 可能不在第一行**（vispy 那几份前头有十来行注释）——
+   只认行首那一处的话原来那句会留在正文里，浏览器报
+   `'version' : #version directive must occur before anything else`。 */
+const frag = '// 注释一\n// 注释二\n\n#version 330 core\nout vec4 c;\nvoid main(){ c = vec4(1); }\n';
+const es = glslSource(frag);
+ok('glslSource 抹掉原来那句 #version', !/#version 330/.test(es));
+ok('glslSource 把 300 es 放在第一个字节', es.startsWith('#version 300 es\n'));
+ok('glslSource 只留一句 #version', (es.match(/#version/g) ?? []).length === 1);
+ok('glslSource 没有 out 时补一格',
+  glslSource('#version 120\nvoid main(){ gl_FragColor = vec4(1); }').includes('out vec4 fragColor;'));
+
+/* **目录树按 IDE 的次序**：目录在前、文件在后；名字里的数字按数值比
+   （`ls` 的字典序会把 `100-…` 插到 `10-…` 与 `11-…` 之间）。 */
+ok('natCompare 数字按数值', natCompare('10-pairs.asy', '100-local.asy') < 0);
+ok('natCompare 09 在 10 前', natCompare('09-arrays.asy', '10-pairs.asy') < 0);
+/* 大小写不敏感：`ls` 按字节比会把所有大写名字甩到小写前头（`B`=66 < `a`=97）。 */
+ok('natCompare 大小写不敏感', natCompare('Beta.md', 'alpha.md') > 0);
+ok('byIdeOrder 目录在文件前',
+  byIdeOrder({ kind: 'dir', name: 'zzz' }, { kind: 'file', name: 'aaa' }) < 0);
 eq('omni run a.go', ['run', 'a.go']);
 eq('go run a.go', ['run', 'a.go']);
 eq('go build a.go -o a', ['build', 'a.go', '-o', 'a']);
@@ -74,6 +96,26 @@ ok('buildTree 收到文件', paths.length > 300, `${paths.length} 份`);
 ok('buildTree 不收判据的跑手', !paths.includes('tests/all.js'));
 ok('buildTree 只收 examples/cases', paths.filter((p) => p.startsWith('ext/'))
   .every((p) => p.includes('/examples/')));
+ok('buildTree 收 html 例子', paths.some((p) => p.startsWith('ext/html/examples/') && p.endsWith('.html')));
+ok('buildTree 收 asy 的 draw', paths.some((p) => p.startsWith('tests/asy/draw/')));
+/* 排序那一条的真判据：同一层里 `09` < `10` < `100`，而 `ls` 会把 `100` 排在 `10` 前头。 */
+{
+  const findDir = (n, want) => {
+    if (n.path === want) return n;
+    for (const k of n.children ?? []) { const r = findDir(k, want); if (r !== null) return r; }
+    return null;
+  };
+  let cases = null;
+  for (const r of tree.roots) { cases = cases ?? findDir(r, 'tests/asy/cases'); }
+  const names = (cases?.children ?? []).map((c) => c.name).filter((x) => x.endsWith('.asy'));
+  /* 只看以数字开头的那一族：不带号的名字（`mod_au.asy`）本来就排在带号的后头，
+     把它们也塞进来会拿 0 去比，判据自己就错了。 */
+  const nums = names.filter((x) => /^\d/.test(x));
+  const num = (x) => Number(x.match(/^\d+/)[0]);
+  ok('目录树按自然序（09 < 10 < 100）',
+    nums.length > 20 && nums.every((x, i) => i === 0 || num(nums[i - 1]) <= num(x)),
+    nums.slice(8, 14).join(' '));
+}
 
 /* ---------------------------------------------------------------- 端点 */
 

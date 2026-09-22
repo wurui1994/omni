@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<!-- canvas + requestAnimationFrame：**脚本在沙箱里照跑**（预览那一栏给 iframe 开的是
+     `sandbox="allow-scripts"`：能跑脚本，可它没有同源身份 —— 碰不到 Studio 这一页）。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>canvas 上的李萨如曲线</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #08080c; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const c = document.getElementById('c');
+const g = c.getContext('2d');
+let t = 0;
+
+function resize() {
+  const d = Math.min(2, window.devicePixelRatio || 1);
+  c.width = Math.max(1, Math.round(c.clientWidth * d));
+  c.height = Math.max(1, Math.round(c.clientHeight * d));
+}
+window.addEventListener('resize', resize);
+resize();
+
+function frame() {
+  const w = c.width, h = c.height;
+  g.fillStyle = 'rgba(8,8,12,0.14)';          // 拖影：每帧盖一层半透明
+  g.fillRect(0, 0, w, h);
+  const r = Math.min(w, h) * 0.38;
+  g.lineWidth = Math.max(1, Math.min(w, h) / 400);
+  g.strokeStyle = `hsl(${(t * 40) % 360} 90% 62%)`;
+  g.beginPath();
+  for (let i = 0; i <= 720; i++) {
+    const a = (i / 720) * Math.PI * 2;
+    // 李萨如：两个方向不同频率的正弦，相位随时间转
+    const x = w / 2 + r * Math.sin(3 * a + t);
+    const y = h / 2 + r * Math.sin(4 * a);
+    if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  }
+  g.stroke();
+  t += 0.01;
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>
