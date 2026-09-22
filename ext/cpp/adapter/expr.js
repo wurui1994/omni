@@ -266,6 +266,23 @@ function callOf(x, C) {
     }
     throw new Error(`cpp->IR: \`std::${nm}()\` 还没接`);
   }
+  /**
+   * **显式写出模板实参**：`maxOf<double>(4.0, 2.5)` → `(tid (n maxOf) (targs (type …)))`。
+   * 这一格不看实参的类型，看写着的那个（`4.0` 是 int 字面量时也照 double 走）。
+   */
+  if (tag(fn) === 'tid') {
+    const nm = nameOf(kids(fn)[0]);
+    if (!C.templates.has(nm)) throw new Error(`cpp->IR: \`${nm}<…>\` 不是登记过的模板`);
+    const targs = part(fn, 'targs');
+    const types = (targs === undefined ? [] : kids(targs))
+      .map((a) => typeOfSpecs(part(a, 'specs') ?? kids(a)[0], C) ?? INT);
+    const inst = C.instantiate(nm, types);
+    return {
+      kind: 'call',
+      fn: { kind: 'name', name: inst },
+      args: rawArgs.map((a) => exprOf(a, C)),
+    };
+  }
   const name = nameOf(fn);
   const args = rawArgs.map((a) => exprOf(a, C));
   if (name === 'printf' || name === 'puts') {
@@ -282,6 +299,11 @@ function callOf(x, C) {
       fn: { kind: 'name', name: `${C.self}_${C.ref(name)}` },
       args: [{ kind: 'name', name: 'this' }, ...args],
     };
+  }
+  /* **模板的调用**（推出类型形参 → 单态化 → 落成一格普通调用）。 */
+  if (C.templates.has(name)) {
+    const inst = C.instantiate(name, C.deduce(name, args.map((a) => typeOf(a, C.tyCtx()))));
+    return { kind: 'call', fn: { kind: 'name', name: inst }, args };
   }
   return { kind: 'call', fn: { kind: 'name', name: C.ref(name) }, args };
 }

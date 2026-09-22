@@ -40,6 +40,14 @@ function opMethodName(tok) {
   return n;
 }
 
+/** 模板实例的名字里那一截（`int` / `real` / `arr_int` / `Point`）。 */
+function tyTag(t) {
+  if (t.kind === 'named') return t.name;
+  if (t.kind === 'arr') return `arr_${tyTag(t.elem)}`;
+  if (t.kind === 'map') return `map_${tyTag(t.value)}`;
+  return t.kind;
+}
+
 /** 一棵 cpp 的树（`(unit …)`）→ 标准 IR 的模块。 */
 export function cppToIR(tree) {
   if (tag(tree) !== 'unit') throw new Error('cpp->IR: 这不是 (unit …)');
@@ -53,9 +61,13 @@ export function cppToIR(tree) {
   const C = {
     /** 记录名 → { name, fields, methods, dtor }。 */
     records: new Map(),
-    /** `typedef int myint;` → 名字 → 类型。 */
+    /** `typedef int myint;` → 名字 → 类型。**模板的类型形参实例化时也临时摆在这儿**。 */
     aliases: new Map(),
     fns: new Map(),
+    /** `template <class T> T f(…)` → 名字 → { tparams, fnTok }（本身**不发代码**）。 */
+    templates: new Map(),
+    /** 已经发过的实例名（`maxOf__int`）—— 同一格只降一遍。 */
+    instDone: new Set(),
     /** 当前函数里那几格带析构的量（出作用域逆序调一遍）。 */
     scoped: [],
     /** 正在降的这格方法的**接收者类型名**（裸写字段名 = `this->` 那一格靠它）。 */
@@ -71,6 +83,15 @@ export function cppToIR(tree) {
     },
     push: () => scopes.push(new Map()),
     pop: () => scopes.pop(),
+    /**
+     * **把作用域栈整个换成空的，跑一段，再换回来**。模板实例化发生在**别人的体中间**
+     * （调用点），要是不换，模板体里的名字会往外看见调用者的局部量 —— 那是
+     * "答案静默地错"那一类（同名的量被借走）。数组的身份要保住，所以用 splice。
+     */
+    isolate: (f) => {
+      const saved = scopes.splice(0, scopes.length, new Map());
+      try { return f(); } finally { scopes.splice(0, scopes.length, ...saved); }
+    },
     bind: (n, t) => scopes[scopes.length - 1].set(n, t),
     tyCtx: () => ({
       env: {
@@ -99,6 +120,21 @@ export function cppToIR(tree) {
       return named(mvs.get(key));
     },
   };
+
+  /* ---- 第零遍：模板登记（本身不发代码，等调用点来要）----------------------- */
+  for (const d of kids(tree)) {
+    if (tag(d) !== 'template') continue;
+    const ps = part(d, 'params');
+    const tparams = (ps === undefined ? [] : kids(ps))
+      .filter((y) => tag(y) === 'tp')
+      .map((y) => nameOf(kids(y).find((z) => tag(z) === 'n')));
+    const inner = kids(d).find((y) => tag(y) === 'func' || tag(y) === 'decl');
+    if (inner === undefined || tag(inner) !== 'func') {
+      throw new Error('cpp->IR: 这一批只接**函数**模板（类模板还没接）');
+    }
+    const f = kids(inner).find((y) => tag(y) === 'fn');
+    C.templates.set(nameOf(kids(f)[0]), { tparams, fnTok: inner });
+  }
 
   /* ---- 第一遍：typedef 与 struct/class ------------------------------------- */
   for (const d of kids(tree)) {
@@ -177,6 +213,49 @@ export function cppToIR(tree) {
     const s = sigOf(f);
     C.fns.set(s.name, { params: s.params, ret: s.ret });
   }
+
+  /**
+   * **一格模板实例**（单态化）。名字按实参类型编（`maxOf__int` / `maxOf__real`），
+   * 第一次要到才把体降一遍 —— 图上一格新节点也没加，落的全是现成的 `fn` + `call`。
+   *
+   * 类型形参**临时摆进 `C.aliases`**（`typeOfSpecs` 认得那张表），完了还回去：
+   * 嵌套实例化（模板里调模板）靠这条就够，因为里层要的是自己那一格绑定。
+   * 作用域栈要 `C.isolate` 换空 —— 调用点在别人的体中间，不换就会看见调用者的局部量。
+   */
+  C.instantiate = (name, types) => {
+    const t = C.templates.get(name);
+    const inst = `${C.ref(name)}__${types.map(tyTag).join('_')}`;
+    if (C.instDone.has(inst)) return inst;
+    C.instDone.add(inst);
+    const saved = t.tparams.map((p) => C.aliases.get(p));
+    t.tparams.forEach((p, i) => C.aliases.set(p, types[i]));
+    try {
+      const s = sigOf(t.fnTok, undefined, inst);
+      C.fns.set(s.name, { params: s.params, ret: s.ret });
+      decls.push(C.isolate(() => fnDecl(s, t.fnTok, C)));
+    } finally {
+      t.tparams.forEach((p, i) => {
+        if (saved[i] === undefined) C.aliases.delete(p); else C.aliases.set(p, saved[i]);
+      });
+    }
+    return inst;
+  };
+  /** 实参类型 → 类型形参的绑定（**只认"形参的类型就是那个形参名"**那一档）。 */
+  C.deduce = (name, argTypes) => {
+    const t = C.templates.get(name);
+    const f = kids(t.fnTok).find((y) => tag(y) === 'fn');
+    const ps = part(f, 'params');
+    const plist = ps === undefined ? [] : kids(ps).filter((y) => tag(y) === 'p');
+    return t.tparams.map((tp) => {
+      for (let i = 0; i < plist.length; i += 1) {
+        const sp = part(plist[i], 'specs');
+        const ns = (sp === undefined ? [] : kids(sp)).filter((y) => tag(y) === 'n').map(nameOf);
+        if (ns.includes(tp) && argTypes[i] !== undefined) return argTypes[i];
+      }
+      throw new Error(`cpp->IR: \`${name}\` 的类型形参 ${tp} 推不出来`
+        + '（这一批只认"某个形参的类型就写着它"那一档 —— 显式写出 `f<T>(…)` 也行）');
+    });
+  };
   for (const [, rec] of C.records) {
     const selfType = named(C.ref(rec.name), true);
     for (const m of rec.methods) {

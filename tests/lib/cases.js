@@ -358,6 +358,13 @@ export const INHERIT = ['7', '7', '12', '2', '30', '1'];
  */
 export const OPOVER = ['11', '22', '9', '18', '1', '0', '1', '2', '7'];
 
+/**
+ * **cpp 的函数模板**（`ext/cpp/examples/tmpl.cpp`）。第一、二行是 int 那份实例、
+ * 第三行是 double 那份、第四五行是"模板里调模板"、最后一行是显式写出的实参。
+ * 期望输出同样是 `c++` 给的。
+ */
+export const TMPL = ['7', '9', '1.5', '5', '3.5', '4'];
+
 const C = (name, grammar, file, expect) => ({ name, grammar, file, expect });
 
 /**
@@ -552,6 +559,10 @@ export const CASES = [
   // （`Vec2_op_add`），改写发生在**调用点**：左边装的是有这一格的类才改写 ——
   // 所以第九行那个 `int + int` 压住"内建不许被抢"。期望输出同样由 `c++` 给。
   ...fam('opover', OPOVER, ['cpp']),
+  // 第五十六个家族：**函数模板**（cpp 独一份）。落法是**单态化** —— 模板本身不发代码，
+  // 调用点按实参的静态类型算出一份实例名（`maxOf__int`），第一次要到才降一遍体。
+  // 图上一格新节点也没加。期望输出同样由 `c++` 给。
+  ...fam('tmpl', TMPL, ['cpp']),
 ];
 
 
