@@ -1,0 +1,45 @@
+// 数值（`std/num.omni`）—— 积分与线性拟合
+//
+// 挑这两格是因为**答案有闭式**：Simpson 对三次以下的多项式是精确的，
+// 而喂给拟合的点来自一条真正的多项式，系数必须原样出来。判据不靠眼睛。
+//
+// `Matrix` 那一行是必要的：**import 不是传递的** —— `num.omni` 自己 import 了矩阵，
+// 可那个名字不会顺着传到这儿来（量出来的：少这一行报 `unknown type 'Matrix'`）。
+import "std/matrix.omni";
+import "std/num.omni";
+
+private real sq(real x) { return x * x; }
+private real cube(real x) { return x * x * x; }
+private real one(real x) { return 1.0; }
+
+// ∫₀¹ x² dx = 1/3
+print(numInteg(sq, 0.0, 1.0, 0.000000001));
+// ∫₀² x³ dx = 4
+print(numInteg(cube, 0.0, 2.0, 0.000000001));
+// ∫₃⁷ 1 dx = 4（常函数，Simpson 一份就准）
+print(numInteg(one, 3.0, 7.0, 0.000000001));
+// 反向区间 = 负号
+print(numInteg(sq, 1.0, 0.0, 0.000000001));
+// 空区间 = 0
+print(numInteg(sq, 2.0, 2.0, 0.000000001));
+
+// 固定份数那一格：Simpson 两份就把 x² 算准
+print(numSimpson(sq, 0.0, 1.0, 2));
+
+// 拟合：y = 1 + 2x（点全在线上，系数要原样出来）
+list<real> xs = [0.0, 1.0, 2.0, 3.0, 4.0];
+list<real> ys = [1.0, 3.0, 5.0, 7.0, 9.0];
+Matrix c = numLinfit(xs, ys, 1);
+print(c.rows);
+print(c.get(0, 0));
+print(c.get(1, 0));
+
+// 二次：y = 2 - x + 0.5x²
+list<real> xs2 = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+list<real> ys2 = [2.0, 1.5, 2.0, 3.5, 6.0, 9.5];
+Matrix c2 = numLinfit(xs2, ys2, 2);
+print(c2.get(0, 0));
+print(c2.get(1, 0));
+print(c2.get(2, 0));
+// 代回去：x = 6 时 2 - 6 + 18 = 14
+print(numPolyAt(c2, 6.0));

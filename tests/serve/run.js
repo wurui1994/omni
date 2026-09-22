@@ -131,6 +131,9 @@ ok('首页清单每一格都在树上',
 ok('首页清单三种腿都有', ['asy', 'glsl', 'html'].every((k) => GALLERY.some((g) => g.kind === k)));
 ok('首页清单不收算术例子（那一族没有图）',
   !GALLERY.some((g) => g.path.startsWith('tests/asy/cases/')));
+/* 主语言那门自己的例子也得在树上 —— 从前这棵树上一行 `.omni` 都没有。 */
+ok('buildTree 收 omni 的例子', paths.some((p) => p.endsWith('.omni')),
+  `${paths.filter((p) => p.endsWith('.omni')).length} 份`);
 /* 排序那一条的真判据：同一层里 `09` < `10` < `100`，而 `ls` 会把 `100` 排在 `10` 前头。 */
 {
   const findDir = (n, want) => {
@@ -205,14 +208,17 @@ try {
     ok('EPS -> SVG 画得出路径', epsToSvg(ra.json.stdout ?? '').includes('<path '));
   }
 
-  /* **首页清单没骗人**：`kind: 'asy'` 那几格真跑一趟，出来的必须是 EPS，
-     而且翻成 SVG 之后真有笔画。清单是人挑的，"它确实出图"是机器判的。 */
-  for (const g of GALLERY.filter((x) => x.kind === 'asy')) {
+  /* **首页清单没骗人**：`kind: 'asy'` 与 `kind: 'svg'` 那几格真跑一趟，
+     出来的必须是图 —— asy 是 EPS（翻成 SVG 后真有笔画），svg 那一族 stdout 本身就是 SVG。
+     清单是人挑的，"它确实出图"是机器判的。 */
+  for (const g of GALLERY.filter((x) => x.kind === 'asy' || x.kind === 'svg')) {
     const rg = await post('/api/run', { path: g.path });
-    const out = rg.json.stdout ?? '';
-    ok(`首页「${g.title}」真出图`,
-      rg.json.code === 0 && out.startsWith('%!PS') && epsToSvg(out).includes('<path '),
-      `code=${rg.json.code} ${JSON.stringify(out.slice(0, 40))}`);
+    const out = (rg.json.stdout ?? '').trim();
+    const good = g.kind === 'svg'
+      ? out.startsWith('<svg') && out.includes('<polyline points=')
+      : out.startsWith('%!PS') && epsToSvg(out).includes('<path ');
+    ok(`首页「${g.title}」真出图`, rg.json.code === 0 && good,
+      `code=${rg.json.code} ${JSON.stringify(out.slice(0, 40))} err=${JSON.stringify((rg.json.stderr ?? '').slice(-300))}`);
   }
 
   /* **不出图的 asy 不许被甩到画布上**：切不切"绘图"那一格的依据就是这一行
@@ -236,6 +242,26 @@ try {
       `direct=${JSON.stringify((a.json.stdout ?? '').slice(0, 60))} ours=${JSON.stringify((b.json.stdout ?? '').slice(0, 60))}`);
     ok('/api/run --direct 说得出自己没过我们这一轮',
       (a.json.stderr ?? '').includes('--direct'));
+  }
+
+  /* **借来语言那条路不许把脏留给下一趟**（2026-09-22 抓到的一个真 bug）。
+   *
+   * `.go` / `.nim` / `.v` 那几门先译成核心方言，那份文本走的是 `cli.js` 的模块级
+   * `SRC_SX`。它从前不清 —— 常驻工人里上一趟 `.go` 留下的 sx 被下一趟 `.omni` 捡走，
+   * 报的是 `scicomp.omni:2:7: error: expected '(', found 'sum'`，而那个 `sum`
+   * **是上一趟那份 go 里的函数**。工人那边"一次只做一件事"防的是并发，防不了这一种。
+   * 闸在 `main()` 入口那一行 `SRC_SX = undefined`。 */
+  {
+    const om = paths.find((p) => p.endsWith('.omni'));
+    if (om !== undefined && cse !== undefined) {
+      const before = await post('/api/run', { path: om });
+      await post('/api/run', { path: cse, lang: 'go' });
+      const after = await post('/api/run', { path: om });
+      ok('跑过 .go 之后再跑 .omni，还是它自己（SRC_SX 不串味）',
+        after.json.code === before.json.code && after.json.stdout === before.json.stdout,
+        `before code=${before.json.code} after code=${after.json.code} `
+        + `${JSON.stringify((after.json.stderr ?? '').slice(0, 160))}`);
+    }
   }
 
   const sh = await post('/api/shell', { line: 'omni --help' });

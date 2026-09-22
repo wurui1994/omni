@@ -240,9 +240,14 @@ function glslThumb(src, px) {
 async function galleryThumb(card, g) {
   const box = card.querySelector('.shot');
   try {
-    if (g.kind === 'asy') {
+    if (g.kind === 'asy' || g.kind === 'svg') {
       const r = await post('/api/run', { path: g.path });
-      const out = r.stdout ?? '';
+      const out = (r.stdout ?? '').trim();
+      if (g.kind === 'svg') {
+        if (!out.startsWith('<svg')) throw new Error(r.stderr || '这一格没出图');
+        box.innerHTML = out;
+        return;
+      }
       if (!out.startsWith('%!PS')) throw new Error(r.stderr || '这一格没出图');
       box.innerHTML = epsToSvg(out);
       return;

@@ -109,9 +109,20 @@
   差分那一轴当场抓到一个真 bug：`plotEsc` 从前一个字一个字搬，而"一个中文字"在两条腿上
   不是同一件事（C 那侧是字节、JS 那侧是 JS 串），`plotNew("两条")` 在 js 腿上印成一串问号。
   改成**按整段拷**（要转义的三个字都是 ASCII，切口只落在 ASCII 上）之后两条腿逐字节相同。
-* **阶段 5 —— 数值那一族（L3b 挑两格）**：`num.integ`（积分）与 `linfit`（线性拟合）。
-  挑这两格是因为它们**答案有闭式**，判据不必靠眼睛。
+* **阶段 5 —— 数值那一族（L3b 挑两格）**（**已落地**：`src/lib/num.omni`）：
+  `numInteg`（复合 Simpson + 加倍到收敛）、`numSimpson`、`numLinfit`（多项式最小二乘）、
+  `numPolyAt`。挑这两格是因为**答案有闭式**，判据不必靠眼睛：
+  `∫₀¹ x² = 1/3`、`∫₀² x³ = 4`（Simpson 对三次以下是精确的）；喂给拟合的点来自真多项式，
+  系数原样出来（`y = 2 - x + 0.5x²` 出 `2 / -1 / 0.5`）。
+  照它的一个真实事实：gsl-shell 的 `num.integ` **不是** GSL 绑定，而是纯 Lua 重写的 qag
+  （`templates/qag.lua.in` 开头写着 "Adapted from the GSL Library, version 1.14"）——
+  所以这一层自己写不是偷懒。`linfit` 那边它包 `gsl_multifit_linear`（走 SVD），
+  我们走正规方程 + 自己的消元，**高次上条件数差**这一格在文件里照实写着（要 QR 得先有 `sqrt`）。
+  判据：`tests/cases/28_num.omni`（js==c 差分 + 快照，13 格答案全是闭式核对）。
+  顺手一格语言事实：**import 不是传递的** —— 用 `numLinfit` 的文件得自己再 import 一次矩阵。
 * **往后**：L3c 随机、L3d 特殊函数、L5 三维、L6 数据表 —— 按需要，一格一格来。
+  欠的两格最要紧：**这门语言还没有数学库**（`sqrt` / `log` / `exp` / `sin` 一个都没有，
+  上面那几层里凡是要它们的地方都绕开了），以及**复数**。
 
 **先不碰的**：`eigen` / `vegas` / `bspline` / `gdt` / `expr-*` —— 上面那一列写清了它们可缺。
 

@@ -16,8 +16,8 @@
  *
  * 一格的形状：
  *   `path`  仓库里的相对路径（必须在 `TREE_ROOTS` 的白名单里 —— 首页点一下要能打开它）
- *   `kind`  怎么出图：`asy`（跑一趟，EPS 翻成 SVG）/ `glsl`（WebGL2 编译着色器）/
- *           `html`（就是一份网页，塞进 iframe）
+ *   `kind`  怎么出图：`asy`（跑一趟，EPS 翻成 SVG）/ `svg`（跑一趟，stdout 本身就是 SVG）/
+ *           `glsl`（WebGL2 编译着色器）/ `html`（就是一份网页，塞进 iframe）
  *   `title` 卡片上的名字（不是文件名 —— 文件名是给判据用的）
  *   `note`  一句话说这格在画什么
  *
@@ -77,6 +77,12 @@ export const GALLERY = [
   {
     path: 'ext/html/examples/03-svg-form.html', kind: 'html', title: 'SVG 与表单',
     note: '内联 SVG + 原生控件联动',
+  },
+
+  /* ---- svg：跑一趟，stdout 本身就是一张 SVG（`std/plot.omni` 那一层） ---- */
+  {
+    path: 'ext/omni/examples/scicomp.omni', kind: 'svg', title: '二次拟合',
+    note: '矩阵 + 最小二乘 + 出图，三层都是 Omni 自己写的',
   },
 ];
 

@@ -23,9 +23,14 @@ import { join } from '../host/path.js';
  */
 export const TREE_ROOTS = [
   { name: '文档', path: 'docs', exts: ['.md'] },
+  /* `.omni` 也收：从前这棵树上**一行主语言的代码都没有** —— 十几门借来的语言都在，
+     而这条链自己那门看不见。`ext/omni/examples/` 底下那几份就是给人看的 omni 例子
+     （那个目录没有 `omni-ext.json`，所以它不是一格扩展，只是例子 —— 见 `ext.js` 里
+     "不自述的目录不算扩展"那一句）。 */
   { name: '例子', path: 'ext', exts: ['.go', '.nim', '.v', '.lua', '.mojo', '.cpp', '.bas',
-    '.awk', '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html'], only: 'examples' },
-  { name: '判据', path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag'],
+    '.awk', '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html', '.omni'], only: 'examples' },
+  { name: '判据', path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag',
+    '.omni'],
     /* `only` 收一串：`cases` 是各腿的判据例子，**`draw` 是 asy 真出图的那些** ——
        少了它，树上一份能出图的 `.asy` 都没有（`cases` 底下的 asy 全是算术），
        于是"预览"那一栏在 asy 上永远空着。glsl 的 `.frag` 在 cases 底下。 */

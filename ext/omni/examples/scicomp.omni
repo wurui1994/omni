@@ -1,0 +1,37 @@
+// 科学计算三件套：矩阵、拟合、出图 —— 一屏看完
+//
+// 这一份是**给人看的例子**（首页那一屏上的一格），不是判据；答案的判据在
+// `tests/cases/26_matrix.omni` / `27_plot.omni` / `28_num.omni` 里。
+//
+// 它印出来的**只有一份 SVG**：首页与控制台都按"看输出决定挂哪儿"办事
+// （`<svg` 起头就是一张图），所以这一份不印别的东西。
+//
+//   omni run ext/omni/examples/scicomp.omni > fit.svg
+import "std/matrix.omni";
+import "std/num.omni";
+import "std/plot.omni";
+
+// 一串"测出来的点"：真值是 y = 2 - x + 0.5x²，第三个点上加了一点噪声
+list<real> xs = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+list<real> ys = [2.0, 1.5, 2.4, 3.5, 6.0, 9.4, 14.0];
+
+// 二次最小二乘拟合（正规方程 + 自己的消元）
+Matrix c = numLinfit(xs, ys, 2);
+
+// 拟合出来的曲线：在 0..6 上密采样
+list<real> fx = [];
+list<real> fy = [];
+int i = 0;
+while (i <= 60) {
+  real x = real(i) * 0.1;
+  fx.push(x);
+  fy.push(numPolyAt(c, x));
+  i = i + 1;
+}
+
+Plot p = plotNew("二次拟合");
+p.xtitle = "x";
+p.ytitle = "y";
+p.addline(fx, fy, "#0a84ff");     // 拟合曲线
+p.addline(xs, ys, "#ff375f");     // 测到的点（折线连起来）
+p.show();

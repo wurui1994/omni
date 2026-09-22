@@ -4604,6 +4604,17 @@ function subMain(argv) {
 
 function main(argv) {
   /**
+   * **一趟一格**：`SRC_SX` 是"借来语言那条路译出来的核心方言"，它是**这一趟**的东西。
+   *
+   * 不清的话，常驻工人（`omni serve` 的热工人池）里上一趟 `.go` 留下的那份 sx 会被
+   * 下一趟 `.omni` 捡走 —— `compileFront` 见到它就不读文件了（`compileProgram(path, SRC_SX, …)`）。
+   * 量出来的症状：先跑 `tests/go/cases/01-loop-call.go`，再跑一份 `.omni`，报的是
+   * `ext/omni/examples/scicomp.omni:2:7: error: expected '(', found 'sum'` ——
+   * **那行 `sum` 是上一趟那份 go 的**。工人那边的"一次只做一件事"防的是并发串味，
+   * 防不了这一种（顺着来的脏），所以在入口处清。
+   */
+  SRC_SX = undefined;
+  /**
    * **`--client` 摆在最前面**（`docs/design/omni-serve-studio.md` §3）：
    * `omni --client run x.go` 把**同一条命令**发给 `omni serve` 去跑，回来的
    * stdout / stderr / 退出码原样落地。默认的 omni 仍旧是 CLI —— 这一格是 opt-in。
