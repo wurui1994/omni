@@ -10,7 +10,7 @@
 /* 纯函数那一半（高亮 / markdown / EPS -> SVG）住在 `render.js` —— 那一份一个 DOM 都不碰，
  * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
 import {
-  highlight, mdToHtml, epsToSvg, glslSource, glslVertex, glslSizeOf, GALLERY,
+  highlight, mdToHtml, epsToSvg, drawKindOf, glslSource, glslVertex, glslSizeOf, GALLERY,
 } from './render.js';
 
 const $ = (s) => document.querySelector(s);
@@ -241,15 +241,15 @@ async function galleryThumb(card, g) {
   const box = card.querySelector('.shot');
   try {
     if (g.kind === 'asy' || g.kind === 'svg') {
-      const r = await post('/api/run', { path: g.path });
+      /* asy 那几格**要原生 SVG**（`-f svg`）：那一路连标签都发成 `<text>`，
+         而页面这一侧的 `epsToSvg` 只认 PS 的那一小套算子。拿不到 SVG（比如某个例子
+         只走得通 EPS）就退回去翻一遍 —— 退路在，但不是默认。 */
+      const r = await post('/api/run',
+        g.kind === 'asy' ? { path: g.path, format: 'svg' } : { path: g.path });
       const out = (r.stdout ?? '').trim();
-      if (g.kind === 'svg') {
-        if (!out.startsWith('<svg')) throw new Error(r.stderr || '这一格没出图');
-        box.innerHTML = out;
-        return;
-      }
-      if (!out.startsWith('%!PS')) throw new Error(r.stderr || '这一格没出图');
-      box.innerHTML = epsToSvg(out);
+      const kind = drawKindOf(out);
+      if (kind === null) throw new Error(r.stderr || '这一格没出图');
+      box.innerHTML = kind === 'eps' ? epsToSvg(out) : out;
       return;
     }
     const f = await api(`/api/file?path=${encodeURIComponent(g.path)}`);
@@ -501,6 +501,8 @@ function renderPreview(kind, payload) {
     host.innerHTML = `<div class="svg-wrap">${svg}</div>`;
     return;
   }
+  /* 原生 SVG 出口（`-f svg`）：原样挂。**不经 `epsToSvg`** —— 那一格只认 PS 算子。 */
+  if (kind === 'svg') { host.innerHTML = `<div class="svg-wrap">${payload}</div>`; return; }
   if (kind === 'html') {
     /* `srcdoc` + `sandbox="allow-scripts"`：脚本照跑（例子里有 canvas 动画），
      * 可它**没有同源身份** —— 碰不到这一页的 DOM、cookie、也不能往上跳转。
@@ -682,8 +684,10 @@ async function openFile(path, row) {
   $('#view').scrollTop = 0; $('#edit').scrollTop = 0;
   const runnable = RUNNABLE.has(f.lang);
   $('#btn-run').disabled = !runnable;
-  /* js 那个开关只在 js 上有意义 —— 别的语言上藏起来（不是置灰：省一格视觉噪声）。 */
+  /* js 那个开关只在 js 上有意义 —— 别的语言上藏起来（不是置灰：省一格视觉噪声）。
+     asy 的出口开关同一条规矩。 */
   $('#js-parse-box').hidden = f.lang !== 'js';
+  $('#asy-svg-box').hidden = f.lang !== 'asy';
   closeDrawer();
   setStatus(f.dirty === true ? '改过' : '', '');
   const kind = previewKind(f.lang);
@@ -790,12 +794,16 @@ async function run() {
   const currentText = $('#edit').value;
   const dirty = currentText !== S.text;
   const direct = S.lang === 'js' && !$('#js-parse').checked;
+  /* asy 的出口：勾着就走**原生 SVG**（`-f svg`），不勾是 EPS 由这一页翻。
+     旗子进 argv 那一格在服务那侧带白名单（`serve.js` 的 `RUN_FORMATS`）。 */
+  const format = S.lang === 'asy' && $('#asy-svg').checked ? 'svg' : undefined;
   try {
     const r = await post('/api/run', {
       path: S.path,
       text: dirty ? currentText : undefined,
       lang: S.lang,
       direct,
+      format,
       verbose: true,
     });
     /* **只认最后一趟**：实时模式下旧的回包要丢掉，不然结果会往回跳。 */
@@ -807,12 +815,14 @@ async function run() {
     $('#stderr').textContent = r.stderr ?? '';
     renderStages(r.stages, r.stderr ?? '', ms);
     markStale(false);
-    /* asy：stdout 是 EPS 正文的那几份才有图（`draw/` 底下那些）；`cases/` 底下一百多份
-       是算术例子，一张图都不出 —— 那时候**不点亮"预览"栏、也不切过去**。 */
+    /* asy：stdout 是图那几份才有图（`draw/` 底下那些）；`cases/` 底下一百多份是算术例子，
+       一张图都不出 —— 那时候**不点亮"预览"栏、也不切过去**。
+       **看输出决定哪一种**（与"看是不是 `%!PS`"同一条纪律）：`<?xml`/`<svg` 起头是原生
+       SVG 出口，原样挂；`%!PS` 是 EPS，由 `epsToSvg` 翻。 */
     if (S.lang === 'asy') {
-      const isEps = (r.stdout ?? '').startsWith('%!PS');
-      renderPreview(isEps ? 'eps' : null, r.stdout);
-      showPreviewTab(isEps);
+      const kind = drawKindOf(r.stdout ?? '');
+      renderPreview(kind, r.stdout);
+      showPreviewTab(kind !== null);
     }
     const via = r.via === 'warm' ? '' : ' · 冷';
     const how = direct ? ' · node' : '';
@@ -1016,6 +1026,7 @@ async function main() {
   $('#btn-run').onclick = run;
   /* js 那个开关：切了就重跑一趟 —— 它改的就是"这一份怎么跑"。 */
   $('#js-parse').onchange = () => { if (S.lang === 'js') run(); };
+  $('#asy-svg').onchange = () => { if (S.lang === 'asy') run(); };
   /* 抽屉：开的时候盖一层遮罩，点它就关（不然窄屏上只能再摸那个按钮）。 */
   const mask = el('div', 'mask');
   mask.style.display = 'none';

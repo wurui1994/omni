@@ -227,13 +227,28 @@ export function mdToHtml(src) {
  * 算子**（`newpath/moveto/lineto/curveto/closepath/setrgbcolor/setgray/Setlinewidth/
  * fill/eofill/stroke/gsave/grestore/translate/concat/clip/setdash`），认不出的整句忽略。
  *
- * 为什么翻在这一头：EPS 那一轴的判据是**逐字节**的（tests/asy 那 192 份参考），
- * 在 asy 库里再加一条输出路会动到那条轴；而预览要的只是"看得见"。
- * 真正的 `emit svg`（在 asy 那条腿里出 SVG）是另一格，记在任务里。
+ * 为什么留着这一格（asy 那条腿现在有**原生 SVG 出口**了，`-f svg`）：不勾"SVG 出图"
+ * 那一档、以及画廊里拿到的是 EPS 的时候，还得靠它。默认那条路已经换成原生出口 ——
+ * 那一路把标签也发成 `<text>`，而这一格对嵌在 EPS 里的 dvips 字节无能为力。
  *
  * PS 的 y 轴朝上、SVG 朝下 —— 所以外层套一格 `translate(0,y0+y1) scale(1,-1)`，
  * 里头的坐标一律按 PS 的算，读起来与 EPS 正文对得上。
  */
+/**
+ * 一份 stdout 是哪一种图（`null` = 不是图）。
+ *
+ * **看输出，不看后缀**：asy 有两条出口（`-f svg` 的原生 SVG 与 EPS），而同一批 `.asy`
+ * 里一百多份根本不出图（`cases/` 底下那些是算术例子）。所以这一格只问三句：
+ * `%!PS` 起头是 EPS、`<?xml` 或 `<svg` 起头是 SVG、别的都不是图。
+ * 与"控制台看输出决定挂哪儿"同一条纪律。
+ */
+export function drawKindOf(out) {
+  const s = String(out ?? '').trimStart();
+  if (s.startsWith('%!PS')) return 'eps';
+  if (s.startsWith('<?xml') || s.startsWith('<svg')) return 'svg';
+  return null;
+}
+
 export function epsToSvg(eps) {
   const toks = [];
   {

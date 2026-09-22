@@ -110,6 +110,12 @@
       <label class="check" id="js-parse-box" hidden title="走我们的 js 前端（不勾 = 原样交给 node）">
         <input type="checkbox" id="js-parse"><span>我们的解析</span>
       </label>
+      <!-- asy 有两条出口（`-f svg` / `-f eps`）。**默认 SVG**：那一路是我们自己写的
+           原生出口（`asy_builtins.asy` 的 SVG 出口），标签也进 `<text>`；不勾就是 EPS，
+           由这一页把路径翻成 SVG（`render.js` 的 `epsToSvg`，认不出的算子整句忽略）。 -->
+      <label class="check" id="asy-svg-box" hidden title="asy 走原生 SVG 出口（不勾 = EPS，由页面翻）">
+        <input type="checkbox" id="asy-svg" checked><span>SVG 出图</span>
+      </label>
       <button class="run" id="btn-run"><svg viewBox="0 0 20 20"><path d="M6 4l10 6-10 6z"/></svg>运行</button>
     </div>
     <div class="code-body">

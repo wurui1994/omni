@@ -4036,8 +4036,21 @@ function runViaJit(mod, argv, srcPath) {
  *
  * 只认 eps 与 svg：别的（pdf/png…）这一层真的没有，猜一个"最像的"出去等于悄悄给错东西。
  */
+/** 进程**起来时**那两格的样子（见 asyRunSetup 里那段"一趟一格"）。 */
+const ASY_ENV0 = {
+  fmt: env('OMNI_ASY_OUTFORMAT') ?? '',
+  name: env('OMNI_ASY_OUTNAME') ?? '',
+};
 function asyRunSetup(path, rest) {
   if (!path.endsWith('.asy')) return;
+  /* **一趟一格**：这两格设置住在环境里，而常驻工人（`omni serve` 的热工人池）一个进程
+     跑很多趟 —— 上一趟的 `-f svg` 会留给下一趟，于是后面那趟明明没给 `-f` 也出 SVG。
+     量出来的：tests/serve 那格「不认的格式当没给」原先是红的（先来一趟
+     `format: 'svg'`，紧跟那趟还是 SVG）。与 `SRC_SX` 同一族（见 `main` 的头注）。
+     **退回进程启动时的样子、不是清空**：外面的跑手是用环境喂它们的
+     （`tests/asy/eps.js:381` 的 `env: { …, OMNI_ASY_OUTFORMAT: 'eps', OMNI_ASY_OUTNAME: pic }`）。 */
+  setEnv('OMNI_ASY_OUTFORMAT', ASY_ENV0.fmt);
+  setEnv('OMNI_ASY_OUTNAME', ASY_ENV0.name);
   const oi = rest.indexOf('-o');
   const out = oi >= 0 ? rest[oi + 1] : null;
   const fi = rest.indexOf('--format');

@@ -22,7 +22,7 @@ import { natCompare, byIdeOrder } from '../../src/core/studio/shared.js';
    GLSL 的源码修修）。它一个 DOM 都不碰，所以在这儿直接 import 就能判 ——
    不必拉一套无头浏览器进来。 */
 import {
-  highlight, mdToHtml, epsToSvg, glslSource, glslVertex, glslSizeOf, GALLERY,
+  highlight, mdToHtml, epsToSvg, drawKindOf, glslSource, glslVertex, glslSizeOf, GALLERY,
 } from '../../src/studio/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -204,19 +204,36 @@ try {
     ok('/api/run 收得到会 spawn 的腿的输出（asy 的 EPS）',
       ra.json.code === 0 && (ra.json.stdout ?? '').startsWith('%!PS'),
       `code=${ra.json.code} stdout=${JSON.stringify((ra.json.stdout ?? '').slice(0, 40))}`);
-    /* 顺手把它翻成 SVG —— 预览那一栏就是这么画的。 */
+    /* 顺手把它翻成 SVG —— 不勾"SVG 出图"那一档的预览就是这么画的。 */
     ok('EPS -> SVG 画得出路径', epsToSvg(ra.json.stdout ?? '').includes('<path '));
+    /* **原生 SVG 出口**（`format: 'svg'` -> `-f svg`，页面上 asy 的默认走法）：
+       出来的是良构头 + 真路径，而且**不经 `epsToSvg`**。这一格钉的是"那条出口真的在"。 */
+    const rs = await post('/api/run', { path: asy, lang: 'asy', format: 'svg' });
+    const so = (rs.json.stdout ?? '').trim();
+    ok('/api/run 认 format:svg（asy 的原生 SVG 出口）',
+      rs.json.code === 0 && drawKindOf(so) === 'svg' && so.includes('<path ')
+      && so.includes('viewBox='),
+      `code=${rs.json.code} ${JSON.stringify(so.slice(0, 60))}`);
+    /* **白名单外的格式一概不传**：那是从网上进来的字符串、要拼进 argv。
+       不报错、也不该把它塞给编译器 —— 表现上就是"跟没给一样"（还是 EPS）。 */
+    const rb = await post('/api/run', { path: asy, lang: 'asy', format: '--boom' });
+    ok('/api/run 不认的格式当没给（EPS 照旧）',
+      rb.json.code === 0 && drawKindOf(rb.json.stdout ?? '') === 'eps',
+      `code=${rb.json.code} ${JSON.stringify((rb.json.stdout ?? '').slice(0, 40))}`);
   }
 
-  /* **首页清单没骗人**：`kind: 'asy'` 与 `kind: 'svg'` 那几格真跑一趟，
-     出来的必须是图 —— asy 是 EPS（翻成 SVG 后真有笔画），svg 那一族 stdout 本身就是 SVG。
+  /* **首页清单没骗人**：`kind: 'asy'` 与 `kind: 'svg'` 那几格真跑一趟，出来的必须是图。
+     asy 那几格**按页面上的走法要原生 SVG**（`format: 'svg'`）；svg 那一族 stdout 本身就是 SVG。
+     `drawKindOf` 是页面判"这是哪一种图"的那一格纯函数 —— 判据与页面认同一条规矩。
      清单是人挑的，"它确实出图"是机器判的。 */
   for (const g of GALLERY.filter((x) => x.kind === 'asy' || x.kind === 'svg')) {
-    const rg = await post('/api/run', { path: g.path });
+    const rg = await post('/api/run',
+      g.kind === 'asy' ? { path: g.path, format: 'svg' } : { path: g.path });
     const out = (rg.json.stdout ?? '').trim();
+    const kind = drawKindOf(out);
     const good = g.kind === 'svg'
-      ? out.startsWith('<svg') && out.includes('<polyline points=')
-      : out.startsWith('%!PS') && epsToSvg(out).includes('<path ');
+      ? kind === 'svg' && out.includes('<polyline points=')
+      : kind === 'svg' && out.includes('<path ');
     ok(`首页「${g.title}」真出图`, rg.json.code === 0 && good,
       `code=${rg.json.code} ${JSON.stringify(out.slice(0, 40))} err=${JSON.stringify((rg.json.stderr ?? '').slice(-300))}`);
   }

@@ -242,8 +242,17 @@ async function runRequest(root, body, verb, extra, pool) {
      所以"对照"要是默认的那一边；勾上"我们的解析"才不带这个旗子。 */
   if (body.direct === true) argv.push('--direct');
   if (body.pkgs) argv.push('--pkgs', body.pkgs);
+  /* **`-f <格式>`：出图那一路选出口**（asy 的 `-f svg` / `-f eps`）。
+     白名单不是摆设 —— 这一格是从网上进来的字符串、要拼进 argv。只认我们自己那两个出口，
+     别的一概**不传**（不报错：那是"我们没这一格"，不是"你写错了"）。 */
+  if (typeof body.format === 'string' && RUN_FORMATS.has(body.format)) {
+    argv.push('-f', body.format);
+  }
   return runOmni(root, argv, body.timeout ?? 30, pool);
 }
+
+/** `/api/run` 认的出口 —— `asy_builtins.asy` 里现有的那两条（EPS 与 SVG）。 */
+const RUN_FORMATS = new Set(['eps', 'svg']);
 
 
 /* ------------------------------------------------------------ 控制台的会话
