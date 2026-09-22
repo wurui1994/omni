@@ -925,6 +925,27 @@ function profFoldedFinish() {
   const unit = PROF.mode === 'sample' ? 'frames' : 'us';
   if (folded.trim() === '') {
     /**
+     * **先分清"没采到"与"根本没跑过"**（任务 #91 抱怨的那一格）。
+     *
+     * `build` 这个动词只编译，谁都没跑 —— 这一层于是看到一份空的折叠栈，而底下那几句
+     * 会把它说成"这一趟太短 / 每一格都不到 1µs"，**把人引到"加大工作量"那条死路上**
+     * （照它把 pt 的 SPP 从 12 提到 300，白跑一轮）。真相是那份产物一次都没跑。
+     * 量出来的证据：同一份 `--profile stub` 的二进制手动跑一趟
+     * （`OMNI_PROF_OUT=… ./w-stub`）就写出 `omni_main;s_work 13356`（µs）。
+     */
+    if (PROF.key === 'build') {
+      const bin = PROF.bin === undefined || PROF.bin === null ? '<产物>' : PROF.bin;
+      const pre = PROF.mode === 'sample' ? 'OMNI_PROF=sample:997 ' : '';
+      const why = PROF.mode === 'sample'
+        ? '采样器是**运行期**按环境变量开的，二进制里一个字节都没改'
+        : '桩已经在这份二进制里了，只差给它一个落点';
+      stderr(`omni: profile（${PROF.mode} · ${LEG_SAY[PROF.leg] ?? PROF.leg} 腿）`
+        + '：`build` 只编译，这一趟没有谁在跑 —— 这几张表要程序真跑起来才有。\n'
+        + `  ${pre}OMNI_PROF_OUT=/tmp/omni.folded ${bin}\n`
+        + `（${why}；折叠栈拿到手之后火焰图走 \`--profile-out x.svg\` 那一条）\n`);
+      return;
+    }
+    /**
      * **一帧都没采到也要说话**（第一百四十九片第三格补的那一句）。
      *
      * 量到的原话（用户那一趟）：`run tests/cases/14_json_native.omni --profile sample:997
@@ -3407,6 +3428,9 @@ function buildSelf(mod, outPath, cPath, plugin, libs, cText, tGen, extern, syms)
   if (rc !== 0) throw new OmniError(`OMNI_CC=self：链接没过（C 留在 ${cPath}）`);
   if (PROF !== null) {
     PROF.map = `${outPath}.map`;
+    /* 产物路径记一格：`build --profile` 收尾时要把"照这句跑它"那条说得出来
+       （见 profFoldedFinish 里 `PROF.key === 'build'` 那一格）。 */
+    PROF.bin = outPath;
     /* 告诉子进程：你那份二进制的地址 -> 名字在这。子进程（链好的可执行文件）在报告期
        读这份图，用它翻 `backtrace` 拿到的裸地址。两侧都做翻名字的原因是：
        - 子进程（`omni_prof.c`）自己翻：`cc` 那一档的**标准输出**（`按自用排前 20 行`）
@@ -4747,6 +4771,9 @@ function main(argv) {
        * 像 `['run']`），于是 `.c` 那条腿一次都没认出来：量到的原话是
        * `run x.c --profile sample --cc clang` 报「js 这条腿上没有这台机器」。 */
       PROF.leg = profLeg(node.key, srcArg(node, rest), rest);
+      /* 这一趟是哪个动词：`build` 只编译、谁都不跑 —— 收尾那一句要按它分开说
+         （见 profFoldedFinish 里那一格）。 */
+      PROF.key = node.key;
       profCheckLeg(mode, PROF.leg);
       /* `--profile-out x.svg`：**火焰图**。运行时那一层只会写折叠栈（它在信号里，不该
        * 干渲染这种事），所以这儿把落点换成 `x.svg.folded`，收尾时再摊成 SVG
