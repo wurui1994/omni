@@ -152,7 +152,11 @@ POST /api/shell             -> { line }；一整行命令（含 tcc/go/nim 等�
   tests/asy/examples/sphere.asy > a.eps`，再把 `epsToSvg(a.eps)` 写成 `a.svg` 比。
   欠的是 **TeX 标签**（那是 dvips 写进 EPS 的字节，这一层不认）。
 * **原生 SVG**（勾上「SVG 出图」= `-f svg`）：`asy_builtins.asy` 自己那条出口，
-  标签进 `<text>`。欠的是**位图那一族**（三维与 `image()` 在那条路上是一整块黑 —— 量出来的）。
+  标签进 `<text>`。**位图那一族它还不认**（三维与 `image()`）—— 接的代价在那一层不合算：
+  要把像素变成浏览器认的格式（PNG 要 deflate+CRC32、BMP 要表头+BGR），两种都得先 base64，
+  而一张 800×804 是近两百万字节、几百万次字符串追加。所以那一族在这条路上摆的是
+  **一格浅底 + 一句"位图这一路要 EPS（-f eps）"** —— 从前是落到 fill 上画成一整块黑，
+  那是"看着像画对了"的最坏一种。
 
 画廊里 asy 那几格走默认那条（它们都是纯路径的二维图，两条画出来一样）。
 `/api/run` 的 `format` 只认 `eps|svg`（白名单，见 `serve.js` 的 `RUN_FORMATS`）。

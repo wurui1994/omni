@@ -8800,6 +8800,22 @@ private void asy__svgcore(drawop[] ops, labelrec[] labs, box bx, real w, real h,
         asy__out('<path d="' + asy__svgds(o.sh.gs, s) + '"' + at + "/>");
       continue;
     }
+    /* **位图那一族**（kind 5 = `_image`、kind 7 = 三维渲出来的裸位图）：这一条出口
+       还没接它们。接的代价在这一层是不合算的 —— 要把像素变成浏览器认的格式（PNG 要
+       deflate + CRC32，BMP 要表头 + BGR），两种都得先 base64，而一张 800×804 是
+       近两百万字节、也就是几百万次字符串追加，这台机器上跑不动。
+       **可它更不能画成一整块黑**（不接的时候落到下面那条 fill 上就是那样）——
+       那是"看着像画对了"的最坏一种。摆一格浅底 + 一句话：图请走 EPS 那一条
+       （`omni run x.asy` 不带 `-f`，页面会把 PS 的 image 翻成 `<image>`）。
+       文字要再翻一次（这一组是 `scale(1 -1)`），所以 y 取负、自己带一格 transform。 */
+    if (o.kind == 5 || o.kind == 7) {
+      asy__out('<path d="' + asy__svgd(o.g, s) + '" fill="#f2f2f5" stroke="#c8c8cd"/>');
+      pair mid = (o.g.nodes[0].point + o.g.nodes[2].point) * (0.5 * s);
+      asy__out('<text x="' + ps(mid.x) + '" y="' + ps(-mid.y) + '"'
+        + ' transform="scale(1 -1)" font-family="sans-serif" font-size="9"'
+        + ' fill="#86868b" text-anchor="middle">位图这一路要 EPS（-f eps）</text>');
+      continue;
+    }
     pen q = o.p;
     if (o.kind == 0 && q.dashpat.length > 0)
       q = asy__dashadjfn(q, asy__arclenfn(o.g), o.g.cyclic);
