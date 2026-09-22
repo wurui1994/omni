@@ -207,6 +207,9 @@ body {
   width: 100%; height: 100%; padding: 16px; box-sizing: border-box;
 }
 .svg-wrap svg { max-width: 100%; max-height: 100%; }
+/* 一趟印了好几张图（`plot` 那一族可以连着 `show()` 几回）：竖着排、各自按内容高。 */
+.svg-list { display: flex; flex-direction: column; gap: 12px; width: 100%; padding: 8px 0; }
+.svg-list .svg-wrap { height: auto; padding: 0 16px; }
 .gl-canvas { width: 100%; height: 100%; display: block; }
 /* 尺寸写死在源码里的那几份（vispy 那一族冲的是 128²，见 render.js 的 `glslSizeOf`）：
    **按原尺寸居中**，别拉伸 —— 拉伸就不是 `omni run … -o out.png` 出的那张图了。 */

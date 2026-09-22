@@ -598,7 +598,10 @@ function renderPreview(kind, payload) {
      （一趟印了好几张图）—— 一块一格 `.svg-wrap`，竖着摆。 */
   if (kind === 'svg') {
     const blocks = Array.isArray(payload) ? payload : [payload];
-    host.innerHTML = blocks.map((s) => `<div class="svg-wrap">${s}</div>`).join('');
+    const wraps = blocks.map((s) => `<div class="svg-wrap">${s}</div>`).join('');
+    /* 一张就照老样子（`.preview` 是 flex，居中那一套靠它）；好几张套一格竖着排的容器 ——
+       不套的话两张会被 flex 并排挤扁。 */
+    host.innerHTML = blocks.length === 1 ? wraps : `<div class="svg-list">${wraps}</div>`;
     return;
   }
   if (kind === 'html') {
