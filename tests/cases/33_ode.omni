@@ -1,0 +1,45 @@
+// 常微分方程（`std/num.omni` 的 `numOdeRk4` / `numOde`）—— 阶段 9
+//
+// 两个方程，**答案都是闭式**：
+//   * y' = y, y(0)=1  ->  y(1) = e = 2.718281828…
+//   * 谐振子 y₁'=y₂, y₂'=-y₁, y(0)=(1,0)  ->  y(t) = (cos t, -sin t)；
+//     另有一条守恒量 y₁²+y₂² ≡ 1，那一条比"某点的值"更能说明积分器没跑偏。
+// 小到 1e-12 的残渣**不照印**（那是拿两条腿的最后一位赌运气）：印的是截过位的值
+// 与"差得够小"这个判断。定步长那一支的答案只由 steps 定，所以它照印。
+import "std/num.omni";
+
+list<real> expo(real t, list<real> y) { return [y[0]]; }
+list<real> harm(real t, list<real> y) { return [y[1], -y[0]]; }
+// 非自治的一格：y' = t（答案 y(2) = 2）
+list<real> ramp(real t, list<real> y) { return [t]; }
+
+// ── 定步长 RK4 ──────────────────────────────────────────────────────────────
+print(string(numOdeRk4(expo, 0.0, [1.0], 1.0, 100)[0]));      // e
+print(string(numOdeRk4(ramp, 0.0, [0.0], 2.0, 8)[0]));        // 2（RK4 对 t 是精确的）
+// 四阶：步数翻倍，误差应当掉到大约 1/16（这儿只判"掉得比 10 倍还多"）
+real e1 = abs(numOdeRk4(expo, 0.0, [1.0], 1.0, 10)[0] - exp(1.0));
+real e2 = abs(numOdeRk4(expo, 0.0, [1.0], 1.0, 20)[0] - exp(1.0));
+print(string(e1 > 0.0 && e2 * 10.0 < e1));
+
+// ── 自适应 RKF45 ────────────────────────────────────────────────────────────
+print(string(numOde(expo, 0.0, [1.0], 1.0, 0.1, 0.000000001)[0]));   // e
+// 初始步长给得过大也要收（它会自己缩）
+print(string(numOde(expo, 0.0, [1.0], 1.0, 10.0, 0.000000001)[0]));
+// 容差收紧，答案要更靠近 e
+real a1 = abs(numOde(expo, 0.0, [1.0], 1.0, 0.5, 0.0001)[0] - exp(1.0));
+real a2 = abs(numOde(expo, 0.0, [1.0], 1.0, 0.5, 0.000000000001)[0] - exp(1.0));
+print(string(a2 <= a1));
+
+// ── 谐振子：半圈与守恒量 ────────────────────────────────────────────────────
+real pi = 4.0 * atan(1.0);
+list<real> h1 = numOdeRk4(harm, 0.0, [1.0, 0.0], pi, 1000);
+print(string(round(h1[0] * 1000000.0) / 1000000.0));          // cos π = -1
+print(string(abs(h1[1]) < 0.000001));                          // -sin π = 0
+list<real> h2 = numOde(harm, 0.0, [1.0, 0.0], pi, 0.05, 0.0000000001);
+print(string(round(h2[0] * 1000000.0) / 1000000.0));
+print(string(abs(h2[1]) < 0.000001));
+print(string(abs(h2[0] * h2[0] + h2[1] * h2[1] - 1.0) < 0.000001));
+// 四分之一圈：(cos, -sin)(π/2) = (0, -1)
+list<real> q = numOde(harm, 0.0, [1.0, 0.0], pi * 0.5, 0.05, 0.0000000001);
+print(string(abs(q[0]) < 0.000001));
+print(string(round(q[1] * 1000000.0) / 1000000.0));

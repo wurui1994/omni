@@ -247,4 +247,117 @@ private bool numIsPow2(int n) {
   return m == 1;
 }
 
+// ── 常微分方程（`num.ode`，设计文档阶段 9）──────────────────────────────────
+//
+// gsl-shell 那边这一层**也是纯 Lua 重写的**（`templates/{rk4,rkf45,rk8pd}.lua.in` +
+// `ode-defs.lua.in`），不是 GSL 绑定 —— 所以自己写一份同样不是偷懒。
+// 对外它是个状态机（`s:init(t0,h0,f,y0)` 然后 `for t,y in s:evolve(t1,tsmp)`）；
+// 我们这儿先给**最常问的那一句**：从 t0 积到 t1，交那一点的 y。要轨迹的话自己分段调。
+//
+// 方程写成"一阶系统"：`f(t, y) -> y'`，`y` 是一串数（一个方程就是长度 1 的那一串）。
+
+/**
+ * 定步长 RK4（经典四阶）。`steps` 是分几段 —— **答案只由这一个数定**，所以它是
+ * 判据里最好用的那一格（换机器换腿都是同一串浮点运算）。
+ */
+list<real> numOdeRk4(fn(real, list<real>) -> list<real> f,
+                     real t0, list<real> y0, real t1, int steps) {
+  if (steps <= 0) { fail("num: numOdeRk4 的 steps 要正数"); }
+  list<real> y = [];
+  for (real v in y0) { y.push(v); }
+  real h = (t1 - t0) / real(steps);
+  int s = 0;
+  while (s < steps) {
+    real t = t0 + real(s) * h;
+    list<real> k1 = f(t, y);
+    list<real> k2 = f(t + 0.5 * h, numOdeStage(y, h, [k1], [0.5]));
+    list<real> k3 = f(t + 0.5 * h, numOdeStage(y, h, [k1, k2], [0.0, 0.5]));
+    list<real> k4 = f(t + h, numOdeStage(y, h, [k1, k2, k3], [0.0, 0.0, 1.0]));
+    y = numOdeStage(y, h, [k1, k2, k3, k4],
+      [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0]);
+    s = s + 1;
+  }
+  return y;
+}
+
+/**
+ * 自适应步长 RKF45（Runge–Kutta–Fehlberg，四阶解 + 五阶解比出误差）。
+ *
+ * **步长那条律照抄 gsl-shell 的 `hadjust`**（`templates/ode-defs.lua.in:66-79`）：
+ * 安全系数 0.9、误差大于 1.1 倍容差就按 `r = 0.9 / rmax^(1/order)` 缩（最多缩到 0.2 倍）、
+ * 小于 0.5 倍就按 `1/(order+1)` 那个指数放（最多放 5 倍）。抄它是因为那几个常数是调过的，
+ * 不是随手写的。
+ */
+list<real> numOde(fn(real, list<real>) -> list<real> f,
+                  real t0, list<real> y0, real t1, real h0, real eps) {
+  if (h0 <= 0.0) { fail("num: numOde 的初始步长要正数"); }
+  if (eps <= 0.0) { fail("num: numOde 的容差要正数"); }
+  list<real> y = [];
+  for (real v in y0) { y.push(v); }
+  real t = t0;
+  real h = h0;
+  int guard = 0;
+  while (t < t1 && guard < 100000) {
+    real hh = h;
+    if (t + hh > t1) { hh = t1 - t; }
+    list<real> k1 = f(t, y);
+    list<real> k2 = f(t + 0.25 * hh, numOdeStage(y, hh, [k1], [0.25]));
+    list<real> k3 = f(t + 0.375 * hh, numOdeStage(y, hh, [k1, k2],
+      [3.0 / 32.0, 9.0 / 32.0]));
+    list<real> k4 = f(t + 12.0 / 13.0 * hh, numOdeStage(y, hh, [k1, k2, k3],
+      [1932.0 / 2197.0, -7200.0 / 2197.0, 7296.0 / 2197.0]));
+    list<real> k5 = f(t + hh, numOdeStage(y, hh, [k1, k2, k3, k4],
+      [439.0 / 216.0, -8.0, 3680.0 / 513.0, -845.0 / 4104.0]));
+    list<real> k6 = f(t + 0.5 * hh, numOdeStage(y, hh, [k1, k2, k3, k4, k5],
+      [-8.0 / 27.0, 2.0, -3544.0 / 2565.0, 1859.0 / 4104.0, -11.0 / 40.0]));
+    list<real> y5 = numOdeStage(y, hh, [k1, k2, k3, k4, k5, k6],
+      [16.0 / 135.0, 0.0, 6656.0 / 12825.0, 28561.0 / 56430.0, -9.0 / 50.0, 2.0 / 55.0]);
+    list<real> y4 = numOdeStage(y, hh, [k1, k2, k3, k4, k5],
+      [25.0 / 216.0, 0.0, 1408.0 / 2565.0, 2197.0 / 4104.0, -0.2]);
+    real rmax = 0.0;
+    int i = 0;
+    while (i < y5.length) {
+      real e = abs(y5[i] - y4[i]) / eps;
+      if (e > rmax) { rmax = e; }
+      i = i + 1;
+    }
+    if (rmax > 1.1 && hh > 0.0) {
+      real r = 0.9 / pow(rmax, 0.2);        // 1/order，order = 5
+      if (r < 0.2) { r = 0.2; }
+      h = r * hh;                            // 这一趟不算，缩了重来
+    } else {
+      t = t + hh;
+      y = y5;
+      if (rmax < 0.5) {
+        real r = 0.9 / pow(rmax + 1.0e-300, 1.0 / 6.0);   // 1/(order+1)
+        if (r < 1.0) { r = 1.0; }
+        if (r > 5.0) { r = 5.0; }
+        h = r * hh;
+      } else {
+        h = hh;
+      }
+    }
+    guard = guard + 1;
+  }
+  if (guard >= 100000) { fail("num: numOde 走了十万步还没到（步长被误差压死了？）"); }
+  return y;
+}
+
+/** `y + h * Σ cⱼkⱼ` —— 有了它，上面那几张表就是照书抄的一行一行。 */
+private list<real> numOdeStage(list<real> y, real h, list<list<real>> ks, list<real> c) {
+  list<real> out = [];
+  int i = 0;
+  while (i < y.length) {
+    real acc = y[i];
+    int j = 0;
+    while (j < c.length) {
+      if (c[j] != 0.0) { acc = acc + h * c[j] * ks[j][i]; }
+      j = j + 1;
+    }
+    out.push(acc);
+    i = i + 1;
+  }
+  return out;
+}
+
 
