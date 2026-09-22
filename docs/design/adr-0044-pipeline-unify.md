@@ -297,19 +297,28 @@ vlang 那一门带出来的两笔公共账：
 - 三段式 `for` 的 init **要自己一层作用域**（摊在 while 前面的话，同一个函数里第二格
   `for i := …` 撞名，方言那侧当场报）。
 
-### 第四片：Go
+### 第四片：Go（**图上只剩这一门**）
 
-Go 最后动。它的 adapter 最大（4900 行的 tograph.js 要翻译成 adapter + 公共 lower），
-而且它有 goroutine/channel/select 等特殊语义需要在 adapter 里处理。
+Go 最后动。它的 adapter 最大（4900 行的 tograph.js + 205 行 `go.mapping`），而且它是**唯一
+一门判据不止"例子的输出"的语言** —— 下面这张清单是量出来的，照它做：
 
-**动它之前先把"多文件"那一格在公共这条路上做出来**（见第二片末尾那笔欠款）：
-`--pkgs` 上挂着 `tests/go` 那 46 份逐字节判据，没有它 go 过不来。
+**多文件那一格已经做了一半**（2026-09-22）：`drive.js` 会读**旁边那几份同语言的文件**
+（`lang.imports` + `toIR(tree, { also })`，判据 `tests/lower/modules.js` 7/7）。
+**还欠 `--pkgs`**：那是"好几个**包**各自一格模块、按拓扑序拼、各自一个平名字空间"，
+比"旁边那几份"多一层。`drive.js` 现在对 `--pkg/--pkgs/--pkgs-root` 明着报。
 
-1. 多文件：`drive.js` 收一串文件，`toIR` 收一串树
-2. `ext/go/adapter/`
-3. 删 `ext/go/tograph.js`
-4. 删 `ext/go/go.mapping`（吸收进 adapter）
-5. **判据**：52/52 包全通、pt 基准逐字节相同
+go 这一门要过的判据（按先后）：
+1. `ext/go/examples` 那 29 份 —— 基线是 **24 绿 / 5 红**（`format` / `mapiter` / `postest` /
+   `scanutil` / `syntaxpkg` 那五份要 `--pkgs` 或标准库桩，`omni run` 裸跑本来就红）；
+2. `--pkgs` 落地 → `tests/go/run.js` 那 **46 份逐字节与 `go run` 相同**（源码头上
+   `//omni:pkgs a,b,c` 指桩）。这一批里有**图上没有的东西**：goroutine / channel / select
+   （走 ccall，不加节点族）、接口（ADR-0040 的"方法闭包的记录"）、type switch、变参、
+   `map[K]接口`、`strings`/`strconv`/`sort`/`rand`/`time` 那几份桩；
+3. go 编译器自举那一轴（52/52 包）与 pt 基准逐字节相同；
+4. 删 `ext/go/tograph.js` 与 `ext/go/go.mapping`（吸收进 adapter）。
+
+**一门语言只许有 `toIR` 或 `toGraph` 一格**（登记处那条规矩）—— 所以 go 不许"例子走
+adapter、`--pkgs` 走图"那样半迁：第 2 步不过，第 4 步就不动。
 
 ### 第五片：清理（**graph 整个拆掉**）
 
