@@ -11,7 +11,7 @@
  * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
 import {
   highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, glslSource, glslVertex, glslSizeOf,
-  glslDeclType, GALLERY,
+  glslDeclType, STD_LIBS, GALLERY,
 } from './render.js';
 
 const $ = (s) => document.querySelector(s);
@@ -546,6 +546,13 @@ async function conSend(line) {
 function initConsole() {
   const inp = $('#con-in');
   if (inp === null) return;
+  /* 开头那一行：**有哪几份库**。不写的话没人知道 `import "std/turtle.omni";` 存在 ——
+     控制台里没有目录树可翻。那张表钉在真目录上（判据比 `src/lib/*.omni`）。 */
+  if ($('#con-log').childElementCount === 0) {
+    conLog('omni 控制台 —— 一行一句，表达式自动印值。', 'note');
+    conLog(`库：${STD_LIBS.map(([n, d]) => `${n}（${d}）`).join('　')}`, 'note');
+    conLog('用法：import "std/plot.omni";　然后 plotLine("t", xs, ys).show()', 'note');
+  }
   inp.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       const v = inp.value;

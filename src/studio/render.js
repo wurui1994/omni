@@ -442,6 +442,23 @@ export function psImages(eps) {
 }
 
 /**
+ * `std/` 底下那几份库（控制台开头那一行提示用它）。
+ *
+ * **它是一份清单，所以会过期** —— 判据把它钉在真目录上：`tests/serve/run.js` 里
+ * 那一格读 `src/lib/*.omni` 与这张表逐个比，添一份库忘了写进来就是红的。
+ */
+export const STD_LIBS = [
+  ['matrix', '矩阵：解方程 / 逆 / 行列式'],
+  ['num', '数值：积分 / 拟合 / 求根 / FFT / ODE'],
+  ['plot', '折线图（出 SVG）'],
+  ['turtle', '海龟绘图（logo 那一套）'],
+  ['complex', '复数'],
+  ['rand', '随机数（minstd）'],
+  ['spec', '特殊函数：Γ / B / erf'],
+  ['json', 'JSON 与动态值的打印'],
+];
+
+/**
  * 一格 PS 位图 -> `data:image/png;base64,…`（回 null = 说不通，那就不画）。
  *
  * **PNG，而且是"不压缩的 PNG"**。两条理由：

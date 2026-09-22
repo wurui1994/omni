@@ -10,7 +10,7 @@
  * JSON 结构对"。UI 的好看与好用靠人看。
  */
 import { execFileSync, execFile as execFileCb } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -23,7 +23,7 @@ import { natCompare, byIdeOrder } from '../../src/core/studio/shared.js';
    不必拉一套无头浏览器进来。 */
 import {
   highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, psImages, psImageUri,
-  glslSource, glslVertex, glslSizeOf, glslDeclType, GALLERY,
+  glslSource, glslVertex, glslSizeOf, glslDeclType, STD_LIBS, GALLERY,
 } from '../../src/studio/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -122,9 +122,23 @@ ok('glslSource 没有 out 时补一格',
     ok('drawBlocks 没图就回 null', drawBlocks('1\n2\n').kind === null);
     ok('drawBlocks 的 EPS 那一族仍按开头认',
       drawBlocks('%!PS-Adobe-3.0\nnewpath\n').kind === 'eps');
-    ok('drawKindOf 与它的分工：夹在中间的图它不认',
-      drawKindOf(two) === null && drawBlocks(two).kind === 'svg');
-  }
+  ok('drawKindOf 与它的分工：夹在中间的图它不认',
+    drawKindOf(two) === null && drawBlocks(two).kind === 'svg');
+}
+
+/* **控制台开头那一行"有哪几份库"不许过期**：那是一张手写的清单（`render.js` 的
+   `STD_LIBS`），而清单会烂。这一格把它钉在真目录上 —— 添一份 `src/lib/*.omni`
+   忘了写进去，或者删了一份没删表，这儿就红。 */
+{
+  const real = readdirSync(join(root, 'src', 'lib'))
+    .filter((f) => f.endsWith('.omni')).map((f) => f.slice(0, -5)).sort();
+  const listed = STD_LIBS.map(([n]) => n).sort();
+  ok('控制台那张库清单与 src/lib 对得上',
+    real.length === listed.length && real.every((n, i) => n === listed[i]),
+    `真目录 ${real.join(' ')} / 清单 ${listed.join(' ')}`);
+  ok('库清单每一格都有一句说明', STD_LIBS.every(([, d]) => typeof d === 'string' && d !== ''));
+}
+
 
   /* ---- EPS 里的**位图**（`image` 那一族：三维那一路、以及 `image(…)`）----
    *
