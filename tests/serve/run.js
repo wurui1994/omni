@@ -172,6 +172,16 @@ try {
     ok('EPS -> SVG 画得出路径', epsToSvg(ra.json.stdout ?? '').includes('<path '));
   }
 
+  /* **不出图的 asy 不许被甩到画布上**：切不切"绘图"那一格的依据就是这一行
+     （`studio.js` 的 `run()` 里看 stdout 是不是 `%!PS`）。`cases` 底下那一大半是算术。 */
+  const asyTxt = paths.find((p) => p.startsWith('tests/asy/cases/') && p.endsWith('.asy'));
+  if (asyTxt !== undefined) {
+    const rt = await post('/api/run', { path: asyTxt, lang: 'asy' });
+    ok('不画图的 asy 不是 EPS（预览那一格不该亮）',
+      rt.json.code === 0 && !(rt.json.stdout ?? '').startsWith('%!PS'),
+      `${asyTxt} code=${rt.json.code} stdout=${JSON.stringify((rt.json.stdout ?? '').slice(0, 40))}`);
+  }
+
   /* **js 两条腿的对照**（Studio 上默认走 `--direct`，勾"我们的解析"才走我们的）：
    * 同一份源码两边**答案必须一样** —— 那正是这一页最该有的判据。 */
   const jsc = paths.find((p) => p.startsWith('tests/js-exec/cases/01-'));
