@@ -94,9 +94,24 @@ export function targetNames() {
  */
 const LANG_PROVIDERS = new Map();
 
-/** @param exts 扩展名（带点）@param name 语言名 @param compile (path, argv) -> { mod, ... } */
-export function registerLang(exts, name, compile) {
-  for (const e of exts) LANG_PROVIDERS.set(e, { name, compile });
+/**
+ * **按语言名**的那一张（`LANG_PROVIDERS` 是按后缀的）。
+ *
+ * 为什么要第二张表：**方言没有自己的后缀**。gsl-shell 是 Lua 加两条产生式，它的源码就是
+ * `.lua`——后缀那张表里加一格等于把所有 `.lua` 都抢过去。可"按名字问"（`--lang gsl-shell`、
+ * `#lang gsl-shell`）必须答得出它，所以名字这一张单独存。
+ *
+ * `dialectOf` 是**方言报的家门**：它说"我是那门语言的一种写法"。`cli.js` 的 `pickLang`
+ * 靠这一格判"`--lang` 与后缀说的不是同一个"到底是**冲突**还是**细化** —— 后者不该报错。
+ */
+const LANG_BY_NAME = new Map();
+
+/** @param exts 扩展名（带点；方言可以给空的）@param name 语言名
+ *  @param compile (path, argv) -> { mod, ... } @param opts `{ dialectOf }` */
+export function registerLang(exts, name, compile, opts) {
+  const l = { name, compile, dialectOf: (opts ?? {}).dialectOf ?? null };
+  for (const e of exts) LANG_PROVIDERS.set(e, l);
+  LANG_BY_NAME.set(name, l);
 }
 
 /* 目录里躺着、但**这条腿装不动**的那些（ADR-0021 的 S4）：名字先记下来，等真用到那门语言
@@ -150,16 +165,12 @@ export function lang(path) {
  * 装完还是没有就交 null，让调用方去印"装着的是哪些"。
  */
 export function langByName(name) {
-  for (const [, l] of LANG_PROVIDERS) {
-    if (l.name === name) return l;
-  }
+  if (LANG_BY_NAME.has(name)) return LANG_BY_NAME.get(name);
   for (const p of PENDING) {
     if (p.done || p.claim.name !== name) continue;
     p.done = true;
     p.load();
-    for (const [, l] of LANG_PROVIDERS) {
-      if (l.name === name) return l;
-    }
+    if (LANG_BY_NAME.has(name)) return LANG_BY_NAME.get(name);
     throw new OmniError(`迟装那一格对不上：声明里说有 '${name}' 这门语言，`
       + '装进来之后注册表里却没有它（lang/builtin.js 的声明与那门语言的 registerLang 走散了）');
   }
@@ -237,6 +248,8 @@ export function cap(name) {
 export function langNames() {
   const out = [];
   for (const [, l] of LANG_PROVIDERS) if (!out.includes(l.name)) out.push(l.name);
+  /* 只有名字没有后缀的那些（方言）也算 —— 它们正是"只能点名"的那一族。 */
+  for (const [n] of LANG_BY_NAME) if (!out.includes(n)) out.push(n);
   for (const p of PENDING) {
     if (p.done) continue;
     const isLang = p.claim.exts !== undefined || p.claim.runnerExts !== undefined;

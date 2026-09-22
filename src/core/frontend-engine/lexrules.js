@@ -145,6 +145,12 @@ export function lex(src, lang) {
   const out = [];
   let i = 0;
   let line = 1;
+  /* `#lang <名字>` 与 shebang：**只在第一行**，整行跳过（ADR-0037）。
+     三台读入器同一条规矩（`sexpr/read.js:43`、`parse/lexer.js:50`，这儿是第三台）——
+     少了这一格，一份写着 `#lang gsl-shell` 的 `.lua` 在词法上就死了。
+     **只认这两种开头**：`#include` 那一类不能碰（cpp 的第一行常常就是它）。 */
+  const head = /^#(?:!|lang\b)[^\n]*(\n|$)/.exec(src);
+  if (head !== null) { i = head[0].length; line = 2; }
   while (i < src.length) {
     let hit = null;
     for (const r of rules) {

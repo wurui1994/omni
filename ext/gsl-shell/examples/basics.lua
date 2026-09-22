@@ -1,3 +1,4 @@
+#lang gsl-shell
 -- ext/gsl-shell/examples/basics.lua —— 与另外十门的 basics.* **同一件事**
 --
 -- 输出必须逐行相同：15 / 120 / 7 / ok（判据在 tests/graph/run.js）。

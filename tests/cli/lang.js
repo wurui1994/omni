@@ -306,5 +306,42 @@ const otplFile = sample('hygiene.omni', OTPL);
   } else bad('没有模板的 .omni 该中性', `rc=${a.status}/${b.status}`);
 }
 
+/* ---- 七、**方言那一格不用开关**（ADR-0037 的 D3 加的一条）
+ *
+ * `#lang gsl-shell` 写在一份 `.lua` 里并没有"偷偷换成另一门语言" —— gsl-shell 就是
+ * Lua 加两条产生式，它连自己的后缀都没有。默认关着 `#lang` 防的是"这份 `.c` 其实按
+ * 别的语言编了"那一类惊吓，而"同一门语言的哪一种写法"不在那一类里。
+ * 判据是**方言自己报的家门**（`registerLang` 的 `dialectOf`），不是名字长得像。 */
+const GSL = join(ROOT, 'ext', 'gsl-shell', 'examples', 'basics.lua');
+const LUA = join(ROOT, 'ext', 'lua', 'examples', 'basics.lua');
+{
+  const r = omni(['run', GSL]);
+  if (r.status === 0 && (r.stdout || '').trim() === '15\n120\n7\nok') {
+    ok('#lang gsl-shell：方言不用开关（15 / 120 / 7 / ok）');
+  } else bad('方言该不用开关', `rc=${r.status} ${both(r).slice(-400)}`);
+}
+{
+  const r = omni(['run', GSL, '--lang', 'gsl-shell']);
+  if (r.status === 0 && (r.stdout || '').trim() === '15\n120\n7\nok') {
+    ok('--lang gsl-shell 配 .lua：是"说得更细"，不算冲突');
+  } else bad('--lang 点方言不该报冲突', `rc=${r.status} ${both(r).slice(-400)}`);
+}
+{
+  /* 方言的例子与 lua 自己那份**答案相同** —— 那两份差的只有 `max2` 的写法。 */
+  const a = omni(['run', GSL]);
+  const b = omni(['run', LUA]);
+  if (a.status === 0 && b.status === 0 && a.stdout === b.stdout) {
+    ok('方言与基准语言的同名例子答案逐字节相同');
+  } else bad('两份 basics 该同答案', `${JSON.stringify(a.stdout)} != ${JSON.stringify(b.stdout)}`);
+}
+{
+  /* **真冲突还得报**：`--lang jnc` 配 `.lua` 不是方言关系。 */
+  const r = omni(['run', LUA, '--lang', 'jnc']);
+  const s = both(r);
+  if (r.status !== 0 && s.includes('不是同一个') && s.includes('--lang 说 jnc')) {
+    ok('不是方言的那一格照旧报冲突（--lang jnc 配 .lua）');
+  } else bad('真冲突该报', `rc=${r.status} ${s.slice(0, 300)}`);
+}
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

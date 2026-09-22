@@ -137,6 +137,19 @@ const EXP = {
     // 不会跑，见 tests 里那个 boom 探针）。Lua 的 `a and b` 一般交出来的是**值**
     // （`x and 1` 给的是 1 不是真假），那种还降不了 —— 记 L-007。
     if (n.op === 'and' || n.op === 'or') {
+      /* **Lua 的三目就是 `c and a or b`** —— 这门语言里没有别的条件表达式写法，
+         而 gsl-shell 的短 lambda 体只能是一个表达式，所以这一格是那门方言的日常
+         （`local max2 = |a, b| (a > b) and a or b`）。核心方言里它就是 `(sel c a b)`。
+         只收 `a` **不可能为假**的那一族（real / string）：`c and false or b` 在 Lua 里
+         的答案是 `b` 而不是 `false`，那一格照旧是 L-007。 */
+      if (n.op === 'or' && n.a.kind === 'binop' && n.a.op === 'and') {
+        const c = exp(n.a.a, cx);
+        const t = exp(n.a.b, cx);
+        const f = exp(n.b, cx);
+        if (c.type === 'bool' && t.type === f.type && (t.type === 'real' || t.type === 'string')) {
+          return { sx: `(sel ${c.sx} ${t.sx} ${f.sx})`, type: t.type };
+        }
+      }
       const la = exp(n.a, cx);
       const lb = exp(n.b, cx);
       if (la.type !== 'bool' || lb.type !== 'bool') no('L-007', n);
@@ -215,6 +228,24 @@ const STAT = {
   local: (n, cx) => {
     const init = n.init ?? [];
     const asGlobal = cx.scopes.length === 1;    // 只有顶层那一层能提成模块级变量
+    /* **`local f = function(a, b) … end` 就是 `local function f`**（gsl-shell 的
+       `local f = |a, b| e` 同理 —— 那两种落到的树只差"体是一个表达式"）。
+       所以这儿把它 desugar 成具名函数走同一条路，而不是一律 L-005。
+       真闭包（体里用了外面的局部量）仍然拦得住：那种情况函数体里那个名字在
+       `local-function` 开的新 Cx 里查不到，照旧报账。
+       一个名字只许提一次（同名再来一格会在模块层撞车），所以那一格还是 L-005。 */
+    const fnExp = init.length === 1 && n.names.length === 1
+      && (init[0].kind === 'lambda' || init[0].kind === 'function-exp') ? init[0] : null;
+    if (fnExp !== null) {
+      const name2 = n.names[0];
+      if (cx.fns.has(name2)) no('L-005', n);
+      const body = fnExp.kind === 'function-exp' ? fnExp.body : {
+        kind: 'funcbody',
+        names: fnExp.names ?? [],
+        body: { kind: 'block', stats: [{ kind: 'return', values: [fnExp.body], span: fnExp.span }] },
+      };
+      return STAT['local-function']({ kind: 'local-function', names: [name2], body, span: n.span }, cx);
+    }
     // 多个名字：Lua 先把右边**全部**算完再绑（`local` 的配方是 `['init','bind:names']`），
     // 而新名字右边压根看不见，所以一格一格降就够 —— 不用临时量。
     if (n.names.length > init.length) no('L-013', n);          // 少的那些是 nil

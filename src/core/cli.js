@@ -1471,22 +1471,40 @@ function pickLang(path, argv) {
   const byExt = lang(path);
   const li = argv.indexOf('--lang');
   const byFlag = li >= 0 && argv[li + 1] !== undefined ? argv[li + 1] : null;
-  const dir = LANG_DIRECTIVE && exists(path) ? langDirectiveOf(readText(path)) : null;
+  /**
+   * **方言是那条规矩的一个例外，而且不用开关**（ADR-0037 的 D3 加的一格）。
+   *
+   * `#lang gsl-shell` 写在一份 `.lua` 里并没有"偷偷换成另一门语言" —— gsl-shell 就是
+   * Lua 加两条产生式（`ext/gsl-shell/lang.js` 的 `extend(luaLang, …)`），它连自己的后缀
+   * 都没有。默认关着 `#lang` 防的是"这份 `.c` 其实按别的语言编了"那一类惊吓，而
+   * "同一门语言的哪一种写法"不在那一类里：文件第一行明写着，编出来的也还是那门语言。
+   *
+   * 判据是**方言自己报的家门**（`registerLang` 的 `dialectOf`），不是名字长得像。
+   */
+  const dialectOfExt = (name) => {
+    if (name === null || byExt === null) return null;
+    let l = null;
+    try { l = langByName(name); } catch { return null; }
+    return l !== null && l.dialectOf === byExt.name ? l : null;
+  };
+  const dir = exists(path) ? langDirectiveOf(readText(path)) : null;
+  const dirDialect = dir === null ? null : dialectOfExt(dir.name);
+  if (dirDialect !== null) return { l: dirDialect, why: `#lang ${dir.name}（${byExt.name} 的方言）` };
   /* 关着的时候也要**看一眼**：看到了就报，不是当注释混过去。 */
-  if (!LANG_DIRECTIVE && exists(path)) {
-    const peek = langDirectiveOf(readText(path));
-    if (peek !== null) {
-      throw new OmniError(`${basename(path)}:${peek.line}: #lang 这一格默认关着 —— `
-        + '一份文件的语言默认只由后缀决定（ADR-0009）。'
-        + '开法：加 `--lang-directive`，或 `OMNI_LANG_DIRECTIVE=1`。'
-        + `装着的读入器：${langsSay()}`);
-    }
+  if (!LANG_DIRECTIVE && dir !== null) {
+    throw new OmniError(`${basename(path)}:${dir.line}: #lang 这一格默认关着 —— `
+      + '一份文件的语言默认只由后缀决定（ADR-0009）。'
+      + '开法：加 `--lang-directive`，或 `OMNI_LANG_DIRECTIVE=1`。'
+      + `装着的读入器：${langsSay()}`);
   }
   const names = [];
-  if (dir !== null) names.push(['#lang 行', dir.name]);
+  if (LANG_DIRECTIVE && dir !== null) names.push(['#lang 行', dir.name]);
   if (byFlag !== null) names.push(['--lang', byFlag]);
   if (byExt !== null) names.push(['后缀', byExt.name]);
-  /* 冲突：两处以上说了话而且说的不是同一门。**报**，不择一。 */
+  /* 冲突：两处以上说了话而且说的不是同一门。**报**，不择一。
+     ——**除了方言**：`--lang gsl-shell` 配一份 `.lua` 是"说得更细"，不是两处打架。 */
+  const flagDialect = dialectOfExt(byFlag);
+  if (flagDialect !== null) return { l: flagDialect, why: `--lang ${byFlag}（${byExt.name} 的方言）` };
   const distinct = [];
   for (const [, n] of names) if (!distinct.includes(n)) distinct.push(n);
   if (distinct.length > 1) {
@@ -1494,7 +1512,7 @@ function pickLang(path, argv) {
       + names.map(([w, n]) => `${w} 说 ${n}`).join('、')
       + '。按 #lang 走就删掉 --lang（或改文件名），按后缀走就删掉那一行');
   }
-  if (dir !== null) {
+  if (LANG_DIRECTIVE && dir !== null) {
     /* `#lang omni` = 核心方言那一支。它**不在**语言注册表里（核心不是插件），所以单列一格 ——
      * 少了它，一份写着 `#lang omni` 的 `.omni` 会被报成"没有 omni 这台读入器"，而那句话是假的。 */
     if (dir.name === 'omni') return { l: null, why: '#lang omni' };

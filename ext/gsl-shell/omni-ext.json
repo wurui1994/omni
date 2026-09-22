@@ -1,0 +1,10 @@
+{
+  "name": "gsl-shell",
+  "version": "0.1.0",
+  "doc": "Lua + GSH_SHORT_FSYNTAX（`|x| e`）—— 一格方言：没有自己的后缀，只能点名。见 DESIGN.md",
+  "entry": "omni-lang.js",
+  "register": "registerGslExt",
+  "provides": {
+    "caps": ["gsl-shell.toSx"]
+  }
+}

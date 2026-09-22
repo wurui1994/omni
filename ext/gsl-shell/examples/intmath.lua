@@ -1,3 +1,4 @@
+#lang gsl-shell
 -- ext/gsl-shell/examples/intmath.lua —— 第七个家族（**四条腿都跑得动的那个子集**）的 gsl-shell 一格
 --
 -- 期望输出（家族里所有语言、所有后端逐行相同）：15 / 120。
