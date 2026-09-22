@@ -40,9 +40,9 @@ const run = (args) => spawnSync(process.execPath, args, {
   encoding: 'utf8', timeout: 120000, maxBuffer: 8 << 20,
 });
 
-/** 三门语言的例子（借用优先那三门）。 */
+/** 还在图那一层的那几门的例子（ADR-0044：迁走的语言在这一层不存在了）。 */
 const cases = [];
-for (const lang of ['go', 'nim', 'vlang']) {
+for (const lang of ['go', 'vlang']) {
   const dir = join(ROOT, 'ext', lang, 'examples');
   for (const f of readdirSync(dir).sort()) {
     if (f.startsWith('.')) continue;

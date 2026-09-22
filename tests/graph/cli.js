@@ -67,22 +67,22 @@ check('go × interp（默认后端）', ['run', 'ext/go/examples/basics.go', '--
   { code: 0, out: BASICS });
 check('vlang × wat', ['run', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'wat'],
   { code: 0, out: BASICS });
-check('nim × js', ['run', 'ext/nim/examples/basics.nim', '--engine', 'graph', '--backend', 'js'],
+/* 这一格从前点的是 nim —— 那门语言 2026-09-22 迁到公共降级器之后在图这一层不存在了
+   （ADR-0044）。图上只剩 go 与 vlang 两门，所以四条腿分着押在这两门上。 */
+check('go × js', ['run', 'ext/go/examples/basics.go', '--engine', 'graph', '--backend', 'js'],
   { code: 0, out: BASICS });
-/* 这一格从前点的是 chez —— 那门语言 2026-09-22 迁到公共降级器之后在图这一层不存在了
-   （ADR-0044），所以换成还在图上的一门。判的东西一个字没变：`sx` 那条腿只序列化。 */
-check('nim × sx（只序列化，第一行是 (graph）',
-  ['run', 'ext/nim/examples/basics.nim', '--engine', 'graph', '--backend', 'sx'],
+check('vlang × sx（只序列化，第一行是 (graph）',
+  ['run', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'sx'],
   { code: 0, head: '(graph' });
 
 // ---- 2) 语言怎么定：后缀是默认，`--lang` 盖过它
 check('go 按后缀', ['run', 'ext/go/examples/intmath.go', '--engine', 'graph'],
   { code: 0, out: ['15', '120'] });
 /* `--lang` 盖过后缀这条规矩不变，只是找一对**都还在图上**的语言来押它：
-   `.mojo` 的文件按 `--lang nim` 读 —— 那份语法读不下去，报的是"语法说不通"。
-   （从前这一格是 `.lisp` 当 chez 读，两门都迁走了。） */
-check('--lang 盖过后缀（.v 当 nim 读 -> nim 的语法不认它）',
-  ['run', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--lang', 'nim'],
+   `.v` 的文件按 `--lang go` 读 —— 那份语法读不下去，报的是"语法说不通"。
+   （从前这一格是 `.lisp` 当 chez 读、后来是 `.v` 当 nim 读，那几门都迁走了。） */
+check('--lang 盖过后缀（.v 当 go 读 -> go 的语法不认它）',
+  ['run', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--lang', 'go'],
   { code: 1 });
 check('后缀不认得就报清单', ['run', 'README.md', '--engine', 'graph'],
   { code: 1, says: '这个后缀不认得' });

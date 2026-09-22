@@ -24,7 +24,8 @@ import { fileURLToPath } from 'node:url';
 import { LANGS } from '../../src/core/graph/langs.js';
 import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
-  DEFER, BLOCKRET, METHOD, ASSERTOK,
+  DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
+  CTIF, MEMBER, BLOCKSCOPE,
 } from '../graph/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -44,6 +45,8 @@ const FAMILIES = {
   basics: BASICS, intmath: INTMATH, loopexit: LOOPEXIT, dict: DICT, unary: UNARY,
   record: RECORD, index: INDEX, slice: SLICE, conv: CONV, values: VALUES, mut: MUT,
   defer: DEFER, blockret: BLOCKRET, method: METHOD, assertok: ASSERTOK,
+  strcat: STRCAT, numstr: NUMSTR, namedarg: NAMEDARG, casefor: CASEFOR,
+  caserange: CASERANGE, ctif: CTIF, member: MEMBER, blockscope: BLOCKSCOPE,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -64,6 +67,16 @@ const MIGRATED = {
   /* cpp：九个家族。`defer` 在这门语言里是 `~Say()`（RAII，与 freebasic 同一手）；
      `printf` 只接"一格转换 + 换行"（见 adapter/expr.js 的 printArgs）。 */
   cpp: ['basics', 'conv', 'defer', 'dict', 'index', 'intmath', 'loopexit', 'record', 'values'],
+  /* nim：十九个家族（借来那几门里最多的一格）。这门语言自己带进来的有五样：
+     `casefor`（`case` 里能有 `elif` + `for … in` 区间/序列）、`caserange`（`of 0 .. 59:`）、
+     `ctif`（`when` 是**编译期**分支：中的那支摊开、别的整格丢掉）、`namedarg`
+     （`Point(x: 1)` 是造记录、`f(a = 3)` 是命名实参 —— 在实参那个位置上两者**不同形**）、
+     `blockscope`（`block:` 自己一层作用域）。
+     **`mapiter` 有意不在这张表里**：`for k in t` 当场报（方言里没有能装下键列表的类型，
+     那是一次语言决定）—— 在图那条路上它也是红的，账没变。 */
+  nim: ['basics', 'blockscope', 'casefor', 'caserange', 'conv', 'ctif', 'defer', 'dict',
+    'index', 'intmath', 'loopexit', 'member', 'method', 'namedarg', 'numstr', 'record',
+    'slice', 'strcat', 'values'],
 };
 
 /** 敲一条命令，回 `{ code, out, err }`（out 按行切好，末尾空行去掉）。 */

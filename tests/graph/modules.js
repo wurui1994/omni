@@ -9,11 +9,12 @@
  * `import x` 里那个 `x`（去掉 `./`）拼上这门语言的后缀，**就在导入方旁边**找；找着就读，
  * 找不着照旧交给映射。所以这一格不改变任何现有例子（判据在 `tests/graph/run.js`）。
  *
- * 这一份判四件事：
- *   一、三门语言（go / nim / vlang）各读进来一份本地文件，答案对；
+ * 这一份判三件事（**nim 那几格退场了**：那门语言 2026-09-22 迁到公共降级器，图这一层
+ * 不再有它，ADR-0044。它的三格判据里"环不许挂死"的夹具是 nim 独有的，跟着一起走 ——
+ * 多文件这件事在新那条路上还没接（`drive.js` 明着报），账记在 ADR-0044 里）：
+ *   一、两门语言（go / vlang）各读进来一份本地文件，答案对；
  *   二、**两条腿一致**：interp 与 js 后端跑出来的字节相同（借用不该只在一条腿上成立）；
- *   三、**环不许挂死**：nim 的 A 引 B、B 引 A（两门语言里都合法）；
- *   四、**标准库那一格照旧**：`import tables` 仍旧被映射接住（不许被这一刀带坏）。
+ *   三、**标准库那一格照旧**：`import "fmt"` 仍旧被映射接住（不许被这一刀带坏）。
  *
  *   node tests/graph/modules.js
  */
@@ -53,13 +54,13 @@ function bothLegs(what, path, want) {
   ok(`${what}（interp 与 js 两条腿都对：${JSON.stringify(want)}）`);
 }
 
-/* ---- 一 & 二：三门语言各读一份本地文件，两条腿都对 */
-bothLegs('nim import util（proc 从旁边那份文件来）', join(MODS, 'main.nim'), '49\n42');
+/* ---- 一 & 二：两门语言各读一份本地文件，两条腿都对 */
 bothLegs('go import "./util"', join(MODS, 'gmain.go'), '64');
 bothLegs('vlang import util', join(MODS, 'vmain.v'), '81');
 
-/* ---- 三：环不许挂死（读过的不再读） */
-bothLegs('nim 互相 import（A 引 B、B 引 A）不挂死', join(MODS, 'ring1.nim'), '3');
+/* ---- 三：**环不许挂死**那一格**退场了**：夹具（ring1.nim / ring2.nim）是 nim 独有的，
+   而 nim 迁到公共降级器之后图这一层没有它了（ADR-0044）。go 与 vlang 那边没有对应的夹具，
+   不现编一份 —— 这一族判据跟着图那一层一起走。 */
 
 /* ---- 三之二：**声明也要看得见**（不只是名字能连上）。
    `Point{3, 4}` 那种位置型字面量要"字段名与顺序"，而 struct 只写在被导入的那份里。
@@ -68,20 +69,20 @@ bothLegs('nim 互相 import（A 引 B、B 引 A）不挂死', join(MODS, 'ring1.
 bothLegs('vlang import 之后**看得见对方的 struct**（位置型字面量的字段名）',
   join(MODS, 'vshape.v'), '12');
 
-/* ---- 四：标准库那一格照旧被映射接住（`import tables` 不该被这一刀带坏） */{
-  const p = join(ROOT, 'ext', 'nim', 'examples', 'dict.nim');
+/* ---- 四：标准库那一格照旧被映射接住（`import "fmt"` 不该被这一刀带坏）。
+   从前这一格点的是 `ext/nim/examples/dict.nim`（`import tables`）—— nim 迁走了，
+   换成还在图上的 go，判的是同一件事：**旁边没有那份文件时，import 交给映射**。 */{
+  const p = join(ROOT, 'ext', 'go', 'examples', 'basics.go');
   const r = omni(['run', p, '--engine', 'graph']);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  /* 它 `import tables`，而 `tables.nim` 不在旁边 —— 所以那一行照旧交给映射（Table 落成
-     map 那四格节点）。**顺带判一句**：不许印出"import 进来的同语言文件"。 */
   if (r.status === 0 && !s.includes('import 进来的同语言文件')) {
-    ok('标准库那一格照旧：import tables 交给映射，不去找文件');
+    ok('标准库那一格照旧：import "fmt" 交给映射，不去找文件');
   } else bad('标准库那一格该照旧', `rc=${r.status} ${s.slice(0, 300)}`);
 }
 
 /* ---- 五：读进来了要**说出来**（那一行去 stderr，stdout 归被跑的程序） */{
-  const r = omni(['run', join(MODS, 'main.nim'), '--engine', 'graph']);
-  if ((r.stderr || '').includes('util.nim') && (r.stdout || '').trim() === '49\n42') {
+  const r = omni(['run', join(MODS, 'gmain.go'), '--engine', 'graph']);
+  if ((r.stderr || '').includes('util.go') && (r.stdout || '').trim() === '64') {
     ok('读进来的文件印在 stderr 上（stdout 只有程序自己的输出）');
   } else bad('该在 stderr 上说读了谁', `stderr=${(r.stderr || '').slice(0, 200)}`);
 }

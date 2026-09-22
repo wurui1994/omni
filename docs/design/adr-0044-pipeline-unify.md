@@ -185,7 +185,7 @@ lower 读这张表决定发码细节。从前这些决定散在 11 份 tograph.j
 | **asy** | `src/core/lang/asy.js` → .sx → sexpr/lower | adapter + 公共 lower（asy 已经出 .sx，只需要把 lower 里的 asy 特殊逻辑搬到 adapter） |
 | **go** | `ext/go/tograph.js`（4900 行） | `ext/go/adapter.js`（~1500 行） + 公共 lower |
 | **vlang** | `ext/vlang/tograph.js`（1581 行） | `ext/vlang/adapter.js`（~500 行） + 公共 lower |
-| **nim** | `ext/nim/tograph.js`（801 行） | `ext/nim/adapter.js`（~300 行） + 公共 lower |
+| **nim** | `ext/nim/tograph.js`（801 行） | `ext/nim/adapter/`（`index.js` + `expr.js`，~750 行） + 公共 lower ✓ |
 | **cpp** | `ext/cpp/tograph.js`（534 行） | `ext/cpp/adapter.js`（~400 行，扩展更多 C++ 语义） + 公共 lower |
 | **lua** | `ext/lua/tograph.js`（476 行）+ `omni-lang.js` | `ext/lua/adapter.js`（~200 行） + 公共 lower（删掉 omni-lang.js 那份重复） |
 | **mojo** | `ext/mojo/tograph.js`（363 行） | `ext/mojo/adapter.js`（~150 行） + 公共 lower |
@@ -245,8 +245,8 @@ adapter 本身就是 CST → 标准 IR 的映射，只是写成 JS 函数而不�
 
 ### 第二片：最小的那几门迁移
 
-按从小到大的次序：**awk ✓ → chez ✓ → sbcl ✓ → freebasic ✓ → mojo ✓ → cpp ✓**
-（2026-09-22 六门迁完）→ nim → vlang → go
+按从小到大的次序：**awk ✓ → chez ✓ → sbcl ✓ → freebasic ✓ → mojo ✓ → cpp ✓ → nim ✓**
+（2026-09-22 七门迁完）→ vlang → go
 
 **lua 与 gsl-shell 不迁，直接退出这张表**（2026-09-22）：`.lua` 的主人是那台字节码 VM +
 tier1 JIT（`src/lang/lua.js` 那格插件，`#lang gsl-shell` 也归它），`omni run x.lua` 走的
@@ -279,21 +279,33 @@ tier1 JIT（`src/lang/lua.js` 那格插件，`#lang gsl-shell` 也归它），`o
 - `ty.js` 的 `zeroOf`（含具名记录：引用语义 `cnew`、值语义 `new`）；
 - `sx.js` 补齐了数组五格、记录四格、字典五格。
 
+**nim 那一门带出来的一笔欠款（2026-09-22）**：图那条路上有一格"**同目录下的同语言文件真的
+读进来**"（登记处的 `imports` + `graph/run.js` 的 `also`），新这条路上**没有**——`drive.js`
+明着报 `--pkg/--pkgs/--pkgs-root` 还没接。量过一遍才动手：那一格在 HEAD 上**三门语言全是红的**
+（`tests/graph/modules.js` 0 passed / 7 failed，go 与 vlang 都报 `unbound name: square`，
+nim 把登记处换回 `toGraph` 单独跑也是同一句话）—— 所以这一刀没有拆掉一台在跑的机器。
+可**go 那一门不能这样过去**：它的 `--pkgs` 上挂着 `tests/go` 那 46 份逐字节判据。次序因此定死：
+**多文件那一格要在第四片（go）之前、在公共这条路上重做一遍**（adapter 收一串树，不是一棵）。
+
 ### 第三片：中等的三门
 
-nim → vlang → cpp
+nim ✓ → cpp ✓ → vlang（2026-09-22：cpp 与 nim 都在第二片那一趟里迁完了，只剩 vlang）
 
-每一门同上。cpp 同时扩展更多 C++ 语义。
+每一门同上。
 
 ### 第四片：Go
 
 Go 最后动。它的 adapter 最大（4900 行的 tograph.js 要翻译成 adapter + 公共 lower），
 而且它有 goroutine/channel/select 等特殊语义需要在 adapter 里处理。
 
-1. `ext/go/adapter.js`
-2. 删 `ext/go/tograph.js`
-3. 删 `ext/go/go.mapping`（吸收进 adapter）
-4. **判据**：52/52 包全通、pt 基准逐字节相同
+**动它之前先把"多文件"那一格在公共这条路上做出来**（见第二片末尾那笔欠款）：
+`--pkgs` 上挂着 `tests/go` 那 46 份逐字节判据，没有它 go 过不来。
+
+1. 多文件：`drive.js` 收一串文件，`toIR` 收一串树
+2. `ext/go/adapter/`
+3. 删 `ext/go/tograph.js`
+4. 删 `ext/go/go.mapping`（吸收进 adapter）
+5. **判据**：52/52 包全通、pt 基准逐字节相同
 
 ### 第五片：清理（**graph 整个拆掉**）
 
