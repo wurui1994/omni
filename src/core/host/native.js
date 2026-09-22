@@ -269,10 +269,27 @@ export function runTimeout(ms, msg) {
   return undefined;
 }
 
+/**
+ * **谁在收着输出**（`OMNI_CAPTURE=1`）：常驻工人（`studio/worker.js`）把
+ * `process.stdout.write` 换成了收集器，而 `stdio: 'inherit'` 的孩子**绕过它直接写 fd 1** ——
+ * 那一格在工人里正是 NDJSON 协议的通道。症状（量出来的）：Studio 上 `.asy` 跑出来
+ * `code=0` 而输出是空的（整份 EPS 漏进了协议管子，池子那侧只能把它当坏帧丢掉）。
+ *
+ * 所以这一档下：孩子的两股输出都走 `pipe`，拿到之后**从这一侧的 write 递出去** ——
+ * 于是它落进收集器里；给调用方的那两格照旧空着（`'o'` 与默认两种 mode 本来就是
+ * "已经出去了"的语义，不能改，不然上面那层会把同一段话印两遍）。
+ * stdin 也从 `inherit` 收成 `ignore`：孩子一伸手就会吃掉协议的字节。
+ */
+const CAPTURED = () => env('OMNI_CAPTURE') === '1';
+
 function spawnRun(cmd, argv, mode, feed) {
+  const cap = CAPTURED();
   const stdio = mode === 'c' ? ['ignore', 'pipe', 'pipe']
     : mode === 'o' ? ['ignore', 'inherit', 'pipe']
       : ['inherit', 'inherit', 'inherit'];
+  if (cap) {
+    for (let i = 0; i < 3; i++) if (stdio[i] === 'inherit') stdio[i] = i === 0 ? 'ignore' : 'pipe';
+  }
   if (feed !== null) stdio[0] = 'pipe';
   // maxBuffer 必须显式给：node 的默认是 1 MiB，而 C 侧的实现没有这个上限。
   // `omni bootstrap` 要收下另一代编译器 1.7 MB 的 stdout，默认值会 ENOBUFS。
@@ -289,16 +306,32 @@ function spawnRun(cmd, argv, mode, feed) {
     opts.killSignal = 'SIGTERM';
   }
   const r = node('node:child_process').spawnSync(cmd, argv, opts);
+  /* 收着输出那一档（见 `CAPTURED`）：本来 `inherit` 的那两格现在在手里，递给这一侧的
+     write —— 落进收集器。**递出去的就不再回给调用方**（`'o'` 与默认 mode 的语义是
+     "已经出去了"），不然同一段话会被印两遍。 */
+  const forward = (out, err) => {
+    if (!cap) return [out, err];
+    let o = out;
+    let e = err;
+    if (mode !== 'c') {
+      if (o !== null && o !== undefined && o !== '') { process.stdout.write(o); o = ''; }
+      if (mode !== 'o' && e !== null && e !== undefined && e !== '') { process.stderr.write(e); e = ''; }
+    }
+    return [o === null || o === undefined ? '' : o, e === null || e === undefined ? '' : e];
+  };
   if (r.error !== undefined && r.error !== null) {
     /* 时限那一枪不是"起不来"：node 把它记成 ETIMEDOUT。回 124 —— 与 timeout(1) 同一个
      * 约定，让上面那层能把"超时"和"程序自己失败了"分开说。 */
     if (r.error.code === 'ETIMEDOUT') {
-      return [124, r.stdout === null || r.stdout === undefined ? '' : r.stdout,
-        r.stderr === null || r.stderr === undefined ? '' : r.stderr];
+      const [o, e] = forward(r.stdout, r.stderr);
+      return [124, o, e];
     }
     throw new Error(`cannot spawn: ${r.error.message}`);
   }
-  return [r.status === null ? 128 : r.status, r.stdout === null ? '' : r.stdout, r.stderr === null ? '' : r.stderr];
+  {
+    const [o, e] = forward(r.stdout, r.stderr);
+    return [r.status === null ? 128 : r.status, o, e];
+  }
 }
 
 export function tmpDir() {

@@ -36,6 +36,10 @@
 process.env.OMNI_AS_LIB = '1';
 process.env.OMNI_TIMEOUT = '0';
 process.env.OMNI_BUILD_TIMEOUT = '0';
+/* **有人在收着输出**（`host/native.js` 的 `CAPTURED`）：`spawn` 出去的孩子不许 `inherit`
+   fd 1 —— 那一格在这儿是 NDJSON 协议的通道。漏进去的话池子只能把它当坏帧丢掉，
+   表现成"跑成功了可是没有输出"（`.asy` 与别的会 spawn 的腿都撞过）。 */
+process.env.OMNI_CAPTURE = '1';
 
 const fs = await import('node:fs');
 
