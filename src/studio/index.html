@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>Omni Studio</title>
+<!-- 图标**内联**（data: 的 SVG）：一是浏览器不再去要 `/favicon.ico`（那一格 404 是服务
+     日志里唯一的红字），二是单体 HTML 那一份在 file:// 上也有图标 —— 外链在那条路上取不到。 -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='rgb(20,22,28)'/><circle cx='16' cy='14' r='7.5' fill='none' stroke='rgb(122,178,255)' stroke-width='3'/><rect x='6.5' y='21.5' width='19' height='3' rx='1.5' fill='rgb(122,178,255)'/></svg>">
 <link rel="stylesheet" href="/studio.css">
 </head>
 <body data-mode="show">

@@ -24,6 +24,11 @@ import { langOf, safePath, buildTree, shellToArgv } from '../core/studio/shared.
 import {
   mountFiles, readText, writeText, exists, takeOutput, setArgs, setExitCode, exitCode,
 } from '../core/host/browser.js';
+/* 网页那一侧的纯函数那一半（高亮 / markdown / EPS -> SVG / GLSL）。
+   `studio.js` 平时 `import` 它，可单体 HTML 是一份 `file://` 的文件 ——
+   那条路上 `import './render.js'` 是**跨源请求**，浏览器直接拦掉。
+   所以这儿把它整个挂到 window 上，打包脚本把 `studio.js` 那条 import 改成读这一格。 */
+import * as render from './render.js';
 /** 图那一条腿吃得下的后缀（`borrowedExts()` 是权威，不在这儿抄第二张表）。 */
 let GRAPH_EXTS = null;
 function graphExts() {
@@ -136,6 +141,7 @@ if (typeof window !== 'undefined') {
   mountFiles(window.__OMNI_VFS ?? {});
   window.__OMNI_LOCAL = localApi;
   window.__OMNI_BACKENDS = graphBackendNames();
+  window.__OMNI_RENDER = render;
 }
 
 export { localApi, runArgv };

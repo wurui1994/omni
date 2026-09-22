@@ -204,8 +204,38 @@ function toRegistryBody(id, src) {
   return `${out}\n${reg}\n`;
 }
 
-/* ------------------------------------------------------ 虚拟文件系统那张表 */
+/* ------------------------------------------------------------- UI 那一份 */
 
+/**
+ * `studio.js` 拼进去之前要动的**唯一一处**：它 `import` 的那份 `render.js`。
+ *
+ * 为什么必须动：单体 HTML 是一份 `file://` 的文件，而 `import './render.js'` 在那条路上
+ * 是**跨源请求**（`已拦截跨源请求：…（原因：CORS 请求不是 http）`）—— 页面白着开不起来。
+ * UI 这一份又不能进上面那张登记表：它跟编译器那一侧是两个 `<script type="module">`
+ * （`__req` 在这一格里看不见），而且它得留着 `import` 那条写法给 `omni serve` 用。
+ *
+ * 于是：`browser-main.js` 把 `render.js` 整个挂在 `window.__OMNI_RENDER` 上，这儿把
+ * `import { a, b } from './render.js'` 改成 `const { a, b } = window.__OMNI_RENDER;`。
+ * 别的说明符一律红着停 —— UI 再多一条 import 时要在这儿做个决定，而不是半夜白屏。
+ */
+function uiScript(src) {
+  return src.replace(new RegExp(FROM_SRC, 'g'), (all, ind, kw, clause, spec) => {
+    if (!spec.endsWith('/render.js')) {
+      throw new Error(`studio.js 里多了一条 import：${all.trim()}\n`
+        + '  单体那一份不经登记表，要么挂到 window 上（像 render.js 那样），要么别用。');
+    }
+    const braced = clause.match(/^\{([\s\S]*)\}$/);
+    if (braced === null) throw new Error(`studio.js: 不认的 import 形状 —— ${all.trim()}`);
+    const binds = braced[1].split(',').map((x) => x.trim()).filter((x) => x.length > 0)
+      .map((p) => {
+        const as = p.split(/\s+as\s+/);
+        return as[1] === undefined ? as[0].trim() : `${as[0].trim()}: ${as[1].trim()}`;
+      });
+    return `${ind}const { ${binds.join(', ')} } = window.__OMNI_RENDER;`;
+  });
+}
+
+/* ------------------------------------------------------ 虚拟文件系统那张表 */
 /** 白名单：与 `src/core/studio/shared.js` 的 `TREE_ROOTS` 同一套形状（那儿是权威）。
  *
  * 多一棵**语法文件**：`ext/<lang>/*.grammar` 不进目录树（那是给人看例子的），可图那条腿
@@ -215,8 +245,9 @@ const VFS_ROOTS = [
   { path: 'docs', exts: ['.md'] },
   { path: 'ext', exts: ['.grammar'] },
   { path: 'ext', exts: ['.go', '.nim', '.v', '.lua', '.mojo', '.cpp', '.bas', '.awk',
-    '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx'], only: 'examples' },
-  { path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag'], only: 'cases' },
+    '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html'], only: ['examples'] },
+  { path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag'],
+    only: ['cases', 'draw'] },
 ];
 
 const extOf = (p) => (p.lastIndexOf('.') < 0 ? '' : p.slice(p.lastIndexOf('.')));
@@ -228,7 +259,7 @@ function collectVfs() {
     const abs = join(ROOT, rel);
     if (!statSync(abs).isDirectory()) {
       if (!spec.exts.includes(extOf(rel))) return;
-      if (spec.only !== undefined && !rel.includes(`/${spec.only}/`)) return;
+      if (spec.only !== undefined && !spec.only.some((o) => rel.includes(`/${o}/`))) return;
       files[rel] = readFileSync(abs, 'utf8');
       return;
     }
@@ -236,12 +267,27 @@ function collectVfs() {
       if (nm.startsWith('.')) continue;
       const sub = `${rel}/${nm}`;
       if (spec.only !== undefined && statSync(join(ROOT, sub)).isDirectory()
-        && sub.split('/').length === 3 && nm !== spec.only) continue;
+        && sub.split('/').length === 3 && !spec.only.includes(nm)) continue;
       walk(sub, spec, depth + 1);
     }
   };
   for (const spec of VFS_ROOTS) walk(spec.path, spec, 0);
   return files;
+}
+
+/**
+ * 文件表写成 JS 字面量。**每个 `<` 都写成 `\u003c`**。
+ *
+ * 不是洁癖：HTML 的解析器在 `<script>` 里见着 `</script` 就把这一格收掉 —— 而
+ * `ext/html/examples/02-canvas.html` 是一份**真的网页**，里头就有一个。那一下的表现是
+ * 整份单体 HTML 从文件表那一行起全部当 HTML 读，页面白屏、控制台一句
+ * `SyntaxError: Invalid or unexpected token`。踩过一次（2026-09-22 加 html 例子那天）。
+ *
+ * 为什么只转义文件表、不转义代码：JSON 里的 `<` 全在字符串里，换成 `\u003c` 语义不变；
+ * 代码里的 `<` 有比较运算，换了就是语法错。代码那一段改用**闸**来管（见 `main`）。
+ */
+function vfsText(files) {
+  return JSON.stringify(files).replace(/</g, '\\u003c');
 }
 
 /* ------------------------------------------------------------------ 拼那一份 */
@@ -262,7 +308,7 @@ function main() {
   const vfs = collectVfs();
   const html = readFileSync(join(ROOT, 'src', 'studio', 'index.html'), 'utf8');
   const css = readFileSync(join(ROOT, 'src', 'studio', 'studio.css'), 'utf8');
-  const ui = readFileSync(join(ROOT, 'src', 'studio', 'studio.js'), 'utf8');
+  const ui = uiScript(readFileSync(join(ROOT, 'src', 'studio', 'studio.js'), 'utf8'));
 
   const loader = [
     'const __M = {};',
@@ -282,9 +328,19 @@ function main() {
   const bundleJs = [
     loader,
     ...mods,
-    `window.__OMNI_VFS = ${JSON.stringify(vfs)};`,
+    `window.__OMNI_VFS = ${vfsText(vfs)};`,
     `__req(${JSON.stringify(ENTRY)});`,
   ].join('\n');
+
+  /* **代码那一段里不许出现 `</script`**：HTML 的解析器见着它就把这一格 script 收了，
+     后半截当 HTML 读 —— 页面当场白屏。文件表那一半已经在 `vfsText` 里转义过了
+     （`ext/html/examples/02-canvas.html` 里就有一个），这儿只剩代码那一半。 */
+  for (const seg of [...mods, ui]) {
+    if (seg.includes('</script')) {
+      throw new Error('拼进去的代码里有 `</script`（HTML 会在那儿把 script 收掉）：\n'
+        + `  …${seg.slice(Math.max(0, seg.indexOf('</script') - 60), seg.indexOf('</script') + 20)}…`);
+    }
+  }
 
   /* 两处替换都走**函数**形态的 replacer，不能给字符串：`$'` / `` $` `` / `$&` 在替换串里
      是特殊记号，而拼进去的正是一整个编译器（满地 `$js_*` 与模板串）。

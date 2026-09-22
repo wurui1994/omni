@@ -41,9 +41,20 @@ execFileSync('node', [join(root, 'tools', 'bundle-studio.mjs'), '-o', out],
 const html = readFileSync(join(root, out), 'utf8');
 
 ok('拼出一份 HTML', html.length > 100000, `${html.length} 字节`);
-ok('CSS 内联了（没有外链）', html.includes('<style>') && !html.includes('<link'));
+/* **外链一格都不许剩**：`file://` 上取外部文件是跨源请求，浏览器直接拦
+   （`已拦截跨源请求：…（原因：CORS 请求不是 http）`）。判的是"有没有 href 指向别的文件"，
+   不是"有没有 `<link>`" —— 图标那一格是 `data:` 的内联 SVG，它不取任何东西。 */
+const links = html.match(/<link[^>]*>/g) ?? [];
+ok('CSS 内联了（没有外链）', html.includes('<style>')
+  && links.every((l) => /href="data:/.test(l)), links.join(' ').slice(0, 200));
 ok('JS 内联了（没有外链）', !html.includes('src="/studio.js"'));
 ok('内联了文件表', html.includes('window.__OMNI_VFS'));
+/* **`</script>` 只许有两个**（编译器那一段 + UI 那一段）。
+   多出来的那个会把 script 提前收掉，后半截当 HTML 读 —— 页面白屏。
+   来源是内联的**数据**：`ext/html/examples/02-canvas.html` 是一份真网页，里头就有一个。
+   闸在 `tools/bundle-studio.mjs` 的 `vfsText`（`<` 一律写成 `\u003c`）。 */
+const nEnd = (html.match(/<\/script>/g) ?? []).length;
+ok('`</script>` 恰好两个（文件表没把 script 收掉）', nEnd === 2, `出现 ${nEnd} 次`);
 
 /* ---------------------------------------------------------------- 2. 不依赖 node */
 
@@ -70,6 +81,23 @@ const codeNoPrelude = PRELUDE_AT < 0 ? code
 ok('内联了 prelude（那一格是数据，不是代码）', PRELUDE_AT >= 0);
 const nBuiltin = codeNoPrelude.split('getBuiltinModule').length - 1;
 ok('除 prelude 之外没有 getBuiltinModule', nBuiltin === 0, `出现 ${nBuiltin} 次`);
+
+/**
+ * **UI 那一段也不许 import**（2026-09-22 漏过一次）。
+ *
+ * `studio.js` 把纯函数那一半分出去成了 `render.js`，于是它多了一条 `import … from
+ * './render.js'` —— 服务那条路上没事，`file://` 上那是跨源请求，页面白着开不起来。
+ * 上面第 3 节跑的是**第一段**（编译器那一侧），碰不到这一格，所以这儿单独判：
+ * 拼出来的 UI 段里一条 import 都不许有，并且它得是从 `window.__OMNI_RENDER` 拿的
+ * （`tools/bundle-studio.mjs` 的 `uiScript`）。
+ */
+{
+  const ua = html.indexOf('<script type="module">', html.indexOf('window.__OMNI_VFS'));
+  const uiSeg = ua < 0 ? '' : html.slice(ua, html.indexOf('</script>', ua));
+  ok('UI 那一段一条 import 都没有', uiSeg.length > 1000 && !/(?:^|\n)[ \t]*import[\s({'"]/.test(uiSeg),
+    (uiSeg.match(/(?:^|\n)[ \t]*import[\s({'"][^\n]*/) ?? ['段子没找到'])[0]);
+  ok('UI 那一段从 window 上拿 render', uiSeg.includes('window.__OMNI_RENDER'));
+}
 
 /* ---------------------------------------------------------------- 3. 真能跑 */
 
