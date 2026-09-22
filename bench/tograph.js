@@ -16,7 +16,7 @@
 // 语料由每门语言自己说：`ext/<语言>/bench.json` 的 **`selfhost`** 那一格（"它自己的编译器
 // 在哪棵子树下"）。没有那一格就跳过并说清 —— 与 grammars.js 同一条纪律。
 //
-//   node bench/tograph.js              三门都跑
+//   node bench/tograph.js              还在图上的那几门都跑（ADR-0044 之后只剩 go）
 //   node bench/tograph.js nim          只跑一门
 //   node bench/tograph.js --limit 200  每门最多跑这么多份（改映射的时候快看一眼）
 //   node bench/tograph.js --walls 20   墙那一栏印前几条
@@ -428,7 +428,7 @@ for (const lang of names) {
 }
 
 if (rows.length === 0) {
-  process.stdout.write('一门都没量到（`selfhost` 那一格只有 go / nim / vlang 三门有）。\n');
+  process.stdout.write('一门都没量到（`selfhost` 那一格 + 还在图上的 `toGraph` 两样都要有；ADR-0044 之后只剩 go）。\n');
 } else {
   process.stdout.write('语言      文件    解析过        落成图      取字段调       字节    用时  子树\n');
   for (const [lang, r] of rows) {
@@ -456,7 +456,7 @@ if (rows.length === 0) {
   if (tot.size > 0) {
     const all = [...tot.entries()].sort((a, b) => b[1] - a[1]);
     const sum = all.reduce((a, [, n]) => a + n, 0);
-    process.stdout.write(`\n三门合起来，没落成图的那 ${sum} 份卡在哪几族上：\n`);
+    process.stdout.write(`\n量到的这 ${rows.length} 门合起来，没落成图的那 ${sum} 份卡在哪几族上：\n`);
     for (const [c, n] of all) {
       process.stdout.write(`  ${String(n).padStart(5)} ${pct(n, sum).padStart(7)}  ${c}\n`);
     }
