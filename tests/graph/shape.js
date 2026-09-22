@@ -25,6 +25,15 @@ import { node, lit, program } from '../../src/core/graph/graph.js';
 import { backends } from '../../src/core/graph/contract.js';
 import { evalGraph } from '../../src/core/graph/eval.js';
 import { LANGS } from '../../src/core/graph/langs.js';
+/* **这一格要的语言已经迁到公共降级器了**（ADR-0044 §1.6：图那一层整个要拆）——
+   它判的是图的 pass，而那门语言在图这一层不存在了。所以**有名有姓地跳过**：
+   不假装绿，也不崩在"找不到那门语言"上。整层拆掉那天这份文件跟着退役。 */
+if (!LANGS.has('lua')) {
+  process.stdout.write('  skip shape.js：lua 已迁到公共降级器（ADR-0044），这一格随图一起退役\n');
+  process.stdout.write('\n0 passed, 0 failed（整格跳过，有名有姓）\n');
+  process.exit(0);
+}
+
 
 const HERE = new URL('.', import.meta.url).pathname;
 const ROOT = `${HERE}../../`;

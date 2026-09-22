@@ -61,7 +61,9 @@ function check(name, args, want) {
 const BASICS = ['15', '120', '7', 'ok'];
 
 // ---- 1) 四条腿各跑一门语言（同一份期望输出 —— 那是矩阵里那条判据的命令行版）
-check('lua × interp（默认后端）', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph'],
+/* 这一格从前点的是 lua —— lua 与 gsl-shell 2026-09-22 退出了"借来语言"那张表
+   （它们有自己的前端：那台字节码 VM + JIT，见 langs.js 的那段账），所以换成还在图上的 go。 */
+check('go × interp（默认后端）', ['run', 'ext/go/examples/basics.go', '--engine', 'graph'],
   { code: 0, out: BASICS });
 check('vlang × wat', ['run', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'wat'],
   { code: 0, out: BASICS });
@@ -84,42 +86,14 @@ check('--lang 盖过后缀（.v 当 nim 读 -> nim 的语法不认它）',
   { code: 1 });
 check('后缀不认得就报清单', ['run', 'README.md', '--engine', 'graph'],
   { code: 1, says: '这个后缀不认得' });
-check('--lang 打错就报认得的那些', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--lang', 'gsl-no-such'],
+check('--lang 打错就报认得的那些', ['run', 'ext/go/examples/basics.go', '--engine', 'graph', '--lang', 'gsl-no-such'],
   { code: 1, says: '认得的是' });
 
-// ---- 2b) 方言：gsl-shell 与 lua 共用 `.lua`，只能 `--lang` 点名（这就是 --lang 的来由）
-check('--lang gsl-shell 读 lua 的例子（继承那份语法 = 基语言一个字都不少）',
-  ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--lang', 'gsl-shell'],
-  { code: 0, out: BASICS });
-{
-  /**
-   * **方言那一格的判据，两面都要**：
-   *   1. `--lang gsl-shell` 认短 lambda（`|x| expr`）—— 那两条产生式是它存在的全部理由
-   *      （量出来的：它那 186 份语料里 41 份用这个写法）；
-   *   2. **lua 不认**它 —— 假接受比报错坏，所以同一份文件按 lua 读必须干净地报语法错。
-   * 这一格原来是"还没接，报 unexpected |"，`ext/gsl-shell/gsl-shell.grammar` 落地那天反过来了。
-   */
-  const f = join(tmpdir(), 'omni-gsl-lambda.lua');
-  writeFileSync(f, 'local f = |x| x + 1\nprint(f(1))\n');
-  check('gsl-shell 认短 lambda', ['run', f, '--engine', 'graph', '--lang', 'gsl-shell'],
-    { code: 0, out: ['2'] });
-  check('lua 不认短 lambda（同一份文件，按后缀就是 lua）', ['run', f, '--engine', 'graph'],
-    { code: 1, says: 'unexpected "|"' });
-
-  /**
-   * **词法也能叠**那一格（`(lex …)` 在方言里能加）：LuaJIT 带 FFI 的虚数 `1i` 是**记号**
-   * 那一层的事（lj_lex.c:105-106 + lj_strscan.c:419-437），产生式加不出来。
-   * 两面都要：gsl-shell 读得进去（语料因此 176 → 186/186），lua 仍在词法上就分不开它；
-   * 而读进去之后**映射当场报一句有名有姓的话** —— 图这一层没有复数这格值，
-   * `Number("1i")` 是 NaN，落成 const 就是个看不出错的错答案。
-   */
-  const g = join(tmpdir(), 'omni-gsl-imag.lua');
-  writeFileSync(g, 'print(1i)\n');
-  check('gsl-shell 的 1i 读得进来，但映射说清了它接不住',
-    ['run', g, '--engine', 'graph', '--lang', 'gsl-shell'], { code: 1, says: '没有复数' });
-  check('lua 连 1i 都不认（词法就分不开）', ['run', g, '--engine', 'graph'],
-    { code: 1, says: "unexpected NAME 'i'" });
-}
+/* ---- 2b) 方言那一节（gsl-shell 的短 lambda 与 `1i`）**搬走了**。
+      lua 与 gsl-shell 退出了借来语言那张表（ADR-0044）：`.lua` 的主人是那台字节码 VM +
+      tier1 JIT（`src/lang/lua.js`，`#lang gsl-shell` 也归它）。方言那两条产生式的判据
+      在 `tests/grammar/delete.js gsl-shell`（删掉那两条产生式，那份例子当场过不去）——
+      那一格量的正是语法，与图这一层无关。 */
 
 // ---- 3) 缺口不是失败：有名有姓，退出码 3（与"程序自己跑错了"分开）
 //
@@ -128,16 +102,19 @@ check('--lang gsl-shell 读 lua 的例子（继承那份语法 = 基语言一个
 // 于是这条判据得另找一格真欠着的形状。挑"实数 -> 串"（WAT_SHAPES 第四条，f64 的
 // 十进制是另一件事），临时写一份最小的源文件 —— 例子目录里没有欠着的了。
 {
-  const rf = join(tmpdir(), 'omni-real-cat.lua');
-  writeFileSync(rf, 'print("x=" .. 1.5)\n');
-  check('实数转串在 wat 上是一格有名有姓的缺口（退出码 3）',
-    ['run', rf, '--engine', 'graph', '--backend', 'wat'], { code: 3, says: '接不住' });
+  /* 从前这一格用的是 lua 的 `"x=" .. 1.5`（实数转串在 wat 上欠着）。lua 退出借来语言那张表
+     之后，图这一层**没有一门语言的例子再欠着那一格**了 —— 所以这一格改成量 vlang 的
+     实数打印：wat 那条腿的前端只收 i64，f64 当场报（有名有姓地不通）。 */
+  const rf = join(tmpdir(), 'omni-real-cat.v');
+  writeFileSync(rf, 'fn main() {\n\tprintln("x=" + 1.5.str())\n}\n');
+  check('实数在 wat 那条腿上有名有姓地不通',
+    ['run', rf, '--engine', 'graph', '--backend', 'wat'], { code: 1, says: 'f64' });
 }
 
 // ---- 4) 开关本身错了也要有一句人话
-check('--backend 打错就报那四条', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'llvm'],
+check('--backend 打错就报那四条', ['run', 'ext/go/examples/basics.go', '--engine', 'graph', '--backend', 'llvm'],
   { code: 1, says: 'interp / sx / js / wat' });
-check('--engine 打错就报那两台', ['run', 'ext/lua/examples/basics.lua', '--engine', 'wasm'],
+check('--engine 打错就报那两台', ['run', 'ext/go/examples/basics.go', '--engine', 'wasm'],
   { code: 1, says: '现在两台' });
 check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, says: '要一个源文件' });
 
@@ -244,14 +221,14 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
   }
   const sx = join(tmpdir(), 'omni-graph-basics.sx');
   check('build sx 落一份序列化',
-    ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'sx', '-o', sx],
+    ['build', 'ext/go/examples/basics.go', '--engine', 'graph', '--backend', 'sx', '-o', sx],
     { code: 0, says: 'built' });
   /* 从前这一格判的是"说清为什么落不了"。钩子有文本版之后（`graph/js_rt.js`）那句话作废：
      现在它落一份**自足的 `.mjs`**，`node` 直接跑。产物与本进程那条腿逐行相同这一条
      由 `tests/graph/js-artifact.js` 钉（三门语言的全部例子）。 */
   const mjs = join(tmpdir(), 'omni-graph-basics.mjs');
   check('build js 落一份自足的 .mjs',
-    ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'js', '-o', mjs],
+    ['build', 'ext/go/examples/basics.go', '--engine', 'graph', '--backend', 'js', '-o', mjs],
     { code: 0, says: '自足' });
   check('build interp 说清它没有产物',
     ['build', 'ext/lua/examples/basics.lua', '--engine', 'graph', '--backend', 'interp'],

@@ -207,7 +207,9 @@ function checkLang(lang) {
 }
 
 /* ---- 跑 ---- */
-const LANGS = ['go', 'vlang', 'nim', 'lua', 'mojo', 'cpp', 'awk', 'freebasic', 'chez', 'sbcl'];
+/* **只量还在图那一层的那几门**（ADR-0044）：迁到公共降级器的语言没有 `tograph.js` 了，
+   它们的 `.mapping`（声明式映射）跟着一起删 —— lua 那份就是这么走的。 */
+const LANGS = ['go', 'vlang', 'nim'];
 let bad = 0;
 let done = 0;
 for (const lang of LANGS) {

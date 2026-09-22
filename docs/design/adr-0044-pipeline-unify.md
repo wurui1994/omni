@@ -245,7 +245,15 @@ adapter 本身就是 CST → 标准 IR 的映射，只是写成 JS 函数而不�
 
 ### 第二片：最小的那几门迁移
 
-按从小到大的次序：**awk ✓ → chez ✓ → sbcl ✓ → freebasic ✓**（2026-09-22 四门迁完）→ mojo → lua
+按从小到大的次序：**awk ✓ → chez ✓ → sbcl ✓ → freebasic ✓ → mojo ✓ → cpp ✓**
+（2026-09-22 六门迁完）→ nim → vlang → go
+
+**lua 与 gsl-shell 不迁，直接退出这张表**（2026-09-22）：`.lua` 的主人是那台字节码 VM +
+tier1 JIT（`src/lang/lua.js` 那格插件，`#lang gsl-shell` 也归它），`omni run x.lua` 走的
+一直是它。图那一层里 `ext/lua/tograph.js`（476 行）+ `ext/gsl-shell/tograph.js`（17 行）
+是**第二份实现**，而且在 HEAD 上就是红的（`lua->graph: 这一格还没接：sumto`、gsl-shell 的
+语法在图那条路上炸）。所以它们跟着这一版删掉，不补 adapter —— 一门语言有自己的前端时，
+"借来"那条路不该再有它。`ext/lua/lua.mapping` 与 `tests/lib/mapping-check.js` 里那一行跟着走。
 
 每一门：
 1. 写 `ext/<lang>/adapter.js`（**内容多的语言不许堆在一份文件里** —— 见下面那条）

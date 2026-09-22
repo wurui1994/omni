@@ -377,16 +377,16 @@ export const CASES = [
   // 第一个家族：含全部基础要素的完整例子（九门全有）
   ...fam('basics', BASICS, ALL),
   // 第二个家族：多值（生产侧 values / 消费侧一串 pick）
-  ...fam('multi', MULTI, ['lua', 'go']),
+  ...fam('multi', MULTI, ['go']),
   // 第三个家族：作用域出口（go/V/nim 的 defer 与 CL 的 unwind-protect 同一格节点）
-  ...fam('defer', DEFER, ['go', 'sbcl', 'vlang', 'nim', 'mojo', 'freebasic', 'cpp', 'lua']),
+  ...fam('defer', DEFER, ['go', 'sbcl', 'vlang', 'nim', 'mojo', 'freebasic', 'cpp']),
   // 第四个家族：记录（**六门六种写法**，落同一格 record-new）——
   // sbcl 那一份的难处与别人不同：字段名是 `(defstruct point x y)` 一句话生成的一族名字
-  ...fam('record', RECORD, ['go', 'lua', 'vlang', 'nim', 'cpp', 'sbcl', 'chez', 'freebasic', 'mojo']),
+  ...fam('record', RECORD, ['go', 'vlang', 'nim', 'cpp', 'sbcl', 'chez', 'freebasic', 'mojo']),
   // 第五个家族：列表与下标（七个提供者 —— 两门 Lisp 的向量写起来像函数调用）
-  ...fam('index', INDEX, ['go', 'lua', 'vlang', 'nim', 'chez', 'sbcl', 'mojo', 'cpp', 'freebasic']),
+  ...fam('index', INDEX, ['go', 'vlang', 'nim', 'chez', 'sbcl', 'mojo', 'cpp', 'freebasic']),
   // 第六个家族：循环的早退（break / continue 落同一格，差的只有 kind；lua 只有 break）
-  ...fam('loopexit', LOOPEXIT, ['go', 'lua', 'vlang', 'nim', 'mojo', 'cpp', 'awk', 'freebasic']),
+  ...fam('loopexit', LOOPEXIT, ['go', 'vlang', 'nim', 'mojo', 'cpp', 'awk', 'freebasic']),
   // 第七个家族：**四条腿都跑得动的那个子集**（只有整数 / 函数 / if / while）
   ...fam('intmath', INTMATH, ALL),
   // 第八个家族：表示转换（五门语言的转换在树上**都是调用的形状** —— 靠名字表分开）
@@ -403,18 +403,18 @@ export const CASES = [
   // 第十二个家族：map / dict 那四格（键是值、缺键报错、默认值归语言）
   // cpp 是最后进来的一门，标记是**声明那一行**（`std::map<K,V> m;`）：库名由例子自己
   // 前向声明（这一门不做预处理），`count` 在条件里就是"在不在"。九门写法各不相同。
-  ...fam('dict', DICT, ['go', 'vlang', 'awk', 'nim', 'lua', 'chez', 'sbcl', 'mojo', 'cpp']),
+  ...fam('dict', DICT, ['go', 'vlang', 'awk', 'nim', 'chez', 'sbcl', 'mojo', 'cpp']),
   // 第十三个家族：串接（四种写法一格内建）—— 它同时钉住字符串在线性内存里的布局
-  ...fam('strcat', STRCAT, ['lua', 'go', 'vlang', 'nim']),
+  ...fam('strcat', STRCAT, ['go', 'vlang', 'nim']),
   // 第十四个家族：**数 -> 串**（lua 隐式落 concat、nim 显式落 conv —— 两格节点，一份输出）
-  ...fam('numstr', NUMSTR, ['lua', 'nim']),
+  ...fam('numstr', NUMSTR, ['nim']),
   // 第十五个家族：**对象构造 vs 命名实参**（nim 独有）—— 钉的是"那笔账记错了"：
   // 两者在调用实参这个位置上不同形，判"是不是类型"扫一遍 type 段就够
   ...fam('namedarg', NAMEDARG, ['nim']),
   // 第十六个家族：**方法**（接收者在声明里写着 ⇒ 单态分派 ⇒ 图上只多一格实参）。
   // 各门写法差得远（nim 的 UFCS 是纯改写、go 的接收者写在 `func (p Point)` 那一格里），
   // 落到的却全是现成的 call + func —— 这一族把"不给新节点"那句话变成判据。
-  ...fam('method', METHOD, ['nim', 'go', 'vlang', 'mojo', 'lua']),
+  ...fam('method', METHOD, ['nim', 'go', 'vlang', 'mojo']),
   // 第十七个家族：**CL 独有的早退形状**（从带名字的块里返回）。单开一族的理由与
   // `deferarg` 同一条：别的九门写不出这个形状 —— 而它落到的节点一格新的都没加
   // （循环里的 `(return)` 落 break、defun 里的 `(return-from f v)` 落 ret）。
@@ -450,7 +450,7 @@ export const CASES = [
   // 第二十四个家族：**一元算子**（lua + awk）。这一族的来历与别的都不同 ——
   // 它是**另一格判据**（`tests/graph/deadcase.js`）算出来的：那两门的 `case 'un'` 接的
   // 标签语法出不来，所以 `-x` / `not x` / `#s` 从来没落成过图。有了这一族才押得住。
-  ...fam('unary', UNARY, ['lua', 'awk']),
+  ...fam('unary', UNARY, ['awk']),
   // 第二十五、二十六个家族：**match** 与 **for … in**（V 独一份）。与 go 那两刀是同一个
   // 形状（branch 链 / counted），差别正是"归语言的那几条"：match 还是**表达式**、
   // `for x in xs` 里 x 是**元素**不是下标、`0..4` 是区间。

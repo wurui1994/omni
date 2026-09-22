@@ -23,6 +23,11 @@ import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
 import { readText } from '../../src/core/host/native.js';
 import { backends, Gap } from '../../src/core/graph/contract.js';
 import { CASES } from './cases.js';
+/* **这三格量的是 lua 那份产物的序言**（`strcat.lua` / `dict.lua` / `basics.lua`），
+   而 lua 已经迁出图那一层了（ADR-0044 §1.6：图整层要拆）—— 有名有姓地跳过那三格，
+   第 2 条（"不许漏留"，走全部例子）照旧量。 */
+const HAS_LUA = CASES.some((c) => c.name === 'lua');
+
 
 const HERE = new URL('.', import.meta.url).pathname;
 const ROOT = `${HERE}../../`;
@@ -30,6 +35,12 @@ let pass = 0;
 let fail = 0;
 const ok = (s) => { pass++; process.stdout.write(`  ok   ${s}\n`); };
 const no = (s, why) => { fail++; process.stdout.write(`  FAIL ${s}\n       ${why}\n`); };
+/** 那门语言迁出图那一层之后，这一格**有名有姓地跳过**（不计分、也不假装绿）。 */
+let skipped = 0;
+const skipLua = (what) => {
+  skipped += 1;
+  process.stdout.write(`  skip ${what}：lua 已迁到公共降级器（ADR-0044），这一格随图一起退役\n`);
+};
 
 const cBack = backends().find((b) => b.name === 'c');
 const MARK = '/* ---- 编译期就知道的那几格常量';
@@ -79,7 +90,8 @@ const one = (name) => {
   if (t === undefined) { no(`裁〔${name}〕`, '这份例子没出 C（缺口？名字改了？）'); return null; }
   return t;
 };
-{
+if (!HAS_LUA) skipLua('裁得动（strcat）');
+else {
   const t = one('lua+strcat');
   if (t !== null) {
     const lines = t.split('\n').length;
@@ -97,15 +109,17 @@ const one = (name) => {
     else no('strcat〔行数〕', `${lines} 行 —— 序言是不是又胖回去了`);
   }
 }
-{
+if (!HAS_LUA) skipLua('该留的留（dict）');
+else {
   const t = one('lua+dict');
   if (t !== null) {
     if (t.includes('g_map_new')) ok('dict〔用得着 map 那一族，就留着〕');
     else no('dict〔map 那一族〕', 'map 那一族被裁掉了 —— 这一份用得着它');
   }
 }
-{
-  /* 那份「含全部基础要素的完整例子」在 `cases.js` 里就叫 `lua`（没有后缀）。 */
+/* 那份「含全部基础要素的完整例子」在 `cases.js` 里就叫 `lua`（没有后缀）。 */
+if (!HAS_LUA) skipLua('basics 那份的行数账');
+else {
   const t = one('lua');
   if (t !== null) {
     const lines = t.split('\n').length;
@@ -115,7 +129,8 @@ const one = (name) => {
 }
 
 // ---- 第一节那一行：**按源码长起来的那一段**不许比源码大（shrink 文档的目标那一句）
-{
+if (!HAS_LUA) skipLua('basics 那一段不许比源码大');
+else {
   const t = one('lua');
   if (t !== null) {
     const src = readText(`${ROOT}ext/lua/examples/basics.lua`);
@@ -140,5 +155,5 @@ const one = (name) => {
   }
 }
 
-process.stdout.write(`\n${pass} passed, ${fail} failed（序言按用到的族裁：裁得动 · 不许漏留 · 该留的留）\n`);
+process.stdout.write(`\n${pass} passed, ${fail} failed${skipped === 0 ? '' : `, ${skipped} skipped（有名有姓）`}（序言按用到的族裁：裁得动 · 不许漏留 · 该留的留）\n`);
 if (fail > 0) process.exit(1);

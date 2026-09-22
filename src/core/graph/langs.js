@@ -24,8 +24,6 @@ import { OmniError } from '../source/diag.js';
 /* "镜像在哪儿"这一格由宿主答（封闭 ABI 的 `js_install_dir`）—— 见 `treeRoot()` 那段账。 */
 import { installDir, exists } from '../host/native.js';
 
-import { luaToGraph } from '../../../ext/lua/tograph.js';
-import { gslShellToGraph } from '../../../ext/gsl-shell/tograph.js';
 import { goToGraph, goImports } from '../../../ext/go/tograph.js';
 import { GO_RT } from '../../../ext/go/go-rt.js';
 import { vlangToGraph, vlangImports } from '../../../ext/vlang/tograph.js';
@@ -99,15 +97,13 @@ export function treeRoot() {
 export const LANGS = new Map([
   ['chez', { grammar: 'ext/chez/chez.grammar', toIR: chezToIR, exts: ['ss', 'scm'] }],
   ['sbcl', { grammar: 'ext/sbcl/sbcl.grammar', toIR: sbclToIR, exts: ['lisp', 'cl'] }],
-  ['lua', { grammar: 'ext/lua/lua.grammar', toGraph: luaToGraph, exts: ['lua'] }],
-  // 方言：语法是"继承 lua 那份 + 两条产生式"（`(extends …)`，见 glr/load.js），
-  // 映射一个字不改地借 lua 的。后缀仍是 `.lua`，但**不参与猜** —— 只能 --lang 点名。
-  // 量出来的账面（`/Users/wurui/Train/gsl-shell` 那 186 份 .lua）：拿 lua 的语法 139/186，
-  // 加两条产生式 176/186，再叠上那一格词法（LuaJIT 的 `1i`）**186/186**。
-  ['gsl-shell', {
-    grammar: 'ext/gsl-shell/gsl-shell.grammar', toGraph: gslShellToGraph,
-    exts: ['lua'], guess: false, extends: 'lua',
-  }],
+  /* **lua 与 gsl-shell 不在这张表里了**（ADR-0044，2026-09-22）：
+     `.lua` 的主人是那台字节码 VM + tier1 JIT（`src/lang/lua.js` 那格插件，ADR-0037 的
+     `#lang gsl-shell` 也归它），比这边的映射全得多 —— `omni run x.lua` 走的一直是它。
+     图那一层里那份 `ext/lua/tograph.js`（476 行）与 `ext/gsl-shell/tograph.js`（17 行，
+     代理 lua）是**第二份实现**，而且在 HEAD 上就是红的（`lua->graph: 这一格还没接：sumto`、
+     gsl-shell 的语法在图那条路上炸）。所以它们跟着这一版直接删掉，不补 adapter：
+     一门语言有自己的前端时，"借来"那条路不该再有它。 */
   /* `imports` 是**可选**的一格（第一百五十一片第二格）：这门语言答"这份文件 import 了什么"。
      给了它，驱动那一层就能把**同目录下的同语言文件**真的读进来（`run.js` 的 `graphOf`）；
      不给就是老样子（import 那一行由映射自己丢掉 —— 标准库那几格靠映射接）。
