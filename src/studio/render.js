@@ -405,3 +405,25 @@ export function glslSizeOf(src) {
   return m === null ? 256 : Number(m[1]);
 }
 
+/**
+ * 某一格 uniform **在源码里声明成什么类型**（没有那一格回 `null`）。
+ *
+ * 为什么要问类型而不是照一种喂：同一件事在两套惯例里类型不同 —— Shadertoy 的
+ * `iMouse` 是 `vec4`（xy 当前位置、zw 按下的位置），而自己写的多半是 `vec2 u_mouse`；
+ * 帧号那格有人写 `int iFrame`、有人写 `float u_frame`。喂错类型不是"值不对"，
+ * 是 `gl.uniform2f` 打在 vec4 上 —— WebGL 直接报 `INVALID_OPERATION`，整张图不画。
+ * 所以这一格照源码定，`glslRun` 按它选 `uniform2f` / `uniform4f` / `uniform1i` / `uniform1f`。
+ *
+ * 只认最朴素的那一行（`uniform <类型> <名字>;`，中间可以有 `highp` 那种限定符）——
+ * 这棵树里的例子都是那么写的，猜更复杂的形态只会把判据变软。
+ */
+export function glslDeclType(src, names) {
+  for (const n of names) {
+    const re = new RegExp(`uniform\\s+(?:(?:lowp|mediump|highp)\\s+)?(\\w+)\\s+${n}\\s*[;[]`);
+    const m = re.exec(src);
+    if (m !== null) return m[1];
+  }
+  return null;
+}
+
+

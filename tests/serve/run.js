@@ -22,7 +22,8 @@ import { natCompare, byIdeOrder } from '../../src/core/studio/shared.js';
    GLSL 的源码修修）。它一个 DOM 都不碰，所以在这儿直接 import 就能判 ——
    不必拉一套无头浏览器进来。 */
 import {
-  highlight, mdToHtml, epsToSvg, drawKindOf, glslSource, glslVertex, glslSizeOf, GALLERY,
+  highlight, mdToHtml, epsToSvg, drawKindOf, glslSource, glslVertex, glslSizeOf,
+  glslDeclType, GALLERY,
 } from '../../src/studio/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -91,6 +92,20 @@ ok('glslSource 没有 out 时补一格',
     glslSizeOf(rd('tests/glsl/cases/pretty.frag')) === 0);
   ok('glslSizeOf 都没说的按 256（与 CLI 同一个默认）',
     glslSizeOf('void main(){}') === 256);
+  /* **喂 uniform 之前要问类型**（`glslDeclType`）：Shadertoy 的 `iMouse` 是 vec4、
+     自己写的多半是 `vec2 u_mouse`，帧号有人写 int 有人写 float。喂错类型 WebGL 当场报
+     INVALID_OPERATION、整张图不画 —— 所以这一格是"按源码定"，不是按哪一种惯例猜。 */
+  const MS = ['u_mouse', 'iMouse', 'mouse'];
+  ok('glslDeclType 认自己写的 vec2 u_mouse',
+    glslDeclType(rd('tests/glsl/cases/mouse-glow.frag'), MS) === 'vec2');
+  ok('glslDeclType 认 int 的帧号',
+    glslDeclType(rd('tests/glsl/cases/mouse-glow.frag'), ['u_frame', 'iFrame']) === 'int');
+  ok('glslDeclType 认 Shadertoy 那套 vec4 iMouse',
+    glslDeclType('uniform vec4 iMouse;\nvoid main(){}', MS) === 'vec4');
+  ok('glslDeclType 认精度限定符',
+    glslDeclType('uniform highp vec2 u_mouse;', MS) === 'vec2');
+  ok('glslDeclType 没那一格就回 null',
+    glslDeclType(rd('tests/glsl/cases/pretty.frag'), MS) === null);
 }
 
 /* **目录树按 IDE 的次序**：目录在前、文件在后；名字里的数字按数值比

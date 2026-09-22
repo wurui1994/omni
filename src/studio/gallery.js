@@ -49,6 +49,10 @@ export const GALLERY = [
 
   /* ---- glsl：在页面上用 WebGL2 编译并画满一格（`glslSource` 把 330 core 改成 300 es） ---- */
   {
+    path: 'tests/glsl/cases/mouse-glow.frag', kind: 'glsl', title: '跟着鼠标的光点',
+    note: '预览栏里能动：`u_mouse` 跟手，`u_frame` 转花纹',
+  },
+  {
     path: 'tests/glsl/cases/pretty.frag', kind: 'glsl', title: '渐变与圆',
     note: '片元着色器：按屏幕坐标算颜色',
   },

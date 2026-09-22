@@ -10,7 +10,8 @@
 /* 纯函数那一半（高亮 / markdown / EPS -> SVG）住在 `render.js` —— 那一份一个 DOM 都不碰，
  * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
 import {
-  highlight, mdToHtml, epsToSvg, drawKindOf, glslSource, glslVertex, glslSizeOf, GALLERY,
+  highlight, mdToHtml, epsToSvg, drawKindOf, glslSource, glslVertex, glslSizeOf,
+  glslDeclType, GALLERY,
 } from './render.js';
 
 const $ = (s) => document.querySelector(s);
@@ -66,7 +67,13 @@ function initTheme() {
  * 以及**任何 `sampler2D`** —— 绑一张现造的棋盘格，不然采样的那几份一片黑。
  * `#version 330 core` 那几份自动换成 `300 es` + 一句精度（判据里那 12 份都是桌面 GL 的写法）。
  */
-const GL = { canvas: null, gl: null, prog: null, raf: 0, t0: 0, tex: null };
+/* `mx`/`my` 是鼠标在**画布像素**里的位置（y 已经翻成"从下往上"，GL 的惯例），
+   `dx`/`dy` 是按下的那一下（Shadertoy 的 `iMouse.zw`）；`frame` 是帧号；
+   `paused` 与 `pt` 是暂停那一格（暂停时时间停在 `pt`，不是继续走）。 */
+const GL = {
+  canvas: null, gl: null, prog: null, raf: 0, t0: 0, tex: null,
+  mx: 0, my: 0, dx: 0, dy: 0, down: false, frame: 0, paused: false, pt: 0, bar: null,
+};
 
 /** 一张 8×8 的棋盘格（给 `sampler2D` 那几份垫底）。只造一次。 */
 function glslCheckerTex(gl) {
@@ -146,6 +153,16 @@ function glslRun(src, host) {
   };
   const uRes = uni('u_resolution', 'iResolution', 'u_res', 'resolution');
   const uTime = uni('u_time', 'iTime', 'time');
+  /* **鼠标与帧号**：喂之前先问源码它声明成什么类型（`glslDeclType`）——
+     `iMouse` 按 Shadertoy 的惯例是 `vec4`（xy 当前、zw 按下那一下），自己写的多半是
+     `vec2 u_mouse`；帧号有人写 `int iFrame`、有人写 `float`。喂错类型不是"值不对"，
+     是 WebGL 当场报 INVALID_OPERATION、整张图不画。 */
+  const MOUSE = ['u_mouse', 'iMouse', 'mouse'];
+  const FRAME = ['u_frame', 'iFrame', 'frame'];
+  const uMouse = uni(...MOUSE);
+  const uFrame = uni(...FRAME);
+  const mouseTy = glslDeclType(src, MOUSE) ?? 'vec2';
+  const frameTy = glslDeclType(src, FRAME) ?? 'int';
   /* `sampler2D` 那几份：绑一张棋盘格。不绑的话默认采样器指着 0 号纹理单元上那张
      "什么都没有"，整块画成黑的 —— 看着像编译失败，其实只是没喂数据。 */
   const uTex = uni('u_tex', 'iChannel0', 'tex', 'texture0');
@@ -155,10 +172,17 @@ function glslRun(src, host) {
     gl.uniform1i(uTex, 0);
   }
   GL.t0 = performance.now();
+  GL.frame = 0;
+  GL.paused = false;
+  GL.pt = 0;
   /* **画多大由文件自己说**（`glslSizeOf`）：vispy 那几份把坐标写死在 128² 上，铺满一格
      大画布的话那个圆点缩在角上。0 = 跟着显示区走（用了分辨率 uniform 的那一族）。 */
   const fixed = glslSizeOf(src);
   GL.canvas.classList.toggle('fixed', fixed > 0);
+  /* **动的那一族**：时间、鼠标、帧号任意一格在就要一直画（从前只看时间那一格）。 */
+  const live = uTime !== null || uMouse !== null || uFrame !== null;
+  glslMouseHook();
+  glslBar(host, live);
   const draw = () => {
     const r = host.getBoundingClientRect();
     const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -167,11 +191,71 @@ function glslRun(src, host) {
     if (GL.canvas.width !== w || GL.canvas.height !== h) { GL.canvas.width = w; GL.canvas.height = h; }
     gl.viewport(0, 0, w, h);
     if (uRes) gl.uniform2f(uRes, w, h);
-    if (uTime) gl.uniform1f(uTime, (performance.now() - GL.t0) / 1000);
+    /* 暂停时时间停在按下去那一刻（`GL.pt`），不是"接着走" —— 不然一继续就跳一大段。 */
+    const t = GL.paused ? GL.pt : (performance.now() - GL.t0) / 1000;
+    if (uTime) gl.uniform1f(uTime, t);
+    if (uMouse) {
+      if (mouseTy === 'vec4') gl.uniform4f(uMouse, GL.mx, GL.my, GL.dx, GL.dy);
+      else if (mouseTy === 'vec3') gl.uniform3f(uMouse, GL.mx, GL.my, GL.down ? 1 : 0);
+      else gl.uniform2f(uMouse, GL.mx, GL.my);
+    }
+    if (uFrame) {
+      if (frameTy === 'float') gl.uniform1f(uFrame, GL.frame);
+      else gl.uniform1i(uFrame, GL.frame);
+    }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    if (uTime) GL.raf = requestAnimationFrame(draw);
+    if (!GL.paused) GL.frame += 1;
+    if (live) GL.raf = requestAnimationFrame(draw);
   };
   draw();
+}
+
+/** 鼠标那一格只挂一次（画布是复用的）。存的是**画布像素**，y 已翻成从下往上。 */
+function glslMouseHook() {
+  if (GL.canvas === null || GL.canvas.dataset.mouse === '1') return;
+  GL.canvas.dataset.mouse = '1';
+  const at = (e) => {
+    const r = GL.canvas.getBoundingClientRect();
+    const x = (e.clientX - r.left) / Math.max(1, r.width) * GL.canvas.width;
+    const y = (1 - (e.clientY - r.top) / Math.max(1, r.height)) * GL.canvas.height;
+    return [x, y];
+  };
+  GL.canvas.addEventListener('pointermove', (e) => { [GL.mx, GL.my] = at(e); });
+  GL.canvas.addEventListener('pointerdown', (e) => {
+    [GL.mx, GL.my] = at(e); GL.dx = GL.mx; GL.dy = GL.my; GL.down = true;
+  });
+  GL.canvas.addEventListener('pointerup', () => { GL.down = false; });
+}
+
+/**
+ * 画布下面那一条：**暂停/继续**与**重播**。静的那一族（一格动态 uniform 都没有）
+ * 不摆这一条 —— 按了也没有任何变化，摆上去就是骗人。
+ */
+function glslBar(host, live) {
+  if (GL.bar !== null) GL.bar.remove();
+  GL.bar = null;
+  if (!live) return;
+  const bar = el('div', 'gl-bar');
+  const pause = el('button', 'icon-btn sm', '⏸');
+  pause.title = '暂停 / 继续';
+  const again = el('button', 'icon-btn sm', '↺');
+  again.title = '从头重播';
+  pause.onclick = () => {
+    if (GL.paused) {
+      /* 继续：把起点往后推，于是时间接着刚才那一刻走（循环一直在转，见 `draw`）。 */
+      GL.t0 = performance.now() - GL.pt * 1000;
+      GL.paused = false;
+      pause.textContent = '⏸';
+    } else {
+      GL.pt = (performance.now() - GL.t0) / 1000;
+      GL.paused = true;
+      pause.textContent = '▶';
+    }
+  };
+  again.onclick = () => { GL.t0 = performance.now(); GL.pt = 0; GL.frame = 0; };
+  bar.append(pause, again);
+  host.append(bar);
+  GL.bar = bar;
 }
 
 /**
@@ -851,24 +935,36 @@ async function run() {
  */
 function renderStages(stages, stderrText, totalMs) {
   const box = $('#stages');
-  box.textContent = '';
-  if (Array.isArray(stages) && stages.length > 0) {
-    for (let i = 0; i < stages.length; i++) {
-      const s = stages[i];
-      const row = el('div', 'st-row');
-      row.append(el('span', '', String(i + 1)));
-      row.append(el('span', 'ph', s.phase ?? ''));
-      row.append(el('span', '', s.verb ?? ''));
-      row.append(el('span', '', s.in ?? ''));
-      row.append(el('span', '', s.out ?? ''));
-      row.append(el('span', 'ms', s.ms === undefined ? '' : `${s.ms}ms`));
-      box.append(row);
-    }
-  } else {
+  const rows = Array.isArray(stages) && stages.length > 0
+    ? stages.map((s, i) => [String(i + 1), s.phase ?? '', s.verb ?? '', s.in ?? '', s.out ?? '',
+      s.ms === undefined ? '' : `${s.ms}ms`])
+    : null;
+  if (rows === null) {
+    box.textContent = '';
     const lines = stderrText.split('\n').filter((l) => l.startsWith('omni:') || /\+\d+ms$/.test(l));
     box.append(el('pre', '', lines.length > 0 ? lines.join('\n') : '（这一趟没有阶段信息：加 -v）'));
+  } else {
+    /* **按行复用**，不是每趟重建 DOM（与目录树那一格同一条纪律）：实时模式下这一栏
+       一秒能重画好几遍，整块拆掉再拼会闪、还会把选中的文字弄丢。行数对不上时才加/删。
+       **末尾那行"合计"先摘掉**（它带 `st-tot`）—— 不摘的话它会被当成一行数据复用，
+       而新的合计又往后加一行，每跑一趟多一行。 */
+    for (const n of [...box.children]) {
+      if (!n.classList.contains('st-row') || n.classList.contains('st-tot')) n.remove();
+    }
+    while (box.childElementCount > rows.length) box.lastElementChild.remove();
+    while (box.childElementCount < rows.length) {
+      const row = el('div', 'st-row');
+      for (const cls of ['', 'ph', '', '', '', 'ms']) row.append(el('span', cls));
+      box.append(row);
+    }
+    rows.forEach((cells, i) => {
+      const row = box.children[i];
+      cells.forEach((txt, k) => {
+        if (row.children[k].textContent !== txt) row.children[k].textContent = txt;
+      });
+    });
   }
-  const tot = el('div', 'st-row');
+  const tot = el('div', 'st-row st-tot');
   tot.append(el('span', '', ''));
   tot.append(el('span', 'ph', '合计'));
   tot.append(el('span', '', 'wall'));
