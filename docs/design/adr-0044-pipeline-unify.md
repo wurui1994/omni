@@ -184,7 +184,7 @@ lower 读这张表决定发码细节。从前这些决定散在 11 份 tograph.j
 | **jnc** | `src/lang/jnc/`（13333 行 + lower.js） | `src/lang/jnc/adapter.js` + 公共 lower（jnc 有指针/位域/属性等特殊语义，adapter 最大） |
 | **asy** | `src/core/lang/asy.js` → .sx → sexpr/lower | adapter + 公共 lower（asy 已经出 .sx，只需要把 lower 里的 asy 特殊逻辑搬到 adapter） |
 | **go** | `ext/go/tograph.js`（4900 行） | `ext/go/adapter.js`（~1500 行） + 公共 lower |
-| **vlang** | `ext/vlang/tograph.js`（1581 行） | `ext/vlang/adapter.js`（~500 行） + 公共 lower |
+| **vlang** | `ext/vlang/tograph.js`（1581 行） | `ext/vlang/adapter/`（`index.js` + `expr.js`，~1100 行） + 公共 lower ✓ |
 | **nim** | `ext/nim/tograph.js`（801 行） | `ext/nim/adapter/`（`index.js` + `expr.js`，~750 行） + 公共 lower ✓ |
 | **cpp** | `ext/cpp/tograph.js`（534 行） | `ext/cpp/adapter.js`（~400 行，扩展更多 C++ 语义） + 公共 lower |
 | **lua** | `ext/lua/tograph.js`（476 行）+ `omni-lang.js` | `ext/lua/adapter.js`（~200 行） + 公共 lower（删掉 omni-lang.js 那份重复） |
@@ -289,9 +289,13 @@ nim 把登记处换回 `toGraph` 单独跑也是同一句话）—— 所以这�
 
 ### 第三片：中等的三门
 
-nim ✓ → cpp ✓ → vlang（2026-09-22：cpp 与 nim 都在第二片那一趟里迁完了，只剩 vlang）
+nim ✓ → cpp ✓ → vlang ✓（2026-09-22 全部迁完 —— **图那一层只剩 go 一门**）
 
-每一门同上。
+vlang 那一门带出来的两笔公共账：
+- `fn-ref` / `call-value` 加在**公共**降级器里（函数值：提升 + `(fnref …)` / `(callfn …)`）——
+  不捕获的那一档从此不是缺口；
+- 三段式 `for` 的 init **要自己一层作用域**（摊在 while 前面的话，同一个函数里第二格
+  `for i := …` 撞名，方言那侧当场报）。
 
 ### 第四片：Go
 
