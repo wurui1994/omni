@@ -7,7 +7,7 @@
  * 分叉的风险不靠"小心"防，靠这条判据钉住：印法（列表 `[a, b]`、记录 `{k = v}`、
  * 多值空格分开、缺键/越界报什么）改了一处忘了另一处，这里当场红。
  *
- * 语言只挑**借用优先那三门**（go / nim / vlang，ADR-0037 §5.1）：它们的例子覆盖了
+ * 语言只挑**还在图上的那几门**（现在只剩 go，ADR-0044）：它的例子覆盖了
  * 记录 / 列表 / map / 多值 / 转换 / 切片 / 早退 / scope-exit 那几族，够压住钩子的每一格。
  *
  *   node tests/graph/js-artifact.js [过滤词...]
@@ -42,7 +42,7 @@ const run = (args) => spawnSync(process.execPath, args, {
 
 /** 还在图那一层的那几门的例子（ADR-0044：迁走的语言在这一层不存在了）。 */
 const cases = [];
-for (const lang of ['go', 'vlang']) {
+for (const lang of ['go']) {
   const dir = join(ROOT, 'ext', lang, 'examples');
   for (const f of readdirSync(dir).sort()) {
     if (f.startsWith('.')) continue;

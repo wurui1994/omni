@@ -12,7 +12,7 @@
 //   node tests/graph/cli.js lua        只跑名字里带 lua 的那几格
 
 import { spawnSync } from 'node:child_process';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,14 +65,14 @@ const BASICS = ['15', '120', '7', 'ok'];
    （它们有自己的前端：那台字节码 VM + JIT，见 langs.js 的那段账），所以换成还在图上的 go。 */
 check('go × interp（默认后端）', ['run', 'ext/go/examples/basics.go', '--engine', 'graph'],
   { code: 0, out: BASICS });
-check('vlang × wat', ['run', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'wat'],
+check('go × wat', ['run', 'ext/go/examples/basics.go', '--engine', 'graph', '--backend', 'wat'],
   { code: 0, out: BASICS });
-/* 这一格从前点的是 nim —— 那门语言 2026-09-22 迁到公共降级器之后在图这一层不存在了
-   （ADR-0044）。图上只剩 go 与 vlang 两门，所以四条腿分着押在这两门上。 */
+/* 这一格从前点的是 nim、再往前是 chez —— 那几门都迁到公共降级器了（ADR-0044）。
+   **图上只剩 go 一门**，所以四条腿全押在它身上：判的东西一个字没变。 */
 check('go × js', ['run', 'ext/go/examples/basics.go', '--engine', 'graph', '--backend', 'js'],
   { code: 0, out: BASICS });
-check('vlang × sx（只序列化，第一行是 (graph）',
-  ['run', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'sx'],
+check('go × sx（只序列化，第一行是 (graph）',
+  ['run', 'ext/go/examples/basics.go', '--engine', 'graph', '--backend', 'sx'],
   { code: 0, head: '(graph' });
 
 // ---- 2) 语言怎么定：后缀是默认，`--lang` 盖过它
@@ -102,13 +102,14 @@ check('--lang 打错就报认得的那些', ['run', 'ext/go/examples/basics.go',
 // 于是这条判据得另找一格真欠着的形状。挑"实数 -> 串"（WAT_SHAPES 第四条，f64 的
 // 十进制是另一件事），临时写一份最小的源文件 —— 例子目录里没有欠着的了。
 {
-  /* 从前这一格用的是 lua 的 `"x=" .. 1.5`（实数转串在 wat 上欠着）。lua 退出借来语言那张表
-     之后，图这一层**没有一门语言的例子再欠着那一格**了 —— 所以这一格改成量 vlang 的
-     实数打印：wat 那条腿的前端只收 i64，f64 当场报（有名有姓地不通）。 */
-  const rf = join(tmpdir(), 'omni-real-cat.v');
-  writeFileSync(rf, 'fn main() {\n\tprintln("x=" + 1.5.str())\n}\n');
-  check('实数在 wat 那条腿上有名有姓地不通',
-    ['run', rf, '--engine', 'graph', '--backend', 'wat'], { code: 1, says: 'f64' });
+  /* 这一格换过三次点的东西，理由每次都一样：**被点的那个缺口通了**（awk 的混用量、
+     lua 的实数转串），或者**那门语言走了**（lua / vlang 迁到公共降级器）。现在点的是
+     go 自己的 `format.go`：`fmt.Sprintf` 落成一格 `__goSprintf`，而 wat 那条腿绑不出它
+     （`tests/graph/run.js` 里那格 skip 是同一句话）。**不再临时写源文件** —— 例子里
+     本来就有真欠着的形状，拿现成的更耐改。 */
+  check('缺口在 wat 那条腿上有名有姓地不通',
+    ['run', 'ext/go/examples/format.go', '--engine', 'graph', '--backend', 'wat'],
+    { code: 3, says: '__goSprintf' });
 }
 
 // ---- 4) 开关本身错了也要有一句人话
@@ -133,7 +134,7 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
 {
   const wat = join(tmpdir(), 'omni-graph-basics.wat');
   check('build wat 落一份 .wat',
-    ['build', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'wat', '-o', wat],
+    ['build', 'ext/go/examples/basics.go', '--engine', 'graph', '--backend', 'wat', '-o', wat],
     { code: 0, says: 'built' });
   if (only.length === 0 || only.some((x) => 'build wat 落一份 .wat'.includes(x))) {
     const text = readFileSync(wat, 'utf8');
@@ -185,7 +186,7 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
    */
   const wasm = join(tmpdir(), 'omni-graph-basics.wasm');
   check('build -o *.wasm 落一份二进制',
-    ['build', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'wat', '-o', wasm],
+    ['build', 'ext/go/examples/basics.go', '--engine', 'graph', '--backend', 'wat', '-o', wasm],
     { code: 0, says: 'wat -> wasm 二进制' });
   if (only.length === 0 || only.some((x) => 'build -o *.wasm 落一份二进制'.includes(x))) {
     try {

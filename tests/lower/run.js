@@ -25,7 +25,8 @@ import { LANGS } from '../../src/core/graph/langs.js';
 import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
-  CTIF, MEMBER, BLOCKSCOPE,
+  CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
+  HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH,
 } from '../graph/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -47,6 +48,9 @@ const FAMILIES = {
   defer: DEFER, blockret: BLOCKRET, method: METHOD, assertok: ASSERTOK,
   strcat: STRCAT, numstr: NUMSTR, namedarg: NAMEDARG, casefor: CASEFOR,
   caserange: CASERANGE, ctif: CTIF, member: MEMBER, blockscope: BLOCKSCOPE,
+  bits: BITS, charlit: CHARLIT, ctconst: CTCONST, decls: DECLS, enumval: ENUMVAL,
+  fnval: FNVAL, forin: FORIN, hoist: HOIST, litnone: LITNONE, match: MATCH,
+  method2: METHOD2, optres: OPTRES, pointer: POINTER, posinit: POSINIT, push: PUSH,
 };
 const MIGRATED = {
   awk: ['basics', 'intmath', 'loopexit', 'dict', 'unary'],
@@ -77,6 +81,16 @@ const MIGRATED = {
   nim: ['basics', 'blockscope', 'casefor', 'caserange', 'conv', 'ctif', 'defer', 'dict',
     'index', 'intmath', 'loopexit', 'member', 'method', 'namedarg', 'numstr', 'record',
     'slice', 'strcat', 'values'],
+  /* vlang：三十个家族（借来那几门里最多的一格）。这门语言自己带进来的有六样：
+     `optres` / `litnone` / `hoist`（Option 与 Result —— **"零值就是 none"**那条口径，
+     与图那条路一字不差）、`fnval`（函数值：提升 + `(fnref …)` / `(callfn …)`，那两格加在
+     **公共**降级器里）、`pointer`（`&T` 与 `mut` —— struct 一律落 `(class …)`）、
+     `ctconst`（`@FN` / `@MOD` / `@STRUCT` / `@METHOD`）、`method2`（两个类型上的同名方法）。
+     **`mapiter` 有意不在这张表里**：`for k, v in m` 当场报（与 nim 同一格语言决定）。 */
+  vlang: ['assertok', 'basics', 'bits', 'charlit', 'conv', 'ctconst', 'ctif', 'decls',
+    'defer', 'dict', 'enumval', 'fnval', 'forin', 'hoist', 'index', 'intmath', 'litnone',
+    'loopexit', 'match', 'member', 'method', 'method2', 'optres', 'pointer', 'posinit',
+    'push', 'record', 'slice', 'strcat', 'values'],
 };
 
 /** 敲一条命令，回 `{ code, out, err }`（out 按行切好，末尾空行去掉）。 */

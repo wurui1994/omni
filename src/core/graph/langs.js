@@ -26,7 +26,6 @@ import { installDir, exists } from '../host/native.js';
 
 import { goToGraph, goImports } from '../../../ext/go/tograph.js';
 import { GO_RT } from '../../../ext/go/go-rt.js';
-import { vlangToGraph, vlangImports } from '../../../ext/vlang/tograph.js';
 /* **迁过来的那几门**（ADR-0044）：`toIR` 是 adapter（CST → 标准 IR），语义降级走
    `src/core/lower/`。有 `toIR` 的语言**没有** `toGraph` —— 图那一层不再有它。 */
 import { awkToIR, AWK_HOOKS } from '../../../ext/awk/adapter.js';
@@ -36,6 +35,7 @@ import { fbToIR } from '../../../ext/freebasic/adapter/index.js';
 import { mojoToIR } from '../../../ext/mojo/adapter/index.js';
 import { cppToIR } from '../../../ext/cpp/adapter/index.js';
 import { nimToIR } from '../../../ext/nim/adapter/index.js';
+import { vlangToIR } from '../../../ext/vlang/adapter/index.js';
 
 /**
  * 这棵树的根。**从宿主那格 `installDir()` 走上去**（`src/core/host` 往上三层）——
@@ -109,9 +109,7 @@ export const LANGS = new Map([
      不给就是老样子（import 那一行由映射自己丢掉 —— 标准库那几格靠映射接）。
      知识按语言分：驱动不认识 go 的 `(import (path "…"))` 与 nim 的 `(import (name …))`。 */
   ['go', { grammar: 'ext/go/go.grammar', toGraph: goToGraph, imports: goImports, exts: ['go'], jsRuntime: GO_RT }],
-  ['vlang', {
-    grammar: 'ext/vlang/vlang.grammar', toGraph: vlangToGraph, imports: vlangImports, exts: ['v'],
-  }],
+  ['vlang', { grammar: 'ext/vlang/vlang.grammar', toIR: vlangToIR, exts: ['v'] }],
   ['awk', {
     grammar: 'ext/awk/awk.grammar', toIR: awkToIR, hooks: AWK_HOOKS, exts: ['awk'],
   }],

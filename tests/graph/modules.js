@@ -54,20 +54,17 @@ function bothLegs(what, path, want) {
   ok(`${what}（interp 与 js 两条腿都对：${JSON.stringify(want)}）`);
 }
 
-/* ---- 一 & 二：两门语言各读一份本地文件，两条腿都对 */
+/* ---- 一 & 二：还在图上的那一门（go）读一份本地文件，两条腿都对。
+   vlang 那三格跟着它迁到公共降级器一起走了（ADR-0044，2026-09-22）——
+   夹具（vmain.v / util.v / vshape.v / shape.v）也删了。 */
 bothLegs('go import "./util"', join(MODS, 'gmain.go'), '64');
-bothLegs('vlang import util', join(MODS, 'vmain.v'), '81');
 
 /* ---- 三：**环不许挂死**那一格**退场了**：夹具（ring1.nim / ring2.nim）是 nim 独有的，
    而 nim 迁到公共降级器之后图这一层没有它了（ADR-0044）。go 与 vlang 那边没有对应的夹具，
    不现编一份 —— 这一族判据跟着图那一层一起走。 */
 
-/* ---- 三之二：**声明也要看得见**（不只是名字能连上）。
-   `Point{3, 4}` 那种位置型字面量要"字段名与顺序"，而 struct 只写在被导入的那份里。
-   落地这一格时漏掉的正是这一半：读进来了，可每份文件的映射各扫各的声明，于是导入方
-   照旧报"声明不在这一份文件里"。现在一起编的那几份互相看得见声明（`opts.also`）。 */
-bothLegs('vlang import 之后**看得见对方的 struct**（位置型字面量的字段名）',
-  join(MODS, 'vshape.v'), '12');
+/* ---- 三之二：**声明也要看得见**那一格也跟着 vlang 走了（夹具是 vshape.v / shape.v）。
+   go 那边位置型字面量的字段名来自 `type` 声明，判据在 `tests/graph/run.js` 的 posinit 那一族。 */
 
 /* ---- 四：标准库那一格照旧被映射接住（`import "fmt"` 不该被这一刀带坏）。
    从前这一格点的是 `ext/nim/examples/dict.nim`（`import tables`）—— nim 迁走了，

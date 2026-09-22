@@ -90,7 +90,11 @@ function lowerWhile(s, ctx) {
 
 function lowerFor(s, ctx) {
   // C 系的 for(init; cond; post) body → 展开成 init + while(cond) { body; post }
+  /* **init 那一格要自己一层作用域**：`for i := 0 …` 里那个 `i` 归这格循环。摊平成
+     "init 摆在 while 前面"的话，同一个函数里第二格 `for i …` 会撞名（方言那侧当场报
+     "'i' 在这一层已经声明过了" —— V 的 `forin.v` 量出来的）。所以带 init 的包一层 `(do …)`。 */
   const parts = [];
+  if (s.init) ctx.scope.push();
   if (s.init) parts.push(lowerStmt(s.init, ctx));
   const c = s.cond ? ctx.lowerExpr(s.cond, ctx) : sx.bool(true);
   /* **`continue` 必须照跑步进那一格**（方言里没有三段式 `for`，只有 `while`）。
@@ -101,9 +105,11 @@ function lowerFor(s, ctx) {
   const body = s.post ? s.body.map((st) => withPostBeforeContinue(st, s.post)) : s.body;
   const bodyParts = body.map((st) => lowerStmt(st, ctx));
   if (s.post) bodyParts.push(lowerStmt(s.post, ctx));
-  const bodyText = bodyParts.length === 0 ? '(do)' : `(do${bodyParts.map((l) => `\n  ${l}`).join('')})`;
+  const bodyText = bodyParts.length === 0 ? '(do)' : `(do${bodyParts.map((l) => `\n  ${indent(l)}`).join('')})`;
   parts.push(`(while ${c} ${bodyText})`);
-  return parts.join('\n');
+  if (!s.init) return parts.join('\n');
+  ctx.scope.pop();
+  return `(do${parts.map((l) => `\n  ${indent(l)}`).join('')})`;
 }
 
 /**

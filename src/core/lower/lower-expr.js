@@ -42,6 +42,15 @@ export function lowerExpr(expr, ctx) {
     case 'builtin': return sx.op(expr.name, ...expr.args.map((a) => lowerExpr(a, ctx)));
     /* 类型当实参那一格（`(anew (arr int) N)` 的第一格、`(dnew …)`、`(new T)`）。 */
     case 'type': return typeToSx(expr.type, ctx.hooks);
+    /**
+     * **函数值那两格**（方言里本来就有：`(fnref f)` 拿一格函数、`(callfn v …)` 通过值调它）。
+     * 提供者不止一门：Scheme 的 lambda、V 的 `fn (x int) int { … }`、go 的函数值 ——
+     * 都是"提升成顶层函数 + 拿它的名字"，所以这两格摆在公共这一份里，不在某一门的钩子里。
+     * **捕获**（闭包）不在这两格里：那要一格环境记录，是另一笔账。
+     */
+    case 'fn-ref': return sx.fnref(expr.name);
+    case 'call-value':
+      return sx.callfn(lowerExpr(expr.fn, ctx), expr.args.map((a) => lowerExpr(a, ctx)));
     /* 表达式位置上的 `if` / 块 —— **Scheme 那一族里它们是表达式**（见 lowerIfExpr）。 */
     case 'if-expr': return lowerIfExpr(expr, ctx);
     case 'block-expr': return lowerBlockExpr(expr, ctx);

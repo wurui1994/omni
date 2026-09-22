@@ -55,6 +55,17 @@ export function typeOf(e, ctx) {
     }
     case 'if-expr': return e.type ?? typeOf(e.then, ctx);
     case 'block-expr': return typeOf(e.value, ctx);
+    /* 函数值那两格（`(fnref f)` / `(callfn v …)`）—— 见 `lower-expr.js` 里那段话。 */
+    case 'fn-ref': {
+      const sig = ctx.fns.get(e.name);
+      return sig === undefined
+        ? INT
+        : { kind: 'fn-type', params: sig.params.map((p) => p.type), ret: sig.ret };
+    }
+    case 'call-value': {
+      const t = typeOf(e.fn, ctx);
+      return t.kind === 'fn-type' ? t.ret : INT;
+    }
     case 'builtin': return builtinType(e, ctx);
     case 'field': {
       const t = typeOf(e.obj, ctx);
