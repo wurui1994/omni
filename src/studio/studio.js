@@ -73,7 +73,11 @@ function initTheme() {
 const GL = {
   canvas: null, gl: null, prog: null, raf: 0, t0: 0, tex: null,
   mx: 0, my: 0, dx: 0, dy: 0, down: false, frame: 0, paused: false, pt: 0, bar: null,
+  scale: Math.min(2, (typeof window === 'undefined' ? 1 : window.devicePixelRatio) || 1),
 };
+
+/** 倍率那一格能按到哪几档（默认那一档跟着屏幕，所以它也在表里）。 */
+const GL_SCALES = [0.5, 1, 2];
 
 /** 一张 8×8 的棋盘格（给 `sampler2D` 那几份垫底）。只造一次。 */
 function glslCheckerTex(gl) {
@@ -181,13 +185,16 @@ function glslRun(src, host) {
   GL.canvas.classList.toggle('fixed', fixed > 0);
   /* **动的那一族**：时间、鼠标、帧号任意一格在就要一直画（从前只看时间那一格）。 */
   const live = uTime !== null || uMouse !== null || uFrame !== null;
+  const scalable = fixed === 0;
   glslMouseHook();
-  glslBar(host, live);
+  glslBar(host, live, scalable);
   const draw = () => {
     const r = host.getBoundingClientRect();
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const w = fixed > 0 ? fixed : Math.max(1, Math.round(r.width * dpr));
-    const h = fixed > 0 ? fixed : Math.max(1, Math.round((r.height || r.width * 0.6) * dpr));
+    /* **倍率**：默认跟着屏幕（`devicePixelRatio`，上限 2），画布下面那一条里可以按成
+       0.5x / 1x / 2x —— 大着色器在高倍率下会掉帧，而这一栏是给人看的，不是判据。
+       尺寸写死在源码里的那一族（`glslSizeOf > 0`）不受它管：那一族的尺寸是答案的一部分。 */
+    const w = fixed > 0 ? fixed : Math.max(1, Math.round(r.width * GL.scale));
+    const h = fixed > 0 ? fixed : Math.max(1, Math.round((r.height || r.width * 0.6) * GL.scale));
     if (GL.canvas.width !== w || GL.canvas.height !== h) { GL.canvas.width = w; GL.canvas.height = h; }
     gl.viewport(0, 0, w, h);
     if (uRes) gl.uniform2f(uRes, w, h);
@@ -231,29 +238,42 @@ function glslMouseHook() {
  * 画布下面那一条：**暂停/继续**与**重播**。静的那一族（一格动态 uniform 都没有）
  * 不摆这一条 —— 按了也没有任何变化，摆上去就是骗人。
  */
-function glslBar(host, live) {
+function glslBar(host, live, scalable) {
   if (GL.bar !== null) GL.bar.remove();
   GL.bar = null;
-  if (!live) return;
+  if (!live && !scalable) return;
   const bar = el('div', 'gl-bar');
-  const pause = el('button', 'icon-btn sm', '⏸');
-  pause.title = '暂停 / 继续';
-  const again = el('button', 'icon-btn sm', '↺');
-  again.title = '从头重播';
-  pause.onclick = () => {
-    if (GL.paused) {
-      /* 继续：把起点往后推，于是时间接着刚才那一刻走（循环一直在转，见 `draw`）。 */
-      GL.t0 = performance.now() - GL.pt * 1000;
-      GL.paused = false;
-      pause.textContent = '⏸';
-    } else {
-      GL.pt = (performance.now() - GL.t0) / 1000;
-      GL.paused = true;
-      pause.textContent = '▶';
-    }
-  };
-  again.onclick = () => { GL.t0 = performance.now(); GL.pt = 0; GL.frame = 0; };
-  bar.append(pause, again);
+  if (live) {
+    const pause = el('button', 'icon-btn sm', '⏸');
+    pause.title = '暂停 / 继续';
+    const again = el('button', 'icon-btn sm', '↺');
+    again.title = '从头重播';
+    pause.onclick = () => {
+      if (GL.paused) {
+        GL.t0 = performance.now() - GL.pt * 1000;
+        GL.paused = false;
+        pause.textContent = '⏸';
+      } else {
+        GL.pt = (performance.now() - GL.t0) / 1000;
+        GL.paused = true;
+        pause.textContent = '▶';
+      }
+    };
+    again.onclick = () => { GL.t0 = performance.now(); GL.pt = 0; GL.frame = 0; };
+    bar.append(pause, again);
+  }
+  /* 倍率：0.5x / 1x / 2x 轮着按。**尺寸写死的那一族这一格没用**（画布不跟显示区走），
+     所以那时候不摆它 —— 与暂停那一格同一条规矩：按了没变化就别摆。 */
+  if (scalable) {
+    const sc = el('button', 'icon-btn sm', `${GL.scale}x`);
+    sc.title = '画布倍率（0.5 / 1 / 2 —— 大着色器降一档更顺）';
+    sc.onclick = () => {
+      const i = GL_SCALES.indexOf(GL.scale);
+      GL.scale = GL_SCALES[(i + 1) % GL_SCALES.length];
+      sc.textContent = `${GL.scale}x`;
+    };
+    bar.append(sc);
+  }
   host.append(bar);
   GL.bar = bar;
 }
