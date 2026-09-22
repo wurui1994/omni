@@ -326,6 +326,22 @@ try {
     ok('变量栏认得出矩阵那一格', vs.includes('a:record'), vs);
   }
 
+  /* ---- 控制台里的数学函数（`src/core/hir/check.js` 的 MATH_FUNCS，设计文档 §4.5）----
+   *
+   * 那一族是**语言自己的内建**（降成 `(rmath …)`），所以控制台里不 import 任何东西就该有。
+   * 这一格钉的只是"一行就算得出来"这条路通；每个函数的答案另有 js==c 差分在
+   * `tests/cases/29_math.omni`。顺带钉一格库里用到它的地方（`Matrix.norm` 里的 sqrt）。
+   */
+  {
+    const say = async (line) => (await post('/api/repl',
+      { session: 'judge-math', line, mode: 'mixed' })).json;
+    const s = await say('sqrt(2.0)');
+    ok('控制台里 sqrt 一行就算得出来（1.41421）', s.out === '1.41421\n', JSON.stringify(s));
+    await say('import "std/matrix.omni";');
+    const n = await say('matVec([3.0, 4.0]).norm()');
+    ok('库里也用得上那一族（3-4-5 的 norm = 5）', n.out === '5\n', JSON.stringify(n));
+  }
+
   /* ---- 控制台里出图（`std/plot.omni`，设计文档阶段 4）----
    *
    * 出来的是一份 SVG 文本；页面**看输出决定挂哪儿**（以 `<svg` 起头就进绘图栏，

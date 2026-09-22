@@ -3286,7 +3286,10 @@ export class CoreSession {
     const nodes = readSexpr(new SourceFile('<repl>', text), diags);
     if (diags.hasErrors()) return null;
     this.no = this.no + 1;
-    const delta = this.lw.chunk(coreWrap(nodes), `omni_chunk_${this.no}`);
+    /* 归属标记也要在这条路上摘掉（markUnits）：asy 那条腿每批都发一格 `(unit "<源文件>")`，
+       整程序那条路（lowerCoreSexpr）摘了、这条增量路从前没摘，于是 `(module …)` 里见到
+       'unit' 就报错 —— tests/repl/incremental.js 的 asy 那一段。 */
+    const delta = this.lw.chunk(markUnits(coreWrap(nodes)), `omni_chunk_${this.no}`);
     this.lastChecked = delta === null ? 0 : delta.funcs.length;
     return delta;
   }

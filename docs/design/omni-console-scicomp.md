@@ -103,7 +103,8 @@
   出来的是**一份 SVG 文本**，页面看输出决定挂哪儿（`<svg` 起头就进绘图栏 —— 与 asy 那条
   "看是不是 `%!PS`"同一条纪律）。**不做窗口**：gsl-shell 那边一窗口一线程、两把锁，
   而它自己也留了不经窗口的口子（`plot:save_svg`）—— 我们只要那一半，那套线程与锁一格不用。
-  刻度是"好看的数"（1/2/5 × 10^k），实现里**一个 log / pow 都没有**（这门语言还没有数学库，
+  刻度是"好看的数"（1/2/5 × 10^k），实现里**一个 log 都没有**（不是因为没有 ——
+  `log10` 是内建；是整十进位一档一档乘除在边界上更稳，差一个 ulp 就会挑错一档），
   按十进位一档一档乘除）。
   判据：`tests/cases/27_plot.omni`（**整份 SVG 的 js==c 差分 + 快照**）+ tests/serve 一格。
   差分那一轴当场抓到一个真 bug：`plotEsc` 从前一个字一个字搬，而"一个中文字"在两条腿上
@@ -117,11 +118,35 @@
   照它的一个真实事实：gsl-shell 的 `num.integ` **不是** GSL 绑定，而是纯 Lua 重写的 qag
   （`templates/qag.lua.in` 开头写着 "Adapted from the GSL Library, version 1.14"）——
   所以这一层自己写不是偷懒。`linfit` 那边它包 `gsl_multifit_linear`（走 SVD），
-  我们走正规方程 + 自己的消元，**高次上条件数差**这一格在文件里照实写着（要 QR 得先有 `sqrt`）。
-  判据：`tests/cases/28_num.omni`（js==c 差分 + 快照，13 格答案全是闭式核对）。
+  我们走正规方程 + 自己的消元，**高次上条件数差**这一格在文件里照实写着
+  （QR 现在做得了 —— `sqrt` 是内建了 —— 只是还没做）。
+  后来又加了 `numRoot`（求根：**二分保底 + 试位法加速**，两端必须异号，不异号当场报）。
+  gsl-shell 那边求根也是纯 Lua（`roots.lua` 的 Brent），我们收的是它的骨架不是全套 Brent。
+  判据：`tests/cases/28_num.omni`（js==c 差分 + 快照，答案全是闭式核对：√2 / 2 / Dottie 数）。
   顺手一格语言事实：**import 不是传递的** —— 用 `numLinfit` 的文件得自己再 import 一次矩阵。
+
+## 4.5 数学那一族（主语言的内建，**这一层原来是空的**）
+
+`sqrt` / `abs` / `floor` / `ceil` / `round` / `pow` / `fmod` / `hypot` / `cbrt` /
+三角那八个 / `exp` / `log` / `log10` —— 全在 `hir/check.js` 的 `MATH_FUNCS`。
+
+**一格都不新写**：核心方言早就有 `(rmath "NAME" …)`，落到的节点是
+`{ kind: 'Builtin', name: 'rmath_<名字>' }`，五条腿全认（C 走 libm、JS 走 `Math.*`，
+名单是 C99 math.h 与 ECMA-262 的交集）。这一层只是**把那扇门开在主语言上** ——
+从前 `sqrt(9.0)` 报 `undefined function 'sqrt'`，而降级器手里明明有它。
+
+三条规矩：
+* 名字取人写得出来的那个（C 的 `fabs` 在这儿叫 `abs`）；
+* 参数一律按 real 算（`int` 走隐式加宽，`sqrt(16)` 收得下）；
+* **回的一律是 real**，包括 `floor` / `round` —— 要 int 自己写 `int(floor(x))`，
+  让那次截断看得见。
+
+判据 `tests/cases/29_math.omni`：闭式的那些逐个比，**边界那几格靠 js==c 差分**
+（`round(-2.5)` 照 C 是 -3 不是 JS `Math.round` 的 -2；`pow(-8, 1/3)` 是 nan
+而 `cbrt(-8)` 是 -2；`fmod(-7, 3)` 是 -1）—— 两条腿逐字节相同，所以那一族的语义是**同一份**。
+
 * **往后**：L3c 随机、L3d 特殊函数、L5 三维、L6 数据表 —— 按需要，一格一格来。
-  欠的两格最要紧：**这门语言还没有数学库**（`sqrt` / `log` / `exp` / `sin` 一个都没有，
+  欠的最要紧那一格是**复数**（`matrix.lua` 的 complex 那一族、FFT、特征值都要它）。
   上面那几层里凡是要它们的地方都绕开了），以及**复数**。
 
 **先不碰的**：`eigen` / `vegas` / `bspline` / `gdt` / `expr-*` —— 上面那一列写清了它们可缺。

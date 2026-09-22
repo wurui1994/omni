@@ -1551,6 +1551,24 @@ class Checker {
   builtinCall(name, args, span) {
     if (args.some((a) => a.name !== null)) this.err(span, `builtin '${name}' does not accept named arguments`);
     if (name === 'set') return this.setCtor(args, span);
+    /**
+     * 数学那一族（`MATH_FUNCS`）：**参数不止一个**，所以摆在"只收一个参数"那道闸前面。
+     *
+     * 两条规矩，都为了"不悄悄改类型"：
+     *   * 参数一律按 real 算（`int` 走 `coerce` 显式加宽 —— 那本来就是这门语言的隐式转换）；
+     *   * **回的也是 real**，包括 `floor` / `round` / `abs`。想要 int 自己写 `int(floor(x))`
+     *     —— 让"这儿发生了一次截断"看得见（ADR-0014 决策 1 那条纪律）。
+     */
+    const m = MATH_FUNCS.get(name);
+    if (m !== undefined) {
+      const [core, want] = m;
+      if (args.length !== want) {
+        this.err(span, `${name}() takes exactly ${want} argument${want > 1 ? 's' : ''}, got ${args.length}`);
+        return { kind: 'Const', type: REAL, value: 0 };
+      }
+      const xs = args.map((x) => this.coerce(x.expr, REAL, x.span));
+      return { kind: 'Builtin', name: `rmath_${core}`, args: xs, type: REAL, argType: REAL };
+    }
     if (args.length !== 1) {
       this.err(span, `builtin '${name}' takes exactly 1 argument, got ${args.length}`);
       return { kind: 'Const', type: INT, value: 0n };
@@ -1739,7 +1757,34 @@ function sortedContainers(map) {  const deps = (t) => {
   for (const key of [...map.keys()].sort()) visit(map.get(key));
   return out;
 }
-export const BUILTIN_FUNCS = new Set(['print', 'int', 'real', 'string', 'chr', 'dyn', 'set', 'fail', 'repr']);
+/**
+ * **数学那一族**：`sqrt(x)` / `pow(a, b)` / `sin(x)` …
+ *
+ * 一格都不新写：核心方言早就有 `(rmath "NAME" …)`，它落到的节点就是
+ * `{ kind: 'Builtin', name: 'rmath_<名字>' }` —— **五条腿全认**（C 走 libm、JS 走 `Math.*`，
+ * 见 `sexpr/lower.js` 的 `RMATH` 与 `runtime/omni_math.c` 的头注）。这一层只是把那扇门
+ * 开在主语言上：从前 `sqrt(9.0)` 报 `undefined function 'sqrt'`，而降级器手里明明有它。
+ *
+ * 名字取**人写得出来的那个**：C 的 `fabs` 在这儿叫 `abs`（与 Python / MATLAB 一致），
+ * 别的照 C99 math.h。表里是 `[核心方言那个名字, 参数个数]`。
+ *
+ * 代价：这些名字成了**保留名**（用户不能再定义同名函数）。所以只收 `RMATH` 里真有的那些，
+ * 不顺手加 `min` / `max` —— 那两个要 int 重载，而且太常被人当自己的函数名。
+ */
+const MATH_FUNCS = new Map([
+  ['sqrt', ['sqrt', 1]], ['abs', ['fabs', 1]], ['floor', ['floor', 1]],
+  ['ceil', ['ceil', 1]], ['round', ['round', 1]],
+  ['pow', ['pow', 2]], ['fmod', ['fmod', 2]], ['hypot', ['hypot', 2]],
+  ['cbrt', ['cbrt', 1]],
+  ['sin', ['sin', 1]], ['cos', ['cos', 1]], ['tan', ['tan', 1]],
+  ['asin', ['asin', 1]], ['acos', ['acos', 1]], ['atan', ['atan', 1]],
+  ['atan2', ['atan2', 2]],
+  ['sinh', ['sinh', 1]], ['cosh', ['cosh', 1]], ['tanh', ['tanh', 1]],
+  ['exp', ['exp', 1]], ['log', ['log', 1]], ['log10', ['log10', 1]],
+]);
+
+export const BUILTIN_FUNCS = new Set(['print', 'int', 'real', 'string', 'chr', 'dyn', 'set', 'fail', 'repr',
+  ...MATH_FUNCS.keys()]);
 
 /** 类型里是否出现 dynamic（含容器元素）：静态模式用它拦下隐式装箱 */
 function mentionsDynamic(t) {

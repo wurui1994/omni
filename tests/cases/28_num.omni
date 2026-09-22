@@ -43,3 +43,21 @@ print(c2.get(1, 0));
 print(c2.get(2, 0));
 // 代回去：x = 6 时 2 - 6 + 18 = 14
 print(numPolyAt(c2, 6.0));
+
+// ── 求根（二分 + 试位法）──────────────────────────────────────────────────────
+// 闭式的三格：x² = 2 的正根是 √2、cos x = x 那个定点、x³ - 8 = 0 是 2。
+private real f2(real x) { return x * x - 2.0; }
+private real fcube(real x) { return x * x * x - 8.0; }
+private real fcosx(real x) { return cos(x) - x; }
+
+print(numRoot(f2, 0.0, 2.0, 0.000000001) - sqrt(2.0) < 0.000001);
+print(numRoot(fcube, 0.0, 5.0, 0.000000001));
+// cos x = x 的那个根 0.739085…（Dottie number）
+real dot = numRoot(fcosx, 0.0, 1.0, 0.000000001);
+print(abs(cos(dot) - dot) < 0.0000001);
+
+// ── 矩阵的范数（用上了内建 sqrt）────────────────────────────────────────────
+// [[3, 4]] 的 Frobenius 范数就是 5
+print(matOf([[3.0, 4.0]]).norm());
+print(matVec([1.0, 2.0, 2.0]).norm());
+print(matEye(3).norm());

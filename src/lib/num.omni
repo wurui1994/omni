@@ -58,7 +58,8 @@ real numSimpson(fn(real) -> real f, real a, real b, int n) {
  *
  * 走**正规方程** `(XᵀX) c = Xᵀy`，解那一步用 `std/matrix.omni` 的消元（带选主元）。
  * 正规方程在高次上条件数差 —— 这一格照实说：`deg` 上到 3、4 就该换 QR 了，
- * 而那要先有 `sqrt`（这门语言还没有数学库）。gsl-shell 那边这一层是
+ * QR 那一步现在**做得了**（`sqrt` 是内建了），只是还没做 —— 这一格的账记在这儿。
+ * gsl-shell 那边这一层是
  * `gsl_multifit_linear`（走 SVD），所以它没有这个限制。
  */
 Matrix numLinfit(list<real> xs, list<real> ys, int deg) {
@@ -97,3 +98,44 @@ real numPolyAt(Matrix c, real x) {
   }
   return acc;
 }
+
+/**
+ * 求根：`f(x) = 0` 在 `[a, b]` 上的那一个（**二分 + 试位法**，要求两端异号）。
+ *
+ * gsl-shell 那边这一层是 `roots.lua` 的纯 Lua Brent（不是 GSL 绑定）。这儿收的是它的
+ * 骨架而不是全套 Brent：**二分保底、试位法（regula falsi）加速**，每一步都夹在
+ * 已知异号的区间里 —— 所以它不会像纯试位法那样在一侧卡死，也不必有 Brent 那套
+ * 三点插值与五个分支。要 Brent 的全套再补，这一格的账在这儿写着。
+ *
+ * 两端不异号就**当场报**（不猜、不返回一个假的根）。
+ */
+real numRoot(fn(real) -> real f, real a, real b, real tol) {
+  real fa = f(a);
+  real fb = f(b);
+  if (fa == 0.0) { return a; }
+  if (fb == 0.0) { return b; }
+  if ((fa < 0.0) == (fb < 0.0)) {
+    fail("num: numRoot 要两端异号（f(a) 与 f(b) 一个正一个负）");
+  }
+  real lo = a;
+  real hi = b;
+  real flo = fa;
+  real fhi = fb;
+  int k = 0;
+  while (k < 200) {
+    // 试位法猜一个；落到区间外或太靠边就退回中点
+    real m = lo + (hi - lo) * 0.5;
+    real den = fhi - flo;
+    if (den != 0.0) {
+      real t = lo - flo * (hi - lo) / den;
+      real pad = (hi - lo) * 0.01;
+      if (t > lo + pad && t < hi - pad) { m = t; }
+    }
+    real fm = f(m);
+    if (fm == 0.0 || (hi - lo) < tol) { return m; }
+    if ((fm < 0.0) == (flo < 0.0)) { lo = m; flo = fm; } else { hi = m; fhi = fm; }
+    k = k + 1;
+  }
+  return lo + (hi - lo) * 0.5;
+}
+

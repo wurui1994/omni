@@ -41,6 +41,19 @@ class Matrix {
     return string(rows) + "x" + string(cols);
   }
 
+  /**
+   * Frobenius 范数（每一格的平方和再开方）。向量上它就是欧氏长度。
+   *
+   * 靠主语言的内建 `sqrt` —— 那一族（`sqrt` / `abs` / `pow` / 三角）是核心方言
+   * `(rmath …)` 那扇门开到主语言上的，五条腿全认，所以这一层不必自己迭代开方。
+   */
+  real norm() {
+    real acc = 0.0;
+    int k = 0;
+    while (k < a.length) { acc = acc + a[k] * a[k]; k = k + 1; }
+    return sqrt(acc);
+  }
+
   Matrix add(Matrix b) {
     if (rows != b.rows || cols != b.cols) { fail("matrix: 加法两边形状不同 " + dim() + " 与 " + b.dim()); }
     Matrix m = matZeros(rows, cols);
@@ -108,7 +121,7 @@ class Matrix {
   string text() {
     real sum = 0.0;
     int k = 0;
-    while (k < a.length) { sum = sum + matAbs(a[k]); k = k + 1; }
+    while (k < a.length) { sum = sum + abs(a[k]); k = k + 1; }
     real eps = 1.0;
     if (a.length > 0 && sum > 0.0) { eps = (sum / real(a.length)) * 0.000000001; }
     list<string> cell = [];
@@ -116,7 +129,7 @@ class Matrix {
     k = 0;
     while (k < a.length) {
       real v = a[k];
-      if (matAbs(v) < eps) { v = 0.0; }
+      if (abs(v) < eps) { v = 0.0; }
       string s = string(v);
       if (s.length > lmax) { lmax = s.length; }
       cell.push(s);
@@ -166,10 +179,10 @@ class Matrix {
     while (c < n) {
       // 选这一列里绝对值最大的那一行
       int piv = c;
-      real best = matAbs(m.get(c, c));
+      real best = abs(m.get(c, c));
       int r = c + 1;
       while (r < n) {
-        real v = matAbs(m.get(r, c));
+        real v = abs(m.get(r, c));
         if (v > best) { best = v; piv = r; }
         r = r + 1;
       }
@@ -217,10 +230,10 @@ class Matrix {
     int c = 0;
     while (c < n) {
       int piv = c;
-      real best = matAbs(m.get(c, c));
+      real best = abs(m.get(c, c));
       int r = c + 1;
       while (r < n) {
-        real v = matAbs(m.get(r, c));
+        real v = abs(m.get(r, c));
         if (v > best) { best = v; piv = r; }
         r = r + 1;
       }
@@ -286,11 +299,6 @@ Matrix matEye(int n) {
   int i = 0;
   while (i < n) { m.put(i, i, 1.0); i = i + 1; }
   return m;
-}
-
-private real matAbs(real x) {
-  if (x < 0.0) { return -x; }
-  return x;
 }
 
 private void matSwapRows(Matrix m, int r1, int r2) {

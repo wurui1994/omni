@@ -1,0 +1,62 @@
+// 数学那一族（`sqrt` / `pow` / `sin` / …）—— 主语言上的内建
+//
+// 一格都不新写：核心方言早就有 `(rmath "NAME" …)`，五条腿全认（C 走 libm、JS 走 Math.*）。
+// 这一份判的是"那扇门在主语言上开对了"，而不是 libm 自己对不对：
+//   * 闭式的那些逐个比（sqrt(9)=3、pow(2,10)=1024、hypot(3,4)=5、exp(0)=1、log(1)=0）；
+//   * **边界那几格两条腿必须一样**（差分那一轴管这件事）：`round(-2.5)` 照 C 是 -3
+//     （不是 JS `Math.round` 的 -2）、`pow(-8, 1/3)` 是 nan 而 `cbrt(-8)` 是 -2、
+//     `fmod(-7, 3)` 是 -1（向零截断，不是数学上的模）；
+//   * **int 实参自动加宽**（`sqrt(16)` 收得下），而**回的一律是 real** ——
+//     想要 int 自己写 `int(floor(x))`，让那次截断看得见。
+
+print(sqrt(9.0));
+print(abs(-2.5));
+print(abs(2.5));
+print(pow(2.0, 10.0));
+print(hypot(3.0, 4.0));
+print(cbrt(27.0));
+print(exp(0.0));
+print(log(1.0));
+print(log10(1000.0));
+
+// 取整那四个：正负各一
+print(floor(2.7));
+print(floor(-2.5));
+print(ceil(2.1));
+print(ceil(-2.5));
+print(round(2.5));
+print(round(-2.5));
+print(round(-0.5));
+
+// 边界：照 C 的语义，不是 JS 的
+print(fmod(-7.0, 3.0));
+print(pow(-8.0, 1.0 / 3.0));
+print(cbrt(-8.0));
+
+// 三角：几个精确点
+print(sin(0.0));
+print(cos(0.0));
+print(tan(0.0));
+print(asin(0.0));
+print(acos(1.0));
+print(atan(0.0));
+print(atan2(0.0, 1.0));
+print(sinh(0.0));
+print(cosh(0.0));
+print(tanh(0.0));
+
+// int 实参自动加宽成 real
+print(sqrt(16));
+print(pow(3, 2));
+
+// 回的是 real，要 int 自己截
+print(int(floor(2.7)));
+print(int(round(2.5)));
+
+// 拿它算个正经东西：一元二次方程 x² - 5x + 6 = 0 -> 3 与 2
+real a = 1.0;
+real b = -5.0;
+real c = 6.0;
+real d = sqrt(b * b - 4.0 * a * c);
+print((-b + d) / (2.0 * a));
+print((-b - d) / (2.0 * a));
