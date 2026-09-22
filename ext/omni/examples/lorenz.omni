@@ -1,0 +1,49 @@
+// 洛伦兹吸引子 —— 那只蝴蝶（`std/num.omni` 的 ODE + `std/plot.omni`）
+//
+// 这一份是**给人看的例子**（首页那一屏上的一格），不是判据；ODE 那一层的判据在
+// `tests/cases/33_ode.omni`（四条腿差分 + 闭式答案 + 守恒量）。
+//
+// 它印出来的**只有一份 SVG**：首页与控制台都按"看输出决定挂哪儿"办事
+// （`<svg` 起头就是一张图），所以这一份不印别的东西。
+//
+//   omni run ext/omni/examples/lorenz.omni > lorenz.svg
+//
+// 方程（Lorenz 1963，σ=10、ρ=28、β=8/3 那一组经典参数）：
+//   x' = σ(y - x) ·  y' = x(ρ - z) - y ·  z' = xy - βz
+// 画的是 x–z 投影 —— 那正是"蝴蝶"的那张脸。
+import "std/num.omni";
+import "std/plot.omni";
+
+list<real> lorenz(real t, list<real> v) {
+  real sigma = 10.0;
+  real rho = 28.0;
+  real beta = 8.0 / 3.0;
+  return [
+    sigma * (v[1] - v[0]),
+    v[0] * (rho - v[2]) - v[1],
+    v[0] * v[1] - beta * v[2]
+  ];
+}
+
+// 一点点偏离原点的起点（原点是不稳定的平衡点，正好停在那儿就什么都不会发生）
+list<real> y = [1.0, 1.0, 20.0];
+list<real> xs = [];
+list<real> zs = [];
+real dt = 0.01;
+int i = 0;
+// 25 个时间单位、每步 0.01 —— 定步长 RK4 在这一档上足够（自适应那一支也行，
+// 但这一份要的是"每次画出来都一模一样"，而定步长的答案只由步数定）
+while (i < 2500) {
+  y = numOdeRk4(lorenz, real(i) * dt, y, real(i + 1) * dt, 1);
+  xs.push(y[0]);
+  zs.push(y[2]);
+  i = i + 1;
+}
+
+Plot p = plotNew("洛伦兹吸引子（x–z 投影）");
+p.xtitle = "x";
+p.ytitle = "z";
+p.width = 520;
+p.height = 380;
+p.addline(xs, zs, "#0a84ff");
+p.show();

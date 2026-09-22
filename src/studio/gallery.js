@@ -81,6 +81,10 @@ export const GALLERY = [
 
   /* ---- svg：跑一趟，stdout 本身就是一张 SVG（`std/plot.omni` 那一层） ---- */
   {
+    path: 'ext/omni/examples/lorenz.omni', kind: 'svg', title: '洛伦兹吸引子',
+    note: 'RK4 积 2500 步，x–z 投影上的那只蝴蝶',
+  },
+  {
     path: 'ext/omni/examples/scicomp.omni', kind: 'svg', title: '二次拟合',
     note: '矩阵 + 最小二乘 + 出图，三层都是 Omni 自己写的',
   },
