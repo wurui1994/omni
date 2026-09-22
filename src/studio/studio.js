@@ -325,11 +325,10 @@ async function galleryThumb(card, g) {
   const box = card.querySelector('.shot');
   try {
     if (g.kind === 'asy' || g.kind === 'svg') {
-      /* asy 那几格**要原生 SVG**（`-f svg`）：那一路连标签都发成 `<text>`，
-         而页面这一侧的 `epsToSvg` 只认 PS 的那一小套算子。拿不到 SVG（比如某个例子
-         只走得通 EPS）就退回去翻一遍 —— 退路在，但不是默认。 */
-      const r = await post('/api/run',
-        g.kind === 'asy' ? { path: g.path, format: 'svg' } : { path: g.path });
+      /* asy 那几格走**默认那条出口**（EPS，页面自己翻）—— 与 IDE 那一页不勾「SVG 出图」
+         时同一条路。首页上这几格都是纯路径的二维图，两条出口画出来一样；位图那一族
+         （三维、`image()`）只有这条路有（`epsToSvg` 现在会把 PS 的 image 翻成 `<image>`）。 */
+      const r = await post('/api/run', { path: g.path });
       const out = (r.stdout ?? '').trim();
       const kind = drawKindOf(out);
       if (kind === null) throw new Error(r.stderr || '这一格没出图');

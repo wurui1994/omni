@@ -22,8 +22,8 @@ import { natCompare, byIdeOrder } from '../../src/core/studio/shared.js';
    GLSL 的源码修修）。它一个 DOM 都不碰，所以在这儿直接 import 就能判 ——
    不必拉一套无头浏览器进来。 */
 import {
-  highlight, mdToHtml, epsToSvg, drawKindOf, glslSource, glslVertex, glslSizeOf,
-  glslDeclType, GALLERY,
+  highlight, mdToHtml, epsToSvg, drawKindOf, psImages, psImageUri,
+  glslSource, glslVertex, glslSizeOf, glslDeclType, GALLERY,
 } from '../../src/studio/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -106,6 +106,43 @@ ok('glslSource 没有 out 时补一格',
     glslDeclType('uniform highp vec2 u_mouse;', MS) === 'vec2');
   ok('glslDeclType 没那一格就回 null',
     glslDeclType(rd('tests/glsl/cases/pretty.frag'), MS) === null);
+
+  /* ---- EPS 里的**位图**（`image` 那一族：三维那一路、以及 `image(…)`）----
+   *
+   * 从前这一格被整句忽略，于是三维的例子在预览里是**空白**。现在 `epsToSvg` 把它翻成
+   * 一格 `<image>`（不压缩的 PNG，data URI）。这儿判三件事，都不用外部工具：
+   *   1. 摘得出来（`psImages`：十六进制那一族以 `>` 收尾、ASCII85 那一族以 `~>` 收尾 ——
+   *      **不能一律找 `>`**，`>` 正在 ASCII85 的字母表里）；
+   *   2. 翻出来的 PNG 是**逐字节固定**的那一串（2×2 红绿蓝白）；
+   *   3. 摆的位置是当前 CTM（`[ax ay bx by x y] concat`）那个矩阵。
+   * **整条链另外核对过**（拿 gs 渲 EPS、rsvg 渲这份 SVG）：三维那个球 800×804 上
+   * `magick compare -metric RMSE` 是 **0**，也就是逐像素相同。那一趟要 gs/rsvg/asy 的 base，
+   * 所以不进这条常跑的轴，记在 `docs/design/omni-serve-studio.md` 里。
+   */
+  const IMG_EPS = '%!PS-Adobe-3.0 EPSF-3.0\n%%HiResBoundingBox: 0 0 4 4\n'
+    + '1 2 translate\ngsave\n[ 4 0 0 4 0 0] concat\n/DeviceRGB setcolorspace\n<<\n'
+    + '/ImageType 1\n/Width 2\n/Height 2\n/BitsPerComponent 8\n/Decode [0 1 0 1 0 1 ]\n'
+    + '/ImageMatrix [2 0 0 2 0 0]\n'
+    + '/DataSource currentfile 1 (>) /SubFileDecode filter /ASCIIHexDecode filter\n>>\nimage\n'
+    + 'ff000000ff000000ffffffff\n>\ngrestore\n';
+  {
+    const { imgs } = psImages(IMG_EPS);
+    ok('psImages 摘得出一格位图（2×2）',
+      imgs.length === 1 && imgs[0].w === 2 && imgs[0].h === 2 && imgs[0].a85 === false,
+      JSON.stringify(imgs.map((i) => [i.w, i.h, i.a85])));
+    /* 这一串是量出来钉住的（PNG 头 + IHDR + 不压缩的 IDAT + IEND）。它一变就说明
+       行序、通道次序、或者 zlib 那几个字节动了 —— 而那三样正是这一格最容易错的。 */
+    const uri = psImageUri(imgs[0]);
+    ok('psImageUri 出的是 PNG 的 data URI', uri !== null && uri.startsWith('data:image/png;base64,iVBORw0KGgo'),
+      String(uri).slice(0, 40));
+    ok('psImageUri 逐字节固定（2×2 红绿/蓝白）',
+      uri === 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91Jpz'
+        + 'AAAAGUlEQVR4AQEOAPH/AP8AAAD/AAAAAP////8f7gX73t3sKwAAAABJRU5ErkJggg==',
+      uri === null ? 'null' : `${uri.length} 字节：${uri.slice(-40)}`);
+    const svg = epsToSvg(IMG_EPS);
+    ok('epsToSvg 把位图摆在 CTM 上（translate ∘ concat）',
+      svg.includes('<image transform="matrix(4 0 0 4 1 2)"'), svg.slice(0, 400));
+  }
 }
 
 /* **目录树按 IDE 的次序**：目录在前、文件在后；名字里的数字按数值比
@@ -238,17 +275,16 @@ try {
   }
 
   /* **首页清单没骗人**：`kind: 'asy'` 与 `kind: 'svg'` 那几格真跑一趟，出来的必须是图。
-     asy 那几格**按页面上的走法要原生 SVG**（`format: 'svg'`）；svg 那一族 stdout 本身就是 SVG。
-     `drawKindOf` 是页面判"这是哪一种图"的那一格纯函数 —— 判据与页面认同一条规矩。
+     asy 那几格走**默认那条出口**（EPS，页面自己翻成 SVG —— 与页面上同一条路）；
+     svg 那一族 stdout 本身就是 SVG。`drawKindOf` 是页面判"这是哪一种图"的那格纯函数。
      清单是人挑的，"它确实出图"是机器判的。 */
   for (const g of GALLERY.filter((x) => x.kind === 'asy' || x.kind === 'svg')) {
-    const rg = await post('/api/run',
-      g.kind === 'asy' ? { path: g.path, format: 'svg' } : { path: g.path });
+    const rg = await post('/api/run', { path: g.path });
     const out = (rg.json.stdout ?? '').trim();
     const kind = drawKindOf(out);
     const good = g.kind === 'svg'
       ? kind === 'svg' && out.includes('<polyline points=')
-      : kind === 'svg' && out.includes('<path ');
+      : kind === 'eps' && epsToSvg(out).includes('<path ');
     ok(`首页「${g.title}」真出图`, rg.json.code === 0 && good,
       `code=${rg.json.code} ${JSON.stringify(out.slice(0, 40))} err=${JSON.stringify((rg.json.stderr ?? '').slice(-300))}`);
   }

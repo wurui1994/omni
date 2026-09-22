@@ -250,12 +250,17 @@ export function drawKindOf(out) {
 }
 
 export function epsToSvg(eps) {
+  /* **位图先摘出来**（`image` 那一族）：三维那一族的 EPS 里一条路径都没有，全部内容
+     就是一格 PS 的 image 字典 + 一大段十六进制（`asy_builtins.asy` 的 `asy__emitraw`）；
+     二维的 `image(…)` 那一族走 ASCII85（`asy__emitimg`）。摘出来换成一格记号，
+     于是下面那台小解释器照旧只管算子与坐标，位图在 `psImage` 里单独翻。 */
+  const { text: epsText, imgs } = psImages(eps);
   const toks = [];
   {
     /* 词法：`%` 到行尾是注释（`%%BoundingBox` 例外，上头另外抠）；`{…}` 整段跳过
        （序言里那格 `/Setlinewidth {…} bind def`）；`[…]` 收成一格。 */
     const re = /\[|\]|\{|\}|\/?[^\s[\]{}%]+|%[^\n]*/g;
-    let m = re.exec(eps);
+    let m = re.exec(epsText);
     let depth = 0;
     while (m !== null) {
       const t = m[0];
@@ -263,10 +268,14 @@ export function epsToSvg(eps) {
       else if (t === '{') depth++;
       else if (t === '}') depth = Math.max(0, depth - 1);
       else if (depth === 0) toks.push(t);
-      m = re.exec(eps);
+      m = re.exec(epsText);
     }
   }
-  const bb = /%%(?:HiRes)?BoundingBox:\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)/.exec(eps);
+  /* 画布：**优先 `%%HiResBoundingBox`**（浮点那一份）。只认整数那一份的话，
+     205.5 会被当成 205 —— 量出来就是整张图横着差 0.5 单位（在 4 倍下是 2 像素，
+     拿 gs 与 rsvg 的截图比时那条高对比的边界一眼看得见）。 */
+  const bbh = /%%HiResBoundingBox:\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)/.exec(eps);
+  const bb = bbh ?? /%%BoundingBox:\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)/.exec(eps);
   const box = bb === null ? [0, 0, 200, 200] : bb.slice(1, 5).map(Number);
   const st = { ctm: [1, 0, 0, 1, 0, 0], rgb: '#000', lw: 1, cap: 0, join: 0, dash: '' };
   const stack = [];
@@ -323,10 +332,36 @@ export function epsToSvg(eps) {
       case 'setlinecap': st.cap = pop(1)[0]; break;
       case 'setlinejoin': st.join = pop(1)[0]; break;
       case 'setdash': { num.length = 0; break; }
+      /* PS 的数组：`[` 起头（前头攒下的数与它无关，清掉），`]` 什么都不做 ——
+         **括号不许清数**：`[ a b c d e f] concat` 的六个数就在括号里，清掉的话
+         `concat` 拿到的是六个 undefined，CTM 整条变 NaN。从前这一格是清的，
+         而它没露馅只因为 `concat` 只跟位图一起出现，而位图那时被整句忽略。 */
+      case '[': num.length = 0; break;
+      case ']': break;
       case 'fill': emit('fill'); break;
       case 'eofill': emit('eofill'); break;
       case 'stroke': emit('stroke'); break;
-      default: num.length = 0; break;    // 认不出的算子：清掉它的实参
+      default: {
+        /* **位图那一格**（上面摘出来的记号）：当前的 CTM 正好把单位正方形送到目标那块
+           平行四边形上（`[ax ay bx by x y] concat`），所以一格 `<image>` 加同一个矩阵
+           就摆对了。图自己那一格是**上下颠倒**的：PS 的第 0 行在下边，而 SVG 的
+           `<image>` 从上往下画 —— 所以位图按"第 0 行在上"写（BMP 的负高度那一档），
+           于是在这个 y 朝上的组里正好翻回来。核对过：gs 渲的 EPS 与 rsvg 渲的这份 SVG
+           逐像素只差抗锯齿那一档（见 tests/serve 那一格）。 */
+        if (t.startsWith('__OMNIIMG')) {
+          const im = imgs[Number(t.slice(9))];
+          const u = im === undefined ? null : psImageUri(im);
+          if (u !== null) {
+            const c = st.ctm.map((v) => f2(v)).join(' ');
+            parts.push(`<image transform="matrix(${c})" x="0" y="0" width="1" height="1"`
+              + ` preserveAspectRatio="none" href="${u}"/>`);
+          }
+          num.length = 0;
+          break;
+        }
+        num.length = 0;    // 认不出的算子：清掉它的实参
+        break;
+      }
     }
   }
   const [x0, y0, x1, y1] = box;
@@ -335,6 +370,198 @@ export function epsToSvg(eps) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x0} ${y0} ${w} ${h}"`
     + ` width="100%" style="max-height:100%">`
     + `<g transform="translate(0 ${y0 + y1}) scale(1 -1)">${parts.join('')}</g></svg>`;
+}
+
+/**
+ * 把 EPS 里每一格 `image` 摘出来，原位换成一格记号 `__OMNIIMG<k>`。
+ *
+ * 形状是我们自己发的那两种（`asy_builtins.asy` 的 `asy__emitraw` / `asy__emitimg`）：
+ *   `<< /ImageType 1 /Width W /Height H /BitsPerComponent 8 … >> image <数据><终止>`
+ * 终止记号看 filter：十六进制那一族是 `>`，ASCII85 那一族是 `~>`。
+ * **不能一律找 `>`**：ASCII85 的字母表是 `!`..`u`，`>` 正在里头（0x3E）。
+ */
+export function psImages(eps) {
+  const imgs = [];
+  let text = '';
+  let i = 0;
+  for (;;) {
+    const a = eps.indexOf('<<', i);
+    if (a < 0) { text += eps.slice(i); break; }
+    const b = eps.indexOf('>>', a);
+    const dict = b < 0 ? '' : eps.slice(a + 2, b);
+    const rest = b < 0 ? '' : eps.slice(b + 2, b + 40);
+    if (b < 0 || !/^\s*image\b/.test(rest) || !/\/ImageType\s+1/.test(dict)) {
+      text += eps.slice(i, a + 2);
+      i = a + 2;
+      continue;
+    }
+    const c = eps.indexOf('image', b) + 5;
+    const a85 = /ASCII85Decode/.test(dict);
+    const term = a85 ? '~>' : '>';
+    const e = eps.indexOf(term, c);
+    const data = e < 0 ? eps.slice(c) : eps.slice(c, e);
+    const gw = /\/Width\s+(\d+)/.exec(dict);
+    const gh = /\/Height\s+(\d+)/.exec(dict);
+    text += `${eps.slice(i, a)} __OMNIIMG${imgs.length} `;
+    imgs.push({
+      w: gw === null ? 0 : Number(gw[1]),
+      h: gh === null ? 0 : Number(gh[1]),
+      a85,
+      data,
+    });
+    i = e < 0 ? eps.length : e + term.length;
+  }
+  return { text, imgs };
+}
+
+/**
+ * 一格 PS 位图 -> `data:image/png;base64,…`（回 null = 说不通，那就不画）。
+ *
+ * **PNG，而且是"不压缩的 PNG"**。两条理由：
+ *   * 这一格必须是**纯函数**（判据在 node 里直接 import 它，没有 canvas、也不该拉 zlib
+ *     进来），而 deflate 有一档合法的"原样存"（stored block，每段最多 65535 字节）——
+ *     于是只要 CRC32 与 Adler32 两张小算术就够了，一共几十行。
+ *   * BMP 更短（表头 + 像素，二十行），**可是只有浏览器认**：量出来 `rsvg-convert`
+ *     根本不画 `data:image/bmp`（整张白），于是"拿 gs 渲 EPS、拿 rsvg 渲 SVG 比像素"
+ *     这条判据就做不成了。换 PNG 之后那条判据能跑 —— 判据比省几行代码要紧。
+ *
+ * 行序：PNG 从上往下写，我们**按数据的倒序写**（最后一行写在最上）。理由是量出来的：
+ * PS 的第 0 行在下边，`<image>` 又摆在那个 `scale(1 -1)` 的组里 —— 照数据顺序写的话
+ * 出来是上下颠倒的（拿 gs 渲 EPS、rsvg 渲 SVG 比过：颠倒那一版 RMSE 0.070，倒序之后
+ * 降到 0.009，剩下的是两台光栅器的抗锯齿差）。
+ */
+export function psImageUri(im) {
+  const { w, h } = im;
+  if (!(w > 0) || !(h > 0)) return null;
+  const px = im.a85 ? a85Decode(im.data) : hexDecode(im.data);
+  if (px.length < w * h * 3) return null;
+  /* 原始扫描线：每行前面一个 0（filter = None）。行序倒过来（见上面那段）。 */
+  const row = w * 3;
+  const raw = new Uint8Array((row + 1) * h);
+  for (let y = 0; y < h; y++) {
+    const src = y * row;
+    raw[y * (row + 1)] = 0;
+    raw.set(px.subarray(src, src + row), y * (row + 1) + 1);
+  }
+  const idat = zlibStored(raw);
+  const ihdr = new Uint8Array(13);
+  const be = (a, o, v) => {
+    a[o] = (v >>> 24) & 255; a[o + 1] = (v >>> 16) & 255;
+    a[o + 2] = (v >>> 8) & 255; a[o + 3] = v & 255;
+  };
+  be(ihdr, 0, w);
+  be(ihdr, 4, h);
+  ihdr[8] = 8;     // 每通道 8 位
+  ihdr[9] = 2;     // 真彩色（RGB）
+  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const chunk = (type, data) => {
+    const out = new Uint8Array(12 + data.length);
+    be(out, 0, data.length);
+    for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+    out.set(data, 8);
+    be(out, 8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+    return out;
+  };
+  const cs = [chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', new Uint8Array(0))];
+  let n = sig.length;
+  for (const c of cs) n += c.length;
+  const png = new Uint8Array(n);
+  png.set(sig, 0);
+  let o = sig.length;
+  for (const c of cs) { png.set(c, o); o += c.length; }
+  return `data:image/png;base64,${b64(png)}`;
+}
+
+/** zlib 流，**整段原样存**（deflate 的 stored block，每段最多 65535 字节）。 */
+function zlibStored(raw) {
+  const N = 65535;
+  const blocks = Math.max(1, Math.ceil(raw.length / N));
+  const out = new Uint8Array(2 + blocks * 5 + raw.length + 4);
+  out[0] = 0x78; out[1] = 0x01;                  // CM=deflate、无字典、最快那一档
+  let o = 2;
+  for (let i = 0; i < raw.length || i === 0; i += N) {
+    const len = Math.min(N, raw.length - i);
+    const last = i + len >= raw.length ? 1 : 0;
+    out[o] = last; o += 1;                        // BFINAL + BTYPE=00
+    out[o] = len & 255; out[o + 1] = (len >> 8) & 255;
+    out[o + 2] = ~len & 255; out[o + 3] = (~len >> 8) & 255;
+    o += 4;
+    out.set(raw.subarray(i, i + len), o);
+    o += len;
+    if (last === 1) break;
+  }
+  const ad = adler32(raw);
+  out[o] = (ad >>> 24) & 255; out[o + 1] = (ad >>> 16) & 255;
+  out[o + 2] = (ad >>> 8) & 255; out[o + 3] = ad & 255;
+  return out.subarray(0, o + 4);
+}
+
+function adler32(b) {
+  let a = 1;
+  let s = 0;
+  for (let i = 0; i < b.length; i++) {
+    a = (a + b[i]) % 65521;
+    s = (s + a) % 65521;
+  }
+  return ((s << 16) | a) >>> 0;
+}
+
+let CRCT = null;
+function crc32(b) {
+  if (CRCT === null) {
+    CRCT = new Int32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) c = (c & 1) !== 0 ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      CRCT[i] = c;
+    }
+  }
+  let c = -1;
+  for (let i = 0; i < b.length; i++) c = CRCT[(c ^ b[i]) & 255] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+/** 十六进制文本 -> 字节（空白与换行随便夹，`asy__emitraw` 就是一长行）。 */
+function hexDecode(s) {
+  const t = s.replace(/[^0-9a-fA-F]/g, '');
+  const n = t.length >> 1;
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) out[i] = parseInt(t.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+/** ASCII85 -> 字节（`z` 是四个 0；末尾不足五个按规矩补 `u`）。 */
+function a85Decode(s) {
+  const bytes = [];
+  let tup = 0;
+  let n = 0;
+  for (const ch of s) {
+    if (ch === 'z' && n === 0) { bytes.push(0, 0, 0, 0); continue; }
+    const v = ch.charCodeAt(0) - 33;
+    if (v < 0 || v > 84) continue;               // 空白与别的都跳过
+    tup = tup * 85 + v;
+    n += 1;
+    if (n === 5) {
+      bytes.push((tup >>> 24) & 255, (tup >>> 16) & 255, (tup >>> 8) & 255, tup & 255);
+      tup = 0; n = 0;
+    }
+  }
+  if (n > 1) {
+    for (let k = n; k < 5; k++) tup = tup * 85 + 84;
+    const b = [(tup / 16777216) & 255, (tup >>> 16) & 255, (tup >>> 8) & 255, tup & 255];
+    for (let k = 0; k < n - 1; k++) bytes.push(b[k]);
+  }
+  return new Uint8Array(bytes);
+}
+
+/** 字节 -> base64。**分段**：`String.fromCharCode(...两百万个)` 会把栈冲爆。 */
+function b64(bytes) {
+  let s = '';
+  const N = 0x8000;
+  for (let i = 0; i < bytes.length; i += N) {
+    s += String.fromCharCode(...bytes.subarray(i, Math.min(i + N, bytes.length)));
+  }
+  return btoa(s);
 }
 
 /* ---------------------------------------------------------------- GLSL 的源码修修

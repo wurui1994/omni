@@ -135,8 +135,27 @@ POST /api/shell             -> { line }；一整行命令（含 tcc/go/nim 等�
   **从前这一格是"IDE 把编辑关掉"** —— 那没道理：一进来先看一份看不懂的源码，
   而这一页最该先给人看的是"它真能画出东西"。
 * **IDE 模式**：目录树 + 编辑器 + 运行 + 预览 + 阶段耗时 + 虚拟 shell。
-* **控制台模式**（在做，任务 #109）：matlab / spyder / idle 那一种 —— REPL + 变量区 +
+* **控制台模式**（任务 #109，已落地）：matlab / spyder / idle 那一种 —— REPL + 变量区 +
   绘图区。它是 IDE 模式的变体，不是第三份实现。
+
+### 4.1b asy 的两条出口（预览那一栏怎么拿到图）
+
+`.asy` 有两条路，**各有各的缺口**，所以编辑器上给了一格开关（默认第一条）：
+
+* **EPS（默认）**：跑一趟拿 stdout 的 EPS，页面自己翻成 SVG（`render.js` 的 `epsToSvg`）。
+  路径与**位图**都有 —— 三维那一族（`import three;`）的 EPS 里一条路径都没有，
+  整张图就是一格 PS 的 `image` 字典（`asy_builtins.asy` 的 `asy__emitraw`），
+  `epsToSvg` 把它翻成一格 `<image>`（**不压缩的 PNG**，data URI；十六进制与 ASCII85 两种都收）。
+  **这条链核对过**：`gs` 渲那份 EPS 与 `rsvg-convert` 渲我们这份 SVG，
+  800×804 上 `magick compare -metric RMSE` 是 **0**（逐像素相同）。
+  重来一遍的办法：`ASYMPTOTE_DIR=/opt/homebrew/share/asymptote omni run
+  tests/asy/examples/sphere.asy > a.eps`，再把 `epsToSvg(a.eps)` 写成 `a.svg` 比。
+  欠的是 **TeX 标签**（那是 dvips 写进 EPS 的字节，这一层不认）。
+* **原生 SVG**（勾上「SVG 出图」= `-f svg`）：`asy_builtins.asy` 自己那条出口，
+  标签进 `<text>`。欠的是**位图那一族**（三维与 `image()` 在那条路上是一整块黑 —— 量出来的）。
+
+画廊里 asy 那几格走默认那条（它们都是纯路径的二维图，两条画出来一样）。
+`/api/run` 的 `format` 只认 `eps|svg`（白名单，见 `serve.js` 的 `RUN_FORMATS`）。
 
 上一次挑的那一格记在 `localStorage`（`omni.mode`）里。
 
