@@ -35,6 +35,17 @@
 </header>
 
 <main class="shell">
+  <!-- 首页（展示模式）：一屏卡片，每格一张真跑出来的图。上哪几格由 `gallery.js` 说。
+       它与下面那三栏是**互斥**的两套版面（CSS 按 body 的 data-mode 切）。 -->
+  <section class="gallery" id="gallery">
+    <header class="gal-head">
+      <h1>看得见的编译器</h1>
+      <p>同一条管线编十几门语言。下面每一格都是现在这台机器上跑出来的 ——
+         点一下就进 IDE，改一行再跑。</p>
+    </header>
+    <div class="gal-grid" id="gallery-grid"></div>
+  </section>
+
   <aside class="pane tree" id="tree">
     <div class="pane-head">
       <span>目录</span>

@@ -9,7 +9,9 @@
 
 /* 纯函数那一半（高亮 / markdown / EPS -> SVG）住在 `render.js` —— 那一份一个 DOM 都不碰，
  * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
-import { highlight, mdToHtml, epsToSvg, glslSource } from './render.js';
+import {
+  highlight, mdToHtml, epsToSvg, glslSource, glslVertex, glslSizeOf, GALLERY,
+} from './render.js';
 
 const $ = (s) => document.querySelector(s);
 const el = (t, cls, txt) => {
@@ -89,17 +91,13 @@ function glslCheckerTex(gl) {
   return t;
 }
 
-function glslRun(src, host) {
-  if (GL.raf !== 0) { cancelAnimationFrame(GL.raf); GL.raf = 0; }
-  if (GL.canvas === null) {
-    GL.canvas = el('canvas', 'gl-canvas');
-    GL.gl = GL.canvas.getContext('webgl2', { antialias: true, preserveDrawingBuffer: false });
-  }
-  const gl = GL.gl;
-  if (gl === null) { host.textContent = '这个浏览器没有 WebGL2'; return; }
-  if (GL.canvas.parentElement !== host) { host.textContent = ''; host.append(GL.canvas); }
-  /* 上一趟的编译错误那一格要收掉 —— 不收的话改对了它还挂在下面。 */
-  for (const n of [...host.querySelectorAll('.gl-err')]) n.remove();
+/**
+ * 编一份片元着色器 + 配套的顶点段，回链好的 program（编不过就 throw，带原话）。
+ *
+ * 顶点段**照片元段生成**（`glslVertex`）：写着 `in vec2 v_uv;` 的那几份少了对应的
+ * 顶点输出在 ES 3.00 上链不上。两处用它 —— 预览那一栏（活的）与首页那一屏（截一张图）。
+ */
+function glslLink(gl, src) {
   const mk = (type, code) => {
     const sh = gl.createShader(type);
     gl.shaderSource(sh, code);
@@ -111,15 +109,28 @@ function glslRun(src, host) {
     }
     return sh;
   };
+  const vs = mk(gl.VERTEX_SHADER, glslVertex(src));
+  const fs = mk(gl.FRAGMENT_SHADER, glslSource(src));
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) ?? '链不上');
+  return prog;
+}
+
+function glslRun(src, host) {
+  if (GL.raf !== 0) { cancelAnimationFrame(GL.raf); GL.raf = 0; }
+  if (GL.canvas === null) {
+    GL.canvas = el('canvas', 'gl-canvas');
+    GL.gl = GL.canvas.getContext('webgl2', { antialias: true, preserveDrawingBuffer: false });
+  }
+  const gl = GL.gl;
+  if (gl === null) { host.textContent = '这个浏览器没有 WebGL2'; return; }
+  if (GL.canvas.parentElement !== host) { host.textContent = ''; host.append(GL.canvas); }
+  /* 上一趟的编译错误那一格要收掉 —— 不收的话改对了它还挂在下面。 */
+  for (const n of [...host.querySelectorAll('.gl-err')]) n.remove();
   let prog = null;
   try {
-    const vs = mk(gl.VERTEX_SHADER, '#version 300 es\nvoid main(){\n'
-      + ' vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n'
-      + ' gl_Position = vec4(p * 2.0 - 1.0, 0, 1);\n}');
-    const fs = mk(gl.FRAGMENT_SHADER, glslSource(src));
-    prog = gl.createProgram();
-    gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) ?? '链不上');
+    prog = glslLink(gl, src);
   } catch (e) {
     host.textContent = '';
     const p = el('pre', 'gl-err', String(e.message ?? e));
@@ -144,11 +155,15 @@ function glslRun(src, host) {
     gl.uniform1i(uTex, 0);
   }
   GL.t0 = performance.now();
+  /* **画多大由文件自己说**（`glslSizeOf`）：vispy 那几份把坐标写死在 128² 上，铺满一格
+     大画布的话那个圆点缩在角上。0 = 跟着显示区走（用了分辨率 uniform 的那一族）。 */
+  const fixed = glslSizeOf(src);
+  GL.canvas.classList.toggle('fixed', fixed > 0);
   const draw = () => {
     const r = host.getBoundingClientRect();
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const w = Math.max(1, Math.round(r.width * dpr));
-    const h = Math.max(1, Math.round((r.height || r.width * 0.6) * dpr));
+    const w = fixed > 0 ? fixed : Math.max(1, Math.round(r.width * dpr));
+    const h = fixed > 0 ? fixed : Math.max(1, Math.round((r.height || r.width * 0.6) * dpr));
     if (GL.canvas.width !== w || GL.canvas.height !== h) { GL.canvas.width = w; GL.canvas.height = h; }
     gl.viewport(0, 0, w, h);
     if (uRes) gl.uniform2f(uRes, w, h);
@@ -157,6 +172,146 @@ function glslRun(src, host) {
     if (uTime) GL.raf = requestAnimationFrame(draw);
   };
   draw();
+}
+
+/**
+ * 首页卡片上那张**静态**的着色器缩略图（回 dataURL，失败回 null）。
+ *
+ * 为什么不给每格卡片一个活的 canvas：浏览器对 WebGL 上下文有个位数的上限，十来张卡片
+ * 一人一格当场黑屏。这儿**一格离屏上下文**轮流画每一份，画完截成 PNG 贴进 `<img>` ——
+ * 首页要的是"一眼看到图"，不是十个动画一起转。
+ */
+const THUMB = { canvas: null, gl: null };
+
+function glslThumb(src, px) {
+  if (THUMB.canvas === null) {
+    THUMB.canvas = document.createElement('canvas');
+    THUMB.gl = THUMB.canvas.getContext('webgl2', { antialias: true, preserveDrawingBuffer: true });
+  }
+  const gl = THUMB.gl;
+  if (gl === null) return null;
+  const fixed = glslSizeOf(src);
+  const n = fixed > 0 ? fixed : px;
+  THUMB.canvas.width = n;
+  THUMB.canvas.height = n;
+  let prog = null;
+  try {
+    prog = glslLink(gl, src);
+  } catch {
+    return null;
+  }
+  gl.useProgram(prog);
+  const uni = (...names) => {
+    for (const q of names) { const l = gl.getUniformLocation(prog, q); if (l !== null) return l; }
+    return null;
+  };
+  const uRes = uni('u_resolution', 'iResolution', 'u_res', 'resolution');
+  const uTime = uni('u_time', 'iTime', 'time');
+  const uTex = uni('u_tex', 'iChannel0', 'tex', 'texture0');
+  if (uTex !== null) {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, glslCheckerTex(gl));
+    gl.uniform1i(uTex, 0);
+  }
+  gl.viewport(0, 0, n, n);
+  if (uRes) gl.uniform2f(uRes, n, n);
+  /* 带时间的那几份定在 1.4 秒：0 那一刻常常是"什么都还没动"的初始态。 */
+  if (uTime) gl.uniform1f(uTime, 1.4);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const url = THUMB.canvas.toDataURL('image/png');
+  gl.deleteProgram(prog);
+  return url;
+}
+
+/* ---------------------------------------------------------------- 首页（展示模式）
+ *
+ * 展示模式**不是"IDE 把编辑关掉"**（从前是，那没道理：一进来先看一份看不懂的源码）。
+ * 它是首页：一屏卡片，每格一张真跑出来的图，点一下进 IDE 打开那份源码。
+ * 上哪几格由 `gallery.js` 那张策展的清单说 —— **没有图的例子不上首页**。
+ *
+ * 缩略图怎么来（三种腿各一种，都是现成的那一套）：
+ *   asy   —— 真跑一趟（`/api/run`），EPS 翻成 SVG
+ *   glsl  —— 离屏 WebGL2 截一张 PNG（`glslThumb`）
+ *   html  —— 就是一份网页，`<iframe srcdoc sandbox>`
+ *
+ * **一格一格来**（`for await`）：十来格一起冲会把热工人池挤满，而首页是给人看的 ——
+ * 先出来的那几格已经能看了。看不见的那几格根本不跑（`IntersectionObserver`）。
+ */
+async function galleryThumb(card, g) {
+  const box = card.querySelector('.shot');
+  try {
+    if (g.kind === 'asy') {
+      const r = await post('/api/run', { path: g.path });
+      const out = r.stdout ?? '';
+      if (!out.startsWith('%!PS')) throw new Error(r.stderr || '这一格没出图');
+      box.innerHTML = epsToSvg(out);
+      return;
+    }
+    const f = await api(`/api/file?path=${encodeURIComponent(g.path)}`);
+    if (g.kind === 'glsl') {
+      const url = glslThumb(f.text, 320);
+      if (url === null) throw new Error('着色器编不过');
+      const img = el('img');
+      img.src = url;
+      img.alt = g.title;
+      box.textContent = '';
+      box.append(img);
+      return;
+    }
+    if (g.kind === 'html') {
+      const fr = el('iframe');
+      fr.setAttribute('sandbox', 'allow-scripts allow-modals');
+      fr.setAttribute('scrolling', 'no');
+      fr.srcdoc = f.text;
+      box.textContent = '';
+      box.append(fr);
+    }
+  } catch (e) {
+    box.classList.add('bad');
+    box.textContent = String(e.message ?? e).slice(0, 120);
+  }
+}
+
+function renderGallery() {
+  const host = $('#gallery-grid');
+  if (host === null || host.childElementCount > 0) return;    /* 只铺一次 */
+  const jobs = [];
+  for (const g of GALLERY) {
+    const card = el('button', 'card');
+    card.innerHTML = `<div class="shot"><span class="dots"></span></div>`;
+    const meta = el('div', 'meta');
+    meta.append(el('b', '', g.title), el('span', 'note', g.note),
+      el('span', 'tag', g.kind));
+    card.append(meta);
+    card.onclick = () => {
+      setMode('ide');
+      openFile(g.path);
+    };
+    host.append(card);
+    jobs.push([card, g]);
+  }
+  /* 看得见的才跑。`IntersectionObserver` 没有的浏览器（很老的）就一格一格全跑。 */
+  const queue = [];
+  const pump = async () => {
+    if (pump.on === true) return;
+    pump.on = true;
+    while (queue.length > 0) await galleryThumb(...queue.shift());
+    pump.on = false;
+  };
+  if (typeof IntersectionObserver === 'function') {
+    const io = new IntersectionObserver((es) => {
+      for (const e of es) {
+        if (!e.isIntersecting) continue;
+        io.unobserve(e.target);
+        const j = jobs.find(([c]) => c === e.target);
+        if (j !== undefined) { queue.push(j); pump(); }
+      }
+    }, { rootMargin: '200px' });
+    for (const [c] of jobs) io.observe(c);
+  } else {
+    queue.push(...jobs);
+    pump();
+  }
 }
 
 /* ---------------------------------------------------------------- 预览：派发
@@ -618,10 +773,23 @@ function initTabs() {
   seg.onclick = (e) => {
     const b = e.target.closest('button');
     if (!b) return;
-    for (const o of seg.children) o.classList.toggle('on', o === b);
-    document.body.dataset.mode = b.dataset.mode;
-    if (b.dataset.mode === 'ide') $('#edit').focus();
+    setMode(b.dataset.mode);
   };
+}
+
+/**
+ * 切模式。**展示 = 首页**（一屏卡片），IDE = 编辑与运行。
+ *
+ * 首页那一屏只在第一次进去时铺（`renderGallery` 自己看 `childElementCount`）——
+ * 每次切都重铺的话，那十来张图会重跑一遍，而它们是静态的。
+ */
+function setMode(m) {
+  const seg = document.querySelector('.seg[role="tablist"]');
+  for (const o of seg.children) o.classList.toggle('on', o.dataset.mode === m);
+  document.body.dataset.mode = m;
+  localStorage.setItem('omni.mode', m);
+  if (m === 'show') renderGallery();
+  if (m === 'ide') $('#edit').focus();
 }
 
 function initEditor() {
@@ -711,14 +879,9 @@ async function main() {
     e.target.value = '';
     if (v.trim()) shell(v);
   });
-  /* 窄屏默认展示模式（设计文档 §4.1）。 */
-  if (window.matchMedia('(max-width: 800px)').matches) document.body.dataset.mode = 'show';
-  else {
-    document.body.dataset.mode = 'ide';
-    for (const b of document.querySelectorAll('.seg[role="tablist"] button')) {
-      b.classList.toggle('on', b.dataset.mode === 'ide');
-    }
-  }
+  /* **默认落在首页**（展示模式）—— 它现在是首页，落在首页是首页的定义。
+     上一次挑的那一格记在 localStorage 里：天天用 IDE 的人不该每趟都先过一眼画廊。 */
+  setMode(localStorage.getItem('omni.mode') === 'ide' ? 'ide' : 'show');
   try {
     await loadTree();
     const h = await api('/api/health');

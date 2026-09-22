@@ -10,6 +10,7 @@
  * JSON 结构对"。UI 的好看与好用靠人看。
  */
 import { execFileSync, execFile as execFileCb } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -20,7 +21,9 @@ import { natCompare, byIdeOrder } from '../../src/core/studio/shared.js';
 /* 网页那一侧的**纯函数那一半**（`src/studio/render.js`：高亮 / markdown / EPS -> SVG /
    GLSL 的源码修修）。它一个 DOM 都不碰，所以在这儿直接 import 就能判 ——
    不必拉一套无头浏览器进来。 */
-import { highlight, mdToHtml, epsToSvg, glslSource } from '../../src/studio/render.js';
+import {
+  highlight, mdToHtml, epsToSvg, glslSource, glslVertex, glslSizeOf, GALLERY,
+} from '../../src/studio/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -68,6 +71,28 @@ ok('glslSource 只留一句 #version', (es.match(/#version/g) ?? []).length === 
 ok('glslSource 没有 out 时补一格',
   glslSource('#version 120\nvoid main(){ gl_FragColor = vec4(1); }').includes('out vec4 fragColor;'));
 
+/* **顶点段照片元段生成**：写着 `in vec2 v_uv;` 的那几份（`pretty.frag`）少了对应的顶点
+   输出在 ES 3.00 上**链不上**。所以 `glslVertex` 要把每一格 `in` 配一格同名 `out`。 */
+{
+  const vs = glslVertex('#version 330 core\nin vec2 v_uv;\nin float t;\nout vec4 c;\nvoid main(){}');
+  ok('glslVertex 给 in 配上同名的 out', vs.includes('out vec2 v_uv;') && vs.includes('out float t;'));
+  ok('glslVertex 给它们赋值', vs.includes('v_uv = p;') && vs.includes('t = p.x;'));
+  ok('glslVertex 没有 in 时就一格三角形',
+    !glslVertex('void main(){}').includes('out '));
+}
+/* **画多大由文件自己说**：vispy 那几份把坐标写死在 128² 上（头上那行 `omni run … --size 128`），
+   用了分辨率 uniform 的那一族回 0 = 跟着显示区走。 */
+{
+  const rd = (p) => readFileSync(join(root, p), 'utf8');
+  ok('glslSizeOf 认文件头上的 --size',
+    glslSizeOf(rd('tests/glsl/cases/vispy-disc.frag')) === 128,
+    `${glslSizeOf(rd('tests/glsl/cases/vispy-disc.frag'))}`);
+  ok('glslSizeOf 分辨率无关的那一族回 0',
+    glslSizeOf(rd('tests/glsl/cases/pretty.frag')) === 0);
+  ok('glslSizeOf 都没说的按 256（与 CLI 同一个默认）',
+    glslSizeOf('void main(){}') === 256);
+}
+
 /* **目录树按 IDE 的次序**：目录在前、文件在后；名字里的数字按数值比
    （`ls` 的字典序会把 `100-…` 插到 `10-…` 与 `11-…` 之间）。 */
 ok('natCompare 数字按数值', natCompare('10-pairs.asy', '100-local.asy') < 0);
@@ -98,6 +123,14 @@ ok('buildTree 只收 examples/cases', paths.filter((p) => p.startsWith('ext/'))
   .every((p) => p.includes('/examples/')));
 ok('buildTree 收 html 例子', paths.some((p) => p.startsWith('ext/html/examples/') && p.endsWith('.html')));
 ok('buildTree 收 asy 的 draw', paths.some((p) => p.startsWith('tests/asy/draw/')));
+/* **首页那张策展清单**：每一格都得在树上（首页点一下要能打开它），
+   而"它是不是真出图"在下面那一节里真跑一趟。 */
+ok('首页清单每一格都在树上',
+  GALLERY.every((g) => paths.includes(g.path)),
+  GALLERY.filter((g) => !paths.includes(g.path)).map((g) => g.path).join(' '));
+ok('首页清单三种腿都有', ['asy', 'glsl', 'html'].every((k) => GALLERY.some((g) => g.kind === k)));
+ok('首页清单不收算术例子（那一族没有图）',
+  !GALLERY.some((g) => g.path.startsWith('tests/asy/cases/')));
 /* 排序那一条的真判据：同一层里 `09` < `10` < `100`，而 `ls` 会把 `100` 排在 `10` 前头。 */
 {
   const findDir = (n, want) => {
@@ -170,6 +203,16 @@ try {
       `code=${ra.json.code} stdout=${JSON.stringify((ra.json.stdout ?? '').slice(0, 40))}`);
     /* 顺手把它翻成 SVG —— 预览那一栏就是这么画的。 */
     ok('EPS -> SVG 画得出路径', epsToSvg(ra.json.stdout ?? '').includes('<path '));
+  }
+
+  /* **首页清单没骗人**：`kind: 'asy'` 那几格真跑一趟，出来的必须是 EPS，
+     而且翻成 SVG 之后真有笔画。清单是人挑的，"它确实出图"是机器判的。 */
+  for (const g of GALLERY.filter((x) => x.kind === 'asy')) {
+    const rg = await post('/api/run', { path: g.path });
+    const out = rg.json.stdout ?? '';
+    ok(`首页「${g.title}」真出图`,
+      rg.json.code === 0 && out.startsWith('%!PS') && epsToSvg(out).includes('<path '),
+      `code=${rg.json.code} ${JSON.stringify(out.slice(0, 40))}`);
   }
 
   /* **不出图的 asy 不许被甩到画布上**：切不切"绘图"那一格的依据就是这一行

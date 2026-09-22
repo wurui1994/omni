@@ -8,6 +8,10 @@
  * 纪律：**这一份里不许出现 `document` / `window`**。
  */
 
+/* 首页那一屏的清单从这儿**转手出去**：`studio.js` 只 import 这一份（单体 HTML 那边
+   是这么定的 —— 见 `tools/bundle-studio.mjs` 的 `uiScript`），而清单该有自己一份文件。 */
+export { GALLERY, galleryPaths } from './gallery.js';
+
 /* ---------------------------------------------------------------- 语法高亮
  *
  * 一门语言一张小表：关键字、注释的形状、串的形状。**不上第三方** —— 要零依赖，
@@ -338,3 +342,51 @@ export function glslSource(src) {
   if (!/\bout\s+vec4\s+\w+\s*;/.test(s)) s = `out vec4 fragColor;\n${s.replace(/\bgl_FragColor\b/g, 'fragColor')}`;
   return pre + s;
 }
+
+/** 片元着色器里那些**从顶点段进来**的量（`in vec2 v_uv;`）。回 `[[类型, 名字], …]`。 */
+export function glslInputs(src) {
+  const out = [];
+  for (const m of src.matchAll(/(?:^|\n)[ \t]*in[ \t]+(float|vec2|vec3|vec4)[ \t]+([A-Za-z_]\w*)[ \t]*;/g)) {
+    out.push([m[1], m[2]]);
+  }
+  return out;
+}
+
+/**
+ * **配套的顶点段**。我们画的是一格铺满屏幕的三角形（`gl_VertexID`，不传顶点缓冲）。
+ *
+ * 为什么不能写死一份：片元段里写着 `in vec2 v_uv;` 的（`pretty.frag` 就是）在 ES 3.00 上
+ * **链不上** —— 那一格输入没有对应的顶点输出。所以顶点段要照片元段的声明生成：
+ * 每一格 `in` 配一格同名 `out`，值给那格三角形的 0..1 坐标（`vec2` 直接给，别的按位补齐）。
+ */
+export function glslVertex(src) {
+  const ins = glslInputs(src);
+  const val = (ty, p) => (ty === 'vec2' ? p
+    : ty === 'float' ? `${p}.x`
+      : ty === 'vec3' ? `vec3(${p}, 0.0)` : `vec4(${p}, 0.0, 1.0)`);
+  return ['#version 300 es',
+    ...ins.map(([ty, nm]) => `out ${ty} ${nm};`),
+    'void main(){',
+    ' vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));',
+    ...ins.map(([ty, nm]) => ` ${nm} = ${val(ty, 'p')};`),
+    ' gl_Position = vec4(p * 2.0 - 1.0, 0, 1);',
+    '}'].join('\n');
+}
+
+/**
+ * 这一份着色器**该画多大**。回 0 = 跟着显示区走。
+ *
+ * 为什么不是"一律铺满"：vispy 那几份把坐标写死了（`vec2 center = vec2(64.0, 64.0)`，
+ * 冲的是 128² 的画布）—— 铺满一格大画布的话，那个圆点缩在左下角，看着像画错了。
+ * 判据是**文件自己说的**：每份例子头上都有那一行 `omni run … --size 128`（这棵树的惯例），
+ * 照它走，页面上看到的就与 `omni run x.frag -o out.png` 出的那张 PNG 是同一张图。
+ *
+ * 用了分辨率那一格 uniform 的（`u_res` / `iResolution` / …）是**与尺寸无关**的写法，
+ * 那一族跟着显示区走（回 0），大屏上就是高清的。没写 `--size` 的按 256 —— 与 CLI 同一个默认。
+ */
+export function glslSizeOf(src) {
+  if (/\b(u_res|u_resolution|iResolution|resolution)\b/.test(src)) return 0;
+  const m = /--size[ \t]+(\d+)/.exec(src);
+  return m === null ? 256 : Number(m[1]);
+}
+
