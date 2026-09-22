@@ -300,6 +300,10 @@ function callOf(x, C) {
       args: [{ kind: 'name', name: 'this' }, ...args],
     };
   }
+  /* `Point(1, 2)` —— **函数式的构造**（与 `Point p(1,2)` 落同一格调用）。 */
+  if (C.records.has(name) && C.fns.has(`${C.ref(name)}__ctor`)) {
+    return { kind: 'call', fn: { kind: 'name', name: `${C.ref(name)}__ctor` }, args };
+  }
   /* **模板的调用**（推出类型形参 → 单态化 → 落成一格普通调用）。 */
   if (C.templates.has(name)) {
     const inst = C.instantiate(name, C.deduce(name, args.map((a) => typeOf(a, C.tyCtx()))));

@@ -365,6 +365,13 @@ export const OPOVER = ['11', '22', '9', '18', '1', '0', '1', '2', '7'];
  */
 export const TMPL = ['7', '9', '1.5', '5', '3.5', '4'];
 
+/**
+ * **cpp 的构造函数**（`ext/cpp/examples/ctor.cpp`）。`Point p(1,2)` / `Point(10,20)` /
+ * 默认构造 / 构造里调自己的方法，四种写法落同一格 `Rec__ctor` 调用。
+ * 第一、二行顺带钉住"成员初始化表按**字段声明的次序**跑"（例子里写的是 `y(b), x(a)`）。
+ */
+export const CTOR = ['1', '2', '3', '30', '100', '5', '11'];
+
 const C = (name, grammar, file, expect) => ({ name, grammar, file, expect });
 
 /**
@@ -563,6 +570,10 @@ export const CASES = [
   // 调用点按实参的静态类型算出一份实例名（`maxOf__int`），第一次要到才降一遍体。
   // 图上一格新节点也没加。期望输出同样由 `c++` 给。
   ...fam('tmpl', TMPL, ['cpp']),
+  // 第五十七个家族：**构造函数**（cpp 独一份）。落成"造一格零值记录 → 跑成员初始化表 →
+  // 跑体 → 交出去"的普通函数（`Point__ctor`）—— 图上一格新节点也没加。
+  // 期望输出同样由 `c++` 给。
+  ...fam('ctor', CTOR, ['cpp']),
 ];
 
 

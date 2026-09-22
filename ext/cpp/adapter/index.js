@@ -20,6 +20,9 @@ import {
 /** 析构函数的名字。 */
 const dtorName = (ty) => `__destruct_${String(ty).replace(/[^A-Za-z0-9_]/g, '_')}`;
 
+/** 构造函数的名字（交的是一格记录，所以它是个**普通函数**，不带 `this`）。 */
+const ctorName = (rec) => `${rec}__ctor`;
+
 /**
  * **`operator@` 的方法名**（与 `expr.js` 的 `OP_MAP` 是同一张表的两头）。
  * 落法是把重载编成一格**普通方法**（`类名_op_add`）—— 登记、发体、分派全不用另写；
@@ -163,6 +166,7 @@ export function cppToIR(tree) {
     const fields = [];
     const methods = [];
     let dtor = null;
+    let ctor = null;
     for (const m of (members === undefined ? [] : kids(members))) {
       if (tag(m) === 'decl') {
         const ms = part(m, 'specs');
@@ -177,13 +181,16 @@ export function cppToIR(tree) {
         const f = part(m, 'fn') ?? kids(m).find((y) => tag(y) === 'fn');
         const head = f === undefined ? undefined : kids(f)[0];
         if (head !== undefined && tag(head) === 'dtor') { dtor = m; continue; }
+        /* **构造函数**：名字与类同名、而且**没有返回类型那一格**。 */
+        if (head !== undefined && tag(head) === 'n' && nameOf(head) === nameOf(nm)
+          && part(m, 'specs') === undefined) { ctor = m; continue; }
         const mn2 = (head !== undefined && tag(head) === 'opname')
           ? opMethodName(head) : nameOf(kids(f)[0]);
         methods.push({ tok: m, name: mn2 });
       }
     }
     C.records.set(nameOf(nm), {
-      name: nameOf(nm), bases, fields, methods, dtor,
+      name: nameOf(nm), bases, fields, methods, dtor, ctor,
     });
   }
   /* **把基类摊进派生类**（字段在前、方法按名字继承）—— 见 `flatten`。 */
@@ -268,6 +275,11 @@ export function cppToIR(tree) {
         ret: { kind: 'void' },
       });
     }
+    /* **构造函数**交的是一格记录（`Point__ctor(a, b) -> Point`）。 */
+    if (rec.ctor !== null && rec.ctor !== undefined) {
+      const s = sigOf(rec.ctor, undefined, ctorName(C.ref(rec.name)));
+      C.fns.set(s.name, { params: s.params, ret: selfType });
+    }
   }
 
   /* ---- 第三遍：方法 / 析构 / 函数的体 -------------------------------------- */
@@ -284,6 +296,10 @@ export function cppToIR(tree) {
         ret: { kind: 'void' },
       };
       decls.push(fnDecl(s, rec.dtor, C, C.ref(rec.name)));
+    }
+    if (rec.ctor !== null && rec.ctor !== undefined) {
+      const s = sigOf(rec.ctor, undefined, ctorName(C.ref(rec.name)));
+      decls.push(ctorDecl({ ...s, ret: selfType }, rec, C));
     }
   }
   for (const f of topFns) decls.push(fnDecl(sigOf(f), f, C));
@@ -354,8 +370,87 @@ function fnDecl(sig, fnTok, C, selfName = null) {
   };
 }
 
-/** 当前函数里那几格带析构的量 → **逆序**各调一次（C++ 的规矩）。 */
-function dtorCalls(C) {
+/**
+ * **一格构造函数**。落成"造一格零值记录 → 跑成员初始化表 → 跑体 → 交出去"的普通函数：
+ *
+ *   Point__ctor(a, b) -> Point { let this = Point{x:0,y:0,sum:0}; this.x=a; this.y=b; …; return this }
+ *
+ * 两条是 C++ 的规矩，不是公共层的：
+ *   1. 成员初始化表**按字段声明的次序**跑（不按表里写的次序 —— 那一格写反了答案会静默地错）；
+ *   2. 体里裸写的名字先查形参、再查字段（`C.self` 那条既有规矩，见 expr.js 的 `case 'n'`）。
+ */
+function ctorDecl(sig, rec, C) {
+  const recName = C.ref(rec.name);
+  const selfType = named(recName, true);
+  C.push();
+  for (const p of sig.params) C.bind(p.name, p.type);
+  C.bind('this', selfType);
+  const outerScoped = C.scoped;
+  const outerSelf = C.self;
+  C.self = recName;
+  C.scoped = [];
+  const stmts = [{
+    kind: 'let',
+    name: 'this',
+    type: selfType,
+    init: {
+      kind: 'new-record',
+      type: selfType,
+      ref: true,
+      fields: rec.fields.map((f) => ({ name: f.name, value: zeroFor(f.type) })),
+    },
+  }];
+  /* 成员初始化表 —— 按**字段声明的次序**，不按表里写的次序。 */
+  const initTok = kids(rec.ctor).find((y) => tag(y) === 'ctor-init');
+  const inits = new Map();
+  for (const mi of (initTok === undefined ? [] : kids(initTok))) {
+    if (tag(mi) !== 'mi') continue;
+    const args = part(mi, 'args');
+    if (args === undefined || kids(args).length !== 1) {
+      throw new Error('cpp->IR: 成员初始化表这一格还没接（只接 `字段(一格表达式)`）');
+    }
+    inits.set(nameOf(kids(mi)[0]), kids(args)[0]);
+  }
+  for (const f of rec.fields) {
+    const e = inits.get(f.name);
+    if (e === undefined) continue;
+    stmts.push({
+      kind: 'assign',
+      target: { kind: 'field', obj: { kind: 'name', name: 'this' }, name: f.name },
+      value: exprOf(e, C),
+    });
+  }
+  const body = part(rec.ctor, 'body');
+  if (body !== undefined) for (const s of kids(body)) stmts.push(...stmtsOf(s, C));
+  stmts.push({ kind: 'return', values: [{ kind: 'name', name: 'this' }] });
+  const exits = dtorCalls(C);
+  C.scoped = outerScoped;
+  C.self = outerSelf;
+  C.pop();
+  return {
+    kind: 'fn',
+    name: sig.name,
+    params: sig.params,
+    ret: selfType,
+    body: exits.length === 0 ? stmts : [{ kind: 'scope', stmts, exits }],
+  };
+}
+
+/** 一格类型的零值（构造函数先造一格全零的记录，再让初始化表与体去改）。 */
+function zeroFor(t) {
+  switch (t.kind) {
+    case 'int': return { kind: 'int', value: 0 };
+    case 'real': return { kind: 'real', value: 0 };
+    case 'bool': return { kind: 'bool', value: false };
+    case 'string': return { kind: 'string', value: '' };
+    case 'arr': return { kind: 'builtin', name: 'anew', args: [tyArg(t), { kind: 'int', value: 0 }] };
+    case 'map': return { kind: 'builtin', name: 'dnew', args: [tyArg(t)] };
+    default:
+      throw new Error(`cpp->IR: 构造函数里 ${t.kind} 那一格字段的零值还没接`);
+  }
+}
+
+/** 当前函数里那几格带析构的量 → **逆序**各调一次（C++ 的规矩）。 */function dtorCalls(C) {
   return [...C.scoped].reverse().map((v) => ({
     kind: 'expr-stmt',
     expr: {
@@ -458,7 +553,18 @@ function stepOf(x, C) {
 
 /** 赋值的左边那一格。 */
 function lhsOf(t, C) {
-  if (tag(t) === 'n') return { kind: 'name', name: C.ref(nameOf(t)) };
+  /**
+   * 裸名字走 `exprOf` —— 那一份已经有"局部量先查、再当 `this->` 那一格字段"的规矩
+   * （见 expr.js 的 `case 'n'`）。**赋值的左边也要认这条**：构造函数体里的
+   * `sum = total();` 与方法里的 `n = 1;` 改的都是字段，写成裸 `(set sum …)` 会报未声明。
+   */
+  if (tag(t) === 'n') {
+    const e = exprOf(t, C);
+    if (e.kind !== 'name' && e.kind !== 'field') {
+      throw new Error(`cpp->IR: \`${nameOf(t)}\` 不能当赋值的左边`);
+    }
+    return e;
+  }
   if (tag(t) === 'dot' || tag(t) === 'arrow') {
     return { kind: 'field', obj: exprOf(kids(t)[0], C), name: nameOf(kids(t)[1]) };
   }
@@ -560,6 +666,26 @@ function declOf(d, specs, C) {
     const rec = [...C.records.values()].find((r) => C.ref(r.name) === type.name);
     if (rec !== undefined && rec.dtor !== null) C.scoped.push({ name, type: rec.name });
   }
+  /**
+   * **构造**：`Point p(1, 2)` 走 `(ctor (args …))` 那一格，`Counter c;`（这个类有构造函数）
+   * 走的是"没有初值"那一格 —— 两者落的都是一次 `Rec__ctor(…)`。没有构造函数的类照旧
+   * （`Point p;` 是 `init: null`，`Say s1;` 只登记析构）。
+   */
+  const ctorTok = kids(dd).find((y) => tag(y) === 'ctor');
+  if (type.kind === 'named' && C.fns.has(`${type.name}__ctor`)
+    && (ctorTok !== undefined || initTok === undefined)) {
+    const as = ctorTok === undefined ? undefined : part(ctorTok, 'args');
+    return {
+      kind: 'let',
+      name,
+      type,
+      init: {
+        kind: 'call',
+        fn: { kind: 'name', name: `${type.name}__ctor` },
+        args: as === undefined ? [] : kids(as).map((a) => exprOf(a, C)),
+      },
+    };
+  }
   return {
     kind: 'let', name, type,
     init: initTok === undefined ? null : exprOf(kids(initTok)[0], C),
@@ -567,8 +693,12 @@ function declOf(d, specs, C) {
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
-//   1. 模板、继承、虚函数、运算符重载、异常、lambda 都没接（与从前那条路同一个范围）。
+//   1. **虚函数、异常、lambda、类模板**还没接（当场报）。虚函数那一格要的不是新节点，
+//      是"Base 那格变量能装 Derived" —— 摊平之后两者是两格无关的记录，所以得换一条
+//      表示（`ext/go/adapter/iface.js` 那套"方法闭包的记录"是现成的参考）。
 //   2. `printf` 只接"一格转换 + 换行"与纯文本（见 expr.js 的 printArgs）。
 //   3. 引用（`T&`）当值收（例子里只用它传结构 —— 记录本来就是引用语义）。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
+//   5. 构造函数一个类只认**一份**（重载还没接）；拷贝构造与赋值算子也没有 ——
+//      记录是引用语义，所以那两格在这条腿上本来就不是"拷贝"。
