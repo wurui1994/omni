@@ -345,6 +345,11 @@ try {
     await say('import "std/complex.omni";');
     const f = await say('numFft([1.0, 1.0, 1.0, 1.0])[0].text()');
     ok('控制台里 FFT 出得来（常数序列的直流 = 4）', f.out === '4\n', JSON.stringify(f));
+    /* 随机数（阶段 7）：minstd 那一串的第一个数是已知的。 */
+    await say('import "std/rand.omni";');
+    const rd = await say('rngNew(1).nextInt()');
+    ok('控制台里随机数是可复现的（种子 1 的第一个数 = 16807）', rd.out === '16807\n',
+      JSON.stringify(rd));
   }
 
   /* ---- 控制台里出图（`std/plot.omni`，设计文档阶段 4）----

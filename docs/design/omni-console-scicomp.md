@@ -170,6 +170,27 @@
   以及朴素 DFT 那条腿上有闭式的 `6` 与 `-1.5 ± i√3/2`（截 6 位）。
   复数的算术本身是精确的（四则），那几行照印。tests/serve 另有一格走控制台。
 
+## 4.7 阶段 7 —— 随机数（L3c，**已落地**：`src/lib/rand.omni`）
+
+gsl-shell 那边这一层**全是绑定，算法一行都不在它那儿**：`rng.lua` 是 `gsl_rng_*` 的 ffi 壳，
+`rnd.lua` 整份由模板生成（`templates/rnd-defs.lua.in` 里一排
+`function rnd.X(r, …) return gsl.gsl_ran_X(r, …) end`）。所以这一层只能自己写。
+
+* 接口照它：`Rng` 上 `nextInt` / `get`（[0,1)）/ `getint(n)` / `flat(a,b)` /
+  `ugaussian` / `gaussian(sigma)` / `exponential(mu)` / `reseed`，加 `rngNew(seed)`。
+  （它那边是 `r:get()` / `r:getint(n)` / `r:set(seed)` —— `set` 在这门语言里是
+  `set<T>` 的类型关键字，所以改叫 `reseed`。）
+* **发生器挑 minstd**（`x = 16807x mod 2147483647`，GSL 里也有这一格），不是 GSL 默认的
+  mt19937。判据那一条决定的：乘积最大 3.6e13，**在 double 里精确**，于是四条腿逐位同一串数；
+  mt19937 要 32 位回绕的位运算，那是另一场仗。质量不如它（周期 2³¹-2、低位有结构），
+  文件头照实写着 —— 换发生器时接口不动。
+* 正态走 **Box–Muller 的极坐标形式**（只要 sqrt/log/cos/sin 四个内建，一趟出两个，
+  第二个留在 `spare` 里），不是 GSL 默认的比值法。
+* 判据 `tests/cases/31_rand.omni`（四条腿 + 快照）。**随机数的判据反而最硬**：
+  minstd 那一串是公开的已知值（种子 1 之后 16807 / 282475249 / 1622650073 / 984943658），
+  逐个比；分布那几格比一万个样本的均值与标准差（0.5 / 0.2887、0 / 1、sigma=3、mu=2），
+  截到两位小数 —— 在四条腿上安全，**因为底下那一串整数一模一样**。
+
 * **往后**：L3c 随机、L3d 特殊函数、L5 三维、L6 数据表 —— 按需要，一格一格来。
 
 **先不碰的**：`eigen` / `vegas` / `bspline` / `gdt` / `expr-*` —— 上面那一列写清了它们可缺。

@@ -1,0 +1,108 @@
+// 随机数（`std/rand.omni`）—— 控制台那套科学计算的 L3c（设计文档阶段 7）
+//
+// **随机数的判据反而是最硬的那一种**：发生器是确定的，所以"第几个数是什么"可以逐个比。
+//   * minstd 那一串是公开的已知值（种子 1 之后 16807 / 282475249 / 1622650073 / 984943658）；
+//   * 同种子两台机器给同一串、换种子就不同 —— 这两条把"状态真的在走"钉住；
+//   * 分布那几格只能统计：一万个样本的均值与标准差，比到两位小数。
+//     这么比在四条腿上是安全的**因为那一串底数一模一样**（minstd 的乘积在 double 里精确）。
+import "std/rand.omni";
+
+// ── 那一串已知的数 ──────────────────────────────────────────────────────────
+Rng a = rngNew(1);
+print(string(a.nextInt()));
+print(string(a.nextInt()));
+print(string(a.nextInt()));
+print(string(a.nextInt()));
+
+// 同种子同一串
+Rng b = rngNew(1);
+print(string(b.nextInt() == 16807));
+// 换种子就不是那一串
+Rng c = rngNew(7);
+print(string(c.nextInt()));
+// 0 与 2147483647 都是不动点，得被搬走（搬成 1，于是第一个数还是 16807）
+print(string(rngNew(0).nextInt()));
+// 负种子也要落进区间
+print(string(rngNew(-1).nextInt() > 0));
+// reseed 之后从头来
+a.reseed(1);
+print(string(a.nextInt()));
+
+// ── 均匀分布 ────────────────────────────────────────────────────────────────
+// [0,1) 里，一万个样本的均值 ≈ 0.5、标准差 ≈ 1/√12 ≈ 0.2887
+Rng r = rngNew(42);
+real sum = 0.0;
+real sum2 = 0.0;
+real lo = 1.0;
+real hi = 0.0;
+int i = 0;
+while (i < 10000) {
+  real x = r.get();
+  if (x < lo) { lo = x; }
+  if (x > hi) { hi = x; }
+  sum = sum + x;
+  sum2 = sum2 + x * x;
+  i = i + 1;
+}
+real mean = sum / 10000.0;
+real sd = sqrt(sum2 / 10000.0 - mean * mean);
+print(string(round(mean * 100.0) / 100.0));
+print(string(round(sd * 1000.0) / 1000.0));
+print(string(lo >= 0.0 && hi < 1.0));
+
+// getint 落在 0..n-1，且每一格都出得来（n 小、样本多）
+list<int> hits = [0, 0, 0, 0, 0, 0];
+int k = 0;
+while (k < 6000) {
+  int idx = r.getint(6);
+  hits[idx] = hits[idx] + 1;
+  k = k + 1;
+}
+bool allHit = true;
+for (int h in hits) { if (h == 0) { allHit = false; } }
+print(string(allHit));
+
+// flat(a, b) 落在区间里
+bool inRange = true;
+int j = 0;
+while (j < 1000) {
+  real x = r.flat(-2.0, 5.0);
+  if (x < -2.0 || x >= 5.0) { inRange = false; }
+  j = j + 1;
+}
+print(string(inRange));
+
+// ── 正态与指数 ──────────────────────────────────────────────────────────────
+// 标准正态：均值 ≈ 0、标准差 ≈ 1（一万个样本，比到两位小数）
+Rng g = rngNew(1234);
+real gs = 0.0;
+real gs2 = 0.0;
+int n = 0;
+while (n < 10000) {
+  real x = g.ugaussian();
+  gs = gs + x;
+  gs2 = gs2 + x * x;
+  n = n + 1;
+}
+real gm = gs / 10000.0;
+print(string(round(gm * 100.0) / 100.0));
+print(string(round(sqrt(gs2 / 10000.0 - gm * gm) * 100.0) / 100.0));
+
+// sigma 那一格真的在缩放：标准差 ≈ 3
+real hs2 = 0.0;
+int m = 0;
+while (m < 10000) { real x = g.gaussian(3.0); hs2 = hs2 + x * x; m = m + 1; }
+print(string(round(sqrt(hs2 / 10000.0) * 10.0) / 10.0));
+
+// 指数分布：均值 ≈ mu、全为正
+real es = 0.0;
+bool pos = true;
+int t = 0;
+while (t < 10000) {
+  real x = g.exponential(2.0);
+  if (x < 0.0) { pos = false; }
+  es = es + x;
+  t = t + 1;
+}
+print(string(round(es / 10000.0 * 10.0) / 10.0));
+print(string(pos));

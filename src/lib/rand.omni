@@ -1,0 +1,110 @@
+// Omni 标准库 —— 随机数（控制台那套科学计算的 L3c，`docs/design/omni-console-scicomp.md` 阶段 7）
+//
+// gsl-shell 那边这一层**全是绑定**：`rng.lua` 是 `gsl_rng_*` 的 ffi 壳（`r:get()` /
+// `r:getint(n)` / `r:set(seed)`），`rnd.lua` 更彻底 —— 整份是模板生成的一排
+// `function rnd.X(r, …) return gsl.gsl_ran_X(r, …) end`（`templates/rnd-defs.lua.in`）。
+// 也就是说**算法一行都不在它那儿**，在 GSL 里。我们没有 GSL，所以这一层自己写。
+//
+// **发生器挑的是 minstd**（Lehmer：`x = 16807 * x mod 2147483647`，GSL 里也有这一格，
+// 叫 `gsl_rng_minstd`），不是 GSL 的默认 mt19937。理由是判据那一条：
+//   * 乘积最大 16807 * 2147483646 ≈ 3.6e13，**在 double 里是精确的**，
+//     所以四条腿（js / c / 解释器 / MIR）逐位同一串数 —— mt19937 要 32 位回绕的
+//     位运算，那在这门语言的 `int` 上是另一场仗，而这一层的正事不是仗。
+//   * 一串已知的数：种子 1 之后是 16807 / 282475249 / 1622650073 / 984943658 …
+//     判据可以逐个比，不必靠统计。
+// 质量当然不如 mt19937（周期 2³¹-2、低位有结构），文件里照实写着 —— 要好的换发生器，
+// 这一层的接口不动。
+//
+// 名字都带 `rng` / `rnd` 前缀（照它的两个模块名）。
+
+class Rng {
+  // 状态永远在 1 .. 2147483646（0 是不动点，所以 `rngNew` 会把 0 换掉）
+  int s;
+  // Box–Muller 一趟出两个数，留着的那个（`hasSpare` 是那一格在不在）
+  real spare;
+  bool hasSpare;
+
+  /** 下一个整数，在 1 .. 2147483646（`gsl_rng_get`）。 */
+  int nextInt() {
+    s = (16807 * s) % 2147483647;
+    return s;
+  }
+
+  /** 均匀分布 [0, 1)（`r:get()` / `gsl_rng_uniform`）。 */
+  real get() {
+    return real(nextInt()) / 2147483647.0;
+  }
+
+  /** 0 .. n-1 的整数（`r:getint(n)` / `gsl_rng_uniform_int`）。 */
+  int getint(int n) {
+    if (n <= 0) { fail("rand: getint 要正数"); }
+    return int(get() * real(n));
+  }
+
+  /** 均匀分布 [a, b)（`rnd.flat`）。 */
+  real flat(real a, real b) {
+    return a + (b - a) * get();
+  }
+
+  /**
+   * 标准正态（`rnd.ugaussian`）——**Box–Muller 的极坐标形式**。
+   *
+   * 为什么不是比值法（GSL 的默认）：极坐标形式只要 `sqrt` / `log` / `cos` / `sin`
+   * 这四个内建，而且**一趟出两个数**，第二个留在 `spare` 里下次直接给。
+   * 落在单位圆外就重抽（平均 1.27 趟）。
+   */
+  real ugaussian() {
+    if (hasSpare) { hasSpare = false; return spare; }
+    real u = 0.0;
+    real v = 0.0;
+    real r = 0.0;
+    bool inside = false;
+    int guard = 0;
+    while (!inside && guard < 100) {
+      u = 2.0 * get() - 1.0;
+      v = 2.0 * get() - 1.0;
+      r = u * u + v * v;
+      inside = r > 0.0 && r < 1.0;
+      guard = guard + 1;
+    }
+    if (!inside) { fail("rand: ugaussian 抽了 100 趟都落在圆外（发生器坏了）"); }
+    real f = sqrt(-2.0 * log(r) / r);
+    spare = v * f;
+    hasSpare = true;
+    return u * f;
+  }
+
+  /** 正态，标准差 `sigma`（`rnd.gaussian`）。 */
+  real gaussian(real sigma) {
+    return sigma * ugaussian();
+  }
+
+  /** 指数分布，均值 `mu`（`rnd.exponential`）。 */
+  real exponential(real mu) {
+    // `get()` 会给 0（状态取不到 2147483647，但 1/2147483647 也够小），所以从 1-u 取
+    return -mu * log(1.0 - get());
+  }
+
+  /** 重新播种（`r:set(seed)`。这儿不叫 `set` —— 那是 `set<T>` 的类型关键字）。 */
+  void reseed(int seed) {
+    s = rngSeed(seed);
+    hasSpare = false;
+  }
+}
+
+/** 一台发生器。种子照 GSL 的习惯：默认那一格是 1。 */
+Rng rngNew(int seed) {
+  Rng r = new Rng();
+  r.s = rngSeed(seed);
+  r.spare = 0.0;
+  r.hasSpare = false;
+  return r;
+}
+
+/** 种子搬进 1 .. 2147483646（0 与 2147483647 都是不动点）。 */
+private int rngSeed(int seed) {
+  int x = seed % 2147483647;
+  if (x < 0) { x = x + 2147483647; }
+  if (x == 0) { x = 1; }
+  return x;
+}
