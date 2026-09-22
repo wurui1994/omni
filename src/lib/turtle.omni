@@ -1,0 +1,180 @@
+// Omni 标准库 —— 海龟绘图（logo 那一套），出一份 SVG
+//
+// 名字照 python 的 `turtle`（`forward` / `back` / `left` / `right` / `penup` /
+// `pendown` / `goto` / `color` / `width`）—— 那是这一族里最多人认得的一套，
+// 而 logo 原本的 `fd` / `bk` / `lt` / `rt` 当别名挂上（短，画递归图形时顺手）。
+//
+// 与 `plot.omni` 同一条纪律：**出一份 SVG 文本，不做窗口**。于是它在 IDE 的预览栏、
+// 控制台的绘图栏、首页的卡片上是同一张图（页面看输出决定挂哪儿）。
+//
+// 两处与 python 那边不同，都记在这儿：
+//   1. **y 朝上**（数学的那一头）。python 的 turtle 也是 y 朝上，可 SVG 是 y 朝下 ——
+//      翻转在 `svg()` 里做一次（整张图套一格 `scale(1 -1)`），画的人不必操心。
+//   2. **画布按画出来的范围定**（自动 viewBox + 一圈边距）。递归图形的尺度是算出来的
+//      （Koch 雪花第 4 层与第 1 层差好几倍），写死画布只会把一半裁掉。
+//
+// 名字都带 `turtle` 前缀（`json.omni` 头上那段账：名字太通用会泄进每个 import 者的作用域）。
+
+/** 一段画下来的线（一次落笔到抬笔）。 */
+class Stroke {
+  string d;
+  string color;
+  real width;
+}
+
+class Turtle {
+  real x;
+  real y;
+  // 朝向，**度**（0 = 朝右，逆时针为正 —— 与 python 一样）
+  real ang;
+  bool down;
+  string pen;
+  real lw;
+  list<Stroke> strokes;
+  // 正在画的那一段（还没抬笔）
+  string cur;
+  // 画出来的范围（只算落过笔的点）
+  real x0;
+  real y0;
+  real x1;
+  real y1;
+  bool any;
+
+  // 记一格到包围盒里（`private` 在类里不能写 —— 那一格只给顶层函数用，量出来的）
+  void mark(real px, real py) {
+    if (!any) { x0 = px; y0 = py; x1 = px; y1 = py; any = true; return; }
+    if (px < x0) { x0 = px; }
+    if (py < y0) { y0 = py; }
+    if (px > x1) { x1 = px; }
+    if (py > y1) { y1 = py; }
+  }
+
+  string num(real v) {
+    return string(round(v * 100.0) / 100.0);
+  }
+
+  /** 往前走 `d`（笔落着就画一条线）。 */
+  void forward(real d) {
+    real tau = 8.0 * atan(1.0);
+    real r = ang * tau / 360.0;
+    real nx = x + d * cos(r);
+    real ny = y + d * sin(r);
+    if (down) {
+      if (cur == "") {
+        cur = "M " + num(x) + " " + num(y);
+        mark(x, y);
+      }
+      cur = cur + " L " + num(nx) + " " + num(ny);
+      mark(nx, ny);
+    }
+    x = nx;
+    y = ny;
+  }
+
+  void back(real d) { forward(-d); }
+  void left(real a) { ang = ang + a; }
+  void right(real a) { ang = ang - a; }
+
+  /** 抬笔：把正在画的那一段收进清单。 */
+  void penup() {
+    if (cur != "") { turtleFlush(this); }
+    down = false;
+  }
+
+  void pendown() { down = true; }
+
+  /** 抬着笔挪到某处（落着笔就画过去）。 */
+  void goto(real nx, real ny) {
+    if (down) {
+      if (cur == "") { cur = "M " + num(x) + " " + num(y); mark(x, y); }
+      cur = cur + " L " + num(nx) + " " + num(ny);
+      mark(nx, ny);
+    }
+    x = nx;
+    y = ny;
+  }
+
+  /** 换颜色（`#rrggbb` 或者 SVG 认的名字）。换色要**断开**这一段，不然颜色会追溯。 */
+  void color(string c) {
+    if (cur != "") { turtleFlush(this); }
+    pen = c;
+  }
+
+  /** 换线宽（同样要断开这一段）。 */
+  void width(real w) {
+    if (cur != "") { turtleFlush(this); }
+    lw = w;
+  }
+
+  /** 朝向定到某个角度（度）。 */
+  void heading(real a) { ang = a; }
+
+  // logo 那套短名字
+  void fd(real d) { forward(d); }
+  void bk(real d) { back(d); }
+  void lt(real a) { left(a); }
+  void rt(real a) { right(a); }
+
+  /** 画出来的范围印成 `x0 y0 x1 y1`（判据与调试用）。 */
+  string bounds() {
+    if (!any) { return "空"; }
+    return num(x0) + " " + num(y0) + " " + num(x1) + " " + num(y1);
+  }
+
+  /** 一份 SVG（宽 `w` 像素；高按画出来的比例定）。 */
+  string svg(int w) {
+    if (cur != "") { turtleFlush(this); }
+    if (!any) { fail("turtle: 一笔都没画，没什么可出的"); }
+    real pad = 8.0;
+    real bw = x1 - x0;
+    real bh = y1 - y0;
+    if (bw < 1.0) { bw = 1.0; }
+    if (bh < 1.0) { bh = 1.0; }
+    // 画布按内容的比例（宽给定，高跟着算）——一圈边距在 viewBox 里让出来
+    real vw = bw + pad * 2.0;
+    real vh = bh + pad * 2.0;
+    int h = int(real(w) * vh / vw);
+    string s = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 "
+      + num(vw) + " " + num(vh) + "\" width=\"" + string(w) + "\" height=\"" + string(h) + "\">";
+    s = s + "<rect width=\"" + num(vw) + "\" height=\"" + num(vh) + "\" fill=\"#ffffff\"/>";
+    // y 朝上：整张图套一格翻转，里头的坐标就是海龟自己的坐标
+    s = s + "<g transform=\"translate(" + num(pad - x0) + " " + num(vh - pad + y0)
+      + ") scale(1 -1)\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\">";
+    for (Stroke k in strokes) {
+      s = s + "<path d=\"" + k.d + "\" stroke=\"" + k.color
+        + "\" stroke-width=\"" + num(k.width) + "\"/>";
+    }
+    return s + "</g></svg>";
+  }
+
+  /** 480 像素宽的那一张（与 `plot.omni` 的默认同一个口径）。 */
+  string svg() { return svg(480); }
+
+  /** 印出来（页面看输出决定挂哪儿：`<svg` 起头就是一张图）。 */
+  void show() { print(svg()); }
+}
+
+/** 一只海龟，站在原点朝右，笔是落着的。 */
+Turtle turtleNew() {
+  Turtle t = new Turtle();
+  t.x = 0.0;
+  t.y = 0.0;
+  t.ang = 0.0;
+  t.down = true;
+  t.pen = "#0a84ff";
+  t.lw = 1.0;
+  t.cur = "";
+  t.any = false;
+  return t;
+}
+
+/** 把正在画的那一段收进清单（换色 / 换宽 / 抬笔 / 出图时都要先收）。 */
+private void turtleFlush(Turtle t) {
+  if (t.cur == "") { return; }
+  Stroke k = new Stroke();
+  k.d = t.cur;
+  k.color = t.pen;
+  k.width = t.lw;
+  t.strokes.push(k);
+  t.cur = "";
+}

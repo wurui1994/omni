@@ -1,0 +1,10 @@
+exit 0
+--- stdout ---
+true
+-0 -100 100 0
+1153
+421
+true
+true
+0 -0 300 86.6
+--- stderr ---

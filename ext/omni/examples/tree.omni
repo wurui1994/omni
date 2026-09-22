@@ -1,0 +1,55 @@
+// 递归树 —— 海龟画的另一种递归图形（分叉 + 逐层变细变绿）
+//
+// 这一份是**给人看的例子**（首页那一屏上的一格）。判据在 `tests/cases/34_turtle.omni`。
+//
+// 顺带示范两件事：**换色与换宽会把线断开**（所以每一层是自己的一段），
+// 以及**没有内建的位置栈**时怎么回到分叉点 —— 自己记下 `x`/`y`/`ang`，
+// 抬笔 `goto` 回去再 `heading` 复位。
+//
+//   omni run ext/omni/examples/tree.omni > tree.svg
+import "std/turtle.omni";
+
+// 由深到浅：树干褐、枝条绿。
+// **写成函数而不是文件级的数组**：这门语言里函数体看得见文件级的**标量**，看不见
+// 文件级的数组/记录（量出来的：`undefined variable 'PALETTE'`）。
+string shade(int i) {
+  if (i <= 0) { return "#6b4a2f"; }
+  if (i == 1) { return "#7a5a33"; }
+  if (i == 2) { return "#8a6b37"; }
+  if (i == 3) { return "#6f8f3a"; }
+  if (i == 4) { return "#4f9f42"; }
+  if (i == 5) { return "#3aae4a"; }
+  return "#5cc46b";
+}
+
+void branch(Turtle t, int n, real len, real w) {
+  if (n <= 0) { return; }
+  t.color(shade(7 - n));
+  t.width(w);
+  t.fd(len);
+
+  real bx = t.x;
+  real by = t.y;
+  real ba = t.ang;
+
+  t.lt(24.0);
+  branch(t, n - 1, len * 0.72, w * 0.68);
+
+  t.penup();
+  t.goto(bx, by);
+  t.pendown();
+  t.heading(ba);
+
+  t.rt(26.0);
+  branch(t, n - 1, len * 0.7, w * 0.68);
+
+  t.penup();
+  t.goto(bx, by);
+  t.pendown();
+  t.heading(ba);
+}
+
+Turtle t = turtleNew();
+t.heading(90.0);          // 朝上
+branch(t, 7, 90.0, 7.0);
+t.show();

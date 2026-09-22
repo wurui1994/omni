@@ -319,7 +319,7 @@ try {
     const out = (rg.json.stdout ?? '').trim();
     const kind = drawKindOf(out);
     const good = g.kind === 'svg'
-      ? kind === 'svg' && out.includes('<polyline points=')
+      ? kind === 'svg' && (out.includes('<polyline points=') || out.includes('<path d='))
       : kind === 'eps' && epsToSvg(out).includes('<path ');
     ok(`首页「${g.title}」真出图`, rg.json.code === 0 && good,
       `code=${rg.json.code} ${JSON.stringify(out.slice(0, 40))} err=${JSON.stringify((rg.json.stderr ?? '').slice(-300))}`);

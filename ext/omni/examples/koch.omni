@@ -1,0 +1,30 @@
+// Koch 雪花 —— 海龟画的递归图形
+//
+// 这一份是**给人看的例子**（首页那一屏上的一格）。判据在 `tests/cases/34_turtle.omni`
+// （四条腿差分 + 几何事实 + 快照）。
+//
+//   omni run ext/omni/examples/koch.omni > koch.svg
+import "std/turtle.omni";
+
+void koch(Turtle t, int n, real d) {
+  if (n == 0) { t.fd(d); return; }
+  real s = d / 3.0;
+  koch(t, n - 1, s);
+  t.lt(60.0);
+  koch(t, n - 1, s);
+  t.rt(120.0);
+  koch(t, n - 1, s);
+  t.lt(60.0);
+  koch(t, n - 1, s);
+}
+
+Turtle t = turtleNew();
+t.color("#0a84ff");
+t.width(1.2);
+// 三条边，每条转 -120 度（闭合的雪花）
+koch(t, 4, 300.0);
+t.rt(120.0);
+koch(t, 4, 300.0);
+t.rt(120.0);
+koch(t, 4, 300.0);
+t.show();

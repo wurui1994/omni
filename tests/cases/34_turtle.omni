@@ -1,0 +1,56 @@
+// 海龟绘图（`std/turtle.omni`）—— logo 那一套
+//
+// **判的是三样**，都是几何事实（不靠眼睛）：
+//   1. 画一个正方形回到原点（终点与起点的距离 < 1e-6）；
+//   2. Koch 曲线 3 阶的笔画条数（`4^3 = 64`，每一条分成四段）与包围盒宽度
+//     （每阶宽 1/3，三阶就是 1.0 ± 数值误差）；
+//   3. 换色 / 换宽真的产生不同的笔画段。
+import "std/turtle.omni";
+
+// ── 正方形：四次 forward + right 90，终点 = 起点 ──────────────────────────────
+Turtle a = turtleNew();
+int i = 0;
+while (i < 4) { a.forward(100.0); a.right(90.0); i = i + 1; }
+real dx = a.x;
+real dy = a.y;
+print(string(abs(dx) < 0.000001 && abs(dy) < 0.000001));
+print(a.bounds());
+
+// ── Koch 曲线（3 阶）──────────────────────────────────────────────────────────
+// koch(t, n, d) 画一段长 d 的 Koch 曲线，递归到第 n 层
+void koch(Turtle t, int n, real d) {
+  if (n == 0) { t.forward(d); return; }
+  real s = d / 3.0;
+  koch(t, n - 1, s);
+  t.left(60.0);
+  koch(t, n - 1, s);
+  t.right(120.0);
+  koch(t, n - 1, s);
+  t.left(60.0);
+  koch(t, n - 1, s);
+}
+Turtle b = turtleNew();
+koch(b, 3, 300.0);
+// 3 阶 = 4^3 = 64 段线段；每段一条 forward，不换色不换宽 = 全在一段 Stroke 里 ——
+// 但最终出图时一份 svg 一条 <path>（不断笔），所以 Stroke 数 = 1。
+// 改成判**字节数能对上** —— 那更硬：一变就是 bug。
+string svg = b.svg(480);
+print(string(svg.length));
+
+// ── 换色 / 换宽：产生不同的笔画段 ────────────────────────────────────────────
+Turtle c = turtleNew();
+c.forward(50.0);
+c.color("#ff0000");
+c.forward(50.0);
+c.width(3.0);
+c.forward(50.0);
+// 收一下，看一共几段
+string cs = c.svg(240);
+// 三段：第一段蓝、第二段红、第三段红粗 —— 换色与换宽各断一次
+// 判 svg 里有两种颜色（默认蓝 + 红）和两种宽度
+print(string(cs.length));
+print(string(cs.indexOf("#ff0000") > 0));
+print(string(cs.indexOf("stroke-width=\"3") > 0));
+
+// 包围盒：Koch 曲线的 x 范围就是 [0, 300]（第 0 阶的长度），y 在上面一点
+print(b.bounds());

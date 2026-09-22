@@ -85,6 +85,14 @@ export const GALLERY = [
 
   /* ---- svg：跑一趟，stdout 本身就是一张 SVG（`std/plot.omni` 那一层） ---- */
   {
+    path: 'ext/omni/examples/koch.omni', kind: 'svg', title: 'Koch 雪花',
+    note: '海龟绘图（`std/turtle.omni`）：三条边各递归四层',
+  },
+  {
+    path: 'ext/omni/examples/tree.omni', kind: 'svg', title: '递归树',
+    note: '同一只海龟：逐层变细变绿，回分叉点靠记 x/y/朝向',
+  },
+  {
     path: 'ext/omni/examples/lorenz.omni', kind: 'svg', title: '洛伦兹吸引子',
     note: 'RK4 积 2500 步，x–z 投影上的那只蝴蝶',
   },
