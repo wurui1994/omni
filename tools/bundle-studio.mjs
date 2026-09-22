@@ -245,7 +245,9 @@ const VFS_ROOTS = [
   { path: 'docs', exts: ['.md'] },
   { path: 'ext', exts: ['.grammar'] },
   { path: 'ext', exts: ['.go', '.nim', '.v', '.lua', '.mojo', '.cpp', '.bas', '.awk',
-    '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html'], only: ['examples'] },
+    '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx', '.html', '.omni'], only: ['examples'] },
+  /* **`src/lib/*.omni` 不带**：单体这一份跑不了 `.omni`（`browser-main.js` 只挂图那条腿），
+     带上那几份库也没人读得着 —— `.omni` 的例子在这儿只是**看得见、编辑得了**。 */
   { path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag'],
     only: ['cases', 'draw'] },
 ];

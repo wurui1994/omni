@@ -295,6 +295,8 @@ body {
 .gal-head { max-width: 900px; margin: 10px auto 22px; padding: 0 16px; text-align: center; }
 .gal-head h1 { margin: 0 0 8px; font: 600 28px/1.2 var(--font); letter-spacing: -.02em; }
 .gal-head p { margin: 0; color: var(--fg-3); font-size: 14px; line-height: 1.6; }
+/* 单体 HTML 那一份里露出来的那句（`#gallery-note`）：说明性的，比正文再淡一档。 */
+.gal-head .gal-note { margin-top: 8px; font-size: 13px; opacity: .75; }
 .gal-grid {
   display: grid; gap: 14px; padding: 0 4px 24px;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));

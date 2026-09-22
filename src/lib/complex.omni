@@ -1,0 +1,90 @@
+// Omni 标准库 —— 复数（控制台模式的科学计算，`docs/design/omni-console-scicomp.md` 阶段 6）
+//
+// 这是矩阵那一层之后**欠得最久的一格**：gsl-shell 里复数不是库，是 LuaJIT 的
+// `complex` cdata（`matrix.lua:13` 的 `ffi.typeof('complex')`），算术靠 ffi 自带的
+// 元方法，库里只补了 `conj` / `real` / `imag` / `norm2`（`matrix.lua:185-205`）。
+// 我们没有那一格 cdata，所以这一层自己写 —— 与 `matrix.omni` 同一条理由。
+//
+// **照抄它的一个事实、补它的一个缺**：
+//   * 照抄：`abs` 是模、`arg` 是相位、`norm2` 是模的平方（不开方那一格它专门留着，
+//     因为排序与比较都只要平方）。
+//   * 补：**它的复数没有 `__tostring`**（`complex_mt` 只有算术，设计文档 §2 记着这一格）——
+//     于是 gsl-shell 里 `print(1+2i)` 印的是 `cdata<complex>: 0x…`。这边给它 `text()`。
+//
+// 名字都带 `cx` 前缀（`complex` 太通用，会泄进每个 import 者的作用域 —— `json.omni`
+// 头上那段账说的就是这件事）。公开的是 `Complex` 与 `cxOf` / `cxPolar`。
+
+class Complex {
+  real re;
+  real im;
+
+  Complex add(Complex b) { return cxOf(re + b.re, im + b.im); }
+  Complex sub(Complex b) { return cxOf(re - b.re, im - b.im); }
+
+  Complex mul(Complex b) {
+    return cxOf(re * b.re - im * b.im, re * b.im + im * b.re);
+  }
+
+  /**
+   * 除法按 **Smith 的那一招**（1962）分两支：拿两个分母里绝对值大的那个去约。
+   * 直接用 `(ac+bd)/(c²+d²)` 在 `c`、`d` 很大时会中途溢出成 inf —— 那是个真坑，
+   * 不是洁癖（C99 的 `_Cdiv` 与 LAPACK 都走这一招）。
+   */
+  Complex div(Complex b) {
+    if (b.re == 0.0 && b.im == 0.0) { fail("complex: 除以 0"); }
+    if (abs(b.re) >= abs(b.im)) {
+      real r = b.im / b.re;
+      real d = b.re + b.im * r;
+      return cxOf((re + im * r) / d, (im - re * r) / d);
+    }
+    real r = b.re / b.im;
+    real d = b.im + b.re * r;
+    return cxOf((re * r + im) / d, (im * r - re) / d);
+  }
+
+  Complex scale(real c) { return cxOf(re * c, im * c); }
+
+  Complex conj() { return cxOf(re, -im); }
+
+  /** 模。`hypot` 是内建（不是 `sqrt(x*x+y*y)`：那一式在两端上会溢出/下溢）。 */
+  real abs() { return hypot(re, im); }
+
+  /** 模的平方（`complex_norm2`，`matrix.lua:200`）——比较与排序只要它。 */
+  real norm2() { return re * re + im * im; }
+
+  /** 相位，落在 (-π, π]。 */
+  real arg() { return atan2(im, re); }
+
+  /**
+   * 印成 `3+4i` / `3-4i` / 实数那一格就只印实部。
+   * 非整数走宿主 `string(real)` 的 6 位有效数字（与 `matrix.omni` 同一条）。
+   */
+  string text() {
+    if (im == 0.0) { return string(re); }
+    if (re == 0.0) {
+      if (im == 1.0) { return "i"; }
+      if (im == -1.0) { return "-i"; }
+      return string(im) + "i";
+    }
+    string s = "+";
+    if (im < 0.0) { s = "-"; }
+    real m = abs(im);
+    if (m == 1.0) { return string(re) + s + "i"; }
+    return string(re) + s + string(m) + "i";
+  }
+
+  void show() { print(text()); }
+}
+
+/** `re + im*i`。 */
+Complex cxOf(real re, real im) {
+  Complex z = new Complex();
+  z.re = re;
+  z.im = im;
+  return z;
+}
+
+/** 极坐标那一格：模 `r`、相位 `th`。 */
+Complex cxPolar(real r, real th) {
+  return cxOf(r * cos(th), r * sin(th));
+}

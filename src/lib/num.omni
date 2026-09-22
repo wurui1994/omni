@@ -13,6 +13,7 @@
 // 名字都带 `num` 前缀（`json.omni` 头上那段账：名字太通用会泄进每个 import 者的作用域）。
 
 import "std/matrix.omni";
+import "std/complex.omni";
 
 /**
  * 定积分（复合 Simpson + 加倍到收敛）。
@@ -138,4 +139,112 @@ real numRoot(fn(real) -> real f, real a, real b, real tol) {
   }
   return lo + (hi - lo) * 0.5;
 }
+
+// ── 傅里叶变换（`fft-init.lua`，设计文档阶段 6）────────────────────────────────
+//
+// **照抄它的对外形状，不照抄它的存储**：gsl-shell 那边 `num.fft(v)` 回的是一个
+// half-complex（`fft_hc`），实部虚部挤在同一块 `double[n]` 里，靠 `ft[k]` 那个索引
+// 访问器（`halfcomplex_radix2_index`，`fft-init.lua:182-195`）把它翻成复数 ——
+// 也就是说**用它的人看见的是"k 从 0 到 n-1，每格一个复数"**。我们直接回那个：
+// 一串 `Complex`。省下来的那半份内存，在这一层不值得拿可读性换。
+//
+// 两条腿也照它分：**n 是 2 的幂走 radix-2**（它走 `gsl_fft_real_radix2_transform`），
+// 不是就走一遍朴素 DFT（它走混合基的 `gsl_fft_real_transform`）—— 朴素那条是 O(n²)，
+// 慢但答案对；混合基要不要补，看有没有人拿非 2 的幂喂它。**不报错、不假装**。
+
+/** 正变换：实数序列 -> n 个复系数（`num.fft`）。 */
+list<Complex> numFft(list<real> xs) {
+  if (xs.length == 0) { fail("num: numFft 要至少一格"); }
+  list<Complex> z = [];
+  for (real v in xs) { z.push(cxOf(v, 0.0)); }
+  return numFftC(z, -1.0);
+}
+
+/**
+ * 逆变换：n 个复系数 -> 实数序列（`num.fftinv`）。
+ *
+ * 符号反过来、末尾除以 n（这一格分母的位置是约定 —— 我们与 GSL 一样把它放在逆变换上，
+ * 于是 `numFftInv(numFft(x))` 就是 `x` 本身）。虚部**扔掉**：喂进去的是实序列的谱时
+ * 它在舍入误差那一档，留着只会让答案看起来脏。
+ */
+list<real> numFftInv(list<Complex> ft) {
+  if (ft.length == 0) { fail("num: numFftInv 要至少一格"); }
+  list<Complex> z = numFftC(ft, 1.0);
+  real s = 1.0 / real(ft.length);
+  list<real> out = [];
+  for (Complex c in z) { out.push(c.re * s); }
+  return out;
+}
+
+/** 两条腿共用的那一趟（`sign` 是指数上的符号：正变换 -1、逆变换 +1）。 */
+private list<Complex> numFftC(list<Complex> z, real sign) {
+  int n = z.length;
+  real tau = 8.0 * atan(1.0);          // 2π（这门语言没有 π 那个常数）
+  list<Complex> a = [];
+  for (Complex c in z) { a.push(cxOf(c.re, c.im)); }
+  if (n < 2) { return a; }
+  if (!numIsPow2(n)) {
+    list<Complex> out = [];
+    int k = 0;
+    while (k < n) {
+      real sre = 0.0;
+      real sim = 0.0;
+      int t = 0;
+      while (t < n) {
+        real ang = sign * tau * real(k) * real(t) / real(n);
+        real c = cos(ang);
+        real s = sin(ang);
+        sre = sre + a[t].re * c - a[t].im * s;
+        sim = sim + a[t].re * s + a[t].im * c;
+        t = t + 1;
+      }
+      out.push(cxOf(sre, sim));
+      k = k + 1;
+    }
+    return out;
+  }
+  // 位反序（不用位运算：一档一档减半，与 `n / 2` 那一路等价）
+  int j = 0;
+  int i = 1;
+  while (i < n) {
+    int bit = n / 2;
+    while (bit > 0 && j >= bit) { j = j - bit; bit = bit / 2; }
+    j = j + bit;
+    if (i < j) {
+      Complex t = a[i];
+      a[i] = a[j];
+      a[j] = t;
+    }
+    i = i + 1;
+  }
+  // 蝶形：段长 2、4、8 … n
+  int len = 2;
+  while (len <= n) {
+    int half = len / 2;
+    real ang = sign * tau / real(len);
+    int base = 0;
+    while (base < n) {
+      int k = 0;
+      while (k < half) {
+        Complex w = cxPolar(1.0, ang * real(k));
+        Complex u = a[base + k];
+        Complex v = a[base + k + half].mul(w);
+        a[base + k] = u.add(v);
+        a[base + k + half] = u.sub(v);
+        k = k + 1;
+      }
+      base = base + len;
+    }
+    len = len * 2;
+  }
+  return a;
+}
+
+private bool numIsPow2(int n) {
+  if (n < 1) { return false; }
+  int m = n;
+  while (m % 2 == 0) { m = m / 2; }
+  return m == 1;
+}
+
 

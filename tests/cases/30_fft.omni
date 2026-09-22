@@ -1,0 +1,72 @@
+// 复数与傅里叶变换（`std/complex.omni` + `std/num.omni` 的 fft）——
+// 控制台那套科学计算的阶段 6（`docs/design/omni-console-scicomp.md`）
+//
+// **判据怎么钉**：FFT 的答案里满是 1e-16 那一档的舍入残渣，直接印出来就是拿
+// 两条腿的 libm 与 `Math.*` 的最后一位赌运气。所以这一份**只印有话可说的量**：
+//   * 整数那几格（常数序列的谱 = `[n, 0, 0, …]`、一个周期的 cos 的谱 = 两格 n/2）——
+//     `round` 一下就是精确的整数；
+//   * 往返是不是回到原处 —— 印的是 `< 1e-12` 这个判断，不是差值本身；
+//   * 非 2 的幂那条腿（朴素 DFT）的答案有闭式（n=3 时是 6 与 -1.5±i√3/2），
+//     截到 6 位小数比。
+// 复数那一族的算术本身是**精确的**（加减乘除都只是四则），所以那几行照印。
+import "std/complex.omni";
+import "std/num.omni";
+
+// ── 复数：算术与印法 ────────────────────────────────────────────────────────
+Complex a = cxOf(3.0, 4.0);
+Complex b = cxOf(1.0, -2.0);
+print(a.text());
+print(b.text());
+print(a.add(b).text());
+print(a.sub(b).text());
+// (3+4i)(1-2i) = 3-6i+4i+8 = 11-2i
+print(a.mul(b).text());
+// (3+4i)/(1-2i) = (3+4i)(1+2i)/5 = (-5+10i)/5 = -1+2i
+print(a.div(b).text());
+print(a.conj().text());
+print(a.scale(0.5).text());
+// 3-4-5 直角三角形：模 5、模平方 25
+print(string(a.abs()));
+print(string(a.norm2()));
+// 印法那四格：纯实、±i、实部非零
+print(cxOf(2.0, 0.0).text());
+print(cxOf(0.0, 1.0).text());
+print(cxOf(0.0, -1.0).text());
+print(cxOf(2.0, 1.0).text());
+// 极坐标：模 2、相位 0 就是实数 2
+print(cxPolar(2.0, 0.0).text());
+
+// ── FFT：常数序列 ──────────────────────────────────────────────────────────
+// 直流那一格是 n，其余全 0（radix-2 那条腿上这几个数是精确的）
+for (Complex c in numFft([1.0, 1.0, 1.0, 1.0])) { print(c.text()); }
+
+// ── FFT：一个周期的 cos ────────────────────────────────────────────────────
+// 谱只在 k=1 与 k=n-1 有东西，各 n/2 —— 别的格子是 1e-16 那一档的残渣，round 掉
+real tau = 8.0 * atan(1.0);
+list<real> xs = [];
+int i = 0;
+while (i < 8) { xs.push(cos(tau * real(i) / 8.0)); i = i + 1; }
+list<Complex> sp = numFft(xs);
+int k = 0;
+while (k < 8) { print(string(k) + " " + string(round(sp[k].abs()))); k = k + 1; }
+
+// ── FFT：往返 ──────────────────────────────────────────────────────────────
+// `numFftInv(numFft(x))` 就是 x 本身（1/n 那个因子放在逆变换上，与 GSL 同）
+list<real> back = numFftInv(sp);
+bool same = true;
+int t = 0;
+while (t < 8) {
+  if (abs(back[t] - xs[t]) >= 1.0e-12) { same = false; }
+  t = t + 1;
+}
+print(string(same));
+
+// ── FFT：非 2 的幂走朴素 DFT ───────────────────────────────────────────────
+// [1,2,3] 的谱：6、-1.5+i√3/2、-1.5-i√3/2（√3/2 = 0.8660254…）
+for (Complex c in numFft([1.0, 2.0, 3.0])) {
+  print(string(round(c.re * 1000000.0) / 1000000.0) + " "
+    + string(round(c.im * 1000000.0) / 1000000.0));
+}
+// 那条腿的往返也要回到原处
+list<real> b3 = numFftInv(numFft([1.0, 2.0, 3.0]));
+for (real v in b3) { print(string(round(v * 1000000.0) / 1000000.0)); }

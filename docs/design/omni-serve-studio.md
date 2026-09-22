@@ -129,6 +129,9 @@ POST /api/shell             -> { line }；一整行命令（含 tcc/go/nim 等�
   html 直接 `<iframe srcdoc sandbox>`。
   清单是人挑的，"它确实出图"是机器判的（`tests/serve` 把 `kind:'asy'` 那几格真跑一趟，
   要求 stdout 以 `%!PS` 起头且翻成 SVG 后真有笔画）。
+  **单体 HTML 那一份里画廊只摆它跑得动的**（glsl 与 html 两类）：那份只挂了图那条腿，
+  asy 与 omni 摆上去就是一排红字 —— 改成在标题下面说一句"要看它们跑 `omni serve`"
+  （闸在 `renderGallery` 里看 `window.__OMNI_LOCAL` 在不在，判据在 `tests/studio`）。
   **从前这一格是"IDE 把编辑关掉"** —— 那没道理：一进来先看一份看不懂的源码，
   而这一页最该先给人看的是"它真能画出东西"。
 * **IDE 模式**：目录树 + 编辑器 + 运行 + 预览 + 阶段耗时 + 虚拟 shell。

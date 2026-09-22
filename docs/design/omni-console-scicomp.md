@@ -145,9 +145,32 @@
 （`round(-2.5)` 照 C 是 -3 不是 JS `Math.round` 的 -2；`pow(-8, 1/3)` 是 nan
 而 `cbrt(-8)` 是 -2；`fmod(-7, 3)` 是 -1）—— 两条腿逐字节相同，所以那一族的语义是**同一份**。
 
+## 4.6 阶段 6 —— 复数与 FFT（**已落地**：`src/lib/complex.omni` + `num` 那两格）
+
+这是矩阵之后欠得最久的一格（从前这一列写着"欠的最要紧那一格是复数"）。
+
+* **复数**（`src/lib/complex.omni`）：`Complex` 上 `add` / `sub` / `mul` / `div` / `scale` /
+  `conj` / `abs` / `norm2` / `arg` / `text`，加 `cxOf` / `cxPolar` 两个口子。
+  gsl-shell 那边复数不是库而是 LuaJIT 的 `complex` cdata（`matrix.lua:13`），
+  算术走 ffi 的元方法，库里只补 `conj`/`real`/`imag`/`norm2`（`matrix.lua:185-205`）——
+  我们没有那格 cdata，所以自己写。**补了它缺的一格**：那边 `complex_mt` 没有 `__tostring`，
+  于是 `print(1+2i)` 印的是 `cdata<complex>: 0x…`；这边 `text()` 印 `3+4i` / `-i` / 纯实数。
+  除法走 **Smith 的两支**（拿分母里大的那个约），不是 `(ac+bd)/(c²+d²)` —— 后者在大数上
+  中途溢出成 inf（C99 的 `_Cdiv` 与 LAPACK 都是这一招）。
+* **FFT**（`numFft` / `numFftInv`）：**照抄它对外的形状，不照抄它的存储**。
+  gsl-shell 回的是 half-complex（实虚挤在一块 `double[n]` 里），但**用它的人看见的是
+  `ft[k]` 一格一个复数**（`halfcomplex_radix2_index`，`fft-init.lua:182-195`）——
+  我们直接回那个：一串 `Complex`。两条腿也照它分：n 是 2 的幂走 radix-2（位反序 + 蝶形），
+  不是就走一遍朴素 DFT（它那边是混合基）—— **慢但答案对，不报错、不假装**。
+  1/n 那个因子放在逆变换上（与 GSL 同），所以 `numFftInv(numFft(x))` 就是 `x`。
+* 判据 `tests/cases/30_fft.omni`（js / c / interp / interp-mir 四条腿 + 快照）。
+  **这一份只印有话可说的量**：FFT 的答案里满是 1e-16 那一档的残渣，直接印就是拿两条腿的
+  `libm` 与 `Math.*` 的最后一位赌运气。所以印的是 `round` 过的整数（常数序列的谱 =
+  `[n,0,0,…]`、一个周期 cos 的谱 = 两格 n/2）、往返的 `< 1e-12` 这个**判断**、
+  以及朴素 DFT 那条腿上有闭式的 `6` 与 `-1.5 ± i√3/2`（截 6 位）。
+  复数的算术本身是精确的（四则），那几行照印。tests/serve 另有一格走控制台。
+
 * **往后**：L3c 随机、L3d 特殊函数、L5 三维、L6 数据表 —— 按需要，一格一格来。
-  欠的最要紧那一格是**复数**（`matrix.lua` 的 complex 那一族、FFT、特征值都要它）。
-  上面那几层里凡是要它们的地方都绕开了），以及**复数**。
 
 **先不碰的**：`eigen` / `vegas` / `bspline` / `gdt` / `expr-*` —— 上面那一列写清了它们可缺。
 

@@ -340,6 +340,11 @@ try {
     await say('import "std/matrix.omni";');
     const n = await say('matVec([3.0, 4.0]).norm()');
     ok('库里也用得上那一族（3-4-5 的 norm = 5）', n.out === '5\n', JSON.stringify(n));
+    /* 复数与 FFT（阶段 6）：常数序列的谱只有直流那一格，等于 n。 */
+    await say('import "std/num.omni";');
+    await say('import "std/complex.omni";');
+    const f = await say('numFft([1.0, 1.0, 1.0, 1.0])[0].text()');
+    ok('控制台里 FFT 出得来（常数序列的直流 = 4）', f.out === '4\n', JSON.stringify(f));
   }
 
   /* ---- 控制台里出图（`std/plot.omni`，设计文档阶段 4）----

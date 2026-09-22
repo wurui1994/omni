@@ -280,8 +280,20 @@ async function galleryThumb(card, g) {
 function renderGallery() {
   const host = $('#gallery-grid');
   if (host === null || host.childElementCount > 0) return;    /* 只铺一次 */
+  /* **单体 HTML 那一份只跑得了图那条腿**（`browser-main.js` 里写着哪几个后缀）——
+     asy 与 omni 的卡片在那儿只会是一排红字。展示模式的正事是"好看的例子摆出来"，
+     所以那两类**不摆**，改在标题下面说一句为什么（`#gallery-note`）。
+     判据：`tests/studio/run.js` 里那份"单体里画廊摆的全是它跑得动的"。 */
+  const offline = typeof window.__OMNI_LOCAL === 'function';
+  const list = offline ? GALLERY.filter((g) => g.kind === 'glsl' || g.kind === 'html') : GALLERY;
+  const note = $('#gallery-note');
+  if (note !== null && offline) {
+    note.hidden = false;
+    note.textContent = '这是单体 HTML 那一份：它只带了图那条腿，'
+      + `所以 asy 与 omni 那 ${GALLERY.length - list.length} 格没摆上来 —— 要看它们跑 \`omni serve\`。`;
+  }
   const jobs = [];
-  for (const g of GALLERY) {
+  for (const g of list) {
     const card = el('button', 'card');
     card.innerHTML = `<div class="shot"><span class="dots"></span></div>`;
     const meta = el('div', 'meta');

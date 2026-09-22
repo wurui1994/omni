@@ -97,6 +97,22 @@ ok('除 prelude 之外没有 getBuiltinModule', nBuiltin === 0, `出现 ${nBuilt
   ok('UI 那一段一条 import 都没有', uiSeg.length > 1000 && !/(?:^|\n)[ \t]*import[\s({'"]/.test(uiSeg),
     (uiSeg.match(/(?:^|\n)[ \t]*import[\s({'"][^\n]*/) ?? ['段子没找到'])[0]);
   ok('UI 那一段从 window 上拿 render', uiSeg.includes('window.__OMNI_RENDER'));
+  /**
+   * **画廊在这一份里只摆它跑得动的**。
+   *
+   * 单体 HTML 只挂了图那条腿（`browser-main.js` 里那串后缀），`.asy` 与 `.omni` 跑不了 ——
+   * 摆上去就是一排红字，而展示模式的正事恰恰是"好看的例子摆出来"。所以 `renderGallery`
+   * 按 `window.__OMNI_LOCAL` 在不在过一遍，剩下 glsl（WebGL 自己画）与 html（iframe）两类。
+   * 这儿判两格：那道闸在拼出来的 UI 段里、且剩下的那几格确实一个服务都不用。
+   */
+  ok('画廊那道闸在（按 __OMNI_LOCAL 过一遍）', uiSeg.includes('__OMNI_LOCAL'));
+  const { GALLERY } = await import(join(root, 'src', 'studio', 'gallery.js'));
+  const offline = GALLERY.filter((g) => g.kind === 'glsl' || g.kind === 'html');
+  const served = GALLERY.filter((g) => g.kind === 'asy' || g.kind === 'svg');
+  ok('单体里剩下的画廊卡片一个服务都不用', offline.length >= 4
+    && offline.every((g) => /\.(frag|vert|glsl|html)$/.test(g.path))
+    && offline.length + served.length === GALLERY.length,
+    `${offline.length} 格不用服务、${served.length} 格要服务、共 ${GALLERY.length}`);
 }
 
 /* ---------------------------------------------------------------- 3. 真能跑 */
