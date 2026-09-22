@@ -314,6 +314,131 @@ function renderGallery() {
   }
 }
 
+/* ---------------------------------------------------------------- 控制台模式
+ *
+ * matlab / spyder / idle 那一种：命令行 + 变量区 + 绘图区。
+ * 会话在服务那侧（`/api/repl`）—— **与终端上 `omni repl` 是同一台机器**
+ * （`src/core/repl.js` 的 `Session`），这一页只管画。
+ *
+ * 续行那一格照 gsl-shell 的做法：服务说 `incomplete` 就把这一行攒着、提示符换成 `…`
+ * （它那边的判据是"语法错且消息结尾是 `'<eof>'`"，我们这边是 `Session.lang.complete()`
+ *   —— 两边都是"问编译器"，不是在界面上数括号）。
+ */
+const CON = { id: `w${Date.now().toString(36)}`, buf: '', hist: [], at: -1, busy: false };
+
+function conLog(text, cls) {
+  const box = $('#con-log');
+  if (box === null || text === '') return;
+  const n = el('div', cls, text.replace(/\n$/, ''));
+  box.append(n);
+  box.scrollTop = box.scrollHeight;
+}
+
+/** 回显自己敲的那一行（带提示符，像终端一样）。 */
+function conEcho(line, cont) {
+  const box = $('#con-log');
+  const n = el('div', 'in');
+  n.append(el('span', 'ps', cont ? '… ' : '> '), document.createTextNode(line));
+  box.append(n);
+  box.scrollTop = box.scrollHeight;
+}
+
+function conVars(vars) {
+  const box = $('#con-vars');
+  const n = $('#con-nvars');
+  if (box === null) return;
+  if (n !== null) n.textContent = vars.length === 0 ? '' : `${vars.length} 格`;
+  if (vars.length === 0) {
+    box.textContent = '';
+    box.append(el('div', 'hint', '还没有变量'));
+    return;
+  }
+  box.textContent = '';
+  for (const v of vars) {
+    const row = el('div', 'vars-row');
+    row.append(el('span', 'nm', v.name), el('span', 'ty', v.type), el('span', 'vl', v.value));
+    row.title = `${v.name} : ${v.type} = ${v.value}`;
+    box.append(row);
+  }
+}
+
+async function conSend(line) {
+  if (CON.busy) return;
+  const cont = CON.buf !== '';
+  conEcho(line, cont);
+  CON.buf = cont ? `${CON.buf}\n${line}` : line;
+  /* 续行里敲一个空行 = 强制提交（与终端那一路、也与 python 的 REPL 一样）。 */
+  const force = cont && line.trim() === '';
+  CON.busy = true;
+  try {
+    const r = await post('/api/repl', {
+      session: CON.id, line: CON.buf, lang: $('#con-lang').value,
+    });
+    if (r.incomplete === true && !force) {
+      $('#con-ps1').textContent = '…';
+      return;
+    }
+    CON.buf = '';
+    $('#con-ps1').textContent = '>';
+    conLog(r.out ?? '', 'out');
+    conLog(r.err ?? '', 'err');
+    conVars(r.vars ?? []);
+  } catch (e) {
+    CON.buf = '';
+    $('#con-ps1').textContent = '>';
+    conLog(String(e.message ?? e), 'err');
+  } finally {
+    CON.busy = false;
+  }
+}
+
+function initConsole() {
+  const inp = $('#con-in');
+  if (inp === null) return;
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const v = inp.value;
+      inp.value = '';
+      if (v.trim() !== '' || CON.buf !== '') {
+        if (v.trim() !== '') { CON.hist.push(v); CON.at = CON.hist.length; }
+        conSend(v);
+      }
+      return;
+    }
+    /* 上下键翻历史 —— 控制台上这一格不做的话，每条命令都要重打一遍。 */
+    if (e.key === 'ArrowUp' && CON.hist.length > 0) {
+      e.preventDefault();
+      CON.at = Math.max(0, CON.at - 1);
+      inp.value = CON.hist[CON.at] ?? '';
+      return;
+    }
+    if (e.key === 'ArrowDown' && CON.hist.length > 0) {
+      e.preventDefault();
+      CON.at = Math.min(CON.hist.length, CON.at + 1);
+      inp.value = CON.at === CON.hist.length ? '' : (CON.hist[CON.at] ?? '');
+    }
+  });
+  $('#con-lang').onchange = (e) => {
+    $('#con-lang-tag').textContent = e.target.value;
+    CON.buf = '';
+    $('#con-ps1').textContent = '>';
+    conLog(`— 换成 ${e.target.value}：开一格新会话 —`, 'note');
+    conVars([]);
+    post('/api/repl', { session: CON.id, line: '', lang: e.target.value, reset: true })
+      .catch(() => {});
+  };
+  $('#con-reset').onclick = async () => {
+    CON.buf = '';
+    $('#con-ps1').textContent = '>';
+    const r = await post('/api/repl', {
+      session: CON.id, line: '', lang: $('#con-lang').value, reset: true,
+    });
+    $('#con-log').textContent = '';
+    conLog('— 会话忘掉了 —', 'note');
+    conVars(r.vars ?? []);
+  };
+}
+
 /* ---------------------------------------------------------------- 预览：派发
  *
  * 四种：markdown 排版、asy 的图（EPS -> SVG）、glsl 的着色器（WebGL2）、html 的页面
@@ -790,6 +915,7 @@ function setMode(m) {
   localStorage.setItem('omni.mode', m);
   if (m === 'show') renderGallery();
   if (m === 'ide') $('#edit').focus();
+  if (m === 'console') $('#con-in').focus();
 }
 
 function initEditor() {
@@ -847,6 +973,7 @@ async function main() {
   initTheme();
   initTabs();
   initEditor();
+  initConsole();
   $('#btn-run').onclick = run;
   /* js 那个开关：切了就重跑一趟 —— 它改的就是"这一份怎么跑"。 */
   $('#js-parse').onchange = () => { if (S.lang === 'js') run(); };
@@ -881,7 +1008,8 @@ async function main() {
   });
   /* **默认落在首页**（展示模式）—— 它现在是首页，落在首页是首页的定义。
      上一次挑的那一格记在 localStorage 里：天天用 IDE 的人不该每趟都先过一眼画廊。 */
-  setMode(localStorage.getItem('omni.mode') === 'ide' ? 'ide' : 'show');
+  const saved = localStorage.getItem('omni.mode');
+  setMode(saved === 'ide' || saved === 'console' ? saved : 'show');
   try {
     await loadTree();
     const h = await api('/api/health');

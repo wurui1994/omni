@@ -330,6 +330,55 @@ body {
   font: 10.5px var(--mono); padding: 2px 6px; border-radius: 5px;
 }
 
+/* ---- 控制台（matlab / spyder / idle 那一种）----
+ *
+ * 三格：命令行占左边整条，右边上下是变量与绘图。
+ * 与展示、IDE 是**三套互斥的版面**（同一条 `data-mode` 机制，见上面那段账）。
+ */
+.console { display: none; }
+[data-mode="console"] .shell {
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+[data-mode="console"] .shell > .pane { display: none; }
+[data-mode="console"] .console {
+  display: grid; min-width: 0; min-height: 0; gap: 12px;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1.1fr) minmax(0, 1fr);
+}
+.con-main { grid-row: 1 / span 2; }
+.con-log {
+  flex: 1; overflow: auto; padding: 10px 12px;
+  font: 12.5px/1.65 var(--mono); white-space: pre-wrap; word-break: break-word;
+  -webkit-overflow-scrolling: touch; scrollbar-gutter: stable;
+}
+.con-log .in { color: var(--fg); }
+.con-log .in .ps { color: var(--accent); }
+.con-log .out { color: var(--fg-2); }
+.con-log .err { color: var(--bad); }
+.con-log .note { color: var(--fg-3); }
+#con-lang {
+  appearance: none; border: 0; outline: 0; border-radius: 6px;
+  background: var(--bg-sunk); color: var(--fg-2);
+  font: 11.5px var(--mono); padding: 4px 6px;
+}
+/* 变量那一栏：三列（名字 / 类型 / 值）。值一行放不下就截断 —— 这一栏是"看一眼"。 */
+.con-vars-body { flex: 1; overflow: auto; padding: 6px; }
+.vars-row {
+  display: grid; grid-template-columns: minmax(48px, auto) auto minmax(0, 1fr);
+  gap: 10px; align-items: baseline;
+  padding: 4px 7px; border-radius: var(--r-sm); font: 12px var(--mono);
+}
+.vars-row:nth-child(odd) { background: var(--bg-sunk); }
+.vars-row .nm { color: var(--fg); font-weight: 600; }
+.vars-row .ty { color: var(--fg-3); font-size: 11px; }
+.vars-row .vl { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.con-plot-body {
+  flex: 1; overflow: auto; padding: 10px;
+  display: flex; align-items: center; justify-content: center;
+}
+.con-plot-body svg, .con-plot-body img { max-width: 100%; max-height: 100%; }
+
 .hl .kw  { color: var(--s-kw); font-weight: 500; }
 .hl .str { color: var(--s-str); }
 .hl .num { color: var(--s-num); }
@@ -414,6 +463,13 @@ body {
   .out { grid-row: 2; }
   /* 首页那一套在窄屏上是**一整块**（上面那两行是给 IDE 那一套排的）。 */
   [data-mode="show"] .shell { grid-template-rows: minmax(0, 1fr); padding: 8px; }
+  /* 控制台在窄屏上摞成一列：命令行在上、变量与绘图在下。 */
+  [data-mode="console"] .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  [data-mode="console"] .console {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1.3fr) minmax(0, .8fr) minmax(0, .8fr);
+  }
+  .con-main { grid-row: 1; }
   .gal-head h1 { font-size: 22px; }
   .gal-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   /* 手指点的目标要够大（Apple HIG 是 44pt）—— 目录行与那几格图标一起抬。 */

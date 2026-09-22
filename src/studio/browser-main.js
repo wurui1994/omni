@@ -119,8 +119,18 @@ async function localApi(path, init) {
     if (!p) return { stdout: '', stderr: 'path 和 text 至少给一格\n', code: 1 };
     return runArgv(['run', p, '-v']);
   }
-  if (route === '/api/shell') {
-    const line = String(body.line ?? '').trim();
+  if (route === '/api/repl') {
+    /* 控制台那一档要常驻会话（`src/core/repl.js` 的 `Session` 在服务进程里活着）。
+       单体这一份**明着说**，不假装：它连解释器都没拼进来（拼的是图那一条腿）。 */
+    return {
+      out: '',
+      err: '控制台这一档要 `omni serve` —— 单体 HTML 里没有常驻会话。\n',
+      ok: false,
+      incomplete: false,
+      vars: [],
+    };
+  }
+  if (route === '/api/shell') {    const line = String(body.line ?? '').trim();
     if (line.length === 0) return { stdout: '', stderr: '', code: 0 };
     const argv = shellToArgv(line);
     if (argv === null) {
