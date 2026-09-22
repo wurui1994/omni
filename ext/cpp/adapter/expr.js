@@ -74,6 +74,14 @@ export function typeOfSpecs(specs, C, declTok) {
       throw new Error(`cpp->IR: 这个类型名还没接：${n}`);
     }
     if (tag(p) === 'qual') return qualType(p, C);
+    /* **类模板的用点**：`Box<int>` → 一格叫 `Box__int` 的普通记录（第一次要到才造）。 */
+    if (tag(p) === 'tid') {
+      const base = nameOf(kids(p)[0]);
+      if (!C.ctemplates.has(base)) {
+        throw new Error(`cpp->IR: \`${base}<…>\` 不是登记过的类模板`);
+      }
+      return C.instClass(base, targTypes(p, C));
+    }
     if (tag(p) === 'class' || tag(p) === 'elaborated') {
       const nm = kids(p).find((y) => tag(y) === 'n');
       if (nm !== undefined && C.records.has(nameOf(nm))) return C.recType(nameOf(nm));
@@ -81,6 +89,13 @@ export function typeOfSpecs(specs, C, declTok) {
     }
   }
   return INT;
+}
+
+/** `(targs (type (specs …)) …)` → 那几格实参类型。 */
+function targTypes(tid, C) {
+  const targs = part(tid, 'targs');
+  return (targs === undefined ? [] : kids(targs))
+    .map((a) => typeOfSpecs(part(a, 'specs') ?? kids(a)[0], C) ?? INT);
 }
 
 /** `std::map<std::string, int>` / `std::string` / `std::vector<int>`。 */
@@ -303,10 +318,7 @@ function callOf(x, C) {
   if (tag(fn) === 'tid') {
     const nm = nameOf(kids(fn)[0]);
     if (!C.templates.has(nm)) throw new Error(`cpp->IR: \`${nm}<…>\` 不是登记过的模板`);
-    const targs = part(fn, 'targs');
-    const types = (targs === undefined ? [] : kids(targs))
-      .map((a) => typeOfSpecs(part(a, 'specs') ?? kids(a)[0], C) ?? INT);
-    const inst = C.instantiate(nm, types);
+    const inst = C.instantiate(nm, targTypes(fn, C));
     return {
       kind: 'call',
       fn: { kind: 'name', name: inst },

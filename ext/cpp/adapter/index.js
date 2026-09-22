@@ -69,6 +69,8 @@ export function cppToIR(tree) {
     fns: new Map(),
     /** `template <class T> T f(…)` → 名字 → { tparams, fnTok }（本身**不发代码**）。 */
     templates: new Map(),
+    /** `template <class T> struct Box {…}` → 名字 → { tparams, clsTok }（同样不发代码）。 */
+    ctemplates: new Map(),
     /** 已经发过的实例名（`maxOf__int`）—— 同一格只降一遍。 */
     instDone: new Set(),
     /**
@@ -153,11 +155,19 @@ export function cppToIR(tree) {
       .filter((y) => tag(y) === 'tp')
       .map((y) => nameOf(kids(y).find((z) => tag(z) === 'n')));
     const inner = kids(d).find((y) => tag(y) === 'func' || tag(y) === 'decl');
-    if (inner === undefined || tag(inner) !== 'func') {
-      throw new Error('cpp->IR: 这一批只接**函数**模板（类模板还没接）');
+    if (inner === undefined) throw new Error('cpp->IR: 这格 template 里什么都没有');
+    if (tag(inner) === 'func') {
+      const f = kids(inner).find((y) => tag(y) === 'fn');
+      C.templates.set(nameOf(kids(f)[0]), { tparams, fnTok: inner });
+      continue;
     }
-    const f = kids(inner).find((y) => tag(y) === 'fn');
-    C.templates.set(nameOf(kids(f)[0]), { tparams, fnTok: inner });
+    /* **类模板**：`template <class T> struct Box { … };`。 */
+    const sp = part(inner, 'specs');
+    const cls = sp === undefined ? undefined : kids(sp).find((y) => tag(y) === 'class');
+    if (cls === undefined) throw new Error('cpp->IR: 这一格 template 还没接（只接函数与类）');
+    const clsKids = kids(cls).flatMap((y) => (tag(y) === null && isList(y) ? groupItems(y) : [y]));
+    const cn = clsKids.find((y) => tag(y) === 'n');
+    C.ctemplates.set(nameOf(cn), { tparams, clsTok: cls });
   }
 
   /* ---- 第一遍：typedef 与 struct/class ------------------------------------- */
@@ -174,57 +184,14 @@ export function cppToIR(tree) {
     }
     const cls = kids(specs).find((y) => tag(y) === 'class');
     if (cls === undefined) continue;
-    /* **带基类的那一档，名字与基类表裹在一格无名表里**（`(class "struct" (· (n …) (bases …)) …)`）
-       —— 无名表的孩子是**全部 items**（`cst.js` 文件头那条教训），所以先摊一层再找。 */
-    const clsKids = kids(cls).flatMap((y) => (tag(y) === null && isList(y) ? groupItems(y) : [y]));
-    const nm = clsKids.find((y) => tag(y) === 'n');
-    /* **继承**：`struct Derived : Base {}` 的 `(bases (b (n "Base")))`。 */
-    const basesTok = clsKids.find((y) => tag(y) === 'bases');
-    const bases = (basesTok === undefined ? [] : kids(basesTok))
-      .map((b) => nameOf(kids(b).find((y) => tag(y) === 'n')))
-      .filter((b) => b !== null && b !== undefined);
-    const members = clsKids.find((y) => tag(y) === 'members');
-    const fields = [];
-    const methods = [];
-    const virtuals = new Set();
-    let dtor = null;
-    let ctor = null;
-    for (const m of (members === undefined ? [] : kids(members))) {
-      if (tag(m) === 'decl') {
-        const ms = part(m, 'specs');
-        const mi = part(m, 'init');
-        const mn = mi === undefined ? undefined : kids(kids(mi)[0])[0];
-        if (mn !== undefined) {
-          fields.push({ name: nameOf(mn), type: typeOfSpecs(ms, C, kids(kids(mi)[0])[0]) ?? INT });
-        }
-        continue;
-      }
-      if (tag(m) === 'func') {
-        const f = part(m, 'fn') ?? kids(m).find((y) => tag(y) === 'fn');
-        const head = f === undefined ? undefined : kids(f)[0];
-        if (head !== undefined && tag(head) === 'dtor') { dtor = m; continue; }
-        /* **构造函数**：名字与类同名、而且**没有返回类型那一格**。 */
-        if (head !== undefined && tag(head) === 'n' && nameOf(head) === nameOf(nm)
-          && part(m, 'specs') === undefined) { ctor = m; continue; }
-        const mn2 = (head !== undefined && tag(head) === 'opname')
-          ? opMethodName(head) : nameOf(kids(f)[0]);
-        /* `virtual` 是 specs 里的一格光秃秃的词。 */
-        const ms2 = part(m, 'specs');
-        if (ms2 !== undefined
-          && kids(ms2).some((y) => tag(y) === null && String(leaf(y)) === 'virtual')) {
-          virtuals.add(mn2);
-        }
-        methods.push({ tok: m, name: mn2 });
-      }
-    }
-    C.records.set(nameOf(nm), {
-      name: nameOf(nm), bases, fields, methods, dtor, ctor, virtuals,
-    });
+    const rec = collectClass(cls, C);
+    C.records.set(rec.name, rec);
   }
   planVirtuals(C, recFields, decls);
   /* **把基类摊进派生类**（字段在前、方法按名字继承）—— 见 `flatten`。 */
   for (const [, rec] of C.records) flatten(rec, C, new Set());
   for (const [, rec] of C.records) {
+    if (rec.done === true) continue;
     recFields.set(C.ref(rec.name), rec.fields);
     /* 虚继承树那一档**只发根那一格记录**（字段是整棵树的并集 + `__vt`）—— 见 `layoutVirtual`。 */
     if (C.storage.get(rec.name) === rec.name) {
@@ -249,11 +216,6 @@ export function cppToIR(tree) {
     const all = selfType === undefined ? params : [{ name: 'this', type: selfType }, ...params];
     return { name, params: all, ret };
   };
-  for (const f of topFns) {
-    const s = sigOf(f);
-    C.fns.set(s.name, { params: s.params, ret: s.ret });
-  }
-
   /**
    * **一格模板实例**（单态化）。名字按实参类型编（`maxOf__int` / `maxOf__real`），
    * 第一次要到才把体降一遍 —— 图上一格新节点也没加，落的全是现成的 `fn` + `call`。
@@ -280,6 +242,47 @@ export function cppToIR(tree) {
     }
     return inst;
   };
+  /**
+   * **一格类模板的实例**（`Box<int>` → 一格叫 `Box__int` 的普通记录）。
+   *
+   * 与函数模板同一条路：类型形参临时摆进 `C.aliases`，把**同一棵 `(class …)` 树**
+   * 再读一遍 —— `collectClass` / `sigOf` 一个字都不用改。读完当场把类、方法签名、
+   * 方法体三样都发掉，并把 `done` 立起来：这一格可能发生在第二、三遍**中间**
+   * （`Box<int> mk(int)` 的返回类型），外头那两个遍历看见 `done` 就跳过，不会发第二份。
+   */
+  C.instClass = (name, types) => {
+    const t = C.ctemplates.get(name);
+    const inst = `${C.ref(name)}__${types.map(tyTag).join('_')}`;
+    if (C.instDone.has(inst)) return C.recType(inst);
+    C.instDone.add(inst);
+    const saved = t.tparams.map((p) => C.aliases.get(p));
+    t.tparams.forEach((p, i) => C.aliases.set(p, types[i]));
+    try {
+      const rec = collectClass(t.clsTok, C, inst);
+      if (rec.virtuals.size > 0) throw new Error('cpp->IR: 类模板 + 虚函数还没接');
+      if (rec.bases.length > 0) throw new Error('cpp->IR: 类模板 + 继承还没接');
+      if (rec.ctor !== null) throw new Error('cpp->IR: 类模板 + 构造函数还没接');
+      rec.done = true;
+      rec.flat = true;
+      C.records.set(inst, rec);
+      C.storage.set(inst, inst);
+      C.storageRef.set(C.ref(inst), C.ref(inst));
+      recFields.set(C.ref(inst), rec.fields);
+      decls.push({ kind: 'class', name: C.ref(inst), fields: rec.fields });
+      const selfType = C.recType(inst);
+      const sigs = rec.methods.map((m) => sigOf(m.tok, selfType, `${C.ref(inst)}_${C.ref(m.name)}`));
+      sigs.forEach((s) => C.fns.set(s.name, { params: s.params, ret: s.ret }));
+      rec.methods.forEach((m, i) => {
+        decls.push(C.isolate(() => fnDecl(sigs[i], m.tok, C, C.ref(inst))));
+      });
+      if (rec.dtor !== null) throw new Error('cpp->IR: 类模板 + 析构函数还没接');
+    } finally {
+      t.tparams.forEach((p, i) => {
+        if (saved[i] === undefined) C.aliases.delete(p); else C.aliases.set(p, saved[i]);
+      });
+    }
+    return C.recType(inst);
+  };
   /** 实参类型 → 类型形参的绑定（**只认"形参的类型就是那个形参名"**那一档）。 */
   C.deduce = (name, argTypes) => {
     const t = C.templates.get(name);
@@ -296,7 +299,16 @@ export function cppToIR(tree) {
         + '（这一批只认"某个形参的类型就写着它"那一档 —— 显式写出 `f<T>(…)` 也行）');
     });
   };
+  /* 顶层函数的签名**要等三格实例化的口子装好之后**才算：`Box<int> mk(int)` 的返回类型
+     就是一格用点，算它的时候会现造 `Box__int`。 */
+  for (const f of topFns) {
+    const s = sigOf(f);
+    C.fns.set(s.name, { params: s.params, ret: s.ret });
+  }
+
   for (const [, rec] of C.records) {
+    /* 类模板的实例自己已经把三样都发过了（`C.instClass`）—— 跳过，别发第二份。 */
+    if (rec.done === true) continue;
     const selfType = C.recType(rec.name);
     for (const m of rec.methods) {
       const s = sigOf(m.tok, selfType, `${C.ref(rec.name)}_${C.ref(m.name)}`);
@@ -326,6 +338,7 @@ export function cppToIR(tree) {
 
   /* ---- 第三遍：方法 / 析构 / 函数的体 -------------------------------------- */
   for (const [, rec] of C.records) {
+    if (rec.done === true) continue;
     const selfType = C.recType(rec.name);
     for (const m of rec.methods) {
       const s = sigOf(m.tok, selfType, `${C.ref(rec.name)}_${C.ref(m.name)}`);
@@ -393,6 +406,62 @@ function vcallDecls(C) {
     }
   }
   return out;
+}
+
+/**
+ * 一格 `(class …)` → `{ name, bases, fields, methods, dtor, ctor, virtuals }`。
+ *
+ * `asName` 给了就用它当记录名（**类模板的实例**走这一格：同一棵树按不同的 `T` 读两遍，
+ * 名字是 `Box__int` / `Box__real`）。字段与形参的类型走 `typeOfSpecs`，所以类型形参
+ * 只要在 `C.aliases` 里绑着，这一份一个字都不用改。
+ */
+function collectClass(cls, C, asName = null) {
+  /* **带基类的那一档，名字与基类表裹在一格无名表里**（`(class "struct" (· (n …) (bases …)) …)`）
+     —— 无名表的孩子是**全部 items**（`cst.js` 文件头那条教训），所以先摊一层再找。 */
+  const clsKids = kids(cls).flatMap((y) => (tag(y) === null && isList(y) ? groupItems(y) : [y]));
+  const nm = clsKids.find((y) => tag(y) === 'n');
+  /* **继承**：`struct Derived : Base {}` 的 `(bases (b (n "Base")))`。 */
+  const basesTok = clsKids.find((y) => tag(y) === 'bases');
+  const bases = (basesTok === undefined ? [] : kids(basesTok))
+    .map((b) => nameOf(kids(b).find((y) => tag(y) === 'n')))
+    .filter((b) => b !== null && b !== undefined);
+  const members = clsKids.find((y) => tag(y) === 'members');
+  const fields = [];
+  const methods = [];
+  const virtuals = new Set();
+  let dtor = null;
+  let ctor = null;
+  for (const m of (members === undefined ? [] : kids(members))) {
+    if (tag(m) === 'decl') {
+      const ms = part(m, 'specs');
+      const mi = part(m, 'init');
+      const mn = mi === undefined ? undefined : kids(kids(mi)[0])[0];
+      if (mn !== undefined) {
+        fields.push({ name: nameOf(mn), type: typeOfSpecs(ms, C, kids(kids(mi)[0])[0]) ?? INT });
+      }
+      continue;
+    }
+    if (tag(m) === 'func') {
+      const f = part(m, 'fn') ?? kids(m).find((y) => tag(y) === 'fn');
+      const head = f === undefined ? undefined : kids(f)[0];
+      if (head !== undefined && tag(head) === 'dtor') { dtor = m; continue; }
+      /* **构造函数**：名字与类同名、而且**没有返回类型那一格**。 */
+      if (head !== undefined && tag(head) === 'n' && nameOf(head) === nameOf(nm)
+        && part(m, 'specs') === undefined) { ctor = m; continue; }
+      const mn2 = (head !== undefined && tag(head) === 'opname')
+        ? opMethodName(head) : nameOf(kids(f)[0]);
+      /* `virtual` 是 specs 里的一格光秃秃的词。 */
+      const ms2 = part(m, 'specs');
+      if (ms2 !== undefined
+        && kids(ms2).some((y) => tag(y) === null && String(leaf(y)) === 'virtual')) {
+        virtuals.add(mn2);
+      }
+      methods.push({ tok: m, name: mn2 });
+    }
+  }
+  return {
+    name: asName ?? nameOf(nm), bases, fields, methods, dtor, ctor, virtuals,
+  };
 }
 
 /**
@@ -884,7 +953,7 @@ function declOf(d, specs, C) {
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
-//   1. **异常、lambda、类模板**还没接（当场报）。
+//   1. **异常与 lambda**还没接（当场报）。
 //   2. `printf` 只接"一格转换 + 换行"与纯文本（见 expr.js 的 printArgs）。
 //   3. 引用（`T&`）当值收（例子里只用它传结构 —— 记录本来就是引用语义）；
 //      `&x` 只在记录/列表/字典上成立（标量上当场报，那要真指针）。
@@ -893,3 +962,5 @@ function declOf(d, specs, C) {
 //   5. 构造函数一个类只认**一份**（重载还没接）；拷贝构造与赋值算子也没有 ——
 //      记录是引用语义，所以那两格在这条腿上本来就不是"拷贝"。
 //   6. 虚函数只接**单继承**（虚函数 + 多继承当场报）；纯虚（`= 0`）与虚析构没接。
+//   7. 类模板只接"没有继承、没有虚函数、没有构造/析构"那一档（别的当场报）；
+//      模板的默认实参与特化没接。

@@ -379,6 +379,13 @@ export const CTOR = ['1', '2', '3', '30', '100', '5', '11'];
  */
 export const VIRT = ['9', '10', '0', '9', '10', '0', '18', '20', '10'];
 
+/**
+ * **cpp 的类模板**（`ext/cpp/examples/ctmpl.cpp`）。`Box<int>` 落成一格叫 `Box__int` 的
+ * 普通记录、方法叫 `Box__int_get`。第五、六行钉住"同一格实例只造一遍"（两个变量各自独立、
+ * 互不串味），最后一行钉住类模板的记录当**返回值**交出去。期望输出由 `c++` 给。
+ */
+export const CTMPL = ['7', '14', '1.5', '3', '4', '7', '18'];
+
 const C = (name, grammar, file, expect) => ({ name, grammar, file, expect });
 
 /**
@@ -585,6 +592,10 @@ export const CASES = [
   // 一棵继承树合成一格记录（字段并集 + `__vt`），"按真身分派"落成按 `__vt` 走的 if 链。
   // 没有它，`Shape* p = &r;` 在"一类一格记录"上根本表示不出来。期望输出由 `c++` 给。
   ...fam('virt', VIRT, ['cpp']),
+  // 第五十九个家族：**类模板**（cpp 独一份）。与函数模板同一条路（单态化）——
+  // `Box<int>` 落成一格叫 `Box__int` 的普通记录、方法叫 `Box__int_get`，
+  // 于是字段读写、方法分派、发体一格都不用另写。期望输出由 `c++` 给。
+  ...fam('ctmpl', CTMPL, ['cpp']),
 ];
 
 
