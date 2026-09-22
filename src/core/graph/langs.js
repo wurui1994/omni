@@ -23,18 +23,21 @@
 import { OmniError } from '../source/diag.js';
 /* "镜像在哪儿"这一格由宿主答（封闭 ABI 的 `js_install_dir`）—— 见 `treeRoot()` 那段账。 */
 import { installDir, exists } from '../host/native.js';
-import { chezToGraph } from '../../../ext/chez/tograph.js';
+
 import { luaToGraph } from '../../../ext/lua/tograph.js';
 import { gslShellToGraph } from '../../../ext/gsl-shell/tograph.js';
 import { goToGraph, goImports } from '../../../ext/go/tograph.js';
 import { GO_RT } from '../../../ext/go/go-rt.js';
-import { sbclToGraph } from '../../../ext/sbcl/tograph.js';
 import { vlangToGraph, vlangImports } from '../../../ext/vlang/tograph.js';
-import { awkToGraph } from '../../../ext/awk/tograph.js';
-import { fbToGraph } from '../../../ext/freebasic/tograph.js';
 import { mojoToGraph } from '../../../ext/mojo/tograph.js';
 import { nimToGraph, nimImports } from '../../../ext/nim/tograph.js';
 import { cppToGraph } from '../../../ext/cpp/tograph.js';
+/* **迁过来的那几门**（ADR-0044）：`toIR` 是 adapter（CST → 标准 IR），语义降级走
+   `src/core/lower/`。有 `toIR` 的语言**没有** `toGraph` —— 图那一层不再有它。 */
+import { awkToIR, AWK_HOOKS } from '../../../ext/awk/adapter.js';
+import { chezToIR } from '../../../ext/chez/adapter/index.js';
+import { sbclToIR } from '../../../ext/sbcl/adapter/index.js';
+import { fbToIR } from '../../../ext/freebasic/adapter/index.js';
 
 /**
  * 这棵树的根。**从宿主那格 `installDir()` 走上去**（`src/core/host` 往上三层）——
@@ -83,13 +86,19 @@ export function treeRoot() {
 }
 
 /**
- * 一门语言一格：`grammar` 是相对这棵树根的路径，`toGraph` 是那门语言的映射，
- * `exts` 是它的源文件后缀（不带点，`exts[0]` 就是例子文件用的那个）。
- * `guess: false` = 那些后缀**不参与按文件名猜**（见文件头）。
+ * 一门语言一格：`grammar` 是相对这棵树根的路径，`exts` 是它的源文件后缀
+ * （不带点，`exts[0]` 就是例子文件用的那个）。`guess: false` = 那些后缀**不参与按文件名猜**。
+ *
+ * **降级那一格有两种**（ADR-0044 迁移期里两者并存）：
+ *   * `toIR` + `hooks` —— 迁完了的那几门：CST → 标准 IR，语义降级走 `src/core/lower/`
+ *     那一份公共降级器（默认、也是唯一的一条路）。
+ *   * `toGraph` —— 还没迁的那几门：CST → 节点图 → `backend-core.js` → `.sx`。
+ * 一门语言只该有其中一格。`toIR` 一落地，那门语言的 `tograph.js` 当场删掉 ——
+ * 留着就是"两条路各自一套"，而那正是这一版要去掉的东西。
  */
 export const LANGS = new Map([
-  ['chez', { grammar: 'ext/chez/chez.grammar', toGraph: chezToGraph, exts: ['ss', 'scm'] }],
-  ['sbcl', { grammar: 'ext/sbcl/sbcl.grammar', toGraph: sbclToGraph, exts: ['lisp', 'cl'] }],
+  ['chez', { grammar: 'ext/chez/chez.grammar', toIR: chezToIR, exts: ['ss', 'scm'] }],
+  ['sbcl', { grammar: 'ext/sbcl/sbcl.grammar', toIR: sbclToIR, exts: ['lisp', 'cl'] }],
   ['lua', { grammar: 'ext/lua/lua.grammar', toGraph: luaToGraph, exts: ['lua'] }],
   // 方言：语法是"继承 lua 那份 + 两条产生式"（`(extends …)`，见 glr/load.js），
   // 映射一个字不改地借 lua 的。后缀仍是 `.lua`，但**不参与猜** —— 只能 --lang 点名。
@@ -107,8 +116,10 @@ export const LANGS = new Map([
   ['vlang', {
     grammar: 'ext/vlang/vlang.grammar', toGraph: vlangToGraph, imports: vlangImports, exts: ['v'],
   }],
-  ['awk', { grammar: 'ext/awk/awk.grammar', toGraph: awkToGraph, exts: ['awk'] }],
-  ['freebasic', { grammar: 'ext/freebasic/freebasic.grammar', toGraph: fbToGraph, exts: ['bas', 'bi'] }],
+  ['awk', {
+    grammar: 'ext/awk/awk.grammar', toIR: awkToIR, hooks: AWK_HOOKS, exts: ['awk'],
+  }],
+  ['freebasic', { grammar: 'ext/freebasic/freebasic.grammar', toIR: fbToIR, exts: ['bas', 'bi'] }],
   ['mojo', { grammar: 'ext/mojo/mojo.grammar', toGraph: mojoToGraph, exts: ['mojo'] }],
   ['nim', {
     grammar: 'ext/nim/nim.grammar', toGraph: nimToGraph, imports: nimImports, exts: ['nim'],

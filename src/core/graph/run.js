@@ -42,6 +42,7 @@ import { shrink } from './shrink.js';
 import { layerModel, layerTable } from '../cli/layers.js';
 import { watToWasm } from '../wasm/assemble.js';
 import { LANGS, pickLang, treeRoot } from './langs.js';
+import { hasAdapter, sxTextOf } from '../lower/drive.js';
 
 /** 一格 `--flag VALUE`：给了就回那个值，没给回 null（不认 `--flag=VALUE`，与别处一致）。
  *  名字不叫 `argOf`：`src/lang/jnc/generic.js` 里那格叫这个名字（取泛型实参，是另一件事）。 */
@@ -67,6 +68,12 @@ export function graphBackendNames() {
  */
 function graphOf(path, argv) {
   const lang = pickLang(path, cliArg(argv, '--lang'));
+  /* **迁完的那几门在图这一层没有了**（ADR-0044）：它们的 `tograph.js` 删掉了，
+     `--engine graph` 对它们只能是一句人话，不能是 `lang.toGraph is not a function`。 */
+  if (lang.toGraph === undefined) {
+    throw new OmniError(`--engine graph 这一层没有 ${lang.name} 了 —— 这门语言已经迁到`
+      + '公共降级器（ADR-0044：adapter → 标准 IR → lower → .sx），直接 `omni run` 就走那条路');
+  }
   const grammarPath = `${treeRoot()}/${lang.grammar}`;
   const { tb, g } = loadGrammarTable(grammarPath);
   const diags = new Diagnostics();
@@ -522,6 +529,10 @@ export function borrowedExts() {
  * 回 null = 语法或映射说不通（诊断已经印过了）。缺口按 `OmniError` 抛（有名有姓）。
  */
 export function coreSxText(path, argv) {
+  /* **迁到公共降级器的那几门走另一条路**（ADR-0044）：adapter → 标准 IR → lower → .sx。
+     这儿只是分岔，不是两套实现 —— 图那一条会随着最后一门迁完一起拆掉。 */
+  const lang = pickLang(path, cliArg(argv, '--lang'));
+  if (hasAdapter(lang)) return sxTextOf(path, argv);
   const got = graphOf(path, argv);
   if (got.code !== undefined) return null;
   const back = backends().find((b) => b.name === 'core');

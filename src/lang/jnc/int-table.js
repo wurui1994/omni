@@ -15,7 +15,7 @@
 import {
   wrapTo, wrapVal, U_OPS, uOp, realOf, arithType, commonInt, intConvCode,
   OVERFLOWS, intBinary, intUnary,
-} from '../common/int.js';
+} from '../../core/lower/int.js';
 
 export {
   wrapTo, wrapVal, U_OPS, uOp, realOf, arithType, commonInt, intConvCode,

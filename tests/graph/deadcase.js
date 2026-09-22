@@ -17,7 +17,7 @@
 //
 //   node tests/graph/deadcase.js
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { loadGrammarTable } from '../../src/core/glr/load.js';
 import { LANGS } from '../../src/core/graph/langs.js';
 
@@ -53,33 +53,58 @@ function tagsIn(action, out) {
 }
 
 /**
- * 那份映射里 `switch (tag(x))` 这一格收的标签表。
+ * 那份映射里 `switch (tag(x))` 这几格收的标签表。
  *
- * 只扫**那一个** switch（到 `default:` 为止）：同一份文件里别的 switch 分的可能是算符名
- * （chez / sbcl 的 `switch (op)`），拿语法标签去比它是不对的。
+ * 只扫 `switch (tag(x))` 那种（每一格到它的 `default:` 为止）：同一份文件里别的 switch
+ * 分的可能是算符名（chez / sbcl 的 `switch (op)`），拿语法标签去比它是不对的。
+ * **有几格就扫几格**：adapter 那一侧（ADR-0044）分表达式与分语句是两个函数、各一格 switch。
  */
 function labelsOf(src) {
-  const at = src.indexOf('switch (tag(x))');
+  const out = [];
+  let at = src.indexOf('switch (tag(x))');
   if (at < 0) return null;
-  const end = src.indexOf('default:', at);
-  const region = src.slice(at, end < 0 ? src.length : end);
-  // **注释要先去掉**：这几份文件里的注释会写"原来那一格 `case 'un'` 是死代码" ——
-  // 不去掉的话，判据自己修好的那一格会被它自己的注释再报一遍（第一版就是这么错的）。
-  // 判"这个 `//` 是注释还是串里的"用的是它前面单引号的个数：偶数就在串外面。
-  const code = region.split('\n').map((line) => {
-    for (let i = 0; i + 1 < line.length; i += 1) {
-      if (line[i] === '/' && line[i + 1] === '/') {
-        const quotes = line.slice(0, i).split("'").length - 1;
-        if (quotes % 2 === 0) return line.slice(0, i);
+  while (at >= 0) {
+    const end = src.indexOf('default:', at);
+    const region = src.slice(at, end < 0 ? src.length : end);
+    // **注释要先去掉**：这几份文件里的注释会写"原来那一格 `case 'un'` 是死代码" ——
+    // 不去掉的话，判据自己修好的那一格会被它自己的注释再报一遍（第一版就是这么错的）。
+    // 判"这个 `//` 是注释还是串里的"用的是它前面单引号的个数：偶数就在串外面。
+    const code = region.split('\n').map((line) => {
+      for (let i = 0; i + 1 < line.length; i += 1) {
+        if (line[i] === '/' && line[i + 1] === '/') {
+          const quotes = line.slice(0, i).split("'").length - 1;
+          if (quotes % 2 === 0) return line.slice(0, i);
+        }
       }
-    }
-    return line;
-  }).join('\n');
-  return [...code.matchAll(/case '([^']+)'/g)].map((m) => m[1]);
+      return line;
+    }).join('\n');
+    for (const m of code.matchAll(/case '([^']+)'/g)) out.push(m[1]);
+    at = src.indexOf('switch (tag(x))', at + 1);
+  }
+  return out;
 }
 
 for (const [name, lang] of LANGS.entries()) {
-  const src = readFileSync(`${ROOT}ext/${name}/tograph.js`, 'utf8');
+  /* **迁到公共降级器的那几门没有 `tograph.js` 了**（ADR-0044）：它们的 adapter 出的是
+     标准 IR，`case '标签'` 那几格在 `ext/<lang>/adapter.js` 或 `ext/<lang>/adapter/` 里
+     —— 这一格判据照样量得到，只是文件换了。一个目录里的几份**拼起来一起量**
+     （内容多的语言按关注点拆目录，那是 ADR-0044 §2 的规矩）。 */
+  const srcs = [];
+  const one = `${ROOT}ext/${name}/adapter.js`;
+  const dir = `${ROOT}ext/${name}/adapter`;
+  if (existsSync(one)) srcs.push(readFileSync(one, 'utf8'));
+  else if (existsSync(dir)) {
+    for (const n of readdirSync(dir).sort()) {
+      if (n.endsWith('.js')) srcs.push(readFileSync(`${dir}/${n}`, 'utf8'));
+    }
+  } else if (existsSync(`${ROOT}ext/${name}/tograph.js`)) {
+    srcs.push(readFileSync(`${ROOT}ext/${name}/tograph.js`, 'utf8'));
+  }
+  if (srcs.length === 0) {
+    no(`${name}`, '既没有 adapter（.js 或 adapter/）也没有 tograph.js —— 登记处说有这一门');
+    continue;
+  }
+  const src = srcs.join('\n');
   const labels = labelsOf(src);
   if (labels === null) {
     // 两门 Lisp 的映射分的是 datum 的头（`head(x)`），那不是语法出的标签 ——

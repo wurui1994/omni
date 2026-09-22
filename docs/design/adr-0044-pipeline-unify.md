@@ -127,13 +127,16 @@ adapter 把 CST 翻译成**标准化的 JS 对象**，不是图节点，不是 .
 
 | 模块 | 功能 | 来源 |
 |---|---|---|
-| `sx.js` | .sx 算子构造器 | **已有**（`src/lang/common/sx.js`，搬过来） |
+| `sx.js` | .sx 算子构造器（含字典那五格 `dnew`/`dget`/`dset`/`dhas`/`dlen`） | **已有**（`src/lang/common/sx.js`，搬过来） |
+| `cst.js` | 走 GLR 那棵树的小函数（`tag`/`kids`/`leaf`/…） | 从 `graph/fromtree.js` 搬过来（旧址 re-export） |
 | `place.js` | 可写位置形状分派 | **已有**（`src/lang/common/place.js`，搬过来） |
 | `scope.js` | 作用域栈 | 从 `emit-ctx.js` 提取 |
 | `type-env.js` | 类型注册/查找/别名 | 从 `emit-ctx.js` + `resolve-type.js` 提取 |
+| `ty.js` | 类型描述 → .sx 类型文本 + **零值**（`zeroOf`） | 从 `lower.js` 拆出来（语句层也要它，摆在主入口里成环） |
 | `lower.js` | **主入口**：标准 IR → .sx text | 新写（调用下面各模块） |
 | `lower-stmt.js` | 语句降级 | 从 `stmt-table.js` 提取 |
 | `lower-expr.js` | 表达式降级 | 从 `expr-table.js` + `emit-expr.js` 提取 |
+| `drive.js` | 源码 → GLR → adapter → lower → `.sx`（接线，一格语义都不加） | 新写（替 `graph/run.js` 的 `graphOf`） |
 | `lower-fn.js` | 函数签名 + 函数体 | 从 `emit-fn.js` + `emit-body.js` 提取 |
 | `lower-agg.js` | struct/class → .sx | 从 `emit-agg.js` 提取 |
 | `lower-global.js` | 模块级变量 | 从 `emit-global.js` 提取 |
@@ -194,30 +197,33 @@ lower 读这张表决定发码细节。从前这些决定散在 11 份 tograph.j
 
 ### 1.6 graph 怎么办
 
-**graph 不删，变成管线里的一个可选分支**。
+**graph 不保留**（2026-09-22 定的，改掉了这一版第一稿"图变成可选分支"那句话）。
 
-从前：
-```
-CST → tograph.js → 图 → backend-core.js → .sx → OIR → JS/C/Native
-                       → backend-wat.js → WAT
-                       → eval.js → 解释
-```
+第一稿说的是"`--engine graph` 留成一个分支，图从 `.sx` 反序列化"。那句话经不起一条追问：
+**谁来判它**。图那一层的后端（WAT / C / 解释器）各有一套判据，而它们判的东西主管线上
+已经各有一份（`.sx → OIR → MIR → 解释器`、`frontend-wat`、`frontend-c`、原生腿）。
+留一条没人走的路等于留两套实现 —— 那正是这一版要去掉的东西。
 
-以后：
+所以：
+
 ```
-CST → adapter → 标准 IR → lower → .sx → OIR → JS/C/Native       （默认路径）
-                                      ↓
-                               (--engine graph)
-                                      ↓
-                              .sx → 读回图 → WAT / 解释器         （可选分支）
+CST → adapter → 标准 IR → lower → .sx → OIR → JS / C / 原生        （唯一的一条路）
 ```
 
-关键变化：
-- **不再从 CST 直接到图**。adapter 出标准 IR，lower 出 .sx，图从 .sx 反序列化。
-- `backend-core.js`（3339 行）**删掉**。它做的事（图→.sx）不再需要——.sx 已经在手里了。
-- `tograph.js`（11 份，9690 行）**全部删掉**。adapter 替代了它们。
-- `graph/nodes.js`、`graph/types.js`、`graph/fromtree.js` 保留——WAT 和解释器后端还需要图表示。
-- `graph/eval.js`（解释器）从 .sx 反序列化图再解释，不从 tograph.js 来。
+- `ext/*/tograph.js`（11 份，9690 行）**全部删掉**，一门一门地删（迁一门删一份）。
+- `src/core/graph/`（12250 行）**整个目录删掉**：`backend-core.js` / `backend-wat.js` /
+  `backend-c.js` / `eval.js` / `nodes.js` / `types.js` / `fromtree.js` / `contract.js` /
+  `shrink.js` / `stat.js` / `mapping.js` / `lift.js` / …
+- `--engine graph` 这个开关**跟着没有**（`run.js` / `cmds.js` 里那一摊接线一起走）。
+- 语言登记处（`langs.js`）不是图的东西 —— 它搬到图外面（最后一门迁完那一笔）。
+- 图那几条腿的判据**不在图上重建**：WAT 由 `tests/wat` + `frontend-wat` 接、C 由
+  `tests/c` + `frontend-c` 接、解释那条由 `.sx` 那条主路接。`tests/graph/` 底下那 3706 行
+  随图一起退役，语言例子那张矩阵搬到 `tests/lower/run.js`（迁一门搬一行）。
+- `.mapping`（go / lua 那两份声明式映射）与 `tests/lib/mapping-check.js` 一起走。
+
+**迁移期里两条路并存**，判据是登记处那一格：一门语言有 `toIR` 就走公共降级器
+（`tests/lower/run.js` 判它），有 `toGraph` 就还在图上（`tests/graph/` 判它）。
+**一门语言不许同时有两格** —— `toIR` 一落地，那门的 `tograph.js` 当场删。
 
 **`.mapping` 文件**的迁移：现有的 `go.mapping`（205 行）和 `lua.mapping`（87 行）
 是声明式的 CST → 图节点映射。它们的内容被**吸收进 adapter**——
@@ -239,13 +245,31 @@ adapter 本身就是 CST → 标准 IR 的映射，只是写成 JS 函数而不�
 
 ### 第二片：最小的那几门迁移
 
-按从小到大的次序：awk → chez → sbcl → freebasic → mojo → lua
+按从小到大的次序：**awk ✓ → chez ✓ → sbcl ✓ → freebasic ✓**（2026-09-22 四门迁完）→ mojo → lua
 
 每一门：
-1. 写 `ext/<lang>/adapter.js`
+1. 写 `ext/<lang>/adapter.js`（**内容多的语言不许堆在一份文件里** —— 见下面那条）
 2. 删 `ext/<lang>/tograph.js`（adapter 替代了它）
-3. 改 `graph/langs.js` 注册
-4. **判据**：`tests/graph/cases.js` 里该语言的那几族全通
+3. 改登记处（`langs.js`）：那一门的 `toGraph` 换成 `toIR` + `hooks`
+4. 把那门语言的例子从 `tests/graph/cases.js` 那张矩阵搬到 `tests/lower/run.js`
+   （**不手抄第二张名单**：矩阵按"有没有 `toGraph`"过滤，搬的只是 `MIGRATED` 那一行）
+5. **判据**：那几个家族的输出与迁移前**逐字节相同**
+
+**一门语言一个目录，不是一份文件**：adapter 超过 ~400 行就按关注点拆
+（`adapter/expr.js` / `adapter/index.js` / …），`ext/<lang>/adapter.js` 只留一格入口（awk 那种
+200 行的小门就一份文件）。go（4900 行的 tograph）与 cpp / vlang / lua 都归这一条 ——
+9690 行搬进四五份"什么都装"的大文件不是统一，是把冗余换了个地方。
+
+**这三门迁下来长出的公共零件**（下一门直接用，不必再写）：
+- `src/core/lower/ty-of.js` —— 标准 IR 的表达式 → 类型（无类型语言那半笔账的公共部分）；
+- `lower.js` 的**语句槽**（`ctx.sink` / `ctx.emit` / `ctx.fresh`）—— 表达式位置上要先跑几句时
+  往槽里放，`lowerStmts` 摆在那条语句前面；
+- `lower-expr.js` 的 `if-expr` / `block-expr` / `new-record` / `builtin` / `type` 五格 ——
+  Lisp 那一族"什么都是表达式"与"造一格记录要临时量"就靠它们；
+- `lower-stmt.js` 的 `builtin-stmt`（`dset` / `aset` / `apush` 只当语句用）与
+  `withPostBeforeContinue`（三段式 `for` 里的 `continue` 要先跑步进）；
+- `ty.js` 的 `zeroOf`（含具名记录：引用语义 `cnew`、值语义 `new`）；
+- `sx.js` 补齐了数组五格、记录四格、字典五格。
 
 ### 第三片：中等的三门
 
@@ -263,13 +287,13 @@ Go 最后动。它的 adapter 最大（4900 行的 tograph.js 要翻译成 adapt
 3. 删 `ext/go/go.mapping`（吸收进 adapter）
 4. **判据**：52/52 包全通、pt 基准逐字节相同
 
-### 第五片：清理
+### 第五片：清理（**graph 整个拆掉**）
 
-1. 删 `graph/backend-core.js`（3339 行）
-2. 删 `graph/fromtree.js` 里只被 tograph 用的辅助函数
-3. 删 `graph/mapping.js`（.mapping 解释器，不再需要）
-4. 图的后端（WAT/解释器）改成从 .sx 反序列化图
-5. **判据**：全量判据不变
+1. 删 `src/core/graph/` 整个目录（12250 行）
+2. 语言登记处（`langs.js`）搬到图外面（`src/core/lang/registry.js`），`borrowedExts()` 跟着搬
+3. 去掉 `--engine graph` 这个开关（`cli.js` / `cmds.js` / `studio` 那几处接线）
+4. 删 `tests/graph/`（3706 行）与 `tests/lib/mapping-check.js`、`ext/*/*.mapping`、`bench/tograph.js`
+5. **判据**：`tests/lower/run.js` 十一门全绿 + 全量判据不变（wat / c / 原生那几条腿归主管线判）
 
 ### 第六片：Lab v2 语义层
 
@@ -280,13 +304,30 @@ Go 最后动。它的 adapter 最大（4900 行的 tograph.js 要翻译成 adapt
 
 ## 3. 判据策略
 
-**每一门迁移都有三个判据**：
+**每一门迁移的判据是两条**：
 
-1. **输出不变**：`omni run x.<ext>` 的 stdout 与迁移前**逐字节相同**
-2. **中间产物不变**：`omni emit sx x.<ext>` 的输出与迁移前逐字节相同
-3. **图那条路不变**（在全部迁移完成前）：`omni run x.<ext> --engine graph` 仍然能走通
+1. **输出不变**：`omni run x.<ext>` 的 stdout 与迁移前**逐字节相同**（这一条是硬的）。
+2. **中间产物出得来**：`omni emit sx x.<ext>` 不报、不空。
 
-第 3 条在第五片（清理）之后就不再需要——图从 .sx 反序列化，不从 tograph.js 来。
+第一稿这儿写的第二条是"`.sx` 逐字节相同"—— 那条**做不到而且不该要**：从前那份 `.sx` 是
+`backend-core.js` 印出来的（一格函数挤一行、类型是它自己按图猜的），公共降级器印的是另一种
+排版、类型由 adapter 定。要求文本逐字节相同等于要求新路复刻旧路的排版与猜法，那是把
+"两套实现"钉进判据里。**判的是行为，不是文本**。
+
+第一稿的第三条（"图那条路仍然走得通"）跟着 §1.6 一起作废：迁过来的语言在图那一层
+**不存在**了 —— `--engine graph` 对它们报的是一句人话（"这门已经迁到公共降级器"）。
+
+### awk 那一门量出来的（2026-09-22）
+
+5 份例子（basics / intmath / loopexit / dict / unary）stdout 逐字节相同，判据在
+`tests/lower/run.js`。两处**比从前好**、一处明写的取舍：
+
+- 从前"变量当条件"（`while (n)` / `if (s)`）在 `backend-core.js` 里是报缺口的，
+  现在 adapter 按 awk 的真值观发 `!= 0` / `!= ""`；
+- 三段式 `for` 里的 `continue` 从前靠图的 loop post 端口，现在公共降级器把它改写成
+  "步进一格再 continue"（`lower-stmt.js` 的 `withPostBeforeContinue`）—— 少这一手会死循环，
+  那是"把 for 摊成 while"这条路上唯一的坑；
+- awk 的数只有 double，这一批仍按 `int` 走（与从前那条路同一个取舍，例子里全是整数）。
 
 ## 4. 工程量估算
 

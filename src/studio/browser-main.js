@@ -20,9 +20,15 @@
 
 import { runGraphFile, graphBackendNames } from '../core/graph/run.js';
 import { borrowedExts } from '../core/graph/run.js';
+/* 迁到公共降级器的那几门（ADR-0044）：这条腿也走那条路 —— 同一份降级器，不是第二份实现。 */
+import { hasAdapter, sxTextOf } from '../core/lower/drive.js';
+import { pickLang } from '../core/graph/langs.js';
+import { lowerCoreSexpr } from '../core/sexpr/lower.js';
+import { interpret } from '../core/interp/eval.js';
+import { Diagnostics, SourceFile } from '../core/source/diag.js';
 import { langOf, safePath, buildTree, shellToArgv } from '../core/studio/shared.js';
 import {
-  mountFiles, readText, writeText, exists, takeOutput, setArgs, setExitCode, exitCode,
+  mountFiles, readText, writeText, exists, takeOutput, setArgs, setExitCode, exitCode, stderr,
 } from '../core/host/browser.js';
 /* 网页那一侧的纯函数那一半（高亮 / markdown / EPS -> SVG / GLSL）。
    `studio.js` 平时 `import` 它，可单体 HTML 是一份 `file://` 的文件 ——
@@ -71,13 +77,35 @@ function runArgv(argv) {
   takeOutput();                                  /* 上一趟的残留一律清掉 */
   let code = 0;
   try {
-    code = runGraphFile(path, rest);
+    code = runOne(path, rest);
   } catch (e) {
     const [o, r] = takeOutput();
     return { stdout: o, stderr: `${r}${e.message ?? e}\n`, code: 1 };
   }
   const [out, err] = takeOutput();
   return { stdout: out, stderr: err, code: code === 0 ? exitCode() : code };
+}
+
+/**
+ * 跑一份源码。**两条路**，按登记处那一格分（ADR-0044）：
+ *
+ *   * 有 `toIR` 的那几门 —— adapter → 标准 IR → 公共 lower → `.sx` → OIR → 解释器
+ *     （`interp/eval.js`）。这条路上一个子进程都不起、一个模块级全局都不碰，
+ *     所以浏览器里走得通 —— 与 `omni run` 在终端上走的是同一份降级器。
+ *   * 还在图那一层的那几门 —— 老路（`runGraphFile`，图 + `graph/eval.js`）。
+ *
+ * 十一门全迁完之后这儿只剩上面那一支（图那一层整个拆掉，见 ADR-0044 §1.6）。
+ */
+function runOne(path, rest) {
+  let lang = null;
+  try { lang = pickLang(path, null); } catch { lang = null; }
+  if (!hasAdapter(lang)) return runGraphFile(path, rest);
+  const sx = sxTextOf(path, rest);
+  if (sx === null) return 1;                     /* 语法说不通 —— 诊断已经印过了 */
+  const diags = new Diagnostics();
+  const mod = lowerCoreSexpr(new SourceFile(`${path}.sx`, sx), diags);
+  if (mod === null || diags.hasErrors()) { stderr(diags.format()); return 1; }
+  return interpret(mod);
 }
 
 /**

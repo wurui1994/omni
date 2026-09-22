@@ -139,9 +139,11 @@ writeFileSync(shell,
 /**
  * 挑的例子：一门语言一份、都秒级（"判据要用最小的那一条"）。
  *
- * **对照那一趟要带 `--engine graph`**：`omni run x.lua` 默认走的是 lua 那台字节码 VM，
- * 与浏览器这条腿（图那一层）不是同一台机器。不带它就是拿两台机器互比。
- * `.lua` 不在名单里也是同一件事：lua->graph 那份映射还有缺口（`sumto` 那一格），
+ * **对照那一趟要走同一台机器**：还在图那一层的那几门要带 `--engine graph`
+ * （`omni run x.lua` 默认走的是 lua 那台字节码 VM，不带就是拿两台机器互比）；
+ * 迁到公共降级器的那几门（ADR-0044，登记处那一格 `toIR`）**不带** —— 它们在图那一层
+ * 已经不存在了，浏览器这条腿走的也是 `adapter → 标准 IR → lower → .sx → OIR → 解释器`。
+ * `.lua` 不在名单里是另一回事：lua->graph 那份映射还有缺口（`sumto` 那一格），
  * 而那是 lua 前端的账，不是这一层的。
  */
 const CASES = [
@@ -153,11 +155,19 @@ const CASES = [
   'ext/sbcl/examples/basics.lisp',
 ];
 
+/** 这一门走哪条路 —— 登记处说（`toIR` 在就是公共降级器那条）。**不手抄第二张名单**。 */
+const { pickLang } = await import(join(root, 'src/core/graph/langs.js'));
+const migrated = (c) => {
+  try { return typeof pickLang(c, null).toIR === 'function'; } catch { return false; }
+};
+
 for (const c of CASES) {
   let want = null;
+  const refArgv = migrated(c)
+    ? [join(root, 'src', 'cli.js'), 'run', c]
+    : [join(root, 'src', 'cli.js'), 'run', c, '--engine', 'graph'];
   try {
-    want = execFileSync('node', [join(root, 'src', 'cli.js'), 'run', c, '--engine', 'graph'],
-      { cwd: root, encoding: 'utf8', timeout: 120000 });
+    want = execFileSync('node', refArgv, { cwd: root, encoding: 'utf8', timeout: 120000 });
   } catch (e) {
     ok(`${c}（本地那一趟先得通）`, false, String(e.message).slice(0, 200));
     continue;

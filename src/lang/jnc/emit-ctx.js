@@ -16,7 +16,7 @@ import { resolveType, INT_BITS } from './resolve-type.js';
 import { emitType, tyKey } from './emit-type.js';
 import { readFormals, JNC_OP_NAMES } from './emit-fn.js';
 import { emitExpr, strLitFold, bytesLitFold } from './emit-expr.js';
-import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
+import { lvalueShape, SHAPE_ACCESS } from '../../core/lower/place.js';
 import {
   memberShape, copyValLines, STR_MEMBERS, strMember,
 } from './member-table.js';
@@ -24,7 +24,7 @@ import { compoundValue, errTest, errValue, escapeText } from './stmt-table.js';
 import { wrapTo, realOf, intConvCode } from './int-table.js';
 import {
   fmtRun, specPiece, specDress, fmtDefault, fmtMergeSpec, fmtSplitSite,
-} from '../common/fmt.js';
+} from '../../core/lower/fmt.js';
 import { zeroText, CRT_CHAR } from './expr-table.js';
 /* `variant_t` 那格结构体是合成出来的：名字与那四格字段的家在 runtime 那一份。 */
 import { VARIANT, VARIANT_FIELDS, varBoxShell, varUnboxShell, mcFireName, mcFireShell } from './runtime.js';

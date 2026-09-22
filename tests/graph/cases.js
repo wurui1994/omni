@@ -361,11 +361,17 @@ const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGr
 const fam = (family, expect, langs) => langs.map((lang) => {
   const d = LANGS.get(lang);
   if (d === undefined) throw new Error(`cases.js: langs.js 里没有 ${lang} 这一门`);
+  /* **迁到公共降级器的那几门不在这张矩阵里**（ADR-0044）：它们的 `tograph.js` 删了，
+     图这一层没有它们了。那条判据搬到 `tests/lower/run.js`（adapter → 标准 IR → lower → .sx
+     → 真跑一趟，输出逐行相同）。这儿按 `toGraph` 在不在过滤，**不手抄第二张名单** ——
+     手抄的那张一定会与登记处分叉。 */
+  if (typeof d.toGraph !== 'function') return null;
   return C(family === 'basics' ? lang : `${lang}+${family}`,
     d.grammar, `ext/${lang}/examples/${family}.${d.exts[0]}`, d.toGraph, expect);
-});
+}).filter((c) => c !== null);
 
-const ALL = [...LANGS.keys()];
+/** 还在图这一层的那几门（迁完的不算 —— 见 `fam` 里那段账）。 */
+const ALL = [...LANGS].filter(([, d]) => typeof d.toGraph === 'function').map(([n]) => n);
 
 export const CASES = [
   // 第一个家族：含全部基础要素的完整例子（九门全有）

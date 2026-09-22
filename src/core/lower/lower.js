@@ -7,6 +7,7 @@ import { Scope } from './scope.js';
 import { TypeEnv, BASIC_TYPES } from './type-env.js';
 import { lowerStmt, lowerStmts } from './lower-stmt.js';
 import { lowerExpr } from './lower-expr.js';
+import { typeToSx, zeroOf } from './ty.js';
 import * as sx from './sx.js';
 
 /**
@@ -31,11 +32,29 @@ export function lower(module, hooks = {}) {
     }
   }
 
-  /** 降级上下文（所有 lower-* 模块共用的那个 ctx）。 */
+  /**
+   * 降级上下文（所有 lower-* 模块共用的那个 ctx）。
+   *
+   * `sink` 那一格是**语句槽**：表达式位置上要先跑几句的时候（Scheme 的 `if` 是表达式、
+   * `let` 是表达式、多值要先落一格记录），降级器把那几句 `ctx.emit(…)` 进去，
+   * 由 `lowerStmts` 摆在当前这条语句**前面**。没有它就只能在表达式里塞语句 —— 那是错的。
+   */
+  let tmpN = 0;
   const ctx = {
     scope,
     typeEnv,
     hooks,
+    sink: null,
+    /** 一格新的临时量名字（`if_tmp1` / `mv_tmp2` …）。模块里唯一。 */
+    fresh: (prefix) => { tmpN += 1; return `${prefix}${tmpN}`; },
+    /** 往当前语句前面插一句。**不在语句里**（sink 为 null）就是降级器写错了，当场报。 */
+    emit: (text) => {
+      if (ctx.sink === null) {
+        throw new Error(`lower.js: 这一格要往语句前面插一句（${text.slice(0, 40)}），`
+          + '可现在不在语句里 —— 顶层的初始化要包在 (main …) 或函数体里');
+      }
+      ctx.sink.push(text);
+    },
     lowerExpr: (expr, c) => lowerExpr(expr, c ?? ctx),
     lowerStmts: (stmts, c) => lowerStmts(stmts, c ?? ctx),
     lowerStmt: (stmt, c) => lowerStmt(stmt, c ?? ctx),
@@ -46,11 +65,13 @@ export function lower(module, hooks = {}) {
 
   // 第一遍：收集类型和函数签名
   for (const decl of module.decls) {
-    if (decl.kind === 'struct') {
-      typeEnv.register(decl.name, { kind: 'struct', fields: decl.fields });
+    if (decl.kind === 'struct' || decl.kind === 'class') {
+      /* **值语义与引用语义分两格**（方言的 `(struct …)` 与 `(class …)`）：
+         谁是哪一格由 adapter 说 —— Scheme 的记录是引用、go 的 struct 是值。 */
+      typeEnv.register(decl.name, { kind: 'named', name: decl.name, ref: decl.kind === 'class' });
       typeEnv.registerFields(decl.name, decl.fields);
       const fields = decl.fields.map((f) => `(${f.name} ${typeToSx(f.type, hooks)})`).join(' ');
-      lines.push(`  (struct ${decl.name} ${fields})`);
+      lines.push(`  (${decl.kind} ${decl.name} ${fields})`);
     }
     if (decl.kind === 'enum') {
       typeEnv.register(decl.name, { kind: 'enum', values: decl.values });
@@ -72,17 +93,29 @@ export function lower(module, hooks = {}) {
     if (decl.kind === 'fn') {
       lines.push(lowerFn(decl, ctx));
     }
-    if (decl.kind === 'global' && decl.init) {
-      const v = lowerExpr(decl.init, ctx);
+    if (decl.kind === 'global') {
+      /* 模块级变量。**初值可以没有**（`(global xs (arr int))`）—— 那时初始化落在
+         入口里（adapter 会摆一句 `set`），与 Scheme / awk 那种"顶层语句"的语义对得上。 */
       const ty = typeToSx(decl.type, hooks);
-      lines.push(`  (global ${decl.name} ${ty} ${v})`);
+      if (decl.init) lines.push(`  (global ${decl.name} ${ty} ${lowerExpr(decl.init, ctx)})`);
+      else lines.push(`  (global ${decl.name} ${ty})`);
     }
   }
 
-  // main 入口
-  const mainFn = module.decls.find((d) => d.kind === 'fn' && d.name === 'main');
-  if (mainFn) {
-    lines.push('  (main (expr (call main)))');
+  /**
+   * 入口那一格。两种形状，**adapter 说是哪一种**：
+   *   * `{ kind: 'main', body }` —— 入口就是一段语句（awk 的 `BEGIN`、lua / 脚本那一族的
+   *     顶层语句）。这一格直接摆进 `(main …)`。
+   *   * 有一格名叫 `main` 的函数（go / cpp 那一族）—— 那就发一句 `(main (expr (call main)))`。
+   * 两种都没有就没有入口（库那一档），`(main …)` 一格都不发。
+   */
+  const mainDecl = module.decls.find((d) => d.kind === 'main');
+  if (mainDecl !== undefined) {
+    ctx.scope.push();
+    lines.push(`  (main ${lowerStmts(mainDecl.body, ctx)})`);
+    ctx.scope.pop();
+  } else if (module.decls.some((d) => d.kind === 'fn' && d.name === 'main')) {
+    lines.push(`  (main ${sx.exprStmt(sx.call('main'))})`);
   }
 
   lines.push(')');
@@ -107,37 +140,18 @@ function lowerFn(decl, ctx) {
 }
 
 /**
- * 类型描述 → .sx 类型文本。
- * 语言的 hooks.typeToSx 可以覆盖（处理特殊类型）。
+ * 类型描述 → .sx 类型文本 + 零值。**正本在 `ty.js`**（语句层也要它们，摆在这儿就成了环）。
+ *
+ * 转口写成"一条 import + 一条光秃秃的 export"，**不是 `export … from`**：这份文件自己
+ * 也用 `typeToSx`，两条都写就是同一格名字进来两遍 —— 单体 HTML 那个打包器把两种形状都摊成
+ * `const { … } = __req(…)`，拼出来当场 `Identifier 'typeToSx' has already been declared`
+ * （`tests/studio/run.js` 量出来的，与 `graph/fromtree.js` 那处同一个坑）。
  */
-export function typeToSx(type, hooks = {}) {
-  if (type === null || type === undefined) return 'void';
-  if (typeof type === 'string') return type;
-  if (hooks.typeToSx) {
-    const r = hooks.typeToSx(type);
-    if (r !== null && r !== undefined) return r;
-  }
-  switch (type.kind) {
-    case 'void': return 'void';
-    case 'bool': return 'bool';
-    case 'int': return 'int';
-    case 'real': return 'real';
-    case 'string': return 'string';
-    case 'named': return type.name;
-    case 'ptr': return `(ptr ${typeToSx(type.inner, hooks)})`;
-    case 'arr': return `(arr ${typeToSx(type.elem, hooks)})`;
-    case 'map': return `(dict ${typeToSx(type.key, hooks)} ${typeToSx(type.value, hooks)})`;
-    case 'fn-type': {
-      const ps = type.params.map((p) => typeToSx(p, hooks)).join(' ');
-      return `(fnty (${ps}) ${typeToSx(type.ret, hooks)})`;
-    }
-    default: return type.name ?? 'void';
-  }
-}
+export { typeToSx, zeroOf };
 
-// Re-export 所有子模块，方便 adapter 统一 import
-export { Scope } from './scope.js';
-export { TypeEnv, BASIC_TYPES } from './type-env.js';
-export { lowerStmt, lowerStmts } from './lower-stmt.js';
-export { lowerExpr } from './lower-expr.js';
-export * as sx from './sx.js';
+/* **这儿不再转口各子模块**（原来有一摊 `export { Scope } from './scope.js'` 之类的
+   "方便 adapter 统一 import"）。两个理由，后一个是硬的：
+     * adapter 要哪一格就 import 哪一份（`ext/awk/adapter.js` 只用 `sx.js` 与 `cst.js`）——
+       转口只是给同一件东西加第二个名字；
+     * 这份文件自己也 import 了那几格，于是"既 import 又 `export … from`"会让单体 HTML
+       那个打包器摊出两条 `const { Scope } = __req(…)` —— 拼出来当场 SyntaxError。 */

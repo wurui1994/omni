@@ -34,7 +34,7 @@ import {
 import { emitBody, makeCtx } from './emit-body.js';
 import { makeFnEnv } from './emit-ctx.js';
 import { bytesLitFold } from './emit-expr.js';
-import { lvalueShape, SHAPE_ACCESS } from '../common/place.js';
+import { lvalueShape, SHAPE_ACCESS } from '../../core/lower/place.js';
 import { templateTable, expandTemplates, synthType } from './generic.js';
 import { zeroText } from './expr-table.js';
 

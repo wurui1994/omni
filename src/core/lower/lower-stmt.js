@@ -4,6 +4,7 @@
 // 每门语言的 adapter 把 CST 翻成 §1.2 的标准描述，这一份接手。
 
 import * as sx from './sx.js';
+import { typeToSx, zeroOf } from './ty.js';
 
 /**
  * 降级一条语句。回一段 .sx 文本（可能多行）。
@@ -26,21 +27,53 @@ export function lowerStmt(stmt, ctx) {
     case 'expr-stmt': return lowerExprStmt(stmt, ctx);
     case 'block': return lowerBlock(stmt, ctx);
     case 'switch': return lowerSwitch(stmt, ctx);
+    case 'print': return lowerPrint(stmt, ctx);
+    /**
+     * **语句形的内建**（`{ kind: 'builtin-stmt', name, args }`）：方言里有几格算子只当语句用
+     * （`(dset d k v)` / `(aset a i v)` / `(apush a v)` / `(fldset o f v)`）——
+     * 包进 `(expr …)` 会被当表达式读，那一侧当场报"不认识的表达式 'dset'"（量出来的）。
+     */
+    case 'builtin-stmt':
+      return sx.op(stmt.name, ...stmt.args.map((a) => ctx.lowerExpr(a, ctx)));
     case 'defer': return ctx.hooks?.lowerDefer?.(stmt, ctx) ?? '';
     default:
       if (ctx.hooks?.lowerStmt) {
         const r = ctx.hooks.lowerStmt(stmt, ctx);
         if (r !== null && r !== undefined) return r;
       }
-      return `;;  未降级的语句：${stmt.kind}`;
+      /* **不发一段坏文本出去**（sx.js 文件头那三条规矩的第二条）：接不住就当场报，
+         不然错要等跑起来印错数才看见。 */
+      throw new Error(`lower-stmt.js: 这一格语句还没接：${stmt.kind}`);
   }
 }
 
-/** 降级一组语句，连成一个 (do ...) 块。 */
+/**
+ * 一组语句连成一个 `(do …)` 块。**每一行都缩进**（一条语句可能占几行，见 `lowerFor`）。
+ *
+ * 每条语句降级时开一格**语句槽**（`ctx.sink`）：表达式位置上要先跑几句的时候
+ * （Scheme 的 `if` / `let` 是表达式、多值要先落一格记录）降级器往槽里 `ctx.emit(…)`，
+ * 这儿把它们摆在那条语句**前面**。槽是按语句开的，所以嵌套的块各自一格，互不串味。
+ */
 export function lowerStmts(stmts, ctx) {
-  const lines = stmts.map((s) => lowerStmt(s, ctx)).filter((s) => s !== '');
-  return lines.length === 0 ? '(do)' : `(do${lines.map((l) => `\n  ${l}`).join('')})`;
+  const lines = [];
+  for (const s of stmts) {
+    const outer = ctx.sink;
+    const pre = [];
+    ctx.sink = pre;
+    let text;
+    try {
+      text = lowerStmt(s, ctx);
+    } finally {
+      ctx.sink = outer;
+    }
+    for (const p of pre) lines.push(p);
+    if (text !== '') lines.push(text);
+  }
+  return lines.length === 0 ? '(do)' : `(do${lines.map((l) => `\n  ${indent(l)}`).join('')})`;
 }
+
+/** 一段（可能多行）文本里除第一行之外的每一行也缩进 —— 印出来的 `.sx` 才对得上括号。 */
+const indent = (text) => text.split('\n').join('\n  ');
 
 function lowerIf(s, ctx) {
   const c = ctx.lowerExpr(s.cond, ctx);
@@ -60,17 +93,69 @@ function lowerFor(s, ctx) {
   const parts = [];
   if (s.init) parts.push(lowerStmt(s.init, ctx));
   const c = s.cond ? ctx.lowerExpr(s.cond, ctx) : sx.bool(true);
-  const bodyParts = s.body.map((st) => lowerStmt(st, ctx));
+  /* **`continue` 必须照跑步进那一格**（方言里没有三段式 `for`，只有 `while`）。
+     把步进缀在体末尾是不够的：`continue` 跳过体的剩下部分，于是 `for (j=0; j<5; j++)`
+     里的 `continue` 会死循环 —— 图那一条路上步进挂在 loop 的 post 端口上，所以那边没这个坑。
+     办法：降级之前先把体里**属于这一层**的 `continue` 改写成"步进一格，再 continue"
+     （嵌套循环里的 continue 归它自己那一层，不碰）。 */
+  const body = s.post ? s.body.map((st) => withPostBeforeContinue(st, s.post)) : s.body;
+  const bodyParts = body.map((st) => lowerStmt(st, ctx));
   if (s.post) bodyParts.push(lowerStmt(s.post, ctx));
-  const body = bodyParts.length === 0 ? '(do)' : `(do${bodyParts.map((l) => `\n  ${l}`).join('')})`;
-  parts.push(`(while ${c} ${body})`);
+  const bodyText = bodyParts.length === 0 ? '(do)' : `(do${bodyParts.map((l) => `\n  ${l}`).join('')})`;
+  parts.push(`(while ${c} ${bodyText})`);
   return parts.join('\n');
+}
+
+/**
+ * 一条语句里**属于这一层循环**的 `continue`，前面补一格步进。
+ *
+ * 不进嵌套循环（`while` / `for` / `for-range` 的体）—— 那里头的 `continue` 是那一层的事。
+ * 回一棵**新的**语句（不改 adapter 交来的那棵 IR：同一棵可能被别处引着）。
+ */
+function withPostBeforeContinue(stmt, post) {
+  if (stmt === null || stmt === undefined) return stmt;
+  switch (stmt.kind) {
+    case 'continue': return { kind: 'block', stmts: [post, stmt] };
+    case 'while': case 'for': case 'for-range': return stmt;   // 另一层的事
+    case 'if': return {
+      ...stmt,
+      then: stmt.then.map((s) => withPostBeforeContinue(s, post)),
+      else_: stmt.else_ ? stmt.else_.map((s) => withPostBeforeContinue(s, post)) : stmt.else_,
+    };
+    case 'block': return { ...stmt, stmts: stmt.stmts.map((s) => withPostBeforeContinue(s, post)) };
+    case 'switch': return {
+      ...stmt,
+      cases: stmt.cases.map((c) => ({ ...c, body: c.body.map((s) => withPostBeforeContinue(s, post)) })),
+      default_: stmt.default_ ? stmt.default_.map((s) => withPostBeforeContinue(s, post)) : stmt.default_,
+    };
+    default: return stmt;
+  }
 }
 
 function lowerForRange(s, ctx) {
   // for name in iter { body } — 由语言的 hooks 处理（Go 的 range 和 Nim 的 for 语义不同）
   if (ctx.hooks?.lowerForRange) return ctx.hooks.lowerForRange(s, ctx);
-  return `;;  for-range 需要语言钩子`;
+  throw new Error('lower-stmt.js: for-range 要一格语言钩子（hooks.lowerForRange）'
+    + ' —— "在什么上走一遍"各门语言答得不一样');
+}
+
+/**
+ * `print`：**一行一格值**（方言的 `(print E)` 收一格）。
+ *
+ * 多个值怎么连（awk 的 OFS、go 的 `Println` 那个空格）是语言的事 —— 由 `hooks.lowerPrint`
+ * 答。没给钩子又来了多格值就当场报，不替谁选一个分隔符。
+ */
+function lowerPrint(s, ctx) {
+  const values = s.values ?? [s.value];
+  if (ctx.hooks?.lowerPrint) {
+    const r = ctx.hooks.lowerPrint(s, ctx);
+    if (r !== null && r !== undefined) return r;
+  }
+  if (values.length !== 1) {
+    throw new Error(`lower-stmt.js: print 收 ${values.length} 格值 —— 怎么连是语言的事`
+      + '（要 hooks.lowerPrint）');
+  }
+  return sx.op('print', ctx.lowerExpr(values[0], ctx));
 }
 
 function lowerReturn(s, ctx) {
@@ -90,20 +175,35 @@ function lowerContinue(s, _ctx) {
 }
 
 function lowerLet(s, ctx) {
-  const v = s.init ? ctx.lowerExpr(s.init, ctx) : null;
-  const ty = ctx.hooks?.typeToSx?.(s.type) ?? 'int';
+  const ty = typeToSx(s.type, ctx.hooks);
+  const v = s.init ? ctx.lowerExpr(s.init, ctx) : zeroOf(s.type, ctx.hooks);
   ctx.scope.declare(s.name, { type: s.type });
-  if (v !== null) return `(let ${s.name} ${ty} ${v})`;
-  return `(let ${s.name} ${ty})`;
+  return `(let ${s.name} ${ty} ${v})`;
 }
 
+/**
+ * 赋值。左边是什么形状决定发哪一格 —— 这正是 `place.js` 那张表的事，
+ * 而各语言的特殊位置（字典的键、位域、属性）由 `hooks.lowerAssign` 先答。
+ */
 function lowerAssign(s, ctx) {
-  const target = ctx.lowerExpr(s.target, ctx);
+  if (ctx.hooks?.lowerAssign) {
+    const r = ctx.hooks.lowerAssign(s, ctx);
+    if (r !== null && r !== undefined) return r;
+  }
   const value = ctx.lowerExpr(s.value, ctx);
   // 简单名字赋值 → (set name value)
   if (s.target.kind === 'name') return sx.set(s.target.name, value);
-  // 其他（字段赋值、下标赋值）由表达式层处理
-  return sx.exprStmt(value);
+  // 字段 → 那一格记录的字段；下标 → 数组那一格（字典由 adapter 发 `dset`）
+  if (s.target.kind === 'field') {
+    return sx.fldset(ctx.lowerExpr(s.target.obj, ctx), s.target.name, value);
+  }
+  if (s.target.kind === 'index') {
+    return sx.aset(ctx.lowerExpr(s.target.obj, ctx), ctx.lowerExpr(s.target.index, ctx), value);
+  }
+  if (s.target.kind === 'deref') {
+    return sx.exprStmt(sx.pstore(ctx.lowerExpr(s.target.expr, ctx), value));
+  }
+  throw new Error(`lower-stmt.js: 赋值的左边是 ${s.target.kind} —— 这一格要由 hooks.lowerAssign 答`);
 }
 
 function lowerExprStmt(s, ctx) {

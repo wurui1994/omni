@@ -39,8 +39,18 @@ export const SX_ARITY = {
   /* 截到 N 位（ADR-0031 §8.2）：`(trunc N E)` = asUintN、`(sext N E)` = asIntN、
      `(zext N E)` 与 trunc 同值（分开写只为让读的人看出意图）。N 是 1..64 的字面量。 */
   trunc: 2, sext: 2, zext: 2,
+  /* 字典那一族（`src/core/sexpr/lower.js` 的 `dnew` / `dget` / `dset` / `dhas` / `dlen`）：
+     lua / awk / go / V / nim 的 map 全落这五格。**`dnew` 收的是一格类型**（空字典的键值
+     类型在方言这一层必须写出来 —— 那一层不推导，只检查）。 */
+  dnew: 1, dget: 2, dset: 3, dhas: 2, dlen: 1,
+  /* 数组那一族：`(anew (arr T) N)` 造、`aget` / `aset` 取写、`apush` 追加、`alen` 长度、
+     `apop` 弹出。**下标从 0 起、上界不含**（各语言的差别由它自己的 adapter 摆平）。 */
+  anew: 2, aget: 2, aset: 3, apush: 2, alen: 1, apop: 1,
+  /* 记录那一族：`new` 造**值**（struct）、`cnew` 造**引用**（class），
+     `fld` / `fldset` 按名字取写一格字段（字段名是**名字**，不是值 —— 与字典正相反）。 */
+  new: 1, cnew: 1, fld: 2, fldset: 3,
   /* 类型 */
-  ptr: 1, tptr: 1, blk: 2, arr: 1, fnty: 2,
+  ptr: 1, tptr: 1, blk: 2, arr: 1, fnty: 2, dict: 2,
 };
 
 /** 一格算子发出来的文字。元数不对、操作数不是一段代码，**当场炸** —— 那是这一层的全部价值。 */
@@ -107,6 +117,32 @@ export const ssci = (v, n) => op('ssci', v, n);
 export const sgen = (v, n, keep = false) => op(keep ? 'sgenk' : 'sgen', v, n);
 export const sbase = (v, n) => op('sbase', v, n);
 
+/* ─── 字典那一族（五格，键是**值**不是名字） ──────────────────────────────── */
+/** 空字典：**要一格类型**（`(dnew (dict string int))`）—— 方言这一层不推导键值类型。 */
+export const dnew = (ty) => op('dnew', ty);
+export const dget = (d, k) => op('dget', d, k);
+export const dset = (d, k, v) => op('dset', d, k, v);
+export const dhas = (d, k) => op('dhas', d, k);
+export const dlen = (d) => op('dlen', d);
+
+/* ─── 数组那一族（下标 0 起、上界不含） ──────────────────────────────────── */
+/** 造一格数组：**要类型与长度**（`(anew (arr int) (int 3))`）。 */
+export const anew = (ty, n) => op('anew', ty, n);
+export const aget = (a, i) => op('aget', a, i);
+export const aset = (a, i, v) => op('aset', a, i, v);
+export const apush = (a, v) => op('apush', a, v);
+export const alen = (a) => op('alen', a);
+
+/* ─── 记录那一族（字段名是**名字**，不是值） ─────────────────────────────── */
+/** 值语义的记录（`(struct …)` 声明的那种）。 */
+export const newVal = (ty) => op('new', ty);
+/** 引用语义的记录（`(class …)` 声明的那种 —— 两个名字指同一格）。 */
+export const cnew = (ty) => op('cnew', ty);
+export const fld = (obj, name) => op('fld', obj, String(name));
+export const fldset = (obj, name, v) => op('fldset', obj, String(name), v);
+
 /* ─── 类型 ──────────────────────────────────────────────────────────────── */
 export const ptr = (t) => op('ptr', t);
 export const blk = (t, n) => op('blk', t, String(n));
+export const dict = (k, v) => op('dict', k, v);
+export const arr = (t) => op('arr', t);

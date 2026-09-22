@@ -371,10 +371,15 @@ for (const c of HAND) {
  * 只在不带过滤参数时检：带了 `only` 时矩阵只跑几格，量出来的名单本来就不全。
  */
 if (only.length === 0) {
+  /* **迁走的那几门不算在这笔账里**（ADR-0044）：`nodes.js` 那份规格名单是按"十门语言"写的，
+     而一门语言迁到公共降级器之后它在图这一层**不存在**了 —— 拿它去比"矩阵里接了没"
+     等于要求一条已经拆掉的路继续供货。判据按登记处算（有 `toIR` 就是迁走了），
+     不手抄第二张名单；十一门全迁完这一节连同整个 `tests/graph/` 一起退役。 */
+  const gone = new Set([...LANGS].filter(([, d]) => typeof d.toIR === 'function').map(([n]) => n));
   for (const [op, d] of NODES) {
     if (d.providers === null) continue;
     const got = [...(providers.get(op) ?? new Set())].sort();
-    const spec = [...d.providers.spec].sort();
+    const spec = [...d.providers.spec].filter((x) => !gone.has(x)).sort();
     const extra = got.filter((x) => !spec.includes(x));
     const missing = spec.filter((x) => !got.includes(x));
     const noWhy = missing.filter((x) => (d.providers.why ?? {})[x] === undefined);
