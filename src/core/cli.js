@@ -1709,6 +1709,8 @@ function mbOf(bytes) {
  */
 /* 借来语言（`.go`/`.nim`/…）译出来的核心方言：只在内存里传一手，`--emit-sx` 才落盘。 */
 let SRC_SX = undefined;
+/* 上面那一格是从**哪份源码**来的（`path` 随后被换成虚拟的 `.sx`，诊断要指着原来那份）。 */
+let SRC_SX_FROM = undefined;
 
 function cacheCmd(args, argv) {
   const sub = args[0] === undefined ? 'ls' : args[0];
@@ -4651,6 +4653,7 @@ function main(argv) {
    * 防不了这一种（顺着来的脏），所以在入口处清。
    */
   SRC_SX = undefined;
+  SRC_SX_FROM = undefined;
   /**
    * **`--client` 摆在最前面**（`docs/design/omni-serve-studio.md` §3）：
    * `omni --client run x.go` 把**同一条命令**发给 `omni serve` 去跑，回来的
@@ -4987,6 +4990,9 @@ function main(argv) {
     }
     if (VERBOSE) stderr(`omni: ${path} -> 核心方言（内存里，${sx.length} 字节）\n`);
     SRC_SX = sx;
+    /* **原来那份源码的路径留一格**：`path` 与 `files[0]` 下一行就被换成那个虚拟的
+       `.sx` 了，而诊断里要指的是用户敲的那份（`emit ast` 那一格照它印命令）。 */
+    SRC_SX_FROM = path;
     path = sxPath;
     files[0] = sxPath;
   }
@@ -5835,6 +5841,17 @@ function main(argv) {
       return rest.includes('--mir') ? runInterpMir(mod) : runInterp(mod);
     }
     case 'ast': {
+      /* **借来的那十门没有 AST 这一层**（它们走图：源码 -> 语法树 -> 图 -> 核心方言），
+       * 而 `path` 此刻已经是那格虚拟的 `.sx`，`compile` 对它回的 `ast` 是 null。
+       * 从前这儿就印一行 `null` —— 那是"看着像跑过了、其实什么也没说"的最坏一种。
+       * 照实说这一门的下一站是哪儿，并给出能直接敲的那条命令。 */
+      if (SRC_SX !== undefined) {
+        const from = SRC_SX_FROM ?? files[0];
+        stderr('omni: 这一门走图那一层（源码 -> 语法树 -> 图 -> 核心方言），没有 AST 这一格。\n'
+          + `omni: 要看语法树：omni glr <语法文件> ${from}\n`
+          + `omni: 要看核心方言：omni emit sx ${from}\n`);
+        return 1;
+      }
       const { ast } = compile(path, rest);
       stdout(JSON.stringify(ast, replacer, 2) + '\n');
       return 0;
@@ -5843,6 +5860,12 @@ function main(argv) {
     // 而那份 .sx 是虚拟的（从不落盘），所以没有这一条就只能拿着行号猜。印出来的
     // 内容与 lowerCoreSexpr 拿到的**逐字节相同** —— 行号可以直接对。
     case 'sx': {
+      /* **借来的那十门先看 `SRC_SX`**：它们走图那一层（`coreSxText`），核心方言那份文本
+       * 上面那一片已经算出来搁在内存里了，而 `path` 已经被换成一格**不存在**的
+       * `src-sx/<名>.sx`（只当名字用，见那一片的头注）。
+       * 从前这儿直接落到 `asy.toSx`，于是 `emit sx x.go` 拿着那个虚路径去 `readText`，
+       * 报的是一串 node 的 ENOENT 栈 —— 而这条路上核心方言明明已经在手里了。 */
+      if (SRC_SX !== undefined) { stdout(SRC_SX); return 0; }
       stdout(path.endsWith('.jnc') ? cap('jnc.toSx')(path, incDirs(rest), false) : cap('asy.toSx')(path));
       return 0;
     }
