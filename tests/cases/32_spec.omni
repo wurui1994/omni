@@ -1,0 +1,62 @@
+// 特殊函数（`std/spec.omni`）—— 控制台那套科学计算的 L3d（设计文档阶段 8）
+//
+// **每一格都有可查的参考值**（手算或标准表），所以这一份是逐个比：
+//   Γ(1/2) = √π = 1.7724539 · Γ(5) = 4! = 24 · Γ(-1/2) = -2√π = -3.5449077
+//   lnΓ(100) = 359.1342054 · B(2,3) = 1/12 · erf(1) = 0.8427008
+//   erfc(3) = 2.209050e-5 · P(1,1) = 1-1/e = 0.6321206 · Q(3,2) = 5/e² = 0.6766764
+// 印的是宿主的 6 位有效数字 —— 那一档上四条腿逐字节相同（差分那一轴管着）。
+import "std/spec.omni";
+
+// ── Γ 与它的一族 ────────────────────────────────────────────────────────────
+print(string(sfGamma(0.5)));      // √π
+print(string(sfGamma(1.0)));      // 1
+print(string(sfGamma(5.0)));      // 4! = 24
+print(string(sfGamma(1.5)));      // √π/2 = 0.886227
+print(string(sfGamma(-0.5)));     // -2√π（反射公式那一支）
+print(string(sfLngamma(1.0)));    // 0
+print(string(sfLngamma(100.0)));  // 359.134
+print(string(sfFact(0)));
+print(string(sfFact(10)));        // 3628800
+print(string(sfBeta(2.0, 3.0)));  // 1/12
+print(string(sfBeta(0.5, 0.5)));  // π
+
+// Γ(n) = (n-1)! —— 两条路算出来要一样（1..8）
+bool same = true;
+int n = 1;
+while (n <= 8) {
+  if (abs(sfGamma(real(n)) - sfFact(n - 1)) > 0.000000001) { same = false; }
+  n = n + 1;
+}
+print(string(same));
+
+// ── erf / erfc ──────────────────────────────────────────────────────────────
+print(string(sfErf(0.0)));
+print(string(sfErf(0.5)));        // 0.5204999
+print(string(sfErf(1.0)));        // 0.8427008
+print(string(sfErf(2.0)));        // 0.9953223
+print(string(sfErf(-1.0)));       // 奇函数
+print(string(sfErfc(0.5)));       // 0.4795001
+print(string(sfErfc(1.0)));       // 0.1572992
+// **大 x 上 erfc 不能用 1-erf 算**（那儿只剩几位有效数字）——这两格就是那条路的证据
+print(string(sfErfc(3.0)));       // 2.20905e-05
+print(string(sfErfc(5.0)));       // 1.53746e-12
+print(string(sfErfc(-1.0)));      // 2 - erfc(1) = 1.8427
+
+// erf(x) + erfc(x) = 1（小 x 那一档上逐位成立）
+bool one = true;
+int k = 0;
+while (k < 10) {
+  real x = 0.1 * real(k);
+  if (abs(sfErf(x) + sfErfc(x) - 1.0) > 0.0000000000001) { one = false; }
+  k = k + 1;
+}
+print(string(one));
+
+// ── 不完全 gamma ────────────────────────────────────────────────────────────
+print(string(sfGammaP(1.0, 1.0)));   // 1 - 1/e
+print(string(sfGammaP(0.5, 1.0)));   // erf(1)
+print(string(sfGammaQ(3.0, 2.0)));   // 5/e²
+print(string(sfGammaP(3.0, 2.0) + sfGammaQ(3.0, 2.0)));
+// 两条腿的接缝（x < a+1 走级数、否则连分式）：在 a+1 两侧各取一格，要接得上
+print(string(sfGammaP(2.0, 2.9)));
+print(string(sfGammaP(2.0, 3.1)));

@@ -1,0 +1,136 @@
+// Omni 标准库 —— 特殊函数（L3d，`docs/design/omni-console-scicomp.md` 阶段 8）
+//
+// gsl-shell 的手册第一个例子用的就是 `sf.gamma`（所以这一层"可缺"但很显眼）。它那边
+// `sf.lua` 又是模板生成的一排绑定（`templates/sf-defs.lua.in`），算法全在 GSL 里 ——
+// 我们没有 GSL，所以这一层也自己写。
+//
+// **一条主线**：`lngamma`（Lanczos）+ 不完全 gamma 的两个展开（级数 / 连分式），
+// 别的都从这两格推：`gamma` = exp(lngamma) 加反射公式、`beta` 三个 lngamma、
+// `erf` = P(1/2, x²)（这是 Numerical Recipes 那一招 —— 少写一份 erf 的近似式，
+// 也就少一份"精度只到 1e-7"的账）。
+//
+// 名字都带 `sf` 前缀（照它的模块名）。
+
+/**
+ * log Γ(x)，x > 0 —— **Lanczos 近似**（g=7，9 个系数，相对误差 ~1e-15）。
+ *
+ * 为什么不是 Stirling：Stirling 在小 x 上不准，而这一层最常被问的恰恰是 0.5 与 1.5。
+ */
+real sfLngamma(real x) {
+  if (x <= 0.0) { fail("spec: sfLngamma 要正数（负的那一侧走 sfGamma 的反射公式）"); }
+  list<real> c = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 0.0000099843695780195716, 0.00000015056327351493116
+  ];
+  real z = x - 1.0;
+  real a = c[0];
+  real t = z + 7.5;
+  int i = 1;
+  while (i < 9) {
+    a = a + c[i] / (z + real(i));
+    i = i + 1;
+  }
+  // log(√(2π)) + (z+0.5)log t - t + log a
+  return 0.91893853320467274 + (z + 0.5) * log(t) - t + log(a);
+}
+
+/** Γ(x)。负的那一侧走反射公式 Γ(x)Γ(1-x) = π / sin(πx)。 */
+real sfGamma(real x) {
+  real pi = 4.0 * atan(1.0);
+  if (x == floor(x) && x <= 0.0) { fail("spec: sfGamma 在 0 与负整数上是极点"); }
+  if (x < 0.5) {
+    return pi / (sin(pi * x) * sfGamma(1.0 - x));
+  }
+  return exp(sfLngamma(x));
+}
+
+/** n! （返回 real —— 20! 之后 double 就装不下整数了，这一格照实说）。 */
+real sfFact(int n) {
+  if (n < 0) { fail("spec: sfFact 要非负整数"); }
+  real acc = 1.0;
+  int k = 2;
+  while (k <= n) { acc = acc * real(k); k = k + 1; }
+  return acc;
+}
+
+/** B(a, b) = Γ(a)Γ(b)/Γ(a+b)（走 log 再 exp —— 直接乘会溢出）。 */
+real sfBeta(real a, real b) {
+  return exp(sfLngamma(a) + sfLngamma(b) - sfLngamma(a + b));
+}
+
+/** 正规化的下不完全 gamma P(a, x) = γ(a,x)/Γ(a)。 */
+real sfGammaP(real a, real x) {
+  if (x < 0.0 || a <= 0.0) { fail("spec: sfGammaP 要 x >= 0、a > 0"); }
+  if (x == 0.0) { return 0.0; }
+  // 分界照 Numerical Recipes：x < a+1 级数收得快，否则连分式
+  if (x < a + 1.0) { return sfGser(a, x); }
+  return 1.0 - sfGcf(a, x);
+}
+
+/** 正规化的上不完全 gamma Q(a, x) = 1 - P(a, x)。 */
+real sfGammaQ(real a, real x) {
+  if (x < 0.0 || a <= 0.0) { fail("spec: sfGammaQ 要 x >= 0、a > 0"); }
+  if (x == 0.0) { return 1.0; }
+  /* **不许写成 `1 - sfGammaP(a, x)`**：大 x 上 P 已经是 0.999…，
+     而 Q 只有 1e-12 那么大 —— 减完只剩四五位有效数字（量出来的：erfc(5) 印成
+     1.53744e-12，真值 1.53746e-12）。所以两条腿各自直接给自己那一格。 */
+  if (x < a + 1.0) { return 1.0 - sfGser(a, x); }
+  return sfGcf(a, x);
+}
+
+/** erf(x) = P(1/2, x²)（奇函数，负的那一侧取反）。 */
+real sfErf(real x) {
+  if (x < 0.0) { return -sfErf(-x); }
+  return sfGammaP(0.5, x * x);
+}
+
+/**
+ * erfc(x) = 1 - erf(x)。
+ *
+ * 大 x 上**不能**用 `1 - erf(x)` 算：erf 已经是 0.999…，减完只剩几位有效数字。
+ * 所以那一侧直接问 Q(1/2, x²)（连分式那条腿）—— 这正是把 erf 挂在不完全 gamma 上的好处。
+ */
+real sfErfc(real x) {
+  if (x < 0.0) { return 2.0 - sfErfc(-x); }
+  if (x < 1.0) { return 1.0 - sfErf(x); }
+  return sfGammaQ(0.5, x * x);
+}
+
+/** P(a,x) 的级数（`gser`）：收到相对变化小于 3e-16 或 200 项。 */
+private real sfGser(real a, real x) {
+  real ap = a;
+  real sum = 1.0 / a;
+  real del = sum;
+  int n = 0;
+  while (n < 200) {
+    ap = ap + 1.0;
+    del = del * x / ap;
+    sum = sum + del;
+    if (abs(del) < abs(sum) * 0.0000000000000003) { n = 1000; } else { n = n + 1; }
+  }
+  return sum * exp(-x + a * log(x) - sfLngamma(a));
+}
+
+/** Q(a,x) 的连分式（`gcf`，修正的 Lentz 法）。 */
+private real sfGcf(real a, real x) {
+  real tiny = 1.0e-300;
+  real b = x + 1.0 - a;
+  real c = 1.0 / tiny;
+  real d = 1.0 / b;
+  real h = d;
+  int i = 1;
+  while (i <= 300) {
+    real an = -real(i) * (real(i) - a);
+    b = b + 2.0;
+    d = an * d + b;
+    if (abs(d) < tiny) { d = tiny; }
+    c = b + an / c;
+    if (abs(c) < tiny) { c = tiny; }
+    d = 1.0 / d;
+    real del = d * c;
+    h = h * del;
+    if (abs(del - 1.0) < 0.0000000000000003) { i = 1000; } else { i = i + 1; }
+  }
+  return exp(-x + a * log(x) - sfLngamma(a)) * h;
+}

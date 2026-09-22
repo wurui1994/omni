@@ -350,6 +350,10 @@ try {
     const rd = await say('rngNew(1).nextInt()');
     ok('控制台里随机数是可复现的（种子 1 的第一个数 = 16807）', rd.out === '16807\n',
       JSON.stringify(rd));
+    /* 特殊函数（阶段 8）：手册第一个例子就是 gamma。Γ(1/2) = √π。 */
+    await say('import "std/spec.omni";');
+    const gm = await say('sfGamma(0.5)');
+    ok('控制台里 Γ(1/2) = √π（1.77245）', gm.out === '1.77245\n', JSON.stringify(gm));
   }
 
   /* ---- 控制台里出图（`std/plot.omni`，设计文档阶段 4）----
