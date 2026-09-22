@@ -30,7 +30,6 @@ import { goToGraph, goImports } from '../../../ext/go/tograph.js';
 import { GO_RT } from '../../../ext/go/go-rt.js';
 import { vlangToGraph, vlangImports } from '../../../ext/vlang/tograph.js';
 import { nimToGraph, nimImports } from '../../../ext/nim/tograph.js';
-import { cppToGraph } from '../../../ext/cpp/tograph.js';
 /* **迁过来的那几门**（ADR-0044）：`toIR` 是 adapter（CST → 标准 IR），语义降级走
    `src/core/lower/`。有 `toIR` 的语言**没有** `toGraph` —— 图那一层不再有它。 */
 import { awkToIR, AWK_HOOKS } from '../../../ext/awk/adapter.js';
@@ -38,6 +37,7 @@ import { chezToIR } from '../../../ext/chez/adapter/index.js';
 import { sbclToIR } from '../../../ext/sbcl/adapter/index.js';
 import { fbToIR } from '../../../ext/freebasic/adapter/index.js';
 import { mojoToIR } from '../../../ext/mojo/adapter/index.js';
+import { cppToIR } from '../../../ext/cpp/adapter/index.js';
 
 /**
  * 这棵树的根。**从宿主那格 `installDir()` 走上去**（`src/core/host` 往上三层）——
@@ -124,7 +124,7 @@ export const LANGS = new Map([
   ['nim', {
     grammar: 'ext/nim/nim.grammar', toGraph: nimToGraph, imports: nimImports, exts: ['nim'],
   }],
-  ['cpp', { grammar: 'ext/cpp/cpp.grammar', toGraph: cppToGraph, exts: ['cpp', 'cc', 'cxx', 'hpp'] }],
+  ['cpp', { grammar: 'ext/cpp/cpp.grammar', toIR: cppToIR, exts: ['cpp', 'cc', 'cxx', 'hpp'] }],
 ]);
 
 /** 后缀 -> 语言名。**一个后缀只许有一门** —— 撞了当场报，不许悄悄挑一个。 */

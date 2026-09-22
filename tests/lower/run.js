@@ -61,6 +61,9 @@ const MIGRATED = {
      按口径拼成 `if !cond then print + fail`）三样是这门语言带进来的。 */
   mojo: ['assertok', 'basics', 'conv', 'defer', 'dict', 'index', 'intmath', 'loopexit',
     'method', 'record', 'slice', 'values'],
+  /* cpp：九个家族。`defer` 在这门语言里是 `~Say()`（RAII，与 freebasic 同一手）；
+     `printf` 只接"一格转换 + 换行"（见 adapter/expr.js 的 printArgs）。 */
+  cpp: ['basics', 'conv', 'defer', 'dict', 'index', 'intmath', 'loopexit', 'record', 'values'],
 };
 
 /** 敲一条命令，回 `{ code, out, err }`（out 按行切好，末尾空行去掉）。 */

@@ -63,7 +63,7 @@ const BASICS = ['15', '120', '7', 'ok'];
 // ---- 1) 四条腿各跑一门语言（同一份期望输出 —— 那是矩阵里那条判据的命令行版）
 check('lua × interp（默认后端）', ['run', 'ext/lua/examples/basics.lua', '--engine', 'graph'],
   { code: 0, out: BASICS });
-check('cpp × wat', ['run', 'ext/cpp/examples/basics.cpp', '--engine', 'graph', '--backend', 'wat'],
+check('vlang × wat', ['run', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'wat'],
   { code: 0, out: BASICS });
 check('nim × js', ['run', 'ext/nim/examples/basics.nim', '--engine', 'graph', '--backend', 'js'],
   { code: 0, out: BASICS });
@@ -79,8 +79,8 @@ check('go 按后缀', ['run', 'ext/go/examples/intmath.go', '--engine', 'graph']
 /* `--lang` 盖过后缀这条规矩不变，只是找一对**都还在图上**的语言来押它：
    `.mojo` 的文件按 `--lang nim` 读 —— 那份语法读不下去，报的是"语法说不通"。
    （从前这一格是 `.lisp` 当 chez 读，两门都迁走了。） */
-check('--lang 盖过后缀（.cpp 当 nim 读 -> nim 的语法不认它）',
-  ['run', 'ext/cpp/examples/basics.cpp', '--engine', 'graph', '--lang', 'nim'],
+check('--lang 盖过后缀（.v 当 nim 读 -> nim 的语法不认它）',
+  ['run', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--lang', 'nim'],
   { code: 1 });
 check('后缀不认得就报清单', ['run', 'README.md', '--engine', 'graph'],
   { code: 1, says: '这个后缀不认得' });
@@ -156,7 +156,7 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
 {
   const wat = join(tmpdir(), 'omni-graph-basics.wat');
   check('build wat 落一份 .wat',
-    ['build', 'ext/cpp/examples/basics.cpp', '--engine', 'graph', '--backend', 'wat', '-o', wat],
+    ['build', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'wat', '-o', wat],
     { code: 0, says: 'built' });
   if (only.length === 0 || only.some((x) => 'build wat 落一份 .wat'.includes(x))) {
     const text = readFileSync(wat, 'utf8');
@@ -208,7 +208,7 @@ check('--engine graph 没给文件', ['run', '--engine', 'graph'], { code: 1, sa
    */
   const wasm = join(tmpdir(), 'omni-graph-basics.wasm');
   check('build -o *.wasm 落一份二进制',
-    ['build', 'ext/cpp/examples/basics.cpp', '--engine', 'graph', '--backend', 'wat', '-o', wasm],
+    ['build', 'ext/vlang/examples/basics.v', '--engine', 'graph', '--backend', 'wat', '-o', wasm],
     { code: 0, says: 'wat -> wasm 二进制' });
   if (only.length === 0 || only.some((x) => 'build -o *.wasm 落一份二进制'.includes(x))) {
     try {
