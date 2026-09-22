@@ -388,8 +388,12 @@ function newEngine(name) {
 
 /**
  * 会话驱动。与语言无关：它只知道"编译一批、装进运行期、跑这一批的入口"。
+ *
+ * **导出它**：控制台模式（`/api/repl`，`docs/design/omni-console-scicomp.md` 阶段 1）
+ * 就是在服务进程里攥着几格这个、一行一行喂 —— 页面上那个 REPL 与终端上敲的是**同一台
+ * 机器**，不是第二份实现。终端那一路（`startRepl`）只是它外面的一圈读行循环。
  */
-class Session {
+export class Session {
   constructor(langName, mode, deps, engine) {
     this.langName = langName;
     this.mode = mode;
@@ -540,6 +544,74 @@ function command(s, line) {
       stderr(`omni: unknown command '${cmd}' (try :help)\n`);
       return false;
   }
+}
+
+/* ---------------------------------------------------------------- 变量那一栏
+ *
+ * matlab 的 Workspace / spyder 的 Variable Explorer 那一格。**gsl-shell 没有这东西**
+ * （查过：全树 grep `whos|workspace|variable explorer` 零命中，FOX GUI 只有控制台、
+ * 绘图窗口、外壳三种），所以这一层是我们自己加的 —— 但**格式化的规矩照它**
+ * （`iter.lua` 的 `tos`，见 `docs/design/omni-console-scicomp.md` §2）：
+ *
+ *   * 深一层就缩（`max_depth`），再深只印一格摘要 —— 变量栏是"看一眼"，不是转储；
+ *   * 串在最外层原样、里层加引号；
+ *   * 函数印 `<function>`，不印它的身体。
+ */
+
+/** 一格值印成一行（`depth` 0 = 最外层）。**纯函数** —— 判据在 tests/serve 里直接调它。 */
+export function formatValue(v, depth = 0) {
+  if (v === undefined) return 'nil';
+  if (v === null) return 'null';
+  const t = typeof v;
+  if (t === 'number' || t === 'boolean' || t === 'bigint') return String(v);
+  if (t === 'string') return depth === 0 ? v : JSON.stringify(v);
+  if (t === 'function') return '<function>';
+  if (Array.isArray(v)) {
+    if (depth >= 2) return `<数组 ${v.length}>`;
+    const head = v.slice(0, 8).map((x) => formatValue(x, depth + 1));
+    return `[${head.join(', ')}${v.length > 8 ? `, …${v.length - 8} 格` : ''}]`;
+  }
+  if (v instanceof Map) return `<字典 ${v.size}>`;
+  if (t === 'object') {
+    if (depth >= 2) return '<记录>';
+    const ks = Object.keys(v);
+    const head = ks.slice(0, 6).map((k) => `${k}= ${formatValue(v[k], depth + 1)}`);
+    return `{${head.join(', ')}${ks.length > 6 ? `, …${ks.length - 6} 格` : ''}}`;
+  }
+  return String(v);
+}
+
+/** 一格值的类型名（变量栏第二列）。 */
+export function typeName(v) {
+  if (v === undefined) return 'nil';
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return 'array';
+  if (v instanceof Map) return 'map';
+  const t = typeof v;
+  if (t === 'bigint') return 'int';
+  if (t === 'number') return Number.isInteger(v) ? 'int' : 'real';
+  if (t === 'object') return 'record';
+  return t;
+}
+
+/**
+ * 这一格会话里**顶层有哪些变量**（名字、类型、印出来的样子），按名字排序。
+ *
+ * 数据源是解释器会话那一格常驻的顶层 `Env`（`interp/eval.js` 的 `InterpSession.env`
+ * —— 那正是"第一批的 `x = 10` 第二批还在"靠的东西）。
+ * **js 引擎那一路回空**：那边的顶层变量住在 `evalJs` 的那个域里，不在我们手上；
+ * 回空而不是瞎猜 —— 变量栏宁可空着，不许印错。
+ */
+export function replVars(s) {
+  const env = s === null || s === undefined ? null : s.rt?.env ?? null;
+  if (env === null || !(env.vars instanceof Map)) return [];
+  const out = [];
+  for (const [name, v] of env.vars) {
+    if (name.startsWith('omni_chunk')) continue;      /* 每批的入口函数，不是人的变量 */
+    out.push({ name, type: typeName(v), value: formatValue(v, 0) });
+  }
+  out.sort((a, b) => (a.name < b.name ? -1 : (a.name > b.name ? 1 : 0)));
+  return out;
 }
 
 /**

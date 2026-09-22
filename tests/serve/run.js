@@ -243,6 +243,42 @@ try {
   const bad = await post('/api/shell', { line: 'rm -rf /' });
   ok('/api/shell 拒绝不认的命令', bad.json.code === 127);
 
+  /* ---- 控制台那一格会话（`/api/repl`，`docs/design/omni-console-scicomp.md` 阶段 1）----
+   *
+   * 钉住的是这一层**唯一**的性质：**状态留着**。第一行的 `x = 10` 第二行还看得见，
+   * 而且那一格答案要与终端上 `omni repl` 逐字相同（`tests/repl/session.in` 的头几行
+   * 就是这几句，期望 100 / abcd / 49）。别的都是附带的。
+   */
+  {
+    const say = async (line, extra) => (await post('/api/repl',
+      { session: 'judge', line, ...(extra ?? {}) })).json;
+    await say('x = 10');
+    const r1 = await say('x * x');
+    ok('/api/repl 状态跨行留着（x=10 之后 x*x 是 100）', r1.out === '100\n',
+      JSON.stringify(r1));
+    await say('s = "ab" + "cd"');
+    const r2 = await say('s');
+    ok('/api/repl 串也留着（abcd）', r2.out === 'abcd\n', JSON.stringify(r2));
+    await say('int sq(int n) { return n * n; }');
+    const r3 = await say('sq(7)');
+    ok('/api/repl 会话里定义的函数下一行就能用（49）', r3.out === '49\n', JSON.stringify(r3));
+    /* **括号没闭合 = 还没写完**：不喂、不报错，页面上接着攒（判据与终端那一路同一格）。 */
+    const r4 = await say('if (x > 5) {');
+    ok('/api/repl 认得出"这一行还没写完"', r4.incomplete === true && r4.err === '',
+      JSON.stringify(r4));
+    /* **变量栏**：名字、类型、印出来的样子。gsl-shell 没有这东西，这一格是我们加的。 */
+    const names = (r3.vars ?? []).map((v) => `${v.name}:${v.type}=${v.value}`).join(' ');
+    ok('/api/repl 报得出变量栏（x:int=10 与 s:string=abcd）',
+      names.includes('x:int=10') && names.includes('s:string=abcd'), names);
+    /* **两格会话互不串味**：另一个 session 里 `x` 是不认识的名字。 */
+    const other = (await post('/api/repl', { session: 'judge-2', line: 'x' })).json;
+    ok('/api/repl 两格会话互不串味', other.err.includes('undefined variable'),
+      JSON.stringify(other));
+    /* `reset` 之后从头开始。 */
+    const re = await say('x', { reset: true });
+    ok('/api/repl reset 把会话忘掉', re.err.includes('undefined variable'), JSON.stringify(re));
+  }
+
   /* ---- 虚拟文件系统：编辑与新建（`PUT /api/file`）----
    *
    * 钉住的是"用户改了有没有效果"那一整条：写得进、读得回、进得了树、**跑的是改过的那一份**。

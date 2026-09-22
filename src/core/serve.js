@@ -246,6 +246,75 @@ async function runRequest(root, body, verb, extra, pool) {
 }
 
 
+/* ------------------------------------------------------------ 控制台的会话
+ *
+ * 控制台模式（`docs/design/omni-console-scicomp.md` 阶段 1）。三个决定，各有理由：
+ *
+ *   1. **会话住在服务进程里，不进热工人池。** 池子里那几格工人是"一趟一格、跑完就还"，
+ *      而 REPL 的全部价值在于**状态留着**（第一行的 `x = 10` 第二行还在）。
+ *      要让工人粘住一格会话就得给池子加一套亲和调度 —— 而 REPL 那一趟本来就在毫秒级，
+ *      没有"要并行"的理由。
+ *   2. **就是 `omni repl` 那台机器**（`repl.js` 的 `Session`），不是第二份实现。
+ *      终端上敲的与这一页上敲的，同一个类、同一套增量与回滚。
+ *   3. **输出靠临时换掉 `process.stdout.write` 收**。`Session.feed` 走宿主的
+ *      `stdout()`/`stderr()`，那两格直接写 fd；`feed` 是**同步**的，所以换走一趟再换回来
+ *      不会跟别的请求串味（工人那边用的也是这一招）。
+ */
+const SESSIONS = new Map();
+let REPL_MOD = null;
+
+/** `repl.js` **迟装**：它把解释器整个拉进来，而 `omni serve` 不该为此慢一截开机。 */
+async function replMod() {
+  if (REPL_MOD === null) REPL_MOD = await import('./repl.js');
+  return REPL_MOD;
+}
+
+/**
+ * 喂一行给某一格会话。
+ *
+ * 进：`{ session, line, lang?, mode?, reset? }`
+ * 出：`{ out, err, ok, incomplete, vars, session, lang }`
+ *
+ * `incomplete` = 这一行还没写完（括号没闭合）——**不喂**，页面上接着攒下一行。
+ * 判据是 `Session.lang.complete()`（与终端那一路同一格），不是在这儿另写一套。
+ */
+async function replRequest(body) {
+  const { Session, replVars } = await replMod();
+  const id = String(body.session ?? 'default');
+  const lang = String(body.lang ?? 'omni');
+  const mode = String(body.mode ?? 'dynamic');
+  if (body.reset === true) SESSIONS.delete(id);
+  let s = SESSIONS.get(id);
+  if (s === undefined || s.langName !== lang) {
+    s = new Session(lang, mode, undefined, 'interp');
+    SESSIONS.set(id, s);
+  }
+  const text = String(body.line ?? '');
+  if (text.trim().length === 0) {
+    return { out: '', err: '', ok: true, incomplete: false, vars: replVars(s), session: id, lang };
+  }
+  if (!s.lang.complete(text)) {
+    return { out: '', err: '', ok: true, incomplete: true, vars: replVars(s), session: id, lang };
+  }
+  let out = '';
+  let err = '';
+  const so = process.stdout.write.bind(process.stdout);
+  const se = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (c) => { out += typeof c === 'string' ? c : String(c); return true; };
+  process.stderr.write = (c) => { err += typeof c === 'string' ? c : String(c); return true; };
+  let ok = false;
+  try {
+    ok = s.feed(text) !== false;
+  } catch (e) {
+    err += `${e.message ?? e}\n`;
+  } finally {
+    process.stdout.write = so;
+    process.stderr.write = se;
+  }
+  return { out, err, ok, incomplete: false, vars: replVars(s), session: id, lang };
+}
+
+
 /**
  * 起服务。回一个 `{ server, close() }` —— `close()` 是优雅停。
  *
@@ -326,6 +395,10 @@ export function startServer(opts) {
         }
         const r = await runOmni(root, argv, body.timeout ?? 30, pool);
         return json(res, 200, r);
+      }
+      if (path === '/api/repl' && req.method === 'POST') {
+        const body = JSON.parse(await readBody(req));
+        return json(res, 200, await replRequest(body));
       }
       /* CORS preflight */
       if (req.method === 'OPTIONS') {
