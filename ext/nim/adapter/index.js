@@ -70,10 +70,19 @@ function whenCond(c) {
     + ' and / or / not 拼起来的那几种');
 }
 
-/** 一棵 nim 的树（`(module …)`）→ 标准 IR 的模块。 */
-export function nimToIR(tree) {
-  if (tag(tree) !== 'module') throw new Error('nim->IR: 这不是 (module …)');
-
+/**
+ * 一棵 nim 的树（`(module …)`）→ 标准 IR 的模块。
+ *
+ * `opts.also` 是**旁边那几份 import 进来的同语言文件**（依赖在前，由 `drive.js` 读好）。
+ * 处理办法只有一条：把它们的顶层形式摆在这一份**前面**，别的一模一样 ——
+ * 于是声明互相看得见，而"被 import 的那份文件的顶层语句先跑"也正好是 nim 的语义。
+ */
+export function nimToIR(tree, opts = {}) {
+  const asModule = (t) => {
+    if (tag(t) !== 'module') throw new Error('nim->IR: 这不是 (module …)');
+    return kids(t);
+  };
+  const forms = [...(opts.also ?? []), tree].flatMap(asModule);
   let tmpN = 0;
   const names = new Map();
   const scopes = [new Map()];
@@ -128,7 +137,7 @@ export function nimToIR(tree) {
   };
 
   /* ---- 第一遍：`type` 段（对象 → 记录、别名 → 类型）-------------------------- */
-  for (const f of kids(tree)) {
+  for (const f of forms) {
     if (tag(f) !== 'type-section') continue;
     for (const d of kids(f)) {
       if (tag(d) !== 'tdef') continue;
@@ -144,7 +153,7 @@ export function nimToIR(tree) {
     }
   }
   /* 字段表要**先全登记**（一个记录的字段可能是另一个记录）。 */
-  for (const f of kids(tree)) {
+  for (const f of forms) {
     if (tag(f) !== 'type-section') continue;
     for (const d of kids(f)) {
       const obj = part(d, 'object');
@@ -164,7 +173,7 @@ export function nimToIR(tree) {
   }
 
   /* ---- 第二遍：proc 的签名（体里会互相调，`fact` 还自己调自己）--------------- */
-  const routines = kids(tree).filter((f) => tag(f) === 'routine');
+  const routines = forms.filter((f) => tag(f) === 'routine');
   for (const r of routines) {
     const s = sigOf(r, C);
     C.fns.set(C.ref(s.name), { params: s.params, ret: s.ret });
@@ -173,10 +182,29 @@ export function nimToIR(tree) {
   for (const r of routines) decls.push(fnDecl(r, C));
 
   /* ---- 顶层语句（`echo …` / `var …` 那些）就是入口 -------------------------- */
-  const top = kids(tree).filter((f) => !['routine', 'type-section'].includes(tag(f)));
+  const top = forms.filter((f) => !['routine', 'type-section'].includes(tag(f)));
   const body = top.flatMap((s) => stmtsOf(s, C));
   if (body.length > 0) decls.push({ kind: 'main', body });
   return { kind: 'module', decls };
+}
+
+/**
+ * **这份文件 import 了哪几格模块**（驱动那一层拿它去旁边找同名的 `.nim`）。
+ * `import util` -> `util`；`import tables` 也回 `tables`，可旁边没有 `tables.nim`，
+ * 于是照旧交给 adapter —— 标准库那一族是这么落的（`drive.js` 里那段话）。
+ */
+export function nimImports(tree) {
+  const out = [];
+  const walk = (x) => {
+    if (tag(x) === 'line') { kids(x).forEach(walk); return; }
+    if (tag(x) !== 'import') return;
+    for (const k of kids(x)) {
+      const n = nameOf(k);
+      if (n !== '') out.push(n);
+    }
+  };
+  kids(tree).forEach(walk);
+  return out;
 }
 
 /** 一格 proc 的签名（`(sig (形参…) 返回 (pragma) (impl …))`）。 */

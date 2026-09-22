@@ -96,6 +96,9 @@ const SUITES = [
      一门语言迁过来之后它在 `tests/graph/` 那张矩阵里的那几格就退出了（`tograph.js` 删掉），
      判据落这儿 —— 判的是同一件事（例子的输出逐行相同），少两层中间表示。 */
   { s: 'lower/run.js' },
+  /* 同一条路上的**多文件**那一轴：`import util` 里的 util 就在旁边（`drive.js` 读、
+     adapter 收 `opts.also`）。这一轴在图那条路上是红的（`unbound name`），这儿是绿的。 */
+  { s: 'lower/modules.js' },
   // 节点图那几条轴：矩阵（语言 × 后端）与**可删除测试**（删一格特性，剩下的照旧跑），
   // 加上命令行那一侧（`omni run --engine graph`）与那三条公理轴：
   //   iface.js  G3 子图替换前后接口逐格对上

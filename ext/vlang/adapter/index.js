@@ -54,8 +54,13 @@ function ctCond(c) {
   throw new Error(`vlang->IR: \`$if\` 的条件是 \`${t}\` 这个形状 —— 只接标志名与 ! && || 拼起来的那几种`);
 }
 
-/** 一棵 V 的树（`(file …)`）→ 标准 IR 的模块。 */
-export function vlangToIR(tree) {
+/**
+ * 一棵 V 的树（`(file …)`）→ 标准 IR 的模块。
+ *
+ * `opts.also` 是**旁边那几份 import 进来的同语言文件**（依赖在前，由 `drive.js` 读好）——
+ * 摆在这一份前面一起处理，于是声明互相看得见（V 里一个目录就是一个模块，名字是平的）。
+ */
+export function vlangToIR(tree, opts = {}) {
   if (tag(tree) !== 'file') throw new Error('vlang->IR: 这不是 (file …)');
 
   let tmpN = 0;
@@ -147,7 +152,7 @@ export function vlangToIR(tree) {
   if (modTok !== undefined) C.mod = String(leaf(kids(modTok)[0]));
 
   /* ---- 第一遍：类型（struct / enum / 别名）。`pub` 与 `[attr]` 是包一层，剥掉。 ---- */
-  const top = kids(tree).flatMap(unwrap);
+  const top = [...(opts.also ?? []), tree].flatMap((t) => kids(t)).flatMap(unwrap);
   for (const d of top) {
     if (tag(d) === 'struct') C.records.set(nameOf(kids(d)[0]).split('.').pop(), { fields: [] });
     if (tag(d) === 'enum') C.enumNames.add(String(leaf(kids(d)[0])));
@@ -226,6 +231,23 @@ export function vlangToIR(tree) {
   }
   if (!C.fns.has('main')) throw new Error('vlang->IR: 这份源码里没有 `fn main`（V 的入口）');
   return { kind: 'module', decls };
+}
+
+/**
+ * **这份文件 import 了哪几格模块**（驱动那一层拿它去旁边找同名的 `.v`）。
+ * 树上是 `(import (path util))`；`import os` 也回 `os`，可旁边没有 `os.v`，
+ * 于是照旧交给 adapter（标准库那一族要"真的编 stdlib"那一层）。
+ */
+export function vlangImports(tree) {
+  const out = [];
+  for (const d of kids(tree)) {
+    if (tag(d) !== 'import') continue;
+    for (const k of kids(d)) {
+      const n = String(leaf(kids(k)[0]) ?? leaf(k) ?? '');
+      if (n !== '') out.push(n);
+    }
+  }
+  return out;
 }
 
 /** `pub` / `[attr]` 是包一层（不产生代码），剥到里头那格声明。 */

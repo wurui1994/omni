@@ -34,8 +34,8 @@ import { sbclToIR } from '../../../ext/sbcl/adapter/index.js';
 import { fbToIR } from '../../../ext/freebasic/adapter/index.js';
 import { mojoToIR } from '../../../ext/mojo/adapter/index.js';
 import { cppToIR } from '../../../ext/cpp/adapter/index.js';
-import { nimToIR } from '../../../ext/nim/adapter/index.js';
-import { vlangToIR } from '../../../ext/vlang/adapter/index.js';
+import { nimToIR, nimImports } from '../../../ext/nim/adapter/index.js';
+import { vlangToIR, vlangImports } from '../../../ext/vlang/adapter/index.js';
 
 /**
  * 这棵树的根。**从宿主那格 `installDir()` 走上去**（`src/core/host` 往上三层）——
@@ -109,13 +109,17 @@ export const LANGS = new Map([
      不给就是老样子（import 那一行由映射自己丢掉 —— 标准库那几格靠映射接）。
      知识按语言分：驱动不认识 go 的 `(import (path "…"))` 与 nim 的 `(import (name …))`。 */
   ['go', { grammar: 'ext/go/go.grammar', toGraph: goToGraph, imports: goImports, exts: ['go'], jsRuntime: GO_RT }],
-  ['vlang', { grammar: 'ext/vlang/vlang.grammar', toIR: vlangToIR, exts: ['v'] }],
+  ['vlang', {
+    grammar: 'ext/vlang/vlang.grammar', toIR: vlangToIR, imports: vlangImports, exts: ['v'],
+  }],
   ['awk', {
     grammar: 'ext/awk/awk.grammar', toIR: awkToIR, hooks: AWK_HOOKS, exts: ['awk'],
   }],
   ['freebasic', { grammar: 'ext/freebasic/freebasic.grammar', toIR: fbToIR, exts: ['bas', 'bi'] }],
   ['mojo', { grammar: 'ext/mojo/mojo.grammar', toIR: mojoToIR, exts: ['mojo'] }],
-  ['nim', { grammar: 'ext/nim/nim.grammar', toIR: nimToIR, exts: ['nim'] }],
+  ['nim', {
+    grammar: 'ext/nim/nim.grammar', toIR: nimToIR, imports: nimImports, exts: ['nim'],
+  }],
   ['cpp', { grammar: 'ext/cpp/cpp.grammar', toIR: cppToIR, exts: ['cpp', 'cc', 'cxx', 'hpp'] }],
 ]);
 
