@@ -300,6 +300,26 @@ try {
     ok('变量栏认得出矩阵那一格', vs.includes('a:record'), vs);
   }
 
+  /* ---- 控制台里出图（`std/plot.omni`，设计文档阶段 4）----
+   *
+   * 出来的是一份 SVG 文本；页面**看输出决定挂哪儿**（以 `<svg` 起头就进绘图栏，
+   * 与 asy 那条"看是不是 `%!PS`"同一条纪律）。所以这一格判的就是那一条：
+   * 真出 SVG、里头真有那条折线。整份 SVG 的逐字节判据在 `tests/cases/27_plot.omni`
+   * （那一份是 js==c 差分 —— 它已经抓到过一个真 bug：非 ASCII 标题被逐字节切开）。
+   */
+  {
+    const say = async (line) => (await post('/api/repl',
+      { session: 'judge-plot', line, mode: 'mixed' })).json;
+    await say('import "std/plot.omni";');
+    await say('list<real> xs = [0.0, 1.0, 2.0, 3.0];');
+    await say('list<real> ys = [0.0, 1.0, 4.0, 9.0];');
+    const r = await say('plotLine("y = x^2", xs, ys).show()');
+    const out = (r.out ?? '').trim();
+    ok('控制台里出得来一张 SVG 图',
+      out.startsWith('<svg') && out.includes('<polyline points=') && out.endsWith('</svg>'),
+      JSON.stringify(out.slice(0, 80)));
+  }
+
   /* ---- 虚拟文件系统：编辑与新建（`PUT /api/file`）----
    *
    * 钉住的是"用户改了有没有效果"那一整条：写得进、读得回、进得了树、**跑的是改过的那一份**。

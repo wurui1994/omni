@@ -1,0 +1,30 @@
+// 绘图（`std/plot.omni`）—— 控制台那套科学计算的"出一张图"那一半
+//
+// 判的是三样，都不用眼睛看：
+//   * 刻度是**好看的数**（1 / 2 / 5 × 10^k）—— 均分会印出 `0.333333` 那种刻度；
+//   * 点全落在画框里（左 52、右 466、上 30、下 266），且 x 单调；
+//   * 整份 SVG 在两条腿上**逐字节相同**（差分那一轴）。
+// 最后那一条最值钱：浮点印法在 js 与 c 上一旦不同，这一份当场红。
+import "std/plot.omni";
+
+list<real> xs = [];
+list<real> ys = [];
+int i = 0;
+while (i <= 10) {
+  xs.push(real(i));
+  ys.push(real(i) * real(i));
+  i = i + 1;
+}
+
+Plot p = plotLine("y = x^2", xs, ys);
+p.xtitle = "x";
+p.ytitle = "y";
+string s = p.svg();
+print(s.length);
+print(s);
+
+// 两条线一张图（颜色各自给）
+Plot q = plotNew("两条");
+q.addline([0.0, 1.0, 2.0], [0.0, 1.0, 4.0], "#0a84ff");
+q.addline([0.0, 1.0, 2.0], [4.0, 1.0, 0.0], "#ff375f");
+print(q.svg().length);

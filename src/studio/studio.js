@@ -347,8 +347,26 @@ function conEcho(line, cont) {
   box.scrollTop = box.scrollHeight;
 }
 
-function conVars(vars) {
-  const box = $('#con-vars');
+/**
+ * 一趟的输出该挂哪儿。
+ *
+ * **看输出，不猜**：以 `<svg` 起头的就是一张图（`std/plot.omni` 的 `show`），挂进绘图栏；
+ * 别的原样进日志。与 asy 那条"看 stdout 是不是 `%!PS`"同一条纪律 ——
+ * 界面上不该有"这一句会不会出图"的猜测，跑完看一眼就知道。
+ */
+function conShow(out) {
+  if (out === '') return;
+  const t = out.trim();
+  if (t.startsWith('<svg')) {
+    const box = $('#con-plot');
+    box.innerHTML = t;
+    conLog('— 出了一张图（右下） —', 'note');
+    return;
+  }
+  conLog(out, 'out');
+}
+
+function conVars(vars) {  const box = $('#con-vars');
   const n = $('#con-nvars');
   if (box === null) return;
   if (n !== null) n.textContent = vars.length === 0 ? '' : `${vars.length} 格`;
@@ -384,7 +402,7 @@ async function conSend(line) {
     }
     CON.buf = '';
     $('#con-ps1').textContent = '>';
-    conLog(r.out ?? '', 'out');
+    conShow(r.out ?? '');
     conLog(r.err ?? '', 'err');
     conVars(r.vars ?? []);
   } catch (e) {

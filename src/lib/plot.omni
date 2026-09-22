@@ -1,0 +1,221 @@
+// Omni 标准库 —— 绘图（控制台模式那套科学计算的第四层，设计文档阶段 4）
+//
+// **只做"出一张图"那一半，不做窗口。** gsl-shell 那边这一层是 C++ 的 AGG 光栅器 +
+// 一窗口一线程（`agg-plot/canvas-window.cpp:59-83` 的 `pthread_create`，两把锁），
+// 而它自己也留了不经窗口的口子：`plot:save_svg`（`lua-plot.cpp:99-116`）。
+// 我们要的正是那一半 —— 页面里"绘图"是一张图，不是一个窗口，那套线程与锁一格都不用。
+//
+// 出来的是**一份 SVG 文本**：控制台看见 `<svg` 开头就把它挂进绘图栏
+// （与 asy 那条"看 stdout 是不是 `%!PS`"同一条纪律 —— 看输出，不猜）。
+//
+// 照 gsl-shell 的名字来（`p:addline` / `p:title` / `p:save_svg`），可**不照它的对象协议**：
+// 它那边 `addline` 收的是 `graph.path` 造出来的路径对象，我们这一层就收两串数 ——
+// 少一个概念，而画出来的是同一件事。
+//
+// 坐标轴的刻度用"好看的数"（1 / 2 / 5 × 10^k）。为什么不直接均分：均分会印出
+// `0.333333` 这种刻度，人读不了。这一段里**一个 log / pow 都没有** —— 这门语言还没有
+// 数学库，所以按十进位一档一档乘除（`plotNiceStep`）。
+
+private class Series {
+  list<real> xs;
+  list<real> ys;
+  string color;
+}
+
+class Plot {
+  string title;
+  string xtitle;
+  string ytitle;
+  int width;
+  int height;
+  list<Series> lines;
+
+  /** 加一条折线。`color` 是 SVG 认的颜色串（`#0a84ff` / `red` / …）。 */
+  void addline(list<real> xs, list<real> ys, string color) {
+    if (xs.length != ys.length) { fail("plot: addline 的两串长度不同"); }
+    if (xs.length < 2) { fail("plot: addline 至少要两个点"); }
+    Series s = new Series();
+    s.xs = xs;
+    s.ys = ys;
+    s.color = color;
+    lines.push(s);
+  }
+
+  /** 这一张图的 SVG 文本。 */
+  string svg() {
+    if (lines.length == 0) { fail("plot: 一条线都没有"); }
+    real x0 = lines[0].xs[0];
+    real x1 = x0;
+    real y0 = lines[0].ys[0];
+    real y1 = y0;
+    for (Series s in lines) {
+      for (real v in s.xs) {
+        if (v < x0) { x0 = v; }
+        if (v > x1) { x1 = v; }
+      }
+      for (real v in s.ys) {
+        if (v < y0) { y0 = v; }
+        if (v > y1) { y1 = v; }
+      }
+    }
+    if (x1 - x0 <= 0.0) { x1 = x0 + 1.0; }
+    if (y1 - y0 <= 0.0) { y1 = y0 + 1.0; }
+    // 上下各留一成，好让顶到边的那条线看得见
+    real pad = (y1 - y0) * 0.1;
+    y0 = y0 - pad;
+    y1 = y1 + pad;
+
+    int L = 52;                 // 左边留给 y 刻度
+    int R = 14;
+    int T = 30;
+    int B = 34;                 // 下边留给 x 刻度
+    real iw = real(width - L - R);
+    real ih = real(height - T - B);
+
+    string out = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 "
+      + string(width) + " " + string(height) + "\" width=\"" + string(width) + "\">";
+    out = out + "<rect width=\"" + string(width) + "\" height=\"" + string(height)
+      + "\" fill=\"#ffffff\"/>";
+    // 画框
+    out = out + "<rect x=\"" + string(L) + "\" y=\"" + string(T) + "\" width=\""
+      + string(int(iw)) + "\" height=\"" + string(int(ih))
+      + "\" fill=\"none\" stroke=\"#c8c8cd\"/>";
+
+    // 刻度（x 与 y 各 5 档上下）
+    real xs = plotNiceStep(x0, x1);
+    real ys = plotNiceStep(y0, y1);
+    real t = plotCeilTo(x0, xs);
+    while (t <= x1) {
+      real px = real(L) + (t - x0) / (x1 - x0) * iw;
+      out = out + "<line x1=\"" + string(px) + "\" y1=\"" + string(T + int(ih))
+        + "\" x2=\"" + string(px) + "\" y2=\"" + string(T + int(ih) + 4)
+        + "\" stroke=\"#8e8e93\"/>";
+      out = out + "<text x=\"" + string(px) + "\" y=\"" + string(T + int(ih) + 17)
+        + "\" font-family=\"monospace\" font-size=\"10\" fill=\"#6e6e73\""
+        + " text-anchor=\"middle\">" + string(t) + "</text>";
+      t = t + xs;
+    }
+    t = plotCeilTo(y0, ys);
+    while (t <= y1) {
+      real py = real(T) + ih - (t - y0) / (y1 - y0) * ih;
+      out = out + "<line x1=\"" + string(L - 4) + "\" y1=\"" + string(py)
+        + "\" x2=\"" + string(L) + "\" y2=\"" + string(py) + "\" stroke=\"#8e8e93\"/>";
+      out = out + "<text x=\"" + string(L - 7) + "\" y=\"" + string(py + 3.0)
+        + "\" font-family=\"monospace\" font-size=\"10\" fill=\"#6e6e73\""
+        + " text-anchor=\"end\">" + string(t) + "</text>";
+      t = t + ys;
+    }
+
+    // 线
+    for (Series s in lines) {
+      string pts = "";
+      int i = 0;
+      while (i < s.xs.length) {
+        real px = real(L) + (s.xs[i] - x0) / (x1 - x0) * iw;
+        real py = real(T) + ih - (s.ys[i] - y0) / (y1 - y0) * ih;
+        if (i > 0) { pts = pts + " "; }
+        pts = pts + string(px) + "," + string(py);
+        i = i + 1;
+      }
+      out = out + "<polyline points=\"" + pts + "\" fill=\"none\" stroke=\""
+        + s.color + "\" stroke-width=\"1.6\"/>";
+    }
+
+    // 标题与轴名
+    if (title != "") {
+      out = out + "<text x=\"" + string(width / 2) + "\" y=\"19\""
+        + " font-family=\"sans-serif\" font-size=\"13\" fill=\"#1c1c1e\""
+        + " text-anchor=\"middle\">" + plotEsc(title) + "</text>";
+    }
+    if (xtitle != "") {
+      out = out + "<text x=\"" + string(width / 2) + "\" y=\"" + string(height - 3)
+        + "\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#6e6e73\""
+        + " text-anchor=\"middle\">" + plotEsc(xtitle) + "</text>";
+    }
+    if (ytitle != "") {
+      out = out + "<text x=\"11\" y=\"" + string(T + int(ih) / 2)
+        + "\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#6e6e73\""
+        + " text-anchor=\"middle\" transform=\"rotate(-90 11 "
+        + string(T + int(ih) / 2) + ")\">" + plotEsc(ytitle) + "</text>";
+    }
+    return out + "</svg>";
+  }
+
+  /** 印出来 —— 控制台看见 `<svg` 就把它挂进绘图栏。 */
+  void show() {
+    print(svg());
+  }
+}
+
+/** 一张空图（`480x300`，够看又不至于把那一栏挤满）。 */
+Plot plotNew(string title) {
+  Plot p = new Plot();
+  p.title = title;
+  p.xtitle = "";
+  p.ytitle = "";
+  p.width = 480;
+  p.height = 300;
+  return p;
+}
+
+/** `y = f(x)` 那一族的快捷法：给一串 x 与一串 y，回一张图。 */
+Plot plotLine(string title, list<real> xs, list<real> ys) {
+  Plot p = plotNew(title);
+  p.addline(xs, ys, "#0a84ff");
+  return p;
+}
+
+/**
+ * "好看的刻度间隔"：1 / 2 / 5 乘以十的某次幂，取**不超过 6 档**的那一个。
+ *
+ * 一个 log 都不用：从 1 出发，比目标大就除以 10、小就乘以 10，到同一数量级了再在
+ * 1 / 2 / 5 里挑。这门语言现在还没有数学库，而这一格本来也只要整十进位。
+ */
+private real plotNiceStep(real lo, real hi) {
+  real span = hi - lo;
+  if (span <= 0.0) { return 1.0; }
+  real want = span / 5.0;
+  real dec = 1.0;
+  while (dec > want) { dec = dec / 10.0; }
+  while (dec * 10.0 <= want) { dec = dec * 10.0; }
+  if (dec * 2.0 >= want) { return dec * 2.0; }
+  if (dec * 5.0 >= want) { return dec * 5.0; }
+  return dec * 10.0;
+}
+
+/** 大于等于 `v` 的第一个 `step` 的整数倍。 */
+private real plotCeilTo(real v, real step) {
+  real k = real(int(v / step));
+  real r = k * step;
+  while (r < v) { r = r + step; }
+  return r;
+}
+
+/**
+ * 标题里的 `<` `>` `&` 换成实体。
+ *
+ * **按"整段"拷，不一个字一个字拷**（踩过，差分那一轴当场抓到）：从前这儿是
+ * `out = out + s.substr(i, 1)` 一格一格搬，而一个中文字在两条腿上的"一格"不是同一件事
+ * （C 那侧的串是字节，JS 那侧是 JS 串），于是 `plotNew("两条")` 在 js 腿上印成一串问号 ——
+ * `js==c` 那一轴报的是"长度 2211 vs 2199"。
+ * 要转义的那三个字**都是 ASCII**，所以切口只落在 ASCII 上、多字节序列永远整段搬走，
+ * 这么写两条腿都对（也快）。`json.omni` 头上那条"非 ASCII 按字节切"的账，这一格躲开了。
+ */
+private string plotEsc(string s) {
+  string out = "";
+  int run = 0;                    // 这一段里没有要转义的字，它从 `run` 起
+  int i = 0;
+  while (i < s.length) {
+    int c = s.byteAt(i);
+    if (c == 60 || c == 62 || c == 38) {
+      if (i > run) { out = out + s.substr(run, i - run); }
+      if (c == 60) { out = out + "&lt;"; }
+      else if (c == 62) { out = out + "&gt;"; }
+      else { out = out + "&amp;"; }
+      run = i + 1;
+    }
+    i = i + 1;
+  }
+  if (i > run) { out = out + s.substr(run, i - run); }
+  return out;
+}
