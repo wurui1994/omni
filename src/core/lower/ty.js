@@ -63,6 +63,8 @@ export function zeroOf(type, hooks = {}) {
     /* 具名的记录：**引用语义造 `cnew`、值语义造 `new`**。
        `if` 当表达式用而两支交的是一格记录时要它（`values.lisp` 量出来的）。 */
     case 'named': return t.ref === true ? sx.cnew(t.name) : sx.newVal(t.name);
+    /* 函数值那一格：零值是一格空的函数值（go 的 `var f func()` / 接口里那几格方法闭包）。 */
+    case 'fn-type': return sx.nullFn(typeToSx(t, hooks));
     default:
       throw new Error(`lower/ty.js: ${typeToSx(t, hooks)} 这一格还没有零值 —— `
         + '要么在这张表上加一格，要么由 hooks.zeroOf 答');

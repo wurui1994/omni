@@ -16,7 +16,7 @@ import { lexText } from '../glr/lex.js';
 import { glrParse } from '../glr/driver.js';
 import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
 import {
-  readText, stderr, exists,
+  readText, stderr, exists, readDir,
 } from '../host/native.js';
 import { pickLang, treeRoot } from '../graph/langs.js';
 import { lower } from './lower.js';
@@ -46,12 +46,11 @@ export function sxTextOf(path, argv = []) {
   if (!hasAdapter(lang)) {
     throw new OmniError(`${lang.name} 还没有 adapter —— 这条路（ADR-0044）要登记处那一格 toIR`);
   }
-  /* **跨包那几个开关还没接到这条路上**（`--pkgs` 是"好几个包各自一格模块、按拓扑序拼"，
-     比"旁边那几份"多一层）：明说，不假装。 */
-  for (const flag of ['--pkg', '--pkgs', '--pkgs-root']) {
+  /* **`--pkgs-root` 还没接**（那是"扫主包的 import 自己找依赖"，go 编译器自举那一轴要它）。 */
+  for (const flag of ['--pkg', '--pkgs-root']) {
     if (argv.includes(flag)) {
       throw new OmniError(`${flag} 还没接到公共降级器这条路上（${lang.name}）——`
-        + ' 那一格是"好几个包一起编"，比"同目录旁边那几份"多一层（各自一格模块 + 拓扑序）');
+        + ' 那一格是"自己去找依赖"，比 `--pkgs`（名单写在命令行上）多一层');
     }
   }
   const { tb, g } = loadGrammarTable(`${treeRoot()}/${lang.grammar}`);
@@ -67,6 +66,28 @@ export function sxTextOf(path, argv = []) {
 
   const also = [];
   const seen = new Set([path]);
+  /**
+   * **`--pkgs DIR,DIR,…`**：名单上每个目录里的源文件都编进来，**次序就是名单的次序**
+   * （判据里写的那一行就是拓扑序：`strconv,strings` = strconv 在前）。
+   * 名字是**平的**（所有包摊进一个名字空间）—— 那是这一层与图那条路同一条口径，
+   * 也是 `reference_go_stdlib_shims` 那笔账里"类型名会撞"的由来。
+   */
+  const pkgsRaw = cliArg(argv, '--pkgs');
+  for (const dir of (pkgsRaw === null ? [] : pkgsRaw.split(',').map((s) => s.trim()).filter(Boolean))) {
+    let names = [];
+    try { names = readDir(dir); } catch { throw new OmniError(`--pkgs 读不了 ${dir}`); }
+    for (const n of names.sort()) {
+      if (!lang.exts.some((e) => n.endsWith(`.${e}`))) continue;
+      if (n.endsWith('_test.go')) continue;
+      const p = `${dir}/${n}`;
+      if (seen.has(p)) continue;
+      seen.add(p);
+      const sub = treeOf(p);
+      if (sub === null) { stderr(diags.format()); return null; }
+      also.push(sub);
+    }
+  }
+
   const load = (p, t) => {
     if (lang.imports === undefined) return true;
     for (const spec of lang.imports(t)) {

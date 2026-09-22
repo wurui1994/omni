@@ -55,6 +55,19 @@ export function lowerStmt(stmt, ctx) {
  * 这儿把它们摆在那条语句**前面**。槽是按语句开的，所以嵌套的块各自一格，互不串味。
  */
 export function lowerStmts(stmts, ctx) {
+  const lines = stmtLines(stmts, ctx);
+  return lines.length === 0 ? '(do)' : `(do${lines.map((l) => `\n  ${indent(l)}`).join('')})`;
+}
+
+/**
+ * 一组语句 → 一串文本行，**每条语句开一格语句槽**（`ctx.sink`）。
+ *
+ * 单开这一格的理由是量出来的一条硬错：`lowerFor` 从前自己 `body.map(lowerStmt)`，
+ * 于是体里那些"表达式位置上要先跑几句"的东西（`block-expr` / `if-expr`）把语句 emit 到了
+ * **循环外头那一格槽**里 —— 症状是 `.sx` 那侧报"未声明的变量 'i'"（go 的 `strings` 桩里
+ * `s[i:i+1]` 量出来的）。凡是"摆一串语句"的地方都要走这一格。
+ */
+export function stmtLines(stmts, ctx) {
   const lines = [];
   for (const s of stmts) {
     const outer = ctx.sink;
@@ -69,7 +82,7 @@ export function lowerStmts(stmts, ctx) {
     for (const p of pre) lines.push(p);
     if (text !== '') lines.push(text);
   }
-  return lines.length === 0 ? '(do)' : `(do${lines.map((l) => `\n  ${indent(l)}`).join('')})`;
+  return lines;
 }
 
 /** 一段（可能多行）文本里除第一行之外的每一行也缩进 —— 印出来的 `.sx` 才对得上括号。 */
@@ -103,8 +116,9 @@ function lowerFor(s, ctx) {
      办法：降级之前先把体里**属于这一层**的 `continue` 改写成"步进一格，再 continue"
      （嵌套循环里的 continue 归它自己那一层，不碰）。 */
   const body = s.post ? s.body.map((st) => withPostBeforeContinue(st, s.post)) : s.body;
-  const bodyParts = body.map((st) => lowerStmt(st, ctx));
-  if (s.post) bodyParts.push(lowerStmt(s.post, ctx));
+  /* **每条语句一格语句槽**（`stmtLines`）—— 见那一段话：自己 map `lowerStmt` 会把体里
+     那些"先跑几句"的东西 emit 到循环外头去。步进那一句摆在最后（它也要一格槽）。 */
+  const bodyParts = stmtLines(s.post ? [...body, s.post] : body, ctx);
   const bodyText = bodyParts.length === 0 ? '(do)' : `(do${bodyParts.map((l) => `\n  ${indent(l)}`).join('')})`;
   parts.push(`(while ${c} ${bodyText})`);
   if (!s.init) return parts.join('\n');

@@ -63,6 +63,12 @@ export function lower(module, hooks = {}) {
   const lines = [];
   lines.push('(module');
 
+  /* **借外头那份 C 的那两句先发**（`(lib …)` / `(cabi …)`）：方言那一侧要它们在用之前。 */
+  for (const decl of module.decls) {
+    if (decl.kind === 'lib') lines.push(`  ${sx.lib(decl.name)}`);
+    if (decl.kind === 'cabi') lines.push(`  ${sx.cabi(decl.sym, decl.ret, decl.params ?? [])}`);
+  }
+
   // 第一遍：收集类型和函数签名
   for (const decl of module.decls) {
     if (decl.kind === 'struct' || decl.kind === 'class') {
@@ -83,6 +89,10 @@ export function lower(module, hooks = {}) {
     if (decl.kind === 'fn') {
       typeEnv.registerFunc(decl.name, { params: decl.params, ret: decl.ret });
     }
+    /* 闭包（`(cfn …)`）也登记一格签名 —— `(mkclo 名 …)` 要按名字找它。 */
+    if (decl.kind === 'closure') {
+      typeEnv.registerFunc(decl.name, { params: decl.params, ret: decl.ret });
+    }
     if (decl.kind === 'global') {
       scope.declare(decl.name, { type: decl.type, global: true });
     }
@@ -92,6 +102,9 @@ export function lower(module, hooks = {}) {
   for (const decl of module.decls) {
     if (decl.kind === 'fn') {
       lines.push(lowerFn(decl, ctx));
+    }
+    if (decl.kind === 'closure') {
+      lines.push(lowerClosure(decl, ctx));
     }
     if (decl.kind === 'global') {
       /* 模块级变量。**初值可以没有**（`(global xs (arr int))`）—— 那时初始化落在
@@ -137,6 +150,26 @@ function lowerFn(decl, ctx) {
 
   const paramStr = params.length > 0 ? ` ${params.join(' ')}` : '';
   return `  (fn ${decl.name} (${paramStr.trim()}) ${ret} ${body})`;
+}
+
+/**
+ * 降级一格闭包（`(cfn 名 ((c T)…) ((p T)…) R 语句…)`）。
+ * 捕获**按值抓**，体里读它写 `(cap c)`（见 `lower-expr.js` 的 `capture` 那一格）。
+ */
+function lowerClosure(decl, ctx) {
+  ctx.scope.push();
+  const caps = (decl.caps ?? []).map((c) => {
+    ctx.scope.declare(c.name, { type: c.type, capture: true });
+    return `(${c.name} ${typeToSx(c.type, ctx.hooks)})`;
+  });
+  const params = (decl.params ?? []).map((p) => {
+    ctx.scope.declare(p.name, { type: p.type });
+    return `(${p.name} ${typeToSx(p.type, ctx.hooks)})`;
+  });
+  const ret = typeToSx(decl.ret, ctx.hooks);
+  const body = decl.body ? lowerStmts(decl.body, ctx) : '(do)';
+  ctx.scope.pop();
+  return `  (cfn ${decl.name} (${caps.join(' ')}) (${params.join(' ')}) ${ret} ${body})`;
 }
 
 /**

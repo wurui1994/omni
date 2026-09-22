@@ -17,7 +17,8 @@ export const REAL = { kind: 'real' };
 export const STR = { kind: 'string' };
 export const BOOL = { kind: 'bool' };
 export const arrOf = (elem) => ({ kind: 'arr', elem });
-export const dictOf = (value) => ({ kind: 'map', key: STR, value });
+/** 一格字典。**键的类型可以给**（go 的 `map[int]T` 要它；不给就是串键 —— awk / lua 那一族）。 */
+export const dictOf = (value, key = STR) => ({ kind: 'map', key, value });
 /** 一格具名的类型。`ref` 为真 = 引用语义（方言的 `(class …)`），否则值语义（`(struct …)`）。 */
 export const named = (name, ref = false) => ({ kind: 'named', name, ref });
 
@@ -44,7 +45,11 @@ export function typeOf(e, ctx) {
     case 'bool': return BOOL;
     case 'name': return ctx.env.get(e.name) ?? INT;
     case 'binop': {
-      if (['<', '>', '<=', '>=', '==', '!=', '&&', '||'].includes(e.op)) return BOOL;
+      /* **无符号的那四个比较**（`u<` / `u>` / `u<=` / `u>=`）交的也是 bool —— go 的 uint64
+         走的是它们（`ext/go/adapter/expr.js` 的 `UOPS`）。漏掉这四格的症状是
+         "`!=` 两边要同型：左是 bool，右是 int"（条件那一层以为它交的是整数）。 */
+      if (['<', '>', '<=', '>=', '==', '!=', '&&', '||',
+        'u<', 'u>', 'u<=', 'u>='].includes(e.op)) return BOOL;
       const l = typeOf(e.left, ctx);
       return l.kind === 'real' ? REAL : (l.kind === 'string' ? STR : typeOf(e.right, ctx));
     }
@@ -55,6 +60,14 @@ export function typeOf(e, ctx) {
     }
     case 'if-expr': return e.type ?? typeOf(e.then, ctx);
     case 'block-expr': return typeOf(e.value, ctx);
+    /* 下标那一格（数组的元素 / 字典的值）—— **赋值的左边**要靠它算目标类型。 */
+    case 'index': {
+      const t = typeOf(e.obj, ctx);
+      if (t.kind === 'arr') return t.elem;
+      return t.kind === 'map' ? t.value : INT;
+    }
+    /* 只换标签不换位的那一格（go 的 `uint64(i)`）。 */
+    case 'cast': return e.type ?? typeOf(e.expr, ctx);
     /* 函数值那两格（`(fnref f)` / `(callfn v …)`）—— 见 `lower-expr.js` 里那段话。 */
     case 'fn-ref': {
       const sig = ctx.fns.get(e.name);
@@ -67,6 +80,8 @@ export function typeOf(e, ctx) {
       return t.kind === 'fn-type' ? t.ret : INT;
     }
     case 'builtin': return builtinType(e, ctx);
+    /* `(rmath …)` 交的一律是 real。 */
+    case 'rmath': return REAL;
     case 'field': {
       const t = typeOf(e.obj, ctx);
       const fs = t.kind === 'named' ? ctx.fields.get(t.name) : undefined;
@@ -90,9 +105,12 @@ function builtinType(e, ctx) {
       return t.kind === 'map' ? t.value : INT;
     }
     case 'dhas': return BOOL;
-    case 'alen': case 'dlen': case 'slen': case 'toint': return INT;
-    case 'toreal': return REAL;
-    case 'tostr': return STR;
+    case 'alen': case 'dlen': case 'slen': case 'toint': case 'sfind': return INT;
+    case 'toreal': case 'torealu': return REAL;
+    /* 串那一族交出来的都是串（漏了 `ssub` 的症状是 `(let c int (ssub …))` —— 声明说 int，
+       装进去的是串，方言当场报"未声明的变量"那一串连锁错）。 */
+    case 'tostr': case 'ssub': case 'srep': case 'supper':
+    case 'sfix': case 'ssci': case 'sgen': case 'sgenk': case 'sbase': return STR;
     case 'anew': return e.args[0].type ?? arrOf(INT);
     case 'dnew': return e.args[0].type ?? dictOf(INT);
     case 'cnew': case 'new': return e.args[0].type ?? INT;

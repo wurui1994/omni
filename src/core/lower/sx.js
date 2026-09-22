@@ -28,8 +28,16 @@ export const SX_ARITY = {
   bin: 3, un: 2, sel: 3,
   /* 调用 */
   call: [1, Infinity], callfn: [1, Infinity], ccall: [1, Infinity],
+  /* **闭包那一族**（`src/core/sexpr/lower.js` 里本来就有）：
+     `(cfn 名 ((c T)…) ((p T)…) R 语句…)` 声明一格、`(mkclo 名 v…)` 造一格、`(cap c)` 读捕获。
+     提供者不止一门：go 的接口（方法闭包的记录，ADR-0040）、cpp 的 lambda、jnc 的函数值 ——
+     所以摆在公共这一层，不在某一门的钩子里。 */
+  cfn: [4, Infinity], mkclo: [1, Infinity], cap: 1,
   /* 语句 */
   set: 2, expr: 1, ret: [0, 1], let: 3, if: [2, 3], while: 2, do: [0, Infinity],
+  /* **借外头那份 C 的库**（`(lib "libomnigo")` 说去哪儿找、`(cabi 符号 返回 (形参…))`
+     说它长什么样）。go 的并发与宿主入口、cpp 的外部符号走的是同一格。 */
+  lib: 1, cabi: 3,
   /* `(fail 串)` —— **停下来**（断言不成立那一路：方言里没有 assert，按口径拼）。 */
   fail: 1,
   brk: [0, 1], cont: [0, 1], print: 1, write: 1,
@@ -38,6 +46,10 @@ export const SX_ARITY = {
   sfix: 2, ssci: 2, sgen: 2, sgenk: 2, sbase: 2,
   /* 整数与实数之间（**无符号 64 位要走 `torealu`**：那一格的位当有符号读是负数） */
   toreal: 1, torealu: 1, toint: 1,
+  /* **实数上的数学函数**（`(rmath "sqrt" A [B])`）：名单是 C99 math.h 与 ECMA-262 Math 的
+     交集（正本在 `src/core/sexpr/lower.js` 的 `RMATH`）。go 的 `math.Sqrt`、V 的 `math.sqrt`、
+     lua 的 `math.floor` 都落这一格 —— 所以摆在公共这一层。 */
+  rmath: [2, 3],
   /* 截到 N 位（ADR-0031 §8.2）：`(trunc N E)` = asUintN、`(sext N E)` = asIntN、
      `(zext N E)` 与 trunc 同值（分开写只为让读的人看出意图）。N 是 1..64 的字面量。 */
   trunc: 2, sext: 2, zext: 2,
@@ -76,8 +88,30 @@ export function op(name, ...args) {
 export const int = (v) => op('int', String(v));
 export const real = (v) => op('real', String(v));
 export const bool = (v) => op('bool', v === true || v === 'true' ? 'true' : 'false');
-/** 字符串字面量：**收正文**，这一层负责编码（记号的 `value` 是解好转义的正文）。 */
-export const str = (s) => op('str', JSON.stringify(String(s)));
+/**
+ * 字符串字面量：**收正文**，这一层负责编码（记号的 `value` 是解好转义的正文）。
+ *
+ * **不能用 `JSON.stringify`**：方言那侧认得的转义只有 `\t` `\n` `\r` `\"` `\'` `\\`
+ * 与 `\u{…}` / 两位十六进制（`src/core/sexpr/read.js`），而 JSON 会写出 `\f` / `\u000b`
+ * 那种它不认的形状 —— 症状是"unknown escape '\u'"（go 的 `strings` 桩里 `'\v'` 量出来的）。
+ * 别的控制字符一律写成 `\u{…}`；`\n` `\t` `\r` `\"` `\\` 与 JSON 写出来的一样，
+ * 所以这一刀对已有的 `.sx` 是**逐字节中性**的。
+ */
+export const str = (s) => op('str', quoteSx(String(s)));
+function quoteSx(s) {
+  let out = '"';
+  for (const ch of s) {
+    if (ch === '\\') { out += '\\\\'; continue; }
+    if (ch === '"') { out += '\\"'; continue; }
+    if (ch === '\n') { out += '\\n'; continue; }
+    if (ch === '\t') { out += '\\t'; continue; }
+    if (ch === '\r') { out += '\\r'; continue; }
+    const c = ch.codePointAt(0);
+    if (c < 0x20 || c === 0x7f) { out += `\\u{${c.toString(16)}}`; continue; }
+    out += ch;
+  }
+  return `${out}"`;
+}
 export const varOf = (name) => op('var', String(name));
 export const chr = (v) => op('chr', v);
 
@@ -100,7 +134,17 @@ export const sel = (c, a, b) => op('sel', c, a, b);
 /* ─── 调用 ──────────────────────────────────────────────────────────────── */
 export const call = (name, args = []) => op('call', String(name), ...args);
 export const callfn = (v, args = []) => op('callfn', v, ...args);
+/** 叫外头那份 C 里的一格符号（要先有 `(lib …)` 与 `(cabi …)`）。 */
+export const ccall = (sym, args = []) => op('ccall', String(sym), ...args);
+/** 去哪儿找那份 C 库（逻辑名 —— `cli.js` 的 `resolveLib` 认它）。 */
+export const lib = (name) => op('lib', JSON.stringify(String(name)));
+/** 一格外部符号长什么样：`(cabi 符号 返回 (形参…))`。 */
+export const cabi = (sym, ret, params = []) => op('cabi', String(sym), String(ret), `(${params.join(' ')})`);
 export const fnref = (name) => op('fnref', String(name));
+/** 造一格闭包：`(mkclo 名 捕获…)` —— 捕获**按值抓**（方言那一侧的规矩）。 */
+export const mkclo = (name, caps = []) => op('mkclo', String(name), ...caps);
+/** 读当前 `(cfn …)` 的一格捕获。 */
+export const cap = (name) => op('cap', String(name));
 
 /* ─── 语句 ──────────────────────────────────────────────────────────────── */
 export const set = (name, v) => op('set', String(name), v);
@@ -109,6 +153,8 @@ export const ret = (v = null) => (v === null ? op('ret') : op('ret', v));
 
 /* ─── 字符串那一族（格式化用它们拼） ──────────────────────────────────── */
 export const tostr = (v) => op('tostr', v);
+/** `(rmath "NAME" A [B])` —— 函数名是**字面的串**（不是一格 `(str …)` 值）。 */
+export const rmath = (fn, args = []) => op('rmath', JSON.stringify(String(fn)), ...args);
 export const slen = (v) => op('slen', v);
 export const sfind = (v, x) => op('sfind', v, x);
 export const ssub = (v, a, b) => op('ssub', v, a, b);

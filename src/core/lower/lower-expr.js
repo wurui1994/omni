@@ -18,7 +18,8 @@ export function lowerExpr(expr, ctx) {
     case 'real': return sx.real(expr.value);
     case 'string': return sx.str(expr.value);
     case 'bool': return sx.bool(expr.value);
-    case 'null': return '(null void)';
+    case 'null': return expr.type === undefined || expr.type === null
+      ? '(null void)' : sx.nullFn(typeToSx(expr.type, ctx.hooks));
     case 'name': return sx.varOf(expr.name);
     case 'binop': return lowerBinop(expr, ctx);
     case 'unop': return lowerUnop(expr, ctx);
@@ -49,6 +50,24 @@ export function lowerExpr(expr, ctx) {
      * **捕获**（闭包）不在这两格里：那要一格环境记录，是另一笔账。
      */
     case 'fn-ref': return sx.fnref(expr.name);
+    /**
+     * **闭包那两格**：`(mkclo 名 捕获…)` 造一格、`(cap c)` 读捕获（捕获**按值抓**）。
+     * go 的接口值就是一摊方法闭包（ADR-0040）；cpp 的 lambda 与 jnc 的函数值同一格。
+     */
+    case 'make-closure':
+      return sx.mkclo(expr.name, (expr.caps ?? []).map((c) => lowerExpr(c, ctx)));
+    case 'capture': return sx.cap(expr.name);
+    /**
+     * **实数上的数学函数**（`(rmath "sqrt" A)`）：函数名是字面的串。
+     * go 的 `math.Sqrt`、lua 的 `math.floor`、V 的 `math.sqrt` 落的是同一格。
+     */
+    case 'rmath': return sx.rmath(expr.fn, expr.args.map((a) => lowerExpr(a, ctx)));
+    /**
+     * **叫外头那份 C 里的一格符号**（`(ccall omni_go_chan_new …)`）。
+     * 模块头上那两句（`(lib …)` / `(cabi …)`）由 adapter 发成 decl —— 见 `lower.js`。
+     * go 的并发与宿主入口、cpp 的外部符号、jnc 的 ffi 走的是同一格。
+     */
+    case 'ccall': return sx.ccall(expr.sym, expr.args.map((a) => lowerExpr(a, ctx)));
     case 'call-value':
       return sx.callfn(lowerExpr(expr.fn, ctx), expr.args.map((a) => lowerExpr(a, ctx)));
     /* 表达式位置上的 `if` / 块 —— **Scheme 那一族里它们是表达式**（见 lowerIfExpr）。 */
