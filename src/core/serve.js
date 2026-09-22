@@ -229,6 +229,10 @@ async function runRequest(root, body, verb, extra, pool) {
   const argv = extra !== undefined
     ? [verb, extra, path, '-v']
     : [verb, path, '-v'];
+  /* **`--direct`：一份 `.js` 原样交给 node**（cli.js 第一百四十八片第二格）。
+     Studio 那一页 js 默认走这一条 —— 它的用处之一是拿真 node 当参照，
+     所以"对照"要是默认的那一边；勾上"我们的解析"才不带这个旗子。 */
+  if (body.direct === true) argv.push('--direct');
   if (body.pkgs) argv.push('--pkgs', body.pkgs);
   return runOmni(root, argv, body.timeout ?? 30, pool);
 }

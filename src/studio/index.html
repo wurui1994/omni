@@ -49,6 +49,11 @@
       <span class="tag" id="cur-lang"></span>
       <div class="spacer"></div>
       <label class="check" title="改一行就跑一趟"><input type="checkbox" id="live"><span>实时</span></label>
+      <!-- js 默认原样交给 node（`--direct`）。勾上才走我们的前端 —— 这一页的用处之一
+           是拿真 node 当参照，所以"对照"要是默认的那一边。别的语言上这一格藏起来。 -->
+      <label class="check" id="js-parse-box" hidden title="走我们的 js 前端（不勾 = 原样交给 node）">
+        <input type="checkbox" id="js-parse"><span>我们的解析</span>
+      </label>
       <button class="run" id="btn-run"><svg viewBox="0 0 20 20"><path d="M6 4l10 6-10 6z"/></svg>运行</button>
     </div>
     <div class="code-body">
@@ -61,6 +66,7 @@
     <div class="pane-head">
       <div class="seg small" id="out-tabs">
         <button data-tab="stdout" class="on">输出</button>
+        <button data-tab="preview" disabled>预览</button>
         <button data-tab="stages">阶段</button>
         <button data-tab="shell">Shell</button>
       </div>
@@ -69,6 +75,8 @@
     </div>
     <div class="out-body">
       <div class="tabp on" data-tab="stdout"><pre id="stdout"></pre><pre id="stderr" class="err"></pre></div>
+      <!-- 预览：markdown 排版 / asy 的图（EPS -> SVG）/ glsl 的着色器（WebGL2）。 -->
+      <div class="tabp" data-tab="preview"><div id="preview" class="preview empty"></div></div>
       <div class="tabp" data-tab="stages"><div id="stages" class="stages"></div></div>
       <div class="tabp" data-tab="shell">
         <div id="sh-log" class="sh-log"></div>

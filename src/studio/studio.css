@@ -189,6 +189,66 @@ body {
 .node.open > .kids { display: block; }
 .row.file .caret { visibility: hidden; }
 
+/* ---- 切例子时的"旧结果"过渡 ----
+ *
+ * 从前切一份例子是"先清空三格、再跑" —— 空一下再填回来，连滚动条都出现又消失，
+ * 看着就是闪。现在**旧结果留在原处、整块压暗**，新结果到了一次换掉（studio.js 的
+ * `markStale`）。压暗而不是拆 DOM：控件不重建，滚动位置也就不跳。 */
+.out-body.stale { opacity: .38; pointer-events: none; transition: opacity .1s; }
+.out-body { transition: opacity .06s; }
+/* 运行按钮：到点（`BTN_GRACE`）还没回来才灰 —— 大半趟 8~40ms，灰一下再亮回来纯是闪。 */
+.run.busy { opacity: .5; pointer-events: none; }
+
+/* ---- 预览区（markdown 排版 / asy 的图 / glsl 着色器） ---- */
+.preview { width: 100%; height: 100%; overflow: auto; }
+.preview.empty { display: none; }
+.svg-wrap {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%; padding: 16px; box-sizing: border-box;
+}
+.svg-wrap svg { max-width: 100%; max-height: 100%; }
+.gl-canvas { width: 100%; height: 100%; display: block; }
+.gl-err { color: var(--bad); font: 12px/1.5 var(--mono); padding: 10px; white-space: pre-wrap; }
+
+/* ---- Markdown 排版 ---- */
+.md { padding: 18px 22px; max-width: 78ch; font: 14.5px/1.72 var(--font); color: var(--fg); }
+.md > :first-child { margin-top: 0; }
+.md h1 { font-size: 1.7em; font-weight: 600; margin: 0 0 .6em; letter-spacing: -.02em;
+  border-bottom: 1px solid var(--line); padding-bottom: .3em; }
+.md h2 { font-size: 1.32em; font-weight: 600; margin: 1.4em 0 .5em;
+  border-bottom: 1px solid var(--line-2); padding-bottom: .2em; }
+.md h3 { font-size: 1.12em; font-weight: 600; margin: 1.2em 0 .4em; }
+.md h4, .md h5, .md h6 { font-size: 1em; font-weight: 600; margin: 1em 0 .3em; color: var(--fg-2); }
+.md p { margin: 0 0 .85em; }
+.md b, .md strong { font-weight: 640; }
+.md i, .md em { font-style: italic; }
+.md code { font: .87em/1.35 var(--mono); background: var(--bg-sunk);
+  padding: 1.5px 5px; border-radius: 5px; }
+.md pre.md-code { background: var(--bg-sunk); padding: 11px 13px; border-radius: var(--r-sm);
+  overflow-x: auto; margin: 0 0 1em; font: 12.5px/1.55 var(--mono); }
+.md pre.md-code code { background: none; padding: 0; font-size: 1em; }
+.md blockquote { margin: 0 0 1em; padding: 2px 14px; color: var(--fg-2);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 60%, transparent); }
+.md blockquote p:last-child { margin-bottom: 0; }
+.md ul, .md ol { margin: 0 0 .85em; padding-left: 1.6em; }
+.md li { margin: 0 0 .25em; }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 1.4em 0; }
+.md a { color: var(--accent); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md table { border-collapse: collapse; margin: 0 0 1em; font-size: .95em; }
+.md th, .md td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; }
+.md th { background: var(--bg-sunk); font-weight: 600; }
+.md img { max-width: 100%; }
+.md s { text-decoration: line-through; color: var(--fg-3); }
+/* 围栏代码块过一遍这一页那张高亮表（`highlight`），所以那几格颜色也要在这儿认。 */
+.md-code .kw { color: var(--s-kw); }
+.md-code .str { color: var(--s-str); }
+.md-code .num { color: var(--s-num); }
+.md-code .com { color: var(--s-com); }
+.md-code .fn { color: var(--s-fn); }
+.md-code .ty { color: var(--s-ty); }
+.md-code .pn { color: var(--s-pn); }
+
 /* ---- 代码区 ----
  *
  * **只有 textarea 会滚。** 从前三层都能滚（`.code-body` 的 `overflow:auto`、
@@ -234,11 +294,18 @@ body {
 .run:disabled { opacity: .45; pointer-events: none; }
 .run svg { width: 13px; height: 13px; fill: currentColor; stroke: none; }
 
-/* ---- 输出区 ---- */
-.out-body { flex: 1; overflow: auto; position: relative; }
+/* ---- 输出区 ----
+ *
+ * `scrollbar-gutter: stable`：**滚动槽永远留着**。切例子时上一份有溢出、下一份没有，
+ * 滚动条出现又消失会把整块内容左右推一下 —— 那是"闪烁"里最显眼的一份。 */
+.out-body { flex: 1; overflow: auto; position: relative; scrollbar-gutter: stable; }
 .tabp { display: none; padding: 10px 12px; font: 13px/1.5 var(--mono); color: var(--fg-2);
         white-space: pre-wrap; word-break: break-all; min-height: 100%; }
 .tabp.on { display: block; }
+/* 预览那一格自己铺满（里头是 md 排版 / SVG / canvas，不走等宽与 pre-wrap）。 */
+.tabp[data-tab="preview"] { padding: 0; white-space: normal; word-break: normal; }
+.tabp[data-tab="preview"].on { display: flex; height: 100%; }
+#out-tabs button:disabled { opacity: .35; pointer-events: none; }
 .err { color: var(--bad); }
 .badge {
   font: 500 11px var(--mono); padding: 2px 7px; border-radius: 20px;

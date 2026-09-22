@@ -7,6 +7,10 @@
  * 也不从格式里往回抠结构。那张表本来就是数据的一种印法（`src/core/cli/stages.js`）。
  */
 
+/* 纯函数那一半（高亮 / markdown / EPS -> SVG）住在 `render.js` —— 那一份一个 DOM 都不碰，
+ * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
+import { highlight, mdToHtml, epsToSvg } from './render.js';
+
 const $ = (s) => document.querySelector(s);
 const el = (t, cls, txt) => {
   const n = document.createElement(t);
@@ -51,105 +55,113 @@ function initTheme() {
   };
 }
 
-/* ---------------------------------------------------------------- 语法高亮
+/* ---------------------------------------------------------------- 预览：GLSL
  *
- * 一门语言一张小表：关键字、注释的形状、串的形状。**不上第三方** —— 要零依赖，
- * 而且这一层只要"读起来分得清"，不需要真的解析。
+ * 片元着色器直接在页面上跑（WebGL2，一个全屏三角）。**同一格 canvas 反复用** ——
+ * 浏览器对 WebGL 上下文的个数有上限（十来个），每换一份文件新建一格很快就黑屏。
+ *
+ * 认三套常见的 uniform 名（有就喂）：`u_resolution`/`iResolution`、`u_time`/`iTime`。
+ * `#version 330 core` 的那几份自动换成 `300 es` + 一句精度 —— 判据里那 15 份都是桌面 GL 的写法。
  */
+const GL = { canvas: null, gl: null, prog: null, raf: 0, t0: 0 };
 
-const KW = {
-  common: 'if else for while return break continue switch case default goto do',
-  omni: 'fn let mut const type struct enum match import export pub as in is nil true false',
-  sx: 'module fn main let set do if while ret print var call int real bool str struct class global cabi lib ccall',
-  go: 'package import func var const type struct interface map chan go defer select range nil true false iota',
-  c: 'int char long short float double void unsigned signed static extern struct union enum typedef sizeof const volatile register inline',
-  cpp: 'class public private protected virtual template typename namespace using new delete this nullptr auto constexpr',
-  nim: 'proc func method template macro var let const type object ref ptr import export discard nil true false when',
-  v: 'fn mut pub struct enum interface import module or none true false',
-  lua: 'function local end then elseif repeat until nil true false and or not',
-  mojo: 'fn def struct var let alias trait raises owned borrowed inout import from as pass None True False',
-  basic: 'Dim As Sub Function End If Then Else For Next Do Loop While Wend Type Declare',
-  awk: 'BEGIN END function print printf getline next exit delete',
-  scheme: 'define lambda let let* letrec cond case when unless set! quote begin',
-  lisp: 'defun defvar defparameter let let* lambda cond when unless setf loop',
-  js: 'function let const var class extends new this async await yield import export from null undefined true false typeof instanceof',
-  asy: 'pen path guide picture real pair triple struct void return import access from as new operator',
-  wat: 'module func param result local global memory data export import i32 i64 f32 f64 call br_if loop block',
-  jancy: 'class property construct destruct int char void bool string alias enum',
-  glsl: 'void float vec2 vec3 vec4 mat4 uniform varying attribute in out precision',
-};
+function glslSource(src) {
+  let s = src.replace(/^\s*#version[^\n]*\n/, '');
+  const pre = '#version 300 es\nprecision highp float;\n';
+  /* 桌面写法里 `out vec4 名字;` 照收；没有 out 声明的（老 `gl_FragColor` 写法）补一格。 */
+  if (!/\bout\s+vec4\s+\w+\s*;/.test(s)) s = `out vec4 fragColor;\n${s.replace(/\bgl_FragColor\b/g, 'fragColor')}`;
+  return pre + s;
+}
 
-const LINE_COM = {
-  go: '//', c: '//', cpp: '//', js: '//', v: '//', jancy: '//', glsl: '//', asy: '//',
-  omni: '//', sx: ';', nim: '#', mojo: '#', lua: '--', awk: '#', basic: "'",
-  scheme: ';', lisp: ';', wat: ';;',
-};
-const BLOCK_COM = { go: ['/*', '*/'], c: ['/*', '*/'], cpp: ['/*', '*/'], js: ['/*', '*/'],
-  v: ['/*', '*/'], jancy: ['/*', '*/'], glsl: ['/*', '*/'], asy: ['/*', '*/'],
-  omni: ['/*', '*/'], lua: ['--[[', ']]'], sx: null };
-
-const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-
-/** 一份源码 -> 带 span 的 HTML。**按字符扫一遍**，不回溯。 */
-function highlight(text, lang) {
-  const kws = new Set(`${KW.common} ${KW[lang] ?? ''}`.trim().split(/\s+/));
-  const lc = LINE_COM[lang] ?? '//';
-  const bc = BLOCK_COM[lang];
-  let out = '';
-  let i = 0;
-  const n = text.length;
-  while (i < n) {
-    const c = text[i];
-    /* 块注释 */
-    if (bc && text.startsWith(bc[0], i)) {
-      const e = text.indexOf(bc[1], i + bc[0].length);
-      const j = e < 0 ? n : e + bc[1].length;
-      out += `<span class="com">${esc(text.slice(i, j))}</span>`;
-      i = j; continue;
-    }
-    /* 行注释 */
-    if (text.startsWith(lc, i)) {
-      let j = text.indexOf('\n', i);
-      if (j < 0) j = n;
-      out += `<span class="com">${esc(text.slice(i, j))}</span>`;
-      i = j; continue;
-    }
-    /* 串（单/双引号，认反斜杠转义） */
-    if (c === '"' || c === "'" || c === '`') {
-      let j = i + 1;
-      while (j < n && text[j] !== c) { if (text[j] === '\\') j++; j++; }
-      out += `<span class="str">${esc(text.slice(i, Math.min(j + 1, n)))}</span>`;
-      i = j + 1; continue;
-    }
-    /* 数字 */
-    if (/[0-9]/.test(c) && !/[A-Za-z_]/.test(text[i - 1] ?? '')) {
-      let j = i;
-      while (j < n && /[0-9a-fA-FxX._eE+-]/.test(text[j])) {
-        if ((text[j] === '+' || text[j] === '-') && !/[eE]/.test(text[j - 1])) break;
-        j++;
-      }
-      out += `<span class="num">${esc(text.slice(i, j))}</span>`;
-      i = j; continue;
-    }
-    /* 标识符 / 关键字 */
-    if (/[A-Za-z_$]/.test(c)) {
-      let j = i;
-      while (j < n && /[A-Za-z0-9_$!?*-]/.test(text[j])) {
-        if (text[j] === '-' && lang !== 'scheme' && lang !== 'lisp') break;
-        j++;
-      }
-      const w = text.slice(i, j);
-      if (kws.has(w)) out += `<span class="kw">${esc(w)}</span>`;
-      else if (text[j] === '(') out += `<span class="fn">${esc(w)}</span>`;
-      else if (/^[A-Z]/.test(w)) out += `<span class="ty">${esc(w)}</span>`;
-      else out += esc(w);
-      i = j; continue;
-    }
-    if ('(){}[];,.:'.includes(c)) { out += `<span class="pn">${esc(c)}</span>`; i++; continue; }
-    out += esc(c);
-    i++;
+function glslRun(src, host) {
+  if (GL.raf !== 0) { cancelAnimationFrame(GL.raf); GL.raf = 0; }
+  if (GL.canvas === null) {
+    GL.canvas = el('canvas', 'gl-canvas');
+    GL.gl = GL.canvas.getContext('webgl2', { antialias: true, preserveDrawingBuffer: false });
   }
-  return out;
+  const gl = GL.gl;
+  if (gl === null) { host.textContent = '这个浏览器没有 WebGL2'; return; }
+  if (GL.canvas.parentElement !== host) { host.textContent = ''; host.append(GL.canvas); }
+  /* 上一趟的编译错误那一格要收掉 —— 不收的话改对了它还挂在下面。 */
+  for (const n of [...host.querySelectorAll('.gl-err')]) n.remove();
+  const mk = (type, code) => {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, code);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      throw new Error(log ?? '编不过');
+    }
+    return sh;
+  };
+  let prog = null;
+  try {
+    const vs = mk(gl.VERTEX_SHADER, '#version 300 es\nvoid main(){\n'
+      + ' vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n'
+      + ' gl_Position = vec4(p * 2.0 - 1.0, 0, 1);\n}');
+    const fs = mk(gl.FRAGMENT_SHADER, glslSource(src));
+    prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) ?? '链不上');
+  } catch (e) {
+    host.textContent = '';
+    const p = el('pre', 'gl-err', String(e.message ?? e));
+    host.append(GL.canvas, p);
+    return;
+  }
+  if (GL.prog !== null) gl.deleteProgram(GL.prog);
+  GL.prog = prog;
+  gl.useProgram(prog);
+  const uRes = gl.getUniformLocation(prog, 'u_resolution') ?? gl.getUniformLocation(prog, 'iResolution');
+  const uTime = gl.getUniformLocation(prog, 'u_time') ?? gl.getUniformLocation(prog, 'iTime');
+  GL.t0 = performance.now();
+  const draw = () => {
+    const r = host.getBoundingClientRect();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.max(1, Math.round(r.width * dpr));
+    const h = Math.max(1, Math.round((r.height || r.width * 0.6) * dpr));
+    if (GL.canvas.width !== w || GL.canvas.height !== h) { GL.canvas.width = w; GL.canvas.height = h; }
+    gl.viewport(0, 0, w, h);
+    if (uRes) gl.uniform2f(uRes, w, h);
+    if (uTime) gl.uniform1f(uTime, (performance.now() - GL.t0) / 1000);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (uTime) GL.raf = requestAnimationFrame(draw);
+  };
+  draw();
+}
+
+/* ---------------------------------------------------------------- 预览：派发
+ *
+ * 三种：markdown 排版、asy 的图（EPS -> SVG）、glsl 的着色器（WebGL）。
+ * 都没有的时候这一栏空着 —— 但**栏本身不拆**（拆了会让右边整块跳一下，见 `openFile`）。
+ */
+function renderPreview(kind, payload) {
+  const host = $('#preview');
+  const tab = document.querySelector('#out-tabs button[data-tab="preview"]');
+  if (kind === null) {
+    host.textContent = '';
+    host.classList.add('empty');
+    tab.disabled = true;
+    return;
+  }
+  tab.disabled = false;
+  host.classList.remove('empty');
+  if (kind === 'md') { host.innerHTML = `<article class="md">${mdToHtml(payload)}</article>`; return; }
+  if (kind === 'eps') {
+    const svg = epsToSvg(payload);
+    host.innerHTML = `<div class="svg-wrap">${svg}</div>`;
+    return;
+  }
+  if (kind === 'glsl') glslRun(payload, host);
+}
+
+/** 这一份文件的预览是哪一种（没有回 null）。 */
+function previewKind(lang) {
+  if (lang === 'markdown') return 'md';
+  if (lang === 'glsl') return 'glsl';
+  if (lang === 'asy') return 'eps';
+  return null;
 }
 
 /* ---------------------------------------------------------------- 状态 */
@@ -197,9 +209,16 @@ function caretSvg() {
   return s;
 }
 
+/**
+ * 一格节点。
+ *
+ * **"开着"与"孩子建了没有"必须同时改**（第一次点击没反应那个 bug）：从前根节点一上来就
+ * 加 `.open`，可孩子是懒建的、那时还没建 —— 于是看起来是"合着的、三角却朝下"，
+ * 第一次点击把 `.open` 去掉（看起来才对上：三角转回右），第二次点击才真的展开。
+ * 现在只有 `setOpen` 一处改这件事，它先保证孩子在、再改类名。
+ */
 function renderNode(n, depth) {
   const box = el('div', 'node');
-  if (depth === 0) box.classList.add('open');
   const row = el('div', `row ${n.kind}${n.dirty === true ? ' dirty' : ''}`);
   const caret = el('span', 'caret');
   if (n.kind === 'dir') caret.append(caretSvg());
@@ -210,13 +229,20 @@ function renderNode(n, depth) {
   box.append(row);
   if (n.kind === 'dir') {
     const kids = el('div', 'kids');
+    box.append(kids);
     /* **懒展开**：一千多格一次全建 DOM 会卡，展开那一刻才建。 */
     let built = false;
-    row.onclick = () => {
-      if (!built) { for (const k of n.children) kids.append(renderNode(k, depth + 1)); built = true; }
-      box.classList.toggle('open');
+    const setOpen = (on) => {
+      if (on && !built) {
+        for (const k of n.children ?? []) kids.append(renderNode(k, depth + 1));
+        built = true;
+      }
+      box.classList.toggle('open', on);
+      row.setAttribute('aria-expanded', String(on));
     };
-    box.append(kids);
+    row.onclick = () => setOpen(!box.classList.contains('open'));
+    if (depth === 0) setOpen(true);          // 顶层默认展开 —— 孩子也就在这一刻建好
+    else setOpen(false);
   } else {
     row.onclick = () => { openFile(n.path, row); };
   }
@@ -263,6 +289,11 @@ function paint(text) {
  *
  * **切之前先把当前这份存下来**（改过的话）：用户切走再切回来，改动还在 —— 那是
  * "虚拟文件系统"这四个字的最低要求。存去哪见 `serve.js` 的 `EDITS`（仓库里一个字节不动）。
+ *
+ * **别在这儿清输出区**（"闪烁"那一条）：从前这儿先把 stdout/stderr/阶段三格清空、
+ * 再去跑 —— 于是切一份例子看得见"空一下再填回来"，连滚动条都跟着出现又消失。
+ * 现在的做法是**旧结果留在原处、整块压暗**（`.stale`），新结果到了一次换掉。
+ * 跑不了的那几门（`.md` 之类）才真的清 —— 它们本来就没有输出。
  */
 async function openFile(path, row) {
   await stash();
@@ -283,14 +314,47 @@ async function openFile(path, row) {
   $('#edit').value = f.text;
   paint(f.text);
   $('#view').scrollTop = 0; $('#edit').scrollTop = 0;
-  $('#btn-run').disabled = !RUNNABLE.has(f.lang);
+  const runnable = RUNNABLE.has(f.lang);
+  $('#btn-run').disabled = !runnable;
+  /* js 那个开关只在 js 上有意义 —— 别的语言上藏起来（不是置灰：省一格视觉噪声）。 */
+  $('#js-parse-box').hidden = f.lang !== 'js';
   closeDrawer();
   setStatus(f.dirty === true ? '改过' : '', '');
-  $('#stdout').textContent = ''; $('#stderr').textContent = '';
-  $('#stages').textContent = '';
-  /* 打开就跑一趟（能跑的那几门）—— 用户要的是"打开新例子就看到结果"。
-     热工人那侧一趟 8~19ms，所以这一下不用犹豫。 */
-  if (RUNNABLE.has(f.lang)) run();
+  const kind = previewKind(f.lang);
+  /* md / glsl 的预览**不用跑**：源码就是全部输入。asy 要等 EPS，所以先留着旧图。 */
+  if (kind === 'md' || kind === 'glsl') renderPreview(kind, f.text);
+  else if (kind === null) renderPreview(null);
+  showPreviewTab(kind !== null);
+  if (runnable) {
+    markStale(true);
+    run();
+  } else {
+    markStale(false);
+    $('#stdout').textContent = ''; $('#stderr').textContent = '';
+    $('#stages').textContent = '';
+  }
+}
+
+/** 旧结果压暗（新的还在路上）。**不动 DOM 结构** —— 只加一格类名。 */
+function markStale(on) {
+  $('.out-body').classList.toggle('stale', on);
+}
+
+/** 有预览就把那一栏点亮、并切过去；没有就退回"输出"。 */
+function showPreviewTab(has) {
+  const tabs = $('#out-tabs');
+  const pv = tabs.querySelector('button[data-tab="preview"]');
+  const cur = tabs.querySelector('button.on');
+  if (has) selectTab(pv);
+  else if (cur === pv) selectTab(tabs.querySelector('button[data-tab="stdout"]'));
+}
+
+function selectTab(b) {
+  if (!b) return;
+  for (const o of $('#out-tabs').children) o.classList.toggle('on', o === b);
+  for (const p of document.querySelectorAll('.tabp')) {
+    p.classList.toggle('on', p.dataset.tab === b.dataset.tab);
+  }
 }
 
 /** 把编辑器里改过的内容存进虚拟文件系统（没改就什么都不做）。 */
@@ -330,7 +394,7 @@ function setStatus(txt, kind) {
 /**
  * 跑当前这份文件。
  *
- * 三条要紧的：
+ * 五条要紧的：
  *
  * 1. **不因为"上一趟还在跑"就不跑**。从前这儿 `if (S.busy) return` —— 实时模式下
  *    上一趟在路上时最后那几下键就被丢了，表现成"改了没有效果"。现在照发，
@@ -338,21 +402,34 @@ function setStatus(txt, kind) {
  * 2. **改过的源码只走一趟往返**。`body.text` 递过去，服务那侧顺手就把它写进虚拟文件系统
  *    （`serve.js` 的 `putEdit`）—— 不必先 PUT 再 POST。实时模式下那省掉的是一半延迟。
  * 3. 状态栏印 `ms` 与 `via`（warm/cold）—— "实时"这件事得**看得见**。
+ * 4. **运行按钮只在"真的等得住"时才置灰**（`BTN_GRACE` 毫秒）。热工人那侧大半趟
+ *    8~40ms，比人眼能分辨的一帧还短 —— 灰一下再亮回来纯是闪。到点还没回来才置灰，
+ *    那时它是**有用的信息**（"这一趟真的慢"）。
+ * 5. **js 默认原样交给 node**（`--direct`）。要对照我们那条腿时把"我们的解析"那格勾上。
+ *    理由：这一页的用处之一是拿真 node 当参照，默认走我们的前端会让"对照"这件事
+ *    每次都要先想一下。
  */
+const BTN_GRACE = 150;
+
 async function run() {
   if (S.path === null) return;
   const my = ++S.seq;
   S.busy = true;
-  $('#btn-run').disabled = true;
+  /* 到点还没回来才置灰（见头注第 4 条）。 */
+  const graceTimer = setTimeout(() => {
+    if (my === S.seq && S.busy) { $('#btn-run').disabled = true; $('#btn-run').classList.add('busy'); }
+  }, BTN_GRACE);
   setStatus('跑…', '');
   const t0 = performance.now();
   const currentText = $('#edit').value;
   const dirty = currentText !== S.text;
+  const direct = S.lang === 'js' && !$('#js-parse').checked;
   try {
     const r = await post('/api/run', {
       path: S.path,
       text: dirty ? currentText : undefined,
       lang: S.lang,
+      direct,
       verbose: true,
     });
     /* **只认最后一趟**：实时模式下旧的回包要丢掉，不然结果会往回跳。 */
@@ -363,12 +440,25 @@ async function run() {
     $('#stdout').textContent = r.stdout ?? '';
     $('#stderr').textContent = r.stderr ?? '';
     renderStages(r.stages, r.stderr ?? '', ms);
+    markStale(false);
+    /* asy：stdout 就是 EPS 正文，翻成 SVG 画出来（见 `epsToSvg`）。 */
+    if (S.lang === 'asy' && (r.stdout ?? '').includes('%!PS')) renderPreview('eps', r.stdout);
     const via = r.via === 'warm' ? '' : ' · 冷';
-    setStatus(`${r.code === 0 ? 'ok' : `exit ${r.code}`} · ${ms}ms${via}`, r.code === 0 ? 'ok' : 'bad');
+    const how = direct ? ' · node' : '';
+    setStatus(`${r.code === 0 ? 'ok' : `exit ${r.code}`} · ${ms}ms${via}${how}`, r.code === 0 ? 'ok' : 'bad');
   } catch (e) {
-    if (my === S.seq) { $('#stderr').textContent = String(e.message ?? e); setStatus('失败', 'bad'); }
+    if (my === S.seq) {
+      $('#stderr').textContent = String(e.message ?? e);
+      markStale(false);
+      setStatus('失败', 'bad');
+    }
   } finally {
-    if (my === S.seq) { S.busy = false; $('#btn-run').disabled = !RUNNABLE.has(S.lang); }
+    clearTimeout(graceTimer);
+    if (my === S.seq) {
+      S.busy = false;
+      $('#btn-run').classList.remove('busy');
+      $('#btn-run').disabled = !RUNNABLE.has(S.lang);
+    }
   }
 }
 
@@ -469,11 +559,8 @@ function initTabs() {
   const tabs = $('#out-tabs');
   tabs.onclick = (e) => {
     const b = e.target.closest('button');
-    if (!b) return;
-    for (const o of tabs.children) o.classList.toggle('on', o === b);
-    for (const p of document.querySelectorAll('.tabp')) {
-      p.classList.toggle('on', p.dataset.tab === b.dataset.tab);
-    }
+    if (!b || b.disabled) return;
+    selectTab(b);
   };
   const seg = document.querySelector('.seg[role="tablist"]');
   seg.onclick = (e) => {
@@ -488,6 +575,7 @@ function initTabs() {
 function initEditor() {
   const ta = $('#edit');
   let timer = null;
+  let glTimer = null;
   /** 正在用输入法拼字（中文/日文）—— 那期间别去打扰它。 */
   let composing = false;
   ta.addEventListener('compositionstart', () => { composing = true; });
@@ -495,6 +583,14 @@ function initEditor() {
   ta.addEventListener('input', () => {
     /* **画的是 `ta.value`，不是 `S.text`** —— 见 `paint` 的头注。 */
     paint(ta.value);
+    /* md / glsl 的预览就是源码本身 —— 不必等一趟往返，边敲边跟着变。
+       glsl 那一格自带防抖：编不过的中间状态每敲一下报一次错太吵。 */
+    const kind = previewKind(S.lang);
+    if (kind === 'md') renderPreview('md', ta.value);
+    else if (kind === 'glsl') {
+      clearTimeout(glTimer);
+      glTimer = setTimeout(() => renderPreview('glsl', ta.value), 300);
+    }
     if (!$('#live').checked || composing) return;
     /* 防抖 250ms（设计文档 §4.4）。热工人那侧一趟 8~19ms，所以这 250ms 现在是**真的**
        在等用户停手，而不是在等 node 启动。 */
@@ -532,6 +628,8 @@ async function main() {
   initTabs();
   initEditor();
   $('#btn-run').onclick = run;
+  /* js 那个开关：切了就重跑一趟 —— 它改的就是"这一份怎么跑"。 */
+  $('#js-parse').onchange = () => { if (S.lang === 'js') run(); };
   /* 抽屉：开的时候盖一层遮罩，点它就关（不然窄屏上只能再摸那个按钮）。 */
   const mask = el('div', 'mask');
   mask.style.display = 'none';

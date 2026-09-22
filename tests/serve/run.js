@@ -16,6 +16,9 @@ import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCb);
 import { startServer, shellToArgv, safePath, buildTree } from '../../src/core/serve.js';
+/* 网页那一侧的**纯函数那一半**（`src/studio/render.js`：高亮 / markdown / EPS -> SVG）。
+   它一个 DOM 都不碰，所以在这儿直接 import 就能判 —— 不必拉一套无头浏览器进来。 */
+import { highlight, mdToHtml, epsToSvg } from '../../src/studio/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -41,6 +44,16 @@ const eq = (line, want) => {
   ok(`shellToArgv ${JSON.stringify(line)}`, JSON.stringify(got) === JSON.stringify(want),
     `${JSON.stringify(got)} != ${JSON.stringify(want)}`);
 };
+
+/* render.js 那三样纯函数。 */
+ok('highlight 认得 go 关键字', highlight('func main() {}', 'go').includes('class="kw"'));
+const md = '# Hello\n\nworld **bold** _it_\n\n- a\n- b\n\n```go\nfunc x()\n```\n';
+const h = mdToHtml(md);
+ok('mdToHtml 标题', h.includes('<h1>'));
+ok('mdToHtml 粗体', h.includes('<b>'));
+ok('mdToHtml 列表', h.includes('<li>'));
+ok('mdToHtml 围栏代码', h.includes('md-code'));
+ok('mdToHtml 代码块里高亮', h.includes('class="kw"'));
 eq('omni run a.go', ['run', 'a.go']);
 eq('go run a.go', ['run', 'a.go']);
 eq('go build a.go -o a', ['build', 'a.go', '-o', 'a']);
@@ -89,7 +102,7 @@ try {
   ok('/api/file 拦路径穿越', (await get('/api/file?path=../.env')).code === 404);
   ok('/api/file 拦白名单外', (await get('/api/file?path=src/core/cli.js')).code === 404);
 
-  for (const p of ['/', '/studio.css', '/studio.js']) {
+  for (const p of ['/', '/studio.css', '/studio.js', '/render.js']) {
     ok(`静态 ${p}`, (await get(p)).code === 200);
   }
   ok('静态拦不存在的', (await get('/nope.js')).code === 404);
@@ -102,6 +115,33 @@ try {
   ok('/api/run 与本地 omni run 逐字节相同', r.json.stdout === local,
     `${JSON.stringify(r.json.stdout)} != ${JSON.stringify(local)}`);
   ok('/api/run 带阶段信息', (r.json.stderr ?? '').split('\n').some((l) => l.startsWith('omni:')));
+
+  /* **会 spawn 的那几门也要收得到输出**（2026-09-22 修的一个真 bug）：
+   * 常驻工人把 `process.stdout.write` 换成了收集器，而 `stdio:'inherit'` 的孩子直接写 fd 1
+   * —— 那一格在工人里是 NDJSON 协议的通道。症状是 Studio 上 `.asy` `code=0` 而输出空的
+   * （整份 EPS 漏进协议管子）。闸在 `host/native.js` 的 `CAPTURED`（`OMNI_CAPTURE=1`）。 */
+  const asy = paths.find((p) => p.startsWith('tests/asy/draw/') && p.endsWith('.asy'));
+  if (asy !== undefined) {
+    const ra = await post('/api/run', { path: asy, lang: 'asy' });
+    ok('/api/run 收得到会 spawn 的腿的输出（asy 的 EPS）',
+      ra.json.code === 0 && (ra.json.stdout ?? '').startsWith('%!PS'),
+      `code=${ra.json.code} stdout=${JSON.stringify((ra.json.stdout ?? '').slice(0, 40))}`);
+    /* 顺手把它翻成 SVG —— 预览那一栏就是这么画的。 */
+    ok('EPS -> SVG 画得出路径', epsToSvg(ra.json.stdout ?? '').includes('<path '));
+  }
+
+  /* **js 两条腿的对照**（Studio 上默认走 `--direct`，勾"我们的解析"才走我们的）：
+   * 同一份源码两边**答案必须一样** —— 那正是这一页最该有的判据。 */
+  const jsc = paths.find((p) => p.startsWith('tests/js-exec/cases/01-'));
+  if (jsc !== undefined) {
+    const a = await post('/api/run', { path: jsc, lang: 'js', direct: true });
+    const b = await post('/api/run', { path: jsc, lang: 'js' });
+    ok('/api/run --direct 交给 node 跑得出来', a.json.code === 0 && (a.json.stdout ?? '').length > 0);
+    ok('/api/run js 两条腿答案相同', a.json.stdout === b.json.stdout,
+      `direct=${JSON.stringify((a.json.stdout ?? '').slice(0, 60))} ours=${JSON.stringify((b.json.stdout ?? '').slice(0, 60))}`);
+    ok('/api/run --direct 说得出自己没过我们这一轮',
+      (a.json.stderr ?? '').includes('--direct'));
+  }
 
   const sh = await post('/api/shell', { line: 'omni --help' });
   ok('/api/shell 认 omni', sh.json.code === 0);

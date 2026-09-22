@@ -26,7 +26,10 @@ export const TREE_ROOTS = [
   { name: '例子', path: 'ext', exts: ['.go', '.nim', '.v', '.lua', '.mojo', '.cpp', '.bas',
     '.awk', '.ss', '.lisp', '.asy', '.jnc', '.js', '.sx'], only: 'examples' },
   { name: '判据', path: 'tests', exts: ['.go', '.sx', '.asy', '.wat', '.js', '.jnc', '.frag'],
-    only: 'cases' },
+    /* `only` 收一串：`cases` 是各腿的判据例子，**`draw` 是 asy 真出图的那些** ——
+       少了它，树上一份能出图的 `.asy` 都没有（`cases` 底下的 asy 全是算术），
+       于是"预览"那一栏在 asy 上永远空着。glsl 的 `.frag` 在 cases 底下。 */
+    only: ['cases', 'draw'] },
 ];
 
 /** 后缀 -> 语言标签（高亮与"用哪条腿跑"两处都用它）。 */
@@ -68,22 +71,25 @@ export function safePath(root, rel) {
 function walk(root, rel, spec, depth) {
   const abs = join(root, rel);
   if (depth > 6) return null;
+  /** `only` 收一格名字或一串名字（`['cases', 'draw']`）—— 归一到数组再问。 */
+  const onlyList = spec.only === undefined ? null
+    : (Array.isArray(spec.only) ? spec.only : [spec.only]);
   if (!isDir(abs)) {
     const e = extOf(rel);
     if (spec.exts !== null && !spec.exts.includes(e)) return null;
     /* `only` 那一格也管**文件**：`tests/all.js` 是判据的跑手，不是一格例子。
        判据是"路径里有没有那一层"（`tests` 某个腿 `cases` 底下）。 */
-    if (spec.only !== undefined && !rel.includes(`/${spec.only}/`)) return null;
+    if (onlyList !== null && !onlyList.some((o) => rel.includes(`/${o}/`))) return null;
     return { name: rel.slice(rel.lastIndexOf('/') + 1), path: rel, kind: 'file', lang: langOf(rel) };
   }
   const kids = [];
   for (const nm of readDir(abs).sort()) {
     if (nm.startsWith('.')) continue;
     const sub = `${rel}/${nm}`;
-    /* `only`：在第二层上只放行那个名字的目录（`ext/go/examples`）。 */
-    if (spec.only !== undefined && isDir(join(root, sub))) {
+    /* `only`：在第二层上只放行那几个名字的目录（`ext/go/examples`、`tests/asy/draw`）。 */
+    if (onlyList !== null && isDir(join(root, sub))) {
       const parts = sub.split('/');
-      if (parts.length === 3 && nm !== spec.only) continue;
+      if (parts.length === 3 && !onlyList.includes(nm)) continue;
     }
     const k = walk(root, sub, spec, depth + 1);
     if (k !== null) kids.push(k);
