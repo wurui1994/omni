@@ -12,10 +12,6 @@
  */
 
 import { TCC_HELP } from './cmd-tcc.js';
-/* `--engine graph` 那几行说明**从图那一层现取**（后端名单是 `contract.js` 里注册出来的）。
- * 这一份是"数据"，本来不该 import 别人；破例的理由只有一条：手抄一份后端名单就是第二处
- * 会过期的账，而这份 help 正是用户唯一看得到的那张清单。 */
-import { graphEngineHelp } from '../graph/run.js';
 
 /* ---- 与语言无关的那几格开关，好几条命令共用。 */
 const F_OUT = { name: '-o', arity: 1, value: 'NAME', brief: '产物落在哪儿' };
@@ -23,7 +19,7 @@ const F_MODE = { name: '--mode', arity: 1, value: 'M', brief: 'mixed|dynamic|sta
 const F_WORK = { name: '--work', arity: 1, value: 'DIR', brief: '生成的中间文件留在这儿' };
 const F_BACKEND = {
   name: '--backend', arity: 1, value: 'B',
-  brief: 'interp|js|c|llvm|jit|native|spirv（--engine graph 时是 interp|js|wat|sx）',
+  brief: 'interp|js|c|llvm|jit|native|spirv',
 };
 /**
  * `build` 那一份**不一样**：`jit` 是「就地编就地跑」（只在 `run` 上有意义），
@@ -149,24 +145,6 @@ const F_STAT = {
 const F_STAT_OUT = {
   name: '--stat-out', arity: 1, value: 'FILE',
   brief: '依赖图写到 FILE —— `.dot`（graphviz）/ `.json` 按后缀定',
-};
-/**
- * 两张图**逐格相减**（只在 `--engine graph` 那一路有意思）：本文件是基线，`FILE` 是变换后。
- * 这一格是 `docs/design/node-graph-shrink.md` 第三条要求（「变换是减法：每个 pass 要能报出
- * 删了几格节点」）的量尺 —— 没有它，「缩了没有」只能靠感觉。
- */
-const F_STAT_DIFF = {
-  name: '--stat-diff', arity: 1, value: 'FILE',
-  brief: '（--engine graph）拿 FILE 的图当变换后，按 op 逐格相减（+ 是胀，- 是缩）',
-};
-/**
- * 图这一层的**第一个 pass**（`src/core/graph/shrink.js`）：常量折叠 + 死绑定删除。
- * 开关本身就会把账印出来（折了几格、删了几格）—— 那是 shrink 文档第三条要求的字面意思，
- * 不是 `-v` 才有的调试话。再给 `--stat` 就连按 op 的差表一起印。
- */
-const F_SHRINK = {
-  name: '--shrink', arity: 0,
-  brief: '（--engine graph）先缩一遍图：常量折叠 + 死绑定删除，并报出删了几格',
 };
 
 /* ---- C 前端那几格（`-I` 这种只在这儿出现，不在顶层）。 */
@@ -374,30 +352,24 @@ uniform 由 --set 给，没给的按 0；一个名字对一串数，逗号分开
 （与 timeout(1) 同一个约定）；跑在本进程里（--interp 与编成 JS 直接 eval 那条）
 只能开枪，退出码 137 —— 被 SIGKILL 的进程没有机会再设自己的退出码。
 
-${graphEngineHelp()}
-
-  omni run ext/lua/examples/basics.lua --engine graph
-  omni run x.lua --engine graph --lang gsl-shell        （--lang 盖过后缀）
-  omni run ext/cpp/examples/basics.cpp --engine graph --backend wat
-
-**借来的那些语言不用给 --engine**：它们与 .c 一样按后缀选前端 ——
-译成核心方言（.sx，落在 .omni-cache/src-sx/<内容哈希>/）之后走的是和 .sx 输入
-一模一样的那条路，所以 --backend / --cc / --profile / 摇树 / 暖存全都照旧管用：
+**借来的那十一门语言与 .c 一样按后缀选前端**（ADR-0044：一门语言一份 adapter）——
+译成核心方言（.sx）之后走的是和 .sx 输入一模一样的那条路，所以
+--backend / --cc / --profile / 摇树 / 暖存全都照旧管用：
   omni run bench/go/fib.go                      跑掉（默认 js 那条腿）
   omni build bench/go/pt.go -o pt               原生二进制（一条命令，不用先落 .sx）
   omni build ext/chez/examples/basics.ss -o s   Scheme 也一样
   omni emit c bench/go/pt.go                    看生成的 C
-后缀名单从 graph/langs.js 那张表算；**已经有主的后缀不抢**（.lua 归它自带的读入器）。
-给了 --engine graph 才切到图那一层的后端（那儿的 --backend 是另一套名字）。`,
+  omni run x.lua --lang gsl-shell               --lang 盖过后缀
+后缀名单从 src/core/lower/langs.js 那张表算；**已经有主的后缀不抢**（.lua 归它自带的读入器）。`,
       flags: [F_MODE, F_WORK, F_BACKEND, F_INC, F_LEG_INTERP, F_LEG_MIR, F_OUT, F_EMIT_SX,
         /* `run` **没有** `--arch`/`--os`/`--sysroot`：它本来就跑在这台机器上，
          * 交叉编译出来的东西这儿跑不动。要换编译器或换 libc 才有意义，所以只有这两格
          * （`--libc self` 那一趟的 sysroot 按本机取自带的，不用给）。 */
         F_CC, F_LIBC, F_MODULES, F_ONE_FILE, F_PROFILE, F_PROFILE_OUT, F_NO_TRIM,
         F_DIRECT, F_LANG_DIRECTIVE,
-        /* `--stat` 在 `run` 上只对 `--engine graph` 那一路有话说（图的形状与结构）——
+        /* `--stat` 在 `run` 上只有 js 那条腿有话说 ——
          * 另一台机器的构建统计要 `build --stat`（那儿才有 cgen 的产出分布）。 */
-        F_STAT, F_STAT_OUT, F_STAT_DIFF, F_SHRINK,
+        F_STAT, F_STAT_OUT,
         { name: '--engine', arity: 1, value: 'E',
           brief: 'omni（默认：前端 -> OIR -> 后端）| graph（节点图 + 契约五问）' },
         { name: '--lang', arity: 1, value: 'L',
@@ -420,30 +392,21 @@ ${graphEngineHelp()}
     {
       name: 'build', key: 'build', usage: 'FILE -o NAME',
       brief: '编译成产物',
-      help: `--engine graph 时落的是**图那一层的产物**（语言按 --lang / 后缀定，同 run）：
-  --backend wat  一份自足的 wasm 模块（宿主面就是那四格 print_* 导入）—— 默认。
-                 **产物按 -o 的后缀定**：.wat 落文本、**.wasm 落二进制**（真引擎吃的是它）
-  --backend sx   一份图的序列化（fromSx 读得回来）
-  --backend js   一份**自足的 .mjs**（钩子摊在最前面，node 直接跑）—— 默认 -o 后缀是 .mjs
-  --backend interp 没有产物：它就是 graph.eval
+      help: `借来的那十一门语言与 .c 一样按后缀选前端（ADR-0044）——
+译成核心方言之后走的是和 .sx 输入一模一样的那条路，所以下面这些开关全照旧管用：
 
-  omni build ext/cpp/examples/basics.cpp --engine graph --backend wat -o basics.wat
-  omni build ext/lua/examples/intmath.lua --engine graph -o intmath.wasm   （二进制，V8 直接吃）`,
+  omni build bench/go/pt.go -o pt                        原生二进制（一条命令）
+  omni build ext/chez/examples/basics.ss -o s            Scheme 也一样
+  omni build tests/go/cases/29-strings.go --pkgs src/lib/go/strings -o s29`,
       flags: [F_OUT, F_MODE, F_WORK, F_BACKEND_BUILD, F_INC, F_STATS, F_EMIT_SX,
         ...C_TARGET_FLAGS,
         F_SYSROOT, F_LIBC, F_CC, F_MODULES, F_ONE_FILE,
-        F_PROFILE, F_PROFILE_OUT, F_STAT, F_STAT_OUT, F_STAT_DIFF,
-        F_SHRINK, F_LANG_DIRECTIVE,
-        { name: '--engine', arity: 1, value: 'E',
-          brief: 'omni（默认）| graph（节点图：产物是 wat / wasm / sx）' },
+        F_PROFILE, F_PROFILE_OUT, F_STAT, F_STAT_OUT,
+        F_LANG_DIRECTIVE,
         { name: '--lang', arity: 1, value: 'L',
-          brief: '（graph）这份源码归哪门语言，**优先于文件名后缀**' },
-        { name: '--pkg', arity: 0,
-          brief: '（graph）把同目录下所有同语言文件一起编（go 的包 = 一个目录）' },
+          brief: '这份源码归哪门语言，**优先于文件名后缀**' },
         { name: '--pkgs', arity: 1, value: 'DIR,DIR,...',
-          brief: '（graph）按拓扑序编多个包目录到一张图（逗号分隔绝对路径）' },
-        { name: '--pkgs-root', arity: 1, value: 'DIR',
-          brief: '（graph/go）扫 import 自动发现同级依赖包' },
+          brief: '（借来的语言）按拓扑序把这几个目录里的源文件一起编（逗号分隔）' },
         { name: '--plugin', arity: 1, value: 'NAME', brief: '出一格插件动态库，NAME 是它的 register 函数' },
         { name: '--fat', arity: 0, brief: '把所有语言都编进核心（默认是薄核心 + plugins/）' },
         { name: '--extern', arity: 0, brief: '生成的函数用外部链接并导出（插件要能绑到它）' },

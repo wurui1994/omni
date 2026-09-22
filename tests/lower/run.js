@@ -21,13 +21,13 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LANGS } from '../../src/core/graph/langs.js';
+import { LANGS } from '../../src/core/lower/langs.js';
 import {
   BASICS, INTMATH, LOOPEXIT, DICT, UNARY, RECORD, INDEX, SLICE, CONV, VALUES, MUT,
   DEFER, BLOCKRET, METHOD, ASSERTOK, STRCAT, NUMSTR, NAMEDARG, CASEFOR, CASERANGE,
   CTIF, MEMBER, BLOCKSCOPE, BITS, CHARLIT, CTCONST, DECLS, ENUMVAL, FNVAL, FORIN,
   HOIST, LITNONE, MATCH, METHOD2, OPTRES, POINTER, POSINIT, PUSH,
-} from '../graph/cases.js';
+} from '../lib/cases.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = join(ROOT, 'src/core/cli.js');

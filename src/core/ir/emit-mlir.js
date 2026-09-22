@@ -6,7 +6,7 @@
 //
 // 路径：lua CST → 这份 → MLIR（llvm 方言）→ mlir-translate → LLVM IR → clang + lua-rt.o → 可执行
 
-import { tag, kids, leaf, isList } from '../graph/fromtree.js';
+import { tag, kids, leaf, isList } from '../lower/cst.js';
 
 const MLIR_PRELUDE = `module {
   llvm.func @omni_val_add(i64, i64) -> i64

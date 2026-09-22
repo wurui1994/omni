@@ -2,14 +2,11 @@
 //
 //   源码 → GLR → CST → adapter(语言) → 标准 IR → lower(公共) → .sx text
 //
-// 与图那一条（`graph/run.js` 的 `graphOf` + `backend-core.js`）比，这条路少两层中间表示：
-// 没有节点图、没有"把图翻回文本"那一道。每门语言剩下的只有一份 adapter，语义降级只有一份。
-//
 // 这一份**只管接线**：读语法、解析、叫 adapter、叫公共降级器。一格语义都不加 ——
 // 语言的知识在 adapter 里，方言的形状在 `sx.js` 里。
 //
-// 登记处仍旧是 `graph/langs.js`（一门语言一格：语法 · adapter · 后缀）。那份表还长在
-// `graph/` 底下是因为图那一层还有几门没迁完；十一门全迁完之后它跟着搬出来（ADR-0044 第五片）。
+// 登记处是旁边那份 `langs.js`（一门语言一格：语法 · adapter · 后缀）。
+// **`cli.js` 的入口是这一份的 `coreSxText` 与 `borrowedExts`**（十一门全走这条路）。
 
 import { loadGrammarTable } from '../glr/load.js';
 import { lexText } from '../glr/lex.js';
@@ -18,10 +15,10 @@ import { Diagnostics, SourceFile, OmniError } from '../source/diag.js';
 import {
   readText, stderr, exists, readDir,
 } from '../host/native.js';
-import { pickLang, treeRoot } from '../graph/langs.js';
+import { pickLang, treeRoot, LANGS } from './langs.js';
 import { lower } from './lower.js';
 
-/** 一份路径的目录（宿主那侧不供这一格 —— 与 `graph/run.js` 里那一行同一条办法）。 */
+/** 一份路径的目录（宿主那侧不供这一格）。 */
 const dirOf = (p) => (p.lastIndexOf('/') >= 0 ? p.slice(0, p.lastIndexOf('/')) : '.');
 
 /** 一门语言迁到公共降级器了没有（登记处那一格 `toIR` 就是答案）。 */
@@ -117,8 +114,33 @@ export function sxTextOf(path, argv = []) {
   }
 }
 
-/** 一格 `--flag VALUE`（与 `graph/run.js` 那份同一条规矩：不认 `--flag=VALUE`）。 */
+/** 一格 `--flag VALUE`（不认 `--flag=VALUE` —— 整条链一条规矩）。 */
 function cliArg(argv, name) {
   const i = argv.indexOf(name);
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : null;
+}
+
+/**
+ * **按后缀能猜到哪一门**（登记处那张表算出来的，不在别处手抄）。
+ * `cli.js` 拿它判"这份文件是借来的语言吗" —— 加一门语言只改登记处那一处。
+ * `guess: false` 的那几门不参与（gsl-shell 的 `.lua` 归 lua，只能 `--lang` 点名）。
+ */
+export function borrowedExts() {
+  const out = new Set();
+  for (const [, d] of LANGS) {
+    if (d.guess === false) continue;
+    for (const e of d.exts) out.add(`.${e}`);
+  }
+  return [...out];
+}
+
+/**
+ * 源码 → 核心方言文本（`.sx`）。**这是 `cli.js` 那一侧的名字**。
+ *
+ * `.go` 这类文件与 `.c` 一样，**就是这条链的一个前端**：译成 `.sx` 之后走的是与 `.sx`
+ * 输入一模一样的那条路（lower → OIR → MIR → 原生 / js / llvm，还有 `--cc` /
+ * `OMNI_MIR_OPT` / 摇树 / profile），所以下游一行都不用再写。
+ */
+export function coreSxText(path, argv) {
+  return sxTextOf(path, argv);
 }

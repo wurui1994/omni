@@ -6,7 +6,7 @@
 // 寄存器分配是**栈规矩**：局部量占 0..nlocals-1 固定格，临时值从水位线往上开，
 // 表达式算完就退回去。够用且好查（v8 的生成器也是这个形状：局部量固定、临时按栈）。
 
-import { tag, kids, leaf, isList } from '../graph/fromtree.js';
+import { tag, kids, leaf, isList } from '../lower/cst.js';
 import { OP, Buf } from './bc.js';
 
 class Proto {

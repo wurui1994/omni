@@ -297,36 +297,46 @@ vlang 那一门带出来的两笔公共账：
 - 三段式 `for` 的 init **要自己一层作用域**（摊在 while 前面的话，同一个函数里第二格
   `for i := …` 撞名，方言那侧当场报）。
 
-### 第四片：Go（**图上只剩这一门**）
+### 第四片：Go ✓（2026-09-23 迁完）
 
-Go 最后动。它的 adapter 最大（4900 行的 tograph.js + 205 行 `go.mapping`），而且它是**唯一
-一门判据不止"例子的输出"的语言** —— 下面这张清单是量出来的，照它做：
+Go 最后动，也是唯一一门**判据不止"例子的输出"**的语言。落成五份（按关注点拆，不堆在一格
+adapter 单文件里）：
 
-**多文件那一格已经做了一半**（2026-09-22）：`drive.js` 会读**旁边那几份同语言的文件**
-（`lang.imports` + `toIR(tree, { also })`，判据 `tests/lower/modules.js` 7/7）。
-**还欠 `--pkgs`**：那是"好几个**包**各自一格模块、按拓扑序拼、各自一个平名字空间"，
-比"旁边那几份"多一层。`drive.js` 现在对 `--pkg/--pkgs/--pkgs-root` 明着报。
+- `ext/go/adapter/expr.js` —— 表达式 · 类型 · 字面量 · 转换 · 无类型常量
+- `ext/go/adapter/index.js` —— 声明与语句（六遍半）
+- `ext/go/adapter/iface.js` —— 接口 = **方法闭包的记录**（ADR-0040）
+- `ext/go/adapter/conc.js` —— goroutine / channel / select 走 `(ccall omni_go_*)`
+- `ext/go/adapter/stdlib.js` —— `math` 内建、别的包靠 `--pkgs` 的桩、宿主入口走 ccall
 
-go 这一门要过的判据（按先后）：
-1. `ext/go/examples` 那 29 份 —— 基线是 **24 绿 / 5 红**（`format` / `mapiter` / `postest` /
-   `scanutil` / `syntaxpkg` 那五份要 `--pkgs` 或标准库桩，`omni run` 裸跑本来就红）；
-2. `--pkgs` 落地 → `tests/go/run.js` 那 **46 份逐字节与 `go run` 相同**（源码头上
-   `//omni:pkgs a,b,c` 指桩）。这一批里有**图上没有的东西**：goroutine / channel / select
-   （走 ccall，不加节点族）、接口（ADR-0040 的"方法闭包的记录"）、type switch、变参、
-   `map[K]接口`、`strings`/`strconv`/`sort`/`rand`/`time` 那几份桩；
-3. go 编译器自举那一轴（52/52 包）与 pt 基准逐字节相同；
-4. 删 `ext/go/tograph.js` 与 `ext/go/go.mapping`（吸收进 adapter）。
+**判据（都过了）**：`tests/go/run.js` **46 passed / 0 failed / 0 skipped**（原生腿的 stdout
+与 `go run` 逐字节相同）；144 份借来的例子与迁移前基线比 142 份相同 + 2 份红转绿。
 
-**一门语言只许有 `toIR` 或 `toGraph` 一格**（登记处那条规矩）—— 所以 go 不许"例子走
-adapter、`--pkgs` 走图"那样半迁：第 2 步不过，第 4 步就不动。
+这一门带出来的**公共**账（十一门共用，不是给 go 开的口子）：
 
-### 第五片：清理（**graph 整个拆掉**）
+- **闭包**：`(cfn …)` / `(mkclo …)` / `(cap …)` —— go 的接口、cpp 的 lambda、jnc 的函数值同一格；
+- **借外头那份 C**：`(lib …)` / `(cabi …)` / `(ccall …)`。**`fn` 那一格要写成 `ptr`**
+  （方言的 cabi 只认 i32/i64/f32/f64/bool/ptr）；
+- **实数数学**：`(rmath "sqrt" …)`；
+- `ty-of.js` 补齐：下标与 cast 的类型、串那一族回 string、无符号四个比较回 bool；
+- **无类型常量按任意精度折**（`1 << 63` 当 real 用是正的、当 int 用才是最小的 int64）——
+  不折就是一格静默的错答案（`math/rand` 的 `Float64` 全变负数）。
 
-1. 删 `src/core/graph/` 整个目录（12250 行）
-2. 语言登记处（`langs.js`）搬到图外面（`src/core/lang/registry.js`），`borrowedExts()` 跟着搬
-3. 去掉 `--engine graph` 这个开关（`cli.js` / `cmds.js` / `studio` 那几处接线）
-4. 删 `tests/graph/`（3706 行）与 `tests/lib/mapping-check.js`、`ext/*/*.mapping`、`bench/tograph.js`
-5. **判据**：`tests/lower/run.js` 十一门全绿 + 全量判据不变（wat / c / 原生那几条腿归主管线判）
+三处明说的近似：模块级 var 的初始化不是真依赖排序（纯字面量先赋、带调用后赋）、
+`interface{}`（any）当场报、按键遍历字典当场报。
+
+### 第五片：清理 ✓（**graph 整个拆掉**，2026-09-23）
+
+1. 删 `src/core/graph/` 整个目录 ✓
+2. 语言登记处搬到 `src/core/lower/langs.js`，`borrowedExts()` / `coreSxText()` 搬到
+   `src/core/lower/drive.js` ✓
+3. 去掉 `--engine graph`（`cli.js` / `cmds.js` / `studio` 三处接线）✓ ——
+   给别的 `--engine` 名字当场报一句人话
+4. 删 `tests/graph/`、`tests/lib/mapping-check.js`、`ext/go/go.mapping`、`bench/tograph.js` ✓
+   （`tests/graph/cases.js` 那张**例子表**留着，搬到 `tests/lib/cases.js` —— 它被
+   `tests/lower/run.js` 与 `tests/grammar/delete.js` 两条判据用，与图没有关系）
+5. **判据**：`tests/lower/run.js` 202/0 · `tests/lower/modules.js` 7/7 · `tests/go/run.js` 46/0 ·
+   `tests/studio/run.js` 17/0 · `tests/grammar/delete.js` 446/0 · `npm run check:self` 绿 ·
+   144 份例子与基线比只多两份红转绿
 
 ### 第六片：Lab v2 语义层
 

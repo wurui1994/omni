@@ -6,23 +6,21 @@
  *
  * ## 这条腿能跑什么
  *
- * **图那一条**（`--engine graph`：go / nim / v / lua / mojo / cpp / awk / basic /
- * scheme / lisp 那十一门），因为它从头到尾只用封闭 ABI 上的那几格，而
+ * **借来的那十一门**（go / nim / v / lua / mojo / cpp / awk / basic / scheme / lisp …），
+ * 因为这条路从头到尾只用封闭 ABI 上的那几格，而
  * `host/browser.js` 全答得出来。`.sx` / `.asy` / `.jnc` / `.c` 那几条走的是
  * `cli.js` 里那台机器（模块级全局 + 子进程 cc），页面上答一句"这一步要 serve" ——
  * 那是事实，不是欠账：浏览器里没有 `fork`。
  *
  * ## 为什么不 import `cli.js`
  *
- * 那份文件末尾就 `main(procArgs())` —— import 它等于当场跑一趟。图那一层的入口
- * （`graph/run.js` 的 `runGraphFile`）本来就是导出的，直接用它。
+ * 那份文件末尾就 `main(procArgs())` —— import 它等于当场跑一趟。所以这一份自己接线：
+ * 借来的语言走公共降级器（`lower/drive.js`），与终端上的 `omni run` 是同一份实现。
  */
 
-import { runGraphFile, graphBackendNames } from '../core/graph/run.js';
-import { borrowedExts } from '../core/graph/run.js';
-/* 迁到公共降级器的那几门（ADR-0044）：这条腿也走那条路 —— 同一份降级器，不是第二份实现。 */
-import { hasAdapter, sxTextOf } from '../core/lower/drive.js';
-import { pickLang } from '../core/graph/langs.js';
+/* 借来的那十一门（ADR-0044）：adapter → 标准 IR → 公共 lower → `.sx` → OIR → 解释器。 */
+import { hasAdapter, sxTextOf, borrowedExts } from '../core/lower/drive.js';
+import { pickLang } from '../core/lower/langs.js';
 import { lowerCoreSexpr } from '../core/sexpr/lower.js';
 import { interpret } from '../core/interp/eval.js';
 import { Diagnostics, SourceFile } from '../core/source/diag.js';
@@ -35,11 +33,11 @@ import {
    那条路上 `import './render.js'` 是**跨源请求**，浏览器直接拦掉。
    所以这儿把它整个挂到 window 上，打包脚本把 `studio.js` 那条 import 改成读这一格。 */
 import * as render from './render.js';
-/** 图那一条腿吃得下的后缀（`borrowedExts()` 是权威，不在这儿抄第二张表）。 */
-let GRAPH_EXTS = null;
-function graphExts() {
-  if (GRAPH_EXTS === null) GRAPH_EXTS = new Set(borrowedExts());
-  return GRAPH_EXTS;
+/** 借来的语言吃得下的后缀（`borrowedExts()` 是权威，不在这儿抄第二张表）。 */
+let SRC_EXTS = null;
+function srcExts() {
+  if (SRC_EXTS === null) SRC_EXTS = new Set(borrowedExts());
+  return SRC_EXTS;
 }
 
 const extOf = (p) => (p.lastIndexOf('.') < 0 ? '' : p.slice(p.lastIndexOf('.')));
@@ -47,7 +45,7 @@ const extOf = (p) => (p.lastIndexOf('.') < 0 ? '' : p.slice(p.lastIndexOf('.')))
 /**
  * 跑一条 omni 命令。回 `{ stdout, stderr, code }` —— 与服务那侧 `runOmni` 同一个形状。
  *
- * 只认 `run`（与 `--engine graph` 隐含）：`build` 要链接器与 cc，`emit` 的那十几种
+ * 只认 `run`：`build` 要链接器与 cc，`emit` 的那十几种
  * 格式住在 `cli.js` 的巨型 switch 里。认不了的**明着说要 serve**，不假装。
  */
 function runArgv(argv) {
@@ -64,10 +62,10 @@ function runArgv(argv) {
   const path = rest.find((a) => !a.startsWith('-'));
   if (path === undefined) return { stdout: '', stderr: 'omni run: 要一个文件\n', code: 2 };
   if (!exists(path)) return { stdout: '', stderr: `omni run: 找不到 ${path}\n`, code: 1 };
-  if (!graphExts().has(extOf(path))) {
+  if (!srcExts().has(extOf(path))) {
     return {
       stdout: '',
-      stderr: `omni run ${path}: 单体 HTML 这一份只跑图那一条腿（${[...graphExts()].join(' ')}）。\n`
+      stderr: `omni run ${path}: 单体 HTML 这一份只跑借来的那几门（${[...srcExts()].join(' ')}）。\n`
         + `${extOf(path)} 那一条走的是 cli.js 里那台机器 —— 请用 \`omni serve\`。\n`,
       code: 2,
     };
@@ -87,19 +85,17 @@ function runArgv(argv) {
 }
 
 /**
- * 跑一份源码。**两条路**，按登记处那一格分（ADR-0044）：
- *
- *   * 有 `toIR` 的那几门 —— adapter → 标准 IR → 公共 lower → `.sx` → OIR → 解释器
- *     （`interp/eval.js`）。这条路上一个子进程都不起、一个模块级全局都不碰，
- *     所以浏览器里走得通 —— 与 `omni run` 在终端上走的是同一份降级器。
- *   * 还在图那一层的那几门 —— 老路（`runGraphFile`，图 + `graph/eval.js`）。
- *
- * 十一门全迁完之后这儿只剩上面那一支（图那一层整个拆掉，见 ADR-0044 §1.6）。
+ * 跑一份源码：adapter → 标准 IR → 公共 lower → `.sx` → OIR → 解释器（`interp/eval.js`）。
+ * 这条路上一个子进程都不起、一个模块级全局都不碰，所以浏览器里走得通 ——
+ * 与 `omni run` 在终端上走的是**同一份**降级器（ADR-0044）。
  */
 function runOne(path, rest) {
   let lang = null;
   try { lang = pickLang(path, null); } catch { lang = null; }
-  if (!hasAdapter(lang)) return runGraphFile(path, rest);
+  if (!hasAdapter(lang)) {
+    stderr(`omni run ${path}: 这一门还没有 adapter（登记处那一格 toIR）\n`);
+    return 1;
+  }
   const sx = sxTextOf(path, rest);
   if (sx === null) return 1;                     /* 语法说不通 —— 诊断已经印过了 */
   const diags = new Diagnostics();
@@ -120,7 +116,7 @@ async function localApi(path, init) {
   const params = new URLSearchParams(q < 0 ? '' : path.slice(q + 1));
 
   if (route === '/api/health') {
-    return { ok: true, version: '0.1', legs: ['graph'], standalone: true };
+    return { ok: true, version: '0.1', legs: ['borrowed'], standalone: true };
   }
   if (route === '/api/tree') return buildTree('');
   if (route === '/api/file' && method === 'PUT') {
@@ -173,12 +169,10 @@ async function localApi(path, init) {
   throw new Error(`单体 HTML 这一份没有 ${route}`);
 }
 
-/* 装上内联的那张表，再把这台"服务"挂到 UI 认的那一格上。
-   `graphBackendNames()` 提早叫一次是为了让"有哪几条腿"这件事在健康检查之前就定了。 */
+/* 装上内联的那张表，再把这台"服务"挂到 UI 认的那一格上。 */
 if (typeof window !== 'undefined') {
   mountFiles(window.__OMNI_VFS ?? {});
   window.__OMNI_LOCAL = localApi;
-  window.__OMNI_BACKENDS = graphBackendNames();
   window.__OMNI_RENDER = render;
 }
 

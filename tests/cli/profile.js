@@ -196,7 +196,6 @@ const FIB_CALLS = '635621';
  *   stub   js 腿上**真的能量**（我们自己插的那一对，两个后端发的都是我们的代码）
  *   cc     js 腿上没有（它是外部 C 编译器的 -finstrument-functions）
  *   sample js 腿上还没接（要 node 自己那台 V8 采样器）—— 有名有姓地欠着
- *   graph  那台机器（--engine graph）三档都还没有
  */
 {
   const r = omni(['run', FIB, '--profile', 'stub']);
@@ -265,12 +264,13 @@ const FIB_CALLS = '635621';
   } else bad('--direct stub 要报错', `rc=${r.status} ${s.slice(0, 300)}`);
 }
 {
+  /* **`--engine` 只剩一台**（ADR-0044：节点图那一层拆掉了）：给别的名字要当场报。 */
   const lua = join(ROOT, 'ext', 'lua', 'examples', 'basics.lua');
-  const r = omni(['run', '--engine', 'graph', lua, '--profile', 'stub']);
+  const r = omni(['run', '--engine', 'graph', lua]);
   const s = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.status !== 0 && s.includes('graph 这条腿上没有')) {
-    ok('graph 那台机器：三档都还没有，当场报');
-  } else bad('graph 腿要报 profile 没接', `rc=${r.status} ${s.slice(0, 300)}`);
+  if (r.status !== 0 && s.includes('没有 --engine graph 这一条')) {
+    ok('--engine 只剩 omni 一台：别的名字当场报');
+  } else bad('--engine graph 该当场报', `rc=${r.status} ${s.slice(0, 300)}`);
 }
 /* ---- 三、`.c` **输入**那条腿（`c-src`，第一百四十七片第六格）
  *

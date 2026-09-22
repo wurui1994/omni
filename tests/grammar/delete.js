@@ -42,7 +42,7 @@ import { printSexpr } from '../../src/core/sexpr/print.js';
 import { lexText } from '../../src/core/glr/lex.js';
 import { glrParse } from '../../src/core/glr/driver.js';
 import { Diagnostics, SourceFile } from '../../src/core/source/diag.js';
-import { CASES } from '../graph/cases.js';
+import { CASES } from '../lib/cases.js';
 
 const ROOT = `${join(dirname(fileURLToPath(import.meta.url)), '../..')}/`;
 const argv = process.argv.slice(2);

@@ -53,12 +53,11 @@ import { verifyMir } from './mir/verify.js';
 import { dumpBytes } from './mir/bytes.js';
 import { IncrCache, compileIncremental, incrReport } from './incr/cache.js';
 import { Diagnostics, OmniError, SourceFile } from './source/diag.js';
-/* `--engine graph`（那十门语言 -> 节点图 -> 契约五问）。**静态 import 是有代价的**：
- * 它把十份 tograph.js（`ext/<lang>/tograph.js`）一起拽进核心，与"薄核心 + plugins"
- * 那条路是反着的。现在这么写是因为那十份都是纯 JS、小、且没有别的依赖；哪天核心大小
- * 要紧了，正解是把 graph 这台机器登记成一格 lang / plugin（`lang/builtin.js` 那一套），
- * 不是在这儿加一句 `await import`（这份文件里 44 个 import 全是静态的，只有一套规矩）。 */
-import { runGraphFile, buildGraphFile, coreSxText, borrowedExts } from './graph/run.js';
+/* **借来的那十一门语言**（ADR-0044）：一门一份 adapter，CST → 标准 IR → 公共降级器 → `.sx`。
+ * 静态 import 是有代价的（十一份 adapter 一起进核心），可它们都是纯 JS、小、没有别的依赖；
+ * 哪天核心大小要紧了，正解是把它登记成 lang / plugin，不是在这儿加一句 `await import`
+ * （这份文件里那几十个 import 全是静态的，只有一套规矩）。 */
+import { coreSxText, borrowedExts } from './lower/drive.js';
 /* 构建引擎（`omni ninja`）：依赖图 + 脏判定 + 调度，不认识语言 —— 设计见
  * `docs/design/build-system.md`，模型照 ninja 复刻。 */
 import { ninjaCmd } from './build/cli.js';
@@ -726,7 +725,6 @@ function profLeg(key, path, rest) {
     const i = rest.indexOf(n);
     return i >= 0 ? rest[i + 1] : null;
   };
-  if (val('--engine') === 'graph') return 'graph';
   /* `--direct`（原样交给 node）是**另一条腿**：那份 js 不经我们的发射器，所以发射期插桩
    * 在它上头不成立，而 node 自己那台采样器成立。 */
   if (rest.includes('--direct')) return 'node';
@@ -800,7 +798,7 @@ function profCheckLeg(mode, leg) {
   }
   throw new OmniError(`--profile ${mode} 在 ${leg} 这条腿上没有：现在 `
     + `${has('cc')} · ${has('stub')} · ${has('sample')}`
-    + `${leg === 'graph' ? '。graph 那台机器（--engine graph）的 profile 还没接' : ''}`);
+    );
 }
 
 /**
@@ -4965,9 +4963,8 @@ function main(argv) {
    * `c obj x.c` 那些动词吃的是**这份文件本身**，把 `path` 换掉就等于换了它们的输入 ——
    * 量到过：不加这条判断，`glr` 与 `sexpr` 两套判据整套翻红。
    *
-   * `--engine graph` 给了就不接管 —— 那是点名要另一层的后端（interp/js/wat/c/sx）。
    */
-  if (path !== undefined && path !== null && !rest.includes('--engine')
+  if (path !== undefined && path !== null
       && ['run', 'build', 'emit', 'check'].includes(node.key)
       && lang(path) === null && borrowedExts().some((e) => path.endsWith(e))) {
     const sx = coreSxText(path, rest);
@@ -4997,47 +4994,23 @@ function main(argv) {
     files[0] = sxPath;
   }
   /**
-   * **`--engine graph`（第十八批）：切到节点图那台机器**（ADR-0033 + 契约五问）。
-   *
-   * 摆在这儿的理由与 `.c` 那一处一模一样：下面那张 `--backend` 表会把 `run` 改写成
-   * 别的动词（`--backend interp` -> `cmd = 'interp'`），改写完就绕过 `case 'run'` 里
-   * 按扩展名分派的那条规矩。而图这一层的 `--backend` 是**它自己那四条**
-   * （interp / sx / js / wat），与 OIR 那条腿的同名参数不是一回事 ——
-   * **分派必须在 backend 翻译之前**。
-   *
-   * 语言由 `--lang` 定，没给才按后缀猜（`graph/langs.js`）。
+   * **`--engine` 只剩一台**（ADR-0044）：`omni`（前端 → OIR → 后端）。
+   * 节点图那台机器（`--engine graph`）随着十一门语言全迁到公共降级器一起拆掉了 ——
+   * 借来的语言现在与 `.c` 一样按后缀选前端，不用给 `--engine`。
    */
-  if (node.key === 'run' && rest.includes('--engine')) {
+  if ((node.key === 'run' || node.key === 'build') && rest.includes('--engine')) {
     const ei = rest.indexOf('--engine');
     const eng = ei + 1 < rest.length ? rest[ei + 1] : null;
-    if (eng === 'graph') {
-      if (path === undefined || path === null) throw new OmniError('run --engine graph 要一个源文件');
-      return runGraphFile(path, rest);
-    }
     if (eng !== null && eng !== 'omni') {
-      throw new OmniError(`没有 --engine ${eng} 这一条 —— 现在两台：omni（默认，前端 -> OIR -> 后端）`
-        + '与 graph（节点图 + 契约五问，见 `omni run --help`）');
+      throw new OmniError(`没有 --engine ${eng} 这一条 —— 现在只有一台：omni（默认，前端 -> OIR -> 后端）。`
+        + '借来的语言按后缀选前端，不用给 --engine（ADR-0044）');
     }
   }
   /* `run --stat` 在 js 那条腿上现在**有账可报**（时间 + 各层的账，见 `statReport`）；
    * 别的腿（llvm / jit / interp）还没接上那张表 —— 一声不响是最坏的，所以说一句。 */
-  if (node.key === 'run' && STAT !== null && !rest.includes('--engine')
-    && rest.indexOf('--backend') >= 0) {
-    stderr('omni: run --stat：这一趟的后端还没接上那张表 —— js 腿（默认）与 '
-      + '`--engine graph` 有，`build --stat` 上是全的\n');
-  }
-  /* `build --engine graph -o OUT`：把那条腿的产物落成文件（wat / sx 有产物，
-   * js 与 interp 各有一句说清为什么没有 —— 见 `graph/run.js` 的 buildGraphFile）。 */
-  if (node.key === 'build' && rest.includes('--engine')) {
-    const ei = rest.indexOf('--engine');
-    const eng = ei + 1 < rest.length ? rest[ei + 1] : null;
-    if (eng === 'graph') {
-      if (path === undefined || path === null) throw new OmniError('build --engine graph 要一个源文件');
-      return buildGraphFile(path, rest);
-    }
-    if (eng !== null && eng !== 'omni') {
-      throw new OmniError(`没有 --engine ${eng} 这一条 —— 现在两台：omni 与 graph`);
-    }
+  if (node.key === 'run' && STAT !== null && rest.indexOf('--backend') >= 0) {
+    stderr('omni: run --stat：这一趟的后端还没接上那张表 —— js 腿（默认）有，'
+      + '`build --stat` 上是全的\n');
   }
   /* `run`/`build --backend B`（决策一）：同样先只做翻译。 */
   if (cmd === 'run' || cmd === 'build') {

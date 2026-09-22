@@ -73,13 +73,6 @@ const SUITES = [
      还有一条**中性** —— 不带那一行的文件一个字节都不受影响（词法与 s-expr 读入器各加了
      "跳第一行"那一手，它们只在真有那一行时动）。 */
   { s: 'cli/lang.js' },
-  /* 图那条 js 腿的**自足产物**（第一百五十一片）：`build --backend js` 落的 `.mjs`
-     node 直接跑，而且与本进程那条腿逐行相同。那条比对同时钉住"钩子的文本版
-     （graph/js_rt.js）不许与 eval.js 分叉"。 */
-  { s: 'graph/js-artifact.js' },
-  /* 同目录下的同语言文件真的 import 进来（借用第一档的第一步）：三门语言 × 两条腿，
-     加"环不许挂死"与"标准库那一格照旧交给映射"。 */
-  { s: 'graph/modules.js' },
   { s: 'oracle/run.js' },
   { s: 'oir/run.js' },
   { s: 'cabi/run.js' }, { s: 'wat/run.js' }, { s: 'glr/run.js' }, { s: 'mir/run.js' },
@@ -92,48 +85,17 @@ const SUITES = [
    * `.o` -> **我们自己的链接器**的可执行文件 -> 输出与解释器逐字节相同。
    * 一个外部工具都不用，所以它守的是「整条自己的路」而不是某一格。 */
   { s: 'selfc/run.js' },
-  /* 公共降级器那条路（ADR-0044）：adapter → 标准 IR → lower → .sx → 真跑一趟。
-     一门语言迁过来之后它在 `tests/graph/` 那张矩阵里的那几格就退出了（`tograph.js` 删掉），
-     判据落这儿 —— 判的是同一件事（例子的输出逐行相同），少两层中间表示。 */
+  /* **借来的那十一门语言唯一的那条路**（ADR-0044）：adapter → 标准 IR → 公共 lower →
+     `.sx` → 真跑一趟，输出逐行相同。节点图那一层（`src/core/graph/` + `tests/graph/`）
+     随着最后一门（go）迁完一起拆掉了 —— 一件事只有一份实现。 */
   { s: 'lower/run.js' },
   /* 同一条路上的**多文件**那一轴：`import util` 里的 util 就在旁边（`drive.js` 读、
      adapter 收 `opts.also`）。这一轴在图那条路上是红的（`unbound name`），这儿是绿的。 */
   { s: 'lower/modules.js' },
-  // 节点图那几条轴：矩阵（语言 × 后端）与**可删除测试**（删一格特性，剩下的照旧跑），
-  // 加上命令行那一侧（`omni run --engine graph`）与那三条公理轴：
-  //   iface.js  G3 子图替换前后接口逐格对上
-  //   order.js  G4 次序与临时量命名逐字节相同、与加载顺序无关
-  //   wasm.js   那份 `.wat` 交给 V8 那台**树外**的 wasm 引擎跑（宿主面另写一遍）
-  // 都在 `tests/graph/` 底下，都只用得着 `src/core/graph` + 各语言的 `.grammar`。
-  { s: 'graph/run.js' }, { s: 'graph/delete.js' }, { s: 'graph/cli.js' },
-  { s: 'graph/iface.js' }, { s: 'graph/order.js' }, { s: 'graph/wasm.js' },
-  //   stat.js   图的形状与结构那把尺子（`--stat`）：数得对、共享只算一次、两遍一样、
-  //             减法是减法 —— 它是 `docs/design/node-graph-shrink.md` 第三条的量尺
-  { s: 'graph/stat.js' },
-  //   shrink.js 第一个 pass（常量折叠 + 死绑定删除）：折 / 不折 / 删 / 不删 / 共享 / 停，
-  //             + 现有例子 × 五条腿输出一字不变 —— shrink 文档第五节第 1 条的判据
-  { s: 'graph/shrink.js' },
-  //   narrow.js 数值窄化（判据 3 的头一半）：只装数的局部量落 C 的 double，
-  //             不该窄的不窄，值位置装回去，C 腿跑出来一样
-  { s: 'graph/narrow.js' },
-  //   shape.js  形状推断（判据 2）：字段名静态可知的记录落 C 的 struct，
-  //             跑出去 / 名单外的字段 / 共享出去的三条不动，各有一格判据
-  { s: 'graph/shape.js' },
-  //   prelude.js 序言按用到的族裁（第七节第 1 条）：裁得动、**不许漏留**（93 份产物里
-  //             用到的 g_* 都要有定义 —— 漏一格就是编不动）、该留的留
-  { s: 'graph/prelude.js' },
-  //   deadcase.js 映射里的**死代码**：`case '标签'` 接的标签，那门语言的语法出得来吗。
-  //             这一格是账上算出来的 —— go 的 `var-decl`/`const-decl` 与 V 的 `type-decl`
-  //             都写在了不存在的标签上（568 份文件卡在墙上），而例子全绿。
-  { s: 'graph/deadcase.js' },
-  //   assertfail.js 断言**不成立**那一路（第二十九批那格节点的另一半）：那句话印出来了没有、
-  //             后面那一句真的没跑。矩阵那张表比不了它 —— 各腿的"停下来"不同形，退出码不在图上。
-  { s: 'graph/assertfail.js' },
-  //   types.js  类型覆盖层（#40）：**推不出来就答 unknown**（七格反向证物）、词汇闭合
-  //             （137 份例子问 5428 格，答的话只许落在设计第二节那张表里）、
-  //             还剩几处"吞掉 unknown"是数出来的（抽出来那天 9 处，现在 2 处）。
-  { s: 'graph/types.js' },
-  // 可删除测试的**第二层**：删一支产生式（语法那一层）。默认只跑两门小语法 ——
+  /* go 这条腿的**端到端**判据：源码 → 公共 lower → MIR 管线 → 原生，stdout 与 `go run`
+     逐字节相同（46 份）。参考是别人的实现，不是我们自己的复述。 */
+  { s: 'go/run.js' },
+  // 可删除测试：删一支产生式（语法那一层）。默认只跑两门小语法 ——
   // 整跑一遍是分钟级的，量出来的数与理由写在那份文件的头上。
   { s: 'grammar/delete.js' },
   { s: 'incr/run.js' }, { s: 'c/run.js' }, { s: 'c/ldscript.js' }, { s: 'c/syscall.js' },

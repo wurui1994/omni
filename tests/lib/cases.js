@@ -1,14 +1,12 @@
-// tests/graph/cases.js —— **例子表：语言 × 家族**（`run.js` 与 `delete.js` 共用一份）
+// tests/lib/cases.js —— **例子表：语言 × 家族**（好几条判据共用一份）
 //
-// 抽出来的理由只有一条：**同一张表要被两条判据用**。
-//   * `run.js`    —— 语言 × 后端的矩阵（输出逐行相同）
-//   * `delete.js` —— **可删除测试**（删掉一格节点，不用它的例子必须照旧全绿）
+// 抽出来的理由只有一条：**同一张表要被几条判据用**。
+//   * `tests/lower/run.js`     —— adapter → 标准 IR → 公共 lower → `.sx` → 真跑一趟
+//   * `tests/grammar/delete.js` —— **可删除测试**（删掉一条产生式，不用它的例子必须照旧全绿）
 // 抄两份的话，加一门语言就要改两处，而其中一处一定会忘。
-
-import { node, lit, program, bin } from '../../src/core/graph/graph.js';
-import { lazyAnd, lazyOr } from '../../src/core/graph/fromtree.js';
-// 语言的登记处（语法 · 映射 · 后缀）。这一份**只挑家族**，不再自己抄一张语言表
-import { LANGS } from '../../src/core/graph/langs.js';
+//
+// 语言的登记处（语法 · adapter · 后缀）。这一份**只挑家族**，不再自己抄一张语言表。
+import { LANGS } from '../../src/core/lower/langs.js';
 
 /**
  * 期望的输出。**一个例子家族一份**，家族里所有语言、所有后端共用 ——
@@ -347,31 +345,25 @@ export const SWITCH = ['10', '20', '30', '2', '4', '3'];
  */
 export const BLOCKSCOPE = ['5', '1'];
 
-const C = (name, grammar, file, toGraph, expect) => ({ name, grammar, file, toGraph, expect });
+const C = (name, grammar, file, expect) => ({ name, grammar, file, expect });
 
 /**
  * 一格例子 = 一门语言 × 一个家族。文件名是**算出来的**
  * （`ext/<lang>/examples/<家族>.<后缀>`）—— 那条命名约定因此不许破，破了当场报"文件没有"。
  *
- * 语法 / 映射 / 后缀三样**从 `src/core/graph/langs.js` 取**（那是登记处）。
- * 这儿原来自己抄了一张同样的表，而它现在有第二个消费者（`omni run --engine graph`）——
- * 抄两份的话加一门语言要改两处，忘掉的那处就是"测试里绿的、命令行上没有"。
+ * 语法 / 后缀两样**从 `src/core/lower/langs.js` 取**（那是登记处）：抄两份的话加一门语言
+ * 要改两处，忘掉的那处就是"测试里绿的、命令行上没有"。
  * 后缀取 `exts[0]`：例子文件用的就是那门语言最常见的那个后缀。
  */
 const fam = (family, expect, langs) => langs.map((lang) => {
   const d = LANGS.get(lang);
   if (d === undefined) throw new Error(`cases.js: langs.js 里没有 ${lang} 这一门`);
-  /* **迁到公共降级器的那几门不在这张矩阵里**（ADR-0044）：它们的 `tograph.js` 删了，
-     图这一层没有它们了。那条判据搬到 `tests/lower/run.js`（adapter → 标准 IR → lower → .sx
-     → 真跑一趟，输出逐行相同）。这儿按 `toGraph` 在不在过滤，**不手抄第二张名单** ——
-     手抄的那张一定会与登记处分叉。 */
-  if (typeof d.toGraph !== 'function') return null;
   return C(family === 'basics' ? lang : `${lang}+${family}`,
-    d.grammar, `ext/${lang}/examples/${family}.${d.exts[0]}`, d.toGraph, expect);
-}).filter((c) => c !== null);
+    d.grammar, `ext/${lang}/examples/${family}.${d.exts[0]}`, expect);
+});
 
-/** 还在图这一层的那几门（迁完的不算 —— 见 `fam` 里那段账）。 */
-const ALL = [...LANGS].filter(([, d]) => typeof d.toGraph === 'function').map(([n]) => n);
+/** 登记处上那几门（一门语言一格 `toIR`，ADR-0044）。 */
+const ALL = [...LANGS].filter(([, d]) => typeof d.toIR === 'function').map(([n]) => n);
 
 export const CASES = [
   // 第一个家族：含全部基础要素的完整例子（九门全有）
@@ -545,140 +537,3 @@ export const CASES = [
  * 手搭的图（不经过任何一门语言）—— 检的是**调度器自己的语义**。
  * 每一条都要有理由说明"为什么不写成语言例子"，否则它该是一份 `examples/`。
  */
-const say = (s) => node('prim', { args: [lit(s)] }, { name: 'print' });
-const num = (n) => node('prim', { args: [lit(n)] }, { name: 'print' });
-export const HAND = [
-  {
-    // break **穿过一格 region**：途中那格 region 的出口（scope-exit）照跑。
-    // 不写成语言例子的理由：go / V 的 defer 是函数作用域、nim 的是块作用域，
-    // 而图上挂的是"最近的一格 region" —— 拿谁的语法当例子都会写歪一门的语义。
-    // 印的是**整数**而不是字符串：字符串在 wat 那条腿上还没有（宿主面只有 print_i64），
-    // 用整数这一格就能在四条腿上一起验 —— 判据能多一条腿就多一条。
-    name: 'hand+break-exit',
-    expect: ['1', '2', '3'],
-    graph: () => program([
-      node('loop', {
-        cond: lit(true),
-        body: [node('region', {
-          body: [
-            node('scope-exit', { action: [num(2)] }),     // 出口动作
-            num(1),                                        // 体
-            node('loop-exit', {}, { kind: 'break' }),      // 早退穿过这格 region
-          ],
-        })],
-      }),
-      num(3),
-    ]),
-  },
-  {
-    // **逆序**：后注册的先跑。同样只用整数，四条腿一起验。
-    name: 'hand+exit-order',
-    expect: ['3', '2', '1', '4'],
-    graph: () => program([
-      node('region', {
-        body: [
-          node('scope-exit', { action: [num(1)] }),
-          node('scope-exit', { action: [num(2)] }),
-          num(3),
-        ],
-      }),
-      num(4),
-    ]),
-  },
-  {
-    // **出口动作在"跑到出口那一刻"求值**，不是在注册那一刻 ——
-    // 这一格钉住的是现在**真实**的语义（不是当初写在注释里的那句）：
-    //   x = 1; scope-exit{ print x }; x = 2   →  印 2
-    // 对 CL 的 `unwind-protect`（清理表在出口求值）与 nim 的 `defer:`（块作用域）**是对的**；
-    // 对 go / V 的 `defer f(x)` **不对** —— 它们的实参在注册那一刻就算好了（该印 1）。
-    // 要两家都对，`scope-exit` 得把 action 拆成"被调者 + 实参各一格端口"，
-    // 注册时把实参算进临时量。那笔账记在 docs/design/node-graph-contract.md A.6.1。
-    name: 'hand+exit-when',
-    expect: ['2'],
-    graph: () => program([
-      node('region', {
-        body: [
-          node('bind', { init: lit(1) }, { name: 'x' }),
-          node('scope-exit', {
-            action: [node('prim', { args: [node('ref', {}, { name: 'x' })] }, { name: 'print' })],
-          }),
-          node('set', { value: lit(2) }, { name: 'x' }),
-        ],
-      }),
-    ]),
-  },
-  {
-    // continue **照跑步进**（`post` 端口那一条）。语言例子里 go 那份也压到了，
-    // 这一条把它单独钉住：步进缀在体末尾的老写法在这儿是死循环。
-    name: 'hand+continue-post',
-    expect: ['0', '2', '9'],
-    graph: () => program([
-      node('bind', { init: lit(0) }, { name: 'i' }),
-      node('loop', {
-        cond: bin('<', node('ref', {}, { name: 'i' }), lit(3)),
-        body: [node('branch', {
-          cond: bin('=', node('ref', {}, { name: 'i' }), lit(1)),
-          then: [node('loop-exit', {}, { kind: 'continue' })],
-        }), node('prim', { args: [node('ref', {}, { name: 'i' })] }, { name: 'print' })],
-        post: [node('set', { value: bin('+', node('ref', {}, { name: 'i' }), lit(1)) }, { name: 'i' })],
-      }),
-      num(9),                      // 整数而不是字符串 —— 好让 wat 那条腿也验得上
-    ]),
-  },
-  {
-    // **打印一格多值**：wasm 上没有 sprintf，所以那一步是运行期造串
-    // （数位数 → 从末位往前填 → 长度写偏移 0，见 backend-wat.js 的 `$__str_join`）。
-    // 不写成语言例子的理由：lua / go 那两份 multi 印的是 1 与 2 —— 单数位、非负，
-    // 把"数位循环"和"负号"两条都盖不住。这一格专挑边界：**负数 · 0 · 多位数**。
-    name: 'hand+multi-print',
-    expect: ['-5 0 42'],
-    graph: () => program([
-      node('prim', {
-        args: [node('values', { args: [lit(-5), lit(0), lit(42)] })],
-      }, { name: 'print' }),
-    ]),
-  },
-  {
-    // **lua 的 `c and X or Y` 折成三目**（core 的 `luaTernary`）。
-    // 不写成语言例子的理由：lua 那份 basics 里已经压着这个写法（`max2`），这一条是
-    // **反向钉住折出来的那张图跑出同一个答案**。手搭是因为要用 `lazyAnd` / `lazyOr`
-    // 直接说图的形状，而不是先过 lua 的映射再指望那边落的恰好就是这个形状。
-    // `(3 > 7) and 3 or 7` -> 3 假 -> 取 else -> 7。
-    // `(7 > 3) and 7 or 3` -> (> 7 3) 真、7 恒真 -> 取 7。
-    name: 'hand+lua-ternary',
-    expect: ['7', '7'],
-    graph: () => {
-      const cmp1 = bin('>', lit(3), lit(7));
-      const cmp2 = bin('>', lit(7), lit(3));
-      const or1 = lazyOr(lazyAnd(cmp1, lit(3), { keepValue: true }), lit(7), { keepValue: true });
-      const or2 = lazyOr(lazyAnd(cmp2, lit(7), { keepValue: true }), lit(3), { keepValue: true });
-      return program([
-        node('prim', { args: [or1] }, { name: 'print' }),
-        node('prim', { args: [or2] }, { name: 'print' }),
-      ]);
-    },
-  },
-  {
-    // **非 ASCII 的串在六条腿上是同一串字节**。四格宽度各一行：1 / 2 / 3 / 4 字节。
-    //
-    // 不写成语言例子的理由：这一格要压的是**编码**而不是哪门语言的语法，而语言例子里
-    // 带非 ASCII 的（V 与 mojo 的 assert 消息）在成立那一路上根本不印 —— 字节写进了
-    // data 段却没人读，等于没判。
-    //
-    // 这一格钉住两处刚改的：wat 后端不再拦 ≥ 0x80 的字节（`strAddr`），而宿主面那格
-    // `print_str` 把内存里的 UTF-8 **按码位组装回来**（`frontend-wat/lower.js` 的
-    // strHelper）—— 逐字节 `chr` 会把 0xE4 当成 U+00E4 再编两个字节，印出来是乱码。
-    // 第四行还顺带钉住 `chr` 收的是码位不是 UTF-16 码元（interp 的 chrOf）。
-    //
-    // 字面量写成显式转义而不是直接敲字符：源文件被编辑器归一化过就量不出真东西了
-    // （与 tests/oracle/string_bytes.py 同一条理由）。
-    name: 'hand+utf8-str',
-    expect: ['ok', 'caf\u00e9', '\u4e16\u754c', '\u{1d11e}'],
-    graph: () => program([
-      node('prim', { args: [lit('ok')] }, { name: 'print' }),
-      node('prim', { args: [lit('caf\u00e9')] }, { name: 'print' }),
-      node('prim', { args: [lit('\u4e16\u754c')] }, { name: 'print' }),
-      node('prim', { args: [lit('\u{1d11e}')] }, { name: 'print' }),
-    ]),
-  },
-];

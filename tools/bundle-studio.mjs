@@ -239,7 +239,7 @@ function uiScript(src) {
 /** 白名单：与 `src/core/studio/shared.js` 的 `TREE_ROOTS` 同一套形状（那儿是权威）。
  *
  * 多一棵**语法文件**：`ext/<lang>/*.grammar` 不进目录树（那是给人看例子的），可图那条腿
- * 跑起来第一件事就是读它（`graph/langs.js` 的 `treeRoot()` + `glr/load.js`）。
+ * 跑起来第一件事就是读它（`lower/langs.js` 的 `treeRoot()` + `glr/load.js`）。
  * 322 KB，十一门 —— 这是"单体"两个字的成本里说得清的一格。 */
 const VFS_ROOTS = [
   { path: 'docs', exts: ['.md'] },

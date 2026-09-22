@@ -10,7 +10,7 @@
  *      为什么按位置切：内联的文档与例子里**会**出现 `node:fs` 这种字样（它们是数据，
  *      不是代码），整份 grep 必然假红。
  *   3. **真能跑**：拿 node 当浏览器壳子（塞一格 `window`），跑几个例子，
- *      **stdout 与本地 `omni run --engine graph` 逐字节相同**。
+ *      **stdout 与本地 `omni run` 逐字节相同**。
  *      这一条是这一层唯一的真判据 —— 换宿主不许换答案。
  *
  * 不装无头浏览器：那会带一整套依赖进来，而"页面长得对不对"只有人看得出来。
@@ -139,12 +139,9 @@ writeFileSync(shell,
 /**
  * 挑的例子：一门语言一份、都秒级（"判据要用最小的那一条"）。
  *
- * **对照那一趟要走同一台机器**：还在图那一层的那几门要带 `--engine graph`
- * （`omni run x.lua` 默认走的是 lua 那台字节码 VM，不带就是拿两台机器互比）；
- * 迁到公共降级器的那几门（ADR-0044，登记处那一格 `toIR`）**不带** —— 它们在图那一层
- * 已经不存在了，浏览器这条腿走的也是 `adapter → 标准 IR → lower → .sx → OIR → 解释器`。
- * `.lua` 不在名单里是另一回事：lua->graph 那份映射还有缺口（`sumto` 那一格），
- * 而那是 lua 前端的账，不是这一层的。
+ * **两趟走的是同一台机器**：本地那一趟与浏览器这一趟都是
+ * `adapter → 标准 IR → 公共 lower → .sx → OIR → 解释器`（ADR-0044）。
+ * `.lua` 不在名单里：它默认走的是 lua 自己那台字节码 VM，拿它对照就是两台机器互比。
  */
 const CASES = [
   'ext/go/examples/basics.go',
@@ -155,17 +152,9 @@ const CASES = [
   'ext/sbcl/examples/basics.lisp',
 ];
 
-/** 这一门走哪条路 —— 登记处说（`toIR` 在就是公共降级器那条）。**不手抄第二张名单**。 */
-const { pickLang } = await import(join(root, 'src/core/graph/langs.js'));
-const migrated = (c) => {
-  try { return typeof pickLang(c, null).toIR === 'function'; } catch { return false; }
-};
-
 for (const c of CASES) {
   let want = null;
-  const refArgv = migrated(c)
-    ? [join(root, 'src', 'cli.js'), 'run', c]
-    : [join(root, 'src', 'cli.js'), 'run', c, '--engine', 'graph'];
+  const refArgv = [join(root, 'src', 'cli.js'), 'run', c];
   try {
     want = execFileSync('node', refArgv, { cwd: root, encoding: 'utf8', timeout: 120000 });
   } catch (e) {
