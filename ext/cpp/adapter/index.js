@@ -14,7 +14,7 @@ import {
 } from '../../../src/core/lower/cst.js';
 import { INT, arrOf, named, typeOf } from '../../../src/core/lower/ty-of.js';
 import {
-  exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg,
+  exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg, vcallName,
 } from './expr.js';
 
 /** 析构函数的名字。 */
@@ -71,6 +71,27 @@ export function cppToIR(tree) {
     templates: new Map(),
     /** 已经发过的实例名（`maxOf__int`）—— 同一格只降一遍。 */
     instDone: new Set(),
+    /**
+     * **一格类名 → 它在方言里落成哪一格记录**。没有虚函数的类就是自己；有虚函数的
+     * 整棵继承树**共用根那一格记录**（见 `planVirtuals`）—— 那是"基类指针能装派生类"
+     * 的唯一办法，方言里没有子类型。
+     */
+    storage: new Map(),
+    /** 同一张表，键与值都**已经 ref 过**（`C.self` 是 ref 过的名字，那边要用这张）。 */
+    storageRef: new Map(),
+    /** 类名 → `__vt` 的值（根是 0，派生类按登记次序 1、2、…）。 */
+    vtId: new Map(),
+    /** 同一张表，键**已经 ref 过**。 */
+    vtIdRef: new Map(),
+    /** 根名（已 ref 过） → 方法名 → [{ vt, fn }]（虚方法的分派表）。 */
+    vtab: new Map(),
+    /**
+     * 一格类名 → 类型。**`name` 是落地的记录（可能是根）、`cls` 是写着的那个静态类型** ——
+     * 非虚方法按 `cls` 单态分派（C++ 的隐藏规则），虚方法按 `name` 找分派表。
+     */
+    recType: (n) => ({
+      kind: 'named', name: C.ref(C.storage.get(n) ?? n), ref: true, cls: C.ref(n),
+    }),
     /** 当前函数里那几格带析构的量（出作用域逆序调一遍）。 */
     scoped: [],
     /** 正在降的这格方法的**接收者类型名**（裸写字段名 = `this->` 那一格靠它）。 */
@@ -165,6 +186,7 @@ export function cppToIR(tree) {
     const members = clsKids.find((y) => tag(y) === 'members');
     const fields = [];
     const methods = [];
+    const virtuals = new Set();
     let dtor = null;
     let ctor = null;
     for (const m of (members === undefined ? [] : kids(members))) {
@@ -186,19 +208,30 @@ export function cppToIR(tree) {
           && part(m, 'specs') === undefined) { ctor = m; continue; }
         const mn2 = (head !== undefined && tag(head) === 'opname')
           ? opMethodName(head) : nameOf(kids(f)[0]);
+        /* `virtual` 是 specs 里的一格光秃秃的词。 */
+        const ms2 = part(m, 'specs');
+        if (ms2 !== undefined
+          && kids(ms2).some((y) => tag(y) === null && String(leaf(y)) === 'virtual')) {
+          virtuals.add(mn2);
+        }
         methods.push({ tok: m, name: mn2 });
       }
     }
     C.records.set(nameOf(nm), {
-      name: nameOf(nm), bases, fields, methods, dtor, ctor,
+      name: nameOf(nm), bases, fields, methods, dtor, ctor, virtuals,
     });
   }
+  planVirtuals(C, recFields, decls);
   /* **把基类摊进派生类**（字段在前、方法按名字继承）—— 见 `flatten`。 */
   for (const [, rec] of C.records) flatten(rec, C, new Set());
   for (const [, rec] of C.records) {
     recFields.set(C.ref(rec.name), rec.fields);
-    decls.push({ kind: 'class', name: C.ref(rec.name), fields: rec.fields });
+    /* 虚继承树那一档**只发根那一格记录**（字段是整棵树的并集 + `__vt`）—— 见 `layoutVirtual`。 */
+    if (C.storage.get(rec.name) === rec.name) {
+      decls.push({ kind: 'class', name: C.ref(rec.name), fields: rec.fields });
+    }
   }
+  layoutVirtual(C, recFields, decls);
 
   /* ---- 第二遍：函数签名（含方法与析构）------------------------------------- */
   const topFns = kids(tree).filter((f) => tag(f) === 'func');
@@ -264,7 +297,7 @@ export function cppToIR(tree) {
     });
   };
   for (const [, rec] of C.records) {
-    const selfType = named(C.ref(rec.name), true);
+    const selfType = C.recType(rec.name);
     for (const m of rec.methods) {
       const s = sigOf(m.tok, selfType, `${C.ref(rec.name)}_${C.ref(m.name)}`);
       C.fns.set(s.name, { params: s.params, ret: s.ret });
@@ -282,9 +315,18 @@ export function cppToIR(tree) {
     }
   }
 
+  /* **虚方法的分派函数**（签名照根那一份抄，第一格实参是接收者）。 */
+  for (const { root } of (C.vtRoots ?? [])) {
+    const rootRef = C.ref(root);
+    for (const [m] of C.vtab.get(rootRef)) {
+      const base = C.fns.get(`${rootRef}_${C.ref(m)}`);
+      C.fns.set(vcallName(rootRef, C.ref(m)), { params: base.params, ret: base.ret });
+    }
+  }
+
   /* ---- 第三遍：方法 / 析构 / 函数的体 -------------------------------------- */
   for (const [, rec] of C.records) {
-    const selfType = named(C.ref(rec.name), true);
+    const selfType = C.recType(rec.name);
     for (const m of rec.methods) {
       const s = sigOf(m.tok, selfType, `${C.ref(rec.name)}_${C.ref(m.name)}`);
       decls.push(fnDecl(s, m.tok, C, C.ref(rec.name)));
@@ -303,9 +345,134 @@ export function cppToIR(tree) {
     }
   }
   for (const f of topFns) decls.push(fnDecl(sigOf(f), f, C));
+  for (const d of vcallDecls(C)) decls.push(d);
 
   if (!C.fns.has('main')) throw new Error('cpp->IR: 这份源码里没有 `int main()`');
   return { kind: 'module', decls };
+}
+
+/**
+ * **虚方法的分派函数**：按 `this.__vt` 走一条 if 链，兜底是根自己那一份
+ * （`__vt` 为 0 —— 那是基类自己的对象）。
+ *
+ * 为什么是 if 链而不是一格"虚表"：方言里函数不是值（没有函数指针那一族），
+ * 而这条链落的全是现成的 `if` + `call` —— 一格新节点也没加。派生类少的时候它也够快。
+ */
+function vcallDecls(C) {
+  const out = [];
+  for (const { root } of (C.vtRoots ?? [])) {
+    const rootRef = C.ref(root);
+    for (const [m, entries] of C.vtab.get(rootRef)) {
+      const mref = C.ref(m);
+      const sig = C.fns.get(vcallName(rootRef, mref));
+      const fwd = sig.params.map((p) => ({ kind: 'name', name: p.name }));
+      const callTo = (fn) => ({ kind: 'call', fn: { kind: 'name', name: fn }, args: fwd });
+      const isVoid = sig.ret.kind === 'void';
+      const hand = (fn) => (isVoid
+        ? [{ kind: 'expr-stmt', expr: callTo(fn) }, { kind: 'return', values: [] }]
+        : [{ kind: 'return', values: [callTo(fn)] }]);
+      const body = [];
+      for (const e of entries) {
+        if (e.vt === 0) continue;               // 根那一份是兜底，摆在最后
+        body.push({
+          kind: 'if',
+          cond: {
+            kind: 'binop',
+            op: '==',
+            left: { kind: 'field', obj: { kind: 'name', name: 'this' }, name: VT },
+            right: { kind: 'int', value: e.vt },
+          },
+          then: hand(e.fn),
+          else_: null,
+        });
+      }
+      body.push(...hand(`${rootRef}_${mref}`));
+      out.push({
+        kind: 'fn', name: vcallName(rootRef, mref), params: sig.params, ret: sig.ret, body,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * **哪几棵继承树要合成一格记录**（`C.storage` / `C.vtId`）。
+ *
+ * 判据只有一条：树里**有人写了 `virtual`**。没写的（`inherit.cpp` 那一族）照旧一类一格
+ * 记录、方法静态分派 —— 那条路已经全绿，不为这一格去动它。
+ *
+ * **Why 合成一格**：方言的记录没有子类型，`Shape* p = &r;` 在"两格互不相关的记录"上
+ * 根本表示不出来。合成一格（字段是并集 + 一格 `__vt` 标记）之后它就是一格普通赋值，
+ * 而"按真身分派"落成按 `__vt` 走的 if 链 —— 图上一格新节点也没加。
+ */
+function planVirtuals(C, recFields, decls) {
+  const rootOf = (name, seen = new Set()) => {
+    const rec = C.records.get(name);
+    if (rec === undefined || rec.bases.length === 0) return name;
+    if (seen.has(name)) throw new Error(`cpp->IR: 继承成环了（${name}）`);
+    return rootOf(rec.bases[0], new Set([...seen, name]));
+  };
+  /* 每棵树的成员表（根 → 树里的类，按登记次序）。 */
+  const trees = new Map();
+  for (const [n] of C.records) {
+    const r = rootOf(n);
+    if (!trees.has(r)) trees.set(r, []);
+    trees.get(r).push(n);
+  }
+  for (const [root, members] of trees) {
+    const anyVirtual = members.some((n) => C.records.get(n).virtuals.size > 0);
+    if (!anyVirtual) {
+      for (const n of members) { C.storage.set(n, n); C.storageRef.set(C.ref(n), C.ref(n)); }
+      continue;
+    }
+    if (members.some((n) => C.records.get(n).bases.length > 1)) {
+      throw new Error(`cpp->IR: 虚函数 + 多继承还没接（${root} 那棵树）`);
+    }
+    members.forEach((n, i) => {
+      C.storage.set(n, root);
+      C.storageRef.set(C.ref(n), C.ref(root));
+      C.vtId.set(n, i);
+      C.vtIdRef.set(C.ref(n), i);
+    });
+    C.vtRoots = C.vtRoots ?? [];
+    C.vtRoots.push({ root, members });
+  }
+  /* 这两个实参只是让调用点读起来是"三件事一起算"，这一趟不用它们。 */
+  void recFields; void decls;
+}
+
+/** `__vt` 那一格字段的名字（用户写不出这个名字 —— 双下线开头是留给我们的）。 */
+const VT = '__vt';
+
+/**
+ * 虚继承树的**落地**：根那一格记录的字段 = 整棵树的并集 + `__vt`，
+ * 再给每个虚方法发一格**分派函数** `根__v_方法(this, …)` —— 按 `__vt` 走 if 链，
+ * 兜底是根自己那一份（`__vt` 为 0 就是基类的对象）。
+ */
+function layoutVirtual(C, recFields, decls) {
+  for (const { root, members } of (C.vtRoots ?? [])) {
+    const union = [];
+    for (const n of members) {
+      for (const f of C.records.get(n).fields) {
+        if (!union.some((y) => y.name === f.name)) union.push(f);
+      }
+    }
+    union.push({ name: VT, type: INT });
+    const rootRef = C.ref(root);
+    recFields.set(rootRef, union);
+    const cls = decls.find((d) => d.kind === 'class' && d.name === rootRef);
+    cls.fields = union;
+    C.vtUnion = C.vtUnion ?? new Map();
+    C.vtUnion.set(rootRef, union);
+    /* 分派表：一格虚方法名 → 每个派生类那一份。 */
+    const tab = new Map();
+    for (const name of C.records.get(root).virtuals) {
+      tab.set(name, members.map((n) => ({
+        vt: C.vtId.get(n), fn: `${C.ref(n)}_${C.ref(name)}`,
+      })));
+    }
+    C.vtab.set(rootRef, tab);
+  }
 }
 
 /**
@@ -381,7 +548,7 @@ function fnDecl(sig, fnTok, C, selfName = null) {
  */
 function ctorDecl(sig, rec, C) {
   const recName = C.ref(rec.name);
-  const selfType = named(recName, true);
+  const selfType = C.recType(rec.name);
   C.push();
   for (const p of sig.params) C.bind(p.name, p.type);
   C.bind('this', selfType);
@@ -393,12 +560,8 @@ function ctorDecl(sig, rec, C) {
     kind: 'let',
     name: 'this',
     type: selfType,
-    init: {
-      kind: 'new-record',
-      type: selfType,
-      ref: true,
-      fields: rec.fields.map((f) => ({ name: f.name, value: zeroFor(f.type) })),
-    },
+    /* 零值记录走同一份（虚继承树上那一格要带 `__vt`，字段表也是并集）。 */
+    init: vtZeroRecord(selfType, C),
   }];
   /* 成员初始化表 —— 按**字段声明的次序**，不按表里写的次序。 */
   const initTok = kids(rec.ctor).find((y) => tag(y) === 'ctor-init');
@@ -436,8 +599,25 @@ function ctorDecl(sig, rec, C) {
   };
 }
 
-/** 一格类型的零值（构造函数先造一格全零的记录，再让初始化表与体去改）。 */
-function zeroFor(t) {
+/**
+ * 一格**带 `__vt` 的零值记录**。字段表取的是**落地那格记录**的（虚继承树上那是并集），
+ * 所以派生类自己那几格也在里头 —— 少一格 `new-record` 就会缺字段。
+ */
+function vtZeroRecord(type, C) {
+  const fs = C.tyCtx().fields.get(type.name) ?? [];
+  const id = C.vtIdRef.get(type.cls) ?? 0;
+  return {
+    kind: 'new-record',
+    type,
+    ref: true,
+    fields: fs.map((f) => ({
+      name: f.name,
+      value: f.name === VT ? { kind: 'int', value: id } : zeroFor(f.type),
+    })),
+  };
+}
+
+/** 一格类型的零值（构造函数先造一格全零的记录，再让初始化表与体去改）。 */function zeroFor(t) {
   switch (t.kind) {
     case 'int': return { kind: 'int', value: 0 };
     case 'real': return { kind: 'real', value: 0 };
@@ -672,6 +852,17 @@ function declOf(d, specs, C) {
    * （`Point p;` 是 `init: null`，`Say s1;` 只登记析构）。
    */
   const ctorTok = kids(dd).find((y) => tag(y) === 'ctor');
+  /**
+   * **虚继承树里的对象要带上 `__vt`**（那是"真身是谁"的唯一记号）。`Square q;` 落成
+   * 一格全零的根记录 + `__vt = 1` —— 忘了这一句，分派会一路走到兜底那份，
+   * 答案静默地错成基类的。
+   */
+  if (type.kind === 'named' && C.vtIdRef.has(type.cls)
+    && ctorTok === undefined && initTok === undefined) {
+    return {
+      kind: 'let', name, type, init: vtZeroRecord(type, C),
+    };
+  }
   if (type.kind === 'named' && C.fns.has(`${type.name}__ctor`)
     && (ctorTok !== undefined || initTok === undefined)) {
     const as = ctorTok === undefined ? undefined : part(ctorTok, 'args');
@@ -693,12 +884,12 @@ function declOf(d, specs, C) {
 }
 
 // ---- 这一批明说的不足（不猜）----------------------------------------------------
-//   1. **虚函数、异常、lambda、类模板**还没接（当场报）。虚函数那一格要的不是新节点，
-//      是"Base 那格变量能装 Derived" —— 摊平之后两者是两格无关的记录，所以得换一条
-//      表示（`ext/go/adapter/iface.js` 那套"方法闭包的记录"是现成的参考）。
+//   1. **异常、lambda、类模板**还没接（当场报）。
 //   2. `printf` 只接"一格转换 + 换行"与纯文本（见 expr.js 的 printArgs）。
-//   3. 引用（`T&`）当值收（例子里只用它传结构 —— 记录本来就是引用语义）。
+//   3. 引用（`T&`）当值收（例子里只用它传结构 —— 记录本来就是引用语义）；
+//      `&x` 只在记录/列表/字典上成立（标量上当场报，那要真指针）。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
 //   5. 构造函数一个类只认**一份**（重载还没接）；拷贝构造与赋值算子也没有 ——
 //      记录是引用语义，所以那两格在这条腿上本来就不是"拷贝"。
+//   6. 虚函数只接**单继承**（虚函数 + 多继承当场报）；纯虚（`= 0`）与虚析构没接。

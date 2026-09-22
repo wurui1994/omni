@@ -38,6 +38,8 @@ const BTYPES = new Map([
 
 export const nameOf = (x) => (tag(x) === 'n' ? String(leaf(kids(x)[0])) : String(leaf(x)));
 export const tyArg = (type) => ({ kind: 'type', type });
+/** 虚方法的**分派函数**叫什么（`Shape__v_area`）。 */
+export const vcallName = (root, m) => `${root}__v_${m}`;
 
 /**
  * `(specs …)` → 标准 IR 的类型。认得的形状：
@@ -48,8 +50,10 @@ export function typeOfSpecs(specs, C, declTok) {
   if (specs === undefined) return INT;
   const parts = kids(specs).filter((y) => {
     const t = tag(y);
-    if (t === null) return String(leaf(y)) !== 'const' && String(leaf(y)) !== 'static'
-      && String(leaf(y)) !== 'typedef';
+    if (t === null) {
+      const w = String(leaf(y));
+      return w !== 'const' && w !== 'static' && w !== 'typedef' && w !== 'virtual';
+    }
     return true;
   });
   /* `char *` / `const char *` → 串（C 里串就是 `char*`）。 */
@@ -66,13 +70,13 @@ export function typeOfSpecs(specs, C, declTok) {
     if (tag(p) === 'n') {
       const n = nameOf(p);
       if (C.aliases.has(n)) return C.aliases.get(n);
-      if (C.records.has(n)) return named(C.ref(n), true);
+      if (C.records.has(n)) return C.recType(n);
       throw new Error(`cpp->IR: 这个类型名还没接：${n}`);
     }
     if (tag(p) === 'qual') return qualType(p, C);
     if (tag(p) === 'class' || tag(p) === 'elaborated') {
       const nm = kids(p).find((y) => tag(y) === 'n');
-      if (nm !== undefined && C.records.has(nameOf(nm))) return named(C.ref(nameOf(nm)), true);
+      if (nm !== undefined && C.records.has(nameOf(nm))) return C.recType(nameOf(nm));
       return null;
     }
   }
@@ -139,6 +143,18 @@ export function exprOf(x, C) {
     }
     case 'paren': case 'expr': return exprOf(kids(x)[0], C);
     case 'this': return { kind: 'name', name: 'this' };
+    /**
+     * `&x` —— **记录本来就是引用**（方言的 `(class …)`），所以取地址就是那格值自己。
+     * 标量上的 `&` 当场报：那要真指针，这条腿上没有。
+     */
+    case 'addrof': {
+      const v = exprOf(kids(x)[0], C);
+      const t = typeOf(v, C.tyCtx());
+      if (t.kind !== 'named' && t.kind !== 'arr' && t.kind !== 'map') {
+        throw new Error(`cpp->IR: \`&\` 用在 ${t.kind} 上还没接（记录/列表/字典本来就是引用）`);
+      }
+      return v;
+    }
     /* `p.x` 与 `this->tag` —— 同一格字段。 */
     case 'dot': case 'arrow':
       return { kind: 'field', obj: exprOf(kids(x)[0], C), name: nameOf(kids(x)[1]) };
@@ -239,7 +255,21 @@ function callOf(x, C) {
      * 所以这儿只查一次，不用往基类走。
      */
     if (t.kind === 'named') {
-      const target = `${t.name}_${C.ref(m)}`;
+      /**
+       * **虚方法走分派函数**（`Shape__v_area(obj)`）—— 按对象自己的 `__vt` 走 if 链。
+       * 为什么连 `q.area()`（静态类型就是派生类）也走：那格对象的真身可能是**更派生的**
+       * 一层，静态类型定不了。分派函数在任何一格上都给对的那一份，所以只留这一条路。
+       */
+      const tab = C.vtab.get(t.name);
+      if (tab !== undefined && tab.has(m)) {
+        return {
+          kind: 'call',
+          fn: { kind: 'name', name: vcallName(t.name, C.ref(m)) },
+          args: [obj, ...rawArgs.map((a) => exprOf(a, C))],
+        };
+      }
+      /* 非虚方法按**静态类型**（`t.cls`）单态分派 —— C++ 的隐藏规则。 */
+      const target = `${t.cls ?? t.name}_${C.ref(m)}`;
       if (C.fns.has(target)) {
         return {
           kind: 'call',
@@ -294,6 +324,16 @@ function callOf(x, C) {
    * 类里有同名成员时裸写的一定是成员（自由函数要写 `::f()` 才轮到它）。
    */
   if (C.self !== null && C.fns.has(`${C.self}_${C.ref(name)}`)) {
+    /* 裸写的**虚**方法同样走分派函数（`twice()` 里的 `area()`）。 */
+    const root = C.storageRef.get(C.self) ?? C.self;
+    const tab = C.vtab.get(root);
+    if (tab !== undefined && tab.has(name)) {
+      return {
+        kind: 'call',
+        fn: { kind: 'name', name: vcallName(root, C.ref(name)) },
+        args: [{ kind: 'name', name: 'this' }, ...args],
+      };
+    }
     return {
       kind: 'call',
       fn: { kind: 'name', name: `${C.self}_${C.ref(name)}` },
