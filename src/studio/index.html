@@ -25,6 +25,7 @@
     <button data-mode="show" class="on">展示</button>
     <button data-mode="ide">IDE</button>
     <button data-mode="console">控制台</button>
+    <button data-mode="lab">实验室</button>
   </div>
 
   <div class="spacer"></div>
@@ -84,6 +85,56 @@
       <div class="con-plot-body" id="con-plot">
         <div class="hint">出一张图：<code>import "std/plot.omni";</code> 然后
           <code>plotLine("t", xs, ys).show()</code></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 实验室（Language Laboratory）：语法编辑 + 实时解析 + AST 可视化 + 管线探针。
+       与展示、IDE、控制台是**四套互斥的版面**。
+       语法表构建与解析全在浏览器里跑（readGrammar / buildTable / glrParse 是纯函数），
+       管线面板走 /api/emit。 -->
+  <section class="lab" id="lab">
+    <div class="lab-edit">
+      <div class="pane lab-grammar">
+        <div class="pane-head">
+          <span>语法</span>
+          <select id="lab-load" title="加载项目里的 .grammar 文件">
+            <option value="">— 模板 —</option>
+          </select>
+          <div class="spacer"></div>
+          <span class="tag" id="lab-lang-tag"></span>
+        </div>
+        <div class="code-body">
+          <pre id="lab-gview" class="hl"><code></code></pre>
+          <textarea id="lab-grammar" spellcheck="false" autocapitalize="off" autocomplete="off"
+            placeholder="在这里写语法（S-expression）…"></textarea>
+        </div>
+      </div>
+      <div class="pane lab-sample">
+        <div class="pane-head"><span>示例源码</span></div>
+        <div class="code-body">
+          <pre id="lab-sview" class="hl"><code></code></pre>
+          <textarea id="lab-sample" spellcheck="false" autocapitalize="off" autocomplete="off"
+            placeholder="用上面那门语言写一段代码…"></textarea>
+        </div>
+      </div>
+    </div>
+    <div class="pane lab-inspect">
+      <div class="pane-head">
+        <div class="seg small" id="lab-tabs">
+          <button data-tab="lab-table" class="on">表</button>
+          <button data-tab="lab-tree">树</button>
+          <button data-tab="lab-pipeline">管线</button>
+          <button data-tab="lab-examples">示例</button>
+        </div>
+        <div class="spacer"></div>
+        <span class="badge" id="lab-status"></span>
+      </div>
+      <div class="lab-body">
+        <div class="tabp on" data-tab="lab-table" id="lab-table"></div>
+        <div class="tabp" data-tab="lab-tree" id="lab-tree-panel"></div>
+        <div class="tabp" data-tab="lab-pipeline" id="lab-pipeline"></div>
+        <div class="tabp" data-tab="lab-examples" id="lab-examples"></div>
       </div>
     </div>
   </section>

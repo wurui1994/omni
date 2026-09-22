@@ -486,6 +486,11 @@ body {
     grid-template-rows: minmax(0, 1.3fr) minmax(0, .8fr) minmax(0, .8fr);
   }
   .con-main { grid-row: 1; }
+  /* 实验室在窄屏上摞成一列。 */
+  [data-mode="lab"] .lab {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
   .gal-head h1 { font-size: 22px; }
   .gal-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   /* 手指点的目标要够大（Apple HIG 是 44pt）—— 目录行与那几格图标一起抬。 */
@@ -497,6 +502,92 @@ body {
   .hl, #edit { font-size: 13.5px; padding: 12px 10px; }
   /* 抽屉开着的时候点别处要能关掉它（`#tree-mask` 由 studio.js 挂）。 */
   .mask { position: fixed; inset: var(--bar-h) 0 0 0; z-index: 29; background: rgba(0,0,0,.25); }
+}
+
+/* ---- 实验室（Language Laboratory）----
+ *
+ * 左半是两个编辑器（语法 + 示例源码），右半是检查面板（表/树/管线/示例）。
+ * 与展示、IDE、控制台是**四套互斥的版面**（同一条 `data-mode` 机制）。
+ */
+.lab { display: none; }
+[data-mode="lab"] .shell { grid-template-columns: minmax(0, 1fr); }
+[data-mode="lab"] .shell > .pane { display: none; }
+[data-mode="lab"] .lab {
+  display: grid; min-width: 0; min-height: 0; gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+}
+.lab-edit { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.lab-grammar, .lab-sample { flex: 1; min-height: 0; }
+.lab-inspect { min-height: 0; }
+.lab-body {
+  flex: 1; overflow: auto; position: relative; scrollbar-gutter: stable;
+}
+.lab-body .tabp { display: none; padding: 10px 12px; font: 13px/1.5 var(--mono); color: var(--fg-2);
+  white-space: pre-wrap; word-break: break-all; min-height: 100%; }
+.lab-body .tabp.on { display: block; }
+
+/* 语法编辑器与示例编辑器复用 .code-body 的那套（透明 textarea 压高亮层） */
+.lab-grammar .code-body, .lab-sample .code-body { flex: 1; overflow: hidden; position: relative; }
+.lab-grammar textarea, .lab-sample textarea {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  margin: 0; padding: 12px; border: 0;
+  font: 13px/1.6 var(--mono); white-space: pre; tab-size: 4;
+  overflow: auto; box-sizing: border-box;
+  z-index: 1; resize: none; outline: 0; caret-color: var(--accent);
+  background: transparent; color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+.lab-grammar .hl, .lab-sample .hl {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  margin: 0; padding: 12px; border: 0;
+  font: 13px/1.6 var(--mono); white-space: pre; tab-size: 4;
+  overflow: auto; box-sizing: border-box;
+  pointer-events: none; color: var(--fg); z-index: 0;
+}
+
+/* 表面板 */
+.lab-stats { display: flex; gap: 18px; padding: 6px 0 12px; flex-wrap: wrap; }
+.lab-stat { text-align: center; }
+.lab-stat .n { font: 600 28px/1.2 var(--font); color: var(--fg); }
+.lab-stat .n.ok { color: var(--ok); }
+.lab-stat .n.bad { color: var(--bad); }
+.lab-stat .lbl { font: 12px var(--font); color: var(--fg-3); }
+
+/* 冲突卡片 */
+.lab-conflict {
+  margin: 0 0 8px; padding: 10px 12px; border-radius: var(--r-sm);
+  border-left: 3px solid var(--warn); background: var(--bg-sunk);
+  font: 12.5px/1.6 var(--mono);
+}
+.lab-conflict .kind { font-weight: 600; color: var(--warn); }
+
+/* 规则表 */
+.lab-rules { font: 12px/1.7 var(--mono); }
+.lab-rules .rule { padding: 1px 0; }
+.lab-rules .lhs { color: var(--s-fn); font-weight: 500; }
+.lab-rules .rhs { color: var(--fg-2); }
+.lab-rules .idx { color: var(--fg-3); min-width: 2.5ch; display: inline-block; text-align: right; margin-right: 6px; }
+
+/* 树面板 */
+.lab-tree-view { padding: 4px 0; }
+.lab-node { padding-left: 16px; }
+.lab-node-head {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 6px; border-radius: 4px; cursor: default;
+  font: 12.5px var(--mono);
+  transition: background var(--dur);
+}
+.lab-node-head:hover { background: var(--sel); }
+.lab-node-head .tag-name { color: var(--s-fn); font-weight: 500; }
+.lab-node-head .leaf { color: var(--fg-2); }
+.lab-node-head .leaf.str { color: var(--s-str); }
+
+/* 下拉选择器（加载 .grammar） */
+#lab-load {
+  appearance: none; border: 0; outline: 0; border-radius: 6px;
+  background: var(--bg-sunk); color: var(--fg-2);
+  font: 12px var(--mono); padding: 4px 8px;
+  max-width: 200px; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* 谁把动画关了就别动（`prefers-reduced-motion`）。 */

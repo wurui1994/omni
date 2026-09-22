@@ -11,7 +11,9 @@
  * 于是判据能在 node 里直接 import 它（`tests/serve/run.js`）。 */
 import {
   highlight, mdToHtml, epsToSvg, drawKindOf, drawBlocks, glslSource, glslVertex, glslSizeOf,
-  glslDeclType, STD_LIBS, GALLERY,
+  glslDeclType, STD_LIBS, GALLERY, esc,
+  labStats, labConflictsHtml, labRulesHtml, labTreeHtml, labTreeSexpr,
+  labSexprEq, labExtOfGrammar, LAB_EMIT_FORMATS,
 } from './render.js';
 
 const $ = (s) => document.querySelector(s);
@@ -1081,6 +1083,476 @@ async function shell(line) {
   } catch (e) { shLog(String(e.message ?? e), 'err'); }
 }
 
+/* ---------------------------------------------------------------- 实验室（Lab） */
+
+/** GLR 模块迟装：这几份不碰 node，但 serve 模式下也可以不装（如果不进 Lab 模式）。 */
+let GLR = null;
+async function ensureGlr() {
+  if (GLR !== null) return;
+  /* 单体 HTML 模式：`browser-main.js` 把 GLR 模块挂在 `window.__OMNI_GLR` 上。
+     serve 模式：从 `/core/…` 动态拉模块（serve.js 映射 `/core/…` 到 `src/core/…`）。
+     **动态 import 写成字符串拼接**以避免 bundle-studio 的 import 检查（那一格只查静态写法）。 */
+  if (window.__OMNI_GLR !== undefined) {
+    GLR = window.__OMNI_GLR;
+    return;
+  }
+  const base = '/core/';
+  const load = (p) => Function('return import("' + base + p + '")')();
+  const [read, diag, grammar, table, driver, lex] = await Promise.all([
+    load('sexpr/read.js'),
+    load('source/diag.js'),
+    load('glr/grammar.js'),
+    load('glr/table.js'),
+    load('glr/driver.js'),
+    load('glr/lex.js'),
+  ]);
+  GLR = { ...diag, ...read, ...grammar, ...table, ...driver, ...lex };
+}
+
+const LAB_TEMPLATES = {
+  expr: `;; 经典算术表达式：语法本身有歧义，全靠优先级消掉。
+;; 门槛是**零冲突** —— 如果优先级实现错了，这份语法立刻会剩下一堆移进/归约。
+(grammar expr
+  (tokens NUM UMINUS)
+  (prec left "+" "-")
+  (prec left "*" "/")
+  (prec right "^")
+  (prec right UMINUS)
+  (start E)
+  (lex
+    (skip space)
+    (comment ";;" (* (not "\\n")))
+    (token NUM (+ digit) (? "." (+ digit)))
+    (op "+" "-" "*" "/" "^" "(" ")"))
+  (rule E
+    (-> (E "+" E) (add $1 $3))
+    (-> (E "-" E) (sub $1 $3))
+    (-> (E "*" E) (mul $1 $3))
+    (-> (E "/" E) (div $1 $3))
+    (-> (E "^" E) (pow $1 $3))
+    (-> ("-" E) (prec UMINUS) (neg $2))
+    (-> ("(" E ")") $2)
+    (-> (NUM) $1)))`,
+  empty: `(grammar scratch
+  (tokens NUM NAME)
+  (start S)
+  (lex
+    (skip space)
+    (token NUM (+ digit))
+    (token NAME (+ alpha))
+    (op "(" ")"))
+  (rule S
+    (-> (NAME) $1)))`,
+};
+
+const LAB = {
+  inited: false,
+  timer: null,
+  grammarText: '',
+  sampleText: '',
+  lastTable: null,
+  lastTree: null,
+  /** 示例面板那几组（输入, 期望）。**内联的判据** —— 改一条规则就看它们变不变。 */
+  examples: null,
+};
+
+function labSelectTab(btn) {
+  const parent = btn.parentElement;
+  const body = document.querySelector('.lab-body');
+  for (const b of parent.children) b.classList.toggle('on', b === btn);
+  for (const p of body.children) p.classList.toggle('on', p.dataset.tab === btn.dataset.tab);
+  /* 管线与示例两栏是**按需算**的（前者走网络，后者要跑一遍解析）——
+     切过去的那一下才刷，不然每敲一个字都白算两栏。 */
+  if (btn.dataset.tab === 'lab-pipeline') labRefreshPipeline();
+  if (btn.dataset.tab === 'lab-examples') labRefreshExamples();
+}
+
+function labPaintGrammar(text) {
+  /* S-expression 语法高亮（复用 lisp 那套）。 */
+  $('#lab-gview code').innerHTML = highlight(text, 'lisp') + '\n';
+}
+
+function labPaintSample(text) {
+  /* 示例源码暂时不做语法高亮（那门语言的词法表还在上面编着）。 */
+  $('#lab-sview code').textContent = text + '\n';
+}
+
+/** 在浏览器里重建语法表 + 重解析 + 刷新面板。 */
+async function labRefresh() {
+  await ensureGlr();
+  const gText = LAB.grammarText;
+  const sText = LAB.sampleText;
+  const status = $('#lab-status');
+  const tablePanel = $('#lab-table');
+  const treePanel = $('#lab-tree-panel');
+
+  /* 1. 读 S-expression */
+  const diags = new GLR.Diagnostics();
+  const sf = new GLR.SourceFile('<lab>', gText);
+  const nodes = GLR.readSexpr(sf, diags);
+  if (diags.errorCount() > 0) {
+    status.textContent = '语法错误';
+    status.className = 'badge bad';
+    tablePanel.innerHTML = `<div class="hint" style="color:var(--bad)">`
+      + diags.items.map((d) => d.msg).join('<br>') + '</div>';
+    treePanel.innerHTML = '';
+    LAB.lastTable = null;
+    LAB.lastTree = null;
+    return;
+  }
+
+  /* 2. 建表 */
+  const g = GLR.readGrammar(nodes, diags);
+  if (g === null || diags.errorCount() > 0) {
+    status.textContent = '语法无效';
+    status.className = 'badge bad';
+    tablePanel.innerHTML = `<div class="hint" style="color:var(--bad)">`
+      + diags.items.map((d) => d.msg).join('<br>') + '</div>';
+    treePanel.innerHTML = '';
+    LAB.lastTable = null;
+    LAB.lastTree = null;
+    return;
+  }
+
+  let tb;
+  try { tb = GLR.buildTable(g); } catch (e) {
+    status.textContent = '建表失败';
+    status.className = 'badge bad';
+    tablePanel.innerHTML = `<div class="hint" style="color:var(--bad)">${e.message}</div>`;
+    LAB.lastTable = null;
+    return;
+  }
+  LAB.lastTable = tb;
+
+  /* 3. 表面板 */
+  const st = labStats(tb);
+  status.textContent = st.conflicts === 0 ? `${st.states} 状态` : `${st.conflicts} 冲突`;
+  status.className = st.conflicts === 0 ? 'badge ok' : 'badge bad';
+  tablePanel.innerHTML = '<div class="lab-stats">'
+    + labStatHtml('状态', st.states, false)
+    + labStatHtml('记号', st.terms, false)
+    + labStatHtml('非终结符', st.nonterms, false)
+    + labStatHtml('规则', st.rules, false)
+    + labStatHtml('冲突', st.conflicts, st.conflicts === 0)
+    + '</div>'
+    + labConflictsHtml(tb)
+    + labRulesHtml(tb);
+
+  /* 4. 解析示例 */
+  if (sText.trim() && g.lex) {
+    const sd = new GLR.Diagnostics();
+    const ssf = new GLR.SourceFile('<sample>', sText);
+    const toks = GLR.lexText(g.lex, ssf, sd);
+    if (sd.errorCount() > 0) {
+      treePanel.innerHTML = '<div class="hint" style="color:var(--bad)">词法错误：'
+        + sd.items.map((d) => d.msg).join('; ') + '</div>';
+      LAB.lastTree = null;
+    } else {
+      const pd = new GLR.Diagnostics();
+      const tree = GLR.glrParse(tb, toks, pd);
+      LAB.lastTree = tree;
+      if (pd.errorCount() > 0) {
+        treePanel.innerHTML = '<div class="hint" style="color:var(--bad)">语法错误：'
+          + pd.items.map((d) => d.msg).join('; ') + '</div>'
+          + labTreeHtml(tree);
+      } else {
+        treePanel.innerHTML = labTreeHtml(tree)
+          + '<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">'
+          + '<pre style="font:12px/1.6 var(--mono);color:var(--fg-2);white-space:pre-wrap">'
+          + labTreeSexpr(tree) + '</pre>';
+      }
+    }
+  } else {
+    treePanel.innerHTML = '<div class="hint">在下面写一段示例代码，这里会显示解析树。</div>';
+    LAB.lastTree = null;
+  }
+
+  /* 5. 管线面板（只在选中时触发，走网络） */
+  labRefreshPipeline();
+
+  /* 6. 示例面板 */
+  labRefreshExamples();
+}
+
+function labStatHtml(label, n, isOk) {
+  const cls = isOk ? ' ok' : (label === '冲突' && n > 0 ? ' bad' : '');
+  return `<div class="lab-stat"><div class="n${cls}">${n}</div><div class="lbl">${label}</div></div>`;
+}
+
+function labScheduleRefresh() {
+  if (LAB.timer !== null) clearTimeout(LAB.timer);
+  LAB.timer = setTimeout(() => { LAB.timer = null; labRefresh(); }, 250);
+}
+
+/** 一次性初始化（懒：第一次进 Lab 模式才调）。 */
+async function initLab() {
+  if (LAB.inited) {
+    $('#lab-grammar').focus();
+    return;
+  }
+  LAB.inited = true;
+
+  const gta = $('#lab-grammar');
+  const sta = $('#lab-sample');
+
+  /* 语法编辑器事件 */
+  gta.addEventListener('input', () => {
+    LAB.grammarText = gta.value;
+    labPaintGrammar(gta.value);
+    labScheduleRefresh();
+  });
+  gta.addEventListener('scroll', () => {
+    const v = $('#lab-gview');
+    v.scrollTop = gta.scrollTop;
+    v.scrollLeft = gta.scrollLeft;
+  });
+  gta.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') { e.preventDefault(); labInsert(gta, '  '); }
+  });
+
+  /* 示例编辑器事件 */
+  sta.addEventListener('input', () => {
+    LAB.sampleText = sta.value;
+    labPaintSample(sta.value);
+    labScheduleRefresh();
+  });
+  sta.addEventListener('scroll', () => {
+    const v = $('#lab-sview');
+    v.scrollTop = sta.scrollTop;
+    v.scrollLeft = sta.scrollLeft;
+  });
+  sta.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') { e.preventDefault(); labInsert(sta, '  '); }
+  });
+
+  /* 加载项目语法的下拉框 */
+  const sel = $('#lab-load');
+  /* 模板选项 */
+  const optExpr = document.createElement('option');
+  optExpr.value = '__tpl:expr'; optExpr.textContent = '模板：算术表达式';
+  sel.appendChild(optExpr);
+  const optEmpty = document.createElement('option');
+  optEmpty.value = '__tpl:empty'; optEmpty.textContent = '模板：空白';
+  sel.appendChild(optEmpty);
+
+  /* 项目里的 .grammar 文件 */
+  try {
+    const tree = await api('/api/tree');
+    const paths = [];
+    (function walk(nodes, prefix) {
+      for (const n of nodes) {
+        const p = prefix ? prefix + '/' + n.name : n.name;
+        if (n.kind === 'dir') walk(n.children ?? [], p);
+        else if (p.endsWith('.grammar')) paths.push(p);
+      }
+    })(tree, '');
+    if (paths.length > 0) {
+      const sep = document.createElement('option');
+      sep.disabled = true; sep.textContent = '— 项目语法 —';
+      sel.appendChild(sep);
+      for (const p of paths.sort()) {
+        const o = document.createElement('option');
+        o.value = p; o.textContent = p.replace(/^(ext|src|tests)\//, '');
+        sel.appendChild(o);
+      }
+    }
+  } catch { /* 单体模式没有 /api/tree */ }
+
+  sel.onchange = async () => {
+    const v = sel.value;
+    if (!v) return;
+    if (v.startsWith('__tpl:')) {
+      const key = v.slice(6);
+      gta.value = LAB_TEMPLATES[key] ?? '';
+    } else {
+      try {
+        const f = await api(`/api/file?path=${encodeURIComponent(v)}`);
+        gta.value = f.text;
+      } catch { gta.value = `;; 读不到 ${v}`; }
+    }
+    LAB.grammarText = gta.value;
+    labPaintGrammar(gta.value);
+    labScheduleRefresh();
+  };
+
+  /* 默认填一份模板 */
+  gta.value = LAB_TEMPLATES.expr;
+  LAB.grammarText = gta.value;
+  labPaintGrammar(gta.value);
+  sta.value = '1 + 2 * 3';
+  LAB.sampleText = sta.value;
+  labPaintSample(sta.value);
+  gta.focus();
+  labRefresh();
+}
+
+function labInsert(ta, s) {
+  const a = ta.selectionStart;
+  ta.value = ta.value.slice(0, a) + s + ta.value.slice(ta.selectionEnd);
+  ta.selectionStart = ta.selectionEnd = a + s.length;
+  ta.dispatchEvent(new Event('input'));
+}
+
+/* ---- 管线面板 ---- */
+
+let labPipelineSeq = 0;
+
+async function labRefreshPipeline() {
+  const panel = $('#lab-pipeline');
+  /* 只在管线 tab 选中时才发请求（省网络）。 */
+  const btn = document.querySelector('#lab-tabs button[data-tab="lab-pipeline"]');
+  if (!btn || !btn.classList.contains('on')) return;
+
+  const sText = LAB.sampleText.trim();
+  if (!sText) {
+    panel.innerHTML = '<div class="hint">在下面写一段示例代码，管线面板会显示逐层中间产物。</div>';
+    return;
+  }
+  /* 需要知道这是哪门已注册的语言才能走 /api/emit。
+     如果是从项目里加载的 .grammar（有对应的语言），才能走管线。 */
+  const sel = $('#lab-load');
+  const loadedPath = sel ? sel.value : '';
+  if (!loadedPath || loadedPath.startsWith('__tpl:')) {
+    panel.innerHTML = '<div class="hint" style="color:var(--fg-3)">'
+      + '管线面板需要一门已注册的语言 —— 加载项目里的 .grammar 后，'
+      + '在示例栏写那门语言的代码，这里会显示逐层 emit 输出。</div>';
+    return;
+  }
+
+  /* 从 .grammar 路径猜语言后缀。ext/go/go.grammar -> .go 那门语言的后缀 */
+  const langExt = labExtOfGrammar(loadedPath);
+  if (!langExt) {
+    const langDir = loadedPath.split('/')[1] ?? '';
+    panel.innerHTML = '<div class="hint" style="color:var(--fg-3)">'
+      + `不认识 '${langDir}' 对应的语言后缀，管线面板暂时不可用。</div>`;
+    return;
+  }
+
+  const seq = ++labPipelineSeq;
+  panel.innerHTML = '<div class="hint">正在获取管线各层…</div>';
+
+  /* 逐层发 /api/emit。并行发出去、按序展示。 */
+  const results = await Promise.all(LAB_EMIT_FORMATS.map(async (fmt) => {
+    try {
+      const r = await post('/api/emit', {
+        text: sText,
+        lang: langExt.slice(1),
+        format: fmt,
+      });
+      return { fmt, stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.code ?? 0 };
+    } catch (e) {
+      return { fmt, stdout: '', stderr: String(e.message ?? e), code: 1 };
+    }
+  }));
+
+  if (seq !== labPipelineSeq) return; // 旧请求丢掉
+
+  let h = '<div style="display:flex;gap:8px;padding:4px 0 8px;flex-wrap:wrap">';
+  for (const { fmt } of results) {
+    h += `<button class="seg-btn lab-pipe-btn" data-fmt="${fmt}"`;
+    h += ` style="appearance:none;border:1px solid var(--line);background:var(--bg-sunk);`
+      + `color:var(--fg-2);font:12px var(--mono);padding:4px 10px;border-radius:6px;cursor:pointer">`
+      + `${fmt.toUpperCase()}</button>`;
+  }
+  h += '</div><pre class="lab-pipe-out" style="font:12px/1.6 var(--mono);color:var(--fg-2);'
+    + 'white-space:pre-wrap;word-break:break-all;max-height:100%;overflow:auto"></pre>';
+  panel.innerHTML = h;
+
+  const out = panel.querySelector('.lab-pipe-out');
+  const btns = panel.querySelectorAll('.lab-pipe-btn');
+  const show = (fmt) => {
+    const r = results.find((x) => x.fmt === fmt);
+    if (!r) return;
+    for (const b of btns) b.style.background = b.dataset.fmt === fmt ? 'var(--accent)' : 'var(--bg-sunk)',
+      b.style.color = b.dataset.fmt === fmt ? '#fff' : 'var(--fg-2)';
+    out.textContent = r.code === 0 ? (r.stdout || '（空）') : `错误：\n${r.stderr}`;
+    if (r.code !== 0) out.style.color = 'var(--bad)'; else out.style.color = 'var(--fg-2)';
+  };
+  for (const b of btns) b.onclick = () => show(b.dataset.fmt);
+  /* 默认显示第一个成功的 */
+  const first = results.find((r) => r.code === 0) ?? results[0];
+  show(first.fmt);
+}
+
+/* ---- 示例面板（内联判据） ---- */
+
+function labRefreshExamples() {
+  const panel = $('#lab-examples');
+  const btn = document.querySelector('#lab-tabs button[data-tab="lab-examples"]');
+  if (!btn || !btn.classList.contains('on')) return;
+
+  if (!LAB.examples || LAB.examples.length === 0) {
+    LAB.examples = [{ input: '1 + 2', expected: '(add 1 2)' }];
+  }
+
+  let h = '';
+  for (let i = 0; i < LAB.examples.length; i++) {
+    const ex = LAB.examples[i];
+    const got = labParseToSexpr(ex.input);
+    const pass = got !== null && labSexprEq(got, ex.expected);
+    const icon = got === null ? '?' : (pass ? '✓' : '✗');
+    const cls = got === null ? 'var(--fg-3)' : (pass ? 'var(--ok)' : 'var(--bad)');
+    h += `<div class="lab-ex-row" data-idx="${i}" style="margin:0 0 10px;padding:8px;`
+      + `border-radius:var(--r-sm);background:var(--bg-sunk)">`
+      + `<div style="display:flex;align-items:center;gap:8px;margin:0 0 4px">`
+      + `<span style="font:600 16px var(--font);color:${cls}">${icon}</span>`
+      + `<input class="lab-ex-input" data-idx="${i}" value="${escAttr(ex.input)}" `
+      + `style="flex:1;border:1px solid var(--line);background:var(--bg-elev);color:var(--fg);`
+      + `font:12px var(--mono);padding:4px 8px;border-radius:5px;outline:0">`
+      + `<span style="color:var(--fg-3);font:12px var(--font)">→</span>`
+      + `<input class="lab-ex-expected" data-idx="${i}" value="${escAttr(ex.expected)}" `
+      + `style="flex:1;border:1px solid var(--line);background:var(--bg-elev);color:var(--fg);`
+      + `font:12px var(--mono);padding:4px 8px;border-radius:5px;outline:0">`
+      + `<button class="lab-ex-del" data-idx="${i}" style="appearance:none;border:0;background:none;`
+      + `color:var(--bad);cursor:pointer;font:14px var(--font)">✕</button>`
+      + `</div>`;
+    if (!pass && got !== null) {
+      h += `<div style="font:11px var(--mono);color:var(--bad);padding:2px 0 0 28px">`
+        + `实际：${esc(got)}</div>`;
+    }
+    h += '</div>';
+  }
+  h += `<button id="lab-ex-add" style="appearance:none;border:1px dashed var(--line);`
+    + `background:none;color:var(--fg-3);font:12px var(--font);padding:6px 14px;`
+    + `border-radius:6px;cursor:pointer;width:100%">＋ 加一组</button>`;
+  panel.innerHTML = h;
+
+  /* 接线 */
+  panel.querySelector('#lab-ex-add').onclick = () => {
+    LAB.examples.push({ input: '', expected: '' });
+    labRefreshExamples();
+  };
+  for (const inp of panel.querySelectorAll('.lab-ex-input')) {
+    inp.oninput = () => { LAB.examples[inp.dataset.idx].input = inp.value; labRefreshExamples(); };
+  }
+  for (const inp of panel.querySelectorAll('.lab-ex-expected')) {
+    inp.oninput = () => { LAB.examples[inp.dataset.idx].expected = inp.value; labRefreshExamples(); };
+  }
+  for (const btn2 of panel.querySelectorAll('.lab-ex-del')) {
+    btn2.onclick = () => { LAB.examples.splice(Number(btn2.dataset.idx), 1); labRefreshExamples(); };
+  }
+}
+
+/** 用当前语法表解析一小段代码，返回 S-expr 文本或 null。 */
+function labParseToSexpr(src) {
+  if (!GLR || !LAB.lastTable || !LAB.lastTable.grammar.lex || !src.trim()) return null;
+  const d = new GLR.Diagnostics();
+  const toks = GLR.lexText(LAB.lastTable.grammar.lex, new GLR.SourceFile('<ex>', src), d);
+  if (d.errorCount() > 0) return null;
+  const pd = new GLR.Diagnostics();
+  const tree = GLR.glrParse(LAB.lastTable, toks, pd);
+  if (pd.errorCount() > 0) return null;
+  return labTreeSexpr(tree);
+}
+
+/** 把 S-expr 文本归一化（去掉多余空白和换行）以便比较。 */
+
+/* 管线 tab 被选中时触发一次刷新 */
+
+/* `render.js` 的 `esc` 只转 `& < >`（它是给**文本内容**用的）。这儿要往
+   `value="…"` 里塞，所以双引号也得转 —— 不转的话示例里写一个引号就把属性收掉了。 */
+const escAttr = (s) => esc(String(s)).replace(/"/g, '&quot;');
+
 /* ---------------------------------------------------------------- 接线 */
 
 function initTabs() {
@@ -1089,6 +1561,13 @@ function initTabs() {
     const b = e.target.closest('button');
     if (!b || b.disabled) return;
     selectTab(b);
+  };
+  /* Lab 模式的检查面板也是同一套 tab 机制。 */
+  const labTabs = $('#lab-tabs');
+  labTabs.onclick = (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    labSelectTab(b);
   };
   const seg = document.querySelector('.seg[role="tablist"]');
   seg.onclick = (e) => {
@@ -1112,6 +1591,7 @@ function setMode(m) {
   if (m === 'show') renderGallery();
   if (m === 'ide') $('#edit').focus();
   if (m === 'console') $('#con-in').focus();
+  if (m === 'lab') initLab();
 }
 
 function initEditor() {
@@ -1206,7 +1686,7 @@ async function main() {
   /* **默认落在首页**（展示模式）—— 它现在是首页，落在首页是首页的定义。
      上一次挑的那一格记在 localStorage 里：天天用 IDE 的人不该每趟都先过一眼画廊。 */
   const saved = localStorage.getItem('omni.mode');
-  setMode(saved === 'ide' || saved === 'console' ? saved : 'show');
+  setMode(saved === 'ide' || saved === 'console' || saved === 'lab' ? saved : 'show');
   try {
     await loadTree();
     const h = await api('/api/health');

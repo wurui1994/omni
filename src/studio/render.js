@@ -697,4 +697,133 @@ export function glslDeclType(src, names) {
   return null;
 }
 
+/* ---------------------------------------------------------------- Lab 模式
+ *
+ * 语法表、冲突、规则、解析树的格式化。全是纯函数，不碰 DOM。
+ * 判据在 tests/studio（node 里直接 import）。
+ */
 
+/** 表面板的统计数字。 `tb` = `buildTable(g)` 的返回值。 */
+export function labStats(tb) {
+  return {
+    states: tb.states.length,
+    terms: tb.grammar.terms.size,
+    nonterms: tb.grammar.nonterms.size,
+    conflicts: tb.conflicts.length,
+    rules: tb.rules.length - 1, // 去掉增广的 $accept 规则
+  };
+}
+
+/** 冲突清单 → HTML 卡片。 */
+export function labConflictsHtml(tb) {
+  if (tb.conflicts.length === 0) {
+    return '<div style="padding:10px;color:var(--ok);font-weight:600">✓ 零冲突</div>';
+  }
+  let h = '';
+  for (const c of tb.conflicts) {
+    h += '<div class="lab-conflict">'
+      + `<span class="kind">${esc(c.kind)}</span> `
+      + `状态 ${c.state}，记号 <code>${esc(c.token)}</code>`
+      + '</div>';
+  }
+  return h;
+}
+
+/** 规则表 → HTML。 */
+export function labRulesHtml(tb) {
+  let h = '<div class="lab-rules">';
+  const rules = tb.rules;
+  for (let i = 0; i < rules.length - 1; i++) { // 去掉增广规则
+    const r = rules[i];
+    h += `<div class="rule"><span class="idx">${i}</span>`
+      + `<span class="lhs">${esc(r.lhs)}</span> → `
+      + `<span class="rhs">${r.rhs.map(esc).join(' ')}</span></div>`;
+  }
+  h += '</div>';
+  return h;
+}
+
+/** 解析树 → 嵌套 HTML（树形视图）。 `n` 是 glrParse 的返回值。 */
+export function labTreeHtml(n) {
+  if (n === null || n === undefined) return '<div class="hint">（无解析结果）</div>';
+  return '<div class="lab-tree-view">' + _treeNode(n) + '</div>';
+}
+
+function _treeNode(n) {
+  if (n.kind === 'atom') {
+    return `<div class="lab-node-head"><span class="leaf">${esc(n.value)}</span></div>`;
+  }
+  if (n.kind === 'string') {
+    return `<div class="lab-node-head"><span class="leaf str">"${esc(n.value)}"</span></div>`;
+  }
+  // list
+  const items = n.items ?? [];
+  const tag = items.length > 0 && items[0].kind === 'atom' ? items[0].value : '';
+  let h = '<div class="lab-node">';
+  h += `<div class="lab-node-head"><span class="tag-name">${tag ? esc(tag) : '(…)'}</span></div>`;
+  const start = tag ? 1 : 0;
+  for (let i = start; i < items.length; i++) h += _treeNode(items[i]);
+  h += '</div>';
+  return h;
+}
+
+/** 解析树 → S-expression 文本。 */
+export function labTreeSexpr(n, indent) {
+  if (indent === undefined) indent = 0;
+  const pad = '  '.repeat(indent);
+  if (n === null || n === undefined) return '';
+  if (n.kind === 'atom') return pad + n.value;
+  if (n.kind === 'string') return pad + JSON.stringify(n.value);
+  const items = n.items ?? [];
+  if (items.length === 0) return pad + '()';
+  // short list (all atoms/strings, fits in ~80 chars) → one line
+  if (items.every((x) => x.kind !== 'list') && items.length <= 6) {
+    const inner = items.map((x) => x.kind === 'string' ? JSON.stringify(x.value) : x.value).join(' ');
+    if (inner.length < 72) return `${pad}(${inner})`;
+  }
+  let s = `${pad}(${items[0].kind === 'atom' ? items[0].value : ''}`;
+  const start = items[0].kind === 'atom' ? 1 : 0;
+  for (let i = start; i < items.length; i++) {
+    s += '\n' + labTreeSexpr(items[i], indent + 1);
+  }
+  s += ')';
+  return s;
+}
+
+/**
+ * 示例面板比两串 S-expr **按空白归一之后**再比。
+ *
+ * 为什么不逐字节比：`labTreeSexpr` 会按长度决定"一行还是换行缩进"
+ * （短表折成一行、长的摊开），所以同一棵树在加了一条规则之后**排版可能变、结构没变**。
+ * 判据要盯的是结构，不是排版。归一之后 `(add 1 2)` 与
+ * `(add\n  1\n  2)` 是同一格 —— 人手写期望值时也就不必猜缩进。
+ */
+export function labSexprEq(a, b) {
+  const norm = (s) => String(s).replace(/\s+/g, ' ').replace(/\(\s+/g, '(')
+    .replace(/\s+\)/g, ')').trim();
+  return norm(a) === norm(b);
+}
+
+/**
+ * `ext/<目录名>` -> 那门语言的文件后缀（管线面板要它拼 `{ lang }`）。
+ *
+ * 为什么是一张手写的表：`omni-ext.json` 里的 `provides.exts` 只有三份填了
+ * （量过：gsl-shell / lua / tiny），别的都靠 `omni-lang.js` 里 `registerLang` 那一句 ——
+ * 那一句在运行期才执行，网页这侧拿不到。等哪天那几份 json 补齐了再回来删这张表。
+ * **`gsl-shell` 落 `.lua`**：它是 lua 的方言（ADR-0037），文件后缀就是 `.lua`。
+ */
+export const LAB_LANG_EXT = {
+  go: '.go', nim: '.nim', vlang: '.v', lua: '.lua', mojo: '.mojo',
+  cpp: '.cpp', freebasic: '.bas', awk: '.awk', chez: '.ss', sbcl: '.lisp',
+  'gsl-shell': '.lua', tiny: '.tiny',
+};
+
+/** 一份 `.grammar` 的仓库路径 -> 那门语言的后缀，或 null（没有对应的注册语言）。 */
+export function labExtOfGrammar(path) {
+  const parts = String(path).split('/');
+  if (parts[0] !== 'ext' || parts.length < 2) return null;
+  return LAB_LANG_EXT[parts[1]] ?? null;
+}
+
+/** 管线面板那几层（从源码到产物的次序）。 */
+export const LAB_EMIT_FORMATS = ['ast', 'oir', 'mir', 'sx', 'js', 'c'];

@@ -35,6 +35,16 @@ export const TREE_ROOTS = [
        少了它，树上一份能出图的 `.asy` 都没有（`cases` 底下的 asy 全是算术），
        于是"预览"那一栏在 asy 上永远空着。glsl 的 `.frag` 在 cases 底下。 */
     only: ['cases', 'draw'] },
+  /* **语法文件** —— 实验室模式（`docs/design/omni-lab.md`）的正事就是"改一条规则，
+     看表与树怎么变"，所以那 `.grammar` 得读得到。两棵：
+       * `ext/<语言>/<语言>.grammar` —— 十一门借来的语言，各一份；
+       * `tests/glr/grammars/*.grammar` —— 教学用的那几份（`expr` 十五行零冲突、
+         `dangling` 悬挂 else、`typename` 类型名那道墙）。
+     **`src/core/frontend-asy` 那三份（asy / glsl / jnc）不在这儿**：那要放开 `src` 这个前缀，
+     而 `safePath` 只比前缀不比后缀 —— 放开它等于把整个 `src/` 交出去。
+     要看那三份走 IDE 模式（它们在磁盘上，不在这棵树上）。 */
+  { name: '语法', path: 'ext', exts: ['.grammar'] },
+  { name: '语法（判据）', path: 'tests', exts: ['.grammar'], only: ['grammars'] },
 ];
 
 /** 后缀 -> 语言标签（高亮与"用哪条腿跑"两处都用它）。 */
@@ -44,6 +54,7 @@ export const LANG_OF = {
   '.c': 'c', '.h': 'c', '.bas': 'basic', '.awk': 'awk', '.ss': 'scheme', '.lisp': 'lisp',
   '.js': 'js', '.mjs': 'js', '.jnc': 'jancy', '.wat': 'wat', '.frag': 'glsl', '.vert': 'glsl',
   '.md': 'markdown', '.json': 'json', '.css': 'css', '.html': 'html',
+  '.grammar': 'lisp',
 };
 
 export const extOf = (p) => (p.lastIndexOf('.') < 0 ? '' : p.slice(p.lastIndexOf('.')));

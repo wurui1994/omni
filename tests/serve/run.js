@@ -196,16 +196,22 @@ eq('tcc a.c -o a', ['c', 'tcc', 'a.c', '-o', 'a']);
 eq('awk -f x.awk', ['run', 'x.awk']);
 ok('shellToArgv 不认的回 null', shellToArgv('rm -rf /') === null);
 
-/* 树：三棵根、`tests/all.js` 那种跑手不进树。 */
+/* 树：五棵根（文档 / 例子 / 判据 / 语法 / 语法判据）、`tests/all.js` 那种跑手不进树。 */
 const tree = buildTree(root);
 const paths = [];
 const collect = (n) => { if (n.kind === 'file') paths.push(n.path); else (n.children ?? []).forEach(collect); };
 tree.roots.forEach(collect);
-ok('buildTree 三棵根', tree.roots.length === 3, `${tree.roots.length}`);
+ok('buildTree 五棵根', tree.roots.length === 5, `${tree.roots.length}`);
 ok('buildTree 收到文件', paths.length > 300, `${paths.length} 份`);
 ok('buildTree 不收判据的跑手', !paths.includes('tests/all.js'));
-ok('buildTree 只收 examples/cases', paths.filter((p) => p.startsWith('ext/'))
-  .every((p) => p.includes('/examples/')));
+/* `ext/` 底下只许两样进树：**examples 里的例子**与**语法文件**。
+   后者是实验室模式要的（改一条规则看表怎么变）—— 那十一门的 `.grammar` 不在
+   examples 底下，所以它是单独一棵根。ext 里那一堆实现用的 `.js` 一份都不许进。 */
+ok('buildTree 只收 examples 与 .grammar', paths.filter((p) => p.startsWith('ext/'))
+  .every((p) => p.includes('/examples/') || p.endsWith('.grammar')));
+ok('buildTree 收得到语法文件', paths.includes('ext/go/go.grammar')
+  && paths.includes('tests/glr/grammars/expr.grammar'));
+ok('buildTree 不收 ext 里的实现', !paths.some((p) => p.startsWith('ext/') && p.endsWith('.js')));
 ok('buildTree 收 html 例子', paths.some((p) => p.startsWith('ext/html/examples/') && p.endsWith('.html')));
 ok('buildTree 收 asy 的 draw', paths.some((p) => p.startsWith('tests/asy/draw/')));
 /* **首页那张策展清单**：每一格都得在树上（首页点一下要能打开它），
@@ -257,7 +263,7 @@ try {
   ok('/api/health 200', h.code === 200 && JSON.parse(h.text).ok === true);
 
   const t = await get('/api/tree');
-  ok('/api/tree 200', t.code === 200 && JSON.parse(t.text).roots.length === 3);
+  ok('/api/tree 200', t.code === 200 && JSON.parse(t.text).roots.length === 5);
 
   const f = await get(`/api/file?path=${encodeURIComponent('docs/guide.md')}`);
   ok('/api/file 读到文档', f.code === 200 && JSON.parse(f.text).lang === 'markdown');
@@ -558,6 +564,49 @@ try {
   }
 } finally {
   await s.close();
+}
+
+/* ---- Lab 模式的纯函数：readGrammar + buildTable + glrParse 在 node 里跑通 ---- */
+import { SourceFile, Diagnostics } from '../../src/core/source/diag.js';
+import { readSexpr } from '../../src/core/sexpr/read.js';
+import { readGrammar as labReadGrammar } from '../../src/core/glr/grammar.js';
+import { buildTable as labBuildTable } from '../../src/core/glr/table.js';
+import { glrParse as labGlrParse } from '../../src/core/glr/driver.js';
+import { lexText as labLexText } from '../../src/core/glr/lex.js';
+import { labStats, labConflictsHtml, labRulesHtml, labTreeHtml, labTreeSexpr } from '../../src/studio/render.js';
+{
+  const gSrc = readFileSync(join(root, 'tests/glr/grammars/expr.grammar'), 'utf8');
+  const d = new Diagnostics();
+  const nodes = readSexpr(new SourceFile('<lab>', gSrc), d);
+  ok('Lab: readSexpr 不报错', d.errorCount() === 0, `${d.errorCount()} 个错误`);
+  const g = labReadGrammar(nodes, d);
+  ok('Lab: readGrammar 成功', g !== null && d.errorCount() === 0);
+  const tb = labBuildTable(g);
+  const st = labStats(tb);
+  ok('Lab: expr.grammar 零冲突', st.conflicts === 0, `${st.conflicts}`);
+  ok('Lab: expr.grammar 8 条规则', st.rules === 8, `${st.rules}`);
+  ok('Lab: expr.grammar 18 个状态', st.states === 18, `${st.states}`);
+  ok('Lab: 冲突 HTML 是零冲突', labConflictsHtml(tb).includes('零冲突'));
+  ok('Lab: 规则 HTML 有内容', labRulesHtml(tb).length > 100);
+  /* 解析一段示例 */
+  const sd = new Diagnostics();
+  const toks = labLexText(g.lex, new SourceFile('<s>', '1 + 2 * 3'), sd);
+  ok('Lab: 词法不报错', sd.errorCount() === 0);
+  const pd = new Diagnostics();
+  const tree = labGlrParse(tb, toks, pd);
+  ok('Lab: 解析不报错', pd.errorCount() === 0);
+  ok('Lab: 树的 S-expr 包含 add 和 mul', labTreeSexpr(tree).includes('add') && labTreeSexpr(tree).includes('mul'));
+  ok('Lab: 树 HTML 有内容', labTreeHtml(tree).length > 100);
+  /* 试一份有冲突的语法（dangling else） */
+  const dSrc = readFileSync(join(root, 'tests/glr/grammars/dangling.grammar'), 'utf8');
+  const dd = new Diagnostics();
+  const dNodes = readSexpr(new SourceFile('<d>', dSrc), dd);
+  const dg = labReadGrammar(dNodes, dd);
+  if (dg !== null && dd.errorCount() === 0) {
+    const dtb = labBuildTable(dg);
+    ok('Lab: dangling.grammar 有冲突', dtb.conflicts.length > 0, `${dtb.conflicts.length}`);
+    ok('Lab: 冲突 HTML 不含零冲突', !labConflictsHtml(dtb).includes('零冲突'));
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

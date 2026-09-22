@@ -420,7 +420,14 @@ export function startServer(opts) {
       }
       /* ---- 静态文件：Studio ---- */
       const file = path === '/' ? '/index.html' : path;
-      const abs = join(studioDir, file.replace(/^\/+/, ''));
+      /* Lab 模式需要从浏览器直接 import 语法/表/解析那几个纯模块（它们不碰 node API）。
+         `/core/…` 映射到 `src/core/…`（只允许 .js，不上别的后缀以免暴露配置文件）。 */
+      let abs;
+      if (file.startsWith('/core/') && file.endsWith('.js')) {
+        abs = join(root, 'src', file.slice(1));
+      } else {
+        abs = join(studioDir, file.replace(/^\/+/, ''));
+      }
       if (abs.includes('..') || !exists(abs) || isDir(abs)) {
         return json(res, 404, { error: 'not found' });
       }
