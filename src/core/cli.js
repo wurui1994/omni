@@ -64,7 +64,7 @@ import { ninjaCmd } from './build/cli.js';
 /* 模块产物缓存那套通用机器（一份索引 + 内容身份 + 一格键）：有 import 关系的语言共用它，
  * 不再每门语言手写一份脏判定 —— 见 `docs/design/build-system.md` §10。 */
 import {
-  UnitIndex, moduleDir, declRead, declPath, declWrite, launcherText, loadableText, declDigest,
+  UnitIndex, moduleDir, declRead, declPath, declWrite, launcherText, loadableText, declSpans,
   moduleOrderOf,
 } from './build/modules.js';
 import { cacheSlot, slotDone, slotRelay } from './build/modcache.js';
@@ -2379,32 +2379,40 @@ const ASY_LOADED = new Map();
 /** 这个进程里那几份 `.load.js` 的正文（省掉每趟读 —— 运行时那份就有 334KB）。 */
 const ASY_LOAD_TEXT = new Map();
 
-/* **同一个全局对象里谁定义了哪个名字**（`declDigest` 那一段注释里是为什么）。
+/* **同一个全局对象里谁定义了哪个名字**（`declSpans` 那一段注释里是为什么）。
  *
- *   `ASY_OWNER`  顶层名字 -> `{mod, h}`：现在这个名字活着的那份定义是谁装的、指纹多少
- *   `ASY_DIGEST` 产物名 -> 它那份 `名字 -> 指纹` 表（产物名是内容地址，算一次就够）
+ *   `ASY_OWNER`  顶层名字 -> `{mod, a, b}`：这个名字现在活着的定义是谁装的、在它那份
+ *                正文里的哪一段
+ *   `ASY_SPANS`  产物名 -> 它那份 `名字 -> [起, 止]` 表（产物名是内容地址，算一次就够）
  *   `ASY_STALE`  名字被**别人按不同正文**盖过的那几份 —— 再要用它就得重装
  *
  * 每趟只给"真装了的那几份"记账（入口、`gen_…`、运行时），库那几份一个进程里只记一次。 */
 const ASY_OWNER = new Map();
-const ASY_DIGEST = new Map();
+const ASY_SPANS = new Map();
 const ASY_STALE = new Set();
 
-function asyDigest(dir, name) {
+function asySpans(dir, name) {
   const at = mtimeMs(join(dir, name));
-  const had = ASY_DIGEST.get(name);
+  const had = ASY_SPANS.get(name);
   if (had !== undefined && had.at === at) return had.map;
-  const map = declDigest(asyLoadText(dir, name));
-  ASY_DIGEST.set(name, { at, map });
+  const map = declSpans(asyLoadText(dir, name));
+  ASY_SPANS.set(name, { at, map });
   return map;
 }
 
 /** 这一份刚装上：把它定义的名字记在自己名下，被它按**不同正文**盖掉的那几份标成要重装。 */
 function asyClaim(dir, name) {
-  for (const [nm, h] of asyDigest(dir, name)) {
+  const text = asyLoadText(dir, name);
+  for (const [nm, sp] of asySpans(dir, name)) {
     const own = ASY_OWNER.get(nm);
-    if (own !== undefined && own.mod !== name && own.h !== h) ASY_STALE.add(own.mod);
-    ASY_OWNER.set(nm, { mod: name, h });
+    /* 重名大多是同一段正文（库那几份里同一个蹦床各发一遍）—— 那种情况下被盖的那一份
+       照旧是对的，只有真不一样才标。账里连正文一起记着：回头去问 `asyLoadText` 就是
+       每个重名一次 stat，几百个重名量出来能把一趟拖慢 10ms。 */
+    if (own !== undefined && own.mod !== name
+      && own.text.slice(own.a, own.b) !== text.slice(sp[0], sp[1])) {
+      ASY_STALE.add(own.mod);
+    }
+    ASY_OWNER.set(nm, { mod: name, text, a: sp[0], b: sp[1] });
   }
   ASY_STALE.delete(name);
 }

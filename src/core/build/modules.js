@@ -194,33 +194,38 @@ export function loadableText(dir, name) {
 }
 
 /**
- * 一份可 eval 正文里**每个顶层名字的定义指纹**：`名字 -> 一个整数`。
+ * 一份可 eval 正文里**每个顶层名字的定义落在哪一段**：`名字 -> [起, 止]`（字符下标）。
  *
  * 为什么需要它：分开 eval 之后所有产物的顶层名字都落在**同一个全局对象**里，而产物的
  * 名字只在"一个程序这一趟链接"里唯一 —— 两个程序各有一个 `struct Box`，两份产物就都
  * 发一个 `s_asy__ctor_Box_body`，正文却不同。谁后装谁赢，于是"这一份进程里已经装过了"
  * 那条捷径会拿到**别的程序**的定义（撞出来过：28-import 跑出 23-ctor 的 Box 构造函数，
- * 症状是 `Cannot convert undefined to a BigInt`）。有了指纹就能判"被盖的是不是同一段
+ * 症状是 `Cannot convert undefined to a BigInt`）。有了这张表就能判"被盖的是不是同一段
  * 正文"：同一段就什么都没发生，不同段就把被盖那一份标成要重装。
  *
- * 指纹算的是**从这一行起、到下一个顶层声明之前**的所有文字（顶层语句会被算进上一格 ——
- * 宁可多判几次不同：多判只是多装一遍，少判就是静默地跑错人家的函数）。
+ * 为什么存下标而不是指纹：这一格要在**盘上每一份产物**上各算一趟（asy_builtins 那份
+ * 2MB、4190 个顶层声明），逐字符哈一遍量出来 40ms。存下标是纯扫行，真要比的时候再
+ * `slice` 两段逐字节比 —— 而重名**大多是同一段正文**（库那几份里同一个蹦床各发一遍），
+ * 这一比一趟只有几百次。顺带比哈希还准：没有碰撞这回事。
+ *
+ * 一格的范围是"从这一行起、到下一个顶层声明之前"（顶层语句算进上一格 —— 宁可多判几次
+ * 不同：多判只是多装一遍，少判就是静默地跑错人家的函数）。
  */
-export function declDigest(text) {
+export function declSpans(text) {
   const out = new Map();
   let cur = null;
-  let h = 0;
+  let at = 0;                      // 当前那一格从哪个字符开始
+  let i = 0;                       // 这一行从哪个字符开始
   for (const line of text.split('\n')) {
     const nm = declName(line);
     if (nm !== null) {
-      if (cur !== null) out.set(cur, h);
+      if (cur !== null) out.set(cur, [at, i]);
       cur = nm;
-      h = 0;
+      at = i;
     }
-    if (cur === null) continue;
-    for (let i = 0; i < line.length; i++) h = (h * 31 + line.charCodeAt(i)) | 0;
+    i += line.length + 1;          // `+1` 是被 split 吃掉的那个换行
   }
-  if (cur !== null) out.set(cur, h);
+  if (cur !== null) out.set(cur, [at, text.length]);
   return out;
 }
 
