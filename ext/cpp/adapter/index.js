@@ -98,6 +98,11 @@ export function cppToIR(tree) {
     /** 已经发过的实例名（`maxOf__int`）—— 同一格只降一遍。 */
     instDone: new Set(),
     /**
+     * **重载了的自由函数**：原名 → `[{ name, params }]`（`name` 是缀了实参类型的那个）。
+     * 只有真重载了的名字才在这张表里 —— 没重载的名字一个字节不动。
+     */
+    ovlFns: new Map(),
+    /**
      * **一格类名 → 它在方言里落成哪一格记录**。没有虚函数的类就是自己；有虚函数的
      * 整棵继承树**共用根那一格记录**（见 `planVirtuals`）—— 那是"基类指针能装派生类"
      * 的唯一办法，方言里没有子类型。
@@ -121,6 +126,30 @@ export function cppToIR(tree) {
     },
     /** 根名（已 ref 过） → 方法名 → [{ vt, fn }]（虚方法的分派表）。 */
     vtab: new Map(),
+    /**
+     * **挑哪一份重载**（自由函数，按实参**类型**）。两步，照 C++ 的次序：
+     *   1. 逐格类型**一模一样**的那份赢；
+     *   2. 没有的话，看"每格实参都能转过去"的（这条腿上只认 `int -> double`
+     *      与 `bool -> int` 两格提升）—— 剩下**正好一份**才算，不然当场报。
+     *
+     * 交的是 `{ name, params }`，调用点照 `params` 给实参补转换（方言是严的：
+     * 拿 int 去喂 real 形参会当场报，不会悄悄转）。
+     */
+    pickFn: (base, argTypes) => {
+      const cands = C.ovlFns.get(base) ?? [];
+      const tags = argTypes.map(tyTag);
+      const same = cands.filter((c) => c.params.length === tags.length
+        && c.params.every((p, i) => tyTag(p.type) === tags[i]));
+      if (same.length === 1) return same[0];
+      const ok = (want, got) => tyTag(want) === tyTag(got)
+        || (want.kind === 'real' && got.kind === 'int')
+        || (want.kind === 'int' && got.kind === 'bool');
+      const fits = cands.filter((c) => c.params.length === tags.length
+        && c.params.every((p, i) => ok(p.type, argTypes[i])));
+      if (fits.length === 1) return fits[0];
+      throw new Error(`cpp->IR: \`${base}(${tags.join(', ')})\` 挑不出唯一那一份重载`
+        + `（有 ${cands.length} 份：${cands.map((c) => c.name).join(' / ')}）`);
+    },
     /**
      * 一格类名 → 类型。**`name` 是落地的记录（可能是根）、`cls` 是写着的那个静态类型** ——
      * 非虚方法按 `cls` 单态分派（C++ 的隐藏规则），虚方法按 `name` 找分派表。
@@ -452,9 +481,39 @@ export function cppToIR(tree) {
   };
   /* 顶层函数的签名**要等三格实例化的口子装好之后**才算：`Box<int> mk(int)` 的返回类型
      就是一格用点，算它的时候会现造 `Box__int`。 */
+  /**
+   * **自由函数的重载**（`int twice(int)` / `double twice(double)`）。
+   *
+   * 与方法那一格同一条规矩的两半：①**没重载的名字一个字节不动**（别的家族逐字节中性）；
+   * ②重载了的按**实参类型**缀名字（`twice__int` / `twice__real`）。方法那一格缀的是
+   * 实参**个数** —— 个数一样的两份到现在还是当场报，而自由函数这儿按类型分得开。
+   *
+   * **Why 非要管**：从前两份同名函数都发成一个名字，方言报的是 `.sx` 里的"重复定义"，
+   * 而且**第一份的签名赢了**，第二份的体照第一份的类型去检 —— 报出来的第二条错
+   * （"`*` 两边要同型"）根本不是病因。这是"覆盖 vs 追加"那个形状的第五次。
+   */
+  const topSig = new Map();
+  const fnSeen = new Map();
   for (const f of topFns) {
-    const s = sigOf(f);
+    const fTok = kids(f).find((y) => tag(y) === 'fn');
+    const n = C.ref(nameOf(kids(fTok)[0]));
+    fnSeen.set(n, (fnSeen.get(n) ?? 0) + 1);
+  }
+  for (const f of topFns) {
+    const s0 = sigOf(f);
+    if ((fnSeen.get(s0.name) ?? 0) < 2) {
+      topSig.set(f, s0);
+      C.fns.set(s0.name, { params: s0.params, ret: s0.ret });
+      continue;
+    }
+    const s = { ...s0, name: `${s0.name}__${s0.params.map((p) => tyTag(p.type)).join('_')}` };
+    if (C.fns.has(s.name)) {
+      throw new Error(`cpp->IR: \`${s0.name}\` 有两份形参类型一模一样的重载`);
+    }
+    topSig.set(f, s);
     C.fns.set(s.name, { params: s.params, ret: s.ret });
+    if (!C.ovlFns.has(s0.name)) C.ovlFns.set(s0.name, []);
+    C.ovlFns.get(s0.name).push({ name: s.name, params: s.params });
   }
 
   for (const [, rec] of C.records) {
@@ -520,7 +579,7 @@ export function cppToIR(tree) {
       decls.push(ctorDecl({ ...s, ret: selfType }, rec, ct, C));
     }
   }
-  for (const f of topFns) decls.push(fnDecl(sigOf(f), f, C));
+  for (const f of topFns) decls.push(fnDecl(topSig.get(f), f, C));
   for (const d of vcallDecls(C)) decls.push(d);
 
   if (!C.fns.has('main')) throw new Error('cpp->IR: 这份源码里没有 `int main()`');
@@ -882,8 +941,7 @@ function layoutVirtual(C, recFields, decls) {
   }
 }
 
-/** 这个类上**出现过一次以上**的方法名（重载）。 */
-function overloadedNames(rec) {
+/** 这个类上**出现过一次以上**的方法名（重载）。 */function overloadedNames(rec) {
   const cnt = new Map();
   for (const m of rec.methods) cnt.set(m.name, (cnt.get(m.name) ?? 0) + 1);
   return new Set([...cnt].filter(([, n]) => n > 1).map(([k]) => k));
@@ -1342,9 +1400,10 @@ function declOf(d, specs, C) {
 //      `&x` 只在记录/列表/字典上成立（标量上当场报，那要真指针）。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
-//   5. 构造函数与方法都按**实参个数**重载；个数一样的两份当场报（按类型挑还没接）。
-//      拷贝构造与赋值算子没有 —— 记录是引用语义，那两格在这条腿上本来就不是"拷贝"。
-//      **虚方法 + 重载**当场报（分派表按老名字找那一份）。
+//   5. **自由函数**按实参**类型**重载（`fnovl.cpp`：`pickFn` —— 先找一模一样的，
+//      再看能提升的，剩下正好一份才算）；**方法与构造函数**只按实参**个数**，
+//      个数一样的两份当场报。拷贝构造与赋值算子没有 —— 记录是引用语义，那两格在这条腿上
+//      本来就不是"拷贝"。**虚方法 + 重载**当场报（分派表按老名字找那一份）。
 //   6. 虚函数接**单继承与多继承**（分组按连通块 —— 见 `planVirtuals`）；纯虚（`= 0`）接了 ——
 //      声明处没有体，分派函数的兜底是一格 `(fail …)`。**菱形继承当场报**（两个基类都有
 //      同一个字段名时 C++ 是两份独立的字段，而摊平只有一张表 —— 见 `flatten`）；

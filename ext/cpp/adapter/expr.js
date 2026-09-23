@@ -153,6 +153,9 @@ export function exprOf(x, C) {
         ? { kind: 'real', value: v } : { kind: 'int', value: v };
     }
     case 'str': return { kind: 'string', value: unquote(leaf(kids(x)[0])) };
+    /* 树上的布尔字面量有两种形状：`(true)` / `(false)`，与"当成一格名字读"（见 `case 'n'`）。 */
+    case 'true': return { kind: 'bool', value: true };
+    case 'false': return { kind: 'bool', value: false };
     case 'n': {
       const n = nameOf(x);
       if (n === 'true') return { kind: 'bool', value: true };
@@ -401,7 +404,34 @@ function callOf(x, C) {
   if (fv !== undefined && fv.kind === 'fn-type') {
     return { kind: 'call-value', fn: exprOf(fn, C), args };
   }
+  /**
+   * **重载了的自由函数**：按实参类型挑那一份（`twice__int` / `twice__real`），
+   * 再照挑中那份的形参给实参补转换 —— 方言是严的，拿 int 去喂 real 形参会当场报。
+   * 没重载的名字不进这张表，所以这一格对别的家族是逐字节中性的。
+   */
+  if (C.ovlFns.has(C.ref(name))) {
+    const hit = C.pickFn(C.ref(name), args.map((a) => typeOf(a, C.tyCtx())));
+    return {
+      kind: 'call',
+      fn: { kind: 'name', name: hit.name },
+      args: args.map((a, i) => coerce(a, hit.params[i].type, C)),
+    };
+  }
   return { kind: 'call', fn: { kind: 'name', name: C.ref(name) }, args };
+}
+
+/** 一格实参往形参的类型上凑（这条腿只认 `int -> real` 与 `bool -> int` 两格提升）。 */
+function coerce(a, want, C) {
+  const got = typeOf(a, C.tyCtx());
+  if (want.kind === 'real' && got.kind === 'int') {
+    return { kind: 'builtin', name: 'toreal', args: [a] };
+  }
+  if (want.kind === 'int' && got.kind === 'bool') {
+    return {
+      kind: 'if-expr', type: INT, cond: a, then: { kind: 'int', value: 1 }, else_: { kind: 'int', value: 0 },
+    };
+  }
+  return a;
 }
 
 /**
