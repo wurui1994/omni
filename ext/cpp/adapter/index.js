@@ -81,6 +81,35 @@ function noRefParams(s, who) {
   }
 }
 
+/**
+ * **按值收的记录，进门先拷一份**（C++ 的值语义）。
+ *
+ * 为什么落在**被调方**而不是每个调用点：调用点有八九处（自由函数、方法、虚方法的分派、
+ * 构造、模板实例、lambda…），而"进门第一句"只有一处 —— 少八处就少八处漏。
+ * 接收者（`this`）与借出去的那几格（`ref`）不拷：前者本来就是引用语义，后者的整个意义
+ * 就是要改到调用者那一格。
+ */
+function byValueCopies(sig, C) {
+  return sig.params
+    .filter((p) => p.name !== 'this' && p.ref !== true && p.type.kind === 'named')
+    .map((p) => ({
+      kind: 'assign',
+      target: { kind: 'name', name: p.name },
+      value: {
+        kind: 'call',
+        fn: { kind: 'name', name: C.recCopy(p.type) },
+        args: [{ kind: 'name', name: p.name }],
+      },
+    }));
+}
+
+/** 一格记录**当值赋出去**（`P b = a;` / `b = a;`）也要拷 —— 右边是"一格地方"才拷。 */
+function copyIfLv(v, type, C) {
+  if (type === null || type === undefined || type.kind !== 'named') return v;
+  if (!['name', 'field', 'index', 'capture'].includes(v.kind)) return v;
+  return { kind: 'call', fn: { kind: 'name', name: C.recCopy(type) }, args: [v] };
+}
+
 /** 一份函数的形参类型标记（`int_real`）—— 与造模板实例名时用的是同一份 `tyTag`。 */
 function paramTags(fnTok, C) {
   const f = kids(fnTok).find((y) => tag(y) === 'fn');
@@ -216,6 +245,52 @@ export function cppToIR(tree) {
     refSig: new Map(),
     /** `类名_成员名`（类名已 ref 过） → 那格 `static` 成员落成的模块级名字。 */
     statics: new Map(),
+    /**
+     * **按值传一格记录要拷一份**（C++ 的值语义）。方言的记录是引用语义，所以"传进去、
+     * 在里头改字段"从前**改到了调用者那一格**（`grow(a)` 之后 `a.x` 变了 —— 答案静默地错）。
+     * 这儿给每格记录发一份 `类名__copy`（逐字段，字段本身是记录就再递归拷一层），
+     * **要到才发**，所以没用到这条路的家族一个字节都不动。
+     */
+    recCopy: (type) => {
+      const nm = `${type.name}__copy`;
+      if (!C.copyDone.has(nm)) {
+        C.copyDone.add(nm);
+        const fs = recFields.get(type.name) ?? [];
+        for (const f of fs) {
+          if (f.type.kind === 'arr' || f.type.kind === 'map') {
+            throw new Error(`cpp->IR: 按值拷 ${type.name} 还没接`
+              + `（字段 ${f.name} 是列表/字典 —— 那要连里头一起拷）`);
+          }
+        }
+        const src = { kind: 'name', name: 'src' };
+        C.fns.set(nm, { params: [{ name: 'src', type }], ret: type });
+        decls.push({
+          kind: 'fn',
+          name: nm,
+          params: [{ name: 'src', type }],
+          ret: type,
+          body: [{
+            kind: 'return',
+            values: [{
+              kind: 'new-record',
+              type,
+              ref: true,
+              fields: fs.map((f) => {
+                const read = { kind: 'field', obj: src, name: f.name };
+                return {
+                  name: f.name,
+                  value: f.type.kind === 'named'
+                    ? { kind: 'call', fn: { kind: 'name', name: C.recCopy(f.type) }, args: [read] }
+                    : read,
+                };
+              }),
+            }],
+          }],
+        });
+      }
+      return nm;
+    },
+    copyDone: new Set(),
     /**
      * **当前函数里哪几格名字装在盒子里**（引用形参 + 被借出去的局部量）。
      * 读写这些名字都要走 `.v`，而在"借出去"的那个实参位置上要交盒子本身。
@@ -621,7 +696,10 @@ export function cppToIR(tree) {
       C.isolate(() => {
         C.push();
         for (const p of params) C.bind(p.name, p.type);
-        stmts = kids(body).flatMap((s) => stmtsOf(s, C));
+        stmts = [
+          ...byValueCopies({ params }, C),
+          ...kids(body).flatMap((s) => stmtsOf(s, C)),
+        ];
         const rv = firstReturn(stmts);
         ret = rv === null ? { kind: 'void' } : typeOf(rv, C.tyCtx());
         C.pop();
@@ -1268,7 +1346,10 @@ function fnDecl(sig, fnTok, C, selfName = null) {
   C.self = selfName;
   C.scoped = [];
   const body = part(fnTok, 'body');
-  const stmts = body === undefined ? [] : kids(body).flatMap((s) => stmtsOf(s, C));
+  const stmts = [
+    ...byValueCopies(sig, C),
+    ...(body === undefined ? [] : kids(body).flatMap((s) => stmtsOf(s, C))),
+  ];
   const exits = dtorCalls(C);
   C.scoped = outerScoped;
   C.self = outerSelf;
@@ -1302,7 +1383,7 @@ function ctorDecl(sig, rec, ctorTok, C) {
   const outerSelf = C.self;
   C.self = recName;
   C.scoped = [];
-  const stmts = [{
+  const stmts = [...byValueCopies(sig, C), {
     kind: 'let',
     name: 'this',
     type: selfType,
@@ -1358,12 +1439,12 @@ function vtZeroRecord(type, C) {
     ref: true,
     fields: fs.map((f) => ({
       name: f.name,
-      value: f.name === VT ? { kind: 'int', value: id } : zeroFor(f.type),
+      value: f.name === VT ? { kind: 'int', value: id } : zeroFor(f.type, C),
     })),
   };
 }
 
-/** 一格类型的零值（构造函数先造一格全零的记录，再让初始化表与体去改）。 */function zeroFor(t) {
+/** 一格类型的零值（构造函数先造一格全零的记录，再让初始化表与体去改）。 */function zeroFor(t, C) {
   switch (t.kind) {
     case 'int': return { kind: 'int', value: 0 };
     case 'real': return { kind: 'real', value: 0 };
@@ -1371,6 +1452,13 @@ function vtZeroRecord(type, C) {
     case 'string': return { kind: 'string', value: '' };
     case 'arr': return { kind: 'builtin', name: 'anew', args: [tyArg(t), { kind: 'int', value: 0 }] };
     case 'map': return { kind: 'builtin', name: 'dnew', args: [tyArg(t)] };
+    /**
+     * **字段本身是一格记录**：要造一格零值的子记录，不能留 null —— 留 null 的后果是
+     * `a.in.v = 5` 在运行期"null reference"（C++ 那边子对象是现成的）。
+     */
+    case 'named':
+      if (C === undefined) throw new Error('cpp->IR: 嵌套记录的零值要 C（内部错）');
+      return vtZeroRecord(t, C);
     default:
       throw new Error(`cpp->IR: 构造函数里 ${t.kind} 那一格字段的零值还没接`);
   }
@@ -1525,7 +1613,7 @@ function assignOf(x, C) {
       return { kind: 'builtin-stmt', name: 'dset', args: [target.obj, target.index, value] };
     }
   }
-  return { kind: 'assign', target, value };
+  return { kind: 'assign', target, value: copyIfLv(value, typeOf(target, C.tyCtx()), C) };
 }
 
 /** 一格 `(init (d 名字 [(init 值)]))` → 一条 `let`。 */
@@ -1558,7 +1646,7 @@ function declOf(d, specs, C) {
       throw new Error(`cpp->IR: \`${name}\` 被按引用借出去了，可它不是标量 —— 还没接`);
     }
     const box = C.refBox(type);
-    const v = initTok === undefined ? zeroFor(type) : exprOf(kids(initTok)[0], C);
+    const v = initTok === undefined ? zeroFor(type, C) : exprOf(kids(initTok)[0], C);
     C.bind(name, box);
     return {
       kind: 'let',
@@ -1672,9 +1760,19 @@ function declOf(d, specs, C) {
       throw new Error(`cpp->IR: ${type.cls} 没有收 ${args.length} 个实参的构造函数`);
     }
   }
+  /**
+   * **字段里套着记录的那一档，声明时要现造一格零值记录**：只发 `(let a P)` 的话那格子
+   * 记录是 null，`a.in.v = 5` 在运行期报 "null reference"（C++ 那边子对象是现成的）。
+   * 字段全是标量的照旧（`init: null`）—— 那一档已经全绿，不为这一格去动它。
+   */
+  if (type !== null && type.kind === 'named' && ctorTok === undefined && initTok === undefined
+    && (C.tyCtx().fields.get(type.name) ?? []).some((f) => f.type.kind === 'named')) {
+    C.bind(name, type);
+    return { kind: 'let', name, type, init: vtZeroRecord(type, C) };
+  }
   return {
     kind: 'let', name, type,
-    init: initTok === undefined ? null : exprOf(kids(initTok)[0], C),
+    init: initTok === undefined ? null : copyIfLv(exprOf(kids(initTok)[0], C), type, C),
   };
 }
 
@@ -1714,3 +1812,9 @@ function declOf(d, specs, C) {
 //      一个类一份，初值（类里那句或类外那句 `int C::x = …;`）摆在 `main` 体的最前面 ——
 //      方言的 `(global 名字 类型)` 按设计零初始化，不带初值那一格。
 //      `static` 的**成员函数**还没接（那要"没有 this 的方法"）。
+//  10. **记录是值语义**（`byvalue.cpp`）：按值收的记录形参在**被调方进门第一句**拷一份
+//      （`类名__copy`，逐字段、字段是记录再递归拷），拷贝初始化与拷贝赋值也拷。
+//      不拷的两格是有意的：接收者（`this`）与借出去的形参（`T&` / `T*`）。
+//      **记录里有列表/字典时按值拷当场报**（那要连里头一起拷）；返回局部记录不拷
+//      （那格量本来就要没了，与 C++ 的省略拷贝对得上）。
+//      字段里套着记录的，声明时现造一格零值子记录（只发 `(let a P)` 那格子记录是 null）。
