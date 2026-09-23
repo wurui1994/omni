@@ -95,13 +95,25 @@ export function typeOfSpecs(specs, C, declTok) {
 /**
  * 一格 `(params (p (specs …) (n x)) …)` → `[{ name, type }]`。
  * 函数、方法、构造函数、**lambda** 四处共用这一份（名字那一格可能裹在 `ptr` / `array` 里）。
+ *
+ * **`T&`（引用）那一格**：记录 / 列表 / 字典本来就是引用语义，照原样收；**标量**上要
+ * 交一格 `{ ref: true }` 出去 —— 调用点与体里都得知道它装在一格盒子里（`__ref_int`），
+ * 不然 `void bump(int& x)` 会**静默地改副本**（从前就是这样：`&` 被无声地丢掉了）。
  */
 export function readParams(paramsTok, C) {
   const ps = paramsTok === undefined ? [] : kids(paramsTok).filter((y) => tag(y) === 'p');
   return ps.map((p) => {
     const pn = kids(p).find((y) => tag(y) === 'n' || tag(y) === 'ptr' || tag(y) === 'array');
     const pname = pn === undefined ? 'x' : nameOf(tag(pn) === 'n' ? pn : kids(pn)[kids(pn).length - 1]);
-    return { name: C.ref(pname), type: typeOfSpecs(part(p, 'specs'), C, pn) ?? INT };
+    const type = typeOfSpecs(part(p, 'specs'), C, pn) ?? INT;
+    const amp = pn !== undefined && tag(pn) === 'ptr'
+      && kids(pn).some((y) => tag(y) === null && String(leaf(y)) === '&');
+    const scalar = type.kind === 'int' || type.kind === 'real'
+      || type.kind === 'bool' || type.kind === 'string';
+    if (amp && scalar) {
+      return { name: C.ref(pname), type: C.refBox(type), ref: true, of: type };
+    }
+    return { name: C.ref(pname), type };
   });
 }
 
@@ -166,6 +178,15 @@ export function exprOf(x, C) {
        * 顺序是硬的：**局部量与形参先查**（同名的局部量遮住字段，C++ 就是这么定的）。
        */
       const flat = C.ref(n);
+      /**
+       * **借出去的那几格量装在一格盒子里**（`T&` —— 见 index.js 的 `refBox` / `borrowedLocals`）：
+       * 方言里标量是值，"改得动调用者那一格"只能把它装进一格记录（记录本来就是引用）。
+       * 于是读写这个名字都要走那一格字段 —— 这一条要排在最前：装盒子的量既在环境里，
+       * 也可能与字段同名，漏了就是**答案静默地错**（改的是副本）。
+       */
+      if (C.refNames.has(flat)) {
+        return { kind: 'field', obj: { kind: 'name', name: flat }, name: 'v' };
+      }
       /**
        * **lambda 体里借走的那几格量**落成 `(cap …)`：那一层的作用域栈是换空过的
        * （见 index.js 的 `C.lambda`），所以"环境里没有、捕获表里有"就是一格捕获。
@@ -364,7 +385,20 @@ function callOf(x, C) {
     };
   }
   const name = nameOf(fn);
-  const args = rawArgs.map((a) => exprOf(a, C));
+  /**
+   * **借出去的那几格实参不许求值**（`T&`）：那个位置上要交的是**盒子本身**，
+   * 不是盒子里的值。能借的只有"一格装着盒子的量"（局部量或上一层的引用形参）——
+   * 别的（字段、数组元素、临时值）当场报，别静默地传一份副本进去。
+   */
+  const rsig = C.refSig.get(C.ref(name));
+  const args = rawArgs.map((a, i) => {
+    if (rsig === undefined || !rsig.has(i)) return exprOf(a, C);
+    if (tag(a) !== 'n' || !C.refNames.has(C.ref(nameOf(a)))) {
+      throw new Error(`cpp->IR: \`${name}\` 的第 ${i + 1} 格实参要按引用借出去，`
+        + '可这儿给的不是一格局部量（字段 / 数组元素 / 临时值上还没接）');
+    }
+    return { kind: 'name', name: C.ref(nameOf(a)) };
+  });
   if (name === 'printf' || name === 'puts') {
     throw new Error(`cpp->IR: \`${name}\` 在表达式位置上（它不交值）`);
   }

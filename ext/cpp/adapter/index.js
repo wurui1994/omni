@@ -44,6 +44,42 @@ function methodName(rec, m, C) {
   return (rec.ovl?.has(m.name) === true) ? `${base}__${ctorArity(m.tok)}` : base;
 }
 
+/**
+ * **体里被借出去的那几格局部量**（要发成盒子的）。一趟扫树：凡是 `f(…, y, …)` 里
+ * `y` 落在 `f` 的引用形参那个位置上，`y` 就得装盒子。
+ *
+ * **Why 先扫一趟**：声明那一句（`int y = 5;`）要发成 `let y = __ref_int{v:5}`，
+ * 而它在体里排在调用**之前** —— 边降边发现来不及。
+ */
+function borrowedLocals(fnTok, C) {
+  const out = new Set();
+  const walk = (t) => {
+    if (t === null || t === undefined || !isList(t)) return;
+    if (tag(t) === 'call') {
+      const fn = kids(t)[0];
+      const as = part(t, 'args');
+      if (fn !== undefined && tag(fn) === 'n' && as !== undefined) {
+        const idx = C.refSig.get(C.ref(nameOf(fn)));
+        if (idx !== undefined) {
+          kids(as).forEach((a, i) => {
+            if (idx.has(i) && tag(a) === 'n') out.add(C.ref(nameOf(a)));
+          });
+        }
+      }
+    }
+    for (const k of kids(t)) walk(k);
+  };
+  walk(part(fnTok, 'body'));
+  return out;
+}
+
+/** 形参里有 `T&` 就当场报（自由函数上接了，别的位置还没接）。 */
+function noRefParams(s, who) {
+  if (s.params.some((p) => p.ref === true)) {
+    throw new Error(`cpp->IR: ${who} 上的 \`T&\` 形参还没接（自由函数上接了）`);
+  }
+}
+
 /** 一份函数的形参类型标记（`int_real`）—— 与造模板实例名时用的是同一份 `tyTag`。 */
 function paramTags(fnTok, C) {
   const f = kids(fnTok).find((y) => tag(y) === 'fn');
@@ -160,6 +196,28 @@ export function cppToIR(tree) {
     ctemplates: new Map(),
     /** 已经发过的实例名（`maxOf__int`）—— 同一格只降一遍。 */
     instDone: new Set(),
+    /**
+     * **`T&` 那一格的盒子**：标量按引用传不出去（方言里标量是值），所以装进一格只有
+     * 一格字段 `v` 的记录 —— 记录本来就是引用语义。同一个元素类型只造一格
+     * （`__ref_int` / `__ref_real` / …），用户写不出这个名字（双下线开头留给我们）。
+     */
+    refBox: (t) => {
+      const nm = `__ref_${tyTag(t)}`;
+      if (!C.refBoxDone.has(nm)) {
+        C.refBoxDone.add(nm);
+        recFields.set(nm, [{ name: 'v', type: t }]);
+        decls.push({ kind: 'class', name: nm, fields: [{ name: 'v', type: t }] });
+      }
+      return { kind: 'named', name: nm, ref: true, cls: nm };
+    },
+    refBoxDone: new Set(),
+    /** 函数名（已 ref 过） → 哪几格形参是借出去的（下标集合）。 */
+    refSig: new Map(),
+    /**
+     * **当前函数里哪几格名字装在盒子里**（引用形参 + 被借出去的局部量）。
+     * 读写这些名字都要走 `.v`，而在"借出去"的那个实参位置上要交盒子本身。
+     */
+    refNames: new Set(),
     /**
      * **重载了的自由函数**：原名 → `[{ name, params }]`（`name` 是缀了实参类型的那个）。
      * 只有真重载了的名字才在这张表里 —— 没重载的名字一个字节不动。
@@ -415,6 +473,7 @@ export function cppToIR(tree) {
       rec.ovlT = overloadedByType(rec);
       const sigs = rec.methods.map((m) => sigOf(m.tok, selfType, methodName(rec, m, C)));
       sigs.forEach((s, i) => {
+        noRefParams(s, `${inst}::${rec.methods[i].name}`);
         C.fns.set(s.name, { params: s.params, ret: s.ret });
         regMethOvl(rec, rec.methods[i], s, C);
       });
@@ -428,6 +487,7 @@ export function cppToIR(tree) {
           throw new Error(`cpp->IR: ${inst} 有两份形参一模一样的构造函数`);
         }
         const s = sigOf(tok, undefined, name);
+        noRefParams(s, `${inst} 的构造函数`);
         C.fns.set(name, { params: s.params, ret: selfType });
         if (byType) {
           if (!C.ctorOvl.has(C.ref(inst))) C.ctorOvl.set(C.ref(inst), []);
@@ -475,6 +535,7 @@ export function cppToIR(tree) {
   C.lambda = (tok) => {
     const name = C.fresh('__lam');
     const params = readParams(kids(tok).find((y) => tag(y) === 'params'), C);
+    noRefParams({ params }, 'lambda');
     const body = part(tok, 'body');
     const capsTok = kids(tok).find((y) => tag(y) === 'captures');
     const wanted = [];
@@ -504,10 +565,16 @@ export function cppToIR(tree) {
       C.tyCtx().env.get(c.name) === undefined && C.capNames.has(c.name)
         ? { kind: 'capture', name: c.name, type: c.type }
         : { kind: 'name', name: c.name }));
-    const outer = { caps: C.capNames, self: C.self, scoped: C.scoped };
+    const outer = {
+      caps: C.capNames, self: C.self, scoped: C.scoped, refs: C.refNames,
+    };
     C.capNames = new Map(caps.map((c) => [c.name, c.type]));
     C.self = null;
     C.scoped = [];
+    /* **盒子那张表在 lambda 里清空**：捕获一律按值，而盒子是按引用的 —— 两种语义不能
+       混着来。真在 lambda 体里用了一格装盒子的量，那一格会在方言那侧当场报类型不对
+       （`__ref_int` vs `int`），比"静默地变成按引用捕获"强。 */
+    C.refNames = new Set();
     let stmts;
     let ret;
     try {
@@ -523,6 +590,7 @@ export function cppToIR(tree) {
       C.capNames = outer.caps;
       C.self = outer.self;
       C.scoped = outer.scoped;
+      C.refNames = outer.refs;
     }
     const retTok = kids(tok).find((y) => tag(y) === 'ret');
     if (retTok !== undefined) {
@@ -577,10 +645,16 @@ export function cppToIR(tree) {
   }
   for (const f of topFns) {
     const s0 = sigOf(f);
+    const refIdx = new Set(s0.params.flatMap((p, i) => (p.ref === true ? [i] : [])));
     if ((fnSeen.get(s0.name) ?? 0) < 2) {
+      if (refIdx.size > 0) C.refSig.set(s0.name, refIdx);
       topSig.set(f, s0);
       C.fns.set(s0.name, { params: s0.params, ret: s0.ret });
       continue;
+    }
+    if (refIdx.size > 0) {
+      throw new Error(`cpp->IR: \`${s0.name}\` 既重载又有 \`T&\` 形参 —— 还没接`
+        + '（调用点挑重载靠实参类型，而借出去那一格给的是盒子）');
     }
     const s = { ...s0, name: `${s0.name}__${s0.params.map((p) => tyTag(p.type)).join('_')}` };
     if (C.fns.has(s.name)) {
@@ -598,6 +672,7 @@ export function cppToIR(tree) {
     const selfType = C.recType(rec.name);
     for (const m of rec.methods) {
       const s = sigOf(m.tok, selfType, methodName(rec, m, C));
+      noRefParams(s, `${rec.name}::${m.name}`);
       if (C.fns.has(s.name)) {
         throw new Error(`cpp->IR: ${rec.name} 上有两份一模一样的 ${m.name}`);
       }
@@ -617,6 +692,7 @@ export function cppToIR(tree) {
         throw new Error(`cpp->IR: ${rec.name} 有两份形参一模一样的构造函数`);
       }
       const s = sigOf(tok, undefined, name);
+      noRefParams(s, `${rec.name} 的构造函数`);
       C.fns.set(s.name, { params: s.params, ret: selfType });
       if (byType) {
         const k = C.ref(rec.name);
@@ -1118,6 +1194,13 @@ function fnDecl(sig, fnTok, C, selfName = null) {
   for (const p of sig.params) C.bind(p.name, p.type);
   const outerScoped = C.scoped;
   const outerSelf = C.self;
+  const outerRefs = C.refNames;
+  /**
+   * **这一格函数里哪几个名字装在盒子里**：引用形参，加上"体里被借出去"的那几格局部量
+   * （`borrowedLocals` 先扫一趟树 —— 声明那一句要发成盒子，所以得在降体**之前**知道）。
+   */
+  C.refNames = new Set(sig.params.filter((p) => p.ref === true).map((p) => p.name));
+  for (const n of borrowedLocals(fnTok, C)) C.refNames.add(n);
   C.self = selfName;
   C.scoped = [];
   const body = part(fnTok, 'body');
@@ -1125,6 +1208,7 @@ function fnDecl(sig, fnTok, C, selfName = null) {
   const exits = dtorCalls(C);
   C.scoped = outerScoped;
   C.self = outerSelf;
+  C.refNames = outerRefs;
   C.pop();
   return {
     kind: 'fn',
@@ -1395,6 +1479,29 @@ function declOf(d, specs, C) {
     return { kind: 'let', name, type, init: v };
   }
 
+  /**
+   * **被借出去的局部量装进盒子**（`int y = 5;` 后头有一句 `bump(y, 3)`）——
+   * 哪几格要装是降体之前扫出来的（`borrowedLocals`）。盒子就是一格只有 `v` 的记录，
+   * 于是"改得动调用者那一格"落成一次普通的字段赋值，图上一格新东西也没加。
+   */
+  if (C.refNames.has(name) && !isArray) {
+    const ok = type !== null && ['int', 'real', 'bool', 'string'].includes(type.kind);
+    if (!ok) {
+      throw new Error(`cpp->IR: \`${name}\` 被按引用借出去了，可它不是标量 —— 还没接`);
+    }
+    const box = C.refBox(type);
+    const v = initTok === undefined ? zeroFor(type) : exprOf(kids(initTok)[0], C);
+    C.bind(name, box);
+    return {
+      kind: 'let',
+      name,
+      type: box,
+      init: {
+        kind: 'new-record', type: box, ref: true, fields: [{ name: 'v', value: v }],
+      },
+    };
+  }
+
   if (isArray) {
     const elem = type;
     const arrTy = arrOf(elem);
@@ -1511,8 +1618,11 @@ function declOf(d, specs, C) {
 //      长度修饰（`%lld` / `%lu` / `%08lld` 那一族）**读得对、印得也对** —— 量过一趟与
 //      `c++` 逐字节相同：这条腿上整数只有一格宽度，所以"按几位读"那件事现在没有区别；
 //      真要按位截断得等定宽整数回卷那一格（见第 4 条）。
-//   3. 引用（`T&`）当值收（例子里只用它传结构 —— 记录本来就是引用语义）；
-//      `&x` 只在记录/列表/字典上成立（标量上当场报，那要真指针）。
+//   3. 引用（`T&`）：记录 / 列表 / 字典上照原样收（本来就是引用语义）；**标量上装进一格
+//      盒子**（`__ref_int`，`refparam.cpp`）—— 只接**自由函数**的形参，而且借出去的那个
+//      实参只能是"一格装着盒子的量"；方法 / 构造 / lambda 的形参、重载 + `T&`、
+//      以及把字段或数组元素借出去，全当场报。
+//      `&x`（取地址当值用）只在记录/列表/字典上成立（标量上当场报，那要真指针）。
 //   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
 //      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
 //   5. **自由函数、方法与构造函数**都按实参**类型**重载（`fnovl.cpp` / `methov2.cpp` /
