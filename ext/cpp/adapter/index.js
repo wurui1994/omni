@@ -122,13 +122,21 @@ function borrowedLocals(fnTok, C) {
       const sp = part(t, 'specs');
       const cn = sp === undefined ? undefined : kids(sp).find((y) => tag(y) === 'n');
       const cands = cn === undefined ? undefined : C.ctorCands.get(C.ref(nameOf(cn)));
+      /**
+       * **类模板的那一格**（`Holder<int> h(y);`）：实例还没造出来，`ctorCands` 里当然没有它。
+       * 可构造的名字与类名同名，所以收模板那会儿 `seedRefByName` 已经按**类名**记过一份
+       * （并集近似）—— 这儿按 `tid` 的基名去查那一份。
+       */
+      const tid = sp === undefined ? undefined : kids(sp).find((y) => tag(y) === 'tid');
+      const tmplIdx = tid === undefined ? undefined : C.refByName.get(nameOf(kids(tid)[0]));
       const it = part(t, 'init');
-      if (cands !== undefined && it !== undefined) {
+      if ((cands !== undefined || tmplIdx !== undefined) && it !== undefined) {
         for (const d of kids(it)) {
           const ct = kids(d).find((y) => tag(y) === 'ctor');
           const cas = ct === undefined ? undefined : part(ct, 'args');
           if (cas === undefined) continue;
-          const idx = C.refIdxAgreed(cands, kids(cas).length, nameOf(cn));
+          const idx = cands === undefined ? tmplIdx
+            : C.refIdxAgreed(cands, kids(cas).length, nameOf(cn));
           if (idx === undefined) continue;
           kids(cas).forEach((a, i) => {
             const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
@@ -864,7 +872,11 @@ export function cppToIR(tree) {
           throw new Error(`cpp->IR: ${inst} 有两份形参一模一样的构造函数`);
         }
         const s = sigOf(tok, undefined, name);
-        noRefParams(s, `${inst} 的构造函数`);
+        /* 出参：与非模板那条路同一条（扫树那趟按**类名**查 `refByName` —— 构造与类同名）。 */
+        const cRef = new Set(s.params.flatMap((p, k) => (p.ref === true ? [k] : [])));
+        if (cRef.size > 0) C.refSig.set(s.name, cRef);
+        if (!C.ctorCands.has(C.ref(inst))) C.ctorCands.set(C.ref(inst), []);
+        C.ctorCands.get(C.ref(inst)).push({ name, params: s.params });
         C.fns.set(name, { params: s.params, ret: selfType });
         if (byType) {
           if (!C.ctorOvl.has(C.ref(inst))) C.ctorOvl.set(C.ref(inst), []);
@@ -2476,11 +2488,11 @@ function declOf(d, specs, C) {
 //      `virtual ~X()` 上的 `virtual` 这条腿上没有意义（没有 `delete`，对象都是作用域里的，
 //      静态类型定得死），所以照普通析构收。
 //      类里"只声明不给体、体写在类外"那一档**接了**（`attachOutline`；类模板上还没有）。
-//   7. 类模板接**构造、析构、继承与方法上的出参**（`ctmpl2.cpp`；继承摊平走同一份
-//      `flatten`，析构串链）。出参那一格的坑是**时序** —— 实例是第二、三遍中间才现造的，
-//      而降体之前那趟扫树比它早，所以"哪个方法名借哪几格"在**收模板**那会儿就按树记下
-//      （`seedRefByName`，`refByName` 本来就是并集近似）。**构造上的出参**还没接
-//      （那一格要按类名查，而声明形写的是 `Holder<int>` —— 名字还没定下来）。
+//   7. 类模板接**构造、析构、继承与出参**（方法上的与构造上的都接了，`ctmpl2.cpp`；
+//      继承摊平走同一份 `flatten`，析构串链）。出参那一格的坑是**时序** —— 实例是第二、三遍
+//      中间才现造的，而降体之前那趟扫树比它早，所以"哪个名字借哪几格"在**收模板**那会儿
+//      就按树记下（`seedRefByName`，`refByName` 本来就是并集近似）；构造与类同名，所以
+//      `Holder<int> h(y);` 那一格按 `tid` 的基名查的是同一份记录。
 //      **虚函数**当场报（自己写了 `virtual` 或基类那侧有 —— 虚那条路是"整块合成一格记录"，
 //      而实例是第二、三遍中间现造的，`planVirtuals` 早过去了）；基类本身是类模板
 //      （`Derived : Base<T>`）、模板的默认实参与特化、类模板里"体写在类外"也都当场报。

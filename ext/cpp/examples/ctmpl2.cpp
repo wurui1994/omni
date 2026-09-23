@@ -53,6 +53,11 @@ struct Cell : Tag {
   T v;
   Cell(T x) : v(x) {
   }
+  /* **类模板的构造上的出参**：实例还没造出来时扫树那一趟查不到 `ctorCands` —— 可构造与
+     类同名，所以收模板那会儿按**类名**记下的那一份（`seedRefByName`）正好能用。 */
+  Cell(T x, int& seen) : v(x) {
+    seen = seen + 1;
+  }
   T get() {
     return v;
   }
@@ -79,5 +84,9 @@ int main() {
   double gotd = 0.0;
   b.take(gotd);
   printf("%d %.2f\n", got, gotd);
+  int seen = 0;
+  Cell<int> e(9, seen);
+  e.id = 3;
+  printf("%d %d\n", e.get(), seen);
   return 0;
 }
