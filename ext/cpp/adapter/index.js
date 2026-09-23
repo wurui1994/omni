@@ -15,6 +15,7 @@ import {
 import { INT, arrOf, named, typeOf } from '../../../src/core/lower/ty-of.js';
 import {
   exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg, vcallName, readParams, coerce,
+  wrapNarrow,
 } from './expr.js';
 
 /**
@@ -1830,6 +1831,64 @@ export function stmtsOf(x, C) {
         body: rbody,
       }];
     }
+    /**
+     * `switch` —— 落公共层现成的那一格（它摊成 if/else 链）。**两处与 C++ 不一样，要认清**：
+     *   1. C++ 是**穿透**的（不写 `break` 就往下掉），而公共层那一格每一支各自独立 ——
+     *      所以每一组末尾那句 `break` 要**摘掉**（它的意思是"出 switch"，而公共层的
+     *      `break` 是"出循环"，留着就跳错了）；**没有 `break` 又不是最后一组**的当场报，
+     *      别静默地把穿透改成不穿透。
+     *   2. 树上每格 `case` 只带**一条**语句（`(case v stmt)`），剩下的是它后面的兄弟 ——
+     *      所以要自己按 `case` / `default` **分组**。
+     */
+    case 'switch': {
+      const [condTok, bodyTok] = kids(x);
+      const items = tag(bodyTok) === 'block' || tag(bodyTok) === null
+        ? kids(bodyTok) : [bodyTok];
+      const groups = [];
+      /**
+       * 一格 `case` 带的那条语句**可能又是一格 `case`**（`case 2: case 3: …` —— 树上是
+       * 套起来的）：那是"两个值共用一份体"，摊成两格 case（各发一份体，语义一样）。
+       */
+      const push = (it) => {
+        const first = kids(it)[tag(it) === 'case' ? 1 : 0];
+        if (first !== undefined && (tag(first) === 'case' || tag(first) === 'default')) {
+          groups.push({ tok: it, stmts: [], share: true });
+          push(first);
+          return;
+        }
+        groups.push({ tok: it, stmts: first === undefined ? [] : [first] });
+      };
+      for (const it of items) {
+        if (tag(it) === 'case' || tag(it) === 'default') { push(it); continue; }
+        if (groups.length === 0) throw new Error('cpp->IR: switch 里第一句不是 case/default');
+        groups[groups.length - 1].stmts.push(it);
+      }
+      const cases = [];
+      let default_ = null;
+      groups.forEach((g, gi) => {
+        /* 共用体的那几格（`case 2:` 紧跟着 `case 3:`）借下一组的体。 */
+        if (g.share === true) {
+          const host = groups.slice(gi + 1).find((y) => y.share !== true);
+          if (host === undefined) throw new Error('cpp->IR: switch 里这一格 case 没有体');
+          g.stmts = host.stmts;
+        }
+        const last = g.stmts[g.stmts.length - 1];
+        const hasBreak = last !== undefined && tag(last) === 'break';
+        const isLastReal = groups.slice(gi + 1).every((y) => y.share === true);
+        const ends = hasBreak || (last !== undefined && tag(last) === 'return');
+        if (!ends && !isLastReal && g.stmts.length > 0) {
+          throw new Error('cpp->IR: switch 的这一支会**穿透**到下一支 —— 还没接（补一句 break）');
+        }
+        const body = (hasBreak ? g.stmts.slice(0, -1) : g.stmts).flatMap((t2) => stmtsOf(t2, C));
+        if (tag(g.tok) === 'default') { default_ = body; return; }
+        const mt = kids(g.tok)[0];
+        if (tag(mt) === 'range') throw new Error('cpp->IR: `case a ... b`（区间）还没接');
+        cases.push({ match: exprOf(mt, C), body });
+      });
+      return [{
+        kind: 'switch', value: exprOf(condTok, C), cases, default_,
+      }];
+    }
     case 'return': {
       /* 析构不在这儿补 —— 公共层那一格 `scope` 在**每个**出口上补（见 `fnDecl`）。 */
       const vs = kids(x);
@@ -1848,10 +1907,11 @@ export function stmtsOf(x, C) {
 function stepOf(x, C) {
   const op = String(leaf(kids(x)[0])) === '++' ? '+' : '-';
   const target = lhsOf(kids(x)[1], C);
+  const step = { kind: 'binop', op, left: target, right: { kind: 'int', value: 1 } };
   return {
     kind: 'assign',
     target,
-    value: { kind: 'binop', op, left: target, right: { kind: 'int', value: 1 } },
+    value: wrapNarrow(step, typeOf(target, C.tyCtx())),
   };
 }
 
@@ -1899,7 +1959,9 @@ function assignOf(x, C) {
       return { kind: 'builtin-stmt', name: 'dset', args: [target.obj, target.index, value] };
     }
   }
-  return { kind: 'assign', target, value: copyIfLv(value, typeOf(target, C.tyCtx()), C) };
+  const tt = typeOf(target, C.tyCtx());
+  /* **存进窄整数要回卷**（`unsigned char` 8 位…）—— 见 expr.js 的 `wrapNarrow`。 */
+  return { kind: 'assign', target, value: wrapNarrow(copyIfLv(value, tt, C), tt) };
 }
 
 /** 一格 `(init (d 名字 [(init 值)]))` → 一条 `let`。 */
@@ -2110,8 +2172,12 @@ function declOf(d, specs, C) {
     return { kind: 'let', name, type, init: vtZeroRecord(type, C) };
   }
   return {
-    kind: 'let', name, type,
-    init: initTok === undefined ? null : copyIfLv(exprOf(kids(initTok)[0], C), type, C),
+    kind: 'let',
+    name,
+    type,
+    /* 初值也要回卷（`unsigned char c = 300;` 在 C++ 里就是 44）。 */
+    init: initTok === undefined
+      ? null : wrapNarrow(copyIfLv(exprOf(kids(initTok)[0], C), type, C), type),
   };
 }
 
@@ -2125,8 +2191,8 @@ function declOf(d, specs, C) {
 //      宽度、`-` / `0` / `+` / 空格 / `#` 五个标志、各档精度、`*` / `.*`、`%c`、
 //      末尾不带换行（落 `write`）、一句里几个换行 —— **都接了**。
 //      长度修饰（`%lld` / `%lu` / `%08lld` 那一族）**读得对、印得也对** —— 量过一趟与
-//      `c++` 逐字节相同：这条腿上整数只有一格宽度，所以"按几位读"那件事现在没有区别；
-//      真要按位截断得等定宽整数回卷那一格（见第 4 条）。
+//      `c++` 逐字节相同：这条腿上整数只有一格宽度，所以"按几位读"那件事现在没有区别
+//      （按位截断那一格见第 4 条 —— 回卷在**存进去**那一头，不在印出来这一头）。
 //   3. 引用（`T&`）与**按指针收的出参**（`T*` + `*p` + 调用点 `&y`）落成同一样东西：
 //      记录 / 列表 / 字典照原样收（本来就是引用语义）；**标量装进一格盒子**
 //      （`__ref_int`，`refparam.cpp`）。接**自由函数**与**方法**（后者只认"没重载、非虚"
@@ -2134,8 +2200,14 @@ function declOf(d, specs, C) {
 //      构造 / lambda 的形参、重载或虚方法 + `T&`、把字段或数组元素借出去，全当场报。
 //      指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
 //      `&x`（取地址当值用）只在记录/列表/字典上成立。
-//   4. 整数那一族只有一格宽度：定宽类型（`int8_t` …）的位宽表在
-//      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张），**回卷还没接**。
+//   4. **窄整数存进去会回卷**（`narrow.cpp`）：方言里整数只有一格宽度，所以类型上带一格
+//      `bits` / `uns` 记号（`expr.js` 的 `BTYPES`），**存进去**的四处补一次 `wrapNarrow` ——
+//      声明的初值、赋值、`++` / `--`、显式转换。无符号一次与掩码；有符号 `((v+half)&mask)-half`。
+//      `int` / `long` 那几格**有意不带**：C++ 里有符号溢出是 UB，没有义务把 UB 学像。
+//      读树那一格要当心：`unsigned char` 是**一格 `btype` 里两个词**（只读第一个词会按 32 位
+//      回卷，还是错的）—— 所以 `typeOfSpecs` 把 `btype` 的 kids 全 flatMap 出来按"合起来的词"查表。
+//      还没补的两格：窄形参（传进去那一下）与窄返回值。定宽类型（`int8_t` …）的位宽表在
+//      `src/core/lower/cfam.js` 的 `C_INT_BITS`（与 jancy 共用一张）。
 //   5. **自由函数、方法与构造函数**都按实参**类型**重载（`fnovl.cpp` / `methov2.cpp` /
 //      `ctor3.cpp`：名字分三档 —— 没重载不动 / 个数各不相同的缀个数 / 有两份个数一样的
 //      缀类型；挑那一份三处共用 `pickAmong`）。形参一模一样的两份当场报。
@@ -2180,3 +2252,15 @@ function declOf(d, specs, C) {
 //      按值走那格量是**拷出来的**；**按引用走**（`T&`）的那一格不造新量 —— 它就是
 //      `xs[i]` 的**别名**（`C.lvAlias`），改它落成一次普通的 `aset`。`T&&` 与在字典上
 //      走一遍当场报。元素是记录的数组声明时会把格子填上（否则是 null）。
+//  13. **`switch`**（`swbreak.cpp`）落公共层那一格（它摊成 if/else 链）。两处形状要自己认：
+//      树上每格 `case` 只带**一条**语句，剩下的是它后面的兄弟 —— 得按 `case` / `default`
+//      自己分组；而 `case 2: case 3:` 在树上是**套起来的**（一格 case 的那条语句又是一格
+//      case），那是"两个值共用一份体"，摊成两格（`share` 借同一份体）。
+//      每组末尾那句 `break` 要**摘掉** —— 它的意思是"出 switch"，而公共层的 `break` 是
+//      "出循环"，留着就跳错了。**穿透当场报**（没有 `break` / `return` 又不是最后一支）：
+//      公共层每支各自独立，静默地把穿透改成不穿透就是答案静默地错。
+//      `case a ... b`（区间，gcc 的扩展）当场报。go 那一族的 `switch` 不是同一个程序
+//      （无值形与 `case 2, 3` 多值形 C++ 写不出来），所以另起了一个家族名。
+//  14. **`i++` / `++i` 当值用**（`narrow.cpp`）落公共层现成的 `block-expr`（先跑几句、
+//      再交一格值）：`++i` 交的是那格量自己，`i++` 先把旧值存进一格临时量再交它。
+//      语句位置那一档本来就有。步进那一下照第 4 条补回卷。

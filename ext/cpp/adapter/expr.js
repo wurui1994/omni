@@ -32,10 +32,50 @@ const OPS = new Map([
 ]);
 
 /** 基本类型名 → 标准 IR 的类型。 */
+/**
+ * 基本类型：**按写着的那几个词一起看**（`unsigned char` 是两个词）。
+ *
+ * 窄整数那几格带上 `bits` / `uns` —— 那是"存进去要回卷"的记号（见 `wrapNarrow`）：
+ * 方言里整数只有一格宽度，`unsigned char c = 200; c = c + 100;` 不回卷的话答成 300
+ * 而不是 44（**答案静默地错**）。`int` / `long` 那几格**有意不带**：C++ 里有符号溢出是
+ * UB，我们没有义务把 UB 学像。
+ */
 const BTYPES = new Map([
-  ['int', INT], ['long', INT], ['short', INT], ['unsigned', INT], ['size_t', INT],
-  ['char', INT], ['bool', BOOL], ['double', REAL], ['float', REAL], ['void', { kind: 'void' }],
+  ['int', INT], ['signed', INT], ['signed int', INT], ['long', INT], ['long int', INT],
+  ['long long', INT], ['long long int', INT], ['size_t', INT], ['void', { kind: 'void' }],
+  ['bool', BOOL], ['double', REAL], ['float', REAL], ['long double', REAL],
+  ['char', { kind: 'int', bits: 8 }], ['signed char', { kind: 'int', bits: 8 }],
+  ['unsigned char', { kind: 'int', bits: 8, uns: true }],
+  ['short', { kind: 'int', bits: 16 }], ['short int', { kind: 'int', bits: 16 }],
+  ['signed short', { kind: 'int', bits: 16 }],
+  ['unsigned short', { kind: 'int', bits: 16, uns: true }],
+  ['unsigned', { kind: 'int', bits: 32, uns: true }],
+  ['unsigned int', { kind: 'int', bits: 32, uns: true }],
+  ['unsigned long', INT], ['unsigned long long', INT],
 ]);
+
+/**
+ * **窄整数存进去要回卷**（`unsigned char` 8 位、`short` 16 位、`unsigned` 32 位…）。
+ * 无符号就是一次与掩码；有符号要把符号位摊回来（`((v + half) & mask) - half`）——
+ * 落的全是现成的算术，一格新东西也没加。类型上没有 `bits` 的原样交回去。
+ */
+export function wrapNarrow(v, t) {
+  if (t === null || t === undefined || t.kind !== 'int' || t.bits === undefined) return v;
+  const mask = 2 ** t.bits - 1;
+  const band = (e) => ({
+    kind: 'binop', op: '&', left: e, right: { kind: 'int', value: mask },
+  });
+  if (t.uns === true) return band(v);
+  const half = 2 ** (t.bits - 1);
+  return {
+    kind: 'binop',
+    op: '-',
+    left: band({
+      kind: 'binop', op: '+', left: v, right: { kind: 'int', value: half },
+    }),
+    right: { kind: 'int', value: half },
+  };
+}
 
 export const nameOf = (x) => (tag(x) === 'n' ? String(leaf(kids(x)[0])) : String(leaf(x)));
 
@@ -69,14 +109,27 @@ export function typeOfSpecs(specs, C, declTok) {
   });
   /* `char *` / `const char *` → 串（C 里串就是 `char*`）。 */
   const isPtr = declTok !== undefined && tag(declTok) === 'ptr';
+  /**
+   * **基本类型那几个词要合起来看**（`unsigned char` / `long long`）。
+   * 树上是**一格 `btype` 里好几个词**（语法那条 `builtin-seq`：`(btype unsigned char)`）——
+   * 只读第一个词的话 `unsigned char` 只看见 `unsigned`、回卷按 32 位做，
+   * `c = c + 100` 答成 300 而不是 44（**答案静默地错**，量一趟才看得见）。
+   */
+  const TYWORDS = new Set(['char', 'short', 'int', 'long', 'unsigned', 'signed',
+    'float', 'double', 'bool', 'void', 'size_t']);
+  const words = parts
+    .filter((p) => tag(p) === 'btype' || (tag(p) === null && TYWORDS.has(String(leaf(p)))))
+    .flatMap((p) => (tag(p) === 'btype'
+      /* `(btype unsigned char)` —— **一格 btype 里可以有好几个词**（语法那条 `builtin-seq`）。 */
+      ? kids(p).map((w) => String(leaf(w)))
+      : [String(leaf(p))]));
+  if (words.length > 0) {
+    if (words[words.length - 1] === 'char' && isPtr) return STR;
+    const t = BTYPES.get(words.join(' '));
+    if (t !== undefined) return t;
+    throw new Error(`cpp->IR: 这个基本类型还没接：${words.join(' ')}`);
+  }
   for (const p of parts) {
-    if (tag(p) === 'btype') {
-      const n = String(leaf(kids(p)[0]));
-      if (n === 'char' && isPtr) return STR;
-      const t = BTYPES.get(n);
-      if (t !== undefined) return t;
-      throw new Error(`cpp->IR: 这个基本类型还没接：${n}`);
-    }
     if (tag(p) === 'auto') return null;            // 从初值取
     if (tag(p) === 'n') {
       const n = nameOf(p);
@@ -230,6 +283,36 @@ export function exprOf(x, C) {
       }
       return base;
     }
+    /**
+     * **`i++` / `++i` 当值用**（`int a = i++;`）。语句位置上那一格早就有了（`stepOf`）——
+     * 这儿是**当值用**那一档：落成公共层现成的 `block-expr`（先跑几句、再交一格值）。
+     *   * `++i` → 先加，交的是那一格自己；
+     *   * `i++` → 先把旧值存进一格临时量，再加，交的是那格临时量。
+     * 图上一格新东西也没加。
+     */
+    case 'post': case 'pre': {
+      const op = String(leaf(kids(x)[0])) === '++' ? '+' : '-';
+      const target = exprOf(kids(x)[1], C);
+      if (!['name', 'field', 'index'].includes(target.kind)) {
+        throw new Error(`cpp->IR: \`${leaf(kids(x)[0])}\` 只能作用在一格地方上`);
+      }
+      const step = {
+        kind: 'assign',
+        target,
+        value: {
+          kind: 'binop', op, left: target, right: { kind: 'int', value: 1 },
+        },
+      };
+      if (tag(x) === 'pre') return { kind: 'block-expr', stmts: [step], value: target };
+      const tmp = C.fresh('pv');
+      const ty = typeOf(target, C.tyCtx());
+      C.bind(tmp, ty);
+      return {
+        kind: 'block-expr',
+        stmts: [{ kind: 'let', name: tmp, type: ty, init: target }, step],
+        value: { kind: 'name', name: tmp },
+      };
+    }
     case 'paren': case 'expr': return exprOf(kids(x)[0], C);
     /* `this` —— 在 lambda 里它是**捕获进来的那一格**（`[this]`），不是本地的名字。 */
     case 'this': return thisNode(C);
@@ -314,7 +397,8 @@ export function exprOf(x, C) {
       const v = exprOf(kids(x)[kids(x).length - 1], C);
       const t = typeOf(v, C.tyCtx());
       if (target !== null && target.kind === 'int') {
-        return t.kind === 'int' ? v : { kind: 'builtin', name: 'toint', args: [v] };
+        /* 转到窄整数也要回卷（`(unsigned char)300` 是 44）。 */
+        return wrapNarrow(t.kind === 'int' ? v : { kind: 'builtin', name: 'toint', args: [v] }, target);
       }
       if (target !== null && target.kind === 'real') {
         return t.kind === 'real' ? v : { kind: 'builtin', name: 'toreal', args: [v] };
