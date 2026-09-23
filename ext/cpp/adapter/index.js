@@ -12,7 +12,7 @@
 import {
   tag, kids, leaf, part, isList, groupItems,
 } from '../../../src/core/lower/cst.js';
-import { INT, arrOf, named, typeOf } from '../../../src/core/lower/ty-of.js';
+import { INT, BOOL, arrOf, named, typeOf } from '../../../src/core/lower/ty-of.js';
 import {
   exprOf, condOf, typeOfSpecs, printArgs, nameOf, tyArg, vcallName, readParams, coerce,
   wrapNarrow, argsWithRefs,
@@ -379,6 +379,11 @@ export function cppToIR(tree) {
     records: new Map(),
     /** `typedef int myint;` → 名字 → 类型。**模板的类型形参实例化时也临时摆在这儿**。 */
     aliases: new Map(),
+    /**
+     * **枚举子 → 值**（`RED` 与 `Color::RED` 两把钥匙都进表）。C++ 里枚举子是**常量**，
+     * 所以这条腿上不发模块级的量 —— 读到那个名字就换成字面量。
+     */
+    enums: new Map(),
     fns: new Map(),
     /** `template <class T> T f(…)` → 名字 → { tparams, fnTok }（本身**不发代码**）。 */
     templates: new Map(),
@@ -700,6 +705,34 @@ export function cppToIR(tree) {
       const init = part(d, 'init');
       const nm = init === undefined ? undefined : kids(kids(init)[0])[0];
       if (nm !== undefined) C.aliases.set(nameOf(nm), typeOfSpecs(specs, C));
+      continue;
+    }
+    /**
+     * **`enum` / `enum class`**：枚举名落成 `int` 的别名，几个枚举子落成**编译期常量**
+     * （名字 → 值，见 `expr.js` 的 `case 'n'` 与 `case 'qual'`）—— 不发模块级的量，
+     * 因为 C++ 里它们本来就是常量。值按 C++ 的规矩数：从 0 起，写了 `= N` 就从 N 接着数。
+     */
+    const en = kids(specs).find((y) => tag(y) === 'enum');
+    if (en !== undefined) {
+      const enKids = kids(en);
+      const enName = enKids.find((y) => tag(y) === 'n');
+      if (enName !== undefined) C.aliases.set(nameOf(enName), INT);
+      let next = 0;
+      const items = enKids.find((y) => tag(y) === 'items');
+      for (const item of (items === undefined ? [] : kids(items))) {
+        if (tag(item) !== 'v') continue;
+        const vs = kids(item);
+        if (vs.length > 1) {
+          const lit = exprOf(vs[1], C);
+          if (lit.kind !== 'int') {
+            throw new Error('cpp->IR: 枚举子的值只接整数字面量（算式还没接）');
+          }
+          next = lit.value;
+        }
+        C.enums.set(nameOf(vs[0]), next);
+        if (enName !== undefined) C.enums.set(`${nameOf(enName)}::${nameOf(vs[0])}`, next);
+        next += 1;
+      }
       continue;
     }
     const cls = kids(specs).find((y) => tag(y) === 'class');
@@ -2000,6 +2033,42 @@ export function stmtsOf(x, C) {
       C.pop();
       return [{ kind: 'while', cond, body }];
     }
+    /**
+     * `do 体 while (条件);` —— **体先跑一趟**。摊成"一格旗子 + 普通 while"：
+     *
+     *   let __do1 = true;  while (__do1 || 条件) { __do1 = false; 体 }
+     *
+     * 为什么不摊成"永真循环 + 末尾 `if (!条件) break`"：那样体里的 `continue` 会跳过那句
+     * 检查（C++ 里 `continue` 在 do-while 里是**跳到条件那一句**）—— 轻则少判一次，
+     * 重则死循环。也别摊成"体 + while(条件){体}"：体发两份，副作用跟着来两遍。
+     * `||` 在方言里是短路的，所以第一趟不会去求那个条件。
+     */
+    case 'do': {
+      const [bodyTok, condTok] = kids(x);
+      const flag = C.fresh('__do');
+      C.push();
+      const body = stmtsOf(bodyTok, C);
+      C.pop();
+      return [
+        {
+          kind: 'let', name: flag, type: BOOL, init: { kind: 'bool', value: true },
+        },
+        {
+          kind: 'while',
+          cond: {
+            kind: 'binop', op: '||', left: { kind: 'name', name: flag }, right: condOf(condTok, C),
+          },
+          body: [
+            {
+              kind: 'assign',
+              target: { kind: 'name', name: flag },
+              value: { kind: 'bool', value: false },
+            },
+            ...body,
+          ],
+        },
+      ];
+    }
     /* `for (init; cond; post) body` —— 三段式（公共降级器会把 `continue` 那一格摆对）。 */
     case 'for': {
       const [initTok, condTok, postTok, ...rest] = kids(x);
@@ -2541,3 +2610,14 @@ function declOf(d, specs, C) {
 //  14. **`i++` / `++i` 当值用**（`narrow.cpp`）落公共层现成的 `block-expr`（先跑几句、
 //      再交一格值）：`++i` 交的是那格量自己，`i++` 先把旧值存进一格临时量再交它。
 //      语句位置那一档本来就有。步进那一下照第 4 条补回卷。
+//  15. **`enum` / `enum class`**（`enumdo.cpp`）：枚举名落成 `int` 的别名，枚举子是
+//      **编译期常量** —— 读到那个名字就换成字面量，不发模块级的量（C++ 里它们本来就是常量）。
+//      值从 0 起、写了 `= N` 就从 N 接着数；`enum class` 的要写全名，所以 `RED` 与
+//      `Color::RED` 两把钥匙都进表（`C.enums`）。枚举子的值只接整数字面量（算式当场报）。
+//      局部量同名时先查环境（局部量遮住枚举子）。
+//  16. **`do 体 while (条件);`**（`enumdo.cpp`）摊成"一格旗子 + 普通 while"：
+//      `let __do1 = true; while (__do1 || 条件) { __do1 = false; 体 }`。
+//      两条**错**的摊法：①"永真循环 + 末尾 `if (!条件) break`" —— 体里的 `continue` 会跳过
+//      那句检查，而 C++ 里 do-while 的 `continue` 是**跳到条件那一句**（轻则少判一次，重则
+//      死循环）；②"体 + while(条件){体}" —— 体发两份，副作用跟着来两遍。
+//      `||` 在方言里是短路的，所以第一趟不去求那个条件。

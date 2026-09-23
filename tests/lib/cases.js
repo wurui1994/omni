@@ -593,6 +593,19 @@ export const SWBREAK = ['10', '20', '20', '30', '2'];
 export const NARROW = ['44', '-126', '464', '4', '44', '0 2 2', '44', '44', '4464', '44', '44'];
 
 /**
+ * **cpp 的枚举与 do-while**（`ext/cpp/examples/enumdo.cpp`）。
+ * 枚举子在 C++ 里是**常量**，所以这条腿上**不发模块级的量** —— 枚举名落成 `int` 的别名、
+ * 读到枚举子那一格换成字面量；值从 0 起、写了 `= N` 就从 N 接着数（`RED`/`GREEN`/`BLUE`
+ * 是 0/5/6）。`enum class` 要写全名（`Mode::On`），所以两把钥匙都进表。
+ * do-while 摊成**"一格旗子 + 普通 while"**（`while (__do1 || 条件)`，体第一句把旗子放倒）。
+ * 两条错的摊法：①"永真循环 + 末尾 `if (!条件) break`" —— 体里的 `continue` 会跳过那句检查，
+ * 而 C++ 里 do-while 的 `continue` 是**跳到条件那一句**；②"体 + while(条件){体}" —— 体发两份。
+ * 第四行钉住"条件一上来就假、体还是跑了一趟"，最后一行钉住 do-while 里的 `continue`。
+ * 期望输出由 `c++` 给。
+ */
+export const ENUMDO = ['0 5 6', '6', '3 30', '1 10', '5 13'];
+
+/**
  * **cpp 的类模板**（`ext/cpp/examples/ctmpl.cpp`）。`Box<int>` 落成一格叫 `Box__int` 的
  * 普通记录、方法叫 `Box__int_get`。第五、六行钉住"同一格实例只造一遍"（两个变量各自独立、
  * 互不串味），最后一行钉住类模板的记录当**返回值**交出去。期望输出由 `c++` 给。
@@ -916,6 +929,10 @@ export const CASES = [
   // （外加 `i++` 当值用）。两族都是 cpp 独一份。
   ...fam('swbreak', SWBREAK, ['cpp']),
   ...fam('narrow', NARROW, ['cpp']),
+  // 第七十九个家族：**枚举与 do-while**（cpp 独一份）。枚举子是常量（不发模块级的量）；
+  // do-while 摊成"旗子 + 普通 while"，两条**错**的摊法在注释里写着（永真+break 让
+  // continue 跳过判条件、体×2 让副作用来两遍）。
+  ...fam('enumdo', ENUMDO, ['cpp']),
 ];
 
 

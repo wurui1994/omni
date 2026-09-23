@@ -243,6 +243,12 @@ export function exprOf(x, C) {
       const n = nameOf(x);
       if (n === 'true') return { kind: 'bool', value: true };
       if (n === 'false') return { kind: 'bool', value: false };
+      /* 枚举子是**常量**（C++ 的规矩）—— 读到就换成字面量，不发模块级的量。
+         要排在局部量之后？不用：C++ 里同一层作用域里名字不许撞，而局部量遮住枚举子
+         那一档得先查环境 —— 所以这儿只在"环境里没有这格量"时才算。 */
+      if (C.tyCtx().env.get(C.ref(n)) === undefined && C.enums.has(n)) {
+        return { kind: 'int', value: C.enums.get(n) };
+      }
       /**
        * **方法体里裸写的字段名就是 `this->` 那一格**（C++ 的隐式成员访问）：
        * `int sum() { return a + b; }` 里的 a、b 不是局部量，是接收者的字段。
@@ -419,6 +425,9 @@ export function exprOf(x, C) {
       if (ps.length === 2 && tag(ps[0]) === 'n' && tag(ps[1]) === 'n') {
         const g = C.statics.get(`${C.ref(nameOf(ps[0]))}_${nameOf(ps[1])}`);
         if (g !== undefined) return { kind: 'name', name: g };
+        /* `Color::RED` —— `enum class` 的枚举子（常量）。 */
+        const ev = C.enums.get(`${nameOf(ps[0])}::${nameOf(ps[1])}`);
+        if (ev !== undefined) return { kind: 'int', value: ev };
       }
       /* `std::something` 当值用（这一批只有 `std::make_pair` 那一处，在 callOf 里）。 */
       throw new Error(`cpp->IR: \`${kids(x).map((k) => (tag(k) === 'n' ? nameOf(k) : '?')).join('::')}\` 当值用还没接`);
