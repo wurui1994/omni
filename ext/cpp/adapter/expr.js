@@ -569,7 +569,16 @@ function callOf(x, C) {
    * 不是盒子里的值。能借的只有"一格装着盒子的量"（局部量或上一层的引用形参）——
    * 别的（字段、数组元素、临时值）当场报，别静默地传一份副本进去。
    */
-  const rsig = C.refSig.get(C.ref(name)) ?? C.ctorRef.get(C.ref(name));
+  /**
+   * **一格函数值（lambda）上的出参**：它没有名字进 `refSig`，可类型上看得出来 ——
+   * 形参那一格是**盒子那种记录**（`C.refBoxDone`）就是借出去的那一格。
+   */
+  const fnv = C.tyCtx().env.get(C.ref(name));
+  const boxIdx = fnv === undefined || fnv.kind !== 'fn-type' ? undefined
+    : new Set(fnv.params.flatMap((t, i) => (
+      t.kind === 'named' && C.refBoxDone.has(t.name) ? [i] : [])));
+  const rsig = C.refSig.get(C.ref(name)) ?? C.ctorRef.get(C.ref(name))
+    ?? (boxIdx !== undefined && boxIdx.size > 0 ? boxIdx : undefined);
   const args = argsWithRefs(rawArgs, rsig, C, name);
   if (name === 'printf' || name === 'puts') {
     throw new Error(`cpp->IR: \`${name}\` 在表达式位置上（它不交值）`);

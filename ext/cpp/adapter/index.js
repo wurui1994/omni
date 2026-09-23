@@ -60,6 +60,23 @@ function borrowedLocals(fnTok, C) {
    * 这一趟手上还没有类型，所以先收着，最后与"这个体里真声明过的局部量"求交（见下面）。
    */
   const capWanted = new Set();
+  /**
+   * **一格函数值（lambda）上的出参**：`auto f = [](int& x){…};` 之后 `f(y)` 里那格 `y`
+   * 也要装盒子。这一趟手上没有类型，所以按"哪个名字上绑了带 `&` 形参的 lambda"记 ——
+   * 声明总排在调用之前，所以边走边记就够。
+   */
+  const lamRef = new Map();
+  const refParamIdx = (lam) => {
+    const ps = kids(lam).find((y) => tag(y) === 'params');
+    const idxs = new Set();
+    (ps === undefined ? [] : kids(ps)).filter((y) => tag(y) === 'p').forEach((p, i) => {
+      const pn = kids(p).find((y) => tag(y) === 'ptr');
+      if (pn !== undefined && kids(pn).some((y) => tag(y) === null && String(leaf(y)) === '&')) {
+        idxs.add(i);
+      }
+    });
+    return idxs;
+  };
   const walk = (t) => {
     if (t === null || t === undefined || !isList(t)) return;
     if (tag(t) === 'lambda') {
@@ -85,8 +102,9 @@ function borrowedLocals(fnTok, C) {
         }
       }
       if (fn !== undefined && tag(fn) === 'n' && as !== undefined) {
-        /* 自由函数，或者**函数式的构造**（`Counter(y)` —— 那一格按类名查）。 */
-        const idx = C.refSig.get(C.ref(nameOf(fn))) ?? C.ctorRef.get(C.ref(nameOf(fn)));
+        /* 自由函数、**函数式的构造**（按类名查），或者一格绑了 lambda 的名字。 */
+        const fname = C.ref(nameOf(fn));
+        const idx = C.refSig.get(fname) ?? C.ctorRef.get(fname) ?? lamRef.get(fname);
         if (idx !== undefined) {
           kids(as).forEach((a, i) => {
             const inner = tag(a) === 'addrof' ? kids(a)[0] : a;
@@ -111,6 +129,17 @@ function borrowedLocals(fnTok, C) {
             if (idx.has(i) && tag(inner) === 'n') out.add(C.ref(nameOf(inner)));
           });
         }
+      }
+      /* `auto f = [](int& x){…};` —— 记下"这个名字上绑的那格 lambda 借哪几格"。 */
+      for (const d of (it === undefined ? [] : kids(it))) {
+        const iv = part(d, 'init');
+        const lam = iv === undefined ? undefined : kids(iv)[0];
+        if (lam === undefined || tag(lam) !== 'lambda') continue;
+        const idxs = refParamIdx(lam);
+        const nm = kids(d)[0];
+        const bare = nm === undefined ? undefined
+          : (tag(nm) === 'n' ? nm : kids(nm).find((y) => tag(y) === 'n'));
+        if (idxs.size > 0 && bare !== undefined) lamRef.set(C.ref(nameOf(bare)), idxs);
       }
     }
     for (const k of kids(t)) walk(k);
@@ -820,7 +849,6 @@ export function cppToIR(tree) {
   C.lambda = (tok) => {
     const name = C.fresh('__lam');
     const params = readParams(kids(tok).find((y) => tag(y) === 'params'), C);
-    noRefParams({ params }, 'lambda');
     const body = part(tok, 'body');
     const capsTok = kids(tok).find((y) => tag(y) === 'captures');
     const wanted = [];
@@ -891,6 +919,8 @@ export function cppToIR(tree) {
      * 读写必须走 `.v`（落成 `(field (cap x) v)`）。
      */
     C.refNames = refCaps;
+    /* lambda 上的**出参**（`[](int& x)`）与按引用捕的那几格同一台机器：体里读写走 `.v`。 */
+    for (const p of params) if (p.ref === true) C.refNames.add(p.name);
     /**
      * 写着的返回类型（`-> T`）在降体**之前**就要知道 —— 窄整数交出去那一下要回卷。
      * 没写的那一档从体里推（`firstReturn`），推出来的不是"写着的"，不回卷。
@@ -2280,13 +2310,16 @@ function declOf(d, specs, C) {
 //      （按位截断那一格见第 4 条 —— 回卷在**存进去**那一头，不在印出来这一头）。
 //   3. 引用（`T&`）与**按指针收的出参**（`T*` + `*p` + 调用点 `&y`）落成同一样东西：
 //      记录 / 列表 / 字典照原样收（本来就是引用语义）；**标量装进一格盒子**
-//      （`__ref_int`，`refparam.cpp`）。接**自由函数**、**方法**与**构造**（后两者只认
-//      "没重载、非虚"那一档 —— 名字定得死，调用点才能在求值之前知道哪几格要交盒子）；
-//      借出去的那个实参只能是"一格装着盒子的量"。构造那一格两种写法都接：声明形
-//      （`Grab gr(g);` —— 实参在声明符的 `(ctor …)` 里，按类名查 `C.ctorRef`）与函数式
-//      （`Grab(g)` —— 一格普通调用）。
-//      lambda 的形参、重载或虚方法 + `T&`、重载的构造 + `T&`、把字段或数组元素借出去，
-//      全当场报。指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
+//      （`__ref_int`，`refparam.cpp`）。接**自由函数**、**方法**、**构造**与**lambda**
+//      （中间两样只认"没重载、非虚"那一档 —— 名字定得死，调用点才能在求值之前知道
+//      哪几格要交盒子）；借出去的那个实参只能是"一格装着盒子的量"。
+//      构造那一格两种写法都接：声明形（`Grab gr(g);` —— 实参在声明符的 `(ctor …)` 里，
+//      按类名查 `C.ctorRef`）与函数式（`Grab(g)` —— 一格普通调用）。
+//      lambda 那一格**名字不进 `refSig`**（闭包没有名字），靠**类型**认：形参那格是
+//      盒子那种记录（`C.refBoxDone`）就是借出去的；降体前那趟扫树按"哪个名字上绑了
+//      带 `&` 形参的 lambda"记（`lamRef`）。
+//      重载或虚方法 + `T&`、重载的构造 + `T&`、把字段或数组元素借出去，全当场报。
+//      指针也**只有这一种用法** —— 指针算术、指向数组的指针都当场报。
 //      `&x`（取地址当值用）只在记录/列表/字典上成立。
 //   4. **窄整数存进去会回卷**（`narrow.cpp`）：方言里整数只有一格宽度，所以类型上带一格
 //      `bits` / `uns` 记号（`expr.js` 的 `BTYPES`），**存进去**的六处补一次 `wrapNarrow` ——
@@ -2321,7 +2354,8 @@ function declOf(d, specs, C) {
 //      引用），体里读写落成 `(field (cap x) v)`。只接"这个函数体里声明过的局部量"
 //      （哪几格要装是降体之前扫树算的，与"真声明过"求交 —— 全局名字装了盒子会当场报）。
 //      **`[this]`** 也接了（记录是引用语义，"按值捕一格记录"就是它；体里裸写的字段名
-//      照旧当 `this->`，`this` 自己落成一格捕获）。`mutable`、`[*this]`、`[x = 表达式]`、
+//      照旧当 `this->`，`this` 自己落成一格捕获）。**形参上的 `T&`** 也接了（见第 3 条 ——
+//      名字不进 `refSig`，靠类型认那格盒子）。`mutable`、`[*this]`、`[x = 表达式]`、
 //      泛型 lambda 还没接。
 //   9. **`static` 数据成员**落成一格模块级的量（`类名__成员名`，`staticmem.cpp`）：
 //      一个类一份，初值（类里那句或类外那句 `int C::x = …;`）摆在 `main` 体的最前面 ——

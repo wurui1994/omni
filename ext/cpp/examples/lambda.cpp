@@ -65,5 +65,13 @@ int main() {
   bx.n = 1;
   printf("%d\n", bx.grow(2));
   printf("%d\n", bx.n);
+  /* **lambda 上的出参**（`[](int& x)`）：与自由函数同一台机器。这一格的名字不进
+     `refSig`（闭包没有名字），可**类型上看得出来** —— 形参那格是盒子那种记录。 */
+  auto dbl = [](int& x) {
+    x = x * 2;
+  };
+  int w = 21;
+  dbl(w);
+  printf("%d\n", w);
   return 0;
 }
