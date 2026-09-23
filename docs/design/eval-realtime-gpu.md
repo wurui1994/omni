@@ -170,8 +170,9 @@ JS 腿 `$gfx_frame_fn(omni_eval$frame)`、C 腿 `omni_gfx_frame_fn((void *)…)`
 ## 5. 判据（不许靠"看上去对"）
 
 1. **语言那一半**：`tests/lower/run.js` 的家族判据照旧（stdout 逐行）—— 与设备无关。
-2. **设备那一半**（`--gfx=surface`，跑固定帧数）：
-   * CPU 备选那一档：三条腿（js / interp / c）的表面**逐字节相同**（现在这条已经在跑）；
+2. **设备那一半**（`OMNI_GFX=host` 那条路，跑固定帧数：`--frame N` / `OMNI_FRAMES`）：
+   * CPU 备选那一档：三条腿（js / interp / c）交出的那一帧**逐字节相同**（这条已经在跑，
+     PNG 那个默认出口也逐字节相同 —— 编码那一层是 stored，确定的）；
    * GL 那一档：与 CPU 那一档比**结构**（非黑像素数量级、图元覆盖的行列），不比逐字节
      —— 驱动之间本来就不逐字节一致（`project_reference_is_vulkan.md` 那一课）。
 3. **实时性**：量三个数并记账 —— 一次重编译的墙上时间、一帧的 CPU 时间、
@@ -204,3 +205,56 @@ JS 腿 `$gfx_frame_fn(omni_eval$frame)`、C 腿 `omni_gfx_frame_fn((void *)…)`
 
 第一刀落地之前，现有的那套生成 IR 的 CPU 光栅器**照旧留着**（它是备选那一档的实现，
 只是搬个地方）—— 判据不许因为换架构断一趟。
+
+## 7. 出口与命令行（PNG 默认、`render`/`view`、性能账）
+
+口径**照 c_impl**（`/Users/wurui/Documents/polydraw/c_impl` 的 `polydraw-render` /
+`polydraw-view`，它是"相对正确"的那一份；语义上有分歧仍以 `polydraw_src` 的原始代码为准）。
+
+### 7.1 一帧图的出口：**默认 PNG**，裸表面是备选
+
+* 默认落 `.omni-cache/gfx/frame.png`（8 位 RGBA、filter 0、zlib **stored**）——
+  双击能开、`magick compare` 直接吃。**不引 zlib**：stored 那点格式自己写就几十行，
+  而且逐字节确定（压缩器换个版本字节就变，那会把"三条腿逐字节相同"毁掉）。
+* 落点后缀是 `.rgba` 才走裸表面（`#rgba <w> <h>\n` + `w*h*4` 个字节）——
+  程序对程序那一头（`putImageData` / `glTexImage2D`）直接吃裸字节。
+* stdout 上永远只有**一行指针**：`#gfx <种类> <路径> <宽> <高>`（`png` / `rgba`）。
+* 编码器有四份**同一套字节**：`src/core/host/png.js`（js 与 interp 两条腿）、
+  `backend-js/prelude.js` 里一份（产物拿不到模块）、`runtime/omni_fmt.c` 里一份（C 腿）、
+  `src/jit/png.c`（宿主工具链，早就有）。页面那侧解码是 `studio/render.js` 的 `pngToRgba`
+  （只认我们写的那一档，别的当场报）。
+
+### 7.2 命令行：`--mode render`（默认）/ `view`
+
+```
+omni run x.pss                          render：画一帧，落 .omni-cache/gfx/frame.png
+omni run x.kc --frame 30 -o out.png     走到第 30 帧、**只交出那一帧**（前 30 帧真跑）
+omni run x.kc --w 640 --h 480           画布尺寸（默认 320×240）
+omni run x.kc --frame 60 --perf         每帧耗时与 fps 印到 stderr
+omni run x.pss --mode view              有窗口地跑 —— **这条腿上还没有**（第 4 刀）
+```
+
+* **`render` 模式下 `klock()` 是确定性时钟**：帧号 / 60（照 c_impl 的
+  `pdrl_set_clock_scale(ctx, 1/60)`）。离屏出的图要能逐字节比，墙上时间在那儿是噪声。
+  `view` 模式才是真墙上时间。
+* 这几格旗子落成**环境变量**（`OMNI_GFX_MODE` / `_FRAME` / `_W` / `_H` / `_PERF` / `_OUT`）：
+  四条腿唯一都认的口径（C 腿是另一个进程），而且**不进产物缓存的印记** ——
+  同一份编好的东西换个旗子再跑就换个行为（与 `.asy` 的出图设置同一条规矩）。
+* 给了其中任何一格就把"设备在宿主那一侧"那条路打开（`OMNI_GFX=host`）：
+  不打开的话旗子会静默没效果（默认那条路是生成出来的 CPU 光栅器，它只画一帧）。
+* `--mode view` 在 node 上**明着报**并指向 `omni serve` 那一页（浏览器 WebGL2 直通 GPU
+  就是 view 那一档）；本机窗口是第 4 刀（`--fovy` 那格旗子跟着那一刀一起做 ——
+  默认投影的角度在设备里，现在这条腿上没有能读它的设备）。
+
+### 7.3 性能与 fps：两个数，一处量
+
+* `fps` = 每秒**真刷了几帧**（墙上时间）；`ms/帧` = 一帧里**我们**花掉的
+  （帧函数 + 上传 + draw call）。第二个才是优化的对象，第一个被 vsync 压着。
+* CLI（`--perf`）：一趟结束在 stderr 上印一行
+  `#perf gfx render frames=… total=…ms avg=…ms min=…ms max=…ms fps=…`。
+  **落 stderr 不落 stdout** —— 那一股上只许有指针行。
+* Studio：状态栏那一格后头接上 `· 60.0 fps · 1.3ms/帧`，每半秒结算一次（照
+  `polydraw-view` 把 fps 写在窗口标题上那一手）。数从设备来（`gfx-gl.js` 的 `perf()`）——
+  这一层不自己计时，不然两处的数会不一样。
+* 判据：`tests/studio/run.js` 第 4 节有一格判 `dev.perf()` 真结算出来了
+  （fps > 0、每帧耗时是个有限的数）。

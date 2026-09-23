@@ -332,6 +332,12 @@ const VFS_ROOTS = [
      `import … from '../lib/ege.js'` —— 少了这一格，页面上那三格 gfx 例子报的是
      "no such module"，而库的代码就在同一份 HTML 里。 */
   { path: 'ext/js/lib', exts: ['.js'] },
+  /* **PNG 编码那一份**（`src/core/host/png.js`）：`ext/js/lib/ege.js` 现在默认出 PNG，
+     第一行就 `import { pngFromRgba } from '../../../src/core/host/png.js'` ——
+     它是**被编译的源码**（页面里那台编译器要读它），不是宿主那一层的实现，
+     所以按文件单挂一格（整个 `src/core/host` 挂进来就把两份宿主实现都带上了）。
+     少了这一格，页面上那几格 gfx 例子报 "cannot read module"（判据里红过一次）。 */
+  { path: 'src/core/host/png.js', exts: ['.js'] },
   /* **C 那一侧的同一套库**（`ext/jnc/lib/ege.jnc`）：例子第一行就 `import "../lib/ege.jnc"`
      —— 与上面那一格同一笔账（库不在 `examples` 底下）。 */
   { path: 'ext/jnc/lib', exts: ['.jnc'] },

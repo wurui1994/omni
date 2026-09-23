@@ -41,6 +41,11 @@ const D = {
   batches: [],
   fno: 0, t0: 0,
   frameFn: null, raf: 0,          /* 每帧那一格函数 + rAF 的句柄（帧循环在页面这边） */
+  /* **性能那几格**（实时那一档的核心指标，`perf()` 交出去给状态栏显示）：
+     `pn`/`psum` 是这一段里的帧数与耗时和（量的是"帧函数 + flush"那一截，
+     不含浏览器等下一次 vsync 的空档 —— 那一截不是我们的开销）；
+     `pms`/`pfps` 是上一次结算出来的两个数（每 ~0.5 秒结算一次，照 c_impl 的 view）。 */
+  pn: 0, psum: 0, pms: 0, pfps: 0, pt0: 0,
   mx: 0, my: 0, bst: 0,           /* 鼠标：canvas 左上角起的像素位置 + 按键位（bit0 左/1 右/2 中） */
   keys: null,                     /* `keystatus[256]`：扫描码 -> 0/1（下面那张表把 code 换成扫描码） */
 };
@@ -960,6 +965,8 @@ function setFrame(f) {
   const tick = () => {
     D.raf = 0;
     D.fno += 1;
+    const t = performance.now();
+    if (D.pt0 === 0) D.pt0 = t;
     try {
       D.frameFn();
     } catch (e) {
@@ -967,9 +974,30 @@ function setFrame(f) {
       return;
     }
     flush();
+    /* 性能账：这一帧我们花了多少、每 ~0.5 秒结算一次 fps（用的是**墙上时间**，
+       所以 fps 反映的是真正刷了几帧，而不是 1000/每帧耗时那个上限）。 */
+    D.psum += performance.now() - t;
+    D.pn += 1;
+    const span = performance.now() - D.pt0;
+    if (span >= 500) {
+      D.pfps = (D.pn * 1000) / span;
+      D.pms = D.psum / D.pn;
+      D.pn = 0;
+      D.psum = 0;
+      D.pt0 = performance.now();
+    }
     D.raf = requestAnimationFrame(tick);
   };
   D.raf = requestAnimationFrame(tick);
+}
+
+/**
+ * 这一档的**性能账**（状态栏显示它，与 CLI 的 `--perf` 是同一组数）：
+ * `fps` 是每秒真刷了几帧，`ms` 是一帧里**我们**花的时间（帧函数 + 上传 + draw call）。
+ * 还没攒够半秒时 `fps` 是 0 —— 调用方那时就别显示。
+ */
+function perf() {
+  return { fps: D.pfps, ms: D.pms, frames: D.fno, live: D.raf !== 0 };
 }
 
 /** 停掉帧循环（换文件、判据收尾都要它 —— 不停的话上一份脚本会一直在画）。 */
@@ -1007,6 +1035,12 @@ function reset() {
   D.y = 0;
   D.fno = 0;
   D.t0 = performance.now();
+  /* 性能账也归零 —— 上一份脚本的 fps 不许挂在下一份头上。 */
+  D.pn = 0;
+  D.psum = 0;
+  D.pms = 0;
+  D.pfps = 0;
+  D.pt0 = 0;
   G.on = false;
   G.mode = -1;
   G.verts = [];
@@ -1057,6 +1091,7 @@ export function installGlDevice(canvas, w = 320, h = 240) {
     present: flush,
     snapshot,
     setFrame,
+    perf,
     frames: () => D.fno,
     stop,
     step,

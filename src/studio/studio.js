@@ -935,6 +935,40 @@ function glDevice() {
 /** 停掉页面那格帧循环（换文件、跑别的语言都要它 —— 不停的话上一份脚本一直在画）。 */
 function glStop() {
   if (GLDEV !== null) GLDEV.dev.stop();
+  liveFpsStop();
+}
+
+/* ---------------------------------------------------------------- 实时那一档的 fps
+ *
+ * **实时是这两门语言的核心**，所以"现在多少帧"要一直看得见（照 c_impl 的 `polydraw-view`：
+ * 它把 fps 写在窗口标题上，每半秒结算一次）。这儿把它接在状态栏那一格后头：
+ *
+ *     ok · 18ms · 冷 · 60.0 fps · 1.3ms/帧
+ *
+ * 两个数分工不同：`fps` 是**真刷了几帧**（墙上时间，被 vsync 压着就是 60），
+ * `ms/帧` 是一帧里**我们**花掉的（帧函数 + 上传 + draw call）—— 那一格才是优化的对象。
+ * 数从设备那边来（`gfx-gl.js` 的 `perf()`）：这一层不自己计时，不然两处的数会不一样。
+ */
+let LIVE_TIMER = 0;
+let LIVE_BASE = '';
+const fps1 = (v) => {
+  const r = Math.round(v * 10) / 10;
+  return Number.isInteger(r) ? `${r}.0` : `${r}`;
+};
+function liveFpsStart(base) {
+  LIVE_BASE = base;
+  if (LIVE_TIMER !== 0) return;
+  LIVE_TIMER = setInterval(() => {
+    if (GLDEV === null || typeof GLDEV.dev.perf !== 'function') return;
+    const p = GLDEV.dev.perf();
+    /* 还没攒够半秒（`fps === 0`）、或者帧循环没在转（单帧脚本）就不动状态栏。 */
+    if (!p.live || p.fps === 0) return;
+    setStatus(`${LIVE_BASE} · ${fps1(p.fps)} fps · ${fps1(p.ms)}ms/帧`, 'ok');
+  }, 500);
+}
+function liveFpsStop() {
+  if (LIVE_TIMER !== 0) clearInterval(LIVE_TIMER);
+  LIVE_TIMER = 0;
 }
 
 /** 关掉窄屏那个抽屉（连遮罩一起）。`main` 里把遮罩挂上来。 */
@@ -1063,7 +1097,11 @@ async function run() {
     }
     const via = r.via === 'warm' ? '' : ' · 冷';
     const how = direct ? ' · node' : '';
-    setStatus(`${r.code === 0 ? 'ok' : `exit ${r.code}`} · ${ms}ms${via}${how}`, r.code === 0 ? 'ok' : 'bad');
+    const st = `${r.code === 0 ? 'ok' : `exit ${r.code}`} · ${ms}ms${via}${how}`;
+    setStatus(st, r.code === 0 ? 'ok' : 'bad');
+    /* 直通 GPU 且真跑起来了：把 fps 与每帧耗时接在这句话后头（每半秒更新一次）。 */
+    if (live !== null && r.code === 0) liveFpsStart(st);
+    else liveFpsStop();
   } catch (e) {
     if (my === S.seq) {
       $('#stderr').textContent = String(e.message ?? e);

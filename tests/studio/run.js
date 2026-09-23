@@ -373,9 +373,11 @@ for (const c of CASES) {
        * （方言的 `(gfxframefn …)`），页面用 rAF 反复调 —— 所以"跑了几帧"不是我们数的，
        * 是浏览器按刷新率给的。
        *
-       * 判的是**帧真的在往前走**：等 300ms（60Hz 上大约 18 帧），设备的帧号要 > 3，
-       * 而且 `frames.kc` 画的圆随帧数长大（半径 = 帧数×20，几帧之后就铺满画布）——
-       * 于是"非背景色的格数"比头一帧大一截。跑完 `stop()`，不让它一直在那儿画。
+       * 判三件事：**帧真的在往前走**（等 700ms，60Hz 上大约 42 帧，帧号要 > 3）、
+       * `frames.kc` 画的圆随帧数长大（半径 = 帧数×20 —— 于是"金色格数"比头一帧大一截）、
+       * **性能账真的在结算**（`dev.perf()`：fps > 0 且每帧耗时是个有限的数）——
+       * 状态栏显示的就是这两个数（`studio.js` 的 `liveFpsStart`），它是"实时是核心"
+       * 那条口径的判据。跑完 `stop()`，不让它一直在那儿画。
        */
       const rp = 'async () => {'
         + ' const c = document.createElement("canvas");'
@@ -387,18 +389,22 @@ for (const c of CASES) {
         + '   { body: JSON.stringify({ argv: ["run", "ext/evaldraw/examples/frames.kc"] }) });'
         + ' if (r.code !== 0) return { err: (r.stderr || "").slice(0, 300) };'
         + ' const f0 = dev.frames();'
-        + ' await new Promise((res) => setTimeout(res, 300));'
+        + ' await new Promise((res) => setTimeout(res, 700));'
         + ' const f1 = dev.frames();'
+        + ' const p = dev.perf();'
         + ' const s = dev.snapshot();'
         + ' dev.stop();'
         + ' let gold = 0;'
         + ' for (let i = 0; i < s.bytes.length; i += 4) {'
         + '   if (s.bytes[i] > 200 && s.bytes[i+1] > 150 && s.bytes[i+2] < 120) gold++;'
         + ' }'
-        + ' return { f0, f1, gold }; }';
+        + ' return { f0, f1, gold, fps: p.fps, ms: p.ms }; }';
       const rr = JSON.parse(await pw([S, '--raw', 'eval', rp]));
       ok('真浏览器里帧循环是活的（rAF 驱动、static 跨帧）',
         rr.err === undefined && rr.f1 > 3 && rr.gold > 4000,
+        JSON.stringify(rr).slice(0, 240));
+      ok('真浏览器里 fps 与每帧耗时是量出来的（状态栏显示的那两个数）',
+        rr.err === undefined && rr.fps > 0 && Number.isFinite(rr.ms) && rr.ms >= 0,
         JSON.stringify(rr).slice(0, 240));
       /**
        * **输入那一族**（`mousx`/`mousy`/`bstatus`/`keystatus[k]`）：造真事件
